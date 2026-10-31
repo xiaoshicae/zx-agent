@@ -79,6 +79,9 @@ impl ProcessGroup {
             // process group, so a negative PID targets its pipelines and descendants.
             // ESRCH only means the group has already ended, which is the goal.
             unsafe {
+                // Freeze the group first: dying pipeline children could otherwise wake
+                // the shell before its SIGKILL arrives, letting it run the next command.
+                libc::kill(-pid, libc::SIGSTOP);
                 libc::kill(-pid, libc::SIGKILL);
             }
         }
@@ -312,7 +315,37 @@ mod tests {
         assert!(output.is_error);
         assert!(output.content.starts_with("start\n"), "{}", output.content);
         assert!(output.content.contains("timed out after 1s"), "{}", output.content);
-        assert!(!output.content.contains("never"));
+        assert!(!output.content.contains("never"), "{}", output.content);
+    }
+
+    #[tokio::test]
+    async fn timed_out_pipelines_cannot_resume_the_shell() {
+        let tool = BashTool {
+            default_timeout: Duration::from_millis(30),
+            ..BashTool::default()
+        };
+        let context = ctx();
+        // Exercise concurrent pipeline exits: killing children must not wake a live shell
+        // long enough to execute the next command. Bound concurrency to avoid FD exhaustion.
+        for _ in 0..12 {
+            let outputs = futures::future::join_all((0..8).map(|_| {
+                tool.execute(
+                    json!({"command": "sleep 30 | cat; echo post-timeout-command-ran"}),
+                    &context,
+                )
+            }))
+            .await;
+            for output in outputs {
+                let output = output.unwrap();
+                assert!(output.is_error, "{}", output.content);
+                assert!(output.content.contains("timed out"), "{}", output.content);
+                assert!(
+                    !output.content.contains("post-timeout-command-ran"),
+                    "{}",
+                    output.content
+                );
+            }
+        }
     }
 
     #[tokio::test]
