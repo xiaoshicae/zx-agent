@@ -11,9 +11,10 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use common::{Collect, EchoTool, config, run_prompt, summarize, with_policy};
-use zx_agent::agent::{Decision, ExecutionMode, LoopConfig, LoopOutcome, Tool, ToolPolicy, run_loop};
+use zx_agent::agent::{Decision, ExecutionMode, LoopControl, LoopOutcome, Tool, ToolPolicy, run_loop};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{ContentBlock, EventReceiver, Message, PREAMBLE, Provider, Request, StopReason, SystemPrompt};
+use zx_agent::interaction::ApprovalCache;
 
 fn provider(steps: impl IntoIterator<Item = FauxStep>) -> Arc<FauxProvider> {
     Arc::new(FauxProvider::new(steps))
@@ -127,6 +128,75 @@ async fn one_sequential_tool_makes_the_batch_sequential() {
 
 struct DenyEcho;
 
+struct PanickingPolicy;
+
+#[async_trait]
+impl ToolPolicy for PanickingPolicy {
+    async fn check(&self, _tool_name: &str, _args: &Value) -> Decision {
+        panic!("policy bug");
+    }
+}
+
+#[tokio::test]
+async fn a_panicking_policy_blocks_the_tool_and_the_model_can_continue() {
+    let provider = provider([
+        FauxStep::tool_call("c", "echo", json!({"text": "must not run"})),
+        FauxStep::text("handled"),
+    ]);
+    let tool = echo();
+    let config = with_policy(config(provider.clone(), vec![tool.clone()]), Arc::new(PanickingPolicy));
+    let mut context = Vec::new();
+
+    let (result, _) = run_prompt(&config, &mut context, "go").await;
+
+    assert_eq!(result.outcome, LoopOutcome::Completed);
+    assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
+    let tool_result = &provider.requests()[1].messages[2];
+    let Message::ToolResult(tool_result) = tool_result else {
+        panic!("expected a tool result");
+    };
+    assert!(tool_result.is_error);
+    assert!(tool_result.content.contains("panicked"), "{}", tool_result.content);
+}
+
+struct WaitingPolicy(Arc<tokio::sync::Notify>);
+
+#[async_trait]
+impl ToolPolicy for WaitingPolicy {
+    async fn check(&self, _tool_name: &str, _args: &Value) -> Decision {
+        self.0.notify_one();
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn cancellation_interrupts_a_waiting_policy() {
+    let provider = provider([FauxStep::tool_call("c", "echo", json!({"text": "must not run"}))]);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let tool = echo();
+    let config = with_policy(
+        config(provider, vec![tool.clone()]),
+        Arc::new(WaitingPolicy(entered.clone())),
+    );
+    let cancel = CancellationToken::new();
+    let sink = Collect::default();
+    let mut context = Vec::new();
+    let mut approvals = ApprovalCache::default();
+    let mut control = LoopControl::new(Some(10), &mut approvals, &cancel, &sink);
+    let mut running = Box::pin(run_loop(&mut context, vec![Message::user("go")], &config, &mut control));
+    tokio::select! {
+        _ = entered.notified() => {}
+        _ = &mut running => panic!("policy must still be waiting"),
+    }
+    cancel.cancel();
+
+    let result = tokio::time::timeout(Duration::from_secs(1), running)
+        .await
+        .expect("cancellation must interrupt the policy");
+    assert_eq!(result.outcome, LoopOutcome::Aborted);
+    assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
+}
+
 #[async_trait]
 impl ToolPolicy for DenyEcho {
     async fn check(&self, tool_name: &str, _args: &Value) -> Decision {
@@ -205,9 +275,12 @@ async fn stops_at_the_turn_budget() {
         &mut Vec::new(),
         prompts,
         &config,
-        Some(2),
-        &CancellationToken::new(),
-        &Collect::default(),
+        &mut LoopControl::new(
+            Some(2),
+            &mut ApprovalCache::default(),
+            &CancellationToken::new(),
+            &Collect::default(),
+        ),
     )
     .await;
 
@@ -250,10 +323,8 @@ async fn steering_enters_after_the_turn_and_follow_ups_after_the_answer() {
     let config = config(provider, vec![]);
     let mut echo = EchoTool::new("echo");
     echo.queues = Some(config.queues.clone());
-    let config = LoopConfig {
-        tools: vec![Arc::new(echo)],
-        ..config
-    };
+    let mut config = config;
+    config.spec.tools = vec![Arc::new(echo)];
     let mut context = Vec::new();
 
     let (result, _) = run_prompt(&config, &mut context, "go").await;
@@ -308,9 +379,7 @@ async fn cancellation_ends_the_loop() {
         &mut Vec::new(),
         prompts,
         &config,
-        Some(10),
-        &cancel,
-        &Collect::default(),
+        &mut LoopControl::new(Some(10), &mut ApprovalCache::default(), &cancel, &Collect::default()),
     )
     .await;
 
@@ -362,7 +431,7 @@ fn prompt(started: &str) -> SystemPrompt {
 /// Run `text` on `context` with `system_prompt`; the model answers `answer`.
 async fn run_with_prompt(context: &mut Vec<Message>, system_prompt: SystemPrompt, text: &str, answer: &str) {
     let mut config = config(provider([FauxStep::text(answer)]), vec![]);
-    config.system_prompt = system_prompt;
+    config.spec.system_prompt = system_prompt;
     run_prompt(&config, context, text).await;
 }
 

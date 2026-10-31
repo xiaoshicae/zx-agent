@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use crate::agent::HookChain;
+use crate::extensions::ContinueOnLength;
 use crate::runner::Limits;
 
 /// Model requests allowed in one unattended run, including failed attempts.
@@ -37,8 +39,12 @@ pub fn limits() -> Limits {
     Limits {
         max_turns: Some(MAX_TURNS),
         timeout: Some(Duration::from_secs(TIMEOUT_SECS)),
-        continue_on_length: CONTINUE_ON_LENGTH,
     }
+}
+
+/// Extension policy matching the CLI default; neutral SDK configuration has no hooks.
+pub fn hooks() -> HookChain {
+    HookChain::new().with(ContinueOnLength::new(CONTINUE_ON_LENGTH))
 }
 
 #[cfg(test)]
@@ -50,6 +56,5 @@ mod tests {
         let limits = limits();
         assert_eq!(limits.max_turns, Some(30));
         assert_eq!(limits.timeout, Some(Duration::from_secs(900)));
-        assert_eq!(limits.continue_on_length, 1);
     }
 }

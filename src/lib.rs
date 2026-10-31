@@ -13,6 +13,9 @@
 
 pub mod agent;
 pub mod ai;
+pub mod extensions;
+pub mod interaction;
+pub mod policy;
 pub mod presets;
 pub mod prompt;
 pub mod runner;

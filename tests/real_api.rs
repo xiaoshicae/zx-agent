@@ -80,10 +80,10 @@ impl Endpoint {
         })
         .unwrap();
         let mut config = config(Arc::new(provider), vec![]);
-        config.model = self.model.clone();
-        config.cwd = cwd.to_path_buf();
-        config.max_tokens = Some(256);
-        config.system_prompt = build_system_prompt(
+        config.spec.model = self.model.clone();
+        config.spec.cwd = cwd.to_path_buf();
+        config.spec.max_tokens = Some(256);
+        config.spec.system_prompt = build_system_prompt(
             "You are a test assistant. Follow the user's instructions exactly and keep answers short.",
             &[("environment", &environment_section(cwd))],
         );
@@ -91,7 +91,6 @@ impl Endpoint {
             limits: Limits {
                 max_turns: Some(4),
                 timeout: Some(Duration::from_secs(120)),
-                continue_on_length: 0,
             },
             ..RunnerSetup::new(config)
         }
@@ -105,8 +104,11 @@ impl Endpoint {
             hidden_env: vec![self.api_key_env.clone()],
             ..BashTool::default()
         };
-        setup.config.tools = vec![Arc::new(bash)];
-        setup.config.policy = Arc::new(CommandPolicy::new(allowed));
+        setup.config.spec.tools = vec![Arc::new(bash)];
+        setup
+            .config
+            .hooks
+            .push(zx_agent::policy::PolicyHook::new(Arc::new(CommandPolicy::new(allowed))));
         setup
     }
 }
@@ -184,7 +186,7 @@ async fn an_answer_over_the_output_limit_is_reported_as_truncated() {
     let endpoint = Endpoint::from_env();
     let dir = tempfile::tempdir().unwrap();
     let mut setup = endpoint.setup(endpoint.api_key(), dir.path());
-    setup.config.max_tokens = Some(16);
+    setup.config.spec.max_tokens = Some(16);
     let (mut runner, _) = setup.build();
 
     let report = runner

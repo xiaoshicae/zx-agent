@@ -35,10 +35,10 @@ fn setup_with_provider(server: &MockServer, mut settings: OpenAiConfig) -> Runne
     settings.use_system_proxy = false;
     let provider = OpenAiCompatible::new(settings).unwrap();
     let mut config = config(Arc::new(provider), vec![Arc::new(BashTool::default())]);
-    config.model = "mock-model".into();
-    config.system_prompt = SystemPrompt::default().with_section(PREAMBLE, "You are a test.");
-    config.cwd = std::env::temp_dir();
-    config.max_tokens = Some(256);
+    config.spec.model = "mock-model".into();
+    config.spec.system_prompt = SystemPrompt::default().with_section(PREAMBLE, "You are a test.");
+    config.spec.cwd = std::env::temp_dir();
+    config.spec.max_tokens = Some(256);
     RunnerSetup::new(config)
 }
 

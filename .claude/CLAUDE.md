@@ -39,22 +39,23 @@
 | CLI | `src/main.rs` | 解析参数、组装各层、处理信号、输出 text 或 jsonl、映射退出码 |
 | 场景预设 | `src/presets/` | 提供外层显式选择的说明与运行默认值；内核机制不依赖预设 |
 | 提示词 | `src/prompt.rs` | 生成系统提示词：说明 + `<environment>` + `<command_policy>` |
-| 运行层 | `src/runner.rs` | 持有可顺序复用的会话；以独占借用控制单次运行、重试、上限、续写、持久化和报告 |
+| 运行层 | `src/runner.rs` | 持有可顺序复用的会话；以独占借用控制单次运行、重试、上限、审批缓存、持久化和报告 |
 | 会话 | `src/session.rs` | 只追加的 JSONL 条目树，投影出发给模型的消息 |
-| agent | `src/agent/` | 双层循环、工具执行与策略检查、事件、消息队列 |
+| agent | `src/agent/` | 回合循环、工具执行、Hooks 宿主、事件、消息队列 |
 | ai | `src/ai/` | 消息类型、系统提示词段落、流式事件协议、provider 与重试判断 |
+| 外层策略与交互 | `src/policy.rs`、`src/extensions.rs`、`src/interaction.rs` | 命令与规则策略、续写、已知密钥脱敏、宿主审批与 NoHuman |
 | 工具 | `src/tools/` | bash、read_file、输出截断 |
 
-一次运行的数据流：`main` 组装 `Runner` → `Runner::run` 取会话投影作为上下文 → `run_loop` 先追加提示词的变化和用户消息，再循环"请求模型 → 执行工具" → 每条完成的消息由 `PersistingSink` 先写进会话文件，再转发给输出 → 请求失败时 runner 决定是否重试，回答被截断时决定是否续写 → 汇总成 `RunReport`，由 `main` 映射为退出码。
+一次运行的数据流：`main` 组装 `Runner` → `Runner::run` 取会话投影作为上下文 → `run_loop` 先追加提示词的变化和用户消息，再循环"请求模型 → 执行工具" → 每条完成的消息由 `PersistingSink` 先写进会话文件，再转发给输出 → 请求失败时 runner 决定是否重试；输入与上下文改动先持久化，续写由 finish_turn 钩子决定 → 汇总成 `RunReport`，由 `main` 映射为退出码。
 
 设计取舍（改动前先理解原因；必须保持的约束见下文"不变量"）：
 
-- **场景策略不进内核**：提示词、运行上限与续写默认值由预设提供；钩子与人机交互接口按 P1 实施，无人时按拒绝处理。无人值守的 `run` 用退出码 0 到 6 表达结果，调度器不必解析输出。
+- **场景策略不进内核**：提示词、运行上限与续写默认值由预设提供；P1 已实现六个 Hooks 和 Interaction；命令策略、续写、脱敏由外层注册，无人时拒绝 Ask。无人值守的 `run` 用退出码 0 到 6 表达结果，调度器不必解析输出。
 - **会话文件既是审计日志，也是模型上下文的唯一来源**：修正上下文靠追加 `context_edit`，提示词变化靠追加 system 消息，原始记录始终保留。
 - **事实由程序提供，不让模型去查**：操作系统、启动时间、命令白名单在启动时写进系统提示词。这样不浪费轮次，也不会被白名单拦住。
 - **兼容性默认保守，能力按需打开**：提示词更新默认合并到开头（`collapse`，与 pi 对 OpenAI 兼容服务的默认一致），服务端支持时才按位置发送（`inline`）。
 - **安全靠部署隔离**：策略只是第一道防线（检查边界见 README 的"安全模型"）。认证 key 只从环境变量读取，该变量从 bash 子进程环境中删除；Unix 上新建会话文件的权限为 0600，打开已有文件不修改权限；真正的隔离要靠不同账号或容器。
-- **扩展点都是 trait**：`Provider`、`Tool`、`ToolPolicy`、`EventSink`。新能力优先以实现 trait 的方式加入，不改循环本身。
+- **扩展点都是 trait**：`Provider`、`Tool`、`ToolPolicy`、`Hooks`、`Interaction`、`EventSink`。新能力优先以实现 trait 的方式加入，不改循环本身。
 
 ## 命令
 
@@ -116,10 +117,12 @@
 6. **发给模型的上下文就是会话投影，系统提示词也在其中。** 系统提示词以 system 消息记录，变化时只追加变化的段落，不改写之前的版本（`src/ai/system_prompt.rs`）。重试时用 `context_edit` 省略失败的回答再续跑，不重复用户消息（`src/runner.rs`）。
 7. **会话文件写入失败时立即取消运行**（审计要求）。
 8. **工具输出必须截断**（`src/tools/truncate.rs`）；耗时的工具必须响应 `ToolContext::cancel`。
-9. **认证用的 API key 只从环境变量读取**，不主动写入会话文件、事件或日志；其环境变量从 bash 子进程中删除（`BashTool::hidden_env`）。这不保证工具输出已脱敏，边界见 README 的"安全模型"。
+9. **认证用的 API key 只从环境变量读取**，不主动写入会话文件、事件或日志；其环境变量从 bash 子进程中删除（`BashTool::hidden_env`）。CLI 的 `RedactSecrets` 在工具输出持久化前过滤认证 key 的完整字面值；不识别未知或变形的密钥，也不覆盖输入、模型输出与参数，边界见 README 的"安全模型"。
 
 ## 新增功能放在哪里
 
 - **新 provider**：实现 `ai::Provider` 并遵守不变量 1。为解析逻辑写单元测试，并在 `tests/` 下用本地假 HTTP 服务（`tests/common/mock_server.rs`）写端到端测试，参照 `tests/openai_mock.rs`。
 - **新工具**：实现 `agent::Tool`。参数定义成带 `#[serde(deny_unknown_fields)]` 的结构体再反序列化；输出要截断；要支持取消。测试覆盖成功、参数错误、超时或取消三种情况。
-- **新策略**：实现 `agent::ToolPolicy`，无法判断时返回 `Decision::Deny`。
+- **新策略**：实现 `agent::ToolPolicy`，通过 `policy::PolicyHook` 注册，无法判断时返回 `Decision::Deny`。
+- **新扩展**：实现 `agent::Hooks`，按需覆盖默认方法；回调必须异步让出执行权。错误、panic、取消与超时由宿主处理，具体规则见 README。
+- **上下文改动**：`on_input` 改写或拒绝通过 `context_edit` 记录；`transform_context` 返回 `ContextEdit` 计划，整份计划先校验，逐项写入成功后再请求模型。

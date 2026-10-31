@@ -69,7 +69,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | P0 | 场景默认值移出内核 | 已完成 |
-| P1 | 钩子、工具调用流水线与人机交互接口 | 未开始 |
+| P1 | 钩子、工具调用流水线与人机交互接口 | 已实现，待 PR review |
 | P2 | 长期会话 `AgentSession` | 未开始 |
 | P3 | 终端对话 `chat` | 未开始 |
 | P4 | profile 文件、上下文文件与 skills | 未开始 |
@@ -99,15 +99,19 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 
 目标：扩展点到位，现有的策略检查和截断续写改为钩子实现。不引入新依赖。
 
-- [ ] `Hooks` trait 与钩子链：`on_input`、`transform_context`、`before_tool`、`after_tool`、`finish_turn`、`on_event`；可失败的钩子通过 `Result` 返回错误
-- [ ] 组合规则：按注册顺序执行；`before_tool` 取最严格结果（Deny > Ask > Allow）；策略类钩子出错按拒绝处理；每个钩子有超时
-- [ ] `Decision` 增加 `Ask`；规则求值顺序 deny → ask → allow，首个匹配生效
-- [ ] `Interaction` trait 与 `NoHuman`（Ask 等同拒绝）
-- [ ] `CommandPolicy` 与截断续写迁移为钩子；`run_loop` 参数整理（静态配置与钩子分开）
-- [ ] 脱敏扩展：`after_tool` 中去掉密钥和令牌（原路线图“执行后钩子”）
-- [ ] 输入与上下文变换先以追加消息或 `context_edit` 记录，写入成功后再请求模型；P5 加入压缩时沿用这一约束
+- [x] `Hooks` trait 与钩子链：`on_input`、`transform_context`、`before_tool`、`after_tool`、`finish_turn`、`on_event`；可失败的钩子通过 `Result` 返回错误
+- [x] 组合规则：按注册顺序执行；`before_tool` 取最严格结果（Deny > Ask > Allow）；策略类钩子出错按拒绝处理；每个钩子有超时
+- [x] `Decision` 增加 `Ask`；规则求值顺序 deny → ask → allow，首个匹配生效
+- [x] `Interaction` trait 与 `NoHuman`（Ask 等同拒绝）
+- [x] `CommandPolicy` 与截断续写迁移为钩子；`run_loop` 参数整理（静态配置与钩子分开）
+- [x] 脱敏扩展：`after_tool` 中去掉密钥和令牌（原路线图“执行后钩子”）
+- [x] 输入与上下文变换先以追加消息或 `context_edit` 记录，写入成功后再请求模型；P5 加入压缩时沿用这一约束
 
-验收：无人值守行为不变；新增钩子组合、出错时拒绝、超时的测试。
+实现提交：`ea147e4`。
+
+验收（2026-11-01）：原有 `tests/cli.rs` 与 `run --help` 均保持不变；覆盖六个钩子的组合、失败处理、超时与取消、精确审批范围、变换先落盘、脱敏与续写。稳定版与 Rust 1.88 均为 196 项通过，6 项付费 API 测试跳过。命令与原始测试摘要附在本阶段 PR 中。
+
+实现接口：`LoopSpec` 保存静态配置，`LoopConfig` 持有钩子与交互宿主，`LoopControl` 借用运行状态。`PolicyHook` 适配原策略；`ContinueOnLength` 替代 `Limits::continue_on_length`；SDK 迁移见 README。终端审批与配置文件仍属 P3、P4。
 
 ### P2 长期会话 `AgentSession`
 
@@ -205,7 +209,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 
 这些整理不改变行为，在改到相关代码时顺带完成：
 
-- [ ] `run_loop` 参数过多（P1）
+- [x] `run_loop` 参数过多（P1）：整理为 4 个参数，运行状态通过 `LoopControl` 借用
 - [ ] 工具名字符串散落在多个文件（P1 或 P4）
 - [ ] `clip` 有两份实现（任意阶段）
 - [ ] `BashTool::execute` 过长（P6）

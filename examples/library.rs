@@ -5,9 +5,11 @@
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
-use zx_agent::agent::{AgentEvent, CommandPolicy, LoopConfig, MessageQueues};
+use zx_agent::agent::{AgentEvent, CommandPolicy, LoopConfig, LoopSpec};
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
+use zx_agent::extensions::RedactSecrets;
+use zx_agent::policy::PolicyHook;
 use zx_agent::presets::troubleshoot;
 use zx_agent::prompt::{build_system_prompt, environment_section};
 use zx_agent::runner::Runner;
@@ -37,22 +39,24 @@ async fn main() -> anyhow::Result<()> {
         ..BashTool::default()
     };
 
+    let api_key = std::env::var("OPENAI_API_KEY").ok();
     let provider = OpenAiCompatible::new(OpenAiConfig {
         base_url: std::env::var("ZX_BASE_URL").unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
-        api_key: std::env::var("OPENAI_API_KEY").ok(),
+        api_key: api_key.clone(),
         ..OpenAiConfig::default()
     })?;
-    let config = LoopConfig {
+    let mut config = LoopConfig::new(LoopSpec {
         provider: Arc::new(provider),
         model: model.clone(),
         system_prompt,
         tools: vec![Arc::new(bash), Arc::new(ReadFileTool::default())],
-        policy: Arc::new(policy),
         cwd: cwd.clone(),
         max_tokens: None,
         sequential_tools: false,
-        queues: Arc::new(MessageQueues::default()),
-    };
+    });
+    config.hooks = troubleshoot::hooks();
+    config.hooks.push(PolicyHook::new(Arc::new(policy)));
+    config.hooks.push(RedactSecrets::new(api_key));
     let session = SessionStore::in_memory(SessionHeader::new(&cwd, &model));
     // Any `Fn(AgentEvent)` is an event sink.
     let sink = Arc::new(|event: AgentEvent| {

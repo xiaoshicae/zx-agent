@@ -206,13 +206,32 @@ pub struct ToolResultMessage {
     pub duration_ms: Option<u64>,
 }
 
-/// One conversation message. The system prompt is part of the transcript, as in pi: the
-/// first `System` message sets it and later ones change sections.
+/// Whether user text starts a new answer or continues the preceding answer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UserMessageKind {
+    #[default]
+    Prompt,
+    ContinueAnswer,
+}
+
+impl UserMessageKind {
+    fn is_prompt(&self) -> bool {
+        *self == Self::Prompt
+    }
+}
+
+/// A transcript message. Ordinary user records retain their pre-Hooks JSON shape.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "camelCase")]
 pub enum Message {
     System(SystemMessage),
-    User { content: String, timestamp: u64 },
+    User {
+        content: String,
+        timestamp: u64,
+        #[serde(default, skip_serializing_if = "UserMessageKind::is_prompt")]
+        kind: UserMessageKind,
+    },
     Assistant(AssistantMessage),
     ToolResult(ToolResultMessage),
 }
@@ -223,7 +242,32 @@ impl Message {
         Message::User {
             content: text.into(),
             timestamp: now_ms(),
+            kind: UserMessageKind::Prompt,
         }
+    }
+
+    /// A request to continue the same answer, independent of the prompt's wording.
+    pub fn continuation(text: impl Into<String>) -> Self {
+        Self::User {
+            content: text.into(),
+            timestamp: now_ms(),
+            kind: UserMessageKind::ContinueAnswer,
+        }
+    }
+
+    /// A projection needs a separate copy; the original audit record stays unchanged.
+    pub(crate) fn with_replaced_text(&self, text: &str) -> Self {
+        let mut message = self.clone();
+        match &mut message {
+            // System changes are appended, never edited.
+            Self::System(_) => {}
+            Self::User { content, .. } => *content = text.to_string(),
+            Self::Assistant(assistant) => {
+                assistant.content = vec![ContentBlock::Text { text: text.to_string() }];
+            }
+            Self::ToolResult(result) => result.content = text.to_string(),
+        }
+        message
     }
 
     /// The serialized role name: `system`, `user`, `assistant`, or `toolResult`.
@@ -380,6 +424,7 @@ mod tests {
                 Message::User {
                     content: "go".into(),
                     timestamp: 2,
+                    kind: UserMessageKind::Prompt,
                 },
                 json!({"role": "user", "content": "go", "timestamp": 2}),
             ),
@@ -418,6 +463,26 @@ mod tests {
             assert_eq!(serde_json::to_value(&message).unwrap(), expected);
             assert_eq!(serde_json::from_value::<Message>(expected).unwrap(), message);
         }
+    }
+
+    #[test]
+    fn continuation_kind_round_trips_and_survives_text_edits() {
+        let message = Message::continuation("继续");
+        let json = serde_json::to_value(&message).unwrap();
+        assert_eq!(json["kind"], "continueAnswer");
+        assert_eq!(serde_json::from_value::<Message>(json).unwrap(), message);
+        assert!(
+            matches!(message.with_replaced_text("接着说"), Message::User { kind: UserMessageKind::ContinueAnswer, content, .. } if content == "接着说")
+        );
+        let legacy: Message =
+            serde_json::from_value(json!({"role": "user", "content": "old", "timestamp": 1})).unwrap();
+        assert!(matches!(
+            legacy,
+            Message::User {
+                kind: UserMessageKind::Prompt,
+                ..
+            }
+        ));
     }
 
     #[test]

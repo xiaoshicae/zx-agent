@@ -11,12 +11,14 @@ use crate::ai::{Delta, Message};
 pub enum LoopOutcome {
     /// The model answered without further tool calls and no queued message remained.
     Completed,
-    /// The provider returned an error response.
+    /// A provider or operational hook failed, or a context edit could not be persisted.
     Error,
     /// Cancelled.
     Aborted,
     /// The turn budget ran out while the model still wanted to continue.
     MaxTurns,
+    /// The answer was cut off and no hook requested a continuation.
+    Truncated,
 }
 
 /// Events emitted while the agent runs (pi: `AgentEvent`, packages/agent/src/types.ts).
@@ -66,6 +68,17 @@ pub enum AgentEvent {
         delay_ms: u64,
         error: String,
     },
+    /// A persisted change to an existing model-visible message.
+    ContextEdited {
+        index: usize,
+        replacement: Option<String>,
+    },
+    /// A hook failure. Observer failures produce diagnostics without stopping the run.
+    HookFailed {
+        hook: String,
+        phase: &'static str,
+        error: String,
+    },
 }
 
 impl AgentEvent {
@@ -82,6 +95,8 @@ impl AgentEvent {
             AgentEvent::TurnEnd { .. } => "turn_end",
             AgentEvent::AgentEnd { .. } => "agent_end",
             AgentEvent::RetryScheduled { .. } => "retry_scheduled",
+            AgentEvent::ContextEdited { .. } => "context_edited",
+            AgentEvent::HookFailed { .. } => "hook_failed",
         }
     }
 }
@@ -91,6 +106,11 @@ impl AgentEvent {
 pub trait EventSink: Send + Sync {
     /// Handle one event.
     fn emit(&self, event: AgentEvent);
+    /// Persist an edit before the loop changes its projection. Memory-only sinks
+    /// need no audit writer; the Runner supplies a session-backed implementation.
+    fn edit_context(&self, _index: usize, _replacement: Option<&str>) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 impl<F> EventSink for F
@@ -148,6 +168,15 @@ mod tests {
                 max_retries: 3,
                 delay_ms: 10,
                 error: "e".into(),
+            },
+            AgentEvent::ContextEdited {
+                index: 0,
+                replacement: None,
+            },
+            AgentEvent::HookFailed {
+                hook: "test".into(),
+                phase: "on_event",
+                error: "failed".into(),
             },
         ];
         for event in events {
