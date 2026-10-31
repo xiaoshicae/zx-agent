@@ -16,27 +16,19 @@ use crate::ai::{AssistantMessage, Message, StopReason, Usage, duration_ms};
 use crate::session::SessionStore;
 use crate::sync::{AbortOnDrop, lock};
 
-/// Bounds for one run. Unattended runs have no one to stop them, so both default to finite values.
-#[derive(Clone, Debug)]
+/// Bounds for one run. Defaults impose no turn or time limit and do not continue
+/// truncated answers; callers select the policies their scenario needs.
+#[derive(Clone, Debug, Default)]
 pub struct Limits {
-    /// Model requests per run, failed attempts included.
-    pub max_turns: u32,
+    /// Model requests per run, failed attempts included. `None` disables the limit;
+    /// `Some(0)` prevents any model request.
+    pub max_turns: Option<u32>,
     /// Wall-clock limit for the whole run; `None` disables it.
     pub timeout: Option<Duration>,
     /// How many times an answer cut off at the output token limit is continued by asking
     /// the model to go on. Each continuation is a model request and counts as a turn.
     /// Interactive callers usually set 0 and leave it to the user, as pi does.
     pub continue_on_length: u32,
-}
-
-impl Default for Limits {
-    fn default() -> Self {
-        Self {
-            max_turns: 30,
-            timeout: Some(Duration::from_secs(15 * 60)),
-            continue_on_length: 1,
-        }
-    }
 }
 
 /// How a run ended.
@@ -66,6 +58,7 @@ pub struct RunReport {
     /// Text of the last assistant message in the session projection, joined with the parts
     /// it continues when earlier responses were cut off at the output token limit.
     pub final_text: String,
+    /// Model requests made, saturating at `u32::MAX` for unbounded runs.
     pub turns: u32,
     pub retries: u32,
     /// Usage of every response in this run, failed attempts included. A cancelled request
@@ -157,7 +150,7 @@ impl Runner {
         // run's failed attempts, so the earlier part of the projection does not change.
         let run_start = self.session().messages().len();
         let mut prompts = vec![Message::user(prompt)];
-        let mut turns = 0;
+        let mut turns: u32 = 0;
         let mut retries = 0;
         let mut usage = Usage::default();
         let mut last_error = None;
@@ -172,13 +165,13 @@ impl Runner {
                 &mut context,
                 std::mem::take(&mut prompts),
                 &self.config,
-                self.limits.max_turns.saturating_sub(turns),
+                self.limits.max_turns.map(|limit| limit.saturating_sub(turns)),
                 &run_cancel,
                 &sink,
             )
             .await;
             let new_messages = &context[first_new..];
-            turns += result.turns;
+            turns = turns.saturating_add(result.turns);
             for message in new_messages {
                 if let Message::Assistant(assistant) = message {
                     usage.add(&assistant.usage);
@@ -191,7 +184,8 @@ impl Runner {
                     if !truncated {
                         break Ending::Loop(LoopOutcome::Completed);
                     }
-                    let budget_left = turns < self.limits.max_turns && !run_cancel.is_cancelled();
+                    let budget_left =
+                        self.limits.max_turns.is_none_or(|limit| turns < limit) && !run_cancel.is_cancelled();
                     if continuations >= self.limits.continue_on_length || !budget_left {
                         break Ending::Truncated;
                     }
@@ -250,7 +244,12 @@ impl Runner {
             (None, Ending::Loop(LoopOutcome::Error)) => (RunOutcome::Error, last_error),
             (None, Ending::Loop(LoopOutcome::MaxTurns)) => (
                 RunOutcome::MaxTurns,
-                Some(format!("turn limit reached (max_turns = {})", self.limits.max_turns)),
+                Some(format!(
+                    "turn limit reached (max_turns = {})",
+                    self.limits
+                        .max_turns
+                        .expect("MaxTurns requires a configured turn limit")
+                )),
             ),
             (None, Ending::Loop(LoopOutcome::Aborted)) if timed_out.load(Ordering::SeqCst) => {
                 let secs = self.limits.timeout.map(|t| t.as_secs()).unwrap_or_default();
@@ -390,6 +389,11 @@ mod tests {
     use crate::ai::SystemPrompt;
     use crate::ai::faux::{FauxProvider, FauxStep};
     use crate::session::{FailingWriter, SessionHeader};
+
+    #[test]
+    fn default_turn_budget_is_unbounded() {
+        assert_eq!(Limits::default().max_turns, None);
+    }
 
     #[tokio::test]
     async fn a_session_write_failure_cancels_the_run() {

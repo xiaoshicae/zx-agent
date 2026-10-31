@@ -45,7 +45,7 @@ pub struct LoopConfig {
 #[derive(Debug)]
 pub struct LoopResult {
     pub outcome: LoopOutcome,
-    /// Model requests made in this run.
+    /// Model requests made in this run, saturating at `u32::MAX` for unbounded runs.
     pub turns: u32,
 }
 
@@ -56,11 +56,13 @@ pub struct LoopResult {
 /// `context`. Then `prompts` are appended (pi: `runAgentLoop`); pass none to continue from the
 /// current context (pi: `runAgentLoopContinue`), whose last message must then be a user
 /// or tool-result message.
+///
+/// `max_turns: None` imposes no request limit; `Some(0)` makes no model request.
 pub async fn run_loop(
     context: &mut Vec<Message>,
     prompts: Vec<Message>,
     config: &LoopConfig,
-    max_turns: u32,
+    max_turns: Option<u32>,
     cancel: &CancellationToken,
     sink: &dyn EventSink,
 ) -> LoopResult {
@@ -91,7 +93,9 @@ pub async fn run_loop(
                 if pending.is_empty() {
                     pending = config.queues.drain_steering();
                 }
-                sink.emit(AgentEvent::TurnStart { turn: turns + 1 });
+                sink.emit(AgentEvent::TurnStart {
+                    turn: turns.saturating_add(1),
+                });
             }
             for message in pending.drain(..) {
                 append(context, sink, message);
@@ -99,10 +103,10 @@ pub async fn run_loop(
             if cancel.is_cancelled() {
                 break 'outer LoopOutcome::Aborted;
             }
-            if turns >= max_turns {
+            if max_turns.is_some_and(|limit| turns >= limit) {
                 break 'outer LoopOutcome::MaxTurns;
             }
-            turns += 1;
+            turns = turns.saturating_add(1);
 
             let message = stream_assistant_response(context, config, cancel, sink).await;
             let stop_reason = message.stop_reason;

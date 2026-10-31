@@ -10,10 +10,10 @@
   - `bash` 与 `read_file` 工具
   - 声明式命令策略
   - 结构化错误分类与自动重试
-  - 轮次上限与时间上限
+  - 可选的轮次上限与时间上限；无人值守默认值集中在 `troubleshoot` 预设
   - 只追加的 JSONL 会话文件（可续跑）
   - JSONL 事件流输出，流式工具参数携带调用 ID
-  - 回答被输出上限截断时自动续写
+  - 可配置的截断续写（`run` 默认续写 1 次）
   - 启动时把环境信息与命令策略写入系统提示词
   - 对 bash 命令隐藏 API key 所在的环境变量
   - 系统提示词记录在对话中，恢复会话时只追加有变化的段落
@@ -102,6 +102,7 @@ echo "exit code: $?"
 
 ```
 CLI (main.rs)
+  ├─ presets/troubleshoot  排障说明与 run 的默认上限、续写
   └─ runner      重试、轮次与时间上限、写入会话文件          ← pi: coding-agent AgentSession（精简）
        ├─ session  只追加的 JSONL 条目树 + 投影              ← pi: SessionManager
        └─ agent    双层循环、工具执行、策略检查、事件         ← pi: packages/agent/src/agent-loop.ts
@@ -121,6 +122,7 @@ CLI (main.rs)
 | 会话 | `src/session.rs` | `coding-agent/src/core/session-manager.ts` |
 | 运行控制 | `src/runner.rs` | `coding-agent/src/core/agent-session.ts`（`_startRun`、`_prepareRetry`） |
 | 系统提示词 | `src/prompt.rs` | `coding-agent/src/core/system-prompt.ts` |
+| 场景预设 | `src/presets/troubleshoot.rs` | 内核之外的场景策略 |
 
 ### 与 pi 一致的关键语义
 
@@ -236,6 +238,14 @@ let mut runner = Runner::new(config, RetryPolicy::default(), Limits::default(), 
 let report = runner.run("任务描述", &CancellationToken::new()).await;
 ```
 
+`Limits::default()` 不限制轮次和运行时间，也不自动续写截断回答。需要与 `run` 相同的无人值守策略时，
+显式传入 `presets::troubleshoot::limits()`；排障说明位于 `presets::troubleshoot::INSTRUCTIONS`。
+`examples/library.rs` 演示了这一预设的完整用法。调用方通过 `CancellationToken` 控制不限时运行的取消。
+
+P0 的 SDK 接口调整：`Limits::max_turns` 和 `agent::run_loop` 的轮次预算改为 `Option<u32>`。
+`None` 表示不限，`Some(0)` 表示不调用模型，原来的数值上限 `n` 改为 `Some(n)`。
+原 `prompt::DEFAULT_INSTRUCTIONS` 已移到上述预设。CLI 的参数、提示词及默认行为保持兼容。
+
 组装系统提示词（`ai::SystemPrompt`）可用 `prompt::build_system_prompt`、`prompt::environment_section` 和 `CommandPolicy::prompt_section`。如果 API key 来自环境变量，构造 `BashTool` 时把该变量名放进 `hidden_env`。两者的用法见示例。
 
 `Runner::run` 需要 `&mut self`，同一会话可顺序运行多次，编译器会拒绝重叠调用。运行期间需要插话时，提前克隆 `config.queues`；取消使用独立的 `CancellationToken`。外层 `select!` 或 `timeout` 丢弃运行 future 时，只取消本次运行的子令牌。
@@ -267,7 +277,7 @@ cargo fmt --check
 | `tests/cli.rs` | 编译出的程序：退出码 0 到 6、jsonl 输出、从 stdin 读提示词、bash 读不到 API key、系统提示词的生成段落、`--system-updates inline` |
 | `tests/real_api.rs` | 真实模型 API（付费，默认跳过）：文本回答与用量、工具往返、策略拒绝、输出截断、恢复会话、无效 key 不重试 |
 
-新增回归还覆盖：取消与 future 丢弃、特殊文件与读取上限、UTF-8 尾记录修复及损坏记录保留、交错工具参数 ID、有界队列背压、结构化错误与数值 `Retry-After`、响应预算和 CLI 参数接线。Rustdoc 的编译失败用例保护单一运行的借用约束。
+新增回归还覆盖：取消与 future 丢弃、特殊文件与读取上限、UTF-8 尾记录修复及损坏记录保留、交错工具参数 ID、有界队列背压、结构化错误与数值 `Retry-After`、响应预算和 CLI 参数接线。P0 回归覆盖内核不限轮次、无时限、不自动续写，以及零轮次、显式续写与预设取值。Rustdoc 的编译失败用例保护单一运行的借用约束。
 
 `tests/real_api.rs` 会产生费用。每个测试都标为 `#[ignore]`，而且没有设置 `ZX_E2E_AUTHORIZED=1` 时，在发出请求前就失败。服务地址、模型和 key 所在的变量名都从环境变量读取，运行方式见该文件开头的注释。
 
