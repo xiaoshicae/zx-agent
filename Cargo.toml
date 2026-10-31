@@ -2,8 +2,8 @@
 name = "zx-agent"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
-description = "Minimal agent kernel for unattended automation, modeled on the pi agent loop"
+rust-version = "1.88"
+description = "Minimal general-purpose agent kernel for interactive, unattended, and embedded use, modeled on pi"
 license = "MIT"
 publish = false
 

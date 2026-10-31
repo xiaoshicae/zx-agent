@@ -116,6 +116,7 @@ pub struct SessionStore {
     entries: Vec<Entry>,
     index: HashMap<String, usize>,
     leaf: Option<String>,
+    recovered_tail_bytes: usize,
 }
 
 impl SessionStore {
@@ -128,6 +129,7 @@ impl SessionStore {
             entries: Vec::new(),
             index: HashMap::new(),
             leaf: None,
+            recovered_tail_bytes: 0,
         }
     }
 
@@ -159,20 +161,24 @@ impl SessionStore {
     /// A crash during the final write can leave an incomplete last line. That line is cut
     /// off so later appends start on a clean line; damage anywhere else is an error.
     pub fn open(path: &Path) -> Result<Self> {
-        let content =
-            std::fs::read_to_string(path).with_context(|| format!("cannot read session file {}", path.display()))?;
+        // A short final write can end inside a UTF-8 character, so validate one record at
+        // a time rather than rejecting the whole file during UTF-8 decoding.
+        let content = std::fs::read(path).with_context(|| format!("cannot read session file {}", path.display()))?;
         let mut lines = Vec::new();
         let mut offset = 0;
-        for raw in content.split_inclusive('\n') {
+        for raw in content.split_inclusive(|&byte| byte == b'\n') {
             lines.push((offset, raw));
             offset += raw.len();
         }
-        let lines: Vec<(usize, &str)> = lines.into_iter().filter(|(_, raw)| !raw.trim().is_empty()).collect();
+        let lines: Vec<(usize, &[u8])> = lines
+            .into_iter()
+            .filter(|(_, raw)| !raw.iter().all(u8::is_ascii_whitespace))
+            .collect();
         let (_, first) = lines
             .first()
             .ok_or_else(|| anyhow!("session file {} is empty", path.display()))?;
         let HeaderLine::Session(header) =
-            serde_json::from_str(first).with_context(|| format!("{}: invalid session header", path.display()))?;
+            serde_json::from_slice(first).with_context(|| format!("{}: invalid session header", path.display()))?;
         if header.version > SESSION_VERSION {
             bail!(
                 "{}: session version {} is newer than the supported version {SESSION_VERSION}",
@@ -184,9 +190,11 @@ impl SessionStore {
         let mut store = Self::in_memory(header);
         let mut truncate_at = None;
         for (position, (line_offset, raw)) in lines.iter().enumerate().skip(1) {
-            match serde_json::from_str::<Entry>(raw) {
+            match serde_json::from_slice::<Entry>(raw) {
                 Ok(entry) => store.insert(entry),
-                Err(_) if position + 1 == lines.len() => truncate_at = Some(*line_offset),
+                Err(e) if position + 1 == lines.len() && incomplete_tail(raw, &e) => {
+                    truncate_at = Some(*line_offset);
+                }
                 Err(e) => bail!("{}: entry {position}: {e}", path.display()),
             }
         }
@@ -196,8 +204,9 @@ impl SessionStore {
             .open(path)
             .with_context(|| format!("cannot open {} for appending", path.display()))?;
         if let Some(length) = truncate_at {
-            file.set_len(length as u64)?;
-        } else if !content.is_empty() && !content.ends_with('\n') {
+            file.set_len(u64::try_from(length)?)?;
+            store.recovered_tail_bytes = content.len() - length;
+        } else if !content.is_empty() && !content.ends_with(b"\n") {
             // A complete last entry without its newline: terminate it before appending.
             (&file).write_all(b"\n")?;
         }
@@ -224,6 +233,12 @@ impl SessionStore {
     /// The session file; `None` for an in-memory session.
     pub fn path(&self) -> Option<&Path> {
         self.path.as_deref()
+    }
+
+    /// Bytes removed from an incomplete final record when opened; zero if no repair was
+    /// needed. Complete corrupt records are errors and are never silently removed.
+    pub fn recovered_tail_bytes(&self) -> usize {
+        self.recovered_tail_bytes
     }
 
     /// Every entry in file order, on all branches.
@@ -369,6 +384,23 @@ impl SessionStore {
     }
 }
 
+fn incomplete_tail(raw: &[u8], error: &serde_json::Error) -> bool {
+    if raw.ends_with(b"\n") {
+        return false;
+    }
+    if error.is_eof() {
+        return true;
+    }
+    // Only a valid, unfinished JSON prefix may be repaired. An incomplete UTF-8
+    // suffix must not hide an unrelated syntax/schema error earlier in the record.
+    match std::str::from_utf8(raw) {
+        Err(utf8) if utf8.error_len().is_none() => {
+            serde_json::from_slice::<Entry>(&raw[..utf8.valid_up_to()]).is_err_and(|error| error.is_eof())
+        }
+        Ok(_) | Err(_) => false,
+    }
+}
+
 fn replace_content(message: &Message, text: &str) -> Message {
     match message {
         // `append_context_edit` refuses system targets, so a system message stays as it is.
@@ -499,6 +531,73 @@ mod tests {
         let mut store = SessionStore::open(&path).unwrap();
         store.append_message(Message::user("b")).unwrap();
         assert_eq!(texts(&SessionStore::open(&path).unwrap()), ["a", "b"]);
+    }
+
+    #[test]
+    fn recovers_a_tail_cut_inside_a_utf8_character() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("utf8.jsonl");
+        let mut store = SessionStore::create(&path, header()).unwrap();
+        store.append_message(Message::user("keep")).unwrap();
+        store.append_message(Message::user("中文")).unwrap();
+        drop(store);
+        let bytes = std::fs::read(&path).unwrap();
+        let cut = bytes.windows("中".len()).position(|w| w == "中".as_bytes()).unwrap() + 2;
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(u64::try_from(cut).unwrap())
+            .unwrap();
+
+        let reopened = SessionStore::open(&path);
+
+        assert!(reopened.is_ok(), "a partial UTF-8 tail was not repaired");
+        assert_eq!(texts(&reopened.unwrap()), ["keep"]);
+    }
+
+    #[test]
+    fn does_not_delete_a_corrupt_newline_terminated_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = session_file(dir.path(), &[&user_entry("a", None), "{broken}\n"]);
+        let original = std::fs::read(&path).unwrap();
+
+        let result = SessionStore::open(&path);
+
+        assert!(result.is_err(), "a complete corrupt record was silently discarded");
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn preserves_unknown_complete_records_even_without_a_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = session_file(dir.path(), &[&user_entry("a", None), r#"{"type":"future_kind"}"#]);
+        let original = std::fs::read(&path).unwrap();
+
+        assert!(SessionStore::open(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn an_incomplete_utf8_suffix_does_not_hide_an_earlier_syntax_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invalid.jsonl");
+        let mut store = SessionStore::create(&path, header()).unwrap();
+        store.append_message(Message::user("keep")).unwrap();
+        drop(store);
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{broken}\xe4\xb8")
+            .unwrap();
+        let original = std::fs::read(&path).unwrap();
+
+        assert!(
+            SessionStore::open(&path).is_err(),
+            "invalid JSON was mistaken for an interrupted UTF-8 write"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original);
     }
 
     #[test]

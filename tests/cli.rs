@@ -55,6 +55,87 @@ fn sent_messages(server: &MockServer, index: usize) -> Vec<Value> {
     server.requests()[index].body["messages"].as_array().unwrap().clone()
 }
 
+#[tokio::test]
+async fn streaming_resource_limits_reach_the_provider() {
+    let server = MockServer::start(vec![Reply::text(&"x".repeat(256))]).await;
+    let output = run(
+        &server.base_url,
+        &[
+            "--tools",
+            "",
+            "--max-response-bytes",
+            "64",
+            "--output",
+            "jsonl",
+            "check",
+        ],
+    )
+    .await;
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let events: Vec<Value> = stdout(&output)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(
+        events
+            .iter()
+            .any(|event| event["message"]["providerError"]["kind"] == "resource_limit")
+    );
+}
+
+#[tokio::test]
+async fn zero_stream_budgets_are_configuration_errors() {
+    for flag in ["--max-response-bytes", "--max-sse-event-bytes"] {
+        let output = run(NO_SERVER, &[flag, "0", "check"]).await;
+        assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+        assert!(stderr(&output).contains("must be greater than zero"));
+    }
+}
+
+#[tokio::test]
+async fn repaired_session_tails_are_reported_on_stderr() {
+    use std::io::Write;
+    use zx_agent::ai::Message;
+    use zx_agent::session::{SessionHeader, SessionStore};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    let mut session = SessionStore::create(&path, SessionHeader::new(dir.path(), "mock-model")).unwrap();
+    session.append_message(Message::user("earlier")).unwrap();
+    drop(session);
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"{\"type\":\"mess")
+        .unwrap();
+    let server = MockServer::start(vec![Reply::text("ok")]).await;
+
+    let output = zx_agent(
+        &server.base_url,
+        dir.path(),
+        &[
+            "--tools",
+            "",
+            "--session",
+            path.to_str().unwrap(),
+            "--output",
+            "jsonl",
+            "continue",
+        ],
+    )
+    .output()
+    .await
+    .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stderr(&output).contains("recovered incomplete final record"));
+    for line in stdout(&output).lines() {
+        serde_json::from_str::<Value>(line).unwrap();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Exit codes
 // ---------------------------------------------------------------------------

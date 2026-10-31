@@ -14,7 +14,7 @@ use crate::agent::{AgentEvent, EventSink, LoopConfig, LoopOutcome, run_loop};
 use crate::ai::retry::{RetryPolicy, is_retryable};
 use crate::ai::{AssistantMessage, Message, StopReason, Usage, duration_ms};
 use crate::session::SessionStore;
-use crate::sync::lock;
+use crate::sync::{AbortOnDrop, lock};
 
 /// Bounds for one run. Unattended runs have no one to stop them, so both default to finite values.
 #[derive(Clone, Debug)]
@@ -116,17 +116,33 @@ impl Runner {
 
     /// Run one prompt to completion. Never panics on provider or tool failures; the report
     /// says how the run ended.
-    pub async fn run(&self, prompt: impl Into<String>, cancel: &CancellationToken) -> RunReport {
+    ///
+    /// One runner owns one active conversation. Overlapping runs are rejected by borrowing:
+    ///
+    /// ```compile_fail
+    /// use tokio_util::sync::CancellationToken;
+    /// use zx_agent::runner::Runner;
+    ///
+    /// async fn overlapping(runner: &mut Runner, cancel: &CancellationToken) {
+    ///     let first = runner.run("first", cancel);
+    ///     let second = runner.run("second", cancel);
+    ///     tokio::join!(first, second);
+    /// }
+    /// ```
+    pub async fn run(&mut self, prompt: impl Into<String>, cancel: &CancellationToken) -> RunReport {
         let run_cancel = cancel.child_token();
+        // Dropping this future must cancel background providers even when the caller
+        // keeps its parent token alive.
+        let _cancel_on_drop = run_cancel.drop_guard_ref();
         let timed_out = Arc::new(AtomicBool::new(false));
-        let timer = self.limits.timeout.map(|limit| {
+        let _timer = self.limits.timeout.map(|limit| {
             let token = run_cancel.clone();
             let flag = timed_out.clone();
-            tokio::spawn(async move {
+            AbortOnDrop(tokio::spawn(async move {
                 tokio::time::sleep(limit).await;
                 flag.store(true, Ordering::SeqCst);
                 token.cancel();
-            })
+            }))
         });
 
         let sink = PersistingSink {
@@ -194,7 +210,10 @@ impl Runner {
             }
 
             retries += 1;
-            let delay = self.retry.delay(retries);
+            // A retryable error always has a failed assistant message.
+            let delay = self
+                .retry
+                .delay_for(retries, failed.expect("a retryable failure has an assistant message"));
             self.sink.emit(AgentEvent::RetryScheduled {
                 attempt: retries,
                 max_retries: self.retry.max_retries,
@@ -220,9 +239,6 @@ impl Runner {
             }
         };
 
-        if let Some(timer) = timer {
-            timer.abort();
-        }
         let persistence_failure = lock(&sink.failure).take();
         let (outcome, error) = match (persistence_failure, ending) {
             (Some(failure), _) => (RunOutcome::Error, Some(failure)),
@@ -390,7 +406,7 @@ mod tests {
             queues: Arc::new(MessageQueues::default()),
         };
         let session = SessionStore::with_writer(SessionHeader::new(Path::new("."), "m"), Box::new(FailingWriter));
-        let runner = Runner::new(
+        let mut runner = Runner::new(
             config,
             RetryPolicy::default(),
             Limits::default(),

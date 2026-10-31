@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
             eprintln!("[tool] {tool_name} {args}");
         }
     });
-    let runner = Runner::new(config, RetryPolicy::default(), Limits::default(), session, sink);
+    let mut runner = Runner::new(config, RetryPolicy::default(), Limits::default(), session, sink);
 
     let report = runner.run(task, &CancellationToken::new()).await;
     println!("{}", report.final_text);

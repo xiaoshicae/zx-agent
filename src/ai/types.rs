@@ -95,6 +95,35 @@ pub struct ToolCall {
     pub arguments_error: Option<String>,
 }
 
+/// Machine-readable provider failure details. Human-readable text stays in
+/// AssistantMessage::error_message. Optional metadata keeps older sessions readable.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
+pub enum ProviderError {
+    /// An unsuccessful HTTP response.
+    Http {
+        status: u16,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+        /// A numeric Retry-After header, converted to milliseconds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_after_ms: Option<u64>,
+    },
+    /// An error reported inside a successful streaming HTTP response.
+    Provider {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+    },
+    /// A connection or response-body transport failure.
+    Transport,
+    /// A connection, response-header, or stream idle timeout.
+    Timeout,
+    /// Invalid JSON, missing completion markers, or another protocol violation.
+    Protocol,
+    /// A configured response or event byte budget was exceeded.
+    ResourceLimit,
+}
+
 /// A model response, complete or failed.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -106,6 +135,8 @@ pub struct AssistantMessage {
     pub stop_reason: StopReason,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_error: Option<ProviderError>,
     /// When the request started.
     pub timestamp: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -122,6 +153,7 @@ impl AssistantMessage {
             usage: Usage::default(),
             stop_reason,
             error_message: Some(error.into()),
+            provider_error: None,
             timestamp: now_ms(),
             duration_ms: None,
         }
@@ -227,10 +259,22 @@ pub struct Request {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Delta {
-    Text { text: String },
-    Thinking { text: String },
-    ToolCallStart { id: String, name: String },
-    ToolCallArgs { text: String },
+    Text {
+        text: String,
+    },
+    Thinking {
+        text: String,
+    },
+    ToolCallStart {
+        id: String,
+        name: String,
+    },
+    ToolCallArgs {
+        /// Matches ToolCallStart::id. Empty only when decoding older uncorrelated events.
+        #[serde(default)]
+        id: String,
+        text: String,
+    },
 }
 
 /// Event protocol of one streamed response (pi: `AssistantMessageEvent`).
@@ -251,6 +295,39 @@ mod tests {
 
     use super::*;
     use crate::ai::{SectionChange, SystemMessage};
+
+    #[test]
+    fn reads_older_uncorrelated_deltas() {
+        let delta: Delta = serde_json::from_value(json!({"kind": "tool_call_args", "text": "{}"})).unwrap();
+        assert_eq!(
+            delta,
+            Delta::ToolCallArgs {
+                id: String::new(),
+                text: "{}".into()
+            }
+        );
+    }
+
+    #[test]
+    fn provider_error_metadata_is_optional_and_round_trips() {
+        let mut message = AssistantMessage::failure("p", "m", StopReason::Error, "rate limited");
+        let legacy = serde_json::to_value(&message).unwrap();
+        assert!(legacy.get("providerError").is_none());
+        assert_eq!(
+            serde_json::from_value::<AssistantMessage>(legacy)
+                .unwrap()
+                .provider_error,
+            None
+        );
+        message.provider_error = Some(ProviderError::Http {
+            status: 429,
+            code: Some("rate_limit_exceeded".into()),
+            retry_after_ms: Some(2000),
+        });
+        let encoded = serde_json::to_value(&message).unwrap();
+        assert_eq!(encoded["providerError"]["retryAfterMs"], 2000);
+        assert_eq!(serde_json::from_value::<AssistantMessage>(encoded).unwrap(), message);
+    }
 
     fn assistant() -> AssistantMessage {
         AssistantMessage {
@@ -279,6 +356,7 @@ mod tests {
             },
             stop_reason: StopReason::ToolUse,
             error_message: None,
+            provider_error: None,
             timestamp: 7,
             duration_ms: None,
         }

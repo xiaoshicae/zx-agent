@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::io::AsyncReadExt;
 
 use super::truncate::{MAX_BYTES, MAX_LINES, truncate_head};
 use crate::agent::{Tool, ToolContext, ToolOutput};
@@ -21,6 +22,58 @@ impl Default for ReadFileTool {
         Self {
             max_file_bytes: 10 * 1024 * 1024,
         }
+    }
+}
+
+impl ReadFileTool {
+    async fn read_bytes(&self, path: &Path) -> Result<Vec<u8>, String> {
+        let mut options = tokio::fs::OpenOptions::new();
+        options.read(true);
+        // A path can be replaced with a FIFO between lookup and open. Nonblocking open
+        // lets us inspect the opened descriptor without waiting for a pipe writer.
+        #[cfg(unix)]
+        options.custom_flags(libc::O_NONBLOCK);
+        let file = options
+            .open(path)
+            .await
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let meta = file
+            .metadata()
+            .await
+            .map_err(|e| format!("cannot inspect {}: {e}", path.display()))?;
+        if meta.is_dir() {
+            return Err(format!("{} is a directory; use bash `ls` to list it", path.display()));
+        }
+        if !meta.is_file() {
+            return Err(format!(
+                "{} is not a regular file; special files are not supported",
+                path.display()
+            ));
+        }
+        if meta.len() > self.max_file_bytes {
+            return Err(format!(
+                "{} is {} bytes, over the {} byte limit; use bash with head, tail, or grep instead",
+                path.display(),
+                meta.len(),
+                self.max_file_bytes
+            ));
+        }
+        // Metadata can be stale (growing files and procfs). Bound the actual read too,
+        // using one extra byte to distinguish an exact-limit file from an oversized one.
+        let mut bytes = Vec::new();
+        file.take(self.max_file_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let read_bytes = u64::try_from(bytes.len()).map_err(|e| format!("file length is out of range: {e}"))?;
+        if read_bytes > self.max_file_bytes {
+            return Err(format!(
+                "{} grew over the {} byte limit; use bash with head, tail, or grep instead",
+                path.display(),
+                self.max_file_bytes
+            ));
+        }
+        Ok(bytes)
     }
 }
 
@@ -45,8 +98,9 @@ impl Tool for ReadFileTool {
         ToolDef {
             name: "read_file".to_string(),
             description: format!(
-                "Read a text file. Returns at most {MAX_LINES} lines or {}KB per call; use offset (1-based line \
+                "Read a regular text file up to {} bytes. Returns at most {MAX_LINES} lines or {}KB per call; use offset (1-based line \
                  number) and limit to page through larger files. Relative paths resolve against the working directory.",
+                self.max_file_bytes,
                 MAX_BYTES / 1024
             ),
             parameters: json!({
@@ -65,23 +119,11 @@ impl Tool for ReadFileTool {
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
         let args: Args = serde_json::from_value(args).map_err(|e| format!("invalid arguments: {e}"))?;
         let path = resolve(&ctx.cwd, &args.path)?;
-        let meta = tokio::fs::metadata(&path)
-            .await
-            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        if meta.is_dir() {
-            return Err(format!("{} is a directory; use bash `ls` to list it", path.display()));
-        }
-        if meta.len() > self.max_file_bytes {
-            return Err(format!(
-                "{} is {} bytes, over the {} byte limit; use bash with head, tail, or grep instead",
-                path.display(),
-                meta.len(),
-                self.max_file_bytes
-            ));
-        }
-        let bytes = tokio::fs::read(&path)
-            .await
-            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let bytes = tokio::select! {
+            biased;
+            _ = ctx.cancel.cancelled() => return Err("read cancelled".to_string()),
+            result = self.read_bytes(&path) => result?,
+        };
         if bytes.iter().take(8192).any(|&b| b == 0) {
             return Err(format!("{} looks like a binary file", path.display()));
         }
@@ -96,7 +138,9 @@ impl Tool for ReadFileTool {
         if start > total {
             return Err(format!("offset {start} is beyond the end of the file ({total} lines)"));
         }
-        let end = args.limit.map_or(total, |limit| (start - 1 + limit.max(1)).min(total));
+        let end = args
+            .limit
+            .map_or(total, |limit| (start - 1).saturating_add(limit.max(1)).min(total));
         let selected = lines[start - 1..end].concat();
         let truncated = truncate_head(&selected, MAX_LINES, MAX_BYTES);
         let shown_end = start - 1 + truncated.kept_lines;
@@ -177,6 +221,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_cancelled_read_does_not_return_file_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "must not be returned").unwrap();
+        let context = ctx(dir.path());
+        context.cancel.cancel();
+
+        let result = ReadFileTool::default()
+            .execute(json!({"path": "f.txt"}), &context)
+            .await;
+
+        assert!(result.is_err(), "a cancelled read returned {result:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn refuses_special_files() {
+        let result = ReadFileTool::default()
+            .execute(json!({"path": "/dev/null"}), &ctx(Path::new("/")))
+            .await;
+
+        assert!(result.is_err(), "a special file was accepted: {result:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn refuses_named_pipes() {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fifo");
+        assert!(
+            tokio::process::Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .await
+                .unwrap()
+                .success()
+        );
+        let writer_path = path.clone();
+        // This writer also lets the old implementation complete, so a failing regression
+        // test never leaves a blocking read behind during runtime shutdown.
+        let writer = tokio::task::spawn_blocking(move || {
+            let mut file = std::fs::OpenOptions::new().write(true).open(writer_path).unwrap();
+            file.write_all(b"pipe contents")
+        });
+        let result = ReadFileTool::default()
+            .execute(json!({"path": "fifo"}), &ctx(dir.path()))
+            .await;
+        // Release the writer if the reader rejected the FIFO before opening it.
+        let _unblock = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&path)
+            .unwrap();
+        // Broken pipe is expected when rejection closes the read descriptor first.
+        let _ = writer.await.unwrap();
+        assert!(result.unwrap_err().contains("not a regular file"));
+    }
+
+    #[tokio::test]
     async fn long_files_end_with_a_hint_to_continue() {
         let dir = tempfile::tempdir().unwrap();
         let content: String = (1..=MAX_LINES + 5).map(|i| format!("{i}\n")).collect();
@@ -207,6 +312,21 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.contains("over the 4 byte limit"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn reads_exact_size_limits_and_large_page_limits_without_overflow() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("exact.txt"), "ab\nc").unwrap();
+        let tool = ReadFileTool { max_file_bytes: 4 };
+        let output = tool
+            .execute(
+                json!({"path": "exact.txt", "offset": 2, "limit": usize::MAX}),
+                &ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.content, "c");
     }
 
     #[tokio::test]

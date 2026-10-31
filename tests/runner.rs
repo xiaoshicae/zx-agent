@@ -3,6 +3,59 @@
 
 mod common;
 
+struct CancellationProbe {
+    token: std::sync::Mutex<Option<CancellationToken>>,
+    started: tokio::sync::Notify,
+}
+
+impl zx_agent::ai::Provider for CancellationProbe {
+    fn name(&self) -> &str {
+        "cancellation-probe"
+    }
+
+    fn stream(&self, _request: zx_agent::ai::Request, cancel: CancellationToken) -> zx_agent::ai::EventReceiver {
+        *self.token.lock().unwrap() = Some(cancel.clone());
+        self.started.notify_one();
+        let (mut tx, rx) = zx_agent::ai::provider::event_channel();
+        tokio::spawn(async move {
+            cancel.cancelled().await;
+            let _ = futures::SinkExt::send(
+                &mut tx,
+                zx_agent::ai::StreamEvent::Error(zx_agent::ai::AssistantMessage::failure(
+                    "cancellation-probe",
+                    "test-model",
+                    StopReason::Aborted,
+                    "cancelled",
+                )),
+            )
+            .await;
+        });
+        rx
+    }
+}
+
+#[tokio::test]
+async fn dropping_a_run_cancels_its_provider() {
+    let probe = Arc::new(CancellationProbe {
+        token: std::sync::Mutex::new(None),
+        started: tokio::sync::Notify::new(),
+    });
+    let (mut runner, _) = RunnerSetup::new(config(probe.clone(), vec![])).build();
+    let cancel = CancellationToken::new();
+    let mut running = Box::pin(runner.run("go", &cancel));
+    tokio::select! {
+        _ = probe.started.notified() => {}
+        _ = &mut running => panic!("the provider must still be running"),
+    }
+
+    drop(running);
+    let cancelled = probe.token.lock().unwrap().as_ref().unwrap().is_cancelled();
+    // Clean up the probe even before the production fix, so a failing test leaks no task.
+    cancel.cancel();
+
+    assert!(cancelled, "dropping the run left its provider active");
+}
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,7 +65,7 @@ use tokio_util::sync::CancellationToken;
 use common::{EchoTool, RunnerSetup, config, fast_retry, header, read_lines, summarize};
 use zx_agent::agent::AgentEvent;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{PREAMBLE, SystemPrompt};
+use zx_agent::ai::{PREAMBLE, StopReason, SystemPrompt};
 use zx_agent::runner::{Limits, RunOutcome};
 use zx_agent::session::SessionStore;
 
@@ -43,7 +96,7 @@ async fn retries_transient_errors_without_repeating_the_prompt() {
         FauxStep::Fail("HTTP 503: service unavailable".into()),
         FauxStep::text("ok"),
     ]);
-    let (runner, sink) = RunnerSetup {
+    let (mut runner, sink) = RunnerSetup {
         retry: fast_retry(3),
         ..setup(&provider)
     }
@@ -66,7 +119,7 @@ async fn a_retried_failure_stays_in_the_file_but_leaves_the_context() {
         FauxStep::Fail("HTTP 503: service unavailable".into()),
         FauxStep::text("ok"),
     ]);
-    let (runner, _) = RunnerSetup {
+    let (mut runner, _) = RunnerSetup {
         retry: fast_retry(3),
         session: SessionStore::create(&path, header()).unwrap(),
         ..setup(&provider)
@@ -90,7 +143,7 @@ async fn a_retried_failure_stays_in_the_file_but_leaves_the_context() {
 #[tokio::test]
 async fn permanent_errors_are_not_retried() {
     let provider = provider([FauxStep::Fail("HTTP 401: invalid api key".into())]);
-    let (runner, _) = RunnerSetup {
+    let (mut runner, _) = RunnerSetup {
         retry: fast_retry(3),
         ..setup(&provider)
     }
@@ -105,7 +158,7 @@ async fn permanent_errors_are_not_retried() {
 #[tokio::test]
 async fn retrying_stops_after_max_retries() {
     let provider = provider((0..5).map(|_| FauxStep::Fail("HTTP 502: bad gateway".into())));
-    let (runner, _) = RunnerSetup {
+    let (mut runner, _) = RunnerSetup {
         retry: fast_retry(2),
         ..setup(&provider)
     }
@@ -124,7 +177,7 @@ async fn retrying_stops_after_max_retries() {
 #[tokio::test]
 async fn a_run_stops_at_the_turn_limit() {
     let provider = provider((0..10).map(|i| FauxStep::tool_call(&format!("c{i}"), "echo", json!({"text": "loop"}))));
-    let (runner, _) = RunnerSetup {
+    let (mut runner, _) = RunnerSetup {
         limits: limits(3, None, 0),
         ..RunnerSetup::new(config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]))
     }
@@ -138,7 +191,7 @@ async fn a_run_stops_at_the_turn_limit() {
 #[tokio::test]
 async fn a_run_stops_at_the_time_limit() {
     let provider = provider([FauxStep::Hang]);
-    let (runner, _) = RunnerSetup {
+    let (mut runner, _) = RunnerSetup {
         limits: limits(10, Some(Duration::from_millis(150)), 0),
         ..setup(&provider)
     }
@@ -152,7 +205,7 @@ async fn a_run_stops_at_the_time_limit() {
 #[tokio::test]
 async fn the_caller_can_cancel_a_waiting_run() {
     let provider = provider([FauxStep::Hang]);
-    let (runner, _) = setup(&provider).build();
+    let (mut runner, _) = setup(&provider).build();
     let cancel = CancellationToken::new();
     let trigger = cancel.clone();
     // The delay only lets the request start; the assertion does not depend on timing.
@@ -173,7 +226,7 @@ async fn the_caller_can_cancel_a_waiting_run() {
 #[tokio::test]
 async fn continues_a_truncated_answer_and_joins_the_parts() {
     let provider = provider([FauxStep::truncated("Part one, "), FauxStep::text("part two.")]);
-    let (runner, _) = setup(&provider).build();
+    let (mut runner, _) = setup(&provider).build();
 
     let report = runner.run("go", &CancellationToken::new()).await;
 
@@ -193,7 +246,7 @@ async fn a_continuation_that_repeats_the_cut_line_is_joined_once() {
         FauxStep::truncated("Steps:\n1. Check logs\n2. Add a pre-deploy"),
         FauxStep::text("2. Add a pre-deploy check."),
     ]);
-    let (runner, _) = setup(&provider).build();
+    let (mut runner, _) = setup(&provider).build();
 
     let report = runner.run("go", &CancellationToken::new()).await;
 
@@ -203,7 +256,7 @@ async fn a_continuation_that_repeats_the_cut_line_is_joined_once() {
 #[tokio::test]
 async fn reports_truncated_when_no_continuation_is_allowed() {
     let provider = provider([FauxStep::truncated("Part one")]);
-    let (runner, _) = RunnerSetup {
+    let (mut runner, _) = RunnerSetup {
         limits: limits(30, None, 0),
         ..setup(&provider)
     }
@@ -221,7 +274,7 @@ async fn reports_truncated_when_no_continuation_is_allowed() {
 #[tokio::test]
 async fn continuations_count_against_the_turn_limit() {
     let provider = provider([FauxStep::truncated("a"), FauxStep::text("b")]);
-    let (runner, _) = RunnerSetup {
+    let (mut runner, _) = RunnerSetup {
         limits: limits(1, None, 1),
         ..setup(&provider)
     }
@@ -242,7 +295,7 @@ async fn events_are_forwarded_after_persistence() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("e.jsonl");
     let provider = provider([FauxStep::text("hi")]);
-    let (runner, sink) = RunnerSetup {
+    let (mut runner, sink) = RunnerSetup {
         session: SessionStore::create(&path, header()).unwrap(),
         ..setup(&provider)
     }
@@ -262,7 +315,7 @@ async fn events_are_forwarded_after_persistence() {
 #[tokio::test]
 async fn final_text_ignores_answers_from_earlier_runs() {
     let provider = provider([FauxStep::text("old answer")]);
-    let (runner, _) = setup(&provider).build();
+    let (mut runner, _) = setup(&provider).build();
     runner.run("first", &CancellationToken::new()).await;
 
     let cancelled = CancellationToken::new();
@@ -277,7 +330,7 @@ async fn resumed_sessions_continue_the_conversation() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
     let first = provider([FauxStep::text("nginx is down")]);
-    let (runner, _) = RunnerSetup {
+    let (mut runner, _) = RunnerSetup {
         session: SessionStore::create(&path, header()).unwrap(),
         ..setup(&first)
     }
@@ -286,7 +339,7 @@ async fn resumed_sessions_continue_the_conversation() {
     drop(runner);
 
     let second = provider([FauxStep::text("restart it")]);
-    let (runner, _) = RunnerSetup {
+    let (mut runner, _) = RunnerSetup {
         session: SessionStore::open(&path).unwrap(),
         ..setup(&second)
     }
@@ -306,7 +359,7 @@ async fn run_with_environment(session: SessionStore, started: &str) {
     config.system_prompt = SystemPrompt::default()
         .with_section(PREAMBLE, "Do it.")
         .with_section("environment", started);
-    let (runner, _) = RunnerSetup {
+    let (mut runner, _) = RunnerSetup {
         session,
         ..RunnerSetup::new(config)
     }

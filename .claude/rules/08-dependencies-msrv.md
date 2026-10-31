@@ -6,19 +6,14 @@ paths:
 
 # 08 依赖与 MSRV
 
-## MSRV 1.85（edition 2024）
+## MSRV 1.88（edition 2024）
 
-本机工具链比 1.85 新，用了新特性也能编译通过，所以要靠规则避免：
+本机默认工具链比 1.88 新，用了更新的特性也能编译通过，所以要专门检查：
 
-- **标准库 API**：clippy 的 `incompatible_msrv` 默认开启，会对照 `rust-version` 报警（已实测：`Vec::pop_if` 报 "stable since 1.86.0"）。
-- **语言特性**：clippy 查不出，当前工具链也能编译（已实测 let chains）。常见的有：
-
-| 特性 | 稳定版本 | 1.85 下的写法 |
-|---|---|---|
-| let chains：`if let Some(x) = a && x > 1` | 1.88 | 嵌套 `if let`，或者 `if let Some(x) = a.filter(\|x\| *x > 1)` |
-| trait 向上转型：`&dyn Sub` 转 `&dyn Super` | 1.86 | 在 trait 里加一个返回 `&dyn Super` 的方法 |
-
-- 拿不准时，查本机标准库源码的 `since` 标注：`grep -rn 'since = "1\.8[6-9]' ~/.rustup/toolchains/stable-*/lib/rustlib/src/rust/library/`。彻底验证要 `rustup toolchain install 1.85 && cargo +1.85 check --all-targets`，这需要网络，本机还没有安装。
+- **标准库 API**：clippy 的 `incompatible_msrv` 默认开启，会对照 `rust-version` 报警（已实测：`str::floor_char_boundary` 报 "stable since 1.91.0"）。
+- **语言特性**：clippy 查不出。用本机已安装的 1.88.0 工具链验证：`cargo +1.88.0 check --all-targets`。
+- let chains（`if let Some(x) = a && x > 1`）从 1.88 起可用；clippy 的 `collapsible_if` 会建议把嵌套的 `if let` 合并成这种写法。
+- 拿不准某个 API 的稳定版本时，查本机标准库源码的 `since` 标注：`grep -rnE 'since = "1\.(89|9[0-9])' ~/.rustup/toolchains/stable-*/lib/rustlib/src/rust/library/`。
 - edition 2024 中 `std::env::set_var` 和 `remove_var` 是 `unsafe`，不要使用。
 
 ## crate API 以锁定的版本为准
@@ -28,4 +23,4 @@ paths:
 
 ## 新增或升级依赖
 
-先征得用户同意（红线 5）。提议时说明四点：标准库和现有依赖为什么做不到；维护状况和传递依赖数量（`cargo tree -p <crate>`）；能否关掉默认 feature；它的 MSRV 是否不高于 1.85。同意后用 `cargo add` 添加，检查 `Cargo.toml` 和 `Cargo.lock` 的改动，再跑 CLAUDE.md 中的三条命令。
+先征得用户同意（红线 5）。已获授权、按阶段引入的依赖见 `docs/ROADMAP.md` 的决策 D2，引入时仍要说明用在哪个阶段。提议其他依赖时说明四点：标准库和现有依赖为什么做不到；维护状况和传递依赖数量（`cargo tree -p <crate>`）；能否关掉默认 feature；它的 MSRV 是否不高于 1.88。同意后用 `cargo add` 添加，检查 `Cargo.toml` 和 `Cargo.lock` 的改动，再跑 CLAUDE.md 中的三条命令。

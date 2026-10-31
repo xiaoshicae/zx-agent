@@ -1,27 +1,28 @@
 # zx-agent
 
-一个用 Rust 编写的最小 agent 内核，面向无人值守场景，例如自动化排障。整体架构参考 [pi](https://github.com/earendil-works/pi)（commit `a92283056`）：分层方式、循环语义和会话文件格式都沿用 pi 的设计；凡是针对无人值守做的改动，都单独列在[与 pi 的差异](#与-pi-的差异)一节。
+一个用 Rust 编写的通用 agent 内核，目标是让同一个内核支撑人机对话、无人值守运行和被其他程序嵌入。场景之间的差异将通过 profile（提示词、工具、规则、上限）和插件表达，不改内核。整体架构参考 [pi](https://github.com/earendil-works/pi)（commit `a92283056`）：分层方式、循环语义和会话文件格式都沿用 pi 的设计；与 pi 不同的地方列在[与 pi 的差异](#与-pi-的差异)一节。
 
-当前版本为 v0.1.0（最小内核）。
+当前版本为 v0.1.0，已实现无人值守的 `run` 命令（例如自动化排障）。对话模式 `chat`、嵌入协议 `acp`、profile 文件和插件按[路线图](docs/ROADMAP.md)分阶段推进。
 
 - **已具备**：
-  - OpenAI 兼容的流式 provider
+  - OpenAI 兼容的流式 provider，带事件队列、SSE 事件与响应大小上限
   - 双层 agent 循环：工具调用先检查、再并发执行，结果保持调用顺序
   - `bash` 与 `read_file` 工具
   - 声明式命令策略
-  - 自动重试
+  - 结构化错误分类与自动重试
   - 轮次上限与时间上限
   - 只追加的 JSONL 会话文件（可续跑）
-  - JSONL 事件流输出
+  - JSONL 事件流输出，流式工具参数携带调用 ID
   - 回答被输出上限截断时自动续写
   - 启动时把环境信息与命令策略写入系统提示词
   - 对 bash 命令隐藏 API key 所在的环境变量
   - 系统提示词记录在对话中，恢复会话时只追加有变化的段落
-- **尚未实现**：上下文压缩、扩展系统、MCP、其他 provider。详见[路线图](#路线图)。
+  - 运行 future 被丢弃时取消后台请求、定时任务和工具子进程组
+- **尚未实现**：对话模式、profile 文件、插件与 MCP、上下文压缩、其他 provider。详见[路线图](docs/ROADMAP.md)。
 
 ## 快速开始
 
-需要 Rust 1.85 及以上版本。
+需要 Rust 1.88 及以上版本。
 
 ```bash
 cargo build --release
@@ -75,7 +76,7 @@ echo "exit code: $?"
 | `--model` | 环境变量 `ZX_MODEL` | 模型 ID |
 | `--base-url` | `https://api.openai.com/v1`，或环境变量 `ZX_BASE_URL` | OpenAI 兼容地址 |
 | `--api-key-env` | `OPENAI_API_KEY` | 存放 API key 的**环境变量名**。key 不接受命令行传入，避免在进程列表中暴露 |
-| `--system-updates` | `collapse` | 恢复会话时，提示词的变化怎样发给模型。`collapse`：合并进开头的 system 消息，适用于任何服务端；`inline`：在变化发生的位置发送，保留服务端的提示词缓存，模型也能看出提示词从哪里开始变化，但要求服务端接受对话中途的 system 消息，使用前需确认 |
+| `--system-updates` | `collapse` | 恢复会话时，提示词的变化怎样发给模型。`collapse`：合并进开头的 system 消息，兼容不接受对话中途 system 消息的服务端；`inline`：在变化发生的位置发送，保持此前的请求前缀，便于服务端复用提示词缓存，模型也能看出提示词从哪里开始变化，但要求服务端接受对话中途的 system 消息，使用前需确认 |
 | `--tools` | `bash,read_file` | 启用的工具 |
 | `--cwd` | 当前目录 | 工具的工作目录，同时写入 `<environment>` |
 | `--allow-cmd` / `--deny-cmd` | 无 | bash 命令白名单前缀 / 额外的拒绝子串，均可重复 |
@@ -86,10 +87,16 @@ echo "exit code: $?"
 | `--max-retries` | 3 | 遇到临时性错误时的重试次数 |
 | `--continue-on-length` | 1 | 回答因输出 token 上限被截断时，自动请模型续写的次数。每次续写都计入 `--max-turns`；设为 0 时直接以退出码 6 结束 |
 | `--max-tokens` | 无（由服务端决定） | 每次回复的输出 token 上限。推理模型的推理部分也计入这个上限，设得太小时回答可能为空 |
+| `--max-response-bytes` | 16777216（16 MiB） | 每次模型请求的流式响应字节上限，包含 SSE 封装与推理内容 |
+| `--max-sse-event-bytes` | 1048576（1 MiB） | 单个 SSE 事件的字节上限，包含封装；累计多行和未换行的数据也受限制 |
 | `--session` | 无（只保存在内存） | 会话文件路径。文件不存在则创建；已存在则在原有对话上继续 |
 | `--output` | `text` | `text`：进度输出到 stderr，最终回答输出到 stdout；`jsonl`：每个事件一行 JSON，输出到 stdout |
 | `--deltas` | 关闭 | 仅用于 `jsonl`：同时输出流式的 `message_update` 事件 |
 | `--system-prompt-file` | 内置排障说明 | 替换内置的排障说明。下文的 `<environment>` 和 `<command_policy>` 两段仍会追加在末尾 |
+
+重试优先依据结构化的 HTTP 状态和错误码。服务端数值秒形式的 `Retry-After` 会参与退避计算，仍受 `RetryPolicy::max_delay` 约束（默认 60 秒）；HTTP 日期形式和无效提示使用本地退避。旧会话和未提供结构化元数据的 provider 保留错误文本判断。
+
+事件队列采用有界缓冲与背压，慢消费者会使生产者等待。达到响应或 SSE 事件上限时保留已接受的部分内容，以退出码 1 结束且不重试；确需更大响应时可显式提高对应上限。两个字节上限都必须大于零。
 
 ## 架构
 
@@ -151,10 +158,10 @@ CLI (main.rs)
 
 这些信息都通过读文件获得（如 `/etc/os-release`、`/etc/localtime`），不执行命令。主机名和用户名不会写入，因为提示词会发送给第三方模型。
 
-恢复会话时，程序重新生成提示词，只把有变化的段落追加为一条新的 system 消息。启动时间每次都不同，所以 `<environment>` 通常会出现在更新中。发给模型的方式由 `--system-updates` 决定：
+恢复会话时，程序重新生成提示词，只把有变化的段落追加为一条新的 system 消息。启动时间按分钟记录；跨分钟恢复时，`<environment>` 通常会出现在更新中。发给模型的方式由 `--system-updates` 决定：
 
-- `collapse`（默认）：最新版本合并到开头的 system 消息。开头变化后，第一次请求无法命中服务端的提示词缓存。
-- `inline`：更新出现在对话中变化发生的位置，内容为 `Updated system prompt section "environment": …`。之前的请求内容不变，可以命中缓存。
+- `collapse`（默认）：最新版本合并到开头的 system 消息。开头变化会影响服务端对既有请求前缀的缓存复用。
+- `inline`：更新出现在对话中变化发生的位置，内容为 `Updated system prompt section "environment": …`。在模型、工具等发送配置不变时，之前的请求前缀保持不变，便于复用缓存；是否实际命中由服务端决定。
 
 ## 安全模型
 
@@ -172,14 +179,16 @@ CLI (main.rs)
 | `kubectl get pods && rm x` | 拒绝：包含 `&` |
 | `grep x $(cat list)` | 拒绝：包含 `$(` |
 
-bash 命令结束时，无论是正常退出、超时还是被取消，它所在的整个进程组都会被结束，命令放到后台的进程不会残留。因此不能用 bash 工具启动常驻进程。
+在 Unix 上，bash 命令正常退出、超时、被取消或工具 future 被丢弃时，程序都会终止其进程组，并清理输出读取任务。因此不能用 bash 工具启动常驻进程。
+
+`read_file` 只接受普通文件，默认单文件上限为 10 MiB，同时检查文件元数据与实际读取量。目录、FIFO 和设备文件会被拒绝。取消会停止等待文件 I/O；底层已经启动的普通文件 I/O 仍可能由 Tokio 的阻塞线程继续完成。
 
 **局限（必须了解）**：
 
 - 策略只是第一道防线，**不是安全边界**。生产环境请以最小权限账号运行，并放在容器或虚拟机中，必要时限制网络访问。
-- `read_file` 不受命令白名单约束，可以读取进程有权限读取的任何文件。需要限制时，使用 `--tools bash` 关闭它。
+- `read_file` 不受命令白名单约束，可以读取进程有权限读取的普通文件。需要限制时，使用 `--tools bash` 关闭它。
 - 工具输出可能包含密钥或个人数据，这些内容会发送给模型，并写入会话文件和事件流。请控制会话文件的访问权限；输出脱敏功能在路线图中。
-- API key 只从环境变量读取，不会写入会话文件，也不会出现在事件中。bash 命令启动前，会从其环境中删除 `--api-key-env` 指定的变量，因此 `env`、`echo $NAME` 读不到 key。但工具与 agent 以同一系统用户运行，仍可能通过其他途径读到 key，例如在 Linux 上读取 agent 进程的 `/proc/<pid>/environ`，或在白名单允许 `ps` 时执行 `ps e`。需要隔离时，请以不同账号或在容器中运行。
+- 认证用的 API key 只从环境变量读取，程序不会主动把它写入会话文件或事件。bash 命令启动前，会从其环境中删除 `--api-key-env` 指定的变量，因此 `env`、`echo $NAME` 读不到该变量。但工具与 agent 以同一系统用户运行，仍可能通过其他途径读到 key，例如在 Linux 上读取 agent 进程的 `/proc/<pid>/environ`，或在白名单允许 `ps` 时执行 `ps e`。当前没有输出脱敏；如果工具输出了 key，它仍会进入会话和事件。需要隔离时，请以不同账号或在容器中运行。
 - 除 `--api-key-env` 指定的变量外，其他环境变量（如云厂商凭证）bash 命令仍然可以读到。需要时请在启动 zx-agent 前清理环境变量。
 
 ## 输出格式
@@ -193,6 +202,10 @@ bash 命令结束时，无论是正常退出、超时还是被取消，它所在
 ```
 
 `usage` 统计本次运行中每个回复的用量，失败的尝试也计入。被取消的请求记为 0，因为服务端在流的末尾才返回用量；实际计费以服务商账单为准。
+
+`message_update.delta` 的 `tool_call_args` 包含 `id` 和 `text`，`id` 与对应 `tool_call_start` 相同，便于关联交错返回的工具参数。旧事件缺少 `id` 时，反序列化为空字符串。
+
+模型失败消息可附带 `providerError`，区分 HTTP、服务端流内错误、传输、超时、协议与资源上限。HTTP 元数据包含 `status`、可选 `code` 和 `retryAfterMs`；给人看的原因仍在 `errorMessage` 中。
 
 ### 会话文件（`--session`）
 
@@ -208,7 +221,9 @@ bash 命令结束时，无论是正常退出、超时还是被取消，它所在
 
 `context_edit` 不能指向 system 消息：提示词的变化只能以新的 system 消息记录。版本 1 的文件（头部带 `systemPrompt`）仍可打开，下次运行会把提示词作为 system 消息补进对话。
 
-如果进程在写入最后一行时崩溃，留下的不完整行会在下次打开会话时被截掉；文件其他位置出现损坏则直接报错。
+如果进程在写入最后一行时崩溃，未换行且确实未完成的尾记录会在下次打开时截掉，包括截断在 UTF-8 字符中间的情况。CLI 会在 stderr 报告修复；库调用方可读取 `SessionStore::recovered_tail_bytes()`。完整记录缺少末尾换行时会补换行；已换行的损坏记录、未知记录类型和完整记录的字段错误会报错并保留文件。
+
+会话格式仍为版本 2。`providerError` 是可选消息字段，旧会话没有该字段时仍可读取。
 
 ## 作为库使用
 
@@ -217,11 +232,15 @@ bash 命令结束时，无论是正常退出、超时还是被取消，它所在
 ```rust
 let config = LoopConfig { provider, model, system_prompt, tools, policy, cwd, max_tokens: None,
                           sequential_tools: false, queues: Arc::new(MessageQueues::default()) };
-let runner = Runner::new(config, RetryPolicy::default(), Limits::default(), session, sink);
+let mut runner = Runner::new(config, RetryPolicy::default(), Limits::default(), session, sink);
 let report = runner.run("任务描述", &CancellationToken::new()).await;
 ```
 
 组装系统提示词（`ai::SystemPrompt`）可用 `prompt::build_system_prompt`、`prompt::environment_section` 和 `CommandPolicy::prompt_section`。如果 API key 来自环境变量，构造 `BashTool` 时把该变量名放进 `hidden_env`。两者的用法见示例。
+
+`Runner::run` 需要 `&mut self`，同一会话可顺序运行多次，编译器会拒绝重叠调用。运行期间需要插话时，提前克隆 `config.queues`；取消使用独立的 `CancellationToken`。外层 `select!` 或 `timeout` 丢弃运行 future 时，只取消本次运行的子令牌。
+
+自定义 provider 使用 `ai::provider::event_channel()` 创建有界通道，并通过 `futures::SinkExt::send` 异步发送，发送失败后停止生产。手动构造 `AssistantMessage` 的调用方需填写 `provider_error`（没有元数据时为 `None`）；`AssistantMessage::failure` 已提供这一默认值。
 
 扩展点均为 trait：
 
@@ -248,16 +267,39 @@ cargo fmt --check
 | `tests/cli.rs` | 编译出的程序：退出码 0 到 6、jsonl 输出、从 stdin 读提示词、bash 读不到 API key、系统提示词的生成段落、`--system-updates inline` |
 | `tests/real_api.rs` | 真实模型 API（付费，默认跳过）：文本回答与用量、工具往返、策略拒绝、输出截断、恢复会话、无效 key 不重试 |
 
+新增回归还覆盖：取消与 future 丢弃、特殊文件与读取上限、UTF-8 尾记录修复及损坏记录保留、交错工具参数 ID、有界队列背压、结构化错误与数值 `Retry-After`、响应预算和 CLI 参数接线。Rustdoc 的编译失败用例保护单一运行的借用约束。
+
 `tests/real_api.rs` 会产生费用。每个测试都标为 `#[ignore]`，而且没有设置 `ZX_E2E_AUTHORIZED=1` 时，在发出请求前就失败。服务地址、模型和 key 所在的变量名都从环境变量读取，运行方式见该文件开头的注释。
+
+## CI 与发布
+
+`Rust` 工作流在 `main` 的 push、PR 和手动运行时检查：
+
+- stable Rust 下的格式、clippy、严格 Rustdoc 构建，以及 actionlint 和发布脚本的 shellcheck。
+- Linux（Ubuntu 24.04）和 macOS（Apple Silicon）的全目标构建、单元测试、集成测试及 doctest。
+- Rust 1.88 的全目标编译和测试。构建与测试使用 `--locked`；真实模型 API 测试保持默认跳过。
+
+`Release` 工作流在推送 `v*` tag 时构建发布草稿；tag 必须与 `Cargo.toml` 的版本一致。
+也可以按既有 tag 重跑：`gh workflow run release.yml --ref v0.1.0`。手动运行时须选择 tag，
+使来源证明记录的工作流版本与实际构建源码一致。
+
+发布包包含二进制、README 和 MIT 许可证，支持 `x86_64-unknown-linux-gnu`（Ubuntu 22.04 构建）
+及 `aarch64-apple-darwin`。两个平台都通过测试并完成
+[GitHub 来源证明](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations)
+后，汇总安装包、`SHA256SUMS` 和 `.sigstore.json` 证明到同一份 release 草稿。
+重跑可更新同 tag 的草稿附件；已发布的 release 会拒绝覆盖。确认附件齐全后再发布草稿，也适用于
+[不可变 release](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases)。
+
+下载包及对应证明后，可用 GitHub CLI 验证构建来源：
+
+```bash
+ZX_ARCHIVE=zx-agent-v0.1.0-aarch64-apple-darwin.tar.gz
+gh attestation verify "$ZX_ARCHIVE" --repo xiaoshicae/zx-agent --bundle "$ZX_ARCHIVE.sigstore.json"
+```
 
 ## 路线图
 
-1. **上下文压缩**：参考 pi 的 `CompactionEntry`（`firstKeptEntryId` + 摘要）。长时间排障需要这项能力。
-2. **执行后钩子**：工具输出先脱敏（密钥、令牌），再交给模型和写入文件。
-3. **结构化最终报告**：按 JSON Schema 约束最终回答，便于告警或工单系统直接使用。
-4. **更多 provider**：例如 Anthropic Messages API。
-5. **异步审批策略**：高风险命令发 webhook 请求批准，超时则拒绝。
-6. **MCP 客户端，以及只读的领域工具**：如 Kubernetes、Prometheus 查询。
+设计目标、已定决策与分阶段计划见 [docs/ROADMAP.md](docs/ROADMAP.md)。
 
 ## 许可证
 
