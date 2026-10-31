@@ -271,6 +271,32 @@ cargo fmt --check
 
 `tests/real_api.rs` 会产生费用。每个测试都标为 `#[ignore]`，而且没有设置 `ZX_E2E_AUTHORIZED=1` 时，在发出请求前就失败。服务地址、模型和 key 所在的变量名都从环境变量读取，运行方式见该文件开头的注释。
 
+## CI 与发布
+
+`Rust` 工作流在 `main` 的 push、PR 和手动运行时检查：
+
+- stable Rust 下的格式、clippy、严格 Rustdoc 构建，以及 actionlint 和发布脚本的 shellcheck。
+- Linux（Ubuntu 24.04）和 macOS（Apple Silicon）的全目标构建、单元测试、集成测试及 doctest。
+- Rust 1.88 的全目标编译和测试。构建与测试使用 `--locked`；真实模型 API 测试保持默认跳过。
+
+`Release` 工作流在推送 `v*` tag 时构建发布草稿；tag 必须与 `Cargo.toml` 的版本一致。
+也可以按既有 tag 重跑：`gh workflow run release.yml --ref v0.1.0`。手动运行时须选择 tag，
+使来源证明记录的工作流版本与实际构建源码一致。
+
+发布包包含二进制、README 和 MIT 许可证，支持 `x86_64-unknown-linux-gnu`（Ubuntu 22.04 构建）
+及 `aarch64-apple-darwin`。两个平台都通过测试并完成
+[GitHub 来源证明](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations)
+后，汇总安装包、`SHA256SUMS` 和 `.sigstore.json` 证明到同一份 release 草稿。
+重跑可更新同 tag 的草稿附件；已发布的 release 会拒绝覆盖。确认附件齐全后再发布草稿，也适用于
+[不可变 release](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases)。
+
+下载包及对应证明后，可用 GitHub CLI 验证构建来源：
+
+```bash
+ZX_ARCHIVE=zx-agent-v0.1.0-aarch64-apple-darwin.tar.gz
+gh attestation verify "$ZX_ARCHIVE" --repo xiaoshicae/zx-agent --bundle "$ZX_ARCHIVE.sigstore.json"
+```
+
 ## 路线图
 
 设计目标、已定决策与分阶段计划见 [docs/ROADMAP.md](docs/ROADMAP.md)。
