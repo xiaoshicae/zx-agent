@@ -6,12 +6,14 @@
 //! - [`ai`]: message types, the streaming event protocol, providers (pi: packages/ai)
 //! - [`agent`]: the agent loop, tool execution, and tool policy (pi: packages/agent)
 //! - [`session`]: append-only JSONL session tree and its projection (pi: SessionManager)
-//! - [`runner`]: retries, limits, and persistence around the loop (pi: AgentSession, subset)
+//! - [`agent_session`]: shared prompts, cancellation, subscriptions and model switching
+//! - [`runner`]: exclusive run ownership, retries, limits and persistence
 //! - [`presets`]: opt-in scenario instructions and limits
 //! - [`prompt`]: system prompt assembly and the generated environment section
 //! - [`tools`]: built-in tools
 
 pub mod agent;
+pub mod agent_session;
 pub mod ai;
 pub mod extensions;
 pub mod interaction;
@@ -22,3 +24,5 @@ pub mod runner;
 pub mod session;
 mod sync;
 pub mod tools;
+
+pub use agent_session::AgentSession;

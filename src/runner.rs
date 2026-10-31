@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent::{AgentEvent, EventSink, LoopConfig, LoopControl, LoopFailure, LoopOutcome, run_loop};
 use crate::ai::retry::{RetryPolicy, is_retryable};
-use crate::ai::{Message, Usage, UserMessageKind, duration_ms};
+use crate::ai::{Message, Provider, Usage, UserMessageKind, duration_ms};
 use crate::interaction::ApprovalCache;
 use crate::session::{Entry, SessionStore};
 use crate::sync::{AbortOnDrop, lock};
@@ -100,6 +100,17 @@ impl Runner {
     /// The loop configuration, for example to reach `config().queues` during a run.
     pub fn config(&self) -> &LoopConfig {
         &self.config
+    }
+
+    pub(crate) fn replace_sink(&mut self, sink: Arc<dyn EventSink>) -> Arc<dyn EventSink> {
+        std::mem::replace(&mut self.sink, sink)
+    }
+
+    pub(crate) fn replace_model(&mut self, provider: Arc<dyn Provider>, model: String) -> (Arc<dyn Provider>, String) {
+        (
+            std::mem::replace(&mut self.config.spec.provider, provider),
+            std::mem::replace(&mut self.config.spec.model, model),
+        )
     }
 
     /// Revoke exact-call approvals granted by this Runner's interaction host.

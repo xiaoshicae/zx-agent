@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use tokio_util::sync::CancellationToken;
+use zx_agent::AgentSession;
 use zx_agent::agent::{AgentEvent, CommandPolicy, LoopConfig, LoopSpec};
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
@@ -12,7 +12,6 @@ use zx_agent::extensions::RedactSecrets;
 use zx_agent::policy::PolicyHook;
 use zx_agent::presets::troubleshoot;
 use zx_agent::prompt::{build_system_prompt, environment_section};
-use zx_agent::runner::Runner;
 use zx_agent::session::{SessionHeader, SessionStore};
 use zx_agent::tools::{BashTool, ReadFileTool};
 
@@ -64,9 +63,9 @@ async fn main() -> anyhow::Result<()> {
             eprintln!("[tool] {tool_name} {args}");
         }
     });
-    let mut runner = Runner::new(config, RetryPolicy::default(), troubleshoot::limits(), session, sink);
+    let agent = AgentSession::new(config, RetryPolicy::default(), troubleshoot::limits(), session, sink);
 
-    let report = runner.run(task, &CancellationToken::new()).await;
+    let report = agent.prompt(task).await?;
     println!("{}", report.final_text);
     eprintln!(
         "outcome: {:?}, turns: {}, tokens: {}",

@@ -6,7 +6,8 @@
 
 - **已具备**：
   - OpenAI 兼容的流式 provider，带事件队列、SSE 事件与响应大小上限
-  - 双层 agent 循环：工具调用先检查、再并发执行，结果保持调用顺序
+  - agent 回合循环：工具调用先检查、再并发执行，结果保持调用顺序
+  - 长期 `AgentSession`：共享提问、单次运行互斥、取消后复用、多订阅者和模型切换
   - `bash` 与 `read_file` 工具
   - 声明式命令策略
   - 结构化错误分类与自动重试
@@ -103,11 +104,12 @@ echo "exit code: $?"
 ```
 CLI (main.rs)
   ├─ presets/troubleshoot  排障说明与 run 的默认上限、续写
-  └─ runner      重试、轮次与时间上限、写入会话文件          ← pi: coding-agent AgentSession（精简）
-       ├─ session  只追加的 JSONL 条目树 + 投影              ← pi: SessionManager
-       └─ agent    回合循环、工具执行、钩子与事件             ← pi: packages/agent/src/agent-loop.ts
-            ├─ ai    消息类型、流式事件协议、provider        ← pi: packages/ai
-            └─ tools bash、read_file、输出截断               ← pi: coding-agent/src/core/tools
+  └─ agent_session  共享会话、取消、订阅与模型切换           ← pi: coding-agent AgentSession
+       └─ runner    独占运行、重试、轮次与时间上限、持久化
+            ├─ session  只追加的 JSONL 条目树 + 投影         ← pi: SessionManager
+            └─ agent    回合循环、工具执行、钩子与事件       ← pi: packages/agent/src/agent-loop.ts
+                 ├─ ai    消息类型、流式事件协议、provider  ← pi: packages/ai
+                 └─ tools bash、read_file、输出截断         ← pi: coding-agent/src/core/tools
 ```
 
 | 模块 | 文件 | 对应的 pi 实现 |
@@ -124,6 +126,7 @@ CLI (main.rs)
 | 内置扩展 | `src/extensions.rs` | 截断续写与已知密钥脱敏 |
 | 会话 | `src/session.rs` | `coding-agent/src/core/session-manager.ts` |
 | 运行控制 | `src/runner.rs` | `coding-agent/src/core/agent-session.ts`（`_startRun`、`_prepareRetry`） |
+| 共享会话 | `src/agent_session.rs` | `AgentSession` 的长期生命周期与多订阅者接口 |
 | 系统提示词 | `src/prompt.rs` | `coding-agent/src/core/system-prompt.ts` |
 | 场景预设 | `src/presets/troubleshoot.rs` | 内核之外的场景策略 |
 
@@ -240,13 +243,38 @@ let mut config = LoopConfig::new(LoopSpec {
     provider, model, system_prompt, tools, cwd, max_tokens: None, sequential_tools: false,
 });
 config.hooks.push(PolicyHook::new(policy));
-let mut runner = Runner::new(config, RetryPolicy::default(), Limits::default(), session, sink);
-let report = runner.run("任务描述", &CancellationToken::new()).await;
+let agent = AgentSession::new(config, RetryPolicy::default(), Limits::default(), session, sink);
+let report = agent.prompt("任务描述").await?;
 ```
 
 `Limits::default()` 不限制轮次和运行时间；`LoopConfig::new` 默认没有钩子，不自动续写。
 需要排障预设时，设置 `config.hooks = presets::troubleshoot::hooks()`，并传入 `presets::troubleshoot::limits()`；再注册命令策略与脱敏钩子。排障说明位于 `presets::troubleshoot::INSTRUCTIONS`。
-`examples/library.rs` 演示了这一预设的完整用法。调用方通过 `CancellationToken` 控制不限时运行的取消。
+`examples/library.rs` 演示了这一预设的完整用法。需要外部取消令牌时使用 `prompt_with_cancel(task, &cancel).await?`。
+
+P2 增加 `zx_agent::AgentSession`；已有 `Runner` 可通过 `AgentSession::from(runner)` 转为共享会话。
+调用 `prompt` 只需 `&self`，可由多个前端持有 `Arc<AgentSession>`；同一时刻仅一个调用获得运行权。
+
+| API | 契约 |
+|---|---|
+| `prompt`、`prompt_with_cancel` | 返回 `Result<RunReport, SessionError>`；重叠调用立即返回 `Busy`，不排队。provider、钩子和持久化失败由 `RunReport` 表达 |
+| `steer`、`follow_up` | 分别在下一次模型请求前和当前任务结束时消费，沿用原有队列 |
+| `abort` | 只取消当前运行；空闲时返回 `false`。等待当前 `prompt` 返回，或 drop 它的 future 后，可继续提问；外部父令牌不受影响 |
+| `subscribe` | 返回 `Subscription`，必须持有句柄才能继续接收事件；drop 后退订。只发送后续事件，不重放历史，已经分发的回调可能完成 |
+| `set_model(ModelRef { provider, model })` | 空闲时同步切换，运行中返回 `Busy`，空模型 ID 返回 `InvalidModel`。保留历史、工具、提示词、钩子、上限与审批缓存；会话头部仍记录初始模型 |
+| `clear_approvals` | 空闲时撤销所有本会话授权，运行中返回 `Busy` |
+
+`ModelRef`、`SessionError` 和 `Subscription` 位于 `agent_session` 模块。新 provider 的认证和过滤配置由宿主负责。
+构造时的 sink 持续接收事件；每条消息只写入会话一次，再通知所有订阅者。额外订阅示例：
+
+```rust
+let _subscription = agent.subscribe(extra_sink);
+let first = agent.prompt("先检查日志").await?;
+let second = agent.prompt("结合上面的证据总结").await?;
+```
+
+订阅回调同步执行，必须及时返回。单个回调 panic 会被隔离并摘除，可通过 `Subscription::has_panicked()` 或
+`AgentSession::failed_subscribers()` 查询；初始 sink 的 panic 也计数。快照分发期间不持有订阅列表锁，可在回调中取消或退订。
+运行期间由当前 `prompt` 独占持有 `Runner`，结束、panic 或 future 被丢弃时由 RAII 归还；状态锁不跨越异步等待。
 
 P0 的 SDK 接口调整：`Limits::max_turns` 和 `agent::run_loop` 的轮次预算改为 `Option<u32>`。
 `None` 表示不限，`Some(0)` 表示不调用模型，原来的数值上限 `n` 改为 `Some(n)`。
@@ -266,12 +294,12 @@ P1 的 SDK 接口调整：静态配置移入 `LoopSpec`；`LoopConfig` 持有钩
 整份变换计划先校验，随后逐项持久化；写入失败时立即取消，不发送模型请求。写入失败前已追加的条目仍保留。
 
 审批默认超时 120 秒。`NoHuman` 明确拒绝 Ask；`Approval::AllowOnce` 只允许一次，
-`AllowSession` 只缓存当前 Runner 内完全相同的工具名和参数，仍须通过每次策略检查，可用 `Runner::clear_approvals` 撤销；不会写入会话或跨进程恢复。
+`AllowSession` 只缓存当前会话内完全相同的工具名和参数，仍须通过每次策略检查，可用 `AgentSession::clear_approvals` 或底层 `Runner::clear_approvals` 撤销；不会写入会话或跨进程恢复。
 异步回调必须让出执行权，合作式超时无法抢占阻塞线程。
 
 组装系统提示词（`ai::SystemPrompt`）可用 `prompt::build_system_prompt`、`prompt::environment_section` 和 `CommandPolicy::prompt_section`。如果 API key 来自环境变量，构造 `BashTool` 时把该变量名放进 `hidden_env`。两者的用法见示例。
 
-`Runner::run` 需要 `&mut self`，同一会话可顺序运行多次，编译器会拒绝重叠调用。运行期间需要插话时，提前克隆 `config.queues`；取消使用独立的 `CancellationToken`。外层 `select!` 或 `timeout` 丢弃运行 future 时，只取消本次运行的子令牌。
+底层 `Runner::run(&mut self)` 仍可用于独占调用；共享前端使用 `AgentSession` 的方法。两种方式都保留会话，外层 `select!` 或 `timeout` 丢弃运行 future 时只取消本次子令牌。
 
 自定义 provider 使用 `ai::provider::event_channel()` 创建有界通道，并通过 `futures::SinkExt::send` 异步发送，发送失败后停止生产。手动构造 `AssistantMessage` 的调用方需填写 `provider_error`（没有元数据时为 `None`）；`AssistantMessage::failure` 已提供这一默认值。
 
@@ -298,6 +326,7 @@ cargo fmt --check
 | `src/**`（单元测试） | 会话文件和事件流的 JSON 格式、会话写入失败时取消运行、SSE 解析、流式累积、推理内容的记录与回传、请求体组装、错误链、重试判断、命令策略及其提示词、会话投影、崩溃恢复与文件权限、截断、bash（超时后杀掉整个进程组、取消、隐藏环境变量）、read_file、系统提示词的段落对比与两种发送模式 |
 | `tests/agent_loop.rs` | 循环语义：工具调用往返、并行与结果顺序、串行模式、各类失败、length 截断、轮次上限、terminate、引导与后续消息、出错与中止、provider 未发最终事件、系统提示词的记录与增量更新 |
 | `tests/runner.rs` | 重试且不重复 prompt、失败记录留在文件中、放弃不可重试的错误、轮次与时间上限、调用方取消、截断续写与拼接、最终回答只取本次运行的消息、续跑会话、恢复会话时提示词变化写入文件、先写盘再转发事件 |
+| `tests/agent_session.rs` | 共享提问与 Busy、取消与 future 丢弃后复用、队列边界、订阅和退订、回调重入与 panic 隔离、模型切换、授权撤销、先写审计再多订阅分发 |
 | `tests/openai_mock.rs` | 本地假 HTTP 服务上的端到端测试：SSE、执行 bash、回传工具结果、认证头、HTTP 错误重试、空闲超时、中途取消后保留已输出内容 |
 | `tests/cli.rs` | 编译出的程序：退出码 0 到 6、jsonl 输出、从 stdin 读提示词、bash 读不到 API key、系统提示词的生成段落、`--system-updates inline` |
 | `tests/hooks.rs`、`tests/hooks_cli.rs` | 钩子组合与失败处理、审批范围与取消、审计变换、续写预算、工具输出脱敏的 CLI 接线 |

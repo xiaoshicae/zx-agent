@@ -31,6 +31,7 @@ paths:
 | `src/**` 中的 `mod tests` | 各模块的单元测试，包括会话文件和事件流的 JSON 格式 |
 | `tests/agent_loop.rs` | 循环语义 |
 | `tests/runner.rs` | 运行层：重试、上限、截断续写、持久化、恢复会话 |
+| `tests/agent_session.rs` | 共享会话：Busy、取消与丢弃后复用、多订阅者、退订、回调重入与 panic、模型切换与审计 |
 | `tests/openai_mock.rs` | 真实 HTTP 下的 provider：SSE、重试、空闲超时、中途取消 |
 | `tests/cli.rs` | 编译出的程序：退出码、输出格式、`main.rs` 中的接线 |
 | `tests/hooks.rs`、`tests/hooks_cli.rs` | 六个钩子、审批与失败回退、变换持久化、已知密钥脱敏接线 |
