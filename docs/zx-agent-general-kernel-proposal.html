@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>zx-agent 通用内核技术方案（评审稿 v0.5）</title>
+<title>zx-agent 通用内核技术方案（评审稿 v0.6）</title>
 <style>
   :root {
     --ink: #1f2328; --muted: #57606a; --line: #d0d7de; --bg: #ffffff; --soft: #f6f8fa;
@@ -60,7 +60,7 @@
 <main>
 
 <h1>zx-agent 通用内核技术方案</h1>
-<p class="meta">评审稿 v0.5 · 2026年10月 · 状态：已评审，D5 待定 · 代码核对基线：commit <code>439456b</code> 及本次 P0 改动（2026-10-31）</p>
+<p class="meta">评审稿 v0.6 · 2026年11月 · 状态：已评审，D5 待定 · 代码核对基线：commit <code>a570e91</code> 及本次 P1 改动（2026-11-01）</p>
 <p class="meta">本方案由 AI 辅助起草。调研来源见第 11 节；产品行为以所列版本和资料日期为准，论文结果不代表本项目实测，未核实项明确标注。</p>
 
 <div class="box key">
@@ -179,13 +179,13 @@
 </table>
 
 <h2 id="s4">4. 总体架构</h2>
-<p>第 4–9 节描述目标设计，接口代码为规划草图，尚未实现的能力按第 9 节推进。现有用法见 <a href="../README.md">README</a>，阶段状态以<a href="ROADMAP.md">路线图</a>为准。</p>
+<p>第 4–9 节描述目标设计，接口代码为规划草图，尚未实现的能力按第 9 节推进。现有用法见 <a href="../README.md">README</a>，阶段状态以<a href="ROADMAP.md">路线图</a>为准。P1 已落地第 5.3、5.4 节的 Hooks 与宿主审批接口；终端审批、配置文件与 Executor 仍按后续阶段推进。</p>
 <div class="layers">
   <div class="layer"><div class="name">前端</div><div class="items"><span class="chip keep">run：无人值守</span><span class="chip new">chat：终端对话</span><span class="chip new">acp：编辑器 / 其他程序</span><span class="chip keep">Rust SDK</span></div></div>
   <div class="layer"><div class="name">场景配置</div><div class="items"><span class="chip new">profile：说明 / 工具 / 规则 / 上限 / 扩展</span><span class="chip new">上下文文件（AGENTS.md）</span><span class="chip new">skills（按需加载）</span></div></div>
   <div class="layer"><div class="name">扩展</div><div class="items"><span class="chip new">Rust 扩展（编译期）</span><span class="chip new">MCP 客户端（子进程或 HTTP）</span><span class="chip">钩子进程（后续）</span></div></div>
-  <div class="layer"><div class="name">会话运行时</div><div class="items"><span class="chip new">AgentSession：运行生命周期</span><span class="chip keep">持久化</span><span class="chip keep">重试</span><span class="chip keep">上限</span><span class="chip new">审批路由</span><span class="chip new">压缩触发</span><span class="chip new">事件分发</span></div></div>
-  <div class="layer"><div class="name">循环</div><div class="items"><span class="chip keep">回合循环</span><span class="chip new">钩子链</span><span class="chip new">工具调用流水线</span><span class="chip keep">引导与后续消息</span></div></div>
+  <div class="layer"><div class="name">会话运行时</div><div class="items"><span class="chip new">AgentSession：运行生命周期</span><span class="chip keep">持久化</span><span class="chip keep">重试</span><span class="chip keep">上限</span><span class="chip keep">审批路由</span><span class="chip new">压缩触发</span><span class="chip new">事件分发</span></div></div>
+  <div class="layer"><div class="name">循环</div><div class="items"><span class="chip keep">回合循环</span><span class="chip keep">钩子链</span><span class="chip keep">工具调用流水线</span><span class="chip keep">引导与后续消息</span></div></div>
   <div class="layer"><div class="name">模型</div><div class="items"><span class="chip keep">Provider</span><span class="chip keep">消息与流式事件</span><span class="chip keep">系统提示词段落</span></div></div>
 </div>
 <p class="legend">图例：<span class="chip keep">已有，保留或微调</span> <span class="chip new">新增或重构</span> <span class="chip">后续阶段</span>　上层依赖下层，下层不知道上层的存在。</p>
@@ -202,6 +202,8 @@
   <div class="step"><b>7</b><code>after_tool</code> 钩子链：脱敏、预算</div>
   <div class="step"><b>8</b>先写会话文件，再发事件</div>
 </div>
+
+<p>P1 已实现参数预校验、钩子、审批、工具执行与输出过滤。步骤 5 的持久化调用开始条目及步骤 6 的 <code>Executor</code> 属于 P6；当前 <code>tool_execution_start</code> 只表示调用尝试，可能随后被拒绝。</p>
 
 <h2 id="s5">5. 关键设计</h2>
 
@@ -231,35 +233,39 @@
 <h3>5.3 钩子</h3>
 <table>
   <tr><th>钩子</th><th>时机</th><th>可以做什么</th><th>对应</th></tr>
-  <tr><td><code>on_input</code></td><td>用户输入进入对话前</td><td>拒绝、改写、附加上下文</td><td>Claude Code <code>UserPromptSubmit</code>；pi <code>input</code></td></tr>
+  <tr><td><code>on_input</code></td><td>原始输入追加后、模型请求前</td><td>拒绝或改写，以 context_edit 记录</td><td>Claude Code <code>UserPromptSubmit</code>；pi <code>input</code></td></tr>
   <tr><td><code>transform_context</code></td><td>每次请求模型前</td><td>压缩、注入记忆或待办、裁剪</td><td>pi <code>transformContext</code></td></tr>
   <tr><td><code>before_tool</code></td><td>工具执行前</td><td>允许、拒绝、询问</td><td>pi <code>beforeToolCall</code>；Claude Code <code>PreToolUse</code></td></tr>
   <tr><td><code>after_tool</code></td><td>工具执行后、写入会话前</td><td>脱敏、按预算截断、标记错误、终止</td><td>pi <code>afterToolCall</code>；Claude Code <code>PostToolUse</code></td></tr>
   <tr><td><code>finish_turn</code></td><td>每个回合结束时</td><td>继续或结束（如截断后续写、检查最终答案格式）</td><td>pi <code>finishTurn</code>；Claude Code <code>Stop</code></td></tr>
   <tr><td><code>on_event</code></td><td>任何事件</td><td>只读观察：日志、指标、界面</td><td>pi 事件；<code>EventSink</code></td></tr>
 </table>
-<pre><code>type HookResult&lt;T&gt; = Result&lt;T, HookError&gt;; // HookError 的具体类型在 P1 落实
+<pre><code>// 回调返回文字原因；宿主补充 HookError { hook, phase, failure }。
+type HookResult&lt;T&gt; = Result&lt;T, String&gt;;
 
 #[async_trait]
 pub trait Hooks: Send + Sync {
-    async fn before_tool(&amp;self, call: &amp;ToolCall) -&gt; HookResult&lt;Decision&gt; { Ok(Decision::Allow) }
-    async fn after_tool(&amp;self, call: &amp;ToolCall, output: ToolOutput) -&gt; HookResult&lt;ToolOutput&gt; { Ok(output) }
-    async fn transform_context(&amp;self, messages: Vec&lt;Message&gt;) -&gt; HookResult&lt;Vec&lt;Message&gt;&gt; { Ok(messages) }
-    async fn finish_turn(&amp;self, turn: &amp;TurnSummary) -&gt; HookResult&lt;TurnDecision&gt; { Ok(TurnDecision::Default) }
-    // on_input、on_event 同理，均有空的默认实现
+    async fn on_input(&amp;self, text: String) -&gt; HookResult&lt;String&gt; { Ok(text) }
+    async fn transform_context(&amp;self, _: &amp;[Message]) -&gt; HookResult&lt;Vec&lt;ContextEdit&gt;&gt; { Ok(Vec::new()) }
+    async fn before_tool(&amp;self, _: &amp;ToolCall) -&gt; HookResult&lt;Decision&gt; { Ok(Decision::Allow) }
+    async fn after_tool(&amp;self, _: &amp;ToolCall, output: ToolOutput) -&gt; HookResult&lt;ToolOutput&gt; { Ok(output) }
+    async fn finish_turn(&amp;self, _: &amp;TurnSummary&lt;'_&gt;) -&gt; HookResult&lt;TurnDecision&gt; { Ok(TurnDecision::Default) }
+    async fn on_event(&amp;self, _: &amp;AgentEvent) -&gt; HookResult&lt;()&gt; { Ok(()) }
 }
 pub enum Decision { Allow, Deny(String), Ask(String) }</code></pre>
-<p><strong>组合规则</strong>：按注册顺序执行；多个 <code>before_tool</code> 的结果取最严格者（Deny &gt; Ask &gt; Allow）；策略类钩子出错按拒绝处理（fail closed），观察类钩子出错只记录；每个钩子有超时。</p>
-<p><strong>持久化约束</strong>：<code>on_input</code>、<code>transform_context</code> 的变换结果必须先以追加消息、<code>context_edit</code> 或 P5 的 <code>compaction</code> 条目记录，写入成功后才请求模型；不能只在内存中改写上下文。</p>
+<p><strong>组合规则</strong>：按注册顺序执行；多个 <code>before_tool</code> 的结果取最严格者（Deny &gt; Ask &gt; Allow）；策略类钩子出错按拒绝处理（fail closed），观察类钩子出错只产生不递归的 <code>hook_failed</code> 诊断；单次回调默认超时 5 秒，可单独覆盖。panic 与超时按失败处理，取消会中断等待。输入、上下文、回合钩子失败结束运行且不重试 provider；工具前置失败变成拒绝结果，后置失败丢弃原始输出。</p>
+<p><strong>持久化约束</strong>：<code>on_input</code>、<code>transform_context</code> 的变换结果必须先以追加消息、<code>context_edit</code> 或 P5 的 <code>compaction</code> 条目记录，写入成功后才请求模型；不能只在内存中改写上下文。P1 的 <code>ContextEdit</code> 明确表达追加、替换文本或省略，整份计划先校验；不能改写或省略 system 消息，也不能以文本替换抹掉工具调用。逐项写入失败时立即取消，保留已写入条目，不请求模型。</p>
+<p><code>ContinueOnLength</code> 与 <code>RedactSecrets</code> 位于 <code>src/extensions.rs</code>。前者通过 <code>finish_turn</code> 续写；后者在 <code>after_tool</code> 中过滤显式配置密钥的完整字面值，CLI 默认配置认证 key。未知密钥、编码变形、用户输入、模型输出与工具参数不在此过滤范围。</p>
 
 <h3>5.4 人机交互与审批</h3>
-<p><strong>规则</strong>：按工具名和命令前缀匹配，求值顺序为 deny → ask → allow，首个匹配生效（与 Claude Code 一致 [R5]）。配置叠加时 deny 规则只增不减，后加载的配置只能收紧。</p>
+<p><strong>规则</strong>：按工具名和命令前缀匹配，求值顺序为 deny → ask → allow，首个匹配生效（与 Claude Code 一致 [R5]）。P1 的 <code>RulePolicy</code> 支持工具名与字面命令前缀匹配，同级按注册顺序，无匹配时拒绝；命令前缀匹配不是 shell 解析。配置文件叠加在 P4 实现，目标是 deny 规则只增不减，后加载的配置只能收紧。</p>
 <pre><code>#[async_trait]
 pub trait Interaction: Send + Sync {
-    async fn confirm(&amp;self, request: &amp;ApprovalRequest) -&gt; Approval; // 允许一次 / 本会话允许 / 拒绝
-    fn notify(&amp;self, text: &amp;str);
+    async fn confirm(&amp;self, request: &amp;ApprovalRequest) -&gt; Result&lt;Approval, String&gt;; // 允许一次 / 本会话允许 / 拒绝
+    fn notify(&amp;self, text: &amp;str) {} // 可选通知
 }
 pub struct NoHuman; // confirm 恒为拒绝：无人值守</code></pre>
+<p>审批默认超时 120 秒。失败、panic、超时或取消均拒绝。<code>AllowSession</code> 只允许同一 Runner 中完全相同的工具名与参数，仍须每次通过策略，可用 <code>clear_approvals</code> 撤销；授权不持久化。阻塞回调无法被合作式超时抢占。</p>
 <table>
   <tr><th>实现</th><th>场景</th><th>行为</th></tr>
   <tr><td><code>NoHuman</code></td><td>run</td><td>Ask 等同 Deny，理由写入工具结果，模型可改用其他方法</td></tr>
@@ -382,15 +388,15 @@ enabled = ["redaction"]</code></pre>
 <table>
   <tr><th>现在</th><th>改成</th></tr>
   <tr><td><code>src/ai/*</code></td><td>保留；按模型增加兼容选项（如是否接受对话中途的 system 消息）</td></tr>
-  <tr><td><code>src/agent/agent_loop.rs</code>（<code>run_loop</code> 6 个参数）</td><td>拆为静态配置 <code>LoopSpec</code> 与 <code>Hooks</code>；工具调用按第 4 节流水线组织；内部函数改用上下文结构体</td></tr>
-  <tr><td><code>src/agent/policy.rs</code></td><td>移入 <code>src/policy/</code>：工具与命令前缀规则、三值 <code>Decision</code>；<code>CommandPolicy</code> 成为规则的一种来源</td></tr>
+  <tr><td><code>src/agent/agent_loop.rs</code>（<code>run_loop</code> 4 个参数）</td><td>P1 已拆为 <code>LoopSpec</code>、包含 Hooks 的 <code>LoopConfig</code> 与借用运行状态的 <code>LoopControl</code>；流水线遵守逐个检查、并发执行、按调用顺序写结果</td></tr>
+  <tr><td><code>src/agent/policy.rs</code></td><td>P1 已将具体策略移入 <code>src/policy.rs</code>，经 <code>PolicyHook</code> 注册；循环层保留 <code>Decision</code> 与 <code>ToolPolicy</code> 契约及兼容导出</td></tr>
   <tr><td>（新增）</td><td><code>src/agent/hooks.rs</code>：<code>Hooks</code> trait 与钩子链</td></tr>
   <tr><td>（新增）</td><td><code>src/interaction.rs</code>：<code>Interaction</code>、<code>NoHuman</code>、审批请求与结果</td></tr>
-  <tr><td><code>src/runner.rs</code></td><td>演进为 <code>AgentSession</code>；截断续写移为 <code>finish_turn</code> 扩展；默认上限改为不限</td></tr>
+  <tr><td><code>src/runner.rs</code></td><td>P1 已将截断续写移为 <code>finish_turn</code> 扩展，并按稳定条目 ID 汇总当前答案；P2 再演进为 <code>AgentSession</code></td></tr>
   <tr><td><code>src/session.rs</code></td><td>P5、P6 分别新增 <code>compaction</code>、<code>tool_call_started</code> 条目，首次写入前分别升级格式；存储后端抽象为 trait（后续）</td></tr>
   <tr><td><code>src/tools/*</code></td><td>新增 <code>Executor</code> 接缝；<code>Tool</code> 增加 <code>effects()</code>；内置工具由 profile 按名字启用</td></tr>
   <tr><td><code>src/prompt.rs</code>、<code>src/presets/troubleshoot.rs</code></td><td>P0 已分离通用组装与排障预设；P4 将预设文件化，并新增 <code>assistant</code> profile</td></tr>
-  <tr><td>（新增）</td><td><code>src/profile.rs</code>：加载与叠加 profile；<code>src/extension.rs</code>：<code>Extension</code> trait 与内置扩展（续写、脱敏、压缩）</td></tr>
+  <tr><td>（新增）</td><td><code>src/profile.rs</code>：加载与叠加 profile；<code>src/extension.rs</code>：P7 的 <code>Extension</code> trait；续写、脱敏已在 <code>src/extensions.rs</code>，压缩待 P5</td></tr>
   <tr><td><code>src/main.rs</code></td><td>子命令 <code>run</code>、<code>chat</code>、<code>acp</code>；新增 <code>--profile</code></td></tr>
   <tr><td>单一 crate</td><td>最后阶段可拆为 <code>zx-ai</code>、<code>zx-core</code>、<code>zx-tools</code>、<code>zx-cli</code>，用编译器保证分层</td></tr>
 </table>
@@ -399,7 +405,7 @@ enabled = ["redaction"]</code></pre>
 <table>
   <tr><th>阶段</th><th>内容</th><th>验收标准</th><th>新依赖 / 前置决策</th></tr>
   <tr><td>P0</td><td>已用 Rust 代码实现 <code>presets::troubleshoot</code>，集中提示词、上限与续写默认值</td><td>CLI 测试不改即通过；内核默认值不限轮次、不限时间、不续写；<code>None</code> 表示不限，<code>Some(0)</code> 为零轮次</td><td>无</td></tr>
-  <tr><td>P1</td><td>钩子与工具流水线；<code>Decision::Ask</code>；<code>Interaction</code> 与 <code>NoHuman</code>；策略与续写迁移为钩子</td><td>无人值守行为不变；新增钩子组合、fail closed、超时测试</td><td>无</td></tr>
+  <tr><td>P1</td><td>已实现六个钩子与工具流水线；<code>Decision::Ask</code>；<code>Interaction</code> 与 <code>NoHuman</code>；策略与续写迁移为钩子</td><td>无人值守行为不变；新增钩子组合、fail closed、超时测试</td><td>无</td></tr>
   <tr><td>P2</td><td><code>AgentSession</code>：多次提问、中止、多订阅者、运行中提问的处理</td><td>中止后会话可继续；多订阅者都收到事件</td><td>无</td></tr>
   <tr><td>P3</td><td><code>chat</code> REPL：流式输出、终端审批、斜杠命令</td><td>用脚本化 stdin 驱动的 CLI 测试；人工试用</td><td>tokio 的 <code>io-std</code> feature；可选 <code>rustyline</code>（已授权）</td></tr>
   <tr><td>P4</td><td>profile 文件、AGENTS.md、skills</td><td><code>troubleshoot</code> 与 <code>assistant</code> 均由文件定义；配置错误时退出码 2</td><td><code>toml</code>（已授权）</td></tr>

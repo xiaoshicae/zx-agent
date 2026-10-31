@@ -105,7 +105,7 @@ CLI (main.rs)
   ├─ presets/troubleshoot  排障说明与 run 的默认上限、续写
   └─ runner      重试、轮次与时间上限、写入会话文件          ← pi: coding-agent AgentSession（精简）
        ├─ session  只追加的 JSONL 条目树 + 投影              ← pi: SessionManager
-       └─ agent    双层循环、工具执行、策略检查、事件         ← pi: packages/agent/src/agent-loop.ts
+       └─ agent    回合循环、工具执行、钩子与事件             ← pi: packages/agent/src/agent-loop.ts
             ├─ ai    消息类型、流式事件协议、provider        ← pi: packages/ai
             └─ tools bash、read_file、输出截断               ← pi: coding-agent/src/core/tools
 ```
@@ -118,7 +118,10 @@ CLI (main.rs)
 | 重试判断 | `src/ai/retry.rs` | `ai/src/utils/retry.ts` |
 | 测试用 provider | `src/ai/faux.rs` | `ai/src/providers/faux.ts` |
 | agent 循环 | `src/agent/agent_loop.rs` | `agent/src/agent-loop.ts`（`runLoop`、`executeToolCalls`） |
-| 工具调用策略 | `src/agent/policy.rs` | `beforeToolCall` 以及扩展的 `tool_call` 事件 |
+| 钩子宿主 | `src/agent/hooks.rs` | 输入、上下文、工具、回合与事件扩展点 |
+| 工具调用策略 | `src/policy.rs` | `PolicyHook` 适配 `ToolPolicy`；命令策略与 deny → ask → allow 规则 |
+| 人机交互 | `src/interaction.rs` | 宿主审批与 `NoHuman` |
+| 内置扩展 | `src/extensions.rs` | 截断续写与已知密钥脱敏 |
 | 会话 | `src/session.rs` | `coding-agent/src/core/session-manager.ts` |
 | 运行控制 | `src/runner.rs` | `coding-agent/src/core/agent-session.ts`（`_startRun`、`_prepareRetry`） |
 | 系统提示词 | `src/prompt.rs` | `coding-agent/src/core/system-prompt.ts` |
@@ -140,13 +143,13 @@ CLI (main.rs)
 | 项目 | zx-agent | 原因 |
 |---|---|---|
 | 轮次与时间上限 | 有（`--max-turns`、`--timeout-secs`） | 无人值守时没有人能手动中止 |
-| 工具调用确认 | 只有声明式策略 | 没有人可以回答确认请求 |
+| 工具调用确认 | SDK 支持宿主审批；`run` 使用 `NoHuman` 拒绝 Ask | 无人值守时没有人可以回答确认请求 |
 | 输出被截断 | 自动请模型续写（`--continue-on-length`），仍未完成则以退出码 6 结束 | pi 不自动续写，交给用户决定；无人值守时没有人可以决定 |
 | 会话文件写入失败 | 立即中止运行 | 不允许在缺少审计记录的情况下继续执行操作 |
 | 会话文件创建时机 | 启动时立即创建并写入头部 | 进程中途崩溃也能留下记录 |
 | 环境信息 | 启动时由程序写入系统提示词，见下文 | pi 只写入工作目录；无人值守时没有人提供这些信息，白名单也可能禁止 `uname`、`date` 等命令 |
 | 参数校验 | 由各工具反序列化成自己的参数类型来完成 | 避免引入 JSON Schema 校验器 |
-| 上下文压缩、扩展、TUI | 未实现 | 最小内核 |
+| 上下文压缩、TUI | 未实现 | 按路线图逐步加入；已提供类型化 Hooks |
 
 ### 系统提示词的组成
 
@@ -189,15 +192,16 @@ CLI (main.rs)
 
 - 策略只是第一道防线，**不是安全边界**。生产环境请以最小权限账号运行，并放在容器或虚拟机中，必要时限制网络访问。
 - `read_file` 不受命令白名单约束，可以读取进程有权限读取的普通文件。需要限制时，使用 `--tools bash` 关闭它。
-- 工具输出可能包含密钥或个人数据，这些内容会发送给模型，并写入会话文件和事件流。请控制会话文件的访问权限；输出脱敏功能在路线图中。
-- 认证用的 API key 只从环境变量读取，程序不会主动把它写入会话文件或事件。bash 命令启动前，会从其环境中删除 `--api-key-env` 指定的变量，因此 `env`、`echo $NAME` 读不到该变量。但工具与 agent 以同一系统用户运行，仍可能通过其他途径读到 key，例如在 Linux 上读取 agent 进程的 `/proc/<pid>/environ`，或在白名单允许 `ps` 时执行 `ps e`。当前没有输出脱敏；如果工具输出了 key，它仍会进入会话和事件。需要隔离时，请以不同账号或在容器中运行。
+- `run` 在 `after_tool` 中将认证 API key 的完整字面值替换为 `[REDACTED]`，处理后的结果才会写入会话、事件并回传模型。SDK 可用 `RedactSecrets` 显式配置其他密钥；过滤器失败时丢弃原始输出，返回错误结果。
+- 该过滤不识别未知密钥、编码或拆分后的密钥，也不处理用户输入、模型输出和工具调用参数。这些内容及工具输出中的其他敏感数据仍可能进入模型请求、会话和事件；请控制会话文件访问权限。
+- 认证 key 只从环境变量读取；bash 命令启动前删除 `--api-key-env` 指定的变量。但工具与 agent 以同一系统用户运行，仍可能通过其他途径读取凭证。需要隔离时，请以不同账号或在容器中运行。
 - 除 `--api-key-env` 指定的变量外，其他环境变量（如云厂商凭证）bash 命令仍然可以读到。需要时请在启动 zx-agent 前清理环境变量。
 
 ## 输出格式
 
 ### 事件（`--output jsonl`）
 
-每行一个事件。`type` 的取值有：`agent_start`、`turn_start`、`message_start`、`message_update`（需加 `--deltas`）、`message_end`（提示词首次记录或发生变化时，也包括 system 消息）、`tool_execution_start`、`tool_execution_end`、`turn_end`、`agent_end`、`retry_scheduled`。最后一行是汇总：
+每行一个事件。`type` 的取值有：`agent_start`、`turn_start`、`message_start`、`message_update`（需加 `--deltas`）、`message_end`（包括 system 消息）、`tool_execution_start`、`tool_execution_end`、`turn_end`、`agent_end`、`retry_scheduled`、`context_edited`、`hook_failed`。最后一行是汇总：
 
 ```json
 {"type":"run_end","report":{"outcome":"completed","finalText":"## Summary ...","turns":3,"retries":0,"usage":{"input":1200,"output":300,"cacheRead":0,"totalTokens":1500},"sessionFile":"/var/log/zx-agent/run.jsonl"}}
@@ -225,26 +229,45 @@ CLI (main.rs)
 
 如果进程在写入最后一行时崩溃，未换行且确实未完成的尾记录会在下次打开时截掉，包括截断在 UTF-8 字符中间的情况。CLI 会在 stderr 报告修复；库调用方可读取 `SessionStore::recovered_tail_bytes()`。完整记录缺少末尾换行时会补换行；已换行的损坏记录、未知记录类型和完整记录的字段错误会报错并保留文件。
 
-会话格式仍为版本 2。`providerError` 是可选消息字段，旧会话没有该字段时仍可读取。
+会话格式仍为版本 2。`providerError` 是可选消息字段；续写请求增加可选的 `kind: "continueAnswer"`，报告据此拼接答案。普通 user 消息的 JSON 不变，旧文件缺少 `kind` 时按普通输入处理。
 
 ## 作为库使用
 
 完整示例见 `examples/library.rs`（参与编译检查）。核心步骤如下：
 
 ```rust
-let config = LoopConfig { provider, model, system_prompt, tools, policy, cwd, max_tokens: None,
-                          sequential_tools: false, queues: Arc::new(MessageQueues::default()) };
+let mut config = LoopConfig::new(LoopSpec {
+    provider, model, system_prompt, tools, cwd, max_tokens: None, sequential_tools: false,
+});
+config.hooks.push(PolicyHook::new(policy));
 let mut runner = Runner::new(config, RetryPolicy::default(), Limits::default(), session, sink);
 let report = runner.run("任务描述", &CancellationToken::new()).await;
 ```
 
-`Limits::default()` 不限制轮次和运行时间，也不自动续写截断回答。需要与 `run` 相同的无人值守策略时，
-显式传入 `presets::troubleshoot::limits()`；排障说明位于 `presets::troubleshoot::INSTRUCTIONS`。
+`Limits::default()` 不限制轮次和运行时间；`LoopConfig::new` 默认没有钩子，不自动续写。
+需要排障预设时，设置 `config.hooks = presets::troubleshoot::hooks()`，并传入 `presets::troubleshoot::limits()`；再注册命令策略与脱敏钩子。排障说明位于 `presets::troubleshoot::INSTRUCTIONS`。
 `examples/library.rs` 演示了这一预设的完整用法。调用方通过 `CancellationToken` 控制不限时运行的取消。
 
 P0 的 SDK 接口调整：`Limits::max_turns` 和 `agent::run_loop` 的轮次预算改为 `Option<u32>`。
 `None` 表示不限，`Some(0)` 表示不调用模型，原来的数值上限 `n` 改为 `Some(n)`。
 原 `prompt::DEFAULT_INSTRUCTIONS` 已移到上述预设。CLI 的参数、提示词及默认行为保持兼容。
+
+P1 的 SDK 接口调整：静态配置移入 `LoopSpec`；`LoopConfig` 持有钩子、交互宿主与队列。
+原 `config.policy` 改为注册 `PolicyHook::new(policy)`；`Limits::continue_on_length` 改为 `ContinueOnLength::new(n)`。
+直接调用循环改为 `run_loop(context, prompts, config, &mut LoopControl::new(max_turns, approvals, cancel, sink))`，
+其中 `approvals` 是宿主持有的 `&mut ApprovalCache`；使用 `Runner` 时由它管理。
+
+`Hooks` 的六个方法均有默认实现。`HookChain::push` 按顺序注册，每次回调默认超时 5 秒，可用 `push_with_timeout` 覆盖。
+`before_tool` 取 Deny > Ask > Allow，首个 Deny 立即拒绝；同级 Ask 保留第一条理由。`RulePolicy` 按 deny → ask → allow 匹配，同级按注册顺序，无匹配时拒绝。
+策略与审批的错误、panic、超时均拒绝执行；`after_tool` 失败会丢弃输出；输入、上下文与回合钩子失败会结束运行且不触发 provider 重试。`on_event` 的错误只生成 `hook_failed`，诊断不再递归送入钩子。
+
+`on_input` 的原始输入先追加审计记录，改写或拒绝通过 `context_edit` 表达。
+`transform_context` 返回按顺序应用的 `ContextEdit`：追加消息、替换文本或省略消息；不能修改或省略 system 消息，也不能用文本替换抹掉工具调用。
+整份变换计划先校验，随后逐项持久化；写入失败时立即取消，不发送模型请求。写入失败前已追加的条目仍保留。
+
+审批默认超时 120 秒。`NoHuman` 明确拒绝 Ask；`Approval::AllowOnce` 只允许一次，
+`AllowSession` 只缓存当前 Runner 内完全相同的工具名和参数，仍须通过每次策略检查，可用 `Runner::clear_approvals` 撤销；不会写入会话或跨进程恢复。
+异步回调必须让出执行权，合作式超时无法抢占阻塞线程。
 
 组装系统提示词（`ai::SystemPrompt`）可用 `prompt::build_system_prompt`、`prompt::environment_section` 和 `CommandPolicy::prompt_section`。如果 API key 来自环境变量，构造 `BashTool` 时把该变量名放进 `hidden_env`。两者的用法见示例。
 
@@ -257,6 +280,8 @@ P0 的 SDK 接口调整：`Limits::max_turns` 和 `agent::run_loop` 的轮次预
 - `ai::Provider`：接入新的模型服务，必须遵守 `src/ai/provider.rs` 中的约定。
 - `agent::Tool`：自定义工具。返回 `Err` 等价于 pi 中的抛出异常，会变成错误结果交给模型。
 - `agent::ToolPolicy`：自定义工具调用策略，例如接入审批系统或资源级权限。
+- `agent::Hooks`：输入、上下文、工具调用前后、回合结束与事件观察。
+- `interaction::Interaction`：由宿主回答审批；内核不读取终端。
 - `agent::EventSink`：订阅事件。任何 `Fn(AgentEvent) + Send + Sync` 都可以直接用作 sink。
 - `agent::MessageQueues`：在运行期间注入引导消息或后续消息。
 
@@ -275,6 +300,7 @@ cargo fmt --check
 | `tests/runner.rs` | 重试且不重复 prompt、失败记录留在文件中、放弃不可重试的错误、轮次与时间上限、调用方取消、截断续写与拼接、最终回答只取本次运行的消息、续跑会话、恢复会话时提示词变化写入文件、先写盘再转发事件 |
 | `tests/openai_mock.rs` | 本地假 HTTP 服务上的端到端测试：SSE、执行 bash、回传工具结果、认证头、HTTP 错误重试、空闲超时、中途取消后保留已输出内容 |
 | `tests/cli.rs` | 编译出的程序：退出码 0 到 6、jsonl 输出、从 stdin 读提示词、bash 读不到 API key、系统提示词的生成段落、`--system-updates inline` |
+| `tests/hooks.rs`、`tests/hooks_cli.rs` | 钩子组合与失败处理、审批范围与取消、审计变换、续写预算、工具输出脱敏的 CLI 接线 |
 | `tests/real_api.rs` | 真实模型 API（付费，默认跳过）：文本回答与用量、工具往返、策略拒绝、输出截断、恢复会话、无效 key 不重试 |
 
 新增回归还覆盖：取消与 future 丢弃、特殊文件与读取上限、UTF-8 尾记录修复及损坏记录保留、交错工具参数 ID、有界队列背压、结构化错误与数值 `Retry-After`、响应预算和 CLI 参数接线。P0 回归覆盖内核不限轮次、无时限、不自动续写，以及零轮次、显式续写与预设取值。Rustdoc 的编译失败用例保护单一运行的借用约束。

@@ -75,14 +75,15 @@ fn provider(steps: impl IntoIterator<Item = FauxStep>) -> Arc<FauxProvider> {
 
 /// A runner with test defaults around `provider` and no tools.
 fn setup(provider: &Arc<FauxProvider>) -> RunnerSetup {
-    RunnerSetup::new(config(provider.clone(), vec![]))
+    let mut config = config(provider.clone(), vec![]);
+    config.hooks = zx_agent::presets::troubleshoot::hooks();
+    RunnerSetup::new(config)
 }
 
-fn limits(max_turns: u32, timeout: Option<Duration>, continue_on_length: u32) -> Limits {
+fn limits(max_turns: u32, timeout: Option<Duration>) -> Limits {
     Limits {
         max_turns: Some(max_turns),
         timeout,
-        continue_on_length,
     }
 }
 
@@ -119,7 +120,7 @@ async fn default_limits_leave_truncated_answers_for_the_caller() {
     let provider = provider([FauxStep::truncated("part one"), FauxStep::text("part two")]);
     let (mut runner, _) = RunnerSetup {
         limits: Limits::default(),
-        ..setup(&provider)
+        ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build();
 
@@ -134,7 +135,7 @@ async fn default_limits_leave_truncated_answers_for_the_caller() {
 async fn zero_turn_limit_does_not_call_the_provider() {
     let provider = provider([FauxStep::text("must not be requested")]);
     let (mut runner, _) = RunnerSetup {
-        limits: limits(0, None, 0),
+        limits: limits(0, None),
         ..setup(&provider)
     }
     .build();
@@ -152,10 +153,7 @@ async fn zero_turn_limit_does_not_call_the_provider() {
 async fn an_unlimited_budget_can_explicitly_enable_continuation() {
     let provider = provider([FauxStep::truncated("part one, "), FauxStep::text("part two")]);
     let (mut runner, _) = RunnerSetup {
-        limits: Limits {
-            continue_on_length: 1,
-            ..Limits::default()
-        },
+        limits: Limits::default(),
         ..setup(&provider)
     }
     .build();
@@ -259,7 +257,7 @@ async fn retrying_stops_after_max_retries() {
 async fn a_run_stops_at_the_turn_limit() {
     let provider = provider((0..10).map(|i| FauxStep::tool_call(&format!("c{i}"), "echo", json!({"text": "loop"}))));
     let (mut runner, _) = RunnerSetup {
-        limits: limits(3, None, 0),
+        limits: limits(3, None),
         ..RunnerSetup::new(config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]))
     }
     .build();
@@ -273,7 +271,7 @@ async fn a_run_stops_at_the_turn_limit() {
 async fn a_run_stops_at_the_time_limit() {
     let provider = provider([FauxStep::Hang]);
     let (mut runner, _) = RunnerSetup {
-        limits: limits(10, Some(Duration::from_millis(150)), 0),
+        limits: limits(10, Some(Duration::from_millis(150))),
         ..setup(&provider)
     }
     .build();
@@ -342,8 +340,8 @@ async fn a_continuation_that_repeats_the_cut_line_is_joined_once() {
 async fn reports_truncated_when_no_continuation_is_allowed() {
     let provider = provider([FauxStep::truncated("Part one")]);
     let (mut runner, _) = RunnerSetup {
-        limits: limits(30, None, 0),
-        ..setup(&provider)
+        limits: limits(30, None),
+        ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build();
 
@@ -360,7 +358,7 @@ async fn reports_truncated_when_no_continuation_is_allowed() {
 async fn continuations_count_against_the_turn_limit() {
     let provider = provider([FauxStep::truncated("a"), FauxStep::text("b")]);
     let (mut runner, _) = RunnerSetup {
-        limits: limits(1, None, 1),
+        limits: limits(1, None),
         ..setup(&provider)
     }
     .build();
@@ -441,7 +439,7 @@ async fn resumed_sessions_continue_the_conversation() {
 /// One run on `session` whose environment section says `started`.
 async fn run_with_environment(session: SessionStore, started: &str) {
     let mut config = config(provider([FauxStep::text("ok")]), vec![]);
-    config.system_prompt = SystemPrompt::default()
+    config.spec.system_prompt = SystemPrompt::default()
         .with_section(PREAMBLE, "Do it.")
         .with_section("environment", started);
     let (mut runner, _) = RunnerSetup {

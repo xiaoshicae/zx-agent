@@ -3,6 +3,7 @@
 //! The loop stops at the first provider error; this layer decides whether to retry, keeps
 //! the session file as the source of model context, and enforces turn and time limits.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -10,14 +11,15 @@ use std::time::Duration;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::{AgentEvent, EventSink, LoopConfig, LoopOutcome, run_loop};
+use crate::agent::{AgentEvent, EventSink, LoopConfig, LoopControl, LoopFailure, LoopOutcome, run_loop};
 use crate::ai::retry::{RetryPolicy, is_retryable};
-use crate::ai::{AssistantMessage, Message, StopReason, Usage, duration_ms};
-use crate::session::SessionStore;
+use crate::ai::{Message, Usage, UserMessageKind, duration_ms};
+use crate::interaction::ApprovalCache;
+use crate::session::{Entry, SessionStore};
 use crate::sync::{AbortOnDrop, lock};
 
-/// Bounds for one run. Defaults impose no turn or time limit and do not continue
-/// truncated answers; callers select the policies their scenario needs.
+/// Bounds for one run. Defaults impose no turn or time limit.
+/// Continuation is supplied by a finish_turn hook.
 #[derive(Clone, Debug, Default)]
 pub struct Limits {
     /// Model requests per run, failed attempts included. `None` disables the limit;
@@ -25,10 +27,6 @@ pub struct Limits {
     pub max_turns: Option<u32>,
     /// Wall-clock limit for the whole run; `None` disables it.
     pub timeout: Option<Duration>,
-    /// How many times an answer cut off at the output token limit is continued by asking
-    /// the model to go on. Each continuation is a model request and counts as a turn.
-    /// Interactive callers usually set 0 and leave it to the user, as pi does.
-    pub continue_on_length: u32,
 }
 
 /// How a run ended.
@@ -40,7 +38,7 @@ pub enum RunOutcome {
     /// The final answer stayed cut off at the output token limit after the allowed
     /// continuations. `final_text` holds what was produced.
     Truncated,
-    /// A request failed and retrying did not help, or the session file could not be written.
+    /// A request exhausted retries, an operational hook failed, or persistence failed.
     Error,
     /// The turn budget ran out while the model still wanted to continue.
     MaxTurns,
@@ -77,6 +75,7 @@ pub struct Runner {
     limits: Limits,
     session: Mutex<SessionStore>,
     sink: Arc<dyn EventSink>,
+    approvals: ApprovalCache,
 }
 
 impl Runner {
@@ -94,12 +93,18 @@ impl Runner {
             limits,
             session: Mutex::new(session),
             sink,
+            approvals: ApprovalCache::default(),
         }
     }
 
     /// The loop configuration, for example to reach `config().queues` during a run.
     pub fn config(&self) -> &LoopConfig {
         &self.config
+    }
+
+    /// Revoke exact-call approvals granted by this Runner's interaction host.
+    pub fn clear_approvals(&mut self) {
+        self.approvals.clear();
     }
 
     /// The session. Do not hold the guard across `.await`: the run locks it for every message.
@@ -146,9 +151,8 @@ impl Runner {
             last_assistant_entry: Mutex::new(None),
         };
 
-        // Messages before this index belong to earlier runs. Context edits only ever omit this
-        // run's failed attempts, so the earlier part of the projection does not change.
-        let run_start = self.session().messages().len();
+        // Entry IDs remain stable even when hooks omit messages from earlier runs.
+        let run_start = lock(&self.session).entries().len();
         let mut prompts = vec![Message::user(prompt)];
         let mut turns: u32 = 0;
         let mut retries = 0;
@@ -159,61 +163,55 @@ impl Runner {
         let ending = loop {
             // The session projection, not an in-memory list, is what the model sees
             // (pi: AgentSession replaces the context with the projection before each request).
-            let mut context = self.session().messages();
-            let first_new = context.len();
-            let result = run_loop(
-                &mut context,
-                std::mem::take(&mut prompts),
-                &self.config,
+            let mut context = lock(&self.session).messages();
+            let mut control = LoopControl::new(
                 self.limits.max_turns.map(|limit| limit.saturating_sub(turns)),
+                &mut self.approvals,
                 &run_cancel,
                 &sink,
-            )
-            .await;
-            let new_messages = &context[first_new..];
+            );
+            control.turn_offset = turns;
+            control.continuations = continuations;
+            let result = run_loop(&mut context, std::mem::take(&mut prompts), &self.config, &mut control).await;
             turns = turns.saturating_add(result.turns);
-            for message in new_messages {
-                if let Message::Assistant(assistant) = message {
-                    usage.add(&assistant.usage);
-                }
+            continuations = result.continuations;
+            usage.add(&result.usage);
+            if result.outcome != LoopOutcome::Error {
+                break result.outcome;
             }
-            match result.outcome {
-                LoopOutcome::Error => {}
-                LoopOutcome::Completed => {
-                    let truncated = last_assistant(new_messages).is_some_and(|m| m.stop_reason == StopReason::Length);
-                    if !truncated {
-                        break Ending::Loop(LoopOutcome::Completed);
-                    }
-                    let budget_left =
-                        self.limits.max_turns.is_none_or(|limit| turns < limit) && !run_cancel.is_cancelled();
-                    if continuations >= self.limits.continue_on_length || !budget_left {
-                        break Ending::Truncated;
-                    }
-                    continuations += 1;
-                    prompts.push(Message::user(CONTINUE_PROMPT));
-                    continue;
+            // Hook failures are distinct from failed provider responses and are not retried.
+            let failed = match result.failure {
+                Some(LoopFailure::Provider(message)) => message,
+                Some(LoopFailure::Host(error)) => {
+                    last_error = Some(error);
+                    break LoopOutcome::Error;
                 }
-                other => break Ending::Loop(other),
-            }
-
-            let failed = last_assistant(new_messages);
-            last_error = failed.and_then(|message| message.error_message.clone());
-            let retryable = failed.is_some_and(is_retryable);
+                None => {
+                    last_error = Some("loop failed without a diagnostic".into());
+                    break LoopOutcome::Error;
+                }
+            };
+            last_error = failed.error_message.clone();
+            let retryable = is_retryable(&failed);
             if !retryable || retries >= self.retry.max_retries || run_cancel.is_cancelled() {
-                break Ending::Loop(LoopOutcome::Error);
+                break LoopOutcome::Error;
             }
 
             retries += 1;
-            // A retryable error always has a failed assistant message.
-            let delay = self
-                .retry
-                .delay_for(retries, failed.expect("a retryable failure has an assistant message"));
-            self.sink.emit(AgentEvent::RetryScheduled {
-                attempt: retries,
-                max_retries: self.retry.max_retries,
-                delay_ms: duration_ms(delay),
-                error: last_error.clone().unwrap_or_default(),
-            });
+            let delay = self.retry.delay_for(retries, &failed);
+            self.config
+                .hooks
+                .emit(
+                    AgentEvent::RetryScheduled {
+                        attempt: retries,
+                        max_retries: self.retry.max_retries,
+                        delay_ms: duration_ms(delay),
+                        error: last_error.clone().unwrap_or_default(),
+                    },
+                    &run_cancel,
+                    &sink,
+                )
+                .await;
             // Keep the failed attempt in the file but drop it from model context, then
             // continue from the previous message (pi: AgentSession._prepareRetry and
             // _omitRecoveryAttempt). No user message is repeated.
@@ -221,7 +219,7 @@ impl Runner {
                 let omitted = self.session().append_context_edit(&entry_id, None);
                 if let Err(e) = omitted {
                     sink.record_failure(format!("cannot omit the failed attempt: {e:#}"));
-                    break Ending::Loop(LoopOutcome::Error);
+                    break LoopOutcome::Error;
                 }
             }
             let cancelled = tokio::select! {
@@ -229,20 +227,20 @@ impl Runner {
                 _ = run_cancel.cancelled() => true,
             };
             if cancelled {
-                break Ending::Loop(LoopOutcome::Aborted);
+                break LoopOutcome::Aborted;
             }
         };
 
         let persistence_failure = lock(&sink.failure).take();
         let (outcome, error) = match (persistence_failure, ending) {
             (Some(failure), _) => (RunOutcome::Error, Some(failure)),
-            (None, Ending::Truncated) => (
+            (None, LoopOutcome::Truncated) => (
                 RunOutcome::Truncated,
                 Some("the answer was cut off at the output token limit".to_string()),
             ),
-            (None, Ending::Loop(LoopOutcome::Completed)) => (RunOutcome::Completed, None),
-            (None, Ending::Loop(LoopOutcome::Error)) => (RunOutcome::Error, last_error),
-            (None, Ending::Loop(LoopOutcome::MaxTurns)) => (
+            (None, LoopOutcome::Completed) => (RunOutcome::Completed, None),
+            (None, LoopOutcome::Error) => (RunOutcome::Error, last_error),
+            (None, LoopOutcome::MaxTurns) => (
                 RunOutcome::MaxTurns,
                 Some(format!(
                     "turn limit reached (max_turns = {})",
@@ -251,20 +249,32 @@ impl Runner {
                         .expect("MaxTurns requires a configured turn limit")
                 )),
             ),
-            (None, Ending::Loop(LoopOutcome::Aborted)) if timed_out.load(Ordering::SeqCst) => {
+            (None, LoopOutcome::Aborted) if timed_out.load(Ordering::SeqCst) => {
                 let secs = self.limits.timeout.map(|t| t.as_secs()).unwrap_or_default();
                 (
                     RunOutcome::Timeout,
                     Some(format!("run exceeded the {secs}s time limit")),
                 )
             }
-            (None, Ending::Loop(LoopOutcome::Aborted)) => (RunOutcome::Aborted, Some("run was cancelled".to_string())),
+            (None, LoopOutcome::Aborted) => (RunOutcome::Aborted, Some("run was cancelled".to_string())),
         };
 
         let session = self.session();
         // An earlier run's answer must not be reported as this run's.
-        let messages = session.messages();
-        let final_text = final_answer(messages.get(run_start..).unwrap_or_default());
+        let new_ids: HashSet<&str> = session.entries()[run_start..]
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Message(message) => Some(message.id.as_str()),
+                Entry::ContextEdit(_) => None,
+            })
+            .collect();
+        let messages: Vec<Message> = session
+            .projection()
+            .into_iter()
+            .filter(|projected| new_ids.contains(projected.entry_id.as_str()))
+            .map(|projected| projected.message)
+            .collect();
+        let final_text = final_answer(&messages);
         RunReport {
             outcome,
             final_text,
@@ -277,19 +287,7 @@ impl Runner {
     }
 }
 
-/// Sent when an answer is cut off at the output token limit.
-const CONTINUE_PROMPT: &str = "Your previous response was cut off at the output token limit. Continue exactly where it \
-stopped, without repeating earlier text, and keep the rest concise.";
-
-/// How the retry loop ended, before persistence failures and timeouts are taken into account.
-enum Ending {
-    Loop(LoopOutcome),
-    /// The answer stayed cut off at the output token limit.
-    Truncated,
-}
-
-/// The text of the last assistant message, preceded by the parts it continues: an answer
-/// continues the previous one when a cut-off response and a continuation prompt precede it.
+/// Join explicit continuation fragments, ignoring intervening system prompt updates.
 fn final_answer(messages: &[Message]) -> String {
     let mut parts = Vec::new();
     let mut end = messages.len();
@@ -304,12 +302,22 @@ fn final_answer(messages: &[Message]) -> String {
             })
     {
         parts.push(answer.text());
-        match &messages[..index] {
-            [.., Message::Assistant(previous), Message::User { content, .. }]
-                if previous.stop_reason == StopReason::Length && content == CONTINUE_PROMPT =>
-            {
-                end = index - 1;
-            }
+        let mut preceding = messages[..index]
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, message)| !matches!(message, Message::System(_)));
+        match (preceding.next(), preceding.next()) {
+            (
+                Some((
+                    _,
+                    Message::User {
+                        kind: UserMessageKind::ContinueAnswer,
+                        ..
+                    },
+                )),
+                Some((previous, Message::Assistant(_))),
+            ) => end = previous + 1,
             _ => break,
         }
     }
@@ -331,13 +339,6 @@ fn overlap(previous: &str, next: &str) -> usize {
         .rev()
         .find(|&len| next.is_char_boundary(len) && previous.ends_with(&next[..len]))
         .unwrap_or(0)
-}
-
-fn last_assistant(messages: &[Message]) -> Option<&AssistantMessage> {
-    messages.iter().rev().find_map(|message| match message {
-        Message::Assistant(assistant) => Some(assistant),
-        Message::System(_) | Message::User { .. } | Message::ToolResult(_) => None,
-    })
 }
 
 /// Persists finished messages before forwarding events (pi: AgentSession writes on
@@ -363,6 +364,24 @@ impl PersistingSink<'_> {
 }
 
 impl EventSink for PersistingSink<'_> {
+    fn edit_context(&self, index: usize, replacement: Option<&str>) -> Result<(), String> {
+        let edited = {
+            let mut session = lock(self.session);
+            let projection = session.projection();
+            match projection.get(index) {
+                Some(target) => session
+                    .append_context_edit(&target.entry_id, replacement.map(str::to_string))
+                    .map(|_| ())
+                    .map_err(|error| format!("cannot persist context edit: {error:#}")),
+                None => Err(format!("context index {index} is out of bounds")),
+            }
+        };
+        if let Err(error) = &edited {
+            self.record_failure(error.clone());
+        }
+        edited
+    }
+
     fn emit(&self, event: AgentEvent) {
         if let AgentEvent::MessageEnd { message } = &event {
             // The event owns the message and is forwarded below, so the session stores a copy.
@@ -385,7 +404,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::*;
-    use crate::agent::{AllowAll, MessageQueues, NullSink};
+    use crate::agent::{LoopSpec, NullSink};
     use crate::ai::SystemPrompt;
     use crate::ai::faux::{FauxProvider, FauxStep};
     use crate::session::{FailingWriter, SessionHeader};
@@ -398,17 +417,15 @@ mod tests {
     #[tokio::test]
     async fn a_session_write_failure_cancels_the_run() {
         let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
-        let config = LoopConfig {
+        let config = LoopConfig::new(LoopSpec {
             provider: provider.clone(),
             model: "m".into(),
             system_prompt: SystemPrompt::default(),
             tools: vec![],
-            policy: Arc::new(AllowAll),
             cwd: PathBuf::from("."),
             max_tokens: None,
             sequential_tools: false,
-            queues: Arc::new(MessageQueues::default()),
-        };
+        });
         let session = SessionStore::with_writer(SessionHeader::new(Path::new("."), "m"), Box::new(FailingWriter));
         let mut runner = Runner::new(
             config,
@@ -432,6 +449,58 @@ mod tests {
     #[test]
     fn short_overlaps_are_treated_as_coincidence() {
         assert_eq!(overlap("step 1", "1 more"), 0);
+    }
+
+    #[tokio::test]
+    async fn a_context_edit_write_failure_prevents_the_request() {
+        struct EditFailure;
+        impl std::io::Write for EditFailure {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if bytes
+                    .windows(b"context_edit".len())
+                    .any(|window| window == b"context_edit")
+                {
+                    Err(std::io::Error::other("disk full on edit"))
+                } else {
+                    Ok(bytes.len())
+                }
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        struct Rewrite;
+        #[async_trait::async_trait]
+        impl crate::agent::Hooks for Rewrite {
+            async fn on_input(&self, _text: String) -> crate::agent::HookResult<String> {
+                Ok("rewritten".into())
+            }
+        }
+        let provider = Arc::new(FauxProvider::new([FauxStep::text("never")]));
+        let mut config = LoopConfig::new(LoopSpec {
+            provider: provider.clone(),
+            model: "m".into(),
+            system_prompt: SystemPrompt::default(),
+            tools: vec![],
+            cwd: PathBuf::from("."),
+            max_tokens: None,
+            sequential_tools: false,
+        });
+        config.hooks.push(Rewrite);
+        let session = SessionStore::with_writer(SessionHeader::new(Path::new("."), "m"), Box::new(EditFailure));
+        let mut runner = Runner::new(
+            config,
+            RetryPolicy::default(),
+            Limits::default(),
+            session,
+            Arc::new(NullSink),
+        );
+        let report = runner.run("original", &CancellationToken::new()).await;
+        assert_eq!(report.outcome, RunOutcome::Error);
+        assert!(report.error.unwrap().contains("disk full on edit"));
+        assert!(provider.requests().is_empty());
+        assert_eq!(runner.session().messages().len(), 1);
+        assert!(matches!(&runner.session().messages()[0], Message::User { content, .. } if content == "original"));
     }
 
     #[test]

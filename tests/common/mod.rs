@@ -17,11 +17,13 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::agent::{
-    AgentEvent, AllowAll, EventSink, ExecutionMode, LoopConfig, LoopResult, MessageQueues, Tool, ToolContext,
-    ToolOutput, ToolPolicy, run_loop,
+    AgentEvent, EventSink, ExecutionMode, LoopConfig, LoopControl, LoopResult, LoopSpec, MessageQueues, Tool,
+    ToolContext, ToolOutput, ToolPolicy, run_loop,
 };
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::{Message, Provider, SystemPrompt, ToolDef};
+use zx_agent::interaction::ApprovalCache;
+use zx_agent::policy::PolicyHook;
 use zx_agent::presets::troubleshoot;
 use zx_agent::runner::{Limits, Runner};
 use zx_agent::session::{SessionHeader, SessionStore};
@@ -119,22 +121,20 @@ impl Collect {
 }
 
 pub fn config(provider: Arc<dyn Provider>, tools: Vec<Arc<dyn Tool>>) -> LoopConfig {
-    LoopConfig {
+    LoopConfig::new(LoopSpec {
         provider,
         model: "test-model".to_string(),
         // Empty, so runs add no system message; system prompt tests set their own.
         system_prompt: SystemPrompt::default(),
         tools,
-        policy: Arc::new(AllowAll),
         cwd: PathBuf::from("."),
         max_tokens: None,
         sequential_tools: false,
-        queues: Arc::new(MessageQueues::default()),
-    }
+    })
 }
 
 pub fn with_policy(mut config: LoopConfig, policy: Arc<dyn ToolPolicy>) -> LoopConfig {
-    config.policy = policy;
+    config.hooks.push(PolicyHook::new(policy));
     config
 }
 
@@ -173,7 +173,10 @@ pub fn summarize(messages: &[Message]) -> Vec<String> {
 pub async fn run_prompt(config: &LoopConfig, context: &mut Vec<Message>, prompt: &str) -> (LoopResult, Collect) {
     let sink = Collect::default();
     let prompts = vec![Message::user(prompt)];
-    let result = run_loop(context, prompts, config, Some(10), &CancellationToken::new(), &sink).await;
+    let mut approvals = ApprovalCache::default();
+    let cancel = CancellationToken::new();
+    let mut control = LoopControl::new(Some(10), &mut approvals, &cancel, &sink);
+    let result = run_loop(context, prompts, config, &mut control).await;
     (result, sink)
 }
 

@@ -1,237 +1,656 @@
-//! The agent loop (pi: `runLoop` in packages/agent/src/agent-loop.ts).
-//!
-//! Each turn sends one model request and executes the tool calls in the response. The
-//! model decides when to stop: a response without tool calls ends the inner loop.
+//! The agent loop. Extension behavior is supplied through bounded, ordered hooks.
 
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use futures::FutureExt;
-use futures::StreamExt;
 use futures::future::join_all;
+use futures::{FutureExt, StreamExt};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use super::events::{AgentEvent, EventSink, LoopOutcome};
-use super::policy::{Decision, ToolPolicy};
+use super::hooks::{
+    ContextEdit, HookCall, HookChain, HookError, HookFailure, HookPhase, TurnDecision, TurnDisposition, TurnSummary,
+    report_failure,
+};
+use super::policy::Decision;
 use super::queue::MessageQueues;
 use super::tool::{ExecutionMode, Tool, ToolContext, ToolOutput};
 use crate::ai::{
     AssistantMessage, Message, Provider, Request, StopReason, StreamEvent, SystemMessage, SystemPrompt, ToolCall,
-    ToolResultMessage, duration_ms, now_ms,
+    ToolResultMessage, Usage, UserMessageKind, duration_ms, now_ms,
 };
+use crate::interaction::{Approval, ApprovalCache, ApprovalRequest, DEFAULT_APPROVAL_TIMEOUT, Interaction, NoHuman};
 
-/// Everything the loop needs. Policies that pi injects as hooks are fields here.
-pub struct LoopConfig {
+/// Static model and tool configuration, independent of per-run state and extensions.
+pub struct LoopSpec {
     pub provider: Arc<dyn Provider>,
     pub model: String,
-    /// The system prompt this run should use. A run first records it, or the sections that
-    /// differ from the prompt already in the conversation, as a system message.
+    /// Changes are recorded as system messages before the next request.
     pub system_prompt: SystemPrompt,
     pub tools: Vec<Arc<dyn Tool>>,
-    pub policy: Arc<dyn ToolPolicy>,
-    /// Working directory handed to tools.
     pub cwd: PathBuf,
-    /// Output token limit per response; `None` leaves it to the provider.
     pub max_tokens: Option<u32>,
-    /// Run every batch of tool calls one at a time.
     pub sequential_tools: bool,
+}
+
+/// Host extensions and the static specification. Queues have shared ownership because
+/// frontends can submit input while a run borrows this configuration.
+pub struct LoopConfig {
+    pub spec: LoopSpec,
+    pub hooks: HookChain,
+    pub interaction: Arc<dyn Interaction>,
+    pub interaction_timeout: Duration,
     pub queues: Arc<MessageQueues>,
 }
 
-/// How a `run_loop` call ended. The messages it produced are appended to `context`.
+impl LoopConfig {
+    pub fn new(spec: LoopSpec) -> Self {
+        Self {
+            spec,
+            hooks: HookChain::new(),
+            interaction: Arc::new(NoHuman),
+            interaction_timeout: DEFAULT_APPROVAL_TIMEOUT,
+            queues: Arc::new(MessageQueues::default()),
+        }
+    }
+}
+
+/// State borrowed from the run owner; grants survive retries without sharing a lock.
+pub struct LoopControl<'a> {
+    pub max_turns: Option<u32>,
+    pub turn_offset: u32,
+    pub continuations: u32,
+    pub approvals: &'a mut ApprovalCache,
+    pub cancel: &'a CancellationToken,
+    pub sink: &'a dyn EventSink,
+}
+
+impl<'a> LoopControl<'a> {
+    pub fn new(
+        max_turns: Option<u32>,
+        approvals: &'a mut ApprovalCache,
+        cancel: &'a CancellationToken,
+        sink: &'a dyn EventSink,
+    ) -> Self {
+        Self {
+            max_turns,
+            turn_offset: 0,
+            continuations: 0,
+            approvals,
+            cancel,
+            sink,
+        }
+    }
+}
+
+/// Accounting follows actual responses, so context edits cannot change usage or retries.
+#[derive(Debug)]
+pub enum LoopFailure {
+    /// Boxed so a successful LoopResult does not reserve space for a full response.
+    Provider(Box<AssistantMessage>),
+    Host(String),
+}
+
+/// Result of one loop attempt. Only provider failures qualify for provider retries.
 #[derive(Debug)]
 pub struct LoopResult {
     pub outcome: LoopOutcome,
-    /// Model requests made in this run, saturating at `u32::MAX` for unbounded runs.
     pub turns: u32,
+    pub continuations: u32,
+    pub usage: Usage,
+    pub failure: Option<LoopFailure>,
 }
 
-/// Run the loop until the model stops, the turn budget is spent, a request fails, or
-/// `cancel` fires. Every message of the run, prompts included, is appended to `context`.
-///
-/// A system message comes first when `config.system_prompt` differs from the prompt in
-/// `context`. Then `prompts` are appended (pi: `runAgentLoop`); pass none to continue from the
-/// current context (pi: `runAgentLoopContinue`), whose last message must then be a user
-/// or tool-result message.
-///
-/// `max_turns: None` imposes no request limit; `Some(0)` makes no model request.
+/// Append prompts and run until the model stops, the budget expires, or cancellation.
+/// Hooks persist changes before a request; the provider sees exactly this projection.
+/// None imposes no turn limit, while Some(0) makes no model request.
 pub async fn run_loop(
     context: &mut Vec<Message>,
     prompts: Vec<Message>,
     config: &LoopConfig,
-    max_turns: Option<u32>,
-    cancel: &CancellationToken,
-    sink: &dyn EventSink,
+    control: &mut LoopControl<'_>,
 ) -> LoopResult {
-    let mut turns: u32 = 0;
-    sink.emit(AgentEvent::AgentStart);
-    sink.emit(AgentEvent::TurnStart { turn: 1 });
-    // pi: AgentSession appends a system message when the prompt sections differ.
-    let changes = SystemPrompt::from_transcript(context).diff(&config.system_prompt);
-    if !changes.is_empty() {
-        let update = SystemMessage {
-            sections: changes,
-            timestamp: now_ms(),
-        };
-        append(context, sink, Message::System(update));
+    let mut result = LoopResult {
+        outcome: LoopOutcome::Completed,
+        turns: 0,
+        continuations: control.continuations,
+        usage: Usage::default(),
+        failure: None,
+    };
+    let mut engine = Engine { config, control };
+    engine.emit(AgentEvent::AgentStart).await;
+    match engine.run(context, prompts, &mut result).await {
+        Ok(outcome) => result.outcome = outcome,
+        Err(error) => {
+            result.outcome = if engine.control.cancel.is_cancelled() {
+                LoopOutcome::Aborted
+            } else {
+                LoopOutcome::Error
+            };
+            result.failure = Some(LoopFailure::Host(error));
+        }
     }
-    for message in prompts {
-        append(context, sink, message);
-    }
-    // The user may have queued input while the run was starting.
-    let mut pending = config.queues.drain_steering();
+    engine
+        .emit(AgentEvent::AgentEnd {
+            outcome: result.outcome,
+        })
+        .await;
+    result
+}
 
-    // Outer loop: continues when follow-up messages arrive after the agent would stop.
-    let outcome = 'outer: loop {
-        let mut has_more_tool_calls = true;
-        // Inner loop: one iteration per turn.
-        while has_more_tool_calls || !pending.is_empty() {
-            if turns > 0 {
-                if pending.is_empty() {
-                    pending = config.queues.drain_steering();
+struct Engine<'a, 'b, 'c> {
+    config: &'a LoopConfig,
+    control: &'b mut LoopControl<'c>,
+}
+
+impl Engine<'_, '_, '_> {
+    async fn emit(&self, event: AgentEvent) {
+        self.config
+            .hooks
+            .emit(event, self.control.cancel, self.control.sink)
+            .await;
+    }
+
+    fn hook_error(&self, error: HookError) -> String {
+        report_failure(error, self.control.sink)
+    }
+
+    async fn append(&self, context: &mut Vec<Message>, message: Message) {
+        self.emit(AgentEvent::MessageStart { role: message.role() }).await;
+        self.emit(AgentEvent::MessageEnd {
+            message: message.clone(),
+        })
+        .await;
+        context.push(message);
+    }
+
+    async fn edit(&self, context: &mut Vec<Message>, edit: ContextEdit) -> Result<(), String> {
+        match &edit {
+            ContextEdit::Append(message) => self.append(context, message.clone()).await,
+            ContextEdit::ReplaceText { index, text } => {
+                self.control.sink.edit_context(*index, Some(text))?;
+                edit.apply(context)?;
+                self.emit(AgentEvent::ContextEdited {
+                    index: *index,
+                    replacement: Some(text.clone()),
+                })
+                .await;
+            }
+            ContextEdit::Omit { index } => {
+                self.control.sink.edit_context(*index, None)?;
+                edit.apply(context)?;
+                self.emit(AgentEvent::ContextEdited {
+                    index: *index,
+                    replacement: None,
+                })
+                .await;
+            }
+        }
+        Ok(())
+    }
+
+    async fn input(&self, context: &mut Vec<Message>, message: Message) -> Result<(), String> {
+        self.append(context, message).await;
+        let index = context.len() - 1;
+        let Message::User {
+            content,
+            kind: UserMessageKind::Prompt,
+            ..
+        } = &context[index]
+        else {
+            return Ok(());
+        };
+        let transformed = self.config.hooks.on_input(content.clone(), self.control.cancel).await;
+        match transformed {
+            Ok(text) if text != *content => {
+                self.edit(context, ContextEdit::ReplaceText { index, text }).await?;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                // A rejected input remains in the audit log but is omitted from requests.
+                if error.failure != HookFailure::Cancelled {
+                    self.edit(context, ContextEdit::Omit { index }).await?;
                 }
-                sink.emit(AgentEvent::TurnStart {
-                    turn: turns.saturating_add(1),
-                });
+                return Err(self.hook_error(error));
+            }
+        }
+        Ok(())
+    }
+
+    async fn run(
+        &mut self,
+        context: &mut Vec<Message>,
+        prompts: Vec<Message>,
+        result: &mut LoopResult,
+    ) -> Result<LoopOutcome, String> {
+        self.emit(AgentEvent::TurnStart {
+            turn: self.control.turn_offset.saturating_add(1),
+        })
+        .await;
+        let changes = SystemPrompt::from_transcript(context).diff(&self.config.spec.system_prompt);
+        if !changes.is_empty() {
+            self.append(
+                context,
+                Message::System(SystemMessage {
+                    sections: changes,
+                    timestamp: now_ms(),
+                }),
+            )
+            .await;
+        }
+        for message in prompts {
+            self.input(context, message).await?;
+        }
+        let mut pending = self.config.queues.drain_steering();
+        loop {
+            if result.turns > 0 {
+                if pending.is_empty() {
+                    pending = self.config.queues.drain_steering();
+                }
+                self.emit(AgentEvent::TurnStart {
+                    turn: self.control.turn_offset.saturating_add(result.turns).saturating_add(1),
+                })
+                .await;
             }
             for message in pending.drain(..) {
-                append(context, sink, message);
+                self.input(context, message).await?;
             }
-            if cancel.is_cancelled() {
-                break 'outer LoopOutcome::Aborted;
+            if self.control.cancel.is_cancelled() {
+                return Ok(LoopOutcome::Aborted);
             }
-            if max_turns.is_some_and(|limit| turns >= limit) {
-                break 'outer LoopOutcome::MaxTurns;
+            if self.control.max_turns.is_some_and(|limit| result.turns >= limit) {
+                return Ok(LoopOutcome::MaxTurns);
             }
-            turns = turns.saturating_add(1);
-
-            let message = stream_assistant_response(context, config, cancel, sink).await;
-            let stop_reason = message.stop_reason;
-            let tool_calls = message.tool_calls();
-            context.push(Message::Assistant(message));
-
-            // Provider failures end the run; retrying is the runner's decision (pi: agent-loop.ts:254).
-            match stop_reason {
-                StopReason::Error => {
-                    sink.emit(AgentEvent::TurnEnd { turn: turns });
-                    break 'outer LoopOutcome::Error;
-                }
-                StopReason::Aborted => {
-                    sink.emit(AgentEvent::TurnEnd { turn: turns });
-                    break 'outer LoopOutcome::Aborted;
-                }
-                StopReason::Stop | StopReason::Length | StopReason::ToolUse => {}
+            let edits = self
+                .config
+                .hooks
+                .transform_context(context, self.control.cancel)
+                .await
+                .map_err(|error| self.hook_error(error))?;
+            for edit in edits {
+                self.edit(context, edit).await?;
             }
-
-            has_more_tool_calls = false;
-            if !tool_calls.is_empty() {
-                // A length stop may have cut off tool-call arguments: do not run them (pi: agent-loop.ts:277).
-                let batch = if stop_reason == StopReason::Length {
-                    fail_truncated_calls(&tool_calls, sink)
+            if self.control.cancel.is_cancelled() {
+                return Ok(LoopOutcome::Aborted);
+            }
+            result.turns = result.turns.saturating_add(1);
+            let message = self.stream(context).await;
+            result.usage.add(&message.usage);
+            let stop = message.stop_reason;
+            let calls = message.tool_calls();
+            // History owns a copy; finish_turn and accounting retain the actual response.
+            context.push(Message::Assistant(message.clone()));
+            let turn = self.control.turn_offset.saturating_add(result.turns);
+            if matches!(stop, StopReason::Error | StopReason::Aborted) {
+                self.emit(AgentEvent::TurnEnd { turn }).await;
+                result.failure = Some(LoopFailure::Provider(Box::new(message)));
+                return Ok(if stop == StopReason::Aborted {
+                    LoopOutcome::Aborted
                 } else {
-                    execute_tool_calls(&tool_calls, config, cancel, sink).await
+                    LoopOutcome::Error
+                });
+            }
+
+            let mut needs_more = false;
+            let mut terminated = false;
+            if !calls.is_empty() {
+                let batch = if stop == StopReason::Length {
+                    self.truncated(&calls).await
+                } else {
+                    self.tools(&calls).await
                 };
-                has_more_tool_calls = !batch.terminate;
+                terminated = batch.terminate;
+                needs_more = !terminated;
                 context.extend(batch.results.into_iter().map(Message::ToolResult));
             }
-            sink.emit(AgentEvent::TurnEnd { turn: turns });
-            if cancel.is_cancelled() {
-                break 'outer LoopOutcome::Aborted;
+            self.emit(AgentEvent::TurnEnd { turn }).await;
+            if self.control.cancel.is_cancelled() {
+                return Ok(LoopOutcome::Aborted);
             }
-            pending = config.queues.drain_steering();
-        }
-
-        let follow_ups = config.queues.drain_follow_up();
-        if !follow_ups.is_empty() {
-            pending = follow_ups;
-            continue;
-        }
-        break LoopOutcome::Completed;
-    };
-
-    sink.emit(AgentEvent::AgentEnd { outcome });
-    LoopResult { outcome, turns }
-}
-
-fn append(context: &mut Vec<Message>, sink: &dyn EventSink, message: Message) {
-    sink.emit(AgentEvent::MessageStart { role: message.role() });
-    // Events own their payload, so the event gets a copy and the context keeps the original.
-    sink.emit(AgentEvent::MessageEnd {
-        message: message.clone(),
-    });
-    context.push(message);
-}
-
-/// One model call (pi: `streamAssistantResponse`). Never fails: provider errors come back
-/// as a message with `stop_reason` `Error` or `Aborted`.
-async fn stream_assistant_response(
-    context: &[Message],
-    config: &LoopConfig,
-    cancel: &CancellationToken,
-    sink: &dyn EventSink,
-) -> AssistantMessage {
-    let request = Request {
-        model: config.model.clone(),
-        // The provider hands the request to a background task, which must own it.
-        messages: context.to_vec(),
-        tools: config.tools.iter().map(|tool| tool.definition()).collect(),
-        max_tokens: config.max_tokens,
-    };
-    let mut events = config.provider.stream(request, cancel.clone());
-    let mut started = false;
-    // Listeners always see a start before the end, even when a request fails before
-    // generation begins (pi: agent-loop.ts:461).
-    let mut ensure_started = |sink: &dyn EventSink| {
-        if !started {
-            started = true;
-            sink.emit(AgentEvent::MessageStart { role: "assistant" });
-        }
-    };
-    while let Some(event) = events.next().await {
-        match event {
-            StreamEvent::Start => ensure_started(sink),
-            StreamEvent::Delta(delta) => {
-                ensure_started(sink);
-                sink.emit(AgentEvent::MessageUpdate { delta });
+            // Inspect queues without consuming them: stopping or failing in a hook must
+            // leave accepted user input available to the next run.
+            let queued = self.config.queues.has_steering() || (!needs_more && self.config.queues.has_follow_up());
+            let disposition = if needs_more || queued {
+                TurnDisposition::Continue
+            } else if terminated {
+                TurnDisposition::Terminated
+            } else {
+                TurnDisposition::Stop
+            };
+            let remaining_turns = self.control.max_turns.map(|limit| limit.saturating_sub(result.turns));
+            let summary = TurnSummary {
+                response: &message,
+                messages: context,
+                turn,
+                continuations: result.continuations,
+                remaining_turns,
+                disposition,
+            };
+            let decision = self
+                .config
+                .hooks
+                .finish_turn(&summary, self.control.cancel)
+                .await
+                .map_err(|error| self.hook_error(error))?;
+            if decision == TurnDecision::Stop {
+                return Ok(completed(stop));
             }
-            StreamEvent::Done(message) | StreamEvent::Error(message) => {
-                ensure_started(sink);
-                sink.emit(AgentEvent::MessageEnd {
-                    message: Message::Assistant(message.clone()),
-                });
-                return message;
+            pending = self.config.queues.drain_steering();
+            if !needs_more && pending.is_empty() {
+                pending = self.config.queues.drain_follow_up();
+            }
+            match decision {
+                TurnDecision::ContinueAnswer(text) if disposition == TurnDisposition::Stop && pending.is_empty() => {
+                    if remaining_turns == Some(0) {
+                        return Ok(if stop == StopReason::Length {
+                            LoopOutcome::Truncated
+                        } else {
+                            LoopOutcome::MaxTurns
+                        });
+                    }
+                    result.continuations = result.continuations.saturating_add(1);
+                    pending.push(Message::continuation(text));
+                }
+                TurnDecision::FollowUp(text) if disposition != TurnDisposition::Continue && pending.is_empty() => {
+                    if remaining_turns == Some(0) {
+                        return Ok(LoopOutcome::MaxTurns);
+                    }
+                    pending.push(Message::user(text));
+                }
+                TurnDecision::Stop
+                | TurnDecision::Default
+                | TurnDecision::ContinueAnswer(_)
+                | TurnDecision::FollowUp(_) => {}
+            }
+            if !needs_more && pending.is_empty() {
+                return Ok(completed(stop));
             }
         }
     }
-    // The provider broke its contract by ending without a final event.
-    let stop = if cancel.is_cancelled() {
-        StopReason::Aborted
-    } else {
-        StopReason::Error
-    };
-    let message = AssistantMessage::failure(
-        config.provider.name(),
-        &config.model,
-        stop,
-        "provider stream ended without a final event",
-    );
-    ensure_started(sink);
-    sink.emit(AgentEvent::MessageEnd {
-        message: Message::Assistant(message.clone()),
-    });
-    message
+
+    async fn stream(&self, context: &[Message]) -> AssistantMessage {
+        let spec = &self.config.spec;
+        let request = Request {
+            model: spec.model.clone(),
+            // Provider background work owns a separate request snapshot.
+            messages: context.to_vec(),
+            tools: spec.tools.iter().map(|tool| tool.definition()).collect(),
+            max_tokens: spec.max_tokens,
+        };
+        let mut events = spec.provider.stream(request, self.control.cancel.clone());
+        let mut started = false;
+        while let Some(event) = events.next().await {
+            if !started {
+                started = true;
+                self.emit(AgentEvent::MessageStart { role: "assistant" }).await;
+            }
+            match event {
+                StreamEvent::Start => {}
+                StreamEvent::Delta(delta) => self.emit(AgentEvent::MessageUpdate { delta }).await,
+                StreamEvent::Done(message) | StreamEvent::Error(message) => {
+                    self.emit(AgentEvent::MessageEnd {
+                        message: Message::Assistant(message.clone()),
+                    })
+                    .await;
+                    return message;
+                }
+            }
+        }
+        let stop = if self.control.cancel.is_cancelled() {
+            StopReason::Aborted
+        } else {
+            StopReason::Error
+        };
+        let message = AssistantMessage::failure(
+            spec.provider.name(),
+            &spec.model,
+            stop,
+            "provider stream ended without a final event",
+        );
+        if !started {
+            self.emit(AgentEvent::MessageStart { role: "assistant" }).await;
+        }
+        self.emit(AgentEvent::MessageEnd {
+            message: Message::Assistant(message.clone()),
+        })
+        .await;
+        message
+    }
+
+    fn find_tool(&self, name: &str) -> Option<&dyn Tool> {
+        self.config
+            .spec
+            .tools
+            .iter()
+            .find(|tool| tool.name() == name)
+            .map(AsRef::as_ref)
+    }
+
+    async fn prepare(&mut self, call: &ToolCall) -> Prepared {
+        // Resolve and validate before running policy or asking the host.
+        let Some(tool) = self.find_tool(&call.name) else {
+            return Prepared::blocked(format!("Tool {} not found", call.name));
+        };
+        if let Some(error) = &call.arguments_error {
+            return Prepared::blocked(format!("Invalid arguments for tool {:?}: {error}", call.name));
+        }
+        if !call.arguments.is_object() {
+            return Prepared::blocked(format!(
+                "Invalid arguments for tool {:?}: expected a JSON object",
+                call.name
+            ));
+        }
+        let validation = std::panic::catch_unwind(AssertUnwindSafe(|| tool.validate_arguments(&call.arguments)));
+        match validation {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => return Prepared::blocked(format!("Invalid arguments for tool {:?}: {error}", call.name)),
+            Err(_) => return Prepared::blocked(format!("Tool {} argument validation panicked", call.name)),
+        }
+        let verdict = match self.config.hooks.before_tool(call, self.control.cancel).await {
+            Ok(verdict) => verdict,
+            Err(error) => return Prepared::blocked(format!("Blocked by policy: {}", self.hook_error(error))),
+        };
+        match verdict {
+            Decision::Deny(reason) => return Prepared::blocked(format!("Blocked by policy: {reason}")),
+            Decision::Ask(reason) if !self.control.approvals.allows(call) => {
+                let request = ApprovalRequest {
+                    call: call.clone(),
+                    reason,
+                };
+                let guard = HookCall {
+                    name: "Interaction::confirm",
+                    phase: HookPhase::Approval,
+                    timeout: self.config.interaction_timeout,
+                };
+                match guard
+                    .run(self.config.interaction.confirm(&request), self.control.cancel)
+                    .await
+                {
+                    Ok(Approval::AllowOnce) => {}
+                    Ok(Approval::AllowSession) => self.control.approvals.remember(call),
+                    Ok(Approval::Deny(reason)) => return Prepared::blocked(format!("Approval denied: {reason}")),
+                    Err(error) => return Prepared::blocked(format!("Approval denied: {}", self.hook_error(error))),
+                }
+            }
+            Decision::Allow | Decision::Ask(_) => {}
+        }
+        if self.control.cancel.is_cancelled() {
+            return Prepared::blocked("Operation aborted");
+        }
+        // Tool storage is static; the execution phase can resolve it again by name.
+        Prepared::Ready
+    }
+
+    async fn tools(&mut self, calls: &[ToolCall]) -> Batch {
+        let sequential = self.config.spec.sequential_tools
+            || calls.iter().any(|call| {
+                self.find_tool(&call.name)
+                    .is_some_and(|tool| tool.execution_mode() == ExecutionMode::Sequential)
+            });
+        if sequential {
+            self.sequential(calls).await
+        } else {
+            self.parallel(calls).await
+        }
+    }
+
+    async fn sequential(&mut self, calls: &[ToolCall]) -> Batch {
+        let mut results = Vec::new();
+        let mut terminate = true;
+        for call in calls {
+            self.tool_start(call).await;
+            // Keep only the preparation verdict so the mutable approval borrow ends here.
+            let outcome = match self.prepare(call).await {
+                Prepared::Immediate(outcome) => outcome,
+                Prepared::Ready => {
+                    execute(
+                        self.find_tool(&call.name).expect("tool was resolved above"),
+                        call.arguments.clone(),
+                        &self.config.spec,
+                        self.control.cancel,
+                    )
+                    .await
+                }
+            };
+            let outcome = self.after(call, outcome).await;
+            self.tool_end(call, &outcome).await;
+            terminate &= outcome.output.terminate;
+            let result = to_result(call, outcome);
+            self.emit_result(&result).await;
+            results.push(result);
+            if self.control.cancel.is_cancelled() {
+                break;
+            }
+        }
+        Batch {
+            terminate: terminate && !results.is_empty(),
+            results,
+        }
+    }
+
+    async fn parallel(&mut self, calls: &[ToolCall]) -> Batch {
+        // Phase 1: all checks are ordered. Store verdicts, then borrow the static
+        // tools during execution after the mutable approval borrow ends.
+        let mut slots = Vec::new();
+        for call in calls {
+            self.tool_start(call).await;
+            let immediate = match self.prepare(call).await {
+                Prepared::Immediate(outcome) => Some(outcome),
+                Prepared::Ready => None,
+            };
+            slots.push((call, immediate));
+            if self.control.cancel.is_cancelled() {
+                break;
+            }
+        }
+        // Phase 2: borrow the runtime; futures do not need spawn or shared mutable state.
+        let engine = &*self;
+        let outcomes = join_all(slots.into_iter().map(|(call, immediate)| async move {
+            let outcome = match immediate {
+                Some(outcome) => outcome,
+                None => {
+                    execute(
+                        engine.find_tool(&call.name).expect("tool was resolved in phase 1"),
+                        call.arguments.clone(),
+                        &engine.config.spec,
+                        engine.control.cancel,
+                    )
+                    .await
+                }
+            };
+            let outcome = engine.after(call, outcome).await;
+            engine.tool_end(call, &outcome).await;
+            (call, outcome)
+        }))
+        .await;
+        // Phase 3: commit results in model call order, regardless of completion order.
+        let terminate = !outcomes.is_empty() && outcomes.iter().all(|(_, result)| result.output.terminate);
+        let mut results = Vec::with_capacity(outcomes.len());
+        for (call, outcome) in outcomes {
+            let result = to_result(call, outcome);
+            self.emit_result(&result).await;
+            results.push(result);
+        }
+        Batch { results, terminate }
+    }
+
+    async fn after(&self, call: &ToolCall, outcome: Outcome) -> Outcome {
+        let output = match self
+            .config
+            .hooks
+            .after_tool(call, outcome.output, self.control.cancel)
+            .await
+        {
+            Ok(output) => output,
+            // Discard the raw output on every failure, including cancellation.
+            Err(error) => ToolOutput::error(format!("Tool output withheld: {}", self.hook_error(error))),
+        };
+        Outcome {
+            output,
+            duration_ms: outcome.duration_ms,
+        }
+    }
+
+    async fn truncated(&self, calls: &[ToolCall]) -> Batch {
+        let mut results = Vec::new();
+        for call in calls {
+            self.tool_start(call).await;
+            let outcome = self.after(call, Outcome::blocked(format!(
+                "Tool call {:?} was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments.",
+                call.name
+            ))).await;
+            self.tool_end(call, &outcome).await;
+            let result = to_result(call, outcome);
+            self.emit_result(&result).await;
+            results.push(result);
+        }
+        Batch {
+            results,
+            terminate: false,
+        }
+    }
+
+    async fn tool_start(&self, call: &ToolCall) {
+        self.emit(AgentEvent::ToolExecutionStart {
+            tool_call_id: call.id.clone(),
+            tool_name: call.name.clone(),
+            args: call.arguments.clone(),
+        })
+        .await;
+    }
+
+    async fn tool_end(&self, call: &ToolCall, outcome: &Outcome) {
+        self.emit(AgentEvent::ToolExecutionEnd {
+            tool_call_id: call.id.clone(),
+            tool_name: call.name.clone(),
+            is_error: outcome.output.is_error,
+            duration_ms: outcome.duration_ms,
+        })
+        .await;
+    }
+
+    async fn emit_result(&self, result: &ToolResultMessage) {
+        self.emit(AgentEvent::MessageStart { role: "toolResult" }).await;
+        self.emit(AgentEvent::MessageEnd {
+            message: Message::ToolResult(result.clone()),
+        })
+        .await;
+    }
 }
 
-// ---------------------------------------------------------------------------
-// Tool execution (pi: executeToolCalls and helpers)
-// ---------------------------------------------------------------------------
+fn completed(stop: StopReason) -> LoopOutcome {
+    if stop == StopReason::Length {
+        LoopOutcome::Truncated
+    } else {
+        LoopOutcome::Completed
+    }
+}
 
 struct Batch {
     results: Vec<ToolResultMessage>,
-    /// True when every result asked to stop.
     terminate: bool,
 }
 
@@ -240,188 +659,49 @@ struct Outcome {
     duration_ms: Option<u64>,
 }
 
+impl Outcome {
+    fn blocked(text: impl Into<String>) -> Self {
+        Self {
+            output: ToolOutput::error(text),
+            duration_ms: None,
+        }
+    }
+}
+
 enum Prepared {
-    /// Resolved without running the tool: not found, invalid arguments, denied, aborted.
     Immediate(Outcome),
-    Ready(Arc<dyn Tool>, Value),
+    Ready,
 }
 
-fn find_tool(config: &LoopConfig, name: &str) -> Option<Arc<dyn Tool>> {
-    config.tools.iter().find(|tool| tool.name() == name).cloned()
-}
-
-async fn execute_tool_calls(
-    calls: &[ToolCall],
-    config: &LoopConfig,
-    cancel: &CancellationToken,
-    sink: &dyn EventSink,
-) -> Batch {
-    // One sequential tool makes the whole batch sequential (pi: agent-loop.ts:526).
-    let sequential = config.sequential_tools
-        || calls.iter().any(|call| {
-            find_tool(config, &call.name).is_some_and(|tool| tool.execution_mode() == ExecutionMode::Sequential)
-        });
-    if sequential {
-        execute_sequential(calls, config, cancel, sink).await
-    } else {
-        execute_parallel(calls, config, cancel, sink).await
+impl Prepared {
+    fn blocked(text: impl Into<String>) -> Self {
+        Self::Immediate(Outcome::blocked(text))
     }
 }
 
-async fn execute_sequential(
-    calls: &[ToolCall],
-    config: &LoopConfig,
-    cancel: &CancellationToken,
-    sink: &dyn EventSink,
-) -> Batch {
-    let mut results = Vec::new();
-    let mut terminate = true;
-    for call in calls {
-        emit_start(call, sink);
-        let outcome = match prepare(call, config, cancel).await {
-            Prepared::Immediate(outcome) => outcome,
-            Prepared::Ready(tool, args) => execute(tool, args, config, cancel).await,
-        };
-        emit_end(call, &outcome, sink);
-        terminate &= outcome.output.terminate;
-        let result = to_result(call, outcome);
-        emit_result(&result, sink);
-        results.push(result);
-        if cancel.is_cancelled() {
-            // Remaining calls get no result; the provider layer fills placeholders.
-            break;
-        }
-    }
-    Batch {
-        terminate: terminate && !results.is_empty(),
-        results,
-    }
-}
-
-/// Three phases, as in pi:
-/// 1. check every call in order (policy decisions never overlap);
-/// 2. run every allowed call concurrently, emitting `tool_execution_end` as each finishes;
-/// 3. emit tool results in the order the model issued the calls.
-async fn execute_parallel(
-    calls: &[ToolCall],
-    config: &LoopConfig,
-    cancel: &CancellationToken,
-    sink: &dyn EventSink,
-) -> Batch {
-    enum Slot {
-        Done(Outcome),
-        Pending(Arc<dyn Tool>, Value),
-    }
-
-    let mut slots = Vec::new();
-    for call in calls {
-        emit_start(call, sink);
-        match prepare(call, config, cancel).await {
-            Prepared::Immediate(outcome) => {
-                emit_end(call, &outcome, sink);
-                slots.push((call, Slot::Done(outcome)));
-            }
-            Prepared::Ready(tool, args) => slots.push((call, Slot::Pending(tool, args))),
-        }
-        if cancel.is_cancelled() {
-            break;
-        }
-    }
-
-    // Running inside this task, not via spawn, lets the futures borrow `config`, `cancel`, and `sink`.
-    let outcomes = join_all(slots.into_iter().map(|(call, slot)| async move {
-        let outcome = match slot {
-            Slot::Done(outcome) => outcome,
-            Slot::Pending(tool, args) => {
-                let outcome = execute(tool, args, config, cancel).await;
-                emit_end(call, &outcome, sink);
-                outcome
-            }
-        };
-        (call, outcome)
-    }))
-    .await;
-
-    let terminate = !outcomes.is_empty() && outcomes.iter().all(|(_, outcome)| outcome.output.terminate);
-    let mut results = Vec::with_capacity(outcomes.len());
-    for (call, outcome) in outcomes {
-        let result = to_result(call, outcome);
-        emit_result(&result, sink);
-        results.push(result);
-    }
-    Batch { results, terminate }
-}
-
-async fn prepare(call: &ToolCall, config: &LoopConfig, cancel: &CancellationToken) -> Prepared {
-    let immediate = |message: String| {
-        Prepared::Immediate(Outcome {
-            output: ToolOutput::error(message),
-            duration_ms: None,
-        })
-    };
-    let Some(tool) = find_tool(config, &call.name) else {
-        return immediate(format!("Tool {} not found", call.name));
-    };
-    if let Some(error) = &call.arguments_error {
-        return immediate(format!("Invalid arguments for tool \"{}\": {error}", call.name));
-    }
-    if !call.arguments.is_object() {
-        return immediate(format!(
-            "Invalid arguments for tool \"{}\": expected a JSON object",
-            call.name
-        ));
-    }
-    if let Decision::Deny(reason) = config.policy.check(&call.name, &call.arguments).await {
-        return immediate(format!("Blocked by policy: {reason}"));
-    }
+async fn execute(tool: &dyn Tool, args: Value, spec: &LoopSpec, cancel: &CancellationToken) -> Outcome {
     if cancel.is_cancelled() {
-        return immediate("Operation aborted".to_string());
-    }
-    Prepared::Ready(tool, call.arguments.clone())
-}
-
-async fn execute(tool: Arc<dyn Tool>, args: Value, config: &LoopConfig, cancel: &CancellationToken) -> Outcome {
-    if cancel.is_cancelled() {
-        return Outcome {
-            output: ToolOutput::error("Operation aborted"),
-            duration_ms: None,
-        };
+        return Outcome::blocked("Operation aborted");
     }
     let ctx = ToolContext {
-        cwd: config.cwd.clone(),
+        cwd: spec.cwd.clone(),
         cancel: cancel.clone(),
     };
     let started = Instant::now();
-    // A panicking tool must not take down an unattended run.
-    let result = AssertUnwindSafe(tool.execute(args, &ctx)).catch_unwind().await;
-    let duration_ms = Some(duration_ms(started.elapsed()));
+    let future = AssertUnwindSafe(tool.execute(args, &ctx)).catch_unwind();
+    let result = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Outcome::blocked("Operation aborted"),
+        result = future => result,
+    };
     let output = match result {
         Ok(Ok(output)) => output,
-        Ok(Err(message)) => ToolOutput::error(message),
+        Ok(Err(error)) => ToolOutput::error(error),
         Err(_) => ToolOutput::error(format!("Tool {} panicked", tool.name())),
     };
-    Outcome { output, duration_ms }
-}
-
-fn fail_truncated_calls(calls: &[ToolCall], sink: &dyn EventSink) -> Batch {
-    let mut results = Vec::new();
-    for call in calls {
-        emit_start(call, sink);
-        let outcome = Outcome {
-            output: ToolOutput::error(format!(
-                "Tool call \"{}\" was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments.",
-                call.name
-            )),
-            duration_ms: None,
-        };
-        emit_end(call, &outcome, sink);
-        let result = to_result(call, outcome);
-        emit_result(&result, sink);
-        results.push(result);
-    }
-    Batch {
-        results,
-        terminate: false,
+    Outcome {
+        output,
+        duration_ms: Some(duration_ms(started.elapsed())),
     }
 }
 
@@ -440,28 +720,4 @@ fn to_result(call: &ToolCall, outcome: Outcome) -> ToolResultMessage {
         timestamp: now_ms(),
         duration_ms,
     }
-}
-
-fn emit_start(call: &ToolCall, sink: &dyn EventSink) {
-    sink.emit(AgentEvent::ToolExecutionStart {
-        tool_call_id: call.id.clone(),
-        tool_name: call.name.clone(),
-        args: call.arguments.clone(),
-    });
-}
-
-fn emit_end(call: &ToolCall, outcome: &Outcome, sink: &dyn EventSink) {
-    sink.emit(AgentEvent::ToolExecutionEnd {
-        tool_call_id: call.id.clone(),
-        tool_name: call.name.clone(),
-        is_error: outcome.output.is_error,
-        duration_ms: outcome.duration_ms,
-    });
-}
-
-fn emit_result(result: &ToolResultMessage, sink: &dyn EventSink) {
-    sink.emit(AgentEvent::MessageStart { role: "toolResult" });
-    sink.emit(AgentEvent::MessageEnd {
-        message: Message::ToolResult(result.clone()),
-    });
 }

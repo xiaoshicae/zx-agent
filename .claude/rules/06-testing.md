@@ -33,6 +33,7 @@ paths:
 | `tests/runner.rs` | 运行层：重试、上限、截断续写、持久化、恢复会话 |
 | `tests/openai_mock.rs` | 真实 HTTP 下的 provider：SSE、重试、空闲超时、中途取消 |
 | `tests/cli.rs` | 编译出的程序：退出码、输出格式、`main.rs` 中的接线 |
+| `tests/hooks.rs`、`tests/hooks_cli.rs` | 六个钩子、审批与失败回退、变换持久化、已知密钥脱敏接线 |
 | `tests/real_api.rs` | 付费：真实模型 API，默认跳过 |
 
 只能在 Unix 上运行的测试（如进程组、信号相关的）加 `#[cfg(unix)]`。

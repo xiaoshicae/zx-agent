@@ -11,11 +11,13 @@ use serde_json::json;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
 
-use zx_agent::agent::{AgentEvent, CommandPolicy, EventSink, LoopConfig, MessageQueues, ToolPolicy};
+use zx_agent::agent::{AgentEvent, CommandPolicy, EventSink, LoopConfig, LoopSpec};
 use zx_agent::ai::openai::{DEFAULT_MAX_RESPONSE_BYTES, OpenAiCompatible, OpenAiConfig, SystemUpdates};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::sse::DEFAULT_MAX_EVENT_BYTES;
 use zx_agent::ai::{Message, StopReason};
+use zx_agent::extensions::{ContinueOnLength, RedactSecrets};
+use zx_agent::policy::PolicyHook;
 use zx_agent::presets::troubleshoot;
 use zx_agent::prompt::{build_system_prompt, environment_section};
 use zx_agent::runner::{Limits, RunOutcome, RunReport, Runner};
@@ -244,7 +246,8 @@ fn build_runner(args: &RunArgs) -> Result<Runner> {
 
     let provider = OpenAiCompatible::new(OpenAiConfig {
         base_url: args.base_url.clone(),
-        api_key,
+        // Provider authentication and output filtering each need an owned copy.
+        api_key: api_key.clone(),
         idle_timeout: Duration::from_secs(args.idle_timeout_secs),
         max_response_bytes: args.max_response_bytes,
         max_sse_event_bytes: args.max_sse_event_bytes,
@@ -254,18 +257,18 @@ fn build_runner(args: &RunArgs) -> Result<Runner> {
         },
         ..OpenAiConfig::default()
     })?;
-    let policy: Arc<dyn ToolPolicy> = Arc::new(policy);
-    let config = LoopConfig {
+    let mut config = LoopConfig::new(LoopSpec {
         provider: Arc::new(provider),
         model: args.model.clone(),
         system_prompt,
         tools,
-        policy,
         cwd,
         max_tokens: args.max_tokens,
         sequential_tools: false,
-        queues: Arc::new(MessageQueues::default()),
-    };
+    });
+    config.hooks.push(PolicyHook::new(Arc::new(policy)));
+    config.hooks.push(ContinueOnLength::new(args.continue_on_length));
+    config.hooks.push(RedactSecrets::new(api_key));
     let sink: Arc<dyn EventSink> = match args.output {
         OutputMode::Text => Arc::new(TextProgress),
         OutputMode::Jsonl => Arc::new(JsonlEvents { deltas: args.deltas }),
@@ -277,7 +280,6 @@ fn build_runner(args: &RunArgs) -> Result<Runner> {
     let limits = Limits {
         max_turns: Some(args.max_turns),
         timeout: (args.timeout_secs > 0).then(|| Duration::from_secs(args.timeout_secs)),
-        continue_on_length: args.continue_on_length,
     };
     Ok(Runner::new(config, retry, limits, session, sink))
 }

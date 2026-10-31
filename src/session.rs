@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::ai::{ContentBlock, Message, now_ms};
+#[cfg(test)]
+use crate::ai::ContentBlock;
+use crate::ai::{Message, now_ms};
 
 /// Format version written to new session headers. Version 2 records the system prompt as
 /// system messages in the conversation; version 1 kept it in the header. Version 1 files still
@@ -329,7 +331,7 @@ impl SessionStore {
                 let message = match edits.get(entry.id.as_str()) {
                     None => entry.message.clone(),
                     Some(None) => return None,
-                    Some(Some(text)) => replace_content(&entry.message, text),
+                    Some(Some(text)) => entry.message.with_replaced_text(text),
                 };
                 Some(ProjectedMessage {
                     entry_id: entry.id.clone(),
@@ -398,27 +400,6 @@ fn incomplete_tail(raw: &[u8], error: &serde_json::Error) -> bool {
             serde_json::from_slice::<Entry>(&raw[..utf8.valid_up_to()]).is_err_and(|error| error.is_eof())
         }
         Ok(_) | Err(_) => false,
-    }
-}
-
-fn replace_content(message: &Message, text: &str) -> Message {
-    match message {
-        // `append_context_edit` refuses system targets, so a system message stays as it is.
-        Message::System(system) => Message::System(system.clone()),
-        Message::User { timestamp, .. } => Message::User {
-            content: text.to_string(),
-            timestamp: *timestamp,
-        },
-        Message::Assistant(assistant) => {
-            let mut assistant = assistant.clone();
-            assistant.content = vec![ContentBlock::Text { text: text.to_string() }];
-            Message::Assistant(assistant)
-        }
-        Message::ToolResult(result) => {
-            let mut result = result.clone();
-            result.content = text.to_string();
-            Message::ToolResult(result)
-        }
     }
 }
 

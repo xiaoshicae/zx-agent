@@ -127,6 +127,14 @@ impl Tool for BashTool {
         }
     }
 
+    fn validate_arguments(&self, args: &Value) -> Result<(), String> {
+        let args = Args::deserialize(args).map_err(|e| format!("invalid arguments: {e}"))?;
+        if args.command.trim().is_empty() {
+            return Err("command is empty".to_string());
+        }
+        Ok(())
+    }
+
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
         let args: Args = serde_json::from_value(args).map_err(|e| format!("invalid arguments: {e}"))?;
         if args.command.trim().is_empty() {

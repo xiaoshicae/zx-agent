@@ -70,6 +70,11 @@ pub trait Tool: Send + Sync {
     fn execution_mode(&self) -> ExecutionMode {
         ExecutionMode::Parallel
     }
+    /// Validate before policy and approval. Override for schema and semantic checks;
+    /// execute must still validate direct SDK calls. The default adds no checks.
+    fn validate_arguments(&self, _args: &Value) -> Result<(), String> {
+        Ok(())
+    }
     /// Run the tool. Must honor `ctx.cancel` if it can take long, and bound its output.
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String>;
 }

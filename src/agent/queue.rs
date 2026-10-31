@@ -37,6 +37,14 @@ impl MessageQueues {
     pub fn drain_follow_up(&self) -> Vec<Message> {
         drain(&self.follow_up)
     }
+
+    pub(crate) fn has_steering(&self) -> bool {
+        !lock(&self.steering).is_empty()
+    }
+
+    pub(crate) fn has_follow_up(&self) -> bool {
+        !lock(&self.follow_up).is_empty()
+    }
 }
 
 fn drain(queue: &Mutex<VecDeque<String>>) -> Vec<Message> {

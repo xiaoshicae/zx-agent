@@ -116,6 +116,11 @@ impl Tool for ReadFileTool {
         }
     }
 
+    fn validate_arguments(&self, args: &Value) -> Result<(), String> {
+        let args = Args::deserialize(args).map_err(|e| format!("invalid arguments: {e}"))?;
+        resolve(Path::new("."), &args.path).map(|_| ())
+    }
+
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
         let args: Args = serde_json::from_value(args).map_err(|e| format!("invalid arguments: {e}"))?;
         let path = resolve(&ctx.cwd, &args.path)?;
