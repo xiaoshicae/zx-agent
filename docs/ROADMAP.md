@@ -68,7 +68,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| P0 | 场景默认值移出内核 | 进行中 |
+| P0 | 场景默认值移出内核 | 已完成 |
 | P1 | 钩子、工具调用流水线与人机交互接口 | 未开始 |
 | P2 | 长期会话 `AgentSession` | 未开始 |
 | P3 | 终端对话 `chat` | 未开始 |
@@ -85,9 +85,13 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 
 实现约定：`Limits::max_turns` 与 `run_loop` 的轮次预算使用 `Option<u32>`；`None` 表示不限，`Some(0)` 表示不调用模型。`run --max-turns 0` 保留原有的零轮次语义。预设先放在 Rust 模块 `presets::troubleshoot`，提示词组装与运行机制不依赖该模块。
 
-- [ ] 内置说明 `DEFAULT_INSTRUCTIONS` 移到 `troubleshoot` 预设（先用 Rust 代码表达，P4 改为文件）
-- [ ] `Limits::default()` 改为不限轮次、不限时间、不续写；`troubleshoot` 预设设置 30 轮、15 分钟、续写 1 次
-- [ ] `run` 命令默认使用 `troubleshoot` 预设
+- [x] 内置说明 `DEFAULT_INSTRUCTIONS` 移到 `troubleshoot` 预设（先用 Rust 代码表达，P4 改为文件）
+- [x] `Limits::default()` 改为不限轮次、不限时间、不续写；`troubleshoot` 预设设置 30 轮、15 分钟、续写 1 次
+- [x] `run` 命令默认使用 `troubleshoot` 预设
+
+完成日期：2026-10-31。实施提交：[50a2773](https://github.com/xiaoshicae/zx-agent/commit/50a2773e8cb1c030c2bef5ae0df29b616457d378)。
+本地 macOS 验证：stable 与 Rust 1.88 各 160 项测试通过、6 项付费 API 测试跳过；格式、clippy、全目标构建、MSRV 检查与严格 Rustdoc 构建通过。
+`tests/cli.rs`、`run --help` 和排障说明字符串均与实施前逐字节一致；未新增依赖。
 
 验收：CLI 测试不改即通过；新增测试覆盖内核默认值。
 
