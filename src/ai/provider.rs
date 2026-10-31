@@ -1,16 +1,25 @@
 //! The provider contract.
 
-use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
+use futures::SinkExt;
+use futures::channel::mpsc::{Receiver, Sender, channel};
 use tokio_util::sync::CancellationToken;
 
 use super::types::{Request, StreamEvent};
 
-/// Receiving side of one streamed response.
-///
-/// Unbounded on purpose, like pi's `EventStream`: the producer never waits for the
-/// consumer, so slow event handlers cannot stall reading from the network. One response
-/// produces a bounded number of events, so the queue cannot grow without limit.
-pub type EventReceiver = UnboundedReceiver<StreamEvent>;
+/// Buffered events per response before the producer waits for its consumer.
+pub const STREAM_EVENT_BUFFER: usize = 64;
+
+/// Receiving side of one streamed response, with bounded buffering and backpressure.
+pub type EventReceiver = Receiver<StreamEvent>;
+
+/// Sending side of one response. Producers await sends and stop when the receiver closes.
+pub type EventSender = Sender<StreamEvent>;
+
+/// Create the bounded event channel used by providers. A single sender can hold one
+/// additional in-flight event beyond the shared buffer.
+pub fn event_channel() -> (EventSender, EventReceiver) {
+    channel(STREAM_EVENT_BUFFER)
+}
 
 /// A model provider.
 ///
@@ -28,10 +37,7 @@ pub trait Provider: Send + Sync {
     fn stream(&self, request: Request, cancel: CancellationToken) -> EventReceiver;
 }
 
-/// Send an event to the consumer of a stream.
-///
-/// Sending fails only when the receiver was dropped, which means nobody wants this response
-/// anymore (for example the run ended). There is no one left to tell, so the error is ignored.
-pub(crate) fn send_event(tx: &UnboundedSender<StreamEvent>, event: StreamEvent) {
-    let _ = tx.unbounded_send(event);
+/// Send with backpressure. False means the consumer closed; the producer must stop.
+pub(crate) async fn send_event(tx: &mut EventSender, event: StreamEvent) -> bool {
+    tx.send(event).await.is_ok()
 }

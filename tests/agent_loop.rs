@@ -7,7 +7,6 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::channel::mpsc::unbounded;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
@@ -320,7 +319,7 @@ impl Provider for SilentProvider {
 
     fn stream(&self, _request: Request, _cancel: CancellationToken) -> EventReceiver {
         // Dropping the sender ends the stream at once.
-        let (_sender, receiver) = unbounded();
+        let (_sender, receiver) = zx_agent::ai::provider::event_channel();
         receiver
     }
 }

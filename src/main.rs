@@ -12,8 +12,9 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::agent::{AgentEvent, CommandPolicy, EventSink, LoopConfig, MessageQueues, ToolPolicy};
-use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig, SystemUpdates};
+use zx_agent::ai::openai::{DEFAULT_MAX_RESPONSE_BYTES, OpenAiCompatible, OpenAiConfig, SystemUpdates};
 use zx_agent::ai::retry::RetryPolicy;
+use zx_agent::ai::sse::DEFAULT_MAX_EVENT_BYTES;
 use zx_agent::ai::{Message, StopReason};
 use zx_agent::prompt::{DEFAULT_INSTRUCTIONS, build_system_prompt, environment_section};
 use zx_agent::runner::{Limits, RunOutcome, RunReport, Runner};
@@ -30,7 +31,7 @@ const EXIT_ABORTED: u8 = 5;
 const EXIT_TRUNCATED: u8 = 6;
 
 #[derive(Parser)]
-#[command(name = "zx-agent", version, about = "Minimal agent kernel for unattended automation")]
+#[command(name = "zx-agent", version, about = "Minimal general-purpose agent kernel")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -119,6 +120,14 @@ struct RunArgs {
     #[arg(long)]
     max_tokens: Option<u32>,
 
+    /// Maximum raw streaming response bytes per request, including SSE framing.
+    #[arg(long, default_value_t = DEFAULT_MAX_RESPONSE_BYTES)]
+    max_response_bytes: usize,
+
+    /// Maximum bytes in one SSE event, including framing.
+    #[arg(long, default_value_t = DEFAULT_MAX_EVENT_BYTES)]
+    max_sse_event_bytes: usize,
+
     /// Session file (JSONL). Created if missing; an existing one is continued.
     #[arg(long)]
     session: Option<PathBuf>,
@@ -162,7 +171,7 @@ async fn main() -> ExitCode {
 /// before the run started.
 async fn run(args: RunArgs) -> Result<u8> {
     let prompt = read_prompt(&args.prompt)?;
-    let runner = build_runner(&args)?;
+    let mut runner = build_runner(&args)?;
     let cancel = CancellationToken::new();
     spawn_signal_handler(cancel.clone());
     let report = runner.run(prompt, &cancel).await;
@@ -225,11 +234,19 @@ fn build_runner(args: &RunArgs) -> Result<Runner> {
         Some(path) => SessionStore::create(path, header)?,
         None => SessionStore::in_memory(header),
     };
+    if session.recovered_tail_bytes() > 0 {
+        eprintln!(
+            "[session] recovered incomplete final record; removed {} bytes",
+            session.recovered_tail_bytes()
+        );
+    }
 
     let provider = OpenAiCompatible::new(OpenAiConfig {
         base_url: args.base_url.clone(),
         api_key,
         idle_timeout: Duration::from_secs(args.idle_timeout_secs),
+        max_response_bytes: args.max_response_bytes,
+        max_sse_event_bytes: args.max_sse_event_bytes,
         system_updates: match args.system_updates {
             SystemUpdatesArg::Collapse => SystemUpdates::Collapse,
             SystemUpdatesArg::Inline => SystemUpdates::Inline,

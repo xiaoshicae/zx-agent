@@ -125,7 +125,7 @@ fn print_usage(test: &str, report: &RunReport) {
 async fn answers_with_streamed_text_and_reports_usage() {
     let endpoint = Endpoint::from_env();
     let dir = tempfile::tempdir().unwrap();
-    let (runner, _) = endpoint.setup(endpoint.api_key(), dir.path()).build();
+    let (mut runner, _) = endpoint.setup(endpoint.api_key(), dir.path()).build();
 
     let report = runner
         .run("Reply with exactly the word PONG.", &CancellationToken::new())
@@ -146,7 +146,7 @@ async fn answers_with_streamed_text_and_reports_usage() {
 async fn runs_a_tool_and_answers_from_its_output() {
     let endpoint = Endpoint::from_env();
     let dir = tempfile::tempdir().unwrap();
-    let (runner, _) = endpoint.setup_with_bash(dir.path(), &["seq", "wc"]).build();
+    let (mut runner, _) = endpoint.setup_with_bash(dir.path(), &["seq", "wc"]).build();
 
     let prompt = "Use the bash tool to run `seq 1 7 | wc -l`, then reply with the number only.";
     let report = runner.run(prompt, &CancellationToken::new()).await;
@@ -165,7 +165,7 @@ async fn runs_a_tool_and_answers_from_its_output() {
 async fn a_policy_denial_reaches_the_model_and_the_run_completes() {
     let endpoint = Endpoint::from_env();
     let dir = tempfile::tempdir().unwrap();
-    let (runner, _) = endpoint.setup_with_bash(dir.path(), &["seq"]).build();
+    let (mut runner, _) = endpoint.setup_with_bash(dir.path(), &["seq"]).build();
 
     let prompt = "Call the bash tool once with the command `ls`, then say in one sentence whether it was blocked.";
     let report = runner.run(prompt, &CancellationToken::new()).await;
@@ -185,7 +185,7 @@ async fn an_answer_over_the_output_limit_is_reported_as_truncated() {
     let dir = tempfile::tempdir().unwrap();
     let mut setup = endpoint.setup(endpoint.api_key(), dir.path());
     setup.config.max_tokens = Some(16);
-    let (runner, _) = setup.build();
+    let (mut runner, _) = setup.build();
 
     let report = runner
         .run("Count from 1 to 200, separated by spaces.", &CancellationToken::new())
@@ -205,7 +205,7 @@ async fn a_resumed_session_gives_the_model_the_new_environment() {
     // First run in "first-dir"; the resumed run moves to "second-dir".
     let first_dir = dir.path().join("first-dir");
     std::fs::create_dir(&first_dir).unwrap();
-    let (runner, _) = RunnerSetup {
+    let (mut runner, _) = RunnerSetup {
         session: SessionStore::create(&path, common::header()).unwrap(),
         ..endpoint.setup(endpoint.api_key(), &first_dir)
     }
@@ -216,7 +216,7 @@ async fn a_resumed_session_gives_the_model_the_new_environment() {
 
     let second_dir = dir.path().join("second-dir");
     std::fs::create_dir(&second_dir).unwrap();
-    let (runner, _) = RunnerSetup {
+    let (mut runner, _) = RunnerSetup {
         session: SessionStore::open(&path).unwrap(),
         ..endpoint.setup(endpoint.api_key(), &second_dir)
     }
@@ -234,7 +234,7 @@ async fn a_resumed_session_gives_the_model_the_new_environment() {
 async fn an_invalid_key_fails_without_retrying() {
     let endpoint = Endpoint::from_env();
     let dir = tempfile::tempdir().unwrap();
-    let (runner, _) = RunnerSetup {
+    let (mut runner, _) = RunnerSetup {
         retry: fast_retry(2),
         ..endpoint.setup("zx-e2e-invalid-key".into(), dir.path())
     }

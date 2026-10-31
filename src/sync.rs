@@ -2,6 +2,18 @@
 
 use std::sync::{Mutex, MutexGuard};
 
+use tokio::task::JoinHandle;
+
+/// A background task owned by an operation. Dropping a plain JoinHandle detaches it;
+/// these tasks must instead stop when their run or tool future is dropped.
+pub(crate) struct AbortOnDrop<T>(pub(crate) JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Lock `mutex`, recovering the data if a previous holder panicked.
 ///
 /// Poisoning only records that some holder panicked. Every critical section in this crate

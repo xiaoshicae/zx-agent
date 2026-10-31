@@ -25,6 +25,8 @@ pub enum Reply {
     Stall(Vec<Value>),
     /// Answer with an HTTP error status and a JSON body.
     Status(u16, &'static str),
+    /// A complete HTTP response, for custom headers and invalid/oversized payloads.
+    Raw(String),
 }
 
 impl Reply {
@@ -130,6 +132,10 @@ async fn answer(mut stream: TcpStream, reply: Reply, log: Arc<Mutex<Vec<Captured
             );
             stream.write_all(response.as_bytes()).await.unwrap();
             stream.shutdown().await.unwrap();
+        }
+        Reply::Raw(response) => {
+            // Limit/cancellation tests intentionally close the connection early.
+            let _ = stream.write_all(response.as_bytes()).await;
         }
     }
 }

@@ -3,11 +3,10 @@
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
-use futures::channel::mpsc::unbounded;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use super::provider::{EventReceiver, Provider, send_event};
+use super::provider::{EventReceiver, Provider, event_channel, send_event};
 use super::types::{AssistantMessage, ContentBlock, Delta, Request, StopReason, StreamEvent, Usage, now_ms};
 use crate::sync::lock;
 
@@ -99,7 +98,7 @@ impl Provider for FauxProvider {
         let model = request.model.clone();
         lock(&self.requests).push(request);
         let step = lock(&self.steps).pop_front();
-        let (tx, rx) = unbounded();
+        let (mut tx, rx) = event_channel();
         tokio::spawn(async move {
             let failure = |stop, error: &str| AssistantMessage::failure("faux", &model, stop, error);
             let event = match step {
@@ -111,10 +110,14 @@ impl Provider for FauxProvider {
                 }
                 Some(FauxStep::Respond { blocks, stop }) => {
                     let timestamp = now_ms();
-                    send_event(&tx, StreamEvent::Start);
+                    if !send_event(&mut tx, StreamEvent::Start).await {
+                        return;
+                    }
                     for block in &blocks {
                         for delta in deltas_for(block) {
-                            send_event(&tx, StreamEvent::Delta(delta));
+                            if !send_event(&mut tx, StreamEvent::Delta(delta)).await {
+                                return;
+                            }
                         }
                     }
                     let aborted = cancel.is_cancelled();
@@ -130,6 +133,7 @@ impl Provider for FauxProvider {
                         },
                         stop_reason: if aborted { StopReason::Aborted } else { stop },
                         error_message: aborted.then(|| "Request was aborted".to_string()),
+                        provider_error: None,
                         timestamp,
                         duration_ms: Some(0),
                     };
@@ -139,7 +143,8 @@ impl Provider for FauxProvider {
                     }
                 }
             };
-            send_event(&tx, event);
+            // A failed terminal send only means its consumer has gone away.
+            send_event(&mut tx, event).await;
         });
         rx
     }
@@ -157,6 +162,7 @@ fn deltas_for(block: &ContentBlock) -> Vec<Delta> {
                 name: name.clone(),
             },
             Delta::ToolCallArgs {
+                id: id.clone(),
                 text: arguments.to_string(),
             },
         ],
@@ -199,5 +205,35 @@ mod tests {
             events.as_slice(),
             [StreamEvent::Error(message)] if message.stop_reason == StopReason::Error
         ));
+    }
+
+    #[tokio::test]
+    async fn a_burst_larger_than_the_buffer_keeps_every_delta_and_the_final_message() {
+        let count = crate::ai::provider::STREAM_EVENT_BUFFER * 3;
+        let blocks = (0..count).map(|_| ContentBlock::Text { text: "x".into() }).collect();
+        let provider = FauxProvider::new([FauxStep::Respond {
+            blocks,
+            stop: StopReason::Stop,
+        }]);
+        let request = Request {
+            model: "m".into(),
+            messages: vec![],
+            tools: vec![],
+            max_tokens: None,
+        };
+        let mut receiver = provider.stream(request, CancellationToken::new());
+        let mut deltas = 0;
+        let mut final_text = None;
+        while let Some(event) = receiver.next().await {
+            match event {
+                StreamEvent::Delta(_) => deltas += 1,
+                StreamEvent::Done(message) => final_text = Some(message.text()),
+                StreamEvent::Error(message) => panic!("unexpected provider error: {message:?}"),
+                StreamEvent::Start => {}
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(deltas, count);
+        assert_eq!(final_text, Some("x".repeat(count)));
     }
 }

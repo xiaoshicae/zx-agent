@@ -9,12 +9,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, Command};
-use tokio::task::JoinHandle;
 
 use super::truncate::{MAX_BYTES, MAX_LINES, truncate_tail};
 use crate::agent::{Tool, ToolContext, ToolOutput};
 use crate::ai::ToolDef;
-use crate::sync::lock;
+use crate::sync::{AbortOnDrop, lock};
 
 /// Bytes kept per stream while reading. Older output is dropped; only the tail is returned.
 const CAPTURE_LIMIT: usize = 1024 * 1024;
@@ -66,6 +65,33 @@ enum End {
     WaitFailed(String),
     TimedOut,
     Cancelled,
+}
+
+/// Owns the process group until it has been signalled, including future-drop paths.
+struct ProcessGroup(Option<u32>);
+
+impl ProcessGroup {
+    fn kill(&mut self) {
+        let pid = self.0.take();
+        #[cfg(unix)]
+        if let Some(pid) = pid.and_then(|pid| libc::pid_t::try_from(pid).ok()) {
+            // SAFETY: kill(2) has no memory-safety preconditions. The child leads this
+            // process group, so a negative PID targets its pipelines and descendants.
+            // ESRCH only means the group has already ended, which is the goal.
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+        }
+        // Other platforms still terminate the child through kill_on_drop/start_kill.
+        #[cfg(not(unix))]
+        let _ = pid;
+    }
+}
+
+impl Drop for ProcessGroup {
+    fn drop(&mut self) {
+        self.kill();
+    }
 }
 
 #[async_trait]
@@ -127,7 +153,7 @@ impl Tool for BashTool {
         let mut child = command
             .spawn()
             .map_err(|e| format!("failed to start {}: {e}", self.shell))?;
-        let pid = child.id();
+        let mut group = ProcessGroup(child.id());
         let (stdout, stdout_reader) = spawn_reader(child.stdout.take());
         let (stderr, stderr_reader) = spawn_reader(child.stderr.take());
 
@@ -142,7 +168,8 @@ impl Tool for BashTool {
         // Kill the group after a normal exit too: background children (`cmd &`, daemons) would
         // otherwise outlive the call and the agent. It also closes the output pipes they hold,
         // so reading does not wait for PIPE_DRAIN_TIMEOUT.
-        kill_process_group(pid, &mut child).await;
+        group.kill();
+        stop_child(&mut child).await;
         for reader in [stdout_reader, stderr_reader].into_iter().flatten() {
             finish_reader(reader).await;
         }
@@ -191,7 +218,7 @@ impl Tool for BashTool {
     }
 }
 
-fn spawn_reader<R>(reader: Option<R>) -> (Arc<Mutex<Capture>>, Option<JoinHandle<()>>)
+fn spawn_reader<R>(reader: Option<R>) -> (Arc<Mutex<Capture>>, Option<AbortOnDrop<()>>)
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
@@ -217,35 +244,20 @@ where
             }
         }
     });
-    (capture, Some(handle))
+    (capture, Some(AbortOnDrop(handle)))
 }
 
-async fn finish_reader(mut handle: JoinHandle<()>) {
-    if tokio::time::timeout(PIPE_DRAIN_TIMEOUT, &mut handle).await.is_err() {
-        handle.abort();
-    }
+async fn finish_reader(mut handle: AbortOnDrop<()>) {
+    // Reader failure leaves the partial capture available. On timeout its owner aborts
+    // it on drop; the command's status still reports why execution ended.
+    let _ = tokio::time::timeout(PIPE_DRAIN_TIMEOUT, &mut handle.0).await;
 }
 
 fn take_capture(capture: &Mutex<Capture>) -> Capture {
     std::mem::take(&mut *lock(capture))
 }
 
-async fn kill_process_group(pid: Option<u32>, child: &mut Child) {
-    // Kernel process ids are `pid_t` values, so the conversion back cannot fail in practice.
-    #[cfg(unix)]
-    if let Some(pid) = pid.and_then(|pid| libc::pid_t::try_from(pid).ok()) {
-        // SAFETY: kill(2) has no memory-safety preconditions. A negative pid signals the
-        // whole process group, which the shell leads because of `process_group(0)`. The group
-        // id outlives the reaped shell while any member lives, because POSIX does not reuse a
-        // process group id before the group ends.
-        // The result is not checked: the only expected failure is that the group already exited.
-        unsafe {
-            libc::kill(-pid, libc::SIGKILL);
-        }
-    }
-    // Only the Unix process-group kill needs the pid.
-    #[cfg(not(unix))]
-    let _ = pid;
+async fn stop_child(child: &mut Child) {
     // Fails only if the child already exited, which is the goal.
     let _ = child.start_kill();
     // Reap the child so it does not linger as a zombie. If it takes longer than this,
@@ -336,6 +348,56 @@ mod tests {
         });
         let output = tool.execute(json!({"command": "sleep 30"}), &ctx).await.unwrap();
         assert!(output.content.contains("cancelled"), "{}", output.content);
+    }
+
+    #[tokio::test]
+    async fn dropping_a_command_stops_its_background_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("child.pid");
+        let quoted = pid_path.to_string_lossy().replace('\'', "'\\''");
+        let command = format!("sleep 30 & echo $! > '{quoted}'; wait");
+        let running =
+            tokio::spawn(async move { BashTool::default().execute(json!({"command": command}), &ctx()).await });
+        // Wait for the child's published PID rather than assuming that spawn has finished.
+        let pid = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(text) = tokio::fs::read_to_string(&pid_path).await
+                    && let Ok(pid) = text.trim().parse::<u32>()
+                {
+                    break pid.to_string();
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        running.abort();
+        assert!(running.await.unwrap_err().is_cancelled());
+        let stopped = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let alive = Command::new("ps")
+                    .args(["-p", &pid])
+                    .output()
+                    .await
+                    .unwrap()
+                    .status
+                    .success();
+                if !alive {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        if stopped.is_err() {
+            // Cleanup also runs against the old implementation, before asserting failure.
+            Command::new("kill").arg(&pid).status().await.unwrap();
+        }
+        assert!(
+            stopped.is_ok(),
+            "background child {pid} outlived the dropped tool future"
+        );
     }
 
     #[tokio::test]

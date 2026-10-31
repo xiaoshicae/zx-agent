@@ -7,16 +7,21 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
-use futures::channel::mpsc::{UnboundedSender, unbounded};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use super::provider::{EventReceiver, Provider, send_event};
-use super::sse::SseParser;
+use super::provider::{EventReceiver, EventSender, Provider, event_channel, send_event};
+use super::sse::{DEFAULT_MAX_EVENT_BYTES, SseParser};
 use super::system_prompt::SystemPrompt;
 use super::types::{
-    AssistantMessage, ContentBlock, Delta, Message, Request, StopReason, StreamEvent, Usage, duration_ms, now_ms,
+    AssistantMessage, ContentBlock, Delta, Message, ProviderError, Request, StopReason, StreamEvent, Usage,
+    duration_ms, now_ms,
 };
+
+/// Default maximum raw SSE response bytes per model request, including reasoning.
+pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+/// Error bodies only add diagnostic detail; keep their memory use independent of the server.
+const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
 
 /// Response fields that carry reasoning text: `reasoning_content` (DeepSeek, vLLM) or
 /// `reasoning` (OpenRouter, Ollama). The first one present wins; replay uses the same name.
@@ -38,19 +43,23 @@ pub struct OpenAiConfig {
     pub use_system_proxy: bool,
     /// How system prompt changes after the first one reach the model.
     pub system_updates: SystemUpdates,
+    /// Maximum raw streaming response bytes per request.
+    pub max_response_bytes: usize,
+    /// Maximum bytes in a single SSE event, including framing.
+    pub max_sse_event_bytes: usize,
 }
 
 /// How system prompt changes after the first one are sent (pi: the
 /// `supportsMidConvoSystemMessages` compat flag).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SystemUpdates {
-    /// Fold every version into one leading system message. Works with any server, but the
-    /// model does not see when the prompt changed, and a change invalidates the prompt cache.
+    /// Fold versions into one leading system message, for servers that reject mid-conversation
+    /// system messages. Prompt changes can reduce reuse of the previous request prefix.
     /// pi's default for OpenAI-compatible servers.
     #[default]
     Collapse,
-    /// Send each change as a system message where it happened. Earlier requests stay a prefix
-    /// of later ones, but the server must accept system messages after the conversation starts.
+    /// Send changes at their original positions. With other request settings unchanged,
+    /// earlier messages remain a prefix. The server must accept mid-conversation system messages.
     Inline,
 }
 
@@ -64,6 +73,8 @@ impl Default for OpenAiConfig {
             connect_timeout: Duration::from_secs(15),
             use_system_proxy: true,
             system_updates: SystemUpdates::default(),
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
+            max_sse_event_bytes: DEFAULT_MAX_EVENT_BYTES,
         }
     }
 }
@@ -75,8 +86,16 @@ pub struct OpenAiCompatible {
 }
 
 impl OpenAiCompatible {
-    /// Build the HTTP client. Fails only if the TLS backend cannot be initialized.
+    /// Validate byte budgets and build the HTTP client.
     pub fn new(config: OpenAiConfig) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            config.max_response_bytes > 0,
+            "max_response_bytes must be greater than zero"
+        );
+        anyhow::ensure!(
+            config.max_sse_event_bytes > 0,
+            "max_sse_event_bytes must be greater than zero"
+        );
         let mut builder = reqwest::Client::builder().connect_timeout(config.connect_timeout);
         if !config.use_system_proxy {
             builder = builder.no_proxy();
@@ -94,7 +113,7 @@ impl Provider for OpenAiCompatible {
     }
 
     fn stream(&self, request: Request, cancel: CancellationToken) -> EventReceiver {
-        let (tx, rx) = unbounded();
+        let (tx, rx) = event_channel();
         let client = self.client.clone();
         let config = self.config.clone();
         tokio::spawn(async move { run(client, config, request, cancel, tx).await });
@@ -104,7 +123,17 @@ impl Provider for OpenAiCompatible {
 
 enum Failure {
     Aborted,
-    Error(String),
+    Closed,
+    Error { details: ProviderError, message: String },
+}
+
+impl Failure {
+    fn error(details: ProviderError, message: impl Into<String>) -> Self {
+        Self::Error {
+            details,
+            message: message.into(),
+        }
+    }
 }
 
 async fn run(
@@ -112,7 +141,7 @@ async fn run(
     config: OpenAiConfig,
     request: Request,
     cancel: CancellationToken,
-    tx: UnboundedSender<StreamEvent>,
+    mut tx: EventSender,
 ) {
     let started = Instant::now();
     let mut acc = Accumulator::new(&config.provider_name, &request.model, now_ms());
@@ -122,23 +151,31 @@ async fn run(
     let outcome = tokio::select! {
         biased;
         _ = cancel.cancelled() => Err(Failure::Aborted),
-        result = stream_response(&client, &config, &url, &body, &mut acc, &tx) => result.map_err(Failure::Error),
+        result = stream_response(&client, &config, &url, &body, &mut acc, &mut tx) => result,
     };
 
     // Failures keep the content streamed so far, like pi's providers.
     let mut message = match outcome {
-        Ok(()) => acc
-            .finish()
-            .unwrap_or_else(|error| acc.failure(StopReason::Error, error)),
+        Ok(()) => acc.finish().unwrap_or_else(|error| {
+            let mut message = acc.failure(StopReason::Error, error);
+            message.provider_error = Some(ProviderError::Protocol);
+            message
+        }),
         Err(Failure::Aborted) => acc.failure(StopReason::Aborted, "Request was aborted"),
-        Err(Failure::Error(error)) => acc.failure(StopReason::Error, error),
+        Err(Failure::Closed) => return,
+        Err(Failure::Error { details, message }) => {
+            let mut failed = acc.failure(StopReason::Error, message);
+            failed.provider_error = Some(details);
+            failed
+        }
     };
     message.duration_ms = Some(duration_ms(started.elapsed()));
     let event = match message.stop_reason {
         StopReason::Error | StopReason::Aborted => StreamEvent::Error(message),
         StopReason::Stop | StopReason::Length | StopReason::ToolUse => StreamEvent::Done(message),
     };
-    send_event(&tx, event);
+    // Once the consumer closes, a terminal event has nobody left to report to.
+    send_event(&mut tx, event).await;
 }
 
 async fn stream_response(
@@ -147,8 +184,8 @@ async fn stream_response(
     url: &str,
     body: &Value,
     acc: &mut Accumulator,
-    tx: &UnboundedSender<StreamEvent>,
-) -> Result<(), String> {
+    tx: &mut EventSender,
+) -> Result<(), Failure> {
     let idle = config.idle_timeout;
     let mut request = client.post(url).json(body);
     if let Some(key) = config.api_key.as_deref().filter(|key| !key.is_empty()) {
@@ -157,47 +194,89 @@ async fn stream_response(
     let response = tokio::time::timeout(idle, request.send())
         .await
         .map_err(|_| {
-            format!(
-                "request timed out after {}s waiting for response headers",
-                idle.as_secs()
+            Failure::error(
+                ProviderError::Timeout,
+                format!(
+                    "request timed out after {}s waiting for response headers",
+                    idle.as_secs()
+                ),
             )
         })?
-        .map_err(|e| format!("request failed: {}", with_causes(&e)))?;
+        .map_err(|e| transport_failure("request failed", &e))?;
 
     let status = response.status();
     if !status.is_success() {
-        // The body only adds detail; if it cannot be read, the status code still describes the failure.
-        let text = tokio::time::timeout(idle, response.text())
-            .await
+        // Only numeric delay-seconds hints are used. Invalid/HTTP-date hints are optional
+        // and fall back to local backoff; they do not invalidate the HTTP error.
+        let retry_after_ms = response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .map(|seconds| seconds.saturating_mul(1000));
+        // Body errors only lose diagnostics; the HTTP status remains authoritative.
+        let bytes = match tokio::time::timeout(
+            idle,
+            read_error_body(response, MAX_ERROR_BODY_BYTES.min(config.max_response_bytes)),
+        )
+        .await
+        {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(_)) | Err(_) => Vec::new(),
+        };
+        let code = serde_json::from_slice::<Value>(&bytes)
             .ok()
-            .and_then(Result::ok)
-            .unwrap_or_default();
-        return Err(format!("HTTP {}: {}", status.as_u16(), clip(text.trim(), 2000)));
+            .and_then(|body| body.get("error").and_then(error_code));
+        let text = String::from_utf8_lossy(&bytes);
+        return Err(Failure::error(
+            ProviderError::Http {
+                status: status.as_u16(),
+                code,
+                retry_after_ms,
+            },
+            format!("HTTP {}: {}", status.as_u16(), clip(text.trim(), 2000)),
+        ));
     }
 
-    send_event(tx, StreamEvent::Start);
-    let mut parser = SseParser::default();
+    if !send_event(tx, StreamEvent::Start).await {
+        return Err(Failure::Closed);
+    }
+    let mut parser = SseParser::new(config.max_sse_event_bytes);
     let mut body = response.bytes_stream();
+    let mut received_bytes = 0;
     loop {
-        let next = tokio::time::timeout(idle, body.next())
-            .await
-            .map_err(|_| format!("stream stalled: no data for {}s", idle.as_secs()))?;
+        let next = tokio::time::timeout(idle, body.next()).await.map_err(|_| {
+            Failure::error(
+                ProviderError::Timeout,
+                format!("stream stalled: no data for {}s", idle.as_secs()),
+            )
+        })?;
         let Some(chunk) = next else { break };
-        let chunk = chunk.map_err(|e| format!("stream read failed: {}", with_causes(&e)))?;
-        for data in parser.push(&chunk) {
-            if handle_data(&data, acc, tx)? {
+        let chunk = chunk.map_err(|e| transport_failure("stream read failed", &e))?;
+        if chunk.len() > config.max_response_bytes.saturating_sub(received_bytes) {
+            return Err(Failure::error(
+                ProviderError::ResourceLimit,
+                format!("stream response exceeds the {} byte limit", config.max_response_bytes,),
+            ));
+        }
+        received_bytes += chunk.len();
+        let events = parser
+            .push(&chunk)
+            .map_err(|e| Failure::error(ProviderError::ResourceLimit, e))?;
+        for data in events {
+            if handle_data(&data, acc, tx).await? {
                 return Ok(());
             }
         }
     }
     if let Some(data) = parser.finish() {
-        handle_data(&data, acc, tx)?;
+        handle_data(&data, acc, tx).await?;
     }
     Ok(())
 }
 
 /// Apply one SSE payload. Returns true at the `[DONE]` sentinel.
-fn handle_data(data: &str, acc: &mut Accumulator, tx: &UnboundedSender<StreamEvent>) -> Result<bool, String> {
+async fn handle_data(data: &str, acc: &mut Accumulator, tx: &mut EventSender) -> Result<bool, Failure> {
     let data = data.trim();
     if data == "[DONE]" {
         return Ok(true);
@@ -205,11 +284,61 @@ fn handle_data(data: &str, acc: &mut Accumulator, tx: &UnboundedSender<StreamEve
     if data.is_empty() {
         return Ok(false);
     }
-    let chunk: Value = serde_json::from_str(data).map_err(|e| format!("invalid stream chunk: {e}"))?;
-    for delta in acc.apply(&chunk)? {
-        send_event(tx, StreamEvent::Delta(delta));
+    let chunk: Value = serde_json::from_str(data)
+        .map_err(|e| Failure::error(ProviderError::Protocol, format!("invalid stream chunk: {e}")))?;
+    if let Some(error) = chunk.get("error").filter(|error| !error.is_null()) {
+        let text = error
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| error.to_string());
+        return Err(Failure::error(
+            ProviderError::Provider {
+                code: error_code(error),
+            },
+            format!("provider error: {text}"),
+        ));
+    }
+    for delta in acc
+        .apply(&chunk)
+        .map_err(|e| Failure::error(ProviderError::Protocol, e))?
+    {
+        if !send_event(tx, StreamEvent::Delta(delta)).await {
+            return Err(Failure::Closed);
+        }
     }
     Ok(false)
+}
+
+fn error_code(error: &Value) -> Option<String> {
+    error
+        .get("code")
+        .and_then(Value::as_str)
+        .or_else(|| error.get("type").and_then(Value::as_str))
+        .map(str::to_string)
+}
+
+fn transport_failure(operation: &str, error: &reqwest::Error) -> Failure {
+    let details = if error.is_timeout() {
+        ProviderError::Timeout
+    } else {
+        ProviderError::Transport
+    };
+    Failure::error(details, format!("{operation}: {}", with_causes(error)))
+}
+
+async fn read_error_body(response: reqwest::Response, max_bytes: usize) -> Result<Vec<u8>, reqwest::Error> {
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        let keep = chunk.len().min(max_bytes.saturating_sub(bytes.len()));
+        bytes.extend_from_slice(&chunk[..keep]);
+        if bytes.len() == max_bytes {
+            break;
+        }
+    }
+    Ok(bytes)
 }
 
 /// `error` followed by its causes. reqwest's own message omits the cause, such as
@@ -513,10 +642,11 @@ impl Accumulator {
             .unwrap_or_default();
         let slot = match self.tool_slots.get(&index) {
             Some(&slot) => {
-                if let Block::Tool { name: existing, .. } = &mut self.blocks[slot] {
-                    if existing.is_empty() && !name.is_empty() {
-                        *existing = name.to_string();
-                    }
+                if let Block::Tool { name: existing, .. } = &mut self.blocks[slot]
+                    && existing.is_empty()
+                    && !name.is_empty()
+                {
+                    *existing = name.to_string();
                 }
                 slot
             }
@@ -545,11 +675,11 @@ impl Accumulator {
             .and_then(|f| f.get("arguments"))
             .and_then(Value::as_str)
             .filter(|f| !f.is_empty())
+            && let Block::Tool { args, id, .. } = &mut self.blocks[slot]
         {
-            if let Block::Tool { args, .. } = &mut self.blocks[slot] {
-                args.push_str(fragment);
-            }
+            args.push_str(fragment);
             deltas.push(Delta::ToolCallArgs {
+                id: id.clone(),
                 text: fragment.to_string(),
             });
         }
@@ -619,6 +749,9 @@ impl Accumulator {
             usage: self.usage.clone(),
             stop_reason,
             error_message,
+            provider_error: (stop_reason == StopReason::Error).then(|| ProviderError::Provider {
+                code: Some("content_filter".to_string()),
+            }),
             timestamp: self.timestamp,
             duration_ms: None,
         })
@@ -632,6 +765,7 @@ impl Accumulator {
             usage: self.usage.clone(),
             stop_reason,
             error_message: Some(error.into()),
+            provider_error: None,
             timestamp: self.timestamp,
             duration_ms: None,
         }
@@ -699,6 +833,39 @@ mod tests {
         assert!(acc.finish().is_err());
         let failed = acc.failure(StopReason::Error, "cut off");
         assert!(failed.tool_calls()[0].arguments_error.is_some());
+    }
+
+    #[test]
+    fn interleaved_argument_deltas_identify_their_tool_call() {
+        let mut acc = Accumulator::new("p", "m", 1);
+        let deltas = apply_all(
+            &mut acc,
+            &[
+                json!({"choices":[{"delta":{"tool_calls":[
+                    {"index":0,"id":"a","function":{"name":"bash","arguments":"{"}},
+                    {"index":1,"id":"b","function":{"name":"read_file","arguments":"{"}}
+                ]}}]}),
+                json!({"choices":[{"delta":{"tool_calls":[
+                {"index":0,"function":{"arguments":"}"}},
+                {"index":1,"function":{"arguments":"}"}}
+            ]},"finish_reason":"tool_calls"}]}),
+            ],
+        );
+        let args: Vec<_> = deltas
+            .into_iter()
+            .filter_map(|delta| {
+                if matches!(delta, Delta::ToolCallArgs { .. }) {
+                    Some(serde_json::to_value(delta).unwrap())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert_eq!(
+            args.iter().map(|a| a["id"].as_str()).collect::<Vec<_>>(),
+            [Some("a"), Some("b"), Some("a"), Some("b")]
+        );
     }
 
     #[test]

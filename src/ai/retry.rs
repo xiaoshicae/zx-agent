@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use super::types::{AssistantMessage, StopReason};
+use super::types::{AssistantMessage, ProviderError, StopReason};
 
 /// How often and how patiently to retry failed responses.
 #[derive(Clone, Debug)]
@@ -29,6 +29,18 @@ impl RetryPolicy {
     pub fn delay(&self, attempt: u32) -> Duration {
         let factor = 2u32.saturating_pow(attempt.saturating_sub(1));
         self.base_delay.saturating_mul(factor).min(self.max_delay)
+    }
+
+    /// Backoff including a server's numeric Retry-After hint, capped by max_delay.
+    pub fn delay_for(&self, attempt: u32, message: &AssistantMessage) -> Duration {
+        let hint = match &message.provider_error {
+            Some(ProviderError::Http {
+                retry_after_ms: Some(ms),
+                ..
+            }) => Duration::from_millis(*ms),
+            _ => Duration::ZERO,
+        };
+        self.delay(attempt).max(hint).min(self.max_delay)
     }
 }
 
@@ -71,11 +83,32 @@ const RETRYABLE: &[&str] = &[
     "temporarily",
 ];
 
-/// Whether a failed response looks transient. Like pi, this matches error text:
-/// providers do not report a common machine-readable "retryable" flag.
+/// Whether a failed response is transient. Structured metadata takes precedence;
+/// messages from older sessions and providers without metadata use the pi text fallback.
 pub fn is_retryable(message: &AssistantMessage) -> bool {
     if message.stop_reason != StopReason::Error {
         return false;
+    }
+    match &message.provider_error {
+        Some(ProviderError::Http { status, code, .. }) => {
+            let permanent = code.as_deref().is_some_and(permanent_code);
+            return !permanent && matches!(status, 408 | 429 | 500..=599);
+        }
+        Some(ProviderError::Provider { code: Some(code) }) => {
+            return matches!(
+                code.to_ascii_lowercase().as_str(),
+                "rate_limit_exceeded"
+                    | "rate_limit_error"
+                    | "server_error"
+                    | "internal_error"
+                    | "overloaded_error"
+                    | "server_busy"
+                    | "timeout"
+            );
+        }
+        Some(ProviderError::Transport | ProviderError::Timeout) => return true,
+        Some(ProviderError::Protocol | ProviderError::ResourceLimit) => return false,
+        Some(ProviderError::Provider { code: None }) | None => {}
     }
     let Some(error) = message.error_message.as_deref() else {
         return false;
@@ -85,6 +118,18 @@ pub fn is_retryable(message: &AssistantMessage) -> bool {
         return false;
     }
     RETRYABLE.iter().any(|pattern| mentions(&error, pattern))
+}
+
+fn permanent_code(code: &str) -> bool {
+    matches!(
+        code.to_ascii_lowercase().as_str(),
+        "insufficient_quota"
+            | "billing_hard_limit_reached"
+            | "invalid_api_key"
+            | "context_length_exceeded"
+            | "authentication_error"
+            | "permission_error"
+    )
 }
 
 /// Whether `error` contains `pattern`. A number must stand alone, with no letter or digit
@@ -125,6 +170,50 @@ mod tests {
             "HTTP 400: unknown model (request_id: 9d500a1b-0c2e)"
         )));
         assert!(is_retryable(&failed("HTTP 503: busy (request_id: 1401ab-77)")));
+    }
+
+    #[test]
+    fn structured_status_and_error_codes_override_text() {
+        let mut message = failed("request_id: 401; billing service connection");
+        message.provider_error = Some(ProviderError::Http {
+            status: 503,
+            code: None,
+            retry_after_ms: None,
+        });
+        assert!(is_retryable(&message));
+        message.provider_error = Some(ProviderError::Http {
+            status: 400,
+            code: None,
+            retry_after_ms: None,
+        });
+        assert!(!is_retryable(&message));
+        message.provider_error = Some(ProviderError::Http {
+            status: 429,
+            code: Some("insufficient_quota".into()),
+            retry_after_ms: None,
+        });
+        assert!(!is_retryable(&message));
+        message.provider_error = Some(ProviderError::ResourceLimit);
+        assert!(!is_retryable(&message));
+    }
+
+    #[test]
+    fn server_retry_hints_respect_the_configured_delay_cap() {
+        let policy = RetryPolicy::default();
+        let mut message = failed("rate limited");
+        message.provider_error = Some(ProviderError::Http {
+            status: 429,
+            code: None,
+            retry_after_ms: Some(7000),
+        });
+        assert_eq!(policy.delay_for(1, &message), Duration::from_secs(7));
+        assert_eq!(policy.delay_for(3, &message), Duration::from_secs(8));
+        message.provider_error = Some(ProviderError::Http {
+            status: 429,
+            code: None,
+            retry_after_ms: Some(120_000),
+        });
+        assert_eq!(policy.delay_for(1, &message), policy.max_delay);
     }
 
     #[test]
