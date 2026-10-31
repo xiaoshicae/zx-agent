@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>zx-agent 通用内核技术方案（评审稿 v0.6）</title>
+<title>zx-agent 通用内核技术方案（评审稿 v0.7）</title>
 <style>
   :root {
     --ink: #1f2328; --muted: #57606a; --line: #d0d7de; --bg: #ffffff; --soft: #f6f8fa;
@@ -60,7 +60,7 @@
 <main>
 
 <h1>zx-agent 通用内核技术方案</h1>
-<p class="meta">评审稿 v0.6 · 2026年11月 · 状态：已评审，D5 待定 · 代码核对基线：commit <code>a570e91</code> 及本次 P1 改动（2026-11-01）</p>
+<p class="meta">评审稿 v0.7 · 2026年11月 · 状态：已评审，D5 待定 · 代码核对基线：commit <code>93dc4b9</code> 及本次 P2 改动（2026-11-01）</p>
 <p class="meta">本方案由 AI 辅助起草。调研来源见第 11 节；产品行为以所列版本和资料日期为准，论文结果不代表本项目实测，未核实项明确标注。</p>
 
 <div class="box key">
@@ -93,13 +93,13 @@
 
 <h2 id="s1">1. 背景、目标与约束</h2>
 <h3>1.1 现状</h3>
-<p>zx-agent v0.1.0 已提供无人值守的 <code>run</code> 与 Rust SDK（验证命令与覆盖范围见 README；真实 API 测试默认跳过）。P0 已将排障说明、运行上限与续写默认值移到 <code>presets::troubleshoot</code>；内核默认不限轮次、不限时间、不自动续写。以下 4 处仍缺少其他场景所需的接口：</p>
+<p>zx-agent v0.1.0 已提供无人值守的 <code>run</code> 与 Rust SDK（验证命令与覆盖范围见 README；真实 API 测试默认跳过）。P0 已将排障说明、运行上限与续写默认值移到 <code>presets::troubleshoot</code>；内核默认不限轮次、不限时间、不自动续写。P1、P2 已落实钩子和共享会话，以下列出四处当前进展及后续接口：</p>
 <table>
-  <tr><th>位置</th><th>待实施内容</th></tr>
-  <tr><td><code>src/agent/policy.rs</code></td><td><code>Decision</code> 只有允许和拒绝，没有“询问”</td></tr>
-  <tr><td><code>src/agent/agent_loop.rs</code></td><td>只有工具调用前的策略检查，没有调用后、请求前、回合结束时的扩展点</td></tr>
-  <tr><td><code>src/runner.rs</code></td><td>已支持顺序多次运行并保留会话，以 <code>run(&amp;mut self)</code> 限制重叠调用；缺少统一会话 API、多个订阅者与切换模型</td></tr>
-  <tr><td><code>src/main.rs</code></td><td>只有 <code>run</code> 子命令，以退出码表示结果，支持 text 和 JSONL 输出</td></tr>
+  <tr><th>位置</th><th>进展与后续工作</th></tr>
+  <tr><td><code>src/agent/policy.rs</code></td><td>P1 已实现 Allow / Ask / Deny 与 NoHuman，终端审批待 P3</td></tr>
+  <tr><td><code>src/agent/agent_loop.rs</code></td><td>P1 已接入六个 Hooks；压缩策略待 P5</td></tr>
+  <tr><td><code>src/agent_session.rs</code></td><td>P2 已在 Runner 外提供共享会话 API、Busy 互斥、多个订阅者与模型切换；run 和 SDK 共用此入口</td></tr>
+  <tr><td><code>src/main.rs</code></td><td>run 已接入 AgentSession；chat 与 acp 前端分别待 P3、P8</td></tr>
 </table>
 <p>2026-10-31 已落实文件读取与取消、UTF-8 尾记录恢复、结构化 provider 错误、流式工具调用 ID 与内存预算等健壮性优化，详见<a href="ROADMAP.md">路线图第 4 节</a>。后续阶段仍按各自验收标准推进。</p>
 <h3>1.2 目标</h3>
@@ -148,7 +148,7 @@
 <h3>2.3 研究结论与设计影响</h3>
 <table>
   <tr><th style="width:30%">研究</th><th>结论</th><th style="width:30%">对本方案的影响</th></tr>
-  <tr><td>ReAct [P1]</td><td>推理与行动交替进行的循环</td><td>现有双层循环即此模式，保留</td></tr>
+  <tr><td>ReAct [P1]</td><td>推理与行动交替进行的循环</td><td>现有回合循环即此模式，保留</td></tr>
   <tr><td>Building Effective Agents [R25]；Agentless [P3]；mini-swe-agent [R18]</td><td>成功的实现多用简单、可组合的模式；简单流程也能取得有竞争力的结果</td><td>内核保持最小；固定流程作为 profile 中的工作流，而不是新内核</td></tr>
   <tr><td>SWE-agent [P2]；Writing Tools for Agents [R26]</td><td>为 Agent 专门设计的接口显著影响表现；大输出要分页、过滤、截断</td><td>工具接口按 Agent 设计；输出预算在工具侧完成</td></tr>
   <tr><td>Lost in the Middle [P4]；Context Engineering [R27]</td><td>上下文越长，利用信息越不可靠（context rot）；上下文是边际收益递减的有限资源</td><td>上下文管理是一等扩展点；优先按需加载（skills、文件路径）</td></tr>
@@ -179,12 +179,12 @@
 </table>
 
 <h2 id="s4">4. 总体架构</h2>
-<p>第 4–9 节描述目标设计，接口代码为规划草图，尚未实现的能力按第 9 节推进。现有用法见 <a href="../README.md">README</a>，阶段状态以<a href="ROADMAP.md">路线图</a>为准。P1 已落地第 5.3、5.4 节的 Hooks 与宿主审批接口；终端审批、配置文件与 Executor 仍按后续阶段推进。</p>
+<p>第 4–9 节包含已实现接口与目标设计，后续能力按第 9 节推进。现有用法见 <a href="../README.md">README</a>，阶段状态以<a href="ROADMAP.md">路线图</a>为准。P1、P2 已落地第 5.2–5.4 节的共享会话、Hooks 与宿主审批接口；终端审批、配置文件与 Executor 仍按后续阶段推进。</p>
 <div class="layers">
   <div class="layer"><div class="name">前端</div><div class="items"><span class="chip keep">run：无人值守</span><span class="chip new">chat：终端对话</span><span class="chip new">acp：编辑器 / 其他程序</span><span class="chip keep">Rust SDK</span></div></div>
   <div class="layer"><div class="name">场景配置</div><div class="items"><span class="chip new">profile：说明 / 工具 / 规则 / 上限 / 扩展</span><span class="chip new">上下文文件（AGENTS.md）</span><span class="chip new">skills（按需加载）</span></div></div>
   <div class="layer"><div class="name">扩展</div><div class="items"><span class="chip new">Rust 扩展（编译期）</span><span class="chip new">MCP 客户端（子进程或 HTTP）</span><span class="chip">钩子进程（后续）</span></div></div>
-  <div class="layer"><div class="name">会话运行时</div><div class="items"><span class="chip new">AgentSession：运行生命周期</span><span class="chip keep">持久化</span><span class="chip keep">重试</span><span class="chip keep">上限</span><span class="chip keep">审批路由</span><span class="chip new">压缩触发</span><span class="chip new">事件分发</span></div></div>
+  <div class="layer"><div class="name">会话运行时</div><div class="items"><span class="chip keep">AgentSession：运行生命周期</span><span class="chip keep">持久化</span><span class="chip keep">重试</span><span class="chip keep">上限</span><span class="chip keep">审批路由</span><span class="chip new">压缩触发</span><span class="chip keep">事件分发</span></div></div>
   <div class="layer"><div class="name">循环</div><div class="items"><span class="chip keep">回合循环</span><span class="chip keep">钩子链</span><span class="chip keep">工具调用流水线</span><span class="chip keep">引导与后续消息</span></div></div>
   <div class="layer"><div class="name">模型</div><div class="items"><span class="chip keep">Provider</span><span class="chip keep">消息与流式事件</span><span class="chip keep">系统提示词段落</span></div></div>
 </div>
@@ -217,17 +217,23 @@
 </table>
 
 <h3>5.2 会话运行时 AgentSession</h3>
-<p>由现有 <code>Runner</code> 演进而来：生命周期从“一次任务”变为“一个会话”，可以多次提问。</p>
+<p>P2 已实现 <code>AgentSession</code>，由同一个 <code>Runner</code> 执行每次任务并保留会话。run 和 Rust SDK 都经此入口调用。</p>
 <pre><code>impl AgentSession {
     pub async fn prompt(&amp;self, text: impl Into&lt;String&gt;) -&gt; Result&lt;RunReport, SessionError&gt;;
-    pub fn steer(&amp;self, text: impl Into&lt;String&gt;);     // 运行中插话
-    pub fn follow_up(&amp;self, text: impl Into&lt;String&gt;); // 运行结束后再处理
-    pub fn abort(&amp;self);                              // 只取消当前运行，会话保留
-    pub fn subscribe(&amp;self, sink: Arc&lt;dyn EventSink&gt;);   // 界面、日志、审计同时订阅
-    pub async fn set_model(&amp;self, model: ModelRef) -&gt; Result&lt;(), SessionError&gt;;
-    pub async fn compact(&amp;self) -&gt; Result&lt;(), SessionError&gt;; // P5 加入
-}</code></pre>
-<p>语义：同一时刻只有一个运行；运行中调用 <code>prompt</code> 返回 <code>SessionError::Busy</code>，插话须显式调用 <code>steer</code> 或 <code>follow_up</code>。无人值守仍可一行调用：<code>session.prompt(task).await?</code> 取得 <code>RunReport</code>。错误类型及其他细节在 P2 落实。</p>
+    pub async fn prompt_with_cancel(&amp;self, text: impl Into&lt;String&gt;, parent: &amp;CancellationToken)
+        -&gt; Result&lt;RunReport, SessionError&gt;;
+    pub fn steer(&amp;self, text: impl Into&lt;String&gt;);
+    pub fn follow_up(&amp;self, text: impl Into&lt;String&gt;);
+    pub fn abort(&amp;self) -&gt; bool; // 只取消当前运行，空闲时 false
+    pub fn subscribe(&amp;self, sink: Arc&lt;dyn EventSink&gt;) -&gt; Subscription;
+    pub fn set_model(&amp;self, model: ModelRef) -&gt; Result&lt;(), SessionError&gt;;
+    pub fn clear_approvals(&amp;self) -&gt; Result&lt;(), SessionError&gt;;
+}
+// compact 在 P5 加入；set_model 无 I/O，因此使用同步接口。</code></pre>
+<p>同一时刻只有一个运行；重叠的 prompt、运行中的 set_model 与 clear_approvals 返回 <code>SessionError::Busy</code>，插话须显式调用 steer 或 follow_up。空模型 ID 返回 <code>InvalidModel</code>；运行中的 provider、钩子与持久化失败仍由 <code>RunReport</code> 表达。无人值守一行调用 <code>session.prompt(task).await?</code> 取得报告。</p>
+<p>状态在“空闲并持有 Runner”与“运行中并持有取消令牌”之间切换。prompt 原子地取出 Runner；RAII guard 在完成、panic 或 future 被丢弃时归还，锁不跨越异步等待。abort 发出取消后须等待 prompt 返回或 drop 其 future，再开始下一次；它不取消外部父令牌或后续运行。</p>
+<p>构造时的 sink 保留，额外订阅以 RAII <code>Subscription</code> 持有和退订；只分发后续事件，已分发快照中的回调可能完成。每条消息先写入一次审计，再向所有订阅者发事件，回调期间不持有订阅列表锁。单个回调 panic 会被摘除，通过 <code>Subscription::has_panicked</code> 和 <code>failed_subscribers</code> 报告，不阻断其他订阅者。</p>
+<p>ModelRef 由宿主提供已配置的 provider 与模型 ID；切换保留历史、工具、钩子、上限、提示词和审批缓存，不改写会话头部的初始模型。宿主负责新 provider 的认证和过滤配置；clear_approvals 可在空闲时显式撤销授权。</p>
 <div class="box decide"><strong class="label">取舍</strong>进程内方法 API + 协议适配器（ACP 等包在外层），而非在内核中实现 Codex 式的提交 / 事件队列（SQ/EQ）。理由：当前只有进程内前端，方法 API 更简单；ACP 适配器可以把方法调用映射为协议消息。<strong>何时重新评估</strong>：出现多个客户端同时连接同一会话的需求时。</div>
 
 <h3>5.3 钩子</h3>
@@ -318,10 +324,10 @@ enabled = ["redaction"]</code></pre>
 <h3>5.7 前端</h3>
 <table>
   <tr><th>前端</th><th>交互</th><th>审批</th><th>输出</th><th>状态</th></tr>
-  <tr><td><code>run</code></td><td>一次任务</td><td>当前为声明式策略；P1 接入 <code>NoHuman</code></td><td>text 报告或 JSONL、退出码 0–6；后续增加 <code>--output-schema</code></td><td>已有</td></tr>
+  <tr><td><code>run</code></td><td>一次任务</td><td>声明式策略与 <code>NoHuman</code>，Ask 明确拒绝</td><td>text 报告或 JSONL、退出码 0–6；后续增加 <code>--output-schema</code></td><td>已有</td></tr>
   <tr><td><code>chat</code></td><td>多轮对话，运行中可插话，Ctrl+C 只中止当前运行</td><td>终端确认</td><td>流式文本；<code>/new</code>、<code>/model</code>、<code>/compact</code>、<code>/quit</code></td><td>新增，先做 REPL</td></tr>
   <tr><td><code>acp</code></td><td>由编辑器或其他程序驱动</td><td>转发给客户端</td><td>ACP 消息</td><td>新增</td></tr>
-  <tr><td>Rust SDK</td><td>由宿主程序驱动</td><td>当前由宿主提供 <code>ToolPolicy</code>；P1 接入 <code>Interaction</code></td><td>事件流</td><td>已有，接口会调整</td></tr>
+  <tr><td>Rust SDK</td><td>由宿主程序驱动</td><td>宿主注册 <code>PolicyHook</code> 并提供 <code>Interaction</code></td><td>事件流</td><td>P2 已实现共享会话 API</td></tr>
 </table>
 <div class="box decide"><strong class="label">取舍</strong>嵌入协议选 ACP，而非自定义 JSON-RPC（pi 的 rpc 模式、Codex 的 app-server 属于后者）。理由：ACP 已被 Goose、OpenHands 等采用，实现后可直接接入现有编辑器和平台。终端界面先做 REPL，不做完整 TUI：pi 的 tui 包约 2 万行，投入与收益不匹配，完整界面可交给 ACP 客户端。</div>
 
@@ -392,7 +398,7 @@ enabled = ["redaction"]</code></pre>
   <tr><td><code>src/agent/policy.rs</code></td><td>P1 已将具体策略移入 <code>src/policy.rs</code>，经 <code>PolicyHook</code> 注册；循环层保留 <code>Decision</code> 与 <code>ToolPolicy</code> 契约及兼容导出</td></tr>
   <tr><td>（新增）</td><td><code>src/agent/hooks.rs</code>：<code>Hooks</code> trait 与钩子链</td></tr>
   <tr><td>（新增）</td><td><code>src/interaction.rs</code>：<code>Interaction</code>、<code>NoHuman</code>、审批请求与结果</td></tr>
-  <tr><td><code>src/runner.rs</code></td><td>P1 已将截断续写移为 <code>finish_turn</code> 扩展，并按稳定条目 ID 汇总当前答案；P2 再演进为 <code>AgentSession</code></td></tr>
+  <tr><td><code>src/runner.rs</code></td><td>P1 已将截断续写移为 <code>finish_turn</code> 扩展，并按稳定条目 ID 汇总当前答案；P2 已由 <code>src/agent_session.rs</code> 统一提供共享调用、订阅和模型切换，Runner 保留独占执行职责</td></tr>
   <tr><td><code>src/session.rs</code></td><td>P5、P6 分别新增 <code>compaction</code>、<code>tool_call_started</code> 条目，首次写入前分别升级格式；存储后端抽象为 trait（后续）</td></tr>
   <tr><td><code>src/tools/*</code></td><td>新增 <code>Executor</code> 接缝；<code>Tool</code> 增加 <code>effects()</code>；内置工具由 profile 按名字启用</td></tr>
   <tr><td><code>src/prompt.rs</code>、<code>src/presets/troubleshoot.rs</code></td><td>P0 已分离通用组装与排障预设；P4 将预设文件化，并新增 <code>assistant</code> profile</td></tr>
@@ -406,7 +412,7 @@ enabled = ["redaction"]</code></pre>
   <tr><th>阶段</th><th>内容</th><th>验收标准</th><th>新依赖 / 前置决策</th></tr>
   <tr><td>P0</td><td>已用 Rust 代码实现 <code>presets::troubleshoot</code>，集中提示词、上限与续写默认值</td><td>CLI 测试不改即通过；内核默认值不限轮次、不限时间、不续写；<code>None</code> 表示不限，<code>Some(0)</code> 为零轮次</td><td>无</td></tr>
   <tr><td>P1</td><td>已实现六个钩子与工具流水线；<code>Decision::Ask</code>；<code>Interaction</code> 与 <code>NoHuman</code>；策略与续写迁移为钩子</td><td>无人值守行为不变；新增钩子组合、fail closed、超时测试</td><td>无</td></tr>
-  <tr><td>P2</td><td><code>AgentSession</code>：多次提问、中止、多订阅者、运行中提问的处理</td><td>中止后会话可继续；多订阅者都收到事件</td><td>无</td></tr>
+  <tr><td>P2</td><td>已实现 <code>AgentSession</code>：共享提问、Busy、中止后复用、多订阅者与退订、模型切换</td><td>中止后会话可继续；多订阅者都收到事件</td><td>无</td></tr>
   <tr><td>P3</td><td><code>chat</code> REPL：流式输出、终端审批、斜杠命令</td><td>用脚本化 stdin 驱动的 CLI 测试；人工试用</td><td>tokio 的 <code>io-std</code> feature；可选 <code>rustyline</code>（已授权）</td></tr>
   <tr><td>P4</td><td>profile 文件、AGENTS.md、skills</td><td><code>troubleshoot</code> 与 <code>assistant</code> 均由文件定义；配置错误时退出码 2</td><td><code>toml</code>（已授权）</td></tr>
   <tr><td>P5</td><td>上下文管理：压缩扩展、大结果落盘；首次写入 <code>compaction</code> 前升级会话格式</td><td>faux provider 测试；旧文件兼容测试；经授权的付费 e2e 测试</td><td>无</td></tr>
@@ -496,7 +502,7 @@ enabled = ["redaction"]</code></pre>
   <li>[P20] Packer et al., MemGPT: Towards LLMs as Operating Systems, 2023. <a href="https://arxiv.org/abs/2310.08560">arXiv:2310.08560</a></li>
 </ol>
 
-<footer>文件：zx-agent-general-kernel-proposal.html · 版本 v0.6 · 2026年11月</footer>
+<footer>文件：zx-agent-general-kernel-proposal.html · 版本 v0.7 · 2026年11月</footer>
 </main>
 </body>
 </html>

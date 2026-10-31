@@ -43,7 +43,7 @@ G1–G4 是验收目标。当前会话日志可重建对话与提示词；G3 所
 | D1 | MSRV | 升级到 1.88 | 2026-10-31 | 已完成：`rust-version = "1.88"`，已用 1.88.0 工具链编译并通过测试 |
 | D2 | 新依赖 | 已授权：tokio 的 `io-std` feature、`toml`、`rmcp`（MCP 官方 Rust SDK）、ACP 官方 Rust SDK、`rustyline`（可选）。在用到它们的阶段再引入 | 2026-10-31 | 按阶段引入 |
 | D3 | profile 文件格式 | TOML | 2026-10-31 | P4 落实 |
-| D4 | 会话 API 形态 | 进程内方法调用；暂不实现提交队列 / 事件队列（SQ/EQ） | 2026-10-31 | P2 落实 |
+| D4 | 会话 API 形态 | 进程内方法调用；暂不实现提交队列 / 事件队列（SQ/EQ） | 2026-10-31 | 已实现：P2 进程内共享会话 API |
 | D5 | 无人值守的命令执行环境 | 待定。候选方案：`troubleshoot` profile 默认在沙箱容器中执行命令，没有 Docker 时拒绝启动，除非显式指定在本机执行 | — | 待确认 |
 | D6 | 项目定位 | 改为“通用内核 + 场景配置” | 2026-10-31 | 已完成：README、`.claude/CLAUDE.md` 已更新 |
 
@@ -64,13 +64,13 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 
 下面的 P0–P9 继续按各自验收标准推进。
 
-状态取值：未开始、进行中、已完成。每个阶段完成时勾选任务，并记录完成日期和提交。
+状态取值：未开始、进行中、已实现待 PR review、已完成。每个阶段完成时勾选任务，并记录完成日期和提交。
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | P0 | 场景默认值移出内核 | 已完成 |
-| P1 | 钩子、工具调用流水线与人机交互接口 | 已实现，待 PR review |
-| P2 | 长期会话 `AgentSession` | 未开始 |
+| P1 | 钩子、工具调用流水线与人机交互接口 | 已完成（PR #3） |
+| P2 | 长期会话 `AgentSession` | 已实现待 PR review |
 | P3 | 终端对话 `chat` | 未开始 |
 | P4 | profile 文件、上下文文件与 skills | 未开始 |
 | P5 | 上下文管理 | 未开始 |
@@ -117,12 +117,22 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 
 目标：现有 `Runner` 已支持顺序多次运行并保留会话；在此基础上提供统一的 `AgentSession` API、多订阅者、模型切换和共享调用互斥。不引入新依赖。
 
-- [ ] `prompt`、`steer`、`follow_up`、`abort`、`subscribe`、`set_model`
-- [ ] 同一时刻只有一个运行；运行中 `prompt` 返回忙碌错误，插话须显式调用 `steer` 或 `follow_up`
-- [ ] `abort` 只取消当前运行，会话保留；多个订阅者都收到事件
-- [ ] `prompt` 返回 `Result<RunReport, SessionError>`；无人值守仍可一行调用：`session.prompt(task).await?` 取得 `RunReport`
+- [x] `prompt`、`steer`、`follow_up`、`abort`、`subscribe`、`set_model`
+- [x] 同一时刻只有一个运行；运行中 `prompt` 返回忙碌错误，插话须显式调用 `steer` 或 `follow_up`
+- [x] `abort` 只取消当前运行，会话保留；多个订阅者都收到事件
+- [x] `prompt` 返回 `Result<RunReport, SessionError>`；无人值守仍可一行调用：`session.prompt(task).await?` 取得 `RunReport`
 
-验收：中止后会话可继续使用；多订阅者测试；运行中提问的测试。
+P2 接口与所有权约定（2026-11-01）：
+
+- `AgentSession` 在 `Runner` 外提供共享的 `&self` 方法；`Runner` 保留为独占的运行、重试与审计实现，兼容现有 SDK。
+- 状态为“空闲并持有 Runner”或“运行中并持有取消令牌”。`prompt` 原子地取出 Runner，RAII guard 在完成、panic 或 future 被丢弃后归还；锁不跨越异步等待，也不包住订阅回调。
+- `prompt(task).await` 返回 `Result<RunReport, SessionError>`；`prompt_with_cancel` 接受外部取消令牌。并发 `prompt` 或运行中 `set_model` 立即返回 `Busy`，不排队。
+- `abort` 只取消当前运行，空闲时无操作；`steer`、`follow_up` 沿用现有队列。每次运行创建独立的子令牌，已取消的运行不会影响下一次。
+- `subscribe` 返回 RAII `Subscription`；持有期间接收后续事件，drop 后退订，已分发快照中的回调可能完成。构造时的原有 sink 保留。单个订阅 panic 被隔离并移除，通过订阅句柄与会话失败计数报告。
+- `set_model(ModelRef)` 同步切换 provider 与模型 ID，空模型 ID 报错；保留历史、提示词、工具、钩子、上限和审批缓存；空闲时可通过 `clear_approvals` 撤销授权。API 不需要 I/O，因此将方案草图中的 async 改为同步方法；不会改写会话头部记录的初始模型。
+- `run` 与库示例接入 `AgentSession`；CLI 参数和 `tests/cli.rs` 保持不变。终端对话仍属 P3。
+
+验收：新增 24 项共享会话行为测试与 1 个 Rustdoc 编译示例，覆盖忙碌错误、取消与丢弃后复用、并发调用、订阅和退订、回调重入与 panic、模型切换、审批撤销及审计顺序。原有 `tests/cli.rs` 和 `run --help` 逐字节不变；未新增依赖。完整检查与原始测试输出附在本阶段 PR 中。
 
 ### P3 终端对话 `chat`
 
@@ -224,4 +234,4 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 
 ---
 
-ROADMAP.md · v0.1 · 2026年10月
+ROADMAP.md · v0.2 · 2026年11月

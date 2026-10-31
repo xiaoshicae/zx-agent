@@ -11,6 +11,7 @@ use serde_json::json;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
 
+use zx_agent::AgentSession;
 use zx_agent::agent::{AgentEvent, CommandPolicy, EventSink, LoopConfig, LoopSpec};
 use zx_agent::ai::openai::{DEFAULT_MAX_RESPONSE_BYTES, OpenAiCompatible, OpenAiConfig, SystemUpdates};
 use zx_agent::ai::retry::RetryPolicy;
@@ -20,7 +21,7 @@ use zx_agent::extensions::{ContinueOnLength, RedactSecrets};
 use zx_agent::policy::PolicyHook;
 use zx_agent::presets::troubleshoot;
 use zx_agent::prompt::{build_system_prompt, environment_section};
-use zx_agent::runner::{Limits, RunOutcome, RunReport, Runner};
+use zx_agent::runner::{Limits, RunOutcome, RunReport};
 use zx_agent::session::{SessionHeader, SessionStore};
 use zx_agent::tools;
 
@@ -174,10 +175,10 @@ async fn main() -> ExitCode {
 /// before the run started.
 async fn run(args: RunArgs) -> Result<u8> {
     let prompt = read_prompt(&args.prompt)?;
-    let mut runner = build_runner(&args)?;
+    let session = build_session(&args)?;
     let cancel = CancellationToken::new();
     spawn_signal_handler(cancel.clone());
-    let report = runner.run(prompt, &cancel).await;
+    let report = session.prompt_with_cancel(prompt, &cancel).await?;
     print_report(&report, args.output);
     Ok(exit_code(report.outcome))
 }
@@ -197,7 +198,7 @@ fn read_prompt(arg: &str) -> Result<String> {
 }
 
 /// Assemble the provider, tools, policy, session, and output from the command line.
-fn build_runner(args: &RunArgs) -> Result<Runner> {
+fn build_session(args: &RunArgs) -> Result<AgentSession> {
     let cwd = match &args.cwd {
         Some(path) => path
             .canonicalize()
@@ -281,7 +282,7 @@ fn build_runner(args: &RunArgs) -> Result<Runner> {
         max_turns: Some(args.max_turns),
         timeout: (args.timeout_secs > 0).then(|| Duration::from_secs(args.timeout_secs)),
     };
-    Ok(Runner::new(config, retry, limits, session, sink))
+    Ok(AgentSession::new(config, retry, limits, session, sink))
 }
 
 fn print_report(report: &RunReport, output: OutputMode) {
