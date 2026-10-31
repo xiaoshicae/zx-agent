@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "ask": [
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(cargo add *)",
+      "Bash(cargo remove *)",
+      "Bash(cargo update *)",
+      "Edit(**/Cargo.toml)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [{ "type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/post-edit.sh" }]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [{ "type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/stop-check.sh" }]
+      }
+    ]
+  }
+}
