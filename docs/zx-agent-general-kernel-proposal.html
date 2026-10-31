@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>zx-agent 通用内核技术方案（评审稿 v0.4）</title>
+<title>zx-agent 通用内核技术方案（评审稿 v0.5）</title>
 <style>
   :root {
     --ink: #1f2328; --muted: #57606a; --line: #d0d7de; --bg: #ffffff; --soft: #f6f8fa;
@@ -60,7 +60,7 @@
 <main>
 
 <h1>zx-agent 通用内核技术方案</h1>
-<p class="meta">评审稿 v0.4 · 2026年10月 · 状态：已评审，D5 待定 · 代码核对基线：commit <code>3c98350</code> 及本次 PR 改动（2026-10-31）</p>
+<p class="meta">评审稿 v0.5 · 2026年10月 · 状态：已评审，D5 待定 · 代码核对基线：commit <code>439456b</code> 及本次 P0 改动（2026-10-31）</p>
 <p class="meta">本方案由 AI 辅助起草。调研来源见第 11 节；产品行为以所列版本和资料日期为准，论文结果不代表本项目实测，未核实项明确标注。</p>
 
 <div class="box key">
@@ -93,11 +93,9 @@
 
 <h2 id="s1">1. 背景、目标与约束</h2>
 <h3>1.1 现状</h3>
-<p>zx-agent v0.1.0 的当前实现主要面向无人值守排障（验证命令与覆盖范围见 README；真实 API 测试默认跳过）。模型层、循环语义、会话文件、事件流已基本通用；以下 6 处仍带有场景默认值或缺少其他场景所需的接口：</p>
+<p>zx-agent v0.1.0 已提供无人值守的 <code>run</code> 与 Rust SDK（验证命令与覆盖范围见 README；真实 API 测试默认跳过）。P0 已将排障说明、运行上限与续写默认值移到 <code>presets::troubleshoot</code>；内核默认不限轮次、不限时间、不自动续写。以下 4 处仍缺少其他场景所需的接口：</p>
 <table>
-  <tr><th>位置</th><th>写死的内容</th></tr>
-  <tr><td><code>src/prompt.rs</code></td><td>内置说明是“没有人工操作员的自主排障 Agent”，并规定四段式报告</td></tr>
-  <tr><td><code>src/runner.rs</code></td><td><code>Limits::default()</code> 为 30 轮、15 分钟、自动续写 1 次</td></tr>
+  <tr><th>位置</th><th>待实施内容</th></tr>
   <tr><td><code>src/agent/policy.rs</code></td><td><code>Decision</code> 只有允许和拒绝，没有“询问”</td></tr>
   <tr><td><code>src/agent/agent_loop.rs</code></td><td>只有工具调用前的策略检查，没有调用后、请求前、回合结束时的扩展点</td></tr>
   <tr><td><code>src/runner.rs</code></td><td>已支持顺序多次运行并保留会话，以 <code>run(&amp;mut self)</code> 限制重叠调用；缺少统一会话 API、多个订阅者与切换模型</td></tr>
@@ -391,7 +389,7 @@ enabled = ["redaction"]</code></pre>
   <tr><td><code>src/runner.rs</code></td><td>演进为 <code>AgentSession</code>；截断续写移为 <code>finish_turn</code> 扩展；默认上限改为不限</td></tr>
   <tr><td><code>src/session.rs</code></td><td>P5、P6 分别新增 <code>compaction</code>、<code>tool_call_started</code> 条目，首次写入前分别升级格式；存储后端抽象为 trait（后续）</td></tr>
   <tr><td><code>src/tools/*</code></td><td>新增 <code>Executor</code> 接缝；<code>Tool</code> 增加 <code>effects()</code>；内置工具由 profile 按名字启用</td></tr>
-  <tr><td><code>src/prompt.rs</code></td><td>保留提示词组装与环境段落；<code>DEFAULT_INSTRUCTIONS</code> 移到 <code>troubleshoot</code> profile；新增 <code>assistant</code> profile</td></tr>
+  <tr><td><code>src/prompt.rs</code>、<code>src/presets/troubleshoot.rs</code></td><td>P0 已分离通用组装与排障预设；P4 将预设文件化，并新增 <code>assistant</code> profile</td></tr>
   <tr><td>（新增）</td><td><code>src/profile.rs</code>：加载与叠加 profile；<code>src/extension.rs</code>：<code>Extension</code> trait 与内置扩展（续写、脱敏、压缩）</td></tr>
   <tr><td><code>src/main.rs</code></td><td>子命令 <code>run</code>、<code>chat</code>、<code>acp</code>；新增 <code>--profile</code></td></tr>
   <tr><td>单一 crate</td><td>最后阶段可拆为 <code>zx-ai</code>、<code>zx-core</code>、<code>zx-tools</code>、<code>zx-cli</code>，用编译器保证分层</td></tr>
@@ -400,7 +398,7 @@ enabled = ["redaction"]</code></pre>
 <h2 id="s9">9. 分阶段实施计划</h2>
 <table>
   <tr><th>阶段</th><th>内容</th><th>验收标准</th><th>新依赖 / 前置决策</th></tr>
-  <tr><td>P0</td><td>场景默认值移出内核：提示词、上限、续写进入 <code>troubleshoot</code> 预设（先用 Rust 代码表达）；更新 README 与 CLAUDE.md 的项目定位</td><td>CLI 测试不改即通过；内核默认值不限轮次、不续写</td><td>无</td></tr>
+  <tr><td>P0</td><td>已用 Rust 代码实现 <code>presets::troubleshoot</code>，集中提示词、上限与续写默认值</td><td>CLI 测试不改即通过；内核默认值不限轮次、不限时间、不续写；<code>None</code> 表示不限，<code>Some(0)</code> 为零轮次</td><td>无</td></tr>
   <tr><td>P1</td><td>钩子与工具流水线；<code>Decision::Ask</code>；<code>Interaction</code> 与 <code>NoHuman</code>；策略与续写迁移为钩子</td><td>无人值守行为不变；新增钩子组合、fail closed、超时测试</td><td>无</td></tr>
   <tr><td>P2</td><td><code>AgentSession</code>：多次提问、中止、多订阅者、运行中提问的处理</td><td>中止后会话可继续；多订阅者都收到事件</td><td>无</td></tr>
   <tr><td>P3</td><td><code>chat</code> REPL：流式输出、终端审批、斜杠命令</td><td>用脚本化 stdin 驱动的 CLI 测试；人工试用</td><td>tokio 的 <code>io-std</code> feature；可选 <code>rustyline</code>（已授权）</td></tr>
@@ -492,7 +490,7 @@ enabled = ["redaction"]</code></pre>
   <li>[P20] Packer et al., MemGPT: Towards LLMs as Operating Systems, 2023. <a href="https://arxiv.org/abs/2310.08560">arXiv:2310.08560</a></li>
 </ol>
 
-<footer>文件：zx-agent-general-kernel-proposal.html · 版本 v0.4 · 2026年10月</footer>
+<footer>文件：zx-agent-general-kernel-proposal.html · 版本 v0.5 · 2026年10月</footer>
 </main>
 </body>
 </html>

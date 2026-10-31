@@ -22,6 +22,7 @@ use zx_agent::agent::{
 };
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::{Message, Provider, SystemPrompt, ToolDef};
+use zx_agent::presets::troubleshoot;
 use zx_agent::runner::{Limits, Runner};
 use zx_agent::session::{SessionHeader, SessionStore};
 
@@ -172,7 +173,7 @@ pub fn summarize(messages: &[Message]) -> Vec<String> {
 pub async fn run_prompt(config: &LoopConfig, context: &mut Vec<Message>, prompt: &str) -> (LoopResult, Collect) {
     let sink = Collect::default();
     let prompts = vec![Message::user(prompt)];
-    let result = run_loop(context, prompts, config, 10, &CancellationToken::new(), &sink).await;
+    let result = run_loop(context, prompts, config, Some(10), &CancellationToken::new(), &sink).await;
     (result, sink)
 }
 
@@ -198,8 +199,8 @@ pub fn read_lines(path: &Path) -> Vec<Value> {
         .collect()
 }
 
-/// The parts of a runner, with test defaults: no retries, default limits, an in-memory
-/// session. Override fields with struct update syntax, then `build`.
+/// The parts of a runner, with test defaults: no retries, unattended preset limits,
+/// an in-memory session. Override fields with struct update syntax, then `build`.
 pub struct RunnerSetup {
     pub config: LoopConfig,
     pub retry: RetryPolicy,
@@ -212,7 +213,7 @@ impl RunnerSetup {
         Self {
             config,
             retry: fast_retry(0),
-            limits: Limits::default(),
+            limits: troubleshoot::limits(),
             session: SessionStore::in_memory(header()),
         }
     }

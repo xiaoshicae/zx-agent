@@ -205,7 +205,7 @@ async fn stops_at_the_turn_budget() {
         &mut Vec::new(),
         prompts,
         &config,
-        2,
+        Some(2),
         &CancellationToken::new(),
         &Collect::default(),
     )
@@ -304,7 +304,15 @@ async fn cancellation_ends_the_loop() {
     });
     let prompts = vec![Message::user("go")];
 
-    let result = run_loop(&mut Vec::new(), prompts, &config, 10, &cancel, &Collect::default()).await;
+    let result = run_loop(
+        &mut Vec::new(),
+        prompts,
+        &config,
+        Some(10),
+        &cancel,
+        &Collect::default(),
+    )
+    .await;
 
     assert_eq!(result.outcome, LoopOutcome::Aborted);
 }

@@ -8,8 +8,9 @@ use tokio_util::sync::CancellationToken;
 use zx_agent::agent::{AgentEvent, CommandPolicy, LoopConfig, MessageQueues};
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
-use zx_agent::prompt::{DEFAULT_INSTRUCTIONS, build_system_prompt, environment_section};
-use zx_agent::runner::{Limits, Runner};
+use zx_agent::presets::troubleshoot;
+use zx_agent::prompt::{build_system_prompt, environment_section};
+use zx_agent::runner::Runner;
 use zx_agent::session::{SessionHeader, SessionStore};
 use zx_agent::tools::{BashTool, ReadFileTool};
 
@@ -24,7 +25,7 @@ async fn main() -> anyhow::Result<()> {
     // of the user's processes, which includes this process's API key.
     let policy = CommandPolicy::new(["df", "free", "uptime", "head", "sort"]);
     let system_prompt = build_system_prompt(
-        DEFAULT_INSTRUCTIONS,
+        troubleshoot::INSTRUCTIONS,
         &[
             ("environment", &environment_section(&cwd)),
             ("command_policy", &policy.prompt_section().unwrap_or_default()),
@@ -59,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
             eprintln!("[tool] {tool_name} {args}");
         }
     });
-    let mut runner = Runner::new(config, RetryPolicy::default(), Limits::default(), session, sink);
+    let mut runner = Runner::new(config, RetryPolicy::default(), troubleshoot::limits(), session, sink);
 
     let report = runner.run(task, &CancellationToken::new()).await;
     println!("{}", report.final_text);

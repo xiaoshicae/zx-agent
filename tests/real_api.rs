@@ -89,7 +89,7 @@ impl Endpoint {
         );
         RunnerSetup {
             limits: Limits {
-                max_turns: 4,
+                max_turns: Some(4),
                 timeout: Some(Duration::from_secs(120)),
                 continue_on_length: 0,
             },

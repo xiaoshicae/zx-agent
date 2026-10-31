@@ -80,10 +80,90 @@ fn setup(provider: &Arc<FauxProvider>) -> RunnerSetup {
 
 fn limits(max_turns: u32, timeout: Option<Duration>, continue_on_length: u32) -> Limits {
     Limits {
-        max_turns,
+        max_turns: Some(max_turns),
         timeout,
         continue_on_length,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Neutral kernel defaults
+// ---------------------------------------------------------------------------
+
+#[test]
+fn default_limits_have_no_deadline() {
+    assert!(Limits::default().timeout.is_none());
+}
+
+#[tokio::test]
+async fn default_limits_allow_more_than_thirty_requests() {
+    let steps = (0..31)
+        .map(|index| FauxStep::tool_call(&format!("c{index}"), "echo", json!({"text": "ok"})))
+        .chain([FauxStep::text("done")]);
+    let provider = provider(steps);
+    let (mut runner, _) = RunnerSetup {
+        limits: Limits::default(),
+        ..RunnerSetup::new(config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]))
+    }
+    .build();
+
+    let report = runner.run("go", &CancellationToken::new()).await;
+
+    assert_eq!(report.outcome, RunOutcome::Completed);
+    assert_eq!((report.turns, report.final_text.as_str()), (32, "done"));
+    assert_eq!(provider.requests().len(), 32);
+}
+
+#[tokio::test]
+async fn default_limits_leave_truncated_answers_for_the_caller() {
+    let provider = provider([FauxStep::truncated("part one"), FauxStep::text("part two")]);
+    let (mut runner, _) = RunnerSetup {
+        limits: Limits::default(),
+        ..setup(&provider)
+    }
+    .build();
+
+    let report = runner.run("go", &CancellationToken::new()).await;
+
+    assert_eq!(report.outcome, RunOutcome::Truncated);
+    assert_eq!((report.turns, report.final_text.as_str()), (1, "part one"));
+    assert_eq!(provider.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn zero_turn_limit_does_not_call_the_provider() {
+    let provider = provider([FauxStep::text("must not be requested")]);
+    let (mut runner, _) = RunnerSetup {
+        limits: limits(0, None, 0),
+        ..setup(&provider)
+    }
+    .build();
+
+    let report = runner.run("go", &CancellationToken::new()).await;
+
+    assert_eq!(report.outcome, RunOutcome::MaxTurns);
+    assert_eq!(report.turns, 0);
+    assert!(report.final_text.is_empty());
+    assert!(provider.requests().is_empty());
+    assert_eq!(report.error.as_deref(), Some("turn limit reached (max_turns = 0)"));
+}
+
+#[tokio::test]
+async fn an_unlimited_budget_can_explicitly_enable_continuation() {
+    let provider = provider([FauxStep::truncated("part one, "), FauxStep::text("part two")]);
+    let (mut runner, _) = RunnerSetup {
+        limits: Limits {
+            continue_on_length: 1,
+            ..Limits::default()
+        },
+        ..setup(&provider)
+    }
+    .build();
+
+    let report = runner.run("go", &CancellationToken::new()).await;
+
+    assert_eq!(report.outcome, RunOutcome::Completed);
+    assert_eq!((report.turns, report.final_text.as_str()), (2, "part one, part two"));
 }
 
 // ---------------------------------------------------------------------------
@@ -98,6 +178,7 @@ async fn retries_transient_errors_without_repeating_the_prompt() {
     ]);
     let (mut runner, sink) = RunnerSetup {
         retry: fast_retry(3),
+        limits: Limits::default(),
         ..setup(&provider)
     }
     .build();
@@ -205,7 +286,11 @@ async fn a_run_stops_at_the_time_limit() {
 #[tokio::test]
 async fn the_caller_can_cancel_a_waiting_run() {
     let provider = provider([FauxStep::Hang]);
-    let (mut runner, _) = setup(&provider).build();
+    let (mut runner, _) = RunnerSetup {
+        limits: Limits::default(),
+        ..setup(&provider)
+    }
+    .build();
     let cancel = CancellationToken::new();
     let trigger = cancel.clone();
     // The delay only lets the request start; the assertion does not depend on timing.

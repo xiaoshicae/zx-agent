@@ -16,7 +16,8 @@ use zx_agent::ai::openai::{DEFAULT_MAX_RESPONSE_BYTES, OpenAiCompatible, OpenAiC
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::sse::DEFAULT_MAX_EVENT_BYTES;
 use zx_agent::ai::{Message, StopReason};
-use zx_agent::prompt::{DEFAULT_INSTRUCTIONS, build_system_prompt, environment_section};
+use zx_agent::presets::troubleshoot;
+use zx_agent::prompt::{build_system_prompt, environment_section};
 use zx_agent::runner::{Limits, RunOutcome, RunReport, Runner};
 use zx_agent::session::{SessionHeader, SessionStore};
 use zx_agent::tools;
@@ -91,11 +92,11 @@ struct RunArgs {
     deny_cmd: Vec<String>,
 
     /// Maximum model requests for the run, failed attempts included.
-    #[arg(long, default_value_t = 30)]
+    #[arg(long, default_value_t = troubleshoot::MAX_TURNS)]
     max_turns: u32,
 
     /// Wall-clock limit for the whole run, in seconds. 0 disables it.
-    #[arg(long, default_value_t = 900)]
+    #[arg(long, default_value_t = troubleshoot::TIMEOUT_SECS)]
     timeout_secs: u64,
 
     /// Default bash command timeout, in seconds.
@@ -112,7 +113,7 @@ struct RunArgs {
 
     /// Times to ask the model to continue an answer cut off by the output token limit.
     /// Each continuation counts against --max-turns.
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = troubleshoot::CONTINUE_ON_LENGTH)]
     continue_on_length: u32,
 
     /// Output token limit per response. Reasoning models count their reasoning against it,
@@ -203,7 +204,7 @@ fn build_runner(args: &RunArgs) -> Result<Runner> {
     };
     let instructions = match &args.system_prompt_file {
         Some(path) => std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?,
-        None => DEFAULT_INSTRUCTIONS.to_string(),
+        None => troubleshoot::INSTRUCTIONS.to_string(),
     };
     // Local servers (vLLM, Ollama, llama.cpp) often need no key, so a missing key is allowed.
     let api_key = std::env::var(&args.api_key_env).ok().filter(|key| !key.is_empty());
@@ -274,7 +275,7 @@ fn build_runner(args: &RunArgs) -> Result<Runner> {
         ..RetryPolicy::default()
     };
     let limits = Limits {
-        max_turns: args.max_turns,
+        max_turns: Some(args.max_turns),
         timeout: (args.timeout_secs > 0).then(|| Duration::from_secs(args.timeout_secs)),
         continue_on_length: args.continue_on_length,
     };
