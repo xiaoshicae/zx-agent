@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 
 use crate::agent::ToolOutput;
-use crate::agent::hooks::{HookResult, Hooks, TurnDecision, TurnDisposition, TurnSummary};
+use crate::agent::hooks::{HookContext, HookResult, HookStage, Hooks, TurnDecision, TurnDisposition, TurnSummary};
 use crate::ai::{StopReason, ToolCall};
 use crate::profile::read_text;
 use crate::sync::lock;
@@ -29,7 +29,7 @@ impl ContinueOnLength {
 
 #[async_trait]
 impl Hooks for ContinueOnLength {
-    async fn finish_turn(&self, turn: &TurnSummary<'_>) -> HookResult<TurnDecision> {
+    async fn finish_turn(&self, turn: &TurnSummary<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
         if turn.disposition == TurnDisposition::Stop
             && turn.response.stop_reason == StopReason::Length
             && turn.remaining_turns != Some(0)
@@ -150,7 +150,12 @@ fn secret_files_at(path: &Path) -> Result<Vec<PathBuf>, String> {
 
 #[async_trait]
 impl Hooks for RedactSecrets {
-    async fn after_tool(&self, _call: &ToolCall, mut output: ToolOutput) -> HookResult<ToolOutput> {
+    /// After every extension has changed the output, so none can bring a secret back.
+    fn stage(&self) -> HookStage {
+        HookStage::Redaction
+    }
+
+    async fn after_tool(&self, _call: &ToolCall, mut output: ToolOutput, _ctx: &HookContext) -> HookResult<ToolOutput> {
         let file_secrets = self.file_secrets()?;
         let mut secrets: Vec<&str> = self.secrets.iter().chain(&file_secrets).map(String::as_str).collect();
         secrets.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));

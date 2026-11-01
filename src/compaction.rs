@@ -118,8 +118,8 @@ struct Candidate {
 }
 
 impl Host<'_> {
-    async fn emit(&self, event: AgentEvent, cancel: &CancellationToken) {
-        self.hooks.emit(event, cancel, self.to).await;
+    async fn emit(&self, event: AgentEvent) {
+        self.hooks.emit(event, self.to).await;
     }
 
     fn candidate(&self) -> Result<Option<Candidate>> {
@@ -289,23 +289,17 @@ impl Host<'_> {
                 return (report, None);
             }
         };
-        self.emit(
-            AgentEvent::CompactionStart {
-                input_bytes: report.input_bytes,
-                automatic,
-            },
-            cancel,
-        )
+        self.emit(AgentEvent::CompactionStart {
+            input_bytes: report.input_bytes,
+            automatic,
+        })
         .await;
-        self.emit(
-            AgentEvent::RequestStart {
-                kind: RequestKind::Summary,
-                entry_id: Some(request_entry),
-                model: self.model.into(),
-                attempt: self.attempt,
-            },
-            cancel,
-        )
+        self.emit(AgentEvent::RequestStart {
+            kind: RequestKind::Summary,
+            entry_id: Some(request_entry),
+            model: self.model.into(),
+            attempt: self.attempt,
+        })
         .await;
         report.requests = 1;
         let response = self.summarize(request, cancel).await;
@@ -372,16 +366,13 @@ impl Host<'_> {
                 report.outcome = Outcome::Completed;
                 report.output_bytes = output_bytes;
                 report.entry_id = Some(id.clone());
-                self.emit(
-                    AgentEvent::CompactionEnd {
-                        entry_id: id,
-                        input_bytes: report.input_bytes,
-                        output_bytes: report.output_bytes,
-                        usage: report.usage.clone(),
-                        automatic,
-                    },
-                    cancel,
-                )
+                self.emit(AgentEvent::CompactionEnd {
+                    entry_id: id,
+                    input_bytes: report.input_bytes,
+                    output_bytes: report.output_bytes,
+                    usage: report.usage.clone(),
+                    automatic,
+                })
                 .await;
                 (report, Some(messages))
             }
@@ -403,13 +394,10 @@ impl Host<'_> {
                     error = format!("cannot persist compaction failure: {write_error:#}; {error}");
                     report.persistence_error = Some(error.clone());
                 }
-                self.emit(
-                    AgentEvent::CompactionFailed {
-                        error: error.clone(),
-                        automatic,
-                    },
-                    cancel,
-                )
+                self.emit(AgentEvent::CompactionFailed {
+                    error: error.clone(),
+                    automatic,
+                })
                 .await;
                 report.error = Some(error);
                 (report, None)

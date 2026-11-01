@@ -17,8 +17,8 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::agent::{
-    AgentEvent, Event, EventSink, ExecutionMode, LoopConfig, LoopControl, LoopResult, LoopSpec, MessageQueues, Tool,
-    ToolContext, ToolOutput, ToolPolicy, run_loop,
+    AgentEvent, Event, EventSink, ExecutionMode, HookContext, LoopConfig, LoopControl, LoopResult, LoopSpec,
+    MessageQueues, Tool, ToolContext, ToolOutput, ToolPolicy, run_loop,
 };
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::{Message, Provider, SystemPrompt, ToolDef};
@@ -184,6 +184,11 @@ pub async fn run_prompt(config: &LoopConfig, context: &mut Vec<Message>, prompt:
     let mut control = LoopControl::new(Some(10), &mut approvals, &cancel, &sink);
     let result = run_loop(context, prompts, config, &mut control).await;
     (result, sink)
+}
+
+/// A hook context for calling a hook directly: a fresh run in the current directory.
+pub fn hook_context() -> HookContext {
+    HookContext::new(None, PathBuf::from("."), CancellationToken::new())
 }
 
 /// Retries with millisecond delays, so retry tests stay fast.

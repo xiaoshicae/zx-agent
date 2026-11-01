@@ -16,11 +16,11 @@ pub use events::{
 };
 pub(crate) use events::{Emit, RunTrace};
 pub use hooks::{
-    ContextEdit, HookChain, HookError, HookFailure, HookPhase, HookResult, Hooks, TurnDecision, TurnDisposition,
-    TurnSummary,
+    ContextEdit, HookChain, HookContext, HookError, HookFailure, HookOptions, HookPhase, HookResult, HookStage, Hooks,
+    TurnDecision, TurnDisposition, TurnSummary,
 };
 pub(crate) use host::{ContextPreparation, SessionHost};
-pub use policy::{AllowAll, CommandPolicy, Decision, ToolPolicy};
+pub use policy::{AllowAll, Decision, ToolPolicy};
 pub use queue::MessageQueues;
 pub use report::{RunOutcome, RunReport};
 pub use tool::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};

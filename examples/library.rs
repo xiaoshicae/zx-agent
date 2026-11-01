@@ -5,11 +5,11 @@
 use std::sync::Arc;
 
 use zx_agent::AgentSession;
-use zx_agent::agent::{AgentEvent, CommandPolicy, Event, LoopConfig, LoopSpec};
+use zx_agent::agent::{AgentEvent, Event, LoopConfig, LoopSpec};
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::extensions::RedactSecrets;
-use zx_agent::policy::PolicyHook;
+use zx_agent::policy::{CommandPolicy, PolicyHook};
 use zx_agent::presets::troubleshoot;
 use zx_agent::prompt::{build_system_prompt, environment_section};
 use zx_agent::session::{SessionHeader, SessionStore};

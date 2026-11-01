@@ -1,11 +1,14 @@
 //! Events emitted while the agent runs, the envelope that places each one in a trace, and the
 //! sink that receives them.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Serialize;
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 
+use super::hooks::HookContext;
 use super::report::RunReport;
 use crate::ai::{Delta, Message, Usage, now_ms};
 
@@ -35,21 +38,25 @@ pub struct Event {
     pub event: AgentEvent,
 }
 
-/// Stamps the events of one run with its IDs and a sequence number.
+/// One run's context: what its hooks are told and what stamps its events, with the next
+/// sequence number.
 pub(crate) struct RunTrace {
-    session_id: Option<String>,
-    run_id: String,
+    context: HookContext,
     seq: AtomicU64,
 }
 
 impl RunTrace {
-    /// A new run with a fresh ID.
-    pub(crate) fn new(session_id: Option<String>) -> Self {
+    /// A new run with a fresh ID, cancelled by `cancel`.
+    pub(crate) fn new(session_id: Option<String>, cwd: PathBuf, cancel: CancellationToken) -> Self {
         Self {
-            session_id,
-            run_id: uuid::Uuid::new_v4().to_string(),
+            context: HookContext::new(session_id, cwd, cancel),
             seq: AtomicU64::new(0),
         }
+    }
+
+    /// What every hook of this run is told.
+    pub(crate) fn context(&self) -> &HookContext {
+        &self.context
     }
 
     /// The event with the next sequence number. Events are stamped in the order they are
@@ -59,8 +66,8 @@ impl RunTrace {
             schema_version: EVENT_SCHEMA_VERSION,
             seq: self.seq.fetch_add(1, Ordering::Relaxed) + 1,
             at_ms: now_ms(),
-            session_id: self.session_id.clone(),
-            run_id: self.run_id.clone(),
+            session_id: self.context.session_id.clone(),
+            run_id: self.context.run_id.clone(),
             event,
         }
     }
@@ -513,7 +520,7 @@ mod tests {
 
     #[test]
     fn the_envelope_shares_one_object_with_the_event() {
-        let trace = RunTrace::new(Some("session".into()));
+        let trace = RunTrace::new(Some("session".into()), PathBuf::from("."), CancellationToken::new());
         let first = trace.stamp(AgentEvent::AgentStart { attempt: 1 });
         let second = trace.stamp(AgentEvent::TurnStart { turn: 1 });
 
@@ -533,8 +540,8 @@ mod tests {
 
     #[test]
     fn each_run_has_its_own_id_and_numbering() {
-        let first = RunTrace::new(None);
-        let second = RunTrace::new(None);
+        let first = RunTrace::new(None, PathBuf::from("."), CancellationToken::new());
+        let second = RunTrace::new(None, PathBuf::from("."), CancellationToken::new());
         first.stamp(AgentEvent::AgentStart { attempt: 1 });
 
         let event = second.stamp(AgentEvent::AgentStart { attempt: 1 });

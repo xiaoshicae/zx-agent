@@ -7,19 +7,20 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use zx_agent::agent::{CommandPolicy, Decision, LoopConfig, LoopSpec, Tool};
+use zx_agent::AgentSession;
+use zx_agent::agent::{Decision, EventSink, LoopConfig, LoopSpec, Tool};
 use zx_agent::ai::openai::{DEFAULT_MAX_RESPONSE_BYTES, OpenAiCompatible, OpenAiConfig, SystemUpdates};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::sse::DEFAULT_MAX_EVENT_BYTES;
 use zx_agent::compaction;
 use zx_agent::executor::{ContainerConfig, ContainerExecutor, Executor, LocalExecutor};
-use zx_agent::extensions::RedactSecrets;
+use zx_agent::extensions::{ContinueOnLength, RedactSecrets};
 use zx_agent::output_store::{self, OutputStore, ReadOutputTool, SpillOutputs};
-use zx_agent::policy::{AutoApprove, PolicyHook, Rule, RuleMatcher, RulePolicy};
+use zx_agent::policy::{AutoApprove, CommandPolicy, PolicyHook, Rule, RuleMatcher, RulePolicy};
 use zx_agent::profile::skills::{ReadSkillTool, TOOL_NAME};
 use zx_agent::profile::{Builtin, ContainerSettings, Execution, Profile};
 use zx_agent::prompt::{build_system_prompt, container_environment_section, environment_section};
-use zx_agent::runner::Limits;
+use zx_agent::runner::{Limits, Runner};
 use zx_agent::session::{SessionHeader, SessionStore};
 use zx_agent::tools::{self, BASH};
 
@@ -315,17 +316,16 @@ pub(crate) struct Budget {
     pub(crate) continue_on_length: Option<u32>,
 }
 
+/// A configured session with the hooks every mode shares. A mode adds only what is its own,
+/// such as chat's approval rule and interaction host, then calls `into_session`.
 pub(crate) struct PreparedSession {
     pub(crate) config: LoopConfig,
     pub(crate) retry: RetryPolicy,
     pub(crate) store: SessionStore,
-    pub(crate) redactor: RedactSecrets,
     /// The profile's auto-approved commands, for frontend policies that also ask for bash.
     pub(crate) auto_approve: AutoApprove,
     pub(crate) limits: Limits,
-    pub(crate) continue_on_length: u32,
     pub(crate) compaction: compaction::Config,
-    pub(crate) spill: Option<SpillOutputs>,
 }
 
 /// Read `--system-prompt-file` once, at startup. As before profiles existed, it may be a
@@ -569,6 +569,18 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
             RulePolicy::new(rules).auto_approve(auto_approve.clone()),
         )));
     }
+    // The hooks every mode shares. Each declares its stage, so the policies above run first
+    // and redaction runs before output is saved, whatever is registered later.
+    config.hooks.push(ContinueOnLength::new(profile.continue_on_length));
+    config.hooks.push(
+        RedactSecrets::new(api_key)
+            .with_secret_files(std::iter::once(PathBuf::from(SERVICE_ACCOUNT_TOKEN)).chain(secret_files)),
+    );
+    if let Some(spill) = spill {
+        config.hooks.push(spill);
+    }
+    // The built-in tools skip repeated names; this guards tools registered here later.
+    config.spec.validate().map_err(anyhow::Error::msg)?;
     Ok(PreparedSession {
         config,
         retry: RetryPolicy {
@@ -576,14 +588,20 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
             ..RetryPolicy::default()
         },
         store: session,
-        redactor: RedactSecrets::new(api_key)
-            .with_secret_files(std::iter::once(PathBuf::from(SERVICE_ACCOUNT_TOKEN)).chain(secret_files)),
         auto_approve,
         limits: profile.limits,
-        continue_on_length: profile.continue_on_length,
         compaction: profile.compaction,
-        spill,
     })
+}
+
+impl PreparedSession {
+    /// The conversation, sending events to `sink`: the one place where both modes turn a
+    /// prepared session into a running one.
+    pub(crate) fn into_session(self, sink: Arc<dyn EventSink>) -> Result<AgentSession> {
+        let runner =
+            Runner::new(self.config, self.retry, self.limits, self.store, sink).with_compaction(self.compaction)?;
+        Ok(AgentSession::from(runner))
+    }
 }
 
 /// Container settings from the profile; the session file must already be outside `cwd`.

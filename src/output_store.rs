@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::agent::{Effects, HookResult, Hooks, Tool, ToolContext, ToolOutput};
+use crate::agent::{Effects, HookContext, HookResult, HookStage, Hooks, Tool, ToolContext, ToolOutput};
 use crate::ai::{ToolCall, ToolDef};
 
 /// Paging tool name; enabling spilling requires registering this tool too.
@@ -238,7 +238,12 @@ impl SpillOutputs {
 
 #[async_trait]
 impl Hooks for SpillOutputs {
-    async fn after_tool(&self, call: &ToolCall, mut output: ToolOutput) -> HookResult<ToolOutput> {
+    /// After redaction, so that saved output contains no known secret.
+    fn stage(&self) -> HookStage {
+        HookStage::Storage
+    }
+
+    async fn after_tool(&self, call: &ToolCall, mut output: ToolOutput, _ctx: &HookContext) -> HookResult<ToolOutput> {
         if !self.exempt_tools.contains(&call.name)
             && self
                 .store

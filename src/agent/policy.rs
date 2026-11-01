@@ -3,12 +3,23 @@
 //! An unattended run has no one to ask, so a policy decides on its own and should deny
 //! when unsure. Policies are a first line of defense, not a security boundary: run the
 //! agent as a least-privilege user, in a container or VM, for real isolation.
+//!
+//! Extensions decide through [`Hooks::before_tool`](super::Hooks::before_tool); a
+//! [`ToolPolicy`] is how the built-in policies join, through `policy::PolicyHook`. The
+//! concrete policies live outside the kernel, in `zx_agent::policy`:
+//!
+//! ```compile_fail
+//! use zx_agent::agent::CommandPolicy;
+//! ```
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// The verdict on one tool call.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The verdict on one tool call. In JSON: `{"decision":"allow"}`, or `deny` / `ask` with a
+/// `reason`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "decision", content = "reason", rename_all = "snake_case")]
 pub enum Decision {
     Allow,
     /// The reason is shown to the model as the tool result.
@@ -33,6 +44,3 @@ impl ToolPolicy for AllowAll {
         Decision::Allow
     }
 }
-
-// Compatibility exports; concrete policies live outside the loop.
-pub use crate::policy::{CommandPolicy, DEFAULT_DENIED_PATTERNS};

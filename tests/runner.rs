@@ -65,7 +65,7 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use common::{EchoTool, RunnerSetup, config, fast_retry, header, read_lines, summarize};
-use zx_agent::agent::{AgentEvent, EVENT_SCHEMA_VERSION, HookResult, Hooks, RequestKind};
+use zx_agent::agent::{AgentEvent, EVENT_SCHEMA_VERSION, HookContext, HookResult, Hooks, RequestKind};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, PREAMBLE, StopReason, SystemPrompt};
 use zx_agent::runner::{Limits, RunOutcome};
@@ -683,7 +683,7 @@ async fn attempts_and_requests_are_numbered_and_name_their_request_records() {
 struct Uppercase;
 #[async_trait]
 impl Hooks for Uppercase {
-    async fn on_input(&self, text: String) -> HookResult<String> {
+    async fn on_input(&self, text: String, _ctx: &HookContext) -> HookResult<String> {
         Ok(text.to_uppercase())
     }
 }

@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::AgentSession;
-use zx_agent::agent::{AgentEvent, ContextEdit, Event, Hooks};
+use zx_agent::agent::{AgentEvent, ContextEdit, Event, HookContext, HookOptions, Hooks};
 use zx_agent::agent_session::{ModelRef, SessionError};
 use zx_agent::ai::Message;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
@@ -141,7 +141,7 @@ async fn steering_received_during_a_summary_is_persisted_before_the_next_task_re
     struct SteerAfterSummary(Arc<zx_agent::agent::MessageQueues>);
     #[async_trait]
     impl Hooks for SteerAfterSummary {
-        async fn on_event(&self, event: &Event) -> Result<(), String> {
+        async fn on_event(&self, event: &Event, _ctx: &HookContext) -> Result<(), String> {
             if matches!(event.event, AgentEvent::CompactionEnd { .. }) {
                 self.0.steer("new correction");
             }
@@ -332,7 +332,7 @@ async fn the_pause_survives_a_run_whose_future_is_dropped() {
     struct Hold(Arc<tokio::sync::Notify>);
     #[async_trait]
     impl Hooks for Hold {
-        async fn on_input(&self, text: String) -> Result<String, String> {
+        async fn on_input(&self, text: String, _ctx: &HookContext) -> Result<String, String> {
             if text == "hold" {
                 self.0.notify_one();
                 std::future::pending::<()>().await;
@@ -347,9 +347,13 @@ async fn the_pause_survives_a_run_whose_future_is_dropped() {
     ]));
     let waiting = Arc::new(tokio::sync::Notify::new());
     let mut config = config(provider.clone(), vec![]);
-    config
-        .hooks
-        .push_with_timeout(Hold(waiting.clone()), Duration::from_secs(3600));
+    config.hooks.push_with(
+        Hold(waiting.clone()),
+        HookOptions {
+            timeout: Duration::from_secs(3600),
+            ..HookOptions::default()
+        },
+    );
     let (runner, _) = RunnerSetup {
         session: store,
         ..RunnerSetup::new(config)
@@ -440,7 +444,11 @@ async fn context_hooks_are_persisted_before_a_summary_sees_the_source() {
     struct Correct;
     #[async_trait]
     impl Hooks for Correct {
-        async fn transform_context(&self, messages: &[Message]) -> Result<Vec<ContextEdit>, String> {
+        async fn transform_context(
+            &self,
+            messages: &[Message],
+            _ctx: &HookContext,
+        ) -> Result<Vec<ContextEdit>, String> {
             Ok(
                 if matches!(&messages[0], Message::User{content,..} if content.starts_with("observed")) {
                     vec![ContextEdit::ReplaceText {
@@ -488,7 +496,11 @@ async fn a_context_plan_that_edits_a_summary_is_rejected_before_any_edit_is_writ
     struct EditInputThenSummary;
     #[async_trait]
     impl Hooks for EditInputThenSummary {
-        async fn transform_context(&self, messages: &[Message]) -> Result<Vec<ContextEdit>, String> {
+        async fn transform_context(
+            &self,
+            messages: &[Message],
+            _ctx: &HookContext,
+        ) -> Result<Vec<ContextEdit>, String> {
             let input = messages
                 .iter()
                 .position(|m| matches!(m, Message::User{content,..} if content == "go"));

@@ -19,10 +19,9 @@ use zx_agent::agent::Decision;
 use zx_agent::agent_session::ModelRef;
 use zx_agent::ai::Provider;
 use zx_agent::compaction;
-use zx_agent::extensions::ContinueOnLength;
 use zx_agent::policy::{PolicyHook, Rule, RuleMatcher, RulePolicy};
 use zx_agent::profile::Builtin;
-use zx_agent::runner::{RunReport, Runner};
+use zx_agent::runner::RunReport;
 use zx_agent::tools::BASH;
 
 use crate::cli::{self, ChatArgs, SessionFile, SessionOptions};
@@ -94,29 +93,12 @@ async fn build(
                 decision: Decision::Allow,
             },
         ])
-        .auto_approve(prepared.auto_approve),
+        .auto_approve(std::mem::take(&mut prepared.auto_approve)),
     )));
-    prepared
-        .config
-        .hooks
-        .push(ContinueOnLength::new(prepared.continue_on_length));
-    prepared.config.hooks.push(prepared.redactor);
-    if let Some(spill) = prepared.spill {
-        prepared.config.hooks.push(spill);
-    }
     prepared.config.interaction = interaction.clone();
     let provider = prepared.config.spec.provider.clone();
     let cwd = prepared.config.spec.cwd.clone();
-    let session = AgentSession::from(
-        Runner::new(
-            prepared.config,
-            prepared.retry,
-            prepared.limits,
-            prepared.store,
-            output.clone(),
-        )
-        .with_compaction(prepared.compaction)?,
-    );
+    let session = prepared.into_session(output.clone())?;
     Ok(Built { session, provider, cwd })
 }
 

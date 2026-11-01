@@ -85,7 +85,11 @@ impl Runner {
     pub async fn compact(&mut self, cancel: &CancellationToken) -> compaction::Report {
         let child = cancel.child_token();
         let _cancel_on_drop = child.drop_guard_ref();
-        let trace = RunTrace::new(Some(self.session.header().id.clone()));
+        let trace = RunTrace::new(
+            Some(self.session.header().id.clone()),
+            self.config.spec.cwd.clone(),
+            child.clone(),
+        );
         let mut host = compaction::Host {
             session: &mut self.session,
             provider: self.config.spec.provider.as_ref(),
@@ -165,7 +169,11 @@ impl Runner {
             }))
         });
 
-        let trace = RunTrace::new(Some(self.session.header().id.clone()));
+        let trace = RunTrace::new(
+            Some(self.session.header().id.clone()),
+            self.config.spec.cwd.clone(),
+            run_cancel.clone(),
+        );
         let start = AgentEvent::RunStart {
             model: self.config.spec.model.clone(),
             provider: self.config.spec.provider.name().into(),
@@ -174,11 +182,11 @@ impl Runner {
             sink: self.sink.as_ref(),
             trace: &trace,
         };
-        self.config.hooks.emit(start, &run_cancel, to).await;
+        self.config.hooks.emit(start, to).await;
         // Entry IDs remain stable even when hooks omit messages from earlier runs.
         let run_start = self.session.entries().len();
         // Before any system prompt change or input, so that results directly follow their calls.
-        let recovered = self.recover_interrupted_calls(&run_cancel, &trace).await;
+        let recovered = self.recover_interrupted_calls(&trace).await;
         let Self {
             config,
             retry,
@@ -268,7 +276,6 @@ impl Runner {
                             delay_ms: duration_ms(delay),
                             error: last_error.clone().unwrap_or_default(),
                         },
-                        &run_cancel,
                         to,
                     )
                     .await;
@@ -349,14 +356,14 @@ impl Runner {
         let end = AgentEvent::RunEnd {
             report: Box::new(report.clone()),
         };
-        config.hooks.emit(end, &run_cancel, to).await;
+        config.hooks.emit(end, to).await;
         report
     }
 
     /// Record an error result for each call that an interrupted run left without one, so
     /// the next request cannot suggest that such a call did nothing. Calls are never run
     /// again. Stops at the first result the session cannot record.
-    async fn recover_interrupted_calls(&mut self, cancel: &CancellationToken, trace: &RunTrace) -> Result<(), String> {
+    async fn recover_interrupted_calls(&mut self, trace: &RunTrace) -> Result<(), String> {
         let Self {
             config, session, sink, ..
         } = self;
@@ -377,7 +384,7 @@ impl Runner {
                 tool_name: call.tool_name.clone(),
                 state,
             };
-            config.hooks.emit(event, cancel, to).await;
+            config.hooks.emit(event, to).await;
             let result = Message::ToolResult(ToolResultMessage {
                 tool_call_id: call.tool_call_id,
                 tool_name: call.tool_name,
@@ -387,7 +394,7 @@ impl Runner {
                 duration_ms: None,
             });
             let start = AgentEvent::MessageStart { role: "toolResult" };
-            config.hooks.emit(start, cancel, to).await;
+            config.hooks.emit(start, to).await;
             let entry_id = session
                 .append_message(result.clone())
                 .await
@@ -396,7 +403,7 @@ impl Runner {
                 message: result,
                 entry_id: Some(entry_id),
             };
-            config.hooks.emit(end, cancel, to).await;
+            config.hooks.emit(end, to).await;
         }
         Ok(())
     }
@@ -914,7 +921,11 @@ mod tests {
         struct Rewrite;
         #[async_trait::async_trait]
         impl crate::agent::Hooks for Rewrite {
-            async fn on_input(&self, _text: String) -> crate::agent::HookResult<String> {
+            async fn on_input(
+                &self,
+                _text: String,
+                _ctx: &crate::agent::HookContext,
+            ) -> crate::agent::HookResult<String> {
                 Ok("rewritten".into())
             }
         }

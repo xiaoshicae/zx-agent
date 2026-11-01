@@ -155,7 +155,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P4 | profile 文件、上下文文件与 skills | 已完成（PR #6） |
 | P5 | 上下文管理 | 已完成（PR #9） |
 | P6 | 执行环境与崩溃恢复 | 进行中：崩溃恢复（PR #12）、执行环境接缝（PR #13）、离线容器执行（PR #14）已完成；在线访问评审稿已合入（PR #17），一期已完成：只读命令自动放行（PR #19）、环境变量保护与 ServiceAccount token 脱敏（PR #20）、常驻 Pod 部署包（PR #22）、多集群（PR #24）；容器联网已取消，改为常驻 Pod 部署。待部署方在真实集群上验收 |
-| P7 | 插件与 MCP | 未开始；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已实施（PR #23，待合并），A2–A8 待评审 |
+| P7 | 插件与 MCP | 未开始；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已完成（PR #23），A2–A8（扩展 API）已完成（PR #25） |
 | P8 | 嵌入协议 `acp` | 未开始 |
 | P9 | 可选增强 | 未开始 |
 
@@ -530,7 +530,7 @@ B. 追踪事件
 - `tests/cli.rs` 改动一行：准备数据时的 `append_message(...)` 加 `.await`，这是写方法改为异步的直接结果，断言未改；该文件自 `d2a6a6c` 以来首次改动。其他既有测试的调整：写方法加 `.await`；写入者仍在运行时读取会话文件的 9 处改用 `SessionStore::read`；`src/session.rs` 中 2 项测试在重新打开文件前先释放写入者。
 - 本机 macOS 验证：新增 15 项测试（含 1 个 Rustdoc 示例）；合并 `dd43cce` 后，stable 与 Rust 1.88.0 各 495 项通过、6 项付费测试跳过。其中 4 项回归测试在修复前失败：在 `e350c8f` 上，取消输入钩子后原始输入仍在会话中（2 项），第二个 `run` 写入同一会话文件并以 0 退出（1 项）；在加入重试之前的本分支上，关闭会话后立即重新打开报 `is in use`（1 项）。另用独立进程（Python `fcntl.flock`）持锁实测：`run` 与 `chat` 均以退出码 2 结束并报告 `is in use`，文件不变；释放后 `chat` 正常打开。未新增依赖。完整检查结果与原始测试摘要附在 PR 中。
 
-#### B 定稿：追踪事件（2026-11-01，已实施，PR #23）
+#### B 定稿：追踪事件（2026-11-01，已完成，PR #23）
 
 目标：只看事件就能还原一次运行的时间线——运行、每次尝试、回合、每个模型请求、工具的策略结论与审批、摘要——并能逐条对应到会话中的记录，为 P9 的 OTel 导出器备好数据。本阶段不引入导出器，也不新增依赖。
 
@@ -558,6 +558,51 @@ B. 追踪事件
 - 公开 API 的变化：`EventSink::emit` 与 `Hooks::on_event` 改为接收 `&Event`，新增 `Hooks::observes`；`AgentEvent` 新增 `RunStart`、`RunEnd`、`RequestStart`、`ToolDecision`、`ApprovalRequested`、`ApprovalResolved`，`AgentStart` 带 `attempt`，`MessageEnd`、`ContextEdited` 带 `entry_id`；`RunReport`、`RunOutcome` 移到 `agent`，`runner` 再导出；新增 `Event`、`EVENT_SCHEMA_VERSION`、`RequestKind`、`ToolVerdict`、`ApprovalResult` 与 `agent_session::EventStream`。
 - 既有测试的调整：`tests/cli.rs` 中 JSONL 第一行的期望由 `agent_start` 改为 `run_start`（该文件第二次改动）；`tests/compaction.rs` 中手动压缩的事件序列多出 `request_start`，自动摘要的回合编号由两个回合 `[1, 2]` 变为一个回合的 `turn_start` / `turn_end`；测试中的 sink 与观察钩子改为接收 `&Event`，需要观察全部事件的钩子覆盖 `observes`。
 - 本机 macOS 验证：新增 16 项测试；stable 与 Rust 1.88.0 各 511 项通过（基线 495 项）、6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过；设置 `ZX_DOCKER_TEST_IMAGE=debian:bookworm-slim` 时容器测试 30 项通过。"预算用完不开空回合"的测试在改动前失败（任务回合数为 2，期望 1）。`run --help`、`chat --help` 不变，未新增依赖。
+
+#### A2–A8 定稿：扩展 API（2026-11-01，已完成，PR #25）
+
+目标：P7 公开 `Extension` 之前，把扩展会用到的钩子接口、注册方式、执行顺序与数据格式定下来；之后只做兼容的增改。
+
+1. **钩子上下文（A2）**：每个钩子方法最后增加一个参数 `&HookContext`，含 `session_id`、`run_id`（与事件信封的 `runId` 相同）、`cwd` 与运行的 `cancel` 令牌。结构标为 `#[non_exhaustive]`，字段只增不删；库外用 `HookContext::new` 构造。运行上下文只有一份：同时给事件盖信封、给钩子提供上下文。`HookChain` 的公开方法改为接收 `&HookContext`，不再单独接收取消令牌。
+2. **钩子名称（A3）**：注册时可以给出名称，用于 `hook_failed` 与追踪；不给时仍用类型名。注册参数收拢为 `HookOptions { name, timeout }`（`Default` 加结构体更新语法），`push_with(hook, options)` 取代 `push_with_timeout`。P7 中扩展注册的钩子以 `Extension::name()` 命名。
+3. **固定阶段（A4）**：钩子分为四个阶段，每个钩子方法都按 `Policy`（内置工具策略）、`Extension`（默认）、`Redaction`（脱敏）、`Storage`（长结果落盘）的顺序执行，同一阶段内按注册顺序。阶段由钩子自己声明（`Hooks::stage()`，默认 `Extension`）：`PolicyHook`、`RedactSecrets`、`SpillOutputs` 各自声明所属阶段，不再依赖宿主的注册顺序。P7 的 `Extension` 接口只允许 `Extension` 阶段。
+4. **工具重名（A5）**：`LoopSpec::validate` 拒绝重名的工具；`run_loop` 开始时先检查，重名则不发请求、以 `Error` 结束；CLI 在启动时检查，按配置错误退出。MCP 工具名的前缀与分隔符随 P7 确定。
+5. **唯一组装入口（A6）**：`run` 与 `chat` 共用的钩子（续写、脱敏、长结果落盘）在 `cli::prepare` 中注册，Runner 与 `AgentSession` 也由同一个函数构造；两种模式只各自提供事件输出、交互宿主与 chat 的审批规则。P7 的扩展与 P8 的 `acp` 都在这里接入。
+6. **放行接口（A7）**：扩展统一使用 `Hooks::before_tool`；`ToolPolicy` 保留为内置策略经 `PolicyHook` 接入的方式。内核模块 `agent` 不再再导出外层的 `CommandPolicy`，改从 `policy` 引用。
+7. **JSON 契约（A8）**：钩子的输入输出类型派生 serde，格式由测试固定：`Decision` 为 `{"decision":"allow"}`、`{"decision":"deny","reason":…}`；`TurnDecision` 为 `{"decision":"continue_answer","text":…}` 等；`ContextEdit` 为 `{"edit":"append","message":…}`、`{"edit":"replace_text","index":…,"text":…}`、`{"edit":"omit","index":…}`（`Append` 因此改为带字段的形式）；`Approval` 为 `{"approval":"deny","reason":…}` 等；`ToolOutput`、`ApprovalRequest` 为 camelCase 对象，`ToolOutput` 的 `content` 必填，`isError`、`terminate` 缺省为 `false`。`HookContext`（不含取消令牌）、`TurnSummary` 可序列化，供钩子进程（L2）与 P8 的审批转发使用；协议本身随 L2 设计。
+8. **不变**：钩子的语义（失败、超时、取消的处理与最严结论）、事件格式、会话文件格式、CLI 参数。
+
+验收：每个钩子方法都能读到会话 ID、运行 ID、工作目录与取消令牌，且运行 ID 与事件一致；具名钩子的名字出现在 `hook_failed` 中；无论注册顺序如何，`after_tool` 中扩展先于脱敏、脱敏先于落盘，`before_tool` 中内置策略最先；重名工具在发请求前被拒绝；`run` 与 `chat` 注册的公共钩子相同；`agent` 不再导出 `CommandPolicy`；每个契约类型的 JSON 与上文一致并能往返。
+
+实施记录（PR #25，基于 `090dbec`，含 PR #24）：
+
+- 按上述 1–8 实施，与定稿的差异与补充如下：
+  - `HookContext` 只派生 `Clone` 与 `Serialize`，钩子进程只需读取它。直接调用 `run_loop` 时 `sessionId` 为空，`runId` 为新生成的 UUID。钩子拿到的取消令牌与此前 `HookChain` 收到的相同：`Runner::run` 中是本次运行的令牌，手动压缩中是压缩自己的子令牌。
+  - `HookOptions` 未标 `#[non_exhaustive]`，库外才能用结构体更新语法构造。`HookChain::push` 与 `with` 不变，仍以类型名注册。
+  - `on_event` 同样按阶段、再按注册顺序调用观察钩子。
+  - 阶段由 `Hooks::stage` 声明，SDK 中实现 `Hooks` 的类型目前可以声明任意阶段；"扩展只能使用 `Extension` 阶段"随 P7 的 `Extension` 接口实施。
+  - chat 的 bash 审批规则在 `cli::prepare` 之后注册，`PolicyHook` 声明 `Policy` 阶段，因此仍排在续写、脱敏与落盘之前。两种模式的钩子顺序与此前相同。
+  - `cli::prepare` 中的重名检查对内置工具不会触发（`tools::builtin_tools_with` 已跳过重复的名字），只防以后在此注册的工具，因此没有 CLI 测试；失败时与其他启动错误一样以退出码 2 结束。
+  - `ToolOutput` 的 `content` 必填（第 7 项已补充）：钩子进程漏写 `content` 时解析失败，不会以空文本替换工具结果。
+  - `ToolCall` 也派生 serde，字段与消息中 `toolCall` 块的字段同名（`argumentsError` 为空时省略），`ApprovalRequest` 因此可以往返。
+- 公开 API 的变化：
+  - `Hooks` 的六个回调增加最后一个参数 `&HookContext`，新增 `Hooks::stage`。
+  - `HookChain` 的六个回调方法改为接收 `&HookContext`，不再接收 `&CancellationToken`；`push_with_timeout` 由 `push_with(hook, HookOptions)` 取代。
+  - 新增 `HookContext`、`HookOptions`、`HookStage` 与 `LoopSpec::validate`。
+  - `ContextEdit::Append(Message)` 改为 `ContextEdit::Append { message }`。
+  - `agent` 不再再导出 `CommandPolicy`，`agent::policy` 不再再导出 `CommandPolicy` 与 `DEFAULT_DENIED_PATTERNS`，改从 `policy` 引用。
+  - `Decision`、`TurnDecision`、`ContextEdit`、`ToolOutput`、`ToolCall`、`ApprovalRequest`、`Approval` 派生 `Serialize` 与 `Deserialize`；`HookContext`、`TurnSummary`、`TurnDisposition` 派生 `Serialize`。
+  - 事件格式、会话文件格式与 CLI 参数不变，`run --help`、`chat --help` 与 `090dbec` 逐字节相同。
+- 既有测试的调整只涉及调用方式，断言未改：
+  - 测试中的钩子实现增加 `_ctx: &HookContext` 参数；直接调用钩子或 `HookChain` 时传入 `tests/common` 新增的 `hook_context()`，`cancellation_skips_writes_and_reads` 传入带已取消令牌的上下文。
+  - `push_with_timeout` 改为 `push_with`，`ContextEdit::Append(...)` 改为带字段的形式。
+  - `tests/real_api.rs` 与 `examples/library.rs` 改从 `policy` 引入 `CommandPolicy`。
+  - `tests/cli.rs` 未改。
+- 本机 macOS 验证：
+  - 新增 16 项测试：`tests/hooks.rs` 5 项（钩子上下文、具名钩子、阶段顺序 2 项、重名工具），`tests/hook_contract.rs` 10 项（JSON 契约），1 个 Rustdoc 示例（`compile_fail`：`agent` 不再导出 `CommandPolicy`）。
+  - stable 与 Rust 1.88.0 各 531 项通过（基线 515 项），6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过，自查脚本的命中项与基线相同；设置 `ZX_DOCKER_TEST_IMAGE=debian:bookworm-slim` 时容器测试 30 项通过。
+  - 反向验证：让钩子忽略阶段、按注册顺序执行时，阶段顺序的 2 项测试失败，其中注册在前的脱敏没有处理扩展追加的密钥；去掉 `run_loop` 中的重名检查时，重名工具的测试失败，运行以 `Completed` 结束。修改均已还原。`ToolOutput` 缺少 `content` 的测试在修复前失败。
+  - 未新增依赖，`Cargo.toml`、`Cargo.lock` 未改动。
 
 ### P7 插件与 MCP
 

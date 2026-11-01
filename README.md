@@ -422,12 +422,14 @@ P1 的 SDK 接口调整：静态配置移入 `LoopSpec`；`LoopConfig` 持有钩
 直接调用循环改为 `run_loop(context, prompts, config, &mut LoopControl::new(max_turns, approvals, cancel, sink))`，
 其中 `approvals` 是宿主持有的 `&mut ApprovalCache`；使用 `Runner` 时由它管理。
 
-`Hooks` 的六个回调均有默认实现。`HookChain::push` 按顺序注册，每次回调默认超时 5 秒，可用 `push_with_timeout` 覆盖。`on_event` 收到带信封的 `Event`；每次调用都会被等待，所以默认不观察流式增量 `message_update`，需要时覆盖 `observes`。
-`before_tool` 取 Deny > Ask > Allow，首个 Deny 立即拒绝；同级 Ask 保留第一条理由。`RulePolicy` 按 deny → ask → allow 匹配，同级按注册顺序，无匹配时拒绝。
+`Hooks` 的六个回调均有默认实现，最后一个参数都是 `&HookContext`：会话 ID、运行 ID（与事件的 `runId` 相同）、工作目录与运行的取消令牌；它标为 `#[non_exhaustive]`，以后只增加字段。`HookChain::push` 以类型名注册，每次回调默认超时 5 秒；`push_with(hook, HookOptions { name, timeout })` 可以给出名称（用于 `hook_failed` 与追踪）和超时。`on_event` 收到带信封的 `Event`；每次调用都会被等待，所以默认不观察流式增量 `message_update`，需要时覆盖 `observes`。
+
+钩子分阶段执行：每个回调都按 `Policy`（内置工具策略）、`Extension`（默认）、`Redaction`（脱敏）、`Storage`（长结果落盘）的顺序，同一阶段内按注册顺序。阶段由钩子自己声明（`Hooks::stage`）：`PolicyHook`、`RedactSecrets`、`SpillOutputs` 各自声明所属阶段，因此无论宿主以什么顺序注册，`before_tool` 都先经过内置策略，`after_tool` 中扩展的改动都会再经过脱敏，落盘的总是脱敏后的结果。
+`before_tool` 取 Deny > Ask > Allow，首个 Deny 立即拒绝；同级 Ask 保留第一条理由。扩展用 `before_tool` 放行或拒绝；`ToolPolicy` 是内置策略经 `PolicyHook` 接入的方式，具体策略（如 `CommandPolicy`）在 `policy` 模块。`RulePolicy` 按 deny → ask → allow 匹配，同级按注册顺序，无匹配时拒绝。
 策略与审批的错误、panic、超时均拒绝执行；`after_tool` 失败会丢弃输出；输入、上下文与回合钩子失败会结束运行且不触发 provider 重试。`on_event` 的错误只生成 `hook_failed`，诊断不再递归送入钩子。
 
 `on_input` 完成后才写入输入：改写时依次追加原始输入和替换它的 `context_edit`，拒绝时追加原始输入和省略它的 `context_edit`，原始内容都留在会话中供审计。钩子被取消或运行 future 被丢弃时什么也不写，从队列取出的插话或后续消息仍留在队首，由下一次运行处理。两次追加之间进程崩溃时，原始输入会出现在投影中。
-`transform_context` 返回按顺序应用的 `ContextEdit`：追加消息、替换文本或省略消息；不能修改或省略 system 消息，也不能用文本替换抹掉工具调用。会话根据压缩记录合成的摘要（`UserMessageKind::Summary`）不能被编辑、省略或追加；要修正摘要，应编辑它引用的原始消息，摘要随之失效，投影回到原始记录。包含这类编辑的计划在校验时整份拒绝，不写入任何条目。
+`transform_context` 返回按顺序应用的 `ContextEdit`：追加消息（`Append { message }`）、替换文本或省略消息；不能修改或省略 system 消息，也不能用文本替换抹掉工具调用。会话根据压缩记录合成的摘要（`UserMessageKind::Summary`）不能被编辑、省略或追加；要修正摘要，应编辑它引用的原始消息，摘要随之失效，投影回到原始记录。包含这类编辑的计划在校验时整份拒绝，不写入任何条目。
 整份变换计划先校验，随后逐项持久化；写入失败时立即停止运行，不发送模型请求。写入失败前已追加的条目仍保留。
 
 审批默认超时 120 秒。`NoHuman` 明确拒绝 Ask；`Approval::AllowOnce` 只允许一次，
@@ -444,8 +446,8 @@ P1 的 SDK 接口调整：静态配置移入 `LoopSpec`；`LoopConfig` 持有钩
 
 - `ai::Provider`：接入新的模型服务，必须遵守 `src/ai/provider.rs` 中的约定。
 - `agent::Tool`：自定义工具。返回 `Err` 等价于 pi 中的抛出异常，会变成错误结果交给模型。`effects()` 默认返回 `SideEffects`，Runner 会在执行前记录开始；不会改变任何状态的工具应返回 `Effects::ReadOnly`，否则中断后只能报告结果未知。
-- `agent::ToolPolicy`：自定义工具调用策略，例如接入审批系统或资源级权限。
-- `agent::Hooks`：输入、上下文、工具调用前后、回合结束与事件观察。
+- `agent::ToolPolicy`：内置风格的工具调用策略，经 `policy::PolicyHook` 注册，运行在 `Policy` 阶段；扩展改用 `Hooks::before_tool`。
+- `agent::Hooks`：输入、上下文、工具调用前后、回合结束与事件观察。钩子的输入输出类型（`Decision`、`TurnDecision`、`ContextEdit`、`ToolOutput`、`Approval`、`ApprovalRequest`、`ToolCall`、`HookContext`、`TurnSummary`）都有固定的 JSON 格式，供钩子进程与审批转发使用，格式由 `tests/hook_contract.rs` 固定。
 - `interaction::Interaction`：由宿主回答审批；内核不读取终端。
 - `agent::EventSink`：订阅事件，收到带信封的 `agent::Event`（事件本体在 `event.event`）。任何 `Fn(&Event) + Send + Sync` 都可以直接用作 sink。事件发出时，它报告的消息与编辑已写入会话；sink 只接收事件，不参与持久化。导出器可用 `AgentSession::subscribe_bounded(capacity)` 得到有界通道：通道满时丢弃新事件并计数（`EventStream::dropped()`），不阻塞运行。
 - `session::SessionLog`：会话记录存在哪里，见下文[会话存储](#会话存储)。
@@ -496,7 +498,8 @@ cargo fmt --check
 | `tests/container.rs` | 容器执行：用假 docker 程序验证启动参数与失败报告、命令与读文件的转发、超时 / 取消 / 丢弃后的清理、CLI 接线与配置错误；设置 `ZX_DOCKER_TEST_IMAGE` 时另对真实 Docker 验证用户、只读工作目录与无网络、命令进程树与 `setsid` 子进程的终止、清理不受命令写入影响、命令逐条执行、容器内读文件、chat 中 Ctrl-C 后容器仍在、zx-agent 正常结束或被 SIGKILL 后容器删除（CI 在 Linux 上用 `debian:bookworm-slim` 运行）；另验证 root 用户与工作目录内的会话文件被拒绝 |
 | `tests/crash_recovery.rs` | 内置工具的副作用声明、开始记录先于执行（串行与并行批次）、中断批次的四种恢复结果且不重放、旧格式会话、丢弃 future 后的同进程恢复、`run` 的 `[recover]` 输出；Unix 上 SIGKILL 掉正在执行命令的 `run`，再由下一次 `run` 恢复且不重放 |
 | `tests/output_store.rs` | 先脱敏后落盘、UUID 边界、文件权限、UTF-8 分页、容量、取消、写盘失败时保留内联结果、目录越界与 `.gitignore` |
-| `tests/hooks.rs`、`tests/hooks_cli.rs` | 钩子组合与失败处理、审批范围与取消、审计变换、输入钩子被取消或运行被丢弃时不写入输入且插话留在队列、策略结论与审批事件（询问、会话内授权、拒绝、失败、超时、取消、等待时长）、观察者默认跳过增量、续写预算、工具输出脱敏的 CLI 接线 |
+| `tests/hooks.rs`、`tests/hooks_cli.rs` | 钩子组合与失败处理、审批范围与取消、审计变换、输入钩子被取消或运行被丢弃时不写入输入且插话留在队列、策略结论与审批事件（询问、会话内授权、拒绝、失败、超时、取消、等待时长）、观察者默认跳过增量、钩子上下文（会话、运行、工作目录与取消令牌）、具名钩子、按阶段执行与先注册的脱敏仍在扩展之后、重名工具在请求前被拒绝、续写预算、工具输出脱敏的 CLI 接线 |
+| `tests/hook_contract.rs` | 钩子输入输出的 JSON 契约：策略结论、回合决定、上下文编辑、审批及其请求、工具输出与调用、钩子上下文、回合摘要 |
 | `tests/real_api.rs` | 真实模型 API（付费，默认跳过）：文本回答与用量、工具往返、策略拒绝、输出截断、恢复会话、无效 key 不重试 |
 
 新增回归还覆盖：取消与 future 丢弃、特殊文件与读取上限、UTF-8 尾记录修复及损坏记录保留、交错工具参数 ID、有界队列背压、结构化错误与数值 `Retry-After`、响应预算和 CLI 参数接线。P0 回归覆盖内核不限轮次、无时限、不自动续写，以及零轮次、显式续写与预设取值。Rustdoc 的编译失败用例保护单一运行的借用约束。
