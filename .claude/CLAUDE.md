@@ -50,6 +50,7 @@
 | 工具 | `src/tools/` | bash、read_file、输出截断 |
 | 执行环境 | `src/executor/` | 工具执行命令与读文件的位置；`LocalExecutor` 为本机，负责进程组、超时与取消、输出捕获上限；`ContainerExecutor` 在每个进程一个的 Docker 容器中执行，并在容器内按进程组终止命令 |
 | IM 接入 | `src/im/` | 平台接口 `ImChannel`；`Server` 做访问控制并按线程分派，每个线程一个任务独占会话、运行、审批卡片与空闲释放，任务之间只经 channel 通信；宿主经 `SessionFactory` 打开会话；`slack.rs` 经 Socket Mode 接收、经 Web API 发送 |
+| MCP 客户端 | `src/mcp.rs` | 经 Streamable HTTP 连接外部 MCP 服务器（先 `server/discover`，旧服务器回退到 `initialize`），只把配置中列出的工具交给模型；`Server` 是一个 `Extension`。调用有超时、可取消，结果截断，工具一律按有副作用处理 |
 
 一次运行的数据流：`main` 组装 `AgentSession` → `prompt_with_cancel` 独占取得 Runner → `Runner::run` 取会话投影作为上下文 → `run_loop` 先持久化提示词、输入和上下文改动，再经宿主准备步骤执行可选摘要 → 新增插话与钩子改动持久化后请求任务模型 → 执行工具、脱敏、可选落盘 → 循环经 Runner 实现的会话宿主（`agent::SessionHost`，crate 内部）先写完成消息，再发出事件 → runner 处理任务请求重试并汇总 `RunReport`，由 `main` 映射退出码。自动摘要单独记录、消耗请求预算且不重试；手动 compact 共用独占权并独立报告。
 

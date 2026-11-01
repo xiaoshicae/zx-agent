@@ -6,6 +6,7 @@
 )]
 
 pub mod fake_feishu;
+pub mod fake_mcp;
 pub mod fake_slack;
 pub mod http;
 pub mod mock_server;

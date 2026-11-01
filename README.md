@@ -520,6 +520,18 @@ P1 的 SDK 接口调整：静态配置移入 `LoopSpec`；`LoopConfig` 持有钩
 - 先检查全部扩展再注册：扩展名为空或重复、钩子不在 `Extension` 阶段、工具重名或声明有误、段落名不合规时返回错误，`config` 保持原样。
 - 一个扩展可以注册进多个循环（例如 serve 的每个线程），工具共用同一份；每次注册都会调用一次 `hooks()`。
 
+### MCP 客户端
+
+`mcp::Server::connect(ServerConfig::new(名称, 地址, 工具列表))` 连接一个外部 MCP 服务器，只支持 Streamable HTTP。返回的 `Server` 是一个扩展，用 `extensions::register` 加入循环。CLI 的接入（profile 中的 `[[mcp]]`）随后实施。
+
+- 协议：先发 `server/discover`（2026-07-28）；服务器按旧版本应答时，改用 `initialize` 握手与会话（2025-11-25）。`Server::protocol_version()` 返回最终使用的版本。
+- 工具：只把 `ServerConfig.tools` 中列出的工具交给模型，名字为 `<名称>__<工具名>`。名称只能是小写 ASCII 字母、数字与 `-`；工具名中字母、数字、`_`、`-` 以外的字符换成 `_`，全名不超过 64 个字符（模型 API 的限制）。服务器缺少列出的工具、换名后重名或超长时，连接失败。工具描述超过 4 KiB 时截断。
+- 凭据：`token` 以 `Authorization: Bearer` 随每个请求发送，错误信息中不含它。
+- 上限：连接与列出工具不超过 `connect_timeout`（默认 30 秒），每次调用不超过 `call_timeout`（默认 120 秒）。调用超时或被取消时请求随之结束：关闭连接，旧版协议另发 `notifications/cancelled`。
+- 结果：文本原样拼接；图片、音频与二进制资源只写一行说明；没有其他内容时给出 `structuredContent` 的 JSON；`isError` 的结果作为错误结果交给模型；最多 2000 行或 50 KiB。协议错误、HTTP 失败、超时与取消作为工具错误返回。
+- 副作用：工具一律按有副作用处理（`effects()` 为 `SideEffects`）。服务器给出的 annotations 只是提示，不据此放行，也不据此判断中断的调用是否已执行。
+- 响应体没有大小上限：rmcp 读取 JSON 响应时不限制大小，SSE 每个事件上限 16 MiB。只连接自己选定的服务器。
+
 ### 会话存储
 
 `SessionStore` 负责校验、条目树、投影、压缩、请求审计与崩溃恢复；记录本身交给 `SessionLog` 保存。`SessionStore::create` / `open` 使用 JSONL 文件；其他位置（例如数据库）实现 `SessionLog` 即可，只需一个方法：
