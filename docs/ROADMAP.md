@@ -222,7 +222,9 @@ P4 实施约定（2026-11-01）：
 
 目标：长对话不超出上下文窗口，且不丢失关键信息（原路线图“上下文压缩”）。不引入新依赖。
 
-开工前置（2026-11-01 补充）：经用户授权，先运行一次 `tests/real_api.rs`，确认目标服务的流式格式、工具调用与用量统计。这组付费测试还没有运行过，provider 的自动化测试只使用本地假服务，而压缩依赖真实模型的行为与用量。
+开工前置（2026-11-01 补充）：经用户授权，先运行一次 `tests/real_api.rs`，确认目标服务的流式格式、工具调用与用量统计。provider 的自动化测试只使用本地假服务，而压缩依赖真实模型的行为与用量。
+
+开工前置补跑记录（2026-11-01，经用户授权，基于 `0c37a66`，在实现完成后补跑）：DeepSeek（`https://api.deepseek.com/v1`，默认 `collapse`）的 `deepseek-flash` 与 `deepseek-chat` 各运行一次 `tests/real_api.rs`，均为 6 项通过。覆盖流式文本与用量统计、bash 工具往返、策略拒绝传回模型、输出上限截断（`Truncated`）、恢复会话后的提示词增量更新、无效 key 不重试。实测用量：`deepseek-flash` 3045 token，`deepseek-chat` 2810 token，单次回答最多 76 个输出 token。该服务的 `/v1/models` 只列出 `deepseek-flash` 与 `deepseek-v4-pro`；`deepseek-chat` 的请求同样成功，原因未核实。这组测试不含压缩与请求审计用例，`inline` 模式未在该服务上运行。
 
 P5 实施约定（2026-11-01）：
 
@@ -249,7 +251,7 @@ P5 实施约定（2026-11-01）：
 
 请求审计验收（2026-11-01）：每次任务请求与摘要请求都能从重新打开的会话文件还原，并与实际发送的 `Request` 逐项相等；配置只在变化时追加（含切换模型）；v1/v2 会话在首次请求前只升级一次且原有字节不变；`request_config` 或 `request_started` 写入失败时不发请求；OpenAI 兼容 provider 的还原请求体与实际请求体在两种 `systemUpdates` 模式下一致，且不含 API key。原有 4 项测试按新的会话文件约定更新了预期：3 项只统计 message 行，1 项允许出现请求审计条目，原本要验证的行为不变。stable 与 Rust 1.88.0 各 **385 项通过，6 项付费测试跳过**；fmt、clippy、严格 Rustdoc、MSRV 全目标检查均通过。`tests/cli.rs`、`Cargo.toml`、`Cargo.lock` 未改动。
 
-未验证：真实模型的摘要准确率、信息保真和 token 窗口适配；本轮不调用付费 API，开工前置中的 `tests/real_api.rs` 仍未运行。配置预算及限制见 [PROFILES.md](PROFILES.md#上下文管理)。
+未验证：真实模型的摘要准确率、信息保真和 token 窗口适配；压缩与请求审计未在真实模型上运行（付费测试只覆盖上面开工前置补跑记录所列项）。配置预算及限制见 [PROFILES.md](PROFILES.md#上下文管理)。
 
 ### P6 执行环境与崩溃恢复
 
