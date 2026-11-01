@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::ai::{Message, PREAMBLE, Request, SystemMessage, SystemPrompt, ToolDef, now_ms};
 
-use super::{Entry, SessionStore};
+use super::{CompactionStartedEntry, Entry, SessionStore};
 
 /// Non-secret request fields. Authentication and transport credentials are not recorded.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -145,11 +145,27 @@ impl SessionStore {
                     "request config is not on this branch"
                 );
                 self.request_config(&started.config_id)?;
-                self.request_messages(&started.source, started.parent_id.as_deref())?;
+                // Check only what can fail: a projection can always be built, and building
+                // one for every request record would make loading quadratic.
+                if let RequestSource::Summary { attempt_id, .. } = &started.source {
+                    self.summary_attempt(attempt_id, &path)?;
+                }
             }
             _ => bail!("not a request record"),
         }
         Ok(())
+    }
+
+    /// The summary attempt that a summary request names, which must be on its branch.
+    fn summary_attempt(&self, attempt_id: &str, path: &[&Entry]) -> Result<&CompactionStartedEntry> {
+        ensure!(
+            path.iter().any(|entry| entry.id() == attempt_id),
+            "summary attempt is not on this request branch"
+        );
+        let Some(Entry::CompactionStarted(attempt)) = self.get(attempt_id) else {
+            bail!("summary attempt {attempt_id:?} not found");
+        };
+        Ok(attempt)
     }
 
     fn request_messages(&self, source: &RequestSource, parent: Option<&str>) -> Result<Vec<Message>> {
@@ -164,14 +180,7 @@ impl SessionStore {
                 system_timestamp,
                 user_timestamp,
             } => {
-                let path = self.branch_path_from(parent);
-                ensure!(
-                    path.iter().any(|entry| entry.id() == attempt_id),
-                    "summary attempt is not on this request branch"
-                );
-                let Some(Entry::CompactionStarted(attempt)) = self.get(attempt_id) else {
-                    bail!("summary attempt {attempt_id:?} not found");
-                };
+                let attempt = self.summary_attempt(attempt_id, &self.branch_path_from(parent))?;
                 let raw = Self::raw_projection_from(&self.branch_path_from(attempt.parent_id.as_deref()));
                 let source: Vec<_> = raw
                     .into_iter()

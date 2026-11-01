@@ -684,6 +684,26 @@ fn invalid_budgets_are_rejected_before_use() {
     }
 }
 
+#[test]
+fn a_trigger_whose_first_summary_cannot_be_read_is_rejected() {
+    // A summary reads what precedes the kept recent messages, at most 2 MiB.
+    let keep = 64 * 1024;
+    let readable = Config {
+        trigger_bytes: Some(2 * 1024 * 1024 + keep),
+        keep_recent_bytes: keep,
+        ..budget()
+    };
+    let unreadable = Config {
+        trigger_bytes: Some(3 * 1024 * 1024),
+        keep_recent_bytes: keep,
+        ..budget()
+    };
+
+    assert!(readable.validate().is_ok());
+    let error = unreadable.validate().unwrap_err();
+    assert!(error.to_string().contains("triggerBytes"), "{error}");
+}
+
 #[tokio::test]
 async fn the_run_timeout_also_bounds_automatic_compaction() {
     let (store, _) = seeded().await;

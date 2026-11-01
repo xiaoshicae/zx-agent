@@ -16,7 +16,7 @@ use crate::ai::Provider;
 use crate::ai::retry::RetryPolicy;
 use crate::compaction;
 use crate::runner::{Limits, RunReport, Runner};
-use crate::session::SessionStore;
+use crate::session::{SessionStore, WritesStopped};
 use crate::sync::lock;
 
 /// Provider and model selected together, so a switch cannot expose a mixed pair.
@@ -193,6 +193,16 @@ impl AgentSession {
     /// Number of subscribers detached because their callback panicked, initial sink included.
     pub fn failed_subscribers(&self) -> usize {
         self.events.failures.load(Ordering::SeqCst)
+    }
+
+    /// Why the session no longer writes, or `None` while it does; see [`WritesStopped`]. A
+    /// session that stopped writing fails every later prompt, so a host that keeps sessions
+    /// open checks this after a failed run. Busy during a prompt or compaction.
+    pub fn writes_stopped(&self) -> Result<Option<WritesStopped>, SessionError> {
+        match &*lock(&self.state) {
+            State::Idle(runner) => Ok(runner.session().writes_stopped().cloned()),
+            State::Running(_) => Err(SessionError::Busy),
+        }
     }
 
     /// Revoke all session approvals while idle. A concurrent run returns Busy.

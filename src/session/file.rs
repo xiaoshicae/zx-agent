@@ -3,12 +3,15 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::thread;
 #[cfg(unix)]
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, ensure};
 use async_trait::async_trait;
 use serde::de::IgnoredAny;
+use tokio::sync::oneshot;
 
 use super::log::{LoadedSession, LogRecord, SessionLog};
 use super::{HeaderLine, SessionHeader};
@@ -16,9 +19,80 @@ use super::{HeaderLine, SessionHeader};
 /// A session file open for appending. On Unix it holds an exclusive `flock(2)` lock until it
 /// is dropped, so a second writer, in this process or another, cannot open the same file.
 pub(super) struct JsonlFile {
-    writer: Box<dyn Write + Send + Sync>,
+    writer: Writer,
     /// The `seq` the next record must have.
     next_seq: u64,
+}
+
+/// Records reach the file on a thread of their own. A write to a volume that stopped
+/// answering blocks inside the kernel; on that thread it stalls neither the runtime nor the
+/// store's append timeout, and it does not keep the process from exiting.
+struct Writer {
+    lines: Option<mpsc::SyncSender<Line>>,
+    thread: Option<thread::JoinHandle<()>>,
+    /// Whether a line was sent and its result has not been received.
+    pending: bool,
+}
+
+/// One record's line and where the result of writing it goes.
+struct Line {
+    text: String,
+    written: oneshot::Sender<std::io::Result<()>>,
+}
+
+impl Writer {
+    fn spawn(mut target: Box<dyn Write + Send>) -> Result<Self> {
+        // One line at a time: the store waits for each append before the next one.
+        let (lines, received) = mpsc::sync_channel::<Line>(1);
+        let thread = thread::Builder::new()
+            .name("zx-session-writer".into())
+            .spawn(move || {
+                for line in received {
+                    let result = target.write_all(line.text.as_bytes()).and_then(|()| target.flush());
+                    // The store may have stopped waiting for this write; then no one needs
+                    // its result.
+                    let _ = line.written.send(result);
+                }
+            })
+            .context("cannot start the session writer thread")?;
+        Ok(Self {
+            lines: Some(lines),
+            thread: Some(thread),
+            pending: false,
+        })
+    }
+
+    async fn write(&mut self, text: String) -> Result<()> {
+        let lines = self
+            .lines
+            .as_ref()
+            .ok_or_else(|| anyhow!("the session writer has stopped"))?;
+        let (written, result) = oneshot::channel();
+        lines
+            .try_send(Line { text, written })
+            .map_err(|_| anyhow!("an earlier write of the session file has not finished"))?;
+        self.pending = true;
+        let result = result
+            .await
+            .map_err(|_| anyhow!("the session writer stopped before the write finished"))?;
+        self.pending = false;
+        Ok(result?)
+    }
+}
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        // Without a sender, the thread ends once it has written what it was sent.
+        drop(self.lines.take());
+        // An idle thread ends at once, closing the file and releasing its lock before this
+        // returns. One stuck in a write is left to finish on its own.
+        if !self.pending
+            && let Some(thread) = self.thread.take()
+        {
+            // A panic on that thread already failed its write; nothing is left to report.
+            let _ = thread.join();
+        }
+    }
 }
 
 /// A locked session file that has been read but not yet changed. Its records are checked
@@ -53,7 +127,7 @@ impl JsonlFile {
         writeln!(file, "{}", serde_json::to_string(&HeaderLine::Session(header.clone()))?)?;
         file.flush()?;
         Ok(Self {
-            writer: Box::new(file),
+            writer: Writer::spawn(Box::new(file))?,
             next_seq: 1,
         })
     }
@@ -87,7 +161,10 @@ impl JsonlFile {
     /// Records go to `writer`, so tests can make writes fail. No header is written.
     #[cfg(test)]
     pub(super) fn with_writer(writer: Box<dyn Write + Send + Sync>) -> Self {
-        Self { writer, next_seq: 1 }
+        Self {
+            writer: Writer::spawn(writer).expect("tests can start a thread"),
+            next_seq: 1,
+        }
     }
 }
 
@@ -155,7 +232,7 @@ impl Unrepaired {
                 .with_context(|| format!("cannot repair session file {}", path.display()))?;
         }
         Ok(JsonlFile {
-            writer: Box::new(file),
+            writer: Writer::spawn(Box::new(file))?,
             next_seq,
         })
     }
@@ -170,14 +247,11 @@ impl SessionLog for JsonlFile {
             record.seq,
             self.next_seq
         );
-        // Synchronous I/O inside an async method: one short line per record reaches the
-        // operating system in microseconds, and the store waits for it before going on.
-        // It survives a crash of this process, not of the machine: there is no fsync.
+        // The line survives a crash of this process, not of the machine: there is no fsync.
         let mut line = String::with_capacity(record.json.len() + 1);
         line.push_str(record.json);
         line.push('\n');
-        self.writer.write_all(line.as_bytes())?;
-        self.writer.flush()?;
+        self.writer.write(line).await?;
         self.next_seq += 1;
         Ok(())
     }

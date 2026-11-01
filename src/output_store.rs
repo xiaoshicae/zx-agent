@@ -5,6 +5,7 @@
 //! When storing fails, the result stays inline: storage is an optimisation, not a filter.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Result, ensure};
 use async_trait::async_trait;
@@ -222,17 +223,36 @@ impl OutputStore {
     }
 }
 
+/// How long storing one result may take before the result stays inline instead. It is under
+/// the default hook timeout, so a slow disk keeps the result rather than losing it to that
+/// timeout.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// An after_tool hook. Register after secret filtering and exempt paging tools to
 /// avoid turning every page into another file reference. HookChain bounds/cancels I/O.
 pub struct SpillOutputs {
     store: OutputStore,
     exempt_tools: Vec<String>,
+    write_timeout: Duration,
 }
 
 impl SpillOutputs {
     /// The host must also register ReadOutputTool with the same store configuration.
     pub fn new(store: OutputStore, exempt_tools: Vec<String>) -> Self {
-        Self { store, exempt_tools }
+        Self {
+            store,
+            exempt_tools,
+            write_timeout: WRITE_TIMEOUT,
+        }
+    }
+
+    /// Keep a result inline when storing it takes longer than `timeout` (3 seconds by
+    /// default). Keep it below the timeout this hook is registered with (5 seconds by
+    /// default): when that one fires first, the tool's output is withheld. A write that runs
+    /// out of time may still finish later and leave its file behind.
+    pub fn write_timeout(mut self, timeout: Duration) -> Self {
+        self.write_timeout = timeout;
+        self
     }
 }
 
@@ -251,7 +271,11 @@ impl Hooks for SpillOutputs {
                 .threshold_bytes
                 .is_some_and(|limit| output.content.len() > limit)
         {
-            match self.store.write(&output.content).await {
+            let stored = match tokio::time::timeout(self.write_timeout, self.store.write(&output.content)).await {
+                Ok(stored) => stored,
+                Err(_) => Err(format!("storing took longer than {:?}", self.write_timeout)),
+            };
+            match stored {
                 Ok(reference) => output.content = reference,
                 // This hook runs after redaction, so the bounded result is already what the
                 // session would record without spilling; hiding it would only lose evidence.

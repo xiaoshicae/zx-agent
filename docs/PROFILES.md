@@ -64,7 +64,7 @@ path = "skills/rust-review/SKILL.md"
 | `context.discover` | 是否自动发现项目 AGENTS.md；`assistant` 默认开启，`troubleshoot` 默认关闭 |
 | `context.files` | 追加显式上下文文件 |
 | `skills` | 显式登记 name、description、path 的目录；正文按需读取 |
-| `compaction.triggerBytes` | 自动摘要阈值，0 关闭；非零须大于 `keepRecentBytes` |
+| `compaction.triggerBytes` | 自动摘要阈值，0 关闭；非零须大于 `keepRecentBytes`，且超出部分不能多于 2 MiB（一次摘要最多读取的原始记录） |
 | `compaction.keepRecentBytes` | 近期消息的序列化字节预算，大于零；完整保留最新输入和全部 system，可因此超出保留预算 |
 | `compaction.maxSummaryTokens` | 摘要输出 token 上限，1–16384，默认 2048 |
 | `compaction.timeoutSecs` | 摘要流总超时，大于零，默认 120 秒 |
@@ -169,7 +169,7 @@ maxFileBytes = 1048576
 # directory = "results"   # 相对本 TOML；省略则使用 cwd/.zx-agent/outputs
 ```
 
-保存的是 `bash`、`read_file` 等工具**已经返回的有界文本**，不会恢复此前已截掉的 stdout、stderr 或文件内容。写入失败（包括超过单文件上限、目录越界）时，保留已脱敏的有界结果内联，并附一行原因，不编造文件引用；写了一半的文件会被删除。落盘钩子位于脱敏之后，内联的结果与不落盘时会话本来记录的内容相同。
+保存的是 `bash`、`read_file` 等工具**已经返回的有界文本**，不会恢复此前已截掉的 stdout、stderr 或文件内容。写入失败（包括超过单文件上限、目录越界）或 3 秒内没有完成时，保留已脱敏的有界结果内联，并附一行原因，不编造文件引用；写了一半的文件会被删除，超时后才完成的写入可能留下文件。这个期限低于钩子默认的 5 秒超时，所以磁盘变慢时结果仍然保留，而不是被钩子超时整条丢弃。落盘钩子位于脱敏之后，内联的结果与不落盘时会话本来记录的内容相同。
 
 模型调用 `read_output({"id":"<outputId>","offset":0})` 读取，offset 为 UTF-8 字节位置。正文加续读提示不超过配置阈值；默认 8 KiB，关闭落盘后读取仍使用 8 KiB 页。严格校验 UUID 和参数，只在配置目录读取 UUID 文件；Unix 拒绝末级文件符号链接和特殊文件。`read_output` 和 `read_skill` 在 CLI 中不再次落盘，避免递归引用。
 
