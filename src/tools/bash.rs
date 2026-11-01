@@ -48,6 +48,19 @@ struct Args {
     timeout_secs: Option<u64>,
 }
 
+/// The same checks run before policy and approval, and again for direct SDK calls.
+fn parse(args: &Value) -> Result<Args, String> {
+    let args = Args::deserialize(args).map_err(|e| format!("invalid arguments: {e}"))?;
+    if args.command.trim().is_empty() {
+        return Err("command is empty".to_string());
+    }
+    // A zero limit would end the command before it could run.
+    if args.timeout_secs == Some(0) {
+        return Err("timeout_secs must be at least 1; omit it to use the default timeout".to_string());
+    }
+    Ok(args)
+}
+
 #[async_trait]
 impl Tool for BashTool {
     fn name(&self) -> &str {
@@ -84,18 +97,11 @@ impl Tool for BashTool {
     }
 
     fn validate_arguments(&self, args: &Value) -> Result<(), String> {
-        let args = Args::deserialize(args).map_err(|e| format!("invalid arguments: {e}"))?;
-        if args.command.trim().is_empty() {
-            return Err("command is empty".to_string());
-        }
-        Ok(())
+        parse(args).map(|_| ())
     }
 
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
-        let args: Args = serde_json::from_value(args).map_err(|e| format!("invalid arguments: {e}"))?;
-        if args.command.trim().is_empty() {
-            return Err("command is empty".to_string());
-        }
+        let args = parse(&args)?;
         let limit = args
             .timeout_secs
             .map(Duration::from_secs)
@@ -364,6 +370,15 @@ mod tests {
         let tool = BashTool::default();
         assert!(tool.execute(json!({"cmd": "ls"}), &ctx()).await.is_err());
         assert!(tool.execute(json!({"command": "  "}), &ctx()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_zero_timeout_is_rejected_before_the_command_runs() {
+        let tool = BashTool::default();
+        let args = json!({"command": "echo hi", "timeout_secs": 0});
+        let error = tool.validate_arguments(&args).unwrap_err();
+        assert!(error.contains("timeout_secs"), "{error}");
+        assert!(tool.execute(args, &ctx()).await.is_err());
     }
 
     #[tokio::test]

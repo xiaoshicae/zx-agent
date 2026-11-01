@@ -45,7 +45,7 @@ path = "skills/rust-review/SKILL.md"
 |---|---|
 | `name` | 场景名称，省略时继承基线 |
 | `extends` | 可选的 `troubleshoot` 或 `assistant`；省略时使用当前前端的默认 profile；不支持文件链式继承 |
-| `instructions` | 替换场景说明的 UTF-8 文件；CLI `--system-prompt-file` 优先，它的读取方式与引入 profile 之前一致：可以是管道，不受 64 KiB 限制 |
+| `instructions` | 替换场景说明的 UTF-8 文件；CLI `--system-prompt-file` 优先，它的读取方式与引入 profile 之前一致：可以是管道，不受 64 KiB 限制，只在启动时读取一次（`chat` 的 `/new` 沿用同一内容） |
 | `tools` | 替换启用列表，支持 `bash`、`read_file`、`read_skill`、`read_output`；`[]` 禁用全部工具 |
 | `execution` | `local`（默认）或 `container`；其他值报错。`container` 时 bash 与 read_file 在 Docker 容器中执行，见 README 的“容器执行”。CLI `--execution` 优先 |
 | `container.image` | 容器镜像，`execution = "container"` 时必填，须已在本地；CLI `--container-image` 优先 |
@@ -151,9 +151,9 @@ zx-agent run --model "$ZX_MODEL" --compact-threshold-bytes 262144 "处理长任�
                               全部 system + 成功摘要 + 保留范围 → 任务请求
 ```
 
-新文件使用 v3，旧 v1/v2 文件的头部不改写。开始记录保存源 ID、保留边界、摘要请求配置；成功记录保存摘要、用量和开始记录的引用。失败或进程退出后未完成的尝试不改变投影。重压缩始终读取应用过 `context_edit` 的原始投影，不读取旧摘要；各分支独立。
+新文件使用 v4（v4 由 P6 的工具调用开始记录引入）。旧 v1/v2 文件在首次写入压缩或请求记录前追加 `format_upgrade`（v3），头部不改写。开始记录保存源 ID、保留边界、摘要请求配置；成功记录保存摘要、用量和开始记录的引用。失败或进程退出后未完成的尝试不改变投影。保留边界按条目在分支上的先后计算：保留范围的第一条消息之后被 `context_edit` 省略，摘要仍替代它之前的全部记录。重压缩始终读取应用过 `context_edit` 的原始投影，不读取旧摘要；各分支独立。
 
-摘要字段为 `facts: [{text, sourceEntryIds}]`、`inferences: [string]`、`plans: [string]`。每条事实至少引用一个本次源条目；无效引用、无效 JSON、工具调用、输出截断或超限均拒绝提交。引用存在只证明出处可定位，**不证明模型的陈述正确或摘要无信息损失**。system 和合成摘要不能直接通过 `context_edit` 改写；修正被摘要覆盖的原消息后，旧摘要失效，投影恢复到已应用修正的原始记录。
+摘要字段为 `facts: [{text, sourceEntryIds}]`、`inferences: [string]`、`plans: [string]`。每条事实至少引用一个本次源条目；无效引用、无效 JSON、工具调用、输出截断或超限均拒绝提交。引用存在只证明出处可定位，**不证明模型的陈述正确或摘要无信息损失**。system 和合成摘要不能直接通过 `context_edit` 改写；修正被摘要覆盖的原消息后，旧摘要失效，投影恢复到已应用修正的原始记录。钩子看到的合成摘要是 `kind` 为 `summary` 的 user 消息，变换计划若编辑、省略或追加这类消息，会在校验时被整份拒绝，不写入任何条目。
 
 `compact` 与 prompt 重叠时返回 Busy，运行中也不能切模型或清授权。取消、超时或丢弃 future 会释放运行权，未完成记录保留供审计。TTY 手动压缩期间可暂存一个普通输入，成功或失败返回后执行；Ctrl+C 清除暂存输入并报告。管道脚本仍按操作顺序消费。
 
@@ -180,4 +180,4 @@ SDK 宿主注册同配置的 `OutputStore`、`ReadOutputTool` 和 `SpillOutputs`
 
 ---
 
-PROFILES.md · v0.4 · 2026年11月
+PROFILES.md · v0.5 · 2026年11月

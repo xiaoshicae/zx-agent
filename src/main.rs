@@ -3,6 +3,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use clap::Parser;
 use serde_json::json;
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
@@ -18,7 +19,8 @@ use zx_agent::runner::{RunOutcome, RunReport, Runner};
 mod chat;
 mod cli;
 
-use cli::{Command, Explicit, OutputMode, RunArgs};
+use chat::visible;
+use cli::{Cli, Command, OutputMode, RunArgs};
 
 /// Exit codes, so schedulers can react without parsing output.
 const EXIT_COMPLETED: u8 = 0;
@@ -31,10 +33,9 @@ const EXIT_TRUNCATED: u8 = 6;
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let (cli, explicit) = cli::parse();
-    let result = match cli.command {
-        Command::Run(args) => run(args, explicit).await,
-        Command::Chat(args) => chat::run(args, explicit).await,
+    let result = match Cli::parse().command {
+        Command::Run(args) => run(args).await,
+        Command::Chat(args) => chat::run(args).await,
     };
     match result {
         Ok(code) => ExitCode::from(code),
@@ -47,9 +48,9 @@ async fn main() -> ExitCode {
 
 /// Run one task and return its exit code. An `Err` is a configuration problem found
 /// before the run started.
-async fn run(args: RunArgs, explicit: Explicit) -> Result<u8> {
+async fn run(args: RunArgs) -> Result<u8> {
     let prompt = read_prompt(&args.prompt)?;
-    let session = build_session(&args, explicit).await?;
+    let session = build_session(&args).await?;
     let cancel = CancellationToken::new();
     spawn_signal_handler(cancel.clone());
     let report = session.prompt_with_cancel(prompt, &cancel).await?;
@@ -72,7 +73,8 @@ fn read_prompt(arg: &str) -> Result<String> {
 }
 
 /// Assemble the unattended preset without exposing interactive choices to the kernel.
-async fn build_session(args: &RunArgs, explicit: Explicit) -> Result<AgentSession> {
+async fn build_session(args: &RunArgs) -> Result<AgentSession> {
+    let instructions = cli::read_instructions(&args.base)?;
     let mut prepared = cli::prepare(cli::SessionOptions {
         base: &args.base,
         transport: &args.transport,
@@ -81,11 +83,11 @@ async fn build_session(args: &RunArgs, explicit: Explicit) -> Result<AgentSessio
         file: cli::SessionFile::from_path(args.request.session.as_deref()),
         default_profile: Builtin::Troubleshoot,
         budget: cli::Budget {
-            max_turns: Some(args.max_turns),
+            max_turns: args.max_turns,
             timeout_secs: args.timeout_secs,
             continue_on_length: args.continue_on_length,
         },
-        explicit,
+        instructions: instructions.as_deref(),
     })
     .await?;
     prepared
@@ -116,7 +118,7 @@ fn print_report(report: &RunReport, output: OutputMode) {
             let error = report
                 .error
                 .as_deref()
-                .map(|e| format!(" error={e}"))
+                .map(|e| format!(" error={}", visible(e)))
                 .unwrap_or_default();
             let session = report
                 .session_file
@@ -211,14 +213,19 @@ impl EventSink for JsonlEvents {
     }
 }
 
-/// Short progress lines on stderr.
+/// Short progress lines on stderr. Tool names, arguments and errors come from the model or
+/// the server, so they are escaped like chat output.
 struct TextProgress;
 
 impl EventSink for TextProgress {
     fn emit(&self, event: AgentEvent) {
         match event {
             AgentEvent::ToolExecutionStart { tool_name, args, .. } => {
-                eprintln!("[tool] {tool_name} {}", clip(&args.to_string(), 300));
+                eprintln!(
+                    "[tool] {} {}",
+                    visible(&tool_name),
+                    visible(&clip(&args.to_string(), 300))
+                );
             }
             AgentEvent::ToolExecutionEnd {
                 tool_name,
@@ -228,13 +235,13 @@ impl EventSink for TextProgress {
             } => {
                 let status = if is_error { "error" } else { "ok" };
                 let duration = duration_ms.map(|ms| format!(" {ms}ms")).unwrap_or_default();
-                eprintln!("[tool] {tool_name} -> {status}{duration}");
+                eprintln!("[tool] {} -> {status}{duration}", visible(&tool_name));
             }
             AgentEvent::MessageEnd {
                 message: Message::Assistant(message),
             } => {
                 if let Some(error) = &message.error_message {
-                    eprintln!("[model] {:?}: {error}", message.stop_reason);
+                    eprintln!("[model] {:?}: {}", message.stop_reason, visible(error));
                 } else if message.stop_reason == StopReason::Length {
                     eprintln!("[model] Length: the response hit the output token limit");
                 }
@@ -245,7 +252,7 @@ impl EventSink for TextProgress {
                 delay_ms,
                 error,
             } => {
-                eprintln!("[retry] {attempt}/{max_retries} in {delay_ms}ms: {error}");
+                eprintln!("[retry] {attempt}/{max_retries} in {delay_ms}ms: {}", visible(&error));
             }
             AgentEvent::CompactionStart { input_bytes, .. } => {
                 eprintln!("[compact] summarizing {input_bytes} context bytes")
@@ -255,12 +262,17 @@ impl EventSink for TextProgress {
                 output_bytes,
                 ..
             } => eprintln!("[compact] {input_bytes} -> {output_bytes} context bytes"),
-            AgentEvent::CompactionFailed { error, .. } => eprintln!("[compact] {error}"),
+            AgentEvent::CompactionFailed { error, .. } => eprintln!("[compact] {}", visible(&error)),
             AgentEvent::ToolCallRecovered {
                 tool_call_id,
                 tool_name,
                 state,
-            } => eprintln!("[recover] {tool_name} {tool_call_id}: {}", state.describe()),
+            } => eprintln!(
+                "[recover] {} {}: {}",
+                visible(&tool_name),
+                visible(&tool_call_id),
+                state.describe()
+            ),
             AgentEvent::AgentStart
             | AgentEvent::TurnStart { .. }
             | AgentEvent::MessageStart { .. }

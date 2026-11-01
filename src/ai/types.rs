@@ -206,13 +206,18 @@ pub struct ToolResultMessage {
     pub duration_ms: Option<u64>,
 }
 
-/// Whether user text starts a new answer or continues the preceding answer.
+/// Whether user text starts a new answer, continues the preceding answer, or is a context
+/// summary.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum UserMessageKind {
     #[default]
     Prompt,
     ContinueAnswer,
+    /// Built by the session from a compaction record in place of the summarized messages.
+    /// It is not a stored message, so context edits cannot target it; editing one of its
+    /// sources invalidates the summary instead.
+    Summary,
 }
 
 impl UserMessageKind {

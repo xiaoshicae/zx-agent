@@ -75,7 +75,7 @@ impl CompactionSummary {
         Message::User {
             content: text,
             timestamp,
-            kind: UserMessageKind::Prompt,
+            kind: UserMessageKind::Summary,
         }
     }
 }
@@ -373,13 +373,22 @@ impl SessionStore {
     }
 
     pub(super) fn compacted_projection_at(&self, leaf: Option<&str>) -> Vec<ProjectedMessage> {
-        let raw = Self::raw_projection_from(&self.branch_path_from(leaf));
+        let path = self.branch_path_from(leaf);
+        let raw = Self::raw_projection_from(&path);
         let Some(compact) = self.latest_compaction_at(leaf) else {
             return raw;
         };
-        let Some(cut) = raw.iter().position(|item| item.entry_id == compact.first_kept_entry_id) else {
+        // Cut by branch order, not by finding the first kept message in the projection: a
+        // later context edit may omit that message, and the summary must still replace
+        // everything recorded before it.
+        let Some(boundary) = path.iter().position(|entry| entry.id() == compact.first_kept_entry_id) else {
             return raw;
         };
+        let summarized: HashSet<&str> = path[..boundary].iter().map(|entry| entry.id()).collect();
+        let cut = raw
+            .iter()
+            .take_while(|item| summarized.contains(item.entry_id.as_str()))
+            .count();
         let mut projected: Vec<_> = raw[..cut]
             .iter()
             .filter(|item| matches!(item.message, Message::System(_)))

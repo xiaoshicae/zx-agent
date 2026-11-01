@@ -83,8 +83,9 @@ const RETRYABLE: &[&str] = &[
     "temporarily",
 ];
 
-/// Whether a failed response is transient. Structured metadata takes precedence;
-/// messages from older sessions and providers without metadata use the pi text fallback.
+/// Whether a failed response is transient. Structured metadata takes precedence; messages
+/// without it (from providers that report none, or read from older session files) use the
+/// pi text fallback.
 pub fn is_retryable(message: &AssistantMessage) -> bool {
     if message.stop_reason != StopReason::Error {
         return false;

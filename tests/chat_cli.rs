@@ -99,6 +99,53 @@ async fn multiple_prompts_keep_history_and_stream_each_answer_once() {
 }
 
 #[tokio::test]
+async fn new_conversations_keep_the_instructions_read_at_startup() {
+    let dir = tempfile::tempdir().unwrap();
+    let instructions = dir.path().join("instructions.md");
+    std::fs::write(&instructions, "Startup instructions MARKER-ONE").unwrap();
+    let release = std::sync::Arc::new(tokio::sync::Notify::new());
+    let chunks = vec![json!({"choices":[{"index":0,"delta":{"content":"first"},"finish_reason":null}]})];
+    let server = MockServer::start(vec![
+        Reply::Gate {
+            chunks,
+            release: release.clone(),
+        },
+        Reply::text("second"),
+    ])
+    .await;
+    let mut child = chat(
+        &server,
+        dir.path(),
+        &["--tools", "", "--system-prompt-file", instructions.to_str().unwrap()],
+    )
+    .spawn()
+    .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"hello\n/new\nhello again\n/quit\n").await.unwrap();
+    stdin.shutdown().await.unwrap();
+    drop(stdin);
+    server.wait_for_requests(1).await;
+    // A pipe cannot be read twice; changing the file shows whether /new reads it again.
+    std::fs::write(&instructions, "Changed instructions MARKER-TWO").unwrap();
+    release.notify_one();
+    let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stderr(&output).contains("new conversation"), "{}", stderr(&output));
+    let system = |index: usize| {
+        server.requests()[index].body["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert!(system(0).contains("MARKER-ONE"));
+    assert!(system(1).contains("MARKER-ONE"), "{}", system(1));
+    assert!(!system(1).contains("MARKER-TWO"));
+}
+
+#[tokio::test]
 async fn slash_commands_are_local_and_compact_without_history_is_a_noop() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![]).await;

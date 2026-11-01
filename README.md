@@ -54,13 +54,13 @@ zx-agent chat --model "$ZX_MODEL" --session ./chat.jsonl
 
 直接输入问题即可开始下一轮。TTY 中运行时输入普通文本会作为 steering，在下一次模型请求前进入上下文；通过管道输入脚本时逐轮消费，避免后面的命令提前打断任务。单行输入最多 1 MiB（含行尾）；超限或无效 UTF-8 的行会被整行丢弃并提示，对话和当前任务继续，不把截断片段发送给模型。
 
-每轮默认不限轮次、不限总时间、不自动续写；可用 `--max-turns` 和 `--timeout-secs` 设限。连接、工具、会话和输出选项与 `run` 共用；`chat --help` 列出实际支持项。`--output jsonl` 为每轮发送一个 `run_end`，`--deltas` 可包含增量。
+上限取自所选 profile，内置的 assistant 每轮不限轮次、不限总时间、不自动续写；可用 `--max-turns` 和 `--timeout-secs` 设限。连接、工具、会话和输出选项与 `run` 共用；`chat --help` 列出实际支持项。`--output jsonl` 为每轮发送一个 `run_end`，`--deltas` 可包含增量。
 
 | 输入 | 行为 |
 |---|---|
 | `/help` | 查看命令 |
 | `/model`、`/model <id>` | 查看模型，或空闲时切换同一 provider 的模型，保留历史 |
-| `/new` | 创建新会话，清空历史和授权；运行中先取消任务。启用文件会话时在同目录创建唯一新文件，保留旧日志 |
+| `/new` | 创建新会话，清空历史和授权；运行中先取消任务。启用文件会话时在同目录创建唯一新文件，保留旧日志。重新加载 profile 与项目说明，`--system-prompt-file` 沿用启动时读取的内容 |
 | `/compact` | 请求模型压缩旧上下文，保留原始日志；没有可压缩范围时不发请求。运行中拒绝重叠调用 |
 | `/quit` | 取消当前任务并退出 |
 | Ctrl+C | 取消当前任务或审批，继续保留会话；空闲时保持会话 |
@@ -131,25 +131,27 @@ echo "exit code: $?"
 | `--tools` | profile：`run` 为 `bash,read_file`，`chat` 为 `bash,read_file,read_output`；有 skill 目录时加入 `read_skill` | 显式传入时替换工具集合；仅启用 `read_output` 时安装长结果落盘钩子 |
 | `--cwd` | 当前目录 | 工具的工作目录，同时写入 `<environment>` |
 | `--allow-cmd` / `--deny-cmd` | 无 | bash 命令白名单前缀 / 额外的拒绝子串，均可重复 |
-| `--max-turns` | 30 | 本次运行的模型请求次数上限，失败的尝试也计入 |
-| `--timeout-secs` | 900 | 整次运行的时间上限，0 表示不限制 |
+| `--max-turns` | profile：`run`（troubleshoot）为 30，`chat`（assistant）不限 | 本次运行的模型请求次数上限，失败的尝试也计入；`chat` 中为每轮上限 |
+| `--timeout-secs` | profile：`run`（troubleshoot）为 900，`chat`（assistant）为 0 | 整次运行的时间上限，0 表示不限制；`chat` 中为每轮上限 |
 | `--tool-timeout-secs` | 120 | bash 命令的默认超时。模型可以通过工具参数 `timeout_secs` 为单条命令申请更长时间，上限为本参数与 600 秒中较大的一个；整次运行仍受 `--timeout-secs` 限制 |
 | `--idle-timeout-secs` | 120 | 等待响应头，或两段流数据之间的最长等待时间 |
 | `--max-retries` | 3 | 遇到临时性错误时的重试次数 |
-| `--continue-on-length` | 1 | 回答因输出 token 上限被截断时，自动请模型续写的次数。每次续写都计入 `--max-turns`；设为 0 时直接以退出码 6 结束 |
+| `--continue-on-length` | profile：`run`（troubleshoot）为 1 | 仅 `run`。回答因输出 token 上限被截断时，自动请模型续写的次数。每次续写都计入 `--max-turns`；设为 0 时直接以退出码 6 结束 |
 | `--max-tokens` | 无（由服务端决定） | 每次回复的输出 token 上限。推理模型的推理部分也计入这个上限，设得太小时回答可能为空 |
 | `--max-response-bytes` | 16777216（16 MiB） | 每次模型请求的流式响应字节上限，包含 SSE 封装与推理内容 |
 | `--max-sse-event-bytes` | 1048576（1 MiB） | 单个 SSE 事件的字节上限，包含封装；累计多行和未换行的数据也受限制 |
 | `--session` | 无（只保存在内存） | 会话文件路径。文件不存在则创建；已存在则在原有对话上继续 |
 | `--output` | `text` | `text`：进度输出到 stderr，最终回答输出到 stdout；`jsonl`：每个事件一行 JSON，输出到 stdout |
 | `--deltas` | 关闭 | 仅用于 `jsonl`：同时输出流式的 `message_update` 事件 |
-| `--system-prompt-file` | 内置排障说明 | 替换内置的排障说明。下文的 `<environment>` 和 `<command_policy>` 两段仍会追加在末尾 |
+| `--system-prompt-file` | 所选 profile 的说明 | 替换所选 profile 的说明。只在启动时读取一次，可以是管道；`chat` 的 `/new` 沿用同一内容。下文生成的段落仍会追加在末尾 |
 | `--compact-threshold-bytes` | profile：run 关闭，chat 262144 | 自动摘要的序列化上下文字节阈值；0 关闭，非零值须大于 profile 的保留预算 |
 | `--no-auto-compact` | 关闭 | 禁用自动摘要，与上项互斥；保留手动 `/compact` |
 | `--execution` | profile 决定，内置 profile 为 `local` | `local`：在本机执行；`container`：bash 与 read_file 在无网络、工作目录只读的 Docker 容器中执行，见[容器执行](#容器执行) |
 | `--container-image` | 无 | `--execution container` 使用的镜像，须已在本地（`docker pull`）；本机执行时给出该参数视为配置错误 |
 
-重试优先依据结构化的 HTTP 状态和错误码。服务端数值秒形式的 `Retry-After` 会参与退避计算，仍受 `RetryPolicy::max_delay` 约束（默认 60 秒）；HTTP 日期形式和无效提示使用本地退避。旧会话和未提供结构化元数据的 provider 保留错误文本判断。
+表中标注 profile 的默认值取自所选 profile，命令行显式传入时覆盖；`run --help` 与 `chat --help` 不再显示固定默认值。
+
+重试优先依据结构化的 HTTP 状态和错误码。服务端数值秒形式的 `Retry-After` 会参与退避计算，仍受 `RetryPolicy::max_delay` 约束（默认 60 秒）；HTTP 日期形式和无效提示使用本地退避。未提供结构化元数据的 provider 保留错误文本判断。服务端以 `stop`、`end`、`length`、`tool_calls`、`function_call` 以外的 `finish_reason` 结束回答时（如 `content_filter`），按 provider 错误处理，错误码为该取值，不重试；这组正常取值与 pi 的 `openai-completions.ts` 相同。以 `stop` 或 `end` 结束但带工具调用时按工具调用处理，以兼容这样上报的服务端。
 
 事件队列采用有界缓冲与背压，慢消费者会使生产者等待。达到响应或 SSE 事件上限时保留已接受的部分内容，以退出码 1 结束且不重试；确需更大响应时可显式提高对应上限。两个字节上限都必须大于零。
 
@@ -210,19 +212,21 @@ CLI (main.rs + cli.rs + chat/)
 | 环境信息 | 启动时由程序写入系统提示词，见下文 | pi 只写入工作目录；无人值守时没有人提供这些信息，白名单也可能禁止 `uname`、`date` 等命令 |
 | 参数校验 | 由各工具反序列化成自己的参数类型来完成 | 避免引入 JSON Schema 校验器 |
 | 缺少结果的工具调用 | 有副作用的调用执行前先记录开始；下一次运行开始时，为缺少结果的调用写入"结果未知""未执行"等错误结果，不重放 | 发送时补占位（沿用 pi 的 transform-messages.ts）区分不了调用是否执行过；崩溃后需要依据记录判断 |
-| 上下文压缩、TUI | 未实现 | 按路线图逐步加入；已提供类型化 Hooks |
+| 完整 TUI | 未实现，`chat` 是逐行 REPL | 路线图将其列为本期不做 |
 
 ### 系统提示词的组成
 
-系统提示词由三个段落依次拼接，后两个由程序在启动时生成，各自用同名标签包裹（参照 pi 的 `system-prompt.ts`）：
+系统提示词由说明和其后的生成段落依次拼接。生成段落由程序在启动时生成，各自用同名标签包裹（参照 pi 的 `system-prompt.ts`），内容为空的段落不出现：
 
 | 部分 | 内容 | 何时出现 |
 |---|---|---|
-| 说明 | 内置排障说明，或 `--system-prompt-file` 的内容 | 总是 |
-| `<environment>` | 操作系统与版本、CPU 架构、启动时间（UTC）与本地时区、工作目录 | 总是 |
-| `<command_policy>` | 允许的命令前缀、禁止的语法、引号内 `\|` 的写法提示 | 启用了 bash 且设置了 `--allow-cmd` 时 |
+| 说明 | 所选 profile 的说明（`run` 默认为排障说明，`chat` 默认为通用对话说明），或 `--system-prompt-file` 的内容 | 总是 |
+| `<environment>` | 操作系统与版本、CPU 架构、启动时间（UTC）与本地时区、工作目录；容器执行时描述容器、镜像与隔离方式 | 总是 |
+| `<command_policy>` | 允许的命令前缀、禁止的语法、引号内 `\|` 的写法提示 | 启用了 bash 且设置了命令白名单（`--allow-cmd` 或 profile 的 `rules.allow`）时 |
+| `<project_context>` | 项目说明文件：自动发现的 AGENTS.md，以及 `--context-file` 或 profile 列出的文件 | 有项目说明时 |
+| `<available_skills>` | 已注册 skill 的名称与描述；正文由 `read_skill` 按需读取 | 启用 `read_skill` 且注册了 skill 时 |
 
-这些信息都通过读文件获得（如 `/etc/os-release`、`/etc/localtime`），不执行命令。主机名和用户名不会写入，因为提示词会发送给第三方模型。
+本机执行时，这些信息都通过读文件获得（如 `/etc/os-release`、`/etc/localtime`），不执行命令；容器执行时，容器的系统信息来自启动检查在容器内运行的 `uname` 与 `/etc/os-release`。主机名和用户名不会写入，因为提示词会发送给第三方模型。
 
 恢复会话时，程序重新生成提示词，只把有变化的段落追加为一条新的 system 消息。启动时间按分钟记录；跨分钟恢复时，`<environment>` 通常会出现在更新中。发给模型的方式由 `--system-updates` 决定：
 
@@ -392,7 +396,7 @@ P1 的 SDK 接口调整：静态配置移入 `LoopSpec`；`LoopConfig` 持有钩
 策略与审批的错误、panic、超时均拒绝执行；`after_tool` 失败会丢弃输出；输入、上下文与回合钩子失败会结束运行且不触发 provider 重试。`on_event` 的错误只生成 `hook_failed`，诊断不再递归送入钩子。
 
 `on_input` 的原始输入先追加审计记录，改写或拒绝通过 `context_edit` 表达。
-`transform_context` 返回按顺序应用的 `ContextEdit`：追加消息、替换文本或省略消息；不能修改或省略 system 消息，也不能用文本替换抹掉工具调用。
+`transform_context` 返回按顺序应用的 `ContextEdit`：追加消息、替换文本或省略消息；不能修改或省略 system 消息，也不能用文本替换抹掉工具调用。会话根据压缩记录合成的摘要（`UserMessageKind::Summary`）不能被编辑、省略或追加；要修正摘要，应编辑它引用的原始消息，摘要随之失效，投影回到原始记录。包含这类编辑的计划在校验时整份拒绝，不写入任何条目。
 整份变换计划先校验，随后逐项持久化；写入失败时立即取消，不发送模型请求。写入失败前已追加的条目仍保留。
 
 审批默认超时 120 秒。`NoHuman` 明确拒绝 Ask；`Approval::AllowOnce` 只允许一次，
@@ -433,8 +437,9 @@ cargo fmt --check
 | `tests/openai_mock.rs` | 本地假 HTTP 服务上的端到端测试：SSE、执行 bash、回传工具结果、认证头、HTTP 错误重试、空闲超时、中途取消后保留已输出内容 |
 | `tests/cli.rs` | 编译出的程序：退出码 0 到 6、jsonl 输出、从 stdin 读提示词、bash 读不到 API key、系统提示词的生成段落、`--system-updates inline` |
 | `tests/chat_cli.rs` | 多轮历史、审批与授权范围、重置、模型切换、EOF、信号、超时、控制字符显示、恢复中断会话的提示；Unix PTY 验证运行中插话、取消重置和退出 |
-| `tests/profiles_cli.rs` | profile 覆盖、显式默认值、不可绕过的 deny、上下文范围与审计、上下文默认值与越界链接、`--system-prompt-file` 兼容、skill 懒加载与脱敏、配置错误退出码 |
-| `tests/session_compaction.rs`、`tests/compaction.rs` | v1/v2 追加升级、分支和引用、原始投影、摘要失败与取消、请求 / 用量预算、超时和上限 |
+| `tests/profiles_cli.rs` | profile 覆盖、显式默认值、预算参数的 help 写明取自 profile、不可绕过的 deny、上下文范围与审计、上下文默认值与越界链接、`--system-prompt-file` 兼容、skill 懒加载与脱敏、配置错误（含 provider 参数）退出码且不建会话文件 |
+| `tests/run_cli.rs` | `run` 在 P0 之后新增的输出约定：进度与报告行转义终端控制字符（原有 `run` 测试仍在 `tests/cli.rs`，逐字节保持） |
+| `tests/session_compaction.rs`、`tests/compaction.rs` | v1/v2 追加升级、分支和引用、原始投影、省略保留边界后摘要仍生效、编辑摘要的变换计划在写入前被拒绝、摘要失败与取消、请求 / 用量预算、超时和上限 |
 | `tests/request_audit.rs` | 每次任务与摘要请求可从会话文件还原、配置只在变化时追加、旧会话首次请求前升级、与投影不一致的请求不记录 |
 | `tests/executor.rs` | 执行器接缝：bash 与 read_file 只经自身执行器运行命令和读文件，命令的 6 种结束方式均正确报告 |
 | `tests/container.rs` | 容器执行：用假 docker 程序验证启动参数与失败报告、命令与读文件的转发、超时 / 取消 / 丢弃后的清理、CLI 接线与配置错误；设置 `ZX_DOCKER_TEST_IMAGE` 时另对真实 Docker 验证用户、只读工作目录与无网络、整个进程组的终止、隐藏会话文件、容器内读文件、chat 中 Ctrl-C 后容器仍在、zx-agent 正常结束或被 SIGKILL 后容器删除（CI 在 Linux 上用 `debian:bookworm-slim` 运行） |

@@ -34,6 +34,7 @@ paths:
 | `tests/agent_session.rs` | 共享会话：Busy、取消与丢弃后复用、多订阅者、退订、回调重入与 panic、模型切换与审计 |
 | `tests/openai_mock.rs` | 真实 HTTP 下的 provider：SSE、重试、空闲超时、中途取消 |
 | `tests/cli.rs` | 原有 run 行为与退出码，P0 起逐字节保持；P6 默认值变更另行验收 |
+| `tests/run_cli.rs` | P0 之后新增的 run 输出约定（如进度与报告行转义终端控制字符），新的 run 测试放这里，`tests/cli.rs` 不改 |
 | `tests/chat_cli.rs` | chat 的脚本 stdin、审批、信号与超时、Unicode、模型切换、会话重置和 Unix PTY |
 | `tests/profiles_cli.rs` | profile/CLI 覆盖与 deny、项目上下文范围、默认值与越界链接、`--system-prompt-file` 兼容、skill 懒加载、工具策略和审计 |
 | `tests/session_compaction.rs`、`tests/compaction.rs` | 追加升级、分支 / 引用与原始投影、自动 / 手动摘要、计费、steering、失败、取消与超时 |

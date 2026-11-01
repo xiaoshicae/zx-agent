@@ -39,7 +39,7 @@
 | CLI | `src/main.rs`、`src/cli.rs`、`src/chat/` | 共用参数与运行组装；run 处理单次任务；chat 管理单一输入所有者、审批、信号和 REPL |
 | 场景配置 | `src/profile/`、`profiles/` | TOML 基线与覆盖、项目上下文、显式 skill 目录及按需读取；不进入循环机制 |
 | 场景预设 | `src/presets/` | 提供外层显式选择的说明与运行默认值；内核机制不依赖预设 |
-| 提示词 | `src/prompt.rs` | 生成系统提示词：说明 + `<environment>` + `<command_policy>` |
+| 提示词 | `src/prompt.rs` | 生成系统提示词：说明 + `<environment>` + `<command_policy>` + `<project_context>` + `<available_skills>`（空段落不出现） |
 | 共享会话 | `src/agent_session.rs` | 共享调用与 Busy、RAII 归还运行权、取消、订阅与退订、空闲时切换模型 |
 | 运行层 | `src/runner.rs` | 持有可顺序复用的会话；以独占借用控制单次运行、重试、上限、审批缓存、持久化和报告 |
 | 会话 | `src/session.rs` | 只追加的 JSONL 条目树，投影出发给模型的消息 |

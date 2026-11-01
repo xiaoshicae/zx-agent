@@ -183,6 +183,24 @@ fn editing_summarized_evidence_falls_back_to_originals_with_the_edit_applied() {
 }
 
 #[test]
+fn omitting_the_first_retained_message_keeps_the_summary_in_place_of_the_old_prefix() {
+    let mut store = SessionStore::in_memory(header());
+    let (old, kept) = seeded(&mut store);
+    let attempt = store.begin_compaction(plan(&store, &kept)).unwrap();
+    store
+        .append_compaction(&attempt, summary(&old), Usage::default())
+        .unwrap();
+    store.append_message(Message::user("after")).unwrap();
+    store.append_context_edit(&kept, None).unwrap();
+    // The retained message is not summarized evidence, so the summary stays valid.
+    assert!(store.latest_compaction().is_some());
+    let messages = summarize(&store.messages());
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert!(messages[0].starts_with("user:<context_summary>"), "{messages:?}");
+    assert_eq!(messages[1], "user:after");
+}
+
+#[test]
 fn a_summary_cannot_commit_after_its_source_was_edited_during_the_attempt() {
     let mut store = SessionStore::in_memory(header());
     let (old, kept) = seeded(&mut store);
