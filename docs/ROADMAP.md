@@ -22,7 +22,7 @@
 | G3 | 保持可审计与安全 | `.claude/CLAUDE.md` 中的不变量全部保留；每次模型请求都能从会话文件还原 |
 | G4 | 渐进迁移 | 保持现有 `run` 行为兼容，测试全部通过；D5 若改变默认执行环境，在 P6 明确迁移方式并单独验收 |
 
-G1–G4 是验收目标。当前会话日志可重建对话与提示词；G3 所要求的完整请求重建还需补齐每次请求的工具定义与发送配置记录（风险见技术方案第 10.2 节），在 P5 的会话格式升级中一并补齐。
+G1–G4 是验收目标。当前会话日志可重建对话与提示词；G3 所要求的完整请求重建（风险见技术方案第 10.2 节）已在 P5 补齐：每次请求前记录 `request_started`，工具定义与发送配置变化时记录 `request_config`。
 
 **本期不做**：pi 级别的完整 TUI、多 Agent 协作、插件热加载、WASM 插件、云端托管运行时。
 
@@ -98,7 +98,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P2 | 长期会话 `AgentSession` | 已完成（PR #4） |
 | P3 | 终端对话 `chat` | 已完成（PR #5） |
 | P4 | profile 文件、上下文文件与 skills | 已完成（PR #6） |
-| P5 | 上下文管理 | 进行中（离线实现待评审） |
+| P5 | 上下文管理 | 已实现待 PR review |
 | P6 | 执行环境与崩溃恢复 | 未开始 |
 | P7 | 插件与 MCP | 未开始 |
 | P8 | 嵌入协议 `acp` | 未开始 |
@@ -236,17 +236,20 @@ P5 实施约定（2026-11-01）：
 - 注册 `read_output` 按 UUID 与 UTF-8 字节 offset 分页读取结果，单页不超过落盘阈值；读取结果和 read_skill 不再次落盘，避免递归引用。只有启用 read_output 时安装落盘扩展，显式 CLI 工具集合仍生效。结果目录默认 cwd/.zx-agent/outputs，文件不自动删除并可在同目录续用；加入 gitignore。
 - profile 使用 `[compaction]` 与 `[toolOutput]`；CLI 可覆盖自动触发阈值或关闭自动压缩。默认 SDK 仍不自动压缩、不落盘，已有构造器保持兼容；可在 Runner 上显式配置后交给 AgentSession。
 - 用 FauxProvider、本地假 HTTP 服务、会话兼容/分支/失败写入测试验收，不运行付费 API 测试。
+- 请求审计（G3，2026-11-01 补充）：每次任务请求和摘要请求调用 `Provider::stream` 前，先追加 `request_started`；provider、模型、工具定义、`max_tokens` 或 provider 转换参数与当前分支上最近一条 `request_config` 不同时，先追加新的 `request_config`。`request_started` 只记录配置引用和消息来源（会话投影，或摘要尝试的源条目与请求时间戳），不复制整份对话；`SessionStore::replay_request` 据此还原与 provider 无关的 `Request`。写入前校验待发消息与持久化投影一致；任何一步写入失败都不发请求，并按不变量 7 取消运行。默认 SDK 也记录，这是会话文件约定的变化：会话中除 message、context_edit、压缩记录外，还会出现这两类条目。旧 v1/v2 日志在首次写入请求或压缩记录前追加 `format_upgrade`，不再只在首次压缩前。不记录 API key、URL 与 HTTP 头；`Provider::request_options` 只返回非机密的转换参数，默认 `null`，OpenAI 兼容 provider 记录格式版本与 `systemUpdates`，可用 `openai::replay_body` 重建请求体。`request_started` 只表示准备发送，不能证明服务端已接受；没有对应回答说明发送结果未知。
 
 - [x] 会话条目 `compaction`：记录保留的第一条条目与摘要（沿用 pi 的结构）
 - [x] 首次写入 `compaction` 前升级会话格式，兼容读取旧版本；版本号按当时的格式递增，不延后到 P6
-- [ ] 同一次格式升级加入请求配置条目：记录工具定义、模型与发送参数，变化时追加，使每次请求都能从会话文件还原（G3）
+- [x] 同一次格式升级加入请求配置条目：记录工具定义、模型与发送参数，变化时追加，使每次请求都能从会话文件还原（G3）
 - [x] 摘要分“环境事实（附原始条目出处）”与“推断和计划”两部分；原始历史不改写
 - [x] 触发方式：达到阈值自动触发，或在 `chat` 中用 `/compact` 手动触发；无人值守的短任务默认关闭
 - [x] 工具侧预算：大结果写入文件，只返回路径
 
 验收（2026-11-01）：FauxProvider、本地 HTTP、会话 v1/v2/v3 与分支、四种压缩写入失败、取消 / 超时 / 丢弃、请求计费与摘要期间 steering、CLI profile 与 Unix PTY、长结果脱敏与分页均通过。stable 与 Rust 1.88.0 各 **356 项通过（含 2 项 doctest），6 项付费测试跳过**；fmt、clippy、严格 Rustdoc 均通过。`tests/cli.rs` 逐字节保留，Cargo 依赖未变。
 
-未验证：真实模型的摘要准确率、信息保真和 token 窗口适配；本轮不调用付费 API。配置预算及限制见 [PROFILES.md](PROFILES.md#上下文管理)。
+请求审计验收（2026-11-01）：每次任务请求与摘要请求都能从重新打开的会话文件还原，并与实际发送的 `Request` 逐项相等；配置只在变化时追加（含切换模型）；v1/v2 会话在首次请求前只升级一次且原有字节不变；`request_config` 或 `request_started` 写入失败时不发请求；OpenAI 兼容 provider 的还原请求体与实际请求体在两种 `systemUpdates` 模式下一致，且不含 API key。原有 4 项测试按新的会话文件约定更新了预期：3 项只统计 message 行，1 项允许出现请求审计条目，原本要验证的行为不变。stable 与 Rust 1.88.0 各 **385 项通过，6 项付费测试跳过**；fmt、clippy、严格 Rustdoc、MSRV 全目标检查均通过。`tests/cli.rs`、`Cargo.toml`、`Cargo.lock` 未改动。
+
+未验证：真实模型的摘要准确率、信息保真和 token 窗口适配；本轮不调用付费 API，开工前置中的 `tests/real_api.rs` 仍未运行。配置预算及限制见 [PROFILES.md](PROFILES.md#上下文管理)。
 
 ### P6 执行环境与崩溃恢复
 
