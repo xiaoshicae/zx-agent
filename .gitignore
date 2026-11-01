@@ -21,6 +21,10 @@
 *.tmp
 *.bak
 
+# Local agent worktrees
+/.claude/worktrees/
+/.worktrees/
+
 # Operating system metadata
 .DS_Store
 ._*

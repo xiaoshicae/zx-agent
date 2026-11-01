@@ -27,7 +27,7 @@
 
 - **是什么**：用 Rust 编写的通用 agent 内核。同一个内核支撑三类场景：和人对话；无人值守运行，例如由 cron 或 Kubernetes Job 触发的排障；被编辑器或其他程序嵌入。场景差异放在内核之外，通过 profile、提示词和插件表达。
 - **参照**：分层方式、循环语义和会话格式沿用 pi（https://github.com/earendil-works/pi ，commit `a92283056`）。与 pi 不同的地方记录在 README 的"与 pi 的差异"。
-- **现状**：v0.1.0。已实现共享的 `AgentSession`（多次提问、取消后复用、多订阅者、切换模型）、无人值守的 `run` 和交互式 `chat` 命令、一个 OpenAI 兼容的流式 provider、`bash` 与 `read_file` 两个工具。`run` 的提示词、上限和续写默认值集中在 `presets::troubleshoot`；内核默认不限轮次、不限时间、不自动续写。接口与资源上限见 README，目标、阶段计划与已定决策见 `docs/ROADMAP.md`，改动前先确认当前阶段。
+- **现状**：v0.1.0。已实现共享的 `AgentSession`、无人值守的 `run` 和终端 `chat`、一个 OpenAI 兼容的流式 provider、`bash` 与 `read_file`，以及文件化 profile、项目上下文和按需 `read_skill`。CLI 的场景默认值位于 `profiles/*.toml` 与相邻说明文件；`presets` 保留已有 SDK 接口。内核默认不限轮次、不限时间、不自动续写。接口与资源上限见 README，目标、阶段计划与已定决策见 `docs/ROADMAP.md`，改动前先确认当前阶段。
 - **验证范围**：本地使用 macOS，CI 覆盖 Linux 与 macOS；`--system-updates inline` 只在一个服务上验证过；付费 e2e 测试还没有运行过。
 
 ## 架构设计
@@ -37,6 +37,7 @@
 | 层 | 位置 | 职责 |
 |---|---|---|
 | CLI | `src/main.rs`、`src/cli.rs`、`src/chat/` | 共用参数与运行组装；run 处理单次任务；chat 管理单一输入所有者、审批、信号和 REPL |
+| 场景配置 | `src/profile/`、`profiles/` | TOML 基线与覆盖、项目上下文、显式 skill 目录及按需读取；不进入循环机制 |
 | 场景预设 | `src/presets/` | 提供外层显式选择的说明与运行默认值；内核机制不依赖预设 |
 | 提示词 | `src/prompt.rs` | 生成系统提示词：说明 + `<environment>` + `<command_policy>` |
 | 共享会话 | `src/agent_session.rs` | 共享调用与 Busy、RAII 归还运行权、取消、订阅与退订、空闲时切换模型 |
@@ -52,6 +53,7 @@
 设计取舍（改动前先理解原因；必须保持的约束见下文"不变量"）：
 
 - **场景策略不进内核**：提示词、运行上限与续写默认值由预设提供；P1 已实现六个 Hooks 和 Interaction；命令策略、续写、脱敏由外层注册，无人时拒绝 Ask。无人值守的 `run` 用退出码 0 到 6 表达结果，调度器不必解析输出。
+- **配置与文件内容分工**：profile 决定工具和规则，CLI 只用显式传参覆盖文件，deny 累加；项目上下文和 skill 正文不能更改控制策略。skill 目录启动时只读取元数据，正文由工具按需读取并经过既有流水线，不隐式执行脚本或加载全局 AI 配置。
 - **共享 API、独占执行**：AgentSession 的短锁只切换 Runner 所有权，不跨 await。重叠 prompt 和运行中改配置返回 Busy；取消、panic 或 future 丢弃后由 RAII 归还。订阅列表先取快照再调用，单个 subscriber panic 会被隔离并可查询，不持锁调用宿主回调。
 - **会话文件既是审计日志，也是模型上下文的唯一来源**：修正上下文靠追加 `context_edit`，提示词变化靠追加 system 消息，原始记录始终保留。
 - **终端输入只有一个所有者**：chat 的专用线程通过有界通道提供逐行输入；REPL 协调提问、审批和信号，Interaction 不直接读 stdin。审批回复必须匹配主机生成的请求编号，取消后失效；TTY 运行中输入 steering，管道脚本逐轮消费。按 Tokio stdin 源码对交互终端的建议避免不可取消的 stdin 阻塞任务卡住运行时退出。

@@ -1,10 +1,8 @@
 use std::io::{Read, Write};
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
-use clap::Parser;
 use serde_json::json;
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
@@ -14,13 +12,13 @@ use zx_agent::AgentSession;
 use zx_agent::agent::{AgentEvent, EventSink};
 use zx_agent::ai::{Message, StopReason};
 use zx_agent::extensions::ContinueOnLength;
-use zx_agent::presets::troubleshoot;
-use zx_agent::runner::{Limits, RunOutcome, RunReport};
+use zx_agent::profile::Builtin;
+use zx_agent::runner::{RunOutcome, RunReport};
 
 mod chat;
 mod cli;
 
-use cli::{Cli, Command, OutputMode, RunArgs};
+use cli::{Command, Explicit, OutputMode, RunArgs};
 
 /// Exit codes, so schedulers can react without parsing output.
 const EXIT_COMPLETED: u8 = 0;
@@ -33,10 +31,10 @@ const EXIT_TRUNCATED: u8 = 6;
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let (cli, explicit) = cli::parse();
     let result = match cli.command {
-        Command::Run(args) => run(args).await,
-        Command::Chat(args) => chat::run(args).await,
+        Command::Run(args) => run(args, explicit).await,
+        Command::Chat(args) => chat::run(args, explicit).await,
     };
     match result {
         Ok(code) => ExitCode::from(code),
@@ -49,9 +47,9 @@ async fn main() -> ExitCode {
 
 /// Run one task and return its exit code. An `Err` is a configuration problem found
 /// before the run started.
-async fn run(args: RunArgs) -> Result<u8> {
+async fn run(args: RunArgs, explicit: Explicit) -> Result<u8> {
     let prompt = read_prompt(&args.prompt)?;
-    let session = build_session(&args)?;
+    let session = build_session(&args, explicit)?;
     let cancel = CancellationToken::new();
     spawn_signal_handler(cancel.clone());
     let report = session.prompt_with_cancel(prompt, &cancel).await?;
@@ -74,32 +72,34 @@ fn read_prompt(arg: &str) -> Result<String> {
 }
 
 /// Assemble the unattended preset without exposing interactive choices to the kernel.
-fn build_session(args: &RunArgs) -> Result<AgentSession> {
+fn build_session(args: &RunArgs, explicit: Explicit) -> Result<AgentSession> {
     let mut prepared = cli::prepare(cli::SessionOptions {
         base: &args.base,
         transport: &args.transport,
         request: &args.request,
         model: &args.base.model,
         file: cli::SessionFile::from_path(args.request.session.as_deref()),
-        instructions: troubleshoot::INSTRUCTIONS,
+        default_profile: Builtin::Troubleshoot,
+        budget: cli::Budget {
+            max_turns: Some(args.max_turns),
+            timeout_secs: args.timeout_secs,
+            continue_on_length: args.continue_on_length,
+        },
+        explicit,
     })?;
     prepared
         .config
         .hooks
-        .push(ContinueOnLength::new(args.continue_on_length));
+        .push(ContinueOnLength::new(prepared.continue_on_length));
     prepared.config.hooks.push(prepared.redactor);
     let sink: Arc<dyn EventSink> = match args.output {
         OutputMode::Text => Arc::new(TextProgress),
         OutputMode::Jsonl => Arc::new(JsonlEvents { deltas: args.deltas }),
     };
-    let limits = Limits {
-        max_turns: Some(args.max_turns),
-        timeout: (args.timeout_secs > 0).then(|| Duration::from_secs(args.timeout_secs)),
-    };
     Ok(AgentSession::new(
         prepared.config,
         prepared.retry,
-        limits,
+        prepared.limits,
         prepared.store,
         sink,
     ))

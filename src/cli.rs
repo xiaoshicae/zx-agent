@@ -5,16 +5,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::parser::ValueSource;
+use clap::{ArgMatches, Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 
-use zx_agent::agent::{CommandPolicy, LoopConfig, LoopSpec};
+use zx_agent::agent::{CommandPolicy, Decision, LoopConfig, LoopSpec};
 use zx_agent::ai::openai::{DEFAULT_MAX_RESPONSE_BYTES, OpenAiCompatible, OpenAiConfig, SystemUpdates};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::sse::DEFAULT_MAX_EVENT_BYTES;
 use zx_agent::extensions::RedactSecrets;
-use zx_agent::policy::PolicyHook;
+use zx_agent::policy::{PolicyHook, Rule, RuleMatcher, RulePolicy};
 use zx_agent::presets::troubleshoot;
+use zx_agent::profile::skills::{ReadSkillTool, TOOL_NAME};
+use zx_agent::profile::{Builtin, Profile, read_text};
 use zx_agent::prompt::{build_system_prompt, environment_section};
+use zx_agent::runner::Limits;
 use zx_agent::session::{SessionHeader, SessionStore};
 use zx_agent::tools;
 
@@ -23,6 +27,38 @@ use zx_agent::tools;
 pub(crate) struct Cli {
     #[command(subcommand)]
     pub(crate) command: Command,
+}
+
+/// Clap defaults keep the existing help stable. Track explicit values separately so a
+/// value equal to an old default still overrides a profile's different value.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Explicit {
+    tools: bool,
+    max_turns: bool,
+    timeout_secs: bool,
+    continue_on_length: bool,
+}
+
+impl Explicit {
+    fn from_matches(matches: &ArgMatches, name: &str) -> Self {
+        let explicit = |id| matches.value_source(id) == Some(ValueSource::CommandLine);
+        Self {
+            tools: explicit("tools"),
+            max_turns: explicit("max_turns"),
+            timeout_secs: explicit("timeout_secs"),
+            continue_on_length: name == "run" && explicit("continue_on_length"),
+        }
+    }
+}
+
+pub(crate) fn parse() -> (Cli, Explicit) {
+    let matches = Cli::command().get_matches();
+    let explicit = matches
+        .subcommand()
+        .map(|(name, args)| Explicit::from_matches(args, name))
+        .unwrap_or_default();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    (cli, explicit)
 }
 
 #[derive(Subcommand)]
@@ -140,6 +176,18 @@ pub(crate) struct BaseArgs {
     /// Extra substring to reject in bash commands. Repeatable.
     #[arg(long = "deny-cmd")]
     pub(crate) deny_cmd: Vec<String>,
+
+    /// Embedded profile name (troubleshoot, assistant) or path to a TOML file.
+    #[arg(long)]
+    pub(crate) profile: Option<String>,
+
+    /// Additional project instructions file. Repeatable; relative to the launch directory.
+    #[arg(long = "context-file", conflicts_with = "no_context")]
+    pub(crate) context_files: Vec<PathBuf>,
+
+    /// Disable automatic AGENTS.md discovery and profile context files.
+    #[arg(long)]
+    pub(crate) no_context: bool,
 }
 
 #[derive(Args)]
@@ -210,7 +258,15 @@ pub(crate) struct SessionOptions<'a> {
     pub(crate) request: &'a RequestArgs,
     pub(crate) model: &'a str,
     pub(crate) file: SessionFile<'a>,
-    pub(crate) instructions: &'a str,
+    pub(crate) default_profile: Builtin,
+    pub(crate) budget: Budget,
+    pub(crate) explicit: Explicit,
+}
+
+pub(crate) struct Budget {
+    pub(crate) max_turns: Option<u32>,
+    pub(crate) timeout_secs: u64,
+    pub(crate) continue_on_length: u32,
 }
 
 pub(crate) struct PreparedSession {
@@ -218,6 +274,8 @@ pub(crate) struct PreparedSession {
     pub(crate) retry: RetryPolicy,
     pub(crate) store: SessionStore,
     pub(crate) redactor: RedactSecrets,
+    pub(crate) limits: Limits,
+    pub(crate) continue_on_length: u32,
 }
 
 /// Synchronous startup reads and short session appends precede the asynchronous run.
@@ -228,21 +286,66 @@ pub(crate) fn prepare(options: SessionOptions<'_>) -> Result<PreparedSession> {
             .with_context(|| format!("invalid --cwd {}", path.display()))?,
         None => std::env::current_dir()?,
     };
-    let instructions = match &options.base.system_prompt_file {
-        Some(path) => std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?,
-        None => options.instructions.to_string(),
-    };
+    anyhow::ensure!(cwd.is_dir(), "--cwd is not a directory: {}", cwd.display());
+    let mut profile = Profile::load(options.base.profile.as_deref(), options.default_profile)?;
+    if options.explicit.tools {
+        profile.tools = options
+            .base
+            .tools
+            .iter()
+            .map(|name| name.trim())
+            .filter(|name| !name.is_empty())
+            .map(String::from)
+            .collect();
+    }
+    if options.explicit.max_turns {
+        profile.limits.max_turns = options.budget.max_turns;
+    }
+    if options.explicit.timeout_secs {
+        profile.limits.timeout =
+            (options.budget.timeout_secs > 0).then(|| Duration::from_secs(options.budget.timeout_secs));
+    }
+    if options.explicit.continue_on_length {
+        profile.continue_on_length = options.budget.continue_on_length;
+    }
+    if !options.base.allow_cmd.is_empty() {
+        profile.rules.allow.clone_from(&options.base.allow_cmd);
+    }
+    profile.rules.deny.extend_from_slice(&options.base.deny_cmd);
+    if let Some(path) = &options.base.system_prompt_file {
+        profile.instructions = read_text(path)?;
+    }
+    if options.base.no_context {
+        profile.context.discover = false;
+        profile.context.files.clear();
+    }
+    profile.context.files.extend_from_slice(&options.base.context_files);
+    profile.validate()?;
+    let context = profile.context_section(&cwd)?;
     // Local servers (vLLM, Ollama, llama.cpp) often need no key, so a missing key is allowed.
     let api_key = std::env::var(&options.base.api_key_env)
         .ok()
         .filter(|key| !key.is_empty());
     // Commands must not inherit the key: `env` would put it into the session file and the context.
-    let tools = tools::builtin_tools(
-        &options.base.tools,
+    let mut tools = tools::builtin_tools(
+        &profile
+            .tools
+            .iter()
+            .filter(|name| name.as_str() != TOOL_NAME)
+            .cloned()
+            .collect::<Vec<_>>(),
         Duration::from_secs(options.transport.tool_timeout_secs),
         std::slice::from_ref(&options.base.api_key_env),
     )?;
-    let policy = CommandPolicy::new(&options.base.allow_cmd).deny_also(&options.base.deny_cmd);
+    let catalog = if profile.tools.iter().any(|name| name == TOOL_NAME) && !profile.skills.is_empty() {
+        let tool = ReadSkillTool::new(std::mem::take(&mut profile.skills))?;
+        let catalog = tool.catalog();
+        tools.push(Arc::new(tool));
+        catalog
+    } else {
+        String::new()
+    };
+    let policy = CommandPolicy::new(&profile.rules.allow).deny_also(&profile.rules.deny);
     // The command policy only concerns bash.
     let command_policy = if tools.iter().any(|tool| tool.name() == "bash") {
         policy.prompt_section().unwrap_or_default()
@@ -250,10 +353,12 @@ pub(crate) fn prepare(options: SessionOptions<'_>) -> Result<PreparedSession> {
         String::new()
     };
     let system_prompt = build_system_prompt(
-        &instructions,
+        &profile.instructions,
         &[
             ("environment", &environment_section(&cwd)),
             ("command_policy", &command_policy),
+            ("project_context", &context),
+            ("available_skills", &catalog),
         ],
     );
 
@@ -293,6 +398,26 @@ pub(crate) fn prepare(options: SessionOptions<'_>) -> Result<PreparedSession> {
         sequential_tools: false,
     });
     config.hooks.push(PolicyHook::new(Arc::new(policy)));
+    let mut rules = Vec::new();
+    for tool in profile.rules.deny_tools {
+        rules.push(Rule {
+            matcher: RuleMatcher::Tool(tool),
+            decision: Decision::Deny("tool denied by profile".into()),
+        });
+    }
+    for tool in profile.rules.ask_tools {
+        rules.push(Rule {
+            matcher: RuleMatcher::Tool(tool),
+            decision: Decision::Ask("profile requires tool approval".into()),
+        });
+    }
+    if !rules.is_empty() {
+        rules.push(Rule {
+            matcher: RuleMatcher::Any,
+            decision: Decision::Allow,
+        });
+        config.hooks.push(PolicyHook::new(Arc::new(RulePolicy::new(rules))));
+    }
     Ok(PreparedSession {
         config,
         retry: RetryPolicy {
@@ -301,6 +426,8 @@ pub(crate) fn prepare(options: SessionOptions<'_>) -> Result<PreparedSession> {
         },
         store: session,
         redactor: RedactSecrets::new(api_key),
+        limits: profile.limits,
+        continue_on_length: profile.continue_on_length,
     })
 }
 
@@ -332,5 +459,22 @@ mod tests {
             }
             Command::Run(_) => panic!("chat command"),
         }
+    }
+
+    #[test]
+    fn explicit_zero_time_and_default_values_are_distinct_from_parser_defaults() {
+        let chat = Cli::command()
+            .try_get_matches_from(["zx-agent", "chat", "--model", "m", "--timeout-secs", "0"])
+            .unwrap();
+        let (_, args) = chat.subcommand().unwrap();
+        let explicit = Explicit::from_matches(args, "chat");
+        assert!(explicit.timeout_secs);
+        assert!(!explicit.tools);
+        assert!(!explicit.max_turns);
+        let run = Cli::command()
+            .try_get_matches_from(["zx-agent", "run", "--model", "m", "--timeout-secs", "900", "go"])
+            .unwrap();
+        let (_, args) = run.subcommand().unwrap();
+        assert!(Explicit::from_matches(args, "run").timeout_secs);
     }
 }
