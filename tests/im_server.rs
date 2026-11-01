@@ -33,7 +33,7 @@ const OTHER: &str = "U-other";
 const WAIT: Duration = Duration::from_secs(10);
 
 /// What the server asked the channel to do.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum Sent {
     Post {
         to: Destination,
@@ -50,6 +50,9 @@ enum Sent {
 struct FakeChannel {
     name: &'static str,
     events: Mutex<Option<mpsc::Receiver<Inbound>>>,
+    /// Passed on once cancelled, before `run` returns: deliveries acknowledged just as the
+    /// server stopped.
+    late: Mutex<Vec<Inbound>>,
     sent: mpsc::UnboundedSender<Sent>,
     next: AtomicUsize,
     fail: Option<String>,
@@ -68,7 +71,15 @@ impl ImChannel for FakeChannel {
         let mut events = self.events.lock().unwrap().take().expect("run is called once");
         loop {
             tokio::select! {
-                () = cancel.cancelled() => return Ok(()),
+                () = cancel.cancelled() => {
+                    let late = std::mem::take(&mut *self.late.lock().unwrap());
+                    for event in late {
+                        if inbound.send(event).await.is_err() {
+                            break;
+                        }
+                    }
+                    return Ok(());
+                }
                 Some(event) = events.recv() => {
                     if inbound.send(event).await.is_err() {
                         return Ok(());
@@ -169,6 +180,8 @@ struct Setup {
     approval_timeout: Duration,
     fail_open: Option<String>,
     fail_channel: Option<String>,
+    /// Events the channel passes on as the server stops.
+    late: Vec<Inbound>,
 }
 
 impl Default for Setup {
@@ -183,6 +196,7 @@ impl Default for Setup {
             approval_timeout: WAIT,
             fail_open: None,
             fail_channel: None,
+            late: Vec::new(),
         }
     }
 }
@@ -211,6 +225,7 @@ fn start(setup: Setup) -> Harness {
     let channel: Arc<dyn ImChannel> = Arc::new(FakeChannel {
         name: PLATFORM,
         events: Mutex::new(Some(events_in)),
+        late: Mutex::new(setup.late),
         sent: sent_to,
         next: AtomicUsize::new(0),
         fail: setup.fail_channel,
@@ -243,19 +258,22 @@ fn text(text: &str) -> Outbound {
     Outbound::Text(text.into())
 }
 
+/// A message in `chat`; `thread` is `None` for one posted in the chat itself.
+fn message(chat: &str, id: &str, thread: Option<&str>, text: &str) -> Inbound {
+    Inbound::Message {
+        id: MessageId(id.into()),
+        at: Destination {
+            conversation: ConversationId(chat.into()),
+            thread: thread.map(|root| ThreadId(root.into())),
+        },
+        sender: UserId("U-asker".into()),
+        text: text.into(),
+    }
+}
+
 impl Harness {
-    /// A message in `chat`; `thread` is `None` for one posted in the chat itself.
     async fn say_in(&self, chat: &str, id: &str, thread: Option<&str>, text: &str) {
-        let message = Inbound::Message {
-            id: MessageId(id.into()),
-            at: Destination {
-                conversation: ConversationId(chat.into()),
-                thread: thread.map(|root| ThreadId(root.into())),
-            },
-            sender: UserId("U-asker".into()),
-            text: text.into(),
-        };
-        self.inject.send(message).await.unwrap();
+        self.inject.send(message(chat, id, thread, text)).await.unwrap();
     }
 
     async fn say(&self, id: &str, thread: Option<&str>, text: &str) {
@@ -348,6 +366,32 @@ impl Harness {
     async fn stop(self) -> Result<(), ImError> {
         self.cancel.cancel();
         self.server.await.unwrap()
+    }
+
+    /// Stop the server and wait until it has returned; then take what it sent and reported
+    /// meanwhile. Conversations stop concurrently, so different threads may interleave.
+    async fn stop_and_take(mut self) -> (Vec<Sent>, Vec<ServerEvent>) {
+        self.cancel.cancel();
+        (&mut self.server).await.unwrap().unwrap();
+        let sent = std::iter::from_fn(|| self.sent.try_recv().ok()).collect();
+        let events = std::iter::from_fn(|| self.events.try_recv().ok()).collect();
+        (sent, events)
+    }
+}
+
+fn key(root: &str) -> SessionKey {
+    SessionKey {
+        platform: PLATFORM.into(),
+        conversation: ConversationId(CHAT.into()),
+        thread: ThreadId(root.into()),
+    }
+}
+
+/// The operator's record of a thread's messages that will not run.
+fn unanswered(root: &str, count: usize) -> ServerEvent {
+    ServerEvent::Failed {
+        key: Some(key(root)),
+        error: format!("{count} message(s) were not answered: the server is stopping"),
     }
 }
 
@@ -662,6 +706,104 @@ async fn stopping_the_server_cancels_runs_and_posts_how_they_ended() {
 }
 
 #[tokio::test]
+async fn stopping_tells_a_thread_waiting_for_a_run_slot_that_it_will_not_run() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::Hang],
+        config: ServerConfig {
+            max_running: NonZeroUsize::MIN,
+            ..Setup::default().config
+        },
+        ..Setup::default()
+    });
+    let replies = h.replies.clone();
+    h.say("a", None, "task a").await;
+    let status_a = h.posted(&thread("a"), text(&replies.working)).await;
+    h.say("b", None, "task b").await;
+    h.posted(&thread("b"), text(&replies.queued)).await;
+    let (sent, events) = h.stop_and_take().await;
+    let (mut in_a, mut in_b) = (Vec::new(), Vec::new());
+    for sent in sent {
+        match sent {
+            Sent::Update { posted, message } if posted == status_a => in_a.push(message),
+            Sent::Post { to, message, .. } if to == thread("b") => in_b.push(message),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    // The run had taken in all its input, so its thread only learns how it ended. Thread b
+    // never ran: a run posts its status first.
+    assert_eq!(in_a, [text(&replies.cancelled)]);
+    assert_eq!(in_b, [text(&replies.stopping)]);
+    assert_eq!(events, [unanswered("b", 1)]);
+}
+
+#[tokio::test]
+async fn stopping_tells_a_thread_about_steering_its_run_did_not_take_in() {
+    let mut h = start(Setup {
+        steps: vec![echo_call()],
+        ..Setup::default()
+    });
+    let replies = h.replies.clone();
+    h.say("m1", None, "run echo").await;
+    let status = h.posted(&thread("m1"), text(&replies.working)).await;
+    let (id, card) = h.card(&thread("m1")).await;
+    h.say("m2", Some("m1"), "also check the logs").await;
+    // The worker answers this click only after it has steered the message before it.
+    h.click("m1", OTHER, &id, Choice::AllowOnce).await;
+    h.posted(&thread("m1"), text(&replies.not_approver)).await;
+    let (sent, events) = h.stop_and_take().await;
+    let closed = Outbound::ApprovalResolved {
+        id,
+        user: None,
+        result: ApprovalResult::Cancelled,
+    };
+    match sent.as_slice() {
+        [first, second, Sent::Post { to, message, .. }] => {
+            assert_eq!(
+                first,
+                &Sent::Update {
+                    posted: card,
+                    message: closed
+                }
+            );
+            assert_eq!(
+                second,
+                &Sent::Update {
+                    posted: status,
+                    message: text(&replies.cancelled)
+                }
+            );
+            assert_eq!((to, message), (&thread("m1"), &text(&replies.stopping)));
+        }
+        other => panic!("expected the card, the status and a notice, got {other:?}"),
+    }
+    assert!(
+        matches!(events.as_slice(), [ServerEvent::Approval(_), last] if *last == unanswered("m1", 1)),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_message_received_as_the_server_stops_is_answered_without_running() {
+    let h = start(Setup {
+        late: vec![message(CHAT, "m1", None, "hello")],
+        ..Setup::default()
+    });
+    let replies = h.replies.clone();
+    let factory = Arc::clone(&h.factory);
+    let (sent, events) = h.stop_and_take().await;
+    match sent.as_slice() {
+        [Sent::Post { to, message, .. }] => assert_eq!((to, message), (&thread("m1"), &text(&replies.stopping))),
+        other => panic!("expected one notice, got {other:?}"),
+    }
+    assert_eq!(events, [unanswered("m1", 1)]);
+    assert_eq!(
+        factory.opened.load(Ordering::SeqCst),
+        0,
+        "no session is opened to refuse"
+    );
+}
+
+#[tokio::test]
 async fn a_failing_channel_stops_the_server_with_its_error() {
     let h = start(Setup {
         fail_channel: Some("token rejected".into()),
@@ -702,6 +844,7 @@ async fn two_channels_with_one_name_are_a_configuration_error() {
         Arc::new(FakeChannel {
             name: PLATFORM,
             events: Mutex::new(None),
+            late: Mutex::new(Vec::new()),
             sent,
             next: AtomicUsize::new(0),
             fail: None,
