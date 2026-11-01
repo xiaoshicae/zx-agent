@@ -8,18 +8,19 @@ use anyhow::{Context, Result};
 use clap::parser::ValueSource;
 use clap::{ArgMatches, Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 
-use zx_agent::agent::{CommandPolicy, Decision, LoopConfig, LoopSpec};
+use zx_agent::agent::{CommandPolicy, Decision, LoopConfig, LoopSpec, Tool};
 use zx_agent::ai::openai::{DEFAULT_MAX_RESPONSE_BYTES, OpenAiCompatible, OpenAiConfig, SystemUpdates};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::sse::DEFAULT_MAX_EVENT_BYTES;
 use zx_agent::compaction;
+use zx_agent::executor::{ContainerConfig, ContainerExecutor, Executor, LocalExecutor};
 use zx_agent::extensions::RedactSecrets;
 use zx_agent::output_store::{self, OutputStore, ReadOutputTool, SpillOutputs};
 use zx_agent::policy::{PolicyHook, Rule, RuleMatcher, RulePolicy};
 use zx_agent::presets::troubleshoot;
 use zx_agent::profile::skills::{ReadSkillTool, TOOL_NAME};
-use zx_agent::profile::{Builtin, Profile};
-use zx_agent::prompt::{build_system_prompt, environment_section};
+use zx_agent::profile::{Builtin, ContainerSettings, Execution, Profile};
+use zx_agent::prompt::{build_system_prompt, container_environment_section, environment_section};
 use zx_agent::runner::Limits;
 use zx_agent::session::{SessionHeader, SessionStore};
 use zx_agent::tools::{self, BASH};
@@ -204,6 +205,22 @@ pub(crate) struct BaseArgs {
     /// Disable automatic summaries; /compact remains available in chat.
     #[arg(long)]
     pub(crate) no_auto_compact: bool,
+
+    /// Where bash and read_file run. local: this machine. container: an isolated Docker
+    /// container without network access and with a read-only working directory.
+    /// Defaults to the selected profile.
+    #[arg(long, value_enum)]
+    pub(crate) execution: Option<ExecutionArg>,
+
+    /// Image for --execution container. It must already be present locally (docker pull).
+    #[arg(long)]
+    pub(crate) container_image: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum ExecutionArg {
+    Local,
+    Container,
 }
 
 #[derive(Args)]
@@ -296,8 +313,9 @@ pub(crate) struct PreparedSession {
     pub(crate) spill: Option<SpillOutputs>,
 }
 
-/// Synchronous startup reads and short session appends precede the asynchronous run.
-pub(crate) fn prepare(options: SessionOptions<'_>) -> Result<PreparedSession> {
+/// Startup reads, short session appends and, in container mode, starting the container
+/// precede the run. Configuration errors are reported before the session file is created.
+pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSession> {
     let cwd = match &options.base.cwd {
         Some(path) => path
             .canonicalize()
@@ -347,7 +365,27 @@ pub(crate) fn prepare(options: SessionOptions<'_>) -> Result<PreparedSession> {
     if options.base.no_auto_compact {
         profile.compaction.trigger_bytes = None;
     }
+    if let Some(execution) = options.base.execution {
+        profile.execution = match execution {
+            ExecutionArg::Local => Execution::Local,
+            ExecutionArg::Container => Execution::Container,
+        };
+    }
+    if let Some(image) = &options.base.container_image {
+        anyhow::ensure!(
+            profile.execution == Execution::Container,
+            "--container-image needs container execution: add --execution container, or set execution = \"container\" in the profile"
+        );
+        profile.container.image = Some(image.clone());
+    }
     profile.validate()?;
+    // The container mounts the workspace at its real path, which tools must use as well.
+    let cwd = match profile.execution {
+        Execution::Local => cwd,
+        Execution::Container => cwd
+            .canonicalize()
+            .with_context(|| format!("cannot resolve {}", cwd.display()))?,
+    };
     let context = profile.context_section(&cwd).context(
         "cannot load project instructions; --no-context skips AGENTS.md discovery and profile context files",
     )?;
@@ -355,21 +393,12 @@ pub(crate) fn prepare(options: SessionOptions<'_>) -> Result<PreparedSession> {
     let api_key = std::env::var(&options.base.api_key_env)
         .ok()
         .filter(|key| !key.is_empty());
-    // Commands must not inherit the key: `env` would put it into the session file and the context.
-    let mut tools = tools::builtin_tools(
-        &profile
-            .tools
-            .iter()
-            .filter(|name| name.as_str() != TOOL_NAME && name.as_str() != output_store::TOOL_NAME)
-            .cloned()
-            .collect::<Vec<_>>(),
-        Duration::from_secs(options.transport.tool_timeout_secs),
-        std::slice::from_ref(&options.base.api_key_env),
-    )?;
+    // read_skill and read_output read files on this machine, whatever executor runs commands.
+    let mut host_tools: Vec<Arc<dyn Tool>> = Vec::new();
     let catalog = if profile.tools.iter().any(|name| name == TOOL_NAME) && !profile.skills.is_empty() {
         let tool = ReadSkillTool::new(std::mem::take(&mut profile.skills))?;
         let catalog = tool.catalog();
-        tools.push(Arc::new(tool));
+        host_tools.push(Arc::new(tool));
         catalog
     } else {
         String::new()
@@ -378,11 +407,51 @@ pub(crate) fn prepare(options: SessionOptions<'_>) -> Result<PreparedSession> {
         let store = OutputStore::new(&cwd, profile.tool_output)?;
         // The immutable path/config is used independently by the reading tool and writer hook.
         let hook = SpillOutputs::new(store.clone(), vec![output_store::TOOL_NAME.into(), TOOL_NAME.into()]);
-        tools.push(Arc::new(ReadOutputTool::new(store)));
+        host_tools.push(Arc::new(ReadOutputTool::new(store)));
         Some(hook)
     } else {
         None
     };
+
+    // The session file exists before a container starts, so that the container can hide it.
+    let header = SessionHeader::new(&cwd, options.model);
+    let (session, session_path) = match options.file {
+        SessionFile::Memory => (SessionStore::in_memory(header), None),
+        SessionFile::Open(path) if path.exists() => (SessionStore::open(path)?, Some(path)),
+        SessionFile::Open(path) | SessionFile::Create(path) => (SessionStore::create(path, header)?, Some(path)),
+    };
+    if session.recovered_tail_bytes() > 0 {
+        eprintln!(
+            "[session] recovered incomplete final record; removed {} bytes",
+            session.recovered_tail_bytes()
+        );
+    }
+    let (executor, environment): (Arc<dyn Executor>, String) = match profile.execution {
+        Execution::Local => (Arc::new(LocalExecutor), environment_section(&cwd)),
+        Execution::Container => {
+            let config = container_config(&profile.container, &cwd, session_path, &session.header().id)?;
+            let user = config.user.clone();
+            let container = ContainerExecutor::start(config)
+                .await
+                .context("cannot start the container for --execution container")?;
+            let environment = container_environment_section(&cwd, container.image(), &user, container.platform());
+            (Arc::new(container), environment)
+        }
+    };
+
+    // Commands must not inherit the key: `env` would put it into the session file and the context.
+    let mut tools = tools::builtin_tools_with(
+        &profile
+            .tools
+            .iter()
+            .filter(|name| name.as_str() != TOOL_NAME && name.as_str() != output_store::TOOL_NAME)
+            .cloned()
+            .collect::<Vec<_>>(),
+        Duration::from_secs(options.transport.tool_timeout_secs),
+        std::slice::from_ref(&options.base.api_key_env),
+        executor,
+    )?;
+    tools.extend(host_tools);
     let policy = CommandPolicy::new(&profile.rules.allow).deny_also(&profile.rules.deny);
     // The command policy only concerns bash.
     let command_policy = if tools.iter().any(|tool| tool.name() == BASH) {
@@ -393,25 +462,12 @@ pub(crate) fn prepare(options: SessionOptions<'_>) -> Result<PreparedSession> {
     let system_prompt = build_system_prompt(
         &profile.instructions,
         &[
-            ("environment", &environment_section(&cwd)),
+            ("environment", &environment),
             ("command_policy", &command_policy),
             ("project_context", &context),
             ("available_skills", &catalog),
         ],
     );
-
-    let header = SessionHeader::new(&cwd, options.model);
-    let session = match options.file {
-        SessionFile::Memory => SessionStore::in_memory(header),
-        SessionFile::Open(path) if path.exists() => SessionStore::open(path)?,
-        SessionFile::Open(path) | SessionFile::Create(path) => SessionStore::create(path, header)?,
-    };
-    if session.recovered_tail_bytes() > 0 {
-        eprintln!(
-            "[session] recovered incomplete final record; removed {} bytes",
-            session.recovered_tail_bytes()
-        );
-    }
 
     let provider = OpenAiCompatible::new(OpenAiConfig {
         base_url: options.base.base_url.clone(),
@@ -469,6 +525,42 @@ pub(crate) fn prepare(options: SessionOptions<'_>) -> Result<PreparedSession> {
         compaction: profile.compaction,
         spill,
     })
+}
+
+/// Container settings from the profile. The session file is hidden from the container when
+/// it lies in the mounted workspace.
+fn container_config(
+    settings: &ContainerSettings,
+    cwd: &Path,
+    session: Option<&Path>,
+    label: &str,
+) -> Result<ContainerConfig> {
+    let image = settings
+        .image
+        .clone()
+        .context("execution = \"container\" needs container.image (or --container-image)")?;
+    let mut config = ContainerConfig {
+        label: label.into(),
+        ..ContainerConfig::new(image, cwd)
+    };
+    if let Some(user) = &settings.user {
+        config.user.clone_from(user);
+    }
+    if let Some(memory) = &settings.memory {
+        config.memory.clone_from(memory);
+    }
+    if let Some(limit) = settings.pids_limit {
+        config.pids_limit = limit;
+    }
+    if let Some(path) = session {
+        let path = path
+            .canonicalize()
+            .with_context(|| format!("cannot resolve session file {}", path.display()))?;
+        if path.starts_with(cwd) {
+            config.hidden_files.push(path);
+        }
+    }
+    Ok(config)
 }
 
 #[cfg(test)]

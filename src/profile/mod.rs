@@ -72,6 +72,30 @@ pub struct ProjectContext {
     pub files: Vec<PathBuf>,
 }
 
+/// Where bash and read_file run.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Execution {
+    /// On this machine, as the agent's user.
+    #[default]
+    Local,
+    /// In an isolated Docker container; see [`ContainerSettings`].
+    Container,
+}
+
+/// Container settings for `Execution::Container`; unset values use the executor defaults.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ContainerSettings {
+    /// Required in container mode; the image must already be present locally.
+    pub image: Option<String>,
+    /// `uid:gid` that commands run as.
+    pub user: Option<String>,
+    /// Memory limit in Docker's syntax, such as `1g`.
+    pub memory: Option<String>,
+    /// Maximum number of processes in the container.
+    pub pids_limit: Option<u32>,
+}
+
 /// Fully layered scene configuration. CLI overrides are applied by the frontend;
 /// callers must keep deny rules additive and call `validate` before assembly.
 #[derive(Debug)]
@@ -96,6 +120,10 @@ pub struct Profile {
     pub compaction: compaction::Config,
     /// Already bounded tool results may be persisted when read_output is enabled.
     pub tool_output: output_store::Config,
+    /// Where bash and read_file run.
+    pub execution: Execution,
+    /// Used when `execution` is `Container`.
+    pub container: ContainerSettings,
 }
 
 impl Profile {
@@ -144,6 +172,8 @@ impl Profile {
             skills: Vec::new(),
             compaction: compaction::Config::default(),
             tool_output: output_store::Config::default(),
+            execution: Execution::Local,
+            container: ContainerSettings::default(),
         };
         profile.overlay(raw, Path::new("."))?;
         profile.validate()?;
@@ -218,6 +248,22 @@ impl Profile {
         if let Some(bytes) = raw.tool_output.max_file_bytes {
             self.tool_output.max_file_bytes = bytes;
         }
+        if let Some(execution) = raw.execution {
+            self.execution = execution;
+        }
+        let container = raw.container;
+        for (value, layer) in [
+            (&mut self.container.image, container.image),
+            (&mut self.container.user, container.user),
+            (&mut self.container.memory, container.memory),
+        ] {
+            if layer.is_some() {
+                *value = layer;
+            }
+        }
+        if container.pids_limit.is_some() {
+            self.container.pids_limit = container.pids_limit;
+        }
         Ok(())
     }
 
@@ -245,6 +291,24 @@ impl Profile {
         }
         self.compaction.validate()?;
         self.tool_output.validate()?;
+        for (key, value) in [
+            ("container.image", &self.container.image),
+            ("container.user", &self.container.user),
+            ("container.memory", &self.container.memory),
+        ] {
+            ensure!(
+                value.as_deref().is_none_or(|value| !value.trim().is_empty()),
+                "{key} must not be empty"
+            );
+        }
+        ensure!(
+            self.container.pids_limit != Some(0),
+            "container.pidsLimit must be greater than zero"
+        );
+        ensure!(
+            self.execution == Execution::Local || self.container.image.is_some(),
+            "execution = \"container\" needs container.image (or --container-image)"
+        );
         skills::validate(&self.skills)
     }
 
@@ -261,9 +325,9 @@ struct RawProfile {
     extends: Option<Builtin>,
     instructions: Option<PathBuf>,
     tools: Option<Vec<String>>,
-    // Deserialization validates the only implemented backend; no backend is ignored.
-    #[serde(rename = "execution")]
-    _execution: Option<Execution>,
+    // Unknown backends fail to deserialize instead of being ignored.
+    execution: Option<Execution>,
+    container: RawContainer,
     rules: RawRules,
     limits: RawLimits,
     extensions: RawExtensions,
@@ -290,10 +354,13 @@ struct RawToolOutput {
     max_file_bytes: Option<usize>,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum Execution {
-    Local,
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+struct RawContainer {
+    image: Option<String>,
+    user: Option<String>,
+    memory: Option<String>,
+    pids_limit: Option<u32>,
 }
 
 #[derive(Default, Deserialize)]
@@ -450,9 +517,41 @@ mod tests {
     #[test]
     fn unsupported_execution_and_extensions_fail_instead_of_being_ignored() {
         for text in [
-            "execution = 'container'",
+            "execution = 'kubernetes'",
             "[extensions]\nenabled = ['mcp']",
             "extends = 'other.toml'",
+        ] {
+            assert!(load_file(text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn container_execution_reads_its_settings_and_defaults_to_local() {
+        assert_eq!(load_file("").unwrap().execution, Execution::Local);
+        let profile = load_file(
+            "execution = 'container'\n[container]\nimage = 'debian:bookworm-slim'\nuser = '1000:1000'\nmemory = '512m'\npidsLimit = 64",
+        )
+        .unwrap();
+        assert_eq!(profile.execution, Execution::Container);
+        assert_eq!(
+            profile.container,
+            ContainerSettings {
+                image: Some("debian:bookworm-slim".into()),
+                user: Some("1000:1000".into()),
+                memory: Some("512m".into()),
+                pids_limit: Some(64),
+            }
+        );
+    }
+
+    #[test]
+    fn invalid_container_settings_are_configuration_errors() {
+        for text in [
+            "execution = 'container'",
+            "execution = 'container'\n[container]\nimage = ' '",
+            "[container]\nimage = 'x'\npidsLimit = 0",
+            "[container]\nimage = 'x'\nuser = ''",
+            "[container]\nimage = 'x'\nnetwork = 'host'",
         ] {
             assert!(load_file(text).is_err(), "{text}");
         }

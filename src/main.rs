@@ -49,7 +49,7 @@ async fn main() -> ExitCode {
 /// before the run started.
 async fn run(args: RunArgs, explicit: Explicit) -> Result<u8> {
     let prompt = read_prompt(&args.prompt)?;
-    let session = build_session(&args, explicit)?;
+    let session = build_session(&args, explicit).await?;
     let cancel = CancellationToken::new();
     spawn_signal_handler(cancel.clone());
     let report = session.prompt_with_cancel(prompt, &cancel).await?;
@@ -72,7 +72,7 @@ fn read_prompt(arg: &str) -> Result<String> {
 }
 
 /// Assemble the unattended preset without exposing interactive choices to the kernel.
-fn build_session(args: &RunArgs, explicit: Explicit) -> Result<AgentSession> {
+async fn build_session(args: &RunArgs, explicit: Explicit) -> Result<AgentSession> {
     let mut prepared = cli::prepare(cli::SessionOptions {
         base: &args.base,
         transport: &args.transport,
@@ -86,7 +86,8 @@ fn build_session(args: &RunArgs, explicit: Explicit) -> Result<AgentSession> {
             continue_on_length: args.continue_on_length,
         },
         explicit,
-    })?;
+    })
+    .await?;
     prepared
         .config
         .hooks

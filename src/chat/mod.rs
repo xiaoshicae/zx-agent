@@ -58,7 +58,7 @@ struct Settings {
     explicit: Explicit,
 }
 
-fn build(
+async fn build(
     settings: &Settings,
     model: &str,
     file: SessionFile<'_>,
@@ -79,7 +79,8 @@ fn build(
             continue_on_length: 0,
         },
         explicit: settings.explicit,
-    })?;
+    })
+    .await?;
     prepared
         .config
         .hooks
@@ -135,7 +136,8 @@ pub(crate) async fn run(args: ChatArgs, explicit: Explicit) -> Result<u8> {
         SessionFile::from_path(args.request.session.as_deref()),
         &interaction,
         &output,
-    )?;
+    )
+    .await?;
     let mut signals = Signals::new().context("cannot register chat signal handlers")?;
     let mut input = input::spawn()?;
     eprintln!("[chat] model={}; /help for commands", visible(&model));
@@ -216,7 +218,7 @@ pub(crate) async fn run(args: ChatArgs, explicit: Explicit) -> Result<u8> {
             Flow::New => {
                 let path = new_file(args.request.session.as_deref());
                 let file = path.as_deref().map_or(SessionFile::Memory, SessionFile::Create);
-                match build(&settings, &model, file, &interaction, &output) {
+                match build(&settings, &model, file, &interaction, &output).await {
                     Ok(next) => {
                         built = next;
                         let file = path

@@ -13,6 +13,7 @@ pub use bash::BashTool;
 pub use read::ReadFileTool;
 
 use crate::agent::Tool;
+use crate::executor::{Executor, LocalExecutor};
 
 /// Name of the built-in shell tool.
 pub const BASH: &str = "bash";
@@ -24,7 +25,18 @@ pub const BUILTIN_TOOL_NAMES: &[&str] = &[BASH, READ_FILE];
 
 /// Build built-in tools by name, in the given order, without duplicates. `hidden_env` names
 /// environment variables that bash commands must not see, such as the API key variable.
+/// The tools run on this machine; see [`builtin_tools_with`] for another executor.
 pub fn builtin_tools(names: &[String], bash_timeout: Duration, hidden_env: &[String]) -> Result<Vec<Arc<dyn Tool>>> {
+    builtin_tools_with(names, bash_timeout, hidden_env, Arc::new(LocalExecutor))
+}
+
+/// Like [`builtin_tools`], with bash and read_file running through `executor`.
+pub fn builtin_tools_with(
+    names: &[String],
+    bash_timeout: Duration,
+    hidden_env: &[String],
+    executor: Arc<dyn Executor>,
+) -> Result<Vec<Arc<dyn Tool>>> {
     let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
     for name in names {
         let name = name.trim();
@@ -36,9 +48,13 @@ pub fn builtin_tools(names: &[String], bash_timeout: Duration, hidden_env: &[Str
                 default_timeout: bash_timeout,
                 max_timeout: bash_timeout.max(BashTool::default().max_timeout),
                 hidden_env: hidden_env.to_vec(),
+                executor: executor.clone(),
                 ..BashTool::default()
             }),
-            READ_FILE => Arc::new(ReadFileTool::default()),
+            READ_FILE => Arc::new(ReadFileTool {
+                executor: executor.clone(),
+                ..ReadFileTool::default()
+            }),
             other => bail!("unknown tool {other:?}; available: {}", BUILTIN_TOOL_NAMES.join(", ")),
         };
         tools.push(tool);
