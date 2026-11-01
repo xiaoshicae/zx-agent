@@ -6,11 +6,14 @@
 //! [`ImChannel`].
 
 mod approval;
+pub mod feishu;
 mod server;
 pub mod slack;
 mod worker;
 
+use std::collections::{HashSet, VecDeque};
 use std::fmt;
+use std::hash::Hash;
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
@@ -148,6 +151,103 @@ pub enum Outbound {
 pub enum Choice {
     AllowOnce,
     Deny,
+}
+
+/// Texts of approval cards, for every platform. The defaults are Chinese, like [`Replies`].
+#[derive(Clone, Debug)]
+pub struct CardLabels {
+    pub title: String,
+    pub reason: String,
+    pub allow_once: String,
+    pub deny: String,
+    pub allowed: String,
+    pub denied: String,
+    pub timed_out: String,
+    pub cancelled: String,
+    pub failed: String,
+}
+
+impl Default for CardLabels {
+    fn default() -> Self {
+        Self {
+            title: "需要审批".into(),
+            reason: "理由".into(),
+            allow_once: "批准一次".into(),
+            deny: "拒绝".into(),
+            allowed: "已批准".into(),
+            denied: "已拒绝".into(),
+            timed_out: "无人处理，已超时，未执行".into(),
+            cancelled: "已取消，未执行".into(),
+            failed: "审批失败，未执行".into(),
+        }
+    }
+}
+
+/// Text in parts of at most `max` characters, each written by `push`, which may write one
+/// character as several (an entity, for example) but never splits what it writes. A part
+/// ends at its last line break when that keeps at least half of it. Empty text is one empty
+/// part.
+pub(crate) fn split(text: &str, max: usize, push: fn(&mut String, char)) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut count = 0;
+    for c in text.chars() {
+        let mut piece = String::new();
+        push(&mut piece, c);
+        let size = piece.chars().count();
+        if count + size > max && count > 0 {
+            let cut = current
+                .rfind('\n')
+                .filter(|at| current[..*at].chars().count() >= max / 2);
+            match cut {
+                Some(at) => {
+                    let rest = current.split_off(at + 1);
+                    parts.push(std::mem::replace(&mut current, rest));
+                    count = current.chars().count();
+                }
+                None => {
+                    parts.push(std::mem::take(&mut current));
+                    count = 0;
+                }
+            }
+        }
+        current.push_str(&piece);
+        count += size;
+    }
+    parts.push(current);
+    parts
+}
+
+/// Messages a channel has passed on recently, to drop redeliveries; the oldest are
+/// forgotten first.
+pub(crate) struct Seen<K> {
+    order: VecDeque<K>,
+    keys: HashSet<K>,
+    capacity: usize,
+}
+
+impl<K: Clone + Eq + Hash> Seen<K> {
+    pub(crate) fn new(capacity: usize) -> Self {
+        Self {
+            order: VecDeque::new(),
+            keys: HashSet::new(),
+            capacity,
+        }
+    }
+
+    /// Record `key`; false if it was seen already.
+    pub(crate) fn insert(&mut self, key: &K) -> bool {
+        if !self.keys.insert(key.clone()) {
+            return false;
+        }
+        self.order.push_back(key.clone());
+        if self.order.len() > self.capacity
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.keys.remove(&oldest);
+        }
+        true
+    }
 }
 
 /// Why a channel call failed.

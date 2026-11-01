@@ -112,11 +112,12 @@ echo "exit code: $?"
 
 ### IM 服务
 
-`zx-agent serve` 作为常驻进程接入 IM：在频道里 @ 机器人或私聊它，每个线程一个会话，写操作在 IM 里审批。目前支持 Slack，经 Socket Mode 接收，只需出网，不需要公网入口。设计见 `docs/serve-im-review.md`；部署到 Kubernetes 的方式在评审稿模块 D 中实施。
+`zx-agent serve` 作为常驻进程接入 IM：在频道里 @ 机器人或私聊它，每个线程一个会话，写操作在 IM 里审批。目前支持 Slack（Socket Mode）与 ⚑ D:5/CHINA FLAG: 飞书（长连接），都只需出网，不需要公网入口。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：对话内容、命令输出与用户 ID 发往该平台] 该平台的使用 Subject to Legal/Export Compliance approval。设计见 `docs/serve-im-review.md`；部署到 Kubernetes 的方式在评审稿模块 D 中实施。
 
 ```bash
 export SLACK_APP_TOKEN=xapp-...   # app-level token，用于 Socket Mode
 export SLACK_BOT_TOKEN=xoxb-...   # bot token，用于发消息
+# 使用 ⚑ D:5/CHINA FLAG: 飞书时改为 FEISHU_APP_ID 与 FEISHU_APP_SECRET（企业自建应用的凭据）
 zx-agent serve --config serve.toml --model <model>
 ```
 
@@ -126,6 +127,11 @@ zx-agent serve --config serve.toml --model <model>
 [slack]
 # appTokenEnv = "SLACK_APP_TOKEN"   # 存放 app-level token 的环境变量名，此为默认值
 # botTokenEnv = "SLACK_BOT_TOKEN"   # 存放 bot token 的环境变量名，此为默认值
+
+# ⚑ D:5/CHINA FLAG: 飞书；两个平台可以同时配置。名单中写作 feishu:oc_…（群或私聊）与 feishu:ou_…（用户）
+# [feishu]
+# appIdEnv = "FEISHU_APP_ID"           # 存放 App ID 的环境变量名，此为默认值
+# appSecretEnv = "FEISHU_APP_SECRET"   # 存放 App Secret 的环境变量名，此为默认值
 
 [access]
 conversations = ["slack:C0123456789"]   # 只在这些频道或私聊中回答，其他地方只回一句“未授权”
@@ -143,9 +149,10 @@ dir = "/data/sessions"      # 会话文件位于 <dir>/slack/<频道>/<线程>.j
 | 项 | 说明 |
 |---|---|
 | Slack 应用 | 打开 Socket Mode 与 Interactivity；订阅 bot 事件 `app_mention` 与 `message.im`。bot token 需要读取 @ 消息的权限（Slack 文档两处分别写作 `app_mentions:read` 与 `app_mentions.read`，以应用设置页显示的为准）、`im:history` 与 `chat:write`；app-level token 带 `connections:write`（Slack 的权限页把 `apps.connections.open` 列为它的适用方法） |
-| 使用 | 频道中 @ 机器人，回答在这条消息的线程里；线程中追问时同样要 @ 机器人。私聊直接发送。单独发送 `/cancel` 取消本线程的任务 |
+| ⚑ D:5/CHINA FLAG: 飞书应用 | 企业自建应用；事件与回调的订阅方式都选长连接；订阅事件 `im.message.receive_v1` 与回调 `card.action.trigger`；开通发送消息的权限，群聊只开通读取 @ 机器人消息的权限（`im:message.group_at_msg:readonly`）。连接方式没有公开文档，按官方 Go SDK 实现，见评审稿 3.5 节 |
+| 使用 | Slack：频道中 @ 机器人，回答在这条消息的线程里；线程中追问时同样要 @ 机器人。⚑ D:5/CHINA FLAG: 飞书：群里 @ 机器人，回答以话题回复；在话题中追问时同样要 @。两个平台的私聊都直接发送。单独发送 `/cancel` 取消本线程的任务 |
 | 审批 | 与 chat 相同，使用 assistant profile：自动放行清单中的只读命令直接执行，其余 bash 命令发审批卡片，只有 `approvers` 中的用户点击才生效 |
-| 凭据 | 两个 token 只从环境变量读取。命令的环境中删除这两个变量，命令输出中出现它们的值时脱敏 |
+| 凭据 | Slack 的两个 token 与 ⚑ D:5/CHINA FLAG: 飞书的 App Secret 只从环境变量读取。命令的环境中删除这些变量，命令输出中出现它们的值时脱敏 |
 | 日志 | stdout 每行一个 JSON：`approval`（审批记录：线程、工具调用、审批人、结果、时间）、`released`（释放空闲会话）、`failed`（未能发出的消息等）。对话内容在会话文件中 |
 | 退出 | 收到 SIGINT 或 SIGTERM 时取消进行中的任务，各线程发出结果后以 0 退出；配置错误与被拒的凭据为 2；平台连接意外结束为 1 |
 
@@ -520,7 +527,7 @@ pub trait SessionLog: Send + Sync {
 
 ### IM 接入
 
-`im::Server` 在 IM 中回答问题：每个线程一个会话，写操作在 IM 中审批。设计见 `docs/serve-im-review.md`；命令行用法见上文[IM 服务](#im-服务)。Slack 的实现是 `im::slack::SlackChannel`，用 `SlackConfig::new(app_token, bot_token)` 构造；卡片文字在 `CardLabels`，默认中文，可替换。
+`im::Server` 在 IM 中回答问题：每个线程一个会话，写操作在 IM 中审批。设计见 `docs/serve-im-review.md`；命令行用法见上文[IM 服务](#im-服务)。Slack 的实现是 `im::slack::SlackChannel`，用 `SlackConfig::new(app_token, bot_token)` 构造；⚑ D:5/CHINA FLAG: 飞书的实现是 `im::feishu::FeishuChannel`，用 `FeishuConfig::new(app_id, app_secret)` 构造。两者的卡片文字都在 `CardLabels`，默认中文，可替换。
 
 平台实现 `ImChannel` 的四个方法：`platform`、`run`（接收直到取消）、`send`、`update`。实现负责：自行重连；收到平台投递后立即确认，再转交事件；按消息 ID 去重；只转交发给机器人的消息（@ 与单聊），不转交机器人自己的消息；遵守平台限频；超长文本自行拆分。`Destination.thread` 是线程根消息的 ID。
 

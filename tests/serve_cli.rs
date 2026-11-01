@@ -27,6 +27,8 @@ fn serve(dir: &Path, config: &Path, model: &str) -> Command {
         .current_dir(dir)
         .env("SLACK_APP_TOKEN", APP_TOKEN)
         .env("SLACK_BOT_TOKEN", BOT_TOKEN)
+        .env("FEISHU_APP_ID", "cli_test")
+        .env("FEISHU_APP_SECRET", "secret-test")
         .env_remove("ZX_MODEL")
         .env_remove("ZX_BASE_URL")
         .env_remove("ZX_SECRET_FILES")
@@ -53,7 +55,7 @@ dir = "sessions"
 
 #[tokio::test]
 async fn configuration_errors_are_reported_before_serving() {
-    let cases: [(&str, &[&str], Option<&str>, &str); 6] = [
+    let cases: [(&str, &[&str], Option<&str>, &str); 7] = [
         (
             "[slack]\n[sessions]\ndir = \"s\"\n",
             &[],
@@ -61,6 +63,12 @@ async fn configuration_errors_are_reported_before_serving() {
             "missing field `access`",
         ),
         (VALID, &[], Some("SLACK_APP_TOKEN"), "SLACK_APP_TOKEN must hold"),
+        (
+            "[feishu]\n[access]\nconversations = []\n[sessions]\ndir = \"s\"\n",
+            &[],
+            Some("FEISHU_APP_SECRET"),
+            "FEISHU_APP_SECRET must hold",
+        ),
         (
             "[access]\nconversations = []\n[sessions]\ndir = \"s\"\n",
             &[],
