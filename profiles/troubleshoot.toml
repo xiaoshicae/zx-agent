@@ -12,4 +12,5 @@ redaction = true
 continueOnLength = 1
 
 [context]
-discover = true
+# Unattended runs do not read repository instructions unless asked explicitly.
+discover = false

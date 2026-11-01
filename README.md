@@ -85,7 +85,7 @@ zx-agent run --model "$ZX_MODEL" --profile examples/profiles/review.toml "评审
 zx-agent chat --model "$ZX_MODEL" --profile assistant
 ```
 
-配置按内置基线、文件、显式 CLI 参数叠加；deny 规则累加。默认加载 Git 根目录到工具 cwd 的 `AGENTS.md`；可用 `--context-file` 追加文件，或 `--no-context` 禁用上下文。skills 通过 profile 登记目录，模型调用 `read_skill` 时才读取正文。配置格式、路径规则、读取预算和完整示例见[场景配置说明](docs/PROFILES.md)。
+配置按内置基线、文件、显式 CLI 参数叠加；deny 规则累加。`chat` 默认加载 Git 根目录到工具 cwd 的 `AGENTS.md`，`run` 默认不加载；自动发现的文件解析后必须位于项目内。可用 `--context-file` 追加文件，或 `--no-context` 禁用上下文。skills 通过 profile 登记目录，模型调用 `read_skill` 时才读取正文。配置格式、路径规则、读取预算和完整示例见[场景配置说明](docs/PROFILES.md)。
 
 ### 无人值守示例
 
@@ -244,6 +244,7 @@ CLI (main.rs + cli.rs + chat/)
 
 - 策略只是第一道防线，**不是安全边界**。生产环境请以最小权限账号运行，并放在容器或虚拟机中，必要时限制网络访问。
 - `read_file` 不受命令白名单约束，可以读取进程有权限读取的普通文件。需要限制时，使用 `--tools bash` 关闭它。
+- 项目上下文（`AGENTS.md`、`--context-file` 与 profile 中的上下文文件）会进入系统提示词并发送给模型服务方，可能引导模型的行为。自动发现的 `AGENTS.md` 不能通过符号链接指向项目外；在不可信仓库中运行时，建议使用 `--no-context`。
 - `run` 和 `chat` 在 `after_tool` 中将认证 API key 的完整字面值替换为 `[REDACTED]`，处理后的结果才会写入会话、事件并回传模型。SDK 可用 `RedactSecrets` 显式配置其他密钥；过滤器失败时丢弃原始输出，返回错误结果。
 - 该过滤不识别未知密钥、编码或拆分后的密钥，也不处理用户输入、模型输出和工具调用参数。这些内容及工具输出中的其他敏感数据仍可能进入模型请求、会话和事件；请控制会话文件访问权限。
 - 认证 key 只从环境变量读取；bash 命令启动前删除 `--api-key-env` 指定的变量。但工具与 agent 以同一系统用户运行，仍可能通过其他途径读取凭证。需要隔离时，请以不同账号或在容器中运行。
@@ -379,7 +380,7 @@ cargo fmt --check
 | `tests/openai_mock.rs` | 本地假 HTTP 服务上的端到端测试：SSE、执行 bash、回传工具结果、认证头、HTTP 错误重试、空闲超时、中途取消后保留已输出内容 |
 | `tests/cli.rs` | 编译出的程序：退出码 0 到 6、jsonl 输出、从 stdin 读提示词、bash 读不到 API key、系统提示词的生成段落、`--system-updates inline` |
 | `tests/chat_cli.rs` | 多轮历史、审批与授权范围、重置、模型切换、EOF、信号、超时、控制字符显示；Unix PTY 验证运行中插话、取消重置和退出 |
-| `tests/profiles_cli.rs` | profile 覆盖、显式默认值、不可绕过的 deny、上下文范围与审计、skill 懒加载与脱敏、配置错误退出码 |
+| `tests/profiles_cli.rs` | profile 覆盖、显式默认值、不可绕过的 deny、上下文范围与审计、上下文默认值与越界链接、`--system-prompt-file` 兼容、skill 懒加载与脱敏、配置错误退出码 |
 | `tests/hooks.rs`、`tests/hooks_cli.rs` | 钩子组合与失败处理、审批范围与取消、审计变换、续写预算、工具输出脱敏的 CLI 接线 |
 | `tests/real_api.rs` | 真实模型 API（付费，默认跳过）：文本回答与用量、工具往返、策略拒绝、输出截断、恢复会话、无效 key 不重试 |
 

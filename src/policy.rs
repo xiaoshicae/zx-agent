@@ -7,6 +7,7 @@ use serde_json::Value;
 
 use crate::agent::{Decision, HookResult, Hooks, ToolPolicy};
 use crate::ai::ToolCall;
+use crate::tools::BASH;
 
 /// Adapts an existing asynchronous policy to the bounded before_tool hook.
 pub struct PolicyHook {
@@ -48,7 +49,7 @@ impl Rule {
             RuleMatcher::Any => true,
             RuleMatcher::Tool(name) => name == tool,
             RuleMatcher::CommandPrefix(prefix) => {
-                if tool != "bash" || prefix.trim().is_empty() {
+                if tool != BASH || prefix.trim().is_empty() {
                     return false;
                 }
                 args.get("command").and_then(Value::as_str).is_some_and(|command| {
@@ -217,7 +218,7 @@ impl CommandPolicy {
 #[async_trait]
 impl ToolPolicy for CommandPolicy {
     async fn check(&self, tool_name: &str, args: &Value) -> Decision {
-        if tool_name != "bash" {
+        if tool_name != BASH {
             return Decision::Allow;
         }
         match args.get("command").and_then(Value::as_str) {

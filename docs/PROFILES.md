@@ -45,7 +45,7 @@ path = "skills/rust-review/SKILL.md"
 |---|---|
 | `name` | 场景名称，省略时继承基线 |
 | `extends` | 可选的 `troubleshoot` 或 `assistant`；省略时使用当前前端的默认 profile；不支持文件链式继承 |
-| `instructions` | 替换场景说明的 UTF-8 文件；CLI `--system-prompt-file` 优先 |
+| `instructions` | 替换场景说明的 UTF-8 文件；CLI `--system-prompt-file` 优先，它的读取方式与引入 profile 之前一致：可以是管道，不受 64 KiB 限制 |
 | `tools` | 替换启用列表，支持 `bash`、`read_file`、`read_skill`；`[]` 禁用全部工具 |
 | `execution` | 当前只接受 `local`；容器执行留到 P6，填写未实现后端时报错 |
 | `rules.allow` | bash 命令前缀白名单，沿用原管道检查；空列表表示只检查 deny |
@@ -56,7 +56,7 @@ path = "skills/rust-review/SKILL.md"
 | `limits.timeoutSecs` | 每轮总时间上限，`0` 关闭 |
 | `extensions.continueOnLength` | 输出达到 token 上限后的续写次数；每次消耗一次模型请求预算 |
 | `extensions.redaction` | 仅接受 `true` 或省略；CLI 的已知认证 key 脱敏不可关闭 |
-| `context.discover` | 是否自动发现项目 AGENTS.md |
+| `context.discover` | 是否自动发现项目 AGENTS.md；`assistant` 默认开启，`troubleshoot` 默认关闭 |
 | `context.files` | 追加显式上下文文件 |
 | `skills` | 显式登记 name、description、path 的目录；正文按需读取 |
 
@@ -68,7 +68,13 @@ path = "skills/rust-review/SKILL.md"
 
 ## 项目上下文
 
-默认从最近 Git 根目录到工具 cwd，依次加载各层 `AGENTS.md`。Git worktree 的 `.git` 文件也被识别为边界；没有 Git 根目录时只检查 cwd。不会隐式读取用户主目录里的其他 AI 配置。
+开启自动发现时，从最近 Git 根目录到工具 cwd，依次加载各层 `AGENTS.md`。Git worktree 的 `.git` 文件也被识别为边界；没有 Git 根目录时只检查 cwd。不会隐式读取用户主目录里的其他 AI 配置。
+
+`chat` 默认使用的 `assistant` 开启自动发现；`run` 默认使用的 `troubleshoot` 关闭，无人值守运行不读取仓库里的说明。`run` 需要项目说明时，用 `--context-file AGENTS.md` 显式指定，或在自定义 profile 中设置 `[context] discover = true`。
+
+自动发现的 `AGENTS.md` 可以是符号链接，但解析后的路径必须位于 Git 根目录内（没有 Git 根目录时为 cwd），否则在请求模型前以退出码 2 报错。这样仓库内容就不能让程序读取并发送仓库外的文件。`--context-file` 与 profile 中的上下文文件由使用者显式指定，不受这条限制。
+
+项目说明会进入系统提示词，可能引导模型的行为，但不能改变工具和规则。在不可信的仓库中运行时，建议使用 `--no-context`。
 
 ```bash
 zx-agent run --model "$ZX_MODEL" --context-file ./extra-context.md "分析当前项目"
@@ -77,13 +83,13 @@ zx-agent chat --model "$ZX_MODEL" --no-context
 
 `--context-file` 相对启动目录解析，即使工具 cwd 通过 `--cwd` 改到别处。`--no-context` 同时关闭自动发现和 profile 中的显式上下文文件，不能与 `--context-file` 同时使用。相同 canonical 路径只加载一次。
 
-上下文追加到生成的 `project_context` 提示词段落，沿用现有系统提示词持久化和更新机制。只读普通 UTF-8 文件，每个文件最多 64 KiB；上下文总量包含路径标题和分隔符，最多 256 KiB。超限报错，不静默截断指令。
+上下文追加到生成的 `project_context` 提示词段落，沿用现有系统提示词持久化和更新机制。只读普通 UTF-8 文件，每个文件最多 64 KiB；上下文总量包含路径标题和分隔符，最多 256 KiB。超限报错，不静默截断指令；报错会提示可以用 `--no-context` 跳过项目上下文。
 
 ## 按需加载 skills
 
 P4 使用 profile 中显式登记的目录，不自动扫描全局 skills，也不解析 SKILL.md 的 YAML frontmatter。已有 SKILL.md 可以直接作为正文，名称和简介以 TOML 为准；skill 里的脚本不会自动执行。
 
-启动只检查登记项及文件元数据，并向 `available_skills` 加入目录。正文只有模型调用 `read_skill` 时才读取，作为普通工具结果先持久化、再发给模型：
+启动只检查登记项及文件元数据，并向 `available_skills` 加入目录。目录包含每个 skill 正文文件的路径；该路径与 `<environment>` 中的工作目录一样，会随系统提示词发送给模型服务方。正文只有模型调用 `read_skill` 时才读取，作为普通工具结果先持久化、再发给模型：
 
 ```text
 profile 的目录信息 → 系统提示词 → 模型选择 read_skill(name)
@@ -98,3 +104,7 @@ profile 的目录信息 → 系统提示词 → 模型选择 read_skill(name)
 `read_skill` 仅接受已登记名称和可选 offset，不能通过参数指定任意路径。内置 profile 预留该工具；目录为空时不注册。`--tools` 或 profile 的 tools 列表未启用它时，工具和目录均不加入请求。skill 调用与其他工具使用同一条校验、钩子、审批、取消、脱敏和审计流水线。
 
 项目上下文与 skill 正文是提示词和工具数据，不能修改已组装的工具或规则。认证 key 的脱敏边界仍见 [README 安全模型](../README.md#安全模型)；上下文和说明属于输入，不在工具输出过滤范围内。
+
+---
+
+PROFILES.md · v0.2 · 2026年11月
