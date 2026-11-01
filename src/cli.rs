@@ -16,7 +16,7 @@ use zx_agent::extensions::RedactSecrets;
 use zx_agent::policy::{PolicyHook, Rule, RuleMatcher, RulePolicy};
 use zx_agent::presets::troubleshoot;
 use zx_agent::profile::skills::{ReadSkillTool, TOOL_NAME};
-use zx_agent::profile::{Builtin, Profile, read_text};
+use zx_agent::profile::{Builtin, Profile};
 use zx_agent::prompt::{build_system_prompt, environment_section};
 use zx_agent::runner::Limits;
 use zx_agent::session::{SessionHeader, SessionStore};
@@ -313,7 +313,10 @@ pub(crate) fn prepare(options: SessionOptions<'_>) -> Result<PreparedSession> {
     }
     profile.rules.deny.extend_from_slice(&options.base.deny_cmd);
     if let Some(path) = &options.base.system_prompt_file {
-        profile.instructions = read_text(path)?;
+        // An explicit file keeps the behavior it had before profiles: it may be a pipe and
+        // is not limited to the profile file budget.
+        profile.instructions =
+            std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
     }
     if options.base.no_context {
         profile.context.discover = false;
@@ -321,7 +324,9 @@ pub(crate) fn prepare(options: SessionOptions<'_>) -> Result<PreparedSession> {
     }
     profile.context.files.extend_from_slice(&options.base.context_files);
     profile.validate()?;
-    let context = profile.context_section(&cwd)?;
+    let context = profile.context_section(&cwd).context(
+        "cannot load project instructions; --no-context skips AGENTS.md discovery and profile context files",
+    )?;
     // Local servers (vLLM, Ollama, llama.cpp) often need no key, so a missing key is allowed.
     let api_key = std::env::var(&options.base.api_key_env)
         .ok()

@@ -347,6 +347,12 @@ mod tests {
     }
 
     #[test]
+    fn only_the_interactive_profile_discovers_project_instructions_by_default() {
+        assert!(!Profile::load(None, Builtin::Troubleshoot).unwrap().context.discover);
+        assert!(Profile::load(None, Builtin::Assistant).unwrap().context.discover);
+    }
+
+    #[test]
     fn a_file_extends_an_embedded_baseline_and_resolves_its_instructions() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("prompt.md"), "自定义说明").unwrap();

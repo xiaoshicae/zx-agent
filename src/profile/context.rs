@@ -37,23 +37,34 @@ pub(super) fn load(cwd: &Path, config: &ProjectContext) -> Result<String> {
     Ok(section)
 }
 
+/// AGENTS.md files from the nearest Git root down to `cwd`, parents first; only `cwd`
+/// without a Git root. A discovered file may be a link, but it must resolve inside that
+/// root: repository content must not make the agent read other files on this machine.
 fn discover(cwd: &Path) -> Result<Vec<PathBuf>> {
     let mut ancestors = Vec::new();
-    let mut found_root = false;
+    let mut root = None;
     for directory in cwd.ancestors() {
         ancestors.push(directory);
         match directory.join(".git").try_exists() {
             Ok(true) => {
-                found_root = true;
+                root = Some(directory);
                 break;
             }
             Ok(false) => {}
             Err(error) => return Err(error).with_context(|| format!("cannot inspect {}", directory.display())),
         }
     }
-    if !found_root {
-        ancestors.truncate(1);
-    }
+    let root = match root {
+        Some(root) => root,
+        None => {
+            ancestors.truncate(1);
+            cwd
+        }
+    };
+    // Compare resolved paths: the root itself may be reached through a link.
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("cannot resolve {}", root.display()))?;
     let mut files = Vec::new();
     for directory in ancestors.into_iter().rev() {
         let path = directory.join("AGENTS.md");
@@ -61,7 +72,17 @@ fn discover(cwd: &Path) -> Result<Vec<PathBuf>> {
             .try_exists()
             .with_context(|| format!("cannot inspect {}", path.display()))?
         {
-            files.push(path);
+            let resolved = path
+                .canonicalize()
+                .with_context(|| format!("cannot locate context {}", path.display()))?;
+            ensure!(
+                resolved.starts_with(&root),
+                "{} resolves to {}, outside the project root {}",
+                path.display(),
+                resolved.display(),
+                root.display()
+            );
+            files.push(resolved);
         }
     }
     Ok(files)
@@ -104,6 +125,41 @@ mod tests {
         let text = load(&cwd, &config()).unwrap();
         assert!(!text.contains("parent marker"));
         assert!(text.contains("cwd marker"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovered_instructions_cannot_link_outside_the_git_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(dir.path().join("secret.txt"), "OUTSIDE SECRET").unwrap();
+        std::os::unix::fs::symlink("../secret.txt", root.join("AGENTS.md")).unwrap();
+        let error = load(&root, &config()).unwrap_err();
+        assert!(format!("{error:#}").contains("outside the project root"), "{error:#}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn without_a_git_root_discovered_instructions_cannot_link_outside_the_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("work");
+        std::fs::create_dir(&cwd).unwrap();
+        std::fs::write(dir.path().join("secret.txt"), "OUTSIDE SECRET").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("secret.txt"), cwd.join("AGENTS.md")).unwrap();
+        assert!(load(&cwd, &config()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovered_instructions_may_link_inside_the_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/agents.md"), "LINKED CONTEXT").unwrap();
+        std::os::unix::fs::symlink("docs/agents.md", root.join("AGENTS.md")).unwrap();
+        assert!(load(&root, &config()).unwrap().contains("LINKED CONTEXT"));
     }
 
     #[test]
