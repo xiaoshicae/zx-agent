@@ -35,6 +35,7 @@ paths:
 | `tests/openai_mock.rs` | 真实 HTTP 下的 provider：SSE、重试、空闲超时、中途取消 |
 | `tests/cli.rs` | 原有 run 行为与退出码，P0 起逐字节保持；P6 默认值变更另行验收 |
 | `tests/chat_cli.rs` | chat 的脚本 stdin、审批、信号与超时、Unicode、模型切换、会话重置和 Unix PTY |
+| `tests/profiles_cli.rs` | profile/CLI 覆盖与 deny、项目上下文范围、skill 懒加载、工具策略和审计 |
 | `tests/hooks.rs`、`tests/hooks_cli.rs` | 六个钩子、审批与失败回退、变换持久化、已知密钥脱敏接线 |
 | `tests/real_api.rs` | 付费：真实模型 API，默认跳过 |
 

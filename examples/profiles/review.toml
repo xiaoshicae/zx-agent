@@ -1,0 +1,25 @@
+name = "code-review"
+extends = "assistant"
+instructions = "review.md"
+tools = ["read_file", "read_skill"]
+execution = "local"
+
+[rules]
+denyTools = ["bash"]
+
+[limits]
+maxTurns = 12
+timeoutSecs = 300
+
+[extensions]
+redaction = true
+continueOnLength = 0
+
+[context]
+discover = true
+files = ["review-context.md"]
+
+[[skills]]
+name = "rust-review"
+description = "Review Rust ownership, async cancellation, errors and test coverage."
+path = "skills/rust-review/SKILL.md"

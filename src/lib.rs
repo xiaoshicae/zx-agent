@@ -19,6 +19,7 @@ pub mod extensions;
 pub mod interaction;
 pub mod policy;
 pub mod presets;
+pub mod profile;
 pub mod prompt;
 pub mod runner;
 pub mod session;

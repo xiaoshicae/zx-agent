@@ -2,13 +2,15 @@
 
 一个用 Rust 编写的通用 agent 内核，目标是让同一个内核支撑人机对话、无人值守运行和被其他程序嵌入。场景之间的差异将通过 profile（提示词、工具、规则、上限）和插件表达，不改内核。整体架构参考 [pi](https://github.com/earendil-works/pi)（commit `a92283056`）：分层方式、循环语义和会话文件格式都沿用 pi 的设计；与 pi 不同的地方列在[与 pi 的差异](#与-pi-的差异)一节。
 
-当前版本为 v0.1.0，已实现无人值守的 `run` 和终端对话 `chat`。嵌入协议 `acp`、profile 文件和插件按[路线图](docs/ROADMAP.md)分阶段推进。
+当前版本为 v0.1.0，已实现无人值守的 `run`、终端对话 `chat`、TOML profile、项目上下文与按需加载的 skills。嵌入协议 `acp` 和插件按[路线图](docs/ROADMAP.md)分阶段推进。
 
 - **已具备**：
   - OpenAI 兼容的流式 provider，带事件队列、SSE 事件与响应大小上限
   - agent 回合循环：工具调用先检查、再并发执行，结果保持调用顺序
   - 长期 `AgentSession`：共享提问、单次运行互斥、取消后复用、多订阅者和模型切换
   - 终端 `chat`：流式回答、审批、运行中插话、Ctrl+C 后继续对话
+  - 文件化的 `troubleshoot` 与 `assistant` profile；显式 CLI 参数覆盖、deny 累加
+  - 项目 `AGENTS.md` 和显式上下文文件；`read_skill` 按需读取登记的 skill 正文
   - `bash` 与 `read_file` 工具
   - 声明式命令策略
   - 结构化错误分类与自动重试
@@ -20,7 +22,7 @@
   - 对 bash 命令隐藏 API key 所在的环境变量
   - 系统提示词记录在对话中，恢复会话时只追加有变化的段落
   - 运行 future 被丢弃时取消后台请求、定时任务和工具子进程组
-- **尚未实现**：profile 文件、插件与 MCP、上下文压缩、其他 provider。详见[路线图](docs/ROADMAP.md)。
+- **尚未实现**：插件与 MCP、上下文压缩、其他 provider。详见[路线图](docs/ROADMAP.md)。
 
 ## 快速开始
 
@@ -73,6 +75,17 @@ chat 中的 bash 调用先经过原命令策略，再显示完整工具名、参
 `once` 只允许当前调用，`session` 只复用完全相同的工具名与参数；命令策略的 Deny 始终优先。取消、超时后的旧编号不能批准新请求。审批默认超时 120 秒；未收到答案不会执行工具。模型文本和诊断中的 ESC、回车及双向控制字符按字面显示，保留正常换行和制表符。
 
 `/quit` 和正常 EOF 退出码为 0；参数、配置或输入错误为 2；SIGTERM 为 5。单轮模型或预算错误会报告后继续对话，JSONL 消费者可读取每轮报告的 `outcome`。这是逐行 REPL，尚未提供历史行编辑或完整 TUI。
+
+### 场景配置
+
+`run` 默认使用 `profiles/troubleshoot.toml`，`chat` 默认使用 `profiles/assistant.toml`，均嵌入发布二进制。可用 `--profile` 选择内置名称或自定义 TOML：
+
+```bash
+zx-agent run --model "$ZX_MODEL" --profile examples/profiles/review.toml "评审 src/profile/ 的实现"
+zx-agent chat --model "$ZX_MODEL" --profile assistant
+```
+
+配置按内置基线、文件、显式 CLI 参数叠加；deny 规则累加。默认加载 Git 根目录到工具 cwd 的 `AGENTS.md`；可用 `--context-file` 追加文件，或 `--no-context` 禁用上下文。skills 通过 profile 登记目录，模型调用 `read_skill` 时才读取正文。配置格式、路径规则、读取预算和完整示例见[场景配置说明](docs/PROFILES.md)。
 
 ### 无人值守示例
 
@@ -136,8 +149,8 @@ echo "exit code: $?"
 
 ```
 CLI (main.rs + cli.rs + chat/)
-  ├─ presets/troubleshoot  排障说明与 run 的默认上限、续写
-  ├─ presets/assistant     chat 通用说明与终端审批
+  ├─ profile/ + profiles/  文件化场景、上下文与 skill 工具
+  ├─ presets/             保留已有 SDK 场景常量与辅助方法
   └─ agent_session  共享会话、取消、订阅与模型切换           ← pi: coding-agent AgentSession
        └─ runner    独占运行、重试、轮次与时间上限、持久化
             ├─ session  只追加的 JSONL 条目树 + 投影         ← pi: SessionManager
@@ -163,6 +176,7 @@ CLI (main.rs + cli.rs + chat/)
 | 共享会话 | `src/agent_session.rs` | `AgentSession` 的长期生命周期与多订阅者接口 |
 | 系统提示词 | `src/prompt.rs` | `coding-agent/src/core/system-prompt.ts` |
 | 场景预设 | `src/presets/troubleshoot.rs`、`assistant.rs` | 内核之外的场景策略 |
+| 文件化配置 | `src/profile/`、`profiles/` | 加载与叠加 TOML、项目上下文、显式 skill 目录及按需读取 |
 | 终端前端 | `src/chat/`、`src/cli.rs` | 单输入所有者、审批、显示与共享 CLI 选项 |
 
 ### 与 pi 一致的关键语义
@@ -365,6 +379,7 @@ cargo fmt --check
 | `tests/openai_mock.rs` | 本地假 HTTP 服务上的端到端测试：SSE、执行 bash、回传工具结果、认证头、HTTP 错误重试、空闲超时、中途取消后保留已输出内容 |
 | `tests/cli.rs` | 编译出的程序：退出码 0 到 6、jsonl 输出、从 stdin 读提示词、bash 读不到 API key、系统提示词的生成段落、`--system-updates inline` |
 | `tests/chat_cli.rs` | 多轮历史、审批与授权范围、重置、模型切换、EOF、信号、超时、控制字符显示；Unix PTY 验证运行中插话、取消重置和退出 |
+| `tests/profiles_cli.rs` | profile 覆盖、显式默认值、不可绕过的 deny、上下文范围与审计、skill 懒加载与脱敏、配置错误退出码 |
 | `tests/hooks.rs`、`tests/hooks_cli.rs` | 钩子组合与失败处理、审批范围与取消、审计变换、续写预算、工具输出脱敏的 CLI 接线 |
 | `tests/real_api.rs` | 真实模型 API（付费，默认跳过）：文本回答与用量、工具往返、策略拒绝、输出截断、恢复会话、无效 key 不重试 |
 

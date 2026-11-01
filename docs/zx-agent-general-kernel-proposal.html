@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>zx-agent 通用内核技术方案（评审稿 v0.8）</title>
+<title>zx-agent 通用内核技术方案（评审稿 v0.9）</title>
 <style>
   :root {
     --ink: #1f2328; --muted: #57606a; --line: #d0d7de; --bg: #ffffff; --soft: #f6f8fa;
@@ -60,7 +60,7 @@
 <main>
 
 <h1>zx-agent 通用内核技术方案</h1>
-<p class="meta">评审稿 v0.8 · 2026年11月 · 状态：已评审，D5 待定 · 代码核对基线：commit <code>a5f94a8</code>（2026-11-01）</p>
+<p class="meta">评审稿 v0.9 · 2026年11月 · 状态：已评审，D5 待定 · 代码核对基线：commit <code>7fb3124</code>（2026-11-01）</p>
 <p class="meta">本方案由 AI 辅助起草。调研来源见第 11 节；产品行为以所列版本和资料日期为准，论文结果不代表本项目实测，未核实项明确标注。</p>
 
 <div class="box key">
@@ -179,10 +179,10 @@
 </table>
 
 <h2 id="s4">4. 总体架构</h2>
-<p>第 4–9 节包含已实现接口与目标设计，后续能力按第 9 节推进。现有用法见 <a href="../README.md">README</a>，阶段状态以<a href="ROADMAP.md">路线图</a>为准。P1–P3 已落地共享会话、Hooks、宿主审批接口与 chat 前端；配置文件和 Executor 仍按后续阶段推进。</p>
+<p>第 4–9 节包含已实现接口与目标设计，后续能力按第 9 节推进。现有用法见 <a href="../README.md">README</a>，阶段状态以<a href="ROADMAP.md">路线图</a>为准。P1–P4 已落地共享会话、Hooks、宿主审批接口、chat 前端与文件化场景配置；Executor 仍按后续阶段推进。</p>
 <div class="layers">
   <div class="layer"><div class="name">前端</div><div class="items"><span class="chip keep">run：无人值守</span><span class="chip keep">chat：终端对话</span><span class="chip new">acp：编辑器 / 其他程序</span><span class="chip keep">Rust SDK</span></div></div>
-  <div class="layer"><div class="name">场景配置</div><div class="items"><span class="chip new">profile：说明 / 工具 / 规则 / 上限 / 扩展</span><span class="chip new">上下文文件（AGENTS.md）</span><span class="chip new">skills（按需加载）</span></div></div>
+  <div class="layer"><div class="name">场景配置</div><div class="items"><span class="chip keep">profile：说明 / 工具 / 规则 / 上限 / 扩展</span><span class="chip keep">上下文文件（AGENTS.md）</span><span class="chip keep">skills（按需加载）</span></div></div>
   <div class="layer"><div class="name">扩展</div><div class="items"><span class="chip new">Rust 扩展（编译期）</span><span class="chip new">MCP 客户端（子进程或 HTTP）</span><span class="chip">钩子进程（后续）</span></div></div>
   <div class="layer"><div class="name">会话运行时</div><div class="items"><span class="chip keep">AgentSession：运行生命周期</span><span class="chip keep">持久化</span><span class="chip keep">重试</span><span class="chip keep">上限</span><span class="chip keep">审批路由</span><span class="chip new">压缩触发</span><span class="chip keep">事件分发</span></div></div>
   <div class="layer"><div class="name">循环</div><div class="items"><span class="chip keep">回合循环</span><span class="chip keep">钩子链</span><span class="chip keep">工具调用流水线</span><span class="chip keep">引导与后续消息</span></div></div>
@@ -301,25 +301,26 @@ pub struct NoHuman; // confirm 恒为拒绝：无人值守</code></pre>
 </div>
 
 <h3>5.6 场景配置 profile</h3>
-<pre><code># profiles/troubleshoot.toml（示例）
+<pre><code># profiles/troubleshoot.toml（已实现）
 name = "troubleshoot"
-instructions = "troubleshoot.md"          # 排障说明与报告格式
-tools = ["bash", "read_file"]
-interaction = "none"                      # none | terminal | acp
-
-[rules]
-allow = ["kubectl get", "kubectl describe", "journalctl", "grep", "tail"]
-deny  = ["kubectl delete", "rm -rf"]
+instructions = "troubleshoot.md"
+tools = ["bash", "read_file", "read_skill"]
+execution = "local"
 
 [limits]
-max_turns = 30
-timeout_secs = 900
-continue_on_length = 1
+maxTurns = 30
+timeoutSecs = 900
 
 [extensions]
-enabled = ["redaction"]</code></pre>
+redaction = true
+continueOnLength = 1
+
+[context]
+discover = true</code></pre>
 <p><strong>叠加顺序</strong>：内置默认 &lt; profile 文件 &lt; 命令行参数；deny 规则只增不减。内置两个 profile：<code>troubleshoot</code>（当前行为）与 <code>assistant</code>（通用对话）。</p>
-<div class="box decide"><strong class="label">取舍</strong>TOML 便于手写，Codex 也用 TOML 做配置 [R8]；需要新增 <code>toml</code> 依赖，上游 <a href="https://github.com/toml-rs/toml/blob/main/Cargo.toml">Cargo.toml</a> 在 2026-10-31 核对的 MSRV 为 1.85，与项目兼容，接入时须按选定版本复核。JSON 无需新依赖但不便手写注释。YAML 不选：常用的 <a href="https://github.com/dtolnay/serde-yaml"><code>serde_yaml</code></a> 已于 2024 年归档。<strong>评审结论：TOML。</strong></div>
+<p>P4 已将两个 profile 与说明嵌入二进制，保留原 SDK 预设接口。<code>--profile</code> 接受内置名称或 TOML 路径，文件可 extends 一个内置基线；仅显式 CLI 参数覆盖文件，deny 命令与工具规则累加。run 始终 NoHuman，chat 保留终端审批，不由 profile 改换前端。当前 execution 仅支持 local，未知字段、容器或任意扩展配置明确报错，脱敏不可关闭。</p>
+<p>上下文按最近 Git 根目录到 cwd 加载 AGENTS.md，无 Git 根时只检查 cwd；显式路径和禁用选项见 <a href="PROFILES.md">场景配置说明</a>。每文件 64 KiB、上下文合计 256 KiB。skills 在 TOML 中显式登记 name、description、path；启动仅加入目录，模型调用 read_skill 后才读取正文，经策略、审批、取消、脱敏和审计后回传。P4 不解析 YAML frontmatter、不扫描全局 skills、不自动执行 skill 脚本。</p>
+<div class="box decide"><strong class="label">取舍</strong>TOML 便于手写，Codex 也用 TOML 做配置 [R8]；P4 已引入 <code>toml 1.1.8</code>（仅 parse、serde、std feature），上游 <a href="https://github.com/toml-rs/toml/blob/main/Cargo.toml">Cargo.toml</a> 在 2026-10-31 核对的 MSRV 为 1.85，与项目兼容，锁定 crate 声明 MSRV 1.85，已用 Rust 1.88 复核。JSON 无需新依赖但不便手写注释。YAML 不选：常用的 <a href="https://github.com/dtolnay/serde-yaml"><code>serde_yaml</code></a> 已于 2024 年归档。<strong>评审结论：TOML。</strong></div>
 
 <h3>5.7 前端</h3>
 <table>
@@ -409,9 +410,9 @@ enabled = ["redaction"]</code></pre>
   <tr><td><code>src/runner.rs</code></td><td>P1 已将截断续写移为 <code>finish_turn</code> 扩展，并按稳定条目 ID 汇总当前答案；P2 已由 <code>src/agent_session.rs</code> 统一提供共享调用、订阅和模型切换，Runner 保留独占执行职责</td></tr>
   <tr><td><code>src/session.rs</code></td><td>P5、P6 分别新增 <code>compaction</code>、<code>tool_call_started</code> 条目，首次写入前分别升级格式；存储后端抽象为 trait（后续）</td></tr>
   <tr><td><code>src/tools/*</code></td><td>新增 <code>Executor</code> 接缝；<code>Tool</code> 增加 <code>effects()</code>；内置工具由 profile 按名字启用</td></tr>
-  <tr><td><code>src/prompt.rs</code>、<code>src/presets/troubleshoot.rs</code></td><td>P0 已分离通用组装与排障预设；P4 将预设文件化，并新增 <code>assistant</code> profile</td></tr>
-  <tr><td>（新增）</td><td><code>src/profile.rs</code>：加载与叠加 profile；<code>src/extension.rs</code>：P7 的 <code>Extension</code> trait；续写、脱敏已在 <code>src/extensions.rs</code>，压缩待 P5</td></tr>
-  <tr><td><code>src/main.rs</code>、<code>src/cli.rs</code>、<code>src/chat/</code></td><td>P3 已共用 run/chat 参数与运行组装，前端独立管理终端；acp、--profile 仍属后续阶段</td></tr>
+  <tr><td><code>src/prompt.rs</code>、<code>src/presets/troubleshoot.rs</code></td><td>P0 已分离通用组装与排障预设；P4 已将两个预设文件化，TOML 与 Markdown 位于 <code>profiles/</code></td></tr>
+  <tr><td>（新增）</td><td><code>src/profile/</code>：已实现加载与叠加 profile、项目上下文和按需 skill；<code>src/extension.rs</code>：P7 的 <code>Extension</code> trait；续写、脱敏已在 <code>src/extensions.rs</code>，压缩待 P5</td></tr>
+  <tr><td><code>src/main.rs</code>、<code>src/cli.rs</code>、<code>src/chat/</code></td><td>P3 已共用 run/chat 参数与运行组装，前端独立管理终端；P4 已接入 --profile，acp 仍属后续阶段</td></tr>
   <tr><td>单一 crate</td><td>最后阶段可拆为 <code>zx-ai</code>、<code>zx-core</code>、<code>zx-tools</code>、<code>zx-cli</code>，用编译器保证分层</td></tr>
 </table>
 
@@ -422,7 +423,7 @@ enabled = ["redaction"]</code></pre>
   <tr><td>P1</td><td>已实现六个钩子与工具流水线；<code>Decision::Ask</code>；<code>Interaction</code> 与 <code>NoHuman</code>；策略与续写迁移为钩子</td><td>无人值守行为不变；新增钩子组合、fail closed、超时测试</td><td>无</td></tr>
   <tr><td>P2</td><td>已实现 <code>AgentSession</code>：共享提问、Busy、中止后复用、多订阅者与退订、模型切换</td><td>中止后会话可继续；多订阅者都收到事件</td><td>无</td></tr>
   <tr><td>P3</td><td>已实现 chat：流式输出、终端审批、斜杠命令、取消后继续对话</td><td>脚本 stdin、信号、超时和 Unix PTY 测试；本地假服务交互试用</td><td>无；已授权的 io-std、rustyline 本阶段无需引入</td></tr>
-  <tr><td>P4</td><td>profile 文件、AGENTS.md、skills</td><td><code>troubleshoot</code> 与 <code>assistant</code> 均由文件定义；配置错误时退出码 2</td><td><code>toml</code>（已授权）</td></tr>
+  <tr><td>P4</td><td>已实现 profile 文件、AGENTS.md、显式登记与按需读取 skills</td><td><code>troubleshoot</code> 与 <code>assistant</code> 均由文件定义；配置错误时退出码 2</td><td><code>toml</code>（已授权）</td></tr>
   <tr><td>P5</td><td>上下文管理：压缩扩展、大结果落盘；首次写入 <code>compaction</code> 前升级会话格式</td><td>faux provider 测试；旧文件兼容测试；经授权的付费 e2e 测试</td><td>无</td></tr>
   <tr><td>P6</td><td><code>Executor</code> 与容器执行；<code>effects()</code>；首次写入 <code>tool_call_started</code> 前再次升级格式</td><td>离线任务禁网；在线任务按评审范围访问 API；崩溃恢复与旧文件兼容测试；D5 改变默认值时另验收迁移</td><td>无新 crate（调用本机 docker）；D5 与在线访问方案须先确认</td></tr>
   <tr><td>P7</td><td>MCP 客户端扩展；公开 <code>Extension</code> trait</td><td>MCP 工具可列出、可调用，并受规则约束</td><td><code>rmcp</code>（已授权；MSRV 已是 1.88）</td></tr>
@@ -480,8 +481,8 @@ enabled = ["redaction"]</code></pre>
   <li>[R20] langchain-ai/langgraph README：<a href="https://github.com/langchain-ai/langgraph">github.com/langchain-ai/langgraph</a></li>
   <li>[R21] openai/openai-agents-python README：<a href="https://github.com/openai/openai-agents-python">github.com/openai/openai-agents-python</a></li>
   <li>[R22] kagent-dev/kagent README：<a href="https://github.com/kagent-dev/kagent">github.com/kagent-dev/kagent</a></li>
-  <li>[R23] Model Context Protocol specification 2026-07-28（含 Transports）：<a href="https://modelcontextprotocol.io/specification/2026-07-28">modelcontextprotocol.io/specification/2026-07-28</a>；Rust SDK：<a href="https://github.com/modelcontextprotocol/rust-sdk">github.com/modelcontextprotocol/rust-sdk</a>，MSRV 见 <a href="https://github.com/modelcontextprotocol/rust-sdk/blob/main/Cargo.toml">Cargo.toml</a>（2026-10-31 核对为 1.88；接入时须按选定版本复核）</li>
-  <li>[R24] Agent Client Protocol：<a href="https://github.com/agentclientprotocol/agent-client-protocol">github.com/agentclientprotocol/agent-client-protocol</a>；Rust SDK：<a href="https://github.com/agentclientprotocol/rust-sdk">github.com/agentclientprotocol/rust-sdk</a>，MSRV 见 <a href="https://github.com/agentclientprotocol/rust-sdk/blob/main/Cargo.toml">Cargo.toml</a>（2026-10-31 核对为 1.88.0；接入时须按选定版本复核）</li>
+  <li>[R23] Model Context Protocol specification 2026-07-28（含 Transports）：<a href="https://modelcontextprotocol.io/specification/2026-07-28">modelcontextprotocol.io/specification/2026-07-28</a>；Rust SDK：<a href="https://github.com/modelcontextprotocol/rust-sdk">github.com/modelcontextprotocol/rust-sdk</a>，MSRV 见 <a href="https://github.com/modelcontextprotocol/rust-sdk/blob/main/Cargo.toml">Cargo.toml</a>（2026-10-31 核对为 1.88；锁定 crate 声明 MSRV 1.85，已用 Rust 1.88 复核）</li>
+  <li>[R24] Agent Client Protocol：<a href="https://github.com/agentclientprotocol/agent-client-protocol">github.com/agentclientprotocol/agent-client-protocol</a>；Rust SDK：<a href="https://github.com/agentclientprotocol/rust-sdk">github.com/agentclientprotocol/rust-sdk</a>，MSRV 见 <a href="https://github.com/agentclientprotocol/rust-sdk/blob/main/Cargo.toml">Cargo.toml</a>（2026-10-31 核对为 1.88.0；锁定 crate 声明 MSRV 1.85，已用 Rust 1.88 复核）</li>
   <li>[R25] Anthropic, Building effective agents：<a href="https://www.anthropic.com/engineering/building-effective-agents">anthropic.com/engineering/building-effective-agents</a></li>
   <li>[R26] Anthropic, Writing effective tools for agents：<a href="https://www.anthropic.com/engineering/writing-tools-for-agents">anthropic.com/engineering/writing-tools-for-agents</a></li>
   <li>[R27] Anthropic, Effective context engineering for AI agents：<a href="https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents">anthropic.com/engineering/effective-context-engineering-for-ai-agents</a></li>
@@ -510,7 +511,7 @@ enabled = ["redaction"]</code></pre>
   <li>[P20] Packer et al., MemGPT: Towards LLMs as Operating Systems, 2023. <a href="https://arxiv.org/abs/2310.08560">arXiv:2310.08560</a></li>
 </ol>
 
-<footer>文件：zx-agent-general-kernel-proposal.html · 版本 v0.8 · 2026年11月</footer>
+<footer>文件：zx-agent-general-kernel-proposal.html · 版本 v0.9 · 2026年11月</footer>
 </main>
 </body>
 </html>

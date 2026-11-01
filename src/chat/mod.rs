@@ -10,7 +10,6 @@ use std::ffi::OsStr;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
@@ -19,11 +18,11 @@ use zx_agent::AgentSession;
 use zx_agent::agent::Decision;
 use zx_agent::agent_session::ModelRef;
 use zx_agent::ai::Provider;
+use zx_agent::extensions::ContinueOnLength;
 use zx_agent::policy::{PolicyHook, Rule, RuleMatcher, RulePolicy};
-use zx_agent::presets::assistant;
-use zx_agent::runner::Limits;
+use zx_agent::profile::Builtin;
 
-use crate::cli::{self, ChatArgs, SessionFile, SessionOptions};
+use crate::cli::{self, ChatArgs, Explicit, SessionFile, SessionOptions};
 use crate::{EXIT_ABORTED, EXIT_COMPLETED};
 
 use commands::Command;
@@ -49,20 +48,32 @@ struct Built {
     cwd: PathBuf,
 }
 
+struct Settings {
+    args: ChatArgs,
+    explicit: Explicit,
+}
+
 fn build(
-    args: &ChatArgs,
+    settings: &Settings,
     model: &str,
     file: SessionFile<'_>,
     interaction: &Arc<TerminalInteraction>,
     output: &Arc<Output>,
 ) -> Result<Built> {
+    let args = &settings.args;
     let mut prepared = cli::prepare(SessionOptions {
         base: &args.base,
         transport: &args.transport,
         request: &args.request,
         model,
         file,
-        instructions: assistant::INSTRUCTIONS,
+        default_profile: Builtin::Assistant,
+        budget: cli::Budget {
+            max_turns: args.max_turns,
+            timeout_secs: args.timeout_secs,
+            continue_on_length: 0,
+        },
+        explicit: settings.explicit,
     })?;
     prepared
         .config
@@ -77,19 +88,27 @@ fn build(
                 decision: Decision::Allow,
             },
         ]))));
+    prepared
+        .config
+        .hooks
+        .push(ContinueOnLength::new(prepared.continue_on_length));
     prepared.config.hooks.push(prepared.redactor);
     prepared.config.interaction = interaction.clone();
     let provider = prepared.config.spec.provider.clone();
     let cwd = prepared.config.spec.cwd.clone();
-    let limits = Limits {
-        max_turns: args.max_turns,
-        timeout: (args.timeout_secs > 0).then(|| Duration::from_secs(args.timeout_secs)),
-    };
-    let session = AgentSession::new(prepared.config, prepared.retry, limits, prepared.store, output.clone());
+    let session = AgentSession::new(
+        prepared.config,
+        prepared.retry,
+        prepared.limits,
+        prepared.store,
+        output.clone(),
+    );
     Ok(Built { session, provider, cwd })
 }
 
-pub(crate) async fn run(args: ChatArgs) -> Result<u8> {
+pub(crate) async fn run(args: ChatArgs, explicit: Explicit) -> Result<u8> {
+    let settings = Settings { args, explicit };
+    let args = &settings.args;
     let mode = if std::io::stdin().is_terminal() {
         InputMode::Terminal
     } else {
@@ -100,7 +119,7 @@ pub(crate) async fn run(args: ChatArgs) -> Result<u8> {
     let output = Arc::new(Output::new(args.output, args.deltas));
     let mut model = args.base.model.clone();
     let mut built = build(
-        &args,
+        &settings,
         &model,
         SessionFile::from_path(args.request.session.as_deref()),
         &interaction,
@@ -178,7 +197,7 @@ pub(crate) async fn run(args: ChatArgs) -> Result<u8> {
             Flow::New => {
                 let path = new_file(args.request.session.as_deref());
                 let file = path.as_deref().map_or(SessionFile::Memory, SessionFile::Create);
-                match build(&args, &model, file, &interaction, &output) {
+                match build(&settings, &model, file, &interaction, &output) {
                     Ok(next) => {
                         built = next;
                         let file = path

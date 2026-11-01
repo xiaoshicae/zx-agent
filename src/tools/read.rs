@@ -26,7 +26,7 @@ impl Default for ReadFileTool {
 }
 
 impl ReadFileTool {
-    async fn read_bytes(&self, path: &Path) -> Result<Vec<u8>, String> {
+    pub(crate) async fn read_bytes(&self, path: &Path) -> Result<Vec<u8>, String> {
         let mut options = tokio::fs::OpenOptions::new();
         options.read(true);
         // A path can be replaced with a FIFO between lookup and open. Nonblocking open

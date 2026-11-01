@@ -71,8 +71,8 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P0 | 场景默认值移出内核 | 已完成 |
 | P1 | 钩子、工具调用流水线与人机交互接口 | 已完成（PR #3） |
 | P2 | 长期会话 `AgentSession` | 已完成（PR #4） |
-| P3 | 终端对话 `chat` | 已实现待 PR review |
-| P4 | profile 文件、上下文文件与 skills | 未开始 |
+| P3 | 终端对话 `chat` | 已完成（PR #5） |
+| P4 | profile 文件、上下文文件与 skills | 已实现待 PR review |
 | P5 | 上下文管理 | 未开始 |
 | P6 | 执行环境与崩溃恢复 | 未开始 |
 | P7 | 插件与 MCP | 未开始 |
@@ -168,13 +168,30 @@ P3 实施约定（2026-11-01）：
 
 目标：不写代码即可定义场景。依赖：`toml`（D2 已授权；上游 [Cargo.toml](https://github.com/toml-rs/toml/blob/main/Cargo.toml) 在 2026-10-31 核对的 MSRV 为 1.85，接入时按选定版本复核）。
 
-- [ ] profile 文件格式（TOML）：说明、工具、规则、上限、扩展、执行环境
-- [ ] 叠加顺序：内置默认 < profile 文件 < 命令行参数；deny 规则只增不减
-- [ ] 内置两个 profile：`troubleshoot`（P0 的预设）与 `assistant`（通用对话）
-- [ ] 读取 AGENTS.md 等上下文文件；skills 按需加载
-- [ ] 命令行增加 `--profile`；配置错误时退出码 2
+P4 实施约定（2026-11-01）：
+
+- `run` 默认加载嵌入二进制的 `profiles/troubleshoot.toml`，`chat` 默认加载 `profiles/assistant.toml`；说明放在相邻 Markdown 文件。保留现有预设 SDK 接口，运行时配置以 TOML 为准。
+- `--profile` 接受内置名称或 TOML 路径；自定义文件可用 `extends` 选择一个内置基线，不支持任意文件继承。叠加顺序为内置基线、文件、显式 CLI 参数；显式传入与旧默认值相同的参数也必须覆盖文件。原有 `tests/cli.rs` 不改，帮助仅新增配置选项。
+- TOML 字段使用 camelCase，拒绝未知字段和无效类型。规则包含命令前缀 allow、命令子串 deny、askTools 与 denyTools；deny 累加，不能被 CLI 工具开关或 allow 覆盖。run 始终使用 NoHuman，chat 保留终端审批，profile 不切换前端。
+- 配置支持轮次、总时间、截断续写与已知密钥脱敏；`maxTurns = "unlimited"` 表示不限，0 仍表示不调用模型。当前只支持 `execution = "local"`，脱敏不可关闭；未实现的容器、任意扩展等配置直接报错。
+- 自动读取最近 Git 根目录到 cwd 的 AGENTS.md（无 Git 根时仅 cwd），不隐式读取用户主目录配置；profile 可添加上下文文件，路径相对 profile 文件。CLI `--context-file` 相对启动目录，`--no-context` 可禁用上下文加载。
+- skills 通过 TOML 的 `[[skills]]` 显式登记 name、description、path，兼容把现有 SKILL.md 当正文文件；不解析 YAML frontmatter、不自动扫描全局 skill 目录。启动只向提示词加入目录信息；`read_skill` 工具按名称加载正文，经过原钩子、策略、取消、脱敏与持久化流程。未启用该工具时不加入目录。
+- 配置、说明、单个上下文和 skill 正文均有 64 KiB 上限；上下文总量 256 KiB，skills 最多 64 项。只读普通 UTF-8 文件，超限或无效内容明确报错。上下文与 skill 文本不能改变已组装的工具及策略。
+- 引入已授权的 `toml 1.1.8`，仅启用 parse、serde、std；其 crate 声明 MSRV 1.85，仍用 Rust 1.88 验证。
+
+- [x] profile 文件格式（TOML）：说明、工具、规则、上限、扩展、执行环境
+- [x] 叠加顺序：内置默认 < profile 文件 < 命令行参数；deny 规则只增不减
+- [x] 内置两个 profile：`troubleshoot`（P0 的预设）与 `assistant`（通用对话）
+- [x] 读取 AGENTS.md 等上下文文件；skills 按需加载
+- [x] 命令行增加 `--profile`；配置错误时退出码 2
 
 验收：两个内置 profile 均由文件定义；配置错误的测试。
+
+实现提交：`7fb3124`。
+
+本地验收（2026-11-01）：新增 24 项单元测试、18 项 CLI 测试；stable 与 Rust 1.88 各 304 项通过、6 项付费 API 测试跳过。格式、clippy、严格 Rustdoc 与 MSRV 全目标检查通过。两个内置 profile 及完整评审示例通过零请求离线试用；真实模型 API 未运行。
+
+兼容性：原 `tests/cli.rs` 和两份预设说明逐字节不变，原 SDK 场景辅助接口保留；`run --help` 仅增加 profile 和上下文选项。新增配置覆盖、deny、上下文边界与预算、skill 懒加载和审计测试；上下文分隔符预算及非 UTF-8 原生路径的回归均先失败后修复。配置说明与完整示例见 [PROFILES.md](PROFILES.md)。
 
 ### P5 上下文管理
 

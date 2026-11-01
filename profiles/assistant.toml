@@ -1,0 +1,18 @@
+name = "assistant"
+instructions = "assistant.md"
+tools = ["bash", "read_file", "read_skill"]
+execution = "local"
+
+[rules]
+askTools = ["bash"]
+
+[limits]
+maxTurns = "unlimited"
+timeoutSecs = 0
+
+[extensions]
+redaction = true
+continueOnLength = 0
+
+[context]
+discover = true
