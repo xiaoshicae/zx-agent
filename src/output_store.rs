@@ -2,6 +2,7 @@
 //!
 //! Install the spill hook after redaction. Stored text is the tool's already bounded
 //! result, not data discarded by that tool's own truncation. Files are not auto-deleted.
+//! When storing fails, the result stays inline: storage is an optimisation, not a filter.
 
 use std::path::{Path, PathBuf};
 
@@ -20,6 +21,9 @@ const DEFAULT_PAGE_BYTES: usize = 8 * 1024;
 const MAX_FILE_BYTES: usize = 1024 * 1024;
 // Enough for the fixed footer, a UUID and any usize offset, including on 128-bit targets.
 const FOOTER_BYTES: usize = 160;
+/// Written into the output directory: stored results may contain sensitive data, and the
+/// default directory lies inside the user's working tree.
+const GITIGNORE: &str = "# Created by zx-agent: stored tool results may contain sensitive data.\n*\n";
 
 /// Storage settings. A zero threshold in a profile maps to None (spilling disabled).
 #[derive(Clone, Debug)]
@@ -68,34 +72,88 @@ impl Config {
 #[derive(Clone)]
 pub struct OutputStore {
     config: Config,
+    /// The tool cwd when the configured directory is relative to it. The resolved directory
+    /// must stay inside, so a link committed to a repository cannot redirect writes.
+    root: Option<PathBuf>,
 }
 
 impl OutputStore {
     /// Resolve a relative directory against cwd and validate, without creating files.
     pub fn new(cwd: &Path, mut config: Config) -> Result<Self> {
         config.validate()?;
+        let root = config.directory.is_relative().then(|| cwd.to_path_buf());
         config.directory = cwd.join(config.directory);
-        Ok(Self { config })
+        Ok(Self { config, root })
     }
 
-    async fn write(&self, text: &str) -> HookResult<String> {
-        if text.len() > self.config.max_file_bytes {
-            return Err(format!(
-                "tool result is {} bytes, over toolOutput.maxFileBytes = {}; reduce the tool output",
-                text.len(),
-                self.config.max_file_bytes
-            ));
+    /// Check that the deepest existing part of the directory resolves inside `root`, so the
+    /// missing parts are created inside it too; then create it with its ignore file.
+    async fn prepare_directory(&self) -> Result<(), String> {
+        let directory = &self.config.directory;
+        if let Some(root) = &self.root {
+            let root = tokio::fs::canonicalize(root)
+                .await
+                .map_err(|error| format!("cannot resolve working directory {}: {error}", root.display()))?;
+            let mut existing = directory.as_path();
+            let resolved = loop {
+                match tokio::fs::canonicalize(existing).await {
+                    Ok(resolved) => break resolved,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        existing = existing
+                            .parent()
+                            .ok_or_else(|| format!("cannot resolve output directory {}", directory.display()))?;
+                    }
+                    Err(error) => {
+                        return Err(format!(
+                            "cannot create output directory {}: cannot resolve {}: {error}",
+                            directory.display(),
+                            existing.display()
+                        ));
+                    }
+                }
+            };
+            if !resolved.starts_with(&root) {
+                return Err(format!(
+                    "output directory {} resolves to {}, outside the working directory {}",
+                    directory.display(),
+                    resolved.display(),
+                    root.display()
+                ));
+            }
         }
         let mut builder = tokio::fs::DirBuilder::new();
         builder.recursive(true);
         #[cfg(unix)]
         builder.mode(0o700);
-        builder.create(&self.config.directory).await.map_err(|error| {
-            format!(
-                "cannot create output directory {}: {error}",
-                self.config.directory.display()
-            )
-        })?;
+        builder
+            .create(directory)
+            .await
+            .map_err(|error| format!("cannot create output directory {}: {error}", directory.display()))?;
+        let ignore = directory.join(".gitignore");
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        match options.open(&ignore).await {
+            Ok(mut file) => file
+                .write_all(GITIGNORE.as_bytes())
+                .await
+                .map_err(|error| format!("cannot write {}: {error}", ignore.display())),
+            // Keep an existing file: the user may have edited it.
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(error) => Err(format!("cannot create {}: {error}", ignore.display())),
+        }
+    }
+
+    async fn write(&self, text: &str) -> HookResult<String> {
+        if text.len() > self.config.max_file_bytes {
+            return Err(format!(
+                "tool result is {} bytes, over toolOutput.maxFileBytes = {}",
+                text.len(),
+                self.config.max_file_bytes
+            ));
+        }
+        self.prepare_directory().await?;
         let id = uuid::Uuid::new_v4().to_string();
         let path = self.config.directory.join(format!("{id}.txt"));
         let mut options = tokio::fs::OpenOptions::new();
@@ -106,12 +164,16 @@ impl OutputStore {
             .open(&path)
             .await
             .map_err(|error| format!("cannot create tool output {}: {error}", path.display()))?;
-        file.write_all(text.as_bytes())
-            .await
-            .map_err(|error| format!("cannot write tool output {}: {error}", path.display()))?;
-        file.flush()
-            .await
-            .map_err(|error| format!("cannot flush tool output {}: {error}", path.display()))?;
+        let written = match file.write_all(text.as_bytes()).await {
+            Ok(()) => file.flush().await,
+            Err(error) => Err(error),
+        };
+        drop(file);
+        if let Err(error) = written {
+            // Best effort: the write already failed and the partial file is unreferenced.
+            let _ = tokio::fs::remove_file(&path).await;
+            return Err(format!("cannot write tool output {}: {error}", path.display()));
+        }
         // Cancellation may leave an unreferenced partial file. No reference is returned
         // until the complete write succeeds; UUID names are never reused or overwritten.
         Ok(json!({"outputId":id,"path":path.to_string_lossy(),"bytes":text.len(),"readWith":TOOL_NAME}).to_string())
@@ -184,7 +246,14 @@ impl Hooks for SpillOutputs {
                 .threshold_bytes
                 .is_some_and(|limit| output.content.len() > limit)
         {
-            output.content = self.store.write(&output.content).await?;
+            match self.store.write(&output.content).await {
+                Ok(reference) => output.content = reference,
+                // This hook runs after redaction, so the bounded result is already what the
+                // session would record without spilling; hiding it would only lose evidence.
+                Err(reason) => output
+                    .content
+                    .push_str(&format!("\n[not stored: {reason}; the result is shown inline]")),
+            }
         }
         Ok(output)
     }

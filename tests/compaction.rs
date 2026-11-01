@@ -290,6 +290,71 @@ async fn invalid_or_truncated_summaries_never_replace_context_or_retry_as_tasks(
 }
 
 #[tokio::test]
+async fn a_failed_automatic_summary_is_not_paid_for_again_on_the_next_prompt() {
+    let (store, _) = seeded();
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::text("not JSON"),
+        FauxStep::text("must not be requested"),
+    ]));
+    let (runner, _) = RunnerSetup {
+        session: store,
+        ..RunnerSetup::new(config(provider.clone(), vec![]))
+    }
+    .build();
+    let mut runner = runner
+        .with_compaction(Config {
+            trigger_bytes: Some(1024),
+            ..budget()
+        })
+        .unwrap();
+    let first = runner.run("continue", &CancellationToken::new()).await;
+    assert_eq!(first.outcome, RunOutcome::Error, "{first:?}");
+    let second = runner.run("try again", &CancellationToken::new()).await;
+    assert_eq!(second.outcome, RunOutcome::Error, "{second:?}");
+    assert_eq!(second.turns, 0);
+    assert!(
+        second.error.as_deref().unwrap_or_default().contains("paused"),
+        "{second:?}"
+    );
+    assert_eq!(provider.requests().len(), 1, "the failed summary is not paid for again");
+}
+
+#[tokio::test]
+async fn a_successful_manual_summary_resumes_automatic_summaries() {
+    let (store, old) = seeded();
+    let provider = Arc::new(FauxProvider::new([
+        // The automatic attempt fails and pauses automatic summaries.
+        FauxStep::text("not JSON"),
+        // A manual summary succeeds.
+        FauxStep::text(summary(&old)),
+        // A long answer grows the context over the trigger again.
+        FauxStep::text("y".repeat(3000)),
+        // The next automatic attempt is made instead of being skipped.
+        FauxStep::text("not JSON"),
+    ]));
+    let (runner, _) = RunnerSetup {
+        session: store,
+        ..RunnerSetup::new(config(provider.clone(), vec![]))
+    }
+    .build();
+    let mut runner = runner
+        .with_compaction(Config {
+            trigger_bytes: Some(1024),
+            ..budget()
+        })
+        .unwrap();
+    let cancel = CancellationToken::new();
+    assert_eq!(runner.run("continue", &cancel).await.outcome, RunOutcome::Error);
+    let compact = runner.compact(&cancel).await;
+    assert_eq!(compact.outcome, Outcome::Completed, "{compact:?}");
+    let answered = runner.run("next", &cancel).await;
+    assert_eq!(answered.outcome, RunOutcome::Completed, "{answered:?}");
+    let resumed = runner.run("again", &cancel).await;
+    assert_eq!(resumed.outcome, RunOutcome::Error, "{resumed:?}");
+    assert_eq!(provider.requests().len(), 4);
+}
+
+#[tokio::test]
 async fn an_input_that_cannot_fit_is_not_silently_truncated_or_sent_to_the_task_model() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("must not execute")]));
     let (runner, _) = RunnerSetup::new(config(provider.clone(), vec![])).build();

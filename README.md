@@ -128,7 +128,7 @@ echo "exit code: $?"
 | `--base-url` | `https://api.openai.com/v1`，或环境变量 `ZX_BASE_URL` | OpenAI 兼容地址 |
 | `--api-key-env` | `OPENAI_API_KEY` | 存放 API key 的**环境变量名**。key 不接受命令行传入，避免在进程列表中暴露 |
 | `--system-updates` | `collapse` | 恢复会话时，提示词的变化怎样发给模型。`collapse`：合并进开头的 system 消息，兼容不接受对话中途 system 消息的服务端；`inline`：在变化发生的位置发送，保持此前的请求前缀，便于服务端复用提示词缓存，模型也能看出提示词从哪里开始变化，但要求服务端接受对话中途的 system 消息，使用前需确认 |
-| `--tools` | profile：`bash,read_file,read_output`，有目录时加入 `read_skill` | 显式传入时替换工具集合；仅启用 `read_output` 时安装长结果落盘钩子 |
+| `--tools` | profile：`run` 为 `bash,read_file`，`chat` 为 `bash,read_file,read_output`；有 skill 目录时加入 `read_skill` | 显式传入时替换工具集合；仅启用 `read_output` 时安装长结果落盘钩子 |
 | `--cwd` | 当前目录 | 工具的工作目录，同时写入 `<environment>` |
 | `--allow-cmd` / `--deny-cmd` | 无 | bash 命令白名单前缀 / 额外的拒绝子串，均可重复 |
 | `--max-turns` | 30 | 本次运行的模型请求次数上限，失败的尝试也计入 |
@@ -252,7 +252,7 @@ CLI (main.rs + cli.rs + chat/)
 - `read_file` 不受命令白名单约束，可以读取进程有权限读取的普通文件。需要限制时，使用 `--tools bash` 关闭它。
 - 项目上下文（`AGENTS.md`、`--context-file` 与 profile 中的上下文文件）会进入系统提示词并发送给模型服务方，可能引导模型的行为。自动发现的 `AGENTS.md` 不能通过符号链接指向项目外；在不可信仓库中运行时，建议使用 `--no-context`。
 - `run` 和 `chat` 在 `after_tool` 中将认证 API key 的完整字面值替换为 `[REDACTED]`，处理后的结果才会写入会话、事件并回传模型。SDK 可用 `RedactSecrets` 显式配置其他密钥；过滤器失败时丢弃原始输出，返回错误结果。
-- 长工具结果的文件同样在脱敏后写入，Unix 新目录 / 文件权限为 0700 / 0600；结果目录默认 `.zx-agent/outputs`，不会自动删除。保存的是工具已经截断的结果，详见[工具结果落盘](docs/PROFILES.md#工具结果落盘)。
+- 长工具结果的文件同样在脱敏后写入，Unix 新目录 / 文件权限为 0700 / 0600；结果目录默认 `.zx-agent/outputs`，不会自动删除，目录中写入忽略全部文件的 `.gitignore`。默认目录必须位于工作目录内，仓库中的符号链接不能把写入引到外部；写入失败时结果保持内联。`run` 默认不落盘。保存的是工具已经截断的结果，详见[工具结果落盘](docs/PROFILES.md#工具结果落盘)。
 - 该过滤不识别未知密钥、编码或拆分后的密钥，也不处理用户输入、模型输出和工具调用参数。这些内容及工具输出中的其他敏感数据仍可能进入模型请求、会话和事件；请控制会话文件访问权限。
 - 认证 key 只从环境变量读取；bash 命令启动前删除 `--api-key-env` 指定的变量。但工具与 agent 以同一系统用户运行，仍可能通过其他途径读取凭证。需要隔离时，请以不同账号或在容器中运行。
 - 除 `--api-key-env` 指定的变量外，其他环境变量（如云厂商凭证）bash 命令仍然可以读到。需要时请在启动 zx-agent 前清理环境变量。
@@ -397,7 +397,7 @@ cargo fmt --check
 | `tests/profiles_cli.rs` | profile 覆盖、显式默认值、不可绕过的 deny、上下文范围与审计、上下文默认值与越界链接、`--system-prompt-file` 兼容、skill 懒加载与脱敏、配置错误退出码 |
 | `tests/session_compaction.rs`、`tests/compaction.rs` | v1/v2 追加升级、分支和引用、原始投影、摘要失败与取消、请求 / 用量预算、超时和上限 |
 | `tests/request_audit.rs` | 每次任务与摘要请求可从会话文件还原、配置只在变化时追加、旧会话首次请求前升级、与投影不一致的请求不记录 |
-| `tests/output_store.rs` | 先脱敏后落盘、UUID 边界、文件权限、UTF-8 分页、容量、取消和写盘失败回退 |
+| `tests/output_store.rs` | 先脱敏后落盘、UUID 边界、文件权限、UTF-8 分页、容量、取消、写盘失败时保留内联结果、目录越界与 `.gitignore` |
 | `tests/hooks.rs`、`tests/hooks_cli.rs` | 钩子组合与失败处理、审批范围与取消、审计变换、续写预算、工具输出脱敏的 CLI 接线 |
 | `tests/real_api.rs` | 真实模型 API（付费，默认跳过）：文本回答与用量、工具往返、策略拒绝、输出截断、恢复会话、无效 key 不重试 |
 
