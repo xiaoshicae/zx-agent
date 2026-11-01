@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use crate::agent::{Effects, Tool, ToolContext, ToolOutput};
 use crate::ai::ToolDef;
-use crate::tools::ReadFileTool;
+use crate::executor::{Executor, LocalExecutor};
 use crate::tools::truncate::{MAX_BYTES, MAX_LINES, truncate_head};
 
 use super::MAX_FILE_BYTES;
@@ -130,13 +130,11 @@ impl Tool for ReadSkillTool {
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
         let args: Args = serde_json::from_value(args).map_err(|error| format!("invalid arguments: {error}"))?;
         let skill = self.find(&args.name)?;
-        let reader = ReadFileTool {
-            max_file_bytes: MAX_FILE_BYTES,
-        };
+        // Skills are registered files on this machine, wherever commands run.
         let bytes = tokio::select! {
             biased;
             _ = ctx.cancel.cancelled() => return Err("skill read cancelled".into()),
-            result = reader.read_bytes(&skill.path) => result?,
+            result = LocalExecutor.read_file(&skill.path, MAX_FILE_BYTES) => result?,
         };
         let text = String::from_utf8(bytes).map_err(|error| format!("skill {:?} is not UTF-8: {error}", skill.name))?;
         let remaining = text.get(args.offset..).ok_or_else(|| {
