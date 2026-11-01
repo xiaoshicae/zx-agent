@@ -5,7 +5,7 @@ paths:
 
 # 05 类型与 API 设计
 
-- **不可能出现的状态，让它写不出来**：封闭的取值集合用枚举，不用字符串或 bool；互斥的几种状态用一个枚举，而不是几个 `Option` 或 bool 的组合（参照 `bash.rs` 的 `End`）。时间用 `Duration`，路径用 `Path`。
+- **不可能出现的状态，让它写不出来**：封闭的取值集合用枚举，不用字符串或 bool；互斥的几种状态用一个枚举，而不是几个 `Option` 或 bool 的组合（参照 `src/executor/mod.rs` 的 `CommandEnd`）。时间用 `Duration`，路径用 `Path`。
 - **id 的新类型**：新代码中跨模块传递的标识，可以用新类型包一层（如 `EntryId(String)`）。现有代码的 id 是 `String`，要修改先征得用户同意。
 - **不提前抽象**：只有一种实现、也不需要测试替身时，直接写具体类型；等出现第二种实现时再定义 trait 或泛型。需要让使用者扩展的（provider、工具、策略、事件订阅）才用 trait。
 - **构造**：字段多时用结构体加 `Default` 和结构体更新语法（参照 `OpenAiConfig`、`RetryPolicy`、`Limits`）。只有需要校验或分步构造时才用 builder。

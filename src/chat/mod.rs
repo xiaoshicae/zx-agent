@@ -28,7 +28,7 @@ use commands::Command;
 use input::Line;
 use interaction::{TerminalInteraction, Ticket};
 use output::Output;
-pub(crate) use output::visible;
+pub(crate) use output::{progress_line, visible};
 use signals::{Interrupt, Signals};
 
 #[derive(Clone, Copy, PartialEq, Eq)]

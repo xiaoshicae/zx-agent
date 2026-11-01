@@ -14,11 +14,15 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
+use crate::agent::ExecutionMode;
+
 pub use container::{ContainerConfig, ContainerExecutor, Platform};
 pub use local::LocalExecutor;
 
 /// One shell command: `<shell> -c <command>` in `cwd`.
 pub struct ShellCommand<'a> {
+    /// The shell the tool is configured with. [`ContainerExecutor`] ignores it and uses the
+    /// shell of its configuration, which it checked at start.
     pub shell: &'a str,
     pub command: &'a str,
     pub cwd: &'a Path,
@@ -59,6 +63,17 @@ pub struct CommandOutput {
 /// Runs commands and reads files for the built-in tools.
 #[async_trait]
 pub trait Executor: Send + Sync {
+    /// Whether calls may run at the same time. The built-in tools declare the mode of their
+    /// executor. One that handles a single call at a time is `Sequential`, so that the loop
+    /// does not start a call, and record it as started, only for it to wait for another; a
+    /// run cancelled meanwhile then reports it as not executed. Defaults to `Parallel`;
+    /// [`ContainerExecutor`] is `Sequential`. Must not panic, like [`Tool::execution_mode`].
+    ///
+    /// [`Tool::execution_mode`]: crate::agent::Tool::execution_mode
+    fn execution_mode(&self) -> ExecutionMode {
+        ExecutionMode::Parallel
+    }
+
     /// Run `command` until it exits, its timeout passes, or `cancel` fires. Then, and when the
     /// future is dropped, the processes it started are stopped, background children included.
     /// How far that reaches depends on the executor: [`LocalExecutor`] stops the command's

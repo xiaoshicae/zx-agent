@@ -237,9 +237,60 @@ async fn an_unknown_finish_reason_is_a_provider_error_not_a_completed_answer() {
     assert_eq!(
         provider_error(&runner),
         ProviderError::Provider {
-            code: Some("server_interrupted".into())
+            code: Some("finish_reason:server_interrupted".into())
         }
     );
+}
+
+/// A complete `200 OK` response with a JSON body, as a gateway or a non-streaming server
+/// sends it.
+fn json_ok(body: &serde_json::Value) -> Reply {
+    let body = body.to_string();
+    Reply::Raw(format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    ))
+}
+
+#[tokio::test]
+async fn an_error_object_under_a_success_status_is_reported() {
+    let server = MockServer::start(vec![json_ok(&json!({
+        "error": {"message": "The model `m` does not exist", "code": "model_not_found"}
+    }))])
+    .await;
+    let (mut runner, _) = RunnerSetup {
+        retry: fast_retry(3),
+        ..setup(&server, Duration::from_secs(10))
+    }
+    .build();
+
+    let report = runner.run("check", &CancellationToken::new()).await;
+
+    assert_eq!((report.outcome, report.retries), (RunOutcome::Error, 0), "{report:?}");
+    let error = report.error.unwrap_or_default();
+    assert!(error.contains("The model `m` does not exist"), "{error}");
+}
+
+#[tokio::test]
+async fn a_whole_answer_instead_of_a_stream_is_named_in_the_error() {
+    // A server that ignores `stream: true`.
+    let server = MockServer::start(vec![json_ok(&json!({
+        "object": "chat.completion",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "hello"}, "finish_reason": "stop"}]
+    }))])
+    .await;
+    let (mut runner, _) = RunnerSetup {
+        retry: fast_retry(3),
+        ..setup(&server, Duration::from_secs(10))
+    }
+    .build();
+
+    let report = runner.run("check", &CancellationToken::new()).await;
+
+    assert_eq!((report.outcome, report.retries), (RunOutcome::Error, 0), "{report:?}");
+    let error = report.error.unwrap_or_default();
+    assert!(error.contains("instead of an event stream"), "{error}");
+    assert!(error.contains("chat.completion"), "{error}");
 }
 
 #[tokio::test]

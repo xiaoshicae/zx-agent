@@ -9,6 +9,7 @@ mod common;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -16,9 +17,15 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
+use zx_agent::agent::{ExecutionMode, Tool};
+use zx_agent::ai::Message;
+use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::executor::{CommandEnd, CommandOutput, ContainerConfig, ContainerExecutor, Executor, ShellCommand};
+use zx_agent::runner::RunOutcome;
+use zx_agent::tools::{BashTool, ReadFileTool};
 
 use common::mock_server::{MockServer, Reply};
+use common::{RunnerSetup, config};
 
 // ---------------------------------------------------------------------------
 // Fake docker
@@ -381,6 +388,101 @@ async fn a_dropped_run_still_stops_its_command() {
         eventually(Duration::from_secs(5), || fake.execs("zx-agent-sweep").len() == 2).await,
         "no cleanup after the run future was dropped"
     );
+}
+
+#[tokio::test]
+async fn tools_in_the_container_run_one_call_at_a_time() {
+    let fake = FakeDocker::new();
+    let executor: Arc<dyn Executor> = Arc::new(ContainerExecutor::start(fake.config()).await.unwrap());
+
+    let bash = BashTool {
+        executor: Arc::clone(&executor),
+        ..BashTool::default()
+    };
+    let read = ReadFileTool {
+        executor,
+        ..ReadFileTool::default()
+    };
+
+    assert_eq!(bash.execution_mode(), ExecutionMode::Sequential);
+    assert_eq!(read.execution_mode(), ExecutionMode::Sequential);
+}
+
+#[tokio::test]
+async fn a_call_queued_behind_a_running_command_is_recorded_as_not_executed_when_the_run_is_cancelled() {
+    let fake = FakeDocker::new();
+    fake.answer("cmd.hang", "");
+    let bash = BashTool {
+        executor: Arc::new(ContainerExecutor::start(fake.config()).await.unwrap()),
+        ..BashTool::default()
+    };
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::tool_calls(vec![
+            ("c1", "bash", json!({"command": "sleep 30"})),
+            ("c2", "bash", json!({"command": "echo next"})),
+        ]),
+        FauxStep::text("done"),
+    ]));
+    let (mut runner, _events) = RunnerSetup::new(config(provider, vec![Arc::new(bash)])).build();
+    let cancel = CancellationToken::new();
+
+    let cancelling = async {
+        assert!(eventually(Duration::from_secs(5), || fake.execs("zx-agent-run").len() == 1).await);
+        cancel.cancel();
+    };
+    let (report, ()) = tokio::join!(runner.run("go", &cancel), cancelling);
+    assert_eq!(report.outcome, RunOutcome::Aborted);
+    // The next run gives the calls left without a result one, from what the session recorded.
+    runner.run("again", &CancellationToken::new()).await;
+
+    let results: Vec<(String, String)> = runner
+        .session()
+        .messages()
+        .into_iter()
+        .filter_map(|message| match message {
+            Message::ToolResult(result) => Some((result.tool_call_id, result.content)),
+            Message::System(_) | Message::User { .. } | Message::Assistant(_) => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 2, "{results:?}");
+    assert_eq!(results[0].0, "c1");
+    assert!(results[0].1.starts_with("Interrupted: "), "{results:?}");
+    // The second call waited for the first one and never ran, so it changed nothing.
+    assert_eq!(
+        results[1],
+        (
+            "c2".to_string(),
+            "Not executed: the agent stopped before this call started, so it had no effect. Run it again if it is still needed."
+                .to_string()
+        )
+    );
+    assert_eq!(fake.execs("zx-agent-run").len(), 1);
+}
+
+#[tokio::test]
+async fn commands_run_with_the_shell_checked_at_start() {
+    let fake = FakeDocker::new();
+    let config = ContainerConfig {
+        shell: "zsh".into(),
+        ..fake.config()
+    };
+    let executor = ContainerExecutor::start(config).await.unwrap();
+    let workspace = fake.workspace();
+    // A tool configured with another shell, such as `BashTool::shell` left at its default.
+    let request = ShellCommand {
+        shell: "bash",
+        command: "echo hi",
+        cwd: &workspace,
+        timeout: Duration::from_secs(10),
+        hidden_env: &[],
+    };
+
+    executor.run(&request, &CancellationToken::new()).await.unwrap();
+
+    let probe = &fake.execs("zx-agent-probe")[0];
+    assert_eq!(after(probe, "zx-agent-probe")[0], "zsh");
+    let call = &fake.execs("zx-agent-run")[0];
+    assert_eq!(after(call, "zx-agent-run"), ["zsh".to_string(), "echo hi".to_string()]);
 }
 
 #[tokio::test]
@@ -870,6 +972,35 @@ async fn a_container_that_cannot_start_stops_the_run_before_any_request() {
     assert!(stderr.contains("cannot start the container"), "{stderr}");
     assert!(stderr.contains("Unable to find image 'fake:1' locally"), "{stderr}");
     assert!(server.requests().is_empty());
+}
+
+#[tokio::test]
+async fn a_container_that_cannot_start_leaves_no_session_file() {
+    let fake = FakeDocker::new();
+    fake.answer("run.fail", "Unable to find image 'fake:1' locally");
+    let workspace = fake.workspace();
+    let sessions = tempfile::tempdir().unwrap();
+    let session = sessions.path().join("s.jsonl");
+    let server = MockServer::start(vec![]).await;
+
+    let output = zx_run(
+        &server,
+        &workspace,
+        Some(fake.dir.path()),
+        &[
+            "--execution",
+            "container",
+            "--container-image",
+            "fake:1",
+            "--session",
+            session.to_str().unwrap(),
+            "go",
+        ],
+    )
+    .await;
+
+    assert_eq!(output.status.code(), Some(2), "{}", stderr_of(&output));
+    assert!(!session.exists(), "a failed start left {}", session.display());
 }
 
 #[tokio::test]

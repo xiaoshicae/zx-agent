@@ -252,6 +252,44 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
   - 既有测试未改。
 - 本机 macOS 验证：stable 与 Rust 1.88.0 各 659 项通过（基线 651 项，在 `b169275` 上实测），6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过；设置 `ZX_DOCKER_TEST_IMAGE=debian:bookworm-slim` 时容器测试 30 项通过。自查脚本比基线多两处 `let _ =`，都在写入线程中（存储已不再等待时丢弃写入结果；回收线程时忽略 join 的结果），旁边写明了理由。`run --help`、`chat --help`、`serve --help` 与基线逐字节相同。未新增依赖，`Cargo.toml`、`Cargo.lock` 未改动。
 
+四、输出与诊断（已完成，PR #35）：
+
+| 项目 | 修正 |
+|---|---|
+| bash 的 stdout 与 stderr | 两路输出各自截尾、各带截断说明：两路都长时 stdout 占预算的四分之三、stderr 占四分之一，一路用不完的部分让给另一路；`[stderr]` 标记始终保留。此前先拼接再整体截尾，stderr 较大时 stdout 与标记都被截掉 |
+| 文本输出的诊断 | `run` 与 chat 的文本模式打印钩子失败（`[hook] <钩子> <阶段> failed: <原因>`），两份渲染共用同一个函数。此前两者都忽略 `hook_failed`，例如脱敏失败而丢弃输出时，巡检日志里看不到原因 |
+| stdout 关闭 | 文本模式把最终回答写到已关闭的 stdout 时忽略写入错误，退出码仍由运行结果决定（JSONL 输出原本如此）。此前 `println!` panic，退出码变为 101 |
+| 零超时 | `--tool-timeout-secs`、`--idle-timeout-secs` 至少为 1；`OpenAiCompatible::new` 拒绝为零的空闲与连接超时。此前 0 表示立即超时，每条命令或每个请求都失败 |
+| 2xx 的 JSON 响应 | `Content-Type` 为 `application/json` 时读取有界的正文：含 `error` 对象时按 provider 错误报告其信息，否则按协议错误附上正文摘录（服务端可能不支持流式）。其他类型仍按事件流读取，以兼容标注不规范的流式服务。此前一律报 "stream ended without a finish_reason"，真正的原因（例如模型不存在）丢失 |
+| 不合法的工具参数 | `argumentsError` 附上模型发出的原文（至多 2 KiB），与 pi 一致，会话与模型都能看到。此前只有 `{}` 与解析错误 |
+| `finish_reason` 的重试 | 未知的结束原因以 `finish_reason:<值>` 作为错误码，不再与流内错误码同名，因此按 PR #16 的决定一律不重试。此前 `timeout` 等取值因与可重试的错误码同名而被重试 |
+| 容器与会话文件 | 先启动容器，再创建会话文件；容器启动失败时不留下只有头部的会话文件。此前顺序相反（为已经取消的遮蔽而设） |
+| 容器执行器 | 执行器声明执行方式（`Executor::execution_mode`，默认并行）：容器执行器为串行，bash 与 read_file 随所用的执行器；容器内的命令总用启动时检查过的 shell。此前工具声明并行而执行器内部排队：整批的开始记录先写完，运行在排队期间被取消时，从未执行的调用被报告为"可能已改变状态"，记录的耗时也包含排队时间；SDK 中 `BashTool::shell` 与容器配置不一致时，启动检查与实际执行用的不是同一个 shell |
+| 整理 | `clip` 合为一处；`profile::read_text` 的实现移到中立的 `text` 模块（`read_text_file`，上限由调用方给出），脱敏使用自己的 64 KiB 上限，不再借用 profile 的（消除 `extensions → profile → presets → extensions` 的依赖环）；`BashTool::execute` 拆出可单测的纯函数；更新过期的文档（presets 模块说明、README 中"尚未实现：容器执行"、规则文件中指向旧位置的引用） |
+
+暂不做：
+- `cli::prepare` 拆分为配置、进程级运行时与每会话三层：改动面大，等 acp 接入时一起设计。
+- FauxProvider 在增量之间响应取消、可脚本化带 `ProviderError` 的失败。
+- 目录登记的密钥文件中出现无法读取的文件时整体丢弃输出：这是"无法过滤时宁可丢弃"的取舍，是否改为跳过需要确认。
+- 审计中写明自动放行的前缀（见一、安全）。
+- provider 契约的兜底（取消后给 provider 的宽限期、`Done`/`Error` 与 `stop_reason` 的一致性检查）。
+
+实施记录（PR #35，基于 `66e1b7b`，含 PR #34）：
+
+- 按上表实施，补充如下：
+  - 钩子失败行中的钩子名是注册时给的名称；未命名时是类型名，例如 `zx_agent::extensions::RedactSecrets`。`run` 与 chat 的其余进度行改由同一个函数生成，输出不变；`[model]` 行仍各自输出，措辞不变。
+  - 2xx 的 JSON 正文与 HTTP 错误的正文按同样的上限读取（8 KiB 与 `--max-response-bytes` 中较小者），读取失败或超时只损失摘录。
+  - 容器执行器：修复前实测（假 docker，第一条命令挂起时取消运行），同一批中排在后面的调用从未执行，却被写成 "Interrupted: … It may have changed state"；修复后它没有开始记录，下一次运行恢复时记为 "Not executed"。
+  - `ShellCommand::shell` 对容器执行器不再生效。CLI 中两处的值原本都是 `bash`，只有 SDK 调用方可能配置成不同的值。
+- 公开 API 的变化：新增 `Executor::execution_mode`（有默认实现，`Parallel`）；`OpenAiCompatible::new` 拒绝为零的 `idle_timeout` 与 `connect_timeout`；未知 `finish_reason` 的错误码由 `<值>` 改为 `finish_reason:<值>`；`argumentsError` 附上原文；新增 `#[doc(hidden)]` 的 `text` 模块，供命令行程序使用，不属于公开 API。会话文件格式与事件格式不变。
+- CLI：`--tool-timeout-secs 0`、`--idle-timeout-secs 0` 改为参数错误（退出码 2）。`run --help`、`chat --help`、`serve --help` 与基线相比，各自只有这两个参数的说明多了 "; at least 1"。
+- 新增测试 18 项，没有删除测试：
+  - 修复前实测失败 14 项：零超时在请求前被拒绝（CLI）与 provider 拒绝零超时；未知 `finish_reason` 不论取值都不重试；不合法的参数附上原文；成功状态下的错误对象与整份 JSON 回答；stderr 很长时 stdout 的回答仍在；容器无法启动时不留会话文件；容器中的工具串行、排队的调用在取消后记为未执行、命令用启动时检查过的 shell；`run` 与 chat 打印钩子失败；stdout 关闭时退出码仍为 0。其中 provider 拒绝零超时与不合法参数两项以反向验证确认：去掉修复后测试即失败，修改已还原；钩子失败的两项在修复前实测失败，断言改写后又做了一次同样的反向验证。
+  - 新接口与新函数 4 项：工具的执行方式随执行器；stdout 与 stderr 的预算分配；`clip` 与 `prefix_within`。
+  - 既有测试的调整：两处期望的错误码由 `<值>` 改为 `finish_reason:<值>`（`openai.rs` 的 `only_known_finish_reasons_succeed`、`tests/openai_mock.rs` 的 `an_unknown_finish_reason_is_a_provider_error_not_a_completed_answer`），属于上表中有意的变化；其余既有测试的断言未改。
+  - 偶发失败的测试（单独提交）：PR #34 新增的 `a_result_not_stored_in_time_stays_inline` 在本 PR 的 Linux CI 上失败一次：结果被存成了文件。它假设零时限总在存储的第一个文件操作完成前到期，但 Tokio 先 poll 被包裹的 future、再看计时器，计时器最早在下一个毫秒刻度触发（`tokio-1.54.1` 的 `time/timeout.rs`、`runtime/time/source.rs`），磁盘快时写入先完成。本机实测：零时限下经阻塞线程池的打开、写入与 flush，300 次中 239 次完成；旧测试在 8 路并发各 100 次的压力下失败 1 次。改为在只有一个阻塞线程的运行时中占住该线程直到钩子返回，存储确定无法按时完成；并给钩子设 10 秒上限，时限失效时测试失败而不是挂住。同样压力下新版 0 次失败；反向验证中把存储时限改为 1 小时，新版在 10 秒时失败。断言与生产代码未改。
+- 本机 macOS 验证：stable 与 Rust 1.88.0 各 677 项通过（基线 659 项，在 `66e1b7b` 上实测），6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过；设置 `ZX_DOCKER_TEST_IMAGE=debian:bookworm-slim` 时容器测试 34 项通过，其中 12 项在真实 Docker 上运行。自查脚本的命中与基线相同（`write_line` 中的 `let _ =` 移入新的 `print_line`，理由不变）。未新增依赖，`Cargo.toml`、`Cargo.lock` 未改动。
+
 下面的 P0–P9 继续按各自验收标准推进。
 
 状态取值：未开始、进行中、已实现待 PR review、已完成。每个阶段完成时勾选任务，并记录完成日期和提交。

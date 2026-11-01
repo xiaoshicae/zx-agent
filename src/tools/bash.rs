@@ -8,13 +8,16 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::truncate::{MAX_BYTES, MAX_LINES, truncate_tail};
-use crate::agent::{Effects, Tool, ToolContext, ToolOutput};
+use crate::agent::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
 use crate::ai::ToolDef;
-use crate::executor::{CommandEnd, Executor, LocalExecutor, ShellCommand};
+use crate::executor::{Captured, CommandEnd, Executor, LocalExecutor, ShellCommand};
 
 /// Runs `<shell> -c <command>` in the working directory.
 pub struct BashTool {
-    /// Shell program, looked up on `PATH`.
+    /// Shell program, looked up on `PATH`. A [`ContainerExecutor`] runs commands with the
+    /// shell of its own configuration instead.
+    ///
+    /// [`ContainerExecutor`]: crate::executor::ContainerExecutor
     pub shell: String,
     /// Timeout when the call does not set `timeout_secs`.
     pub default_timeout: Duration,
@@ -48,6 +51,74 @@ struct Args {
     timeout_secs: Option<u64>,
 }
 
+impl BashTool {
+    /// The limit for one call: what it asks for, else the default, never above the maximum.
+    fn timeout_for(&self, requested_secs: Option<u64>) -> Duration {
+        requested_secs
+            .map(Duration::from_secs)
+            .unwrap_or(self.default_timeout)
+            .min(self.max_timeout)
+    }
+}
+
+/// Of the output budget, the share stderr keeps when both streams are long: the answer is
+/// usually on stdout. Room one stream leaves unused goes to the other.
+const STDERR_SHARE: usize = 4;
+
+/// Split `budget` between stdout and stderr, which need `stdout` and `stderr` of it.
+fn split(budget: usize, stdout: usize, stderr: usize) -> (usize, usize) {
+    let for_stderr = stderr.min((budget / STDERR_SHARE).max(budget.saturating_sub(stdout)));
+    (budget - for_stderr, for_stderr)
+}
+
+/// stdout, then stderr after a `[stderr]` marker, each cut from its start to fit its share
+/// of the budget and noted when cut, so a long stderr never hides stdout or the marker.
+fn streams(stdout: &Captured, stderr: &Captured) -> String {
+    let out = String::from_utf8_lossy(&stdout.bytes);
+    let err = String::from_utf8_lossy(&stderr.bytes);
+    let mut text = String::new();
+    if err.trim().is_empty() {
+        let kept = truncate_tail(&out, MAX_LINES, MAX_BYTES);
+        if kept.truncated || stdout.dropped + stderr.dropped > 0 {
+            text.push_str("[output truncated; showing the end]\n");
+        }
+        text.push_str(&kept.text);
+        return text;
+    }
+    let (out_bytes, err_bytes) = split(MAX_BYTES, out.len(), err.len());
+    let (out_lines, err_lines) = split(MAX_LINES, out.lines().count(), err.lines().count());
+    let kept_out = truncate_tail(&out, out_lines, out_bytes);
+    let kept_err = truncate_tail(&err, err_lines, err_bytes);
+    if kept_out.truncated || stdout.dropped > 0 {
+        text.push_str("[output truncated; showing the end]\n");
+    }
+    text.push_str(&kept_out.text);
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str("[stderr]\n");
+    if kept_err.truncated || stderr.dropped > 0 {
+        text.push_str("[stderr truncated; showing the end]\n");
+    }
+    text.push_str(&kept_err.text);
+    text
+}
+
+/// The closing status line, and whether the call failed.
+fn status(end: &CommandEnd, limit: Duration) -> (String, bool) {
+    match end {
+        CommandEnd::Exited(0) => ("[exit code: 0]".to_string(), false),
+        CommandEnd::Exited(code) => (format!("[exit code: {code}]"), true),
+        CommandEnd::Signaled => ("[terminated by a signal]".to_string(), true),
+        CommandEnd::WaitFailed(e) => (format!("[failed to wait for the process: {e}]"), true),
+        CommandEnd::TimedOut => (
+            format!("[timed out after {}s; process group killed]", limit.as_secs()),
+            true,
+        ),
+        CommandEnd::Cancelled => ("[cancelled; process group killed]".to_string(), true),
+    }
+}
+
 /// The same checks run before policy and approval, and again for direct SDK calls.
 fn parse(args: &Value) -> Result<Args, String> {
     let args = Args::deserialize(args).map_err(|e| format!("invalid arguments: {e}"))?;
@@ -65,6 +136,11 @@ fn parse(args: &Value) -> Result<Args, String> {
 impl Tool for BashTool {
     fn name(&self) -> &str {
         super::BASH
+    }
+
+    /// The mode of the executor: calls run one at a time when it handles one at a time.
+    fn execution_mode(&self) -> ExecutionMode {
+        self.executor.execution_mode()
     }
 
     /// Commands can change anything the process can reach, so every call is a side effect.
@@ -102,12 +178,7 @@ impl Tool for BashTool {
 
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
         let args = parse(&args)?;
-        let limit = args
-            .timeout_secs
-            .map(Duration::from_secs)
-            .unwrap_or(self.default_timeout)
-            .min(self.max_timeout);
-
+        let limit = self.timeout_for(args.timeout_secs);
         let request = ShellCommand {
             shell: &self.shell,
             command: &args.command,
@@ -116,38 +187,11 @@ impl Tool for BashTool {
             hidden_env: &self.hidden_env,
         };
         let output = self.executor.run(&request, &ctx.cancel).await?;
-        let (stdout, stderr) = (output.stdout, output.stderr);
-        let mut text = String::from_utf8_lossy(&stdout.bytes).into_owned();
-        let stderr_text = String::from_utf8_lossy(&stderr.bytes);
-        if !stderr_text.trim().is_empty() {
-            if !text.is_empty() && !text.ends_with('\n') {
-                text.push('\n');
-            }
-            text.push_str("[stderr]\n");
-            text.push_str(&stderr_text);
-        }
-
-        let truncated = truncate_tail(&text, MAX_LINES, MAX_BYTES);
-        let mut content = String::new();
-        if truncated.truncated || stdout.dropped + stderr.dropped > 0 {
-            content.push_str("[output truncated; showing the end]\n");
-        }
-        content.push_str(&truncated.text);
+        let mut content = streams(&output.stdout, &output.stderr);
         if !content.is_empty() && !content.ends_with('\n') {
             content.push('\n');
         }
-
-        let (status, is_error) = match output.end {
-            CommandEnd::Exited(0) => ("[exit code: 0]".to_string(), false),
-            CommandEnd::Exited(code) => (format!("[exit code: {code}]"), true),
-            CommandEnd::Signaled => ("[terminated by a signal]".to_string(), true),
-            CommandEnd::WaitFailed(e) => (format!("[failed to wait for the process: {e}]"), true),
-            CommandEnd::TimedOut => (
-                format!("[timed out after {}s; process group killed]", limit.as_secs()),
-                true,
-            ),
-            CommandEnd::Cancelled => ("[cancelled; process group killed]".to_string(), true),
-        };
+        let (status, is_error) = status(&output.end, limit);
         content.push_str(&status);
         Ok(ToolOutput {
             content,
@@ -169,6 +213,33 @@ mod tests {
             cwd: std::env::temp_dir(),
             cancel: CancellationToken::new(),
         }
+    }
+
+    #[test]
+    fn stderr_keeps_a_quarter_of_the_budget_unless_stdout_leaves_it_more() {
+        // Short stdout: stderr may use whatever stdout does not need.
+        assert_eq!(split(100, 10, 500), (10, 90));
+        // Both long: stderr keeps a quarter.
+        assert_eq!(split(100, 500, 500), (75, 25));
+        // Short stderr: stdout gets the rest.
+        assert_eq!(split(100, 500, 5), (95, 5));
+    }
+
+    #[tokio::test]
+    async fn a_large_stderr_never_hides_the_answer_on_stdout() {
+        let tool = BashTool::default();
+        let command = "printf 'ANSWER-ON-STDOUT\\n'; head -c 60000 /dev/zero | tr '\\0' 'e' >&2";
+
+        let output = tool.execute(json!({ "command": command }), &ctx()).await.unwrap();
+
+        assert!(
+            output.content.starts_with("ANSWER-ON-STDOUT\n"),
+            "{}",
+            &output.content[..80]
+        );
+        assert!(output.content.contains("\n[stderr]\n"));
+        assert!(output.content.contains("[stderr truncated; showing the end]"));
+        assert!(output.content.len() <= MAX_BYTES + 200, "{}", output.content.len());
     }
 
     #[tokio::test]

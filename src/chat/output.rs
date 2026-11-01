@@ -7,9 +7,10 @@ use zx_agent::agent::{AgentEvent, Event, EventSink};
 use zx_agent::ai::{Delta, Message, StopReason};
 use zx_agent::compaction::{self, Outcome};
 use zx_agent::runner::RunReport;
+use zx_agent::text::clip;
 
 use crate::cli::OutputMode;
-use crate::{JsonlEvents, clip, write_line};
+use crate::{JsonlEvents, write_line};
 
 pub(super) struct Output {
     mode: OutputMode,
@@ -88,62 +89,80 @@ impl EventSink for Output {
                     eprintln!("[model] response reached the output token limit");
                 }
             }
-            AgentEvent::ToolExecutionStart { tool_name, args, .. } => eprintln!(
-                "[tool] {} {}",
-                visible(tool_name),
-                visible(&clip(&args.to_string(), 300))
-            ),
-            AgentEvent::ToolExecutionEnd {
-                tool_name,
-                is_error,
-                duration_ms,
-                ..
-            } => {
-                let status = if *is_error { "error" } else { "ok" };
-                let duration = duration_ms.map(|ms| format!(" {ms}ms")).unwrap_or_default();
-                eprintln!("[tool] {} -> {status}{duration}", visible(tool_name));
+            // Everything else is printed as `run` prints it; `progress_line` covers every event.
+            other => {
+                if let Some(line) = progress_line(other) {
+                    eprintln!("{line}");
+                }
             }
-            AgentEvent::RetryScheduled {
-                attempt,
-                max_retries,
-                delay_ms,
-                error,
-            } => eprintln!("[retry] {attempt}/{max_retries} in {delay_ms}ms: {}", visible(error)),
-            AgentEvent::CompactionStart { input_bytes, .. } => {
-                eprintln!("[compact] summarizing {input_bytes} context bytes")
-            }
-            AgentEvent::CompactionEnd {
-                input_bytes,
-                output_bytes,
-                ..
-            } => eprintln!("[compact] {input_bytes} -> {output_bytes} context bytes"),
-            AgentEvent::CompactionFailed { error, .. } => eprintln!("[compact] {}", visible(error)),
-            AgentEvent::ToolCallRecovered {
-                tool_call_id,
-                tool_name,
-                state,
-            } => eprintln!(
-                "[recover] {} {}: {}",
-                visible(tool_name),
-                visible(tool_call_id),
-                state.describe()
-            ),
-            AgentEvent::RunStart { .. }
-            | AgentEvent::RunEnd { .. }
-            | AgentEvent::AgentStart { .. }
-            | AgentEvent::TurnStart { .. }
-            | AgentEvent::RequestStart { .. }
-            | AgentEvent::MessageStart { .. }
-            | AgentEvent::MessageUpdate { .. }
-            | AgentEvent::MessageEnd { .. }
-            | AgentEvent::ToolDecision { .. }
-            | AgentEvent::ApprovalRequested { .. }
-            | AgentEvent::ApprovalResolved { .. }
-            | AgentEvent::TurnEnd { .. }
-            | AgentEvent::AgentEnd { .. }
-            | AgentEvent::ContextEdited { .. }
-            | AgentEvent::HookFailed { .. } => {}
         }
+    }
+}
+
+/// The stderr line for `event` in text output, shared by `run` and chat. Names, arguments and
+/// errors come from the model, servers or hooks, so they are escaped. Messages are left to
+/// each caller, which shows answers in its own way.
+pub(crate) fn progress_line(event: &AgentEvent) -> Option<String> {
+    match event {
+        AgentEvent::ToolExecutionStart { tool_name, args, .. } => Some(format!(
+            "[tool] {} {}",
+            visible(tool_name),
+            visible(&clip(&args.to_string(), 300))
+        )),
+        AgentEvent::ToolExecutionEnd {
+            tool_name,
+            is_error,
+            duration_ms,
+            ..
+        } => {
+            let status = if *is_error { "error" } else { "ok" };
+            let duration = duration_ms.map(|ms| format!(" {ms}ms")).unwrap_or_default();
+            Some(format!("[tool] {} -> {status}{duration}", visible(tool_name)))
+        }
+        AgentEvent::RetryScheduled {
+            attempt,
+            max_retries,
+            delay_ms,
+            error,
+        } => Some(format!(
+            "[retry] {attempt}/{max_retries} in {delay_ms}ms: {}",
+            visible(error)
+        )),
+        AgentEvent::CompactionStart { input_bytes, .. } => {
+            Some(format!("[compact] summarizing {input_bytes} context bytes"))
+        }
+        AgentEvent::CompactionEnd {
+            input_bytes,
+            output_bytes,
+            ..
+        } => Some(format!("[compact] {input_bytes} -> {output_bytes} context bytes")),
+        AgentEvent::CompactionFailed { error, .. } => Some(format!("[compact] {}", visible(error))),
+        AgentEvent::ToolCallRecovered {
+            tool_call_id,
+            tool_name,
+            state,
+        } => Some(format!(
+            "[recover] {} {}: {}",
+            visible(tool_name),
+            visible(tool_call_id),
+            state.describe()
+        )),
+        // The error names the hook and the phase: "<hook> after_tool failed: <reason>".
+        AgentEvent::HookFailed { error, .. } => Some(format!("[hook] {}", visible(error))),
+        AgentEvent::RunStart { .. }
+        | AgentEvent::RunEnd { .. }
+        | AgentEvent::AgentStart { .. }
+        | AgentEvent::TurnStart { .. }
+        | AgentEvent::RequestStart { .. }
+        | AgentEvent::MessageStart { .. }
+        | AgentEvent::MessageUpdate { .. }
+        | AgentEvent::MessageEnd { .. }
+        | AgentEvent::ToolDecision { .. }
+        | AgentEvent::ApprovalRequested { .. }
+        | AgentEvent::ApprovalResolved { .. }
+        | AgentEvent::TurnEnd { .. }
+        | AgentEvent::AgentEnd { .. }
+        | AgentEvent::ContextEdited { .. } => None,
     }
 }
 

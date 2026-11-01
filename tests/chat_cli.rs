@@ -1220,3 +1220,39 @@ async fn resuming_an_interrupted_session_reports_the_recovered_call_without_runn
     );
     assert!(!dir.path().join("ran-again").exists(), "the command ran again");
 }
+
+#[tokio::test]
+async fn a_hook_failure_is_reported_with_its_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let token = dir.path().join("token");
+    std::fs::write(&token, "token-value").unwrap();
+    // The command leaves the secret file unreadable as text: redaction fails and discards
+    // the output.
+    let server = MockServer::start(vec![
+        Reply::bash("c", r"printf '\377' > token; echo hi"),
+        Reply::text("done"),
+    ])
+    .await;
+
+    let output = run(
+        &server,
+        dir.path(),
+        &["--tools", "bash", "--secret-file", token.to_str().unwrap()],
+        "go\n/approve 1 once\n/quit\n",
+    )
+    .await;
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    // The hook's default name is its type name, whose exact form Rust does not guarantee.
+    let reason = format!(
+        "RedactSecrets after_tool failed: cannot read a secret file to redact tool output: {} is not UTF-8",
+        token.display()
+    );
+    assert!(
+        stderr(&output)
+            .lines()
+            .any(|line| line.starts_with("[hook] ") && line.contains(&reason)),
+        "{}",
+        stderr(&output)
+    );
+}

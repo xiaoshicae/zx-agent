@@ -18,6 +18,7 @@ use super::types::{
     AssistantMessage, ContentBlock, Delta, Message, ProviderError, Request, StopReason, StreamEvent, Usage,
     duration_ms, now_ms,
 };
+use crate::text::{clip, prefix_within};
 
 /// Default maximum raw SSE response bytes per model request, including reasoning.
 pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
@@ -113,6 +114,12 @@ impl OpenAiCompatible {
         anyhow::ensure!(
             config.max_sse_event_bytes > 0,
             "max_sse_event_bytes must be greater than zero"
+        );
+        // Zero would time out every request at once rather than disable the limit.
+        anyhow::ensure!(!config.idle_timeout.is_zero(), "idle_timeout must be greater than zero");
+        anyhow::ensure!(
+            !config.connect_timeout.is_zero(),
+            "connect_timeout must be greater than zero"
         );
         let mut builder = reqwest::Client::builder().connect_timeout(config.connect_timeout);
         if !config.use_system_proxy {
@@ -236,15 +243,7 @@ async fn stream_response(
             .and_then(|value| value.trim().parse::<u64>().ok())
             .map(|seconds| seconds.saturating_mul(1000));
         // Body errors only lose diagnostics; the HTTP status remains authoritative.
-        let bytes = match tokio::time::timeout(
-            idle,
-            read_error_body(response, MAX_ERROR_BODY_BYTES.min(config.max_response_bytes)),
-        )
-        .await
-        {
-            Ok(Ok(bytes)) => bytes,
-            Ok(Err(_)) | Err(_) => Vec::new(),
-        };
+        let bytes = diagnostic_body(response, idle, config.max_response_bytes).await;
         let code = serde_json::from_slice::<Value>(&bytes)
             .ok()
             .and_then(|body| body.get("error").and_then(error_code));
@@ -256,6 +255,42 @@ async fn stream_response(
                 retry_after_ms,
             },
             format!("HTTP {}: {}", status.as_u16(), clip(text.trim(), 2000)),
+        ));
+    }
+
+    // A gateway can put an error object under a success status, and a server that ignores
+    // `stream: true` sends the whole answer as JSON. Report what such a body says instead of
+    // a stream that ended without a finish_reason. Other content types are read as a stream,
+    // so a server that labels its stream oddly keeps working.
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if content_type.starts_with("application/json") {
+        // Body errors only lose the excerpt; the content type already rules out a stream.
+        let bytes = diagnostic_body(response, idle, config.max_response_bytes).await;
+        let body = serde_json::from_slice::<Value>(&bytes).ok();
+        if let Some(error) = body.as_ref().and_then(|body| body.get("error")) {
+            let message = error
+                .get("message")
+                .and_then(Value::as_str)
+                .map_or_else(|| error.to_string(), str::to_string);
+            return Err(Failure::error(
+                ProviderError::Provider {
+                    code: error_code(error),
+                },
+                format!("provider error: {}", clip(message.trim(), 2000)),
+            ));
+        }
+        let text = String::from_utf8_lossy(&bytes);
+        return Err(Failure::error(
+            ProviderError::Protocol,
+            format!(
+                "the server answered with JSON instead of an event stream; it may not support streaming: {}",
+                clip(text.trim(), 2000)
+            ),
         ));
     }
 
@@ -348,6 +383,21 @@ fn transport_failure(operation: &str, error: &reqwest::Error) -> Failure {
     Failure::error(details, format!("{operation}: {}", with_causes(error)))
 }
 
+/// The start of a body read only to explain a failure, within `idle`. A body that cannot be
+/// read in time loses only the explanation, so it reads as empty; callers say why that is
+/// acceptable.
+async fn diagnostic_body(response: reqwest::Response, idle: Duration, max_response_bytes: usize) -> Vec<u8> {
+    match tokio::time::timeout(
+        idle,
+        read_error_body(response, MAX_ERROR_BODY_BYTES.min(max_response_bytes)),
+    )
+    .await
+    {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(_)) | Err(_) => Vec::new(),
+    }
+}
+
 async fn read_error_body(response: reqwest::Response, max_bytes: usize) -> Result<Vec<u8>, reqwest::Error> {
     let mut stream = response.bytes_stream();
     let mut bytes = Vec::new();
@@ -377,13 +427,6 @@ fn with_causes(error: &dyn std::error::Error) -> String {
         source = cause.source();
     }
     text
-}
-
-fn clip(text: &str, max_chars: usize) -> String {
-    match text.char_indices().nth(max_chars) {
-        Some((index, _)) => format!("{}...", &text[..index]),
-        None => text.to_string(),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -810,8 +853,10 @@ impl Accumulator {
             model: self.model.clone(),
             usage: self.usage.clone(),
             stop_reason,
+            // Prefixed so that an ending reason never shares a name with an error code that
+            // is retried, such as "timeout": an unknown ending is not retried (PR #16).
             provider_error: error_message.is_some().then(|| ProviderError::Provider {
-                code: Some(reason.to_string()),
+                code: Some(format!("finish_reason:{reason}")),
             }),
             error_message,
             timestamp: self.timestamp,
@@ -834,13 +879,27 @@ impl Accumulator {
     }
 }
 
+/// The most of an invalid argument text that its error keeps: enough for the model to see
+/// what it sent (pi: `parseToolCallArguments` adds the whole text), bounded so the session
+/// and the next request do not grow with it.
+const MAX_RECEIVED_ARGUMENTS: usize = 2048;
+
 fn parse_arguments(raw: &str) -> (Value, Option<String>) {
     if raw.trim().is_empty() {
         return (json!({}), None);
     }
     match serde_json::from_str::<Value>(raw) {
         Ok(value) => (value, None),
-        Err(e) => (json!({}), Some(format!("arguments are not valid JSON: {e}"))),
+        Err(e) => {
+            let received = prefix_within(raw, MAX_RECEIVED_ARGUMENTS);
+            let cut = if received.len() < raw.len() { "…" } else { "" };
+            (
+                json!({}),
+                Some(format!(
+                    "arguments are not valid JSON: {e}\n\nReceived arguments:\n{received}{cut}"
+                )),
+            )
+        }
     }
 }
 
@@ -895,6 +954,23 @@ mod tests {
         assert!(acc.finish().is_err());
         let failed = acc.failure(StopReason::Error, "cut off");
         assert!(failed.tool_calls()[0].arguments_error.is_some());
+    }
+
+    #[test]
+    fn invalid_tool_arguments_keep_what_the_model_sent() {
+        let raw = "{\"command\":\"echo \"quoted\" text\"}";
+        let (arguments, error) = parse_arguments(raw);
+
+        assert_eq!(arguments, json!({}));
+        let error = error.unwrap();
+        assert!(error.starts_with("arguments are not valid JSON: "), "{error}");
+        assert!(error.ends_with(&format!("\n\nReceived arguments:\n{raw}")), "{error}");
+
+        // A long one is cut at a character boundary, so the error stays bounded.
+        let long = format!("{{\"text\":\"{}", "界".repeat(2000));
+        let error = parse_arguments(&long).1.unwrap();
+        assert!(error.len() < MAX_RECEIVED_ARGUMENTS + 200, "{}", error.len());
+        assert!(error.ends_with("…"), "{error}");
     }
 
     #[test]
@@ -956,10 +1032,23 @@ mod tests {
             assert_eq!(
                 message.provider_error,
                 Some(ProviderError::Provider {
-                    code: Some(reason.to_string())
+                    code: Some(format!("finish_reason:{reason}"))
                 })
             );
             assert!(message.error_message.is_some(), "{reason}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_finish_reason_is_not_retried_whatever_its_name() {
+        for reason in ["timeout", "server_error", "rate_limit_exceeded", "network_error"] {
+            let mut acc = Accumulator::new("p", "m", 1);
+            acc.apply(&json!({"choices":[{"delta":{"content":"x"},"finish_reason":reason}]}))
+                .unwrap();
+            let message = acc.finish().unwrap();
+
+            assert_eq!(message.stop_reason, StopReason::Error, "{reason}");
+            assert!(!crate::ai::retry::is_retryable(&message), "{reason}");
         }
     }
 
@@ -1313,6 +1402,26 @@ mod tests {
             let provider = OpenAiCompatible::new(live.clone()).unwrap();
             let replayed = replay_body(&request, provider.name(), &provider.request_options()).unwrap();
             assert_eq!(replayed, build_body(&request, &live), "{system_updates:?}");
+        }
+    }
+
+    #[test]
+    fn zero_timeouts_are_rejected() {
+        for config in [
+            OpenAiConfig {
+                idle_timeout: Duration::ZERO,
+                ..OpenAiConfig::default()
+            },
+            OpenAiConfig {
+                connect_timeout: Duration::ZERO,
+                ..OpenAiConfig::default()
+            },
+        ] {
+            let error = OpenAiCompatible::new(config).err().expect("a zero timeout is rejected");
+            assert!(
+                error.to_string().contains("timeout must be greater than zero"),
+                "{error}"
+            );
         }
     }
 

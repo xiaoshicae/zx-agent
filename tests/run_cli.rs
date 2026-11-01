@@ -236,3 +236,40 @@ async fn jsonl_events_carry_the_envelope_of_their_run() {
         (json!("run_end"), json!("ok"))
     );
 }
+
+#[tokio::test]
+async fn a_zero_timeout_is_rejected_before_any_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::text("never sent")]).await;
+
+    for flag in ["--tool-timeout-secs", "--idle-timeout-secs"] {
+        let output = run(&server, dir.path()).args([flag, "0"]).output().await.unwrap();
+
+        assert_eq!(output.status.code(), Some(2), "{flag}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(flag), "{flag}: {stderr}");
+    }
+    assert!(server.requests().is_empty());
+}
+
+#[tokio::test]
+async fn a_closed_stdout_leaves_the_exit_code_to_the_outcome() {
+    let dir = tempfile::tempdir().unwrap();
+    for mode in ["text", "jsonl"] {
+        let server = MockServer::start(vec![Reply::text("the answer")]).await;
+        let mut child = run(&server, dir.path())
+            .args(["--output", mode])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Whoever was to read the output is gone before the run starts.
+        drop(child.stdout.take());
+
+        let output = child.wait_with_output().await.unwrap();
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(0), "{mode}: {stderr}");
+        assert_eq!(server.requests().len(), 1, "{mode}");
+    }
+}

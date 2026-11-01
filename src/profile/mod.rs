@@ -4,10 +4,6 @@
 mod context;
 pub mod skills;
 
-use std::fs::OpenOptions;
-use std::io::Read;
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -16,6 +12,7 @@ use serde::Deserialize;
 
 use crate::presets::{assistant, troubleshoot};
 use crate::runner::Limits;
+use crate::text::read_text_file;
 use crate::tools::BUILTIN_TOOL_NAMES;
 use crate::{compaction, output_store};
 
@@ -422,33 +419,7 @@ struct RawContext {
 /// Read a regular UTF-8 configuration file within [`MAX_FILE_BYTES`]. This is bounded,
 /// synchronous startup I/O; invalid files and read failures preserve their path in errors.
 pub fn read_text(path: &Path) -> Result<String> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    // Inspect the opened descriptor without blocking if a path is a FIFO.
-    #[cfg(unix)]
-    options.custom_flags(libc::O_NONBLOCK);
-    let file = options
-        .open(path)
-        .with_context(|| format!("cannot read {}", path.display()))?;
-    let meta = file
-        .metadata()
-        .with_context(|| format!("cannot inspect {}", path.display()))?;
-    ensure!(meta.is_file(), "{} is not a regular file", path.display());
-    ensure!(
-        meta.len() <= MAX_FILE_BYTES,
-        "{} exceeds {MAX_FILE_BYTES} bytes",
-        path.display()
-    );
-    let mut bytes = Vec::new();
-    file.take(MAX_FILE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .with_context(|| format!("cannot read {}", path.display()))?;
-    ensure!(
-        u64::try_from(bytes.len())? <= MAX_FILE_BYTES,
-        "{} exceeds {MAX_FILE_BYTES} bytes",
-        path.display()
-    );
-    String::from_utf8(bytes).with_context(|| format!("{} is not UTF-8", path.display()))
+    read_text_file(path, MAX_FILE_BYTES)
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use zx_agent::agent::{Tool, ToolContext};
+use zx_agent::agent::{ExecutionMode, Tool, ToolContext};
 use zx_agent::executor::{Captured, CommandEnd, CommandOutput, Executor, ShellCommand};
 use zx_agent::tools::{BashTool, ReadFileTool};
 
@@ -166,4 +166,42 @@ async fn read_file_reads_the_resolved_path_through_its_executor() {
             max_bytes: 64,
         }]
     );
+}
+
+/// An executor that handles one call at a time. The test never asks it to do anything.
+struct OneAtATime;
+
+#[async_trait]
+impl Executor for OneAtATime {
+    fn execution_mode(&self) -> ExecutionMode {
+        ExecutionMode::Sequential
+    }
+
+    async fn run(&self, _command: &ShellCommand<'_>, _cancel: &CancellationToken) -> Result<CommandOutput, String> {
+        Err("not used".into())
+    }
+
+    async fn read_file(&self, _path: &Path, _max_bytes: u64) -> Result<Vec<u8>, String> {
+        Err("not used".into())
+    }
+}
+
+#[test]
+fn tools_declare_the_execution_mode_of_their_executor() {
+    // On this machine, and with any executor that does not say otherwise, calls may overlap.
+    assert_eq!(BashTool::default().execution_mode(), ExecutionMode::Parallel);
+    assert_eq!(ReadFileTool::default().execution_mode(), ExecutionMode::Parallel);
+
+    let executor: Arc<dyn Executor> = Arc::new(OneAtATime);
+    let bash = BashTool {
+        executor: Arc::clone(&executor),
+        ..BashTool::default()
+    };
+    let read = ReadFileTool {
+        executor,
+        ..ReadFileTool::default()
+    };
+
+    assert_eq!(bash.execution_mode(), ExecutionMode::Sequential);
+    assert_eq!(read.execution_mode(), ExecutionMode::Sequential);
 }
