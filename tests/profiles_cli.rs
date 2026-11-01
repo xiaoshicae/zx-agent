@@ -456,6 +456,53 @@ async fn invalid_configuration_exits_2_without_a_model_request_or_session_file()
     }
 }
 
+/// The description printed under `flag` by `<mode> --help`.
+fn flag_help(mode: &str, flag: &str) -> String {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_zx-agent"))
+        .args([mode, "--help"])
+        .output()
+        .unwrap();
+    let help = String::from_utf8(output.stdout).unwrap();
+    let mut lines = help
+        .lines()
+        .skip_while(|line| !line.trim_start().starts_with(&format!("{flag} <")));
+    assert!(lines.next().is_some(), "{mode} --help lists {flag}");
+    lines
+        .take_while(|line| !line.trim_start().starts_with('-') && !line.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[test]
+fn omitted_budget_flags_are_documented_as_profile_values() {
+    for (mode, flag) in [
+        ("run", "--max-turns"),
+        ("run", "--timeout-secs"),
+        ("run", "--continue-on-length"),
+        ("chat", "--max-turns"),
+        ("chat", "--timeout-secs"),
+    ] {
+        // A parser default here would claim a value that a non-default profile replaces.
+        let help = flag_help(mode, flag);
+        assert!(!help.contains("[default:"), "{mode} {flag}: {help}");
+        assert!(help.contains("profile"), "{mode} {flag}: {help}");
+    }
+}
+
+#[tokio::test]
+async fn invalid_provider_settings_exit_2_without_a_session_file() {
+    for args in [["--max-response-bytes", "0"], ["--max-sse-event-bytes", "0"]] {
+        let dir = tempfile::tempdir().unwrap();
+        let server = MockServer::start(vec![]).await;
+        let mut all = args.to_vec();
+        all.extend(["--session", "audit.jsonl", "go"]);
+        let output = run(&server, dir.path(), &all).await;
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {}", stderr(&output));
+        assert!(server.requests().is_empty());
+        assert!(!dir.path().join("audit.jsonl").exists(), "{args:?}");
+    }
+}
+
 #[tokio::test]
 async fn project_context_is_scoped_to_cwd_and_recorded_in_the_audit_log() {
     let dir = tempfile::tempdir().unwrap();

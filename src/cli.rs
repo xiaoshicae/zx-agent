@@ -5,8 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use clap::parser::ValueSource;
-use clap::{ArgMatches, Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use zx_agent::agent::{CommandPolicy, Decision, LoopConfig, LoopSpec, Tool};
 use zx_agent::ai::openai::{DEFAULT_MAX_RESPONSE_BYTES, OpenAiCompatible, OpenAiConfig, SystemUpdates};
@@ -17,7 +16,6 @@ use zx_agent::executor::{ContainerConfig, ContainerExecutor, Executor, LocalExec
 use zx_agent::extensions::RedactSecrets;
 use zx_agent::output_store::{self, OutputStore, ReadOutputTool, SpillOutputs};
 use zx_agent::policy::{PolicyHook, Rule, RuleMatcher, RulePolicy};
-use zx_agent::presets::troubleshoot;
 use zx_agent::profile::skills::{ReadSkillTool, TOOL_NAME};
 use zx_agent::profile::{Builtin, ContainerSettings, Execution, Profile};
 use zx_agent::prompt::{build_system_prompt, container_environment_section, environment_section};
@@ -30,38 +28,6 @@ use zx_agent::tools::{self, BASH};
 pub(crate) struct Cli {
     #[command(subcommand)]
     pub(crate) command: Command,
-}
-
-/// Clap defaults keep the existing help stable. Track explicit values separately so a
-/// value equal to an old default still overrides a profile's different value.
-#[derive(Clone, Copy, Default)]
-pub(crate) struct Explicit {
-    tools: bool,
-    max_turns: bool,
-    timeout_secs: bool,
-    continue_on_length: bool,
-}
-
-impl Explicit {
-    fn from_matches(matches: &ArgMatches, name: &str) -> Self {
-        let explicit = |id| matches.value_source(id) == Some(ValueSource::CommandLine);
-        Self {
-            tools: explicit("tools"),
-            max_turns: explicit("max_turns"),
-            timeout_secs: explicit("timeout_secs"),
-            continue_on_length: name == "run" && explicit("continue_on_length"),
-        }
-    }
-}
-
-pub(crate) fn parse() -> (Cli, Explicit) {
-    let matches = Cli::command().get_matches();
-    let explicit = matches
-        .subcommand()
-        .map(|(name, args)| Explicit::from_matches(args, name))
-        .unwrap_or_default();
-    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
-    (cli, explicit)
 }
 
 #[derive(Subcommand)]
@@ -80,21 +46,23 @@ pub(crate) struct RunArgs {
     #[command(flatten)]
     pub(crate) base: BaseArgs,
 
-    /// Maximum model requests for the run, failed attempts included.
-    #[arg(long, default_value_t = troubleshoot::MAX_TURNS)]
-    pub(crate) max_turns: u32,
+    /// Maximum model requests for the run, failed attempts included. Defaults to the
+    /// selected profile.
+    #[arg(long)]
+    pub(crate) max_turns: Option<u32>,
 
-    /// Wall-clock limit for the whole run, in seconds. 0 disables it.
-    #[arg(long, default_value_t = troubleshoot::TIMEOUT_SECS)]
-    pub(crate) timeout_secs: u64,
+    /// Wall-clock limit for the whole run, in seconds. 0 disables it. Defaults to the
+    /// selected profile.
+    #[arg(long)]
+    pub(crate) timeout_secs: Option<u64>,
 
     #[command(flatten)]
     pub(crate) transport: TransportArgs,
 
     /// Times to ask the model to continue an answer cut off by the output token limit.
-    /// Each continuation counts against --max-turns.
-    #[arg(long, default_value_t = troubleshoot::CONTINUE_ON_LENGTH)]
-    pub(crate) continue_on_length: u32,
+    /// Each continuation counts against --max-turns. Defaults to the selected profile.
+    #[arg(long)]
+    pub(crate) continue_on_length: Option<u32>,
 
     #[command(flatten)]
     pub(crate) request: RequestArgs,
@@ -113,13 +81,14 @@ pub(crate) struct ChatArgs {
     #[command(flatten)]
     pub(crate) base: BaseArgs,
 
-    /// Maximum model requests per prompt. Omit to leave it unlimited.
+    /// Maximum model requests per prompt. Defaults to the selected profile.
     #[arg(long)]
     pub(crate) max_turns: Option<u32>,
 
-    /// Wall-clock limit per prompt, in seconds. 0 disables it.
-    #[arg(long, default_value_t = 0)]
-    pub(crate) timeout_secs: u64,
+    /// Wall-clock limit per prompt, in seconds. 0 disables it. Defaults to the selected
+    /// profile.
+    #[arg(long)]
+    pub(crate) timeout_secs: Option<u64>,
 
     #[command(flatten)]
     pub(crate) transport: TransportArgs,
@@ -158,8 +127,8 @@ pub(crate) struct BaseArgs {
     #[arg(long, value_enum, default_value_t = SystemUpdatesArg::Collapse)]
     pub(crate) system_updates: SystemUpdatesArg,
 
-    /// Replace the built-in instructions with the contents of this file. The generated
-    /// <environment> and <command_policy> sections are still appended.
+    /// Replace the selected profile's instructions with the contents of this file. It is read
+    /// once at startup and may be a pipe; the generated sections are still appended.
     #[arg(long)]
     pub(crate) system_prompt_file: Option<PathBuf>,
 
@@ -168,13 +137,8 @@ pub(crate) struct BaseArgs {
     pub(crate) cwd: Option<PathBuf>,
 
     /// Enabled tools, comma-separated. Defaults to the selected profile; explicit values replace it.
-    #[arg(
-        long,
-        value_delimiter = ',',
-        default_value = "bash,read_file",
-        hide_default_value = true
-    )]
-    pub(crate) tools: Vec<String>,
+    #[arg(long, value_delimiter = ',')]
+    pub(crate) tools: Option<Vec<String>>,
 
     /// Allowlisted command prefix for bash, e.g. --allow-cmd "kubectl get". Repeatable.
     /// When set, bash may only run '|' pipelines of allowlisted commands.
@@ -293,13 +257,15 @@ pub(crate) struct SessionOptions<'a> {
     pub(crate) file: SessionFile<'a>,
     pub(crate) default_profile: Builtin,
     pub(crate) budget: Budget,
-    pub(crate) explicit: Explicit,
+    /// Text read once by [`read_instructions`]; `None` keeps the profile's instructions.
+    pub(crate) instructions: Option<&'a str>,
 }
 
+/// Limits given on the command line. `None` keeps the selected profile's value.
 pub(crate) struct Budget {
     pub(crate) max_turns: Option<u32>,
-    pub(crate) timeout_secs: u64,
-    pub(crate) continue_on_length: u32,
+    pub(crate) timeout_secs: Option<u64>,
+    pub(crate) continue_on_length: Option<u32>,
 }
 
 pub(crate) struct PreparedSession {
@@ -313,8 +279,19 @@ pub(crate) struct PreparedSession {
     pub(crate) spill: Option<SpillOutputs>,
 }
 
+/// Read `--system-prompt-file` once, at startup. As before profiles existed, it may be a
+/// pipe and is not limited to the profile file budget, so it cannot be read again for a
+/// later conversation.
+pub(crate) fn read_instructions(base: &BaseArgs) -> Result<Option<String>> {
+    base.system_prompt_file
+        .as_deref()
+        .map(|path| std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display())))
+        .transpose()
+}
+
 /// Startup reads, short session appends and, in container mode, starting the container
-/// precede the run. Configuration errors are reported before the session file is created.
+/// precede the run. Configuration errors are reported before the session file is created;
+/// only starting the container follows it, so that the container can hide the file.
 pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSession> {
     let cwd = match &options.base.cwd {
         Some(path) => path
@@ -324,35 +301,29 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     };
     anyhow::ensure!(cwd.is_dir(), "--cwd is not a directory: {}", cwd.display());
     let mut profile = Profile::load(options.base.profile.as_deref(), options.default_profile)?;
-    if options.explicit.tools {
-        profile.tools = options
-            .base
-            .tools
+    if let Some(tools) = &options.base.tools {
+        profile.tools = tools
             .iter()
             .map(|name| name.trim())
             .filter(|name| !name.is_empty())
             .map(String::from)
             .collect();
     }
-    if options.explicit.max_turns {
-        profile.limits.max_turns = options.budget.max_turns;
+    if let Some(turns) = options.budget.max_turns {
+        profile.limits.max_turns = Some(turns);
     }
-    if options.explicit.timeout_secs {
-        profile.limits.timeout =
-            (options.budget.timeout_secs > 0).then(|| Duration::from_secs(options.budget.timeout_secs));
+    if let Some(secs) = options.budget.timeout_secs {
+        profile.limits.timeout = (secs > 0).then(|| Duration::from_secs(secs));
     }
-    if options.explicit.continue_on_length {
-        profile.continue_on_length = options.budget.continue_on_length;
+    if let Some(count) = options.budget.continue_on_length {
+        profile.continue_on_length = count;
     }
     if !options.base.allow_cmd.is_empty() {
         profile.rules.allow.clone_from(&options.base.allow_cmd);
     }
     profile.rules.deny.extend_from_slice(&options.base.deny_cmd);
-    if let Some(path) = &options.base.system_prompt_file {
-        // An explicit file keeps the behavior it had before profiles: it may be a pipe and
-        // is not limited to the profile file budget.
-        profile.instructions =
-            std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
+    if let Some(instructions) = options.instructions {
+        profile.instructions = instructions.to_string();
     }
     if options.base.no_context {
         profile.context.discover = false;
@@ -393,6 +364,20 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     let api_key = std::env::var(&options.base.api_key_env)
         .ok()
         .filter(|key| !key.is_empty());
+    // Before the session file: invalid provider settings are configuration errors too.
+    let provider = OpenAiCompatible::new(OpenAiConfig {
+        base_url: options.base.base_url.clone(),
+        // Provider authentication and output filtering each need an owned copy.
+        api_key: api_key.clone(),
+        idle_timeout: Duration::from_secs(options.transport.idle_timeout_secs),
+        max_response_bytes: options.request.max_response_bytes,
+        max_sse_event_bytes: options.request.max_sse_event_bytes,
+        system_updates: match options.base.system_updates {
+            SystemUpdatesArg::Collapse => SystemUpdates::Collapse,
+            SystemUpdatesArg::Inline => SystemUpdates::Inline,
+        },
+        ..OpenAiConfig::default()
+    })?;
     // read_skill and read_output read files on this machine, whatever executor runs commands.
     let mut host_tools: Vec<Arc<dyn Tool>> = Vec::new();
     let catalog = if profile.tools.iter().any(|name| name == TOOL_NAME) && !profile.skills.is_empty() {
@@ -469,19 +454,6 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
         ],
     );
 
-    let provider = OpenAiCompatible::new(OpenAiConfig {
-        base_url: options.base.base_url.clone(),
-        // Provider authentication and output filtering each need an owned copy.
-        api_key: api_key.clone(),
-        idle_timeout: Duration::from_secs(options.transport.idle_timeout_secs),
-        max_response_bytes: options.request.max_response_bytes,
-        max_sse_event_bytes: options.request.max_sse_event_bytes,
-        system_updates: match options.base.system_updates {
-            SystemUpdatesArg::Collapse => SystemUpdates::Collapse,
-            SystemUpdatesArg::Inline => SystemUpdates::Inline,
-        },
-        ..OpenAiConfig::default()
-    })?;
     let mut config = LoopConfig::new(LoopSpec {
         provider: Arc::new(provider),
         model: options.model.to_string(),
@@ -568,25 +540,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn run_preserves_the_unattended_defaults() {
+    fn omitted_budgets_and_tools_keep_the_profile_values() {
         let cli = Cli::try_parse_from(["zx-agent", "run", "--model", "m", "go"]).unwrap();
         match cli.command {
             Command::Run(args) => {
-                assert_eq!(args.max_turns, 30);
-                assert_eq!(args.timeout_secs, 900);
-                assert_eq!(args.continue_on_length, 1);
+                assert_eq!(args.max_turns, None);
+                assert_eq!(args.timeout_secs, None);
+                assert_eq!(args.continue_on_length, None);
+                assert_eq!(args.base.tools, None);
             }
             Command::Chat(_) => panic!("run command"),
         }
-    }
-
-    #[test]
-    fn chat_has_neutral_prompt_budgets() {
         let cli = Cli::try_parse_from(["zx-agent", "chat", "--model", "m"]).unwrap();
         match cli.command {
             Command::Chat(args) => {
                 assert_eq!(args.max_turns, None);
-                assert_eq!(args.timeout_secs, 0);
+                assert_eq!(args.timeout_secs, None);
                 assert_eq!(args.output, OutputMode::Text);
             }
             Command::Run(_) => panic!("chat command"),
@@ -594,19 +563,20 @@ mod tests {
     }
 
     #[test]
-    fn explicit_zero_time_and_default_values_are_distinct_from_parser_defaults() {
-        let chat = Cli::command()
-            .try_get_matches_from(["zx-agent", "chat", "--model", "m", "--timeout-secs", "0"])
-            .unwrap();
-        let (_, args) = chat.subcommand().unwrap();
-        let explicit = Explicit::from_matches(args, "chat");
-        assert!(explicit.timeout_secs);
-        assert!(!explicit.tools);
-        assert!(!explicit.max_turns);
-        let run = Cli::command()
-            .try_get_matches_from(["zx-agent", "run", "--model", "m", "--timeout-secs", "900", "go"])
-            .unwrap();
-        let (_, args) = run.subcommand().unwrap();
-        assert!(Explicit::from_matches(args, "run").timeout_secs);
+    fn explicit_values_override_even_when_zero_or_empty() {
+        let cli =
+            Cli::try_parse_from(["zx-agent", "chat", "--model", "m", "--timeout-secs", "0", "--tools", ""]).unwrap();
+        match cli.command {
+            Command::Chat(args) => {
+                assert_eq!(args.timeout_secs, Some(0));
+                assert_eq!(args.base.tools, Some(vec![String::new()]));
+            }
+            Command::Run(_) => panic!("chat command"),
+        }
+        let cli = Cli::try_parse_from(["zx-agent", "run", "--model", "m", "--timeout-secs", "900", "go"]).unwrap();
+        match cli.command {
+            Command::Run(args) => assert_eq!(args.timeout_secs, Some(900)),
+            Command::Chat(_) => panic!("run command"),
+        }
     }
 }

@@ -146,7 +146,9 @@ fn write_stdout(text: &str) {
     let _ = stdout.write_all(text.as_bytes()).and_then(|()| stdout.flush());
 }
 
-pub(super) fn visible(text: &str) -> String {
+/// Escape control characters, including bidirectional overrides, so that text from models,
+/// tools or servers cannot drive the terminal.
+pub(crate) fn visible(text: &str) -> String {
     let mut visible = String::with_capacity(text.len());
     for c in text.chars() {
         if (c.is_control() && c != '\n' && c != '\t')

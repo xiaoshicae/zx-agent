@@ -421,6 +421,65 @@ async fn context_hooks_are_persisted_before_a_summary_sees_the_source() {
 }
 
 #[tokio::test]
+async fn a_context_plan_that_edits_a_summary_is_rejected_before_any_edit_is_written() {
+    struct EditInputThenSummary;
+    #[async_trait]
+    impl Hooks for EditInputThenSummary {
+        async fn transform_context(&self, messages: &[Message]) -> Result<Vec<ContextEdit>, String> {
+            let input = messages
+                .iter()
+                .position(|m| matches!(m, Message::User{content,..} if content == "go"));
+            let summary = messages
+                .iter()
+                .position(|m| matches!(m, Message::User{content,..} if content.contains("<context_summary>")));
+            Ok(match (input, summary) {
+                (Some(input), Some(summary)) => vec![
+                    ContextEdit::ReplaceText {
+                        index: input,
+                        text: "go, corrected".into(),
+                    },
+                    ContextEdit::ReplaceText {
+                        index: summary,
+                        text: "rewritten summary".into(),
+                    },
+                ],
+                _ => vec![],
+            })
+        }
+    }
+    let (store, old) = seeded();
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::text(summary(&old)),
+        FauxStep::text("answer"),
+    ]));
+    let mut config = config(provider.clone(), vec![]);
+    config.hooks.push(EditInputThenSummary);
+    let (runner, _) = RunnerSetup {
+        session: store,
+        ..RunnerSetup::new(config)
+    }
+    .build();
+    let mut runner = runner
+        .with_compaction(Config {
+            trigger_bytes: Some(1024),
+            ..budget()
+        })
+        .unwrap();
+    let report = runner.run("go", &CancellationToken::new()).await;
+    assert_eq!(report.outcome, RunOutcome::Error);
+    // A hook rejection, decided while validating the plan, not a failed session write.
+    let error = report.error.unwrap();
+    assert!(error.contains("transform_context"), "{error}");
+    assert!(!error.contains("cannot persist"), "{error}");
+    assert_eq!(provider.requests().len(), 1, "only the summary request was sent");
+    let entries = runner.session().entries().to_vec();
+    assert!(
+        !entries.iter().any(|entry| matches!(entry, Entry::ContextEdit(_))),
+        "no edit of the rejected plan may be written"
+    );
+}
+
+#[tokio::test]
 async fn pending_summary_shares_busy_cancel_and_drop_reuse_with_prompt() {
     let (store, _) = seeded();
     let provider = Arc::new(FauxProvider::new([FauxStep::Hang, FauxStep::text("reused")]));

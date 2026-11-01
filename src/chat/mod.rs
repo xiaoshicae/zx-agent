@@ -25,13 +25,14 @@ use zx_agent::profile::Builtin;
 use zx_agent::runner::{RunReport, Runner};
 use zx_agent::tools::BASH;
 
-use crate::cli::{self, ChatArgs, Explicit, SessionFile, SessionOptions};
+use crate::cli::{self, ChatArgs, SessionFile, SessionOptions};
 use crate::{EXIT_ABORTED, EXIT_COMPLETED};
 
 use commands::Command;
 use input::Line;
 use interaction::{TerminalInteraction, Ticket};
-use output::{Output, visible};
+use output::Output;
+pub(crate) use output::visible;
 use signals::{Interrupt, Signals};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -55,7 +56,8 @@ struct Built {
 
 struct Settings {
     args: ChatArgs,
-    explicit: Explicit,
+    /// `--system-prompt-file`, read once: it may be a pipe, and /new reuses the text.
+    instructions: Option<String>,
 }
 
 async fn build(
@@ -76,9 +78,9 @@ async fn build(
         budget: cli::Budget {
             max_turns: args.max_turns,
             timeout_secs: args.timeout_secs,
-            continue_on_length: 0,
+            continue_on_length: None,
         },
-        explicit: settings.explicit,
+        instructions: settings.instructions.as_deref(),
     })
     .await?;
     prepared
@@ -118,8 +120,9 @@ async fn build(
     Ok(Built { session, provider, cwd })
 }
 
-pub(crate) async fn run(args: ChatArgs, explicit: Explicit) -> Result<u8> {
-    let settings = Settings { args, explicit };
+pub(crate) async fn run(args: ChatArgs) -> Result<u8> {
+    let instructions = cli::read_instructions(&args.base)?;
+    let settings = Settings { args, instructions };
     let args = &settings.args;
     let mode = if std::io::stdin().is_terminal() {
         InputMode::Terminal

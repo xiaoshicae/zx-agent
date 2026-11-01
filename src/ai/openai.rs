@@ -783,17 +783,26 @@ impl Accumulator {
     pub(crate) fn finish(&self) -> Result<AssistantMessage, String> {
         let content = self.content();
         let has_tool_calls = content.iter().any(|b| matches!(b, ContentBlock::ToolCall { .. }));
-        let (stop_reason, error_message) = match self.finish_reason.as_deref() {
-            None => return Err("stream ended without a finish_reason".to_string()),
-            Some("tool_calls" | "function_call") => (StopReason::ToolUse, None),
-            Some("length") => (StopReason::Length, None),
-            Some("content_filter") => (
+        let Some(reason) = self.finish_reason.as_deref() else {
+            return Err("stream ended without a finish_reason".to_string());
+        };
+        // pi: openai-completions.ts mapStopReason. Only the known endings succeed; any other
+        // value means the server interrupted or rejected the answer, so it is not reported
+        // as a complete one.
+        let (stop_reason, error_message) = match reason {
+            // Some servers report "stop" with tool calls.
+            "stop" | "end" if has_tool_calls => (StopReason::ToolUse, None),
+            "stop" | "end" => (StopReason::Stop, None),
+            "tool_calls" | "function_call" => (StopReason::ToolUse, None),
+            "length" => (StopReason::Length, None),
+            "content_filter" => (
                 StopReason::Error,
                 Some("response blocked by the provider content filter".to_string()),
             ),
-            // "stop" and server-specific reasons. Some servers report "stop" with tool calls.
-            Some(_) if has_tool_calls => (StopReason::ToolUse, None),
-            Some(_) => (StopReason::Stop, None),
+            other => (
+                StopReason::Error,
+                Some(format!("the provider ended the response with finish_reason {other:?}")),
+            ),
         };
         Ok(AssistantMessage {
             content,
@@ -801,10 +810,10 @@ impl Accumulator {
             model: self.model.clone(),
             usage: self.usage.clone(),
             stop_reason,
-            error_message,
-            provider_error: (stop_reason == StopReason::Error).then(|| ProviderError::Provider {
-                code: Some("content_filter".to_string()),
+            provider_error: error_message.is_some().then(|| ProviderError::Provider {
+                code: Some(reason.to_string()),
             }),
+            error_message,
             timestamp: self.timestamp,
             duration_ms: None,
         })
@@ -928,6 +937,30 @@ mod tests {
             .unwrap();
         assert_eq!(acc.finish().unwrap().stop_reason, StopReason::ToolUse);
         assert!(acc.apply(&json!({"error":{"message":"overloaded"}})).is_err());
+    }
+
+    #[test]
+    fn only_known_finish_reasons_succeed() {
+        let finish = |reason: &str| {
+            let mut acc = Accumulator::new("p", "m", 1);
+            acc.apply(&json!({"choices":[{"delta":{"content":"x"},"finish_reason":reason}]}))
+                .unwrap();
+            acc.finish().unwrap()
+        };
+        assert_eq!(finish("stop").stop_reason, StopReason::Stop);
+        assert_eq!(finish("end").stop_reason, StopReason::Stop);
+        assert_eq!(finish("length").stop_reason, StopReason::Length);
+        for reason in ["content_filter", "network_error", "server_interrupted"] {
+            let message = finish(reason);
+            assert_eq!(message.stop_reason, StopReason::Error, "{reason}");
+            assert_eq!(
+                message.provider_error,
+                Some(ProviderError::Provider {
+                    code: Some(reason.to_string())
+                })
+            );
+            assert!(message.error_message.is_some(), "{reason}");
+        }
     }
 
     #[test]

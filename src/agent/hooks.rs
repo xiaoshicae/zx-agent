@@ -11,7 +11,7 @@ use futures::FutureExt;
 use tokio_util::sync::CancellationToken;
 
 use super::{AgentEvent, Decision, EventSink, ToolOutput};
-use crate::ai::{AssistantMessage, Message, ToolCall};
+use crate::ai::{AssistantMessage, Message, ToolCall, UserMessageKind};
 
 /// Default bound for each individual hook invocation.
 pub const DEFAULT_HOOK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -22,7 +22,9 @@ pub type HookResult<T> = Result<T, String>;
 /// Audit-friendly changes, applied in order against the current projection.
 ///
 /// Indexes refer to the projection after preceding edits. System messages can only
-/// be appended, and replacing assistant text must not erase tool calls.
+/// be appended, and replacing assistant text must not erase tool calls. Context summaries
+/// (`UserMessageKind::Summary`) are built by the session, so they can be neither edited,
+/// omitted nor appended; editing one of their sources invalidates the summary instead.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ContextEdit {
     Append(Message),
@@ -30,16 +32,27 @@ pub enum ContextEdit {
     Omit { index: usize },
 }
 
+const SUMMARY_EDIT: &str = "a context summary cannot be edited or omitted; edit its source messages instead";
+
 impl ContextEdit {
     pub(crate) fn apply(&self, messages: &mut Vec<Message>) -> Result<(), String> {
         match self {
-            Self::Append(message) => messages.push(message.clone()),
+            Self::Append(message) => {
+                if is_summary(message) {
+                    return Err("only the session creates context summaries".into());
+                }
+                messages.push(message.clone());
+            }
             Self::ReplaceText { index, text } => {
                 let message = messages
                     .get_mut(*index)
                     .ok_or_else(|| format!("context index {index} is out of bounds"))?;
                 match message {
                     Message::System(_) => return Err("append system prompt changes instead of editing them".into()),
+                    Message::User {
+                        kind: UserMessageKind::Summary,
+                        ..
+                    } => return Err(SUMMARY_EDIT.into()),
                     Message::Assistant(assistant) if !assistant.tool_calls().is_empty() => {
                         return Err("text replacement cannot erase assistant tool calls".into());
                     }
@@ -54,11 +67,24 @@ impl ContextEdit {
                 if matches!(message, Message::System(_)) {
                     return Err("system prompt history cannot be omitted".into());
                 }
+                if is_summary(message) {
+                    return Err(SUMMARY_EDIT.into());
+                }
                 messages.remove(*index);
             }
         }
         Ok(())
     }
+}
+
+fn is_summary(message: &Message) -> bool {
+    matches!(
+        message,
+        Message::User {
+            kind: UserMessageKind::Summary,
+            ..
+        }
+    )
 }
 
 /// Whether the normal loop already has work after this response.
@@ -645,5 +671,28 @@ mod tests {
             .apply(&mut messages)
             .is_err()
         );
+    }
+
+    #[test]
+    fn context_summaries_cannot_be_edited_omitted_or_appended() {
+        let summary = Message::User {
+            content: "<context_summary></context_summary>".into(),
+            timestamp: 0,
+            kind: crate::ai::UserMessageKind::Summary,
+        };
+        let mut messages = vec![summary.clone(), Message::user("kept")];
+        for edit in [
+            ContextEdit::ReplaceText {
+                index: 0,
+                text: "changed".into(),
+            },
+            ContextEdit::Omit { index: 0 },
+            ContextEdit::Append(summary),
+        ] {
+            let error = edit.apply(&mut messages).unwrap_err();
+            assert!(error.contains("summar"), "{error}");
+        }
+        assert_eq!(messages.len(), 2, "rejected edits leave the projection unchanged");
+        assert!(ContextEdit::Omit { index: 1 }.apply(&mut messages).is_ok());
     }
 }

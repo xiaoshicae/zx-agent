@@ -102,6 +102,26 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 
 本地 macOS 验证（基于 `25e5b49`）：新增 6 项测试，其中 5 项回归测试在修复前失败，另 1 项验证手动压缩成功后恢复自动摘要。stable 与 Rust 1.88 各 391 项通过、6 项付费测试跳过；格式、clippy、严格 Rustdoc 与 MSRV 全目标检查通过。`tests/cli.rs`、`Cargo.toml`、`Cargo.lock` 未改动，未新增依赖。另用本地假服务实测：默认 `run` 的工具集与结果内联同 P5 前一致；显式启用 `read_output` 时，只读目录与越界链接都保留内联结果、不写外部目录；结果目录中的 `.gitignore` 经 `git status` 验证生效。
 
+2026-11-01 全局评审后的修正（已实现待 PR review）：
+
+| 项目 | 修正 |
+|---|---|
+| 压缩保留边界 | 保留边界按条目在分支上的先后计算。此前保留范围的第一条消息被 `context_edit` 省略后，摘要从投影中消失，已摘要的旧记录回到模型上下文 |
+| 合成摘要的编辑 | 合成摘要标为 `UserMessageKind::Summary`；编辑、省略或追加它的变换计划在校验时整份拒绝，按钩子失败结束，不写入任何条目。此前计划校验放行，写到这一项才失败：前面的编辑已写入，并按会话写入失败取消运行 |
+| 未知 `finish_reason` | 只有 `stop`、`end`、`length`、`tool_calls`、`function_call` 视为正常结束，与 pi 的 `openai-completions.ts`（`a92283056`）相同；其他取值为 provider 错误，错误码为该取值，不重试。以 `stop` 或 `end` 结束但带工具调用时仍按工具调用处理，沿用此前对部分服务端的兼容（pi 没有这一处理）。此前未知取值一律当作正常结束，服务端中断的回答会以退出码 0 报告 |
+| bash `timeout_secs: 0` | 在策略检查与审批之前拒绝。此前命令会立即超时 |
+| provider 参数错误 | 先构造 provider，再创建会话文件；`--max-response-bytes 0` 等错误不再留下只有头部的会话文件。容器仍在会话文件之后启动，以便把文件隐藏在容器外 |
+| 预算参数的默认值 | `--max-turns`、`--timeout-secs`、`--continue-on-length` 省略时取所选 profile 的值，help 不再显示固定默认值；删除 `Explicit` 与解析器默认值。此前 `run --help` 显示 30 / 900 / 1，而 `run --profile assistant` 实际不限轮次和时间 |
+| `/new` 与 `--system-prompt-file` | 说明文件只在启动时读取一次，`/new` 沿用。此前 `/new` 重新读取：管道传入时新对话的说明被静默清空，文件被删除时 `/new` 失败 |
+| `run` 进度输出 | 工具名、参数、错误文本与报告行经与 chat 相同的转义后输出。此前模型或服务端返回的控制字符原样写到 stderr |
+| 文档 | README 的系统提示词组成（说明加四个生成段落，空段不出现；容器执行时环境信息的来源）、"与 pi 的差异"中过期的"上下文压缩未实现"、预算参数与重试说明；PROFILES.md 的会话格式版本；`.claude/CLAUDE.md` 的提示词一行 |
+
+兼容性：`run --help` 与 `chat --help` 中上述预算参数和 `--system-prompt-file` 的说明有意改变；此前各阶段以 `run --help` 逐字节不变作为验收项，本次不再适用于这几项。`tests/cli.rs`、`Cargo.toml`、`Cargo.lock` 未改动，未新增依赖。
+
+既有测试的调整：`src/cli.rs` 中三项断言解析器默认值与 `Explicit` 的单元测试，改为两项断言"省略即取 profile、显式的 0 或空值仍覆盖"。
+
+本地 macOS 验证（基于 `efe998e`）：新增 10 项测试。其中 8 项回归测试在修复前失败，分别对应压缩保留边界、编辑摘要的计划、未知 `finish_reason`、bash 零超时、provider 参数错误、预算参数的 help、`/new` 与说明文件、`run` 输出转义；另 2 项单元测试覆盖合成摘要的三种编辑和 `finish_reason` 映射。stable 与 Rust 1.88 各 455 项通过（基线 446 项）、6 项付费测试跳过；格式、clippy、严格 Rustdoc 与 MSRV 全目标检查通过。与基线相比，`run --help`、`chat --help` 只有上述几项说明变化。
+
 下面的 P0–P9 继续按各自验收标准推进。
 
 状态取值：未开始、进行中、已实现待 PR review、已完成。每个阶段完成时勾选任务，并记录完成日期和提交。
@@ -392,4 +412,4 @@ P5 实施约定（2026-11-01）：
 
 ---
 
-ROADMAP.md · v0.5 · 2026年11月
+ROADMAP.md · v0.6 · 2026年11月

@@ -218,6 +218,31 @@ async fn invalid_stream_json_is_a_non_retryable_protocol_error() {
 }
 
 #[tokio::test]
+async fn an_unknown_finish_reason_is_a_provider_error_not_a_completed_answer() {
+    let server = MockServer::start(vec![Reply::Sse(vec![json!({"choices":[{
+        "index": 0, "delta": {"content": "partial"}, "finish_reason": "server_interrupted"
+    }]})])])
+    .await;
+    let (mut runner, _) = RunnerSetup {
+        retry: fast_retry(3),
+        ..setup(&server, Duration::from_secs(10))
+    }
+    .build();
+
+    let report = runner.run("check", &CancellationToken::new()).await;
+
+    assert_eq!((report.outcome, report.retries), (RunOutcome::Error, 0), "{report:?}");
+    let error = report.error.unwrap_or_default();
+    assert!(error.contains("server_interrupted"), "{error}");
+    assert_eq!(
+        provider_error(&runner),
+        ProviderError::Provider {
+            code: Some("server_interrupted".into())
+        }
+    );
+}
+
+#[tokio::test]
 async fn tool_call_round_trip_over_http() {
     // The arguments arrive in two fragments, as real servers send them.
     let server = MockServer::start(vec![
