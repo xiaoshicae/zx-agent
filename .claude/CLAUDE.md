@@ -125,11 +125,12 @@
 7. **会话文件写入失败时立即取消运行**（审计要求）。
 8. **工具输出必须截断**（`src/tools/truncate.rs`）；耗时的工具必须响应 `ToolContext::cancel`。
 9. **认证用的 API key 只从环境变量读取**，不主动写入会话文件、事件或日志；其环境变量从 bash 子进程中删除（`BashTool::hidden_env`）。CLI 的 `RedactSecrets` 在工具输出持久化前过滤认证 key 的完整字面值；不识别未知或变形的密钥，也不覆盖输入、模型输出与参数，边界见 README 的"安全模型"。
+10. **有副作用的工具调用先记录开始再执行，恢复时不重放。** `Tool::effects()` 为 `SideEffects` 的调用通过检查与审批后，先追加 `tool_call_started`，写入失败则不执行（`src/agent/agent_loop.rs`）。Runner 每次运行开始时，为分支末尾缺少结果的调用补写错误结果，按开始记录区分结果未知与未执行（`src/session/recovery.rs`、`src/runner.rs`）。
 
 ## 新增功能放在哪里
 
 - **新 provider**：实现 `ai::Provider` 并遵守不变量 1。为解析逻辑写单元测试，并在 `tests/` 下用本地假 HTTP 服务（`tests/common/mock_server.rs`）写端到端测试，参照 `tests/openai_mock.rs`。
-- **新工具**：实现 `agent::Tool`。参数定义成带 `#[serde(deny_unknown_fields)]` 的结构体再反序列化；输出要截断；要支持取消。测试覆盖成功、参数错误、超时或取消三种情况。
+- **新工具**：实现 `agent::Tool`。参数定义成带 `#[serde(deny_unknown_fields)]` 的结构体再反序列化；输出要截断；要支持取消；不会改变任何状态的工具让 `effects()` 返回 `Effects::ReadOnly`，其余保留默认的 `SideEffects`（不变量 10）。测试覆盖成功、参数错误、超时或取消三种情况。
 - **新策略**：实现 `agent::ToolPolicy`，通过 `policy::PolicyHook` 注册，无法判断时返回 `Decision::Deny`。
 - **新扩展**：实现 `agent::Hooks`，按需覆盖默认方法；回调必须异步让出执行权。错误、panic、取消与超时由宿主处理，具体规则见 README。
 - **上下文改动**：`on_input` 改写或拒绝通过 `context_edit` 记录；`transform_context` 返回 `ContextEdit` 计划，整份计划先校验，逐项写入成功后再请求模型。
