@@ -84,6 +84,13 @@ jobs:
         run: cargo +stable build --locked --all-targets
       - name: Run local tests and doctests
         run: cargo +stable test --locked
+      - name: Run container tests against Docker
+        if: runner.os == 'Linux'
+        env:
+          ZX_DOCKER_TEST_IMAGE: debian:bookworm-slim
+        run: |
+          docker pull "$ZX_DOCKER_TEST_IMAGE"
+          cargo +stable test --locked --test container
 
   msrv:
     name: Rust 1.88
