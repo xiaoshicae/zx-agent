@@ -14,7 +14,7 @@ use crate::agent::{LoopConfig, Tool, ToolOutput};
 use crate::ai::{PREAMBLE, StopReason, ToolCall};
 use crate::prompt::GENERATED_SECTIONS;
 use crate::sync::lock;
-use crate::text::read_text_file;
+use crate::text::read_regular_file;
 
 /// Tools, hooks and system prompt sections registered together, such as a client for an
 /// external tool server. A host may register one extension into many loops, as serve does
@@ -174,7 +174,9 @@ fn check_section_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The largest secret file read, such as a token: anything bigger is not a single secret.
+/// The largest secret file read, such as a token: anything bigger is not a single secret, and
+/// it could never be matched whole in the output of a built-in tool, which returns at most
+/// 50 KiB at a time.
 const MAX_SECRET_FILE_BYTES: u64 = 64 * 1024;
 
 /// The unattended continuation text; the runtime does not depend on this wording.
@@ -238,10 +240,12 @@ impl RedactSecrets {
     /// Kubernetes ServiceAccount. A directory stands for every file directly inside it whose
     /// name does not start with a dot, so a whole Kubernetes Secret volume can be given and keys
     /// added to it later are covered. Every redaction reads them again, so a rotated value is
-    /// covered and earlier values stay redacted; surrounding whitespace is ignored. A file
+    /// covered and earlier values stay redacted; surrounding whitespace is ignored. Content
+    /// that is not UTF-8 is matched as the built-in tools print it, decoded lossily. A file
     /// that is missing, or that this process may not read, is skipped: commands running as
-    /// the same user cannot read it either. Any other failure, such as a file that is not
-    /// regular UTF-8 text within 64 KiB, fails the hook, which discards the tool output.
+    /// the same user cannot read it either. Any other failure, such as a file over 64 KiB or
+    /// one that is not a regular file, fails the hook, which discards the tool output; check
+    /// the files with [`check_secret_files`] before use to report those at startup.
     pub fn with_secret_files(mut self, files: impl IntoIterator<Item = PathBuf>) -> Self {
         self.files.extend(files);
         self
@@ -253,8 +257,10 @@ impl RedactSecrets {
         for path in &self.files {
             for file in secret_files_at(path)? {
                 // Small, bounded local reads, synchronous like the other configuration reads.
-                match read_text_file(&file, MAX_SECRET_FILE_BYTES) {
-                    Ok(text) => current.push(text.trim().to_string()),
+                match read_regular_file(&file, MAX_SECRET_FILE_BYTES) {
+                    // The built-in tools decode output the same way, so a value that is not
+                    // UTF-8 appears in their output exactly like this.
+                    Ok(bytes) => current.push(String::from_utf8_lossy(&bytes).trim().to_string()),
                     Err(error) if is_unreadable(&error) => {}
                     Err(error) => return Err(format!("cannot read a secret file to redact tool output: {error:#}")),
                 }
@@ -329,6 +335,34 @@ impl Hooks for RedactSecrets {
             output.content = output.content.replace(secret, "[REDACTED]");
         }
         Ok(output)
+    }
+}
+
+/// Check before use that the secret files registered at `paths`, given as to
+/// [`RedactSecrets::with_secret_files`], can be redacted: each must be a regular file of at
+/// most 64 KiB. A larger file could never be matched whole in the output of a built-in tool,
+/// and it usually holds structured data, whose single values should be registered instead.
+/// Content that is not UTF-8 is fine. Files that are missing or that this process may not
+/// read are not errors here: the redaction skips them. Returns one message naming every file
+/// that cannot be used; a file that only becomes unusable later fails the redaction instead.
+pub fn check_secret_files(paths: &[PathBuf]) -> Result<(), String> {
+    let mut problems = Vec::new();
+    for path in paths {
+        for file in secret_files_at(path)? {
+            match read_regular_file(&file, MAX_SECRET_FILE_BYTES) {
+                Ok(_) => {}
+                Err(error) if is_unreadable(&error) => {}
+                Err(error) => problems.push(format!("{error:#}")),
+            }
+        }
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "cannot redact these secret files from tool output: {}; register files that each hold a single value of at most {MAX_SECRET_FILE_BYTES} bytes",
+            problems.join("; ")
+        ))
     }
 }
 

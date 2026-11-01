@@ -1226,10 +1226,10 @@ async fn a_hook_failure_is_reported_with_its_reason() {
     let dir = tempfile::tempdir().unwrap();
     let token = dir.path().join("token");
     std::fs::write(&token, "token-value").unwrap();
-    // The command leaves the secret file unreadable as text: redaction fails and discards
-    // the output.
+    // The command grows the secret file past the limit: redaction fails and discards the
+    // output.
     let server = MockServer::start(vec![
-        Reply::bash("c", r"printf '\377' > token; echo hi"),
+        Reply::bash("c", "head -c 70000 /dev/zero | tr '\\0' x > token; echo hi"),
         Reply::text("done"),
     ])
     .await;
@@ -1245,7 +1245,7 @@ async fn a_hook_failure_is_reported_with_its_reason() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     // The hook's default name is its type name, whose exact form Rust does not guarantee.
     let reason = format!(
-        "RedactSecrets after_tool failed: cannot read a secret file to redact tool output: {} is not UTF-8",
+        "RedactSecrets after_tool failed: cannot read a secret file to redact tool output: {} exceeds 65536 bytes",
         token.display()
     );
     assert!(

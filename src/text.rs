@@ -9,10 +9,16 @@ use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
 
-/// Read a regular UTF-8 file of at most `max_bytes`. The read is small, bounded and
-/// synchronous, as for configuration at startup or a secret file before a redaction; errors
-/// name the path. FIFOs and devices are refused without waiting for a writer.
+/// Read a regular UTF-8 file of at most `max_bytes`, as [`read_regular_file`] does.
 pub fn read_text_file(path: &Path, max_bytes: u64) -> Result<String> {
+    let bytes = read_regular_file(path, max_bytes)?;
+    String::from_utf8(bytes).with_context(|| format!("{} is not UTF-8", path.display()))
+}
+
+/// Read a regular file of at most `max_bytes`. The read is small, bounded and synchronous,
+/// as for configuration at startup or a secret file before a redaction; errors name the path.
+/// FIFOs and devices are refused without waiting for a writer.
+pub fn read_regular_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
     let mut options = OpenOptions::new();
     options.read(true);
     // Inspect the opened descriptor without blocking if a path is a FIFO.
@@ -35,7 +41,7 @@ pub fn read_text_file(path: &Path, max_bytes: u64) -> Result<String> {
         "{} exceeds {max_bytes} bytes",
         path.display()
     );
-    String::from_utf8(bytes).with_context(|| format!("{} is not UTF-8", path.display()))
+    Ok(bytes)
 }
 
 /// The first `max_chars` characters of `text`, followed by "..." when more were left out.

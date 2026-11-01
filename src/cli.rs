@@ -14,7 +14,7 @@ use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::sse::DEFAULT_MAX_EVENT_BYTES;
 use zx_agent::compaction;
 use zx_agent::executor::{ContainerConfig, ContainerExecutor, Executor, LocalExecutor};
-use zx_agent::extensions::{ContinueOnLength, RedactSecrets};
+use zx_agent::extensions::{ContinueOnLength, RedactSecrets, check_secret_files};
 use zx_agent::output_store::{self, OutputStore, ReadOutputTool, SpillOutputs};
 use zx_agent::policy::{AutoApprove, CommandPolicy, PolicyHook, Rule, RuleMatcher, RulePolicy};
 use zx_agent::profile::skills::{ReadSkillTool, TOOL_NAME};
@@ -199,9 +199,10 @@ pub(crate) struct BaseArgs {
     pub(crate) auto_approve_cmd: Vec<String>,
 
     /// File holding a secret to redact from tool output, such as another cluster's token, or a
-    /// directory of such files (names starting with a dot are skipped). Read again before
-    /// every redaction. Repeatable, and added to the files in the comma-separated
-    /// ZX_SECRET_FILES. The Pod's ServiceAccount token is always redacted.
+    /// directory of such files (names starting with a dot are skipped). Each must be a regular
+    /// file of at most 64 KiB. Read again before every redaction. Repeatable, and added to the
+    /// files in the comma-separated ZX_SECRET_FILES. The Pod's ServiceAccount token is always
+    /// redacted.
     #[arg(long = "secret-file", value_delimiter = ',')]
     pub(crate) secret_files: Vec<PathBuf>,
 
@@ -391,8 +392,9 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     anyhow::ensure!(cwd.is_dir(), "--cwd is not a directory: {}", cwd.display());
     // Both sources count: a file named at the command line must not drop the ones a
     // deployment registered in the environment. A misspelt path would leave a secret
-    // unredacted without a word, so each must exist at startup; one that disappears later is
-    // skipped (RedactSecrets::with_secret_files).
+    // unredacted without a word, so each must exist at startup, and every file must be one the
+    // redaction can match; one that disappears later is skipped, and one that becomes
+    // unusable later withholds the output (RedactSecrets::with_secret_files).
     let from_environment: Vec<PathBuf> = match std::env::var_os(SECRET_FILES_ENV) {
         Some(value) => value
             .to_str()
@@ -415,6 +417,7 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
             )
         })?;
     }
+    check_secret_files(&secret_files).map_err(|error| anyhow::anyhow!("{error} (--secret-file or ZX_SECRET_FILES)"))?;
     let mut profile = Profile::load(options.base.profile.as_deref(), options.default_profile)?;
     if let Some(tools) = &options.base.tools {
         profile.tools = tools
