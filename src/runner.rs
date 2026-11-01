@@ -81,6 +81,9 @@ pub struct Runner {
     sink: Arc<dyn EventSink>,
     approvals: ApprovalCache,
     compaction: compaction::Config,
+    /// Why automatic compaction is paused after a paid summary request failed. Kept across
+    /// prompts so the same failing summary is not paid for again on every prompt.
+    compaction_pause: Option<String>,
 }
 
 impl Runner {
@@ -100,6 +103,7 @@ impl Runner {
             sink,
             approvals: ApprovalCache::default(),
             compaction: compaction::Config::default(),
+            compaction_pause: None,
         }
     }
 
@@ -124,7 +128,12 @@ impl Runner {
             sink: self.sink.as_ref(),
             hooks: &self.config.hooks,
         };
-        host.run(Trigger::Manual, &child).await.0
+        let report = host.run(Trigger::Manual, &child).await.0;
+        if report.outcome == compaction::Outcome::Completed {
+            // A summary succeeded, so automatic attempts may succeed again.
+            self.compaction_pause = None;
+        }
+        report
     }
 
     /// The loop configuration, for example to reach `config().queues` during a run.
@@ -137,6 +146,8 @@ impl Runner {
     }
 
     pub(crate) fn replace_model(&mut self, provider: Arc<dyn Provider>, model: String) -> (Arc<dyn Provider>, String) {
+        // Another model may produce a valid summary where the previous one failed.
+        self.compaction_pause = None;
         (
             std::mem::replace(&mut self.config.spec.provider, provider),
             std::mem::replace(&mut self.config.spec.model, model),
@@ -191,6 +202,7 @@ impl Runner {
             failure: Mutex::new(None),
             last_assistant_entry: Mutex::new(None),
             compaction: &self.compaction,
+            compaction_pause: Mutex::new(self.compaction_pause.take()),
             provider: self.config.spec.provider.as_ref(),
             model: &self.config.spec.model,
             hooks: &self.config.hooks,
@@ -276,6 +288,7 @@ impl Runner {
             }
         };
 
+        self.compaction_pause = lock(&sink.compaction_pause).take();
         let persistence_failure = lock(&sink.failure).take();
         let (outcome, error) = match (persistence_failure, ending) {
             (Some(failure), _) => (RunOutcome::Error, Some(failure)),
@@ -402,6 +415,8 @@ struct PersistingSink<'a> {
     failure: Mutex<Option<String>>,
     last_assistant_entry: Mutex<Option<String>>,
     compaction: &'a compaction::Config,
+    /// Taken from and returned to the Runner, so the pause outlives one prompt.
+    compaction_pause: Mutex<Option<String>>,
     provider: &'a dyn Provider,
     model: &'a str,
     hooks: &'a crate::agent::HookChain,
@@ -452,6 +467,16 @@ impl EventSink for PersistingSink<'_> {
                 };
             }
         }
+        if let Some(reason) = lock(&self.compaction_pause).as_deref() {
+            return ContextPreparation::Failed {
+                error: format!(
+                    "automatic compaction is paused because it failed earlier in this session ({reason}); \
+                     compact manually to retry, start a new session, or disable automatic compaction"
+                ),
+                requests: 0,
+                usage: Usage::default(),
+            };
+        }
         let host = compaction::Host {
             session: self.session,
             provider: self.provider,
@@ -470,13 +495,21 @@ impl EventSink for PersistingSink<'_> {
                 requests: report.requests,
                 usage: report.usage,
             },
-            None => ContextPreparation::Failed {
-                error: report
+            None => {
+                let error = report
                     .error
-                    .unwrap_or_else(|| "automatic compaction made no progress".into()),
-                requests: report.requests,
-                usage: report.usage,
-            },
+                    .unwrap_or_else(|| "automatic compaction made no progress".into());
+                // A paid summary request failed; repeating it on every prompt would keep
+                // paying for the same failure. Cancellation is the caller's choice.
+                if report.outcome == compaction::Outcome::Failed && report.requests > 0 {
+                    *lock(&self.compaction_pause) = Some(error.clone());
+                }
+                ContextPreparation::Failed {
+                    error,
+                    requests: report.requests,
+                    usage: report.usage,
+                }
+            }
         }
     }
 

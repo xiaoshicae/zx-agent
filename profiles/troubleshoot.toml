@@ -1,6 +1,8 @@
 name = "troubleshoot"
 instructions = "troubleshoot.md"
-tools = ["bash", "read_file", "read_skill", "read_output"]
+# read_output is opt-in here: unattended runs keep tool results inline, as before P5,
+# and never write into a working directory that may be read-only.
+tools = ["bash", "read_file", "read_skill"]
 execution = "local"
 
 [limits]

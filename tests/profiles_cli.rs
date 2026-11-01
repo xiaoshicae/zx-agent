@@ -113,7 +113,13 @@ async fn cli_spills_large_redacted_results_and_pages_them_without_recursive_file
         Reply::text("done"),
     ])
     .await;
-    let output = run(&server, dir.path(), &["--session", "audit.jsonl", "go"]).await;
+    // run's default profile keeps results inline; enable the paging tool explicitly.
+    let output = run(
+        &server,
+        dir.path(),
+        &["--tools", "read_file,read_output", "--session", "audit.jsonl", "go"],
+    )
+    .await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let reference: Value = serde_json::from_str(&tool_result(&server, 1)).unwrap();
     let content = std::fs::read_to_string(reference["path"].as_str().unwrap()).unwrap();
@@ -131,15 +137,43 @@ async fn cli_spills_large_redacted_results_and_pages_them_without_recursive_file
         .unwrap();
     assert!(page.contains("value=[REDACTED]"));
     assert!(page.len() <= 8192);
-    assert_eq!(
-        std::fs::read_dir(dir.path().join(".zx-agent/outputs")).unwrap().count(),
-        1
-    );
+    // Paging must not store the page again: exactly one stored result next to the ignore file.
+    let stored = std::fs::read_dir(dir.path().join(".zx-agent/outputs"))
+        .unwrap()
+        .filter(|entry| entry.as_ref().unwrap().path().extension() == Some("txt".as_ref()))
+        .count();
+    assert_eq!(stored, 1);
     assert!(
         !std::fs::read_to_string(dir.path().join("audit.jsonl"))
             .unwrap()
             .contains("sk-profile-key")
     );
+}
+
+#[tokio::test]
+async fn unattended_runs_keep_large_tool_results_inline_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("source.txt"), "x".repeat(20_000)).unwrap();
+    let server = MockServer::start(vec![read_file_reply(), Reply::text("done")]).await;
+    let output = run(&server, dir.path(), &["go"]).await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(tool_result(&server, 1), "x".repeat(20_000));
+    assert!(!dir.path().join(".zx-agent").exists());
+}
+
+#[tokio::test]
+async fn unattended_runs_offer_the_tool_set_they_had_before_output_spilling() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::text("done")]).await;
+    let output = run(&server, dir.path(), &["go"]).await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let names: Vec<String> = server.requests()[0].body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["function"]["name"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(names, ["bash", "read_file"]);
 }
 
 #[tokio::test]
@@ -159,7 +193,10 @@ async fn an_explicit_tool_set_without_read_output_keeps_large_results_inline() {
 #[tokio::test]
 async fn a_profile_can_disable_spilling_without_removing_the_reading_tool() {
     let dir = tempfile::tempdir().unwrap();
-    profile(dir.path(), "[toolOutput]\nthresholdBytes = 0");
+    profile(
+        dir.path(),
+        "tools = ['read_file', 'read_output']\n[toolOutput]\nthresholdBytes = 0",
+    );
     std::fs::write(dir.path().join("source.txt"), "x".repeat(20_000)).unwrap();
     let server = MockServer::start(vec![read_file_reply(), Reply::text("done")]).await;
     let output = run(&server, dir.path(), &["--profile", "profile.toml", "go"]).await;
@@ -180,7 +217,10 @@ async fn a_configured_output_directory_is_relative_to_the_profile_file() {
     let dir = tempfile::tempdir().unwrap();
     let config_dir = dir.path().join("config");
     std::fs::create_dir(&config_dir).unwrap();
-    profile(&config_dir, "[toolOutput]\ndirectory = 'results'\nthresholdBytes = 256");
+    profile(
+        &config_dir,
+        "tools = ['read_file', 'read_output']\n[toolOutput]\ndirectory = 'results'\nthresholdBytes = 256",
+    );
     std::fs::write(dir.path().join("source.txt"), "x".repeat(1000)).unwrap();
     let server = MockServer::start(vec![read_file_reply(), Reply::text("done")]).await;
     let output = run(&server, dir.path(), &["--profile", "config/profile.toml", "go"]).await;

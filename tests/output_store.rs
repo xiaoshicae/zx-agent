@@ -187,12 +187,13 @@ async fn file_caps_bound_both_writes_and_reads_and_invalid_utf8_is_refused() {
     let store = OutputStore::new(dir.path(), config).unwrap();
     let hook = SpillOutputs::new(store.clone(), vec![]);
     let reader = ReadOutputTool::new(store);
-    assert!(
-        hook.after_tool(&call("bash"), ToolOutput::ok("x".repeat(513)))
-            .await
-            .unwrap_err()
-            .contains("over toolOutput.maxFileBytes")
-    );
+    // Over the cap nothing is written; the bounded result stays inline with the reason.
+    let kept = hook
+        .after_tool(&call("bash"), ToolOutput::ok("x".repeat(513)))
+        .await
+        .unwrap();
+    assert!(kept.content.starts_with(&"x".repeat(513)));
+    assert!(kept.content.contains("over toolOutput.maxFileBytes"));
     assert!(!dir.path().join(".zx-agent").exists());
     let reference = spill(&hook, &"x".repeat(512)).await;
     let args = json!({"id":reference["outputId"]});
@@ -343,8 +344,41 @@ async fn redaction_precedes_both_output_file_and_session_persistence() {
     assert!(result.content.len() < stored.len());
 }
 
+#[cfg(unix)]
 #[tokio::test]
-async fn a_storage_error_withholds_raw_output_and_allows_the_model_to_recover() {
+async fn a_linked_default_directory_outside_the_working_directory_is_never_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().join("repository");
+    let elsewhere = dir.path().join("elsewhere");
+    std::fs::create_dir(&cwd).unwrap();
+    std::fs::create_dir(&elsewhere).unwrap();
+    // A repository can commit this link; following it would write outside the project.
+    std::os::unix::fs::symlink("../elsewhere", cwd.join(".zx-agent")).unwrap();
+    let (hook, _) = parts(&cwd);
+    let result = hook
+        .after_tool(&call("read_file"), ToolOutput::ok("x".repeat(1000)))
+        .await
+        .unwrap();
+    assert!(result.content.starts_with(&"x".repeat(1000)), "{}", result.content);
+    assert!(
+        result.content.contains("outside the working directory"),
+        "{}",
+        result.content
+    );
+    assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn a_created_output_directory_keeps_its_files_out_of_git() {
+    let dir = tempfile::tempdir().unwrap();
+    let (hook, _) = parts(dir.path());
+    spill(&hook, &"z".repeat(1000)).await;
+    let ignore = std::fs::read_to_string(dir.path().join(".zx-agent/outputs/.gitignore")).unwrap();
+    assert!(ignore.lines().any(|line| line == "*"), "{ignore}");
+}
+
+#[tokio::test]
+async fn a_storage_error_keeps_the_redacted_result_inline_and_the_run_continues() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("source.txt"), "x".repeat(1000)).unwrap();
     std::fs::write(dir.path().join("blocked"), "not a directory").unwrap();
@@ -371,18 +405,18 @@ async fn a_storage_error_withholds_raw_output_and_allows_the_model_to_recover() 
     config.hooks.push(SpillOutputs::new(store, vec![]));
     let (mut runner, _) = RunnerSetup::new(config).build();
     let report = runner.run("go", &CancellationToken::new()).await;
-    // The existing after_tool contract turns failures into an error result for the
-    // model. Storage failure must follow that contract and never release raw output.
+    // Storing is an optimisation: the hook runs after redaction, so a storage failure
+    // keeps the already redacted, bounded result inline instead of hiding it.
     assert_eq!(report.outcome, RunOutcome::Completed);
     assert_eq!(provider.requests().len(), 2);
     let requests = provider.requests();
     let Message::ToolResult(result) = &requests[1].messages[2] else {
         panic!("tool result");
     };
-    assert!(result.is_error);
-    assert!(result.content.contains("Tool output withheld"));
+    assert!(!result.is_error);
+    assert!(result.content.starts_with(&"x".repeat(1000)));
     assert!(result.content.contains("cannot create output directory"));
-    assert!(!result.content.contains(&"x".repeat(1000)));
+    assert!(!result.content.contains("Tool output withheld"));
 }
 
 #[test]

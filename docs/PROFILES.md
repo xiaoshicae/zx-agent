@@ -131,7 +131,7 @@ zx-agent run --model "$ZX_MODEL" --compact-threshold-bytes 262144 "处理长任�
 
 两个选项互斥；`--compact-threshold-bytes 0` 也关闭自动触发。`--no-auto-compact` 不影响手动 `/compact`。SDK 默认不自动压缩，原构造器不变；宿主可在 Runner 上调用 `with_compaction(Config)` 校验并启用。
 
-自动步骤在输入和上下文钩子的改动持久化之后、任务模型请求之前执行。一次摘要占用一次 `--max-turns`，其 usage 与失败成本也计入本轮报告，并受整轮时间限制。摘要的工具列表为空；失败不重试成任务请求。手动摘要单独返回 `compaction_report`，不占下一轮 prompt 的预算。
+自动步骤在输入和上下文钩子的改动持久化之后、任务模型请求之前执行。一次摘要占用一次 `--max-turns`，其 usage 与失败成本也计入本轮报告，并受整轮时间限制。摘要的工具列表为空；失败不重试成任务请求。付费的自动摘要请求失败后，本会话暂停自动摘要：之后需要摘要时直接报错并说明原因，不再自动发请求；手动 `/compact` 成功或切换模型后恢复，新会话也重新开始。手动摘要单独返回 `compaction_report`，不占下一轮 prompt 的预算。
 
 预算按内部消息 JSON 的字节数估算，不是 tokenizer，也不包含工具定义或 HTTP 封装；不能据此保证适合每个模型的 token 窗口。保留最近约 64 KiB、完整的最新用户输入、全部 system 更新，边界不拆开工具调用与结果。保留范围会向前扩到最新输入，并保留它之后的全部消息；单个任务过长也可能超过预算。若保留部分无法缩到阈值内，明确停止，不截断指令或最新输入。摘要源最多 2 MiB，摘要响应和结构化正文最多 64 KiB；源过大时需新建会话，无法无限压缩同一份原始历史。
 
@@ -155,7 +155,7 @@ zx-agent run --model "$ZX_MODEL" --compact-threshold-bytes 262144 "处理长任�
 
 ## 工具结果落盘
 
-两个内置 profile 默认启用 `read_output`。工具返回的文本超过 8 KiB 时，在最后一个 `after_tool` 钩子中脱敏后写入文件，会话和模型只收到 `{outputId, path, bytes, readWith}` 引用。SDK 默认不安装这一钩子；显式 `--tools` 未启用 `read_output` 时也不安装，保留工具本来的有界输出。
+`chat` 使用的 `assistant` 默认启用 `read_output`；`run` 使用的 `troubleshoot` 默认不启用，工具结果保持内联，与 P5 之前一致，也不会向可能只读的工作目录写文件。启用后，工具返回的文本超过 8 KiB 时，在最后一个 `after_tool` 钩子中脱敏后写入文件，会话和模型只收到 `{outputId, path, bytes, readWith}` 引用。SDK 默认不安装这一钩子；显式 `--tools` 未启用 `read_output` 时也不安装，保留工具本来的有界输出。
 
 ```toml
 [toolOutput]
@@ -164,14 +164,16 @@ maxFileBytes = 1048576
 # directory = "results"   # 相对本 TOML；省略则使用 cwd/.zx-agent/outputs
 ```
 
-保存的是 `bash`、`read_file` 等工具**已经返回的有界文本**，不会恢复此前已截掉的 stdout、stderr 或文件内容。文件写入失败时，按既有钩子契约返回 `Tool output withheld` 错误结果供模型恢复，不泄出原文本，也不编造文件引用。
+保存的是 `bash`、`read_file` 等工具**已经返回的有界文本**，不会恢复此前已截掉的 stdout、stderr 或文件内容。写入失败（包括超过单文件上限、目录越界）时，保留已脱敏的有界结果内联，并附一行原因，不编造文件引用；写了一半的文件会被删除。落盘钩子位于脱敏之后，内联的结果与不落盘时会话本来记录的内容相同。
 
 模型调用 `read_output({"id":"<outputId>","offset":0})` 读取，offset 为 UTF-8 字节位置。正文加续读提示不超过配置阈值；默认 8 KiB，关闭落盘后读取仍使用 8 KiB 页。严格校验 UUID 和参数，只在配置目录读取 UUID 文件；Unix 拒绝末级文件符号链接和特殊文件。`read_output` 和 `read_skill` 在 CLI 中不再次落盘，避免递归引用。
 
-新目录及 UUID 文件在 Unix 上分别使用 0700、0600；已有目录权限不改动，UUID 文件用 `create_new` 防止覆盖。文件不自动删除；取消可能留下未被日志引用的部分文件。续跑应使用同一结果目录，并一并保存 JSONL 和结果文件；每文件受上限约束，总磁盘占用需由宿主管理。默认目录已加入 `.gitignore`。
+新目录及 UUID 文件在 Unix 上分别使用 0700、0600；已有目录权限不改动，UUID 文件用 `create_new` 防止覆盖。文件不自动删除；取消可能留下未被日志引用的部分文件。续跑应使用同一结果目录，并一并保存 JSONL 和结果文件；每文件受上限约束，总磁盘占用需由宿主管理。
+
+结果目录中会写入内容为 `*` 的 `.gitignore`（已有则不覆盖），避免结果被提交到用户的仓库；本仓库自己的 `.gitignore` 也忽略默认目录。默认目录（相对工作目录）解析后必须位于工作目录内：仓库中提交的 `.zx-agent` 等符号链接不能把写入引到外部，越界时不写入，结果保持内联。profile 中显式配置的 `directory` 由使用者指定，不受这条限制。
 
 SDK 宿主注册同配置的 `OutputStore`、`ReadOutputTool` 和 `SpillOutputs`，写入钩子必须在 `RedactSecrets` 之后，并把分页工具名加入豁免列表。落盘不扩大已知密钥过滤范围，未知凭证和其他敏感数据仍需由宿主处理。
 
 ---
 
-PROFILES.md · v0.3 · 2026年11月
+PROFILES.md · v0.4 · 2026年11月
