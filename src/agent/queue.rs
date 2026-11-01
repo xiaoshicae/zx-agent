@@ -38,6 +38,14 @@ impl MessageQueues {
         drain(&self.follow_up)
     }
 
+    /// Take the text of every queued message: steering first, then follow-ups, each oldest
+    /// first.
+    pub(crate) fn take_all(&self) -> Vec<String> {
+        let mut texts: Vec<String> = lock(&self.steering).drain(..).collect();
+        texts.extend(lock(&self.follow_up).drain(..));
+        texts
+    }
+
     /// The oldest message of `queue`, left in place: the loop removes it only once the
     /// session has recorded it, so input that a cancelled or dropped run never recorded is
     /// still queued for the next run.

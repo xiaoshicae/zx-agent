@@ -32,7 +32,7 @@ paths:
 | `src/**` 中的 `mod tests` | 各模块的单元测试，包括会话文件和事件流的 JSON 格式 |
 | `tests/agent_loop.rs` | 循环语义 |
 | `tests/runner.rs` | 运行层：重试、上限、截断续写、持久化（含自定义 `SessionLog`）、恢复会话 |
-| `tests/agent_session.rs` | 共享会话：Busy、取消与丢弃后复用、多订阅者、退订、回调重入与 panic、模型切换与审计 |
+| `tests/agent_session.rs` | 共享会话：Busy、取消与丢弃后复用、多订阅者、退订、回调重入与 panic、模型切换与审计、取出未被消费的排队输入 |
 | `tests/openai_mock.rs` | 真实 HTTP 下的 provider：SSE、重试、空闲超时、中途取消 |
 | `tests/cli.rs` | 原有 run 行为与退出码，P0 起逐字节保持；P6 默认值变更另行验收 |
 | `tests/run_cli.rs` | P0 之后新增的 run 约定（如进度与报告行转义终端控制字符、会话文件单写者），新的 run 测试放这里，`tests/cli.rs` 不改 |
@@ -46,6 +46,7 @@ paths:
 | `tests/output_store.rs` | 脱敏顺序、UUID 与文件边界、Unix 权限、UTF-8 分页、容量、取消和错误回退 |
 | `tests/hooks.rs`、`tests/hooks_cli.rs` | 六个钩子、钩子上下文、具名注册与阶段顺序、审批与失败回退、变换持久化、已知密钥脱敏接线 |
 | `tests/hook_contract.rs` | 钩子输入输出的 JSON 契约，改格式会破坏钩子进程与审批转发 |
+| `tests/im_server.rs` | IM 服务：内存中的 `FakeChannel` 加脚本化模型，覆盖线程与会话、访问控制、审批卡片（批准、拒绝、非审批人、超时、取消）、运行上限与排队、插话、空闲释放与重开、停止与平台错误 |
 | `tests/real_api.rs` | 付费：真实模型 API，默认跳过 |
 
 只能在 Unix 上运行的测试（如进程组、信号相关的）加 `#[cfg(unix)]`。

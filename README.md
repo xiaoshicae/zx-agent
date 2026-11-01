@@ -192,6 +192,7 @@ CLI (main.rs + cli.rs + chat/)
 | 场景预设 | `src/presets/troubleshoot.rs`、`assistant.rs` | 内核之外的场景策略 |
 | 文件化配置 | `src/profile/`、`profiles/` | 加载与叠加 TOML、项目上下文、显式 skill 目录及按需读取 |
 | 终端前端 | `src/chat/`、`src/cli.rs` | 单输入所有者、审批、显示与共享 CLI 选项 |
+| IM 接入 | `src/im/` | 无对应实现：`ImChannel` 平台接口；`Server` 按线程分派，每个线程一个任务独占会话，审批卡片与运行上限 |
 
 ### 与 pi 一致的关键语义
 
@@ -393,6 +394,7 @@ P2 增加 `zx_agent::AgentSession`；已有 `Runner` 可通过 `AgentSession::fr
 | `prompt`、`prompt_with_cancel` | 返回 `Result<RunReport, SessionError>`；重叠调用立即返回 `Busy`，不排队。provider、钩子和持久化失败由 `RunReport` 表达 |
 | `compact`、`compact_with_cancel` | 返回 `Result<compaction::Report, SessionError>`；与 prompt 共用独占权、Busy、取消和丢弃后复用；报告包含结果、请求数、用量、前后字节数和审计条目 ID |
 | `steer`、`follow_up` | 分别在下一次模型请求前和当前任务结束时消费，沿用原有队列 |
+| `take_queued` | 空闲时取出排入队列但没有被运行消费的输入：先引导消息、后后续消息，各自按先后；运行中返回 `Busy`。运行只在每个回合末查看队列，所以运行结束时才到的输入会留到下一次运行；自己发起运行的宿主应在运行结束时调用它，参照 `im::Server` |
 | `abort` | 只取消当前运行；空闲时返回 `false`。等待当前 `prompt` 返回，或 drop 它的 future 后，可继续提问；外部父令牌不受影响 |
 | `subscribe` | 返回 `Subscription`，必须持有句柄才能继续接收事件；drop 后退订。只发送后续事件，不重放历史，已经分发的回调可能完成 |
 | `set_model(ModelRef { provider, model })` | 空闲时同步切换，运行中返回 `Busy`，空模型 ID 返回 `InvalidModel`。保留历史、工具、提示词、钩子、上限与审批缓存；会话头部仍记录初始模型 |
@@ -453,6 +455,7 @@ P1 的 SDK 接口调整：静态配置移入 `LoopSpec`；`LoopConfig` 持有钩
 - `session::SessionLog`：会话记录存在哪里，见下文[会话存储](#会话存储)。
 - `executor::Executor`：工具执行命令与读文件的位置。`BashTool` 与 `ReadFileTool` 的 `executor` 字段默认是 `LocalExecutor`（本机）；`run` 结束、超时或取消时须终止命令启动的全部进程，`read_file` 只读不超过上限的普通文件。`ContainerExecutor::start(ContainerConfig::new(image, workspace))` 启动[容器执行](#容器执行)所用的容器，`tools::builtin_tools_with` 用指定的执行器构造内置工具；容器随执行器释放而删除。
 - `agent::MessageQueues`：在运行期间注入引导消息或后续消息。
+- `im::ImChannel`：接入一个 IM 平台，见下文[IM 接入](#im-接入)。
 
 ### 会话存储
 
@@ -472,6 +475,27 @@ pub trait SessionLog: Send + Sync {
 - `SessionStore` 先等 `append` 成功再更新内存。`append` 失败或 30 秒内未返回时，正在进行的运行以 `Error` 结束。此后，以及 `append` 的 future 在等待中被丢弃（结果未知）之后，这个 `SessionStore` 不再写入，之后的运行在第一次写入时同样以 `Error` 结束；要继续，需按存储中的实际内容重新加载。
 
 可运行的完整示例见 `session::SessionLog` 的 Rustdoc（`cargo test` 会执行）。`Runner::session()` 返回当前会话的只读借用。
+
+### IM 接入
+
+`im::Server` 在 IM 中回答问题：每个线程一个会话，写操作在 IM 中审批。设计见 `docs/serve-im-review.md`。目前只有库接口；CLI 的 `serve` 子命令和具体平台的实现尚未提供（评审稿第 6 节的模块 B、C）。
+
+平台实现 `ImChannel` 的四个方法：`platform`、`run`（接收直到取消）、`send`、`update`。实现负责：自行重连；收到平台投递后立即确认，再转交事件；按消息 ID 去重；只转交发给机器人的消息（@ 与单聊），不转交机器人自己的消息；遵守平台限频；超长文本自行拆分。`Destination.thread` 是线程根消息的 ID。
+
+宿主提供两样东西：`SessionFactory` 为一个线程打开会话，须把传入的 `interaction` 设为 `LoopConfig::interaction`；`ServerSink` 接收运维事件。`SessionKey::file_in(dir)` 给出 `<dir>/<平台>/<聊天>/<线程>.jsonl`，各段按字节编码，ID 不能指向其他目录。
+
+| 行为 | 说明 |
+|---|---|
+| 线程即会话 | 聊天中的新消息以它为根开出线程；线程中的后续消息进入同一个会话 |
+| 访问控制 | 只在 `ServerConfig::conversations` 列出的聊天中回答；其他聊天只收到一句“未授权” |
+| 运行中的消息 | 作为插话（`steer`）；运行结束时才到的，由 `take_queued` 取出后另起一次运行 |
+| `/cancel` | 单独发在线程中，取消该线程的运行；排队时取消排队 |
+| 运行上限 | 同时运行 `max_running` 个会话，其余按到达顺序排队，并收到一句排队提示 |
+| 回复 | 开始时发“处理中”，结束时把它替换为回答；未完成、超时、取消与失败各有固定说明（`Replies`，默认中文，可替换） |
+| 审批 | 需要审批时发卡片；只有 `approvers` 中的用户点击才生效，其他人点击只收到提示。卡片按运行发出的 `approval_resolved` 改为结果，所以超时与取消也会显示 |
+| 审计 | 每次审批结束，`ServerSink` 收到 `ServerEvent::Approval`：会话、工具调用、审批人、结果与时间 |
+| 空闲释放 | `idle` 内没有输入的会话释放其文件锁，下一条消息重新打开 |
+| 停止 | `run` 在取消后中止所有运行，等各线程发出结果后返回；平台返回错误时，以该错误结束 |
 
 ## 开发
 

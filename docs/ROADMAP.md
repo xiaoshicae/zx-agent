@@ -155,7 +155,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P3 | 终端对话 `chat` | 已完成（PR #5） |
 | P4 | profile 文件、上下文文件与 skills | 已完成（PR #6） |
 | P5 | 上下文管理 | 已完成（PR #9） |
-| P6 | 执行环境与崩溃恢复 | 进行中：崩溃恢复（PR #12）、执行环境接缝（PR #13）、离线容器执行（PR #14）已完成；在线访问评审稿已合入（PR #17），一期已完成：只读命令自动放行（PR #19）、环境变量保护与 ServiceAccount token 脱敏（PR #20）、常驻 Pod 部署包（PR #22）、多集群（PR #24）；容器联网已取消，改为常驻 Pod 部署。待部署方在真实集群上验收；服务模式与 IM 接入的评审稿待评审（PR #27） |
+| P6 | 执行环境与崩溃恢复 | 进行中：崩溃恢复（PR #12）、执行环境接缝（PR #13）、离线容器执行（PR #14）已完成；在线访问评审稿已合入（PR #17），一期已完成：只读命令自动放行（PR #19）、环境变量保护与 ServiceAccount token 脱敏（PR #20）、常驻 Pod 部署包（PR #22）、多集群（PR #24）；容器联网已取消，改为常驻 Pod 部署。待部署方在真实集群上验收；服务模式与 IM 接入的评审稿已合入（PR #27），模块 A（IM 接口与服务）已完成（PR #28），B–D 待实施 |
 | P7 | 插件与 MCP | 未开始；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已完成（PR #23），A2–A8（扩展 API）已完成（PR #25） |
 | P8 | 嵌入协议 `acp` | 未开始 |
 | P9 | 可选增强 | 未开始 |
@@ -363,7 +363,14 @@ P5 实施约定（2026-11-01）：
 - [x] 常驻 Pod 部署包（单集群）：Deployment、RBAC、Secret 与会话存储卷的模板和文档（由“Kubernetes 部署说明”调整；已完成，PR #22）
 - [x] 多集群：多个 context 的 kubeconfig，以及其他集群 token 文件的脱敏登记（已完成，PR #24）
 
-部署方向（2026-11-01，用户确认）：Agent 以常驻 Pod 部署，kubectl 在 Pod 内以本机执行方式运行，凭据来自 ServiceAccount，因此取消容器执行的联网与 kubeconfig。用户确认的任务来源：kubectl exec 进 Pod 对话、定时巡检、告警 Webhook、IM 机器人。用户希望增加的功能：写操作（需审批）、专用查询工具 / MCP、多集群访问、记住历史排障。其中告警 Webhook 与 IM 机器人需要新的服务模式，另行评审后实施。评审稿见 `docs/serve-im-review.md`（PR #27，待评审）：一期为 `zx-agent serve`、IM 接口与两个平台的实现，告警 Webhook 放在二期。
+部署方向（2026-11-01，用户确认）：Agent 以常驻 Pod 部署，kubectl 在 Pod 内以本机执行方式运行，凭据来自 ServiceAccount，因此取消容器执行的联网与 kubeconfig。用户确认的任务来源：kubectl exec 进 Pod 对话、定时巡检、告警 Webhook、IM 机器人。用户希望增加的功能：写操作（需审批）、专用查询工具 / MCP、多集群访问、记住历史排障。其中告警 Webhook 与 IM 机器人需要新的服务模式，另行评审后实施。评审稿见 `docs/serve-im-review.md`（已合入，PR #27）：一期为 `zx-agent serve`、IM 接口与两个平台的实现，告警 Webhook 放在二期。
+
+IM 接入一期（2026-11-01 起；评审稿合入后由用户要求推进，按其第 6 节分 PR 实施）：
+
+- [x] A. IM 接口与服务：`im` 模块（`ImChannel`、`Server`）与 `AgentSession::take_queued`，用内存实现测试（已完成，PR #28）
+- [ ] B. Slack：Socket Mode、`zx-agent serve` 子命令与配置文件、IM 凭据的隐藏与脱敏（引入 `tokio-tungstenite`，决策 D7）
+- [ ] C. ⚑ D:5/CHINA FLAG: 飞书：长连接、token、发送与回复、卡片（Subject to Legal/Export Compliance approval）
+- [ ] D. 部署与验收：Deployment 运行 serve 并共享进程命名空间、配置与凭据、部署说明；真实平台验收
 
 自动放行实施记录（2026-11-01，PR #19）：
 
@@ -442,6 +449,31 @@ P5 实施约定（2026-11-01）：
   - 巡检访问远端；
   - 清理。远端清理需要 `--ignore-not-found`。
 - 未验证：真正分属两个集群的访问；kubeconfig 中 exec 插件方式的凭据。
+
+IM 接入模块 A 实施记录（2026-11-01，PR #28）：
+
+- 内容：
+  - 公开模块 `im`：平台接口 `ImChannel` 与评审稿 3.1 节的类型；`Server`、`ServerConfig`、`SessionFactory`（宿主为一个线程打开会话）、`ServerSink` 与 `ServerEvent`（审批记录、空闲释放、只有运维看得到的失败）、`Replies`（固定文本，默认中文）、`SessionKey::file_in`（会话文件路径，各段按字节编码）。
+  - 结构：路由任务做访问控制并按线程分派；每个线程一个任务，独占会话、运行、审批卡片与空闲计时；任务之间只经 channel 通信。运行在独立任务中进行，所以发消息的等待不会拖住模型请求。运行上限用 tokio 的公平信号量。
+  - 缺口 ③ 采用 a)：新增 `AgentSession::take_queued`，空闲时取出未被消费的排队输入，运行中返回 `Busy`；线程任务在每次运行结束后调用，非空就再运行一次。
+  - 缺口 ④ 采用 a)：审批记录由 `ServerSink` 收到的 `ServerEvent::Approval` 给出，公开的 `Approval` 与事件格式不变。
+  - 空闲释放先关闭会话、再请路由结束线程任务；路由只在这期间没有新消息时才结束它，否则由同一个任务重新打开会话，所以同一会话文件不会被两个任务打开。
+- 相对评审稿的补充：`MessageRef` 定为“发往位置 + 平台消息 ID”；`Destination.thread` 是线程根消息的 ID；`ImChannel::run` 须在停止转交之后才返回。
+- 新增 28 项测试：
+  - `tests/im_server.rs` 16 项，覆盖：
+    - 线程与会话：开线程、同线程续接、不同线程分开；
+    - 访问控制：名单外的聊天；
+    - 审批：批准、拒绝、非审批人点击、超时、取消；
+    - 运行上限与排队、插话；
+    - 空闲释放与重开；
+    - 停止：取消运行并发出结果；
+    - 出错：平台返回错误、会话打不开后重试、平台重名。
+  - `tests/agent_session.rs` 2 项（`take_queued`）。
+  - 模块内 10 项：卡片摘要、会话路径编码、结束文本。
+- 反向验证：每次只破坏一处，再还原，对应测试都失败。被破坏的五处是：审批人检查、空闲释放、`take_queued`、卡片收尾、插话。
+- 本地 macOS：基于 `75d0bc9`，stable 与 Rust 1.88.0 各 559 项通过（基线 531 项），6 项付费测试跳过；格式、clippy、严格 Rustdoc 与 MSRV 全目标检查通过；`tests/im_server.rs` 连续运行 30 次均通过。`Cargo.toml`、`Cargo.lock` 未改动，未新增依赖。
+- 未实现（模块 B–D）：`serve` 子命令、配置文件与 IM 凭据的隐藏和脱敏、任何真实平台。
+- 未覆盖：运行结束瞬间到达的插话。会话层的 `take_queued` 有确定性测试；这一时序在服务层无法确定地构造。
 
 执行环境接缝验收（2026-11-01，已完成，PR #13）：`src/executor/` 提供 `Executor`、`ShellCommand`、`CommandOutput`、`CommandEnd` 与 `LocalExecutor`；bash 与 read_file 新增 `executor` 字段，默认 `LocalExecutor`，`..Default::default()` 的构造方式不受影响，按字段完整列出的字面量需补上新字段。本机执行代码从 bash 与 read_file 原样搬迁，bash 与 read_file 原有测试不改断言即通过（仅 read_file 测试中两处字面量补 `..ReadFileTool::default()`，bash 测试模块补一行 `use tokio::process::Command;`）。新增 `tests/executor.rs` 3 项，用记录请求的替身执行器验证：bash 把命令、目录、超时与隐藏变量交给执行器，并正确报告 6 种结束方式；read_file 经执行器读取解析后的路径与上限。反向验证：让工具绕过自身执行器时，3 项全部失败，修改已还原。本地 macOS 基于 `bb91974`，stable 与 Rust 1.88.0 各 416 项通过、6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过。`tests/cli.rs`、`Cargo.toml`、`Cargo.lock` 未改动。
 

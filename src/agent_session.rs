@@ -135,6 +135,20 @@ impl AgentSession {
         self.queues.follow_up(text);
     }
 
+    /// Take the input that `steer` and `follow_up` queued and no run consumed: steering
+    /// messages first, then follow-ups, each oldest first. A run looks for input at the end
+    /// of each turn, so input queued as it ends waits for the next run; a host that starts
+    /// runs itself calls this when one ends and prompts with what it gets. Returns Busy
+    /// during a prompt or compaction, whose loop may still take the input.
+    pub fn take_queued(&self) -> Result<Vec<String>, SessionError> {
+        // Holding the state lock keeps a prompt from starting between the check and the take.
+        let state = lock(&self.state);
+        match &*state {
+            State::Running(_) => Err(SessionError::Busy),
+            State::Idle(_) => Ok(self.queues.take_all()),
+        }
+    }
+
     /// Cancel only the active prompt or compaction. Returns false when idle.
     pub fn abort(&self) -> bool {
         let cancel = match &*lock(&self.state) {
