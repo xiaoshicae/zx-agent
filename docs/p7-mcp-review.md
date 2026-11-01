@@ -2,11 +2,11 @@
 
 | 信息 | 内容 |
 |-|-|
-| 版本 | `v0.1` |
+| 版本 | `v0.2` |
 | 日期 | `2026-11-01` |
-| 状态 | 草稿，待评审 |
+| 状态 | 已评审（2026-11-01：缺口 ②–⑤ 按建议执行），已合入（PR #36）；按第 6 节分模块实施：A（Extension 接口，PR #38）已完成 |
 | Owner | 待指定 |
-| 对应 | `docs/ROADMAP.md:892-902`（P7 插件与 MCP）；范围按用户 2026-11-01 的决定（D8）收窄（1.2） |
+| 对应 | `docs/ROADMAP.md:924-934`（P7 插件与 MCP）；范围按用户 2026-11-01 的决定（D8）收窄（1.2） |
 | 代码核对基线 | `a345b39`（含 PR #35）；源码行号以此为准，`docs/ROADMAP.md` 的行号以本稿所在 PR 修改后的版本为准 |
 | Milestone | 一期：公开 `Extension`、MCP 客户端（只接工具，只用 Streamable HTTP）<br>以后按需：运行中更新工具列表、OAuth、MCP 的其他能力 |
 
@@ -22,8 +22,8 @@ P7 的目标是第三方能力不改内核即可接入。本稿定两件事：�
 
 | 诉求 | 今天的状况 |
 |-|-|
-| 接入外部团队提供的查询能力（“部署方向”中的“专用查询工具 / MCP”，`docs/ROADMAP.md:515`） | 只有内置工具（`src/tools/mod.rs:18-24`），新增工具要改代码、重新编译 |
-| 以库的方式打包扩展 | SDK 可以自己往 `LoopSpec.tools` 与 `HookChain` 里加，但没有把工具、钩子、提示词段落打包的接口；“扩展只能用 `Extension` 阶段”留待 P7 实施（`docs/ROADMAP.md:868`） |
+| 接入外部团队提供的查询能力（“部署方向”中的“专用查询工具 / MCP”，`docs/ROADMAP.md:547`） | 只有内置工具（`src/tools/mod.rs:18-24`），新增工具要改代码、重新编译 |
+| 以库的方式打包扩展 | SDK 可以自己往 `LoopSpec.tools` 与 `HookChain` 里加，但没有把工具、钩子、提示词段落打包的接口；“扩展只能用 `Extension` 阶段”留待 P7 实施（`docs/ROADMAP.md:900`） |
 | 外部工具不能沿用内置工具的默认放行 | 非 bash 工具只受 `askTools` / `denyTools` 约束，其余兜底为 Allow（`src/cli.rs:611-632`） |
 
 ### 1.2 本期范围
@@ -41,7 +41,7 @@ P7 的目标是第三方能力不改内核即可接入。本稿定两件事：�
 | resources、prompts、sampling、elicitation、roots 等 | 只接工具（用户决定） |
 | OAuth 授权流程 | 规范中授权是可选的（附录 9.1 第 8 条）；一期只支持静态 token（缺口 ③） |
 | 运行中更新工具列表 | 工具集在组装时固定在 `LoopSpec.tools`；收到 `list_changed` 只记录（3.6） |
-| 扩展注册命令 | P7 清单原先包括“命令”，但只有 chat 有命令，没有使用者。以后以带默认实现的方法加入，不破坏兼容（`docs/ROADMAP.md:897` 已注明） |
+| 扩展注册命令 | P7 清单原先包括“命令”，但只有 chat 有命令，没有使用者。以后以带默认实现的方法加入，不破坏兼容（`docs/ROADMAP.md:929` 已注明） |
 | 钩子进程（L2）、动态库、WASM、热加载 | 技术方案 5.5 节另行设计，或已排除 |
 
 ### 1.4 相关链接
@@ -128,21 +128,21 @@ pub trait Extension: Send + Sync {
     fn tools(&self) -> Vec<Arc<dyn Tool>> { Vec::new() }
     /// (tag, text) pairs placed after the built-in sections of the system prompt.
     fn prompt_sections(&self) -> Vec<(String, String)> { Vec::new() }
-    fn hooks(&self) -> Vec<Arc<dyn Hooks>> { Vec::new() }
+    fn hooks(&self) -> Vec<Box<dyn Hooks>> { Vec::new() }
 }
 ```
 
 | 项 | 规则 | 依据 |
 |-|-|-|
 | 位置 | `zx_agent::extensions`；内核模块 `agent` 不依赖它 | 场景策略不进内核 |
-| 钩子阶段 | 只能是 `Extension`，声明其他阶段时组装报错 | A4 定稿：内置策略最先，脱敏与落盘在扩展之后（`docs/ROADMAP.md:853,868`） |
+| 钩子阶段 | 只能是 `Extension`，声明其他阶段时组装报错 | A4 定稿：内置策略最先，脱敏与落盘在扩展之后（`docs/ROADMAP.md:885,900`） |
 | 钩子名称 | 以 `Extension::name()` 注册（`HookOptions`，`src/agent/hooks.rs:370`） | A3 |
 | 工具重名 | 与内置工具或其他扩展的工具重名时，组装报错 | A5；`LoopSpec::validate`（`src/agent/agent_loop.rs:47-71`） |
-| 提示词段落 | 不能与内置段落同名（`environment`、`command_policy`、`project_context`、`available_skills`），附在内置段落之后 | 内置段落是程序提供的事实（`src/cli.rs:588-596`） |
-| 组装 | `cli::prepare` 接收扩展列表并统一注册；SDK 用 `extensions::register` 注册工具与钩子，段落自行传给 `build_system_prompt`（`src/prompt.rs:15`） | A6 |
+| 提示词段落 | 名称只能是小写 ASCII 字母、数字与 `_`，以字母开头；不能是 `preamble`、内置段落（`prompt::GENERATED_SECTIONS`：`environment`、`command_policy`、`project_context`、`available_skills`）或提示词中已有的段落；附在已有段落之后 | 内置段落是程序提供的事实（`src/cli.rs:588-596`）；同名段落会被原地替换（`src/ai/system_prompt.rs:27-33`） |
+| 组装 | `extensions::register(&mut LoopConfig, &[Arc<dyn Extension>])` 先检查全部扩展，再注册工具、钩子与段落，出错时不改动配置。`cli::prepare` 的接入随模块 B 一起做：届时才有第一个 CLI 扩展 | A6 |
 
 与技术方案草图（5.5 节）的差异：
-- `hooks()` 返回列表而不是 `Option`：一个扩展可能有多个钩子。
+- `hooks()` 返回 `Vec<Box<dyn Hooks>>`，而不是 `Option<Arc<dyn Hooks>>`：一个扩展可能有多个钩子；钩子链拥有钩子（`HookChain` 本来就以 `Box` 保存），需要共享的状态由扩展自己持有。
 - `prompt_sections` 不接收 `PromptEnv`：代码中没有这个类型，环境事实已在 `environment` 段落中。
 
 MCP 工具的审批规则由 `cli::prepare` 以内置策略的身份加入（3.3），不经 `Extension` 接口。扩展的钩子只能处在 `Extension` 阶段，而 `before_tool` 取所有钩子中最严的结论（`src/agent/hooks.rs:609` 的测试），所以扩展放宽不了策略给出的审批或拒绝。
@@ -309,7 +309,7 @@ timeoutSecs = 60                              # 可选：单次调用的上限�
 
 | 变更 | 内容 |
 |-|-|
-| 公开 API | `extensions::Extension`、`extensions::register`；新模块 `mcp`：服务器配置类型，以及返回 `Extension` 实现的 `connect` |
+| 公开 API | `extensions::Extension`、`extensions::register`、`prompt::GENERATED_SECTIONS` 与各段落名常量（模块 A）；新模块 `mcp`：服务器配置类型，以及返回 `Extension` 实现的 `connect` |
 | profile | 新增 `[[mcp]]`（3.2） |
 | CLI | 无新参数 |
 | 会话文件 | 格式不变；MCP 工具定义经 `request_config` 记录 |
@@ -339,8 +339,8 @@ timeoutSecs = 60                              # 可选：单次调用的上限�
 
 | 模块 | 负责人 | 范围 | 依赖 |
 |-|-|-|-|
-| A. Extension 接口 | 待指定 | trait、`register`、`cli::prepare` 接入、阶段与重名检查 | 无 |
-| B. MCP 客户端 | 待指定 | 引入 rmcp、配置、连接、`McpTool`、策略与凭据、假服务与测试 | A |
+| A. Extension 接口 | 待指定 | trait、`register`、阶段、重名与段落名检查（已完成，PR #38） | 无 |
+| B. MCP 客户端 | 待指定 | `cli::prepare` 接入扩展、引入 rmcp、配置、连接、`McpTool`、策略与凭据、假服务与测试 | A |
 | C. 文档 | 待指定 | README、`docs/PROFILES.md`、部署说明、ROADMAP | B |
 
 ---
@@ -348,7 +348,7 @@ timeoutSecs = 60                              # 可选：单次调用的上限�
 ## 7. 后续规划
 
 - OAuth（`client_credentials`）、运行中更新工具列表、stdio。
-- “记住历史排障”：以 `Extension` 实现，`transform_context` 加外部存储（技术方案已规划，`docs/ROADMAP.md:754`）。
+- “记住历史排障”：以 `Extension` 实现，`transform_context` 加外部存储（技术方案已规划，`docs/ROADMAP.md:786`）。
 - 钩子进程（L2）。
 
 ---
@@ -357,7 +357,7 @@ timeoutSecs = 60                              # 可选：单次调用的上限�
 
 | 日期 | 评审人 | 意见 | 回复 / 处理 |
 |-|-|-|-|
-| | | | |
+| 2026-11-01 | 用户 | 缺口 ②–⑤ 按建议执行，继续实施 | 已采纳；缺口 ① 已在 PR #36 中解决，模块 A 见 PR #38 |
 
 ---
 
@@ -445,4 +445,4 @@ S 指 2026-07-28 版（`docs/specification/2026-07-28/`，提交 `5f5440bb26a62e
 
 ---
 
-`p7-mcp-review.md` · v0.1 · 2026年11月
+`p7-mcp-review.md` · v0.2 · 2026年11月

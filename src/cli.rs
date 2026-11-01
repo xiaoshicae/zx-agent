@@ -19,7 +19,7 @@ use zx_agent::output_store::{self, OutputStore, ReadOutputTool, SpillOutputs};
 use zx_agent::policy::{AutoApprove, CommandPolicy, PolicyHook, Rule, RuleMatcher, RulePolicy};
 use zx_agent::profile::skills::{ReadSkillTool, TOOL_NAME};
 use zx_agent::profile::{Builtin, ContainerSettings, Execution, Profile};
-use zx_agent::prompt::{build_system_prompt, container_environment_section, environment_section};
+use zx_agent::prompt::{self, build_system_prompt, container_environment_section, environment_section};
 use zx_agent::runner::{Limits, Runner};
 use zx_agent::session::{SessionHeader, SessionStore};
 use zx_agent::tools::{self, BASH};
@@ -588,10 +588,10 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     let system_prompt = build_system_prompt(
         &profile.instructions,
         &[
-            ("environment", &environment),
-            ("command_policy", &command_policy),
-            ("project_context", &context),
-            ("available_skills", &catalog),
+            (prompt::ENVIRONMENT, &environment),
+            (prompt::COMMAND_POLICY, &command_policy),
+            (prompt::PROJECT_CONTEXT, &context),
+            (prompt::AVAILABLE_SKILLS, &catalog),
         ],
     );
 

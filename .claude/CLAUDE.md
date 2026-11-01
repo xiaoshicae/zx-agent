@@ -46,7 +46,7 @@
 | 上下文管理 | `src/compaction.rs`、`src/session/compaction.rs`、`src/output_store.rs` | 宿主摘要、追加升级与原始投影、脱敏后的长结果保存及分页 |
 | agent | `src/agent/` | 回合循环、工具执行、Hooks 宿主、事件、消息队列 |
 | ai | `src/ai/` | 消息类型、系统提示词段落、流式事件协议、provider 与重试判断 |
-| 外层策略与交互 | `src/policy.rs`、`src/extensions.rs`、`src/interaction.rs` | 命令与规则策略、续写、已知密钥脱敏、宿主审批与 NoHuman |
+| 外层策略与交互 | `src/policy.rs`、`src/extensions.rs`、`src/interaction.rs` | 命令与规则策略、续写、已知密钥脱敏、扩展的打包与注册（`Extension`、`register`）、宿主审批与 NoHuman |
 | 工具 | `src/tools/` | bash、read_file、输出截断 |
 | 执行环境 | `src/executor/` | 工具执行命令与读文件的位置；`LocalExecutor` 为本机，负责进程组、超时与取消、输出捕获上限；`ContainerExecutor` 在每个进程一个的 Docker 容器中执行，并在容器内按进程组终止命令 |
 | IM 接入 | `src/im/` | 平台接口 `ImChannel`；`Server` 做访问控制并按线程分派，每个线程一个任务独占会话、运行、审批卡片与空闲释放，任务之间只经 channel 通信；宿主经 `SessionFactory` 打开会话；`slack.rs` 经 Socket Mode 接收、经 Web API 发送 |
@@ -64,7 +64,7 @@
 - **事实由程序提供，不让模型去查**：操作系统、启动时间、命令白名单在启动时写进系统提示词。这样不浪费轮次，也不会被白名单拦住。
 - **兼容性默认保守，能力按需打开**：提示词更新默认合并到开头（`collapse`，与 pi 对 OpenAI 兼容服务的默认一致），服务端支持时才按位置发送（`inline`）。
 - **安全靠部署隔离**：策略只是第一道防线（检查边界见 README 的"安全模型"）。认证 key 只从环境变量读取，该变量从 bash 子进程环境中删除；Unix 上新建会话文件的权限为 0600，打开已有文件不修改权限；真正的隔离要靠不同账号或容器。
-- **扩展点都是 trait**：`Provider`、`Tool`、`ToolPolicy`、`Hooks`、`Interaction`、`EventSink`、`Executor`、`SessionLog`、`ImChannel`。新能力优先以实现 trait 的方式加入，不改循环本身。
+- **扩展点都是 trait**：`Provider`、`Tool`、`ToolPolicy`、`Hooks`、`Interaction`、`EventSink`、`Executor`、`SessionLog`、`ImChannel`、`Extension`。新能力优先以实现 trait 的方式加入，不改循环本身。
 
 ## 命令
 
@@ -135,6 +135,7 @@
 - **新工具**：实现 `agent::Tool`。参数定义成带 `#[serde(deny_unknown_fields)]` 的结构体再反序列化；输出要截断；要支持取消；不会改变任何状态的工具让 `effects()` 返回 `Effects::ReadOnly`，其余保留默认的 `SideEffects`（不变量 10）。测试覆盖成功、参数错误、超时或取消三种情况。
 - **新策略**：内置策略实现 `agent::ToolPolicy`，通过 `policy::PolicyHook` 注册（运行在 `Policy` 阶段），无法判断时返回 `Decision::Deny`；扩展的放行判断写在 `Hooks::before_tool`。
 - **新扩展**：实现 `agent::Hooks`，按需覆盖默认方法；每个回调最后一个参数是 `&HookContext`（会话、运行、工作目录、只读的取消信号）。回调必须异步让出执行权。`transform_context` 不能追加 system 消息，系统提示词只来自配置。错误、panic、取消与超时由宿主处理，具体规则见 README。阶段（`Hooks::stage`）默认 `Extension`，只有内置的策略适配、脱敏与落盘声明其他阶段。用 `HookChain::push_with` 注册时给出名称。钩子输入输出的 JSON 格式由 `tests/hook_contract.rs` 固定，改动前先确认钩子进程与审批转发能否兼容。
+- **打包的扩展**：工具、钩子与提示词段落要一起注册时，实现 `extensions::Extension`，经 `extensions::register` 加入 `LoopConfig`。扩展的钩子只能声明 `Extension` 阶段；段落名不能是 `preamble`、`prompt::GENERATED_SECTIONS` 中的名字或提示词中已有的段落（同名段落会被原地替换）。行为由 `tests/extensions.rs` 覆盖。
 - **上下文改动**：`on_input` 完成后才写入原始输入，改写或拒绝再追加 `context_edit`，钩子被取消时不写入；`transform_context` 返回 `ContextEdit` 计划，整份计划先校验，逐项写入成功后再请求模型。
 - **新的会话存储**：实现 `session::SessionLog`。`append` 在记录保存后才返回，同一 `seq` 已有记录时报错；新会话由后端保存头部后交给 `SessionStore::with_log`，续接时读出 `LoadedSession` 交给 `SessionStore::load`。用内存实现测往返，参照 `tests/runner.rs` 的 `TableLog`。
 - **新 IM 平台**：实现 `im::ImChannel`，遵守其文档列出的职责：立即确认投递、按消息 ID 去重、只转交发给机器人的消息、遵守限频、拆分超长文本。协议用本地假服务测；与 `Server` 的配合参照 `tests/im_server.rs` 的 `FakeChannel`；Slack 的协议测试参照 `tests/im_slack.rs` 与 `tests/common/fake_slack.rs`。

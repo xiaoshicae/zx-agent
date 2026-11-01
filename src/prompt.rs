@@ -9,6 +9,18 @@ use std::path::Path;
 use crate::ai::{PREAMBLE, SystemPrompt, now_ms};
 use crate::executor::Platform;
 
+/// Where commands run: [`environment_section`] or [`container_environment_section`].
+pub const ENVIRONMENT: &str = "environment";
+/// The commands bash may run, when bash is enabled.
+pub const COMMAND_POLICY: &str = "command_policy";
+/// Repository instructions such as AGENTS.md.
+pub const PROJECT_CONTEXT: &str = "project_context";
+/// The catalog of skills the model can read.
+pub const AVAILABLE_SKILLS: &str = "available_skills";
+/// The sections zx-agent generates after the preamble, in this order. Extensions may not
+/// use these names, present or not, nor the preamble's.
+pub const GENERATED_SECTIONS: [&str; 4] = [ENVIRONMENT, COMMAND_POLICY, PROJECT_CONTEXT, AVAILABLE_SKILLS];
+
 /// `instructions` as the preamble, followed by every non-empty section. Sections are wrapped
 /// in tags of their names, so the model can tell generated facts from instructions
 /// (pi: `buildSystemPromptSections`).

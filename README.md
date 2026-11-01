@@ -508,6 +508,17 @@ P1 的 SDK 接口调整：静态配置移入 `LoopSpec`；`LoopConfig` 持有钩
 - `executor::Executor`：工具执行命令与读文件的位置。`BashTool` 与 `ReadFileTool` 的 `executor` 字段默认是 `LocalExecutor`（本机）；`run` 结束、超时或取消时须终止命令启动的全部进程，`read_file` 只读不超过上限的普通文件。`execution_mode` 默认 `Parallel`；一次只能处理一个调用的执行器返回 `Sequential`，内置工具随之声明，循环就不会提前开始并记录只能排队等待的调用。`ContainerExecutor::start(ContainerConfig::new(image, workspace))` 启动[容器执行](#容器执行)所用的容器，`tools::builtin_tools_with` 用指定的执行器构造内置工具；容器随执行器释放而删除。
 - `agent::MessageQueues`：在运行期间注入引导消息或后续消息。
 - `im::ImChannel`：接入一个 IM 平台，见下文[IM 接入](#im-接入)。
+- `extensions::Extension`：把工具、钩子与系统提示词段落打包注册，见下文[扩展](#扩展)。
+
+### 扩展
+
+`extensions::Extension` 声明名称、工具、提示词段落与钩子，`extensions::register(&mut config, &[Arc::new(扩展)])` 把它们加入 `LoopConfig`。示例见 `Extension` 的文档注释（作为 doctest 编译）。
+
+- 工具加在已有工具之后，名字不能与任何工具重名。
+- 钩子以扩展的名称注册，`hook_failed` 中显示这个名称；它们只能声明 `Extension` 阶段，因此内置策略总在它们之前、脱敏与落盘总在它们之后：扩展放宽不了策略的结论，也恢复不了已脱敏的密钥。
+- 段落加在系统提示词的末尾。名称只能是小写 ASCII 字母、数字与 `_`，以字母开头；不能是 `preamble`、zx-agent 生成的段落（`prompt::GENERATED_SECTIONS`：`environment`、`command_policy`、`project_context`、`available_skills`，无论提示词中是否已有）或提示词中已有的段落，因为同名段落会被替换。
+- 先检查全部扩展再注册：扩展名为空或重复、钩子不在 `Extension` 阶段、工具重名或声明有误、段落名不合规时返回错误，`config` 保持原样。
+- 一个扩展可以注册进多个循环（例如 serve 的每个线程），工具共用同一份；每次注册都会调用一次 `hooks()`。
 
 ### 会话存储
 

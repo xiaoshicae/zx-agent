@@ -337,7 +337,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P4 | profile 文件、上下文文件与 skills | 已完成（PR #6） |
 | P5 | 上下文管理 | 已完成（PR #9） |
 | P6 | 执行环境与崩溃恢复 | 进行中：崩溃恢复（PR #12）、执行环境接缝（PR #13）、离线容器执行（PR #14）已完成；在线访问评审稿已合入（PR #17），一期已完成：只读命令自动放行（PR #19）、环境变量保护与 ServiceAccount token 脱敏（PR #20）、常驻 Pod 部署包（PR #22）、多集群（PR #24）；容器联网已取消，改为常驻 Pod 部署。待部署方在真实集群上验收；服务模式与 IM 接入的评审稿已合入（PR #27），模块 A（IM 接口与服务，PR #28）、B（Slack 与 `serve`，PR #29）、C（⚑ D:5/CHINA FLAG: 飞书，PR #32）、D（部署，PR #33）已完成，真实平台验收待提供凭据 |
-| P7 | 插件与 MCP | 评审中：范围按 D8 收窄，评审稿 `docs/p7-mcp-review.md`（草稿）；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已完成（PR #23），A2–A8（扩展 API）已完成（PR #25） |
+| P7 | 插件与 MCP | 进行中：范围按 D8 收窄，评审稿已合入（PR #36）并经用户确认；模块 A（Extension 接口，PR #38）已完成；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已完成（PR #23），A2–A8（扩展 API）已完成（PR #25） |
 | P8 | 嵌入协议 `acp` | 未开始 |
 | P9 | 可选增强 | 未开始 |
 
@@ -923,10 +923,10 @@ B. 追踪事件
 
 ### P7 插件与 MCP
 
-目标：第三方能力可以不改内核接入（原路线图“MCP 客户端，以及只读的领域工具”）。范围按 D8 收窄（2026-11-01）：本项目只做 MCP 客户端。评审稿见 `docs/p7-mcp-review.md`（草稿）。依赖：`rmcp`（D2 已授权；3.8.0 声明 MSRV 1.88），模块 B 引入；它需要的 reqwest 0.13 已先行升级（D9）。
+目标：第三方能力可以不改内核接入（原路线图“MCP 客户端，以及只读的领域工具”）。范围按 D8 收窄（2026-11-01）：本项目只做 MCP 客户端。评审稿见 `docs/p7-mcp-review.md`（已合入，PR #36；2026-11-01 用户确认缺口 ②–⑤ 按建议执行）。依赖：`rmcp`（D2 已授权；3.8.0 声明 MSRV 1.88），模块 B 引入；它需要的 reqwest 0.13 已先行升级（D9）。
 
 - [x] 前置设计（上节 A、B 两部分）评审通过并实施（A1：PR #21；B：PR #23；A2–A8：PR #25）
-- [ ] 公开 `Extension` trait：注册工具、钩子、提示词段落（命令暂不做，见评审稿 1.3）
+- [x] 公开 `Extension` trait：注册工具、钩子、提示词段落（命令暂不做，见评审稿 1.3；已完成，PR #38）
 - [ ] MCP 客户端扩展：只接工具，只支持 Streamable HTTP（D8；stdio 不做）
 - [ ] MCP 工具同样受规则约束；服务器与工具都要在配置中显式列出；无人值守只执行显式放行的工具
 - ~~只读的领域工具（如 Kubernetes、Prometheus 查询）以扩展或 MCP 服务器提供~~：由外部服务以 MCP 服务器提供（D8）
@@ -947,6 +947,19 @@ reqwest 0.13 升级记录（2026-11-01，PR #36）：
 - 测试：新增 `tests/im_slack.rs` 的 `a_failed_tls_handshake_is_reported_and_retried`，假 Slack 新增 `Answer::Json`。反向验证：给测试构建加入启用 `ring` 的依赖后，该测试因 rustls 在 `crypto/mod.rs:249` panic 而失败，修改已还原。`.claude/rules/08-dependencies-msrv.md` 记下“rustls 只能有一个加密后端”。
 - 本地 macOS（基于含 PR #35 的 `a345b39`）：stable 与 Rust 1.88.0 各 678 项通过（其中 1 项为本 PR 新增），6 项付费测试跳过；格式、clippy、严格 Rustdoc 与 MSRV 全目标检查通过；`tests/openai_mock.rs`、`tests/im_slack.rs`、⚑ D:5/CHINA FLAG: `tests/im_feishu.rs` 与 `tests/serve_cli.rs` 各连续运行 5 次，均通过。
 - 未验证：x86_64 镜像的构建；对真实模型服务、Slack 与 ⚑ D:5/CHINA FLAG: 飞书 的 HTTPS 连接（镜像中只连过 example.com）。
+
+P7 模块 A 实施记录（2026-11-01，PR #38）：
+
+- 按评审稿 3.1 实施：`extensions::Extension`（名称、工具、提示词段落、钩子）与 `extensions::register(&mut LoopConfig, &[Arc<dyn Extension>])`。与评审稿 v0.1 的差异（评审稿已改为 v0.2）：
+  - `hooks()` 返回 `Vec<Box<dyn Hooks>>`：`HookChain` 本来以 `Box` 保存钩子，新增 crate 内部的 `push_extension_hook`，以扩展名注册；需要共享的状态由扩展自己持有。
+  - `cli::prepare` 的接入移到模块 B：现在还没有 CLI 扩展，先接入只会多一个总是为空的参数。
+- 规则：
+  - 先检查全部扩展再注册，出错时 `config` 不变；工具由 `LoopSpec::validate` 检查，失败时撤回。
+  - 钩子只能声明 `Extension` 阶段，内置策略总在它们之前、脱敏与落盘总在它们之后。
+  - 段落名为小写 ASCII 字母、数字与 `_`，以字母开头；不能是 `preamble`、`prompt::GENERATED_SECTIONS` 中的名字或提示词中已有的段落，因为 `SystemPrompt::with_section` 会原地替换同名段落。
+- 段落名常量：新增 `prompt::ENVIRONMENT`、`COMMAND_POLICY`、`PROJECT_CONTEXT`、`AVAILABLE_SKILLS` 与 `GENERATED_SECTIONS`，`src/cli.rs` 改用它们；`SystemPrompt` 新增 crate 内部的 `has_section`。
+- 测试：新增 `tests/extensions.rs` 6 项，以及 `Extension` 文档中的 1 个 Rustdoc 示例。反向验证：分别去掉阶段检查、工具的撤回、保留名检查与已有段落检查，或改变钩子的注册名，对应测试各有 1 项失败，修改已还原。
+- 本地 macOS：代码基于 `e95064f`（含 PR #36）检查，之后合入的 PR #37 只改文档。stable 与 Rust 1.88.0 各 685 项通过（基线 678 项），6 项付费测试跳过；格式、clippy、严格 Rustdoc 与 MSRV 全目标检查通过，自查脚本对改动的文件无命中；`tests/extensions.rs` 连续运行 10 次、`tests/hooks.rs` 3 次，均通过。
 
 ### P8 嵌入协议 `acp`
 

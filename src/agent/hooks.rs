@@ -419,16 +419,26 @@ impl HookChain {
     /// Register an owned hook. It runs in the stage it declares, after the hooks already
     /// registered in that stage.
     pub fn push_with<H: Hooks + 'static>(&mut self, hook: H, options: HookOptions) {
-        let stage = hook.stage();
         let name = options.name.unwrap_or_else(|| std::any::type_name::<H>().to_string());
+        self.insert(name, Box::new(hook), options.timeout);
+    }
+
+    /// Register a hook an extension supplies, under the extension's name and with the default
+    /// timeout. `extensions::register` has checked its stage.
+    pub(crate) fn push_extension_hook(&mut self, name: &str, hook: Box<dyn Hooks>) {
+        self.insert(name.to_string(), hook, HookOptions::default().timeout);
+    }
+
+    fn insert(&mut self, name: String, hook: Box<dyn Hooks>, timeout: Duration) {
+        let stage = hook.stage();
         let position = self.hooks.partition_point(|entry| entry.stage <= stage);
         self.hooks.insert(
             position,
             RegisteredHook {
                 name,
                 stage,
-                hook: Box::new(hook),
-                timeout: options.timeout,
+                hook,
+                timeout,
             },
         );
     }
