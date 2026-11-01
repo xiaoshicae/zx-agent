@@ -1,0 +1,36 @@
+# Apply once in every other cluster the agent should read: kubectl apply -f remote.yaml
+# It creates a read-only account (the built-in view role, without Secrets) and a long-lived
+# token for it, which goes into the Secret zx-agent-clusters of the cluster running zx-agent.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: zx-agent-remote
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: zx-agent
+  namespace: zx-agent-remote
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: zx-agent-remote-view
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view
+subjects:
+  - kind: ServiceAccount
+    name: zx-agent
+    namespace: zx-agent-remote
+---
+# Kubernetes fills in data.token and data.ca.crt for this Secret.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: zx-agent-token
+  namespace: zx-agent-remote
+  annotations:
+    kubernetes.io/service-account.name: zx-agent
+type: kubernetes.io/service-account-token

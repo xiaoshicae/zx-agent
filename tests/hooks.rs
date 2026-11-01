@@ -672,12 +672,56 @@ async fn missing_or_empty_secret_files_redact_nothing_else() {
 #[tokio::test]
 async fn a_secret_file_that_cannot_be_read_as_text_fails_the_hook() {
     let dir = tempfile::tempdir().unwrap();
-    let hook = RedactSecrets::new(Vec::new()).with_secret_files([dir.path().to_path_buf()]);
+    let binary = dir.path().join("binary");
+    std::fs::write(&binary, [0xff, 0xfe, 0x00]).unwrap();
+    let hook = RedactSecrets::new(Vec::new()).with_secret_files([binary]);
     let error = hook
         .after_tool(&redaction_call(), ToolOutput::ok("output"))
         .await
         .unwrap_err();
     assert!(error.contains("cannot read a secret file"), "{error}");
+}
+
+#[tokio::test]
+async fn a_secret_directory_covers_its_visible_files_including_later_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("cluster-a"), "token-a\n").unwrap();
+    std::fs::write(dir.path().join(".hidden"), "token-hidden").unwrap();
+    std::fs::create_dir(dir.path().join("nested")).unwrap();
+    std::fs::write(dir.path().join("nested").join("cluster-x"), "token-x").unwrap();
+    let hook = RedactSecrets::new(Vec::new()).with_secret_files([dir.path().to_path_buf()]);
+    let output = hook
+        .after_tool(&redaction_call(), ToolOutput::ok("token-a token-hidden token-x"))
+        .await
+        .unwrap();
+    assert_eq!(output.content, "[REDACTED] token-hidden token-x");
+    // A key added to a Secret volume later shows up as a new file in the same directory.
+    std::fs::write(dir.path().join("cluster-b"), "token-b").unwrap();
+    let output = hook
+        .after_tool(&redaction_call(), ToolOutput::ok("token-b"))
+        .await
+        .unwrap();
+    assert_eq!(output.content, "[REDACTED]");
+}
+
+#[tokio::test]
+async fn every_current_secret_is_redacted_however_many_files_there_are() {
+    let dir = tempfile::tempdir().unwrap();
+    let count = 40;
+    for index in 0..count {
+        std::fs::write(
+            dir.path().join(format!("cluster-{index:02}")),
+            format!("token-{index:02}"),
+        )
+        .unwrap();
+    }
+    let hook = RedactSecrets::new(Vec::new()).with_secret_files([dir.path().to_path_buf()]);
+    let all: Vec<String> = (0..count).map(|index| format!("token-{index:02}")).collect();
+    let output = hook
+        .after_tool(&redaction_call(), ToolOutput::ok(all.join(" ")))
+        .await
+        .unwrap();
+    assert_eq!(output.content, vec!["[REDACTED]"; count].join(" "));
 }
 
 struct NextTurn(TurnDecision);

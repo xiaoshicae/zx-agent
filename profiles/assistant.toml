@@ -18,6 +18,8 @@ autoApprove = [
   "kubectl explain",
   "kubectl api-resources",
   "kubectl version",
+  "kubectl config get-contexts",
+  "kubectl config current-context",
   "grep",
   "head",
   "tail",

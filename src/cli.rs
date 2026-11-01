@@ -160,6 +160,13 @@ pub(crate) struct BaseArgs {
     #[arg(long = "auto-approve-cmd")]
     pub(crate) auto_approve_cmd: Vec<String>,
 
+    /// File holding a secret to redact from tool output, such as another cluster's token, or a
+    /// directory of such files (names starting with a dot are skipped). Read again before
+    /// every redaction. Repeatable; when absent, the comma-separated ZX_SECRET_FILES is used.
+    /// The Pod's ServiceAccount token is always redacted.
+    #[arg(long = "secret-file", env = "ZX_SECRET_FILES", value_delimiter = ',')]
+    pub(crate) secret_files: Vec<PathBuf>,
+
     /// Embedded profile name (troubleshoot, assistant) or path to a TOML file.
     #[arg(long)]
     pub(crate) profile: Option<String>,
@@ -342,6 +349,23 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
         None => std::env::current_dir()?,
     };
     anyhow::ensure!(cwd.is_dir(), "--cwd is not a directory: {}", cwd.display());
+    // A misspelt path would leave a secret unredacted without a word, so each must exist at
+    // startup; one that disappears later is skipped (RedactSecrets::with_secret_files).
+    let secret_files: Vec<PathBuf> = options
+        .base
+        .secret_files
+        .iter()
+        .filter(|path| !path.as_os_str().is_empty())
+        .cloned()
+        .collect();
+    for path in &secret_files {
+        std::fs::metadata(path).with_context(|| {
+            format!(
+                "cannot use secret file {} (--secret-file or ZX_SECRET_FILES)",
+                path.display()
+            )
+        })?;
+    }
     let mut profile = Profile::load(options.base.profile.as_deref(), options.default_profile)?;
     if let Some(tools) = &options.base.tools {
         profile.tools = tools
@@ -552,7 +576,8 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
             ..RetryPolicy::default()
         },
         store: session,
-        redactor: RedactSecrets::new(api_key).with_secret_files([PathBuf::from(SERVICE_ACCOUNT_TOKEN)]),
+        redactor: RedactSecrets::new(api_key)
+            .with_secret_files(std::iter::once(PathBuf::from(SERVICE_ACCOUNT_TOKEN)).chain(secret_files)),
         auto_approve,
         limits: profile.limits,
         continue_on_length: profile.continue_on_length,

@@ -1,7 +1,7 @@
 //! Built-in policies implemented through the same Hooks interface as SDK extensions.
 
 use std::io::ErrorKind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -42,9 +42,10 @@ impl Hooks for ContinueOnLength {
     }
 }
 
-/// Values read from secret files that stay redacted, oldest dropped first. A rotated
-/// credential, such as a ServiceAccount token, stays valid until it expires, so the values
-/// it replaced must stay hidden as well; the bound keeps a long-running process from growing.
+/// Earlier values read from secret files that stay redacted after the files change, oldest
+/// dropped first; current values are always redacted. A rotated credential, such as a
+/// ServiceAccount token, stays valid until it expires, so the values it replaced must stay
+/// hidden as well; the bound keeps a long-running process from growing.
 const MAX_FILE_SECRETS: usize = 32;
 
 /// Redacts exact occurrences of configured secrets from tool output before persistence.
@@ -54,7 +55,8 @@ const MAX_FILE_SECRETS: usize = 32;
 pub struct RedactSecrets {
     secrets: Vec<String>,
     files: Vec<PathBuf>,
-    /// Values read from `files`, newest last, at most [`MAX_FILE_SECRETS`].
+    /// Values read from `files`, newest last: the current ones and at most
+    /// [`MAX_FILE_SECRETS`] earlier ones.
     file_secrets: Mutex<Vec<String>>,
 }
 
@@ -68,7 +70,9 @@ impl RedactSecrets {
     }
 
     /// Also redact the contents of `files`, each holding one secret such as the token of a
-    /// Kubernetes ServiceAccount. Every redaction reads them again, so a rotated value is
+    /// Kubernetes ServiceAccount. A directory stands for every file directly inside it whose
+    /// name does not start with a dot, so a whole Kubernetes Secret volume can be given and keys
+    /// added to it later are covered. Every redaction reads them again, so a rotated value is
     /// covered and earlier values stay redacted; surrounding whitespace is ignored. A file
     /// that is missing, or that this process may not read, is skipped: commands running as
     /// the same user cannot read it either. Any other failure, such as a file that is not
@@ -78,29 +82,70 @@ impl RedactSecrets {
         self
     }
 
-    /// The current and earlier values of the secret files.
+    /// The current values of the secret files, and earlier ones within [`MAX_FILE_SECRETS`].
     fn file_secrets(&self) -> Result<Vec<String>, String> {
         let mut current = Vec::new();
         for path in &self.files {
-            // Small, bounded local reads, synchronous like the other configuration reads.
-            match read_text(path) {
-                Ok(text) => current.push(text.trim().to_string()),
-                Err(error) if is_unreadable(&error) => {}
-                Err(error) => return Err(format!("cannot read a secret file to redact tool output: {error:#}")),
+            for file in secret_files_at(path)? {
+                // Small, bounded local reads, synchronous like the other configuration reads.
+                match read_text(&file) {
+                    Ok(text) => current.push(text.trim().to_string()),
+                    Err(error) if is_unreadable(&error) => {}
+                    Err(error) => return Err(format!("cannot read a secret file to redact tool output: {error:#}")),
+                }
             }
         }
+        current.retain(|value| !value.is_empty());
         let mut seen = lock(&self.file_secrets);
-        for value in current {
-            if !value.is_empty() && !seen.contains(&value) {
-                seen.push(value);
+        for value in &current {
+            if !seen.contains(value) {
+                seen.push(value.clone());
             }
         }
-        while seen.len() > MAX_FILE_SECRETS {
-            seen.remove(0);
-        }
+        // Current values always stay; of the earlier ones, the oldest go first.
+        let mut earlier = seen.iter().filter(|value| !current.contains(value)).count();
+        seen.retain(|value| {
+            let drop = earlier > MAX_FILE_SECRETS && !current.contains(value);
+            if drop {
+                earlier -= 1;
+            }
+            !drop
+        });
         // A copy, so the lock is not held while the output is rewritten.
         Ok(seen.clone())
     }
+}
+
+/// The files to read for a registered path: the path itself, or for a directory the entries
+/// directly inside it whose names do not start with a dot. That skips the `..data` links that
+/// Kubernetes keeps in Secret volumes; subdirectories are skipped too. A directory that is
+/// missing or that this process may not list yields nothing, like an unreadable file.
+fn secret_files_at(path: &Path) -> Result<Vec<PathBuf>, String> {
+    if !path.is_dir() {
+        // A file, or nothing at all: reading it decides, with the same rules as for files.
+        return Ok(vec![path.to_path_buf()]);
+    }
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::PermissionDenied) => {
+            return Ok(Vec::new());
+        }
+        Err(error) => return Err(format!("cannot list secret files in {}: {error}", path.display())),
+    };
+    let mut files = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("cannot list secret files in {}: {error}", path.display()))?;
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let file = entry.path();
+        // is_dir follows links, as the entries of a Secret volume are links to the data.
+        if !file.is_dir() {
+            files.push(file);
+        }
+    }
+    files.sort();
+    Ok(files)
 }
 
 #[async_trait]

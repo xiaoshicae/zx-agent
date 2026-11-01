@@ -134,6 +134,7 @@ echo "exit code: $?"
 | `--cwd` | 当前目录 | 工具的工作目录，同时写入 `<environment>` |
 | `--allow-cmd` / `--deny-cmd` | 无 | bash 命令白名单前缀 / 额外的拒绝子串，均可重复 |
 | `--auto-approve-cmd` | profile：`chat`（assistant）为一组只读命令，`run`（troubleshoot）为空 | 不经审批直接执行的 bash 命令前缀，可重复，替换 profile 的清单；只在 bash 需要审批时起作用，见[安全模型](#安全模型) |
+| `--secret-file` | 环境变量 `ZX_SECRET_FILES`（逗号分隔），否则无 | 内容需要从工具输出中过滤的凭据文件，或存放这类文件的目录，可重复；命令行给出时不读环境变量。登记的路径在启动时必须存在，见[安全模型](#安全模型) |
 | `--max-turns` | profile：`run`（troubleshoot）为 30，`chat`（assistant）不限 | 本次运行的模型请求次数上限，失败的尝试也计入；`chat` 中为每轮上限 |
 | `--timeout-secs` | profile：`run`（troubleshoot）为 900，`chat`（assistant）为 0 | 整次运行的时间上限，0 表示不限制；`chat` 中为每轮上限 |
 | `--tool-timeout-secs` | 120 | bash 命令的默认超时。模型可以通过工具参数 `timeout_secs` 为单条命令申请更长时间，上限为本参数与 600 秒中较大的一个；整次运行仍受 `--timeout-secs` 限制 |
@@ -258,7 +259,7 @@ CLI (main.rs + cli.rs + chat/)
 - 不含白名单拒绝的语法、`secret`、URL（`://`）；
 - 不含把请求发往别处的参数：`--server`、`--kubeconfig`、`--token`、`--insecure-skip-tls-verify`，以及 kubectl 中含 `s` 的短参数。2026-11-01 实测（kubectl v1.36.1，加 `--insecure-skip-tls-verify`），kubectl 把 kubeconfig 中的 token 发给了 `--server` 指定的 HTTPS 地址。
 
-拒绝规则始终优先。内置 assistant 清单只收不能执行其他程序、不能写文件的命令：`kubectl` 的 `get`、`describe`、`logs`、`top`、`events`、`explain`、`api-resources`、`version`，以及 `grep`、`head`、`tail`、`wc`、`jq`。检查同样只看字面；这些命令能读到什么取决于运行它们的账号与凭据，读到的内容会进入模型上下文。
+拒绝规则始终优先。内置 assistant 清单只收不能执行其他程序、不能写文件的命令：`kubectl` 的 `get`、`describe`、`logs`、`top`、`events`、`explain`、`api-resources`、`version`、`config get-contexts`、`config current-context`，以及 `grep`、`head`、`tail`、`wc`、`jq`。检查同样只看字面；这些命令能读到什么取决于运行它们的账号与凭据，读到的内容会进入模型上下文。
 
 在 Unix 上，bash 命令正常退出、超时、被取消或工具 future 被丢弃时，程序都会终止其进程组，并清理输出读取任务。因此不能用 bash 工具启动常驻进程。本机执行只能终止进程组：用 `setsid` 或守护化方式脱离进程组的进程不在此列，可能在命令结束后继续运行；需要保证时使用容器执行，见下文。
 
@@ -291,7 +292,7 @@ pidsLimit = 256                  # 可选，容器内进程数上限
 - 策略只是第一道防线，**不是安全边界**。生产环境请以最小权限账号运行，并放在容器或虚拟机中，必要时限制网络访问。
 - `read_file` 不受命令白名单约束，可以读取进程有权限读取的普通文件。需要限制时，使用 `--tools bash` 关闭它。
 - 项目上下文（`AGENTS.md`、`--context-file` 与 profile 中的上下文文件）会进入系统提示词并发送给模型服务方，可能引导模型的行为。自动发现的 `AGENTS.md` 不能通过符号链接指向项目外；在不可信仓库中运行时，建议使用 `--no-context`。
-- `run` 和 `chat` 在 `after_tool` 中将认证 API key 的完整字面值替换为 `[REDACTED]`，处理后的结果才会写入会话、事件并回传模型。在 Kubernetes Pod 中，ServiceAccount token（`/var/run/secrets/kubernetes.io/serviceaccount/token`）同样被过滤：每次过滤前重新读取该文件，token 轮换后，旧值在过期前仍然有效，因此最近 32 个值都会继续过滤；文件不存在或本进程无权读取时跳过。SDK 可用 `RedactSecrets` 显式配置其他密钥，或用 `with_secret_files` 登记这类文件；过滤器失败时丢弃原始输出，返回错误结果。
+- `run` 和 `chat` 在 `after_tool` 中将认证 API key 的完整字面值替换为 `[REDACTED]`，处理后的结果才会写入会话、事件并回传模型。在 Kubernetes Pod 中，ServiceAccount token（`/var/run/secrets/kubernetes.io/serviceaccount/token`）同样被过滤。其他凭据文件可以用 `--secret-file` 或 `ZX_SECRET_FILES` 登记，例如其他集群的 token；登记目录时，表示其中名字不以点开头的文件，之后新增的文件也会过滤。这些文件在每次过滤前重新读取，文件中的当前值总是过滤；轮换下来的旧值在过期前仍然有效，因此还会保留最近 32 个继续过滤。文件不存在或本进程无权读取时跳过；启动时，登记的路径必须存在。SDK 可用 `RedactSecrets` 显式配置其他密钥，或用 `with_secret_files` 登记这类文件；过滤器失败时丢弃原始输出，返回错误结果。
 - 长工具结果的文件同样在脱敏后写入，Unix 新目录 / 文件权限为 0700 / 0600；结果目录默认 `.zx-agent/outputs`，不会自动删除，目录中写入忽略全部文件的 `.gitignore`。默认目录必须位于工作目录内，仓库中的符号链接不能把写入引到外部；写入失败时结果保持内联。`run` 默认不落盘。保存的是工具已经截断的结果，详见[工具结果落盘](docs/PROFILES.md#工具结果落盘)。
 - 该过滤不识别未知密钥、编码或拆分后的密钥，也不处理用户输入、模型输出和工具调用参数。这些内容及工具输出中的其他敏感数据仍可能进入模型请求、会话和事件；请控制会话文件访问权限。
 - 认证 key 只从环境变量读取；bash 命令启动前删除 `--api-key-env` 指定的变量。但本机执行时，工具与 agent 以同一系统用户运行，仍可能通过其他途径读取凭证。Linux 上，agent 启动时把自身设为不可 dump（`PR_SET_DUMPABLE`），同一用户的命令因此读不到它的 `/proc/<pid>/environ`。以下情况不在保护范围内：带 `CAP_SYS_PTRACE` 的进程；其他持有 key 的进程，如启动 agent 的 shell。在 Pod 中运行时，容器入口应直接运行 zx-agent，并且不要添加 `SYS_PTRACE` 能力。需要隔离时，请使用容器执行，或以不同账号运行。
