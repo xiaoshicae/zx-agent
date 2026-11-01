@@ -159,6 +159,19 @@ dir = "/data/sessions"      # 会话文件位于 <dir>/slack/<频道>/<线程>.j
 
 其余参数与 `chat` 相同（`--model`、`--base-url`、`--api-key-env`、`--profile`、`--max-turns`、`--timeout-secs` 等）；`--max-turns` 与 `--timeout-secs` 作用于每一次运行。不接受 `--session`。
 
+### MCP 工具
+
+在 profile 中用 `[[mcp]]` 列出外部 MCP 服务器及其工具，run、chat、serve 启动时各连接一次，模型以 `<服务器名>__<工具名>` 调用这些工具。只支持 Streamable HTTP；MCP 服务器由外部服务提供。配置项见 [场景配置说明](docs/PROFILES.md#mcp-服务器)。
+
+```bash
+export PROM_MCP_TOKEN=...   # 与 profile 中的 tokenEnv 一致
+./target/release/zx-agent chat --model <模型 ID> --profile prom.toml
+```
+
+- 只有 `tools` 列出的工具交给模型；`allowTools` 中的直接执行，其余每次都要审批（run 中没有人审批，因此拒绝）。`rules.denyTools` 可以拒绝其中任何一个。
+- token 只以 `Authorization: Bearer` 发给该服务器，命令看不到存放它的变量，工具输出中出现它的值时脱敏。
+- 连不上、token 变量没有值、服务器缺少列出的工具时，以退出码 2 报错；成功时 stderr 每个服务器一行 `[mcp] …`。
+
 ### run 退出码
 
 | 退出码 | 含义 |
@@ -317,6 +330,8 @@ CLI (main.rs + cli.rs + chat/)
 在 Unix 上，bash 命令正常退出、超时、被取消或工具 future 被丢弃时，程序都会终止其进程组，并清理输出读取任务。因此不能用 bash 工具启动常驻进程。本机执行只能终止进程组：用 `setsid` 或守护化方式脱离进程组的进程不在此列，可能在命令结束后继续运行；需要保证时使用容器执行，见下文。
 
 `read_file` 只接受普通文件，默认单文件上限为 10 MiB，同时检查文件元数据与实际读取量。目录、FIFO 和设备文件会被拒绝，并且不会被打开：先查看路径类型再打开，打开后再检查一次，防止中途被替换。取消会停止等待文件 I/O；底层已经启动的普通文件 I/O 仍可能由 Tokio 的阻塞线程继续完成。每次最多返回 2000 行或 50 KiB（51200 字节），按行翻页；单行超过这个字节上限时只显示前缀，并注明该行被截断及其字节数。
+
+MCP 工具（见上文“MCP 工具”）：服务器由使用者在 profile 中显式列出，工具也要逐个列出，没列出的工具连描述都不会进入上下文。工具描述与结果来自外部服务，可能含注入内容；`allowTools` 以外的工具每次都要审批，服务器给出的 annotations 不影响放行。工具一律按有副作用处理，中断后恢复为“结果未知”。响应体没有大小上限（rmcp 读取 JSON 响应时不限制，SSE 每个事件上限 16 MiB），交给模型的结果最多 2000 行或 50 KiB。
 
 ### 容器执行
 
@@ -522,7 +537,7 @@ P1 的 SDK 接口调整：静态配置移入 `LoopSpec`；`LoopConfig` 持有钩
 
 ### MCP 客户端
 
-`mcp::Server::connect(ServerConfig::new(名称, 地址, 工具列表))` 连接一个外部 MCP 服务器，只支持 Streamable HTTP。返回的 `Server` 是一个扩展，用 `extensions::register` 加入循环。CLI 的接入（profile 中的 `[[mcp]]`）随后实施。
+`mcp::Server::connect(ServerConfig::new(名称, 地址, 工具列表))` 连接一个外部 MCP 服务器，只支持 Streamable HTTP。返回的 `Server` 是一个扩展，用 `extensions::register` 加入循环。CLI 的用法见上文“MCP 工具”。
 
 - 协议：先发 `server/discover`（2026-07-28）；服务器按旧版本应答时，改用 `initialize` 握手与会话（2025-11-25）。`Server::protocol_version()` 返回最终使用的版本。
 - 工具：只把 `ServerConfig.tools` 中列出的工具交给模型，名字为 `<名称>__<工具名>`。名称只能是小写 ASCII 字母、数字与 `-`；工具名中字母、数字、`_`、`-` 以外的字符换成 `_`，全名不超过 64 个字符（模型 API 的限制）。服务器缺少列出的工具、换名后重名或超长时，连接失败。工具描述超过 4 KiB 时截断。

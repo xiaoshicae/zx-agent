@@ -14,7 +14,8 @@ use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::sse::DEFAULT_MAX_EVENT_BYTES;
 use zx_agent::compaction;
 use zx_agent::executor::{ContainerConfig, ContainerExecutor, Executor, LocalExecutor};
-use zx_agent::extensions::{ContinueOnLength, RedactSecrets, check_secret_files};
+use zx_agent::extensions::{self, ContinueOnLength, Extension, RedactSecrets, check_secret_files};
+use zx_agent::mcp::{Server, ServerConfig};
 use zx_agent::output_store::{self, OutputStore, ReadOutputTool, SpillOutputs};
 use zx_agent::policy::{AutoApprove, CommandPolicy, PolicyHook, Rule, RuleMatcher, RulePolicy};
 use zx_agent::profile::skills::{ReadSkillTool, TOOL_NAME};
@@ -348,6 +349,75 @@ pub(crate) struct SessionOptions<'a> {
     /// Environment variables that hold credentials besides the API key, such as IM tokens:
     /// commands do not inherit them, and their values are redacted like the key's.
     pub(crate) hidden_env: &'a [String],
+    /// The profile's MCP servers, connected by [`connect_mcp`].
+    pub(crate) mcp: &'a McpTools,
+}
+
+/// The profile's MCP servers, connected once per process and shared by every session it
+/// opens, as serve does for each thread (docs/p7-mcp-review.md, 2.3.3).
+#[derive(Default)]
+pub(crate) struct McpTools {
+    servers: Vec<Arc<dyn Extension>>,
+    /// Tools that need approval: those not in their server's `allowTools`.
+    ask: Vec<String>,
+    /// Variables holding the servers' tokens: hidden from commands, values redacted.
+    token_env: Vec<String>,
+}
+
+/// Connect the MCP servers of the selected profile. A missing token, a server that cannot be
+/// reached in time or a tool it lacks stops startup, like other configuration errors. Prints
+/// one line per server on stderr, without the token or the URL's path.
+pub(crate) async fn connect_mcp(base: &BaseArgs, default: Builtin, transport: &TransportArgs) -> Result<McpTools> {
+    let profile = Profile::load(base.profile.as_deref(), default)?;
+    let mut configs = Vec::new();
+    for server in &profile.mcp {
+        let token = match &server.token_env {
+            Some(name) => match std::env::var(name) {
+                Ok(value) if !value.is_empty() => Some(value),
+                _ => anyhow::bail!("MCP server {}: {name} must hold its token (tokenEnv)", server.name),
+            },
+            None => None,
+        };
+        configs.push(ServerConfig {
+            token,
+            call_timeout: Duration::from_secs(server.timeout_secs.unwrap_or(transport.tool_timeout_secs)),
+            ..ServerConfig::new(server.name.as_str(), server.url.as_str(), server.tools.clone())
+        });
+    }
+    // Each connection has its own bound, so the slowest server sets the startup time.
+    let connected = futures::future::join_all(configs.into_iter().map(Server::connect)).await;
+    let mut tools = McpTools::default();
+    for (settings, server) in profile.mcp.iter().zip(connected) {
+        let server = server.map_err(anyhow::Error::msg)?;
+        let mut names = Vec::new();
+        for (remote, name) in server.tool_names() {
+            if settings.allow_tools.contains(remote) {
+                names.push(name.clone());
+            } else {
+                names.push(format!("{name} (asks)"));
+                tools.ask.push(name.clone());
+            }
+        }
+        // The origin only: a path or query may hold a credential. `Server::connect` has parsed
+        // the URL already, so the empty fallback is never shown.
+        let origin = reqwest::Url::parse(&settings.url)
+            .map(|url| url.origin().ascii_serialization())
+            .unwrap_or_default();
+        let plain = if settings.token_env.is_some() && origin.starts_with("http://") {
+            "; the token is sent unencrypted"
+        } else {
+            ""
+        };
+        eprintln!(
+            "[mcp] {}: {}; protocol {}; {origin}{plain}",
+            settings.name,
+            names.join(", "),
+            server.protocol_version()
+        );
+        tools.token_env.extend(settings.token_env.iter().cloned());
+        tools.servers.push(Arc::new(server));
+    }
+    Ok(tools)
 }
 
 /// Limits given on the command line. `None` keeps the selected profile's value.
@@ -568,6 +638,7 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     // Commands must not inherit the key: `env` would put it into the session file and the context.
     let hidden_env: Vec<String> = std::iter::once(options.base.api_key_env.clone())
         .chain(options.hidden_env.iter().cloned())
+        .chain(options.mcp.token_env.iter().cloned())
         .collect();
     let mut tools = tools::builtin_tools_with(
         &profile
@@ -608,6 +679,7 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
         sequential_tools: false,
     });
     config.hooks.push(PolicyHook::new(Arc::new(policy)));
+    extensions::register(&mut config, &options.mcp.servers).map_err(anyhow::Error::msg)?;
     // Every policy that asks for bash approval gets the list: the strictest verdict of all
     // policies wins, so one that still asked would cancel the others' auto-approval.
     let auto_approve = AutoApprove::new(&profile.rules.auto_approve);
@@ -622,6 +694,13 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
         rules.push(Rule {
             matcher: RuleMatcher::Tool(tool),
             decision: Decision::Ask("profile requires tool approval".into()),
+        });
+    }
+    // An MCP server's tools ask unless its allowTools lists them: annotations are hints.
+    for tool in &options.mcp.ask {
+        rules.push(Rule {
+            matcher: RuleMatcher::Tool(tool.clone()),
+            decision: Decision::Ask("MCP tool requires approval (not in the server's allowTools)".into()),
         });
     }
     if !rules.is_empty() {
@@ -640,6 +719,7 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     let hidden_values = options
         .hidden_env
         .iter()
+        .chain(&options.mcp.token_env)
         .filter_map(|name| std::env::var(name).ok())
         .filter(|value| !value.is_empty());
     config.hooks.push(

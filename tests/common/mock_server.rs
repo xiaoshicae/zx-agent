@@ -44,8 +44,13 @@ impl Reply {
 
     /// A request for one `bash` call running `command`.
     pub fn bash(id: &str, command: &str) -> Self {
+        Self::tool_call(id, "bash", json!({"command": command}))
+    }
+
+    /// A request for one call of tool `name` with `arguments`.
+    pub fn tool_call(id: &str, name: &str, arguments: Value) -> Self {
         let call = json!({"index": 0, "id": id, "type": "function",
-            "function": {"name": "bash", "arguments": json!({"command": command}).to_string()}});
+            "function": {"name": name, "arguments": arguments.to_string()}});
         Reply::Sse(vec![
             json!({"choices": [{"index": 0, "delta": {"tool_calls": [call]}, "finish_reason": "tool_calls"}]}),
             usage(),

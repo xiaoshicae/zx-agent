@@ -350,7 +350,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P4 | profile 文件、上下文文件与 skills | 已完成（PR #6） |
 | P5 | 上下文管理 | 已完成（PR #9） |
 | P6 | 执行环境与崩溃恢复 | 进行中：崩溃恢复（PR #12）、执行环境接缝（PR #13）、离线容器执行（PR #14）已完成；在线访问评审稿已合入（PR #17），一期已完成：只读命令自动放行（PR #19）、环境变量保护与 ServiceAccount token 脱敏（PR #20）、常驻 Pod 部署包（PR #22）、多集群（PR #24）；容器联网已取消，改为常驻 Pod 部署。待部署方在真实集群上验收；服务模式与 IM 接入的评审稿已合入（PR #27），模块 A（IM 接口与服务，PR #28）、B（Slack 与 `serve`，PR #29）、C（⚑ D:5/CHINA FLAG: 飞书，PR #32）、D（部署，PR #33）已完成，真实平台验收待提供凭据 |
-| P7 | 插件与 MCP | 进行中：范围按 D8 收窄，评审稿已合入（PR #36）并经用户确认；模块 A（Extension 接口，PR #38）、B1（MCP 客户端库，PR #40）已完成，B2（CLI 接入）待实施；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已完成（PR #23），A2–A8（扩展 API）已完成（PR #25） |
+| P7 | 插件与 MCP | 已完成（PR #41）：范围按 D8 收窄，评审稿已合入（PR #36）并经用户确认；模块 A（Extension 接口，PR #38）、B1（MCP 客户端库，PR #40）、B2（CLI 接入与文档，PR #41）已完成；真实 MCP 服务器的验收待选定服务器；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已完成（PR #23），A2–A8（扩展 API）已完成（PR #25） |
 | P8 | 嵌入协议 `acp` | 未开始 |
 | P9 | 可选增强 | 未开始 |
 
@@ -940,9 +940,10 @@ B. 追踪事件
 
 - [x] 前置设计（上节 A、B 两部分）评审通过并实施（A1：PR #21；B：PR #23；A2–A8：PR #25）
 - [x] 公开 `Extension` trait：注册工具、钩子、提示词段落（命令暂不做，见评审稿 1.3；已完成，PR #38）
-- [ ] MCP 客户端扩展：只接工具，只支持 Streamable HTTP（D8；stdio 不做）。库已完成（模块 B1，PR #40），CLI 接入待模块 B2
-- [ ] MCP 工具同样受规则约束；服务器与工具都要在配置中显式列出；无人值守只执行显式放行的工具
+- [x] MCP 客户端扩展：只接工具，只支持 Streamable HTTP（D8；stdio 不做）。库：PR #40；CLI 接入：PR #41
+- [x] MCP 工具同样受规则约束；服务器与工具都要在配置中显式列出；无人值守只执行显式放行的工具（PR #41）
 - ~~只读的领域工具（如 Kubernetes、Prometheus 查询）以扩展或 MCP 服务器提供~~：由外部服务以 MCP 服务器提供（D8）
+- [ ] 真实 MCP 服务器的验收：对一个真实的 Streamable HTTP MCP 服务器跑通列出、调用与审批（服务器尚未选定）
 
 验收：MCP 工具可以列出、调用，并受规则约束。
 
@@ -989,6 +990,21 @@ P7 模块 B1 实施记录（2026-11-01，PR #40）：
   - 新增 `tests/mcp.rs` 16 项，假服务 `tests/common/fake_mcp.rs` 按规范手写，两种协议都支持；另有 `src/mcp.rs` 中 3 项单元测试。
   - 反向验证：不发送 token、把服务器的全部工具交给模型、忽略 `isError`，对应测试分别有 1、2、1 项失败，修改已还原。
 - 本地 macOS（基于含 PR #39 的 `5a40588`）：stable 与 Rust 1.88.0 各 707 项通过（其中 19 项为本 PR 新增），6 项付费测试跳过；格式、clippy、严格 Rustdoc 与 MSRV 全目标检查通过，自查脚本对改动的文件无命中；`tests/mcp.rs` 累计连续运行 20 次、`tests/extensions.rs` 6 次，均通过。
+- 未验证：真实的 MCP 服务器（尚未选定）；HTTPS 的 MCP 服务器（测试只用 HTTP）。
+
+P7 模块 B2 实施记录（2026-11-01，PR #41）：
+
+- 按评审稿 3.2–3.6 接入 CLI：
+  - profile 的 `[[mcp]]`：`name`、`url`、`tokenEnv`、`tools`、`allowTools`、`timeoutSecs`，子 profile 整组替换。加载时检查服务器名与重名、空的工具列表、`allowTools` 须在 `tools` 中、超时大于零、工具换名后重名或超长。`rules.askTools` 与 `denyTools` 可以写配置过的 MCP 工具名。
+  - `cli::connect_mcp`：run、chat、serve 在组装会话前各连接一次，chat 的 `/new` 与 serve 的各线程共用。token 变量没有值、连不上或缺少工具时以退出码 2 结束；stderr 每个服务器一行 `[mcp]`。
+  - `cli::prepare`：用 `extensions::register` 注册服务器；`allowTools` 以外的工具加 Ask 规则；token 所在的变量加入隐藏变量与脱敏。
+- 定下退出时不主动关闭会话（评审稿 3.6）。原模块 C（文档）并入本 PR。
+- 文档：README 新增“MCP 工具”一节并补充安全模型；`docs/PROFILES.md` 新增“MCP 服务器”；`.claude/CLAUDE.md`、测试规范、评审稿 v0.4。部署说明未改：MCP 的配置写在 profile 中，与部署方式无关。
+- 测试：
+  - 新增 `tests/mcp_cli.rs` 7 项，用编译出的程序对假 MCP 服务与假模型；profile 单元测试 3 项；`MockServer` 新增 `Reply::tool_call`。
+  - 反向验证：不注册扩展、不加审批规则、不隐藏 token 变量、不对 token 脱敏，对应测试分别有 4、2、1、1 项失败，修改已还原。
+- 顺带：`src/mcp.rs` 中两处 `unwrap_or_default` 补上注释，按规范说明为什么可以用默认值。
+- 本地 macOS（基于 PR #40 的 `3968919`，含 PR #39）：stable 与 Rust 1.88.0 各 717 项通过（其中 10 项为本 PR 新增），6 项付费测试跳过；格式、clippy、严格 Rustdoc 与 MSRV 全目标检查通过。自查脚本在改动的文件中只列出原有的 3 处（`src/main.rs` 的 `unsafe` 与 `let _ =`，`src/chat/mod.rs` 的 `let _ =`）。`tests/mcp_cli.rs` 连续运行 10 次，`tests/mcp.rs` 3 次，`tests/profiles_cli.rs` 与 `tests/serve_cli.rs` 各 2 次，均通过。
 - 未验证：真实的 MCP 服务器（尚未选定）；HTTPS 的 MCP 服务器（测试只用 HTTP）。
 
 ### P8 嵌入协议 `acp`

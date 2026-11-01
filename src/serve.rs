@@ -176,6 +176,8 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
     std::fs::create_dir_all(&dir).with_context(|| format!("cannot create the session directory {}", dir.display()))?;
 
     let instructions = cli::read_instructions(&args.base)?;
+    // Once for the process: every thread's session shares the connections.
+    let mcp = cli::connect_mcp(&args.base, Builtin::Assistant, &args.transport).await?;
     let factory = Sessions {
         args,
         instructions,
@@ -186,6 +188,7 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
                 .unwrap_or(DEFAULT_APPROVAL_TIMEOUT_SECS),
         ),
         hidden_env,
+        mcp,
     };
     // A wrong model, profile or tool setting would otherwise surface only at the first
     // message, in the chat; check it once with a session that is never stored.
@@ -274,6 +277,8 @@ struct Sessions {
     /// Variables holding IM credentials: commands do not inherit them, and their values are
     /// redacted.
     hidden_env: Vec<String>,
+    /// The profile's MCP servers, shared by every thread's session.
+    mcp: cli::McpTools,
 }
 
 impl Sessions {
@@ -292,6 +297,7 @@ impl Sessions {
             },
             instructions: self.instructions.as_deref(),
             hidden_env: &self.hidden_env,
+            mcp: &self.mcp,
         })
         .await?;
         prepared.require_bash_approval("shell commands require approval in the chat");

@@ -55,8 +55,8 @@ path = "skills/rust-review/SKILL.md"
 | `rules.allow` | bash 命令前缀白名单，沿用原管道检查；空列表表示只检查 deny |
 | `rules.deny` | 追加 bash 命令子串拒绝规则，原内置拒绝规则始终保留 |
 | `rules.autoApprove` | 替换不经审批直接执行的 bash 命令前缀；只在 bash 需要审批时起作用（chat）。带引号、`$` 等 shell 语法、`secret`、URL、连接参数或只读集合以外的 kubectl 参数的命令仍要审批，拒绝规则始终优先，见 README 的“安全模型”。内置 assistant 为一组只读命令，troubleshoot 为空 |
-| `rules.askTools` | 替换需审批的工具名列表；run 通过 NoHuman 明确拒绝，chat 交给终端审批 |
-| `rules.denyTools` | 追加被拒绝的工具名；启用该工具或批准调用都不能覆盖拒绝 |
+| `rules.askTools` | 替换需审批的工具名列表；run 通过 NoHuman 明确拒绝，chat 交给终端审批。可以写内置工具名，也可以写 `[[mcp]]` 中配置过的 MCP 工具名（`<服务器名>__<工具名>`） |
+| `rules.denyTools` | 追加被拒绝的工具名；启用该工具或批准调用都不能覆盖拒绝。工具名的范围同 `askTools` |
 | `limits.maxTurns` | 每轮模型请求数；`"unlimited"` 不限，`0` 不请求模型 |
 | `limits.timeoutSecs` | 每轮总时间上限，`0` 关闭 |
 | `extensions.continueOnLength` | 输出达到 token 上限后的续写次数；每次消耗一次模型请求预算 |
@@ -71,12 +71,40 @@ path = "skills/rust-review/SKILL.md"
 | `toolOutput.thresholdBytes` | 超过此大小的工具结果落盘；0 关闭，否则为 256–maxFileBytes，默认 8192 |
 | `toolOutput.maxFileBytes` | 读写文件上限，1–1048576，默认 1 MiB |
 | `toolOutput.directory` | 显式路径相对 TOML 文件；省略时为工具 cwd 下的 `.zx-agent/outputs` |
+| `[[mcp]]` | 外部 MCP 服务器，可写多段，见下文“MCP 服务器”；子 profile 的整组替换基线的（内置 profile 都没有） |
 
 未提供的值继承基线。叠加顺序为 **内置基线 < profile 文件 < 显式命令行参数**；即使 CLI 值恰好等于旧默认值，也按显式覆盖处理。`--allow-cmd`、`--auto-approve-cmd` 分别替换文件的 allow、autoApprove；`--deny-cmd` 追加到文件和内置 deny，不能清除拒绝规则。重复的 `--context-file` 追加文件。在本机执行时给出 `--container-image` 视为配置错误，避免误以为命令已在容器中执行。
 
 连接地址、模型、认证环境变量名、传输与工具超时、输出模式和会话路径仍使用原 CLI 选项。TOML 不接受这些键，也不接受任意扩展名称；未知字段、错误类型、无效路径或不支持的配置均在请求模型前以退出码 2 报错。
 
 `run` 始终是无人值守前端，`chat` 始终保留 bash 的终端审批；`--profile` 不改变前端。例如 `run --profile assistant` 遇到 bash 的 Ask 会拒绝，`chat --profile troubleshoot` 仍会询问 shell 审批。
+
+## MCP 服务器
+
+`[[mcp]]` 让模型调用外部 MCP 服务器的工具（只支持 Streamable HTTP）。MCP 服务器由外部服务提供，本项目只做客户端；设计见 [`p7-mcp-review.md`](p7-mcp-review.md)。
+
+```toml
+[[mcp]]
+name = "prom"                               # 小写 ASCII 字母、数字与 -
+url = "https://prom-mcp.monitoring.svc/mcp"
+tokenEnv = "PROM_MCP_TOKEN"                 # 可选：以 Authorization: Bearer 发送
+tools = ["query", "query_range"]            # 交给模型的工具，其余不暴露
+allowTools = ["query"]                      # 可选：不经审批直接执行
+timeoutSecs = 60                            # 可选：单次调用的上限，默认同 --tool-timeout-secs
+```
+
+| 配置 | 语义 |
+|---|---|
+| `name` | 服务器名，不能重复。模型看到的工具名是 `<name>__<工具名>`：工具名中 ASCII 字母、数字、`_`、`-` 以外的字符换成 `_`，全名不超过 64 个字符 |
+| `url` | MCP 端点，`http://` 或 `https://` |
+| `tokenEnv` | 存放 token 的环境变量；设置后必须有值。命令看不到这个变量，它的值在工具输出中替换为 `[REDACTED]` |
+| `tools` | 交给模型的工具，按服务器给出的名字，至少一个。服务器没有列出的工具时启动失败 |
+| `allowTools` | `tools` 中不经审批直接执行的工具。其余的每次调用都要审批：chat 在终端询问，serve 发审批卡片，run 没有人审批而拒绝 |
+| `timeoutSecs` | 单次调用的上限，大于零 |
+
+- 每个进程启动时连接一次：run、chat 在组装会话前，serve 在开始接收消息前，各线程共用连接。连不上、token 变量没有值、服务器缺少列出的工具时，以退出码 2 报错。
+- 连接成功时，stderr 每个服务器一行，例如 `[mcp] prom: prom__query, prom__query_range (asks); protocol 2026-07-28; https://prom-mcp.monitoring.svc`。只写地址的协议、主机与端口；经 `http://` 发送 token 时另加 `the token is sent unencrypted`。
+- 服务器给出的工具注释（annotations）只是提示，不据此放行；工具一律按有副作用处理。
 
 ## 项目上下文
 
