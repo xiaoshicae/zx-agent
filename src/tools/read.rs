@@ -149,16 +149,34 @@ impl Tool for ReadFileTool {
         let selected = lines[start - 1..end].concat();
         let truncated = truncate_head(&selected, MAX_LINES, MAX_BYTES);
         let shown_end = start - 1 + truncated.kept_lines;
+        // A first line over the byte limit is cut to a prefix but still counted as kept.
+        // Paging is by line, so the note must say that this line is incomplete.
+        let first_line = lines[start - 1].strip_suffix('\n').unwrap_or(lines[start - 1]);
+        let cut_line = truncated.kept_lines == 1 && truncated.text.len() < first_line.len();
+        let next = if shown_end < total {
+            format!(" Use offset={} to continue.", shown_end + 1)
+        } else {
+            String::new()
+        };
+        let note = if cut_line {
+            Some(format!(
+                "[Line {start} of {total} was cut: showing {} of {} bytes. read_file cannot page within a line; \
+                 use another tool, such as bash, to read the rest.{next}]",
+                truncated.text.len(),
+                first_line.len()
+            ))
+        } else if shown_end < total {
+            Some(format!("[Showing lines {start}-{shown_end} of {total}.{next}]"))
+        } else {
+            None
+        };
 
         let mut content = truncated.text;
-        if shown_end < total {
+        if let Some(note) = note {
             if !content.ends_with('\n') {
                 content.push('\n');
             }
-            content.push_str(&format!(
-                "[Showing lines {start}-{shown_end} of {total}. Use offset={} to continue.]",
-                shown_end + 1
-            ));
+            content.push_str(&note);
         }
         Ok(ToolOutput::ok(content))
     }
@@ -304,6 +322,72 @@ mod tests {
             output.content.ends_with(&expected),
             "{}",
             &output.content[output.content.len() - 80..]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_line_over_the_byte_limit_is_reported_as_cut() {
+        let dir = tempfile::tempdir().unwrap();
+        // One line, as in minified JSON. The byte limit falls inside a 3-byte character.
+        let line = "界".repeat(MAX_BYTES / 3 + 10);
+        std::fs::write(dir.path().join("one.json"), &line).unwrap();
+        let output = ReadFileTool::default()
+            .execute(json!({"path": "one.json"}), &ctx(dir.path()))
+            .await
+            .unwrap();
+        let (shown, note) = output
+            .content
+            .rsplit_once('\n')
+            .expect("a cut line must be followed by a note");
+        assert!(
+            line.starts_with(shown) && shown.len() <= MAX_BYTES,
+            "{} bytes shown",
+            shown.len()
+        );
+        assert_eq!(
+            note,
+            format!(
+                "[Line 1 of 1 was cut: showing {} of {} bytes. read_file cannot page within a line; \
+                 use another tool, such as bash, to read the rest.]",
+                shown.len(),
+                line.len()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cut_line_is_not_counted_as_shown_when_more_lines_follow() {
+        let dir = tempfile::tempdir().unwrap();
+        let long = "x".repeat(MAX_BYTES + 100);
+        std::fs::write(dir.path().join("two.txt"), format!("{long}\nnext\n")).unwrap();
+        let output = ReadFileTool::default()
+            .execute(json!({"path": "two.txt"}), &ctx(dir.path()))
+            .await
+            .unwrap();
+        assert!(output.content.starts_with(&long[..MAX_BYTES]));
+        assert_eq!(
+            &output.content[MAX_BYTES..],
+            format!(
+                "\n[Line 1 of 2 was cut: showing {MAX_BYTES} of {} bytes. read_file cannot page within a line; \
+                 use another tool, such as bash, to read the rest. Use offset=2 to continue.]",
+                long.len()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn a_line_that_fits_the_byte_limit_is_not_reported_as_cut() {
+        let dir = tempfile::tempdir().unwrap();
+        let line = "y".repeat(MAX_BYTES);
+        std::fs::write(dir.path().join("fits.txt"), format!("{line}\nnext\n")).unwrap();
+        let output = ReadFileTool::default()
+            .execute(json!({"path": "fits.txt"}), &ctx(dir.path()))
+            .await
+            .unwrap();
+        assert!(output.content.starts_with(&line));
+        assert_eq!(
+            &output.content[MAX_BYTES..],
+            "\n[Showing lines 1-1 of 2. Use offset=2 to continue.]"
         );
     }
 

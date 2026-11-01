@@ -105,6 +105,19 @@ async fn slash_commands_are_local_and_compact_is_explicitly_unavailable() {
 }
 
 #[tokio::test]
+async fn an_oversized_input_line_is_rejected_and_the_conversation_continues() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::text("still here")]).await;
+    // One byte over the 1 MiB line limit, followed by an ordinary prompt.
+    let input = format!("{}\n你好\n/quit\n", "x".repeat(1024 * 1024 + 1));
+    let output = run(&server, dir.path(), &["--tools", ""], &input).await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stderr(&output).contains("exceeds"), "{}", stderr(&output));
+    assert_eq!(users(&server, 0), ["你好"]);
+    assert_eq!(stdout(&output), "still here\n");
+}
+
+#[tokio::test]
 async fn model_command_changes_subsequent_requests_without_losing_history() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::text("one"), Reply::text("two")]).await;
@@ -667,7 +680,7 @@ async fn new_while_a_tty_task_runs_cancels_it_and_starts_with_empty_history() {
 }
 
 #[tokio::test]
-async fn a_timed_out_approval_does_not_authorize_a_later_call() {
+async fn an_approval_cancelled_by_the_run_timeout_does_not_authorize_a_later_call() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::bash("c", "printf no > marker"), Reply::text("safe")]).await;
     let mut child = chat(

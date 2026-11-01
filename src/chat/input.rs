@@ -9,7 +9,15 @@ use tokio::sync::mpsc;
 pub(super) const MAX_LINE_BYTES: usize = 1024 * 1024;
 const INPUT_QUEUE: usize = 8;
 
-pub(super) type Input = mpsc::Receiver<io::Result<String>>;
+/// One line from the input owner.
+pub(super) enum Line {
+    /// A complete line without its line ending.
+    Text(String),
+    /// A line that was read in full but not delivered, with the reason.
+    Rejected(String),
+}
+
+pub(super) type Input = mpsc::Receiver<io::Result<Line>>;
 
 pub(super) fn spawn() -> Result<Input> {
     let (sender, receiver) = mpsc::channel(INPUT_QUEUE);
@@ -20,8 +28,10 @@ pub(super) fn spawn() -> Result<Input> {
             let mut reader = stdin.lock();
             loop {
                 let line = match read_line(&mut reader) {
-                    Ok(Some(line)) => Ok(line),
+                    Ok(Some(text)) => Ok(Line::Text(text)),
                     Ok(None) => break,
+                    // An oversized or non-UTF-8 line has been consumed whole; later lines are intact.
+                    Err(error) if error.kind() == io::ErrorKind::InvalidData => Ok(Line::Rejected(error.to_string())),
                     Err(error) => Err(error),
                 };
                 let failed = line.is_err();
@@ -41,17 +51,23 @@ pub(super) fn spawn() -> Result<Input> {
     Ok(receiver)
 }
 
+/// The next line without its line ending; `None` at EOF. Oversized and non-UTF-8 lines are
+/// consumed whole and reported as `InvalidData`, so the following line starts intact.
 fn read_line(reader: &mut impl BufRead) -> io::Result<Option<String>> {
     let mut bytes = Vec::new();
     let limit = u64::try_from(MAX_LINE_BYTES).expect("one MiB fits in u64") + 1;
-    let read = reader.take(limit).read_until(b'\n', &mut bytes)?;
+    let read = reader.by_ref().take(limit).read_until(b'\n', &mut bytes)?;
     if read == 0 {
         return Ok(None);
     }
     if bytes.len() > MAX_LINE_BYTES {
+        // Skip the rest of the line without buffering it.
+        if bytes.last() != Some(&b'\n') {
+            reader.skip_until(b'\n')?;
+        }
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("input line exceeds {MAX_LINE_BYTES} bytes"),
+            format!("input line exceeds {MAX_LINE_BYTES} bytes and was discarded"),
         ));
     }
     if bytes.last() == Some(&b'\n') {
@@ -92,6 +108,14 @@ mod tests {
         let data = format!("{}界\n", "x".repeat(MAX_LINE_BYTES - 1));
         let error = read_line(&mut io::Cursor::new(data)).unwrap_err();
         assert!(error.to_string().contains("exceeds"));
+    }
+
+    #[test]
+    fn an_oversized_line_is_discarded_whole_so_the_next_line_is_intact() {
+        let data = format!("{}\nnext\n", "x".repeat(MAX_LINE_BYTES + 5));
+        let mut input = io::Cursor::new(data.into_bytes());
+        assert!(read_line(&mut input).unwrap_err().to_string().contains("exceeds"));
+        assert_eq!(read_line(&mut input).unwrap().as_deref(), Some("next"));
     }
 
     #[test]

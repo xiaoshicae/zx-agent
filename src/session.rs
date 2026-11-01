@@ -1,6 +1,8 @@
 //! Append-only JSONL session tree and its projection (pi: coding-agent SessionManager).
 //!
-//! Every change appends an entry; nothing is rewritten. Entries link to their parent, so
+//! Every change appends an entry; written entries are never rewritten. The one exception is
+//! `open`, which cuts off an unfinished last line left by a crash or failed write, and
+//! reports how many bytes it removed. Entries link to their parent, so
 //! the file is a tree and the "leaf" pointer selects the current branch. The messages a
 //! model sees are a projection of that branch: context edits can omit or replace earlier
 //! messages without touching the raw history, which stays available for auditing.
@@ -110,10 +112,15 @@ pub struct ProjectedMessage {
 }
 
 /// A session tree, kept in memory and optionally mirrored to a JSONL file.
+///
+/// After a failed write, every later append fails without writing. A failed write can
+/// leave a partial record; stopping there keeps it the last line, which `open` repairs.
 pub struct SessionStore {
     path: Option<PathBuf>,
     /// Receives one JSON line per entry; the session file outside of tests.
     writer: Option<Box<dyn Write + Send>>,
+    /// The first write error; set once, after which nothing more is written.
+    write_failure: Option<String>,
     header: SessionHeader,
     entries: Vec<Entry>,
     index: HashMap<String, usize>,
@@ -127,6 +134,7 @@ impl SessionStore {
         Self {
             path: None,
             writer: None,
+            write_failure: None,
             header,
             entries: Vec::new(),
             index: HashMap::new(),
@@ -353,15 +361,21 @@ impl SessionStore {
         // Synchronous I/O, although callers run inside async tasks: one short line per message
         // finishes in microseconds, and writing it before continuing is what makes the audit
         // trail reliable.
+        if let Some(failure) = &self.write_failure {
+            // Appending after a partial line would glue the next entry to it, turning a
+            // repairable tail into a corrupt record in the middle of the file.
+            bail!("session file is not written after an earlier write failure: {failure}");
+        }
         if let Some(writer) = &mut self.writer {
             // Write before updating memory: an entry missing from the file must never become
             // the parent of later entries (pi: SessionManager._appendEntry).
             let mut line = serde_json::to_string(&entry)?;
             line.push('\n');
-            writer
-                .write_all(line.as_bytes())
-                .and_then(|()| writer.flush())
-                .context("cannot write session entry")?;
+            let written = writer.write_all(line.as_bytes()).and_then(|()| writer.flush());
+            if let Err(error) = written {
+                self.write_failure = Some(error.to_string());
+                return Err(error).context("cannot write session entry");
+            }
         }
         let id = entry.id().to_string();
         self.insert(entry);
@@ -483,6 +497,59 @@ mod tests {
         assert!(store.append_message(Message::user("q")).is_err());
         assert!(store.entries().is_empty());
         assert_eq!(store.leaf_id(), None);
+    }
+
+    /// Keeps `keep` bytes of the first write and then fails once, like a disk that fills up
+    /// in the middle of a record and is freed again. Later writes succeed.
+    struct PartialWriteOnce {
+        file: std::fs::File,
+        keep: usize,
+        calls: usize,
+    }
+
+    impl Write for PartialWriteOnce {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.calls += 1;
+            match self.calls {
+                1 => {
+                    let part = &bytes[..self.keep.min(bytes.len())];
+                    self.file.write_all(part)?;
+                    Ok(part.len())
+                }
+                2 => Err(std::io::Error::other("disk full")),
+                _ => self.file.write(bytes),
+            }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.file.flush()
+        }
+    }
+
+    #[test]
+    fn a_partial_write_stops_later_writes_and_leaves_a_repairable_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let mut store = SessionStore::create(&path, header()).unwrap();
+        store.append_message(Message::user("kept")).unwrap();
+        drop(store);
+        let file = OpenOptions::new().append(true).open(&path).unwrap();
+        let writer = PartialWriteOnce {
+            file,
+            keep: 10,
+            calls: 0,
+        };
+        let mut store = SessionStore::with_writer(header(), Box::new(writer));
+
+        assert!(store.append_message(Message::user("cut short")).is_err());
+        // A run keeps emitting messages until it observes its cancellation.
+        let later = store.append_message(Message::user("after the failure"));
+        assert!(later.is_err(), "an entry was written after a failed write");
+        drop(store);
+
+        let reopened = SessionStore::open(&path).unwrap();
+        assert_eq!(reopened.recovered_tail_bytes(), 10);
+        assert_eq!(texts(&reopened), ["kept"]);
     }
 
     #[test]

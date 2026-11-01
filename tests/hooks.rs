@@ -182,6 +182,12 @@ async fn approval_errors_panics_and_timeouts_block_execution_and_preserve_the_lo
     }
 }
 
+#[test]
+fn host_approvals_wait_two_minutes_by_default() {
+    let config = config(Arc::new(FauxProvider::new([])), vec![]);
+    assert_eq!(config.interaction_timeout, Duration::from_secs(120));
+}
+
 struct WaitingHost(Arc<tokio::sync::Notify>);
 #[async_trait]
 impl Interaction for WaitingHost {
