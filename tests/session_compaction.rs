@@ -8,7 +8,7 @@ use serde_json::json;
 
 use zx_agent::ai::{Message, SystemMessage, SystemPrompt, Usage, now_ms};
 use zx_agent::session::{
-    CompactionPlan, CompactionSummary, Entry, SessionHeader, SessionStore, SummaryFact, SummaryRequest,
+    CompactionPlan, CompactionSummary, Entry, SESSION_VERSION, SessionHeader, SessionStore, SummaryFact, SummaryRequest,
 };
 
 use common::{header, read_lines, summarize};
@@ -51,9 +51,9 @@ fn seeded(store: &mut SessionStore) -> (String, String) {
 }
 
 #[test]
-fn new_sessions_use_v3_and_legacy_upgrade_preserves_every_existing_byte() {
+fn new_sessions_use_v4_and_legacy_upgrade_preserves_every_existing_byte() {
     let dir = tempfile::tempdir().unwrap();
-    assert_eq!(header().version, 3);
+    assert_eq!(header().version, 4);
     for version in [1, 2] {
         let path = dir.path().join(format!("v{version}.jsonl"));
         let mut legacy_header = SessionHeader::new(Path::new("."), "m");
@@ -239,7 +239,7 @@ fn duplicate_ids_and_future_upgrades_are_rejected_without_modifying_the_file() {
     drop(store);
     let prefix = std::fs::read_to_string(&path).unwrap();
     for bad in [
-        json!({"type":"format_upgrade","id":"future","parentId":id,"timestamp":0,"version":4}),
+        json!({"type":"format_upgrade","id":"future","parentId":id,"timestamp":0,"version":SESSION_VERSION + 1}),
         json!({"type":"format_upgrade","id":id,"parentId":null,"timestamp":0,"version":3}),
     ] {
         let content = format!("{prefix}{bad}\n");

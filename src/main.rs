@@ -255,6 +255,11 @@ impl EventSink for TextProgress {
                 ..
             } => eprintln!("[compact] {input_bytes} -> {output_bytes} context bytes"),
             AgentEvent::CompactionFailed { error, .. } => eprintln!("[compact] {error}"),
+            AgentEvent::ToolCallRecovered {
+                tool_call_id,
+                tool_name,
+                state,
+            } => eprintln!("[recover] {tool_name} {tool_call_id}: {}", state.describe()),
             AgentEvent::AgentStart
             | AgentEvent::TurnStart { .. }
             | AgentEvent::MessageStart { .. }

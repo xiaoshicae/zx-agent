@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::agent::{HookResult, Hooks, Tool, ToolContext, ToolOutput};
+use crate::agent::{Effects, HookResult, Hooks, Tool, ToolContext, ToolOutput};
 use crate::ai::{ToolCall, ToolDef};
 
 /// Paging tool name; enabling spilling requires registering this tool too.
@@ -284,6 +284,9 @@ struct Args {
 impl Tool for ReadOutputTool {
     fn name(&self) -> &str {
         TOOL_NAME
+    }
+    fn effects(&self) -> Effects {
+        Effects::ReadOnly
     }
     fn definition(&self) -> ToolDef {
         ToolDef { name: TOOL_NAME.into(), description: "Read a persisted tool result by outputId (UUID). Use the returned UTF-8 byte offset for the next page. Only files in the configured output directory are readable.".into(), parameters: json!({"type":"object","properties":{"id":{"type":"string","description":"outputId from a tool result"},"offset":{"type":"integer","minimum":0}},"required":["id"],"additionalProperties":false}) }

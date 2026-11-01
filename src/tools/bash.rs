@@ -11,7 +11,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, Command};
 
 use super::truncate::{MAX_BYTES, MAX_LINES, truncate_tail};
-use crate::agent::{Tool, ToolContext, ToolOutput};
+use crate::agent::{Effects, Tool, ToolContext, ToolOutput};
 use crate::ai::ToolDef;
 use crate::sync::{AbortOnDrop, lock};
 
@@ -101,6 +101,11 @@ impl Drop for ProcessGroup {
 impl Tool for BashTool {
     fn name(&self) -> &str {
         super::BASH
+    }
+
+    /// Commands can change anything the process can reach, so every call is a side effect.
+    fn effects(&self) -> Effects {
+        Effects::SideEffects
     }
 
     fn definition(&self) -> ToolDef {

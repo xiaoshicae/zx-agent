@@ -168,19 +168,21 @@ impl SessionStore {
         };
         // Validate the plan before even appending an upgrade.
         self.validate_compaction_start(&entry)?;
-        self.upgrade_for_v3()?;
+        self.ensure_format(3)?;
         entry.parent_id = self.leaf.clone();
         entry.id = self.new_id();
         self.append(Entry::CompactionStarted(entry))
     }
 
-    pub(super) fn upgrade_for_v3(&mut self) -> Result<()> {
-        if self.format_version < 3 {
+    /// Append a format upgrade before the first record that needs `version`.
+    /// The header is never rewritten.
+    pub(super) fn ensure_format(&mut self, version: u32) -> Result<()> {
+        if self.format_version < version {
             self.append(Entry::FormatUpgrade(FormatUpgradeEntry {
                 id: self.new_id(),
                 parent_id: self.leaf.clone(),
                 timestamp: now_ms(),
-                version: 3,
+                version,
             }))?;
         }
         Ok(())
@@ -267,6 +269,13 @@ impl SessionStore {
                 self.validate_attempt_completion(&failed.attempt_id, entry.parent_id())?;
             }
             Entry::RequestConfig(_) | Entry::RequestStarted(_) => self.validate_request_entry(entry)?,
+            Entry::ToolCallStarted(start) => {
+                ensure!(
+                    self.format_version >= super::recovery::START_RECORDS_VERSION,
+                    "tool call start records require a format upgrade to v4"
+                );
+                self.validate_tool_call_start(start)?;
+            }
         }
         Ok(())
     }
@@ -286,7 +295,8 @@ impl SessionStore {
                 | Entry::FormatUpgrade(_)
                 | Entry::CompactionStarted(_)
                 | Entry::RequestConfig(_)
-                | Entry::RequestStarted(_) => false,
+                | Entry::RequestStarted(_)
+                | Entry::ToolCallStarted(_) => false,
             }),
             "compaction attempt already finished"
         );

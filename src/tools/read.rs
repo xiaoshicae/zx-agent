@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 
 use super::truncate::{MAX_BYTES, MAX_LINES, truncate_head};
-use crate::agent::{Tool, ToolContext, ToolOutput};
+use crate::agent::{Effects, Tool, ToolContext, ToolOutput};
 use crate::ai::ToolDef;
 
 /// Reads text files in pages of bounded size.
@@ -92,6 +92,10 @@ struct Args {
 impl Tool for ReadFileTool {
     fn name(&self) -> &str {
         super::READ_FILE
+    }
+
+    fn effects(&self) -> Effects {
+        Effects::ReadOnly
     }
 
     fn definition(&self) -> ToolDef {

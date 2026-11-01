@@ -7,14 +7,17 @@
 //! model sees are a projection of that branch: context edits can omit or replace earlier
 //! messages without touching the raw history, which stays available for auditing.
 //!
-//! Version 3 adds auditable compaction without rewriting earlier records.
+//! Version 3 adds auditable compaction without rewriting earlier records. Version 4 records
+//! that a tool call with side effects started, so recovery can tell interrupted calls apart.
 
 mod compaction;
+mod recovery;
 mod request;
 pub use compaction::{
     CompactionEntry, CompactionFailedEntry, CompactionPlan, CompactionStartedEntry, CompactionSummary,
     FormatUpgradeEntry, SummaryFact, SummaryRequest,
 };
+pub use recovery::{InterruptedToolCall, StartRecord, ToolCallStartedEntry};
 pub use request::{RequestConfig, RequestConfigEntry, RequestSource, RequestStartedEntry};
 
 use std::collections::HashMap;
@@ -29,11 +32,12 @@ use serde::{Deserialize, Serialize};
 use crate::ai::ContentBlock;
 use crate::ai::{Message, now_ms};
 
-/// Format version written to new session headers. Version 3 adds auditable compaction and
-/// append-only format upgrades. Version 2 records the system prompt as
+/// Format version written to new session headers. Version 4 adds `tool_call_started`.
+/// Version 3 adds auditable compaction, request records and append-only format upgrades.
+/// Version 2 records the system prompt as
 /// system messages in the conversation; version 1 kept it in the header. Version 1 files still
 /// open: the old header field is ignored, and the next run records the prompt as a message.
-pub const SESSION_VERSION: u32 = 3;
+pub const SESSION_VERSION: u32 = 4;
 
 /// First line of a session file. Records where and with which model the session started.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -99,6 +103,7 @@ pub enum Entry {
     CompactionFailed(CompactionFailedEntry),
     RequestConfig(RequestConfigEntry),
     RequestStarted(RequestStartedEntry),
+    ToolCallStarted(ToolCallStartedEntry),
 }
 
 impl Entry {
@@ -113,6 +118,7 @@ impl Entry {
             Entry::FormatUpgrade(entry) => &entry.id,
             Entry::RequestConfig(entry) => &entry.id,
             Entry::RequestStarted(entry) => &entry.id,
+            Entry::ToolCallStarted(entry) => &entry.id,
         }
     }
 
@@ -127,6 +133,7 @@ impl Entry {
             Entry::FormatUpgrade(entry) => entry.parent_id.as_deref(),
             Entry::RequestConfig(entry) => entry.parent_id.as_deref(),
             Entry::RequestStarted(entry) => entry.parent_id.as_deref(),
+            Entry::ToolCallStarted(entry) => entry.parent_id.as_deref(),
         }
     }
 }
@@ -329,7 +336,8 @@ impl SessionStore {
                 | Entry::Compaction(_)
                 | Entry::CompactionFailed(_)
                 | Entry::RequestConfig(_)
-                | Entry::RequestStarted(_),
+                | Entry::RequestStarted(_)
+                | Entry::ToolCallStarted(_),
             ) => bail!("entry {target_id} is not a message"),
             None => bail!("entry {target_id} not found"),
         }
