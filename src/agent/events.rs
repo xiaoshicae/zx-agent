@@ -5,7 +5,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::ai::{Delta, Message, Usage};
+use crate::ai::{Delta, Message, Provider, Request, Usage};
 
 /// How one `run_loop` call ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -135,6 +135,11 @@ pub trait EventSink: Send + Sync {
     /// Persist an edit before the loop changes its projection. Memory-only sinks
     /// need no audit writer; the Runner supplies a session-backed implementation.
     fn edit_context(&self, _index: usize, _replacement: Option<&str>) -> Result<(), String> {
+        Ok(())
+    }
+    /// Persist a request checkpoint before dispatch. The default is memory-only;
+    /// a Runner records configuration and projection in its append-only session.
+    fn record_request(&self, _request: &Request, _provider: &dyn Provider) -> Result<(), String> {
         Ok(())
     }
     /// Session-host preparation after input/context edits and before a task request.

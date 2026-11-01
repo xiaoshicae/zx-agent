@@ -11,9 +11,11 @@ use tokio_util::sync::CancellationToken;
 use crate::agent::{AgentEvent, EventSink, HookChain};
 use crate::ai::{
     AssistantMessage, Message, PREAMBLE, Provider, Request, StopReason, StreamEvent, SystemMessage, SystemPrompt,
-    Usage, duration_ms, now_ms,
+    Usage, UserMessageKind, duration_ms, now_ms,
 };
-use crate::session::{CompactionPlan, CompactionSummary, ProjectedMessage, SessionStore, SummaryRequest};
+use crate::session::{
+    CompactionPlan, CompactionSummary, ProjectedMessage, RequestSource, SessionStore, SummaryRequest,
+};
 use crate::sync::lock;
 
 const MAX_SUMMARY_BYTES: usize = 64 * 1024;
@@ -251,6 +253,39 @@ impl Host<'_> {
                 return (report, None);
             }
         };
+        let system_timestamp = now_ms();
+        let user_timestamp = now_ms();
+        let request = Request {
+            model: self.model.into(),
+            messages: vec![
+                Message::System(SystemMessage {
+                    sections: SystemPrompt::default()
+                        .diff(&SystemPrompt::default().with_section(PREAMBLE, SUMMARY_INSTRUCTIONS)),
+                    timestamp: system_timestamp,
+                }),
+                Message::User {
+                    content: source,
+                    timestamp: user_timestamp,
+                    kind: UserMessageKind::Prompt,
+                },
+            ],
+            tools: Vec::new(),
+            max_tokens: Some(self.config.max_summary_tokens),
+        };
+        let source = RequestSource::Summary {
+            attempt_id: attempt.clone(),
+            system_timestamp,
+            user_timestamp,
+        };
+        let options = self.provider.request_options();
+        let name = self.provider.name();
+        if let Err(error) = lock(self.session).record_request(&request, name, options, source) {
+            let error = format!("cannot persist summary request checkpoint: {error:#}");
+            report.persistence_error = Some(error.clone());
+            report.error = Some(error);
+            report.outcome = Outcome::Failed;
+            return (report, None);
+        }
         self.emit(
             AgentEvent::CompactionStart {
                 input_bytes: report.input_bytes,
@@ -260,7 +295,7 @@ impl Host<'_> {
         )
         .await;
         report.requests = 1;
-        let response = self.summarize(source, cancel).await;
+        let response = self.summarize(request, cancel).await;
         if let Ok(message) = &response {
             report.usage = message.usage.clone();
         }
@@ -361,22 +396,9 @@ impl Host<'_> {
         }
     }
 
-    async fn summarize(&self, source: String, cancel: &CancellationToken) -> Result<AssistantMessage, String> {
+    async fn summarize(&self, request: Request, cancel: &CancellationToken) -> Result<AssistantMessage, String> {
         let child = cancel.child_token();
         let _cancel_on_drop = child.drop_guard_ref();
-        let request = Request {
-            model: self.model.into(),
-            messages: vec![
-                Message::System(SystemMessage {
-                    sections: SystemPrompt::default()
-                        .diff(&SystemPrompt::default().with_section(PREAMBLE, SUMMARY_INSTRUCTIONS)),
-                    timestamp: now_ms(),
-                }),
-                Message::user(source),
-            ],
-            tools: Vec::new(),
-            max_tokens: Some(self.config.max_summary_tokens),
-        };
         let mut stream = self.provider.stream(request, child.clone());
         let wait = async {
             let mut bytes = 0usize;

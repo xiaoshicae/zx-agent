@@ -314,7 +314,9 @@ impl Runner {
                 | Entry::FormatUpgrade(_)
                 | Entry::CompactionStarted(_)
                 | Entry::Compaction(_)
-                | Entry::CompactionFailed(_) => None,
+                | Entry::CompactionFailed(_)
+                | Entry::RequestConfig(_)
+                | Entry::RequestStarted(_) => None,
             })
             .collect();
         let messages: Vec<Message> = session
@@ -418,6 +420,22 @@ impl PersistingSink<'_> {
 
 #[async_trait]
 impl EventSink for PersistingSink<'_> {
+    fn record_request(&self, request: &crate::ai::Request, provider: &dyn Provider) -> Result<(), String> {
+        let options = provider.request_options();
+        let recorded = lock(self.session)
+            .record_request(
+                request,
+                provider.name(),
+                options,
+                crate::session::RequestSource::Projection,
+            )
+            .map(|_| ())
+            .map_err(|error| format!("cannot persist request checkpoint: {error:#}"));
+        if let Err(error) = &recorded {
+            self.record_failure(error.clone());
+        }
+        recorded
+    }
     async fn prepare_context(&self, cancel: &CancellationToken) -> ContextPreparation {
         let Some(limit) = self.compaction.trigger_bytes else {
             return ContextPreparation::Unchanged;
@@ -512,25 +530,29 @@ mod tests {
         assert_eq!(Limits::default().max_turns, None);
     }
 
-    #[tokio::test]
-    async fn compaction_write_failures_cancel_before_any_further_model_request() {
-        struct RejectEntry(&'static str);
-        impl std::io::Write for RejectEntry {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                let needle = format!("\"type\":\"{}\"", self.0);
-                if bytes.windows(needle.len()).any(|part| part == needle.as_bytes()) {
-                    Err(std::io::Error::other(format!("disk full on {}", self.0)))
-                } else {
-                    Ok(bytes.len())
-                }
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
+    /// Fails only the write of one entry type, like a disk filling up at that record.
+    struct RejectEntry(&'static str);
+    impl std::io::Write for RejectEntry {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let needle = format!("\"type\":\"{}\"", self.0);
+            if bytes.windows(needle.len()).any(|part| part == needle.as_bytes()) {
+                Err(std::io::Error::other(format!("disk full on {}", self.0)))
+            } else {
+                Ok(bytes.len())
             }
         }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn compaction_write_failures_cancel_before_any_further_model_request() {
         for rejected in [
             "format_upgrade",
             "compaction_started",
+            "request_config",
+            "request_started",
             "compaction",
             "compaction_failed",
         ] {
@@ -612,6 +634,45 @@ mod tests {
             provider.requests().is_empty(),
             "no model request without an audit trail"
         );
+    }
+
+    #[tokio::test]
+    async fn a_request_checkpoint_write_failure_prevents_the_request() {
+        for rejected in ["request_config", "request_started"] {
+            let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
+            let config = LoopConfig::new(LoopSpec {
+                provider: provider.clone(),
+                model: "m".into(),
+                system_prompt: SystemPrompt::default(),
+                tools: vec![],
+                cwd: PathBuf::from("."),
+                max_tokens: None,
+                sequential_tools: false,
+            });
+            let session =
+                SessionStore::with_writer(SessionHeader::new(Path::new("."), "m"), Box::new(RejectEntry(rejected)));
+            let mut runner = Runner::new(
+                config,
+                RetryPolicy::default(),
+                Limits::default(),
+                session,
+                Arc::new(NullSink),
+            );
+
+            let report = runner.run("go", &CancellationToken::new()).await;
+
+            assert_eq!(report.outcome, RunOutcome::Error, "{rejected}");
+            let error = report.error.unwrap_or_default();
+            assert!(
+                error.contains(&format!("disk full on {rejected}")),
+                "{rejected}: {error}"
+            );
+            assert!(
+                provider.requests().is_empty(),
+                "{rejected}: dispatched without a checkpoint"
+            );
+            assert_eq!(report.retries, 0);
+        }
     }
 
     #[test]

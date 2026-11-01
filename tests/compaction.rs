@@ -212,13 +212,11 @@ async fn sdk_defaults_do_not_make_summary_requests() {
         RunOutcome::Completed
     );
     assert_eq!(provider.requests().len(), 1);
-    assert!(
-        runner
-            .session()
-            .entries()
-            .iter()
-            .all(|entry| matches!(entry, Entry::Message(_)))
-    );
+    // Request checkpoints are always written; no compaction record may appear.
+    assert!(runner.session().entries().iter().all(|entry| matches!(
+        entry,
+        Entry::Message(_) | Entry::RequestConfig(_) | Entry::RequestStarted(_)
+    )));
 }
 
 #[tokio::test]

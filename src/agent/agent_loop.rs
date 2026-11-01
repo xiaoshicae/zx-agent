@@ -317,8 +317,19 @@ impl Engine<'_, '_, '_> {
                 // and persist context hooks again before the next task request.
                 continue;
             }
+            let spec = &self.config.spec;
+            let request = Request {
+                model: spec.model.clone(),
+                messages: context.to_vec(),
+                tools: spec.tools.iter().map(|tool| tool.definition()).collect(),
+                max_tokens: spec.max_tokens,
+            };
+            self.control.sink.record_request(&request, spec.provider.as_ref())?;
+            if self.control.cancel.is_cancelled() {
+                return Ok(LoopOutcome::Aborted);
+            }
             result.turns = result.turns.saturating_add(1);
-            let message = self.stream(context).await;
+            let message = self.stream(request).await;
             result.usage.add(&message.usage);
             let stop = message.stop_reason;
             let calls = message.tool_calls();
@@ -412,15 +423,8 @@ impl Engine<'_, '_, '_> {
         }
     }
 
-    async fn stream(&self, context: &[Message]) -> AssistantMessage {
+    async fn stream(&self, request: Request) -> AssistantMessage {
         let spec = &self.config.spec;
-        let request = Request {
-            model: spec.model.clone(),
-            // Provider background work owns a separate request snapshot.
-            messages: context.to_vec(),
-            tools: spec.tools.iter().map(|tool| tool.definition()).collect(),
-            max_tokens: spec.max_tokens,
-        };
         let mut events = spec.provider.stream(request, self.control.cancel.clone());
         let mut started = false;
         while let Some(event) = events.next().await {

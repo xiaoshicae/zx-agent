@@ -291,7 +291,8 @@ pub struct ToolDef {
 }
 
 /// One model request. The system prompt travels in `messages` as system messages.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Request {
     pub model: String,
     pub messages: Vec<Message>,

@@ -10,10 +10,12 @@
 //! Version 3 adds auditable compaction without rewriting earlier records.
 
 mod compaction;
+mod request;
 pub use compaction::{
     CompactionEntry, CompactionFailedEntry, CompactionPlan, CompactionStartedEntry, CompactionSummary,
     FormatUpgradeEntry, SummaryFact, SummaryRequest,
 };
+pub use request::{RequestConfig, RequestConfigEntry, RequestSource, RequestStartedEntry};
 
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -95,6 +97,8 @@ pub enum Entry {
     CompactionStarted(CompactionStartedEntry),
     Compaction(CompactionEntry),
     CompactionFailed(CompactionFailedEntry),
+    RequestConfig(RequestConfigEntry),
+    RequestStarted(RequestStartedEntry),
 }
 
 impl Entry {
@@ -107,6 +111,8 @@ impl Entry {
             Entry::Compaction(entry) => &entry.id,
             Entry::CompactionStarted(entry) => &entry.id,
             Entry::FormatUpgrade(entry) => &entry.id,
+            Entry::RequestConfig(entry) => &entry.id,
+            Entry::RequestStarted(entry) => &entry.id,
         }
     }
 
@@ -119,6 +125,8 @@ impl Entry {
             Entry::Compaction(entry) => entry.parent_id.as_deref(),
             Entry::CompactionStarted(entry) => entry.parent_id.as_deref(),
             Entry::FormatUpgrade(entry) => entry.parent_id.as_deref(),
+            Entry::RequestConfig(entry) => entry.parent_id.as_deref(),
+            Entry::RequestStarted(entry) => entry.parent_id.as_deref(),
         }
     }
 }
@@ -319,7 +327,9 @@ impl SessionStore {
                 | Entry::FormatUpgrade(_)
                 | Entry::CompactionStarted(_)
                 | Entry::Compaction(_)
-                | Entry::CompactionFailed(_),
+                | Entry::CompactionFailed(_)
+                | Entry::RequestConfig(_)
+                | Entry::RequestStarted(_),
             ) => bail!("entry {target_id} is not a message"),
             None => bail!("entry {target_id} not found"),
         }

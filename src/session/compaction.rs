@@ -168,6 +168,13 @@ impl SessionStore {
         };
         // Validate the plan before even appending an upgrade.
         self.validate_compaction_start(&entry)?;
+        self.upgrade_for_v3()?;
+        entry.parent_id = self.leaf.clone();
+        entry.id = self.new_id();
+        self.append(Entry::CompactionStarted(entry))
+    }
+
+    pub(super) fn upgrade_for_v3(&mut self) -> Result<()> {
         if self.format_version < 3 {
             self.append(Entry::FormatUpgrade(FormatUpgradeEntry {
                 id: self.new_id(),
@@ -175,10 +182,8 @@ impl SessionStore {
                 timestamp: now_ms(),
                 version: 3,
             }))?;
-            entry.parent_id = self.leaf.clone();
         }
-        entry.id = self.new_id();
-        self.append(Entry::CompactionStarted(entry))
+        Ok(())
     }
 
     /// Commit a validated result. Persistence precedes projection changes.
@@ -261,6 +266,7 @@ impl SessionStore {
             Entry::CompactionFailed(failed) => {
                 self.validate_attempt_completion(&failed.attempt_id, entry.parent_id())?;
             }
+            Entry::RequestConfig(_) | Entry::RequestStarted(_) => self.validate_request_entry(entry)?,
         }
         Ok(())
     }
@@ -275,8 +281,12 @@ impl SessionStore {
             !path.iter().any(|entry| match entry {
                 Entry::Compaction(done) => done.attempt_id == id,
                 Entry::CompactionFailed(failed) => failed.attempt_id == id,
-                Entry::Message(_) | Entry::ContextEdit(_) | Entry::FormatUpgrade(_) | Entry::CompactionStarted(_) =>
-                    false,
+                Entry::Message(_)
+                | Entry::ContextEdit(_)
+                | Entry::FormatUpgrade(_)
+                | Entry::CompactionStarted(_)
+                | Entry::RequestConfig(_)
+                | Entry::RequestStarted(_) => false,
             }),
             "compaction attempt already finished"
         );
@@ -323,7 +333,11 @@ impl SessionStore {
 
     /// Latest successful, still-valid summary on the active branch.
     pub fn latest_compaction(&self) -> Option<&CompactionEntry> {
-        let path = self.branch_path();
+        self.latest_compaction_at(self.leaf.as_deref())
+    }
+
+    fn latest_compaction_at(&self, leaf: Option<&str>) -> Option<&CompactionEntry> {
+        let path = self.branch_path_from(leaf);
         let (position, compact) = path.iter().enumerate().rev().find_map(|(index, entry)| {
             if let Entry::Compaction(entry) = entry {
                 Some((index, entry))
@@ -345,8 +359,12 @@ impl SessionStore {
     }
 
     pub(super) fn compacted_projection(&self) -> Vec<ProjectedMessage> {
-        let raw = self.raw_projection();
-        let Some(compact) = self.latest_compaction() else {
+        self.compacted_projection_at(self.leaf.as_deref())
+    }
+
+    pub(super) fn compacted_projection_at(&self, leaf: Option<&str>) -> Vec<ProjectedMessage> {
+        let raw = Self::raw_projection_from(&self.branch_path_from(leaf));
+        let Some(compact) = self.latest_compaction_at(leaf) else {
             return raw;
         };
         let Some(cut) = raw.iter().position(|item| item.entry_id == compact.first_kept_entry_id) else {
