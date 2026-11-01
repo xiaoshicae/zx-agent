@@ -1,0 +1,30 @@
+# kubectl in the resident Pod uses the mounted kubeconfig; the token directory is redacted from
+# tool output. Both volumes follow later changes to the ConfigMap and the Secret.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zx-agent
+spec:
+  template:
+    spec:
+      containers:
+        - name: zx-agent
+          env:
+            - name: KUBECONFIG
+              value: /etc/zx-agent/kubeconfig
+            - name: ZX_SECRET_FILES
+              value: /var/run/secrets/zx-agent/clusters
+          volumeMounts:
+            - name: kubeconfig
+              mountPath: /etc/zx-agent
+              readOnly: true
+            - name: clusters
+              mountPath: /var/run/secrets/zx-agent/clusters
+              readOnly: true
+      volumes:
+        - name: kubeconfig
+          configMap:
+            name: zx-agent-kubeconfig
+        - name: clusters
+          secret:
+            secretName: zx-agent-clusters

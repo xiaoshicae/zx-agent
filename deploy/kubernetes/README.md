@@ -20,6 +20,7 @@
 | `pvc.yaml` | 会话文件的存储卷，挂载在 `/data` |
 | `deployment.yaml` | 常驻 Pod |
 | `cronjob.yaml` | 定时巡检，默认每小时一次 |
+| `multicluster/` | 可选：访问其他集群。kustomize 组件给两种 Pod 挂上 kubeconfig 与 token 目录；`remote.yaml` 在每个远端集群执行一次 |
 
 ## 部署
 
@@ -78,6 +79,87 @@ kubectl -n zx-agent logs job/inspect-now
 
 退出码的含义见仓库 README 的“run 退出码”一节。
 
+## 多集群
+
+常驻 Pod 通过一份 kubeconfig 访问其他集群。各集群的 token 存放在 Secret 中，kubeconfig 用 `tokenFile` 引用这些文件，本身不含密钥。zx-agent 把整个 token 目录登记为脱敏对象（`ZX_SECRET_FILES`），命令读出的 token 不会进入模型上下文。定时巡检也能访问这些集群。
+
+1. 在每个要访问的远端集群执行一次。这会创建只读账号（预置的 `view`，不含 Secret）和它的长期 token，然后取出 token 和集群 CA：
+
+   ```sh
+   kubectl apply -f deploy/kubernetes/multicluster/remote.yaml
+   kubectl -n zx-agent-remote get secret zx-agent-token -o jsonpath='{.data.token}' | base64 -d > <集群名>.token
+   kubectl -n zx-agent-remote get secret zx-agent-token -o jsonpath='{.data.ca\.crt}'
+   ```
+
+   第三条命令输出的是 base64 编码的 CA，填进下面的 `certificate-authority-data`。
+
+2. 写一份 kubeconfig。`local` 就是 zx-agent 所在的集群，沿用 Pod 自己的账号，必须保留；每个远端集群各加一组 cluster、user、context：
+
+   ```yaml
+   apiVersion: v1
+   kind: Config
+   clusters:
+     - name: local
+       cluster:
+         server: https://kubernetes.default.svc
+         certificate-authority: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+     - name: <集群名>
+       cluster:
+         server: https://<远端 API server 的地址>
+         certificate-authority-data: <第 1 步输出的 CA>
+   users:
+     - name: local
+       user:
+         tokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+     - name: <集群名>
+       user:
+         tokenFile: /var/run/secrets/zx-agent/clusters/<集群名>
+   contexts:
+     - name: local
+       context:
+         cluster: local
+         user: local
+     - name: <集群名>
+       context:
+         cluster: <集群名>
+         user: <集群名>
+   current-context: local
+   ```
+
+   远端 API server 的地址必须能从 Pod 访问到。
+
+3. 在 zx-agent 所在的集群创建这两个对象，然后取消 `kustomization.yaml` 中 `components` 两行的注释，再次执行 `kubectl apply -k deploy/kubernetes`：
+
+   ```sh
+   kubectl -n zx-agent create secret generic zx-agent-clusters --save-config --from-file=<集群名>=<集群名>.token
+   kubectl -n zx-agent create configmap zx-agent-kubeconfig --save-config --from-file=kubeconfig=<kubeconfig 文件>
+   ```
+
+   `--save-config` 让以后可以直接用 `kubectl apply` 更新这两个对象。
+
+使用时，在命令中用 `--context` 选择集群，例如 `kubectl get pods -A --context <集群名>`。`--context` 要放在子命令之后，这样命令仍以 `kubectl get` 开头，在 chat 中不经审批直接执行。`kubectl config get-contexts` 可以列出所有集群。kubeconfig 以只读方式挂载，所以要在每条命令里指定集群。
+
+**以后新增集群**：远端集群照第 1 步执行，然后更新 Secret 和 kubeconfig，不需要重启 Pod。验证时，新文件约 1 分钟后出现在 Pod 中，随即被脱敏。
+
+```sh
+kubectl -n zx-agent create secret generic zx-agent-clusters --from-file=<集群名>=<集群名>.token \
+  --from-file=<新集群名>=<新集群名>.token --dry-run=client -o yaml | kubectl -n zx-agent apply -f -
+kubectl -n zx-agent create configmap zx-agent-kubeconfig --from-file=kubeconfig=<kubeconfig 文件> \
+  --dry-run=client -o yaml | kubectl -n zx-agent apply -f -
+```
+
+**注意事项**：
+
+- 远端 token 不带过期时间（实测其 JWT 中没有 `exp`），泄露后会一直有效，直到在远端集群删除 `zx-agent-token`。要更换它，先删除并重建 `zx-agent-token`，再更新 Secret。
+- 远端账号只读。如果需要在远端执行写操作，要另外在远端集群绑定相应的写权限。
+- 不再访问某个远端集群时，在该集群执行：
+
+  ```sh
+  kubectl delete -f deploy/kubernetes/multicluster/remote.yaml --ignore-not-found
+  ```
+
+  删除 Namespace 时，其中的 token 会被一并删除，所以需要 `--ignore-not-found`，否则命令会报 NotFound。
+
 ## 权限
 
 | 账号 | 用于 | 权限 |
@@ -116,6 +198,8 @@ kubectl -n zx-agent delete secret zx-agent-model
 kubectl delete namespace zx-agent
 ```
 
+启用了多集群时，在 `delete -k` 之后还要删除 `zx-agent-kubeconfig`（ConfigMap）和 `zx-agent-clusters`（Secret），再在每个远端集群执行上一节的 `kubectl delete -f`。
+
 `kubectl delete -k` 会删除清单中的对象，包括集群级的 ClusterRoleBinding 和存储卷声明。会话文件是否随之删除，取决于 StorageClass 的回收策略：`Delete` 时删除，`Retain` 时保留在卷上。可以用 `kubectl get storageclass` 查看。
 
 ## 验证记录
@@ -140,7 +224,18 @@ kubectl delete namespace zx-agent
 | 会话文件锁（PR #21） | chat 运行期间持有会话文件的 `flock`。另一个 `kubectl exec` 中对同一文件的 run 报告 `is in use`，退出码 2；chat 结束后，同一文件可以再次使用 |
 | 清理 | `delete -k` 删除了全部对象，包括集群级的角色和绑定；从 CronJob 创建的 Job 被一并回收；卷被删除；删除命名空间后没有残留 |
 
-未验证：x86_64 镜像与其他集群（如 GKE）、推送到镜像仓库、真实模型、多集群。
+**多集群**（基于 `e33f6fb` 上的分支，镜像标签为 `e2e-mc`）：只有一个集群可用，所以由同一集群扮演远端。`remote.yaml` 创建的只读账号作为远端身份，kubeconfig 中的 `remote` context 指向同一个 API server，但使用这个账号的 token。
+
+| 项 | 结果 |
+|-|-|
+| 远端准备 | `kubectl apply -f remote.yaml` 之后，token Secret 自动填入了 token 和 CA；该 token 的 JWT 中没有 `exp` |
+| 身份 | 常驻 Pod 中 `kubectl auth whoami`：默认 context 为 `system:serviceaccount:zx-agent-e2e:zx-agent`，`--context remote` 为 `system:serviceaccount:zx-agent-remote:zx-agent`。巡检 Pod 中两者分别为 `zx-agent-inspect` 与同一个远端账号 |
+| run 与脱敏 | run 通过 `--context remote` 读到 Pod 列表；命令读出远端 token 时，工具结果是 `[REDACTED]`（`ZX_SECRET_FILES` 指向 token 目录） |
+| chat | `kubectl config get-contexts` 与 `kubectl get pods … --context remote` 都不经审批直接执行 |
+| 新增集群 | 用 `create … --dry-run=client -o yaml \| apply` 给 Secret 加一个 key；约 56 秒后新文件出现在 Pod 中，内容随即被脱敏；Pod 没有重启。用 `--save-config` 创建的对象，之后 `apply` 不再提示缺少注解 |
+| 清理 | 本集群对象按“清理”一节删除；远端执行 `kubectl delete -f remote.yaml --ignore-not-found`，退出码 0。不加该参数时，因 token 已随 Namespace 删除，命令报 NotFound 并以 1 退出 |
+
+未验证：x86_64 镜像与其他集群（如 GKE）、推送到镜像仓库、真实模型、真正分属两个集群的多集群访问、kubeconfig 中 exec 插件（如云厂商认证插件）方式的凭据。
 
 ---
 

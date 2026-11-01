@@ -154,7 +154,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P3 | 终端对话 `chat` | 已完成（PR #5） |
 | P4 | profile 文件、上下文文件与 skills | 已完成（PR #6） |
 | P5 | 上下文管理 | 已完成（PR #9） |
-| P6 | 执行环境与崩溃恢复 | 进行中：崩溃恢复（PR #12）、执行环境接缝（PR #13）、离线容器执行（PR #14）已完成；在线访问评审稿已合入（PR #17），一期实施中：只读命令自动放行（PR #19）、环境变量保护与 ServiceAccount token 脱敏（PR #20）、常驻 Pod 部署包（单集群，PR #22）已完成；容器联网已取消，改为常驻 Pod 部署 |
+| P6 | 执行环境与崩溃恢复 | 进行中：崩溃恢复（PR #12）、执行环境接缝（PR #13）、离线容器执行（PR #14）已完成；在线访问评审稿已合入（PR #17），一期已完成：只读命令自动放行（PR #19）、环境变量保护与 ServiceAccount token 脱敏（PR #20）、常驻 Pod 部署包（PR #22）、多集群（PR #24）；容器联网已取消，改为常驻 Pod 部署。待部署方在真实集群上验收 |
 | P7 | 插件与 MCP | 未开始；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已实施（PR #23，待合并），A2–A8 待评审 |
 | P8 | 嵌入协议 `acp` | 未开始 |
 | P9 | 可选增强 | 未开始 |
@@ -348,8 +348,8 @@ P5 实施约定（2026-11-01）：
 - [x] `Executor` 接缝：`LocalExecutor`（现有行为）与 `ContainerExecutor`（接缝与 `LocalExecutor`：PR #13；`ContainerExecutor`：PR #14）
 - [x] profile 的 `execution` 增加容器选项（D5：显式开启，默认仍为本机；PR #14）
 - [x] `ContainerExecutor`：每个进程创建一个沙箱容器（2026-11-01 由“每次运行”调整，见上方约定；网络默认拒绝，在线任务按评审方案限制访问范围；只读根文件系统、非 root、去掉全部 capability、进程数与内存上限）；每条命令通过 `docker exec` 执行；`read_file` 也在容器内读取；运行结束删除容器（离线部分已完成，PR #14；在线访问随下一项评审）
-- [ ] API key 和会话文件只留在 Agent 进程，不进入容器；工具需要的凭据以只读方式挂载（API key 与会话文件已完成，PR #14；凭据只读挂载随在线方案评审）
-- [ ] 列出在线排障所需的 API 地址、网络与凭据范围；无网络的容器只用于离线排障，在线场景的受限访问方案在实施前评审（评审稿 `docs/p6-online-access-review.md` 已合入，PR #17；2026-11-01 按用户要求实施一期，见下方“在线访问一期”）
+- [x] API key 和会话文件只留在 Agent 进程，不进入容器；工具需要的凭据以只读方式挂载（API key 与会话文件：PR #14。容器中的凭据挂载随容器联网一起取消；改为常驻 Pod 部署后，各集群的凭据以只读卷挂载：PR #22、#24）
+- [x] 列出在线排障所需的 API 地址、网络与凭据范围；无网络的容器只用于离线排障，在线场景的受限访问方案在实施前评审（评审稿 `docs/p6-online-access-review.md` 已合入，PR #17；按用户确认，先定机制、地址由部署方配置；一期已实施，见下方“在线访问一期”）
 - [x] `Tool` trait 增加 `effects()`：只读或有副作用
 - [x] 有副作用的工具执行前追加 `tool_call_started` 条目；恢复时把“已开始、无结果”的调用标记为结果未知，不自动重放
 - [x] 首次写入 `tool_call_started` 前再次升级会话格式，兼容读取 P5 及更早版本
@@ -360,7 +360,7 @@ P5 实施约定（2026-11-01）：
 - ~~容器联网与 kubeconfig~~：已取消（2026-11-01，见下方“部署方向”）
 - [x] Linux 上保护 agent 的环境变量（`PR_SET_DUMPABLE`），ServiceAccount token 登记脱敏（已完成，PR #20）
 - [x] 常驻 Pod 部署包（单集群）：Deployment、RBAC、Secret 与会话存储卷的模板和文档（由“Kubernetes 部署说明”调整；已完成，PR #22）
-- [ ] 多集群：多个 context 的 kubeconfig，以及其他集群 token 文件的脱敏登记
+- [x] 多集群：多个 context 的 kubeconfig，以及其他集群 token 文件的脱敏登记（已完成，PR #24）
 
 部署方向（2026-11-01，用户确认）：Agent 以常驻 Pod 部署，kubectl 在 Pod 内以本机执行方式运行，凭据来自 ServiceAccount，因此取消容器执行的联网与 kubeconfig。用户确认的任务来源：kubectl exec 进 Pod 对话、定时巡检、告警 Webhook、IM 机器人。用户希望增加的功能：写操作（需审批）、专用查询工具 / MCP、多集群访问、记住历史排障。其中告警 Webhook 与 IM 机器人需要新的服务模式，另行评审后实施。
 
@@ -413,6 +413,31 @@ P5 实施约定（2026-11-01）：
   - PR #22 的首次 CI 中，`tests/container.rs` 的 `a_dropped_run_still_stops_its_command` 在 ubuntu 上以 `Text file busy (os error 26)` 失败：假 docker 脚本写出后立即执行。本 PR 未改动 Rust 代码与测试，只重跑失败的任务后通过。这是已有的偶发问题，另行处理。
 - 未改动 Rust 代码，也未改动 `Cargo.toml`、`Cargo.lock`。
 - 未验证：x86_64 镜像与其他集群；推送到镜像仓库；真实模型。
+
+多集群实施记录（2026-11-01，PR #24）：
+
+- 部署方式：
+  - 常驻 Pod 与定时巡检挂载一份 kubeconfig（ConfigMap），各集群的 token 放在 Secret 中，kubeconfig 用 `tokenFile` 引用，本身不含密钥。`local` context 沿用 Pod 自己的账号。
+  - `deploy/kubernetes/multicluster/` 是可选的 kustomize 组件。`remote.yaml` 在每个远端集群执行一次，创建只读账号（`view`）与长期 token。
+- 代码：
+  - 新增 `--secret-file`（可重复，默认取逗号分隔的 `ZX_SECRET_FILES`）。登记的路径在启动时必须存在，否则以退出码 2 报配置错误。
+  - `RedactSecrets::with_secret_files` 接受目录，表示其中名字不以点开头的文件，跳过子目录与 Secret 卷的 `..data` 链接，之后新增的文件也会读入。
+  - 修正旧值上限：原实现中当前值与旧值共用 32 个的上限，登记的文件超过 32 个时，部分当前值会不再过滤。现在当前值总是过滤，上限只约束轮换下来的旧值。
+  - assistant 的自动放行清单加入 `kubectl config get-contexts` 与 `kubectl config current-context`。
+- 新增 4 项测试：
+  - `tests/hooks.rs` 2 项：目录中的可见文件与后来新增的文件被过滤，隐藏文件与子目录不受影响；40 个文件的当前值全部过滤。
+  - `tests/hooks_cli.rs` 2 项：`ZX_SECRET_FILES` 以逗号登记目录与文件；路径不存在时为配置错误且不发请求。
+  - 既有测试调整 1 项：`a_secret_file_that_cannot_be_read_as_text_fails_the_hook` 原先用目录充当“不能按文本读取的文件”。目录现在有了含义，改用非 UTF-8 内容的文件，断言不变。
+- 反向验证：恢复旧的上限逻辑后，40 个文件的用例失败；修改已还原。
+- 本地 macOS：基于 `e33f6fb` 时，stable 与 Rust 1.88 各 499 项通过（基线 495 项）；rebase 到含 PR #23 的 `23eabb3` 后，各 515 项通过（基线 511 项）。均有 6 项付费测试跳过；格式、clippy、严格 Rustdoc 与 MSRV 全目标检查通过。`Cargo.toml`、`Cargo.lock` 未改动。
+- 集群验证：只有一个本机集群，由它同时扮演远端，结果见 `deploy/kubernetes/README.md` 的“验证记录”。验证内容包括：
+  - 身份切换；
+  - 远端 token 脱敏；
+  - chat 中直接执行 `--context` 读命令；
+  - 不重启新增集群：新文件约 56 秒后出现；
+  - 巡检访问远端；
+  - 清理。远端清理需要 `--ignore-not-found`。
+- 未验证：真正分属两个集群的访问；kubeconfig 中 exec 插件方式的凭据。
 
 执行环境接缝验收（2026-11-01，已完成，PR #13）：`src/executor/` 提供 `Executor`、`ShellCommand`、`CommandOutput`、`CommandEnd` 与 `LocalExecutor`；bash 与 read_file 新增 `executor` 字段，默认 `LocalExecutor`，`..Default::default()` 的构造方式不受影响，按字段完整列出的字面量需补上新字段。本机执行代码从 bash 与 read_file 原样搬迁，bash 与 read_file 原有测试不改断言即通过（仅 read_file 测试中两处字面量补 `..ReadFileTool::default()`，bash 测试模块补一行 `use tokio::process::Command;`）。新增 `tests/executor.rs` 3 项，用记录请求的替身执行器验证：bash 把命令、目录、超时与隐藏变量交给执行器，并正确报告 6 种结束方式；read_file 经执行器读取解析后的路径与上限。反向验证：让工具绕过自身执行器时，3 项全部失败，修改已还原。本地 macOS 基于 `bb91974`，stable 与 Rust 1.88.0 各 416 项通过、6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过。`tests/cli.rs`、`Cargo.toml`、`Cargo.lock` 未改动。
 

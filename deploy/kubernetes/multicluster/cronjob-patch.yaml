@@ -1,0 +1,32 @@
+# Scheduled inspections reach the same clusters. The tokens in zx-agent-clusters should be
+# read-only (remote.yaml binds view), as the inspection account is.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: zx-agent-inspect
+spec:
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: inspect
+              env:
+                - name: KUBECONFIG
+                  value: /etc/zx-agent/kubeconfig
+                - name: ZX_SECRET_FILES
+                  value: /var/run/secrets/zx-agent/clusters
+              volumeMounts:
+                - name: kubeconfig
+                  mountPath: /etc/zx-agent
+                  readOnly: true
+                - name: clusters
+                  mountPath: /var/run/secrets/zx-agent/clusters
+                  readOnly: true
+          volumes:
+            - name: kubeconfig
+              configMap:
+                name: zx-agent-kubeconfig
+            - name: clusters
+              secret:
+                secretName: zx-agent-clusters

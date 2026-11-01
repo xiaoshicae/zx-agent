@@ -133,7 +133,7 @@ zx-agent 把 kubeconfig 只读挂载进容器，为命令设置 `KUBECONFIG`，�
 | 不含 `secret` | 读取 Secret 要确认 |
 | 不含 URL（`://`）和连接参数 | 连接参数指任何一段中的 `--server`、`--kubeconfig`、`--token`、`--insecure-skip-tls-verify`，以及 kubectl 段中含字母 `s` 的单横线短参数（覆盖 `-s` 的各种写法；其他程序的短参数含义不同，如 `jq -s`）。实测 `--server` 指向其他 HTTPS 地址时，kubectl 把 kubeconfig 中的 token 发给了该地址（附录 9.3，K1） |
 
-3. **内置清单**：`kubectl get`、`kubectl describe`、`kubectl logs`、`kubectl top`、`kubectl events`、`kubectl explain`、`kubectl api-resources`、`kubectl version`，以及 `grep`、`head`、`tail`、`wc`、`jq`。入选标准：不能执行其他程序、不能写文件。因此不收录：
+3. **内置清单**：`kubectl get`、`kubectl describe`、`kubectl logs`、`kubectl top`、`kubectl events`、`kubectl explain`、`kubectl api-resources`、`kubectl version`，以及 `grep`、`head`、`tail`、`wc`、`jq`。多集群实施时（PR #24）加入 `kubectl config get-contexts` 与 `kubectl config current-context`，用于列出集群。入选标准：不能执行其他程序、不能写文件。因此不收录：
    - `awk`：`system()` 能执行命令。
    - `sed`：GNU sed 的 `e` 命令能执行命令，`w` 命令能写文件（附录 9.3，K3）。
    - `sort`：`--compress-program` 会运行指定程序，`-o` 能写文件（K3）。
@@ -200,7 +200,7 @@ Kubernetes 模式下，命令与 agent 在同一容器中以同一用户运行�
 | b) | 在 a) 的基础上，每次脱敏前重新读取已登记的文件 | 覆盖文件被更新的情况；文件很小，成本低 |
 | c) | 调用 exec 插件取得 token 再登记 | 每次运行多一次凭据请求 |
 
-**建议 b)**，同时使用短期 token 限制泄露后的影响。
+**建议 b)**，同时使用短期 token 限制泄露后的影响。（已实施：b) 见 PR #20；PR #24 增加 `--secret-file` / `ZX_SECRET_FILES`，可登记其他凭据文件或目录。）
 
 #### ② 自动放行仍是字面检查
 
