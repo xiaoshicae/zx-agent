@@ -9,8 +9,11 @@ use async_trait::async_trait;
 use crate::agent::ToolOutput;
 use crate::agent::hooks::{HookContext, HookResult, HookStage, Hooks, TurnDecision, TurnDisposition, TurnSummary};
 use crate::ai::{StopReason, ToolCall};
-use crate::profile::read_text;
 use crate::sync::lock;
+use crate::text::read_text_file;
+
+/// The largest secret file read, such as a token: anything bigger is not a single secret.
+const MAX_SECRET_FILE_BYTES: u64 = 64 * 1024;
 
 /// The unattended continuation text; the runtime does not depend on this wording.
 pub const CONTINUE_PROMPT: &str = "Your previous response was cut off at the output token limit. Continue exactly where it \
@@ -88,7 +91,7 @@ impl RedactSecrets {
         for path in &self.files {
             for file in secret_files_at(path)? {
                 // Small, bounded local reads, synchronous like the other configuration reads.
-                match read_text(&file) {
+                match read_text_file(&file, MAX_SECRET_FILE_BYTES) {
                     Ok(text) => current.push(text.trim().to_string()),
                     Err(error) if is_unreadable(&error) => {}
                     Err(error) => return Err(format!("cannot read a secret file to redact tool output: {error:#}")),

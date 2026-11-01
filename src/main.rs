@@ -18,7 +18,7 @@ mod chat;
 mod cli;
 mod serve;
 
-use chat::visible;
+use chat::{progress_line, visible};
 use cli::{Cli, Command, OutputMode, RunArgs};
 
 /// Exit codes, so schedulers can react without parsing output.
@@ -128,9 +128,9 @@ fn print_report(report: &RunReport, output: OutputMode) {
             if !report.final_text.is_empty() {
                 // A terminal would run control sequences in the answer; a pipe gets the exact text.
                 if std::io::stdout().is_terminal() {
-                    println!("{}", visible(&report.final_text));
+                    print_line(&visible(&report.final_text));
                 } else {
-                    println!("{}", report.final_text);
+                    print_line(&report.final_text);
                 }
             }
             let usage = &report.usage;
@@ -213,10 +213,16 @@ fn write_line(value: &impl serde::Serialize) {
     let Ok(line) = serde_json::to_string(value) else {
         return;
     };
+    print_line(&line);
+}
+
+/// Print `text` and a newline on stdout, unlike `println!` without panicking when stdout is
+/// closed.
+fn print_line(text: &str) {
     let mut out = std::io::stdout().lock();
     // A closed stdout (for example a consumer that exited) leaves nobody to report to; the run
     // continues and the exit code still tells the scheduler how it ended.
-    let _ = writeln!(out, "{line}").and_then(|()| out.flush());
+    let _ = writeln!(out, "{text}").and_then(|()| out.flush());
 }
 
 /// Writes every event as one JSON line on stdout.
@@ -233,89 +239,23 @@ impl EventSink for JsonlEvents {
     }
 }
 
-/// Short progress lines on stderr. Tool names, arguments and errors come from the model or
-/// the server, so they are escaped like chat output.
+/// Short progress lines on stderr, printed like chat's; the answer is printed with the report.
 struct TextProgress;
 
 impl EventSink for TextProgress {
     fn emit(&self, event: &Event) {
-        match &event.event {
-            AgentEvent::ToolExecutionStart { tool_name, args, .. } => {
-                eprintln!(
-                    "[tool] {} {}",
-                    visible(tool_name),
-                    visible(&clip(&args.to_string(), 300))
-                );
+        if let AgentEvent::MessageEnd {
+            message: Message::Assistant(message),
+            ..
+        } = &event.event
+        {
+            if let Some(error) = &message.error_message {
+                eprintln!("[model] {:?}: {}", message.stop_reason, visible(error));
+            } else if message.stop_reason == StopReason::Length {
+                eprintln!("[model] Length: the response hit the output token limit");
             }
-            AgentEvent::ToolExecutionEnd {
-                tool_name,
-                is_error,
-                duration_ms,
-                ..
-            } => {
-                let status = if *is_error { "error" } else { "ok" };
-                let duration = duration_ms.map(|ms| format!(" {ms}ms")).unwrap_or_default();
-                eprintln!("[tool] {} -> {status}{duration}", visible(tool_name));
-            }
-            AgentEvent::MessageEnd {
-                message: Message::Assistant(message),
-                ..
-            } => {
-                if let Some(error) = &message.error_message {
-                    eprintln!("[model] {:?}: {}", message.stop_reason, visible(error));
-                } else if message.stop_reason == StopReason::Length {
-                    eprintln!("[model] Length: the response hit the output token limit");
-                }
-            }
-            AgentEvent::RetryScheduled {
-                attempt,
-                max_retries,
-                delay_ms,
-                error,
-            } => {
-                eprintln!("[retry] {attempt}/{max_retries} in {delay_ms}ms: {}", visible(error));
-            }
-            AgentEvent::CompactionStart { input_bytes, .. } => {
-                eprintln!("[compact] summarizing {input_bytes} context bytes")
-            }
-            AgentEvent::CompactionEnd {
-                input_bytes,
-                output_bytes,
-                ..
-            } => eprintln!("[compact] {input_bytes} -> {output_bytes} context bytes"),
-            AgentEvent::CompactionFailed { error, .. } => eprintln!("[compact] {}", visible(error)),
-            AgentEvent::ToolCallRecovered {
-                tool_call_id,
-                tool_name,
-                state,
-            } => eprintln!(
-                "[recover] {} {}: {}",
-                visible(tool_name),
-                visible(tool_call_id),
-                state.describe()
-            ),
-            AgentEvent::RunStart { .. }
-            | AgentEvent::RunEnd { .. }
-            | AgentEvent::AgentStart { .. }
-            | AgentEvent::TurnStart { .. }
-            | AgentEvent::RequestStart { .. }
-            | AgentEvent::MessageStart { .. }
-            | AgentEvent::MessageUpdate { .. }
-            | AgentEvent::MessageEnd { .. }
-            | AgentEvent::ToolDecision { .. }
-            | AgentEvent::ApprovalRequested { .. }
-            | AgentEvent::ApprovalResolved { .. }
-            | AgentEvent::TurnEnd { .. }
-            | AgentEvent::AgentEnd { .. }
-            | AgentEvent::ContextEdited { .. }
-            | AgentEvent::HookFailed { .. } => {}
+        } else if let Some(line) = progress_line(&event.event) {
+            eprintln!("{line}");
         }
-    }
-}
-
-fn clip(text: &str, max_chars: usize) -> String {
-    match text.char_indices().nth(max_chars) {
-        Some((index, _)) => format!("{}...", &text[..index]),
-        None => text.to_string(),
     }
 }

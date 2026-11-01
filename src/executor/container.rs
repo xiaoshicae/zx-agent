@@ -27,6 +27,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::capture::{finish_reader, spawn_reader, stop_child, take_capture};
 use super::{Captured, CommandEnd, CommandOutput, Executor, ShellCommand};
+use crate::agent::ExecutionMode;
 use crate::sync::AbortOnDrop;
 
 /// Longest wait for a new container to accept commands.
@@ -212,6 +213,8 @@ impl Target {
 pub struct ContainerExecutor {
     target: Target,
     image: String,
+    /// The shell of the configuration, checked at start; commands always run with it.
+    shell: String,
     platform: Platform,
     /// Taken by one command or file read at a time, because a sweep stops every process of
     /// the command user. Shared (`Arc`) with the cleanup task of a dropped run, which outlives
@@ -273,6 +276,7 @@ impl ContainerExecutor {
         Ok(Self {
             target,
             image: config.image,
+            shell: config.shell,
             platform,
             turn: Arc::new(tokio::sync::Mutex::new(())),
             _client: client,
@@ -307,6 +311,11 @@ fn not_started() -> CommandOutput {
 
 #[async_trait]
 impl Executor for ContainerExecutor {
+    /// One call at a time: see `turn`.
+    fn execution_mode(&self) -> ExecutionMode {
+        ExecutionMode::Sequential
+    }
+
     async fn run(&self, request: &ShellCommand<'_>, cancel: &CancellationToken) -> Result<CommandOutput, String> {
         // Declared before `cleanup`, so that a dropped run releases its turn only after the
         // cleanup task has been queued for the next one.
@@ -318,9 +327,13 @@ impl Executor for ContainerExecutor {
         // An earlier run that was dropped may have left processes whose sweep is still queued.
         self.target.sweep().await;
         // Commands never inherit the agent's environment, so `hidden_env` has nothing to remove.
-        let mut command = self
-            .target
-            .exec(Some(request.cwd), RUN, "zx-agent-run", [request.shell, request.command]);
+        // The shell is the one the start-up probe found, whatever the tool was configured with.
+        let mut command = self.target.exec(
+            Some(request.cwd),
+            RUN,
+            "zx-agent-run",
+            [self.shell.as_str(), request.command],
+        );
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = command
             .spawn()

@@ -12,11 +12,12 @@
   - 文件化的 `troubleshoot` 与 `assistant` profile；显式 CLI 参数覆盖、deny 累加
   - 项目 `AGENTS.md` 和显式上下文文件；`read_skill` 按需读取登记的 skill 正文
   - `bash` 与 `read_file` 工具
+  - 可选的离线容器执行（`--execution container`）：bash 与 read_file 在无网络、工作目录只读的 Docker 容器中逐个执行，见[容器执行](#容器执行)
   - 可选的自动 / 手动压缩：摘要引用源条目，原始历史保留
   - 长工具结果脱敏后落盘，`read_output` 按 UUID 分页读取
   - 声明式命令策略
   - 结构化错误分类与自动重试
-  - 可选的轮次上限与时间上限；无人值守默认值集中在 `troubleshoot` 预设
+  - 可选的轮次上限与时间上限；无人值守默认值集中在 `troubleshoot` profile
   - 只追加的会话记录：默认存为 JSONL 文件（可续跑，同一时间只有一个写入者），也可经 `SessionLog` 存到数据库等其他位置
   - JSONL 事件流输出，流式工具参数携带调用 ID
   - 可配置的截断续写（`run` 默认续写 1 次）
@@ -24,7 +25,7 @@
   - 对 bash 命令隐藏 API key 所在的环境变量
   - 系统提示词记录在对话中，恢复会话时只追加有变化的段落
   - 运行 future 被丢弃时取消后台请求、定时任务和工具子进程组
-- **尚未实现**：容器执行、插件与 MCP、其他 provider。详见[路线图](docs/ROADMAP.md)。
+- **尚未实现**：插件与 MCP、其他 provider。详见[路线图](docs/ROADMAP.md)。
 
 ## 快速开始
 
@@ -186,15 +187,15 @@ dir = "/data/sessions"      # 会话文件位于 <dir>/slack/<频道>/<线程>.j
 | `--max-turns` | profile：`run`（troubleshoot）为 30，`chat`（assistant）不限 | 本次运行的模型请求次数上限，失败的尝试也计入；`chat` 中为每轮上限 |
 | `--timeout-secs` | profile：`run`（troubleshoot）为 900，`chat`（assistant）为 0 | 整次运行的时间上限，0 表示不限制；`chat` 中为每轮上限 |
 | `--approval-timeout-secs` | 120 | 仅 `chat`：审批请求等待 `/approve` 或 `/deny` 的秒数，至少为 1。超时按拒绝处理，任务继续，REPL 立即提示该请求已过期 |
-| `--tool-timeout-secs` | 120 | bash 命令的默认超时。模型可以通过工具参数 `timeout_secs` 为单条命令申请更长时间，上限为本参数与 600 秒中较大的一个；整次运行仍受 `--timeout-secs` 限制 |
-| `--idle-timeout-secs` | 120 | 等待响应头，或两段流数据之间的最长等待时间 |
+| `--tool-timeout-secs` | 120 | bash 命令的默认超时，至少为 1。模型可以通过工具参数 `timeout_secs` 为单条命令申请更长时间，上限为本参数与 600 秒中较大的一个；整次运行仍受 `--timeout-secs` 限制 |
+| `--idle-timeout-secs` | 120 | 等待响应头，或两段流数据之间的最长等待时间，至少为 1 |
 | `--max-retries` | 3 | 遇到临时性错误时的重试次数 |
 | `--continue-on-length` | profile：`run`（troubleshoot）为 1 | 仅 `run`。回答因输出 token 上限被截断时，自动请模型续写的次数。每次续写都计入 `--max-turns`；设为 0 时直接以退出码 6 结束 |
 | `--max-tokens` | 无（由服务端决定） | 每次回复的输出 token 上限。推理模型的推理部分也计入这个上限，设得太小时回答可能为空 |
 | `--max-response-bytes` | 16777216（16 MiB） | 每次模型请求的流式响应字节上限，包含 SSE 封装与推理内容 |
 | `--max-sse-event-bytes` | 1048576（1 MiB） | 单个 SSE 事件的字节上限，包含封装；累计多行和未换行的数据也受限制 |
 | `--session` | 无（只保存在内存） | 会话文件路径。文件不存在则创建；已存在则在原有对话上继续 |
-| `--output` | `text` | `text`：进度输出到 stderr，最终回答输出到 stdout；stdout 是终端时转义回答中的控制字符，输出到管道时保持原文。`jsonl`：每个事件一行 JSON，输出到 stdout |
+| `--output` | `text` | `text`：进度与诊断（工具、重试、摘要、恢复、钩子失败）输出到 stderr，最终回答输出到 stdout；stdout 是终端时转义回答中的控制字符，输出到管道时保持原文。`jsonl`：每个事件一行 JSON，输出到 stdout。`run` 在两种模式下遇到已关闭的 stdout（如读取方已退出）都不再写出，退出码仍由运行结果决定 |
 | `--deltas` | 关闭 | 仅用于 `jsonl`：同时输出流式的 `message_update` 事件 |
 | `--system-prompt-file` | 所选 profile 的说明 | 替换所选 profile 的说明。只在启动时读取一次，可以是管道；`chat` 的 `/new` 沿用同一内容。下文生成的段落仍会追加在末尾 |
 | `--compact-threshold-bytes` | profile：run 关闭，chat 262144 | 自动摘要的序列化上下文字节阈值；0 关闭，非零值须大于 profile 的保留预算 |
@@ -204,7 +205,7 @@ dir = "/data/sessions"      # 会话文件位于 <dir>/slack/<频道>/<线程>.j
 
 表中标注 profile 的默认值取自所选 profile，命令行显式传入时覆盖；`run --help` 与 `chat --help` 不再显示固定默认值。
 
-重试优先依据结构化的 HTTP 状态和错误码。服务端数值秒形式的 `Retry-After` 会参与退避计算，仍受 `RetryPolicy::max_delay` 约束（默认 60 秒）；HTTP 日期形式和无效提示使用本地退避。未提供结构化元数据的 provider 保留错误文本判断。服务端以 `stop`、`end`、`length`、`tool_calls`、`function_call` 以外的 `finish_reason` 结束回答时（如 `content_filter`），按 provider 错误处理，错误码为该取值，不重试；这组正常取值与 pi 的 `openai-completions.ts` 相同。以 `stop` 或 `end` 结束但带工具调用时按工具调用处理，以兼容这样上报的服务端。
+重试优先依据结构化的 HTTP 状态和错误码。服务端数值秒形式的 `Retry-After` 会参与退避计算，仍受 `RetryPolicy::max_delay` 约束（默认 60 秒）；HTTP 日期形式和无效提示使用本地退避。未提供结构化元数据的 provider 保留错误文本判断。服务端以 `stop`、`end`、`length`、`tool_calls`、`function_call` 以外的 `finish_reason` 结束回答时（如 `content_filter`），按 provider 错误处理，错误码为 `finish_reason:<取值>`（如 `finish_reason:content_filter`），不与可重试的错误码同名，因此不重试；这组正常取值与 pi 的 `openai-completions.ts` 相同。以 `stop` 或 `end` 结束但带工具调用时按工具调用处理，以兼容这样上报的服务端。成功状态的响应若 `Content-Type` 为 `application/json`，不按事件流解析：正文含 `error` 对象时与流内的错误对象一样报告其信息与错误码，否则按协议错误报告（服务端可能不支持流式）并附正文摘录，不重试。
 
 事件队列采用有界缓冲与背压，慢消费者会使生产者等待。达到响应或 SSE 事件上限时保留已接受的部分内容，以退出码 1 结束且不重试；确需更大响应时可显式提高对应上限。两个字节上限都必须大于零。
 
@@ -333,7 +334,7 @@ pidsLimit = 256                  # 可选，容器内进程数上限
 - 每个进程一个容器，在启动时创建；`chat` 的 `/new` 会换一个新容器。启动时检查命令不以 root 运行、镜像提供 bash 与 `cat`、`head`、`uname`，以及容器用户能读取工作目录。任一项不满足、镜像不在本地或 Docker 不可用时，以配置错误结束（退出码 2），不请求模型。
 - 隔离：无网络（`--network none`）、只读根文件系统、工作目录以只读方式挂载在同一路径、只有 `/tmp`（tmpfs）可写、去掉全部 capability、`no-new-privileges`、进程数与内存上限。命令以非 root 用户运行：`container.user` 为 UID 0 或 `root` 时报配置错误。保持容器存活的 PID 1 及其 `cat` 以去掉全部 capability 的 root 运行，命令无法向它们发信号。命令不继承 agent 的环境变量，API key 不进入容器。`<environment>` 描述容器的系统与这些限制，而不是宿主机。
 - 工作目录整体对容器只读可见，包括其中的硬链接和 `.zx-agent/outputs` 中已脱敏的工具结果。因此容器执行时，`--session` 指向的会话文件必须在工作目录之外，否则启动时报配置错误；遮蔽单个路径挡不住硬链接，也挡不住同目录中的其他会话文件。
-- 同一容器内的命令与文件读取逐条执行。每条命令执行前后，以命令用户的身份终止该用户的全部进程（`kill -1`）：超时、取消、运行被丢弃或正常结束后，命令留下的后台进程都会被终止，用 `setsid` 脱离进程组的也不例外；命令写入 `/tmp` 的内容不影响清理。被信号终止的命令报告 `128 + 信号编号` 的退出码（如 137），而不是本机执行时的 `terminated by a signal`。
+- 同一容器内的命令与文件读取逐条执行：容器执行器声明为串行，bash 与 read_file 随之声明 `Sequential`，同一批调用因此逐个检查、记录并执行，运行在其间被取消时，尚未轮到的调用在恢复时记为未执行。命令总用容器配置中、启动检查过的 shell。每条命令执行前后，以命令用户的身份终止该用户的全部进程（`kill -1`）：超时、取消、运行被丢弃或正常结束后，命令留下的后台进程都会被终止，用 `setsid` 脱离进程组的也不例外；命令写入 `/tmp` 的内容不影响清理。被信号终止的命令报告 `128 + 信号编号` 的退出码（如 137），而不是本机执行时的 `terminated by a signal`。
 - 容器随 zx-agent 进程结束而删除，进程被 SIGKILL 时也一样（容器读取的 stdin 随之关闭）。容器带 `zx-agent.session=<会话 ID>` 标签，可用 `docker ps --filter label=zx-agent.session` 查看。
 - 原生 Linux 的 Docker 保留宿主机的文件权限：默认用户 65534 只能读取对其他用户可读的文件，工作目录本身也需要可读，否则启动时报错；需要时用 `container.user` 指定其他用户。macOS 的 Docker Desktop 把挂载的文件显示为容器用户所有（2026-11-01 实测），权限位不起限制作用。
 - 在线排障所需的网络与凭据访问尚未提供，见路线图 P6。
@@ -503,7 +504,7 @@ P1 的 SDK 接口调整：静态配置移入 `LoopSpec`；`LoopConfig` 持有钩
 - `interaction::Interaction`：由宿主回答审批；内核不读取终端。
 - `agent::EventSink`：订阅事件，收到带信封的 `agent::Event`（事件本体在 `event.event`）。任何 `Fn(&Event) + Send + Sync` 都可以直接用作 sink。事件发出时，它报告的消息与编辑已写入会话；sink 只接收事件，不参与持久化。导出器可用 `AgentSession::subscribe_bounded(capacity)` 得到有界通道：通道满时丢弃新事件并计数（`EventStream::dropped()`），不阻塞运行；会话释放、已发出的事件读完后，`recv` 返回 `None`。订阅句柄不持有 sink，sink 随会话释放。
 - `session::SessionLog`：会话记录存在哪里，见下文[会话存储](#会话存储)。
-- `executor::Executor`：工具执行命令与读文件的位置。`BashTool` 与 `ReadFileTool` 的 `executor` 字段默认是 `LocalExecutor`（本机）；`run` 结束、超时或取消时须终止命令启动的全部进程，`read_file` 只读不超过上限的普通文件。`ContainerExecutor::start(ContainerConfig::new(image, workspace))` 启动[容器执行](#容器执行)所用的容器，`tools::builtin_tools_with` 用指定的执行器构造内置工具；容器随执行器释放而删除。
+- `executor::Executor`：工具执行命令与读文件的位置。`BashTool` 与 `ReadFileTool` 的 `executor` 字段默认是 `LocalExecutor`（本机）；`run` 结束、超时或取消时须终止命令启动的全部进程，`read_file` 只读不超过上限的普通文件。`execution_mode` 默认 `Parallel`；一次只能处理一个调用的执行器返回 `Sequential`，内置工具随之声明，循环就不会提前开始并记录只能排队等待的调用。`ContainerExecutor::start(ContainerConfig::new(image, workspace))` 启动[容器执行](#容器执行)所用的容器，`tools::builtin_tools_with` 用指定的执行器构造内置工具；容器随执行器释放而删除。
 - `agent::MessageQueues`：在运行期间注入引导消息或后续消息。
 - `im::ImChannel`：接入一个 IM 平台，见下文[IM 接入](#im-接入)。
 
@@ -562,18 +563,18 @@ cargo fmt --check
 | `tests/agent_loop.rs` | 循环语义：工具调用往返、并行与结果顺序、串行模式、各类失败、length 截断、轮次上限、预算用完时不开新回合且排队输入留在队列、terminate、引导与后续消息、出错与中止、provider 未发最终事件、系统提示词的记录与增量更新 |
 | `tests/runner.rs` | 重试且不重复 prompt、失败记录留在文件中、放弃不可重试的错误、轮次与时间上限、调用方取消、截断续写与拼接、最终回答只取本次运行的消息、续跑会话、恢复会话时提示词变化写入文件、先写盘再转发事件、自定义 `SessionLog` 存储的会话重新加载后继续对话、事件的编号与 ID、`run_start` / `run_end`、尝试与请求起点及其会话条目、消息与上下文编辑的条目 ID、预算用完不重试并保留错误、重试省略失败回答的 `context_edited`、无预算时排队输入留在队列、运行在观察者处理时被丢弃时排队输入只写一次 |
 | `tests/agent_session.rs` | 共享提问与 Busy、取消与 future 丢弃后复用、队列边界、订阅和退订、回调重入与 panic 隔离、模型切换、授权撤销、先写审计再多订阅分发、有界订阅按序接收、通道满时丢弃计数且不阻塞运行、会话释放后有界订阅结束 |
-| `tests/openai_mock.rs` | 本地假 HTTP 服务上的端到端测试：SSE、执行 bash、回传工具结果、认证头、HTTP 错误重试、空闲超时、中途取消后保留已输出内容 |
+| `tests/openai_mock.rs` | 本地假 HTTP 服务上的端到端测试：SSE、执行 bash、回传工具结果、认证头、HTTP 错误重试、空闲超时、中途取消后保留已输出内容、成功状态下的 JSON 正文（错误对象与整份回答） |
 | `tests/cli.rs` | 编译出的程序：退出码 0 到 6、jsonl 输出、从 stdin 读提示词、bash 读不到 API key、系统提示词的生成段落、`--system-updates inline` |
-| `tests/chat_cli.rs` | 多轮历史、审批与授权范围、审批过期后下一行作为新提问、只读命令自动放行、重置、模型切换、EOF、信号、超时、控制字符显示、恢复中断会话的提示；Unix PTY 验证运行中插话、取消后丢弃残留插话、取消重置和退出 |
+| `tests/chat_cli.rs` | 多轮历史、审批与授权范围、审批过期后下一行作为新提问、只读命令自动放行、重置、模型切换、EOF、信号、超时、控制字符显示、恢复中断会话的提示、钩子失败的提示；Unix PTY 验证运行中插话、取消后丢弃残留插话、取消重置和退出 |
 | `tests/profiles_cli.rs` | profile 覆盖、显式默认值、预算参数的 help 写明取自 profile、不可绕过的 deny、上下文范围与审计、上下文默认值与越界链接、`--system-prompt-file` 兼容、skill 懒加载与脱敏、配置错误（含 provider 参数）退出码且不建会话文件 |
-| `tests/run_cli.rs` | `run` 在 P0 之后新增的约定：进度与报告行转义终端控制字符；另一个 `run` 正在写的会话文件不能再被打开写入；JSONL 事件的信封（原有 `run` 测试仍在 `tests/cli.rs`） |
+| `tests/run_cli.rs` | `run` 在 P0 之后新增的约定：进度与报告行转义终端控制字符；另一个 `run` 正在写的会话文件不能再被打开写入；JSONL 事件的信封；为零的超时在请求前被拒绝；stdout 已关闭时退出码仍由运行结果决定（原有 `run` 测试仍在 `tests/cli.rs`） |
 | `tests/session_compaction.rs`、`tests/compaction.rs` | v1/v2 追加升级、分支和引用、原始投影、省略保留边界后摘要仍生效、编辑摘要的变换计划在写入前被拒绝、摘要失败与取消、请求 / 用量预算、超时和上限 |
 | `tests/request_audit.rs` | 每次任务与摘要请求可从会话文件还原、配置只在变化时追加、旧会话首次请求前升级、与投影不一致的请求不记录、固定会话文件的还原结果不变（版本守护） |
-| `tests/executor.rs` | 执行器接缝：bash 与 read_file 只经自身执行器运行命令和读文件，命令的 6 种结束方式均正确报告 |
-| `tests/container.rs` | 容器执行：用假 docker 程序验证启动参数与失败报告、命令与读文件的转发、超时 / 取消 / 丢弃后的清理、CLI 接线与配置错误；设置 `ZX_DOCKER_TEST_IMAGE` 时另对真实 Docker 验证用户、只读工作目录与无网络、命令进程树与 `setsid` 子进程的终止、清理不受命令写入影响、命令逐条执行、容器内读文件、chat 中 Ctrl-C 后容器仍在、zx-agent 正常结束或被 SIGKILL 后容器删除（CI 在 Linux 上用 `debian:bookworm-slim` 运行）；另验证 root 用户与工作目录内的会话文件被拒绝 |
+| `tests/executor.rs` | 执行器接缝：bash 与 read_file 只经自身执行器运行命令和读文件，命令的 6 种结束方式均正确报告，执行方式随执行器 |
+| `tests/container.rs` | 容器执行：用假 docker 程序验证启动参数与失败报告、命令与读文件的转发、超时 / 取消 / 丢弃后的清理、工具逐个执行（排队的调用在取消后记为未执行）、命令用配置的 shell、启动失败不留会话文件、CLI 接线与配置错误；设置 `ZX_DOCKER_TEST_IMAGE` 时另对真实 Docker 验证用户、只读工作目录与无网络、命令进程树与 `setsid` 子进程的终止、清理不受命令写入影响、命令逐条执行、容器内读文件、chat 中 Ctrl-C 后容器仍在、zx-agent 正常结束或被 SIGKILL 后容器删除（CI 在 Linux 上用 `debian:bookworm-slim` 运行）；另验证 root 用户与工作目录内的会话文件被拒绝 |
 | `tests/crash_recovery.rs` | 内置工具的副作用声明、开始记录先于执行（串行与并行批次）、中断批次的四种恢复结果且不重放、失败或取消的回答中的调用记为未执行、恢复事件在结果写入之后、旧格式会话、丢弃 future 后的同进程恢复、`run` 的 `[recover]` 输出；Unix 上 SIGKILL 掉正在执行命令的 `run`，再由下一次 `run` 恢复且不重放 |
 | `tests/output_store.rs` | 先脱敏后落盘、UUID 边界、文件权限、UTF-8 分页、容量、取消、写盘失败或超时时保留内联结果、目录越界与 `.gitignore` |
-| `tests/hooks.rs`、`tests/hooks_cli.rs` | 钩子组合与失败处理、审批范围与取消、审计变换、输入钩子被取消或运行被丢弃时不写入输入且插话留在队列、策略结论与审批事件（询问、会话内授权、拒绝、失败、超时、取消、等待时长）、观察者默认跳过增量、钩子上下文（会话、运行、工作目录与取消信号）、具名钩子、按阶段执行与先注册的脱敏仍在扩展之后、重名或声明名不一致的工具在请求前被拒绝、工具元数据 panic 时运行失败、`observes` 的 panic 被报告且运行继续、钩子不能追加 system 消息、工具取消自己的令牌不影响运行、续写预算、工具输出脱敏的 CLI 接线 |
+| `tests/hooks.rs`、`tests/hooks_cli.rs` | 钩子组合与失败处理、审批范围与取消、审计变换、输入钩子被取消或运行被丢弃时不写入输入且插话留在队列、策略结论与审批事件（询问、会话内授权、拒绝、失败、超时、取消、等待时长）、观察者默认跳过增量、钩子上下文（会话、运行、工作目录与取消信号）、具名钩子、按阶段执行与先注册的脱敏仍在扩展之后、重名或声明名不一致的工具在请求前被拒绝、工具元数据 panic 时运行失败、`observes` 的 panic 被报告且运行继续、钩子不能追加 system 消息、工具取消自己的令牌不影响运行、续写预算、工具输出脱敏的 CLI 接线、脱敏失败在文本输出中的提示 |
 | `tests/hook_contract.rs` | 钩子输入输出的 JSON 契约：策略结论、回合决定、上下文编辑、审批及其请求、工具输出与调用、钩子上下文、回合摘要 |
 | `tests/real_api.rs` | 真实模型 API（付费，默认跳过）：文本回答与用量、工具往返、策略拒绝、输出截断、恢复会话、无效 key 不重试 |
 

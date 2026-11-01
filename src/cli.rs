@@ -245,12 +245,12 @@ pub(crate) enum ExecutionArg {
 
 #[derive(Args)]
 pub(crate) struct TransportArgs {
-    /// Default bash command timeout, in seconds.
-    #[arg(long, default_value_t = 120)]
+    /// Default bash command timeout, in seconds; at least 1.
+    #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..))]
     pub(crate) tool_timeout_secs: u64,
 
-    /// Longest wait for response headers or the next stream chunk, in seconds.
-    #[arg(long, default_value_t = 120)]
+    /// Longest wait for response headers or the next stream chunk, in seconds; at least 1.
+    #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..))]
     pub(crate) idle_timeout_secs: u64,
 
     /// Retries for transient provider errors.
@@ -379,8 +379,8 @@ pub(crate) fn read_instructions(base: &BaseArgs) -> Result<Option<String>> {
 }
 
 /// Startup reads, short session appends and, in container mode, starting the container
-/// precede the run. Configuration errors are reported before the session file is created;
-/// only starting the container follows it, so that the container can hide the file.
+/// precede the run. Configuration errors and a container that cannot start are reported
+/// before a new session file is created.
 pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSession> {
     let cwd = match &options.base.cwd {
         Some(path) => path
@@ -529,21 +529,19 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
         );
     }
     let header = SessionHeader::new(&cwd, options.model);
-    let session = match options.file {
-        SessionFile::Memory => SessionStore::in_memory(header),
-        SessionFile::Open(path) if path.exists() => SessionStore::open(path)?,
-        SessionFile::Open(path) | SessionFile::Create(path) => SessionStore::create(path, header)?,
+    // An existing session is opened first, for its ID. A new one is created only after the
+    // container, if any, has started, so that a failed start leaves no session file behind.
+    let opened = match options.file {
+        SessionFile::Open(path) if path.exists() => Some(SessionStore::open(path)?),
+        SessionFile::Memory | SessionFile::Open(_) | SessionFile::Create(_) => None,
     };
-    if session.recovered_tail_bytes() > 0 {
-        eprintln!(
-            "[session] recovered incomplete final record; removed {} bytes",
-            session.recovered_tail_bytes()
-        );
-    }
+    let session_id = opened
+        .as_ref()
+        .map_or_else(|| header.id.clone(), |session| session.header().id.clone());
     let (executor, environment): (Arc<dyn Executor>, String) = match profile.execution {
         Execution::Local => (Arc::new(LocalExecutor), environment_section(&cwd)),
         Execution::Container => {
-            let config = container_config(&profile.container, &cwd, &session.header().id)?;
+            let config = container_config(&profile.container, &cwd, &session_id)?;
             let user = config.user.clone();
             let container = ContainerExecutor::start(config)
                 .await
@@ -552,6 +550,17 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
             (Arc::new(container), environment)
         }
     };
+    let session = match (opened, options.file) {
+        (Some(session), _) => session,
+        (None, SessionFile::Memory) => SessionStore::in_memory(header),
+        (None, SessionFile::Open(path) | SessionFile::Create(path)) => SessionStore::create(path, header)?,
+    };
+    if session.recovered_tail_bytes() > 0 {
+        eprintln!(
+            "[session] recovered incomplete final record; removed {} bytes",
+            session.recovered_tail_bytes()
+        );
+    }
 
     // Commands must not inherit the key: `env` would put it into the session file and the context.
     let hidden_env: Vec<String> = std::iter::once(options.base.api_key_env.clone())

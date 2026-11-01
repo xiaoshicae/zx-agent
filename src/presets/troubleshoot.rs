@@ -1,4 +1,5 @@
-//! The unattended troubleshooting preset used by `zx-agent run`.
+//! The unattended troubleshooting preset: the defaults of the `troubleshoot` profile, which
+//! `zx-agent run` uses.
 
 use std::time::Duration;
 

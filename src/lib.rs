@@ -30,6 +30,8 @@ pub mod prompt;
 pub mod runner;
 pub mod session;
 mod sync;
+#[doc(hidden)]
+pub mod text;
 pub mod tools;
 
 pub use agent_session::AgentSession;

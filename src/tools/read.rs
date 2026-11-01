@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::truncate::{MAX_BYTES, MAX_LINES, truncate_head};
-use crate::agent::{Effects, Tool, ToolContext, ToolOutput};
+use crate::agent::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
 use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
 
@@ -44,6 +44,11 @@ struct Args {
 impl Tool for ReadFileTool {
     fn name(&self) -> &str {
         super::READ_FILE
+    }
+
+    /// The mode of the executor: calls run one at a time when it handles one at a time.
+    fn execution_mode(&self) -> ExecutionMode {
+        self.executor.execution_mode()
     }
 
     fn effects(&self) -> Effects {
