@@ -2,7 +2,7 @@
 
 一个用 Rust 编写的通用 agent 内核，目标是让同一个内核支撑人机对话、无人值守运行和被其他程序嵌入。场景之间的差异将通过 profile（提示词、工具、规则、上限）和插件表达，不改内核。整体架构参考 [pi](https://github.com/earendil-works/pi)（commit `a92283056`）：分层方式、循环语义和会话文件格式都沿用 pi 的设计；与 pi 不同的地方列在[与 pi 的差异](#与-pi-的差异)一节。
 
-当前版本为 v0.1.0，已实现无人值守的 `run`、终端对话 `chat`、TOML profile、项目上下文与按需加载的 skills。嵌入协议 `acp` 和插件按[路线图](docs/ROADMAP.md)分阶段推进。
+当前版本为 v0.1.0，已实现无人值守的 `run`、终端对话 `chat`、TOML profile、项目上下文、按需 skills 与上下文管理。嵌入协议 `acp` 和插件按[路线图](docs/ROADMAP.md)分阶段推进。
 
 - **已具备**：
   - OpenAI 兼容的流式 provider，带事件队列、SSE 事件与响应大小上限
@@ -12,6 +12,8 @@
   - 文件化的 `troubleshoot` 与 `assistant` profile；显式 CLI 参数覆盖、deny 累加
   - 项目 `AGENTS.md` 和显式上下文文件；`read_skill` 按需读取登记的 skill 正文
   - `bash` 与 `read_file` 工具
+  - 可选的自动 / 手动压缩：摘要引用源条目，原始历史保留
+  - 长工具结果脱敏后落盘，`read_output` 按 UUID 分页读取
   - 声明式命令策略
   - 结构化错误分类与自动重试
   - 可选的轮次上限与时间上限；无人值守默认值集中在 `troubleshoot` 预设
@@ -22,7 +24,7 @@
   - 对 bash 命令隐藏 API key 所在的环境变量
   - 系统提示词记录在对话中，恢复会话时只追加有变化的段落
   - 运行 future 被丢弃时取消后台请求、定时任务和工具子进程组
-- **尚未实现**：插件与 MCP、上下文压缩、其他 provider。详见[路线图](docs/ROADMAP.md)。
+- **尚未实现**：容器执行、插件与 MCP、其他 provider。详见[路线图](docs/ROADMAP.md)。
 
 ## 快速开始
 
@@ -59,7 +61,7 @@ zx-agent chat --model "$ZX_MODEL" --session ./chat.jsonl
 | `/help` | 查看命令 |
 | `/model`、`/model <id>` | 查看模型，或空闲时切换同一 provider 的模型，保留历史 |
 | `/new` | 创建新会话，清空历史和授权；运行中先取消任务。启用文件会话时在同目录创建唯一新文件，保留旧日志 |
-| `/compact` | 提示压缩尚未实现，计划在 P5 加入 |
+| `/compact` | 请求模型压缩旧上下文，保留原始日志；没有可压缩范围时不发请求。运行中拒绝重叠调用 |
 | `/quit` | 取消当前任务并退出 |
 | Ctrl+C | 取消当前任务或审批，继续保留会话；空闲时保持会话 |
 | EOF、SIGTERM | EOF 结束会话，管道中的正常任务先完成；待审批时 EOF 拒绝并取消。SIGTERM 取消并退出 |
@@ -74,7 +76,9 @@ chat 中的 bash 调用先经过原命令策略，再显示完整工具名、参
 
 `once` 只允许当前调用，`session` 只复用完全相同的工具名与参数；命令策略的 Deny 始终优先。取消、超时后的旧编号不能批准新请求。审批默认超时 120 秒；未收到答案不会执行工具。模型文本和诊断中的 ESC、回车及双向控制字符按字面显示，保留正常换行和制表符。
 
-`/quit` 和正常 EOF 退出码为 0；参数或配置错误、读取终端输入失败为 2，超限或无效 UTF-8 的输入行只会被丢弃，不会退出；SIGTERM 为 5。单轮模型或预算错误会报告后继续对话，JSONL 消费者可读取每轮报告的 `outcome`。这是逐行 REPL，尚未提供历史行编辑或完整 TUI。
+`assistant` 默认在上下文超过 256 KiB 时自动压缩，`troubleshoot` 默认关闭。自动摘要消耗一次请求预算并统计用量；`/compact` 使用独立的有界请求并报告结果。可用 `--no-auto-compact` 禁用自动摘要，或 `--compact-threshold-bytes` 修改字节阈值。该阈值不是模型 token 窗口的保证；摘要有信息损失风险，引用校验也不证明事实正确。配置、审计和边界见[上下文管理](docs/PROFILES.md#上下文管理)。
+
+TTY 中手动压缩时可暂存一个普通输入，完成后自动执行；Ctrl+C 取消压缩并明确清除暂存输入。`/model` 等待空闲，`/new` 与 `/quit` 和正常 EOF 退出码为 0；参数或配置错误、读取终端输入失败为 2，超限或无效 UTF-8 的输入行只会被丢弃，不会退出；SIGTERM 为 5。单轮模型或预算错误会报告后继续对话，JSONL 消费者可读取每轮报告的 `outcome`。这是逐行 REPL，尚未提供历史行编辑或完整 TUI。
 
 ### 场景配置
 
@@ -124,7 +128,7 @@ echo "exit code: $?"
 | `--base-url` | `https://api.openai.com/v1`，或环境变量 `ZX_BASE_URL` | OpenAI 兼容地址 |
 | `--api-key-env` | `OPENAI_API_KEY` | 存放 API key 的**环境变量名**。key 不接受命令行传入，避免在进程列表中暴露 |
 | `--system-updates` | `collapse` | 恢复会话时，提示词的变化怎样发给模型。`collapse`：合并进开头的 system 消息，兼容不接受对话中途 system 消息的服务端；`inline`：在变化发生的位置发送，保持此前的请求前缀，便于服务端复用提示词缓存，模型也能看出提示词从哪里开始变化，但要求服务端接受对话中途的 system 消息，使用前需确认 |
-| `--tools` | `bash,read_file` | 启用的工具 |
+| `--tools` | profile：`bash,read_file,read_output`，有目录时加入 `read_skill` | 显式传入时替换工具集合；仅启用 `read_output` 时安装长结果落盘钩子 |
 | `--cwd` | 当前目录 | 工具的工作目录，同时写入 `<environment>` |
 | `--allow-cmd` / `--deny-cmd` | 无 | bash 命令白名单前缀 / 额外的拒绝子串，均可重复 |
 | `--max-turns` | 30 | 本次运行的模型请求次数上限，失败的尝试也计入 |
@@ -140,6 +144,8 @@ echo "exit code: $?"
 | `--output` | `text` | `text`：进度输出到 stderr，最终回答输出到 stdout；`jsonl`：每个事件一行 JSON，输出到 stdout |
 | `--deltas` | 关闭 | 仅用于 `jsonl`：同时输出流式的 `message_update` 事件 |
 | `--system-prompt-file` | 内置排障说明 | 替换内置的排障说明。下文的 `<environment>` 和 `<command_policy>` 两段仍会追加在末尾 |
+| `--compact-threshold-bytes` | profile：run 关闭，chat 262144 | 自动摘要的序列化上下文字节阈值；0 关闭，非零值须大于 profile 的保留预算 |
+| `--no-auto-compact` | 关闭 | 禁用自动摘要，与上项互斥；保留手动 `/compact` |
 
 重试优先依据结构化的 HTTP 状态和错误码。服务端数值秒形式的 `Retry-After` 会参与退避计算，仍受 `RetryPolicy::max_delay` 约束（默认 60 秒）；HTTP 日期形式和无效提示使用本地退避。旧会话和未提供结构化元数据的 provider 保留错误文本判断。
 
@@ -246,6 +252,7 @@ CLI (main.rs + cli.rs + chat/)
 - `read_file` 不受命令白名单约束，可以读取进程有权限读取的普通文件。需要限制时，使用 `--tools bash` 关闭它。
 - 项目上下文（`AGENTS.md`、`--context-file` 与 profile 中的上下文文件）会进入系统提示词并发送给模型服务方，可能引导模型的行为。自动发现的 `AGENTS.md` 不能通过符号链接指向项目外；在不可信仓库中运行时，建议使用 `--no-context`。
 - `run` 和 `chat` 在 `after_tool` 中将认证 API key 的完整字面值替换为 `[REDACTED]`，处理后的结果才会写入会话、事件并回传模型。SDK 可用 `RedactSecrets` 显式配置其他密钥；过滤器失败时丢弃原始输出，返回错误结果。
+- 长工具结果的文件同样在脱敏后写入，Unix 新目录 / 文件权限为 0700 / 0600；结果目录默认 `.zx-agent/outputs`，不会自动删除。保存的是工具已经截断的结果，详见[工具结果落盘](docs/PROFILES.md#工具结果落盘)。
 - 该过滤不识别未知密钥、编码或拆分后的密钥，也不处理用户输入、模型输出和工具调用参数。这些内容及工具输出中的其他敏感数据仍可能进入模型请求、会话和事件；请控制会话文件访问权限。
 - 认证 key 只从环境变量读取；bash 命令启动前删除 `--api-key-env` 指定的变量。但工具与 agent 以同一系统用户运行，仍可能通过其他途径读取凭证。需要隔离时，请以不同账号或在容器中运行。
 - 除 `--api-key-env` 指定的变量外，其他环境变量（如云厂商凭证）bash 命令仍然可以读到。需要时请在启动 zx-agent 前清理环境变量。
@@ -254,7 +261,7 @@ CLI (main.rs + cli.rs + chat/)
 
 ### 事件（`--output jsonl`）
 
-每行一个事件。`type` 的取值有：`agent_start`、`turn_start`、`message_start`、`message_update`（需加 `--deltas`）、`message_end`（包括 system 消息）、`tool_execution_start`、`tool_execution_end`、`turn_end`、`agent_end`、`retry_scheduled`、`context_edited`、`hook_failed`。`run` 最后一行、`chat` 每轮最后一行是汇总：
+每行一个事件。`type` 的取值有：`agent_start`、`turn_start`、`message_start`、`message_update`（需加 `--deltas`）、`message_end`（包括 system 消息）、`tool_execution_start`、`tool_execution_end`、`turn_end`、`agent_end`、`retry_scheduled`、`context_edited`、`hook_failed`、`compaction_start`、`compaction_end`、`compaction_failed`。压缩事件带 `automatic`；成功事件包含条目 ID、前后字节数与用量。手动 `/compact` 另发 `compaction_report`，不产生任务回答或 `run_end`。`run` 最后一行、`chat` 每轮最后一行是汇总：
 
 ```json
 {"type":"run_end","report":{"outcome":"completed","finalText":"## Summary ...","turns":3,"retries":0,"usage":{"input":1200,"output":300,"cacheRead":0,"totalTokens":1500},"sessionFile":"/var/log/zx-agent/run.jsonl"}}
@@ -271,18 +278,20 @@ CLI (main.rs + cli.rs + chat/)
 第一行是头部，之后每行一个条目，条目之间通过 `parentId` 连成一棵树：
 
 ```json
-{"type":"session","version":2,"id":"…","timestamp":1761700000000,"cwd":"/srv","model":"…"}
+{"type":"session","version":3,"id":"…","timestamp":1761700000000,"cwd":"/srv","model":"…"}
 {"type":"message","id":"f0e1d2c3","parentId":null,"timestamp":…,"message":{"role":"system","sections":[{"name":"preamble","content":"…"},{"name":"environment","content":"…"}],"timestamp":…}}
 {"type":"message","id":"a1b2c3d4","parentId":"f0e1d2c3","timestamp":…,"message":{"role":"user","content":"…","timestamp":…}}
 {"type":"message","id":"b2c3d4e5","parentId":"a1b2c3d4","timestamp":…,"message":{"role":"assistant","stopReason":"error","errorMessage":"HTTP 503: …",…}}
 {"type":"context_edit","id":"c3d4e5f6","parentId":"b2c3d4e5","timestamp":…,"targetId":"b2c3d4e5","replacement":null}
 ```
 
-`context_edit` 不能指向 system 消息：提示词的变化只能以新的 system 消息记录。版本 1 的文件（头部带 `systemPrompt`）仍可打开，下次运行会把提示词作为 system 消息补进对话。
+`context_edit` 不能指向 system 或合成摘要消息：提示词变化以新的 system 消息记录，摘要通过新压缩生成。修正被摘要引用的原消息会使该摘要失效，投影回到已应用修正的原始记录。版本 1 的文件（头部带 `systemPrompt`）仍可打开，下次运行会把提示词作为 system 消息补进对话。
 
 如果进程在写入最后一行时崩溃，未换行且确实未完成的尾记录会在下次打开时截掉，包括截断在 UTF-8 字符中间的情况。写入失败（如磁盘已满）后不再写入，因此留下的残缺同样只在文件末尾，按同一规则修复。CLI 会在 stderr 报告修复；库调用方可读取 `SessionStore::recovered_tail_bytes()`。完整记录缺少末尾换行时会补换行；已换行的损坏记录、未知记录类型和完整记录的字段错误会报错并保留文件。
 
-会话格式仍为版本 2。`providerError` 是可选消息字段；续写请求增加可选的 `kind: "continueAnswer"`，报告据此拼接答案。普通 user 消息的 JSON 不变，旧文件缺少 `kind` 时按普通输入处理。
+新建会话格式为 v3，兼容读取 v1/v2。旧文件首次压缩前追加 `format_upgrade`，不改写头部；随后追加 `compaction_started`，请求完成后追加 `compaction` 或 `compaction_failed`。未完成或失败记录不改变投影；成功记录保留全部 system、结构化摘要及 `firstKeptEntryId` 之后的原消息，原始历史仍可审计。摘要来源是应用过 `context_edit` 的原始投影，不输入旧摘要。
+
+`providerError` 仍是可选消息字段；续写请求可带 `kind: "continueAnswer"`，报告据此拼接答案。普通 user 消息的 JSON 不变，旧文件缺少 `kind` 时按普通输入处理。
 
 ## 作为库使用
 
@@ -297,7 +306,7 @@ let agent = AgentSession::new(config, RetryPolicy::default(), Limits::default(),
 let report = agent.prompt("任务描述").await?;
 ```
 
-`Limits::default()` 不限制轮次和运行时间；`LoopConfig::new` 默认没有钩子，不自动续写。
+`Limits::default()` 不限制轮次和运行时间；`LoopConfig::new` 默认没有钩子，不自动续写、压缩或落盘工具结果。
 需要排障预设时，设置 `config.hooks = presets::troubleshoot::hooks()`，并传入 `presets::troubleshoot::limits()`；再注册命令策略与脱敏钩子。排障说明位于 `presets::troubleshoot::INSTRUCTIONS`。
 `examples/library.rs` 演示了这一预设的完整用法。需要外部取消令牌时使用 `prompt_with_cancel(task, &cancel).await?`。
 
@@ -307,6 +316,7 @@ P2 增加 `zx_agent::AgentSession`；已有 `Runner` 可通过 `AgentSession::fr
 | API | 契约 |
 |---|---|
 | `prompt`、`prompt_with_cancel` | 返回 `Result<RunReport, SessionError>`；重叠调用立即返回 `Busy`，不排队。provider、钩子和持久化失败由 `RunReport` 表达 |
+| `compact`、`compact_with_cancel` | 返回 `Result<compaction::Report, SessionError>`；与 prompt 共用独占权、Busy、取消和丢弃后复用；报告包含结果、请求数、用量、前后字节数和审计条目 ID |
 | `steer`、`follow_up` | 分别在下一次模型请求前和当前任务结束时消费，沿用原有队列 |
 | `abort` | 只取消当前运行；空闲时返回 `false`。等待当前 `prompt` 返回，或 drop 它的 future 后，可继续提问；外部父令牌不受影响 |
 | `subscribe` | 返回 `Subscription`，必须持有句柄才能继续接收事件；drop 后退订。只发送后续事件，不重放历史，已经分发的回调可能完成 |
@@ -325,6 +335,8 @@ let second = agent.prompt("结合上面的证据总结").await?;
 订阅回调同步执行，必须及时返回。单个回调 panic 会被隔离并摘除，可通过 `Subscription::has_panicked()` 或
 `AgentSession::failed_subscribers()` 查询；初始 sink 的 panic 也计数。快照分发期间不持有订阅列表锁，可在回调中取消或退订。
 运行期间由当前 `prompt` 独占持有 `Runner`，结束、panic 或 future 被丢弃时由 RAII 归还；状态锁不跨越异步等待。
+
+P5 保持原构造器兼容。自动压缩通过 `Runner::new(...).with_compaction(compaction::Config { trigger_bytes: Some(256 * 1024), ..Default::default() })?` 显式启用，再转为 `AgentSession`。手动压缩默认最多 2048 输出 token、120 秒，无可压缩范围时返回 `Noop`。SDK 落盘需显式注册同配置的 `OutputStore`、`ReadOutputTool` 和 `SpillOutputs`，写入钩子放在脱敏之后，并排除分页工具。
 
 P0 的 SDK 接口调整：`Limits::max_turns` 和 `agent::run_loop` 的轮次预算改为 `Option<u32>`。
 `None` 表示不限，`Some(0)` 表示不调用模型，原来的数值上限 `n` 改为 `Some(n)`。
@@ -381,6 +393,8 @@ cargo fmt --check
 | `tests/cli.rs` | 编译出的程序：退出码 0 到 6、jsonl 输出、从 stdin 读提示词、bash 读不到 API key、系统提示词的生成段落、`--system-updates inline` |
 | `tests/chat_cli.rs` | 多轮历史、审批与授权范围、重置、模型切换、EOF、信号、超时、控制字符显示；Unix PTY 验证运行中插话、取消重置和退出 |
 | `tests/profiles_cli.rs` | profile 覆盖、显式默认值、不可绕过的 deny、上下文范围与审计、上下文默认值与越界链接、`--system-prompt-file` 兼容、skill 懒加载与脱敏、配置错误退出码 |
+| `tests/session_compaction.rs`、`tests/compaction.rs` | v1/v2 追加升级、分支和引用、原始投影、摘要失败与取消、请求 / 用量预算、超时和上限 |
+| `tests/output_store.rs` | 先脱敏后落盘、UUID 边界、文件权限、UTF-8 分页、容量、取消和写盘失败回退 |
 | `tests/hooks.rs`、`tests/hooks_cli.rs` | 钩子组合与失败处理、审批范围与取消、审计变换、续写预算、工具输出脱敏的 CLI 接线 |
 | `tests/real_api.rs` | 真实模型 API（付费，默认跳过）：文本回答与用量、工具往返、策略拒绝、输出截断、恢复会话、无效 key 不重试 |
 

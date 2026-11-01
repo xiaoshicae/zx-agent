@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>zx-agent 通用内核技术方案（评审稿 v0.9）</title>
+<title>zx-agent 通用内核技术方案（评审稿 v0.10）</title>
 <style>
   :root {
     --ink: #1f2328; --muted: #57606a; --line: #d0d7de; --bg: #ffffff; --soft: #f6f8fa;
@@ -60,7 +60,7 @@
 <main>
 
 <h1>zx-agent 通用内核技术方案</h1>
-<p class="meta">评审稿 v0.9 · 2026年11月 · 状态：已评审，D5 待定 · 代码核对基线：commit <code>7fb3124</code>（2026-11-01）</p>
+<p class="meta">评审稿 v0.10 · 2026年11月 · 状态：已评审，D5 待定 · 代码核对基线：commit <code>7fb3124</code>（2026-11-01）</p>
 <p class="meta">本方案由 AI 辅助起草。调研来源见第 11 节；产品行为以所列版本和资料日期为准，论文结果不代表本项目实测，未核实项明确标注。</p>
 
 <div class="box key">
@@ -97,7 +97,7 @@
 <table>
   <tr><th>位置</th><th>进展与后续工作</th></tr>
   <tr><td><code>src/agent/policy.rs</code></td><td>P1 已实现 Allow / Ask / Deny 与 NoHuman，P3 已接入终端审批与请求编号验证</td></tr>
-  <tr><td><code>src/agent/agent_loop.rs</code></td><td>P1 已接入六个 Hooks；压缩策略待 P5</td></tr>
+  <tr><td><code>src/agent/agent_loop.rs</code></td><td>P1 已接入六个 Hooks；P5 通过宿主准备边界接入压缩与请求计费，循环不判断场景</td></tr>
   <tr><td><code>src/agent_session.rs</code></td><td>P2 已在 Runner 外提供共享会话 API、Busy 互斥、多个订阅者与模型切换；run 和 SDK 共用此入口</td></tr>
   <tr><td><code>src/main.rs</code></td><td>run 和 chat 已共用 AgentSession；acp 前端待 P8</td></tr>
 </table>
@@ -179,12 +179,12 @@
 </table>
 
 <h2 id="s4">4. 总体架构</h2>
-<p>第 4–9 节包含已实现接口与目标设计，后续能力按第 9 节推进。现有用法见 <a href="../README.md">README</a>，阶段状态以<a href="ROADMAP.md">路线图</a>为准。P1–P4 已落地共享会话、Hooks、宿主审批接口、chat 前端与文件化场景配置；Executor 仍按后续阶段推进。</p>
+<p>第 4–9 节包含已实现接口与目标设计，后续能力按第 9 节推进。现有用法见 <a href="../README.md">README</a>，阶段状态以<a href="ROADMAP.md">路线图</a>为准。P1–P5 已落地共享会话、Hooks、宿主审批接口、chat、文件化场景配置与上下文管理；Executor 仍按后续阶段推进。</p>
 <div class="layers">
   <div class="layer"><div class="name">前端</div><div class="items"><span class="chip keep">run：无人值守</span><span class="chip keep">chat：终端对话</span><span class="chip new">acp：编辑器 / 其他程序</span><span class="chip keep">Rust SDK</span></div></div>
   <div class="layer"><div class="name">场景配置</div><div class="items"><span class="chip keep">profile：说明 / 工具 / 规则 / 上限 / 扩展</span><span class="chip keep">上下文文件（AGENTS.md）</span><span class="chip keep">skills（按需加载）</span></div></div>
   <div class="layer"><div class="name">扩展</div><div class="items"><span class="chip new">Rust 扩展（编译期）</span><span class="chip new">MCP 客户端（子进程或 HTTP）</span><span class="chip">钩子进程（后续）</span></div></div>
-  <div class="layer"><div class="name">会话运行时</div><div class="items"><span class="chip keep">AgentSession：运行生命周期</span><span class="chip keep">持久化</span><span class="chip keep">重试</span><span class="chip keep">上限</span><span class="chip keep">审批路由</span><span class="chip new">压缩触发</span><span class="chip keep">事件分发</span></div></div>
+  <div class="layer"><div class="name">会话运行时</div><div class="items"><span class="chip keep">AgentSession：运行生命周期</span><span class="chip keep">持久化</span><span class="chip keep">重试</span><span class="chip keep">上限</span><span class="chip keep">审批路由</span><span class="chip keep">压缩触发</span><span class="chip keep">事件分发</span></div></div>
   <div class="layer"><div class="name">循环</div><div class="items"><span class="chip keep">回合循环</span><span class="chip keep">钩子链</span><span class="chip keep">工具调用流水线</span><span class="chip keep">引导与后续消息</span></div></div>
   <div class="layer"><div class="name">模型</div><div class="items"><span class="chip keep">Provider</span><span class="chip keep">消息与流式事件</span><span class="chip keep">系统提示词段落</span></div></div>
 </div>
@@ -222,6 +222,9 @@
     pub async fn prompt(&amp;self, text: impl Into&lt;String&gt;) -&gt; Result&lt;RunReport, SessionError&gt;;
     pub async fn prompt_with_cancel(&amp;self, text: impl Into&lt;String&gt;, parent: &amp;CancellationToken)
         -&gt; Result&lt;RunReport, SessionError&gt;;
+    pub async fn compact(&amp;self) -&gt; Result&lt;compaction::Report, SessionError&gt;;
+    pub async fn compact_with_cancel(&amp;self, parent: &amp;CancellationToken)
+        -&gt; Result&lt;compaction::Report, SessionError&gt;;
     pub fn steer(&amp;self, text: impl Into&lt;String&gt;);
     pub fn follow_up(&amp;self, text: impl Into&lt;String&gt;);
     pub fn abort(&amp;self) -&gt; bool; // 只取消当前运行，空闲时 false
@@ -229,8 +232,8 @@
     pub fn set_model(&amp;self, model: ModelRef) -&gt; Result&lt;(), SessionError&gt;;
     pub fn clear_approvals(&amp;self) -&gt; Result&lt;(), SessionError&gt;;
 }
-// compact 在 P5 加入；set_model 无 I/O，因此使用同步接口。</code></pre>
-<p>同一时刻只有一个运行；重叠的 prompt、运行中的 set_model 与 clear_approvals 返回 <code>SessionError::Busy</code>，插话须显式调用 steer 或 follow_up。空模型 ID 返回 <code>InvalidModel</code>；运行中的 provider、钩子与持久化失败仍由 <code>RunReport</code> 表达。无人值守一行调用 <code>session.prompt(task).await?</code> 取得报告。</p>
+// compact 已在 P5 加入；set_model 无 I/O，因此使用同步接口。</code></pre>
+<p>同一时刻只有一个运行；prompt 与 compact 共用独占权，重叠调用、运行中的 set_model 与 clear_approvals 返回 <code>SessionError::Busy</code>，插话须显式调用 steer 或 follow_up。空模型 ID 返回 <code>InvalidModel</code>；运行中的操作失败由相应的 run 或 compaction 报告表达。无人值守一行调用 <code>session.prompt(task).await?</code> 取得报告。</p>
 <p>状态在“空闲并持有 Runner”与“运行中并持有取消令牌”之间切换。prompt 原子地取出 Runner；RAII guard 在完成、panic 或 future 被丢弃时归还，锁不跨越异步等待。abort 发出取消后须等待 prompt 返回或 drop 其 future，再开始下一次；它不取消外部父令牌或后续运行。</p>
 <p>构造时的 sink 保留，额外订阅以 RAII <code>Subscription</code> 持有和退订；只分发后续事件，已分发快照中的回调可能完成。每条消息先写入一次审计，再向所有订阅者发事件，回调期间不持有订阅列表锁。单个回调 panic 会被摘除，通过 <code>Subscription::has_panicked</code> 和 <code>failed_subscribers</code> 报告，不阻断其他订阅者。</p>
 <p>ModelRef 由宿主提供已配置的 provider 与模型 ID；切换保留历史、工具、钩子、上限、提示词和审批缓存，不改写会话头部的初始模型。宿主负责新 provider 的认证和过滤配置；clear_approvals 可在空闲时显式撤销授权。</p>
@@ -240,7 +243,7 @@
 <table>
   <tr><th>钩子</th><th>时机</th><th>可以做什么</th><th>对应</th></tr>
   <tr><td><code>on_input</code></td><td>原始输入追加后、模型请求前</td><td>拒绝或改写，以 context_edit 记录</td><td>Claude Code <code>UserPromptSubmit</code>；pi <code>input</code></td></tr>
-  <tr><td><code>transform_context</code></td><td>每次请求模型前</td><td>压缩、注入记忆或待办、裁剪</td><td>pi <code>transformContext</code></td></tr>
+  <tr><td><code>transform_context</code></td><td>每次任务模型请求前</td><td>注入记忆或待办、裁剪；压缩由之后的宿主准备步骤负责</td><td>pi <code>transformContext</code></td></tr>
   <tr><td><code>before_tool</code></td><td>工具执行前</td><td>允许、拒绝、询问</td><td>pi <code>beforeToolCall</code>；Claude Code <code>PreToolUse</code></td></tr>
   <tr><td><code>after_tool</code></td><td>工具执行后、写入会话前</td><td>脱敏、按预算截断、标记错误、终止</td><td>pi <code>afterToolCall</code>；Claude Code <code>PostToolUse</code></td></tr>
   <tr><td><code>finish_turn</code></td><td>每个回合结束时</td><td>继续或结束（如截断后续写、检查最终答案格式）</td><td>pi <code>finishTurn</code>；Claude Code <code>Stop</code></td></tr>
@@ -304,7 +307,7 @@ pub struct NoHuman; // confirm 恒为拒绝：无人值守</code></pre>
 <pre><code># profiles/troubleshoot.toml（已实现）
 name = "troubleshoot"
 instructions = "troubleshoot.md"
-tools = ["bash", "read_file", "read_skill"]
+tools = ["bash", "read_file", "read_skill", "read_output"]
 execution = "local"
 
 [limits]
@@ -319,6 +322,7 @@ continueOnLength = 1
 discover = true</code></pre>
 <p><strong>叠加顺序</strong>：内置默认 &lt; profile 文件 &lt; 命令行参数；deny 规则只增不减。内置两个 profile：<code>troubleshoot</code>（当前行为）与 <code>assistant</code>（通用对话）。</p>
 <p>P4 已将两个 profile 与说明嵌入二进制，保留原 SDK 预设接口。<code>--profile</code> 接受内置名称或 TOML 路径，文件可 extends 一个内置基线；仅显式 CLI 参数覆盖文件，deny 命令与工具规则累加。run 始终 NoHuman，chat 保留终端审批，不由 profile 改换前端。当前 execution 仅支持 local，未知字段、容器或任意扩展配置明确报错，脱敏不可关闭。</p>
+<p>P5 增加 <code>[compaction]</code> 和 <code>[toolOutput]</code>，上例省略其默认预算。自动触发阈值可由 CLI 覆盖或关闭；仅启用 read_output 时安装长结果落盘钩子。完整配置、路径与读取边界见 <a href="PROFILES.md">场景配置说明</a>。</p>
 <p>上下文按最近 Git 根目录到 cwd 加载 AGENTS.md，无 Git 根时只检查 cwd；显式路径和禁用选项见 <a href="PROFILES.md">场景配置说明</a>。每文件 64 KiB、上下文合计 256 KiB。skills 在 TOML 中显式登记 name、description、path；启动仅加入目录，模型调用 read_skill 后才读取正文，经策略、审批、取消、脱敏和审计后回传。P4 不解析 YAML frontmatter、不扫描全局 skills、不自动执行 skill 脚本。</p>
 <div class="box decide"><strong class="label">取舍</strong>TOML 便于手写，Codex 也用 TOML 做配置 [R8]；P4 已引入 <code>toml 1.1.8</code>（仅 parse、serde、std feature），上游 <a href="https://github.com/toml-rs/toml/blob/main/Cargo.toml">Cargo.toml</a> 在 2026-10-31 核对的 MSRV 为 1.85，与项目兼容，锁定 crate 声明 MSRV 1.85，已用 Rust 1.88 复核。JSON 无需新依赖但不便手写注释。YAML 不选：常用的 <a href="https://github.com/dtolnay/serde-yaml"><code>serde_yaml</code></a> 已于 2024 年归档。<strong>评审结论：TOML。</strong></div>
 
@@ -326,7 +330,7 @@ discover = true</code></pre>
 <table>
   <tr><th>前端</th><th>交互</th><th>审批</th><th>输出</th><th>状态</th></tr>
   <tr><td><code>run</code></td><td>一次任务</td><td>声明式策略与 <code>NoHuman</code>，Ask 明确拒绝</td><td>text 报告或 JSONL、退出码 0–6；后续增加 <code>--output-schema</code></td><td>已有</td></tr>
-  <tr><td><code>chat</code></td><td>多轮对话，运行中可插话，Ctrl+C 只中止当前运行</td><td>终端确认</td><td>流式文本；<code>/new</code>、<code>/model</code>、<code>/compact</code>、<code>/quit</code></td><td>P3 已实现逐行 REPL；compact 待 P5</td></tr>
+  <tr><td><code>chat</code></td><td>多轮对话，运行中可插话，Ctrl+C 只中止当前运行</td><td>终端确认</td><td>流式文本；<code>/new</code>、<code>/model</code>、<code>/compact</code>、<code>/quit</code></td><td>P3 已实现逐行 REPL；P5 已接入 compact</td></tr>
   <tr><td><code>acp</code></td><td>由编辑器或其他程序驱动</td><td>转发给客户端</td><td>ACP 消息</td><td>新增</td></tr>
   <tr><td>Rust SDK</td><td>由宿主程序驱动</td><td>宿主注册 <code>PolicyHook</code> 并提供 <code>Interaction</code></td><td>事件流</td><td>P2 已实现共享会话 API</td></tr>
 </table>
@@ -338,17 +342,21 @@ discover = true</code></pre>
                                   | approval ticket + reply        |
                                   +------ TerminalInteraction &lt;----+</code></pre>
 <p>输入仅由一个专用线程读取，经有界通道交给 REPL；Interaction 通过一次性回复等待答案，不直接读 stdin。按锁定的 Tokio 1.54.1 stdin 源码对交互应用的建议，使用进程生命周期线程，避免不可取消的 Tokio stdin 阻塞任务卡住退出；不需要启用 io-std 或引入新 crate。每行最多 1 MiB，EOF、错误和取消都有明确处理。</p>
-<p>TTY 运行中普通输入成为 steering，管道脚本逐轮消费。Ctrl+C 只取消当前任务，SIGTERM 取消并退出；<code>/new</code> 重置会话和授权，文件会话另建唯一文件保留旧日志；<code>/model</code> 只在空闲时切换同一 provider 的模型。<code>/compact</code> 仅提示 P5 待实现。stdout 可流式显示文本或输出 JSONL，终端文本与诊断中的控制字符按字面显示。</p>
+<p>TTY 运行中普通输入成为 steering，自动摘要后的任务请求也先消费新增插话；管道脚本逐轮消费。Ctrl+C 只取消当前任务或压缩，SIGTERM 取消并退出；<code>/new</code> 重置会话和授权，文件会话另建唯一文件保留旧日志；<code>/model</code> 只在空闲时切换同一 provider 的模型。<code>/compact</code> 使用共享会话 API，手动压缩期间可暂存一个输入，完成后执行；取消时明确清除暂存输入。stdout 可流式显示文本或输出 JSONL，终端文本与诊断中的控制字符按字面显示。</p>
 
 <h3>5.8 上下文管理</h3>
-<ul>
-  <li><strong>原始历史只追加、不改写。</strong>压缩以追加条目表达：<code>compaction</code> 条目记录“保留的第一条条目”与摘要（沿用 pi 的结构）。</li>
-  <li><strong>摘要分两部分</strong>：“环境事实”每条附原始条目出处；“推断与计划”单独列出，供模型区分（依据 [P14]）。</li>
-  <li><strong>触发</strong>：上下文达到阈值时自动触发，或在 <code>chat</code> 中用 <code>/compact</code> 手动触发；无人值守的短任务默认关闭（依据 [P13]）。</li>
-  <li><strong>工具侧预算</strong>：截断、分页、大结果写入文件只返回路径（参考 HolmesGPT 的输出预算 [R19]）。</li>
-  <li><strong>提示词更新</strong>：按段落记录、变化只追加（已实现）。发送时默认 <code>collapse</code>，提示词变化会影响既有前缀的缓存复用；服务端支持且模型、工具等发送配置不变时，可选 <code>inline</code> 保持此前的请求前缀，实际缓存命中由服务端决定。</li>
-</ul>
-<div class="box decide"><strong class="label">取舍</strong>阈值触发的摘要压缩作为内置扩展；模型自管上下文 [P15] 作为可选扩展，不进内核；不做“摘要的摘要”（依据 [P11]）。</div>
+<p>P5 已实现有界的宿主摘要与工具结果落盘，代码位于 <code>src/compaction.rs</code>、<code>src/session/compaction.rs</code> 和 <code>src/output_store.rs</code>。具体用法见 <a href="PROFILES.md">场景配置说明</a>。</p>
+<table>
+  <tr><th>约束</th><th>实现</th><th>验收</th></tr>
+  <tr><td>原始历史保留</td><td>新建 v3；旧 v1/v2 追加 format_upgrade，头部不改写。请求先写 compaction_started，成功或失败另追加。投影保留全部 system、成功摘要和 firstKeptEntryId 起的原消息；未完成记录不生效</td><td>旧文件逐字节前缀保留、分支投影、失败写入</td></tr>
+  <tr><td>摘要出处</td><td>facts 每条附 sourceEntryIds，inferences 与 plans 单列（依据 [P14]）。重压缩使用应用过编辑的原始投影，不输入旧摘要；修正源消息会使旧摘要失效</td><td>引用、格式、空摘要、截断、工具调用与容量检查；不证明语义正确</td></tr>
+  <tr><td>触发与预算</td><td>assistant 默认超过 256 KiB 触发；troubleshoot 与 SDK 默认关闭。保留最近约 64 KiB、最新输入及全部 system。摘要源 2 MiB、响应 64 KiB、默认 2048 输出 token / 120 秒</td><td>FauxProvider 与本地 HTTP；字节阈值不等于模型 token 窗口，无法容纳时明确停止</td></tr>
+  <tr><td>请求边界</td><td>输入 / 上下文改动先持久化，宿主再准备上下文。自动摘要计入轮次和用量，失败不重试；完成后先消费新增 steering，再请求任务模型。手动 compact 独立报告，与 prompt 共用 Busy 和取消</td><td>预算、用量、插话、超时、future 丢弃与复用、Unix PTY</td></tr>
+  <tr><td>长工具结果</td><td>已有有界结果在脱敏后落盘，默认阈值 8 KiB、每文件上限 1 MiB。会话只记录 UUID / 路径引用；read_output 分页，read_skill 与 read_output 不再次落盘</td><td>先脱敏后写入、UTF-8 续读、容量、UUID 路径、失败回退</td></tr>
+  <tr><td>文件生命周期</td><td>默认 cwd/.zx-agent/outputs，已忽略；Unix 新目录 / 文件 0700 / 0600，不覆盖、不自动删除。只在启用读取工具时安装落盘钩子，SDK 显式注册</td><td>权限、配置继承、显式 CLI 工具集合；续跑需保存相同结果目录</td></tr>
+  <tr><td>提示词更新</td><td>按段落追加，默认 collapse；服务支持且发送配置不变时可选 inline 保持此前请求前缀，实际缓存命中由服务端决定</td><td>沿用现有系统提示词回归</td></tr>
+</table>
+<div class="box decide"><strong class="label">取舍</strong>采用可配置、可审计的宿主摘要；模型自管上下文 [P15] 留作可选扩展；不做“摘要的摘要”（依据 [P11]）。摘要引用存在不保证事实正确，真实模型下的信息保真和 token 窗口适配仍未验证。</div>
 
 <h3>5.9 执行环境与安全</h3>
 <ul>
@@ -408,10 +416,10 @@ discover = true</code></pre>
   <tr><td>（新增）</td><td><code>src/agent/hooks.rs</code>：<code>Hooks</code> trait 与钩子链</td></tr>
   <tr><td>（新增）</td><td><code>src/interaction.rs</code>：<code>Interaction</code>、<code>NoHuman</code>、审批请求与结果</td></tr>
   <tr><td><code>src/runner.rs</code></td><td>P1 已将截断续写移为 <code>finish_turn</code> 扩展，并按稳定条目 ID 汇总当前答案；P2 已由 <code>src/agent_session.rs</code> 统一提供共享调用、订阅和模型切换，Runner 保留独占执行职责</td></tr>
-  <tr><td><code>src/session.rs</code></td><td>P5、P6 分别新增 <code>compaction</code>、<code>tool_call_started</code> 条目，首次写入前分别升级格式；存储后端抽象为 trait（后续）</td></tr>
+  <tr><td><code>src/session.rs</code></td><td>P5 已实现 v3 压缩条目、只追加升级与旧格式读取；P6 新增 <code>tool_call_started</code> 时再次升级；存储后端 trait 留到后续</td></tr>
   <tr><td><code>src/tools/*</code></td><td>新增 <code>Executor</code> 接缝；<code>Tool</code> 增加 <code>effects()</code>；内置工具由 profile 按名字启用</td></tr>
   <tr><td><code>src/prompt.rs</code>、<code>src/presets/troubleshoot.rs</code></td><td>P0 已分离通用组装与排障预设；P4 已将两个预设文件化，TOML 与 Markdown 位于 <code>profiles/</code></td></tr>
-  <tr><td>（新增）</td><td><code>src/profile/</code>：已实现加载与叠加 profile、项目上下文和按需 skill；<code>src/extension.rs</code>：P7 的 <code>Extension</code> trait；续写、脱敏已在 <code>src/extensions.rs</code>，压缩待 P5</td></tr>
+  <tr><td>（新增）</td><td><code>src/profile/</code>：场景、项目上下文和按需 skill；<code>src/compaction.rs</code>：宿主摘要；<code>src/output_store.rs</code>：落盘钩子与读取工具。P7 的 <code>Extension</code> trait 仍待实现</td></tr>
   <tr><td><code>src/main.rs</code>、<code>src/cli.rs</code>、<code>src/chat/</code></td><td>P3 已共用 run/chat 参数与运行组装，前端独立管理终端；P4 已接入 --profile，acp 仍属后续阶段</td></tr>
   <tr><td>单一 crate</td><td>最后阶段可拆为 <code>zx-ai</code>、<code>zx-core</code>、<code>zx-tools</code>、<code>zx-cli</code>，用编译器保证分层</td></tr>
 </table>
@@ -424,7 +432,7 @@ discover = true</code></pre>
   <tr><td>P2</td><td>已实现 <code>AgentSession</code>：共享提问、Busy、中止后复用、多订阅者与退订、模型切换</td><td>中止后会话可继续；多订阅者都收到事件</td><td>无</td></tr>
   <tr><td>P3</td><td>已实现 chat：流式输出、终端审批、斜杠命令、取消后继续对话</td><td>脚本 stdin、信号、超时和 Unix PTY 测试；本地假服务交互试用</td><td>无；已授权的 io-std、rustyline 本阶段无需引入</td></tr>
   <tr><td>P4</td><td>已实现 profile 文件、AGENTS.md、显式登记与按需读取 skills</td><td><code>troubleshoot</code> 与 <code>assistant</code> 均由文件定义；配置错误时退出码 2</td><td><code>toml</code>（已授权）</td></tr>
-  <tr><td>P5</td><td>上下文管理：压缩扩展、大结果落盘；首次写入 <code>compaction</code> 前升级会话格式</td><td>faux provider 测试；旧文件兼容测试；经授权的付费 e2e 测试</td><td>无</td></tr>
+  <tr><td>P5</td><td>已实现自动 / 手动摘要、工具结果落盘与 v3 追加升级</td><td>FauxProvider、本地 HTTP、旧格式与分支、失败写入、取消、权限与分页；付费摘要质量验证未运行</td><td>无新依赖</td></tr>
   <tr><td>P6</td><td><code>Executor</code> 与容器执行；<code>effects()</code>；首次写入 <code>tool_call_started</code> 前再次升级格式</td><td>离线任务禁网；在线任务按评审范围访问 API；崩溃恢复与旧文件兼容测试；D5 改变默认值时另验收迁移</td><td>无新 crate（调用本机 docker）；D5 与在线访问方案须先确认</td></tr>
   <tr><td>P7</td><td>MCP 客户端扩展；公开 <code>Extension</code> trait</td><td>MCP 工具可列出、可调用，并受规则约束</td><td><code>rmcp</code>（已授权；MSRV 已是 1.88）</td></tr>
   <tr><td>P8</td><td><code>acp</code> 前端</td><td>可被 ACP 客户端驱动，审批经客户端完成</td><td>ACP Rust SDK（已授权）</td></tr>
@@ -511,7 +519,7 @@ discover = true</code></pre>
   <li>[P20] Packer et al., MemGPT: Towards LLMs as Operating Systems, 2023. <a href="https://arxiv.org/abs/2310.08560">arXiv:2310.08560</a></li>
 </ol>
 
-<footer>文件：zx-agent-general-kernel-proposal.html · 版本 v0.9 · 2026年11月</footer>
+<footer>文件：zx-agent-general-kernel-proposal.html · 版本 v0.10 · 2026年11月</footer>
 </main>
 </body>
 </html>
