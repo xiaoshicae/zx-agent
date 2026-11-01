@@ -52,7 +52,7 @@ impl SessionStore {
     /// Record that a call with side effects is about to run. Older sessions get a format
     /// upgrade to v4 first. Fails without writing anything if the call is not on the current
     /// branch, has another name, already has a result, or has already started.
-    pub fn append_tool_call_started(&mut self, tool_call_id: &str, tool_name: &str) -> Result<String> {
+    pub async fn append_tool_call_started(&mut self, tool_call_id: &str, tool_name: &str) -> Result<String> {
         let mut entry = ToolCallStartedEntry {
             id: String::new(),
             parent_id: self.leaf.clone(),
@@ -62,10 +62,10 @@ impl SessionStore {
         };
         // Validate the reference before even appending an upgrade.
         self.validate_tool_call_start(&entry)?;
-        self.ensure_format(START_RECORDS_VERSION)?;
+        self.ensure_format(START_RECORDS_VERSION).await?;
         entry.parent_id = self.leaf.clone();
         entry.id = self.new_id();
-        self.append(Entry::ToolCallStarted(entry))
+        self.append(Entry::ToolCallStarted(entry)).await
     }
 
     /// The calls of the branch's last assistant message that have no result, in call order.
@@ -247,13 +247,14 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn start_records_use_snake_case_tags_and_camel_case_fields() {
+    #[tokio::test]
+    async fn start_records_use_snake_case_tags_and_camel_case_fields() {
         let mut store = store(4);
         let issuer = store
             .append_message(answer(StopReason::ToolUse, &[("c1", "bash")]))
+            .await
             .unwrap();
-        let id = store.append_tool_call_started("c1", "bash").unwrap();
+        let id = store.append_tool_call_started("c1", "bash").await.unwrap();
         let line = serde_json::to_value(store.get(&id).unwrap()).unwrap();
         assert_eq!(line["type"], "tool_call_started");
         assert_eq!(line["parentId"], issuer);
@@ -262,57 +263,61 @@ mod tests {
         assert_eq!(&serde_json::from_value::<Entry>(line).unwrap(), store.get(&id).unwrap());
     }
 
-    #[test]
-    fn a_start_must_name_an_unfinished_call_issued_on_the_branch() {
+    #[tokio::test]
+    async fn a_start_must_name_an_unfinished_call_issued_on_the_branch() {
         let mut store = store(4);
         store
             .append_message(answer(StopReason::ToolUse, &[("c1", "bash"), ("c2", "bash")]))
+            .await
             .unwrap();
-        store.append_message(result("c1", "bash")).unwrap();
-        store.append_tool_call_started("c2", "bash").unwrap();
+        store.append_message(result("c1", "bash")).await.unwrap();
+        store.append_tool_call_started("c2", "bash").await.unwrap();
         let before = store.entries().len();
         // Unknown call, another tool's name, a call with a result, a call that already started.
         for (id, name) in [("c9", "bash"), ("c2", "read_file"), ("c1", "bash"), ("c2", "bash")] {
-            assert!(store.append_tool_call_started(id, name).is_err(), "{id} {name}");
+            assert!(store.append_tool_call_started(id, name).await.is_err(), "{id} {name}");
         }
         assert_eq!(store.entries().len(), before);
     }
 
-    #[test]
-    fn a_reused_call_id_refers_to_the_latest_answer() {
+    #[tokio::test]
+    async fn a_reused_call_id_refers_to_the_latest_answer() {
         let mut store = store(4);
         store
             .append_message(answer(StopReason::ToolUse, &[("call_0", "bash")]))
+            .await
             .unwrap();
-        store.append_tool_call_started("call_0", "bash").unwrap();
-        store.append_message(result("call_0", "bash")).unwrap();
+        store.append_tool_call_started("call_0", "bash").await.unwrap();
+        store.append_message(result("call_0", "bash")).await.unwrap();
         store
             .append_message(answer(StopReason::ToolUse, &[("call_0", "read_file")]))
+            .await
             .unwrap();
-        assert!(store.append_tool_call_started("call_0", "bash").is_err());
-        store.append_tool_call_started("call_0", "read_file").unwrap();
+        assert!(store.append_tool_call_started("call_0", "bash").await.is_err());
+        store.append_tool_call_started("call_0", "read_file").await.unwrap();
     }
 
-    #[test]
-    fn older_sessions_upgrade_to_v4_before_the_first_start_record() {
+    #[tokio::test]
+    async fn older_sessions_upgrade_to_v4_before_the_first_start_record() {
         let mut store = store(3);
         store
             .append_message(answer(StopReason::ToolUse, &[("c1", "bash")]))
+            .await
             .unwrap();
-        assert!(store.append_tool_call_started("c9", "bash").is_err());
+        assert!(store.append_tool_call_started("c9", "bash").await.is_err());
         assert_eq!(
             store.format_version(),
             3,
             "a rejected start must not upgrade the session"
         );
-        store.append_tool_call_started("c1", "bash").unwrap();
+        store.append_tool_call_started("c1", "bash").await.unwrap();
         assert_eq!(kinds(&store), ["message", "format_upgrade", "tool_call_started"]);
         assert_eq!(store.format_version(), 4);
         assert_eq!(store.header().version, 3);
     }
 
-    #[test]
-    fn opening_a_start_record_requires_format_v4() {
+    #[tokio::test]
+    async fn opening_a_start_record_requires_format_v4() {
         let dir = tempfile::tempdir().unwrap();
         for (version, opens) in [(3, false), (4, true)] {
             let path = dir.path().join(format!("v{version}.jsonl"));
@@ -321,6 +326,7 @@ mod tests {
             let mut store = SessionStore::create(&path, header).unwrap();
             let issuer = store
                 .append_message(answer(StopReason::ToolUse, &[("c1", "bash")]))
+                .await
                 .unwrap();
             drop(store);
             let start = json!({"type":"tool_call_started","id":"s1","parentId":issuer,"timestamp":1,"toolCallId":"c1","toolName":"bash"});
@@ -331,30 +337,32 @@ mod tests {
         }
     }
 
-    #[test]
-    fn interrupted_calls_are_the_unanswered_calls_of_the_last_answer_in_call_order() {
+    #[tokio::test]
+    async fn interrupted_calls_are_the_unanswered_calls_of_the_last_answer_in_call_order() {
         let mut store = store(4);
-        store.append_message(Message::user("go")).unwrap();
+        store.append_message(Message::user("go")).await.unwrap();
         store
             .append_message(answer(
                 StopReason::ToolUse,
                 &[("c1", "bash"), ("c2", "bash"), ("c3", "read_file")],
             ))
+            .await
             .unwrap();
-        store.append_tool_call_started("c1", "bash").unwrap();
-        store.append_tool_call_started("c2", "bash").unwrap();
-        store.append_message(result("c1", "bash")).unwrap();
+        store.append_tool_call_started("c1", "bash").await.unwrap();
+        store.append_tool_call_started("c2", "bash").await.unwrap();
+        store.append_message(result("c1", "bash")).await.unwrap();
         assert_eq!(
             starts(&store),
             [("c2".into(), StartRecord::Present), ("c3".into(), StartRecord::Absent)]
         );
     }
 
-    #[test]
-    fn starts_are_unavailable_until_the_session_records_them() {
+    #[tokio::test]
+    async fn starts_are_unavailable_until_the_session_records_them() {
         let mut store = store(3);
         store
             .append_message(answer(StopReason::ToolUse, &[("c1", "bash"), ("c2", "bash")]))
+            .await
             .unwrap();
         assert_eq!(
             starts(&store),
@@ -364,50 +372,56 @@ mod tests {
             ]
         );
         // The upgrade comes after the answer, right before the run's first start record.
-        store.append_tool_call_started("c1", "bash").unwrap();
+        store.append_tool_call_started("c1", "bash").await.unwrap();
         assert_eq!(
             starts(&store),
             [("c1".into(), StartRecord::Present), ("c2".into(), StartRecord::Absent)]
         );
     }
 
-    #[test]
-    fn calls_followed_by_other_messages_or_off_the_branch_are_not_interrupted() {
+    #[tokio::test]
+    async fn calls_followed_by_other_messages_or_off_the_branch_are_not_interrupted() {
         let mut store = store(4);
-        let question = store.append_message(Message::user("go")).unwrap();
+        let question = store.append_message(Message::user("go")).await.unwrap();
         store
             .append_message(answer(StopReason::ToolUse, &[("c1", "bash")]))
+            .await
             .unwrap();
-        store.append_message(Message::user("later")).unwrap();
+        store.append_message(Message::user("later")).await.unwrap();
         assert!(store.interrupted_tool_calls().is_empty());
         store.branch(&question).unwrap();
         assert!(store.interrupted_tool_calls().is_empty());
     }
 
-    #[test]
-    fn failed_and_cancelled_answers_never_ran_their_calls() {
+    #[tokio::test]
+    async fn failed_and_cancelled_answers_never_ran_their_calls() {
         for stop_reason in [StopReason::Error, StopReason::Aborted] {
             let mut store = store(4);
-            store.append_message(answer(stop_reason, &[("c1", "bash")])).unwrap();
+            store
+                .append_message(answer(stop_reason, &[("c1", "bash")]))
+                .await
+                .unwrap();
             assert!(store.interrupted_tool_calls().is_empty(), "{stop_reason:?}");
         }
     }
 
-    #[test]
-    fn context_edits_hide_answers_but_not_recorded_results() {
+    #[tokio::test]
+    async fn context_edits_hide_answers_but_not_recorded_results() {
         let mut omitted = store(4);
         let issuer = omitted
             .append_message(answer(StopReason::ToolUse, &[("c1", "bash")]))
+            .await
             .unwrap();
-        omitted.append_context_edit(&issuer, None).unwrap();
+        omitted.append_context_edit(&issuer, None).await.unwrap();
         assert!(omitted.interrupted_tool_calls().is_empty());
 
         let mut hidden = store(4);
         hidden
             .append_message(answer(StopReason::ToolUse, &[("c1", "bash")]))
+            .await
             .unwrap();
-        let recorded = hidden.append_message(result("c1", "bash")).unwrap();
-        hidden.append_context_edit(&recorded, None).unwrap();
+        let recorded = hidden.append_message(result("c1", "bash")).await.unwrap();
+        hidden.append_context_edit(&recorded, None).await.unwrap();
         assert!(hidden.interrupted_tool_calls().is_empty());
     }
 }

@@ -398,7 +398,7 @@ impl HookChain {
     }
 
     pub(crate) async fn emit(&self, event: AgentEvent, cancel: &CancellationToken, sink: &dyn EventSink) {
-        // Persistence happens in the sink before observers receive their own view.
+        // What the event reports is already recorded; the sink sees it before observers do.
         sink.emit(event.clone());
         for error in self.on_event(&event, cancel).await {
             report_failure(error, sink);

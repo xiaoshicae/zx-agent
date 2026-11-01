@@ -44,14 +44,14 @@ fn plan(store: &SessionStore, first_kept: &str) -> CompactionPlan {
     }
 }
 
-fn seeded(store: &mut SessionStore) -> (String, String) {
-    let old = store.append_message(Message::user("old evidence")).unwrap();
-    let kept = store.append_message(Message::user("latest input")).unwrap();
+async fn seeded(store: &mut SessionStore) -> (String, String) {
+    let old = store.append_message(Message::user("old evidence")).await.unwrap();
+    let kept = store.append_message(Message::user("latest input")).await.unwrap();
     (old, kept)
 }
 
-#[test]
-fn new_sessions_use_v4_and_legacy_upgrade_preserves_every_existing_byte() {
+#[tokio::test]
+async fn new_sessions_use_v4_and_legacy_upgrade_preserves_every_existing_byte() {
     let dir = tempfile::tempdir().unwrap();
     assert_eq!(header().version, 4);
     for version in [1, 2] {
@@ -59,13 +59,14 @@ fn new_sessions_use_v4_and_legacy_upgrade_preserves_every_existing_byte() {
         let mut legacy_header = SessionHeader::new(Path::new("."), "m");
         legacy_header.version = version;
         let mut store = SessionStore::create(&path, legacy_header).unwrap();
-        let (old, kept) = seeded(&mut store);
+        let (old, kept) = seeded(&mut store).await;
         drop(store);
         let before = std::fs::read(&path).unwrap();
         let mut store = SessionStore::open(&path).unwrap();
-        let attempt = store.begin_compaction(plan(&store, &kept)).unwrap();
+        let attempt = store.begin_compaction(plan(&store, &kept)).await.unwrap();
         store
             .append_compaction(&attempt, summary(&old), Usage::default())
+            .await
             .unwrap();
         assert_eq!(store.header().version, version);
         assert_eq!(store.format_version(), 3);
@@ -75,31 +76,32 @@ fn new_sessions_use_v4_and_legacy_upgrade_preserves_every_existing_byte() {
         assert_eq!(lines[4]["type"], "compaction_started");
         assert_eq!(lines[5]["type"], "compaction");
         assert_eq!(lines[5]["firstKeptEntryId"], kept);
-        let reopened = SessionStore::open(&path).unwrap();
+        let reopened = SessionStore::read(&path).unwrap();
         assert_eq!(reopened.messages(), store.messages());
         assert_eq!(reopened.format_version(), 3);
     }
 }
 
-#[test]
-fn summary_replaces_only_the_old_prefix_and_preserves_all_system_updates() {
+#[tokio::test]
+async fn summary_replaces_only_the_old_prefix_and_preserves_all_system_updates() {
     let mut store = SessionStore::in_memory(header());
     let first_system = Message::System(SystemMessage {
         sections: SystemPrompt::default().diff(&SystemPrompt::default().with_section("preamble", "first")),
         timestamp: now_ms(),
     });
-    store.append_message(first_system.clone()).unwrap();
-    let old = store.append_message(Message::user("observed something")).unwrap();
+    store.append_message(first_system.clone()).await.unwrap();
+    let old = store.append_message(Message::user("observed something")).await.unwrap();
     let second_system = Message::System(SystemMessage {
         sections: SystemPrompt::default().diff(&SystemPrompt::default().with_section("environment", "updated")),
         timestamp: now_ms(),
     });
-    store.append_message(second_system.clone()).unwrap();
-    let kept = store.append_message(Message::user("latest input")).unwrap();
+    store.append_message(second_system.clone()).await.unwrap();
+    let kept = store.append_message(Message::user("latest input")).await.unwrap();
     let raw = store.raw_projection();
-    let attempt = store.begin_compaction(plan(&store, &kept)).unwrap();
+    let attempt = store.begin_compaction(plan(&store, &kept)).await.unwrap();
     let done = store
         .append_compaction(&attempt, summary(&old), Usage::default())
+        .await
         .unwrap();
     let projection = store.projection();
     assert_eq!(
@@ -118,62 +120,68 @@ fn summary_replaces_only_the_old_prefix_and_preserves_all_system_updates() {
     assert_eq!(store.raw_projection(), raw);
 }
 
-#[test]
-fn unfinished_and_failed_attempts_do_not_change_context() {
+#[tokio::test]
+async fn unfinished_and_failed_attempts_do_not_change_context() {
     let mut store = SessionStore::in_memory(header());
-    let (_, kept) = seeded(&mut store);
+    let (_, kept) = seeded(&mut store).await;
     let before = store.messages();
-    let attempt = store.begin_compaction(plan(&store, &kept)).unwrap();
+    let attempt = store.begin_compaction(plan(&store, &kept)).await.unwrap();
     assert_eq!(store.messages(), before);
     store
         .fail_compaction(&attempt, "cancelled".into(), Usage::default(), None)
+        .await
         .unwrap();
     assert_eq!(store.messages(), before);
     assert!(
         store
             .append_compaction(&attempt, summary("unknown"), Usage::default())
+            .await
             .unwrap_err()
             .to_string()
             .contains("already finished")
     );
 }
 
-#[test]
-fn summaries_are_branch_local_and_references_to_other_branches_are_rejected() {
+#[tokio::test]
+async fn summaries_are_branch_local_and_references_to_other_branches_are_rejected() {
     let mut store = SessionStore::in_memory(header());
-    let (old, kept) = seeded(&mut store);
-    let attempt = store.begin_compaction(plan(&store, &kept)).unwrap();
+    let (old, kept) = seeded(&mut store).await;
+    let attempt = store.begin_compaction(plan(&store, &kept)).await.unwrap();
     let done = store
         .append_compaction(&attempt, summary(&old), Usage::default())
+        .await
         .unwrap();
     let compacted = store.messages();
     store.branch(&old).unwrap();
-    let other = store.append_message(Message::user("different branch")).unwrap();
+    let other = store.append_message(Message::user("different branch")).await.unwrap();
     assert_eq!(store.messages().len(), 2);
     assert!(
         store
             .append_compaction(&attempt, summary(&old), Usage::default())
+            .await
             .unwrap_err()
             .to_string()
             .contains("not on this branch")
     );
     let mut invalid = plan(&store, &other);
     invalid.first_kept_entry_id = kept;
-    assert!(store.begin_compaction(invalid).is_err());
+    assert!(store.begin_compaction(invalid).await.is_err());
     store.branch(&done).unwrap();
     assert_eq!(store.messages(), compacted);
 }
 
-#[test]
-fn editing_summarized_evidence_falls_back_to_originals_with_the_edit_applied() {
+#[tokio::test]
+async fn editing_summarized_evidence_falls_back_to_originals_with_the_edit_applied() {
     let mut store = SessionStore::in_memory(header());
-    let (old, kept) = seeded(&mut store);
-    let attempt = store.begin_compaction(plan(&store, &kept)).unwrap();
+    let (old, kept) = seeded(&mut store).await;
+    let attempt = store.begin_compaction(plan(&store, &kept)).await.unwrap();
     store
         .append_compaction(&attempt, summary(&old), Usage::default())
+        .await
         .unwrap();
     store
         .append_context_edit(&old, Some("corrected observation".into()))
+        .await
         .unwrap();
     assert!(store.latest_compaction().is_none());
     assert_eq!(
@@ -182,16 +190,17 @@ fn editing_summarized_evidence_falls_back_to_originals_with_the_edit_applied() {
     );
 }
 
-#[test]
-fn omitting_the_first_retained_message_keeps_the_summary_in_place_of_the_old_prefix() {
+#[tokio::test]
+async fn omitting_the_first_retained_message_keeps_the_summary_in_place_of_the_old_prefix() {
     let mut store = SessionStore::in_memory(header());
-    let (old, kept) = seeded(&mut store);
-    let attempt = store.begin_compaction(plan(&store, &kept)).unwrap();
+    let (old, kept) = seeded(&mut store).await;
+    let attempt = store.begin_compaction(plan(&store, &kept)).await.unwrap();
     store
         .append_compaction(&attempt, summary(&old), Usage::default())
+        .await
         .unwrap();
-    store.append_message(Message::user("after")).unwrap();
-    store.append_context_edit(&kept, None).unwrap();
+    store.append_message(Message::user("after")).await.unwrap();
+    store.append_context_edit(&kept, None).await.unwrap();
     // The retained message is not summarized evidence, so the summary stays valid.
     assert!(store.latest_compaction().is_some());
     let messages = summarize(&store.messages());
@@ -200,27 +209,29 @@ fn omitting_the_first_retained_message_keeps_the_summary_in_place_of_the_old_pre
     assert_eq!(messages[1], "user:after");
 }
 
-#[test]
-fn a_summary_cannot_commit_after_its_source_was_edited_during_the_attempt() {
+#[tokio::test]
+async fn a_summary_cannot_commit_after_its_source_was_edited_during_the_attempt() {
     let mut store = SessionStore::in_memory(header());
-    let (old, kept) = seeded(&mut store);
-    let attempt = store.begin_compaction(plan(&store, &kept)).unwrap();
+    let (old, kept) = seeded(&mut store).await;
+    let attempt = store.begin_compaction(plan(&store, &kept)).await.unwrap();
     store
         .append_context_edit(&old, Some("corrected observation".into()))
+        .await
         .unwrap();
     assert!(
         store
             .append_compaction(&attempt, summary(&old), Usage::default())
+            .await
             .is_err(),
         "a stale summary must not hide a corrected source"
     );
 }
 
-#[test]
-fn invalid_fact_references_or_empty_summaries_never_append_a_success_record() {
+#[tokio::test]
+async fn invalid_fact_references_or_empty_summaries_never_append_a_success_record() {
     let mut store = SessionStore::in_memory(header());
-    let (_, kept) = seeded(&mut store);
-    let attempt = store.begin_compaction(plan(&store, &kept)).unwrap();
+    let (_, kept) = seeded(&mut store).await;
+    let attempt = store.begin_compaction(plan(&store, &kept)).await.unwrap();
     let count = store.entries().len();
     for invalid in [
         summary("unknown"),
@@ -230,30 +241,35 @@ fn invalid_fact_references_or_empty_summaries_never_append_a_success_record() {
             plans: vec![],
         },
     ] {
-        assert!(store.append_compaction(&attempt, invalid, Usage::default()).is_err());
+        assert!(
+            store
+                .append_compaction(&attempt, invalid, Usage::default())
+                .await
+                .is_err()
+        );
         assert_eq!(store.entries().len(), count);
     }
 }
 
-#[test]
-fn invalid_plan_does_not_even_append_an_upgrade() {
+#[tokio::test]
+async fn invalid_plan_does_not_even_append_an_upgrade() {
     let mut legacy = header();
     legacy.version = 2;
     let mut store = SessionStore::in_memory(legacy);
-    let (_, kept) = seeded(&mut store);
+    let (_, kept) = seeded(&mut store).await;
     let mut invalid = plan(&store, &kept);
     invalid.source_entry_ids.push("invented".into());
-    assert!(store.begin_compaction(invalid).is_err());
+    assert!(store.begin_compaction(invalid).await.is_err());
     assert_eq!(store.format_version(), 2);
     assert_eq!(store.entries().len(), 2);
 }
 
-#[test]
-fn duplicate_ids_and_future_upgrades_are_rejected_without_modifying_the_file() {
+#[tokio::test]
+async fn duplicate_ids_and_future_upgrades_are_rejected_without_modifying_the_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session.jsonl");
     let mut store = SessionStore::create(&path, header()).unwrap();
-    let (id, _) = seeded(&mut store);
+    let (id, _) = seeded(&mut store).await;
     drop(store);
     let prefix = std::fs::read_to_string(&path).unwrap();
     for bad in [
@@ -267,13 +283,14 @@ fn duplicate_ids_and_future_upgrades_are_rejected_without_modifying_the_file() {
     }
 }
 
-#[test]
-fn serialized_summary_records_use_camel_case_fields_and_snake_case_tags() {
+#[tokio::test]
+async fn serialized_summary_records_use_camel_case_fields_and_snake_case_tags() {
     let mut store = SessionStore::in_memory(header());
-    let (old, kept) = seeded(&mut store);
-    let attempt = store.begin_compaction(plan(&store, &kept)).unwrap();
+    let (old, kept) = seeded(&mut store).await;
+    let attempt = store.begin_compaction(plan(&store, &kept)).await.unwrap();
     store
         .append_compaction(&attempt, summary(&old), Usage::default())
+        .await
         .unwrap();
     let Entry::Compaction(entry) = store.entries().last().unwrap() else {
         panic!("compaction");
@@ -286,11 +303,11 @@ fn serialized_summary_records_use_camel_case_fields_and_snake_case_tags() {
     assert_eq!(entry.summary.facts[0].text, "The old observation");
 }
 
-#[test]
-fn a_retained_boundary_never_splits_an_assistant_tool_result_exchange() {
+#[tokio::test]
+async fn a_retained_boundary_never_splits_an_assistant_tool_result_exchange() {
     use zx_agent::ai::{AssistantMessage, ContentBlock, StopReason, ToolResultMessage};
     let mut store = SessionStore::in_memory(header());
-    let old = store.append_message(Message::user("old evidence")).unwrap();
+    let old = store.append_message(Message::user("old evidence")).await.unwrap();
     let mut assistant = AssistantMessage::failure("faux", "m", StopReason::ToolUse, "");
     assistant.error_message = None;
     assistant.content = vec![ContentBlock::ToolCall {
@@ -299,7 +316,7 @@ fn a_retained_boundary_never_splits_an_assistant_tool_result_exchange() {
         arguments: json!({"path":"x"}),
         arguments_error: None,
     }];
-    let call = store.append_message(Message::Assistant(assistant)).unwrap();
+    let call = store.append_message(Message::Assistant(assistant)).await.unwrap();
     let result = store
         .append_message(Message::ToolResult(ToolResultMessage {
             tool_call_id: "c".into(),
@@ -309,11 +326,13 @@ fn a_retained_boundary_never_splits_an_assistant_tool_result_exchange() {
             timestamp: 0,
             duration_ms: None,
         }))
+        .await
         .unwrap();
-    assert!(store.begin_compaction(plan(&store, &result)).is_err());
-    let attempt = store.begin_compaction(plan(&store, &call)).unwrap();
+    assert!(store.begin_compaction(plan(&store, &result)).await.is_err());
+    let attempt = store.begin_compaction(plan(&store, &call)).await.unwrap();
     store
         .append_compaction(&attempt, summary(&old), Usage::default())
+        .await
         .unwrap();
     let messages = store.messages();
     assert!(matches!(&messages[1], Message::Assistant(assistant) if assistant.tool_calls()[0].id == "c"));

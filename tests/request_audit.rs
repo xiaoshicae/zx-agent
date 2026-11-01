@@ -32,9 +32,9 @@ fn request_ids(store: &SessionStore) -> Vec<String> {
         .collect()
 }
 
-/// Every request rebuilt from a freshly opened copy of the file.
+/// Every request rebuilt from a fresh snapshot of the file.
 fn replayed(path: &Path) -> Vec<Request> {
-    let store = SessionStore::open(path).unwrap();
+    let store = SessionStore::read(path).unwrap();
     request_ids(&store)
         .iter()
         .map(|id| store.replay_request(id).unwrap().1)
@@ -116,7 +116,7 @@ async fn legacy_sessions_upgrade_once_before_the_first_request() {
         let mut legacy = SessionHeader::new(Path::new("."), "test-model");
         legacy.version = version;
         let mut store = SessionStore::create(&path, legacy).unwrap();
-        store.append_message(Message::user("earlier")).unwrap();
+        store.append_message(Message::user("earlier")).await.unwrap();
         drop(store);
         let before = std::fs::read(&path).unwrap();
 
@@ -149,8 +149,11 @@ async fn summary_requests_are_rebuilt_from_the_compaction_attempt() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
     let mut store = SessionStore::create(&path, header()).unwrap();
-    let old = store.append_message(Message::user("observed ".repeat(600))).unwrap();
-    store.append_message(Message::user("most recent input")).unwrap();
+    let old = store
+        .append_message(Message::user("observed ".repeat(600)))
+        .await
+        .unwrap();
+    store.append_message(Message::user("most recent input")).await.unwrap();
     let summary =
         json!({"facts":[{"text":"Old observation","sourceEntryIds":[old]}],"inferences":[],"plans":[]}).to_string();
     let provider = Arc::new(FauxProvider::new([FauxStep::text(summary)]));
@@ -172,7 +175,7 @@ async fn summary_requests_are_rebuilt_from_the_compaction_attempt() {
     let report = session.compact().await.unwrap();
 
     assert_eq!(report.outcome, Outcome::Completed, "{report:?}");
-    let reopened = SessionStore::open(&path).unwrap();
+    let reopened = SessionStore::read(&path).unwrap();
     let ids = request_ids(&reopened);
     assert_eq!(ids.len(), 1);
     let Some(Entry::RequestStarted(started)) = reopened.get(&ids[0]) else {
@@ -184,18 +187,18 @@ async fn summary_requests_are_rebuilt_from_the_compaction_attempt() {
     assert_eq!(vec![request], provider.requests());
 }
 
-#[test]
-fn only_request_checkpoints_can_be_replayed() {
+#[tokio::test]
+async fn only_request_checkpoints_can_be_replayed() {
     let mut store = SessionStore::in_memory(header());
-    let message = store.append_message(Message::user("not a request")).unwrap();
+    let message = store.append_message(Message::user("not a request")).await.unwrap();
     assert!(store.replay_request(&message).is_err());
     assert!(store.replay_request("missing").is_err());
 }
 
-#[test]
-fn a_request_that_differs_from_the_persisted_projection_is_not_recorded() {
+#[tokio::test]
+async fn a_request_that_differs_from_the_persisted_projection_is_not_recorded() {
     let mut store = SessionStore::in_memory(header());
-    store.append_message(Message::user("persisted")).unwrap();
+    store.append_message(Message::user("persisted")).await.unwrap();
     let before = store.entries().len();
     let request = Request {
         model: "test-model".into(),
@@ -204,7 +207,9 @@ fn a_request_that_differs_from_the_persisted_projection_is_not_recorded() {
         max_tokens: None,
     };
 
-    let recorded = store.record_request(&request, "faux", serde_json::Value::Null, RequestSource::Projection);
+    let recorded = store
+        .record_request(&request, "faux", serde_json::Value::Null, RequestSource::Projection)
+        .await;
 
     assert!(recorded.is_err());
     assert_eq!(store.entries().len(), before);

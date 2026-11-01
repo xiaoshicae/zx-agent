@@ -57,17 +57,99 @@ async fn dropping_a_run_cancels_its_provider() {
 }
 
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use common::{EchoTool, RunnerSetup, config, fast_retry, header, read_lines, summarize};
 use zx_agent::agent::AgentEvent;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{PREAMBLE, StopReason, SystemPrompt};
+use zx_agent::ai::{Message, PREAMBLE, StopReason, SystemPrompt};
 use zx_agent::runner::{Limits, RunOutcome};
-use zx_agent::session::SessionStore;
+use zx_agent::session::{LoadedSession, LogRecord, SessionLog, SessionStore};
+
+/// A stored record, as a database row would hold it.
+#[derive(Debug)]
+struct Row {
+    seq: u64,
+    id: String,
+    parent_id: Option<String>,
+    kind: String,
+    json: String,
+}
+
+/// Stores records outside a file, like a database table that the test reads back.
+struct TableLog(mpsc::Sender<Row>);
+
+#[async_trait]
+impl SessionLog for TableLog {
+    async fn append(&mut self, record: &LogRecord<'_>) -> anyhow::Result<()> {
+        self.0.send(Row {
+            seq: record.seq,
+            id: record.id.into(),
+            parent_id: record.parent_id.map(String::from),
+            kind: record.kind.into(),
+            json: record.json.into(),
+        })?;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_session_in_a_custom_log_reloads_and_continues_the_same_conversation() {
+    let (sender, table) = mpsc::channel();
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::tool_call("c1", "echo", json!({"text": "observed"})),
+        FauxStep::text("done"),
+    ]));
+    let tool = Arc::new(EchoTool::new("echo"));
+    let (mut runner, _) = RunnerSetup {
+        session: SessionStore::with_log(header(), Box::new(TableLog(sender))),
+        ..RunnerSetup::new(config(provider, vec![tool.clone()]))
+    }
+    .build();
+
+    let report = runner.run("go", &CancellationToken::new()).await;
+
+    assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
+    assert_eq!(report.session_file, None);
+    let rows: Vec<Row> = table.try_iter().collect();
+    let seqs: Vec<u64> = rows.iter().map(|row| row.seq).collect();
+    assert_eq!(seqs, (1..=u64::try_from(rows.len()).unwrap()).collect::<Vec<_>>());
+    for row in &rows {
+        let value: Value = serde_json::from_str(&row.json).unwrap();
+        assert_eq!((&value["type"], &value["id"]), (&json!(row.kind), &json!(row.id)));
+        assert_eq!(value["parentId"], json!(row.parent_id));
+    }
+    let kinds: Vec<&str> = rows.iter().map(|row| row.kind.as_str()).collect();
+    assert!(kinds.contains(&"tool_call_started"), "{kinds:?}");
+
+    let loaded = LoadedSession {
+        header: runner.session().header().clone(),
+        records: rows.iter().map(|row| row.json.clone()).collect(),
+        repaired_bytes: 0,
+    };
+    let (sender, more) = mpsc::channel();
+    let reloaded = SessionStore::load(loaded, Box::new(TableLog(sender))).unwrap();
+    assert_eq!(reloaded.entries(), runner.session().entries());
+    let history = runner.session().messages();
+    let next = Arc::new(FauxProvider::new([FauxStep::text("again")]));
+    let (mut runner, _) = RunnerSetup {
+        session: reloaded,
+        ..RunnerSetup::new(config(next.clone(), vec![tool]))
+    }
+    .build();
+    let report = runner.run("next", &CancellationToken::new()).await;
+    assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
+    let mut expected = history;
+    expected.push(Message::user("next"));
+    assert_eq!(summarize(&next.requests()[0].messages), summarize(&expected));
+    let continued: Vec<u64> = more.try_iter().map(|row| row.seq).collect();
+    assert_eq!(continued.first(), Some(&(u64::try_from(rows.len()).unwrap() + 1)));
+}
 
 fn provider(steps: impl IntoIterator<Item = FauxStep>) -> Arc<FauxProvider> {
     Arc::new(FauxProvider::new(steps))

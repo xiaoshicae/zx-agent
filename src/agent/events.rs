@@ -1,11 +1,9 @@
 //! Events emitted while the agent runs, and the sink that receives them.
 
-use async_trait::async_trait;
 use serde::Serialize;
 use serde_json::Value;
-use tokio_util::sync::CancellationToken;
 
-use crate::ai::{Delta, Message, Provider, Request, ToolCall, Usage};
+use crate::ai::{Delta, Message, Usage};
 
 /// How one `run_loop` call ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -13,7 +11,7 @@ use crate::ai::{Delta, Message, Provider, Request, ToolCall, Usage};
 pub enum LoopOutcome {
     /// The model answered without further tool calls and no queued message remained.
     Completed,
-    /// A provider or operational hook failed, or a context edit could not be persisted.
+    /// A provider or operational hook failed, or the session could not record.
     Error,
     /// Cancelled.
     Aborted,
@@ -69,7 +67,7 @@ pub enum AgentEvent {
     MessageUpdate {
         delta: Delta,
     },
-    /// A finished message. The runner persists messages at this point.
+    /// A finished message. A run with a session has already recorded it.
     MessageEnd {
         message: Message,
     },
@@ -161,50 +159,11 @@ impl AgentEvent {
     }
 }
 
-/// Receives events and persists edits synchronously, possibly from concurrent tool
-/// futures. These methods must not block for long. prepare_context is the asynchronous
-/// session-host boundary before the next task request.
-#[async_trait]
+/// Receives events. Called from the running loop, possibly from concurrent tool futures,
+/// so it must return promptly. Events report what happened; the session records it first.
 pub trait EventSink: Send + Sync {
     /// Handle one event.
     fn emit(&self, event: AgentEvent);
-    /// Persist an edit before the loop changes its projection. Memory-only sinks
-    /// need no audit writer; the Runner supplies a session-backed implementation.
-    fn edit_context(&self, _index: usize, _replacement: Option<&str>) -> Result<(), String> {
-        Ok(())
-    }
-    /// Persist a request checkpoint before dispatch. The default is memory-only;
-    /// a Runner records configuration and projection in its append-only session.
-    fn record_request(&self, _request: &Request, _provider: &dyn Provider) -> Result<(), String> {
-        Ok(())
-    }
-    /// Persist that a call with side effects is about to run, after its checks and approval.
-    /// An error prevents the call. The default is memory-only; a Runner appends
-    /// `tool_call_started` to its session.
-    fn record_tool_call_started(&self, _call: &ToolCall) -> Result<(), String> {
-        Ok(())
-    }
-    /// Session-host preparation after input/context edits and before a task request.
-    /// The default makes no request or change. A replacement must already be persisted;
-    /// request costs, including failed preparation, count against the run budget.
-    async fn prepare_context(&self, _cancel: &CancellationToken) -> ContextPreparation {
-        ContextPreparation::Unchanged
-    }
-}
-
-/// A host-owned preparation step. The loop knows neither profiles nor compaction policy.
-pub enum ContextPreparation {
-    Unchanged,
-    Updated {
-        messages: Vec<Message>,
-        requests: u32,
-        usage: Usage,
-    },
-    Failed {
-        error: String,
-        requests: u32,
-        usage: Usage,
-    },
 }
 
 impl<F> EventSink for F

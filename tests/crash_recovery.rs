@@ -287,7 +287,7 @@ async fn an_interrupted_batch_gets_results_and_no_call_runs_again() {
     let path = dir.path().join("s.jsonl");
     // What a crash leaves: c1 finished, c2 started, c3 and c4 never ran, c5's tool is gone.
     let mut store = SessionStore::create(&path, header()).unwrap();
-    store.append_message(Message::user("fix it")).unwrap();
+    store.append_message(Message::user("fix it")).await.unwrap();
     store
         .append_message(answer(&[
             ("c1", "write"),
@@ -296,10 +296,11 @@ async fn an_interrupted_batch_gets_results_and_no_call_runs_again() {
             ("c4", "read"),
             ("c5", "gone"),
         ]))
+        .await
         .unwrap();
-    store.append_tool_call_started("c1", "write").unwrap();
-    store.append_tool_call_started("c2", "write").unwrap();
-    store.append_message(result("c1", "write", "written")).unwrap();
+    store.append_tool_call_started("c1", "write").await.unwrap();
+    store.append_tool_call_started("c2", "write").await.unwrap();
+    store.append_message(result("c1", "write", "written")).await.unwrap();
     drop(store);
     let write = Counted::new("write", Effects::SideEffects);
     let read = Counted::new("read", Effects::ReadOnly);
@@ -353,7 +354,7 @@ async fn an_interrupted_batch_gets_results_and_no_call_runs_again() {
         assert!(is_error, "{content}");
     }
     // Recorded in the file, so the next run has nothing to recover.
-    assert!(SessionStore::open(&path).unwrap().interrupted_tool_calls().is_empty());
+    assert!(SessionStore::read(&path).unwrap().interrupted_tool_calls().is_empty());
 }
 
 #[tokio::test]
@@ -363,9 +364,10 @@ async fn sessions_from_before_start_records_report_an_unknown_start() {
     let mut legacy = SessionHeader::new(Path::new("."), "test-model");
     legacy.version = 3;
     let mut store = SessionStore::create(&path, legacy).unwrap();
-    store.append_message(Message::user("fix it")).unwrap();
+    store.append_message(Message::user("fix it")).await.unwrap();
     store
         .append_message(answer(&[("c1", "write"), ("c2", "read")]))
+        .await
         .unwrap();
     drop(store);
     let write = Counted::new("write", Effects::SideEffects);
@@ -497,7 +499,7 @@ fn sent_tool_result(server: &MockServer, index: usize) -> Value {
 async fn run_reports_a_recovered_call_and_does_not_run_the_command_again() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = SessionStore::create(&dir.path().join("session.jsonl"), header()).unwrap();
-    store.append_message(Message::user("fix it")).unwrap();
+    store.append_message(Message::user("fix it")).await.unwrap();
     let mut call = AssistantMessage::failure("mock", "mock", StopReason::ToolUse, "");
     call.error_message = None;
     call.content = vec![ContentBlock::ToolCall {
@@ -506,8 +508,8 @@ async fn run_reports_a_recovered_call_and_does_not_run_the_command_again() {
         arguments: json!({"command": "touch ran-again"}),
         arguments_error: None,
     }];
-    store.append_message(Message::Assistant(call)).unwrap();
-    store.append_tool_call_started("c1", "bash").unwrap();
+    store.append_message(Message::Assistant(call)).await.unwrap();
+    store.append_tool_call_started("c1", "bash").await.unwrap();
     drop(store);
     let server = MockServer::start(vec![Reply::text("checked")]).await;
 

@@ -237,8 +237,11 @@ async fn run_keeps_auto_compaction_disabled_unless_the_cli_explicitly_enables_it
     for enable in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let mut store = SessionStore::create(&dir.path().join("audit.jsonl"), common::header()).unwrap();
-        let id = store.append_message(Message::user("x".repeat(300 * 1024))).unwrap();
-        store.append_message(Message::user("recent input")).unwrap();
+        let id = store
+            .append_message(Message::user("x".repeat(300 * 1024)))
+            .await
+            .unwrap();
+        store.append_message(Message::user("recent input")).await.unwrap();
         drop(store);
         let summary =
             json!({"facts":[{"text":"Old observation","sourceEntryIds":[id]}],"inferences":[],"plans":[]}).to_string();

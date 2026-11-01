@@ -102,7 +102,7 @@ async fn repaired_session_tails_are_reported_on_stderr() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session.jsonl");
     let mut session = SessionStore::create(&path, SessionHeader::new(dir.path(), "mock-model")).unwrap();
-    session.append_message(Message::user("earlier")).unwrap();
+    session.append_message(Message::user("earlier")).await.unwrap();
     drop(session);
     std::fs::OpenOptions::new()
         .append(true)

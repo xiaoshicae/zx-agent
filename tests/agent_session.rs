@@ -515,7 +515,7 @@ async fn switching_models_keeps_the_session_header_and_append_only_history() {
     );
     session.prompt("second").await.unwrap();
     assert!(std::fs::read(&file).unwrap().starts_with(&before));
-    let reopened = SessionStore::open(&file).unwrap();
+    let reopened = SessionStore::read(&file).unwrap();
     assert_eq!(reopened.header().model, "test-model");
     assert!(
         matches!(reopened.messages().last(), Some(zx_agent::ai::Message::Assistant(message)) if message.model == "new-model")
@@ -541,7 +541,7 @@ async fn subscriber_callbacks_see_messages_only_after_the_single_audit_write() {
         let observed = observed.clone();
         subscriptions.push(session.subscribe(Arc::new(move |event: AgentEvent| {
             if let AgentEvent::MessageEnd { message } = event {
-                let stored = SessionStore::open(&file).unwrap();
+                let stored = SessionStore::read(&file).unwrap();
                 assert_eq!(stored.messages().last(), Some(&message));
                 observed.fetch_add(1, Ordering::SeqCst);
             }
@@ -550,5 +550,5 @@ async fn subscriber_callbacks_see_messages_only_after_the_single_audit_write() {
     session.prompt("go").await.unwrap();
     assert_eq!(session.failed_subscribers(), 0);
     assert_eq!(observed.load(Ordering::SeqCst), 4);
-    assert_eq!(SessionStore::open(&file).unwrap().messages().len(), 2);
+    assert_eq!(SessionStore::read(&file).unwrap().messages().len(), 2);
 }

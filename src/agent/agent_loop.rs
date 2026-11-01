@@ -10,13 +10,14 @@ use futures::{FutureExt, StreamExt};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use super::events::{AgentEvent, ContextPreparation, EventSink, LoopOutcome};
+use super::events::{AgentEvent, EventSink, LoopOutcome};
 use super::hooks::{
     ContextEdit, HookCall, HookChain, HookError, HookFailure, HookPhase, TurnDecision, TurnDisposition, TurnSummary,
     report_failure,
 };
+use super::host::{ContextPreparation, SessionHost};
 use super::policy::Decision;
-use super::queue::MessageQueues;
+use super::queue::{MessageQueues, Queue};
 use super::tool::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
 use crate::ai::{
     AssistantMessage, Message, Provider, Request, StopReason, StreamEvent, SystemMessage, SystemPrompt, ToolCall,
@@ -66,9 +67,13 @@ pub struct LoopControl<'a> {
     pub approvals: &'a mut ApprovalCache,
     pub cancel: &'a CancellationToken,
     pub sink: &'a dyn EventSink,
+    /// Records each step before the loop acts on it; the Runner supplies its session. Without
+    /// one, the loop keeps messages and edits only in its context.
+    pub(crate) host: Option<&'a mut dyn SessionHost>,
 }
 
 impl<'a> LoopControl<'a> {
+    /// Control for a run that keeps its messages only in the context passed to `run_loop`.
     pub fn new(
         max_turns: Option<u32>,
         approvals: &'a mut ApprovalCache,
@@ -82,6 +87,7 @@ impl<'a> LoopControl<'a> {
             approvals,
             cancel,
             sink,
+            host: None,
         }
     }
 }
@@ -89,8 +95,14 @@ impl<'a> LoopControl<'a> {
 /// Accounting follows actual responses, so context edits cannot change usage or retries.
 #[derive(Debug)]
 pub enum LoopFailure {
-    /// Boxed so a successful LoopResult does not reserve space for a full response.
-    Provider(Box<AssistantMessage>),
+    /// A failed or cancelled response. Boxed so a successful LoopResult does not reserve
+    /// space for a full response.
+    Provider {
+        message: Box<AssistantMessage>,
+        /// The response's session entry, when the run records to a session.
+        entry_id: Option<String>,
+    },
+    /// A hook or context preparation failed, or the session could not record.
     Host(String),
 }
 
@@ -105,7 +117,7 @@ pub struct LoopResult {
 }
 
 /// Append prompts and run until the model stops, the budget expires, or cancellation.
-/// Hooks persist changes before a request; the provider sees exactly this projection.
+/// Each step is recorded before the loop acts on it; the provider sees exactly this context.
 /// None imposes no turn limit, while Some(0) makes no model request.
 pub async fn run_loop(
     context: &mut Vec<Message>,
@@ -124,8 +136,13 @@ pub async fn run_loop(
     engine.emit(AgentEvent::AgentStart).await;
     match engine.run(context, prompts, &mut result).await {
         Ok(outcome) => result.outcome = outcome,
-        Err(error) => {
-            result.outcome = if engine.control.cancel.is_cancelled() {
+        Err(halt) => {
+            let (aborted, error) = match halt {
+                Halt::Failed(error) => (engine.control.cancel.is_cancelled(), error),
+                // Even when the run was also cancelled: its audit trail is incomplete.
+                Halt::Unrecorded(error) => (false, error),
+            };
+            result.outcome = if aborted {
                 LoopOutcome::Aborted
             } else {
                 LoopOutcome::Error
@@ -141,12 +158,20 @@ pub async fn run_loop(
     result
 }
 
+/// Why the loop stopped before the model finished.
+enum Halt {
+    /// A hook or context preparation failed; if the run was cancelled, it was aborted.
+    Failed(String),
+    /// The session could not record a step, so the loop must not act on it.
+    Unrecorded(String),
+}
+
 struct Engine<'a, 'b, 'c> {
     config: &'a LoopConfig,
     control: &'b mut LoopControl<'c>,
 }
 
-impl Engine<'_, '_, '_> {
+impl<'a> Engine<'a, '_, '_> {
     async fn emit(&self, event: AgentEvent) {
         self.config
             .hooks
@@ -158,66 +183,83 @@ impl Engine<'_, '_, '_> {
         report_failure(error, self.control.sink)
     }
 
-    async fn append(&self, context: &mut Vec<Message>, message: Message) {
-        self.emit(AgentEvent::MessageStart { role: message.role() }).await;
+    /// Record a finished message, then report it. Returns its entry ID in a session.
+    async fn finish(&mut self, message: &Message) -> Result<Option<String>, Halt> {
+        let id = match self.control.host.as_deref_mut() {
+            Some(host) => Some(host.append_message(message).await.map_err(Halt::Unrecorded)?),
+            None => None,
+        };
         self.emit(AgentEvent::MessageEnd {
             message: message.clone(),
         })
         .await;
-        context.push(message);
+        Ok(id)
     }
 
-    async fn edit(&self, context: &mut Vec<Message>, edit: ContextEdit) -> Result<(), String> {
-        match &edit {
-            ContextEdit::Append(message) => self.append(context, message.clone()).await,
-            ContextEdit::ReplaceText { index, text } => {
-                self.control.sink.edit_context(*index, Some(text))?;
-                edit.apply(context)?;
-                self.emit(AgentEvent::ContextEdited {
-                    index: *index,
-                    replacement: Some(text.clone()),
-                })
-                .await;
-            }
-            ContextEdit::Omit { index } => {
-                self.control.sink.edit_context(*index, None)?;
-                edit.apply(context)?;
-                self.emit(AgentEvent::ContextEdited {
-                    index: *index,
-                    replacement: None,
-                })
-                .await;
-            }
-        }
+    async fn append(&mut self, context: &mut Vec<Message>, message: Message) -> Result<(), Halt> {
+        self.emit(AgentEvent::MessageStart { role: message.role() }).await;
+        self.finish(&message).await?;
+        context.push(message);
         Ok(())
     }
 
-    async fn input(&self, context: &mut Vec<Message>, message: Message) -> Result<(), String> {
-        self.append(context, message).await;
-        let index = context.len() - 1;
+    async fn edit(&mut self, context: &mut Vec<Message>, edit: ContextEdit) -> Result<(), Halt> {
+        let (index, replacement) = match &edit {
+            ContextEdit::Append(message) => return self.append(context, message.clone()).await,
+            ContextEdit::ReplaceText { index, text } => (*index, Some(text.clone())),
+            ContextEdit::Omit { index } => (*index, None),
+        };
+        if let Some(host) = self.control.host.as_deref_mut() {
+            host.edit_context(index, replacement.as_deref())
+                .await
+                .map_err(Halt::Unrecorded)?;
+        }
+        edit.apply(context).map_err(Halt::Failed)?;
+        self.emit(AgentEvent::ContextEdited { index, replacement }).await;
+        Ok(())
+    }
+
+    /// Pass user input through the input hooks, then record it. The original text is kept
+    /// for auditing: a rewrite or a rejection is recorded as an edit after it. A cancelled
+    /// hook decided nothing, so nothing is recorded. Input from `queue` leaves the queue
+    /// only once recorded, so a cancelled or dropped run leaves it for the next run.
+    async fn input(&mut self, context: &mut Vec<Message>, message: Message, queue: Option<Queue>) -> Result<(), Halt> {
         let Message::User {
             content,
             kind: UserMessageKind::Prompt,
             ..
-        } = &context[index]
+        } = &message
         else {
-            return Ok(());
+            return self.append(context, message).await;
         };
-        let transformed = self.config.hooks.on_input(content.clone(), self.control.cancel).await;
+        let text = content.clone();
+        let transformed = match self.config.hooks.on_input(text.clone(), self.control.cancel).await {
+            Err(error) if error.failure == HookFailure::Cancelled => return Err(Halt::Failed(self.hook_error(error))),
+            transformed => transformed,
+        };
+        self.append(context, message).await?;
+        if let Some(queue) = queue {
+            self.config.queues.remove_front(queue, &text);
+        }
+        let index = context.len() - 1;
         match transformed {
-            Ok(text) if text != *content => {
-                self.edit(context, ContextEdit::ReplaceText { index, text }).await?;
+            Ok(replacement) if replacement != text => {
+                self.edit(
+                    context,
+                    ContextEdit::ReplaceText {
+                        index,
+                        text: replacement,
+                    },
+                )
+                .await
             }
-            Ok(_) => {}
+            Ok(_) => Ok(()),
             Err(error) => {
                 // A rejected input remains in the audit log but is omitted from requests.
-                if error.failure != HookFailure::Cancelled {
-                    self.edit(context, ContextEdit::Omit { index }).await?;
-                }
-                return Err(self.hook_error(error));
+                self.edit(context, ContextEdit::Omit { index }).await?;
+                Err(Halt::Failed(self.hook_error(error)))
             }
         }
-        Ok(())
     }
 
     async fn run(
@@ -225,12 +267,13 @@ impl Engine<'_, '_, '_> {
         context: &mut Vec<Message>,
         prompts: Vec<Message>,
         result: &mut LoopResult,
-    ) -> Result<LoopOutcome, String> {
+    ) -> Result<LoopOutcome, Halt> {
+        let config = self.config;
         self.emit(AgentEvent::TurnStart {
             turn: self.control.turn_offset.saturating_add(1),
         })
         .await;
-        let changes = SystemPrompt::from_transcript(context).diff(&self.config.spec.system_prompt);
+        let changes = SystemPrompt::from_transcript(context).diff(&config.spec.system_prompt);
         if !changes.is_empty() {
             self.append(
                 context,
@@ -239,10 +282,10 @@ impl Engine<'_, '_, '_> {
                     timestamp: now_ms(),
                 }),
             )
-            .await;
+            .await?;
         }
         for message in prompts {
-            self.input(context, message).await?;
+            self.input(context, message, None).await?;
         }
         // A continuation or follow-up that a finish_turn hook asked for.
         let mut requested: Option<Message> = None;
@@ -255,18 +298,18 @@ impl Engine<'_, '_, '_> {
                 })
                 .await;
             }
-            // Queued input is taken one message at a time, so a rejected message or a dropped
+            // Queued input is taken one message at a time, so a rejected message or a stopped
             // run leaves the rest of the queue for the next run.
-            while let Some(message) = self.config.queues.pop_steering() {
-                self.input(context, message).await?;
+            while let Some(text) = config.queues.front(Queue::Steering) {
+                self.input(context, Message::user(text), Some(Queue::Steering)).await?;
             }
             if std::mem::take(&mut take_follow_ups) {
-                while let Some(message) = self.config.queues.pop_follow_up() {
-                    self.input(context, message).await?;
+                while let Some(text) = config.queues.front(Queue::FollowUp) {
+                    self.input(context, Message::user(text), Some(Queue::FollowUp)).await?;
                 }
             }
             if let Some(message) = requested.take() {
-                self.input(context, message).await?;
+                self.input(context, message, None).await?;
             }
             if self.control.cancel.is_cancelled() {
                 return Ok(LoopOutcome::Aborted);
@@ -274,19 +317,21 @@ impl Engine<'_, '_, '_> {
             if self.control.max_turns.is_some_and(|limit| result.turns >= limit) {
                 return Ok(LoopOutcome::MaxTurns);
             }
-            let edits = self
-                .config
+            let edits = config
                 .hooks
                 .transform_context(context, self.control.cancel)
                 .await
-                .map_err(|error| self.hook_error(error))?;
+                .map_err(|error| Halt::Failed(self.hook_error(error)))?;
             for edit in edits {
                 self.edit(context, edit).await?;
             }
             if self.control.cancel.is_cancelled() {
                 return Ok(LoopOutcome::Aborted);
             }
-            let prepared = self.control.sink.prepare_context(self.control.cancel).await;
+            let prepared = match self.control.host.as_deref_mut() {
+                Some(host) => host.prepare_context(self.control.cancel).await,
+                None => ContextPreparation::Unchanged,
+            };
             let (requests, usage, failure) = match prepared {
                 ContextPreparation::Unchanged => (0, Usage::default(), None),
                 ContextPreparation::Updated {
@@ -297,7 +342,10 @@ impl Engine<'_, '_, '_> {
                     *context = messages;
                     (requests, usage, None)
                 }
-                ContextPreparation::Failed { error, requests, usage } => (requests, usage, Some(error)),
+                ContextPreparation::Failed { error, requests, usage } => (requests, usage, Some(Halt::Failed(error))),
+                ContextPreparation::Unrecorded { error, requests, usage } => {
+                    (requests, usage, Some(Halt::Unrecorded(error)))
+                }
             };
             result.usage.add(&usage);
             for request in 0..requests {
@@ -313,8 +361,8 @@ impl Engine<'_, '_, '_> {
                     .await;
                 }
             }
-            if let Some(error) = failure {
-                return Err(error);
+            if let Some(halt) = failure {
+                return Err(halt);
             }
             if self.control.cancel.is_cancelled() {
                 return Ok(LoopOutcome::Aborted);
@@ -324,17 +372,21 @@ impl Engine<'_, '_, '_> {
             }
             if requests > 0 {
                 // Preparation is a request boundary too. Drain newly arrived steering
-                // and persist context hooks again before the next task request.
+                // and record context hooks again before the next task request.
                 continue;
             }
-            let spec = &self.config.spec;
+            let spec = &config.spec;
             let request = Request {
                 model: spec.model.clone(),
                 messages: context.to_vec(),
                 tools: spec.tools.iter().map(|tool| tool.definition()).collect(),
                 max_tokens: spec.max_tokens,
             };
-            self.control.sink.record_request(&request, spec.provider.as_ref())?;
+            if let Some(host) = self.control.host.as_deref_mut() {
+                host.record_request(&request, spec.provider.as_ref())
+                    .await
+                    .map_err(Halt::Unrecorded)?;
+            }
             if self.control.cancel.is_cancelled() {
                 return Ok(LoopOutcome::Aborted);
             }
@@ -344,11 +396,16 @@ impl Engine<'_, '_, '_> {
             let stop = message.stop_reason;
             let calls = message.tool_calls();
             // History owns a copy; finish_turn and accounting retain the actual response.
-            context.push(Message::Assistant(message.clone()));
+            let recorded = Message::Assistant(message.clone());
+            let entry_id = self.finish(&recorded).await?;
+            context.push(recorded);
             let turn = self.control.turn_offset.saturating_add(result.turns);
             if matches!(stop, StopReason::Error | StopReason::Aborted) {
                 self.emit(AgentEvent::TurnEnd { turn }).await;
-                result.failure = Some(LoopFailure::Provider(Box::new(message)));
+                result.failure = Some(LoopFailure::Provider {
+                    message: Box::new(message),
+                    entry_id,
+                });
                 return Ok(if stop == StopReason::Aborted {
                     LoopOutcome::Aborted
                 } else {
@@ -360,9 +417,9 @@ impl Engine<'_, '_, '_> {
             let mut terminated = false;
             if !calls.is_empty() {
                 let batch = if stop == StopReason::Length {
-                    self.truncated(&calls).await
+                    self.truncated(&calls).await?
                 } else {
-                    self.tools(&calls).await
+                    self.tools(&calls).await?
                 };
                 terminated = batch.terminate;
                 needs_more = !terminated;
@@ -374,7 +431,7 @@ impl Engine<'_, '_, '_> {
             }
             // Inspect queues without consuming them: stopping or failing in a hook must
             // leave accepted user input available to the next run.
-            let queued = self.config.queues.has_steering() || (!needs_more && self.config.queues.has_follow_up());
+            let queued = config.queues.has(Queue::Steering) || (!needs_more && config.queues.has(Queue::FollowUp));
             let disposition = if needs_more || queued {
                 TurnDisposition::Continue
             } else if terminated {
@@ -391,19 +448,18 @@ impl Engine<'_, '_, '_> {
                 remaining_turns,
                 disposition,
             };
-            let decision = self
-                .config
+            let decision = config
                 .hooks
                 .finish_turn(&summary, self.control.cancel)
                 .await
-                .map_err(|error| self.hook_error(error))?;
+                .map_err(|error| Halt::Failed(self.hook_error(error)))?;
             if decision == TurnDecision::Stop {
                 return Ok(completed(stop));
             }
             // Inspect again: input may have arrived while the hook ran. It is taken at the top
             // of the next turn; follow-ups only when the model has nothing left to do.
-            let steering = self.config.queues.has_steering();
-            take_follow_ups = !needs_more && !steering && self.config.queues.has_follow_up();
+            let steering = config.queues.has(Queue::Steering);
+            take_follow_ups = !needs_more && !steering && config.queues.has(Queue::FollowUp);
             let input_waiting = steering || take_follow_ups;
             match decision {
                 TurnDecision::ContinueAnswer(text) if disposition == TurnDisposition::Stop && !input_waiting => {
@@ -434,6 +490,8 @@ impl Engine<'_, '_, '_> {
         }
     }
 
+    /// Stream one response, reporting its start and its deltas. The caller records the
+    /// response and reports its end.
     async fn stream(&self, request: Request) -> AssistantMessage {
         let spec = &self.config.spec;
         let mut events = spec.provider.stream(request, self.control.cancel.clone());
@@ -446,13 +504,7 @@ impl Engine<'_, '_, '_> {
             match event {
                 StreamEvent::Start => {}
                 StreamEvent::Delta(delta) => self.emit(AgentEvent::MessageUpdate { delta }).await,
-                StreamEvent::Done(message) | StreamEvent::Error(message) => {
-                    self.emit(AgentEvent::MessageEnd {
-                        message: Message::Assistant(message.clone()),
-                    })
-                    .await;
-                    return message;
-                }
+                StreamEvent::Done(message) | StreamEvent::Error(message) => return message,
             }
         }
         let stop = if self.control.cancel.is_cancelled() {
@@ -460,23 +512,18 @@ impl Engine<'_, '_, '_> {
         } else {
             StopReason::Error
         };
-        let message = AssistantMessage::failure(
+        if !started {
+            self.emit(AgentEvent::MessageStart { role: "assistant" }).await;
+        }
+        AssistantMessage::failure(
             spec.provider.name(),
             &spec.model,
             stop,
             "provider stream ended without a final event",
-        );
-        if !started {
-            self.emit(AgentEvent::MessageStart { role: "assistant" }).await;
-        }
-        self.emit(AgentEvent::MessageEnd {
-            message: Message::Assistant(message.clone()),
-        })
-        .await;
-        message
+        )
     }
 
-    fn find_tool(&self, name: &str) -> Option<&dyn Tool> {
+    fn find_tool(&self, name: &str) -> Option<&'a dyn Tool> {
         self.config
             .spec
             .tools
@@ -540,7 +587,7 @@ impl Engine<'_, '_, '_> {
         Prepared::Ready
     }
 
-    async fn tools(&mut self, calls: &[ToolCall]) -> Batch {
+    async fn tools(&mut self, calls: &[ToolCall]) -> Result<Batch, Halt> {
         let sequential = self.config.spec.sequential_tools
             || calls.iter().any(|call| {
                 self.find_tool(&call.name)
@@ -553,39 +600,36 @@ impl Engine<'_, '_, '_> {
         }
     }
 
-    async fn sequential(&mut self, calls: &[ToolCall]) -> Batch {
+    async fn sequential(&mut self, calls: &[ToolCall]) -> Result<Batch, Halt> {
         let mut results = Vec::new();
         let mut terminate = true;
         for call in calls {
             self.tool_start(call).await;
-            // Keep only the preparation verdict so the mutable approval borrow ends here.
             let outcome = match self.prepare(call).await {
                 Prepared::Immediate(outcome) => outcome,
                 Prepared::Ready => {
                     let tool = self.find_tool(&call.name).expect("tool was resolved above");
-                    match self.record_start(call, tool) {
-                        Ok(()) => execute(tool, call.arguments.clone(), &self.config.spec, self.control.cancel).await,
-                        Err(error) => Outcome::blocked(format!("Tool call was not executed: {error}")),
-                    }
+                    self.record_start(call, tool.effects()).await?;
+                    execute(tool, call.arguments.clone(), &self.config.spec, self.control.cancel).await
                 }
             };
             let outcome = self.after(call, outcome).await;
             self.tool_end(call, &outcome).await;
             terminate &= outcome.output.terminate;
             let result = to_result(call, outcome);
-            self.emit_result(&result).await;
+            self.finish_result(&result).await?;
             results.push(result);
             if self.control.cancel.is_cancelled() {
                 break;
             }
         }
-        Batch {
+        Ok(Batch {
             terminate: terminate && !results.is_empty(),
             results,
-        }
+        })
     }
 
-    async fn parallel(&mut self, calls: &[ToolCall]) -> Batch {
+    async fn parallel(&mut self, calls: &[ToolCall]) -> Result<Batch, Halt> {
         // Phase 1: all checks are ordered. Store verdicts, then borrow the static
         // tools during execution after the mutable approval borrow ends.
         let mut slots = Vec::new();
@@ -602,12 +646,10 @@ impl Engine<'_, '_, '_> {
         }
         // Record starts in call order before any call runs, so that recovery after a crash
         // can tell the calls that began from those that never did.
-        for (call, immediate) in &mut slots {
+        for (call, immediate) in &slots {
             if immediate.is_none() {
                 let tool = self.find_tool(&call.name).expect("tool was resolved in phase 1");
-                if let Err(error) = self.record_start(call, tool) {
-                    *immediate = Some(Outcome::blocked(format!("Tool call was not executed: {error}")));
-                }
+                self.record_start(call, tool.effects()).await?;
             }
         }
         // Phase 2: borrow the runtime; futures do not need spawn or shared mutable state.
@@ -630,23 +672,23 @@ impl Engine<'_, '_, '_> {
             (call, outcome)
         }))
         .await;
-        // Phase 3: commit results in model call order, regardless of completion order.
+        // Phase 3: record results in model call order, regardless of completion order.
         let terminate = !outcomes.is_empty() && outcomes.iter().all(|(_, result)| result.output.terminate);
         let mut results = Vec::with_capacity(outcomes.len());
         for (call, outcome) in outcomes {
             let result = to_result(call, outcome);
-            self.emit_result(&result).await;
+            self.finish_result(&result).await?;
             results.push(result);
         }
-        Batch { results, terminate }
+        Ok(Batch { results, terminate })
     }
 
-    /// Persist the start of a call with side effects; an error means it must not run.
+    /// Record the start of a call with side effects; an error means it must not run.
     /// Read-only calls are not recorded.
-    fn record_start(&self, call: &ToolCall, tool: &dyn Tool) -> Result<(), String> {
-        match tool.effects() {
-            Effects::ReadOnly => Ok(()),
-            Effects::SideEffects => self.control.sink.record_tool_call_started(call),
+    async fn record_start(&mut self, call: &ToolCall, effects: Effects) -> Result<(), Halt> {
+        match (effects, self.control.host.as_deref_mut()) {
+            (Effects::SideEffects, Some(host)) => host.record_tool_call_started(call).await.map_err(Halt::Unrecorded),
+            (Effects::SideEffects, None) | (Effects::ReadOnly, _) => Ok(()),
         }
     }
 
@@ -667,7 +709,7 @@ impl Engine<'_, '_, '_> {
         }
     }
 
-    async fn truncated(&self, calls: &[ToolCall]) -> Batch {
+    async fn truncated(&mut self, calls: &[ToolCall]) -> Result<Batch, Halt> {
         let mut results = Vec::new();
         for call in calls {
             self.tool_start(call).await;
@@ -677,13 +719,13 @@ impl Engine<'_, '_, '_> {
             ))).await;
             self.tool_end(call, &outcome).await;
             let result = to_result(call, outcome);
-            self.emit_result(&result).await;
+            self.finish_result(&result).await?;
             results.push(result);
         }
-        Batch {
+        Ok(Batch {
             results,
             terminate: false,
-        }
+        })
     }
 
     async fn tool_start(&self, call: &ToolCall) {
@@ -705,12 +747,10 @@ impl Engine<'_, '_, '_> {
         .await;
     }
 
-    async fn emit_result(&self, result: &ToolResultMessage) {
+    async fn finish_result(&mut self, result: &ToolResultMessage) -> Result<(), Halt> {
         self.emit(AgentEvent::MessageStart { role: "toolResult" }).await;
-        self.emit(AgentEvent::MessageEnd {
-            message: Message::ToolResult(result.clone()),
-        })
-        .await;
+        self.finish(&Message::ToolResult(result.clone())).await?;
+        Ok(())
     }
 }
 

@@ -1,11 +1,11 @@
 //! Run-level control around the loop (a small subset of pi's coding-agent AgentSession).
 //!
 //! The loop stops at the first provider error; this layer decides whether to retry, keeps
-//! the session file as the source of model context, and enforces turn and time limits.
+//! the session as the source of model context, and enforces turn and time limits.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -13,15 +13,15 @@ use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{
-    AgentEvent, ContextPreparation, Effects, EventSink, Interruption, LoopConfig, LoopControl, LoopFailure,
-    LoopOutcome, run_loop,
+    AgentEvent, ContextPreparation, Effects, EventSink, HookChain, Interruption, LoopConfig, LoopControl, LoopFailure,
+    LoopOutcome, SessionHost, run_loop,
 };
 use crate::ai::retry::{RetryPolicy, is_retryable};
-use crate::ai::{Message, Provider, ToolCall, ToolResultMessage, Usage, UserMessageKind, duration_ms, now_ms};
+use crate::ai::{Message, Provider, Request, ToolCall, ToolResultMessage, Usage, UserMessageKind, duration_ms, now_ms};
 use crate::compaction::{self, Trigger};
 use crate::interaction::ApprovalCache;
-use crate::session::{Entry, SessionStore, StartRecord};
-use crate::sync::{AbortOnDrop, lock};
+use crate::session::{Entry, RequestSource, SessionStore, StartRecord};
+use crate::sync::AbortOnDrop;
 
 /// Bounds for one run. Defaults impose no turn or time limit.
 /// Continuation is supplied by a finish_turn hook.
@@ -78,18 +78,19 @@ pub struct Runner {
     config: LoopConfig,
     retry: RetryPolicy,
     limits: Limits,
-    session: Mutex<SessionStore>,
+    session: SessionStore,
     sink: Arc<dyn EventSink>,
     approvals: ApprovalCache,
     compaction: compaction::Config,
     /// Why automatic compaction is paused after a paid summary request failed. Kept across
     /// prompts so the same failing summary is not paid for again on every prompt. A run only
     /// borrows it, so the pause also survives a run whose future is dropped.
-    compaction_pause: Mutex<Option<String>>,
+    compaction_pause: Option<String>,
 }
 
 impl Runner {
-    /// Create a runner. Events go to `sink` after each finished message is persisted.
+    /// Create a runner. Each step of a run is recorded in `session` before it takes effect;
+    /// events go to `sink` afterwards.
     pub fn new(
         config: LoopConfig,
         retry: RetryPolicy,
@@ -101,11 +102,11 @@ impl Runner {
             config,
             retry,
             limits,
-            session: Mutex::new(session),
+            session,
             sink,
             approvals: ApprovalCache::default(),
             compaction: compaction::Config::default(),
-            compaction_pause: Mutex::new(None),
+            compaction_pause: None,
         }
     }
 
@@ -122,8 +123,8 @@ impl Runner {
     pub async fn compact(&mut self, cancel: &CancellationToken) -> compaction::Report {
         let child = cancel.child_token();
         let _cancel_on_drop = child.drop_guard_ref();
-        let host = compaction::Host {
-            session: &self.session,
+        let mut host = compaction::Host {
+            session: &mut self.session,
             provider: self.config.spec.provider.as_ref(),
             model: &self.config.spec.model,
             config: &self.compaction,
@@ -133,7 +134,7 @@ impl Runner {
         let report = host.run(Trigger::Manual, &child).await.0;
         if report.outcome == compaction::Outcome::Completed {
             // A summary succeeded, so automatic attempts may succeed again.
-            *lock(&self.compaction_pause) = None;
+            self.compaction_pause = None;
         }
         report
     }
@@ -149,7 +150,7 @@ impl Runner {
 
     pub(crate) fn replace_model(&mut self, provider: Arc<dyn Provider>, model: String) -> (Arc<dyn Provider>, String) {
         // Another model may produce a valid summary where the previous one failed.
-        *lock(&self.compaction_pause) = None;
+        self.compaction_pause = None;
         (
             std::mem::replace(&mut self.config.spec.provider, provider),
             std::mem::replace(&mut self.config.spec.model, model),
@@ -161,9 +162,9 @@ impl Runner {
         self.approvals.clear();
     }
 
-    /// The session. Do not hold the guard across `.await`: the run locks it for every message.
-    pub fn session(&self) -> MutexGuard<'_, SessionStore> {
-        lock(&self.session)
+    /// The session.
+    pub fn session(&self) -> &SessionStore {
+        &self.session
     }
 
     /// Run one prompt to completion. Never panics on provider or tool failures; the report
@@ -197,23 +198,21 @@ impl Runner {
             }))
         });
 
-        let sink = PersistingSink {
-            session: &self.session,
-            inner: self.sink.as_ref(),
-            cancel: &run_cancel,
-            failure: Mutex::new(None),
-            last_assistant_entry: Mutex::new(None),
-            compaction: &self.compaction,
-            compaction_pause: &self.compaction_pause,
-            provider: self.config.spec.provider.as_ref(),
-            model: &self.config.spec.model,
-            hooks: &self.config.hooks,
-        };
-
         // Entry IDs remain stable even when hooks omit messages from earlier runs.
-        let run_start = lock(&self.session).entries().len();
+        let run_start = self.session.entries().len();
         // Before any system prompt change or input, so that results directly follow their calls.
-        self.recover_interrupted_calls(&sink, &run_cancel).await;
+        let recovered = self.recover_interrupted_calls(&run_cancel).await;
+        let Self {
+            config,
+            retry,
+            limits,
+            session,
+            sink,
+            approvals,
+            compaction,
+            compaction_pause,
+        } = self;
+        let sink = sink.as_ref();
         let mut prompts = vec![Message::user(prompt)];
         let mut turns: u32 = 0;
         let mut retries = 0;
@@ -221,106 +220,116 @@ impl Runner {
         let mut last_error = None;
         let mut continuations = 0;
 
-        let ending = loop {
-            // The session projection, not an in-memory list, is what the model sees
-            // (pi: AgentSession replaces the context with the projection before each request).
-            let mut context = lock(&self.session).messages();
-            let mut control = LoopControl::new(
-                self.limits.max_turns.map(|limit| limit.saturating_sub(turns)),
-                &mut self.approvals,
-                &run_cancel,
-                &sink,
-            );
-            control.turn_offset = turns;
-            control.continuations = continuations;
-            let result = run_loop(&mut context, std::mem::take(&mut prompts), &self.config, &mut control).await;
-            turns = turns.saturating_add(result.turns);
-            continuations = result.continuations;
-            usage.add(&result.usage);
-            if result.outcome != LoopOutcome::Error {
-                break result.outcome;
+        let ending = match recovered {
+            Err(error) => {
+                last_error = Some(error);
+                LoopOutcome::Error
             }
-            // Hook failures are distinct from failed provider responses and are not retried.
-            let failed = match result.failure {
-                Some(LoopFailure::Provider(message)) => message,
-                Some(LoopFailure::Host(error)) => {
-                    last_error = Some(error);
-                    break LoopOutcome::Error;
-                }
-                None => {
-                    last_error = Some("loop failed without a diagnostic".into());
-                    break LoopOutcome::Error;
-                }
-            };
-            last_error = failed.error_message.clone();
-            let retryable = is_retryable(&failed);
-            if !retryable || retries >= self.retry.max_retries || run_cancel.is_cancelled() {
-                break LoopOutcome::Error;
-            }
-
-            retries += 1;
-            let delay = self.retry.delay_for(retries, &failed);
-            self.config
-                .hooks
-                .emit(
-                    AgentEvent::RetryScheduled {
-                        attempt: retries,
-                        max_retries: self.retry.max_retries,
-                        delay_ms: duration_ms(delay),
-                        error: last_error.clone().unwrap_or_default(),
-                    },
+            Ok(()) => loop {
+                // The session projection, not an in-memory list, is what the model sees
+                // (pi: AgentSession replaces the context with the projection before each request).
+                let mut context = session.messages();
+                let mut host = RunnerHost {
+                    session: &mut *session,
+                    sink,
+                    hooks: &config.hooks,
+                    provider: config.spec.provider.as_ref(),
+                    model: &config.spec.model,
+                    compaction,
+                    compaction_pause: &mut *compaction_pause,
+                };
+                let mut control = LoopControl::new(
+                    limits.max_turns.map(|limit| limit.saturating_sub(turns)),
+                    &mut *approvals,
                     &run_cancel,
-                    &sink,
-                )
-                .await;
-            // Keep the failed attempt in the file but drop it from model context, then
-            // continue from the previous message (pi: AgentSession._prepareRetry and
-            // _omitRecoveryAttempt). No user message is repeated.
-            if let Some(entry_id) = sink.take_last_assistant_entry() {
-                let omitted = self.session().append_context_edit(&entry_id, None);
-                if let Err(e) = omitted {
-                    sink.record_failure(format!("cannot omit the failed attempt: {e:#}"));
+                    sink,
+                );
+                control.turn_offset = turns;
+                control.continuations = continuations;
+                control.host = Some(&mut host);
+                let result = run_loop(&mut context, std::mem::take(&mut prompts), config, &mut control).await;
+                turns = turns.saturating_add(result.turns);
+                continuations = result.continuations;
+                usage.add(&result.usage);
+                if result.outcome != LoopOutcome::Error {
+                    break result.outcome;
+                }
+                // Hook failures are distinct from failed provider responses and are not retried.
+                let (failed, entry_id) = match result.failure {
+                    Some(LoopFailure::Provider { message, entry_id }) => (message, entry_id),
+                    Some(LoopFailure::Host(error)) => {
+                        last_error = Some(error);
+                        break LoopOutcome::Error;
+                    }
+                    None => {
+                        last_error = Some("loop failed without a diagnostic".into());
+                        break LoopOutcome::Error;
+                    }
+                };
+                last_error = failed.error_message.clone();
+                let retryable = is_retryable(&failed);
+                if !retryable || retries >= retry.max_retries || run_cancel.is_cancelled() {
                     break LoopOutcome::Error;
                 }
-            }
-            let cancelled = tokio::select! {
-                _ = tokio::time::sleep(delay) => false,
-                _ = run_cancel.cancelled() => true,
-            };
-            if cancelled {
-                break LoopOutcome::Aborted;
-            }
+
+                retries += 1;
+                let delay = retry.delay_for(retries, &failed);
+                config
+                    .hooks
+                    .emit(
+                        AgentEvent::RetryScheduled {
+                            attempt: retries,
+                            max_retries: retry.max_retries,
+                            delay_ms: duration_ms(delay),
+                            error: last_error.clone().unwrap_or_default(),
+                        },
+                        &run_cancel,
+                        sink,
+                    )
+                    .await;
+                // Keep the failed attempt in the session but drop it from model context, then
+                // continue from the previous message (pi: AgentSession._prepareRetry and
+                // _omitRecoveryAttempt). No user message is repeated.
+                if let Some(entry_id) = entry_id
+                    && let Err(error) = session.append_context_edit(&entry_id, None).await
+                {
+                    last_error = Some(format!("cannot omit the failed attempt: {error:#}"));
+                    break LoopOutcome::Error;
+                }
+                let cancelled = tokio::select! {
+                    _ = tokio::time::sleep(delay) => false,
+                    _ = run_cancel.cancelled() => true,
+                };
+                if cancelled {
+                    break LoopOutcome::Aborted;
+                }
+            },
         };
 
-        let persistence_failure = lock(&sink.failure).take();
-        let (outcome, error) = match (persistence_failure, ending) {
-            (Some(failure), _) => (RunOutcome::Error, Some(failure)),
-            (None, LoopOutcome::Truncated) => (
+        let (outcome, error) = match ending {
+            LoopOutcome::Truncated => (
                 RunOutcome::Truncated,
                 Some("the answer was cut off at the output token limit".to_string()),
             ),
-            (None, LoopOutcome::Completed) => (RunOutcome::Completed, None),
-            (None, LoopOutcome::Error) => (RunOutcome::Error, last_error),
-            (None, LoopOutcome::MaxTurns) => (
+            LoopOutcome::Completed => (RunOutcome::Completed, None),
+            LoopOutcome::Error => (RunOutcome::Error, last_error),
+            LoopOutcome::MaxTurns => (
                 RunOutcome::MaxTurns,
                 Some(format!(
                     "turn limit reached (max_turns = {})",
-                    self.limits
-                        .max_turns
-                        .expect("MaxTurns requires a configured turn limit")
+                    limits.max_turns.expect("MaxTurns requires a configured turn limit")
                 )),
             ),
-            (None, LoopOutcome::Aborted) if timed_out.load(Ordering::SeqCst) => {
-                let secs = self.limits.timeout.map(|t| t.as_secs()).unwrap_or_default();
+            LoopOutcome::Aborted if timed_out.load(Ordering::SeqCst) => {
+                let secs = limits.timeout.map(|t| t.as_secs()).unwrap_or_default();
                 (
                     RunOutcome::Timeout,
                     Some(format!("run exceeded the {secs}s time limit")),
                 )
             }
-            (None, LoopOutcome::Aborted) => (RunOutcome::Aborted, Some("run was cancelled".to_string())),
+            LoopOutcome::Aborted => (RunOutcome::Aborted, Some("run was cancelled".to_string())),
         };
 
-        let session = self.session();
         // An earlier run's answer must not be reported as this run's.
         let new_ids: HashSet<&str> = session.entries()[run_start..]
             .iter()
@@ -356,15 +365,13 @@ impl Runner {
 
     /// Record an error result for each call that an interrupted run left without one, so
     /// the next request cannot suggest that such a call did nothing. Calls are never run
-    /// again. A failed write cancels the run through the sink and stops recovery.
-    async fn recover_interrupted_calls(&self, sink: &PersistingSink<'_>, cancel: &CancellationToken) {
-        let interrupted = lock(&self.session).interrupted_tool_calls();
-        for call in interrupted {
-            if lock(&sink.failure).is_some() {
-                break;
-            }
-            let effects = self
-                .config
+    /// again. Stops at the first result the session cannot record.
+    async fn recover_interrupted_calls(&mut self, cancel: &CancellationToken) -> Result<(), String> {
+        let Self {
+            config, session, sink, ..
+        } = self;
+        for call in session.interrupted_tool_calls() {
+            let effects = config
                 .spec
                 .tools
                 .iter()
@@ -376,22 +383,25 @@ impl Runner {
                 tool_name: call.tool_name.clone(),
                 state,
             };
-            self.config.hooks.emit(event, cancel, sink).await;
-            let result = ToolResultMessage {
+            config.hooks.emit(event, cancel, sink.as_ref()).await;
+            let result = Message::ToolResult(ToolResultMessage {
                 tool_call_id: call.tool_call_id,
                 tool_name: call.tool_name,
                 content: recovered_result(state).to_string(),
                 is_error: true,
                 timestamp: now_ms(),
                 duration_ms: None,
-            };
+            });
             let start = AgentEvent::MessageStart { role: "toolResult" };
-            self.config.hooks.emit(start, cancel, sink).await;
-            let end = AgentEvent::MessageEnd {
-                message: Message::ToolResult(result),
-            };
-            self.config.hooks.emit(end, cancel, sink).await;
+            config.hooks.emit(start, cancel, sink.as_ref()).await;
+            session
+                .append_message(result.clone())
+                .await
+                .map_err(|error| format!("cannot persist session entry: {error:#}"))?;
+            let end = AgentEvent::MessageEnd { message: result };
+            config.hooks.emit(end, cancel, sink.as_ref()).await;
         }
+        Ok(())
     }
 }
 
@@ -480,68 +490,64 @@ fn overlap(previous: &str, next: &str) -> usize {
         .unwrap_or(0)
 }
 
-/// Persists finished messages before forwarding events (pi: AgentSession writes on
-/// `message_end`). If writing fails the run is cancelled: an unattended run must not
-/// keep acting without an audit trail.
-struct PersistingSink<'a> {
-    session: &'a Mutex<SessionStore>,
-    inner: &'a dyn EventSink,
-    cancel: &'a CancellationToken,
-    failure: Mutex<Option<String>>,
-    last_assistant_entry: Mutex<Option<String>>,
-    compaction: &'a compaction::Config,
-    /// Borrowed from the Runner, so the pause outlives one prompt and a dropped run.
-    compaction_pause: &'a Mutex<Option<String>>,
+/// Records each step of a run in the session before the loop acts on it (pi: AgentSession
+/// writes on `message_end`), and prepares the context before each task request. A failed
+/// write stops the run: an unattended run must not keep acting without an audit trail.
+struct RunnerHost<'a> {
+    session: &'a mut SessionStore,
+    sink: &'a dyn EventSink,
+    hooks: &'a HookChain,
     provider: &'a dyn Provider,
     model: &'a str,
-    hooks: &'a crate::agent::HookChain,
-}
-
-impl PersistingSink<'_> {
-    fn take_last_assistant_entry(&self) -> Option<String> {
-        lock(&self.last_assistant_entry).take()
-    }
-
-    fn record_failure(&self, message: String) {
-        lock(&self.failure).get_or_insert(message);
-        self.cancel.cancel();
-    }
+    compaction: &'a compaction::Config,
+    /// Borrowed from the Runner, so the pause outlives one prompt and a dropped run.
+    compaction_pause: &'a mut Option<String>,
 }
 
 #[async_trait]
-impl EventSink for PersistingSink<'_> {
-    fn record_request(&self, request: &crate::ai::Request, provider: &dyn Provider) -> Result<(), String> {
+impl SessionHost for RunnerHost<'_> {
+    async fn append_message(&mut self, message: &Message) -> Result<String, String> {
+        // The event that reports the message owns it, so the session stores a copy.
+        self.session
+            .append_message(message.clone())
+            .await
+            .map_err(|error| format!("cannot persist session entry: {error:#}"))
+    }
+
+    async fn edit_context(&mut self, index: usize, replacement: Option<&str>) -> Result<(), String> {
+        let projection = self.session.projection();
+        let target = projection
+            .get(index)
+            .ok_or_else(|| format!("context index {index} is out of bounds"))?;
+        self.session
+            .append_context_edit(&target.entry_id, replacement.map(str::to_string))
+            .await
+            .map(|_| ())
+            .map_err(|error| format!("cannot persist context edit: {error:#}"))
+    }
+
+    async fn record_request(&mut self, request: &Request, provider: &dyn Provider) -> Result<(), String> {
         let options = provider.request_options();
-        let recorded = lock(self.session)
-            .record_request(
-                request,
-                provider.name(),
-                options,
-                crate::session::RequestSource::Projection,
-            )
+        self.session
+            .record_request(request, provider.name(), options, RequestSource::Projection)
+            .await
             .map(|_| ())
-            .map_err(|error| format!("cannot persist request checkpoint: {error:#}"));
-        if let Err(error) = &recorded {
-            self.record_failure(error.clone());
-        }
-        recorded
+            .map_err(|error| format!("cannot persist request checkpoint: {error:#}"))
     }
-    fn record_tool_call_started(&self, call: &ToolCall) -> Result<(), String> {
-        let recorded = lock(self.session)
+
+    async fn record_tool_call_started(&mut self, call: &ToolCall) -> Result<(), String> {
+        self.session
             .append_tool_call_started(&call.id, &call.name)
+            .await
             .map(|_| ())
-            .map_err(|error| format!("cannot persist the start of tool call {:?}: {error:#}", call.id));
-        if let Err(error) = &recorded {
-            self.record_failure(error.clone());
-        }
-        recorded
+            .map_err(|error| format!("cannot persist the start of tool call {:?}: {error:#}", call.id))
     }
-    async fn prepare_context(&self, cancel: &CancellationToken) -> ContextPreparation {
+
+    async fn prepare_context(&mut self, cancel: &CancellationToken) -> ContextPreparation {
         let Some(limit) = self.compaction.trigger_bytes else {
             return ContextPreparation::Unchanged;
         };
-        let bytes = compaction::context_bytes(&lock(self.session).messages());
-        match bytes {
+        match compaction::context_bytes(&self.session.messages()) {
             Ok(bytes) if bytes <= limit => return ContextPreparation::Unchanged,
             Ok(_) => {}
             Err(error) => {
@@ -552,7 +558,7 @@ impl EventSink for PersistingSink<'_> {
                 };
             }
         }
-        if let Some(reason) = lock(self.compaction_pause).as_deref() {
+        if let Some(reason) = self.compaction_pause.as_deref() {
             return ContextPreparation::Failed {
                 error: format!(
                     "automatic compaction is paused because it failed earlier in this session ({reason}); \
@@ -562,17 +568,21 @@ impl EventSink for PersistingSink<'_> {
                 usage: Usage::default(),
             };
         }
-        let host = compaction::Host {
-            session: self.session,
+        let mut host = compaction::Host {
+            session: &mut *self.session,
             provider: self.provider,
             model: self.model,
             config: self.compaction,
-            sink: self,
+            sink: self.sink,
             hooks: self.hooks,
         };
         let (report, messages) = host.run(Trigger::Automatic, cancel).await;
         if let Some(error) = report.persistence_error {
-            self.record_failure(error);
+            return ContextPreparation::Unrecorded {
+                error,
+                requests: report.requests,
+                usage: report.usage,
+            };
         }
         match messages {
             Some(messages) => ContextPreparation::Updated {
@@ -587,7 +597,7 @@ impl EventSink for PersistingSink<'_> {
                 // A paid summary request failed; repeating it on every prompt would keep
                 // paying for the same failure. Cancellation is the caller's choice.
                 if report.outcome == compaction::Outcome::Failed && report.requests > 0 {
-                    *lock(self.compaction_pause) = Some(error.clone());
+                    *self.compaction_pause = Some(error.clone());
                 }
                 ContextPreparation::Failed {
                     error,
@@ -596,40 +606,6 @@ impl EventSink for PersistingSink<'_> {
                 }
             }
         }
-    }
-
-    fn edit_context(&self, index: usize, replacement: Option<&str>) -> Result<(), String> {
-        let edited = {
-            let mut session = lock(self.session);
-            let projection = session.projection();
-            match projection.get(index) {
-                Some(target) => session
-                    .append_context_edit(&target.entry_id, replacement.map(str::to_string))
-                    .map(|_| ())
-                    .map_err(|error| format!("cannot persist context edit: {error:#}")),
-                None => Err(format!("context index {index} is out of bounds")),
-            }
-        };
-        if let Err(error) = &edited {
-            self.record_failure(error.clone());
-        }
-        edited
-    }
-
-    fn emit(&self, event: AgentEvent) {
-        if let AgentEvent::MessageEnd { message } = &event {
-            // The event owns the message and is forwarded below, so the session stores a copy.
-            let appended = lock(self.session).append_message(message.clone());
-            match appended {
-                Ok(id) => {
-                    if matches!(message, Message::Assistant(_)) {
-                        *lock(&self.last_assistant_entry) = Some(id);
-                    }
-                }
-                Err(e) => self.record_failure(format!("cannot persist session entry: {e:#}")),
-            }
-        }
-        self.inner.emit(event);
     }
 }
 
@@ -677,8 +653,8 @@ mod tests {
             let mut header = SessionHeader::new(Path::new("."), "m");
             header.version = 2;
             let mut store = SessionStore::with_writer(header, Box::new(RejectEntry(rejected)));
-            let old = store.append_message(Message::user("x".repeat(4096))).unwrap();
-            store.append_message(Message::user("recent")).unwrap();
+            let old = store.append_message(Message::user("x".repeat(4096))).await.unwrap();
+            store.append_message(Message::user("recent")).await.unwrap();
             let summary = if rejected == "compaction_failed" {
                 "invalid JSON".into()
             } else {
@@ -890,7 +866,7 @@ mod tests {
             SessionHeader::new(Path::new("."), "m"),
             Box::new(RejectText("\"role\":\"toolResult\"")),
         );
-        session.append_message(Message::user("go")).unwrap();
+        session.append_message(Message::user("go")).await.unwrap();
         let mut answer = crate::ai::AssistantMessage::failure("p", "m", crate::ai::StopReason::ToolUse, "");
         answer.error_message = None;
         answer.content = vec![crate::ai::ContentBlock::ToolCall {
@@ -899,8 +875,8 @@ mod tests {
             arguments: serde_json::json!({}),
             arguments_error: None,
         }];
-        session.append_message(Message::Assistant(answer)).unwrap();
-        session.append_tool_call_started("c1", "counted").unwrap();
+        session.append_message(Message::Assistant(answer)).await.unwrap();
+        session.append_tool_call_started("c1", "counted").await.unwrap();
         let tool = Arc::new(Counted(std::sync::atomic::AtomicUsize::new(0)));
         let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
         let mut runner = counted_runner(&tool, &provider, session);

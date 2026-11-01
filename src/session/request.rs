@@ -58,7 +58,7 @@ pub struct RequestStartedEntry {
 impl SessionStore {
     /// Persist configuration changes and a dispatch checkpoint before a model call.
     /// Checks messages against the audit projection; any failure prevents dispatch.
-    pub fn record_request(
+    pub async fn record_request(
         &mut self,
         request: &Request,
         provider: &str,
@@ -76,19 +76,25 @@ impl SessionStore {
             max_tokens: request.max_tokens,
             provider_options,
         };
-        self.ensure_format(3)?;
+        self.ensure_format(3).await?;
         let existing = self.branch_path().into_iter().rev().find_map(|entry| match entry {
             Entry::RequestConfig(entry) => Some(entry),
             _ => None,
         });
-        let config_id = match existing {
-            Some(entry) if entry.config == config => entry.id.clone(),
-            _ => self.append(Entry::RequestConfig(RequestConfigEntry {
-                id: self.new_id(),
-                parent_id: self.leaf.clone(),
-                timestamp: now_ms(),
-                config,
-            }))?,
+        let unchanged = existing
+            .filter(|entry| entry.config == config)
+            .map(|entry| entry.id.clone());
+        let config_id = match unchanged {
+            Some(id) => id,
+            None => {
+                self.append(Entry::RequestConfig(RequestConfigEntry {
+                    id: self.new_id(),
+                    parent_id: self.leaf.clone(),
+                    timestamp: now_ms(),
+                    config,
+                }))
+                .await?
+            }
         };
         self.append(Entry::RequestStarted(RequestStartedEntry {
             id: self.new_id(),
@@ -97,6 +103,7 @@ impl SessionStore {
             config_id,
             source,
         }))
+        .await
     }
 
     /// Recover the exact provider-neutral request at a historical dispatch checkpoint,

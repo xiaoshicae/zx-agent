@@ -70,11 +70,11 @@ fn users(server: &MockServer, index: usize) -> Vec<String> {
         .collect()
 }
 
-fn seed_context(dir: &Path, bytes: usize) -> String {
+async fn seed_context(dir: &Path, bytes: usize) -> String {
     let path = dir.join("chat.jsonl");
     let mut store = SessionStore::create(&path, common::header()).unwrap();
-    let id = store.append_message(Message::user("x".repeat(bytes))).unwrap();
-    store.append_message(Message::user("recent input")).unwrap();
+    let id = store.append_message(Message::user("x".repeat(bytes))).await.unwrap();
+    store.append_message(Message::user("recent input")).await.unwrap();
     id
 }
 
@@ -179,7 +179,7 @@ async fn an_oversized_input_line_is_rejected_and_the_conversation_continues() {
 #[tokio::test]
 async fn manual_compact_persists_a_summary_and_the_next_prompt_uses_it() {
     let dir = tempfile::tempdir().unwrap();
-    let id = seed_context(dir.path(), 10_000);
+    let id = seed_context(dir.path(), 10_000).await;
     std::fs::write(dir.path().join("profile.toml"), "[compaction]\nkeepRecentBytes = 1\n").unwrap();
     let server = MockServer::start(vec![Reply::text(&summary_json(&id)), Reply::text("answer")]).await;
     let output = run(
@@ -229,7 +229,7 @@ async fn manual_compact_persists_a_summary_and_the_next_prompt_uses_it() {
 #[tokio::test]
 async fn chat_automatically_compacts_at_its_default_byte_budget() {
     let dir = tempfile::tempdir().unwrap();
-    let id = seed_context(dir.path(), 300 * 1024);
+    let id = seed_context(dir.path(), 300 * 1024).await;
     let server = MockServer::start(vec![Reply::text(&summary_json(&id)), Reply::text("answer")]).await;
     let output = run(
         &server,
@@ -256,7 +256,7 @@ async fn chat_automatically_compacts_at_its_default_byte_budget() {
 async fn explicit_cli_flags_disable_automatic_compaction() {
     for disable in [vec!["--no-auto-compact"], vec!["--compact-threshold-bytes", "0"]] {
         let dir = tempfile::tempdir().unwrap();
-        seed_context(dir.path(), 300 * 1024);
+        seed_context(dir.path(), 300 * 1024).await;
         let server = MockServer::start(vec![Reply::text("answer")]).await;
         let mut args = vec!["--tools", "", "--session", "chat.jsonl"];
         args.extend(disable);
@@ -276,7 +276,7 @@ async fn explicit_cli_flags_disable_automatic_compaction() {
 #[tokio::test]
 async fn a_failed_manual_summary_is_reported_and_chat_can_accept_another_task() {
     let dir = tempfile::tempdir().unwrap();
-    seed_context(dir.path(), 10_000);
+    seed_context(dir.path(), 10_000).await;
     std::fs::write(dir.path().join("profile.toml"), "[compaction]\nkeepRecentBytes = 1\n").unwrap();
     let server = MockServer::start(vec![Reply::text("invalid summary"), Reply::text("recovered")]).await;
     let output = run(
@@ -322,7 +322,7 @@ async fn a_failed_manual_summary_is_reported_and_chat_can_accept_another_task() 
 #[tokio::test]
 async fn sigint_cancels_a_manual_summary_and_keeps_the_conversation_reusable() {
     let dir = tempfile::tempdir().unwrap();
-    seed_context(dir.path(), 10_000);
+    seed_context(dir.path(), 10_000).await;
     std::fs::write(dir.path().join("profile.toml"), "[compaction]\nkeepRecentBytes = 1\n").unwrap();
     let server = MockServer::start(vec![Reply::Stall(vec![]), Reply::text("reused")]).await;
     let mut child = chat(
@@ -374,7 +374,7 @@ async fn sigint_cancels_a_manual_summary_and_keeps_the_conversation_reusable() {
 #[tokio::test]
 async fn tty_compaction_rejects_overlaps_and_runs_one_queued_input_after_completion() {
     let dir = tempfile::tempdir().unwrap();
-    let id = seed_context(dir.path(), 10_000);
+    let id = seed_context(dir.path(), 10_000).await;
     std::fs::write(dir.path().join("profile.toml"), "[compaction]\nkeepRecentBytes = 1\n").unwrap();
     let release = std::sync::Arc::new(tokio::sync::Notify::new());
     let chunks = vec![json!({"choices":[{"index":0,"delta":{"content":summary_json(&id)},"finish_reason":null}]})];
@@ -1108,7 +1108,7 @@ async fn quit_during_a_tty_approval_cancels_the_task_and_exits() {
 async fn resuming_an_interrupted_session_reports_the_recovered_call_without_running_it() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = SessionStore::create(&dir.path().join("chat.jsonl"), common::header()).unwrap();
-    store.append_message(Message::user("fix it")).unwrap();
+    store.append_message(Message::user("fix it")).await.unwrap();
     let mut call = AssistantMessage::failure("mock", "mock-model", StopReason::ToolUse, "");
     call.error_message = None;
     call.content = vec![ContentBlock::ToolCall {
@@ -1117,8 +1117,8 @@ async fn resuming_an_interrupted_session_reports_the_recovered_call_without_runn
         arguments: json!({"command": "touch ran-again"}),
         arguments_error: None,
     }];
-    store.append_message(Message::Assistant(call)).unwrap();
-    store.append_tool_call_started("c1", "bash").unwrap();
+    store.append_message(Message::Assistant(call)).await.unwrap();
+    store.append_tool_call_started("c1", "bash").await.unwrap();
     drop(store);
     let server = MockServer::start(vec![Reply::text("checked")]).await;
 
