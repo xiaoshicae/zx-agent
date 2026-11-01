@@ -27,7 +27,7 @@
 
 - **是什么**：用 Rust 编写的通用 agent 内核。同一个内核支撑三类场景：和人对话；无人值守运行，例如由 cron 或 Kubernetes Job 触发的排障；被编辑器或其他程序嵌入。场景差异放在内核之外，通过 profile、提示词和插件表达。
 - **参照**：分层方式、循环语义和会话格式沿用 pi（https://github.com/earendil-works/pi ，commit `a92283056`）。与 pi 不同的地方记录在 README 的"与 pi 的差异"。
-- **现状**：v0.1.0。已实现共享的 `AgentSession`（多次提问、取消后复用、多订阅者、切换模型）、无人值守的 `run` 命令、一个 OpenAI 兼容的流式 provider、`bash` 与 `read_file` 两个工具。`run` 的提示词、上限和续写默认值集中在 `presets::troubleshoot`；内核默认不限轮次、不限时间、不自动续写。接口与资源上限见 README，目标、阶段计划与已定决策见 `docs/ROADMAP.md`，改动前先确认当前阶段。
+- **现状**：v0.1.0。已实现共享的 `AgentSession`（多次提问、取消后复用、多订阅者、切换模型）、无人值守的 `run` 和交互式 `chat` 命令、一个 OpenAI 兼容的流式 provider、`bash` 与 `read_file` 两个工具。`run` 的提示词、上限和续写默认值集中在 `presets::troubleshoot`；内核默认不限轮次、不限时间、不自动续写。接口与资源上限见 README，目标、阶段计划与已定决策见 `docs/ROADMAP.md`，改动前先确认当前阶段。
 - **验证范围**：本地使用 macOS，CI 覆盖 Linux 与 macOS；`--system-updates inline` 只在一个服务上验证过；付费 e2e 测试还没有运行过。
 
 ## 架构设计
@@ -36,7 +36,7 @@
 
 | 层 | 位置 | 职责 |
 |---|---|---|
-| CLI | `src/main.rs` | 解析参数、组装各层、处理信号、输出 text 或 jsonl、映射退出码 |
+| CLI | `src/main.rs`、`src/cli.rs`、`src/chat/` | 共用参数与运行组装；run 处理单次任务；chat 管理单一输入所有者、审批、信号和 REPL |
 | 场景预设 | `src/presets/` | 提供外层显式选择的说明与运行默认值；内核机制不依赖预设 |
 | 提示词 | `src/prompt.rs` | 生成系统提示词：说明 + `<environment>` + `<command_policy>` |
 | 共享会话 | `src/agent_session.rs` | 共享调用与 Busy、RAII 归还运行权、取消、订阅与退订、空闲时切换模型 |
@@ -54,6 +54,7 @@
 - **场景策略不进内核**：提示词、运行上限与续写默认值由预设提供；P1 已实现六个 Hooks 和 Interaction；命令策略、续写、脱敏由外层注册，无人时拒绝 Ask。无人值守的 `run` 用退出码 0 到 6 表达结果，调度器不必解析输出。
 - **共享 API、独占执行**：AgentSession 的短锁只切换 Runner 所有权，不跨 await。重叠 prompt 和运行中改配置返回 Busy；取消、panic 或 future 丢弃后由 RAII 归还。订阅列表先取快照再调用，单个 subscriber panic 会被隔离并可查询，不持锁调用宿主回调。
 - **会话文件既是审计日志，也是模型上下文的唯一来源**：修正上下文靠追加 `context_edit`，提示词变化靠追加 system 消息，原始记录始终保留。
+- **终端输入只有一个所有者**：chat 的专用线程通过有界通道提供逐行输入；REPL 协调提问、审批和信号，Interaction 不直接读 stdin。审批回复必须匹配主机生成的请求编号，取消后失效；TTY 运行中输入 steering，管道脚本逐轮消费。按 Tokio stdin 源码对交互终端的建议避免不可取消的 stdin 阻塞任务卡住运行时退出。
 - **事实由程序提供，不让模型去查**：操作系统、启动时间、命令白名单在启动时写进系统提示词。这样不浪费轮次，也不会被白名单拦住。
 - **兼容性默认保守，能力按需打开**：提示词更新默认合并到开头（`collapse`，与 pi 对 OpenAI 兼容服务的默认一致），服务端支持时才按位置发送（`inline`）。
 - **安全靠部署隔离**：策略只是第一道防线（检查边界见 README 的"安全模型"）。认证 key 只从环境变量读取，该变量从 bash 子进程环境中删除；Unix 上新建会话文件的权限为 0600，打开已有文件不修改权限；真正的隔离要靠不同账号或容器。

@@ -23,6 +23,8 @@ pub enum Reply {
     Sse(Vec<Value>),
     /// Stream these chunks, then keep the connection open without sending anything more.
     Stall(Vec<Value>),
+    /// Send partial output, then finish only after the test releases the gate.
+    Gate { chunks: Vec<Value>, release: Arc<Notify> },
     /// Answer with an HTTP error status and a JSON body.
     Status(u16, &'static str),
     /// A complete HTTP response, for custom headers and invalid/oversized payloads.
@@ -124,6 +126,15 @@ async fn answer(mut stream: TcpStream, reply: Reply, log: Arc<Mutex<Vec<Captured
             stream.write_all(response.as_bytes()).await.unwrap();
             // Hold the connection open; the client gives up first.
             tokio::time::sleep(Duration::from_secs(60)).await;
+        }
+        Reply::Gate { chunks, release } => {
+            let response = format!("{sse_head}{}", sse_events(&chunks));
+            stream.write_all(response.as_bytes()).await.unwrap();
+            release.notified().await;
+            let finish = json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]});
+            let response = format!("{}data: [DONE]\n\n", sse_events(&[finish]));
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.shutdown().await.unwrap();
         }
         Reply::Status(code, body) => {
             let response = format!(

@@ -19,7 +19,7 @@ paths:
 | `RunnerSetup` | `tests/common/mod.rs` | 带测试默认值（不重试、默认上限、内存会话）的 runner 构造器，用结构体更新语法覆盖字段 |
 | `fast_retry` / `header` / `read_lines` | `tests/common/mod.rs` | 毫秒级退避的重试策略、会话头部、读取会话文件的每一行 |
 | `CancelOnFirstDelta` | `tests/common/mod.rs` | 收到第一段流式增量就取消，测试中途取消而不依赖计时 |
-| `MockServer` / `Reply` | `tests/common/mock_server.rs` | 本地假 HTTP 服务：返回 SSE 流、HTTP 错误，或发出部分数据后卡住（`Stall`）；记录请求，`wait_for_requests` 等到请求到达 |
+| `MockServer` / `Reply` | `tests/common/mock_server.rs` | 本地假 HTTP 服务：返回 SSE 流、HTTP 错误，发出部分数据后卡住（`Stall`），或等待测试通知后结束（`Gate`）；记录请求，`wait_for_requests` 等到请求到达 |
 | `FailingWriter` / `SessionStore::with_writer` | `src/session.rs`（仅测试编译） | 让会话写入失败，测试不变量 5 和 7 |
 
 典型写法：循环测试参照 `tests/agent_loop.rs` 的 `runs_tools_until_the_model_answers`，用 `run_prompt` 跑完后断言 `result.outcome`，再用 `summarize(&context)` 断言消息序列；运行层测试参照 `tests/runner.rs`，写成 `RunnerSetup { retry: fast_retry(3), ..setup(&provider) }.build()`。
@@ -33,7 +33,8 @@ paths:
 | `tests/runner.rs` | 运行层：重试、上限、截断续写、持久化、恢复会话 |
 | `tests/agent_session.rs` | 共享会话：Busy、取消与丢弃后复用、多订阅者、退订、回调重入与 panic、模型切换与审计 |
 | `tests/openai_mock.rs` | 真实 HTTP 下的 provider：SSE、重试、空闲超时、中途取消 |
-| `tests/cli.rs` | 编译出的程序：退出码、输出格式、`main.rs` 中的接线 |
+| `tests/cli.rs` | 原有 run 行为与退出码，P0 起逐字节保持；P6 默认值变更另行验收 |
+| `tests/chat_cli.rs` | chat 的脚本 stdin、审批、信号与超时、Unicode、模型切换、会话重置和 Unix PTY |
 | `tests/hooks.rs`、`tests/hooks_cli.rs` | 六个钩子、审批与失败回退、变换持久化、已知密钥脱敏接线 |
 | `tests/real_api.rs` | 付费：真实模型 API，默认跳过 |
 
