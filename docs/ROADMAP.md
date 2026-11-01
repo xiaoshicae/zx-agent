@@ -47,6 +47,8 @@ G1–G4 是验收目标。当前会话日志可重建对话与提示词；G3 所
 | D5 | 无人值守的命令执行环境 | 默认仍在本机执行，`run` 行为不变；容器执行须在 profile 或 CLI 中显式开启。理由：在 Kubernetes Job 中运行时 Pod 内通常没有 Docker；无网络的容器做不了在线排障，而在线访问方案尚未评审。此前的候选方案（`troubleshoot` 默认容器、没有 Docker 时拒绝启动）不采用 | 2026-11-01 | 已确认：P6 执行环境部分按此实现 |
 | D6 | 项目定位 | 改为“通用内核 + 场景配置” | 2026-10-31 | 已完成：README、`.claude/CLAUDE.md` 已更新 |
 | D7 | IM 长连接的 WebSocket 客户端 | 已授权：`tokio-tungstenite`（0.30，关掉默认 feature，只开 `connect` 与 `rustls-tls-webpki-roots`）。理由与依赖核对见 `docs/serve-im-review.md` 缺口 ① | 2026-11-01 | 已引入（PR #29） |
+| D8 | MCP 的范围 | 本项目只做 MCP 客户端：只接工具，只支持 Streamable HTTP。MCP 服务器与领域工具（如 Kubernetes、Prometheus 查询）由外部服务实现 | 2026-11-01 | 已确认：P7 按此评审，见 `docs/p7-mcp-review.md` |
+| D9 | HTTP 客户端与 TLS | reqwest 升到 0.13（`json`、`stream`、`rustls`）。rustls 只用 aws-lc-rs 一个加密后端，HTTPS 的根证书改用系统信任库。理由：rmcp 只支持 reqwest 0.13，与 0.12 并存时 rustls 同时启用两个后端，`wss://` 连接会 panic（评审稿缺口 ①）；项目还没有使用者，用户授权按最合理的方式处理 | 2026-11-01 | 已完成（PR #36） |
 
 D2 之外的新依赖、依赖升级，仍需先征得同意。
 
@@ -303,7 +305,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P4 | profile 文件、上下文文件与 skills | 已完成（PR #6） |
 | P5 | 上下文管理 | 已完成（PR #9） |
 | P6 | 执行环境与崩溃恢复 | 进行中：崩溃恢复（PR #12）、执行环境接缝（PR #13）、离线容器执行（PR #14）已完成；在线访问评审稿已合入（PR #17），一期已完成：只读命令自动放行（PR #19）、环境变量保护与 ServiceAccount token 脱敏（PR #20）、常驻 Pod 部署包（PR #22）、多集群（PR #24）；容器联网已取消，改为常驻 Pod 部署。待部署方在真实集群上验收；服务模式与 IM 接入的评审稿已合入（PR #27），模块 A（IM 接口与服务，PR #28）、B（Slack 与 `serve`，PR #29）、C（⚑ D:5/CHINA FLAG: 飞书，PR #32）、D（部署，PR #33）已完成，真实平台验收待提供凭据 |
-| P7 | 插件与 MCP | 未开始；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已完成（PR #23），A2–A8（扩展 API）已完成（PR #25） |
+| P7 | 插件与 MCP | 评审中：范围按 D8 收窄，评审稿 `docs/p7-mcp-review.md`（草稿）；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已完成（PR #23），A2–A8（扩展 API）已完成（PR #25） |
 | P8 | 嵌入协议 `acp` | 未开始 |
 | P9 | 可选增强 | 未开始 |
 
@@ -747,9 +749,9 @@ IM 接入模块 D 实施记录（2026-11-01，PR #33）：
 
 验收：离线任务在无网络的容器中执行命令；在线任务按已评审的网络与凭据范围访问目标 API；崩溃恢复测试。D5 若改变 `run` 的默认执行环境，补充迁移说明和相应 CLI 测试。
 
-### P7 前置：扩展 API 与追踪事件（设计草案，2026-11-01，待评审）
+### P7 前置：扩展 API 与追踪事件（2026-11-01，已完成：A1 PR #21，B PR #23，A2–A8 PR #25）
 
-背景：P7 将公开 `Extension` trait（技术方案 5.5 节：`name`、`tools`、`prompt_sections`、`hooks`）；技术方案把长期记忆规划为"`transform_context` + 外部存储"的扩展；P9 计划 OpenTelemetry 追踪。公开 trait 有了外部实现后，再改签名就是不兼容变更，所以先定稿下列接口。本节是草案，尚未实施；评审通过后，每项先补测试再改代码。
+背景：P7 将公开 `Extension` trait（技术方案 5.5 节：`name`、`tools`、`prompt_sections`、`hooks`）；技术方案把长期记忆规划为"`transform_context` + 外部存储"的扩展；P9 计划 OpenTelemetry 追踪。公开 trait 有了外部实现后，再改签名就是不兼容变更，所以先定稿下列接口。下表是最初的草案；各项已定稿并实施，见后面三个小节。
 
 A. 扩展 API
 
@@ -889,15 +891,30 @@ B. 追踪事件
 
 ### P7 插件与 MCP
 
-目标：第三方能力可以不改内核接入（原路线图“MCP 客户端，以及只读的领域工具”）。依赖：`rmcp`（D2 已授权，要求 MSRV 1.88）。
+目标：第三方能力可以不改内核接入（原路线图“MCP 客户端，以及只读的领域工具”）。范围按 D8 收窄（2026-11-01）：本项目只做 MCP 客户端。评审稿见 `docs/p7-mcp-review.md`（草稿）。依赖：`rmcp`（D2 已授权；3.8.0 声明 MSRV 1.88），模块 B 引入；它需要的 reqwest 0.13 已先行升级（D9）。
 
-- [ ] 前置设计（上节 A、B 两部分）评审通过并实施
-- [ ] 公开 `Extension` trait：注册工具、钩子、提示词段落、命令
-- [ ] MCP 客户端扩展：支持 stdio 与 Streamable HTTP 两种传输
-- [ ] MCP 工具同样受规则约束；MCP 服务器需要显式信任；无人值守默认不启用外部 MCP
-- [ ] 只读的领域工具（如 Kubernetes、Prometheus 查询）以扩展或 MCP 服务器提供
+- [x] 前置设计（上节 A、B 两部分）评审通过并实施（A1：PR #21；B：PR #23；A2–A8：PR #25）
+- [ ] 公开 `Extension` trait：注册工具、钩子、提示词段落（命令暂不做，见评审稿 1.3）
+- [ ] MCP 客户端扩展：只接工具，只支持 Streamable HTTP（D8；stdio 不做）
+- [ ] MCP 工具同样受规则约束；服务器与工具都要在配置中显式列出；无人值守只执行显式放行的工具
+- ~~只读的领域工具（如 Kubernetes、Prometheus 查询）以扩展或 MCP 服务器提供~~：由外部服务以 MCP 服务器提供（D8）
 
 验收：MCP 工具可以列出、调用，并受规则约束。
+
+reqwest 0.13 升级记录（2026-11-01，PR #36）：
+
+- 起因：P7 评审中发现，rmcp 只支持 reqwest 0.13，与项目的 0.12.28 并存时，rustls 同时启用 ring 与 aws-lc-rs 两个后端，`wss://` 连接会 panic（`docs/p7-mcp-review.md` 缺口 ①）。项目还没有使用者，用户授权按最合理的方式处理，见决策 D9。
+- 改动：`Cargo.toml` 中 reqwest 改为 0.13（`json`、`stream`、`rustls`），源码无需修改。
+  - `Cargo.lock` 由 183 个包变为 210 个：新增 30 个，移除 base64 0.22.1、ryu、serde_urlencoded；reqwest 0.12.28 升为 0.13.5，wasm-streams 0.4.2 升为 0.5.0。
+  - 本机（macOS）新编译 12 个包：aws-lc-rs、aws-lc-sys 及其构建工具 cmake、dunce、fs_extra、jobserver、pkg-config，rustls-platform-verifier，security-framework 与 core-foundation 各两个；其余是其他平台的条目。
+  - rustls 的特性由 `ring,std,tls12` 变为 `aws-lc-rs,aws_lc_rs,std,tls12`；本机的重复依赖只剩原有的 webpki-roots。
+- 行为变化：
+  - HTTPS 的根证书改用系统信任库；Linux 上没有 CA 证书时，程序启动即报错，已在镜像中实测（评审稿附录 9.4），README 已写明。
+  - 构建需要 C 编译器（aws-lc-sys）；项目的 Dockerfile 不改即可构建（linux/arm64 实测）。镜像实测基于 `b169275` 加本次改动；之后合入的 PR #34、#35 没有改动依赖，也没有改动 HTTP 客户端的构建方式。
+  - 代理仍读取 `HTTPS_PROXY`、`HTTP_PROXY`、`NO_PROXY`。
+- 测试：新增 `tests/im_slack.rs` 的 `a_failed_tls_handshake_is_reported_and_retried`，假 Slack 新增 `Answer::Json`。反向验证：给测试构建加入启用 `ring` 的依赖后，该测试因 rustls 在 `crypto/mod.rs:249` panic 而失败，修改已还原。`.claude/rules/08-dependencies-msrv.md` 记下“rustls 只能有一个加密后端”。
+- 本地 macOS（基于含 PR #35 的 `a345b39`）：stable 与 Rust 1.88.0 各 678 项通过（其中 1 项为本 PR 新增），6 项付费测试跳过；格式、clippy、严格 Rustdoc 与 MSRV 全目标检查通过；`tests/openai_mock.rs`、`tests/im_slack.rs`、⚑ D:5/CHINA FLAG: `tests/im_feishu.rs` 与 `tests/serve_cli.rs` 各连续运行 5 次，均通过。
+- 未验证：x86_64 镜像的构建；对真实模型服务、Slack 与 ⚑ D:5/CHINA FLAG: 飞书 的 HTTPS 连接（镜像中只连过 example.com）。
 
 ### P8 嵌入协议 `acp`
 
@@ -941,4 +958,4 @@ B. 追踪事件
 
 ---
 
-ROADMAP.md · v0.6 · 2026年11月
+ROADMAP.md · v0.7 · 2026年11月

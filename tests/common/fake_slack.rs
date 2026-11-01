@@ -34,6 +34,8 @@ pub enum Answer {
     Error(&'static str),
     /// Status 429 with this `Retry-After`.
     RateLimited { retry_after_secs: u64 },
+    /// Status 200 with this body, for answers the normal ones do not cover.
+    Json(Value),
 }
 
 pub struct FakeSlack {
@@ -199,6 +201,7 @@ async fn answer(
             "",
         ),
         Some(Answer::Error(error)) => response("200 OK", &[], &json!({"ok": false, "error": error}).to_string()),
+        Some(Answer::Json(body)) => response("200 OK", &[], &body.to_string()),
         None => response("200 OK", &[], &normal(&call, &socket_url, &posted).to_string()),
     };
     log.lock().unwrap().push(call);

@@ -464,6 +464,38 @@ async fn a_failed_connection_attempt_is_reported_and_retried() {
     running.stop().await.unwrap();
 }
 
+/// `wss://` goes through rustls' process-wide crypto provider. A build in which two providers
+/// are enabled makes the connection panic instead of failing, which only `wss://` addresses
+/// reach; the fake's own socket is plain `ws://`.
+#[tokio::test]
+async fn a_failed_tls_handshake_is_reported_and_retried() {
+    let tls = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tls_url = format!("wss://{}/link", tls.local_addr().unwrap());
+    // Accepts and closes, so the handshake fails.
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = tls.accept().await {
+            drop(stream);
+        }
+    });
+    let mut slack = FakeSlack::start().await;
+    slack.script(
+        "apps.connections.open",
+        vec![Answer::Json(json!({"ok": true, "url": tls_url}))],
+    );
+    let (reported, mut reports) = mpsc::unbounded_channel();
+    let mut config = SlackConfig::new(APP_TOKEN.into(), BOT_TOKEN.into());
+    config.api_base = slack.api_base.clone();
+    config.on_error = Some(Arc::new(move |error: &ImError| {
+        reported.send(error.to_string()).ok();
+    }));
+    let running = run(Arc::new(SlackChannel::new(config).unwrap()));
+    let report = tokio::time::timeout(WAIT, reports.recv()).await.unwrap().unwrap();
+    assert!(report.contains("cannot open the Socket Mode connection"), "{report}");
+    // The next attempt gets the fake's plain socket.
+    slack.socket().await;
+    running.stop().await.unwrap();
+}
+
 #[tokio::test]
 async fn stopping_closes_the_connection() {
     let mut slack = FakeSlack::start().await;
