@@ -1,9 +1,11 @@
 //! Where built-in tools run commands and read files.
 //!
 //! Tools keep their arguments, result format and truncation; an executor only runs a
-//! command or reads a file. [`LocalExecutor`] uses this machine; an isolated executor can
-//! run the same tools elsewhere without changing them.
+//! command or reads a file. [`LocalExecutor`] uses this machine; [`ContainerExecutor`]
+//! runs the same tools in an isolated Docker container.
 
+mod capture;
+mod container;
 mod local;
 
 use std::path::Path;
@@ -12,6 +14,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
+pub use container::{ContainerConfig, ContainerExecutor, Platform};
 pub use local::LocalExecutor;
 
 /// One shell command: `<shell> -c <command>` in `cwd`.

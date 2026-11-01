@@ -7,6 +7,7 @@
 use std::path::Path;
 
 use crate::ai::{PREAMBLE, SystemPrompt, now_ms};
+use crate::executor::Platform;
 
 /// `instructions` as the preamble, followed by every non-empty section. Sections are wrapped
 /// in tags of their names, so the model can tell generated facts from instructions
@@ -25,12 +26,35 @@ pub fn build_system_prompt(instructions: &str, sections: &[(&str, &str)]) -> Sys
 /// misses the provider's prompt cache on its first request.
 pub fn environment_section(cwd: &Path) -> String {
     let os = format!("{} ({})", os_release(), std::env::consts::ARCH);
+    format!(
+        "OS: {os}\nRun started: {}\nWorking directory: {}",
+        run_started(),
+        cwd.display()
+    )
+}
+
+/// Facts about the container that commands run in, instead of this machine: its system,
+/// the read-only workspace, and the isolation that limits what commands can do.
+pub fn container_environment_section(cwd: &Path, image: &str, user: &str, platform: &Platform) -> String {
+    let name = pretty_name(&platform.os_release).unwrap_or_else(|| "Linux".to_string());
+    format!(
+        "OS: {name}, Linux kernel {} ({}), in a container from image {image}\nRun started: {}\n\
+         Working directory: {} (read-only)\n\
+         Isolation: commands run as user {user} without network access; only /tmp is writable.",
+        platform.kernel,
+        platform.arch,
+        run_started(),
+        cwd.display()
+    )
+}
+
+/// The current UTC time, with this machine's time zone when it is known.
+fn run_started() -> String {
     let started = format_utc(now_ms() / 1000);
-    let started = match time_zone() {
+    match time_zone() {
         Some(zone) => format!("{started} (local time zone: {zone})"),
         None => started,
-    };
-    format!("OS: {os}\nRun started: {started}\nWorking directory: {}", cwd.display())
+    }
 }
 
 /// The OS name and version, read from files rather than by running commands. Falls back to
@@ -134,6 +158,32 @@ mod tests {
             "{section}"
         );
         assert_eq!(lines[2], "Working directory: /srv/app");
+    }
+
+    #[test]
+    fn the_container_environment_describes_the_container_and_its_isolation() {
+        let platform = Platform {
+            os_release: "PRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\n".into(),
+            kernel: "6.10.14-linuxkit".into(),
+            arch: "aarch64".into(),
+        };
+        let section =
+            container_environment_section(Path::new("/srv/app"), "debian:bookworm-slim", "65534:65534", &platform);
+        let lines: Vec<&str> = section.lines().collect();
+        assert_eq!(
+            lines[0],
+            "OS: Debian GNU/Linux 12 (bookworm), Linux kernel 6.10.14-linuxkit (aarch64), in a container from image debian:bookworm-slim"
+        );
+        assert!(lines[1].starts_with("Run started: "), "{section}");
+        assert_eq!(lines[2], "Working directory: /srv/app (read-only)");
+        assert_eq!(
+            lines[3],
+            "Isolation: commands run as user 65534:65534 without network access; only /tmp is writable."
+        );
+        let unnamed = Platform::default();
+        assert!(
+            container_environment_section(Path::new("/"), "x", "0:0", &unnamed).starts_with("OS: Linux, Linux kernel")
+        );
     }
 
     #[test]
