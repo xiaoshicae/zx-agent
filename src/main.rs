@@ -16,6 +16,7 @@ use zx_agent::runner::{RunOutcome, RunReport};
 
 mod chat;
 mod cli;
+mod serve;
 
 use chat::visible;
 use cli::{Cli, Command, OutputMode, RunArgs};
@@ -38,6 +39,7 @@ async fn main() -> ExitCode {
     let result = match Cli::parse().command {
         Command::Run(args) => run(args).await,
         Command::Chat(args) => chat::run(args).await,
+        Command::Serve(args) => serve::run(args).await,
     };
     match result {
         Ok(code) => ExitCode::from(code),
@@ -110,6 +112,7 @@ async fn build_session(args: &RunArgs) -> Result<AgentSession> {
             continue_on_length: args.continue_on_length,
         },
         instructions: instructions.as_deref(),
+        hidden_env: &[],
     })
     .await?;
     let sink: Arc<dyn EventSink> = match args.output {

@@ -15,14 +15,11 @@ use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 
 use zx_agent::AgentSession;
-use zx_agent::agent::Decision;
 use zx_agent::agent_session::ModelRef;
 use zx_agent::ai::Provider;
 use zx_agent::compaction;
-use zx_agent::policy::{PolicyHook, Rule, RuleMatcher, RulePolicy};
 use zx_agent::profile::Builtin;
 use zx_agent::runner::RunReport;
-use zx_agent::tools::BASH;
 
 use crate::cli::{self, ChatArgs, SessionFile, SessionOptions};
 use crate::{EXIT_ABORTED, EXIT_COMPLETED};
@@ -80,21 +77,10 @@ async fn build(
             continue_on_length: None,
         },
         instructions: settings.instructions.as_deref(),
+        hidden_env: &[],
     })
     .await?;
-    prepared.config.hooks.push(PolicyHook::new(Arc::new(
-        RulePolicy::new(vec![
-            Rule {
-                matcher: RuleMatcher::Tool(BASH.into()),
-                decision: Decision::Ask("shell commands require interactive approval".into()),
-            },
-            Rule {
-                matcher: RuleMatcher::Any,
-                decision: Decision::Allow,
-            },
-        ])
-        .auto_approve(std::mem::take(&mut prepared.auto_approve)),
-    )));
+    prepared.require_bash_approval("shell commands require interactive approval");
     prepared.config.interaction = interaction.clone();
     let provider = prepared.config.spec.provider.clone();
     let cwd = prepared.config.spec.cwd.clone();

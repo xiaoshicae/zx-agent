@@ -110,6 +110,47 @@ echo "exit code: $?"
 
 在 Kubernetes 中常驻部署（`kubectl exec` 进 Pod 对话、CronJob 定时巡检、可选的写权限）：见 [deploy/kubernetes/README.md](deploy/kubernetes/README.md)。
 
+### IM 服务
+
+`zx-agent serve` 作为常驻进程接入 IM：在频道里 @ 机器人或私聊它，每个线程一个会话，写操作在 IM 里审批。目前支持 Slack，经 Socket Mode 接收，只需出网，不需要公网入口。设计见 `docs/serve-im-review.md`；部署到 Kubernetes 的方式在评审稿模块 D 中实施。
+
+```bash
+export SLACK_APP_TOKEN=xapp-...   # app-level token，用于 Socket Mode
+export SLACK_BOT_TOKEN=xoxb-...   # bot token，用于发消息
+zx-agent serve --config serve.toml --model <model>
+```
+
+配置文件（TOML，未知的键视为错误）：
+
+```toml
+[slack]
+# appTokenEnv = "SLACK_APP_TOKEN"   # 存放 app-level token 的环境变量名，此为默认值
+# botTokenEnv = "SLACK_BOT_TOKEN"   # 存放 bot token 的环境变量名，此为默认值
+
+[access]
+conversations = ["slack:C0123456789"]   # 只在这些频道或私聊中回答，其他地方只回一句“未授权”
+approvers = ["slack:U0123456789"]       # 只有这些用户的点击能批准写操作
+
+[limits]
+maxRunning = 4              # 同时运行的会话数，默认 4，其余排队
+approvalTimeoutSecs = 600   # 审批卡片的等待时长，默认 600，超时按拒绝处理
+idleSecs = 1800             # 会话空闲多久后释放其文件锁，默认 1800
+
+[sessions]
+dir = "/data/sessions"      # 会话文件位于 <dir>/slack/<频道>/<线程>.jsonl
+```
+
+| 项 | 说明 |
+|---|---|
+| Slack 应用 | 打开 Socket Mode 与 Interactivity；订阅 bot 事件 `app_mention` 与 `message.im`。bot token 需要读取 @ 消息的权限（Slack 文档两处分别写作 `app_mentions:read` 与 `app_mentions.read`，以应用设置页显示的为准）、`im:history` 与 `chat:write`；app-level token 带 `connections:write`（Slack 的权限页把 `apps.connections.open` 列为它的适用方法） |
+| 使用 | 频道中 @ 机器人，回答在这条消息的线程里；线程中追问时同样要 @ 机器人。私聊直接发送。单独发送 `/cancel` 取消本线程的任务 |
+| 审批 | 与 chat 相同，使用 assistant profile：自动放行清单中的只读命令直接执行，其余 bash 命令发审批卡片，只有 `approvers` 中的用户点击才生效 |
+| 凭据 | 两个 token 只从环境变量读取。命令的环境中删除这两个变量，命令输出中出现它们的值时脱敏 |
+| 日志 | stdout 每行一个 JSON：`approval`（审批记录：线程、工具调用、审批人、结果、时间）、`released`（释放空闲会话）、`failed`（未能发出的消息等）。对话内容在会话文件中 |
+| 退出 | 收到 SIGINT 或 SIGTERM 时取消进行中的任务，各线程发出结果后以 0 退出；配置错误与被拒的凭据为 2；平台连接意外结束为 1 |
+
+其余参数与 `chat` 相同（`--model`、`--base-url`、`--api-key-env`、`--profile`、`--max-turns`、`--timeout-secs` 等）；`--max-turns` 与 `--timeout-secs` 作用于每一次运行。不接受 `--session`。
+
 ### run 退出码
 
 | 退出码 | 含义 |
@@ -478,7 +519,7 @@ pub trait SessionLog: Send + Sync {
 
 ### IM 接入
 
-`im::Server` 在 IM 中回答问题：每个线程一个会话，写操作在 IM 中审批。设计见 `docs/serve-im-review.md`。目前只有库接口；CLI 的 `serve` 子命令和具体平台的实现尚未提供（评审稿第 6 节的模块 B、C）。
+`im::Server` 在 IM 中回答问题：每个线程一个会话，写操作在 IM 中审批。设计见 `docs/serve-im-review.md`；命令行用法见上文[IM 服务](#im-服务)。Slack 的实现是 `im::slack::SlackChannel`，用 `SlackConfig::new(app_token, bot_token)` 构造；卡片文字在 `CardLabels`，默认中文，可替换。
 
 平台实现 `ImChannel` 的四个方法：`platform`、`run`（接收直到取消）、`send`、`update`。实现负责：自行重连；收到平台投递后立即确认，再转交事件；按消息 ID 去重；只转交发给机器人的消息（@ 与单聊），不转交机器人自己的消息；遵守平台限频；超长文本自行拆分。`Destination.thread` 是线程根消息的 ID。
 
