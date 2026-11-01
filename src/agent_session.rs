@@ -4,13 +4,14 @@
 //! Its lease restores the Runner on completion, cancellation, panic or future drop.
 
 use std::fmt;
+use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::{AgentEvent, EventSink, LoopConfig, MessageQueues};
+use crate::agent::{Event, EventSink, LoopConfig, MessageQueues};
 use crate::ai::Provider;
 use crate::ai::retry::RetryPolicy;
 use crate::compaction;
@@ -58,14 +59,14 @@ enum State {
 /// ```no_run
 /// use std::sync::Arc;
 /// use zx_agent::AgentSession;
-/// use zx_agent::agent::AgentEvent;
+/// use zx_agent::agent::Event;
 /// use zx_agent::agent_session::SessionError;
 /// use zx_agent::runner::Runner;
 ///
 /// # async fn example(runner: Runner) -> Result<(), SessionError> {
 /// let session = AgentSession::from(runner);
-/// let _subscription = session.subscribe(Arc::new(|event: AgentEvent| {
-///     println!("{}", event.kind());
+/// let _subscription = session.subscribe(Arc::new(|event: &Event| {
+///     println!("{} #{} {}", event.run_id, event.seq, event.event.kind());
 /// }));
 /// let first = session.prompt("Inspect the logs.").await?;
 /// let second = session.prompt("Summarize the findings.").await?;
@@ -152,6 +153,24 @@ impl AgentSession {
         Subscription {
             events: Arc::downgrade(&self.events),
             listener: self.events.attach(sink),
+        }
+    }
+
+    /// Receive future events through a channel that holds at most `capacity` of them, for
+    /// exporters that must never slow a run down. While the channel is full, new events are
+    /// dropped and counted, which also leaves a gap in their `seq`. Dropping the stream
+    /// unsubscribes.
+    pub fn subscribe_bounded(&self, capacity: NonZeroUsize) -> EventStream {
+        let (sender, receiver) = tokio::sync::mpsc::channel(capacity.get());
+        let dropped = Arc::new(AtomicU64::new(0));
+        let sink = Arc::new(BoundedSink {
+            sender,
+            dropped: dropped.clone(),
+        });
+        EventStream {
+            receiver,
+            dropped,
+            _subscription: self.subscribe(sink),
         }
     }
 
@@ -295,17 +314,61 @@ impl EventHub {
     }
 }
 
+/// Events of an [`AgentSession`] through a bounded channel; see
+/// [`AgentSession::subscribe_bounded`].
+pub struct EventStream {
+    receiver: tokio::sync::mpsc::Receiver<Event>,
+    // Shared with the sink that counts: an atomic counter, read here and written there.
+    dropped: Arc<AtomicU64>,
+    _subscription: Subscription,
+}
+
+impl EventStream {
+    /// The next event; waits until one arrives. `None` once the session is gone.
+    pub async fn recv(&mut self) -> Option<Event> {
+        self.receiver.recv().await
+    }
+
+    /// The next event if one is waiting, without waiting.
+    pub fn try_recv(&mut self) -> Option<Event> {
+        self.receiver.try_recv().ok()
+    }
+
+    /// Events dropped so far because the channel was full.
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::SeqCst)
+    }
+}
+
+struct BoundedSink {
+    sender: tokio::sync::mpsc::Sender<Event>,
+    dropped: Arc<AtomicU64>,
+}
+
+impl EventSink for BoundedSink {
+    fn emit(&self, event: &Event) {
+        match self.sender.try_send(event.clone()) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                self.dropped.fetch_add(1, Ordering::SeqCst);
+            }
+            // The stream is gone; its subscription is being dropped as well.
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
+        }
+    }
+}
+
 impl EventSink for EventHub {
-    fn emit(&self, event: AgentEvent) {
+    fn emit(&self, event: &Event) {
         // Snapshot only the Arc handles. Reentrant subscribe, unsubscribe and abort must
-        // never run under this lock; each subscriber receives its own event payload.
+        // never run under this lock.
         let listeners = lock(&self.listeners).clone();
         let mut failed = false;
         for listener in &listeners {
             if listener.failed.load(Ordering::SeqCst) {
                 continue;
             }
-            if catch_unwind(AssertUnwindSafe(|| listener.sink.emit(event.clone()))).is_err() {
+            if catch_unwind(AssertUnwindSafe(|| listener.sink.emit(event))).is_err() {
                 if !listener.failed.swap(true, Ordering::SeqCst) {
                     self.failures.fetch_add(1, Ordering::SeqCst);
                 }

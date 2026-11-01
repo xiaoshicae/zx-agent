@@ -27,7 +27,7 @@
 
 - **是什么**：用 Rust 编写的通用 agent 内核。同一个内核支撑三类场景：和人对话；无人值守运行，例如由 cron 或 Kubernetes Job 触发的排障；被编辑器或其他程序嵌入。场景差异放在内核之外，通过 profile、提示词和插件表达。
 - **参照**：分层方式、循环语义和会话格式沿用 pi（https://github.com/earendil-works/pi ，commit `a92283056`）。与 pi 不同的地方记录在 README 的"与 pi 的差异"。
-- **现状**：v0.1.0。已实现共享的 `AgentSession`、无人值守的 `run` 和终端 `chat`、一个 OpenAI 兼容的流式 provider、`bash` 与 `read_file`，以及文件化 profile、项目上下文、按需 `read_skill`、有界摘要和长工具结果落盘 / `read_output`，崩溃恢复，可替换的会话存储（`SessionLog`；JSONL 会话文件同一时间只有一个写入者），以及可选的离线容器执行（`--execution container`，默认仍在本机执行）。CLI 的场景默认值位于 `profiles/*.toml` 与相邻说明文件；`presets` 保留已有 SDK 接口。SDK 默认不限轮次、不限时间、不自动续写或压缩、不落盘工具结果。接口与资源上限见 README，目标、阶段计划与已定决策见 `docs/ROADMAP.md`，改动前先确认当前阶段。
+- **现状**：v0.1.0。已实现共享的 `AgentSession`、无人值守的 `run` 和终端 `chat`、一个 OpenAI 兼容的流式 provider、`bash` 与 `read_file`，以及文件化 profile、项目上下文、按需 `read_skill`、有界摘要和长工具结果落盘 / `read_output`，崩溃恢复，可替换的会话存储（`SessionLog`；JSONL 会话文件同一时间只有一个写入者），带信封的追踪事件（运行、尝试、请求、策略结论与审批，可回链会话条目），以及可选的离线容器执行（`--execution container`，默认仍在本机执行）。CLI 的场景默认值位于 `profiles/*.toml` 与相邻说明文件；`presets` 保留已有 SDK 接口。SDK 默认不限轮次、不限时间、不自动续写或压缩、不落盘工具结果。接口与资源上限见 README，目标、阶段计划与已定决策见 `docs/ROADMAP.md`，改动前先确认当前阶段。
 - **验证范围**：本地使用 macOS，CI 覆盖 Linux 与 macOS；`--system-updates inline` 只在一个服务上验证过；付费 e2e 测试（`tests/real_api.rs`）于 2026-11-01 在 DeepSeek 的 `deepseek-flash` 与 `deepseek-chat` 上各运行一次，均为 6 项通过（只覆盖 `collapse` 模式，不含压缩用例）。容器执行的真实 Docker 测试（设置 `ZX_DOCKER_TEST_IMAGE` 运行 `tests/container.rs`）在本机 macOS 的 Docker Desktop 上用 `debian:bookworm-slim` 与一个 Ubuntu 系镜像跑过，原生 Linux 的 Docker 只由 CI 覆盖；没有在 rootless Docker 或 Podman 上验证。
 
 ## 架构设计

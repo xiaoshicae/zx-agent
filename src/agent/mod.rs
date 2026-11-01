@@ -6,10 +6,15 @@ pub mod hooks;
 mod host;
 pub mod policy;
 pub mod queue;
+mod report;
 pub mod tool;
 
 pub use agent_loop::{LoopConfig, LoopControl, LoopFailure, LoopResult, LoopSpec, run_loop};
-pub use events::{AgentEvent, EventSink, Interruption, LoopOutcome, NullSink};
+pub use events::{
+    AgentEvent, ApprovalResult, EVENT_SCHEMA_VERSION, Event, EventSink, Interruption, LoopOutcome, NullSink,
+    RequestKind, ToolVerdict,
+};
+pub(crate) use events::{Emit, RunTrace};
 pub use hooks::{
     ContextEdit, HookChain, HookError, HookFailure, HookPhase, HookResult, Hooks, TurnDecision, TurnDisposition,
     TurnSummary,
@@ -17,4 +22,5 @@ pub use hooks::{
 pub(crate) use host::{ContextPreparation, SessionHost};
 pub use policy::{AllowAll, CommandPolicy, Decision, ToolPolicy};
 pub use queue::MessageQueues;
+pub use report::{RunOutcome, RunReport};
 pub use tool::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};

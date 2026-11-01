@@ -344,6 +344,48 @@ async fn steering_enters_after_the_turn_and_follow_ups_after_the_answer() {
     );
 }
 
+#[tokio::test]
+async fn a_spent_budget_starts_no_new_turn_and_leaves_queued_input_queued() {
+    let provider = provider([FauxStep::tool_call(
+        "c1",
+        "echo",
+        json!({"text": "ok", "steer": "also check disk"}),
+    )]);
+    let config = config(provider.clone(), vec![]);
+    let mut echo = EchoTool::new("echo");
+    echo.queues = Some(config.queues.clone());
+    let mut config = config;
+    config.spec.tools = vec![Arc::new(echo)];
+    let mut context = Vec::new();
+    let events = Collect::default();
+
+    let result = run_loop(
+        &mut context,
+        vec![Message::user("go")],
+        &config,
+        &mut LoopControl::new(
+            Some(1),
+            &mut ApprovalCache::default(),
+            &CancellationToken::new(),
+            &events,
+        ),
+    )
+    .await;
+
+    assert_eq!(
+        (result.outcome, result.turns, result.requests),
+        (LoopOutcome::MaxTurns, 1, 1)
+    );
+    assert_eq!(summarize(&context), ["user:go", "assistant:calls[c1]", "tool:c1=ok"]);
+    assert_eq!(summarize(&config.queues.drain_steering()), ["user:also check disk"]);
+    let turns: Vec<_> = events
+        .kinds()
+        .into_iter()
+        .filter(|kind| kind.starts_with("turn_"))
+        .collect();
+    assert_eq!(turns, ["turn_start", "turn_end"]);
+}
+
 // ---------------------------------------------------------------------------
 // Provider failures and cancellation
 // ---------------------------------------------------------------------------

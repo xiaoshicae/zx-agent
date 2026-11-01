@@ -10,7 +10,7 @@ use futures::{FutureExt, StreamExt};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use super::events::{AgentEvent, EventSink, LoopOutcome};
+use super::events::{AgentEvent, ApprovalResult, Emit, EventSink, LoopOutcome, RequestKind, RunTrace, ToolVerdict};
 use super::hooks::{
     ContextEdit, HookCall, HookChain, HookError, HookFailure, HookPhase, TurnDecision, TurnDisposition, TurnSummary,
     report_failure,
@@ -61,7 +61,9 @@ impl LoopConfig {
 
 /// State borrowed from the run owner; grants survive retries without sharing a lock.
 pub struct LoopControl<'a> {
+    /// Model requests this attempt may make, summary requests included; `None` is unlimited.
     pub max_turns: Option<u32>,
+    /// Task turns of earlier attempts, so that turn numbers continue across retries.
     pub turn_offset: u32,
     pub continuations: u32,
     pub approvals: &'a mut ApprovalCache,
@@ -70,6 +72,10 @@ pub struct LoopControl<'a> {
     /// Records each step before the loop acts on it; the Runner supplies its session. Without
     /// one, the loop keeps messages and edits only in its context.
     pub(crate) host: Option<&'a mut dyn SessionHost>,
+    /// The run this attempt belongs to; without one, `run_loop` is a run of its own.
+    pub(crate) trace: Option<&'a RunTrace>,
+    /// 1 for the first attempt of a run, plus one for each retry.
+    pub(crate) attempt: u32,
 }
 
 impl<'a> LoopControl<'a> {
@@ -88,6 +94,8 @@ impl<'a> LoopControl<'a> {
             cancel,
             sink,
             host: None,
+            trace: None,
+            attempt: 1,
         }
     }
 }
@@ -110,7 +118,10 @@ pub enum LoopFailure {
 #[derive(Debug)]
 pub struct LoopResult {
     pub outcome: LoopOutcome,
+    /// Task turns started, numbered from `turn_offset + 1`.
     pub turns: u32,
+    /// Model requests made, summary requests included: what the budget counts.
+    pub requests: u32,
     pub continuations: u32,
     pub usage: Usage,
     pub failure: Option<LoopFailure>,
@@ -128,12 +139,27 @@ pub async fn run_loop(
     let mut result = LoopResult {
         outcome: LoopOutcome::Completed,
         turns: 0,
+        requests: 0,
         continuations: control.continuations,
         usage: Usage::default(),
         failure: None,
     };
-    let mut engine = Engine { config, control };
-    engine.emit(AgentEvent::AgentStart).await;
+    let own_trace;
+    let trace = match control.trace {
+        Some(trace) => trace,
+        None => {
+            own_trace = RunTrace::new(None);
+            &own_trace
+        }
+    };
+    let mut engine = Engine {
+        config,
+        control,
+        trace,
+        turn: None,
+    };
+    let attempt = engine.control.attempt;
+    engine.emit(AgentEvent::AgentStart { attempt }).await;
     match engine.run(context, prompts, &mut result).await {
         Ok(outcome) => result.outcome = outcome,
         Err(halt) => {
@@ -150,6 +176,8 @@ pub async fn run_loop(
             result.failure = Some(LoopFailure::Host(error));
         }
     }
+    // A turn that stopped before its request finished still ends, so turn events pair up.
+    engine.end_turn().await;
     engine
         .emit(AgentEvent::AgentEnd {
             outcome: result.outcome,
@@ -169,18 +197,42 @@ enum Halt {
 struct Engine<'a, 'b, 'c> {
     config: &'a LoopConfig,
     control: &'b mut LoopControl<'c>,
+    trace: &'b RunTrace,
+    /// The number of the turn in progress, between its `turn_start` and `turn_end`.
+    turn: Option<u32>,
 }
 
 impl<'a> Engine<'a, '_, '_> {
+    fn to(&self) -> Emit<'_> {
+        Emit {
+            sink: self.control.sink,
+            trace: self.trace,
+        }
+    }
+
     async fn emit(&self, event: AgentEvent) {
-        self.config
-            .hooks
-            .emit(event, self.control.cancel, self.control.sink)
-            .await;
+        self.config.hooks.emit(event, self.control.cancel, self.to()).await;
     }
 
     fn hook_error(&self, error: HookError) -> String {
-        report_failure(error, self.control.sink)
+        report_failure(error, self.to())
+    }
+
+    /// Start the next task turn unless one is in progress.
+    async fn start_turn(&mut self, result: &mut LoopResult) {
+        if self.turn.is_none() {
+            result.turns = result.turns.saturating_add(1);
+            let turn = self.control.turn_offset.saturating_add(result.turns);
+            self.turn = Some(turn);
+            self.emit(AgentEvent::TurnStart { turn }).await;
+        }
+    }
+
+    /// End the turn in progress, if there is one.
+    async fn end_turn(&mut self) {
+        if let Some(turn) = self.turn.take() {
+            self.emit(AgentEvent::TurnEnd { turn }).await;
+        }
     }
 
     /// Record a finished message, then report it. Returns its entry ID in a session.
@@ -191,6 +243,7 @@ impl<'a> Engine<'a, '_, '_> {
         };
         self.emit(AgentEvent::MessageEnd {
             message: message.clone(),
+            entry_id: id.clone(),
         })
         .await;
         Ok(id)
@@ -209,13 +262,21 @@ impl<'a> Engine<'a, '_, '_> {
             ContextEdit::ReplaceText { index, text } => (*index, Some(text.clone())),
             ContextEdit::Omit { index } => (*index, None),
         };
-        if let Some(host) = self.control.host.as_deref_mut() {
-            host.edit_context(index, replacement.as_deref())
-                .await
-                .map_err(Halt::Unrecorded)?;
-        }
+        let entry_id = match self.control.host.as_deref_mut() {
+            Some(host) => Some(
+                host.edit_context(index, replacement.as_deref())
+                    .await
+                    .map_err(Halt::Unrecorded)?,
+            ),
+            None => None,
+        };
         edit.apply(context).map_err(Halt::Failed)?;
-        self.emit(AgentEvent::ContextEdited { index, replacement }).await;
+        self.emit(AgentEvent::ContextEdited {
+            index,
+            replacement,
+            entry_id,
+        })
+        .await;
         Ok(())
     }
 
@@ -269,10 +330,7 @@ impl<'a> Engine<'a, '_, '_> {
         result: &mut LoopResult,
     ) -> Result<LoopOutcome, Halt> {
         let config = self.config;
-        self.emit(AgentEvent::TurnStart {
-            turn: self.control.turn_offset.saturating_add(1),
-        })
-        .await;
+        self.start_turn(result).await;
         let changes = SystemPrompt::from_transcript(context).diff(&config.spec.system_prompt);
         if !changes.is_empty() {
             self.append(
@@ -292,11 +350,17 @@ impl<'a> Engine<'a, '_, '_> {
         // Whether queued follow-ups are taken at the top of the next turn.
         let mut take_follow_ups = false;
         loop {
-            if result.turns > 0 {
-                self.emit(AgentEvent::TurnStart {
-                    turn: self.control.turn_offset.saturating_add(result.turns).saturating_add(1),
-                })
-                .await;
+            // A new turn, unless a summary request has just ended inside the current one. A turn
+            // exists to make a request: without budget, or once cancelled, none starts, and
+            // queued input stays queued for the next run.
+            if self.turn.is_none() {
+                if self.control.cancel.is_cancelled() {
+                    return Ok(LoopOutcome::Aborted);
+                }
+                if self.control.max_turns.is_some_and(|limit| result.requests >= limit) {
+                    return Ok(LoopOutcome::MaxTurns);
+                }
+                self.start_turn(result).await;
             }
             // Queued input is taken one message at a time, so a rejected message or a stopped
             // run leaves the rest of the queue for the next run.
@@ -314,7 +378,7 @@ impl<'a> Engine<'a, '_, '_> {
             if self.control.cancel.is_cancelled() {
                 return Ok(LoopOutcome::Aborted);
             }
-            if self.control.max_turns.is_some_and(|limit| result.turns >= limit) {
+            if self.control.max_turns.is_some_and(|limit| result.requests >= limit) {
                 return Ok(LoopOutcome::MaxTurns);
             }
             let edits = config
@@ -347,27 +411,17 @@ impl<'a> Engine<'a, '_, '_> {
                     (requests, usage, Some(Halt::Unrecorded(error)))
                 }
             };
+            // Summary requests count against the budget but are reported as a compaction,
+            // not as turns of their own.
             result.usage.add(&usage);
-            for request in 0..requests {
-                result.turns = result.turns.saturating_add(1);
-                self.emit(AgentEvent::TurnEnd {
-                    turn: self.control.turn_offset.saturating_add(result.turns),
-                })
-                .await;
-                if request + 1 < requests {
-                    self.emit(AgentEvent::TurnStart {
-                        turn: self.control.turn_offset.saturating_add(result.turns).saturating_add(1),
-                    })
-                    .await;
-                }
-            }
+            result.requests = result.requests.saturating_add(requests);
             if let Some(halt) = failure {
                 return Err(halt);
             }
             if self.control.cancel.is_cancelled() {
                 return Ok(LoopOutcome::Aborted);
             }
-            if self.control.max_turns.is_some_and(|limit| result.turns >= limit) {
+            if self.control.max_turns.is_some_and(|limit| result.requests >= limit) {
                 return Ok(LoopOutcome::MaxTurns);
             }
             if requests > 0 {
@@ -382,15 +436,25 @@ impl<'a> Engine<'a, '_, '_> {
                 tools: spec.tools.iter().map(|tool| tool.definition()).collect(),
                 max_tokens: spec.max_tokens,
             };
-            if let Some(host) = self.control.host.as_deref_mut() {
-                host.record_request(&request, spec.provider.as_ref())
-                    .await
-                    .map_err(Halt::Unrecorded)?;
-            }
+            let request_entry = match self.control.host.as_deref_mut() {
+                Some(host) => Some(
+                    host.record_request(&request, spec.provider.as_ref())
+                        .await
+                        .map_err(Halt::Unrecorded)?,
+                ),
+                None => None,
+            };
             if self.control.cancel.is_cancelled() {
                 return Ok(LoopOutcome::Aborted);
             }
-            result.turns = result.turns.saturating_add(1);
+            self.emit(AgentEvent::RequestStart {
+                kind: RequestKind::Task,
+                entry_id: request_entry,
+                model: spec.model.clone(),
+                attempt: self.control.attempt,
+            })
+            .await;
+            result.requests = result.requests.saturating_add(1);
             let message = self.stream(request).await;
             result.usage.add(&message.usage);
             let stop = message.stop_reason;
@@ -399,9 +463,10 @@ impl<'a> Engine<'a, '_, '_> {
             let recorded = Message::Assistant(message.clone());
             let entry_id = self.finish(&recorded).await?;
             context.push(recorded);
+            // The turn in progress: the loop starts one at its top and ends it below.
             let turn = self.control.turn_offset.saturating_add(result.turns);
             if matches!(stop, StopReason::Error | StopReason::Aborted) {
-                self.emit(AgentEvent::TurnEnd { turn }).await;
+                self.end_turn().await;
                 result.failure = Some(LoopFailure::Provider {
                     message: Box::new(message),
                     entry_id,
@@ -425,7 +490,7 @@ impl<'a> Engine<'a, '_, '_> {
                 needs_more = !terminated;
                 context.extend(batch.results.into_iter().map(Message::ToolResult));
             }
-            self.emit(AgentEvent::TurnEnd { turn }).await;
+            self.end_turn().await;
             if self.control.cancel.is_cancelled() {
                 return Ok(LoopOutcome::Aborted);
             }
@@ -439,7 +504,10 @@ impl<'a> Engine<'a, '_, '_> {
             } else {
                 TurnDisposition::Stop
             };
-            let remaining_turns = self.control.max_turns.map(|limit| limit.saturating_sub(result.turns));
+            let remaining_turns = self
+                .control
+                .max_turns
+                .map(|limit| limit.saturating_sub(result.requests));
             let summary = TurnSummary {
                 response: &message,
                 messages: context,
@@ -554,37 +622,105 @@ impl<'a> Engine<'a, '_, '_> {
         }
         let verdict = match self.config.hooks.before_tool(call, self.control.cancel).await {
             Ok(verdict) => verdict,
-            Err(error) => return Prepared::blocked(format!("Blocked by policy: {}", self.hook_error(error))),
+            Err(error) => {
+                let reason = self.hook_error(error);
+                self.decision(call, ToolVerdict::Deny, Some(reason.clone())).await;
+                return Prepared::blocked(format!("Blocked by policy: {reason}"));
+            }
         };
         match verdict {
-            Decision::Deny(reason) => return Prepared::blocked(format!("Blocked by policy: {reason}")),
-            Decision::Ask(reason) if !self.control.approvals.allows(call) => {
-                let request = ApprovalRequest {
-                    call: call.clone(),
-                    reason,
-                };
-                let guard = HookCall {
-                    name: "Interaction::confirm",
-                    phase: HookPhase::Approval,
-                    timeout: self.config.interaction_timeout,
-                };
-                match guard
-                    .run(self.config.interaction.confirm(&request), self.control.cancel)
-                    .await
-                {
-                    Ok(Approval::AllowOnce) => {}
-                    Ok(Approval::AllowSession) => self.control.approvals.remember(call),
-                    Ok(Approval::Deny(reason)) => return Prepared::blocked(format!("Approval denied: {reason}")),
-                    Err(error) => return Prepared::blocked(format!("Approval denied: {}", self.hook_error(error))),
+            Decision::Allow => self.decision(call, ToolVerdict::Allow, None).await,
+            Decision::Deny(reason) => {
+                self.decision(call, ToolVerdict::Deny, Some(reason.clone())).await;
+                return Prepared::blocked(format!("Blocked by policy: {reason}"));
+            }
+            Decision::Ask(reason) => {
+                self.decision(call, ToolVerdict::Ask, Some(reason.clone())).await;
+                if self.control.approvals.allows(call) {
+                    self.approval_resolved(call, ApprovalResult::Remembered, None, 0).await;
+                } else if let Err(denied) = self.ask(call, reason).await {
+                    return Prepared::blocked(format!("Approval denied: {denied}"));
                 }
             }
-            Decision::Allow | Decision::Ask(_) => {}
         }
         if self.control.cancel.is_cancelled() {
             return Prepared::blocked(NOT_STARTED);
         }
         // Tool storage is static; the execution phase can resolve it again by name.
         Prepared::Ready
+    }
+
+    /// Ask the interaction host to approve `call`. Returns why the call may not run.
+    async fn ask(&mut self, call: &ToolCall, reason: String) -> Result<(), String> {
+        self.emit(AgentEvent::ApprovalRequested {
+            tool_call_id: call.id.clone(),
+            tool_name: call.name.clone(),
+            reason: reason.clone(),
+        })
+        .await;
+        let request = ApprovalRequest {
+            call: call.clone(),
+            reason,
+        };
+        let guard = HookCall {
+            name: "Interaction::confirm",
+            phase: HookPhase::Approval,
+            timeout: self.config.interaction_timeout,
+        };
+        let asked = Instant::now();
+        let answer = guard
+            .run(self.config.interaction.confirm(&request), self.control.cancel)
+            .await;
+        let waited = duration_ms(asked.elapsed());
+        match answer {
+            Ok(Approval::AllowOnce) => {
+                self.approval_resolved(call, ApprovalResult::AllowOnce, None, waited)
+                    .await;
+                Ok(())
+            }
+            Ok(Approval::AllowSession) => {
+                self.control.approvals.remember(call);
+                self.approval_resolved(call, ApprovalResult::AllowSession, None, waited)
+                    .await;
+                Ok(())
+            }
+            Ok(Approval::Deny(reason)) => {
+                self.approval_resolved(call, ApprovalResult::Denied, Some(reason.clone()), waited)
+                    .await;
+                Err(reason)
+            }
+            Err(error) => {
+                let result = match error.failure {
+                    HookFailure::TimedOut(_) => ApprovalResult::TimedOut,
+                    HookFailure::Cancelled => ApprovalResult::Cancelled,
+                    HookFailure::Rejected(_) | HookFailure::Panicked => ApprovalResult::Failed,
+                };
+                let reason = self.hook_error(error);
+                self.approval_resolved(call, result, Some(reason.clone()), waited).await;
+                Err(reason)
+            }
+        }
+    }
+
+    async fn decision(&self, call: &ToolCall, verdict: ToolVerdict, reason: Option<String>) {
+        self.emit(AgentEvent::ToolDecision {
+            tool_call_id: call.id.clone(),
+            tool_name: call.name.clone(),
+            verdict,
+            reason,
+        })
+        .await;
+    }
+
+    async fn approval_resolved(&self, call: &ToolCall, approval: ApprovalResult, reason: Option<String>, wait_ms: u64) {
+        self.emit(AgentEvent::ApprovalResolved {
+            tool_call_id: call.id.clone(),
+            tool_name: call.name.clone(),
+            approval,
+            reason,
+            wait_ms,
+        })
+        .await;
     }
 
     async fn tools(&mut self, calls: &[ToolCall]) -> Result<Batch, Halt> {

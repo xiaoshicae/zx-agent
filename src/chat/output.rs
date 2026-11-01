@@ -3,13 +3,13 @@
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use zx_agent::agent::{AgentEvent, EventSink};
+use zx_agent::agent::{AgentEvent, Event, EventSink};
 use zx_agent::ai::{Delta, Message, StopReason};
 use zx_agent::compaction::{self, Outcome};
 use zx_agent::runner::RunReport;
 
 use crate::cli::OutputMode;
-use crate::{JsonlEvents, clip, print_report, write_line};
+use crate::{JsonlEvents, clip, write_line};
 
 pub(super) struct Output {
     mode: OutputMode,
@@ -28,7 +28,8 @@ impl Output {
 
     pub(super) fn report(&self, report: &RunReport) {
         match self.mode {
-            OutputMode::Jsonl => print_report(report, OutputMode::Jsonl),
+            // The `run_end` event, already written, carries the report.
+            OutputMode::Jsonl => {}
             OutputMode::Text => {
                 if let Some(error) = &report.error {
                     eprintln!("[chat] {}", visible(error));
@@ -57,12 +58,12 @@ impl Output {
 }
 
 impl EventSink for Output {
-    fn emit(&self, event: AgentEvent) {
+    fn emit(&self, event: &Event) {
         if self.mode == OutputMode::Jsonl {
             self.json.emit(event);
             return;
         }
-        match &event {
+        match &event.event {
             AgentEvent::MessageStart { role: "assistant" } => self.wrote_text.store(false, Ordering::SeqCst),
             AgentEvent::MessageUpdate {
                 delta: Delta::Text { text },
@@ -72,6 +73,7 @@ impl EventSink for Output {
             }
             AgentEvent::MessageEnd {
                 message: Message::Assistant(message),
+                ..
             } => {
                 let text = message.text();
                 if !self.wrote_text.load(Ordering::SeqCst) && !text.is_empty() {
@@ -126,11 +128,17 @@ impl EventSink for Output {
                 visible(tool_call_id),
                 state.describe()
             ),
-            AgentEvent::AgentStart
+            AgentEvent::RunStart { .. }
+            | AgentEvent::RunEnd { .. }
+            | AgentEvent::AgentStart { .. }
             | AgentEvent::TurnStart { .. }
+            | AgentEvent::RequestStart { .. }
             | AgentEvent::MessageStart { .. }
             | AgentEvent::MessageUpdate { .. }
             | AgentEvent::MessageEnd { .. }
+            | AgentEvent::ToolDecision { .. }
+            | AgentEvent::ApprovalRequested { .. }
+            | AgentEvent::ApprovalResolved { .. }
             | AgentEvent::TurnEnd { .. }
             | AgentEvent::AgentEnd { .. }
             | AgentEvent::ContextEdited { .. }

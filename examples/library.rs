@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use zx_agent::AgentSession;
-use zx_agent::agent::{AgentEvent, CommandPolicy, LoopConfig, LoopSpec};
+use zx_agent::agent::{AgentEvent, CommandPolicy, Event, LoopConfig, LoopSpec};
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::extensions::RedactSecrets;
@@ -57,9 +57,9 @@ async fn main() -> anyhow::Result<()> {
     config.hooks.push(PolicyHook::new(Arc::new(policy)));
     config.hooks.push(RedactSecrets::new(api_key));
     let session = SessionStore::in_memory(SessionHeader::new(&cwd, &model));
-    // Any `Fn(AgentEvent)` is an event sink.
-    let sink = Arc::new(|event: AgentEvent| {
-        if let AgentEvent::ToolExecutionStart { tool_name, args, .. } = event {
+    // Any `Fn(&Event)` is an event sink.
+    let sink = Arc::new(|event: &Event| {
+        if let AgentEvent::ToolExecutionStart { tool_name, args, .. } = &event.event {
             eprintln!("[tool] {tool_name} {args}");
         }
     });

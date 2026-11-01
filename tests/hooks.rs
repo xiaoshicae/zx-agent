@@ -12,7 +12,8 @@ use tokio_util::sync::CancellationToken;
 
 use common::{EchoTool, RunnerSetup, config, fast_retry, header, read_lines, run_prompt, summarize};
 use zx_agent::agent::{
-    AgentEvent, ContextEdit, Decision, HookChain, HookResult, Hooks, LoopOutcome, ToolOutput, TurnDecision, TurnSummary,
+    AgentEvent, ApprovalResult, ContextEdit, Decision, Event, HookChain, HookResult, Hooks, LoopOutcome, ToolOutput,
+    ToolVerdict, TurnDecision, TurnSummary,
 };
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{EventReceiver, Message, Provider, Request, SectionChange, StopReason, SystemMessage, ToolCall};
@@ -517,13 +518,17 @@ struct Observer {
 }
 #[async_trait]
 impl Hooks for Observer {
-    async fn on_event(&self, event: &AgentEvent) -> HookResult<()> {
+    async fn on_event(&self, event: &Event) -> HookResult<()> {
         assert!(
-            !matches!(event, AgentEvent::HookFailed { .. }),
+            !matches!(event.event, AgentEvent::HookFailed { .. }),
             "diagnostics must not recurse"
         );
-        self.seen.lock().unwrap().push(event.kind());
+        self.seen.lock().unwrap().push(event.event.kind());
         Err("observer unavailable".into())
+    }
+
+    fn observes(&self, _event: &AgentEvent) -> bool {
+        true
     }
 }
 
@@ -704,8 +709,8 @@ async fn a_hook_follow_up_obeys_the_turn_budget() {
 struct StopAndQueue(Arc<zx_agent::agent::MessageQueues>);
 #[async_trait]
 impl Hooks for StopAndQueue {
-    async fn on_event(&self, event: &AgentEvent) -> HookResult<()> {
-        if matches!(event, AgentEvent::TurnEnd { .. }) {
+    async fn on_event(&self, event: &Event) -> HookResult<()> {
+        if matches!(event.event, AgentEvent::TurnEnd { .. }) {
             self.0.steer("pending user input");
         }
         Ok(())
@@ -858,4 +863,244 @@ async fn queued_input_whose_run_was_dropped_stays_queued_and_unrecorded() {
         summarize(&provider.requests()[0].messages),
         ["user:go", "user:next", "user:hold: check the disk"]
     );
+}
+
+/// The policy verdicts and approvals of a run, in order, as `(call, what)` pairs.
+fn approvals(events: &common::Collect) -> Vec<(String, String)> {
+    events
+        .events()
+        .into_iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolDecision {
+                tool_call_id, verdict, ..
+            } => Some((tool_call_id, format!("{verdict:?}"))),
+            AgentEvent::ApprovalRequested { tool_call_id, .. } => Some((tool_call_id, "requested".into())),
+            AgentEvent::ApprovalResolved {
+                tool_call_id, approval, ..
+            } => Some((tool_call_id, format!("{approval:?}"))),
+            _ => None,
+        })
+        .collect()
+}
+
+fn pairs(expected: &[(&str, &str)]) -> Vec<(String, String)> {
+    expected
+        .iter()
+        .map(|(call, what)| ((*call).to_string(), (*what).to_string()))
+        .collect()
+}
+
+#[tokio::test]
+async fn the_policy_verdict_of_every_call_is_reported_with_its_reason() {
+    for (decision, verdict, reason) in [
+        (Decision::Allow, ToolVerdict::Allow, None),
+        (
+            Decision::Deny("not on the list".into()),
+            ToolVerdict::Deny,
+            Some("not on the list".to_string()),
+        ),
+    ] {
+        let provider = Arc::new(FauxProvider::new([
+            FauxStep::tool_call("c1", "echo", json!({})),
+            FauxStep::text("done"),
+        ]));
+        let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
+        config.hooks.push(Verdict(decision));
+
+        let (_, events) = run_prompt(&config, &mut Vec::new(), "go").await;
+
+        let decisions: Vec<_> = events
+            .events()
+            .into_iter()
+            .filter_map(|event| match event {
+                AgentEvent::ToolDecision { verdict, reason, .. } => Some((verdict, reason)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(decisions, [(verdict, reason)]);
+        assert_eq!(approvals(&events).len(), 1, "nobody is asked");
+    }
+}
+
+#[tokio::test]
+async fn approvals_are_reported_when_asked_and_when_remembered() {
+    for (approval, expected) in [
+        (
+            Approval::AllowOnce,
+            pairs(&[
+                ("c1", "Ask"),
+                ("c1", "requested"),
+                ("c1", "AllowOnce"),
+                ("c2", "Ask"),
+                ("c2", "requested"),
+                ("c2", "AllowOnce"),
+            ]),
+        ),
+        (
+            Approval::AllowSession,
+            pairs(&[
+                ("c1", "Ask"),
+                ("c1", "requested"),
+                ("c1", "AllowSession"),
+                ("c2", "Ask"),
+                ("c2", "Remembered"),
+            ]),
+        ),
+        (
+            Approval::Deny("declined".into()),
+            pairs(&[
+                ("c1", "Ask"),
+                ("c1", "requested"),
+                ("c1", "Denied"),
+                ("c2", "Ask"),
+                ("c2", "requested"),
+                ("c2", "Denied"),
+            ]),
+        ),
+    ] {
+        let provider = Arc::new(FauxProvider::new([
+            FauxStep::tool_calls(vec![
+                ("c1", "echo", json!({"text": "same"})),
+                ("c2", "echo", json!({"text": "same"})),
+            ]),
+            FauxStep::text("done"),
+        ]));
+        let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
+        config.hooks.push(Verdict(Decision::Ask("review".into())));
+        config.interaction = Arc::new(Approver {
+            approval,
+            calls: AtomicUsize::new(0),
+        });
+
+        let (_, events) = run_prompt(&config, &mut Vec::new(), "go").await;
+
+        assert_eq!(approvals(&events), expected);
+    }
+}
+
+/// Answers after `delay`, like a person who takes a moment.
+struct SlowApprover(Duration);
+#[async_trait]
+impl Interaction for SlowApprover {
+    async fn confirm(&self, _request: &ApprovalRequest) -> Result<Approval, String> {
+        tokio::time::sleep(self.0).await;
+        Ok(Approval::AllowOnce)
+    }
+}
+
+#[tokio::test]
+async fn a_resolved_approval_reports_how_long_it_waited() {
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::tool_call("c1", "echo", json!({})),
+        FauxStep::text("done"),
+    ]));
+    let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
+    config.hooks.push(Verdict(Decision::Ask("review".into())));
+    config.interaction = Arc::new(SlowApprover(Duration::from_millis(20)));
+
+    let (_, events) = run_prompt(&config, &mut Vec::new(), "go").await;
+
+    let waited: Vec<u64> = events
+        .events()
+        .into_iter()
+        .filter_map(|event| match event {
+            AgentEvent::ApprovalResolved { wait_ms, .. } => Some(wait_ms),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(waited.len(), 1);
+    assert!(waited[0] >= 20, "{waited:?}");
+}
+
+#[tokio::test]
+async fn approvals_that_fail_or_time_out_report_how_they_ended() {
+    for (host, ended) in [
+        (HostFailure::Error, ApprovalResult::Failed),
+        (HostFailure::Panic, ApprovalResult::Failed),
+        (HostFailure::Pending, ApprovalResult::TimedOut),
+    ] {
+        let provider = Arc::new(FauxProvider::new([
+            FauxStep::tool_call("c", "echo", json!({})),
+            FauxStep::text("handled"),
+        ]));
+        let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
+        config.hooks.push(Verdict(Decision::Ask("review".into())));
+        config.interaction = Arc::new(host);
+        config.interaction_timeout = Duration::ZERO;
+
+        let (_, events) = run_prompt(&config, &mut Vec::new(), "go").await;
+
+        let resolved: Vec<_> = events
+            .events()
+            .into_iter()
+            .filter_map(|event| match event {
+                AgentEvent::ApprovalResolved { approval, reason, .. } => Some((approval, reason.is_some())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(resolved, [(ended, true)]);
+    }
+}
+
+#[tokio::test]
+async fn an_approval_interrupted_by_cancellation_is_reported_as_cancelled() {
+    let provider = Arc::new(FauxProvider::new([FauxStep::tool_call("c", "echo", json!({}))]));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
+    config.hooks.push(Verdict(Decision::Ask("review".into())));
+    config.interaction = Arc::new(WaitingHost(entered.clone()));
+    let (mut runner, events) = RunnerSetup::new(config).build();
+    let cancel = CancellationToken::new();
+
+    let (report, ()) = tokio::join!(runner.run("go", &cancel), async {
+        entered.notified().await;
+        cancel.cancel();
+    });
+
+    assert_eq!(report.outcome, RunOutcome::Aborted);
+    assert_eq!(
+        approvals(&events),
+        pairs(&[("c", "Ask"), ("c", "requested"), ("c", "Cancelled")])
+    );
+}
+
+/// Records the kinds of the events it observes; `all` also observes streaming deltas.
+struct Kinds {
+    seen: Arc<Mutex<Vec<&'static str>>>,
+    all: bool,
+}
+#[async_trait]
+impl Hooks for Kinds {
+    async fn on_event(&self, event: &Event) -> HookResult<()> {
+        self.seen.lock().unwrap().push(event.event.kind());
+        Ok(())
+    }
+
+    fn observes(&self, event: &AgentEvent) -> bool {
+        self.all || !matches!(event, AgentEvent::MessageUpdate { .. })
+    }
+}
+
+#[tokio::test]
+async fn observers_skip_streaming_deltas_unless_they_ask_for_them() {
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
+    let mut config = config(provider, vec![]);
+    let default = Arc::new(Mutex::new(Vec::new()));
+    let all = Arc::new(Mutex::new(Vec::new()));
+    config.hooks.push(Kinds {
+        seen: default.clone(),
+        all: false,
+    });
+    config.hooks.push(Kinds {
+        seen: all.clone(),
+        all: true,
+    });
+
+    let (_, events) = run_prompt(&config, &mut Vec::new(), "go").await;
+
+    let kinds = events.kinds();
+    assert!(kinds.contains(&"message_update"), "the provider streamed deltas");
+    assert_eq!(*all.lock().unwrap(), kinds);
+    let without_deltas: Vec<_> = kinds.into_iter().filter(|kind| *kind != "message_update").collect();
+    assert_eq!(*default.lock().unwrap(), without_deltas);
 }

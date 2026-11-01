@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use common::mock_server::{MockServer, Reply};
 use common::{CancelOnFirstDelta, Collect, RunnerSetup, config, fast_retry};
-use zx_agent::agent::{AgentEvent, EventSink};
+use zx_agent::agent::{AgentEvent, Event, EventSink};
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::{Message, PREAMBLE, ProviderError, StopReason, SystemPrompt};
@@ -162,8 +162,8 @@ async fn numeric_retry_after_is_used_by_the_runner() {
         retry: RetryPolicy::default(),
         ..setup(&server, Duration::from_secs(10))
     }
-    .build_with(Arc::new(move |event: AgentEvent| {
-        if matches!(event, AgentEvent::RetryScheduled { .. }) {
+    .build_with(Arc::new(move |event: &Event| {
+        if matches!(event.event, AgentEvent::RetryScheduled { .. }) {
             trigger.cancel();
         }
         captured.emit(event);
@@ -179,7 +179,7 @@ async fn numeric_retry_after_is_used_by_the_runner() {
             .any(|event| matches!(event, AgentEvent::RetryScheduled { delay_ms: 7000, .. }))
     );
     assert!(observed.events().iter().any(|event| matches!(
-        event, AgentEvent::MessageEnd { message: Message::Assistant(message) }
+        event, AgentEvent::MessageEnd { message: Message::Assistant(message), .. }
             if message.provider_error == Some(ProviderError::Http {
                 status: 429, code: Some("rate_limit_exceeded".into()), retry_after_ms: Some(7000),
             })
