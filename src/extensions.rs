@@ -366,6 +366,38 @@ pub fn check_secret_files(paths: &[PathBuf]) -> Result<(), String> {
     }
 }
 
+/// Values shorter than this many characters are still redacted, but every occurrence of the
+/// same text is replaced too, wherever it appears. GitLab masks only values of at least 8
+/// characters (<https://docs.gitlab.com/ci/variables/>).
+pub const MIN_SECRET_CHARS: usize = 8;
+
+/// The files at `paths`, given as to [`RedactSecrets::with_secret_files`], whose value is
+/// shorter than [`MIN_SECRET_CHARS`] characters, for a notice at startup: such a value is still
+/// redacted, and so is every other occurrence of the same text in tool output. Blank values,
+/// which redact nothing, are left out, as are files that cannot be read: [`check_secret_files`]
+/// reports those.
+pub fn short_secret_files(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut short = Vec::new();
+    for path in paths {
+        // A directory that cannot be listed holds no value to report; check_secret_files
+        // reports the failure.
+        let Ok(files) = secret_files_at(path) else {
+            continue;
+        };
+        for file in files {
+            // Likewise for a file that cannot be read.
+            let Ok(bytes) = read_regular_file(&file, MAX_SECRET_FILE_BYTES) else {
+                continue;
+            };
+            let chars = String::from_utf8_lossy(&bytes).trim().chars().count();
+            if chars > 0 && chars < MIN_SECRET_CHARS {
+                short.push(file);
+            }
+        }
+    }
+    short
+}
+
 /// Whether a secret file is missing or not readable by this process.
 fn is_unreadable(error: &anyhow::Error) -> bool {
     error

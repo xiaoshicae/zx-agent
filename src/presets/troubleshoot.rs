@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use crate::agent::HookChain;
+use crate::agent::{HookChain, HookOptions};
 use crate::extensions::ContinueOnLength;
 use crate::runner::Limits;
 
@@ -26,9 +26,18 @@ pub fn limits() -> Limits {
     }
 }
 
-/// Extension policy matching the CLI default; neutral SDK configuration has no hooks.
+/// Extension policy matching the CLI default; neutral SDK configuration has no hooks. The
+/// hook has the name the CLI gives it, `continue_on_length`.
 pub fn hooks() -> HookChain {
-    HookChain::new().with(ContinueOnLength::new(CONTINUE_ON_LENGTH))
+    let mut hooks = HookChain::new();
+    hooks.push_with(
+        ContinueOnLength::new(CONTINUE_ON_LENGTH),
+        HookOptions {
+            name: Some("continue_on_length".to_string()),
+            ..HookOptions::default()
+        },
+    );
+    hooks
 }
 
 #[cfg(test)]

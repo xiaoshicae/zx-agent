@@ -1243,15 +1243,12 @@ async fn a_hook_failure_is_reported_with_its_reason() {
     .await;
 
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    // The hook's default name is its type name, whose exact form Rust does not guarantee.
-    let reason = format!(
-        "RedactSecrets after_tool failed: cannot read a secret file to redact tool output: {} exceeds 65536 bytes",
+    let reported = format!(
+        "[hook] redact_secrets after_tool failed: cannot read a secret file to redact tool output: {} exceeds 65536 bytes",
         token.display()
     );
     assert!(
-        stderr(&output)
-            .lines()
-            .any(|line| line.starts_with("[hook] ") && line.contains(&reason)),
+        stderr(&output).lines().any(|line| line.starts_with(&reported)),
         "{}",
         stderr(&output)
     );

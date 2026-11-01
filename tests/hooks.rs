@@ -17,7 +17,7 @@ use zx_agent::agent::{
 };
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{EventReceiver, Message, Provider, Request, SectionChange, StopReason, SystemMessage, ToolCall};
-use zx_agent::extensions::{ContinueOnLength, RedactSecrets, check_secret_files};
+use zx_agent::extensions::{ContinueOnLength, RedactSecrets, check_secret_files, short_secret_files};
 use zx_agent::interaction::{Approval, ApprovalRequest, Interaction};
 use zx_agent::runner::{Limits, RunOutcome};
 use zx_agent::session::{Entry, SessionStore};
@@ -762,6 +762,22 @@ fn secret_files_that_cannot_be_matched_are_found_before_use() {
         "{error}"
     );
     assert_eq!(check_secret_files(&[usable.path().to_path_buf()]), Ok(()));
+}
+
+#[test]
+fn secret_files_with_short_values_are_found() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("username"), "admin\n").unwrap();
+    std::fs::write(dir.path().join("port"), "5432").unwrap();
+    std::fs::write(dir.path().join("token"), "token-value").unwrap();
+    // Blank values redact nothing, so they are not short values.
+    std::fs::write(dir.path().join("empty"), " \n").unwrap();
+    // Eight characters, counted as characters rather than bytes.
+    std::fs::write(dir.path().join("eight"), "界界界界界界界界").unwrap();
+
+    let short = short_secret_files(&[dir.path().to_path_buf(), dir.path().join("absent")]);
+
+    assert_eq!(short, [dir.path().join("port"), dir.path().join("username")]);
 }
 
 #[tokio::test]
