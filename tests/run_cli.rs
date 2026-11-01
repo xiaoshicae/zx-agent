@@ -114,3 +114,43 @@ async fn progress_and_report_lines_escape_terminal_control_characters() {
     assert!(stderr.contains("x\\u{1b}[2J"), "{stderr}");
     assert!(stderr.contains("bad\\u{1b}[2J"), "{stderr}");
 }
+
+/// Commands run as the same user as the agent. On Linux they must not read the agent's
+/// environment, which holds the API key, through /proc.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn commands_cannot_read_the_agent_environment_through_proc() {
+    const PROBE: &str = "visible-in-the-agent-environment";
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::bash("c", "cat /proc/$PPID/environ"), Reply::text("done")]).await;
+    let output = Command::new(env!("CARGO_BIN_EXE_zx-agent"))
+        .args(["run", "--model", "mock", "--base-url", &server.base_url])
+        .args([
+            "--max-retries",
+            "0",
+            "--api-key-env",
+            "ZX_RUN_CLI_TEST_KEY",
+            "--tools",
+            "bash",
+            "go",
+        ])
+        .current_dir(dir.path())
+        .env("ZX_ENVIRON_PROBE", PROBE)
+        .env_remove("ZX_RUN_CLI_TEST_KEY")
+        .env_remove("ZX_MODEL")
+        .env_remove("ZX_BASE_URL")
+        .stdin(Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result = server.requests()[1].body["messages"].to_string();
+    assert!(result.contains("Permission denied"), "{result}");
+    assert!(!result.contains(PROBE), "{result}");
+}

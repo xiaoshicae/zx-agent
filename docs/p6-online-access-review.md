@@ -4,11 +4,11 @@
 |-|-|
 | 版本 | `v0.1` |
 | 日期 | `2026-11-01` |
-| 状态 | 已合入（PR #17）；2026-11-01 按用户要求实施一期，进度见 ROADMAP P6 |
+| 状态 | 已合入（PR #17）；2026-11-01 按用户要求实施一期，进度见 ROADMAP P6。同日用户决定 Agent 以常驻 Pod 部署、kubectl 在 Pod 内执行，因此取消“容器联网与 kubeconfig”：2.2 中带 Docker 的主机、3.4，以及第 4、5、6 节的对应项不再实施，保留原文作为设计记录 |
 | 代码核对基线 | `e4a5235`；文中行号以此为准 |
 | Owner | 待指定 |
 | 对应 PRD | 无（技术驱动）；对应 `docs/ROADMAP.md` P6 的最后两项 |
-| Milestone | 一期：容器联网与 kubeconfig、chat 自动放行只读命令、凭据自动脱敏、Linux 上保护 agent 的环境变量、Kubernetes 部署说明<br>二期（按需）：按地址限制出网 |
+| Milestone | 一期：容器联网与 kubeconfig（已取消）、chat 自动放行只读命令、凭据自动脱敏、Linux 上保护 agent 的环境变量、Kubernetes 部署说明<br>二期（按需）：按地址限制出网 |
 
 ---
 
@@ -63,13 +63,13 @@
 |-|-|-|
 | **凭据**：能做什么 | 用户提供。只读排障用 `view`；要做写操作时用有写权限的凭据，如自己的 kubeconfig | 只读：Kubernetes 预置的 `view` 角色 |
 | **命令**：什么时候问人 | 只读命令直接执行，其余逐条确认（3.1） | 不变：除危险模式和 `rules.deny` 外都执行；写请求由 API server 按只读凭据拒绝 |
-| **网络**：能连哪里 | 本机执行与 Kubernetes Pod：由部署环境决定（不变）。容器执行：默认无网络，`network = "bridge"` 后用普通网络（3.4） | 同左 |
+| **网络**：能连哪里 | 本机执行与 Kubernetes Pod：由部署环境决定（不变）。容器执行：无网络（联网选项已取消，见 3.4） | 同左 |
 
 `view` 是 Kubernetes 预置的角色，不用自己写 Role。官方文档：它 “Allows read-only access to see most objects in a namespace”，并且 “does not allow viewing Secrets”。在 Kubernetes 仓库的角色测试数据里，它包含 `pods`、`pods/log`、`events`、`deployments` 的 get、list、watch，不包含 `secrets`（附录 9.1）。
 
 ### 2.2 建成之后怎么用
 
-**带 Docker 的主机**：profile 里写这几行。
+**带 Docker 的主机**（已取消，见扉页）：profile 里写这几行。
 
 ```toml
 execution = "container"
@@ -109,7 +109,7 @@ zx-agent 把 kubeconfig 只读挂载进容器，为命令设置 `KUBECONFIG`，�
 
 ⚠ **前提会变**：方案一假设 run 拿到的是只读凭据。部署方给了有写权限的凭据，run 就能写；zx-agent 不检查凭据的权限范围。
 
-#### 2.3.2 容器怎样联网：采用普通网络（2026-11-01 确认）
+#### 2.3.2 容器怎样联网：采用普通网络（2026-11-01 确认；同日改为常驻 Pod 部署后取消实施）
 
 | 对比项 | 普通网络（采用） | 只通列出的地址（二期备选） |
 |-|-|-|
@@ -173,7 +173,7 @@ Kubernetes 模式下，命令与 agent 在同一容器中以同一用户运行�
 3. 部署要求：Pod 不添加 `SYS_PTRACE`；入口直接运行 zx-agent。其他持有 API key 的进程（例如作为父进程的 shell）不受这项保护。
 4. 本机执行时，启动 agent 的 shell 通常也持有 key，保护不完整；README“安全模型”中的说明不变。
 
-### 3.4 容器联网
+### 3.4 容器联网（已取消，见扉页）
 
 1. **配置**：`[container] network` / `--container-network`，默认 `none`。`bridge` 是 Docker 的默认网络；也可以填部署方预先建好的 Docker 网络名，例如带出网限制的网络。不接受 `host` 和 `container:<名字>`：它们让命令共享宿主机或其他容器的网络。
 2. **保持不变**：只读根文件系统、去掉全部 capability、非 root、进程数与内存上限、API key 不进容器（README“容器执行”）。
@@ -233,8 +233,8 @@ Kubernetes 模式下，命令与 agent 在同一容器中以同一用户运行�
 
 | 用途 | 位置 | 新增 / 改动 |
 |-|-|-|
-| 容器联网 | profile `[container] network`；CLI `--container-network` | 新增；默认 `none` |
-| kubeconfig | profile `[container] kubeconfig`；CLI `--container-kubeconfig` | 新增；只读挂载并设置 `KUBECONFIG` |
+| 容器联网 | profile `[container] network`；CLI `--container-network` | 已取消（原计划新增，默认 `none`） |
+| kubeconfig | profile `[container] kubeconfig`；CLI `--container-kubeconfig` | 已取消（原计划新增，只读挂载并设置 `KUBECONFIG`） |
 | 自动放行 | profile `rules.autoApprove`；CLI `--auto-approve-cmd` | 新增；`assistant` profile 内置清单 |
 | 现有命令与工具规则 | `rules.allow`、`rules.deny`、`rules.askTools`、`rules.denyTools` | 无改动 |
 | 环境变量保护、凭据登记 | — | 自动进行，无配置项 |
@@ -250,8 +250,8 @@ Kubernetes 模式下，命令与 agent 在同一容器中以同一用户运行�
 | 项 | 判据 | 怎么验 |
 |-|-|-|
 | 离线行为不变 | 未配置 `network` 时仍为 `--network none` | `tests/container.rs` 现有测试 |
-| 容器联网 | `network = "bridge"` 时能访问外部地址；`host`、`container:<名字>` 报配置错误 | 真实 Docker 测试，CI 的 Linux 任务与本机都运行 |
-| kubeconfig | 容器内 kubectl 使用挂载的文件；向挂载点写入失败；文件中的 token 不出现在会话与模型请求中 | 真实 Docker 测试与集成测试 |
+| 容器联网（已取消） | `network = "bridge"` 时能访问外部地址；`host`、`container:<名字>` 报配置错误 | 真实 Docker 测试，CI 的 Linux 任务与本机都运行 |
+| kubeconfig（已取消） | 容器内 kubectl 使用挂载的文件；向挂载点写入失败；文件中的 token 不出现在会话与模型请求中 | 真实 Docker 测试与集成测试 |
 | 自动放行 | 清单内命令不经确认直接执行；以下命令都要求确认：含 `secret`、URL、连接参数或 shell 语法的命令，带多余空白的变体，管道后段不在清单中的命令；run 的行为不变 | 单元测试与 chat 命令行测试 |
 | 环境变量保护 | Linux 上同一用户的命令读取 agent 的 `/proc/<pid>/environ` 失败 | CI 的 Linux 任务上的集成测试 |
 | Kubernetes 模式 | 绑定 `view` 后 `kubectl get`、`kubectl logs` 可用，`kubectl get secret` 和写操作被拒绝；ServiceAccount 的 token 不出现在会话中 | 部署方在测试集群人工验收，记录到 ROADMAP |
@@ -264,7 +264,7 @@ Kubernetes 模式下，命令与 agent 在同一容器中以同一用户运行�
 | 功能模块 | 负责人 | 范围 | 依赖关系 |
 |-|-|-|-|
 | 自动放行 | 待定 | `rules.autoApprove`、`--auto-approve-cmd`、内置清单 | 独立 |
-| 容器联网与 kubeconfig | 待定 | `network`、`kubeconfig`、`KUBECONFIG`、凭据登记 | 独立 |
+| 容器联网与 kubeconfig | — | 已取消（2026-11-01，见扉页） | — |
 | 环境变量保护 | 待定 | `prctl`、ServiceAccount token 登记 | 独立 |
 | Kubernetes 部署说明 | 待定 | README 中的部署步骤（2.2） | 依赖以上三项 |
 | 真实环境验收 | 部署方 | 第 5 节最后两项 | 依赖以上全部 |
