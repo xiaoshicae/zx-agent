@@ -32,20 +32,20 @@ paths:
 |---|---|
 | `src/**` 中的 `mod tests` | 各模块的单元测试，包括会话文件和事件流的 JSON 格式 |
 | `tests/agent_loop.rs` | 循环语义 |
-| `tests/runner.rs` | 运行层：重试、上限、截断续写、持久化（含自定义 `SessionLog`）、恢复会话 |
-| `tests/agent_session.rs` | 共享会话：Busy、取消与丢弃后复用、多订阅者、退订、回调重入与 panic、模型切换与审计、取出未被消费的排队输入 |
+| `tests/runner.rs` | 运行层：重试（含预算用完不重试、省略失败回答的事件）、上限、截断续写、持久化（含自定义 `SessionLog`）、恢复会话、排队输入只写一次 |
+| `tests/agent_session.rs` | 共享会话：Busy、取消与丢弃后复用、多订阅者、退订、回调重入与 panic、模型切换与审计、取出未被消费的排队输入、会话释放后有界订阅结束 |
 | `tests/openai_mock.rs` | 真实 HTTP 下的 provider：SSE、重试、空闲超时、中途取消 |
 | `tests/cli.rs` | 原有 run 行为与退出码，P0 起逐字节保持；P6 默认值变更另行验收 |
 | `tests/run_cli.rs` | P0 之后新增的 run 约定（如进度与报告行转义终端控制字符、会话文件单写者），新的 run 测试放这里，`tests/cli.rs` 不改 |
-| `tests/chat_cli.rs` | chat 的脚本 stdin、审批、信号与超时、Unicode、模型切换、会话重置和 Unix PTY |
+| `tests/chat_cli.rs` | chat 的脚本 stdin、审批与过期、信号与超时、取消后丢弃残留插话、Unicode、模型切换、会话重置和 Unix PTY |
 | `tests/profiles_cli.rs` | profile/CLI 覆盖与 deny、项目上下文范围、默认值与越界链接、`--system-prompt-file` 兼容、skill 懒加载、工具策略和审计 |
 | `tests/session_compaction.rs`、`tests/compaction.rs` | 追加升级、分支 / 引用与原始投影、自动 / 手动摘要、计费、steering、失败、取消与超时 |
 | `tests/request_audit.rs` | 请求审计（G3）：从会话文件还原每次请求、配置变化才追加、旧会话升级时机 |
 | `tests/executor.rs` | 执行器接缝：工具只经自身执行器运行命令和读文件，结束方式的报告 |
 | `tests/container.rs` | 容器执行：假 docker 程序（在测试目录里记录参数、按文件应答）覆盖启动、命令、读文件、清理与 CLI；名字以 `real_` 开头的测试在设置 `ZX_DOCKER_TEST_IMAGE`（本地已有、带 bash 的镜像）时对真实 Docker 运行，否则打印提示后返回；工作目录要让容器用户可读（见 `real_workspace`） |
-| `tests/crash_recovery.rs` | 崩溃恢复：开始记录先于执行、中断调用的四种恢复结果且不重放、旧格式会话、丢弃 future 与 SIGKILL 后恢复 |
+| `tests/crash_recovery.rs` | 崩溃恢复：开始记录先于执行、中断调用的四种恢复结果且不重放、失败或取消的回答中的调用记为未执行、恢复事件在结果写入之后、旧格式会话、丢弃 future 与 SIGKILL 后恢复 |
 | `tests/output_store.rs` | 脱敏顺序、UUID 与文件边界、Unix 权限、UTF-8 分页、容量、取消和错误回退 |
-| `tests/hooks.rs`、`tests/hooks_cli.rs` | 六个钩子、钩子上下文、具名注册与阶段顺序、审批与失败回退、变换持久化、已知密钥脱敏接线 |
+| `tests/hooks.rs`、`tests/hooks_cli.rs` | 六个钩子、钩子上下文、具名注册与阶段顺序、审批与失败回退、变换持久化（钩子不能追加 system 消息）、`observes` 的 panic 隔离、工具的声明名与元数据检查、工具取消自己的令牌、已知密钥脱敏接线 |
 | `tests/hook_contract.rs` | 钩子输入输出的 JSON 契约，改格式会破坏钩子进程与审批转发 |
 | `tests/im_slack.rs` | Slack channel 对假 Slack：@ 与私聊、确认与去重、忽略自己的消息、按钮点击、断线重连、凭据被拒、转义与拆分、卡片、限频与停止 |
 | `tests/serve_cli.rs` | `serve` 子命令：配置错误；对假 Slack 与假模型的完整流程（审批卡片、命令看不到 token、脱敏、会话文件、运维日志、SIGTERM） |

@@ -261,7 +261,10 @@ impl Runner {
                 };
                 last_error = failed.error_message.clone();
                 let retryable = is_retryable(&failed);
-                if !retryable || retries >= retry.max_retries || run_cancel.is_cancelled() {
+                // A retry is a request, so it needs budget; without any, the provider error
+                // is the reason the run ends.
+                let budget_left = limits.max_turns.is_none_or(|limit| requests < limit);
+                if !retryable || retries >= retry.max_retries || !budget_left || run_cancel.is_cancelled() {
                     break LoopOutcome::Error;
                 }
 
@@ -282,11 +285,24 @@ impl Runner {
                 // Keep the failed attempt in the session but drop it from model context, then
                 // continue from the previous message (pi: AgentSession._prepareRetry and
                 // _omitRecoveryAttempt). No user message is repeated.
-                if let Some(entry_id) = entry_id
-                    && let Err(error) = session.append_context_edit(&entry_id, None).await
-                {
-                    last_error = Some(format!("cannot omit the failed attempt: {error:#}"));
-                    break LoopOutcome::Error;
+                if let Some(target) = entry_id {
+                    let index = session.projection().iter().position(|item| item.entry_id == target);
+                    match session.append_context_edit(&target, None).await {
+                        Ok(edit) => {
+                            if let Some(index) = index {
+                                let event = AgentEvent::ContextEdited {
+                                    index,
+                                    replacement: None,
+                                    entry_id: Some(edit),
+                                };
+                                config.hooks.emit(event, to).await;
+                            }
+                        }
+                        Err(error) => {
+                            last_error = Some(format!("cannot omit the failed attempt: {error:#}"));
+                            break LoopOutcome::Error;
+                        }
+                    }
                 }
                 let cancelled = tokio::select! {
                     _ = tokio::time::sleep(delay) => false,
@@ -384,7 +400,6 @@ impl Runner {
                 tool_name: call.tool_name.clone(),
                 state,
             };
-            config.hooks.emit(event, to).await;
             let result = Message::ToolResult(ToolResultMessage {
                 tool_call_id: call.tool_call_id,
                 tool_name: call.tool_name,
@@ -404,6 +419,8 @@ impl Runner {
                 entry_id: Some(entry_id),
             };
             config.hooks.emit(end, to).await;
+            // Reported once recorded, so the event never claims a result the session lacks.
+            config.hooks.emit(event, to).await;
         }
         Ok(())
     }
@@ -415,6 +432,7 @@ impl Runner {
 fn interruption(start: StartRecord, effects: Option<Effects>) -> Interruption {
     match (start, effects) {
         (StartRecord::Present, _) => Interruption::Started,
+        (StartRecord::NeverRun, _) => Interruption::NotStarted,
         (StartRecord::Absent | StartRecord::Unavailable, Some(Effects::ReadOnly)) => Interruption::ReadOnly,
         (StartRecord::Absent, Some(Effects::SideEffects)) => Interruption::NotStarted,
         (StartRecord::Unavailable, Some(Effects::SideEffects))
@@ -627,6 +645,32 @@ mod tests {
     #[test]
     fn default_turn_budget_is_unbounded() {
         assert_eq!(Limits::default().max_turns, None);
+    }
+
+    #[test]
+    fn a_final_answer_joins_marked_continuations_across_system_messages() {
+        let answer = |text: &str| {
+            let mut message = crate::ai::AssistantMessage::failure("p", "m", crate::ai::StopReason::Stop, "");
+            message.error_message = None;
+            message.content = vec![crate::ai::ContentBlock::Text { text: text.into() }];
+            Message::Assistant(message)
+        };
+        let update = Message::System(crate::ai::SystemMessage {
+            sections: vec![crate::ai::SectionChange {
+                name: "environment".into(),
+                content: Some("changed".into()),
+            }],
+            timestamp: 0,
+        });
+        let messages = [
+            Message::user("go"),
+            answer("甲"),
+            update,
+            Message::continuation("continue"),
+            answer("乙"),
+        ];
+
+        assert_eq!(final_answer(&messages), "甲乙");
     }
 
     /// Fails only the write of one entry type, like a disk filling up at that record.

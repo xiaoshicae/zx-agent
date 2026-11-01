@@ -358,6 +358,83 @@ async fn an_interrupted_batch_gets_results_and_no_call_runs_again() {
 }
 
 #[tokio::test]
+async fn calls_of_a_failed_or_cancelled_answer_are_reported_as_not_executed() {
+    for stop_reason in [StopReason::Error, StopReason::Aborted] {
+        let mut store = SessionStore::in_memory(header());
+        store.append_message(Message::user("fix it")).await.unwrap();
+        let Message::Assistant(mut failed) = answer(&[("c1", "write"), ("c2", "read")]) else {
+            panic!("answer builds an assistant message");
+        };
+        failed.stop_reason = stop_reason;
+        store.append_message(Message::Assistant(failed)).await.unwrap();
+        let write = Counted::new("write", Effects::SideEffects);
+        let read = Counted::new("read", Effects::ReadOnly);
+        let tools: Vec<Arc<dyn Tool>> = vec![write.clone(), read.clone()];
+        let provider = Arc::new(FauxProvider::new([FauxStep::text("checked")]));
+        let (mut runner, events) = RunnerSetup {
+            session: store,
+            ..RunnerSetup::new(config(provider.clone(), tools))
+        }
+        .build();
+
+        let report = runner.run("continue", &CancellationToken::new()).await;
+
+        assert_eq!(report.outcome, RunOutcome::Completed, "{stop_reason:?}");
+        assert_eq!(write.runs.load(Ordering::SeqCst) + read.runs.load(Ordering::SeqCst), 0);
+        // The loop never runs the calls of such an answer, whatever their effects.
+        assert_eq!(
+            recovered(&events.events()),
+            [
+                ("c1".into(), Interruption::NotStarted),
+                ("c2".into(), Interruption::NotStarted)
+            ],
+            "{stop_reason:?}"
+        );
+        let results = results(&provider.requests()[0].messages);
+        assert_eq!(results.len(), 2, "{stop_reason:?}");
+        for (_, content, is_error) in &results {
+            assert!(content.starts_with("Not executed"), "{content}");
+            assert!(is_error, "{content}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_recovery_event_follows_the_recorded_result() {
+    let mut store = SessionStore::in_memory(header());
+    store.append_message(Message::user("fix it")).await.unwrap();
+    store.append_message(answer(&[("c1", "write")])).await.unwrap();
+    let tools: Vec<Arc<dyn Tool>> = vec![Counted::new("write", Effects::SideEffects)];
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("checked")]));
+    let (mut runner, events) = RunnerSetup {
+        session: store,
+        ..RunnerSetup::new(config(provider, tools))
+    }
+    .build();
+
+    runner.run("continue", &CancellationToken::new()).await;
+
+    let events = events.events();
+    let recorded = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                AgentEvent::MessageEnd {
+                    message: Message::ToolResult(_),
+                    entry_id: Some(_),
+                }
+            )
+        })
+        .unwrap();
+    let reported = events
+        .iter()
+        .position(|event| matches!(event, AgentEvent::ToolCallRecovered { .. }))
+        .unwrap();
+    assert!(recorded < reported, "{:?}", events);
+}
+
+#[tokio::test]
 async fn sessions_from_before_start_records_report_an_unknown_start() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("v3.jsonl");

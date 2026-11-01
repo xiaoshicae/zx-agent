@@ -10,7 +10,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::FutureExt;
 use serde::{Deserialize, Serialize};
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, WaitForCancellationFuture};
 
 use super::{AgentEvent, Decision, Emit, Event, ToolOutput};
 use crate::ai::{AssistantMessage, Message, ToolCall, UserMessageKind};
@@ -23,7 +23,7 @@ pub type HookResult<T> = Result<T, String>;
 
 /// What every hook call knows about the run it belongs to. Fields are only ever added, so
 /// the struct is `#[non_exhaustive]`: read its fields, and outside the crate build one with
-/// [`HookContext::new`]. In JSON the cancellation token is left out.
+/// [`HookContext::new`]. In JSON the cancellation signal is left out.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
@@ -35,30 +35,68 @@ pub struct HookContext {
     pub run_id: String,
     /// The tools' working directory.
     pub cwd: PathBuf,
-    /// Cancelled with the run. The host then stops waiting for the hook; a hook can also
-    /// pass it to work of its own.
+    /// Set when the run is cancelled; the host then stops waiting for the hook.
     #[serde(skip)]
-    pub cancel: CancellationToken,
+    pub cancel: CancelSignal,
 }
 
 impl HookContext {
-    /// A context for a new run with a fresh ID.
+    /// A context for a new run with a fresh ID, cancelled with `cancel`.
     pub fn new(session_id: Option<String>, cwd: PathBuf, cancel: CancellationToken) -> Self {
         Self {
             session_id,
             run_id: uuid::Uuid::new_v4().to_string(),
             cwd,
-            cancel,
+            cancel: CancelSignal(cancel),
         }
     }
 }
 
+/// A run's cancellation as a hook sees it: a hook can wait for it, check it, and derive a
+/// token for work of its own, but cannot cancel the run, which only its caller does.
+///
+/// ```compile_fail
+/// fn stop(ctx: &zx_agent::agent::HookContext) {
+///     ctx.cancel.cancel();
+/// }
+/// ```
+#[derive(Clone, Debug)]
+pub struct CancelSignal(CancellationToken);
+
+impl CancelSignal {
+    /// Whether the run has been cancelled.
+    pub fn is_cancelled(&self) -> bool {
+        self.0.is_cancelled()
+    }
+
+    /// Completes once the run is cancelled.
+    pub fn cancelled(&self) -> WaitForCancellationFuture<'_> {
+        self.0.cancelled()
+    }
+
+    /// A token cancelled with the run, for work of the hook's own; cancelling it stops only
+    /// that work.
+    pub fn child_token(&self) -> CancellationToken {
+        self.0.child_token()
+    }
+
+    /// The run's own token, for the host that waits on hooks.
+    pub(crate) fn token(&self) -> &CancellationToken {
+        &self.0
+    }
+}
+
+const SYSTEM_APPEND: &str =
+    "the system prompt comes from the configuration, so hooks cannot add system messages; add other context instead";
+
 /// Audit-friendly changes, applied in order against the current projection.
 ///
-/// Indexes refer to the projection after preceding edits. System messages can only
-/// be appended, and replacing assistant text must not erase tool calls. Context summaries
-/// (`UserMessageKind::Summary`) are built by the session, so they can be neither edited,
-/// omitted nor appended; editing one of their sources invalidates the summary instead.
+/// Indexes refer to the projection after preceding edits. System messages cannot be
+/// appended, edited or omitted: the system prompt comes from the configuration, and a section
+/// it does not have would be removed again when the next attempt starts. Replacing assistant
+/// text must not erase tool calls. Context summaries (`UserMessageKind::Summary`) are built
+/// by the session, so they can be neither edited, omitted nor appended; editing one of their
+/// sources invalidates the summary instead.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "edit", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum ContextEdit {
@@ -73,6 +111,9 @@ impl ContextEdit {
     pub(crate) fn apply(&self, messages: &mut Vec<Message>) -> Result<(), String> {
         match self {
             Self::Append { message } => {
+                if matches!(message, Message::System(_)) {
+                    return Err(SYSTEM_APPEND.into());
+                }
                 if is_summary(message) {
                     return Err("only the session creates context summaries".into());
                 }
@@ -197,12 +238,20 @@ pub trait Hooks: Send + Sync {
     /// Read-only observation of the events this hook [`observes`](Hooks::observes), after
     /// persistence and event delivery. Diagnostic events reporting observer errors are not
     /// sent back through this method.
+    ///
+    /// Each call is awaited before the run goes on, in stage and registration order. While
+    /// tools run in parallel, their events arrive concurrently, so calls of one hook can
+    /// overlap and finish out of `seq` order. Once the run is cancelled, a call that is
+    /// still pending is stopped, so an observer can miss the remaining events, `run_end`
+    /// among them. An exporter that needs every event, in order, uses
+    /// [`AgentSession::subscribe_bounded`](crate::AgentSession::subscribe_bounded).
     async fn on_event(&self, _event: &Event, _ctx: &HookContext) -> HookResult<()> {
         Ok(())
     }
 
     /// Whether `on_event` receives `event`. Every call of `on_event` is awaited, so the
     /// default skips the frequent streaming deltas (`message_update`); override to see them.
+    /// A panic here counts as not observing the event and is reported as a hook failure.
     fn observes(&self, event: &AgentEvent) -> bool {
         !matches!(event, AgentEvent::MessageUpdate { .. })
     }
@@ -393,7 +442,7 @@ impl HookChain {
         for entry in &self.hooks {
             text = entry
                 .call(HookPhase::OnInput)
-                .run(entry.hook.on_input(text, ctx), &ctx.cancel)
+                .run(entry.hook.on_input(text, ctx), ctx.cancel.token())
                 .await?;
         }
         Ok(text)
@@ -410,7 +459,7 @@ impl HookChain {
         for entry in &self.hooks {
             let call = entry.call(HookPhase::TransformContext);
             let changes = call
-                .run(entry.hook.transform_context(&projected, ctx), &ctx.cancel)
+                .run(entry.hook.transform_context(&projected, ctx), ctx.cancel.token())
                 .await?;
             for change in &changes {
                 change
@@ -427,7 +476,7 @@ impl HookChain {
         for entry in &self.hooks {
             let decision = entry
                 .call(HookPhase::BeforeTool)
-                .run(entry.hook.before_tool(tool, ctx), &ctx.cancel)
+                .run(entry.hook.before_tool(tool, ctx), ctx.cancel.token())
                 .await?;
             match decision {
                 Decision::Deny(_) => return Ok(decision),
@@ -447,7 +496,7 @@ impl HookChain {
         for entry in &self.hooks {
             output = entry
                 .call(HookPhase::AfterTool)
-                .run(entry.hook.after_tool(tool, output, ctx), &ctx.cancel)
+                .run(entry.hook.after_tool(tool, output, ctx), ctx.cancel.token())
                 .await?;
         }
         Ok(output)
@@ -458,7 +507,7 @@ impl HookChain {
         for entry in &self.hooks {
             let next = entry
                 .call(HookPhase::FinishTurn)
-                .run(entry.hook.finish_turn(turn, ctx), &ctx.cancel)
+                .run(entry.hook.finish_turn(turn, ctx), ctx.cancel.token())
                 .await?;
             match next {
                 TurnDecision::Stop => return Ok(TurnDecision::Stop),
@@ -476,10 +525,19 @@ impl HookChain {
     /// Call `on_event` of every hook that observes `event`, in stage and registration order.
     pub async fn on_event(&self, event: &Event, ctx: &HookContext) -> Vec<HookError> {
         let mut errors = Vec::new();
-        for entry in self.hooks.iter().filter(|entry| entry.hook.observes(&event.event)) {
+        for entry in &self.hooks {
+            // Synchronous extension code: a panic is a failure of this hook, not of the run.
+            match std::panic::catch_unwind(AssertUnwindSafe(|| entry.hook.observes(&event.event))) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(_) => {
+                    errors.push(entry.call(HookPhase::OnEvent).error(HookFailure::Panicked));
+                    continue;
+                }
+            }
             if let Err(error) = entry
                 .call(HookPhase::OnEvent)
-                .run(entry.hook.on_event(event, ctx), &ctx.cancel)
+                .run(entry.hook.on_event(event, ctx), ctx.cancel.token())
                 .await
             {
                 // Cancellation is a normal shutdown, not an observer failure.

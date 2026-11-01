@@ -344,6 +344,147 @@ async fn retrying_stops_after_max_retries() {
     assert_eq!(provider.requests().len(), 3);
 }
 
+#[tokio::test]
+async fn a_retry_needs_request_budget_and_keeps_the_provider_error() {
+    let provider = provider([
+        FauxStep::Fail("HTTP 503: service unavailable".into()),
+        FauxStep::text("never sent"),
+    ]);
+    let (mut runner, sink) = RunnerSetup {
+        retry: fast_retry(3),
+        limits: limits(1, None),
+        ..setup(&provider)
+    }
+    .build();
+
+    let report = runner.run("go", &CancellationToken::new()).await;
+
+    assert_eq!((report.outcome, report.retries), (RunOutcome::Error, 0));
+    assert!(report.error.unwrap_or_default().contains("503"));
+    assert_eq!(provider.requests().len(), 1);
+    assert!(!sink.kinds().contains(&"retry_scheduled"));
+}
+
+#[tokio::test]
+async fn queued_input_waits_when_no_request_budget_is_left() {
+    let provider = provider([FauxStep::text("never sent")]);
+    let setup = RunnerSetup {
+        limits: limits(0, None),
+        ..setup(&provider)
+    };
+    let queues = setup.config.queues.clone();
+    queues.steer("later");
+    let (mut runner, _) = setup.build();
+
+    let report = runner.run("go", &CancellationToken::new()).await;
+
+    assert_eq!(report.outcome, RunOutcome::MaxTurns);
+    assert_eq!(summarize(&runner.session().messages()), ["user:go"]);
+    assert_eq!(summarize(&queues.drain_steering()), ["user:later"]);
+}
+
+#[tokio::test]
+async fn a_retried_failure_is_reported_as_a_context_edit() {
+    let provider = provider([
+        FauxStep::Fail("HTTP 503: service unavailable".into()),
+        FauxStep::text("ok"),
+    ]);
+    let (mut runner, sink) = RunnerSetup {
+        retry: fast_retry(3),
+        ..setup(&provider)
+    }
+    .build();
+
+    runner.run("diagnose", &CancellationToken::new()).await;
+
+    let edit = runner
+        .session()
+        .entries()
+        .iter()
+        .find_map(|entry| match entry {
+            Entry::ContextEdit(edit) => Some(edit.id.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let kinds = sink.kinds();
+    let reported: Vec<Option<String>> = sink
+        .events()
+        .into_iter()
+        .filter_map(|event| match event {
+            AgentEvent::ContextEdited { entry_id, .. } => Some(entry_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reported, [Some(edit)]);
+    let scheduled = kinds.iter().position(|kind| *kind == "retry_scheduled").unwrap();
+    let edited = kinds.iter().position(|kind| *kind == "context_edited").unwrap();
+    let second_attempt = kinds.iter().rposition(|kind| *kind == "agent_start").unwrap();
+    assert!(scheduled < edited && edited < second_attempt, "{kinds:?}");
+}
+
+/// Holds the first `message_end` of the user input `text` until the run is dropped.
+struct HoldInput {
+    text: &'static str,
+    held: std::sync::atomic::AtomicBool,
+    reached: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl Hooks for HoldInput {
+    fn observes(&self, event: &AgentEvent) -> bool {
+        matches!(event, AgentEvent::MessageEnd { .. })
+    }
+
+    async fn on_event(&self, event: &zx_agent::agent::Event, _ctx: &HookContext) -> HookResult<()> {
+        if let AgentEvent::MessageEnd {
+            message: Message::User { content, .. },
+            ..
+        } = &event.event
+            && content == self.text
+            && !self.held.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.reached.notify_one();
+            std::future::pending::<()>().await;
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn queued_input_is_recorded_once_when_a_run_is_dropped_while_observers_run() {
+    let provider = provider([FauxStep::text("answered")]);
+    let mut setup = setup(&provider);
+    let reached = Arc::new(tokio::sync::Notify::new());
+    setup.config.hooks.push_with(
+        HoldInput {
+            text: "queued",
+            held: std::sync::atomic::AtomicBool::new(false),
+            reached: reached.clone(),
+        },
+        zx_agent::agent::HookOptions {
+            timeout: Duration::from_secs(3600),
+            ..Default::default()
+        },
+    );
+    setup.config.queues.steer("queued");
+    let (mut runner, _) = setup.build();
+    let cancel = CancellationToken::new();
+
+    // The first run records the queued input, then is dropped while an observer holds it.
+    tokio::select! {
+        _ = runner.run("first", &cancel) => panic!("the observer holds the first run"),
+        () = reached.notified() => {}
+    }
+    let report = runner.run("second", &cancel).await;
+
+    assert_eq!(report.outcome, RunOutcome::Completed);
+    let inputs: Vec<String> = summarize(&runner.session().messages())
+        .into_iter()
+        .filter(|message| message.starts_with("user:"))
+        .collect();
+    assert_eq!(inputs, ["user:first", "user:queued", "user:second"]);
+}
+
 // ---------------------------------------------------------------------------
 // Limits and cancellation
 // ---------------------------------------------------------------------------

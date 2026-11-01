@@ -37,10 +37,14 @@ pub enum StartRecord {
     Absent,
     /// The call was issued before the session recorded starts (format before v4).
     Unavailable,
+    /// The answer that issued the call ended with `Error` or `Aborted`: the loop runs no
+    /// call of such an answer, so this one never began.
+    NeverRun,
 }
 
 /// A tool call at the end of the current branch that has no recorded result: the run that
-/// issued it stopped, through a crash, an exit or a dropped run future, before recording one.
+/// issued it stopped, through a crash, an exit or a dropped run future, before recording one,
+/// or the answer that issued it failed or was cancelled, so it never ran.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InterruptedToolCall {
     pub tool_call_id: String,
@@ -71,9 +75,10 @@ impl SessionStore {
     /// The calls of the branch's last assistant message that have no result, in call order.
     ///
     /// Empty unless that message is followed only by tool results and records that are not
-    /// messages, is still in the model projection, and did not end with `Error` or `Aborted`
-    /// (the loop never runs tools from such a response). A result that a `context_edit`
-    /// hides from the model still counts as recorded.
+    /// messages, and is still in the model projection. The calls of a message that ended
+    /// with `Error` or `Aborted` are all [`StartRecord::NeverRun`]: the loop never runs
+    /// tools from such a response, and the model must not take them for calls that ran. A
+    /// result that a `context_edit` hides from the model still counts as recorded.
     pub fn interrupted_tool_calls(&self) -> Vec<InterruptedToolCall> {
         let path = self.branch_path();
         let issuer = path.iter().enumerate().rev().find_map(|(index, entry)| {
@@ -91,9 +96,7 @@ impl SessionStore {
         let Message::Assistant(answer) = &issuer.message else {
             return Vec::new();
         };
-        if matches!(answer.stop_reason, StopReason::Error | StopReason::Aborted) {
-            return Vec::new();
-        }
+        let never_ran = matches!(answer.stop_reason, StopReason::Error | StopReason::Aborted);
         if !self.projection().iter().any(|item| item.entry_id == issuer.id) {
             // Omitted or summarized: the model no longer sees these calls.
             return Vec::new();
@@ -117,7 +120,9 @@ impl SessionStore {
             .into_iter()
             .filter(|call| !results.contains(call.id.as_str()))
             .map(|call| {
-                let start = if started.contains(call.id.as_str()) {
+                let start = if never_ran {
+                    StartRecord::NeverRun
+                } else if started.contains(call.id.as_str()) {
                     StartRecord::Present
                 } else if records_starts {
                     StartRecord::Absent
@@ -401,7 +406,15 @@ mod tests {
                 .append_message(answer(stop_reason, &[("c1", "bash")]))
                 .await
                 .unwrap();
-            assert!(store.interrupted_tool_calls().is_empty(), "{stop_reason:?}");
+            assert_eq!(
+                store.interrupted_tool_calls(),
+                [InterruptedToolCall {
+                    tool_call_id: "c1".into(),
+                    tool_name: "bash".into(),
+                    start: StartRecord::NeverRun,
+                }],
+                "{stop_reason:?}"
+            );
         }
     }
 

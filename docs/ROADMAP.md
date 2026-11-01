@@ -175,6 +175,45 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
   - 既有测试未改。
 - 本机 macOS 验证：stable 与 Rust 1.88.0 各 568 项通过（基线 559 项，在 `0984288` 上实测），6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过，自查脚本的命中项与基线相同；设置 `ZX_DOCKER_TEST_IMAGE=debian:bookworm-slim` 时容器测试 30 项通过。未新增依赖，`Cargo.toml`、`Cargo.lock` 未改动。
 
+二、循环与 chat（实施中）：
+
+| 项目 | 修正 |
+|---|---|
+| 失败回答中的工具调用 | 以 `Error` 或 `Aborted` 结束的回答若仍在投影中，下一次运行开始时由崩溃恢复为其中的调用补写"未执行"结果（这类回答中的调用从不执行）。此前不补写：请求转换只补 "No result provided"，模型无法知道调用根本没有执行，参数不完整的调用还会显示为 `bash({})` |
+| 预算用完时的重试 | 没有剩余请求预算时不再安排重试，以 `Error` 结束并保留 provider 的错误。每个回合（含每次尝试的第一个回合）先检查预算与取消，再取出排队的插话。此前会白等一次退避，开出一个不发请求的回合并取走插话，最后报 `MaxTurns`，真实错误丢失 |
+| 插话写入与出队 | 输入写入会话后立即出队，再通知观察者。此前要等观察者处理完 `message_end` 才出队，运行 future 在此期间被丢弃时，同一输入会在下一次运行中再写一次 |
+| 事件与会话记录 | `tool_call_recovered` 在补写的结果写入之后发出；重试时省略失败回答的 `context_edit` 也发出 `context_edited`（带条目 ID）。此前前者先于写入，后者没有事件 |
+| 有界订阅的结束 | 会话释放后 `EventStream::recv` 返回 `None`，`subscribe` 登记的 sink 随会话释放。此前订阅句柄持有 sink 与发送端，`recv` 会一直等待 |
+| 钩子追加的 system 消息 | `transform_context` 不能再追加 system 消息，整份计划按钩子失败拒绝；系统提示词只来自配置（P7 的扩展经 `prompt_sections` 加入）。此前可以追加，但下一次尝试或运行开始时会被当作与配置不一致而删除 |
+| 钩子与工具的取消令牌 | `HookContext::cancel` 改为只读的 `CancelSignal`（可等待、可查询、可派生子令牌，不能取消运行）；工具拿到的是每次调用的子令牌。此前两者拿到的都是运行本身的令牌，调用 `cancel()` 会中止整个运行，并被报告为调用方取消 |
+| 扩展的同步方法 | `Hooks::observes` panic 时按不观察处理并报告 `hook_failed`；运行开始时在 panic 保护下检查每个工具的 `name`、`definition`、`execution_mode` 与 `effects`，并要求 `name` 与声明的函数名一致、声明的函数名不重复。此前这些方法的 panic 会穿出 `prompt`，名字不一致时模型调用会报 "not found" |
+| 观察与取消的语义 | 在 `Hooks::on_event`、`Tool::execute` 与 README 中写明：并行执行工具时同一钩子的 `on_event` 可能并发、乱序；运行取消后，挂起的观察者被停止，可能收不到其余事件，需要完整事件流时用 `subscribe_bounded`；运行取消时循环直接丢弃工具 future，必须执行的清理放在 `Drop` 中 |
+| chat 中残留的输入 | 每轮结束后取出内核队列中没有被处理的输入：被 Ctrl+C 取消时丢弃并提示条数与内容；正常结束时作为下一轮提问发送。此前取消后残留的插话会在下一轮排在新问题之后，正常结束时迟到的插话也一样 |
+| chat 的审批过期 | 审批超时或被取消后立即提示已过期并清除，脚本模式不再吞掉下一条输入；新增 `--approval-timeout-secs`（默认 120）。此前只在下一次循环开头才发现，期间读到的输入被当作"请先审批"丢弃 |
+
+实施记录（基于 `ba10d35`，含 PR #29、#30）：
+
+- 按上表实施，补充如下：
+  - 失败回答：`StartRecord` 新增 `NeverRun`，对应的恢复状态为 `not_started`，与"会话已记录开始、该调用却没有开始记录"使用同一段"未执行"文本。请求转换不变，旧会话的请求还原不受影响。
+  - 预算：重试需要剩余预算；没有时以 `Error` 结束，错误是 provider 的原文。
+  - 取消信号：`HookContext::cancel` 的类型由 `CancellationToken` 改为 `CancelSignal`；`HookContext::new` 仍接收 `CancellationToken`。
+  - `observes` panic 时，每个事件各报告一次 `hook_failed`。
+  - chat：正常结束时没被读到的插话作为下一轮提问发送。这个窗口位于运行结束前最后一次检查队列之后，无法从 CLI 稳定构造，因此没有端到端测试；取出逻辑由 PR #28 的 `take_queued` 测试覆盖。
+- 公开 API 与 CLI 的变化：新增 `CancelSignal` 与 `StartRecord::NeverRun`；`HookContext::cancel` 改为 `CancelSignal`；`ContextEdit::Append` 拒绝 system 消息；`LoopSpec::validate` 增加声明名与元数据检查；`tool_call_recovered` 改在结果写入之后发出，重试省略失败回答时发出 `context_edited`；chat 新增 `--approval-timeout-secs`。`run --help`、`serve --help` 与 `ba10d35` 逐字节相同，`chat --help` 只多出这一项。会话文件格式不变。
+- 既有测试的调整（对应上表有意改变的行为）：
+  - `src/session/recovery.rs` 的 `failed_and_cancelled_answers_never_ran_their_calls`：失败回答中的调用由"不返回"改为返回并标为 `NeverRun`。
+  - `tests/hooks.rs` 的 `input_and_context_changes_are_persisted_before_the_model_request`：钩子追加的消息由 system 改为 user，期望值随之改为 `user:extension note`，验证的持久化顺序不变。
+  - `tests/hooks.rs` 的 `marked_continuations_join_across_system_updates` 依靠钩子在续写之间追加 system 消息，改为 `src/runner.rs` 的单元测试 `a_final_answer_joins_marked_continuations_across_system_messages`，验证同一条拼接规则；续写拼接的端到端覆盖仍在 `tests/runner.rs`。
+  - `tests/hooks.rs` 的 `ContextProbe` 保存的类型由 `CancellationToken` 改为 `CancelSignal`，断言不变。
+- 新增 16 项测试，删除上述 1 项，净增 15 项。除替换用的单元测试外，修复前均实测失败：
+  - `tests/runner.rs` 4 项：预算用完不重试且保留错误；无预算时排队输入留在队列；重试省略失败回答时发出 `context_edited`；运行在观察者处理时被丢弃，排队输入只写一次。
+  - `tests/crash_recovery.rs` 2 项：失败或取消的回答中的调用记为未执行；恢复事件在结果写入之后。
+  - `tests/agent_session.rs` 1 项：会话释放后有界订阅结束。
+  - `tests/hooks.rs` 5 项：钩子不能追加 system 消息；`observes` 的 panic 被报告且运行继续；声明名不一致的工具、`definition` panic 的工具在请求前被拒绝；工具取消自己的令牌不影响运行。
+  - `tests/chat_cli.rs` 2 项：取消后残留的插话被丢弃（修复前第二轮请求的用户消息为 `first`、`second`、`late steering`）；审批过期后下一行作为新提问（只加入 `--approval-timeout-secs` 时实测失败：该行被当作"请先审批"丢弃，随后 `/quit` 中止了运行）。
+  - 1 个 `compile_fail` Rustdoc 示例：钩子不能调用 `ctx.cancel.cancel()`（修复前能编译）。
+- 本机 macOS 验证：stable 与 Rust 1.88.0 各 616 项通过（基线 601 项，在 `ba10d35` 上实测），6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过，自查脚本的命中项与基线相同；设置 `ZX_DOCKER_TEST_IMAGE=debian:bookworm-slim` 时容器测试 30 项通过。未新增依赖，`Cargo.toml`、`Cargo.lock` 未改动。
+
 下面的 P0–P9 继续按各自验收标准推进。
 
 状态取值：未开始、进行中、已实现待 PR review、已完成。每个阶段完成时勾选任务，并记录完成日期和提交。

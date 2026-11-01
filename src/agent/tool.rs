@@ -34,7 +34,9 @@ pub enum Effects {
 #[derive(Clone, Debug)]
 pub struct ToolContext {
     pub cwd: PathBuf,
-    /// Cancelled when the run is aborted or times out. Long-running tools must honor it.
+    /// Cancelled when the run is aborted or times out. Long-running tools must honor it. In
+    /// a run it is the call's own token: a tool may cancel it to stop work of its own
+    /// without stopping the run.
     pub cancel: CancellationToken,
 }
 
@@ -98,5 +100,11 @@ pub trait Tool: Send + Sync {
         Ok(())
     }
     /// Run the tool. Must honor `ctx.cancel` if it can take long, and bound its output.
+    ///
+    /// When the run is cancelled, the loop stops waiting at once and drops this future, so
+    /// cleanup that must happen, such as ending a process, belongs in `Drop`; the built-in
+    /// tools do so. `ctx.cancel` lets a tool stop early when it is called directly. The
+    /// `name`, `definition`, `execution_mode` and `effects` methods must not panic: the loop
+    /// tries them before a run's first request and fails the run if one does.
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String>;
 }

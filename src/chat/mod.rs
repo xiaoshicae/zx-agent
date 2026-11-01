@@ -82,6 +82,7 @@ async fn build(
     .await?;
     prepared.require_bash_approval("shell commands require interactive approval");
     prepared.config.interaction = interaction.clone();
+    prepared.config.interaction_timeout = std::time::Duration::from_secs(settings.args.approval_timeout_secs);
     let provider = prepared.config.spec.provider.clone();
     let cwd = prepared.config.spec.cwd.clone();
     let session = prepared.into_session(output.clone())?;
@@ -255,6 +256,15 @@ async fn drive_turn(session: &AgentSession, operation: Operation, io: &mut TurnI
                 let report = running.await?;
                 report.print(io.output);
                 if queued_prompt.is_some() { eprintln!("[chat] queued input cleared by cancellation"); }
+                // Steering meant for the cancelled task must not reach the next one.
+                let dropped = unread_input(session);
+                if !dropped.is_empty() {
+                    eprintln!(
+                        "[chat] cancellation discarded {} steering input(s): {}",
+                        dropped.len(),
+                        visible(&dropped.join(" / "))
+                    );
+                }
                 return Ok(match interrupt {
                     Interrupt::Cancel => Flow::Continue,
                     Interrupt::Terminate => Flow::Exit(EXIT_ABORTED),
@@ -262,7 +272,18 @@ async fn drive_turn(session: &AgentSession, operation: Operation, io: &mut TurnI
             }
             report = &mut running => {
                 report?.print(io.output);
-                return Ok(queued_prompt.map_or(Flow::Continue, Flow::Prompt));
+                // Steering that arrived as the task ended was never read: ask it next.
+                let late = unread_input(session);
+                if !late.is_empty() {
+                    eprintln!("[chat] steering input arrived as the task ended; sending it as the next prompt");
+                }
+                let next: Vec<String> = queued_prompt.into_iter().chain(late).collect();
+                return Ok(if next.is_empty() { Flow::Continue } else { Flow::Prompt(next.join("\n\n")) });
+            }
+            () = expired(&mut pending), if pending.is_some() => {
+                if let Some(ticket) = pending.take() {
+                    eprintln!("[approval] request {} expired; the task goes on without the call", ticket.id);
+                }
             }
             request = io.approvals.recv() => {
                 let Some(ticket) = request else { anyhow::bail!("terminal approval channel closed"); };
@@ -333,6 +354,23 @@ async fn drive_turn(session: &AgentSession, operation: Operation, io: &mut TurnI
             }
         }
     }
+}
+
+/// Completes once the core stops waiting for the pending approval: it timed out, or the
+/// task was cancelled. Never completes without one.
+async fn expired(pending: &mut Option<Ticket>) {
+    match pending {
+        Some(ticket) => ticket.reply.closed().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Input that `steer` queued and no run read; a task only reads it between turns.
+fn unread_input(session: &AgentSession) -> Vec<String> {
+    session.take_queued().unwrap_or_else(|error| {
+        eprintln!("[chat] cannot take the unread input: {error}");
+        Vec::new()
+    })
 }
 
 fn show_approval(ticket: &Ticket, cwd: &Path) {

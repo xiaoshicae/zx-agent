@@ -12,8 +12,8 @@ use tokio_util::sync::CancellationToken;
 
 use common::{EchoTool, RunnerSetup, config, fast_retry, header, read_lines, run_prompt, summarize};
 use zx_agent::agent::{
-    AgentEvent, ApprovalResult, ContextEdit, Decision, Event, HookChain, HookContext, HookOptions, HookResult,
-    HookStage, Hooks, LoopOutcome, ToolOutput, ToolVerdict, TurnDecision, TurnSummary,
+    AgentEvent, ApprovalResult, CancelSignal, ContextEdit, Decision, Event, HookChain, HookContext, HookOptions,
+    HookResult, HookStage, Hooks, LoopOutcome, ToolOutput, ToolVerdict, TurnDecision, TurnSummary,
 };
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{EventReceiver, Message, Provider, Request, SectionChange, StopReason, SystemMessage, ToolCall};
@@ -267,13 +267,7 @@ impl Hooks for Project {
                 text: "view:GO".into(),
             },
             ContextEdit::Append {
-                message: Message::System(SystemMessage {
-                    sections: vec![SectionChange {
-                        name: "extension".into(),
-                        content: Some("logged".into()),
-                    }],
-                    timestamp: 0,
-                }),
+                message: Message::user("extension note"),
             },
         ])
     }
@@ -321,7 +315,7 @@ async fn input_and_context_changes_are_persisted_before_the_model_request() {
     assert_eq!(report.final_text, "done");
     assert_eq!(
         summarize(&provider.requests()[0].messages),
-        ["user:view:GO", "system:extension"]
+        ["user:view:GO", "user:extension note"]
     );
     let lines = read_lines(&path);
     assert_eq!(lines[2]["message"]["content"], "go", "original input remains intact");
@@ -806,40 +800,6 @@ async fn stopping_from_a_hook_preserves_queued_user_input() {
     assert_eq!(summarize(&config.queues.drain_steering()), ["user:pending user input"]);
 }
 
-struct ContinueWithSystemUpdate;
-#[async_trait]
-impl Hooks for ContinueWithSystemUpdate {
-    async fn transform_context(&self, _messages: &[Message], _ctx: &HookContext) -> HookResult<Vec<ContextEdit>> {
-        Ok(vec![ContextEdit::Append {
-            message: Message::System(SystemMessage {
-                sections: vec![SectionChange {
-                    name: "extension".into(),
-                    content: Some("keep answering".into()),
-                }],
-                timestamp: 0,
-            }),
-        }])
-    }
-    async fn finish_turn(&self, turn: &TurnSummary<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
-        Ok(if turn.turn == 1 {
-            TurnDecision::ContinueAnswer("continue".into())
-        } else {
-            TurnDecision::Default
-        })
-    }
-}
-
-#[tokio::test]
-async fn marked_continuations_join_across_system_updates() {
-    let provider = Arc::new(FauxProvider::new([FauxStep::text("甲"), FauxStep::text("乙")]));
-    let mut config = config(provider, vec![]);
-    config.hooks.push(ContinueWithSystemUpdate);
-    let (mut runner, _) = RunnerSetup::new(config).build();
-    let report = runner.run("go", &CancellationToken::new()).await;
-    assert_eq!(report.outcome, RunOutcome::Completed);
-    assert_eq!(report.final_text, "甲乙");
-}
-
 struct FinishFailure;
 #[async_trait]
 impl Hooks for FinishFailure {
@@ -1186,11 +1146,11 @@ async fn observers_skip_streaming_deltas_unless_they_ask_for_them() {
 /// What each hook method of a [`ContextProbe`] received: method, session, run and directory.
 type Seen = Arc<Mutex<Vec<(&'static str, Option<String>, String, PathBuf)>>>;
 
-/// Records the context each hook method receives, and keeps the run's cancel token.
+/// Records the context each hook method receives, and keeps the run's cancel signal.
 #[derive(Clone, Default)]
 struct ContextProbe {
     seen: Seen,
-    cancel: Arc<Mutex<Option<CancellationToken>>>,
+    cancel: Arc<Mutex<Option<CancelSignal>>>,
 }
 impl ContextProbe {
     fn record(&self, method: &'static str, ctx: &HookContext) {
@@ -1405,4 +1365,163 @@ async fn tools_with_the_same_name_are_rejected_before_any_request() {
     let error = format!("{:?}", result.failure);
     assert!(error.contains("more than one tool is named \\\"echo\\\""), "{error}");
     assert!(provider.requests().is_empty());
+}
+
+struct AppendSystem;
+#[async_trait]
+impl Hooks for AppendSystem {
+    async fn transform_context(&self, _messages: &[Message], _ctx: &HookContext) -> HookResult<Vec<ContextEdit>> {
+        Ok(vec![ContextEdit::Append {
+            message: Message::System(SystemMessage {
+                sections: vec![SectionChange {
+                    name: "memory".into(),
+                    content: Some("remembered".into()),
+                }],
+                timestamp: 0,
+            }),
+        }])
+    }
+}
+
+#[tokio::test]
+async fn a_hook_cannot_append_system_messages() {
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
+    let mut config = config(provider.clone(), vec![]);
+    config.hooks.push(AppendSystem);
+
+    let (result, _) = run_prompt(&config, &mut Vec::new(), "go").await;
+
+    assert_eq!(result.outcome, LoopOutcome::Error);
+    let error = format!("{:?}", result.failure);
+    assert!(error.contains("system prompt comes from the configuration"), "{error}");
+    assert!(provider.requests().is_empty());
+}
+
+struct PanickingObserver;
+#[async_trait]
+impl Hooks for PanickingObserver {
+    fn observes(&self, _event: &AgentEvent) -> bool {
+        panic!("observes is broken")
+    }
+}
+
+#[tokio::test]
+async fn a_panic_in_observes_is_reported_and_the_run_continues() {
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
+    let mut config = config(provider, vec![]);
+    config.hooks.push(PanickingObserver);
+
+    let (result, sink) = run_prompt(&config, &mut Vec::new(), "go").await;
+
+    assert_eq!(result.outcome, LoopOutcome::Completed);
+    assert!(sink.kinds().contains(&"hook_failed"), "{:?}", sink.kinds());
+}
+
+/// A tool that may declare itself under another name, or panic while declaring itself.
+struct Declared {
+    name: &'static str,
+    declared: &'static str,
+    panics: bool,
+}
+
+#[async_trait]
+impl zx_agent::agent::Tool for Declared {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn definition(&self) -> zx_agent::ai::ToolDef {
+        assert!(!self.panics, "definition is broken");
+        zx_agent::ai::ToolDef {
+            name: self.declared.into(),
+            description: "Test tool".into(),
+            parameters: json!({"type": "object"}),
+        }
+    }
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+        _ctx: &zx_agent::agent::ToolContext,
+    ) -> Result<ToolOutput, String> {
+        Ok(ToolOutput::ok("ran"))
+    }
+}
+
+#[tokio::test]
+async fn a_tool_declared_under_another_name_is_rejected_before_any_request() {
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
+    let tool = Declared {
+        name: "echo",
+        declared: "other",
+        panics: false,
+    };
+    let config = config(provider.clone(), vec![Arc::new(tool)]);
+
+    let (result, _) = run_prompt(&config, &mut Vec::new(), "go").await;
+
+    assert_eq!(result.outcome, LoopOutcome::Error);
+    let error = format!("{:?}", result.failure);
+    assert!(error.contains("declares itself as \\\"other\\\""), "{error}");
+    assert!(provider.requests().is_empty());
+}
+
+#[tokio::test]
+async fn a_tool_whose_definition_panics_fails_the_run_before_any_request() {
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
+    let tool = Declared {
+        name: "echo",
+        declared: "echo",
+        panics: true,
+    };
+    let config = config(provider.clone(), vec![Arc::new(tool)]);
+
+    let (result, _) = run_prompt(&config, &mut Vec::new(), "go").await;
+
+    assert_eq!(result.outcome, LoopOutcome::Error);
+    let error = format!("{:?}", result.failure);
+    assert!(error.contains("panicked"), "{error}");
+    assert!(provider.requests().is_empty());
+}
+
+/// Cancels the token it is given, as a tool might to stop work of its own.
+struct CancelsItself;
+
+#[async_trait]
+impl zx_agent::agent::Tool for CancelsItself {
+    fn name(&self) -> &str {
+        "stop"
+    }
+    fn definition(&self) -> zx_agent::ai::ToolDef {
+        zx_agent::ai::ToolDef {
+            name: "stop".into(),
+            description: "Test tool".into(),
+            parameters: json!({"type": "object"}),
+        }
+    }
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+        ctx: &zx_agent::agent::ToolContext,
+    ) -> Result<ToolOutput, String> {
+        ctx.cancel.cancel();
+        Ok(ToolOutput::ok("stopped its own work"))
+    }
+}
+
+#[tokio::test]
+async fn a_tool_cancelling_its_token_stops_only_itself() {
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::tool_call("c1", "stop", json!({})),
+        FauxStep::text("done"),
+    ]));
+    let config = config(provider, vec![Arc::new(CancelsItself)]);
+    let mut context = Vec::new();
+
+    let (result, _) = run_prompt(&config, &mut context, "go").await;
+
+    assert_eq!(result.outcome, LoopOutcome::Completed);
+    assert!(
+        summarize(&context).contains(&"tool:c1=stopped its own work".to_string()),
+        "{:?}",
+        summarize(&context)
+    );
 }

@@ -1007,6 +1007,88 @@ async fn tty_input_steers_a_running_task_and_model_changes_wait_until_idle() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn input_steered_into_a_cancelled_task_is_discarded_not_sent_later() {
+    let dir = tempfile::tempdir().unwrap();
+    let chunks = vec![json!({"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]})];
+    let server = MockServer::start(vec![Reply::Stall(chunks), Reply::text("fresh")]).await;
+    let (mut terminal, slave) = common::pty();
+    let mut child = chat(&server, dir.path(), &["--tools", "", "--output", "jsonl", "--deltas"])
+        .stdin(Stdio::from(slave))
+        .spawn()
+        .unwrap();
+    let mut events = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut errors = BufReader::new(child.stderr.take().unwrap()).lines();
+    terminal.write_all(b"first\n").await.unwrap();
+    terminal.flush().await.unwrap();
+    read_event_until(&mut events, |event| event["type"] == "message_update").await;
+    terminal.write_all(b"late steering\n").await.unwrap();
+    terminal.flush().await.unwrap();
+    read_error_until(&mut errors, "steering input queued").await;
+    signal(&child, "-INT").await;
+    let report = read_event_until(&mut events, |event| event["type"] == "run_end").await;
+    assert_eq!(report["report"]["outcome"], "aborted");
+    terminal.write_all(b"second\n").await.unwrap();
+    terminal.flush().await.unwrap();
+    let report = read_event_until(&mut events, |event| event["type"] == "run_end").await;
+    assert_eq!(report["report"]["finalText"], "fresh");
+    assert_eq!(users(&server, 1), ["first", "second"]);
+    read_error_until(&mut errors, "discarded").await;
+    terminal.write_all(b"/quit\n").await.unwrap();
+    terminal.flush().await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .code(),
+        Some(0)
+    );
+}
+
+#[tokio::test]
+async fn an_expired_approval_frees_the_next_scripted_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![
+        Reply::bash("c", "printf no > marker"),
+        Reply::text("went on without it"),
+        Reply::text("second answer"),
+    ])
+    .await;
+    let mut child = chat(
+        &server,
+        dir.path(),
+        &["--tools", "bash", "--approval-timeout-secs", "1", "--output", "jsonl"],
+    )
+    .spawn()
+    .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut events = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut errors = BufReader::new(child.stderr.take().unwrap()).lines();
+    stdin.write_all(b"first\n").await.unwrap();
+    read_error_until(&mut errors, "[approval] /approve 1").await;
+    let resolved = read_event_until(&mut events, |event| event["type"] == "approval_resolved").await;
+    assert_eq!(resolved["approval"], "timed_out");
+    // The task goes on without the call, so a line written now is the next question.
+    stdin.write_all(b"second\n/quit\n").await.unwrap();
+    drop(stdin);
+    read_event_until(&mut events, |event| event["type"] == "run_end").await;
+    let report = read_event_until(&mut events, |event| event["type"] == "run_end").await;
+    assert_eq!(report["report"]["finalText"], "second answer");
+    assert_eq!(users(&server, 2), ["first", "second"]);
+    read_error_until(&mut errors, "expired").await;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .code(),
+        Some(0)
+    );
+    assert!(!dir.path().join("marker").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn new_while_a_tty_task_runs_cancels_it_and_starts_with_empty_history() {
     let dir = tempfile::tempdir().unwrap();
     let chunks = vec![json!({"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]})];
