@@ -15,8 +15,10 @@
 pub mod agent;
 pub mod agent_session;
 pub mod ai;
+pub mod compaction;
 pub mod extensions;
 pub mod interaction;
+pub mod output_store;
 pub mod policy;
 pub mod presets;
 pub mod profile;

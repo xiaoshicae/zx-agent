@@ -1,6 +1,6 @@
 name = "troubleshoot"
 instructions = "troubleshoot.md"
-tools = ["bash", "read_file", "read_skill"]
+tools = ["bash", "read_file", "read_skill", "read_output"]
 execution = "local"
 
 [limits]
@@ -14,3 +14,13 @@ continueOnLength = 1
 [context]
 # Unattended runs do not read repository instructions unless asked explicitly.
 discover = false
+
+[compaction]
+triggerBytes = 0
+keepRecentBytes = 65536
+maxSummaryTokens = 2048
+timeoutSecs = 120
+
+[toolOutput]
+thresholdBytes = 8192
+maxFileBytes = 1048576

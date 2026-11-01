@@ -17,6 +17,7 @@ use serde::Deserialize;
 use crate::presets::{assistant, troubleshoot};
 use crate::runner::Limits;
 use crate::tools::BUILTIN_TOOL_NAMES;
+use crate::{compaction, output_store};
 
 use skills::Skill;
 
@@ -91,6 +92,10 @@ pub struct Profile {
     pub context: ProjectContext,
     /// Catalog metadata; loading does not decode the skill bodies.
     pub skills: Vec<Skill>,
+    /// Automatic trigger and bounded manual summarization settings.
+    pub compaction: compaction::Config,
+    /// Already bounded tool results may be persisted when read_output is enabled.
+    pub tool_output: output_store::Config,
 }
 
 impl Profile {
@@ -137,6 +142,8 @@ impl Profile {
                 files: Vec::new(),
             },
             skills: Vec::new(),
+            compaction: compaction::Config::default(),
+            tool_output: output_store::Config::default(),
         };
         profile.overlay(raw, Path::new("."))?;
         profile.validate()?;
@@ -189,6 +196,28 @@ impl Profile {
                 })
                 .collect();
         }
+        if let Some(bytes) = raw.compaction.trigger_bytes {
+            self.compaction.trigger_bytes = (bytes > 0).then_some(bytes);
+        }
+        if let Some(bytes) = raw.compaction.keep_recent_bytes {
+            self.compaction.keep_recent_bytes = bytes;
+        }
+        if let Some(tokens) = raw.compaction.max_summary_tokens {
+            self.compaction.max_summary_tokens = tokens;
+        }
+        if let Some(secs) = raw.compaction.timeout_secs {
+            self.compaction.timeout = Duration::from_secs(secs);
+        }
+        if let Some(path) = raw.tool_output.directory {
+            ensure!(!path.as_os_str().is_empty(), "toolOutput.directory must not be empty");
+            self.tool_output.directory = parent.join(path);
+        }
+        if let Some(bytes) = raw.tool_output.threshold_bytes {
+            self.tool_output.threshold_bytes = (bytes > 0).then_some(bytes);
+        }
+        if let Some(bytes) = raw.tool_output.max_file_bytes {
+            self.tool_output.max_file_bytes = bytes;
+        }
         Ok(())
     }
 
@@ -197,7 +226,9 @@ impl Profile {
         ensure!(!self.name.trim().is_empty(), "profile name is empty");
         for name in &self.tools {
             ensure!(
-                name == skills::TOOL_NAME || BUILTIN_TOOL_NAMES.contains(&name.as_str()),
+                name == skills::TOOL_NAME
+                    || name == output_store::TOOL_NAME
+                    || BUILTIN_TOOL_NAMES.contains(&name.as_str()),
                 "unknown tool {name:?}"
             );
         }
@@ -206,10 +237,14 @@ impl Profile {
         }
         for tool in self.rules.ask_tools.iter().chain(&self.rules.deny_tools) {
             ensure!(
-                tool == skills::TOOL_NAME || BUILTIN_TOOL_NAMES.contains(&tool.as_str()),
+                tool == skills::TOOL_NAME
+                    || tool == output_store::TOOL_NAME
+                    || BUILTIN_TOOL_NAMES.contains(&tool.as_str()),
                 "unknown tool in rule {tool:?}"
             );
         }
+        self.compaction.validate()?;
+        self.tool_output.validate()?;
         skills::validate(&self.skills)
     }
 
@@ -234,6 +269,25 @@ struct RawProfile {
     extensions: RawExtensions,
     context: RawContext,
     skills: Option<Vec<Skill>>,
+    compaction: RawCompaction,
+    tool_output: RawToolOutput,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+struct RawCompaction {
+    trigger_bytes: Option<usize>,
+    keep_recent_bytes: Option<usize>,
+    max_summary_tokens: Option<u32>,
+    timeout_secs: Option<u64>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+struct RawToolOutput {
+    directory: Option<PathBuf>,
+    threshold_bytes: Option<usize>,
+    max_file_bytes: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -344,6 +398,10 @@ mod tests {
         assert_eq!(assistant.limits.timeout, None);
         assert_eq!(assistant.continue_on_length, 0);
         assert_eq!(assistant.rules.ask_tools, ["bash"]);
+        assert_eq!(profile.compaction.trigger_bytes, None);
+        assert_eq!(assistant.compaction.trigger_bytes, Some(256 * 1024));
+        assert_eq!(assistant.compaction.keep_recent_bytes, 64 * 1024);
+        assert_eq!(assistant.tool_output.threshold_bytes, Some(8 * 1024));
     }
 
     #[test]
@@ -408,6 +466,24 @@ mod tests {
                 .to_string()
                 .contains("cannot be disabled")
         );
+    }
+
+    #[test]
+    fn context_management_settings_overlay_individually_and_validate() {
+        let profile = load_file("extends = 'assistant'\n[compaction]\ntriggerBytes = 0\nmaxSummaryTokens = 1024\n[toolOutput]\nthresholdBytes = 0").unwrap();
+        assert_eq!(profile.compaction.trigger_bytes, None);
+        assert_eq!(profile.compaction.keep_recent_bytes, 64 * 1024);
+        assert_eq!(profile.compaction.max_summary_tokens, 1024);
+        assert_eq!(profile.tool_output.threshold_bytes, None);
+        for text in [
+            "[compaction]\nkeepRecentBytes = 0",
+            "[compaction]\ntimeoutSecs = 0",
+            "[compaction]\nunknown = 1",
+            "[toolOutput]\ndirectory = ''",
+            "[toolOutput]\nthreshold_bytes = 256",
+        ] {
+            assert!(load_file(text).is_err(), "{text}");
+        }
     }
 
     #[test]

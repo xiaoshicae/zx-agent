@@ -8,12 +8,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::{AgentEvent, EventSink, LoopConfig, LoopControl, LoopFailure, LoopOutcome, run_loop};
+use crate::agent::{
+    AgentEvent, ContextPreparation, EventSink, LoopConfig, LoopControl, LoopFailure, LoopOutcome, run_loop,
+};
 use crate::ai::retry::{RetryPolicy, is_retryable};
 use crate::ai::{Message, Provider, Usage, UserMessageKind, duration_ms};
+use crate::compaction::{self, Trigger};
 use crate::interaction::ApprovalCache;
 use crate::session::{Entry, SessionStore};
 use crate::sync::{AbortOnDrop, lock};
@@ -76,6 +80,7 @@ pub struct Runner {
     session: Mutex<SessionStore>,
     sink: Arc<dyn EventSink>,
     approvals: ApprovalCache,
+    compaction: compaction::Config,
 }
 
 impl Runner {
@@ -94,7 +99,32 @@ impl Runner {
             session: Mutex::new(session),
             sink,
             approvals: ApprovalCache::default(),
+            compaction: compaction::Config::default(),
         }
+    }
+
+    /// Opt into automatic context preparation or tune manual summary budgets.
+    /// Rejects invalid budgets without making requests or changing the session.
+    pub fn with_compaction(mut self, config: compaction::Config) -> anyhow::Result<Self> {
+        config.validate()?;
+        self.compaction = config;
+        Ok(self)
+    }
+
+    /// Summarize the old prefix without executing a task or tools. Uses the same exclusive
+    /// Runner borrow as run; cancellation and future drop cancel only this operation.
+    pub async fn compact(&mut self, cancel: &CancellationToken) -> compaction::Report {
+        let child = cancel.child_token();
+        let _cancel_on_drop = child.drop_guard_ref();
+        let host = compaction::Host {
+            session: &self.session,
+            provider: self.config.spec.provider.as_ref(),
+            model: &self.config.spec.model,
+            config: &self.compaction,
+            sink: self.sink.as_ref(),
+            hooks: &self.config.hooks,
+        };
+        host.run(Trigger::Manual, &child).await.0
     }
 
     /// The loop configuration, for example to reach `config().queues` during a run.
@@ -160,6 +190,10 @@ impl Runner {
             cancel: &run_cancel,
             failure: Mutex::new(None),
             last_assistant_entry: Mutex::new(None),
+            compaction: &self.compaction,
+            provider: self.config.spec.provider.as_ref(),
+            model: &self.config.spec.model,
+            hooks: &self.config.hooks,
         };
 
         // Entry IDs remain stable even when hooks omit messages from earlier runs.
@@ -276,7 +310,13 @@ impl Runner {
             .iter()
             .filter_map(|entry| match entry {
                 Entry::Message(message) => Some(message.id.as_str()),
-                Entry::ContextEdit(_) => None,
+                Entry::ContextEdit(_)
+                | Entry::FormatUpgrade(_)
+                | Entry::CompactionStarted(_)
+                | Entry::Compaction(_)
+                | Entry::CompactionFailed(_)
+                | Entry::RequestConfig(_)
+                | Entry::RequestStarted(_) => None,
             })
             .collect();
         let messages: Vec<Message> = session
@@ -361,6 +401,10 @@ struct PersistingSink<'a> {
     cancel: &'a CancellationToken,
     failure: Mutex<Option<String>>,
     last_assistant_entry: Mutex<Option<String>>,
+    compaction: &'a compaction::Config,
+    provider: &'a dyn Provider,
+    model: &'a str,
+    hooks: &'a crate::agent::HookChain,
 }
 
 impl PersistingSink<'_> {
@@ -374,7 +418,68 @@ impl PersistingSink<'_> {
     }
 }
 
+#[async_trait]
 impl EventSink for PersistingSink<'_> {
+    fn record_request(&self, request: &crate::ai::Request, provider: &dyn Provider) -> Result<(), String> {
+        let options = provider.request_options();
+        let recorded = lock(self.session)
+            .record_request(
+                request,
+                provider.name(),
+                options,
+                crate::session::RequestSource::Projection,
+            )
+            .map(|_| ())
+            .map_err(|error| format!("cannot persist request checkpoint: {error:#}"));
+        if let Err(error) = &recorded {
+            self.record_failure(error.clone());
+        }
+        recorded
+    }
+    async fn prepare_context(&self, cancel: &CancellationToken) -> ContextPreparation {
+        let Some(limit) = self.compaction.trigger_bytes else {
+            return ContextPreparation::Unchanged;
+        };
+        let bytes = compaction::context_bytes(&lock(self.session).messages());
+        match bytes {
+            Ok(bytes) if bytes <= limit => return ContextPreparation::Unchanged,
+            Ok(_) => {}
+            Err(error) => {
+                return ContextPreparation::Failed {
+                    error: format!("cannot measure context: {error:#}"),
+                    requests: 0,
+                    usage: Usage::default(),
+                };
+            }
+        }
+        let host = compaction::Host {
+            session: self.session,
+            provider: self.provider,
+            model: self.model,
+            config: self.compaction,
+            sink: self,
+            hooks: self.hooks,
+        };
+        let (report, messages) = host.run(Trigger::Automatic, cancel).await;
+        if let Some(error) = report.persistence_error {
+            self.record_failure(error);
+        }
+        match messages {
+            Some(messages) => ContextPreparation::Updated {
+                messages,
+                requests: report.requests,
+                usage: report.usage,
+            },
+            None => ContextPreparation::Failed {
+                error: report
+                    .error
+                    .unwrap_or_else(|| "automatic compaction made no progress".into()),
+                requests: report.requests,
+                usage: report.usage,
+            },
+        }
+    }
+
     fn edit_context(&self, index: usize, replacement: Option<&str>) -> Result<(), String> {
         let edited = {
             let mut session = lock(self.session);
@@ -425,6 +530,80 @@ mod tests {
         assert_eq!(Limits::default().max_turns, None);
     }
 
+    /// Fails only the write of one entry type, like a disk filling up at that record.
+    struct RejectEntry(&'static str);
+    impl std::io::Write for RejectEntry {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let needle = format!("\"type\":\"{}\"", self.0);
+            if bytes.windows(needle.len()).any(|part| part == needle.as_bytes()) {
+                Err(std::io::Error::other(format!("disk full on {}", self.0)))
+            } else {
+                Ok(bytes.len())
+            }
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn compaction_write_failures_cancel_before_any_further_model_request() {
+        for rejected in [
+            "format_upgrade",
+            "compaction_started",
+            "request_config",
+            "request_started",
+            "compaction",
+            "compaction_failed",
+        ] {
+            let mut header = SessionHeader::new(Path::new("."), "m");
+            header.version = 2;
+            let mut store = SessionStore::with_writer(header, Box::new(RejectEntry(rejected)));
+            let old = store.append_message(Message::user("x".repeat(4096))).unwrap();
+            store.append_message(Message::user("recent")).unwrap();
+            let summary = if rejected == "compaction_failed" {
+                "invalid JSON".into()
+            } else {
+                serde_json::json!({"facts":[{"text":"Old observation","sourceEntryIds":[old]}],"inferences":[],"plans":[]}).to_string()
+            };
+            let provider = Arc::new(FauxProvider::new([
+                FauxStep::text(summary),
+                FauxStep::text("must not execute"),
+            ]));
+            let config = LoopConfig::new(LoopSpec {
+                provider: provider.clone(),
+                model: "m".into(),
+                system_prompt: SystemPrompt::default(),
+                tools: vec![],
+                cwd: PathBuf::from("."),
+                max_tokens: None,
+                sequential_tools: false,
+            });
+            let mut runner = Runner::new(
+                config,
+                RetryPolicy::default(),
+                Limits::default(),
+                store,
+                Arc::new(NullSink),
+            )
+            .with_compaction(compaction::Config {
+                trigger_bytes: Some(1024),
+                keep_recent_bytes: 1,
+                ..compaction::Config::default()
+            })
+            .unwrap();
+            let report = runner.run("continue", &CancellationToken::new()).await;
+            assert_eq!(report.outcome, RunOutcome::Error, "{rejected}: {report:?}");
+            assert!(report.error.unwrap().contains(&format!("disk full on {rejected}")));
+            assert_eq!(
+                provider.requests().len(),
+                usize::from(matches!(rejected, "compaction" | "compaction_failed"))
+            );
+            assert!(runner.session().latest_compaction().is_none());
+            assert_eq!(report.retries, 0);
+        }
+    }
+
     #[tokio::test]
     async fn a_session_write_failure_cancels_the_run() {
         let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
@@ -455,6 +634,45 @@ mod tests {
             provider.requests().is_empty(),
             "no model request without an audit trail"
         );
+    }
+
+    #[tokio::test]
+    async fn a_request_checkpoint_write_failure_prevents_the_request() {
+        for rejected in ["request_config", "request_started"] {
+            let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
+            let config = LoopConfig::new(LoopSpec {
+                provider: provider.clone(),
+                model: "m".into(),
+                system_prompt: SystemPrompt::default(),
+                tools: vec![],
+                cwd: PathBuf::from("."),
+                max_tokens: None,
+                sequential_tools: false,
+            });
+            let session =
+                SessionStore::with_writer(SessionHeader::new(Path::new("."), "m"), Box::new(RejectEntry(rejected)));
+            let mut runner = Runner::new(
+                config,
+                RetryPolicy::default(),
+                Limits::default(),
+                session,
+                Arc::new(NullSink),
+            );
+
+            let report = runner.run("go", &CancellationToken::new()).await;
+
+            assert_eq!(report.outcome, RunOutcome::Error, "{rejected}");
+            let error = report.error.unwrap_or_default();
+            assert!(
+                error.contains(&format!("disk full on {rejected}")),
+                "{rejected}: {error}"
+            );
+            assert!(
+                provider.requests().is_empty(),
+                "{rejected}: dispatched without a checkpoint"
+            );
+            assert_eq!(report.retries, 0);
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Shared conversation API around the exclusively owned Runner.
 //!
-//! A prompt takes ownership of the Runner, without holding a lock across await.
+//! A prompt or compaction takes ownership of the Runner, without a lock across await.
 //! Its lease restores the Runner on completion, cancellation, panic or future drop.
 
 use std::fmt;
@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 use crate::agent::{AgentEvent, EventSink, LoopConfig, MessageQueues};
 use crate::ai::Provider;
 use crate::ai::retry::RetryPolicy;
+use crate::compaction;
 use crate::runner::{Limits, RunReport, Runner};
 use crate::session::SessionStore;
 use crate::sync::lock;
@@ -25,10 +26,10 @@ pub struct ModelRef {
     pub model: String,
 }
 
-/// Session API errors. Provider, hook and persistence failures remain in RunReport.
+/// Session API errors. Operational failures remain in the run or compaction report.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionError {
-    /// A prompt or model change overlaps the current run; it is never queued.
+    /// A prompt, compaction or model change overlaps an active operation; it is never queued.
     Busy,
     /// Model IDs must contain at least one non-whitespace character.
     InvalidModel,
@@ -109,6 +110,20 @@ impl AgentSession {
         Ok(report)
     }
 
+    /// Compact the retained conversation while holding the same exclusive lease as prompt.
+    /// An overlap returns Busy; no eligible old prefix returns a no-op report.
+    pub async fn compact(&self) -> Result<compaction::Report, SessionError> {
+        self.compact_with_cancel(&CancellationToken::new()).await
+    }
+
+    /// Like compact, using a child token. Abort or future drop leaves the parent token
+    /// untouched, restores the Runner, and keeps incomplete summary attempts out of context.
+    pub async fn compact_with_cancel(&self, parent: &CancellationToken) -> Result<compaction::Report, SessionError> {
+        let cancel = parent.child_token();
+        let mut active = self.acquire(cancel.clone())?;
+        Ok(active.runner().compact(&cancel).await)
+    }
+
     /// Queue input before the next model request, using the existing steering semantics.
     pub fn steer(&self, text: impl Into<String>) {
         self.queues.steer(text);
@@ -119,7 +134,7 @@ impl AgentSession {
         self.queues.follow_up(text);
     }
 
-    /// Cancel only the active prompt. Returns false when the conversation is idle.
+    /// Cancel only the active prompt or compaction. Returns false when idle.
     pub fn abort(&self) -> bool {
         let cancel = match &*lock(&self.state) {
             State::Idle(_) => return false,

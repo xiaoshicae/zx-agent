@@ -7,7 +7,15 @@
 //! model sees are a projection of that branch: context edits can omit or replace earlier
 //! messages without touching the raw history, which stays available for auditing.
 //!
-//! Not implemented yet: compaction entries (pi: CompactionEntry).
+//! Version 3 adds auditable compaction without rewriting earlier records.
+
+mod compaction;
+mod request;
+pub use compaction::{
+    CompactionEntry, CompactionFailedEntry, CompactionPlan, CompactionStartedEntry, CompactionSummary,
+    FormatUpgradeEntry, SummaryFact, SummaryRequest,
+};
+pub use request::{RequestConfig, RequestConfigEntry, RequestSource, RequestStartedEntry};
 
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -21,10 +29,11 @@ use serde::{Deserialize, Serialize};
 use crate::ai::ContentBlock;
 use crate::ai::{Message, now_ms};
 
-/// Format version written to new session headers. Version 2 records the system prompt as
+/// Format version written to new session headers. Version 3 adds auditable compaction and
+/// append-only format upgrades. Version 2 records the system prompt as
 /// system messages in the conversation; version 1 kept it in the header. Version 1 files still
 /// open: the old header field is ignored, and the next run records the prompt as a message.
-pub const SESSION_VERSION: u32 = 2;
+pub const SESSION_VERSION: u32 = 3;
 
 /// First line of a session file. Records where and with which model the session started.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -84,6 +93,12 @@ pub struct ContextEditEntry {
 pub enum Entry {
     Message(MessageEntry),
     ContextEdit(ContextEditEntry),
+    FormatUpgrade(FormatUpgradeEntry),
+    CompactionStarted(CompactionStartedEntry),
+    Compaction(CompactionEntry),
+    CompactionFailed(CompactionFailedEntry),
+    RequestConfig(RequestConfigEntry),
+    RequestStarted(RequestStartedEntry),
 }
 
 impl Entry {
@@ -92,6 +107,12 @@ impl Entry {
         match self {
             Entry::Message(entry) => &entry.id,
             Entry::ContextEdit(entry) => &entry.id,
+            Entry::CompactionFailed(entry) => &entry.id,
+            Entry::Compaction(entry) => &entry.id,
+            Entry::CompactionStarted(entry) => &entry.id,
+            Entry::FormatUpgrade(entry) => &entry.id,
+            Entry::RequestConfig(entry) => &entry.id,
+            Entry::RequestStarted(entry) => &entry.id,
         }
     }
 
@@ -100,12 +121,19 @@ impl Entry {
         match self {
             Entry::Message(entry) => entry.parent_id.as_deref(),
             Entry::ContextEdit(entry) => entry.parent_id.as_deref(),
+            Entry::CompactionFailed(entry) => entry.parent_id.as_deref(),
+            Entry::Compaction(entry) => entry.parent_id.as_deref(),
+            Entry::CompactionStarted(entry) => entry.parent_id.as_deref(),
+            Entry::FormatUpgrade(entry) => entry.parent_id.as_deref(),
+            Entry::RequestConfig(entry) => entry.parent_id.as_deref(),
+            Entry::RequestStarted(entry) => entry.parent_id.as_deref(),
         }
     }
 }
 
 /// A model-visible message and the entry it came from.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProjectedMessage {
     pub entry_id: String,
     pub message: Message,
@@ -122,6 +150,7 @@ pub struct SessionStore {
     /// The first write error; set once, after which nothing more is written.
     write_failure: Option<String>,
     header: SessionHeader,
+    format_version: u32,
     entries: Vec<Entry>,
     index: HashMap<String, usize>,
     leaf: Option<String>,
@@ -135,6 +164,7 @@ impl SessionStore {
             path: None,
             writer: None,
             write_failure: None,
+            format_version: header.version,
             header,
             entries: Vec::new(),
             index: HashMap::new(),
@@ -201,7 +231,12 @@ impl SessionStore {
         let mut truncate_at = None;
         for (position, (line_offset, raw)) in lines.iter().enumerate().skip(1) {
             match serde_json::from_slice::<Entry>(raw) {
-                Ok(entry) => store.insert(entry),
+                Ok(entry) => {
+                    store
+                        .validate_entry(&entry)
+                        .with_context(|| format!("{}: entry {position}", path.display()))?;
+                    store.insert(entry);
+                }
                 Err(e) if position + 1 == lines.len() && incomplete_tail(raw, &e) => {
                     truncate_at = Some(*line_offset);
                 }
@@ -279,13 +314,23 @@ impl SessionStore {
 
     /// Omit (`None`) or replace the text of a message on the current branch, for future
     /// model context only. The target keeps its original content in the file.
+    /// System and synthetic summary messages cannot be edited directly. Editing a
+    /// summary's original evidence invalidates it and restores the original projection.
     pub fn append_context_edit(&mut self, target_id: &str, replacement: Option<String>) -> Result<String> {
         match self.get(target_id) {
             Some(Entry::Message(entry)) if matches!(entry.message, Message::System(_)) => {
                 bail!("entry {target_id} is a system message; record prompt changes as new system messages")
             }
             Some(Entry::Message(_)) => {}
-            Some(Entry::ContextEdit(_)) => bail!("entry {target_id} is a context edit, not a message"),
+            Some(
+                Entry::ContextEdit(_)
+                | Entry::FormatUpgrade(_)
+                | Entry::CompactionStarted(_)
+                | Entry::Compaction(_)
+                | Entry::CompactionFailed(_)
+                | Entry::RequestConfig(_)
+                | Entry::RequestStarted(_),
+            ) => bail!("entry {target_id} is not a message"),
             None => bail!("entry {target_id} not found"),
         }
         if !self.branch_path().iter().any(|entry| entry.id() == target_id) {
@@ -313,8 +358,12 @@ impl SessionStore {
 
     /// Entries from the root to the leaf.
     pub fn branch_path(&self) -> Vec<&Entry> {
+        self.branch_path_from(self.leaf.as_deref())
+    }
+
+    fn branch_path_from(&self, leaf: Option<&str>) -> Vec<&Entry> {
         let mut path = Vec::new();
-        let mut current = self.leaf.as_deref().and_then(|id| self.get(id));
+        let mut current = leaf.and_then(|id| self.get(id));
         while let Some(entry) = current {
             path.push(entry);
             current = entry.parent_id().and_then(|id| self.get(id));
@@ -325,10 +374,13 @@ impl SessionStore {
 
     /// The model-visible messages of the current branch, with their source entries.
     pub fn projection(&self) -> Vec<ProjectedMessage> {
-        let path = self.branch_path();
+        self.compacted_projection()
+    }
+
+    fn raw_projection_from(path: &[&Entry]) -> Vec<ProjectedMessage> {
         // Later edits of the same target win.
         let mut edits: HashMap<&str, &Option<String>> = HashMap::new();
-        for entry in &path {
+        for entry in path {
             if let Entry::ContextEdit(edit) = entry {
                 edits.insert(edit.target_id.as_str(), &edit.replacement);
             }
@@ -358,6 +410,7 @@ impl SessionStore {
     }
 
     fn append(&mut self, entry: Entry) -> Result<String> {
+        self.validate_entry(&entry)?;
         // Synchronous I/O, although callers run inside async tasks: one short line per message
         // finishes in microseconds, and writing it before continuing is what makes the audit
         // trail reliable.
@@ -383,6 +436,9 @@ impl SessionStore {
     }
 
     fn insert(&mut self, entry: Entry) {
+        if let Entry::FormatUpgrade(upgrade) = &entry {
+            self.format_version = upgrade.version;
+        }
         let id = entry.id().to_string();
         self.index.insert(id.clone(), self.entries.len());
         self.entries.push(entry);

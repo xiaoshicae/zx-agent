@@ -5,10 +5,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use zx_agent::agent::{AgentEvent, EventSink};
 use zx_agent::ai::{Delta, Message, StopReason};
+use zx_agent::compaction::{self, Outcome};
 use zx_agent::runner::RunReport;
 
 use crate::cli::OutputMode;
-use crate::{JsonlEvents, clip, print_report};
+use crate::{JsonlEvents, clip, print_report, write_line};
 
 pub(super) struct Output {
     mode: OutputMode,
@@ -33,6 +34,24 @@ impl Output {
                     eprintln!("[chat] {}", visible(error));
                 }
             }
+        }
+    }
+
+    pub(super) fn compact_report(&self, report: &compaction::Report) {
+        match self.mode {
+            OutputMode::Jsonl => write_line(&serde_json::json!({"type":"compaction_report","report":report})),
+            OutputMode::Text => match report.outcome {
+                Outcome::Noop => eprintln!("[compact] no eligible old messages to summarize"),
+                Outcome::Completed => eprintln!(
+                    "[compact] requests={} tokens={}",
+                    report.requests, report.usage.total_tokens
+                ),
+                Outcome::Failed | Outcome::Aborted => {
+                    if let Some(error) = &report.error {
+                        eprintln!("[compact] {}", visible(error));
+                    }
+                }
+            },
         }
     }
 }
@@ -88,6 +107,15 @@ impl EventSink for Output {
                 delay_ms,
                 error,
             } => eprintln!("[retry] {attempt}/{max_retries} in {delay_ms}ms: {}", visible(error)),
+            AgentEvent::CompactionStart { input_bytes, .. } => {
+                eprintln!("[compact] summarizing {input_bytes} context bytes")
+            }
+            AgentEvent::CompactionEnd {
+                input_bytes,
+                output_bytes,
+                ..
+            } => eprintln!("[compact] {input_bytes} -> {output_bytes} context bytes"),
+            AgentEvent::CompactionFailed { error, .. } => eprintln!("[compact] {}", visible(error)),
             AgentEvent::AgentStart
             | AgentEvent::TurnStart { .. }
             | AgentEvent::MessageStart { .. }

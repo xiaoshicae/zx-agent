@@ -24,6 +24,7 @@
 # Local agent worktrees
 /.claude/worktrees/
 /.worktrees/
+/.zx-agent/outputs/
 
 # Operating system metadata
 .DS_Store

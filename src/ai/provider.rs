@@ -33,6 +33,12 @@ pub fn event_channel() -> (EventSender, EventReceiver) {
 pub trait Provider: Send + Sync {
     /// Name recorded on assistant messages.
     fn name(&self) -> &str;
+    /// Non-secret options needed to replay wire payload conversion. Never include
+    /// authentication, headers or credentials. Null leaves custom wire conversion opaque;
+    /// the session still records the complete provider-neutral Request.
+    fn request_options(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
     /// Start one request and return its event stream.
     fn stream(&self, request: Request, cancel: CancellationToken) -> EventReceiver;
 }

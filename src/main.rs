@@ -13,7 +13,7 @@ use zx_agent::agent::{AgentEvent, EventSink};
 use zx_agent::ai::{Message, StopReason};
 use zx_agent::extensions::ContinueOnLength;
 use zx_agent::profile::Builtin;
-use zx_agent::runner::{RunOutcome, RunReport};
+use zx_agent::runner::{RunOutcome, RunReport, Runner};
 
 mod chat;
 mod cli;
@@ -92,16 +92,16 @@ fn build_session(args: &RunArgs, explicit: Explicit) -> Result<AgentSession> {
         .hooks
         .push(ContinueOnLength::new(prepared.continue_on_length));
     prepared.config.hooks.push(prepared.redactor);
+    if let Some(spill) = prepared.spill {
+        prepared.config.hooks.push(spill);
+    }
     let sink: Arc<dyn EventSink> = match args.output {
         OutputMode::Text => Arc::new(TextProgress),
         OutputMode::Jsonl => Arc::new(JsonlEvents { deltas: args.deltas }),
     };
-    Ok(AgentSession::new(
-        prepared.config,
-        prepared.retry,
-        prepared.limits,
-        prepared.store,
-        sink,
+    Ok(AgentSession::from(
+        Runner::new(prepared.config, prepared.retry, prepared.limits, prepared.store, sink)
+            .with_compaction(prepared.compaction)?,
     ))
 }
 
@@ -246,8 +246,24 @@ impl EventSink for TextProgress {
             } => {
                 eprintln!("[retry] {attempt}/{max_retries} in {delay_ms}ms: {error}");
             }
-            // Progress output only reports tool activity, model errors, and retries.
-            _ => {}
+            AgentEvent::CompactionStart { input_bytes, .. } => {
+                eprintln!("[compact] summarizing {input_bytes} context bytes")
+            }
+            AgentEvent::CompactionEnd {
+                input_bytes,
+                output_bytes,
+                ..
+            } => eprintln!("[compact] {input_bytes} -> {output_bytes} context bytes"),
+            AgentEvent::CompactionFailed { error, .. } => eprintln!("[compact] {error}"),
+            AgentEvent::AgentStart
+            | AgentEvent::TurnStart { .. }
+            | AgentEvent::MessageStart { .. }
+            | AgentEvent::MessageUpdate { .. }
+            | AgentEvent::MessageEnd { .. }
+            | AgentEvent::TurnEnd { .. }
+            | AgentEvent::AgentEnd { .. }
+            | AgentEvent::ContextEdited { .. }
+            | AgentEvent::HookFailed { .. } => {}
         }
     }
 }

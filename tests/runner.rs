@@ -209,10 +209,23 @@ async fn a_retried_failure_stays_in_the_file_but_leaves_the_context() {
 
     let lines = read_lines(&path);
     let types: Vec<&str> = lines.iter().map(|line| line["type"].as_str().unwrap()).collect();
-    assert_eq!(types, ["session", "message", "message", "context_edit", "message"]);
-    assert_eq!(lines[2]["message"]["stopReason"], "error");
-    assert_eq!(lines[3]["targetId"], lines[2]["id"]);
-    assert_eq!(lines[3]["replacement"], Value::Null);
+    // Each dispatch is checkpointed first; the unchanged configuration is recorded once.
+    assert_eq!(
+        types,
+        [
+            "session",
+            "message",
+            "request_config",
+            "request_started",
+            "message",
+            "context_edit",
+            "request_started",
+            "message"
+        ]
+    );
+    assert_eq!(lines[4]["message"]["stopReason"], "error");
+    assert_eq!(lines[5]["targetId"], lines[4]["id"]);
+    assert_eq!(lines[5]["replacement"], Value::Null);
     assert_eq!(
         summarize(&runner.session().messages()),
         ["user:diagnose", "assistant:ok"]
@@ -391,8 +404,12 @@ async fn events_are_forwarded_after_persistence() {
         .into_iter()
         .filter(|event| matches!(event, AgentEvent::MessageEnd { .. }))
         .count();
-    // Header plus one line per finished message.
-    assert_eq!(read_lines(&path).len(), 1 + ends);
+    // One message line per finished message; request checkpoints are separate entries.
+    let messages = read_lines(&path)
+        .iter()
+        .filter(|line| line["type"] == "message")
+        .count();
+    assert_eq!(messages, ends);
 }
 
 #[tokio::test]
@@ -457,14 +474,18 @@ async fn resumed_sessions_record_prompt_changes_in_the_file() {
     run_with_environment(SessionStore::create(&path, header()).unwrap(), "t1").await;
     run_with_environment(SessionStore::open(&path).unwrap(), "t2").await;
 
-    let lines = read_lines(&path);
-    let roles: Vec<&str> = lines[1..]
+    // Request checkpoints sit between messages; only message lines carry roles.
+    let messages: Vec<Value> = read_lines(&path)
+        .into_iter()
+        .filter(|line| line["type"] == "message")
+        .collect();
+    let roles: Vec<&str> = messages
         .iter()
         .map(|line| line["message"]["role"].as_str().unwrap())
         .collect();
     assert_eq!(roles, ["system", "user", "assistant", "system", "user", "assistant"]);
     assert_eq!(
-        lines[4]["message"]["sections"],
+        messages[3]["message"]["sections"],
         json!([{"name": "environment", "content": "t2"}])
     );
 }

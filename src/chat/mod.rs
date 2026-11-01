@@ -18,9 +18,11 @@ use zx_agent::AgentSession;
 use zx_agent::agent::Decision;
 use zx_agent::agent_session::ModelRef;
 use zx_agent::ai::Provider;
+use zx_agent::compaction;
 use zx_agent::extensions::ContinueOnLength;
 use zx_agent::policy::{PolicyHook, Rule, RuleMatcher, RulePolicy};
 use zx_agent::profile::Builtin;
+use zx_agent::runner::{RunReport, Runner};
 use zx_agent::tools::BASH;
 
 use crate::cli::{self, ChatArgs, Explicit, SessionFile, SessionOptions};
@@ -40,6 +42,7 @@ enum InputMode {
 
 enum Flow {
     Continue,
+    Prompt(String),
     New,
     Exit(u8),
 }
@@ -95,15 +98,21 @@ fn build(
         .hooks
         .push(ContinueOnLength::new(prepared.continue_on_length));
     prepared.config.hooks.push(prepared.redactor);
+    if let Some(spill) = prepared.spill {
+        prepared.config.hooks.push(spill);
+    }
     prepared.config.interaction = interaction.clone();
     let provider = prepared.config.spec.provider.clone();
     let cwd = prepared.config.spec.cwd.clone();
-    let session = AgentSession::new(
-        prepared.config,
-        prepared.retry,
-        prepared.limits,
-        prepared.store,
-        output.clone(),
+    let session = AgentSession::from(
+        Runner::new(
+            prepared.config,
+            prepared.retry,
+            prepared.limits,
+            prepared.store,
+            output.clone(),
+        )
+        .with_compaction(prepared.compaction)?,
     );
     Ok(Built { session, provider, cwd })
 }
@@ -130,23 +139,36 @@ pub(crate) async fn run(args: ChatArgs, explicit: Explicit) -> Result<u8> {
     let mut signals = Signals::new().context("cannot register chat signal handlers")?;
     let mut input = input::spawn()?;
     eprintln!("[chat] model={}; /help for commands", visible(&model));
+    let mut next_prompt = None;
 
     loop {
         if mode == InputMode::Terminal {
             prompt();
         }
-        let line = tokio::select! {
-            biased;
-            interrupt = signals.next() => {
-                match interrupt {
-                    Interrupt::Cancel => { eprintln!("\n[chat] no active task; /quit to exit"); continue; }
-                    Interrupt::Terminate => return Ok(EXIT_ABORTED),
+        let line = if let Some(text) = next_prompt.take() {
+            Line::Text(text)
+        } else {
+            tokio::select! {
+                biased;
+                interrupt = signals.next() => {
+                    match interrupt {
+                        Interrupt::Cancel => { eprintln!("\n[chat] no active task; /quit to exit"); continue; }
+                        Interrupt::Terminate => return Ok(EXIT_ABORTED),
+                    }
                 }
+                line = input.recv() => match line {
+                    Some(line) => line.context("cannot read terminal input")?,
+                    None => return Ok(EXIT_COMPLETED),
+                },
             }
-            line = input.recv() => match line {
-                Some(line) => line.context("cannot read terminal input")?,
-                None => return Ok(EXIT_COMPLETED),
-            },
+        };
+        let mut io = TurnIo {
+            input: &mut input,
+            approvals: &mut approvals,
+            signals: &mut signals,
+            mode,
+            output: &output,
+            cwd: &built.cwd,
         };
         let line = match line {
             Line::Text(text) => text,
@@ -156,17 +178,8 @@ pub(crate) async fn run(args: ChatArgs, explicit: Explicit) -> Result<u8> {
             }
         };
         let action = match commands::parse(line) {
-            Command::Prompt(text) => {
-                let mut io = TurnIo {
-                    input: &mut input,
-                    approvals: &mut approvals,
-                    signals: &mut signals,
-                    mode,
-                    output: &output,
-                    cwd: &built.cwd,
-                };
-                drive_turn(&built.session, text, &mut io).await?
-            }
+            Command::Prompt(text) => drive_turn(&built.session, Operation::Prompt(text), &mut io).await?,
+            Command::Compact => drive_turn(&built.session, Operation::Compact, &mut io).await?,
             Command::New => Flow::New,
             Command::Model(None) => {
                 eprintln!("[chat] model={}", visible(&model));
@@ -186,10 +199,6 @@ pub(crate) async fn run(args: ChatArgs, explicit: Explicit) -> Result<u8> {
                 help();
                 Flow::Continue
             }
-            Command::Compact => {
-                compact_unavailable();
-                Flow::Continue
-            }
             Command::Approval { .. } => {
                 eprintln!("[approval] no pending request");
                 Flow::Continue
@@ -202,6 +211,7 @@ pub(crate) async fn run(args: ChatArgs, explicit: Explicit) -> Result<u8> {
         };
         match action {
             Flow::Continue => {}
+            Flow::Prompt(text) => next_prompt = Some(text),
             Flow::Exit(code) => return Ok(code),
             Flow::New => {
                 let path = new_file(args.request.session.as_deref());
@@ -231,10 +241,35 @@ struct TurnIo<'a> {
     cwd: &'a Path,
 }
 
-async fn drive_turn(session: &AgentSession, text: String, io: &mut TurnIo<'_>) -> Result<Flow> {
-    let running = session.prompt(text);
+enum Operation {
+    Prompt(String),
+    Compact,
+}
+enum Report {
+    Task(RunReport),
+    Compact(compaction::Report),
+}
+
+impl Report {
+    fn print(&self, output: &Output) {
+        match self {
+            Self::Task(report) => output.report(report),
+            Self::Compact(report) => output.compact_report(report),
+        }
+    }
+}
+
+async fn drive_turn(session: &AgentSession, operation: Operation, io: &mut TurnIo<'_>) -> Result<Flow> {
+    let compact = matches!(operation, Operation::Compact);
+    let running = async {
+        match operation {
+            Operation::Prompt(text) => session.prompt(text).await.map(Report::Task),
+            Operation::Compact => session.compact().await.map(Report::Compact),
+        }
+    };
     tokio::pin!(running);
     let mut pending: Option<Ticket> = None;
+    let mut queued_prompt = None;
     loop {
         if pending.as_ref().is_some_and(|ticket| ticket.reply.is_closed()) {
             pending = None;
@@ -245,15 +280,16 @@ async fn drive_turn(session: &AgentSession, text: String, io: &mut TurnIo<'_>) -
                 session.abort();
                 drop(pending.take());
                 let report = running.await?;
-                io.output.report(&report);
+                report.print(io.output);
+                if queued_prompt.is_some() { eprintln!("[chat] queued input cleared by cancellation"); }
                 return Ok(match interrupt {
                     Interrupt::Cancel => Flow::Continue,
                     Interrupt::Terminate => Flow::Exit(EXIT_ABORTED),
                 });
             }
             report = &mut running => {
-                io.output.report(&report?);
-                return Ok(Flow::Continue);
+                report?.print(io.output);
+                return Ok(queued_prompt.map_or(Flow::Continue, Flow::Prompt));
             }
             request = io.approvals.recv() => {
                 let Some(ticket) = request else { anyhow::bail!("terminal approval channel closed"); };
@@ -277,7 +313,7 @@ async fn drive_turn(session: &AgentSession, text: String, io: &mut TurnIo<'_>) -
                     None => {
                         if let Some(ticket) = pending.take() { deny(ticket, "terminal input closed"); }
                         session.abort();
-                        io.output.report(&running.await?);
+                        running.await?.print(io.output);
                         return Ok(Flow::Exit(EXIT_COMPLETED));
                     }
                 };
@@ -301,8 +337,14 @@ async fn drive_turn(session: &AgentSession, text: String, io: &mut TurnIo<'_>) -
                         let next = if matches!(command, Command::New) { Flow::New } else { Flow::Exit(EXIT_COMPLETED) };
                         session.abort();
                         drop(pending.take());
-                        io.output.report(&running.await?);
+                        running.await?.print(io.output);
                         return Ok(next);
+                    }
+                    Command::Prompt(text) if compact => {
+                        if queued_prompt.is_none() {
+                            queued_prompt = Some(text);
+                            eprintln!("[chat] input queued after compaction");
+                        } else { eprintln!("[chat] one input is already queued; wait for compaction or cancel it"); }
                     }
                     Command::Prompt(text) if pending.is_none() => {
                         session.steer(text);
@@ -311,7 +353,7 @@ async fn drive_turn(session: &AgentSession, text: String, io: &mut TurnIo<'_>) -
                     Command::Prompt(_) => eprintln!("[approval] use /approve <id> once|session or /deny <id> [reason]"),
                     Command::Model(_) => eprintln!("[chat] wait for the current task or cancel it before changing models"),
                     Command::Help => help(),
-                    Command::Compact => compact_unavailable(),
+                    Command::Compact => eprintln!("[chat] session is busy; wait for the current operation or cancel it before /compact"),
                     Command::Invalid(message) => eprintln!("[chat] {}", visible(&message)),
                     Command::Empty => {}
                 }
@@ -368,15 +410,11 @@ fn help() {
     eprintln!(
         "/new                  start a fresh conversation\n\
                /model [id]           show or change the model while idle\n\
-               /compact              reserved for P5 context compaction\n\
+               /compact              summarize old context while retaining raw history\n\
                /approve <id> once    approve one exact call\n\
                /approve <id> session approve identical calls in this conversation\n\
                /deny <id> [reason]   reject the pending call\n\
                /quit                 exit chat\n\
                Ctrl+C                cancel the current task; keep the conversation"
     );
-}
-
-fn compact_unavailable() {
-    eprintln!("[chat] /compact is not available yet; context compaction is planned for P5");
 }

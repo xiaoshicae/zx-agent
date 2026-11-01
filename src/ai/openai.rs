@@ -129,6 +129,9 @@ impl Provider for OpenAiCompatible {
     fn name(&self) -> &str {
         &self.config.provider_name
     }
+    fn request_options(&self) -> Value {
+        json!({"format":"openai-chat-completions","version":1,"systemUpdates":match self.config.system_updates { SystemUpdates::Collapse => "collapse", SystemUpdates::Inline => "inline" }})
+    }
 
     fn stream(&self, request: Request, cancel: CancellationToken) -> EventReceiver {
         let (tx, rx) = event_channel();
@@ -419,6 +422,37 @@ pub fn build_body(request: &Request, config: &OpenAiConfig) -> Value {
         body["max_tokens"] = json!(max_tokens);
     }
     body
+}
+
+/// Rebuild a Chat Completions JSON body from a persisted RequestConfig and Request.
+/// Credentials, URLs and HTTP headers are intentionally absent. Rejects unknown option
+/// formats/versions rather than silently applying a different conversion policy.
+pub fn replay_body(request: &Request, provider: &str, options: &Value) -> anyhow::Result<Value> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields, rename_all = "camelCase")]
+    struct Options {
+        format: String,
+        version: u32,
+        system_updates: String,
+    }
+    let options: Options = serde_json::from_value(options.clone())?;
+    anyhow::ensure!(
+        options.format == "openai-chat-completions" && options.version == 1,
+        "unsupported request conversion format/version"
+    );
+    let system_updates = match options.system_updates.as_str() {
+        "collapse" => SystemUpdates::Collapse,
+        "inline" => SystemUpdates::Inline,
+        value => anyhow::bail!("unknown system update mode {value:?}"),
+    };
+    Ok(build_body(
+        request,
+        &OpenAiConfig {
+            provider_name: provider.into(),
+            system_updates,
+            ..OpenAiConfig::default()
+        },
+    ))
 }
 
 /// Convert the transcript, keeping tool calls and results paired.
@@ -805,7 +839,7 @@ fn parse_arguments(raw: &str) -> (Value, Option<String>) {
 mod tests {
     use super::*;
     use crate::ai::system_prompt::{SectionChange, SystemMessage};
-    use crate::ai::types::ToolResultMessage;
+    use crate::ai::types::{ToolDef, ToolResultMessage};
 
     fn apply_all(acc: &mut Accumulator, chunks: &[Value]) -> Vec<Delta> {
         chunks.iter().flat_map(|c| acc.apply(c).unwrap()).collect()
@@ -1214,5 +1248,66 @@ mod tests {
             reply("m", vec![text("two")]),
         ]);
         assert_eq!(entries[1]["reasoning_content"], "");
+    }
+
+    fn replayable_request() -> Request {
+        Request {
+            model: "m".into(),
+            messages: vec![
+                system(&[("preamble", Some("Be brief."))]),
+                Message::user("first"),
+                system(&[("environment", Some("changed"))]),
+                Message::user("second"),
+            ],
+            tools: vec![ToolDef {
+                name: "bash".into(),
+                description: "Run a command".into(),
+                parameters: json!({"type": "object"}),
+            }],
+            max_tokens: Some(64),
+        }
+    }
+
+    #[test]
+    fn replayed_bodies_match_the_live_body_in_both_system_update_modes() {
+        let request = replayable_request();
+        for system_updates in [SystemUpdates::Collapse, SystemUpdates::Inline] {
+            let live = OpenAiConfig {
+                base_url: "https://example.invalid/v1".into(),
+                api_key: Some("sk-not-recorded".into()),
+                ..p_config(system_updates)
+            };
+            let provider = OpenAiCompatible::new(live.clone()).unwrap();
+            let replayed = replay_body(&request, provider.name(), &provider.request_options()).unwrap();
+            assert_eq!(replayed, build_body(&request, &live), "{system_updates:?}");
+        }
+    }
+
+    #[test]
+    fn request_options_hold_only_the_conversion_policy() {
+        let provider = OpenAiCompatible::new(OpenAiConfig {
+            base_url: "https://example.invalid/v1".into(),
+            api_key: Some("sk-not-recorded".into()),
+            ..p_config(SystemUpdates::Inline)
+        })
+        .unwrap();
+        assert_eq!(
+            provider.request_options(),
+            json!({"format": "openai-chat-completions", "version": 1, "systemUpdates": "inline"})
+        );
+    }
+
+    #[test]
+    fn replay_rejects_unknown_conversion_options() {
+        let request = replayable_request();
+        for options in [
+            Value::Null,
+            json!({"format": "other", "version": 1, "systemUpdates": "collapse"}),
+            json!({"format": "openai-chat-completions", "version": 2, "systemUpdates": "collapse"}),
+            json!({"format": "openai-chat-completions", "version": 1, "systemUpdates": "sideways"}),
+            json!({"format": "openai-chat-completions", "version": 1, "systemUpdates": "collapse", "extra": 1}),
+        ] {
+            assert!(replay_body(&request, "p", &options).is_err(), "{options}");
+        }
     }
 }

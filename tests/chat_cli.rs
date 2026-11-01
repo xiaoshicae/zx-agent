@@ -70,6 +70,18 @@ fn users(server: &MockServer, index: usize) -> Vec<String> {
         .collect()
 }
 
+fn seed_context(dir: &Path, bytes: usize) -> String {
+    let path = dir.join("chat.jsonl");
+    let mut store = SessionStore::create(&path, common::header()).unwrap();
+    let id = store.append_message(Message::user("x".repeat(bytes))).unwrap();
+    store.append_message(Message::user("recent input")).unwrap();
+    id
+}
+
+fn summary_json(id: &str) -> String {
+    json!({"facts":[{"text":"Old observation","sourceEntryIds":[id]}],"inferences":[],"plans":["Continue"]}).to_string()
+}
+
 #[tokio::test]
 async fn multiple_prompts_keep_history_and_stream_each_answer_once() {
     let dir = tempfile::tempdir().unwrap();
@@ -87,7 +99,7 @@ async fn multiple_prompts_keep_history_and_stream_each_answer_once() {
 }
 
 #[tokio::test]
-async fn slash_commands_are_local_and_compact_is_explicitly_unavailable() {
+async fn slash_commands_are_local_and_compact_without_history_is_a_noop() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![]).await;
     let output = run(
@@ -100,7 +112,7 @@ async fn slash_commands_are_local_and_compact_is_explicitly_unavailable() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(server.requests().is_empty());
     assert!(stderr(&output).contains("model=mock-model"));
-    assert!(stderr(&output).contains("planned for P5"));
+    assert!(stderr(&output).contains("no eligible old messages"));
     assert!(stderr(&output).contains("unknown command"));
 }
 
@@ -115,6 +127,266 @@ async fn an_oversized_input_line_is_rejected_and_the_conversation_continues() {
     assert!(stderr(&output).contains("exceeds"), "{}", stderr(&output));
     assert_eq!(users(&server, 0), ["你好"]);
     assert_eq!(stdout(&output), "still here\n");
+}
+
+#[tokio::test]
+async fn manual_compact_persists_a_summary_and_the_next_prompt_uses_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = seed_context(dir.path(), 10_000);
+    std::fs::write(dir.path().join("profile.toml"), "[compaction]\nkeepRecentBytes = 1\n").unwrap();
+    let server = MockServer::start(vec![Reply::text(&summary_json(&id)), Reply::text("answer")]).await;
+    let output = run(
+        &server,
+        dir.path(),
+        &[
+            "--tools",
+            "",
+            "--profile",
+            "profile.toml",
+            "--session",
+            "chat.jsonl",
+            "--output",
+            "jsonl",
+        ],
+        "/compact\ncontinue\n/quit\n",
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let events: Vec<Value> = stdout(&output)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let compact = events
+        .iter()
+        .find(|event| event["type"] == "compaction_report")
+        .unwrap();
+    assert_eq!(compact["report"]["outcome"], "completed");
+    assert_eq!(compact["report"]["requests"], 1);
+    assert_eq!(compact["report"]["usage"]["totalTokens"], 12);
+    let task = events.iter().find(|event| event["type"] == "run_end").unwrap();
+    assert_eq!(task["report"]["finalText"], "answer");
+    assert_eq!(task["report"]["turns"], 1);
+    assert!(users(&server, 1)[0].contains("<context_summary>"));
+    assert!(
+        !server.requests()[1].body["messages"]
+            .to_string()
+            .contains(&"x".repeat(1000))
+    );
+    assert_eq!(server.requests()[0].body["max_tokens"], 2048);
+    assert!(server.requests()[0].body.get("tools").is_none());
+    let store = SessionStore::open(&dir.path().join("chat.jsonl")).unwrap();
+    assert!(store.latest_compaction().is_some());
+    assert!(store.raw_projection().iter().any(|item| item.entry_id == id));
+}
+
+#[tokio::test]
+async fn chat_automatically_compacts_at_its_default_byte_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = seed_context(dir.path(), 300 * 1024);
+    let server = MockServer::start(vec![Reply::text(&summary_json(&id)), Reply::text("answer")]).await;
+    let output = run(
+        &server,
+        dir.path(),
+        &["--tools", "", "--session", "chat.jsonl", "--output", "jsonl"],
+        "continue\n/quit\n",
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let events: Vec<Value> = stdout(&output)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let start = events.iter().find(|event| event["type"] == "compaction_start").unwrap();
+    assert_eq!(start["automatic"], true);
+    let report = events.iter().find(|event| event["type"] == "run_end").unwrap();
+    assert_eq!(report["report"]["outcome"], "completed");
+    assert_eq!(report["report"]["turns"], 2);
+    assert_eq!(report["report"]["usage"]["totalTokens"], 24);
+    assert!(users(&server, 1)[0].contains("<context_summary>"));
+}
+
+#[tokio::test]
+async fn explicit_cli_flags_disable_automatic_compaction() {
+    for disable in [vec!["--no-auto-compact"], vec!["--compact-threshold-bytes", "0"]] {
+        let dir = tempfile::tempdir().unwrap();
+        seed_context(dir.path(), 300 * 1024);
+        let server = MockServer::start(vec![Reply::text("answer")]).await;
+        let mut args = vec!["--tools", "", "--session", "chat.jsonl"];
+        args.extend(disable);
+        let output = run(&server, dir.path(), &args, "continue\n/quit\n").await;
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        assert_eq!(server.requests().len(), 1);
+        assert!(users(&server, 0)[0].len() > 256 * 1024);
+        assert!(
+            SessionStore::open(&dir.path().join("chat.jsonl"))
+                .unwrap()
+                .latest_compaction()
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_failed_manual_summary_is_reported_and_chat_can_accept_another_task() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_context(dir.path(), 10_000);
+    std::fs::write(dir.path().join("profile.toml"), "[compaction]\nkeepRecentBytes = 1\n").unwrap();
+    let server = MockServer::start(vec![Reply::text("invalid summary"), Reply::text("recovered")]).await;
+    let output = run(
+        &server,
+        dir.path(),
+        &[
+            "--tools",
+            "",
+            "--profile",
+            "profile.toml",
+            "--session",
+            "chat.jsonl",
+            "--output",
+            "jsonl",
+        ],
+        "/compact\ncontinue\n/quit\n",
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let events: Vec<Value> = stdout(&output)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        events
+            .iter()
+            .find(|event| event["type"] == "compaction_report")
+            .unwrap()["report"]["outcome"],
+        "failed"
+    );
+    assert_eq!(
+        events.iter().find(|event| event["type"] == "run_end").unwrap()["report"]["finalText"],
+        "recovered"
+    );
+    assert!(
+        !server.requests()[1].body["messages"]
+            .to_string()
+            .contains("invalid summary")
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn sigint_cancels_a_manual_summary_and_keeps_the_conversation_reusable() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_context(dir.path(), 10_000);
+    std::fs::write(dir.path().join("profile.toml"), "[compaction]\nkeepRecentBytes = 1\n").unwrap();
+    let server = MockServer::start(vec![Reply::Stall(vec![]), Reply::text("reused")]).await;
+    let mut child = chat(
+        &server,
+        dir.path(),
+        &[
+            "--tools",
+            "",
+            "--profile",
+            "profile.toml",
+            "--session",
+            "chat.jsonl",
+            "--output",
+            "jsonl",
+        ],
+    )
+    .spawn()
+    .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut events = BufReader::new(child.stdout.take().unwrap()).lines();
+    stdin.write_all(b"/compact\n").await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), server.wait_for_requests(1))
+        .await
+        .unwrap();
+    signal(&child, "-INT").await;
+    let compact = read_event_until(&mut events, |event| event["type"] == "compaction_report").await;
+    assert_eq!(compact["report"]["outcome"], "aborted");
+    stdin.write_all(b"continue\n/quit\n").await.unwrap();
+    drop(stdin);
+    let task = read_event_until(&mut events, |event| event["type"] == "run_end").await;
+    assert_eq!(task["report"]["finalText"], "reused");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .code(),
+        Some(0)
+    );
+    assert!(
+        SessionStore::open(&dir.path().join("chat.jsonl"))
+            .unwrap()
+            .latest_compaction()
+            .is_none()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn tty_compaction_rejects_overlaps_and_runs_one_queued_input_after_completion() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = seed_context(dir.path(), 10_000);
+    std::fs::write(dir.path().join("profile.toml"), "[compaction]\nkeepRecentBytes = 1\n").unwrap();
+    let release = std::sync::Arc::new(tokio::sync::Notify::new());
+    let chunks = vec![json!({"choices":[{"index":0,"delta":{"content":summary_json(&id)},"finish_reason":null}]})];
+    let server = MockServer::start(vec![
+        Reply::Gate {
+            chunks,
+            release: release.clone(),
+        },
+        Reply::text("queued answer"),
+    ])
+    .await;
+    let (mut terminal, slave) = terminal_input();
+    let mut child = chat(
+        &server,
+        dir.path(),
+        &[
+            "--tools",
+            "",
+            "--profile",
+            "profile.toml",
+            "--session",
+            "chat.jsonl",
+            "--output",
+            "jsonl",
+        ],
+    )
+    .stdin(Stdio::from(slave))
+    .spawn()
+    .unwrap();
+    let mut events = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut errors = BufReader::new(child.stderr.take().unwrap()).lines();
+    terminal.write_all(b"/compact\n").await.unwrap();
+    terminal.flush().await.unwrap();
+    read_event_until(&mut events, |event| event["type"] == "compaction_start").await;
+    terminal
+        .write_all(b"/compact\n/model no-switch\nqueued task\n")
+        .await
+        .unwrap();
+    terminal.flush().await.unwrap();
+    read_error_until(&mut errors, "session is busy").await;
+    read_error_until(&mut errors, "before changing models").await;
+    read_error_until(&mut errors, "input queued after compaction").await;
+    release.notify_one();
+    let compact = read_event_until(&mut events, |event| event["type"] == "compaction_report").await;
+    assert_eq!(compact["report"]["outcome"], "completed");
+    let task = read_event_until(&mut events, |event| event["type"] == "run_end").await;
+    assert_eq!(task["report"]["finalText"], "queued answer");
+    assert_eq!(server.requests()[1].body["model"], "mock-model");
+    assert_eq!(users(&server, 1).last().unwrap(), "queued task");
+    terminal.write_all(b"/quit\n").await.unwrap();
+    terminal.flush().await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .code(),
+        Some(0)
+    );
 }
 
 #[tokio::test]

@@ -21,6 +21,8 @@ pub struct Captured {
 pub enum Reply {
     /// Stream these chunks, then `[DONE]`.
     Sse(Vec<Value>),
+    /// Build SSE chunks from the request body, e.g. to read a newly generated output ID.
+    Dynamic(fn(&Value) -> Vec<Value>),
     /// Stream these chunks, then keep the connection open without sending anything more.
     Stall(Vec<Value>),
     /// Send partial output, then finish only after the test releases the gate.
@@ -112,6 +114,10 @@ impl MockServer {
 
 async fn answer(mut stream: TcpStream, reply: Reply, log: Arc<Mutex<Vec<Captured>>>, received: Arc<Notify>) {
     let request = read_request(&mut stream).await;
+    let reply = match reply {
+        Reply::Dynamic(build) => Reply::Sse(build(&request.body)),
+        reply => reply,
+    };
     log.lock().unwrap().push(request);
     received.notify_one();
     let sse_head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n";
@@ -148,6 +154,7 @@ async fn answer(mut stream: TcpStream, reply: Reply, log: Arc<Mutex<Vec<Captured
             // Limit/cancellation tests intentionally close the connection early.
             let _ = stream.write_all(response.as_bytes()).await;
         }
+        Reply::Dynamic(_) => unreachable!("dynamic replies are resolved before recording the request"),
     }
 }
 

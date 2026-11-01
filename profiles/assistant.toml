@@ -1,6 +1,6 @@
 name = "assistant"
 instructions = "assistant.md"
-tools = ["bash", "read_file", "read_skill"]
+tools = ["bash", "read_file", "read_skill", "read_output"]
 execution = "local"
 
 [rules]
@@ -16,3 +16,13 @@ continueOnLength = 0
 
 [context]
 discover = true
+
+[compaction]
+triggerBytes = 262144
+keepRecentBytes = 65536
+maxSummaryTokens = 2048
+timeoutSecs = 120
+
+[toolOutput]
+thresholdBytes = 8192
+maxFileBytes = 1048576

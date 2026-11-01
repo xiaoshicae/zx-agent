@@ -12,7 +12,9 @@ use zx_agent::agent::{CommandPolicy, Decision, LoopConfig, LoopSpec};
 use zx_agent::ai::openai::{DEFAULT_MAX_RESPONSE_BYTES, OpenAiCompatible, OpenAiConfig, SystemUpdates};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::sse::DEFAULT_MAX_EVENT_BYTES;
+use zx_agent::compaction;
 use zx_agent::extensions::RedactSecrets;
+use zx_agent::output_store::{self, OutputStore, ReadOutputTool, SpillOutputs};
 use zx_agent::policy::{PolicyHook, Rule, RuleMatcher, RulePolicy};
 use zx_agent::presets::troubleshoot;
 use zx_agent::profile::skills::{ReadSkillTool, TOOL_NAME};
@@ -164,8 +166,13 @@ pub(crate) struct BaseArgs {
     #[arg(long)]
     pub(crate) cwd: Option<PathBuf>,
 
-    /// Enabled tools, comma-separated.
-    #[arg(long, value_delimiter = ',', default_value = "bash,read_file")]
+    /// Enabled tools, comma-separated. Defaults to the selected profile; explicit values replace it.
+    #[arg(
+        long,
+        value_delimiter = ',',
+        default_value = "bash,read_file",
+        hide_default_value = true
+    )]
     pub(crate) tools: Vec<String>,
 
     /// Allowlisted command prefix for bash, e.g. --allow-cmd "kubectl get". Repeatable.
@@ -188,6 +195,15 @@ pub(crate) struct BaseArgs {
     /// Disable automatic AGENTS.md discovery and profile context files.
     #[arg(long)]
     pub(crate) no_context: bool,
+
+    /// Serialized context bytes that trigger a summary request. 0 disables it.
+    /// This is a byte budget, not a model token-window guarantee.
+    #[arg(long, conflicts_with = "no_auto_compact")]
+    pub(crate) compact_threshold_bytes: Option<usize>,
+
+    /// Disable automatic summaries; /compact remains available in chat.
+    #[arg(long)]
+    pub(crate) no_auto_compact: bool,
 }
 
 #[derive(Args)]
@@ -276,6 +292,8 @@ pub(crate) struct PreparedSession {
     pub(crate) redactor: RedactSecrets,
     pub(crate) limits: Limits,
     pub(crate) continue_on_length: u32,
+    pub(crate) compaction: compaction::Config,
+    pub(crate) spill: Option<SpillOutputs>,
 }
 
 /// Synchronous startup reads and short session appends precede the asynchronous run.
@@ -323,6 +341,12 @@ pub(crate) fn prepare(options: SessionOptions<'_>) -> Result<PreparedSession> {
         profile.context.files.clear();
     }
     profile.context.files.extend_from_slice(&options.base.context_files);
+    if let Some(bytes) = options.base.compact_threshold_bytes {
+        profile.compaction.trigger_bytes = (bytes > 0).then_some(bytes);
+    }
+    if options.base.no_auto_compact {
+        profile.compaction.trigger_bytes = None;
+    }
     profile.validate()?;
     let context = profile.context_section(&cwd).context(
         "cannot load project instructions; --no-context skips AGENTS.md discovery and profile context files",
@@ -336,7 +360,7 @@ pub(crate) fn prepare(options: SessionOptions<'_>) -> Result<PreparedSession> {
         &profile
             .tools
             .iter()
-            .filter(|name| name.as_str() != TOOL_NAME)
+            .filter(|name| name.as_str() != TOOL_NAME && name.as_str() != output_store::TOOL_NAME)
             .cloned()
             .collect::<Vec<_>>(),
         Duration::from_secs(options.transport.tool_timeout_secs),
@@ -349,6 +373,15 @@ pub(crate) fn prepare(options: SessionOptions<'_>) -> Result<PreparedSession> {
         catalog
     } else {
         String::new()
+    };
+    let spill = if profile.tools.iter().any(|name| name == output_store::TOOL_NAME) {
+        let store = OutputStore::new(&cwd, profile.tool_output)?;
+        // The immutable path/config is used independently by the reading tool and writer hook.
+        let hook = SpillOutputs::new(store.clone(), vec![output_store::TOOL_NAME.into(), TOOL_NAME.into()]);
+        tools.push(Arc::new(ReadOutputTool::new(store)));
+        Some(hook)
+    } else {
+        None
     };
     let policy = CommandPolicy::new(&profile.rules.allow).deny_also(&profile.rules.deny);
     // The command policy only concerns bash.
@@ -433,6 +466,8 @@ pub(crate) fn prepare(options: SessionOptions<'_>) -> Result<PreparedSession> {
         redactor: RedactSecrets::new(api_key),
         limits: profile.limits,
         continue_on_length: profile.continue_on_length,
+        compaction: profile.compaction,
+        spill,
     })
 }
 
