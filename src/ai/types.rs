@@ -35,12 +35,12 @@ pub struct Usage {
 }
 
 impl Usage {
-    /// Add `other` to these counts.
+    /// Add `other` to these counts, saturating: servers report them, so they are untrusted.
     pub fn add(&mut self, other: &Usage) {
-        self.input += other.input;
-        self.output += other.output;
-        self.cache_read += other.cache_read;
-        self.total_tokens += other.total_tokens;
+        self.input = self.input.saturating_add(other.input);
+        self.output = self.output.saturating_add(other.output);
+        self.cache_read = self.cache_read.saturating_add(other.cache_read);
+        self.total_tokens = self.total_tokens.saturating_add(other.total_tokens);
     }
 }
 
@@ -504,6 +504,31 @@ mod tests {
                 output: 4,
                 cache_read: 2,
                 total_tokens: 10
+            }
+        );
+    }
+
+    #[test]
+    fn usage_totals_saturate_instead_of_overflowing() {
+        let mut total = Usage {
+            input: u64::MAX - 1,
+            output: 1,
+            cache_read: 0,
+            total_tokens: u64::MAX,
+        };
+        total.add(&Usage {
+            input: 5,
+            output: u64::MAX,
+            cache_read: 3,
+            total_tokens: 1,
+        });
+        assert_eq!(
+            total,
+            Usage {
+                input: u64::MAX,
+                output: u64::MAX,
+                cache_read: 3,
+                total_tokens: u64::MAX
             }
         );
     }

@@ -26,6 +26,7 @@ use crate::cli::{self, ChatArgs, Explicit, SessionFile, SessionOptions};
 use crate::{EXIT_ABORTED, EXIT_COMPLETED};
 
 use commands::Command;
+use input::Line;
 use interaction::{TerminalInteraction, Ticket};
 use output::{Output, visible};
 use signals::{Interrupt, Signals};
@@ -146,6 +147,13 @@ pub(crate) async fn run(args: ChatArgs, explicit: Explicit) -> Result<u8> {
                 None => return Ok(EXIT_COMPLETED),
             },
         };
+        let line = match line {
+            Line::Text(text) => text,
+            Line::Rejected(reason) => {
+                rejected(&reason);
+                continue;
+            }
+        };
         let action = match commands::parse(line) {
             Command::Prompt(text) => {
                 let mut io = TurnIo {
@@ -258,7 +266,13 @@ async fn drive_turn(session: &AgentSession, text: String, io: &mut TurnIo<'_>) -
             }
             line = io.input.recv(), if io.mode == InputMode::Terminal || pending.is_some() => {
                 let command = match line {
-                    Some(line) => commands::parse(line.context("cannot read terminal input")?),
+                    Some(line) => match line.context("cannot read terminal input")? {
+                        Line::Text(text) => commands::parse(text),
+                        Line::Rejected(reason) => {
+                            rejected(&reason);
+                            continue;
+                        }
+                    },
                     None => {
                         if let Some(ticket) = pending.take() { deny(ticket, "terminal input closed"); }
                         session.abort();
@@ -314,6 +328,11 @@ fn show_approval(ticket: &Ticket, cwd: &Path) {
         "[approval] /approve {} once | /approve {} session | /deny {} [reason]",
         ticket.id, ticket.id, ticket.id
     );
+}
+
+/// A discarded input line ends neither the conversation nor the current task.
+fn rejected(reason: &str) {
+    eprintln!("[chat] input rejected: {}", visible(reason));
 }
 
 fn deny(ticket: Ticket, reason: &str) {

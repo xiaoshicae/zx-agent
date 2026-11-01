@@ -4,6 +4,7 @@
 //! (vLLM, Ollama, llama.cpp server, LiteLLM, most hosted gateways).
 
 use std::collections::HashMap;
+use std::fmt;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
@@ -27,8 +28,8 @@ const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
 /// `reasoning` (OpenRouter, Ollama). The first one present wins; replay uses the same name.
 const REASONING_FIELDS: [&str; 2] = ["reasoning_content", "reasoning"];
 
-/// Connection settings for an OpenAI-compatible server.
-#[derive(Clone, Debug)]
+/// Connection settings for an OpenAI-compatible server. Debug output redacts the API key.
+#[derive(Clone)]
 pub struct OpenAiConfig {
     /// Base URL without `/chat/completions`, e.g. `https://api.openai.com/v1`.
     pub base_url: String,
@@ -47,6 +48,23 @@ pub struct OpenAiConfig {
     pub max_response_bytes: usize,
     /// Maximum bytes in a single SSE event, including framing.
     pub max_sse_event_bytes: usize,
+}
+
+impl fmt::Debug for OpenAiConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Debug output can reach logs and panic messages; the key must not.
+        f.debug_struct("OpenAiConfig")
+            .field("base_url", &self.base_url)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("provider_name", &self.provider_name)
+            .field("idle_timeout", &self.idle_timeout)
+            .field("connect_timeout", &self.connect_timeout)
+            .field("use_system_proxy", &self.use_system_proxy)
+            .field("system_updates", &self.system_updates)
+            .field("max_response_bytes", &self.max_response_bytes)
+            .field("max_sse_event_bytes", &self.max_sse_event_bytes)
+            .finish()
+    }
 }
 
 /// How system prompt changes after the first one are sent (pi: the
@@ -701,7 +719,8 @@ impl Accumulator {
         self.usage.total_tokens = if total > 0 {
             total
         } else {
-            self.usage.input + self.usage.output
+            // Counts come from the server, so a bogus value must not overflow.
+            self.usage.input.saturating_add(self.usage.output)
         };
     }
 
@@ -1096,6 +1115,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(acc.usage.cache_read, 6);
+    }
+
+    #[test]
+    fn a_missing_total_is_computed_without_overflowing() {
+        let mut acc = Accumulator::new("p", "m", 1);
+        acc.apply(&json!({"choices":[],"usage":{"prompt_tokens":u64::MAX,"completion_tokens":1}}))
+            .unwrap();
+        assert_eq!(acc.usage.total_tokens, u64::MAX);
+    }
+
+    #[test]
+    fn debug_output_never_contains_the_api_key() {
+        let config = OpenAiConfig {
+            api_key: Some("sk-debug-secret".into()),
+            ..OpenAiConfig::default()
+        };
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("sk-debug-secret"), "{debug}");
+        assert!(debug.contains("[REDACTED]"), "{debug}");
     }
 
     #[test]
