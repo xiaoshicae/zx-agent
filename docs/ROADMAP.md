@@ -411,6 +411,9 @@ P5 实施约定（2026-11-01）：
     - 脱敏、`/proc` 保护、chat 审批与定时巡检不变。
   - 复验时发现，重复使用同一镜像标签，节点会沿用缓存的旧镜像；部署说明据此要求每次构建使用新标签。
   - PR #22 的首次 CI 中，`tests/container.rs` 的 `a_dropped_run_still_stops_its_command` 在 ubuntu 上以 `Text file busy (os error 26)` 失败：假 docker 脚本写出后立即执行。本 PR 未改动 Rust 代码与测试，只重跑失败的任务后通过。这是已有的偶发问题，另行处理。
+  - 已修复（PR #26）：`FakeDocker::new` 写出脚本后先以 `--zx-ready` 试运行一次（脚本直接退出，不记为调用），遇到 `ExecutableFileBusy` 时等 5 毫秒重试，最多 200 次。原因是另一测试线程恰在脚本写入期间 fork，子进程在 exec 之前持有写描述符的副本，这时执行脚本得到 ETXTBSY；试运行成功之后，任何进程都不再持有该文件的写描述符。在 Linux 容器（`rust:slim-bookworm`）中实测：
+    - 写出后立即执行，另一线程同时 fork 时 300 次中 2 次 ETXTBSY，不 fork 时 0 次；
+    - 容器测试以 16 个线程各跑 40 次：不加试运行时 1 次失败，为 `Text file busy`；加上后 0 次失败。次数少，后者只说明这 40 次没有复现。
 - 未改动 Rust 代码，也未改动 `Cargo.toml`、`Cargo.lock`。
 - 未验证：x86_64 镜像与其他集群；推送到镜像仓库；真实模型。
 

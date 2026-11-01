@@ -29,6 +29,8 @@ use common::mock_server::{MockServer, Reply};
 /// probe fails), `cmd.out`, `cmd.err`, `cmd.code` and `cmd.hang` (a command's result, or a
 /// command that never ends), `read.out` and `read.code` (a file read).
 const FAKE_DOCKER: &str = r#"#!/bin/sh
+# The readiness check of FakeDocker::new, not recorded as a call.
+if [ "$1" = "--zx-ready" ]; then exit 0; fi
 dir=$(cd "$(dirname "$0")" && pwd)
 call=$(mktemp "$dir/calls/call.XXXXXX")
 for arg in "$@"; do printf '%s\0' "$arg" >> "$call"; done
@@ -74,6 +76,28 @@ struct FakeDocker {
     workspace: tempfile::TempDir,
 }
 
+/// Run a freshly written script until it starts. A test thread that forks while another one
+/// writes the script gives its child a copy of the write descriptor, and until that child runs
+/// its own program, running the script fails with ETXTBSY; this failed a CI run once. Once
+/// the script has started, no descriptor open for writing is left anywhere. There is no event
+/// to wait for, so the check retries after a short pause.
+fn wait_until_runnable(program: &Path) {
+    const ATTEMPTS: u32 = 200;
+    for _ in 0..ATTEMPTS {
+        match std::process::Command::new(program).arg("--zx-ready").status() {
+            Ok(status) => {
+                assert!(status.success(), "{} --zx-ready: {status}", program.display());
+                return;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => panic!("cannot run {}: {error}", program.display()),
+        }
+    }
+    panic!("{} stayed busy for {ATTEMPTS} attempts", program.display());
+}
+
 impl FakeDocker {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
@@ -81,6 +105,7 @@ impl FakeDocker {
         let program = dir.path().join("docker");
         std::fs::write(&program, FAKE_DOCKER).unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        wait_until_runnable(&program);
         Self {
             dir,
             workspace: tempfile::tempdir().unwrap(),
