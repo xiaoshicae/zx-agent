@@ -154,7 +154,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P3 | 终端对话 `chat` | 已完成（PR #5） |
 | P4 | profile 文件、上下文文件与 skills | 已完成（PR #6） |
 | P5 | 上下文管理 | 已完成（PR #9） |
-| P6 | 执行环境与崩溃恢复 | 进行中：崩溃恢复（PR #12）、执行环境接缝（PR #13）、离线容器执行（PR #14）已完成；在线访问评审稿已合入（PR #17），一期实施中：只读命令自动放行已完成（PR #19） |
+| P6 | 执行环境与崩溃恢复 | 进行中：崩溃恢复（PR #12）、执行环境接缝（PR #13）、离线容器执行（PR #14）已完成；在线访问评审稿已合入（PR #17），一期实施中：只读命令自动放行（PR #19）、环境变量保护与 ServiceAccount token 脱敏（PR #20）已完成；容器联网已取消，改为常驻 Pod 部署 |
 | P7 | 插件与 MCP | 未开始；前置设计草案待评审 |
 | P8 | 嵌入协议 `acp` | 未开始 |
 | P9 | 可选增强 | 未开始 |
@@ -357,9 +357,11 @@ P5 实施约定（2026-11-01）：
 在线访问一期（2026-11-01 起；评审稿合入后由用户要求推进，按其第 6 节分 PR 实施）：
 
 - [x] chat 只读命令自动放行：`rules.autoApprove` 与 `--auto-approve-cmd`，assistant 内置只读清单（已完成，PR #19）
-- [ ] 容器联网与 kubeconfig：`[container] network`、`[container] kubeconfig`，凭据登记脱敏
-- [ ] Linux 上保护 agent 的环境变量（`PR_SET_DUMPABLE`），ServiceAccount token 登记脱敏
-- [ ] Kubernetes 部署说明
+- ~~容器联网与 kubeconfig~~：已取消（2026-11-01，见下方“部署方向”）
+- [x] Linux 上保护 agent 的环境变量（`PR_SET_DUMPABLE`），ServiceAccount token 登记脱敏（已完成，PR #20）
+- [ ] 常驻 Pod 部署包：Deployment、RBAC、Secret 与会话存储卷的模板和文档（由“Kubernetes 部署说明”调整）
+
+部署方向（2026-11-01，用户确认）：Agent 以常驻 Pod 部署，kubectl 在 Pod 内以本机执行方式运行，凭据来自 ServiceAccount，因此取消容器执行的联网与 kubeconfig。用户确认的任务来源：kubectl exec 进 Pod 对话、定时巡检、告警 Webhook、IM 机器人。用户希望增加的功能：写操作（需审批）、专用查询工具 / MCP、多集群访问、记住历史排障。其中告警 Webhook 与 IM 机器人需要新的服务模式，另行评审后实施。
 
 自动放行实施记录（2026-11-01，PR #19）：
 
@@ -373,6 +375,22 @@ P5 实施约定（2026-11-01）：
 - 反向验证：分别去掉 chat 侧或 profile 侧的接入时，`tests/chat_cli.rs` 中两项自动放行测试都失败，另一项不受影响；修改已还原。
 - 本地 macOS 基于 `533b6d7`：stable 与 Rust 1.88 各 477 项通过（基线 468 项）、6 项付费测试跳过；格式、clippy、严格 Rustdoc 与 MSRV 全目标检查通过。`tests/cli.rs`、`Cargo.toml`、`Cargo.lock` 未改动，未新增依赖。
 - 未验证：清单中的 kubectl 命令没有在真实集群上执行，测试只用 `grep`、`head`、`printf`；规则只看字面，局限见评审稿缺口 ②。
+
+环境变量保护与 ServiceAccount token 脱敏实施记录（2026-11-01，PR #20）：
+
+- 实现：
+  - Linux 上，`main` 在解析参数前调用 `prctl(PR_SET_DUMPABLE, 0)`；调用失败时在 stderr 报告并继续运行。依据是评审稿附录 9.2 的 E1–E4 实测：同一用户可读，设置后被拒绝，带 `CAP_SYS_PTRACE` 时仍可读。
+  - `RedactSecrets::with_secret_files` 登记文件，每个文件存放一个密钥，每次过滤前重新读取，最近 32 个值继续过滤。文件不存在或无权读取时跳过；其他读取失败使钩子失败并丢弃输出。
+  - CLI 登记 `/var/run/secrets/kubernetes.io/serviceaccount/token`，即 client-go `rest.InClusterConfig` 读取的路径。
+- 新增 4 项测试：
+  - `tests/hooks.rs` 3 项：文件重新读取且旧值继续过滤；缺失或空文件不影响其他过滤；不是普通文本的文件使钩子失败。
+  - `tests/run_cli.rs` 1 项，只在 Linux 上编译：命令读取 `/proc/$PPID/environ` 得到 `Permission denied`，读不到 agent 环境中的探针变量。
+- 本地 macOS 基于 `3af5ef1`：stable 与 Rust 1.88 各 480 项通过（基线 477 项；Linux 专用的 1 项在 macOS 上不编译），6 项付费测试跳过；格式、clippy、严格 Rustdoc 与 MSRV 全目标检查通过。`Cargo.toml`、`Cargo.lock` 未改动，`libc` 原本就是 Unix 依赖。
+- 本机 Docker 中的 Linux 验证（`rust:slim-bookworm`，rustc 1.99.1，aarch64，以 root 和 Docker 默认 capability 运行）：
+  - clippy 全目标无警告；新增 4 项测试全部通过。
+  - 反向验证：把 `prctl` 调用换成空操作后，`/proc` 探针测试失败。修改只作用于容器内的源码副本。
+  - 以非 root 用户运行的 Linux 结果以 CI 为准。
+- 未验证：真实 Pod 中的效果（评审稿缺口 ④）；ServiceAccount token 的实际轮换周期。
 
 执行环境接缝验收（2026-11-01，已完成，PR #13）：`src/executor/` 提供 `Executor`、`ShellCommand`、`CommandOutput`、`CommandEnd` 与 `LocalExecutor`；bash 与 read_file 新增 `executor` 字段，默认 `LocalExecutor`，`..Default::default()` 的构造方式不受影响，按字段完整列出的字面量需补上新字段。本机执行代码从 bash 与 read_file 原样搬迁，bash 与 read_file 原有测试不改断言即通过（仅 read_file 测试中两处字面量补 `..ReadFileTool::default()`，bash 测试模块补一行 `use tokio::process::Command;`）。新增 `tests/executor.rs` 3 项，用记录请求的替身执行器验证：bash 把命令、目录、超时与隐藏变量交给执行器，并正确报告 6 种结束方式；read_file 经执行器读取解析后的路径与上限。反向验证：让工具绕过自身执行器时，3 项全部失败，修改已还原。本地 macOS 基于 `bb91974`，stable 与 Rust 1.88.0 各 416 项通过、6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过。`tests/cli.rs`、`Cargo.toml`、`Cargo.lock` 未改动。
 

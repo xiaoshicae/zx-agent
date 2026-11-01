@@ -23,6 +23,11 @@ use zx_agent::runner::Limits;
 use zx_agent::session::{SessionHeader, SessionStore};
 use zx_agent::tools::{self, BASH};
 
+/// Where Kubernetes mounts the Pod's ServiceAccount token, which kubectl in the Pod reads
+/// (client-go `rest.InClusterConfig`). Commands can read it as well, so its value is
+/// redacted; elsewhere the file does not exist and is skipped.
+const SERVICE_ACCOUNT_TOKEN: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
+
 #[derive(Parser)]
 #[command(name = "zx-agent", version, about = "Minimal general-purpose agent kernel")]
 pub(crate) struct Cli {
@@ -547,7 +552,7 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
             ..RetryPolicy::default()
         },
         store: session,
-        redactor: RedactSecrets::new(api_key),
+        redactor: RedactSecrets::new(api_key).with_secret_files([PathBuf::from(SERVICE_ACCOUNT_TOKEN)]),
         auto_approve,
         limits: profile.limits,
         continue_on_length: profile.continue_on_length,
