@@ -42,6 +42,8 @@ pub(crate) enum Command {
     Run(RunArgs),
     /// Start a conversation with streaming output and terminal approvals.
     Chat(ChatArgs),
+    /// Answer chat messages from IM platforms, one session per thread, until stopped.
+    Serve(ServeArgs),
 }
 
 #[derive(Args)]
@@ -109,6 +111,32 @@ pub(crate) struct ChatArgs {
     /// In jsonl mode, also emit streaming message_update events.
     #[arg(long)]
     pub(crate) deltas: bool,
+}
+
+#[derive(Args)]
+pub(crate) struct ServeArgs {
+    /// Serve configuration (TOML): platforms, who may use the bot, limits and the session
+    /// directory. See README, section "IM 服务".
+    #[arg(long)]
+    pub(crate) config: PathBuf,
+
+    #[command(flatten)]
+    pub(crate) base: BaseArgs,
+
+    /// Maximum model requests per prompt. Defaults to the selected profile.
+    #[arg(long)]
+    pub(crate) max_turns: Option<u32>,
+
+    /// Wall-clock limit per prompt, in seconds. 0 disables it. Defaults to the selected
+    /// profile.
+    #[arg(long)]
+    pub(crate) timeout_secs: Option<u64>,
+
+    #[command(flatten)]
+    pub(crate) transport: TransportArgs,
+
+    #[command(flatten)]
+    pub(crate) request: RequestArgs,
 }
 
 #[derive(Args)]
@@ -307,6 +335,9 @@ pub(crate) struct SessionOptions<'a> {
     pub(crate) budget: Budget,
     /// Text read once by [`read_instructions`]; `None` keeps the profile's instructions.
     pub(crate) instructions: Option<&'a str>,
+    /// Environment variables that hold credentials besides the API key, such as IM tokens:
+    /// commands do not inherit them, and their values are redacted like the key's.
+    pub(crate) hidden_env: &'a [String],
 }
 
 /// Limits given on the command line. `None` keeps the selected profile's value.
@@ -505,6 +536,9 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     };
 
     // Commands must not inherit the key: `env` would put it into the session file and the context.
+    let hidden_env: Vec<String> = std::iter::once(options.base.api_key_env.clone())
+        .chain(options.hidden_env.iter().cloned())
+        .collect();
     let mut tools = tools::builtin_tools_with(
         &profile
             .tools
@@ -513,7 +547,7 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
             .cloned()
             .collect::<Vec<_>>(),
         Duration::from_secs(options.transport.tool_timeout_secs),
-        std::slice::from_ref(&options.base.api_key_env),
+        &hidden_env,
         executor,
     )?;
     tools.extend(host_tools);
@@ -572,8 +606,14 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     // The hooks every mode shares. Each declares its stage, so the policies above run first
     // and redaction runs before output is saved, whatever is registered later.
     config.hooks.push(ContinueOnLength::new(profile.continue_on_length));
+    // An unset or empty variable holds nothing to redact.
+    let hidden_values = options
+        .hidden_env
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .filter(|value| !value.is_empty());
     config.hooks.push(
-        RedactSecrets::new(api_key)
+        RedactSecrets::new(api_key.into_iter().chain(hidden_values))
             .with_secret_files(std::iter::once(PathBuf::from(SERVICE_ACCOUNT_TOKEN)).chain(secret_files)),
     );
     if let Some(spill) = spill {
@@ -595,7 +635,25 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
 }
 
 impl PreparedSession {
-    /// The conversation, sending events to `sink`: the one place where both modes turn a
+    /// Ask a person before every bash command, except those the profile auto-approves; other
+    /// tools follow the profile's rules. Chat and serve both work this way.
+    pub(crate) fn require_bash_approval(&mut self, reason: &str) {
+        self.config.hooks.push(PolicyHook::new(Arc::new(
+            RulePolicy::new(vec![
+                Rule {
+                    matcher: RuleMatcher::Tool(BASH.into()),
+                    decision: Decision::Ask(reason.into()),
+                },
+                Rule {
+                    matcher: RuleMatcher::Any,
+                    decision: Decision::Allow,
+                },
+            ])
+            .auto_approve(std::mem::take(&mut self.auto_approve)),
+        )));
+    }
+
+    /// The conversation, sending events to `sink`: the one place where every mode turns a
     /// prepared session into a running one.
     pub(crate) fn into_session(self, sink: Arc<dyn EventSink>) -> Result<AgentSession> {
         let runner =
@@ -640,7 +698,7 @@ mod tests {
                 assert_eq!(args.continue_on_length, None);
                 assert_eq!(args.base.tools, None);
             }
-            Command::Chat(_) => panic!("run command"),
+            Command::Chat(_) | Command::Serve(_) => panic!("run command"),
         }
         let cli = Cli::try_parse_from(["zx-agent", "chat", "--model", "m"]).unwrap();
         match cli.command {
@@ -649,8 +707,22 @@ mod tests {
                 assert_eq!(args.timeout_secs, None);
                 assert_eq!(args.output, OutputMode::Text);
             }
-            Command::Run(_) => panic!("chat command"),
+            Command::Run(_) | Command::Serve(_) => panic!("chat command"),
         }
+    }
+
+    #[test]
+    fn serve_takes_a_configuration_file_and_the_shared_settings() {
+        let cli = Cli::try_parse_from(["zx-agent", "serve", "--config", "serve.toml", "--model", "m"]).unwrap();
+        match cli.command {
+            Command::Serve(args) => {
+                assert_eq!(args.config, Path::new("serve.toml"));
+                assert_eq!(args.max_turns, None);
+                assert_eq!(args.request.session, None);
+            }
+            Command::Run(_) | Command::Chat(_) => panic!("serve command"),
+        }
+        assert!(Cli::try_parse_from(["zx-agent", "serve", "--model", "m"]).is_err());
     }
 
     #[test]
@@ -662,12 +734,12 @@ mod tests {
                 assert_eq!(args.timeout_secs, Some(0));
                 assert_eq!(args.base.tools, Some(vec![String::new()]));
             }
-            Command::Run(_) => panic!("chat command"),
+            Command::Run(_) | Command::Serve(_) => panic!("chat command"),
         }
         let cli = Cli::try_parse_from(["zx-agent", "run", "--model", "m", "--timeout-secs", "900", "go"]).unwrap();
         match cli.command {
             Command::Run(args) => assert_eq!(args.timeout_secs, Some(900)),
-            Command::Chat(_) => panic!("run command"),
+            Command::Chat(_) | Command::Serve(_) => panic!("run command"),
         }
     }
 }

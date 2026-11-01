@@ -46,7 +46,7 @@ G1–G4 是验收目标。当前会话日志可重建对话与提示词；G3 所
 | D4 | 会话 API 形态 | 进程内方法调用；暂不实现提交队列 / 事件队列（SQ/EQ） | 2026-10-31 | 已实现：P2 进程内共享会话 API |
 | D5 | 无人值守的命令执行环境 | 默认仍在本机执行，`run` 行为不变；容器执行须在 profile 或 CLI 中显式开启。理由：在 Kubernetes Job 中运行时 Pod 内通常没有 Docker；无网络的容器做不了在线排障，而在线访问方案尚未评审。此前的候选方案（`troubleshoot` 默认容器、没有 Docker 时拒绝启动）不采用 | 2026-11-01 | 已确认：P6 执行环境部分按此实现 |
 | D6 | 项目定位 | 改为“通用内核 + 场景配置” | 2026-10-31 | 已完成：README、`.claude/CLAUDE.md` 已更新 |
-| D7 | IM 长连接的 WebSocket 客户端 | 已授权：`tokio-tungstenite`（0.30，关掉默认 feature，只开 `connect` 与 `rustls-tls-webpki-roots`）。理由与依赖核对见 `docs/serve-im-review.md` 缺口 ① | 2026-11-01 | 待引入：实施评审稿模块 B、C 时添加 |
+| D7 | IM 长连接的 WebSocket 客户端 | 已授权：`tokio-tungstenite`（0.30，关掉默认 feature，只开 `connect` 与 `rustls-tls-webpki-roots`）。理由与依赖核对见 `docs/serve-im-review.md` 缺口 ① | 2026-11-01 | 已引入（PR #29） |
 
 D2 之外的新依赖、依赖升级，仍需先征得同意。
 
@@ -155,7 +155,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P3 | 终端对话 `chat` | 已完成（PR #5） |
 | P4 | profile 文件、上下文文件与 skills | 已完成（PR #6） |
 | P5 | 上下文管理 | 已完成（PR #9） |
-| P6 | 执行环境与崩溃恢复 | 进行中：崩溃恢复（PR #12）、执行环境接缝（PR #13）、离线容器执行（PR #14）已完成；在线访问评审稿已合入（PR #17），一期已完成：只读命令自动放行（PR #19）、环境变量保护与 ServiceAccount token 脱敏（PR #20）、常驻 Pod 部署包（PR #22）、多集群（PR #24）；容器联网已取消，改为常驻 Pod 部署。待部署方在真实集群上验收；服务模式与 IM 接入的评审稿已合入（PR #27），模块 A（IM 接口与服务）已完成（PR #28），B–D 待实施 |
+| P6 | 执行环境与崩溃恢复 | 进行中：崩溃恢复（PR #12）、执行环境接缝（PR #13）、离线容器执行（PR #14）已完成；在线访问评审稿已合入（PR #17），一期已完成：只读命令自动放行（PR #19）、环境变量保护与 ServiceAccount token 脱敏（PR #20）、常驻 Pod 部署包（PR #22）、多集群（PR #24）；容器联网已取消，改为常驻 Pod 部署。待部署方在真实集群上验收；服务模式与 IM 接入的评审稿已合入（PR #27），模块 A（IM 接口与服务，PR #28）、B（Slack 与 `serve`，PR #29）已完成，C、D 待实施 |
 | P7 | 插件与 MCP | 未开始；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已完成（PR #23），A2–A8（扩展 API）已完成（PR #25） |
 | P8 | 嵌入协议 `acp` | 未开始 |
 | P9 | 可选增强 | 未开始 |
@@ -368,7 +368,7 @@ P5 实施约定（2026-11-01）：
 IM 接入一期（2026-11-01 起；评审稿合入后由用户要求推进，按其第 6 节分 PR 实施）：
 
 - [x] A. IM 接口与服务：`im` 模块（`ImChannel`、`Server`）与 `AgentSession::take_queued`，用内存实现测试（已完成，PR #28）
-- [ ] B. Slack：Socket Mode、`zx-agent serve` 子命令与配置文件、IM 凭据的隐藏与脱敏（引入 `tokio-tungstenite`，决策 D7）
+- [x] B. Slack：Socket Mode、`zx-agent serve` 子命令与配置文件、IM 凭据的隐藏与脱敏（引入 `tokio-tungstenite`，决策 D7；已完成，PR #29）
 - [ ] C. ⚑ D:5/CHINA FLAG: 飞书：长连接、token、发送与回复、卡片（Subject to Legal/Export Compliance approval）
 - [ ] D. 部署与验收：Deployment 运行 serve 并共享进程命名空间、配置与凭据、部署说明；真实平台验收
 
@@ -474,6 +474,40 @@ IM 接入模块 A 实施记录（2026-11-01，PR #28）：
 - 本地 macOS：基于 `75d0bc9`，stable 与 Rust 1.88.0 各 559 项通过（基线 531 项），6 项付费测试跳过；格式、clippy、严格 Rustdoc 与 MSRV 全目标检查通过；`tests/im_server.rs` 连续运行 30 次均通过。`Cargo.toml`、`Cargo.lock` 未改动，未新增依赖。
 - 未实现（模块 B–D）：`serve` 子命令、配置文件与 IM 凭据的隐藏和脱敏、任何真实平台。
 - 未覆盖：运行结束瞬间到达的插话。会话层的 `take_queued` 有确定性测试；这一时序在服务层无法确定地构造。
+
+IM 接入模块 B 实施记录（2026-11-01，PR #29）：
+
+- 依赖：按决策 D7 引入 `tokio-tungstenite` 0.30（关掉默认 feature，只开 `connect` 与 `rustls-tls-webpki-roots`），`Cargo.lock` 新增 11 个包，与评审稿缺口 ① 的核对一致。`wss://` 握手用项目的依赖解析实测过：连接 Slack 的 WebSocket 地址时 TLS 握手成功，Slack 以 `400 Bad Request` 拒绝无效的 ticket。
+- `im::slack::SlackChannel`：
+  - 接收：启动时调用 `auth.test`，校验 bot token 并取得机器人自己的用户 ID；再经 `apps.connections.open` 连接 Socket Mode。每个信封先确认再处理，按（频道, ts）去重。只转交 `app_mention` 与私聊消息，去掉对机器人的 @，还原 `&amp;`、`&lt;`、`&gt;`；忽略机器人自己的消息和带 `subtype` 的消息（编辑、删除等）。
+  - 重连：收到 `disconnect` 或连接断开时立即重连；连接失败按 1 秒起、最长 60 秒的退避重试；token 被拒等无法靠重试解决的错误使 `run` 以配置错误结束。
+  - 发送：转义 `&`、`<`、`>`；超过 4000 字符的文本拆成多条，余下部分发在同一线程；同一聊天两次发送至少间隔 1 秒；429 按 `Retry-After` 等待后重试。
+  - 卡片：两个按钮的 `value` 是审批 ID。关闭卡片时保留原请求，按钮换成结果与审批人；卡片文字默认中文（`CardLabels`）。
+- `zx-agent serve --config <文件>`：
+  - 配置文件为 TOML，含 `[slack]`、`[access]`、`[limits]`、`[sessions]`，未知键报错。
+  - 启动检查：凭据变量必须非空；访问名单只能引用已配置的平台；创建会话目录；用内存会话准备一次，模型与 profile 的配置错误在启动时以退出码 2 报出。
+  - 会话按 chat 的方式组装：assistant profile，bash 需审批，自动放行清单照常生效。IM 凭据变量从命令环境中删除，其值登记脱敏（`SessionOptions::hidden_env`）。
+  - stdout 每行一个 JSON：审批记录、空闲释放与失败。SIGINT 或 SIGTERM 时各线程发出结果后以 0 退出。
+  - chat 的 bash 审批规则提取为 `PreparedSession::require_bash_approval`，与 serve 共用。
+- 新增 33 项测试：
+  - `tests/im_slack.rs` 18 项（对 `tests/common/fake_slack.rs` 的假 Slack）；
+  - `tests/serve_cli.rs` 2 项：配置错误 6 种；对假 Slack 与假模型的完整流程，见下一条；
+  - 模块内 13 项：Slack 的转义、拆分、去重与卡片长度，serve 配置的解析，`serve` 的参数。
+- 完整流程测试：@ 机器人，模型请求执行 `echo app=$SLACK_APP_TOKEN bot=$SLACK_BOT_TOKEN; cat token.txt`，审批人点击“批准一次”后：
+  - 命令输出 `app= bot=`，两个变量不在命令环境中；
+  - 从文件读出的 token 在下一次模型请求里是 `[REDACTED]`；
+  - 卡片显示审批人，状态消息替换为回答，会话文件写在 `sessions/slack/C1/<线程>.jsonl`；
+  - stdout 有审批记录；SIGTERM 后退出码为 0。
+- 测试先于修复发现的问题：关闭卡片时审批人的 `<@U…>` 提及被一并转义，显示为文字而不是提及。已改为只转义标签文字。
+- 按 Slack 官方文档核对后的取舍（原文见评审稿附录 9.1）：
+  - `block_actions` 的字段说明里没有消息所在的线程，所以卡片按钮的 `value` 写成“线程/审批 ID”，点击时从中取线程；`value` 中没有线程时再读 `message` 或 `container` 的 `thread_ts`。完整流程测试中的点击不带线程字段。
+  - 只替换文字时不传 `blocks`：文档写明此时 Slack 去掉原有的块。
+  - Socket Mode 页称信封中的 `payload` 与 Events API 相同（带外层），而同页示例是事件本身，两种都接受。
+  - 文档没有 `retry_attempt` 的说明，去重只依据（频道, ts），不依赖该字段。
+  - 文档没有写 Socket Mode 的 ping；依据 Slack 的 SDK 推断服务端会发 ping，由 tungstenite 自动应答，未验证。
+- 反向验证：每次只破坏一处并还原，对应测试都失败。破坏的六处：不确认信封、放过机器人自己的消息、放过重投、忽略按钮 `value` 中的线程、命令能看到 IM token、不对 IM token 脱敏。
+- 本地 macOS（基于 PR #28 的 `1c39ce6`）：stable 与 Rust 1.88.0 各 592 项通过（基线 559 项），6 项付费测试跳过；格式、clippy、严格 Rustdoc 与 MSRV 全目标检查通过。`tests/im_slack.rs` 连续运行 20 次，`tests/serve_cli.rs` 与 `tests/im_server.rs` 各 10 次，均通过。
+- 未验证：真实的 Slack 工作区（需要测试应用的凭据）。
 
 执行环境接缝验收（2026-11-01，已完成，PR #13）：`src/executor/` 提供 `Executor`、`ShellCommand`、`CommandOutput`、`CommandEnd` 与 `LocalExecutor`；bash 与 read_file 新增 `executor` 字段，默认 `LocalExecutor`，`..Default::default()` 的构造方式不受影响，按字段完整列出的字面量需补上新字段。本机执行代码从 bash 与 read_file 原样搬迁，bash 与 read_file 原有测试不改断言即通过（仅 read_file 测试中两处字面量补 `..ReadFileTool::default()`，bash 测试模块补一行 `use tokio::process::Command;`）。新增 `tests/executor.rs` 3 项，用记录请求的替身执行器验证：bash 把命令、目录、超时与隐藏变量交给执行器，并正确报告 6 种结束方式；read_file 经执行器读取解析后的路径与上限。反向验证：让工具绕过自身执行器时，3 项全部失败，修改已还原。本地 macOS 基于 `bb91974`，stable 与 Rust 1.88.0 各 416 项通过、6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过。`tests/cli.rs`、`Cargo.toml`、`Cargo.lock` 未改动。
 

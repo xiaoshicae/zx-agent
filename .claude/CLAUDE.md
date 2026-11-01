@@ -27,7 +27,7 @@
 
 - **是什么**：用 Rust 编写的通用 agent 内核。同一个内核支撑三类场景：和人对话；无人值守运行，例如由 cron 或 Kubernetes Job 触发的排障；被编辑器或其他程序嵌入。场景差异放在内核之外，通过 profile、提示词和插件表达。
 - **参照**：分层方式、循环语义和会话格式沿用 pi（https://github.com/earendil-works/pi ，commit `a92283056`）。与 pi 不同的地方记录在 README 的"与 pi 的差异"。
-- **现状**：v0.1.0。已实现共享的 `AgentSession`、无人值守的 `run` 和终端 `chat`、一个 OpenAI 兼容的流式 provider、`bash` 与 `read_file`，以及文件化 profile、项目上下文、按需 `read_skill`、有界摘要和长工具结果落盘 / `read_output`，崩溃恢复，可替换的会话存储（`SessionLog`；JSONL 会话文件同一时间只有一个写入者），带信封的追踪事件（运行、尝试、请求、策略结论与审批，可回链会话条目），可选的离线容器执行（`--execution container`，默认仍在本机执行），以及 IM 接入的库接口（`im`：平台接口 `ImChannel` 与按线程分派会话的 `Server`；具体平台与 `serve` 子命令尚未实现）。CLI 的场景默认值位于 `profiles/*.toml` 与相邻说明文件；`presets` 保留已有 SDK 接口。SDK 默认不限轮次、不限时间、不自动续写或压缩、不落盘工具结果。接口与资源上限见 README，目标、阶段计划与已定决策见 `docs/ROADMAP.md`，改动前先确认当前阶段。
+- **现状**：v0.1.0。已实现共享的 `AgentSession`、无人值守的 `run` 和终端 `chat`、一个 OpenAI 兼容的流式 provider、`bash` 与 `read_file`，以及文件化 profile、项目上下文、按需 `read_skill`、有界摘要和长工具结果落盘 / `read_output`，崩溃恢复，可替换的会话存储（`SessionLog`；JSONL 会话文件同一时间只有一个写入者），带信封的追踪事件（运行、尝试、请求、策略结论与审批，可回链会话条目），可选的离线容器执行（`--execution container`，默认仍在本机执行），以及 IM 服务 `zx-agent serve`（`im`：平台接口 `ImChannel`、按线程分派会话的 `Server`、Slack 实现；第二个平台与部署尚未实现）。CLI 的场景默认值位于 `profiles/*.toml` 与相邻说明文件；`presets` 保留已有 SDK 接口。SDK 默认不限轮次、不限时间、不自动续写或压缩、不落盘工具结果。接口与资源上限见 README，目标、阶段计划与已定决策见 `docs/ROADMAP.md`，改动前先确认当前阶段。
 - **验证范围**：本地使用 macOS，CI 覆盖 Linux 与 macOS；`--system-updates inline` 只在一个服务上验证过；付费 e2e 测试（`tests/real_api.rs`）于 2026-11-01 在 DeepSeek 的 `deepseek-flash` 与 `deepseek-chat` 上各运行一次，均为 6 项通过（只覆盖 `collapse` 模式，不含压缩用例）。容器执行的真实 Docker 测试（设置 `ZX_DOCKER_TEST_IMAGE` 运行 `tests/container.rs`）在本机 macOS 的 Docker Desktop 上用 `debian:bookworm-slim` 与一个 Ubuntu 系镜像跑过，原生 Linux 的 Docker 只由 CI 覆盖；没有在 rootless Docker 或 Podman 上验证。
 
 ## 架构设计
@@ -36,7 +36,7 @@
 
 | 层 | 位置 | 职责 |
 |---|---|---|
-| CLI | `src/main.rs`、`src/cli.rs`、`src/chat/` | 共用参数与运行组装；run 处理单次任务；chat 管理单一输入所有者、审批、信号和 REPL |
+| CLI | `src/main.rs`、`src/cli.rs`、`src/chat/`、`src/serve.rs` | 共用参数与运行组装；run 处理单次任务；chat 管理单一输入所有者、审批、信号和 REPL；serve 读取配置、为每个线程准备会话并隐藏 IM 凭据 |
 | 场景配置 | `src/profile/`、`profiles/` | TOML 基线与覆盖、项目上下文、显式 skill 目录及按需读取；不进入循环机制 |
 | 场景预设 | `src/presets/` | 提供外层显式选择的说明与运行默认值；内核机制不依赖预设 |
 | 提示词 | `src/prompt.rs` | 生成系统提示词：说明 + `<environment>` + `<command_policy>` + `<project_context>` + `<available_skills>`（空段落不出现） |
@@ -49,7 +49,7 @@
 | 外层策略与交互 | `src/policy.rs`、`src/extensions.rs`、`src/interaction.rs` | 命令与规则策略、续写、已知密钥脱敏、宿主审批与 NoHuman |
 | 工具 | `src/tools/` | bash、read_file、输出截断 |
 | 执行环境 | `src/executor/` | 工具执行命令与读文件的位置；`LocalExecutor` 为本机，负责进程组、超时与取消、输出捕获上限；`ContainerExecutor` 在每个进程一个的 Docker 容器中执行，并在容器内按进程组终止命令 |
-| IM 接入 | `src/im/` | 平台接口 `ImChannel`；`Server` 做访问控制并按线程分派，每个线程一个任务独占会话、运行、审批卡片与空闲释放，任务之间只经 channel 通信；宿主经 `SessionFactory` 打开会话 |
+| IM 接入 | `src/im/` | 平台接口 `ImChannel`；`Server` 做访问控制并按线程分派，每个线程一个任务独占会话、运行、审批卡片与空闲释放，任务之间只经 channel 通信；宿主经 `SessionFactory` 打开会话；`slack.rs` 经 Socket Mode 接收、经 Web API 发送 |
 
 一次运行的数据流：`main` 组装 `AgentSession` → `prompt_with_cancel` 独占取得 Runner → `Runner::run` 取会话投影作为上下文 → `run_loop` 先持久化提示词、输入和上下文改动，再经宿主准备步骤执行可选摘要 → 新增插话与钩子改动持久化后请求任务模型 → 执行工具、脱敏、可选落盘 → 循环经 Runner 实现的会话宿主（`agent::SessionHost`，crate 内部）先写完成消息，再发出事件 → runner 处理任务请求重试并汇总 `RunReport`，由 `main` 映射退出码。自动摘要单独记录、消耗请求预算且不重试；手动 compact 共用独占权并独立报告。
 
@@ -137,4 +137,4 @@
 - **新扩展**：实现 `agent::Hooks`，按需覆盖默认方法；每个回调最后一个参数是 `&HookContext`（会话、运行、工作目录、取消令牌）。回调必须异步让出执行权。错误、panic、取消与超时由宿主处理，具体规则见 README。阶段（`Hooks::stage`）默认 `Extension`，只有内置的策略适配、脱敏与落盘声明其他阶段。用 `HookChain::push_with` 注册时给出名称。钩子输入输出的 JSON 格式由 `tests/hook_contract.rs` 固定，改动前先确认钩子进程与审批转发能否兼容。
 - **上下文改动**：`on_input` 完成后才写入原始输入，改写或拒绝再追加 `context_edit`，钩子被取消时不写入；`transform_context` 返回 `ContextEdit` 计划，整份计划先校验，逐项写入成功后再请求模型。
 - **新的会话存储**：实现 `session::SessionLog`。`append` 在记录保存后才返回，同一 `seq` 已有记录时报错；新会话由后端保存头部后交给 `SessionStore::with_log`，续接时读出 `LoadedSession` 交给 `SessionStore::load`。用内存实现测往返，参照 `tests/runner.rs` 的 `TableLog`。
-- **新 IM 平台**：实现 `im::ImChannel`，遵守其文档列出的职责：立即确认投递、按消息 ID 去重、只转交发给机器人的消息、遵守限频、拆分超长文本。协议用本地假服务测；与 `Server` 的配合参照 `tests/im_server.rs` 的 `FakeChannel`。
+- **新 IM 平台**：实现 `im::ImChannel`，遵守其文档列出的职责：立即确认投递、按消息 ID 去重、只转交发给机器人的消息、遵守限频、拆分超长文本。协议用本地假服务测；与 `Server` 的配合参照 `tests/im_server.rs` 的 `FakeChannel`；Slack 的协议测试参照 `tests/im_slack.rs` 与 `tests/common/fake_slack.rs`。

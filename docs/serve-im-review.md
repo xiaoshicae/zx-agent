@@ -2,9 +2,9 @@
 
 | 信息 | 内容 |
 |-|-|
-| 版本 | `v0.2` |
+| 版本 | `v0.3` |
 | 日期 | `2026-11-01` |
-| 状态 | 已合入（PR #27），按第 6 节分模块实施：A 已完成（PR #28） |
+| 状态 | 已合入（PR #27），按第 6 节分模块实施：A（PR #28）、B（PR #29）已完成 |
 | Owner | 待指定 |
 | 对应 | `docs/ROADMAP.md:365`：P6“部署方向”中告警 Webhook 与 IM 机器人需要新的服务模式，另行评审；P9 的“由 webhook 或告警触发运行”“异步审批” |
 | 代码核对基线 | `5518791`（含 PR #25）；文中行号以此为准 |
@@ -236,9 +236,10 @@ pub enum Choice { AllowOnce, Deny }
 
 | 方面 | 做法 |
 |-|-|
-| 入站 | 用 app-level token（`xapp-`，放在 Authorization 头中）调用 `apps.connections.open` 取得 WSS 地址，连接后先收到 `hello`。之后每个 envelope 都立即回复 `{"envelope_id": …}`。<br>`app_mention`（频道中 @）和 `message.im`（单聊，`channel_type` 为 `im`）转成 `Inbound::Message`；`interactive` 类型中的 `block_actions`（按钮）转成 `Inbound::Decision` |
+| 入站 | 用 app-level token（`xapp-`，放在 Authorization 头中）调用 `apps.connections.open` 取得 WSS 地址，连接后先收到 `hello`。之后每个 envelope 都立即回复 `{"envelope_id": …}`。<br>`app_mention`（频道中 @）和 `message.im`（单聊，`channel_type` 为 `im`）转成 `Inbound::Message`；`interactive` 类型中的 `block_actions`（按钮）转成 `Inbound::Decision`。<br>启动时调用 `auth.test`：校验 bot token，取得机器人自己的用户 ID 以忽略它的消息。按（频道, ts）去重；去掉对机器人的 @，还原 `&amp;`、`&lt;`、`&gt;`。只订阅 `app_mention`，所以频道线程中的追问也要 @ 机器人。<br>`events_api` 的 `payload` 带外层 `event_callback` 或直接是事件，两种都接受（附录 9.1） |
 | 重连 | 收到 `disconnect`（`refresh_requested`、`warning`、`link_disabled`）后，重新调用 `apps.connections.open`。文档说明连接“once every few hours”会刷新一次 |
-| 出站 | `chat.postMessage` 发消息，用 bot token（`xoxb-`），需要 `chat:write`；`thread_ts` 用于回复线程。`chat.update` 用于替换卡片 |
+| 出站 | `chat.postMessage` 发消息，用 bot token（`xoxb-`），需要 `chat:write`；`thread_ts` 用于回复线程。`chat.update` 用于替换卡片。<br>转义 `&`、`<`、`>`；超过 4000 字符的文本拆成多条。只替换文字时不传 `blocks`，Slack 随之去掉原有的块。429 按 `Retry-After` 等待后重试 |
+| 卡片 | 两个按钮的 `value` 是“线程/审批 ID”：文档列出的 `block_actions` 字段里没有消息所在的线程（附录 9.1）。关闭卡片时保留原请求，按钮换成结果与审批人 |
 | 应用配置 | 打开 Socket Mode 和 Interactivity。权限包括：app_mentions 的读权限（文档两处写法不同，见附录 9.1）、`im:history`、`chat:write`；订阅 `app_mention` 与 `message.im` |
 | 限制 | 最多 10 个连接；每个频道约每秒 1 条消息 |
 
@@ -264,7 +265,7 @@ pub enum Choice { AllowOnce, Deny }
 appTokenEnv = "SLACK_APP_TOKEN"     # xapp-，Socket Mode
 botTokenEnv = "SLACK_BOT_TOKEN"     # xoxb-，发消息
 
-# ⚑ D:5/CHINA FLAG: 飞书（须经法务 / 出口合规审批）
+# ⚑ D:5/CHINA FLAG: 飞书（须经法务 / 出口合规审批；模块 C 实施后配置才接受此段）
 [feishu]
 appIdEnv = "FEISHU_APP_ID"
 appSecretEnv = "FEISHU_APP_SECRET"
@@ -274,6 +275,9 @@ domain = "https://open.feishu.cn"
 [access]
 conversations = ["slack:C0123456789", "feishu:oc_xxx"]   # 在哪些频道、群或单聊中响应
 approvers = ["slack:U0123456789", "feishu:ou_xxx"]       # 谁能批准写操作
+
+[sessions]
+dir = "/data/sessions"     # 会话文件目录（模块 B 增加）
 
 [limits]
 maxRunning = 4              # 同时运行的会话数
@@ -439,6 +443,13 @@ A ──┬──▶ B（Slack）───┬──▶ D
 | 限频 | “It will generally allow an app to post 1 message per second to a specific channel.” | 同上 |
 | 单聊 | “Subscribe to message.im events to receive messages directed to your bot user in direct message conversations.” | app_mention、message.im |
 | 权限写法 | app_mention 页写作 `app_mentions.read`，Socket Mode 的 manifest 示例写作 `app_mentions:read`；以应用 OAuth 设置中显示的为准 | 同上 |
+| 文本长度 | “For best results, limit the number of characters in the `text` field to 4,000 characters. … Slack will truncate messages containing more than 40,000 characters.” | chat.postMessage |
+| 替换文字 | “If the `text` argument is provided and `blocks` are not provided, the `blocks` will be removed”；`msg_too_long`：“The `text` field cannot exceed 4,000 characters.” | chat.update |
+| 点击 | `block_actions` 的字段说明有 `user`、`container`、`channel`、`message`、`actions.action_id`、`actions.value`，没有写消息所在的线程（`thread_ts`） | block_actions payload |
+| 块的长度 | section 文本 “maximum length is 3000 characters”；按钮 `value` “Maximum length is 2000 characters.” | section block、button element |
+| 转义 | “Slack uses `&`, `<`, and `>` as control characters … they must be converted to HTML entities if they're not going to be used for their parsing purpose.” | formatting-message-text |
+| 限频响应 | “Slack will return a `HTTP 429 Too Many Requests` error, and a `Retry-After` HTTP header containing the number of seconds until you can retry.” | rate-limits |
+| 信封 | “Event payloads sent to your app via Socket Mode are identical to the typical Events API payloads”；同页示例的 `payload` 却是事件本身 | using-socket-mode |
 
 ### 9.2 ⚑ D:5/CHINA FLAG: 飞书
 
@@ -487,4 +498,4 @@ A ──┬──▶ B（Slack）───┬──▶ D
 
 ---
 
-`serve-im-review.md` · v0.2 · 2026年11月
+`serve-im-review.md` · v0.3 · 2026年11月

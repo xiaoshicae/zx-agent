@@ -5,6 +5,7 @@
     reason = "each test binary uses a different subset of these helpers; `expect` would fail in a binary that uses them all"
 )]
 
+pub mod fake_slack;
 pub mod mock_server;
 
 use std::path::{Path, PathBuf};

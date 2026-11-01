@@ -7,6 +7,7 @@
 
 mod approval;
 mod server;
+pub mod slack;
 mod worker;
 
 use std::fmt;
