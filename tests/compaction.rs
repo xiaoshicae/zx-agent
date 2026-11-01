@@ -320,6 +320,62 @@ async fn a_failed_automatic_summary_is_not_paid_for_again_on_the_next_prompt() {
 }
 
 #[tokio::test]
+async fn the_pause_survives_a_run_whose_future_is_dropped() {
+    /// Holds the input "hold" forever, after telling the test it is waiting.
+    struct Hold(Arc<tokio::sync::Notify>);
+    #[async_trait]
+    impl Hooks for Hold {
+        async fn on_input(&self, text: String) -> Result<String, String> {
+            if text == "hold" {
+                self.0.notify_one();
+                std::future::pending::<()>().await;
+            }
+            Ok(text)
+        }
+    }
+    let (store, _) = seeded();
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::text("not JSON"),
+        FauxStep::text("must not be requested"),
+    ]));
+    let waiting = Arc::new(tokio::sync::Notify::new());
+    let mut config = config(provider.clone(), vec![]);
+    config
+        .hooks
+        .push_with_timeout(Hold(waiting.clone()), Duration::from_secs(3600));
+    let (runner, _) = RunnerSetup {
+        session: store,
+        ..RunnerSetup::new(config)
+    }
+    .build();
+    let mut runner = runner
+        .with_compaction(Config {
+            trigger_bytes: Some(1024),
+            ..budget()
+        })
+        .unwrap();
+    let first = runner.run("continue", &CancellationToken::new()).await;
+    assert_eq!(first.outcome, RunOutcome::Error, "{first:?}");
+    {
+        // Dropped while its input waits in a hook, before it reaches the summary step.
+        let cancel = CancellationToken::new();
+        let held = runner.run("hold", &cancel);
+        tokio::pin!(held);
+        tokio::select! {
+            _ = &mut held => panic!("the held run must not finish"),
+            () = waiting.notified() => {}
+        }
+    }
+    let third = runner.run("try again", &CancellationToken::new()).await;
+    assert_eq!(third.outcome, RunOutcome::Error, "{third:?}");
+    assert!(
+        third.error.as_deref().unwrap_or_default().contains("paused"),
+        "{third:?}"
+    );
+    assert_eq!(provider.requests().len(), 1, "the failed summary is not paid for again");
+}
+
+#[tokio::test]
 async fn a_successful_manual_summary_resumes_automatic_summaries() {
     let (store, old) = seeded();
     let provider = Arc::new(FauxProvider::new([

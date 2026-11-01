@@ -247,6 +247,35 @@ impl<'a> SessionFile<'a> {
             None => Self::Memory,
         }
     }
+
+    fn path(&self) -> Option<&'a Path> {
+        match self {
+            Self::Memory => None,
+            Self::Open(path) | Self::Create(path) => Some(path),
+        }
+    }
+}
+
+/// `path` with its deepest existing ancestor resolved, so that a file that does not exist yet
+/// is still compared by where it will be created.
+fn resolve(path: &Path) -> Result<PathBuf> {
+    let absolute = std::env::current_dir()?.join(path);
+    let mut existing = absolute.as_path();
+    let mut missing = Vec::new();
+    while std::fs::symlink_metadata(existing).is_err() {
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing.push(name);
+                existing = parent;
+            }
+            _ => break,
+        }
+    }
+    let mut resolved = existing
+        .canonicalize()
+        .with_context(|| format!("cannot resolve {}", existing.display()))?;
+    resolved.extend(missing.iter().rev());
+    Ok(resolved)
 }
 
 pub(crate) struct SessionOptions<'a> {
@@ -398,12 +427,23 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
         None
     };
 
-    // The session file exists before a container starts, so that the container can hide it.
+    // The container reads the whole working directory: masking one path would leave hard links
+    // to the session file and earlier session files beside it readable.
+    if profile.execution == Execution::Container
+        && let Some(path) = options.file.path()
+    {
+        anyhow::ensure!(
+            !resolve(path)?.starts_with(&cwd),
+            "--execution container needs the session file outside the working directory, which the container can read: {}; choose a --session path outside {}",
+            path.display(),
+            cwd.display()
+        );
+    }
     let header = SessionHeader::new(&cwd, options.model);
-    let (session, session_path) = match options.file {
-        SessionFile::Memory => (SessionStore::in_memory(header), None),
-        SessionFile::Open(path) if path.exists() => (SessionStore::open(path)?, Some(path)),
-        SessionFile::Open(path) | SessionFile::Create(path) => (SessionStore::create(path, header)?, Some(path)),
+    let session = match options.file {
+        SessionFile::Memory => SessionStore::in_memory(header),
+        SessionFile::Open(path) if path.exists() => SessionStore::open(path)?,
+        SessionFile::Open(path) | SessionFile::Create(path) => SessionStore::create(path, header)?,
     };
     if session.recovered_tail_bytes() > 0 {
         eprintln!(
@@ -414,7 +454,7 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     let (executor, environment): (Arc<dyn Executor>, String) = match profile.execution {
         Execution::Local => (Arc::new(LocalExecutor), environment_section(&cwd)),
         Execution::Container => {
-            let config = container_config(&profile.container, &cwd, session_path, &session.header().id)?;
+            let config = container_config(&profile.container, &cwd, &session.header().id)?;
             let user = config.user.clone();
             let container = ContainerExecutor::start(config)
                 .await
@@ -499,14 +539,8 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     })
 }
 
-/// Container settings from the profile. The session file is hidden from the container when
-/// it lies in the mounted workspace.
-fn container_config(
-    settings: &ContainerSettings,
-    cwd: &Path,
-    session: Option<&Path>,
-    label: &str,
-) -> Result<ContainerConfig> {
+/// Container settings from the profile; the session file must already be outside `cwd`.
+fn container_config(settings: &ContainerSettings, cwd: &Path, label: &str) -> Result<ContainerConfig> {
     let image = settings
         .image
         .clone()
@@ -523,14 +557,6 @@ fn container_config(
     }
     if let Some(limit) = settings.pids_limit {
         config.pids_limit = limit;
-    }
-    if let Some(path) = session {
-        let path = path
-            .canonicalize()
-            .with_context(|| format!("cannot resolve session file {}", path.display()))?;
-        if path.starts_with(cwd) {
-            config.hidden_files.push(path);
-        }
     }
     Ok(config)
 }

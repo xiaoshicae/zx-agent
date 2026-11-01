@@ -386,7 +386,7 @@ async fn tty_compaction_rejects_overlaps_and_runs_one_queued_input_after_complet
         Reply::text("queued answer"),
     ])
     .await;
-    let (mut terminal, slave) = terminal_input();
+    let (mut terminal, slave) = common::pty();
     let mut child = chat(
         &server,
         dir.path(),
@@ -893,28 +893,6 @@ async fn ctrl_c_while_idle_keeps_chat_open() {
 }
 
 #[cfg(unix)]
-fn terminal_input() -> (tokio::fs::File, std::os::fd::OwnedFd) {
-    use std::os::fd::{FromRawFd, OwnedFd};
-    let mut master = -1;
-    let mut slave = -1;
-    // SAFETY: both output pointers refer to initialized local integers, and null optional
-    // name/termios/winsize pointers request the OS defaults. Success yields two fresh FDs.
-    let result = unsafe {
-        libc::openpty(
-            &mut master,
-            &mut slave,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    assert_eq!(result, 0, "{}", std::io::Error::last_os_error());
-    // SAFETY: openpty succeeded; each descriptor has exactly one owner from here on.
-    let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
-    (tokio::fs::File::from_std(std::fs::File::from(master)), slave)
-}
-
-#[cfg(unix)]
 #[tokio::test]
 async fn tty_input_steers_a_running_task_and_model_changes_wait_until_idle() {
     let dir = tempfile::tempdir().unwrap();
@@ -928,7 +906,7 @@ async fn tty_input_steers_a_running_task_and_model_changes_wait_until_idle() {
         Reply::text("steered"),
     ])
     .await;
-    let (mut terminal, slave) = terminal_input();
+    let (mut terminal, slave) = common::pty();
     let mut child = chat(&server, dir.path(), &["--tools", "", "--output", "jsonl", "--deltas"])
         .stdin(Stdio::from(slave))
         .spawn()
@@ -966,7 +944,7 @@ async fn new_while_a_tty_task_runs_cancels_it_and_starts_with_empty_history() {
     let dir = tempfile::tempdir().unwrap();
     let chunks = vec![json!({"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]})];
     let server = MockServer::start(vec![Reply::Stall(chunks), Reply::text("fresh")]).await;
-    let (mut terminal, slave) = terminal_input();
+    let (mut terminal, slave) = common::pty();
     let mut child = chat(&server, dir.path(), &["--tools", "", "--output", "jsonl", "--deltas"])
         .stdin(Stdio::from(slave))
         .spawn()
@@ -1037,7 +1015,7 @@ async fn an_approval_cancelled_by_the_run_timeout_does_not_authorize_a_later_cal
 async fn quit_during_a_tty_approval_cancels_the_task_and_exits() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::bash("c", "printf no > marker")]).await;
-    let (mut terminal, slave) = terminal_input();
+    let (mut terminal, slave) = common::pty();
     let mut child = chat(&server, dir.path(), &["--tools", "bash", "--output", "jsonl"])
         .stdin(Stdio::from(slave))
         .spawn()

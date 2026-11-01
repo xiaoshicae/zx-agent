@@ -1,14 +1,22 @@
 //! Commands and files inside one Docker container, isolated from this machine.
 //!
-//! The container has no network, a read-only root and workspace, a writable `/tmp`, no
-//! capabilities and a non-root user. Its PID 1 reads the stdin of the attached
-//! `docker run` client that the executor owns. Dropping the executor kills the client, and
-//! if the agent dies the pipe closes; either way the container is removed (`--rm`).
-//! Docker 29.9.2 behaved this way when tested on 2026-11-01; see docs/ROADMAP.md (P6).
+//! The container has no network, a read-only root and workspace, a writable `/tmp` and no
+//! capabilities. Its PID 1 reads the stdin of the attached `docker run` client that the
+//! executor owns. Dropping the executor kills the client, and if the agent dies the pipe
+//! closes; either way the container is removed (`--rm`). Docker 29.9.2 behaved this way when
+//! tested on 2026-11-01; see docs/ROADMAP.md (P6).
+//!
+//! Commands run as a non-root user, while PID 1 and its `cat` run as root without
+//! capabilities. Around every command, a sweep run as the command user kills every process
+//! that user owns (`kill -1`): children that left the process group with `setsid` are
+//! stopped too, nothing the command can write decides what is stopped, and the root processes
+//! that keep the container alive cannot be signalled. Because a sweep would also stop a
+//! concurrent call, the executor runs one command or file read at a time.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -18,7 +26,7 @@ use tokio::process::{Child, Command};
 use tokio_util::sync::CancellationToken;
 
 use super::capture::{finish_reader, spawn_reader, stop_child, take_capture};
-use super::{CommandEnd, CommandOutput, Executor, ShellCommand};
+use super::{Captured, CommandEnd, CommandOutput, Executor, ShellCommand};
 use crate::sync::AbortOnDrop;
 
 /// Longest wait for a new container to accept commands.
@@ -29,30 +37,31 @@ const START_POLL: Duration = Duration::from_millis(100);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Longest wait for one file read. A FIFO swapped in after the checks would otherwise block.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
-/// Longest wait for stopping a command's process group.
+/// Longest wait for one sweep of the command user's processes.
 const KILL_TIMEOUT: Duration = Duration::from_secs(10);
-/// Where the run wrapper records process group IDs: the container's writable tmpfs.
-const STATE_DIR: &str = "/tmp/.zx-agent";
+/// The user that PID 1 and its `cat` run as: root without capabilities, so that commands,
+/// which must not run as root, cannot signal the processes that keep the container alive.
+const KEEPER_USER: &str = "0:0";
 
 /// Exit codes of the start-up probe for an unusable container; other failures are retried.
-const PROBE_NO_GROUP: i32 = 90;
+const PROBE_ROOT: i32 = 90;
 const PROBE_MISSING: i32 = 91;
-const PROBE_NO_STATE: i32 = 92;
 const PROBE_NO_WORKSPACE: i32 = 93;
 
-/// Checks the process-group assumption, required programs and access to the workspace;
-/// prints the platform. Arguments: the shell commands run with, the state directory and
-/// the workspace.
-const PROBE: &str = r#"shell=$1 state=$2 workspace=$3
-stat=$(cat /proc/$$/stat) || { echo "cannot read /proc/$$/stat" >&2; exit 90; }
-set -- $stat
-[ "$1" = "$5" ] || { echo "docker exec does not start commands as process group leaders (pid $1, group $5)" >&2; exit 90; }
+/// Checks that commands run as a non-root user, that the image has the required programs
+/// and that the user can read the workspace; prints the platform. Arguments: the shell
+/// commands run with, and the workspace.
+const PROBE: &str = r#"shell=$1 workspace=$2
+uid=
+while read -r key value rest; do
+  [ "$key" = "Uid:" ] && uid=$value
+done < /proc/self/status
+[ -n "$uid" ] && [ "$uid" != 0 ] || { echo "commands must not run as root (uid ${uid:-unknown})" >&2; exit 90; }
 missing=
-for program in "$shell" cat head sleep mkdir rm uname; do
+for program in "$shell" cat head uname; do
   command -v "$program" >/dev/null 2>&1 || missing="$missing $program"
 done
 [ -z "$missing" ] || { echo "the image lacks:$missing" >&2; exit 91; }
-mkdir -p "$state" || exit 92
 { [ -r "$workspace" ] && [ -x "$workspace" ]; } || exit 93
 echo "arch=$(uname -m)"
 echo "kernel=$(uname -r)"
@@ -60,22 +69,13 @@ echo "--- os-release"
 cat /etc/os-release 2>/dev/null
 exit 0"#;
 
-/// Records the process group (this process leads it), then becomes the shell.
-/// Arguments: the PID file, the shell and the command.
-const RUN: &str = r#"{ echo $$ > "$1"; } 2>/dev/null || { echo "zx-agent: cannot record the command's process group" >&2; exit 125; }
-exec "$2" -c "$3""#;
+/// Becomes the shell. Arguments: the shell and the command.
+const RUN: &str = r#"exec "$1" -c "$2""#;
 
-/// Stops a command's process group: freeze first so dying pipeline members cannot wake the
-/// shell, then kill. Waits briefly for a PID file that a just-started command may still write.
-/// Argument: the PID file.
-const KILL: &str = r#"i=0
-while [ ! -s "$1" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
-if [ -s "$1" ]; then
-  group=$(cat "$1")
-  kill -STOP -"$group" 2>/dev/null
-  kill -KILL -"$group" 2>/dev/null
-fi
-rm -f "$1"
+/// Kills every process of the user it runs as, except itself (kill(2) with pid -1). Run as the
+/// command user, this stops a command's whole tree, including children in another session.
+/// `-s KILL -- -1` is the form Debian's dash accepts (tested 2026-11-01).
+const SWEEP: &str = r#"kill -s KILL -- -1 2>/dev/null
 exit 0"#;
 
 /// Exit codes of the read script for each refusal.
@@ -99,14 +99,14 @@ pub struct ContainerConfig {
     pub image: String,
     /// Docker client program; looked up on `PATH` unless it is a path.
     pub docker: PathBuf,
-    /// Mounted read-only at the same path; commands start here.
+    /// Mounted read-only at the same path; commands start here. Everything in it is readable
+    /// inside the container, so keep files the container must not read, such as the session
+    /// file, elsewhere.
     pub workspace: PathBuf,
-    /// Existing files inside the workspace that the container must not read, such as the
-    /// session file. Each one appears empty inside the container.
-    pub hidden_files: Vec<PathBuf>,
     /// Shell that commands run with; the image must provide it.
     pub shell: String,
-    /// `uid:gid` that commands run as.
+    /// `uid:gid` that commands run as. Must not be root: the keep-alive processes run as root,
+    /// and cleanup stops every process of this user.
     pub user: String,
     /// Memory limit in Docker's syntax, such as `1g`.
     pub memory: String,
@@ -124,7 +124,6 @@ impl ContainerConfig {
             image: image.into(),
             docker: PathBuf::from("docker"),
             workspace: workspace.into(),
-            hidden_files: Vec::new(),
             shell: "bash".into(),
             user: "65534:65534".into(),
             memory: "1g".into(),
@@ -137,17 +136,26 @@ impl ContainerConfig {
         ensure!(!self.image.trim().is_empty(), "container image is empty");
         ensure!(!self.shell.trim().is_empty(), "container shell is empty");
         ensure!(!self.user.trim().is_empty(), "container user is empty");
+        // The start-up probe also checks the effective UID, which catches names mapped to 0.
+        let uid = self.user.split(':').next().unwrap_or_default().trim();
+        ensure!(
+            uid != "root" && uid.parse::<u32>() != Ok(0),
+            "container user {:?} is root; commands must run as an unprivileged user",
+            self.user
+        );
         ensure!(!self.memory.trim().is_empty(), "container memory limit is empty");
         ensure!(self.pids_limit > 0, "container process limit must be greater than zero");
-        for path in std::iter::once(&self.workspace).chain(&self.hidden_files) {
-            ensure!(path.is_absolute(), "container mount {} is not absolute", path.display());
-            // --mount separates its fields with commas.
-            let text = path.to_str().context("container mount paths must be UTF-8")?;
-            ensure!(
-                !text.contains([',', '"', '\n']),
-                "container mount {text:?} contains a comma, quote or newline"
-            );
-        }
+        ensure!(
+            self.workspace.is_absolute(),
+            "container mount {} is not absolute",
+            self.workspace.display()
+        );
+        // --mount separates its fields with commas.
+        let text = self.workspace.to_str().context("container mount paths must be UTF-8")?;
+        ensure!(
+            !text.contains([',', '"', '\n']),
+            "container mount {text:?} contains a comma, quote or newline"
+        );
         Ok(())
     }
 }
@@ -163,12 +171,52 @@ pub struct Platform {
     pub arch: String,
 }
 
-/// Runs commands and reads files in one container that lives as long as this value.
-pub struct ContainerExecutor {
+/// Where `docker exec` runs calls: the client program, the container and the command user.
+#[derive(Clone)]
+struct Target {
     docker: PathBuf,
     name: String,
+    user: String,
+}
+
+impl Target {
+    /// `docker exec --user <user> [--workdir <dir>] <container> sh -c <script> <label> <arguments...>`.
+    fn exec<I, S>(&self, workdir: Option<&Path>, script: &str, label: &str, arguments: I) -> Command
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut command = docker(&self.docker);
+        command.args(["exec", "--user", &self.user]);
+        if let Some(workdir) = workdir {
+            command.arg("--workdir").arg(workdir);
+        }
+        command
+            .arg(&self.name)
+            .args(["sh", "-c", script, label])
+            .args(arguments);
+        command
+    }
+
+    /// Kill every process of the command user (see `SWEEP`). A failure leaves them running
+    /// until the container is removed with the agent.
+    async fn sweep(&self) {
+        let mut command = self.exec(None, SWEEP, "zx-agent-sweep", std::iter::empty::<&str>());
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+        // See above: there is nothing more to do when the sweep fails.
+        let _ = tokio::time::timeout(KILL_TIMEOUT, command.status()).await;
+    }
+}
+
+/// Runs commands and reads files in one container that lives as long as this value.
+pub struct ContainerExecutor {
+    target: Target,
     image: String,
     platform: Platform,
+    /// Taken by one command or file read at a time, because a sweep stops every process of
+    /// the command user. Shared (`Arc`) with the cleanup task of a dropped run, which outlives
+    /// the run and must wait for its turn like any other call.
+    turn: Arc<tokio::sync::Mutex<()>>,
     /// The attached `docker run` client: its open stdin keeps the container running, and
     /// killing it on drop removes the container.
     _client: Child,
@@ -178,12 +226,17 @@ pub struct ContainerExecutor {
 
 impl ContainerExecutor {
     /// Start the container and check that it can run commands. Fails, and removes the
-    /// container, when the settings are invalid, Docker cannot run, the image is not present
-    /// locally, the container does not accept commands within 60 seconds, or the image lacks
-    /// a required program.
+    /// container, when the settings are invalid (including a root user), Docker cannot run,
+    /// the image is not present locally, the container does not accept commands within 60
+    /// seconds, the image lacks a required program, or commands would run as root.
     pub async fn start(config: ContainerConfig) -> Result<Self> {
         config.validate()?;
         let name = format!("zx-agent-{}", uuid::Uuid::new_v4().simple());
+        let target = Target {
+            docker: config.docker.clone(),
+            name: name.clone(),
+            user: config.user.clone(),
+        };
         let mut command = docker(&config.docker);
         command
             .args(run_args(&config, &name))
@@ -205,7 +258,7 @@ impl ContainerExecutor {
                     text(&take_capture(&stderr).bytes)
                 );
             }
-            let reason = match probe(&config, &name).await {
+            let reason = match probe(&target, &config).await {
                 Probe::Ready(platform) => break platform,
                 Probe::Unusable(reason) => bail!("container image {} cannot be used: {reason}", config.image),
                 Probe::NotReady(reason) => reason,
@@ -218,10 +271,10 @@ impl ContainerExecutor {
             tokio::time::sleep(START_POLL).await;
         };
         Ok(Self {
-            docker: config.docker,
-            name,
+            target,
             image: config.image,
             platform,
+            turn: Arc::new(tokio::sync::Mutex::new(())),
             _client: client,
             _client_stderr: stderr_reader,
         })
@@ -239,46 +292,41 @@ impl ContainerExecutor {
 
     /// The container's name, for example to find it with `docker ps`.
     pub fn name(&self) -> &str {
-        &self.name
+        &self.target.name
     }
+}
 
-    /// `docker exec <container> sh -c <script> <label> <arguments...>`.
-    fn exec<I, S>(&self, workdir: Option<&Path>, script: &str, label: &str, arguments: I) -> Command
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>,
-    {
-        let mut command = docker(&self.docker);
-        command.arg("exec");
-        if let Some(workdir) = workdir {
-            command.arg("--workdir").arg(workdir);
-        }
-        command
-            .arg(&self.name)
-            .args(["sh", "-c", script, label])
-            .args(arguments);
-        command
+/// The result of a command that never started because its run was cancelled first.
+fn not_started() -> CommandOutput {
+    CommandOutput {
+        stdout: Captured::default(),
+        stderr: Captured::default(),
+        end: CommandEnd::Cancelled,
     }
 }
 
 #[async_trait]
 impl Executor for ContainerExecutor {
     async fn run(&self, request: &ShellCommand<'_>, cancel: &CancellationToken) -> Result<CommandOutput, String> {
+        // Declared before `cleanup`, so that a dropped run releases its turn only after the
+        // cleanup task has been queued for the next one.
+        let _turn = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(not_started()),
+            turn = self.turn.lock() => turn,
+        };
+        // An earlier run that was dropped may have left processes whose sweep is still queued.
+        self.target.sweep().await;
         // Commands never inherit the agent's environment, so `hidden_env` has nothing to remove.
-        let pid_file = format!("{STATE_DIR}/{}", uuid::Uuid::new_v4().simple());
-        let mut command = self.exec(
-            Some(request.cwd),
-            RUN,
-            "zx-agent-run",
-            [pid_file.as_str(), request.shell, request.command],
-        );
+        let mut command = self
+            .target
+            .exec(Some(request.cwd), RUN, "zx-agent-run", [request.shell, request.command]);
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = command
             .spawn()
             .map_err(|e| format!("failed to start docker exec: {e}"))?;
-        let group = GroupGuard {
+        let cleanup = Cleanup {
             executor: self,
-            pid_file,
             armed: true,
         };
         let (stdout, stdout_reader) = spawn_reader(child.stdout.take());
@@ -296,8 +344,9 @@ impl Executor for ContainerExecutor {
             _ = tokio::time::sleep(request.timeout) => CommandEnd::TimedOut,
             _ = cancel.cancelled() => CommandEnd::Cancelled,
         };
-        // Stop the group after a normal exit too, ending background children.
-        group.stop().await;
+        // After a normal exit too: background children end with their command, including
+        // ones that started their own session.
+        cleanup.finish().await;
         stop_child(&mut child).await;
         for reader in [stdout_reader, stderr_reader].into_iter().flatten() {
             finish_reader(reader).await;
@@ -310,9 +359,13 @@ impl Executor for ContainerExecutor {
     }
 
     async fn read_file(&self, path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {
+        // A sweep for a command would also stop this read, so wait for any command to finish.
+        let _turn = self.turn.lock().await;
         let limit = max_bytes.saturating_add(1);
         let limit_text = limit.to_string();
-        let mut command = self.exec(None, READ, "zx-agent-read", [path.as_os_str(), OsStr::new(&limit_text)]);
+        let mut command = self
+            .target
+            .exec(None, READ, "zx-agent-read", [path.as_os_str(), OsStr::new(&limit_text)]);
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         let read = async {
             let mut child = command.spawn().map_err(|e| format!("cannot run docker exec: {e}"))?;
@@ -371,44 +424,36 @@ impl Executor for ContainerExecutor {
     }
 }
 
-/// Stops a command's process group in the container, including when the run future is
-/// dropped before the command ends.
-struct GroupGuard<'a> {
+/// Sweeps the command user's processes when a command ends, including when the run future
+/// is dropped before it does.
+struct Cleanup<'a> {
     executor: &'a ContainerExecutor,
-    pid_file: String,
     armed: bool,
 }
 
-impl GroupGuard<'_> {
-    fn command(&self) -> Command {
-        let mut command = self
-            .executor
-            .exec(None, KILL, "zx-agent-kill", [self.pid_file.as_str()]);
-        command.stdout(Stdio::null()).stderr(Stdio::null());
-        command
-    }
-
-    async fn stop(mut self) {
+impl Cleanup<'_> {
+    async fn finish(mut self) {
         self.armed = false;
-        let mut command = self.command();
-        // Failure leaves the command running until the container is removed with the agent.
-        let _ = tokio::time::timeout(KILL_TIMEOUT, command.status()).await;
+        self.executor.target.sweep().await;
     }
 }
 
-impl Drop for GroupGuard<'_> {
+impl Drop for Cleanup<'_> {
     fn drop(&mut self) {
-        // Spawning a Tokio process needs a runtime; without one the container's removal
-        // with the agent is the only cleanup.
+        // Spawning a Tokio task needs a runtime; without one the container's removal with
+        // the agent is the only cleanup, and the next command's own sweep comes first anyway.
         if !self.armed || tokio::runtime::Handle::try_current().is_err() {
             return;
         }
-        let mut command = self.command();
-        // The cleanup must outlive the dropped run; Tokio reaps the client in the background
-        // (tokio 1.54 src/process/mod.rs:218). Like a failed stop, a failed spawn leaves the
-        // command running until the container is removed.
-        command.kill_on_drop(false);
-        let _ = command.spawn();
+        let target = self.executor.target.clone();
+        let turn = Arc::clone(&self.executor.turn);
+        // The sweep must outlive the dropped run, so it is not awaited. It takes its turn like
+        // a call: the dropped run releases the lock right after this guard, and the sweep can
+        // then never stop a command that started later.
+        tokio::spawn(async move {
+            let _turn = turn.lock_owned().await;
+            target.sweep().await;
+        });
     }
 }
 
@@ -420,13 +465,13 @@ enum Probe {
     NotReady(String),
 }
 
-async fn probe(config: &ContainerConfig, name: &str) -> Probe {
-    let mut command = docker(&config.docker);
-    command
-        .args(["exec", name, "sh", "-c", PROBE, "zx-agent-probe"])
-        .arg(&config.shell)
-        .arg(STATE_DIR)
-        .arg(&config.workspace);
+async fn probe(target: &Target, config: &ContainerConfig) -> Probe {
+    let mut command = target.exec(
+        None,
+        PROBE,
+        "zx-agent-probe",
+        [OsStr::new(&config.shell), config.workspace.as_os_str()],
+    );
     let output = match tokio::time::timeout(PROBE_TIMEOUT, command.output()).await {
         Ok(Ok(output)) => output,
         Ok(Err(e)) => return Probe::NotReady(format!("cannot run docker exec: {e}")),
@@ -439,7 +484,7 @@ async fn probe(config: &ContainerConfig, name: &str) -> Probe {
     };
     match output.status.code() {
         Some(0) => Probe::Ready(parse_platform(&String::from_utf8_lossy(&output.stdout))),
-        Some(PROBE_NO_GROUP | PROBE_MISSING | PROBE_NO_STATE) => Probe::Unusable(text(&output.stderr)),
+        Some(PROBE_ROOT | PROBE_MISSING) => Probe::Unusable(text(&output.stderr)),
         Some(PROBE_NO_WORKSPACE) => Probe::Unusable(format!(
             "user {} cannot read the workspace {}; make it readable by others, or set container.user",
             config.user,
@@ -493,18 +538,12 @@ fn run_args(config: &ContainerConfig, name: &str) -> Vec<String> {
         config.pids_limit.to_string(),
         "--memory".into(),
         config.memory.clone(),
+        // Only PID 1 and its `cat`; every `docker exec` names the command user.
         "--user".into(),
-        config.user.clone(),
+        KEEPER_USER.into(),
         "--mount".into(),
         format!("type=bind,source={workspace},target={workspace},readonly"),
     ]);
-    for hidden in &config.hidden_files {
-        args.push("--mount".into());
-        args.push(format!(
-            "type=bind,source=/dev/null,target={},readonly",
-            hidden.display()
-        ));
-    }
     // No --workdir: PID 1 needs none, and an unreadable workspace would stop the container
     // from starting with Docker's own error instead of the probe's explanation.
     args.extend(["--entrypoint".into(), "cat".into(), config.image.clone()]);
@@ -539,7 +578,6 @@ mod tests {
 
     fn config() -> ContainerConfig {
         ContainerConfig {
-            hidden_files: vec![PathBuf::from("/work/session.jsonl")],
             label: "s1".into(),
             ..ContainerConfig::new("debian:bookworm-slim", "/work")
         }
@@ -553,13 +591,14 @@ mod tests {
             "run --interactive --rm --init --sig-proxy=false --pull never",
             "--network none --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges",
             "--name zx-agent-x --label zx-agent.session=s1",
-            "--pids-limit 256 --memory 1g --user 65534:65534",
+            // The keep-alive processes run as root; commands get their user on docker exec.
+            "--pids-limit 256 --memory 1g --user 0:0",
             "--mount type=bind,source=/work,target=/work,readonly",
-            "--mount type=bind,source=/dev/null,target=/work/session.jsonl,readonly",
             "--entrypoint cat debian:bookworm-slim",
         ] {
             assert!(joined.contains(flag), "{flag:?} missing from {joined}");
         }
+        assert_eq!(args.iter().filter(|arg| *arg == "--mount").count(), 1, "{joined}");
         assert_eq!(args.last().map(String::as_str), Some("debian:bookworm-slim"));
         // No environment from the agent, and no working directory that could fail the start.
         assert!(
@@ -580,15 +619,30 @@ mod tests {
                 pids_limit: 0,
                 ..ContainerConfig::new("image", "/work")
             },
-            ContainerConfig {
-                hidden_files: vec![PathBuf::from("relative.jsonl")],
-                ..ContainerConfig::new("image", "/work")
-            },
         ];
         for config in cases {
             assert!(config.validate().is_err(), "{config:?}");
         }
         assert!(config().validate().is_ok());
+    }
+
+    #[test]
+    fn commands_must_not_run_as_root() {
+        for user in ["0", "0:0", "00:1000", "root", "root:root", " 0 :0"] {
+            let config = ContainerConfig {
+                user: user.into(),
+                ..config()
+            };
+            let error = config.validate().unwrap_err().to_string();
+            assert!(error.contains("is root"), "{user:?}: {error}");
+        }
+        for user in ["65534:65534", "1000", "nobody"] {
+            let config = ContainerConfig {
+                user: user.into(),
+                ..config()
+            };
+            assert!(config.validate().is_ok(), "{user:?}");
+        }
     }
 
     #[test]

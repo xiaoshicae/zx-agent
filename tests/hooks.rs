@@ -391,6 +391,35 @@ async fn rejected_input_is_logged_and_omitted_without_retrying_the_model() {
     assert!(runner.session().messages().is_empty());
 }
 
+#[tokio::test]
+async fn steering_queued_after_a_rejected_message_stays_queued_for_the_next_run() {
+    struct RejectMarked;
+    #[async_trait]
+    impl Hooks for RejectMarked {
+        async fn on_input(&self, text: String) -> HookResult<String> {
+            if text == "reject-me" {
+                Err("rejected".into())
+            } else {
+                Ok(text)
+            }
+        }
+    }
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("answer")]));
+    let mut config = config(provider.clone(), vec![]);
+    config.hooks.push(RejectMarked);
+    let (mut runner, _) = RunnerSetup::new(config).build();
+    runner.config().queues.steer("reject-me");
+    runner.config().queues.steer("keep-me");
+    let first = runner.run("hello", &CancellationToken::new()).await;
+    assert_eq!(first.outcome, RunOutcome::Error, "{first:?}");
+    let second = runner.run("again", &CancellationToken::new()).await;
+    assert_eq!(second.outcome, RunOutcome::Completed, "{second:?}");
+    assert_eq!(
+        summarize(&provider.requests()[0].messages),
+        ["user:hello", "user:again", "user:keep-me"]
+    );
+}
+
 struct OmitEarlier;
 #[async_trait]
 impl Hooks for OmitEarlier {

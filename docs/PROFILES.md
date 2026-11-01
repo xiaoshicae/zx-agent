@@ -49,7 +49,7 @@ path = "skills/rust-review/SKILL.md"
 | `tools` | 替换启用列表，支持 `bash`、`read_file`、`read_skill`、`read_output`；`[]` 禁用全部工具 |
 | `execution` | `local`（默认）或 `container`；其他值报错。`container` 时 bash 与 read_file 在 Docker 容器中执行，见 README 的“容器执行”。CLI `--execution` 优先 |
 | `container.image` | 容器镜像，`execution = "container"` 时必填，须已在本地；CLI `--container-image` 优先 |
-| `container.user` | 容器内运行命令的 `uid:gid`，默认 `65534:65534` |
+| `container.user` | 容器内运行命令的 `uid:gid`，默认 `65534:65534`；不能是 root（UID 0 或 `root`），启动时也会检查命令的实际 UID |
 | `container.memory` | Docker 写法的内存上限，默认 `1g` |
 | `container.pidsLimit` | 容器内进程数上限，大于零，默认 256 |
 | `rules.allow` | bash 命令前缀白名单，沿用原管道检查；空列表表示只检查 deny |

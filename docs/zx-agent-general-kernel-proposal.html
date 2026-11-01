@@ -60,11 +60,11 @@
 <main>
 
 <h1>zx-agent 通用内核技术方案</h1>
-<p class="meta">评审稿 v0.10 · 2026年11月 · 状态：已评审，D5 待定 · 代码核对基线：commit <code>7fb3124</code>（2026-11-01）</p>
+<p class="meta">评审稿 v0.11 · 2026年11月 · 状态：已评审，D5 已于 2026-11-01 确认（见路线图） · 代码核对基线：commit <code>7fb3124</code>（2026-11-01）；v0.11 只更新了 D5 与 execution 的现状说明</p>
 <p class="meta">本方案由 AI 辅助起草。调研来源见第 11 节；产品行为以所列版本和资料日期为准，论文结果不代表本项目实测，未核实项明确标注。</p>
 
 <div class="box key">
-  <strong>评审结论（2026-10-31）：</strong>D1 升级到 MSRV 1.88（已完成）；D2 所列依赖已授权，按阶段引入；D3 profile 用 TOML；D4 会话 API 用进程内方法调用；D6 项目定位已更新；D5 待定。阶段计划与进度在 <a href="ROADMAP.md">路线图</a>中跟踪。
+  <strong>评审结论（2026-10-31）：</strong>D1 升级到 MSRV 1.88（已完成）；D2 所列依赖已授权，按阶段引入；D3 profile 用 TOML；D4 会话 API 用进程内方法调用；D6 项目定位已更新；D5 于 2026-11-01 确认：默认仍在本机执行，容器须在 profile 或 CLI 中显式开启。阶段计划与进度在 <a href="ROADMAP.md">路线图</a>中跟踪。
 </div>
 
 <nav class="toc">
@@ -321,7 +321,7 @@ continueOnLength = 1
 [context]
 discover = true</code></pre>
 <p><strong>叠加顺序</strong>：内置默认 &lt; profile 文件 &lt; 命令行参数；deny 规则只增不减。内置两个 profile：<code>troubleshoot</code>（当前行为）与 <code>assistant</code>（通用对话）。</p>
-<p>P4 已将两个 profile 与说明嵌入二进制，保留原 SDK 预设接口。<code>--profile</code> 接受内置名称或 TOML 路径，文件可 extends 一个内置基线；仅显式 CLI 参数覆盖文件，deny 命令与工具规则累加。run 始终 NoHuman，chat 保留终端审批，不由 profile 改换前端。当前 execution 仅支持 local，未知字段、容器或任意扩展配置明确报错，脱敏不可关闭。</p>
+<p>P4 已将两个 profile 与说明嵌入二进制，保留原 SDK 预设接口。<code>--profile</code> 接受内置名称或 TOML 路径，文件可 extends 一个内置基线；仅显式 CLI 参数覆盖文件，deny 命令与工具规则累加。run 始终 NoHuman，chat 保留终端审批，不由 profile 改换前端。execution 支持 local（默认）与 container（P6，须显式开启，见 README“容器执行”）；未知字段或任意扩展配置明确报错，脱敏不可关闭。</p>
 <p>P5 增加 <code>[compaction]</code> 和 <code>[toolOutput]</code>，上例省略其默认预算。自动触发阈值可由 CLI 覆盖或关闭；仅启用 read_output 时安装长结果落盘钩子。完整配置、路径与读取边界见 <a href="PROFILES.md">场景配置说明</a>。</p>
 <p>上下文按最近 Git 根目录到 cwd 加载 AGENTS.md，无 Git 根时只检查 cwd；显式路径和禁用选项见 <a href="PROFILES.md">场景配置说明</a>。每文件 64 KiB、上下文合计 256 KiB。skills 在 TOML 中显式登记 name、description、path；启动仅加入目录，模型调用 read_skill 后才读取正文，经策略、审批、取消、脱敏和审计后回传。P4 不解析 YAML frontmatter、不扫描全局 skills、不自动执行 skill 脚本。</p>
 <div class="box decide"><strong class="label">取舍</strong>TOML 便于手写，Codex 也用 TOML 做配置 [R8]；P4 已引入 <code>toml 1.1.8</code>（仅 parse、serde、std feature），上游 <a href="https://github.com/toml-rs/toml/blob/main/Cargo.toml">Cargo.toml</a> 在 2026-10-31 核对的 MSRV 为 1.85，与项目兼容，锁定 crate 声明 MSRV 1.85，已用 Rust 1.88 复核。JSON 无需新依赖但不便手写注释。YAML 不选：常用的 <a href="https://github.com/dtolnay/serde-yaml"><code>serde_yaml</code></a> 已于 2024 年归档。<strong>评审结论：TOML。</strong></div>
@@ -448,7 +448,7 @@ discover = true</code></pre>
   <tr><td>D2</td><td>新依赖清单</td><td>tokio <code>io-std</code>（P3 无需启用）、<code>toml</code>（P4）、<code>rmcp</code>（P7）、ACP SDK（P8），可选 <code>rustyline</code></td><td>逐阶段授权</td><td>已授权，按阶段引入</td></tr>
   <tr><td>D3</td><td>profile 格式</td><td>TOML（需依赖）或 JSON（无依赖）</td><td>TOML</td><td>TOML</td></tr>
   <tr><td>D4</td><td>会话 API 形态</td><td>进程内方法，或一开始就做 SQ/EQ</td><td>进程内方法</td><td>进程内方法调用</td></tr>
-  <tr><td>D5</td><td>无人值守是否强制容器执行</td><td>强制更安全，但要求运行环境有 docker</td><td>默认容器，可显式改为本机</td><td>待定</td></tr>
+  <tr><td>D5</td><td>无人值守是否强制容器执行</td><td>强制更安全，但要求运行环境有 docker</td><td>默认容器，可显式改为本机</td><td>未采用该建议：2026-11-01 确认默认本机执行，容器显式开启（路线图 D5）</td></tr>
   <tr><td>D6</td><td>项目定位的更新时间点</td><td>README、CLAUDE.md 的“面向无人值守”改为“通用内核 + 场景 profile”</td><td>随 P0 一起</td><td>已更新 README 与 CLAUDE.md</td></tr>
 </table>
 <h3>10.2 风险</h3>
@@ -519,7 +519,7 @@ discover = true</code></pre>
   <li>[P20] Packer et al., MemGPT: Towards LLMs as Operating Systems, 2023. <a href="https://arxiv.org/abs/2310.08560">arXiv:2310.08560</a></li>
 </ol>
 
-<footer>文件：zx-agent-general-kernel-proposal.html · 版本 v0.10 · 2026年11月</footer>
+<footer>文件：zx-agent-general-kernel-proposal.html · 版本 v0.11 · 2026年11月</footer>
 </main>
 </body>
 </html>

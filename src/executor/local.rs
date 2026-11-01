@@ -12,6 +12,11 @@ use super::capture::{finish_reader, spawn_reader, stop_child, take_capture};
 use super::{CommandEnd, CommandOutput, Executor, ShellCommand};
 
 /// Runs commands as child processes of the agent and reads files directly.
+///
+/// Each command leads its own process group, which is killed when the command ends, times out
+/// or is cancelled. A process that leaves the group, for example with `setsid` or by
+/// daemonizing, is not tracked and can outlive the command: this machine offers no portable
+/// way to find it. Use [`super::ContainerExecutor`] when that must not happen.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LocalExecutor;
 
@@ -81,9 +86,9 @@ impl Executor for LocalExecutor {
             _ = tokio::time::sleep(request.timeout) => CommandEnd::TimedOut,
             _ = cancel.cancelled() => CommandEnd::Cancelled,
         };
-        // Kill the group after a normal exit too: background children (`cmd &`, daemons) would
-        // otherwise outlive the call and the agent. It also closes the output pipes they hold,
-        // so reading does not wait for PIPE_DRAIN_TIMEOUT.
+        // Kill the group after a normal exit too: background children (`cmd &`) would otherwise
+        // outlive the call and the agent. It also closes the output pipes they hold, so reading
+        // does not wait for PIPE_DRAIN_TIMEOUT. Children that left the group are out of reach.
         group.kill();
         stop_child(&mut child).await;
         for reader in [stdout_reader, stderr_reader].into_iter().flatten() {

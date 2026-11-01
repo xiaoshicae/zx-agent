@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -112,7 +112,12 @@ fn print_report(report: &RunReport, output: OutputMode) {
     match output {
         OutputMode::Text => {
             if !report.final_text.is_empty() {
-                println!("{}", report.final_text);
+                // A terminal would run control sequences in the answer; a pipe gets the exact text.
+                if std::io::stdout().is_terminal() {
+                    println!("{}", visible(&report.final_text));
+                } else {
+                    println!("{}", report.final_text);
+                }
             }
             let usage = &report.usage;
             let error = report
