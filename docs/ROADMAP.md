@@ -114,7 +114,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P3 | 终端对话 `chat` | 已完成（PR #5） |
 | P4 | profile 文件、上下文文件与 skills | 已完成（PR #6） |
 | P5 | 上下文管理 | 已完成（PR #9） |
-| P6 | 执行环境与崩溃恢复 | 进行中：崩溃恢复已完成（PR #12），执行环境接缝已完成（PR #13），容器执行器未开始 |
+| P6 | 执行环境与崩溃恢复 | 进行中：崩溃恢复（PR #12）、执行环境接缝（PR #13）、离线容器执行（PR #14）已完成；在线访问的网络与凭据范围待评审 |
 | P7 | 插件与 MCP | 未开始 |
 | P8 | 嵌入协议 `acp` | 未开始 |
 | P9 | 可选增强 | 未开始 |
@@ -289,22 +289,43 @@ P5 实施约定（2026-11-01）：
 
 - 分两个 PR：先加 `Executor` 接缝与 `LocalExecutor`，行为不变；再加离线 `ContainerExecutor` 与配置。
 - `Executor` 接缝（`src/executor/`）提供两个操作：`run` 在给定目录执行一条 shell 命令，响应超时与取消，返回有上限的 stdout / stderr 与结束方式；`read_file` 只读取不超过上限的普通文件。bash 负责参数、结果格式与截断，read_file 负责分页；两者各持有一个执行器，默认 `LocalExecutor`。`LocalExecutor` 是原有实现搬迁而来：进程组、超时与取消后终止、输出捕获上限、只读普通文件与实际读取量上限。read_skill 读取宿主机上的 skill 文件，固定使用 `LocalExecutor`。
-- 容器生命周期：每个进程一个容器（`run` 对应一次任务，`chat` 对应整个会话），首次使用时创建，进程退出时删除；容器带会话 ID 标签，崩溃遗留的容器可按标签识别和清理。
-- 工作目录只读挂载进容器；命令只能写容器内的 tmpfs `/tmp`。网络这一轮只接受 `none`，在线访问方案评审后再加。
-- 超时与取消：2026-11-01 在本机 Docker 29.9.2 上实测，SIGKILL 或 SIGTERM 结束本机的 `docker exec` 客户端（不带 `-t`）后，容器内的命令仍在运行（单次观测，机制未从源码确认）。因此容器执行器在容器内按进程组终止命令，不依赖结束客户端；所需的 `sh`、`setsid`、`kill` 在容器启动时检查，缺少时报配置错误。
+- 容器生命周期：每个进程一个容器（`run` 对应一次任务，`chat` 对应整个会话），在启动时创建（要先读取容器的系统信息写进提示词，配置错误也在启动时暴露），进程退出时删除；容器带 `zx-agent.session` 标签，便于识别。
+- 工作目录只读挂载进容器；命令只能写容器内的 tmpfs `/tmp`。网络这一轮固定为 `none`，不提供配置项，在线访问方案评审后再加。
+- 超时与取消：2026-11-01 在本机 Docker 29.9.2 上实测，SIGKILL 或 SIGTERM 结束本机的 `docker exec` 客户端（不带 `-t`）后，容器内的命令仍在运行（单次观测，机制未从源码确认）。因此容器执行器在容器内按进程组终止命令，不依赖结束客户端。
 - 容器模式下，系统提示词的 `<environment>` 描述容器而不是宿主机。
 - 测试：默认 `cargo test` 用记录参数的假 docker 程序，不访问网络；真实 Docker 测试仅在设置 `ZX_DOCKER_TEST_IMAGE` 时运行，并在 CI 的 Linux 任务中拉取镜像后开启。
 
-- [ ] `Executor` 接缝：`LocalExecutor`（现有行为）与 `ContainerExecutor`（接缝与 `LocalExecutor` 已完成，PR #13；`ContainerExecutor` 待做）
-- [ ] profile 的 `execution` 增加容器选项（D5：显式开启，默认仍为本机；P4 只接受 `local`）
-- [ ] `ContainerExecutor`：每个进程创建一个沙箱容器（2026-11-01 由“每次运行”调整，见上方约定；网络默认拒绝，在线任务按评审方案限制访问范围；只读根文件系统、非 root、去掉全部 capability、进程数与内存上限）；每条命令通过 `docker exec` 执行；`read_file` 也在容器内读取；运行结束删除容器
-- [ ] API key 和会话文件只留在 Agent 进程，不进入容器；工具需要的凭据以只读方式挂载
+容器执行器实现细节（2026-11-01，依据同日在本机 Docker 29.9.2、Ubuntu 系镜像上的实测，均为单次观测）：
+
+- 容器以 `docker run -i --rm --init --sig-proxy=false` 启动，PID 1 读取 agent 持有的 stdin。实测关闭 stdin、或用 SIGKILL 结束 `docker run` 客户端后，容器在 5 秒内被删除；因此正常退出（结束客户端）和 agent 崩溃（stdin 随之关闭）都会删除容器，不需要在析构时同步调用 `docker rm`。docker 客户端放在独立进程组，终端发给前台进程组的信号只送达 agent，由它决定停止什么；另外实测即使不放进独立进程组，`docker run --sig-proxy=false` 客户端收到 SIGINT（默认处置）后仍在运行、容器保留，所以 chat 中按 Ctrl-C 不会删除容器（机制未从 Docker 源码确认）。
+- 加固参数：`--network none --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges --pids-limit --memory --user`，实测均被接受；默认用户 `65534:65534`、内存 1g、进程数 256，profile 可调。镜像不自动拉取（`--pull never`），缺少时提示先 `docker pull`。
+- 启动检查：实测 `docker exec` 启动的进程既是进程组组长也是会话首进程，但这只是对一个运行时的观测，所以启动时在容器内核对；不成立、缺少配置的 shell 与 `cat`、`head`、`sleep`、`mkdir`、`rm`、`uname`、或容器用户不能读取工作目录时，报配置错误。`docker run` 不设工作目录（PID 1 不需要），否则不可读的工作目录会让容器直接启动失败，只留下 Docker 自己的报错。
+- 命令：包装脚本先把自身 PID（即进程组号）写到 tmpfs，再 `exec` 配置的 shell。超时或取消时另起一次 `docker exec`，先 SIGSTOP 再 SIGKILL 整个进程组（实测以非 root 用户可行）；命令正常结束后也清理一次进程组，结束后台子进程。实测主进程退出但后台子进程仍占用输出时，`docker exec` 约 2 秒后返回。命令被信号终止时，退出码沿用 `docker exec` 的 128+信号编号（实测 SIGKILL 为 137），与本机执行的“terminated by a signal”不同。运行中的 future 被丢弃时，尽力在后台发起同样的清理。
+- 会话文件：实测在 Docker Desktop 上，只读挂载的文件对容器用户显示为其所有，权限为 0600 的文件也能读到。因此会话文件位于工作目录内时，用 `/dev/null` 覆盖挂载到同一路径（实测容器内读到空文件，宿主机文件不变）。工作目录中的其他文件（含 `.zx-agent/outputs` 中已脱敏的工具结果）对容器只读可见。原生 Linux 的 Docker 保留宿主机权限，默认用户 65534 只能读取对其他用户可读的文件，工作目录本身也须可读（`tempfile` 创建的 0700 目录不行，测试因此使用 0755 的工作目录），可用 `container.user` 改用其他用户。
+- read_file 在容器内读取，目录、不存在、特殊文件、无读权限分别报错，读取量上限同本机；单次读取 30 秒超时。
+- 配置：profile 的 `execution` 取 `local`（默认）或 `container`；`[container]` 表含 `image`（容器模式必填）、`user`、`memory`、`pidsLimit`。CLI 的 `--execution`、`--container-image` 覆盖 profile；在本机模式下给出 `--container-image` 视为配置错误。
+
+- [x] `Executor` 接缝：`LocalExecutor`（现有行为）与 `ContainerExecutor`（接缝与 `LocalExecutor`：PR #13；`ContainerExecutor`：PR #14）
+- [x] profile 的 `execution` 增加容器选项（D5：显式开启，默认仍为本机；PR #14）
+- [x] `ContainerExecutor`：每个进程创建一个沙箱容器（2026-11-01 由“每次运行”调整，见上方约定；网络默认拒绝，在线任务按评审方案限制访问范围；只读根文件系统、非 root、去掉全部 capability、进程数与内存上限）；每条命令通过 `docker exec` 执行；`read_file` 也在容器内读取；运行结束删除容器（离线部分已完成，PR #14；在线访问随下一项评审）
+- [ ] API key 和会话文件只留在 Agent 进程，不进入容器；工具需要的凭据以只读方式挂载（API key 与会话文件已完成，PR #14；凭据只读挂载随在线方案评审）
 - [ ] 列出在线排障所需的 API 地址、网络与凭据范围；无网络的容器只用于离线排障，在线场景的受限访问方案在实施前评审
 - [x] `Tool` trait 增加 `effects()`：只读或有副作用
 - [x] 有副作用的工具执行前追加 `tool_call_started` 条目；恢复时把“已开始、无结果”的调用标记为结果未知，不自动重放
 - [x] 首次写入 `tool_call_started` 前再次升级会话格式，兼容读取 P5 及更早版本
 
 执行环境接缝验收（2026-11-01，已完成，PR #13）：`src/executor/` 提供 `Executor`、`ShellCommand`、`CommandOutput`、`CommandEnd` 与 `LocalExecutor`；bash 与 read_file 新增 `executor` 字段，默认 `LocalExecutor`，`..Default::default()` 的构造方式不受影响，按字段完整列出的字面量需补上新字段。本机执行代码从 bash 与 read_file 原样搬迁，bash 与 read_file 原有测试不改断言即通过（仅 read_file 测试中两处字面量补 `..ReadFileTool::default()`，bash 测试模块补一行 `use tokio::process::Command;`）。新增 `tests/executor.rs` 3 项，用记录请求的替身执行器验证：bash 把命令、目录、超时与隐藏变量交给执行器，并正确报告 6 种结束方式；read_file 经执行器读取解析后的路径与上限。反向验证：让工具绕过自身执行器时，3 项全部失败，修改已还原。本地 macOS 基于 `bb91974`，stable 与 Rust 1.88.0 各 416 项通过、6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过。`tests/cli.rs`、`Cargo.toml`、`Cargo.lock` 未改动。
+
+离线容器执行验收（2026-11-01，已完成，PR #14；在线访问未开始）：
+
+- 新增测试：模块内 6 项（`docker run` 参数与校验、启动探测输出的解析、容器的 `<environment>`、profile 的容器设置）；`tests/container.rs` 在 macOS 上 24 项、在 Linux 上 25 项。其中 14 项用假 docker 程序，始终运行：启动参数与失败报告、命令与读文件的转发、超时 / 取消 / 丢弃后的清理、CLI 接线与配置错误。其余以 `real_` 开头的测试只在设置 `ZX_DOCKER_TEST_IMAGE` 时运行：用户与只读工作目录、无网络、整个进程组的终止、后台进程清理、隐藏会话文件、容器内读文件、chat 中 Ctrl-C 后容器仍在、zx-agent 正常结束或被 SIGKILL 后容器删除、不可读工作目录在启动时报错（后者只在 Linux 上编译）。
+- 本地真实 Docker：macOS Docker Desktop（Docker 29.9.2）上分别用 `debian:bookworm-slim` 与一个 Ubuntu 系镜像运行，全部通过，未跳过；测试后没有遗留容器或 docker 客户端进程。CI 在 Linux 任务中拉取 `debian:bookworm-slim` 后运行同一文件，以 CI 结果为准；workflow 的改动未在本地用 actionlint 检查，由 CI 的检查步骤校验。
+- 反向验证：容器内只终止进程组组长、不终止整个组时，整棵命令树与后台进程两项真实测试失败；去掉 docker 客户端的独立进程组时，Ctrl-C 测试仍通过，说明它验证的是“Ctrl-C 不删除容器”这一行为，不能证明独立进程组的必要性（见上方实现细节）。修改均已还原。
+- 修正一项测试自身的问题：读文件测试曾按 `read_dir` 的顺序取第一次调用，而该顺序未定义，约半数运行失败；改为与顺序无关的断言后连续 10 次通过。
+- 原有测试的调整：profile 测试中表示“不支持的后端”的取值由 `container`（现已支持）改为 `kubernetes`，仍验证未知后端报错。
+- 本地 macOS 基于 `f45fd98`：stable 与 Rust 1.88.0 各 446 项通过、6 项付费测试跳过（未设置 `ZX_DOCKER_TEST_IMAGE`，真实 Docker 测试只打印提示）；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过。`tests/cli.rs`、`Cargo.toml`、`Cargo.lock` 未改动，未新增依赖。
+
+未验证：原生 Linux 的 Docker 只由 CI 覆盖，本地没有运行；rootless Docker 与 Podman；Windows；`docker exec` 在后台进程占用输出时约 2 秒返回，以及 `docker run` 客户端在 SIGINT 后继续运行，都只是单次观测。
 
 崩溃恢复验收（2026-11-01，已完成，PR #12；执行环境部分未开始）：
 

@@ -47,7 +47,11 @@ path = "skills/rust-review/SKILL.md"
 | `extends` | 可选的 `troubleshoot` 或 `assistant`；省略时使用当前前端的默认 profile；不支持文件链式继承 |
 | `instructions` | 替换场景说明的 UTF-8 文件；CLI `--system-prompt-file` 优先，它的读取方式与引入 profile 之前一致：可以是管道，不受 64 KiB 限制 |
 | `tools` | 替换启用列表，支持 `bash`、`read_file`、`read_skill`、`read_output`；`[]` 禁用全部工具 |
-| `execution` | 当前只接受 `local`；容器执行留到 P6，填写未实现后端时报错 |
+| `execution` | `local`（默认）或 `container`；其他值报错。`container` 时 bash 与 read_file 在 Docker 容器中执行，见 README 的“容器执行”。CLI `--execution` 优先 |
+| `container.image` | 容器镜像，`execution = "container"` 时必填，须已在本地；CLI `--container-image` 优先 |
+| `container.user` | 容器内运行命令的 `uid:gid`，默认 `65534:65534` |
+| `container.memory` | Docker 写法的内存上限，默认 `1g` |
+| `container.pidsLimit` | 容器内进程数上限，大于零，默认 256 |
 | `rules.allow` | bash 命令前缀白名单，沿用原管道检查；空列表表示只检查 deny |
 | `rules.deny` | 追加 bash 命令子串拒绝规则，原内置拒绝规则始终保留 |
 | `rules.askTools` | 替换需审批的工具名列表；run 通过 NoHuman 明确拒绝，chat 交给终端审批 |
@@ -67,7 +71,7 @@ path = "skills/rust-review/SKILL.md"
 | `toolOutput.maxFileBytes` | 读写文件上限，1–1048576，默认 1 MiB |
 | `toolOutput.directory` | 显式路径相对 TOML 文件；省略时为工具 cwd 下的 `.zx-agent/outputs` |
 
-未提供的值继承基线。叠加顺序为 **内置基线 < profile 文件 < 显式命令行参数**；即使 CLI 值恰好等于旧默认值，也按显式覆盖处理。`--allow-cmd` 替换文件的 allow；`--deny-cmd` 追加到文件和内置 deny，不能清除拒绝规则。重复的 `--context-file` 追加文件。
+未提供的值继承基线。叠加顺序为 **内置基线 < profile 文件 < 显式命令行参数**；即使 CLI 值恰好等于旧默认值，也按显式覆盖处理。`--allow-cmd` 替换文件的 allow；`--deny-cmd` 追加到文件和内置 deny，不能清除拒绝规则。重复的 `--context-file` 追加文件。在本机执行时给出 `--container-image` 视为配置错误，避免误以为命令已在容器中执行。
 
 连接地址、模型、认证环境变量名、传输与工具超时、输出模式和会话路径仍使用原 CLI 选项。TOML 不接受这些键，也不接受任意扩展名称；未知字段、错误类型、无效路径或不支持的配置均在请求模型前以退出码 2 报错。
 
