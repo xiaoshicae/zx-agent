@@ -2,12 +2,13 @@
 
 一个用 Rust 编写的通用 agent 内核，目标是让同一个内核支撑人机对话、无人值守运行和被其他程序嵌入。场景之间的差异将通过 profile（提示词、工具、规则、上限）和插件表达，不改内核。整体架构参考 [pi](https://github.com/earendil-works/pi)（commit `a92283056`）：分层方式、循环语义和会话文件格式都沿用 pi 的设计；与 pi 不同的地方列在[与 pi 的差异](#与-pi-的差异)一节。
 
-当前版本为 v0.1.0，已实现无人值守的 `run` 命令（例如自动化排障）。对话模式 `chat`、嵌入协议 `acp`、profile 文件和插件按[路线图](docs/ROADMAP.md)分阶段推进。
+当前版本为 v0.1.0，已实现无人值守的 `run` 和终端对话 `chat`。嵌入协议 `acp`、profile 文件和插件按[路线图](docs/ROADMAP.md)分阶段推进。
 
 - **已具备**：
   - OpenAI 兼容的流式 provider，带事件队列、SSE 事件与响应大小上限
   - agent 回合循环：工具调用先检查、再并发执行，结果保持调用顺序
   - 长期 `AgentSession`：共享提问、单次运行互斥、取消后复用、多订阅者和模型切换
+  - 终端 `chat`：流式回答、审批、运行中插话、Ctrl+C 后继续对话
   - `bash` 与 `read_file` 工具
   - 声明式命令策略
   - 结构化错误分类与自动重试
@@ -19,7 +20,7 @@
   - 对 bash 命令隐藏 API key 所在的环境变量
   - 系统提示词记录在对话中，恢复会话时只追加有变化的段落
   - 运行 future 被丢弃时取消后台请求、定时任务和工具子进程组
-- **尚未实现**：对话模式、profile 文件、插件与 MCP、上下文压缩、其他 provider。详见[路线图](docs/ROADMAP.md)。
+- **尚未实现**：profile 文件、插件与 MCP、上下文压缩、其他 provider。详见[路线图](docs/ROADMAP.md)。
 
 ## 快速开始
 
@@ -41,6 +42,38 @@ export OPENAI_API_KEY=...            # 变量名可通过 --api-key-env 修改
 
 如果找不到 API key，请求中就不带认证头。本地服务通常不需要认证，所以缺少 key 不会报错。
 
+### 终端对话
+
+```bash
+zx-agent chat --model "$ZX_MODEL" --session ./chat.jsonl
+```
+
+直接输入问题即可开始下一轮。TTY 中运行时输入普通文本会作为 steering，在下一次模型请求前进入上下文；通过管道输入脚本时逐轮消费，避免后面的命令提前打断任务。单行输入最多 1 MiB（含行尾），无效 UTF-8 或超限会报错，不把截断片段发送给模型。
+
+每轮默认不限轮次、不限总时间、不自动续写；可用 `--max-turns` 和 `--timeout-secs` 设限。连接、工具、会话和输出选项与 `run` 共用；`chat --help` 列出实际支持项。`--output jsonl` 为每轮发送一个 `run_end`，`--deltas` 可包含增量。
+
+| 输入 | 行为 |
+|---|---|
+| `/help` | 查看命令 |
+| `/model`、`/model <id>` | 查看模型，或空闲时切换同一 provider 的模型，保留历史 |
+| `/new` | 创建新会话，清空历史和授权；运行中先取消任务。启用文件会话时在同目录创建唯一新文件，保留旧日志 |
+| `/compact` | 提示压缩尚未实现，计划在 P5 加入 |
+| `/quit` | 取消当前任务并退出 |
+| Ctrl+C | 取消当前任务或审批，继续保留会话；空闲时保持会话 |
+| EOF、SIGTERM | EOF 结束会话，管道中的正常任务先完成；待审批时 EOF 拒绝并取消。SIGTERM 取消并退出 |
+
+chat 中的 bash 调用先经过原命令策略，再显示完整工具名、参数、工作目录、理由及权限范围，等待审批；read_file 仍按原读取权限执行。菜单中的编号绑定当前请求，例如：
+
+```text
+/approve 7 once
+/approve 7 session
+/deny 7 需要换一种做法
+```
+
+`once` 只允许当前调用，`session` 只复用完全相同的工具名与参数；命令策略的 Deny 始终优先。取消、超时后的旧编号不能批准新请求。审批默认超时 120 秒；未收到答案不会执行工具。模型文本和诊断中的 ESC、回车及双向控制字符按字面显示，保留正常换行和制表符。
+
+`/quit` 和正常 EOF 退出码为 0；参数、配置或输入错误为 2；SIGTERM 为 5。单轮模型或预算错误会报告后继续对话，JSONL 消费者可读取每轮报告的 `outcome`。这是逐行 REPL，尚未提供历史行编辑或完整 TUI。
+
 ### 无人值守示例
 
 可用于 cron、systemd timer、Kubernetes Job 等定时或批处理任务：
@@ -58,7 +91,7 @@ zx-agent run \
 echo "exit code: $?"
 ```
 
-### 退出码
+### run 退出码
 
 | 退出码 | 含义 |
 |---|---|
@@ -102,8 +135,9 @@ echo "exit code: $?"
 ## 架构
 
 ```
-CLI (main.rs)
+CLI (main.rs + cli.rs + chat/)
   ├─ presets/troubleshoot  排障说明与 run 的默认上限、续写
+  ├─ presets/assistant     chat 通用说明与终端审批
   └─ agent_session  共享会话、取消、订阅与模型切换           ← pi: coding-agent AgentSession
        └─ runner    独占运行、重试、轮次与时间上限、持久化
             ├─ session  只追加的 JSONL 条目树 + 投影         ← pi: SessionManager
@@ -128,7 +162,8 @@ CLI (main.rs)
 | 运行控制 | `src/runner.rs` | `coding-agent/src/core/agent-session.ts`（`_startRun`、`_prepareRetry`） |
 | 共享会话 | `src/agent_session.rs` | `AgentSession` 的长期生命周期与多订阅者接口 |
 | 系统提示词 | `src/prompt.rs` | `coding-agent/src/core/system-prompt.ts` |
-| 场景预设 | `src/presets/troubleshoot.rs` | 内核之外的场景策略 |
+| 场景预设 | `src/presets/troubleshoot.rs`、`assistant.rs` | 内核之外的场景策略 |
+| 终端前端 | `src/chat/`、`src/cli.rs` | 单输入所有者、审批、显示与共享 CLI 选项 |
 
 ### 与 pi 一致的关键语义
 
@@ -195,7 +230,7 @@ CLI (main.rs)
 
 - 策略只是第一道防线，**不是安全边界**。生产环境请以最小权限账号运行，并放在容器或虚拟机中，必要时限制网络访问。
 - `read_file` 不受命令白名单约束，可以读取进程有权限读取的普通文件。需要限制时，使用 `--tools bash` 关闭它。
-- `run` 在 `after_tool` 中将认证 API key 的完整字面值替换为 `[REDACTED]`，处理后的结果才会写入会话、事件并回传模型。SDK 可用 `RedactSecrets` 显式配置其他密钥；过滤器失败时丢弃原始输出，返回错误结果。
+- `run` 和 `chat` 在 `after_tool` 中将认证 API key 的完整字面值替换为 `[REDACTED]`，处理后的结果才会写入会话、事件并回传模型。SDK 可用 `RedactSecrets` 显式配置其他密钥；过滤器失败时丢弃原始输出，返回错误结果。
 - 该过滤不识别未知密钥、编码或拆分后的密钥，也不处理用户输入、模型输出和工具调用参数。这些内容及工具输出中的其他敏感数据仍可能进入模型请求、会话和事件；请控制会话文件访问权限。
 - 认证 key 只从环境变量读取；bash 命令启动前删除 `--api-key-env` 指定的变量。但工具与 agent 以同一系统用户运行，仍可能通过其他途径读取凭证。需要隔离时，请以不同账号或在容器中运行。
 - 除 `--api-key-env` 指定的变量外，其他环境变量（如云厂商凭证）bash 命令仍然可以读到。需要时请在启动 zx-agent 前清理环境变量。
@@ -204,7 +239,7 @@ CLI (main.rs)
 
 ### 事件（`--output jsonl`）
 
-每行一个事件。`type` 的取值有：`agent_start`、`turn_start`、`message_start`、`message_update`（需加 `--deltas`）、`message_end`（包括 system 消息）、`tool_execution_start`、`tool_execution_end`、`turn_end`、`agent_end`、`retry_scheduled`、`context_edited`、`hook_failed`。最后一行是汇总：
+每行一个事件。`type` 的取值有：`agent_start`、`turn_start`、`message_start`、`message_update`（需加 `--deltas`）、`message_end`（包括 system 消息）、`tool_execution_start`、`tool_execution_end`、`turn_end`、`agent_end`、`retry_scheduled`、`context_edited`、`hook_failed`。`run` 最后一行、`chat` 每轮最后一行是汇总：
 
 ```json
 {"type":"run_end","report":{"outcome":"completed","finalText":"## Summary ...","turns":3,"retries":0,"usage":{"input":1200,"output":300,"cacheRead":0,"totalTokens":1500},"sessionFile":"/var/log/zx-agent/run.jsonl"}}
@@ -329,6 +364,7 @@ cargo fmt --check
 | `tests/agent_session.rs` | 共享提问与 Busy、取消与 future 丢弃后复用、队列边界、订阅和退订、回调重入与 panic 隔离、模型切换、授权撤销、先写审计再多订阅分发 |
 | `tests/openai_mock.rs` | 本地假 HTTP 服务上的端到端测试：SSE、执行 bash、回传工具结果、认证头、HTTP 错误重试、空闲超时、中途取消后保留已输出内容 |
 | `tests/cli.rs` | 编译出的程序：退出码 0 到 6、jsonl 输出、从 stdin 读提示词、bash 读不到 API key、系统提示词的生成段落、`--system-updates inline` |
+| `tests/chat_cli.rs` | 多轮历史、审批与授权范围、重置、模型切换、EOF、信号、超时、控制字符显示；Unix PTY 验证运行中插话、取消重置和退出 |
 | `tests/hooks.rs`、`tests/hooks_cli.rs` | 钩子组合与失败处理、审批范围与取消、审计变换、续写预算、工具输出脱敏的 CLI 接线 |
 | `tests/real_api.rs` | 真实模型 API（付费，默认跳过）：文本回答与用量、工具往返、策略拒绝、输出截断、恢复会话、无效 key 不重试 |
 
@@ -372,4 +408,4 @@ MIT，见 [LICENSE](LICENSE)。设计参考的 [pi](https://github.com/earendil-
 
 ---
 
-README.md · v0.1.0 · 2026年10月
+README.md · v0.1.0 · 2026年11月
