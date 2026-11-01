@@ -155,7 +155,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P4 | profile 文件、上下文文件与 skills | 已完成（PR #6） |
 | P5 | 上下文管理 | 已完成（PR #9） |
 | P6 | 执行环境与崩溃恢复 | 进行中：崩溃恢复（PR #12）、执行环境接缝（PR #13）、离线容器执行（PR #14）已完成；在线访问评审稿已合入（PR #17），一期实施中：只读命令自动放行（PR #19）、环境变量保护与 ServiceAccount token 脱敏（PR #20）、常驻 Pod 部署包（单集群，PR #22）已完成；容器联网已取消，改为常驻 Pod 部署 |
-| P7 | 插件与 MCP | 未开始；前置设计草案待评审，其中 A1（会话宿主拆分与可替换的会话存储）已实施（PR #21，待合并） |
+| P7 | 插件与 MCP | 未开始；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）实施中，A2–A8 待评审 |
 | P8 | 嵌入协议 `acp` | 未开始 |
 | P9 | 可选增强 | 未开始 |
 
@@ -476,7 +476,7 @@ B. 追踪事件
 - B7：追踪要能导出完整的调用细节（导出方式与默认范围随 OTel 导出器另行设计）。
 - 公开 API 与 JSONL 事件格式可以改变：目前没有外部使用者，按最佳实践设计，不为兼容保留旧接口。
 
-#### A1 定稿：会话宿主拆分与可替换的会话存储（2026-11-01，已实施，PR #21）
+#### A1 定稿：会话宿主拆分与可替换的会话存储（2026-11-01，已完成，PR #21）
 
 目标：会话可以保存到文件以外的地方，例如数据库；所有会话不变量仍由内核保证。同时修复 Codex 评审中的两项：钩子未完成时取消的输入会进入投影；同一会话文件可被多个实例同时写入。
 
@@ -504,6 +504,35 @@ B. 追踪事件
 - 公开 API 的变化：`SessionStore` 的写方法改为 `async`；`Runner::session()` 返回 `&SessionStore`；`EventSink` 只剩 `emit`；`ContextPreparation` 不再公开；`LoopFailure::Provider` 改为 `{ message, entry_id }`；新增 `Entry::kind` / `timestamp`。会话文件格式（v4）与 CLI 参数不变，`run --help`、`chat --help` 与 `dd43cce` 逐字节相同。
 - `tests/cli.rs` 改动一行：准备数据时的 `append_message(...)` 加 `.await`，这是写方法改为异步的直接结果，断言未改；该文件自 `d2a6a6c` 以来首次改动。其他既有测试的调整：写方法加 `.await`；写入者仍在运行时读取会话文件的 9 处改用 `SessionStore::read`；`src/session.rs` 中 2 项测试在重新打开文件前先释放写入者。
 - 本机 macOS 验证：新增 15 项测试（含 1 个 Rustdoc 示例）；合并 `dd43cce` 后，stable 与 Rust 1.88.0 各 495 项通过、6 项付费测试跳过。其中 4 项回归测试在修复前失败：在 `e350c8f` 上，取消输入钩子后原始输入仍在会话中（2 项），第二个 `run` 写入同一会话文件并以 0 退出（1 项）；在加入重试之前的本分支上，关闭会话后立即重新打开报 `is in use`（1 项）。另用独立进程（Python `fcntl.flock`）持锁实测：`run` 与 `chat` 均以退出码 2 结束并报告 `is in use`，文件不变；释放后 `chat` 正常打开。未新增依赖。完整检查结果与原始测试摘要附在 PR 中。
+
+#### B 定稿：追踪事件（2026-11-01，实施中）
+
+目标：只看事件就能还原一次运行的时间线——运行、每次尝试、回合、每个模型请求、工具的策略结论与审批、摘要——并能逐条对应到会话中的记录，为 P9 的 OTel 导出器备好数据。本阶段不引入导出器，也不新增依赖。
+
+1. **统一信封（B5、B8）**：订阅者收到 `agent::Event`，即事件本身加上 `schemaVersion`、`seq`、`atMs`、`sessionId`、`runId`。JSON 中信封字段与事件字段同层，`type` 仍在顶层。`schemaVersion` 从 1 开始，信封或事件出现不兼容变化时加一。`seq` 在一次运行内从 1 开始连续递增；`runId` 是每次运行新生成的 UUID；`sessionId` 是会话头部的 ID，直接调用 `run_loop` 时没有。手动压缩不属于任何运行，使用自己的 `runId`。`EventSink::emit` 与 `Hooks::on_event` 改为接收 `&Event`。
+2. **运行级事件（B1）**：`Runner::run` 以 `run_start`（模型、provider）开始，以 `run_end`（完整的 `RunReport`）结束，中断调用的恢复事件位于两者之间。每次尝试仍由 `agent_start` / `agent_end` 包围，`agent_start` 增加 `attempt`（从 1 开始，每次重试加一）。`run` 与 `chat` 的 `--output jsonl` 不再单独打印 `run_end` 行，改为输出该事件，行内的 `type` 与 `report` 不变。`RunReport`、`RunOutcome` 移到 agent 层，`runner` 再导出原路径。
+3. **请求起点（B2）**：每个模型请求在调用 provider 之前发 `request_start`：`kind`（`task` 或 `summary`）、`entryId`（会话中对应的 `request_started` 条目，没有会话时为空）、`model`、`attempt`。HTTP 失败的请求因此也有起点。
+4. **策略结论与审批（B3）**：工具策略得出结论后发 `tool_decision`：`allow`、`deny` 或 `ask` 及理由；策略钩子出错按 `deny` 报告。需要询问时发 `approval_requested`，得到结果后发 `approval_resolved`，结果为 `allow_once`、`allow_session`、`denied`、`timed_out`、`cancelled`、`failed` 之一，附理由与等待毫秒数。会话内已授权过的同一调用不再询问，只发 `approval_resolved`（`remembered`，等待 0）。工具不存在、参数无效等不经过策略的情况不发 `tool_decision`，仍体现在工具结果中。
+5. **摘要单独成段（B4）**：自动摘要请求不再发 `turn_start` / `turn_end`，由 `compaction_start`、`request_start`（`summary`）与 `compaction_end` 或 `compaction_failed` 表示。`turn` 只给任务回合编号，回合事件成对出现；摘要发生在回合内时，位于该回合的任务请求之前。轮次预算仍按模型请求计数（含摘要请求），`RunReport.turns` 的含义不变。回合是为了发出请求：预算已用完或运行已取消时，不再开启新回合，排队的插话与后续消息留给下一次运行。
+6. **回链审计记录（B5）**：`message_end` 带消息条目的 `entryId`，`context_edited` 带编辑条目的 `entryId`；没有会话时为空。
+7. **订阅与观察（B6）**：`AgentSession::subscribe_bounded(capacity)` 返回有界通道：通道已满时丢弃新事件并计数（`dropped()`），不阻塞运行，`seq` 的空缺同样反映丢失。`Hooks` 新增 `observes(&AgentEvent) -> bool`，默认不观察流式增量 `message_update`，需要时覆盖；`on_event` 只收到观察的事件。
+8. **内容范围（B7，已决定）**：事件保留完整内容：用户输入、工具参数、经 `after_tool` 处理后的工具输出与模型输出。导出时的默认范围随 OTel 导出器另行设计。
+9. **不变**：会话文件格式与版本、CLI 参数、文本模式的输出。
+
+兼容性：`EventSink`、`Hooks::on_event` 的签名与 JSONL 事件行的格式改变，在已授权的范围内。JSONL 的第一行从 `agent_start` 变为 `run_start`。
+
+验收：一次运行中 `seq` 从 1 连续递增，所有事件的 `runId`、`sessionId` 相同；`run_start` 最先、`run_end` 最后，`run_end` 的报告与返回值一致；每个模型请求之前恰有一条 `request_start`，其 `entryId` 与会话中的 `request_started` 一致，重试时 `attempt` 加一；策略的三种结论、会话内授权、审批超时与取消各有对应事件；自动摘要期间没有回合事件，回合编号连续，预算计数不变；`message_end`、`context_edited` 的 `entryId` 指向会话中的对应条目；有界订阅在通道满时丢弃并计数且不阻塞运行；钩子默认不观察增量。
+
+实施记录（基于 `e33f6fb`）：
+
+- 按上述 1–9 实施，与定稿的差异与补充如下：
+  - `LoopResult` 新增 `requests`（模型请求数，含摘要请求，预算按它计算），`turns` 改为任务回合数；`LoopControl::turn_offset` 改为此前各次尝试的任务回合数。`RunReport.turns` 仍是模型请求数。
+  - 预算用完或已取消时不开空回合（第 5 项末句）。此前循环会先开启新回合、把排队的输入写入会话，再以 `MaxTurns` 或 `Aborted` 结束。
+  - `seq` 的空缺也可能来自订阅者自己的过滤，例如 `--output jsonl` 未加 `--deltas` 时省略的增量；`Event::seq` 的文档与 README 已写明。
+  - 订阅接口为 `AgentSession::subscribe_bounded(NonZeroUsize) -> EventStream`，提供 `recv`、`try_recv` 与 `dropped`。
+- 公开 API 的变化：`EventSink::emit` 与 `Hooks::on_event` 改为接收 `&Event`，新增 `Hooks::observes`；`AgentEvent` 新增 `RunStart`、`RunEnd`、`RequestStart`、`ToolDecision`、`ApprovalRequested`、`ApprovalResolved`，`AgentStart` 带 `attempt`，`MessageEnd`、`ContextEdited` 带 `entry_id`；`RunReport`、`RunOutcome` 移到 `agent`，`runner` 再导出；新增 `Event`、`EVENT_SCHEMA_VERSION`、`RequestKind`、`ToolVerdict`、`ApprovalResult` 与 `agent_session::EventStream`。
+- 既有测试的调整：`tests/cli.rs` 中 JSONL 第一行的期望由 `agent_start` 改为 `run_start`（该文件第二次改动）；`tests/compaction.rs` 中手动压缩的事件序列多出 `request_start`，自动摘要的回合编号由两个回合 `[1, 2]` 变为一个回合的 `turn_start` / `turn_end`；测试中的 sink 与观察钩子改为接收 `&Event`，需要观察全部事件的钩子覆盖 `observes`。
+- 本机 macOS 验证：新增 16 项测试；stable 与 Rust 1.88.0 各 511 项通过（基线 495 项）、6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过；设置 `ZX_DOCKER_TEST_IMAGE=debian:bookworm-slim` 时容器测试 30 项通过。"预算用完不开空回合"的测试在改动前失败（任务回合数为 2，期望 1）。`run --help`、`chat --help` 不变，未新增依赖。
 
 ### P7 插件与 MCP
 

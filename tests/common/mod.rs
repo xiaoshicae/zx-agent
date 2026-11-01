@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::agent::{
-    AgentEvent, EventSink, ExecutionMode, LoopConfig, LoopControl, LoopResult, LoopSpec, MessageQueues, Tool,
+    AgentEvent, Event, EventSink, ExecutionMode, LoopConfig, LoopControl, LoopResult, LoopSpec, MessageQueues, Tool,
     ToolContext, ToolOutput, ToolPolicy, run_loop,
 };
 use zx_agent::ai::retry::RetryPolicy;
@@ -91,17 +91,23 @@ impl Tool for EchoTool {
 }
 
 #[derive(Default)]
-pub struct Collect(pub Mutex<Vec<AgentEvent>>);
+pub struct Collect(pub Mutex<Vec<Event>>);
 
 impl EventSink for Collect {
-    fn emit(&self, event: AgentEvent) {
-        self.0.lock().unwrap().push(event);
+    fn emit(&self, event: &Event) {
+        self.0.lock().unwrap().push(event.clone());
     }
 }
 
 impl Collect {
-    pub fn events(&self) -> Vec<AgentEvent> {
+    /// The events with their envelopes.
+    pub fn envelopes(&self) -> Vec<Event> {
         self.0.lock().unwrap().clone()
+    }
+
+    /// The events without their envelopes.
+    pub fn events(&self) -> Vec<AgentEvent> {
+        self.envelopes().into_iter().map(|event| event.event).collect()
     }
 
     pub fn kinds(&self) -> Vec<&'static str> {
@@ -238,8 +244,8 @@ impl RunnerSetup {
 pub struct CancelOnFirstDelta(pub CancellationToken);
 
 impl EventSink for CancelOnFirstDelta {
-    fn emit(&self, event: AgentEvent) {
-        if matches!(event, AgentEvent::MessageUpdate { .. }) {
+    fn emit(&self, event: &Event) {
+        if matches!(event.event, AgentEvent::MessageUpdate { .. }) {
             self.0.cancel();
         }
     }

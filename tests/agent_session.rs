@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 use common::{Collect, RunnerSetup, config, header, summarize};
 use zx_agent::AgentSession;
-use zx_agent::agent::{AgentEvent, Decision, HookResult, Hooks, Tool, ToolContext, ToolOutput};
+use zx_agent::agent::{AgentEvent, Decision, Event, HookResult, Hooks, Tool, ToolContext, ToolOutput};
 use zx_agent::agent_session::{ModelRef, SessionError, Subscription};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{EventReceiver, Provider, Request, ToolDef};
@@ -218,7 +218,7 @@ async fn a_callback_can_unsubscribe_itself_and_abort_without_deadlocking() {
     let handle_in_callback = handle.clone();
     let calls = Arc::new(AtomicUsize::new(0));
     let observed_calls = calls.clone();
-    let callback = Arc::new(move |_: AgentEvent| {
+    let callback = Arc::new(move |_: &Event| {
         observed_calls.fetch_add(1, Ordering::SeqCst);
         let subscription = handle_in_callback.lock().unwrap().take();
         drop(subscription);
@@ -239,7 +239,7 @@ async fn a_panicking_subscriber_is_detached_without_silencing_other_subscribers(
     let (session, _, initial) = setup([FauxStep::text("one"), FauxStep::text("two")]);
     let calls = Arc::new(AtomicUsize::new(0));
     let callback_calls = calls.clone();
-    let failed = session.subscribe(Arc::new(move |_: AgentEvent| {
+    let failed = session.subscribe(Arc::new(move |_: &Event| {
         callback_calls.fetch_add(1, Ordering::SeqCst);
         panic!("subscriber bug");
     }));
@@ -257,7 +257,7 @@ async fn a_panicking_subscriber_is_detached_without_silencing_other_subscribers(
 async fn a_panicking_initial_sink_is_also_counted_and_isolated() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let runner =
-        RunnerSetup::new(config(provider, vec![])).build_with(Arc::new(|_: AgentEvent| panic!("initial sink bug")));
+        RunnerSetup::new(config(provider, vec![])).build_with(Arc::new(|_: &Event| panic!("initial sink bug")));
     let session = AgentSession::from(runner);
     let observer = Arc::new(Collect::default());
     let _observer = session.subscribe(observer.clone());
@@ -539,10 +539,10 @@ async fn subscriber_callbacks_see_messages_only_after_the_single_audit_write() {
     for _ in 0..2 {
         let file = file.clone();
         let observed = observed.clone();
-        subscriptions.push(session.subscribe(Arc::new(move |event: AgentEvent| {
-            if let AgentEvent::MessageEnd { message } = event {
+        subscriptions.push(session.subscribe(Arc::new(move |event: &Event| {
+            if let AgentEvent::MessageEnd { message, .. } = &event.event {
                 let stored = SessionStore::read(&file).unwrap();
-                assert_eq!(stored.messages().last(), Some(&message));
+                assert_eq!(stored.messages().last(), Some(message));
                 observed.fetch_add(1, Ordering::SeqCst);
             }
         })));
@@ -551,4 +551,38 @@ async fn subscriber_callbacks_see_messages_only_after_the_single_audit_write() {
     assert_eq!(session.failed_subscribers(), 0);
     assert_eq!(observed.load(Ordering::SeqCst), 4);
     assert_eq!(SessionStore::read(&file).unwrap().messages().len(), 2);
+}
+
+#[tokio::test]
+async fn a_bounded_subscription_receives_the_events_in_order() {
+    let (session, _, initial) = setup([FauxStep::text("done")]);
+    let mut stream = session.subscribe_bounded(std::num::NonZeroUsize::new(1024).unwrap());
+
+    session.prompt("go").await.unwrap();
+
+    let mut received = Vec::new();
+    while let Some(event) = stream.try_recv() {
+        received.push(event);
+    }
+    assert_eq!(received, initial.envelopes());
+    assert_eq!(stream.dropped(), 0);
+}
+
+#[tokio::test]
+async fn a_full_bounded_subscription_drops_and_counts_events_without_blocking_the_run() {
+    let (session, _, initial) = setup([FauxStep::text("done")]);
+    let mut stream = session.subscribe_bounded(std::num::NonZeroUsize::new(2).unwrap());
+
+    let report = tokio::time::timeout(Duration::from_secs(5), session.prompt("go"))
+        .await
+        .expect("a full channel must not block the run")
+        .unwrap();
+
+    assert_eq!(report.outcome, RunOutcome::Completed);
+    let all = initial.envelopes();
+    let kept: Vec<u64> = std::iter::from_fn(|| stream.try_recv())
+        .map(|event| event.seq)
+        .collect();
+    assert_eq!(kept, [1, 2]);
+    assert_eq!(stream.dropped(), u64::try_from(all.len()).unwrap() - 2);
 }

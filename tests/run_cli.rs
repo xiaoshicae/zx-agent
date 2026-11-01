@@ -5,7 +5,7 @@ mod common;
 use std::process::Stdio;
 use std::time::Duration;
 
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::process::Command;
 
 use common::mock_server::{MockServer, Reply};
@@ -199,4 +199,40 @@ async fn commands_cannot_read_the_agent_environment_through_proc() {
     let result = server.requests()[1].body["messages"].to_string();
     assert!(result.contains("Permission denied"), "{result}");
     assert!(!result.contains(PROBE), "{result}");
+}
+
+#[tokio::test]
+async fn jsonl_events_carry_the_envelope_of_their_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::text("ok")]).await;
+
+    // With the streaming deltas, so that every event of the run is written.
+    let output = run(&server, dir.path())
+        .args(["--output", "jsonl", "--deltas"])
+        .output()
+        .await
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0));
+    let lines: Vec<Value> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    for (index, line) in lines.iter().enumerate() {
+        assert_eq!(line["schemaVersion"], 1, "{line}");
+        assert_eq!(line["seq"], index + 1, "{line}");
+        assert_eq!(line["runId"], lines[0]["runId"], "{line}");
+        assert!(line["sessionId"].is_string() && line["atMs"].is_u64(), "{line}");
+    }
+    assert_eq!(lines[0]["type"], "run_start");
+    // The run's first attempt follows it.
+    assert_eq!(
+        (lines[1]["type"].clone(), lines[1]["attempt"].clone()),
+        (json!("agent_start"), json!(1))
+    );
+    let end = lines.last().unwrap();
+    assert_eq!(
+        (end["type"].clone(), end["report"]["finalText"].clone()),
+        (json!("run_end"), json!("ok"))
+    );
 }

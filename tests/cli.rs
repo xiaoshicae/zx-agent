@@ -230,7 +230,7 @@ async fn jsonl_output_is_one_event_per_line_ending_with_the_report() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(events[0]["type"], "agent_start");
+    assert_eq!(events[0]["type"], "run_start");
     let report = events.last().unwrap();
     assert_eq!(report["type"], "run_end");
     assert_eq!(report["report"]["outcome"], "completed");

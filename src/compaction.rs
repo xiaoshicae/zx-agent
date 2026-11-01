@@ -7,7 +7,7 @@ use futures::StreamExt;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::{AgentEvent, EventSink, HookChain};
+use crate::agent::{AgentEvent, Emit, HookChain, RequestKind};
 use crate::ai::{
     AssistantMessage, Message, PREAMBLE, Provider, Request, StopReason, StreamEvent, SystemMessage, SystemPrompt,
     Usage, UserMessageKind, duration_ms, now_ms,
@@ -105,8 +105,10 @@ pub(crate) struct Host<'a> {
     pub provider: &'a dyn Provider,
     pub model: &'a str,
     pub config: &'a Config,
-    pub sink: &'a dyn EventSink,
+    pub to: Emit<'a>,
     pub hooks: &'a HookChain,
+    /// The attempt of the run that compacts; 1 for a manual compaction.
+    pub attempt: u32,
 }
 
 struct Candidate {
@@ -117,7 +119,7 @@ struct Candidate {
 
 impl Host<'_> {
     async fn emit(&self, event: AgentEvent, cancel: &CancellationToken) {
-        self.hooks.emit(event, cancel, self.sink).await;
+        self.hooks.emit(event, cancel, self.to).await;
     }
 
     fn candidate(&self) -> Result<Option<Candidate>> {
@@ -277,17 +279,30 @@ impl Host<'_> {
         };
         let options = self.provider.request_options();
         let name = self.provider.name();
-        if let Err(error) = self.session.record_request(&request, name, options, source).await {
-            let error = format!("cannot persist summary request checkpoint: {error:#}");
-            report.persistence_error = Some(error.clone());
-            report.error = Some(error);
-            report.outcome = Outcome::Failed;
-            return (report, None);
-        }
+        let request_entry = match self.session.record_request(&request, name, options, source).await {
+            Ok(id) => id,
+            Err(error) => {
+                let error = format!("cannot persist summary request checkpoint: {error:#}");
+                report.persistence_error = Some(error.clone());
+                report.error = Some(error);
+                report.outcome = Outcome::Failed;
+                return (report, None);
+            }
+        };
         self.emit(
             AgentEvent::CompactionStart {
                 input_bytes: report.input_bytes,
                 automatic,
+            },
+            cancel,
+        )
+        .await;
+        self.emit(
+            AgentEvent::RequestStart {
+                kind: RequestKind::Summary,
+                entry_id: Some(request_entry),
+                model: self.model.into(),
+                attempt: self.attempt,
             },
             cancel,
         )

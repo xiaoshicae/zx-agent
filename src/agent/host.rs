@@ -15,11 +15,12 @@ pub(crate) trait SessionHost: Send + Sync {
     async fn append_message(&mut self, message: &Message) -> Result<String, String>;
 
     /// Record an edit of the message at `index` in the current projection, before the loop
-    /// applies it: `None` omits the message, `Some` replaces its text.
-    async fn edit_context(&mut self, index: usize, replacement: Option<&str>) -> Result<(), String>;
+    /// applies it: `None` omits the message, `Some` replaces its text. Returns the edit's
+    /// entry ID.
+    async fn edit_context(&mut self, index: usize, replacement: Option<&str>) -> Result<String, String>;
 
-    /// Record a request before it is sent.
-    async fn record_request(&mut self, request: &Request, provider: &dyn Provider) -> Result<(), String>;
+    /// Record a request before it is sent. Returns the ID of its `request_started` entry.
+    async fn record_request(&mut self, request: &Request, provider: &dyn Provider) -> Result<String, String>;
 
     /// Record that a call with side effects is about to run, after its checks and approval.
     async fn record_tool_call_started(&mut self, call: &ToolCall) -> Result<(), String>;

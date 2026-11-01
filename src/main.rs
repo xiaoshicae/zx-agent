@@ -4,13 +4,12 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use serde_json::json;
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::AgentSession;
-use zx_agent::agent::{AgentEvent, EventSink};
+use zx_agent::agent::{AgentEvent, Event, EventSink};
 use zx_agent::ai::{Message, StopReason};
 use zx_agent::extensions::ContinueOnLength;
 use zx_agent::profile::Builtin;
@@ -159,7 +158,8 @@ fn print_report(report: &RunReport, output: OutputMode) {
                 report.outcome, report.turns, report.retries, usage.total_tokens, usage.input, usage.output,
             );
         }
-        OutputMode::Jsonl => write_line(&json!({ "type": "run_end", "report": report })),
+        // The `run_end` event, already written, carries the report.
+        OutputMode::Jsonl => {}
     }
 }
 
@@ -234,11 +234,11 @@ struct JsonlEvents {
 }
 
 impl EventSink for JsonlEvents {
-    fn emit(&self, event: AgentEvent) {
-        if !self.deltas && matches!(event, AgentEvent::MessageUpdate { .. }) {
+    fn emit(&self, event: &Event) {
+        if !self.deltas && matches!(event.event, AgentEvent::MessageUpdate { .. }) {
             return;
         }
-        write_line(&event);
+        write_line(event);
     }
 }
 
@@ -247,12 +247,12 @@ impl EventSink for JsonlEvents {
 struct TextProgress;
 
 impl EventSink for TextProgress {
-    fn emit(&self, event: AgentEvent) {
-        match event {
+    fn emit(&self, event: &Event) {
+        match &event.event {
             AgentEvent::ToolExecutionStart { tool_name, args, .. } => {
                 eprintln!(
                     "[tool] {} {}",
-                    visible(&tool_name),
+                    visible(tool_name),
                     visible(&clip(&args.to_string(), 300))
                 );
             }
@@ -262,12 +262,13 @@ impl EventSink for TextProgress {
                 duration_ms,
                 ..
             } => {
-                let status = if is_error { "error" } else { "ok" };
+                let status = if *is_error { "error" } else { "ok" };
                 let duration = duration_ms.map(|ms| format!(" {ms}ms")).unwrap_or_default();
-                eprintln!("[tool] {} -> {status}{duration}", visible(&tool_name));
+                eprintln!("[tool] {} -> {status}{duration}", visible(tool_name));
             }
             AgentEvent::MessageEnd {
                 message: Message::Assistant(message),
+                ..
             } => {
                 if let Some(error) = &message.error_message {
                     eprintln!("[model] {:?}: {}", message.stop_reason, visible(error));
@@ -281,7 +282,7 @@ impl EventSink for TextProgress {
                 delay_ms,
                 error,
             } => {
-                eprintln!("[retry] {attempt}/{max_retries} in {delay_ms}ms: {}", visible(&error));
+                eprintln!("[retry] {attempt}/{max_retries} in {delay_ms}ms: {}", visible(error));
             }
             AgentEvent::CompactionStart { input_bytes, .. } => {
                 eprintln!("[compact] summarizing {input_bytes} context bytes")
@@ -291,22 +292,28 @@ impl EventSink for TextProgress {
                 output_bytes,
                 ..
             } => eprintln!("[compact] {input_bytes} -> {output_bytes} context bytes"),
-            AgentEvent::CompactionFailed { error, .. } => eprintln!("[compact] {}", visible(&error)),
+            AgentEvent::CompactionFailed { error, .. } => eprintln!("[compact] {}", visible(error)),
             AgentEvent::ToolCallRecovered {
                 tool_call_id,
                 tool_name,
                 state,
             } => eprintln!(
                 "[recover] {} {}: {}",
-                visible(&tool_name),
-                visible(&tool_call_id),
+                visible(tool_name),
+                visible(tool_call_id),
                 state.describe()
             ),
-            AgentEvent::AgentStart
+            AgentEvent::RunStart { .. }
+            | AgentEvent::RunEnd { .. }
+            | AgentEvent::AgentStart { .. }
             | AgentEvent::TurnStart { .. }
+            | AgentEvent::RequestStart { .. }
             | AgentEvent::MessageStart { .. }
             | AgentEvent::MessageUpdate { .. }
             | AgentEvent::MessageEnd { .. }
+            | AgentEvent::ToolDecision { .. }
+            | AgentEvent::ApprovalRequested { .. }
+            | AgentEvent::ApprovalResolved { .. }
             | AgentEvent::TurnEnd { .. }
             | AgentEvent::AgentEnd { .. }
             | AgentEvent::ContextEdited { .. }

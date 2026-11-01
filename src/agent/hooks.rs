@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use futures::FutureExt;
 use tokio_util::sync::CancellationToken;
 
-use super::{AgentEvent, Decision, EventSink, ToolOutput};
+use super::{AgentEvent, Decision, Emit, Event, ToolOutput};
 use crate::ai::{AssistantMessage, Message, ToolCall, UserMessageKind};
 
 /// Default bound for each individual hook invocation.
@@ -140,10 +140,17 @@ pub trait Hooks: Send + Sync {
         Ok(TurnDecision::Default)
     }
 
-    /// Read-only observation, after persistence and event delivery. Diagnostic events
-    /// reporting observer errors are not sent back through this method.
-    async fn on_event(&self, _event: &AgentEvent) -> HookResult<()> {
+    /// Read-only observation of the events this hook [`observes`](Hooks::observes), after
+    /// persistence and event delivery. Diagnostic events reporting observer errors are not
+    /// sent back through this method.
+    async fn on_event(&self, _event: &Event) -> HookResult<()> {
         Ok(())
+    }
+
+    /// Whether `on_event` receives `event`. Every call of `on_event` is awaited, so the
+    /// default skips the frequent streaming deltas (`message_update`); override to see them.
+    fn observes(&self, event: &AgentEvent) -> bool {
+        !matches!(event, AgentEvent::MessageUpdate { .. })
     }
 }
 
@@ -380,9 +387,10 @@ impl HookChain {
         Ok(decision)
     }
 
-    pub async fn on_event(&self, event: &AgentEvent, cancel: &CancellationToken) -> Vec<HookError> {
+    /// Call `on_event` of every hook that observes `event`, in registration order.
+    pub async fn on_event(&self, event: &Event, cancel: &CancellationToken) -> Vec<HookError> {
         let mut errors = Vec::new();
-        for entry in &self.hooks {
+        for entry in self.hooks.iter().filter(|entry| entry.hook.observes(&event.event)) {
             if let Err(error) = entry
                 .call(HookPhase::OnEvent)
                 .run(entry.hook.on_event(event), cancel)
@@ -397,19 +405,21 @@ impl HookChain {
         errors
     }
 
-    pub(crate) async fn emit(&self, event: AgentEvent, cancel: &CancellationToken, sink: &dyn EventSink) {
+    /// Stamp `event`, hand it to the sink, then to the observing hooks.
+    pub(crate) async fn emit(&self, event: AgentEvent, cancel: &CancellationToken, to: Emit<'_>) {
         // What the event reports is already recorded; the sink sees it before observers do.
-        sink.emit(event.clone());
+        let event = to.trace.stamp(event);
+        to.sink.emit(&event);
         for error in self.on_event(&event, cancel).await {
-            report_failure(error, sink);
+            report_failure(error, to);
         }
     }
 }
 
-pub(crate) fn report_failure(error: HookError, sink: &dyn EventSink) -> String {
+pub(crate) fn report_failure(error: HookError, to: Emit<'_>) -> String {
     let text = error.to_string();
     // Diagnostics bypass hooks, preventing recursive observer failures.
-    sink.emit(AgentEvent::HookFailed {
+    to.direct(AgentEvent::HookFailed {
         hook: error.hook,
         phase: error.phase.as_str(),
         error: text.clone(),

@@ -65,11 +65,11 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use common::{EchoTool, RunnerSetup, config, fast_retry, header, read_lines, summarize};
-use zx_agent::agent::AgentEvent;
+use zx_agent::agent::{AgentEvent, EVENT_SCHEMA_VERSION, HookResult, Hooks, RequestKind};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, PREAMBLE, StopReason, SystemPrompt};
 use zx_agent::runner::{Limits, RunOutcome};
-use zx_agent::session::{LoadedSession, LogRecord, SessionLog, SessionStore};
+use zx_agent::session::{Entry, LoadedSession, LogRecord, SessionLog, SessionStore};
 
 /// A stored record, as a database row would hold it.
 #[derive(Debug)]
@@ -570,4 +570,149 @@ async fn resumed_sessions_record_prompt_changes_in_the_file() {
         messages[3]["message"]["sections"],
         json!([{"name": "environment", "content": "t2"}])
     );
+}
+
+/// A run that fails once with a retryable error, then answers.
+fn retried_run() -> (zx_agent::runner::Runner, Arc<common::Collect>) {
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::Fail("HTTP 503: retry".into()),
+        FauxStep::text("done"),
+    ]));
+    RunnerSetup {
+        retry: fast_retry(1),
+        ..RunnerSetup::new(config(provider, vec![]))
+    }
+    .build()
+}
+
+#[tokio::test]
+async fn every_event_of_a_run_carries_its_ids_and_the_next_sequence_number() {
+    let (mut runner, events) = retried_run();
+
+    runner.run("go", &CancellationToken::new()).await;
+
+    let envelopes = events.envelopes();
+    let seqs: Vec<u64> = envelopes.iter().map(|event| event.seq).collect();
+    assert_eq!(seqs, (1..=u64::try_from(envelopes.len()).unwrap()).collect::<Vec<_>>());
+    let session_id = runner.session().header().id.clone();
+    for event in &envelopes {
+        assert_eq!(event.schema_version, EVENT_SCHEMA_VERSION);
+        assert_eq!(event.run_id, envelopes[0].run_id);
+        assert_eq!(event.session_id.as_deref(), Some(session_id.as_str()));
+    }
+    let first = envelopes.len();
+    runner.run("again", &CancellationToken::new()).await;
+    let next = &events.envelopes()[first..];
+    assert_ne!(next[0].run_id, envelopes[0].run_id, "each run has its own ID");
+    assert_eq!(next[0].seq, 1);
+}
+
+#[tokio::test]
+async fn a_run_starts_with_run_start_and_ends_with_its_report() {
+    let (mut runner, events) = retried_run();
+
+    let report = runner.run("go", &CancellationToken::new()).await;
+
+    let all = events.events();
+    assert!(matches!(&all[0], AgentEvent::RunStart { model, .. } if model == "test-model"));
+    match all.last() {
+        Some(AgentEvent::RunEnd { report: ended }) => assert_eq!(**ended, report),
+        other => panic!("the last event is not run_end: {other:?}"),
+    }
+    assert_eq!(
+        all.iter()
+            .filter(|event| matches!(event, AgentEvent::RunEnd { .. }))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn attempts_and_requests_are_numbered_and_name_their_request_records() {
+    let (mut runner, events) = retried_run();
+
+    runner.run("go", &CancellationToken::new()).await;
+
+    let all = events.events();
+    let attempts: Vec<u32> = all
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::AgentStart { attempt } => Some(*attempt),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(attempts, [1, 2]);
+    let requests: Vec<(RequestKind, u32, Option<String>)> = all
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::RequestStart {
+                kind,
+                attempt,
+                entry_id,
+                ..
+            } => Some((*kind, *attempt, entry_id.clone())),
+            _ => None,
+        })
+        .collect();
+    let recorded: Vec<Option<String>> = runner
+        .session()
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::RequestStarted(started) => Some(Some(started.id.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        requests,
+        [
+            (RequestKind::Task, 1, recorded[0].clone()),
+            (RequestKind::Task, 2, recorded[1].clone())
+        ]
+    );
+    let turns: Vec<u32> = all
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::TurnStart { turn } | AgentEvent::TurnEnd { turn } => Some(*turn),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(turns, [1, 1, 2, 2], "turn numbers continue across attempts");
+}
+
+struct Uppercase;
+#[async_trait]
+impl Hooks for Uppercase {
+    async fn on_input(&self, text: String) -> HookResult<String> {
+        Ok(text.to_uppercase())
+    }
+}
+
+#[tokio::test]
+async fn messages_and_context_edits_name_their_session_entries() {
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
+    let mut config = config(provider, vec![]);
+    config.hooks.push(Uppercase);
+    let (mut runner, events) = RunnerSetup::new(config).build();
+
+    runner.run("go", &CancellationToken::new()).await;
+
+    let reported: Vec<(&'static str, Option<String>)> = events
+        .events()
+        .into_iter()
+        .filter_map(|event| match event {
+            AgentEvent::MessageEnd { entry_id, .. } => Some(("message", entry_id)),
+            AgentEvent::ContextEdited { entry_id, .. } => Some(("context_edit", entry_id)),
+            _ => None,
+        })
+        .collect();
+    let recorded: Vec<(&'static str, Option<String>)> = runner
+        .session()
+        .entries()
+        .iter()
+        .filter(|entry| matches!(entry, Entry::Message(_) | Entry::ContextEdit(_)))
+        .map(|entry| (entry.kind(), Some(entry.id().to_string())))
+        .collect();
+    assert_eq!(reported, recorded);
+    assert_eq!(reported.len(), 3, "the input, its rewrite and the answer");
 }

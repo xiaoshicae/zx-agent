@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::AgentSession;
-use zx_agent::agent::{AgentEvent, ContextEdit, Hooks};
+use zx_agent::agent::{AgentEvent, ContextEdit, Event, Hooks};
 use zx_agent::agent_session::{ModelRef, SessionError};
 use zx_agent::ai::Message;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
@@ -61,7 +61,7 @@ async fn manual_compaction_is_a_bounded_tool_free_request_and_survives_reuse() {
     assert_eq!(compact.requests, 1);
     assert_eq!(compact.usage.total_tokens, 15);
     assert!(compact.output_bytes < compact.input_bytes);
-    assert_eq!(events.kinds(), ["compaction_start", "compaction_end"]);
+    assert_eq!(events.kinds(), ["compaction_start", "request_start", "compaction_end"]);
     let report = session.prompt("continue now").await.unwrap();
     assert_eq!(report.outcome, RunOutcome::Completed);
     assert_eq!(report.turns, 1);
@@ -118,18 +118,22 @@ async fn automatic_summary_counts_against_task_request_budget_and_usage() {
     assert_eq!(provider.requests().len(), 2);
     let messages = runner.session().messages();
     assert_eq!(provider.requests()[1].messages, messages[..messages.len() - 1]);
-    let starts: Vec<_> = events
+    // The summary request counts against the budget, but only the task request is a turn.
+    let turns: Vec<_> = events
         .events()
         .iter()
-        .filter_map(|event| {
-            if let AgentEvent::TurnStart { turn } = event {
-                Some(*turn)
-            } else {
-                None
-            }
+        .filter_map(|event| match event {
+            AgentEvent::TurnStart { turn } | AgentEvent::TurnEnd { turn } => Some(*turn),
+            _ => None,
         })
         .collect();
-    assert_eq!(starts, [1, 2]);
+    assert_eq!(turns, [1, 1]);
+    let kinds = events.kinds();
+    let summary = kinds.iter().position(|kind| *kind == "compaction_start").unwrap();
+    assert_eq!(
+        kinds[summary..summary + 3],
+        ["compaction_start", "request_start", "compaction_end"]
+    );
 }
 
 #[tokio::test]
@@ -137,8 +141,8 @@ async fn steering_received_during_a_summary_is_persisted_before_the_next_task_re
     struct SteerAfterSummary(Arc<zx_agent::agent::MessageQueues>);
     #[async_trait]
     impl Hooks for SteerAfterSummary {
-        async fn on_event(&self, event: &AgentEvent) -> Result<(), String> {
-            if matches!(event, AgentEvent::CompactionEnd { .. }) {
+        async fn on_event(&self, event: &Event) -> Result<(), String> {
+            if matches!(event.event, AgentEvent::CompactionEnd { .. }) {
                 self.0.steer("new correction");
             }
             Ok(())

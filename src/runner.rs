@@ -9,13 +9,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{
-    AgentEvent, ContextPreparation, Effects, EventSink, HookChain, Interruption, LoopConfig, LoopControl, LoopFailure,
-    LoopOutcome, SessionHost, run_loop,
+    AgentEvent, ContextPreparation, Effects, Emit, EventSink, HookChain, Interruption, LoopConfig, LoopControl,
+    LoopFailure, LoopOutcome, RunTrace, SessionHost, run_loop,
 };
+pub use crate::agent::{RunOutcome, RunReport};
 use crate::ai::retry::{RetryPolicy, is_retryable};
 use crate::ai::{Message, Provider, Request, ToolCall, ToolResultMessage, Usage, UserMessageKind, duration_ms, now_ms};
 use crate::compaction::{self, Trigger};
@@ -32,45 +32,6 @@ pub struct Limits {
     pub max_turns: Option<u32>,
     /// Wall-clock limit for the whole run; `None` disables it.
     pub timeout: Option<Duration>,
-}
-
-/// How a run ended.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RunOutcome {
-    /// The model gave a final answer.
-    Completed,
-    /// The final answer stayed cut off at the output token limit after the allowed
-    /// continuations. `final_text` holds what was produced.
-    Truncated,
-    /// A request exhausted retries, an operational hook failed, or persistence failed.
-    Error,
-    /// The turn budget ran out while the model still wanted to continue.
-    MaxTurns,
-    /// The wall-clock limit was reached.
-    Timeout,
-    /// The caller cancelled the run.
-    Aborted,
-}
-
-/// Summary of a finished run.
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RunReport {
-    pub outcome: RunOutcome,
-    /// Text of the last assistant message in the session projection, joined with the parts
-    /// it continues when earlier responses were cut off at the output token limit.
-    pub final_text: String,
-    /// Model requests made, saturating at `u32::MAX` for unbounded runs.
-    pub turns: u32,
-    pub retries: u32,
-    /// Usage of every response in this run, failed attempts included. A cancelled request
-    /// counts as zero: servers report usage only at the end of the stream.
-    pub usage: Usage,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_file: Option<String>,
 }
 
 /// Runs prompts against one session, adding retries, limits, and persistence to the loop.
@@ -119,17 +80,23 @@ impl Runner {
     }
 
     /// Summarize the old prefix without executing a task or tools. Uses the same exclusive
-    /// Runner borrow as run; cancellation and future drop cancel only this operation.
+    /// Runner borrow as run; cancellation and future drop cancel only this operation. Its
+    /// events carry a `runId` of their own.
     pub async fn compact(&mut self, cancel: &CancellationToken) -> compaction::Report {
         let child = cancel.child_token();
         let _cancel_on_drop = child.drop_guard_ref();
+        let trace = RunTrace::new(Some(self.session.header().id.clone()));
         let mut host = compaction::Host {
             session: &mut self.session,
             provider: self.config.spec.provider.as_ref(),
             model: &self.config.spec.model,
             config: &self.compaction,
-            sink: self.sink.as_ref(),
+            to: Emit {
+                sink: self.sink.as_ref(),
+                trace: &trace,
+            },
             hooks: &self.config.hooks,
+            attempt: 1,
         };
         let report = host.run(Trigger::Manual, &child).await.0;
         if report.outcome == compaction::Outcome::Completed {
@@ -198,10 +165,20 @@ impl Runner {
             }))
         });
 
+        let trace = RunTrace::new(Some(self.session.header().id.clone()));
+        let start = AgentEvent::RunStart {
+            model: self.config.spec.model.clone(),
+            provider: self.config.spec.provider.name().into(),
+        };
+        let to = Emit {
+            sink: self.sink.as_ref(),
+            trace: &trace,
+        };
+        self.config.hooks.emit(start, &run_cancel, to).await;
         // Entry IDs remain stable even when hooks omit messages from earlier runs.
         let run_start = self.session.entries().len();
         // Before any system prompt change or input, so that results directly follow their calls.
-        let recovered = self.recover_interrupted_calls(&run_cancel).await;
+        let recovered = self.recover_interrupted_calls(&run_cancel, &trace).await;
         let Self {
             config,
             retry,
@@ -213,8 +190,11 @@ impl Runner {
             compaction_pause,
         } = self;
         let sink = sink.as_ref();
+        let to = Emit { sink, trace: &trace };
         let mut prompts = vec![Message::user(prompt)];
+        // Task turns, for numbering, and model requests, for the budget and the report.
         let mut turns: u32 = 0;
+        let mut requests: u32 = 0;
         let mut retries = 0;
         let mut usage = Usage::default();
         let mut last_error = None;
@@ -226,20 +206,22 @@ impl Runner {
                 LoopOutcome::Error
             }
             Ok(()) => loop {
+                let attempt = retries + 1;
                 // The session projection, not an in-memory list, is what the model sees
                 // (pi: AgentSession replaces the context with the projection before each request).
                 let mut context = session.messages();
                 let mut host = RunnerHost {
                     session: &mut *session,
-                    sink,
+                    to,
                     hooks: &config.hooks,
                     provider: config.spec.provider.as_ref(),
                     model: &config.spec.model,
                     compaction,
                     compaction_pause: &mut *compaction_pause,
+                    attempt,
                 };
                 let mut control = LoopControl::new(
-                    limits.max_turns.map(|limit| limit.saturating_sub(turns)),
+                    limits.max_turns.map(|limit| limit.saturating_sub(requests)),
                     &mut *approvals,
                     &run_cancel,
                     sink,
@@ -247,8 +229,11 @@ impl Runner {
                 control.turn_offset = turns;
                 control.continuations = continuations;
                 control.host = Some(&mut host);
+                control.trace = Some(&trace);
+                control.attempt = attempt;
                 let result = run_loop(&mut context, std::mem::take(&mut prompts), config, &mut control).await;
                 turns = turns.saturating_add(result.turns);
+                requests = requests.saturating_add(result.requests);
                 continuations = result.continuations;
                 usage.add(&result.usage);
                 if result.outcome != LoopOutcome::Error {
@@ -284,7 +269,7 @@ impl Runner {
                             error: last_error.clone().unwrap_or_default(),
                         },
                         &run_cancel,
-                        sink,
+                        to,
                     )
                     .await;
                 // Keep the failed attempt in the session but drop it from model context, then
@@ -352,24 +337,33 @@ impl Runner {
             .map(|projected| projected.message)
             .collect();
         let final_text = final_answer(&messages);
-        RunReport {
+        let report = RunReport {
             outcome,
             final_text,
-            turns,
+            turns: requests,
             retries,
             usage,
             error,
             session_file: session.path().map(|p| p.display().to_string()),
-        }
+        };
+        let end = AgentEvent::RunEnd {
+            report: Box::new(report.clone()),
+        };
+        config.hooks.emit(end, &run_cancel, to).await;
+        report
     }
 
     /// Record an error result for each call that an interrupted run left without one, so
     /// the next request cannot suggest that such a call did nothing. Calls are never run
     /// again. Stops at the first result the session cannot record.
-    async fn recover_interrupted_calls(&mut self, cancel: &CancellationToken) -> Result<(), String> {
+    async fn recover_interrupted_calls(&mut self, cancel: &CancellationToken, trace: &RunTrace) -> Result<(), String> {
         let Self {
             config, session, sink, ..
         } = self;
+        let to = Emit {
+            sink: sink.as_ref(),
+            trace,
+        };
         for call in session.interrupted_tool_calls() {
             let effects = config
                 .spec
@@ -383,7 +377,7 @@ impl Runner {
                 tool_name: call.tool_name.clone(),
                 state,
             };
-            config.hooks.emit(event, cancel, sink.as_ref()).await;
+            config.hooks.emit(event, cancel, to).await;
             let result = Message::ToolResult(ToolResultMessage {
                 tool_call_id: call.tool_call_id,
                 tool_name: call.tool_name,
@@ -393,13 +387,16 @@ impl Runner {
                 duration_ms: None,
             });
             let start = AgentEvent::MessageStart { role: "toolResult" };
-            config.hooks.emit(start, cancel, sink.as_ref()).await;
-            session
+            config.hooks.emit(start, cancel, to).await;
+            let entry_id = session
                 .append_message(result.clone())
                 .await
                 .map_err(|error| format!("cannot persist session entry: {error:#}"))?;
-            let end = AgentEvent::MessageEnd { message: result };
-            config.hooks.emit(end, cancel, sink.as_ref()).await;
+            let end = AgentEvent::MessageEnd {
+                message: result,
+                entry_id: Some(entry_id),
+            };
+            config.hooks.emit(end, cancel, to).await;
         }
         Ok(())
     }
@@ -495,13 +492,15 @@ fn overlap(previous: &str, next: &str) -> usize {
 /// write stops the run: an unattended run must not keep acting without an audit trail.
 struct RunnerHost<'a> {
     session: &'a mut SessionStore,
-    sink: &'a dyn EventSink,
+    to: Emit<'a>,
     hooks: &'a HookChain,
     provider: &'a dyn Provider,
     model: &'a str,
     compaction: &'a compaction::Config,
     /// Borrowed from the Runner, so the pause outlives one prompt and a dropped run.
     compaction_pause: &'a mut Option<String>,
+    /// The attempt this host serves, for the events of an automatic compaction.
+    attempt: u32,
 }
 
 #[async_trait]
@@ -514,7 +513,7 @@ impl SessionHost for RunnerHost<'_> {
             .map_err(|error| format!("cannot persist session entry: {error:#}"))
     }
 
-    async fn edit_context(&mut self, index: usize, replacement: Option<&str>) -> Result<(), String> {
+    async fn edit_context(&mut self, index: usize, replacement: Option<&str>) -> Result<String, String> {
         let projection = self.session.projection();
         let target = projection
             .get(index)
@@ -522,16 +521,14 @@ impl SessionHost for RunnerHost<'_> {
         self.session
             .append_context_edit(&target.entry_id, replacement.map(str::to_string))
             .await
-            .map(|_| ())
             .map_err(|error| format!("cannot persist context edit: {error:#}"))
     }
 
-    async fn record_request(&mut self, request: &Request, provider: &dyn Provider) -> Result<(), String> {
+    async fn record_request(&mut self, request: &Request, provider: &dyn Provider) -> Result<String, String> {
         let options = provider.request_options();
         self.session
             .record_request(request, provider.name(), options, RequestSource::Projection)
             .await
-            .map(|_| ())
             .map_err(|error| format!("cannot persist request checkpoint: {error:#}"))
     }
 
@@ -573,8 +570,9 @@ impl SessionHost for RunnerHost<'_> {
             provider: self.provider,
             model: self.model,
             config: self.compaction,
-            sink: self.sink,
+            to: self.to,
             hooks: self.hooks,
+            attempt: self.attempt,
         };
         let (report, messages) = host.run(Trigger::Automatic, cancel).await;
         if let Some(error) = report.persistence_error {
