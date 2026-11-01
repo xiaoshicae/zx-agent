@@ -20,6 +20,47 @@ use zx_agent::session::{Entry, RequestSource, SessionHeader, SessionStore};
 
 use common::{EchoTool, RunnerSetup, config, header, read_lines};
 
+/// Every recorded request of `store`, rebuilt: the provider-neutral request and its
+/// OpenAI-compatible body in both system update modes.
+fn replays(store: &SessionStore) -> serde_json::Value {
+    let mut out = Vec::new();
+    for id in request_ids(store) {
+        let (config, request) = store.replay_request(&id).unwrap();
+        let mut bodies = serde_json::Map::new();
+        for mode in ["collapse", "inline"] {
+            let mut options = config.provider_options.clone();
+            options["systemUpdates"] = json!(mode);
+            let body = zx_agent::ai::openai::replay_body(&request, &config.provider, &options).unwrap();
+            bodies.insert(mode.into(), body);
+        }
+        out.push(json!({"entryId": id, "request": request, "body": bodies}));
+    }
+    serde_json::Value::Array(out)
+}
+
+/// A recorded session must keep rebuilding to the requests it sent. The fixture holds a tool
+/// call, a retried failure hidden by a context edit, a manual summary and a request after it.
+/// If a change to the projection, to summaries or to the OpenAI conversion alters this
+/// output, older sessions would no longer show what was sent: keep the old behavior for them
+/// behind a new request conversion version or a session format upgrade, then regenerate the
+/// expected file.
+#[test]
+fn a_recorded_session_rebuilds_to_the_requests_it_sent() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let store = SessionStore::read(&fixtures.join("replay-v4.jsonl")).unwrap();
+    let expected: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(fixtures.join("replay-v4.expected.json")).unwrap()).unwrap();
+
+    let rebuilt = replays(&store);
+
+    assert_eq!(
+        rebuilt,
+        expected,
+        "rebuilt requests changed:\n{}",
+        serde_json::to_string_pretty(&rebuilt).unwrap()
+    );
+}
+
 /// Request checkpoint IDs on the session's entry list, in file order.
 fn request_ids(store: &SessionStore) -> Vec<String> {
     store

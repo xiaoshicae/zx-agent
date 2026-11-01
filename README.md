@@ -522,7 +522,8 @@ pub trait SessionLog: Send + Sync {
 
 - 新会话由后端自己的构造函数保存头部（`SessionHeader`），再交给 `SessionStore::with_log`；续接会话时，后端按 `seq` 顺序读出头部与全部 `json`，组成 `LoadedSession` 交给 `SessionStore::load`，后者按打开文件的同一套规则校验每条记录。
 - `append` 在记录保存后才返回。同一 `seq` 已有记录时必须报错而不是覆盖，例如对 (会话 ID, `seq`) 建唯一约束，这样第二个写入者无法分叉同一会话。
-- `SessionStore` 先等 `append` 成功再更新内存。`append` 失败或 30 秒内未返回时，正在进行的运行以 `Error` 结束。此后，以及 `append` 的 future 在等待中被丢弃（结果未知）之后，这个 `SessionStore` 不再写入，之后的运行在第一次写入时同样以 `Error` 结束；要继续，需按存储中的实际内容重新加载。
+- `SessionStore` 先等 `append` 成功再更新内存。`append` 失败或 30 秒内未返回时，正在进行的运行以 `Error` 结束。此后，以及 `append` 的 future 在等待中被丢弃（结果未知）之后，这个 `SessionStore` 不再写入，之后的运行在第一次写入时同样以 `Error` 结束；要继续，需按存储中的实际内容重新加载。原因可用 `SessionStore::writes_stopped()` 或空闲时的 `AgentSession::writes_stopped()` 查询，`WritesStopped` 区分结果未知（`Interrupted`、`TimedOut`）、写入失败（`Failed`）与只读快照（`ReadOnly`）。
+- 超时只对会让出执行权的 `append` 有效：卡在同步 I/O 里的实现会一直占住它所在的线程。内置的 JSONL 文件在自己的写入线程上写入，所以卷卡住时超时照样生效。
 
 可运行的完整示例见 `session::SessionLog` 的 Rustdoc（`cargo test` 会执行）。`Runner::session()` 返回当前会话的只读借用。
 
@@ -567,11 +568,11 @@ cargo fmt --check
 | `tests/profiles_cli.rs` | profile 覆盖、显式默认值、预算参数的 help 写明取自 profile、不可绕过的 deny、上下文范围与审计、上下文默认值与越界链接、`--system-prompt-file` 兼容、skill 懒加载与脱敏、配置错误（含 provider 参数）退出码且不建会话文件 |
 | `tests/run_cli.rs` | `run` 在 P0 之后新增的约定：进度与报告行转义终端控制字符；另一个 `run` 正在写的会话文件不能再被打开写入；JSONL 事件的信封（原有 `run` 测试仍在 `tests/cli.rs`） |
 | `tests/session_compaction.rs`、`tests/compaction.rs` | v1/v2 追加升级、分支和引用、原始投影、省略保留边界后摘要仍生效、编辑摘要的变换计划在写入前被拒绝、摘要失败与取消、请求 / 用量预算、超时和上限 |
-| `tests/request_audit.rs` | 每次任务与摘要请求可从会话文件还原、配置只在变化时追加、旧会话首次请求前升级、与投影不一致的请求不记录 |
+| `tests/request_audit.rs` | 每次任务与摘要请求可从会话文件还原、配置只在变化时追加、旧会话首次请求前升级、与投影不一致的请求不记录、固定会话文件的还原结果不变（版本守护） |
 | `tests/executor.rs` | 执行器接缝：bash 与 read_file 只经自身执行器运行命令和读文件，命令的 6 种结束方式均正确报告 |
 | `tests/container.rs` | 容器执行：用假 docker 程序验证启动参数与失败报告、命令与读文件的转发、超时 / 取消 / 丢弃后的清理、CLI 接线与配置错误；设置 `ZX_DOCKER_TEST_IMAGE` 时另对真实 Docker 验证用户、只读工作目录与无网络、命令进程树与 `setsid` 子进程的终止、清理不受命令写入影响、命令逐条执行、容器内读文件、chat 中 Ctrl-C 后容器仍在、zx-agent 正常结束或被 SIGKILL 后容器删除（CI 在 Linux 上用 `debian:bookworm-slim` 运行）；另验证 root 用户与工作目录内的会话文件被拒绝 |
 | `tests/crash_recovery.rs` | 内置工具的副作用声明、开始记录先于执行（串行与并行批次）、中断批次的四种恢复结果且不重放、失败或取消的回答中的调用记为未执行、恢复事件在结果写入之后、旧格式会话、丢弃 future 后的同进程恢复、`run` 的 `[recover]` 输出；Unix 上 SIGKILL 掉正在执行命令的 `run`，再由下一次 `run` 恢复且不重放 |
-| `tests/output_store.rs` | 先脱敏后落盘、UUID 边界、文件权限、UTF-8 分页、容量、取消、写盘失败时保留内联结果、目录越界与 `.gitignore` |
+| `tests/output_store.rs` | 先脱敏后落盘、UUID 边界、文件权限、UTF-8 分页、容量、取消、写盘失败或超时时保留内联结果、目录越界与 `.gitignore` |
 | `tests/hooks.rs`、`tests/hooks_cli.rs` | 钩子组合与失败处理、审批范围与取消、审计变换、输入钩子被取消或运行被丢弃时不写入输入且插话留在队列、策略结论与审批事件（询问、会话内授权、拒绝、失败、超时、取消、等待时长）、观察者默认跳过增量、钩子上下文（会话、运行、工作目录与取消信号）、具名钩子、按阶段执行与先注册的脱敏仍在扩展之后、重名或声明名不一致的工具在请求前被拒绝、工具元数据 panic 时运行失败、`observes` 的 panic 被报告且运行继续、钩子不能追加 system 消息、工具取消自己的令牌不影响运行、续写预算、工具输出脱敏的 CLI 接线 |
 | `tests/hook_contract.rs` | 钩子输入输出的 JSON 契约：策略结论、回合决定、上下文编辑、审批及其请求、工具输出与调用、钩子上下文、回合摘要 |
 | `tests/real_api.rs` | 真实模型 API（付费，默认跳过）：文本回答与用量、工具往返、策略拒绝、输出截断、恢复会话、无效 key 不重试 |

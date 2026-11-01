@@ -229,6 +229,26 @@ async fn file_caps_bound_both_writes_and_reads_and_invalid_utf8_is_refused() {
 }
 
 #[tokio::test]
+async fn a_result_not_stored_in_time_stays_inline() {
+    let dir = tempfile::tempdir().unwrap();
+    let (hook, _) = parts(dir.path());
+    // Writes go through Tokio's blocking pool, so none finishes within no time at all.
+    let hook = hook.write_timeout(std::time::Duration::ZERO);
+
+    let output = hook
+        .after_tool(&call("bash"), ToolOutput::ok("x".repeat(500)), &common::hook_context())
+        .await
+        .unwrap();
+
+    assert!(output.content.starts_with(&"x".repeat(500)), "{}", output.content);
+    assert!(
+        output.content.contains("[not stored: storing took longer than 0ns"),
+        "{}",
+        output.content
+    );
+}
+
+#[tokio::test]
 async fn paging_tools_are_exempt_and_disabled_spilling_is_a_noop() {
     let dir = tempfile::tempdir().unwrap();
     let (hook, _) = parts(dir.path());

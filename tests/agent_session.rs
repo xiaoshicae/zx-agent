@@ -596,6 +596,40 @@ async fn a_bounded_subscription_receives_the_events_in_order() {
     assert_eq!(stream.dropped(), 0);
 }
 
+/// Refuses every record, like a database that no longer accepts writes.
+struct RefusingLog;
+
+#[async_trait]
+impl zx_agent::session::SessionLog for RefusingLog {
+    async fn append(&mut self, _record: &zx_agent::session::LogRecord<'_>) -> anyhow::Result<()> {
+        anyhow::bail!("the database is read-only")
+    }
+}
+
+#[tokio::test]
+async fn a_session_reports_why_it_stopped_writing() {
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
+    let (runner, _) = RunnerSetup {
+        session: SessionStore::with_log(header(), Box::new(RefusingLog)),
+        ..RunnerSetup::new(config(provider, vec![]))
+    }
+    .build();
+    let session = AgentSession::from(runner);
+    assert_eq!(session.writes_stopped().unwrap(), None);
+
+    let report = session.prompt("go").await.unwrap();
+
+    assert_eq!(report.outcome, RunOutcome::Error);
+    assert!(
+        matches!(
+            session.writes_stopped().unwrap(),
+            Some(zx_agent::session::WritesStopped::Failed(error)) if error.contains("the database is read-only")
+        ),
+        "{:?}",
+        session.writes_stopped()
+    );
+}
+
 #[tokio::test]
 async fn a_bounded_subscription_ends_when_the_session_is_dropped() {
     let (session, _, _) = setup([FauxStep::text("done")]);

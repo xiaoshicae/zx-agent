@@ -53,6 +53,12 @@ impl Config {
             self.trigger_bytes.is_none_or(|bytes| bytes > self.keep_recent_bytes),
             "triggerBytes must exceed keepRecentBytes (or be zero to disable auto compaction)"
         );
+        // The first summary reads about what precedes the kept recent messages.
+        ensure!(
+            self.trigger_bytes
+                .is_none_or(|bytes| bytes - self.keep_recent_bytes <= MAX_SOURCE_BYTES),
+            "triggerBytes may exceed keepRecentBytes by at most {MAX_SOURCE_BYTES} bytes, the most a summary reads"
+        );
         ensure!(
             self.max_summary_tokens > 0 && self.max_summary_tokens <= 16_384,
             "maxSummaryTokens must be 1..=16384"

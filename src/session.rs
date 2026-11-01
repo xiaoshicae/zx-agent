@@ -26,6 +26,7 @@ pub use recovery::{InterruptedToolCall, StartRecord, ToolCallStartedEntry};
 pub use request::{RequestConfig, RequestConfigEntry, RequestSource, RequestStartedEntry};
 
 use std::collections::HashMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -48,11 +49,36 @@ pub const SESSION_VERSION: u32 = 4;
 /// A file append finishes long before; a timed-out append stops writing, like a failed one.
 const APPEND_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Why writing stopped when an append was dropped while it waited for its log.
-const INTERRUPTED: &str = "an earlier append was interrupted before its log answered, so its outcome is unknown";
+/// Why a store no longer writes. Each case asks for something different before a session can
+/// be written again, so hosts such as a server that keeps sessions open can match on it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WritesStopped {
+    /// An append was dropped while it waited for its log, so the log may or may not hold the
+    /// record. Open the session again from its storage before writing.
+    Interrupted,
+    /// An append did not finish within this time; its outcome is unknown, as above.
+    TimedOut(Duration),
+    /// An append failed with this error. Remove the cause, then open the session again.
+    Failed(String),
+    /// The store is a snapshot from [`SessionStore::read`], which never writes.
+    ReadOnly,
+}
 
-/// Why a snapshot from [`SessionStore::read`] does not write.
-const READ_ONLY: &str = "it was read as a snapshot, which is read-only";
+impl fmt::Display for WritesStopped {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Interrupted => {
+                f.write_str("an earlier append was interrupted before its log answered, so its outcome is unknown")
+            }
+            Self::TimedOut(timeout) => write!(
+                f,
+                "an earlier append did not finish within {timeout:?}, so its outcome is unknown"
+            ),
+            Self::Failed(error) => write!(f, "an earlier write failed: {error}"),
+            Self::ReadOnly => f.write_str("it was read as a snapshot, which is read-only"),
+        }
+    }
+}
 
 /// First line of a session file. Records where and with which model the session started.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -202,9 +228,8 @@ pub struct ProjectedMessage {
 pub struct SessionStore {
     path: Option<PathBuf>,
     log: Option<Box<dyn SessionLog>>,
-    /// Why this store no longer writes: an append failed or did not finish, or the store is
-    /// a read-only snapshot.
-    stopped: Option<String>,
+    /// Why this store no longer writes, if it does not.
+    stopped: Option<WritesStopped>,
     append_timeout: Duration,
     header: SessionHeader,
     format_version: u32,
@@ -306,8 +331,14 @@ impl SessionStore {
         let loaded = file::read(path)?;
         let mut store = Self::replay(loaded).map_err(|error| anyhow!("{}: {error:#}", path.display()))?;
         store.path = Some(path.to_path_buf());
-        store.stopped = Some(READ_ONLY.into());
+        store.stopped = Some(WritesStopped::ReadOnly);
         Ok(store)
+    }
+
+    /// Why this store no longer writes, or `None` while it does. Every append fails from
+    /// then on; [`WritesStopped`] says what to do before writing the session again.
+    pub fn writes_stopped(&self) -> Option<&WritesStopped> {
+        self.stopped.as_ref()
     }
 
     /// A session that writes entries to `writer` instead of a file, so tests can make writes
@@ -365,11 +396,32 @@ impl SessionStore {
     /// System and synthetic summary messages cannot be edited directly. Editing a
     /// summary's original evidence invalidates it and restores the original projection.
     pub async fn append_context_edit(&mut self, target_id: &str, replacement: Option<String>) -> Result<String> {
-        match self.get(target_id) {
-            Some(Entry::Message(entry)) if matches!(entry.message, Message::System(_)) => {
-                bail!("entry {target_id} is a system message; record prompt changes as new system messages")
-            }
-            Some(Entry::Message(_)) => {}
+        let entry = Entry::ContextEdit(ContextEditEntry {
+            id: self.new_id(),
+            parent_id: self.leaf.clone(),
+            timestamp: now_ms(),
+            target_id: target_id.to_string(),
+            replacement,
+        });
+        self.append(entry).await
+    }
+
+    /// The rules an edit follows, when it is appended and when a session is loaded: it
+    /// targets an earlier message on its own branch, not a system message (prompt changes
+    /// are new system messages), and a text replacement does not erase tool calls, whose
+    /// results would otherwise lose their call.
+    fn validate_context_edit(&self, edit: &ContextEditEntry) -> Result<()> {
+        let target = edit.target_id.as_str();
+        match self.get(target) {
+            Some(Entry::Message(entry)) => match &entry.message {
+                Message::System(_) => {
+                    bail!("entry {target} is a system message; record prompt changes as new system messages")
+                }
+                Message::Assistant(answer) if edit.replacement.is_some() && !answer.tool_calls().is_empty() => {
+                    bail!("entry {target} has tool calls, which a text replacement would erase")
+                }
+                Message::Assistant(_) | Message::User { .. } | Message::ToolResult(_) => {}
+            },
             Some(
                 Entry::ContextEdit(_)
                 | Entry::FormatUpgrade(_)
@@ -379,20 +431,17 @@ impl SessionStore {
                 | Entry::RequestConfig(_)
                 | Entry::RequestStarted(_)
                 | Entry::ToolCallStarted(_),
-            ) => bail!("entry {target_id} is not a message"),
-            None => bail!("entry {target_id} not found"),
+            ) => bail!("entry {target} is not a message"),
+            None => bail!("entry {target} not found"),
         }
-        if !self.branch_path().iter().any(|entry| entry.id() == target_id) {
-            bail!("entry {target_id} is not on the active branch");
+        let mut ancestor = edit.parent_id.as_deref();
+        while let Some(id) = ancestor {
+            if id == target {
+                return Ok(());
+            }
+            ancestor = self.get(id).and_then(Entry::parent_id);
         }
-        let entry = Entry::ContextEdit(ContextEditEntry {
-            id: self.new_id(),
-            parent_id: self.leaf.clone(),
-            timestamp: now_ms(),
-            target_id: target_id.to_string(),
-            replacement,
-        });
-        self.append(entry).await
+        bail!("entry {target} is not on the edit's branch")
     }
 
     /// Move the leaf to an existing entry. The next append starts a new branch there.
@@ -479,18 +528,16 @@ impl SessionStore {
             };
             // Until the log answers, the outcome is unknown. If this future is dropped while
             // waiting, the reason stays and nothing more is written.
-            self.stopped = Some(INTERRUPTED.into());
+            self.stopped = Some(WritesStopped::Interrupted);
             match tokio::time::timeout(self.append_timeout, log.append(&record)).await {
                 Ok(Ok(())) => self.stopped = None,
                 Ok(Err(error)) => {
-                    self.stopped = Some(format!("an earlier write failed: {error:#}"));
+                    self.stopped = Some(WritesStopped::Failed(format!("{error:#}")));
                     return Err(error.context("cannot write session entry"));
                 }
                 Err(_) => {
                     let timeout = self.append_timeout;
-                    self.stopped = Some(format!(
-                        "an earlier append did not finish within {timeout:?}, so its outcome is unknown"
-                    ));
+                    self.stopped = Some(WritesStopped::TimedOut(timeout));
                     bail!("cannot write session entry: the log did not answer within {timeout:?}");
                 }
             }
@@ -607,6 +654,64 @@ mod tests {
         async fn append(&mut self, _record: &LogRecord<'_>) -> Result<()> {
             std::future::pending().await
         }
+    }
+
+    #[tokio::test]
+    async fn a_text_replacement_cannot_erase_tool_calls() {
+        let mut store = SessionStore::in_memory(header());
+        store.append_message(Message::user("q")).await.unwrap();
+        let mut answer = AssistantMessage::failure("p", "m", StopReason::ToolUse, "");
+        answer.error_message = None;
+        answer.content = vec![ContentBlock::ToolCall {
+            id: "c1".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({}),
+            arguments_error: None,
+        }];
+        let target = store.append_message(Message::Assistant(answer)).await.unwrap();
+
+        let error = store
+            .append_context_edit(&target, Some("no calls".into()))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("tool calls"), "{error}");
+        store.append_context_edit(&target, None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn opening_rejects_a_context_edit_of_a_system_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let mut store = SessionStore::create(&path, header()).unwrap();
+        let system = store
+            .append_message(Message::System(crate::ai::SystemMessage {
+                sections: vec![crate::ai::SectionChange {
+                    name: "preamble".into(),
+                    content: Some("rules".into()),
+                }],
+                timestamp: 0,
+            }))
+            .await
+            .unwrap();
+        store.append_message(Message::user("q")).await.unwrap();
+        let leaf = store.leaf.clone();
+        drop(store);
+        // Written by another program, or by hand: appending through the store refuses it.
+        let edit = Entry::ContextEdit(ContextEditEntry {
+            id: "edit".into(),
+            parent_id: leaf,
+            timestamp: 0,
+            target_id: system,
+            replacement: None,
+        });
+        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(file, "{}", serde_json::to_string(&edit).unwrap()).unwrap();
+        drop(file);
+
+        let error = SessionStore::open(&path).err().expect("the edit must be refused");
+
+        assert!(format!("{error:#}").contains("system message"), "{error:#}");
     }
 
     #[tokio::test]
@@ -750,6 +855,62 @@ mod tests {
         store.log = Some(Box::new(JsonlFile::with_writer(Box::new(std::io::sink()))));
         let later = store.append_message(Message::user("later")).await.unwrap_err();
         assert!(later.to_string().contains("outcome is unknown"), "{later}");
+    }
+
+    #[tokio::test]
+    async fn why_writes_stopped_can_be_told_apart() {
+        assert_eq!(SessionStore::in_memory(header()).writes_stopped(), None);
+
+        let mut failed = SessionStore::with_writer(header(), Box::new(FailingWriter));
+        failed.append_message(Message::user("q")).await.unwrap_err();
+        assert_eq!(
+            failed.writes_stopped(),
+            Some(&WritesStopped::Failed("disk full".into()))
+        );
+
+        let mut silent = SessionStore::with_log(header(), Box::new(Unresponsive));
+        silent.append_timeout = Duration::from_millis(10);
+        silent.append_message(Message::user("q")).await.unwrap_err();
+        assert_eq!(
+            silent.writes_stopped(),
+            Some(&WritesStopped::TimedOut(Duration::from_millis(10)))
+        );
+
+        let mut dropped = SessionStore::with_log(header(), Box::new(Unresponsive));
+        assert!(dropped.append_message(Message::user("q")).now_or_never().is_none());
+        assert_eq!(dropped.writes_stopped(), Some(&WritesStopped::Interrupted));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        drop(SessionStore::create(&path, header()).unwrap());
+        assert_eq!(
+            SessionStore::read(&path).unwrap().writes_stopped(),
+            Some(&WritesStopped::ReadOnly)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_file_write_that_blocks_times_out_without_stalling_the_runtime() {
+        /// Answers every write late, like a session volume that stopped answering; bounded,
+        /// so that a store that waits for it still ends.
+        struct Stuck;
+        impl std::io::Write for Stuck {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                std::thread::sleep(Duration::from_secs(2));
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut store = SessionStore::with_writer(header(), Box::new(Stuck));
+        store.append_timeout = Duration::from_millis(50);
+        let started = std::time::Instant::now();
+
+        let error = store.append_message(Message::user("q")).await.unwrap_err();
+
+        assert!(error.to_string().contains("did not answer within 50ms"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
     }
 
     #[tokio::test]

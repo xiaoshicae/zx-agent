@@ -246,7 +246,8 @@ impl SessionStore {
             ensure!(self.index.contains_key(parent), "entry parent {parent:?} not found");
         }
         match entry {
-            Entry::Message(_) | Entry::ContextEdit(_) => {}
+            Entry::Message(_) => {}
+            Entry::ContextEdit(edit) => self.validate_context_edit(edit)?,
             Entry::FormatUpgrade(upgrade) => {
                 ensure!(
                     upgrade.version >= self.format_version && upgrade.version <= SESSION_VERSION,
