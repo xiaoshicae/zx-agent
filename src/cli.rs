@@ -15,7 +15,7 @@ use zx_agent::compaction;
 use zx_agent::executor::{ContainerConfig, ContainerExecutor, Executor, LocalExecutor};
 use zx_agent::extensions::RedactSecrets;
 use zx_agent::output_store::{self, OutputStore, ReadOutputTool, SpillOutputs};
-use zx_agent::policy::{PolicyHook, Rule, RuleMatcher, RulePolicy};
+use zx_agent::policy::{AutoApprove, PolicyHook, Rule, RuleMatcher, RulePolicy};
 use zx_agent::profile::skills::{ReadSkillTool, TOOL_NAME};
 use zx_agent::profile::{Builtin, ContainerSettings, Execution, Profile};
 use zx_agent::prompt::{build_system_prompt, container_environment_section, environment_section};
@@ -148,6 +148,12 @@ pub(crate) struct BaseArgs {
     /// Extra substring to reject in bash commands. Repeatable.
     #[arg(long = "deny-cmd")]
     pub(crate) deny_cmd: Vec<String>,
+
+    /// Command prefix for bash that runs without asking where bash needs approval, as in
+    /// chat, e.g. --auto-approve-cmd "kubectl get". Repeatable; replaces the profile's list.
+    /// Commands with shell syntax, the word "secret", a URL or a connection option still ask.
+    #[arg(long = "auto-approve-cmd")]
+    pub(crate) auto_approve_cmd: Vec<String>,
 
     /// Embedded profile name (troubleshoot, assistant) or path to a TOML file.
     #[arg(long)]
@@ -302,6 +308,8 @@ pub(crate) struct PreparedSession {
     pub(crate) retry: RetryPolicy,
     pub(crate) store: SessionStore,
     pub(crate) redactor: RedactSecrets,
+    /// The profile's auto-approved commands, for frontend policies that also ask for bash.
+    pub(crate) auto_approve: AutoApprove,
     pub(crate) limits: Limits,
     pub(crate) continue_on_length: u32,
     pub(crate) compaction: compaction::Config,
@@ -351,6 +359,9 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
         profile.rules.allow.clone_from(&options.base.allow_cmd);
     }
     profile.rules.deny.extend_from_slice(&options.base.deny_cmd);
+    if !options.base.auto_approve_cmd.is_empty() {
+        profile.rules.auto_approve.clone_from(&options.base.auto_approve_cmd);
+    }
     if let Some(instructions) = options.instructions {
         profile.instructions = instructions.to_string();
     }
@@ -504,6 +515,9 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
         sequential_tools: false,
     });
     config.hooks.push(PolicyHook::new(Arc::new(policy)));
+    // Every policy that asks for bash approval gets the list: the strictest verdict of all
+    // policies wins, so one that still asked would cancel the others' auto-approval.
+    let auto_approve = AutoApprove::new(&profile.rules.auto_approve);
     let mut rules = Vec::new();
     for tool in profile.rules.deny_tools {
         rules.push(Rule {
@@ -522,7 +536,9 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
             matcher: RuleMatcher::Any,
             decision: Decision::Allow,
         });
-        config.hooks.push(PolicyHook::new(Arc::new(RulePolicy::new(rules))));
+        config.hooks.push(PolicyHook::new(Arc::new(
+            RulePolicy::new(rules).auto_approve(auto_approve.clone()),
+        )));
     }
     Ok(PreparedSession {
         config,
@@ -532,6 +548,7 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
         },
         store: session,
         redactor: RedactSecrets::new(api_key),
+        auto_approve,
         limits: profile.limits,
         continue_on_length: profile.continue_on_length,
         compaction: profile.compaction,

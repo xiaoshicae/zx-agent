@@ -633,6 +633,73 @@ async fn a_policy_denial_cannot_be_overridden_by_an_approval_command() {
 }
 
 #[tokio::test]
+async fn listed_read_only_commands_run_without_approval() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("app.log"), "ok\nerror: disk full\n").unwrap();
+    let server = MockServer::start(vec![
+        Reply::bash("c", "grep error app.log | head -n 1"),
+        Reply::text("done"),
+    ])
+    .await;
+    let output = run(&server, dir.path(), &["--tools", "bash"], "go\n/quit\n").await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(!stderr(&output).contains("[approval"), "{}", stderr(&output));
+    assert!(
+        server.requests()[1].body["messages"]
+            .to_string()
+            .contains("error: disk full")
+    );
+}
+
+#[tokio::test]
+async fn listed_commands_still_ask_when_they_mention_secrets_or_redirect() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("app.log"), "line\n").unwrap();
+    let server = MockServer::start(vec![
+        Reply::bash("c1", "grep secret app.log"),
+        Reply::bash("c2", "head -n 1 app.log > copy"),
+        Reply::text("done"),
+    ])
+    .await;
+    let output = run(
+        &server,
+        dir.path(),
+        &["--tools", "bash"],
+        "go\n/deny 1 no\n/deny 2 no\n/quit\n",
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stderr(&output).contains("[approval 1]"));
+    assert!(stderr(&output).contains("[approval 2]"));
+    assert!(!dir.path().join("copy").exists());
+}
+
+#[tokio::test]
+async fn the_auto_approve_flag_replaces_the_profile_list() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("app.log"), "line\n").unwrap();
+    let server = MockServer::start(vec![
+        Reply::bash("c1", "printf flagged"),
+        Reply::bash("c2", "head -n 1 app.log"),
+        Reply::text("done"),
+    ])
+    .await;
+    let output = run(
+        &server,
+        dir.path(),
+        &["--tools", "bash", "--auto-approve-cmd", "printf"],
+        "go\n/deny 1 no\n/quit\n",
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(server.requests()[1].body["messages"].to_string().contains("flagged"));
+    // head is no longer listed, so it is the run's first approval request.
+    assert!(stderr(&output).contains("[approval 1]"));
+    assert!(stderr(&output).contains("head -n 1 app.log"));
+    assert!(!stderr(&output).contains("[approval 2]"));
+}
+
+#[tokio::test]
 async fn eof_during_approval_never_executes_the_tool_or_hangs_shutdown() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::bash("c", "printf no > marker")]).await;

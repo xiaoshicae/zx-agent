@@ -65,20 +65,28 @@ impl Rule {
 }
 
 /// Deny rules are tried before Ask, then Allow; registration order breaks ties.
-/// A call with no matching rule is denied.
+/// A call with no matching rule is denied. With an [`AutoApprove`] list, an Ask verdict for
+/// a bash command the list covers becomes Allow; Deny verdicts are never changed.
 pub struct RulePolicy {
     rules: Vec<Rule>,
+    auto_approve: AutoApprove,
 }
 
 impl RulePolicy {
     pub fn new(rules: Vec<Rule>) -> Self {
-        Self { rules }
+        Self {
+            rules,
+            auto_approve: AutoApprove::default(),
+        }
     }
-}
 
-#[async_trait]
-impl ToolPolicy for RulePolicy {
-    async fn check(&self, tool_name: &str, args: &Value) -> Decision {
+    /// Let bash commands covered by `list` run where a rule of this policy would ask.
+    pub fn auto_approve(mut self, list: AutoApprove) -> Self {
+        self.auto_approve = list;
+        self
+    }
+
+    fn rule_verdict(&self, tool_name: &str, args: &Value) -> Decision {
         for priority in 0..3 {
             for rule in &self.rules {
                 let rank = match rule.decision {
@@ -92,6 +100,22 @@ impl ToolPolicy for RulePolicy {
             }
         }
         Decision::Deny(format!("no policy rule permits {tool_name:?}"))
+    }
+}
+
+#[async_trait]
+impl ToolPolicy for RulePolicy {
+    async fn check(&self, tool_name: &str, args: &Value) -> Decision {
+        let verdict = self.rule_verdict(tool_name, args);
+        let covered = tool_name == BASH
+            && args
+                .get("command")
+                .and_then(Value::as_str)
+                .is_some_and(|command| self.auto_approve.covers(command));
+        if covered && matches!(verdict, Decision::Ask(_)) {
+            return Decision::Allow;
+        }
+        verdict
     }
 }
 
@@ -171,10 +195,7 @@ impl CommandPolicy {
             if segment.is_empty() {
                 return Decision::Deny("empty pipeline segment (is '||' used?)".to_string());
             }
-            let allowed = self
-                .allow_prefixes
-                .iter()
-                .any(|prefix| segment == prefix || segment.starts_with(&format!("{prefix} ")));
+            let allowed = self.allow_prefixes.iter().any(|prefix| begins_with(segment, prefix));
             if !allowed {
                 // An odd number of quotes means the split happened inside a quoted string.
                 let split_quote = segment.matches('"').count() % 2 == 1 || segment.matches('\'').count() % 2 == 1;
@@ -226,6 +247,71 @@ impl ToolPolicy for CommandPolicy {
             None => Decision::Deny("missing \"command\" argument".to_string()),
         }
     }
+}
+
+/// Options that send a request, and the credentials attached to it, to a server other than
+/// the configured one. kubectl v1.36.1 sent the kubeconfig token to an HTTPS address given
+/// with `--server` (docs/p6-online-access-review.md, appendix 9.3, K1).
+const CONNECTION_OPTIONS: &[&str] = &["--server", "--kubeconfig", "--token", "--insecure-skip-tls-verify"];
+
+/// Bash commands that run without asking where a rule would otherwise ask for approval.
+///
+/// A command is covered only when it is a plain `|` pipeline whose every segment starts with
+/// a listed prefix, compared like the allowlist (whitespace collapsed, lowercased), and it
+/// contains none of these: the syntax the allowlist rejects, the word `secret`, a URL
+/// (`://`), a connection option (`--server`, `--kubeconfig`, `--token`,
+/// `--insecure-skip-tls-verify`), or, in a kubectl segment, a short option containing `s`,
+/// which covers `-s` in every spelling. Like the allowlist the check is lexical: it decides
+/// only whether to ask, and never turns a denial into an approval.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AutoApprove {
+    prefixes: Vec<String>,
+}
+
+impl AutoApprove {
+    /// Commands starting with one of `prefixes`, such as `kubectl get`. An empty list covers
+    /// no command.
+    pub fn new(prefixes: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
+        Self {
+            prefixes: prefixes
+                .into_iter()
+                .map(|p| normalize(p.as_ref()))
+                .filter(|p| !p.is_empty())
+                .collect(),
+        }
+    }
+
+    /// Whether `command` may run without asking.
+    pub fn covers(&self, command: &str) -> bool {
+        if self.prefixes.is_empty() || ALLOWLIST_FORBIDDEN.iter().any(|token| command.contains(token)) {
+            return false;
+        }
+        let normalized = normalize(command);
+        if normalized.contains("secret") || normalized.contains("://") {
+            return false;
+        }
+        normalized
+            .split('|')
+            .map(str::trim)
+            .all(|segment| self.prefixes.iter().any(|prefix| begins_with(segment, prefix)) && !redirects(segment))
+    }
+}
+
+/// Whether a normalized pipeline segment passes an option that can send its request elsewhere.
+fn redirects(segment: &str) -> bool {
+    let kubectl = segment.split(' ').next() == Some("kubectl");
+    segment.split(' ').any(|word| {
+        CONNECTION_OPTIONS.iter().any(|option| word.starts_with(option))
+            // Only for kubectl: elsewhere short options mean other things (jq -s, grep -s).
+            || (kubectl && word.starts_with('-') && !word.starts_with("--") && word.contains('s'))
+    })
+}
+
+/// Whether a normalized pipeline segment starts with `prefix` at a word boundary.
+fn begins_with(segment: &str, prefix: &str) -> bool {
+    segment
+        .strip_prefix(prefix)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
 }
 
 fn normalize(text: &str) -> String {
@@ -378,6 +464,104 @@ mod tests {
             policy.check("bash", &serde_json::json!({"command": "ls\t-a"})).await,
             Decision::Allow
         );
+    }
+
+    #[test]
+    fn auto_approval_covers_listed_read_only_pipelines() {
+        let list = AutoApprove::new(["kubectl get", "grep", "jq"]);
+        for command in [
+            "kubectl get pods -A | grep -v Running",
+            "KUBECTL  get\tpods -n prod",
+            "kubectl get pods -o json | jq -s .",
+            "grep -s error app.log",
+        ] {
+            assert!(list.covers(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn auto_approval_asks_for_commands_beyond_the_list() {
+        let list = AutoApprove::new(["kubectl get", "grep"]);
+        for command in [
+            "kubectl delete pod x",
+            "kubectl get pods | kubectl delete pod x",
+            "grepx error",
+            "grep a || grep b",
+            "kubectl get pods; rm x",
+            "kubectl get pods && rm x",
+            "grep x $(cat list)",
+            "grep x app.log > copy",
+            "grep a\nrm b",
+        ] {
+            assert!(!list.covers(command), "{command}");
+        }
+        assert!(!AutoApprove::default().covers("grep x"));
+    }
+
+    #[test]
+    fn auto_approval_asks_for_secrets_urls_and_connection_options() {
+        let list = AutoApprove::new(["kubectl get", "grep"]);
+        for command in [
+            "kubectl get secret db -o yaml",
+            "kubectl get SECRETS -A",
+            "kubectl get -f https://example.com/pods.yaml",
+            "kubectl get pods --server=https://example.com",
+            "kubectl get pods --server example.com:443",
+            "kubectl get pods -s example.com:443",
+            "kubectl get pods -sexample.com:443",
+            "kubectl get pods -As example.com:443",
+            "kubectl get pods --kubeconfig /tmp/other",
+            "kubectl get pods --token abc",
+            "kubectl get pods --insecure-skip-tls-verify",
+            "grep --server x app.log",
+        ] {
+            assert!(!list.covers(command), "{command}");
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_approval_turns_only_a_bash_ask_into_allow() {
+        let policy = RulePolicy::new(vec![
+            Rule {
+                matcher: RuleMatcher::Tool("bash".into()),
+                decision: Decision::Ask("approve bash".into()),
+            },
+            Rule {
+                matcher: RuleMatcher::Any,
+                decision: Decision::Ask("approve any".into()),
+            },
+        ])
+        .auto_approve(AutoApprove::new(["ls"]));
+        assert_eq!(
+            policy.check("bash", &serde_json::json!({"command": "ls -a"})).await,
+            Decision::Allow
+        );
+        assert_eq!(
+            policy.check("bash", &serde_json::json!({"command": "rm x"})).await,
+            Decision::Ask("approve bash".into())
+        );
+        assert_eq!(
+            policy.check("bash", &serde_json::json!({})).await,
+            Decision::Ask("approve bash".into())
+        );
+        assert_eq!(
+            policy.check("read_file", &serde_json::json!({"command": "ls"})).await,
+            Decision::Ask("approve any".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_approval_never_overrides_a_denial() {
+        let list = AutoApprove::new(["ls"]);
+        let ls = serde_json::json!({"command": "ls -a"});
+        let denied_by_rule = RulePolicy::new(vec![Rule {
+            matcher: RuleMatcher::CommandPrefix("ls".into()),
+            decision: Decision::Deny("denied".into()),
+        }])
+        .auto_approve(list.clone());
+        assert_eq!(denied_by_rule.check("bash", &ls).await, Decision::Deny("denied".into()));
+        let unmatched = RulePolicy::new(Vec::new()).auto_approve(list);
+        assert!(denied(unmatched.check("bash", &ls).await));
     }
 
     #[tokio::test]

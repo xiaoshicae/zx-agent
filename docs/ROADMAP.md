@@ -154,7 +154,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P3 | 终端对话 `chat` | 已完成（PR #5） |
 | P4 | profile 文件、上下文文件与 skills | 已完成（PR #6） |
 | P5 | 上下文管理 | 已完成（PR #9） |
-| P6 | 执行环境与崩溃恢复 | 进行中：崩溃恢复（PR #12）、执行环境接缝（PR #13）、离线容器执行（PR #14）已完成；在线访问的网络与凭据范围待评审 |
+| P6 | 执行环境与崩溃恢复 | 进行中：崩溃恢复（PR #12）、执行环境接缝（PR #13）、离线容器执行（PR #14）已完成；在线访问评审稿已合入（PR #17），一期实施中：只读命令自动放行已完成（PR #19） |
 | P7 | 插件与 MCP | 未开始；前置设计草案待评审 |
 | P8 | 嵌入协议 `acp` | 未开始 |
 | P9 | 可选增强 | 未开始 |
@@ -349,10 +349,30 @@ P5 实施约定（2026-11-01）：
 - [x] profile 的 `execution` 增加容器选项（D5：显式开启，默认仍为本机；PR #14）
 - [x] `ContainerExecutor`：每个进程创建一个沙箱容器（2026-11-01 由“每次运行”调整，见上方约定；网络默认拒绝，在线任务按评审方案限制访问范围；只读根文件系统、非 root、去掉全部 capability、进程数与内存上限）；每条命令通过 `docker exec` 执行；`read_file` 也在容器内读取；运行结束删除容器（离线部分已完成，PR #14；在线访问随下一项评审）
 - [ ] API key 和会话文件只留在 Agent 进程，不进入容器；工具需要的凭据以只读方式挂载（API key 与会话文件已完成，PR #14；凭据只读挂载随在线方案评审）
-- [ ] 列出在线排障所需的 API 地址、网络与凭据范围；无网络的容器只用于离线排障，在线场景的受限访问方案在实施前评审（评审稿：`docs/p6-online-access-review.md`，2026-11-01，待评审）
+- [ ] 列出在线排障所需的 API 地址、网络与凭据范围；无网络的容器只用于离线排障，在线场景的受限访问方案在实施前评审（评审稿 `docs/p6-online-access-review.md` 已合入，PR #17；2026-11-01 按用户要求实施一期，见下方“在线访问一期”）
 - [x] `Tool` trait 增加 `effects()`：只读或有副作用
 - [x] 有副作用的工具执行前追加 `tool_call_started` 条目；恢复时把“已开始、无结果”的调用标记为结果未知，不自动重放
 - [x] 首次写入 `tool_call_started` 前再次升级会话格式，兼容读取 P5 及更早版本
+
+在线访问一期（2026-11-01 起；评审稿合入后由用户要求推进，按其第 6 节分 PR 实施）：
+
+- [x] chat 只读命令自动放行：`rules.autoApprove` 与 `--auto-approve-cmd`，assistant 内置只读清单（已完成，PR #19）
+- [ ] 容器联网与 kubeconfig：`[container] network`、`[container] kubeconfig`，凭据登记脱敏
+- [ ] Linux 上保护 agent 的环境变量（`PR_SET_DUMPABLE`），ServiceAccount token 登记脱敏
+- [ ] Kubernetes 部署说明
+
+自动放行实施记录（2026-11-01，PR #19）：
+
+- 实现：`policy::AutoApprove` 判断命令能否不经审批执行，四个条件见评审稿 3.1。`RulePolicy::auto_approve` 把该策略对清单覆盖命令的 Ask 降为 Allow，Deny 不变。多个策略钩子取最严格的结论（`src/agent/hooks.rs`），所以 chat 自带的 bash 确认规则与 profile `askTools` 生成的规则都接入同一份清单。profile 的 `rules.autoApprove` 与 CLI 的 `--auto-approve-cmd` 都是替换语义，与 `allow` 一致。
+- 行为变化：chat（assistant）中清单内的只读命令不再请求审批，`profiles/assistant.md` 的说明随之调整；run（troubleshoot）没有 `askTools`，行为不变。
+- 新增 9 项测试：
+  - 策略单元测试 5 项：清单覆盖的管道；清单外的命令与 shell 语法；`secret`、URL 与连接参数；只把 bash 的 Ask 降为 Allow；不推翻拒绝。
+  - profile 单元测试 1 项：文件替换清单。
+  - `tests/chat_cli.rs` 3 项：只读命令不经审批；含 `secret` 或重定向的命令仍要审批；`--auto-approve-cmd` 替换清单。
+  - 原有 2 项 profile 测试补充了断言：内置清单；空规则报错。
+- 反向验证：分别去掉 chat 侧或 profile 侧的接入时，`tests/chat_cli.rs` 中两项自动放行测试都失败，另一项不受影响；修改已还原。
+- 本地 macOS 基于 `533b6d7`：stable 与 Rust 1.88 各 477 项通过（基线 468 项）、6 项付费测试跳过；格式、clippy、严格 Rustdoc 与 MSRV 全目标检查通过。`tests/cli.rs`、`Cargo.toml`、`Cargo.lock` 未改动，未新增依赖。
+- 未验证：清单中的 kubectl 命令没有在真实集群上执行，测试只用 `grep`、`head`、`printf`；规则只看字面，局限见评审稿缺口 ②。
 
 执行环境接缝验收（2026-11-01，已完成，PR #13）：`src/executor/` 提供 `Executor`、`ShellCommand`、`CommandOutput`、`CommandEnd` 与 `LocalExecutor`；bash 与 read_file 新增 `executor` 字段，默认 `LocalExecutor`，`..Default::default()` 的构造方式不受影响，按字段完整列出的字面量需补上新字段。本机执行代码从 bash 与 read_file 原样搬迁，bash 与 read_file 原有测试不改断言即通过（仅 read_file 测试中两处字面量补 `..ReadFileTool::default()`，bash 测试模块补一行 `use tokio::process::Command;`）。新增 `tests/executor.rs` 3 项，用记录请求的替身执行器验证：bash 把命令、目录、超时与隐藏变量交给执行器，并正确报告 6 种结束方式；read_file 经执行器读取解析后的路径与上限。反向验证：让工具绕过自身执行器时，3 项全部失败，修改已还原。本地 macOS 基于 `bb91974`，stable 与 Rust 1.88.0 各 416 项通过、6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过。`tests/cli.rs`、`Cargo.toml`、`Cargo.lock` 未改动。
 

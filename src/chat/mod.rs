@@ -83,10 +83,8 @@ async fn build(
         instructions: settings.instructions.as_deref(),
     })
     .await?;
-    prepared
-        .config
-        .hooks
-        .push(PolicyHook::new(Arc::new(RulePolicy::new(vec![
+    prepared.config.hooks.push(PolicyHook::new(Arc::new(
+        RulePolicy::new(vec![
             Rule {
                 matcher: RuleMatcher::Tool(BASH.into()),
                 decision: Decision::Ask("shell commands require interactive approval".into()),
@@ -95,7 +93,9 @@ async fn build(
                 matcher: RuleMatcher::Any,
                 decision: Decision::Allow,
             },
-        ]))));
+        ])
+        .auto_approve(prepared.auto_approve),
+    )));
     prepared
         .config
         .hooks

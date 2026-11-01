@@ -4,7 +4,8 @@
 |-|-|
 | 版本 | `v0.1` |
 | 日期 | `2026-11-01` |
-| 状态 | 草稿（待评审） |
+| 状态 | 已合入（PR #17）；2026-11-01 按用户要求实施一期，进度见 ROADMAP P6 |
+| 代码核对基线 | `e4a5235`；文中行号以此为准 |
 | Owner | 待指定 |
 | 对应 PRD | 无（技术驱动）；对应 `docs/ROADMAP.md` P6 的最后两项 |
 | Milestone | 一期：容器联网与 kubeconfig、chat 自动放行只读命令、凭据自动脱敏、Linux 上保护 agent 的环境变量、Kubernetes 部署说明<br>二期（按需）：按地址限制出网 |
@@ -130,7 +131,7 @@ zx-agent 把 kubeconfig 只读挂载进容器，为命令设置 `KUBECONFIG`，�
 | 管道的每一段都以清单中的前缀开头 | 沿用命令白名单的检查：合并空白、转小写后逐段比较（`src/policy.rs:169-177`、`src/policy.rs:231-232`） |
 | 不含 shell 语法 | 沿用白名单禁止的 `;`、`&`、`` ` ``、`$(`、`>`、`<` 和换行 |
 | 不含 `secret` | 读取 Secret 要确认 |
-| 不含 URL（`://`）和 kubectl 的连接参数 | 连接参数指 `--server`、`--kubeconfig`、`--token`、`--insecure-skip-tls-verify`，以及含字母 `s` 的单横线短参数（覆盖 `-s` 的各种写法）。实测 `--server` 指向其他 HTTPS 地址时，kubectl 把 kubeconfig 中的 token 发给了该地址（附录 9.3，K1） |
+| 不含 URL（`://`）和连接参数 | 连接参数指任何一段中的 `--server`、`--kubeconfig`、`--token`、`--insecure-skip-tls-verify`，以及 kubectl 段中含字母 `s` 的单横线短参数（覆盖 `-s` 的各种写法；其他程序的短参数含义不同，如 `jq -s`）。实测 `--server` 指向其他 HTTPS 地址时，kubectl 把 kubeconfig 中的 token 发给了该地址（附录 9.3，K1） |
 
 3. **内置清单**：`kubectl get`、`kubectl describe`、`kubectl logs`、`kubectl top`、`kubectl events`、`kubectl explain`、`kubectl api-resources`、`kubectl version`，以及 `grep`、`head`、`tail`、`wc`、`jq`。入选标准：不能执行其他程序、不能写文件。因此不收录：
    - `awk`：`system()` 能执行命令。
@@ -141,7 +142,7 @@ zx-agent 把 kubeconfig 只读挂载进容器，为命令设置 `KUBECONFIG`，�
    - `xargs`：运行其他命令。
    - `tee`：写文件。
    - `curl`：能发送任意请求。
-4. **实现位置**：`RulePolicy` 现在按 Deny → Ask → Allow 的顺序判断（`src/policy.rs:67-68`）。自动放行放在 Deny 之后、Ask 之前。
+4. **实现位置**：多个策略钩子的结论取最严格的一个，Deny 优先于 Ask，Ask 优先于 Allow（`src/agent/hooks.rs:328-338`）。因此自动放行不能另加一个返回 Allow 的钩子，而是让要求确认的策略对清单覆盖的 bash 命令不再要求确认：`RulePolicy::auto_approve` 把 Ask 降为 Allow，Deny 不变。chat 自带的 bash 确认规则和 profile 的 `askTools` 规则接入同一份清单。
 5. **影响范围**：只作用于需要确认的调用。run 本来就不对 bash 要求确认（内置 profile 的规则从空值开始，`src/profile/mod.rs:165`；`troubleshoot` 也没有设置），所以不受影响。
 6. **与 `rules.allow` 的区别**：`allow` 是“只能运行这些”，清单外的命令被拒绝；`autoApprove` 是“这些不用问”，清单外的命令仍可确认后执行。
 
