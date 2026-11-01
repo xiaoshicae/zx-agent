@@ -1,7 +1,7 @@
 //! Hook, approval and audit contracts, exercised through the public SDK.
 mod common;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -12,8 +12,8 @@ use tokio_util::sync::CancellationToken;
 
 use common::{EchoTool, RunnerSetup, config, fast_retry, header, read_lines, run_prompt, summarize};
 use zx_agent::agent::{
-    AgentEvent, ApprovalResult, ContextEdit, Decision, Event, HookChain, HookResult, Hooks, LoopOutcome, ToolOutput,
-    ToolVerdict, TurnDecision, TurnSummary,
+    AgentEvent, ApprovalResult, ContextEdit, Decision, Event, HookChain, HookContext, HookOptions, HookResult,
+    HookStage, Hooks, LoopOutcome, ToolOutput, ToolVerdict, TurnDecision, TurnSummary,
 };
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{EventReceiver, Message, Provider, Request, SectionChange, StopReason, SystemMessage, ToolCall};
@@ -26,7 +26,7 @@ use zx_agent::tools::BashTool;
 struct Verdict(Decision);
 #[async_trait]
 impl Hooks for Verdict {
-    async fn before_tool(&self, _call: &ToolCall) -> HookResult<Decision> {
+    async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<Decision> {
         Ok(self.0.clone())
     }
 }
@@ -94,7 +94,7 @@ async fn allow_once_and_session_approvals_have_different_scopes() {
 struct SwitchPolicy(Arc<AtomicBool>);
 #[async_trait]
 impl Hooks for SwitchPolicy {
-    async fn before_tool(&self, _call: &ToolCall) -> HookResult<Decision> {
+    async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<Decision> {
         Ok(if self.0.load(Ordering::SeqCst) {
             Decision::Deny("revoked".into())
         } else {
@@ -219,7 +219,7 @@ async fn cancellation_interrupts_a_pending_approval() {
 struct CountBefore(Arc<AtomicUsize>);
 #[async_trait]
 impl Hooks for CountBefore {
-    async fn before_tool(&self, _call: &ToolCall) -> HookResult<Decision> {
+    async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<Decision> {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(Decision::Ask("review".into()))
     }
@@ -250,7 +250,7 @@ async fn invalid_tool_arguments_are_rejected_before_policy_and_approval() {
 struct RewriteInput;
 #[async_trait]
 impl Hooks for RewriteInput {
-    async fn on_input(&self, text: String) -> HookResult<String> {
+    async fn on_input(&self, text: String, _ctx: &HookContext) -> HookResult<String> {
         Ok(text.to_uppercase())
     }
 }
@@ -258,7 +258,7 @@ impl Hooks for RewriteInput {
 struct Project;
 #[async_trait]
 impl Hooks for Project {
-    async fn transform_context(&self, messages: &[Message]) -> HookResult<Vec<ContextEdit>> {
+    async fn transform_context(&self, messages: &[Message], _ctx: &HookContext) -> HookResult<Vec<ContextEdit>> {
         assert_eq!(summarize(messages), ["user:old", "user:GO"]);
         Ok(vec![
             ContextEdit::Omit { index: 0 },
@@ -266,13 +266,15 @@ impl Hooks for Project {
                 index: 0,
                 text: "view:GO".into(),
             },
-            ContextEdit::Append(Message::System(SystemMessage {
-                sections: vec![SectionChange {
-                    name: "extension".into(),
-                    content: Some("logged".into()),
-                }],
-                timestamp: 0,
-            })),
+            ContextEdit::Append {
+                message: Message::System(SystemMessage {
+                    sections: vec![SectionChange {
+                        name: "extension".into(),
+                        content: Some("logged".into()),
+                    }],
+                    timestamp: 0,
+                }),
+            },
         ])
     }
 }
@@ -333,7 +335,7 @@ async fn input_and_context_changes_are_persisted_before_the_model_request() {
 struct InvalidPlan;
 #[async_trait]
 impl Hooks for InvalidPlan {
-    async fn transform_context(&self, _messages: &[Message]) -> HookResult<Vec<ContextEdit>> {
+    async fn transform_context(&self, _messages: &[Message], _ctx: &HookContext) -> HookResult<Vec<ContextEdit>> {
         Ok(vec![
             ContextEdit::Omit { index: 0 },
             ContextEdit::ReplaceText {
@@ -367,7 +369,7 @@ async fn an_invalid_edit_plan_is_rejected_before_any_partial_edit_or_request() {
 struct RejectInput;
 #[async_trait]
 impl Hooks for RejectInput {
-    async fn on_input(&self, _text: String) -> HookResult<String> {
+    async fn on_input(&self, _text: String, _ctx: &HookContext) -> HookResult<String> {
         Err("unsupported input".into())
     }
 }
@@ -397,7 +399,7 @@ async fn steering_queued_after_a_rejected_message_stays_queued_for_the_next_run(
     struct RejectMarked;
     #[async_trait]
     impl Hooks for RejectMarked {
-        async fn on_input(&self, text: String) -> HookResult<String> {
+        async fn on_input(&self, text: String, _ctx: &HookContext) -> HookResult<String> {
             if text == "reject-me" {
                 Err("rejected".into())
             } else {
@@ -424,7 +426,7 @@ async fn steering_queued_after_a_rejected_message_stays_queued_for_the_next_run(
 struct OmitEarlier;
 #[async_trait]
 impl Hooks for OmitEarlier {
-    async fn transform_context(&self, messages: &[Message]) -> HookResult<Vec<ContextEdit>> {
+    async fn transform_context(&self, messages: &[Message], _ctx: &HookContext) -> HookResult<Vec<ContextEdit>> {
         Ok((0..messages.len().saturating_sub(1))
             .map(|_| ContextEdit::Omit { index: 0 })
             .collect())
@@ -458,7 +460,7 @@ enum BadOutput {
 }
 #[async_trait]
 impl Hooks for BadOutput {
-    async fn after_tool(&self, _call: &ToolCall, _output: ToolOutput) -> HookResult<ToolOutput> {
+    async fn after_tool(&self, _call: &ToolCall, _output: ToolOutput, _ctx: &HookContext) -> HookResult<ToolOutput> {
         match self {
             Self::Error => Err("filter rejected".into()),
             Self::Panic => panic!("filter bug"),
@@ -496,7 +498,13 @@ async fn failed_output_hooks_withhold_raw_results_from_events_and_persistence() 
             }
         }
         let mut config = config(provider.clone(), vec![Arc::new(SecretTool)]);
-        config.hooks.push_with_timeout(hook, Duration::ZERO);
+        config.hooks.push_with(
+            hook,
+            HookOptions {
+                timeout: Duration::ZERO,
+                ..HookOptions::default()
+            },
+        );
         let (mut runner, events) = RunnerSetup::new(config).build();
         let report = runner.run("go", &CancellationToken::new()).await;
         assert_eq!(report.outcome, RunOutcome::Completed);
@@ -518,7 +526,7 @@ struct Observer {
 }
 #[async_trait]
 impl Hooks for Observer {
-    async fn on_event(&self, event: &Event) -> HookResult<()> {
+    async fn on_event(&self, event: &Event, _ctx: &HookContext) -> HookResult<()> {
         assert!(
             !matches!(event.event, AgentEvent::HookFailed { .. }),
             "diagnostics must not recurse"
@@ -561,7 +569,7 @@ async fn observer_failures_are_diagnostic_and_retry_events_are_observed_once() {
 struct CustomContinue;
 #[async_trait]
 impl Hooks for CustomContinue {
-    async fn finish_turn(&self, turn: &TurnSummary<'_>) -> HookResult<TurnDecision> {
+    async fn finish_turn(&self, turn: &TurnSummary<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
         Ok(if turn.response.stop_reason == StopReason::Length {
             TurnDecision::ContinueAnswer("接着回答".into())
         } else {
@@ -620,7 +628,11 @@ async fn redaction_handles_overlapping_secrets_unicode_and_error_outputs() {
         arguments_error: None,
     };
     let output = hook
-        .after_tool(&call, ToolOutput::error("token-long，令牌 token"))
+        .after_tool(
+            &call,
+            ToolOutput::error("token-long，令牌 token"),
+            &common::hook_context(),
+        )
         .await
         .unwrap();
     assert_eq!(output.content, "[REDACTED]，[REDACTED] [REDACTED]");
@@ -643,14 +655,22 @@ async fn secret_files_are_read_again_and_earlier_values_stay_redacted() {
     std::fs::write(&token, "first-token\n").unwrap();
     let hook = RedactSecrets::new(Vec::new()).with_secret_files([token.clone()]);
     let output = hook
-        .after_tool(&redaction_call(), ToolOutput::ok("a first-token b"))
+        .after_tool(
+            &redaction_call(),
+            ToolOutput::ok("a first-token b"),
+            &common::hook_context(),
+        )
         .await
         .unwrap();
     assert_eq!(output.content, "a [REDACTED] b");
     // A rotated token: the new value is read, and the old one, still valid, stays hidden.
     std::fs::write(&token, "second-token").unwrap();
     let output = hook
-        .after_tool(&redaction_call(), ToolOutput::ok("first-token second-token"))
+        .after_tool(
+            &redaction_call(),
+            ToolOutput::ok("first-token second-token"),
+            &common::hook_context(),
+        )
         .await
         .unwrap();
     assert_eq!(output.content, "[REDACTED] [REDACTED]");
@@ -663,7 +683,11 @@ async fn missing_or_empty_secret_files_redact_nothing_else() {
     std::fs::write(&empty, " \n").unwrap();
     let hook = RedactSecrets::new(["key".to_string()]).with_secret_files([dir.path().join("absent"), empty]);
     let output = hook
-        .after_tool(&redaction_call(), ToolOutput::ok("key stays out, the rest stays"))
+        .after_tool(
+            &redaction_call(),
+            ToolOutput::ok("key stays out, the rest stays"),
+            &common::hook_context(),
+        )
         .await
         .unwrap();
     assert_eq!(output.content, "[REDACTED] stays out, the rest stays");
@@ -676,7 +700,7 @@ async fn a_secret_file_that_cannot_be_read_as_text_fails_the_hook() {
     std::fs::write(&binary, [0xff, 0xfe, 0x00]).unwrap();
     let hook = RedactSecrets::new(Vec::new()).with_secret_files([binary]);
     let error = hook
-        .after_tool(&redaction_call(), ToolOutput::ok("output"))
+        .after_tool(&redaction_call(), ToolOutput::ok("output"), &common::hook_context())
         .await
         .unwrap_err();
     assert!(error.contains("cannot read a secret file"), "{error}");
@@ -691,14 +715,18 @@ async fn a_secret_directory_covers_its_visible_files_including_later_ones() {
     std::fs::write(dir.path().join("nested").join("cluster-x"), "token-x").unwrap();
     let hook = RedactSecrets::new(Vec::new()).with_secret_files([dir.path().to_path_buf()]);
     let output = hook
-        .after_tool(&redaction_call(), ToolOutput::ok("token-a token-hidden token-x"))
+        .after_tool(
+            &redaction_call(),
+            ToolOutput::ok("token-a token-hidden token-x"),
+            &common::hook_context(),
+        )
         .await
         .unwrap();
     assert_eq!(output.content, "[REDACTED] token-hidden token-x");
     // A key added to a Secret volume later shows up as a new file in the same directory.
     std::fs::write(dir.path().join("cluster-b"), "token-b").unwrap();
     let output = hook
-        .after_tool(&redaction_call(), ToolOutput::ok("token-b"))
+        .after_tool(&redaction_call(), ToolOutput::ok("token-b"), &common::hook_context())
         .await
         .unwrap();
     assert_eq!(output.content, "[REDACTED]");
@@ -718,7 +746,11 @@ async fn every_current_secret_is_redacted_however_many_files_there_are() {
     let hook = RedactSecrets::new(Vec::new()).with_secret_files([dir.path().to_path_buf()]);
     let all: Vec<String> = (0..count).map(|index| format!("token-{index:02}")).collect();
     let output = hook
-        .after_tool(&redaction_call(), ToolOutput::ok(all.join(" ")))
+        .after_tool(
+            &redaction_call(),
+            ToolOutput::ok(all.join(" ")),
+            &common::hook_context(),
+        )
         .await
         .unwrap();
     assert_eq!(output.content, vec!["[REDACTED]"; count].join(" "));
@@ -727,7 +759,7 @@ async fn every_current_secret_is_redacted_however_many_files_there_are() {
 struct NextTurn(TurnDecision);
 #[async_trait]
 impl Hooks for NextTurn {
-    async fn finish_turn(&self, _turn: &TurnSummary<'_>) -> HookResult<TurnDecision> {
+    async fn finish_turn(&self, _turn: &TurnSummary<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
         Ok(self.0.clone())
     }
 }
@@ -753,13 +785,13 @@ async fn a_hook_follow_up_obeys_the_turn_budget() {
 struct StopAndQueue(Arc<zx_agent::agent::MessageQueues>);
 #[async_trait]
 impl Hooks for StopAndQueue {
-    async fn on_event(&self, event: &Event) -> HookResult<()> {
+    async fn on_event(&self, event: &Event, _ctx: &HookContext) -> HookResult<()> {
         if matches!(event.event, AgentEvent::TurnEnd { .. }) {
             self.0.steer("pending user input");
         }
         Ok(())
     }
-    async fn finish_turn(&self, _turn: &TurnSummary<'_>) -> HookResult<TurnDecision> {
+    async fn finish_turn(&self, _turn: &TurnSummary<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
         Ok(TurnDecision::Stop)
     }
 }
@@ -777,16 +809,18 @@ async fn stopping_from_a_hook_preserves_queued_user_input() {
 struct ContinueWithSystemUpdate;
 #[async_trait]
 impl Hooks for ContinueWithSystemUpdate {
-    async fn transform_context(&self, _messages: &[Message]) -> HookResult<Vec<ContextEdit>> {
-        Ok(vec![ContextEdit::Append(Message::System(SystemMessage {
-            sections: vec![SectionChange {
-                name: "extension".into(),
-                content: Some("keep answering".into()),
-            }],
-            timestamp: 0,
-        }))])
+    async fn transform_context(&self, _messages: &[Message], _ctx: &HookContext) -> HookResult<Vec<ContextEdit>> {
+        Ok(vec![ContextEdit::Append {
+            message: Message::System(SystemMessage {
+                sections: vec![SectionChange {
+                    name: "extension".into(),
+                    content: Some("keep answering".into()),
+                }],
+                timestamp: 0,
+            }),
+        }])
     }
-    async fn finish_turn(&self, turn: &TurnSummary<'_>) -> HookResult<TurnDecision> {
+    async fn finish_turn(&self, turn: &TurnSummary<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
         Ok(if turn.turn == 1 {
             TurnDecision::ContinueAnswer("continue".into())
         } else {
@@ -809,7 +843,7 @@ async fn marked_continuations_join_across_system_updates() {
 struct FinishFailure;
 #[async_trait]
 impl Hooks for FinishFailure {
-    async fn finish_turn(&self, _turn: &TurnSummary<'_>) -> HookResult<TurnDecision> {
+    async fn finish_turn(&self, _turn: &TurnSummary<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
         Err("HTTP 503 from extension".into())
     }
 }
@@ -841,7 +875,7 @@ struct HoldInput {
 }
 #[async_trait]
 impl Hooks for HoldInput {
-    async fn on_input(&self, text: String) -> HookResult<String> {
+    async fn on_input(&self, text: String, _ctx: &HookContext) -> HookResult<String> {
         if text.starts_with("hold") && !self.released.load(Ordering::SeqCst) {
             self.holding.notify_one();
             std::future::pending::<()>().await;
@@ -1115,7 +1149,7 @@ struct Kinds {
 }
 #[async_trait]
 impl Hooks for Kinds {
-    async fn on_event(&self, event: &Event) -> HookResult<()> {
+    async fn on_event(&self, event: &Event, _ctx: &HookContext) -> HookResult<()> {
         self.seen.lock().unwrap().push(event.event.kind());
         Ok(())
     }
@@ -1147,4 +1181,228 @@ async fn observers_skip_streaming_deltas_unless_they_ask_for_them() {
     assert_eq!(*all.lock().unwrap(), kinds);
     let without_deltas: Vec<_> = kinds.into_iter().filter(|kind| *kind != "message_update").collect();
     assert_eq!(*default.lock().unwrap(), without_deltas);
+}
+
+/// What each hook method of a [`ContextProbe`] received: method, session, run and directory.
+type Seen = Arc<Mutex<Vec<(&'static str, Option<String>, String, PathBuf)>>>;
+
+/// Records the context each hook method receives, and keeps the run's cancel token.
+#[derive(Clone, Default)]
+struct ContextProbe {
+    seen: Seen,
+    cancel: Arc<Mutex<Option<CancellationToken>>>,
+}
+impl ContextProbe {
+    fn record(&self, method: &'static str, ctx: &HookContext) {
+        assert!(!ctx.cancel.is_cancelled(), "{method} ran in a cancelled run");
+        self.seen
+            .lock()
+            .unwrap()
+            .push((method, ctx.session_id.clone(), ctx.run_id.clone(), ctx.cwd.clone()));
+        *self.cancel.lock().unwrap() = Some(ctx.cancel.clone());
+    }
+}
+#[async_trait]
+impl Hooks for ContextProbe {
+    async fn on_input(&self, text: String, ctx: &HookContext) -> HookResult<String> {
+        self.record("on_input", ctx);
+        Ok(text)
+    }
+    async fn transform_context(&self, _messages: &[Message], ctx: &HookContext) -> HookResult<Vec<ContextEdit>> {
+        self.record("transform_context", ctx);
+        Ok(Vec::new())
+    }
+    async fn before_tool(&self, _call: &ToolCall, ctx: &HookContext) -> HookResult<Decision> {
+        self.record("before_tool", ctx);
+        Ok(Decision::Allow)
+    }
+    async fn after_tool(&self, _call: &ToolCall, output: ToolOutput, ctx: &HookContext) -> HookResult<ToolOutput> {
+        self.record("after_tool", ctx);
+        Ok(output)
+    }
+    async fn finish_turn(&self, _turn: &TurnSummary<'_>, ctx: &HookContext) -> HookResult<TurnDecision> {
+        self.record("finish_turn", ctx);
+        Ok(TurnDecision::Default)
+    }
+    async fn on_event(&self, _event: &Event, ctx: &HookContext) -> HookResult<()> {
+        self.record("on_event", ctx);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn every_hook_method_knows_the_session_run_and_working_directory() {
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::tool_call("c1", "echo", json!({})),
+        FauxStep::text("done"),
+    ]));
+    let probe = ContextProbe::default();
+    let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
+    config.spec.cwd = PathBuf::from("/srv/work");
+    config.hooks.push(probe.clone());
+    let (mut runner, events) = RunnerSetup::new(config).build();
+
+    runner.run("go", &CancellationToken::new()).await;
+
+    let session_id = runner.session().header().id.clone();
+    let run_id = events.envelopes()[0].run_id.clone();
+    let seen = probe.seen.lock().unwrap().clone();
+    let mut methods: Vec<&str> = seen.iter().map(|(method, ..)| *method).collect();
+    methods.sort_unstable();
+    methods.dedup();
+    assert_eq!(
+        methods,
+        [
+            "after_tool",
+            "before_tool",
+            "finish_turn",
+            "on_event",
+            "on_input",
+            "transform_context"
+        ]
+    );
+    for (method, session, run, cwd) in &seen {
+        assert_eq!(session.as_deref(), Some(session_id.as_str()), "{method}");
+        assert_eq!(run, &run_id, "{method}: the run ID of the events");
+        assert_eq!(cwd, Path::new("/srv/work"), "{method}");
+    }
+    let cancel = probe.cancel.lock().unwrap().clone().unwrap();
+    assert!(cancel.is_cancelled(), "the token is the run's, which ends with the run");
+}
+
+struct FailingObserver;
+#[async_trait]
+impl Hooks for FailingObserver {
+    async fn on_event(&self, _event: &Event, _ctx: &HookContext) -> HookResult<()> {
+        Err("exporter offline".into())
+    }
+}
+
+#[tokio::test]
+async fn a_named_hook_is_reported_under_its_name() {
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
+    let mut config = config(provider, vec![]);
+    config.hooks.push_with(
+        FailingObserver,
+        HookOptions {
+            name: Some("trace-exporter".into()),
+            ..HookOptions::default()
+        },
+    );
+    let (mut runner, events) = RunnerSetup::new(config).build();
+
+    runner.run("go", &CancellationToken::new()).await;
+
+    let hooks: Vec<String> = events
+        .events()
+        .into_iter()
+        .filter_map(|event| match event {
+            AgentEvent::HookFailed { hook, .. } => Some(hook),
+            _ => None,
+        })
+        .collect();
+    assert!(!hooks.is_empty());
+    assert!(hooks.iter().all(|hook| hook == "trace-exporter"), "{hooks:?}");
+}
+
+/// Records its tag in before_tool and after_tool; runs in the stage it declares.
+struct Staged {
+    stage: HookStage,
+    tag: &'static str,
+    order: Arc<Mutex<Vec<String>>>,
+}
+#[async_trait]
+impl Hooks for Staged {
+    async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<Decision> {
+        self.order.lock().unwrap().push(format!("before:{}", self.tag));
+        Ok(Decision::Allow)
+    }
+    async fn after_tool(&self, _call: &ToolCall, output: ToolOutput, _ctx: &HookContext) -> HookResult<ToolOutput> {
+        self.order.lock().unwrap().push(format!("after:{}", self.tag));
+        Ok(output)
+    }
+    fn stage(&self) -> HookStage {
+        self.stage
+    }
+}
+
+#[tokio::test]
+async fn hooks_run_in_stage_order_whatever_the_registration_order() {
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::tool_call("c1", "echo", json!({})),
+        FauxStep::text("done"),
+    ]));
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
+    for (stage, tag) in [
+        (HookStage::Storage, "storage"),
+        (HookStage::Redaction, "redaction"),
+        (HookStage::Extension, "extension-1"),
+        (HookStage::Policy, "policy"),
+        (HookStage::Extension, "extension-2"),
+    ] {
+        config.hooks.push(Staged {
+            stage,
+            tag,
+            order: order.clone(),
+        });
+    }
+
+    run_prompt(&config, &mut Vec::new(), "go").await;
+
+    let order = order.lock().unwrap().clone();
+    let expected: Vec<String> = ["policy", "extension-1", "extension-2", "redaction", "storage"]
+        .iter()
+        .map(|tag| format!("before:{tag}"))
+        .chain(
+            ["policy", "extension-1", "extension-2", "redaction", "storage"]
+                .iter()
+                .map(|tag| format!("after:{tag}")),
+        )
+        .collect();
+    assert_eq!(order, expected);
+}
+
+/// An extension that copies a secret into tool output.
+struct LeakSecret;
+#[async_trait]
+impl Hooks for LeakSecret {
+    async fn after_tool(&self, _call: &ToolCall, mut output: ToolOutput, _ctx: &HookContext) -> HookResult<ToolOutput> {
+        output.content.push_str(" sk-registered-early");
+        Ok(output)
+    }
+}
+
+#[tokio::test]
+async fn redaction_registered_first_still_runs_after_extensions() {
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::tool_call("c1", "echo", json!({"text": "ok"})),
+        FauxStep::text("done"),
+    ]));
+    let mut config = config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]);
+    config
+        .hooks
+        .push(RedactSecrets::new(Some("sk-registered-early".into())));
+    config.hooks.push(LeakSecret);
+
+    run_prompt(&config, &mut Vec::new(), "go").await;
+
+    let sent = summarize(&provider.requests()[1].messages);
+    assert_eq!(sent.last().unwrap(), "tool:c1=ok [REDACTED]");
+}
+
+#[tokio::test]
+async fn tools_with_the_same_name_are_rejected_before_any_request() {
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
+    let config = config(
+        provider.clone(),
+        vec![Arc::new(EchoTool::new("echo")), Arc::new(EchoTool::new("echo"))],
+    );
+
+    let (result, _) = run_prompt(&config, &mut Vec::new(), "go").await;
+
+    assert_eq!(result.outcome, LoopOutcome::Error);
+    let error = format!("{:?}", result.failure);
+    assert!(error.contains("more than one tool is named \\\"echo\\\""), "{error}");
+    assert!(provider.requests().is_empty());
 }

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::agent::{Decision, HookResult, Hooks, ToolPolicy};
+use crate::agent::{Decision, HookContext, HookResult, HookStage, Hooks, ToolPolicy};
 use crate::ai::ToolCall;
 use crate::tools::BASH;
 
@@ -22,7 +22,12 @@ impl PolicyHook {
 
 #[async_trait]
 impl Hooks for PolicyHook {
-    async fn before_tool(&self, call: &ToolCall) -> HookResult<Decision> {
+    /// Before any extension sees the call.
+    fn stage(&self) -> HookStage {
+        HookStage::Policy
+    }
+
+    async fn before_tool(&self, call: &ToolCall, _ctx: &HookContext) -> HookResult<Decision> {
         Ok(self.policy.check(&call.name, &call.arguments).await)
     }
 }

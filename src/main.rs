@@ -11,9 +11,8 @@ use tokio_util::sync::CancellationToken;
 use zx_agent::AgentSession;
 use zx_agent::agent::{AgentEvent, Event, EventSink};
 use zx_agent::ai::{Message, StopReason};
-use zx_agent::extensions::ContinueOnLength;
 use zx_agent::profile::Builtin;
-use zx_agent::runner::{RunOutcome, RunReport, Runner};
+use zx_agent::runner::{RunOutcome, RunReport};
 
 mod chat;
 mod cli;
@@ -98,7 +97,7 @@ fn read_prompt(arg: &str) -> Result<String> {
 /// Assemble the unattended preset without exposing interactive choices to the kernel.
 async fn build_session(args: &RunArgs) -> Result<AgentSession> {
     let instructions = cli::read_instructions(&args.base)?;
-    let mut prepared = cli::prepare(cli::SessionOptions {
+    let prepared = cli::prepare(cli::SessionOptions {
         base: &args.base,
         transport: &args.transport,
         request: &args.request,
@@ -113,22 +112,11 @@ async fn build_session(args: &RunArgs) -> Result<AgentSession> {
         instructions: instructions.as_deref(),
     })
     .await?;
-    prepared
-        .config
-        .hooks
-        .push(ContinueOnLength::new(prepared.continue_on_length));
-    prepared.config.hooks.push(prepared.redactor);
-    if let Some(spill) = prepared.spill {
-        prepared.config.hooks.push(spill);
-    }
     let sink: Arc<dyn EventSink> = match args.output {
         OutputMode::Text => Arc::new(TextProgress),
         OutputMode::Jsonl => Arc::new(JsonlEvents { deltas: args.deltas }),
     };
-    Ok(AgentSession::from(
-        Runner::new(prepared.config, prepared.retry, prepared.limits, prepared.store, sink)
-            .with_compaction(prepared.compaction)?,
-    ))
+    prepared.into_session(sink)
 }
 
 fn print_report(report: &RunReport, output: OutputMode) {

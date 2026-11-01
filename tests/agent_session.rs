@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 use common::{Collect, RunnerSetup, config, header, summarize};
 use zx_agent::AgentSession;
-use zx_agent::agent::{AgentEvent, Decision, Event, HookResult, Hooks, Tool, ToolContext, ToolOutput};
+use zx_agent::agent::{AgentEvent, Decision, Event, HookContext, HookResult, Hooks, Tool, ToolContext, ToolOutput};
 use zx_agent::agent_session::{ModelRef, SessionError, Subscription};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{EventReceiver, Provider, Request, ToolDef};
@@ -444,7 +444,7 @@ async fn concurrent_callers_share_one_running_prompt() {
 struct Ask;
 #[async_trait]
 impl Hooks for Ask {
-    async fn before_tool(&self, _call: &zx_agent::ai::ToolCall) -> HookResult<Decision> {
+    async fn before_tool(&self, _call: &zx_agent::ai::ToolCall, _ctx: &HookContext) -> HookResult<Decision> {
         Ok(Decision::Ask("review".into()))
     }
 }

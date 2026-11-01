@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -37,13 +38,17 @@ pub struct ToolContext {
     pub cancel: CancellationToken,
 }
 
-/// What a tool returns.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// What a tool returns. In JSON `content` is required and the flags default to `false`, so
+/// output that a hook process forgot cannot silently replace the result with nothing.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolOutput {
     /// Text returned to the model.
     pub content: String,
+    #[serde(default)]
     pub is_error: bool,
     /// Ask to stop after this batch. Takes effect only when every result in the batch sets it.
+    #[serde(default)]
     pub terminate: bool,
 }
 

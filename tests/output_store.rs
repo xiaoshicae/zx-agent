@@ -8,7 +8,7 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use zx_agent::agent::{HookChain, Hooks, Tool, ToolContext, ToolOutput};
+use zx_agent::agent::{HookChain, HookContext, Hooks, Tool, ToolContext, ToolOutput};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, ToolCall};
 use zx_agent::extensions::RedactSecrets;
@@ -47,7 +47,10 @@ fn parts(dir: &Path) -> (SpillOutputs, ReadOutputTool) {
     )
 }
 async fn spill(hook: &SpillOutputs, text: &str) -> Value {
-    let result = hook.after_tool(&call("read_file"), ToolOutput::ok(text)).await.unwrap();
+    let result = hook
+        .after_tool(&call("read_file"), ToolOutput::ok(text), &common::hook_context())
+        .await
+        .unwrap();
     serde_json::from_str(&result.content).unwrap()
 }
 
@@ -86,13 +89,21 @@ async fn exact_threshold_is_inline_and_error_and_terminate_flags_survive_spillin
     let dir = tempfile::tempdir().unwrap();
     let (hook, _) = parts(dir.path());
     let exact = ToolOutput::error("x".repeat(256));
-    assert_eq!(hook.after_tool(&call("bash"), exact.clone()).await.unwrap(), exact);
+    assert_eq!(
+        hook.after_tool(&call("bash"), exact.clone(), &common::hook_context())
+            .await
+            .unwrap(),
+        exact
+    );
     let output = ToolOutput {
         content: "界".repeat(86),
         is_error: true,
         terminate: true,
     };
-    let spilled = hook.after_tool(&call("bash"), output.clone()).await.unwrap();
+    let spilled = hook
+        .after_tool(&call("bash"), output.clone(), &common::hook_context())
+        .await
+        .unwrap();
     assert!(spilled.is_error && spilled.terminate);
     let reference: Value = serde_json::from_str(&spilled.content).unwrap();
     assert_eq!(
@@ -189,7 +200,7 @@ async fn file_caps_bound_both_writes_and_reads_and_invalid_utf8_is_refused() {
     let reader = ReadOutputTool::new(store);
     // Over the cap nothing is written; the bounded result stays inline with the reason.
     let kept = hook
-        .after_tool(&call("bash"), ToolOutput::ok("x".repeat(513)))
+        .after_tool(&call("bash"), ToolOutput::ok("x".repeat(513)), &common::hook_context())
         .await
         .unwrap();
     assert!(kept.content.starts_with(&"x".repeat(513)));
@@ -223,7 +234,12 @@ async fn paging_tools_are_exempt_and_disabled_spilling_is_a_noop() {
     let (hook, _) = parts(dir.path());
     let large = ToolOutput::ok("x".repeat(500));
     for name in [TOOL_NAME, "read_skill"] {
-        assert_eq!(hook.after_tool(&call(name), large.clone()).await.unwrap(), large);
+        assert_eq!(
+            hook.after_tool(&call(name), large.clone(), &common::hook_context())
+                .await
+                .unwrap(),
+            large
+        );
     }
     let disabled = SpillOutputs::new(
         OutputStore::new(
@@ -236,7 +252,13 @@ async fn paging_tools_are_exempt_and_disabled_spilling_is_a_noop() {
         .unwrap(),
         vec![],
     );
-    assert_eq!(disabled.after_tool(&call("bash"), large.clone()).await.unwrap(), large);
+    assert_eq!(
+        disabled
+            .after_tool(&call("bash"), large.clone(), &common::hook_context())
+            .await
+            .unwrap(),
+        large
+    );
     assert!(!dir.path().join(".zx-agent").exists());
 }
 
@@ -250,7 +272,11 @@ async fn cancellation_skips_writes_and_reads() {
     cancel.cancel();
     assert!(
         chain
-            .after_tool(&call("bash"), ToolOutput::ok("x".repeat(500)), &cancel)
+            .after_tool(
+                &call("bash"),
+                ToolOutput::ok("x".repeat(500)),
+                &HookContext::new(None, dir.path().into(), cancel.clone())
+            )
             .await
             .is_err()
     );
@@ -356,7 +382,11 @@ async fn a_linked_default_directory_outside_the_working_directory_is_never_writt
     std::os::unix::fs::symlink("../elsewhere", cwd.join(".zx-agent")).unwrap();
     let (hook, _) = parts(&cwd);
     let result = hook
-        .after_tool(&call("read_file"), ToolOutput::ok("x".repeat(1000)))
+        .after_tool(
+            &call("read_file"),
+            ToolOutput::ok("x".repeat(1000)),
+            &common::hook_context(),
+        )
         .await
         .unwrap();
     assert!(result.content.starts_with(&"x".repeat(1000)), "{}", result.content);

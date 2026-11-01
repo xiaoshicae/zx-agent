@@ -4,10 +4,12 @@ use std::borrow::Cow;
 use std::fmt;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::FutureExt;
+use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use super::{AgentEvent, Decision, Emit, Event, ToolOutput};
@@ -19,15 +21,48 @@ pub const DEFAULT_HOOK_TIMEOUT: Duration = Duration::from_secs(5);
 /// Callback errors are supplied as text; the host adds the hook, phase and failure kind.
 pub type HookResult<T> = Result<T, String>;
 
+/// What every hook call knows about the run it belongs to. Fields are only ever added, so
+/// the struct is `#[non_exhaustive]`: read its fields, and outside the crate build one with
+/// [`HookContext::new`]. In JSON the cancellation token is left out.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct HookContext {
+    /// The session's ID; absent when `run_loop` runs without a session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// The run: one prompt or one manual compaction, as in the events' `runId`.
+    pub run_id: String,
+    /// The tools' working directory.
+    pub cwd: PathBuf,
+    /// Cancelled with the run. The host then stops waiting for the hook; a hook can also
+    /// pass it to work of its own.
+    #[serde(skip)]
+    pub cancel: CancellationToken,
+}
+
+impl HookContext {
+    /// A context for a new run with a fresh ID.
+    pub fn new(session_id: Option<String>, cwd: PathBuf, cancel: CancellationToken) -> Self {
+        Self {
+            session_id,
+            run_id: uuid::Uuid::new_v4().to_string(),
+            cwd,
+            cancel,
+        }
+    }
+}
+
 /// Audit-friendly changes, applied in order against the current projection.
 ///
 /// Indexes refer to the projection after preceding edits. System messages can only
 /// be appended, and replacing assistant text must not erase tool calls. Context summaries
 /// (`UserMessageKind::Summary`) are built by the session, so they can be neither edited,
 /// omitted nor appended; editing one of their sources invalidates the summary instead.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "edit", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum ContextEdit {
-    Append(Message),
+    Append { message: Message },
     ReplaceText { index: usize, text: String },
     Omit { index: usize },
 }
@@ -37,7 +72,7 @@ const SUMMARY_EDIT: &str = "a context summary cannot be edited or omitted; edit 
 impl ContextEdit {
     pub(crate) fn apply(&self, messages: &mut Vec<Message>) -> Result<(), String> {
         match self {
-            Self::Append(message) => {
+            Self::Append { message } => {
                 if is_summary(message) {
                     return Err("only the session creates context summaries".into());
                 }
@@ -88,7 +123,8 @@ fn is_summary(message: &Message) -> bool {
 }
 
 /// Whether the normal loop already has work after this response.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TurnDisposition {
     Continue,
     Stop,
@@ -96,6 +132,8 @@ pub enum TurnDisposition {
 }
 
 /// A successful model turn, after tool results have been processed.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TurnSummary<'a> {
     pub response: &'a AssistantMessage,
     pub messages: &'a [Message],
@@ -106,7 +144,8 @@ pub struct TurnSummary<'a> {
 }
 
 /// Stop dominates; otherwise the first non-default decision wins.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "decision", content = "text", rename_all = "snake_case")]
 pub enum TurnDecision {
     Default,
     Stop,
@@ -116,34 +155,49 @@ pub enum TurnDecision {
     FollowUp(String),
 }
 
+/// Where a hook runs among the others. Every hook method runs the stages in this order;
+/// within a stage, hooks run in the order they were registered. A hook declares its stage
+/// with [`Hooks::stage`], so the guarantees below hold however a host registers it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum HookStage {
+    /// Built-in tool policies: they decide before any extension sees a call.
+    Policy,
+    /// Extensions and other hooks; the default.
+    Extension,
+    /// Removes known secrets from tool output, after every extension has changed it.
+    Redaction,
+    /// Saves long tool output, after redaction.
+    Storage,
+}
+
 /// Hooks must yield while waiting. Blocking work prevents cooperative timeouts.
 /// Every method has a no-op default so implementers override only what they use.
 #[async_trait]
 pub trait Hooks: Send + Sync {
-    async fn on_input(&self, text: String) -> HookResult<String> {
+    async fn on_input(&self, text: String, _ctx: &HookContext) -> HookResult<String> {
         Ok(text)
     }
 
-    async fn transform_context(&self, _messages: &[Message]) -> HookResult<Vec<ContextEdit>> {
+    async fn transform_context(&self, _messages: &[Message], _ctx: &HookContext) -> HookResult<Vec<ContextEdit>> {
         Ok(Vec::new())
     }
 
-    async fn before_tool(&self, _call: &ToolCall) -> HookResult<Decision> {
+    async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<Decision> {
         Ok(Decision::Allow)
     }
 
-    async fn after_tool(&self, _call: &ToolCall, output: ToolOutput) -> HookResult<ToolOutput> {
+    async fn after_tool(&self, _call: &ToolCall, output: ToolOutput, _ctx: &HookContext) -> HookResult<ToolOutput> {
         Ok(output)
     }
 
-    async fn finish_turn(&self, _turn: &TurnSummary<'_>) -> HookResult<TurnDecision> {
+    async fn finish_turn(&self, _turn: &TurnSummary<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
         Ok(TurnDecision::Default)
     }
 
     /// Read-only observation of the events this hook [`observes`](Hooks::observes), after
     /// persistence and event delivery. Diagnostic events reporting observer errors are not
     /// sent back through this method.
-    async fn on_event(&self, _event: &Event) -> HookResult<()> {
+    async fn on_event(&self, _event: &Event, _ctx: &HookContext) -> HookResult<()> {
         Ok(())
     }
 
@@ -151,6 +205,12 @@ pub trait Hooks: Send + Sync {
     /// default skips the frequent streaming deltas (`message_update`); override to see them.
     fn observes(&self, event: &AgentEvent) -> bool {
         !matches!(event, AgentEvent::MessageUpdate { .. })
+    }
+
+    /// The stage this hook runs in. Only the kernel's tool policy adapter, secret redaction
+    /// and output storage declare a stage other than [`HookStage::Extension`].
+    fn stage(&self) -> HookStage {
+        HookStage::Extension
     }
 }
 
@@ -256,8 +316,27 @@ impl HookCall<'_> {
     }
 }
 
+/// How a hook is registered. Build it from `Default` with struct update syntax.
+#[derive(Clone, Debug)]
+pub struct HookOptions {
+    /// The hook's name in `hook_failed` events and traces; `None` uses its type name.
+    pub name: Option<String>,
+    /// Bound for each call of the hook.
+    pub timeout: Duration,
+}
+
+impl Default for HookOptions {
+    fn default() -> Self {
+        Self {
+            name: None,
+            timeout: DEFAULT_HOOK_TIMEOUT,
+        }
+    }
+}
+
 struct RegisteredHook {
-    name: &'static str,
+    name: String,
+    stage: HookStage,
     hook: Box<dyn Hooks>,
     timeout: Duration,
 }
@@ -265,14 +344,14 @@ struct RegisteredHook {
 impl RegisteredHook {
     fn call(&self, phase: HookPhase) -> HookCall<'_> {
         HookCall {
-            name: self.name,
+            name: &self.name,
             phase,
             timeout: self.timeout,
         }
     }
 }
 
-/// A chain owns its hooks and is borrowed by concurrent tool futures.
+/// A chain owns its hooks, kept in stage order, and is borrowed by concurrent tool futures.
 #[derive(Default)]
 pub struct HookChain {
     hooks: Vec<RegisteredHook>,
@@ -283,17 +362,26 @@ impl HookChain {
         Self::default()
     }
 
-    /// Register an owned hook with the default per-call timeout.
+    /// Register an owned hook under its type name, with the default per-call timeout.
     pub fn push(&mut self, hook: impl Hooks + 'static) {
-        self.push_with_timeout(hook, DEFAULT_HOOK_TIMEOUT);
+        self.push_with(hook, HookOptions::default());
     }
 
-    pub fn push_with_timeout<H: Hooks + 'static>(&mut self, hook: H, timeout: Duration) {
-        self.hooks.push(RegisteredHook {
-            name: std::any::type_name::<H>(),
-            hook: Box::new(hook),
-            timeout,
-        });
+    /// Register an owned hook. It runs in the stage it declares, after the hooks already
+    /// registered in that stage.
+    pub fn push_with<H: Hooks + 'static>(&mut self, hook: H, options: HookOptions) {
+        let stage = hook.stage();
+        let name = options.name.unwrap_or_else(|| std::any::type_name::<H>().to_string());
+        let position = self.hooks.partition_point(|entry| entry.stage <= stage);
+        self.hooks.insert(
+            position,
+            RegisteredHook {
+                name,
+                stage,
+                hook: Box::new(hook),
+                timeout: options.timeout,
+            },
+        );
     }
 
     pub fn with(mut self, hook: impl Hooks + 'static) -> Self {
@@ -301,11 +389,11 @@ impl HookChain {
         self
     }
 
-    pub async fn on_input(&self, mut text: String, cancel: &CancellationToken) -> Result<String, HookError> {
+    pub async fn on_input(&self, mut text: String, ctx: &HookContext) -> Result<String, HookError> {
         for entry in &self.hooks {
             text = entry
                 .call(HookPhase::OnInput)
-                .run(entry.hook.on_input(text), cancel)
+                .run(entry.hook.on_input(text, ctx), &ctx.cancel)
                 .await?;
         }
         Ok(text)
@@ -314,14 +402,16 @@ impl HookChain {
     pub async fn transform_context(
         &self,
         messages: &[Message],
-        cancel: &CancellationToken,
+        ctx: &HookContext,
     ) -> Result<Vec<ContextEdit>, HookError> {
         // A separate projection validates the complete ordered plan before any write.
         let mut projected = Cow::Borrowed(messages);
         let mut edits = Vec::new();
         for entry in &self.hooks {
             let call = entry.call(HookPhase::TransformContext);
-            let changes = call.run(entry.hook.transform_context(&projected), cancel).await?;
+            let changes = call
+                .run(entry.hook.transform_context(&projected, ctx), &ctx.cancel)
+                .await?;
             for change in &changes {
                 change
                     .apply(projected.to_mut())
@@ -332,12 +422,12 @@ impl HookChain {
         Ok(edits)
     }
 
-    pub async fn before_tool(&self, tool: &ToolCall, cancel: &CancellationToken) -> Result<Decision, HookError> {
+    pub async fn before_tool(&self, tool: &ToolCall, ctx: &HookContext) -> Result<Decision, HookError> {
         let mut verdict = Decision::Allow;
         for entry in &self.hooks {
             let decision = entry
                 .call(HookPhase::BeforeTool)
-                .run(entry.hook.before_tool(tool), cancel)
+                .run(entry.hook.before_tool(tool, ctx), &ctx.cancel)
                 .await?;
             match decision {
                 Decision::Deny(_) => return Ok(decision),
@@ -352,27 +442,23 @@ impl HookChain {
         &self,
         tool: &ToolCall,
         mut output: ToolOutput,
-        cancel: &CancellationToken,
+        ctx: &HookContext,
     ) -> Result<ToolOutput, HookError> {
         for entry in &self.hooks {
             output = entry
                 .call(HookPhase::AfterTool)
-                .run(entry.hook.after_tool(tool, output), cancel)
+                .run(entry.hook.after_tool(tool, output, ctx), &ctx.cancel)
                 .await?;
         }
         Ok(output)
     }
 
-    pub async fn finish_turn(
-        &self,
-        turn: &TurnSummary<'_>,
-        cancel: &CancellationToken,
-    ) -> Result<TurnDecision, HookError> {
+    pub async fn finish_turn(&self, turn: &TurnSummary<'_>, ctx: &HookContext) -> Result<TurnDecision, HookError> {
         let mut decision = TurnDecision::Default;
         for entry in &self.hooks {
             let next = entry
                 .call(HookPhase::FinishTurn)
-                .run(entry.hook.finish_turn(turn), cancel)
+                .run(entry.hook.finish_turn(turn, ctx), &ctx.cancel)
                 .await?;
             match next {
                 TurnDecision::Stop => return Ok(TurnDecision::Stop),
@@ -387,13 +473,13 @@ impl HookChain {
         Ok(decision)
     }
 
-    /// Call `on_event` of every hook that observes `event`, in registration order.
-    pub async fn on_event(&self, event: &Event, cancel: &CancellationToken) -> Vec<HookError> {
+    /// Call `on_event` of every hook that observes `event`, in stage and registration order.
+    pub async fn on_event(&self, event: &Event, ctx: &HookContext) -> Vec<HookError> {
         let mut errors = Vec::new();
         for entry in self.hooks.iter().filter(|entry| entry.hook.observes(&event.event)) {
             if let Err(error) = entry
                 .call(HookPhase::OnEvent)
-                .run(entry.hook.on_event(event), cancel)
+                .run(entry.hook.on_event(event, ctx), &ctx.cancel)
                 .await
             {
                 // Cancellation is a normal shutdown, not an observer failure.
@@ -406,11 +492,11 @@ impl HookChain {
     }
 
     /// Stamp `event`, hand it to the sink, then to the observing hooks.
-    pub(crate) async fn emit(&self, event: AgentEvent, cancel: &CancellationToken, to: Emit<'_>) {
+    pub(crate) async fn emit(&self, event: AgentEvent, to: Emit<'_>) {
         // What the event reports is already recorded; the sink sees it before observers do.
         let event = to.trace.stamp(event);
         to.sink.emit(&event);
-        for error in self.on_event(&event, cancel).await {
+        for error in self.on_event(&event, to.trace.context()).await {
             report_failure(error, to);
         }
     }
@@ -434,6 +520,10 @@ mod tests {
     use serde_json::json;
     use std::sync::{Arc, Mutex};
 
+    fn context() -> HookContext {
+        HookContext::new(None, PathBuf::from("."), CancellationToken::new())
+    }
+
     fn call() -> ToolCall {
         ToolCall {
             id: "c".into(),
@@ -451,7 +541,7 @@ mod tests {
 
     #[async_trait]
     impl Hooks for Verdict {
-        async fn before_tool(&self, _call: &ToolCall) -> HookResult<Decision> {
+        async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<Decision> {
             self.seen.lock().unwrap().push(self.index);
             Ok(self.decision.clone())
         }
@@ -493,10 +583,7 @@ mod tests {
                     seen: seen.clone(),
                 });
             }
-            assert_eq!(
-                chain.before_tool(&call(), &CancellationToken::new()).await.unwrap(),
-                expected
-            );
+            assert_eq!(chain.before_tool(&call(), &context()).await.unwrap(), expected);
             assert_eq!(*seen.lock().unwrap(), visited);
         }
     }
@@ -504,14 +591,19 @@ mod tests {
     struct Suffix(&'static str);
     #[async_trait]
     impl Hooks for Suffix {
-        async fn on_input(&self, text: String) -> HookResult<String> {
+        async fn on_input(&self, text: String, _ctx: &HookContext) -> HookResult<String> {
             Ok(text + self.0)
         }
-        async fn after_tool(&self, _call: &ToolCall, mut output: ToolOutput) -> HookResult<ToolOutput> {
+        async fn after_tool(
+            &self,
+            _call: &ToolCall,
+            mut output: ToolOutput,
+            _ctx: &HookContext,
+        ) -> HookResult<ToolOutput> {
             output.content.push_str(self.0);
             Ok(output)
         }
-        async fn transform_context(&self, messages: &[Message]) -> HookResult<Vec<ContextEdit>> {
+        async fn transform_context(&self, messages: &[Message], _ctx: &HookContext) -> HookResult<Vec<ContextEdit>> {
             let Message::User { content, .. } = &messages[0] else {
                 panic!("user input")
             };
@@ -525,19 +617,13 @@ mod tests {
     #[tokio::test]
     async fn input_hooks_compose_in_registration_order_including_empty_unicode_input() {
         let chain = HookChain::new().with(Suffix("甲")).with(Suffix("乙"));
-        assert_eq!(
-            chain.on_input(String::new(), &CancellationToken::new()).await.unwrap(),
-            "甲乙"
-        );
+        assert_eq!(chain.on_input(String::new(), &context()).await.unwrap(), "甲乙");
     }
 
     #[tokio::test]
     async fn output_hooks_receive_the_preceding_hooks_result() {
         let chain = HookChain::new().with(Suffix("甲")).with(Suffix("乙"));
-        let output = chain
-            .after_tool(&call(), ToolOutput::ok(""), &CancellationToken::new())
-            .await
-            .unwrap();
+        let output = chain.after_tool(&call(), ToolOutput::ok(""), &context()).await.unwrap();
         assert_eq!(output.content, "甲乙");
     }
 
@@ -545,10 +631,7 @@ mod tests {
     async fn context_hooks_see_the_projection_after_preceding_edits() {
         let chain = HookChain::new().with(Suffix("甲")).with(Suffix("乙"));
         let original = vec![Message::user("")];
-        let edits = chain
-            .transform_context(&original, &CancellationToken::new())
-            .await
-            .unwrap();
+        let edits = chain.transform_context(&original, &context()).await.unwrap();
         let mut projected = original.clone();
         for edit in edits {
             edit.apply(&mut projected).unwrap();
@@ -560,7 +643,7 @@ mod tests {
     struct Finish(TurnDecision);
     #[async_trait]
     impl Hooks for Finish {
-        async fn finish_turn(&self, _turn: &TurnSummary<'_>) -> HookResult<TurnDecision> {
+        async fn finish_turn(&self, _turn: &TurnSummary<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
             Ok(self.0.clone())
         }
     }
@@ -580,15 +663,9 @@ mod tests {
         let chain = HookChain::new()
             .with(Finish(first.clone()))
             .with(Finish(TurnDecision::FollowUp("second".into())));
-        assert_eq!(
-            chain.finish_turn(&turn, &CancellationToken::new()).await.unwrap(),
-            first
-        );
+        assert_eq!(chain.finish_turn(&turn, &context()).await.unwrap(), first);
         let chain = chain.with(Finish(TurnDecision::Stop));
-        assert_eq!(
-            chain.finish_turn(&turn, &CancellationToken::new()).await.unwrap(),
-            TurnDecision::Stop
-        );
+        assert_eq!(chain.finish_turn(&turn, &context()).await.unwrap(), TurnDecision::Stop);
     }
 
     fn guard() -> HookCall<'static> {
@@ -697,7 +774,7 @@ mod tests {
                 text: "changed".into(),
             },
             ContextEdit::Omit { index: 0 },
-            ContextEdit::Append(summary),
+            ContextEdit::Append { message: summary },
         ] {
             let error = edit.apply(&mut messages).unwrap_err();
             assert!(error.contains("summar"), "{error}");

@@ -1,6 +1,7 @@
 //! Approval is supplied by the host; the runtime does not read from a terminal.
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::Duration;
 
@@ -10,14 +11,17 @@ use crate::ai::ToolCall;
 pub const DEFAULT_APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The exact tool call and the policy's reason for asking.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ApprovalRequest {
     pub call: ToolCall,
     pub reason: String,
 }
 
 /// Scope of an approval. Session grants cover only the exact tool name and arguments.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// In JSON: `{"approval":"allow_once"}`, `allow_session`, or `deny` with a `reason`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "approval", content = "reason", rename_all = "snake_case")]
 pub enum Approval {
     AllowOnce,
     AllowSession,

@@ -86,12 +86,15 @@ pub enum ContentBlock {
     },
 }
 
-/// A tool call extracted from an assistant message.
-#[derive(Clone, Debug, PartialEq)]
+/// A tool call extracted from an assistant message. In JSON its fields are named as in the
+/// message's `toolCall` block.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arguments_error: Option<String>,
 }
 

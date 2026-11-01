@@ -1,5 +1,6 @@
 //! The agent loop. Extension behavior is supplied through bounded, ordered hooks.
 
+use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -35,6 +36,20 @@ pub struct LoopSpec {
     pub cwd: PathBuf,
     pub max_tokens: Option<u32>,
     pub sequential_tools: bool,
+}
+
+impl LoopSpec {
+    /// Check what the loop relies on: the model calls tools by name, so no two tools may
+    /// share one. `run_loop` checks before its first request.
+    pub fn validate(&self) -> Result<(), String> {
+        let mut names = HashSet::new();
+        for tool in &self.tools {
+            if !names.insert(tool.name()) {
+                return Err(format!("more than one tool is named {:?}", tool.name()));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Host extensions and the static specification. Queues have shared ownership because
@@ -148,7 +163,7 @@ pub async fn run_loop(
     let trace = match control.trace {
         Some(trace) => trace,
         None => {
-            own_trace = RunTrace::new(None);
+            own_trace = RunTrace::new(None, config.spec.cwd.clone(), control.cancel.clone());
             &own_trace
         }
     };
@@ -211,7 +226,7 @@ impl<'a> Engine<'a, '_, '_> {
     }
 
     async fn emit(&self, event: AgentEvent) {
-        self.config.hooks.emit(event, self.control.cancel, self.to()).await;
+        self.config.hooks.emit(event, self.to()).await;
     }
 
     fn hook_error(&self, error: HookError) -> String {
@@ -258,7 +273,7 @@ impl<'a> Engine<'a, '_, '_> {
 
     async fn edit(&mut self, context: &mut Vec<Message>, edit: ContextEdit) -> Result<(), Halt> {
         let (index, replacement) = match &edit {
-            ContextEdit::Append(message) => return self.append(context, message.clone()).await,
+            ContextEdit::Append { message } => return self.append(context, message.clone()).await,
             ContextEdit::ReplaceText { index, text } => (*index, Some(text.clone())),
             ContextEdit::Omit { index } => (*index, None),
         };
@@ -294,7 +309,7 @@ impl<'a> Engine<'a, '_, '_> {
             return self.append(context, message).await;
         };
         let text = content.clone();
-        let transformed = match self.config.hooks.on_input(text.clone(), self.control.cancel).await {
+        let transformed = match self.config.hooks.on_input(text.clone(), self.trace.context()).await {
             Err(error) if error.failure == HookFailure::Cancelled => return Err(Halt::Failed(self.hook_error(error))),
             transformed => transformed,
         };
@@ -330,6 +345,7 @@ impl<'a> Engine<'a, '_, '_> {
         result: &mut LoopResult,
     ) -> Result<LoopOutcome, Halt> {
         let config = self.config;
+        config.spec.validate().map_err(Halt::Failed)?;
         self.start_turn(result).await;
         let changes = SystemPrompt::from_transcript(context).diff(&config.spec.system_prompt);
         if !changes.is_empty() {
@@ -383,7 +399,7 @@ impl<'a> Engine<'a, '_, '_> {
             }
             let edits = config
                 .hooks
-                .transform_context(context, self.control.cancel)
+                .transform_context(context, self.trace.context())
                 .await
                 .map_err(|error| Halt::Failed(self.hook_error(error)))?;
             for edit in edits {
@@ -518,7 +534,7 @@ impl<'a> Engine<'a, '_, '_> {
             };
             let decision = config
                 .hooks
-                .finish_turn(&summary, self.control.cancel)
+                .finish_turn(&summary, self.trace.context())
                 .await
                 .map_err(|error| Halt::Failed(self.hook_error(error)))?;
             if decision == TurnDecision::Stop {
@@ -620,7 +636,7 @@ impl<'a> Engine<'a, '_, '_> {
             Ok(Err(error)) => return Prepared::blocked(format!("Invalid arguments for tool {:?}: {error}", call.name)),
             Err(_) => return Prepared::blocked(format!("Tool {} argument validation panicked", call.name)),
         }
-        let verdict = match self.config.hooks.before_tool(call, self.control.cancel).await {
+        let verdict = match self.config.hooks.before_tool(call, self.trace.context()).await {
             Ok(verdict) => verdict,
             Err(error) => {
                 let reason = self.hook_error(error);
@@ -832,7 +848,7 @@ impl<'a> Engine<'a, '_, '_> {
         let output = match self
             .config
             .hooks
-            .after_tool(call, outcome.output, self.control.cancel)
+            .after_tool(call, outcome.output, self.trace.context())
             .await
         {
             Ok(output) => output,

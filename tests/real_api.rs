@@ -25,9 +25,9 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use common::{RunnerSetup, config, fast_retry};
-use zx_agent::agent::CommandPolicy;
 use zx_agent::ai::Message;
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig, SystemUpdates};
+use zx_agent::policy::CommandPolicy;
 use zx_agent::prompt::{build_system_prompt, environment_section};
 use zx_agent::runner::{Limits, RunOutcome, RunReport};
 use zx_agent::session::SessionStore;
