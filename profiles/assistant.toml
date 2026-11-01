@@ -5,6 +5,25 @@ execution = "local"
 
 [rules]
 askTools = ["bash"]
+# Read-only commands that run without asking: none of them can run another program or
+# write a file. awk, sed, sort, uniq, find, xargs, tee and curl are left out for that
+# reason. Commands with shell syntax, the word "secret", a URL or a connection option
+# (such as kubectl --server) still ask; see docs/p6-online-access-review.md, section 3.1.
+autoApprove = [
+  "kubectl get",
+  "kubectl describe",
+  "kubectl logs",
+  "kubectl top",
+  "kubectl events",
+  "kubectl explain",
+  "kubectl api-resources",
+  "kubectl version",
+  "grep",
+  "head",
+  "tail",
+  "wc",
+  "jq",
+]
 
 [limits]
 maxTurns = "unlimited"

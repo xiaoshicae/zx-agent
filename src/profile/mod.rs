@@ -57,6 +57,9 @@ pub struct Rules {
     pub allow: Vec<String>,
     /// Additional case-insensitive command substrings to deny.
     pub deny: Vec<String>,
+    /// Bash command prefixes that run without asking where bash needs approval; the commands
+    /// that still ask are listed on [`crate::policy::AutoApprove`].
+    pub auto_approve: Vec<String>,
     /// Registered tool names whose calls require a host approval.
     pub ask_tools: Vec<String>,
     /// Tool names denied regardless of enabled tools or approval grants.
@@ -194,6 +197,9 @@ impl Profile {
             self.rules.allow = allow;
         }
         self.rules.deny.extend(raw.rules.deny);
+        if let Some(prefixes) = raw.rules.auto_approve {
+            self.rules.auto_approve = prefixes;
+        }
         if let Some(tools) = raw.rules.ask_tools {
             self.rules.ask_tools = tools;
         }
@@ -278,7 +284,13 @@ impl Profile {
                 "unknown tool {name:?}"
             );
         }
-        for pattern in self.rules.allow.iter().chain(&self.rules.deny) {
+        for pattern in self
+            .rules
+            .allow
+            .iter()
+            .chain(&self.rules.deny)
+            .chain(&self.rules.auto_approve)
+        {
             ensure!(!pattern.trim().is_empty(), "empty command rule is not allowed");
         }
         for tool in self.rules.ask_tools.iter().chain(&self.rules.deny_tools) {
@@ -368,6 +380,7 @@ struct RawContainer {
 struct RawRules {
     allow: Option<Vec<String>>,
     deny: Vec<String>,
+    auto_approve: Option<Vec<String>>,
     ask_tools: Option<Vec<String>>,
     deny_tools: Vec<String>,
 }
@@ -465,6 +478,14 @@ mod tests {
         assert_eq!(assistant.limits.timeout, None);
         assert_eq!(assistant.continue_on_length, 0);
         assert_eq!(assistant.rules.ask_tools, ["bash"]);
+        assert!(
+            assistant
+                .rules
+                .auto_approve
+                .iter()
+                .any(|prefix| prefix == "kubectl get")
+        );
+        assert!(profile.rules.auto_approve.is_empty());
         assert_eq!(profile.compaction.trigger_bytes, None);
         assert_eq!(assistant.compaction.trigger_bytes, Some(256 * 1024));
         assert_eq!(assistant.compaction.keep_recent_bytes, 64 * 1024);
@@ -591,9 +612,18 @@ mod tests {
             "tools = ['missing']",
             "[rules]\naskTools = ['missing']",
             "[rules]\ndeny = ['  ']",
+            "[rules]\nautoApprove = ['']",
         ] {
             assert!(load_file(text).is_err(), "{text}");
         }
+    }
+
+    #[test]
+    fn a_file_replaces_the_auto_approve_list_of_its_baseline() {
+        let profile = load_file("extends = 'assistant'\n[rules]\nautoApprove = ['kubectl get']").unwrap();
+        assert_eq!(profile.rules.auto_approve, ["kubectl get"]);
+        let profile = load_file("extends = 'assistant'\n[rules]\nautoApprove = []").unwrap();
+        assert!(profile.rules.auto_approve.is_empty());
     }
 
     #[test]

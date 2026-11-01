@@ -66,7 +66,7 @@ zx-agent chat --model "$ZX_MODEL" --session ./chat.jsonl
 | Ctrl+C | 取消当前任务或审批，继续保留会话；空闲时保持会话 |
 | EOF、SIGTERM | EOF 结束会话，管道中的正常任务先完成；待审批时 EOF 拒绝并取消。SIGTERM 取消并退出 |
 
-chat 中的 bash 调用先经过原命令策略，再显示完整工具名、参数、工作目录、理由及权限范围，等待审批；read_file 仍按原读取权限执行。菜单中的编号绑定当前请求，例如：
+chat 中的 bash 调用先经过原命令策略，再显示完整工具名、参数、工作目录、理由及权限范围，等待审批；read_file 仍按原读取权限执行。内置 assistant profile 列出的只读命令（如 `kubectl get`、`grep`）不经审批直接执行；带 shell 语法、`secret`、URL 或连接参数的命令仍要审批，见[安全模型](#安全模型)。菜单中的编号绑定当前请求，例如：
 
 ```text
 /approve 7 once
@@ -131,6 +131,7 @@ echo "exit code: $?"
 | `--tools` | profile：`run` 为 `bash,read_file`，`chat` 为 `bash,read_file,read_output`；有 skill 目录时加入 `read_skill` | 显式传入时替换工具集合；仅启用 `read_output` 时安装长结果落盘钩子 |
 | `--cwd` | 当前目录 | 工具的工作目录，同时写入 `<environment>` |
 | `--allow-cmd` / `--deny-cmd` | 无 | bash 命令白名单前缀 / 额外的拒绝子串，均可重复 |
+| `--auto-approve-cmd` | profile：`chat`（assistant）为一组只读命令，`run`（troubleshoot）为空 | 不经审批直接执行的 bash 命令前缀，可重复，替换 profile 的清单；只在 bash 需要审批时起作用，见[安全模型](#安全模型) |
 | `--max-turns` | profile：`run`（troubleshoot）为 30，`chat`（assistant）不限 | 本次运行的模型请求次数上限，失败的尝试也计入；`chat` 中为每轮上限 |
 | `--timeout-secs` | profile：`run`（troubleshoot）为 900，`chat`（assistant）为 0 | 整次运行的时间上限，0 表示不限制；`chat` 中为每轮上限 |
 | `--tool-timeout-secs` | 120 | bash 命令的默认超时。模型可以通过工具参数 `timeout_secs` 为单条命令申请更长时间，上限为本参数与 600 秒中较大的一个；整次运行仍受 `--timeout-secs` 限制 |
@@ -248,6 +249,14 @@ CLI (main.rs + cli.rs + chat/)
 | `kubectl delete pod x` | 拒绝：不在白名单 |
 | `kubectl get pods && rm x` | 拒绝：包含 `&` |
 | `grep x $(cat list)` | 拒绝：包含 `$(` |
+
+自动放行（`--auto-approve-cmd` 或 profile 的 `rules.autoApprove`）只决定是否询问，不决定能运行什么。bash 需要审批时（如 chat），满足以下条件的命令不经审批直接执行：
+
+- 是由清单中的前缀组成的管道；
+- 不含白名单拒绝的语法、`secret`、URL（`://`）；
+- 不含把请求发往别处的参数：`--server`、`--kubeconfig`、`--token`、`--insecure-skip-tls-verify`，以及 kubectl 中含 `s` 的短参数。2026-11-01 实测（kubectl v1.36.1，加 `--insecure-skip-tls-verify`），kubectl 把 kubeconfig 中的 token 发给了 `--server` 指定的 HTTPS 地址。
+
+拒绝规则始终优先。内置 assistant 清单只收不能执行其他程序、不能写文件的命令：`kubectl` 的 `get`、`describe`、`logs`、`top`、`events`、`explain`、`api-resources`、`version`，以及 `grep`、`head`、`tail`、`wc`、`jq`。检查同样只看字面；这些命令能读到什么取决于运行它们的账号与凭据，读到的内容会进入模型上下文。
 
 在 Unix 上，bash 命令正常退出、超时、被取消或工具 future 被丢弃时，程序都会终止其进程组，并清理输出读取任务。因此不能用 bash 工具启动常驻进程。本机执行只能终止进程组：用 `setsid` 或守护化方式脱离进程组的进程不在此列，可能在命令结束后继续运行；需要保证时使用容器执行，见下文。
 
@@ -436,7 +445,7 @@ cargo fmt --check
 | `tests/agent_session.rs` | 共享提问与 Busy、取消与 future 丢弃后复用、队列边界、订阅和退订、回调重入与 panic 隔离、模型切换、授权撤销、先写审计再多订阅分发 |
 | `tests/openai_mock.rs` | 本地假 HTTP 服务上的端到端测试：SSE、执行 bash、回传工具结果、认证头、HTTP 错误重试、空闲超时、中途取消后保留已输出内容 |
 | `tests/cli.rs` | 编译出的程序：退出码 0 到 6、jsonl 输出、从 stdin 读提示词、bash 读不到 API key、系统提示词的生成段落、`--system-updates inline` |
-| `tests/chat_cli.rs` | 多轮历史、审批与授权范围、重置、模型切换、EOF、信号、超时、控制字符显示、恢复中断会话的提示；Unix PTY 验证运行中插话、取消重置和退出 |
+| `tests/chat_cli.rs` | 多轮历史、审批与授权范围、只读命令自动放行、重置、模型切换、EOF、信号、超时、控制字符显示、恢复中断会话的提示；Unix PTY 验证运行中插话、取消重置和退出 |
 | `tests/profiles_cli.rs` | profile 覆盖、显式默认值、预算参数的 help 写明取自 profile、不可绕过的 deny、上下文范围与审计、上下文默认值与越界链接、`--system-prompt-file` 兼容、skill 懒加载与脱敏、配置错误（含 provider 参数）退出码且不建会话文件 |
 | `tests/run_cli.rs` | `run` 在 P0 之后新增的输出约定：进度与报告行转义终端控制字符（原有 `run` 测试仍在 `tests/cli.rs`，逐字节保持） |
 | `tests/session_compaction.rs`、`tests/compaction.rs` | v1/v2 追加升级、分支和引用、原始投影、省略保留边界后摘要仍生效、编辑摘要的变换计划在写入前被拒绝、摘要失败与取消、请求 / 用量预算、超时和上限 |

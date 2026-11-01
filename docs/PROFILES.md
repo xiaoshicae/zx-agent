@@ -54,6 +54,7 @@ path = "skills/rust-review/SKILL.md"
 | `container.pidsLimit` | 容器内进程数上限，大于零，默认 256 |
 | `rules.allow` | bash 命令前缀白名单，沿用原管道检查；空列表表示只检查 deny |
 | `rules.deny` | 追加 bash 命令子串拒绝规则，原内置拒绝规则始终保留 |
+| `rules.autoApprove` | 替换不经审批直接执行的 bash 命令前缀；只在 bash 需要审批时起作用（chat）。带 shell 语法、`secret`、URL 或连接参数的命令仍要审批，拒绝规则始终优先，见 README 的“安全模型”。内置 assistant 为一组只读命令，troubleshoot 为空 |
 | `rules.askTools` | 替换需审批的工具名列表；run 通过 NoHuman 明确拒绝，chat 交给终端审批 |
 | `rules.denyTools` | 追加被拒绝的工具名；启用该工具或批准调用都不能覆盖拒绝 |
 | `limits.maxTurns` | 每轮模型请求数；`"unlimited"` 不限，`0` 不请求模型 |
@@ -71,7 +72,7 @@ path = "skills/rust-review/SKILL.md"
 | `toolOutput.maxFileBytes` | 读写文件上限，1–1048576，默认 1 MiB |
 | `toolOutput.directory` | 显式路径相对 TOML 文件；省略时为工具 cwd 下的 `.zx-agent/outputs` |
 
-未提供的值继承基线。叠加顺序为 **内置基线 < profile 文件 < 显式命令行参数**；即使 CLI 值恰好等于旧默认值，也按显式覆盖处理。`--allow-cmd` 替换文件的 allow；`--deny-cmd` 追加到文件和内置 deny，不能清除拒绝规则。重复的 `--context-file` 追加文件。在本机执行时给出 `--container-image` 视为配置错误，避免误以为命令已在容器中执行。
+未提供的值继承基线。叠加顺序为 **内置基线 < profile 文件 < 显式命令行参数**；即使 CLI 值恰好等于旧默认值，也按显式覆盖处理。`--allow-cmd`、`--auto-approve-cmd` 分别替换文件的 allow、autoApprove；`--deny-cmd` 追加到文件和内置 deny，不能清除拒绝规则。重复的 `--context-file` 追加文件。在本机执行时给出 `--container-image` 视为配置错误，避免误以为命令已在容器中执行。
 
 连接地址、模型、认证环境变量名、传输与工具超时、输出模式和会话路径仍使用原 CLI 选项。TOML 不接受这些键，也不接受任意扩展名称；未知字段、错误类型、无效路径或不支持的配置均在请求模型前以退出码 2 报错。
 
