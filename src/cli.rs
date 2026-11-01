@@ -1,20 +1,22 @@
 //! Command-line settings and shared runtime assembly for run and chat.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use zx_agent::AgentSession;
-use zx_agent::agent::{Decision, EventSink, LoopConfig, LoopSpec, Tool};
+use zx_agent::agent::{Decision, EventSink, HookOptions, Hooks, LoopConfig, LoopSpec, Tool};
 use zx_agent::ai::openai::{DEFAULT_MAX_RESPONSE_BYTES, OpenAiCompatible, OpenAiConfig, SystemUpdates};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::sse::DEFAULT_MAX_EVENT_BYTES;
 use zx_agent::compaction;
 use zx_agent::executor::{ContainerConfig, ContainerExecutor, Executor, LocalExecutor};
-use zx_agent::extensions::{self, ContinueOnLength, Extension, RedactSecrets, check_secret_files};
+use zx_agent::extensions::{
+    self, ContinueOnLength, Extension, MIN_SECRET_CHARS, RedactSecrets, check_secret_files, short_secret_files,
+};
 use zx_agent::mcp::{Server, ServerConfig};
 use zx_agent::output_store::{self, OutputStore, ReadOutputTool, SpillOutputs};
 use zx_agent::policy::{AutoApprove, CommandPolicy, PolicyHook, Rule, RuleMatcher, RulePolicy};
@@ -32,6 +34,24 @@ const SERVICE_ACCOUNT_TOKEN: &str = "/var/run/secrets/kubernetes.io/serviceaccou
 
 /// Comma-separated secret files to redact, added to `--secret-file`; deployments set it.
 const SECRET_FILES_ENV: &str = "ZX_SECRET_FILES";
+
+/// The notice about short secret values describes the configuration, which stays the same
+/// while the process runs; serve prepares a session for every thread, and says it once.
+static SHORT_SECRETS_NOTICE: Once = Once::new();
+
+/// Register a built-in hook under a fixed name, which `hook_failed` events and `[hook]` lines
+/// show. Without one the name is the hook's type name, whose form Rust does not guarantee
+/// across compiler versions, and the policy hooks would all share a name. MCP server names
+/// cannot contain `_`, so these never clash with an extension's.
+fn push_built_in(config: &mut LoopConfig, name: &str, hook: impl Hooks + 'static) {
+    config.hooks.push_with(
+        hook,
+        HookOptions {
+            name: Some(name.to_string()),
+            ..HookOptions::default()
+        },
+    );
+}
 
 #[derive(Parser)]
 #[command(name = "zx-agent", version, about = "Minimal general-purpose agent kernel")]
@@ -488,6 +508,15 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
         })?;
     }
     check_secret_files(&secret_files).map_err(|error| anyhow::anyhow!("{error} (--secret-file or ZX_SECRET_FILES)"))?;
+    // Never the value itself: the notice goes to a terminal or a log.
+    SHORT_SECRETS_NOTICE.call_once(|| {
+        for file in short_secret_files(&secret_files) {
+            eprintln!(
+                "[secret] {}: the value is shorter than {MIN_SECRET_CHARS} characters; it is still redacted, and so is every other occurrence of the same text in tool output",
+                file.display()
+            );
+        }
+    });
     let mut profile = Profile::load(options.base.profile.as_deref(), options.default_profile)?;
     if let Some(tools) = &options.base.tools {
         profile.tools = tools
@@ -678,7 +707,7 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
         max_tokens: options.request.max_tokens,
         sequential_tools: false,
     });
-    config.hooks.push(PolicyHook::new(Arc::new(policy)));
+    push_built_in(&mut config, "command_policy", PolicyHook::new(Arc::new(policy)));
     extensions::register(&mut config, &options.mcp.servers).map_err(anyhow::Error::msg)?;
     // Every policy that asks for bash approval gets the list: the strictest verdict of all
     // policies wins, so one that still asked would cancel the others' auto-approval.
@@ -708,13 +737,19 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
             matcher: RuleMatcher::Any,
             decision: Decision::Allow,
         });
-        config.hooks.push(PolicyHook::new(Arc::new(
-            RulePolicy::new(rules).auto_approve(auto_approve.clone()),
-        )));
+        push_built_in(
+            &mut config,
+            "profile_rules",
+            PolicyHook::new(Arc::new(RulePolicy::new(rules).auto_approve(auto_approve.clone()))),
+        );
     }
     // The hooks every mode shares. Each declares its stage, so the policies above run first
     // and redaction runs before output is saved, whatever is registered later.
-    config.hooks.push(ContinueOnLength::new(profile.continue_on_length));
+    push_built_in(
+        &mut config,
+        "continue_on_length",
+        ContinueOnLength::new(profile.continue_on_length),
+    );
     // An unset or empty variable holds nothing to redact.
     let hidden_values = options
         .hidden_env
@@ -722,12 +757,14 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
         .chain(&options.mcp.token_env)
         .filter_map(|name| std::env::var(name).ok())
         .filter(|value| !value.is_empty());
-    config.hooks.push(
+    push_built_in(
+        &mut config,
+        "redact_secrets",
         RedactSecrets::new(api_key.into_iter().chain(hidden_values))
             .with_secret_files(std::iter::once(PathBuf::from(SERVICE_ACCOUNT_TOKEN)).chain(secret_files)),
     );
     if let Some(spill) = spill {
-        config.hooks.push(spill);
+        push_built_in(&mut config, "spill_outputs", spill);
     }
     // The built-in tools skip repeated names; this guards tools registered here later.
     config.spec.validate().map_err(anyhow::Error::msg)?;
@@ -748,19 +785,18 @@ impl PreparedSession {
     /// Ask a person before every bash command, except those the profile auto-approves; other
     /// tools follow the profile's rules. Chat and serve both work this way.
     pub(crate) fn require_bash_approval(&mut self, reason: &str) {
-        self.config.hooks.push(PolicyHook::new(Arc::new(
-            RulePolicy::new(vec![
-                Rule {
-                    matcher: RuleMatcher::Tool(BASH.into()),
-                    decision: Decision::Ask(reason.into()),
-                },
-                Rule {
-                    matcher: RuleMatcher::Any,
-                    decision: Decision::Allow,
-                },
-            ])
-            .auto_approve(std::mem::take(&mut self.auto_approve)),
-        )));
+        let policy = RulePolicy::new(vec![
+            Rule {
+                matcher: RuleMatcher::Tool(BASH.into()),
+                decision: Decision::Ask(reason.into()),
+            },
+            Rule {
+                matcher: RuleMatcher::Any,
+                decision: Decision::Allow,
+            },
+        ])
+        .auto_approve(std::mem::take(&mut self.auto_approve));
+        push_built_in(&mut self.config, "bash_approval", PolicyHook::new(Arc::new(policy)));
     }
 
     /// The conversation, sending events to `sink`: the one place where every mode turns a

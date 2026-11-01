@@ -305,7 +305,10 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 |---|---|---|
 | 增量摘要 | 设计稿第二版，待评审 | 见"三、会话"。评审通过后实施，并把 P5 的"重新摘要读取原始投影"标为已被取代 |
 | 目录中无法用作匹配的密钥文件 | 已完成，PR #39 | 见下文"密钥文件的处理" |
-| 短值的脱敏 | 待决定 | 目前对任何非空值都做替换。GitLab 要求被遮蔽的值至少 8 个字符；目录中若有 `admin`、`5432` 这类短值，输出中所有相同的字符串都会被替换 |
+| 短值的脱敏 | 实施中 | 决定：仍然替换，不放过任何登记的值；启动时在 stderr 指出值短于 8 个字符的文件（`[secret] <文件>: …`，不显示值本身，每个进程一次）。背景：GitLab 要求被遮蔽的值至少 8 个字符；目录中若有 `admin`、`5432` 这类短值，输出中所有相同的文本都会被替换 |
+| 内置钩子的固定名称 | 实施中 | CLI 注册的内置钩子没有名称，`hook_failed` 与 `[hook]` 行显示类型名；`std::any::type_name` 的文档写明其格式不受保证、可能随编译器版本变化，几个策略钩子也因此同名。改为固定名称：`command_policy`、`profile_rules`、`bash_approval`、`continue_on_length`、`redact_secrets`、`spill_outputs`（MCP 服务器名不含 `_`，不会重名）；`presets::troubleshoot::hooks` 同样使用 `continue_on_length` |
+| 真实服务上的验证 | 待授权 | PR #35 改了 provider 的错误处理，PR #36 换了 HTTP 客户端与 TLS；对真实模型服务与 IM 平台的 HTTPS 连接尚未验证（见 PR #36 的记录）。付费测试需用户明确授权，并由用户设置 `ZX_E2E_AUTHORIZED` 后运行 |
+| 打开大会话的耗时 | 暂缓 | 加载时每条请求记录仍要构建一次分支路径，耗时高于线性（见 PR #34 的实施记录） |
 | 保留近期用户消息原文；摘要前把较早的长工具结果换成引用 | 待评估 | 增量摘要之外的两项上下文管理改进，见"三、会话"的设计稿末尾 |
 | 审计中写明自动放行命中的前缀 | 暂缓 | 需要改变 PR #25 固定的 `Decision` JSON 契约（见"一、安全"） |
 | `cli::prepare` 拆分为配置、进程级运行时与每会话三层 | 暂缓 | 改动面大，等 acp 接入时一起设计 |
@@ -336,6 +339,17 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
   - 新接口 1 项：`check_secret_files` 报出超过上限的文件与 FIFO，接受非 UTF-8 的文件，跳过缺失的路径。
   - 既有测试的调整（有意的行为变化）：`a_secret_file_that_cannot_be_read_as_text_fails_the_hook` 改为 `a_secret_file_over_the_limit_fails_the_hook`，用超过上限的文件验证运行中仍丢弃输出；PR #35 的两项钩子失败测试（`tests/hooks_cli.rs`、`tests/chat_cli.rs`）原先把 token 改写成非 UTF-8 来制造失败，现改为在运行中写到超过 64 KiB，期望的原因随之变为 "exceeds 65536 bytes"。
 - 本机 macOS 验证：stable 与 Rust 1.88.0 各 688 项通过（基线 685 项，在 `9d6c440` 上实测），6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过；设置 `ZX_DOCKER_TEST_IMAGE=debian:bookworm-slim` 时容器测试 34 项通过。自查脚本的命中与基线相同。未新增依赖，`Cargo.toml`、`Cargo.lock` 未改动。
+
+内置钩子的名称与短值提示（2026-11-02，实施中；设计见上方"后续事项"的两行）：
+
+实施记录（基于 `71539ef`，含 PR #40、#41）：
+
+- 名称：CLI 经 `push_with` 给 6 个内置钩子起固定名称；`presets::troubleshoot::hooks` 的续写钩子同样命名。名称只出现在 `hook_failed` 事件与 `[hook]` 行中，钩子的顺序与行为不变。修复前实测：JSONL 中脱敏失败的事件为 `"hook": "zx_agent::extensions::RedactSecrets"`。
+- 短值：新增 `extensions::short_secret_files` 与 `MIN_SECRET_CHARS`（8）。CLI 在启动检查之后提示，用 `std::sync::Once` 保证每个进程只提示一次：serve 启动时检查一次配置，之后每个线程再准备一次会话，配置不变，不必重复。值按字符计数；空白的值不提示，读不到的文件交给 `check_secret_files` 报告。
+- 测试：新增 3 项，修改 2 项的断言，没有删除测试。
+  - 修复前实测失败 4 项：JSONL 事件中的钩子名为固定名称（修复前为类型名）；run 与 chat 的 `[hook]` 行以固定名称开头（两项既有测试，断言由"行中含 `RedactSecrets after_tool failed`"改为精确匹配 `[hook] redact_secrets after_tool failed: …`）；启动时指出短值文件、不显示值本身、该值仍被替换（修复前没有提示）。
+  - 新接口 1 项：`short_secret_files` 按字符计数，以 8 个字符为界，空白值与缺失的路径不计。
+- 本机 macOS 验证：stable 与 Rust 1.88.0 各 720 项通过（基线 717 项，在 `71539ef` 上实测），6 项付费测试跳过；fmt、clippy 与 MSRV 全目标检查通过；严格 Rustdoc 第一次因 `MIN_SECRET_CHARS` 注释中的裸 URL 失败，改为尖括号链接后通过（只改注释）；设置 `ZX_DOCKER_TEST_IMAGE=debian:bookworm-slim` 时容器测试 34 项通过。`run --help`、`chat --help`、`serve --help` 与基线逐字节相同；自查脚本的命中与基线相同。未新增依赖，`Cargo.toml`、`Cargo.lock` 未改动。
 
 下面的 P0–P9 继续按各自验收标准推进。
 

@@ -196,15 +196,81 @@ async fn a_failed_redaction_is_reported_in_text_output() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
-    // The hook's default name is its type name, whose exact form Rust does not guarantee.
-    let reason = format!(
-        "RedactSecrets after_tool failed: cannot read a secret file to redact tool output: {} exceeds 65536 bytes",
+    let reported = format!(
+        "[hook] redact_secrets after_tool failed: cannot read a secret file to redact tool output: {} exceeds 65536 bytes",
         token.display()
     );
+    assert!(stderr.lines().any(|line| line.starts_with(&reported)), "{stderr}");
+}
+
+#[tokio::test]
+async fn hook_failures_name_the_built_in_hook_in_jsonl_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let token = dir.path().join("token");
+    std::fs::write(&token, "token-value").unwrap();
+    let server = MockServer::start(vec![
+        Reply::bash("c", "head -c 70000 /dev/zero | tr '\\0' x > token; echo hi"),
+        Reply::text("done"),
+    ])
+    .await;
+
+    let output = run_bash(&server, dir.path())
+        .args(["--secret-file", token.to_str().unwrap(), "--output", "jsonl"])
+        .output()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let failures: Vec<(String, String)> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|event| event["type"] == "hook_failed")
+        .map(|event| {
+            (
+                event["hook"].as_str().unwrap().to_string(),
+                event["phase"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    // A fixed name, not the type name, whose form Rust does not guarantee.
+    assert_eq!(failures, [("redact_secrets".to_string(), "after_tool".to_string())]);
+}
+
+#[tokio::test]
+async fn a_short_secret_is_reported_at_startup_and_still_redacted() {
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = dir.path().join("secrets");
+    std::fs::create_dir(&secrets).unwrap();
+    std::fs::write(secrets.join("username"), "admin\n").unwrap();
+    std::fs::write(secrets.join("token"), "token-value-long-enough").unwrap();
+    let server = MockServer::start(vec![
+        Reply::bash("c", "printf 'user=%s\\n' adm''in"),
+        Reply::text("done"),
+    ])
+    .await;
+
+    let output = run_bash(&server, dir.path())
+        .args(["--secret-file", secrets.to_str().unwrap()])
+        .output()
+        .await
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    let notice: Vec<&str> = stderr.lines().filter(|line| line.starts_with("[secret] ")).collect();
+    assert_eq!(notice.len(), 1, "{stderr}");
     assert!(
-        stderr
-            .lines()
-            .any(|line| line.starts_with("[hook] ") && line.contains(&reason)),
+        notice[0].starts_with(&format!("[secret] {}: ", secrets.join("username").display())),
         "{stderr}"
     );
+    assert!(notice[0].contains("shorter than 8 characters"), "{stderr}");
+    // The notice never shows the value itself, and the value is still redacted.
+    assert!(!notice[0].contains("admin"), "{stderr}");
+    let messages = server.requests()[1].body["messages"].to_string();
+    assert!(messages.contains("user=[REDACTED]"), "{messages}");
 }
