@@ -226,7 +226,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P3 | 终端对话 `chat` | 已完成（PR #5） |
 | P4 | profile 文件、上下文文件与 skills | 已完成（PR #6） |
 | P5 | 上下文管理 | 已完成（PR #9） |
-| P6 | 执行环境与崩溃恢复 | 进行中：崩溃恢复（PR #12）、执行环境接缝（PR #13）、离线容器执行（PR #14）已完成；在线访问评审稿已合入（PR #17），一期已完成：只读命令自动放行（PR #19）、环境变量保护与 ServiceAccount token 脱敏（PR #20）、常驻 Pod 部署包（PR #22）、多集群（PR #24）；容器联网已取消，改为常驻 Pod 部署。待部署方在真实集群上验收；服务模式与 IM 接入的评审稿已合入（PR #27），模块 A（IM 接口与服务，PR #28）、B（Slack 与 `serve`，PR #29）、C（⚑ D:5/CHINA FLAG: 飞书，PR #32）已完成，D 待实施 |
+| P6 | 执行环境与崩溃恢复 | 进行中：崩溃恢复（PR #12）、执行环境接缝（PR #13）、离线容器执行（PR #14）已完成；在线访问评审稿已合入（PR #17），一期已完成：只读命令自动放行（PR #19）、环境变量保护与 ServiceAccount token 脱敏（PR #20）、常驻 Pod 部署包（PR #22）、多集群（PR #24）；容器联网已取消，改为常驻 Pod 部署。待部署方在真实集群上验收；服务模式与 IM 接入的评审稿已合入（PR #27），模块 A（IM 接口与服务，PR #28）、B（Slack 与 `serve`，PR #29）、C（⚑ D:5/CHINA FLAG: 飞书，PR #32）、D（部署，PR #33）已完成，真实平台验收待提供凭据 |
 | P7 | 插件与 MCP | 未开始；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已完成（PR #23），A2–A8（扩展 API）已完成（PR #25） |
 | P8 | 嵌入协议 `acp` | 未开始 |
 | P9 | 可选增强 | 未开始 |
@@ -441,7 +441,8 @@ IM 接入一期（2026-11-01 起；评审稿合入后由用户要求推进，按
 - [x] A. IM 接口与服务：`im` 模块（`ImChannel`、`Server`）与 `AgentSession::take_queued`，用内存实现测试（已完成，PR #28）
 - [x] B. Slack：Socket Mode、`zx-agent serve` 子命令与配置文件、IM 凭据的隐藏与脱敏（引入 `tokio-tungstenite`，决策 D7；已完成，PR #29）
 - [x] C. ⚑ D:5/CHINA FLAG: 飞书：长连接、token、发送与回复、卡片（Subject to Legal/Export Compliance approval；已完成，PR #32）
-- [ ] D. 部署与验收：Deployment 运行 serve 并共享进程命名空间、配置与凭据、部署说明；真实平台验收
+- [x] D. 部署：`serve` 组件（共享进程命名空间、主进程改为 serve、配置与凭据）、部署说明与本机集群验收（已完成，PR #33）
+- [ ] 真实平台验收：在 Slack 工作区与 ⚑ D:5/CHINA FLAG: 飞书租户中各跑通一次 @、回答与审批（需要测试应用的凭据）
 
 自动放行实施记录（2026-11-01，PR #19）：
 
@@ -618,6 +619,32 @@ IM 接入模块 C 实施记录（2026-11-01，PR #32）：⚑ D:5/CHINA FLAG: �
   - 真实的飞书租户。
   - `{"code":200,"headers":null,"data":null}` 作为卡片回调的确认能否被接受：文档写的是返回 `{}`，Go SDK 发的是 `null` 的 base64，Python SDK 只发 `{"code":200}`。
   - 私聊中的话题回复是否可用：现在私聊不开话题。
+
+IM 接入模块 D 实施记录（2026-11-01，PR #33）：
+
+- 部署：`deploy/kubernetes/serve/` 是可选的 kustomize 组件，与 `multicluster` 并列。基础 Deployment 不变，仍是 `tini -- sleep infinity`，只用 `kubectl exec` 的部署不需要 IM 配置。组件包括：
+  - `shareProcessNamespace: true`，主进程改为 `zx-agent serve --config /etc/zx-agent-serve/serve.toml`；
+  - 配置来自 ConfigMap `zx-agent-serve`，挂在 `/etc/zx-agent-serve`，因为 `/etc/zx-agent` 已由多集群组件使用；
+  - 凭据来自 Secret `zx-agent-im`，四个键都是可选的，只写用到的平台；
+  - `serve.example.toml` 是配置示例。
+- 可观察性：验收前发现，平台连不上时 serve 静默重试，日志中没有任何输出。
+  - 为两个平台的配置增加 `on_error`（类型 `im::ErrorReport`），每次连接失败都调用；serve 把它写成 `failed` 行。
+  - 新增 2 项测试，Slack 与 ⚑ D:5/CHINA FLAG: 飞书各 1 项：一次可重试的失败被上报，下一次连接成功。反向验证：两处上报分别改为不调用时，对应测试都失败，修改已还原。
+- 本机集群验收：Docker Desktop 的 Kubernetes v1.36.1。没有真实平台凭据，Slack 指向拒绝连接的地址。结果：
+  - PID 1 为 pause，serve 为普通进程。
+  - `/proc/1/environ` 中没有 API key，读取 serve 的环境被拒绝。
+  - 孤儿进程被回收。
+  - serve 运行期间，`kubectl exec` 启动的 chat 正常。
+  - 日志有启动行与 `failed` 行，不含凭据。
+  - SIGTERM 后以 0 退出；`rollout restart` 正常。
+  - 两个组件同时启用时，挂载不冲突。
+  - 详见 `deploy/kubernetes/README.md` 的“验证记录”。
+- 文档：
+  - 部署说明新增“IM 服务”一节：创建 Secret 与 ConfigMap、启用组件、重启、日志、出网。
+  - 安全说明中“常驻 Pod 中的 API key”一条，改为启用 serve 后不再存在。
+  - 根目录 README 指向部署说明。
+- 本地 macOS（基于含 PR #31、#32 的 `0eb4b96`）：stable 与 Rust 1.88.0 各 651 项通过（基线 649 项），6 项付费测试跳过；格式、clippy、严格 Rustdoc 与 MSRV 全目标检查通过；⚑ D:5/CHINA FLAG: `tests/im_feishu.rs` 连续运行 20 次，`tests/im_slack.rs`、`tests/serve_cli.rs` 与 `tests/im_server.rs` 各 5 次，均通过。集群验收所用镜像基于 `c272f41` 加本次改动构建，合入 PR #31 之后没有重建镜像复验。
+- 未验证：真实的 Slack 工作区与 ⚑ D:5/CHINA FLAG: 飞书租户；两种 WebSocket 主机，需要真实连接；x86_64 镜像。
 
 执行环境接缝验收（2026-11-01，已完成，PR #13）：`src/executor/` 提供 `Executor`、`ShellCommand`、`CommandOutput`、`CommandEnd` 与 `LocalExecutor`；bash 与 read_file 新增 `executor` 字段，默认 `LocalExecutor`，`..Default::default()` 的构造方式不受影响，按字段完整列出的字面量需补上新字段。本机执行代码从 bash 与 read_file 原样搬迁，bash 与 read_file 原有测试不改断言即通过（仅 read_file 测试中两处字面量补 `..ReadFileTool::default()`，bash 测试模块补一行 `use tokio::process::Command;`）。新增 `tests/executor.rs` 3 项，用记录请求的替身执行器验证：bash 把命令、目录、超时与隐藏变量交给执行器，并正确报告 6 种结束方式；read_file 经执行器读取解析后的路径与上限。反向验证：让工具绕过自身执行器时，3 项全部失败，修改已还原。本地 macOS 基于 `bb91974`，stable 与 Rust 1.88.0 各 416 项通过、6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过。`tests/cli.rs`、`Cargo.toml`、`Cargo.lock` 未改动。
 

@@ -447,6 +447,24 @@ async fn posts_to_one_chat_are_spaced_out() {
 }
 
 #[tokio::test]
+async fn a_failed_connection_attempt_is_reported_and_retried() {
+    let mut slack = FakeSlack::start().await;
+    slack.script("apps.connections.open", vec![Answer::Error("internal_error")]);
+    let (reported, mut reports) = mpsc::unbounded_channel();
+    let mut config = SlackConfig::new(APP_TOKEN.into(), BOT_TOKEN.into());
+    config.api_base = slack.api_base.clone();
+    config.on_error = Some(Arc::new(move |error: &ImError| {
+        reported.send(error.to_string()).ok();
+    }));
+    let running = run(Arc::new(SlackChannel::new(config).unwrap()));
+    let report = tokio::time::timeout(WAIT, reports.recv()).await.unwrap().unwrap();
+    assert!(report.contains("internal_error"), "{report}");
+    // The next attempt connects.
+    slack.socket().await;
+    running.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn stopping_closes_the_connection() {
     let mut slack = FakeSlack::start().await;
     let running = run(channel(&slack));

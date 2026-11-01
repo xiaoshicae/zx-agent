@@ -21,8 +21,8 @@ use crate::agent::ApprovalResult;
 use crate::sync::lock;
 
 use super::{
-    ApprovalId, CardLabels, Choice, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId, MessageRef,
-    Outbound, Seen, ThreadId, UserId,
+    ApprovalId, CardLabels, Choice, ConversationId, Destination, ErrorReport, ImChannel, ImError, Inbound, MessageId,
+    MessageRef, Outbound, Seen, ThreadId, UserId,
 };
 
 /// Where the Web API lives.
@@ -73,6 +73,9 @@ pub struct SlackConfig {
     /// second per channel (chat.postMessage, "Rate limiting").
     pub post_interval: Duration,
     pub labels: CardLabels,
+    /// Called with each failed attempt to connect, before the channel waits and tries
+    /// again, so that an operator can see a platform that cannot be reached.
+    pub on_error: Option<ErrorReport>,
 }
 
 impl SlackConfig {
@@ -84,6 +87,7 @@ impl SlackConfig {
             request_timeout: Duration::from_secs(30),
             post_interval: Duration::from_secs(1),
             labels: CardLabels::default(),
+            on_error: None,
         }
     }
 }
@@ -148,6 +152,12 @@ impl SlackChannel {
             } else {
                 ImError::Transport(format!("slack {method}: {error}"))
             });
+        }
+    }
+
+    fn report(&self, error: &ImError) {
+        if let Some(callback) = &self.config.on_error {
+            callback(error);
         }
     }
 
@@ -228,7 +238,19 @@ impl SlackChannel {
         let connected = tokio::time::timeout(self.config.request_timeout, tokio_tungstenite::connect_async(url)).await;
         let mut socket = match connected {
             Ok(Ok((socket, _))) => socket,
-            Ok(Err(_)) | Err(_) => return Ended::Failed,
+            Ok(Err(error)) => {
+                self.report(&ImError::Transport(format!(
+                    "slack: cannot open the Socket Mode connection: {error}"
+                )));
+                return Ended::Failed;
+            }
+            Err(_) => {
+                self.report(&ImError::Transport(format!(
+                    "slack: opening the Socket Mode connection took longer than {} s",
+                    self.config.request_timeout.as_secs()
+                )));
+                return Ended::Failed;
+            }
         };
         loop {
             let frame = tokio::select! {
@@ -297,7 +319,8 @@ impl ImChannel for SlackChannel {
             match self.call("auth.test", &self.config.bot_token, None).await {
                 Ok(answer) => break answer["user_id"].as_str().map(String::from),
                 Err(error @ ImError::Config(_)) => return Err(error),
-                Err(ImError::Transport(_)) => {
+                Err(error @ ImError::Transport(_)) => {
+                    self.report(&error);
                     if !pause(&mut backoff, cancel).await {
                         return Ok(());
                     }
@@ -312,7 +335,10 @@ impl ImChannel for SlackChannel {
             let url = match self.call("apps.connections.open", &self.config.app_token, None).await {
                 Ok(answer) => answer["url"].as_str().map(String::from),
                 Err(error @ ImError::Config(_)) => return Err(error),
-                Err(ImError::Transport(_)) => None,
+                Err(error @ ImError::Transport(_)) => {
+                    self.report(&error);
+                    None
+                }
             };
             let ended = match url {
                 Some(url) => self.receive(&url, &inbound, bot.as_deref(), &mut seen, cancel).await,

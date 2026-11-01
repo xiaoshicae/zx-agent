@@ -14,6 +14,7 @@ mod worker;
 use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::hash::Hash;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
@@ -249,6 +250,9 @@ impl<K: Clone + Eq + Hash> Seen<K> {
         true
     }
 }
+
+/// A callback that a channel calls with each failed attempt to reach its platform.
+pub type ErrorReport = Arc<dyn Fn(&ImError) + Send + Sync>;
 
 /// Why a channel call failed.
 #[derive(Debug)]

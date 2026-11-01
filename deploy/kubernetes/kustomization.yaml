@@ -11,10 +11,14 @@ resources:
   - cronjob.yaml
   # Writes in chat, each approved by a person; scheduled inspections stay read-only.
   # - operator.yaml
-# Other clusters (README.md, "多集群"): uncomment after creating the ConfigMap
-# zx-agent-kubeconfig and the Secret zx-agent-clusters.
+# Optional components: uncomment `components:` and the ones wanted.
+# - multicluster: other clusters (README.md, "多集群"), after creating the ConfigMap
+#   zx-agent-kubeconfig and the Secret zx-agent-clusters.
+# - serve: the IM service (README.md, "IM 服务"), after creating the ConfigMap zx-agent-serve
+#   and the Secret zx-agent-im.
 # components:
 #   - multicluster
+#   - serve
 images:
   # Replace with the image built from deploy/kubernetes/Dockerfile and pushed to a registry
   # the cluster can pull from.
