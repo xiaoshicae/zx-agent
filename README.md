@@ -29,7 +29,7 @@
 
 ## 快速开始
 
-需要 Rust 1.88 及以上版本。
+需要 Rust 1.88 及以上版本，以及 C 编译器（TLS 使用的 aws-lc 在构建时编译）。HTTPS 使用系统的根证书：Linux 上没有安装 CA 证书（如 Debian 的 `ca-certificates`）时，程序启动即报错 `No CA certificates were loaded from the system`，只连 `http://` 的本地模型也一样。
 
 ```bash
 cargo build --release
