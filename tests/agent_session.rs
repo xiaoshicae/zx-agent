@@ -78,6 +78,34 @@ async fn sdk_prompts_preserve_empty_and_unicode_input() {
 }
 
 #[tokio::test]
+async fn take_queued_returns_input_no_run_consumed_steering_first() {
+    let (session, provider, _) = setup([FauxStep::text("one"), FauxStep::text("two")]);
+    session.prompt("first").await.unwrap();
+    session.follow_up("later");
+    session.steer("now");
+    session.steer("also now");
+    assert_eq!(session.take_queued().unwrap(), ["now", "also now", "later"]);
+    assert!(session.take_queued().unwrap().is_empty());
+    session.prompt("second").await.unwrap();
+    assert_eq!(
+        summarize(&provider.faux.requests()[1].messages),
+        ["user:first", "assistant:one", "user:second"]
+    );
+}
+
+#[tokio::test]
+async fn take_queued_during_a_run_is_busy_and_leaves_the_input_queued() {
+    let (session, provider, _) = setup([FauxStep::Hang]);
+    let mut running = Box::pin(session.prompt("first"));
+    tokio::select! { _ = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
+    session.steer("queued");
+    assert_eq!(session.take_queued(), Err(SessionError::Busy));
+    assert!(session.abort());
+    assert_eq!(running.await.unwrap().outcome, RunOutcome::Aborted);
+    assert_eq!(session.take_queued().unwrap(), ["queued"]);
+}
+
+#[tokio::test]
 async fn a_running_prompt_rejects_another_prompt_without_queueing_it() {
     let (session, provider, _) = setup([FauxStep::Hang, FauxStep::text("resumed")]);
     let mut running = Box::pin(session.prompt("first"));

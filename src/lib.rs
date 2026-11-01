@@ -12,6 +12,7 @@
 //! - [`prompt`]: system prompt assembly and the generated environment section
 //! - [`tools`]: built-in tools
 //! - [`executor`]: where built-in tools run commands and read files
+//! - [`im`]: chat platforms, and a server that answers each thread with its own session
 
 pub mod agent;
 pub mod agent_session;
@@ -19,6 +20,7 @@ pub mod ai;
 pub mod compaction;
 pub mod executor;
 pub mod extensions;
+pub mod im;
 pub mod interaction;
 pub mod output_store;
 pub mod policy;

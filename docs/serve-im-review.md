@@ -2,9 +2,9 @@
 
 | 信息 | 内容 |
 |-|-|
-| 版本 | `v0.1` |
+| 版本 | `v0.2` |
 | 日期 | `2026-11-01` |
-| 状态 | 草稿（待评审） |
+| 状态 | 已合入（PR #27），按第 6 节分模块实施：A 已完成（PR #28） |
 | Owner | 待指定 |
 | 对应 | `docs/ROADMAP.md:365`：P6“部署方向”中告警 Webhook 与 IM 机器人需要新的服务模式，另行评审；P9 的“由 webhook 或告警触发运行”“异步审批” |
 | 代码核对基线 | `5518791`（含 PR #25）；文中行号以此为准 |
@@ -187,7 +187,7 @@ pub enum Outbound {
 pub enum Choice { AllowOnce, Deny }
 ```
 
-`ConversationId`（聊天：频道、群或单聊）、`ThreadId`、`UserId`、`MessageId`、`ApprovalId` 都是包一层 `String` 的新类型。`MessageRef` 由实现定义内容，例如 Slack 的 channel 与 ts。`ApprovalResult` 是现有的公开类型（`src/agent/events.rs:113`），与 `ApprovalResolved` 事件共用。
+`ConversationId`（聊天：频道、群或单聊）、`ThreadId`、`UserId`、`MessageId`、`ApprovalId` 都是包一层 `String` 的新类型。`MessageRef` 是发往的位置（`Destination`）加平台的消息 ID，例如 Slack 的 channel、线程与 ts。`Destination.thread` 是线程根消息的 ID；频道中的新消息没有线程，serve 以它的 ID 开出线程。`ApprovalResult` 是现有的公开类型（`src/agent/events.rs:113`），与 `ApprovalResolved` 事件共用。
 
 实现必须遵守的约定：
 
@@ -322,7 +322,7 @@ idleSecs = 1800             # 会话空闲多久后释放
 
 **建议 a)**；集群有公网入口时，可以把 b) 作为备选。
 
-#### ③ 运行结束瞬间到达的插话
+#### ③ 运行结束瞬间到达的插话【已定：a)】
 
 运行层在每个回合末检查插话队列（`src/agent/agent_loop.rs:545`），在下一回合开始时取出（`src/agent/agent_loop.rs:383-384`）；运行停止时，队列中的输入留给下一次运行（`src/agent/agent_loop.rs:370-371`）。插话若恰好在最后一次检查之后、运行结束之前到达，要等线程里再来一条消息才会处理。`AgentSession` 目前没有查询或取出队列的公开方法。
 
@@ -331,9 +331,9 @@ idleSecs = 1800             # 会话空闲多久后释放
 | a) | 给 `AgentSession` 增加取出未处理输入的方法；serve 在每次运行结束后调用，非空就作为下一次 prompt | 新增公开方法，不影响现有调用方 |
 | b) | serve 不用插话：运行中到达的消息由 serve 排队，运行结束后作为下一次 prompt | 不改内核，但运行中的消息要等本次运行结束才被看到 |
 
-**建议 a)**，方法名与语义在实施 A 时定稿。
+**已定：a)**，实施为 `AgentSession::take_queued`（PR #28）：空闲时取出未被消费的排队输入，运行中返回 `Busy`。
 
-#### ④ 审批人身份没有进入审计
+#### ④ 审批人身份没有进入审计【已定：a)】
 
 `Interaction::confirm` 的返回值 `Approval` 只有 `AllowOnce`、`AllowSession`、`Deny`（`src/interaction.rs:25-29`），`ApprovalResolved` 事件也没有审批人字段（`src/agent/events.rs:245-252`）。IM 中的审批人可能是名单里的任何一人，需要记录是谁批准的。
 
@@ -342,7 +342,7 @@ idleSecs = 1800             # 会话空闲多久后释放
 | a) | serve 自己记录：每次决定写一行结构化日志（会话键、`tool_call_id`、审批人、结果、时间），卡片上也显示审批人 | 不改公开类型；记录不在会话文件中，靠 `tool_call_id` 与会话、事件对应 |
 | b) | 在 `Approval` 或 `ApprovalResolved` 中加入审批人 | 记录进入事件流；但二者都是公开类型，`Approval` 的 JSON 格式刚在 PR #25 中确定（`src/interaction.rs:22-24`），加字段会影响现有实现与匹配 |
 
-**建议 a)**；需要把审批人写进会话文件时，再按 b) 单独评审。
+**已定：a)**，实施为 `ServerEvent::Approval`（PR #28），由 serve 写成结构化日志；需要把审批人写进会话文件时，再按 b) 单独评审。
 
 #### 其余缺口
 
@@ -362,9 +362,9 @@ idleSecs = 1800             # 会话空闲多久后释放
 | 服务配置 | TOML：`[slack]`、`[feishu]`（⚑ D:5/CHINA FLAG: 飞书）、`[access]`、`[limits]` | 新增（3.6） |
 | IM 扩展点 | 公开模块 `im`：`ImChannel` 与相关类型 | 新增（3.1） |
 | 依赖 | `tokio-tungstenite` 0.30（`docs/ROADMAP.md` 决策 D7） | 新增（缺口 ①，实施 B、C 时引入） |
-| 插话 | `AgentSession` 取出未处理输入的方法 | 新增（缺口 ③，待定） |
+| 插话 | `AgentSession::take_queued` | 新增（缺口 ③，PR #28） |
 | 会话文件 | `/data/sessions/<平台>/<聊天>/<线程>.jsonl` | 新的存放位置，格式不变 |
-| 审批记录 | serve 的结构化日志 | 新增（缺口 ④）；事件格式不变 |
+| 审批记录 | `ServerEvent::Approval`，由 serve 写成结构化日志 | 新增（缺口 ④，PR #28）；事件格式不变 |
 | 部署 | Deployment 运行 serve，`shareProcessNamespace: true`；新增配置 ConfigMap 与凭据 Secret | 改动（2.3.2、3.6） |
 
 ---
@@ -487,4 +487,4 @@ A ──┬──▶ B（Slack）───┬──▶ D
 
 ---
 
-`serve-im-review.md` · v0.1 · 2026年11月
+`serve-im-review.md` · v0.2 · 2026年11月
