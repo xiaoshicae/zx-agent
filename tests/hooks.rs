@@ -622,6 +622,59 @@ async fn redaction_handles_overlapping_secrets_unicode_and_error_outputs() {
     assert!(output.is_error);
 }
 
+fn redaction_call() -> ToolCall {
+    ToolCall {
+        id: "c".into(),
+        name: "echo".into(),
+        arguments: json!({}),
+        arguments_error: None,
+    }
+}
+
+#[tokio::test]
+async fn secret_files_are_read_again_and_earlier_values_stay_redacted() {
+    let dir = tempfile::tempdir().unwrap();
+    let token = dir.path().join("token");
+    std::fs::write(&token, "first-token\n").unwrap();
+    let hook = RedactSecrets::new(Vec::new()).with_secret_files([token.clone()]);
+    let output = hook
+        .after_tool(&redaction_call(), ToolOutput::ok("a first-token b"))
+        .await
+        .unwrap();
+    assert_eq!(output.content, "a [REDACTED] b");
+    // A rotated token: the new value is read, and the old one, still valid, stays hidden.
+    std::fs::write(&token, "second-token").unwrap();
+    let output = hook
+        .after_tool(&redaction_call(), ToolOutput::ok("first-token second-token"))
+        .await
+        .unwrap();
+    assert_eq!(output.content, "[REDACTED] [REDACTED]");
+}
+
+#[tokio::test]
+async fn missing_or_empty_secret_files_redact_nothing_else() {
+    let dir = tempfile::tempdir().unwrap();
+    let empty = dir.path().join("empty");
+    std::fs::write(&empty, " \n").unwrap();
+    let hook = RedactSecrets::new(["key".to_string()]).with_secret_files([dir.path().join("absent"), empty]);
+    let output = hook
+        .after_tool(&redaction_call(), ToolOutput::ok("key stays out, the rest stays"))
+        .await
+        .unwrap();
+    assert_eq!(output.content, "[REDACTED] stays out, the rest stays");
+}
+
+#[tokio::test]
+async fn a_secret_file_that_cannot_be_read_as_text_fails_the_hook() {
+    let dir = tempfile::tempdir().unwrap();
+    let hook = RedactSecrets::new(Vec::new()).with_secret_files([dir.path().to_path_buf()]);
+    let error = hook
+        .after_tool(&redaction_call(), ToolOutput::ok("output"))
+        .await
+        .unwrap_err();
+    assert!(error.contains("cannot read a secret file"), "{error}");
+}
+
 struct NextTurn(TurnDecision);
 #[async_trait]
 impl Hooks for NextTurn {
