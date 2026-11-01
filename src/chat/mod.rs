@@ -54,6 +54,8 @@ struct Settings {
     args: ChatArgs,
     /// `--system-prompt-file`, read once: it may be a pipe, and /new reuses the text.
     instructions: Option<String>,
+    /// Connected once; /new reuses the connections.
+    mcp: cli::McpTools,
 }
 
 async fn build(
@@ -78,6 +80,7 @@ async fn build(
         },
         instructions: settings.instructions.as_deref(),
         hidden_env: &[],
+        mcp: &settings.mcp,
     })
     .await?;
     prepared.require_bash_approval("shell commands require interactive approval");
@@ -91,7 +94,12 @@ async fn build(
 
 pub(crate) async fn run(args: ChatArgs) -> Result<u8> {
     let instructions = cli::read_instructions(&args.base)?;
-    let settings = Settings { args, instructions };
+    let mcp = cli::connect_mcp(&args.base, Builtin::Assistant, &args.transport).await?;
+    let settings = Settings {
+        args,
+        instructions,
+        mcp,
+    };
     let args = &settings.args;
     let mode = if std::io::stdin().is_terminal() {
         InputMode::Terminal

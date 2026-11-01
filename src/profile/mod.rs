@@ -4,12 +4,14 @@
 mod context;
 pub mod skills;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 
+use crate::mcp::{check_server_name, tool_name as mcp_tool_name};
 use crate::presets::{assistant, troubleshoot};
 use crate::runner::Limits;
 use crate::text::read_text_file;
@@ -61,6 +63,30 @@ pub struct Rules {
     pub ask_tools: Vec<String>,
     /// Tool names denied regardless of enabled tools or approval grants.
     pub deny_tools: Vec<String>,
+}
+
+/// An external MCP server whose listed tools the model may call (docs/p7-mcp-review.md). The
+/// frontends connect it at startup; whether a call runs is up to the rules.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct McpServer {
+    /// ASCII lowercase letters, digits and `-`. Its tools reach the model as `<name>__<tool>`.
+    pub name: String,
+    /// The server's MCP endpoint (Streamable HTTP).
+    pub url: String,
+    /// The variable holding the token sent as `Authorization: Bearer`; unset sends none.
+    /// Commands do not see the variable, and its value is redacted from tool output.
+    #[serde(default)]
+    pub token_env: Option<String>,
+    /// The server's tools to offer the model, by the names the server gives them.
+    pub tools: Vec<String>,
+    /// Tools among `tools` that run without approval. The others ask a person, and are
+    /// refused where no one can answer, as in `run`.
+    #[serde(default)]
+    pub allow_tools: Vec<String>,
+    /// Bound for one call, in seconds; unset uses `--tool-timeout-secs`.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 }
 
 /// Which project instructions to read at startup. Explicit paths are absolute after load.
@@ -124,6 +150,8 @@ pub struct Profile {
     pub execution: Execution,
     /// Used when `execution` is `Container`.
     pub container: ContainerSettings,
+    /// External MCP servers; a profile's `[[mcp]]` list replaces the one it extends.
+    pub mcp: Vec<McpServer>,
 }
 
 impl Profile {
@@ -174,6 +202,7 @@ impl Profile {
             tool_output: output_store::Config::default(),
             execution: Execution::Local,
             container: ContainerSettings::default(),
+            mcp: Vec::new(),
         };
         profile.overlay(raw, Path::new("."))?;
         profile.validate()?;
@@ -267,7 +296,47 @@ impl Profile {
         if container.pids_limit.is_some() {
             self.container.pids_limit = container.pids_limit;
         }
+        if let Some(servers) = raw.mcp {
+            self.mcp = servers;
+        }
         Ok(())
+    }
+
+    /// The names the model calls the configured MCP tools by, checking the `[[mcp]]` entries.
+    fn mcp_tool_names(&self) -> Result<Vec<String>> {
+        let mut servers = HashSet::new();
+        let mut names = Vec::new();
+        for server in &self.mcp {
+            let name = server.name.as_str();
+            check_server_name(name).map_err(anyhow::Error::msg)?;
+            ensure!(servers.insert(name), "more than one MCP server is named {name:?}");
+            ensure!(!server.url.trim().is_empty(), "MCP server {name}: url is empty");
+            ensure!(!server.tools.is_empty(), "MCP server {name}: tools lists no tool");
+            ensure!(
+                server.token_env.as_deref().is_none_or(|env| !env.trim().is_empty()),
+                "MCP server {name}: tokenEnv is empty"
+            );
+            ensure!(
+                server.timeout_secs != Some(0),
+                "MCP server {name}: timeoutSecs must be greater than zero"
+            );
+            for tool in &server.allow_tools {
+                ensure!(
+                    server.tools.contains(tool),
+                    "MCP server {name}: allowTools names {tool:?}, which tools does not list"
+                );
+            }
+            let first = names.len();
+            for tool in &server.tools {
+                let model_name = mcp_tool_name(name, tool).map_err(anyhow::Error::msg)?;
+                ensure!(
+                    !names[first..].contains(&model_name),
+                    "MCP server {name}: tool {tool:?} would be named {model_name:?}, like another of its tools"
+                );
+                names.push(model_name);
+            }
+        }
+        Ok(names)
     }
 
     /// Check names, rule patterns and skill registrations without reading skill bodies.
@@ -290,11 +359,13 @@ impl Profile {
         {
             ensure!(!pattern.trim().is_empty(), "empty command rule is not allowed");
         }
+        let mcp_tools = self.mcp_tool_names()?;
         for tool in self.rules.ask_tools.iter().chain(&self.rules.deny_tools) {
             ensure!(
                 tool == skills::TOOL_NAME
                     || tool == output_store::TOOL_NAME
-                    || BUILTIN_TOOL_NAMES.contains(&tool.as_str()),
+                    || BUILTIN_TOOL_NAMES.contains(&tool.as_str())
+                    || mcp_tools.contains(tool),
                 "unknown tool in rule {tool:?}"
             );
         }
@@ -344,6 +415,7 @@ struct RawProfile {
     skills: Option<Vec<Skill>>,
     compaction: RawCompaction,
     tool_output: RawToolOutput,
+    mcp: Option<Vec<McpServer>>,
 }
 
 #[derive(Default, Deserialize)]
@@ -641,5 +713,63 @@ mod tests {
         );
         assert_eq!(profile.skills[0].name, "rust-review");
         assert!(read_text(&profile.skills[0].path).unwrap().contains("Rust review"));
+    }
+
+    const PROM: &str = "[[mcp]]\nname = 'prom'\nurl = 'https://prom.example/mcp'\ntokenEnv = 'PROM_TOKEN'\n\
+                        tools = ['query', 'range']\nallowTools = ['query']\ntimeoutSecs = 30\n";
+
+    #[test]
+    fn mcp_servers_are_read_from_the_profile() {
+        let profile = load_file(PROM).unwrap();
+        assert_eq!(
+            profile.mcp,
+            [McpServer {
+                name: "prom".into(),
+                url: "https://prom.example/mcp".into(),
+                token_env: Some("PROM_TOKEN".into()),
+                tools: vec!["query".into(), "range".into()],
+                allow_tools: vec!["query".into()],
+                timeout_secs: Some(30),
+            }]
+        );
+        assert!(Profile::load(None, Builtin::Assistant).unwrap().mcp.is_empty());
+    }
+
+    #[test]
+    fn rules_may_name_the_configured_mcp_tools_only() {
+        let profile = load_file(&format!("[rules]\ndenyTools = ['prom__range']\n{PROM}")).unwrap();
+        assert_eq!(profile.rules.deny_tools, ["prom__range"]);
+        let error = load_file(&format!("[rules]\naskTools = ['prom__admin']\n{PROM}"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown tool in rule \"prom__admin\""), "{error}");
+    }
+
+    #[test]
+    fn malformed_mcp_settings_are_refused() {
+        let server = |fields: &str| format!("[[mcp]]\nname = 'prom'\nurl = 'https://prom.example/mcp'\n{fields}\n");
+        for (text, expected) in [
+            (server("tools = []"), "tools lists no tool"),
+            (
+                server("tools = ['query']\nallowTools = ['range']"),
+                "which tools does not list",
+            ),
+            (server("tools = ['query']\ntimeoutSecs = 0"), "greater than zero"),
+            (server("tools = ['query']\ntokenEnv = ' '"), "tokenEnv is empty"),
+            (server("tools = ['a.b', 'a_b']"), "like another of its tools"),
+            (server(&format!("tools = ['{}']", "x".repeat(64))), "longer than 64"),
+            (
+                format!("{}{}", server("tools = ['query']"), server("tools = ['range']")),
+                "more than one MCP server",
+            ),
+            (
+                "[[mcp]]\nname = 'Prom'\nurl = 'https://prom.example/mcp'\ntools = ['query']\n".to_string(),
+                "must be ASCII lowercase",
+            ),
+            (server("tools = ['query']\nheaders = {}"), "unknown field"),
+        ] {
+            let error = format!("{:#}", load_file(&text).unwrap_err());
+            assert!(error.contains(expected), "{text}\n{error}");
+        }
     }
 }

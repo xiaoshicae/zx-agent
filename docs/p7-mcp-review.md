@@ -2,11 +2,11 @@
 
 | 信息 | 内容 |
 |-|-|
-| 版本 | `v0.3` |
+| 版本 | `v0.4` |
 | 日期 | `2026-11-01` |
-| 状态 | 已评审（2026-11-01：缺口 ②–⑤ 按建议执行），已合入（PR #36）；按第 6 节分模块实施：A（Extension 接口，PR #38）、B1（MCP 客户端库，PR #40）已完成，B2（CLI 接入）待实施 |
+| 状态 | 已评审（2026-11-01：缺口 ②–⑤ 按建议执行），已合入（PR #36）；按第 6 节分模块实施：A（Extension 接口，PR #38）、B1（MCP 客户端库，PR #40）、B2（CLI 接入与文档，PR #41）已完成；真实 MCP 服务器的验收待选定服务器 |
 | Owner | 待指定 |
-| 对应 | `docs/ROADMAP.md:937-947`（P7 插件与 MCP）；范围按用户 2026-11-01 的决定（D8）收窄（1.2） |
+| 对应 | `docs/ROADMAP.md:937-948`（P7 插件与 MCP）；范围按用户 2026-11-01 的决定（D8）收窄（1.2） |
 | 代码核对基线 | `a345b39`（含 PR #35）；源码行号以此为准，`docs/ROADMAP.md` 的行号以本稿所在 PR 修改后的版本为准 |
 | Milestone | 一期：公开 `Extension`、MCP 客户端（只接工具，只用 Streamable HTTP）<br>以后按需：运行中更新工具列表、OAuth、MCP 的其他能力 |
 
@@ -230,8 +230,8 @@ timeoutSecs = 60                              # 可选：单次调用的上限�
 | 启动 | 每个服务器用 `Auto` 模式建立连接：先发 `server/discover`，旧服务器回退到 `initialize`（协议版本 2025-11-25）；`list_all_tools` 取全部工具，核对配置。每个服务器 30 秒超时 |
 | 启动失败 | 报配置错误，退出码 2；serve 也一样，由 Kubernetes 重启（缺口 ②） |
 | 运行中 | 旧协议的会话过期（404）由 rmcp 重新初始化（`streamable_http_client.rs:2123-2134`）；`list_changed` 只记录，重启进程后生效 |
-| 退出 | 计划用 `close_with_timeout`，旧协议的会话发 DELETE，上限 5 秒。B1 未实施：工具共用同一个客户端，进程退出时不主动关闭，旧协议的会话由服务器过期回收；B2 再定 |
-| 启动行 | stderr：服务器名、主机、协商的协议版本、交给模型的工具数 |
+| 退出 | 不主动关闭（B2 定）：新协议没有会话；旧协议的会话由服务器过期回收。各工具共用一个客户端，要发 DELETE，就得在所有会话释放后收回它；收益只在旧协议，代价是多一段收尾流程 |
+| 启动行 | stderr 每个服务器一行：`[mcp] <服务器名>: <工具名>; protocol <版本>; <协议、主机与端口>`。要审批的工具名后加 `(asks)`；经 `http://` 发 token 时，行末加 `; the token is sent unencrypted` |
 
 ### 3.7 关键技术缺口
 
@@ -341,8 +341,8 @@ timeoutSecs = 60                              # 可选：单次调用的上限�
 |-|-|-|-|
 | A. Extension 接口 | 待指定 | trait、`register`、阶段、重名与段落名检查（已完成，PR #38） | 无 |
 | B1. MCP 客户端库 | 待指定 | 引入 rmcp；`mcp` 模块：连接与协议回退、工具的选择与命名、调用、结果、超时与取消；假服务与测试（已完成，PR #40） | A |
-| B2. CLI 接入 | 待指定 | profile 的 `[[mcp]]`、`cli::prepare` 接入扩展、审批规则、凭据的隐藏与脱敏、run、chat 与 serve 的连接与启动行 | B1 |
-| C. 文档 | 待指定 | README、`docs/PROFILES.md`、部署说明、ROADMAP | B2 |
+| B2. CLI 接入 | 待指定 | profile 的 `[[mcp]]`、`cli::prepare` 接入扩展、审批规则、凭据的隐藏与脱敏、run、chat 与 serve 的连接与启动行（已完成，PR #41） | B1 |
+| C. 文档 | 待指定 | 并入 B2：README、`docs/PROFILES.md`、ROADMAP。部署说明未改：MCP 的配置写在 profile 中，与部署方式无关 | B2 |
 
 ---
 
@@ -446,4 +446,4 @@ S 指 2026-07-28 版（`docs/specification/2026-07-28/`，提交 `5f5440bb26a62e
 
 ---
 
-`p7-mcp-review.md` · v0.3 · 2026年11月
+`p7-mcp-review.md` · v0.4 · 2026年11月

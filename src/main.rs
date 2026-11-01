@@ -99,6 +99,7 @@ fn read_prompt(arg: &str) -> Result<String> {
 /// Assemble the unattended preset without exposing interactive choices to the kernel.
 async fn build_session(args: &RunArgs) -> Result<AgentSession> {
     let instructions = cli::read_instructions(&args.base)?;
+    let mcp = cli::connect_mcp(&args.base, Builtin::Troubleshoot, &args.transport).await?;
     let prepared = cli::prepare(cli::SessionOptions {
         base: &args.base,
         transport: &args.transport,
@@ -113,6 +114,7 @@ async fn build_session(args: &RunArgs) -> Result<AgentSession> {
         },
         instructions: instructions.as_deref(),
         hidden_env: &[],
+        mcp: &mcp,
     })
     .await?;
     let sink: Arc<dyn EventSink> = match args.output {

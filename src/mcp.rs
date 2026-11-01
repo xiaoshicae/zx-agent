@@ -124,6 +124,8 @@ impl Server {
                 ));
             }
         };
+        // A completed handshake or discovery records the server's information, so the empty
+        // fallback is not expected; it only affects what is reported.
         let protocol_version = client
             .peer_info()
             .map(|info| info.protocol_version.to_string())
@@ -149,6 +151,7 @@ impl Server {
             tools.push(Arc::new(McpTool {
                 definition: ToolDef {
                     name: name.clone(),
+                    // A description is optional in MCP.
                     description: bounded(
                         offered.description.as_deref().unwrap_or_default(),
                         MAX_DESCRIPTION_BYTES,
@@ -215,7 +218,9 @@ pub fn tool_name(server: &str, tool: &str) -> Result<String, String> {
     Ok(name)
 }
 
-fn check_server_name(name: &str) -> Result<(), String> {
+/// A server name is ASCII lowercase letters, digits and `-`, so that it ends at the first `__`
+/// of a tool name.
+pub(crate) fn check_server_name(name: &str) -> Result<(), String> {
     let well_formed = !name.is_empty()
         && name
             .chars()
