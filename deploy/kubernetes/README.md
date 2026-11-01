@@ -20,6 +20,7 @@
 | `pvc.yaml` | 会话文件的存储卷，挂载在 `/data` |
 | `deployment.yaml` | 常驻 Pod |
 | `cronjob.yaml` | 定时巡检，默认每小时一次 |
+| `serve/` | 可选：常驻 Pod 运行 `zx-agent serve`，接入 IM。kustomize 组件开启进程命名空间共享、改主进程、挂上配置与凭据；`serve.example.toml` 是配置示例 |
 | `multicluster/` | 可选：访问其他集群。kustomize 组件给两种 Pod 挂上 kubeconfig 与 token 目录；`remote.yaml` 在每个远端集群执行一次 |
 
 ## 部署
@@ -160,6 +161,49 @@ kubectl -n zx-agent create configmap zx-agent-kubeconfig --from-file=kubeconfig=
 
   删除 Namespace 时，其中的 token 会被一并删除，所以需要 `--ignore-not-found`，否则命令会报 NotFound。
 
+## IM 服务
+
+启用 `serve` 组件后，常驻 Pod 的主进程是 `zx-agent serve`：在 IM 中 @ 机器人排障，写操作在 IM 中审批。用法、配置项与平台应用的设置见仓库根目录 README 的“IM 服务”。
+
+- Pod 设置 `shareProcessNamespace: true`。PID 1 是 pause：命令留下的进程由它回收，`/proc/1/environ` 中也没有容器的环境变量（见下文“安全说明”）。
+- 用 `kubectl exec` 启动 chat 或 run 的方式不变，定时巡检不受影响。
+
+1. 把凭据写进 Secret `zx-agent-im`，只写用到的平台：
+
+   ```sh
+   kubectl -n zx-agent create secret generic zx-agent-im \
+     --from-literal=slack-app-token=xapp-... \
+     --from-literal=slack-bot-token=xoxb-...
+   ```
+
+   ⚑ D:5/CHINA FLAG: 飞书用 `feishu-app-id` 与 `feishu-app-secret` 两个键（Subject to Legal/Export Compliance approval）。
+
+2. 由 `serve/serve.example.toml` 复制出 `serve.toml`，填好聊天与审批人，再创建 ConfigMap `zx-agent-serve`：
+
+   ```sh
+   kubectl -n zx-agent create configmap zx-agent-serve --from-file=serve.toml
+   ```
+
+3. 在 `kustomization.yaml` 中取消 `components:` 与 `- serve` 的注释，然后执行 `kubectl apply -k deploy/kubernetes`。
+
+serve 只在启动时读取配置与凭据。修改 ConfigMap 或 Secret 之后，需要重启：
+
+```sh
+kubectl -n zx-agent rollout restart deploy/zx-agent
+```
+
+日志用 `kubectl -n zx-agent logs deploy/zx-agent` 查看：
+
+- stderr 是启动行。
+- stdout 每行一个 JSON：`approval`（审批记录）、`released`（释放空闲会话）、`failed`（未能发出的消息、平台连不上等）。
+- 对话内容在会话文件 `/data/sessions` 中。
+
+出网：
+
+- Slack 需要访问 `slack.com` 及其 WebSocket 主机；⚑ D:5/CHINA FLAG: 飞书需要访问 `open.feishu.cn`、`accounts.feishu.cn` 及长连接主机。
+- 两种 WebSocket 主机都由平台在运行时下发，文档没有列出，也还没有实测。
+- NetworkPolicy 只能按 IP 段放行；需要按域名限制时，使用出口代理。
+
 ## 权限
 
 | 账号 | 用于 | 权限 |
@@ -183,7 +227,7 @@ kubectl -n zx-agent create configmap zx-agent-kubeconfig --from-file=kubeconfig=
   - 读到的 key 会被脱敏，不会进入模型上下文。
   - 被诱导的命令仍可能把 key 发往外部。在 chat 中，这类命令需要人工确认。
   - 能 `kubectl exec` 进这个 Pod 的人，本来就能读到 key。
-  - 服务模式作为主进程之后，可以去掉这条限制。
+  - 启用 `serve` 组件后，这条限制不再存在：主进程是 zx-agent（不可 dump），PID 1 是 pause，`/proc/1/environ` 中没有容器的环境变量。实测见“验证记录”。
 - **定时巡检**：Pod 的主进程就是 zx-agent。它在 Linux 上把自身设为不可 dump，命令读不到它的环境。
 - 不要给容器添加 `SYS_PTRACE` 能力，否则命令可以读取 agent 的环境变量。
 - 会话文件在 `/data` 中。命令与 agent 以同一用户运行，能够修改这些文件，这是本机执行的限制。
@@ -198,7 +242,7 @@ kubectl -n zx-agent delete secret zx-agent-model
 kubectl delete namespace zx-agent
 ```
 
-启用了多集群时，在 `delete -k` 之后还要删除 `zx-agent-kubeconfig`（ConfigMap）和 `zx-agent-clusters`（Secret），再在每个远端集群执行上一节的 `kubectl delete -f`。
+启用了 IM 服务时，在 `delete -k` 之后还要删除 `zx-agent-serve`（ConfigMap）和 `zx-agent-im`（Secret）。启用了多集群时，在 `delete -k` 之后还要删除 `zx-agent-kubeconfig`（ConfigMap）和 `zx-agent-clusters`（Secret），再在每个远端集群执行上一节的 `kubectl delete -f`。
 
 `kubectl delete -k` 会删除清单中的对象，包括集群级的 ClusterRoleBinding 和存储卷声明。会话文件是否随之删除，取决于 StorageClass 的回收策略：`Delete` 时删除，`Retain` 时保留在卷上。可以用 `kubectl get storageclass` 查看。
 
@@ -235,8 +279,26 @@ kubectl delete namespace zx-agent
 | 新增集群 | 用 `create … --dry-run=client -o yaml \| apply` 给 Secret 加一个 key；约 56 秒后新文件出现在 Pod 中，内容随即被脱敏；Pod 没有重启。用 `--save-config` 创建的对象，之后 `apply` 不再提示缺少注解 |
 | 清理 | 本集群对象按“清理”一节删除；远端执行 `kubectl delete -f remote.yaml --ignore-not-found`，退出码 0。不加该参数时，因 token 已随 Namespace 删除，命令报 NotFound 并以 1 退出 |
 
-未验证：x86_64 镜像与其他集群（如 GKE）、推送到镜像仓库、真实模型、真正分属两个集群的多集群访问、kubeconfig 中 exec 插件（如云厂商认证插件）方式的凭据。
+**IM 服务**（基于 PR #32 的 `c272f41` 加上本次改动，镜像标签为 `serve-d1`）：
+
+- 没有真实平台的凭据，所以 `serve.toml` 中 Slack 的 `apiBase` 指向一个拒绝连接的地址（`127.0.0.1:9`），Secret 中放的是假 token。
+- 清单为本目录原样，只在 `kustomization.yaml` 中启用了 `serve` 组件、改了镜像标签。
+- 上文“IM 服务”中的每条命令都执行过。
+
+| 项 | 结果 |
+|-|-|
+| 进程 | PID 1 为 `/pause`，`zx-agent serve --config /etc/zx-agent-serve/serve.toml` 为 7 号进程 |
+| `/proc` 保护 | `/proc/1/environ` 中没有 `OPENAI_API_KEY`；读 serve 的 `/proc/7/environ` 得到 `Permission denied` |
+| 孤儿进程 | 执行 `(sleep 1 &)` 后 3 秒，没有状态为 `Z` 的进程 |
+| chat | serve 运行期间，`kubectl exec -i` 启动 chat 并输入 `/quit`，退出码 0 |
+| 日志 | stderr 有启动行 `[serve] platforms=slack; sessions in /data/sessions`；连不上 Slack 时，每次重试都有一行 `{"type":"failed","platform":"slack",...}`，间隔 1、2 秒递增；日志中没有出现任何一个凭据值 |
+| 停止 | 向 serve 发送 SIGTERM 后，容器以退出码 0 结束（`Completed`）并重启 |
+| 重启 | `kubectl rollout restart` 完成 |
+| 两个组件 | 同时启用 `serve` 与 `multicluster` 渲染：挂载 `/etc/zx-agent-serve` 与 `/etc/zx-agent`，两组环境变量都在，不冲突 |
+| 清理 | 按“清理”一节删除后，命名空间与两个 ClusterRoleBinding 都已不存在 |
+
+未验证：x86_64 镜像与其他集群（如 GKE）、推送到镜像仓库、真实模型、真正分属两个集群的多集群访问、kubeconfig 中 exec 插件（如云厂商认证插件）方式的凭据、真实的 Slack 工作区与 ⚑ D:5/CHINA FLAG: 飞书租户（IM 服务只对连不上的地址验证了启动、日志与停止）。
 
 ---
 
-`deploy/kubernetes/README.md` · v0.1 · 2026年11月
+`deploy/kubernetes/README.md` · v0.2 · 2026年11月

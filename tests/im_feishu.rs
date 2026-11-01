@@ -449,6 +449,25 @@ async fn a_rate_limited_call_waits_and_is_retried() {
 }
 
 #[tokio::test]
+async fn a_busy_endpoint_is_reported_and_retried() {
+    let mut fake = FakeFeishu::start(120).await;
+    fake.script("endpoint", vec![Answer::Code(1)]);
+    let (reported, mut reports) = mpsc::unbounded_channel();
+    let mut config = FeishuConfig::new("cli_test".into(), "secret-test".into());
+    config.api_base = fake.api_base.clone();
+    config.token_url = fake.token_url.clone();
+    config.on_error = Some(Arc::new(move |error: &ImError| {
+        reported.send(error.to_string()).ok();
+    }));
+    let running = run(Arc::new(FeishuChannel::new(config).unwrap()));
+    let report = tokio::time::timeout(WAIT, reports.recv()).await.unwrap().unwrap();
+    assert!(report.contains("code 1"), "{report}");
+    // The next attempt connects.
+    fake.socket().await;
+    running.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn stopping_closes_the_connection() {
     let mut fake = FakeFeishu::start(120).await;
     let running = run(channel(&fake));

@@ -1,0 +1,7 @@
+# Optional: the resident Pod runs zx-agent serve, which answers IM messages with one session
+# per thread. Create the ConfigMap zx-agent-serve and the Secret zx-agent-im first, then enable
+# this in ../kustomization.yaml (README.md, "IM 服务").
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - path: deployment-patch.yaml

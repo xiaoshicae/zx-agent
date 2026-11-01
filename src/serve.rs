@@ -19,8 +19,8 @@ use zx_agent::ai::now_ms;
 use zx_agent::im::feishu::{FeishuChannel, FeishuConfig};
 use zx_agent::im::slack::{SlackChannel, SlackConfig};
 use zx_agent::im::{
-    ConversationId, ImChannel, ImError, Server, ServerConfig, ServerEvent, ServerSink, SessionFactory, SessionKey,
-    UserId,
+    ConversationId, ErrorReport, ImChannel, ImError, Server, ServerConfig, ServerEvent, ServerSink, SessionFactory,
+    SessionKey, UserId,
 };
 use zx_agent::interaction::Interaction;
 use zx_agent::profile::Builtin;
@@ -138,6 +138,7 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
         if let Some(base) = &slack.api_base {
             config.api_base.clone_from(base);
         }
+        config.on_error = Some(failure_log("slack"));
         channels.push(Arc::new(SlackChannel::new(config).map_err(anyhow::Error::msg)?));
         hidden_env.extend([slack.app_token_env.clone(), slack.bot_token_env.clone()]);
     }
@@ -152,6 +153,7 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
         if let Some(url) = &feishu.token_url {
             config.token_url.clone_from(url);
         }
+        config.on_error = Some(failure_log("feishu"));
         channels.push(Arc::new(FeishuChannel::new(config).map_err(anyhow::Error::msg)?));
         // The App ID is not a secret; the App Secret is.
         hidden_env.push(feishu.app_secret_env.clone());
@@ -228,6 +230,13 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
             Ok(EXIT_ERROR)
         }
     }
+}
+
+/// Reports a platform's failed connection attempts as `failed` lines, like the server's own.
+fn failure_log(platform: &'static str) -> ErrorReport {
+    Arc::new(move |error: &ImError| {
+        write_line(&json!({"type": "failed", "platform": platform, "error": error.to_string(), "timeMs": now_ms()}));
+    })
 }
 
 /// The value of a credential variable, which must be set and non-empty.

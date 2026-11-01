@@ -1,0 +1,22 @@
+# Configuration of zx-agent serve in the resident Pod (README.md, "IM 服务"). Copy it to
+# serve.toml, fill in the chats and approvers, and create the ConfigMap from it:
+#   kubectl create configmap zx-agent-serve -n zx-agent --from-file=serve.toml
+# The credentials come from the Secret zx-agent-im, never from this file.
+
+[slack]
+
+# ⚑ D:5/CHINA FLAG: Feishu (Subject to Legal/Export Compliance approval); add its keys to the
+# Secret as well, and write its chats and users as feishu:oc_... and feishu:ou_...
+# [feishu]
+
+[access]
+conversations = ["slack:C0123456789"]
+approvers = ["slack:U0123456789"]
+
+[limits]
+maxRunning = 4
+approvalTimeoutSecs = 600
+idleSecs = 1800
+
+[sessions]
+dir = "/data/sessions"

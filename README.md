@@ -112,7 +112,7 @@ echo "exit code: $?"
 
 ### IM 服务
 
-`zx-agent serve` 作为常驻进程接入 IM：在频道里 @ 机器人或私聊它，每个线程一个会话，写操作在 IM 里审批。目前支持 Slack（Socket Mode）与 ⚑ D:5/CHINA FLAG: 飞书（长连接），都只需出网，不需要公网入口。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：对话内容、命令输出与用户 ID 发往该平台] 该平台的使用 Subject to Legal/Export Compliance approval。设计见 `docs/serve-im-review.md`；部署到 Kubernetes 的方式在评审稿模块 D 中实施。
+`zx-agent serve` 作为常驻进程接入 IM：在频道里 @ 机器人或私聊它，每个线程一个会话，写操作在 IM 里审批。目前支持 Slack（Socket Mode）与 ⚑ D:5/CHINA FLAG: 飞书（长连接），都只需出网，不需要公网入口。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：对话内容、命令输出与用户 ID 发往该平台] 该平台的使用 Subject to Legal/Export Compliance approval。设计见 `docs/serve-im-review.md`；部署到 Kubernetes 见 `deploy/kubernetes/README.md` 的“IM 服务”。
 
 ```bash
 export SLACK_APP_TOKEN=xapp-...   # app-level token，用于 Socket Mode
@@ -153,7 +153,7 @@ dir = "/data/sessions"      # 会话文件位于 <dir>/slack/<频道>/<线程>.j
 | 使用 | Slack：频道中 @ 机器人，回答在这条消息的线程里；线程中追问时同样要 @ 机器人。⚑ D:5/CHINA FLAG: 飞书：群里 @ 机器人，回答以话题回复；在话题中追问时同样要 @。两个平台的私聊都直接发送。单独发送 `/cancel` 取消本线程的任务 |
 | 审批 | 与 chat 相同，使用 assistant profile：自动放行清单中的只读命令直接执行，其余 bash 命令发审批卡片，只有 `approvers` 中的用户点击才生效 |
 | 凭据 | Slack 的两个 token 与 ⚑ D:5/CHINA FLAG: 飞书的 App Secret 只从环境变量读取。命令的环境中删除这些变量，命令输出中出现它们的值时脱敏 |
-| 日志 | stdout 每行一个 JSON：`approval`（审批记录：线程、工具调用、审批人、结果、时间）、`released`（释放空闲会话）、`failed`（未能发出的消息等）。对话内容在会话文件中 |
+| 日志 | stdout 每行一个 JSON：`approval`（审批记录：线程、工具调用、审批人、结果、时间）、`released`（释放空闲会话）、`failed`（未能发出的消息、连不上平台等）。对话内容在会话文件中 |
 | 退出 | 收到 SIGINT 或 SIGTERM 时取消进行中的任务，各线程发出结果后以 0 退出；配置错误与被拒的凭据为 2；平台连接意外结束为 1 |
 
 其余参数与 `chat` 相同（`--model`、`--base-url`、`--api-key-env`、`--profile`、`--max-turns`、`--timeout-secs` 等）；`--max-turns` 与 `--timeout-secs` 作用于每一次运行。不接受 `--session`。

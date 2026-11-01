@@ -1,0 +1,52 @@
+# zx-agent serve becomes the container's main process. With a shared process namespace the
+# pause container is PID 1: it reaps the processes commands leave behind, and /proc/1/environ
+# holds none of this container's variables, so the keys stay in zx-agent's own environment,
+# which commands cannot read (docs/serve-im-review.md, section 2.3.2). kubectl exec still
+# starts chat or run beside it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zx-agent
+spec:
+  template:
+    spec:
+      shareProcessNamespace: true
+      containers:
+        - name: zx-agent
+          command: ["zx-agent", "serve", "--config", "/etc/zx-agent-serve/serve.toml"]
+          env:
+            # Each platform reads only its own keys; the Secret holds the ones in use.
+            - name: SLACK_APP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: zx-agent-im
+                  key: slack-app-token
+                  optional: true
+            - name: SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: zx-agent-im
+                  key: slack-bot-token
+                  optional: true
+            # ⚑ D:5/CHINA FLAG: Feishu (Subject to Legal/Export Compliance approval).
+            - name: FEISHU_APP_ID
+              valueFrom:
+                secretKeyRef:
+                  name: zx-agent-im
+                  key: feishu-app-id
+                  optional: true
+            - name: FEISHU_APP_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: zx-agent-im
+                  key: feishu-app-secret
+                  optional: true
+          volumeMounts:
+            # Not /etc/zx-agent: the multicluster component mounts its kubeconfig there.
+            - name: serve-config
+              mountPath: /etc/zx-agent-serve
+              readOnly: true
+      volumes:
+        - name: serve-config
+          configMap:
+            name: zx-agent-serve

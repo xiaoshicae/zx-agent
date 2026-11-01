@@ -25,8 +25,8 @@ use crate::agent::ApprovalResult;
 use crate::sync::lock;
 
 use super::{
-    ApprovalId, CardLabels, Choice, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId, MessageRef,
-    Outbound, Seen, ThreadId, UserId,
+    ApprovalId, CardLabels, Choice, ConversationId, Destination, ErrorReport, ImChannel, ImError, Inbound, MessageId,
+    MessageRef, Outbound, Seen, ThreadId, UserId,
 };
 use frame::Frame;
 
@@ -98,6 +98,9 @@ pub struct FeishuConfig {
     /// per second.
     pub post_interval: Duration,
     pub labels: CardLabels,
+    /// Called with each failed attempt to connect, before the channel waits and tries
+    /// again, so that an operator can see a platform that cannot be reached.
+    pub on_error: Option<ErrorReport>,
 }
 
 impl FeishuConfig {
@@ -110,6 +113,7 @@ impl FeishuConfig {
             request_timeout: Duration::from_secs(30),
             post_interval: Duration::from_millis(200),
             labels: CardLabels::default(),
+            on_error: None,
         }
     }
 }
@@ -312,6 +316,12 @@ impl FeishuChannel {
         }
     }
 
+    fn report(&self, error: &ImError) {
+        if let Some(callback) = &self.config.on_error {
+            callback(error);
+        }
+    }
+
     /// Wait for this chat's next posting turn.
     async fn turn(&self, conversation: &str) {
         let at = {
@@ -368,9 +378,10 @@ impl FeishuChannel {
         cards.remove(index).map(|(_, request)| request)
     }
 
-    /// Ask for the long connection's address and open it. `Ok(None)` is a failure worth
-    /// retrying; an error is one that retrying cannot fix.
-    async fn connect(&self, config: &mut ClientConfig) -> Result<Option<(Socket, i32)>, ImError> {
+    /// Ask for the long connection's address and open it. `Ok(Err(reason))` is a failure
+    /// worth retrying; an error is one that retrying cannot fix. No reason shows the address,
+    /// which carries a ticket.
+    async fn connect(&self, config: &mut ClientConfig) -> Result<Result<(Socket, i32), String>, ImError> {
         let url = format!("{}{ENDPOINT_PATH}", self.config.api_base.trim_end_matches('/'));
         let body = json!({
             "AppID": self.config.app_id,
@@ -379,14 +390,19 @@ impl FeishuChannel {
         });
         let response = match self.http.post(&url).header("locale", "zh").json(&body).send().await {
             Ok(response) if response.status() == StatusCode::OK => response,
-            Ok(_) | Err(_) => return Ok(None),
+            Ok(response) => {
+                return Ok(Err(format!("feishu long connection: HTTP {}", response.status())));
+            }
+            Err(error) => return Ok(Err(format!("feishu long connection: {error}"))),
         };
         let Ok(answer) = response.json::<Value>().await else {
-            return Ok(None);
+            return Ok(Err("feishu long connection: the answer is not JSON".into()));
         };
         match answer["code"].as_i64() {
             Some(0) => {}
-            Some(code) if RETRY_CODES.contains(&code) => return Ok(None),
+            Some(code) if RETRY_CODES.contains(&code) => {
+                return Ok(Err(format!("feishu long connection: code {code}, retrying")));
+            }
             code => {
                 let detail = answer["msg"].as_str().unwrap_or("no message");
                 return Err(ImError::Config(format!(
@@ -396,12 +412,12 @@ impl FeishuChannel {
         }
         // The address carries a ticket: it is used, never shown.
         let Some(address) = answer["data"]["URL"].as_str() else {
-            return Ok(None);
+            return Ok(Err("feishu long connection: no address in the answer".into()));
         };
         config.update(&answer["data"]["ClientConfig"]);
         let service = service_id(address);
         match tokio::time::timeout(self.config.request_timeout, tokio_tungstenite::connect_async(address)).await {
-            Ok(Ok((socket, _))) => Ok(Some((socket, service))),
+            Ok(Ok((socket, _))) => Ok(Ok((socket, service))),
             Ok(Err(tungstenite::Error::Http(response))) => {
                 let status = response.status();
                 let auth = response
@@ -414,10 +430,14 @@ impl FeishuChannel {
                         auth.unwrap_or("none")
                     )))
                 } else {
-                    Ok(None)
+                    Ok(Err(format!("feishu long connection: handshake refused, HTTP {status}")))
                 }
             }
-            Ok(Err(_)) | Err(_) => Ok(None),
+            Ok(Err(error)) => Ok(Err(format!("feishu long connection: cannot connect: {error}"))),
+            Err(_) => Ok(Err(format!(
+                "feishu long connection: connecting took longer than {} s",
+                self.config.request_timeout.as_secs()
+            ))),
         }
     }
 
@@ -545,7 +565,7 @@ impl ImChannel for FeishuChannel {
                 return Ok(());
             }
             let wait = match self.connect(&mut config).await? {
-                Some((socket, service)) => {
+                Ok((socket, service)) => {
                     backoff = RECONNECT_MIN;
                     match self
                         .receive(socket, service, &mut config, &inbound, &mut seen, cancel)
@@ -556,7 +576,8 @@ impl ImChannel for FeishuChannel {
                         Ended::Lost => jitter(config.nonce),
                     }
                 }
-                None => {
+                Err(reason) => {
+                    self.report(&ImError::Transport(reason));
                     let wait = config.reconnect.unwrap_or(backoff);
                     backoff = (backoff * 2).min(RECONNECT_MAX);
                     wait
