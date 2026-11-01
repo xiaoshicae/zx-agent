@@ -13,11 +13,11 @@ use tokio_util::sync::CancellationToken;
 use common::{EchoTool, RunnerSetup, config, fast_retry, header, read_lines, run_prompt, summarize};
 use zx_agent::agent::{
     AgentEvent, ApprovalResult, CancelSignal, ContextEdit, Decision, Event, HookChain, HookContext, HookOptions,
-    HookResult, HookStage, Hooks, LoopOutcome, ToolOutput, ToolVerdict, TurnDecision, TurnSummary,
+    HookResult, HookStage, Hooks, LoopOutcome, Tool, ToolContext, ToolOutput, ToolVerdict, TurnDecision, TurnSummary,
 };
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{EventReceiver, Message, Provider, Request, SectionChange, StopReason, SystemMessage, ToolCall};
-use zx_agent::extensions::{ContinueOnLength, RedactSecrets};
+use zx_agent::extensions::{ContinueOnLength, RedactSecrets, check_secret_files};
 use zx_agent::interaction::{Approval, ApprovalRequest, Interaction};
 use zx_agent::runner::{Limits, RunOutcome};
 use zx_agent::session::{Entry, SessionStore};
@@ -688,16 +688,80 @@ async fn missing_or_empty_secret_files_redact_nothing_else() {
 }
 
 #[tokio::test]
-async fn a_secret_file_that_cannot_be_read_as_text_fails_the_hook() {
+async fn a_secret_file_that_is_not_utf8_is_redacted_as_tools_print_it() {
     let dir = tempfile::tempdir().unwrap();
-    let binary = dir.path().join("binary");
-    std::fs::write(&binary, [0xff, 0xfe, 0x00]).unwrap();
-    let hook = RedactSecrets::new(Vec::new()).with_secret_files([binary]);
+    // "pässword" in Latin-1: the tools decode output lossily, so it prints as "p\u{FFFD}ssword".
+    std::fs::write(dir.path().join("password"), b"p\xe4ssword\n").unwrap();
+    let printed = BashTool::default()
+        .execute(
+            json!({"command": "cat password"}),
+            &ToolContext {
+                cwd: dir.path().to_path_buf(),
+                cancel: CancellationToken::new(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(printed.content.contains("p\u{FFFD}ssword"), "{}", printed.content);
+    let hook = RedactSecrets::new(Vec::new()).with_secret_files([dir.path().join("password")]);
+
+    let output = hook
+        .after_tool(&redaction_call(), printed, &common::hook_context())
+        .await
+        .unwrap();
+
+    assert!(output.content.starts_with("[REDACTED]\n"), "{}", output.content);
+    assert!(!output.content.contains("ssword"), "{}", output.content);
+}
+
+#[tokio::test]
+async fn a_secret_file_over_the_limit_fails_the_hook() {
+    let dir = tempfile::tempdir().unwrap();
+    let large = dir.path().join("large");
+    std::fs::write(&large, "x".repeat(64 * 1024 + 1)).unwrap();
+    let hook = RedactSecrets::new(Vec::new()).with_secret_files([large]);
     let error = hook
         .after_tool(&redaction_call(), ToolOutput::ok("output"), &common::hook_context())
         .await
         .unwrap_err();
     assert!(error.contains("cannot read a secret file"), "{error}");
+    assert!(error.contains("exceeds 65536 bytes"), "{error}");
+}
+
+#[test]
+fn secret_files_that_cannot_be_matched_are_found_before_use() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("token"), "token-a").unwrap();
+    std::fs::write(dir.path().join("latin1"), b"p\xe4ssword").unwrap();
+    std::fs::write(dir.path().join("bundle"), "x".repeat(64 * 1024 + 1)).unwrap();
+    #[cfg(unix)]
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(dir.path().join("pipe"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    let usable = tempfile::tempdir().unwrap();
+    std::fs::write(usable.path().join("token"), "token-b").unwrap();
+
+    let error = check_secret_files(&[dir.path().to_path_buf(), dir.path().join("absent")]).unwrap_err();
+
+    assert!(
+        error.contains(&dir.path().join("bundle").display().to_string()),
+        "{error}"
+    );
+    #[cfg(unix)]
+    assert!(
+        error.contains(&dir.path().join("pipe").display().to_string()),
+        "{error}"
+    );
+    // Text and non-UTF-8 files can be matched; a missing file is skipped, as at redaction.
+    assert!(
+        !error.contains("token") && !error.contains("latin1") && !error.contains("absent"),
+        "{error}"
+    );
+    assert_eq!(check_secret_files(&[usable.path().to_path_buf()]), Ok(()));
 }
 
 #[tokio::test]

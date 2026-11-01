@@ -304,7 +304,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | 事项 | 状态 | 说明 |
 |---|---|---|
 | 增量摘要 | 设计稿第二版，待评审 | 见"三、会话"。评审通过后实施，并把 P5 的"重新摘要读取原始投影"标为已被取代 |
-| 目录中无法用作匹配的密钥文件 | 设计已定，待实施 | 见下文"密钥文件的处理" |
+| 目录中无法用作匹配的密钥文件 | 已完成，PR #39 | 见下文"密钥文件的处理" |
 | 短值的脱敏 | 待决定 | 目前对任何非空值都做替换。GitLab 要求被遮蔽的值至少 8 个字符；目录中若有 `admin`、`5432` 这类短值，输出中所有相同的字符串都会被替换 |
 | 保留近期用户消息原文；摘要前把较早的长工具结果换成引用 | 待评估 | 增量摘要之外的两项上下文管理改进，见"三、会话"的设计稿末尾 |
 | 审计中写明自动放行命中的前缀 | 暂缓 | 需要改变 PR #25 固定的 `Decision` JSON 契约（见"一、安全"） |
@@ -313,7 +313,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | provider 契约的兜底 | 暂缓 | 取消后给 provider 的宽限期、`Done`/`Error` 与 `stop_reason` 的一致性检查 |
 | `JsonlFile::create` 在加锁或写头部失败后留下文件 | 暂缓 | 这两种失败无法在测试中稳定构造（见"三、会话"） |
 
-密钥文件的处理（设计，2026-11-01，待实施）：登记的文件缺失或本进程无权读取时跳过；其余失败（非 UTF-8、超过 64 KiB、不是普通文件、其他 I/O 错误）都让脱敏钩子失败，整段工具输出被丢弃（`src/extensions.rs`）。脱敏是对文件内容（去掉首尾空白）的精确替换；bash 与 read_file 用 `from_utf8_lossy` 生成输出，单次输出至多 50 KiB。改为按失败原因分别处理：
+密钥文件的处理（2026-11-01，已完成，PR #39）：此前，登记的文件缺失或本进程无权读取时跳过；其余失败（非 UTF-8、超过 64 KiB、不是普通文件、其他 I/O 错误）都让脱敏钩子失败，整段工具输出被丢弃（`src/extensions.rs`）。脱敏是对文件内容（去掉首尾空白）的精确替换；bash 与 read_file 用 `from_utf8_lossy` 生成输出，单次输出至多 50 KiB。改为按失败原因分别处理：
 
 | 情况 | 处理 | 理由 |
 |---|---|---|
@@ -323,6 +323,19 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | 其他 I/O 错误 | 丢弃输出（不变） | 读不到当前值，可能恰好错过一次轮换 |
 
 依据：GitHub Actions 的安全指南写明脱敏 "largely relies on finding an exact match for the specific secret value"，并要求不要把结构化数据当作一个密钥，而是为每个敏感值单独登记（https://docs.github.com/en/actions/reference/security/secure-use）。
+
+实施记录（PR #39，基于 `9d6c440`，含 PR #37、#38）：
+
+- 按上表实施，补充如下：
+  - 启动检查只覆盖 `--secret-file` 与 `ZX_SECRET_FILES` 登记的路径，在读取 profile、创建会话文件之前进行，一次列出所有不符合要求的文件。自动登记的 ServiceAccount token 不参与，报错只针对用户能修改的配置；它若在运行中无法读取，仍按上表丢弃输出。
+  - 非 UTF-8 的值以 `String::from_utf8_lossy` 解码、去掉首尾空白后匹配。测试用真实的 bash 工具 `cat` 一个 Latin-1 编码的文件，输出中的 `p�ssword` 被替换为 `[REDACTED]`。
+- 公开 API 的变化：新增 `extensions::check_secret_files`；`RedactSecrets` 对非 UTF-8 文件由"钩子失败"改为"有损解码后匹配"；`text` 模块（`#[doc(hidden)]`）新增 `read_regular_file`。会话文件格式与事件格式不变。
+- CLI：登记的文件超过 64 KiB 或不是普通文件时，启动报配置错误（退出码 2），并列出每个文件及原因。`run --help`、`chat --help`、`serve --help` 与基线相比，各自只有 `--secret-file` 的说明多了 "Each must be a regular file of at most 64 KiB."。
+- 测试：新增 3 项，改写 1 项，没有删除其他测试。
+  - 修复前实测失败 2 项：非 UTF-8 的密钥文件按工具打印的形式脱敏（修复前钩子失败）；超过上限的密钥文件在启动时报配置错误（修复前退出码为 0）。
+  - 新接口 1 项：`check_secret_files` 报出超过上限的文件与 FIFO，接受非 UTF-8 的文件，跳过缺失的路径。
+  - 既有测试的调整（有意的行为变化）：`a_secret_file_that_cannot_be_read_as_text_fails_the_hook` 改为 `a_secret_file_over_the_limit_fails_the_hook`，用超过上限的文件验证运行中仍丢弃输出；PR #35 的两项钩子失败测试（`tests/hooks_cli.rs`、`tests/chat_cli.rs`）原先把 token 改写成非 UTF-8 来制造失败，现改为在运行中写到超过 64 KiB，期望的原因随之变为 "exceeds 65536 bytes"。
+- 本机 macOS 验证：stable 与 Rust 1.88.0 各 688 项通过（基线 685 项，在 `9d6c440` 上实测），6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过；设置 `ZX_DOCKER_TEST_IMAGE=debian:bookworm-slim` 时容器测试 34 项通过。自查脚本的命中与基线相同。未新增依赖，`Cargo.toml`、`Cargo.lock` 未改动。
 
 下面的 P0–P9 继续按各自验收标准推进。
 
