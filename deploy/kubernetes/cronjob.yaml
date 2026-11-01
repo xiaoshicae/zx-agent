@@ -1,0 +1,68 @@
+# Scheduled inspection: an unattended run with the read-only account. The answer is written
+# to the Pod log (kubectl logs); the exit code tells the result (README.md, "run 退出码").
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: zx-agent-inspect
+spec:
+  schedule: "0 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      # Above the run's own 15-minute limit (troubleshoot profile).
+      activeDeadlineSeconds: 1200
+      ttlSecondsAfterFinished: 86400
+      template:
+        spec:
+          serviceAccountName: zx-agent-inspect
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: inspect
+              image: zx-agent
+              # zx-agent itself is PID 1: the only process holding the API key, and one that
+              # commands cannot inspect (README.md, "安全模型").
+              command: ["zx-agent", "run"]
+              args:
+                - "检查所有命名空间中未就绪的 Pod 和最近一小时的 Warning 事件，列出问题和可能的原因。只读，不做任何修改。"
+              env:
+                - name: ZX_MODEL
+                  valueFrom:
+                    configMapKeyRef:
+                      name: zx-agent-model
+                      key: model
+                - name: ZX_BASE_URL
+                  valueFrom:
+                    configMapKeyRef:
+                      name: zx-agent-model
+                      key: base-url
+                - name: OPENAI_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: zx-agent-model
+                      key: api-key
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  memory: 1Gi
+          volumes:
+            - name: tmp
+              emptyDir: {}

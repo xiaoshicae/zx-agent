@@ -154,7 +154,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P3 | 终端对话 `chat` | 已完成（PR #5） |
 | P4 | profile 文件、上下文文件与 skills | 已完成（PR #6） |
 | P5 | 上下文管理 | 已完成（PR #9） |
-| P6 | 执行环境与崩溃恢复 | 进行中：崩溃恢复（PR #12）、执行环境接缝（PR #13）、离线容器执行（PR #14）已完成；在线访问评审稿已合入（PR #17），一期实施中：只读命令自动放行（PR #19）、环境变量保护与 ServiceAccount token 脱敏（PR #20）已完成；容器联网已取消，改为常驻 Pod 部署 |
+| P6 | 执行环境与崩溃恢复 | 进行中：崩溃恢复（PR #12）、执行环境接缝（PR #13）、离线容器执行（PR #14）已完成；在线访问评审稿已合入（PR #17），一期实施中：只读命令自动放行（PR #19）、环境变量保护与 ServiceAccount token 脱敏（PR #20）、常驻 Pod 部署包（单集群，PR #22）已完成；容器联网已取消，改为常驻 Pod 部署 |
 | P7 | 插件与 MCP | 未开始；前置设计草案待评审，其中 A1（会话宿主拆分与可替换的会话存储）已实施（PR #21，待合并） |
 | P8 | 嵌入协议 `acp` | 未开始 |
 | P9 | 可选增强 | 未开始 |
@@ -359,7 +359,8 @@ P5 实施约定（2026-11-01）：
 - [x] chat 只读命令自动放行：`rules.autoApprove` 与 `--auto-approve-cmd`，assistant 内置只读清单（已完成，PR #19）
 - ~~容器联网与 kubeconfig~~：已取消（2026-11-01，见下方“部署方向”）
 - [x] Linux 上保护 agent 的环境变量（`PR_SET_DUMPABLE`），ServiceAccount token 登记脱敏（已完成，PR #20）
-- [ ] 常驻 Pod 部署包：Deployment、RBAC、Secret 与会话存储卷的模板和文档（由“Kubernetes 部署说明”调整）
+- [x] 常驻 Pod 部署包（单集群）：Deployment、RBAC、Secret 与会话存储卷的模板和文档（由“Kubernetes 部署说明”调整；已完成，PR #22）
+- [ ] 多集群：多个 context 的 kubeconfig，以及其他集群 token 文件的脱敏登记
 
 部署方向（2026-11-01，用户确认）：Agent 以常驻 Pod 部署，kubectl 在 Pod 内以本机执行方式运行，凭据来自 ServiceAccount，因此取消容器执行的联网与 kubeconfig。用户确认的任务来源：kubectl exec 进 Pod 对话、定时巡检、告警 Webhook、IM 机器人。用户希望增加的功能：写操作（需审批）、专用查询工具 / MCP、多集群访问、记住历史排障。其中告警 Webhook 与 IM 机器人需要新的服务模式，另行评审后实施。
 
@@ -390,7 +391,28 @@ P5 实施约定（2026-11-01）：
   - clippy 全目标无警告；新增 4 项测试全部通过。
   - 反向验证：把 `prctl` 调用换成空操作后，`/proc` 探针测试失败。修改只作用于容器内的源码副本。
   - 以非 root 用户运行的 Linux 结果以 CI 为准。
-- 未验证：真实 Pod 中的效果（评审稿缺口 ④）；ServiceAccount token 的实际轮换周期。
+- 未验证：真实 Pod 中的效果（评审稿缺口 ④；2026-11-01 已在本机集群的 Pod 中确认，见下方 PR #22 的记录）；ServiceAccount token 的实际轮换周期。
+
+常驻 Pod 部署包实施记录（2026-11-01，PR #22，单集群）：
+
+- 内容：
+  - `deploy/kubernetes/` 下的 Dockerfile：镜像包含 zx-agent、bash、kubectl、curl、jq、tini，以 uid 10001 运行。
+  - kustomize 清单：两个账号、`view` 绑定、可选的 `operator.yaml` 写权限、会话存储卷、常驻 Deployment、定时巡检 CronJob。
+  - 部署说明；仓库根目录新增 `.dockerignore`。
+- 设计取舍：
+  - 常驻 Pod 的主进程是 tini 与 sleep，它们环境中的 API key 能被同一用户的命令读到，读到的值会被脱敏。巡检 Pod 的主进程就是 zx-agent，不受影响。服务模式作为主进程之后再收紧。
+  - 定时巡检使用独立的只读账号。写权限只绑定常驻 Pod 的账号，默认不启用。
+  - ClusterRoleBinding 的 subjects 不写命名空间。实测 kustomize 覆盖命名空间时，不会改写 subjects 中已写明的命名空间；留空时则会填入。因此这两个文件只能用 `kubectl apply -k` 应用。
+- 验证：
+  - 在本机 Docker Desktop 的 Kubernetes v1.36.1 上逐项实测，结果见 `deploy/kubernetes/README.md` 的“验证记录”。
+  - 评审稿缺口 ④ 的三项在该集群上得到确认：Pod 内 kubectl 使用 ServiceAccount；`view` 的实际权限；Pod 内的 `prctl`。
+  - 完整验证基于 `dd43cce`。rebase 到包含 PR #21 的 `5c20655` 之后复验：
+    - 会话锁在存储卷上生效：chat 打开会话期间，另一个 `kubectl exec` 中的 run 报告 `is in use`，退出码 2；
+    - 脱敏、`/proc` 保护、chat 审批与定时巡检不变。
+  - 复验时发现，重复使用同一镜像标签，节点会沿用缓存的旧镜像；部署说明据此要求每次构建使用新标签。
+  - PR #22 的首次 CI 中，`tests/container.rs` 的 `a_dropped_run_still_stops_its_command` 在 ubuntu 上以 `Text file busy (os error 26)` 失败：假 docker 脚本写出后立即执行。本 PR 未改动 Rust 代码与测试，只重跑失败的任务后通过。这是已有的偶发问题，另行处理。
+- 未改动 Rust 代码，也未改动 `Cargo.toml`、`Cargo.lock`。
+- 未验证：x86_64 镜像与其他集群；推送到镜像仓库；真实模型。
 
 执行环境接缝验收（2026-11-01，已完成，PR #13）：`src/executor/` 提供 `Executor`、`ShellCommand`、`CommandOutput`、`CommandEnd` 与 `LocalExecutor`；bash 与 read_file 新增 `executor` 字段，默认 `LocalExecutor`，`..Default::default()` 的构造方式不受影响，按字段完整列出的字面量需补上新字段。本机执行代码从 bash 与 read_file 原样搬迁，bash 与 read_file 原有测试不改断言即通过（仅 read_file 测试中两处字面量补 `..ReadFileTool::default()`，bash 测试模块补一行 `use tokio::process::Command;`）。新增 `tests/executor.rs` 3 项，用记录请求的替身执行器验证：bash 把命令、目录、超时与隐藏变量交给执行器，并正确报告 6 种结束方式；read_file 经执行器读取解析后的路径与上限。反向验证：让工具绕过自身执行器时，3 项全部失败，修改已还原。本地 macOS 基于 `bb91974`，stable 与 Rust 1.88.0 各 416 项通过、6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过。`tests/cli.rs`、`Cargo.toml`、`Cargo.lock` 未改动。
 

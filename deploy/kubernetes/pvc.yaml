@@ -1,0 +1,10 @@
+# Session files of chat and of runs started in the resident Pod, kept across restarts.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: zx-agent-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi

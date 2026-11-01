@@ -1,0 +1,4 @@
+# Build context of deploy/kubernetes/Dockerfile, which copies only the sources it compiles.
+target
+.git
+.claude

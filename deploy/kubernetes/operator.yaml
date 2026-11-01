@@ -1,0 +1,32 @@
+# Optional: the writes that chat may perform, each after a person approves the command.
+# Bound to the resident Pod's account only; scheduled inspections stay read-only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: zx-agent-operator
+rules:
+  # kubectl rollout restart
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["patch"]
+  # kubectl scale
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale", "statefulsets/scale"]
+    verbs: ["patch"]
+  # kubectl delete pod, so that its controller recreates it
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: zx-agent-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: zx-agent-operator
+# No namespace: kustomize fills it in (see rbac.yaml).
+subjects:
+  - kind: ServiceAccount
+    name: zx-agent
