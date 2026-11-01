@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::agent::{Tool, ToolContext, ToolOutput};
+use crate::agent::{Effects, Tool, ToolContext, ToolOutput};
 use crate::ai::ToolDef;
 use crate::tools::ReadFileTool;
 use crate::tools::truncate::{MAX_BYTES, MAX_LINES, truncate_head};
@@ -108,6 +108,10 @@ struct Args {
 impl Tool for ReadSkillTool {
     fn name(&self) -> &str {
         TOOL_NAME
+    }
+
+    fn effects(&self) -> Effects {
+        Effects::ReadOnly
     }
 
     fn definition(&self) -> ToolDef {

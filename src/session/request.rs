@@ -76,7 +76,7 @@ impl SessionStore {
             max_tokens: request.max_tokens,
             provider_options,
         };
-        self.upgrade_for_v3()?;
+        self.ensure_format(3)?;
         let existing = self.branch_path().into_iter().rev().find_map(|entry| match entry {
             Entry::RequestConfig(entry) => Some(entry),
             _ => None,

@@ -13,13 +13,14 @@ use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{
-    AgentEvent, ContextPreparation, EventSink, LoopConfig, LoopControl, LoopFailure, LoopOutcome, run_loop,
+    AgentEvent, ContextPreparation, Effects, EventSink, Interruption, LoopConfig, LoopControl, LoopFailure,
+    LoopOutcome, run_loop,
 };
 use crate::ai::retry::{RetryPolicy, is_retryable};
-use crate::ai::{Message, Provider, Usage, UserMessageKind, duration_ms};
+use crate::ai::{Message, Provider, ToolCall, ToolResultMessage, Usage, UserMessageKind, duration_ms, now_ms};
 use crate::compaction::{self, Trigger};
 use crate::interaction::ApprovalCache;
-use crate::session::{Entry, SessionStore};
+use crate::session::{Entry, SessionStore, StartRecord};
 use crate::sync::{AbortOnDrop, lock};
 
 /// Bounds for one run. Defaults impose no turn or time limit.
@@ -210,6 +211,8 @@ impl Runner {
 
         // Entry IDs remain stable even when hooks omit messages from earlier runs.
         let run_start = lock(&self.session).entries().len();
+        // Before any system prompt change or input, so that results directly follow their calls.
+        self.recover_interrupted_calls(&sink, &run_cancel).await;
         let mut prompts = vec![Message::user(prompt)];
         let mut turns: u32 = 0;
         let mut retries = 0;
@@ -329,7 +332,8 @@ impl Runner {
                 | Entry::Compaction(_)
                 | Entry::CompactionFailed(_)
                 | Entry::RequestConfig(_)
-                | Entry::RequestStarted(_) => None,
+                | Entry::RequestStarted(_)
+                | Entry::ToolCallStarted(_) => None,
             })
             .collect();
         let messages: Vec<Message> = session
@@ -347,6 +351,77 @@ impl Runner {
             usage,
             error,
             session_file: session.path().map(|p| p.display().to_string()),
+        }
+    }
+
+    /// Record an error result for each call that an interrupted run left without one, so
+    /// the next request cannot suggest that such a call did nothing. Calls are never run
+    /// again. A failed write cancels the run through the sink and stops recovery.
+    async fn recover_interrupted_calls(&self, sink: &PersistingSink<'_>, cancel: &CancellationToken) {
+        let interrupted = lock(&self.session).interrupted_tool_calls();
+        for call in interrupted {
+            if lock(&sink.failure).is_some() {
+                break;
+            }
+            let effects = self
+                .config
+                .spec
+                .tools
+                .iter()
+                .find(|tool| tool.name() == call.tool_name)
+                .map(|tool| tool.effects());
+            let state = interruption(call.start, effects);
+            let event = AgentEvent::ToolCallRecovered {
+                tool_call_id: call.tool_call_id.clone(),
+                tool_name: call.tool_name.clone(),
+                state,
+            };
+            self.config.hooks.emit(event, cancel, sink).await;
+            let result = ToolResultMessage {
+                tool_call_id: call.tool_call_id,
+                tool_name: call.tool_name,
+                content: recovered_result(state).to_string(),
+                is_error: true,
+                timestamp: now_ms(),
+                duration_ms: None,
+            };
+            let start = AgentEvent::MessageStart { role: "toolResult" };
+            self.config.hooks.emit(start, cancel, sink).await;
+            let end = AgentEvent::MessageEnd {
+                message: Message::ToolResult(result),
+            };
+            self.config.hooks.emit(end, cancel, sink).await;
+        }
+    }
+}
+
+/// What recovery may claim about an interrupted call. A start record means the call may
+/// have taken effect; its absence proves nothing for read-only tools, which are never
+/// recorded, or for tools that are no longer configured, whose effects are unknown.
+fn interruption(start: StartRecord, effects: Option<Effects>) -> Interruption {
+    match (start, effects) {
+        (StartRecord::Present, _) => Interruption::Started,
+        (StartRecord::Absent | StartRecord::Unavailable, Some(Effects::ReadOnly)) => Interruption::ReadOnly,
+        (StartRecord::Absent, Some(Effects::SideEffects)) => Interruption::NotStarted,
+        (StartRecord::Unavailable, Some(Effects::SideEffects))
+        | (StartRecord::Absent | StartRecord::Unavailable, None) => Interruption::StartUnknown,
+    }
+}
+
+/// The result the model sees for an interrupted call.
+fn recovered_result(state: Interruption) -> &'static str {
+    match state {
+        Interruption::Started => {
+            "Result unknown: this call started, but the agent stopped before its result was recorded. It may have changed state; check the current state before running it again."
+        }
+        Interruption::StartUnknown => {
+            "Result unknown: the agent stopped before this call's result was recorded, and whether the call started was not recorded. It may have changed state; check the current state before running it again."
+        }
+        Interruption::NotStarted => {
+            "Not executed: the agent stopped before this call started, so it had no effect. Run it again if it is still needed."
+        }
+        Interruption::ReadOnly => {
+            "No result: the agent stopped before this read-only call finished. It changed nothing; run it again if the result is still needed."
         }
     }
 }
@@ -446,6 +521,16 @@ impl EventSink for PersistingSink<'_> {
             )
             .map(|_| ())
             .map_err(|error| format!("cannot persist request checkpoint: {error:#}"));
+        if let Err(error) = &recorded {
+            self.record_failure(error.clone());
+        }
+        recorded
+    }
+    fn record_tool_call_started(&self, call: &ToolCall) -> Result<(), String> {
+        let recorded = lock(self.session)
+            .append_tool_call_started(&call.id, &call.name)
+            .map(|_| ())
+            .map_err(|error| format!("cannot persist the start of tool call {:?}: {error:#}", call.id));
         if let Err(error) = &recorded {
             self.record_failure(error.clone());
         }
@@ -706,6 +791,127 @@ mod tests {
             );
             assert_eq!(report.retries, 0);
         }
+    }
+
+    /// Fails every write that contains `self.0`, like a disk filling up at that record.
+    struct RejectText(&'static str);
+    impl std::io::Write for RejectText {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.windows(self.0.len()).any(|part| part == self.0.as_bytes()) {
+                Err(std::io::Error::other("disk full on a tool result"))
+            } else {
+                Ok(bytes.len())
+            }
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Counts its executions, which must never happen without an audit trail.
+    struct Counted(std::sync::atomic::AtomicUsize);
+    #[async_trait]
+    impl crate::agent::Tool for Counted {
+        fn name(&self) -> &str {
+            "counted"
+        }
+        fn definition(&self) -> crate::ai::ToolDef {
+            crate::ai::ToolDef {
+                name: "counted".into(),
+                description: "Counts calls".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            }
+        }
+        async fn execute(
+            &self,
+            _args: serde_json::Value,
+            _ctx: &crate::agent::ToolContext,
+        ) -> Result<crate::agent::ToolOutput, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(crate::agent::ToolOutput::ok("ran"))
+        }
+    }
+
+    fn counted_runner(tool: &Arc<Counted>, provider: &Arc<FauxProvider>, session: SessionStore) -> Runner {
+        let tool: Arc<dyn crate::agent::Tool> = tool.clone();
+        let config = LoopConfig::new(LoopSpec {
+            provider: provider.clone(),
+            model: "m".into(),
+            system_prompt: SystemPrompt::default(),
+            tools: vec![tool],
+            cwd: PathBuf::from("."),
+            max_tokens: None,
+            sequential_tools: false,
+        });
+        Runner::new(
+            config,
+            RetryPolicy::default(),
+            Limits::default(),
+            session,
+            Arc::new(NullSink),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_start_record_write_failure_prevents_the_call() {
+        // A v3 session must first record its upgrade to v4; either write can fail.
+        for (version, rejected) in [(4, "tool_call_started"), (3, "format_upgrade")] {
+            let tool = Arc::new(Counted(std::sync::atomic::AtomicUsize::new(0)));
+            let provider = Arc::new(FauxProvider::new([
+                FauxStep::tool_call("c1", "counted", serde_json::json!({})),
+                FauxStep::text("never sent"),
+            ]));
+            let mut header = SessionHeader::new(Path::new("."), "m");
+            header.version = version;
+            let session = SessionStore::with_writer(header, Box::new(RejectEntry(rejected)));
+            let mut runner = counted_runner(&tool, &provider, session);
+
+            let report = runner.run("go", &CancellationToken::new()).await;
+
+            assert_eq!(report.outcome, RunOutcome::Error, "{rejected}");
+            let error = report.error.unwrap_or_default();
+            assert!(
+                error.contains(&format!("disk full on {rejected}")),
+                "{rejected}: {error}"
+            );
+            assert_eq!(
+                tool.0.load(Ordering::SeqCst),
+                0,
+                "{rejected}: ran without a start record"
+            );
+            assert_eq!(provider.requests().len(), 1, "{rejected}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_recovery_write_failure_cancels_the_run_before_any_request() {
+        // Recovery writes tool results; reject them, and only them.
+        let mut session = SessionStore::with_writer(
+            SessionHeader::new(Path::new("."), "m"),
+            Box::new(RejectText("\"role\":\"toolResult\"")),
+        );
+        session.append_message(Message::user("go")).unwrap();
+        let mut answer = crate::ai::AssistantMessage::failure("p", "m", crate::ai::StopReason::ToolUse, "");
+        answer.error_message = None;
+        answer.content = vec![crate::ai::ContentBlock::ToolCall {
+            id: "c1".into(),
+            name: "counted".into(),
+            arguments: serde_json::json!({}),
+            arguments_error: None,
+        }];
+        session.append_message(Message::Assistant(answer)).unwrap();
+        session.append_tool_call_started("c1", "counted").unwrap();
+        let tool = Arc::new(Counted(std::sync::atomic::AtomicUsize::new(0)));
+        let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
+        let mut runner = counted_runner(&tool, &provider, session);
+
+        let report = runner.run("continue", &CancellationToken::new()).await;
+
+        assert_eq!(report.outcome, RunOutcome::Error);
+        let error = report.error.unwrap_or_default();
+        assert!(error.contains("disk full on a tool result"), "{error}");
+        assert!(provider.requests().is_empty(), "requested without a recorded result");
+        assert_eq!(tool.0.load(Ordering::SeqCst), 0, "recovery must not run calls again");
     }
 
     #[test]

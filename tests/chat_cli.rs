@@ -10,7 +10,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdout, Command};
 
 use common::mock_server::{MockServer, Reply};
-use zx_agent::ai::Message;
+use zx_agent::ai::{AssistantMessage, ContentBlock, Message, StopReason};
 use zx_agent::session::SessionStore;
 
 const KEY_VAR: &str = "ZX_CHAT_TEST_KEY";
@@ -1010,4 +1010,39 @@ async fn quit_during_a_tty_approval_cancels_the_task_and_exits() {
         Some(0)
     );
     assert!(!dir.path().join("marker").exists());
+}
+
+#[tokio::test]
+async fn resuming_an_interrupted_session_reports_the_recovered_call_without_running_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = SessionStore::create(&dir.path().join("chat.jsonl"), common::header()).unwrap();
+    store.append_message(Message::user("fix it")).unwrap();
+    let mut call = AssistantMessage::failure("mock", "mock-model", StopReason::ToolUse, "");
+    call.error_message = None;
+    call.content = vec![ContentBlock::ToolCall {
+        id: "c1".into(),
+        name: "bash".into(),
+        arguments: json!({"command": "touch ran-again"}),
+        arguments_error: None,
+    }];
+    store.append_message(Message::Assistant(call)).unwrap();
+    store.append_tool_call_started("c1", "bash").unwrap();
+    drop(store);
+    let server = MockServer::start(vec![Reply::text("checked")]).await;
+
+    let output = run(
+        &server,
+        dir.path(),
+        &["--tools", "bash", "--session", "chat.jsonl"],
+        "continue\n/quit\n",
+    )
+    .await;
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("[recover] bash c1: started, result unknown"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!dir.path().join("ran-again").exists(), "the command ran again");
 }

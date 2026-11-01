@@ -5,7 +5,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::ai::{Delta, Message, Provider, Request, Usage};
+use crate::ai::{Delta, Message, Provider, Request, ToolCall, Usage};
 
 /// How one `run_loop` call ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -21,6 +21,34 @@ pub enum LoopOutcome {
     MaxTurns,
     /// The answer was cut off and no hook requested a continuation.
     Truncated,
+}
+
+/// What is known about a tool call that an interrupted run left without a result. The
+/// result recorded during recovery tells the model the same thing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Interruption {
+    /// The call started and may have changed state; its outcome is unknown.
+    Started,
+    /// Whether the call started was not recorded: the session predates start records, or
+    /// the tool is no longer configured. Treated like `Started`.
+    StartUnknown,
+    /// A call with side effects that never started, so it had no effect.
+    NotStarted,
+    /// A read-only call: it changed nothing, whether or not it ran.
+    ReadOnly,
+}
+
+impl Interruption {
+    /// A short description for progress output.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Interruption::Started => "started, result unknown",
+            Interruption::StartUnknown => "start not recorded, result unknown",
+            Interruption::NotStarted => "not started",
+            Interruption::ReadOnly => "read-only, no result",
+        }
+    }
 }
 
 /// Events emitted while the agent runs (pi: `AgentEvent`, packages/agent/src/types.ts).
@@ -95,6 +123,13 @@ pub enum AgentEvent {
         usage: Usage,
         automatic: bool,
     },
+    /// Before the next request, recovery recorded an error result for a tool call that an
+    /// interrupted run left without one. The call is never executed again.
+    ToolCallRecovered {
+        tool_call_id: String,
+        tool_name: String,
+        state: Interruption,
+    },
     /// A summary failed; the preceding projection is retained.
     CompactionFailed {
         error: String,
@@ -121,6 +156,7 @@ impl AgentEvent {
             AgentEvent::CompactionStart { .. } => "compaction_start",
             AgentEvent::CompactionEnd { .. } => "compaction_end",
             AgentEvent::CompactionFailed { .. } => "compaction_failed",
+            AgentEvent::ToolCallRecovered { .. } => "tool_call_recovered",
         }
     }
 }
@@ -140,6 +176,12 @@ pub trait EventSink: Send + Sync {
     /// Persist a request checkpoint before dispatch. The default is memory-only;
     /// a Runner records configuration and projection in its append-only session.
     fn record_request(&self, _request: &Request, _provider: &dyn Provider) -> Result<(), String> {
+        Ok(())
+    }
+    /// Persist that a call with side effects is about to run, after its checks and approval.
+    /// An error prevents the call. The default is memory-only; a Runner appends
+    /// `tool_call_started` to its session.
+    fn record_tool_call_started(&self, _call: &ToolCall) -> Result<(), String> {
         Ok(())
     }
     /// Session-host preparation after input/context edits and before a task request.
@@ -245,9 +287,35 @@ mod tests {
                 error: "failed".into(),
                 automatic: false,
             },
+            AgentEvent::ToolCallRecovered {
+                tool_call_id: "c".into(),
+                tool_name: "bash".into(),
+                state: Interruption::Started,
+            },
         ];
         for event in events {
             assert_eq!(serde_json::to_value(&event).unwrap()["type"], event.kind());
+        }
+    }
+
+    #[test]
+    fn recovered_calls_serialize_their_documented_states() {
+        let states = [
+            (Interruption::Started, "started"),
+            (Interruption::StartUnknown, "start_unknown"),
+            (Interruption::NotStarted, "not_started"),
+            (Interruption::ReadOnly, "read_only"),
+        ];
+        for (state, name) in states {
+            let event = AgentEvent::ToolCallRecovered {
+                tool_call_id: "c".into(),
+                tool_name: "bash".into(),
+                state,
+            };
+            assert_eq!(
+                serde_json::to_value(&event).unwrap(),
+                json!({"type": "tool_call_recovered", "toolCallId": "c", "toolName": "bash", "state": name})
+            );
         }
     }
 

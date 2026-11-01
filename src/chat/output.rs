@@ -116,6 +116,16 @@ impl EventSink for Output {
                 ..
             } => eprintln!("[compact] {input_bytes} -> {output_bytes} context bytes"),
             AgentEvent::CompactionFailed { error, .. } => eprintln!("[compact] {}", visible(error)),
+            AgentEvent::ToolCallRecovered {
+                tool_call_id,
+                tool_name,
+                state,
+            } => eprintln!(
+                "[recover] {} {}: {}",
+                visible(tool_name),
+                visible(tool_call_id),
+                state.describe()
+            ),
             AgentEvent::AgentStart
             | AgentEvent::TurnStart { .. }
             | AgentEvent::MessageStart { .. }

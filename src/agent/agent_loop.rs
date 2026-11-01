@@ -17,7 +17,7 @@ use super::hooks::{
 };
 use super::policy::Decision;
 use super::queue::MessageQueues;
-use super::tool::{ExecutionMode, Tool, ToolContext, ToolOutput};
+use super::tool::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
 use crate::ai::{
     AssistantMessage, Message, Provider, Request, StopReason, StreamEvent, SystemMessage, SystemPrompt, ToolCall,
     ToolResultMessage, Usage, UserMessageKind, duration_ms, now_ms,
@@ -551,13 +551,11 @@ impl Engine<'_, '_, '_> {
             let outcome = match self.prepare(call).await {
                 Prepared::Immediate(outcome) => outcome,
                 Prepared::Ready => {
-                    execute(
-                        self.find_tool(&call.name).expect("tool was resolved above"),
-                        call.arguments.clone(),
-                        &self.config.spec,
-                        self.control.cancel,
-                    )
-                    .await
+                    let tool = self.find_tool(&call.name).expect("tool was resolved above");
+                    match self.record_start(call, tool) {
+                        Ok(()) => execute(tool, call.arguments.clone(), &self.config.spec, self.control.cancel).await,
+                        Err(error) => Outcome::blocked(format!("Tool call was not executed: {error}")),
+                    }
                 }
             };
             let outcome = self.after(call, outcome).await;
@@ -591,6 +589,16 @@ impl Engine<'_, '_, '_> {
                 break;
             }
         }
+        // Record starts in call order before any call runs, so that recovery after a crash
+        // can tell the calls that began from those that never did.
+        for (call, immediate) in &mut slots {
+            if immediate.is_none() {
+                let tool = self.find_tool(&call.name).expect("tool was resolved in phase 1");
+                if let Err(error) = self.record_start(call, tool) {
+                    *immediate = Some(Outcome::blocked(format!("Tool call was not executed: {error}")));
+                }
+            }
+        }
         // Phase 2: borrow the runtime; futures do not need spawn or shared mutable state.
         let engine = &*self;
         let outcomes = join_all(slots.into_iter().map(|(call, immediate)| async move {
@@ -620,6 +628,15 @@ impl Engine<'_, '_, '_> {
             results.push(result);
         }
         Batch { results, terminate }
+    }
+
+    /// Persist the start of a call with side effects; an error means it must not run.
+    /// Read-only calls are not recorded.
+    fn record_start(&self, call: &ToolCall, tool: &dyn Tool) -> Result<(), String> {
+        match tool.effects() {
+            Effects::ReadOnly => Ok(()),
+            Effects::SideEffects => self.control.sink.record_tool_call_started(call),
+        }
     }
 
     async fn after(&self, call: &ToolCall, outcome: Outcome) -> Outcome {

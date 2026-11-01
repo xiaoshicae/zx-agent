@@ -207,6 +207,7 @@ CLI (main.rs + cli.rs + chat/)
 | 会话文件创建时机 | 启动时立即创建并写入头部 | 进程中途崩溃也能留下记录 |
 | 环境信息 | 启动时由程序写入系统提示词，见下文 | pi 只写入工作目录；无人值守时没有人提供这些信息，白名单也可能禁止 `uname`、`date` 等命令 |
 | 参数校验 | 由各工具反序列化成自己的参数类型来完成 | 避免引入 JSON Schema 校验器 |
+| 缺少结果的工具调用 | 有副作用的调用执行前先记录开始；下一次运行开始时，为缺少结果的调用写入"结果未知""未执行"等错误结果，不重放 | 发送时补占位（沿用 pi 的 transform-messages.ts）区分不了调用是否执行过；崩溃后需要依据记录判断 |
 | 上下文压缩、TUI | 未实现 | 按路线图逐步加入；已提供类型化 Hooks |
 
 ### 系统提示词的组成
@@ -261,7 +262,7 @@ CLI (main.rs + cli.rs + chat/)
 
 ### 事件（`--output jsonl`）
 
-每行一个事件。`type` 的取值有：`agent_start`、`turn_start`、`message_start`、`message_update`（需加 `--deltas`）、`message_end`（包括 system 消息）、`tool_execution_start`、`tool_execution_end`、`turn_end`、`agent_end`、`retry_scheduled`、`context_edited`、`hook_failed`、`compaction_start`、`compaction_end`、`compaction_failed`。压缩事件带 `automatic`；成功事件包含条目 ID、前后字节数与用量。手动 `/compact` 另发 `compaction_report`，不产生任务回答或 `run_end`。`run` 最后一行、`chat` 每轮最后一行是汇总：
+每行一个事件。`type` 的取值有：`agent_start`、`turn_start`、`message_start`、`message_update`（需加 `--deltas`）、`message_end`（包括 system 消息）、`tool_execution_start`、`tool_execution_end`、`turn_end`、`agent_end`、`retry_scheduled`、`context_edited`、`hook_failed`、`compaction_start`、`compaction_end`、`compaction_failed`、`tool_call_recovered`。压缩事件带 `automatic`；成功事件包含条目 ID、前后字节数与用量。`tool_call_recovered` 包含 `toolCallId`、`toolName` 与 `state`，取值见下文会话文件一节。手动 `/compact` 另发 `compaction_report`，不产生任务回答或 `run_end`。`run` 最后一行、`chat` 每轮最后一行是汇总：
 
 ```json
 {"type":"run_end","report":{"outcome":"completed","finalText":"## Summary ...","turns":3,"retries":0,"usage":{"input":1200,"output":300,"cacheRead":0,"totalTokens":1500},"sessionFile":"/var/log/zx-agent/run.jsonl"}}
@@ -278,7 +279,7 @@ CLI (main.rs + cli.rs + chat/)
 第一行是头部，之后每行一个条目，条目之间通过 `parentId` 连成一棵树：
 
 ```json
-{"type":"session","version":3,"id":"…","timestamp":1761700000000,"cwd":"/srv","model":"…"}
+{"type":"session","version":4,"id":"…","timestamp":1761700000000,"cwd":"/srv","model":"…"}
 {"type":"message","id":"f0e1d2c3","parentId":null,"timestamp":…,"message":{"role":"system","sections":[{"name":"preamble","content":"…"},{"name":"environment","content":"…"}],"timestamp":…}}
 {"type":"message","id":"a1b2c3d4","parentId":"f0e1d2c3","timestamp":…,"message":{"role":"user","content":"…","timestamp":…}}
 {"type":"message","id":"b2c3d4e5","parentId":"a1b2c3d4","timestamp":…,"message":{"role":"assistant","stopReason":"error","errorMessage":"HTTP 503: …",…}}
@@ -289,9 +290,22 @@ CLI (main.rs + cli.rs + chat/)
 
 如果进程在写入最后一行时崩溃，未换行且确实未完成的尾记录会在下次打开时截掉，包括截断在 UTF-8 字符中间的情况。写入失败（如磁盘已满）后不再写入，因此留下的残缺同样只在文件末尾，按同一规则修复。CLI 会在 stderr 报告修复；库调用方可读取 `SessionStore::recovered_tail_bytes()`。完整记录缺少末尾换行时会补换行；已换行的损坏记录、未知记录类型和完整记录的字段错误会报错并保留文件。
 
-新建会话格式为 v3，兼容读取 v1/v2。旧文件在首次写入请求或压缩记录前追加 `format_upgrade`，不改写头部；随后追加 `compaction_started`，请求完成后追加 `compaction` 或 `compaction_failed`。未完成或失败记录不改变投影；成功记录保留全部 system、结构化摘要及 `firstKeptEntryId` 之后的原消息，原始历史仍可审计。摘要来源是应用过 `context_edit` 的原始投影，不输入旧摘要。
+新建会话格式为 v4，兼容读取 v1–v3。旧文件在首次写入请求或压缩记录前追加 `format_upgrade`（version 3），在首次写入 `tool_call_started` 前追加 `format_upgrade`（version 4），都不改写头部。只支持到 v3 的程序会拒绝打开 v4 会话。压缩时先追加 `compaction_started`，请求完成后追加 `compaction` 或 `compaction_failed`。未完成或失败记录不改变投影；成功记录保留全部 system、结构化摘要及 `firstKeptEntryId` 之后的原消息，原始历史仍可审计。摘要来源是应用过 `context_edit` 的原始投影，不输入旧摘要。
 
 每次模型请求（任务请求与摘要请求）发出前，先追加 `request_started`；provider、模型、工具定义、`max_tokens` 或 provider 转换参数变化时，先追加一条 `request_config`。`request_started` 引用配置，并记录消息来源：会话投影（以该条目的父节点为准），或摘要尝试的源条目与请求时间戳。库调用方可用 `SessionStore::replay_request` 还原当时与 provider 无关的 `Request`，OpenAI 兼容服务可再用 `openai::replay_body` 重建请求体。会话文件不记录 API key、URL 和 HTTP 头；自定义 provider 通过 `Provider::request_options` 提供非机密的转换参数，默认为 `null`，此时只能还原到 `Request`。这些记录写入失败时不发请求，并中止运行。`request_started` 只表示准备发送，后面没有对应的回答，说明发送结果未知。
+
+有副作用的工具（`Tool::effects()` 为 `SideEffects`；内置工具中只有 bash）通过检查与审批后、执行前，先追加 `tool_call_started`（`toolCallId`、`toolName`）。并行批次先按调用顺序写完全部开始记录，再并发执行。写入失败时不执行该调用，并中止运行。只读工具不写开始记录。
+
+进程崩溃、被终止或运行 future 被丢弃后，下一次运行在追加新输入之前检查分支末尾的 assistant 消息：没有结果记录的调用，各补一条 `isError` 的工具结果，并发出 `tool_call_recovered` 事件；调用不会被重放。`state` 按记录取值：
+
+| `state` | 依据 | 告诉模型 |
+|---|---|---|
+| `started` | 有开始记录 | 结果未知，可能已改变状态，重新执行前先核对 |
+| `not_started` | 会话已按 v4 记录开始，工具有副作用，但没有开始记录 | 未执行，没有产生影响 |
+| `read_only` | 只读工具 | 没有结果，没有改变任何状态，可以重新调用 |
+| `start_unknown` | 旧格式会话，或当前未配置该工具 | 是否开始未知，按可能已改变状态处理 |
+
+文本输出在 stderr 打印 `[recover] <工具名> <调用 ID>: <状态>`。只处理分支末尾的调用：之后已有其他消息、已被 `context_edit` 省略或已被摘要替代的调用不补结果，`Error` / `Aborted` 回答里的调用从未执行，也不处理；这些情况下，发给模型时仍补 `No result provided` 占位。
 
 `providerError` 仍是可选消息字段；续写请求可带 `kind: "continueAnswer"`，报告据此拼接答案。普通 user 消息的 JSON 不变，旧文件缺少 `kind` 时按普通输入处理。
 
@@ -370,7 +384,7 @@ P1 的 SDK 接口调整：静态配置移入 `LoopSpec`；`LoopConfig` 持有钩
 扩展点均为 trait：
 
 - `ai::Provider`：接入新的模型服务，必须遵守 `src/ai/provider.rs` 中的约定。
-- `agent::Tool`：自定义工具。返回 `Err` 等价于 pi 中的抛出异常，会变成错误结果交给模型。
+- `agent::Tool`：自定义工具。返回 `Err` 等价于 pi 中的抛出异常，会变成错误结果交给模型。`effects()` 默认返回 `SideEffects`，Runner 会在执行前记录开始；不会改变任何状态的工具应返回 `Effects::ReadOnly`，否则中断后只能报告结果未知。
 - `agent::ToolPolicy`：自定义工具调用策略，例如接入审批系统或资源级权限。
 - `agent::Hooks`：输入、上下文、工具调用前后、回合结束与事件观察。
 - `interaction::Interaction`：由宿主回答审批；内核不读取终端。
@@ -393,10 +407,11 @@ cargo fmt --check
 | `tests/agent_session.rs` | 共享提问与 Busy、取消与 future 丢弃后复用、队列边界、订阅和退订、回调重入与 panic 隔离、模型切换、授权撤销、先写审计再多订阅分发 |
 | `tests/openai_mock.rs` | 本地假 HTTP 服务上的端到端测试：SSE、执行 bash、回传工具结果、认证头、HTTP 错误重试、空闲超时、中途取消后保留已输出内容 |
 | `tests/cli.rs` | 编译出的程序：退出码 0 到 6、jsonl 输出、从 stdin 读提示词、bash 读不到 API key、系统提示词的生成段落、`--system-updates inline` |
-| `tests/chat_cli.rs` | 多轮历史、审批与授权范围、重置、模型切换、EOF、信号、超时、控制字符显示；Unix PTY 验证运行中插话、取消重置和退出 |
+| `tests/chat_cli.rs` | 多轮历史、审批与授权范围、重置、模型切换、EOF、信号、超时、控制字符显示、恢复中断会话的提示；Unix PTY 验证运行中插话、取消重置和退出 |
 | `tests/profiles_cli.rs` | profile 覆盖、显式默认值、不可绕过的 deny、上下文范围与审计、上下文默认值与越界链接、`--system-prompt-file` 兼容、skill 懒加载与脱敏、配置错误退出码 |
 | `tests/session_compaction.rs`、`tests/compaction.rs` | v1/v2 追加升级、分支和引用、原始投影、摘要失败与取消、请求 / 用量预算、超时和上限 |
 | `tests/request_audit.rs` | 每次任务与摘要请求可从会话文件还原、配置只在变化时追加、旧会话首次请求前升级、与投影不一致的请求不记录 |
+| `tests/crash_recovery.rs` | 内置工具的副作用声明、开始记录先于执行（串行与并行批次）、中断批次的四种恢复结果且不重放、旧格式会话、丢弃 future 后的同进程恢复、`run` 的 `[recover]` 输出；Unix 上 SIGKILL 掉正在执行命令的 `run`，再由下一次 `run` 恢复且不重放 |
 | `tests/output_store.rs` | 先脱敏后落盘、UUID 边界、文件权限、UTF-8 分页、容量、取消、写盘失败时保留内联结果、目录越界与 `.gitignore` |
 | `tests/hooks.rs`、`tests/hooks_cli.rs` | 钩子组合与失败处理、审批范围与取消、审计变换、续写预算、工具输出脱敏的 CLI 接线 |
 | `tests/real_api.rs` | 真实模型 API（付费，默认跳过）：文本回答与用量、工具往返、策略拒绝、输出截断、恢复会话、无效 key 不重试 |

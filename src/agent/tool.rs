@@ -18,6 +18,17 @@ pub enum ExecutionMode {
     Sequential,
 }
 
+/// What a tool call can change. Recovery after an interrupted run depends on it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Effects {
+    /// Only reads state, so running the call again is harmless.
+    ReadOnly,
+    /// May change files, processes or remote systems. The default: a tool that does not
+    /// declare its effects is treated as one that changes state.
+    #[default]
+    SideEffects,
+}
+
 /// What a tool receives besides its arguments.
 #[derive(Clone, Debug)]
 pub struct ToolContext {
@@ -69,6 +80,12 @@ pub trait Tool: Send + Sync {
     /// Defaults to `Parallel`.
     fn execution_mode(&self) -> ExecutionMode {
         ExecutionMode::Parallel
+    }
+    /// Defaults to `SideEffects`. The session records that a call with side effects
+    /// started before it runs, so recovery never assumes that an interrupted call did
+    /// nothing. Return `ReadOnly` only when the tool cannot change any state.
+    fn effects(&self) -> Effects {
+        Effects::SideEffects
     }
     /// Validate before policy and approval. Override for schema and semantic checks;
     /// execute must still validate direct SDK calls. The default adds no checks.
