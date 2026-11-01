@@ -143,6 +143,38 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 
 本地 macOS 验证（基于 `ee15a29`）：新增 14 项测试，删除 1 项。其中 7 项回归测试在修复前实测失败：摘要暂停在丢弃运行后保留、被拒绝的插话之后的消息仍在队列、执行中被取消的有副作用调用的结果、终端中的最终回答，以及真实 Docker 中的 `setsid` 子进程清理、命令无法关掉清理、命令逐条执行。另外 7 项覆盖只读调用被打断、管道输出保持原文、root 用户的配置校验与启动探测、工作目录内的会话文件被拒绝、开始前取消不执行命令。修复前的另两处现象用 Docker 直接复现过（同一套启动参数）：遮蔽的会话文件可经硬链接读出，同目录较早的会话文件可读；`--user 0:0` 时 `id -u` 为 0。stable 与 Rust 1.88 各 468 项通过（基线 455 项）、6 项付费测试跳过；设置 `ZX_DOCKER_TEST_IMAGE=debian:bookworm-slim` 时容器测试 30 项通过（Docker Desktop 29.9.2）；格式、clippy、严格 Rustdoc 与 MSRV 全目标检查通过。
 
+2026-11-01 整体设计评审后的修正（进行中）：
+
+背景：2026-11-01 按模块分五个区对整个代码库做了一次设计评审，共 46 条，逐条核实后按主题分四个 PR 修正：安全、循环与 chat、会话、输出与诊断。
+
+一、安全（实施中）：
+
+| 项目 | 修正 |
+|---|---|
+| 自动放行的字面检查 | 命令只由字母、数字、空白和 `- _ . / : = , @ + \| ^ ~ !` 组成时才可能自动放行；出现引号、`\`、`$`、通配符、花括号、括号等其他字符一律询问。此前"不含 `secret`、URL、连接参数"只检查原始字面，`kubectl get sec""rets`、`"--server=…"`、`"https:"//…` 经 shell 去掉引号后照常生效，不经审批即可执行 |
+| 自动放行的 kubectl 参数 | 自动放行的 kubectl 命令只能带白名单中的只读参数：命名空间与上下文、标签与字段选择、输出格式与排序、日志范围等；`--raw`、`--user`、`--cluster`、`--profile`、`--profile-output`、`--cache-dir`、`-v`、`-f`、`-w` 等一律询问。此前只排除 4 个连接参数：全局参数 `--profile-output` 能覆盖任意文件（kubectl v1.36.1 实测），`--raw` 的路径可用 URL 编码绕过 `secret` 检查，`--user` 可把一个集群的 token 用在另一个集群的地址上 |
+| 默认危险命令 | 关机、重启与 `mkfs` 等程序名只在命令位置匹配：管道与命令列表的每一段、`sudo` 等包装程序之后；比较前去掉引号与反斜杠，按路径的文件名比较。`grep`、`last`、`journalctl` 等只读程序的参数不参与匹配。`rm -rf /` 等多词模式仍按子串匹配。此前按子串匹配整条命令：`kubectl get pods -n asphalt-prod`、`last reboot`、`journalctl … \| grep -i reboot` 被拒绝，`/sbin/re''boot` 却能通过 |
+| `read_file` 的特殊文件 | 先查看路径类型，只打开普通文件；打开后再检查一次，防止中途被替换。此前先打开再判断，FIFO 与设备文件在被拒绝之前已经被打开 |
+| `--secret-file` 与 `ZX_SECRET_FILES` | 两者合并登记。此前命令行给出 `--secret-file` 时整体忽略环境变量，部署包用环境变量登记的远端 token 会因此不再脱敏 |
+| `RuleMatcher::CommandPrefix` | 与命令白名单一样忽略大小写、合并空白；Allow 规则不匹配含 `;`、`&`、`>`、`<`、反引号、`$(` 或换行的命令。此前 `KUBECTL delete` 能绕过 Deny 前缀，Allow 前缀 `kubectl get` 会放行 `kubectl get pods; rm …` |
+
+暂不做：在审计中写明自动放行命中的清单前缀，需要改变 PR #25 固定的 `Decision` JSON 契约，另行评估。
+
+实施记录（基于 `0984288`，含 PR #28）：
+
+- 按上表实施，补充如下：
+  - kubectl 参数白名单按 kubectl v1.36.1 的帮助核对（`get`、`describe`、`logs`、`top`、`events`、`explain`、`api-resources`、`version`、`config get-contexts` 与全局参数）。`--watch`、`--follow` 这类会一直等待的参数也不在其中。
+  - 旧规则把 kubectl 短参数中含字母 `s` 的一律当作 `-s`，`-nkube-system` 因此要审批；现在按参数白名单判断，可以自动放行。
+  - `DEFAULT_DENIED_PATTERNS` 只保留多词模式，程序名移到新的 `DENIED_PROGRAMS`。`--deny-cmd` 与 profile 的 `rules.deny` 仍按子串匹配。
+  - `read_file` 的错误信息不变。
+- 公开 API 与 CLI 的变化：`DEFAULT_DENIED_PATTERNS` 去掉程序名，新增 `DENIED_PROGRAMS`；`RuleMatcher::CommandPrefix` 的匹配方式见上表；`--secret-file` 不再以 `ZX_SECRET_FILES` 为缺省值，而是与之合并。`run --help`、`chat --help` 只有 `--auto-approve-cmd` 与 `--secret-file` 的说明改变，其余与 `0984288` 逐字节相同。
+- 新增 9 项测试，修复前均实测失败：
+  - 策略单元测试 7 项：引号与展开；kubectl 参数在白名单外要询问、在白名单内可放行；危险程序在命令位置被拒绝、作为只读程序的参数不被拒绝；`CommandPrefix` 忽略大小写与空白；Allow 前缀不放行第二条命令。
+  - `read_file` 拒绝 FIFO 时不打开它：修复前写端被释放。
+  - 命令行与环境变量登记的密钥文件合并：修复前环境变量登记的 token 没有被过滤。
+  - 既有测试未改。
+- 本机 macOS 验证：stable 与 Rust 1.88.0 各 568 项通过（基线 559 项，在 `0984288` 上实测），6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过，自查脚本的命中项与基线相同；设置 `ZX_DOCKER_TEST_IMAGE=debian:bookworm-slim` 时容器测试 30 项通过。未新增依赖，`Cargo.toml`、`Cargo.lock` 未改动。
+
 下面的 P0–P9 继续按各自验收标准推进。
 
 状态取值：未开始、进行中、已实现待 PR review、已完成。每个阶段完成时勾选任务，并记录完成日期和提交。

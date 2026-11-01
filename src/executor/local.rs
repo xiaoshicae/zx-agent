@@ -102,10 +102,16 @@ impl Executor for LocalExecutor {
     }
 
     async fn read_file(&self, path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {
+        // Opening a special file can act by itself: it releases a FIFO's writer, and some
+        // devices start working when opened. So only regular files are opened.
+        let meta = tokio::fs::metadata(path)
+            .await
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        regular_file(path, &meta)?;
         let mut options = tokio::fs::OpenOptions::new();
         options.read(true);
-        // A path can be replaced with a FIFO between lookup and open. Nonblocking open
-        // lets us inspect the opened descriptor without waiting for a pipe writer.
+        // A path can be replaced with a FIFO between the check and the open. Nonblocking
+        // open lets us inspect the opened descriptor without waiting for a pipe writer.
         #[cfg(unix)]
         options.custom_flags(libc::O_NONBLOCK);
         let file = options
@@ -116,15 +122,7 @@ impl Executor for LocalExecutor {
             .metadata()
             .await
             .map_err(|e| format!("cannot inspect {}: {e}", path.display()))?;
-        if meta.is_dir() {
-            return Err(format!("{} is a directory; use bash `ls` to list it", path.display()));
-        }
-        if !meta.is_file() {
-            return Err(format!(
-                "{} is not a regular file; special files are not supported",
-                path.display()
-            ));
-        }
+        regular_file(path, &meta)?;
         if meta.len() > max_bytes {
             return Err(format!(
                 "{} is {} bytes, over the {} byte limit; use bash with head, tail, or grep instead",
@@ -150,4 +148,18 @@ impl Executor for LocalExecutor {
         }
         Ok(bytes)
     }
+}
+
+/// Refuse what is not a regular file, with a hint for directories.
+fn regular_file(path: &Path, meta: &std::fs::Metadata) -> Result<(), String> {
+    if meta.is_dir() {
+        return Err(format!("{} is a directory; use bash `ls` to list it", path.display()));
+    }
+    if !meta.is_file() {
+        return Err(format!(
+            "{} is not a regular file; special files are not supported",
+            path.display()
+        ));
+    }
+    Ok(())
 }

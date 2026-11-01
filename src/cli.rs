@@ -29,6 +29,9 @@ use zx_agent::tools::{self, BASH};
 /// redacted; elsewhere the file does not exist and is skipped.
 const SERVICE_ACCOUNT_TOKEN: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
 
+/// Comma-separated secret files to redact, added to `--secret-file`; deployments set it.
+const SECRET_FILES_ENV: &str = "ZX_SECRET_FILES";
+
 #[derive(Parser)]
 #[command(name = "zx-agent", version, about = "Minimal general-purpose agent kernel")]
 pub(crate) struct Cli {
@@ -157,15 +160,16 @@ pub(crate) struct BaseArgs {
 
     /// Command prefix for bash that runs without asking where bash needs approval, as in
     /// chat, e.g. --auto-approve-cmd "kubectl get". Repeatable; replaces the profile's list.
-    /// Commands with shell syntax, the word "secret", a URL or a connection option still ask.
+    /// Commands with quotes, `$`, other shell syntax, the word "secret", a URL, a connection
+    /// option or a kubectl option outside a read-only set still ask.
     #[arg(long = "auto-approve-cmd")]
     pub(crate) auto_approve_cmd: Vec<String>,
 
     /// File holding a secret to redact from tool output, such as another cluster's token, or a
     /// directory of such files (names starting with a dot are skipped). Read again before
-    /// every redaction. Repeatable; when absent, the comma-separated ZX_SECRET_FILES is used.
-    /// The Pod's ServiceAccount token is always redacted.
-    #[arg(long = "secret-file", env = "ZX_SECRET_FILES", value_delimiter = ',')]
+    /// every redaction. Repeatable, and added to the files in the comma-separated
+    /// ZX_SECRET_FILES. The Pod's ServiceAccount token is always redacted.
+    #[arg(long = "secret-file", value_delimiter = ',')]
     pub(crate) secret_files: Vec<PathBuf>,
 
     /// Embedded profile name (troubleshoot, assistant) or path to a TOML file.
@@ -349,14 +353,23 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
         None => std::env::current_dir()?,
     };
     anyhow::ensure!(cwd.is_dir(), "--cwd is not a directory: {}", cwd.display());
-    // A misspelt path would leave a secret unredacted without a word, so each must exist at
-    // startup; one that disappears later is skipped (RedactSecrets::with_secret_files).
-    let secret_files: Vec<PathBuf> = options
-        .base
-        .secret_files
-        .iter()
+    // Both sources count: a file named at the command line must not drop the ones a
+    // deployment registered in the environment. A misspelt path would leave a secret
+    // unredacted without a word, so each must exist at startup; one that disappears later is
+    // skipped (RedactSecrets::with_secret_files).
+    let from_environment: Vec<PathBuf> = match std::env::var_os(SECRET_FILES_ENV) {
+        Some(value) => value
+            .to_str()
+            .with_context(|| format!("{SECRET_FILES_ENV} is not valid UTF-8"))?
+            .split(',')
+            .map(PathBuf::from)
+            .collect(),
+        None => Vec::new(),
+    };
+    let secret_files: Vec<PathBuf> = from_environment
+        .into_iter()
+        .chain(options.base.secret_files.iter().cloned())
         .filter(|path| !path.as_os_str().is_empty())
-        .cloned()
         .collect();
     for path in &secret_files {
         std::fs::metadata(path).with_context(|| {

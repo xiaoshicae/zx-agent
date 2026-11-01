@@ -106,6 +106,33 @@ async fn secret_files_named_in_the_environment_are_redacted() {
 }
 
 #[tokio::test]
+async fn secret_files_from_the_flag_add_to_those_in_the_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    let from_env = dir.path().join("env-token");
+    std::fs::write(&from_env, "token-from-env").unwrap();
+    let from_flag = dir.path().join("flag-token");
+    std::fs::write(&from_flag, "token-from-flag").unwrap();
+    let server = MockServer::start(vec![Reply::bash("c", "cat env-token flag-token"), Reply::text("done")]).await;
+
+    let output = run_bash(&server, dir.path())
+        .env("ZX_SECRET_FILES", &from_env)
+        .args(["--secret-file", from_flag.to_str().unwrap()])
+        .output()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let messages = server.requests()[1].body["messages"].to_string();
+    assert!(!messages.contains("token-from-env"), "{messages}");
+    assert!(!messages.contains("token-from-flag"), "{messages}");
+}
+
+#[tokio::test]
 async fn a_missing_secret_file_is_a_configuration_error() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::text("never")]).await;
