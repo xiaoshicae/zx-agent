@@ -285,7 +285,7 @@ impl Provider for AuditProbe {
         "audit-probe"
     }
     fn stream(&self, request: Request, cancel: CancellationToken) -> EventReceiver {
-        let persisted = SessionStore::open(&self.path).unwrap();
+        let persisted = SessionStore::read(&self.path).unwrap();
         assert_eq!(
             request.messages,
             persisted.messages(),
@@ -300,7 +300,7 @@ async fn input_and_context_changes_are_persisted_before_the_model_request() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session.jsonl");
     let mut session = SessionStore::create(&path, header()).unwrap();
-    session.append_message(Message::user("old")).unwrap();
+    session.append_message(Message::user("old")).await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let probe = Arc::new(AuditProbe {
         provider: provider.clone(),
@@ -324,7 +324,7 @@ async fn input_and_context_changes_are_persisted_before_the_model_request() {
     assert_eq!(lines[2]["message"]["content"], "go", "original input remains intact");
     assert_eq!(lines.iter().filter(|line| line["type"] == "context_edit").count(), 3);
     assert_eq!(
-        SessionStore::open(&path).unwrap().messages(),
+        SessionStore::read(&path).unwrap().messages(),
         runner.session().messages()
     );
 }
@@ -435,7 +435,7 @@ async fn omitting_prior_runs_does_not_lose_the_current_answer_or_usage() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("current")]));
     let mut session = SessionStore::in_memory(header());
     for _ in 0..5 {
-        session.append_message(Message::user("old")).unwrap();
+        session.append_message(Message::user("old")).await.unwrap();
     }
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push(OmitEarlier);
@@ -729,4 +729,80 @@ async fn a_finish_hook_error_never_triggers_provider_retry() {
     );
     assert!(report.error.unwrap().contains("HTTP 503 from extension"));
     assert_eq!(provider.requests().len(), 1);
+}
+
+/// Holds input that starts with "hold" until the run is cancelled or dropped, unless released,
+/// and reports when it starts holding.
+struct HoldInput {
+    holding: Arc<tokio::sync::Notify>,
+    released: Arc<AtomicBool>,
+}
+#[async_trait]
+impl Hooks for HoldInput {
+    async fn on_input(&self, text: String) -> HookResult<String> {
+        if text.starts_with("hold") && !self.released.load(Ordering::SeqCst) {
+            self.holding.notify_one();
+            std::future::pending::<()>().await;
+        }
+        Ok(text)
+    }
+}
+
+fn holding_runner(provider: Arc<FauxProvider>) -> (zx_agent::runner::Runner, HoldInput) {
+    let holding = Arc::new(tokio::sync::Notify::new());
+    let released = Arc::new(AtomicBool::new(false));
+    let mut config = config(provider, vec![]);
+    config.hooks.push(HoldInput {
+        holding: holding.clone(),
+        released: released.clone(),
+    });
+    let (runner, _) = RunnerSetup::new(config).build();
+    (runner, HoldInput { holding, released })
+}
+
+fn mentions(messages: &[Message], text: &str) -> usize {
+    summarize(messages)
+        .iter()
+        .filter(|message| message.contains(text))
+        .count()
+}
+
+#[tokio::test]
+async fn input_whose_hook_was_cancelled_is_not_recorded() {
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
+    let (mut runner, hold) = holding_runner(provider.clone());
+    let cancel = CancellationToken::new();
+
+    let (report, ()) = tokio::join!(runner.run("hold: rotate the logs", &cancel), async {
+        hold.holding.notified().await;
+        cancel.cancel();
+    });
+
+    assert_eq!(report.outcome, RunOutcome::Aborted);
+    assert_eq!(mentions(&runner.session().messages(), "rotate the logs"), 0);
+    let report = runner.run("next", &CancellationToken::new()).await;
+    assert_eq!(report.outcome, RunOutcome::Completed);
+    assert_eq!(summarize(&provider.requests()[0].messages), ["user:next"]);
+}
+
+#[tokio::test]
+async fn queued_input_whose_run_was_dropped_stays_queued_and_unrecorded() {
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
+    let (mut runner, hold) = holding_runner(provider.clone());
+    runner.config().queues.steer("hold: check the disk");
+    let cancel = CancellationToken::new();
+
+    tokio::select! {
+        _ = runner.run("go", &cancel) => panic!("the input hook should still hold the input"),
+        () = hold.holding.notified() => {}
+    }
+
+    assert_eq!(mentions(&runner.session().messages(), "check the disk"), 0);
+    hold.released.store(true, Ordering::SeqCst);
+    let report = runner.run("next", &CancellationToken::new()).await;
+    assert_eq!(report.outcome, RunOutcome::Completed);
+    assert_eq!(
+        summarize(&provider.requests()[0].messages),
+        ["user:go", "user:next", "user:hold: check the disk"]
+    );
 }

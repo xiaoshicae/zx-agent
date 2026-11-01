@@ -27,7 +27,7 @@
 
 - **是什么**：用 Rust 编写的通用 agent 内核。同一个内核支撑三类场景：和人对话；无人值守运行，例如由 cron 或 Kubernetes Job 触发的排障；被编辑器或其他程序嵌入。场景差异放在内核之外，通过 profile、提示词和插件表达。
 - **参照**：分层方式、循环语义和会话格式沿用 pi（https://github.com/earendil-works/pi ，commit `a92283056`）。与 pi 不同的地方记录在 README 的"与 pi 的差异"。
-- **现状**：v0.1.0。已实现共享的 `AgentSession`、无人值守的 `run` 和终端 `chat`、一个 OpenAI 兼容的流式 provider、`bash` 与 `read_file`，以及文件化 profile、项目上下文、按需 `read_skill`、有界摘要和长工具结果落盘 / `read_output`，崩溃恢复，以及可选的离线容器执行（`--execution container`，默认仍在本机执行）。CLI 的场景默认值位于 `profiles/*.toml` 与相邻说明文件；`presets` 保留已有 SDK 接口。SDK 默认不限轮次、不限时间、不自动续写或压缩、不落盘工具结果。接口与资源上限见 README，目标、阶段计划与已定决策见 `docs/ROADMAP.md`，改动前先确认当前阶段。
+- **现状**：v0.1.0。已实现共享的 `AgentSession`、无人值守的 `run` 和终端 `chat`、一个 OpenAI 兼容的流式 provider、`bash` 与 `read_file`，以及文件化 profile、项目上下文、按需 `read_skill`、有界摘要和长工具结果落盘 / `read_output`，崩溃恢复，可替换的会话存储（`SessionLog`；JSONL 会话文件同一时间只有一个写入者），以及可选的离线容器执行（`--execution container`，默认仍在本机执行）。CLI 的场景默认值位于 `profiles/*.toml` 与相邻说明文件；`presets` 保留已有 SDK 接口。SDK 默认不限轮次、不限时间、不自动续写或压缩、不落盘工具结果。接口与资源上限见 README，目标、阶段计划与已定决策见 `docs/ROADMAP.md`，改动前先确认当前阶段。
 - **验证范围**：本地使用 macOS，CI 覆盖 Linux 与 macOS；`--system-updates inline` 只在一个服务上验证过；付费 e2e 测试（`tests/real_api.rs`）于 2026-11-01 在 DeepSeek 的 `deepseek-flash` 与 `deepseek-chat` 上各运行一次，均为 6 项通过（只覆盖 `collapse` 模式，不含压缩用例）。容器执行的真实 Docker 测试（设置 `ZX_DOCKER_TEST_IMAGE` 运行 `tests/container.rs`）在本机 macOS 的 Docker Desktop 上用 `debian:bookworm-slim` 与一个 Ubuntu 系镜像跑过，原生 Linux 的 Docker 只由 CI 覆盖；没有在 rootless Docker 或 Podman 上验证。
 
 ## 架构设计
@@ -42,7 +42,7 @@
 | 提示词 | `src/prompt.rs` | 生成系统提示词：说明 + `<environment>` + `<command_policy>` + `<project_context>` + `<available_skills>`（空段落不出现） |
 | 共享会话 | `src/agent_session.rs` | 共享调用与 Busy、RAII 归还运行权、取消、订阅与退订、空闲时切换模型 |
 | 运行层 | `src/runner.rs` | 持有可顺序复用的会话；以独占借用控制单次运行、重试、上限、审批缓存、持久化和报告 |
-| 会话 | `src/session.rs` | 只追加的 JSONL 条目树，投影出发给模型的消息 |
+| 会话 | `src/session.rs`、`src/session/` | 只追加的条目树与校验，投影出发给模型的消息；记录经 `SessionLog` 保存，默认是单写者的 JSONL 文件（`file.rs`） |
 | 上下文管理 | `src/compaction.rs`、`src/session/compaction.rs`、`src/output_store.rs` | 宿主摘要、追加升级与原始投影、脱敏后的长结果保存及分页 |
 | agent | `src/agent/` | 回合循环、工具执行、Hooks 宿主、事件、消息队列 |
 | ai | `src/ai/` | 消息类型、系统提示词段落、流式事件协议、provider 与重试判断 |
@@ -50,20 +50,20 @@
 | 工具 | `src/tools/` | bash、read_file、输出截断 |
 | 执行环境 | `src/executor/` | 工具执行命令与读文件的位置；`LocalExecutor` 为本机，负责进程组、超时与取消、输出捕获上限；`ContainerExecutor` 在每个进程一个的 Docker 容器中执行，并在容器内按进程组终止命令 |
 
-一次运行的数据流：`main` 组装 `AgentSession` → `prompt_with_cancel` 独占取得 Runner → `Runner::run` 取会话投影作为上下文 → `run_loop` 先持久化提示词、输入和上下文改动，再经宿主准备步骤执行可选摘要 → 新增插话与钩子改动持久化后请求任务模型 → 执行工具、脱敏、可选落盘 → `PersistingSink` 先写完成消息，再转发事件 → runner 处理任务请求重试并汇总 `RunReport`，由 `main` 映射退出码。自动摘要单独记录、消耗请求预算且不重试；手动 compact 共用独占权并独立报告。
+一次运行的数据流：`main` 组装 `AgentSession` → `prompt_with_cancel` 独占取得 Runner → `Runner::run` 取会话投影作为上下文 → `run_loop` 先持久化提示词、输入和上下文改动，再经宿主准备步骤执行可选摘要 → 新增插话与钩子改动持久化后请求任务模型 → 执行工具、脱敏、可选落盘 → 循环经 Runner 实现的会话宿主（`agent::SessionHost`，crate 内部）先写完成消息，再发出事件 → runner 处理任务请求重试并汇总 `RunReport`，由 `main` 映射退出码。自动摘要单独记录、消耗请求预算且不重试；手动 compact 共用独占权并独立报告。
 
 设计取舍（改动前先理解原因；必须保持的约束见下文"不变量"）：
 
 - **场景策略不进内核**：提示词、运行上限与续写默认值由预设提供；P1 已实现六个 Hooks 和 Interaction；命令策略、续写、脱敏由外层注册，无人时拒绝 Ask。无人值守的 `run` 用退出码 0 到 6 表达结果，调度器不必解析输出。
 - **配置与文件内容分工**：profile 决定工具和规则，CLI 只用显式传参覆盖文件，deny 累加；项目上下文和 skill 正文不能更改控制策略。自动发现的 AGENTS.md 解析后必须位于项目根目录内，`run` 的默认 profile 不自动发现，避免仓库内容让程序读取并发送项目外的文件；长结果的默认目录同样必须解析在工作目录内，`run` 默认不落盘。skill 目录启动时只读取元数据，正文由工具按需读取并经过既有流水线，不隐式执行脚本或加载全局 AI 配置。
 - **共享 API、独占执行**：AgentSession 的短锁只切换 Runner 所有权，不跨 await。重叠 prompt 和运行中改配置返回 Busy；取消、panic 或 future 丢弃后由 RAII 归还。订阅列表先取快照再调用，单个 subscriber panic 会被隔离并可查询，不持锁调用宿主回调。
-- **会话文件既是审计日志，也是模型上下文的唯一来源**：修正上下文靠追加 `context_edit`，提示词变化靠追加 system 消息，原始记录始终保留。
+- **会话既是审计日志，也是模型上下文的唯一来源**：修正上下文靠追加 `context_edit`，提示词变化靠追加 system 消息，原始记录始终保留。可替换的只是最底层的记录保存（`SessionLog`）；校验、先写后改内存、写失败后停写、投影、压缩、请求审计与崩溃恢复都留在 `SessionStore`。持久化走 crate 内部的会话宿主并以 `Result` 返回错误，`EventSink` 只接收事件。
 - **摘要不替代证据**：v3 用开始、成功或失败记录审计摘要，旧文件先追加格式升级；重新摘要读取原始投影，保留全部 system。摘要引用只校验来源存在；原始事实被修正后摘要失效。预算与真实模型信息保真是不同的验收项。
 - **终端输入只有一个所有者**：chat 的专用线程通过有界通道提供逐行输入；REPL 协调提问、审批和信号，Interaction 不直接读 stdin。审批回复必须匹配主机生成的请求编号，取消后失效；TTY 运行中输入 steering，管道脚本逐轮消费。按 Tokio stdin 源码对交互终端的建议避免不可取消的 stdin 阻塞任务卡住运行时退出。
 - **事实由程序提供，不让模型去查**：操作系统、启动时间、命令白名单在启动时写进系统提示词。这样不浪费轮次，也不会被白名单拦住。
 - **兼容性默认保守，能力按需打开**：提示词更新默认合并到开头（`collapse`，与 pi 对 OpenAI 兼容服务的默认一致），服务端支持时才按位置发送（`inline`）。
 - **安全靠部署隔离**：策略只是第一道防线（检查边界见 README 的"安全模型"）。认证 key 只从环境变量读取，该变量从 bash 子进程环境中删除；Unix 上新建会话文件的权限为 0600，打开已有文件不修改权限；真正的隔离要靠不同账号或容器。
-- **扩展点都是 trait**：`Provider`、`Tool`、`ToolPolicy`、`Hooks`、`Interaction`、`EventSink`、`Executor`。新能力优先以实现 trait 的方式加入，不改循环本身。
+- **扩展点都是 trait**：`Provider`、`Tool`、`ToolPolicy`、`Hooks`、`Interaction`、`EventSink`、`Executor`、`SessionLog`。新能力优先以实现 trait 的方式加入，不改循环本身。
 
 ## 命令
 
@@ -121,9 +121,9 @@
 2. **由模型决定何时停止。** 工具失败（找不到、参数无效、被策略拒绝、执行报错、panic）都变成 `is_error` 的工具结果，循环继续（`src/agent/agent_loop.rs`）。
 3. **并行执行工具分三个阶段：** 逐个检查 → 并发执行 → 按调用顺序写结果。只要有一个工具是 `Sequential`，整批改为串行。
 4. **回复因 `Length` 截断时，不执行其中的工具调用。**
-5. **会话文件只追加。** 不改写、不删除已写入的行；先写文件，再更新内存（`src/session.rs`）。唯一的例外是打开文件时截掉崩溃或写入失败留下的未完成尾记录，并报告删除的字节数；一次写入失败后不再写入，保证残缺只出现在文件末尾。
+5. **会话只追加。** 不改写、不删除已写入的记录；`SessionLog::append` 成功后才更新内存（`src/session.rs`）。唯一的例外是打开 JSONL 文件时截掉崩溃或写入失败留下的未完成尾记录（在其余记录校验通过之后），并报告删除的字节数；一次写入失败、超时或被中断（结果未知）后不再写入，保证残缺只出现在末尾。JSONL 文件同一时间只有一个写入者（`flock`，`src/session/file.rs`）。
 6. **发给模型的上下文就是会话投影，系统提示词也在其中。** 系统提示词以 system 消息记录，变化时只追加变化的段落，不改写之前的版本（`src/ai/system_prompt.rs`）。重试时用 `context_edit` 省略失败的回答再续跑，不重复用户消息（`src/runner.rs`）。
-7. **会话文件写入失败时立即取消运行**（审计要求）。
+7. **会话写入失败时立即停止运行**（审计要求）：会话宿主返回错误，循环不再执行后续步骤，运行以 `Error` 结束，即使同时被取消。
 8. **工具输出必须截断**（`src/tools/truncate.rs`）；耗时的工具必须响应 `ToolContext::cancel`。
 9. **认证用的 API key 只从环境变量读取**，不主动写入会话文件、事件或日志；其环境变量从 bash 子进程中删除（`BashTool::hidden_env`）。CLI 的 `RedactSecrets` 在工具输出持久化前过滤认证 key 的完整字面值；不识别未知或变形的密钥，也不覆盖输入、模型输出与参数，边界见 README 的"安全模型"。
 10. **有副作用的工具调用先记录开始再执行，恢复时不重放。** `Tool::effects()` 为 `SideEffects` 的调用通过检查与审批后，先追加 `tool_call_started`，写入失败则不执行（`src/agent/agent_loop.rs`）。Runner 每次运行开始时，为分支末尾缺少结果的调用补写错误结果，按开始记录区分结果未知与未执行（`src/session/recovery.rs`、`src/runner.rs`）。
@@ -134,4 +134,5 @@
 - **新工具**：实现 `agent::Tool`。参数定义成带 `#[serde(deny_unknown_fields)]` 的结构体再反序列化；输出要截断；要支持取消；不会改变任何状态的工具让 `effects()` 返回 `Effects::ReadOnly`，其余保留默认的 `SideEffects`（不变量 10）。测试覆盖成功、参数错误、超时或取消三种情况。
 - **新策略**：实现 `agent::ToolPolicy`，通过 `policy::PolicyHook` 注册，无法判断时返回 `Decision::Deny`。
 - **新扩展**：实现 `agent::Hooks`，按需覆盖默认方法；回调必须异步让出执行权。错误、panic、取消与超时由宿主处理，具体规则见 README。
-- **上下文改动**：`on_input` 改写或拒绝通过 `context_edit` 记录；`transform_context` 返回 `ContextEdit` 计划，整份计划先校验，逐项写入成功后再请求模型。
+- **上下文改动**：`on_input` 完成后才写入原始输入，改写或拒绝再追加 `context_edit`，钩子被取消时不写入；`transform_context` 返回 `ContextEdit` 计划，整份计划先校验，逐项写入成功后再请求模型。
+- **新的会话存储**：实现 `session::SessionLog`。`append` 在记录保存后才返回，同一 `seq` 已有记录时报错；新会话由后端保存头部后交给 `SessionStore::with_log`，续接时读出 `LoadedSession` 交给 `SessionStore::load`。用内存实现测往返，参照 `tests/runner.rs` 的 `TableLog`。

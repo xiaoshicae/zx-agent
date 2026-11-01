@@ -1,9 +1,8 @@
 //! Bounded, auditable summarization owned by the session host, not the agent loop.
 
-use std::sync::Mutex;
 use std::time::Duration;
 
-use anyhow::{Result, ensure};
+use anyhow::{Result, bail, ensure};
 use futures::StreamExt;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -16,7 +15,6 @@ use crate::ai::{
 use crate::session::{
     CompactionPlan, CompactionSummary, ProjectedMessage, RequestSource, SessionStore, SummaryRequest,
 };
-use crate::sync::lock;
 
 const MAX_SUMMARY_BYTES: usize = 64 * 1024;
 const MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
@@ -103,7 +101,7 @@ pub fn context_bytes(messages: &[Message]) -> Result<usize> {
 }
 
 pub(crate) struct Host<'a> {
-    pub session: &'a Mutex<SessionStore>,
+    pub session: &'a mut SessionStore,
     pub provider: &'a dyn Provider,
     pub model: &'a str,
     pub config: &'a Config,
@@ -123,7 +121,7 @@ impl Host<'_> {
     }
 
     fn candidate(&self) -> Result<Option<Candidate>> {
-        let store = lock(self.session);
+        let store = &*self.session;
         let raw = store.raw_projection();
         let Some(last_user) = raw
             .iter()
@@ -181,7 +179,7 @@ impl Host<'_> {
         }))
     }
 
-    pub async fn run(&self, trigger: Trigger, cancel: &CancellationToken) -> (Report, Option<Vec<Message>>) {
+    pub async fn run(&mut self, trigger: Trigger, cancel: &CancellationToken) -> (Report, Option<Vec<Message>>) {
         let automatic = trigger == Trigger::Automatic;
         let mut report = Report {
             outcome: Outcome::Noop,
@@ -194,7 +192,7 @@ impl Host<'_> {
             persistence_error: None,
         };
         let setup = (|| -> Result<Option<(Candidate, String)>> {
-            report.input_bytes = context_bytes(&lock(self.session).messages())?;
+            report.input_bytes = context_bytes(&self.session.messages())?;
             report.output_bytes = report.input_bytes;
             let Some(candidate) = self.candidate()? else {
                 return Ok(None);
@@ -243,7 +241,7 @@ impl Host<'_> {
             },
             input_bytes: report.input_bytes,
         };
-        let attempt = match lock(self.session).begin_compaction(plan) {
+        let attempt = match self.session.begin_compaction(plan).await {
             Ok(id) => id,
             Err(error) => {
                 report.outcome = Outcome::Failed;
@@ -279,7 +277,7 @@ impl Host<'_> {
         };
         let options = self.provider.request_options();
         let name = self.provider.name();
-        if let Err(error) = lock(self.session).record_request(&request, name, options, source) {
+        if let Err(error) = self.session.record_request(&request, name, options, source).await {
             let error = format!("cannot persist summary request checkpoint: {error:#}");
             report.persistence_error = Some(error.clone());
             report.error = Some(error);
@@ -315,7 +313,7 @@ impl Host<'_> {
             },
             Err(error) => Err(error.clone()),
         };
-        let completed = (|| -> Result<(String, Vec<Message>, usize)> {
+        let validated = (|| -> Result<(CompactionSummary, usize)> {
             let summary = parsed.map_err(anyhow::Error::msg)?;
             let ids: Vec<_> = candidate.source.iter().map(|item| item.entry_id.clone()).collect();
             summary.validate(&ids)?;
@@ -336,20 +334,26 @@ impl Host<'_> {
                 "retained context still exceeds triggerBytes; reduce retained input or raise the budget"
             );
             if cancel.is_cancelled() {
-                anyhow::bail!("compaction cancelled");
+                bail!("compaction cancelled");
             }
-            let mut store = lock(self.session);
-            let id = store
+            Ok((summary, output_bytes))
+        })();
+        let completed = match validated {
+            Ok((summary, output_bytes)) => self
+                .session
                 .append_compaction(&attempt, summary, report.usage.clone())
+                .await
+                .map(|id| (id, output_bytes))
                 .map_err(|error| {
                     let message = format!("cannot persist compaction result: {error:#}");
                     report.persistence_error = Some(message.clone());
                     anyhow::Error::msg(message)
-                })?;
-            Ok((id, store.messages(), output_bytes))
-        })();
+                }),
+            Err(error) => Err(error),
+        };
         match completed {
-            Ok((id, messages, output_bytes)) => {
+            Ok((id, output_bytes)) => {
+                let messages = self.session.messages();
                 report.outcome = Outcome::Completed;
                 report.output_bytes = output_bytes;
                 report.entry_id = Some(id.clone());
@@ -376,8 +380,10 @@ impl Host<'_> {
                 // Stream failures are already included in error; only a received final
                 // response can be recorded verbatim alongside the failure.
                 let response = response.ok();
-                if let Err(write_error) =
-                    lock(self.session).fail_compaction(&attempt, error.clone(), report.usage.clone(), response)
+                if let Err(write_error) = self
+                    .session
+                    .fail_compaction(&attempt, error.clone(), report.usage.clone(), response)
+                    .await
                 {
                     error = format!("cannot persist compaction failure: {write_error:#}; {error}");
                     report.persistence_error = Some(error.clone());

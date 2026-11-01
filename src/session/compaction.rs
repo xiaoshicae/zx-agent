@@ -156,7 +156,7 @@ impl SessionStore {
     }
 
     /// Persist a format upgrade and request metadata before contacting a model.
-    pub fn begin_compaction(&mut self, plan: CompactionPlan) -> Result<String> {
+    pub async fn begin_compaction(&mut self, plan: CompactionPlan) -> Result<String> {
         let mut entry = CompactionStartedEntry {
             id: self.new_id(),
             parent_id: self.leaf.clone(),
@@ -168,28 +168,34 @@ impl SessionStore {
         };
         // Validate the plan before even appending an upgrade.
         self.validate_compaction_start(&entry)?;
-        self.ensure_format(3)?;
+        self.ensure_format(3).await?;
         entry.parent_id = self.leaf.clone();
         entry.id = self.new_id();
-        self.append(Entry::CompactionStarted(entry))
+        self.append(Entry::CompactionStarted(entry)).await
     }
 
     /// Append a format upgrade before the first record that needs `version`.
     /// The header is never rewritten.
-    pub(super) fn ensure_format(&mut self, version: u32) -> Result<()> {
+    pub(super) async fn ensure_format(&mut self, version: u32) -> Result<()> {
         if self.format_version < version {
             self.append(Entry::FormatUpgrade(FormatUpgradeEntry {
                 id: self.new_id(),
                 parent_id: self.leaf.clone(),
                 timestamp: now_ms(),
                 version,
-            }))?;
+            }))
+            .await?;
         }
         Ok(())
     }
 
     /// Commit a validated result. Persistence precedes projection changes.
-    pub fn append_compaction(&mut self, attempt_id: &str, summary: CompactionSummary, usage: Usage) -> Result<String> {
+    pub async fn append_compaction(
+        &mut self,
+        attempt_id: &str,
+        summary: CompactionSummary,
+        usage: Usage,
+    ) -> Result<String> {
         let first_kept_entry_id = self.compaction_attempt(attempt_id)?.first_kept_entry_id.clone();
         self.append(Entry::Compaction(CompactionEntry {
             id: self.new_id(),
@@ -200,10 +206,11 @@ impl SessionStore {
             summary,
             usage,
         }))
+        .await
     }
 
     /// Record a failed summary without replacing the current projection.
-    pub fn fail_compaction(
+    pub async fn fail_compaction(
         &mut self,
         attempt_id: &str,
         error: String,
@@ -219,6 +226,7 @@ impl SessionStore {
             usage,
             response,
         }))
+        .await
     }
 
     fn compaction_attempt(&self, id: &str) -> Result<&CompactionStartedEntry> {

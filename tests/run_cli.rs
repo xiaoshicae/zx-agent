@@ -114,3 +114,49 @@ async fn progress_and_report_lines_escape_terminal_control_characters() {
     assert!(stderr.contains("x\\u{1b}[2J"), "{stderr}");
     assert!(stderr.contains("bad\\u{1b}[2J"), "{stderr}");
 }
+
+#[tokio::test]
+async fn a_second_run_cannot_write_a_session_that_another_run_is_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = dir.path().join("session.jsonl");
+    let release = std::sync::Arc::new(tokio::sync::Notify::new());
+    let chunks = vec![json!({"choices":[{"index":0,"delta":{"content":"first"},"finish_reason":null}]})];
+    let server = MockServer::start(vec![
+        Reply::Gate {
+            chunks,
+            release: release.clone(),
+        },
+        Reply::text("second"),
+    ])
+    .await;
+    let mut first = run(&server, dir.path());
+    first
+        .args(["--session", session.to_str().unwrap()])
+        .stdout(Stdio::piped());
+    let first = first.spawn().unwrap();
+    // The first run has written its input and is waiting for the model.
+    server.wait_for_requests(1).await;
+    let before = std::fs::read(&session).unwrap();
+
+    let second = run(&server, dir.path())
+        .args(["--session", session.to_str().unwrap()])
+        .output()
+        .await
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert_eq!(second.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("is in use"), "{stderr}");
+    assert_eq!(
+        std::fs::read(&session).unwrap(),
+        before,
+        "the second run wrote to the session"
+    );
+    release.notify_one();
+    let first = tokio::time::timeout(Duration::from_secs(10), first.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.status.code(), Some(0));
+    assert_eq!(server.requests().len(), 1, "the second run sent a request");
+}

@@ -1,36 +1,41 @@
-//! Append-only JSONL session tree and its projection (pi: coding-agent SessionManager).
+//! Append-only session tree and its projection (pi: coding-agent SessionManager).
 //!
-//! Every change appends an entry; written entries are never rewritten. The one exception is
-//! `open`, which cuts off an unfinished last line left by a crash or failed write, and
-//! reports how many bytes it removed. Entries link to their parent, so
-//! the file is a tree and the "leaf" pointer selects the current branch. The messages a
-//! model sees are a projection of that branch: context edits can omit or replace earlier
-//! messages without touching the raw history, which stays available for auditing.
+//! Every change appends an entry; stored entries are never rewritten. Entries link to their
+//! parent, so the session is a tree and the "leaf" pointer selects the current branch. The
+//! messages a model sees are a projection of that branch: context edits can omit or replace
+//! earlier messages without touching the raw history, which stays available for auditing.
+//!
+//! A [`SessionLog`] keeps the entries: the JSONL session file, or a backend of the host's
+//! choice. The file's one exception to append-only is `open`, which cuts off an unfinished
+//! last line left by a crash or failed write, and reports how many bytes it removed.
 //!
 //! Version 3 adds auditable compaction without rewriting earlier records. Version 4 records
 //! that a tool call with side effects started, so recovery can tell interrupted calls apart.
 
 mod compaction;
+mod file;
+mod log;
 mod recovery;
 mod request;
 pub use compaction::{
     CompactionEntry, CompactionFailedEntry, CompactionPlan, CompactionStartedEntry, CompactionSummary,
     FormatUpgradeEntry, SummaryFact, SummaryRequest,
 };
+pub use log::{LoadedSession, LogRecord, SessionLog};
 pub use recovery::{InterruptedToolCall, StartRecord, ToolCallStartedEntry};
 pub use request::{RequestConfig, RequestConfigEntry, RequestSource, RequestStartedEntry};
 
 use std::collections::HashMap;
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
 use crate::ai::ContentBlock;
 use crate::ai::{Message, now_ms};
+use file::JsonlFile;
 
 /// Format version written to new session headers. Version 4 adds `tool_call_started`.
 /// Version 3 adds auditable compaction, request records and append-only format upgrades.
@@ -38,6 +43,16 @@ use crate::ai::{Message, now_ms};
 /// system messages in the conversation; version 1 kept it in the header. Version 1 files still
 /// open: the old header field is ignored, and the next run records the prompt as a message.
 pub const SESSION_VERSION: u32 = 4;
+
+/// How long one append may wait for its log, such as a database that stopped answering.
+/// A file append finishes long before; a timed-out append stops writing, like a failed one.
+const APPEND_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Why writing stopped when an append was dropped while it waited for its log.
+const INTERRUPTED: &str = "an earlier append was interrupted before its log answered, so its outcome is unknown";
+
+/// Why a snapshot from [`SessionStore::read`] does not write.
+const READ_ONLY: &str = "it was read as a snapshot, which is read-only";
 
 /// First line of a session file. Records where and with which model the session started.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -91,7 +106,7 @@ pub struct ContextEditEntry {
     pub replacement: Option<String>,
 }
 
-/// One line of the session file after the header.
+/// One record of a session after the header: one line of a session file.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Entry {
@@ -136,6 +151,36 @@ impl Entry {
             Entry::ToolCallStarted(entry) => entry.parent_id.as_deref(),
         }
     }
+
+    /// The serialized `type`, such as `context_edit`.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Entry::Message(_) => "message",
+            Entry::ContextEdit(_) => "context_edit",
+            Entry::FormatUpgrade(_) => "format_upgrade",
+            Entry::CompactionStarted(_) => "compaction_started",
+            Entry::Compaction(_) => "compaction",
+            Entry::CompactionFailed(_) => "compaction_failed",
+            Entry::RequestConfig(_) => "request_config",
+            Entry::RequestStarted(_) => "request_started",
+            Entry::ToolCallStarted(_) => "tool_call_started",
+        }
+    }
+
+    /// When the entry was appended, in milliseconds since the Unix epoch.
+    pub fn timestamp(&self) -> u64 {
+        match self {
+            Entry::Message(entry) => entry.timestamp,
+            Entry::ContextEdit(entry) => entry.timestamp,
+            Entry::CompactionFailed(entry) => entry.timestamp,
+            Entry::Compaction(entry) => entry.timestamp,
+            Entry::CompactionStarted(entry) => entry.timestamp,
+            Entry::FormatUpgrade(entry) => entry.timestamp,
+            Entry::RequestConfig(entry) => entry.timestamp,
+            Entry::RequestStarted(entry) => entry.timestamp,
+            Entry::ToolCallStarted(entry) => entry.timestamp,
+        }
+    }
 }
 
 /// A model-visible message and the entry it came from.
@@ -146,16 +191,21 @@ pub struct ProjectedMessage {
     pub message: Message,
 }
 
-/// A session tree, kept in memory and optionally mirrored to a JSONL file.
+/// A session tree, kept in memory and optionally stored by a [`SessionLog`].
 ///
-/// After a failed write, every later append fails without writing. A failed write can
-/// leave a partial record; stopping there keeps it the last line, which `open` repairs.
+/// Methods that write are `async`: each waits until its log has stored the entry, and only
+/// then changes memory. After a failed write, every later append fails without writing; so
+/// does every append after one that timed out or whose future was dropped, because its
+/// outcome is unknown. A failed write can leave a partial record; stopping there keeps it the
+/// last one, which opening the session repairs. One store is the only writer of its session.
+/// Appending to a log waits with a Tokio timer, so it needs a Tokio runtime with time enabled.
 pub struct SessionStore {
     path: Option<PathBuf>,
-    /// Receives one JSON line per entry; the session file outside of tests.
-    writer: Option<Box<dyn Write + Send>>,
-    /// The first write error; set once, after which nothing more is written.
-    write_failure: Option<String>,
+    log: Option<Box<dyn SessionLog>>,
+    /// Why this store no longer writes: an append failed or did not finish, or the store is
+    /// a read-only snapshot.
+    stopped: Option<String>,
+    append_timeout: Duration,
     header: SessionHeader,
     format_version: u32,
     entries: Vec<Entry>,
@@ -169,8 +219,9 @@ impl SessionStore {
     pub fn in_memory(header: SessionHeader) -> Self {
         Self {
             path: None,
-            writer: None,
-            write_failure: None,
+            log: None,
+            stopped: None,
+            append_timeout: APPEND_TIMEOUT,
             format_version: header.version,
             header,
             entries: Vec::new(),
@@ -180,101 +231,90 @@ impl SessionStore {
         }
     }
 
+    /// A new session whose entries go to `log`. The backend has already stored `header`.
+    pub fn with_log(header: SessionHeader, log: Box<dyn SessionLog>) -> Self {
+        Self {
+            log: Some(log),
+            ..Self::in_memory(header)
+        }
+    }
+
+    /// Rebuild a stored session from `loaded` and append to `log` from then on. Checks the
+    /// format version and every record, as opening a session file does. The leaf is the last
+    /// entry.
+    pub fn load(loaded: LoadedSession, log: Box<dyn SessionLog>) -> Result<Self> {
+        let mut store = Self::replay(loaded)?;
+        store.log = Some(log);
+        Ok(store)
+    }
+
+    fn replay(loaded: LoadedSession) -> Result<Self> {
+        let LoadedSession {
+            header,
+            records,
+            repaired_bytes,
+        } = loaded;
+        if header.version > SESSION_VERSION {
+            bail!(
+                "session version {} is newer than the supported version {SESSION_VERSION}",
+                header.version
+            );
+        }
+        let mut store = Self::in_memory(header);
+        for (position, record) in (1..).zip(&records) {
+            let entry: Entry = serde_json::from_str(record).map_err(|error| anyhow!("entry {position}: {error}"))?;
+            store
+                .validate_entry(&entry)
+                .map_err(|error| anyhow!("entry {position}: {error:#}"))?;
+            store.insert(entry);
+        }
+        store.recovered_tail_bytes = repaired_bytes;
+        Ok(store)
+    }
+
     /// Create a new session file. Fails if the file exists. Unlike pi, the header is written
     /// immediately, so even a run that crashes before the first answer leaves a record.
+    /// On Unix the file stays locked while the store exists; see [`SessionStore::open`].
     pub fn create(path: &Path, header: SessionHeader) -> Result<Self> {
-        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            std::fs::create_dir_all(parent).with_context(|| format!("cannot create {}", parent.display()))?;
-        }
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        // Tool output in the session can contain secrets, so only the owner may read the file.
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        let mut file = options
-            .open(path)
-            .with_context(|| format!("cannot create session file {}", path.display()))?;
-        writeln!(file, "{}", serde_json::to_string(&HeaderLine::Session(header.clone()))?)?;
-        file.flush()?;
+        let file = JsonlFile::create(path, &header)?;
         Ok(Self {
             path: Some(path.to_path_buf()),
-            writer: Some(Box::new(file)),
-            ..Self::in_memory(header)
+            ..Self::with_log(header, Box::new(file))
         })
     }
 
     /// Open an existing session file for reading and appending. The leaf is the last entry.
     ///
-    /// A crash during the final write can leave an incomplete last line. That line is cut
-    /// off so later appends start on a clean line; damage anywhere else is an error.
+    /// On Unix the file is locked with `flock(2)` while the store exists, so opening it again,
+    /// in this process or another, fails until this store is dropped. A crash during the final
+    /// write can leave an incomplete last line. Once every other record has been checked, that
+    /// line is cut off so later appends start on a clean line; damage anywhere else is an
+    /// error, and the file is left unchanged.
     pub fn open(path: &Path) -> Result<Self> {
-        // A short final write can end inside a UTF-8 character, so validate one record at
-        // a time rather than rejecting the whole file during UTF-8 decoding.
-        let content = std::fs::read(path).with_context(|| format!("cannot read session file {}", path.display()))?;
-        let mut lines = Vec::new();
-        let mut offset = 0;
-        for raw in content.split_inclusive(|&byte| byte == b'\n') {
-            lines.push((offset, raw));
-            offset += raw.len();
-        }
-        let lines: Vec<(usize, &[u8])> = lines
-            .into_iter()
-            .filter(|(_, raw)| !raw.iter().all(u8::is_ascii_whitespace))
-            .collect();
-        let (_, first) = lines
-            .first()
-            .ok_or_else(|| anyhow!("session file {} is empty", path.display()))?;
-        let HeaderLine::Session(header) =
-            serde_json::from_slice(first).with_context(|| format!("{}: invalid session header", path.display()))?;
-        if header.version > SESSION_VERSION {
-            bail!(
-                "{}: session version {} is newer than the supported version {SESSION_VERSION}",
-                path.display(),
-                header.version
-            );
-        }
-
-        let mut store = Self::in_memory(header);
-        let mut truncate_at = None;
-        for (position, (line_offset, raw)) in lines.iter().enumerate().skip(1) {
-            match serde_json::from_slice::<Entry>(raw) {
-                Ok(entry) => {
-                    store
-                        .validate_entry(&entry)
-                        .with_context(|| format!("{}: entry {position}", path.display()))?;
-                    store.insert(entry);
-                }
-                Err(e) if position + 1 == lines.len() && incomplete_tail(raw, &e) => {
-                    truncate_at = Some(*line_offset);
-                }
-                Err(e) => bail!("{}: entry {position}: {e}", path.display()),
-            }
-        }
-
-        let file = OpenOptions::new()
-            .append(true)
-            .open(path)
-            .with_context(|| format!("cannot open {} for appending", path.display()))?;
-        if let Some(length) = truncate_at {
-            file.set_len(u64::try_from(length)?)?;
-            store.recovered_tail_bytes = content.len() - length;
-        } else if !content.is_empty() && !content.ends_with(b"\n") {
-            // A complete last entry without its newline: terminate it before appending.
-            (&file).write_all(b"\n")?;
-        }
+        let (loaded, file) = JsonlFile::open(path)?;
+        let mut store = Self::replay(loaded).map_err(|error| anyhow!("{}: {error:#}", path.display()))?;
+        store.log = Some(Box::new(file.repair()?));
         store.path = Some(path.to_path_buf());
-        store.writer = Some(Box::new(file));
+        Ok(store)
+    }
+
+    /// Read a session file without opening it for writing: a snapshot, also of a session
+    /// that another store is writing. It neither takes the lock nor changes the file; an
+    /// incomplete last line, such as a record still being written, is left out. Every append
+    /// to the snapshot fails.
+    pub fn read(path: &Path) -> Result<Self> {
+        let loaded = file::read(path)?;
+        let mut store = Self::replay(loaded).map_err(|error| anyhow!("{}: {error:#}", path.display()))?;
+        store.path = Some(path.to_path_buf());
+        store.stopped = Some(READ_ONLY.into());
         Ok(store)
     }
 
     /// A session that writes entries to `writer` instead of a file, so tests can make writes
     /// fail. The header is not written.
     #[cfg(test)]
-    pub(crate) fn with_writer(header: SessionHeader, writer: Box<dyn Write + Send>) -> Self {
-        Self {
-            writer: Some(writer),
-            ..Self::in_memory(header)
-        }
+    pub(crate) fn with_writer(header: SessionHeader, writer: Box<dyn std::io::Write + Send + Sync>) -> Self {
+        Self::with_log(header, Box::new(JsonlFile::with_writer(writer)))
     }
 
     /// The header the session was created with.
@@ -282,18 +322,19 @@ impl SessionStore {
         &self.header
     }
 
-    /// The session file; `None` for an in-memory session.
+    /// The session file; `None` for a session in memory or in another kind of log.
     pub fn path(&self) -> Option<&Path> {
         self.path.as_deref()
     }
 
-    /// Bytes removed from an incomplete final record when opened; zero if no repair was
-    /// needed. Complete corrupt records are errors and are never silently removed.
+    /// Bytes of an incomplete final record left out when the session was loaded, which
+    /// `open` also removes from the file; zero if there was none. Complete corrupt records
+    /// are errors and are never silently removed.
     pub fn recovered_tail_bytes(&self) -> usize {
         self.recovered_tail_bytes
     }
 
-    /// Every entry in file order, on all branches.
+    /// Every entry in the order it was appended, on all branches.
     pub fn entries(&self) -> &[Entry] {
         &self.entries
     }
@@ -309,21 +350,21 @@ impl SessionStore {
     }
 
     /// Append a message as a child of the leaf and make it the leaf. Returns its id.
-    pub fn append_message(&mut self, message: Message) -> Result<String> {
+    pub async fn append_message(&mut self, message: Message) -> Result<String> {
         let entry = Entry::Message(MessageEntry {
             id: self.new_id(),
             parent_id: self.leaf.clone(),
             timestamp: now_ms(),
             message,
         });
-        self.append(entry)
+        self.append(entry).await
     }
 
     /// Omit (`None`) or replace the text of a message on the current branch, for future
-    /// model context only. The target keeps its original content in the file.
+    /// model context only. The target keeps its original content in the log.
     /// System and synthetic summary messages cannot be edited directly. Editing a
     /// summary's original evidence invalidates it and restores the original projection.
-    pub fn append_context_edit(&mut self, target_id: &str, replacement: Option<String>) -> Result<String> {
+    pub async fn append_context_edit(&mut self, target_id: &str, replacement: Option<String>) -> Result<String> {
         match self.get(target_id) {
             Some(Entry::Message(entry)) if matches!(entry.message, Message::System(_)) => {
                 bail!("entry {target_id} is a system message; record prompt changes as new system messages")
@@ -351,7 +392,7 @@ impl SessionStore {
             target_id: target_id.to_string(),
             replacement,
         });
-        self.append(entry)
+        self.append(entry).await
     }
 
     /// Move the leaf to an existing entry. The next append starts a new branch there.
@@ -417,25 +458,41 @@ impl SessionStore {
             .collect()
     }
 
-    fn append(&mut self, entry: Entry) -> Result<String> {
+    async fn append(&mut self, entry: Entry) -> Result<String> {
         self.validate_entry(&entry)?;
-        // Synchronous I/O, although callers run inside async tasks: one short line per message
-        // finishes in microseconds, and writing it before continuing is what makes the audit
-        // trail reliable.
-        if let Some(failure) = &self.write_failure {
-            // Appending after a partial line would glue the next entry to it, turning a
-            // repairable tail into a corrupt record in the middle of the file.
-            bail!("session file is not written after an earlier write failure: {failure}");
+        if let Some(reason) = &self.stopped {
+            // Appending after a partial record would glue the next entry to it, turning a
+            // repairable tail into a corrupt record in the middle of the session.
+            bail!("the session is no longer written: {reason}");
         }
-        if let Some(writer) = &mut self.writer {
-            // Write before updating memory: an entry missing from the file must never become
+        if let Some(log) = &mut self.log {
+            // Store before updating memory: an entry missing from the log must never become
             // the parent of later entries (pi: SessionManager._appendEntry).
-            let mut line = serde_json::to_string(&entry)?;
-            line.push('\n');
-            let written = writer.write_all(line.as_bytes()).and_then(|()| writer.flush());
-            if let Err(error) = written {
-                self.write_failure = Some(error.to_string());
-                return Err(error).context("cannot write session entry");
+            let json = serde_json::to_string(&entry)?;
+            let record = LogRecord {
+                seq: u64::try_from(self.entries.len())? + 1,
+                id: entry.id(),
+                parent_id: entry.parent_id(),
+                kind: entry.kind(),
+                timestamp: entry.timestamp(),
+                json: &json,
+            };
+            // Until the log answers, the outcome is unknown. If this future is dropped while
+            // waiting, the reason stays and nothing more is written.
+            self.stopped = Some(INTERRUPTED.into());
+            match tokio::time::timeout(self.append_timeout, log.append(&record)).await {
+                Ok(Ok(())) => self.stopped = None,
+                Ok(Err(error)) => {
+                    self.stopped = Some(format!("an earlier write failed: {error:#}"));
+                    return Err(error.context("cannot write session entry"));
+                }
+                Err(_) => {
+                    let timeout = self.append_timeout;
+                    self.stopped = Some(format!(
+                        "an earlier append did not finish within {timeout:?}, so its outcome is unknown"
+                    ));
+                    bail!("cannot write session entry: the log did not answer within {timeout:?}");
+                }
             }
         }
         let id = entry.id().to_string();
@@ -464,29 +521,12 @@ impl SessionStore {
     }
 }
 
-fn incomplete_tail(raw: &[u8], error: &serde_json::Error) -> bool {
-    if raw.ends_with(b"\n") {
-        return false;
-    }
-    if error.is_eof() {
-        return true;
-    }
-    // Only a valid, unfinished JSON prefix may be repaired. An incomplete UTF-8
-    // suffix must not hide an unrelated syntax/schema error earlier in the record.
-    match std::str::from_utf8(raw) {
-        Err(utf8) if utf8.error_len().is_none() => {
-            serde_json::from_slice::<Entry>(&raw[..utf8.valid_up_to()]).is_err_and(|error| error.is_eof())
-        }
-        Ok(_) | Err(_) => false,
-    }
-}
-
 /// A writer whose every write fails, like a full disk.
 #[cfg(test)]
 pub(crate) struct FailingWriter;
 
 #[cfg(test)]
-impl Write for FailingWriter {
+impl std::io::Write for FailingWriter {
     fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
         Err(std::io::Error::other("disk full"))
     }
@@ -498,8 +538,15 @@ impl Write for FailingWriter {
 
 #[cfg(test)]
 mod tests {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    use std::sync::mpsc;
+
+    use async_trait::async_trait;
+    use futures::FutureExt;
+
     use super::*;
-    use crate::ai::{AssistantMessage, StopReason};
+    use crate::ai::{AssistantMessage, StopReason, ToolCall, Usage};
 
     /// A session file with a v2 header followed by `entries`, one per line, unterminated.
     fn session_file(dir: &Path, entries: &[&str]) -> PathBuf {
@@ -541,26 +588,222 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn context_edits_omit_or_replace_and_latest_wins() {
+    /// Sends every record it stores to the test, which keeps the receiver.
+    struct ChannelLog(mpsc::Sender<(u64, String)>);
+
+    #[async_trait]
+    impl SessionLog for ChannelLog {
+        async fn append(&mut self, record: &LogRecord<'_>) -> Result<()> {
+            self.0.send((record.seq, record.json.to_string()))?;
+            Ok(())
+        }
+    }
+
+    /// Never answers, like a database that stopped responding.
+    struct Unresponsive;
+
+    #[async_trait]
+    impl SessionLog for Unresponsive {
+        async fn append(&mut self, _record: &LogRecord<'_>) -> Result<()> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn context_edits_omit_or_replace_and_latest_wins() {
         let mut store = SessionStore::in_memory(header());
-        store.append_message(Message::user("q")).unwrap();
-        let failed = store.append_message(assistant("bad")).unwrap();
-        let answer = store.append_message(assistant("good")).unwrap();
-        store.append_context_edit(&failed, None).unwrap();
+        store.append_message(Message::user("q")).await.unwrap();
+        let failed = store.append_message(assistant("bad")).await.unwrap();
+        let answer = store.append_message(assistant("good")).await.unwrap();
+        store.append_context_edit(&failed, None).await.unwrap();
         assert_eq!(texts(&store), ["q", "good"]);
-        store.append_context_edit(&answer, Some("first".into())).unwrap();
-        store.append_context_edit(&answer, Some("second".into())).unwrap();
+        store.append_context_edit(&answer, Some("first".into())).await.unwrap();
+        store.append_context_edit(&answer, Some("second".into())).await.unwrap();
         assert_eq!(texts(&store), ["q", "second"]);
         assert_eq!(store.entries().len(), 6, "raw history keeps every entry");
     }
 
-    #[test]
-    fn a_failed_write_leaves_the_tree_unchanged() {
+    #[tokio::test]
+    async fn a_failed_write_leaves_the_tree_unchanged() {
         let mut store = SessionStore::with_writer(header(), Box::new(FailingWriter));
-        assert!(store.append_message(Message::user("q")).is_err());
+        assert!(store.append_message(Message::user("q")).await.is_err());
         assert!(store.entries().is_empty());
         assert_eq!(store.leaf_id(), None);
+    }
+
+    #[tokio::test]
+    async fn a_log_receives_numbered_records_that_load_into_the_same_session() {
+        let (sender, records) = mpsc::channel();
+        let mut store = SessionStore::with_log(header(), Box::new(ChannelLog(sender)));
+        let question = store.append_message(Message::user("q")).await.unwrap();
+        store.append_message(assistant("a")).await.unwrap();
+        store
+            .append_context_edit(&question, Some("edited".into()))
+            .await
+            .unwrap();
+
+        let received: Vec<(u64, String)> = records.try_iter().collect();
+        let seqs: Vec<u64> = received.iter().map(|(seq, _)| *seq).collect();
+        assert_eq!(seqs, [1, 2, 3]);
+        let loaded = LoadedSession {
+            header: store.header().clone(),
+            records: received.into_iter().map(|(_, json)| json).collect(),
+            repaired_bytes: 0,
+        };
+        let (sender, _records) = mpsc::channel();
+        let reloaded = SessionStore::load(loaded, Box::new(ChannelLog(sender))).unwrap();
+        assert_eq!(reloaded.entries(), store.entries());
+        assert_eq!(texts(&reloaded), ["edited", "a"]);
+        assert_eq!(reloaded.leaf_id(), store.leaf_id());
+    }
+
+    #[tokio::test]
+    async fn records_carry_the_serialized_type_of_every_entry_kind() {
+        let (sender, records) = mpsc::channel();
+        let mut old = header();
+        old.version = 2;
+        let mut store = SessionStore::with_log(old, Box::new(ChannelLog(sender)));
+        let first = store.append_message(Message::user("old")).await.unwrap();
+        store.append_message(assistant("a")).await.unwrap();
+        let kept = store.append_message(Message::user("recent")).await.unwrap();
+        let ids: Vec<String> = store.projection().into_iter().map(|item| item.entry_id).collect();
+        let plan = || CompactionPlan {
+            first_kept_entry_id: kept.clone(),
+            source_entry_ids: ids[..2].to_vec(),
+            request: SummaryRequest {
+                provider: "p".into(),
+                model: "m".into(),
+                instructions: "summarize".into(),
+                max_tokens: 10,
+            },
+            input_bytes: 1,
+        };
+        let attempt = store.begin_compaction(plan()).await.unwrap();
+        store
+            .fail_compaction(&attempt, "invalid".into(), Usage::default(), None)
+            .await
+            .unwrap();
+        let attempt = store.begin_compaction(plan()).await.unwrap();
+        let summary = CompactionSummary {
+            facts: vec![SummaryFact {
+                text: "fact".into(),
+                source_entry_ids: vec![first.clone()],
+            }],
+            inferences: vec![],
+            plans: vec![],
+        };
+        store
+            .append_compaction(&attempt, summary, Usage::default())
+            .await
+            .unwrap();
+        let request = crate::ai::Request {
+            model: "m".into(),
+            messages: store.messages(),
+            tools: vec![],
+            max_tokens: None,
+        };
+        store
+            .record_request(&request, "p", serde_json::json!({}), RequestSource::Projection)
+            .await
+            .unwrap();
+        let mut call = AssistantMessage::failure("p", "m", StopReason::ToolUse, "");
+        call.error_message = None;
+        let tool_call = ToolCall {
+            id: "c1".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({}),
+            arguments_error: None,
+        };
+        call.content = vec![ContentBlock::ToolCall {
+            id: tool_call.id.clone(),
+            name: tool_call.name.clone(),
+            arguments: tool_call.arguments.clone(),
+            arguments_error: None,
+        }];
+        store.append_message(Message::Assistant(call)).await.unwrap();
+        store.append_context_edit(&first, None).await.unwrap();
+        store
+            .append_tool_call_started(&tool_call.id, &tool_call.name)
+            .await
+            .unwrap();
+
+        let mut kinds: Vec<&str> = store.entries().iter().map(Entry::kind).collect();
+        for ((_, json), entry) in records.try_iter().zip(store.entries()) {
+            let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(value["type"], entry.kind());
+            assert_eq!(value["timestamp"], entry.timestamp());
+        }
+        kinds.sort_unstable();
+        kinds.dedup();
+        assert_eq!(kinds.len(), 9, "every entry kind was checked: {kinds:?}");
+    }
+
+    #[tokio::test]
+    async fn an_append_that_times_out_stops_later_writes() {
+        let mut store = SessionStore::with_log(header(), Box::new(Unresponsive));
+        store.append_timeout = Duration::from_millis(10);
+
+        let error = store.append_message(Message::user("q")).await.unwrap_err();
+
+        assert!(error.to_string().contains("did not answer within 10ms"), "{error}");
+        assert!(store.entries().is_empty());
+        store.log = Some(Box::new(JsonlFile::with_writer(Box::new(std::io::sink()))));
+        let later = store.append_message(Message::user("later")).await.unwrap_err();
+        assert!(later.to_string().contains("outcome is unknown"), "{later}");
+    }
+
+    #[tokio::test]
+    async fn an_append_dropped_while_waiting_stops_later_writes() {
+        let mut store = SessionStore::with_log(header(), Box::new(Unresponsive));
+
+        // Poll once: the log has the record but has not answered, so its outcome is unknown.
+        assert!(store.append_message(Message::user("q")).now_or_never().is_none());
+
+        assert!(store.entries().is_empty());
+        store.log = Some(Box::new(JsonlFile::with_writer(Box::new(std::io::sink()))));
+        let later = store.append_message(Message::user("later")).await.unwrap_err();
+        assert!(later.to_string().contains("outcome is unknown"), "{later}");
+    }
+
+    #[tokio::test]
+    async fn a_session_file_has_one_writer_at_a_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let store = SessionStore::create(&path, header()).unwrap();
+
+        let error = SessionStore::open(&path).err().unwrap().to_string();
+        assert!(error.contains("is in use"), "{error}");
+
+        drop(store);
+        let mut reopened = SessionStore::open(&path).unwrap();
+        reopened.append_message(Message::user("q")).await.unwrap();
+        let error = SessionStore::open(&path).err().unwrap().to_string();
+        assert!(error.contains("is in use"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_reads_a_session_in_use_without_changing_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let mut writer = SessionStore::create(&path, header()).unwrap();
+        writer.append_message(Message::user("q")).await.unwrap();
+        // A record the writer has not finished yet.
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{\"type\":\"mess")
+            .unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let mut snapshot = SessionStore::read(&path).unwrap();
+
+        assert_eq!(texts(&snapshot), ["q"]);
+        assert_eq!(snapshot.recovered_tail_bytes(), "{\"type\":\"mess".len());
+        let error = snapshot.append_message(Message::user("x")).await.unwrap_err();
+        assert!(error.to_string().contains("read-only"), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(SessionStore::open(&path).is_err(), "the writer still holds the file");
     }
 
     /// Keeps `keep` bytes of the first write and then fails once, like a disk that fills up
@@ -590,12 +833,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_partial_write_stops_later_writes_and_leaves_a_repairable_tail() {
+    #[tokio::test]
+    async fn a_partial_write_stops_later_writes_and_leaves_a_repairable_tail() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
         let mut store = SessionStore::create(&path, header()).unwrap();
-        store.append_message(Message::user("kept")).unwrap();
+        store.append_message(Message::user("kept")).await.unwrap();
         drop(store);
         let file = OpenOptions::new().append(true).open(&path).unwrap();
         let writer = PartialWriteOnce {
@@ -605,9 +848,9 @@ mod tests {
         };
         let mut store = SessionStore::with_writer(header(), Box::new(writer));
 
-        assert!(store.append_message(Message::user("cut short")).is_err());
+        assert!(store.append_message(Message::user("cut short")).await.is_err());
         // A run keeps emitting messages until it observes its cancellation.
-        let later = store.append_message(Message::user("after the failure"));
+        let later = store.append_message(Message::user("after the failure")).await;
         assert!(later.is_err(), "an entry was written after a failed write");
         drop(store);
 
@@ -630,28 +873,45 @@ mod tests {
     }
 
     #[test]
+    fn a_newer_session_with_a_cut_short_tail_is_left_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("future.jsonl");
+        std::fs::write(
+            &path,
+            "{\"type\":\"session\",\"version\":99,\"id\":\"h\",\"timestamp\":1,\"cwd\":\"/\",\"model\":\"m\"}\n{\"type\":\"mess",
+        )
+        .unwrap();
+        let original = std::fs::read(&path).unwrap();
+
+        assert!(SessionStore::open(&path).is_err());
+
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
     fn damage_before_the_last_line_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = session_file(dir.path(), &["{broken", &user_entry("a", None)]);
         assert!(SessionStore::open(&path).is_err());
     }
 
-    #[test]
-    fn a_complete_last_line_without_newline_is_kept() {
+    #[tokio::test]
+    async fn a_complete_last_line_without_newline_is_kept() {
         let dir = tempfile::tempdir().unwrap();
         let path = session_file(dir.path(), &[&user_entry("a", None)]);
         let mut store = SessionStore::open(&path).unwrap();
-        store.append_message(Message::user("b")).unwrap();
+        store.append_message(Message::user("b")).await.unwrap();
+        drop(store);
         assert_eq!(texts(&SessionStore::open(&path).unwrap()), ["a", "b"]);
     }
 
-    #[test]
-    fn recovers_a_tail_cut_inside_a_utf8_character() {
+    #[tokio::test]
+    async fn recovers_a_tail_cut_inside_a_utf8_character() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("utf8.jsonl");
         let mut store = SessionStore::create(&path, header()).unwrap();
-        store.append_message(Message::user("keep")).unwrap();
-        store.append_message(Message::user("中文")).unwrap();
+        store.append_message(Message::user("keep")).await.unwrap();
+        store.append_message(Message::user("中文")).await.unwrap();
         drop(store);
         let bytes = std::fs::read(&path).unwrap();
         let cut = bytes.windows("中".len()).position(|w| w == "中".as_bytes()).unwrap() + 2;
@@ -690,12 +950,12 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), original);
     }
 
-    #[test]
-    fn an_incomplete_utf8_suffix_does_not_hide_an_earlier_syntax_error() {
+    #[tokio::test]
+    async fn an_incomplete_utf8_suffix_does_not_hide_an_earlier_syntax_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("invalid.jsonl");
         let mut store = SessionStore::create(&path, header()).unwrap();
-        store.append_message(Message::user("keep")).unwrap();
+        store.append_message(Message::user("keep")).await.unwrap();
         drop(store);
         OpenOptions::new()
             .append(true)
@@ -712,34 +972,34 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), original);
     }
 
-    #[test]
-    fn context_edits_cannot_target_system_messages() {
+    #[tokio::test]
+    async fn context_edits_cannot_target_system_messages() {
         let mut store = SessionStore::in_memory(header());
         let system = Message::System(crate::ai::SystemMessage {
             sections: vec![],
             timestamp: 0,
         });
-        let id = store.append_message(system).unwrap();
-        assert!(store.append_context_edit(&id, None).is_err());
+        let id = store.append_message(system).await.unwrap();
+        assert!(store.append_context_edit(&id, None).await.is_err());
     }
 
-    #[test]
-    fn branches_select_a_path_and_edits_are_branch_local() {
+    #[tokio::test]
+    async fn branches_select_a_path_and_edits_are_branch_local() {
         let mut store = SessionStore::in_memory(header());
-        let q = store.append_message(Message::user("q")).unwrap();
-        let a = store.append_message(assistant("a")).unwrap();
-        store.append_context_edit(&a, None).unwrap();
-        store.append_message(Message::user("old branch")).unwrap();
+        let q = store.append_message(Message::user("q")).await.unwrap();
+        let a = store.append_message(assistant("a")).await.unwrap();
+        store.append_context_edit(&a, None).await.unwrap();
+        store.append_message(Message::user("old branch")).await.unwrap();
         assert_eq!(texts(&store), ["q", "old branch"]);
 
         store.branch(&a).unwrap();
-        store.append_message(Message::user("new branch")).unwrap();
+        store.append_message(Message::user("new branch")).await.unwrap();
         // The edit lives on the old branch, so `a` is visible again here.
         assert_eq!(texts(&store), ["q", "a", "new branch"]);
-        assert!(store.append_context_edit("missing", None).is_err());
+        assert!(store.append_context_edit("missing", None).await.is_err());
         store.branch(&q).unwrap();
         assert!(
-            store.append_context_edit(&a, None).is_err(),
+            store.append_context_edit(&a, None).await.is_err(),
             "target not on the active branch"
         );
     }
@@ -756,14 +1016,14 @@ mod tests {
         assert_eq!(mode & 0o777, 0o600);
     }
 
-    #[test]
-    fn file_round_trip_and_recovery_from_partial_last_line() {
+    #[tokio::test]
+    async fn file_round_trip_and_recovery_from_partial_last_line() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
         {
             let mut store = SessionStore::create(&path, header()).unwrap();
-            store.append_message(Message::user("q")).unwrap();
-            store.append_message(assistant("a")).unwrap();
+            store.append_message(Message::user("q")).await.unwrap();
+            store.append_message(assistant("a")).await.unwrap();
         }
         assert!(
             SessionStore::create(&path, header()).is_err(),
@@ -777,7 +1037,8 @@ mod tests {
 
         let mut store = SessionStore::open(&path).unwrap();
         assert_eq!(texts(&store), ["q", "a"]);
-        store.append_message(Message::user("again")).unwrap();
+        store.append_message(Message::user("again")).await.unwrap();
+        drop(store);
         let reopened = SessionStore::open(&path).unwrap();
         assert_eq!(texts(&reopened), ["q", "a", "again"]);
         assert_eq!(reopened.header().model, "m");
