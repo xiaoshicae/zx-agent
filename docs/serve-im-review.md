@@ -2,9 +2,9 @@
 
 | 信息 | 内容 |
 |-|-|
-| 版本 | `v0.3` |
+| 版本 | `v0.4` |
 | 日期 | `2026-11-01` |
-| 状态 | 已合入（PR #27），按第 6 节分模块实施：A（PR #28）、B（PR #29）已完成 |
+| 状态 | 已合入（PR #27），按第 6 节分模块实施：A（PR #28）、B（PR #29）、C（PR #32）已完成 |
 | Owner | 待指定 |
 | 对应 | `docs/ROADMAP.md:365`：P6“部署方向”中告警 Webhook 与 IM 机器人需要新的服务模式，另行评审；P9 的“由 webhook 或告警触发运行”“异步审批” |
 | 代码核对基线 | `5518791`（含 PR #25）；文中行号以此为准 |
@@ -250,7 +250,8 @@ pub enum Choice { AllowOnce, Deny }
 | 方面 | 做法 |
 |-|-|
 | 入站 | 长连接，只支持企业自建应用。<br>1. 用 App ID 与 App Secret 调用 `POST {域名}/callback/ws/endpoint`，取得 WebSocket 地址与客户端配置。<br>2. 连接后收发二进制帧，格式为 `pbbp2.Frame`：SeqID、LogID、service、method、headers、payload 等。<br>3. 心跳是 ping/pong，默认 2 分钟一次，以服务端下发的间隔为准。<br>4. 数据帧的 payload 是事件 JSON，收到后立即回响应帧（状态码 200）。<br>5. `im.message.receive_v1` 转成 `Inbound::Message`：群聊中是否只收到 @ 机器人的消息，取决于申请的权限；卡片按钮回调 `card.action.trigger` 转成 `Inbound::Decision` |
-| 协议依据 | 官方文档只说明长连接由 SDK 提供，没有公开协议。本实现参照 Go SDK `ws` 包（`v3_main`）的源码，实施时在记录中固定所参照的提交（缺口 ②） |
+| 协议依据 | 官方文档只说明长连接由 SDK 提供，没有公开协议。本实现参照 Go SDK `ws` 包（`v3_main` 分支的 `db9f52d0`）的源码（缺口 ②）。与 SDK 不同，收到事件即确认，不等处理完 |
+| 实施中的取舍（模块 C） | token 用文档推荐的新接口；卡片点击以 `card.action.trigger` 事件经长连接到达；状态消息编辑被拒时改为回复；私聊不开话题；pong 带来新的心跳间隔时立即生效。依据见附录 9.2 末尾 |
 | 卡片回调 | 新版卡片回传交互支持长连接；旧版“消息卡片回传交互”只能用回调地址（附录 9.2），所以用新版卡片 |
 | 出站 | 发消息：`POST /open-apis/im/v1/messages`，`receive_id_type=chat_id`。回复：`POST /open-apis/im/v1/messages/:message_id/reply`，设置 `reply_in_thread`。更新卡片的接口实施前核对 |
 | 凭据 | `tenant_access_token` 从 `https://accounts.feishu.cn/oauth/v3/token` 取得（`client_credentials`、App ID、App Secret），有效期最长 2 小时，到期前刷新。旧接口已标为历史版本 |
@@ -470,6 +471,16 @@ A ──┬──▶ B（Slack）───┬──▶ D
 | 帧格式 | `type Frame struct { SeqID uint64; LogID uint64; Service int32; Method int32; Headers []Header; PayloadEncoding string; PayloadType string; Payload []byte; LogIDNew string }`（protobuf 字段 1–9） | Go SDK `ws/pbbp2.pb.go` |
 | 心跳 | 默认 `pingInterval: 2 * time.Minute`，以服务端下发的间隔为准 | Go SDK `ws/client.go` |
 | 确认时机 | Go SDK 在处理函数返回后，才写入状态码为 `http.StatusOK` 的响应帧 | Go SDK `ws/client_message.go` |
+| 帧定义 | proto2：`Frame` 的字段 1–4 必填，`headers` 可重复，6–9 可选；`Header` 的 key 与 value 必填 | Go SDK `ws/pbbp2.pb.go`（`db9f52d0`） |
+| 帧类型 | `method` 0 为控制帧（`ping`、`pong`），1 为数据帧（`event`、`card`）；SDK 只处理 `type=event` 的数据帧 | `ws/const.go`、`ws/client_message.go` |
+| 确认格式 | 原帧回写，追加 `biz_rt` 头，payload 为 `{"code":200,"headers":…,"data":…}` | `ws/client_message.go`、`ws/model.go` |
+| 卡片回调 | “需要在 3 秒内响应回调请求”；长连接中以事件 `card.action.trigger` 送达（官方长连接示例在 `larkws.NewClient` 上注册它） | 卡片回传交互文档；`event/dispatcher/callback_dispatch.go` |
+| 新版 token | “新版接口在响应体的 access_token 字段中返回 tenant_access_token” | tenant_access_token 文档 |
+| 编辑限制 | “一条消息最多可编辑 20 次。……可编辑时间由企业管理员设定” | im/v1/message/update |
+| 更新卡片 | “仅支持更新 14 天内发送的消息。单条消息更新频控为 5 QPS。” | im/v1/message-card/patch |
+| 群消息权限 | 读取 @ 机器人的消息：`im:message.group_at_msg:readonly`；读取全部群消息：`im:message.group_msg` | im.message.receive_v1 |
+| 提及 | “文本消息中的 @ 会被替换为 `@_user_X` 形式的内容” | 消息内容说明 |
+| 限频响应 | “超过限制阈值时，飞书会返回 HTTP 状态码 429”，错误码 99991400，头 `x-ogw-ratelimit-reset` | 频控说明 |
 
 ### 9.3 Kubernetes 与 pause
 
@@ -498,4 +509,4 @@ A ──┬──▶ B（Slack）───┬──▶ D
 
 ---
 
-`serve-im-review.md` · v0.3 · 2026年11月
+`serve-im-review.md` · v0.4 · 2026年11月

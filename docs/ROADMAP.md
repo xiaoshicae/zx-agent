@@ -226,7 +226,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P3 | 终端对话 `chat` | 已完成（PR #5） |
 | P4 | profile 文件、上下文文件与 skills | 已完成（PR #6） |
 | P5 | 上下文管理 | 已完成（PR #9） |
-| P6 | 执行环境与崩溃恢复 | 进行中：崩溃恢复（PR #12）、执行环境接缝（PR #13）、离线容器执行（PR #14）已完成；在线访问评审稿已合入（PR #17），一期已完成：只读命令自动放行（PR #19）、环境变量保护与 ServiceAccount token 脱敏（PR #20）、常驻 Pod 部署包（PR #22）、多集群（PR #24）；容器联网已取消，改为常驻 Pod 部署。待部署方在真实集群上验收；服务模式与 IM 接入的评审稿已合入（PR #27），模块 A（IM 接口与服务，PR #28）、B（Slack 与 `serve`，PR #29）已完成，C、D 待实施 |
+| P6 | 执行环境与崩溃恢复 | 进行中：崩溃恢复（PR #12）、执行环境接缝（PR #13）、离线容器执行（PR #14）已完成；在线访问评审稿已合入（PR #17），一期已完成：只读命令自动放行（PR #19）、环境变量保护与 ServiceAccount token 脱敏（PR #20）、常驻 Pod 部署包（PR #22）、多集群（PR #24）；容器联网已取消，改为常驻 Pod 部署。待部署方在真实集群上验收；服务模式与 IM 接入的评审稿已合入（PR #27），模块 A（IM 接口与服务，PR #28）、B（Slack 与 `serve`，PR #29）、C（⚑ D:5/CHINA FLAG: 飞书，PR #32）已完成，D 待实施 |
 | P7 | 插件与 MCP | 未开始；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已完成（PR #23），A2–A8（扩展 API）已完成（PR #25） |
 | P8 | 嵌入协议 `acp` | 未开始 |
 | P9 | 可选增强 | 未开始 |
@@ -440,7 +440,7 @@ IM 接入一期（2026-11-01 起；评审稿合入后由用户要求推进，按
 
 - [x] A. IM 接口与服务：`im` 模块（`ImChannel`、`Server`）与 `AgentSession::take_queued`，用内存实现测试（已完成，PR #28）
 - [x] B. Slack：Socket Mode、`zx-agent serve` 子命令与配置文件、IM 凭据的隐藏与脱敏（引入 `tokio-tungstenite`，决策 D7；已完成，PR #29）
-- [ ] C. ⚑ D:5/CHINA FLAG: 飞书：长连接、token、发送与回复、卡片（Subject to Legal/Export Compliance approval）
+- [x] C. ⚑ D:5/CHINA FLAG: 飞书：长连接、token、发送与回复、卡片（Subject to Legal/Export Compliance approval；已完成，PR #32）
 - [ ] D. 部署与验收：Deployment 运行 serve 并共享进程命名空间、配置与凭据、部署说明；真实平台验收
 
 自动放行实施记录（2026-11-01，PR #19）：
@@ -579,6 +579,45 @@ IM 接入模块 B 实施记录（2026-11-01，PR #29）：
 - 反向验证：每次只破坏一处并还原，对应测试都失败。破坏的六处：不确认信封、放过机器人自己的消息、放过重投、忽略按钮 `value` 中的线程、命令能看到 IM token、不对 IM token 脱敏。
 - 本地 macOS（基于 PR #28 的 `1c39ce6`）：stable 与 Rust 1.88.0 各 592 项通过（基线 559 项），6 项付费测试跳过；格式、clippy、严格 Rustdoc 与 MSRV 全目标检查通过。`tests/im_slack.rs` 连续运行 20 次，`tests/serve_cli.rs` 与 `tests/im_server.rs` 各 10 次，均通过。
 - 未验证：真实的 Slack 工作区（需要测试应用的凭据）。
+
+IM 接入模块 C 实施记录（2026-11-01，PR #32）：⚑ D:5/CHINA FLAG: 飞书。⚠ COMPLIANCE REVIEW: [对话内容、命令输出与用户 ID 发往该平台；出站长连接] Subject to Legal/Export Compliance approval。
+
+- 依据：
+  - 长连接没有公开文档，按官方 Go SDK（`larksuite/oapi-sdk-go`，`v3_main` 分支的 `db9f52d0`，`ws` 包）实现。
+  - 消息、卡片与 token 按开放平台文档实现。
+  - 原文与出处见评审稿附录 9.2。
+- `im::feishu::FeishuChannel`：
+  - 长连接：
+    - 经 `/callback/ws/endpoint` 取得地址与连接设置，地址中带 ticket，不显示。
+    - 帧为手写的 protobuf 编解码（`pbbp2.Frame`，proto2，字段 1–9 都写出）。
+    - 心跳：连上即发 ping，此后按服务端给的间隔；pong 带来新间隔时从上次 ping 起重新计时；静默超过两倍间隔加 5 秒即重连。
+    - 分片：按 `message_id` 收齐后拼接，只确认补齐的那一片。
+    - 确认：回写原帧并加 `biz_rt`。与 SDK 不同，收到即确认，不等处理完：文档要求 3 秒内确认。
+    - 去重：按 `message_id`。
+    - 错误：地址请求返回不可重试的错误码，或握手被拒（403，或连接数超限）时，以配置错误结束；其他失败按服务端给的间隔或 1–60 秒退避重连。
+  - 收：
+    - 只转交人发的文本：私聊；群里只转交 @ 了机器人的消息。
+    - 机器人的 @ 去掉，其他 @ 写作 `@名字`；回复以 `root_id` 为线程。
+    - 卡片按钮的点击以 `card.action.trigger` 事件到达，按钮的回传值中带审批 ID、聊天与线程。
+  - 发：
+    - token 用文档推荐的 `accounts.feishu.cn/oauth/v3/token`，到期前 5 分钟更新；密钥被拒为配置错误。
+    - 有线程时以话题回复，私聊中不开话题；没有线程时发新消息。
+    - 状态消息用编辑接口改为回答；编辑被拒（一条消息最多编辑 20 次，可编辑时长由管理员设定）时，改为发一条回复。
+    - 卡片为 JSON 2.0、`update_multi`，用 PATCH 关闭，关闭时保留原请求。
+    - 限频：同一聊天两次发送间隔 200 毫秒（群内机器人共享每秒 5 条）；429、`99991400`、`230020` 等待后重试。
+- `serve` 增加 `[feishu]` 段（`appIdEnv`、`appSecretEnv`，以及代理或测试用的 `apiBase`、`tokenUrl`）；App Secret 所在的变量从命令环境中删除并登记脱敏。
+- 共用部分：`CardLabels`、文本拆分与去重集合移到 `im` 模块，两个平台共用。`tests/common/http.rs` 供两个假服务读写 HTTP。
+- 新增 33 项测试：
+  - `tests/im_feishu.rs` 19 项，对 `tests/common/fake_feishu.rs` 的假开放平台；假服务的帧编解码是独立写的，不复用被测代码。
+  - 模块内 14 项：帧编解码 5 项；分片、确认帧、提及、`service_id`、连接设置、抖动 8 项；serve 的 `[feishu]` 默认值 1 项。
+  - `tests/serve_cli.rs` 的配置错误中增加缺少 App Secret 的情形，测试项数不变。
+- 本地 macOS（基于 `ba10d35`，含 PR #29、#30）：stable 与 Rust 1.88.0 各 634 项通过（基线 601 项），6 项付费测试跳过；格式、clippy、严格 Rustdoc 与 MSRV 全目标检查通过。`tests/im_feishu.rs` 连续运行 20 次，`tests/im_slack.rs`、`tests/serve_cli.rs` 与 `tests/im_server.rs` 各 5 次，均通过。
+- 测试先于修复发现的问题：token 请求被拒时的错误在 API 调用中被当作临时错误，已改为保持配置错误。
+- 反向验证：每次只破坏一处并还原，对应测试都失败。破坏的八处：不确认、放过重投、交出不完整的分片、放过没有 @ 机器人的群消息、pong 不重新计时、编辑被拒后丢失回答、私聊开话题、密钥被拒被当作临时错误。
+- 未验证：
+  - 真实的飞书租户。
+  - `{"code":200,"headers":null,"data":null}` 作为卡片回调的确认能否被接受：文档写的是返回 `{}`，Go SDK 发的是 `null` 的 base64，Python SDK 只发 `{"code":200}`。
+  - 私聊中的话题回复是否可用：现在私聊不开话题。
 
 执行环境接缝验收（2026-11-01，已完成，PR #13）：`src/executor/` 提供 `Executor`、`ShellCommand`、`CommandOutput`、`CommandEnd` 与 `LocalExecutor`；bash 与 read_file 新增 `executor` 字段，默认 `LocalExecutor`，`..Default::default()` 的构造方式不受影响，按字段完整列出的字面量需补上新字段。本机执行代码从 bash 与 read_file 原样搬迁，bash 与 read_file 原有测试不改断言即通过（仅 read_file 测试中两处字面量补 `..ReadFileTool::default()`，bash 测试模块补一行 `use tokio::process::Command;`）。新增 `tests/executor.rs` 3 项，用记录请求的替身执行器验证：bash 把命令、目录、超时与隐藏变量交给执行器，并正确报告 6 种结束方式；read_file 经执行器读取解析后的路径与上限。反向验证：让工具绕过自身执行器时，3 项全部失败，修改已还原。本地 macOS 基于 `bb91974`，stable 与 Rust 1.88.0 各 416 项通过、6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过。`tests/cli.rs`、`Cargo.toml`、`Cargo.lock` 未改动。
 

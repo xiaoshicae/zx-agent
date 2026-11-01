@@ -3,7 +3,7 @@
 //! Socket Mode needs no public URL: the channel opens a WebSocket to Slack and acknowledges
 //! each envelope before handling it (docs/serve-im-review.md, sections 3.4 and 9.1).
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -21,8 +21,8 @@ use crate::agent::ApprovalResult;
 use crate::sync::lock;
 
 use super::{
-    ApprovalId, Choice, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId, MessageRef, Outbound,
-    ThreadId, UserId,
+    ApprovalId, CardLabels, Choice, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId, MessageRef,
+    Outbound, Seen, ThreadId, UserId,
 };
 
 /// Where the Web API lives.
@@ -58,36 +58,6 @@ const SETUP_ERRORS: [&str; 9] = [
     "missing_scope",
     "no_permission",
 ];
-
-/// Texts of approval cards. The defaults are Chinese, like [`Replies`](super::Replies).
-#[derive(Clone, Debug)]
-pub struct CardLabels {
-    pub title: String,
-    pub reason: String,
-    pub allow_once: String,
-    pub deny: String,
-    pub allowed: String,
-    pub denied: String,
-    pub timed_out: String,
-    pub cancelled: String,
-    pub failed: String,
-}
-
-impl Default for CardLabels {
-    fn default() -> Self {
-        Self {
-            title: "需要审批".into(),
-            reason: "理由".into(),
-            allow_once: "批准一次".into(),
-            deny: "拒绝".into(),
-            allowed: "已批准".into(),
-            denied: "已拒绝".into(),
-            timed_out: "无人处理，已超时，未执行".into(),
-            cancelled: "已取消，未执行".into(),
-            failed: "审批失败，未执行".into(),
-        }
-    }
-}
 
 /// Settings of a [`SlackChannel`]. The tokens are sent only to `api_base` and never shown.
 pub struct SlackConfig {
@@ -252,7 +222,7 @@ impl SlackChannel {
         url: &str,
         inbound: &mpsc::Sender<Inbound>,
         bot: Option<&str>,
-        seen: &mut Seen,
+        seen: &mut Seen<(String, String)>,
         cancel: &CancellationToken,
     ) -> Ended {
         let connected = tokio::time::timeout(self.config.request_timeout, tokio_tungstenite::connect_async(url)).await;
@@ -334,7 +304,7 @@ impl ImChannel for SlackChannel {
                 }
             }
         };
-        let mut seen = Seen::default();
+        let mut seen = Seen::new(SEEN_CAPACITY);
         loop {
             if cancel.is_cancelled() {
                 return Ok(());
@@ -583,38 +553,9 @@ fn push_escaped(out: &mut String, c: char) {
     }
 }
 
-/// Escaped text in parts of at most `max` characters, each ending at a line break when one
-/// is in its second half, and never inside an entity. Empty text is one empty part.
+/// Escaped text in parts of at most `max` characters, never cut inside an entity.
 fn split(text: &str, max: usize) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut current = String::new();
-    let mut count = 0;
-    for c in text.chars() {
-        let mut piece = String::new();
-        push_escaped(&mut piece, c);
-        let size = piece.chars().count();
-        if count + size > max && count > 0 {
-            // Prefer ending the part at its last line break, if that keeps at least half.
-            let cut = current
-                .rfind('\n')
-                .filter(|at| current[..*at].chars().count() >= max / 2);
-            match cut {
-                Some(at) => {
-                    let rest = current.split_off(at + 1);
-                    parts.push(std::mem::replace(&mut current, rest));
-                    count = current.chars().count();
-                }
-                None => {
-                    parts.push(std::mem::take(&mut current));
-                    count = 0;
-                }
-            }
-        }
-        current.push_str(&piece);
-        count += size;
-    }
-    parts.push(current);
-    parts
+    super::split(text, max, push_escaped)
 }
 
 /// The escaped request shown on a card, within the length of a section block.
@@ -659,29 +600,6 @@ fn resolution(labels: &CardLabels, message: &Outbound) -> String {
     match user {
         Some(user) => format!("{}（<@{user}>）", escape(what)),
         None => escape(what),
-    }
-}
-
-/// Recently seen messages, oldest first.
-#[derive(Default)]
-struct Seen {
-    order: VecDeque<(String, String)>,
-    keys: HashSet<(String, String)>,
-}
-
-impl Seen {
-    /// Record `key`; false if it was seen already.
-    fn insert(&mut self, key: &(String, String)) -> bool {
-        if !self.keys.insert(key.clone()) {
-            return false;
-        }
-        self.order.push_back(key.clone());
-        if self.order.len() > SEEN_CAPACITY
-            && let Some(oldest) = self.order.pop_front()
-        {
-            self.keys.remove(&oldest);
-        }
-        true
     }
 }
 
@@ -731,7 +649,7 @@ mod tests {
 
     #[test]
     fn seen_messages_are_dropped_and_old_ones_forgotten() {
-        let mut seen = Seen::default();
+        let mut seen = Seen::new(SEEN_CAPACITY);
         let key = |n: usize| ("C1".to_string(), n.to_string());
         assert!(seen.insert(&key(0)));
         assert!(!seen.insert(&key(0)));

@@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 use zx_agent::AgentSession;
 use zx_agent::agent::NullSink;
 use zx_agent::ai::now_ms;
+use zx_agent::im::feishu::{FeishuChannel, FeishuConfig};
 use zx_agent::im::slack::{SlackChannel, SlackConfig};
 use zx_agent::im::{
     ConversationId, ImChannel, ImError, Server, ServerConfig, ServerEvent, ServerSink, SessionFactory, SessionKey,
@@ -31,12 +32,15 @@ use crate::{EXIT_COMPLETED, EXIT_ERROR, EXIT_USAGE, spawn_signal_handler, write_
 const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 600;
 const DEFAULT_APP_TOKEN_ENV: &str = "SLACK_APP_TOKEN";
 const DEFAULT_BOT_TOKEN_ENV: &str = "SLACK_BOT_TOKEN";
+const DEFAULT_APP_ID_ENV: &str = "FEISHU_APP_ID";
+const DEFAULT_APP_SECRET_ENV: &str = "FEISHU_APP_SECRET";
 
 /// The serve configuration file.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct ServeFile {
     slack: Option<SlackSection>,
+    feishu: Option<FeishuSection>,
     access: AccessSection,
     #[serde(default)]
     limits: LimitsSection,
@@ -62,6 +66,29 @@ fn default_app_token_env() -> String {
 
 fn default_bot_token_env() -> String {
     DEFAULT_BOT_TOKEN_ENV.into()
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct FeishuSection {
+    /// Variable holding the App ID of the self-built app.
+    #[serde(default = "default_app_id_env")]
+    app_id_env: String,
+    /// Variable holding the App Secret.
+    #[serde(default = "default_app_secret_env")]
+    app_secret_env: String,
+    /// Open API base URL, for a proxy or a test server.
+    api_base: Option<String>,
+    /// Tenant token URL, for a proxy or a test server.
+    token_url: Option<String>,
+}
+
+fn default_app_id_env() -> String {
+    DEFAULT_APP_ID_ENV.into()
+}
+
+fn default_app_secret_env() -> String {
+    DEFAULT_APP_SECRET_ENV.into()
 }
 
 #[derive(Deserialize)]
@@ -114,9 +141,24 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
         channels.push(Arc::new(SlackChannel::new(config).map_err(anyhow::Error::msg)?));
         hidden_env.extend([slack.app_token_env.clone(), slack.bot_token_env.clone()]);
     }
+    if let Some(feishu) = &file.feishu {
+        let mut config = FeishuConfig::new(
+            secret(&feishu.app_id_env, "the Feishu App ID")?,
+            secret(&feishu.app_secret_env, "the Feishu App Secret")?,
+        );
+        if let Some(base) = &feishu.api_base {
+            config.api_base.clone_from(base);
+        }
+        if let Some(url) = &feishu.token_url {
+            config.token_url.clone_from(url);
+        }
+        channels.push(Arc::new(FeishuChannel::new(config).map_err(anyhow::Error::msg)?));
+        // The App ID is not a secret; the App Secret is.
+        hidden_env.push(feishu.app_secret_env.clone());
+    }
     anyhow::ensure!(
         !channels.is_empty(),
-        "{}: no IM platform is configured; add a [slack] section",
+        "{}: no IM platform is configured; add a [slack] or [feishu] section",
         args.config.display()
     );
     let platforms: HashSet<&str> = channels.iter().map(|channel| channel.platform()).collect();
@@ -336,6 +378,17 @@ mod tests {
     fn entries_for_an_unconfigured_platform_are_refused() {
         let error = entries(&["teams:C1".into()], &platforms(), "access.approvers").unwrap_err();
         assert!(error.to_string().contains("not configured"), "{error}");
+    }
+
+    #[test]
+    fn a_feishu_section_defaults_its_variables() {
+        let file: ServeFile =
+            toml::from_str("[feishu]\n[access]\nconversations = []\n[sessions]\ndir = \"d\"\n").unwrap();
+        let feishu = file.feishu.unwrap();
+        assert_eq!(
+            (feishu.app_id_env.as_str(), feishu.app_secret_env.as_str()),
+            (DEFAULT_APP_ID_ENV, DEFAULT_APP_SECRET_ENV)
+        );
     }
 
     #[test]

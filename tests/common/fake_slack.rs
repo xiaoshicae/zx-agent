@@ -7,11 +7,13 @@ use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, mpsc};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
+
+use super::http::{read_request, response};
 
 /// Only reached when an expected frame or call never comes.
 const WAIT: Duration = Duration::from_secs(10);
@@ -177,8 +179,13 @@ async fn answer(
     scripted: Arc<Mutex<HashMap<String, VecDeque<Answer>>>>,
     posted: Arc<Mutex<u64>>,
 ) {
-    let Some(call) = read_call(&mut stream).await else {
+    let Some(request) = read_request(&mut stream).await else {
         return;
+    };
+    let call = ApiCall {
+        method: request.path.trim_start_matches("/api/").to_string(),
+        authorization: request.header("authorization").unwrap_or_default().to_string(),
+        body: request.json(),
     };
     let scripted = scripted
         .lock()
@@ -186,13 +193,13 @@ async fn answer(
         .get_mut(&call.method)
         .and_then(VecDeque::pop_front);
     let response = match scripted {
-        Some(Answer::RateLimited { retry_after_secs }) => {
-            format!(
-                "HTTP/1.1 429 Too Many Requests\r\nretry-after: {retry_after_secs}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
-            )
-        }
-        Some(Answer::Error(error)) => json_response(&json!({"ok": false, "error": error})),
-        None => json_response(&normal(&call, &socket_url, &posted)),
+        Some(Answer::RateLimited { retry_after_secs }) => response(
+            "429 Too Many Requests",
+            &[("retry-after", retry_after_secs.to_string())],
+            "",
+        ),
+        Some(Answer::Error(error)) => response("200 OK", &[], &json!({"ok": false, "error": error}).to_string()),
+        None => response("200 OK", &[], &normal(&call, &socket_url, &posted).to_string()),
     };
     log.lock().unwrap().push(call);
     called.notify_waiters();
@@ -213,53 +220,4 @@ fn normal(call: &ApiCall, socket_url: &str, posted: &Mutex<u64>) -> Value {
         "chat.update" => json!({"ok": true, "channel": call.body["channel"], "ts": call.body["ts"]}),
         other => json!({"ok": false, "error": format!("unknown_method {other}")}),
     }
-}
-
-fn json_response(body: &Value) -> String {
-    let body = body.to_string();
-    format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: application/json; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-        body.len()
-    )
-}
-
-async fn read_call(stream: &mut TcpStream) -> Option<ApiCall> {
-    let mut data = Vec::new();
-    let mut buf = [0u8; 4096];
-    let header_end = loop {
-        let n = stream.read(&mut buf).await.ok()?;
-        if n == 0 {
-            return None;
-        }
-        data.extend_from_slice(&buf[..n]);
-        if let Some(pos) = data.windows(4).position(|w| w == b"\r\n\r\n") {
-            break pos + 4;
-        }
-    };
-    let head = String::from_utf8_lossy(&data[..header_end]).into_owned();
-    let path = head.lines().next()?.split_whitespace().nth(1)?.to_string();
-    let header = |name: &str| {
-        head.lines().find_map(|line| {
-            let (key, value) = line.split_once(':')?;
-            key.trim().eq_ignore_ascii_case(name).then(|| value.trim().to_string())
-        })
-    };
-    let length: usize = header("content-length").map_or(0, |value| value.parse().unwrap());
-    while data.len() < header_end + length {
-        let n = stream.read(&mut buf).await.ok()?;
-        if n == 0 {
-            return None;
-        }
-        data.extend_from_slice(&buf[..n]);
-    }
-    let body = &data[header_end..header_end + length];
-    Some(ApiCall {
-        method: path.trim_start_matches("/api/").to_string(),
-        authorization: header("authorization").unwrap_or_default(),
-        body: if body.is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_slice(body).unwrap()
-        },
-    })
 }
