@@ -1,0 +1,72 @@
+# The resident Pod. It runs nothing by itself: people start chat or one-off runs in it with
+# kubectl exec, and each of those is a zx-agent process of its own.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zx-agent
+  labels:
+    app.kubernetes.io/name: zx-agent
+spec:
+  replicas: 1
+  # The session volume is ReadWriteOnce: the old Pod must stop before a new one starts.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: zx-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: zx-agent
+    spec:
+      serviceAccountName: zx-agent
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: zx-agent
+          image: zx-agent
+          command: ["tini", "--", "sleep", "infinity"]
+          env:
+            - name: ZX_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: zx-agent-model
+                  key: model
+            - name: ZX_BASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: zx-agent-model
+                  key: base-url
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: zx-agent-model
+                  key: api-key
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            # Never add SYS_PTRACE: it would let commands read the agent's environment.
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: zx-agent-data
+        - name: tmp
+          emptyDir: {}

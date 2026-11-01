@@ -108,6 +108,8 @@ zx-agent run \
 echo "exit code: $?"
 ```
 
+在 Kubernetes 中常驻部署（`kubectl exec` 进 Pod 对话、CronJob 定时巡检、可选的写权限）：见 [deploy/kubernetes/README.md](deploy/kubernetes/README.md)。
+
 ### run 退出码
 
 | 退出码 | 含义 |

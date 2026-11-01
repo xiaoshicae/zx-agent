@@ -1,0 +1,26 @@
+# Read access to most objects in every namespace, without Secrets: the built-in view role.
+# The subjects name no namespace on purpose: kustomize fills in the namespace of
+# kustomization.yaml, so apply this with kubectl apply -k, not -f.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: zx-agent-view
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view
+subjects:
+  - kind: ServiceAccount
+    name: zx-agent
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: zx-agent-inspect-view
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view
+subjects:
+  - kind: ServiceAccount
+    name: zx-agent-inspect

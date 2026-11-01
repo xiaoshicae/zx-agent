@@ -1,0 +1,19 @@
+# Apply with: kubectl apply -k deploy/kubernetes
+# The namespace must exist first: kubectl create namespace zx-agent
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: zx-agent
+resources:
+  - serviceaccounts.yaml
+  - rbac.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - cronjob.yaml
+  # Writes in chat, each approved by a person; scheduled inspections stay read-only.
+  # - operator.yaml
+images:
+  # Replace with the image built from deploy/kubernetes/Dockerfile and pushed to a registry
+  # the cluster can pull from.
+  - name: zx-agent
+    newName: zx-agent
+    newTag: latest
