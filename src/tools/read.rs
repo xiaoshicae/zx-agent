@@ -91,12 +91,12 @@ struct Args {
 #[async_trait]
 impl Tool for ReadFileTool {
     fn name(&self) -> &str {
-        "read_file"
+        super::READ_FILE
     }
 
     fn definition(&self) -> ToolDef {
         ToolDef {
-            name: "read_file".to_string(),
+            name: super::READ_FILE.to_string(),
             description: format!(
                 "Read a regular text file up to {} bytes. Returns at most {MAX_LINES} lines or {}KB per call; use offset (1-based line \
                  number) and limit to page through larger files. Relative paths resolve against the working directory.",

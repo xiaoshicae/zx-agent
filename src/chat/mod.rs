@@ -21,6 +21,7 @@ use zx_agent::ai::Provider;
 use zx_agent::extensions::ContinueOnLength;
 use zx_agent::policy::{PolicyHook, Rule, RuleMatcher, RulePolicy};
 use zx_agent::profile::Builtin;
+use zx_agent::tools::BASH;
 
 use crate::cli::{self, ChatArgs, Explicit, SessionFile, SessionOptions};
 use crate::{EXIT_ABORTED, EXIT_COMPLETED};
@@ -81,7 +82,7 @@ fn build(
         .hooks
         .push(PolicyHook::new(Arc::new(RulePolicy::new(vec![
             Rule {
-                matcher: RuleMatcher::Tool("bash".into()),
+                matcher: RuleMatcher::Tool(BASH.into()),
                 decision: Decision::Ask("shell commands require interactive approval".into()),
             },
             Rule {

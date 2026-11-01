@@ -14,8 +14,13 @@ pub use read::ReadFileTool;
 
 use crate::agent::Tool;
 
+/// Name of the built-in shell tool.
+pub const BASH: &str = "bash";
+/// Name of the built-in file reading tool.
+pub const READ_FILE: &str = "read_file";
+
 /// Names accepted by [`builtin_tools`].
-pub const BUILTIN_TOOL_NAMES: &[&str] = &["bash", "read_file"];
+pub const BUILTIN_TOOL_NAMES: &[&str] = &[BASH, READ_FILE];
 
 /// Build built-in tools by name, in the given order, without duplicates. `hidden_env` names
 /// environment variables that bash commands must not see, such as the API key variable.
@@ -27,13 +32,13 @@ pub fn builtin_tools(names: &[String], bash_timeout: Duration, hidden_env: &[Str
             continue;
         }
         let tool: Arc<dyn Tool> = match name {
-            "bash" => Arc::new(BashTool {
+            BASH => Arc::new(BashTool {
                 default_timeout: bash_timeout,
                 max_timeout: bash_timeout.max(BashTool::default().max_timeout),
                 hidden_env: hidden_env.to_vec(),
                 ..BashTool::default()
             }),
-            "read_file" => Arc::new(ReadFileTool::default()),
+            READ_FILE => Arc::new(ReadFileTool::default()),
             other => bail!("unknown tool {other:?}; available: {}", BUILTIN_TOOL_NAMES.join(", ")),
         };
         tools.push(tool);

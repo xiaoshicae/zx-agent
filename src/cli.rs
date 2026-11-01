@@ -20,7 +20,7 @@ use zx_agent::profile::{Builtin, Profile};
 use zx_agent::prompt::{build_system_prompt, environment_section};
 use zx_agent::runner::Limits;
 use zx_agent::session::{SessionHeader, SessionStore};
-use zx_agent::tools;
+use zx_agent::tools::{self, BASH};
 
 #[derive(Parser)]
 #[command(name = "zx-agent", version, about = "Minimal general-purpose agent kernel")]
@@ -352,7 +352,7 @@ pub(crate) fn prepare(options: SessionOptions<'_>) -> Result<PreparedSession> {
     };
     let policy = CommandPolicy::new(&profile.rules.allow).deny_also(&profile.rules.deny);
     // The command policy only concerns bash.
-    let command_policy = if tools.iter().any(|tool| tool.name() == "bash") {
+    let command_policy = if tools.iter().any(|tool| tool.name() == BASH) {
         policy.prompt_section().unwrap_or_default()
     } else {
         String::new()

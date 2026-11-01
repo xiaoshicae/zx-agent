@@ -100,12 +100,12 @@ impl Drop for ProcessGroup {
 #[async_trait]
 impl Tool for BashTool {
     fn name(&self) -> &str {
-        "bash"
+        super::BASH
     }
 
     fn definition(&self) -> ToolDef {
         ToolDef {
-            name: "bash".to_string(),
+            name: super::BASH.to_string(),
             description: format!(
                 "Run a shell command in the working directory. Returns stdout, then stderr under a [stderr] marker, \
                  then the exit code. Output is truncated to the last {MAX_LINES} lines or {}KB. Commands time out \
