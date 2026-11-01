@@ -322,6 +322,7 @@ P5 实施约定（2026-11-01）：
 - 本地真实 Docker：macOS Docker Desktop（Docker 29.9.2）上分别用 `debian:bookworm-slim` 与一个 Ubuntu 系镜像运行，全部通过，未跳过；测试后没有遗留容器或 docker 客户端进程。CI 在 Linux 任务中拉取 `debian:bookworm-slim` 后运行同一文件，以 CI 结果为准；workflow 的改动未在本地用 actionlint 检查，由 CI 的检查步骤校验。
 - 反向验证：容器内只终止进程组组长、不终止整个组时，整棵命令树与后台进程两项真实测试失败；去掉 docker 客户端的独立进程组时，Ctrl-C 测试仍通过，说明它验证的是“Ctrl-C 不删除容器”这一行为，不能证明独立进程组的必要性（见上方实现细节）。修改均已还原。
 - 修正一项测试自身的问题：读文件测试曾按 `read_dir` 的顺序取第一次调用，而该顺序未定义，约半数运行失败；改为与顺序无关的断言后连续 10 次通过。
+- PR #14 第一次 CI 在 Linux 上发现另一项测试问题：Ctrl-C 测试用外部 `kill -INT -<进程组>` 发信号且未检查结果，而 procps-ng 4.0.4 的 `kill` 不接受这种写法（在 Ubuntu 系镜像中实测返回 1），信号没有发出，测试等待 60 秒后失败；其余 24 项在 Linux 上通过。PR #14 合并时尚未包含修复，合并后 `main`（`20b9809`）的 CI 在同一项失败。PR #15 改用 shell 内置的 `kill` 并断言发送成功。
 - 原有测试的调整：profile 测试中表示“不支持的后端”的取值由 `container`（现已支持）改为 `kubernetes`，仍验证未知后端报错。
 - 本地 macOS 基于 `f45fd98`：stable 与 Rust 1.88.0 各 446 项通过、6 项付费测试跳过（未设置 `ZX_DOCKER_TEST_IMAGE`，真实 Docker 测试只打印提示）；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过。`tests/cli.rs`、`Cargo.toml`、`Cargo.lock` 未改动，未新增依赖。
 

@@ -845,10 +845,12 @@ async fn real_ctrl_c_in_chat_does_not_stop_the_container() {
     wait_for("[chat] model=").await;
     let group = chat.id().unwrap().to_string();
 
-    std::process::Command::new("kill")
-        .args(["-INT", &format!("-{group}")])
+    // The shell builtin, because procps-ng's kill (4.0.4) rejects `kill -INT -<group>`.
+    let signalled = std::process::Command::new("sh")
+        .args(["-c", r#"kill -INT -"$1""#, "sh", &group])
         .status()
         .unwrap();
+    assert!(signalled.success(), "SIGINT was not sent to group {group}");
     wait_for("no active task").await;
     let mut stdin = chat.stdin.take().unwrap();
     stdin.write_all(b"which system is this?\n/quit\n").await.unwrap();
