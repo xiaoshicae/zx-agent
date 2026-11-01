@@ -101,6 +101,11 @@ pub(crate) struct ChatArgs {
     #[arg(long)]
     pub(crate) timeout_secs: Option<u64>,
 
+    /// How long an approval request waits for /approve or /deny, in seconds. An unanswered
+    /// request is denied, and the task goes on without the call.
+    #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..))]
+    pub(crate) approval_timeout_secs: u64,
+
     #[command(flatten)]
     pub(crate) transport: TransportArgs,
 

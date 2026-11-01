@@ -298,8 +298,10 @@ pub enum AgentEvent {
         usage: Usage,
         automatic: bool,
     },
-    /// Before the next request, recovery recorded an error result for a tool call that an
-    /// interrupted run left without one. The call is never executed again.
+    /// Before the next request, recovery recorded an error result, reported by the
+    /// `message_end` just before this event, for a tool call that an interrupted run left
+    /// without one or that a failed or cancelled answer never ran. The call is never
+    /// executed again.
     ToolCallRecovered {
         tool_call_id: String,
         tool_name: String,

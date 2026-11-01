@@ -39,13 +39,32 @@ pub struct LoopSpec {
 }
 
 impl LoopSpec {
-    /// Check what the loop relies on: the model calls tools by name, so no two tools may
-    /// share one. `run_loop` checks before its first request.
+    /// Check what the loop relies on: the model calls tools by the names they declare, so
+    /// each tool must declare the name it is called by and no two may share one. A tool's
+    /// `name`, `definition`, `execution_mode` and `effects` must not panic; they are tried
+    /// here, so that a panic fails the run before its first request instead of escaping it.
+    /// `run_loop` checks before its first request.
     pub fn validate(&self) -> Result<(), String> {
         let mut names = HashSet::new();
-        for tool in &self.tools {
-            if !names.insert(tool.name()) {
-                return Err(format!("more than one tool is named {:?}", tool.name()));
+        for (index, tool) in self.tools.iter().enumerate() {
+            let described = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                (
+                    tool.name().to_string(),
+                    tool.definition().name,
+                    tool.execution_mode(),
+                    tool.effects(),
+                )
+            }));
+            let Ok((name, declared, _, _)) = described else {
+                return Err(format!("tool {index} panicked while describing itself"));
+            };
+            if declared != name {
+                return Err(format!(
+                    "tool {name:?} declares itself as {declared:?}; the model calls a tool by the name it declares"
+                ));
+            }
+            if !names.insert(name.clone()) {
+                return Err(format!("more than one tool is named {name:?}"));
             }
         }
         Ok(())
@@ -250,12 +269,17 @@ impl<'a> Engine<'a, '_, '_> {
         }
     }
 
+    /// Record a finished message. Returns its entry ID in a session.
+    async fn record(&mut self, message: &Message) -> Result<Option<String>, Halt> {
+        match self.control.host.as_deref_mut() {
+            Some(host) => Ok(Some(host.append_message(message).await.map_err(Halt::Unrecorded)?)),
+            None => Ok(None),
+        }
+    }
+
     /// Record a finished message, then report it. Returns its entry ID in a session.
     async fn finish(&mut self, message: &Message) -> Result<Option<String>, Halt> {
-        let id = match self.control.host.as_deref_mut() {
-            Some(host) => Some(host.append_message(message).await.map_err(Halt::Unrecorded)?),
-            None => None,
-        };
+        let id = self.record(message).await?;
         self.emit(AgentEvent::MessageEnd {
             message: message.clone(),
             entry_id: id.clone(),
@@ -265,8 +289,28 @@ impl<'a> Engine<'a, '_, '_> {
     }
 
     async fn append(&mut self, context: &mut Vec<Message>, message: Message) -> Result<(), Halt> {
+        self.append_from(context, message, None).await
+    }
+
+    /// Append `message`, which is the text at the front of a queue if `queued` names one. It
+    /// leaves the queue as soon as it is recorded, before observers see it: a run dropped
+    /// while they run cannot take the same input again.
+    async fn append_from(
+        &mut self,
+        context: &mut Vec<Message>,
+        message: Message,
+        queued: Option<(Queue, &str)>,
+    ) -> Result<(), Halt> {
         self.emit(AgentEvent::MessageStart { role: message.role() }).await;
-        self.finish(&message).await?;
+        let id = self.record(&message).await?;
+        if let Some((queue, text)) = queued {
+            self.config.queues.remove_front(queue, text);
+        }
+        self.emit(AgentEvent::MessageEnd {
+            message: message.clone(),
+            entry_id: id,
+        })
+        .await;
         context.push(message);
         Ok(())
     }
@@ -313,10 +357,8 @@ impl<'a> Engine<'a, '_, '_> {
             Err(error) if error.failure == HookFailure::Cancelled => return Err(Halt::Failed(self.hook_error(error))),
             transformed => transformed,
         };
-        self.append(context, message).await?;
-        if let Some(queue) = queue {
-            self.config.queues.remove_front(queue, &text);
-        }
+        self.append_from(context, message, queue.map(|queue| (queue, text.as_str())))
+            .await?;
         let index = context.len() - 1;
         match transformed {
             Ok(replacement) if replacement != text => {
@@ -366,18 +408,18 @@ impl<'a> Engine<'a, '_, '_> {
         // Whether queued follow-ups are taken at the top of the next turn.
         let mut take_follow_ups = false;
         loop {
-            // A new turn, unless a summary request has just ended inside the current one. A turn
-            // exists to make a request: without budget, or once cancelled, none starts, and
-            // queued input stays queued for the next run.
-            if self.turn.is_none() {
-                if self.control.cancel.is_cancelled() {
-                    return Ok(LoopOutcome::Aborted);
-                }
-                if self.control.max_turns.is_some_and(|limit| result.requests >= limit) {
-                    return Ok(LoopOutcome::MaxTurns);
-                }
-                self.start_turn(result).await;
+            // A turn exists to make a request: without budget, or once cancelled, none is made,
+            // and queued input stays queued for the next run. The first turn of an attempt
+            // starts with it, before the prompt, so this is checked before taking input as
+            // well; a summary request may also have used the budget inside the current turn.
+            if self.control.cancel.is_cancelled() {
+                return Ok(LoopOutcome::Aborted);
             }
+            if self.control.max_turns.is_some_and(|limit| result.requests >= limit) {
+                return Ok(LoopOutcome::MaxTurns);
+            }
+            // A new turn, unless one is in progress.
+            self.start_turn(result).await;
             // Queued input is taken one message at a time, so a rejected message or a stopped
             // run leaves the rest of the queue for the next run.
             while let Some(text) = config.queues.front(Queue::Steering) {
@@ -964,9 +1006,11 @@ async fn execute(tool: &dyn Tool, args: Value, spec: &LoopSpec, cancel: &Cancell
     if cancel.is_cancelled() {
         return Outcome::blocked(NOT_STARTED);
     }
+    // A token of the call's own: cancelled with the run, while a tool that cancels it to
+    // stop work of its own does not stop the run.
     let ctx = ToolContext {
         cwd: spec.cwd.clone(),
-        cancel: cancel.clone(),
+        cancel: cancel.child_token(),
     };
     let started = Instant::now();
     let future = AssertUnwindSafe(tool.execute(args, &ctx)).catch_unwind();

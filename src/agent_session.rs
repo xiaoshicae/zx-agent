@@ -164,9 +164,11 @@ impl AgentSession {
     /// Callbacks must return promptly. A panic detaches only that subscriber, and is
     /// observable through the handle and failed_subscribers; other subscribers continue.
     pub fn subscribe(&self, sink: Arc<dyn EventSink>) -> Subscription {
+        let (listener, failed) = self.events.attach(sink);
         Subscription {
             events: Arc::downgrade(&self.events),
-            listener: self.events.attach(sink),
+            listener,
+            failed,
         }
     }
 
@@ -284,31 +286,35 @@ impl Drop for ActiveRun<'_> {
 }
 
 /// Keeps an additional event subscriber attached. Dropping it unsubscribes; an already
-/// dispatched snapshot may still finish. The handle does not keep the conversation alive.
+/// dispatched snapshot may still finish. The handle keeps neither the conversation nor the
+/// sink alive: the session owns its subscribers and releases them when it is dropped.
 #[must_use = "retain the subscription for as long as events are needed"]
 pub struct Subscription {
     events: Weak<EventHub>,
-    listener: Arc<Listener>,
+    /// Identifies the subscriber; the session holds the only strong reference.
+    listener: Weak<Listener>,
+    failed: Arc<AtomicBool>,
 }
 
 impl Subscription {
     /// Whether a callback panic caused this subscriber to be detached.
     pub fn has_panicked(&self) -> bool {
-        self.listener.failed.load(Ordering::SeqCst)
+        self.failed.load(Ordering::SeqCst)
     }
 }
 
 impl Drop for Subscription {
     fn drop(&mut self) {
         if let Some(events) = self.events.upgrade() {
-            lock(&events.listeners).retain(|listener| !Arc::ptr_eq(listener, &self.listener));
+            // The weak reference keeps the allocation, so no other listener can share its address.
+            lock(&events.listeners).retain(|listener| !std::ptr::eq(Arc::as_ptr(listener), self.listener.as_ptr()));
         }
     }
 }
 
 struct Listener {
     sink: Arc<dyn EventSink>,
-    failed: AtomicBool,
+    failed: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
@@ -318,13 +324,15 @@ struct EventHub {
 }
 
 impl EventHub {
-    fn attach(&self, sink: Arc<dyn EventSink>) -> Arc<Listener> {
+    fn attach(&self, sink: Arc<dyn EventSink>) -> (Weak<Listener>, Arc<AtomicBool>) {
+        let failed = Arc::new(AtomicBool::new(false));
         let listener = Arc::new(Listener {
             sink,
-            failed: AtomicBool::new(false),
+            failed: failed.clone(),
         });
-        lock(&self.listeners).push(listener.clone());
-        listener
+        let handle = Arc::downgrade(&listener);
+        lock(&self.listeners).push(listener);
+        (handle, failed)
     }
 }
 
@@ -338,7 +346,8 @@ pub struct EventStream {
 }
 
 impl EventStream {
-    /// The next event; waits until one arrives. `None` once the session is gone.
+    /// The next event; waits until one arrives. `None` once the session is gone and the
+    /// events it sent before are read.
     pub async fn recv(&mut self) -> Option<Event> {
         self.receiver.recv().await
     }

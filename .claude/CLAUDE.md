@@ -127,14 +127,14 @@
 7. **会话写入失败时立即停止运行**（审计要求）：会话宿主返回错误，循环不再执行后续步骤，运行以 `Error` 结束，即使同时被取消。
 8. **工具输出必须截断**（`src/tools/truncate.rs`）；耗时的工具必须响应 `ToolContext::cancel`。
 9. **认证用的 API key 只从环境变量读取**，不主动写入会话文件、事件或日志；其环境变量从 bash 子进程中删除（`BashTool::hidden_env`）。CLI 的 `RedactSecrets` 在工具输出持久化前过滤认证 key 的完整字面值；不识别未知或变形的密钥，也不覆盖输入、模型输出与参数，边界见 README 的"安全模型"。
-10. **有副作用的工具调用先记录开始再执行，恢复时不重放。** `Tool::effects()` 为 `SideEffects` 的调用通过检查与审批后，先追加 `tool_call_started`，写入失败则不执行（`src/agent/agent_loop.rs`）。Runner 每次运行开始时，为分支末尾缺少结果的调用补写错误结果，按开始记录区分结果未知与未执行（`src/session/recovery.rs`、`src/runner.rs`）。
+10. **有副作用的工具调用先记录开始再执行，恢复时不重放。** `Tool::effects()` 为 `SideEffects` 的调用通过检查与审批后，先追加 `tool_call_started`，写入失败则不执行（`src/agent/agent_loop.rs`）。Runner 每次运行开始时，为分支末尾缺少结果的调用补写错误结果，按开始记录区分结果未知与未执行；以 `Error` 或 `Aborted` 结束的回答中的调用从不执行，一律记为未执行（`src/session/recovery.rs`、`src/runner.rs`）。
 
 ## 新增功能放在哪里
 
 - **新 provider**：实现 `ai::Provider` 并遵守不变量 1。为解析逻辑写单元测试，并在 `tests/` 下用本地假 HTTP 服务（`tests/common/mock_server.rs`）写端到端测试，参照 `tests/openai_mock.rs`。
 - **新工具**：实现 `agent::Tool`。参数定义成带 `#[serde(deny_unknown_fields)]` 的结构体再反序列化；输出要截断；要支持取消；不会改变任何状态的工具让 `effects()` 返回 `Effects::ReadOnly`，其余保留默认的 `SideEffects`（不变量 10）。测试覆盖成功、参数错误、超时或取消三种情况。
 - **新策略**：内置策略实现 `agent::ToolPolicy`，通过 `policy::PolicyHook` 注册（运行在 `Policy` 阶段），无法判断时返回 `Decision::Deny`；扩展的放行判断写在 `Hooks::before_tool`。
-- **新扩展**：实现 `agent::Hooks`，按需覆盖默认方法；每个回调最后一个参数是 `&HookContext`（会话、运行、工作目录、取消令牌）。回调必须异步让出执行权。错误、panic、取消与超时由宿主处理，具体规则见 README。阶段（`Hooks::stage`）默认 `Extension`，只有内置的策略适配、脱敏与落盘声明其他阶段。用 `HookChain::push_with` 注册时给出名称。钩子输入输出的 JSON 格式由 `tests/hook_contract.rs` 固定，改动前先确认钩子进程与审批转发能否兼容。
+- **新扩展**：实现 `agent::Hooks`，按需覆盖默认方法；每个回调最后一个参数是 `&HookContext`（会话、运行、工作目录、只读的取消信号）。回调必须异步让出执行权。`transform_context` 不能追加 system 消息，系统提示词只来自配置。错误、panic、取消与超时由宿主处理，具体规则见 README。阶段（`Hooks::stage`）默认 `Extension`，只有内置的策略适配、脱敏与落盘声明其他阶段。用 `HookChain::push_with` 注册时给出名称。钩子输入输出的 JSON 格式由 `tests/hook_contract.rs` 固定，改动前先确认钩子进程与审批转发能否兼容。
 - **上下文改动**：`on_input` 完成后才写入原始输入，改写或拒绝再追加 `context_edit`，钩子被取消时不写入；`transform_context` 返回 `ContextEdit` 计划，整份计划先校验，逐项写入成功后再请求模型。
 - **新的会话存储**：实现 `session::SessionLog`。`append` 在记录保存后才返回，同一 `seq` 已有记录时报错；新会话由后端保存头部后交给 `SessionStore::with_log`，续接时读出 `LoadedSession` 交给 `SessionStore::load`。用内存实现测往返，参照 `tests/runner.rs` 的 `TableLog`。
 - **新 IM 平台**：实现 `im::ImChannel`，遵守其文档列出的职责：立即确认投递、按消息 ID 去重、只转交发给机器人的消息、遵守限频、拆分超长文本。协议用本地假服务测；与 `Server` 的配合参照 `tests/im_server.rs` 的 `FakeChannel`；Slack 的协议测试参照 `tests/im_slack.rs` 与 `tests/common/fake_slack.rs`。

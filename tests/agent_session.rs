@@ -597,6 +597,25 @@ async fn a_bounded_subscription_receives_the_events_in_order() {
 }
 
 #[tokio::test]
+async fn a_bounded_subscription_ends_when_the_session_is_dropped() {
+    let (session, _, _) = setup([FauxStep::text("done")]);
+    let mut stream = session.subscribe_bounded(std::num::NonZeroUsize::new(1024).unwrap());
+    session.prompt("go").await.unwrap();
+
+    drop(session);
+
+    let mut received = 0;
+    let ended = tokio::time::timeout(Duration::from_secs(5), async {
+        while stream.recv().await.is_some() {
+            received += 1;
+        }
+    })
+    .await;
+    assert!(ended.is_ok(), "recv kept waiting after the session was dropped");
+    assert!(received > 0);
+}
+
+#[tokio::test]
 async fn a_full_bounded_subscription_drops_and_counts_events_without_blocking_the_run() {
     let (session, _, initial) = setup([FauxStep::text("done")]);
     let mut stream = session.subscribe_bounded(std::num::NonZeroUsize::new(2).unwrap());
