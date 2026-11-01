@@ -10,6 +10,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use common::mock_server::{MockServer, Reply};
+use zx_agent::ai::Message;
+use zx_agent::session::SessionStore;
 
 fn command(server: &MockServer, dir: &Path, mode: &str, args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_zx-agent"));
@@ -75,6 +77,171 @@ fn register_skill(dir: &Path, extra: &str) {
         dir,
         &format!("{extra}\n[[skills]]\nname = 'review'\ndescription = 'Review a change'\npath = 'SKILL.md'\n"),
     );
+}
+
+fn read_file_reply() -> Reply {
+    Reply::Sse(vec![
+        json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"read","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"source.txt\"}"}}]},"finish_reason":"tool_calls"}]}),
+    ])
+}
+
+fn read_output_reply(body: &Value) -> Vec<Value> {
+    let reference: Value = serde_json::from_str(
+        body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|message| message["role"] == "tool")
+            .unwrap()["content"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    vec![
+        json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"output","type":"function","function":{"name":"read_output","arguments":json!({"id":reference["outputId"]}).to_string()}}]},"finish_reason":"tool_calls"}]}),
+    ]
+}
+
+#[tokio::test]
+async fn cli_spills_large_redacted_results_and_pages_them_without_recursive_files() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("source.txt"), "value=sk-profile-key\n".repeat(1000)).unwrap();
+    let server = MockServer::start(vec![
+        read_file_reply(),
+        Reply::Dynamic(read_output_reply),
+        Reply::text("done"),
+    ])
+    .await;
+    let output = run(&server, dir.path(), &["--session", "audit.jsonl", "go"]).await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let reference: Value = serde_json::from_str(&tool_result(&server, 1)).unwrap();
+    let content = std::fs::read_to_string(reference["path"].as_str().unwrap()).unwrap();
+    assert!(content.contains("[REDACTED]"));
+    assert!(!content.contains("sk-profile-key"));
+    let requests = server.requests();
+    let page = requests[2].body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|message| message["role"] == "tool")
+        .unwrap()["content"]
+        .as_str()
+        .unwrap();
+    assert!(page.contains("value=[REDACTED]"));
+    assert!(page.len() <= 8192);
+    assert_eq!(
+        std::fs::read_dir(dir.path().join(".zx-agent/outputs")).unwrap().count(),
+        1
+    );
+    assert!(
+        !std::fs::read_to_string(dir.path().join("audit.jsonl"))
+            .unwrap()
+            .contains("sk-profile-key")
+    );
+}
+
+#[tokio::test]
+async fn an_explicit_tool_set_without_read_output_keeps_large_results_inline() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("source.txt"), "x".repeat(20_000)).unwrap();
+    let server = MockServer::start(vec![read_file_reply(), Reply::text("done")]).await;
+    let output = run(&server, dir.path(), &["--tools", "read_file", "go"]).await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(tool_result(&server, 1), "x".repeat(20_000));
+    let tools = server.requests()[0].body["tools"].as_array().unwrap().clone();
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0]["function"]["name"], "read_file");
+    assert!(!dir.path().join(".zx-agent").exists());
+}
+
+#[tokio::test]
+async fn a_profile_can_disable_spilling_without_removing_the_reading_tool() {
+    let dir = tempfile::tempdir().unwrap();
+    profile(dir.path(), "[toolOutput]\nthresholdBytes = 0");
+    std::fs::write(dir.path().join("source.txt"), "x".repeat(20_000)).unwrap();
+    let server = MockServer::start(vec![read_file_reply(), Reply::text("done")]).await;
+    let output = run(&server, dir.path(), &["--profile", "profile.toml", "go"]).await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(tool_result(&server, 1), "x".repeat(20_000));
+    assert!(
+        server.requests()[0].body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["function"]["name"] == "read_output")
+    );
+    assert!(!dir.path().join(".zx-agent").exists());
+}
+
+#[tokio::test]
+async fn a_configured_output_directory_is_relative_to_the_profile_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_dir = dir.path().join("config");
+    std::fs::create_dir(&config_dir).unwrap();
+    profile(&config_dir, "[toolOutput]\ndirectory = 'results'\nthresholdBytes = 256");
+    std::fs::write(dir.path().join("source.txt"), "x".repeat(1000)).unwrap();
+    let server = MockServer::start(vec![read_file_reply(), Reply::text("done")]).await;
+    let output = run(&server, dir.path(), &["--profile", "config/profile.toml", "go"]).await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let reference: Value = serde_json::from_str(&tool_result(&server, 1)).unwrap();
+    assert_eq!(
+        Path::new(reference["path"].as_str().unwrap()).parent(),
+        Some(config_dir.join("results").canonicalize().unwrap().as_path())
+    );
+}
+
+#[tokio::test]
+async fn run_keeps_auto_compaction_disabled_unless_the_cli_explicitly_enables_it() {
+    for enable in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = SessionStore::create(&dir.path().join("audit.jsonl"), common::header()).unwrap();
+        let id = store.append_message(Message::user("x".repeat(300 * 1024))).unwrap();
+        store.append_message(Message::user("recent input")).unwrap();
+        drop(store);
+        let summary =
+            json!({"facts":[{"text":"Old observation","sourceEntryIds":[id]}],"inferences":[],"plans":[]}).to_string();
+        let replies = if enable {
+            vec![Reply::text(&summary), Reply::text("answer")]
+        } else {
+            vec![Reply::text("answer")]
+        };
+        let server = MockServer::start(replies).await;
+        let mut args = vec!["--tools", "", "--session", "audit.jsonl", "--output", "jsonl"];
+        if enable {
+            args.extend(["--compact-threshold-bytes", "262144"]);
+        }
+        args.push("continue");
+        let output = run(&server, dir.path(), &args).await;
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        assert_eq!(server.requests().len(), if enable { 2 } else { 1 });
+        let store = SessionStore::open(&dir.path().join("audit.jsonl")).unwrap();
+        assert_eq!(store.latest_compaction().is_some(), enable);
+    }
+}
+
+#[tokio::test]
+async fn invalid_context_budgets_fail_before_creating_a_session_or_calling_the_model() {
+    for text in [
+        "[compaction]\ntriggerBytes = 100\nkeepRecentBytes = 200",
+        "[compaction]\nmaxSummaryTokens = 0",
+        "[toolOutput]\nthresholdBytes = 1",
+        "[toolOutput]\nmaxFileBytes = 1048577",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        profile(dir.path(), text);
+        let server = MockServer::start(vec![]).await;
+        let output = run(
+            &server,
+            dir.path(),
+            &["--profile", "profile.toml", "--session", "audit.jsonl", "go"],
+        )
+        .await;
+        assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+        assert!(server.requests().is_empty());
+        assert!(!dir.path().join("audit.jsonl").exists());
+    }
 }
 
 #[tokio::test]

@@ -1,9 +1,11 @@
 //! Events emitted while the agent runs, and the sink that receives them.
 
+use async_trait::async_trait;
 use serde::Serialize;
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 
-use crate::ai::{Delta, Message};
+use crate::ai::{Delta, Message, Usage};
 
 /// How one `run_loop` call ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -23,7 +25,8 @@ pub enum LoopOutcome {
 
 /// Events emitted while the agent runs (pi: `AgentEvent`, packages/agent/src/types.ts).
 ///
-/// A turn is one model response plus the tool calls it requested.
+/// A turn is one model request plus its tool calls. Automatic host preparation requests
+/// count against the same turn budget; manual compaction reports its own costs.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum AgentEvent {
@@ -79,6 +82,24 @@ pub enum AgentEvent {
         phase: &'static str,
         error: String,
     },
+    /// The host persisted a summary request before calling the model.
+    CompactionStart {
+        input_bytes: usize,
+        automatic: bool,
+    },
+    /// The summary was validated and persisted before changing model context.
+    CompactionEnd {
+        entry_id: String,
+        input_bytes: usize,
+        output_bytes: usize,
+        usage: Usage,
+        automatic: bool,
+    },
+    /// A summary failed; the preceding projection is retained.
+    CompactionFailed {
+        error: String,
+        automatic: bool,
+    },
 }
 
 impl AgentEvent {
@@ -97,12 +118,17 @@ impl AgentEvent {
             AgentEvent::RetryScheduled { .. } => "retry_scheduled",
             AgentEvent::ContextEdited { .. } => "context_edited",
             AgentEvent::HookFailed { .. } => "hook_failed",
+            AgentEvent::CompactionStart { .. } => "compaction_start",
+            AgentEvent::CompactionEnd { .. } => "compaction_end",
+            AgentEvent::CompactionFailed { .. } => "compaction_failed",
         }
     }
 }
 
-/// Receives events. Called synchronously and possibly from concurrently running tool
-/// futures, so implementations use interior mutability and must not block for long.
+/// Receives events and persists edits synchronously, possibly from concurrent tool
+/// futures. These methods must not block for long. prepare_context is the asynchronous
+/// session-host boundary before the next task request.
+#[async_trait]
 pub trait EventSink: Send + Sync {
     /// Handle one event.
     fn emit(&self, event: AgentEvent);
@@ -111,6 +137,27 @@ pub trait EventSink: Send + Sync {
     fn edit_context(&self, _index: usize, _replacement: Option<&str>) -> Result<(), String> {
         Ok(())
     }
+    /// Session-host preparation after input/context edits and before a task request.
+    /// The default makes no request or change. A replacement must already be persisted;
+    /// request costs, including failed preparation, count against the run budget.
+    async fn prepare_context(&self, _cancel: &CancellationToken) -> ContextPreparation {
+        ContextPreparation::Unchanged
+    }
+}
+
+/// A host-owned preparation step. The loop knows neither profiles nor compaction policy.
+pub enum ContextPreparation {
+    Unchanged,
+    Updated {
+        messages: Vec<Message>,
+        requests: u32,
+        usage: Usage,
+    },
+    Failed {
+        error: String,
+        requests: u32,
+        usage: Usage,
+    },
 }
 
 impl<F> EventSink for F
@@ -177,6 +224,21 @@ mod tests {
                 hook: "test".into(),
                 phase: "on_event",
                 error: "failed".into(),
+            },
+            AgentEvent::CompactionStart {
+                input_bytes: 1000,
+                automatic: true,
+            },
+            AgentEvent::CompactionEnd {
+                entry_id: "s".into(),
+                input_bytes: 1000,
+                output_bytes: 500,
+                usage: Usage::default(),
+                automatic: true,
+            },
+            AgentEvent::CompactionFailed {
+                error: "failed".into(),
+                automatic: false,
             },
         ];
         for event in events {

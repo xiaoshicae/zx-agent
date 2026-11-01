@@ -10,7 +10,7 @@ use futures::{FutureExt, StreamExt};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use super::events::{AgentEvent, EventSink, LoopOutcome};
+use super::events::{AgentEvent, ContextPreparation, EventSink, LoopOutcome};
 use super::hooks::{
     ContextEdit, HookCall, HookChain, HookError, HookFailure, HookPhase, TurnDecision, TurnDisposition, TurnSummary,
     report_failure,
@@ -275,6 +275,47 @@ impl Engine<'_, '_, '_> {
             }
             if self.control.cancel.is_cancelled() {
                 return Ok(LoopOutcome::Aborted);
+            }
+            let prepared = self.control.sink.prepare_context(self.control.cancel).await;
+            let (requests, usage, failure) = match prepared {
+                ContextPreparation::Unchanged => (0, Usage::default(), None),
+                ContextPreparation::Updated {
+                    messages,
+                    requests,
+                    usage,
+                } => {
+                    *context = messages;
+                    (requests, usage, None)
+                }
+                ContextPreparation::Failed { error, requests, usage } => (requests, usage, Some(error)),
+            };
+            result.usage.add(&usage);
+            for request in 0..requests {
+                result.turns = result.turns.saturating_add(1);
+                self.emit(AgentEvent::TurnEnd {
+                    turn: self.control.turn_offset.saturating_add(result.turns),
+                })
+                .await;
+                if request + 1 < requests {
+                    self.emit(AgentEvent::TurnStart {
+                        turn: self.control.turn_offset.saturating_add(result.turns).saturating_add(1),
+                    })
+                    .await;
+                }
+            }
+            if let Some(error) = failure {
+                return Err(error);
+            }
+            if self.control.cancel.is_cancelled() {
+                return Ok(LoopOutcome::Aborted);
+            }
+            if self.control.max_turns.is_some_and(|limit| result.turns >= limit) {
+                return Ok(LoopOutcome::MaxTurns);
+            }
+            if requests > 0 {
+                // Preparation is a request boundary too. Drain newly arrived steering
+                // and persist context hooks again before the next task request.
+                continue;
             }
             result.turns = result.turns.saturating_add(1);
             let message = self.stream(context).await;
