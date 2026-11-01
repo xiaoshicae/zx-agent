@@ -3,6 +3,8 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, ensure};
 use async_trait::async_trait;
@@ -181,26 +183,48 @@ impl SessionLog for JsonlFile {
     }
 }
 
-/// Take an exclusive lock on the whole file without waiting. It lasts until the file is
-/// closed, including when the process exits or is killed.
+/// How long opening keeps trying a lock that another descriptor holds before reporting the file
+/// as in use. A program that this process is starting holds copies of its descriptors until it
+/// runs, so a store that was just dropped can keep its lock for a moment: under a millisecond
+/// in a measurement on macOS (2026-11-01), longer on a busy machine.
+#[cfg(unix)]
+const LOCK_WAIT: Duration = Duration::from_millis(500);
+
+/// Longest pause between two attempts; the first pause is 1 ms and each one doubles.
+#[cfg(unix)]
+const LOCK_RETRY_MAX: Duration = Duration::from_millis(50);
+
+/// Take an exclusive lock on the whole file. It lasts until the file is closed, including when
+/// the process exits or is killed. A lock held elsewhere is retried for up to [`LOCK_WAIT`].
 #[cfg(unix)]
 fn lock(file: &File, path: &Path) -> Result<()> {
     use std::os::fd::AsRawFd;
 
-    // SAFETY: flock(2) has no memory-safety preconditions; the descriptor stays open for the
-    // call because `file` is borrowed.
-    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if result == 0 {
-        return Ok(());
+    let started = Instant::now();
+    let mut pause = Duration::from_millis(1);
+    loop {
+        // SAFETY: flock(2) has no memory-safety preconditions; the descriptor stays open for
+        // the call because `file` is borrowed.
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        match error.kind() {
+            std::io::ErrorKind::Interrupted => continue,
+            std::io::ErrorKind::WouldBlock if started.elapsed() < LOCK_WAIT => {
+                // A synchronous pause: opening happens once per session, and it waits only
+                // while another descriptor holds the lock.
+                std::thread::sleep(pause);
+                pause = (pause * 2).min(LOCK_RETRY_MAX);
+            }
+            std::io::ErrorKind::WouldBlock => anyhow::bail!(
+                "session file {} is in use: another process or session has it open for writing",
+                path.display()
+            ),
+            _ => return Err(error).with_context(|| format!("cannot lock session file {}", path.display())),
+        }
     }
-    let error = std::io::Error::last_os_error();
-    if error.kind() == std::io::ErrorKind::WouldBlock {
-        anyhow::bail!(
-            "session file {} is in use: another process or session has it open for writing",
-            path.display()
-        );
-    }
-    Err(error).with_context(|| format!("cannot lock session file {}", path.display()))
 }
 
 /// Without `flock(2)`, two writers are not detected.

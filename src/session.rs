@@ -806,6 +806,37 @@ mod tests {
         assert!(SessionStore::open(&path).is_err(), "the writer still holds the file");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_dropped_store_can_be_reopened_while_this_process_starts_programs() {
+        // A program being started holds copies of this process's descriptors until it runs,
+        // so the lock of a store that was just dropped can outlive the store for a moment.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        drop(SessionStore::create(&path, header()).unwrap());
+        let starting = std::sync::atomic::AtomicBool::new(true);
+
+        let failures = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while starting.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::process::Command::new("true").status().unwrap();
+                }
+            });
+            let failures: Vec<String> = (0..3000)
+                .filter_map(|_| SessionStore::open(&path).err().map(|error| error.to_string()))
+                .collect();
+            starting.store(false, std::sync::atomic::Ordering::Relaxed);
+            failures
+        });
+
+        assert!(
+            failures.is_empty(),
+            "{} reopenings failed: {:?}",
+            failures.len(),
+            failures.first()
+        );
+    }
+
     /// Keeps `keep` bytes of the first write and then fails once, like a disk that fills up
     /// in the middle of a record and is freed again. Later writes succeed.
     struct PartialWriteOnce {
