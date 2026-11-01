@@ -286,7 +286,8 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 - 新增测试 18 项，没有删除测试：
   - 修复前实测失败 14 项：零超时在请求前被拒绝（CLI）与 provider 拒绝零超时；未知 `finish_reason` 不论取值都不重试；不合法的参数附上原文；成功状态下的错误对象与整份 JSON 回答；stderr 很长时 stdout 的回答仍在；容器无法启动时不留会话文件；容器中的工具串行、排队的调用在取消后记为未执行、命令用启动时检查过的 shell；`run` 与 chat 打印钩子失败；stdout 关闭时退出码仍为 0。其中 provider 拒绝零超时与不合法参数两项以反向验证确认：去掉修复后测试即失败，修改已还原；钩子失败的两项在修复前实测失败，断言改写后又做了一次同样的反向验证。
   - 新接口与新函数 4 项：工具的执行方式随执行器；stdout 与 stderr 的预算分配；`clip` 与 `prefix_within`。
-  - 既有测试的调整：两处期望的错误码由 `<值>` 改为 `finish_reason:<值>`（`openai.rs` 的 `only_known_finish_reasons_succeed`、`tests/openai_mock.rs` 的 `an_unknown_finish_reason_is_a_provider_error_not_a_completed_answer`），属于上表中有意的变化；其余既有测试未改。
+  - 既有测试的调整：两处期望的错误码由 `<值>` 改为 `finish_reason:<值>`（`openai.rs` 的 `only_known_finish_reasons_succeed`、`tests/openai_mock.rs` 的 `an_unknown_finish_reason_is_a_provider_error_not_a_completed_answer`），属于上表中有意的变化；其余既有测试的断言未改。
+  - 偶发失败的测试（单独提交）：PR #34 新增的 `a_result_not_stored_in_time_stays_inline` 在本 PR 的 Linux CI 上失败一次：结果被存成了文件。它假设零时限总在存储的第一个文件操作完成前到期，但 Tokio 先 poll 被包裹的 future、再看计时器，计时器最早在下一个毫秒刻度触发（`tokio-1.54.1` 的 `time/timeout.rs`、`runtime/time/source.rs`），磁盘快时写入先完成。本机实测：零时限下经阻塞线程池的打开、写入与 flush，300 次中 239 次完成；旧测试在 8 路并发各 100 次的压力下失败 1 次。改为在只有一个阻塞线程的运行时中占住该线程直到钩子返回，存储确定无法按时完成；并给钩子设 10 秒上限，时限失效时测试失败而不是挂住。同样压力下新版 0 次失败；反向验证中把存储时限改为 1 小时，新版在 10 秒时失败。断言与生产代码未改。
 - 本机 macOS 验证：stable 与 Rust 1.88.0 各 677 项通过（基线 659 项，在 `66e1b7b` 上实测），6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过；设置 `ZX_DOCKER_TEST_IMAGE=debian:bookworm-slim` 时容器测试 34 项通过，其中 12 项在真实 Docker 上运行。自查脚本的命中与基线相同（`write_line` 中的 `let _ =` 移入新的 `print_line`，理由不变）。未新增依赖，`Cargo.toml`、`Cargo.lock` 未改动。
 
 下面的 P0–P9 继续按各自验收标准推进。
