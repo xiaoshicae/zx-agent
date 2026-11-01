@@ -47,7 +47,8 @@ pub enum CommandEnd {
     Cancelled,
 }
 
-/// A finished command. Its processes have been stopped, including background children.
+/// A finished command. The processes it started have been stopped as far as the executor can
+/// track them; see [`Executor::run`].
 #[derive(Debug)]
 pub struct CommandOutput {
     pub stdout: Captured,
@@ -58,9 +59,12 @@ pub struct CommandOutput {
 /// Runs commands and reads files for the built-in tools.
 #[async_trait]
 pub trait Executor: Send + Sync {
-    /// Run `command` until it exits, its timeout passes, or `cancel` fires; in the last two
-    /// cases the command and everything it started are stopped. Dropping the future stops
-    /// them too. `Err` means the command could not start; the text is for the model.
+    /// Run `command` until it exits, its timeout passes, or `cancel` fires. Then, and when the
+    /// future is dropped, the processes it started are stopped, background children included.
+    /// How far that reaches depends on the executor: [`LocalExecutor`] stops the command's
+    /// process group, so a child that leaves it (`setsid`, a daemon) can keep running;
+    /// [`ContainerExecutor`] stops every process of the command user. `Err` means the command
+    /// could not start; the text is for the model.
     async fn run(&self, command: &ShellCommand<'_>, cancel: &CancellationToken) -> Result<CommandOutput, String>;
 
     /// Read a regular file of at most `max_bytes`. Directories, special files and larger

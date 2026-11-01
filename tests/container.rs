@@ -40,7 +40,8 @@ case "$1" in
     ;;
   exec)
     shift
-    if [ "$1" = "--workdir" ]; then shift 2; fi
+    # Skip the options before the container name: --user, and --workdir for commands.
+    while [ "${1#--}" != "$1" ]; do shift 2; done
     shift 4
     label=$1
     case "$label" in
@@ -58,7 +59,7 @@ case "$1" in
       zx-agent-read)
         if [ -f "$dir/read.out" ]; then cat "$dir/read.out"; fi
         exit "$(cat "$dir/read.code" 2>/dev/null || echo 0)" ;;
-      zx-agent-kill)
+      zx-agent-sweep)
         exit 0 ;;
     esac
     echo "fake docker: unexpected exec $label" >&2
@@ -168,18 +169,43 @@ async fn start_runs_a_hardened_container_and_reports_its_platform() {
     assert_eq!(executor.platform().arch, "x86_64");
     let calls = fake.calls();
     let run = calls.iter().find(|call| call[0] == "run").unwrap().join(" ");
-    for flag in ["--network none", "--read-only", "--user 65534:65534", "--pull never"] {
+    // The keep-alive processes run as root; the probe, like every call, as the command user.
+    for flag in ["--network none", "--read-only", "--user 0:0", "--pull never"] {
         assert!(run.contains(flag), "{flag:?} missing from {run}");
     }
     let probe = &fake.execs("zx-agent-probe")[0];
-    assert_eq!(probe[1], executor.name());
+    assert_eq!(probe[1..4], ["--user", "65534:65534", executor.name()]);
     assert_eq!(
         after(probe, "zx-agent-probe"),
-        [
-            "bash".to_string(),
-            "/tmp/.zx-agent".to_string(),
-            fake.workspace().display().to_string()
-        ]
+        ["bash".to_string(), fake.workspace().display().to_string()]
+    );
+}
+
+#[tokio::test]
+async fn start_refuses_a_root_user_before_docker_runs() {
+    let fake = FakeDocker::new();
+    let config = ContainerConfig {
+        user: "0:0".into(),
+        ..fake.config()
+    };
+
+    let error = ContainerExecutor::start(config).await.err().unwrap().to_string();
+
+    assert!(error.contains("is root"), "{error}");
+    assert!(fake.calls().is_empty());
+}
+
+#[tokio::test]
+async fn start_refuses_an_image_whose_commands_would_run_as_root() {
+    let fake = FakeDocker::new();
+    fake.answer("probe.code", "90");
+    fake.answer("probe.err", "commands must not run as root (uid 0)");
+
+    let error = ContainerExecutor::start(fake.config()).await.err().unwrap().to_string();
+
+    assert_eq!(
+        error,
+        "container image fake:1 cannot be used: commands must not run as root (uid 0)"
     );
 }
 
@@ -223,7 +249,7 @@ async fn start_explains_a_workspace_the_container_user_cannot_read() {
 }
 
 #[tokio::test]
-async fn commands_run_in_the_workspace_and_their_group_is_stopped_afterwards() {
+async fn commands_run_as_their_user_in_the_workspace_between_two_sweeps() {
     let fake = FakeDocker::new();
     fake.answer("cmd.out", "hi\n");
     fake.answer("cmd.err", "warn\n");
@@ -237,15 +263,20 @@ async fn commands_run_in_the_workspace_and_their_group_is_stopped_afterwards() {
     assert!(matches!(output.end, CommandEnd::Exited(3)), "{:?}", output.end);
     let call = &fake.execs("zx-agent-run")[0];
     assert_eq!(
-        call[1..3],
-        ["--workdir".to_string(), fake.workspace().display().to_string()]
+        call[1..5],
+        [
+            "--user".to_string(),
+            "65534:65534".to_string(),
+            "--workdir".to_string(),
+            fake.workspace().display().to_string()
+        ]
     );
-    let arguments = after(call, "zx-agent-run");
-    assert!(arguments[0].starts_with("/tmp/.zx-agent/"), "{arguments:?}");
-    assert_eq!(arguments[1..], ["bash".to_string(), "echo hi".to_string()]);
+    assert_eq!(after(call, "zx-agent-run"), ["bash".to_string(), "echo hi".to_string()]);
     assert!(!call.iter().any(|arg| arg == "-e" || arg == "--env"), "{call:?}");
-    let kill = &fake.execs("zx-agent-kill")[0];
-    assert_eq!(after(kill, "zx-agent-kill"), &arguments[..1]);
+    // One sweep clears what an earlier call may have left, one stops what this one left.
+    let sweeps = fake.execs("zx-agent-sweep");
+    assert_eq!(sweeps.len(), 2, "{sweeps:?}");
+    assert!(sweeps.iter().all(|sweep| sweep[1..3] == ["--user", "65534:65534"]));
 }
 
 #[tokio::test]
@@ -257,10 +288,7 @@ async fn a_timed_out_command_is_stopped_inside_the_container() {
     let output = run(&executor, &fake.workspace(), "sleep 30", Duration::from_millis(100)).await;
 
     assert!(matches!(output.end, CommandEnd::TimedOut), "{:?}", output.end);
-    let runs = fake.execs("zx-agent-run");
-    let kills = fake.execs("zx-agent-kill");
-    let pid_file = &after(&runs[0], "zx-agent-run")[..1];
-    assert_eq!(after(&kills[0], "zx-agent-kill"), pid_file);
+    assert_eq!(fake.execs("zx-agent-sweep").len(), 2);
 }
 
 #[tokio::test]
@@ -269,7 +297,6 @@ async fn a_cancelled_command_is_stopped_inside_the_container() {
     fake.answer("cmd.hang", "");
     let executor = ContainerExecutor::start(fake.config()).await.unwrap();
     let cancel = CancellationToken::new();
-    cancel.cancel();
     let workspace = fake.workspace();
     let request = ShellCommand {
         shell: "bash",
@@ -279,10 +306,36 @@ async fn a_cancelled_command_is_stopped_inside_the_container() {
         hidden_env: &[],
     };
 
+    let running = executor.run(&request, &cancel);
+    let cancelling = async {
+        assert!(eventually(Duration::from_secs(5), || fake.execs("zx-agent-run").len() == 1).await);
+        cancel.cancel();
+    };
+    let (output, ()) = tokio::join!(running, cancelling);
+
+    assert!(matches!(output.unwrap().end, CommandEnd::Cancelled));
+    assert_eq!(fake.execs("zx-agent-sweep").len(), 2);
+}
+
+#[tokio::test]
+async fn a_run_cancelled_before_it_starts_runs_nothing() {
+    let fake = FakeDocker::new();
+    let executor = ContainerExecutor::start(fake.config()).await.unwrap();
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let workspace = fake.workspace();
+    let request = ShellCommand {
+        shell: "bash",
+        command: "echo never",
+        cwd: &workspace,
+        timeout: Duration::from_secs(60),
+        hidden_env: &[],
+    };
+
     let output = executor.run(&request, &cancel).await.unwrap();
 
     assert!(matches!(output.end, CommandEnd::Cancelled), "{:?}", output.end);
-    assert_eq!(fake.execs("zx-agent-kill").len(), 1);
+    assert!(fake.execs("zx-agent-run").is_empty());
 }
 
 #[tokio::test]
@@ -298,8 +351,9 @@ async fn a_dropped_run_still_stops_its_command() {
     .await;
 
     assert!(dropped.is_err(), "the command should still have been running");
+    // The sweep before the command, and the one queued when its run was dropped.
     assert!(
-        eventually(Duration::from_secs(5), || fake.execs("zx-agent-kill").len() == 1).await,
+        eventually(Duration::from_secs(5), || fake.execs("zx-agent-sweep").len() == 2).await,
         "no cleanup after the run future was dropped"
     );
 }
@@ -460,6 +514,63 @@ async fn real_background_children_end_with_their_command() {
 }
 
 #[tokio::test]
+async fn real_a_child_that_left_the_process_group_ends_with_its_command() {
+    let Some(image) = docker_image() else { return };
+    let (_dir, workspace) = real_workspace();
+    let executor = start_real(&image, &workspace).await;
+
+    // setsid gives the child its own session and process group.
+    let output = run(
+        &executor,
+        &workspace,
+        "setsid sleep 30 & echo started",
+        Duration::from_secs(30),
+    )
+    .await;
+
+    assert!(matches!(output.end, CommandEnd::Exited(0)), "{:?}", output.end);
+    let left = run(&executor, &workspace, COUNT_SLEEPERS, Duration::from_secs(30)).await;
+    assert_eq!(stdout(&left).trim(), "0");
+}
+
+#[tokio::test]
+async fn real_a_command_cannot_disable_its_own_cleanup() {
+    let Some(image) = docker_image() else { return };
+    let (_dir, workspace) = real_workspace();
+    let executor = start_real(&image, &workspace).await;
+
+    // Everything a command can write, such as /tmp, must be irrelevant to stopping it.
+    let output = run(
+        &executor,
+        &workspace,
+        "sleep 30 & rm -rf /tmp/.zx-agent /tmp/* 2>/dev/null; echo started",
+        Duration::from_secs(30),
+    )
+    .await;
+
+    assert!(matches!(output.end, CommandEnd::Exited(0)), "{:?}", output.end);
+    let left = run(&executor, &workspace, COUNT_SLEEPERS, Duration::from_secs(30)).await;
+    assert_eq!(stdout(&left).trim(), "0");
+}
+
+#[tokio::test]
+async fn real_commands_in_one_container_run_one_at_a_time() {
+    let Some(image) = docker_image() else { return };
+    let (_dir, workspace) = real_workspace();
+    let executor = start_real(&image, &workspace).await;
+
+    // Each command holds a lock directory for a second; an overlap makes one of them fail.
+    let command = "mkdir /tmp/held || exit 9; sleep 1; rmdir /tmp/held";
+    let (first, second) = tokio::join!(
+        run(&executor, &workspace, command, Duration::from_secs(30)),
+        run(&executor, &workspace, command, Duration::from_secs(30)),
+    );
+
+    assert!(matches!(first.end, CommandEnd::Exited(0)), "{:?}", first.end);
+    assert!(matches!(second.end, CommandEnd::Exited(0)), "{:?}", second.end);
+}
+
+#[tokio::test]
 async fn real_a_dropped_run_stops_its_command() {
     let Some(image) = docker_image() else { return };
     let (_dir, workspace) = real_workspace();
@@ -517,32 +628,6 @@ async fn real_files_are_read_inside_the_container() {
     }
     let error = executor.read_file(Path::new("/etc/os-release"), 4).await.unwrap_err();
     assert!(error.contains("over the 4 byte limit"), "{error}");
-}
-
-#[tokio::test]
-async fn real_hidden_files_read_as_empty_in_the_container() {
-    let Some(image) = docker_image() else { return };
-    let (_dir, workspace) = real_workspace();
-    let session = workspace.join("session.jsonl");
-    std::fs::write(&session, "secret").unwrap();
-    std::fs::write(workspace.join("app.log"), "public").unwrap();
-    let executor = ContainerExecutor::start(ContainerConfig {
-        hidden_files: vec![session.clone()],
-        ..ContainerConfig::new(&image, &workspace)
-    })
-    .await
-    .unwrap();
-
-    let output = run(
-        &executor,
-        &workspace,
-        "cat session.jsonl; echo '|'; cat app.log",
-        Duration::from_secs(30),
-    )
-    .await;
-
-    assert_eq!(stdout(&output), "|\npublic");
-    assert_eq!(std::fs::read_to_string(&session).unwrap(), "secret");
 }
 
 #[tokio::test]
@@ -627,6 +712,8 @@ async fn run_in_container_mode_describes_the_container_and_runs_bash_there() {
     let fake = FakeDocker::new();
     fake.answer("cmd.out", "from-container\n");
     let workspace = fake.workspace();
+    let sessions = tempfile::tempdir().unwrap();
+    let session = sessions.path().join("session.jsonl");
     let server = MockServer::start(vec![Reply::bash("c1", "echo hi"), Reply::text("done")]).await;
 
     let output = zx_run(
@@ -641,7 +728,7 @@ async fn run_in_container_mode_describes_the_container_and_runs_bash_there() {
             "--tools",
             "bash",
             "--session",
-            "session.jsonl",
+            session.to_str().unwrap(),
             "go",
         ],
     )
@@ -658,22 +745,46 @@ async fn run_in_container_mode_describes_the_container_and_runs_bash_there() {
         "{prompt}"
     );
     assert!(tool_result(&server, 1).starts_with("from-container\n"));
-    let run = fake
-        .calls()
-        .into_iter()
-        .find(|call| call[0] == "run")
-        .unwrap()
-        .join(" ");
-    assert!(
-        run.contains(&format!(
-            "type=bind,source=/dev/null,target={}/session.jsonl,readonly",
-            workspace.display()
-        )),
-        "the session file is not hidden: {run}"
-    );
     let exec = &fake.execs("zx-agent-run")[0];
-    assert_eq!(exec[1..3], ["--workdir".to_string(), workspace.display().to_string()]);
-    assert_eq!(after(exec, "zx-agent-run")[2], "echo hi");
+    assert_eq!(exec[3..5], ["--workdir".to_string(), workspace.display().to_string()]);
+    assert_eq!(after(exec, "zx-agent-run")[1], "echo hi");
+    assert!(session.exists());
+}
+
+#[tokio::test]
+async fn container_execution_refuses_a_session_file_the_container_could_read() {
+    let fake = FakeDocker::new();
+    let workspace = fake.workspace();
+    let server = MockServer::start(vec![]).await;
+
+    // Relative to the working directory, and in a directory that does not exist yet.
+    for session in ["session.jsonl", "logs/session.jsonl"] {
+        let output = zx_run(
+            &server,
+            &workspace,
+            Some(fake.dir.path()),
+            &[
+                "--execution",
+                "container",
+                "--container-image",
+                "fake:1",
+                "--session",
+                session,
+                "go",
+            ],
+        )
+        .await;
+
+        assert_eq!(output.status.code(), Some(2), "{}", stderr_of(&output));
+        assert!(
+            stderr_of(&output).contains("needs the session file outside the working directory"),
+            "{}",
+            stderr_of(&output)
+        );
+        assert!(!workspace.join(session).exists(), "{session}");
+    }
+    assert!(server.requests().is_empty());
+    assert!(fake.calls().is_empty(), "no container was started");
 }
 
 #[tokio::test]
@@ -741,11 +852,9 @@ async fn real_run_in_container_mode_executes_bash_in_the_container() {
     let Some(image) = docker_image() else { return };
     let (_dir, workspace) = real_workspace();
     std::fs::write(workspace.join("app.log"), "public\n").unwrap();
-    let server = MockServer::start(vec![
-        Reply::bash("c1", "id -u; cat app.log; wc -c < session.jsonl"),
-        Reply::text("done"),
-    ])
-    .await;
+    let sessions = tempfile::tempdir().unwrap();
+    let session = sessions.path().join("session.jsonl");
+    let server = MockServer::start(vec![Reply::bash("c1", "id -u; cat app.log"), Reply::text("done")]).await;
 
     let output = zx_run(
         &server,
@@ -759,27 +868,20 @@ async fn real_run_in_container_mode_executes_bash_in_the_container() {
             "--tools",
             "bash",
             "--session",
-            "session.jsonl",
+            session.to_str().unwrap(),
             "go",
         ],
     )
     .await;
 
     assert_eq!(output.status.code(), Some(0), "{}", stderr_of(&output));
-    // The session file is hidden: the container sees it empty.
     assert!(
-        tool_result(&server, 1).starts_with("65534\npublic\n0\n"),
+        tool_result(&server, 1).starts_with("65534\npublic\n"),
         "{}",
         tool_result(&server, 1)
     );
-    let header: Value = serde_json::from_str(
-        std::fs::read_to_string(workspace.join("session.jsonl"))
-            .unwrap()
-            .lines()
-            .next()
-            .unwrap(),
-    )
-    .unwrap();
+    let header: Value =
+        serde_json::from_str(std::fs::read_to_string(&session).unwrap().lines().next().unwrap()).unwrap();
     let label = format!("label=zx-agent.session={}", header["id"].as_str().unwrap());
     let left = || {
         let output = std::process::Command::new("docker")
@@ -870,12 +972,14 @@ async fn real_a_killed_zx_agent_leaves_no_container_behind() {
     const KEY_VAR: &str = "ZX_P6_CONTAINER_TEST_KEY";
     let Some(image) = docker_image() else { return };
     let (_dir, workspace) = real_workspace();
+    let sessions = tempfile::tempdir().unwrap();
+    let session = sessions.path().join("session.jsonl");
     let server = MockServer::start(vec![Reply::bash("c1", "sleep 30")]).await;
     let mut agent = Command::new(env!("CARGO_BIN_EXE_zx-agent"))
         .args(["run", "--model", "mock", "--base-url", &server.base_url])
         .args(["--api-key-env", KEY_VAR, "--max-retries", "0", "--tools", "bash"])
         .args(["--execution", "container", "--container-image", &image])
-        .args(["--session", "session.jsonl", "go"])
+        .args(["--session", session.to_str().unwrap(), "go"])
         .current_dir(&workspace)
         .env(KEY_VAR, "sk-p6-container-test")
         .env_remove("ZX_MODEL")
@@ -888,14 +992,8 @@ async fn real_a_killed_zx_agent_leaves_no_container_behind() {
         .unwrap();
     // The model's request comes after start-up, so the container is running.
     server.wait_for_requests(1).await;
-    let header: Value = serde_json::from_str(
-        std::fs::read_to_string(workspace.join("session.jsonl"))
-            .unwrap()
-            .lines()
-            .next()
-            .unwrap(),
-    )
-    .unwrap();
+    let header: Value =
+        serde_json::from_str(std::fs::read_to_string(&session).unwrap().lines().next().unwrap()).unwrap();
     let label = format!("label=zx-agent.session={}", header["id"].as_str().unwrap());
     let exists = || {
         let output = std::process::Command::new("docker")

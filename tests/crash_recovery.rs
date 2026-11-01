@@ -110,6 +110,16 @@ impl Tool for Counted {
 /// Signals that it started, then waits until its future is dropped.
 struct Hang {
     started: Notify,
+    effects: Effects,
+}
+
+impl Hang {
+    fn new(effects: Effects) -> Arc<Self> {
+        Arc::new(Self {
+            started: Notify::new(),
+            effects,
+        })
+    }
 }
 
 #[async_trait]
@@ -119,6 +129,9 @@ impl Tool for Hang {
     }
     fn definition(&self) -> ToolDef {
         definition("hang")
+    }
+    fn effects(&self) -> Effects {
+        self.effects
     }
     async fn execute(&self, _args: Value, _ctx: &ToolContext) -> Result<ToolOutput, String> {
         self.started.notify_one();
@@ -380,7 +393,7 @@ async fn sessions_from_before_start_records_report_an_unknown_start() {
 
 #[tokio::test]
 async fn a_dropped_run_is_recovered_by_the_next_prompt() {
-    let hang = Arc::new(Hang { started: Notify::new() });
+    let hang = Hang::new(Effects::SideEffects);
     let tools: Vec<Arc<dyn Tool>> = vec![hang.clone()];
     let provider = Arc::new(FauxProvider::new([
         FauxStep::tool_call("c1", "hang", json!({})),
@@ -406,6 +419,49 @@ async fn a_dropped_run_is_recovered_by_the_next_prompt() {
         results[0].1.starts_with("Result unknown: this call started"),
         "{results:?}"
     );
+}
+
+/// Cancels a run while its `hang` call runs, then returns the result the next request sends.
+async fn result_after_cancelling_a_running_call(effects: Effects) -> (String, bool) {
+    let hang = Hang::new(effects);
+    let tools: Vec<Arc<dyn Tool>> = vec![hang.clone()];
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::tool_call("c1", "hang", json!({})),
+        FauxStep::text("checked"),
+    ]));
+    let (runner, _) = RunnerSetup::new(config(provider.clone(), tools)).build();
+    let session = AgentSession::from(runner);
+    let cancel = CancellationToken::new();
+    {
+        let mut running = Box::pin(session.prompt_with_cancel("start", &cancel));
+        tokio::select! {
+            _ = hang.started.notified() => {}
+            _ = &mut running => panic!("the run ended before its tool started"),
+        }
+        cancel.cancel();
+        assert_eq!(running.await.unwrap().outcome, RunOutcome::Aborted);
+    }
+    let report = session.prompt("again").await.unwrap();
+    assert_eq!(report.outcome, RunOutcome::Completed);
+    let results = results(&provider.requests()[1].messages);
+    assert_eq!(results.len(), 1, "{results:?}");
+    let (_, content, is_error) = results.into_iter().next().unwrap();
+    (content, is_error)
+}
+
+#[tokio::test]
+async fn a_call_with_side_effects_cancelled_while_running_is_reported_as_possibly_applied() {
+    let (content, is_error) = result_after_cancelling_a_running_call(Effects::SideEffects).await;
+    // The call ran when it was cancelled, so the model must not take it as having done nothing.
+    assert!(content.contains("may have changed state"), "{content}");
+    assert!(is_error);
+}
+
+#[tokio::test]
+async fn a_read_only_call_cancelled_while_running_is_reported_as_harmless() {
+    let (content, is_error) = result_after_cancelling_a_running_call(Effects::ReadOnly).await;
+    assert!(content.contains("changed nothing"), "{content}");
+    assert!(is_error);
 }
 
 /// `zx-agent run` with bash against the mock server, without retries.

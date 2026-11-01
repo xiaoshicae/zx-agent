@@ -244,18 +244,28 @@ impl Engine<'_, '_, '_> {
         for message in prompts {
             self.input(context, message).await?;
         }
-        let mut pending = self.config.queues.drain_steering();
+        // A continuation or follow-up that a finish_turn hook asked for.
+        let mut requested: Option<Message> = None;
+        // Whether queued follow-ups are taken at the top of the next turn.
+        let mut take_follow_ups = false;
         loop {
             if result.turns > 0 {
-                if pending.is_empty() {
-                    pending = self.config.queues.drain_steering();
-                }
                 self.emit(AgentEvent::TurnStart {
                     turn: self.control.turn_offset.saturating_add(result.turns).saturating_add(1),
                 })
                 .await;
             }
-            for message in pending.drain(..) {
+            // Queued input is taken one message at a time, so a rejected message or a dropped
+            // run leaves the rest of the queue for the next run.
+            while let Some(message) = self.config.queues.pop_steering() {
+                self.input(context, message).await?;
+            }
+            if std::mem::take(&mut take_follow_ups) {
+                while let Some(message) = self.config.queues.pop_follow_up() {
+                    self.input(context, message).await?;
+                }
+            }
+            if let Some(message) = requested.take() {
                 self.input(context, message).await?;
             }
             if self.control.cancel.is_cancelled() {
@@ -390,12 +400,13 @@ impl Engine<'_, '_, '_> {
             if decision == TurnDecision::Stop {
                 return Ok(completed(stop));
             }
-            pending = self.config.queues.drain_steering();
-            if !needs_more && pending.is_empty() {
-                pending = self.config.queues.drain_follow_up();
-            }
+            // Inspect again: input may have arrived while the hook ran. It is taken at the top
+            // of the next turn; follow-ups only when the model has nothing left to do.
+            let steering = self.config.queues.has_steering();
+            take_follow_ups = !needs_more && !steering && self.config.queues.has_follow_up();
+            let input_waiting = steering || take_follow_ups;
             match decision {
-                TurnDecision::ContinueAnswer(text) if disposition == TurnDisposition::Stop && pending.is_empty() => {
+                TurnDecision::ContinueAnswer(text) if disposition == TurnDisposition::Stop && !input_waiting => {
                     if remaining_turns == Some(0) {
                         return Ok(if stop == StopReason::Length {
                             LoopOutcome::Truncated
@@ -404,20 +415,20 @@ impl Engine<'_, '_, '_> {
                         });
                     }
                     result.continuations = result.continuations.saturating_add(1);
-                    pending.push(Message::continuation(text));
+                    requested = Some(Message::continuation(text));
                 }
-                TurnDecision::FollowUp(text) if disposition != TurnDisposition::Continue && pending.is_empty() => {
+                TurnDecision::FollowUp(text) if disposition != TurnDisposition::Continue && !input_waiting => {
                     if remaining_turns == Some(0) {
                         return Ok(LoopOutcome::MaxTurns);
                     }
-                    pending.push(Message::user(text));
+                    requested = Some(Message::user(text));
                 }
                 TurnDecision::Stop
                 | TurnDecision::Default
                 | TurnDecision::ContinueAnswer(_)
                 | TurnDecision::FollowUp(_) => {}
             }
-            if !needs_more && pending.is_empty() {
+            if !needs_more && !input_waiting && requested.is_none() {
                 return Ok(completed(stop));
             }
         }
@@ -523,7 +534,7 @@ impl Engine<'_, '_, '_> {
             Decision::Allow | Decision::Ask(_) => {}
         }
         if self.control.cancel.is_cancelled() {
-            return Prepared::blocked("Operation aborted");
+            return Prepared::blocked(NOT_STARTED);
         }
         // Tool storage is static; the execution phase can resolve it again by name.
         Prepared::Ready
@@ -741,9 +752,25 @@ impl Prepared {
     }
 }
 
+/// The result of a call that never started because the run was cancelled first.
+const NOT_STARTED: &str = "Not executed: the run was cancelled before this call started, so it had no effect.";
+
+/// The result of a call that the cancellation interrupted. Like a call that a crash
+/// interrupted, one with side effects may have changed state before it stopped.
+fn interrupted(effects: Effects) -> &'static str {
+    match effects {
+        Effects::SideEffects => {
+            "Interrupted: the run was cancelled while this call was running. It may have changed state; check the current state before running it again."
+        }
+        Effects::ReadOnly => {
+            "Interrupted: the run was cancelled while this read-only call was running. It changed nothing; run it again if the result is still needed."
+        }
+    }
+}
+
 async fn execute(tool: &dyn Tool, args: Value, spec: &LoopSpec, cancel: &CancellationToken) -> Outcome {
     if cancel.is_cancelled() {
-        return Outcome::blocked("Operation aborted");
+        return Outcome::blocked(NOT_STARTED);
     }
     let ctx = ToolContext {
         cwd: spec.cwd.clone(),
@@ -753,7 +780,12 @@ async fn execute(tool: &dyn Tool, args: Value, spec: &LoopSpec, cancel: &Cancell
     let future = AssertUnwindSafe(tool.execute(args, &ctx)).catch_unwind();
     let result = tokio::select! {
         biased;
-        _ = cancel.cancelled() => return Outcome::blocked("Operation aborted"),
+        _ = cancel.cancelled() => {
+            return Outcome {
+                output: ToolOutput::error(interrupted(tool.effects())),
+                duration_ms: Some(duration_ms(started.elapsed())),
+            };
+        }
         result = future => result,
     };
     let output = match result {

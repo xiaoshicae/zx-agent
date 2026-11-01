@@ -38,6 +38,17 @@ impl MessageQueues {
         drain(&self.follow_up)
     }
 
+    /// Take the oldest steering message. The loop takes queued input one message at a time,
+    /// so input it has not reached yet stays queued when a run fails or is dropped.
+    pub(crate) fn pop_steering(&self) -> Option<Message> {
+        lock(&self.steering).pop_front().map(Message::user)
+    }
+
+    /// Take the oldest follow-up message.
+    pub(crate) fn pop_follow_up(&self) -> Option<Message> {
+        lock(&self.follow_up).pop_front().map(Message::user)
+    }
+
     pub(crate) fn has_steering(&self) -> bool {
         !lock(&self.steering).is_empty()
     }
