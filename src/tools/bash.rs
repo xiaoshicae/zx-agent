@@ -1,25 +1,16 @@
 //! `bash` tool: run a shell command with a timeout and bounded output.
 
-use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::process::{Child, Command};
 
 use super::truncate::{MAX_BYTES, MAX_LINES, truncate_tail};
 use crate::agent::{Effects, Tool, ToolContext, ToolOutput};
 use crate::ai::ToolDef;
-use crate::sync::{AbortOnDrop, lock};
-
-/// Bytes kept per stream while reading. Older output is dropped; only the tail is returned.
-const CAPTURE_LIMIT: usize = 1024 * 1024;
-/// How long to wait for output pipes after the process ends. Background children that
-/// inherited the pipes could otherwise keep them open forever.
-const PIPE_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+use crate::executor::{CommandEnd, Executor, LocalExecutor, ShellCommand};
 
 /// Runs `<shell> -c <command>` in the working directory.
 pub struct BashTool {
@@ -33,6 +24,8 @@ pub struct BashTool {
     /// API key. Commands otherwise inherit the agent's whole environment, and `env` or
     /// `echo $NAME` would put a secret into the tool result.
     pub hidden_env: Vec<String>,
+    /// Where commands run. Defaults to this machine.
+    pub executor: Arc<dyn Executor>,
 }
 
 impl Default for BashTool {
@@ -42,6 +35,7 @@ impl Default for BashTool {
             default_timeout: Duration::from_secs(120),
             max_timeout: Duration::from_secs(600),
             hidden_env: Vec::new(),
+            executor: Arc::new(LocalExecutor),
         }
     }
 }
@@ -52,49 +46,6 @@ struct Args {
     command: String,
     #[serde(default)]
     timeout_secs: Option<u64>,
-}
-
-#[derive(Default)]
-struct Capture {
-    bytes: Vec<u8>,
-    dropped: usize,
-}
-
-enum End {
-    Exited(std::process::ExitStatus),
-    WaitFailed(String),
-    TimedOut,
-    Cancelled,
-}
-
-/// Owns the process group until it has been signalled, including future-drop paths.
-struct ProcessGroup(Option<u32>);
-
-impl ProcessGroup {
-    fn kill(&mut self) {
-        let pid = self.0.take();
-        #[cfg(unix)]
-        if let Some(pid) = pid.and_then(|pid| libc::pid_t::try_from(pid).ok()) {
-            // SAFETY: kill(2) has no memory-safety preconditions. The child leads this
-            // process group, so a negative PID targets its pipelines and descendants.
-            // ESRCH only means the group has already ended, which is the goal.
-            unsafe {
-                // Freeze the group first: dying pipeline children could otherwise wake
-                // the shell before its SIGKILL arrives, letting it run the next command.
-                libc::kill(-pid, libc::SIGSTOP);
-                libc::kill(-pid, libc::SIGKILL);
-            }
-        }
-        // Other platforms still terminate the child through kill_on_drop/start_kill.
-        #[cfg(not(unix))]
-        let _ = pid;
-    }
-}
-
-impl Drop for ProcessGroup {
-    fn drop(&mut self) {
-        self.kill();
-    }
 }
 
 #[async_trait]
@@ -151,47 +102,15 @@ impl Tool for BashTool {
             .unwrap_or(self.default_timeout)
             .min(self.max_timeout);
 
-        let mut command = Command::new(&self.shell);
-        command
-            .arg("-c")
-            .arg(&args.command)
-            .current_dir(&ctx.cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        for name in &self.hidden_env {
-            command.env_remove(name);
-        }
-        // Lead a new process group so a timeout can stop pipelines and background children.
-        #[cfg(unix)]
-        command.process_group(0);
-        let mut child = command
-            .spawn()
-            .map_err(|e| format!("failed to start {}: {e}", self.shell))?;
-        let mut group = ProcessGroup(child.id());
-        let (stdout, stdout_reader) = spawn_reader(child.stdout.take());
-        let (stderr, stderr_reader) = spawn_reader(child.stderr.take());
-
-        let end = tokio::select! {
-            status = child.wait() => match status {
-                Ok(status) => End::Exited(status),
-                Err(e) => End::WaitFailed(e.to_string()),
-            },
-            _ = tokio::time::sleep(limit) => End::TimedOut,
-            _ = ctx.cancel.cancelled() => End::Cancelled,
+        let request = ShellCommand {
+            shell: &self.shell,
+            command: &args.command,
+            cwd: &ctx.cwd,
+            timeout: limit,
+            hidden_env: &self.hidden_env,
         };
-        // Kill the group after a normal exit too: background children (`cmd &`, daemons) would
-        // otherwise outlive the call and the agent. It also closes the output pipes they hold,
-        // so reading does not wait for PIPE_DRAIN_TIMEOUT.
-        group.kill();
-        stop_child(&mut child).await;
-        for reader in [stdout_reader, stderr_reader].into_iter().flatten() {
-            finish_reader(reader).await;
-        }
-
-        let stdout = take_capture(&stdout);
-        let stderr = take_capture(&stderr);
+        let output = self.executor.run(&request, &ctx.cancel).await?;
+        let (stdout, stderr) = (output.stdout, output.stderr);
         let mut text = String::from_utf8_lossy(&stdout.bytes).into_owned();
         let stderr_text = String::from_utf8_lossy(&stderr.bytes);
         if !stderr_text.trim().is_empty() {
@@ -212,18 +131,16 @@ impl Tool for BashTool {
             content.push('\n');
         }
 
-        let (status, is_error) = match end {
-            End::Exited(status) => match status.code() {
-                Some(0) => ("[exit code: 0]".to_string(), false),
-                Some(code) => (format!("[exit code: {code}]"), true),
-                None => ("[terminated by a signal]".to_string(), true),
-            },
-            End::WaitFailed(e) => (format!("[failed to wait for the process: {e}]"), true),
-            End::TimedOut => (
+        let (status, is_error) = match output.end {
+            CommandEnd::Exited(0) => ("[exit code: 0]".to_string(), false),
+            CommandEnd::Exited(code) => (format!("[exit code: {code}]"), true),
+            CommandEnd::Signaled => ("[terminated by a signal]".to_string(), true),
+            CommandEnd::WaitFailed(e) => (format!("[failed to wait for the process: {e}]"), true),
+            CommandEnd::TimedOut => (
                 format!("[timed out after {}s; process group killed]", limit.as_secs()),
                 true,
             ),
-            End::Cancelled => ("[cancelled; process group killed]".to_string(), true),
+            CommandEnd::Cancelled => ("[cancelled; process group killed]".to_string(), true),
         };
         content.push_str(&status);
         Ok(ToolOutput {
@@ -234,57 +151,11 @@ impl Tool for BashTool {
     }
 }
 
-fn spawn_reader<R>(reader: Option<R>) -> (Arc<Mutex<Capture>>, Option<AbortOnDrop<()>>)
-where
-    R: AsyncRead + Unpin + Send + 'static,
-{
-    let capture = Arc::new(Mutex::new(Capture::default()));
-    let Some(mut reader) = reader else {
-        return (capture, None);
-    };
-    // Shared buffer: output read so far survives even if the reader task is aborted.
-    let shared = capture.clone();
-    let handle = tokio::spawn(async move {
-        let mut chunk = [0u8; 8192];
-        // A read error ends the capture early; the exit status still reports how the command ended.
-        while let Ok(n) = reader.read(&mut chunk).await {
-            if n == 0 {
-                break;
-            }
-            let mut capture = lock(&shared);
-            capture.bytes.extend_from_slice(&chunk[..n]);
-            if capture.bytes.len() > CAPTURE_LIMIT {
-                let excess = capture.bytes.len() - CAPTURE_LIMIT;
-                capture.bytes.drain(..excess);
-                capture.dropped += excess;
-            }
-        }
-    });
-    (capture, Some(AbortOnDrop(handle)))
-}
-
-async fn finish_reader(mut handle: AbortOnDrop<()>) {
-    // Reader failure leaves the partial capture available. On timeout its owner aborts
-    // it on drop; the command's status still reports why execution ended.
-    let _ = tokio::time::timeout(PIPE_DRAIN_TIMEOUT, &mut handle.0).await;
-}
-
-fn take_capture(capture: &Mutex<Capture>) -> Capture {
-    std::mem::take(&mut *lock(capture))
-}
-
-async fn stop_child(child: &mut Child) {
-    // Fails only if the child already exited, which is the goal.
-    let _ = child.start_kill();
-    // Reap the child so it does not linger as a zombie. If it takes longer than this,
-    // `kill_on_drop` still cleans up when `child` is dropped.
-    let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
-}
-
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::time::Instant;
+    use tokio::process::Command;
     use tokio_util::sync::CancellationToken;
 
     fn ctx() -> ToolContext {

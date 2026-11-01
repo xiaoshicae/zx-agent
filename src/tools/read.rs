@@ -1,79 +1,31 @@
 //! `read_file` tool: read a text file in pages.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::io::AsyncReadExt;
 
 use super::truncate::{MAX_BYTES, MAX_LINES, truncate_head};
 use crate::agent::{Effects, Tool, ToolContext, ToolOutput};
 use crate::ai::ToolDef;
+use crate::executor::{Executor, LocalExecutor};
 
 /// Reads text files in pages of bounded size.
 pub struct ReadFileTool {
     /// Larger files are refused; the model should use `bash` with head, tail, or grep.
     pub max_file_bytes: u64,
+    /// Where files are read. Defaults to this machine.
+    pub executor: Arc<dyn Executor>,
 }
 
 impl Default for ReadFileTool {
     fn default() -> Self {
         Self {
             max_file_bytes: 10 * 1024 * 1024,
+            executor: Arc::new(LocalExecutor),
         }
-    }
-}
-
-impl ReadFileTool {
-    pub(crate) async fn read_bytes(&self, path: &Path) -> Result<Vec<u8>, String> {
-        let mut options = tokio::fs::OpenOptions::new();
-        options.read(true);
-        // A path can be replaced with a FIFO between lookup and open. Nonblocking open
-        // lets us inspect the opened descriptor without waiting for a pipe writer.
-        #[cfg(unix)]
-        options.custom_flags(libc::O_NONBLOCK);
-        let file = options
-            .open(path)
-            .await
-            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        let meta = file
-            .metadata()
-            .await
-            .map_err(|e| format!("cannot inspect {}: {e}", path.display()))?;
-        if meta.is_dir() {
-            return Err(format!("{} is a directory; use bash `ls` to list it", path.display()));
-        }
-        if !meta.is_file() {
-            return Err(format!(
-                "{} is not a regular file; special files are not supported",
-                path.display()
-            ));
-        }
-        if meta.len() > self.max_file_bytes {
-            return Err(format!(
-                "{} is {} bytes, over the {} byte limit; use bash with head, tail, or grep instead",
-                path.display(),
-                meta.len(),
-                self.max_file_bytes
-            ));
-        }
-        // Metadata can be stale (growing files and procfs). Bound the actual read too,
-        // using one extra byte to distinguish an exact-limit file from an oversized one.
-        let mut bytes = Vec::new();
-        file.take(self.max_file_bytes.saturating_add(1))
-            .read_to_end(&mut bytes)
-            .await
-            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        let read_bytes = u64::try_from(bytes.len()).map_err(|e| format!("file length is out of range: {e}"))?;
-        if read_bytes > self.max_file_bytes {
-            return Err(format!(
-                "{} grew over the {} byte limit; use bash with head, tail, or grep instead",
-                path.display(),
-                self.max_file_bytes
-            ));
-        }
-        Ok(bytes)
     }
 }
 
@@ -131,7 +83,7 @@ impl Tool for ReadFileTool {
         let bytes = tokio::select! {
             biased;
             _ = ctx.cancel.cancelled() => return Err("read cancelled".to_string()),
-            result = self.read_bytes(&path) => result?,
+            result = self.executor.read_file(&path, self.max_file_bytes) => result?,
         };
         if bytes.iter().take(8192).any(|&b| b == 0) {
             return Err(format!("{} looks like a binary file", path.display()));
@@ -399,7 +351,10 @@ mod tests {
     async fn refuses_files_over_the_size_limit() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("big.txt"), "hello\n").unwrap();
-        let tool = ReadFileTool { max_file_bytes: 4 };
+        let tool = ReadFileTool {
+            max_file_bytes: 4,
+            ..ReadFileTool::default()
+        };
         let error = tool
             .execute(json!({"path": "big.txt"}), &ctx(dir.path()))
             .await
@@ -411,7 +366,10 @@ mod tests {
     async fn reads_exact_size_limits_and_large_page_limits_without_overflow() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("exact.txt"), "ab\nc").unwrap();
-        let tool = ReadFileTool { max_file_bytes: 4 };
+        let tool = ReadFileTool {
+            max_file_bytes: 4,
+            ..ReadFileTool::default()
+        };
         let output = tool
             .execute(
                 json!({"path": "exact.txt", "offset": 2, "limit": usize::MAX}),
