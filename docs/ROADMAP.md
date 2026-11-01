@@ -41,7 +41,7 @@ G1–G4 是验收目标。当前会话日志可重建对话与提示词；G3 所
 | 编号 | 事项 | 结论 | 日期 | 状态 |
 |---|---|---|---|---|
 | D1 | MSRV | 升级到 1.88 | 2026-10-31 | 已完成：`rust-version = "1.88"`，已用 1.88.0 工具链编译并通过测试 |
-| D2 | 新依赖 | 已授权：tokio 的 `io-std` feature、`toml`、`rmcp`（MCP 官方 Rust SDK）、ACP 官方 Rust SDK、`rustyline`（可选）。在用到它们的阶段再引入 | 2026-10-31 | 按阶段引入 |
+| D2 | 新依赖 | 已授权：tokio 的 `io-std` feature、`toml`、`rmcp`（MCP 官方 Rust SDK）、ACP 官方 Rust SDK、`rustyline`（可选）。在用到它们的阶段再引入 | 2026-10-31 | 按阶段引入；`rmcp` 3.8.0 已于 P7 引入（PR #40） |
 | D3 | profile 文件格式 | TOML | 2026-10-31 | P4 落实 |
 | D4 | 会话 API 形态 | 进程内方法调用；暂不实现提交队列 / 事件队列（SQ/EQ） | 2026-10-31 | 已实现：P2 进程内共享会话 API |
 | D5 | 无人值守的命令执行环境 | 默认仍在本机执行，`run` 行为不变；容器执行须在 profile 或 CLI 中显式开启。理由：在 Kubernetes Job 中运行时 Pod 内通常没有 Docker；无网络的容器做不了在线排障，而在线访问方案尚未评审。此前的候选方案（`troubleshoot` 默认容器、没有 Docker 时拒绝启动）不采用 | 2026-11-01 | 已确认：P6 执行环境部分按此实现 |
@@ -350,7 +350,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P4 | profile 文件、上下文文件与 skills | 已完成（PR #6） |
 | P5 | 上下文管理 | 已完成（PR #9） |
 | P6 | 执行环境与崩溃恢复 | 进行中：崩溃恢复（PR #12）、执行环境接缝（PR #13）、离线容器执行（PR #14）已完成；在线访问评审稿已合入（PR #17），一期已完成：只读命令自动放行（PR #19）、环境变量保护与 ServiceAccount token 脱敏（PR #20）、常驻 Pod 部署包（PR #22）、多集群（PR #24）；容器联网已取消，改为常驻 Pod 部署。待部署方在真实集群上验收；服务模式与 IM 接入的评审稿已合入（PR #27），模块 A（IM 接口与服务，PR #28）、B（Slack 与 `serve`，PR #29）、C（⚑ D:5/CHINA FLAG: 飞书，PR #32）、D（部署，PR #33）已完成，真实平台验收待提供凭据 |
-| P7 | 插件与 MCP | 进行中：范围按 D8 收窄，评审稿已合入（PR #36）并经用户确认；模块 A（Extension 接口，PR #38）已完成；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已完成（PR #23），A2–A8（扩展 API）已完成（PR #25） |
+| P7 | 插件与 MCP | 进行中：范围按 D8 收窄，评审稿已合入（PR #36）并经用户确认；模块 A（Extension 接口，PR #38）、B1（MCP 客户端库，PR #40）已完成，B2（CLI 接入）待实施；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已完成（PR #23），A2–A8（扩展 API）已完成（PR #25） |
 | P8 | 嵌入协议 `acp` | 未开始 |
 | P9 | 可选增强 | 未开始 |
 
@@ -940,7 +940,7 @@ B. 追踪事件
 
 - [x] 前置设计（上节 A、B 两部分）评审通过并实施（A1：PR #21；B：PR #23；A2–A8：PR #25）
 - [x] 公开 `Extension` trait：注册工具、钩子、提示词段落（命令暂不做，见评审稿 1.3；已完成，PR #38）
-- [ ] MCP 客户端扩展：只接工具，只支持 Streamable HTTP（D8；stdio 不做）
+- [ ] MCP 客户端扩展：只接工具，只支持 Streamable HTTP（D8；stdio 不做）。库已完成（模块 B1，PR #40），CLI 接入待模块 B2
 - [ ] MCP 工具同样受规则约束；服务器与工具都要在配置中显式列出；无人值守只执行显式放行的工具
 - ~~只读的领域工具（如 Kubernetes、Prometheus 查询）以扩展或 MCP 服务器提供~~：由外部服务以 MCP 服务器提供（D8）
 
@@ -973,6 +973,23 @@ P7 模块 A 实施记录（2026-11-01，PR #38）：
 - 段落名常量：新增 `prompt::ENVIRONMENT`、`COMMAND_POLICY`、`PROJECT_CONTEXT`、`AVAILABLE_SKILLS` 与 `GENERATED_SECTIONS`，`src/cli.rs` 改用它们；`SystemPrompt` 新增 crate 内部的 `has_section`。
 - 测试：新增 `tests/extensions.rs` 6 项，以及 `Extension` 文档中的 1 个 Rustdoc 示例。反向验证：分别去掉阶段检查、工具的撤回、保留名检查与已有段落检查，或改变钩子的注册名，对应测试各有 1 项失败，修改已还原。
 - 本地 macOS：代码基于 `e95064f`（含 PR #36）检查，之后合入的 PR #37 只改文档。stable 与 Rust 1.88.0 各 685 项通过（基线 678 项），6 项付费测试跳过；格式、clippy、严格 Rustdoc 与 MSRV 全目标检查通过，自查脚本对改动的文件无命中；`tests/extensions.rs` 连续运行 10 次、`tests/hooks.rs` 3 次，均通过。
+
+P7 模块 B1 实施记录（2026-11-01，PR #40）：
+
+- 依赖：按决策 D2 引入 `rmcp` 3.8.0，`default-features = false`，只开 `client`、`transport-streamable-http-client-reqwest` 与 `reqwest`。`Cargo.lock` 由 210 个包变为 225 个，新增的 15 个与评审稿附录 9.2 一致；rustls 的特性仍为 `aws-lc-rs,aws_lc_rs,std,tls12`。
+- `src/mcp.rs`：
+  - `ServerConfig` 与 `Server::connect`：用 rmcp 的 `ClientLifecycleMode::Auto` 先发 `server/discover`，旧服务器回退到 `initialize`；连接与列出工具有超时。
+  - `tool_name`：工具交给模型时的名字。
+  - 内部的 `McpTool`：实现 `Tool`，负责调用、超时、取消、结果转文本与截断。
+  - `Server` 实现 `Extension`。
+- 与评审稿的差异：
+  - 模块 B 拆为 B1（库）与 B2（CLI 接入）。
+  - 进程退出时不主动关闭会话：各工具共用同一个客户端，rmcp 只在显式关闭时发 DELETE。旧协议的会话由服务器过期回收，B2 再定。
+- 测试：
+  - 新增 `tests/mcp.rs` 16 项，假服务 `tests/common/fake_mcp.rs` 按规范手写，两种协议都支持；另有 `src/mcp.rs` 中 3 项单元测试。
+  - 反向验证：不发送 token、把服务器的全部工具交给模型、忽略 `isError`，对应测试分别有 1、2、1 项失败，修改已还原。
+- 本地 macOS（基于含 PR #39 的 `5a40588`）：stable 与 Rust 1.88.0 各 707 项通过（其中 19 项为本 PR 新增），6 项付费测试跳过；格式、clippy、严格 Rustdoc 与 MSRV 全目标检查通过，自查脚本对改动的文件无命中；`tests/mcp.rs` 累计连续运行 20 次、`tests/extensions.rs` 6 次，均通过。
+- 未验证：真实的 MCP 服务器（尚未选定）；HTTPS 的 MCP 服务器（测试只用 HTTP）。
 
 ### P8 嵌入协议 `acp`
 
