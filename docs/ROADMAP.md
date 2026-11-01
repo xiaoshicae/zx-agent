@@ -98,7 +98,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P2 | 长期会话 `AgentSession` | 已完成（PR #4） |
 | P3 | 终端对话 `chat` | 已完成（PR #5） |
 | P4 | profile 文件、上下文文件与 skills | 已完成（PR #6） |
-| P5 | 上下文管理 | 已实现待 PR review |
+| P5 | 上下文管理 | 已完成（PR #9） |
 | P6 | 执行环境与崩溃恢复 | 未开始 |
 | P7 | 插件与 MCP | 未开始 |
 | P8 | 嵌入协议 `acp` | 未开始 |
@@ -222,7 +222,9 @@ P4 实施约定（2026-11-01）：
 
 目标：长对话不超出上下文窗口，且不丢失关键信息（原路线图“上下文压缩”）。不引入新依赖。
 
-开工前置（2026-11-01 补充）：经用户授权，先运行一次 `tests/real_api.rs`，确认目标服务的流式格式、工具调用与用量统计。这组付费测试还没有运行过，provider 的自动化测试只使用本地假服务，而压缩依赖真实模型的行为与用量。
+开工前置（2026-11-01 补充）：经用户授权，先运行一次 `tests/real_api.rs`，确认目标服务的流式格式、工具调用与用量统计。provider 的自动化测试只使用本地假服务，而压缩依赖真实模型的行为与用量。
+
+开工前置补跑记录（2026-11-01，经用户授权，基于 `0c37a66`，在实现完成后补跑）：DeepSeek（`https://api.deepseek.com/v1`，默认 `collapse`）的 `deepseek-flash` 与 `deepseek-chat` 各运行一次 `tests/real_api.rs`，均为 6 项通过。覆盖流式文本与用量统计、bash 工具往返、策略拒绝传回模型、输出上限截断（`Truncated`）、恢复会话后的提示词增量更新、无效 key 不重试。实测用量：`deepseek-flash` 3045 token，`deepseek-chat` 2810 token，单次回答最多 76 个输出 token。该服务的 `/v1/models` 只列出 `deepseek-flash` 与 `deepseek-v4-pro`；`deepseek-chat` 的请求同样成功，原因未核实。这组测试不含压缩与请求审计用例，`inline` 模式未在该服务上运行。
 
 P5 实施约定（2026-11-01）：
 
@@ -245,11 +247,13 @@ P5 实施约定（2026-11-01）：
 - [x] 触发方式：达到阈值自动触发，或在 `chat` 中用 `/compact` 手动触发；无人值守的短任务默认关闭
 - [x] 工具侧预算：大结果写入文件，只返回路径
 
+实现提交：`f78cbcb`、`e9be6a9`。完成日期：2026-11-01（PR #9 合并）。PR 的 CI（macOS、Ubuntu、Rust 1.88、格式 / clippy / 文档）在 `0c37a66` 上全部通过。
+
 验收（2026-11-01）：FauxProvider、本地 HTTP、会话 v1/v2/v3 与分支、四种压缩写入失败、取消 / 超时 / 丢弃、请求计费与摘要期间 steering、CLI profile 与 Unix PTY、长结果脱敏与分页均通过。stable 与 Rust 1.88.0 各 **356 项通过（含 2 项 doctest），6 项付费测试跳过**；fmt、clippy、严格 Rustdoc 均通过。`tests/cli.rs` 逐字节保留，Cargo 依赖未变。
 
 请求审计验收（2026-11-01）：每次任务请求与摘要请求都能从重新打开的会话文件还原，并与实际发送的 `Request` 逐项相等；配置只在变化时追加（含切换模型）；v1/v2 会话在首次请求前只升级一次且原有字节不变；`request_config` 或 `request_started` 写入失败时不发请求；OpenAI 兼容 provider 的还原请求体与实际请求体在两种 `systemUpdates` 模式下一致，且不含 API key。原有 4 项测试按新的会话文件约定更新了预期：3 项只统计 message 行，1 项允许出现请求审计条目，原本要验证的行为不变。stable 与 Rust 1.88.0 各 **385 项通过，6 项付费测试跳过**；fmt、clippy、严格 Rustdoc、MSRV 全目标检查均通过。`tests/cli.rs`、`Cargo.toml`、`Cargo.lock` 未改动。
 
-未验证：真实模型的摘要准确率、信息保真和 token 窗口适配；本轮不调用付费 API，开工前置中的 `tests/real_api.rs` 仍未运行。配置预算及限制见 [PROFILES.md](PROFILES.md#上下文管理)。
+未验证：真实模型的摘要准确率、信息保真和 token 窗口适配；压缩与请求审计未在真实模型上运行（付费测试只覆盖上面开工前置补跑记录所列项）。配置预算及限制见 [PROFILES.md](PROFILES.md#上下文管理)。
 
 ### P6 执行环境与崩溃恢复
 
