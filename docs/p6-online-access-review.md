@@ -133,6 +133,8 @@ zx-agent 把 kubeconfig 只读挂载进容器，为命令设置 `KUBECONFIG`，�
 | 不含 `secret` | 读取 Secret 要确认 |
 | 不含 URL（`://`）和连接参数 | 连接参数指任何一段中的 `--server`、`--kubeconfig`、`--token`、`--insecure-skip-tls-verify`，以及 kubectl 段中含字母 `s` 的单横线短参数（覆盖 `-s` 的各种写法；其他程序的短参数含义不同，如 `jq -s`）。实测 `--server` 指向其他 HTTPS 地址时，kubectl 把 kubeconfig 中的 token 发给了该地址（附录 9.3，K1） |
 
+2026-11-01 整体设计评审后收紧（见 ROADMAP"整体设计评审后的修正"）：上表的"不含"检查只看原始字面，引号、`\` 与 `$` 展开都能绕过，例如 `kubectl get sec""rets`；kubectl 的全局参数 `--profile-output` 还能写文件。现在命令只能由字母、数字、空白和少数不改变词义的标点组成，kubectl 段只能带一组只读参数，短参数 `s` 的规则随之并入参数白名单。
+
 3. **内置清单**：`kubectl get`、`kubectl describe`、`kubectl logs`、`kubectl top`、`kubectl events`、`kubectl explain`、`kubectl api-resources`、`kubectl version`，以及 `grep`、`head`、`tail`、`wc`、`jq`。多集群实施时（PR #24）加入 `kubectl config get-contexts` 与 `kubectl config current-context`，用于列出集群。入选标准：不能执行其他程序、不能写文件。因此不收录：
    - `awk`：`system()` 能执行命令。
    - `sed`：GNU sed 的 `e` 命令能执行命令，`w` 命令能写文件（附录 9.3，K3）。

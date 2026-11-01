@@ -54,7 +54,7 @@ path = "skills/rust-review/SKILL.md"
 | `container.pidsLimit` | 容器内进程数上限，大于零，默认 256 |
 | `rules.allow` | bash 命令前缀白名单，沿用原管道检查；空列表表示只检查 deny |
 | `rules.deny` | 追加 bash 命令子串拒绝规则，原内置拒绝规则始终保留 |
-| `rules.autoApprove` | 替换不经审批直接执行的 bash 命令前缀；只在 bash 需要审批时起作用（chat）。带 shell 语法、`secret`、URL 或连接参数的命令仍要审批，拒绝规则始终优先，见 README 的“安全模型”。内置 assistant 为一组只读命令，troubleshoot 为空 |
+| `rules.autoApprove` | 替换不经审批直接执行的 bash 命令前缀；只在 bash 需要审批时起作用（chat）。带引号、`$` 等 shell 语法、`secret`、URL、连接参数或只读集合以外的 kubectl 参数的命令仍要审批，拒绝规则始终优先，见 README 的“安全模型”。内置 assistant 为一组只读命令，troubleshoot 为空 |
 | `rules.askTools` | 替换需审批的工具名列表；run 通过 NoHuman 明确拒绝，chat 交给终端审批 |
 | `rules.denyTools` | 追加被拒绝的工具名；启用该工具或批准调用都不能覆盖拒绝 |
 | `limits.maxTurns` | 每轮模型请求数；`"unlimited"` 不限，`0` 不请求模型 |

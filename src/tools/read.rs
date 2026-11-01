@@ -260,6 +260,47 @@ mod tests {
         assert!(result.unwrap_err().contains("not a regular file"));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn refusing_a_named_pipe_does_not_open_it() {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fifo");
+        assert!(
+            tokio::process::Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .await
+                .unwrap()
+                .success()
+        );
+        let writer_path = path.clone();
+        // Opening a FIFO for writing waits until something opens it for reading: the writer
+        // is released only if the reader opens the FIFO it refuses, as opening a device would
+        // set off whatever the device does on open.
+        let mut writer =
+            tokio::task::spawn_blocking(move || std::fs::OpenOptions::new().write(true).open(writer_path).map(drop));
+        let result = ReadFileTool::default()
+            .execute(json!({"path": "fifo"}), &ctx(dir.path()))
+            .await;
+        // Showing that the writer stays blocked needs a bounded wait. A reader that does not
+        // open the FIFO never releases it, so the wait cannot fail a correct implementation.
+        let released = tokio::time::timeout(std::time::Duration::from_millis(300), &mut writer)
+            .await
+            .is_ok();
+        if !released {
+            let _unblock = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&path)
+                .unwrap();
+            writer.await.unwrap().unwrap();
+        }
+        assert!(result.unwrap_err().contains("not a regular file"));
+        assert!(!released, "refusing the FIFO opened it");
+    }
+
     #[tokio::test]
     async fn long_files_end_with_a_hint_to_continue() {
         let dir = tempfile::tempdir().unwrap();
