@@ -1,16 +1,178 @@
-//! Built-in policies implemented through the same Hooks interface as SDK extensions.
+//! Extensions: [`Extension`] bundles tools, hooks and system prompt sections, and
+//! [`register`] adds them to a loop. The built-in policies below use the same Hooks
+//! interface as extension hooks.
 
+use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use crate::agent::ToolOutput;
 use crate::agent::hooks::{HookContext, HookResult, HookStage, Hooks, TurnDecision, TurnDisposition, TurnSummary};
-use crate::ai::{StopReason, ToolCall};
+use crate::agent::{LoopConfig, Tool, ToolOutput};
+use crate::ai::{PREAMBLE, StopReason, ToolCall};
+use crate::prompt::GENERATED_SECTIONS;
 use crate::sync::lock;
 use crate::text::read_text_file;
+
+/// Tools, hooks and system prompt sections registered together, such as a client for an
+/// external tool server. A host may register one extension into many loops, as serve does
+/// for each chat thread: the tools are shared, and `hooks` is called once per registration.
+///
+/// ```
+/// use std::sync::Arc;
+///
+/// use zx_agent::agent::{HookContext, HookResult, Hooks, LoopConfig, ToolOutput};
+/// use zx_agent::ai::ToolCall;
+/// use zx_agent::extensions::{Extension, register};
+///
+/// /// Marks every tool result and tells the model so.
+/// struct Checked;
+///
+/// struct Mark;
+///
+/// #[async_trait::async_trait]
+/// impl Hooks for Mark {
+///     async fn after_tool(&self, _call: &ToolCall, mut output: ToolOutput, _ctx: &HookContext) -> HookResult<ToolOutput> {
+///         output.content.push_str("\n(checked)");
+///         Ok(output)
+///     }
+/// }
+///
+/// impl Extension for Checked {
+///     fn name(&self) -> &str {
+///         "checked"
+///     }
+///
+///     fn prompt_sections(&self) -> Vec<(String, String)> {
+///         vec![("checked".into(), "Tool results end with (checked).".into())]
+///     }
+///
+///     fn hooks(&self) -> Vec<Box<dyn Hooks>> {
+///         vec![Box::new(Mark)]
+///     }
+/// }
+///
+/// fn add(config: &mut LoopConfig) -> Result<(), String> {
+///     register(config, &[Arc::new(Checked)])
+/// }
+/// ```
+pub trait Extension: Send + Sync {
+    /// Names the extension in errors, and its hooks in `hook_failed` events and traces. Not
+    /// blank, and unique among the extensions registered together.
+    fn name(&self) -> &str;
+
+    /// Tools for the model. Their names must differ from every other tool's.
+    fn tools(&self) -> Vec<Arc<dyn Tool>> {
+        Vec::new()
+    }
+
+    /// `(name, content)` sections placed after the prompt's existing ones. A name is ASCII
+    /// lowercase letters, digits and `_`, starting with a letter; it may not be the preamble's,
+    /// one of [`GENERATED_SECTIONS`] or one the prompt already has. Blank content is left out.
+    fn prompt_sections(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
+    /// Hooks, each declaring [`HookStage::Extension`]: built-in policies decide before them
+    /// and redaction runs after them, so an extension can neither loosen a policy's verdict
+    /// nor bring back a redacted secret.
+    fn hooks(&self) -> Vec<Box<dyn Hooks>> {
+        Vec::new()
+    }
+}
+
+/// Add `extensions` to `config`, in order: their tools after the existing ones, their hooks
+/// under each extension's name, their sections at the end of the system prompt. Everything is
+/// checked first, so on error `config` is unchanged.
+///
+/// Errors: a blank or repeated extension name, a hook outside [`HookStage::Extension`], a
+/// tool name already in use or a tool that fails [`LoopSpec::validate`](crate::agent::LoopSpec::validate),
+/// and a section name that is malformed, reserved, already in the prompt or repeated.
+pub fn register(config: &mut LoopConfig, extensions: &[Arc<dyn Extension>]) -> Result<(), String> {
+    let mut names = HashSet::new();
+    let mut sections_seen = HashSet::new();
+    let mut parts = Vec::new();
+    for extension in extensions {
+        let name = extension.name();
+        if name.trim().is_empty() {
+            return Err("an extension has a blank name".to_string());
+        }
+        if !names.insert(name) {
+            return Err(format!("more than one extension is named {name:?}"));
+        }
+        let hooks = extension.hooks();
+        if let Some(stage) = hooks
+            .iter()
+            .map(|hook| hook.stage())
+            .find(|stage| *stage != HookStage::Extension)
+        {
+            return Err(format!(
+                "extension {name:?}: a hook declares the {stage:?} stage; extension hooks run in the Extension stage"
+            ));
+        }
+        let sections = extension.prompt_sections();
+        for (section, _) in &sections {
+            check_section_name(section).map_err(|reason| format!("extension {name:?}: {reason}"))?;
+            if config.spec.system_prompt.has_section(section) || !sections_seen.insert(section.clone()) {
+                return Err(format!(
+                    "extension {name:?}: the system prompt already has a section named {section:?}"
+                ));
+            }
+        }
+        parts.push(Parts {
+            name,
+            tools: extension.tools(),
+            hooks,
+            sections,
+        });
+    }
+    // The loop's own check covers names, declarations and panics; on failure the tools are
+    // taken out again, so nothing is registered.
+    let existing = config.spec.tools.len();
+    for part in &mut parts {
+        config.spec.tools.append(&mut part.tools);
+    }
+    if let Err(error) = config.spec.validate() {
+        config.spec.tools.truncate(existing);
+        return Err(format!("extension tools: {error}"));
+    }
+    for part in parts {
+        for hook in part.hooks {
+            config.hooks.push_extension_hook(part.name, hook);
+        }
+        for (section, content) in part.sections {
+            config.spec.system_prompt = std::mem::take(&mut config.spec.system_prompt).with_section(&section, &content);
+        }
+    }
+    Ok(())
+}
+
+/// What one extension adds, collected before anything is registered.
+struct Parts<'a> {
+    name: &'a str,
+    tools: Vec<Arc<dyn Tool>>,
+    hooks: Vec<Box<dyn Hooks>>,
+    sections: Vec<(String, String)>,
+}
+
+/// A section name renders as a tag (`<name>`), and the ones zx-agent generates hold facts the
+/// program provides, so an extension's section may not take or imitate them.
+fn check_section_name(name: &str) -> Result<(), String> {
+    let mut chars = name.chars();
+    let well_formed = chars.next().is_some_and(|first| first.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if !well_formed {
+        return Err(format!(
+            "section name {name:?} must be ASCII lowercase letters, digits and _, starting with a letter"
+        ));
+    }
+    if name == PREAMBLE || GENERATED_SECTIONS.contains(&name) {
+        return Err(format!("section name {name:?} is reserved for zx-agent's own sections"));
+    }
+    Ok(())
+}
 
 /// The largest secret file read, such as a token: anything bigger is not a single secret.
 const MAX_SECRET_FILE_BYTES: u64 = 64 * 1024;

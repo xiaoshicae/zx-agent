@@ -49,6 +49,7 @@ paths:
 | `tests/output_store.rs` | 脱敏顺序、UUID 与文件边界、Unix 权限、UTF-8 分页、容量、取消、存储超时与错误回退 |
 | `tests/hooks.rs`、`tests/hooks_cli.rs` | 六个钩子、钩子上下文、具名注册与阶段顺序、审批与失败回退、变换持久化（钩子不能追加 system 消息）、`observes` 的 panic 隔离、工具的声明名与元数据检查、工具取消自己的令牌、已知密钥脱敏接线、钩子失败的文本输出 |
 | `tests/hook_contract.rs` | 钩子输入输出的 JSON 契约，改格式会破坏钩子进程与审批转发 |
+| `tests/extensions.rs` | `extensions::register`：扩展的工具、钩子与提示词段落加入循环；钩子以扩展名报告失败；拒绝非 `Extension` 阶段的钩子、重名的工具与扩展、保留或已有的段落名，出错时不注册任何内容 |
 | `tests/im_feishu.rs` | ⚑ D:5/CHINA FLAG: 飞书 channel 对假开放平台：ping 与 pong、确认、分片、去重、重连、群 @ 与私聊、卡片点击、token、话题回复、编辑与改发、卡片、限频与停止 |
 | `tests/im_slack.rs` | Slack channel 对假 Slack：@ 与私聊、确认与去重、忽略自己的消息、按钮点击、断线重连、连接失败的上报、`wss://` 握手失败（rustls 只有一个加密后端时报错而不是 panic）、凭据被拒、转义与拆分、卡片、限频与停止 |
 | `tests/serve_cli.rs` | `serve` 子命令：配置错误；对假 Slack 与假模型的完整流程（审批卡片、命令看不到 token、脱敏、会话文件、运维日志、SIGTERM） |
