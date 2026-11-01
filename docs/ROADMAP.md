@@ -469,7 +469,7 @@ B. 追踪事件
 
 验收：自定义的内存日志后端能完整往返（创建、运行、按记录重新加载后投影一致）；第二个进程打开同一会话文件时报错；写入被丢弃或超时后会话停止写入；钩子被取消或运行被丢弃时，原始输入不出现在后续请求中，取出的插话放回队列。
 
-实施记录（PR #21，基于 `3af5ef1`，含 PR #18、#19）：
+实施记录（PR #21，基于 `3af5ef1`，其后合并 `dd43cce`，含 PR #18–#20）：
 
 - 按上述 1–6 实施，与定稿的差异如下：
   - JSONL 后端留在 crate 内部（`src/session/file.rs`），文件会话仍经 `SessionStore::create` / `open` 使用。公开的是 `SessionLog`、`LogRecord`、`LoadedSession` 与 `SessionStore::with_log` / `load`。
@@ -478,9 +478,9 @@ B. 追踪事件
   - `flock` 返回"已被占用"以外的错误（例如文件系统不支持）时，打开失败，不降级为无锁写入；Unix 以外的平台不加锁。
   - 会话写不进去时，运行以 `Error` 结束，即使同时被取消；自动压缩写入失败时，已发生的请求和用量照常计入（`ContextPreparation::Unrecorded`）。
   - 用户输入的 `message_start` / `message_end` 事件改在 `on_input` 完成之后发出，此前在钩子之前。事件的 JSON 格式不变。
-- 公开 API 的变化：`SessionStore` 的写方法改为 `async`；`Runner::session()` 返回 `&SessionStore`；`EventSink` 只剩 `emit`；`ContextPreparation` 不再公开；`LoopFailure::Provider` 改为 `{ message, entry_id }`；新增 `Entry::kind` / `timestamp`。会话文件格式（v4）与 CLI 参数不变，`run --help`、`chat --help` 与 `3af5ef1` 逐字节相同。
+- 公开 API 的变化：`SessionStore` 的写方法改为 `async`；`Runner::session()` 返回 `&SessionStore`；`EventSink` 只剩 `emit`；`ContextPreparation` 不再公开；`LoopFailure::Provider` 改为 `{ message, entry_id }`；新增 `Entry::kind` / `timestamp`。会话文件格式（v4）与 CLI 参数不变，`run --help`、`chat --help` 与 `dd43cce` 逐字节相同。
 - `tests/cli.rs` 改动一行：准备数据时的 `append_message(...)` 加 `.await`，这是写方法改为异步的直接结果，断言未改；该文件自 `d2a6a6c` 以来首次改动。其他既有测试的调整：写方法加 `.await`；写入者仍在运行时读取会话文件的 9 处改用 `SessionStore::read`；`src/session.rs` 中 2 项测试在重新打开文件前先释放写入者。
-- 本机 macOS 验证：新增 14 项测试（含 1 个 Rustdoc 示例），stable 与 Rust 1.88.0 各 491 项通过、6 项付费测试跳过。其中 3 项回归测试在修复前（`e350c8f`）失败：取消输入钩子后原始输入仍在会话中（2 项）；第二个 `run` 写入同一会话文件并以 0 退出（1 项）。另用独立进程（Python `fcntl.flock`）持锁实测：`run` 与 `chat` 均以退出码 2 结束并报告 `is in use`，文件不变；释放后 `chat` 正常打开。未新增依赖。完整检查结果与原始测试摘要附在 PR 中。
+- 本机 macOS 验证：新增 14 项测试（含 1 个 Rustdoc 示例）；合并 `dd43cce` 后，stable 与 Rust 1.88.0 各 494 项通过、6 项付费测试跳过。其中 3 项回归测试在修复前（`e350c8f`）失败：取消输入钩子后原始输入仍在会话中（2 项）；第二个 `run` 写入同一会话文件并以 0 退出（1 项）。另用独立进程（Python `fcntl.flock`）持锁实测：`run` 与 `chat` 均以退出码 2 结束并报告 `is in use`，文件不变；释放后 `chat` 正常打开。未新增依赖。完整检查结果与原始测试摘要附在 PR 中。
 
 ### P7 插件与 MCP
 
