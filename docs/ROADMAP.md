@@ -114,7 +114,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P3 | 终端对话 `chat` | 已完成（PR #5） |
 | P4 | profile 文件、上下文文件与 skills | 已完成（PR #6） |
 | P5 | 上下文管理 | 已完成（PR #9） |
-| P6 | 执行环境与崩溃恢复 | 进行中：崩溃恢复已完成（PR #12），执行环境未开始 |
+| P6 | 执行环境与崩溃恢复 | 进行中：崩溃恢复已完成（PR #12），执行环境接缝已完成（PR #13），容器执行器未开始 |
 | P7 | 插件与 MCP | 未开始 |
 | P8 | 嵌入协议 `acp` | 未开始 |
 | P9 | 可选增强 | 未开始 |
@@ -285,14 +285,26 @@ P5 实施约定（2026-11-01）：
 - 只处理分支末尾的调用。之后已有其他消息、已被 `context_edit` 省略或已被摘要替代的调用不补结果，provider 转换时补占位的行为不变。`Error` / `Aborted` 回答里的调用从未执行，不处理。恢复结果写入失败时，按不变量 7 取消运行。
 - 用 FauxProvider、构造的崩溃会话文件、写入失败、丢弃 future，以及对正在执行命令的 `run` 进程发 SIGKILL 的测试验收；不涉及执行环境，`tests/cli.rs` 不改。
 
-- [ ] `Executor` 接缝：`LocalExecutor`（现有行为）与 `ContainerExecutor`
+执行环境实施约定（2026-11-01，经用户确认）：
+
+- 分两个 PR：先加 `Executor` 接缝与 `LocalExecutor`，行为不变；再加离线 `ContainerExecutor` 与配置。
+- `Executor` 接缝（`src/executor/`）提供两个操作：`run` 在给定目录执行一条 shell 命令，响应超时与取消，返回有上限的 stdout / stderr 与结束方式；`read_file` 只读取不超过上限的普通文件。bash 负责参数、结果格式与截断，read_file 负责分页；两者各持有一个执行器，默认 `LocalExecutor`。`LocalExecutor` 是原有实现搬迁而来：进程组、超时与取消后终止、输出捕获上限、只读普通文件与实际读取量上限。read_skill 读取宿主机上的 skill 文件，固定使用 `LocalExecutor`。
+- 容器生命周期：每个进程一个容器（`run` 对应一次任务，`chat` 对应整个会话），首次使用时创建，进程退出时删除；容器带会话 ID 标签，崩溃遗留的容器可按标签识别和清理。
+- 工作目录只读挂载进容器；命令只能写容器内的 tmpfs `/tmp`。网络这一轮只接受 `none`，在线访问方案评审后再加。
+- 超时与取消：2026-11-01 在本机 Docker 29.9.2 上实测，SIGKILL 或 SIGTERM 结束本机的 `docker exec` 客户端（不带 `-t`）后，容器内的命令仍在运行（单次观测，机制未从源码确认）。因此容器执行器在容器内按进程组终止命令，不依赖结束客户端；所需的 `sh`、`setsid`、`kill` 在容器启动时检查，缺少时报配置错误。
+- 容器模式下，系统提示词的 `<environment>` 描述容器而不是宿主机。
+- 测试：默认 `cargo test` 用记录参数的假 docker 程序，不访问网络；真实 Docker 测试仅在设置 `ZX_DOCKER_TEST_IMAGE` 时运行，并在 CI 的 Linux 任务中拉取镜像后开启。
+
+- [ ] `Executor` 接缝：`LocalExecutor`（现有行为）与 `ContainerExecutor`（接缝与 `LocalExecutor` 已完成，PR #13；`ContainerExecutor` 待做）
 - [ ] profile 的 `execution` 增加容器选项（D5：显式开启，默认仍为本机；P4 只接受 `local`）
-- [ ] `ContainerExecutor`：每次运行创建一个沙箱容器（网络默认拒绝，在线任务按评审方案限制访问范围；只读根文件系统、非 root、去掉全部 capability、进程数与内存上限）；每条命令通过 `docker exec` 执行；`read_file` 也在容器内读取；运行结束删除容器
+- [ ] `ContainerExecutor`：每个进程创建一个沙箱容器（2026-11-01 由“每次运行”调整，见上方约定；网络默认拒绝，在线任务按评审方案限制访问范围；只读根文件系统、非 root、去掉全部 capability、进程数与内存上限）；每条命令通过 `docker exec` 执行；`read_file` 也在容器内读取；运行结束删除容器
 - [ ] API key 和会话文件只留在 Agent 进程，不进入容器；工具需要的凭据以只读方式挂载
 - [ ] 列出在线排障所需的 API 地址、网络与凭据范围；无网络的容器只用于离线排障，在线场景的受限访问方案在实施前评审
 - [x] `Tool` trait 增加 `effects()`：只读或有副作用
 - [x] 有副作用的工具执行前追加 `tool_call_started` 条目；恢复时把“已开始、无结果”的调用标记为结果未知，不自动重放
 - [x] 首次写入 `tool_call_started` 前再次升级会话格式，兼容读取 P5 及更早版本
+
+执行环境接缝验收（2026-11-01，已完成，PR #13）：`src/executor/` 提供 `Executor`、`ShellCommand`、`CommandOutput`、`CommandEnd` 与 `LocalExecutor`；bash 与 read_file 新增 `executor` 字段，默认 `LocalExecutor`，`..Default::default()` 的构造方式不受影响，按字段完整列出的字面量需补上新字段。本机执行代码从 bash 与 read_file 原样搬迁，bash 与 read_file 原有测试不改断言即通过（仅 read_file 测试中两处字面量补 `..ReadFileTool::default()`，bash 测试模块补一行 `use tokio::process::Command;`）。新增 `tests/executor.rs` 3 项，用记录请求的替身执行器验证：bash 把命令、目录、超时与隐藏变量交给执行器，并正确报告 6 种结束方式；read_file 经执行器读取解析后的路径与上限。反向验证：让工具绕过自身执行器时，3 项全部失败，修改已还原。本地 macOS 基于 `bb91974`，stable 与 Rust 1.88.0 各 416 项通过、6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过。`tests/cli.rs`、`Cargo.toml`、`Cargo.lock` 未改动。
 
 崩溃恢复验收（2026-11-01，已完成，PR #12；执行环境部分未开始）：
 
