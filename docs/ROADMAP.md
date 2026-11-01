@@ -62,7 +62,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | 流式事件 | 工具参数增量携带调用 ID；事件队列有界，响应与单个 SSE 事件有字节预算 |
 | 验证 | 回归覆盖上述边界，原有 CLI 退出码与正常任务行为继续验证；新增资源限制有单独 CLI 用例 |
 
-2026-11-01 复核 P0–P3 后的修正（已实现待 PR review）：
+2026-11-01 复核 P0–P3 后的修正（已完成，PR #7）：
 
 | 项目 | 修正 |
 |---|---|
@@ -74,6 +74,18 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | 测试 | 每项修正先补回归测试，并确认修复前失败；补充审批默认 120 秒的断言；改正一项名不副实的 chat 测试名 |
 
 本地 macOS 验证（基于 `07a0b8d`，含 P4）：stable 与 Rust 1.88 各 314 项通过、6 项付费测试跳过；格式、clippy、严格 Rustdoc 与 MSRV 全目标检查通过。本次修正未改动 `src/cli.rs`、`tests/cli.rs`、`Cargo.toml`、`Cargo.lock`；`run --help`、`chat --help` 与 `07a0b8d` 逐字节相同；未新增依赖。
+
+2026-11-01 复核 P4 后的修正（已实现待 PR review）：
+
+| 项目 | 修正 |
+|---|---|
+| 自动发现的上下文 | 自动发现的 AGENTS.md 解析后须位于 Git 根目录内（无 Git 根时为 cwd），否则报错，不发出请求。此前仓库中的符号链接可让程序在启动时读取仓库外的任意文件，并写进发给模型的系统提示词 |
+| `run` 默认上下文 | `troubleshoot` 不再自动发现 AGENTS.md，恢复 P4 前 `run` 的行为；需要时用 `--context-file` 显式指定，或在 profile 中设置 `discover = true`。`chat` 使用的 `assistant` 不变 |
+| `--system-prompt-file` | 恢复 P4 前的读取方式：可以是管道，不受 64 KiB 限制。64 KiB 上限只用于 profile 引用的文件 |
+| 上下文报错 | 加载失败时提示 `--no-context` |
+| 工具名 | 工具名集中为常量（第 5 节整理项） |
+
+本地 macOS 验证（基于 `993350e`）：新增 9 项测试，其中 8 项回归测试在修复前失败；3 项既有测试显式开启 `discover = true`，断言不变。stable 与 Rust 1.88 各 323 项通过、6 项付费测试跳过；格式、clippy、严格 Rustdoc 与 MSRV 全目标检查通过。`run --help`、`chat --help` 与 `993350e` 逐字节相同；`tests/cli.rs`、`Cargo.toml`、`Cargo.lock` 未改动，未新增依赖。
 
 下面的 P0–P9 继续按各自验收标准推进。
 
@@ -187,7 +199,7 @@ P4 实施约定（2026-11-01）：
 - `--profile` 接受内置名称或 TOML 路径；自定义文件可用 `extends` 选择一个内置基线，不支持任意文件继承。叠加顺序为内置基线、文件、显式 CLI 参数；显式传入与旧默认值相同的参数也必须覆盖文件。原有 `tests/cli.rs` 不改，帮助仅新增配置选项。
 - TOML 字段使用 camelCase，拒绝未知字段和无效类型。规则包含命令前缀 allow、命令子串 deny、askTools 与 denyTools；deny 累加，不能被 CLI 工具开关或 allow 覆盖。run 始终使用 NoHuman，chat 保留终端审批，profile 不切换前端。
 - 配置支持轮次、总时间、截断续写与已知密钥脱敏；`maxTurns = "unlimited"` 表示不限，0 仍表示不调用模型。当前只支持 `execution = "local"`，脱敏不可关闭；未实现的容器、任意扩展等配置直接报错。
-- 自动读取最近 Git 根目录到 cwd 的 AGENTS.md（无 Git 根时仅 cwd），不隐式读取用户主目录配置；profile 可添加上下文文件，路径相对 profile 文件。CLI `--context-file` 相对启动目录，`--no-context` 可禁用上下文加载。
+- 自动读取最近 Git 根目录到 cwd 的 AGENTS.md（无 Git 根时仅 cwd），不隐式读取用户主目录配置（2026-11-01 调整：`troubleshoot` 默认关闭自动发现，发现的文件须位于项目根目录内，见上方 P4 复核修正）；profile 可添加上下文文件，路径相对 profile 文件。CLI `--context-file` 相对启动目录，`--no-context` 可禁用上下文加载。
 - skills 通过 TOML 的 `[[skills]]` 显式登记 name、description、path，兼容把现有 SKILL.md 当正文文件；不解析 YAML frontmatter、不自动扫描全局 skill 目录。启动只向提示词加入目录信息；`read_skill` 工具按名称加载正文，经过原钩子、策略、取消、脱敏与持久化流程。未启用该工具时不加入目录。
 - 配置、说明、单个上下文和 skill 正文均有 64 KiB 上限；上下文总量 256 KiB，skills 最多 64 项。只读普通 UTF-8 文件，超限或无效内容明确报错。上下文与 skill 文本不能改变已组装的工具及策略。
 - 引入已授权的 `toml 1.1.8`，仅启用 parse、serde、std；其 crate 声明 MSRV 1.85，仍用 Rust 1.88 验证。
@@ -274,7 +286,7 @@ P4 实施约定（2026-11-01）：
 这些整理不改变行为，在改到相关代码时顺带完成：
 
 - [x] `run_loop` 参数过多（P1）：整理为 4 个参数，运行状态通过 `LoopControl` 借用
-- [ ] 工具名字符串散落在多个文件（P1 或 P4）
+- [x] 工具名字符串散落在多个文件（P1 或 P4）：2026-11-01 集中为 `tools::BASH`、`tools::READ_FILE` 与 `profile::skills::TOOL_NAME`
 - [ ] `clip` 有两份实现（任意阶段）
 - [ ] `BashTool::execute` 过长（P6）
 
@@ -289,4 +301,4 @@ P4 实施约定（2026-11-01）：
 
 ---
 
-ROADMAP.md · v0.3 · 2026年11月
+ROADMAP.md · v0.4 · 2026年11月
