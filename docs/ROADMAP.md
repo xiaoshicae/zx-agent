@@ -406,6 +406,11 @@ P5 实施约定（2026-11-01）：
 - 验证：
   - 在本机 Docker Desktop 的 Kubernetes v1.36.1 上逐项实测，结果见 `deploy/kubernetes/README.md` 的“验证记录”。
   - 评审稿缺口 ④ 的三项在该集群上得到确认：Pod 内 kubectl 使用 ServiceAccount；`view` 的实际权限；Pod 内的 `prctl`。
+  - 完整验证基于 `dd43cce`。rebase 到包含 PR #21 的 `5c20655` 之后复验：
+    - 会话锁在存储卷上生效：chat 打开会话期间，另一个 `kubectl exec` 中的 run 报告 `is in use`，退出码 2；
+    - 脱敏、`/proc` 保护、chat 审批与定时巡检不变。
+  - 复验时发现，重复使用同一镜像标签，节点会沿用缓存的旧镜像；部署说明据此要求每次构建使用新标签。
+  - PR #22 的首次 CI 中，`tests/container.rs` 的 `a_dropped_run_still_stops_its_command` 在 ubuntu 上以 `Text file busy (os error 26)` 失败：假 docker 脚本写出后立即执行。本 PR 未改动 Rust 代码与测试，只重跑失败的任务后通过。这是已有的偶发问题，另行处理。
 - 未改动 Rust 代码，也未改动 `Cargo.toml`、`Cargo.lock`。
 - 未验证：x86_64 镜像与其他集群；推送到镜像仓库；真实模型。
 
