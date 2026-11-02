@@ -1141,7 +1141,9 @@ OpenTelemetry 追踪（2026-11-02，已完成，PR #49；用户选择官方 crat
 实施记录（PR #50，基于 PR #49 的 `41dfdcc`）：
 
 - 测试：新增 4 项：`src/ai/openai.rs` 单元测试 2 项（附加字段进入请求体与审计选项、还原结果与实际请求体相同；六个保留字段在构建与还原时都被拒绝）、`tests/run_cli.rs` 2 项（字段到达假模型服务并写入会话的 `extraFields`；保留字段、不是 JSON 的值与缺少 `=` 的写法以退出码 2 结束，不发请求、不建会话文件）。
-- 真实服务验证（2026-11-02，经用户授权，使用对话中提供过的 key）：未完成。该服务对全部 6 个请求返回 HTTP 401（“Authentication Fails, Your api key: ****9246 is invalid”），用量为 0。README 中该服务的设置因此只列依据，思考模式字段的实际效果标为未实测。
+- 真实服务验证（2026-11-02，经用户授权，`deepseek-flash`，`https://api.deepseek.com`，提示词为 “Reply with the single word: ok”，不带工具）：
+  - 先用对话中提供过的 key：全部 6 个请求返回 HTTP 401，服务端回复该 key 无效，用量为 0。
+  - 再用用户放在本机文件中的 key：默认、关闭思考（`thinking={"type":"disabled"}`）与 `reasoning_effort="low"` 都以 0 退出，回答为 `ok`。关闭思考时三次运行的输入 token 都是 340，默认与 `low` 的五次都是 365，说明该字段生效；输出 token 在同一设置下每次不同（默认三次为 202、2、2），不能据此比较思考强度。缓存命中由 `prompt_cache_hit_tokens` 读出（128）。README 中的两条命令按原样经 shell 运行过。
 - 反向验证：分别去掉请求体加入附加字段、审计记录、还原时使用记录的字段、拒绝保留字段与拒绝重复字段，每次都有对应测试失败（依次 2、2、1、2、1 项），修改已还原。
 - 本机 macOS 验证：stable 与 Rust 1.88.0 各 757 项通过（基线 753 项，为 PR #49 的实测），6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过；自查脚本对改动的文件无命中；`tests/run_cli.rs` 连续运行 3 次，均通过。`run`、`chat`、`serve` 的 `--help` 各多出 `--request-field` 一项。未新增依赖。
 

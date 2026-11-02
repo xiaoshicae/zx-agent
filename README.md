@@ -178,14 +178,26 @@ export PROM_MCP_TOKEN=...   # 与 profile 中的 tokenEnv 一致
 
 ⚠ COMPLIANCE REVIEW: [对话内容、命令输出与工具结果会发往该服务的 API，属于远程访问与数据外发] 使用前须经法务 / 出口合规审批（Subject to Legal/Export Compliance approval）。
 
-该服务的 API 兼容 OpenAI 格式（官方文档原文：“The DeepSeek API uses an API format compatible with OpenAI/Anthropic.”，https://api-docs.deepseek.com/ ，2026-11-02 读取），用现有的 OpenAI 兼容 provider 即可：
+该服务的 API 兼容 OpenAI 格式（官方文档原文：“The DeepSeek API uses an API format compatible with OpenAI/Anthropic.”，https://api-docs.deepseek.com/ ，2026-11-02 读取），用现有的 OpenAI 兼容 provider 即可。key 放在环境变量 `DEEPSEEK_API_KEY` 中：
+
+```bash
+zx-agent run --base-url https://api.deepseek.com --model deepseek-flash \
+  --api-key-env DEEPSEEK_API_KEY --tools "" "Reply with the single word: ok"
+
+# 关闭思考模式
+zx-agent run --base-url https://api.deepseek.com --model deepseek-flash \
+  --api-key-env DEEPSEEK_API_KEY --tools "" \
+  --request-field 'thinking={"type":"disabled"}' "Reply with the single word: ok"
+```
+
+2026-11-02 实测：两条命令都以 0 退出，回答为 `ok`，报告行的输入 token 分别为 365 与 340。
 
 | 设置 | 值 | 依据 |
 |---|---|---|
-| `--base-url` | `https://api.deepseek.com` | 官方文档的 base_url。2026-11-01 的付费测试用的是 `https://api.deepseek.com/v1`，6 项通过（见 `docs/ROADMAP.md` 的补跑记录） |
-| `--model` | `deepseek-flash` 或 `deepseek-v4-pro` | 官方文档。文档写明 `deepseek-chat`、`deepseek-reasoner` 在 2026-07-24 之后停用；2026-11-01 用 `deepseek-chat` 的请求仍成功，原因未核实 |
+| `--base-url` | `https://api.deepseek.com` | 官方文档的 base_url，2026-11-02 实测可用。2026-11-01 的付费测试用的是 `https://api.deepseek.com/v1`，6 项通过（见 `docs/ROADMAP.md` 的补跑记录） |
+| `--model` | `deepseek-flash` 或 `deepseek-v4-pro` | 官方文档；2026-11-02 实测的是 `deepseek-flash`。文档写明 `deepseek-chat`、`deepseek-reasoner` 在 2026-07-24 之后停用；2026-11-01 用 `deepseek-chat` 的请求仍成功，原因未核实 |
 | `--api-key-env` | 存放 key 的环境变量名，如 `DEEPSEEK_API_KEY` | key 只从环境变量读取 |
-| 思考模式 | 默认开启。`--request-field 'thinking={"type":"disabled"}'` 关闭；`--request-field 'reasoning_effort="low"'` 调整强度（`low`、`high`、`max`） | 官方文档写明两个字段的格式，`thinking` 决定是否思考时优先。zx-agent 会把它们原样放进请求体（有测试覆盖）；该服务对它们的处理未在本项目中实测 |
+| 思考模式 | 默认开启。`--request-field 'thinking={"type":"disabled"}'` 关闭；`--request-field 'reasoning_effort="low"'` 调整强度（`low`、`high`、`max`） | 官方文档写明两个字段的格式，`thinking` 决定是否思考时优先。2026-11-02 用 `deepseek-flash` 实测：两个字段都被接受；关闭思考时三次运行的输入 token 都是 340，默认与 `low` 都是 365，说明该字段生效（服务端如何处理未核实）。输出 token 在同一设置下每次不同（默认三次为 202、2、2），不能据此比较思考强度 |
 | 思考内容 | 回答中的 `reasoning_content` 记入会话，之后的请求中回传给产生它的模型 | `src/ai/openai.rs`。官方文档：带工具的请求必须回传全部 `reasoning_content`，否则返回 400 |
 | 结构化输出 | `response_format` 只有 `text` 与 `json_object`，没有 `json_schema` | 官方文档 |
 
