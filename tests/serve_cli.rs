@@ -66,7 +66,7 @@ fn mention(envelope: &str, ts: &str, text: &str) -> Value {
 
 #[tokio::test]
 async fn configuration_errors_are_reported_before_serving() {
-    let cases: [(&str, &[&str], Option<&str>, &str); 7] = [
+    let cases: [(&str, &[&str], Option<&str>, &str); 8] = [
         (
             "[slack]\n[sessions]\ndir = \"s\"\n",
             &[],
@@ -103,6 +103,12 @@ async fn configuration_errors_are_reported_before_serving() {
             &[],
             None,
             "unknown field `token`",
+        ),
+        (
+            "[slack]\n[access]\nconversations = []\n[sessions]\ndir = \"s\"\n[replies]\ngreeting = \"hi\"\n",
+            &[],
+            None,
+            "unknown field `greeting`",
         ),
     ];
     for (config, extra, unset, expected) in cases {
@@ -173,7 +179,7 @@ async fn serve_answers_a_mention_with_an_approved_command_that_cannot_see_the_sl
     // The card shows who allowed it, and the status message becomes the answer.
     let updates = slack.wait_for("chat.update", 2).await;
     let texts: Vec<&Value> = updates.iter().map(|call| &call.body["text"]).collect();
-    assert!(texts.contains(&&json!("已批准（<@U2>）")), "{texts:?}");
+    assert!(texts.contains(&&json!("Allowed (<@U2>)")), "{texts:?}");
     assert!(texts.contains(&&json!("done")), "{texts:?}");
 
     // The command ran without the tokens, and a token it read was redacted.
@@ -215,6 +221,58 @@ async fn serve_answers_a_mention_with_an_approved_command_that_cannot_see_the_sl
     );
     assert!(!String::from_utf8_lossy(&output.stdout).contains(BOT_TOKEN));
     assert!(!stderr.contains(BOT_TOKEN) && !stderr.contains(APP_TOKEN));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn configured_replies_and_card_labels_replace_the_english_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = MockServer::start(vec![Reply::bash("c1", "echo hi"), Reply::text("done")]).await;
+    let mut slack = FakeSlack::start().await;
+    let config = write_config(
+        dir.path(),
+        &format!(
+            "{VALID}\n[replies]\nworking = \"处理中…\"\n[cardLabels]\ntitle = \"需要审批\"\nallowed = \"已批准\"\n"
+        )
+        .replace("[slack]\n", &format!("[slack]\napiBase = \"{}\"\n", slack.api_base)),
+    );
+    let _child = serve(dir.path(), &config, &model.base_url)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let mut socket = slack.socket().await;
+    socket.send(mention("e1", "1700000001.000100", "run it")).await;
+    assert_eq!(socket.receive().await, json!({"envelope_id": "e1"}));
+    let posts = slack.wait_for("chat.postMessage", 2).await;
+    assert_eq!(posts[0].body["text"], json!("处理中…"));
+    let card = posts[1].body.to_string();
+    assert!(card.contains("需要审批"), "{card}");
+    // A label the file leaves out keeps its default.
+    assert!(card.contains("Allow once"), "{card}");
+
+    let approval = posts[1].body["blocks"][1]["elements"][0]["value"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    socket
+        .send(json!({
+            "envelope_id": "i1",
+            "type": "interactive",
+            "payload": {
+                "type": "block_actions",
+                "user": {"id": "U2"},
+                "channel": {"id": "C1"},
+                "message": {"ts": "1700000000.000002"},
+                "actions": [{"action_id": "zx_allow_once", "value": approval, "type": "button"}],
+            },
+        }))
+        .await;
+    assert_eq!(socket.receive().await, json!({"envelope_id": "i1"}));
+    let updates = slack.wait_for("chat.update", 2).await;
+    let texts: Vec<&Value> = updates.iter().map(|call| &call.body["text"]).collect();
+    assert!(texts.contains(&&json!("已批准 (<@U2>)")), "{texts:?}");
 }
 
 #[cfg(unix)]
@@ -263,7 +321,7 @@ async fn a_status_left_by_a_killed_server_is_replaced_when_it_starts_again() {
         (
             &json!("C1"),
             &json!(status),
-            &json!("服务重启过：这次任务没有完成，请重新发送。")
+            &json!("The service restarted: this task did not finish; please send it again.")
         )
     );
     let pid = second.id().unwrap().to_string();

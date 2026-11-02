@@ -404,7 +404,7 @@ async fn a_closed_card_keeps_its_request_and_shows_who_decided() {
     let blocks = body["blocks"].as_array().unwrap();
     assert_eq!(blocks.len(), 2, "no buttons are left: {blocks:?}");
     assert_eq!(blocks[0], request);
-    assert_eq!(blocks[1]["text"]["text"], json!("已批准（<@U2>）"));
+    assert_eq!(blocks[1]["text"]["text"], json!("Allowed (<@U2>)"));
 }
 
 #[tokio::test]

@@ -49,6 +49,7 @@ G1–G4 是验收目标。当前会话日志可重建对话与提示词；G3 所
 | D7 | IM 长连接的 WebSocket 客户端 | 已授权：`tokio-tungstenite`（0.30，关掉默认 feature，只开 `connect` 与 `rustls-tls-webpki-roots`）。理由与依赖核对见 `docs/serve-im-review.md` 缺口 ① | 2026-11-01 | 已引入（PR #29） |
 | D8 | MCP 的范围 | 本项目只做 MCP 客户端：只接工具，只支持 Streamable HTTP。MCP 服务器与领域工具（如 Kubernetes、Prometheus 查询）由外部服务实现 | 2026-11-01 | 已确认：P7 按此评审，见 `docs/p7-mcp-review.md` |
 | D9 | HTTP 客户端与 TLS | reqwest 升到 0.13（`json`、`stream`、`rustls`）。rustls 只用 aws-lc-rs 一个加密后端，HTTPS 的根证书改用系统信任库。理由：rmcp 只支持 reqwest 0.13，与 0.12 并存时 rustls 同时启用两个后端，`wss://` 连接会 panic（评审稿缺口 ①）；项目还没有使用者，用户授权按最合理的方式处理 | 2026-11-01 | 已完成（PR #36） |
+| D10 | 通用，不为场景定制 | zx-agent 是通用 Agent：代码只定义接口与通用机制，外部来适配。某个环境、平台或厂商才有的知识（如 kubectl 的只读选项、Kubernetes 的 token 路径、IM 文案的语言）放在 profile、部署清单或配置里；告警等外部系统由外部适配器调用 `run`、SDK 或 IM 接入，zx-agent 不解析它们的私有格式（如 Alertmanager）。provider 对协议方言的处理显式开启。同日决定：P9 只再做更多 provider（如 Anthropic），`--output-schema`、异步审批、OS 级沙箱不做，“由 webhook 或告警触发运行”取消；P8 `acp` 不做 | 2026-11-02 | 用户决定；已有代码中的定制已整理（PR #54），见 P9 的“通用化整理” |
 
 D2 之外的新依赖、依赖升级，仍需先征得同意。
 
@@ -427,7 +428,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | 内置钩子的固定名称 | 已完成，PR #42 | CLI 注册的内置钩子没有名称，`hook_failed` 与 `[hook]` 行显示类型名；`std::any::type_name` 的文档写明其格式不受保证、可能随编译器版本变化，几个策略钩子也因此同名。改为固定名称：`command_policy`、`profile_rules`、`bash_approval`、`continue_on_length`、`redact_secrets`、`spill_outputs`（MCP 服务器名不含 `_`，不会重名）；`presets::troubleshoot::hooks` 同样使用 `continue_on_length` |
 | IM 服务正常停止时没有处理的消息 | 已完成，PR #43 | 见下文"停止时没有处理的消息" |
 | IM 服务停止时取消的运行没有说明原因 | 已完成，PR #46 | 见下文"停止与重启时的状态" |
-| IM 服务崩溃时丢失已确认、还没处理的消息 | 已知缺口；选项 c)（重启后替换遗留的"处理中…"）已完成，PR #46 | 见评审稿 `docs/serve-im-review.md` 3.7 节缺口 ⑧（v0.7）与下文"停止与重启时的状态"。消息本身仍会丢失：持久化收件（选项 b）需要新的记录格式与重放规则，要单独评审；等二期（告警 Webhook）、多副本，或实际出现丢消息时再定 |
+| IM 服务崩溃时丢失已确认、还没处理的消息 | 已知缺口；选项 c)（重启后替换遗留的"处理中…"）已完成，PR #46 | 见评审稿 `docs/serve-im-review.md` 3.7 节缺口 ⑧（v0.7）与下文"停止与重启时的状态"。消息本身仍会丢失：持久化收件（选项 b）需要新的记录格式与重放规则，要单独评审；等多副本，或实际出现丢消息时再定（原计划的二期告警 Webhook 已按 D10 取消） |
 | 真实服务上的验证 | 待授权 | PR #35 改了 provider 的错误处理，PR #36 换了 HTTP 客户端与 TLS；对真实模型服务与 IM 平台的 HTTPS 连接尚未验证（见 PR #36 的记录）。付费测试需用户明确授权，并由用户设置 `ZX_E2E_AUTHORIZED` 后运行 |
 | 打开大会话的耗时 | 暂缓 | 加载时每条请求记录仍要构建一次分支路径，耗时高于线性（见 PR #34 的实施记录） |
 | 保留近期用户消息原文；摘要前把较早的长工具结果换成引用 | 待评估 | 增量摘要之外的两项上下文管理改进，见"三、会话"的设计稿末尾 |
@@ -529,8 +530,8 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P5 | 上下文管理 | 已完成（PR #9） |
 | P6 | 执行环境与崩溃恢复 | 进行中：崩溃恢复（PR #12）、执行环境接缝（PR #13）、离线容器执行（PR #14）已完成；在线访问评审稿已合入（PR #17），一期已完成：只读命令自动放行（PR #19）、环境变量保护与 ServiceAccount token 脱敏（PR #20）、常驻 Pod 部署包（PR #22）、多集群（PR #24）；容器联网已取消，改为常驻 Pod 部署。待部署方在真实集群上验收；服务模式与 IM 接入的评审稿已合入（PR #27），模块 A（IM 接口与服务，PR #28）、B（Slack 与 `serve`，PR #29）、C（⚑ D:5/CHINA FLAG: 飞书，PR #32）、D（部署，PR #33）已完成，真实平台验收待提供凭据 |
 | P7 | 插件与 MCP | 已完成（PR #41）：范围按 D8 收窄，评审稿已合入（PR #36）并经用户确认；模块 A（Extension 接口，PR #38）、B1（MCP 客户端库，PR #40）、B2（CLI 接入与文档，PR #41）已完成；真实 MCP 服务器的验收待选定服务器；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已完成（PR #23），A2–A8（扩展 API）已完成（PR #25） |
-| P8 | 嵌入协议 `acp` | 未开始 |
-| P9 | 可选增强 | 进行中：token 预算（PR #47）、OpenTelemetry 追踪（PR #49）已完成 |
+| P8 | 嵌入协议 `acp` | 不做（2026-11-02 用户决定，D10） |
+| P9 | 可选增强 | 进行中：token 预算（PR #47）、OpenTelemetry 追踪（PR #49）、crate 拆分（PR #52）、通用化整理（PR #54）已完成；剩更多 provider（如 Anthropic）。其余各项按 D10 不做或取消 |
 
 ### P0 场景默认值移出内核
 
@@ -735,7 +736,7 @@ P5 实施约定（2026-11-01）：
 - [x] 常驻 Pod 部署包（单集群）：Deployment、RBAC、Secret 与会话存储卷的模板和文档（由“Kubernetes 部署说明”调整；已完成，PR #22）
 - [x] 多集群：多个 context 的 kubeconfig，以及其他集群 token 文件的脱敏登记（已完成，PR #24）
 
-部署方向（2026-11-01，用户确认）：Agent 以常驻 Pod 部署，kubectl 在 Pod 内以本机执行方式运行，凭据来自 ServiceAccount，因此取消容器执行的联网与 kubeconfig。用户确认的任务来源：kubectl exec 进 Pod 对话、定时巡检、告警 Webhook、IM 机器人。用户希望增加的功能：写操作（需审批）、专用查询工具 / MCP、多集群访问、记住历史排障。其中告警 Webhook 与 IM 机器人需要新的服务模式，另行评审后实施。评审稿见 `docs/serve-im-review.md`（已合入，PR #27）：一期为 `zx-agent serve`、IM 接口与两个平台的实现，告警 Webhook 放在二期。
+部署方向（2026-11-01，用户确认）：Agent 以常驻 Pod 部署，kubectl 在 Pod 内以本机执行方式运行，凭据来自 ServiceAccount，因此取消容器执行的联网与 kubeconfig。用户确认的任务来源：kubectl exec 进 Pod 对话、定时巡检、告警 Webhook、IM 机器人。用户希望增加的功能：写操作（需审批）、专用查询工具 / MCP、多集群访问、记住历史排障。其中告警 Webhook 与 IM 机器人需要新的服务模式，另行评审后实施。（2026-11-02：告警 Webhook 不再由 zx-agent 实现，改由外部适配器调用 `run`、SDK 或 IM 接入，见 D10。）评审稿见 `docs/serve-im-review.md`（已合入，PR #27）：一期为 `zx-agent serve`、IM 接口与两个平台的实现，告警 Webhook 放在二期。
 
 IM 接入一期（2026-11-01 起；评审稿合入后由用户要求推进，按其第 6 节分 PR 实施）：
 
@@ -1187,6 +1188,8 @@ P7 模块 B2 实施记录（2026-11-01，PR #41）：
 
 ### P8 嵌入协议 `acp`
 
+2026-11-02 用户决定不做（D10），以下保留原计划。
+
 目标：可被编辑器和其他平台驱动。依赖：ACP 官方 Rust SDK（D2 已授权，要求 MSRV 1.88）。
 
 - [ ] `acp` 子命令：通过 stdio 收发 ACP 消息
@@ -1198,12 +1201,12 @@ P7 模块 B2 实施记录（2026-11-01，PR #41）：
 
 按需求排序，每项单独评估：
 
-- [ ] 结构化最终报告：`--output-schema`，按 JSON Schema 约束最终回答
+- [ ] 结构化最终报告：`--output-schema`，按 JSON Schema 约束最终回答。2026-11-02 用户决定不做（D10）
 - [x] 无人值守的 token 预算：profile 上限增加 token 总量，超出时结束运行；现有退出码 0–6 的含义不变（2026-11-01 补充）。已完成（PR #47），见下文"token 预算"
 - [ ] 更多 provider：例如 Anthropic Messages API。2026-11-02：DeepSeek 经 OpenAI 兼容接口直接可用，不单独写 provider（用户确认）；服务端自己的设置经新增的 `--request-field` 传递（PR #50），见下文"请求附加字段"
-- [ ] 异步审批：`WebhookInteraction`，高风险命令发 webhook 请求批准，超时则拒绝
-- [ ] OS 级沙箱的 Executor：Linux 的 bubblewrap + seccomp、macOS 的 Seatbelt
-- [ ] 由 webhook 或告警触发运行
+- [ ] 异步审批：`WebhookInteraction`，高风险命令发 webhook 请求批准，超时则拒绝。2026-11-02 用户决定不做（D10）
+- [ ] OS 级沙箱的 Executor：Linux 的 bubblewrap + seccomp、macOS 的 Seatbelt。2026-11-02 用户决定不做（D10）
+- [ ] 由 webhook 或告警触发运行。2026-11-02 取消（D10）：告警等外部系统由外部适配器调用 `run`、SDK 或 IM 接入，zx-agent 不解析告警格式，也不为此增加 HTTP 服务
 - [x] OpenTelemetry 追踪（事件模型见"P7 前置"B 部分）。已完成（PR #49），见下文"OpenTelemetry 追踪"
 - [x] 拆分为多个 crate（`zx-ai`、`zx-core`、`zx-tools`、`zx-cli`），用编译器保证分层。已完成（PR #52），见下文"crate 拆分"；与此处所列不同，CLI 留在根包 `zx-agent`，IM 单独成为 `zx-im`
 
@@ -1282,12 +1285,31 @@ crate 拆分（2026-11-02，已完成，PR #52；基于 PR #51 合并后的 `640
 - 随之修改：`release.yml` 从 `[workspace.package]` 读版本（原来读 `[package].version`，拆分后读到的是 `{workspace = true}`，tag 校验必然失败；新旧脚本都在本机对新清单运行过）；Dockerfile 增加 `COPY crates crates`；自查脚本同时扫描 `crates/`；`post-edit.sh` 改为记录 workspace 根目录，因为在成员 crate 的目录里 `cargo test` 只测那一个 crate（实测 `crates/zx-core` 中只有 81 项）；规则 08 的路径过滤改为 `**/Cargo.toml`，并写明依赖在 workspace 中的写法（实测 `cargo add -p` 只对已列在 `[workspace.dependencies]` 的依赖写成 `.workspace = true`）；README 与 `.claude/` 下文档里指向已移动文件的路径随之更新；评审稿（各自写明了代码核对基线）与本文档已有的实施记录是当时的记录，其中的路径不改。CI 的命令不变：在根目录运行时，clippy、test 与 doc 经 `default-members` 覆盖全部 crate，`cargo fmt --check` 也检查全部成员；fmt 与 clippy 用故意引入的问题验证过，test 与 doc 核对了实际处理的 crate。
 - 本机 macOS 验证：stable 与 Rust 1.88.0 各 777 项通过、7 项付费测试跳过，与拆分前（`64027d4`）相同，784 条测试名与结果一一对应（`ai::`、`im::` 前缀因模块成为 crate 根而去掉）；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过；`run`、`chat`、`serve` 与顶层的 `--help` 逐字节不变；自查脚本的命中与拆分前相同。按 Dockerfile 复制的文件用 Rust 1.88.0 `--release --locked` 构建成功，不复制 `crates/` 时失败；没有实际执行 `docker build`。拆分最初基于 `62ca0aa`，上面其余各项核对在那时完成；PR #51 只改了测试与文档，源码与清单在两个基点之间没有变化。
 
+通用化整理（2026-11-02，已完成，PR #54；按 D10；基于 PR #53 合并后的 `f7397bb`）：
+
+| 原来写在代码里的 | 现在 |
+|---|---|
+| 自动放行里的 kubectl 知识：只读选项表、连接选项、含 `secret` 就询问（`crates/zx-tools/src/policy.rs`） | `AutoApprove` 只做通用检查：前缀、普通字符、不含 URL。程序可带的选项（`rules.autoApproveOptions`）与仍要询问的字词（`rules.autoApproveExcept`，像 `deny` 一样累加）由 profile 给出。kubectl 的选项表原样移到 `deploy/kubernetes/profiles/kubernetes.toml`，镜像装在 `/usr/local/share/zx-agent/profiles/`（不放 `/etc/zx-agent`，multicluster 在那里挂 kubeconfig）；assistant 保留 `secret` |
+| 无条件脱敏 Kubernetes ServiceAccount token 的固定路径（`src/cli.rs`） | 删除。部署清单经 `ZX_SECRET_FILES` 登记；multicluster 的两个补丁会整体替换这个变量，所以同时列出该路径与集群 token 目录 |
+| `run` 默认用排障 profile | 新增中性的内置 profile `unattended`（与 troubleshoot 的工具、上限、续写相同，说明不涉排障），作为 `run` 的默认；troubleshoot 改为显式选择，CronJob 写明 `--profile troubleshoot` |
+| 通用的 assistant profile 预置 10 条 kubectl 命令 | 只留 `grep`、`head`、`tail`、`wc`、`jq`；kubectl 的移到 Kubernetes 的 profile，serve 补丁与部署说明用 `--profile` 指定 |
+| `presets` 模块用 Rust 常量又写了一遍排障默认值 | 删除。`examples/library.rs` 自己给出说明、上限与续写；测试中借它当默认值的两处改为显式写出的同值 |
+| Slack 与 ⚑ D:5/CHINA FLAG: 飞书的实现在 zx-im 内 | 拆成 `crates/zx-im-slack`、`crates/zx-im-feishu`；zx-im 只留接口与 `Server`，不再依赖 tokio-tungstenite、reqwest、futures；`split_text` 与 `Seen` 公开给适配器使用。`zx_agent::im::slack`、`im::feishu` 的路径不变 |
+| IM 回复与审批卡片的默认文案为中文，卡片格式写死全角标点 | 默认英文，格式改用半角标点；`serve` 的配置文件新增 `[replies]`、`[cardLabels]`（各字段可选），示例配置带原来的中文文案。没有错误文本时去掉 `failed` 文案结尾的冒号，全角半角都去 |
+| OpenAI 兼容 provider 总是给其余回答补空的 `reasoning_content`（为 ⚑ D:5/CHINA FLAG: DeepSeek 的报错而加） | 改为显式的 `--fill-missing-reasoning`（`OpenAiConfig::fill_missing_reasoning`），默认关闭。转换选项升到 version 2，开启时记录 `fillMissingReasoning`；version 1 的旧会话仍按“总是补齐”还原，两个固定会话的还原结果不变。读取响应时兼容两种推理字段名与两种缓存命中字段，属于容错读取，未改 |
+
+- 顺带修复：Slack 卡片判断“请求被截断”用的是第一段是否填满可用长度，而分段不切开 `&lt;` 这类实体，第一段可能更短，被截断的请求就不显示 `…`。原来的中文标题长度恰好没触发，换成英文标题后单测暴露。改为看是否还有下一段，并补了回归测试（修复前失败）。
+- 行为变化：不带 `--profile` 的 `run` 使用 unattended 的说明；chat 与 serve 默认不再自动放行 kubectl 命令；IM 默认文案为英文；历史中混有不带推理内容的回答时，要求补齐的服务端需加 `--fill-missing-reasoning`；SDK 的 `zx_agent::presets` 已删除。`run`、`chat`、`serve` 的 `--help` 因 `--fill-missing-reasoning` 与几处说明文字而变化。
+- 测试：新增 11 项（策略 2，profile 4（含加载部署用的 Kubernetes profile，检查 kubectl 的放行与询问），Slack 截断回归 1，OpenAI 2，serve 1，run 1），随 `presets` 删除 1 项。既有测试的调整：3 个文件中 4 处断言的中文文案改为英文默认值；借用 `presets` 的两处改为显式的同值；策略单测中依赖内置 kubectl 规则的 3 项改用测试中给出的 kubectl 选项（`grep --server` 一例不再询问，grep 没有列出选项）；profile 单测中对照 `presets` 常量的 1 项改为对照具体数值，另 1 项加入 unattended；OpenAI 单测中 3 项按新的版本号与开关调整。
+- 反向验证：分别去掉 assistant 的 `autoApproveExcept`、profile 中程序选项的接线、serve 的 `[replies]` 接线、补齐的开关判断、审计中的开关记录，每次都有对应测试失败（依次 1、1、1、2、1 项），修改已还原。
+- 本机 macOS 验证：stable 与 Rust 1.88.0 各 787 项通过、7 项付费测试跳过（基线 777 项，`f7397bb`）；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过。部署清单用 `kubectl kustomize`（kubectl v1.36.1）渲染了基础与“multicluster + serve”两种组合，核对了生效的命令与 `ZX_SECRET_FILES`。部署说明中的 `kubectl exec … --profile /usr/local/share/zx-agent/profiles/kubernetes.toml` 只在本机用同一份 profile 文件验证过，没有在集群中运行，也没有执行 `docker build`。
+
 这些整理不改变行为，在改到相关代码时顺带完成：
 
 - [x] `run_loop` 参数过多（P1）：整理为 4 个参数，运行状态通过 `LoopControl` 借用
 - [x] 工具名字符串散落在多个文件（P1 或 P4）：2026-11-01 集中为 `tools::BASH`、`tools::READ_FILE` 与 `profile::skills::TOOL_NAME`
-- [ ] `clip` 有两份实现（任意阶段）
-- [ ] `BashTool::execute` 过长（P6）
+- [x] `clip` 有两份实现（任意阶段）：已在 2026-11-01 整体设计评审后的修正中合为一处（见上文该节“整理”一行），现只有 `crates/zx-ai/src/text.rs` 中的一份；此处原先漏勾
+- [x] `BashTool::execute` 过长（P6）：同一处修正中拆出了可单测的纯函数，现为 23 行；此处原先漏勾
 
 ## 6. 推进方式
 

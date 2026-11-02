@@ -1,6 +1,6 @@
 [package]
 name = "zx-im"
-description = "Chat platforms of zx-agent, and a server that answers each thread with its own session"
+description = "The chat platform interface of zx-agent, and a server that answers each thread with its own session"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,12 +12,9 @@ zx-ai.workspace = true
 zx-core.workspace = true
 
 async-trait.workspace = true
-futures.workspace = true
-reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
-tokio-tungstenite.workspace = true
 tokio-util.workspace = true
 uuid.workspace = true
 

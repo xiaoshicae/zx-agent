@@ -308,6 +308,28 @@ async fn bad_request_fields_exit_2_before_any_request() {
 }
 
 #[tokio::test]
+async fn filling_missing_reasoning_is_off_unless_asked_and_the_audit_records_the_choice() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::text("ok"), Reply::text("ok")]).await;
+    for (flags, session, filled) in [
+        (&[][..], "off.jsonl", false),
+        (&["--fill-missing-reasoning"][..], "on.jsonl", true),
+    ] {
+        let output = run(&server, dir.path())
+            .args(flags)
+            .args(["--session", session])
+            .output()
+            .await
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(0), "{session}: {stderr}");
+        let audit = std::fs::read_to_string(dir.path().join(session)).unwrap();
+        assert!(audit.contains(r#""version":2"#), "{audit}");
+        assert_eq!(audit.contains(r#""fillMissingReasoning":true"#), filled, "{audit}");
+    }
+}
+
+#[tokio::test]
 async fn jsonl_events_carry_the_envelope_of_their_run() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::text("ok")]).await;

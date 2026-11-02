@@ -1,6 +1,6 @@
 # 场景配置与上下文管理
 
-`run` 默认使用 `troubleshoot`，`chat` 默认使用 `assistant`。两个内置 profile 的 TOML 和说明文件位于 `profiles/`，构建时嵌入二进制，发布后的程序无需额外查找安装目录。
+`run` 默认使用 `unattended`，`chat` 与 `serve` 默认使用 `assistant`；`troubleshoot` 与 `unattended` 的上限、工具相同，另要求回答按排障报告的固定小节组织，需要时显式选择。三个内置 profile 的 TOML 和说明文件位于 `profiles/`，构建时嵌入二进制，发布后的程序无需额外查找安装目录。它们不含任何特定环境的规则：例如 Kubernetes 中只读 kubectl 命令的放行与可带的选项，在部署目录的 `deploy/kubernetes/profiles/kubernetes.toml`。
 
 ```bash
 zx-agent run --model "$ZX_MODEL" --profile troubleshoot "检查磁盘使用情况"
@@ -44,7 +44,7 @@ path = "skills/rust-review/SKILL.md"
 | 配置 | 语义 |
 |---|---|
 | `name` | 场景名称，省略时继承基线 |
-| `extends` | 可选的 `troubleshoot` 或 `assistant`；省略时使用当前前端的默认 profile；不支持文件链式继承 |
+| `extends` | 可选的 `unattended`、`troubleshoot` 或 `assistant`；省略时使用当前前端的默认 profile；不支持文件链式继承 |
 | `instructions` | 替换场景说明的 UTF-8 文件；CLI `--system-prompt-file` 优先，它的读取方式与引入 profile 之前一致：可以是管道，不受 64 KiB 限制，只在启动时读取一次（`chat` 的 `/new` 沿用同一内容） |
 | `tools` | 替换启用列表，支持 `bash`、`read_file`、`read_skill`、`read_output`；`[]` 禁用全部工具 |
 | `execution` | `local`（默认）或 `container`；其他值报错。`container` 时 bash 与 read_file 在 Docker 容器中执行，见 README 的“容器执行”。CLI `--execution` 优先 |
@@ -54,7 +54,9 @@ path = "skills/rust-review/SKILL.md"
 | `container.pidsLimit` | 容器内进程数上限，大于零，默认 256 |
 | `rules.allow` | bash 命令前缀白名单，沿用原管道检查；空列表表示只检查 deny |
 | `rules.deny` | 追加 bash 命令子串拒绝规则，原内置拒绝规则始终保留 |
-| `rules.autoApprove` | 替换不经审批直接执行的 bash 命令前缀；只在 bash 需要审批时起作用（chat）。带引号、`$` 等 shell 语法、`secret`、URL、连接参数或只读集合以外的 kubectl 参数的命令仍要审批，拒绝规则始终优先，见 README 的“安全模型”。内置 assistant 为一组只读命令，troubleshoot 为空 |
+| `rules.autoApprove` | 替换不经审批直接执行的 bash 命令前缀；只在 bash 需要审批时起作用（chat、serve）。带引号、`$` 等 shell 语法或 URL 的命令仍要审批，拒绝规则始终优先，见 README 的“安全模型”。内置 assistant 为 `grep`、`head`、`tail`、`wc`、`jq`，unattended 与 troubleshoot 为空 |
+| `rules.autoApproveExcept` | 追加字词：命令中出现其中之一（不分大小写，作为子串比较）时仍要审批。内置 assistant 为 `["secret"]`，可追加、不能清除 |
+| `rules.autoApproveOptions.<程序>` | 列出该程序（命令的第一个词，小写）的命令不经审批时可以带的选项：`long`（不带 `--` 的长选项名，`--name=value` 按名字比较）、`shortWithValue`（带值的单字母选项，值可紧跟，如 `-oyaml`）、`shortFlags`（不带值的单字母选项，须单独出现，如 `-A`）。其他选项一律审批；没有列出的程序不限选项。文件中列出的程序整组替换基线中同名的（内置 profile 都没有）。示例见 `deploy/kubernetes/profiles/kubernetes.toml` |
 | `rules.askTools` | 替换需审批的工具名列表；run 通过 NoHuman 明确拒绝，chat 交给终端审批。可以写内置工具名，也可以写 `[[mcp]]` 中配置过的 MCP 工具名（`<服务器名>__<工具名>`） |
 | `rules.denyTools` | 追加被拒绝的工具名；启用该工具或批准调用都不能覆盖拒绝。工具名的范围同 `askTools` |
 | `limits.maxTurns` | 每轮模型请求数；`"unlimited"` 不限，`0` 不请求模型 |
@@ -62,7 +64,7 @@ path = "skills/rust-review/SKILL.md"
 | `limits.tokenBudget` | 每轮所有模型请求的输入加输出 token 上限，以服务返回的用量为准，摘要请求与失败的尝试也计入；每次请求之前检查，最后一次请求可能超出；`0` 关闭。用完时 run 以退出码 7 结束 |
 | `extensions.continueOnLength` | 输出达到 token 上限后的续写次数；每次消耗一次模型请求预算 |
 | `extensions.redaction` | 仅接受 `true` 或省略；CLI 的已知认证 key 脱敏不可关闭 |
-| `context.discover` | 是否自动发现项目 AGENTS.md；`assistant` 默认开启，`troubleshoot` 默认关闭 |
+| `context.discover` | 是否自动发现项目 AGENTS.md；`assistant` 默认开启，`unattended` 与 `troubleshoot` 默认关闭 |
 | `context.files` | 追加显式上下文文件 |
 | `skills` | 显式登记 name、description、path 的目录；正文按需读取 |
 | `compaction.triggerBytes` | 自动摘要阈值，0 关闭；非零须大于 `keepRecentBytes`，且超出部分不能多于 2 MiB（一次摘要最多读取的原始记录） |
@@ -111,7 +113,7 @@ timeoutSecs = 60                            # 可选：单次调用的上限，�
 
 开启自动发现时，从最近 Git 根目录到工具 cwd，依次加载各层 `AGENTS.md`。Git worktree 的 `.git` 文件也被识别为边界；没有 Git 根目录时只检查 cwd。不会隐式读取用户主目录里的其他 AI 配置。
 
-`chat` 默认使用的 `assistant` 开启自动发现；`run` 默认使用的 `troubleshoot` 关闭，无人值守运行不读取仓库里的说明。`run` 需要项目说明时，用 `--context-file AGENTS.md` 显式指定，或在自定义 profile 中设置 `[context] discover = true`。
+`chat` 默认使用的 `assistant` 开启自动发现；`run` 默认使用的 `unattended`（以及 `troubleshoot`）关闭，无人值守运行不读取仓库里的说明。`run` 需要项目说明时，用 `--context-file AGENTS.md` 显式指定，或在自定义 profile 中设置 `[context] discover = true`。
 
 自动发现的 `AGENTS.md` 可以是符号链接，但解析后的路径必须位于 Git 根目录内（没有 Git 根目录时为 cwd），否则在请求模型前以退出码 2 报错。这样仓库内容就不能让程序读取并发送仓库外的文件。`--context-file` 与 profile 中的上下文文件由使用者显式指定，不受这条限制。
 
@@ -148,7 +150,7 @@ profile 的目录信息 → 系统提示词 → 模型选择 read_skill(name)
 
 ## 上下文管理
 
-`assistant` 默认在序列化上下文超过 256 KiB 时自动摘要，`troubleshoot` 默认关闭。触发值继承所选 profile，与前端名称无硬编码关联。手动 `/compact` 和 SDK `AgentSession::compact()` 共用独占运行权；没有旧消息可压缩时返回 Noop，不调用模型。
+`assistant` 默认在序列化上下文超过 256 KiB 时自动摘要，`unattended` 与 `troubleshoot` 默认关闭。触发值继承所选 profile，与前端名称无硬编码关联。手动 `/compact` 和 SDK `AgentSession::compact()` 共用独占运行权；没有旧消息可压缩时返回 Noop，不调用模型。
 
 ```toml
 [compaction]
@@ -200,7 +202,7 @@ zx-agent run --model "$ZX_MODEL" --compact-threshold-bytes 262144 "处理长任�
 
 ## 工具结果落盘
 
-`chat` 使用的 `assistant` 默认启用 `read_output`；`run` 使用的 `troubleshoot` 默认不启用，工具结果保持内联，与 P5 之前一致，也不会向可能只读的工作目录写文件。启用后，工具返回的文本超过 8 KiB 时，在最后一个 `after_tool` 钩子中脱敏后写入文件，会话和模型只收到 `{outputId, path, bytes, readWith}` 引用。SDK 默认不安装这一钩子；显式 `--tools` 未启用 `read_output` 时也不安装，保留工具本来的有界输出。
+`chat` 使用的 `assistant` 默认启用 `read_output`；`run` 使用的 `unattended`（以及 `troubleshoot`）默认不启用，工具结果保持内联，与 P5 之前一致，也不会向可能只读的工作目录写文件。启用后，工具返回的文本超过 8 KiB 时，在最后一个 `after_tool` 钩子中脱敏后写入文件，会话和模型只收到 `{outputId, path, bytes, readWith}` 引用。SDK 默认不安装这一钩子；显式 `--tools` 未启用 `read_output` 时也不安装，保留工具本来的有界输出。
 
 ```toml
 [toolOutput]
@@ -221,4 +223,4 @@ SDK 宿主注册同配置的 `OutputStore`、`ReadOutputTool` 和 `SpillOutputs`
 
 ---
 
-PROFILES.md · v0.9 · 2026年11月
+PROFILES.md · v0.10 · 2026年11月

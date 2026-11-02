@@ -14,8 +14,9 @@ spec:
               env:
                 - name: KUBECONFIG
                   value: /etc/zx-agent/kubeconfig
+                # Replaces the base value, so the account's own token is listed again.
                 - name: ZX_SECRET_FILES
-                  value: /var/run/secrets/zx-agent/clusters
+                  value: /var/run/secrets/kubernetes.io/serviceaccount/token,/var/run/secrets/zx-agent/clusters
               volumeMounts:
                 - name: kubeconfig
                   mountPath: /etc/zx-agent

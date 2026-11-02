@@ -27,18 +27,17 @@
 
 - **是什么**：用 Rust 编写的通用 agent 内核。同一个内核支撑三类场景：和人对话；无人值守运行，例如由 cron 或 Kubernetes Job 触发的排障；被编辑器或其他程序嵌入。场景差异放在内核之外，通过 profile、提示词和插件表达。
 - **参照**：分层方式、循环语义和会话格式沿用 pi（https://github.com/earendil-works/pi ，commit `a92283056`）。与 pi 不同的地方记录在 README 的"与 pi 的差异"。
-- **现状**：v0.1.0。已实现共享的 `AgentSession`、无人值守的 `run` 和终端 `chat`、一个 OpenAI 兼容的流式 provider、`bash` 与 `read_file`，以及文件化 profile、项目上下文、按需 `read_skill`、有界摘要和长工具结果落盘 / `read_output`，崩溃恢复，可替换的会话存储（`SessionLog`；JSONL 会话文件同一时间只有一个写入者），带信封的追踪事件（运行、尝试、请求、策略结论与审批，可回链会话条目），可选的离线容器执行（`--execution container`，默认仍在本机执行），以及 IM 服务 `zx-agent serve`（`im`：平台接口 `ImChannel`、按线程分派会话的 `Server`、Slack 与 ⚑ D:5/CHINA FLAG: 飞书的实现；部署组件为 `deploy/kubernetes/serve/`），公开的扩展接口 `extensions::Extension`，以及 MCP 客户端（`mcp`：只接工具、只用 Streamable HTTP；由 profile 的 `[[mcp]]` 接入 run、chat 与 serve，`allowTools` 以外的工具要审批），以及可选的 OpenTelemetry 追踪导出（`otel`：设置 OTLP 地址时启用，只含元数据）。CLI 的场景默认值位于 `profiles/*.toml` 与相邻说明文件；`presets` 保留已有 SDK 接口。SDK 默认不限轮次、不限时间、不自动续写或压缩、不落盘工具结果。接口与资源上限见 README，目标、阶段计划与已定决策见 `docs/ROADMAP.md`，改动前先确认当前阶段。
+- **现状**：v0.1.0。已实现共享的 `AgentSession`、无人值守的 `run` 和终端 `chat`、一个 OpenAI 兼容的流式 provider、`bash` 与 `read_file`，以及文件化 profile、项目上下文、按需 `read_skill`、有界摘要和长工具结果落盘 / `read_output`，崩溃恢复，可替换的会话存储（`SessionLog`；JSONL 会话文件同一时间只有一个写入者），带信封的追踪事件（运行、尝试、请求、策略结论与审批，可回链会话条目），可选的离线容器执行（`--execution container`，默认仍在本机执行），以及 IM 服务 `zx-agent serve`（`im`：平台接口 `ImChannel`、按线程分派会话的 `Server`；Slack 与 ⚑ D:5/CHINA FLAG: 飞书的实现各为独立 crate；回复与卡片文案默认英文，由配置替换；部署组件为 `deploy/kubernetes/serve/`），公开的扩展接口 `extensions::Extension`，以及 MCP 客户端（`mcp`：只接工具、只用 Streamable HTTP；由 profile 的 `[[mcp]]` 接入 run、chat 与 serve，`allowTools` 以外的工具要审批），以及可选的 OpenTelemetry 追踪导出（`otel`：设置 OTLP 地址时启用，只含元数据）。CLI 的场景只在 `profiles/*.toml` 与相邻说明文件（`run` 默认中性的 `unattended`，`chat` 与 `serve` 默认 `assistant`），代码中没有场景、环境或平台文案语言的知识：Kubernetes 的规则在 `deploy/kubernetes/`。SDK 默认不限轮次、不限时间、不自动续写或压缩、不落盘工具结果。接口与资源上限见 README，目标、阶段计划与已定决策见 `docs/ROADMAP.md`，改动前先确认当前阶段。
 - **验证范围**：本地使用 macOS，CI 覆盖 Linux 与 macOS；`--system-updates inline` 只在一个服务上验证过；付费 e2e 测试（`tests/real_api.rs`）于 2026-11-01 在 ⚑ D:5/CHINA FLAG: DeepSeek 的 `deepseek-flash` 与 `deepseek-chat` 上各运行一次，均为 6 项通过（只覆盖 `collapse` 模式，不含压缩用例）；2026-11-02 的摘要评测在 ⚑ D:5/CHINA FLAG: `deepseek-chat` 上运行三次均通过；在 ⚑ D:5/CHINA FLAG: `deepseek-flash` 上三次都失败，第一次因摘要回答的大小上限（PR #48 修正），后两次因推理用满 2048 token 的输出预算（调高预算后尚未运行），见 `docs/ROADMAP.md`。容器执行的真实 Docker 测试（设置 `ZX_DOCKER_TEST_IMAGE` 运行 `tests/container.rs`）在本机 macOS 的 Docker Desktop 上用 `debian:bookworm-slim` 与一个 Ubuntu 系镜像跑过，原生 Linux 的 Docker 只由 CI 覆盖；没有在 rootless Docker 或 Podman 上验证。
 
 ## 架构设计
 
-代码分为一个 workspace 中的 5 个 crate，上层依赖下层，下层 crate 引用不到上层：`zx-ai`（`crates/zx-ai`）← `zx-core`（`crates/zx-core`）← `zx-tools`（`crates/zx-tools`）与 `zx-im`（`crates/zx-im`），二者互不依赖 ← `zx-agent`（根目录 `src/`，CLI、场景配置与追踪导出；库以原有路径再导出各 crate）。各层位置如下，架构图、模块与 pi 的对应表、参数说明见 README。
+代码分为一个 workspace 中的 7 个 crate，上层依赖下层，下层 crate 引用不到上层：`zx-ai`（`crates/zx-ai`）← `zx-core`（`crates/zx-core`）← `zx-tools`（`crates/zx-tools`）与 `zx-im`（`crates/zx-im`），二者互不依赖；`zx-im-slack`、`zx-im-feishu`（`crates/zx-im-*`）实现 `zx-im` 的接口 ← `zx-agent`（根目录 `src/`，CLI、场景配置与追踪导出；库以原有路径再导出各 crate）。各层位置如下，架构图、模块与 pi 的对应表、参数说明见 README。
 
 | 层 | 位置 | 职责 |
 |---|---|---|
 | CLI | `src/main.rs`、`src/cli.rs`、`src/chat/`、`src/serve.rs` | 共用参数与运行组装；run 处理单次任务；chat 管理单一输入所有者、审批、信号和 REPL；serve 读取配置、为每个线程准备会话并隐藏 IM 凭据 |
 | 场景配置 | `src/profile/`、`profiles/` | TOML 基线与覆盖、项目上下文、显式 skill 目录及按需读取、MCP 服务器（`[[mcp]]`）；不进入循环机制 |
-| 场景预设 | `src/presets/` | 提供外层显式选择的说明与运行默认值；内核机制不依赖预设 |
 | 提示词 | `crates/zx-core/src/prompt.rs` | 生成系统提示词：说明 + `<environment>` + `<command_policy>` + `<project_context>` + `<available_skills>`（空段落不出现） |
 | 共享会话 | `crates/zx-core/src/agent_session.rs` | 共享调用与 Busy、RAII 归还运行权、取消、订阅与退订、空闲时切换模型 |
 | 运行层 | `crates/zx-core/src/runner.rs` | 持有可顺序复用的会话；以独占借用控制单次运行、重试、上限、审批缓存、持久化和报告 |
@@ -49,7 +48,7 @@
 | 外层策略与交互 | `crates/zx-tools/src/policy.rs`、`crates/zx-core/src/extensions.rs`、`crates/zx-core/src/interaction.rs` | 命令与规则策略、续写、已知密钥脱敏、扩展的打包与注册（`Extension`、`register`）、宿主审批与 NoHuman |
 | 工具 | `crates/zx-tools/src/tools/` | bash、read_file、输出截断 |
 | 执行环境 | `crates/zx-core/src/executor/` | 工具执行命令与读文件的位置；`LocalExecutor` 为本机，负责进程组、超时与取消、输出捕获上限；`ContainerExecutor` 在每个进程一个的 Docker 容器中执行，并在容器内按进程组终止命令 |
-| IM 接入 | `crates/zx-im/src/` | 平台接口 `ImChannel`；`Server` 做访问控制并按线程分派，每个线程一个任务独占会话、运行、审批卡片与空闲释放，任务之间只经 channel 通信；宿主经 `SessionFactory` 打开会话；运行中的状态经可选的 `StatusStore` 记录，重启时替换上个进程遗留的“处理中…”（`status.rs`）；`slack.rs` 经 Socket Mode 接收、经 Web API 发送 |
+| IM 接入 | `crates/zx-im/src/` | 平台接口 `ImChannel`；`Server` 做访问控制并按线程分派，每个线程一个任务独占会话、运行、审批卡片与空闲释放，任务之间只经 channel 通信；宿主经 `SessionFactory` 打开会话；运行中的状态经可选的 `StatusStore` 记录，重启时替换上个进程遗留的“处理中…”（`status.rs`）；回复与卡片文案（`Replies`、`CardLabels`）默认英文。平台实现在 `crates/zx-im-slack/`（经 Socket Mode 接收、经 Web API 发送）与 `crates/zx-im-feishu/` |
 | MCP 客户端 | `crates/zx-tools/src/mcp.rs` | 经 Streamable HTTP 连接外部 MCP 服务器（先 `server/discover`，旧服务器回退到 `initialize`），只把配置中列出的工具交给模型；`Server` 是一个 `Extension`。调用有超时、可取消，结果截断，工具一律按有副作用处理 |
 | 追踪导出 | `src/otel.rs` | 设置了 OTLP 地址的标准变量时，把运行事件转成 OpenTelemetry span 经 OTLP/HTTP 导出；只含元数据，事件经有界通道交给一个后台任务，满时丢弃，运行不等待导出 |
 
@@ -57,7 +56,7 @@
 
 设计取舍（改动前先理解原因；必须保持的约束见下文"不变量"）：
 
-- **场景策略不进内核**：提示词、运行上限与续写默认值由预设提供；P1 已实现六个 Hooks 和 Interaction；命令策略、续写、脱敏由外层注册，无人时拒绝 Ask。无人值守的 `run` 用退出码 0 到 7 表达结果，调度器不必解析输出。
+- **场景策略不进内核**：提示词、运行上限与续写默认值由 profile 文件提供；P1 已实现六个 Hooks 和 Interaction；命令策略、续写、脱敏由外层注册，无人时拒绝 Ask。无人值守的 `run` 用退出码 0 到 7 表达结果，调度器不必解析输出。
 - **配置与文件内容分工**：profile 决定工具和规则，CLI 只用显式传参覆盖文件，deny 累加；项目上下文和 skill 正文不能更改控制策略。自动发现的 AGENTS.md 解析后必须位于项目根目录内，`run` 的默认 profile 不自动发现，避免仓库内容让程序读取并发送项目外的文件；长结果的默认目录同样必须解析在工作目录内，`run` 默认不落盘。skill 目录启动时只读取元数据，正文由工具按需读取并经过既有流水线，不隐式执行脚本或加载全局 AI 配置。
 - **共享 API、独占执行**：AgentSession 的短锁只切换 Runner 所有权，不跨 await。重叠 prompt 和运行中改配置返回 Busy；取消、panic 或 future 丢弃后由 RAII 归还。订阅列表先取快照再调用，单个 subscriber panic 会被隔离并可查询，不持锁调用宿主回调。
 - **会话既是审计日志，也是模型上下文的唯一来源**：修正上下文靠追加 `context_edit`，提示词变化靠追加 system 消息，原始记录始终保留。可替换的只是最底层的记录保存（`SessionLog`）；校验、先写后改内存、写失败后停写、投影、压缩、请求审计与崩溃恢复都留在 `SessionStore`。持久化走 crate 内部的会话宿主并以 `Result` 返回错误，`EventSink` 只接收事件。
@@ -67,11 +66,12 @@
 - **兼容性默认保守，能力按需打开**：提示词更新默认合并到开头（`collapse`，与 pi 对 OpenAI 兼容服务的默认一致），服务端支持时才按位置发送（`inline`）。
 - **安全靠部署隔离**：策略只是第一道防线（检查边界见 README 的"安全模型"）。认证 key 只从环境变量读取，该变量从 bash 子进程环境中删除；Unix 上新建会话文件的权限为 0600，打开已有文件不修改权限；真正的隔离要靠不同账号或容器。
 - **扩展点都是 trait**：`Provider`、`Tool`、`ToolPolicy`、`Hooks`、`Interaction`、`EventSink`、`Executor`、`SessionLog`、`ImChannel`、`StatusStore`、`Extension`。新能力优先以实现 trait 的方式加入，不改循环本身。
+- **通用，不为场景定制**：代码只定义接口与通用机制。某个环境、平台或厂商才有的知识（kubectl 的只读选项、Kubernetes 的 token 路径、IM 文案的语言、告警的格式）写在 profile、部署清单或配置里，或由外部适配器实现接口、调用 `run` 或 SDK；不在代码里解析某个系统的私有格式。provider 对协议方言的处理也要显式开启（如 `--fill-missing-reasoning`），不按厂商推断。
 - **分层由 crate 边界保证**：内核（`zx-core`）引用不到工具、策略、MCP、IM 和 CLI，只依赖 `zx-core` 与 `zx-ai` 的嵌入方也不会引入 rmcp、tokio-tungstenite 和 OpenTelemetry。新模块放进它所属的层；需要引用上层时，说明分层或接口该改了。各 crate 在根部把下层引入为 `crate::ai`、`crate::agent`、`crate::sync` 等，所以模块内的路径与拆分前相同；跨 crate 使用、但不属于 API 的项写成 `#[doc(hidden)] pub` 并在文档注释里注明（如 `zx_ai::sync`、`SystemPrompt::has_section`）。
 
 ## 命令
 
-- 以下命令都在仓库根目录运行，覆盖全部 5 个 crate（test、clippy 与 doc 经 `Cargo.toml` 的 `default-members`）。在 `crates/*` 的目录里运行或加 `-p <crate>` 时只处理那一个 crate；集成测试都在根目录的 `tests/`，属于 `zx-agent`
+- 以下命令都在仓库根目录运行，覆盖全部 7 个 crate（test、clippy 与 doc 经 `Cargo.toml` 的 `default-members`）。在 `crates/*` 的目录里运行或加 `-p <crate>` 时只处理那一个 crate；集成测试都在根目录的 `tests/`，属于 `zx-agent`
 - 格式：`cargo fmt`（`rustfmt.toml`：`max_width = 120`）
 - lint：`cargo clippy --all-targets -- -D warnings`，要求零警告
 - 测试：`cargo test`，不需要网络和 API key。只跑一个集成测试文件：`cargo test --test agent_loop`；按名字过滤：`cargo test retries_transient`。付费的 `tests/real_api.rs` 默认跳过，见红线 9
@@ -142,4 +142,4 @@
 - **打包的扩展**：工具、钩子与提示词段落要一起注册时，实现 `extensions::Extension`，经 `extensions::register` 加入 `LoopConfig`。扩展的钩子只能声明 `Extension` 阶段；段落名不能是 `preamble`、`prompt::GENERATED_SECTIONS` 中的名字或提示词中已有的段落（同名段落会被原地替换）。行为由 `tests/extensions.rs` 覆盖。
 - **上下文改动**：`on_input` 完成后才写入原始输入，改写或拒绝再追加 `context_edit`，钩子被取消时不写入；`transform_context` 返回 `ContextEdit` 计划，整份计划先校验，逐项写入成功后再请求模型。
 - **新的会话存储**：实现 `session::SessionLog`。`append` 在记录保存后才返回，同一 `seq` 已有记录时报错；新会话由后端保存头部后交给 `SessionStore::with_log`，续接时读出 `LoadedSession` 交给 `SessionStore::load`。用内存实现测往返，参照 `tests/runner.rs` 的 `TableLog`。
-- **新 IM 平台**：实现 `im::ImChannel`，遵守其文档列出的职责：立即确认投递、按消息 ID 去重、只转交发给机器人的消息、遵守限频、拆分超长文本。协议用本地假服务测；与 `Server` 的配合参照 `tests/im_server.rs` 的 `FakeChannel`；Slack 的协议测试参照 `tests/im_slack.rs` 与 `tests/common/fake_slack.rs`。
+- **新 IM 平台**：在独立的 crate 中实现 `zx_im::ImChannel`（参照 `crates/zx-im-slack`），遵守其文档列出的职责：立即确认投递、按消息 ID 去重（`zx_im::Seen`）、只转交发给机器人的消息、遵守限频、拆分超长文本（`zx_im::split_text`）。文案用 `CardLabels`，不写死语言或标点。协议用本地假服务测；与 `Server` 的配合参照 `tests/im_server.rs` 的 `FakeChannel`；Slack 的协议测试参照 `tests/im_slack.rs` 与 `tests/common/fake_slack.rs`。

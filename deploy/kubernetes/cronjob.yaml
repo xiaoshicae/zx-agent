@@ -30,10 +30,15 @@ spec:
               image: zx-agent
               # zx-agent itself is PID 1: the only process holding the API key, and one that
               # commands cannot inspect (README.md, "安全模型").
-              command: ["zx-agent", "run"]
+              # The troubleshoot profile gives the report its fixed sections; without it,
+              # run uses the neutral unattended profile.
+              command: ["zx-agent", "run", "--profile", "troubleshoot"]
               args:
                 - "检查所有命名空间中未就绪的 Pod 和最近一小时的 Warning 事件，列出问题和可能的原因。只读，不做任何修改。"
               env:
+                # kubectl reads this account's token, and so can commands: redact its value.
+                - name: ZX_SECRET_FILES
+                  value: /var/run/secrets/kubernetes.io/serviceaccount/token
                 - name: ZX_MODEL
                   valueFrom:
                     configMapKeyRef:

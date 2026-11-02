@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::agent::{Decision, HookContext, HookResult, HookStage, Hooks, ToolPolicy};
@@ -343,11 +344,6 @@ impl ToolPolicy for CommandPolicy {
     }
 }
 
-/// Options that send a request, and the credentials attached to it, to a server other than
-/// the configured one. kubectl v1.36.1 sent the kubeconfig token to an HTTPS address given
-/// with `--server` (docs/p6-online-access-review.md, appendix 9.3, K1).
-const CONNECTION_OPTIONS: &[&str] = &["--server", "--kubeconfig", "--token", "--insecure-skip-tls-verify"];
-
 /// Punctuation that a command approved without asking may contain, besides letters, digits
 /// and whitespace. None of it lets the shell run or read anything but what the words spell;
 /// every other character asks, such as quotes and `\` (which hide words from these checks),
@@ -355,64 +351,37 @@ const CONNECTION_OPTIONS: &[&str] = &["--server", "--kubeconfig", "--token", "--
 /// and the syntax the allowlist rejects.
 const PLAIN_PUNCTUATION: &[char] = &['-', '_', '.', '/', ':', '=', ',', '@', '+', '|', '^', '~', '!'];
 
-/// kubectl options that a command approved without asking may pass: they choose what to
-/// read and how to show it. Every other option asks, among them those that send the request
-/// elsewhere (`--server`), use other credentials (`--user`, `--token`, `--as`), write files
-/// (`--profile-output`, `--cache-dir`), read any API path (`--raw`) or read manifests
-/// (`--filename`). Checked against kubectl v1.36.1.
-const KUBECTL_OPTIONS: &[&str] = &[
-    "namespace",
-    "context",
-    "request-timeout",
-    "all-namespaces",
-    "output",
-    "selector",
-    "field-selector",
-    "label-columns",
-    "show-labels",
-    "show-kind",
-    "no-headers",
-    "sort-by",
-    "chunk-size",
-    "ignore-not-found",
-    "show-managed-fields",
-    "subresource",
-    "show-events",
-    "for",
-    "types",
-    "container",
-    "previous",
-    "since",
-    "since-time",
-    "tail",
-    "timestamps",
-    "all-containers",
-    "all-pods",
-    "prefix",
-    "limit-bytes",
-    "max-log-requests",
-    "ignore-errors",
-    "pod-running-timeout",
-    "containers",
-    "sum",
-    "use-protocol-buffers",
-    "show-capacity",
-    "show-swap",
-    "recursive",
-    "api-version",
-    "api-group",
-    "cached",
-    "categories",
-    "namespaced",
-    "verbs",
-    "client",
-];
+/// The options that the commands of one program may pass and still run without asking, such
+/// as the read-only options of kubectl. Which options of a program only choose what to read
+/// is knowledge about that program, so it comes from configuration, not from this crate.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+pub struct ProgramOptions {
+    /// Long options without the leading `--`, such as `namespace`; `--namespace=prod` counts
+    /// as `namespace`.
+    pub long: Vec<String>,
+    /// Single-letter options that take a value, given next or attached (`-oyaml`).
+    pub short_with_value: Vec<char>,
+    /// Single-letter options without a value; each must stand alone (`-A`, not `-Ap`).
+    pub short_flags: Vec<char>,
+}
 
-/// Short forms of [`KUBECTL_OPTIONS`] that take a value, given next or attached (`-oyaml`).
-const KUBECTL_SHORT_WITH_VALUE: &[char] = &['n', 'o', 'l', 'L', 'c'];
-
-/// Short forms of [`KUBECTL_OPTIONS`] that take no value; each must stand alone.
-const KUBECTL_SHORT_FLAGS: &[char] = &['A', 'p', 'R'];
+impl ProgramOptions {
+    /// Whether `option`, a word starting with `-`, is one of these. Options keep their case:
+    /// a program's `-A` and `-a` can differ.
+    fn allows(&self, option: &str) -> bool {
+        if let Some(long) = option.strip_prefix("--") {
+            let name = long.split_once('=').map_or(long, |(name, _)| name);
+            return self.long.iter().any(|allowed| allowed == name);
+        }
+        let mut letters = option.chars().skip(1);
+        match letters.next() {
+            Some(flag) if self.short_flags.contains(&flag) => letters.next().is_none(),
+            Some(flag) => self.short_with_value.contains(&flag),
+            None => false,
+        }
+    }
+}
 
 /// Bash commands that run without asking where a rule would otherwise ask for approval.
 ///
@@ -421,29 +390,47 @@ const KUBECTL_SHORT_FLAGS: &[char] = &['A', 'p', 'R'];
 ///   the allowlist (whitespace collapsed, lowercased);
 /// - it consists of letters, digits, whitespace and the punctuation `- _ . / : = , @ + | ^ ~ !`,
 ///   so no quoting, escaping, expansion or other shell syntax can change what runs;
-/// - it contains neither the word `secret` nor a URL (`://`), and no segment passes a
-///   connection option (`--server`, `--kubeconfig`, `--token`, `--insecure-skip-tls-verify`);
-/// - every option of a kubectl segment is one of the read-only options this module lists,
-///   such as `-n`, `-o`, `-l`, `--context` and `--tail`.
+/// - it contains no URL (`://`) and none of the [`except`](Self::except) texts;
+/// - a segment that runs a program given [`options`](Self::options) passes only those options.
 ///
 /// Like the allowlist the check is lexical: it decides only whether to ask, and never turns
-/// a denial into an approval.
+/// a denial into an approval. It knows no particular program: which of a program's options
+/// are safe to pass without asking is configuration.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AutoApprove {
     prefixes: Vec<String>,
+    /// Normalized texts that keep a command asking.
+    except: Vec<String>,
+    /// Lowercased program names and the options their segments may pass.
+    options: Vec<(String, ProgramOptions)>,
 }
 
 impl AutoApprove {
-    /// Commands starting with one of `prefixes`, such as `kubectl get`. An empty list covers
-    /// no command.
+    /// Commands starting with one of `prefixes`, such as `grep`. An empty list covers no
+    /// command.
     pub fn new(prefixes: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
         Self {
-            prefixes: prefixes
-                .into_iter()
-                .map(|p| normalize(p.as_ref()))
-                .filter(|p| !p.is_empty())
-                .collect(),
+            prefixes: normalize_all(prefixes),
+            except: Vec::new(),
+            options: Vec::new(),
         }
+    }
+
+    /// Texts that keep a command asking wherever they appear in it, compared like the
+    /// prefixes, such as `secret` (which also matches `secrets`).
+    pub fn except(mut self, texts: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
+        self.except.extend(normalize_all(texts));
+        self
+    }
+
+    /// Limit the segments that run `program`, their first word compared without case, to
+    /// `options`: any other option asks. Segments of programs given no options may pass any.
+    /// A second call for the same program replaces the first.
+    pub fn options(mut self, program: &str, options: ProgramOptions) -> Self {
+        let program = normalize(program);
+        self.options.retain(|(name, _)| *name != program);
+        self.options.push((program, options));
+        self
     }
 
     /// Whether `command` may run without asking.
@@ -455,48 +442,31 @@ impl AutoApprove {
             return false;
         }
         let normalized = normalize(command);
-        if normalized.contains("secret") || normalized.contains("://") {
+        if normalized.contains("://") || self.except.iter().any(|text| normalized.contains(text.as_str())) {
             return false;
         }
         // Without quotes in the command, every `|` separates two segments.
         command.split('|').all(|raw| {
             let segment = normalize(raw);
             self.prefixes.iter().any(|prefix| begins_with(&segment, prefix))
-                && !redirects(&segment)
-                && kubectl_options_allowed(raw)
+                && self.passes_listed_options(&segment, raw)
         })
     }
-}
 
-/// Whether a normalized pipeline segment passes an option that can send its request elsewhere.
-fn redirects(segment: &str) -> bool {
-    segment
-        .split(' ')
-        .any(|word| CONNECTION_OPTIONS.iter().any(|option| word.starts_with(option)))
-}
-
-/// Whether a pipeline segment that runs kubectl passes only read-only options. Options are
-/// compared with their case: kubectl's `-A` and `-a` differ.
-fn kubectl_options_allowed(segment: &str) -> bool {
-    let mut words = segment.split_whitespace();
-    if !words
-        .next()
-        .is_some_and(|program| program.eq_ignore_ascii_case("kubectl"))
-    {
-        return true;
+    /// Whether a pipeline segment passes only the options its program may pass. `segment` is
+    /// normalized; the options are read from `raw`, which keeps their case.
+    fn passes_listed_options(&self, segment: &str, raw: &str) -> bool {
+        let Some(program) = segment.split(' ').next() else {
+            return true;
+        };
+        let Some((_, options)) = self.options.iter().find(|(name, _)| name == program) else {
+            return true;
+        };
+        raw.split_whitespace()
+            .skip(1)
+            .filter(|word| word.starts_with('-'))
+            .all(|option| options.allows(option))
     }
-    words.filter(|word| word.starts_with('-')).all(|option| {
-        if let Some(long) = option.strip_prefix("--") {
-            let name = long.split_once('=').map_or(long, |(name, _)| name);
-            return KUBECTL_OPTIONS.contains(&name);
-        }
-        let mut letters = option.chars().skip(1);
-        match letters.next() {
-            Some(flag) if KUBECTL_SHORT_FLAGS.contains(&flag) => letters.next().is_none(),
-            Some(flag) => KUBECTL_SHORT_WITH_VALUE.contains(&flag),
-            None => false,
-        }
-    })
 }
 
 /// Whether a normalized pipeline segment starts with `prefix` at a word boundary.
@@ -508,6 +478,14 @@ fn begins_with(segment: &str, prefix: &str) -> bool {
 
 fn normalize(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+fn normalize_all(texts: impl IntoIterator<Item = impl AsRef<str>>) -> Vec<String> {
+    texts
+        .into_iter()
+        .map(|text| normalize(text.as_ref()))
+        .filter(|text| !text.is_empty())
+        .collect()
 }
 
 #[cfg(test)]
@@ -690,13 +668,43 @@ mod tests {
         assert!(!AutoApprove::default().covers("grep x"));
     }
 
+    /// Read-only kubectl options, as a deployment's profile lists them; this crate knows none.
+    fn kubectl_read_only() -> ProgramOptions {
+        ProgramOptions {
+            long: [
+                "namespace",
+                "context",
+                "all-namespaces",
+                "output",
+                "selector",
+                "field-selector",
+                "sort-by",
+                "container",
+                "previous",
+                "since",
+                "tail",
+            ]
+            .map(String::from)
+            .to_vec(),
+            short_with_value: vec!['n', 'o', 'l', 'c'],
+            short_flags: vec!['A', 'p'],
+        }
+    }
+
+    fn kubectl_list(prefixes: &[&str]) -> AutoApprove {
+        AutoApprove::new(prefixes)
+            .except(["secret"])
+            .options("kubectl", kubectl_read_only())
+    }
+
     #[test]
-    fn auto_approval_asks_for_secrets_urls_and_connection_options() {
-        let list = AutoApprove::new(["kubectl get", "grep"]);
+    fn auto_approval_asks_for_urls_listed_texts_and_unlisted_options() {
+        let list = kubectl_list(&["kubectl get", "grep"]);
         for command in [
             "kubectl get secret db -o yaml",
             "kubectl get SECRETS -A",
             "kubectl get -f https://example.com/pods.yaml",
+            "grep -r token https://example.com",
             "kubectl get pods --server=https://example.com",
             "kubectl get pods --server example.com:443",
             "kubectl get pods -s example.com:443",
@@ -705,10 +713,30 @@ mod tests {
             "kubectl get pods --kubeconfig /tmp/other",
             "kubectl get pods --token abc",
             "kubectl get pods --insecure-skip-tls-verify",
-            "grep --server x app.log",
         ] {
             assert!(!list.covers(command), "{command}");
         }
+    }
+
+    #[test]
+    fn a_program_given_no_options_passes_any_option() {
+        // kubectl's options limit kubectl only.
+        assert!(kubectl_list(&["kubectl get", "grep"]).covers("grep --server x app.log"));
+        assert!(AutoApprove::new(["kubectl get"]).covers("kubectl get pods --raw /api"));
+        assert!(!kubectl_list(&["kubectl get"]).covers("kubectl get pods --raw /api"));
+    }
+
+    #[test]
+    fn options_given_again_for_a_program_replace_the_earlier_ones() {
+        let list = kubectl_list(&["kubectl get"]).options(
+            "KUBECTL",
+            ProgramOptions {
+                long: vec!["raw".into()],
+                ..ProgramOptions::default()
+            },
+        );
+        assert!(list.covers("kubectl get --raw /api"));
+        assert!(!list.covers("kubectl get pods -n prod"));
     }
 
     #[tokio::test]
@@ -778,8 +806,8 @@ mod tests {
     }
 
     #[test]
-    fn auto_approval_asks_for_kubectl_options_outside_the_read_only_set() {
-        let list = AutoApprove::new(["kubectl get", "kubectl version", "kubectl logs"]);
+    fn auto_approval_asks_for_options_the_program_does_not_list() {
+        let list = kubectl_list(&["kubectl get", "kubectl version", "kubectl logs"]);
         for command in [
             "kubectl version --client --profile=heap --profile-output=/home/u/.bashrc",
             "kubectl get pods --cache-dir=/home/u/.kube",
@@ -798,8 +826,8 @@ mod tests {
     }
 
     #[test]
-    fn auto_approval_covers_read_only_kubectl_options() {
-        let list = AutoApprove::new(["kubectl get", "kubectl logs", "kubectl top", "grep"]);
+    fn auto_approval_covers_options_the_program_lists() {
+        let list = kubectl_list(&["kubectl get", "kubectl logs", "kubectl top", "grep"]);
         for command in [
             "kubectl get pods -n kube-system -o wide",
             "kubectl get pods -nkube-system -oyaml",

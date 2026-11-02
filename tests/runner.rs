@@ -65,9 +65,10 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use common::{EchoTool, RunnerSetup, config, fast_retry, header, read_lines, summarize};
-use zx_agent::agent::{AgentEvent, EVENT_SCHEMA_VERSION, HookContext, HookResult, Hooks, RequestKind};
+use zx_agent::agent::{AgentEvent, EVENT_SCHEMA_VERSION, HookContext, HookOptions, HookResult, Hooks, RequestKind};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, PREAMBLE, StopReason, SystemPrompt};
+use zx_agent::extensions::ContinueOnLength;
 use zx_agent::runner::{Limits, RunOutcome};
 use zx_agent::session::{Entry, LoadedSession, LogRecord, SessionLog, SessionStore};
 
@@ -155,10 +156,17 @@ fn provider(steps: impl IntoIterator<Item = FauxStep>) -> Arc<FauxProvider> {
     Arc::new(FauxProvider::new(steps))
 }
 
-/// A runner with test defaults around `provider` and no tools.
+/// A runner with test defaults around `provider` and no tools: one automatic continuation of
+/// a truncated answer, as the unattended profiles register it.
 fn setup(provider: &Arc<FauxProvider>) -> RunnerSetup {
     let mut config = config(provider.clone(), vec![]);
-    config.hooks = zx_agent::presets::troubleshoot::hooks();
+    config.hooks.push_with(
+        ContinueOnLength::new(1),
+        HookOptions {
+            name: Some("continue_on_length".to_string()),
+            ..HookOptions::default()
+        },
+    );
     RunnerSetup::new(config)
 }
 

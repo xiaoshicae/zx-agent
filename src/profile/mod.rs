@@ -4,15 +4,15 @@
 mod context;
 pub mod skills;
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 
 use crate::mcp::{check_server_name, tool_name as mcp_tool_name};
-use crate::presets::{assistant, troubleshoot};
+use crate::policy::{AutoApprove, ProgramOptions};
 use crate::runner::Limits;
 use crate::text::read_text_file;
 use crate::tools::BUILTIN_TOOL_NAMES;
@@ -27,22 +27,31 @@ pub const MAX_FILE_BYTES: u64 = 64 * 1024;
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Builtin {
+    /// A neutral agent without a human operator, the default of `run`.
+    Unattended,
+    /// Unattended troubleshooting with a fixed report format.
     Troubleshoot,
+    /// A conversation with a person, the default of `chat` and `serve`.
     Assistant,
 }
 
 impl Builtin {
     fn source(self) -> (&'static str, &'static str, &'static str) {
         match self {
+            Self::Unattended => (
+                include_str!("../../profiles/unattended.toml"),
+                "unattended.md",
+                include_str!("../../profiles/unattended.md"),
+            ),
             Self::Troubleshoot => (
                 include_str!("../../profiles/troubleshoot.toml"),
                 "troubleshoot.md",
-                troubleshoot::INSTRUCTIONS,
+                include_str!("../../profiles/troubleshoot.md"),
             ),
             Self::Assistant => (
                 include_str!("../../profiles/assistant.toml"),
                 "assistant.md",
-                assistant::INSTRUCTIONS,
+                include_str!("../../profiles/assistant.md"),
             ),
         }
     }
@@ -59,10 +68,27 @@ pub struct Rules {
     /// Bash command prefixes that run without asking where bash needs approval; the commands
     /// that still ask are listed on [`crate::policy::AutoApprove`].
     pub auto_approve: Vec<String>,
+    /// Texts that keep a command asking although `auto_approve` covers it, compared without
+    /// case, such as `secret`. Accumulated across layers, like `deny`.
+    pub auto_approve_except: Vec<String>,
+    /// For a program, such as kubectl, the options that a covered command may pass; any other
+    /// option asks. Programs not listed may pass any option. A layer replaces the entry of a
+    /// program it lists.
+    pub auto_approve_options: BTreeMap<String, ProgramOptions>,
     /// Registered tool names whose calls require a host approval.
     pub ask_tools: Vec<String>,
     /// Tool names denied regardless of enabled tools or approval grants.
     pub deny_tools: Vec<String>,
+}
+
+impl Rules {
+    /// The bash commands these rules let run without asking, for the approval rules.
+    pub fn auto_approval(&self) -> AutoApprove {
+        self.auto_approve_options.iter().fold(
+            AutoApprove::new(&self.auto_approve).except(&self.auto_approve_except),
+            |list, (program, options)| list.options(program, options.clone()),
+        )
+    }
 }
 
 /// An external MCP server whose listed tools the model may call (docs/p7-mcp-review.md). The
@@ -161,6 +187,7 @@ impl Profile {
     pub fn load(selector: Option<&str>, default: Builtin) -> Result<Self> {
         let selector = match selector {
             None => return Self::builtin(default),
+            Some("unattended") => return Self::builtin(Builtin::Unattended),
             Some("troubleshoot") => return Self::builtin(Builtin::Troubleshoot),
             Some("assistant") => return Self::builtin(Builtin::Assistant),
             Some(selector) => selector,
@@ -226,6 +253,8 @@ impl Profile {
         if let Some(prefixes) = raw.rules.auto_approve {
             self.rules.auto_approve = prefixes;
         }
+        self.rules.auto_approve_except.extend(raw.rules.auto_approve_except);
+        self.rules.auto_approve_options.extend(raw.rules.auto_approve_options);
         if let Some(tools) = raw.rules.ask_tools {
             self.rules.ask_tools = tools;
         }
@@ -362,8 +391,12 @@ impl Profile {
             .iter()
             .chain(&self.rules.deny)
             .chain(&self.rules.auto_approve)
+            .chain(&self.rules.auto_approve_except)
         {
             ensure!(!pattern.trim().is_empty(), "empty command rule is not allowed");
+        }
+        for (program, options) in &self.rules.auto_approve_options {
+            check_program_options(program, options)?;
         }
         let mcp_tools = self.mcp_tool_names()?;
         for tool in self.rules.ask_tools.iter().chain(&self.rules.deny_tools) {
@@ -402,6 +435,36 @@ impl Profile {
     pub fn context_section(&self, cwd: &Path) -> Result<String> {
         context::load(cwd, &self.context)
     }
+}
+
+/// A program name of `rules.autoApproveOptions` is one lowercase word, since commands are
+/// compared without case; options are written without their dashes, and a letter is either
+/// a flag or takes a value.
+fn check_program_options(program: &str, options: &ProgramOptions) -> Result<()> {
+    ensure!(
+        !program.is_empty() && !program.contains(char::is_whitespace) && program.to_lowercase() == program,
+        "autoApproveOptions: program {program:?} must be one lowercase word"
+    );
+    for name in &options.long {
+        ensure!(
+            !name.is_empty() && !name.starts_with('-') && !name.contains(|c: char| c.is_whitespace() || c == '='),
+            "autoApproveOptions.{program}: long option {name:?} must be a name without dashes, such as \"namespace\""
+        );
+    }
+    for letter in options.short_with_value.iter().chain(&options.short_flags) {
+        ensure!(
+            letter.is_ascii_alphanumeric(),
+            "autoApproveOptions.{program}: short option {letter:?} must be a letter or digit"
+        );
+    }
+    if let Some(letter) = options
+        .short_flags
+        .iter()
+        .find(|letter| options.short_with_value.contains(letter))
+    {
+        bail!("autoApproveOptions.{program}: {letter:?} cannot be both a flag and an option with a value");
+    }
+    Ok(())
 }
 
 #[derive(Default, Deserialize)]
@@ -458,6 +521,8 @@ struct RawRules {
     allow: Option<Vec<String>>,
     deny: Vec<String>,
     auto_approve: Option<Vec<String>>,
+    auto_approve_except: Vec<String>,
+    auto_approve_options: BTreeMap<String, ProgramOptions>,
     ask_tools: Option<Vec<String>>,
     deny_tools: Vec<String>,
 }
@@ -517,38 +582,132 @@ mod tests {
 
     #[test]
     fn embedded_profiles_preserve_the_existing_scene_defaults() {
-        let profile = Profile::load(None, Builtin::Troubleshoot).unwrap();
-        assert_eq!(profile.instructions, troubleshoot::INSTRUCTIONS);
-        assert_eq!(profile.limits.max_turns, Some(troubleshoot::MAX_TURNS));
-        assert_eq!(
-            profile.limits.timeout,
-            Some(Duration::from_secs(troubleshoot::TIMEOUT_SECS))
-        );
-        assert_eq!(profile.continue_on_length, troubleshoot::CONTINUE_ON_LENGTH);
-        let assistant = Profile::load(Some("assistant"), Builtin::Troubleshoot).unwrap();
-        assert_eq!(assistant.instructions, assistant::INSTRUCTIONS);
+        for (selector, instructions) in [
+            ("unattended", include_str!("../../profiles/unattended.md")),
+            ("troubleshoot", include_str!("../../profiles/troubleshoot.md")),
+        ] {
+            let profile = Profile::load(Some(selector), Builtin::Assistant).unwrap();
+            assert_eq!(profile.name, selector);
+            assert_eq!(profile.instructions, instructions);
+            assert_eq!(profile.tools, ["bash", "read_file", "read_skill"]);
+            assert_eq!(profile.limits.max_turns, Some(30));
+            assert_eq!(profile.limits.timeout, Some(Duration::from_secs(900)));
+            assert_eq!(profile.continue_on_length, 1);
+            assert!(profile.rules.auto_approve.is_empty());
+            assert_eq!(profile.compaction.trigger_bytes, None);
+        }
+        let assistant = Profile::load(Some("assistant"), Builtin::Unattended).unwrap();
+        assert_eq!(assistant.instructions, include_str!("../../profiles/assistant.md"));
         assert_eq!(assistant.limits.max_turns, None);
         assert_eq!(assistant.limits.timeout, None);
         assert_eq!(assistant.continue_on_length, 0);
         assert_eq!(assistant.rules.ask_tools, ["bash"]);
-        assert!(
-            assistant
-                .rules
-                .auto_approve
-                .iter()
-                .any(|prefix| prefix == "kubectl get")
-        );
-        assert!(profile.rules.auto_approve.is_empty());
-        assert_eq!(profile.compaction.trigger_bytes, None);
+        assert_eq!(assistant.rules.auto_approve, ["grep", "head", "tail", "wc", "jq"]);
+        assert_eq!(assistant.rules.auto_approve_except, ["secret"]);
         assert_eq!(assistant.compaction.trigger_bytes, Some(256 * 1024));
         assert_eq!(assistant.compaction.keep_recent_bytes, 64 * 1024);
         assert_eq!(assistant.tool_output.threshold_bytes, Some(8 * 1024));
     }
 
     #[test]
+    fn no_embedded_profile_names_a_program_of_a_particular_environment() {
+        for kind in [Builtin::Unattended, Builtin::Troubleshoot, Builtin::Assistant] {
+            let profile = Profile::load(None, kind).unwrap();
+            assert!(profile.rules.auto_approve_options.is_empty(), "{kind:?}");
+            assert!(
+                !profile
+                    .rules
+                    .auto_approve
+                    .iter()
+                    .any(|prefix| prefix.contains("kubectl")),
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
     fn only_the_interactive_profile_discovers_project_instructions_by_default() {
+        assert!(!Profile::load(None, Builtin::Unattended).unwrap().context.discover);
         assert!(!Profile::load(None, Builtin::Troubleshoot).unwrap().context.discover);
         assert!(Profile::load(None, Builtin::Assistant).unwrap().context.discover);
+    }
+
+    #[test]
+    fn auto_approval_exceptions_accumulate_and_program_options_limit_their_program() {
+        let profile = load_file(
+            "extends = 'assistant'\n[rules]\nautoApprove = ['tool get', 'grep']\nautoApproveExcept = ['token']\n\
+             [rules.autoApproveOptions.tool]\nlong = ['namespace']\nshortWithValue = ['n']\nshortFlags = ['A']",
+        )
+        .unwrap();
+        assert_eq!(profile.rules.auto_approve_except, ["secret", "token"]);
+        let list = profile.rules.auto_approval();
+        assert!(list.covers("tool get pods -n prod -A --namespace=x | grep web"));
+        assert!(!list.covers("tool get pods --raw /api"));
+        assert!(!list.covers("tool get pods -Ap"));
+        assert!(!list.covers("tool get tokens"));
+        assert!(!list.covers("grep secret app.log"));
+    }
+
+    #[test]
+    fn program_options_that_cannot_match_a_command_are_configuration_errors() {
+        for (table, message) in [
+            ("[rules.autoApproveOptions.Tool]\nlong = ['x']", "one lowercase word"),
+            (
+                "[rules.autoApproveOptions.tool]\nlong = ['--namespace']",
+                "without dashes",
+            ),
+            (
+                "[rules.autoApproveOptions.tool]\nlong = ['output=json']",
+                "without dashes",
+            ),
+            ("[rules.autoApproveOptions.tool]\nshortFlags = ['-']", "letter or digit"),
+            (
+                "[rules.autoApproveOptions.tool]\nshortFlags = ['n']\nshortWithValue = ['n']",
+                "both a flag and an option with a value",
+            ),
+            (
+                "[rules.autoApproveOptions.tool]\nlong = ['x']\nshort = ['y']",
+                "unknown field",
+            ),
+            ("[rules]\nautoApproveExcept = [' ']", "empty command rule"),
+        ] {
+            let error = format!("{:#}", load_file(table).unwrap_err());
+            assert!(error.contains(message), "{table}: {error}");
+        }
+    }
+
+    #[test]
+    fn the_kubernetes_deployment_profile_keeps_kubectl_reads_and_asks_for_the_rest() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("deploy/kubernetes/profiles/kubernetes.toml");
+        let profile = Profile::load(Some(path.to_str().unwrap()), Builtin::Unattended).unwrap();
+        assert_eq!(profile.rules.ask_tools, ["bash"]);
+        let list = profile.rules.auto_approval();
+        for command in [
+            "kubectl get pods -A -o wide | grep -v Running",
+            "kubectl get pods -nkube-system -oyaml",
+            "kubectl logs web-1 -c app --previous --tail=200 --since=1h",
+            "kubectl top pods -A --sort-by=cpu",
+            "kubectl version --client",
+            "kubectl config current-context",
+            "grep -i error app.log | head -n 5",
+        ] {
+            assert!(list.covers(command), "{command}");
+        }
+        for command in [
+            "kubectl get secret db -o yaml",
+            "kubectl get pods --server=https://example.com",
+            "kubectl get pods -s example.com:443",
+            "kubectl get pods --kubeconfig /tmp/other",
+            "kubectl get pods --token abc",
+            "kubectl get --raw /api/v1/namespaces/default/pods",
+            "kubectl get pods --as=system:admin",
+            "kubectl version --client --profile=heap --profile-output=/home/u/.bashrc",
+            "kubectl get pods -Ap",
+            "kubectl delete pod web-1",
+            "grep secret app.log",
+        ] {
+            assert!(!list.covers(command), "{command}");
+        }
     }
 
     #[test]

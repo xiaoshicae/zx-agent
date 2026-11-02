@@ -19,8 +19,8 @@ use zx_agent::ai::now_ms;
 use zx_agent::im::feishu::{FeishuChannel, FeishuConfig};
 use zx_agent::im::slack::{SlackChannel, SlackConfig};
 use zx_agent::im::{
-    ConversationId, ErrorReport, ImChannel, ImError, Server, ServerConfig, ServerEvent, ServerSink, SessionFactory,
-    SessionKey, StatusFiles, UserId,
+    CardLabels, ConversationId, ErrorReport, ImChannel, ImError, Replies, Server, ServerConfig, ServerEvent,
+    ServerSink, SessionFactory, SessionKey, StatusFiles, UserId,
 };
 use zx_agent::interaction::Interaction;
 use zx_agent::otel::Telemetry;
@@ -49,6 +49,12 @@ struct ServeFile {
     #[serde(default)]
     limits: LimitsSection,
     sessions: SessionsSection,
+    /// Texts the server posts besides answers; each field is optional, the defaults English.
+    #[serde(default)]
+    replies: Replies,
+    /// Texts of approval cards on every platform; each field optional, the defaults English.
+    #[serde(default)]
+    card_labels: CardLabels,
 }
 
 #[derive(Deserialize)]
@@ -142,6 +148,7 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
         if let Some(base) = &slack.api_base {
             config.api_base.clone_from(base);
         }
+        config.labels.clone_from(&file.card_labels);
         config.on_error = Some(failure_log("slack"));
         channels.push(Arc::new(SlackChannel::new(config).map_err(anyhow::Error::msg)?));
         hidden_env.extend([slack.app_token_env.clone(), slack.bot_token_env.clone()]);
@@ -157,6 +164,7 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
         if let Some(url) = &feishu.token_url {
             config.token_url.clone_from(url);
         }
+        config.labels.clone_from(&file.card_labels);
         config.on_error = Some(failure_log("feishu"));
         channels.push(Arc::new(FeishuChannel::new(config).map_err(anyhow::Error::msg)?));
         // The App ID is not a secret; the App Secret is.
@@ -210,6 +218,7 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
     let mut config = ServerConfig {
         conversations,
         approvers,
+        replies: file.replies,
         // A crash or a kill must not leave threads saying the work goes on.
         statuses: Some(Arc::new(StatusFiles::new(running))),
         ..ServerConfig::default()

@@ -28,12 +28,8 @@ use zx_agent::runner::{Limits, Runner};
 use zx_agent::session::{SessionHeader, SessionStore};
 use zx_agent::tools::{self, BASH};
 
-/// Where Kubernetes mounts the Pod's ServiceAccount token, which kubectl in the Pod reads
-/// (client-go `rest.InClusterConfig`). Commands can read it as well, so its value is
-/// redacted; elsewhere the file does not exist and is skipped.
-const SERVICE_ACCOUNT_TOKEN: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
-
-/// Comma-separated secret files to redact, added to `--secret-file`; deployments set it.
+/// Comma-separated secret files to redact, added to `--secret-file`; deployments set it, for
+/// example to the token that the platform mounts for the agent's own account.
 const SECRET_FILES_ENV: &str = "ZX_SECRET_FILES";
 
 /// The notice about short secret values describes the configuration, which stays the same
@@ -222,7 +218,7 @@ pub(crate) struct BaseArgs {
     #[arg(long, value_delimiter = ',')]
     pub(crate) tools: Option<Vec<String>>,
 
-    /// Allowlisted command prefix for bash, e.g. --allow-cmd "kubectl get". Repeatable.
+    /// Allowlisted command prefix for bash, e.g. --allow-cmd "df". Repeatable.
     /// When set, bash may only run '|' pipelines of allowlisted commands.
     #[arg(long = "allow-cmd")]
     pub(crate) allow_cmd: Vec<String>,
@@ -232,21 +228,21 @@ pub(crate) struct BaseArgs {
     pub(crate) deny_cmd: Vec<String>,
 
     /// Command prefix for bash that runs without asking where bash needs approval, as in
-    /// chat, e.g. --auto-approve-cmd "kubectl get". Repeatable; replaces the profile's list.
-    /// Commands with quotes, `$`, other shell syntax, the word "secret", a URL, a connection
-    /// option or a kubectl option outside a read-only set still ask.
+    /// chat, e.g. --auto-approve-cmd "df". Repeatable; replaces the profile's list. Commands
+    /// with quotes, `$`, other shell syntax or a URL still ask, as do those the profile's
+    /// autoApproveExcept and autoApproveOptions exclude.
     #[arg(long = "auto-approve-cmd")]
     pub(crate) auto_approve_cmd: Vec<String>,
 
-    /// File holding a secret to redact from tool output, such as another cluster's token, or a
-    /// directory of such files (names starting with a dot are skipped). Each must be a regular
-    /// file of at most 64 KiB. Read again before every redaction. Repeatable, and added to the
-    /// files in the comma-separated ZX_SECRET_FILES. The Pod's ServiceAccount token is always
-    /// redacted.
+    /// File holding a secret to redact from tool output, such as a token mounted for the
+    /// agent, or a directory of such files (names starting with a dot are skipped). Each path
+    /// must exist at startup, and each file must be a regular file of at most 64 KiB. Read
+    /// again before every redaction. Repeatable, and added to the files in the
+    /// comma-separated ZX_SECRET_FILES.
     #[arg(long = "secret-file", value_delimiter = ',')]
     pub(crate) secret_files: Vec<PathBuf>,
 
-    /// Embedded profile name (troubleshoot, assistant) or path to a TOML file.
+    /// Embedded profile name (unattended, troubleshoot, assistant) or path to a TOML file.
     #[arg(long)]
     pub(crate) profile: Option<String>,
 
@@ -320,6 +316,12 @@ pub(crate) struct RequestArgs {
     /// audit records them.
     #[arg(long = "request-field", value_name = "KEY=JSON")]
     pub(crate) request_fields: Vec<String>,
+
+    /// Once one earlier answer carries reasoning_content, send the others with an empty one,
+    /// for thinking-mode servers that reject a history in which only some answers carry it.
+    /// The session's request audit records the choice.
+    #[arg(long)]
+    pub(crate) fill_missing_reasoning: bool,
 
     /// Session file (JSONL). Created if missing; an existing one is continued.
     #[arg(long)]
@@ -672,6 +674,7 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
             SystemUpdatesArg::Inline => SystemUpdates::Inline,
         },
         extra_fields: request_fields(&options.request.request_fields)?,
+        fill_missing_reasoning: options.request.fill_missing_reasoning,
         ..OpenAiConfig::default()
     })?;
     // read_skill and read_output read files on this machine, whatever executor runs commands.
@@ -789,7 +792,7 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     extensions::register(&mut config, &options.mcp.servers).map_err(anyhow::Error::msg)?;
     // Every policy that asks for bash approval gets the list: the strictest verdict of all
     // policies wins, so one that still asked would cancel the others' auto-approval.
-    let auto_approve = AutoApprove::new(&profile.rules.auto_approve);
+    let auto_approve = profile.rules.auto_approval();
     let mut rules = Vec::new();
     for tool in profile.rules.deny_tools {
         rules.push(Rule {
@@ -838,8 +841,7 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     push_built_in(
         &mut config,
         "redact_secrets",
-        RedactSecrets::new(api_key.into_iter().chain(hidden_values))
-            .with_secret_files(std::iter::once(PathBuf::from(SERVICE_ACCOUNT_TOKEN)).chain(secret_files)),
+        RedactSecrets::new(api_key.into_iter().chain(hidden_values)).with_secret_files(secret_files),
     );
     if let Some(spill) = spill {
         push_built_in(&mut config, "spill_outputs", spill);

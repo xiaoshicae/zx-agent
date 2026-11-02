@@ -29,6 +29,9 @@ RUN curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERS
     | sha256sum --check \
  && chmod 0755 /usr/local/bin/kubectl
 COPY --from=build /src/target/release/zx-agent /usr/local/bin/zx-agent
+# This deployment's profiles (deploy/kubernetes/profiles), passed with --profile. Not under
+# /etc/zx-agent, where the multicluster overlay mounts the kubeconfig.
+COPY deploy/kubernetes/profiles /usr/local/share/zx-agent/profiles
 # A fixed non-root user; the manifests run the Pod with the same IDs. /data is its home and
 # the mount point of the session volume; it exists in the image so that Pods without the
 # volume, such as scheduled inspections with a read-only root filesystem, can start in it.

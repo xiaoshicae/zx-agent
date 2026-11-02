@@ -16,13 +16,11 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
-
-use crate::agent::ApprovalResult;
-use crate::sync::lock;
-
-use super::{
+use zx_ai::sync::lock;
+use zx_core::agent::ApprovalResult;
+use zx_im::{
     ApprovalId, CardLabels, Choice, ConversationId, Destination, ErrorReport, ImChannel, ImError, Inbound, MessageId,
-    MessageRef, Outbound, Seen, ThreadId, UserId,
+    MessageRef, Outbound, Seen, ThreadId, UserId, split_text,
 };
 
 /// Where the Web API lives.
@@ -397,7 +395,7 @@ impl ImChannel for SlackChannel {
                         ],
                     },
                 ]);
-                let fallback = escape(&format!("{}：{tool}", labels.title));
+                let fallback = escape(&format!("{}: {tool}", labels.title));
                 let posted = self.post(to, &fallback, Some(blocks)).await?;
                 self.remember_card(&posted.id, request);
                 Ok(posted)
@@ -581,16 +579,19 @@ fn push_escaped(out: &mut String, c: char) {
 
 /// Escaped text in parts of at most `max` characters, never cut inside an entity.
 fn split(text: &str, max: usize) -> Vec<String> {
-    super::split(text, max, push_escaped)
+    split_text(text, max, push_escaped)
 }
 
 /// The escaped request shown on a card, within the length of a section block.
 fn card_request(labels: &CardLabels, tool: &str, summary: &str, reason: &str) -> String {
-    let head = format!("*{}*：`{}`\n```", escape(&labels.title), escape(tool));
-    let tail = format!("```\n{}：{}", escape(&labels.reason), escape(reason));
+    let head = format!("*{}*: `{}`\n```", escape(&labels.title), escape(tool));
+    let tail = format!("```\n{}: {}", escape(&labels.reason), escape(reason));
     let room = MAX_SECTION_CHARS.saturating_sub(head.chars().count() + tail.chars().count() + 1);
-    let mut summary = split(summary, room).into_iter().next().unwrap_or_default();
-    if summary.chars().count() >= room {
+    let mut parts = split(summary, room).into_iter();
+    let mut summary = parts.next().unwrap_or_default();
+    // A part ends before the room does when the next entity would not fit, so whether the
+    // request was cut shows in the parts left, not in this part's length.
+    if parts.next().is_some() {
         summary.push('…');
     }
     format!("{head}{summary}{tail}")
@@ -624,7 +625,7 @@ fn resolution(labels: &CardLabels, message: &Outbound) -> String {
     };
     // The mention is markup and stays as it is; only the label is text.
     match user {
-        Some(user) => format!("{}（<@{user}>）", escape(what)),
+        Some(user) => format!("{} (<@{user}>)", escape(what)),
         None => escape(what),
     }
 }
@@ -660,6 +661,21 @@ mod tests {
     #[test]
     fn the_bot_mention_is_removed() {
         assert_eq!(without_mention("<@UBOT> check <@U2>", Some("UBOT")), "check <@U2>");
+    }
+
+    #[test]
+    fn a_cut_request_ends_with_an_ellipsis_when_an_entity_ends_its_part_early() {
+        // The room for the request here (2974) is no multiple of the four characters of
+        // `&lt;`, so the part that fits ends two characters before the room does.
+        let labels = CardLabels {
+            title: "T".into(),
+            reason: "R".into(),
+            ..CardLabels::default()
+        };
+        let request = card_request(&labels, "bash", &"<".repeat(5000), "why");
+        assert!(request.chars().count() <= MAX_SECTION_CHARS);
+        assert!(request.contains("&lt;…```"), "{request}");
+        assert!(!card_request(&labels, "bash", "ls -l", "why").contains('…'));
     }
 
     #[test]

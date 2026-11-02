@@ -433,7 +433,7 @@ async fn a_card_carries_its_click_value_and_closing_it_keeps_the_request() {
     let elements = content(&patch.body)["body"]["elements"].clone();
     assert_eq!(
         elements,
-        json!([request, {"tag": "markdown", "content": "已批准（ou_u2）"}])
+        json!([request, {"tag": "markdown", "content": "Allowed (ou_u2)"}])
     );
 }
 

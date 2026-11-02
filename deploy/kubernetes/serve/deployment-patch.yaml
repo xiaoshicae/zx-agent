@@ -13,7 +13,13 @@ spec:
       shareProcessNamespace: true
       containers:
         - name: zx-agent
-          command: ["zx-agent", "serve", "--config", "/etc/zx-agent-serve/serve.toml"]
+          command:
+            - zx-agent
+            - serve
+            - --config
+            - /etc/zx-agent-serve/serve.toml
+            - --profile
+            - /usr/local/share/zx-agent/profiles/kubernetes.toml
           env:
             # Each platform reads only its own keys; the Secret holds the ones in use.
             - name: SLACK_APP_TOKEN

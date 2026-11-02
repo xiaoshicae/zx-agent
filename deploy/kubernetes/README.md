@@ -2,17 +2,18 @@
 
 部署后可以这样使用：
 
-- 运维人员用 `kubectl exec` 进入常驻 Pod，用 chat 排障。只读命令直接执行，其余命令逐条确认（见仓库 README 的“安全模型”）。
+- 运维人员用 `kubectl exec` 进入常驻 Pod，用 chat 排障。`profiles/kubernetes.toml` 列出的只读 kubectl 命令直接执行，其余命令逐条确认（见仓库 README 的“安全模型”）。
 - CronJob 定时巡检，使用只读账号，结果写进 Pod 日志。
-- kubectl 在 Pod 内运行，凭据来自 ServiceAccount，不需要另外提供 kubeconfig。
+- kubectl 在 Pod 内运行，凭据来自 ServiceAccount，不需要另外提供 kubeconfig。ServiceAccount token 经 `ZX_SECRET_FILES` 登记脱敏。
 
-告警 Webhook、IM 机器人等触发方式需要服务模式，尚未实现，见 `docs/ROADMAP.md` P6 的“部署方向”。
+zx-agent 本身不针对 Kubernetes：kubectl 的规则、token 路径都在本目录的清单与 profile 中。IM 机器人见 `serve/`；告警等其他系统由外部适配器调用 `zx-agent run`（或发到 IM）来触发，zx-agent 不解析告警格式。
 
 ## 目录内容
 
 | 文件 | 内容 |
 |-|-|
 | `Dockerfile` | 镜像：zx-agent，以及 bash、kubectl、curl、jq、tini；以 10001 号非 root 用户运行 |
+| `profiles/` | 装进镜像的 `/usr/local/share/zx-agent/profiles/`。`kubernetes.toml` 在内置的 assistant 之上加入只读 kubectl 命令，并列出它们可以带的选项；chat 与 serve 用 `--profile` 指定 |
 | `kustomization.yaml` | 命名空间、清单列表、镜像地址 |
 | `serviceaccounts.yaml` | 两个账号：常驻 Pod 用 `zx-agent`，定时巡检用 `zx-agent-inspect` |
 | `rbac.yaml` | 两个账号都绑定 Kubernetes 预置的只读角色 `view`（不含 Secret） |
@@ -60,16 +61,21 @@
 对话（`-it` 分配终端；会话文件保存在存储卷上，下次用同一路径可以接着聊）：
 
 ```sh
-kubectl -n zx-agent exec -it deploy/zx-agent -- zx-agent chat --session /data/<名字>.jsonl
+kubectl -n zx-agent exec -it deploy/zx-agent -- zx-agent chat \
+  --profile /usr/local/share/zx-agent/profiles/kubernetes.toml --session /data/<名字>.jsonl
 ```
+
+不带 `--profile` 时使用内置的 assistant，kubectl 命令都要逐条确认。
 
 同一个会话文件同一时间只能被一个 chat 或 run 打开。另一个人或任务再打开它时，会报告 `is in use` 并以退出码 2 结束。所以多人同时使用时，各自用不同的文件名。这项限制依赖文件系统的 `flock`：文件系统不支持时，打开会话会直接失败，不会退回到不加锁的写入（见 `docs/ROADMAP.md` 中 A1 的实施记录）。本次只在 ext4 的 local-path 卷上验证过。
 
 单次任务：
 
 ```sh
-kubectl -n zx-agent exec deploy/zx-agent -- zx-agent run --session /data/<名字>.jsonl "<任务>"
+kubectl -n zx-agent exec deploy/zx-agent -- zx-agent run --profile troubleshoot --session /data/<名字>.jsonl "<任务>"
 ```
+
+`--profile troubleshoot` 让回答按排障报告的固定小节组织；不带时使用中性的 unattended。
 
 定时巡检：任务描述和执行时间在 `cronjob.yaml` 的 `args` 与 `schedule` 中修改。立即试跑一次，并查看结果：
 
