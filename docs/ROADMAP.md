@@ -272,6 +272,13 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 - 本机 macOS 验证：stable 与 Rust 1.88.0 各 738 项通过（基线 723 项，在 `feb1de6` 上实测），6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过，自查脚本的命中项与基线相同；`run`、`chat`、`serve` 的 `--help` 与基线逐字节相同；设置 `ZX_DOCKER_TEST_IMAGE=debian:bookworm-slim` 时容器测试 34 项通过。未新增依赖，`Cargo.toml`、`Cargo.lock` 未改动。
 - 未做：第 6 条的评测（需要真实模型，付费，待授权）；默认仍为全量，P5 的决定暂不标为已被取代。
 
+摘要回答的大小上限（2026-11-02 修正，PR #48）：P5 规定摘要正文最多 64 KiB，实现却把流式增量逐个序列化成 JSON 再累计（`src/compaction.rs` 的 `summarize`）：每个增量除正文外还要计入 25 字节的 JSON 外壳（推理增量为 29 字节），推理内容（`reasoning_content` 等，由 `src/ai/openai.rs` 转成 `Delta::Thinking`）也计入同一上限。服务端大约每个 token 发一个事件时，回答的正文远不到 64 KiB 就被判为超限。2026-11-02 用增量摘要的评测程序（设计第 6 条）做首次付费运行时，⚑ D:5/CHINA FLAG: DeepSeek 的 `deepseek-flash` 16 次摘要全部报 `summary stream exceeds 65536 bytes`，每次在开始后 10.6–13.2 秒；失败的摘要不保存流内容与用量，它输出的是推理还是正文、共多少 token 无从得知。
+
+- 修正：回答按内容计数。正文连同工具调用与错误信息（二者都会使摘要失败）最多 64 KiB；推理不属于摘要，另设 1 MiB 上限，只用来拦住不结束的推理。流式累计与最终消息的检查用同一种算法，后者也约束不发增量、只给最终消息的 provider。报错改为 `summary text exceeds 65536 bytes` 与 `summary reasoning exceeds 1048576 bytes`。失败的摘要连同回答一起记录（`compaction_failed` 的 `response`），因此一条失败记录可能带有至多 1 MiB 的推理；此前整条回答至多 64 KiB。
+- 测试：`tests/compaction.rs` 新增 3 项。按字符拆成近 3 千个事件、正文不到 4 KiB 的摘要成功；125 KiB 推理之后的摘要成功；推理超过 1 MiB 时摘要失败并给出原因。前两项在修正前都报 `summary stream exceeds 65536 bytes`，与付费评测中的报错相同；第三项在修正前也失败（报错不同）。原有的正文超过 64 KiB 的用例未改。
+- 本机 macOS 验证（`9297885` 加本修正，不含评测程序）：stable 与 Rust 1.88.0 各 741 项通过（基线 738 项，新增 3 项），6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过，自查脚本的命中项与基线相同。容器测试没有单独运行，与评测程序合在一起时 34 项通过。未新增依赖，`Cargo.toml`、`Cargo.lock` 未改动。
+- 未验证：修正后 ⚑ D:5/CHINA FLAG: `deepseek-flash` 能否完成摘要，需要再次付费运行。若它的推理计入并占满 2048 token 的输出预算，摘要会因达到输出上限而失败（推测），届时需要调高 `maxSummaryTokens`。
+
 暂不做：`JsonlFile::create` 在加锁或写头部失败后留下文件。这两种失败无法在测试中稳定构造，按"先补回归测试"的规则暂不修改。
 
 实施记录（PR #34，基于 `b169275`，含 PR #31–#33）：
@@ -544,7 +551,7 @@ P5 实施约定（2026-11-01）：
 - 摘要分 facts（逐条 sourceEntryIds）、inferences、plans。校验引用属于本次源条目、字段与字节上限；拒绝无来源事实、截断回答、工具调用或无效 JSON。引用校验不代表模型事实的语义已被证明。
 - 在现有输入与上下文钩子持久化后，Runner 的宿主准备步骤可执行自动压缩，再请求任务模型；循环不判断交互模式。自动摘要调用计入该轮模型请求预算和 usage，失败不伪装成任务回答、不自动重试。
 - chat 默认在序列化上下文字节数超过 256 KiB 时触发，保留最近约 64 KiB 及最后用户输入；run 默认关闭自动压缩。阈值是可配置的字节预算，不声称等同模型 token 上限。保留内容无法缩到阈值时明确停止；系统提示词和最新输入不静默截断。（2026-11-01 调整：付费的自动摘要请求失败后，本会话暂停自动摘要，见上方 P5 复核修正。）
-- 摘要源最多 2 MiB，正文最多 64 KiB，单次摘要最多 2048 输出 token、120 秒；profile 可调整触发与保留预算。手动 `AgentSession::compact` 与 prompt 共用独占运行权，支持 Busy、取消和丢弃后复用；chat 的 `/compact` 接入同一 API。
+- 摘要源最多 2 MiB，正文最多 64 KiB，单次摘要最多 2048 输出 token、120 秒；profile 可调整触发与保留预算。手动 `AgentSession::compact` 与 prompt 共用独占运行权，支持 Busy、取消和丢弃后复用；chat 的 `/compact` 接入同一 API。（2026-11-02 修正：正文按回答的文本计数，不再计入流式事件的 JSON 外壳；推理内容不计入正文，另设 1 MiB 上限，见上方"摘要回答的大小上限"。）
 - 大工具结果通过最后的 after_tool 扩展，在已知密钥脱敏后写入普通 UTF-8 文件，只将引用送入会话与模型；保存的是原工具返回的有界内容，既有截断/分页边界不变。默认阈值 8 KiB、文件上限 1 MiB，文件名为 UUID，Unix 新目录/文件权限为 0700/0600。
 - 注册 `read_output` 按 UUID 与 UTF-8 字节 offset 分页读取结果，单页不超过落盘阈值；读取结果和 read_skill 不再次落盘，避免递归引用。只有启用 read_output 时安装落盘扩展，显式 CLI 工具集合仍生效。结果目录默认 cwd/.zx-agent/outputs，文件不自动删除并可在同目录续用；加入 gitignore。（2026-11-01 调整：`troubleshoot` 默认不启用 `read_output`；写入失败时结果保持内联；默认目录须位于工作目录内，并在目录中写入 `.gitignore`，见上方 P5 复核修正。）
 - profile 使用 `[compaction]` 与 `[toolOutput]`；CLI 可覆盖自动触发阈值或关闭自动压缩。默认 SDK 仍不自动压缩、不落盘，已有构造器保持兼容；可在 Runner 上显式配置后交给 AgentSession。
