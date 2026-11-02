@@ -67,7 +67,7 @@ path = "skills/rust-review/SKILL.md"
 | `skills` | 显式登记 name、description、path 的目录；正文按需读取 |
 | `compaction.triggerBytes` | 自动摘要阈值，0 关闭；非零须大于 `keepRecentBytes`，且超出部分不能多于 2 MiB（一次摘要最多读取的原始记录） |
 | `compaction.keepRecentBytes` | 近期消息的序列化字节预算，大于零；完整保留最新输入和全部 system，可因此超出保留预算 |
-| `compaction.maxSummaryTokens` | 摘要输出 token 上限，1–16384，默认 2048 |
+| `compaction.maxSummaryTokens` | 摘要输出 token 上限，1–16384，默认 2048。有的服务把推理计入输出 token，推理可能用满上限而写不出摘要（见 `docs/ROADMAP.md` 的摘要评测记录），使用这类模型时需要调高；服务支持时也可以经 `--request-field` 关闭推理，但它同样作用于任务请求 |
 | `compaction.timeoutSecs` | 摘要流总超时，大于零，默认 120 秒 |
 | `toolOutput.thresholdBytes` | 超过此大小的工具结果落盘；0 关闭，否则为 256–maxFileBytes，默认 8192 |
 | `toolOutput.maxFileBytes` | 读写文件上限，1–1048576，默认 1 MiB |
@@ -220,4 +220,4 @@ SDK 宿主注册同配置的 `OutputStore`、`ReadOutputTool` 和 `SpillOutputs`
 
 ---
 
-PROFILES.md · v0.7 · 2026年11月
+PROFILES.md · v0.8 · 2026年11月

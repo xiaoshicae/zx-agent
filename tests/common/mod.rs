@@ -10,6 +10,7 @@ pub mod fake_mcp;
 pub mod fake_slack;
 pub mod http;
 pub mod mock_server;
+pub mod summary_eval;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
