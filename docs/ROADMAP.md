@@ -41,7 +41,7 @@ G1–G4 是验收目标。当前会话日志可重建对话与提示词；G3 所
 | 编号 | 事项 | 结论 | 日期 | 状态 |
 |---|---|---|---|---|
 | D1 | MSRV | 升级到 1.88 | 2026-10-31 | 已完成：`rust-version = "1.88"`，已用 1.88.0 工具链编译并通过测试 |
-| D2 | 新依赖 | 已授权：tokio 的 `io-std` feature、`toml`、`rmcp`（MCP 官方 Rust SDK）、ACP 官方 Rust SDK、`rustyline`（可选）。在用到它们的阶段再引入 | 2026-10-31 | 按阶段引入；`rmcp` 3.8.0 已于 P7 引入（PR #40） |
+| D2 | 新依赖 | 已授权：tokio 的 `io-std` feature、`toml`、`rmcp`（MCP 官方 Rust SDK）、ACP 官方 Rust SDK、`rustyline`（可选）。在用到它们的阶段再引入。2026-11-02 追加 `opentelemetry`、`opentelemetry_sdk`、`opentelemetry-otlp`（P9 的 OpenTelemetry 追踪） | 2026-10-31 | 按阶段引入；`rmcp` 3.8.0 已于 P7 引入（PR #40）；三个 OpenTelemetry crate 0.33.1 已于 P9 引入（PR #49） |
 | D3 | profile 文件格式 | TOML | 2026-10-31 | P4 落实 |
 | D4 | 会话 API 形态 | 进程内方法调用；暂不实现提交队列 / 事件队列（SQ/EQ） | 2026-10-31 | 已实现：P2 进程内共享会话 API |
 | D5 | 无人值守的命令执行环境 | 默认仍在本机执行，`run` 行为不变；容器执行须在 profile 或 CLI 中显式开启。理由：在 Kubernetes Job 中运行时 Pod 内通常没有 Docker；无网络的容器做不了在线排障，而在线访问方案尚未评审。此前的候选方案（`troubleshoot` 默认容器、没有 Docker 时拒绝启动）不采用 | 2026-11-01 | 已确认：P6 执行环境部分按此实现 |
@@ -446,7 +446,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P6 | 执行环境与崩溃恢复 | 进行中：崩溃恢复（PR #12）、执行环境接缝（PR #13）、离线容器执行（PR #14）已完成；在线访问评审稿已合入（PR #17），一期已完成：只读命令自动放行（PR #19）、环境变量保护与 ServiceAccount token 脱敏（PR #20）、常驻 Pod 部署包（PR #22）、多集群（PR #24）；容器联网已取消，改为常驻 Pod 部署。待部署方在真实集群上验收；服务模式与 IM 接入的评审稿已合入（PR #27），模块 A（IM 接口与服务，PR #28）、B（Slack 与 `serve`，PR #29）、C（⚑ D:5/CHINA FLAG: 飞书，PR #32）、D（部署，PR #33）已完成，真实平台验收待提供凭据 |
 | P7 | 插件与 MCP | 已完成（PR #41）：范围按 D8 收窄，评审稿已合入（PR #36）并经用户确认；模块 A（Extension 接口，PR #38）、B1（MCP 客户端库，PR #40）、B2（CLI 接入与文档，PR #41）已完成；真实 MCP 服务器的验收待选定服务器；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已完成（PR #23），A2–A8（扩展 API）已完成（PR #25） |
 | P8 | 嵌入协议 `acp` | 未开始 |
-| P9 | 可选增强 | 进行中：token 预算已完成（PR #47） |
+| P9 | 可选增强 | 进行中：token 预算（PR #47）、OpenTelemetry 追踪（PR #49）已完成 |
 
 ### P0 场景默认值移出内核
 
@@ -1120,7 +1120,7 @@ P7 模块 B2 实施记录（2026-11-01，PR #41）：
 - [ ] 异步审批：`WebhookInteraction`，高风险命令发 webhook 请求批准，超时则拒绝
 - [ ] OS 级沙箱的 Executor：Linux 的 bubblewrap + seccomp、macOS 的 Seatbelt
 - [ ] 由 webhook 或告警触发运行
-- [ ] OpenTelemetry 追踪（事件模型见"P7 前置"B 部分）
+- [x] OpenTelemetry 追踪（事件模型见"P7 前置"B 部分）。已完成（PR #49），见下文"OpenTelemetry 追踪"
 - [ ] 拆分为多个 crate（`zx-ai`、`zx-core`、`zx-tools`、`zx-cli`），用编译器保证分层
 
 2026-11-02 用户决定：先做 token 预算与 OpenTelemetry。OpenTelemetry 用官方 crate，同意引入 `opentelemetry`、`opentelemetry_sdk`、`opentelemetry-otlp`（0.33，声明的 MSRV 为 1.75）。拆分 crate 与 acp 接入分开，先出方案。
@@ -1142,6 +1142,26 @@ token 预算（2026-11-02，已完成，PR #47；名称与退出码经用户确�
 - 测试：新增 8 项：`tests/runner.rs` 2 项（预算恰好用完时不发下一次请求；差 1 个 token 时照常请求，最后超出预算）、`tests/compaction.rs` 1 项（摘要请求计入预算）、`tests/run_cli.rs` 3 项（退出码 7 与报告行、最后一次请求可超出、profile 设置预算与命令行的 0 关闭）、单元测试 2 项（默认不限、profile 解析）。既有测试中，`tests/profiles_cli.rs` 的帮助文字检查加入 run 与 chat 的 `--token-budget`，IM 回复的单元测试加入新结果，6 处 `Limits` 字面量改为 `..Limits::default()`（其中 `tests/real_api.rs` 一处，未运行）。
 - 反向验证：分别去掉循环中的 token 检查、运行层传入的剩余预算、退出码 7、profile 与命令行的设置，每次都有对应测试失败（依次 4、4、2、2、2 项），修改已还原。“预算用完时失败的请求不再重试”没有单独的测试：FauxProvider 的失败回答不带用量，构造不出这种情况；该条件与已有测试覆盖的 `maxTurns` 写法相同。
 - 本机 macOS 验证：stable 与 Rust 1.88.0 各 746 项通过（基线 738 项，为 PR #45 的实测，其代码与 `9297885` 相同），6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过；自查脚本在改动的文件中只列出原有的 3 处（`src/main.rs` 的 `unsafe` 与 `let _ =`，`src/chat/mod.rs` 的 `let _ =`）；`tests/run_cli.rs` 连续运行 3 次，均通过。`run`、`chat`、`serve` 的 `--help` 各多出 `--token-budget` 一项。未新增依赖，`Cargo.toml`、`Cargo.lock` 未改动。
+
+OpenTelemetry 追踪（2026-11-02，已完成，PR #49；用户选择官方 crate）：
+
+| 环节 | 做法 |
+|---|---|
+| 依赖 | `opentelemetry`、`opentelemetry_sdk`（只开 `trace`）、`opentelemetry-otlp`（`http-proto`、`reqwest-blocking-client`、`trace`），均为 0.33.1，声明的 MSRV 为 1.75。锁文件由 225 个包变为 246 个；reqwest 仍只有 0.13.5，rustls 的特性仍为 `aws-lc-rs,aws_lc_rs,std,tls12`。用阻塞客户端，是因为 SDK 默认的批量处理器在独立线程里导出，源码写明它不支持 `reqwest-client` 这类异步客户端（`opentelemetry_sdk-0.33.1/src/trace/span_processor.rs:461-471`）；阻塞客户端由导出器在单独的线程里创建，不会在 Tokio 中 panic（`opentelemetry-otlp-0.33.1/src/exporter/http/mod.rs:238-268`） |
+| 启用 | 设置了标准变量 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` 或 `OTEL_EXPORTER_OTLP_ENDPOINT` 时才导出（OTLP/HTTP，protobuf），否则不建立任何连接。其余标准变量（如 `OTEL_EXPORTER_OTLP_HEADERS`、`OTEL_SERVICE_NAME`、`OTEL_RESOURCE_ATTRIBUTES`）由 SDK 读取；没设 `OTEL_SERVICE_NAME` 时服务名为 `zx-agent`。run、chat、serve 都支持 |
+| 结构 | 一次运行一条 trace：`run` → `attempt`（每次尝试）→ `turn` → `request`（任务或摘要请求）、`tool <名称>`、`compaction`。策略结论与审批是工具 span 上的事件，重试、钩子失败与中断调用的恢复是运行 span 上的事件。时间取事件信封的 `atMs`。手动压缩不属于任何运行，自成一条 trace。trace ID 由 SDK 生成：0.33 的 `SpanBuilder` 不能指定 trace ID，运行 ID 与会话 ID 记在 `run` 的属性 `zx.run.id`、`zx.session.id` 上 |
+| 内容 | 只导出元数据：运行与会话 ID、模型、轮次、token 用量、结果、工具名与调用 ID、策略结论、审批结果与等待时长等。不导出用户输入、模型输出、工具参数与结果，也不导出理由与错误文本，因为它们可能引用前者（"P7 前置" B7 留给导出器决定的默认范围） |
+| 运行 | 事件经有界通道交给一个后台任务，由它建立 span；通道满时丢弃并计数，运行不会等待导出。退出前结束仍未关闭的 span 并导出剩余部分，最多等待 5 秒（SDK 的默认值） |
+| 凭据 | `OTEL_EXPORTER_OTLP_HEADERS`、`OTEL_EXPORTER_OTLP_TRACES_HEADERS` 可能带认证头，与 API key 一样从命令的环境中删除 |
+
+实施记录（PR #49，基于 PR #47 的 `b6ef721`，即 `9297885` 加 token 预算）：
+
+- 新模块 `src/otel.rs`：`Telemetry::from_env`、`Telemetry::with_provider`、`sink`、`dropped`、`shutdown`，以及常量 `ENDPOINT_VARIABLES`、`HEADER_VARIABLES`。事件先转成只含元数据的内部信号再进通道（容量 4096），不复制消息内容；`AgentEvent` 的 22 个变体逐一处理。后台任务在停止时先处理已排队的信号，再结束仍未关闭的 span。
+- CLI：`run` 在组装会话之前建立导出（配置错误以退出码 2 结束，不建会话文件），经 `AgentSession::subscribe` 接到会话，报告之后关闭；chat 把主体移入 `converse`，每个会话（含 `/new`）各自订阅；serve 在创建会话目录之前建立导出，各线程的会话以它作为事件出口（此前为 `NullSink`），服务停止后关闭。开启时 stderr 打印 `[otel] exporting traces over OTLP/HTTP`，退出时报告丢弃的条数与导出失败。
+- 测试：新增 7 项：`src/otel.rs` 单元测试 4 项（嵌套、时间与只含元数据，运行结束时关闭未结束的 span，手动摘要自成一条 trace，队列满时丢弃并计数）、`tests/otel.rs` 1 项（真实运行的 span 层级与属性）、`tests/run_cli.rs` 2 项（设置地址时编译出的程序向假收集端发出 protobuf 请求且不含回答，不设时不导出；命令看不到两个认证头变量）。SDK 的内存导出器在关闭时清空记录（`opentelemetry_sdk-0.33.1/src/trace/in_memory_exporter.rs:164-171`），集成测试因此用一个关闭后仍保留 span 的导出器。
+- 反向验证：分别去掉认证头变量的隐藏、span 的父子关系、停止时先处理已排队的信号、按地址启用导出，每次都有对应测试失败（依次 1、3、1、1 项），修改已还原。
+- 真实 Collector 验收（2026-11-02，本机 Docker）：`otel/opentelemetry-collector` 0.164.0（digest `sha256:28b6d41a…`），OTLP/HTTP 接收、debug 导出；编译出的 `zx-agent run` 对一个本地假模型服务运行一次，Collector 收到 1 组资源 span（`service.name` 为 `zx-agent`）中的 4 个 span：`request`、`turn`、`attempt`、`run`，`run` 的 `zx.run.id` 与 JSONL 中 `run_end` 的 `runId` 相同。
+- 本机 macOS 验证：stable 与 Rust 1.88.0 各 753 项通过（基线 746 项，为 PR #47 的实测），6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过；自查脚本在改动的文件中只列出原有的 3 处；`tests/otel.rs` 连续运行 10 次、`tests/run_cli.rs` 3 次、`tests/serve_cli.rs` 2 次，均通过。依赖按决策 D2 引入，锁文件 246 个包，rustls 特性与 reqwest 版本不变。
 
 ## 5. 随各阶段处理的整理项
 

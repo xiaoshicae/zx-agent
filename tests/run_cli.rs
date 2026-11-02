@@ -3,11 +3,15 @@
 mod common;
 
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpListener;
 use tokio::process::Command;
 
+use common::http::{Request, read_request};
 use common::mock_server::{MockServer, Reply};
 
 /// An answer that would set the terminal title if a terminal ran it.
@@ -201,6 +205,48 @@ async fn commands_cannot_read_the_agent_environment_through_proc() {
     assert!(!result.contains(PROBE), "{result}");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn commands_cannot_see_the_headers_for_a_trace_collector() {
+    const TOKEN: &str = "Authorization=Bearer collector-secret";
+    let dir = tempfile::tempdir().unwrap();
+    let command = "echo \"headers=[$OTEL_EXPORTER_OTLP_HEADERS] traces=[$OTEL_EXPORTER_OTLP_TRACES_HEADERS]\"";
+    let server = MockServer::start(vec![Reply::bash("c", command), Reply::text("done")]).await;
+    let output = Command::new(env!("CARGO_BIN_EXE_zx-agent"))
+        .args(["run", "--model", "mock", "--base-url", &server.base_url])
+        .args([
+            "--max-retries",
+            "0",
+            "--api-key-env",
+            "ZX_RUN_CLI_TEST_KEY",
+            "--tools",
+            "bash",
+            "go",
+        ])
+        .current_dir(dir.path())
+        .env("OTEL_EXPORTER_OTLP_HEADERS", TOKEN)
+        .env("OTEL_EXPORTER_OTLP_TRACES_HEADERS", TOKEN)
+        .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        .env_remove("ZX_RUN_CLI_TEST_KEY")
+        .env_remove("ZX_MODEL")
+        .env_remove("ZX_BASE_URL")
+        .stdin(Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result = server.requests()[1].body["messages"].to_string();
+    assert!(result.contains("headers=[] traces=[]"), "{result}");
+    assert!(!result.contains("collector-secret"), "{result}");
+}
+
 #[tokio::test]
 async fn jsonl_events_carry_the_envelope_of_their_run() {
     let dir = tempfile::tempdir().unwrap();
@@ -330,6 +376,70 @@ async fn a_profile_sets_the_token_budget_and_zero_on_the_command_line_disables_i
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(unlimited.requests().len(), 2);
+}
+
+/// A trace collector that records each OTLP/HTTP request and answers it as accepted.
+async fn collector() -> (String, Arc<Mutex<Vec<Request>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&received);
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            if let Some(request) = read_request(&mut stream).await {
+                log.lock().unwrap().push(request);
+            }
+            let accepted = "HTTP/1.1 200 OK\r\ncontent-type: application/x-protobuf\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+            stream.write_all(accepted.as_bytes()).await.ok();
+        }
+    });
+    (endpoint, received)
+}
+
+fn contains(body: &[u8], text: &str) -> bool {
+    body.windows(text.len()).any(|window| window == text.as_bytes())
+}
+
+#[tokio::test]
+async fn a_run_exports_its_trace_only_when_an_endpoint_is_configured() {
+    let dir = tempfile::tempdir().unwrap();
+    let (endpoint, received) = collector().await;
+
+    let server = MockServer::start(vec![Reply::text("the answer")]).await;
+    let output = run(&server, dir.path())
+        .env("OTEL_EXPORTER_OTLP_ENDPOINT", &endpoint)
+        .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        .output()
+        .await
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert!(stderr.contains("[otel] exporting traces over OTLP/HTTP"), "{stderr}");
+    {
+        let requests = received.lock().unwrap();
+        // The process exports what remains before it exits.
+        let request = requests.first().expect("the collector received the trace");
+        assert_eq!((request.method.as_str(), request.path.as_str()), ("POST", "/v1/traces"));
+        assert_eq!(request.header("content-type"), Some("application/x-protobuf"));
+        // Protobuf keeps strings as they are: the service and an attribute of the run span.
+        assert!(contains(&request.body, "zx-agent"));
+        assert!(contains(&request.body, "zx.run.id"));
+        assert!(!contains(&request.body, "the answer"), "no content leaves the process");
+    }
+
+    let server = MockServer::start(vec![Reply::text("the answer")]).await;
+    let output = run(&server, dir.path())
+        .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        .env("OTEL_SERVICE_NAME", "not-a-reason-to-export")
+        .output()
+        .await
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert!(!stderr.contains("[otel]"), "{stderr}");
+    assert_eq!(received.lock().unwrap().len(), 1, "nothing more was sent");
 }
 
 #[tokio::test]

@@ -402,6 +402,33 @@ pidsLimit = 256                  # 可选，容器内进程数上限
 
 模型失败消息可附带 `providerError`，区分 HTTP、服务端流内错误、传输、超时、协议与资源上限。HTTP 元数据包含 `status`、可选 `code` 和 `retryAfterMs`；给人看的原因仍在 `errorMessage` 中。
 
+### OpenTelemetry 追踪
+
+run、chat 与 serve 在设置了下面任一标准变量时，用 OTLP/HTTP（protobuf）导出追踪，并在 stderr 打印 `[otel] exporting traces over OTLP/HTTP`；两个都没设时不导出，也不建立任何连接。
+
+| 变量 | 说明 |
+|---|---|
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | 完整地址，原样使用，如 `http://collector:4318/v1/traces` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | 基础地址，后接 `/v1/traces` |
+| 其余标准变量 | 由 OpenTelemetry SDK 读取，如 `OTEL_EXPORTER_OTLP_HEADERS`（认证头）、`OTEL_RESOURCE_ATTRIBUTES`。服务名取 `OTEL_SERVICE_NAME`，没设时为 `zx-agent` |
+
+一次运行是一条 trace，时间取事件的 `atMs`：
+
+| span | 范围 | 属性与事件 |
+|---|---|---|
+| `run` | `run_start` 到 `run_end` | `zx.run.id`、`zx.session.id`、`zx.model`、`zx.provider`、`zx.outcome`、`zx.turns`、`zx.retries`、`zx.usage.input_tokens` / `output_tokens` / `cache_read_tokens`；事件 `retry_scheduled`、`tool_call_recovered` |
+| `attempt` | 每次尝试 | `zx.attempt`、`zx.outcome` |
+| `turn` | 每个回合 | `zx.turn` |
+| `request` | 每个模型请求；摘要请求在 `compaction` 之下 | `zx.request.kind`、`zx.model`、`zx.attempt`、用量、`zx.stop_reason` |
+| `tool <工具名>` | 每个工具调用 | `zx.tool.name`、`zx.tool.call_id`、`zx.tool.is_error`；事件 `decision`（`zx.verdict`）、`approval_requested`、`approval_resolved`（`zx.approval.result`、`zx.approval.wait_ms`） |
+| `compaction` | 每次摘要；手动 `/compact` 不属于任何运行，自成一条 trace | `zx.compaction.automatic`、`zx.compaction.input_bytes` / `output_bytes`、用量 |
+
+钩子失败是当前 span 上的事件 `hook_failed`（`zx.hook`、`zx.hook.phase`）。trace ID 由 SDK 生成，用 `zx.run.id` 对应到 JSONL 事件与会话文件。
+
+只导出元数据：不包含用户输入、模型输出、工具参数与结果，也不包含理由与错误文本，因为它们可能引用前者。事件经有界队列交给后台任务，队列满时丢弃，运行不会等待导出；退出时报告丢弃的条数，并导出剩余部分，最多等待 5 秒。`OTEL_EXPORTER_OTLP_HEADERS`、`OTEL_EXPORTER_OTLP_TRACES_HEADERS` 可能带认证头，命令看不到这两个变量。
+
+作为库使用时，`otel::Telemetry::from_env()` 按上述变量建立导出，`Telemetry::with_provider` 使用宿主自己的 `SdkTracerProvider`；把 `sink()` 交给会话（`into_session` 或 `AgentSession::subscribe`），退出前调用 `shutdown().await`。
+
 ### 会话文件（`--session`）
 
 第一行是头部，之后每行一个条目，条目之间通过 `parentId` 连成一棵树：
@@ -610,7 +637,8 @@ cargo fmt --check
 | `tests/cli.rs` | 编译出的程序：退出码 0 到 6、jsonl 输出、从 stdin 读提示词、bash 读不到 API key、系统提示词的生成段落、`--system-updates inline` |
 | `tests/chat_cli.rs` | 多轮历史、审批与授权范围、审批过期后下一行作为新提问、只读命令自动放行、重置、模型切换、EOF、信号、超时、控制字符显示、恢复中断会话的提示、钩子失败的提示；Unix PTY 验证运行中插话、取消后丢弃残留插话、取消重置和退出 |
 | `tests/profiles_cli.rs` | profile 覆盖、显式默认值、预算参数的 help 写明取自 profile、不可绕过的 deny、上下文范围与审计、上下文默认值与越界链接、`--system-prompt-file` 兼容、skill 懒加载与脱敏、配置错误（含 provider 参数）退出码且不建会话文件 |
-| `tests/run_cli.rs` | `run` 在 P0 之后新增的约定：进度与报告行转义终端控制字符；另一个 `run` 正在写的会话文件不能再被打开写入；JSONL 事件的信封；为零的超时在请求前被拒绝；stdout 已关闭时退出码仍由运行结果决定；token 预算的退出码 7、最后一次请求可超出预算、profile 设置预算与命令行的 0 关闭（原有 `run` 测试仍在 `tests/cli.rs`） |
+| `tests/run_cli.rs` | `run` 在 P0 之后新增的约定：进度与报告行转义终端控制字符；另一个 `run` 正在写的会话文件不能再被打开写入；JSONL 事件的信封；为零的超时在请求前被拒绝；stdout 已关闭时退出码仍由运行结果决定；token 预算的退出码 7、最后一次请求可超出预算、profile 设置预算与命令行的 0 关闭；只在设置了 OTLP 地址时导出追踪，导出内容不含回答（原有 `run` 测试仍在 `tests/cli.rs`） |
+| `tests/otel.rs` | 一次真实运行导出一条 trace：每次尝试、回合、模型请求与工具调用各一个 span，用量与工具属性正确；`src/otel.rs` 的单元测试另覆盖嵌套与时间、只含元数据、运行结束时关闭未结束的 span、手动摘要自成一条 trace、队列满时丢弃并计数 |
 | `tests/session_compaction.rs`、`tests/compaction.rs` | v1/v2 追加升级、分支和引用、原始投影、省略保留边界后摘要仍生效、编辑摘要的变换计划在写入前被拒绝、摘要失败与取消、请求 / 用量预算、超时和上限 |
 | `tests/incremental_summary.rs` | 增量摘要（v5）：第一次读取整段前缀并给事实编号、之后只读旧事实与新增记录、可接续全量模式留下的摘要、取代与淘汰、修正只作废相关事实并在下一次重读、模型不能自带编号、加载时拒绝违反规则的记录、请求可从会话文件还原、多轮之后请求大小不随历史增长（与全量模式对照） |
 | `tests/request_audit.rs` | 每次任务与摘要请求可从会话文件还原、配置只在变化时追加、旧会话首次请求前升级、与投影不一致的请求不记录、固定会话文件（v4 与含增量摘要的 v5）的还原结果不变（版本守护） |

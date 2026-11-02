@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::AgentSession;
-use zx_agent::agent::NullSink;
+use zx_agent::agent::{EventSink, NullSink};
 use zx_agent::ai::now_ms;
 use zx_agent::im::feishu::{FeishuChannel, FeishuConfig};
 use zx_agent::im::slack::{SlackChannel, SlackConfig};
@@ -23,6 +23,7 @@ use zx_agent::im::{
     SessionKey, StatusFiles, UserId,
 };
 use zx_agent::interaction::Interaction;
+use zx_agent::otel::Telemetry;
 use zx_agent::profile::Builtin;
 
 use crate::cli::{self, Budget, ServeArgs, SessionFile, SessionOptions};
@@ -175,6 +176,7 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
         .into_iter()
         .map(|(platform, id)| (platform, UserId(id)))
         .collect();
+    let telemetry = cli::start_telemetry()?;
     let dir = file.sessions.dir;
     std::fs::create_dir_all(&dir).with_context(|| format!("cannot create the session directory {}", dir.display()))?;
     let running = dir.join(RUNNING_DIR);
@@ -194,6 +196,9 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
         ),
         hidden_env,
         mcp,
+        events: telemetry
+            .as_ref()
+            .map_or_else(|| Arc::new(NullSink) as Arc<dyn EventSink>, Telemetry::sink),
     };
     // A wrong model, profile or tool setting would otherwise surface only at the first
     // message, in the chat; check it once with a session that is never stored.
@@ -226,10 +231,11 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
     );
     let cancel = CancellationToken::new();
     spawn_signal_handler(cancel.clone());
-    match Server::new(config, Arc::new(factory), Arc::new(Log))
+    let served = Server::new(config, Arc::new(factory), Arc::new(Log))
         .run(channels, &cancel)
-        .await
-    {
+        .await;
+    cli::finish_telemetry(telemetry).await;
+    match served {
         Ok(()) => Ok(EXIT_COMPLETED),
         Err(error @ ImError::Config(_)) => {
             eprintln!("zx-agent: {error}");
@@ -286,6 +292,8 @@ struct Sessions {
     hidden_env: Vec<String>,
     /// The profile's MCP servers, shared by every thread's session.
     mcp: cli::McpTools,
+    /// Where each session's events go: the trace export, or nowhere.
+    events: Arc<dyn EventSink>,
 }
 
 impl Sessions {
@@ -322,8 +330,8 @@ impl Sessions {
         let mut prepared = self.prepare(SessionFile::Open(&path)).await?;
         prepared.config.interaction = interaction;
         // The session file is the record of each conversation; the operator log holds
-        // approvals and failures (Log).
-        prepared.into_session(Arc::new(NullSink))
+        // approvals and failures (Log), and traces, when exported, the timeline.
+        prepared.into_session(Arc::clone(&self.events))
     }
 }
 

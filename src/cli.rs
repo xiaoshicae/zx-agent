@@ -18,6 +18,7 @@ use zx_agent::extensions::{
     self, ContinueOnLength, Extension, MIN_SECRET_CHARS, RedactSecrets, check_secret_files, short_secret_files,
 };
 use zx_agent::mcp::{Server, ServerConfig};
+use zx_agent::otel::{self, Telemetry};
 use zx_agent::output_store::{self, OutputStore, ReadOutputTool, SpillOutputs};
 use zx_agent::policy::{AutoApprove, CommandPolicy, PolicyHook, Rule, RuleMatcher, RulePolicy};
 use zx_agent::profile::skills::{ReadSkillTool, TOOL_NAME};
@@ -482,6 +483,32 @@ pub(crate) struct PreparedSession {
 /// Read `--system-prompt-file` once, at startup. As before profiles existed, it may be a
 /// pipe and is not limited to the profile file budget, so it cannot be read again for a
 /// later conversation.
+/// Export traces when an OTLP endpoint is configured (`zx_agent::otel`), and say so on
+/// stderr. An endpoint the exporter refuses is a configuration error, reported before any
+/// session file is created.
+pub(crate) fn start_telemetry() -> Result<Option<Telemetry>> {
+    let telemetry = Telemetry::from_env().map_err(anyhow::Error::msg)?;
+    if telemetry.is_some() {
+        eprintln!("[otel] exporting traces over OTLP/HTTP");
+    }
+    Ok(telemetry)
+}
+
+/// Export the spans that remain. Telemetry never changes the outcome: failures only go to
+/// stderr.
+pub(crate) async fn finish_telemetry(telemetry: Option<Telemetry>) {
+    let Some(telemetry) = telemetry else {
+        return;
+    };
+    let dropped = telemetry.dropped();
+    if dropped > 0 {
+        eprintln!("[otel] {dropped} event(s) were not exported: the queue was full");
+    }
+    if let Err(error) = telemetry.shutdown().await {
+        eprintln!("[otel] {error}");
+    }
+}
+
 pub(crate) fn read_instructions(base: &BaseArgs) -> Result<Option<String>> {
     base.system_prompt_file
         .as_deref()
@@ -688,9 +715,11 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     }
 
     // Commands must not inherit the key: `env` would put it into the session file and the context.
+    // The same goes for headers that authenticate to a trace collector.
     let hidden_env: Vec<String> = std::iter::once(options.base.api_key_env.clone())
         .chain(options.hidden_env.iter().cloned())
         .chain(options.mcp.token_env.iter().cloned())
+        .chain(otel::HEADER_VARIABLES.iter().map(|name| name.to_string()))
         .collect();
     let mut tools = tools::builtin_tools_with(
         &profile
