@@ -34,13 +34,13 @@ paths:
 
 | 文件 | 内容 |
 |---|---|
-| `src/**` 与 `crates/*/src/**` 中的 `mod tests` | 各模块的单元测试，包括会话文件和事件流的 JSON 格式。`#[cfg(test)]` 的辅助项（如 `SessionStore::with_writer`）只在所在 crate 的单元测试里可用 |
+| `src/**` 与 `crates/*/src/**` 中的 `mod tests` | 各模块的单元测试，包括会话文件和事件流的 JSON 格式；自动放行按 profile 给出的选项与例外判断，`deploy/kubernetes/profiles/kubernetes.toml` 由 `src/profile` 的单元测试加载并检查。`#[cfg(test)]` 的辅助项（如 `SessionStore::with_writer`）只在所在 crate 的单元测试里可用 |
 | `tests/agent_loop.rs` | 循环语义 |
 | `tests/runner.rs` | 运行层：重试（含预算用完不重试、省略失败回答的事件）、上限（含 token 预算：FauxProvider 每次回答报告 15 个 token）、截断续写、持久化（含自定义 `SessionLog`）、恢复会话、排队输入只写一次 |
 | `tests/agent_session.rs` | 共享会话：Busy、取消与丢弃后复用、多订阅者、退订、回调重入与 panic、模型切换与审计、取出未被消费的排队输入、会话释放后有界订阅结束 |
 | `tests/openai_mock.rs` | 真实 HTTP 下的 provider：SSE、重试、空闲超时、中途取消、成功状态下的 JSON 正文 |
 | `tests/cli.rs` | 原有 run 行为与退出码，P0 起逐字节保持；P6 默认值变更另行验收 |
-| `tests/run_cli.rs` | P0 之后新增的 run 约定（如进度与报告行转义终端控制字符、会话文件单写者、零超时被拒绝、stdout 关闭时的退出码、token 预算的退出码 7：假服务每次回答报告 12 个 token、只在设置了 OTLP 地址时导出追踪：测试中的假收集端只看请求，不解码 protobuf、`--request-field` 到达模型并写入请求审计，写错时以退出码 2 结束），新的 run 测试放这里，`tests/cli.rs` 不改 |
+| `tests/run_cli.rs` | P0 之后新增的 run 约定（如进度与报告行转义终端控制字符、会话文件单写者、零超时被拒绝、stdout 关闭时的退出码、token 预算的退出码 7：假服务每次回答报告 12 个 token、只在设置了 OTLP 地址时导出追踪：测试中的假收集端只看请求，不解码 protobuf、`--request-field` 到达模型并写入请求审计，写错时以退出码 2 结束、`--fill-missing-reasoning` 默认关闭且开启时写入请求审计），新的 run 测试放这里，`tests/cli.rs` 不改 |
 | `tests/otel.rs` | OpenTelemetry 导出：真实运行经 `Telemetry` 产生的 span 层级与属性；测试用的导出器 `Kept` 在关闭后仍保留 span（SDK 的内存导出器关闭时会清空） |
 | `tests/chat_cli.rs` | chat 的脚本 stdin、审批与过期、信号与超时、取消后丢弃残留插话、钩子失败的提示、Unicode、模型切换、会话重置和 Unix PTY |
 | `tests/profiles_cli.rs` | profile/CLI 覆盖与 deny、项目上下文范围、默认值与越界链接、`--system-prompt-file` 兼容、skill 懒加载、工具策略和审计 |
@@ -58,7 +58,7 @@ paths:
 | `tests/mcp_cli.rs` | 编译出的程序带 `[[mcp]]` profile：run 调用放行的工具、拒绝要审批的工具，chat 在审批后调用，serve 在开始服务前连接；命令看不到 token 变量，token 的值被脱敏；用不了的服务器让启动以退出码 2 失败 |
 | `tests/im_feishu.rs` | ⚑ D:5/CHINA FLAG: 飞书 channel 对假开放平台：ping 与 pong、确认、分片、去重、重连、群 @ 与私聊、卡片点击、token、话题回复、编辑与改发、卡片、限频与停止 |
 | `tests/im_slack.rs` | Slack channel 对假 Slack：@ 与私聊、确认与去重、忽略自己的消息、按钮点击、断线重连、连接失败的上报、`wss://` 握手失败（rustls 只有一个加密后端时报错而不是 panic）、凭据被拒、转义与拆分、卡片、限频与停止 |
-| `tests/serve_cli.rs` | `serve` 子命令：配置错误；对假 Slack 与假模型的完整流程（审批卡片、命令看不到 token、脱敏、会话文件、运维日志、SIGTERM）；被 SIGKILL 后重启，替换遗留的“处理中…” |
+| `tests/serve_cli.rs` | `serve` 子命令：配置错误（含 `[replies]` 的未知字段）；配置的 `[replies]` 与 `[cardLabels]` 替换英文默认文案；对假 Slack 与假模型的完整流程（审批卡片、命令看不到 token、脱敏、会话文件、运维日志、SIGTERM）；被 SIGKILL 后重启，替换遗留的“处理中…” |
 | `tests/im_server.rs` | IM 服务：内存中的 `FakeChannel` 加脚本化模型，覆盖线程与会话、访问控制、审批卡片（批准、拒绝、非审批人、超时、取消）、运行上限与排队、插话、空闲释放与重开、停止与平台错误、停止时告知没有处理的消息（排队中的、运行没取走的插话、停止期间才收到的：`FakeChannel` 的 `late`）、停止取消的运行写明原因；运行中的状态（内存中的 `Statuses` 把记录与删除也写进 `Sent`，便于断言先后）：先删记录再写回答、启动时替换遗留的状态、平台拒绝或未配置、停止时放弃替换（`FakeChannel` 的 `updates`）、记录 / 删除 / 读取失败（`Broken`） |
 | `tests/real_api.rs` | 付费：真实模型 API，默认跳过；摘要评测另需 `ZX_E2E_EVAL=1` |
 

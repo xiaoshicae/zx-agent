@@ -8,7 +8,7 @@
 | Owner | 待指定 |
 | 对应 | `docs/ROADMAP.md:365`：P6“部署方向”中告警 Webhook 与 IM 机器人需要新的服务模式，另行评审；P9 的“由 webhook 或告警触发运行”“异步审批” |
 | 代码核对基线 | `5518791`（含 PR #25）；文中行号以此为准，v0.6 新增的缺口 ⑧ 以 `6c439c7`（PR #43）为准 |
-| Milestone | 一期：`zx-agent serve`、IM 接口、Slack（Socket Mode）、⚑ D:5/CHINA FLAG: 飞书（长连接）、IM 内审批<br>二期：告警 Webhook（如 Alertmanager） |
+| Milestone | 一期：`zx-agent serve`、IM 接口、Slack（Socket Mode）、⚑ D:5/CHINA FLAG: 飞书（长连接）、IM 内审批<br>二期：告警 Webhook（如 Alertmanager）。v0.8：已取消，见 `docs/ROADMAP.md` 的 D10 |
 
 > ⚑ D:5/CHINA FLAG: 飞书（Feishu），开放平台域名 `open.feishu.cn`、`accounts.feishu.cn`。
 >
@@ -438,7 +438,7 @@ v0.6 补记（2026-11-02），本节行号以 `6c439c7` 为准；v0.7 实施选�
 | B. Slack | 待定 | Socket Mode、发消息、卡片 | 依赖 A；引入 `tokio-tungstenite`（缺口 ①，已定） |
 | C. ⚑ D:5/CHINA FLAG: 飞书 | 待定 | 长连接、token、发送与回复、卡片 | 依赖 A；引入 `tokio-tungstenite`；须经合规审批 |
 | D. 部署与验收 | 待定 | Deployment 改为运行 serve 并共享进程命名空间、配置与凭据、文档；真实平台验收 | 依赖 B 或 C |
-| 二期：告警 Webhook | 待定 | HTTP 服务、Alertmanager 格式、结果发到 IM | 需要 HTTP 服务依赖 |
+| 二期：告警 Webhook | 已取消（v0.8） | zx-agent 是通用 Agent，不解析 Alertmanager 等系统的格式；告警由外部适配器调用 `run`、SDK 或发到 IM（`docs/ROADMAP.md` 的 D10） | — |
 
 ```
 A ──┬──▶ B（Slack）───┬──▶ D
@@ -451,7 +451,7 @@ A ──┬──▶ B（Slack）───┬──▶ D
 
 ## 7. 后续规划
 
-- 二期：告警 Webhook，告警触发的排障结果发到 IM。
+- 二期：告警 Webhook，告警触发的排障结果发到 IM。v0.8：已取消（D10）。
 - 其他 IM 平台：只需实现 `ImChannel`。
 - 多副本：外部会话存储加分布式协调。
 - 持久化收件：崩溃后补处理已确认的消息（缺口 ⑧ 的选项 b），与二期、多副本一起考虑。
@@ -555,4 +555,4 @@ A ──┬──▶ B（Slack）───┬──▶ D
 
 ---
 
-`serve-im-review.md` · v0.7 · 2026年11月
+`serve-im-review.md` · v0.8 · 2026年11月
