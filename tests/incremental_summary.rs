@@ -673,8 +673,12 @@ async fn the_evaluation_scores_a_summarizer_that_keeps_every_fact_as_keeping_the
     for mode in [SummaryMode::Full, SummaryMode::Incremental] {
         let dir = tempfile::tempdir().unwrap();
         let provider = Arc::new(FauxProvider::new((0..ROUNDS).map(|_| FauxStep::compute(oracle))));
+        let budget = Config {
+            mode,
+            ..Config::default()
+        };
 
-        let evaluation = evaluate(provider, "faux-model", mode, dir.path()).await;
+        let evaluation = evaluate(provider, "faux-model", budget, dir.path()).await;
 
         // Captured; shown when an assertion fails.
         evaluation.print("faux-model");

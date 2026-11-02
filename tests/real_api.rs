@@ -20,8 +20,10 @@
 //! The summary evaluation, `summaries_over_eight_rounds_of_a_scripted_session`, costs far more:
 //! 16 summaries that read about 0.6 MiB of records in all, about 270,000 input tokens on the one
 //! model it has been measured on. It also needs `ZX_E2E_EVAL=1`, and otherwise only prints that
-//! it was skipped. It fails when a summary is not made. It keeps its two session files, with
-//! every round's summary, in a temporary directory and prints the path. Run it on its own:
+//! it was skipped. It fails when a summary is not made. `ZX_E2E_SUMMARY_TOKENS` sets each
+//! summary's output budget (default 2048, at most 16384), which a model whose reasoning counts
+//! as output needs raised. It keeps its two session files, with every round's summary, in a
+//! temporary directory and prints the path. Run it on its own:
 //!
 //! ```text
 //! ZX_E2E_AUTHORIZED=1 ZX_E2E_EVAL=1 \
@@ -41,7 +43,7 @@ use common::summary_eval::{Evaluation, ROUNDS, evaluate};
 use common::{RunnerSetup, config, fast_retry};
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig, SystemUpdates};
 use zx_agent::ai::{Message, Provider};
-use zx_agent::compaction::{Outcome, SummaryMode};
+use zx_agent::compaction::{Config, Outcome, SummaryMode};
 use zx_agent::policy::CommandPolicy;
 use zx_agent::prompt::{build_system_prompt, environment_section};
 use zx_agent::runner::{Limits, RunOutcome, RunReport};
@@ -274,8 +276,9 @@ async fn an_invalid_key_fails_without_retrying() {
 /// summarized after each of its rounds, in full and then in incremental mode. Prints each
 /// round's score and the final facts. Fails when a summary is not made, since the scores then
 /// mean nothing; otherwise asserts only what holds whatever the model answers. Each summary
-/// has the default budgets: 2048 output tokens and 2 minutes. The two session files stay in a
-/// temporary directory, whose path is printed first.
+/// has the default budgets, 2048 output tokens and 2 minutes, unless `ZX_E2E_SUMMARY_TOKENS`
+/// sets the output budget. The two session files stay in a temporary directory, whose path
+/// is printed first.
 #[tokio::test]
 #[ignore = "calls a paid model API; needs ZX_E2E_AUTHORIZED=1 and the API owner's consent"]
 async fn summaries_over_eight_rounds_of_a_scripted_session() {
@@ -286,6 +289,20 @@ async fn summaries_over_eight_rounds_of_a_scripted_session() {
         return;
     }
     let endpoint = Endpoint::from_env();
+    // A model whose reasoning counts as output can use up the default before it answers.
+    let max_summary_tokens = match std::env::var("ZX_E2E_SUMMARY_TOKENS") {
+        Ok(value) => value
+            .parse()
+            .unwrap_or_else(|_| panic!("ZX_E2E_SUMMARY_TOKENS must be a number of tokens, not {value:?}")),
+        Err(_) => Config::default().max_summary_tokens,
+    };
+    let budget = |mode| Config {
+        mode,
+        max_summary_tokens,
+        ..Config::default()
+    };
+    // Rejected here, before any request.
+    budget(SummaryMode::Full).validate().unwrap();
     // Kept after the run, also when it fails, so that every round's summary can be read in
     // the session files.
     let dir = tempfile::Builder::new()
@@ -293,12 +310,15 @@ async fn summaries_over_eight_rounds_of_a_scripted_session() {
         .tempdir()
         .unwrap()
         .keep();
-    eprintln!("[summary eval] session files in {}", dir.display());
+    eprintln!(
+        "[summary eval] session files in {}; at most {max_summary_tokens} output tokens per summary",
+        dir.display()
+    );
     let provider: Arc<dyn Provider> = Arc::new(endpoint.provider(endpoint.api_key()));
 
-    let full = evaluate(Arc::clone(&provider), &endpoint.model, SummaryMode::Full, &dir).await;
+    let full = evaluate(Arc::clone(&provider), &endpoint.model, budget(SummaryMode::Full), &dir).await;
     full.print(&endpoint.model);
-    let incremental = evaluate(provider, &endpoint.model, SummaryMode::Incremental, &dir).await;
+    let incremental = evaluate(provider, &endpoint.model, budget(SummaryMode::Incremental), &dir).await;
     incremental.print(&endpoint.model);
 
     // A summary that was not made has no score, and an incremental one that has no earlier

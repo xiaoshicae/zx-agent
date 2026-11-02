@@ -832,9 +832,11 @@ impl Evaluation {
 }
 
 /// Write the scripted session in `dir` and, after each round, summarize it with `provider`
-/// and `model` in `mode`; score every summary. Panics if the session cannot be written or
-/// does not load again at the end.
-pub async fn evaluate(provider: Arc<dyn Provider>, model: &str, mode: SummaryMode, dir: &Path) -> Evaluation {
+/// and `model` under `budget`, its mode and budgets; score every summary. Only the user's
+/// next request stays out of a summary, whatever `budget` keeps. Panics if the session
+/// cannot be written or does not load again at the end.
+pub async fn evaluate(provider: Arc<dyn Provider>, model: &str, budget: Config, dir: &Path) -> Evaluation {
+    let mode = budget.mode;
     let path = dir.join(format!("{mode:?}.jsonl"));
     let mut store = SessionStore::create(&path, header()).unwrap();
     store.append_message(Message::user(TASK)).await.unwrap();
@@ -858,8 +860,7 @@ pub async fn evaluate(provider: Arc<dyn Provider>, model: &str, mode: SummaryMod
             .with_compaction(Config {
                 // Only the user's next request stays as it is; the summary covers the rest.
                 keep_recent_bytes: 1,
-                mode,
-                ..Config::default()
+                ..budget
             })
             .unwrap();
 
