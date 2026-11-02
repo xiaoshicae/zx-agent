@@ -149,6 +149,10 @@ pub struct Replies {
     pub failed: String,
     /// Followed by the error of a session that could not be opened.
     pub cannot_open: String,
+    /// Posted once in a thread when the server stops before running some of its messages:
+    /// those waiting for a run slot, steering the run did not take in, and those that
+    /// arrived during the stop.
+    pub stopping: String,
 }
 
 impl Default for Replies {
@@ -166,6 +170,7 @@ impl Default for Replies {
             timed_out: "运行超时，任务没有完成。".into(),
             failed: "运行失败：".into(),
             cannot_open: "无法打开会话：".into(),
+            stopping: "服务正在停止：本线程中还没处理的消息不会再处理，请稍后重新发送。".into(),
         }
     }
 }
@@ -220,8 +225,10 @@ impl Server {
     }
 
     /// Serve `channels` until `cancel` is triggered or a channel fails. Stopping cancels the
-    /// runs and waits until each conversation has posted how it ended; a channel's error is
-    /// then returned. Two channels with the same platform name are a configuration error.
+    /// runs and waits until each conversation has posted how it ended; a thread with
+    /// messages that will not run, including those the channels received during the stop,
+    /// also gets [`Replies::stopping`]. A channel's error is then returned. Two channels with
+    /// the same platform name are a configuration error.
     pub async fn run(self, channels: Vec<Arc<dyn ImChannel>>, cancel: &CancellationToken) -> Result<(), ImError> {
         let mut platforms = HashSet::new();
         for channel in &channels {
@@ -268,11 +275,10 @@ impl Server {
             refusals: JoinSet::new(),
         };
         let result = router.serve(&mut inbound, &mut retired, &mut channel_tasks).await;
-        // Closed receivers make waiting senders fail at once, so neither a channel nor a
-        // worker can hold up the stop.
-        drop(inbound);
+        // A closed receiver makes waiting senders fail at once, so no worker can hold up the
+        // stop. The channels are read to the end instead.
         drop(retired);
-        router.shutdown(channel_tasks).await;
+        router.shutdown(inbound, channel_tasks).await;
         result
     }
 }
@@ -529,9 +535,22 @@ impl Router {
         }
     }
 
-    async fn shutdown(mut self, mut channel_tasks: JoinSet<(usize, Result<(), ImError>)>) {
+    async fn shutdown(
+        mut self,
+        mut inbound: mpsc::Receiver<(usize, Inbound)>,
+        mut channel_tasks: JoinSet<(usize, Result<(), ImError>)>,
+    ) {
         self.stop.cancel();
-        // Without their inboxes, workers end once their runs have stopped and posted.
+        // The platforms were told about these events already and will not send them again.
+        // Routed as usual, each message reaches a stopping worker, which answers that it will
+        // not run it. The channels stop sending once cancelled, and their tasks then drop
+        // the senders, which ends this loop; reading on means no channel waits on a full
+        // buffer meanwhile.
+        while let Some((index, event)) = inbound.recv().await {
+            self.route(index, event);
+        }
+        // Without their inboxes, workers end once their runs have stopped and they have
+        // posted.
         self.workers.clear();
         while let Some(ended) = self.tasks.join_next().await {
             if let Err(error) = ended {

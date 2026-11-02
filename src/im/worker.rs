@@ -58,8 +58,10 @@ pub(crate) struct WorkerSetup {
     pub(crate) stop: CancellationToken,
 }
 
-/// Run one conversation until the router drops its inbox or the server stops. A run in
-/// progress is cancelled by the stop and still posts how it ended.
+/// Run one conversation until the router drops its inbox. A run in progress is cancelled by
+/// the stop and still posts how it ended. Input does not run once the server stops; the
+/// worker reads its inbox to the end and posts [`Replies::stopping`] in a thread with
+/// messages it will not run.
 pub(crate) async fn run(setup: WorkerSetup) {
     let WorkerSetup {
         key,
@@ -83,12 +85,14 @@ pub(crate) async fn run(setup: WorkerSetup) {
         open: None,
         phase: Phase::Idle { since: Instant::now() },
         pending: Vec::new(),
+        unanswered: 0,
     };
     let mut received: u64 = 0;
     let mut retiring = false;
     let mut closing = false;
+    let mut inbox_open = true;
     loop {
-        if closing && matches!(worker.phase, Phase::Idle { .. }) {
+        if closing && !inbox_open && matches!(worker.phase, Phase::Idle { .. }) {
             break;
         }
         tokio::select! {
@@ -97,21 +101,26 @@ pub(crate) async fn run(setup: WorkerSetup) {
             Some(update) = updated.recv() => worker.approval(update).await,
             () = worker.stop.cancelled(), if !closing => {
                 closing = true;
-                // Input waiting for a slot is dropped; a run stops through its token.
-                if matches!(worker.phase, Phase::Waiting { .. }) {
-                    worker.phase = Phase::Idle { since: Instant::now() };
-                }
+                worker.stopping();
             }
-            input = inbox.recv(), if !closing => match input {
+            input = inbox.recv(), if inbox_open => match input {
                 Some(input) => {
                     received += 1;
                     retiring = false;
-                    worker.input(input).await;
+                    if closing {
+                        worker.refuse(input);
+                    } else {
+                        worker.input(input).await;
+                    }
                 }
                 // The router ended this conversation, or the server is stopping.
-                None => closing = true,
+                None => {
+                    inbox_open = false;
+                    closing = true;
+                }
             },
-            step = step(&mut worker.phase, worker.out.shared.idle, retiring) => match step {
+            // A closing conversation waits for its inbox to close, not for the idle time.
+            step = step(&mut worker.phase, worker.out.shared.idle, retiring || closing) => match step {
                 Step::Slot(slot) => worker.slot(slot).await,
                 Step::Ended(ended) => worker.ended(ended, closing).await,
                 Step::Idle => {
@@ -126,6 +135,7 @@ pub(crate) async fn run(setup: WorkerSetup) {
             },
         }
     }
+    worker.answer_unanswered().await;
 }
 
 /// The session while it is held. Dropping it releases the session file.
@@ -159,13 +169,13 @@ enum Step {
 }
 
 /// What the current phase waits for. The futures stay in `phase`, so a step that another
-/// branch interrupts loses nothing.
-async fn step(phase: &mut Phase, idle: Duration, retiring: bool) -> Step {
+/// branch interrupts loses nothing. `ending` is set once the conversation retires or closes.
+async fn step(phase: &mut Phase, idle: Duration, ending: bool) -> Step {
     match phase {
         Phase::Idle { since } => {
             match since.checked_add(idle) {
-                Some(deadline) if !retiring => tokio::time::sleep_until(deadline).await,
-                // Retiring already, or an idle time too long to schedule: nothing to wait for.
+                Some(deadline) if !ending => tokio::time::sleep_until(deadline).await,
+                // Ending already, or an idle time too long to schedule: nothing to wait for.
                 _ => std::future::pending::<()>().await,
             }
             Step::Idle
@@ -265,6 +275,8 @@ struct Worker {
     open: Option<Opened>,
     phase: Phase,
     pending: Vec<Pending>,
+    /// Messages that will not run because the server is stopping.
+    unanswered: usize,
 }
 
 impl Worker {
@@ -345,7 +357,8 @@ impl Worker {
         }
     }
 
-    /// Post the answer, then run input that arrived as the run ended.
+    /// Post the answer, then run input that arrived as the run ended; while the server stops,
+    /// that input is unanswered instead.
     async fn ended(&mut self, ended: Result<Result<RunReport, SessionError>, JoinError>, closing: bool) {
         let Phase::Running { slot, status, .. } =
             std::mem::replace(&mut self.phase, Phase::Idle { since: Instant::now() })
@@ -378,13 +391,41 @@ impl Worker {
             return;
         }
         if closing {
-            self.out.failed(format!(
-                "{} queued message(s) were not answered: the server is stopping",
-                leftover.len()
-            ));
+            self.unanswered += leftover.len();
             return;
         }
         self.start(leftover, slot).await;
+    }
+
+    /// The server is stopping: input waiting for a slot will not run. A run stops through
+    /// its token and ends as usual.
+    fn stopping(&mut self) {
+        if let Phase::Waiting { texts, .. } = &self.phase {
+            self.unanswered += texts.len();
+            self.phase = Phase::Idle { since: Instant::now() };
+        }
+    }
+
+    /// Input that arrives while the server stops does not run.
+    fn refuse(&mut self, input: WorkerInput) {
+        match input {
+            WorkerInput::Message { text } if text.trim() != CANCEL_COMMAND => self.unanswered += 1,
+            // The stop cancels the run already, approvals included, and drops what waits.
+            WorkerInput::Message { .. } | WorkerInput::Decision { .. } => {}
+        }
+    }
+
+    /// Tell the thread that its remaining messages will not run. Called as the conversation
+    /// ends, so it follows how the run ended.
+    async fn answer_unanswered(self) {
+        if self.unanswered == 0 {
+            return;
+        }
+        self.out.post(self.out.replies().stopping.clone()).await;
+        self.out.failed(format!(
+            "{} message(s) were not answered: the server is stopping",
+            self.unanswered
+        ));
     }
 
     async fn cancel(&mut self) {

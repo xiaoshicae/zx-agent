@@ -307,6 +307,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | 目录中无法用作匹配的密钥文件 | 已完成，PR #39 | 见下文"密钥文件的处理" |
 | 短值的脱敏 | 已完成，PR #42 | 决定：仍然替换，不放过任何登记的值；启动时在 stderr 指出值短于 8 个字符的文件（`[secret] <文件>: …`，不显示值本身，每个进程一次）。背景：GitLab 要求被遮蔽的值至少 8 个字符；目录中若有 `admin`、`5432` 这类短值，输出中所有相同的文本都会被替换 |
 | 内置钩子的固定名称 | 已完成，PR #42 | CLI 注册的内置钩子没有名称，`hook_failed` 与 `[hook]` 行显示类型名；`std::any::type_name` 的文档写明其格式不受保证、可能随编译器版本变化，几个策略钩子也因此同名。改为固定名称：`command_policy`、`profile_rules`、`bash_approval`、`continue_on_length`、`redact_secrets`、`spill_outputs`（MCP 服务器名不含 `_`，不会重名）；`presets::troubleshoot::hooks` 同样使用 `continue_on_length` |
+| IM 服务正常停止时没有处理的消息 | 已完成，PR #43 | 见下文"停止时没有处理的消息" |
 | 真实服务上的验证 | 待授权 | PR #35 改了 provider 的错误处理，PR #36 换了 HTTP 客户端与 TLS；对真实模型服务与 IM 平台的 HTTPS 连接尚未验证（见 PR #36 的记录）。付费测试需用户明确授权，并由用户设置 `ZX_E2E_AUTHORIZED` 后运行 |
 | 打开大会话的耗时 | 暂缓 | 加载时每条请求记录仍要构建一次分支路径，耗时高于线性（见 PR #34 的实施记录） |
 | 保留近期用户消息原文；摘要前把较早的长工具结果换成引用 | 待评估 | 增量摘要之外的两项上下文管理改进，见"三、会话"的设计稿末尾 |
@@ -350,6 +351,24 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
   - 修复前实测失败 4 项：JSONL 事件中的钩子名为固定名称（修复前为类型名）；run 与 chat 的 `[hook]` 行以固定名称开头（两项既有测试，断言由"行中含 `RedactSecrets after_tool failed`"改为精确匹配 `[hook] redact_secrets after_tool failed: …`）；启动时指出短值文件、不显示值本身、该值仍被替换（修复前没有提示）。
   - 新接口 1 项：`short_secret_files` 按字符计数，以 8 个字符为界，空白值与缺失的路径不计。
 - 本机 macOS 验证：stable 与 Rust 1.88.0 各 720 项通过（基线 717 项，在 `71539ef` 上实测），6 项付费测试跳过；fmt、clippy 与 MSRV 全目标检查通过；严格 Rustdoc 第一次因 `MIN_SECRET_CHARS` 注释中的裸 URL 失败，改为尖括号链接后通过（只改注释）；设置 `ZX_DOCKER_TEST_IMAGE=debian:bookworm-slim` 时容器测试 34 项通过。`run --help`、`chat --help`、`serve --help` 与基线逐字节相同；自查脚本的命中与基线相同。未新增依赖，`Cargo.toml`、`Cargo.lock` 未改动。
+
+停止时没有处理的消息（2026-11-02，已完成，PR #43）：两个平台都在消息到达时立即确认投递（`src/im/slack.rs:274-276`、⚑ D:5/CHINA FLAG: `src/im/feishu.rs:508-519`），确认之后平台不会重投（评审稿 `docs/serve-im-review.md:196`）。此前 serve 正常停止（SIGTERM）时，下列消息都被丢弃，用户收不到任何回复（行号以 `5f8b5f7` 为准）：
+
+| 消息在哪里 | 此前 | 现在 |
+|---|---|---|
+| 等待运行名额（用户已收到“排队中”） | 直接丢弃（`src/im/worker.rs:98-103`） | 不再运行，计入未处理 |
+| 运行中的插话，运行结束时还没被取走 | 只在运维日志记一行 `failed`（`src/im/worker.rs:380-385`） | 同上 |
+| 线程的收件箱、路由器的收件通道 | 停止后不再读取，随通道一起丢弃（`src/im/worker.rs:105`、`src/im/server.rs:273`） | 继续读到各平台停止转交为止，照常交给所在线程，同上 |
+
+有未处理消息的线程收到一句 `Replies::stopping`（默认“服务正在停止：本线程中还没处理的消息不会再处理，请稍后重新发送。”），线程有运行时排在运行的结果之后；运维日志为每个这样的线程记一行 `failed`，写明条数。停止期间收到的 `/cancel` 与卡片点击不计入，因为停止本身就会取消运行、关闭卡片。本项只覆盖正常停止：进程崩溃（SIGKILL、内存不足被杀、panic）时，这些消息仍会丢失，也没有提示。
+
+实施记录（PR #43，基于 `5f8b5f7`，含 PR #42）：
+
+- 线程（`src/im/worker.rs`）：停止后继续读取收件箱，直到路由器关闭它；读到的消息不再运行，只计数。等待名额的消息与运行结束时剩下的插话也计入。线程结束前发一次提示。停止期间不再计时空闲释放。
+- 路由器（`src/im/server.rs`）：停止后先继续读取各平台转交的事件并照常路由，直到所有平台任务结束，再关闭各线程的收件箱。按 `ImChannel::run` 的约定，平台在取消后停止转交；平台任务结束时，Tokio 立即丢弃任务的 future（`tokio-1.54.1` 的 `runtime/task/core.rs:384-386`），其中持有的发送端随之关闭，读取就此结束。此前停止时同样要等所有平台任务结束，只是排在各线程结束之后；现在提示要等平台停止转交之后才发出。
+- 公开 API：`Replies` 新增字段 `stopping`。按字段写全的 `Replies` 结构体字面量需要补上这一项；用 `..Replies::default()` 的写法不受影响。运维日志 `failed` 的文本由 “N queued message(s) were not answered: the server is stopping” 改为 “N message(s) were not answered: the server is stopping”，覆盖上表三类。
+- 测试：`tests/im_server.rs` 新增 3 项，分别覆盖排队中的线程、运行没取走的插话、平台在停止期间转交的消息；测试用的 `FakeChannel` 新增 `late`，在被取消之后、返回之前转交事件。反向验证：分别去掉对排队消息、剩余插话、停止期间读到的消息的计数，以及路由器的继续读取，每次都恰好有 1 项测试失败，修改已还原。
+- 本机 macOS 验证：stable 与 Rust 1.88.0 各 723 项通过（基线 720 项，为 PR #42 在 `411e461` 上的实测，其代码树与 `5f8b5f7` 相同），6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过；自查脚本对改动的文件无命中；`tests/im_server.rs` 连续运行 20 次、`tests/serve_cli.rs` 3 次，均通过。未新增依赖，`Cargo.toml`、`Cargo.lock` 未改动。
 
 下面的 P0–P9 继续按各自验收标准推进。
 
