@@ -29,9 +29,18 @@ use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::{Message, Provider, SystemPrompt, ToolDef};
 use zx_agent::interaction::ApprovalCache;
 use zx_agent::policy::PolicyHook;
-use zx_agent::presets::troubleshoot;
 use zx_agent::runner::{Limits, Runner};
 use zx_agent::session::{SessionHeader, SessionStore};
+
+/// The bounds the runner tests use unless they set their own: 30 model requests and 15
+/// minutes, those of the unattended profiles (the kernel's own defaults are unlimited).
+pub fn test_limits() -> Limits {
+    Limits {
+        max_turns: Some(30),
+        timeout: Some(Duration::from_secs(900)),
+        token_budget: None,
+    }
+}
 
 /// Echoes `text` after sleeping `ms`. Can inject queued messages while it runs.
 pub struct EchoTool {
@@ -232,7 +241,7 @@ impl RunnerSetup {
         Self {
             config,
             retry: fast_retry(0),
-            limits: troubleshoot::limits(),
+            limits: test_limits(),
             session: SessionStore::in_memory(header()),
         }
     }

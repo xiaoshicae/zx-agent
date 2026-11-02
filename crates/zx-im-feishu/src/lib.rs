@@ -20,14 +20,13 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::{self, Message};
 use tokio_util::sync::CancellationToken;
-
-use crate::agent::ApprovalResult;
-use crate::sync::lock;
-
-use super::{
+use zx_ai::sync::lock;
+use zx_core::agent::ApprovalResult;
+use zx_im::{
     ApprovalId, CardLabels, Choice, ConversationId, Destination, ErrorReport, ImChannel, ImError, Inbound, MessageId,
-    MessageRef, Outbound, Seen, ThreadId, UserId,
+    MessageRef, Outbound, Seen, ThreadId, UserId, split_text,
 };
+
 use frame::Frame;
 
 /// Where the open API lives.
@@ -614,7 +613,7 @@ impl ImChannel for FeishuChannel {
             } => {
                 let labels = &self.config.labels;
                 let request = format!(
-                    "**{}**：`{tool}`\n```\n{summary}\n```\n{}：{reason}",
+                    "**{}**: `{tool}`\n```\n{summary}\n```\n{}: {reason}",
                     labels.title, labels.reason
                 );
                 // The click carries everything needed to find the conversation.
@@ -838,7 +837,7 @@ fn rate_limit_wait(response: &reqwest::Response) -> Duration {
 }
 
 fn split(text: &str) -> Vec<String> {
-    super::split(text, MAX_TEXT_CHARS, |out, c| out.push(c))
+    split_text(text, MAX_TEXT_CHARS, |out, c| out.push(c))
 }
 
 /// The content of a text message: a JSON object as a string.
@@ -882,7 +881,7 @@ fn resolution(labels: &CardLabels, message: &Outbound) -> String {
         ApprovalResult::Failed => &labels.failed,
     };
     match user {
-        Some(user) => format!("{what}（{user}）"),
+        Some(user) => format!("{what} ({user})"),
         None => what.clone(),
     }
 }

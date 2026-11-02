@@ -8,7 +8,7 @@
 //! - [`session`]: append-only JSONL session tree and its projection (pi: SessionManager)
 //! - [`agent_session`]: shared prompts, cancellation, subscriptions and model switching
 //! - [`runner`]: exclusive run ownership, retries, limits and persistence
-//! - [`presets`]: opt-in scenario instructions and limits
+//! - [`profile`]: scenarios as files: instructions, tools, rules and limits
 //! - [`prompt`]: system prompt assembly and the generated environment section
 //! - [`tools`]: built-in tools
 //! - [`executor`]: where built-in tools run commands and read files
@@ -19,8 +19,9 @@
 //!
 //! The modules live in the crates of this workspace and are re-exported here under the paths
 //! they always had: [`ai`] is `zx-ai`; the kernel ([`agent`], [`session`], [`runner`] and the
-//! rest) is `zx-core`; [`tools`], [`policy`] and [`mcp`] are `zx-tools`; [`im`] is `zx-im`.
-//! An embedder that needs only part of it can depend on those crates directly.
+//! rest) is `zx-core`; [`tools`], [`policy`] and [`mcp`] are `zx-tools`; [`im`] is `zx-im`,
+//! with the platform crates `zx-im-slack` and `zx-im-feishu` as `im::slack` and
+//! `im::feishu`. An embedder that needs only part of it can depend on those crates directly.
 
 pub use zx_ai as ai;
 #[doc(hidden)]
@@ -29,9 +30,14 @@ pub use zx_core::{
     AgentSession, agent, agent_session, compaction, executor, extensions, interaction, output_store, prompt, runner,
     session,
 };
-pub use zx_im as im;
 pub use zx_tools::{mcp, policy, tools};
 
+/// Chat platforms: the interface and the server of `zx-im`, and this workspace's platforms.
+pub mod im {
+    pub use zx_im::*;
+    pub use zx_im_feishu as feishu;
+    pub use zx_im_slack as slack;
+}
+
 pub mod otel;
-pub mod presets;
 pub mod profile;

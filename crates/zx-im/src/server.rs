@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use tokio::sync::{Semaphore, mpsc};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
@@ -124,9 +125,11 @@ pub struct ApprovalRecord {
     pub ended_ms: u64,
 }
 
-/// Texts the server posts besides the model's answers. The defaults are Chinese, as in
-/// docs/serve-im-review.md.
-#[derive(Clone, Debug)]
+/// Texts the server posts besides the model's answers. The defaults are English; a
+/// deployment sets its users' language, for example in the configuration of `serve`
+/// (`[replies]`, fields in camelCase, each optional).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct Replies {
     /// Posted when a run starts; replaced by the answer when it ends.
     pub working: String,
@@ -168,22 +171,22 @@ pub struct Replies {
 impl Default for Replies {
     fn default() -> Self {
         Self {
-            working: "处理中…".into(),
-            queued: "排队中：同时运行的任务已满，轮到时开始处理。".into(),
-            unauthorized: "未授权：本聊天不在服务名单中。".into(),
-            not_approver: "只有审批人名单中的成员可以批准或拒绝，本次点击不生效。".into(),
-            cancelled: "已取消。".into(),
-            nothing_to_cancel: "没有进行中的任务。".into(),
-            no_answer: "（没有回答）".into(),
-            truncated: "（回答达到输出上限，已截断）".into(),
-            max_turns: "（已达到轮次上限，任务没有完成）".into(),
-            token_budget: "（已达到 token 预算，任务没有完成）".into(),
-            timed_out: "运行超时，任务没有完成。".into(),
-            failed: "运行失败：".into(),
-            cannot_open: "无法打开会话：".into(),
-            stopping: "服务正在停止：本线程中还没处理的消息不会再处理，请稍后重新发送。".into(),
-            stopped: "服务正在停止：本次任务已取消，请稍后重新发送。".into(),
-            interrupted: "服务重启过：这次任务没有完成，请重新发送。".into(),
+            working: "Working…".into(),
+            queued: "Queued: as many tasks as allowed are running; this one starts when one ends.".into(),
+            unauthorized: "Not authorized: this chat is not on the service's list.".into(),
+            not_approver: "Only listed approvers can allow or deny; this click has no effect.".into(),
+            cancelled: "Cancelled.".into(),
+            nothing_to_cancel: "Nothing is running.".into(),
+            no_answer: "(no answer)".into(),
+            truncated: "(the answer reached the output limit and was cut off)".into(),
+            max_turns: "(the turn limit was reached; the task is not finished)".into(),
+            token_budget: "(the token budget was reached; the task is not finished)".into(),
+            timed_out: "The run timed out; the task is not finished.".into(),
+            failed: "The run failed: ".into(),
+            cannot_open: "Cannot open the session: ".into(),
+            stopping: "The service is stopping: messages of this thread not handled yet will not be; please send them again later.".into(),
+            stopped: "The service is stopping: this task was cancelled; please send it again later.".into(),
+            interrupted: "The service restarted: this task did not finish; please send it again.".into(),
         }
     }
 }

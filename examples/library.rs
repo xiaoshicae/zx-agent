@@ -1,19 +1,26 @@
-//! Embedding zx-agent as a library.
+//! Embedding zx-agent as a library. The embedder chooses the instructions, tools, rules and
+//! limits: the kernel has no scenario of its own, and its default limits are unlimited.
 //!
 //! Run: ZX_BASE_URL=http://127.0.0.1:11434/v1 ZX_MODEL=<model> cargo run --example library -- "task"
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use zx_agent::AgentSession;
 use zx_agent::agent::{AgentEvent, Event, LoopConfig, LoopSpec};
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
-use zx_agent::extensions::RedactSecrets;
+use zx_agent::extensions::{ContinueOnLength, RedactSecrets};
 use zx_agent::policy::{CommandPolicy, PolicyHook};
-use zx_agent::presets::troubleshoot;
 use zx_agent::prompt::{build_system_prompt, environment_section};
+use zx_agent::runner::Limits;
 use zx_agent::session::{SessionHeader, SessionStore};
 use zx_agent::tools::{BashTool, ReadFileTool};
+
+/// This embedder's scenario: a bounded, read-only report about the machine it runs on.
+const INSTRUCTIONS: &str = "You are an agent running without a human operator. Use only the tools \
+provided and only read-only commands. Finish with a short report: what you found, and the commands \
+whose output shows it.";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -26,7 +33,7 @@ async fn main() -> anyhow::Result<()> {
     // of the user's processes, which includes this process's API key.
     let policy = CommandPolicy::new(["df", "free", "uptime", "head", "sort"]);
     let system_prompt = build_system_prompt(
-        troubleshoot::INSTRUCTIONS,
+        INSTRUCTIONS,
         &[
             ("environment", &environment_section(&cwd)),
             ("command_policy", &policy.prompt_section().unwrap_or_default()),
@@ -53,7 +60,8 @@ async fn main() -> anyhow::Result<()> {
         max_tokens: None,
         sequential_tools: false,
     });
-    config.hooks = troubleshoot::hooks();
+    // Continue once if an answer stops at the output token limit.
+    config.hooks.push(ContinueOnLength::new(1));
     config.hooks.push(PolicyHook::new(Arc::new(policy)));
     config.hooks.push(RedactSecrets::new(api_key));
     let session = SessionStore::in_memory(SessionHeader::new(&cwd, &model));
@@ -63,7 +71,13 @@ async fn main() -> anyhow::Result<()> {
             eprintln!("[tool] {tool_name} {args}");
         }
     });
-    let agent = AgentSession::new(config, RetryPolicy::default(), troubleshoot::limits(), session, sink);
+    // Nobody can stop an unattended run, so it gets bounds of its own.
+    let limits = Limits {
+        max_turns: Some(30),
+        timeout: Some(Duration::from_secs(15 * 60)),
+        token_budget: None,
+    };
+    let agent = AgentSession::new(config, RetryPolicy::default(), limits, session, sink);
 
     let report = agent.prompt(task).await?;
     println!("{}", report.final_text);

@@ -3,14 +3,15 @@
 //!
 //! A channel only moves messages. The server owns routing, sessions, the run limit and
 //! approvals, so supporting another platform means implementing the four methods of
-//! [`ImChannel`].
+//! [`ImChannel`], in a crate of its own; [`split_text`] and [`Seen`] help with two of the
+//! duties. The platforms of this workspace are such crates: `zx-im-slack` and
+//! `zx-im-feishu`.
 //!
-//! The `zx-agent` crate re-exports this crate as `zx_agent::im`.
+//! The `zx-agent` crate re-exports this crate as `zx_agent::im`, with those platforms as
+//! `zx_agent::im::slack` and `zx_agent::im::feishu`.
 
 mod approval;
-pub mod feishu;
 mod server;
-pub mod slack;
 mod status;
 mod worker;
 
@@ -20,10 +21,11 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 // The modules name the model layer, the kernel and the shared helpers by these crate-root paths.
-use zx_ai::{self as ai, sync};
+use zx_ai as ai;
 use zx_core::{AgentSession, agent, agent_session, interaction, runner};
 
 use crate::agent::ApprovalResult;
@@ -161,13 +163,19 @@ pub enum Choice {
     Deny,
 }
 
-/// Texts of approval cards, for every platform. The defaults are Chinese, like [`Replies`].
-#[derive(Clone, Debug)]
+/// Texts of approval cards, for every platform. The defaults are English, like [`Replies`];
+/// a deployment sets its users' language, for example in the configuration of `serve`
+/// (`[cardLabels]`, fields in camelCase, each optional).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct CardLabels {
+    /// Heads a card; followed by the tool's name.
     pub title: String,
+    /// Followed by the reason the policy gave.
     pub reason: String,
     pub allow_once: String,
     pub deny: String,
+    /// Replace the buttons once decided; followed by who decided, in parentheses.
     pub allowed: String,
     pub denied: String,
     pub timed_out: String,
@@ -178,15 +186,15 @@ pub struct CardLabels {
 impl Default for CardLabels {
     fn default() -> Self {
         Self {
-            title: "需要审批".into(),
-            reason: "理由".into(),
-            allow_once: "批准一次".into(),
-            deny: "拒绝".into(),
-            allowed: "已批准".into(),
-            denied: "已拒绝".into(),
-            timed_out: "无人处理，已超时，未执行".into(),
-            cancelled: "已取消，未执行".into(),
-            failed: "审批失败，未执行".into(),
+            title: "Approval needed".into(),
+            reason: "Reason".into(),
+            allow_once: "Allow once".into(),
+            deny: "Deny".into(),
+            allowed: "Allowed".into(),
+            denied: "Denied".into(),
+            timed_out: "Nobody decided in time; not run".into(),
+            cancelled: "Cancelled; not run".into(),
+            failed: "Approval failed; not run".into(),
         }
     }
 }
@@ -194,8 +202,8 @@ impl Default for CardLabels {
 /// Text in parts of at most `max` characters, each written by `push`, which may write one
 /// character as several (an entity, for example) but never splits what it writes. A part
 /// ends at its last line break when that keeps at least half of it. Empty text is one empty
-/// part.
-pub(crate) fn split(text: &str, max: usize, push: fn(&mut String, char)) -> Vec<String> {
+/// part. For a channel that must split text longer than one platform message.
+pub fn split_text(text: &str, max: usize, push: fn(&mut String, char)) -> Vec<String> {
     let mut parts = Vec::new();
     let mut current = String::new();
     let mut count = 0;
@@ -228,14 +236,15 @@ pub(crate) fn split(text: &str, max: usize, push: fn(&mut String, char)) -> Vec<
 
 /// Messages a channel has passed on recently, to drop redeliveries; the oldest are
 /// forgotten first.
-pub(crate) struct Seen<K> {
+pub struct Seen<K> {
     order: VecDeque<K>,
     keys: HashSet<K>,
     capacity: usize,
 }
 
 impl<K: Clone + Eq + Hash> Seen<K> {
-    pub(crate) fn new(capacity: usize) -> Self {
+    /// Remember the last `capacity` keys.
+    pub fn new(capacity: usize) -> Self {
         Self {
             order: VecDeque::new(),
             keys: HashSet::new(),
@@ -244,7 +253,7 @@ impl<K: Clone + Eq + Hash> Seen<K> {
     }
 
     /// Record `key`; false if it was seen already.
-    pub(crate) fn insert(&mut self, key: &K) -> bool {
+    pub fn insert(&mut self, key: &K) -> bool {
         if !self.keys.insert(key.clone()) {
             return false;
         }

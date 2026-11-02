@@ -565,7 +565,12 @@ fn render(report: &RunReport, replies: &Replies) -> String {
         RunOutcome::Aborted => replies.cancelled.clone(),
         RunOutcome::Error => match &report.error {
             Some(error) => format!("{}{error}", replies.failed),
-            None => replies.failed.trim_end_matches('：').to_string(),
+            // The reply leads into the error; without one, drop the separator it ends with,
+            // whatever the reply's language.
+            None => replies
+                .failed
+                .trim_end_matches(|c: char| c.is_whitespace() || c == ':' || c == '\u{ff1a}')
+                .to_string(),
         },
     }
 }

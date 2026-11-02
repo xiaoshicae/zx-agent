@@ -57,6 +57,11 @@ pub struct OpenAiConfig {
     /// such as `thinking` or `reasoning_effort`. [`RESERVED_FIELDS`] are refused. They are
     /// part of [`Provider::request_options`], so the session's request audit records them.
     pub extra_fields: Map<String, Value>,
+    /// Once one assistant message of a request carries `reasoning_content`, give the others
+    /// an empty one, for servers that reject a history in which only some answers carry
+    /// reasoning. Off unless set: other servers have no use for the field. Part of
+    /// [`Provider::request_options`].
+    pub fill_missing_reasoning: bool,
 }
 
 impl fmt::Debug for OpenAiConfig {
@@ -73,6 +78,7 @@ impl fmt::Debug for OpenAiConfig {
             .field("max_response_bytes", &self.max_response_bytes)
             .field("max_sse_event_bytes", &self.max_sse_event_bytes)
             .field("extra_fields", &self.extra_fields.keys().collect::<Vec<_>>())
+            .field("fill_missing_reasoning", &self.fill_missing_reasoning)
             .finish()
     }
 }
@@ -104,6 +110,7 @@ impl Default for OpenAiConfig {
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             max_sse_event_bytes: DEFAULT_MAX_EVENT_BYTES,
             extra_fields: Map::new(),
+            fill_missing_reasoning: false,
         }
     }
 }
@@ -156,10 +163,15 @@ impl Provider for OpenAiCompatible {
         &self.config.provider_name
     }
     fn request_options(&self) -> Value {
-        let mut options = json!({"format":"openai-chat-completions","version":1,"systemUpdates":match self.config.system_updates { SystemUpdates::Collapse => "collapse", SystemUpdates::Inline => "inline" }});
-        // Absent unless set, so that the options of earlier sessions stay as they were.
+        // Version 1 filled missing reasoning in every request; version 2 only when the options
+        // say so (`replay_body` keeps both).
+        let mut options = json!({"format":"openai-chat-completions","version":2,"systemUpdates":match self.config.system_updates { SystemUpdates::Collapse => "collapse", SystemUpdates::Inline => "inline" }});
+        // Absent unless set, like the reasoning fill below.
         if !self.config.extra_fields.is_empty() {
             options["extraFields"] = Value::Object(self.config.extra_fields.clone());
+        }
+        if self.config.fill_missing_reasoning {
+            options["fillMissingReasoning"] = Value::Bool(true);
         }
         options
     }
@@ -507,12 +519,19 @@ pub fn replay_body(request: &Request, provider: &str, options: &Value) -> anyhow
         system_updates: String,
         #[serde(default)]
         extra_fields: Map<String, Value>,
+        fill_missing_reasoning: Option<bool>,
     }
     let options: Options = serde_json::from_value(options.clone())?;
     anyhow::ensure!(
-        options.format == "openai-chat-completions" && options.version == 1,
-        "unsupported request conversion format/version"
+        options.format == "openai-chat-completions",
+        "unsupported request conversion format"
     );
+    let fill_missing_reasoning = match (options.version, options.fill_missing_reasoning) {
+        // Requests recorded before the fill became an option always had it.
+        (1, None) => true,
+        (2, fill) => fill.unwrap_or(false),
+        _ => anyhow::bail!("unsupported request conversion version"),
+    };
     let system_updates = match options.system_updates.as_str() {
         "collapse" => SystemUpdates::Collapse,
         "inline" => SystemUpdates::Inline,
@@ -525,6 +544,7 @@ pub fn replay_body(request: &Request, provider: &str, options: &Value) -> anyhow
             provider_name: provider.into(),
             system_updates,
             extra_fields: options.extra_fields,
+            fill_missing_reasoning,
             ..OpenAiConfig::default()
         },
     ))
@@ -614,7 +634,9 @@ fn convert_messages(messages: &[Message], config: &OpenAiConfig, model: &str) ->
         }
     }
     flush_missing_results(&mut out, &mut pending);
-    fill_missing_reasoning(&mut out);
+    if config.fill_missing_reasoning {
+        fill_missing_reasoning(&mut out);
+    }
     out
 }
 
@@ -1392,16 +1414,57 @@ mod tests {
         assert!(entries[0].get("reasoning_content").is_none());
     }
 
+    /// A history in which only the first answer carries reasoning.
+    fn partly_reasoned() -> Request {
+        Request {
+            model: "m".into(),
+            messages: vec![
+                Message::user("a"),
+                reply("m", vec![thinking("plan"), text("one")]),
+                Message::user("b"),
+                reply("m", vec![text("two")]),
+            ],
+            tools: vec![],
+            max_tokens: None,
+        }
+    }
+
+    fn second_answer(body: &Value) -> &Value {
+        body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "assistant")
+            .nth(1)
+            .unwrap()
+    }
+
     #[test]
-    fn fills_empty_reasoning_once_the_history_carries_some() {
+    fn fills_empty_reasoning_once_the_history_carries_some_when_asked() {
         // pi #3668: DeepSeek rejects a history in which a response without reasoning lacks the field.
-        let entries = assistant_entries(vec![
-            Message::user("a"),
-            reply("m", vec![thinking("plan"), text("one")]),
-            Message::user("b"),
-            reply("m", vec![text("two")]),
-        ]);
-        assert_eq!(entries[1]["reasoning_content"], "");
+        let config = OpenAiConfig {
+            fill_missing_reasoning: true,
+            ..p_config(SystemUpdates::default())
+        };
+        let body = build_body(&partly_reasoned(), &config);
+        assert_eq!(second_answer(&body)["reasoning_content"], "");
+    }
+
+    #[test]
+    fn leaves_missing_reasoning_alone_unless_asked() {
+        let body = build_body(&partly_reasoned(), &p_config(SystemUpdates::default()));
+        assert!(second_answer(&body).get("reasoning_content").is_none(), "{body}");
+    }
+
+    #[test]
+    fn requests_recorded_by_version_one_replay_with_the_reasoning_filled() {
+        let request = partly_reasoned();
+        let version_one = json!({"format": "openai-chat-completions", "version": 1, "systemUpdates": "collapse"});
+        let body = replay_body(&request, "p", &version_one).unwrap();
+        assert_eq!(second_answer(&body)["reasoning_content"], "");
+        let version_two = json!({"format": "openai-chat-completions", "version": 2, "systemUpdates": "collapse"});
+        let body = replay_body(&request, "p", &version_two).unwrap();
+        assert!(second_answer(&body).get("reasoning_content").is_none(), "{body}");
     }
 
     fn replayable_request() -> Request {
@@ -1467,7 +1530,25 @@ mod tests {
         .unwrap();
         assert_eq!(
             provider.request_options(),
-            json!({"format": "openai-chat-completions", "version": 1, "systemUpdates": "inline"})
+            json!({"format": "openai-chat-completions", "version": 2, "systemUpdates": "inline"})
+        );
+        let filling = OpenAiCompatible::new(OpenAiConfig {
+            fill_missing_reasoning: true,
+            ..p_config(SystemUpdates::Collapse)
+        })
+        .unwrap();
+        let options = filling.request_options();
+        assert_eq!(options["fillMissingReasoning"], json!(true));
+        let request = partly_reasoned();
+        assert_eq!(
+            replay_body(&request, "p", &options).unwrap(),
+            build_body(
+                &request,
+                &OpenAiConfig {
+                    fill_missing_reasoning: true,
+                    ..p_config(SystemUpdates::Collapse)
+                }
+            )
         );
     }
 
@@ -1477,9 +1558,11 @@ mod tests {
         for options in [
             Value::Null,
             json!({"format": "other", "version": 1, "systemUpdates": "collapse"}),
-            json!({"format": "openai-chat-completions", "version": 2, "systemUpdates": "collapse"}),
+            json!({"format": "openai-chat-completions", "version": 3, "systemUpdates": "collapse"}),
             json!({"format": "openai-chat-completions", "version": 1, "systemUpdates": "sideways"}),
             json!({"format": "openai-chat-completions", "version": 1, "systemUpdates": "collapse", "extra": 1}),
+            // Version 1 always filled, so it cannot have recorded a choice.
+            json!({"format": "openai-chat-completions", "version": 1, "systemUpdates": "collapse", "fillMissingReasoning": false}),
         ] {
             assert!(replay_body(&request, "p", &options).is_err(), "{options}");
         }

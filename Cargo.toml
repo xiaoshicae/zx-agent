@@ -1,7 +1,22 @@
 [workspace]
-members = ["crates/zx-ai", "crates/zx-core", "crates/zx-tools", "crates/zx-im"]
+members = [
+  "crates/zx-ai",
+  "crates/zx-core",
+  "crates/zx-tools",
+  "crates/zx-im",
+  "crates/zx-im-slack",
+  "crates/zx-im-feishu",
+]
 # Commands run at the root (build, test, clippy, doc) cover every crate, not only zx-agent.
-default-members = [".", "crates/zx-ai", "crates/zx-core", "crates/zx-tools", "crates/zx-im"]
+default-members = [
+  ".",
+  "crates/zx-ai",
+  "crates/zx-core",
+  "crates/zx-tools",
+  "crates/zx-im",
+  "crates/zx-im-slack",
+  "crates/zx-im-feishu",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -14,6 +29,8 @@ publish = false
 zx-ai = { path = "crates/zx-ai" }
 zx-core = { path = "crates/zx-core" }
 zx-im = { path = "crates/zx-im" }
+zx-im-feishu = { path = "crates/zx-im-feishu" }
+zx-im-slack = { path = "crates/zx-im-slack" }
 zx-tools = { path = "crates/zx-tools" }
 
 anyhow = "1"
@@ -56,6 +73,8 @@ path = "src/main.rs"
 zx-ai.workspace = true
 zx-core.workspace = true
 zx-im.workspace = true
+zx-im-feishu.workspace = true
+zx-im-slack.workspace = true
 zx-tools.workspace = true
 
 anyhow.workspace = true

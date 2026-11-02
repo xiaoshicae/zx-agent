@@ -101,17 +101,18 @@ fn read_prompt(arg: &str) -> Result<String> {
     Ok(prompt)
 }
 
-/// Assemble the unattended preset without exposing interactive choices to the kernel.
+/// Assemble an unattended session from the selected profile, `unattended` unless another is
+/// given, without exposing interactive choices to the kernel.
 async fn build_session(args: &RunArgs) -> Result<AgentSession> {
     let instructions = cli::read_instructions(&args.base)?;
-    let mcp = cli::connect_mcp(&args.base, Builtin::Troubleshoot, &args.transport).await?;
+    let mcp = cli::connect_mcp(&args.base, Builtin::Unattended, &args.transport).await?;
     let prepared = cli::prepare(cli::SessionOptions {
         base: &args.base,
         transport: &args.transport,
         request: &args.request,
         model: &args.base.model,
         file: cli::SessionFile::from_path(args.request.session.as_deref()),
-        default_profile: Builtin::Troubleshoot,
+        default_profile: Builtin::Unattended,
         budget: cli::Budget {
             max_turns: args.max_turns,
             timeout_secs: args.timeout_secs,

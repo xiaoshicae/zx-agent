@@ -32,6 +32,9 @@ spec:
           image: zx-agent
           command: ["tini", "--", "sleep", "infinity"]
           env:
+            # kubectl reads this account's token, and so can commands: redact its value.
+            - name: ZX_SECRET_FILES
+              value: /var/run/secrets/kubernetes.io/serviceaccount/token
             - name: ZX_MODEL
               valueFrom:
                 configMapKeyRef:

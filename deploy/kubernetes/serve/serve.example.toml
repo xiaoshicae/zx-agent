@@ -20,3 +20,34 @@ idleSecs = 1800
 
 [sessions]
 dir = "/data/sessions"
+
+# The texts the service posts besides answers, and those of approval cards, are English
+# unless set here; any field may be left out. These are Chinese versions.
+[replies]
+working = "处理中…"
+queued = "排队中：同时运行的任务已满，轮到时开始处理。"
+unauthorized = "未授权：本聊天不在服务名单中。"
+notApprover = "只有审批人名单中的成员可以批准或拒绝，本次点击不生效。"
+cancelled = "已取消。"
+nothingToCancel = "没有进行中的任务。"
+noAnswer = "（没有回答）"
+truncated = "（回答达到输出上限，已截断）"
+maxTurns = "（已达到轮次上限，任务没有完成）"
+tokenBudget = "（已达到 token 预算，任务没有完成）"
+timedOut = "运行超时，任务没有完成。"
+failed = "运行失败："
+cannotOpen = "无法打开会话："
+stopping = "服务正在停止：本线程中还没处理的消息不会再处理，请稍后重新发送。"
+stopped = "服务正在停止：本次任务已取消，请稍后重新发送。"
+interrupted = "服务重启过：这次任务没有完成，请重新发送。"
+
+[cardLabels]
+title = "需要审批"
+reason = "理由"
+allowOnce = "批准一次"
+deny = "拒绝"
+allowed = "已批准"
+denied = "已拒绝"
+timedOut = "无人处理，已超时，未执行"
+cancelled = "已取消，未执行"
+failed = "审批失败，未执行"
