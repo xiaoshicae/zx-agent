@@ -56,7 +56,7 @@ impl HookContext {
 /// token for work of its own, but cannot cancel the run, which only its caller does.
 ///
 /// ```compile_fail
-/// fn stop(ctx: &zx_agent::agent::HookContext) {
+/// fn stop(ctx: &zx_core::agent::HookContext) {
 ///     ctx.cancel.cancel();
 /// }
 /// ```

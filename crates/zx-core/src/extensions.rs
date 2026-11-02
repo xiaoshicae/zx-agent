@@ -23,9 +23,9 @@ use crate::text::read_regular_file;
 /// ```
 /// use std::sync::Arc;
 ///
-/// use zx_agent::agent::{HookContext, HookResult, Hooks, LoopConfig, ToolOutput};
-/// use zx_agent::ai::ToolCall;
-/// use zx_agent::extensions::{Extension, register};
+/// use zx_ai::ToolCall;
+/// use zx_core::agent::{HookContext, HookResult, Hooks, LoopConfig, ToolOutput};
+/// use zx_core::extensions::{Extension, register};
 ///
 /// /// Marks every tool result and tells the model so.
 /// struct Checked;

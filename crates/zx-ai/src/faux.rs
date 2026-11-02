@@ -249,7 +249,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_burst_larger_than_the_buffer_keeps_every_delta_and_the_final_message() {
-        let count = crate::ai::provider::STREAM_EVENT_BUFFER * 3;
+        let count = crate::provider::STREAM_EVENT_BUFFER * 3;
         let blocks = (0..count).map(|_| ContentBlock::Text { text: "x".into() }).collect();
         let provider = FauxProvider::new([FauxStep::Respond {
             blocks,

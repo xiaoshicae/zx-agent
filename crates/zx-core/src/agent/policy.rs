@@ -6,10 +6,10 @@
 //!
 //! Extensions decide through [`Hooks::before_tool`](super::Hooks::before_tool); a
 //! [`ToolPolicy`] is how the built-in policies join, through `policy::PolicyHook`. The
-//! concrete policies live outside the kernel, in `zx_agent::policy`:
+//! concrete policies live outside the kernel, in the zx-tools crate (`zx_agent::policy`):
 //!
 //! ```compile_fail
-//! use zx_agent::agent::CommandPolicy;
+//! use zx_core::agent::CommandPolicy;
 //! ```
 
 use async_trait::async_trait;

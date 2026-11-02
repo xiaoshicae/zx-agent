@@ -29,8 +29,8 @@ use super::SessionHeader;
 /// use std::sync::mpsc;
 ///
 /// use async_trait::async_trait;
-/// use zx_agent::ai::Message;
-/// use zx_agent::session::{LoadedSession, LogRecord, SessionHeader, SessionLog, SessionStore};
+/// use zx_ai::Message;
+/// use zx_core::session::{LoadedSession, LogRecord, SessionHeader, SessionLog, SessionStore};
 ///
 /// struct Table(mpsc::Sender<String>);
 ///

@@ -37,8 +37,10 @@ impl SystemPrompt {
         self.sections.is_empty()
     }
 
-    /// Whether the prompt has a section named `name`.
-    pub(crate) fn has_section(&self, name: &str) -> bool {
+    /// Whether the prompt has a section named `name`. Public only for extension registration
+    /// in zx-core, not part of the API.
+    #[doc(hidden)]
+    pub fn has_section(&self, name: &str) -> bool {
         self.sections.iter().any(|(section, _)| section == name)
     }
 
