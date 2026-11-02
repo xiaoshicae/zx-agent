@@ -280,7 +280,7 @@ CLI (main.rs + cli.rs + chat/)
 | 环境信息 | 启动时由程序写入系统提示词，见下文 | pi 只写入工作目录；无人值守时没有人提供这些信息，白名单也可能禁止 `uname`、`date` 等命令 |
 | 参数校验 | 由各工具反序列化成自己的参数类型来完成 | 避免引入 JSON Schema 校验器 |
 | 缺少结果的工具调用 | 有副作用的调用执行前先记录开始；下一次运行开始时，为缺少结果的调用写入"结果未知""未执行"等错误结果，不重放。运行被取消时，执行中的有副作用调用的结果写明"可能已改变状态，先检查再重试"，尚未开始的调用写明"未执行" | 发送时补占位（沿用 pi 的 transform-messages.ts）区分不了调用是否执行过；崩溃后需要依据记录判断 |
-| 上下文摘要 | 重新摘要时读取应用过 `context_edit` 的原始记录，不输入上一份摘要；摘要中的每条事实必须引用来源条目，见 [PROFILES.md](docs/PROFILES.md) | pi 把上一份摘要交给模型更新，允许删去旧内容；这里优先保证每条事实可追溯、不经多次转述。代价是摘要请求随历史增长，累计约 2 MiB 后无法再摘要；增量摘要的设计稿见[路线图](docs/ROADMAP.md)，待评审 |
+| 上下文摘要 | 默认（全量模式）重新摘要时读取应用过 `context_edit` 的原始记录，不输入上一份摘要；可选的增量模式沿用上一份摘要的事实、只读新增记录，旧事实由程序原样保留，模型只能新增事实或标明取代旧事实。摘要中的每条事实必须引用来源条目，见 [PROFILES.md](docs/PROFILES.md) | pi 把上一份摘要交给模型更新，允许删去旧内容；这里优先保证每条事实可追溯、不经多次转述。全量模式的代价是摘要请求随历史增长，累计约 2 MiB 后无法再摘要；增量模式每次只读上一份摘要的事实（至多 64 KiB）与新增、被修正的记录，请求大小不随历史总长增长，用真实模型评测之后再决定是否设为默认（见[路线图](docs/ROADMAP.md)） |
 | 完整 TUI | 未实现，`chat` 是逐行 REPL | 路线图将其列为本期不做 |
 
 ### 系统提示词的组成
@@ -417,7 +417,7 @@ pidsLimit = 256                  # 可选，容器内进程数上限
 
 如果进程在写入最后一行时崩溃，未换行且确实未完成的尾记录会在下次打开时截掉，包括截断在 UTF-8 字符中间的情况。写入失败（如磁盘已满）后不再写入，因此留下的残缺同样只在文件末尾，按同一规则修复。CLI 会在 stderr 报告修复；库调用方可读取 `SessionStore::recovered_tail_bytes()`。完整记录缺少末尾换行时会补换行；已换行的损坏记录、未知记录类型和完整记录的字段错误会报错并保留文件。截掉尾记录发生在其余记录全部通过校验之后，因此打开失败时文件保持原样。
 
-新建会话格式为 v4，兼容读取 v1–v3。旧文件在首次写入请求或压缩记录前追加 `format_upgrade`（version 3），在首次写入 `tool_call_started` 前追加 `format_upgrade`（version 4），都不改写头部。只支持到 v3 的程序会拒绝打开 v4 会话。压缩时先追加 `compaction_started`，请求完成后追加 `compaction` 或 `compaction_failed`。未完成或失败记录不改变投影；成功记录保留全部 system、结构化摘要及 `firstKeptEntryId` 之后的原消息，原始历史仍可审计。摘要来源是应用过 `context_edit` 的原始投影，不输入旧摘要。
+新建会话格式为 v5，兼容读取 v1–v4。旧文件在首次写入请求或压缩记录前追加 `format_upgrade`（version 3），在首次写入 `tool_call_started` 前追加 `format_upgrade`（version 4），在第一次增量摘要前追加 `format_upgrade`（version 5），都不改写头部。只支持到 v4 的程序会拒绝打开 v5 会话。压缩时先追加 `compaction_started`，请求完成后追加 `compaction` 或 `compaction_failed`。未完成或失败记录不改变投影；成功记录保留全部 system、结构化摘要及 `firstKeptEntryId` 之后的原消息，原始历史仍可审计。默认的全量模式下，摘要来源是应用过 `context_edit` 的原始投影，不输入旧摘要；可选的增量模式（v5，见 [PROFILES.md](docs/PROFILES.md)）下，后一次摘要沿用前一次仍有效的事实，只读取其边界之后的记录与此后被修正的旧记录。
 
 每次模型请求（任务请求与摘要请求）发出前，先追加 `request_started`；provider、模型、工具定义、`max_tokens` 或 provider 转换参数变化时，先追加一条 `request_config`。`request_started` 引用配置，并记录消息来源：会话投影（以该条目的父节点为准），或摘要尝试的源条目与请求时间戳。库调用方可用 `SessionStore::replay_request` 还原当时与 provider 无关的 `Request`，OpenAI 兼容服务可再用 `openai::replay_body` 重建请求体。会话文件不记录 API key、URL 和 HTTP 头；自定义 provider 通过 `Provider::request_options` 提供非机密的转换参数，默认为 `null`，此时只能还原到 `Request`。这些记录写入失败时不发请求，并中止运行。`request_started` 只表示准备发送，后面没有对应的回答，说明发送结果未知。
 
@@ -608,7 +608,8 @@ cargo fmt --check
 | `tests/profiles_cli.rs` | profile 覆盖、显式默认值、预算参数的 help 写明取自 profile、不可绕过的 deny、上下文范围与审计、上下文默认值与越界链接、`--system-prompt-file` 兼容、skill 懒加载与脱敏、配置错误（含 provider 参数）退出码且不建会话文件 |
 | `tests/run_cli.rs` | `run` 在 P0 之后新增的约定：进度与报告行转义终端控制字符；另一个 `run` 正在写的会话文件不能再被打开写入；JSONL 事件的信封；为零的超时在请求前被拒绝；stdout 已关闭时退出码仍由运行结果决定（原有 `run` 测试仍在 `tests/cli.rs`） |
 | `tests/session_compaction.rs`、`tests/compaction.rs` | v1/v2 追加升级、分支和引用、原始投影、省略保留边界后摘要仍生效、编辑摘要的变换计划在写入前被拒绝、摘要失败与取消、请求 / 用量预算、超时和上限 |
-| `tests/request_audit.rs` | 每次任务与摘要请求可从会话文件还原、配置只在变化时追加、旧会话首次请求前升级、与投影不一致的请求不记录、固定会话文件的还原结果不变（版本守护） |
+| `tests/incremental_summary.rs` | 增量摘要（v5）：第一次读取整段前缀并给事实编号、之后只读旧事实与新增记录、可接续全量模式留下的摘要、取代与淘汰、修正只作废相关事实并在下一次重读、模型不能自带编号、加载时拒绝违反规则的记录、请求可从会话文件还原、多轮之后请求大小不随历史增长（与全量模式对照） |
+| `tests/request_audit.rs` | 每次任务与摘要请求可从会话文件还原、配置只在变化时追加、旧会话首次请求前升级、与投影不一致的请求不记录、固定会话文件（v4 与含增量摘要的 v5）的还原结果不变（版本守护） |
 | `tests/executor.rs` | 执行器接缝：bash 与 read_file 只经自身执行器运行命令和读文件，命令的 6 种结束方式均正确报告，执行方式随执行器 |
 | `tests/container.rs` | 容器执行：用假 docker 程序验证启动参数与失败报告、命令与读文件的转发、超时 / 取消 / 丢弃后的清理、工具逐个执行（排队的调用在取消后记为未执行）、命令用配置的 shell、启动失败不留会话文件、CLI 接线与配置错误；设置 `ZX_DOCKER_TEST_IMAGE` 时另对真实 Docker 验证用户、只读工作目录与无网络、命令进程树与 `setsid` 子进程的终止、清理不受命令写入影响、命令逐条执行、容器内读文件、chat 中 Ctrl-C 后容器仍在、zx-agent 正常结束或被 SIGKILL 后容器删除（CI 在 Linux 上用 `debian:bookworm-slim` 运行）；另验证 root 用户与工作目录内的会话文件被拒绝 |
 | `tests/crash_recovery.rs` | 内置工具的副作用声明、开始记录先于执行（串行与并行批次）、中断批次的四种恢复结果且不重放、失败或取消的回答中的调用记为未执行、恢复事件在结果写入之后、旧格式会话、丢弃 future 后的同进程恢复、`run` 的 `[recover]` 输出；Unix 上 SIGKILL 掉正在执行命令的 `run`，再由下一次 `run` 恢复且不重放 |

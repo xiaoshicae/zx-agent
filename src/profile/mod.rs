@@ -270,6 +270,9 @@ impl Profile {
         if let Some(secs) = raw.compaction.timeout_secs {
             self.compaction.timeout = Duration::from_secs(secs);
         }
+        if let Some(mode) = raw.compaction.mode {
+            self.compaction.mode = mode;
+        }
         if let Some(path) = raw.tool_output.directory {
             ensure!(!path.as_os_str().is_empty(), "toolOutput.directory must not be empty");
             self.tool_output.directory = parent.join(path);
@@ -425,6 +428,8 @@ struct RawCompaction {
     keep_recent_bytes: Option<usize>,
     max_summary_tokens: Option<u32>,
     timeout_secs: Option<u64>,
+    /// `full` (the default) or `incremental`.
+    mode: Option<compaction::SummaryMode>,
 }
 
 #[derive(Default, Deserialize)]
@@ -629,6 +634,26 @@ mod tests {
                 .to_string()
                 .contains("cannot be disabled")
         );
+    }
+
+    #[test]
+    fn summaries_are_full_unless_the_profile_asks_for_incremental_ones() {
+        assert_eq!(
+            Profile::load(None, Builtin::Troubleshoot).unwrap().compaction.mode,
+            compaction::SummaryMode::Full
+        );
+        assert_eq!(
+            Profile::load(Some("assistant"), Builtin::Troubleshoot)
+                .unwrap()
+                .compaction
+                .mode,
+            compaction::SummaryMode::Full
+        );
+        let incremental = load_file("extends = 'assistant'\n[compaction]\nmode = 'incremental'").unwrap();
+        assert_eq!(incremental.compaction.mode, compaction::SummaryMode::Incremental);
+        // Other settings still come from the base profile.
+        assert_eq!(incremental.compaction.trigger_bytes, Some(256 * 1024));
+        assert!(load_file("[compaction]\nmode = 'partial'").is_err());
     }
 
     #[test]

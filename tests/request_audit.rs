@@ -46,10 +46,24 @@ fn replays(store: &SessionStore) -> serde_json::Value {
 /// expected file.
 #[test]
 fn a_recorded_session_rebuilds_to_the_requests_it_sent() {
+    assert_fixture_rebuilds("replay-v4");
+}
+
+/// The same for incremental summaries (format v5): the fixture holds a tool call, a first
+/// incremental summary, a correction of a summarized tool result, a second summary that reads
+/// it again and supersedes an earlier fact, and a request after it.
+#[test]
+fn a_recorded_incremental_session_rebuilds_to_the_requests_it_sent() {
+    assert_fixture_rebuilds("replay-v5");
+}
+
+/// `tests/fixtures/<name>.jsonl` rebuilds to `tests/fixtures/<name>.expected.json`.
+fn assert_fixture_rebuilds(name: &str) {
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    let store = SessionStore::read(&fixtures.join("replay-v4.jsonl")).unwrap();
+    let store = SessionStore::read(&fixtures.join(format!("{name}.jsonl"))).unwrap();
     let expected: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(fixtures.join("replay-v4.expected.json")).unwrap()).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(fixtures.join(format!("{name}.expected.json"))).unwrap())
+            .unwrap();
 
     let rebuilt = replays(&store);
 

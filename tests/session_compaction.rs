@@ -8,7 +8,8 @@ use serde_json::json;
 
 use zx_agent::ai::{Message, SystemMessage, SystemPrompt, Usage, now_ms};
 use zx_agent::session::{
-    CompactionPlan, CompactionSummary, Entry, SESSION_VERSION, SessionHeader, SessionStore, SummaryFact, SummaryRequest,
+    CompactionPlan, CompactionSummary, Entry, SESSION_VERSION, SessionHeader, SessionStore, SummaryFact, SummaryMode,
+    SummaryRequest,
 };
 
 use common::{header, read_lines, summarize};
@@ -16,8 +17,10 @@ use common::{header, read_lines, summarize};
 fn summary(id: &str) -> CompactionSummary {
     CompactionSummary {
         facts: vec![SummaryFact {
+            id: None,
             text: "The old observation".into(),
             source_entry_ids: vec![id.into()],
+            supersedes: Vec::new(),
         }],
         inferences: vec!["An inference".into()],
         plans: vec!["Continue the task".into()],
@@ -41,6 +44,8 @@ fn plan(store: &SessionStore, first_kept: &str) -> CompactionPlan {
             max_tokens: 100,
         },
         input_bytes: 1000,
+        mode: SummaryMode::Full,
+        continues: None,
     }
 }
 
@@ -51,9 +56,9 @@ async fn seeded(store: &mut SessionStore) -> (String, String) {
 }
 
 #[tokio::test]
-async fn new_sessions_use_v4_and_legacy_upgrade_preserves_every_existing_byte() {
+async fn new_sessions_use_v5_and_legacy_upgrade_preserves_every_existing_byte() {
     let dir = tempfile::tempdir().unwrap();
-    assert_eq!(header().version, 4);
+    assert_eq!(header().version, 5);
     for version in [1, 2] {
         let path = dir.path().join(format!("v{version}.jsonl"));
         let mut legacy_header = SessionHeader::new(Path::new("."), "m");
