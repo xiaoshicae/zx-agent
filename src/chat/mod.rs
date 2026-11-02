@@ -76,6 +76,7 @@ async fn build(
         budget: cli::Budget {
             max_turns: args.max_turns,
             timeout_secs: args.timeout_secs,
+            token_budget: args.token_budget,
             continue_on_length: None,
         },
         instructions: settings.instructions.as_deref(),

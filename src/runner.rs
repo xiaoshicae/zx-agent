@@ -1,7 +1,7 @@
 //! Run-level control around the loop (a small subset of pi's coding-agent AgentSession).
 //!
 //! The loop stops at the first provider error; this layer decides whether to retry, keeps
-//! the session as the source of model context, and enforces turn and time limits.
+//! the session as the source of model context, and enforces turn, time and token limits.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -32,6 +32,10 @@ pub struct Limits {
     pub max_turns: Option<u32>,
     /// Wall-clock limit for the whole run; `None` disables it.
     pub timeout: Option<Duration>,
+    /// Tokens the run may use: input plus output of all its model requests as the provider
+    /// reports them, summary requests and failed attempts included. Checked before each
+    /// request, so the last one may go over. `None` disables the budget.
+    pub token_budget: Option<u64>,
 }
 
 /// Runs prompts against one session, adding retries, limits, and persistence to the loop.
@@ -234,6 +238,9 @@ impl Runner {
                     &run_cancel,
                     sink,
                 );
+                control.token_budget = limits
+                    .token_budget
+                    .map(|budget| budget.saturating_sub(usage.input_and_output()));
                 control.turn_offset = turns;
                 control.continuations = continuations;
                 control.host = Some(&mut host);
@@ -263,7 +270,10 @@ impl Runner {
                 let retryable = is_retryable(&failed);
                 // A retry is a request, so it needs budget; without any, the provider error
                 // is the reason the run ends.
-                let budget_left = limits.max_turns.is_none_or(|limit| requests < limit);
+                let budget_left = limits.max_turns.is_none_or(|limit| requests < limit)
+                    && limits
+                        .token_budget
+                        .is_none_or(|budget| usage.input_and_output() < budget);
                 if !retryable || retries >= retry.max_retries || !budget_left || run_cancel.is_cancelled() {
                     break LoopOutcome::Error;
                 }
@@ -326,6 +336,16 @@ impl Runner {
                 Some(format!(
                     "turn limit reached (max_turns = {})",
                     limits.max_turns.expect("MaxTurns requires a configured turn limit")
+                )),
+            ),
+            LoopOutcome::TokenBudget => (
+                RunOutcome::TokenBudget,
+                Some(format!(
+                    "token budget reached ({} tokens used, token_budget = {})",
+                    usage.input_and_output(),
+                    limits
+                        .token_budget
+                        .expect("TokenBudget requires a configured token budget")
                 )),
             ),
             LoopOutcome::Aborted if timed_out.load(Ordering::SeqCst) => {
@@ -645,6 +665,11 @@ mod tests {
     #[test]
     fn default_turn_budget_is_unbounded() {
         assert_eq!(Limits::default().max_turns, None);
+    }
+
+    #[test]
+    fn default_token_budget_is_unbounded() {
+        assert_eq!(Limits::default().token_budget, None);
     }
 
     #[test]

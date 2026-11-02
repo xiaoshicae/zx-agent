@@ -35,6 +35,11 @@ pub struct Usage {
 }
 
 impl Usage {
+    /// Input plus output tokens, saturating: what a token budget counts.
+    pub fn input_and_output(&self) -> u64 {
+        self.input.saturating_add(self.output)
+    }
+
     /// Add `other` to these counts, saturating: servers report them, so they are untrusted.
     pub fn add(&mut self, other: &Usage) {
         self.input = self.input.saturating_add(other.input);

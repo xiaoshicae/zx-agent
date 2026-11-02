@@ -97,6 +97,10 @@ impl LoopConfig {
 pub struct LoopControl<'a> {
     /// Model requests this attempt may make, summary requests included; `None` is unlimited.
     pub max_turns: Option<u32>,
+    /// Tokens this attempt may use, input plus output as the provider reports them, summary
+    /// requests included. Checked before each request, so the last one may go over; `None`
+    /// is unlimited.
+    pub token_budget: Option<u64>,
     /// Task turns of earlier attempts, so that turn numbers continue across retries.
     pub turn_offset: u32,
     pub continuations: u32,
@@ -122,6 +126,7 @@ impl<'a> LoopControl<'a> {
     ) -> Self {
         Self {
             max_turns,
+            token_budget: None,
             turn_offset: 0,
             continuations: 0,
             approvals,
@@ -415,8 +420,8 @@ impl<'a> Engine<'a, '_, '_> {
             if self.control.cancel.is_cancelled() {
                 return Ok(LoopOutcome::Aborted);
             }
-            if self.control.max_turns.is_some_and(|limit| result.requests >= limit) {
-                return Ok(LoopOutcome::MaxTurns);
+            if let Some(outcome) = exhausted(self.control, result) {
+                return Ok(outcome);
             }
             // A new turn, unless one is in progress.
             self.start_turn(result).await;
@@ -436,8 +441,8 @@ impl<'a> Engine<'a, '_, '_> {
             if self.control.cancel.is_cancelled() {
                 return Ok(LoopOutcome::Aborted);
             }
-            if self.control.max_turns.is_some_and(|limit| result.requests >= limit) {
-                return Ok(LoopOutcome::MaxTurns);
+            if let Some(outcome) = exhausted(self.control, result) {
+                return Ok(outcome);
             }
             let edits = config
                 .hooks
@@ -479,8 +484,8 @@ impl<'a> Engine<'a, '_, '_> {
             if self.control.cancel.is_cancelled() {
                 return Ok(LoopOutcome::Aborted);
             }
-            if self.control.max_turns.is_some_and(|limit| result.requests >= limit) {
-                return Ok(LoopOutcome::MaxTurns);
+            if let Some(outcome) = exhausted(self.control, result) {
+                return Ok(outcome);
             }
             if requests > 0 {
                 // Preparation is a request boundary too. Drain newly arrived steering
@@ -946,6 +951,20 @@ impl<'a> Engine<'a, '_, '_> {
         self.finish(&Message::ToolResult(result.clone())).await?;
         Ok(())
     }
+}
+
+/// The outcome when a budget leaves no room for another request: requests first, then tokens.
+fn exhausted(control: &LoopControl<'_>, result: &LoopResult) -> Option<LoopOutcome> {
+    if control.max_turns.is_some_and(|limit| result.requests >= limit) {
+        return Some(LoopOutcome::MaxTurns);
+    }
+    if control
+        .token_budget
+        .is_some_and(|budget| result.usage.input_and_output() >= budget)
+    {
+        return Some(LoopOutcome::TokenBudget);
+    }
+    None
 }
 
 fn completed(stop: StopReason) -> LoopOutcome {

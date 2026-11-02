@@ -88,6 +88,12 @@ pub(crate) struct RunArgs {
     #[arg(long)]
     pub(crate) timeout_secs: Option<u64>,
 
+    /// Tokens the run may use: input plus output of all its model requests, as the provider
+    /// reports them. Checked before each request, so the last one may go over; the run then
+    /// exits 7. 0 disables it. Defaults to the selected profile.
+    #[arg(long)]
+    pub(crate) token_budget: Option<u64>,
+
     #[command(flatten)]
     pub(crate) transport: TransportArgs,
 
@@ -121,6 +127,12 @@ pub(crate) struct ChatArgs {
     /// profile.
     #[arg(long)]
     pub(crate) timeout_secs: Option<u64>,
+
+    /// Tokens per prompt: input plus output of its model requests, as the provider reports
+    /// them. Checked before each request, so the last one may go over. 0 disables it.
+    /// Defaults to the selected profile.
+    #[arg(long)]
+    pub(crate) token_budget: Option<u64>,
 
     /// How long an approval request waits for /approve or /deny, in seconds. An unanswered
     /// request is denied, and the task goes on without the call.
@@ -160,6 +172,12 @@ pub(crate) struct ServeArgs {
     /// profile.
     #[arg(long)]
     pub(crate) timeout_secs: Option<u64>,
+
+    /// Tokens per prompt: input plus output of its model requests, as the provider reports
+    /// them. Checked before each request, so the last one may go over. 0 disables it.
+    /// Defaults to the selected profile.
+    #[arg(long)]
+    pub(crate) token_budget: Option<u64>,
 
     #[command(flatten)]
     pub(crate) transport: TransportArgs,
@@ -444,6 +462,8 @@ pub(crate) async fn connect_mcp(base: &BaseArgs, default: Builtin, transport: &T
 pub(crate) struct Budget {
     pub(crate) max_turns: Option<u32>,
     pub(crate) timeout_secs: Option<u64>,
+    /// 0 disables the profile's budget.
+    pub(crate) token_budget: Option<u64>,
     pub(crate) continue_on_length: Option<u32>,
 }
 
@@ -531,6 +551,9 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     }
     if let Some(secs) = options.budget.timeout_secs {
         profile.limits.timeout = (secs > 0).then(|| Duration::from_secs(secs));
+    }
+    if let Some(tokens) = options.budget.token_budget {
+        profile.limits.token_budget = (tokens > 0).then_some(tokens);
     }
     if let Some(count) = options.budget.continue_on_length {
         profile.continue_on_length = count;

@@ -59,6 +59,7 @@ path = "skills/rust-review/SKILL.md"
 | `rules.denyTools` | 追加被拒绝的工具名；启用该工具或批准调用都不能覆盖拒绝。工具名的范围同 `askTools` |
 | `limits.maxTurns` | 每轮模型请求数；`"unlimited"` 不限，`0` 不请求模型 |
 | `limits.timeoutSecs` | 每轮总时间上限，`0` 关闭 |
+| `limits.tokenBudget` | 每轮所有模型请求的输入加输出 token 上限，以服务返回的用量为准，摘要请求与失败的尝试也计入；每次请求之前检查，最后一次请求可能超出；`0` 关闭。用完时 run 以退出码 7 结束 |
 | `extensions.continueOnLength` | 输出达到 token 上限后的续写次数；每次消耗一次模型请求预算 |
 | `extensions.redaction` | 仅接受 `true` 或省略；CLI 的已知认证 key 脱敏不可关闭 |
 | `context.discover` | 是否自动发现项目 AGENTS.md；`assistant` 默认开启，`troubleshoot` 默认关闭 |
@@ -219,4 +220,4 @@ SDK 宿主注册同配置的 `OutputStore`、`ReadOutputTool` 和 `SpillOutputs`
 
 ---
 
-PROFILES.md · v0.6 · 2026年11月
+PROFILES.md · v0.7 · 2026年11月

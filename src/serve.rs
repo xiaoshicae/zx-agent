@@ -300,6 +300,7 @@ impl Sessions {
             budget: Budget {
                 max_turns: self.args.max_turns,
                 timeout_secs: self.args.timeout_secs,
+                token_budget: self.args.token_budget,
                 continue_on_length: None,
             },
             instructions: self.instructions.as_deref(),

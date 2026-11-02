@@ -446,7 +446,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P6 | 执行环境与崩溃恢复 | 进行中：崩溃恢复（PR #12）、执行环境接缝（PR #13）、离线容器执行（PR #14）已完成；在线访问评审稿已合入（PR #17），一期已完成：只读命令自动放行（PR #19）、环境变量保护与 ServiceAccount token 脱敏（PR #20）、常驻 Pod 部署包（PR #22）、多集群（PR #24）；容器联网已取消，改为常驻 Pod 部署。待部署方在真实集群上验收；服务模式与 IM 接入的评审稿已合入（PR #27），模块 A（IM 接口与服务，PR #28）、B（Slack 与 `serve`，PR #29）、C（⚑ D:5/CHINA FLAG: 飞书，PR #32）、D（部署，PR #33）已完成，真实平台验收待提供凭据 |
 | P7 | 插件与 MCP | 已完成（PR #41）：范围按 D8 收窄，评审稿已合入（PR #36）并经用户确认；模块 A（Extension 接口，PR #38）、B1（MCP 客户端库，PR #40）、B2（CLI 接入与文档，PR #41）已完成；真实 MCP 服务器的验收待选定服务器；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已完成（PR #23），A2–A8（扩展 API）已完成（PR #25） |
 | P8 | 嵌入协议 `acp` | 未开始 |
-| P9 | 可选增强 | 未开始 |
+| P9 | 可选增强 | 进行中：token 预算已完成（PR #47） |
 
 ### P0 场景默认值移出内核
 
@@ -1115,13 +1115,33 @@ P7 模块 B2 实施记录（2026-11-01，PR #41）：
 按需求排序，每项单独评估：
 
 - [ ] 结构化最终报告：`--output-schema`，按 JSON Schema 约束最终回答
-- [ ] 无人值守的 token 预算：profile 上限增加 token 总量，超出时结束运行；现有退出码 0–6 的含义不变（2026-11-01 补充）
+- [x] 无人值守的 token 预算：profile 上限增加 token 总量，超出时结束运行；现有退出码 0–6 的含义不变（2026-11-01 补充）。已完成（PR #47），见下文"token 预算"
 - [ ] 更多 provider：例如 Anthropic Messages API
 - [ ] 异步审批：`WebhookInteraction`，高风险命令发 webhook 请求批准，超时则拒绝
 - [ ] OS 级沙箱的 Executor：Linux 的 bubblewrap + seccomp、macOS 的 Seatbelt
 - [ ] 由 webhook 或告警触发运行
 - [ ] OpenTelemetry 追踪（事件模型见"P7 前置"B 部分）
 - [ ] 拆分为多个 crate（`zx-ai`、`zx-core`、`zx-tools`、`zx-cli`），用编译器保证分层
+
+2026-11-02 用户决定：先做 token 预算与 OpenTelemetry。OpenTelemetry 用官方 crate，同意引入 `opentelemetry`、`opentelemetry_sdk`、`opentelemetry-otlp`（0.33，声明的 MSRV 为 1.75）。拆分 crate 与 acp 接入分开，先出方案。
+
+token 预算（2026-11-02，已完成，PR #47；名称与退出码经用户确认）：
+
+| 环节 | 做法 |
+|---|---|
+| 配置 | profile `[limits] tokenBudget`，命令行 `--token-budget`（run、chat、serve），`0` 关闭，默认不设。`--max-tokens` 已用于每次回复的输出上限，所以另起名。chat 与 serve 中是每轮（每条提示词）的预算，与 `maxTurns` 相同 |
+| 计数 | 本次运行所有模型请求的输入加输出 token，以服务返回的用量为准；摘要请求、失败的尝试与缓存命中的输入都计入 |
+| 检查 | 与 `maxTurns` 相同，在每次请求之前检查：用量达到预算后不再发请求，所以最后一次请求可能让总量超出预算。预算用完时，失败的请求不再重试，以错误结束 |
+| 结果 | 新增 `RunOutcome::TokenBudget`（事件与报告中为 `token_budget`），`run` 以退出码 7 结束，0–6 的含义不变；serve 在回答之后附 `Replies::token_budget` |
+| 公开 API | `Limits` 与 `LoopControl` 各新增 `token_budget`；`LoopOutcome`、`RunOutcome` 各新增一个变体。这两个枚举都没有标 `#[non_exhaustive]`，按变体写全的 match 需要补上 |
+
+实施记录（PR #47，基于 `9297885`，含 PR #44、#45，不含 PR #46）：
+
+- 循环（`src/agent/agent_loop.rs`）：原有的三处轮次检查合并为 `exhausted`，先查请求数、再查 token；`LoopControl::token_budget` 是本次尝试还能用的 token 数。运行层（`src/runner.rs`）在每次尝试之前按已用量算出剩余预算，重试之前也检查。`Usage::input_and_output()` 给出预算所计的数，用饱和加法，因为用量来自服务端。
+- 其余公开 API：`Replies::token_budget`（默认“（已达到 token 预算，任务没有完成）”）、`Usage::input_and_output`。
+- 测试：新增 8 项：`tests/runner.rs` 2 项（预算恰好用完时不发下一次请求；差 1 个 token 时照常请求，最后超出预算）、`tests/compaction.rs` 1 项（摘要请求计入预算）、`tests/run_cli.rs` 3 项（退出码 7 与报告行、最后一次请求可超出、profile 设置预算与命令行的 0 关闭）、单元测试 2 项（默认不限、profile 解析）。既有测试中，`tests/profiles_cli.rs` 的帮助文字检查加入 run 与 chat 的 `--token-budget`，IM 回复的单元测试加入新结果，6 处 `Limits` 字面量改为 `..Limits::default()`（其中 `tests/real_api.rs` 一处，未运行）。
+- 反向验证：分别去掉循环中的 token 检查、运行层传入的剩余预算、退出码 7、profile 与命令行的设置，每次都有对应测试失败（依次 4、4、2、2、2 项），修改已还原。“预算用完时失败的请求不再重试”没有单独的测试：FauxProvider 的失败回答不带用量，构造不出这种情况；该条件与已有测试覆盖的 `maxTurns` 写法相同。
+- 本机 macOS 验证：stable 与 Rust 1.88.0 各 746 项通过（基线 738 项，为 PR #45 的实测，其代码与 `9297885` 相同），6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过；自查脚本在改动的文件中只列出原有的 3 处（`src/main.rs` 的 `unsafe` 与 `let _ =`，`src/chat/mod.rs` 的 `let _ =`）；`tests/run_cli.rs` 连续运行 3 次，均通过。`run`、`chat`、`serve` 的 `--help` 各多出 `--token-budget` 一项。未新增依赖，`Cargo.toml`、`Cargo.lock` 未改动。
 
 ## 5. 随各阶段处理的整理项
 

@@ -91,6 +91,7 @@ impl Endpoint {
             limits: Limits {
                 max_turns: Some(4),
                 timeout: Some(Duration::from_secs(120)),
+                ..Limits::default()
             },
             ..RunnerSetup::new(config)
         }

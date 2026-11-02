@@ -29,6 +29,7 @@ const EXIT_MAX_TURNS: u8 = 3;
 const EXIT_TIMEOUT: u8 = 4;
 const EXIT_ABORTED: u8 = 5;
 const EXIT_TRUNCATED: u8 = 6;
+const EXIT_TOKEN_BUDGET: u8 = 7;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -110,6 +111,7 @@ async fn build_session(args: &RunArgs) -> Result<AgentSession> {
         budget: cli::Budget {
             max_turns: args.max_turns,
             timeout_secs: args.timeout_secs,
+            token_budget: args.token_budget,
             continue_on_length: args.continue_on_length,
         },
         instructions: instructions.as_deref(),
@@ -164,6 +166,7 @@ fn exit_code(outcome: RunOutcome) -> u8 {
         RunOutcome::Timeout => EXIT_TIMEOUT,
         RunOutcome::Aborted => EXIT_ABORTED,
         RunOutcome::Truncated => EXIT_TRUNCATED,
+        RunOutcome::TokenBudget => EXIT_TOKEN_BUDGET,
     }
 }
 
