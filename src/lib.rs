@@ -15,6 +15,7 @@
 //! - [`im`]: chat platforms, and a server that answers each thread with its own session
 //! - [`extensions`]: bundles of tools, hooks and prompt sections, and the built-in policies
 //! - [`mcp`]: the tools of external MCP servers, as an extension
+//! - [`otel`]: OpenTelemetry traces of runs, exported when an OTLP endpoint is configured
 
 pub mod agent;
 pub mod agent_session;
@@ -25,6 +26,7 @@ pub mod extensions;
 pub mod im;
 pub mod interaction;
 pub mod mcp;
+pub mod otel;
 pub mod output_store;
 pub mod policy;
 pub mod presets;

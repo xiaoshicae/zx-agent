@@ -75,11 +75,15 @@ fn deny_same_user_inspection() -> std::io::Result<()> {
 /// before the run started.
 async fn run(args: RunArgs) -> Result<u8> {
     let prompt = read_prompt(&args.prompt)?;
+    let telemetry = cli::start_telemetry()?;
     let session = build_session(&args).await?;
+    // Kept until the run has ended: dropping it unsubscribes.
+    let _traced = telemetry.as_ref().map(|telemetry| session.subscribe(telemetry.sink()));
     let cancel = CancellationToken::new();
     spawn_signal_handler(cancel.clone());
     let report = session.prompt_with_cancel(prompt, &cancel).await?;
     print_report(&report, args.output);
+    cli::finish_telemetry(telemetry).await;
     Ok(exit_code(report.outcome))
 }
 

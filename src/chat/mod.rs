@@ -15,9 +15,11 @@ use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 
 use zx_agent::AgentSession;
-use zx_agent::agent_session::ModelRef;
+use zx_agent::agent::EventSink;
+use zx_agent::agent_session::{ModelRef, Subscription};
 use zx_agent::ai::Provider;
 use zx_agent::compaction;
+use zx_agent::otel::Telemetry;
 use zx_agent::profile::Builtin;
 use zx_agent::runner::RunReport;
 
@@ -48,6 +50,8 @@ struct Built {
     session: AgentSession,
     provider: Arc<dyn Provider>,
     cwd: PathBuf,
+    /// The trace export of this session, while it lasts.
+    _traced: Option<Subscription>,
 }
 
 struct Settings {
@@ -56,6 +60,8 @@ struct Settings {
     instructions: Option<String>,
     /// Connected once; /new reuses the connections.
     mcp: cli::McpTools,
+    /// Where traces go, when an OTLP endpoint is configured.
+    traces: Option<Arc<dyn EventSink>>,
 }
 
 async fn build(
@@ -90,16 +96,31 @@ async fn build(
     let provider = prepared.config.spec.provider.clone();
     let cwd = prepared.config.spec.cwd.clone();
     let session = prepared.into_session(output.clone())?;
-    Ok(Built { session, provider, cwd })
+    let traced = settings.traces.clone().map(|sink| session.subscribe(sink));
+    Ok(Built {
+        session,
+        provider,
+        cwd,
+        _traced: traced,
+    })
 }
 
 pub(crate) async fn run(args: ChatArgs) -> Result<u8> {
+    let telemetry = cli::start_telemetry()?;
+    let traces = telemetry.as_ref().map(Telemetry::sink);
+    let result = converse(args, traces).await;
+    cli::finish_telemetry(telemetry).await;
+    result
+}
+
+async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> {
     let instructions = cli::read_instructions(&args.base)?;
     let mcp = cli::connect_mcp(&args.base, Builtin::Assistant, &args.transport).await?;
     let settings = Settings {
         args,
         instructions,
         mcp,
+        traces,
     };
     let args = &settings.args;
     let mode = if std::io::stdin().is_terminal() {
