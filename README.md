@@ -199,7 +199,7 @@ zx-agent run --base-url https://api.deepseek.com --model deepseek-flash \
 | `--model` | `deepseek-flash` 或 `deepseek-v4-pro` | 官方文档；2026-11-02 实测的是 `deepseek-flash`。文档写明 `deepseek-chat`、`deepseek-reasoner` 在 2026-07-24 之后停用；2026-11-01 用 `deepseek-chat` 的请求仍成功，原因未核实 |
 | `--api-key-env` | 存放 key 的环境变量名，如 `DEEPSEEK_API_KEY` | key 只从环境变量读取 |
 | 思考模式 | 默认开启。`--request-field 'thinking={"type":"disabled"}'` 关闭；`--request-field 'reasoning_effort="low"'` 调整强度（`low`、`high`、`max`） | 官方文档写明两个字段的格式，`thinking` 决定是否思考时优先。2026-11-02 用 `deepseek-flash` 实测：两个字段都被接受；关闭思考时三次运行的输入 token 都是 340，默认与 `low` 都是 365，说明该字段生效（服务端如何处理未核实）。输出 token 在同一设置下每次不同（默认三次为 202、2、2），不能据此比较思考强度 |
-| 思考内容 | 回答中的 `reasoning_content` 记入会话，之后的请求中回传给产生它的模型 | `src/ai/openai.rs`。官方文档：带工具的请求必须回传全部 `reasoning_content`，否则返回 400 |
+| 思考内容 | 回答中的 `reasoning_content` 记入会话，之后的请求中回传给产生它的模型 | `crates/zx-ai/src/openai.rs`。官方文档：带工具的请求必须回传全部 `reasoning_content`，否则返回 400 |
 | 结构化输出 | `response_format` 只有 `text` 与 `json_object`，没有 `json_schema` | 官方文档 |
 
 ### run 退出码
@@ -257,6 +257,19 @@ zx-agent run --base-url https://api.deepseek.com --model deepseek-flash \
 
 ## 架构
 
+代码是一个 Cargo workspace，分为 5 个 crate。依赖只能自上而下，下层 crate 无法引用上层，分层由编译器保证：
+
+```
+zx-agent    src/             CLI（run、chat、serve）、profile、presets、OpenTelemetry 导出；
+                             库以原有路径再导出下面各 crate
+  ├─ zx-im     crates/zx-im     IM 平台与按线程分派会话的服务（依赖 tokio-tungstenite）
+  ├─ zx-tools  crates/zx-tools  内置工具、命令与规则策略、MCP 客户端（依赖 rmcp）
+  └─ zx-core   crates/zx-core   循环、会话、运行层、共享会话、提示词、执行环境、扩展接口
+       └─ zx-ai  crates/zx-ai   消息类型、流式事件协议、provider
+```
+
+zx-im 与 zx-tools 都只依赖 zx-core 与 zx-ai，彼此不依赖。模块之间的关系：
+
 ```
 CLI (main.rs + cli.rs + chat/)
   ├─ profile/ + profiles/  文件化场景、上下文与 skill 工具
@@ -271,24 +284,24 @@ CLI (main.rs + cli.rs + chat/)
 
 | 模块 | 文件 | 对应的 pi 实现 |
 |---|---|---|
-| 消息与事件协议 | `src/ai/types.rs` | `ai/src/types.ts`（`AssistantMessageEvent`） |
-| provider 约定 | `src/ai/provider.rs` | `agent/src/types.ts`（`StreamFn` 约定） |
-| OpenAI 兼容 provider | `src/ai/openai.rs` | `ai/src/api/openai-completions.ts`、`transform-messages.ts` |
-| 重试判断 | `src/ai/retry.rs` | `ai/src/utils/retry.ts` |
-| 测试用 provider | `src/ai/faux.rs` | `ai/src/providers/faux.ts` |
-| agent 循环 | `src/agent/agent_loop.rs` | `agent/src/agent-loop.ts`（`runLoop`、`executeToolCalls`） |
-| 钩子宿主 | `src/agent/hooks.rs` | 输入、上下文、工具、回合与事件扩展点 |
-| 工具调用策略 | `src/policy.rs` | `PolicyHook` 适配 `ToolPolicy`；命令策略与 deny → ask → allow 规则 |
-| 人机交互 | `src/interaction.rs` | 宿主审批与 `NoHuman` |
-| 内置扩展 | `src/extensions.rs` | 截断续写与已知密钥脱敏 |
-| 会话 | `src/session.rs` | `coding-agent/src/core/session-manager.ts` |
-| 运行控制 | `src/runner.rs` | `coding-agent/src/core/agent-session.ts`（`_startRun`、`_prepareRetry`） |
-| 共享会话 | `src/agent_session.rs` | `AgentSession` 的长期生命周期与多订阅者接口 |
-| 系统提示词 | `src/prompt.rs` | `coding-agent/src/core/system-prompt.ts` |
+| 消息与事件协议 | `crates/zx-ai/src/types.rs` | `ai/src/types.ts`（`AssistantMessageEvent`） |
+| provider 约定 | `crates/zx-ai/src/provider.rs` | `agent/src/types.ts`（`StreamFn` 约定） |
+| OpenAI 兼容 provider | `crates/zx-ai/src/openai.rs` | `ai/src/api/openai-completions.ts`、`transform-messages.ts` |
+| 重试判断 | `crates/zx-ai/src/retry.rs` | `ai/src/utils/retry.ts` |
+| 测试用 provider | `crates/zx-ai/src/faux.rs` | `ai/src/providers/faux.ts` |
+| agent 循环 | `crates/zx-core/src/agent/agent_loop.rs` | `agent/src/agent-loop.ts`（`runLoop`、`executeToolCalls`） |
+| 钩子宿主 | `crates/zx-core/src/agent/hooks.rs` | 输入、上下文、工具、回合与事件扩展点 |
+| 工具调用策略 | `crates/zx-tools/src/policy.rs` | `PolicyHook` 适配 `ToolPolicy`；命令策略与 deny → ask → allow 规则 |
+| 人机交互 | `crates/zx-core/src/interaction.rs` | 宿主审批与 `NoHuman` |
+| 内置扩展 | `crates/zx-core/src/extensions.rs` | 截断续写与已知密钥脱敏 |
+| 会话 | `crates/zx-core/src/session.rs` | `coding-agent/src/core/session-manager.ts` |
+| 运行控制 | `crates/zx-core/src/runner.rs` | `coding-agent/src/core/agent-session.ts`（`_startRun`、`_prepareRetry`） |
+| 共享会话 | `crates/zx-core/src/agent_session.rs` | `AgentSession` 的长期生命周期与多订阅者接口 |
+| 系统提示词 | `crates/zx-core/src/prompt.rs` | `coding-agent/src/core/system-prompt.ts` |
 | 场景预设 | `src/presets/troubleshoot.rs`、`assistant.rs` | 内核之外的场景策略 |
 | 文件化配置 | `src/profile/`、`profiles/` | 加载与叠加 TOML、项目上下文、显式 skill 目录及按需读取 |
 | 终端前端 | `src/chat/`、`src/cli.rs` | 单输入所有者、审批、显示与共享 CLI 选项 |
-| IM 接入 | `src/im/` | 无对应实现：`ImChannel` 平台接口；`Server` 按线程分派，每个线程一个任务独占会话，审批卡片与运行上限 |
+| IM 接入 | `crates/zx-im/src/` | 无对应实现：`ImChannel` 平台接口；`Server` 按线程分派，每个线程一个任务独占会话，审批卡片与运行上限 |
 
 ### 与 pi 一致的关键语义
 
@@ -356,7 +369,7 @@ CLI (main.rs + cli.rs + chat/)
 - 是由清单中的前缀组成的管道；
 - 只由字母、数字、空白和 `- _ . / : = , @ + | ^ ~ !` 组成。引号、`\`、`$`、通配符、花括号、括号、`#` 以及白名单拒绝的语法都会改为询问：它们能让 shell 实际执行的内容与字面不同，例如 `kubectl get sec""rets` 去掉引号后就是 `secrets`；
 - 不含 `secret`、URL（`://`），也不含把请求发往别处的参数 `--server`、`--kubeconfig`、`--token`、`--insecure-skip-tls-verify`。2026-11-01 实测（kubectl v1.36.1，加 `--insecure-skip-tls-verify`），kubectl 把 kubeconfig 中的 token 发给了 `--server` 指定的 HTTPS 地址；
-- kubectl 只能带只读参数：`-n`/`--namespace`、`--context`、`-A`、`-o`、`-l`、`-L`、`--field-selector`、`--sort-by`、`--no-headers`、`--show-labels`，日志的 `-c`、`-p`/`--previous`、`--since`、`--tail`、`--timestamps` 等（完整列表见 `src/policy.rs` 的 `KUBECTL_OPTIONS`）。其他参数一律询问，例如 `--raw`（可读任意 API 路径）、`--user` 与 `--cluster`（换用别的凭据或集群）、`--profile-output` 与 `--cache-dir`（写文件，实测 `--profile-output` 会覆盖目标文件）、`-f`、`-w`、`-v`。
+- kubectl 只能带只读参数：`-n`/`--namespace`、`--context`、`-A`、`-o`、`-l`、`-L`、`--field-selector`、`--sort-by`、`--no-headers`、`--show-labels`，日志的 `-c`、`-p`/`--previous`、`--since`、`--tail`、`--timestamps` 等（完整列表见 `crates/zx-tools/src/policy.rs` 的 `KUBECTL_OPTIONS`）。其他参数一律询问，例如 `--raw`（可读任意 API 路径）、`--user` 与 `--cluster`（换用别的凭据或集群）、`--profile-output` 与 `--cache-dir`（写文件，实测 `--profile-output` 会覆盖目标文件）、`-f`、`-w`、`-v`。
 
 拒绝规则始终优先。内置 assistant 清单只收不能执行其他程序、不能写文件的命令：`kubectl` 的 `get`、`describe`、`logs`、`top`、`events`、`explain`、`api-resources`、`version`、`config get-contexts`、`config current-context`，以及 `grep`、`head`、`tail`、`wc`、`jq`。检查同样只看字面；这些命令能读到什么取决于运行它们的账号与凭据，读到的内容会进入模型上下文。
 
@@ -498,6 +511,8 @@ run、chat 与 serve 在设置了下面任一标准变量时，用 OTLP/HTTP（p
 
 ## 作为库使用
 
+`zx-agent` 库再导出各 crate（见[架构](#架构)），`zx_agent::ai`、`zx_agent::agent`、`zx_agent::im` 等路径与拆分为多个 crate 之前相同。只需要内核的嵌入方也可以只依赖 `zx-core` 与 `zx-ai`，路径相应为 `zx_core::agent`、`zx_ai::openai` 等：本机 macOS 上 `cargo tree -e normal` 计得 `zx-core` 连同依赖共 104 个包，不含 rmcp、tokio-tungstenite、OpenTelemetry、clap 与 toml；`zx-agent` 为 169 个。各 crate 都标了 `publish = false`，不发布到 crates.io。
+
 完整示例见 `examples/library.rs`（参与编译检查）。核心步骤如下：
 
 ```rust
@@ -573,7 +588,7 @@ P1 的 SDK 接口调整：静态配置移入 `LoopSpec`；`LoopConfig` 持有钩
 
 扩展点均为 trait：
 
-- `ai::Provider`：接入新的模型服务，必须遵守 `src/ai/provider.rs` 中的约定。
+- `ai::Provider`：接入新的模型服务，必须遵守 `crates/zx-ai/src/provider.rs` 中的约定。
 - `agent::Tool`：自定义工具。返回 `Err` 等价于 pi 中的抛出异常，会变成错误结果交给模型。`effects()` 默认返回 `SideEffects`，Runner 会在执行前记录开始；不会改变任何状态的工具应返回 `Effects::ReadOnly`，否则中断后只能报告结果未知。
 - `agent::ToolPolicy`：内置风格的工具调用策略，经 `policy::PolicyHook` 注册，运行在 `Policy` 阶段；扩展改用 `Hooks::before_tool`。
 - `agent::Hooks`：输入、上下文、工具调用前后、回合结束与事件观察。钩子的输入输出类型（`Decision`、`TurnDecision`、`ContextEdit`、`ToolOutput`、`Approval`、`ApprovalRequest`、`ToolCall`、`HookContext`、`TurnSummary`）都有固定的 JSON 格式，供钩子进程与审批转发使用，格式由 `tests/hook_contract.rs` 固定。
@@ -657,9 +672,11 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
+在仓库根目录运行时，这三条命令覆盖全部 5 个 crate（test 与 clippy 经 `Cargo.toml` 的 `default-members`）。在 `crates/` 下某个 crate 的目录里运行，或加 `-p zx-core` 这样的参数，只处理那一个 crate；集成测试都在根目录的 `tests/`，属于 `zx-agent`。
+
 | 测试文件 | 覆盖内容 |
 |---|---|
-| `src/**`（单元测试） | 会话文件和事件流的 JSON 格式、事件信封与每次运行的编号、会话写入失败 / 超时 / 被中断后停止写入、单写者锁与只读快照、自定义存储的记录与重新加载、SSE 解析、流式累积、推理内容的记录与回传、请求体组装、错误链、重试判断、命令策略及其提示词、会话投影、崩溃恢复与文件权限、截断、bash（超时后杀掉整个进程组、取消、隐藏环境变量）、read_file、系统提示词的段落对比与两种发送模式 |
+| `src/**`、`crates/*/src/**`（单元测试） | 会话文件和事件流的 JSON 格式、事件信封与每次运行的编号、会话写入失败 / 超时 / 被中断后停止写入、单写者锁与只读快照、自定义存储的记录与重新加载、SSE 解析、流式累积、推理内容的记录与回传、请求体组装、错误链、重试判断、命令策略及其提示词、会话投影、崩溃恢复与文件权限、截断、bash（超时后杀掉整个进程组、取消、隐藏环境变量）、read_file、系统提示词的段落对比与两种发送模式 |
 | `tests/agent_loop.rs` | 循环语义：工具调用往返、并行与结果顺序、串行模式、各类失败、length 截断、轮次上限、预算用完时不开新回合且排队输入留在队列、terminate、引导与后续消息、出错与中止、provider 未发最终事件、系统提示词的记录与增量更新 |
 | `tests/runner.rs` | 重试且不重复 prompt、失败记录留在文件中、放弃不可重试的错误、轮次、时间与 token 上限、调用方取消、截断续写与拼接、最终回答只取本次运行的消息、续跑会话、恢复会话时提示词变化写入文件、先写盘再转发事件、自定义 `SessionLog` 存储的会话重新加载后继续对话、事件的编号与 ID、`run_start` / `run_end`、尝试与请求起点及其会话条目、消息与上下文编辑的条目 ID、预算用完不重试并保留错误、重试省略失败回答的 `context_edited`、无预算时排队输入留在队列、运行在观察者处理时被丢弃时排队输入只写一次 |
 | `tests/agent_session.rs` | 共享提问与 Busy、取消与 future 丢弃后复用、队列边界、订阅和退订、回调重入与 panic 隔离、模型切换、授权撤销、先写审计再多订阅分发、有界订阅按序接收、通道满时丢弃计数且不阻塞运行、会话释放后有界订阅结束 |
@@ -692,7 +709,7 @@ cargo fmt --check
 - Linux（Ubuntu 24.04）和 macOS（Apple Silicon）的全目标构建、单元测试、集成测试及 doctest。
 - Rust 1.88 的全目标编译和测试。构建与测试使用 `--locked`；真实模型 API 测试保持默认跳过。
 
-`Release` 工作流在推送 `v*` tag 时构建发布草稿；tag 必须与 `Cargo.toml` 的版本一致。
+`Release` 工作流在推送 `v*` tag 时构建发布草稿；tag 必须与 `Cargo.toml` 中 `[workspace.package]` 的版本一致（各 crate 共用这一版本）。
 也可以按既有 tag 重跑：`gh workflow run release.yml --ref v0.1.0`。手动运行时须选择 tag，
 使来源证明记录的工作流版本与实际构建源码一致。
 

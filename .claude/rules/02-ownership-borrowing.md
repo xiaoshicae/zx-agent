@@ -15,7 +15,7 @@ paths:
 2. 缩短借用：先取出需要的值再修改，或者调整语句顺序。
 3. 拆分借用：分别借用不同字段（`let Self { items, log } = self;`），或者用 `split_at_mut`。
 4. 移动所有权：把值传进去、把结果返回出来；用 `std::mem::take`、`Option::take` 从 `&mut` 中取出值，而不是 clone。
-5. 用索引或 id 代替长期持有的引用。树和图不写成 `Rc<RefCell<Node>>`；本项目的会话树就是 `HashMap<String, usize>` 加 `parent_id`（`src/session.rs`）。
+5. 用索引或 id 代替长期持有的引用。树和图不写成 `Rc<RefCell<Node>>`；本项目的会话树就是 `HashMap<String, usize>` 加 `parent_id`（`crates/zx-core/src/session.rs`）。
 6. 数据确实需要共享所有权时，才用 `Arc`，并在注释里说明前 5 步为什么不适用。
 
 同一个错误改了两次还没解决，就停下来重新审视数据结构，不要反复"改一下再编译试试"。

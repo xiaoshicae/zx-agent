@@ -18,7 +18,7 @@ paths:
 - **错误枚举的底层原因**，要么拼进 `Display`，要么从 `source()` 返回，只选其一，否则打印错误链时会重复。
 - **转换错误时保留原因**：写 `.map_err(|e| format!("cannot read {}: {e}", path.display()))`，不写 `.map_err(|_| "read failed")`。
 - **错误信息**写明操作对象（路径、URL、条目 id），不写入密钥。`Display` 小写开头、结尾不加句号；给模型的工具结果是完整的句子，沿用 pi 的风格。
-- **加锁**一律用 `crate::sync::lock(&mutex)`，不直接写 `.lock()`。为什么可以忽略锁中毒、什么时候不能用它，见 `src/sync.rs`。
+- **加锁**一律用 `crate::sync::lock(&mutex)`（各 crate 在根部引入 `zx_ai::sync`），不直接写 `.lock()`。为什么可以忽略锁中毒、什么时候不能用它，见 `crates/zx-ai/src/sync.rs`。
 - `std::process::exit` 只出现在 `main.rs`。
 
 ## 不吞错误
@@ -32,4 +32,4 @@ paths:
 | `.unwrap_or_default()` / `.unwrap_or(x)` | 失败这件事本身，看起来像成功了 |
 | 没有 else 的 `if let Ok(x) = ...` | 失败分支 |
 
-例子：`src/ai/provider.rs` 的 `send_event` 忽略发送错误，因为接收端已关闭说明没人再需要这个事件。
+例子：`crates/zx-ai/src/provider.rs` 的 `send_event` 忽略发送错误，因为接收端已关闭说明没人再需要这个事件。

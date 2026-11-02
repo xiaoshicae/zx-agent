@@ -1180,7 +1180,7 @@ P7 模块 B2 实施记录（2026-11-01，PR #41）：
 - [ ] OS 级沙箱的 Executor：Linux 的 bubblewrap + seccomp、macOS 的 Seatbelt
 - [ ] 由 webhook 或告警触发运行
 - [x] OpenTelemetry 追踪（事件模型见"P7 前置"B 部分）。已完成（PR #49），见下文"OpenTelemetry 追踪"
-- [ ] 拆分为多个 crate（`zx-ai`、`zx-core`、`zx-tools`、`zx-cli`），用编译器保证分层
+- [x] 拆分为多个 crate（`zx-ai`、`zx-core`、`zx-tools`、`zx-cli`），用编译器保证分层。已完成（PR #52），见下文"crate 拆分"；与此处所列不同，CLI 留在根包 `zx-agent`，IM 单独成为 `zx-im`
 
 2026-11-02 用户决定：先做 token 预算与 OpenTelemetry。OpenTelemetry 用官方 crate，同意引入 `opentelemetry`、`opentelemetry_sdk`、`opentelemetry-otlp`（0.33，声明的 MSRV 为 1.75）。拆分 crate 与 acp 接入分开，先出方案。
 
@@ -1238,6 +1238,24 @@ OpenTelemetry 追踪（2026-11-02，已完成，PR #49；用户选择官方 crat
   - 再用用户放在本机文件中的 key：默认、关闭思考（`thinking={"type":"disabled"}`）与 `reasoning_effort="low"` 都以 0 退出，回答为 `ok`。关闭思考时三次运行的输入 token 都是 340，默认与 `low` 的五次都是 365，说明该字段生效；输出 token 在同一设置下每次不同（默认三次为 202、2、2），不能据此比较思考强度。缓存命中由 `prompt_cache_hit_tokens` 读出（128）。README 中的两条命令按原样经 shell 运行过。
 - 反向验证：分别去掉请求体加入附加字段、审计记录、还原时使用记录的字段、拒绝保留字段与拒绝重复字段，每次都有对应测试失败（依次 2、2、1、2、1 项），修改已还原。
 - 本机 macOS 验证：stable 与 Rust 1.88.0 各 757 项通过（基线 753 项，为 PR #49 的实测），6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过；自查脚本对改动的文件无命中；`tests/run_cli.rs` 连续运行 3 次，均通过。`run`、`chat`、`serve` 的 `--help` 各多出 `--request-field` 一项。未新增依赖。
+
+crate 拆分（2026-11-02，已完成，PR #52；基于 PR #51 合并后的 `64027d4`）：
+
+| crate | 位置 | 内容 | 依赖的 workspace crate |
+|---|---|---|---|
+| `zx-ai` | `crates/zx-ai` | 原 `ai` 模块，另有各 crate 共用的 `sync`、`text` | 无 |
+| `zx-core` | `crates/zx-core` | `agent`、`session`、`runner`、`agent_session`、`compaction`、`output_store`、`prompt`、`executor`、`extensions`、`interaction` | zx-ai |
+| `zx-tools` | `crates/zx-tools` | `tools`、`policy`、`mcp` | zx-ai、zx-core |
+| `zx-im` | `crates/zx-im` | 原 `im` 模块 | zx-ai、zx-core |
+| `zx-agent` | 根目录 | CLI（`main.rs`、`cli.rs`、`chat/`、`serve.rs`）、`profile`、`presets`、`otel`；库再导出以上各 crate | 以上全部 |
+
+- 与上面的计划不同：没有单独的 `zx-cli`，CLI 留在根包 `zx-agent`。这样可执行文件名、`zx_agent::…` 的库路径（`tests/`、`examples/` 与嵌入方都在用）、发布流程与镜像构建的产物位置都不变。IM 单独成为 `zx-im`，只用内核的嵌入方因此不会引入 tokio-tungstenite。
+- 公开路径不变：根包以原有模块名再导出（`pub use zx_ai as ai;`、`pub use zx_core::{agent, …};` 等），`tests/` 与 `examples/` 未改动。按 rustdoc 的条目清单（`all.html`，不含隐藏项）比对，拆分前 `zx_agent` 的 234 个公开条目与拆分后各 crate 换算回 `zx_agent::` 路径的条目完全相同。各 crate 在根部把下层引入为 `crate::ai`、`crate::agent` 等，模块内的路径不用改：50 个文件以改名移动，其中 35 个内容不变；其余 15 个的改动是下面的可见性与 Rustdoc 两条，zx-ai 单元测试里 5 处 `crate::ai::` 改为 `crate::`，两个原 `mod.rs`（现为 zx-ai、zx-im 的 `lib.rs`）加上说明与引入下层的语句，以及一处注释里的旧路径。
+- 可见性：原本 crate 内部的 5 项被其他 crate 用到，改为 `#[doc(hidden)] pub` 并在文档注释中注明：`sync::lock`、`sync::AbortOnDrop`（模块 `zx_ai::sync` 整体隐藏）、`Message::with_replaced_text`、`SystemPrompt::has_section`、`mcp::check_server_name`。
+- 依赖：版本统一写在 `[workspace.dependencies]`，各 crate 只声明自己用到的，用 `unused_crate_dependencies` 核对。未新增、未升级外部依赖：锁文件由 246 个包变为 250 个，多出的是 4 个本地 crate，其余条目不变。本机 macOS 上 `cargo tree -e normal` 计得各 crate 连同依赖的包数：zx-ai 99、zx-core 104、zx-tools 117（多出 rmcp 等）、zx-im 123（多出 tokio-tungstenite 等）、zx-agent 169。仓库外的一个 crate 只依赖 zx-core 与 zx-ai，可以编译并完成一次运行。
+- Rustdoc：zx-core 的 6 个文档测试改用 `zx_core::`、`zx_ai::` 路径。其中 3 个是 `compile_fail`，若仍写 `zx_agent::`，会因 zx-core 不依赖 zx-agent 而编译失败，测试照样通过，却不再检查原本的约束。改后把它们临时改成普通示例运行，报错依次为 E0432（内核的 `agent` 中没有 `CommandPolicy`）、E0599（`CancelSignal` 没有 `cancel`）、E0499（重叠的可变借用），与原意一致。
+- 随之修改：`release.yml` 从 `[workspace.package]` 读版本（原来读 `[package].version`，拆分后读到的是 `{workspace = true}`，tag 校验必然失败；新旧脚本都在本机对新清单运行过）；Dockerfile 增加 `COPY crates crates`；自查脚本同时扫描 `crates/`；`post-edit.sh` 改为记录 workspace 根目录，因为在成员 crate 的目录里 `cargo test` 只测那一个 crate（实测 `crates/zx-core` 中只有 81 项）；规则 08 的路径过滤改为 `**/Cargo.toml`，并写明依赖在 workspace 中的写法（实测 `cargo add -p` 只对已列在 `[workspace.dependencies]` 的依赖写成 `.workspace = true`）；README 与 `.claude/` 下文档里指向已移动文件的路径随之更新；评审稿（各自写明了代码核对基线）与本文档已有的实施记录是当时的记录，其中的路径不改。CI 的命令不变：在根目录运行时，clippy、test 与 doc 经 `default-members` 覆盖全部 crate，`cargo fmt --check` 也检查全部成员；fmt 与 clippy 用故意引入的问题验证过，test 与 doc 核对了实际处理的 crate。
+- 本机 macOS 验证：stable 与 Rust 1.88.0 各 777 项通过、7 项付费测试跳过，与拆分前（`64027d4`）相同，784 条测试名与结果一一对应（`ai::`、`im::` 前缀因模块成为 crate 根而去掉）；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过；`run`、`chat`、`serve` 与顶层的 `--help` 逐字节不变；自查脚本的命中与拆分前相同。按 Dockerfile 复制的文件用 Rust 1.88.0 `--release --locked` 构建成功，不复制 `crates/` 时失败；没有实际执行 `docker build`。拆分最初基于 `62ca0aa`，上面其余各项核对在那时完成；PR #51 只改了测试与文档，源码与清单在两个基点之间没有变化。
 
 这些整理不改变行为，在改到相关代码时顺带完成：
 
