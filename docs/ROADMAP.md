@@ -1116,7 +1116,7 @@ P7 模块 B2 实施记录（2026-11-01，PR #41）：
 
 - [ ] 结构化最终报告：`--output-schema`，按 JSON Schema 约束最终回答
 - [x] 无人值守的 token 预算：profile 上限增加 token 总量，超出时结束运行；现有退出码 0–6 的含义不变（2026-11-01 补充）。已完成（PR #47），见下文"token 预算"
-- [ ] 更多 provider：例如 Anthropic Messages API
+- [ ] 更多 provider：例如 Anthropic Messages API。2026-11-02：DeepSeek 经 OpenAI 兼容接口直接可用，不单独写 provider（用户确认）；服务端自己的设置经新增的 `--request-field` 传递（PR #50），见下文"请求附加字段"
 - [ ] 异步审批：`WebhookInteraction`，高风险命令发 webhook 请求批准，超时则拒绝
 - [ ] OS 级沙箱的 Executor：Linux 的 bubblewrap + seccomp、macOS 的 Seatbelt
 - [ ] 由 webhook 或告警触发运行
@@ -1163,7 +1163,22 @@ OpenTelemetry 追踪（2026-11-02，已完成，PR #49；用户选择官方 crat
 - 真实 Collector 验收（2026-11-02，本机 Docker）：`otel/opentelemetry-collector` 0.164.0（digest `sha256:28b6d41a…`），OTLP/HTTP 接收、debug 导出；编译出的 `zx-agent run` 对一个本地假模型服务运行一次，Collector 收到 1 组资源 span（`service.name` 为 `zx-agent`）中的 4 个 span：`request`、`turn`、`attempt`、`run`，`run` 的 `zx.run.id` 与 JSONL 中 `run_end` 的 `runId` 相同。
 - 本机 macOS 验证：stable 与 Rust 1.88.0 各 753 项通过（基线 746 项，为 PR #47 的实测），6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过；自查脚本在改动的文件中只列出原有的 3 处；`tests/otel.rs` 连续运行 10 次、`tests/run_cli.rs` 3 次、`tests/serve_cli.rs` 2 次，均通过。依赖按决策 D2 引入，锁文件 246 个包，rustls 特性与 reqwest 版本不变。
 
-## 5. 随各阶段处理的整理项
+请求附加字段（2026-11-02，已完成，PR #50；⚑ D:5/CHINA FLAG: DeepSeek 相关部分 Subject to Legal/Export Compliance approval）：
+
+| 环节 | 做法 |
+|---|---|
+| 背景 | ⚑ D:5/CHINA FLAG: DeepSeek 官方文档写明其 API 兼容 OpenAI 格式（README 的“DeepSeek”一节有原文与出处）。本项目已用现有 provider 在该服务上通过付费测试（"P5 上下文管理"的补跑记录），`reasoning_content` 的回传与缓存命中字段也已处理（`src/ai/openai.rs`）。缺的是服务端自己的设置，如思考模式（`thinking`）与思考强度（`reasoning_effort`），请求里没有办法带上 |
+| 做法 | `OpenAiConfig::extra_fields` 原样加入每个请求体；`RESERVED_FIELDS`（`model`、`messages`、`stream`、`stream_options`、`tools`、`max_tokens`）在构建 provider 时拒绝。命令行 `--request-field KEY=JSON`（run、chat、serve，可重复）；写错时在创建会话文件之前以退出码 2 结束 |
+| 审计 | 附加字段写入 `request_options` 的 `extraFields`，只在设置了时出现，此前会话的还原结果不变；还原请求时一并加入。旧版程序的还原拒绝未知字段，读到带 `extraFields` 的记录会报错，不会还原出不同的请求体 |
+
+实施记录（PR #50，基于 PR #49 的 `41dfdcc`）：
+
+- 测试：新增 4 项：`src/ai/openai.rs` 单元测试 2 项（附加字段进入请求体与审计选项、还原结果与实际请求体相同；六个保留字段在构建与还原时都被拒绝）、`tests/run_cli.rs` 2 项（字段到达假模型服务并写入会话的 `extraFields`；保留字段、不是 JSON 的值与缺少 `=` 的写法以退出码 2 结束，不发请求、不建会话文件）。
+- 真实服务验证（2026-11-02，经用户授权，`deepseek-flash`，`https://api.deepseek.com`，提示词为 “Reply with the single word: ok”，不带工具）：
+  - 先用对话中提供过的 key：全部 6 个请求返回 HTTP 401，服务端回复该 key 无效，用量为 0。
+  - 再用用户放在本机文件中的 key：默认、关闭思考（`thinking={"type":"disabled"}`）与 `reasoning_effort="low"` 都以 0 退出，回答为 `ok`。关闭思考时三次运行的输入 token 都是 340，默认与 `low` 的五次都是 365，说明该字段生效；输出 token 在同一设置下每次不同（默认三次为 202、2、2），不能据此比较思考强度。缓存命中由 `prompt_cache_hit_tokens` 读出（128）。README 中的两条命令按原样经 shell 运行过。
+- 反向验证：分别去掉请求体加入附加字段、审计记录、还原时使用记录的字段、拒绝保留字段与拒绝重复字段，每次都有对应测试失败（依次 2、2、1、2、1 项），修改已还原。
+- 本机 macOS 验证：stable 与 Rust 1.88.0 各 757 项通过（基线 753 项，为 PR #49 的实测），6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过；自查脚本对改动的文件无命中；`tests/run_cli.rs` 连续运行 3 次，均通过。`run`、`chat`、`serve` 的 `--help` 各多出 `--request-field` 一项。未新增依赖。
 
 这些整理不改变行为，在改到相关代码时顺带完成：
 

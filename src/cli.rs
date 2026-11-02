@@ -314,6 +314,13 @@ pub(crate) struct RequestArgs {
     #[arg(long, default_value_t = DEFAULT_MAX_EVENT_BYTES)]
     pub(crate) max_sse_event_bytes: usize,
 
+    /// A field to add to every request body, as KEY=JSON, for settings that some servers
+    /// offer, such as thinking='{"type":"disabled"}' on DeepSeek. Repeatable. Fields that
+    /// zx-agent sets itself, such as model and max_tokens, are refused. The session's request
+    /// audit records them.
+    #[arg(long = "request-field", value_name = "KEY=JSON")]
+    pub(crate) request_fields: Vec<String>,
+
     /// Session file (JSONL). Created if missing; an existing one is continued.
     #[arg(long)]
     pub(crate) session: Option<PathBuf>,
@@ -483,6 +490,24 @@ pub(crate) struct PreparedSession {
 /// Read `--system-prompt-file` once, at startup. As before profiles existed, it may be a
 /// pipe and is not limited to the profile file budget, so it cannot be read again for a
 /// later conversation.
+/// `--request-field` values, each KEY=JSON, as the provider's extra fields.
+fn request_fields(values: &[String]) -> Result<serde_json::Map<String, serde_json::Value>> {
+    let mut fields = serde_json::Map::new();
+    for value in values {
+        let (field, json) = value
+            .split_once('=')
+            .filter(|(field, _)| !field.is_empty())
+            .with_context(|| format!("--request-field {value:?} is not of the form KEY=JSON"))?;
+        let parsed =
+            serde_json::from_str(json).with_context(|| format!("--request-field {field}: the value is not JSON"))?;
+        anyhow::ensure!(
+            fields.insert(field.to_string(), parsed).is_none(),
+            "--request-field {field} is given more than once"
+        );
+    }
+    Ok(fields)
+}
+
 /// Export traces when an OTLP endpoint is configured (`zx_agent::otel`), and say so on
 /// stderr. An endpoint the exporter refuses is a configuration error, reported before any
 /// session file is created.
@@ -646,6 +671,7 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
             SystemUpdatesArg::Collapse => SystemUpdates::Collapse,
             SystemUpdatesArg::Inline => SystemUpdates::Inline,
         },
+        extra_fields: request_fields(&options.request.request_fields)?,
         ..OpenAiConfig::default()
     })?;
     // read_skill and read_output read files on this machine, whatever executor runs commands.

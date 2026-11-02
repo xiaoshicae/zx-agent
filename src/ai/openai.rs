@@ -8,7 +8,7 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
 
 use super::provider::{EventReceiver, EventSender, Provider, event_channel, send_event};
@@ -28,6 +28,10 @@ const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
 /// Response fields that carry reasoning text: `reasoning_content` (DeepSeek, vLLM) or
 /// `reasoning` (OpenRouter, Ollama). The first one present wins; replay uses the same name.
 const REASONING_FIELDS: [&str; 2] = ["reasoning_content", "reasoning"];
+
+/// Request body fields that the provider sets itself, so that
+/// [`OpenAiConfig::extra_fields`] cannot replace them.
+pub const RESERVED_FIELDS: [&str; 6] = ["model", "messages", "stream", "stream_options", "tools", "max_tokens"];
 
 /// Connection settings for an OpenAI-compatible server. Debug output redacts the API key.
 #[derive(Clone)]
@@ -49,6 +53,10 @@ pub struct OpenAiConfig {
     pub max_response_bytes: usize,
     /// Maximum bytes in a single SSE event, including framing.
     pub max_sse_event_bytes: usize,
+    /// Fields added as they are to every request body, for settings that some servers offer,
+    /// such as `thinking` or `reasoning_effort`. [`RESERVED_FIELDS`] are refused. They are
+    /// part of [`Provider::request_options`], so the session's request audit records them.
+    pub extra_fields: Map<String, Value>,
 }
 
 impl fmt::Debug for OpenAiConfig {
@@ -64,6 +72,7 @@ impl fmt::Debug for OpenAiConfig {
             .field("system_updates", &self.system_updates)
             .field("max_response_bytes", &self.max_response_bytes)
             .field("max_sse_event_bytes", &self.max_sse_event_bytes)
+            .field("extra_fields", &self.extra_fields.keys().collect::<Vec<_>>())
             .finish()
     }
 }
@@ -94,8 +103,17 @@ impl Default for OpenAiConfig {
             system_updates: SystemUpdates::default(),
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             max_sse_event_bytes: DEFAULT_MAX_EVENT_BYTES,
+            extra_fields: Map::new(),
         }
     }
+}
+
+/// Refuse extra fields that would replace what the provider sets itself.
+fn check_extra_fields(fields: &Map<String, Value>) -> anyhow::Result<()> {
+    if let Some(field) = fields.keys().find(|field| RESERVED_FIELDS.contains(&field.as_str())) {
+        anyhow::bail!("request field {field:?} cannot be added: the provider sets it itself");
+    }
+    Ok(())
 }
 
 /// Streaming provider for the OpenAI Chat Completions protocol.
@@ -121,6 +139,7 @@ impl OpenAiCompatible {
             !config.connect_timeout.is_zero(),
             "connect_timeout must be greater than zero"
         );
+        check_extra_fields(&config.extra_fields)?;
         let mut builder = reqwest::Client::builder().connect_timeout(config.connect_timeout);
         if !config.use_system_proxy {
             builder = builder.no_proxy();
@@ -137,7 +156,12 @@ impl Provider for OpenAiCompatible {
         &self.config.provider_name
     }
     fn request_options(&self) -> Value {
-        json!({"format":"openai-chat-completions","version":1,"systemUpdates":match self.config.system_updates { SystemUpdates::Collapse => "collapse", SystemUpdates::Inline => "inline" }})
+        let mut options = json!({"format":"openai-chat-completions","version":1,"systemUpdates":match self.config.system_updates { SystemUpdates::Collapse => "collapse", SystemUpdates::Inline => "inline" }});
+        // Absent unless set, so that the options of earlier sessions stay as they were.
+        if !self.config.extra_fields.is_empty() {
+            options["extraFields"] = Value::Object(self.config.extra_fields.clone());
+        }
+        options
     }
 
     fn stream(&self, request: Request, cancel: CancellationToken) -> EventReceiver {
@@ -464,6 +488,10 @@ pub fn build_body(request: &Request, config: &OpenAiConfig) -> Value {
     if let Some(max_tokens) = request.max_tokens {
         body["max_tokens"] = json!(max_tokens);
     }
+    // Checked when the provider is built: none replaces a field set above.
+    for (field, value) in &config.extra_fields {
+        body[field.as_str()] = value.clone();
+    }
     body
 }
 
@@ -477,6 +505,8 @@ pub fn replay_body(request: &Request, provider: &str, options: &Value) -> anyhow
         format: String,
         version: u32,
         system_updates: String,
+        #[serde(default)]
+        extra_fields: Map<String, Value>,
     }
     let options: Options = serde_json::from_value(options.clone())?;
     anyhow::ensure!(
@@ -488,11 +518,13 @@ pub fn replay_body(request: &Request, provider: &str, options: &Value) -> anyhow
         "inline" => SystemUpdates::Inline,
         value => anyhow::bail!("unknown system update mode {value:?}"),
     };
+    check_extra_fields(&options.extra_fields)?;
     Ok(build_body(
         request,
         &OpenAiConfig {
             provider_name: provider.into(),
             system_updates,
+            extra_fields: options.extra_fields,
             ..OpenAiConfig::default()
         },
     ))
@@ -1450,6 +1482,57 @@ mod tests {
             json!({"format": "openai-chat-completions", "version": 1, "systemUpdates": "collapse", "extra": 1}),
         ] {
             assert!(replay_body(&request, "p", &options).is_err(), "{options}");
+        }
+    }
+
+    fn fields(pairs: &[(&str, Value)]) -> Map<String, Value> {
+        pairs
+            .iter()
+            .map(|(field, value)| (field.to_string(), value.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn extra_fields_go_into_the_body_and_the_recorded_options() {
+        let config = OpenAiConfig {
+            extra_fields: fields(&[
+                ("thinking", json!({"type": "disabled"})),
+                ("reasoning_effort", json!("low")),
+            ]),
+            ..p_config(SystemUpdates::Collapse)
+        };
+        let request = replayable_request();
+        let body = build_body(&request, &config);
+        assert_eq!(body["thinking"], json!({"type": "disabled"}));
+        assert_eq!(body["reasoning_effort"], json!("low"));
+        let provider = OpenAiCompatible::new(config).unwrap();
+        let options = provider.request_options();
+        assert_eq!(
+            options["extraFields"],
+            json!({"thinking": {"type": "disabled"}, "reasoning_effort": "low"})
+        );
+        // The audit rebuilds the body that was sent.
+        assert_eq!(replay_body(&request, "p", &options).unwrap(), body);
+    }
+
+    #[test]
+    fn fields_the_provider_sets_cannot_be_added() {
+        for field in RESERVED_FIELDS {
+            let extra_fields = fields(&[(field, json!(false))]);
+            let error = OpenAiCompatible::new(OpenAiConfig {
+                extra_fields: extra_fields.clone(),
+                ..p_config(SystemUpdates::Collapse)
+            })
+            .err()
+            .unwrap();
+            assert!(error.to_string().contains(field), "{error}");
+            let options = json!({
+                "format": "openai-chat-completions",
+                "version": 1,
+                "systemUpdates": "collapse",
+                "extraFields": extra_fields,
+            });
+            assert!(replay_body(&replayable_request(), "p", &options).is_err(), "{field}");
         }
     }
 }
