@@ -149,7 +149,7 @@ impl Runner {
     ///
     /// ```compile_fail
     /// use tokio_util::sync::CancellationToken;
-    /// use zx_agent::runner::Runner;
+    /// use zx_core::runner::Runner;
     ///
     /// async fn overlapping(runner: &mut Runner, cancel: &CancellationToken) {
     ///     let first = runner.run("first", cancel);

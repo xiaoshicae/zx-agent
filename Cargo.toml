@@ -1,11 +1,48 @@
-[package]
-name = "zx-agent"
+[workspace]
+members = ["crates/zx-ai", "crates/zx-core", "crates/zx-tools", "crates/zx-im"]
+# Commands run at the root (build, test, clippy, doc) cover every crate, not only zx-agent.
+default-members = [".", "crates/zx-ai", "crates/zx-core", "crates/zx-tools", "crates/zx-im"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
-description = "Minimal general-purpose agent kernel for interactive, unattended, and embedded use, modeled on pi"
 license = "MIT"
 publish = false
+
+[workspace.dependencies]
+zx-ai = { path = "crates/zx-ai" }
+zx-core = { path = "crates/zx-core" }
+zx-im = { path = "crates/zx-im" }
+zx-tools = { path = "crates/zx-tools" }
+
+anyhow = "1"
+async-trait = "0.1"
+clap = { version = "4", features = ["derive", "env"] }
+futures = "0.3"
+libc = "0.2"
+opentelemetry = { version = "0.33", default-features = false, features = ["trace"] }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace"] }
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
+rmcp = { version = "3.8", default-features = false, features = ["client", "transport-streamable-http-client-reqwest", "reqwest"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync", "signal", "io-util", "fs", "net"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+tokio-util = "0.7"
+toml = { version = "1.1.8", default-features = false, features = ["parse", "serde", "std"] }
+uuid = { version = "1", features = ["v4"] }
+
+[package]
+name = "zx-agent"
+description = "Minimal general-purpose agent kernel for interactive, unattended, and embedded use, modeled on pi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
 
 [lib]
 name = "zx_agent"
@@ -16,26 +53,31 @@ name = "zx-agent"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1"
-async-trait = "0.1"
-clap = { version = "4", features = ["derive", "env"] }
-futures = "0.3"
-opentelemetry = { version = "0.33", default-features = false, features = ["trace"] }
-opentelemetry-otlp = { version = "0.33", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace"] }
-opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace"] }
-reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
-rmcp = { version = "3.8", default-features = false, features = ["client", "transport-streamable-http-client-reqwest", "reqwest"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync", "signal", "io-util", "fs", "net"] }
-tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
-tokio-util = "0.7"
-toml = { version = "1.1.8", default-features = false, features = ["parse", "serde", "std"] }
-uuid = { version = "1", features = ["v4"] }
+zx-ai.workspace = true
+zx-core.workspace = true
+zx-im.workspace = true
+zx-tools.workspace = true
+
+anyhow.workspace = true
+async-trait.workspace = true
+clap.workspace = true
+futures.workspace = true
+opentelemetry.workspace = true
+opentelemetry-otlp.workspace = true
+opentelemetry_sdk.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+toml.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
-opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace", "testing"] }
-tempfile = "3"
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
+tempfile.workspace = true
+# The fake chat platforms of the integration tests (tests/common/) speak WebSocket.
+tokio-tungstenite.workspace = true
 
 [target."cfg(unix)".dependencies]
-libc = "0.2"
+libc.workspace = true

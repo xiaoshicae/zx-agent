@@ -269,7 +269,9 @@ impl Message {
     }
 
     /// A projection needs a separate copy; the original audit record stays unchanged.
-    pub(crate) fn with_replaced_text(&self, text: &str) -> Self {
+    /// Public only for the session in zx-core, not part of the API.
+    #[doc(hidden)]
+    pub fn with_replaced_text(&self, text: &str) -> Self {
         let mut message = self.clone();
         match &mut message {
             // System changes are appended, never edited.
@@ -352,7 +354,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::ai::{SectionChange, SystemMessage};
+    use crate::{SectionChange, SystemMessage};
 
     #[test]
     fn reads_older_uncorrelated_deltas() {

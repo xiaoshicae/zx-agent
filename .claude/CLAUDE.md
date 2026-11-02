@@ -32,25 +32,25 @@
 
 ## 架构设计
 
-分层如下，上层依赖下层。架构图、模块与 pi 的对应表、参数说明见 README。
+代码分为一个 workspace 中的 5 个 crate，上层依赖下层，下层 crate 引用不到上层：`zx-ai`（`crates/zx-ai`）← `zx-core`（`crates/zx-core`）← `zx-tools`（`crates/zx-tools`）与 `zx-im`（`crates/zx-im`），二者互不依赖 ← `zx-agent`（根目录 `src/`，CLI、场景配置与追踪导出；库以原有路径再导出各 crate）。各层位置如下，架构图、模块与 pi 的对应表、参数说明见 README。
 
 | 层 | 位置 | 职责 |
 |---|---|---|
 | CLI | `src/main.rs`、`src/cli.rs`、`src/chat/`、`src/serve.rs` | 共用参数与运行组装；run 处理单次任务；chat 管理单一输入所有者、审批、信号和 REPL；serve 读取配置、为每个线程准备会话并隐藏 IM 凭据 |
 | 场景配置 | `src/profile/`、`profiles/` | TOML 基线与覆盖、项目上下文、显式 skill 目录及按需读取、MCP 服务器（`[[mcp]]`）；不进入循环机制 |
 | 场景预设 | `src/presets/` | 提供外层显式选择的说明与运行默认值；内核机制不依赖预设 |
-| 提示词 | `src/prompt.rs` | 生成系统提示词：说明 + `<environment>` + `<command_policy>` + `<project_context>` + `<available_skills>`（空段落不出现） |
-| 共享会话 | `src/agent_session.rs` | 共享调用与 Busy、RAII 归还运行权、取消、订阅与退订、空闲时切换模型 |
-| 运行层 | `src/runner.rs` | 持有可顺序复用的会话；以独占借用控制单次运行、重试、上限、审批缓存、持久化和报告 |
-| 会话 | `src/session.rs`、`src/session/` | 只追加的条目树与校验，投影出发给模型的消息；记录经 `SessionLog` 保存，默认是单写者的 JSONL 文件（`file.rs`） |
-| 上下文管理 | `src/compaction.rs`、`src/session/compaction.rs`、`src/output_store.rs` | 宿主摘要、追加升级与原始投影、脱敏后的长结果保存及分页 |
-| agent | `src/agent/` | 回合循环、工具执行、Hooks 宿主、事件、消息队列 |
-| ai | `src/ai/` | 消息类型、系统提示词段落、流式事件协议、provider 与重试判断 |
-| 外层策略与交互 | `src/policy.rs`、`src/extensions.rs`、`src/interaction.rs` | 命令与规则策略、续写、已知密钥脱敏、扩展的打包与注册（`Extension`、`register`）、宿主审批与 NoHuman |
-| 工具 | `src/tools/` | bash、read_file、输出截断 |
-| 执行环境 | `src/executor/` | 工具执行命令与读文件的位置；`LocalExecutor` 为本机，负责进程组、超时与取消、输出捕获上限；`ContainerExecutor` 在每个进程一个的 Docker 容器中执行，并在容器内按进程组终止命令 |
-| IM 接入 | `src/im/` | 平台接口 `ImChannel`；`Server` 做访问控制并按线程分派，每个线程一个任务独占会话、运行、审批卡片与空闲释放，任务之间只经 channel 通信；宿主经 `SessionFactory` 打开会话；运行中的状态经可选的 `StatusStore` 记录，重启时替换上个进程遗留的“处理中…”（`status.rs`）；`slack.rs` 经 Socket Mode 接收、经 Web API 发送 |
-| MCP 客户端 | `src/mcp.rs` | 经 Streamable HTTP 连接外部 MCP 服务器（先 `server/discover`，旧服务器回退到 `initialize`），只把配置中列出的工具交给模型；`Server` 是一个 `Extension`。调用有超时、可取消，结果截断，工具一律按有副作用处理 |
+| 提示词 | `crates/zx-core/src/prompt.rs` | 生成系统提示词：说明 + `<environment>` + `<command_policy>` + `<project_context>` + `<available_skills>`（空段落不出现） |
+| 共享会话 | `crates/zx-core/src/agent_session.rs` | 共享调用与 Busy、RAII 归还运行权、取消、订阅与退订、空闲时切换模型 |
+| 运行层 | `crates/zx-core/src/runner.rs` | 持有可顺序复用的会话；以独占借用控制单次运行、重试、上限、审批缓存、持久化和报告 |
+| 会话 | `crates/zx-core/src/session.rs`、`crates/zx-core/src/session/` | 只追加的条目树与校验，投影出发给模型的消息；记录经 `SessionLog` 保存，默认是单写者的 JSONL 文件（`file.rs`） |
+| 上下文管理 | `crates/zx-core/src/compaction.rs`、`crates/zx-core/src/session/compaction.rs`、`crates/zx-core/src/output_store.rs` | 宿主摘要、追加升级与原始投影、脱敏后的长结果保存及分页 |
+| agent | `crates/zx-core/src/agent/` | 回合循环、工具执行、Hooks 宿主、事件、消息队列 |
+| ai | `crates/zx-ai/src/` | 消息类型、系统提示词段落、流式事件协议、provider 与重试判断；另有各 crate 共用的 `sync`、`text` |
+| 外层策略与交互 | `crates/zx-tools/src/policy.rs`、`crates/zx-core/src/extensions.rs`、`crates/zx-core/src/interaction.rs` | 命令与规则策略、续写、已知密钥脱敏、扩展的打包与注册（`Extension`、`register`）、宿主审批与 NoHuman |
+| 工具 | `crates/zx-tools/src/tools/` | bash、read_file、输出截断 |
+| 执行环境 | `crates/zx-core/src/executor/` | 工具执行命令与读文件的位置；`LocalExecutor` 为本机，负责进程组、超时与取消、输出捕获上限；`ContainerExecutor` 在每个进程一个的 Docker 容器中执行，并在容器内按进程组终止命令 |
+| IM 接入 | `crates/zx-im/src/` | 平台接口 `ImChannel`；`Server` 做访问控制并按线程分派，每个线程一个任务独占会话、运行、审批卡片与空闲释放，任务之间只经 channel 通信；宿主经 `SessionFactory` 打开会话；运行中的状态经可选的 `StatusStore` 记录，重启时替换上个进程遗留的“处理中…”（`status.rs`）；`slack.rs` 经 Socket Mode 接收、经 Web API 发送 |
+| MCP 客户端 | `crates/zx-tools/src/mcp.rs` | 经 Streamable HTTP 连接外部 MCP 服务器（先 `server/discover`，旧服务器回退到 `initialize`），只把配置中列出的工具交给模型；`Server` 是一个 `Extension`。调用有超时、可取消，结果截断，工具一律按有副作用处理 |
 | 追踪导出 | `src/otel.rs` | 设置了 OTLP 地址的标准变量时，把运行事件转成 OpenTelemetry span 经 OTLP/HTTP 导出；只含元数据，事件经有界通道交给一个后台任务，满时丢弃，运行不等待导出 |
 
 一次运行的数据流：`main` 组装 `AgentSession` → `prompt_with_cancel` 独占取得 Runner → `Runner::run` 取会话投影作为上下文 → `run_loop` 先持久化提示词、输入和上下文改动，再经宿主准备步骤执行可选摘要 → 新增插话与钩子改动持久化后请求任务模型 → 执行工具、脱敏、可选落盘 → 循环经 Runner 实现的会话宿主（`agent::SessionHost`，crate 内部）先写完成消息，再发出事件 → runner 处理任务请求重试并汇总 `RunReport`，由 `main` 映射退出码。自动摘要单独记录、消耗请求预算且不重试；手动 compact 共用独占权并独立报告。
@@ -67,9 +67,11 @@
 - **兼容性默认保守，能力按需打开**：提示词更新默认合并到开头（`collapse`，与 pi 对 OpenAI 兼容服务的默认一致），服务端支持时才按位置发送（`inline`）。
 - **安全靠部署隔离**：策略只是第一道防线（检查边界见 README 的"安全模型"）。认证 key 只从环境变量读取，该变量从 bash 子进程环境中删除；Unix 上新建会话文件的权限为 0600，打开已有文件不修改权限；真正的隔离要靠不同账号或容器。
 - **扩展点都是 trait**：`Provider`、`Tool`、`ToolPolicy`、`Hooks`、`Interaction`、`EventSink`、`Executor`、`SessionLog`、`ImChannel`、`StatusStore`、`Extension`。新能力优先以实现 trait 的方式加入，不改循环本身。
+- **分层由 crate 边界保证**：内核（`zx-core`）引用不到工具、策略、MCP、IM 和 CLI，只依赖 `zx-core` 与 `zx-ai` 的嵌入方也不会引入 rmcp、tokio-tungstenite 和 OpenTelemetry。新模块放进它所属的层；需要引用上层时，说明分层或接口该改了。各 crate 在根部把下层引入为 `crate::ai`、`crate::agent`、`crate::sync` 等，所以模块内的路径与拆分前相同；跨 crate 使用、但不属于 API 的项写成 `#[doc(hidden)] pub` 并在文档注释里注明（如 `zx_ai::sync`、`SystemPrompt::has_section`）。
 
 ## 命令
 
+- 以下命令都在仓库根目录运行，覆盖全部 5 个 crate（test、clippy 与 doc 经 `Cargo.toml` 的 `default-members`）。在 `crates/*` 的目录里运行或加 `-p <crate>` 时只处理那一个 crate；集成测试都在根目录的 `tests/`，属于 `zx-agent`
 - 格式：`cargo fmt`（`rustfmt.toml`：`max_width = 120`）
 - lint：`cargo clippy --all-targets -- -D warnings`，要求零警告
 - 测试：`cargo test`，不需要网络和 API key。只跑一个集成测试文件：`cargo test --test agent_loop`；按名字过滤：`cargo test retries_transient`。付费的 `tests/real_api.rs` 默认跳过，见红线 9
@@ -120,16 +122,16 @@
 
 修改相关模块时必须保持以下不变量。每一条都有测试覆盖，测试失败说明不变量被破坏了：
 
-1. **provider 不报错。** `Provider::stream` 立即返回；所有失败都编码成最终的 `StreamEvent::Error`，其 `stop_reason` 为 `Error` 或 `Aborted`；接收端存续时，每个流恰好以一个 `Done` 或 `Error` 结束。通过有界事件通道发送，临时性失败优先使用 `ProviderError` 判断（`src/ai/provider.rs`、`src/ai/retry.rs`）。
-2. **由模型决定何时停止。** 工具失败（找不到、参数无效、被策略拒绝、执行报错、panic）都变成 `is_error` 的工具结果，循环继续（`src/agent/agent_loop.rs`）。
+1. **provider 不报错。** `Provider::stream` 立即返回；所有失败都编码成最终的 `StreamEvent::Error`，其 `stop_reason` 为 `Error` 或 `Aborted`；接收端存续时，每个流恰好以一个 `Done` 或 `Error` 结束。通过有界事件通道发送，临时性失败优先使用 `ProviderError` 判断（`crates/zx-ai/src/provider.rs`、`crates/zx-ai/src/retry.rs`）。
+2. **由模型决定何时停止。** 工具失败（找不到、参数无效、被策略拒绝、执行报错、panic）都变成 `is_error` 的工具结果，循环继续（`crates/zx-core/src/agent/agent_loop.rs`）。
 3. **并行执行工具分三个阶段：** 逐个检查 → 并发执行 → 按调用顺序写结果。只要有一个工具是 `Sequential`，整批改为串行。
 4. **回复因 `Length` 截断时，不执行其中的工具调用。**
-5. **会话只追加。** 不改写、不删除已写入的记录；`SessionLog::append` 成功后才更新内存（`src/session.rs`）。唯一的例外是打开 JSONL 文件时截掉崩溃或写入失败留下的未完成尾记录（在其余记录校验通过之后），并报告删除的字节数；一次写入失败、超时或被中断（结果未知）后不再写入，保证残缺只出现在末尾。JSONL 文件同一时间只有一个写入者（`flock`，`src/session/file.rs`）。
-6. **发给模型的上下文就是会话投影，系统提示词也在其中。** 系统提示词以 system 消息记录，变化时只追加变化的段落，不改写之前的版本（`src/ai/system_prompt.rs`）。重试时用 `context_edit` 省略失败的回答再续跑，不重复用户消息（`src/runner.rs`）。
+5. **会话只追加。** 不改写、不删除已写入的记录；`SessionLog::append` 成功后才更新内存（`crates/zx-core/src/session.rs`）。唯一的例外是打开 JSONL 文件时截掉崩溃或写入失败留下的未完成尾记录（在其余记录校验通过之后），并报告删除的字节数；一次写入失败、超时或被中断（结果未知）后不再写入，保证残缺只出现在末尾。JSONL 文件同一时间只有一个写入者（`flock`，`crates/zx-core/src/session/file.rs`）。
+6. **发给模型的上下文就是会话投影，系统提示词也在其中。** 系统提示词以 system 消息记录，变化时只追加变化的段落，不改写之前的版本（`crates/zx-ai/src/system_prompt.rs`）。重试时用 `context_edit` 省略失败的回答再续跑，不重复用户消息（`crates/zx-core/src/runner.rs`）。
 7. **会话写入失败时立即停止运行**（审计要求）：会话宿主返回错误，循环不再执行后续步骤，运行以 `Error` 结束，即使同时被取消。
-8. **工具输出必须截断**（`src/tools/truncate.rs`）；耗时的工具必须响应 `ToolContext::cancel`。
+8. **工具输出必须截断**（`crates/zx-tools/src/tools/truncate.rs`）；耗时的工具必须响应 `ToolContext::cancel`。
 9. **认证用的 API key 只从环境变量读取**，不主动写入会话文件、事件或日志；其环境变量从 bash 子进程中删除（`BashTool::hidden_env`）。CLI 的 `RedactSecrets` 在工具输出持久化前过滤认证 key 的完整字面值；不识别未知或变形的密钥，也不覆盖输入、模型输出与参数，边界见 README 的"安全模型"。
-10. **有副作用的工具调用先记录开始再执行，恢复时不重放。** `Tool::effects()` 为 `SideEffects` 的调用通过检查与审批后，先追加 `tool_call_started`，写入失败则不执行（`src/agent/agent_loop.rs`）。Runner 每次运行开始时，为分支末尾缺少结果的调用补写错误结果，按开始记录区分结果未知与未执行；以 `Error` 或 `Aborted` 结束的回答中的调用从不执行，一律记为未执行（`src/session/recovery.rs`、`src/runner.rs`）。
+10. **有副作用的工具调用先记录开始再执行，恢复时不重放。** `Tool::effects()` 为 `SideEffects` 的调用通过检查与审批后，先追加 `tool_call_started`，写入失败则不执行（`crates/zx-core/src/agent/agent_loop.rs`）。Runner 每次运行开始时，为分支末尾缺少结果的调用补写错误结果，按开始记录区分结果未知与未执行；以 `Error` 或 `Aborted` 结束的回答中的调用从不执行，一律记为未执行（`crates/zx-core/src/session/recovery.rs`、`crates/zx-core/src/runner.rs`）。
 
 ## 新增功能放在哪里
 

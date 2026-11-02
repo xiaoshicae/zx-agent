@@ -5,9 +5,11 @@
 # The toolchain the release workflow uses (.github/workflows/release.yml).
 FROM rust:1.88-slim-bookworm AS build
 WORKDIR /src
-# Only what the build reads (profiles/ is compiled in), so edits elsewhere keep it cached.
+# Only what the build reads (the workspace crates, and profiles/, which is compiled in), so
+# edits elsewhere keep it cached.
 COPY Cargo.toml Cargo.lock ./
 COPY src src
+COPY crates crates
 COPY profiles profiles
 RUN cargo build --release --locked
 

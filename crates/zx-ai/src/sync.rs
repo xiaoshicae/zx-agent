@@ -1,4 +1,5 @@
-//! Synchronization helpers shared across the crate.
+//! Synchronization helpers shared by the crates of the zx-agent workspace. Public only so that
+//! those crates can reach them; not part of the API.
 
 use std::sync::{Mutex, MutexGuard};
 
@@ -6,7 +7,7 @@ use tokio::task::JoinHandle;
 
 /// A background task owned by an operation. Dropping a plain JoinHandle detaches it;
 /// these tasks must instead stop when their run or tool future is dropped.
-pub(crate) struct AbortOnDrop<T>(pub(crate) JoinHandle<T>);
+pub struct AbortOnDrop<T>(pub JoinHandle<T>);
 
 impl<T> Drop for AbortOnDrop<T> {
     fn drop(&mut self) {
@@ -16,11 +17,11 @@ impl<T> Drop for AbortOnDrop<T> {
 
 /// Lock `mutex`, recovering the data if a previous holder panicked.
 ///
-/// Poisoning only records that some holder panicked. Every critical section in this crate
+/// Poisoning only records that some holder panicked. Every critical section in the workspace
 /// is a single operation (push, take, assign) or an append that does not panic midway, so
 /// the data is never left half-updated and stays safe to use. Do not use this helper for a
 /// critical section that could leave partial state behind.
-pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+pub fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 

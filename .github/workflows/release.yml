@@ -47,10 +47,11 @@ jobs:
           if os.environ["GITHUB_REF_TYPE"] != "tag":
               raise SystemExit("Select a version tag: gh workflow run release.yml --ref vX.Y.Z")
           tag = os.environ["GITHUB_REF_NAME"]
+          # Every crate, zx-agent included, takes its version from [workspace.package].
           with open("Cargo.toml", "rb") as manifest:
-              version = tomllib.load(manifest)["package"]["version"]
+              version = tomllib.load(manifest)["workspace"]["package"]["version"]
           if tag != f"v{version}":
-              raise SystemExit(f"Tag {tag!r} must match Cargo.toml version v{version}")
+              raise SystemExit(f"Tag {tag!r} must match Cargo.toml workspace version v{version}")
           sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
               output.write(f"tag={tag}\nsha={sha}\n")

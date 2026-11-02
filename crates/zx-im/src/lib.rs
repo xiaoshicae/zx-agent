@@ -1,9 +1,11 @@
 //! Chat platforms: the [`ImChannel`] extension point, and a [`Server`] that answers each
-//! thread with its own [`AgentSession`](crate::AgentSession). Design: docs/serve-im-review.md.
+//! thread with its own [`AgentSession`]. Design: docs/serve-im-review.md.
 //!
 //! A channel only moves messages. The server owns routing, sessions, the run limit and
 //! approvals, so supporting another platform means implementing the four methods of
 //! [`ImChannel`].
+//!
+//! The `zx-agent` crate re-exports this crate as `zx_agent::im`.
 
 mod approval;
 pub mod feishu;
@@ -20,6 +22,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+// The modules name the model layer, the kernel and the shared helpers by these crate-root paths.
+use zx_ai::{self as ai, sync};
+use zx_core::{AgentSession, agent, agent_session, interaction, runner};
 
 use crate::agent::ApprovalResult;
 

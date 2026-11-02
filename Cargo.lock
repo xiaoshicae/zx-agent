@@ -2411,7 +2411,6 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "reqwest",
- "rmcp",
  "serde",
  "serde_json",
  "tempfile",
@@ -2420,4 +2419,76 @@ dependencies = [
  "tokio-util",
  "toml",
  "uuid",
+ "zx-ai",
+ "zx-core",
+ "zx-im",
+ "zx-tools",
+]
+
+[[package]]
+name = "zx-ai"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "libc",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "zx-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "uuid",
+ "zx-ai",
+]
+
+[[package]]
+name = "zx-im"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "uuid",
+ "zx-ai",
+ "zx-core",
+]
+
+[[package]]
+name = "zx-tools"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "libc",
+ "reqwest",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "zx-ai",
+ "zx-core",
 ]

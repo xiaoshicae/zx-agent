@@ -19,10 +19,17 @@ case "$file" in
     *.rs) rustfmt --edition 2024 "$file" >/dev/null 2>&1 ;;
 esac
 
+# 记下 workspace 的根目录，而不是离文件最近的 Cargo.toml：在成员 crate（crates/*）里跑 cargo test
+# 只测那一个包，测不到根目录 tests/ 下的集成测试。cargo 读不了清单（比如正改到一半）时退回最近的 Cargo.toml。
 dir=$(dirname "$file")
-while [ "$dir" != / ] && [ ! -f "$dir/Cargo.toml" ]; do
-    dir=$(dirname "$dir")
-done
+manifest=$(cd "$dir" && cargo locate-project --workspace --message-format plain 2>/dev/null)
+if [ -n "$manifest" ]; then
+    dir=$(dirname "$manifest")
+else
+    while [ "$dir" != / ] && [ ! -f "$dir/Cargo.toml" ]; do
+        dir=$(dirname "$dir")
+    done
+fi
 if [ -n "$session" ] && [ -f "$dir/Cargo.toml" ]; then
     marks="${TMPDIR:-/tmp}/zx-agent-stop-check"
     mkdir -p "$marks" && echo "$dir" >>"$marks/$session"

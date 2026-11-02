@@ -58,10 +58,10 @@ enum State {
 ///
 /// ```no_run
 /// use std::sync::Arc;
-/// use zx_agent::AgentSession;
-/// use zx_agent::agent::Event;
-/// use zx_agent::agent_session::SessionError;
-/// use zx_agent::runner::Runner;
+/// use zx_core::AgentSession;
+/// use zx_core::agent::Event;
+/// use zx_core::agent_session::SessionError;
+/// use zx_core::runner::Runner;
 ///
 /// # async fn example(runner: Runner) -> Result<(), SessionError> {
 /// let session = AgentSession::from(runner);

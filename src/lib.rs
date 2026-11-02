@@ -16,27 +16,22 @@
 //! - [`extensions`]: bundles of tools, hooks and prompt sections, and the built-in policies
 //! - [`mcp`]: the tools of external MCP servers, as an extension
 //! - [`otel`]: OpenTelemetry traces of runs, exported when an OTLP endpoint is configured
+//!
+//! The modules live in the crates of this workspace and are re-exported here under the paths
+//! they always had: [`ai`] is `zx-ai`; the kernel ([`agent`], [`session`], [`runner`] and the
+//! rest) is `zx-core`; [`tools`], [`policy`] and [`mcp`] are `zx-tools`; [`im`] is `zx-im`.
+//! An embedder that needs only part of it can depend on those crates directly.
 
-pub mod agent;
-pub mod agent_session;
-pub mod ai;
-pub mod compaction;
-pub mod executor;
-pub mod extensions;
-pub mod im;
-pub mod interaction;
-pub mod mcp;
+pub use zx_ai as ai;
+#[doc(hidden)]
+pub use zx_ai::text;
+pub use zx_core::{
+    AgentSession, agent, agent_session, compaction, executor, extensions, interaction, output_store, prompt, runner,
+    session,
+};
+pub use zx_im as im;
+pub use zx_tools::{mcp, policy, tools};
+
 pub mod otel;
-pub mod output_store;
-pub mod policy;
 pub mod presets;
 pub mod profile;
-pub mod prompt;
-pub mod runner;
-pub mod session;
-mod sync;
-#[doc(hidden)]
-pub mod text;
-pub mod tools;
-
-pub use agent_session::AgentSession;

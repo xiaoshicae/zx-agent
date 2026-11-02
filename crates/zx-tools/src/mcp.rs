@@ -219,8 +219,9 @@ pub fn tool_name(server: &str, tool: &str) -> Result<String, String> {
 }
 
 /// A server name is ASCII lowercase letters, digits and `-`, so that it ends at the first `__`
-/// of a tool name.
-pub(crate) fn check_server_name(name: &str) -> Result<(), String> {
+/// of a tool name. Public only for profile loading in zx-agent, not part of the API.
+#[doc(hidden)]
+pub fn check_server_name(name: &str) -> Result<(), String> {
     let well_formed = !name.is_empty()
         && name
             .chars()

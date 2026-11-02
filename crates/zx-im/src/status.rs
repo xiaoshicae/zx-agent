@@ -60,7 +60,7 @@ impl StatusFiles {
 }
 
 // Small writes, renames and reads of a few files, like a session file's appended line
-// (src/session.rs); `list` runs once, before the server receives anything.
+// (crates/zx-core/src/session.rs); `list` runs once, before the server receives anything.
 #[async_trait]
 impl StatusStore for StatusFiles {
     async fn insert(&self, key: &SessionKey, status: &MessageRef) -> Result<(), String> {

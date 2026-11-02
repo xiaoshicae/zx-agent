@@ -938,8 +938,8 @@ fn parse_arguments(raw: &str) -> (Value, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ai::system_prompt::{SectionChange, SystemMessage};
-    use crate::ai::types::{ToolDef, ToolResultMessage};
+    use crate::system_prompt::{SectionChange, SystemMessage};
+    use crate::types::{ToolDef, ToolResultMessage};
 
     fn apply_all(acc: &mut Accumulator, chunks: &[Value]) -> Vec<Delta> {
         chunks.iter().flat_map(|c| acc.apply(c).unwrap()).collect()
@@ -1080,7 +1080,7 @@ mod tests {
             let message = acc.finish().unwrap();
 
             assert_eq!(message.stop_reason, StopReason::Error, "{reason}");
-            assert!(!crate::ai::retry::is_retryable(&message), "{reason}");
+            assert!(!crate::retry::is_retryable(&message), "{reason}");
         }
     }
 
