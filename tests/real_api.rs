@@ -13,8 +13,21 @@
 //!
 //! Optional: `ZX_E2E_SYSTEM_UPDATES=inline` for a server known to accept system messages
 //! mid-conversation (default `collapse`). Every test caps output tokens and turns, and prints
-//! its token usage; with a small model the whole file uses a few thousand tokens. The tests use
-//! only synthetic prompts and files in temporary directories.
+//! its token usage; with a small model the tests other than the summary evaluation use a few
+//! thousand tokens together. The tests use only synthetic prompts and files in temporary
+//! directories.
+//!
+//! The summary evaluation, `summaries_over_eight_rounds_of_a_scripted_session`, costs far more:
+//! 16 summaries that read about 0.6 MiB of records in all, about 270,000 input tokens on the one
+//! model it has been measured on. It also needs `ZX_E2E_EVAL=1`, and otherwise only prints that
+//! it was skipped. It fails when a summary is not made. It keeps its two session files, with
+//! every round's summary, in a temporary directory and prints the path. Run it on its own:
+//!
+//! ```text
+//! ZX_E2E_AUTHORIZED=1 ZX_E2E_EVAL=1 \
+//! ZX_E2E_BASE_URL=https://api.example.com/v1 ZX_E2E_MODEL=model-id ZX_E2E_API_KEY_ENV=NAME_OF_KEY_VARIABLE \
+//!     cargo test --test real_api summaries_over_eight_rounds -- --ignored --nocapture
+//! ```
 
 mod common;
 
@@ -24,9 +37,11 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
+use common::summary_eval::{Evaluation, ROUNDS, evaluate};
 use common::{RunnerSetup, config, fast_retry};
-use zx_agent::ai::Message;
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig, SystemUpdates};
+use zx_agent::ai::{Message, Provider};
+use zx_agent::compaction::{Outcome, SummaryMode};
 use zx_agent::policy::CommandPolicy;
 use zx_agent::prompt::{build_system_prompt, environment_section};
 use zx_agent::runner::{Limits, RunOutcome, RunReport};
@@ -69,17 +84,21 @@ impl Endpoint {
         std::env::var(&self.api_key_env).unwrap_or_else(|_| panic!("{} is not set", self.api_key_env))
     }
 
-    /// A runner against this endpoint with small budgets, so a misbehaving model cannot run
-    /// up costs: 256 output tokens per response, 4 turns, 2 minutes, no retries.
-    fn setup(&self, api_key: String, cwd: &Path) -> RunnerSetup {
-        let provider = OpenAiCompatible::new(OpenAiConfig {
+    /// The provider for this endpoint, authenticating with `api_key`.
+    fn provider(&self, api_key: String) -> OpenAiCompatible {
+        OpenAiCompatible::new(OpenAiConfig {
             base_url: self.base_url.clone(),
             api_key: Some(api_key),
             system_updates: self.system_updates,
             ..OpenAiConfig::default()
         })
-        .unwrap();
-        let mut config = config(Arc::new(provider), vec![]);
+        .unwrap()
+    }
+
+    /// A runner against this endpoint with small budgets, so a misbehaving model cannot run
+    /// up costs: 256 output tokens per response, 4 turns, 2 minutes, no retries.
+    fn setup(&self, api_key: String, cwd: &Path) -> RunnerSetup {
+        let mut config = config(Arc::new(self.provider(api_key)), vec![]);
         config.spec.model = self.model.clone();
         config.spec.cwd = cwd.to_path_buf();
         config.spec.max_tokens = Some(256);
@@ -249,4 +268,72 @@ async fn an_invalid_key_fails_without_retrying() {
     assert_eq!((report.outcome, report.retries), (RunOutcome::Error, 0));
     let error = report.error.unwrap_or_default();
     assert!(error.starts_with("HTTP 4"), "{error}");
+}
+
+/// Item 6 of the incremental summary design: the scripted session of `common::summary_eval`
+/// summarized after each of its rounds, in full and then in incremental mode. Prints each
+/// round's score and the final facts. Fails when a summary is not made, since the scores then
+/// mean nothing; otherwise asserts only what holds whatever the model answers. Each summary
+/// has the default budgets: 2048 output tokens and 2 minutes. The two session files stay in a
+/// temporary directory, whose path is printed first.
+#[tokio::test]
+#[ignore = "calls a paid model API; needs ZX_E2E_AUTHORIZED=1 and the API owner's consent"]
+async fn summaries_over_eight_rounds_of_a_scripted_session() {
+    if std::env::var("ZX_E2E_EVAL").as_deref() != Ok("1") {
+        eprintln!(
+            "[real_api] summary evaluation skipped: its 16 summaries read about 0.6 MiB of records; set ZX_E2E_EVAL=1 to run it"
+        );
+        return;
+    }
+    let endpoint = Endpoint::from_env();
+    // Kept after the run, also when it fails, so that every round's summary can be read in
+    // the session files.
+    let dir = tempfile::Builder::new()
+        .prefix("zx-summary-eval-")
+        .tempdir()
+        .unwrap()
+        .keep();
+    eprintln!("[summary eval] session files in {}", dir.display());
+    let provider: Arc<dyn Provider> = Arc::new(endpoint.provider(endpoint.api_key()));
+
+    let full = evaluate(Arc::clone(&provider), &endpoint.model, SummaryMode::Full, &dir).await;
+    full.print(&endpoint.model);
+    let incremental = evaluate(provider, &endpoint.model, SummaryMode::Incremental, &dir).await;
+    incremental.print(&endpoint.model);
+
+    // A summary that was not made has no score, and an incremental one that has no earlier
+    // summary to continue reads everything, as a full one does.
+    let not_made: Vec<String> = [&full, &incremental]
+        .into_iter()
+        .flat_map(|evaluation| {
+            evaluation
+                .rounds
+                .iter()
+                .enumerate()
+                .filter(|(_, round)| round.outcome != Outcome::Completed)
+                .map(move |(index, round)| {
+                    format!(
+                        "{:?} round {}: {:?}, {}",
+                        evaluation.mode,
+                        index + 1,
+                        round.outcome,
+                        round.error.as_deref().unwrap_or("no error")
+                    )
+                })
+        })
+        .collect();
+    assert!(
+        not_made.is_empty(),
+        "summaries that were not made:\n{}",
+        not_made.join("\n")
+    );
+    // The last full summary reads all eight rounds again, about 113 KiB; an incremental one
+    // reads the last round, about 16 KiB, and at most 64 KiB of earlier facts.
+    let last = |evaluation: &Evaluation| evaluation.rounds[ROUNDS - 1].request_bytes;
+    assert!(
+        last(&incremental) < last(&full),
+        "incremental {} bytes, full {} bytes",
+        last(&incremental),
+        last(&full)
+    );
 }
