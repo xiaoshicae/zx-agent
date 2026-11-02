@@ -2,12 +2,12 @@
 
 | 信息 | 内容 |
 |-|-|
-| 版本 | `v0.5` |
-| 日期 | `2026-11-01` |
-| 状态 | 已合入（PR #27），按第 6 节分模块实施：A（PR #28）、B（PR #29）、C（PR #32）、D（部署，PR #33）已完成；真实平台验收待提供凭据 |
+| 版本 | `v0.6` |
+| 日期 | `2026-11-02` |
+| 状态 | 已合入（PR #27），按第 6 节分模块实施：A（PR #28）、B（PR #29）、C（PR #32）、D（部署，PR #33）已完成；真实平台验收待提供凭据。v0.6 补记缺口 ⑧（崩溃时丢失已确认的消息），暂按已知缺口处理 |
 | Owner | 待指定 |
 | 对应 | `docs/ROADMAP.md:365`：P6“部署方向”中告警 Webhook 与 IM 机器人需要新的服务模式，另行评审；P9 的“由 webhook 或告警触发运行”“异步审批” |
-| 代码核对基线 | `5518791`（含 PR #25）；文中行号以此为准 |
+| 代码核对基线 | `5518791`（含 PR #25）；文中行号以此为准，v0.6 新增的缺口 ⑧ 以 `6c439c7`（PR #43）为准 |
 | Milestone | 一期：`zx-agent serve`、IM 接口、Slack（Socket Mode）、⚑ D:5/CHINA FLAG: 飞书（长连接）、IM 内审批<br>二期：告警 Webhook（如 Alertmanager） |
 
 > ⚑ D:5/CHINA FLAG: 飞书（Feishu），开放平台域名 `open.feishu.cn`、`accounts.feishu.cn`。
@@ -193,7 +193,7 @@ pub enum Choice { AllowOnce, Deny }
 
 | 约定 | 原因 |
 |-|-|
-| 先确认，后处理：收到平台投递后立即确认（Slack 回 `envelope_id`，⚑ D:5/CHINA FLAG: 飞书回响应帧），再把事件送进 `inbound` | 两个平台都要求 3 秒内处理完一次投递，否则重投（附录 9.1、9.2）。⚑ D:5/CHINA FLAG: 飞书 Go SDK 等处理函数返回后才写响应帧，本实现不沿用 |
+| 先确认，后处理：收到平台投递后立即确认（Slack 回 `envelope_id`，⚑ D:5/CHINA FLAG: 飞书回响应帧），再把事件送进 `inbound` | 两个平台都要求 3 秒内处理完一次投递，否则重投（附录 9.1、9.2）。⚑ D:5/CHINA FLAG: 飞书 Go SDK 等处理函数返回后才写响应帧，本实现不沿用。代价：确认之后、写入会话之前，进程崩溃会丢失消息（缺口 ⑧） |
 | 同一条消息只送出一次 `Inbound`，用有上限的“最近消息 ID”集合去重 | ⚑ D:5/CHINA FLAG: 飞书原文：“特殊情况下可能会收到重复的推送，如有幂等需求请使用 message_id 去重”；超时重投也会造成重复 |
 | 只送出 @ 机器人的消息和单聊消息；机器人自己发的消息不送出 | 避免回复自己，也避免误读群里的闲聊 |
 | 超出平台单条上限的文本由实现拆分：`send` 拆成多条；`update` 替换第一段，其余作为后续回复 | serve 不需要知道各平台的上限 |
@@ -290,7 +290,7 @@ idleSecs = 1800             # 会话空闲多久后释放
 |-|-|
 | 凭据保护 | IM 凭据所在的环境变量与模型 API key 一样处理：加入 bash 子进程要删除的变量（`BashTool::hidden_env`，`src/tools/bash.rs:26`），其值与 API key 一起交给 `RedactSecrets::new`（`src/extensions.rs:64`）脱敏 |
 | Deployment | `shareProcessNamespace: true`；`command` 改为 `["zx-agent", "serve", "--config", "/etc/zx-agent/serve.toml"]`，不再经过 tini（2.3.2）；配置放在 ConfigMap 并挂载到 `/etc/zx-agent`，IM 凭据放在 Secret，以环境变量注入；单副本，沿用 `Recreate`（`deploy/kubernetes/deployment.yaml:12-13`） |
-| 停止 | 收到 SIGTERM 后停止接收新消息、取消进行中的运行、关闭连接后退出。现有 CLI 已处理 SIGTERM（`src/main.rs:187`、`src/chat/signals.rs:27`） |
+| 停止 | 收到 SIGTERM 后停止接收新消息、取消进行中的运行、关闭连接后退出。现有 CLI 已处理 SIGTERM（`src/main.rs:187`、`src/chat/signals.rs:27`）。还没处理的消息不再运行，所在线程收到一句停止提示（PR #43）；进程崩溃时这些消息丢失（缺口 ⑧） |
 | 出网 | 需要访问 Slack 与 ⚑ D:5/CHINA FLAG: 飞书的服务。WebSocket 连接到哪些主机，文档没有写，实施时实测（缺口 ⑥） |
 | 原有用法 | `kubectl exec` 运行 chat、run，以及 CronJob 不变 |
 
@@ -357,6 +357,33 @@ idleSecs = 1800             # 会话空闲多久后释放
 | ⑥ | 出网主机清单 | 两个平台的文档都没有列出 WebSocket 主机。部署说明列出了 API 主机；WebSocket 主机需要真实连接才能实测，模块 D 只对连不上的地址做了验收。NetworkPolicy 只能按 IP 段放行，按域名限制需要出口代理 |
 | ⑦ | 合规 | ⚑ D:5/CHINA FLAG: 飞书部分须经法务 / 出口合规审批后实施（Subject to Legal/Export Compliance approval） |
 
+#### ⑧ 崩溃时丢失已确认、还没处理的消息【已定：暂按 a) 接受】
+
+v0.6 补记（2026-11-02），本节行号以 `6c439c7` 为准。
+
+本实现先确认、后处理（3.1 的约定）。平台收到确认后，就不会因超时重投这条消息（附录 9.1、9.2）。消息要作为某次运行的输入写进会话文件，才不会因进程退出而丢失：运行层先把输入写入会话，排队的输入写入后才离开队列（`src/agent/agent_loop.rs:342-345`）。写入之前，消息只在内存里：
+
+| 位置 | 通常停留（按代码推断，未实测） |
+|-|-|
+| 平台到路由器的通道、路由器的收件通道，各 64 条（`src/im/server.rs:23`、`:260`、`:327`） | 毫秒级 |
+| 线程的收件箱，32 条（`src/im/server.rs:26`） | 毫秒级 |
+| 等待运行名额（同时运行的会话默认 4 个，`src/im/server.rs:31`；`src/im/worker.rs:155`） | 可能几分钟，用户已收到“排队中” |
+| 运行中的插话（`src/im/worker.rs:298`） | 到下一回合开始 |
+
+| 进程怎么结束 | 结果 |
+|-|-|
+| 正常停止：SIGTERM | 上表的消息不再运行，所在线程收到停止提示（PR #43）。Pod 正常终止时，kubelet 先向容器的主进程发 SIGTERM；宽限期默认 30 秒，到期后剩余进程收到 SIGKILL（附录 9.3），停止超过宽限期就按下一行处理。部署验收只验证过手动向 serve 发 SIGTERM（`deploy/kubernetes/README.md` 的“停止”一行）；`kubectl rollout restart` 时 serve 是否在宽限期内退出，没有验证 |
+| 崩溃：SIGKILL、内存不足被杀、进程 panic | 上表的消息全部丢失，没有提示。正在运行的任务的输入已写入会话；中断的有副作用的调用，在该线程下一次运行开始时记为结果未知，不重放（`src/session/recovery.rs`、`src/runner.rs`）。但这次运行不会续上，线程里的“处理中…”也不会被替换 |
+| 单个线程的任务 panic | 该线程在内存中的消息丢失；下一条消息由新的任务接手（`src/im/server.rs:452`） |
+
+| # | 选项 | 说明 |
+|-|-|-|
+| a) | 接受，写明边界 | 不改代码。Pod 正常终止时先收到 SIGTERM，已有提示；崩溃时用户需要自己重发 |
+| b) | 持久化收件 | 确认前把消息追加到收件记录，写入会话后标记完成；启动时把没完成的消息交还给对应线程。要定的有：记录的格式与清理、按消息 ID 与平台的重投去重、中断的运行是否续跑（有副作用的调用本来就不重放）。另外，确认前写盘会占用平台的 3 秒确认时限 |
+| c) | 只补提示 | 运行开始时记下线程与“处理中”消息，运行结束时删除；启动时把留下的改为“服务重启过，任务没有完成”。排队中与收件箱里的消息仍然丢失，只是线程不再停在“处理中…” |
+
+**已定（2026-11-02）：暂按 a) 接受**，记为已知缺口。b) 需要新的持久化格式与重放规则，要单独评审；等二期接入告警 Webhook、做多副本（缺口 ⑤ 本来就需要外部存储），或实际出现丢消息时再定。c) 改动较小；如果用户反映线程停在“处理中…”，可以先做。
+
 ---
 
 ## 4. 接口与数据变更一览
@@ -370,6 +397,7 @@ idleSecs = 1800             # 会话空闲多久后释放
 | 插话 | `AgentSession::take_queued` | 新增（缺口 ③，PR #28） |
 | 会话文件 | `/data/sessions/<平台>/<聊天>/<线程>.jsonl` | 新的存放位置，格式不变 |
 | 审批记录 | `ServerEvent::Approval`，由 serve 写成结构化日志 | 新增（缺口 ④，PR #28）；事件格式不变 |
+| 停止提示 | `Replies::stopping`：停止时没有处理的消息，在所在线程回一句 | 新增（PR #43） |
 | 部署 | Deployment 运行 serve，`shareProcessNamespace: true`；新增配置 ConfigMap 与凭据 Secret | 改动（2.3.2、3.6） |
 
 ---
@@ -411,6 +439,7 @@ A ──┬──▶ B（Slack）───┬──▶ D
 - 二期：告警 Webhook，告警触发的排障结果发到 IM。
 - 其他 IM 平台：只需实现 `ImChannel`。
 - 多副本：外部会话存储加分布式协调。
+- 持久化收件：崩溃后补处理已确认的消息（缺口 ⑧ 的选项 b），与二期、多副本一起考虑。
 - 在 Kubernetes 之外运行 serve 时的 PID 1 处理。
 - 在 IM 中流式展示进度。
 
@@ -489,6 +518,8 @@ A ──┬──▶ B（Slack）───┬──▶ D
 | PID 1 | “The container process no longer has PID 1.” | `kubernetes/website` 仓库 `content/en/docs/tasks/configure-pod-container/share-process-namespace.md:115`（提交 `585c1c60`） |
 | 进程可见 | “Processes are visible to other containers in the pod. This includes all information visible in `/proc`, such as passwords that were passed as arguments or environment variables. These are protected only by regular Unix permissions.” | 同上，第 121–123 行 |
 | 回收 | `static void sigreap(int signo) {` `while (waitpid(-1, NULL, WNOHANG) > 0)`，并以 `sigaction(SIGCHLD, …sigreap…)` 注册 | `kubernetes/kubernetes` 仓库 `build/pause/linux/pause.c:37-38`、`:59`（该文件最近一次提交为 `82ac28cc`） |
+| 终止信号 | “Typically, with this graceful termination of the pod, kubelet makes requests to the container runtime to attempt to stop the containers in the pod by first sending a TERM (aka. SIGTERM) signal, with a grace period timeout, to the main process in each container.” | Kubernetes 文档 Pod Lifecycle 的 “Termination of Pods”（v1.37，2026-11-02 读取，https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/） |
+| 宽限期 | “The default `terminationGracePeriodSeconds` setting is 30 seconds.”；“Once the grace period has expired, the KILL signal is sent to any remaining processes, and the Pod is then deleted from the API Server.” | 同上 |
 
 实测输出（2026-11-01，docker-desktop，Kubernetes v1.36.1；两个 Pod 的主进程均为 `sh -c '(sleep 2 &); exec sleep 3600'`，容器设置环境变量 `PROBE_SECRET`；输出为 `/proc/<pid>/stat` 的前四列）：
 
@@ -509,4 +540,4 @@ A ──┬──▶ B（Slack）───┬──▶ D
 
 ---
 
-`serve-im-review.md` · v0.5 · 2026年11月
+`serve-im-review.md` · v0.6 · 2026年11月
