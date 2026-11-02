@@ -248,6 +248,66 @@ async fn commands_cannot_see_the_headers_for_a_trace_collector() {
 }
 
 #[tokio::test]
+async fn request_fields_reach_the_model_and_the_audit() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::text("ok")]).await;
+    let output = run(&server, dir.path())
+        .args(["--request-field", r#"thinking={"type":"disabled"}"#])
+        .args(["--request-field", r#"reasoning_effort="low""#])
+        .args(["--session", "audit.jsonl"])
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body = &server.requests()[0].body;
+    assert_eq!(body["thinking"], json!({"type": "disabled"}));
+    assert_eq!(body["reasoning_effort"], json!("low"));
+    let audit = std::fs::read_to_string(dir.path().join("audit.jsonl")).unwrap();
+    assert!(
+        audit.contains(r#""extraFields":{"reasoning_effort":"low","thinking":{"type":"disabled"}}"#),
+        "{audit}"
+    );
+}
+
+#[tokio::test]
+async fn bad_request_fields_exit_2_before_any_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::text("never sent")]).await;
+    for (field, expected) in [
+        (r#"model="other""#, r#"request field "model" cannot be added"#),
+        (r#"thinking={"type":"#, "the value is not JSON"),
+        ("no-equals-sign", "is not of the form KEY=JSON"),
+    ] {
+        let output = run(&server, dir.path())
+            .args(["--request-field", field, "--session", "audit.jsonl"])
+            .output()
+            .await
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{field}: {stderr}");
+        assert!(stderr.contains(expected), "{field}: {stderr}");
+    }
+    let output = run(&server, dir.path())
+        .args(["--request-field", "seed=1", "--request-field", "seed=2"])
+        .output()
+        .await
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.contains("--request-field seed is given more than once"),
+        "{stderr}"
+    );
+    assert!(server.requests().is_empty());
+    assert!(!dir.path().join("audit.jsonl").exists());
+}
+
+#[tokio::test]
 async fn jsonl_events_carry_the_envelope_of_their_run() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::text("ok")]).await;

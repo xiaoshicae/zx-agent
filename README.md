@@ -172,6 +172,23 @@ export PROM_MCP_TOKEN=...   # 与 profile 中的 tokenEnv 一致
 - token 只以 `Authorization: Bearer` 发给该服务器，命令看不到存放它的变量，工具输出中出现它的值时脱敏。
 - 连不上、token 变量没有值、服务器缺少列出的工具时，以退出码 2 报错；成功时 stderr 每个服务器一行 `[mcp] …`。
 
+### DeepSeek
+
+⚑ D:5/CHINA FLAG: DeepSeek（官方文档页面没有写明公司所在地；据公开信息为中国公司，未核实）。
+
+⚠ COMPLIANCE REVIEW: [对话内容、命令输出与工具结果会发往该服务的 API，属于远程访问与数据外发] 使用前须经法务 / 出口合规审批（Subject to Legal/Export Compliance approval）。
+
+该服务的 API 兼容 OpenAI 格式（官方文档原文：“The DeepSeek API uses an API format compatible with OpenAI/Anthropic.”，https://api-docs.deepseek.com/ ，2026-11-02 读取），用现有的 OpenAI 兼容 provider 即可：
+
+| 设置 | 值 | 依据 |
+|---|---|---|
+| `--base-url` | `https://api.deepseek.com` | 官方文档的 base_url。2026-11-01 的付费测试用的是 `https://api.deepseek.com/v1`，6 项通过（见 `docs/ROADMAP.md` 的补跑记录） |
+| `--model` | `deepseek-flash` 或 `deepseek-v4-pro` | 官方文档。文档写明 `deepseek-chat`、`deepseek-reasoner` 在 2026-07-24 之后停用；2026-11-01 用 `deepseek-chat` 的请求仍成功，原因未核实 |
+| `--api-key-env` | 存放 key 的环境变量名，如 `DEEPSEEK_API_KEY` | key 只从环境变量读取 |
+| 思考模式 | 默认开启。`--request-field 'thinking={"type":"disabled"}'` 关闭；`--request-field 'reasoning_effort="low"'` 调整强度（`low`、`high`、`max`） | 官方文档写明两个字段的格式，`thinking` 决定是否思考时优先。zx-agent 会把它们原样放进请求体（有测试覆盖）；该服务对它们的处理未在本项目中实测 |
+| 思考内容 | 回答中的 `reasoning_content` 记入会话，之后的请求中回传给产生它的模型 | `src/ai/openai.rs`。官方文档：带工具的请求必须回传全部 `reasoning_content`，否则返回 400 |
+| 结构化输出 | `response_format` 只有 `text` 与 `json_object`，没有 `json_schema` | 官方文档 |
+
 ### run 退出码
 
 | 退出码 | 含义 |
@@ -207,6 +224,7 @@ export PROM_MCP_TOKEN=...   # 与 profile 中的 tokenEnv 一致
 | `--max-retries` | 3 | 遇到临时性错误时的重试次数 |
 | `--continue-on-length` | profile：`run`（troubleshoot）为 1 | 仅 `run`。回答因输出 token 上限被截断时，自动请模型续写的次数。每次续写都计入 `--max-turns`；设为 0 时直接以退出码 6 结束 |
 | `--max-tokens` | 无（由服务端决定） | 每次回复的输出 token 上限。推理模型的推理部分也计入这个上限，设得太小时回答可能为空 |
+| `--request-field` | 无 | 加到每个请求体中的字段，写作 `KEY=JSON`，可重复，用于服务端自己的设置，如思考模式。zx-agent 自己设置的字段（`model`、`messages`、`stream`、`stream_options`、`tools`、`max_tokens`）不能用它改写。会话的请求审计（`request_config` 条目的 `extraFields`）记录这些字段，还原请求时一并加入 |
 | `--max-response-bytes` | 16777216（16 MiB） | 每次模型请求的流式响应字节上限，包含 SSE 封装与推理内容 |
 | `--max-sse-event-bytes` | 1048576（1 MiB） | 单个 SSE 事件的字节上限，包含封装；累计多行和未换行的数据也受限制 |
 | `--session` | 无（只保存在内存） | 会话文件路径。文件不存在则创建；已存在则在原有对话上继续 |
@@ -635,7 +653,7 @@ cargo fmt --check
 | `tests/cli.rs` | 编译出的程序：退出码 0 到 6、jsonl 输出、从 stdin 读提示词、bash 读不到 API key、系统提示词的生成段落、`--system-updates inline` |
 | `tests/chat_cli.rs` | 多轮历史、审批与授权范围、审批过期后下一行作为新提问、只读命令自动放行、重置、模型切换、EOF、信号、超时、控制字符显示、恢复中断会话的提示、钩子失败的提示；Unix PTY 验证运行中插话、取消后丢弃残留插话、取消重置和退出 |
 | `tests/profiles_cli.rs` | profile 覆盖、显式默认值、预算参数的 help 写明取自 profile、不可绕过的 deny、上下文范围与审计、上下文默认值与越界链接、`--system-prompt-file` 兼容、skill 懒加载与脱敏、配置错误（含 provider 参数）退出码且不建会话文件 |
-| `tests/run_cli.rs` | `run` 在 P0 之后新增的约定：进度与报告行转义终端控制字符；另一个 `run` 正在写的会话文件不能再被打开写入；JSONL 事件的信封；为零的超时在请求前被拒绝；stdout 已关闭时退出码仍由运行结果决定；token 预算的退出码 7、最后一次请求可超出预算、profile 设置预算与命令行的 0 关闭；只在设置了 OTLP 地址时导出追踪，导出内容不含回答（原有 `run` 测试仍在 `tests/cli.rs`） |
+| `tests/run_cli.rs` | `run` 在 P0 之后新增的约定：进度与报告行转义终端控制字符；另一个 `run` 正在写的会话文件不能再被打开写入；JSONL 事件的信封；为零的超时在请求前被拒绝；stdout 已关闭时退出码仍由运行结果决定；token 预算的退出码 7、最后一次请求可超出预算、profile 设置预算与命令行的 0 关闭；只在设置了 OTLP 地址时导出追踪，导出内容不含回答；`--request-field` 到达模型并写入请求审计，写错时以退出码 2 结束且不建会话文件（原有 `run` 测试仍在 `tests/cli.rs`） |
 | `tests/otel.rs` | 一次真实运行导出一条 trace：每次尝试、回合、模型请求与工具调用各一个 span，用量与工具属性正确；`src/otel.rs` 的单元测试另覆盖嵌套与时间、只含元数据、运行结束时关闭未结束的 span、手动摘要自成一条 trace、队列满时丢弃并计数 |
 | `tests/session_compaction.rs`、`tests/compaction.rs` | v1/v2 追加升级、分支和引用、原始投影、省略保留边界后摘要仍生效、编辑摘要的变换计划在写入前被拒绝、摘要失败与取消、请求 / 用量预算、超时和上限 |
 | `tests/incremental_summary.rs` | 增量摘要（v5）：第一次读取整段前缀并给事实编号、之后只读旧事实与新增记录、可接续全量模式留下的摘要、取代与淘汰、修正只作废相关事实并在下一次重读、模型不能自带编号、加载时拒绝违反规则的记录、请求可从会话文件还原、多轮之后请求大小不随历史增长（与全量模式对照） |
