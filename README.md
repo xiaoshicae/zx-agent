@@ -155,7 +155,8 @@ dir = "/data/sessions"      # 会话文件位于 <dir>/slack/<频道>/<线程>.j
 | 审批 | 与 chat 相同，使用 assistant profile：自动放行清单中的只读命令直接执行，其余 bash 命令发审批卡片，只有 `approvers` 中的用户点击才生效 |
 | 凭据 | Slack 的两个 token 与 ⚑ D:5/CHINA FLAG: 飞书的 App Secret 只从环境变量读取。命令的环境中删除这些变量，命令输出中出现它们的值时脱敏 |
 | 日志 | stdout 每行一个 JSON：`approval`（审批记录：线程、工具调用、审批人、结果、时间）、`released`（释放空闲会话）、`failed`（未能发出的消息、连不上平台、停止时各线程没有处理的消息数等）。对话内容在会话文件中 |
-| 退出 | 收到 SIGINT 或 SIGTERM 时取消进行中的任务。还没处理的消息不再处理，包括排队中的、任务没取走的插话和停止期间才收到的，所在线程收到一句提示，请用户稍后重新发送。进程崩溃（如被 SIGKILL、因内存不足被杀）时，这些消息会丢失，也没有提示，见 `docs/serve-im-review.md` 缺口 ⑧。各线程发出结果后以 0 退出；配置错误与被拒的凭据为 2；平台连接意外结束为 1 |
+| 退出 | 收到 SIGINT 或 SIGTERM 时取消进行中的任务，其状态改为“服务正在停止：本次任务已取消，请稍后重新发送。”。还没处理的消息不再处理，包括排队中的、任务没取走的插话和停止期间才收到的，所在线程收到一句提示，请用户稍后重新发送。各线程发出结果后以 0 退出；配置错误与被拒的凭据为 2；平台连接意外结束为 1 |
+| 崩溃之后 | 进程崩溃（如被 SIGKILL、因内存不足被杀）时，上述消息会丢失，也没有提示，见 `docs/serve-im-review.md` 缺口 ⑧。正在运行的任务在 `<dir>/.running/` 下各有一个记录文件；下次启动时，serve 把这些任务遗留的“处理中…”改为“服务重启过：这次任务没有完成，请重新发送。”，再删除记录 |
 
 其余参数与 `chat` 相同（`--model`、`--base-url`、`--api-key-env`、`--profile`、`--max-turns`、`--timeout-secs` 等）；`--max-turns` 与 `--timeout-secs` 作用于每一次运行。不接受 `--session`。
 
@@ -573,7 +574,7 @@ pub trait SessionLog: Send + Sync {
 
 平台实现 `ImChannel` 的四个方法：`platform`、`run`（接收直到取消）、`send`、`update`。实现负责：自行重连；收到平台投递后立即确认，再转交事件；按消息 ID 去重；只转交发给机器人的消息（@ 与单聊），不转交机器人自己的消息；遵守平台限频；超长文本自行拆分。`Destination.thread` 是线程根消息的 ID。
 
-宿主提供两样东西：`SessionFactory` 为一个线程打开会话，须把传入的 `interaction` 设为 `LoopConfig::interaction`；`ServerSink` 接收运维事件。`SessionKey::file_in(dir)` 给出 `<dir>/<平台>/<聊天>/<线程>.jsonl`，各段按字节编码，ID 不能指向其他目录。
+宿主提供两样东西：`SessionFactory` 为一个线程打开会话，须把传入的 `interaction` 设为 `LoopConfig::interaction`；`ServerSink` 接收运维事件。`SessionKey::file_in(dir)` 给出 `<dir>/<平台>/<聊天>/<线程>.jsonl`，各段按字节编码，ID 不能指向其他目录。可选的 `ServerConfig::statuses`（`StatusStore`）记录运行中的状态；`StatusFiles` 把每条记录存为目录中的一个 JSON 文件。
 
 | 行为 | 说明 |
 |---|---|
@@ -586,7 +587,8 @@ pub trait SessionLog: Send + Sync {
 | 审批 | 需要审批时发卡片；只有 `approvers` 中的用户点击才生效，其他人点击只收到提示。卡片按运行发出的 `approval_resolved` 改为结果，所以超时与取消也会显示 |
 | 审计 | 每次审批结束，`ServerSink` 收到 `ServerEvent::Approval`：会话、工具调用、审批人、结果与时间 |
 | 空闲释放 | `idle` 内没有输入的会话释放其文件锁，下一条消息重新打开 |
-| 停止 | `run` 在取消后中止所有运行，等各线程发出结果后返回；平台返回错误时，以该错误结束。还没运行的消息不再运行，包括等待名额的、运行没取走的插话和平台在停止期间转交的；所在线程收到 `Replies::stopping`（线程有运行时，排在运行的结果之后），`ServerSink` 收到一条带条数的 `Failed`。进程崩溃时这些消息丢失（`docs/serve-im-review.md` 缺口 ⑧） |
+| 停止 | `run` 在取消后中止所有运行，其状态改为 `Replies::stopped`（`/cancel` 取消的仍为 `Replies::cancelled`），等各线程发出结果后返回；平台返回错误时，以该错误结束。还没运行的消息不再运行，包括等待名额的、运行没取走的插话和平台在停止期间转交的；所在线程收到 `Replies::stopping`（线程有运行时，排在运行的结果之后），`ServerSink` 收到一条带条数的 `Failed`。进程崩溃时这些消息丢失（`docs/serve-im-review.md` 缺口 ⑧） |
+| 重启 | 设了 `ServerConfig::statuses` 时，线程发出“处理中”后记一条，换成回答之前删除。`run` 在开始接收之前读出上个进程遗留的记录，随后把这些状态替换为 `Replies::interrupted` 并删除记录；每条只试一次，失败时 `ServerSink` 收到 `Failed`；停止时放弃剩下的，留到下次启动 |
 
 ## 开发
 

@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::{Semaphore, mpsc};
-use tokio::task::JoinSet;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use crate::AgentSession;
@@ -17,7 +17,10 @@ use crate::agent::ApprovalResult;
 use crate::interaction::Interaction;
 
 use super::worker::{self, Retire, WorkerInput, WorkerSetup};
-use super::{ApprovalId, ConversationId, Destination, ImChannel, ImError, Inbound, Outbound, ThreadId, UserId};
+use super::{
+    ApprovalId, ConversationId, Destination, ImChannel, ImError, Inbound, MessageRef, Outbound, StatusStore, ThreadId,
+    UserId,
+};
 
 /// Inbound events buffered between the channels and the router, which only passes them on.
 const INBOUND_CAPACITY: usize = 64;
@@ -63,7 +66,7 @@ impl SessionKey {
     }
 }
 
-fn segment(id: &str) -> String {
+pub(super) fn segment(id: &str) -> String {
     if id.is_empty() {
         return "%".to_string();
     }
@@ -133,7 +136,7 @@ pub struct Replies {
     pub unauthorized: String,
     /// The answer to a click by someone who is not an approver.
     pub not_approver: String,
-    /// A cancelled run, and the answer to `/cancel` while waiting for a slot.
+    /// A run cancelled with `/cancel`, and the answer to `/cancel` while waiting for a slot.
     pub cancelled: String,
     /// The answer to `/cancel` when nothing runs.
     pub nothing_to_cancel: String,
@@ -153,6 +156,11 @@ pub struct Replies {
     /// those waiting for a run slot, steering the run did not take in, and those that
     /// arrived during the stop.
     pub stopping: String,
+    /// A run that the stop cancelled.
+    pub stopped: String,
+    /// Replaces, as the server starts, a status that an earlier process left behind when it
+    /// ended without replacing it; see [`ServerConfig::statuses`].
+    pub interrupted: String,
 }
 
 impl Default for Replies {
@@ -171,6 +179,8 @@ impl Default for Replies {
             failed: "运行失败：".into(),
             cannot_open: "无法打开会话：".into(),
             stopping: "服务正在停止：本线程中还没处理的消息不会再处理，请稍后重新发送。".into(),
+            stopped: "服务正在停止：本次任务已取消，请稍后重新发送。".into(),
+            interrupted: "服务重启过：这次任务没有完成，请重新发送。".into(),
         }
     }
 }
@@ -187,9 +197,15 @@ pub struct ServerConfig {
     pub max_running: NonZeroUsize,
     /// How long a conversation may go without input before its session is released.
     pub idle: Duration,
-    /// Limit for each send or update; a call that takes longer counts as failed.
+    /// Limit for each send or update, and for each call to [`statuses`](Self::statuses); a call
+    /// that takes longer counts as failed.
     pub outbound_timeout: Duration,
     pub replies: Replies,
+    /// Keeps the status of each run while it runs, so that a crash or a kill does not leave
+    /// threads saying that the work goes on: the next start replaces those statuses with
+    /// [`Replies::interrupted`]. `None`, the default, keeps nothing.
+    /// [`StatusFiles`](super::StatusFiles) keeps them in a directory.
+    pub statuses: Option<Arc<dyn StatusStore>>,
 }
 
 impl Default for ServerConfig {
@@ -201,6 +217,7 @@ impl Default for ServerConfig {
             idle: DEFAULT_IDLE,
             outbound_timeout: DEFAULT_OUTBOUND_TIMEOUT,
             replies: Replies::default(),
+            statuses: None,
         }
     }
 }
@@ -225,10 +242,15 @@ impl Server {
     }
 
     /// Serve `channels` until `cancel` is triggered or a channel fails. Stopping cancels the
-    /// runs and waits until each conversation has posted how it ended; a thread with
-    /// messages that will not run, including those the channels received during the stop,
-    /// also gets [`Replies::stopping`]. A channel's error is then returned. Two channels with
-    /// the same platform name are a configuration error.
+    /// runs and waits until each conversation has posted how it ended, [`Replies::stopped`]
+    /// for a cancelled run; a thread with messages that will not run, including those the
+    /// channels received during the stop, also gets [`Replies::stopping`]. A channel's error
+    /// is then returned. Two channels with the same platform name are a configuration error.
+    ///
+    /// With [`ServerConfig::statuses`], the statuses an earlier process left behind are read
+    /// before anything is received, then replaced with [`Replies::interrupted`] while the
+    /// server runs: each is tried once and then forgotten. The stop gives up on the rest,
+    /// which stay for the next start.
     pub async fn run(self, channels: Vec<Arc<dyn ImChannel>>, cancel: &CancellationToken) -> Result<(), ImError> {
         let mut platforms = HashSet::new();
         for channel in &channels {
@@ -246,6 +268,7 @@ impl Server {
             idle,
             outbound_timeout,
             replies,
+            statuses,
         } = self.config;
         let shared = Arc::new(Shared {
             factory: self.factory,
@@ -255,7 +278,10 @@ impl Server {
             idle,
             outbound_timeout,
             permits: Arc::new(Semaphore::new(max_running.get())),
+            statuses,
         });
+        // Read before any run can start, so that no status of this process is among them.
+        let left = left_behind(&shared).await;
         let stop = cancel.child_token();
         let (tagged, mut inbound) = mpsc::channel(INBOUND_CAPACITY);
         let mut channel_tasks = JoinSet::new();
@@ -263,6 +289,12 @@ impl Server {
             channel_tasks.spawn(receive(index, Arc::clone(channel), tagged.clone(), stop.clone()));
         }
         drop(tagged);
+        let replacing = tokio::spawn(replace_left_behind(
+            left,
+            channels.clone(),
+            Arc::clone(&shared),
+            stop.clone(),
+        ));
         let (retire, mut retired) = mpsc::channel(RETIRE_CAPACITY);
         let mut router = Router {
             channels,
@@ -273,6 +305,7 @@ impl Server {
             workers: HashMap::new(),
             tasks: JoinSet::new(),
             refusals: JoinSet::new(),
+            replacing,
         };
         let result = router.serve(&mut inbound, &mut retired, &mut channel_tasks).await;
         // A closed receiver makes waiting senders fail at once, so no worker can hold up the
@@ -294,6 +327,7 @@ pub(crate) struct Shared {
     /// Run slots of all conversations. Tokio's semaphore is fair: it hands permits out in
     /// the order they were requested.
     pub(crate) permits: Arc<Semaphore>,
+    statuses: Option<Arc<dyn StatusStore>>,
 }
 
 impl Shared {
@@ -306,6 +340,121 @@ impl Shared {
             key: key.cloned(),
             error,
         });
+    }
+
+    /// Keep the status of a run that starts. A failure is reported; the run goes on.
+    pub(crate) async fn keep_status(&self, key: &SessionKey, status: &MessageRef) {
+        let Some(statuses) = &self.statuses else {
+            return;
+        };
+        match tokio::time::timeout(self.outbound_timeout, statuses.insert(key, status)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => self.failed(Some(key), format!("cannot keep status {}: {error}", status.id)),
+            Err(_) => self.failed(
+                Some(key),
+                format!(
+                    "keeping status {} took longer than {} s",
+                    status.id,
+                    self.outbound_timeout.as_secs()
+                ),
+            ),
+        }
+    }
+
+    /// Forget a status about to be replaced. A failure is reported.
+    pub(crate) async fn forget_status(&self, key: &SessionKey, status: &MessageRef) {
+        let Some(statuses) = &self.statuses else {
+            return;
+        };
+        match tokio::time::timeout(self.outbound_timeout, statuses.remove(key, status)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => self.failed(Some(key), format!("cannot forget status {}: {error}", status.id)),
+            Err(_) => self.failed(
+                Some(key),
+                format!(
+                    "forgetting status {} took longer than {} s",
+                    status.id,
+                    self.outbound_timeout.as_secs()
+                ),
+            ),
+        }
+    }
+}
+
+/// The statuses an earlier process left behind; none when nothing keeps statuses or they
+/// cannot be read, which is reported.
+async fn left_behind(shared: &Shared) -> Vec<(SessionKey, MessageRef)> {
+    let Some(statuses) = &shared.statuses else {
+        return Vec::new();
+    };
+    match tokio::time::timeout(shared.outbound_timeout, statuses.list()).await {
+        Ok(Ok(left)) => left,
+        Ok(Err(error)) => {
+            shared.failed(
+                None,
+                format!("cannot read the statuses an earlier process left: {error}"),
+            );
+            Vec::new()
+        }
+        Err(_) => {
+            shared.failed(
+                None,
+                format!(
+                    "reading the statuses an earlier process left took longer than {} s",
+                    shared.outbound_timeout.as_secs()
+                ),
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// Replace each status in `left` with [`Replies::interrupted`], then forget it. Each is tried
+/// once, so a message the platform no longer lets the bot edit is not tried at every start.
+/// The stop gives up on the rest, which stay kept.
+async fn replace_left_behind(
+    left: Vec<(SessionKey, MessageRef)>,
+    channels: Vec<Arc<dyn ImChannel>>,
+    shared: Arc<Shared>,
+    stop: CancellationToken,
+) {
+    let text = Outbound::Text(shared.replies.interrupted.clone());
+    for (key, status) in left {
+        match channels.iter().find(|channel| channel.platform() == key.platform) {
+            Some(channel) => {
+                let replaced = tokio::select! {
+                    biased;
+                    () = stop.cancelled() => return,
+                    replaced = tokio::time::timeout(shared.outbound_timeout, channel.update(&status, &text)) => replaced,
+                };
+                match replaced {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => shared.failed(
+                        Some(&key),
+                        format!(
+                            "cannot replace status {} that an earlier process left: {error}",
+                            status.id
+                        ),
+                    ),
+                    Err(_) => shared.failed(
+                        Some(&key),
+                        format!(
+                            "replacing status {} that an earlier process left took longer than {} s",
+                            status.id,
+                            shared.outbound_timeout.as_secs()
+                        ),
+                    ),
+                }
+            }
+            None => shared.failed(
+                Some(&key),
+                format!(
+                    "cannot replace status {} that an earlier process left: no channel is named {:?}",
+                    status.id, key.platform
+                ),
+            ),
+        }
+        shared.forget_status(&key, &status).await;
     }
 }
 
@@ -353,6 +502,8 @@ struct Router {
     tasks: JoinSet<()>,
     /// Replies to chats the server does not serve.
     refusals: JoinSet<()>,
+    /// Replaces the statuses an earlier process left behind.
+    replacing: JoinHandle<()>,
 }
 
 impl Router {
@@ -564,6 +715,13 @@ impl Router {
             if let Err(error) = ended {
                 self.shared.failed(None, format!("a reply task failed: {error}"));
             }
+        }
+        // It gives up at the stop, which was triggered above.
+        if let Err(error) = self.replacing.await {
+            self.shared.failed(
+                None,
+                format!("replacing the statuses an earlier process left failed: {error}"),
+            );
         }
     }
 }

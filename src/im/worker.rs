@@ -59,9 +59,9 @@ pub(crate) struct WorkerSetup {
 }
 
 /// Run one conversation until the router drops its inbox. A run in progress is cancelled by
-/// the stop and still posts how it ended. Input does not run once the server stops; the
-/// worker reads its inbox to the end and posts [`Replies::stopping`] in a thread with
-/// messages it will not run.
+/// the stop, and its status then says so ([`Replies::stopped`]). Input does not run once the
+/// server stops; the worker reads its inbox to the end and posts [`Replies::stopping`] in a
+/// thread with messages it will not run.
 pub(crate) async fn run(setup: WorkerSetup) {
     let WorkerSetup {
         key,
@@ -339,6 +339,11 @@ impl Worker {
             None => return,
         };
         let status = self.out.post(self.out.replies().working.clone()).await;
+        if let Some(status) = &status {
+            // Kept before the run starts: should the process end from here on, the next
+            // start replaces this status.
+            self.out.shared.keep_status(&self.out.key, status).await;
+        }
         let stop = self.stop.clone();
         let text = texts.join("\n\n");
         let task = tokio::spawn(async move { session.prompt_with_cancel(text, &stop).await });
@@ -365,14 +370,24 @@ impl Worker {
         else {
             return;
         };
+        let replies = self.out.replies();
         let answer = match ended {
-            Ok(Ok(report)) => render(&report, self.out.replies()),
+            // The stop cancels runs through their token. A `/cancel` just before the stop ends
+            // the same way and is told the same.
+            Ok(Ok(report)) if closing && matches!(report.outcome, RunOutcome::Aborted) => replies.stopped.clone(),
+            Ok(Ok(report)) => render(&report, replies),
             // Only this worker prompts the session, one run at a time, so Busy cannot occur.
-            Ok(Err(error)) => format!("{}{error}", self.out.replies().failed),
-            Err(error) => format!("{}{error}", self.out.replies().failed),
+            Ok(Err(error)) => format!("{}{error}", replies.failed),
+            Err(error) => format!("{}{error}", replies.failed),
         };
         match status {
-            Some(posted) => self.out.replace(&posted, Outbound::Text(answer)).await,
+            Some(posted) => {
+                // Forgotten first: should the process end between the two, the status still
+                // says the work goes on, as it did before statuses were kept; the other order
+                // could have the next start replace this answer.
+                self.out.shared.forget_status(&self.out.key, &posted).await;
+                self.out.replace(&posted, Outbound::Text(answer)).await;
+            }
             None => {
                 self.out.post(answer).await;
             }

@@ -1,6 +1,6 @@
 //! `zx-agent serve`: configuration errors, and the whole path against a fake Slack and a fake
 //! model: a mention, an approval card and its click, hidden and redacted Slack tokens, the
-//! session file, the operator log and the stop.
+//! session file, the operator log, the stop, and a restart after a kill.
 mod common;
 
 use std::path::Path;
@@ -52,6 +52,17 @@ approvers = ["slack:U2"]
 [sessions]
 dir = "sessions"
 "#;
+
+/// A Socket Mode envelope: user U1 mentions the bot in C1 with message `ts`.
+fn mention(envelope: &str, ts: &str, text: &str) -> Value {
+    json!({
+        "envelope_id": envelope,
+        "type": "events_api",
+        "payload": {"type": "event_callback", "event_id": format!("Ev-{envelope}"), "event": {
+            "type": "app_mention", "user": "U1", "text": format!("<@UBOT> {text}"), "ts": ts, "channel": "C1"
+        }},
+    })
+}
 
 #[tokio::test]
 async fn configuration_errors_are_reported_before_serving() {
@@ -135,14 +146,7 @@ async fn serve_answers_a_mention_with_an_approved_command_that_cannot_see_the_sl
         .unwrap();
 
     let mut socket = slack.socket().await;
-    let mention = json!({
-        "envelope_id": "e1",
-        "type": "events_api",
-        "payload": {"type": "event_callback", "event_id": "Ev1", "event": {
-            "type": "app_mention", "user": "U1", "text": "<@UBOT> run it", "ts": "1700000001.000100", "channel": "C1"
-        }},
-    });
-    socket.send(mention).await;
+    socket.send(mention("e1", "1700000001.000100", "run it")).await;
     assert_eq!(socket.receive().await, json!({"envelope_id": "e1"}));
 
     // The status message, then the approval card, both in the mention's thread.
@@ -211,4 +215,68 @@ async fn serve_answers_a_mention_with_an_approved_command_that_cannot_see_the_sl
     );
     assert!(!String::from_utf8_lossy(&output.stdout).contains(BOT_TOKEN));
     assert!(!stderr.contains(BOT_TOKEN) && !stderr.contains(APP_TOKEN));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_status_left_by_a_killed_server_is_replaced_when_it_starts_again() {
+    let dir = tempfile::tempdir().unwrap();
+    // The model never answers, so the run is still going when the server is killed.
+    let model = MockServer::start(vec![Reply::Stall(Vec::new())]).await;
+    let mut slack = FakeSlack::start().await;
+    let config = write_config(
+        dir.path(),
+        &VALID.replace("[slack]\n", &format!("[slack]\napiBase = \"{}\"\n", slack.api_base)),
+    );
+    let mut first = serve(dir.path(), &config, &model.base_url)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut socket = slack.socket().await;
+    socket.send(mention("e1", "1700000001.000100", "wait")).await;
+    assert_eq!(socket.receive().await, json!({"envelope_id": "e1"}));
+    // The status is kept before the run asks the model.
+    tokio::time::timeout(WAIT, model.wait_for_requests(1)).await.unwrap();
+    let status = "1700000000.000001";
+    assert_eq!(slack.calls("chat.postMessage").len(), 1);
+    first.kill().await.unwrap();
+    let running = dir.path().join("sessions/.running");
+    let left: Vec<_> = std::fs::read_dir(&running)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(left, ["slack.C1.1700000000%2E000001.json"]);
+
+    let second = serve(dir.path(), &config, &model.base_url)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let updates = slack.wait_for("chat.update", 1).await;
+    assert_eq!(
+        (
+            &updates[0].body["channel"],
+            &updates[0].body["ts"],
+            &updates[0].body["text"]
+        ),
+        (
+            &json!("C1"),
+            &json!(status),
+            &json!("服务重启过：这次任务没有完成，请重新发送。")
+        )
+    );
+    let pid = second.id().unwrap().to_string();
+    let stopped = Command::new("kill").args(["-TERM", &pid]).status().await.unwrap();
+    assert!(stopped.success());
+    let output = tokio::time::timeout(WAIT, second.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

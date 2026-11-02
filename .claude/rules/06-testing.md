@@ -56,8 +56,8 @@ paths:
 | `tests/mcp_cli.rs` | 编译出的程序带 `[[mcp]]` profile：run 调用放行的工具、拒绝要审批的工具，chat 在审批后调用，serve 在开始服务前连接；命令看不到 token 变量，token 的值被脱敏；用不了的服务器让启动以退出码 2 失败 |
 | `tests/im_feishu.rs` | ⚑ D:5/CHINA FLAG: 飞书 channel 对假开放平台：ping 与 pong、确认、分片、去重、重连、群 @ 与私聊、卡片点击、token、话题回复、编辑与改发、卡片、限频与停止 |
 | `tests/im_slack.rs` | Slack channel 对假 Slack：@ 与私聊、确认与去重、忽略自己的消息、按钮点击、断线重连、连接失败的上报、`wss://` 握手失败（rustls 只有一个加密后端时报错而不是 panic）、凭据被拒、转义与拆分、卡片、限频与停止 |
-| `tests/serve_cli.rs` | `serve` 子命令：配置错误；对假 Slack 与假模型的完整流程（审批卡片、命令看不到 token、脱敏、会话文件、运维日志、SIGTERM） |
-| `tests/im_server.rs` | IM 服务：内存中的 `FakeChannel` 加脚本化模型，覆盖线程与会话、访问控制、审批卡片（批准、拒绝、非审批人、超时、取消）、运行上限与排队、插话、空闲释放与重开、停止与平台错误、停止时告知没有处理的消息（排队中的、运行没取走的插话、停止期间才收到的：`FakeChannel` 的 `late`） |
+| `tests/serve_cli.rs` | `serve` 子命令：配置错误；对假 Slack 与假模型的完整流程（审批卡片、命令看不到 token、脱敏、会话文件、运维日志、SIGTERM）；被 SIGKILL 后重启，替换遗留的“处理中…” |
+| `tests/im_server.rs` | IM 服务：内存中的 `FakeChannel` 加脚本化模型，覆盖线程与会话、访问控制、审批卡片（批准、拒绝、非审批人、超时、取消）、运行上限与排队、插话、空闲释放与重开、停止与平台错误、停止时告知没有处理的消息（排队中的、运行没取走的插话、停止期间才收到的：`FakeChannel` 的 `late`）、停止取消的运行写明原因；运行中的状态（内存中的 `Statuses` 把记录与删除也写进 `Sent`，便于断言先后）：先删记录再写回答、启动时替换遗留的状态、平台拒绝或未配置、停止时放弃替换（`FakeChannel` 的 `updates`）、记录 / 删除 / 读取失败（`Broken`） |
 | `tests/real_api.rs` | 付费：真实模型 API，默认跳过 |
 
 只能在 Unix 上运行的测试（如进程组、信号相关的）加 `#[cfg(unix)]`。
