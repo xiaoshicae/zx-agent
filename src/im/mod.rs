@@ -9,6 +9,7 @@ mod approval;
 pub mod feishu;
 mod server;
 pub mod slack;
+mod status;
 mod worker;
 
 use std::collections::{HashSet, VecDeque};
@@ -23,6 +24,7 @@ use tokio_util::sync::CancellationToken;
 use crate::agent::ApprovalResult;
 
 pub use server::{ApprovalRecord, Replies, Server, ServerConfig, ServerEvent, ServerSink, SessionFactory, SessionKey};
+pub use status::{StatusFiles, StatusStore};
 
 /// One chat platform, such as Slack.
 ///

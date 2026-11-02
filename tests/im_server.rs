@@ -1,5 +1,6 @@
 //! The IM server with an in-memory channel and a scripted model: threads, access, approvals,
-//! the run limit, steering, cancellation, idle release and the stop.
+//! the run limit, steering, cancellation, idle release, the stop, and the statuses kept for a
+//! restart.
 mod common;
 
 use std::num::NonZeroUsize;
@@ -19,7 +20,7 @@ use zx_agent::agent::{ApprovalResult, Decision, NullSink, Tool};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::im::{
     ApprovalId, Choice, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId, MessageRef, Outbound,
-    Replies, Server, ServerConfig, ServerEvent, ServerSink, SessionFactory, SessionKey, ThreadId, UserId,
+    Replies, Server, ServerConfig, ServerEvent, ServerSink, SessionFactory, SessionKey, StatusStore, ThreadId, UserId,
 };
 use zx_agent::interaction::Interaction;
 use zx_agent::policy::{PolicyHook, Rule, RuleMatcher, RulePolicy};
@@ -44,6 +45,20 @@ enum Sent {
         posted: MessageRef,
         message: Outbound,
     },
+    /// A status kept in [`Statuses`].
+    Kept(MessageRef),
+    /// A status forgotten by [`Statuses`].
+    Forgot(MessageRef),
+}
+
+/// How the platform answers an update; it records the update either way.
+#[derive(Clone, Copy, Default)]
+enum Updates {
+    #[default]
+    Done,
+    Refused,
+    /// Never answers.
+    Hang,
 }
 
 /// A platform in memory: the test injects inbound events and reads what the server sent.
@@ -56,6 +71,7 @@ struct FakeChannel {
     sent: mpsc::UnboundedSender<Sent>,
     next: AtomicUsize,
     fail: Option<String>,
+    updates: Updates,
 }
 
 #[async_trait]
@@ -112,7 +128,67 @@ impl ImChannel for FakeChannel {
                 message: message.clone(),
             })
             .unwrap();
-        Ok(())
+        match self.updates {
+            Updates::Done => Ok(()),
+            Updates::Refused => Err(ImError::Transport("update refused".into())),
+            Updates::Hang => std::future::pending().await,
+        }
+    }
+}
+
+/// A call of [`Statuses`] that fails with [`STORE_ERROR`].
+#[derive(Clone, Copy, PartialEq)]
+enum Broken {
+    Insert,
+    Remove,
+    List,
+}
+
+const STORE_ERROR: &str = "store unavailable";
+
+/// Statuses in memory. Each insertion and removal, failed or not, also goes to the test among
+/// what the channel was asked to do, so that a test sees their order.
+struct Statuses {
+    kept: Mutex<Vec<(SessionKey, MessageRef)>>,
+    sent: mpsc::UnboundedSender<Sent>,
+    broken: Option<Broken>,
+}
+
+impl Statuses {
+    fn kept(&self) -> Vec<(SessionKey, MessageRef)> {
+        self.kept.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl StatusStore for Statuses {
+    async fn insert(&self, key: &SessionKey, status: &MessageRef) -> Result<(), String> {
+        if self.broken != Some(Broken::Insert) {
+            self.kept.lock().unwrap().push((key.clone(), status.clone()));
+        }
+        self.sent.send(Sent::Kept(status.clone())).unwrap();
+        match self.broken {
+            Some(Broken::Insert) => Err(STORE_ERROR.into()),
+            _ => Ok(()),
+        }
+    }
+
+    async fn remove(&self, _key: &SessionKey, status: &MessageRef) -> Result<(), String> {
+        if self.broken != Some(Broken::Remove) {
+            self.kept.lock().unwrap().retain(|(_, kept)| kept != status);
+        }
+        self.sent.send(Sent::Forgot(status.clone())).unwrap();
+        match self.broken {
+            Some(Broken::Remove) => Err(STORE_ERROR.into()),
+            _ => Ok(()),
+        }
+    }
+
+    async fn list(&self) -> Result<Vec<(SessionKey, MessageRef)>, String> {
+        match self.broken {
+            Some(Broken::List) => Err(STORE_ERROR.into()),
+            _ => Ok(self.kept()),
+        }
     }
 }
 
@@ -182,6 +258,10 @@ struct Setup {
     fail_channel: Option<String>,
     /// Events the channel passes on as the server stops.
     late: Vec<Inbound>,
+    /// Statuses an earlier process left behind; `None` keeps no statuses.
+    statuses: Option<Vec<(SessionKey, MessageRef)>>,
+    broken: Option<Broken>,
+    updates: Updates,
 }
 
 impl Default for Setup {
@@ -197,6 +277,9 @@ impl Default for Setup {
             fail_open: None,
             fail_channel: None,
             late: Vec::new(),
+            statuses: None,
+            broken: None,
+            updates: Updates::default(),
         }
     }
 }
@@ -209,6 +292,7 @@ struct Harness {
     server: JoinHandle<Result<(), ImError>>,
     factory: Arc<Factory>,
     replies: Replies,
+    statuses: Option<Arc<Statuses>>,
 }
 
 fn start(setup: Setup) -> Harness {
@@ -222,6 +306,13 @@ fn start(setup: Setup) -> Harness {
     });
     let (inject, events_in) = mpsc::channel(16);
     let (sent_to, sent) = mpsc::unbounded_channel();
+    let statuses = setup.statuses.map(|left| {
+        Arc::new(Statuses {
+            kept: Mutex::new(left),
+            sent: sent_to.clone(),
+            broken: setup.broken,
+        })
+    });
     let channel: Arc<dyn ImChannel> = Arc::new(FakeChannel {
         name: PLATFORM,
         events: Mutex::new(Some(events_in)),
@@ -229,10 +320,16 @@ fn start(setup: Setup) -> Harness {
         sent: sent_to,
         next: AtomicUsize::new(0),
         fail: setup.fail_channel,
+        updates: setup.updates,
     });
     let (events_to, events) = mpsc::unbounded_channel();
-    let replies = setup.config.replies.clone();
-    let server = Server::new(setup.config, factory.clone(), Arc::new(Events(events_to)));
+    let mut config = setup.config;
+    if let Some(statuses) = &statuses {
+        let store: Arc<dyn StatusStore> = statuses.clone();
+        config.statuses = Some(store);
+    }
+    let replies = config.replies.clone();
+    let server = Server::new(config, factory.clone(), Arc::new(Events(events_to)));
     let cancel = CancellationToken::new();
     let stop = cancel.clone();
     let server = tokio::spawn(async move { server.run(vec![channel], &stop).await });
@@ -244,6 +341,7 @@ fn start(setup: Setup) -> Harness {
         server,
         factory,
         replies,
+        statuses,
     }
 }
 
@@ -693,7 +791,7 @@ async fn an_idle_conversation_releases_its_session_and_reopens_it() {
 }
 
 #[tokio::test]
-async fn stopping_the_server_cancels_runs_and_posts_how_they_ended() {
+async fn a_run_cancelled_by_the_stop_says_the_server_is_stopping() {
     let mut h = start(Setup {
         steps: vec![FauxStep::Hang],
         ..Setup::default()
@@ -701,7 +799,7 @@ async fn stopping_the_server_cancels_runs_and_posts_how_they_ended() {
     h.say("m1", None, "wait forever").await;
     let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
     h.cancel.cancel();
-    h.updated(&status, text(&h.replies.cancelled.clone())).await;
+    h.updated(&status, text(&h.replies.stopped.clone())).await;
     h.server.await.unwrap().unwrap();
 }
 
@@ -729,9 +827,9 @@ async fn stopping_tells_a_thread_waiting_for_a_run_slot_that_it_will_not_run() {
             other => panic!("unexpected {other:?}"),
         }
     }
-    // The run had taken in all its input, so its thread only learns how it ended. Thread b
-    // never ran: a run posts its status first.
-    assert_eq!(in_a, [text(&replies.cancelled)]);
+    // The run had taken in all its input, so its thread only learns that the stop cancelled
+    // it. Thread b never ran: a run posts its status first.
+    assert_eq!(in_a, [text(&replies.stopped)]);
     assert_eq!(in_b, [text(&replies.stopping)]);
     assert_eq!(events, [unanswered("b", 1)]);
 }
@@ -769,7 +867,7 @@ async fn stopping_tells_a_thread_about_steering_its_run_did_not_take_in() {
                 second,
                 &Sent::Update {
                     posted: status,
-                    message: text(&replies.cancelled)
+                    message: text(&replies.stopped)
                 }
             );
             assert_eq!((to, message), (&thread("m1"), &text(&replies.stopping)));
@@ -801,6 +899,172 @@ async fn a_message_received_as_the_server_stops_is_answered_without_running() {
         0,
         "no session is opened to refuse"
     );
+}
+
+/// A status that an earlier process left in thread `root`.
+fn left_in(root: &str, id: &str) -> MessageRef {
+    MessageRef {
+        at: thread(root),
+        id: MessageId(id.into()),
+    }
+}
+
+fn store_failed(root: &str, doing: &str) -> ServerEvent {
+    ServerEvent::Failed {
+        key: Some(key(root)),
+        error: format!("cannot {doing}: {STORE_ERROR}"),
+    }
+}
+
+#[tokio::test]
+async fn a_running_status_is_kept_and_forgotten_before_the_answer_replaces_it() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("answer")],
+        statuses: Some(Vec::new()),
+        ..Setup::default()
+    });
+    h.say("m1", None, "hello").await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    assert_eq!(h.next().await, Sent::Kept(status.clone()));
+    assert_eq!(h.next().await, Sent::Forgot(status.clone()));
+    h.updated(&status, text("answer")).await;
+    let statuses = h.statuses.clone().unwrap();
+    h.stop().await.unwrap();
+    assert!(statuses.kept().is_empty());
+}
+
+#[tokio::test]
+async fn a_status_left_by_an_earlier_process_is_replaced_and_forgotten() {
+    let left = left_in("m0", "s0");
+    let mut h = start(Setup {
+        statuses: Some(vec![(key("m0"), left.clone())]),
+        ..Setup::default()
+    });
+    h.updated(&left, text(&h.replies.interrupted.clone())).await;
+    assert_eq!(h.next().await, Sent::Forgot(left));
+    let statuses = h.statuses.clone().unwrap();
+    h.stop().await.unwrap();
+    assert!(statuses.kept().is_empty());
+}
+
+#[tokio::test]
+async fn a_left_status_the_platform_does_not_replace_is_reported_and_forgotten() {
+    let left = left_in("m0", "s0");
+    let mut h = start(Setup {
+        statuses: Some(vec![(key("m0"), left.clone())]),
+        updates: Updates::Refused,
+        ..Setup::default()
+    });
+    h.updated(&left, text(&h.replies.interrupted.clone())).await;
+    assert_eq!(h.next().await, Sent::Forgot(left));
+    assert_eq!(
+        h.event().await,
+        ServerEvent::Failed {
+            key: Some(key("m0")),
+            error: "cannot replace status s0 that an earlier process left: update refused".into(),
+        }
+    );
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_left_status_of_a_platform_not_served_is_reported_and_forgotten() {
+    let gone = SessionKey {
+        platform: "gone".into(),
+        ..key("m0")
+    };
+    let left = left_in("m0", "s0");
+    let mut h = start(Setup {
+        statuses: Some(vec![(gone.clone(), left.clone())]),
+        ..Setup::default()
+    });
+    assert_eq!(h.next().await, Sent::Forgot(left));
+    assert_eq!(
+        h.event().await,
+        ServerEvent::Failed {
+            key: Some(gone),
+            error: "cannot replace status s0 that an earlier process left: no channel is named \"gone\"".into(),
+        }
+    );
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_stop_gives_up_replacing_left_statuses_and_keeps_them() {
+    let left = left_in("m0", "s0");
+    let mut h = start(Setup {
+        statuses: Some(vec![(key("m0"), left.clone())]),
+        updates: Updates::Hang,
+        ..Setup::default()
+    });
+    // The platform never answers this update.
+    h.updated(&left, text(&h.replies.interrupted.clone())).await;
+    let statuses = h.statuses.clone().unwrap();
+    h.stop().await.unwrap();
+    assert_eq!(statuses.kept(), [(key("m0"), left)]);
+}
+
+#[tokio::test]
+async fn a_status_that_cannot_be_kept_is_reported_and_the_run_goes_on() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("answer")],
+        statuses: Some(Vec::new()),
+        broken: Some(Broken::Insert),
+        ..Setup::default()
+    });
+    h.say("m1", None, "hello").await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    assert_eq!(h.next().await, Sent::Kept(status.clone()));
+    assert_eq!(
+        h.event().await,
+        store_failed("m1", &format!("keep status {}", status.id))
+    );
+    assert_eq!(h.next().await, Sent::Forgot(status.clone()));
+    h.updated(&status, text("answer")).await;
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_status_that_cannot_be_forgotten_is_reported_and_still_replaced() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("answer")],
+        statuses: Some(Vec::new()),
+        broken: Some(Broken::Remove),
+        ..Setup::default()
+    });
+    h.say("m1", None, "hello").await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    assert_eq!(h.next().await, Sent::Kept(status.clone()));
+    assert_eq!(h.next().await, Sent::Forgot(status.clone()));
+    assert_eq!(
+        h.event().await,
+        store_failed("m1", &format!("forget status {}", status.id))
+    );
+    h.updated(&status, text("answer")).await;
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn statuses_that_cannot_be_read_are_reported_and_the_server_serves() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("answer")],
+        statuses: Some(Vec::new()),
+        broken: Some(Broken::List),
+        ..Setup::default()
+    });
+    assert_eq!(
+        h.event().await,
+        ServerEvent::Failed {
+            key: None,
+            error: format!("cannot read the statuses an earlier process left: {STORE_ERROR}"),
+        }
+    );
+    h.say("m1", None, "hello").await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    assert_eq!(h.next().await, Sent::Kept(status.clone()));
+    assert_eq!(h.next().await, Sent::Forgot(status.clone()));
+    h.updated(&status, text("answer")).await;
+    h.stop().await.unwrap();
 }
 
 #[tokio::test]
@@ -848,6 +1112,7 @@ async fn two_channels_with_one_name_are_a_configuration_error() {
             sent,
             next: AtomicUsize::new(0),
             fail: None,
+            updates: Updates::default(),
         })
     };
     let h = start(Setup::default());

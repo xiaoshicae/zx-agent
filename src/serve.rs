@@ -20,7 +20,7 @@ use zx_agent::im::feishu::{FeishuChannel, FeishuConfig};
 use zx_agent::im::slack::{SlackChannel, SlackConfig};
 use zx_agent::im::{
     ConversationId, ErrorReport, ImChannel, ImError, Server, ServerConfig, ServerEvent, ServerSink, SessionFactory,
-    SessionKey, UserId,
+    SessionKey, StatusFiles, UserId,
 };
 use zx_agent::interaction::Interaction;
 use zx_agent::profile::Builtin;
@@ -34,6 +34,9 @@ const DEFAULT_APP_TOKEN_ENV: &str = "SLACK_APP_TOKEN";
 const DEFAULT_BOT_TOKEN_ENV: &str = "SLACK_BOT_TOKEN";
 const DEFAULT_APP_ID_ENV: &str = "FEISHU_APP_ID";
 const DEFAULT_APP_SECRET_ENV: &str = "FEISHU_APP_SECRET";
+/// Under the session directory: the statuses of runs in progress (`StatusFiles`). The dot
+/// keeps it apart from the platform directories, whose encoded names never contain one.
+const RUNNING_DIR: &str = ".running";
 
 /// The serve configuration file.
 #[derive(Deserialize)]
@@ -174,6 +177,8 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
         .collect();
     let dir = file.sessions.dir;
     std::fs::create_dir_all(&dir).with_context(|| format!("cannot create the session directory {}", dir.display()))?;
+    let running = dir.join(RUNNING_DIR);
+    std::fs::create_dir_all(&running).with_context(|| format!("cannot create {}", running.display()))?;
 
     let instructions = cli::read_instructions(&args.base)?;
     // Once for the process: every thread's session shares the connections.
@@ -200,6 +205,8 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
     let mut config = ServerConfig {
         conversations,
         approvers,
+        // A crash or a kill must not leave threads saying the work goes on.
+        statuses: Some(Arc::new(StatusFiles::new(running))),
         ..ServerConfig::default()
     };
     if let Some(running) = file.limits.max_running {

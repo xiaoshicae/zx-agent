@@ -335,7 +335,8 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | 短值的脱敏 | 已完成，PR #42 | 决定：仍然替换，不放过任何登记的值；启动时在 stderr 指出值短于 8 个字符的文件（`[secret] <文件>: …`，不显示值本身，每个进程一次）。背景：GitLab 要求被遮蔽的值至少 8 个字符；目录中若有 `admin`、`5432` 这类短值，输出中所有相同的文本都会被替换 |
 | 内置钩子的固定名称 | 已完成，PR #42 | CLI 注册的内置钩子没有名称，`hook_failed` 与 `[hook]` 行显示类型名；`std::any::type_name` 的文档写明其格式不受保证、可能随编译器版本变化，几个策略钩子也因此同名。改为固定名称：`command_policy`、`profile_rules`、`bash_approval`、`continue_on_length`、`redact_secrets`、`spill_outputs`（MCP 服务器名不含 `_`，不会重名）；`presets::troubleshoot::hooks` 同样使用 `continue_on_length` |
 | IM 服务正常停止时没有处理的消息 | 已完成，PR #43 | 见下文"停止时没有处理的消息" |
-| IM 服务崩溃时丢失已确认、还没处理的消息 | 已知缺口，暂时接受 | 见评审稿 `docs/serve-im-review.md` 3.7 节缺口 ⑧（v0.6）。持久化收件需要新的记录格式与重放规则，要单独评审；等二期（告警 Webhook）、多副本，或实际出现丢消息时再定 |
+| IM 服务停止时取消的运行没有说明原因 | 已完成，PR #46 | 见下文"停止与重启时的状态" |
+| IM 服务崩溃时丢失已确认、还没处理的消息 | 已知缺口；选项 c)（重启后替换遗留的"处理中…"）已完成，PR #46 | 见评审稿 `docs/serve-im-review.md` 3.7 节缺口 ⑧（v0.7）与下文"停止与重启时的状态"。消息本身仍会丢失：持久化收件（选项 b）需要新的记录格式与重放规则，要单独评审；等二期（告警 Webhook）、多副本，或实际出现丢消息时再定 |
 | 真实服务上的验证 | 待授权 | PR #35 改了 provider 的错误处理，PR #36 换了 HTTP 客户端与 TLS；对真实模型服务与 IM 平台的 HTTPS 连接尚未验证（见 PR #36 的记录）。付费测试需用户明确授权，并由用户设置 `ZX_E2E_AUTHORIZED` 后运行 |
 | 打开大会话的耗时 | 暂缓 | 加载时每条请求记录仍要构建一次分支路径，耗时高于线性（见 PR #34 的实施记录） |
 | 保留近期用户消息原文；摘要前把较早的长工具结果换成引用 | 待评估 | 增量摘要之外的两项上下文管理改进，见"三、会话"的设计稿末尾 |
@@ -380,7 +381,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
   - 新接口 1 项：`short_secret_files` 按字符计数，以 8 个字符为界，空白值与缺失的路径不计。
 - 本机 macOS 验证：stable 与 Rust 1.88.0 各 720 项通过（基线 717 项，在 `71539ef` 上实测），6 项付费测试跳过；fmt、clippy 与 MSRV 全目标检查通过；严格 Rustdoc 第一次因 `MIN_SECRET_CHARS` 注释中的裸 URL 失败，改为尖括号链接后通过（只改注释）；设置 `ZX_DOCKER_TEST_IMAGE=debian:bookworm-slim` 时容器测试 34 项通过。`run --help`、`chat --help`、`serve --help` 与基线逐字节相同；自查脚本的命中与基线相同。未新增依赖，`Cargo.toml`、`Cargo.lock` 未改动。
 
-停止时没有处理的消息（2026-11-02，已完成，PR #43）：两个平台都在消息到达时立即确认投递（`src/im/slack.rs:274-276`、⚑ D:5/CHINA FLAG: `src/im/feishu.rs:508-519`），确认之后平台不会重投（评审稿 `docs/serve-im-review.md:196`）。此前 serve 正常停止（SIGTERM）时，下列消息都被丢弃，用户收不到任何回复（行号以 `5f8b5f7` 为准）：
+停止时没有处理的消息（2026-11-02，已完成，PR #43）：两个平台都在消息到达时立即确认投递（`src/im/slack.rs:274-276`、⚑ D:5/CHINA FLAG: `src/im/feishu.rs:508-519`），确认之后平台不会因超时重投（评审稿 `docs/serve-im-review.md:196`）。此前 serve 正常停止（SIGTERM）时，下列消息都被丢弃，用户收不到任何回复（行号以 `5f8b5f7` 为准）：
 
 | 消息在哪里 | 此前 | 现在 |
 |---|---|---|
@@ -397,6 +398,31 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 - 公开 API：`Replies` 新增字段 `stopping`。按字段写全的 `Replies` 结构体字面量需要补上这一项；用 `..Replies::default()` 的写法不受影响。运维日志 `failed` 的文本由 “N queued message(s) were not answered: the server is stopping” 改为 “N message(s) were not answered: the server is stopping”，覆盖上表三类。
 - 测试：`tests/im_server.rs` 新增 3 项，分别覆盖排队中的线程、运行没取走的插话、平台在停止期间转交的消息；测试用的 `FakeChannel` 新增 `late`，在被取消之后、返回之前转交事件。反向验证：分别去掉对排队消息、剩余插话、停止期间读到的消息的计数，以及路由器的继续读取，每次都恰好有 1 项测试失败，修改已还原。
 - 本机 macOS 验证：stable 与 Rust 1.88.0 各 723 项通过（基线 720 项，为 PR #42 在 `411e461` 上的实测，其代码树与 `5f8b5f7` 相同），6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过；自查脚本对改动的文件无命中；`tests/im_server.rs` 连续运行 20 次、`tests/serve_cli.rs` 3 次，均通过。未新增依赖，`Cargo.toml`、`Cargo.lock` 未改动。
+
+停止与重启时的状态（2026-11-02，已完成，PR #46）：
+
+| 情况 | 此前（行号以 `9297885` 为准） | 现在 |
+|---|---|---|
+| 服务停止时取消的运行 | 状态改为 `Replies::cancelled`（“已取消。”），与用户发 `/cancel` 相同（`src/im/worker.rs:549`） | 改为新增的 `Replies::stopped`（默认“服务正在停止：本次任务已取消，请稍后重新发送。”）；`/cancel` 不变 |
+| 进程崩溃或被杀时正在运行的线程 | “处理中…”一直留着（评审稿 3.7 节缺口 ⑧） | 下次启动时改为新增的 `Replies::interrupted`（默认“服务重启过：这次任务没有完成，请重新发送。”） |
+
+第二行即缺口 ⑧ 的选项 c)，做法如下：
+
+- 记录：新增公开 trait `im::StatusStore`（`insert`、`remove`、`list`）与 `ServerConfig::statuses`（默认 `None`，不记录）。线程发出“处理中…”后记一条，运行结束、用回答替换状态之前删除。先删后改：进程在两步之间结束时，状态停在“处理中…”，与此前相同；反过来则可能把已经发出的回答改成“服务重启过”。
+- 启动：`Server::run` 在开始接收之前读出遗留的记录，之后新记的不在其中。随后与接收并行，逐条把状态替换为 `Replies::interrupted`：每条只试一次，成功与否都删除记录，失败记运维日志 `failed`；记录所属的平台没有配置时，同样报告后删除。服务停止时放弃剩下的替换，记录留到下次启动。
+- 文件：新增 `im::StatusFiles`，每条记录一个 JSON 文件，先写临时文件再改名，崩溃不会留下半条记录；Unix 上权限为 0600，与会话文件相同。serve 放在 `<sessions dir>/.running/`。
+- 失败：记录、删除或读取失败只记 `failed`，不影响运行。读出的文件无法解析时，本次启动不替换任何状态，`failed` 指出该文件。
+- 不覆盖：排队中与收件箱里的消息仍然丢失；审批卡片仍显示按钮，点击没有反应；发出状态到记好之间进程结束时，状态仍停在“处理中…”。
+
+实施记录（PR #46，基于 `9297885`，含 PR #44、#45）：
+
+- 停止原因（`src/im/worker.rs`）：服务停止期间结束、结果为 `Aborted` 的运行，状态改用 `Replies::stopped`。停止前刚发的 `/cancel` 同样走取消，两者无法区分，也显示停止原因。
+- 运行中的状态：trait 与文件实现在 `src/im/status.rs`，启动时的读出与替换在 `src/im/server.rs`，记录与删除在 `src/im/worker.rs`。存储的每次调用与发送、修改一样，受 `ServerConfig::outbound_timeout` 限制。
+- 公开 API：`Replies` 新增 `stopped`、`interrupted`；`ServerConfig` 新增 `statuses`；新增 `StatusStore`、`StatusFiles`。按字段写全的 `Replies`、`ServerConfig` 结构体字面量需要补上新字段，用 `..Default::default()` 的写法不受影响。
+- serve（`src/serve.rs`）：启动时创建 `<sessions dir>/.running/`，用 `StatusFiles` 记录。
+- 测试：新增 15 项：`tests/im_server.rs` 8 项，`src/im/status.rs` 的单元测试 6 项，`tests/serve_cli.rs` 1 项（serve 被 SIGKILL 后重启，假 Slack 收到替换遗留状态的 `chat.update`）。既有测试中，3 项停止测试的期望由 `Replies::cancelled` 改为 `Replies::stopped`，属有意的行为变化，其中 1 项改名为 `a_run_cancelled_by_the_stop_says_the_server_is_stopping`；`tests/serve_cli.rs` 的 @ 消息改用新的辅助函数，事件 ID 由 `Ev1` 变为 `Ev-e1`。
+- 反向验证：分别去掉停止原因、运行开始时的记录、启动替换后的删除、停止时放弃替换、serve 的记录、记录文件的 0600 权限，以及把“先删后改”换成“先改后删”，每次都有对应测试失败（依次 3、5、3、1、1、1、4 项），修改已还原。“开始接收之前读出遗留记录”的顺序，没有能稳定复现竞争的测试，由代码结构保证。
+- 本机 macOS 验证：stable 与 Rust 1.88.0 各 753 项通过（基线 738 项，为 PR #45 的实测，其代码与 `9297885` 相同），6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过；自查脚本对改动的文件无命中；`tests/im_server.rs` 连续运行 20 次、`tests/serve_cli.rs` 3 次，均通过。未新增依赖，`Cargo.toml`、`Cargo.lock` 未改动。
 
 下面的 P0–P9 继续按各自验收标准推进。
 
