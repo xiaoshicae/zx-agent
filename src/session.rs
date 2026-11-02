@@ -11,6 +11,7 @@
 //!
 //! Version 3 adds auditable compaction without rewriting earlier records. Version 4 records
 //! that a tool call with side effects started, so recovery can tell interrupted calls apart.
+//! Version 5 adds incremental summaries, which carry an earlier summary's facts over.
 
 mod compaction;
 mod file;
@@ -19,8 +20,9 @@ mod recovery;
 mod request;
 pub use compaction::{
     CompactionEntry, CompactionFailedEntry, CompactionPlan, CompactionStartedEntry, CompactionSummary,
-    FormatUpgradeEntry, SummaryFact, SummaryRequest,
+    FormatUpgradeEntry, MergedSummary, SummaryFact, SummaryMode, SummaryRequest,
 };
+pub(crate) use compaction::{MAX_STATEMENTS, MAX_SUMMARY_BYTES, cite_only};
 pub use log::{LoadedSession, LogRecord, SessionLog};
 pub use recovery::{InterruptedToolCall, StartRecord, ToolCallStartedEntry};
 pub use request::{RequestConfig, RequestConfigEntry, RequestSource, RequestStartedEntry};
@@ -38,12 +40,13 @@ use crate::ai::ContentBlock;
 use crate::ai::{Message, now_ms};
 use file::JsonlFile;
 
-/// Format version written to new session headers. Version 4 adds `tool_call_started`.
+/// Format version written to new session headers. Version 5 adds incremental summaries.
+/// Version 4 adds `tool_call_started`.
 /// Version 3 adds auditable compaction, request records and append-only format upgrades.
 /// Version 2 records the system prompt as
 /// system messages in the conversation; version 1 kept it in the header. Version 1 files still
 /// open: the old header field is ignored, and the next run records the prompt as a message.
-pub const SESSION_VERSION: u32 = 4;
+pub const SESSION_VERSION: u32 = 5;
 
 /// How long one append may wait for its log, such as a database that stopped answering.
 /// A file append finishes long before; a timed-out append stops writing, like a failed one.
@@ -782,6 +785,8 @@ mod tests {
                 max_tokens: 10,
             },
             input_bytes: 1,
+            mode: SummaryMode::Full,
+            continues: None,
         };
         let attempt = store.begin_compaction(plan()).await.unwrap();
         store
@@ -791,8 +796,10 @@ mod tests {
         let attempt = store.begin_compaction(plan()).await.unwrap();
         let summary = CompactionSummary {
             facts: vec![SummaryFact {
+                id: None,
                 text: "fact".into(),
                 source_entry_ids: vec![first.clone()],
+                supersedes: Vec::new(),
             }],
             inferences: vec![],
             plans: vec![],

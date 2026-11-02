@@ -11,7 +11,7 @@ paths:
 
 | 设施 | 位置 | 用途 |
 |---|---|---|
-| `FauxProvider` / `FauxStep` | `src/ai/faux.rs` | 按脚本返回文本、工具调用、截断、失败（`Fail`）、挂起直到取消（`Hang`），并记录每个请求 |
+| `FauxProvider` / `FauxStep` | `src/ai/faux.rs` | 按脚本返回文本、工具调用、截断、失败（`Fail`）、挂起直到取消（`Hang`），或按请求内容现场决定（`FauxStep::compute`，例如引用摘要请求给出的条目 ID），并记录每个请求 |
 | `EchoTool` | `tests/common/mod.rs` | 可设置延迟、失败、panic、terminate，执行时还能注入引导消息或后续消息 |
 | `Collect` | `tests/common/mod.rs` | 收集事件；`envelopes()` 返回带信封（`seq`、`runId` 等）的事件，`events()` 返回事件本体，`kinds()` 返回事件类型序列，`tool_end_order()` 返回工具完成的顺序 |
 | `summarize` | `tests/common/mod.rs` | 把消息列表压缩成 `"tool:c1=hi"` 这样的短字符串 |
@@ -43,7 +43,8 @@ paths:
 | `tests/chat_cli.rs` | chat 的脚本 stdin、审批与过期、信号与超时、取消后丢弃残留插话、钩子失败的提示、Unicode、模型切换、会话重置和 Unix PTY |
 | `tests/profiles_cli.rs` | profile/CLI 覆盖与 deny、项目上下文范围、默认值与越界链接、`--system-prompt-file` 兼容、skill 懒加载、工具策略和审计 |
 | `tests/session_compaction.rs`、`tests/compaction.rs` | 追加升级、分支 / 引用与原始投影、自动 / 手动摘要、计费、steering、失败、取消与超时 |
-| `tests/request_audit.rs` | 请求审计（G3）：从会话文件还原每次请求、配置变化才追加、旧会话升级时机；固定会话 `tests/fixtures/replay-v4.jsonl` 的还原结果与期望文件逐字节比对，改变还原结果须同时升级转换版本或会话格式 |
+| `tests/incremental_summary.rs` | 增量摘要（v5）：接续与只读新增记录、接续全量摘要、取代、淘汰、修正后的作废与重读、加载校验、请求还原、请求大小不随历史增长 |
+| `tests/request_audit.rs` | 请求审计（G3）：从会话文件还原每次请求、配置变化才追加、旧会话升级时机；固定会话 `tests/fixtures/replay-v4.jsonl` 与含增量摘要的 `replay-v5.jsonl` 的还原结果与期望文件逐字节比对，改变还原结果须同时升级转换版本或会话格式 |
 | `tests/executor.rs` | 执行器接缝：工具只经自身执行器运行命令和读文件，结束方式的报告，执行方式随执行器 |
 | `tests/container.rs` | 容器执行：假 docker 程序（在测试目录里记录参数、按文件应答）覆盖启动、命令、读文件、清理、逐个执行（排队的调用在取消后记为未执行）、所用 shell 与 CLI；名字以 `real_` 开头的测试在设置 `ZX_DOCKER_TEST_IMAGE`（本地已有、带 bash 的镜像）时对真实 Docker 运行，否则打印提示后返回；工作目录要让容器用户可读（见 `real_workspace`） |
 | `tests/crash_recovery.rs` | 崩溃恢复：开始记录先于执行、中断调用的四种恢复结果且不重放、失败或取消的回答中的调用记为未执行、恢复事件在结果写入之后、旧格式会话、丢弃 future 与 SIGKILL 后恢复 |

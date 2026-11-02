@@ -181,17 +181,26 @@ impl SessionStore {
                 user_timestamp,
             } => {
                 let attempt = self.summary_attempt(attempt_id, &self.branch_path_from(parent))?;
-                let raw = Self::raw_projection_from(&self.branch_path_from(attempt.parent_id.as_deref()));
-                let source: Vec<_> = raw
-                    .into_iter()
-                    .take_while(|item| item.entry_id != attempt.first_kept_entry_id)
-                    .collect();
+                let path = self.branch_path_from(attempt.parent_id.as_deref());
+                let content = match &attempt.continues {
+                    // An incremental summary reads the earlier facts and the records it names.
+                    Some(previous) => self
+                        .recorded_incremental_source(&path, previous, &attempt.first_kept_entry_id)?
+                        .input()?,
+                    None => {
+                        let source: Vec<_> = Self::raw_projection_from(&path)
+                            .into_iter()
+                            .take_while(|item| item.entry_id != attempt.first_kept_entry_id)
+                            .collect();
+                        serde_json::to_string(&source)?
+                    }
+                };
                 let system = Message::System(SystemMessage {
                     sections: SystemPrompt::default()
                         .diff(&SystemPrompt::default().with_section(PREAMBLE, &attempt.request.instructions)),
                     timestamp: *system_timestamp,
                 });
-                let mut user = Message::user(serde_json::to_string(&source)?);
+                let mut user = Message::user(content);
                 if let Message::User { timestamp, .. } = &mut user {
                     *timestamp = *user_timestamp;
                 }

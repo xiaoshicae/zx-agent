@@ -21,6 +21,9 @@ pub enum FauxStep {
     Fail(String),
     /// Wait until cancelled, then end with `Aborted`.
     Hang,
+    /// Decide the step from the request, for answers that must refer to what the request
+    /// holds, such as the entry IDs a summary request offers. It may not compute another.
+    Compute(Box<dyn FnOnce(&Request) -> FauxStep + Send>),
 }
 
 impl FauxStep {
@@ -43,6 +46,11 @@ impl FauxStep {
     /// Request one tool call.
     pub fn tool_call(id: &str, name: &str, arguments: Value) -> Self {
         Self::tool_calls(vec![(id, name, arguments)])
+    }
+
+    /// Decide the step when the request arrives, from the request.
+    pub fn compute(answer: impl FnOnce(&Request) -> FauxStep + Send + 'static) -> Self {
+        FauxStep::Compute(Box::new(answer))
     }
 
     /// Request several tool calls, given as `(id, name, arguments)`.
@@ -96,14 +104,23 @@ impl Provider for FauxProvider {
 
     fn stream(&self, request: Request, cancel: CancellationToken) -> EventReceiver {
         let model = request.model.clone();
+        // Taken first, so that the lock is released before a computed step runs.
+        let next = lock(&self.steps).pop_front();
+        let step = match next {
+            Some(FauxStep::Compute(answer)) => Some(answer(&request)),
+            step => step,
+        };
         lock(&self.requests).push(request);
-        let step = lock(&self.steps).pop_front();
         let (mut tx, rx) = event_channel();
         tokio::spawn(async move {
             let failure = |stop, error: &str| AssistantMessage::failure("faux", &model, stop, error);
             let event = match step {
                 None => StreamEvent::Error(failure(StopReason::Error, "faux provider: no scripted response left")),
                 Some(FauxStep::Fail(error)) => StreamEvent::Error(failure(StopReason::Error, &error)),
+                Some(FauxStep::Compute(_)) => StreamEvent::Error(failure(
+                    StopReason::Error,
+                    "faux provider: a computed step computed another",
+                )),
                 Some(FauxStep::Hang) => {
                     cancel.cancelled().await;
                     StreamEvent::Error(failure(StopReason::Aborted, "Request was aborted"))
@@ -195,6 +212,29 @@ mod tests {
                 if message.text() == "hi"
         ));
         assert_eq!(provider.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_computed_step_answers_from_the_request() {
+        let provider = FauxProvider::new([FauxStep::compute(|request| {
+            FauxStep::text(format!("answer for {}", request.model))
+        })]);
+        let events = events(&provider).await;
+        assert!(matches!(
+            events.last(),
+            Some(StreamEvent::Done(message)) if message.text() == "answer for m"
+        ));
+        assert_eq!(provider.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_computed_step_cannot_compute_another() {
+        let provider = FauxProvider::new([FauxStep::compute(|_| FauxStep::compute(|_| FauxStep::text("never")))]);
+        let events = events(&provider).await;
+        assert!(matches!(
+            events.as_slice(),
+            [StreamEvent::Error(message)] if message.stop_reason == StopReason::Error
+        ));
     }
 
     #[tokio::test]
