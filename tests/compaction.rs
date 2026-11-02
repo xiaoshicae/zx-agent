@@ -12,9 +12,9 @@ use tokio_util::sync::CancellationToken;
 use zx_agent::AgentSession;
 use zx_agent::agent::{AgentEvent, ContextEdit, Event, HookContext, HookOptions, Hooks};
 use zx_agent::agent_session::{ModelRef, SessionError};
-use zx_agent::ai::Message;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::compaction::{Config, Outcome};
+use zx_agent::ai::{ContentBlock, Message, StopReason};
+use zx_agent::compaction::{Config, Outcome, Report};
 use zx_agent::runner::{Limits, RunOutcome};
 use zx_agent::session::{Entry, SessionStore};
 
@@ -658,6 +658,88 @@ async fn source_and_summary_byte_limits_stop_unbounded_requests_and_responses() 
     assert_eq!(report.outcome, Outcome::Failed);
     assert!(report.error.unwrap().contains("exceeds 65536"));
     assert!(runner.session().latest_compaction().is_none());
+}
+
+/// Compact the seeded session once. The model answers with the blocks `answer` makes from
+/// the ID of the old entry; the result tells whether the session now has a summary.
+async fn compact_answering(answer: impl FnOnce(&str) -> Vec<ContentBlock>) -> (Report, bool) {
+    let (store, old) = seeded().await;
+    let provider = Arc::new(FauxProvider::new([FauxStep::Respond {
+        blocks: answer(&old),
+        stop: StopReason::Stop,
+    }]));
+    let (runner, _) = RunnerSetup {
+        session: store,
+        ..RunnerSetup::new(config(provider, vec![]))
+    }
+    .build();
+    let mut runner = runner.with_compaction(budget()).unwrap();
+    let report = runner.compact(&CancellationToken::new()).await;
+    let summarized = runner.session().latest_compaction().is_some();
+    (report, summarized)
+}
+
+/// A server streams about a token per event. The summary's limit is on its text, not on the
+/// events that carry it.
+#[tokio::test]
+async fn a_summary_streamed_in_small_pieces_is_measured_by_its_text() {
+    let (report, summarized) = compact_answering(|old| {
+        let answer = json!({
+            "facts": [{"text": format!("Observed {}", "detail ".repeat(400)), "sourceEntryIds": [old]}],
+            "inferences": [],
+            "plans": []
+        })
+        .to_string();
+        assert!(answer.len() < 4 * 1024);
+        // One event per character: each, encoded as a stream event, takes more than 25
+        // bytes, over 64 KiB in all.
+        answer
+            .chars()
+            .map(|piece| ContentBlock::Text { text: piece.into() })
+            .collect()
+    })
+    .await;
+
+    assert_eq!(report.outcome, Outcome::Completed, "{report:?}");
+    assert!(summarized);
+}
+
+/// Reasoning that a model streams before its answer is not part of the summary.
+#[tokio::test]
+async fn reasoning_before_a_summary_does_not_count_toward_its_size_limit() {
+    let (report, summarized) = compact_answering(|old| {
+        vec![
+            // 125 KiB, more than a summary may take.
+            ContentBlock::Thinking {
+                thinking: "Considering the records. ".repeat(5 * 1024),
+                signature: Some("reasoning_content".into()),
+            },
+            ContentBlock::Text { text: summary(old) },
+        ]
+    })
+    .await;
+
+    assert_eq!(report.outcome, Outcome::Completed, "{report:?}");
+    assert!(summarized);
+}
+
+#[tokio::test]
+async fn reasoning_over_its_own_limit_fails_the_summary() {
+    let (report, summarized) = compact_answering(|old| {
+        vec![
+            ContentBlock::Thinking {
+                thinking: "x".repeat(1024 * 1024 + 1),
+                signature: None,
+            },
+            ContentBlock::Text { text: summary(old) },
+        ]
+    })
+    .await;
+
+    assert_eq!(report.outcome, Outcome::Failed);
+    let error = report.error.unwrap();
+    assert!(error.contains("reasoning exceeds 1048576 bytes"), "{error}");
+    assert!(!summarized);
 }
 
 #[test]
