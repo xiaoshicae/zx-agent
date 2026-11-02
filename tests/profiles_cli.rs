@@ -482,8 +482,10 @@ fn omitted_budget_flags_are_documented_as_profile_values() {
         ("run", "--max-turns"),
         ("run", "--timeout-secs"),
         ("run", "--continue-on-length"),
+        ("run", "--token-budget"),
         ("chat", "--max-turns"),
         ("chat", "--timeout-secs"),
+        ("chat", "--token-budget"),
     ] {
         // A parser default here would claim a value that a non-default profile replaces.
         let help = flag_help(mode, flag);

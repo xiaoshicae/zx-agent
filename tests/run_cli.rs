@@ -252,6 +252,86 @@ async fn a_zero_timeout_is_rejected_before_any_request() {
     assert!(server.requests().is_empty());
 }
 
+/// A cut-off answer, which `run` asks the model to continue (`--continue-on-length` is 1),
+/// then the rest. Each answer of the fake service reports 12 tokens: 10 in, 2 out.
+async fn two_answers() -> MockServer {
+    MockServer::start(vec![Reply::truncated("part one, "), Reply::text("part two")]).await
+}
+
+#[tokio::test]
+async fn the_token_budget_ends_a_run_with_exit_code_7_before_the_next_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = two_answers().await;
+
+    let output = run(&server, dir.path())
+        .args(["--token-budget", "12"])
+        .output()
+        .await
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(7), "{stderr}");
+    assert!(stderr.contains("outcome=TokenBudget"), "{stderr}");
+    assert!(
+        stderr.contains("token budget reached (12 tokens used, token_budget = 12)"),
+        "{stderr}"
+    );
+    assert_eq!(server.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn the_last_request_may_take_a_run_over_its_token_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = two_answers().await;
+
+    let output = run(&server, dir.path())
+        .args(["--token-budget", "13"])
+        .output()
+        .await
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "part one, part two\n");
+    assert_eq!(server.requests().len(), 2);
+}
+
+#[tokio::test]
+async fn a_profile_sets_the_token_budget_and_zero_on_the_command_line_disables_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile = dir.path().join("budget.toml");
+    std::fs::write(&profile, "[limits]\ntokenBudget = 12\n").unwrap();
+    let profile = profile.to_str().unwrap();
+
+    let limited = two_answers().await;
+    let output = run(&limited, dir.path())
+        .args(["--profile", profile])
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(7),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(limited.requests().len(), 1);
+
+    let unlimited = two_answers().await;
+    let output = run(&unlimited, dir.path())
+        .args(["--profile", profile, "--token-budget", "0"])
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(unlimited.requests().len(), 2);
+}
+
 #[tokio::test]
 async fn a_closed_stdout_leaves_the_exit_code_to_the_outcome() {
     let dir = tempfile::tempdir().unwrap();

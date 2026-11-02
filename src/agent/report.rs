@@ -22,6 +22,8 @@ pub enum RunOutcome {
     Timeout,
     /// The caller cancelled the run.
     Aborted,
+    /// The token budget ran out while the model still wanted to continue.
+    TokenBudget,
 }
 
 /// Summary of a finished run.

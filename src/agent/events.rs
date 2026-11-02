@@ -140,6 +140,8 @@ pub enum LoopOutcome {
     MaxTurns,
     /// The answer was cut off and no hook requested a continuation.
     Truncated,
+    /// The token budget ran out while the model still wanted to continue.
+    TokenBudget,
 }
 
 /// What is known about a tool call that an interrupted run left without a result. The

@@ -846,7 +846,7 @@ async fn a_hook_follow_up_obeys_the_turn_budget() {
     let (mut runner, _) = RunnerSetup {
         limits: Limits {
             max_turns: Some(1),
-            timeout: None,
+            ..Limits::default()
         },
         ..RunnerSetup::new(config)
     }

@@ -544,6 +544,7 @@ fn render(report: &RunReport, replies: &Replies) -> String {
         RunOutcome::Completed => answer.to_string(),
         RunOutcome::Truncated => noted(&replies.truncated),
         RunOutcome::MaxTurns => noted(&replies.max_turns),
+        RunOutcome::TokenBudget => noted(&replies.token_budget),
         // The last answer in the session may be an earlier run's, so it is not repeated.
         RunOutcome::Timeout => replies.timed_out.clone(),
         RunOutcome::Aborted => replies.cancelled.clone(),
@@ -594,6 +595,10 @@ mod tests {
         assert_eq!(
             render(&report(RunOutcome::MaxTurns, "", None), &replies),
             replies.max_turns
+        );
+        assert_eq!(
+            render(&report(RunOutcome::TokenBudget, "part", None), &replies),
+            format!("part\n\n{}", replies.token_budget)
         );
     }
 

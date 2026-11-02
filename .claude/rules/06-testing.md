@@ -35,14 +35,14 @@ paths:
 |---|---|
 | `src/**` 中的 `mod tests` | 各模块的单元测试，包括会话文件和事件流的 JSON 格式 |
 | `tests/agent_loop.rs` | 循环语义 |
-| `tests/runner.rs` | 运行层：重试（含预算用完不重试、省略失败回答的事件）、上限、截断续写、持久化（含自定义 `SessionLog`）、恢复会话、排队输入只写一次 |
+| `tests/runner.rs` | 运行层：重试（含预算用完不重试、省略失败回答的事件）、上限（含 token 预算：FauxProvider 每次回答报告 15 个 token）、截断续写、持久化（含自定义 `SessionLog`）、恢复会话、排队输入只写一次 |
 | `tests/agent_session.rs` | 共享会话：Busy、取消与丢弃后复用、多订阅者、退订、回调重入与 panic、模型切换与审计、取出未被消费的排队输入、会话释放后有界订阅结束 |
 | `tests/openai_mock.rs` | 真实 HTTP 下的 provider：SSE、重试、空闲超时、中途取消、成功状态下的 JSON 正文 |
 | `tests/cli.rs` | 原有 run 行为与退出码，P0 起逐字节保持；P6 默认值变更另行验收 |
-| `tests/run_cli.rs` | P0 之后新增的 run 约定（如进度与报告行转义终端控制字符、会话文件单写者、零超时被拒绝、stdout 关闭时的退出码），新的 run 测试放这里，`tests/cli.rs` 不改 |
+| `tests/run_cli.rs` | P0 之后新增的 run 约定（如进度与报告行转义终端控制字符、会话文件单写者、零超时被拒绝、stdout 关闭时的退出码、token 预算的退出码 7：假服务每次回答报告 12 个 token），新的 run 测试放这里，`tests/cli.rs` 不改 |
 | `tests/chat_cli.rs` | chat 的脚本 stdin、审批与过期、信号与超时、取消后丢弃残留插话、钩子失败的提示、Unicode、模型切换、会话重置和 Unix PTY |
 | `tests/profiles_cli.rs` | profile/CLI 覆盖与 deny、项目上下文范围、默认值与越界链接、`--system-prompt-file` 兼容、skill 懒加载、工具策略和审计 |
-| `tests/session_compaction.rs`、`tests/compaction.rs` | 追加升级、分支 / 引用与原始投影、自动 / 手动摘要、计费、steering、失败、取消与超时 |
+| `tests/session_compaction.rs`、`tests/compaction.rs` | 追加升级、分支 / 引用与原始投影、自动 / 手动摘要、计费（摘要请求计入请求与 token 预算）、steering、失败、取消与超时 |
 | `tests/incremental_summary.rs` | 增量摘要（v5）：接续与只读新增记录、接续全量摘要、取代、淘汰、修正后的作废与重读、加载校验、请求还原、请求大小不随历史增长 |
 | `tests/request_audit.rs` | 请求审计（G3）：从会话文件还原每次请求、配置变化才追加、旧会话升级时机；固定会话 `tests/fixtures/replay-v4.jsonl` 与含增量摘要的 `replay-v5.jsonl` 的还原结果与期望文件逐字节比对，改变还原结果须同时升级转换版本或会话格式 |
 | `tests/executor.rs` | 执行器接缝：工具只经自身执行器运行命令和读文件，结束方式的报告，执行方式随执行器 |

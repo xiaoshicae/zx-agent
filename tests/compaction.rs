@@ -100,7 +100,7 @@ async fn automatic_summary_counts_against_task_request_budget_and_usage() {
         session: store,
         limits: Limits {
             max_turns: Some(2),
-            timeout: None,
+            ..Limits::default()
         },
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
@@ -185,7 +185,7 @@ async fn summary_cannot_spend_an_extra_task_request_after_max_turns() {
         session: store,
         limits: Limits {
             max_turns: Some(1),
-            timeout: None,
+            ..Limits::default()
         },
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
@@ -200,6 +200,36 @@ async fn summary_cannot_spend_an_extra_task_request_after_max_turns() {
     assert_eq!(report.outcome, RunOutcome::MaxTurns);
     assert_eq!(report.turns, 1);
     assert_eq!(report.usage.total_tokens, 15);
+    assert!(report.final_text.is_empty(), "a summary is never a task answer");
+    assert_eq!(provider.requests().len(), 1);
+    assert!(runner.session().latest_compaction().is_some());
+}
+
+#[tokio::test]
+async fn a_summary_request_counts_against_the_token_budget() {
+    let (store, old) = seeded().await;
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::text(summary(&old)),
+        FauxStep::text("must not be sent"),
+    ]));
+    let (runner, _) = RunnerSetup {
+        session: store,
+        limits: Limits {
+            token_budget: Some(15),
+            ..Limits::default()
+        },
+        ..RunnerSetup::new(config(provider.clone(), vec![]))
+    }
+    .build();
+    let mut runner = runner
+        .with_compaction(Config {
+            trigger_bytes: Some(1024),
+            ..budget()
+        })
+        .unwrap();
+    let report = runner.run("continue", &CancellationToken::new()).await;
+    assert_eq!(report.outcome, RunOutcome::TokenBudget);
+    assert_eq!(report.usage.input_and_output(), 15);
     assert!(report.final_text.is_empty(), "a summary is never a task answer");
     assert_eq!(provider.requests().len(), 1);
     assert!(runner.session().latest_compaction().is_some());
@@ -711,8 +741,8 @@ async fn the_run_timeout_also_bounds_automatic_compaction() {
     let (runner, _) = RunnerSetup {
         session: store,
         limits: Limits {
-            max_turns: None,
             timeout: Some(Duration::from_millis(10)),
+            ..Limits::default()
         },
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }

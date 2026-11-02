@@ -23,6 +23,8 @@ pub fn limits() -> Limits {
     Limits {
         max_turns: Some(MAX_TURNS),
         timeout: Some(Duration::from_secs(TIMEOUT_SECS)),
+        // Token prices differ between models, so no budget suits them all.
+        token_budget: None,
     }
 }
 

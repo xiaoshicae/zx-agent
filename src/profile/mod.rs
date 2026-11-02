@@ -239,6 +239,9 @@ impl Profile {
         if let Some(secs) = raw.limits.timeout_secs {
             self.limits.timeout = (secs > 0).then(|| Duration::from_secs(secs));
         }
+        if let Some(tokens) = raw.limits.token_budget {
+            self.limits.token_budget = (tokens > 0).then_some(tokens);
+        }
         if let Some(count) = raw.extensions.continue_on_length {
             self.continue_on_length = count;
         }
@@ -464,6 +467,8 @@ struct RawRules {
 struct RawLimits {
     max_turns: Option<TurnLimit>,
     timeout_secs: Option<u64>,
+    /// 0 disables a budget that an earlier layer set.
+    token_budget: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -572,12 +577,27 @@ mod tests {
     }
 
     #[test]
+    fn a_token_budget_of_zero_disables_it() {
+        assert_eq!(
+            load_file("[limits]\ntokenBudget = 50000").unwrap().limits.token_budget,
+            Some(50000)
+        );
+        assert_eq!(
+            load_file("[limits]\ntokenBudget = 0").unwrap().limits.token_budget,
+            None
+        );
+        assert_eq!(load_file("").unwrap().limits.token_budget, None);
+    }
+
+    #[test]
     fn unknown_fields_and_invalid_budget_values_are_rejected() {
         for text in [
             "typo = true",
             "[limits]\nmax_turns = 2",
             "[limits]\nmaxTurns = -1",
             "[limits]\nmaxTurns = 'infinite'",
+            "[limits]\ntokenBudget = -1",
+            "[limits]\ntokenBudget = 'unlimited'",
         ] {
             assert!(load_file(text).is_err(), "{text}");
         }

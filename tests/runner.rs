@@ -166,6 +166,7 @@ fn limits(max_turns: u32, timeout: Option<Duration>) -> Limits {
     Limits {
         max_turns: Some(max_turns),
         timeout,
+        ..Limits::default()
     }
 }
 
@@ -229,6 +230,57 @@ async fn zero_turn_limit_does_not_call_the_provider() {
     assert!(report.final_text.is_empty());
     assert!(provider.requests().is_empty());
     assert_eq!(report.error.as_deref(), Some("turn limit reached (max_turns = 0)"));
+}
+
+fn token_budget(tokens: u64) -> Limits {
+    Limits {
+        token_budget: Some(tokens),
+        ..Limits::default()
+    }
+}
+
+/// A runner with the echo tool; each faux answer reports 10 input and 5 output tokens.
+fn echo_runner(provider: &Arc<FauxProvider>, limits: Limits) -> zx_agent::runner::Runner {
+    RunnerSetup {
+        limits,
+        ..RunnerSetup::new(config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]))
+    }
+    .build()
+    .0
+}
+
+#[tokio::test]
+async fn the_token_budget_stops_a_run_before_the_request_it_cannot_pay_for() {
+    let provider = provider([
+        FauxStep::tool_call("c1", "echo", json!({"text": "ok"})),
+        FauxStep::text("must not be requested"),
+    ]);
+    let mut runner = echo_runner(&provider, token_budget(15));
+
+    let report = runner.run("go", &CancellationToken::new()).await;
+
+    assert_eq!(report.outcome, RunOutcome::TokenBudget);
+    assert_eq!(provider.requests().len(), 1);
+    assert_eq!(report.usage.input_and_output(), 15);
+    assert_eq!(
+        report.error.as_deref(),
+        Some("token budget reached (15 tokens used, token_budget = 15)")
+    );
+}
+
+#[tokio::test]
+async fn the_last_request_may_take_a_run_over_its_token_budget() {
+    let provider = provider([
+        FauxStep::tool_call("c1", "echo", json!({"text": "ok"})),
+        FauxStep::text("done"),
+    ]);
+    let mut runner = echo_runner(&provider, token_budget(16));
+
+    let report = runner.run("go", &CancellationToken::new()).await;
+
+    assert_eq!(report.outcome, RunOutcome::Completed);
+    assert_eq!(report.final_text, "done");
+    assert_eq!(report.usage.input_and_output(), 30);
 }
 
 #[tokio::test]

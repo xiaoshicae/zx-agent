@@ -143,6 +143,8 @@ pub struct Replies {
     pub truncated: String,
     /// Appended when the turn budget ran out.
     pub max_turns: String,
+    /// Appended when the token budget ran out.
+    pub token_budget: String,
     /// A run that reached its time limit.
     pub timed_out: String,
     /// Followed by the error of a failed run.
@@ -167,6 +169,7 @@ impl Default for Replies {
             no_answer: "（没有回答）".into(),
             truncated: "（回答达到输出上限，已截断）".into(),
             max_turns: "（已达到轮次上限，任务没有完成）".into(),
+            token_budget: "（已达到 token 预算，任务没有完成）".into(),
             timed_out: "运行超时，任务没有完成。".into(),
             failed: "运行失败：".into(),
             cannot_open: "无法打开会话：".into(),
