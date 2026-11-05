@@ -11,6 +11,7 @@ pub(super) enum Command {
     Compact,
     /// Continue without new input.
     Continue,
+    Status,
     Quit,
     Help,
     Invalid(String),
@@ -32,6 +33,7 @@ pub(super) fn parse(line: String) -> Command {
         "/help" if rest.is_empty() => Command::Help,
         "/compact" if rest.is_empty() => Command::Compact,
         "/continue" if rest.is_empty() => Command::Continue,
+        "/status" if rest.is_empty() => Command::Status,
         "/model" => Command::Model((!rest.is_empty()).then(|| rest.to_string())),
         "/reasoning" => Command::Reasoning((!rest.is_empty()).then(|| rest.to_string())),
         _ => Command::Invalid(format!("unknown command or arguments: {name}; use /help")),
@@ -45,6 +47,7 @@ mod tests {
     #[test]
     fn ordinary_input_keeps_its_unicode_and_whitespace() {
         assert!(matches!(parse("  你好  ".into()), Command::Prompt(text) if text == "  你好  "));
+        assert!(matches!(parse("第一行\n/quit".into()), Command::Prompt(text) if text == "第一行\n/quit"));
         assert!(matches!(parse(" \t".into()), Command::Empty));
     }
 
@@ -55,6 +58,7 @@ mod tests {
             "/quit extra",
             "/compact extra",
             "/continue extra",
+            "/status extra",
             "/unknown",
         ] {
             assert!(matches!(parse(invalid.into()), Command::Invalid(_)), "{invalid}");
@@ -63,5 +67,6 @@ mod tests {
         assert!(matches!(parse("/model".into()), Command::Model(None)));
         assert!(matches!(parse("/reasoning high".into()), Command::Reasoning(Some(level)) if level == "high"));
         assert!(matches!(parse("/reasoning".into()), Command::Reasoning(None)));
+        assert!(matches!(parse("/status".into()), Command::Status));
     }
 }

@@ -89,6 +89,12 @@ async fn multiple_prompts_keep_history_and_stream_each_answer_once() {
     let output = run(&server, dir.path(), &["--tools", ""], "你好\nsecond\n/quit\n").await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(stdout(&output), "first answer\nsecond answer\n");
+    assert_eq!(
+        stderr(&output).matches("[turn] 1 request · ").count(),
+        2,
+        "{}",
+        stderr(&output)
+    );
     assert_eq!(users(&server, 1), ["你好", "second"]);
     let system = server.requests()[0].body["messages"][0]["content"]
         .as_str()
@@ -563,11 +569,182 @@ async fn approving_once_allows_the_displayed_shell_call() {
     let output = run(&server, dir.path(), &["--tools", "bash"], "go\n1\n/quit\n").await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(std::fs::read_to_string(dir.path().join("marker")).unwrap(), "approved");
-    assert!(stderr(&output).contains("[approval 1]"));
-    assert!(stderr(&output).contains("printf approved > marker"));
-    assert!(stderr(&output).contains("[reason]"));
-    assert!(stderr(&output).contains("[scope]"));
+    assert!(stderr(&output).contains("[approval 1] bash: printf approved > marker"));
+    assert!(stderr(&output).contains("  profile requires tool approval"));
+    // The scope and the auto-approved commands are stated once, at startup.
+    assert!(
+        stderr(&output).contains(
+            "[chat] tools=bash · bash asks first, except grep, head, tail, wc, jq · commands run with this process's permissions · /help for commands"
+        ),
+        "{}",
+        stderr(&output)
+    );
     assert_eq!(server.requests().len(), 2);
+}
+
+#[tokio::test]
+async fn an_auto_approved_command_is_shown_with_a_preview_of_its_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::bash("c", "seq 1 5"), Reply::text("done")]).await;
+    let output = run(
+        &server,
+        dir.path(),
+        &["--tools", "bash", "--auto-approve-cmd", "seq"],
+        "go\n/quit\n",
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let log = stderr(&output);
+    assert!(!log.contains("[approval"), "{log}");
+    assert!(log.contains("[tool] bash: seq 1 5 -> ok"), "{log}");
+    // Three lines of the result, then the count of the rest (the exit code line included).
+    assert!(log.contains("\n    1\n    2\n    3\n    … 3 more line(s)\n"), "{log}");
+}
+
+#[tokio::test]
+async fn y_and_n_answer_an_approval_like_1_and_3() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![
+        Reply::bash("c1", "printf yes > first"),
+        Reply::bash("c2", "printf no > second"),
+        Reply::text("done"),
+    ])
+    .await;
+    let output = run(&server, dir.path(), &["--tools", "bash"], "go\ny\nN\n/quit\n").await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(std::fs::read_to_string(dir.path().join("first")).unwrap(), "yes");
+    assert!(!dir.path().join("second").exists());
+    assert_eq!(server.requests().len(), 3);
+    assert!(
+        server.requests()[2].body["messages"]
+            .to_string()
+            .contains("declined by the user")
+    );
+}
+
+#[tokio::test]
+async fn status_shows_the_session_and_what_the_conversation_used() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::text("hi")]).await;
+    let output = run(
+        &server,
+        dir.path(),
+        &["--tools", "", "--session", "chat.jsonl"],
+        "hello\n/status\n/quit\n",
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let log = stderr(&output);
+    assert!(
+        log.contains("[status] model=mock-model · profile=assistant · session=chat.jsonl · cwd="),
+        "{log}"
+    );
+    assert!(
+        log.contains("[status] this conversation: 1 turn(s) · 1 request(s) · "),
+        "{log}"
+    );
+}
+
+#[tokio::test]
+async fn a_file_write_approval_shows_the_content_as_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![
+        Reply::tool_call("c", "write_file", json!({"path": "notes.txt", "content": "one\ntwo\n"})),
+        Reply::text("done"),
+    ])
+    .await;
+    let output = run(&server, dir.path(), &[], "go\n1\n/quit\n").await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let log = stderr(&output);
+    assert!(
+        log.contains("[approval 1] write_file: notes.txt\n  content (2 lines):\n      one\n      two\n"),
+        "{log}"
+    );
+    assert!(log.contains("[tool] write_file: notes.txt -> ok"), "{log}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("notes.txt")).unwrap(),
+        "one\ntwo\n"
+    );
+}
+
+#[tokio::test]
+async fn an_edit_approval_lists_each_edit_and_its_result_shows_the_patch() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "hello\nworld\n").unwrap();
+    let server = MockServer::start(vec![
+        Reply::tool_call(
+            "c",
+            "edit_file",
+            json!({"path": "a.txt", "edits": [{"oldText": "hello", "newText": "bye"}]}),
+        ),
+        Reply::text("done"),
+    ])
+    .await;
+    let output = run(&server, dir.path(), &[], "go\n1\n/quit\n").await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let log = stderr(&output);
+    assert!(
+        log.contains("[approval 1] edit_file: a.txt\n  edits[0].newText: bye\n  edits[0].oldText: hello\n"),
+        "{log}"
+    );
+    assert!(log.contains("[tool] edit_file: a.txt -> ok"), "{log}");
+    assert!(log.contains("\n    -hello\n    +bye\n"), "{log}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+        "bye\nworld\n"
+    );
+}
+
+#[tokio::test]
+async fn color_always_keeps_colors_when_stderr_is_not_a_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::bash("c", "seq 1 2"), Reply::text("done")]).await;
+    let output = run(
+        &server,
+        dir.path(),
+        &["--tools", "bash", "--auto-approve-cmd", "seq", "--color", "always"],
+        "go\n/quit\n",
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let log = stderr(&output);
+    assert!(
+        log.contains("\x1b[2m[tool]\x1b[0m bash: seq 1 2 -> \x1b[32mok\x1b[0m"),
+        "{log}"
+    );
+    assert!(log.contains("\x1b[2m[turn] "), "{log}");
+}
+
+#[tokio::test]
+async fn resuming_a_session_file_says_how_much_history_it_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_context(dir.path(), 10).await;
+    let server = MockServer::start(vec![Reply::text("hi")]).await;
+    let output = run(
+        &server,
+        dir.path(),
+        &["--tools", "", "--session", "chat.jsonl"],
+        "hello\n/quit\n",
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let log = stderr(&output);
+    assert!(
+        log.contains("[chat] resumed 2 message(s) from the session file; last activity 20"),
+        "{log}"
+    );
+
+    let fresh = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::text("hi")]).await;
+    let output = run(
+        &server,
+        fresh.path(),
+        &["--tools", "", "--session", "new.jsonl"],
+        "hello\n/quit\n",
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(!stderr(&output).contains("resumed"), "{}", stderr(&output));
 }
 
 #[tokio::test]
@@ -631,7 +808,8 @@ async fn discussing_an_approval_sends_user_input_without_executing_the_call() {
     .await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(!dir.path().join("marker").exists());
-    assert!(stderr(&output).contains("Chat about this"));
+    assert!(stderr(&output).contains("4 discuss"));
+    assert!(stderr(&output).contains("What would you like to discuss?"));
     assert!(
         server.requests()[1].body["messages"]
             .to_string()
@@ -982,13 +1160,15 @@ async fn debug_reports_model_failure_without_repeating_the_error() {
 }
 
 #[tokio::test]
-async fn normal_chat_does_not_print_tool_arguments_twice() {
+async fn an_approved_command_is_shown_with_the_request_and_again_with_its_result() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::bash("c", "printf example > marker"), Reply::text("done")]).await;
     let output = run(&server, dir.path(), &["--tools", "bash"], "go\n1\n/quit\n").await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let log = stderr(&output);
-    assert_eq!(log.matches("printf example > marker").count(), 1, "{log}");
+    assert_eq!(log.matches("printf example > marker").count(), 2, "{log}");
+    assert!(log.contains("[approval 1] bash: printf example > marker"), "{log}");
+    assert!(log.contains("[tool] bash: printf example > marker -> ok"), "{log}");
     assert!(!log.contains("[debug "));
 }
 
@@ -1063,6 +1243,20 @@ async fn read_error_until(lines: &mut Lines<BufReader<tokio::process::ChildStder
     .unwrap()
 }
 
+/// Read the terminal until `needle` has been seen, keeping everything read in `seen`.
+async fn read_terminal_until(terminal: &mut tokio::fs::File, seen: &mut Vec<u8>, needle: &str) {
+    tokio::time::timeout(Duration::from_secs(8), async {
+        let mut chunk = [0; 4096];
+        while !String::from_utf8_lossy(seen).contains(needle) {
+            let n = terminal.read(&mut chunk).await.unwrap();
+            assert!(n > 0, "terminal closed before {needle:?}");
+            seen.extend_from_slice(&chunk[..n]);
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{needle:?} not seen in {:?}", String::from_utf8_lossy(seen)));
+}
+
 #[cfg(unix)]
 async fn signal(child: &Child, name: &str) {
     assert!(
@@ -1106,6 +1300,140 @@ async fn streamed_output_is_visible_before_cancel_and_the_conversation_can_conti
         Some(0)
     );
     assert_eq!(users(&server, 1), ["first", "second"]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_cancelled_task_is_reported_once_without_a_model_error_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let partial = json!({"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]});
+    let server = MockServer::start(vec![Reply::Stall(vec![partial])]).await;
+    let mut child = chat(&server, dir.path(), &["--tools", ""]).spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    stdin.write_all(b"first\n").await.unwrap();
+    let mut seen = Vec::new();
+    tokio::time::timeout(Duration::from_secs(8), async {
+        let mut chunk = [0; 256];
+        while !String::from_utf8_lossy(&seen).contains("partial") {
+            let n = stdout.read(&mut chunk).await.unwrap();
+            assert!(n > 0, "stdout ended early");
+            seen.extend_from_slice(&chunk[..n]);
+        }
+    })
+    .await
+    .unwrap();
+    signal(&child, "-INT").await;
+    stdin.write_all(b"/quit\n").await.unwrap();
+    drop(stdin);
+    let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let log = stderr(&output);
+    assert!(log.contains("[chat] run was cancelled"), "{log}");
+    assert!(!log.contains("[model] Aborted"), "{log}");
+    assert!(log.contains("[turn] 1 request · "), "{log}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn lines_pasted_together_into_a_terminal_are_one_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::text("got it")]).await;
+    let (mut terminal, slave) = common::pty();
+    let mut child = chat(&server, dir.path(), &["--tools", "", "--output", "jsonl"])
+        .stdin(Stdio::from(slave))
+        .spawn()
+        .unwrap();
+    let mut events = BufReader::new(child.stdout.take().unwrap()).lines();
+    terminal
+        .write_all("第一行：日志\n第二行：ERROR\n请分析\n".as_bytes())
+        .await
+        .unwrap();
+    terminal.flush().await.unwrap();
+    let report = read_event_until(&mut events, |event| event["type"] == "run_end").await;
+    assert_eq!(report["report"]["finalText"], "got it");
+    assert_eq!(users(&server, 0), ["第一行：日志\n第二行：ERROR\n请分析"]);
+    terminal.write_all(b"/quit\n").await.unwrap();
+    terminal.flush().await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .code(),
+        Some(0)
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_terminal_shows_a_status_line_while_the_model_is_silent() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::Stall(vec![])]).await;
+    let (mut terminal, slave) = common::pty();
+    let mut command = chat(&server, dir.path(), &["--tools", ""]);
+    command
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave));
+    command.env("TERM", "xterm").env_remove("NO_COLOR");
+    let mut child = command.spawn().unwrap();
+    drop(command);
+    terminal.write_all(b"go\n").await.unwrap();
+    terminal.flush().await.unwrap();
+    let mut seen = Vec::new();
+    read_terminal_until(&mut terminal, &mut seen, "waiting for the model · ").await;
+    let output = String::from_utf8_lossy(&seen).into_owned();
+    assert!(output.contains("\x1b[2m"), "the status is dimmed: {output:?}");
+    terminal.write_all(b"/quit\n").await.unwrap();
+    terminal.flush().await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .code(),
+        Some(0)
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_terminal_separates_answers_with_blank_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::text("answer")]).await;
+    let (mut terminal, slave) = common::pty();
+    let mut command = chat(&server, dir.path(), &["--tools", ""]);
+    command
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave));
+    command.arg("--color").arg("never");
+    command.env("TERM", "xterm").env_remove("NO_COLOR");
+    let mut child = command.spawn().unwrap();
+    drop(command);
+    let mut seen = Vec::new();
+    // Typed after the prompt, as a person would, so the echo lands below it.
+    read_terminal_until(&mut terminal, &mut seen, "zx> ").await;
+    terminal.write_all(b"go\n").await.unwrap();
+    terminal.flush().await.unwrap();
+    read_terminal_until(&mut terminal, &mut seen, "[turn]").await;
+    let output = String::from_utf8_lossy(&seen).replace('\r', "");
+    assert!(output.contains("zx> go\n\nanswer\n\n[turn] 1 request"), "{output:?}");
+    assert!(!output.contains("\x1b["), "{output:?}");
+    terminal.write_all(b"/quit\n").await.unwrap();
+    terminal.flush().await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .code(),
+        Some(0)
+    );
 }
 
 #[cfg(unix)]
