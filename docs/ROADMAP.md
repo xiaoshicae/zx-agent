@@ -535,7 +535,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P7 | 插件与 MCP | 已完成（PR #41）：范围按 D8 收窄，评审稿已合入（PR #36）并经用户确认；模块 A（Extension 接口，PR #38）、B1（MCP 客户端库，PR #40）、B2（CLI 接入与文档，PR #41）已完成；真实 MCP 服务器的验收待选定服务器；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已完成（PR #23），A2–A8（扩展 API）已完成（PR #25） |
 | P8 | 嵌入协议 `acp` | 不做（2026-11-02 用户决定，D10） |
 | P9 | 可选增强 | 进行中：token 预算（PR #47）、OpenTelemetry 追踪（PR #49）、crate 拆分（PR #52）、通用化整理（PR #54）、chat 交互体验（2026-11-05，见下文）已完成；剩更多 provider（如 Anthropic）。其余各项按 D10 不做或取消 |
-| P10 | 与 pi 的能力对齐 | 进行中：2026-11-05 对照 pi 列出 14 项缺口，见下文 P10；① 上下文超长后自动恢复已完成（PR #56）；② 容器沙箱已完成（PR #57）；③ edit 与 write 工具已完成（PR #58）；④ grep、find、ls 已完成（PR #59）；⑤ 运行中可调整的配置已完成：⑤a 推理强度（PR #60）、⑤b 续跑（PR #61）、⑤c 请求前替换模型与推理强度的钩子（PR #65）；⑥a 会话目录与续接已完成（PR #67）；⑥b fork 已完成（PR #68）；⑥c 会话内切换分支已完成（PR 待开）；⑦ 扩展能力与 ⑨ 消息队列已完成（PR 待开）；⑧ 模型元数据与计量已完成（PR 待开）；⑫ 幂等键已完成（PR 待开，rpc 模式按 D13 不做） |
+| P10 | 与 pi 的能力对齐 | 进行中：2026-11-05 对照 pi 列出 14 项缺口，见下文 P10；① 上下文超长后自动恢复已完成（PR #56）；② 容器沙箱已完成（PR #57）；③ edit 与 write 工具已完成（PR #58）；④ grep、find、ls 已完成（PR #59）；⑤ 运行中可调整的配置已完成：⑤a 推理强度（PR #60）、⑤b 续跑（PR #61）、⑤c 请求前替换模型与推理强度的钩子（PR #65）；⑥a 会话目录与续接已完成（PR #67）；⑥b fork 已完成（PR #68）；⑥c 会话内切换分支已完成（PR 待开）；⑦ 扩展能力与 ⑨ 消息队列已完成（PR 待开）；⑧ 模型元数据与计量已完成（PR 待开）；⑫ 幂等键已完成（PR 待开，rpc 模式按 D13 不做）；⑬ MCP 进度已完成（PR 待开） |
 
 ### P0 场景默认值移出内核
 
@@ -1386,7 +1386,7 @@ chat 交互体验第三批（2026-11-05，基于合并 PR #65 之后的 `829afc8
 - [ ] **⑩ 可观测**（中）。指标（运行耗时、结果计数、token、工具与 MCP 调用耗时）与跨进程传递 trace（W3C `traceparent`）（`packages/telemetry`）。zx 只导出 trace，trace ID 由 SDK 生成。待定：指标要开 opentelemetry 系列的 `metrics` feature，锁文件可能增加包。
 - [ ] **⑪ 行为评测框架**（中）。按 profile 运行场景用例，支持重复次数、两种变体配对比较、只用合成数据、产物落盘（`packages/evals`）。zx 只有一项摘要评测（`tests/real_api.rs`）。框架与离线用例可直接做；真实运行每次都要用户授权（红线 9）。
 - [x] **⑫ 嵌入**（中；幂等键已完成（PR 待开），rpc 模式按 D13 不做，2026-11-05，见下方实施记录）。SDK 提交提示词的幂等键，防止宿主重试时重复提交。待定：给非 Rust 程序用的进程协议（类似 pi 的 rpc 模式，`packages/coding-agent/src/modes/rpc`）。ACP 已按 D10 不做，rpc 是否做由用户决定。
-- [ ] **⑬ MCP 进度**（低中）。转发服务器的进度通知，并按进度延长超时（`packages/mcp/src/client.ts`）；zx 的调用固定 120 秒超时（`crates/zx-tools/src/mcp.rs:36`）。rmcp 是否支持，实施前核对。
+- [x] **⑬ MCP 进度**（低中；已完成（PR 待开），2026-11-05，见下方实施记录）。转发服务器的进度通知，并按进度延长超时（`packages/mcp/src/client.ts`）；zx 的调用固定 120 秒超时（`crates/zx-tools/src/mcp.rs:36`）。rmcp 是否支持，实施前核对。
 - [ ] **⑭ chat 的便利功能**（低）。提示词模板、`!cmd` 直接执行、路径中的 `~` 展开、用户级全局配置、导出、更多斜杠命令（现有 5 个）。
 
 ① 实施记录（2026-11-05，PR #56，基于 `c44154d`）：
@@ -1405,6 +1405,23 @@ chat 交互体验第三批（2026-11-05，基于合并 PR #65 之后的 `829afc8
 - 本机 macOS 验证：stable 下 828 项通过、7 项付费测试跳过（基线 816 项，PR #55 的实测）；fmt、clippy、严格 Rustdoc 与 Rust 1.88.0 的全目标检查通过；Rust 1.88.0 下没有运行测试。自查脚本在改动的文件中只列出原有的 1 处（`src/chat/output.rs` 的 `let _ =`）。未新增依赖。没有对真实模型服务验证超长时的错误格式。
 
 ⑥ 分三步，各一个 PR：⑥a 会话目录、列出与续接；⑥b fork 成新会话（`--fork`、`/fork`，头部记下来源会话）；⑥c 会话内切换分支（`AgentSession` 的分支接口，chat 的 `/tree` 与 `/branch`）。会话目录的默认位置经用户决定（D12）。
+
+⑬ 实施记录（2026-11-05，PR 待开，基于 ⑫ 的提交 `0223eb7`）：
+
+rmcp 3.8.0 的核实（`~/.cargo/registry/src/*/rmcp-3.8.0/src/`）：每个请求都由 rmcp 自动加进度令牌（`service.rs:880-882`），调用方只能从 `RequestHandle.progress_token` 得知；`PeerRequestOptions::with_timeout(t).reset_timeout_on_progress()` 让每条匹配的进度通知重置空闲超时，`with_max_total_timeout` 另设总上限，`await_response` 在两种超时到期时都发 `notifications/cancelled`（`service.rs:542-650`）；`ClientHandler::on_progress` 收通知，每条在各自的任务里处理。原来用的 `call_tool` 没有超时选项，只靠丢弃 future 让 `AbandonedRequestGuard` 取消。
+
+| 环节 | 做法 |
+|---|---|
+| 调用 | `McpTool::execute` 改用 `peer.send_cancellable_request(ClientRequest::CallToolRequest, 选项)`：`call_timeout` 作为空闲超时、进度通知重置（pi 的 `armTimeout`），`ServerConfig::max_call_timeout`（profile 的 `maxTimeoutSecs`）作为总上限；两种超时的报错分别写“did not answer within”与“did not finish within” |
+| 进度 | `Handler` 自带按令牌分发的表（`Mutex<HashMap<ProgressToken, mpsc::Sender>>`，每个调用 16 条，满了丢弃）：`on_progress` 投递，`subscribe(令牌)` 得到接收端，调用结束时释放。不用 rmcp 的 `ProgressDispatcher`：它要 `futures` 的 `StreamExt`，zx-tools 没有这个依赖（只在 dev-dependencies）。通知转成 `ToolContext::report_progress` 的一行（pi 的写法：`message`，否则 `progress n/total`），经既有的进度通道成为 `tool_execution_update` 事件 |
+| 取消 | `ctx.cancel` 触发时自己发 `notifications/cancelled`（`Peer::notify_cancelled`）再停止等待；rmcp 的传输层看到这条通知会关闭该请求的流（`transport/streamable_http_client.rs:724-728`），所以服务器仍然观察到连接被放弃，与此前相同 |
+| 假服务器 | `Reply::Progress { steps, every, result }`：以 `text/event-stream` 应答，按间隔发 `notifications/progress`（令牌取自请求的 `_meta.progressToken`）再发结果；客户端中途关闭连接时计入“放弃” |
+| 与 pi 的不同 | pi 没有总上限；这里可选。pi 把进度文本交给 `onUpdate`，这里走 `report_progress`，不进会话 |
+
+- 测试：新增 3 项：`tests/mcp.rs` 2 项（两种协议下进度通知到达工具上下文、间隔长于空闲超时但每条都重置所以调用成功、请求带令牌；总上限到期后报错、收到部分进度、服务器看到连接被放弃），`crates/zx-tools/src/mcp.rs` 单元 1 项（进度行的写法）。既有测试未改：超时与取消的两项仍然通过（取消改为自己发通知后，服务器照样观察到放弃）。
+- 反向验证：分别不重置超时（去掉 `reset_timeout_on_progress`）、不转发进度，每次都有对应测试失败，修改已还原。
+- 本机 macOS 验证：见下文“本次 PR 的验证”。
+- 未验证：只对假服务器验证；真实 MCP 服务器发送进度通知的写法（SSE 事件的命名与分帧）没有实测。
 
 ⑫ 实施记录（2026-11-05，PR 待开，基于 ⑧ 的提交 `30345cb`）：
 

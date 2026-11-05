@@ -100,7 +100,8 @@ url = "https://prom-mcp.monitoring.svc/mcp"
 tokenEnv = "PROM_MCP_TOKEN"                 # 可选：以 Authorization: Bearer 发送
 tools = ["query", "query_range"]            # 交给模型的工具，其余不暴露
 allowTools = ["query"]                      # 可选：不经审批直接执行
-timeoutSecs = 60                            # 可选：单次调用的上限，默认同 --tool-timeout-secs
+timeoutSecs = 60                            # 可选：一次调用多久没有应答也没有进度通知就超时，默认同 --tool-timeout-secs
+maxTimeoutSecs = 600                        # 可选：一次调用的总上限，不管进度；省略则只受 timeoutSecs、本轮超时与取消约束
 ```
 
 | 配置 | 语义 |

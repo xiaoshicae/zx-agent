@@ -343,3 +343,97 @@ async fn the_model_calls_a_server_tool_through_the_loop() {
         summarize(&requests[1].messages)
     );
 }
+
+/// A tool context whose progress updates are collected.
+fn observed() -> (ToolContext, tokio::sync::mpsc::Receiver<String>) {
+    let (progress, updates) = tokio::sync::mpsc::channel(16);
+    let mut ctx = context();
+    ctx.progress = Some(progress);
+    (ctx, updates)
+}
+
+fn progress_steps() -> Vec<serde_json::Value> {
+    vec![
+        json!({"progress": 1, "total": 3, "message": "step 1"}),
+        json!({"progress": 2, "total": 3}),
+        json!({"progress": 3, "total": 3, "message": "done"}),
+    ]
+}
+
+#[tokio::test]
+async fn progress_notifications_reach_the_tool_context_and_re_arm_the_timeout() {
+    for era in [Era::Modern, Era::Legacy] {
+        let fake = FakeMcp::start(era, three_tools()).await;
+        // Three notifications 150 ms apart, then the answer: longer than the 250 ms a call
+        // may go without news, but no notification is further apart than that.
+        fake.reply(
+            "query",
+            vec![Reply::Progress {
+                steps: progress_steps(),
+                every: Duration::from_millis(150),
+                result: json!({"content": [{"type": "text", "text": "finished"}]}),
+            }],
+        );
+        let server = Server::connect(ServerConfig {
+            call_timeout: Duration::from_millis(250),
+            ..settings(&fake, &["query"])
+        })
+        .await
+        .unwrap();
+        let (ctx, mut updates) = observed();
+
+        let output = the_tool(&server, "prom__query").execute(json!({}), &ctx).await.unwrap();
+
+        assert_eq!(output.content, "finished", "{era:?}");
+        drop(ctx);
+        let mut seen = Vec::new();
+        while let Some(update) = updates.recv().await {
+            seen.push(update);
+        }
+        assert_eq!(seen, ["step 1", "progress 2/3", "done"], "{era:?}");
+        // The request carried a progress token, which the notifications named.
+        let call = &fake.requests("tools/call")[0];
+        assert!(
+            !call.params["_meta"]["progressToken"].is_null(),
+            "{era:?}: {:?}",
+            call.params
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_total_timeout_ends_a_call_however_much_progress_comes() {
+    let fake = FakeMcp::start(Era::Modern, three_tools()).await;
+    let steps: Vec<serde_json::Value> = (1..=20).map(|n| json!({"progress": n, "total": 20})).collect();
+    fake.reply(
+        "query",
+        vec![Reply::Progress {
+            steps,
+            every: Duration::from_millis(50),
+            result: json!({"content": [{"type": "text", "text": "never read"}]}),
+        }],
+    );
+    let server = Server::connect(ServerConfig {
+        call_timeout: Duration::from_millis(500),
+        max_call_timeout: Some(Duration::from_millis(300)),
+        ..settings(&fake, &["query"])
+    })
+    .await
+    .unwrap();
+    let (ctx, mut updates) = observed();
+
+    let error = the_tool(&server, "prom__query")
+        .execute(json!({}), &ctx)
+        .await
+        .unwrap_err();
+
+    assert!(error.contains("did not finish within 0 s"), "{error}");
+    drop(ctx);
+    let mut seen = 0;
+    while updates.recv().await.is_some() {
+        seen += 1;
+    }
+    assert!((1..20).contains(&seen), "progress came, but not all of it: {seen}");
+    // The client gave up on the stream, as a timeout without progress does.
+    fake.wait_abandoned(1).await;
+}

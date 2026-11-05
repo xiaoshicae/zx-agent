@@ -116,9 +116,14 @@ pub struct McpServer {
     /// refused where no one can answer, as in `run`.
     #[serde(default)]
     pub allow_tools: Vec<String>,
-    /// Bound for one call, in seconds; unset uses `--tool-timeout-secs`.
+    /// Longest a call may go without an answer or a progress notification, in seconds;
+    /// unset uses `--tool-timeout-secs`.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Bound for a whole call, in seconds, however much progress the server reports; unset
+    /// leaves only `timeoutSecs`, the run's timeout and cancellation.
+    #[serde(default)]
+    pub max_timeout_secs: Option<u64>,
 }
 
 /// Which project instructions to read at startup. Explicit paths are absolute after load.
@@ -410,6 +415,10 @@ impl Profile {
             ensure!(
                 server.timeout_secs != Some(0),
                 "MCP server {name}: timeoutSecs must be greater than zero"
+            );
+            ensure!(
+                server.max_timeout_secs != Some(0),
+                "MCP server {name}: maxTimeoutSecs must be greater than zero"
             );
             for tool in &server.allow_tools {
                 ensure!(
@@ -1068,7 +1077,8 @@ mod tests {
     }
 
     const PROM: &str = "[[mcp]]\nname = 'prom'\nurl = 'https://prom.example/mcp'\ntokenEnv = 'PROM_TOKEN'\n\
-                        tools = ['query', 'range']\nallowTools = ['query']\ntimeoutSecs = 30\n";
+                        tools = ['query', 'range']\nallowTools = ['query']\ntimeoutSecs = 30\n\
+                        maxTimeoutSecs = 600\n";
 
     #[test]
     fn mcp_servers_are_read_from_the_profile() {
@@ -1082,6 +1092,7 @@ mod tests {
                 tools: vec!["query".into(), "range".into()],
                 allow_tools: vec!["query".into()],
                 timeout_secs: Some(30),
+                max_timeout_secs: Some(600),
             }]
         );
         assert!(Profile::load(None, Builtin::Assistant).unwrap().mcp.is_empty());
@@ -1106,7 +1117,14 @@ mod tests {
                 server("tools = ['query']\nallowTools = ['range']"),
                 "which tools does not list",
             ),
-            (server("tools = ['query']\ntimeoutSecs = 0"), "greater than zero"),
+            (
+                server("tools = ['query']\ntimeoutSecs = 0"),
+                "timeoutSecs must be greater than zero",
+            ),
+            (
+                server("tools = ['query']\nmaxTimeoutSecs = 0"),
+                "maxTimeoutSecs must be greater than zero",
+            ),
             (server("tools = ['query']\ntokenEnv = ' '"), "tokenEnv is empty"),
             (server("tools = ['a.b', 'a_b']"), "like another of its tools"),
             (server(&format!("tools = ['{}']", "x".repeat(64))), "longer than 64"),
