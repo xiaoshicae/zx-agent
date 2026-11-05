@@ -50,7 +50,7 @@ G1–G4 是验收目标。当前会话日志可重建对话与提示词；G3 所
 | D8 | MCP 的范围 | 本项目只做 MCP 客户端：只接工具，只支持 Streamable HTTP。MCP 服务器与领域工具（如 Kubernetes、Prometheus 查询）由外部服务实现 | 2026-11-01 | 已确认：P7 按此评审，见 `docs/p7-mcp-review.md` |
 | D9 | HTTP 客户端与 TLS | reqwest 升到 0.13（`json`、`stream`、`rustls`）。rustls 只用 aws-lc-rs 一个加密后端，HTTPS 的根证书改用系统信任库。理由：rmcp 只支持 reqwest 0.13，与 0.12 并存时 rustls 同时启用两个后端，`wss://` 连接会 panic（评审稿缺口 ①）；项目还没有使用者，用户授权按最合理的方式处理 | 2026-11-01 | 已完成（PR #36） |
 | D10 | 通用，不为场景定制 | zx-agent 是通用 Agent：代码只定义接口与通用机制，外部来适配。某个环境、平台或厂商才有的知识（如 kubectl 的只读选项、Kubernetes 的 token 路径、IM 文案的语言）放在 profile、部署清单或配置里；告警等外部系统由外部适配器调用 `run`、SDK 或 IM 接入，zx-agent 不解析它们的私有格式（如 Alertmanager）。provider 对协议方言的处理显式开启。同日决定：P9 只再做更多 provider（如 Anthropic），`--output-schema`、异步审批、OS 级沙箱不做，“由 webhook 或告警触发运行”取消；P8 `acp` 不做 | 2026-11-02 | 用户决定；已有代码中的定制已整理（PR #54），见 P9 的“通用化整理” |
-| D11 | 容器执行的权限 | 沙箱内给 agent 最大权限，限制只放在沙箱的外墙上：工作目录（含 `.git`）与根文件系统可写，网络默认开启，审批由 profile 决定、可以一律放行；命令默认以映射的宿主机用户运行，仍不允许 root（root 以后按需做成显式选项，并同时改造进程清理）。外墙不变：不加 `--privileged`、不挂 `docker.sock`、不用宿主机的网络与 PID 命名空间、API key 与环境变量不进容器、会话文件在工作目录之外。原严格模式（只读、无网络）保留为可选配置。取代 P6 中“工作目录只读挂载、网络固定为 `none`”的约定与状态表中的“容器联网已取消”；D5（默认在本机执行）不变。理由与各家做法见 P10 | 2026-11-05 | 用户决定；待实施（P10 ②） |
+| D11 | 容器执行的权限 | 沙箱内给 agent 最大权限，限制只放在沙箱的外墙上：工作目录（含 `.git`）与根文件系统可写，网络默认开启，审批由 profile 决定、可以一律放行；命令默认以映射的宿主机用户运行，仍不允许 root（root 以后按需做成显式选项，并同时改造进程清理）。外墙不变：不加 `--privileged`、不挂 `docker.sock`、不用宿主机的网络与 PID 命名空间、API key 与环境变量不进容器、会话文件在工作目录之外。原严格模式（只读、无网络）保留为可选配置。取代 P6 中“工作目录只读挂载、网络固定为 `none`”的约定与状态表中的“容器联网已取消”；D5（默认在本机执行）不变。理由与各家做法见 P10 | 2026-11-05 | 用户决定；已实现（P10 ②） |
 
 D2 之外的新依赖、依赖升级，仍需先征得同意。
 
@@ -533,7 +533,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P7 | 插件与 MCP | 已完成（PR #41）：范围按 D8 收窄，评审稿已合入（PR #36）并经用户确认；模块 A（Extension 接口，PR #38）、B1（MCP 客户端库，PR #40）、B2（CLI 接入与文档，PR #41）已完成；真实 MCP 服务器的验收待选定服务器；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已完成（PR #23），A2–A8（扩展 API）已完成（PR #25） |
 | P8 | 嵌入协议 `acp` | 不做（2026-11-02 用户决定，D10） |
 | P9 | 可选增强 | 进行中：token 预算（PR #47）、OpenTelemetry 追踪（PR #49）、crate 拆分（PR #52）、通用化整理（PR #54）已完成；剩更多 provider（如 Anthropic）。其余各项按 D10 不做或取消 |
-| P10 | 与 pi 的能力对齐 | 进行中：2026-11-05 对照 pi 列出 14 项缺口，见下文 P10；① 上下文超长后自动恢复已完成（PR #56） |
+| P10 | 与 pi 的能力对齐 | 进行中：2026-11-05 对照 pi 列出 14 项缺口，见下文 P10；① 上下文超长后自动恢复已完成（PR #56）；② 容器沙箱已实现 |
 
 ### P0 场景默认值移出内核
 
@@ -1324,7 +1324,7 @@ crate 拆分（2026-11-02，已完成，PR #52；基于 PR #51 合并后的 `640
 实施顺序与任务（每项一个分支与 PR；标“待定”的先请用户决定，再动手）：
 
 - [x] **① 上下文超长后自动恢复**（高；已完成（PR #56），2026-11-05，见下方实施记录）。pi 识别超长（`packages/ai/src/utils/overflow.ts:144`）后压缩一次再重试（`packages/coding-agent/src/core/agent-session.ts:3063`）。zx 把 `context_length_exceeded` 归为不重试的错误（`crates/zx-ai/src/retry.rs:130`），运行直接失败。做法：provider 按状态与错误码给出通用的“超长”分类，不按厂商写正则；运行层收到后做一次摘要再续跑，摘要与续跑都经现有的请求审计，保持不变量 6；没有配置摘要时照旧失败。
-- [ ] **② 容器沙箱改为沙箱内最大权限**（D11）。是 ③ 在容器中可用的前提。
+- [x] **② 容器沙箱改为沙箱内最大权限**（D11；已实现，2026-11-05，见下方实施记录）。是 ③ 在容器中可用的前提。
 - [ ] **③ edit 与 write 工具**（高）。pi 默认工具集是 read、bash、edit、write（`packages/coding-agent/src/core/tools/edit.ts`、`write.ts`）：一次调用可做多处不重叠的精确替换，`details` 带 diff，同一文件的写入经 `file-mutation-queue.ts` 串行。zx 只有 `bash`、`read_file`（`crates/zx-tools/src/tools/mod.rs:24`），`Executor` 只有 `run` 与 `read_file`（`crates/zx-core/src/executor/mod.rs:83,88`）。做法：`Executor` 增加写文件；两个工具声明 `SideEffects`（不变量 10），`details` 带 diff 供审批与审计；同一文件的写入串行，不同文件仍可并行；规则策略可以用 `askTools` 管到它们。
 - [ ] **④ grep、find、ls 只读工具**（中）。pi 用 ripgrep 与 fd，遵守 `.gitignore`，结果有上限（`grep.ts`、`find.ts`、`ls.ts`）。zx 只能经 bash 与命令白名单。声明为 `ReadOnly`，不必依赖白名单即可免审批。待定：经 `Executor` 调外部程序（不加依赖，容器中同样可用）还是用 Rust 实现（需新增 `ignore` 等依赖，红线 5）。
 - [ ] **⑤ 运行中可调整的配置**（中高）。推理强度作为一等配置并可在空闲时修改、变化写入会话（目前只能用 `--request-field` 静态传）；每次请求前可替换模型与推理强度的钩子（pi 的 `prepareRequest`、`prepareNextTurn`，`packages/agent/src/agent-loop.ts:195,228`；zx 的 `set_model` 只能空闲时调用，`crates/zx-core/src/agent_session.rs:222`）；不加新输入的续跑（pi 的 `continue()`；`Runner::run` 必须带提示词）。推理强度的写法遵守 D10：各 provider 显式映射。
@@ -1352,6 +1352,23 @@ crate 拆分（2026-11-02，已完成，PR #52；基于 PR #51 合并后的 `640
 - 测试：新增 12 项：`crates/zx-ai/src/retry.rs` 单元测试 3 项（按状态与错误码、按通用措辞、限流与其他失败不算）；`tests/overflow_recovery.rs` 7 项（成功恢复：请求、投影、事件顺序与尝试编号；未开启自动摘要时不变；恢复后紧接着又过长；回答成功后可再次恢复；摘要失败暂停；预算用完；运行超时）；`tests/openai_mock.rs` 1 项（真实 HTTP 下带错误码的 400）；`tests/request_audit.rs` 1 项（恢复前后的三个请求都能从会话文件逐个还原）。
 - 反向验证：分别去掉运行层的恢复分支、“恢复后紧接着又过长”的拒绝、“回答成功后可再次恢复”的重置、摘要失败时的暂停、按错误码的识别，每次都有对应测试失败（依次 6、1、1、1、1 项），修改已还原。按错误码识别被去掉时，HTTP 端到端测试仍通过：错误文本包含响应体，其中的错误码也被通用措辞 `context_length` 命中，这条路径只由单元测试单独覆盖。
 - 本机 macOS 验证：stable 下 828 项通过、7 项付费测试跳过（基线 816 项，PR #55 的实测）；fmt、clippy、严格 Rustdoc 与 Rust 1.88.0 的全目标检查通过；Rust 1.88.0 下没有运行测试。自查脚本在改动的文件中只列出原有的 1 处（`src/chat/output.rs` 的 `let _ =`）。未新增依赖。没有对真实模型服务验证超长时的错误格式。
+
+② 实施记录（2026-11-05，基于 `77efb18`，即 PR #56 合并后）：
+
+| 环节 | 做法 |
+|---|---|
+| 执行器 | `ContainerConfig` 新增 `workspace_access`、`root_access`（`executor::Access`：`ReadWrite` 默认、`ReadOnly`）与 `network`（默认 `bridge`）。`docker run` 不再固定 `--network none`、`--read-only`、`--tmpfs /tmp` 与只读挂载，按配置给出；`--cap-drop ALL`、`no-new-privileges`、进程数与内存上限、不传环境变量不变。`network` 为空、`host` 或 `container:<名字>` 时报错（`executor::check_network`，profile 加载时也检查） |
+| 用户 | 默认用户由 nobody 改为运行 zx-agent 的 `uid:gid`（`libc::getuid`、`getgid`），在原生 Linux 上写出的文件属于该用户；zx-agent 以 root 运行时仍用 nobody。仍禁止 root，进程清理（按命令用户 `kill -1`）不变 |
+| 启动检查 | 工作目录可写时，检查容器用户能写入（退出码 98），不能时以配置错误结束并说明改 `container.user` 或设 `container.workspace = "readOnly"` |
+| 提示词 | `container_environment_section` 改为接收 `ContainerConfig` 与 `Platform`，按配置写工作目录是否可写、网络与可写范围 |
+| profile | `[container]` 新增 `network`、`workspace`、`root`（`readWrite` / `readOnly`）；`[rules]` 新增 `approveAll`：chat 与 serve 不再加 bash 审批，MCP 的 `allowTools` 以外的工具不再询问；只能与 `execution = "container"` 一起使用（CLI 以 `--execution local` 覆盖时同样报错），且 `askTools` 须为空 |
+| 与 D11 表述的不同 | capability 维持 `--cap-drop ALL` 与 `no-new-privileges`，没有改成 Docker 的默认集合（D11 实施要点中已写明理由）；容器自身的文件可写，但非 root 用户仍不能改 root 所有的系统文件，装软件仍需自定义镜像 |
+| 不兼容的变更 | 容器执行的默认行为变了：工作目录可写、可联网、以运行者的 uid 运行。要恢复此前的行为，写 `network = "none"`、`workspace = "readOnly"`、`root = "readOnly"`、`user = "65534:65534"`。SDK：`ContainerConfig` 新增三个字段（用 `ContainerConfig::new` 加结构体更新语法的不受影响），`container_environment_section` 的参数改变 |
+
+- 测试：新增 12 项：执行器单元测试 3 项（严格模式的参数、默认用户为运行者、拒绝共用外部的网络）、提示词 1 项（严格模式的描述）、profile 1 项（`approveAll` 的两条限制）；`tests/container.rs` 7 项（假 docker：严格模式的启动参数与检查、工作目录不可写时的说明、chat 在 `approveAll` 时不再询问 bash、没有 `approveAll` 时仍询问、本机执行时报配置错误、run 执行 `allowTools` 以外的 MCP 工具；真实 Docker：严格模式只读且无网络）。随默认行为改变的既有测试：执行器单元测试中启动参数的一项改为默认放开、外墙仍在，提示词一项改为放开时的描述，profile 一项补上新字段；`tests/container.rs` 中启动参数、两处用户名、工作目录不可读的说明与 CLI 的提示词共 4 项改用新的默认值，真实 Docker 的“nobody、只读、无网络”一项改为“运行者、可写、有网络”，工作目录不可读与 CLI 两项改为显式指定 nobody 或按运行者的 uid 断言。
+- 反向验证：分别去掉 chat 与 serve 在 `approveAll` 时跳过 bash 审批、MCP 在 `approveAll` 时不再询问、`approveAll` 必须容器执行、拒绝 `host` 网络，每次都有对应测试失败（依次 1、1、2、2 项），修改已还原。
+- 本机 macOS 验证：stable 下 840 项通过、7 项付费测试跳过（基线 828 项，PR #56 合并后的实测）；fmt、clippy、严格 Rustdoc 与 Rust 1.88.0 的全目标检查通过；Rust 1.88.0 下没有运行测试。自查脚本在改动的文件中列出新增的 1 处 `unsafe`（`default_user` 调用 `getuid` 与 `getgid`，没有前置条件，写了 SAFETY 说明）与原有的 1 处 `let _ =`（`sweep`）。未新增依赖（`libc` 已是 zx-core 在 Unix 上的依赖）。
+- 未验证：本机 Docker 守护进程没有运行，名字以 `real_` 开头的 14 项真实 Docker 测试这次只打印跳过提示，没有对真实 Docker 运行，其中改动与新增的 4 项（运行者可写且有网络、严格模式、指定 nobody 时工作目录不可读、CLI 中的 uid）留待 CI 的 Linux 任务或本机启动 Docker 后运行。
 
 D11 容器沙箱的实施要点（2026-11-05 用户决定）：
 
