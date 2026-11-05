@@ -23,11 +23,12 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{
-    AgentEvent, Emit, EventSink, HookChain, LoopConfig, LoopControl, LoopFailure, LoopOutcome, RunTrace, run_loop,
+    AgentEvent, Emit, EventSink, HookChain, LoopConfig, LoopControl, LoopFailure, LoopOutcome, MessageQueues, RunTrace,
+    run_loop,
 };
 pub use crate::agent::{RunOutcome, RunReport};
 use crate::ai::retry::{RetryPolicy, is_context_overflow, is_retryable};
-use crate::ai::{Message, Provider, duration_ms};
+use crate::ai::{Message, Provider, Reasoning, StopReason, duration_ms};
 use crate::compaction::{self, Trigger};
 use crate::interaction::ApprovalCache;
 use crate::session::{Entry, SessionStore};
@@ -142,6 +143,10 @@ impl Runner {
         )
     }
 
+    pub(crate) fn replace_reasoning(&mut self, reasoning: Option<Reasoning>) -> Option<Reasoning> {
+        std::mem::replace(&mut self.config.spec.reasoning, reasoning)
+    }
+
     /// Revoke exact-call approvals granted by this Runner's interaction host.
     pub fn clear_approvals(&mut self) {
         self.approvals.clear();
@@ -168,6 +173,25 @@ impl Runner {
     /// }
     /// ```
     pub async fn run(&mut self, prompt: impl Into<String>, cancel: &CancellationToken) -> RunReport {
+        self.start(Start::Prompt(prompt.into()), cancel).await
+    }
+
+    /// Continue the conversation without new input (pi: `Agent.continue`): the model answers
+    /// the session as it is. Runs like [`Runner::run`] otherwise, interrupted calls recovered
+    /// first. Whether there is something to answer is checked after that recovery:
+    ///
+    /// - the conversation ends with input or a tool result: the model answers it, for
+    ///   example after a crash left results to recover;
+    /// - it ends with an answer that failed or was cancelled, whose calls never ran: that
+    ///   answer is omitted with a `context_edit`, as a retry does, and the model answers again;
+    /// - it ends with a finished answer: queued steering, or else follow-up, input becomes the
+    ///   next input; with none queued the run ends with an error and makes no request, as it
+    ///   does for an empty conversation.
+    pub async fn continue_run(&mut self, cancel: &CancellationToken) -> RunReport {
+        self.start(Start::Continue, cancel).await
+    }
+
+    async fn start(&mut self, begin: Start, cancel: &CancellationToken) -> RunReport {
         let run_cancel = cancel.child_token();
         // Dropping this future must cancel background providers even when the caller
         // keeps its parent token alive.
@@ -213,17 +237,21 @@ impl Runner {
         } = self;
         let sink = sink.as_ref();
         let to = Emit { sink, trace: &trace };
-        let mut prompts = vec![Message::user(prompt)];
+        let begun = match (recovered, begin) {
+            (Err(error), _) => Err(error),
+            (Ok(()), Start::Prompt(prompt)) => Ok(vec![Message::user(prompt)]),
+            (Ok(()), Start::Continue) => continuation(session, &config.hooks, to, &config.queues).await,
+        };
         let mut accounting = RunAccounting::default();
         let mut last_error = None;
         let mut overflow_recovered = false;
 
-        let ending = match recovered {
+        let ending = match begun {
             Err(error) => {
                 last_error = Some(error);
                 LoopOutcome::Error
             }
-            Ok(()) => loop {
+            Ok(mut prompts) => loop {
                 let attempt = accounting.attempts + 1;
                 // The session projection, not an in-memory list, is what the model sees
                 // (pi: AgentSession replaces the context with the projection before each request).
@@ -430,6 +458,52 @@ impl Runner {
     }
 }
 
+/// What a run starts from.
+enum Start {
+    Prompt(String),
+    /// The session as it is; see [`Runner::continue_run`].
+    Continue,
+}
+
+/// The input a continuation starts with, after omitting a failed answer at the end; an error
+/// when there is nothing for the model to answer.
+async fn continuation(
+    session: &mut SessionStore,
+    hooks: &HookChain,
+    to: Emit<'_>,
+    queues: &MessageQueues,
+) -> Result<Vec<Message>, String> {
+    let projection = session.projection();
+    let Some(last) = projection
+        .iter()
+        .rev()
+        .find(|item| !matches!(item.message, Message::System(_)))
+    else {
+        return Err("nothing to continue: the conversation is empty; send a prompt instead".into());
+    };
+    match &last.message {
+        Message::User { .. } | Message::ToolResult(_) => Ok(Vec::new()),
+        Message::Assistant(answer) if matches!(answer.stop_reason, StopReason::Error | StopReason::Aborted) => {
+            let failed = last.entry_id.clone();
+            omit_failed_attempt(session, hooks, to, &failed).await?;
+            Ok(Vec::new())
+        }
+        Message::Assistant(_) => {
+            let mut queued = queues.drain_steering();
+            if queued.is_empty() {
+                queued = queues.drain_follow_up();
+            }
+            if queued.is_empty() {
+                return Err(
+                    "nothing to continue: the conversation ends with a finished answer; send a prompt instead".into(),
+                );
+            }
+            Ok(queued)
+        }
+        Message::System(_) => Err("nothing to continue: the conversation has only system messages".into()),
+    }
+}
+
 /// Keep a failed answer in the session but drop it from the model context, so that the next
 /// attempt continues from the message before it without repeating the user message (pi:
 /// AgentSession._prepareRetry and _omitRecoveryAttempt).
@@ -549,6 +623,7 @@ mod tests {
                 tools: vec![],
                 cwd: PathBuf::from("."),
                 max_tokens: None,
+                reasoning: None,
                 sequential_tools: false,
             });
             let mut runner = Runner::new(
@@ -586,6 +661,7 @@ mod tests {
             tools: vec![],
             cwd: PathBuf::from("."),
             max_tokens: None,
+            reasoning: None,
             sequential_tools: false,
         });
         let session = SessionStore::with_writer(SessionHeader::new(Path::new("."), "m"), Box::new(FailingWriter));
@@ -619,6 +695,7 @@ mod tests {
                 tools: vec![],
                 cwd: PathBuf::from("."),
                 max_tokens: None,
+                reasoning: None,
                 sequential_tools: false,
             });
             let session =
@@ -695,6 +772,7 @@ mod tests {
             tools: vec![tool],
             cwd: PathBuf::from("."),
             max_tokens: None,
+            reasoning: None,
             sequential_tools: false,
         });
         Runner::new(
@@ -810,6 +888,7 @@ mod tests {
             tools: vec![],
             cwd: PathBuf::from("."),
             max_tokens: None,
+            reasoning: None,
             sequential_tools: false,
         });
         config.hooks.push(Rewrite);

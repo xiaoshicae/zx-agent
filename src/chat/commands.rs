@@ -5,7 +5,12 @@ pub(super) enum Command {
     Prompt(String),
     New,
     Model(Option<String>),
+    /// `/reasoning`: show; `/reasoning <level>`: change; `/reasoning default`: leave it to the
+    /// server.
+    Reasoning(Option<String>),
     Compact,
+    /// Continue without new input.
+    Continue,
     Status,
     Quit,
     Help,
@@ -27,8 +32,10 @@ pub(super) fn parse(line: String) -> Command {
         "/quit" if rest.is_empty() => Command::Quit,
         "/help" if rest.is_empty() => Command::Help,
         "/compact" if rest.is_empty() => Command::Compact,
+        "/continue" if rest.is_empty() => Command::Continue,
         "/status" if rest.is_empty() => Command::Status,
         "/model" => Command::Model((!rest.is_empty()).then(|| rest.to_string())),
+        "/reasoning" => Command::Reasoning((!rest.is_empty()).then(|| rest.to_string())),
         _ => Command::Invalid(format!("unknown command or arguments: {name}; use /help")),
     }
 }
@@ -50,6 +57,7 @@ mod tests {
             "/new extra",
             "/quit extra",
             "/compact extra",
+            "/continue extra",
             "/status extra",
             "/unknown",
         ] {
@@ -57,6 +65,8 @@ mod tests {
         }
         assert!(matches!(parse("/model next".into()), Command::Model(Some(model)) if model == "next"));
         assert!(matches!(parse("/model".into()), Command::Model(None)));
+        assert!(matches!(parse("/reasoning high".into()), Command::Reasoning(Some(level)) if level == "high"));
+        assert!(matches!(parse("/reasoning".into()), Command::Reasoning(None)));
         assert!(matches!(parse("/status".into()), Command::Status));
     }
 }

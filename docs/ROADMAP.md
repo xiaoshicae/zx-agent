@@ -533,7 +533,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P7 | 插件与 MCP | 已完成（PR #41）：范围按 D8 收窄，评审稿已合入（PR #36）并经用户确认；模块 A（Extension 接口，PR #38）、B1（MCP 客户端库，PR #40）、B2（CLI 接入与文档，PR #41）已完成；真实 MCP 服务器的验收待选定服务器；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已完成（PR #23），A2–A8（扩展 API）已完成（PR #25） |
 | P8 | 嵌入协议 `acp` | 不做（2026-11-02 用户决定，D10） |
 | P9 | 可选增强 | 进行中：token 预算（PR #47）、OpenTelemetry 追踪（PR #49）、crate 拆分（PR #52）、通用化整理（PR #54）、chat 交互体验（2026-11-05，见下文）已完成；剩更多 provider（如 Anthropic）。其余各项按 D10 不做或取消 |
-| P10 | 与 pi 的能力对齐 | 进行中：2026-11-05 对照 pi 列出 14 项缺口，见下文 P10；① 上下文超长后自动恢复已完成（PR #56）；② 容器沙箱已完成（PR #57）；③ edit 与 write 工具已完成（PR #58）；④ grep、find、ls 已完成（PR #59） |
+| P10 | 与 pi 的能力对齐 | 进行中：2026-11-05 对照 pi 列出 14 项缺口，见下文 P10；① 上下文超长后自动恢复已完成（PR #56）；② 容器沙箱已完成（PR #57）；③ edit 与 write 工具已完成（PR #58）；④ grep、find、ls 已完成（PR #59）；⑤ 运行中可调整的配置已完成：⑤a 推理强度（PR #60）、⑤b 续跑（PR #61）、⑤c 请求前替换模型与推理强度的钩子（PR #65） |
 
 ### P0 场景默认值移出内核
 
@@ -1361,7 +1361,7 @@ chat 交互体验第二批（2026-11-05，基于合并 origin/main `6ed6a9b` 之
 - [x] **② 容器沙箱改为沙箱内最大权限**（D11；已完成（PR #57），2026-11-05，见下方实施记录）。是 ③ 在容器中可用的前提。
 - [x] **③ edit 与 write 工具**（高；已完成（PR #58），2026-11-05，见下方实施记录）。pi 默认工具集是 read、bash、edit、write（`packages/coding-agent/src/core/tools/edit.ts`、`write.ts`）：一次调用可做多处不重叠的精确替换，`details` 带 diff，同一文件的写入经 `file-mutation-queue.ts` 串行。zx 只有 `bash`、`read_file`（`crates/zx-tools/src/tools/mod.rs:24`），`Executor` 只有 `run` 与 `read_file`（`crates/zx-core/src/executor/mod.rs:83,88`）。做法：`Executor` 增加写文件；两个工具声明 `SideEffects`（不变量 10），`details` 带 diff 供审批与审计；同一文件的写入串行，不同文件仍可并行；规则策略可以用 `askTools` 管到它们。
 - [x] **④ grep、find、ls 只读工具**（中；已完成（PR #59），2026-11-05，见下方实施记录）。pi 用 ripgrep 与 fd，遵守 `.gitignore`，结果有上限（`grep.ts`、`find.ts`、`ls.ts`）。zx 只能经 bash 与命令白名单。声明为 `ReadOnly`，不必依赖白名单即可免审批。待定：经 `Executor` 调外部程序（不加依赖，容器中同样可用）还是用 Rust 实现（需新增 `ignore` 等依赖，红线 5）。
-- [ ] **⑤ 运行中可调整的配置**（中高）。推理强度作为一等配置并可在空闲时修改、变化写入会话（目前只能用 `--request-field` 静态传）；每次请求前可替换模型与推理强度的钩子（pi 的 `prepareRequest`、`prepareNextTurn`，`packages/agent/src/agent-loop.ts:195,228`；zx 的 `set_model` 只能空闲时调用，`crates/zx-core/src/agent_session.rs:222`）；不加新输入的续跑（pi 的 `continue()`；`Runner::run` 必须带提示词）。推理强度的写法遵守 D10：各 provider 显式映射。
+- [x] **⑤ 运行中可调整的配置**（中高；已完成（⑤a PR #60、⑤b PR #61、⑤c PR #65），2026-11-05，见下方实施记录）。推理强度作为一等配置并可在空闲时修改、变化写入会话（目前只能用 `--request-field` 静态传）；每次请求前可替换模型与推理强度的钩子（pi 的 `prepareRequest`、`prepareNextTurn`，`packages/agent/src/agent-loop.ts:195,228`；zx 的 `set_model` 只能空闲时调用，`crates/zx-core/src/agent_session.rs:222`）；不加新输入的续跑（pi 的 `continue()`；`Runner::run` 必须带提示词）。推理强度的写法遵守 D10：各 provider 显式映射。
 - [ ] **⑥ 会话导航**（中）。列出会话、续接最近一次、fork 成新会话、在分支间切换（`packages/coding-agent/src/core/session-manager.ts`）。zx 只有 `--session <path>`；`SessionStore::branch`（`crates/zx-core/src/session.rs:486`）只在测试中调用。补 SDK 接口与 CLI，`chat` 加对应命令。
 - [ ] **⑦ 扩展能力**（中高，嵌入）。pi 的扩展可写自定义条目（`appendEntry`）、注入非用户消息（`sendMessage`）、运行中启停工具（`setActiveTools`）、注册命令（`registerCommand`）（`packages/coding-agent/src/core/extensions/types.ts`）。zx 的条目只有 9 种内部类型（`crates/zx-core/src/session.rs:142-151`），工具在构建时固定。自定义消息与“会话投影是上下文的唯一来源”（不变量 6）如何共存，先出方案再实施。
 - [ ] **⑧ 模型层的元数据与计量**（中）。在配置中写模型的上下文窗口、单价与输入类型（不内置厂商模型表，D10），用来按 token 设摘要阈值（现为字节）并计算成本；用量增加 cacheWrite 与推理 token；会话记录应答方返回的模型名与响应 ID；按会话的 prompt cache key；自定义请求头；每次请求动态取 API key；`Retry-After` 支持 HTTP 日期与毫秒写法，退避加抖动。
@@ -1386,6 +1386,51 @@ chat 交互体验第二批（2026-11-05，基于合并 origin/main `6ed6a9b` 之
 - 测试：新增 12 项：`crates/zx-ai/src/retry.rs` 单元测试 3 项（按状态与错误码、按通用措辞、限流与其他失败不算）；`tests/overflow_recovery.rs` 7 项（成功恢复：请求、投影、事件顺序与尝试编号；未开启自动摘要时不变；恢复后紧接着又过长；回答成功后可再次恢复；摘要失败暂停；预算用完；运行超时）；`tests/openai_mock.rs` 1 项（真实 HTTP 下带错误码的 400）；`tests/request_audit.rs` 1 项（恢复前后的三个请求都能从会话文件逐个还原）。
 - 反向验证：分别去掉运行层的恢复分支、“恢复后紧接着又过长”的拒绝、“回答成功后可再次恢复”的重置、摘要失败时的暂停、按错误码的识别，每次都有对应测试失败（依次 6、1、1、1、1 项），修改已还原。按错误码识别被去掉时，HTTP 端到端测试仍通过：错误文本包含响应体，其中的错误码也被通用措辞 `context_length` 命中，这条路径只由单元测试单独覆盖。
 - 本机 macOS 验证：stable 下 828 项通过、7 项付费测试跳过（基线 816 项，PR #55 的实测）；fmt、clippy、严格 Rustdoc 与 Rust 1.88.0 的全目标检查通过；Rust 1.88.0 下没有运行测试。自查脚本在改动的文件中只列出原有的 1 处（`src/chat/output.rs` 的 `let _ =`）。未新增依赖。没有对真实模型服务验证超长时的错误格式。
+
+⑤ 分三步：⑤a 推理强度、⑤b 不加新输入的续跑、⑤c 每次请求前可替换模型与推理强度的钩子，各一个 PR。
+
+⑤a 实施记录（2026-11-05，PR #60，基于 PR #59 的 `89472bf`）：
+
+| 环节 | 做法 |
+|---|---|
+| 类型 | `ai::Reasoning`：`off`、`minimal`、`low`、`medium`、`high`、`xhigh`（pi 的 `ThinkingLevel`）。`Request::reasoning` 为 `None` 时不发送任何推理设置，交给服务端；`LoopSpec::reasoning` 随每个任务请求发送，摘要请求不带 |
+| 写法 | `OpenAiConfig::reasoning_format`（`ReasoningFormat`）显式选择三种写法之一，按写入的字段命名，不按服务名：`effort` 写 `reasoning_effort`（默认；`off` 不写）；`thinking` 写 `thinking` 对象加 `reasoning_effort`（`off` 为 `{"type":"disabled"}`）；`reasoning-object` 写 `reasoning.effort`（`off` 为 `none`）。写在附加字段之后，每次请求的级别优先 |
+| 运行中修改 | `AgentSession::set_reasoning`：空闲时修改之后的任务请求，运行中返回 Busy；chat 的 `/reasoning [级别|default]`；CLI 的 `--reasoning`、`--reasoning-format`（run、chat、serve）。`--request-field` 与所选写法设置同一字段时报配置错误 |
+| 审计 | `request_config` 新增可选的 `reasoning`（未设置时不写，此前的会话还原结果不变），级别变化即追加新的请求配置；非默认的写法记入请求选项 `reasoningFormat`，还原请求体时一并使用；不认识的写法拒绝还原。旧版程序读取带 `reasoning` 的记录时会忽略该字段，还原出不带推理设置的请求，这一点只能靠版本说明提醒 |
+| 与 pi 的不同 | pi 按模型元数据与服务的 compat 设置在十余种写法中选择，并按模型能力调整级别；这里没有模型元数据（⑧），写法由使用者在三种中选择 |
+
+- 测试：新增 9 项：`openai.rs` 单元测试 4 项（三种写法各自的字段与 `off`、不设级别时什么都不发、每次请求的级别优先于附加字段、写法记入请求选项且能还原并拒绝不认识的写法、级别与写法按名字解析），`tests/agent_session.rs` 2 项（三次请求依次为 low、high、不设，三份请求配置，逐个从会话文件还原与实际发送的相同；运行中修改返回 Busy 且不生效），`tests/run_cli.rs` 2 项（`effort` 与 `thinking` 写法到达假模型服务并写入审计，不设时会话文件里没有推理设置；写错的级别、写法与两种字段冲突以退出码 2 结束、不建会话文件），`tests/chat_cli.rs` 1 项（`/reasoning` 修改之后的请求、写错时提示、`default` 不发送）。既有测试只为新字段补了 `reasoning: None`（请求与 `LoopSpec` 的结构体字面量）。
+- 反向验证：分别不把级别写进请求体、审计不记录级别、运行中修改不生效、不检查与附加字段的冲突，每次都有对应测试失败（依次 3、1、2、1 项），修改已还原。
+- 本机 macOS 验证：stable 下 904 项通过、7 项付费测试跳过（基线 895 项，即 PR #59 分支的实测）；fmt、clippy、严格 Rustdoc 与 Rust 1.88.0 的全目标检查通过；Rust 1.88.0 下没有运行测试。自查脚本在改动的文件中只列出原有的 1 处（`src/chat/mod.rs` 的 `let _ =`）。未新增依赖。
+- 未验证：没有对真实模型服务发送过这三种写法，服务端是否接受、级别名是否被认可（如 `xhigh`、`minimal`）要看各服务的文档与实测。
+
+⑤c 实施记录（2026-11-05，PR #65，基于 PR #61 合入 `claude/reasoning-level` 后的 `f706b43`）：
+
+| 环节 | 做法 |
+|---|---|
+| 接口 | `Hooks::prepare_request(&RequestPlan, &HookContext) -> HookResult<Option<RequestSettings>>`，有默认实现（返回 `None`），对应 pi 的 `prepareRequest`。`RequestPlan` 给出将要发送的上下文、回合序号与当前设置；`RequestSettings` 只有模型（同一 provider）与推理强度 |
+| 规则 | 每个任务请求发出前调用；各钩子按阶段与注册顺序接力，后一个看到前一个的选择；替换只对这一次请求有效。失败、panic、超时与空模型名都在发请求之前以 `Error` 结束运行，不触发重试，与其他钩子失败相同。摘要请求不调用 |
+| 审计 | 循环本身只改了“用什么设置构造请求”：请求审计照常记录实际发送的模型与推理强度（变化才追加 `request_config`），`replay_request` 还原的就是发出的请求；`request_start` 事件报告实际的模型 |
+| 与 pi 的不同 | pi 的 `prepareRequest` 还能改上下文；这里不能，发给模型的始终是会话投影（不变量 6），改上下文用 `transform_context` 并写入会话。pi 的 `prepareNextTurn` 没有单独实现，它要做的“下一次请求换设置”由本钩子按回合判断即可 |
+| 未做 | 只有 SDK 接口；外部钩子进程与 profile 配置暂不支持，`RequestSettings` 的 JSON 格式已由 `tests/hook_contract.rs` 固定，供以后接入 |
+
+- 测试：新增 5 项：`tests/prepare_request.rs` 4 项（钩子只替换第一次请求的模型与推理强度，钩子看到配置的设置与将要发送的上下文，`request_start` 报告实际的模型，每个请求都能从会话文件还原；两个钩子接力；失败与空模型名在请求前结束且允许重试时也不重试；panic），`tests/hook_contract.rs` 1 项（`RequestSettings` 的 JSON）。既有测试未改。
+- 反向验证：分别让请求不用钩子的设置、不检查空白模型名、钩子之间不接力，每次都有对应测试失败（2 项、1 项、2 项），修改已还原。
+- 本机 macOS 验证：stable 下 919 项通过、7 项付费测试跳过（基线 914 项，即 PR #61 的实测）；合入 main 的 PR #64（chat 交互体验）后 944 项通过，`/reasoning` 与 `/continue` 改用其输出接口；fmt、clippy、严格 Rustdoc 与 Rust 1.88.0 的全目标检查通过；Rust 1.88.0 下没有运行测试。自查脚本在改动的文件中没有新的命中。未新增依赖。
+- 未验证：钩子超时没有单独的测试，它与其他钩子共用同一层超时处理（`HookChain` 的 `call.run`）。
+
+⑤b 实施记录（2026-11-05，PR #61，基于 PR #60 的 `c02fd68`）：
+
+| 环节 | 做法 |
+|---|---|
+| 接口 | `Runner::continue_run`、`AgentSession::continue_run` 与 `continue_with_cancel`（pi 的 `Agent.continue()`）；`run --continue`（须给已存在的 `--session`，不能再给提示词）；chat 的 `/continue` |
+| 规则 | 先照常恢复中断的调用，再看投影中最后一条非 system 消息：输入或工具结果，直接请求模型；失败或被取消的回答（其中的调用从未执行，不变量 10），用 `context_edit` 省略后再请求，与重试相同；完成的回答，把排队的插话或后续消息作为输入，没有就以 `Error` 结束、不发请求；空会话同样以 `Error` 结束 |
+| 实现 | `Runner::run` 与 `continue_run` 共用一个入口，差别只在起始输入：续跑的提示词列表为空，与重试走同一条路径，循环本身未改 |
+| 与 pi 的不同 | pi 的 `continue()` 遇到回答结尾时报错，失败后的重试由 `AgentSession` 另行处理；这里的续跑同时用于崩溃、超时或取消之后接着做 |
+
+- 测试：新增 10 项：`tests/continue_run.rs` 7 项（回答结尾的输入；崩溃后补写“结果未知”再回答，调用不再执行；省略结尾失败的回答再答，失败的回答留在会话里；完成的回答没有可续的、排队的后续消息作为输入；空会话；续跑的请求可从会话文件还原；运行中返回 Busy），`tests/run_cli.rs` 2 项（失败后 `--continue` 只发一次提示词，再续时以退出码 1 结束且不发请求；缺 `--session`、文件不存在、同时给提示词都以退出码 2 结束），`tests/chat_cli.rs` 1 项（`/continue`）。既有测试未改；`run` 的提示词改为可选后，`tests/cli.rs` 中原有的 `run` 行为测试照常通过。
+- 反向验证：分别不省略结尾失败的回答、不使用排队的后续消息、不检查会话文件存在，每次都有对应测试失败（各 1 项），修改已还原。
+- 本机 macOS 验证：stable 下 914 项通过、7 项付费测试跳过（基线 904 项，即 PR #60 分支的实测）；fmt、clippy、严格 Rustdoc 与 Rust 1.88.0 的全目标检查通过；Rust 1.88.0 下没有运行测试。自查脚本在改动的文件中只列出原有的 3 处。未新增依赖。
 
 ④ 实施记录（2026-11-05，PR #59，基于 PR #58 的 `7afb527`；实现方式经用户确认：经执行器调用系统程序，不新增依赖）：
 

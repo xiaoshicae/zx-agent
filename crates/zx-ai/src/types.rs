@@ -318,6 +318,68 @@ pub struct Request {
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDef>,
     pub max_tokens: Option<u32>,
+    /// How hard a reasoning model should think. `None` sends nothing, leaving the server's
+    /// default; each provider maps a level to its own settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<Reasoning>,
+}
+
+/// How hard a reasoning model thinks before it answers (pi: `ThinkingLevel`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Reasoning {
+    Off,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+}
+
+impl Reasoning {
+    /// Every level, from least to most reasoning.
+    pub const ALL: [Reasoning; 6] = [
+        Reasoning::Off,
+        Reasoning::Minimal,
+        Reasoning::Low,
+        Reasoning::Medium,
+        Reasoning::High,
+        Reasoning::Xhigh,
+    ];
+
+    /// The level's name, as configuration files and commands write it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Reasoning::Off => "off",
+            Reasoning::Minimal => "minimal",
+            Reasoning::Low => "low",
+            Reasoning::Medium => "medium",
+            Reasoning::High => "high",
+            Reasoning::Xhigh => "xhigh",
+        }
+    }
+}
+
+impl std::fmt::Display for Reasoning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Reasoning {
+    type Err = String;
+
+    /// A level by its name, ignoring case.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let wanted = text.trim().to_ascii_lowercase();
+        Reasoning::ALL
+            .into_iter()
+            .find(|level| level.as_str() == wanted)
+            .ok_or_else(|| {
+                let names: Vec<&str> = Reasoning::ALL.iter().map(|level| level.as_str()).collect();
+                format!("unknown reasoning level {text:?}; use one of {}", names.join(", "))
+            })
+    }
 }
 
 /// Incremental output while a response streams.

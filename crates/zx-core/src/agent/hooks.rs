@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::{CancellationToken, WaitForCancellationFuture};
 
 use super::{AgentEvent, Decision, Emit, Event, ToolOutput};
-use crate::ai::{AssistantMessage, Message, ToolCall, UserMessageKind};
+use crate::ai::{AssistantMessage, Message, Reasoning, ToolCall, UserMessageKind};
 
 /// Default bound for each individual hook invocation.
 pub const DEFAULT_HOOK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -185,6 +185,27 @@ pub struct TurnSummary<'a> {
     pub disposition: TurnDisposition,
 }
 
+/// The settings of one task request that [`Hooks::prepare_request`] may change: the model,
+/// with the same provider, and the reasoning level. The context is not among them: what the
+/// model sees is always the session projection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestSettings {
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<Reasoning>,
+}
+
+/// What [`Hooks::prepare_request`] sees of the request about to be sent.
+#[derive(Clone, Copy, Debug)]
+pub struct RequestPlan<'a> {
+    /// The context the request sends, as recorded in the session.
+    pub messages: &'a [Message],
+    pub turn: u32,
+    /// The settings so far: the configured ones, as changed by earlier hooks.
+    pub settings: &'a RequestSettings,
+}
+
 /// Stop dominates; otherwise the first non-default decision wins.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "decision", content = "text", rename_all = "snake_case")]
@@ -230,6 +251,20 @@ pub trait Hooks: Send + Sync {
     /// the session projection. Failure stops the attempt before the request.
     async fn transform_context(&self, _messages: &[Message], _ctx: &HookContext) -> HookResult<Vec<ContextEdit>> {
         Ok(Vec::new())
+    }
+
+    /// Change the model or reasoning level of the next task request, for example to use a
+    /// cheaper model for a simple turn (pi: `prepareRequest`, which may also change the
+    /// context; here the context stays the session projection). Return `None` to keep the
+    /// settings. Changes chain in hook order and last for this request only; the request
+    /// audit records the settings each request used. An empty model and a failure both stop
+    /// the attempt before the request; summary requests do not call this hook.
+    async fn prepare_request(
+        &self,
+        _plan: &RequestPlan<'_>,
+        _ctx: &HookContext,
+    ) -> HookResult<Option<RequestSettings>> {
+        Ok(None)
     }
 
     /// Decide whether a tool call may run; the call and its arguments cannot be changed here.
@@ -284,6 +319,7 @@ pub trait Hooks: Send + Sync {
 pub enum HookPhase {
     OnInput,
     TransformContext,
+    PrepareRequest,
     BeforeTool,
     AfterTool,
     FinishTurn,
@@ -296,6 +332,7 @@ impl HookPhase {
         match self {
             Self::OnInput => "on_input",
             Self::TransformContext => "transform_context",
+            Self::PrepareRequest => "prepare_request",
             Self::BeforeTool => "before_tool",
             Self::AfterTool => "after_tool",
             Self::FinishTurn => "finish_turn",
@@ -496,6 +533,35 @@ impl HookChain {
             edits.extend(changes);
         }
         Ok(edits)
+    }
+
+    /// Run `prepare_request` of every hook, each seeing the settings the previous ones chose.
+    pub async fn prepare_request(
+        &self,
+        messages: &[Message],
+        turn: u32,
+        settings: RequestSettings,
+        ctx: &HookContext,
+    ) -> Result<RequestSettings, HookError> {
+        let mut settings = settings;
+        for entry in &self.hooks {
+            let call = entry.call(HookPhase::PrepareRequest);
+            let plan = RequestPlan {
+                messages,
+                turn,
+                settings: &settings,
+            };
+            if let Some(next) = call
+                .run(entry.hook.prepare_request(&plan, ctx), ctx.cancel.token())
+                .await?
+            {
+                if next.model.trim().is_empty() {
+                    return Err(call.error(HookFailure::Rejected("chose an empty model".into())));
+                }
+                settings = next;
+            }
+        }
+        Ok(settings)
     }
 
     pub async fn before_tool(&self, tool: &ToolCall, ctx: &HookContext) -> Result<Decision, HookError> {

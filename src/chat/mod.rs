@@ -21,7 +21,7 @@ use tokio::time::MissedTickBehavior;
 use zx_agent::AgentSession;
 use zx_agent::agent::EventSink;
 use zx_agent::agent_session::{ModelRef, Subscription};
-use zx_agent::ai::{Message, Provider};
+use zx_agent::ai::{Message, Provider, Reasoning};
 use zx_agent::compaction;
 use zx_agent::interaction::Approval;
 use zx_agent::otel::Telemetry;
@@ -185,6 +185,7 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
     let interaction = Arc::new(interaction);
     let output = Arc::new(Output::new(args.output, args.deltas, args.debug, args.color));
     let mut model = args.base.model.clone();
+    let mut reasoning = args.request.reasoning;
     let mut built = build(
         &settings,
         &model,
@@ -242,11 +243,28 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
         let action = match commands::parse(line) {
             Command::Prompt(text) => drive_turn(&built.session, Operation::Prompt(text), &mut io).await?,
             Command::Compact => drive_turn(&built.session, Operation::Compact, &mut io).await?,
+            Command::Continue => drive_turn(&built.session, Operation::Continue, &mut io).await?,
             Command::New => Flow::New,
             Command::Model(None) => {
                 output.line(Tone::Dim, &format!("[chat] model={}", visible(&model)));
                 Flow::Continue
             }
+            Command::Reasoning(None) => {
+                output.line(Tone::Dim, &format!("[chat] reasoning={}", reasoning_name(reasoning)));
+                Flow::Continue
+            }
+            Command::Reasoning(Some(next)) => match parse_level(&next) {
+                Ok(level) => {
+                    built.session.set_reasoning(level)?;
+                    reasoning = level;
+                    output.line(Tone::Dim, &format!("[chat] reasoning={}", reasoning_name(reasoning)));
+                    Flow::Continue
+                }
+                Err(message) => {
+                    output.line(Tone::Warn, &format!("[chat] {}", visible(&message)));
+                    Flow::Continue
+                }
+            },
             Command::Model(Some(next)) => {
                 built.session.set_model(ModelRef {
                     provider: built.provider.clone(),
@@ -314,6 +332,7 @@ struct TurnIo<'a> {
 
 enum Operation {
     Prompt(String),
+    Continue,
     Compact,
 }
 enum Report {
@@ -354,6 +373,7 @@ async fn drive_turn(session: &AgentSession, operation: Operation, io: &mut TurnI
     let running = async {
         match operation {
             Operation::Prompt(text) => session.prompt(text).await.map(Report::Task),
+            Operation::Continue => session.continue_run().await.map(Report::Task),
             Operation::Compact => session.compact().await.map(Report::Compact),
         }
     };
@@ -484,6 +504,8 @@ async fn drive_turn(session: &AgentSession, operation: Operation, io: &mut TurnI
                     }
                     Command::Prompt(_) => unreachable!("pending approval input is handled above"),
                     Command::Model(_) => io.output.line(Tone::Warn, "[chat] wait for the current task or cancel it before changing models"),
+                    Command::Reasoning(_) => io.output.line(Tone::Warn, "[chat] wait for the current task or cancel it before changing the reasoning level"),
+                    Command::Continue => io.output.line(Tone::Warn, "[chat] session is busy; wait for the current operation or cancel it before /continue"),
                     Command::Status => io.output.line(Tone::Warn, "[chat] wait for the current task or cancel it before /status"),
                     Command::Help => help(io.output),
                     Command::Compact => io.output.line(Tone::Warn, "[chat] session is busy; wait for the current operation or cancel it before /compact"),
@@ -567,6 +589,18 @@ fn session_text(about: &About) -> String {
         .map_or_else(|| "memory".to_string(), |path| path.display().to_string())
 }
 
+/// A level for /reasoning, or `None` for `default`.
+fn parse_level(text: &str) -> Result<Option<Reasoning>, String> {
+    if text.trim().eq_ignore_ascii_case("default") {
+        return Ok(None);
+    }
+    text.parse().map(Some)
+}
+
+fn reasoning_name(reasoning: Option<Reasoning>) -> &'static str {
+    reasoning.map_or("default", Reasoning::as_str)
+}
+
 /// What the conversation runs on, once at startup.
 fn banner(output: &Output, model: &str, about: &About) {
     output.line(
@@ -644,7 +678,10 @@ fn help(output: &Output) {
     for line in [
         "/new                  start a fresh conversation; approvals granted so far are dropped",
         "/model [id]           show or change the model while idle",
+        "/reasoning [level]    show or change the reasoning level while idle: off, minimal,",
+        "                      low, medium, high, xhigh, or default to leave it to the server",
         "/compact              summarize old context while retaining raw history",
+        "/continue             continue without new input, such as after a failed answer",
         "/status               show the model, session file and what this conversation has used",
         "/quit                 exit chat; Ctrl+D while idle does the same",
         "Ctrl+C                cancel the current task or approval; keep the conversation",

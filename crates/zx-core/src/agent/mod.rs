@@ -17,7 +17,7 @@ pub use events::{
 pub(crate) use events::{Emit, RunTrace};
 pub use hooks::{
     CancelSignal, ContextEdit, HookChain, HookContext, HookError, HookFailure, HookOptions, HookPhase, HookResult,
-    HookStage, Hooks, TurnDecision, TurnDisposition, TurnSummary,
+    HookStage, Hooks, RequestPlan, RequestSettings, TurnDecision, TurnDisposition, TurnSummary,
 };
 pub use policy::{AllowAll, Decision, ToolPolicy};
 pub use queue::MessageQueues;

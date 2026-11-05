@@ -454,6 +454,7 @@ impl Host<'_> {
             ],
             tools: Vec::new(),
             max_tokens: Some(self.config.max_summary_tokens),
+            reasoning: None,
         };
         let source = RequestSource::Summary {
             attempt_id: attempt.clone(),

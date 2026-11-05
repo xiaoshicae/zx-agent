@@ -8,8 +8,10 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use zx_agent::agent::{ContextEdit, Decision, HookContext, ToolOutput, TurnDecision, TurnDisposition, TurnSummary};
-use zx_agent::ai::{AssistantMessage, Message, StopReason, ToolCall};
+use zx_agent::agent::{
+    ContextEdit, Decision, HookContext, RequestSettings, ToolOutput, TurnDecision, TurnDisposition, TurnSummary,
+};
+use zx_agent::ai::{AssistantMessage, Message, Reasoning, StopReason, ToolCall};
 use zx_agent::interaction::{Approval, ApprovalRequest};
 
 /// `value` serializes to `expected` and reads back unchanged.
@@ -28,6 +30,24 @@ fn decisions_name_the_verdict_and_give_a_reason_to_deny_or_ask() {
     round_trip(
         Decision::Ask("writes files".into()),
         json!({"decision": "ask", "reason": "writes files"}),
+    );
+}
+
+#[test]
+fn request_settings_name_the_model_and_omit_an_unset_reasoning_level() {
+    round_trip(
+        RequestSettings {
+            model: "small-model".into(),
+            reasoning: None,
+        },
+        json!({"model": "small-model"}),
+    );
+    round_trip(
+        RequestSettings {
+            model: "big-model".into(),
+            reasoning: Some(Reasoning::Xhigh),
+        },
+        json!({"model": "big-model", "reasoning": "xhigh"}),
     );
 }
 

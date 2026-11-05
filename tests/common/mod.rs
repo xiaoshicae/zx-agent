@@ -154,6 +154,7 @@ pub fn config(provider: Arc<dyn Provider>, tools: Vec<Arc<dyn Tool>>) -> LoopCon
         tools,
         cwd: PathBuf::from("."),
         max_tokens: None,
+        reasoning: None,
         sequential_tools: false,
     })
 }

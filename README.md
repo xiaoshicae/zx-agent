@@ -63,8 +63,10 @@ zx-agent chat --model "$ZX_MODEL" --session ./chat.jsonl
 |---|---|
 | `/help` | 查看命令 |
 | `/model`、`/model <id>` | 查看模型，或空闲时切换同一 provider 的模型，保留历史 |
+| `/reasoning`、`/reasoning <级别>` | 查看推理强度，或空闲时修改（`off`、`minimal`、`low`、`medium`、`high`、`xhigh`；`default` 表示不发送，交给服务端），之后的任务请求按新值发送并记入请求审计 |
 | `/new` | 创建新会话，清空历史和授权；运行中先取消任务。启用文件会话时在同目录创建唯一新文件，保留旧日志。重新加载 profile 与项目说明，`--system-prompt-file` 沿用启动时读取的内容 |
 | `/compact` | 请求模型压缩旧上下文，保留原始日志；没有可压缩范围时不发请求。运行中拒绝重叠调用 |
+| `/continue` | 不加新输入，让模型接着回答当前对话：例如回答失败或被取消后重答一次。规则同 `run --continue` |
 | `/status` | 显示模型、profile、会话文件、工作目录，以及本会话累计的轮数、请求数与 token 用量（`/new` 后清零）；运行中等待空闲 |
 | `/quit` | 取消当前任务并退出 |
 | Ctrl+C | 取消当前任务或审批，继续保留会话；空闲时保持会话 |
@@ -251,10 +253,13 @@ zx-agent run --base-url https://api.deepseek.com --model deepseek-flash \
 | `--continue-on-length` | profile：`run`（unattended）为 1 | 仅 `run`。回答因输出 token 上限被截断时，自动请模型续写的次数。每次续写都计入 `--max-model-requests`；设为 0 时直接以退出码 6 结束 |
 | `--max-tokens` | 无（由服务端决定） | 每次回复的输出 token 上限。推理模型的推理部分也计入这个上限，设得太小时回答可能为空 |
 | `--request-field` | 无 | 加到每个请求体中的字段，写作 `KEY=JSON`，可重复，用于服务端自己的设置，如思考模式。zx-agent 自己设置的字段（`model`、`messages`、`stream`、`stream_options`、`tools`、`max_tokens`）不能用它改写。会话的请求审计（`request_config` 条目的 `extraFields`）记录这些字段，还原请求时一并加入 |
+| `--reasoning` | 不设，请求不带推理设置 | 推理强度：`off`、`minimal`、`low`、`medium`、`high`、`xhigh`（对应 pi 的 `ThinkingLevel`）。每个任务请求都带上，摘要请求不带；chat 可用 `/reasoning` 修改。请求审计（`request_config` 的 `reasoning`）记录，还原时一并加入 |
+| `--reasoning-format` | `effort` | 推理强度写进请求体的方式，按服务端文档选择，不按服务名推断：`effort` 写 `reasoning_effort`（OpenAI 的字段，`off` 时不写）；`thinking` 写 `thinking: {"type": "enabled"}` 加 `reasoning_effort`，`off` 时为 `{"type": "disabled"}`；`reasoning-object` 写 `reasoning: {"effort": …}`，`off` 时为 `none`。与 `--request-field` 设置同一字段时报配置错误；非默认值记入请求审计（`reasoningFormat`） |
 | `--fill-missing-reasoning` | 关闭 | 请求中只要有一条回答带 `reasoning_content`，就给其余回答补上空的 `reasoning_content`，用于拒绝“只有部分回答带推理内容”的历史的思考模式服务端。请求审计记录这一选择（`fillMissingReasoning`）。此前的版本对所有服务端都这样做，那时记录的请求仍按当时的方式还原 |
 | `--max-response-bytes` | 16777216（16 MiB） | 每次模型请求的流式响应字节上限，包含 SSE 封装与推理内容 |
 | `--max-sse-event-bytes` | 1048576（1 MiB） | 单个 SSE 事件的字节上限，包含封装；累计多行和未换行的数据也受限制 |
 | `--session` | 无（只保存在内存） | 会话文件路径。文件不存在则创建；已存在则在原有对话上继续 |
+| `--continue` | 关闭 | 只用于 `run`，须同时给出已存在的 `--session`，不能再给提示词。不加新输入，让模型接着回答会话（对应 pi 的 `continue()`）：先照常为中断的调用补写结果；会话以输入或工具结果结尾时直接请求模型，例如崩溃之后；以失败或被取消的回答结尾时（其中的调用从未执行），用 `context_edit` 省略该回答再请求，与重试相同；以完成的回答结尾时，有排队的插话或后续消息就把它作为输入，否则以退出码 1 结束、不发请求 |
 | `--output` | `text` | `text`：进度与诊断（工具、重试、摘要、恢复、钩子失败）输出到 stderr，最终回答输出到 stdout；stdout 是终端时转义回答中的控制字符，输出到管道时保持原文。`jsonl`：每个事件一行 JSON，输出到 stdout。`run` 在两种模式下遇到已关闭的 stdout（如读取方已退出）都不再写出，退出码仍由运行结果决定 |
 | `--deltas` | 关闭 | 仅用于 `jsonl`：同时输出流式的 `message_update` 事件 |
 | `--system-prompt-file` | 所选 profile 的说明 | 替换所选 profile 的说明。只在启动时读取一次，可以是管道；`chat` 的 `/new` 沿用同一内容。下文生成的段落仍会追加在末尾 |
@@ -345,6 +350,9 @@ CLI (main.rs + cli.rs + chat/)
 | 工具接口 | 结果只有文本 `content`，另有只供观察者的 `details`（与 pi 一样随结果写入会话，不发给模型）；进度是文本。没有 pi 的图片内容、`structuredContent` 与 `outputSchema`、结果中的 `usage`、`label`，也没有让工具经同一套校验与钩子调用其他工具的 `runToolCall` | 尚无使用者：图片要改消息格式与 provider，`runToolCall` 在做 codemode 或子 agent 时才需要 |
 | 上下文过长的识别 | 按 HTTP 413、错误码（`context_length_exceeded` 等）与通用措辞（如 “maximum context”“prompt is too long”）识别，限流与服务端错误不算；不识别服务端截断输入而不报错的情况 | pi 按服务逐条匹配错误文本，并用模型的上下文窗口识别不报错的超长（`packages/ai/src/utils/overflow.ts`）。这里不按服务推断（D10），也没有模型的上下文窗口信息（见路线图 P10 ⑧） |
 | 上下文摘要 | 默认（全量模式）重新摘要时读取应用过 `context_edit` 的原始记录，不输入上一份摘要；可选的增量模式沿用上一份摘要的事实、只读新增记录，旧事实由程序原样保留，模型只能新增事实或标明取代旧事实。摘要中的每条事实必须引用来源条目，见 [PROFILES.md](docs/PROFILES.md) | pi 把上一份摘要交给模型更新，允许删去旧内容；这里优先保证每条事实可追溯、不经多次转述。全量模式的代价是摘要请求随历史增长，累计约 2 MiB 后无法再摘要；增量模式每次只读上一份摘要的事实（至多 64 KiB）与新增、被修正的记录，请求大小不随历史总长增长，用真实模型评测之后再决定是否设为默认（见[路线图](docs/ROADMAP.md)） |
+| 不加新输入的续跑 | 以失败或被取消的回答结尾时，先省略该回答再续跑 | pi 的 `Agent.continue()` 遇到回答结尾时报错（排队的消息除外），失败后的重试由 `AgentSession` 另行处理；这里的续跑同时用于崩溃、超时或取消之后接着做 |
+| 请求前替换设置 | `prepare_request` 只能替换模型与推理强度 | pi 的 `prepareRequest` 还可以改写上下文；这里上下文只来自会话投影（不变量 6），改上下文用 `transform_context` 并写入会话 |
+| 推理强度 | 级别与 pi 相同，写法由 `--reasoning-format` 在三种中显式选择 | pi 按模型元数据与服务的 compat 设置（`thinkingFormat`）在十余种写法中选择，并按模型能力调整级别；这里没有模型元数据（见路线图 P10 ⑧），也不按服务推断（D10） |
 | 完整 TUI | 未实现，`chat` 是逐行 REPL | 路线图将其列为本期不做 |
 
 ### 系统提示词的组成
@@ -579,6 +587,7 @@ P2 增加 `zx_agent::AgentSession`；已有 `Runner` 可通过 `AgentSession::fr
 | API | 契约 |
 |---|---|
 | `prompt`、`prompt_with_cancel` | 返回 `Result<RunReport, SessionError>`；重叠调用立即返回 `Busy`，不排队。provider、钩子和持久化失败由 `RunReport` 表达 |
+| `continue_run`、`continue_with_cancel` | 不加新输入接着回答（`Runner::continue_run`），返回值与重叠时的行为同 `prompt`；没有可回答的内容时以 `Error` 结束、不发请求，规则见 `run --continue` |
 | `compact`、`compact_with_cancel` | 返回 `Result<compaction::Report, SessionError>`；与 prompt 共用独占权、Busy、取消和丢弃后复用；报告包含结果、请求数、用量、前后字节数和审计条目 ID |
 | `steer`、`follow_up` | 分别在下一次模型请求前和当前任务结束时消费，沿用原有队列 |
 | `take_queued` | 空闲时取出排入队列但没有被运行消费的输入：先引导消息、后后续消息，各自按先后；运行中返回 `Busy`。运行只在每个回合末查看队列，所以运行结束时才到的输入会留到下一次运行；自己发起运行的宿主应在运行结束时调用它，参照 `im::Server` |
@@ -613,15 +622,16 @@ P1 的 SDK 接口调整：静态配置移入 `LoopSpec`；`LoopConfig` 持有钩
 直接调用循环改为 `run_loop(context, prompts, config, &mut LoopControl::new(max_model_requests, approvals, cancel, sink))`，
 其中 `approvals` 是宿主持有的 `&mut ApprovalCache`；使用 `Runner` 时由它管理。
 
-`Hooks` 的六个回调均有默认实现，最后一个参数都是 `&HookContext`：会话 ID、运行 ID（与事件的 `runId` 相同）、工作目录与运行的取消信号 `CancelSignal`；它标为 `#[non_exhaustive]`，以后只增加字段。`CancelSignal` 可以等待、查询，也可以派生自己的子令牌，但不能取消运行。`HookChain::push` 以类型名注册，每次回调默认超时 5 秒；类型名的格式不受保证，可能随编译器版本变化，需要稳定的名称时用 `push_with(hook, HookOptions { name, timeout })` 给出名称（用于 `hook_failed` 与追踪）和超时。CLI 的内置钩子使用固定名称：`command_policy`、`profile_rules`、`bash_approval`（chat 与 serve）、`continue_on_length`、`redact_secrets`、`spill_outputs`；MCP 服务器名不含 `_`，不会与之重名。`on_event` 收到带信封的 `Event`；每次调用都会被等待，所以默认不观察流式增量 `message_update`，需要时覆盖 `observes`（它 panic 时按不观察处理并报告 `hook_failed`）。并行执行工具时，同一钩子的 `on_event` 可能并发、乱序；运行被取消后，仍在等待的调用会被停止，可能收不到其余事件（包括 `run_end`）。需要完整、有序的事件流时用 `subscribe_bounded`。
+`Hooks` 的七个回调均有默认实现，最后一个参数都是 `&HookContext`：会话 ID、运行 ID（与事件的 `runId` 相同）、工作目录与运行的取消信号 `CancelSignal`；它标为 `#[non_exhaustive]`，以后只增加字段。`CancelSignal` 可以等待、查询，也可以派生自己的子令牌，但不能取消运行。`HookChain::push` 以类型名注册，每次回调默认超时 5 秒；类型名的格式不受保证，可能随编译器版本变化，需要稳定的名称时用 `push_with(hook, HookOptions { name, timeout })` 给出名称（用于 `hook_failed` 与追踪）和超时。CLI 的内置钩子使用固定名称：`command_policy`、`profile_rules`、`bash_approval`（chat 与 serve）、`continue_on_length`、`redact_secrets`、`spill_outputs`；MCP 服务器名不含 `_`，不会与之重名。`on_event` 收到带信封的 `Event`；每次调用都会被等待，所以默认不观察流式增量 `message_update`，需要时覆盖 `observes`（它 panic 时按不观察处理并报告 `hook_failed`）。并行执行工具时，同一钩子的 `on_event` 可能并发、乱序；运行被取消后，仍在等待的调用会被停止，可能收不到其余事件（包括 `run_end`）。需要完整、有序的事件流时用 `subscribe_bounded`。
 
 钩子分阶段执行：每个回调都按 `Policy`（内置工具策略）、`Extension`（默认）、`Redaction`（脱敏）、`Storage`（长结果落盘）的顺序，同一阶段内按注册顺序。阶段由钩子自己声明（`Hooks::stage`）：`PolicyHook`、`RedactSecrets`、`SpillOutputs` 各自声明所属阶段，因此无论宿主以什么顺序注册，`before_tool` 都先经过内置策略，`after_tool` 中扩展的改动都会再经过脱敏，落盘的总是脱敏后的结果。
 `before_tool` 取 Deny > Ask > Allow，首个 Deny 立即拒绝；同级 Ask 保留第一条理由。扩展用 `before_tool` 放行或拒绝；`ToolPolicy` 是内置策略经 `PolicyHook` 接入的方式，具体策略（如 `CommandPolicy`）在 `policy` 模块。`RulePolicy` 按 deny → ask → allow 匹配，同级按注册顺序，无匹配时拒绝。
-策略与审批的错误、panic、超时均拒绝执行；`after_tool` 失败会丢弃输出；输入、上下文与回合钩子失败会结束运行且不触发 provider 重试。`on_event` 的错误只生成 `hook_failed`，诊断不再递归送入钩子。
+策略与审批的错误、panic、超时均拒绝执行；`after_tool` 失败会丢弃输出；输入、上下文、请求准备与回合钩子失败会结束运行且不触发 provider 重试。`on_event` 的错误只生成 `hook_failed`，诊断不再递归送入钩子。
 
 `on_input` 完成后才写入输入：改写时依次追加原始输入和替换它的 `context_edit`，拒绝时追加原始输入和省略它的 `context_edit`，原始内容都留在会话中供审计。钩子被取消或运行 future 被丢弃时什么也不写，从队列取出的插话或后续消息仍留在队首，由下一次运行处理。两次追加之间进程崩溃时，原始输入会出现在投影中。
 `transform_context` 返回按顺序应用的 `ContextEdit`：追加消息（`Append { message }`）、替换文本或省略消息；不能追加、修改或省略 system 消息（系统提示词只来自配置，配置之外的段落会在下一次尝试开始时被删除），也不能用文本替换抹掉工具调用。会话根据压缩记录合成的摘要（`UserMessageKind::Summary`）不能被编辑、省略或追加；要修正摘要，应编辑它引用的原始消息，摘要随之失效，投影回到原始记录。包含这类编辑的计划在校验时整份拒绝，不写入任何条目。
 整份变换计划先校验，随后逐项持久化；写入失败时立即停止运行，不发送模型请求。写入失败前已追加的条目仍保留。
+`prepare_request` 在每个任务请求发出前调用（对应 pi 的 `prepareRequest`），看到将要发送的上下文、回合序号与当前设置（`RequestPlan`），可返回新的 `RequestSettings` 替换这一次请求的模型（同一 provider）与推理强度，返回 `None` 保持不变；例如简单的回合改用便宜的模型。各钩子按顺序接力，后一个看到前一个的选择；替换只对这一次请求有效，下一次请求重新从配置开始。请求审计记录每次请求实际使用的设置，`replay_request` 还原的就是发出的请求，`request_start` 事件报告实际的模型。与 pi 不同，它不能改上下文：发给模型的始终是会话投影（不变量 6），要改上下文用 `transform_context`。钩子失败、panic、超时或返回空模型名时，运行在发请求之前以 `Error` 结束；摘要请求不调用它。目前只有 SDK 接口，外部钩子进程还不支持。
 
 审批默认超时 120 秒。`NoHuman` 明确拒绝 Ask；`Approval::AllowOnce` 只允许一次，
 `AllowSession` 只缓存当前会话内完全相同的工具名和参数，仍须通过每次策略检查，可用 `AgentSession::clear_approvals` 或底层 `Runner::clear_approvals` 撤销；不会写入会话或跨进程恢复。
@@ -731,7 +741,7 @@ cargo fmt --check
 | `tests/cli.rs` | 编译出的程序：退出码 0 到 6、jsonl 输出、从 stdin 读提示词、bash 读不到 API key、系统提示词的生成段落、`--system-updates inline` |
 | `tests/chat_cli.rs` | 多轮历史、审批与授权范围（含 `y`、`n`；write_file 的内容按行显示，edit_file 逐项列出且结果显示补丁）、审批过期后下一行作为新提问、只读命令自动放行、工具行显示命令与结果预览、每轮的 `[turn]` 行、`/status`、`--color always` 在管道中保留颜色、续接会话的提示、取消只报告一次、重置、模型切换、EOF、信号、超时、控制字符显示、恢复中断会话的提示、钩子失败的提示；Unix PTY 验证运行中插话、取消后丢弃残留插话、取消重置和退出、粘贴的多行合为一条消息、等待时的状态行、回答前后的空行 |
 | `tests/profiles_cli.rs` | profile 覆盖、显式默认值、预算参数的 help 写明取自 profile、不可绕过的 deny、上下文范围与审计、上下文默认值与越界链接、`--system-prompt-file` 兼容、skill 懒加载与脱敏、配置错误（含 provider 参数）退出码且不建会话文件 |
-| `tests/run_cli.rs` | `run` 在 P0 之后新增的约定：进度与报告行转义终端控制字符；另一个 `run` 正在写的会话文件不能再被打开写入；JSONL 事件的信封；为零的超时在请求前被拒绝；stdout 已关闭时退出码仍由运行结果决定；token 预算的退出码 7、最后一次请求可超出预算、profile 设置预算与命令行的 0 关闭；只在设置了 OTLP 地址时导出追踪，导出内容不含回答；`--request-field` 到达模型并写入请求审计，写错时以退出码 2 结束且不建会话文件；`--fill-missing-reasoning` 默认关闭，开启时写入请求审计（原有 `run` 测试仍在 `tests/cli.rs`） |
+| `tests/run_cli.rs` | `run` 在 P0 之后新增的约定：进度与报告行转义终端控制字符；另一个 `run` 正在写的会话文件不能再被打开写入；JSONL 事件的信封；为零的超时在请求前被拒绝；stdout 已关闭时退出码仍由运行结果决定；token 预算的退出码 7、最后一次请求可超出预算、profile 设置预算与命令行的 0 关闭；只在设置了 OTLP 地址时导出追踪，导出内容不含回答；`--request-field` 到达模型并写入请求审计，写错时以退出码 2 结束且不建会话文件；`--fill-missing-reasoning` 默认关闭，开启时写入请求审计；`--reasoning` 按三种写法到达模型并写入请求审计，写错或与 `--request-field` 冲突时以退出码 2 结束（原有 `run` 测试仍在 `tests/cli.rs`） |
 | `tests/otel.rs` | 一次真实运行导出一条 trace：每次尝试、回合、模型请求与工具调用各一个 span，用量与工具属性正确；`src/otel.rs` 的单元测试另覆盖嵌套与时间、只含元数据、运行结束时关闭未结束的 span、手动摘要自成一条 trace、队列满时丢弃并计数 |
 | `tests/session_compaction.rs`、`tests/compaction.rs` | v1/v2 追加升级、分支和引用、原始投影、省略保留边界后摘要仍生效、编辑摘要的变换计划在写入前被拒绝、摘要源与上下文字节统计不含工具结果的 `details`、摘要失败与取消、请求 / 用量预算、超时和上限 |
 | `tests/incremental_summary.rs` | 增量摘要（v5）：第一次读取整段前缀并给事实编号、之后只读旧事实与新增记录、可接续全量模式留下的摘要、取代与淘汰、修正只作废相关事实并在下一次重读、模型不能自带编号、加载时拒绝违反规则的记录、请求可从会话文件还原、多轮之后请求大小不随历史增长（与全量模式对照）；摘要评测的脚本会话自检，以及用知道答案的假模型验证评分 |
