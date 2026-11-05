@@ -95,6 +95,10 @@ pub struct SessionHeader {
     pub timestamp: u64,
     pub cwd: String,
     pub model: String,
+    /// The session file this one was forked from (pi: `parentSession`); absent otherwise,
+    /// and in files written before forks existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session: Option<String>,
 }
 
 impl SessionHeader {
@@ -106,6 +110,7 @@ impl SessionHeader {
             timestamp: now_ms(),
             cwd: cwd.display().to_string(),
             model: model.to_string(),
+            parent_session: None,
         }
     }
 }
@@ -491,6 +496,45 @@ impl SessionStore {
         }
         self.leaf = Some(id.to_string());
         Ok(())
+    }
+
+    /// The header of a session that continues one of this session's branches, for
+    /// [`SessionStore::copy_branch`]: a fresh ID and start time, the given working directory
+    /// and model, this session's file as `parent_session`, and this session's format
+    /// version, which the copied entries were written under.
+    pub fn fork_header(&self, cwd: &Path, model: &str) -> SessionHeader {
+        SessionHeader {
+            version: self.header.version,
+            parent_session: self.path.as_ref().map(|path| path.display().to_string()),
+            ..SessionHeader::new(cwd, model)
+        }
+    }
+
+    /// Append the entries of `source` from its root to `leaf`, unchanged: the same IDs,
+    /// parents, timestamps and content, so the projection, compactions and request audit of
+    /// that branch carry over (pi: `createBranchedSession`). Returns how many entries were
+    /// copied. Fails without writing when this session already has entries, `leaf` is not
+    /// in `source`, or the format versions of the two headers differ (see
+    /// [`SessionStore::fork_header`]). A failed append stops writing, as any append does.
+    pub async fn copy_branch(&mut self, source: &SessionStore, leaf: &str) -> Result<usize> {
+        if !self.entries.is_empty() {
+            bail!("a branch can only be copied into an empty session");
+        }
+        if source.get(leaf).is_none() {
+            bail!("entry {leaf} not found");
+        }
+        if self.header.version != source.header.version {
+            bail!(
+                "the session has format version {} but its source {}; start it with fork_header",
+                self.header.version,
+                source.header.version
+            );
+        }
+        let path = source.branch_path_from(Some(leaf));
+        for entry in &path {
+            self.append((*entry).clone()).await?;
+        }
+        Ok(path.len())
     }
 
     /// Entries from the root to the leaf.

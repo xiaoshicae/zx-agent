@@ -53,10 +53,11 @@ export OPENAI_API_KEY=...            # 变量名可通过 --api-key-env 修改
 zx-agent chat --model "$ZX_MODEL"                          # 新对话，存入会话目录
 zx-agent chat --model "$ZX_MODEL" --resume                 # 续接本工作目录最近一次的对话
 zx-agent sessions                                          # 列出本工作目录的会话
+zx-agent chat --model "$ZX_MODEL" --fork 0b7c              # 在某个会话的副本上继续，原会话不变
 zx-agent chat --model "$ZX_MODEL" --session ./chat.jsonl   # 指定会话文件
 ```
 
-不给 `--session` 时，chat 把每次对话存成一个会话文件：`~/.zx-agent/sessions/--<工作目录>--/<UTC 时间>_<会话 ID>.jsonl`，目录名是去掉开头 `/`、其余 `/` 换成 `-` 的工作目录，与 pi 相同；新建的目录权限 0700、文件 0600。`--session-dir` 换一个目录，`--no-session` 只保存在内存。`--resume` 续接会话目录中本工作目录最近活动的会话（没有就新建并提示），`--resume <ID 前缀>` 续接 ID 以它开头的唯一会话，找不到或不唯一时以退出码 2 结束。`zx-agent sessions`（可加 `--session-dir`、`--cwd`）每个会话输出一行：会话 ID 的前 8 个字符、最近活动的本地时间、上下文中的消息数、第一条提示词的首行（至多 60 个字符），按最近活动排序，其他工作目录的会话注明 `cwd`；读不了的文件在 stderr 报告。`run` 不变，只在给出 `--session` 时写文件。
+不给 `--session` 时，chat 把每次对话存成一个会话文件：`~/.zx-agent/sessions/--<工作目录>--/<UTC 时间>_<会话 ID>.jsonl`，目录名是去掉开头 `/`、其余 `/` 换成 `-` 的工作目录，与 pi 相同；新建的目录权限 0700、文件 0600。`--session-dir` 换一个目录，`--no-session` 只保存在内存。`--resume` 续接会话目录中本工作目录最近活动的会话（没有就新建并提示），`--resume <ID 前缀>` 续接 ID 以它开头的唯一会话，找不到或不唯一时以退出码 2 结束。`--fork <ID 前缀|文件>` 把一个会话复制成会话目录中的新文件，在副本上继续（对应 pi 的 `--fork`）：复制源会话最后一条记录所在的分支，条目原样保留（ID、时间、请求审计与摘要都在），新文件头部的 `parentSession` 记下源文件的绝对路径，`cwd` 与 `model` 是这次启动的；源文件不加锁读取、不被修改，别的进程正在写的会话也能复制。`zx-agent sessions`（可加 `--session-dir`、`--cwd`）每个会话输出一行：会话 ID 的前 8 个字符、最近活动的本地时间、上下文中的消息数、第一条提示词的首行（至多 60 个字符），按最近活动排序，其他工作目录的会话注明 `cwd`；读不了的文件在 stderr 报告。`run` 不变，只在给出 `--session` 时写文件。
 
 直接输入问题即可开始下一轮。TTY 中运行时输入普通文本会作为 steering，在下一次模型请求前进入上下文；任务结束时还没被读到的 steering 作为下一轮提问发送（在提示符后回显），按 Ctrl+C 取消任务时则丢弃并提示。TTY 中一次粘贴的多行作为一条消息发送：读完一行后若还有整行在排队，就并入同一条消息；以 `/` 开头的命令始终只占一行；最后一行要按回车才算到达；合并后的消息同样不超过 1 MiB，放不下的行开始下一条消息（非 Unix 平台不合并）。通过管道输入脚本时逐轮、逐行消费，避免后面的命令提前打断任务。单行输入最多 1 MiB（含行尾）；超限或无效 UTF-8 的行会被整行丢弃并提示，对话和当前任务继续，不把截断片段发送给模型。
 
@@ -75,6 +76,7 @@ zx-agent chat --model "$ZX_MODEL" --session ./chat.jsonl   # 指定会话文件
 | `/status` | 显示模型、profile、会话文件、工作目录，以及本会话累计的轮数、请求数与 token 用量（`/new` 后清零）；运行中等待空闲 |
 | `/sessions` | 列出会话目录中的会话，格式同 `zx-agent sessions`，当前会话以 `*` 标出；用 `--session` 时列出该文件所在的目录。运行中等待空闲 |
 | `/resume <ID 前缀>` | 空闲时切换到会话目录中 ID 以此开头的唯一会话，在其上继续，授权与用量统计重新开始 |
+| `/fork` | 空闲时把当前会话复制成会话目录中的新文件并切换过去，之后的对话只写进副本，原文件停在复制时的样子；规则同 `--fork`。`--no-session` 时没有可复制的文件 |
 | `/quit` | 取消当前任务并退出 |
 | Ctrl+C | 取消当前任务或审批，继续保留会话；空闲时保持会话，2 秒内连按两次则退出（退出码 0） |
 | EOF（Ctrl+D）、SIGTERM | EOF 结束会话，管道中的正常任务先完成；待审批时 EOF 拒绝并取消。SIGTERM 取消并退出 |
@@ -270,6 +272,7 @@ zx-agent run --base-url https://api.deepseek.com --model deepseek-flash \
 | `--session-dir` | `~/.zx-agent/sessions/--<工作目录>--` | 只用于 `chat`，不能与 `--session` 同用：新会话文件所在的目录，也是 `--resume`、`/sessions`、`/resume` 查找的目录。`zx-agent sessions` 也接受 |
 | `--no-session` | 关闭 | 只用于 `chat`：只保存在内存，不写会话文件 |
 | `--resume [ID 前缀]` | 关闭 | 只用于 `chat`，不能与 `--session` 同用：续接会话目录中的会话，见上文“终端对话” |
+| `--fork <ID 前缀\|文件>` | 关闭 | 只用于 `chat`，不能与 `--session`、`--no-session`、`--resume` 同用：在一个会话的副本上继续，副本写进会话目录，见上文“终端对话” |
 | `--continue` | 关闭 | 只用于 `run`，须同时给出已存在的 `--session`，不能再给提示词。不加新输入，让模型接着回答会话（对应 pi 的 `continue()`）：先照常为中断的调用补写结果；会话以输入或工具结果结尾时直接请求模型，例如崩溃之后；以失败或被取消的回答结尾时（其中的调用从未执行），用 `context_edit` 省略该回答再请求，与重试相同；以完成的回答结尾时，有排队的插话或后续消息就把它作为输入，否则以退出码 1 结束、不发请求 |
 | `--output` | `text` | `text`：进度与诊断（工具、重试、摘要、恢复、钩子失败）输出到 stderr，最终回答输出到 stdout；stdout 是终端时转义回答中的控制字符，输出到管道时保持原文。`jsonl`：每个事件一行 JSON，输出到 stdout。`run` 在两种模式下遇到已关闭的 stdout（如读取方已退出）都不再写出，退出码仍由运行结果决定 |
 | `--deltas` | 关闭 | 仅用于 `jsonl`：同时输出流式的 `message_update` 事件 |
@@ -354,7 +357,7 @@ CLI (main.rs + cli.rs + chat/)
 | 输出被截断 | 自动请模型续写（`--continue-on-length`），仍未完成则以退出码 6 结束 | pi 不自动续写，交给用户决定；无人值守时没有人可以决定 |
 | 会话文件写入失败 | 立即中止运行，之后不再写入该文件 | 不允许在缺少审计记录的情况下继续执行操作；未写完的记录只会留在文件末尾，可按尾记录修复 |
 | 会话文件创建时机 | 启动时立即创建并写入头部 | 进程中途崩溃也能留下记录 |
-| 会话目录与续接 | chat 默认存入 `~/.zx-agent/sessions/--<工作目录>--/`，`--resume [ID 前缀]` 续接，`zx-agent sessions` 与 `/sessions` 列出；`run` 默认不存 | pi 的 `--continue` 续接最近一次、`--resume` 弹出选择列表、`--session` 也接受 ID，agent 目录可由环境变量改；这里的 `--continue` 已是不加新输入的续跑，chat 是逐行 REPL，目录只由 `--session-dir` 改 |
+| 会话目录与续接 | chat 默认存入 `~/.zx-agent/sessions/--<工作目录>--/`，`--resume [ID 前缀]` 续接，`--fork` 与 `/fork` 在副本上继续，`zx-agent sessions` 与 `/sessions` 列出；`run` 默认不存 | pi 的 `--continue` 续接最近一次、`--resume` 弹出选择列表、`--session` 也接受 ID，agent 目录可由环境变量改；这里的 `--continue` 已是不加新输入的续跑，chat 是逐行 REPL，目录只由 `--session-dir` 改 |
 | 环境信息 | 启动时由程序写入系统提示词，见下文 | pi 只写入工作目录；无人值守时没有人提供这些信息，白名单也可能禁止 `uname`、`date` 等命令 |
 | 参数校验 | 循环按工具声明的 JSON Schema 严格校验（`jsonschema`），不转换类型；兼容旧写法或常见错误要由工具在 `prepare_arguments` 中显式改写。工具执行时仍反序列化成自己的参数类型 | pi 校验前先去掉可选字段的 `null`、按 schema 转换类型（`packages/ai/src/utils/validation.ts`）。这里只在工具声明的地方改写参数，策略与审批看到的参数才有据可查 |
 | 缺少结果的工具调用 | 有副作用的调用执行前先记录开始；下一次运行开始时，为缺少结果的调用写入"结果未知""未执行"等错误结果，不重放。运行被取消时，执行中的有副作用调用的结果写明"可能已改变状态，先检查再重试"，尚未开始的调用写明"未执行" | 发送时补占位（沿用 pi 的 transform-messages.ts）区分不了调用是否执行过；崩溃后需要依据记录判断 |
@@ -551,6 +554,8 @@ run、chat 与 serve 在设置了下面任一标准变量时，用 OTLP/HTTP（p
 {"type":"context_edit","id":"c3d4e5f6","parentId":"b2c3d4e5","timestamp":…,"targetId":"b2c3d4e5","replacement":null}
 ```
 
+复制出来的会话（`--fork`、`/fork`）在头部多一个 `parentSession`，值为源会话文件的绝对路径；其他会话没有这个字段，旧版本的程序读取时忽略它。
+
 `context_edit` 不能指向 system 或合成摘要消息：提示词变化以新的 system 消息记录，摘要通过新压缩生成。修正被摘要引用的原消息会使该摘要失效，投影回到已应用修正的原始记录。版本 1 的文件（头部带 `systemPrompt`）仍可打开，下次运行会把提示词作为 system 消息补进对话。
 
 同一会话文件同一时间只能有一个写入者。创建或打开时用 `flock(2)` 加独占锁，锁持续到会话关闭；进程退出（包括被 SIGKILL）时由系统释放。其他进程，或同一进程里的另一个 `SessionStore`，再打开该文件会报错（`is in use`），`run` 与 `chat` 以退出码 2 结束，不写入任何内容。报错前最多重试 0.5 秒：本进程正在启动的子进程在运行自己的程序之前持有父进程文件描述符的副本，刚关闭的会话可能因此短暂保持锁定。文件系统不支持 `flock` 时打开失败；Unix 以外的平台不加锁。只查看内容可用 `SessionStore::read`：不加锁、不修改文件，未写完的尾记录不计入，得到的快照不能追加。
@@ -712,6 +717,8 @@ pub trait SessionLog: Send + Sync {
 可运行的完整示例见 `session::SessionLog` 的 Rustdoc（`cargo test` 会执行）。`Runner::session()` 返回当前会话的只读借用。
 
 `session::list_sessions(dir)` 读取一个目录中的 `*.jsonl` 会话文件，与 `SessionStore::read` 一样不加锁、不修改文件，按最近活动排序，返回 `SessionList`：`latest_in(cwd)` 取某个工作目录（按头部的 `cwd` 比较）最近的会话，`find(前缀)` 取 ID 以它开头的唯一会话；读不了的文件列在 `unreadable`。每个文件都完整读取，耗时与会话大小成正比，是阻塞 I/O。
+
+复制一个分支成新会话（pi 的 `createBranchedSession`）：用源会话的 `fork_header(cwd, model)` 新建会话（新的 ID 与时间，源会话的格式版本，源文件写进 `parent_session`），再调用 `copy_branch(&源会话, 叶子条目 ID)`，按从根到叶子的顺序原样追加这条分支上的条目，返回条目数。目标会话必须为空、两边头部的格式版本必须相同，否则不写入任何内容并报错；中途写入失败时与其他追加一样停写。源会话只被读取，可以是 `SessionStore::read` 得到的快照。
 
 ### IM 接入
 

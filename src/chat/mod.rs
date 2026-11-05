@@ -232,9 +232,18 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
             args.base.cwd.as_deref(),
         )?)?)
     };
-    let (resumed, notice) = match (&storage, &args.resume) {
-        (Storage::Directory(dir), Some(id)) => resume_target(dir, args.base.cwd.as_deref(), id.as_deref()).await?,
-        (Storage::Memory | Storage::File(_) | Storage::Directory(_), _) => (None, None),
+    let (resumed, notice) = match (&storage, &args.resume, &args.fork) {
+        (Storage::Directory(dir), _, Some(source)) => {
+            let cwd = sessions::resolve_cwd(args.base.cwd.as_deref())?;
+            let source = fork_source(dir, source).await?;
+            let forked = sessions::fork(&source, dir, &cwd, &model).await?;
+            let notice = forked_line(&forked);
+            (Some(forked.path), Some(notice))
+        }
+        (Storage::Directory(dir), Some(id), None) => {
+            resume_target(dir, args.base.cwd.as_deref(), id.as_deref()).await?
+        }
+        (Storage::Memory | Storage::File(_) | Storage::Directory(_), _, _) => (None, None),
     };
     let file = match (&storage, &resumed) {
         (_, Some(path)) => SessionFile::Open(path),
@@ -351,6 +360,16 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
                     Flow::Continue
                 }
             },
+            Command::Fork => match fork_current(&storage, &built.about, &model).await {
+                Ok(forked) => {
+                    output.line(Tone::Dim, &forked_line(&forked));
+                    Flow::Resume(forked.path)
+                }
+                Err(error) => {
+                    output.line(Tone::Warn, &format!("[chat] {}", visible(&format!("{error:#}"))));
+                    Flow::Continue
+                }
+            },
             Command::Quit => Flow::Exit(EXIT_COMPLETED),
             Command::Help => {
                 help(&output);
@@ -444,6 +463,41 @@ async fn resume_target(dir: &Path, cwd: Option<&Path>, id: Option<&str>) -> Resu
             })
         }
     }
+}
+
+/// The session file `--fork` copies: a file, or else the session whose ID starts with
+/// `value` in the session directory.
+async fn fork_source(dir: &Path, value: &str) -> Result<PathBuf> {
+    let path = Path::new(value);
+    if path.is_file() {
+        return Ok(path.to_path_buf());
+    }
+    let list = sessions::list(dir.to_path_buf()).await?;
+    let session = list.find(value).with_context(|| {
+        format!(
+            "--fork: {value} is neither a session file nor a session in {}",
+            dir.display()
+        )
+    })?;
+    Ok(session.path.clone())
+}
+
+/// /fork: copy the current session into a new file of the session directory.
+async fn fork_current(storage: &Storage, about: &About, model: &str) -> Result<sessions::Forked> {
+    let (Some(dir), Some(current)) = (storage.dir(), about.session.as_deref()) else {
+        anyhow::bail!("nothing to fork: the conversation is kept in memory");
+    };
+    sessions::fork(current, dir, &about.cwd, model).await
+}
+
+fn forked_line(forked: &sessions::Forked) -> String {
+    let short: String = forked.source_id.chars().take(sessions::SHORT_ID_CHARS).collect();
+    format!(
+        "[chat] forked session {} ({} record(s)) into {}",
+        visible(&short),
+        forked.entries,
+        visible(&forked.path.display().to_string())
+    )
 }
 
 /// /sessions: the sessions of the session directory, the current one marked with `*`.
@@ -694,6 +748,7 @@ async fn drive_turn(session: &AgentSession, operation: Operation, io: &mut TurnI
                     Command::Status => io.output.line(Tone::Warn, "[chat] wait for the current task or cancel it before /status"),
                     Command::Sessions => io.output.line(Tone::Warn, "[chat] wait for the current task or cancel it before /sessions"),
                     Command::Resume(_) => io.output.line(Tone::Warn, "[chat] wait for the current task or cancel it before /resume"),
+                    Command::Fork => io.output.line(Tone::Warn, "[chat] wait for the current task or cancel it before /fork"),
                     Command::Help => help(io.output),
                     Command::Compact => io.output.line(Tone::Warn, "[chat] session is busy; wait for the current operation or cancel it before /compact"),
                     Command::Invalid(message) => io.output.line(Tone::Warn, &format!("[chat] {}", visible(&message))),
@@ -877,6 +932,7 @@ fn help(output: &Output) {
         "/status               show the model, session file and what this conversation has used",
         "/sessions             list the sessions in the session directory, most recent first",
         "/resume <ID>          switch to the session whose ID starts with <ID>",
+        "/fork                 continue in a copy of this session; the original stays as it is",
         "/quit                 exit chat; Ctrl+D while idle does the same",
         "Ctrl+C                cancel the current task or approval; keep the conversation",
         "                      twice within 2 seconds while idle: exit",

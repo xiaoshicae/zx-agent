@@ -16,6 +16,8 @@ pub(super) enum Command {
     Sessions,
     /// Switch to the session whose ID starts with this prefix.
     Resume(String),
+    /// Continue in a copy of the current session.
+    Fork,
     Quit,
     Help,
     Invalid(String),
@@ -43,6 +45,7 @@ pub(super) fn parse(line: String) -> Command {
             Command::Invalid("give a session ID: /resume <ID>; /sessions lists them".into())
         }
         "/resume" => Command::Resume(rest.to_string()),
+        "/fork" if rest.is_empty() => Command::Fork,
         "/model" => Command::Model((!rest.is_empty()).then(|| rest.to_string())),
         "/reasoning" => Command::Reasoning((!rest.is_empty()).then(|| rest.to_string())),
         _ => Command::Invalid(format!("unknown command or arguments: {name}; use /help")),
@@ -69,6 +72,7 @@ mod tests {
             "/continue extra",
             "/status extra",
             "/sessions extra",
+            "/fork extra",
             "/resume",
             "/unknown",
         ] {

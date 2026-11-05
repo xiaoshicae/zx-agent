@@ -1,6 +1,7 @@
-//! Session navigation in the compiled program (P10 item 6a): chat keeps every conversation
-//! in a session directory under the home directory, `--resume` and `/resume` continue one,
-//! and `zx-agent sessions` and `/sessions` list them. Every test has its own home directory.
+//! Session navigation in the compiled program (P10 items 6a and 6b): chat keeps every
+//! conversation in a session directory under the home directory, `--resume` and `/resume`
+//! continue one, `--fork` and `/fork` continue in a copy, and `zx-agent sessions` and
+//! `/sessions` list them. Every test has its own home directory.
 
 mod common;
 
@@ -353,4 +354,110 @@ async fn new_starts_another_file_in_the_session_directory() {
     let mut prompts: Vec<_> = files(&dirs.session_dir()).iter().map(|path| prompts(path)).collect();
     prompts.sort();
     assert_eq!(prompts, [["first"], ["second"]]);
+}
+
+/// The header of a session file.
+fn header_of(path: &Path) -> serde_json::Value {
+    let text = std::fs::read_to_string(path).unwrap();
+    serde_json::from_str(text.lines().next().unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn fork_continues_in_a_copy_of_a_session_named_by_id() {
+    let dirs = Dirs::new();
+    let dir = dirs.session_dir();
+    let source = seed(&dir, "aaaa0001", &dirs.cwd(), 1_000, "original");
+    let before = std::fs::read(&source).unwrap();
+    let server = MockServer::start(vec![Reply::text("ok")]).await;
+
+    let output = dirs.chat(&server, &["--fork", "aaaa"], "next\n/quit\n").await;
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(sent(&server, 0), ["original", "next"]);
+    assert_eq!(std::fs::read(&source).unwrap(), before, "the source is unchanged");
+    let files = files(&dir);
+    assert_eq!(files.len(), 2);
+    let fork = files.iter().find(|path| **path != source).unwrap();
+    assert_eq!(prompts(fork), ["original", "next"]);
+    let header = header_of(fork);
+    assert_eq!(
+        header["parentSession"],
+        source.canonicalize().unwrap().display().to_string()
+    );
+    assert_eq!(header["cwd"], dirs.cwd().display().to_string());
+    assert!(
+        stderr(&output).contains("[chat] forked session aaaa0001 (1 record(s)) into"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[tokio::test]
+async fn fork_takes_a_session_file_from_anywhere() {
+    let dirs = Dirs::new();
+    let elsewhere = dirs.home.path().join("archive");
+    let source = seed(&elsewhere, "bbbb0002", Path::new("/other"), 1_000, "archived");
+    let server = MockServer::start(vec![Reply::text("ok")]).await;
+
+    let output = dirs
+        .chat(&server, &["--fork", source.to_str().unwrap()], "next\n/quit\n")
+        .await;
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(sent(&server, 0), ["archived", "next"]);
+    let files = files(&dirs.session_dir());
+    assert_eq!(files.len(), 1, "the copy goes to this directory's sessions");
+    assert_eq!(prompts(&files[0]), ["archived", "next"]);
+}
+
+#[tokio::test]
+async fn fork_of_no_session_fails_without_creating_a_file() {
+    let dirs = Dirs::new();
+    seed(&dirs.session_dir(), "aaaa0001", &dirs.cwd(), 1_000, "original");
+    let server = MockServer::start(vec![]).await;
+
+    let output = dirs.chat(&server, &["--fork", "zz"], "/quit\n").await;
+
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(stderr(&output).contains("--fork: zz is neither a session file nor a session in"));
+    assert_eq!(files(&dirs.session_dir()).len(), 1);
+}
+
+#[tokio::test]
+async fn slash_fork_continues_in_a_copy_and_keeps_the_original() {
+    let dirs = Dirs::new();
+    let server = MockServer::start(vec![Reply::text("one"), Reply::text("two")]).await;
+
+    let output = dirs.chat(&server, &[], "first\n/fork\nsecond\n/quit\n").await;
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(sent(&server, 1), ["first", "second"]);
+    let files = files(&dirs.session_dir());
+    assert_eq!(files.len(), 2);
+    let fork = files
+        .iter()
+        .find(|path| header_of(path).get("parentSession").is_some())
+        .unwrap();
+    let original = files.iter().find(|path| *path != fork).unwrap();
+    // The conversation goes on in the copy; the original ends where it was forked.
+    assert_eq!(prompts(fork), ["first", "second"]);
+    assert_eq!(prompts(original), ["first"]);
+    // Recorded canonical, like every parent: the home directory may be reached through a link.
+    assert_eq!(
+        header_of(fork)["parentSession"],
+        original.canonicalize().unwrap().display().to_string()
+    );
+    assert!(stderr(&output).contains("[chat] forked session"), "{}", stderr(&output));
+}
+
+#[tokio::test]
+async fn slash_fork_needs_a_session_file() {
+    let dirs = Dirs::new();
+    let server = MockServer::start(vec![]).await;
+
+    let output = dirs.chat(&server, &["--no-session"], "/fork\n/quit\n").await;
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stderr(&output).contains("[chat] nothing to fork: the conversation is kept in memory"));
+    assert!(!dirs.home.path().join(".zx-agent").exists());
 }
