@@ -1544,6 +1544,15 @@ rmcp 3.8.0 的核实（`~/.cargo/registry/src/*/rmcp-3.8.0/src/`）：每个请�
 - 反向验证：分别让 `/fork` 仍复制文件末尾的分支、`/tree` 不把当前分支排在前面、用户消息解析为移到它之后，每次都有对应测试失败（依次 1、2、2 项），修改已还原。
 - 本机 macOS 验证：见下文“本次 PR 的验证”（本次 PR 合并多项，统一验证）。
 
+本次 PR 的验证（2026-11-05，PR 待开，分支 `claude/p10-remaining`：⑥c、⑦、⑧、⑨、⑩、⑪、⑫、⑬ 与 ⑭ 的决定；基于 PR #68 合并后的 `d1e921a`，中途合并了 PR #69 与 #70 之后的 main `c1803e4`）：
+
+- 每项完成后都在本机 macOS 上运行 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`、`cargo +1.88.0 check --all-targets`、`RUSTDOCFLAGS=-D warnings cargo doc --no-deps` 与自查脚本，均通过。`cargo test` 的通过数依次为 989（⑥c）、1006（⑦ 与 ⑨）、1027（⑧）、1030（⑫）、1033（⑬）、1039（⑩）、1048（合并 main 之后，含 PR #69 的 9 项）、1052（⑪）；基线 `d1e921a` 为 976。最后一次（`ce6e1ad`）：1052 通过、0 失败、8 项付费测试跳过（原 7 项加 ⑪ 的入口）。
+- 自查脚本：新增的命中只有 `crates/zx-tools/src/mcp.rs` 取消时发通知的一处 `let _ =`，有注释说明；`src/otel.rs` 与 `tests/common/evals.rs` 的 `.ok()`、`unwrap_or_default()` 各有注释。每次 `cargo test` 之后 `~/.zx-agent` 都不存在。
+- 依赖：本分支的提交没有改 `Cargo.toml` 与 `Cargo.lock`，两者的变化全部来自合并 main（PR #69 引入的 ACP SDK）；OpenTelemetry 的 `metrics` feature 原本就经 `http-proto` 启用。
+- 合并 main 的处理：D13 已被 ACP 的决定占用，rpc 模式的决定改编号 D14；`src/acp.rs` 的事件映射补上 `custom_entry`；其余冲突都在文档，两边都保留。
+- 每项的反向验证见各自的实施记录。
+- 未验证（红线 9，真实模型 API）：⑧ 的动态 key、`Retry-After` 的日期写法与成本，⑩ 对真实 Collector 的导出，⑪ 的真实运行，⑬ 对真实 MCP 服务器的进度通知，都只对假服务验证过。
+
 ⑥b 实施记录（2026-11-05，PR #68，基于 PR #67 的分支 `8109436`）：
 
 | 环节 | 做法 |
