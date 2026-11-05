@@ -1,7 +1,12 @@
-//! OpenAI-compatible Chat Completions provider with streaming.
+//! OpenAI-compatible Chat Completions provider with streaming (pi: packages/ai,
+//! `openai-completions.ts` and `transform-messages.ts`).
 //!
 //! Works with OpenAI and the many servers that speak the same protocol
-//! (vLLM, Ollama, llama.cpp server, LiteLLM, most hosted gateways).
+//! (vLLM, Ollama, llama.cpp server, LiteLLM, most hosted gateways). The only crate of the
+//! model layer that needs an HTTP client: `zx-ai` holds the types and the `Provider`
+//! contract. The `zx-agent` crate re-exports this crate as `zx_agent::ai::openai`.
+
+pub mod sse;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -10,15 +15,14 @@ use std::time::{Duration, Instant};
 use futures::StreamExt;
 use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
-
-use super::provider::{EventReceiver, EventSender, Provider, event_channel, send_event};
-use super::sse::{DEFAULT_MAX_EVENT_BYTES, SseParser};
-use super::system_prompt::SystemPrompt;
-use super::types::{
-    AssistantMessage, ContentBlock, Delta, Message, ProviderError, Reasoning, Request, StopReason, StreamEvent, Usage,
-    duration_ms, now_ms,
+use zx_ai::provider::{EventReceiver, EventSender, Provider, event_channel, send_event};
+use zx_ai::text::{clip, prefix_within};
+use zx_ai::{
+    AssistantMessage, ContentBlock, Delta, Message, ProviderError, Reasoning, Request, StopReason, StreamEvent,
+    SystemPrompt, Usage, duration_ms, now_ms,
 };
-use crate::text::{clip, prefix_within};
+
+use sse::{DEFAULT_MAX_EVENT_BYTES, SseParser};
 
 /// Default maximum raw SSE response bytes per model request, including reasoning.
 pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
@@ -1048,8 +1052,7 @@ fn parse_arguments(raw: &str) -> (Value, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::system_prompt::{SectionChange, SystemMessage};
-    use crate::types::{ToolDef, ToolResultMessage};
+    use zx_ai::{SectionChange, SystemMessage, ToolDef, ToolResultMessage};
 
     fn apply_all(acc: &mut Accumulator, chunks: &[Value]) -> Vec<Delta> {
         chunks.iter().flat_map(|c| acc.apply(c).unwrap()).collect()
@@ -1190,7 +1193,7 @@ mod tests {
             let message = acc.finish().unwrap();
 
             assert_eq!(message.stop_reason, StopReason::Error, "{reason}");
-            assert!(!crate::retry::is_retryable(&message), "{reason}");
+            assert!(!zx_ai::retry::is_retryable(&message), "{reason}");
         }
     }
 

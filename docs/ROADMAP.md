@@ -517,7 +517,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 - 反向验证：分别去掉停止原因、运行开始时的记录、启动替换后的删除、停止时放弃替换、serve 的记录、记录文件的 0600 权限，以及把“先删后改”换成“先改后删”，每次都有对应测试失败（依次 3、5、3、1、1、1、4 项），修改已还原。“开始接收之前读出遗留记录”的顺序，没有能稳定复现竞争的测试，由代码结构保证。
 - 本机 macOS 验证：stable 与 Rust 1.88.0 各 753 项通过（基线 738 项，为 PR #45 的实测，其代码与 `9297885` 相同），6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过；自查脚本对改动的文件无命中；`tests/im_server.rs` 连续运行 20 次、`tests/serve_cli.rs` 3 次，均通过。未新增依赖，`Cargo.toml`、`Cargo.lock` 未改动。
 
-下面的 P0–P10 继续按各自验收标准推进。
+下面的 P0–P11 继续按各自验收标准推进。
 
 状态取值：未开始、进行中、已实现待 PR review、已完成。每个阶段完成时勾选任务，并记录完成日期和提交。
 
@@ -534,6 +534,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P8 | 嵌入协议 `acp` | 不做（2026-11-02 用户决定，D10） |
 | P9 | 可选增强 | 进行中：token 预算（PR #47）、OpenTelemetry 追踪（PR #49）、crate 拆分（PR #52）、通用化整理（PR #54）、chat 交互体验（2026-11-05，见下文）已完成；剩更多 provider（如 Anthropic）。其余各项按 D10 不做或取消 |
 | P10 | 与 pi 的能力对齐 | 进行中：2026-11-05 对照 pi 列出 14 项缺口，见下文 P10；① 上下文超长后自动恢复已完成（PR #56）；② 容器沙箱已完成（PR #57）；③ edit 与 write 工具已完成（PR #58）；④ grep、find、ls 已完成（PR #59）；⑤ 运行中可调整的配置已完成：⑤a 推理强度（PR #60）、⑤b 续跑（PR #61）、⑤c 请求前替换模型与推理强度的钩子（PR #65） |
+| P11 | 内核整理 | 进行中：2026-11-05 评审稿 `docs/p11-kernel-cleanup-review.md`；① 立项与搬家已实施（本 PR），② 至 ⑥ 见下文 P11 |
 
 ### P0 场景默认值移出内核
 
@@ -1522,6 +1523,32 @@ D11 容器沙箱的实施要点（2026-11-05 用户决定）：
 | Claude Code | devcontainer 中可跳过审批；文档同时提醒这挡不住恶意项目外传容器内的数据（code.claude.com/docs/en/devcontainer） | 要求非 root；以 root 运行时拒绝跳过审批 |
 | OpenHands | Docker 沙箱，工作区默认读写挂载（docs.openhands.dev/openhands/usage/sandboxes/docker） | 建议 `SANDBOX_USER_ID=$(id -u)` 与宿主机一致 |
 | Gemini CLI | Docker 或 Podman 沙箱 | Linux 上映射宿主机 UID/GID（`SANDBOX_SET_UID_GID`；默认值未核实） |
+
+### P11 内核整理
+
+2026-11-05 用户要求把 `zx-core` 做成轻量的微内核，并让内核“模块更清晰、代码更简洁、注释更精简，便于阅读和维护”。评审稿 `docs/p11-kernel-cleanup-review.md`（代码核对基线 `2367a3a`）记录了结论与方案：内核依赖 `zx-ai` 没有错，错在 `zx-ai` 混装了 OpenAI 驱动；内核里约三分之一的代码是默认实现而不是机制；两个超长函数和三份重复的借用包遮住了运行层的数据流；注释总量不多但重复、带历史。任务按下面的顺序各成一个 PR，每个 PR 跑 fmt、clippy、test 三条命令，改到会话格式的加跑 MSRV 检查与 `tests/request_audit.rs` 的固定文件比对：
+
+- [x] **① 立项与搬家**（本 PR，2026-11-05，见下方实施记录）：评审稿；规则 01 的注释条款；拆 `zx-ai-openai`；`executor`、`output_store`、`ContinueOnLength` 与 `RedactSecrets` 移到 `zx-tools`。
+- [ ] **② 机械清理**：clippy pedantic 可自动修的（`Self` 重复、可 derive `Eq`、单臂 match）；`const fn` 建议用 1.88 工具链复核后再采纳；两处超长行；三对同名文件改名（`session/compaction.rs`、`runner/recovery.rs`、两个 `session_runtime.rs`）；`SessionHost` 命名统一。
+- [ ] **③ 运行层**：拆 `Runner::start`（265 行）；三处同样八个字段的借用包合成 `RunContext`；暂停状态封成 `CompactionPause`；`overflow.rs` 消失。
+- [ ] **④ 摘要宿主**：拆 `Host::run`（251 行），返回值只留 `Report`；摘要的两端交给 session；`carry(previous, new)` 合并 `merge` 与 `validate_merged`；`SummaryRequest::messages` 合并两处请求构造。
+- [ ] **⑤ 会话**：校验分发与版本表搬回 `session.rs`；`EntryHead`；查找辅助；`enum Repair`；`without_details` 合成泛型；公开面收口。
+- [ ] **⑥ 循环小改与注释**：`checkpoint`、`decide_next_turn` 拆分、`ToolRef`；注释按评审稿第 5 节的规则整理。
+
+① 实施记录（2026-11-05，基于 `2367a3a`）：
+
+| 环节 | 做法 |
+|---|---|
+| 新 crate `zx-ai-openai` | `crates/zx-ai/src/openai.rs` 改名移动为 `crates/zx-ai-openai/src/lib.rs`，`sse.rs` 随之成为它的子模块；导入从 `super::` 改为 `zx_ai::`；`zx_ai::provider::send_event` 由 `pub(crate)` 改为 `pub`（provider 实现者用的辅助）；`zx-ai` 不再依赖 reqwest。根包以 `pub mod ai { pub use zx_ai::*; pub use zx_ai_openai as openai; pub use zx_ai_openai::sse; }` 保住 `zx_agent::ai::openai` 与 `ai::sse` 的路径 |
+| `executor` 移到 zx-tools | `crates/zx-core/src/executor/` 四个文件改名移动到 `crates/zx-tools/src/executor/`，内容不变；`container_environment_section` 从 `prompt.rs` 移到 `executor/container.rs`（`environment_section`，经 `executor` 以原名再导出），它的两个单元测试随之；`prompt.rs` 的 `run_started` 与 `pretty_name` 改为 `pub`，供描述别处环境的执行器使用；zx-tools 新增 tokio-util、uuid 为普通依赖，Unix 上 libc 由测试依赖改为普通依赖 |
+| `output_store` 移到 zx-tools | 改名移动，内容不变 |
+| 续写与脱敏钩子移到 zx-tools | `extensions.rs` 第 178–438 行拆成 `crates/zx-tools/src/continuation.rs`（`ContinueOnLength`、`CONTINUE_PROMPT`）与 `crates/zx-tools/src/redact.rs`（`RedactSecrets`、`check_secret_files`、`short_secret_files`、`MIN_SECRET_CHARS`），内容不变；`extensions.rs` 只留 `Extension` 与 `register` |
+| 公开路径 | `zx_agent::executor`、`output_store`、`ai::openai`、`ai::sse` 不变。`zx_agent::extensions::{ContinueOnLength, RedactSecrets, …}` 改为 `zx_agent::continuation::…` 与 `zx_agent::redact::…`，仓库内 5 处引用（`src/cli.rs`、`examples/library.rs`、`tests/hooks.rs`、`tests/runner.rs`、`tests/output_store.rs`）随之修改；`zx_agent::prompt::container_environment_section` 改为 `zx_agent::executor::container_environment_section`（`src/cli.rs` 一处） |
+| 依赖闭包 | 本机 macOS 上 `cargo tree -e normal` 去重计得：zx-ai 99 → 33，zx-core 140 → 102（不再含 reqwest；jsonschema 仍在），zx-im 141 → 103，zx-tools 152 不变，zx-agent 205 → 206（多出的是新 crate 本身）。锁文件只多出 `zx-ai-openai` 一项，未新增、未升级外部依赖 |
+| 文档 | README 的架构树、对应表与 crate 数；`.claude/CLAUDE.md` 的架构表与分层说明；规则 01 的注释条款按评审稿第 5 节改写，规则 01、04、05 里 `executor` 的路径随文件移动 |
+
+- 本机 macOS 验证：`cargo fmt`、`cargo clippy --all-targets -- -D warnings`、`cargo test`（951 通过、0 失败、7 项付费测试跳过；`829afc8` 的基线为 944 通过，差额 7 项是 PR #66 新增的测试，移动的文件里测试属性的数量不变）、`RUSTDOCFLAGS=-D warnings cargo doc --no-deps`、`cargo +1.88.0 check --all-targets` 均通过；`RUSTFLAGS="-W unused-crate-dependencies"` 对 zx-ai、zx-ai-openai、zx-core、zx-tools 的库检查无命中；自查脚本的命中与拆分前相同，只是路径随文件移动。
+- 未做，留给后续 PR 或另行决定：评审稿 2.2 节里 `prompt.rs` 为上层功能保留的三个段落名、`jsonschema` 的 feature 开关、`compaction.rs` 内嵌的两段摘要提示词。
 
 ## 6. 推进方式
 

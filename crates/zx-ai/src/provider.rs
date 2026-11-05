@@ -43,7 +43,8 @@ pub trait Provider: Send + Sync {
     fn stream(&self, request: Request, cancel: CancellationToken) -> EventReceiver;
 }
 
-/// Send with backpressure. False means the consumer closed; the producer must stop.
-pub(crate) async fn send_event(tx: &mut EventSender, event: StreamEvent) -> bool {
+/// Send with backpressure, for providers. False means the consumer closed; the producer must
+/// stop. The send error itself is dropped: a closed receiver needs no further events.
+pub async fn send_event(tx: &mut EventSender, event: StreamEvent) -> bool {
     tx.send(event).await.is_ok()
 }

@@ -212,7 +212,7 @@ zx-agent run --base-url https://api.deepseek.com --model deepseek-flash \
 | `--model` | `deepseek-flash` 或 `deepseek-v4-pro` | 官方文档；2026-11-02 实测的是 `deepseek-flash`。文档写明 `deepseek-chat`、`deepseek-reasoner` 在 2026-07-24 之后停用；2026-11-01 用 `deepseek-chat` 的请求仍成功，原因未核实 |
 | `--api-key-env` | 存放 key 的环境变量名，如 `DEEPSEEK_API_KEY` | key 只从环境变量读取 |
 | 思考模式 | 默认开启。`--request-field 'thinking={"type":"disabled"}'` 关闭；`--request-field 'reasoning_effort="low"'` 调整强度（`low`、`high`、`max`） | 官方文档写明两个字段的格式，`thinking` 决定是否思考时优先。2026-11-02 用 `deepseek-flash` 实测：两个字段都被接受；关闭思考时三次运行的输入 token 都是 340，默认与 `low` 都是 365，说明该字段生效（服务端如何处理未核实）。输出 token 在同一设置下每次不同（默认三次为 202、2、2），不能据此比较思考强度 |
-| 思考内容 | 回答中的 `reasoning_content` 记入会话，之后的请求中回传给产生它的模型 | `crates/zx-ai/src/openai.rs`。官方文档：带工具的请求必须回传全部 `reasoning_content`，否则返回 400 |
+| 思考内容 | 回答中的 `reasoning_content` 记入会话，之后的请求中回传给产生它的模型 | `crates/zx-ai-openai/src/lib.rs`。官方文档：带工具的请求必须回传全部 `reasoning_content`，否则返回 400 |
 | `--fill-missing-reasoning` | 历史中混有不带推理内容的回答（例如中途换过模型）时开启 | pi 记录过该服务对这种历史返回 “The `reasoning_content` in the thinking mode must be passed back to the API.”（pi #3668），开启后其余回答带上空的 `reasoning_content`。本项目没有实测这种情况；此前的版本对所有服务都这样做，现在默认关闭 |
 | 结构化输出 | `response_format` 只有 `text` 与 `json_object`，没有 `json_schema` | 官方文档 |
 
@@ -277,7 +277,7 @@ zx-agent run --base-url https://api.deepseek.com --model deepseek-flash \
 
 ## 架构
 
-代码是一个 Cargo workspace，分为 7 个 crate。依赖只能自上而下，下层 crate 无法引用上层，分层由编译器保证：
+代码是一个 Cargo workspace，分为 8 个 crate。依赖只能自上而下，下层 crate 无法引用上层，分层由编译器保证：
 
 ```
 zx-agent    src/             CLI（run、chat、serve）、profile、OpenTelemetry 导出；
@@ -285,12 +285,13 @@ zx-agent    src/             CLI（run、chat、serve）、profile、OpenTelemet
   ├─ zx-im-slack   crates/zx-im-slack   Slack 平台（依赖 tokio-tungstenite）
   ├─ zx-im-feishu  crates/zx-im-feishu  ⚑ D:5/CHINA FLAG: 飞书平台（依赖 tokio-tungstenite）
   │    └─ zx-im    crates/zx-im         IM 平台接口与按线程分派会话的服务
-  ├─ zx-tools  crates/zx-tools  内置工具、命令与规则策略、MCP 客户端（依赖 rmcp）
-  └─ zx-core   crates/zx-core   循环、会话、运行层、共享会话、提示词、执行环境、扩展接口
-       └─ zx-ai  crates/zx-ai   消息类型、流式事件协议、provider
+  ├─ zx-tools  crates/zx-tools  内置工具、执行环境、长结果落盘、命令与规则策略、续写与脱敏钩子、MCP 客户端（依赖 rmcp）
+  ├─ zx-core   crates/zx-core   循环、会话、运行层、共享会话、摘要、提示词、扩展接口
+  │    └─ zx-ai  crates/zx-ai   消息类型、流式事件协议、provider 契约
+  └─ zx-ai-openai  crates/zx-ai-openai  OpenAI 兼容 provider 与 SSE 解析（依赖 reqwest），只依赖 zx-ai
 ```
 
-zx-im 与 zx-tools 都只依赖 zx-core 与 zx-ai，彼此不依赖；两个平台 crate 实现 zx-im 的 `ImChannel`。代码中没有针对特定场景、环境或平台文案语言的规则：场景是 profile 文件，Kubernetes 的规则在 `deploy/kubernetes/`，IM 的文案由配置替换。模块之间的关系：
+zx-im 与 zx-tools 都只依赖 zx-core 与 zx-ai，彼此不依赖；zx-ai-openai 只依赖 zx-ai，内核与它互不依赖，所以只嵌入内核的程序不编译 HTTP 客户端；两个平台 crate 实现 zx-im 的 `ImChannel`。代码中没有针对特定场景、环境或平台文案语言的规则：场景是 profile 文件，Kubernetes 的规则在 `deploy/kubernetes/`，IM 的文案由配置替换。模块之间的关系：
 
 ```
 CLI (main.rs + cli.rs + chat/)
@@ -307,14 +308,16 @@ CLI (main.rs + cli.rs + chat/)
 |---|---|---|
 | 消息与事件协议 | `crates/zx-ai/src/types.rs` | `ai/src/types.ts`（`AssistantMessageEvent`） |
 | provider 约定 | `crates/zx-ai/src/provider.rs` | `agent/src/types.ts`（`StreamFn` 约定） |
-| OpenAI 兼容 provider | `crates/zx-ai/src/openai.rs` | `ai/src/api/openai-completions.ts`、`transform-messages.ts` |
+| OpenAI 兼容 provider | `crates/zx-ai-openai/src/lib.rs` | `ai/src/api/openai-completions.ts`、`transform-messages.ts` |
 | 重试判断 | `crates/zx-ai/src/retry.rs` | `ai/src/utils/retry.ts` |
 | 测试用 provider | `crates/zx-ai/src/faux.rs` | `ai/src/providers/faux.ts` |
 | agent 循环 | `crates/zx-core/src/agent/agent_loop.rs` | `agent/src/agent-loop.ts`（`runLoop`、`executeToolCalls`） |
 | 钩子宿主 | `crates/zx-core/src/agent/hooks.rs` | 输入、上下文、工具、回合与事件扩展点 |
 | 工具调用策略 | `crates/zx-tools/src/policy.rs` | `PolicyHook` 适配 `ToolPolicy`；命令策略与 deny → ask → allow 规则 |
 | 人机交互 | `crates/zx-core/src/interaction.rs` | 宿主审批与 `NoHuman` |
-| 内置扩展 | `crates/zx-core/src/extensions.rs` | 截断续写与已知密钥脱敏 |
+| 扩展接口 | `crates/zx-core/src/extensions.rs` | 无对应实现：`Extension` 与 `register` |
+| 内置钩子 | `crates/zx-tools/src/continuation.rs`、`crates/zx-tools/src/redact.rs` | 截断续写与已知密钥脱敏 |
+| 执行环境 | `crates/zx-tools/src/executor/` | 无对应实现：本机与 Docker 容器两个 `Executor` |
 | 会话 | `crates/zx-core/src/session.rs` | `coding-agent/src/core/session-manager.ts` |
 | 运行控制 | `crates/zx-core/src/runner.rs` | `coding-agent/src/core/agent-session.ts`（`_startRun`、`_prepareRetry`） |
 | 共享会话 | `crates/zx-core/src/agent_session.rs` | `AgentSession` 的长期生命周期与多订阅者接口 |
@@ -567,7 +570,7 @@ run、chat 与 serve 在设置了下面任一标准变量时，用 OTLP/HTTP（p
 
 ## 作为库使用
 
-`zx-agent` 库再导出各 crate（见[架构](#架构)），`zx_agent::ai`、`zx_agent::agent`、`zx_agent::im` 等路径与拆分为多个 crate 之前相同。只需要内核的嵌入方也可以只依赖 `zx-core` 与 `zx-ai`，路径相应为 `zx_core::agent`、`zx_ai::openai` 等：本机 macOS 上 `cargo tree -e normal` 计得 `zx-core` 连同依赖共 104 个包，不含 rmcp、tokio-tungstenite、OpenTelemetry、clap 与 toml；`zx-agent` 为 169 个。各 crate 都标了 `publish = false`，不发布到 crates.io。
+`zx-agent` 库再导出各 crate（见[架构](#架构)），`zx_agent::ai`、`zx_agent::agent`、`zx_agent::im` 等路径与拆分为多个 crate 之前相同。只需要内核的嵌入方也可以只依赖 `zx-core` 与 `zx-ai`，再按需加上 `zx-ai-openai`，路径相应为 `zx_core::agent`、`zx_ai_openai::OpenAiCompatible` 等：本机 macOS 上 `cargo tree -e normal` 去重计得 `zx-core` 连同依赖共 102 个包，不含 reqwest、rmcp、tokio-tungstenite、OpenTelemetry、clap 与 toml；`zx-ai` 为 33 个，`zx-agent` 为 206 个。各 crate 都标了 `publish = false`，不发布到 crates.io。
 
 完整示例见 `examples/library.rs`（参与编译检查）。核心步骤如下：
 
@@ -730,7 +733,7 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-在仓库根目录运行时，这三条命令覆盖全部 7 个 crate（test 与 clippy 经 `Cargo.toml` 的 `default-members`）。在 `crates/` 下某个 crate 的目录里运行，或加 `-p zx-core` 这样的参数，只处理那一个 crate；集成测试都在根目录的 `tests/`，属于 `zx-agent`。
+在仓库根目录运行时，这三条命令覆盖全部 8 个 crate（test 与 clippy 经 `Cargo.toml` 的 `default-members`）。在 `crates/` 下某个 crate 的目录里运行，或加 `-p zx-core` 这样的参数，只处理那一个 crate；集成测试都在根目录的 `tests/`，属于 `zx-agent`。
 
 | 测试文件 | 覆盖内容 |
 |---|---|

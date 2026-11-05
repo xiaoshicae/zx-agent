@@ -2758,6 +2758,7 @@ dependencies = [
  "toml",
  "uuid",
  "zx-ai",
+ "zx-ai-openai",
  "zx-core",
  "zx-im",
  "zx-im-feishu",
@@ -2772,11 +2773,24 @@ dependencies = [
  "anyhow",
  "futures",
  "libc",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "zx-ai-openai"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
  "reqwest",
  "serde",
  "serde_json",
  "tokio",
  "tokio-util",
+ "zx-ai",
 ]
 
 [[package]]
@@ -2860,6 +2874,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "uuid",
  "zx-ai",
  "zx-core",
 ]

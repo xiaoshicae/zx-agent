@@ -16,17 +16,17 @@ use zx_agent::ai::openai::{
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::sse::DEFAULT_MAX_EVENT_BYTES;
 use zx_agent::compaction;
-use zx_agent::executor::{ContainerConfig, ContainerExecutor, Executor, LocalExecutor};
-use zx_agent::extensions::{
-    self, ContinueOnLength, Extension, MIN_SECRET_CHARS, RedactSecrets, check_secret_files, short_secret_files,
-};
+use zx_agent::continuation::ContinueOnLength;
+use zx_agent::executor::{ContainerConfig, ContainerExecutor, Executor, LocalExecutor, container_environment_section};
+use zx_agent::extensions::{self, Extension};
 use zx_agent::mcp::{Server, ServerConfig};
 use zx_agent::otel::{self, Telemetry};
 use zx_agent::output_store::{self, OutputStore, ReadOutputTool, SpillOutputs};
 use zx_agent::policy::{AutoApprove, CommandPolicy, PolicyHook, Rule, RuleMatcher, RulePolicy};
 use zx_agent::profile::skills::{ReadSkillTool, TOOL_NAME};
 use zx_agent::profile::{Builtin, ContainerSettings, Execution, Profile};
-use zx_agent::prompt::{self, build_system_prompt, container_environment_section, environment_section};
+use zx_agent::prompt::{self, build_system_prompt, environment_section};
+use zx_agent::redact::{MIN_SECRET_CHARS, RedactSecrets, check_secret_files, short_secret_files};
 use zx_agent::runner::{Limits, Runner};
 use zx_agent::session::{SessionHeader, SessionStore};
 use zx_agent::tools::{self, BASH};

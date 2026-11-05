@@ -1,6 +1,6 @@
 [package]
 name = "zx-tools"
-description = "Built-in tools, tool policies and the MCP client of zx-agent"
+description = "Built-in tools, executors, tool policies, built-in hooks and the MCP client of zx-agent"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,11 +18,12 @@ rmcp.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 futures.workspace = true
 tempfile.workspace = true
-tokio-util.workspace = true
 
-[target."cfg(unix)".dev-dependencies]
+[target."cfg(unix)".dependencies]
 libc.workspace = true
