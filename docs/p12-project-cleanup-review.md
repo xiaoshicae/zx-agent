@@ -91,7 +91,7 @@ P11（`docs/p11-kernel-cleanup-review.md`）只看 `zx-core`。用户 2026-11-05
 
 ## 5. 验证
 
-本机 macOS，`cargo fmt`、`cargo clippy --all-targets -- -D warnings`、`cargo test`（990 通过、0 失败、7 项付费测试跳过）、`RUSTDOCFLAGS=-D warnings cargo doc --no-deps`、`cargo +1.88.0 check --all-targets` 通过。自查脚本的命中与基线相同，只是 `src/main.rs` 的一处 `let _ =` 随代码移到 `src/process.rs`。未新增依赖；`Cargo.lock` 只少了 `zx-ai` 对 anyhow 与 libc 的两条边。真实 Docker 的 `real_` 测试与付费 e2e 测试本次没有运行。
+本机 macOS，`cargo fmt`、`cargo clippy --all-targets -- -D warnings`、`cargo test`（990 通过、0 失败、7 项付费测试跳过）、`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`、`cargo +1.88.0 check --all-targets` 通过。自查脚本的命中与基线相同，只是 `src/main.rs` 的一处 `let _ =` 随代码移到 `src/process.rs`。未新增依赖；`Cargo.lock` 只少了 `zx-ai` 对 anyhow 与 libc 的两条边。真实 Docker 的 `real_` 测试与付费 e2e 测试本次没有运行。
 
 ## 6. 不做的事
 

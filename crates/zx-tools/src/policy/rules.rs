@@ -16,10 +16,10 @@ pub enum RuleMatcher {
     Any,
     Tool(String),
     /// Matches bash's command at a word boundary, compared like the allowlist of
-    /// [`CommandPolicy`] (lowercased, whitespace collapsed). An Allow rule does not match a
-    /// command with a pipe or with syntax the allowlist rejects, so it cannot let a second
-    /// command through. Quoting is not interpreted: a Deny prefix stops the plain spelling
-    /// only. Use CommandPolicy as well when shell syntax must be restricted.
+    /// [`CommandPolicy`](super::CommandPolicy) (lowercased, whitespace collapsed). An Allow
+    /// rule does not match a command with a pipe or with syntax the allowlist rejects, so it
+    /// cannot let a second command through. Quoting is not interpreted: a Deny prefix stops
+    /// the plain spelling only. Use CommandPolicy as well when shell syntax must be restricted.
     CommandPrefix(String),
 }
 

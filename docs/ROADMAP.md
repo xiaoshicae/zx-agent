@@ -1596,7 +1596,7 @@ D11 容器沙箱的实施要点（2026-11-05 用户决定）：
 | 依赖闭包 | 本机 macOS 上 `cargo tree -e normal` 去重计得：zx-ai 99 → 33，zx-core 140 → 102（不再含 reqwest；jsonschema 仍在），zx-im 141 → 103，zx-tools 152 不变，zx-agent 205 → 206（多出的是新 crate 本身；合并 PR #69 的 ACP 之后为 239）。锁文件只多出 `zx-ai-openai` 一项，未新增、未升级外部依赖 |
 | 文档 | README 的架构树、对应表与 crate 数；`.claude/CLAUDE.md` 的架构表与分层说明；规则 01 的注释条款按评审稿第 5 节改写，规则 01、04、05 里 `executor` 的路径随文件移动 |
 
-- 本机 macOS 验证：`cargo fmt`、`cargo clippy --all-targets -- -D warnings`、`cargo test`（951 通过、0 失败、7 项付费测试跳过；`829afc8` 的基线为 944 通过，差额 7 项是 PR #66 新增的测试，移动的文件里测试属性的数量不变）、`RUSTDOCFLAGS=-D warnings cargo doc --no-deps`、`cargo +1.88.0 check --all-targets` 均通过；`RUSTFLAGS="-W unused-crate-dependencies"` 对 zx-ai、zx-ai-openai、zx-core、zx-tools 的库检查无命中；自查脚本的命中与拆分前相同，只是路径随文件移动。
+- 本机 macOS 验证：`cargo fmt`、`cargo clippy --all-targets -- -D warnings`、`cargo test`（951 通过、0 失败、7 项付费测试跳过；`829afc8` 的基线为 944 通过，差额 7 项是 PR #66 新增的测试，移动的文件里测试属性的数量不变）、`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`、`cargo +1.88.0 check --all-targets` 均通过；`RUSTFLAGS="-W unused-crate-dependencies"` 对 zx-ai、zx-ai-openai、zx-core、zx-tools 的库检查无命中；自查脚本的命中与拆分前相同，只是路径随文件移动。
 - 未做，留给后续 PR 或另行决定：评审稿 2.2 节里 `prompt.rs` 为上层功能保留的三个段落名、`jsonschema` 的 feature 开关、`compaction.rs` 内嵌的两段摘要提示词。
 
 ② 至 ⑥ 实施记录（2026-11-05，本 PR，基于 `a0c400f`）：五个提交依次为 ② 机械清理（`f2a96de`）、③ 运行层（`5b53810`：`runner/host.rs` 的 `RunHost` 同时是循环、摘要与重试的宿主，`RunStop` 与 `CompactionPause`，`overflow.rs` 消失）、④ 摘要宿主（`84946d8`：`Host::run` 拆成 `plan`、`begin`、`validate`、`complete`、`fail`，只返回 `Report`）、⑤ 会话（`ef94295`：`session/projection.rs` 与 `session/summary.rs`，`jsonl.rs` 的 `Repair` 枚举，`without_details` 合成泛型）、⑥ 循环小改与注释（`c04f0c8`：`checkpoint`，注释按规则 01 整理）。`Runner::start` 由 265 行减到 153 行，`Host::run` 251 行拆成都不超过 60 行的五段；内核产线代码 7828 → 8025 行（新文件各带模块文档）。度量与验证见 `docs/p12-project-cleanup-review.md` 第 4、5 节。
@@ -1612,7 +1612,7 @@ D11 容器沙箱的实施要点（2026-11-05 用户决定）：
 - [x] **⑤ 测试辅助**（`1c0e5bb`）：`tests/common` 的 `zx_agent()`、`stdout`、`stderr`。
 - [x] **⑥ 注释与文档**：行级的 pi 出处、PR 编号与决策编号只留在模块文档；README、`.claude/CLAUDE.md`、规则 04 随改动更新。
 
-验证（本机 macOS）：`cargo fmt`、`cargo clippy --all-targets -- -D warnings`、`cargo test`（990 通过、0 失败、7 项付费测试跳过）、`RUSTDOCFLAGS=-D warnings cargo doc --no-deps`、`cargo +1.88.0 check --all-targets` 通过；自查脚本的命中与基线相同；未新增依赖。真实 Docker 与付费 e2e 测试本次没有运行。
+验证（本机 macOS）：`cargo fmt`、`cargo clippy --all-targets -- -D warnings`、`cargo test`（990 通过、0 失败、7 项付费测试跳过）、`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`、`cargo +1.88.0 check --all-targets` 通过；自查脚本的命中与基线相同；未新增依赖。真实 Docker 与付费 e2e 测试本次没有运行。
 
 ## 6. 推进方式
 
