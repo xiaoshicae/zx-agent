@@ -1336,6 +1336,7 @@ chat 交互体验第二批（2026-11-05，基于合并 origin/main `6ed6a9b` 之
 | 续接会话 | 打开已有会话文件时没有任何提示 | 启动行后多一行 `[chat] resumed N message(s) from the session file; last activity <本地时间>`，N 为投影中的 user 与 assistant 消息数，时间取最后一条记录的时间戳 |
 
 - 公开 API 与 CLI：`chat --help` 新增 `--color`；其余不变。
+- 合并 PR #59 之后的补充：调用标签的字段加入 `pattern`，依次为 `command`、`pattern`、`path`，第一个作为主值、其余以 `名=值` 跟在后面，所以 grep 显示为 `grep: fn main path=src`；审批块不再重复列出这些字段。
 - 测试：新增 6 项。单元测试 2 项（状态行宽度在非终端下的回退、补丁预览与着色），`describe_arguments` 的测试替换原 `remaining_arguments` 的；`tests/chat_cli.rs` 4 项：write_file 审批按行显示内容、edit_file 审批逐项列出且结果显示补丁、`--color always` 在管道中保留颜色、续接会话的提示（新会话不提示）。既有的空行测试改用 `--color never`。
 - 本机 macOS 验证：stable 下 900 项通过、7 项付费测试跳过（合并后的基线 894 项）；fmt、clippy 与 Rust 1.88.0 的全目标检查通过。`TIOCGWINSZ` 按 macOS 与 Linux gnu 的 `c_ulong` 类型直接传给 `ioctl`，把它定义为 `c_int` 的目标（如 musl）未编译验证。
 

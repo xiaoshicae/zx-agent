@@ -33,8 +33,9 @@ const INLINE_CHARS: usize = 80;
 const BLOCK_LINES: usize = 60;
 /// Characters of a call's label in progress and result lines; approvals show everything.
 const LABEL_CHARS: usize = 80;
-/// Argument fields that say what a call does, shown instead of the whole JSON.
-const LABEL_FIELDS: [&str; 2] = ["command", "path"];
+/// Argument fields that say what a call does, shown instead of the whole JSON: the first
+/// one present is the call's main value, the others follow as `name=value`.
+const LABEL_FIELDS: [&str; 3] = ["command", "pattern", "path"];
 
 /// What the conversation has used so far, for `/status`.
 #[derive(Clone, Copy, Default)]
@@ -325,18 +326,31 @@ impl EventSink for Output {
     }
 }
 
-/// `name: <main argument>`, or `name: <arguments as JSON>`; nothing is cut, control
-/// characters are escaped and a multi-line command stays on one line.
+/// `name: <main argument> other=value`, or `name: <arguments as JSON>`; nothing is cut,
+/// control characters are escaped and a multi-line command stays on one line.
 pub(super) fn describe_call(name: &str, args: &Value) -> String {
-    let detail = args
-        .as_object()
-        .and_then(|fields| {
-            LABEL_FIELDS
-                .iter()
-                .find_map(|field| fields.get(*field).and_then(Value::as_str))
-        })
-        .map_or_else(|| args.to_string(), str::to_string);
+    let mut labels = label_fields(args);
+    let detail = match labels.next() {
+        Some((_, main)) => {
+            let mut detail = main.to_string();
+            for (field, value) in labels {
+                detail.push_str(&format!(" {field}={value}"));
+            }
+            detail
+        }
+        None => args.to_string(),
+    };
     format!("{}: {}", visible(name), visible(&detail).replace('\n', " "))
+}
+
+/// The label fields `args` carries as strings, in [`LABEL_FIELDS`] order.
+fn label_fields(args: &Value) -> impl Iterator<Item = (&'static str, &str)> {
+    LABEL_FIELDS.iter().filter_map(move |field| {
+        args.as_object()
+            .and_then(|fields| fields.get(*field))
+            .and_then(Value::as_str)
+            .map(|value| (*field, value))
+    })
 }
 
 /// The arguments [`describe_call`] left out, readable: scalars inline, long or multi-line
@@ -346,12 +360,9 @@ pub(super) fn describe_arguments(args: &Value) -> Vec<String> {
     let mut lines = Vec::new();
     match args.as_object() {
         Some(fields) => {
-            let shown = LABEL_FIELDS
-                .iter()
-                .find(|field| fields.get(**field).is_some_and(Value::is_string))
-                .copied();
+            let shown: Vec<&str> = label_fields(args).map(|(field, _)| field).collect();
             for (key, value) in fields {
-                if Some(key.as_str()) != shown {
+                if !shown.contains(&key.as_str()) {
                     describe_value(key, value, &mut lines);
                 }
             }
@@ -573,6 +584,14 @@ mod tests {
             "read_file: src/main.rs"
         );
         assert_eq!(
+            describe_call(
+                "grep",
+                &json!({"pattern": "fn main", "path": "src", "ignoreCase": true})
+            ),
+            "grep: fn main path=src"
+        );
+        assert_eq!(describe_call("ls", &json!({})), "ls: {}");
+        assert_eq!(
             describe_call("prom__query", &json!({"query": "up"})),
             "prom__query: {\"query\":\"up\"}"
         );
@@ -589,6 +608,10 @@ mod tests {
             ["timeout: 5"]
         );
         assert_eq!(describe_arguments(&json!({"command": "ls"})), Vec::<String>::new());
+        assert_eq!(
+            describe_arguments(&json!({"pattern": "x", "path": "src", "limit": 5})),
+            ["limit: 5"]
+        );
         assert_eq!(
             describe_arguments(&json!({"path": "notes.txt", "content": "one\ntwo\n"})),
             ["content (2 lines):", "    one", "    two"]
