@@ -536,7 +536,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P8 | 嵌入协议 `acp` | 进行中：2026-11-05 按 D13 重启，`acp` 子命令已实现（见下文 P8），待在 Zed 或 Wisp 上验证 |
 | P9 | 可选增强 | 进行中：token 预算（PR #47）、OpenTelemetry 追踪（PR #49）、crate 拆分（PR #52）、通用化整理（PR #54）、chat 交互体验（2026-11-05，见下文）已完成；剩更多 provider（如 Anthropic）。其余各项按 D10 不做或取消 |
 | P10 | 与 pi 的能力对齐 | 进行中：2026-11-05 对照 pi 列出 14 项缺口，见下文 P10；① 上下文超长后自动恢复已完成（PR #56）；② 容器沙箱已完成（PR #57）；③ edit 与 write 工具已完成（PR #58）；④ grep、find、ls 已完成（PR #59）；⑤ 运行中可调整的配置已完成：⑤a 推理强度（PR #60）、⑤b 续跑（PR #61）、⑤c 请求前替换模型与推理强度的钩子（PR #65）；⑥a 会话目录与续接已完成（PR #67）；⑥b fork 已完成（PR #68） |
-| P11 | 内核整理 | 进行中：2026-11-05 评审稿 `docs/p11-kernel-cleanup-review.md`；① 立项与搬家已实施（本 PR），② 至 ⑥ 见下文 P11 |
+| P11 | 内核整理 | 进行中：2026-11-05 评审稿 `docs/p11-kernel-cleanup-review.md`；① 立项与搬家已完成（PR #70），② 至 ⑥ 见下文 P11 |
 
 ### P0 场景默认值移出内核
 
@@ -1576,7 +1576,7 @@ D11 容器沙箱的实施要点（2026-11-05 用户决定）：
 
 2026-11-05 用户要求把 `zx-core` 做成轻量的微内核，并让内核“模块更清晰、代码更简洁、注释更精简，便于阅读和维护”。评审稿 `docs/p11-kernel-cleanup-review.md`（代码核对基线 `2367a3a`）记录了结论与方案：内核依赖 `zx-ai` 没有错，错在 `zx-ai` 混装了 OpenAI 驱动；内核里约三分之一的代码是默认实现而不是机制；两个超长函数和三份重复的借用包遮住了运行层的数据流；注释总量不多但重复、带历史。任务按下面的顺序各成一个 PR，每个 PR 跑 fmt、clippy、test 三条命令，改到会话格式的加跑 MSRV 检查与 `tests/request_audit.rs` 的固定文件比对：
 
-- [x] **① 立项与搬家**（本 PR，2026-11-05，见下方实施记录）：评审稿；规则 01 的注释条款；拆 `zx-ai-openai`；`executor`、`output_store`、`ContinueOnLength` 与 `RedactSecrets` 移到 `zx-tools`。
+- [x] **① 立项与搬家**（已完成（PR #70），2026-11-05，见下方实施记录）：评审稿；规则 01 的注释条款；拆 `zx-ai-openai`；`executor`、`output_store`、`ContinueOnLength` 与 `RedactSecrets` 移到 `zx-tools`。
 - [ ] **② 机械清理**：clippy pedantic 可自动修的（`Self` 重复、可 derive `Eq`、单臂 match）；`const fn` 建议用 1.88 工具链复核后再采纳；两处超长行；三对同名文件改名（`session/compaction.rs`、`runner/recovery.rs`、两个 `session_runtime.rs`）；`SessionHost` 命名统一。
 - [ ] **③ 运行层**：拆 `Runner::start`（265 行）；三处同样八个字段的借用包合成 `RunContext`；暂停状态封成 `CompactionPause`；`overflow.rs` 消失。
 - [ ] **④ 摘要宿主**：拆 `Host::run`（251 行），返回值只留 `Report`；摘要的两端交给 session；`carry(previous, new)` 合并 `merge` 与 `validate_merged`；`SummaryRequest::messages` 合并两处请求构造。
