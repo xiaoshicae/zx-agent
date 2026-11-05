@@ -9,13 +9,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent::{AgentEvent, Emit, HookChain, RequestKind};
 use crate::ai::{
-    AssistantMessage, ContentBlock, Delta, Message, PREAMBLE, Provider, Request, StopReason, StreamEvent,
-    SystemMessage, SystemPrompt, Usage, UserMessageKind, duration_ms, now_ms,
+    AssistantMessage, ContentBlock, Delta, Message, Provider, Request, StopReason, StreamEvent, Usage, duration_ms,
+    now_ms,
 };
 pub use crate::session::SummaryMode;
 use crate::session::{
     CompactionPlan, CompactionSummary, MAX_STATEMENTS, MAX_SUMMARY_BYTES, MergedSummary, RequestSource, SessionStore,
-    SummaryFact, SummaryRequest, cite_only, records_without_details, without_details,
+    SummaryFact, SummaryRequest, cite_only, records_without_details, summary_messages, superseded_by, without_details,
 };
 
 const MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
@@ -98,17 +98,18 @@ impl Config {
 }
 
 /// Outcome of a standalone compact operation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
     Completed,
+    #[default]
     Noop,
     Failed,
     Aborted,
 }
 
 /// Costs and audit record for one compaction, including unsuccessful requests.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Report {
     pub outcome: Outcome,
@@ -122,6 +123,26 @@ pub struct Report {
     pub error: Option<String>,
     #[serde(skip)]
     pub(crate) persistence_error: Option<String>,
+}
+
+impl Report {
+    fn failed(mut self, error: String) -> Self {
+        self.outcome = Outcome::Failed;
+        self.error = Some(error);
+        self
+    }
+
+    fn aborted(mut self) -> Self {
+        self.outcome = Outcome::Aborted;
+        self.error = Some("compaction cancelled".into());
+        self
+    }
+
+    /// The session could not record a step, so the run must stop.
+    fn unrecorded(mut self, error: String) -> Self {
+        self.persistence_error = Some(error.clone());
+        self.failed(error)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -186,16 +207,7 @@ fn merge(attempt: &str, previous: Vec<SummaryFact>, answer: ModelSummary, source
         })
         .collect();
     cite_only(&new, sources)?;
-    let mut superseded: Vec<String> = Vec::new();
-    for id in new.iter().flat_map(|fact| &fact.supersedes) {
-        ensure!(
-            previous.iter().any(|fact| fact.id.as_ref() == Some(id)),
-            "a new fact supersedes {id:?}, which is not an earlier fact that still holds"
-        );
-        if !superseded.contains(id) {
-            superseded.push(id.clone());
-        }
-    }
+    let superseded = superseded_by(&previous, &new)?;
     let carried: Vec<SummaryFact> = previous
         .into_iter()
         .filter(|fact| !fact.id.as_ref().is_some_and(|id| superseded.contains(id)))
@@ -235,6 +247,7 @@ pub(crate) struct Host<'a> {
     pub attempt: u32,
 }
 
+/// What a summary would read and keep, chosen from the current projection.
 struct Candidate {
     first_kept: String,
     /// The records the summary reads, which its facts may cite.
@@ -246,13 +259,126 @@ struct Candidate {
     /// the boundary (the first `prefix_system`), then the retained messages.
     retained: Vec<Message>,
     prefix_system: usize,
-    /// The summary an incremental one continues, and that summary's facts that still hold.
-    continues: Option<(String, Vec<SummaryFact>)>,
+    continues: Option<Continuation>,
+}
+
+/// The earlier summary an incremental one continues, and its facts that still hold.
+struct Continuation {
+    previous_id: String,
+    facts: Vec<SummaryFact>,
+}
+
+/// A summary attempt recorded in the session, waiting for the model's answer.
+struct Attempt {
+    id: String,
+    source_ids: Vec<String>,
+    /// The facts an incremental summary carries over; taken when the answer is merged.
+    previous_facts: Option<Vec<SummaryFact>>,
+    retained: Vec<Message>,
+    prefix_system: usize,
+}
+
+/// A summary that did not complete, to record with the attempt.
+struct Failed {
+    attempt_id: String,
+    error: String,
+    /// The final response, when one arrived; stream failures are already in `error`.
+    response: Option<AssistantMessage>,
 }
 
 impl Host<'_> {
     async fn emit(&self, event: AgentEvent) {
         self.hooks.emit(event, self.to).await;
+    }
+
+    /// Run one summary: choose what to summarize, record the attempt, ask the model, check
+    /// the answer, then record the result or the failure. When the outcome is `Completed`,
+    /// the session's projection is the new context.
+    pub async fn run(&mut self, trigger: Trigger, cancel: &CancellationToken) -> Report {
+        let automatic = trigger != Trigger::Manual;
+        let mut report = Report::default();
+        let candidate = match self.plan(trigger, &mut report) {
+            Ok(Some(candidate)) => candidate,
+            Ok(None) => return report,
+            Err(error) => return report.failed(format!("{error:#}")),
+        };
+        if cancel.is_cancelled() {
+            return report.aborted();
+        }
+        let (mut attempt, request) = match self.begin(candidate, report.input_bytes, automatic).await {
+            Ok(begun) => begun,
+            Err(error) => return report.unrecorded(error),
+        };
+        report.requests = 1;
+        let response = self.summarize(request, cancel).await;
+        if let Ok(message) = &response {
+            report.usage = message.usage.clone();
+        }
+        let validated = parse_answer(&response)
+            .map_err(anyhow::Error::msg)
+            .and_then(|answer| self.validate(&mut attempt, answer, &report, automatic, cancel));
+        let committed = match validated {
+            Ok((merged, output_bytes)) => match self
+                .session
+                .append_merged_compaction(&attempt.id, merged, report.usage.clone())
+                .await
+            {
+                Ok(id) => Ok((id, output_bytes)),
+                Err(error) => {
+                    let message = format!("cannot persist compaction result: {error:#}");
+                    report.persistence_error = Some(message.clone());
+                    Err(anyhow::Error::msg(message))
+                }
+            },
+            Err(error) => Err(error),
+        };
+        match committed {
+            Ok((id, output_bytes)) => self.complete(report, id, output_bytes, automatic).await,
+            Err(error) => {
+                let failed = Failed {
+                    attempt_id: attempt.id,
+                    error: format!("{error:#}"),
+                    response: response.ok(),
+                };
+                self.fail(report, failed, automatic, cancel.is_cancelled()).await
+            }
+        }
+    }
+
+    /// Measure the context and choose what to summarize. `None` means nothing can be; the
+    /// report then says why, except for a manual compaction, which simply has nothing to do.
+    fn plan(&self, trigger: Trigger, report: &mut Report) -> Result<Option<Candidate>> {
+        report.input_bytes = context_bytes(&self.session.messages())?;
+        report.output_bytes = report.input_bytes;
+        let Some(candidate) = self.candidate()? else {
+            let (reason, remedy) = match trigger {
+                Trigger::Manual => return Ok(None),
+                Trigger::Automatic => ("context exceeds triggerBytes", "raise the budget"),
+                Trigger::Overflow => (
+                    "the model rejected the context as too long",
+                    "lower keepRecentBytes, use a model with a larger context",
+                ),
+            };
+            report.outcome = Outcome::Failed;
+            report.error = Some(format!(
+                "{reason} but cannot compact while preserving system messages and the latest input; \
+                 {remedy} or start a new session"
+            ));
+            return Ok(None);
+        };
+        ensure!(
+            candidate.input.len() <= MAX_SOURCE_BYTES,
+            "original summary source exceeds {MAX_SOURCE_BYTES} bytes; start a new session"
+        );
+        if trigger != Trigger::Manual
+            && let Some(limit) = self.config.trigger_bytes
+        {
+            ensure!(
+                context_bytes(&candidate.retained)? < limit,
+                "retained system messages and latest input already exceed triggerBytes; raise the budget or start a new session"
+            );
+        }
+        Ok(Some(candidate))
     }
 
     fn candidate(&self) -> Result<Option<Candidate>> {
@@ -325,7 +451,10 @@ impl Host<'_> {
                 input: source.input()?,
                 retained,
                 prefix_system,
-                continues: Some((previous.id.clone(), source.previous_facts)),
+                continues: Some(Continuation {
+                    previous_id: previous.id.clone(),
+                    facts: source.previous_facts,
+                }),
             }));
         }
         let source = &raw[..cut];
@@ -339,65 +468,14 @@ impl Host<'_> {
         }))
     }
 
-    pub async fn run(&mut self, trigger: Trigger, cancel: &CancellationToken) -> (Report, Option<Vec<Message>>) {
-        let automatic = trigger != Trigger::Manual;
-        let mut report = Report {
-            outcome: Outcome::Noop,
-            requests: 0,
-            usage: Usage::default(),
-            input_bytes: 0,
-            output_bytes: 0,
-            entry_id: None,
-            error: None,
-            persistence_error: None,
-        };
-        let setup = (|| -> Result<Option<Candidate>> {
-            report.input_bytes = context_bytes(&self.session.messages())?;
-            report.output_bytes = report.input_bytes;
-            let Some(candidate) = self.candidate()? else {
-                return Ok(None);
-            };
-            ensure!(
-                candidate.input.len() <= MAX_SOURCE_BYTES,
-                "original summary source exceeds {MAX_SOURCE_BYTES} bytes; start a new session"
-            );
-            if automatic && let Some(limit) = self.config.trigger_bytes {
-                ensure!(
-                    context_bytes(&candidate.retained)? < limit,
-                    "retained system messages and latest input already exceed triggerBytes; raise the budget or start a new session"
-                );
-            }
-            Ok(Some(candidate))
-        })();
-        let candidate = match setup {
-            Ok(Some(candidate)) => candidate,
-            Ok(None) => {
-                let (reason, remedy) = match trigger {
-                    Trigger::Manual => return (report, None),
-                    Trigger::Automatic => ("context exceeds triggerBytes", "raise the budget"),
-                    Trigger::Overflow => (
-                        "the model rejected the context as too long",
-                        "lower keepRecentBytes, use a model with a larger context",
-                    ),
-                };
-                report.outcome = Outcome::Failed;
-                report.error = Some(format!(
-                    "{reason} but cannot compact while preserving system messages and the latest input; \
-                     {remedy} or start a new session"
-                ));
-                return (report, None);
-            }
-            Err(error) => {
-                report.outcome = Outcome::Failed;
-                report.error = Some(format!("{error:#}"));
-                return (report, None);
-            }
-        };
-        if cancel.is_cancelled() {
-            report.outcome = Outcome::Aborted;
-            report.error = Some("compaction cancelled".into());
-            return (report, None);
-        }
+    /// Record the attempt and its request in the session, then announce them. An error means
+    /// the session could not record.
+    async fn begin(
+        &mut self,
+        candidate: Candidate,
+        input_bytes: usize,
+        automatic: bool,
+    ) -> Result<(Attempt, Request), String> {
         let Candidate {
             first_kept,
             source_ids,
@@ -406,7 +484,10 @@ impl Host<'_> {
             prefix_system,
             continues,
         } = candidate;
-        let (continues, previous_facts) = continues.unzip();
+        let (continues, previous_facts) = match continues {
+            Some(continuation) => (Some(continuation.previous_id), Some(continuation.facts)),
+            None => (None, None),
+        };
         let instructions = if continues.is_some() {
             INCREMENTAL_SUMMARY_INSTRUCTIONS
         } else {
@@ -422,62 +503,36 @@ impl Host<'_> {
                 instructions: instructions.into(),
                 max_tokens: self.config.max_summary_tokens,
             },
-            input_bytes: report.input_bytes,
+            input_bytes,
             mode: self.config.mode,
             continues,
         };
-        let attempt = match self.session.begin_compaction(plan).await {
-            Ok(id) => id,
-            Err(error) => {
-                report.outcome = Outcome::Failed;
-                let error = format!("cannot persist compaction request: {error:#}");
-                report.persistence_error = Some(error.clone());
-                report.error = Some(error);
-                return (report, None);
-            }
-        };
+        let id = self
+            .session
+            .begin_compaction(plan)
+            .await
+            .map_err(|error| format!("cannot persist compaction request: {error:#}"))?;
         let system_timestamp = now_ms();
         let user_timestamp = now_ms();
         let request = Request {
             model: self.model.into(),
-            messages: vec![
-                Message::System(SystemMessage {
-                    sections: SystemPrompt::default()
-                        .diff(&SystemPrompt::default().with_section(PREAMBLE, instructions)),
-                    timestamp: system_timestamp,
-                }),
-                Message::User {
-                    content: input,
-                    timestamp: user_timestamp,
-                    kind: UserMessageKind::Prompt,
-                },
-            ],
+            messages: summary_messages(instructions, input, system_timestamp, user_timestamp),
             tools: Vec::new(),
             max_tokens: Some(self.config.max_summary_tokens),
             reasoning: None,
         };
         let source = RequestSource::Summary {
-            attempt_id: attempt.clone(),
+            attempt_id: id.clone(),
             system_timestamp,
             user_timestamp,
         };
         let options = self.provider.request_options();
-        let name = self.provider.name();
-        let request_entry = match self.session.record_request(&request, name, options, source).await {
-            Ok(id) => id,
-            Err(error) => {
-                let error = format!("cannot persist summary request checkpoint: {error:#}");
-                report.persistence_error = Some(error.clone());
-                report.error = Some(error);
-                report.outcome = Outcome::Failed;
-                return (report, None);
-            }
-        };
-        self.emit(AgentEvent::CompactionStart {
-            input_bytes: report.input_bytes,
-            automatic,
-        })
-        .await;
+        let request_entry = self
+            .session
+            .record_request(&request, self.provider.name(), options, source)
+            .await
+            .map_err(|error| format!("cannot persist summary request checkpoint: {error:#}"))?;
+        self.emit(AgentEvent::CompactionStart { input_bytes, automatic }).await;
         self.emit(AgentEvent::RequestStart {
             kind: RequestKind::Summary,
             entry_id: Some(request_entry),
@@ -485,110 +540,90 @@ impl Host<'_> {
             attempt: self.attempt,
         })
         .await;
-        report.requests = 1;
-        let response = self.summarize(request, cancel).await;
-        if let Ok(message) = &response {
-            report.usage = message.usage.clone();
-        }
-        let parsed = match &response {
-            Ok(message) => match message.stop_reason {
-                StopReason::Stop if message.tool_calls().is_empty() => {
-                    serde_json::from_str::<ModelSummary>(&message.text())
-                        .map_err(|error| format!("invalid summary JSON: {error}"))
-                }
-                StopReason::Stop => Err("summary contains a tool call; tools are not permitted".into()),
-                StopReason::Length => Err("summary reached the output token limit".into()),
-                StopReason::ToolUse => Err("summary requested a tool call; tools are not permitted".into()),
-                StopReason::Error | StopReason::Aborted => Err(message
-                    .error_message
-                    .clone()
-                    .unwrap_or_else(|| "summary request failed".into())),
+        let attempt = Attempt {
+            id,
+            source_ids,
+            previous_facts,
+            retained,
+            prefix_system,
+        };
+        Ok((attempt, request))
+    }
+
+    /// Check the model's answer against the attempt: it cites only what it read, fits the
+    /// limits and shrinks the context. Returns the merged summary and the new context's size.
+    fn validate(
+        &self,
+        attempt: &mut Attempt,
+        answer: ModelSummary,
+        report: &Report,
+        automatic: bool,
+        cancel: &CancellationToken,
+    ) -> Result<(MergedSummary, usize)> {
+        let merged = match self.config.mode {
+            SummaryMode::Full => MergedSummary {
+                summary: full_summary(answer, &attempt.source_ids)?,
+                superseded: Vec::new(),
+                evicted: Vec::new(),
             },
-            Err(error) => Err(error.clone()),
+            // The first incremental summary has no earlier facts to carry over.
+            SummaryMode::Incremental => merge(
+                &attempt.id,
+                attempt.previous_facts.take().unwrap_or_default(),
+                answer,
+                &attempt.source_ids,
+            )?,
         };
-        let validated = (|| -> Result<(MergedSummary, usize)> {
-            let answer = parsed.map_err(anyhow::Error::msg)?;
-            let merged = match self.config.mode {
-                SummaryMode::Full => MergedSummary {
-                    summary: full_summary(answer, &source_ids)?,
-                    superseded: Vec::new(),
-                    evicted: Vec::new(),
-                },
-                // The first incremental summary has no earlier facts to carry over.
-                SummaryMode::Incremental => merge(&attempt, previous_facts.unwrap_or_default(), answer, &source_ids)?,
-            };
-            let mut projection = Vec::new();
-            // Prefix system messages retain their order before the summary.
-            projection.extend(retained[..prefix_system].iter().cloned());
-            projection.push(merged.summary.message(now_ms()));
-            projection.extend(retained[prefix_system..].iter().cloned());
-            let output_bytes = context_bytes(&projection)?;
-            ensure!(output_bytes < report.input_bytes, "summary did not reduce the context");
-            ensure!(
-                !automatic || self.config.trigger_bytes.is_none_or(|limit| output_bytes <= limit),
-                "retained context still exceeds triggerBytes; reduce retained input or raise the budget"
-            );
-            if cancel.is_cancelled() {
-                bail!("compaction cancelled");
-            }
-            Ok((merged, output_bytes))
-        })();
-        let completed = match validated {
-            Ok((merged, output_bytes)) => self
-                .session
-                .append_merged_compaction(&attempt, merged, report.usage.clone())
-                .await
-                .map(|id| (id, output_bytes))
-                .map_err(|error| {
-                    let message = format!("cannot persist compaction result: {error:#}");
-                    report.persistence_error = Some(message.clone());
-                    anyhow::Error::msg(message)
-                }),
-            Err(error) => Err(error),
-        };
-        match completed {
-            Ok((id, output_bytes)) => {
-                let messages = self.session.messages();
-                report.outcome = Outcome::Completed;
-                report.output_bytes = output_bytes;
-                report.entry_id = Some(id.clone());
-                self.emit(AgentEvent::CompactionEnd {
-                    entry_id: id,
-                    input_bytes: report.input_bytes,
-                    output_bytes: report.output_bytes,
-                    usage: report.usage.clone(),
-                    automatic,
-                })
-                .await;
-                (report, Some(messages))
-            }
-            Err(error) => {
-                report.outcome = if cancel.is_cancelled() {
-                    Outcome::Aborted
-                } else {
-                    Outcome::Failed
-                };
-                let mut error = format!("{error:#}");
-                // Stream failures are already included in error; only a received final
-                // response can be recorded verbatim alongside the failure.
-                let response = response.ok();
-                if let Err(write_error) = self
-                    .session
-                    .fail_compaction(&attempt, error.clone(), report.usage.clone(), response)
-                    .await
-                {
-                    error = format!("cannot persist compaction failure: {write_error:#}; {error}");
-                    report.persistence_error = Some(error.clone());
-                }
-                self.emit(AgentEvent::CompactionFailed {
-                    error: error.clone(),
-                    automatic,
-                })
-                .await;
-                report.error = Some(error);
-                (report, None)
-            }
+        let mut projection = Vec::new();
+        // Prefix system messages retain their order before the summary.
+        projection.extend(attempt.retained[..attempt.prefix_system].iter().cloned());
+        projection.push(merged.summary.message(now_ms()));
+        projection.extend(attempt.retained[attempt.prefix_system..].iter().cloned());
+        let output_bytes = context_bytes(&projection)?;
+        ensure!(output_bytes < report.input_bytes, "summary did not reduce the context");
+        ensure!(
+            !automatic || self.config.trigger_bytes.is_none_or(|limit| output_bytes <= limit),
+            "retained context still exceeds triggerBytes; reduce retained input or raise the budget"
+        );
+        if cancel.is_cancelled() {
+            bail!("compaction cancelled");
         }
+        Ok((merged, output_bytes))
+    }
+
+    async fn complete(&mut self, mut report: Report, entry_id: String, output_bytes: usize, automatic: bool) -> Report {
+        report.outcome = Outcome::Completed;
+        report.output_bytes = output_bytes;
+        report.entry_id = Some(entry_id.clone());
+        self.emit(AgentEvent::CompactionEnd {
+            entry_id,
+            input_bytes: report.input_bytes,
+            output_bytes,
+            usage: report.usage.clone(),
+            automatic,
+        })
+        .await;
+        report
+    }
+
+    async fn fail(&mut self, mut report: Report, failed: Failed, automatic: bool, aborted: bool) -> Report {
+        report.outcome = if aborted { Outcome::Aborted } else { Outcome::Failed };
+        let mut error = failed.error;
+        if let Err(write_error) = self
+            .session
+            .fail_compaction(&failed.attempt_id, error.clone(), report.usage.clone(), failed.response)
+            .await
+        {
+            error = format!("cannot persist compaction failure: {write_error:#}; {error}");
+            report.persistence_error = Some(error.clone());
+        }
+        self.emit(AgentEvent::CompactionFailed {
+            error: error.clone(),
+            automatic,
+        })
+        .await;
+        report.error = Some(error);
+        report
     }
 
     async fn summarize(&self, request: Request, cancel: &CancellationToken) -> Result<AssistantMessage, String> {
@@ -618,6 +653,22 @@ impl Host<'_> {
                 duration_ms(self.config.timeout)
             )),
         }
+    }
+}
+
+/// The model's answer as a summary, or why it is not one.
+fn parse_answer(response: &Result<AssistantMessage, String>) -> Result<ModelSummary, String> {
+    let message = response.as_ref().map_err(Clone::clone)?;
+    match message.stop_reason {
+        StopReason::Stop if message.tool_calls().is_empty() => serde_json::from_str::<ModelSummary>(&message.text())
+            .map_err(|error| format!("invalid summary JSON: {error}")),
+        StopReason::Stop => Err("summary contains a tool call; tools are not permitted".into()),
+        StopReason::Length => Err("summary reached the output token limit".into()),
+        StopReason::ToolUse => Err("summary requested a tool call; tools are not permitted".into()),
+        StopReason::Error | StopReason::Aborted => Err(message
+            .error_message
+            .clone()
+            .unwrap_or_else(|| "summary request failed".into())),
     }
 }
 

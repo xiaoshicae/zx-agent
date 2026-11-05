@@ -104,7 +104,7 @@ impl Runner {
             trace: &trace,
         };
         let mut host = RunHost::new(&mut self.session, to, &self.config, &self.compaction, &mut self.pause);
-        host.summarize(Trigger::Manual, &child).await.0
+        host.summarize(Trigger::Manual, &child).await
     }
 
     /// The loop configuration, for example to reach `config().queues` during a run.

@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
-use crate::ai::{AssistantMessage, Message, Usage, UserMessageKind, now_ms};
+use crate::ai::{AssistantMessage, Message, PREAMBLE, SystemMessage, SystemPrompt, Usage, UserMessageKind, now_ms};
 
 use super::{Entry, ProjectedMessage, SESSION_VERSION, SessionStore, records_without_details};
 
@@ -148,6 +148,51 @@ pub struct SummaryRequest {
     pub model: String,
     pub instructions: String,
     pub max_tokens: u32,
+}
+
+impl SummaryRequest {
+    /// The messages of the request as it was sent: the instructions as the system prompt,
+    /// `input` as the user message.
+    pub(crate) fn messages(&self, input: String, system_timestamp: u64, user_timestamp: u64) -> Vec<Message> {
+        summary_messages(&self.instructions, input, system_timestamp, user_timestamp)
+    }
+}
+
+/// The two messages of a summary request, built the same way when it is sent and when it is
+/// replayed from the session.
+pub(crate) fn summary_messages(
+    instructions: &str,
+    input: String,
+    system_timestamp: u64,
+    user_timestamp: u64,
+) -> Vec<Message> {
+    vec![
+        Message::System(SystemMessage {
+            sections: SystemPrompt::default().diff(&SystemPrompt::default().with_section(PREAMBLE, instructions)),
+            timestamp: system_timestamp,
+        }),
+        Message::User {
+            content: input,
+            timestamp: user_timestamp,
+            kind: UserMessageKind::Prompt,
+        },
+    ]
+}
+
+/// The earlier facts that `new` supersedes, each once, in the order named. An error names a
+/// fact that is not among `previous`.
+pub(crate) fn superseded_by(previous: &[SummaryFact], new: &[SummaryFact]) -> Result<Vec<String>> {
+    let mut superseded: Vec<String> = Vec::new();
+    for id in new.iter().flat_map(|fact| &fact.supersedes) {
+        ensure!(
+            previous.iter().any(|fact| fact.id.as_ref() == Some(id)),
+            "a new fact supersedes {id:?}, which is not an earlier fact that still holds"
+        );
+        if !superseded.contains(id) {
+            superseded.push(id.clone());
+        }
+    }
+    Ok(superseded)
 }
 
 /// Append-only format transition; old headers remain unchanged.
@@ -541,6 +586,15 @@ impl SessionStore {
         Ok(cut)
     }
 
+    /// The records before `first_kept`: what a full summary read.
+    pub(super) fn summarized_prefix<'a>(
+        raw: &'a [ProjectedMessage],
+        first_kept: &str,
+    ) -> Result<&'a [ProjectedMessage]> {
+        let cut = Self::retained_from(raw, first_kept)?;
+        Ok(&raw[..cut])
+    }
+
     /// An incremental result: the new facts are numbered after the attempt, in order, and
     /// cite only what it read; the earlier facts that still held are carried over verbatim,
     /// except those the new facts supersede and the oldest ones evicted; all within the limits.
@@ -569,16 +623,7 @@ impl SessionStore {
             );
         }
         cite_only(new, &attempt.source_entry_ids)?;
-        let mut superseded: Vec<String> = Vec::new();
-        for id in new.iter().flat_map(|fact| &fact.supersedes) {
-            ensure!(
-                previous.iter().any(|fact| fact.id.as_ref() == Some(id)),
-                "a new fact supersedes {id:?}, which is not an earlier fact that still holds"
-            );
-            if !superseded.contains(id) {
-                superseded.push(id.clone());
-            }
-        }
+        let superseded = superseded_by(&previous, new)?;
         ensure!(
             done.superseded == superseded,
             "superseded facts must be exactly those the new facts name"

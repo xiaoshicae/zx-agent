@@ -4,7 +4,7 @@ use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::ai::{Message, PREAMBLE, Reasoning, Request, SystemMessage, SystemPrompt, ToolDef, now_ms};
+use crate::ai::{Message, Reasoning, Request, ToolDef, now_ms};
 
 use super::{CompactionStartedEntry, Entry, SessionStore, records_without_details};
 
@@ -194,24 +194,13 @@ impl SessionStore {
                         .recorded_incremental_source(&path, previous, &attempt.first_kept_entry_id)?
                         .input()?,
                     None => {
-                        let source: Vec<_> = Self::raw_projection_from(&path)
-                            .into_iter()
-                            .take_while(|item| item.entry_id != attempt.first_kept_entry_id)
-                            .collect();
+                        let raw = Self::raw_projection_from(&path);
+                        let source = Self::summarized_prefix(&raw, &attempt.first_kept_entry_id)?;
                         // As the summary request was built: without tool result details.
-                        serde_json::to_string(&records_without_details(&source))?
+                        serde_json::to_string(&records_without_details(source))?
                     }
                 };
-                let system = Message::System(SystemMessage {
-                    sections: SystemPrompt::default()
-                        .diff(&SystemPrompt::default().with_section(PREAMBLE, &attempt.request.instructions)),
-                    timestamp: *system_timestamp,
-                });
-                let mut user = Message::user(content);
-                if let Message::User { timestamp, .. } = &mut user {
-                    *timestamp = *user_timestamp;
-                }
-                Ok(vec![system, user])
+                Ok(attempt.request.messages(content, *system_timestamp, *user_timestamp))
             }
         }
     }

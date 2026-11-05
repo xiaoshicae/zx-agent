@@ -103,13 +103,9 @@ impl<'a> RunHost<'a> {
         }
     }
 
-    /// Summarize the old prefix with `trigger`; the pause follows the outcome. Returns the
-    /// report and, when the summary succeeded, the new context.
-    pub async fn summarize(
-        &mut self,
-        trigger: Trigger,
-        cancel: &CancellationToken,
-    ) -> (compaction::Report, Option<Vec<Message>>) {
+    /// Summarize the old prefix with `trigger`; the pause follows the outcome. When the
+    /// report says `Completed`, the session's projection is the new context.
+    pub async fn summarize(&mut self, trigger: Trigger, cancel: &CancellationToken) -> compaction::Report {
         let mut host = compaction::Host {
             session: &mut *self.session,
             provider: self.provider,
@@ -119,9 +115,9 @@ impl<'a> RunHost<'a> {
             hooks: self.hooks,
             attempt: self.attempt,
         };
-        let (report, messages) = host.run(trigger, cancel).await;
+        let report = host.run(trigger, cancel).await;
         self.pause.note(&report);
-        (report, messages)
+        report
     }
 
     /// The input a continuation starts with, after omitting a failed answer at the end; an
@@ -199,13 +195,13 @@ impl<'a> RunHost<'a> {
         if let Some(target) = failed_entry {
             self.omit_failed_attempt(target).await.map_err(RunStop::error)?;
         }
-        let (report, messages) = self.summarize(Trigger::Overflow, cancel).await;
+        let report = self.summarize(Trigger::Overflow, cancel).await;
         accounting.model_requests = accounting.model_requests.saturating_add(report.requests);
         accounting.usage.add(&report.usage);
         if let Some(error) = report.persistence_error {
             return Err(RunStop::error(error));
         }
-        if messages.is_some() {
+        if report.outcome == compaction::Outcome::Completed {
             return Ok(());
         }
         if report.outcome == compaction::Outcome::Aborted {
@@ -298,11 +294,11 @@ impl SessionHost for RunHost<'_> {
                  compact manually to retry, start a new session, or disable automatic compaction"
             ));
         }
-        let (report, messages) = self.summarize(Trigger::Automatic, cancel).await;
+        let report = self.summarize(Trigger::Automatic, cancel).await;
         let result = if let Some(error) = report.persistence_error {
             Prepared::Unrecorded(error)
-        } else if let Some(messages) = messages {
-            Prepared::Updated(messages)
+        } else if report.outcome == compaction::Outcome::Completed {
+            Prepared::Updated(self.session.messages())
         } else {
             Prepared::Failed(
                 report

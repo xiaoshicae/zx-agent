@@ -27,7 +27,7 @@ pub use summary::{
     CompactionEntry, CompactionFailedEntry, CompactionPlan, CompactionStartedEntry, CompactionSummary,
     FormatUpgradeEntry, MergedSummary, SummaryFact, SummaryMode, SummaryRequest,
 };
-pub(crate) use summary::{MAX_STATEMENTS, MAX_SUMMARY_BYTES, cite_only};
+pub(crate) use summary::{MAX_STATEMENTS, MAX_SUMMARY_BYTES, cite_only, summary_messages, superseded_by};
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
