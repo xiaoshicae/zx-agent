@@ -190,6 +190,12 @@ pub(crate) struct ChatArgs {
     /// working directory, or the one whose ID starts with the value (see `zx-agent sessions`).
     #[arg(long, value_name = "ID", num_args = 0..=1, conflicts_with = "session")]
     pub(crate) resume: Option<Option<String>>,
+
+    /// Start with a copy of another session: a session file, or the session in the session
+    /// directory whose ID starts with the value. The copy is a new file in the session
+    /// directory; the original is not changed.
+    #[arg(long, value_name = "ID|PATH", conflicts_with_all = ["session", "no_session", "resume"])]
+    pub(crate) fork: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -1120,6 +1126,30 @@ mod tests {
         }
         // run keeps its storage: a file only when --session names one.
         assert!(Cli::try_parse_from(["zx-agent", "run", "--model", "m", "--resume", "go"]).is_err());
+        assert!(Cli::try_parse_from(["zx-agent", "run", "--model", "m", "--fork", "a", "go"]).is_err());
+        for conflict in [
+            &["--fork", "a", "--resume"][..],
+            &["--fork", "a", "--session", "s.jsonl"],
+            &["--fork", "a", "--no-session"],
+        ] {
+            let args = ["zx-agent", "chat", "--model", "m"].iter().chain(conflict);
+            assert!(Cli::try_parse_from(args).is_err(), "{conflict:?}");
+        }
+        let cli = Cli::try_parse_from([
+            "zx-agent",
+            "chat",
+            "--model",
+            "m",
+            "--fork",
+            "0b7c",
+            "--session-dir",
+            "d",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Chat(args) => assert_eq!(args.fork.as_deref(), Some("0b7c")),
+            Command::Run(_) | Command::Serve(_) | Command::Sessions(_) => panic!("chat command"),
+        }
     }
 
     #[test]

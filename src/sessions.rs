@@ -1,4 +1,4 @@
-//! Where chat keeps its session files, and `zx-agent sessions`, which lists them.
+//! Where chat keeps its session files, forks them, and `zx-agent sessions`, which lists them.
 //!
 //! As in pi (`getDefaultSessionDirPath`), each working directory has its own directory under
 //! the home directory; `--session-dir` replaces it.
@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::Args;
 
-use zx_agent::session::{self, SessionHeader, SessionInfo, SessionList};
+use zx_agent::session::{self, SessionHeader, SessionInfo, SessionList, SessionStore};
 
 use crate::chat::visible;
 
@@ -82,6 +82,46 @@ pub(crate) fn file_name(header: &SessionHeader) -> String {
         .map(|utc| utc.format("%Y-%m-%dT%H-%M-%S-%3fZ_").to_string())
         .unwrap_or_default();
     format!("{time}{}.jsonl", header.id)
+}
+
+/// A session copied by [`fork`].
+pub(crate) struct Forked {
+    pub(crate) path: PathBuf,
+    /// The source session's ID.
+    pub(crate) source_id: String,
+    /// Entries copied from the source.
+    pub(crate) entries: usize,
+}
+
+/// Copy the branch of the session file `source` that ends at its last record into a new file
+/// in `dir`, started in `cwd` with `model` (pi: `createBranchedSession`). The source is read
+/// as a snapshot, without its lock, so a session that is open elsewhere, or in this chat,
+/// can be forked; it is not changed. A copy that fails part way leaves the new file as far as
+/// it got, and the error names it.
+pub(crate) async fn fork(source: &Path, dir: &Path, cwd: &Path, model: &str) -> Result<Forked> {
+    let source = source
+        .canonicalize()
+        .with_context(|| format!("cannot fork {}", source.display()))?;
+    let read = source.clone();
+    let source_store = tokio::task::spawn_blocking(move || SessionStore::read(&read))
+        .await
+        .context("reading the session to fork stopped")??;
+    let header = source_store.fork_header(cwd, model);
+    create_dir(dir)?;
+    let path = dir.join(file_name(&header));
+    let mut forked = SessionStore::create(&path, header)?;
+    let entries = match source_store.leaf_id() {
+        Some(leaf) => forked
+            .copy_branch(&source_store, leaf)
+            .await
+            .with_context(|| format!("cannot copy {} into {}", source.display(), path.display()))?,
+        None => 0,
+    };
+    Ok(Forked {
+        path,
+        source_id: source_store.header().id.clone(),
+        entries,
+    })
 }
 
 /// List the sessions in `dir`, reading files on a blocking thread.

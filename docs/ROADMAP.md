@@ -534,7 +534,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P7 | 插件与 MCP | 已完成（PR #41）：范围按 D8 收窄，评审稿已合入（PR #36）并经用户确认；模块 A（Extension 接口，PR #38）、B1（MCP 客户端库，PR #40）、B2（CLI 接入与文档，PR #41）已完成；真实 MCP 服务器的验收待选定服务器；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已完成（PR #23），A2–A8（扩展 API）已完成（PR #25） |
 | P8 | 嵌入协议 `acp` | 不做（2026-11-02 用户决定，D10） |
 | P9 | 可选增强 | 进行中：token 预算（PR #47）、OpenTelemetry 追踪（PR #49）、crate 拆分（PR #52）、通用化整理（PR #54）、chat 交互体验（2026-11-05，见下文）已完成；剩更多 provider（如 Anthropic）。其余各项按 D10 不做或取消 |
-| P10 | 与 pi 的能力对齐 | 进行中：2026-11-05 对照 pi 列出 14 项缺口，见下文 P10；① 上下文超长后自动恢复已完成（PR #56）；② 容器沙箱已完成（PR #57）；③ edit 与 write 工具已完成（PR #58）；④ grep、find、ls 已完成（PR #59）；⑤ 运行中可调整的配置已完成：⑤a 推理强度（PR #60）、⑤b 续跑（PR #61）、⑤c 请求前替换模型与推理强度的钩子（PR #65）；⑥a 会话目录与续接已完成（PR #67） |
+| P10 | 与 pi 的能力对齐 | 进行中：2026-11-05 对照 pi 列出 14 项缺口，见下文 P10；① 上下文超长后自动恢复已完成（PR #56）；② 容器沙箱已完成（PR #57）；③ edit 与 write 工具已完成（PR #58）；④ grep、find、ls 已完成（PR #59）；⑤ 运行中可调整的配置已完成：⑤a 推理强度（PR #60）、⑤b 续跑（PR #61）、⑤c 请求前替换模型与推理强度的钩子（PR #65）；⑥a 会话目录与续接已完成（PR #67）；⑥b fork 已完成（PR 待开） |
 
 ### P0 场景默认值移出内核
 
@@ -1378,7 +1378,7 @@ chat 交互体验第三批（2026-11-05，基于合并 PR #65 之后的 `829afc8
 - [x] **③ edit 与 write 工具**（高；已完成（PR #58），2026-11-05，见下方实施记录）。pi 默认工具集是 read、bash、edit、write（`packages/coding-agent/src/core/tools/edit.ts`、`write.ts`）：一次调用可做多处不重叠的精确替换，`details` 带 diff，同一文件的写入经 `file-mutation-queue.ts` 串行。zx 只有 `bash`、`read_file`（`crates/zx-tools/src/tools/mod.rs:24`），`Executor` 只有 `run` 与 `read_file`（`crates/zx-core/src/executor/mod.rs:83,88`）。做法：`Executor` 增加写文件；两个工具声明 `SideEffects`（不变量 10），`details` 带 diff 供审批与审计；同一文件的写入串行，不同文件仍可并行；规则策略可以用 `askTools` 管到它们。
 - [x] **④ grep、find、ls 只读工具**（中；已完成（PR #59），2026-11-05，见下方实施记录）。pi 用 ripgrep 与 fd，遵守 `.gitignore`，结果有上限（`grep.ts`、`find.ts`、`ls.ts`）。zx 只能经 bash 与命令白名单。声明为 `ReadOnly`，不必依赖白名单即可免审批。待定：经 `Executor` 调外部程序（不加依赖，容器中同样可用）还是用 Rust 实现（需新增 `ignore` 等依赖，红线 5）。
 - [x] **⑤ 运行中可调整的配置**（中高；已完成（⑤a PR #60、⑤b PR #61、⑤c PR #65），2026-11-05，见下方实施记录）。推理强度作为一等配置并可在空闲时修改、变化写入会话（目前只能用 `--request-field` 静态传）；每次请求前可替换模型与推理强度的钩子（pi 的 `prepareRequest`、`prepareNextTurn`，`packages/agent/src/agent-loop.ts:195,228`；zx 的 `set_model` 只能空闲时调用，`crates/zx-core/src/agent_session.rs:222`）；不加新输入的续跑（pi 的 `continue()`；`Runner::run` 必须带提示词）。推理强度的写法遵守 D10：各 provider 显式映射。
-- [ ] **⑥ 会话导航**（中；⑥a 会话目录与续接已完成（PR #67），2026-11-05；⑥b fork、⑥c 会话内切换分支待做）。列出会话、续接最近一次、fork 成新会话、在分支间切换（`packages/coding-agent/src/core/session-manager.ts`）。zx 只有 `--session <path>`；`SessionStore::branch`（`crates/zx-core/src/session.rs:486`）只在测试中调用。补 SDK 接口与 CLI，`chat` 加对应命令。
+- [ ] **⑥ 会话导航**（中；⑥a 会话目录与续接已完成（PR #67），⑥b fork 已完成（PR 待开），2026-11-05；⑥c 会话内切换分支待做）。列出会话、续接最近一次、fork 成新会话、在分支间切换（`packages/coding-agent/src/core/session-manager.ts`）。zx 只有 `--session <path>`；`SessionStore::branch`（`crates/zx-core/src/session.rs:486`）只在测试中调用。补 SDK 接口与 CLI，`chat` 加对应命令。
 - [ ] **⑦ 扩展能力**（中高，嵌入）。pi 的扩展可写自定义条目（`appendEntry`）、注入非用户消息（`sendMessage`）、运行中启停工具（`setActiveTools`）、注册命令（`registerCommand`）（`packages/coding-agent/src/core/extensions/types.ts`）。zx 的条目只有 9 种内部类型（`crates/zx-core/src/session.rs:142-151`），工具在构建时固定。自定义消息与“会话投影是上下文的唯一来源”（不变量 6）如何共存，先出方案再实施。
 - [ ] **⑧ 模型层的元数据与计量**（中）。在配置中写模型的上下文窗口、单价与输入类型（不内置厂商模型表，D10），用来按 token 设摘要阈值（现为字节）并计算成本；用量增加 cacheWrite 与推理 token；会话记录应答方返回的模型名与响应 ID；按会话的 prompt cache key；自定义请求头；每次请求动态取 API key；`Retry-After` 支持 HTTP 日期与毫秒写法，退避加抖动。
 - [ ] **⑨ 消息队列**（低中）。队列模式 one-at-a-time（pi 默认，`packages/agent/src/types.ts:55`）；zx 一次取完（`crates/zx-core/src/agent/agent_loop/context.rs:128`）。队列消息目前只能是纯文本。
@@ -1404,6 +1404,20 @@ chat 交互体验第三批（2026-11-05，基于合并 PR #65 之后的 `829afc8
 - 本机 macOS 验证：stable 下 828 项通过、7 项付费测试跳过（基线 816 项，PR #55 的实测）；fmt、clippy、严格 Rustdoc 与 Rust 1.88.0 的全目标检查通过；Rust 1.88.0 下没有运行测试。自查脚本在改动的文件中只列出原有的 1 处（`src/chat/output.rs` 的 `let _ =`）。未新增依赖。没有对真实模型服务验证超长时的错误格式。
 
 ⑥ 分三步，各一个 PR：⑥a 会话目录、列出与续接；⑥b fork 成新会话（`--fork`、`/fork`，头部记下来源会话）；⑥c 会话内切换分支（`AgentSession` 的分支接口，chat 的 `/tree` 与 `/branch`）。会话目录的默认位置经用户决定（D12）。
+
+⑥b 实施记录（2026-11-05，PR 待开，基于 PR #67 的分支 `8109436`）：
+
+| 环节 | 做法 |
+|---|---|
+| SDK | `SessionStore::fork_header(cwd, model)`：新的 ID 与时间、源会话的格式版本、源文件写进 `parent_session`；`SessionStore::copy_branch(&源, 叶子)`：按根到叶子的顺序原样追加该分支的条目（ID、父条目、时间与内容不变），每条照常校验，所以投影、摘要与请求审计随之带过来。目标须为空、格式版本须相同、叶子须存在，否则不写入。对应 pi 的 `createBranchedSession(leafId)`；pi 复制时去掉 label 条目再重连，这里没有 label |
+| 会话格式 | 头部新增可选的 `parentSession`（pi 同名字段），只在复制出来的会话里出现，不升级格式版本；旧程序读取时忽略未知字段 |
+| CLI | `chat --fork <ID 前缀\|文件>`：是存在的文件就复制它，否则在会话目录中按 ID 前缀找；不能与 `--session`、`--no-session`、`--resume` 同用，找不到时以退出码 2 结束且不建文件。chat 的 `/fork`：复制当前会话并切换到副本。源文件以只读快照读取（不加锁），复制的是最后一条记录所在的分支；新文件在会话目录中，头部的 `cwd` 与 `model` 是这次启动的 |
+| 版本取源会话的 | 复制的条目是按源会话的格式写的，恢复按“头部版本加分支上的格式升级”判断缺少开始记录的调用（`crates/zx-core/src/session/recovery.rs:117`）：低于 v4 时为 `Unavailable`（无从判断是否执行过），v4 起为 `Absent`（没有开始，即未执行）。v3 会话中断的调用若被复制进写着最新版本的头部，就会从“无从判断”变成“未执行”。所以副本沿用源会话的版本，之后的运行照常追加格式升级 |
+| 留给 ⑥c | 现在叶子只随追加移动，文件的最后一条记录就是当前位置；⑥c 允许在会话内移动叶子后，`/fork` 要改为复制内存中的当前叶子（`copy_branch` 已接受任意叶子） |
+
+- 测试：新增 9 项：`tests/session_fork.rs` 4 项（只复制选中的分支且条目逐字节相同、头部记下来源、副本可重新打开并追加、源文件不变；复制来的请求能从副本还原；目标不为空、叶子不存在、格式版本不同时不写入；没有 `parentSession` 的头部保持原格式），`tests/sessions_cli.rs` 5 项（`--fork` 按 ID 前缀、按任意位置的文件、找不到时以退出码 2 结束且不建文件；`/fork` 之后对话只写进副本；`--no-session` 时没有可复制的文件）；另在已有的 CLI 解析测试中加了断言（`--fork` 与其他选项互斥、`run` 不接受）。其余既有测试未改。
+- 反向验证：分别让复制包含所有分支、副本用最新的格式版本、不记下来源、`/fork` 后不切换到副本、`--fork` 打开源文件而不是副本，每次都有对应测试失败。第四项起初没有测试失败：`/fork` 的测试把两个文件的提示词排序后比较，看不出哪个是副本；已改为分别断言副本与原文件的内容，再验证该项失败。修改已还原。
+- 本机 macOS 验证：stable 下 976 项通过、7 项付费测试跳过（基线 967 项，即 PR #67 分支合并 main 后的实测）；fmt、clippy、严格 Rustdoc 与 Rust 1.88.0 的全目标检查通过；Rust 1.88.0 下没有运行测试。全部测试跑完后真实的 `~/.zx-agent` 仍不存在。自查脚本在改动的文件中没有新的命中。未新增依赖。
 
 ⑥a 实施记录（2026-11-05，PR #67，基于 PR #65 合并后的 `829afc8`）：
 
