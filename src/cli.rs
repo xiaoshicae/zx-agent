@@ -31,6 +31,8 @@ use zx_agent::runner::{Limits, Runner};
 use zx_agent::session::{SessionHeader, SessionStore};
 use zx_agent::tools::{self, BASH};
 
+use crate::sessions::{self, SessionsArgs};
+
 /// Comma-separated secret files to redact, added to `--secret-file`; deployments set it, for
 /// example to the token that the platform mounts for the agent's own account.
 const SECRET_FILES_ENV: &str = "ZX_SECRET_FILES";
@@ -68,6 +70,10 @@ pub(crate) enum Command {
     Chat(ChatArgs),
     /// Answer chat messages from IM platforms, one session per thread, until stopped.
     Serve(ServeArgs),
+    /// List the session files chat keeps for a working directory, most recent first.
+    Sessions(SessionsArgs),
+    /// Serve the Agent Client Protocol over stdio for an editor or a terminal client.
+    Acp(AcpArgs),
 }
 
 #[derive(Args)]
@@ -172,6 +178,26 @@ pub(crate) struct ChatArgs {
     /// set or TERM is dumb. always: also when piped, e.g. into `less -R`.
     #[arg(long, value_enum, default_value_t = ColorArg::Auto)]
     pub(crate) color: ColorArg,
+
+    /// Directory for new session files and for --resume, /sessions and /resume. Defaults to
+    /// ~/.zx-agent/sessions/--<cwd with / as ->--, one directory per working directory.
+    #[arg(long, conflicts_with = "session")]
+    pub(crate) session_dir: Option<PathBuf>,
+
+    /// Keep the conversation in memory only: no session file is written.
+    #[arg(long, conflicts_with_all = ["session", "session_dir", "resume"])]
+    pub(crate) no_session: bool,
+
+    /// Resume a session from the session directory: the most recent one started in this
+    /// working directory, or the one whose ID starts with the value (see `zx-agent sessions`).
+    #[arg(long, value_name = "ID", num_args = 0..=1, conflicts_with = "session")]
+    pub(crate) resume: Option<Option<String>>,
+
+    /// Start with a copy of another session: a session file, or the session in the session
+    /// directory whose ID starts with the value. The copy is a new file in the session
+    /// directory; the original is not changed.
+    #[arg(long, value_name = "ID|PATH", conflicts_with_all = ["session", "no_session", "resume"])]
+    pub(crate) fork: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -179,6 +205,38 @@ pub(crate) enum ColorArg {
     Auto,
     Always,
     Never,
+}
+
+#[derive(Args)]
+pub(crate) struct AcpArgs {
+    #[command(flatten)]
+    pub(crate) base: BaseArgs,
+
+    /// Maximum model requests per prompt. Defaults to the selected profile.
+    #[arg(long)]
+    pub(crate) max_model_requests: Option<u32>,
+
+    /// Wall-clock limit per prompt, in seconds. 0 disables it. Defaults to the selected
+    /// profile.
+    #[arg(long)]
+    pub(crate) timeout_secs: Option<u64>,
+
+    /// Tokens per prompt: input plus output of its model requests, as the provider reports
+    /// them. Checked before each request, so the last one may go over. 0 disables it.
+    /// Defaults to the selected profile.
+    #[arg(long)]
+    pub(crate) token_budget: Option<u64>,
+
+    /// How long a permission request waits for the client's answer, in seconds. An
+    /// unanswered request is denied, and the turn goes on without the call.
+    #[arg(long, default_value_t = 3600, value_parser = clap::value_parser!(u64).range(1..))]
+    pub(crate) approval_timeout_secs: u64,
+
+    #[command(flatten)]
+    pub(crate) transport: TransportArgs,
+
+    #[command(flatten)]
+    pub(crate) request: RequestArgs,
 }
 
 #[derive(Args)]
@@ -213,7 +271,7 @@ pub(crate) struct ServeArgs {
     pub(crate) request: RequestArgs,
 }
 
-#[derive(Args)]
+#[derive(Args, Clone)]
 pub(crate) struct BaseArgs {
     /// Model id passed to the provider.
     #[arg(long, env = "ZX_MODEL")]
@@ -388,6 +446,9 @@ pub(crate) enum SessionFile<'a> {
     Memory,
     Open(&'a Path),
     Create(&'a Path),
+    /// A new file in this directory, named after the session (`sessions::file_name`); the
+    /// directory is created when missing.
+    NewIn(&'a Path),
 }
 
 impl<'a> SessionFile<'a> {
@@ -398,10 +459,11 @@ impl<'a> SessionFile<'a> {
         }
     }
 
-    pub(crate) fn path(&self) -> Option<&'a Path> {
+    /// The session file, or for [`SessionFile::NewIn`] the directory it will be created in.
+    pub(crate) fn location(&self) -> Option<&'a Path> {
         match self {
             Self::Memory => None,
-            Self::Open(path) | Self::Create(path) => Some(path),
+            Self::Open(path) | Self::Create(path) | Self::NewIn(path) => Some(path),
         }
     }
 }
@@ -625,13 +687,7 @@ pub(crate) fn read_instructions(base: &BaseArgs) -> Result<Option<String>> {
 /// precede the run. Configuration errors and a container that cannot start are reported
 /// before a new session file is created.
 pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSession> {
-    let cwd = match &options.base.cwd {
-        Some(path) => path
-            .canonicalize()
-            .with_context(|| format!("invalid --cwd {}", path.display()))?,
-        None => std::env::current_dir()?,
-    };
-    anyhow::ensure!(cwd.is_dir(), "--cwd is not a directory: {}", cwd.display());
+    let cwd = sessions::resolve_cwd(options.base.cwd.as_deref())?;
     // Both sources count: a file named at the command line must not drop the ones a
     // deployment registered in the environment. A misspelt path would leave a secret
     // unredacted without a word, so each must exist at startup, and every file must be one the
@@ -781,11 +837,11 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     // The container reads the whole working directory: masking one path would leave hard links
     // to the session file and earlier session files beside it readable.
     if profile.execution == Execution::Container
-        && let Some(path) = options.file.path()
+        && let Some(path) = options.file.location()
     {
         anyhow::ensure!(
             !resolve(path)?.starts_with(&cwd),
-            "--execution container needs the session file outside the working directory, which the container can read: {}; choose a --session path outside {}",
+            "--execution container needs the session file outside the working directory, which the container can read: {}; choose a --session path (in chat also --session-dir) outside {}",
             path.display(),
             cwd.display()
         );
@@ -795,7 +851,7 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     // container, if any, has started, so that a failed start leaves no session file behind.
     let opened = match options.file {
         SessionFile::Open(path) if path.exists() => Some(SessionStore::open(path)?),
-        SessionFile::Memory | SessionFile::Open(_) | SessionFile::Create(_) => None,
+        SessionFile::Memory | SessionFile::Open(_) | SessionFile::Create(_) | SessionFile::NewIn(_) => None,
     };
     let session_id = opened
         .as_ref()
@@ -817,6 +873,10 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
         (Some(session), _) => session,
         (None, SessionFile::Memory) => SessionStore::in_memory(header),
         (None, SessionFile::Open(path) | SessionFile::Create(path)) => SessionStore::create(path, header)?,
+        (None, SessionFile::NewIn(dir)) => {
+            sessions::create_dir(dir)?;
+            SessionStore::create(&dir.join(sessions::file_name(&header)), header)?
+        }
     };
     if session.recovered_tail_bytes() > 0 {
         eprintln!(
@@ -1045,7 +1105,7 @@ mod tests {
                 assert_eq!(args.continue_on_length, None);
                 assert_eq!(args.base.tools, None);
             }
-            Command::Chat(_) | Command::Serve(_) => panic!("run command"),
+            Command::Chat(_) | Command::Serve(_) | Command::Sessions(_) | Command::Acp(_) => panic!("run command"),
         }
         let cli = Cli::try_parse_from(["zx-agent", "chat", "--model", "m"]).unwrap();
         match cli.command {
@@ -1054,7 +1114,7 @@ mod tests {
                 assert_eq!(args.timeout_secs, None);
                 assert_eq!(args.output, OutputMode::Text);
             }
-            Command::Run(_) | Command::Serve(_) => panic!("chat command"),
+            Command::Run(_) | Command::Serve(_) | Command::Sessions(_) | Command::Acp(_) => panic!("chat command"),
         }
     }
 
@@ -1067,9 +1127,65 @@ mod tests {
                 assert_eq!(args.max_model_requests, None);
                 assert_eq!(args.request.session, None);
             }
-            Command::Run(_) | Command::Chat(_) => panic!("serve command"),
+            Command::Run(_) | Command::Chat(_) | Command::Sessions(_) | Command::Acp(_) => panic!("serve command"),
         }
         assert!(Cli::try_parse_from(["zx-agent", "serve", "--model", "m"]).is_err());
+    }
+
+    #[test]
+    fn chat_resumes_the_latest_session_or_one_by_id_and_refuses_conflicting_storage() {
+        let resume = |args: &[&str]| {
+            let cli = Cli::try_parse_from(["zx-agent", "chat", "--model", "m"].iter().chain(args)).unwrap();
+            match cli.command {
+                Command::Chat(args) => (args.resume, args.session_dir, args.no_session),
+                Command::Run(_) | Command::Serve(_) | Command::Sessions(_) | Command::Acp(_) => {
+                    panic!("chat command")
+                }
+            }
+        };
+        assert_eq!(resume(&[]), (None, None, false));
+        assert_eq!(resume(&["--resume"]), (Some(None), None, false));
+        assert_eq!(
+            resume(&["--resume", "0b7c", "--session-dir", "d"]),
+            (Some(Some("0b7c".into())), Some(PathBuf::from("d")), false)
+        );
+        assert_eq!(resume(&["--no-session"]), (None, None, true));
+        for conflict in [
+            &["--session", "s.jsonl", "--resume"][..],
+            &["--session", "s.jsonl", "--session-dir", "d"],
+            &["--no-session", "--session-dir", "d"],
+            &["--no-session", "--resume"],
+            &["--no-session", "--session", "s.jsonl"],
+        ] {
+            let args = ["zx-agent", "chat", "--model", "m"].iter().chain(conflict);
+            assert!(Cli::try_parse_from(args).is_err(), "{conflict:?}");
+        }
+        // run keeps its storage: a file only when --session names one.
+        assert!(Cli::try_parse_from(["zx-agent", "run", "--model", "m", "--resume", "go"]).is_err());
+        assert!(Cli::try_parse_from(["zx-agent", "run", "--model", "m", "--fork", "a", "go"]).is_err());
+        for conflict in [
+            &["--fork", "a", "--resume"][..],
+            &["--fork", "a", "--session", "s.jsonl"],
+            &["--fork", "a", "--no-session"],
+        ] {
+            let args = ["zx-agent", "chat", "--model", "m"].iter().chain(conflict);
+            assert!(Cli::try_parse_from(args).is_err(), "{conflict:?}");
+        }
+        let cli = Cli::try_parse_from([
+            "zx-agent",
+            "chat",
+            "--model",
+            "m",
+            "--fork",
+            "0b7c",
+            "--session-dir",
+            "d",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Chat(args) => assert_eq!(args.fork.as_deref(), Some("0b7c")),
+            Command::Run(_) | Command::Serve(_) | Command::Sessions(_) | Command::Acp(_) => panic!("chat command"),
+        }
     }
 
     #[test]
@@ -1081,12 +1197,12 @@ mod tests {
                 assert_eq!(args.timeout_secs, Some(0));
                 assert_eq!(args.base.tools, Some(vec![String::new()]));
             }
-            Command::Run(_) | Command::Serve(_) => panic!("chat command"),
+            Command::Run(_) | Command::Serve(_) | Command::Sessions(_) | Command::Acp(_) => panic!("chat command"),
         }
         let cli = Cli::try_parse_from(["zx-agent", "run", "--model", "m", "--timeout-secs", "900", "go"]).unwrap();
         match cli.command {
             Command::Run(args) => assert_eq!(args.timeout_secs, Some(900)),
-            Command::Chat(_) | Command::Serve(_) => panic!("run command"),
+            Command::Chat(_) | Command::Serve(_) | Command::Sessions(_) | Command::Acp(_) => panic!("run command"),
         }
     }
 }

@@ -20,6 +20,7 @@ paths:
 
 - 版本看 `Cargo.lock`（`cargo tree -i reqwest`）。拿不准就查 `~/.cargo/registry/src/*/<crate>-<版本>/` 的源码和 `Cargo.toml` 的 `[features]`，不要猜。
 - 启用的 feature 以本项目的 `Cargo.toml` 为准：reqwest 只启用了 `json`、`stream`、`rustls`，所以没有 `reqwest::blocking`；tokio 没有启用 `io-std`，所以没有 `tokio::io::stdin`。
+- `agent-client-protocol` 给 serde_json 打开了 `preserve_order`，整个 workspace 的 `serde_json::Map` 因此按插入序：`json!` 字面量与解析出的对象都保持原顺序。比较 JSON 字符串的断言按写入顺序写，不要按字母序。
 
 ## 新增或升级依赖
 

@@ -30,13 +30,14 @@ use zx_agent::runner::RunReport;
 use zx_agent::tools::BASH;
 
 use crate::cli::{self, ChatArgs, SessionFile, SessionOptions};
+use crate::sessions;
 use crate::{EXIT_ABORTED, EXIT_COMPLETED};
 
 use commands::Command;
 use input::Line;
 use interaction::{TerminalInteraction, Ticket};
 use output::Output;
-pub(crate) use output::{progress_line, visible};
+pub(crate) use output::{describe_call, progress_line, visible};
 use signals::{Interrupt, Signals};
 use term::Tone;
 
@@ -58,7 +59,34 @@ enum Flow {
     Continue,
     Prompt(String),
     New,
+    /// Switch to this session file.
+    Resume(PathBuf),
     Exit(u8),
+}
+
+/// Where conversations are kept.
+enum Storage {
+    /// `--no-session`.
+    Memory,
+    /// `--session`: the file named; /new creates one beside it.
+    File(PathBuf),
+    /// A session directory: every new conversation gets its own file there.
+    Directory(PathBuf),
+}
+
+impl Storage {
+    /// The directory /sessions lists and /resume searches.
+    fn dir(&self) -> Option<&Path> {
+        match self {
+            Self::Memory => None,
+            Self::File(path) => Some(
+                path.parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .unwrap_or(Path::new(".")),
+            ),
+            Self::Directory(dir) => Some(dir),
+        }
+    }
 }
 
 /// What a conversation runs on, shown at startup and by `/status`.
@@ -105,7 +133,6 @@ async fn build(
     output: &Arc<Output>,
 ) -> Result<Built> {
     let args = &settings.args;
-    let session_path = file.path().map(Path::to_path_buf);
     let mut prepared = cli::prepare(SessionOptions {
         base: &args.base,
         transport: &args.transport,
@@ -139,7 +166,7 @@ async fn build(
             .collect(),
         auto_approve: std::mem::take(&mut prepared.auto_approve_commands),
         cwd: prepared.config.spec.cwd.clone(),
-        session: session_path,
+        session: prepared.store.path().map(Path::to_path_buf),
         resumed: (!prepared.store.entries().is_empty()).then(|| Resumed {
             messages: prepared
                 .store
@@ -194,16 +221,42 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
     ));
     let mut model = args.base.model.clone();
     let mut reasoning = args.request.reasoning;
-    let mut built = build(
-        &settings,
-        &model,
-        SessionFile::from_path(args.request.session.as_deref()),
-        &interaction,
-        &output,
-    )
-    .await?;
+    let storage = if args.no_session {
+        Storage::Memory
+    } else if let Some(path) = &args.request.session {
+        Storage::File(path.clone())
+    } else if let Some(dir) = &args.session_dir {
+        Storage::Directory(dir.clone())
+    } else {
+        Storage::Directory(sessions::default_dir(&sessions::resolve_cwd(
+            args.base.cwd.as_deref(),
+        )?)?)
+    };
+    let (resumed, notice) = match (&storage, &args.resume, &args.fork) {
+        (Storage::Directory(dir), _, Some(source)) => {
+            let cwd = sessions::resolve_cwd(args.base.cwd.as_deref())?;
+            let source = fork_source(dir, source).await?;
+            let forked = sessions::fork(&source, dir, &cwd, &model).await?;
+            let notice = forked_line(&forked);
+            (Some(forked.path), Some(notice))
+        }
+        (Storage::Directory(dir), Some(id), None) => {
+            resume_target(dir, args.base.cwd.as_deref(), id.as_deref()).await?
+        }
+        (Storage::Memory | Storage::File(_) | Storage::Directory(_), _, _) => (None, None),
+    };
+    let file = match (&storage, &resumed) {
+        (_, Some(path)) => SessionFile::Open(path),
+        (Storage::Memory, None) => SessionFile::Memory,
+        (Storage::File(path), None) => SessionFile::Open(path),
+        (Storage::Directory(dir), None) => SessionFile::NewIn(dir),
+    };
+    let mut built = build(&settings, &model, file, &interaction, &output).await?;
     let mut signals = Signals::new().context("cannot register chat signal handlers")?;
     let mut input = input::spawn(mode)?;
+    if let Some(notice) = notice {
+        output.line(Tone::Dim, &notice);
+    }
     banner(&output, &model, &built.about);
     let mut next_prompt: Option<String> = None;
     let mut last_interrupt: Option<Instant> = None;
@@ -296,6 +349,27 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
                 status(&output, &model, &built.about);
                 Flow::Continue
             }
+            Command::Sessions => {
+                list_sessions(&output, &storage, &built.about).await;
+                Flow::Continue
+            }
+            Command::Resume(id) => match find_session(&storage, &id, &built.about).await {
+                Ok(path) => Flow::Resume(path),
+                Err(error) => {
+                    output.line(Tone::Warn, &format!("[chat] {}", visible(&format!("{error:#}"))));
+                    Flow::Continue
+                }
+            },
+            Command::Fork => match fork_current(&storage, &built.about, &model).await {
+                Ok(forked) => {
+                    output.line(Tone::Dim, &forked_line(&forked));
+                    Flow::Resume(forked.path)
+                }
+                Err(error) => {
+                    output.line(Tone::Warn, &format!("[chat] {}", visible(&format!("{error:#}"))));
+                    Flow::Continue
+                }
+            },
             Command::Quit => Flow::Exit(EXIT_COMPLETED),
             Command::Help => {
                 help(&output);
@@ -315,13 +389,22 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
                 return Ok(code);
             }
             Flow::New => {
-                let path = new_file(args.request.session.as_deref());
-                let file = path.as_deref().map_or(SessionFile::Memory, SessionFile::Create);
+                let sibling;
+                let file = match &storage {
+                    Storage::Memory => SessionFile::Memory,
+                    Storage::File(original) => {
+                        sibling = new_file(original);
+                        SessionFile::Create(&sibling)
+                    }
+                    Storage::Directory(dir) => SessionFile::NewIn(dir),
+                };
                 match build(&settings, &model, file, &interaction, &output).await {
                     Ok(next) => {
                         built = next;
                         output.reset_totals();
-                        let file = path
+                        let file = built
+                            .about
+                            .session
                             .as_deref()
                             .map(|path| format!("; session={}", path.display()))
                             .unwrap_or_default();
@@ -336,8 +419,144 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
                     ),
                 }
             }
+            Flow::Resume(path) => match build(&settings, &model, SessionFile::Open(&path), &interaction, &output).await
+            {
+                Ok(next) => {
+                    built = next;
+                    output.reset_totals();
+                    output.line(
+                        Tone::Dim,
+                        &format!("[chat] session={}", visible(&path.display().to_string())),
+                    );
+                    resumed_line(&output, &built.about);
+                }
+                Err(error) => output.line(
+                    Tone::Error,
+                    &format!("[chat] cannot resume the session: {}", visible(&format!("{error:#}"))),
+                ),
+            },
         }
     }
+}
+
+/// The session `--resume` opens, and a line to show when there is none to resume.
+async fn resume_target(dir: &Path, cwd: Option<&Path>, id: Option<&str>) -> Result<(Option<PathBuf>, Option<String>)> {
+    let list = sessions::list(dir.to_path_buf()).await?;
+    match id {
+        Some(id) => {
+            let session = list
+                .find(id)
+                .with_context(|| format!("--resume: no single session to resume in {}", dir.display()))?;
+            Ok((Some(session.path.clone()), None))
+        }
+        None => {
+            let cwd = sessions::resolve_cwd(cwd)?;
+            Ok(match list.latest_in(&cwd) {
+                Some(session) => (Some(session.path.clone()), None),
+                None => (
+                    None,
+                    Some(format!(
+                        "[chat] no earlier session of this directory in {}; starting a new one",
+                        visible(&dir.display().to_string())
+                    )),
+                ),
+            })
+        }
+    }
+}
+
+/// The session file `--fork` copies: a file, or else the session whose ID starts with
+/// `value` in the session directory.
+async fn fork_source(dir: &Path, value: &str) -> Result<PathBuf> {
+    let path = Path::new(value);
+    if path.is_file() {
+        return Ok(path.to_path_buf());
+    }
+    let list = sessions::list(dir.to_path_buf()).await?;
+    let session = list.find(value).with_context(|| {
+        format!(
+            "--fork: {value} is neither a session file nor a session in {}",
+            dir.display()
+        )
+    })?;
+    Ok(session.path.clone())
+}
+
+/// /fork: copy the current session into a new file of the session directory.
+async fn fork_current(storage: &Storage, about: &About, model: &str) -> Result<sessions::Forked> {
+    let (Some(dir), Some(current)) = (storage.dir(), about.session.as_deref()) else {
+        anyhow::bail!("nothing to fork: the conversation is kept in memory");
+    };
+    sessions::fork(current, dir, &about.cwd, model).await
+}
+
+fn forked_line(forked: &sessions::Forked) -> String {
+    let short: String = forked.source_id.chars().take(sessions::SHORT_ID_CHARS).collect();
+    format!(
+        "[chat] forked session {} ({} record(s)) into {}",
+        visible(&short),
+        forked.entries,
+        visible(&forked.path.display().to_string())
+    )
+}
+
+/// /sessions: the sessions of the session directory, the current one marked with `*`.
+async fn list_sessions(output: &Output, storage: &Storage, about: &About) {
+    let Some(dir) = storage.dir() else {
+        output.line(
+            Tone::Warn,
+            "[chat] no session directory: the conversation is kept in memory",
+        );
+        return;
+    };
+    let list = match sessions::list(dir.to_path_buf()).await {
+        Ok(list) => list,
+        Err(error) => {
+            output.line(Tone::Warn, &format!("[chat] {}", visible(&format!("{error:#}"))));
+            return;
+        }
+    };
+    let lines = sessions::lines(&list, &about.cwd);
+    for (session, line) in list.sessions.iter().zip(lines) {
+        let mark = if about.session.as_deref() == Some(session.path.as_path()) {
+            "* "
+        } else {
+            "  "
+        };
+        output.line(Tone::Plain, &format!("{mark}{line}"));
+    }
+    for unreadable in &list.unreadable {
+        output.line(
+            Tone::Warn,
+            &format!(
+                "[chat] cannot read {}: {}",
+                visible(&unreadable.path.display().to_string()),
+                visible(&unreadable.error)
+            ),
+        );
+    }
+    output.line(
+        Tone::Dim,
+        &format!(
+            "[chat] {} session(s) in {}; /resume <ID> switches",
+            list.sessions.len(),
+            visible(&dir.display().to_string())
+        ),
+    );
+}
+
+/// The file of the session /resume names, unless it is the current one.
+async fn find_session(storage: &Storage, id: &str, about: &About) -> Result<PathBuf> {
+    let dir = storage
+        .dir()
+        .context("no session directory: the conversation is kept in memory")?;
+    let list = sessions::list(dir.to_path_buf()).await?;
+    let path = list.find(id)?.path.clone();
+    anyhow::ensure!(
+        about.session.as_deref() != Some(path.as_path()),
+        "already in session {id}"
+    );
+    Ok(path)
 }
 
 struct TurnIo<'a> {
@@ -527,6 +746,9 @@ async fn drive_turn(session: &AgentSession, operation: Operation, io: &mut TurnI
                     Command::Reasoning(_) => io.output.line(Tone::Warn, "[chat] wait for the current task or cancel it before changing the reasoning level"),
                     Command::Continue => io.output.line(Tone::Warn, "[chat] session is busy; wait for the current operation or cancel it before /continue"),
                     Command::Status => io.output.line(Tone::Warn, "[chat] wait for the current task or cancel it before /status"),
+                    Command::Sessions => io.output.line(Tone::Warn, "[chat] wait for the current task or cancel it before /sessions"),
+                    Command::Resume(_) => io.output.line(Tone::Warn, "[chat] wait for the current task or cancel it before /resume"),
+                    Command::Fork => io.output.line(Tone::Warn, "[chat] wait for the current task or cancel it before /fork"),
                     Command::Help => help(io.output),
                     Command::Compact => io.output.line(Tone::Warn, "[chat] session is busy; wait for the current operation or cancel it before /compact"),
                     Command::Invalid(message) => io.output.line(Tone::Warn, &format!("[chat] {}", visible(&message))),
@@ -591,15 +813,14 @@ fn deny(output: &Output, ticket: Ticket, reason: &str) {
     }
 }
 
-fn new_file(original: Option<&Path>) -> Option<PathBuf> {
-    original.map(|original| {
-        let mut name = original
-            .file_stem()
-            .unwrap_or_else(|| OsStr::new("session"))
-            .to_os_string();
-        name.push(format!(".{}.jsonl", uuid::Uuid::new_v4()));
-        original.with_file_name(name)
-    })
+/// For /new with `--session`: a new file beside the original.
+fn new_file(original: &Path) -> PathBuf {
+    let mut name = original
+        .file_stem()
+        .unwrap_or_else(|| OsStr::new("session"))
+        .to_os_string();
+    name.push(format!(".{}.jsonl", uuid::Uuid::new_v4()));
+    original.with_file_name(name)
 }
 
 fn session_text(about: &About) -> String {
@@ -622,6 +843,32 @@ fn reasoning_name(reasoning: Option<Reasoning>) -> &'static str {
 }
 
 /// What the conversation runs on, once at startup.
+/// How much of an earlier conversation the session file held, when it held one.
+fn resumed_line(output: &Output, about: &About) {
+    let Some(resumed) = &about.resumed else {
+        return;
+    };
+    let when = resumed
+        .last_activity_ms
+        // A timestamp beyond i64 cannot occur; without one the line just omits the time.
+        .and_then(|ms| i64::try_from(ms).ok())
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map(|utc| {
+            format!(
+                "; last activity {}",
+                utc.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")
+            )
+        })
+        .unwrap_or_default();
+    output.line(
+        Tone::Dim,
+        &format!(
+            "[chat] resumed {} message(s) from the session file{when}",
+            resumed.messages
+        ),
+    );
+}
+
 fn banner(output: &Output, model: &str, about: &About) {
     output.line(
         Tone::Dim,
@@ -633,27 +880,7 @@ fn banner(output: &Output, model: &str, about: &About) {
             visible(&about.cwd.display().to_string())
         ),
     );
-    if let Some(resumed) = &about.resumed {
-        let when = resumed
-            .last_activity_ms
-            // A timestamp beyond i64 cannot occur; without one the line just omits the time.
-            .and_then(|ms| i64::try_from(ms).ok())
-            .and_then(chrono::DateTime::from_timestamp_millis)
-            .map(|utc| {
-                format!(
-                    "; last activity {}",
-                    utc.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")
-                )
-            })
-            .unwrap_or_default();
-        output.line(
-            Tone::Dim,
-            &format!(
-                "[chat] resumed {} message(s) from the session file{when}",
-                resumed.messages
-            ),
-        );
-    }
+    resumed_line(output, about);
     let approvals = if about.tools.iter().any(|tool| tool == BASH) {
         let asks = if about.auto_approve.is_empty() {
             "every bash command asks first".to_string()
@@ -703,6 +930,9 @@ fn help(output: &Output) {
         "/compact              summarize old context while retaining raw history",
         "/continue             continue without new input, such as after a failed answer",
         "/status               show the model, session file and what this conversation has used",
+        "/sessions             list the sessions in the session directory, most recent first",
+        "/resume <ID>          switch to the session whose ID starts with <ID>",
+        "/fork                 continue in a copy of this session; the original stays as it is",
         "/quit                 exit chat; Ctrl+D while idle does the same",
         "Ctrl+C                cancel the current task or approval; keep the conversation",
         "                      twice within 2 seconds while idle: exit",

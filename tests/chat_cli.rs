@@ -36,6 +36,8 @@ fn chat_retrying(server: &MockServer, cwd: &Path, args: &[&str], max_retries: &s
         ])
         .args(args)
         .current_dir(cwd)
+        // chat keeps sessions under the home directory by default; never the real one.
+        .env("HOME", cwd.join(".home"))
         .env(KEY_VAR, KEY)
         .env_remove("ZX_MODEL")
         .env_remove("ZX_BASE_URL")
@@ -689,7 +691,7 @@ async fn an_edit_approval_lists_each_edit_and_its_result_shows_the_patch() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let log = stderr(&output);
     assert!(
-        log.contains("[approval 1] edit_file: a.txt\n  edits[0].newText: bye\n  edits[0].oldText: hello\n"),
+        log.contains("[approval 1] edit_file: a.txt\n  edits[0].oldText: hello\n  edits[0].newText: bye\n"),
         "{log}"
     );
     assert!(log.contains("[tool] edit_file: a.txt -> ok"), "{log}");

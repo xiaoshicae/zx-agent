@@ -1406,6 +1406,8 @@ async fn real_ctrl_c_in_chat_does_not_stop_the_container() {
         .args(["chat", "--model", "mock", "--base-url", &server.base_url])
         .args(["--api-key-env", KEY_VAR, "--max-retries", "0", "--tools", "read_file"])
         .args(["--execution", "container", "--container-image", &image])
+        // The session file would have to be outside the workspace; this test needs none.
+        .arg("--no-session")
         .current_dir(&workspace)
         .env(KEY_VAR, "sk-p6-container-test")
         .env_remove("ZX_MODEL")
