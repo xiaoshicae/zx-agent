@@ -640,7 +640,18 @@ mod tests {
         assert_eq!(assistant.limits.max_model_requests, None);
         assert_eq!(assistant.limits.timeout, None);
         assert_eq!(assistant.continue_on_length, 0);
-        assert_eq!(assistant.rules.ask_tools, ["bash"]);
+        assert_eq!(
+            assistant.tools,
+            [
+                "bash",
+                "read_file",
+                "edit_file",
+                "write_file",
+                "read_skill",
+                "read_output"
+            ]
+        );
+        assert_eq!(assistant.rules.ask_tools, ["bash", "edit_file", "write_file"]);
         assert_eq!(assistant.rules.auto_approve, ["grep", "head", "tail", "wc", "jq"]);
         assert_eq!(assistant.rules.auto_approve_except, ["secret"]);
         assert_eq!(assistant.compaction.trigger_bytes, Some(256 * 1024));
@@ -720,6 +731,7 @@ mod tests {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("deploy/kubernetes/profiles/kubernetes.toml");
         let profile = Profile::load(Some(path.to_str().unwrap()), Builtin::Unattended).unwrap();
         assert_eq!(profile.rules.ask_tools, ["bash"]);
+        assert_eq!(profile.tools, ["bash", "read_file", "read_skill", "read_output"]);
         let list = profile.rules.auto_approval();
         for command in [
             "kubectl get pods -A -o wide | grep -v Running",
@@ -760,7 +772,7 @@ mod tests {
         assert_eq!(profile.instructions, "自定义说明");
         assert!(profile.tools.is_empty());
         assert_eq!(profile.rules.deny, ["secret"]);
-        assert_eq!(profile.rules.ask_tools, ["bash"]);
+        assert_eq!(profile.rules.ask_tools, ["bash", "edit_file", "write_file"]);
         assert_eq!(profile.limits.max_model_requests, None);
     }
 

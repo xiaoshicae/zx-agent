@@ -1,10 +1,10 @@
 name = "assistant"
 instructions = "assistant.md"
-tools = ["bash", "read_file", "read_skill", "read_output"]
+tools = ["bash", "read_file", "edit_file", "write_file", "read_skill", "read_output"]
 execution = "local"
 
 [rules]
-askTools = ["bash"]
+askTools = ["bash", "edit_file", "write_file"]
 # Read-only commands that run without asking: none of them can run another program or
 # write a file. awk, sed, sort, uniq, find, xargs, tee and curl are left out for that
 # reason. Commands with quotes, $, other shell syntax, a URL or a text listed in

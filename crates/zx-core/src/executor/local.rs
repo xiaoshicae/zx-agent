@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::Stdio;
 
 use async_trait::async_trait;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
@@ -147,6 +147,40 @@ impl Executor for LocalExecutor {
             ));
         }
         Ok(bytes)
+    }
+
+    async fn write_file(&self, path: &Path, contents: &[u8]) -> Result<(), String> {
+        let display = path.display();
+        match tokio::fs::metadata(path).await {
+            Ok(meta) => regular_file(path, &meta)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+                    tokio::fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| format!("cannot create the directory {}: {e}", parent.display()))?;
+                }
+            }
+            Err(error) => return Err(format!("cannot write {display}: {error}")),
+        }
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        // As for reading: a path replaced with a FIFO after the check must not block the open.
+        #[cfg(unix)]
+        options.custom_flags(libc::O_NONBLOCK);
+        let mut file = options
+            .open(path)
+            .await
+            .map_err(|e| format!("cannot write {display}: {e}"))?;
+        let meta = file
+            .metadata()
+            .await
+            .map_err(|e| format!("cannot inspect {display}: {e}"))?;
+        regular_file(path, &meta)?;
+        file.write_all(contents)
+            .await
+            .map_err(|e| format!("cannot write {display}: {e}"))?;
+        // tokio hands writes to a blocking thread; flushing waits for the last of them.
+        file.flush().await.map_err(|e| format!("cannot write {display}: {e}"))
     }
 }
 
