@@ -7,8 +7,10 @@
 use std::io::Write;
 use std::time::{Duration, Instant};
 
-/// One frame per tick.
+/// One frame per tick, on a terminal that shows UTF-8.
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+/// The frames under any other locale.
+const ASCII_SPINNER: [char; 4] = ['|', '/', '-', '\\'];
 /// The widest status line when the terminal's width cannot be asked: under the usual 80
 /// columns, because a wrapped line cannot be redrawn with a carriage return.
 const STATUS_FALLBACK_CHARS: usize = 78;
@@ -83,8 +85,51 @@ impl Style {
 pub(super) enum Phase {
     /// A model request is out; `thinking` once reasoning streams in.
     Model { thinking: bool },
+    /// A summary request is out.
+    Summary,
+    /// Waiting to send a request again after a transient failure.
+    Retry { attempt: u32, max_retries: u32 },
     /// A tool runs; the label names it and its main argument.
     Tool { label: String },
+}
+
+/// The characters a status line is drawn with, chosen for the locale.
+#[derive(Clone, Copy)]
+struct Glyphs {
+    frames: &'static [char],
+    /// Marks a settled status line.
+    marker: &'static str,
+    separator: &'static str,
+}
+
+impl Glyphs {
+    const UTF8: Self = Self {
+        frames: &SPINNER,
+        marker: "·",
+        separator: " · ",
+    };
+    const ASCII: Self = Self {
+        frames: &ASCII_SPINNER,
+        marker: "*",
+        separator: " - ",
+    };
+
+    /// UTF-8 unless the locale names another encoding. An unset locale counts as UTF-8,
+    /// which every current terminal shows.
+    fn detect() -> Self {
+        let locale = ["LC_ALL", "LC_CTYPE", "LANG"]
+            .iter()
+            .find_map(|name| std::env::var_os(name).filter(|value| !value.is_empty()));
+        match locale {
+            Some(value) if !locale_is_utf8(&value.to_string_lossy()) => Self::ASCII,
+            Some(_) | None => Self::UTF8,
+        }
+    }
+}
+
+fn locale_is_utf8(locale: &str) -> bool {
+    let lower = locale.to_ascii_lowercase();
+    lower.contains("utf-8") || lower.contains("utf8")
 }
 
 struct StatusLine {
@@ -97,6 +142,7 @@ struct StatusLine {
 
 pub(super) struct Terminal {
     style: Style,
+    glyphs: Glyphs,
     /// Status lines are drawn only on an interactive stderr.
     live: bool,
     /// Blank lines around answers only on an interactive stdout.
@@ -107,18 +153,22 @@ pub(super) struct Terminal {
     last_line_blank: bool,
     /// An answer's text is being streamed.
     in_answer: bool,
+    /// Reasoning is being streamed on stderr.
+    in_aside: bool,
 }
 
 impl Terminal {
     pub(super) fn new(style: Style, live: bool, spaced: bool) -> Self {
         Self {
             style,
+            glyphs: Glyphs::detect(),
             live,
             spaced,
             status: None,
             open_line: None,
             last_line_blank: false,
             in_answer: false,
+            in_aside: false,
         }
     }
 
@@ -150,6 +200,26 @@ impl Terminal {
         self.ensure_line_start();
         if self.spaced {
             self.ensure_blank_line(Stream::Stdout);
+        }
+    }
+
+    /// Dimmed text on stderr, streamed like an answer: reasoning the user asked to see.
+    pub(super) fn aside_text(&mut self, text: &str) {
+        // Visible activity: the wait is over.
+        self.clear_status();
+        if !self.in_aside {
+            self.in_aside = true;
+            self.ensure_line_start();
+        }
+        let painted = paint_lines(self.style, Tone::Dim, text);
+        self.write(Stream::Stderr, &painted);
+    }
+
+    /// The reasoning is complete: end its line.
+    pub(super) fn end_aside(&mut self) {
+        if self.in_aside {
+            self.in_aside = false;
+            self.ensure_line_start();
         }
     }
 
@@ -267,7 +337,7 @@ impl Terminal {
         if status.since.elapsed() < STATUS_DELAY {
             return;
         }
-        status.frame = (status.frame + 1) % SPINNER.len();
+        status.frame = (status.frame + 1) % self.glyphs.frames.len();
         self.draw();
     }
 
@@ -276,10 +346,16 @@ impl Terminal {
             return;
         };
         let elapsed = status.since.elapsed().as_secs();
+        let frame = self.glyphs.frames[status.frame % self.glyphs.frames.len()];
+        let sep = self.glyphs.separator;
         let text = match &status.phase {
-            Phase::Model { thinking: false } => format!("{} waiting for the model · {elapsed}s", SPINNER[status.frame]),
-            Phase::Model { thinking: true } => format!("{} thinking · {elapsed}s", SPINNER[status.frame]),
-            Phase::Tool { label } => format!("{} {label} · {elapsed}s", SPINNER[status.frame]),
+            Phase::Model { thinking: false } => format!("{frame} waiting for the model{sep}{elapsed}s"),
+            Phase::Model { thinking: true } => format!("{frame} thinking{sep}{elapsed}s"),
+            Phase::Summary => format!("{frame} summarizing{sep}{elapsed}s"),
+            Phase::Retry { attempt, max_retries } => {
+                format!("{frame} waiting to retry {attempt}/{max_retries}{sep}{elapsed}s")
+            }
+            Phase::Tool { label } => format!("{frame} {label}{sep}{elapsed}s"),
         };
         let text = clip_chars(&text, status_max_chars());
         let chars = text.chars().count();
@@ -305,10 +381,14 @@ impl Terminal {
             return;
         }
         let elapsed = elapsed_text(status.since.elapsed());
+        let marker = self.glyphs.marker;
+        let sep = self.glyphs.separator;
         let text = match &status.phase {
-            Phase::Model { thinking: false } => format!("· waited {elapsed} for the model"),
-            Phase::Model { thinking: true } => format!("· thought for {elapsed}"),
-            Phase::Tool { label } => format!("· {label} · {elapsed}"),
+            Phase::Model { thinking: false } => format!("{marker} waited {elapsed} for the model"),
+            Phase::Model { thinking: true } => format!("{marker} thought for {elapsed}"),
+            Phase::Summary => format!("{marker} summary took {elapsed}"),
+            Phase::Retry { .. } => format!("{marker} waited {elapsed} to retry"),
+            Phase::Tool { label } => format!("{marker} {label}{sep}{elapsed}"),
         };
         let text = clip_chars(&text, status_max_chars());
         let painted = self.style.paint(Tone::Dim, &text);
@@ -370,6 +450,24 @@ impl Terminal {
 enum Stream {
     Stdout,
     Stderr,
+}
+
+/// Paint each line of `text` separately, so that line endings stay outside the escape
+/// sequences and the line bookkeeping still sees them.
+fn paint_lines(style: Style, tone: Tone, text: &str) -> String {
+    let mut painted = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(end) = rest.find('\n') {
+        if end > 0 {
+            painted.push_str(&style.paint(tone, &rest[..end]));
+        }
+        painted.push('\n');
+        rest = &rest[end + 1..];
+    }
+    if !rest.is_empty() {
+        painted.push_str(&style.paint(tone, rest));
+    }
+    painted
 }
 
 /// `1.2s` under ten seconds, whole seconds beyond.
@@ -462,6 +560,24 @@ mod tests {
         let mut terminal = Terminal::new(Style { color: false }, false, false);
         terminal.set_phase(Phase::Model { thinking: false });
         assert!(terminal.status.is_none());
+    }
+
+    #[test]
+    fn painted_lines_keep_their_line_endings_outside_the_escape_codes() {
+        let on = Style { color: true };
+        assert_eq!(paint_lines(on, Tone::Dim, "a\nb"), "\x1b[2ma\x1b[0m\n\x1b[2mb\x1b[0m");
+        assert_eq!(paint_lines(on, Tone::Dim, "a\n"), "\x1b[2ma\x1b[0m\n");
+        assert_eq!(paint_lines(on, Tone::Dim, "\n\n"), "\n\n");
+        assert_eq!(paint_lines(Style { color: false }, Tone::Dim, "a\nb\n"), "a\nb\n");
+    }
+
+    #[test]
+    fn only_a_locale_that_names_another_encoding_turns_the_spinner_ascii() {
+        assert!(locale_is_utf8("zh_CN.UTF-8"));
+        assert!(locale_is_utf8("en_US.utf8"));
+        assert!(!locale_is_utf8("C"));
+        assert!(!locale_is_utf8("en_US.ISO8859-1"));
+        assert_eq!(Glyphs::ASCII.frames.len(), ASCII_SPINNER.len());
     }
 
     #[test]

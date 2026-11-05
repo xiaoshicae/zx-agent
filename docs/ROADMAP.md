@@ -1340,6 +1340,21 @@ chat 交互体验第二批（2026-11-05，基于合并 origin/main `6ed6a9b` 之
 - 测试：新增 6 项。单元测试 2 项（状态行宽度在非终端下的回退、补丁预览与着色），`describe_arguments` 的测试替换原 `remaining_arguments` 的；`tests/chat_cli.rs` 4 项：write_file 审批按行显示内容、edit_file 审批逐项列出且结果显示补丁、`--color always` 在管道中保留颜色、续接会话的提示（新会话不提示）。既有的空行测试改用 `--color never`。
 - 本机 macOS 验证：stable 下 900 项通过、7 项付费测试跳过（合并后的基线 894 项）；fmt、clippy 与 Rust 1.88.0 的全目标检查通过。`TIOCGWINSZ` 按 macOS 与 Linux gnu 的 `c_ulong` 类型直接传给 `ioctl`，把它定义为 `c_int` 的目标（如 musl）未编译验证。
 
+chat 交互体验第三批（2026-11-05，基于合并 PR #65 之后的 `829afc8`；Markdown 渲染经用户决定暂缓，先做简单项）：
+
+| 环节 | 此前 | 改为 |
+|---|---|---|
+| 重试 | `[model] Error: …` 与 `[retry] 1/3 in 2000ms: …` 两行重复同一段错误文本；退避期间状态行写 `waiting for the model` | `[retry]` 行在错误与上一行相同时只写 `(same error)`，与 `--debug` 的去重一致；退避期间状态行为 `waiting to retry 1/3`，结束后留下 `· waited 2.0s to retry` |
+| 摘要请求 | 状态行写 `waiting for the model` | `summarizing`，结束后 `· summary took 2.3s`。摘要结束（`compaction_end` / `compaction_failed`）时清掉状态：手动 `/compact` 没有 `run_end`，此前残留的状态会在下一次操作的第一个 tick 被画出来并带着旧的起始时间；`drive_turn` 开始时也清一次 |
+| `[turn]` | 没有用量时显示 `0 in · 0 out` | 输入与输出都为零时省略这两段：服务端没有返回用量，或请求被取消 |
+| 空闲时 Ctrl+C | 只提示 `/quit to exit` | 2 秒内连按两次退出（退出码 0）；收到任何输入后重新计时 |
+| 非 UTF-8 locale | 状态行用盲文 spinner 与 `·` | `LC_ALL`、`LC_CTYPE`、`LANG` 按此顺序取第一个非空值，不含 `utf-8` / `utf8` 时用 `\|/-\\` 与 `*`、` - `；都未设置按 UTF-8 |
+| 推理正文 | 只在状态行标 `thinking`，`--debug` 在回答结束时整段打印 | 新增 `--show-thinking`：推理增量以暗色流式显示在 stderr，每行单独着色，换行留在转义序列之外，行的归属照常记账；默认关闭 |
+
+- 公开 API 与 CLI：`chat --help` 新增 `--show-thinking`；其余不变。
+- 测试：新增 7 项。单元测试 3 项（`[turn]` 行省略零用量、按行着色保留换行、locale 判断）；`tests/chat_cli.rs` 4 项：重试的错误只出现一次且 `[turn]` 记重试、无用量的 `[turn]`、`--show-thinking` 只在开启时输出推理、空闲时 Ctrl+C 两次退出。测试辅助函数 `chat` 拆出 `chat_retrying` 以指定重试次数。
+- 本机 macOS 验证：stable 下 951 项通过、7 项付费测试跳过；fmt、clippy 与 Rust 1.88.0 的全目标检查通过。用假模型在 PTY 中实测 HTTP 500 重试：`[model] Error` 一行、`[retry] 1/1 in 2000ms (same error)` 一行、退避期间的状态行与结束后的耗时行。摘要状态只按事件顺序推断，没有在 PTY 中实测。
+
 这些整理不改变行为，在改到相关代码时顺带完成：
 
 - [x] `run_loop` 参数过多（P1）：整理为 4 个参数，运行状态通过 `LoopControl` 借用

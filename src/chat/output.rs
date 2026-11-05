@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use serde_json::Value;
-use zx_agent::agent::{AgentEvent, ApprovalResult, Event, EventSink};
+use zx_agent::agent::{AgentEvent, ApprovalResult, Event, EventSink, RequestKind};
 use zx_agent::ai::{ContentBlock, Delta, Message, StopReason, ToolResultMessage};
 use zx_agent::compaction::{self, Outcome};
 use zx_agent::runner::RunReport;
@@ -53,18 +53,22 @@ struct TextState {
     labels: HashMap<String, String>,
     wrote_text: bool,
     totals: Totals,
+    /// The last model error printed in this run, so a retry line need not repeat it.
+    last_error: Option<String>,
 }
 
 pub(super) struct Output {
     mode: OutputMode,
     debug: bool,
+    /// Stream reasoning, dimmed, on stderr.
+    show_thinking: bool,
     debug_state: Mutex<DebugState>,
     json: JsonlEvents,
     text: Mutex<TextState>,
 }
 
 impl Output {
-    pub(super) fn new(mode: OutputMode, deltas: bool, debug: bool, color: ColorArg) -> Self {
+    pub(super) fn new(mode: OutputMode, deltas: bool, debug: bool, color: ColorArg, show_thinking: bool) -> Self {
         let stderr_is_terminal = std::io::stderr().is_terminal();
         let style = match color {
             ColorArg::Auto => Style::auto(stderr_is_terminal),
@@ -79,6 +83,7 @@ impl Output {
         Self {
             mode,
             debug,
+            show_thinking,
             debug_state: Mutex::new(DebugState::default()),
             json: JsonlEvents { deltas },
             text: Mutex::new(TextState {
@@ -86,6 +91,7 @@ impl Output {
                 labels: HashMap::new(),
                 wrote_text: false,
                 totals: Totals::default(),
+                last_error: None,
             }),
         }
     }
@@ -123,6 +129,11 @@ impl Output {
         lock(&self.text).terminal.tick();
     }
 
+    /// Drop the status line: the operation it described is over.
+    pub(super) fn clear_status(&self) {
+        lock(&self.text).terminal.clear_status();
+    }
+
     pub(super) fn totals(&self) -> Totals {
         lock(&self.text).totals
     }
@@ -149,28 +160,7 @@ impl Output {
                 if let Some(error) = &report.error {
                     state.terminal.line(Tone::Error, &format!("[chat] {}", visible(error)));
                 }
-                let requests = match report.model_requests {
-                    1 => "1 request".to_string(),
-                    n => format!("{n} requests"),
-                };
-                let retries = match report.retries {
-                    0 => String::new(),
-                    1 => " · 1 retry".to_string(),
-                    n => format!(" · {n} retries"),
-                };
-                let cached = match report.usage.cache_read {
-                    0 => String::new(),
-                    n => format!(" · {n} cached"),
-                };
-                state.terminal.line(
-                    Tone::Dim,
-                    &format!(
-                        "[turn] {requests}{retries} · {} in · {} out{cached} · {}",
-                        report.usage.input,
-                        report.usage.output,
-                        elapsed_text(elapsed)
-                    ),
-                );
+                state.terminal.line(Tone::Dim, &turn_line(report, elapsed));
             }
         }
     }
@@ -229,7 +219,11 @@ impl EventSink for Output {
         {
             let mut state = lock(&self.text);
             match &event.event {
-                AgentEvent::RequestStart { .. } => state.terminal.set_phase(Phase::Model { thinking: false }),
+                AgentEvent::RunStart { .. } => state.last_error = None,
+                AgentEvent::RequestStart { kind, .. } => state.terminal.set_phase(match kind {
+                    RequestKind::Task => Phase::Model { thinking: false },
+                    RequestKind::Summary => Phase::Summary,
+                }),
                 AgentEvent::MessageStart { role: "assistant" } => state.wrote_text = false,
                 AgentEvent::MessageUpdate {
                     delta: Delta::Text { text },
@@ -238,12 +232,19 @@ impl EventSink for Output {
                     state.wrote_text = true;
                 }
                 AgentEvent::MessageUpdate {
-                    delta: Delta::Thinking { .. },
-                } => state.terminal.set_phase(Phase::Model { thinking: true }),
+                    delta: Delta::Thinking { text },
+                } => {
+                    if self.show_thinking {
+                        state.terminal.aside_text(&visible(text));
+                    } else {
+                        state.terminal.set_phase(Phase::Model { thinking: true });
+                    }
+                }
                 AgentEvent::MessageEnd {
                     message: Message::Assistant(message),
                     ..
                 } => {
+                    state.terminal.end_aside();
                     let text = message.text();
                     if !state.wrote_text && !text.is_empty() {
                         state.terminal.answer_text(&visible(&text));
@@ -258,6 +259,9 @@ impl EventSink for Output {
                                 .labels
                                 .insert(id.clone(), clip(&describe_call(name, arguments), LABEL_CHARS));
                         }
+                    }
+                    if let Some(error) = &message.error_message {
+                        state.last_error = Some(error.clone());
                     }
                     if !self.debug {
                         if let Some(error) = &message.error_message {
@@ -308,12 +312,39 @@ impl EventSink for Output {
                         state.terminal.set_phase(Phase::Tool { label });
                     }
                 }
+                AgentEvent::RetryScheduled {
+                    attempt,
+                    max_retries,
+                    delay_ms,
+                    error,
+                } => {
+                    if !self.debug {
+                        // The failed response was reported just before; name it only once.
+                        let line = if state.last_error.as_deref() == Some(error.as_str()) {
+                            format!("[retry] {attempt}/{max_retries} in {delay_ms}ms (same error)")
+                        } else {
+                            format!("[retry] {attempt}/{max_retries} in {delay_ms}ms: {}", visible(error))
+                        };
+                        state.terminal.line(Tone::Warn, &line);
+                    }
+                    state.terminal.set_phase(Phase::Retry {
+                        attempt: *attempt,
+                        max_retries: *max_retries,
+                    });
+                }
                 // Everything else is printed as `run` prints it; `progress_line` covers every event.
                 other => {
                     if !self.debug
                         && let Some(line) = progress_line(other)
                     {
                         state.terminal.line(progress_tone(other), &line);
+                    }
+                    // A summary is over: a manual one ends without a `run_end`.
+                    if matches!(
+                        other,
+                        AgentEvent::CompactionEnd { .. } | AgentEvent::CompactionFailed { .. }
+                    ) {
+                        state.terminal.clear_status();
                     }
                 }
             }
@@ -324,6 +355,31 @@ impl EventSink for Output {
             lock(&self.debug_state).emit(event, color);
         }
     }
+}
+
+/// The line that ends a turn: requests, retries, tokens when the provider reported any, and
+/// the time it took.
+fn turn_line(report: &RunReport, elapsed: Duration) -> String {
+    let requests = match report.model_requests {
+        1 => "1 request".to_string(),
+        n => format!("{n} requests"),
+    };
+    let retries = match report.retries {
+        0 => String::new(),
+        1 => " · 1 retry".to_string(),
+        n => format!(" · {n} retries"),
+    };
+    // Zero for both means the provider sent no usage, or the request was cancelled.
+    let usage = if report.usage.input == 0 && report.usage.output == 0 {
+        String::new()
+    } else {
+        let cached = match report.usage.cache_read {
+            0 => String::new(),
+            n => format!(" · {n} cached"),
+        };
+        format!(" · {} in · {} out{cached}", report.usage.input, report.usage.output)
+    };
+    format!("[turn] {requests}{retries}{usage} · {}", elapsed_text(elapsed))
 }
 
 /// `name: <main argument> other=value`, or `name: <arguments as JSON>`; nothing is cut,
@@ -637,6 +693,34 @@ mod tests {
         let lines = describe_arguments(&json!({"content": tall}));
         assert_eq!(lines.len(), BLOCK_LINES + 2);
         assert_eq!(lines[BLOCK_LINES + 1], "    … 2 more line(s) not shown");
+    }
+
+    #[test]
+    fn the_turn_line_omits_tokens_the_provider_did_not_report() {
+        use zx_agent::agent::RunOutcome;
+        use zx_agent::ai::Usage;
+        let mut report = RunReport {
+            outcome: RunOutcome::Completed,
+            final_text: String::new(),
+            model_requests: 2,
+            retries: 1,
+            usage: Usage::default(),
+            error: None,
+            session_file: None,
+        };
+        assert_eq!(
+            turn_line(&report, Duration::from_millis(600)),
+            "[turn] 2 requests · 1 retry · 0.6s"
+        );
+        report.usage.input = 30;
+        report.usage.output = 15;
+        report.usage.cache_read = 10;
+        report.retries = 0;
+        report.model_requests = 1;
+        assert_eq!(
+            turn_line(&report, Duration::from_secs(12)),
+            "[turn] 1 request · 30 in · 15 out · 10 cached · 12s"
+        );
     }
 
     fn result(content: &str, details: Option<Value>) -> ToolResultMessage {

@@ -160,6 +160,10 @@ pub(crate) struct ChatArgs {
     #[arg(long)]
     pub(crate) debug: bool,
 
+    /// Stream the model's reasoning, dimmed, on stderr in text mode.
+    #[arg(long)]
+    pub(crate) show_thinking: bool,
+
     /// In jsonl mode, also emit streaming message_update events.
     #[arg(long)]
     pub(crate) deltas: bool,
