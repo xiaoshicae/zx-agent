@@ -6,6 +6,7 @@ use serde_json::json;
 use tokio::process::Command;
 
 use common::mock_server::{MockServer, Reply};
+use common::zx_agent;
 
 #[tokio::test]
 async fn known_api_key_is_redacted_before_model_events_and_session() {
@@ -23,7 +24,7 @@ async fn known_api_key_is_redacted_before_model_events_and_session() {
     ])
     .await;
 
-    let output = Command::new(env!("CARGO_BIN_EXE_zx-agent"))
+    let output = zx_agent()
         .args(["run", "--model", "mock", "--base-url", &server.base_url])
         .args(["--tools", "read_file", "--api-key-env", KEY_VAR, "--max-retries", "0"])
         .args([
@@ -58,7 +59,7 @@ async fn known_api_key_is_redacted_before_model_events_and_session() {
 
 /// `zx-agent run` with bash against `server`, in `dir`.
 fn run_bash(server: &MockServer, dir: &std::path::Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_zx-agent"));
+    let mut command = zx_agent();
     command
         .args(["run", "--model", "mock", "--base-url", &server.base_url])
         .args(["--tools", "bash", "--max-retries", "0", "go"])

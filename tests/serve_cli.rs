@@ -12,6 +12,7 @@ use tokio::process::Command;
 
 use common::fake_slack::FakeSlack;
 use common::mock_server::{MockServer, Reply};
+use common::zx_agent;
 
 const APP_TOKEN: &str = "xapp-1-serve-test-token";
 const BOT_TOKEN: &str = "xoxb-serve-test-token";
@@ -20,7 +21,7 @@ const WAIT: Duration = Duration::from_secs(20);
 
 /// `zx-agent serve` with `config`, in `dir`, against `model`; Slack tokens are set.
 fn serve(dir: &Path, config: &Path, model: &str) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_zx-agent"));
+    let mut command = zx_agent();
     command
         .args(["serve", "--config", config.to_str().unwrap(), "--model", "mock"])
         .args(["--base-url", model, "--max-retries", "0", "--no-context"])

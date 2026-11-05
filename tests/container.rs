@@ -14,7 +14,6 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::agent::{ExecutionMode, Tool};
@@ -28,7 +27,7 @@ use zx_agent::tools::{BashTool, ReadFileTool};
 
 use common::fake_mcp::{Era, FakeMcp, tool};
 use common::mock_server::{MockServer, Reply};
-use common::{RunnerSetup, config};
+use common::{RunnerSetup, config, stderr, zx_agent};
 
 // ---------------------------------------------------------------------------
 // Fake docker
@@ -973,7 +972,7 @@ async fn real_dropping_the_executor_removes_the_container() {
 /// its `docker` replaces the real one.
 async fn zx_run(server: &MockServer, dir: &Path, docker_dir: Option<&Path>, args: &[&str]) -> Output {
     const KEY_VAR: &str = "ZX_P6_CONTAINER_TEST_KEY";
-    let mut command = Command::new(env!("CARGO_BIN_EXE_zx-agent"));
+    let mut command = zx_agent();
     command
         .args(["run", "--model", "mock", "--base-url", &server.base_url])
         .args(["--api-key-env", KEY_VAR, "--max-retries", "0"])
@@ -992,10 +991,6 @@ async fn zx_run(server: &MockServer, dir: &Path, docker_dir: Option<&Path>, args
         .await
         .unwrap()
         .unwrap()
-}
-
-fn stderr_of(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
 /// The leading system message of the first model request.
@@ -1045,7 +1040,7 @@ async fn run_in_container_mode_describes_the_container_and_runs_bash_there() {
     )
     .await;
 
-    assert_eq!(output.status.code(), Some(0), "{}", stderr_of(&output));
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let prompt = system_prompt(&server);
     assert!(
         prompt.contains("OS: Fake Linux 1, Linux kernel 6.0.0-fake (x86_64), in a container from image fake:1"),
@@ -1077,7 +1072,7 @@ async fn zx_chat_in_container(fake: &FakeDocker, server: &MockServer, profile: &
     std::fs::write(&profile_path, profile).unwrap();
     let session = outside.path().join("session.jsonl");
     let path = std::env::var("PATH").unwrap_or_default();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_zx-agent"))
+    let mut child = zx_agent()
         .args(["chat", "--model", "mock", "--base-url", &server.base_url])
         .args(["--api-key-env", KEY_VAR, "--max-retries", "0", "--tools", "bash"])
         .args(["--profile", profile_path.to_str().unwrap()])
@@ -1113,8 +1108,8 @@ async fn chat_in_a_container_that_approves_every_call_runs_bash_without_asking()
 
     let output = zx_chat_in_container(&fake, &server, &profile, "go\n").await;
 
-    assert_eq!(output.status.code(), Some(0), "{}", stderr_of(&output));
-    assert!(!stderr_of(&output).contains("[approval"), "{}", stderr_of(&output));
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(!stderr(&output).contains("[approval"), "{}", stderr(&output));
     assert_eq!(fake.execs("zx-agent-run").len(), 1);
     assert!(tool_result(&server, 1).starts_with("from-container\n"));
 }
@@ -1127,7 +1122,7 @@ async fn chat_in_a_container_still_asks_unless_the_profile_approves_every_call()
     // The input ends before an answer, which denies the call.
     let output = zx_chat_in_container(&fake, &server, SANDBOX_PROFILE, "go\n").await;
 
-    assert!(stderr_of(&output).contains("[approval 1]"), "{}", stderr_of(&output));
+    assert!(stderr(&output).contains("[approval 1]"), "{}", stderr(&output));
     assert!(fake.execs("zx-agent-run").is_empty());
 }
 
@@ -1154,11 +1149,11 @@ async fn approving_every_call_outside_a_container_is_a_configuration_error() {
     )
     .await;
 
-    assert_eq!(output.status.code(), Some(2), "{}", stderr_of(&output));
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
     assert!(
-        stderr_of(&output).contains("rules.approveAll needs execution"),
+        stderr(&output).contains("rules.approveAll needs execution"),
         "{}",
-        stderr_of(&output)
+        stderr(&output)
     );
     assert!(server.requests().is_empty());
     assert!(fake.calls().is_empty(), "no container was started");
@@ -1201,10 +1196,10 @@ async fn approving_every_call_also_runs_mcp_tools_outside_allow_tools() {
     )
     .await;
 
-    assert_eq!(output.status.code(), Some(0), "{}", stderr_of(&output));
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     // `run` has nobody to ask, so a tool that asked would be refused instead.
     assert_eq!(mcp.requests("tools/call").len(), 1);
-    assert!(!stderr_of(&output).contains("(asks)"), "{}", stderr_of(&output));
+    assert!(!stderr(&output).contains("(asks)"), "{}", stderr(&output));
 }
 
 #[tokio::test]
@@ -1231,11 +1226,11 @@ async fn container_execution_refuses_a_session_file_the_container_could_read() {
         )
         .await;
 
-        assert_eq!(output.status.code(), Some(2), "{}", stderr_of(&output));
+        assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
         assert!(
-            stderr_of(&output).contains("needs the session file outside the working directory"),
+            stderr(&output).contains("needs the session file outside the working directory"),
             "{}",
-            stderr_of(&output)
+            stderr(&output)
         );
         assert!(!workspace.join(session).exists(), "{session}");
     }
@@ -1256,8 +1251,8 @@ async fn a_container_image_without_container_execution_is_a_configuration_error(
     )
     .await;
 
-    assert_eq!(output.status.code(), Some(2), "{}", stderr_of(&output));
-    assert!(stderr_of(&output).contains("--container-image needs container execution"));
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(stderr(&output).contains("--container-image needs container execution"));
     assert!(server.requests().is_empty());
     assert!(!dir.path().join("s.jsonl").exists());
 }
@@ -1275,8 +1270,8 @@ async fn container_execution_without_an_image_fails_before_the_session_is_create
     )
     .await;
 
-    assert_eq!(output.status.code(), Some(2), "{}", stderr_of(&output));
-    assert!(stderr_of(&output).contains("needs container.image"));
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(stderr(&output).contains("needs container.image"));
     assert!(server.requests().is_empty());
     assert!(!dir.path().join("s.jsonl").exists());
 }
@@ -1296,8 +1291,8 @@ async fn a_container_that_cannot_start_stops_the_run_before_any_request() {
     )
     .await;
 
-    assert_eq!(output.status.code(), Some(2), "{}", stderr_of(&output));
-    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    let stderr = stderr(&output);
     assert!(stderr.contains("cannot start the container"), "{stderr}");
     assert!(stderr.contains("Unable to find image 'fake:1' locally"), "{stderr}");
     assert!(server.requests().is_empty());
@@ -1328,7 +1323,7 @@ async fn a_container_that_cannot_start_leaves_no_session_file() {
     )
     .await;
 
-    assert_eq!(output.status.code(), Some(2), "{}", stderr_of(&output));
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
     assert!(!session.exists(), "a failed start left {}", session.display());
 }
 
@@ -1359,7 +1354,7 @@ async fn real_run_in_container_mode_executes_bash_in_the_container() {
     )
     .await;
 
-    assert_eq!(output.status.code(), Some(0), "{}", stderr_of(&output));
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let uid = owner(&workspace);
     let expected = if uid == 0 { 65534 } else { uid };
     assert!(
@@ -1402,7 +1397,7 @@ async fn real_ctrl_c_in_chat_does_not_stop_the_container() {
     ])
     .await;
     // Its own process group stands in for a terminal's foreground group.
-    let mut chat = Command::new(env!("CARGO_BIN_EXE_zx-agent"))
+    let mut chat = zx_agent()
         .args(["chat", "--model", "mock", "--base-url", &server.base_url])
         .args(["--api-key-env", KEY_VAR, "--max-retries", "0", "--tools", "read_file"])
         .args(["--execution", "container", "--container-image", &image])
@@ -1464,7 +1459,7 @@ async fn real_a_killed_zx_agent_leaves_no_container_behind() {
     let sessions = tempfile::tempdir().unwrap();
     let session = sessions.path().join("session.jsonl");
     let server = MockServer::start(vec![Reply::bash("c1", "sleep 30")]).await;
-    let mut agent = Command::new(env!("CARGO_BIN_EXE_zx-agent"))
+    let mut agent = zx_agent()
         .args(["run", "--model", "mock", "--base-url", &server.base_url])
         .args(["--api-key-env", KEY_VAR, "--max-retries", "0", "--tools", "bash"])
         .args(["--execution", "container", "--container-image", &image])

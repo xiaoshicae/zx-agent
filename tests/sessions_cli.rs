@@ -14,6 +14,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use common::mock_server::{MockServer, Reply};
+use common::{stderr, stdout, zx_agent};
 use zx_agent::ai::Message;
 use zx_agent::session::SessionStore;
 
@@ -50,7 +51,7 @@ impl Dirs {
     }
 
     fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_zx-agent"));
+        let mut command = zx_agent();
         command
             .args(args)
             .current_dir(self.work.path())
@@ -88,14 +89,6 @@ impl Dirs {
             .unwrap()
             .unwrap()
     }
-}
-
-fn stderr(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stderr).into_owned()
-}
-
-fn stdout(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
 /// The session files in `dir`, by name.

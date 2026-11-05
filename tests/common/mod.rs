@@ -32,6 +32,21 @@ use zx_agent::policy::PolicyHook;
 use zx_agent::runner::{Limits, Runner};
 use zx_agent::session::{SessionHeader, SessionStore};
 
+/// The compiled `zx-agent`, for the tests that drive the program.
+pub fn zx_agent() -> tokio::process::Command {
+    tokio::process::Command::new(env!("CARGO_BIN_EXE_zx-agent"))
+}
+
+/// What a finished program wrote to stdout, decoded lossily.
+pub fn stdout(output: &std::process::Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// What a finished program wrote to stderr, decoded lossily.
+pub fn stderr(output: &std::process::Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
 /// The bounds the runner tests use unless they set their own: 30 model requests and 15
 /// minutes, those of the unattended profiles (the kernel's own defaults are unlimited).
 pub fn test_limits() -> Limits {
