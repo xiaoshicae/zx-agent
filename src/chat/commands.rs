@@ -6,6 +6,7 @@ pub(super) enum Command {
     New,
     Model(Option<String>),
     Compact,
+    Status,
     Quit,
     Help,
     Invalid(String),
@@ -26,6 +27,7 @@ pub(super) fn parse(line: String) -> Command {
         "/quit" if rest.is_empty() => Command::Quit,
         "/help" if rest.is_empty() => Command::Help,
         "/compact" if rest.is_empty() => Command::Compact,
+        "/status" if rest.is_empty() => Command::Status,
         "/model" => Command::Model((!rest.is_empty()).then(|| rest.to_string())),
         _ => Command::Invalid(format!("unknown command or arguments: {name}; use /help")),
     }
@@ -38,15 +40,23 @@ mod tests {
     #[test]
     fn ordinary_input_keeps_its_unicode_and_whitespace() {
         assert!(matches!(parse("  你好  ".into()), Command::Prompt(text) if text == "  你好  "));
+        assert!(matches!(parse("第一行\n/quit".into()), Command::Prompt(text) if text == "第一行\n/quit"));
         assert!(matches!(parse(" \t".into()), Command::Empty));
     }
 
     #[test]
     fn slash_commands_validate_arguments_instead_of_forwarding_them_to_the_model() {
-        for invalid in ["/new extra", "/quit extra", "/compact extra", "/unknown"] {
+        for invalid in [
+            "/new extra",
+            "/quit extra",
+            "/compact extra",
+            "/status extra",
+            "/unknown",
+        ] {
             assert!(matches!(parse(invalid.into()), Command::Invalid(_)), "{invalid}");
         }
         assert!(matches!(parse("/model next".into()), Command::Model(Some(model)) if model == "next"));
         assert!(matches!(parse("/model".into()), Command::Model(None)));
+        assert!(matches!(parse("/status".into()), Command::Status));
     }
 }

@@ -24,6 +24,9 @@
 //! `im::feishu`. An embedder that needs only part of it can depend on those crates directly.
 
 pub use zx_ai as ai;
+/// The lock helper of every crate; not part of the API.
+#[doc(hidden)]
+pub use zx_ai::sync;
 #[doc(hidden)]
 pub use zx_ai::text;
 pub use zx_core::{

@@ -1,17 +1,21 @@
 //! One process-lifetime input owner, as recommended by Tokio's stdin documentation.
 
-use std::io::{self, BufRead, Read};
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Read};
 
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 
-/// Bound both read-ahead and the size of one input line (including its line ending).
+use super::InputMode;
+
+/// Bound both read-ahead and the size of one input line (including its line ending). Lines
+/// pasted together are joined up to the same size; what is left starts the next message.
 pub(super) const MAX_LINE_BYTES: usize = 1024 * 1024;
 const INPUT_QUEUE: usize = 8;
 
-/// One line from the input owner.
+/// One message from the input owner.
 pub(super) enum Line {
-    /// A complete line without its line ending.
+    /// A complete line without its line ending, or several lines that arrived together.
     Text(String),
     /// A line that was read in full but not delivered, with the reason.
     Rejected(String),
@@ -19,15 +23,20 @@ pub(super) enum Line {
 
 pub(super) type Input = mpsc::Receiver<io::Result<Line>>;
 
-pub(super) fn spawn() -> Result<Input> {
+pub(super) fn spawn(mode: InputMode) -> Result<Input> {
+    // A handle of its own: only this thread reads stdin, so the global lock's buffer would hide
+    // whether more input is waiting.
+    let stdin = stdin_handle().context("cannot open terminal input")?;
     let (sender, receiver) = mpsc::channel(INPUT_QUEUE);
     let thread = std::thread::Builder::new()
         .name("zx-chat-input".into())
         .spawn(move || {
-            let stdin = io::stdin();
-            let mut reader = stdin.lock();
+            let mut reader = Reader {
+                inner: BufReader::new(stdin),
+                carried: None,
+            };
             loop {
-                let line = match read_line(&mut reader) {
+                let line = match read_message(&mut reader, mode) {
                     Ok(Some(text)) => Ok(Line::Text(text)),
                     Ok(None) => break,
                     // An oversized or non-UTF-8 line has been consumed whole; later lines are intact.
@@ -49,6 +58,76 @@ pub(super) fn spawn() -> Result<Input> {
     // or process exit; it is not a Tokio blocking task that holds runtime shutdown open.
     drop(thread);
     Ok(receiver)
+}
+
+fn stdin_handle() -> io::Result<File> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsFd;
+        Ok(File::from(io::stdin().as_fd().try_clone_to_owned()?))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsHandle;
+        Ok(File::from(io::stdin().as_handle().try_clone_to_owned()?))
+    }
+}
+
+struct Reader {
+    inner: BufReader<File>,
+    /// A line read while joining a paste that did not fit the message; it starts the next one.
+    carried: Option<String>,
+}
+
+/// The next message; `None` at EOF. In a terminal, lines that are already waiting when a line
+/// completes were pasted together and form one message, unless the first is a slash command.
+fn read_message(reader: &mut Reader, mode: InputMode) -> io::Result<Option<String>> {
+    let first = match reader.carried.take() {
+        Some(line) => Some(line),
+        None => read_line(&mut reader.inner)?,
+    };
+    let Some(mut text) = first else {
+        return Ok(None);
+    };
+    if mode == InputMode::Terminal && !text.trim_start().starts_with('/') {
+        while input_waiting(&mut reader.inner) {
+            let Some(next) = read_line(&mut reader.inner)? else {
+                break;
+            };
+            if text.len() + 1 + next.len() > MAX_LINE_BYTES {
+                reader.carried = Some(next);
+                break;
+            }
+            text.push('\n');
+            text.push_str(&next);
+        }
+    }
+    Ok(Some(text))
+}
+
+/// Whether another line can be read without blocking. A terminal in its usual mode delivers
+/// whole lines, so this is true only for lines that arrived together, such as a paste.
+#[cfg(unix)]
+fn input_waiting(reader: &mut BufReader<File>) -> bool {
+    use std::os::fd::AsRawFd;
+
+    if !reader.buffer().is_empty() {
+        return true;
+    }
+    let mut poll = libc::pollfd {
+        fd: reader.get_ref().as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: `poll` reads one initialized pollfd that outlives the call; a zero timeout returns
+    // at once. The descriptor stays open, owned by `reader`.
+    let ready = unsafe { libc::poll(&mut poll, 1, 0) };
+    ready > 0 && poll.revents & libc::POLLIN != 0
+}
+
+#[cfg(not(unix))]
+fn input_waiting(_reader: &mut BufReader<File>) -> bool {
+    false
 }
 
 /// The next line without its line ending; `None` at EOF. Oversized and non-UTF-8 lines are
@@ -124,5 +203,86 @@ mod tests {
             read_line(&mut io::Cursor::new([0xff, b'\n'])).unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
+    }
+
+    #[cfg(unix)]
+    mod pasted {
+        use std::io::Write;
+        use std::os::fd::OwnedFd;
+
+        use super::*;
+
+        fn pipe() -> (Reader, io::PipeWriter) {
+            let (reader, writer) = io::pipe().unwrap();
+            let reader = Reader {
+                inner: BufReader::new(File::from(OwnedFd::from(reader))),
+                carried: None,
+            };
+            (reader, writer)
+        }
+
+        #[test]
+        fn lines_that_arrived_together_form_one_message_in_a_terminal() {
+            let (mut reader, mut writer) = pipe();
+            writer.write_all("第一行\n第二行\nthird\n".as_bytes()).unwrap();
+            assert_eq!(
+                read_message(&mut reader, InputMode::Terminal).unwrap().as_deref(),
+                Some("第一行\n第二行\nthird")
+            );
+            writer.write_all(b"later\n").unwrap();
+            assert_eq!(
+                read_message(&mut reader, InputMode::Terminal).unwrap().as_deref(),
+                Some("later")
+            );
+            drop(writer);
+            assert!(read_message(&mut reader, InputMode::Terminal).unwrap().is_none());
+        }
+
+        #[test]
+        fn a_script_consumes_one_line_per_message() {
+            let (mut reader, mut writer) = pipe();
+            writer.write_all(b"one\ntwo\n").unwrap();
+            assert_eq!(
+                read_message(&mut reader, InputMode::Script).unwrap().as_deref(),
+                Some("one")
+            );
+            assert_eq!(
+                read_message(&mut reader, InputMode::Script).unwrap().as_deref(),
+                Some("two")
+            );
+        }
+
+        #[test]
+        fn a_joined_message_stays_within_the_line_limit() {
+            let (mut reader, mut writer) = pipe();
+            let big = "x".repeat(MAX_LINE_BYTES / 2 + 1);
+            let thread = std::thread::spawn(move || {
+                writer.write_all(format!("{big}\n{big}\nrest\n").as_bytes()).unwrap();
+            });
+            let first = read_message(&mut reader, InputMode::Terminal).unwrap().unwrap();
+            assert_eq!(first.len(), MAX_LINE_BYTES / 2 + 1);
+            let second = read_message(&mut reader, InputMode::Terminal).unwrap().unwrap();
+            assert_eq!(
+                second.len(),
+                MAX_LINE_BYTES / 2 + 1 + 5,
+                "the carried line heads the next message"
+            );
+            assert!(second.ends_with("\nrest"));
+            thread.join().unwrap();
+        }
+
+        #[test]
+        fn a_slash_command_is_never_joined_with_the_next_line() {
+            let (mut reader, mut writer) = pipe();
+            writer.write_all(b"/model next\nsecond\n").unwrap();
+            assert_eq!(
+                read_message(&mut reader, InputMode::Terminal).unwrap().as_deref(),
+                Some("/model next")
+            );
+            assert_eq!(
+                read_message(&mut reader, InputMode::Terminal).unwrap().as_deref(),
+                Some("second")
+            );
+        }
     }
 }

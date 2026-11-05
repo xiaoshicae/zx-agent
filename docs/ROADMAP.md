@@ -532,7 +532,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P6 | 执行环境与崩溃恢复 | 进行中：崩溃恢复（PR #12）、执行环境接缝（PR #13）、离线容器执行（PR #14）已完成；在线访问评审稿已合入（PR #17），一期已完成：只读命令自动放行（PR #19）、环境变量保护与 ServiceAccount token 脱敏（PR #20）、常驻 Pod 部署包（PR #22）、多集群（PR #24）；容器联网已取消，改为常驻 Pod 部署。待部署方在真实集群上验收；服务模式与 IM 接入的评审稿已合入（PR #27），模块 A（IM 接口与服务，PR #28）、B（Slack 与 `serve`，PR #29）、C（⚑ D:5/CHINA FLAG: 飞书，PR #32）、D（部署，PR #33）已完成，真实平台验收待提供凭据 |
 | P7 | 插件与 MCP | 已完成（PR #41）：范围按 D8 收窄，评审稿已合入（PR #36）并经用户确认；模块 A（Extension 接口，PR #38）、B1（MCP 客户端库，PR #40）、B2（CLI 接入与文档，PR #41）已完成；真实 MCP 服务器的验收待选定服务器；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已完成（PR #23），A2–A8（扩展 API）已完成（PR #25） |
 | P8 | 嵌入协议 `acp` | 不做（2026-11-02 用户决定，D10） |
-| P9 | 可选增强 | 进行中：token 预算（PR #47）、OpenTelemetry 追踪（PR #49）、crate 拆分（PR #52）、通用化整理（PR #54）已完成；剩更多 provider（如 Anthropic）。其余各项按 D10 不做或取消 |
+| P9 | 可选增强 | 进行中：token 预算（PR #47）、OpenTelemetry 追踪（PR #49）、crate 拆分（PR #52）、通用化整理（PR #54）、chat 交互体验（2026-11-05，见下文）已完成；剩更多 provider（如 Anthropic）。其余各项按 D10 不做或取消 |
 | P10 | 与 pi 的能力对齐 | 进行中：2026-11-05 对照 pi 列出 14 项缺口，见下文 P10；① 上下文超长后自动恢复已完成（PR #56）；② 容器沙箱已完成（PR #57）；③ edit 与 write 工具已完成（PR #58）；④ grep、find、ls 已完成（PR #59） |
 
 ### P0 场景默认值移出内核
@@ -1305,6 +1305,40 @@ crate 拆分（2026-11-02，已完成，PR #52；基于 PR #51 合并后的 `640
 - 测试：新增 11 项（策略 2，profile 4（含加载部署用的 Kubernetes profile，检查 kubectl 的放行与询问），Slack 截断回归 1，OpenAI 2，serve 1，run 1），随 `presets` 删除 1 项。既有测试的调整：3 个文件中 4 处断言的中文文案改为英文默认值；借用 `presets` 的两处改为显式的同值；策略单测中依赖内置 kubectl 规则的 3 项改用测试中给出的 kubectl 选项（`grep --server` 一例不再询问，grep 没有列出选项）；profile 单测中对照 `presets` 常量的 1 项改为对照具体数值，另 1 项加入 unattended；OpenAI 单测中 3 项按新的版本号与开关调整。
 - 反向验证：分别去掉 assistant 的 `autoApproveExcept`、profile 中程序选项的接线、serve 的 `[replies]` 接线、补齐的开关判断、审计中的开关记录，每次都有对应测试失败（依次 1、1、1、2、1 项），修改已还原。
 - 本机 macOS 验证：stable 与 Rust 1.88.0 各 787 项通过、7 项付费测试跳过（基线 777 项，`f7397bb`）；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过。部署清单用 `kubectl kustomize`（kubectl v1.36.1）渲染了基础与“multicluster + serve”两种组合，核对了生效的命令与 `ZX_SECRET_FILES`。部署说明中的 `kubectl exec … --profile /usr/local/share/zx-agent/profiles/kubernetes.toml` 只在本机用同一份 profile 文件验证过，没有在集群中运行，也没有执行 `docker build`。
+
+chat 交互体验（2026-11-05，基于 `77efb18`，分支 `worktree-chat-ux`）：
+
+背景：用本地假模型（脚本化的 OpenAI 兼容 SSE 服务）在真实 PTY 中跑了两段对话，记录用户看到的内容和时间，按体感影响排序后实施。不加依赖、不改内核，只改 `src/chat/` 与 `src/cli.rs` 的一处字段。
+
+| 环节 | 此前 | 改为 |
+|---|---|---|
+| 等待 | 从回车到第一个字之间没有任何提示（实测 2.3 秒空白）；provider 解析出的推理增量（`Delta::Thinking`，`crates/zx-ai/src/openai.rs`）不显示 | stderr 是终端时，模型沉默超过 1 秒后显示一行状态（`⠙ waiting for the model · 3s`，收到推理增量后改为 `thinking`，工具执行中为 `⠙ bash: <命令> · 2s`），每秒原地刷新（`\r` 加补空格，不用擦除序列，正在输入的回显得以保留）；活动结束后留下一行耗时（`· thought for 2.3s`）；不到 1 秒的等待不留痕迹。`--debug`、`TERM=dumb` 或 stderr 重定向时不画（`src/chat/term.rs`） |
+| 工具执行 | 非 debug 模式吞掉 `tool_execution_start`，只在结束时打印 `[tool] bash -> ok 8ms`；自动放行的命令用户看不到跑了什么；结果只有 `--debug` 显示 | 工具结果消息到达时打印 `[tool] bash: <命令> -> ok 8ms`（bash 显示 `command`，read_file 显示 `path`，其余显示参数 JSON，超过 80 字符截断），下面缩进显示结果前 3 行与剩余行数；审批过的命令在审批块和结果行各出现一次。调用的标签在回答结束时按 call ID 记下，`tool_execution_start` 在审批之前发出，所以审批通过后才把状态切回工具 |
+| 审批 | 10 行，`[reason]` 与 `[scope]` 每次重复，只接受数字 | 4 行：`[approval 1] bash: <完整命令>`（另有参数时单独一行）、理由、一行菜单、`[approval] Choose 1, 2, 3 or 4:`（末行不变，脚本按它等待）；`y`、`yes` 等同 1，`n`、`no` 等同 3，不区分大小写；工作目录与权限范围改在启动时显示一次。审批块里的命令与参数不截断 |
+| 粘贴与多行 | 粘贴三行变成一条提问加两条插话，屏幕出现两次 `steering input queued`，会话里记为三条 user 消息 | 终端里一次到达的多行作为一条消息：输入线程读完一行后用 `poll(2)` 零超时探测是否还有整行在排队（规范模式下的终端只在整行就绪时可读），有则并入；以 `/` 开头的命令不合并；合并后仍受 1 MiB 上限，放不下的行开始下一条消息；最后一行没按回车前不算。输入线程改用复制出的 stdin 句柄，避开全局 `StdinLock` 的缓冲。管道输入与非 Unix 平台不合并 |
+| 视觉 | 普通模式没有颜色；回答之间、回答与 `[tool]` 行之间没有分隔；Ctrl+C 打印 `[model] Aborted: Request was aborted` 与 `[chat] run was cancelled` 两行 | stdout 是终端时回答前后各空一行（管道中 stdout 仍只有逐行以换行结尾的回答）；提示符加粗，进度行暗色，审批黄色，错误红色（沿用 `--debug` 的 `NO_COLOR` 与 `TERM=dumb` 判断，重定向时不输出颜色码）；用户取消时省略 `[model]` 行；迟到的插话作为下一轮提问时在提示符后回显；退出前结束未完成的行 |
+| 信息 | 启动只显示模型；`/help` 不提插话、审批、Ctrl+D；没有用量 | 启动两行：模型、profile、会话文件、cwd；工具、自动放行清单、权限范围；每轮结束一行 `[turn] 3 requests · 30 in · 15 out · 4.4s`（重试与缓存命中非零时一并显示）；新增 `/status` 显示会话信息与本会话累计（`/new` 后清零）；`/help` 补全 |
+| 未做 | | 行编辑与历史（方向键仍作为输入发给模型，实测 `\x1b[A` 原样到达模型）：D2 已授权的 rustyline 待用户决定；推理正文的显示（`--debug` 仍在回答结束时打印）；Markdown 渲染（需新依赖） |
+
+- 公开 API 与 CLI：没有新参数，`chat --help` 不变。库根新增 `#[doc(hidden)] pub use zx_ai::sync`；`PreparedSession` 新增 `profile_name`、`auto_approve_commands`（crate 内部）。stderr 的文案改变：审批块、`[tool]` 行、启动行（仍以 `[chat] model=` 开头）；`run` 的输出不变。
+- 测试：新增 19 项。单元测试 12 项：`src/chat/term.rs` 5 项（颜色开关、耗时格式、等待转为思考保留起点、非终端不画、按字符截断）、`src/chat/output.rs` 3 项（调用标签、剩余参数、结果预览）、`src/chat/input.rs` 4 项（用 `std::io::pipe` 验证合并、脚本逐行、命令不合并、合并后的上限）；`tests/chat_cli.rs` 7 项：自动放行的命令显示命令与预览、`y`/`n` 审批、`/status`、取消只报告一次（无 `[model] Aborted` 行，有 `[turn]` 行）、PTY 粘贴合为一条消息、PTY 等待时的状态行、PTY 回答前后的空行。既有测试的调整（有意的行为变化）：`normal_chat_does_not_print_tool_arguments_twice` 改名为 `an_approved_command_is_shown_with_the_request_and_again_with_its_result`，命令出现两次；`approving_once_allows_the_displayed_shell_call` 与 `discussing_an_approval_sends_user_input_without_executing_the_call` 的文案断言随新格式调整；`multiple_prompts_keep_history_and_stream_each_answer_once` 加断言每轮一行 `[turn]`。
+- 反向验证：去掉 `poll(2)` 探测后，PTY 粘贴测试失败（单元测试经管道一次读入多行，由缓冲区判断合并，仍通过）；去掉 `[model] Aborted` 行的省略后，取消测试失败。修改已还原。回答结尾的换行曾错写到 stderr，脚本模式下 5 项既有测试因 stdout 少了换行而失败，改为由留下未完成行的那个流补换行后通过。
+- 本机 macOS 验证：stable 下 847 项通过、7 项付费测试跳过（基线 828 项，PR #56 的实测）；fmt、clippy 与 Rust 1.88.0 的全目标检查通过；自查脚本在改动的文件中列出 `src/chat/input.rs` 的 `unsafe`（`poll(2)`，有 SAFETY 注释）与 `src/chat/term.rs` 的 `let _ =`（替代原 `output.rs` 的同一处，写了理由）。PTY 实测的脚本与记录在本机临时目录，未入库。Windows 分支（`AsHandle` 复制 stdin）只编译检查过 cfg 之外的代码，没有在 Windows 上运行。
+
+chat 交互体验第二批（2026-11-05，基于合并 origin/main `6ed6a9b` 之后的 `8fc9f8a`；用户选定的四项，仍不加依赖）：
+
+| 环节 | 此前 | 改为 |
+|---|---|---|
+| 文件工具的审批 | PR #58 之后，`write_file` 的内容与 `edit_file` 的替换片段以 JSON 转义挤在一行 | 参数逐项列出（`describe_arguments`）：标量一行；多行或超过 80 字符的字符串按行缩进显示并注明行数，一段最多 60 行，其余只计数并写明未显示；数组与对象按路径展开（`edits[0].oldText`）；不做 JSON 转义，写入的文件看起来就是文件。字段按 serde_json 的键序排列，所以 `newText` 在 `oldText` 之前 |
+| 文件工具的结果 | `[tool]` 行下只显示结果文本的前 3 行 | 结果 `details` 带 `patch` 时改为显示补丁的前 20 行：增加的行绿色、删除的行红色、其余暗色；其他工具仍显示结果文本 |
+| 颜色 | 审批块整行黄色，命令反而不突出；`[tool]` 整行暗色；黄色在浅色背景上偏淡；只能靠 NO_COLOR 关 | 审批只给 `[approval N]` 标签上色，调用本身加粗默认色；`[tool]` 标签与耗时暗色，`ok` 绿、`error` 红，命令默认色；警告色改为加粗黄；新增 `--color auto\|always\|never`，默认 auto 与此前的判断相同 |
+| 状态行宽度 | 固定裁到 78 字符 | Unix 上每次绘制前用 `TIOCGWINSZ` 查询 stderr 的宽度，裁到宽度减一，最少保留 20 字符；查不到时仍为 78 |
+| 续接会话 | 打开已有会话文件时没有任何提示 | 启动行后多一行 `[chat] resumed N message(s) from the session file; last activity <本地时间>`，N 为投影中的 user 与 assistant 消息数，时间取最后一条记录的时间戳 |
+
+- 公开 API 与 CLI：`chat --help` 新增 `--color`；其余不变。
+- 合并 PR #59 之后的补充：调用标签的字段加入 `pattern`，依次为 `command`、`pattern`、`path`，第一个作为主值、其余以 `名=值` 跟在后面，所以 grep 显示为 `grep: fn main path=src`；审批块不再重复列出这些字段。
+- 测试：新增 6 项。单元测试 2 项（状态行宽度在非终端下的回退、补丁预览与着色），`describe_arguments` 的测试替换原 `remaining_arguments` 的；`tests/chat_cli.rs` 4 项：write_file 审批按行显示内容、edit_file 审批逐项列出且结果显示补丁、`--color always` 在管道中保留颜色、续接会话的提示（新会话不提示）。既有的空行测试改用 `--color never`。
+- 本机 macOS 验证：stable 下 900 项通过、7 项付费测试跳过（合并后的基线 894 项）；fmt、clippy 与 Rust 1.88.0 的全目标检查通过。`TIOCGWINSZ` 按 macOS 与 Linux gnu 的 `c_ulong` 类型直接传给 `ioctl`，把它定义为 `c_int` 的目标（如 musl）未编译验证。
 
 这些整理不改变行为，在改到相关代码时顺带完成：
 
