@@ -1,14 +1,13 @@
 //! Commands and files inside one Docker container, isolated from this machine.
 //!
-//! The container is the sandbox, and inside it the agent may do what its user may (decision D11
-//! in docs/ROADMAP.md): by default the workspace and the container's own files are writable
-//! and the network is Docker's default bridge. The walls stay: no privileged mode, no Docker
-//! socket, no host network or PID namespace, no capabilities, none of the agent's environment.
-//! A stricter sandbox, with a read-only workspace or root and no network, is a setting. Its
-//! PID 1 reads the stdin of the attached `docker run` client that the
-//! executor owns. Dropping the executor kills the client, and if the agent dies the pipe
-//! closes; either way the container is removed (`--rm`). Docker 29.9.2 behaved this way when
-//! tested on 2026-11-01; see docs/ROADMAP.md (P6).
+//! The container is the sandbox, and inside it the agent may do what its user may: by
+//! default the workspace and the container's own files are writable and the network is
+//! Docker's default bridge. The walls stay: no privileged mode, no Docker socket, no host
+//! network or PID namespace, no capabilities, none of the agent's environment. A stricter
+//! sandbox, with a read-only workspace or root and no network, is a setting. Its PID 1
+//! reads the stdin of the attached `docker run` client that the executor owns. Dropping the
+//! executor kills the client, and if the agent dies the pipe closes; either way the
+//! container is removed (`--rm`).
 //!
 //! Commands run as a non-root user, while PID 1 and its `cat` run as root without
 //! capabilities. Around every command, a sweep run as the command user kills every process
@@ -17,24 +16,32 @@
 //! that keep the container alive cannot be signalled. Because a sweep would also stop a
 //! concurrent call, the executor runs one command or file read at a time.
 
+mod config;
+mod scripts;
+
 use std::ffi::OsStr;
+use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use async_trait::async_trait;
-use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio_util::sync::CancellationToken;
 
-use super::capture::{finish_reader, spawn_reader, stop_child, take_capture};
+use config::parse_platform;
+pub use config::{Access, ContainerConfig, Network, Platform, check_network, environment_section};
+use scripts::{
+    EXIT_DENIED, EXIT_DIRECTORY, EXIT_MISSING, EXIT_NO_DIRECTORY, EXIT_SPECIAL, PROBE, PROBE_MISSING,
+    PROBE_NO_WORKSPACE, PROBE_READ_ONLY_WORKSPACE, PROBE_ROOT, READ, RUN, SWEEP, WRITE,
+};
+
+use super::capture::{Capture, await_end, collect};
 use super::{Captured, CommandEnd, CommandOutput, Executor, ShellCommand};
 use crate::agent::ExecutionMode;
-use crate::prompt::{pretty_name, run_started};
-use crate::sync::AbortOnDrop;
 
 /// Longest wait for a new container to accept commands.
 const START_TIMEOUT: Duration = Duration::from_secs(60);
@@ -52,189 +59,6 @@ const KILL_TIMEOUT: Duration = Duration::from_secs(10);
 /// which must not run as root, cannot signal the processes that keep the container alive.
 const KEEPER_USER: &str = "0:0";
 
-/// Exit codes of the start-up probe for an unusable container; other failures are retried.
-const PROBE_ROOT: i32 = 90;
-const PROBE_MISSING: i32 = 91;
-const PROBE_NO_WORKSPACE: i32 = 93;
-const PROBE_READ_ONLY_WORKSPACE: i32 = 98;
-
-/// The user commands run as when the agent itself runs as root, or off Unix: nobody.
-const NOBODY: &str = "65534:65534";
-
-/// Checks that commands run as a non-root user, that the image has the required programs
-/// and that the user can read the workspace, and write it when it is mounted writable; prints
-/// the platform. Arguments: the shell commands run with, the workspace, and `rw` or `ro`.
-const PROBE: &str = r#"shell=$1 workspace=$2 access=$3
-uid=
-while read -r key value rest; do
-  [ "$key" = "Uid:" ] && uid=$value
-done < /proc/self/status
-[ -n "$uid" ] && [ "$uid" != 0 ] || { echo "commands must not run as root (uid ${uid:-unknown})" >&2; exit 90; }
-missing=
-for program in "$shell" cat head uname mkdir; do
-  command -v "$program" >/dev/null 2>&1 || missing="$missing $program"
-done
-[ -z "$missing" ] || { echo "the image lacks:$missing" >&2; exit 91; }
-{ [ -r "$workspace" ] && [ -x "$workspace" ]; } || exit 93
-[ "$access" = ro ] || [ -w "$workspace" ] || exit 98
-echo "arch=$(uname -m)"
-echo "kernel=$(uname -r)"
-echo "--- os-release"
-cat /etc/os-release 2>/dev/null
-exit 0"#;
-
-/// Becomes the shell. Arguments: the shell and the command.
-const RUN: &str = r#"exec "$1" -c "$2""#;
-
-/// Kills every process of the user it runs as, except itself (kill(2) with pid -1). Run as the
-/// command user, this stops a command's whole tree, including children in another session.
-/// `-s KILL -- -1` is the form Debian's dash accepts (tested 2026-11-01).
-const SWEEP: &str = r#"kill -s KILL -- -1 2>/dev/null
-exit 0"#;
-
-/// Exit codes of the read script for each refusal.
-const READ_DIRECTORY: i32 = 94;
-const READ_MISSING: i32 = 95;
-const READ_SPECIAL: i32 = 96;
-const READ_DENIED: i32 = 97;
-
-/// Refuses directories and special files, creates missing parent directories, then replaces
-/// the file's contents with its standard input. Arguments: the absolute path.
-const WRITE: &str = r#"case $1 in */?*) dir=${1%/*}; [ -z "$dir" ] || [ -d "$dir" ] || mkdir -p -- "$dir" || exit 99 ;; esac
-if [ -d "$1" ]; then exit 94; fi
-if [ -e "$1" ] && [ ! -f "$1" ]; then exit 96; fi
-exec cat > "$1""#;
-
-/// Exit code of the write script when it cannot create a parent directory.
-const WRITE_NO_DIRECTORY: i32 = 99;
-
-/// Refuses directories, missing, special and unreadable files; then reads a bounded prefix.
-/// Arguments: the path and the byte limit.
-const READ: &str = r#"if [ -d "$1" ]; then exit 94; fi
-if [ ! -e "$1" ]; then exit 95; fi
-if [ ! -f "$1" ]; then exit 96; fi
-if [ ! -r "$1" ]; then exit 97; fi
-exec head -c "$2" -- "$1""#;
-
-/// Whether the container may change a part of its file system. In configuration files,
-/// `readWrite` or `readOnly`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Access {
-    #[default]
-    ReadWrite,
-    ReadOnly,
-}
-
-/// How to start the container. Paths are absolute host paths, mounted at the same paths.
-#[derive(Clone, Debug)]
-pub struct ContainerConfig {
-    /// Image to run. It must already be present locally; nothing is pulled.
-    pub image: String,
-    /// Docker client program; looked up on `PATH` unless it is a path.
-    pub docker: PathBuf,
-    /// Mounted at the same path; commands start here. Everything in it is readable inside the
-    /// container, and with [`Access::ReadWrite`] changeable, so keep files the container must
-    /// not read or change, such as the session file, elsewhere.
-    pub workspace: PathBuf,
-    /// Whether commands may change the workspace, which holds the host's own files.
-    pub workspace_access: Access,
-    /// Whether commands may change the container's own files, such as installed packages.
-    /// Changes are discarded with the container. With [`Access::ReadOnly`] only a `/tmp` in
-    /// memory is writable.
-    pub root_access: Access,
-    /// Docker network the container joins: `bridge` (Docker's default), `none` for no
-    /// network, or a user-defined network. `host` and `container:<name>` are refused: they
-    /// share a network namespace outside the sandbox.
-    pub network: String,
-    /// Shell that commands run with; the image must provide it.
-    pub shell: String,
-    /// `uid:gid` that commands run as. Must not be root: the keep-alive processes run as root,
-    /// and cleanup stops every process of this user.
-    pub user: String,
-    /// Memory limit in Docker's syntax, such as `1g`.
-    pub memory: String,
-    /// Maximum number of processes in the container.
-    pub pids_limit: u32,
-    /// Value of the `zx-agent.session` label, for example the session ID.
-    pub label: String,
-}
-
-impl ContainerConfig {
-    /// Settings for `image` with the defaults: a writable workspace and root, the `bridge`
-    /// network, the agent's own `uid:gid` (so that files written in the workspace belong to
-    /// the agent's user; nobody, `65534:65534`, when the agent runs as root or off Unix), 1 GiB
-    /// of memory, 256 processes, bash, and the `docker` client found on `PATH`.
-    pub fn new(image: impl Into<String>, workspace: impl Into<PathBuf>) -> Self {
-        Self {
-            image: image.into(),
-            docker: PathBuf::from("docker"),
-            workspace: workspace.into(),
-            workspace_access: Access::ReadWrite,
-            root_access: Access::ReadWrite,
-            network: "bridge".into(),
-            shell: "bash".into(),
-            user: default_user(),
-            memory: "1g".into(),
-            pids_limit: 256,
-            label: String::new(),
-        }
-    }
-
-    fn validate(&self) -> Result<()> {
-        ensure!(!self.image.trim().is_empty(), "container image is empty");
-        ensure!(!self.shell.trim().is_empty(), "container shell is empty");
-        ensure!(!self.user.trim().is_empty(), "container user is empty");
-        // The start-up probe also checks the effective UID, which catches names mapped to 0.
-        let uid = self.user.split(':').next().unwrap_or_default().trim();
-        ensure!(
-            uid != "root" && uid.parse::<u32>() != Ok(0),
-            "container user {:?} is root; commands must run as an unprivileged user",
-            self.user
-        );
-        // Profiles check it when they load; SDK callers may set the field directly.
-        check_network(&self.network)?;
-        ensure!(!self.memory.trim().is_empty(), "container memory limit is empty");
-        ensure!(self.pids_limit > 0, "container process limit must be greater than zero");
-        ensure!(
-            self.workspace.is_absolute(),
-            "container mount {} is not absolute",
-            self.workspace.display()
-        );
-        // --mount separates its fields with commas.
-        let text = self.workspace.to_str().context("container mount paths must be UTF-8")?;
-        ensure!(
-            !text.contains([',', '"', '\n']),
-            "container mount {text:?} contains a comma, quote or newline"
-        );
-        Ok(())
-    }
-}
-
-/// Refuse an empty network and the networks that would share a namespace outside the sandbox:
-/// `host` and `container:<name>`. Configuration layers call this to report the mistake before
-/// anything starts; [`ContainerExecutor::start`] checks it as well.
-pub fn check_network(network: &str) -> Result<()> {
-    let name = network.trim().to_ascii_lowercase();
-    ensure!(!name.is_empty(), "container network is empty");
-    ensure!(
-        name != "host" && !name.starts_with("container:"),
-        "container network {network:?} would share a network namespace outside the sandbox; use bridge, none or a network of your own"
-    );
-    Ok(())
-}
-
-/// What the container reports about itself at start.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Platform {
-    /// Contents of `/etc/os-release`; empty when the image has none.
-    pub os_release: String,
-    /// `uname -r`: the kernel the container shares with its host.
-    pub kernel: String,
-    /// `uname -m`.
-    pub arch: String,
-}
-
 /// Where `docker exec` runs calls: the client program, the container and the command user.
 #[derive(Clone)]
 struct Target {
@@ -243,15 +67,27 @@ struct Target {
     user: String,
 }
 
+/// Whether a script reads its standard input.
+#[derive(Clone, Copy)]
+enum Input {
+    Closed,
+    /// Open for the caller to write: `docker exec --interactive`.
+    Piped,
+}
+
 impl Target {
-    /// `docker exec --user <user> [--workdir <dir>] <container> sh -c <script> <label> <arguments...>`.
-    fn exec<I, S>(&self, workdir: Option<&Path>, script: &str, label: &str, arguments: I) -> Command
+    /// `docker exec [--interactive] --user <user> [--workdir <dir>] <container> sh -c <script> <label> <arguments...>`.
+    fn exec<I, S>(&self, workdir: Option<&Path>, input: Input, script: &str, label: &str, arguments: I) -> Command
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
         let mut command = docker(&self.docker);
-        command.args(["exec", "--user", &self.user]);
+        command.arg("exec");
+        if let Input::Piped = input {
+            command.arg("--interactive");
+        }
+        command.args(["--user", &self.user]);
         if let Some(workdir) = workdir {
             command.arg("--workdir").arg(workdir);
         }
@@ -259,31 +95,17 @@ impl Target {
             .arg(&self.name)
             .args(["sh", "-c", script, label])
             .args(arguments);
-        command
-    }
-
-    /// Like [`Target::exec`], with the command's standard input open for the caller to write.
-    fn exec_with_input<I, S>(&self, script: &str, label: &str, arguments: I) -> Command
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>,
-    {
-        let mut command = docker(&self.docker);
-        command
-            .args(["exec", "--interactive", "--user", &self.user])
-            .arg(&self.name)
-            .args(["sh", "-c", script, label])
-            .args(arguments)
-            .stdin(Stdio::piped());
+        if let Input::Piped = input {
+            command.stdin(Stdio::piped());
+        }
         command
     }
 
     /// Kill every process of the command user (see `SWEEP`). A failure leaves them running
     /// until the container is removed with the agent.
     async fn sweep(&self) {
-        let mut command = self.exec(None, SWEEP, "zx-agent-sweep", std::iter::empty::<&str>());
+        let mut command = self.exec(None, Input::Closed, SWEEP, "zx-agent-sweep", std::iter::empty::<&str>());
         command.stdout(Stdio::null()).stderr(Stdio::null());
-        // See above: there is nothing more to do when the sweep fails.
         let _ = tokio::time::timeout(KILL_TIMEOUT, command.status()).await;
     }
 }
@@ -303,7 +125,7 @@ pub struct ContainerExecutor {
     /// killing it on drop removes the container.
     _client: Child,
     /// Drains the client's error output so that it never blocks on a full pipe.
-    _client_stderr: Option<AbortOnDrop<()>>,
+    _client_stderr: Capture,
 }
 
 impl ContainerExecutor {
@@ -328,16 +150,13 @@ impl ContainerExecutor {
         let mut client = command
             .spawn()
             .with_context(|| format!("cannot run {}; is Docker installed?", config.docker.display()))?;
-        let (stderr, mut stderr_reader) = spawn_reader(client.stderr.take());
+        let stderr = Capture::spawn(client.stderr.take());
         let started = Instant::now();
         let platform = loop {
             if let Some(status) = client.try_wait().context("cannot check the docker run client")? {
-                if let Some(reader) = stderr_reader.take() {
-                    finish_reader(reader).await;
-                }
                 bail!(
                     "docker run exited ({status}) before the container started: {}",
-                    text(&take_capture(&stderr).bytes)
+                    text(&stderr.finish().await.bytes)
                 );
             }
             let reason = match probe(&target, &config).await {
@@ -359,7 +178,7 @@ impl ContainerExecutor {
             platform,
             turn: Arc::new(tokio::sync::Mutex::new(())),
             _client: client,
-            _client_stderr: stderr_reader,
+            _client_stderr: stderr,
         })
     }
 
@@ -377,6 +196,37 @@ impl ContainerExecutor {
     pub fn name(&self) -> &str {
         &self.target.name
     }
+}
+
+/// Wait for a file script to end and drain its error output; `verb` names the operation
+/// in an error.
+async fn script_end(
+    mut child: Child,
+    stderr: Capture,
+    verb: &str,
+    path: &Path,
+) -> Result<(ExitStatus, Vec<u8>), String> {
+    let status = child
+        .wait()
+        .await
+        .map_err(|e| format!("cannot {verb} {}: {e}", path.display()))?;
+    Ok((status, stderr.finish().await.bytes))
+}
+
+/// Run `operation` within `timeout`; `doing` names it in the error, such as `reading`.
+async fn within<T>(
+    timeout: Duration,
+    doing: &str,
+    path: &Path,
+    operation: impl Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    tokio::time::timeout(timeout, operation).await.map_err(|_| {
+        format!(
+            "{doing} {} in the container took longer than {}s",
+            path.display(),
+            timeout.as_secs()
+        )
+    })?
 }
 
 /// The result of a command that never started because its run was cancelled first.
@@ -409,6 +259,7 @@ impl Executor for ContainerExecutor {
         // The shell is the one the start-up probe found, whatever the tool was configured with.
         let mut command = self.target.exec(
             Some(request.cwd),
+            Input::Closed,
             RUN,
             "zx-agent-run",
             [self.shell.as_str(), request.command],
@@ -421,33 +272,13 @@ impl Executor for ContainerExecutor {
             executor: self,
             armed: true,
         };
-        let (stdout, stdout_reader) = spawn_reader(child.stdout.take());
-        let (stderr, stderr_reader) = spawn_reader(child.stderr.take());
-
-        let end = tokio::select! {
-            status = child.wait() => match status {
-                // docker exec reports a command ended by signal N as 128 + N.
-                Ok(status) => match status.code() {
-                    Some(code) => CommandEnd::Exited(code),
-                    None => CommandEnd::Signaled,
-                },
-                Err(e) => CommandEnd::WaitFailed(e.to_string()),
-            },
-            _ = tokio::time::sleep(request.timeout) => CommandEnd::TimedOut,
-            _ = cancel.cancelled() => CommandEnd::Cancelled,
-        };
+        let stdout = Capture::spawn(child.stdout.take());
+        let stderr = Capture::spawn(child.stderr.take());
+        let end = await_end(&mut child, request.timeout, cancel).await;
         // After a normal exit too: background children end with their command, including
         // ones that started their own session.
         cleanup.finish().await;
-        stop_child(&mut child).await;
-        for reader in [stdout_reader, stderr_reader].into_iter().flatten() {
-            finish_reader(reader).await;
-        }
-        Ok(CommandOutput {
-            stdout: take_capture(&stdout),
-            stderr: take_capture(&stderr),
-            end,
-        })
+        Ok(collect(&mut child, stdout, stderr, end).await)
     }
 
     async fn read_file(&self, path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {
@@ -455,13 +286,17 @@ impl Executor for ContainerExecutor {
         let _turn = self.turn.lock().await;
         let limit = max_bytes.saturating_add(1);
         let limit_text = limit.to_string();
-        let mut command = self
-            .target
-            .exec(None, READ, "zx-agent-read", [path.as_os_str(), OsStr::new(&limit_text)]);
+        let mut command = self.target.exec(
+            None,
+            Input::Closed,
+            READ,
+            "zx-agent-read",
+            [path.as_os_str(), OsStr::new(&limit_text)],
+        );
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         let read = async {
             let mut child = command.spawn().map_err(|e| format!("cannot run docker exec: {e}"))?;
-            let (stderr, stderr_reader) = spawn_reader(child.stderr.take());
+            let stderr = Capture::spawn(child.stderr.take());
             let mut bytes = Vec::new();
             if let Some(stdout) = child.stdout.take() {
                 stdout
@@ -470,22 +305,10 @@ impl Executor for ContainerExecutor {
                     .await
                     .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
             }
-            let status = child
-                .wait()
-                .await
-                .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-            if let Some(reader) = stderr_reader {
-                finish_reader(reader).await;
-            }
-            Ok::<_, String>((status, bytes, take_capture(&stderr).bytes))
+            let (status, stderr) = script_end(child, stderr, "read", path).await?;
+            Ok::<_, String>((status, bytes, stderr))
         };
-        let (status, bytes, stderr) = tokio::time::timeout(READ_TIMEOUT, read).await.map_err(|_| {
-            format!(
-                "reading {} in the container took longer than {}s",
-                path.display(),
-                READ_TIMEOUT.as_secs()
-            )
-        })??;
+        let (status, bytes, stderr) = within(READ_TIMEOUT, "reading", path, read).await?;
         match status.code() {
             Some(0) => {
                 let read = u64::try_from(bytes.len()).map_err(|e| format!("file length is out of range: {e}"))?;
@@ -497,13 +320,13 @@ impl Executor for ContainerExecutor {
                 }
                 Ok(bytes)
             }
-            Some(READ_DIRECTORY) => Err(format!("{} is a directory; use bash `ls` to list it", path.display())),
-            Some(READ_MISSING) => Err(format!("cannot read {}: no such file in the container", path.display())),
-            Some(READ_SPECIAL) => Err(format!(
+            Some(EXIT_DIRECTORY) => Err(format!("{} is a directory; use bash `ls` to list it", path.display())),
+            Some(EXIT_MISSING) => Err(format!("cannot read {}: no such file in the container", path.display())),
+            Some(EXIT_SPECIAL) => Err(format!(
                 "{} is not a regular file; special files are not supported",
                 path.display()
             )),
-            Some(READ_DENIED) => Err(format!(
+            Some(EXIT_DENIED) => Err(format!(
                 "cannot read {}: permission denied in the container",
                 path.display()
             )),
@@ -518,11 +341,13 @@ impl Executor for ContainerExecutor {
     async fn write_file(&self, path: &Path, contents: &[u8]) -> Result<(), String> {
         // A sweep for a command would also stop this write, so wait for any command to finish.
         let _turn = self.turn.lock().await;
-        let mut command = self.target.exec_with_input(WRITE, "zx-agent-write", [path.as_os_str()]);
+        let mut command = self
+            .target
+            .exec(None, Input::Piped, WRITE, "zx-agent-write", [path.as_os_str()]);
         command.stdout(Stdio::null()).stderr(Stdio::piped());
         let write = async {
             let mut child = command.spawn().map_err(|e| format!("cannot run docker exec: {e}"))?;
-            let (stderr, stderr_reader) = spawn_reader(child.stderr.take());
+            let stderr = Capture::spawn(child.stderr.take());
             if let Some(mut stdin) = child.stdin.take() {
                 // A script that refused the path exits without reading; its status explains why.
                 if let Err(error) = stdin.write_all(contents).await
@@ -532,30 +357,17 @@ impl Executor for ContainerExecutor {
                 }
                 // Dropping stdin closes it, which ends `cat`.
             }
-            let status = child
-                .wait()
-                .await
-                .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-            if let Some(reader) = stderr_reader {
-                finish_reader(reader).await;
-            }
-            Ok::<_, String>((status, take_capture(&stderr).bytes))
+            script_end(child, stderr, "write", path).await
         };
-        let (status, stderr) = tokio::time::timeout(WRITE_TIMEOUT, write).await.map_err(|_| {
-            format!(
-                "writing {} in the container took longer than {}s",
-                path.display(),
-                WRITE_TIMEOUT.as_secs()
-            )
-        })??;
+        let (status, stderr) = within(WRITE_TIMEOUT, "writing", path, write).await?;
         match status.code() {
             Some(0) => Ok(()),
-            Some(READ_DIRECTORY) => Err(format!("{} is a directory", path.display())),
-            Some(READ_SPECIAL) => Err(format!(
+            Some(EXIT_DIRECTORY) => Err(format!("{} is a directory", path.display())),
+            Some(EXIT_SPECIAL) => Err(format!(
                 "{} is not a regular file; special files are not supported",
                 path.display()
             )),
-            Some(WRITE_NO_DIRECTORY) => Err(format!(
+            Some(EXIT_NO_DIRECTORY) => Err(format!(
                 "cannot create the directory of {} in the container: {}",
                 path.display(),
                 text(&stderr)
@@ -613,6 +425,7 @@ enum Probe {
 async fn probe(target: &Target, config: &ContainerConfig) -> Probe {
     let mut command = target.exec(
         None,
+        Input::Closed,
         PROBE,
         "zx-agent-probe",
         [
@@ -681,7 +494,7 @@ fn run_args(config: &ContainerConfig, name: &str) -> Vec<String> {
     ]
     .map(String::from)
     .into();
-    args.extend(["--network".into(), config.network.trim().into()]);
+    args.extend(["--network".into(), config.network.to_string()]);
     if config.root_access == Access::ReadOnly {
         args.extend(["--read-only", "--tmpfs", "/tmp"].map(String::from));
     }
@@ -710,74 +523,10 @@ fn run_args(config: &ContainerConfig, name: &str) -> Vec<String> {
     args
 }
 
-/// The agent's own `uid:gid`, so that files written in the workspace belong to its user; nobody
-/// when the agent runs as root, since commands must not.
-#[cfg(unix)]
-fn default_user() -> String {
-    // SAFETY: getuid and getgid take no arguments, always succeed and touch no memory.
-    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
-    if uid == 0 {
-        NOBODY.into()
-    } else {
-        format!("{uid}:{gid}")
-    }
-}
-
-#[cfg(not(unix))]
-fn default_user() -> String {
-    NOBODY.into()
-}
-
-fn parse_platform(output: &str) -> Platform {
-    let (head, os_release) = output.split_once("--- os-release\n").unwrap_or((output, ""));
-    let field = |key: &str| {
-        head.lines()
-            .find_map(|line| line.strip_prefix(key))
-            .unwrap_or_default()
-            .trim()
-            .to_string()
-    };
-    Platform {
-        os_release: os_release.to_string(),
-        kernel: field("kernel="),
-        arch: field("arch="),
-    }
-}
-
 /// Client output for an error message: lossy UTF-8, trimmed, or a note that there was none.
 fn text(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes).trim().to_string();
     if text.is_empty() { "(no output)".into() } else { text }
-}
-
-/// The `environment` section of a prompt when commands run in the container: its system, the
-/// workspace (`config.workspace`, where commands start), and what commands may change and
-/// reach, as `config` sets it up.
-pub fn environment_section(config: &ContainerConfig, platform: &Platform) -> String {
-    let name = pretty_name(&platform.os_release).unwrap_or_else(|| "Linux".to_string());
-    let workspace = match config.workspace_access {
-        Access::ReadWrite => "writable; changes are made to the host's files",
-        Access::ReadOnly => "read-only",
-    };
-    let network = match config.network.trim() {
-        "none" => "without network access".to_string(),
-        network => format!("with network access (Docker network {network})"),
-    };
-    let files = match config.root_access {
-        Access::ReadWrite => "the container's own files are writable and are discarded with the container",
-        Access::ReadOnly => "outside the working directory only /tmp is writable",
-    };
-    format!(
-        "OS: {name}, Linux kernel {} ({}), in a container from image {}\nRun started: {}\n\
-         Working directory: {} ({workspace})\n\
-         Isolation: commands run as user {} {network}; {files}.",
-        platform.kernel,
-        platform.arch,
-        config.image,
-        run_started(),
-        config.workspace.display(),
-        config.user,
-    )
 }
 
 #[cfg(test)]
@@ -842,7 +591,7 @@ mod tests {
         let strict = ContainerConfig {
             workspace_access: Access::ReadOnly,
             root_access: Access::ReadOnly,
-            network: "none".into(),
+            network: Network::None,
             ..config()
         };
         let joined = run_args(&strict, "zx-agent-x").join(" ");
@@ -875,7 +624,7 @@ mod tests {
         let uid = file.as_file().metadata().unwrap().uid();
         let user = ContainerConfig::new("image", "/work").user;
         if uid == 0 {
-            assert_eq!(user, NOBODY);
+            assert_eq!(user, config::NOBODY);
         } else {
             assert_eq!(user.split(':').next(), Some(uid.to_string().as_str()), "{user}");
         }
@@ -891,10 +640,6 @@ mod tests {
                 pids_limit: 0,
                 ..ContainerConfig::new("image", "/work")
             },
-            ContainerConfig {
-                network: " ".into(),
-                ..ContainerConfig::new("image", "/work")
-            },
         ];
         for config in cases {
             assert!(config.validate().is_err(), "{config:?}");
@@ -905,20 +650,29 @@ mod tests {
     #[test]
     fn networks_shared_with_the_outside_are_refused() {
         for network in ["host", " HOST ", "container:other"] {
-            let config = ContainerConfig {
-                network: network.into(),
-                ..config()
-            };
-            let error = config.validate().unwrap_err().to_string();
+            let error = network.parse::<Network>().unwrap_err().to_string();
             assert!(error.contains("outside the sandbox"), "{network:?}: {error}");
         }
-        for network in ["bridge", "none", "my-net"] {
-            let config = ContainerConfig {
-                network: network.into(),
+        let error = " ".parse::<Network>().unwrap_err().to_string();
+        assert!(error.contains("is empty"), "{error}");
+    }
+
+    #[test]
+    fn network_names_are_read_case_insensitively_and_written_back_as_docker_expects() {
+        assert_eq!("bridge".parse::<Network>().unwrap(), Network::Bridge);
+        assert_eq!(" None ".parse::<Network>().unwrap(), Network::None);
+        assert_eq!("my-net".parse::<Network>().unwrap(), Network::Named("my-net".into()));
+        assert_eq!(Network::None.to_string(), "none");
+        assert_eq!(Network::Named("my-net".into()).to_string(), "my-net");
+        let args = run_args(
+            &ContainerConfig {
+                network: Network::None,
                 ..config()
-            };
-            assert!(config.validate().is_ok(), "{network}");
-        }
+            },
+            "zx-agent-x",
+        )
+        .join(" ");
+        assert!(args.contains("--network none"), "{args}");
     }
 
     #[test]
@@ -994,7 +748,7 @@ mod tests {
             user: "65534:65534".into(),
             workspace_access: Access::ReadOnly,
             root_access: Access::ReadOnly,
-            network: "none".into(),
+            network: Network::None,
             ..ContainerConfig::new("debian:bookworm-slim", "/srv/app")
         };
         let section = environment_section(&strict, &Platform::default());

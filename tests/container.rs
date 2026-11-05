@@ -21,7 +21,7 @@ use zx_agent::agent::{ExecutionMode, Tool};
 use zx_agent::ai::Message;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::executor::{
-    Access, CommandEnd, CommandOutput, ContainerConfig, ContainerExecutor, Executor, ShellCommand,
+    Access, CommandEnd, CommandOutput, ContainerConfig, ContainerExecutor, Executor, Network, ShellCommand,
 };
 use zx_agent::runner::RunOutcome;
 use zx_agent::tools::{BashTool, ReadFileTool};
@@ -233,7 +233,7 @@ async fn a_strict_container_is_started_read_only_and_offline() {
     let config = ContainerConfig {
         workspace_access: Access::ReadOnly,
         root_access: Access::ReadOnly,
-        network: "none".into(),
+        network: Network::None,
         ..fake.config()
     };
 
@@ -730,7 +730,7 @@ async fn real_a_strict_container_has_a_read_only_workspace_and_root_and_no_netwo
         user: "65534:65534".into(),
         workspace_access: Access::ReadOnly,
         root_access: Access::ReadOnly,
-        network: "none".into(),
+        network: Network::None,
         ..ContainerConfig::new(&image, &workspace)
     })
     .await

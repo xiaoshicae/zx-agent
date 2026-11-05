@@ -8,8 +8,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
-use super::capture::{finish_reader, spawn_reader, stop_child, take_capture};
-use super::{CommandEnd, CommandOutput, Executor, ShellCommand};
+use super::capture::{Capture, await_end, collect};
+use super::{CommandOutput, Executor, ShellCommand};
 
 /// Runs commands as child processes of the agent and reads files directly.
 ///
@@ -72,33 +72,14 @@ impl Executor for LocalExecutor {
             .spawn()
             .map_err(|e| format!("failed to start {}: {e}", request.shell))?;
         let mut group = ProcessGroup(child.id());
-        let (stdout, stdout_reader) = spawn_reader(child.stdout.take());
-        let (stderr, stderr_reader) = spawn_reader(child.stderr.take());
-
-        let end = tokio::select! {
-            status = child.wait() => match status {
-                Ok(status) => match status.code() {
-                    Some(code) => CommandEnd::Exited(code),
-                    None => CommandEnd::Signaled,
-                },
-                Err(e) => CommandEnd::WaitFailed(e.to_string()),
-            },
-            _ = tokio::time::sleep(request.timeout) => CommandEnd::TimedOut,
-            _ = cancel.cancelled() => CommandEnd::Cancelled,
-        };
+        let stdout = Capture::spawn(child.stdout.take());
+        let stderr = Capture::spawn(child.stderr.take());
+        let end = await_end(&mut child, request.timeout, cancel).await;
         // Kill the group after a normal exit too: background children (`cmd &`) would otherwise
         // outlive the call and the agent. It also closes the output pipes they hold, so reading
-        // does not wait for PIPE_DRAIN_TIMEOUT. Children that left the group are out of reach.
+        // does not wait for the drain timeout. Children that left the group are out of reach.
         group.kill();
-        stop_child(&mut child).await;
-        for reader in [stdout_reader, stderr_reader].into_iter().flatten() {
-            finish_reader(reader).await;
-        }
-        Ok(CommandOutput {
-            stdout: take_capture(&stdout),
-            stderr: take_capture(&stderr),
-            end,
-        })
+        Ok(collect(&mut child, stdout, stderr, end).await)
     }
 
     async fn read_file(&self, path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {

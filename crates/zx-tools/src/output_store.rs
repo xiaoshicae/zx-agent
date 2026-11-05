@@ -15,6 +15,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::agent::{Effects, HookContext, HookResult, HookStage, Hooks, Tool, ToolContext, ToolOutput};
 use crate::ai::{ToolCall, ToolDef};
+use crate::tools::{parse_args, unless_cancelled};
 
 /// Paging tool name; enabling spilling requires registering this tool too.
 pub const TOOL_NAME: &str = "read_output";
@@ -318,16 +319,33 @@ impl Tool for ReadOutputTool {
         Effects::ReadOnly
     }
     fn definition(&self) -> ToolDef {
-        ToolDef { name: TOOL_NAME.into(), description: "Read a persisted tool result by outputId (UUID). Use the returned UTF-8 byte offset for the next page. Only files in the configured output directory are readable.".into(), parameters: json!({"type":"object","properties":{"id":{"type":"string","description":"outputId from a tool result"},"offset":{"type":"integer","minimum":0}},"required":["id"],"additionalProperties":false}) }
+        ToolDef {
+            name: TOOL_NAME.into(),
+            description: "Read a persisted tool result by outputId (UUID). Use the returned UTF-8 byte offset for \
+                          the next page. Only files in the configured output directory are readable."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "outputId from a tool result" },
+                    "offset": { "type": "integer", "minimum": 0 }
+                },
+                "required": ["id"],
+                "additionalProperties": false
+            }),
+        }
     }
+
     fn validate_arguments(&self, args: &Value) -> Result<(), String> {
-        let args = Args::deserialize(args).map_err(|error| format!("invalid arguments: {error}"))?;
+        let args: Args = parse_args(args)?;
         self.store.path(&args.id).map(|_| ())
     }
+
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
-        let args: Args = serde_json::from_value(args).map_err(|error| format!("invalid arguments: {error}"))?;
+        let args: Args = parse_args(&args)?;
         let path = self.store.path(&args.id)?;
-        let text = tokio::select! { biased; _ = ctx.cancel.cancelled() => return Err("output read cancelled".into()), result = self.store.read(&path) => result? };
+        let read = unless_cancelled(ctx, self.store.read(&path)).await;
+        let text = read.ok_or_else(|| "output read cancelled".to_string())??;
         let remaining = text.get(args.offset..).ok_or_else(|| {
             "output offset is out of range or inside a UTF-8 character; use the returned offset".to_string()
         })?;

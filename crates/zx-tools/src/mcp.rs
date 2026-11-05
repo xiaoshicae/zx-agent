@@ -1,7 +1,7 @@
 //! A client for external MCP servers that only lists and calls their tools, over Streamable
-//! HTTP (docs/p7-mcp-review.md). The servers, and which of their tools the model gets, come
-//! from configuration; whether a call may run is for the host's policies to decide, not for
-//! the server: its tool annotations are only hints.
+//! HTTP. The servers, and which of their tools the model gets, come from configuration;
+//! whether a call may run is for the host's policies to decide, not for the server: its tool
+//! annotations are only hints.
 //!
 //! A [`Server`] is an [`Extension`]: register it with [`crate::extensions::register`].
 
@@ -23,6 +23,7 @@ use serde_json::Value;
 use crate::agent::{Tool, ToolContext, ToolOutput};
 use crate::ai::ToolDef;
 use crate::extensions::Extension;
+use crate::text::prefix_within;
 use crate::tools::truncate::{MAX_BYTES, MAX_LINES, truncate_head};
 
 /// The longest tool name that OpenAI-compatible APIs accept: "a-z, A-Z, 0-9, or contain
@@ -90,62 +91,47 @@ impl Server {
     pub async fn connect(config: ServerConfig) -> Result<Self, String> {
         let server = config.name.as_str();
         check_server_name(server)?;
-        let url =
-            reqwest::Url::parse(&config.url).map_err(|error| format!("MCP server {server}: invalid url: {error}"))?;
+        let url = reqwest::Url::parse(&config.url).map_err(|error| fault(server, format!("invalid url: {error}")))?;
         if !matches!(url.scheme(), "http" | "https") {
-            return Err(format!("MCP server {server}: the url must be http:// or https://"));
+            return Err(fault(server, "the url must be http:// or https://"));
         }
         if config.tools.is_empty() {
-            return Err(format!("MCP server {server}: no tools are configured"));
+            return Err(fault(server, "no tools are configured"));
         }
-        let mut transport = StreamableHttpClientTransportConfig::with_uri(config.url.as_str());
-        if let Some(token) = &config.token {
-            transport = transport.auth_header(token.as_str());
-        }
-        let transport = StreamableHttpClientTransport::from_config(transport);
-        let lifecycle = ClientLifecycleMode::Auto {
-            preferred_versions: vec![ProtocolVersion::LATEST],
-            legacy_version: Some(ProtocolVersion::LATEST_WITH_INITIALIZE),
-        };
-        let connecting = async {
-            let client = serve_client_with_lifecycle(Handler::new(), transport, lifecycle)
-                .await
-                .map_err(|error| error.to_string())?;
-            let listed = client.list_all_tools().await.map_err(|error| error.to_string())?;
-            Ok::<_, String>((client, listed))
-        };
-        let (client, listed) = match tokio::time::timeout(config.connect_timeout, connecting).await {
-            Ok(Ok(connected)) => connected,
-            Ok(Err(error)) => return Err(format!("MCP server {server}: {error}")),
-            Err(_) => {
-                return Err(format!(
-                    "MCP server {server}: no answer within {} s",
-                    config.connect_timeout.as_secs()
-                ));
-            }
-        };
+        let (client, listed) = connect_and_list(&config).await?;
         // A completed handshake or discovery records the server's information, so the empty
         // fallback is not expected; it only affects what is reported.
         let protocol_version = client
             .peer_info()
             .map(|info| info.protocol_version.to_string())
             .unwrap_or_default();
-        let client = Arc::new(client);
+        Self::with_tools(config, protocol_version, &listed, Arc::new(client))
+    }
+
+    /// The server with the configured tools among those it `listed`, as tools for the model.
+    fn with_tools(
+        config: ServerConfig,
+        protocol_version: String,
+        listed: &[rmcp::model::Tool],
+        client: Arc<Client>,
+    ) -> Result<Self, String> {
+        let server = config.name.as_str();
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
         let mut names = Vec::new();
         let mut taken = HashSet::new();
         for remote in &config.tools {
             let Some(offered) = listed.iter().find(|tool| tool.name.as_ref() == remote.as_str()) else {
                 let offered: Vec<&str> = listed.iter().map(|tool| tool.name.as_ref()).collect();
-                return Err(format!(
-                    "MCP server {server}: it has no tool named {remote:?}; it offers: {}",
-                    offered.join(", ")
+                return Err(fault(
+                    server,
+                    format!("it has no tool named {remote:?}; it offers: {}", offered.join(", ")),
                 ));
             };
             let name = tool_name(server, remote)?;
             if !taken.insert(name.clone()) {
-                return Err(format!(
-                    "MCP server {server}: tool {remote:?} would be named {name:?}, like another of its tools"
+                return Err(fault(
+                    server,
+                    format!("tool {remote:?} would be named {name:?}, like another of its tools"),
                 ));
             }
             tools.push(Arc::new(McpTool {
@@ -191,6 +177,40 @@ impl Extension for Server {
 
     fn tools(&self) -> Vec<Arc<dyn Tool>> {
         self.tools.clone()
+    }
+}
+
+/// An error of `server`, named first so that every message says which server failed.
+fn fault(server: &str, message: impl std::fmt::Display) -> String {
+    format!("MCP server {server}: {message}")
+}
+
+/// Connect to the server within its connect timeout and list its tools.
+async fn connect_and_list(config: &ServerConfig) -> Result<(Client, Vec<rmcp::model::Tool>), String> {
+    let server = config.name.as_str();
+    let mut transport = StreamableHttpClientTransportConfig::with_uri(config.url.as_str());
+    if let Some(token) = &config.token {
+        transport = transport.auth_header(token.as_str());
+    }
+    let transport = StreamableHttpClientTransport::from_config(transport);
+    let lifecycle = ClientLifecycleMode::Auto {
+        preferred_versions: vec![ProtocolVersion::LATEST],
+        legacy_version: Some(ProtocolVersion::LATEST_WITH_INITIALIZE),
+    };
+    let connecting = async {
+        let client = serve_client_with_lifecycle(Handler::new(), transport, lifecycle)
+            .await
+            .map_err(|error| error.to_string())?;
+        let listed = client.list_all_tools().await.map_err(|error| error.to_string())?;
+        Ok::<_, String>((client, listed))
+    };
+    match tokio::time::timeout(config.connect_timeout, connecting).await {
+        Ok(Ok(connected)) => Ok(connected),
+        Ok(Err(error)) => Err(fault(server, error)),
+        Err(_) => Err(fault(
+            server,
+            format!("no answer within {} s", config.connect_timeout.as_secs()),
+        )),
     }
 }
 
@@ -240,11 +260,7 @@ fn bounded(text: &str, max: usize) -> String {
     if text.len() <= max {
         return text.to_string();
     }
-    let mut end = max;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{} [description truncated]", &text[..end])
+    format!("{} [description truncated]", prefix_within(text, max))
 }
 
 /// Identifies zx-agent and declares no optional capabilities: only tools are used.

@@ -1,6 +1,6 @@
 //! `read_file` tool: read a text file in pages.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::truncate::{MAX_BYTES, MAX_LINES, truncate_head};
+use super::{looks_binary, parse_args, resolve, unless_cancelled};
 use crate::agent::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
 use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
@@ -68,7 +69,6 @@ impl Tool for ReadFileTool {
         }
     }
 
-    /// The mode of the executor: calls run one at a time when it handles one at a time.
     fn execution_mode(&self) -> ExecutionMode {
         self.executor.execution_mode()
     }
@@ -78,19 +78,16 @@ impl Tool for ReadFileTool {
     }
 
     fn validate_arguments(&self, args: &Value) -> Result<(), String> {
-        let args = Args::deserialize(args).map_err(|e| format!("invalid arguments: {e}"))?;
+        let args: Args = parse_args(args)?;
         resolve(Path::new("."), &args.path).map(|_| ())
     }
 
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
-        let args: Args = serde_json::from_value(args).map_err(|e| format!("invalid arguments: {e}"))?;
+        let args: Args = parse_args(&args)?;
         let path = resolve(&ctx.cwd, &args.path)?;
-        let bytes = tokio::select! {
-            biased;
-            _ = ctx.cancel.cancelled() => return Err("read cancelled".to_string()),
-            result = self.executor.read_file(&path, self.max_file_bytes) => result?,
-        };
-        if bytes.iter().take(8192).any(|&b| b == 0) {
+        let read = unless_cancelled(ctx, self.executor.read_file(&path, self.max_file_bytes)).await;
+        let bytes = read.ok_or_else(|| "read cancelled".to_string())??;
+        if looks_binary(&bytes) {
             return Err(format!("{} looks like a binary file", path.display()));
         }
 
@@ -141,23 +138,6 @@ impl Tool for ReadFileTool {
         }
         Ok(ToolOutput::ok(content))
     }
-}
-
-/// `raw` as a path: without a leading `@`, and against `cwd` when relative. Shared by the file
-/// tools.
-pub(super) fn resolve(cwd: &Path, raw: &str) -> Result<PathBuf, String> {
-    // Some models prefix paths with '@'; pi's built-in tools strip it too.
-    let raw = raw.trim();
-    let raw = raw.strip_prefix('@').unwrap_or(raw);
-    if raw.is_empty() {
-        return Err("path is empty".to_string());
-    }
-    let path = Path::new(raw);
-    Ok(if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        cwd.join(path)
-    })
 }
 
 #[cfg(test)]

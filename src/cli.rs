@@ -1058,7 +1058,7 @@ fn container_config(settings: &ContainerSettings, cwd: &Path, label: &str) -> Re
         config.pids_limit = limit;
     }
     if let Some(network) = &settings.network {
-        config.network.clone_from(network);
+        config.network = network.parse().context("container.network")?;
     }
     if let Some(access) = settings.workspace {
         config.workspace_access = access;
