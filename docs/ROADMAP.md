@@ -536,7 +536,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P7 | 插件与 MCP | 已完成（PR #41）：范围按 D8 收窄，评审稿已合入（PR #36）并经用户确认；模块 A（Extension 接口，PR #38）、B1（MCP 客户端库，PR #40）、B2（CLI 接入与文档，PR #41）已完成；真实 MCP 服务器的验收待选定服务器；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已完成（PR #23），A2–A8（扩展 API）已完成（PR #25） |
 | P8 | 嵌入协议 `acp` | 进行中：2026-11-05 按 D13 重启，`acp` 子命令已实现（见下文 P8），待在 Zed 或 Wisp 上验证 |
 | P9 | 可选增强 | 进行中：token 预算（PR #47）、OpenTelemetry 追踪（PR #49）、crate 拆分（PR #52）、通用化整理（PR #54）、chat 交互体验（2026-11-05，见下文）已完成；剩更多 provider（如 Anthropic）。其余各项按 D10 不做或取消 |
-| P10 | 与 pi 的能力对齐 | 进行中：2026-11-05 对照 pi 列出 14 项缺口，见下文 P10；① 上下文超长后自动恢复已完成（PR #56）；② 容器沙箱已完成（PR #57）；③ edit 与 write 工具已完成（PR #58）；④ grep、find、ls 已完成（PR #59）；⑤ 运行中可调整的配置已完成：⑤a 推理强度（PR #60）、⑤b 续跑（PR #61）、⑤c 请求前替换模型与推理强度的钩子（PR #65）；⑥a 会话目录与续接已完成（PR #67）；⑥b fork 已完成（PR #68）；⑥c 会话内切换分支已完成（PR 待开）；⑦ 扩展能力与 ⑨ 消息队列已完成（PR 待开）；⑧ 模型元数据与计量已完成（PR 待开）；⑫ 幂等键已完成（PR 待开，rpc 模式按 D14 不做）；⑬ MCP 进度已完成（PR 待开）；⑩ 可观测已完成（PR 待开）；⑭ chat 的便利功能按 D13 不做；⑪ 行为评测框架已完成（PR 待开，真实运行待授权） |
+| P10 | 与 pi 的能力对齐 | 进行中：2026-11-05 对照 pi 列出 14 项缺口，见下文 P10；① 上下文超长后自动恢复已完成（PR #56）；② 容器沙箱已完成（PR #57）；③ edit 与 write 工具已完成（PR #58）；④ grep、find、ls 已完成（PR #59）；⑤ 运行中可调整的配置已完成：⑤a 推理强度（PR #60）、⑤b 续跑（PR #61）、⑤c 请求前替换模型与推理强度的钩子（PR #65）；⑥a 会话目录与续接已完成（PR #67）；⑥b fork 已完成（PR #68）；⑥c 会话内切换分支已完成（PR #72）；⑦ 扩展能力与 ⑨ 消息队列已完成（PR #72）；⑧ 模型元数据与计量已完成（PR #72）；⑫ 幂等键已完成（PR #72，rpc 模式按 D14 不做）；⑬ MCP 进度已完成（PR #72）；⑩ 可观测已完成（PR #72）；⑭ chat 的便利功能按 D13 不做；⑪ 行为评测框架已完成（PR #72，真实运行待授权） |
 | P11 | 内核整理 | 进行中：2026-11-05 评审稿 `docs/p11-kernel-cleanup-review.md`；① 立项与搬家已完成（PR #70），② 至 ⑥ 见下文 P11 |
 
 ### P0 场景默认值移出内核
@@ -1396,14 +1396,14 @@ chat 交互体验第三批（2026-11-05，基于合并 PR #65 之后的 `829afc8
 - [x] **③ edit 与 write 工具**（高；已完成（PR #58），2026-11-05，见下方实施记录）。pi 默认工具集是 read、bash、edit、write（`packages/coding-agent/src/core/tools/edit.ts`、`write.ts`）：一次调用可做多处不重叠的精确替换，`details` 带 diff，同一文件的写入经 `file-mutation-queue.ts` 串行。zx 只有 `bash`、`read_file`（`crates/zx-tools/src/tools/mod.rs:24`），`Executor` 只有 `run` 与 `read_file`（`crates/zx-core/src/executor/mod.rs:83,88`）。做法：`Executor` 增加写文件；两个工具声明 `SideEffects`（不变量 10），`details` 带 diff 供审批与审计；同一文件的写入串行，不同文件仍可并行；规则策略可以用 `askTools` 管到它们。
 - [x] **④ grep、find、ls 只读工具**（中；已完成（PR #59），2026-11-05，见下方实施记录）。pi 用 ripgrep 与 fd，遵守 `.gitignore`，结果有上限（`grep.ts`、`find.ts`、`ls.ts`）。zx 只能经 bash 与命令白名单。声明为 `ReadOnly`，不必依赖白名单即可免审批。待定：经 `Executor` 调外部程序（不加依赖，容器中同样可用）还是用 Rust 实现（需新增 `ignore` 等依赖，红线 5）。
 - [x] **⑤ 运行中可调整的配置**（中高；已完成（⑤a PR #60、⑤b PR #61、⑤c PR #65），2026-11-05，见下方实施记录）。推理强度作为一等配置并可在空闲时修改、变化写入会话（目前只能用 `--request-field` 静态传）；每次请求前可替换模型与推理强度的钩子（pi 的 `prepareRequest`、`prepareNextTurn`，`packages/agent/src/agent-loop.ts:195,228`；zx 的 `set_model` 只能空闲时调用，`crates/zx-core/src/agent_session.rs:222`）；不加新输入的续跑（pi 的 `continue()`；`Runner::run` 必须带提示词）。推理强度的写法遵守 D10：各 provider 显式映射。
-- [x] **⑥ 会话导航**（中；⑥a 会话目录与续接已完成（PR #67），⑥b fork 已完成（PR #68），⑥c 会话内切换分支已完成（PR 待开），2026-11-05，见下方实施记录）。列出会话、续接最近一次、fork 成新会话、在分支间切换（`packages/coding-agent/src/core/session-manager.ts`）。zx 只有 `--session <path>`；`SessionStore::branch`（`crates/zx-core/src/session.rs:486`）只在测试中调用。补 SDK 接口与 CLI，`chat` 加对应命令。
-- [x] **⑦ 扩展能力**（中高，嵌入；已完成（PR 待开），2026-11-05，见下方实施记录）。pi 的扩展可写自定义条目（`appendEntry`）、注入非用户消息（`sendMessage`）、运行中启停工具（`setActiveTools`）、注册命令（`registerCommand`）（`packages/coding-agent/src/core/extensions/types.ts`）。zx 的条目只有 9 种内部类型（`crates/zx-core/src/session.rs:142-151`），工具在构建时固定。自定义消息与“会话投影是上下文的唯一来源”（不变量 6）如何共存，先出方案再实施。
-- [x] **⑧ 模型层的元数据与计量**（中；已完成（PR 待开），2026-11-05，见下方实施记录）。在配置中写模型的上下文窗口、单价与输入类型（不内置厂商模型表，D10），用来按 token 设摘要阈值（现为字节）并计算成本；用量增加 cacheWrite 与推理 token；会话记录应答方返回的模型名与响应 ID；按会话的 prompt cache key；自定义请求头；每次请求动态取 API key；`Retry-After` 支持 HTTP 日期与毫秒写法，退避加抖动。
-- [x] **⑨ 消息队列**（低中；已完成（PR 待开，与 ⑦ 同一提交），2026-11-05，见下方实施记录）。队列模式 one-at-a-time（pi 默认，`packages/agent/src/types.ts:55`）；zx 一次取完（`crates/zx-core/src/agent/agent_loop/context.rs:128`）。队列消息目前只能是纯文本。
-- [x] **⑩ 可观测**（中；已完成（PR 待开），2026-11-05，见下方实施记录）。指标（运行耗时、结果计数、token、工具与 MCP 调用耗时）与跨进程传递 trace（W3C `traceparent`）（`packages/telemetry`）。zx 只导出 trace，trace ID 由 SDK 生成。待定：指标要开 opentelemetry 系列的 `metrics` feature，锁文件可能增加包。
-- [x] **⑪ 行为评测框架**（中；已完成（PR 待开），2026-11-05，见下方实施记录）。按 profile 运行场景用例，支持重复次数、两种变体配对比较、只用合成数据、产物落盘（`packages/evals`）。zx 只有一项摘要评测（`tests/real_api.rs`）。框架与离线用例可直接做；真实运行每次都要用户授权（红线 9）。
-- [x] **⑫ 嵌入**（中；幂等键已完成（PR 待开），rpc 模式按 D14 不做，2026-11-05，见下方实施记录）。SDK 提交提示词的幂等键，防止宿主重试时重复提交。待定：给非 Rust 程序用的进程协议（类似 pi 的 rpc 模式，`packages/coding-agent/src/modes/rpc`）。ACP 已按 D13 实施（P8），rpc 模式不再需要。
-- [x] **⑬ MCP 进度**（低中；已完成（PR 待开），2026-11-05，见下方实施记录）。转发服务器的进度通知，并按进度延长超时（`packages/mcp/src/client.ts`）；zx 的调用固定 120 秒超时（`crates/zx-tools/src/mcp.rs:36`）。rmcp 是否支持，实施前核对。
+- [x] **⑥ 会话导航**（中；⑥a 会话目录与续接已完成（PR #67），⑥b fork 已完成（PR #68），⑥c 会话内切换分支已完成（PR #72），2026-11-05，见下方实施记录）。列出会话、续接最近一次、fork 成新会话、在分支间切换（`packages/coding-agent/src/core/session-manager.ts`）。zx 只有 `--session <path>`；`SessionStore::branch`（`crates/zx-core/src/session.rs:486`）只在测试中调用。补 SDK 接口与 CLI，`chat` 加对应命令。
+- [x] **⑦ 扩展能力**（中高，嵌入；已完成（PR #72），2026-11-05，见下方实施记录）。pi 的扩展可写自定义条目（`appendEntry`）、注入非用户消息（`sendMessage`）、运行中启停工具（`setActiveTools`）、注册命令（`registerCommand`）（`packages/coding-agent/src/core/extensions/types.ts`）。zx 的条目只有 9 种内部类型（`crates/zx-core/src/session.rs:142-151`），工具在构建时固定。自定义消息与“会话投影是上下文的唯一来源”（不变量 6）如何共存，先出方案再实施。
+- [x] **⑧ 模型层的元数据与计量**（中；已完成（PR #72），2026-11-05，见下方实施记录）。在配置中写模型的上下文窗口、单价与输入类型（不内置厂商模型表，D10），用来按 token 设摘要阈值（现为字节）并计算成本；用量增加 cacheWrite 与推理 token；会话记录应答方返回的模型名与响应 ID；按会话的 prompt cache key；自定义请求头；每次请求动态取 API key；`Retry-After` 支持 HTTP 日期与毫秒写法，退避加抖动。
+- [x] **⑨ 消息队列**（低中；已完成（PR #72，与 ⑦ 同一提交），2026-11-05，见下方实施记录）。队列模式 one-at-a-time（pi 默认，`packages/agent/src/types.ts:55`）；zx 一次取完（`crates/zx-core/src/agent/agent_loop/context.rs:128`）。队列消息目前只能是纯文本。
+- [x] **⑩ 可观测**（中；已完成（PR #72），2026-11-05，见下方实施记录）。指标（运行耗时、结果计数、token、工具与 MCP 调用耗时）与跨进程传递 trace（W3C `traceparent`）（`packages/telemetry`）。zx 只导出 trace，trace ID 由 SDK 生成。待定：指标要开 opentelemetry 系列的 `metrics` feature，锁文件可能增加包。
+- [x] **⑪ 行为评测框架**（中；已完成（PR #72），2026-11-05，见下方实施记录）。按 profile 运行场景用例，支持重复次数、两种变体配对比较、只用合成数据、产物落盘（`packages/evals`）。zx 只有一项摘要评测（`tests/real_api.rs`）。框架与离线用例可直接做；真实运行每次都要用户授权（红线 9）。
+- [x] **⑫ 嵌入**（中；幂等键已完成（PR #72），rpc 模式按 D14 不做，2026-11-05，见下方实施记录）。SDK 提交提示词的幂等键，防止宿主重试时重复提交。待定：给非 Rust 程序用的进程协议（类似 pi 的 rpc 模式，`packages/coding-agent/src/modes/rpc`）。ACP 已按 D13 实施（P8），rpc 模式不再需要。
+- [x] **⑬ MCP 进度**（低中；已完成（PR #72），2026-11-05，见下方实施记录）。转发服务器的进度通知，并按进度延长超时（`packages/mcp/src/client.ts`）；zx 的调用固定 120 秒超时（`crates/zx-tools/src/mcp.rs:36`）。rmcp 是否支持，实施前核对。
 - [x] **⑭ chat 的便利功能**（低；按 D13 不做，2026-11-05）。提示词模板、`!cmd` 直接执行、路径中的 `~` 展开、用户级全局配置、导出、更多斜杠命令（现有 5 个）。D13 把 `chat` 冻结为最小入口，这些便利由实现 ACP 的客户端提供（编辑器的提示词库与斜杠命令、终端客户端的 shell 直通与路径补全、会话导出）；`run` 与 SDK 用不到它们。此前为 ⑥c、⑦ 与 ⑨ 加进 chat 的 `/tree`、`/branch`、`/queue` 与扩展命令是 SDK 能力的验证入口，不再扩充。
 
 ① 实施记录（2026-11-05，PR #56，基于 `c44154d`）：
@@ -1423,7 +1423,7 @@ chat 交互体验第三批（2026-11-05，基于合并 PR #65 之后的 `829afc8
 
 ⑥ 分三步，各一个 PR：⑥a 会话目录、列出与续接；⑥b fork 成新会话（`--fork`、`/fork`，头部记下来源会话）；⑥c 会话内切换分支（`AgentSession` 的分支接口，chat 的 `/tree` 与 `/branch`）。会话目录的默认位置经用户决定（D12）。
 
-⑪ 实施记录（2026-11-05，PR 待开，基于合并 origin/main 后的 `ab1b248`）：
+⑪ 实施记录（2026-11-05，PR #72，基于合并 origin/main 后的 `ab1b248`）：
 
 pi 的 `packages/evals` 的核实：评测用 vitest-evals 写，`plan.ts` 把用例展开成 `(用例, 变体, 运行次数)`，奇数轮先控制组、偶数轮先处理组以减少顺序偏差；`report.ts` 按 `(用例, 运行次数)` 配对两个 arm，只有两边各恰好一个分数的配对计入通过率提升，缺失、重复、出错或没有分数的 arm 阻塞配对，有任一配对被阻塞时扣住标题数字；标记无提升、负提升、饱和与不稳定；遥测缺失时记为不可用而不是零；产物目录含 `protocol.json`、`expected-runs.json`、`observations.jsonl`、报告与每个 arm 的会话。它的隔离靠 Docker 镜像与降权；评分是确定性的（`StructuredOutputJudge` 严格比较）。
 
@@ -1444,7 +1444,7 @@ pi 的 `packages/evals` 的核实：评测用 vitest-evals 写，`plan.ts` 把�
 - 本机 macOS 验证：见下文“本次 PR 的验证”。
 - 未验证：没有对真实模型运行（红线 9，需要用户授权后运行 `tests/real_api.rs` 的入口）；样例用例的区分度（真实模型在控制组是否也会签名）未实测。
 
-⑩ 实施记录（2026-11-05，PR 待开，基于 ⑬ 的提交 `4953da5`）：
+⑩ 实施记录（2026-11-05，PR #72，基于 ⑬ 的提交 `4953da5`）：
 
 依赖的核实：`cargo tree -f '{p} {f}' -i opentelemetry-otlp` 显示 `http-proto` feature 已经带上 `metrics`，三个 OpenTelemetry crate 的 `metrics` feature 因此早已启用；`Cargo.toml` 与 `Cargo.lock` 都没有改动（锁文件仍为 287 个包）。pi 的 `packages/telemetry` 只定义契约：指标由 `packages/ai/src/telemetry.ts`（`pi.ai.request.duration`、`pi.ai.tokens`、`pi.ai.cost` 等）与 durable harness 定义，跨进程传递是 `propagation.inject / extract` 得到的不透明 carrier，存进 durable 的任务记录，调度时再取出作为父上下文或 link；pi 没有把 trace 上下文传给工具的子进程。
 
@@ -1461,7 +1461,7 @@ pi 的 `packages/evals` 的核实：评测用 vitest-evals 写，`plan.ts` 把�
 - 本机 macOS 验证：见下文“本次 PR 的验证”。
 - 未验证：没有对真实的 OpenTelemetry Collector 运行；假收集端只检查路径、`content-type` 与 protobuf 中的字符串和 ID 字节，不解码。
 
-⑬ 实施记录（2026-11-05，PR 待开，基于 ⑫ 的提交 `0223eb7`）：
+⑬ 实施记录（2026-11-05，PR #72，基于 ⑫ 的提交 `0223eb7`）：
 
 rmcp 3.8.0 的核实（`~/.cargo/registry/src/*/rmcp-3.8.0/src/`）：每个请求都由 rmcp 自动加进度令牌（`service.rs:880-882`），调用方只能从 `RequestHandle.progress_token` 得知；`PeerRequestOptions::with_timeout(t).reset_timeout_on_progress()` 让每条匹配的进度通知重置空闲超时，`with_max_total_timeout` 另设总上限，`await_response` 在两种超时到期时都发 `notifications/cancelled`（`service.rs:542-650`）；`ClientHandler::on_progress` 收通知，每条在各自的任务里处理。原来用的 `call_tool` 没有超时选项，只靠丢弃 future 让 `AbandonedRequestGuard` 取消。
 
@@ -1478,7 +1478,7 @@ rmcp 3.8.0 的核实（`~/.cargo/registry/src/*/rmcp-3.8.0/src/`）：每个请�
 - 本机 macOS 验证：见下文“本次 PR 的验证”。
 - 未验证：只对假服务器验证；真实 MCP 服务器发送进度通知的写法（SSE 事件的命名与分帧）没有实测。
 
-⑫ 实施记录（2026-11-05，PR 待开，基于 ⑧ 的提交 `30345cb`）：
+⑫ 实施记录（2026-11-05，PR #72，基于 ⑧ 的提交 `30345cb`）：
 
 | 环节 | 做法 |
 |---|---|
@@ -1491,7 +1491,7 @@ rmcp 3.8.0 的核实（`~/.cargo/registry/src/*/rmcp-3.8.0/src/`）：每个请�
 - 反向验证：让查键永远查不到，对应测试失败，修改已还原。
 - 本机 macOS 验证：见下文“本次 PR 的验证”。
 
-⑧ 实施记录（2026-11-05，PR 待开，基于 ⑦、⑨ 的提交 `6c53c48`）：
+⑧ 实施记录（2026-11-05，PR #72，基于 ⑦、⑨ 的提交 `6c53c48`）：
 
 | 环节 | 做法 |
 |---|---|
@@ -1510,7 +1510,7 @@ rmcp 3.8.0 的核实（`~/.cargo/registry/src/*/rmcp-3.8.0/src/`）：每个请�
 - 反向验证：分别不按活跃单价算成本、`prompt_cache_key` 在关闭时也发送、HTTP 日期当作无效、token 阈值不触发摘要，每次都有对应测试失败，修改已还原。
 - 本机 macOS 验证：见下文“本次 PR 的验证”。
 
-⑦、⑨ 实施记录（2026-11-05，PR 待开，基于 ⑥c 的提交 `19a0d8b`）：
+⑦、⑨ 实施记录（2026-11-05，PR #72，基于 ⑥c 的提交 `19a0d8b`）：
 
 与不变量 6 的共存方案：扩展的消息不是绕过投影注入请求，而是会话的一种记录。`custom_message` 记录投影成一条 `kind` 为 `custom` 的用户消息（与合成摘要 `Summary` 的做法相同：不是存储的 `message`，却在投影里），所以请求仍然等于投影、请求审计照常还原；`custom` 记录不进投影。运行期间会话归循环独占，扩展不能直接写，所以钩子只能把消息与状态排进队列，由循环在安全点（回合开始、运行结束）写入；空闲时宿主经 `AgentSession` 直接写。
 
@@ -1530,7 +1530,7 @@ rmcp 3.8.0 的核实（`~/.cargo/registry/src/*/rmcp-3.8.0/src/`）：每个请�
 - 反向验证：分别让 `one-at-a-time` 取完整个队列、扩展消息不写 `custom_message` 记录、请求不按活跃工具过滤、命令重名不检查，每次都有对应测试失败，修改已还原。
 - 本机 macOS 验证：见下文“本次 PR 的验证”。
 
-⑥c 实施记录（2026-11-05，PR 待开，基于 PR #68 合并后的 `d1e921a`）：
+⑥c 实施记录（2026-11-05，PR #72，基于 PR #68 合并后的 `d1e921a`）：
 
 | 环节 | 做法 |
 |---|---|
@@ -1544,7 +1544,7 @@ rmcp 3.8.0 的核实（`~/.cargo/registry/src/*/rmcp-3.8.0/src/`）：每个请�
 - 反向验证：分别让 `/fork` 仍复制文件末尾的分支、`/tree` 不把当前分支排在前面、用户消息解析为移到它之后，每次都有对应测试失败（依次 1、2、2 项），修改已还原。
 - 本机 macOS 验证：见下文“本次 PR 的验证”（本次 PR 合并多项，统一验证）。
 
-本次 PR 的验证（2026-11-05，PR 待开，分支 `claude/p10-remaining`：⑥c、⑦、⑧、⑨、⑩、⑪、⑫、⑬ 与 ⑭ 的决定；基于 PR #68 合并后的 `d1e921a`，中途合并了 PR #69 与 #70 之后的 main `c1803e4`）：
+本次 PR 的验证（2026-11-05，PR #72，分支 `claude/p10-remaining`：⑥c、⑦、⑧、⑨、⑩、⑪、⑫、⑬ 与 ⑭ 的决定；基于 PR #68 合并后的 `d1e921a`，中途合并了 PR #69 与 #70 之后的 main `c1803e4`）：
 
 - 每项完成后都在本机 macOS 上运行 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`、`cargo +1.88.0 check --all-targets`、`RUSTDOCFLAGS=-D warnings cargo doc --no-deps` 与自查脚本，均通过。`cargo test` 的通过数依次为 989（⑥c）、1006（⑦ 与 ⑨）、1027（⑧）、1030（⑫）、1033（⑬）、1039（⑩）、1048（合并 main 之后，含 PR #69 的 9 项）、1052（⑪）；基线 `d1e921a` 为 976。最后一次（`ce6e1ad`）：1052 通过、0 失败、8 项付费测试跳过（原 7 项加 ⑪ 的入口）。
 - 自查脚本：新增的命中只有 `crates/zx-tools/src/mcp.rs` 取消时发通知的一处 `let _ =`，有注释说明；`src/otel.rs` 与 `tests/common/evals.rs` 的 `.ok()`、`unwrap_or_default()` 各有注释。每次 `cargo test` 之后 `~/.zx-agent` 都不存在。
