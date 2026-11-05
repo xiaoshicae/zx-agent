@@ -1084,8 +1084,13 @@ fn status(output: &Output, model: &str, about: &About) {
     output.line(
         Tone::Dim,
         &format!(
-            "[status] this conversation: {} turn(s) · {} request(s) · {} in · {} out · {} cached",
-            totals.turns, totals.requests, totals.input_tokens, totals.output_tokens, totals.cached_tokens
+            "[status] this conversation: {} turn(s) · {} request(s) · {} in · {} out · {} cached{}",
+            totals.turns,
+            totals.requests,
+            totals.input_tokens,
+            totals.output_tokens,
+            totals.cached_tokens,
+            totals.cost_usd.map(output::cost_text).unwrap_or_default()
         ),
     );
 }

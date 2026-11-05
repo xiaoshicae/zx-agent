@@ -73,6 +73,9 @@ path = "skills/rust-review/SKILL.md"
 | `skills` | 显式登记 name、description、path 的目录；正文按需读取 |
 | `compaction.triggerBytes` | 自动摘要阈值，0 关闭；非零须大于 `keepRecentBytes`，且超出部分不能多于 2 MiB（一次摘要最多读取的原始记录） |
 | `compaction.keepRecentBytes` | 近期消息的序列化字节预算，大于零；完整保留最新输入和全部 system，可因此超出保留预算 |
+| `compaction.triggerTokens` | 按 token 估算的自动摘要阈值，0 关闭；与 `triggerBytes` 任一超过即摘要。估算 = 最近一次成功回复报告的输入加输出 token，加上其后消息的字节数除以 4。须高于 `keepRecentBytes` 折算的 token 数（字节除以 4），否则摘要永远压不到阈值以下。省略时，开启自动摘要（`triggerBytes` 非零）且模型的上下文窗口已知（`[[models]]` 或 `--context-window`）的话，取“窗口减 `reserveTokens`”，不满足上述条件时不设 |
+| `compaction.reserveTokens` | 按窗口推导 `triggerTokens` 时留出的 token 数，默认 16384（pi 的 `reserveTokens`） |
+| `[[models]]` | 模型的元数据，每项 `id`（必填）、`contextWindow`（token 数，大于零）、`cost`（美元每百万 token：`input`、`output`、`cacheRead`、`cacheWrite`，都不小于零；`input` 指既不读也不写缓存的提示词 token）。没有内置的模型表；按 `id` 覆盖所扩展 profile 的同名项。有单价时每次回复的 `usage.costUsd` 与 chat 的 `[turn]`、`/status` 显示成本 |
 | `compaction.maxSummaryTokens` | 摘要输出 token 上限，1–16384，默认 2048。有的服务把推理计入输出 token，推理可能用满上限而写不出摘要（见 `docs/ROADMAP.md` 的摘要评测记录），使用这类模型时需要调高；服务支持时也可以经 `--request-field` 关闭推理，但它同样作用于任务请求 |
 | `compaction.timeoutSecs` | 摘要流总超时，大于零，默认 120 秒 |
 | `toolOutput.thresholdBytes` | 超过此大小的工具结果落盘；0 关闭，否则为 256–maxFileBytes，默认 8192 |
@@ -159,10 +162,17 @@ profile 的目录信息 → 系统提示词 → 模型选择 read_skill(name)
 ```toml
 [compaction]
 triggerBytes = 262144      # 0 禁用自动摘要
+triggerTokens = 0          # 省略时按模型窗口推导，0 不按 token 触发
+reserveTokens = 16384
 keepRecentBytes = 65536
 maxSummaryTokens = 2048
 timeoutSecs = 120
 mode = "full"              # 或 "incremental"，见下文"增量模式"
+
+[[models]]
+id = "my-model"
+contextWindow = 128000
+cost = { input = 0.27, output = 1.10, cacheRead = 0.07 }   # 美元每百万 token
 ```
 
 ```bash

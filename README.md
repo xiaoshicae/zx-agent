@@ -278,6 +278,9 @@ zx-agent run --base-url https://api.deepseek.com --model deepseek-flash \
 | `--resume [ID 前缀]` | 关闭 | 只用于 `chat`，不能与 `--session` 同用：续接会话目录中的会话，见上文“终端对话” |
 | `--fork <ID 前缀\|文件>` | 关闭 | 只用于 `chat`，不能与 `--session`、`--no-session`、`--resume` 同用：在一个会话的副本上继续，副本写进会话目录，见上文“终端对话” |
 | `--queue-mode <all\|one-at-a-time>` | `all` | 只用于 `chat`：任务运行中输入的取法，见上文 `/queue` |
+| `--context-window <tokens>` | 关闭 | `--model` 的上下文窗口（token 数），补充或覆盖 profile `[[models]]` 中该模型的 `contextWindow`。开启自动摘要时，估算的上下文达到“窗口减 `compaction.reserveTokens`”也会摘要，见 [PROFILES.md](docs/PROFILES.md#上下文管理) |
+| `--header <NAME: VALUE>` | 无 | 随每个模型请求发送的请求头，可重复，如网关的路由头。`Authorization` 不接受（key 来自 `--api-key-env`）；值会出现在进程列表里，不写入会话 |
+| `--prompt-cache-key` | 关闭 | 把会话 ID 作为请求的 `prompt_cache_key` 发送，同一会话的请求共用服务端的提示词缓存（OpenAI 接受该字段；拒绝未知字段的服务不要开）。请求审计记录该键 |
 | `--continue` | 关闭 | 只用于 `run`，须同时给出已存在的 `--session`，不能再给提示词。不加新输入，让模型接着回答会话（对应 pi 的 `continue()`）：先照常为中断的调用补写结果；会话以输入或工具结果结尾时直接请求模型，例如崩溃之后；以失败或被取消的回答结尾时（其中的调用从未执行），用 `context_edit` 省略该回答再请求，与重试相同；以完成的回答结尾时，有排队的插话或后续消息就把它作为输入，否则以退出码 1 结束、不发请求 |
 | `--output` | `text` | `text`：进度与诊断（工具、重试、摘要、恢复、钩子失败）输出到 stderr，最终回答输出到 stdout；stdout 是终端时转义回答中的控制字符，输出到管道时保持原文。`jsonl`：每个事件一行 JSON，输出到 stdout。`run` 在两种模式下遇到已关闭的 stdout（如读取方已退出）都不再写出，退出码仍由运行结果决定 |
 | `--deltas` | 关闭 | 仅用于 `jsonl`：同时输出流式的 `message_update` 事件 |
@@ -375,7 +378,8 @@ CLI (main.rs + cli.rs + chat/)
 | 上下文摘要 | 默认（全量模式）重新摘要时读取应用过 `context_edit` 的原始记录，不输入上一份摘要；可选的增量模式沿用上一份摘要的事实、只读新增记录，旧事实由程序原样保留，模型只能新增事实或标明取代旧事实。摘要中的每条事实必须引用来源条目，见 [PROFILES.md](docs/PROFILES.md) | pi 把上一份摘要交给模型更新，允许删去旧内容；这里优先保证每条事实可追溯、不经多次转述。全量模式的代价是摘要请求随历史增长，累计约 2 MiB 后无法再摘要；增量模式每次只读上一份摘要的事实（至多 64 KiB）与新增、被修正的记录，请求大小不随历史总长增长，用真实模型评测之后再决定是否设为默认（见[路线图](docs/ROADMAP.md)） |
 | 不加新输入的续跑 | 以失败或被取消的回答结尾时，先省略该回答再续跑 | pi 的 `Agent.continue()` 遇到回答结尾时报错（排队的消息除外），失败后的重试由 `AgentSession` 另行处理；这里的续跑同时用于崩溃、超时或取消之后接着做 |
 | 请求前替换设置 | `prepare_request` 只能替换模型与推理强度 | pi 的 `prepareRequest` 还可以改写上下文；这里上下文只来自会话投影（不变量 6），改上下文用 `transform_context` 并写入会话 |
-| 推理强度 | 级别与 pi 相同，写法由 `--reasoning-format` 在三种中显式选择 | pi 按模型元数据与服务的 compat 设置（`thinkingFormat`）在十余种写法中选择，并按模型能力调整级别；这里没有模型元数据（见路线图 P10 ⑧），也不按服务推断（D10） |
+| 推理强度 | 级别与 pi 相同，写法由 `--reasoning-format` 在三种中显式选择 | pi 按模型元数据与服务的 compat 设置（`thinkingFormat`）在十余种写法中选择，并按模型能力调整级别；这里的模型元数据只有上下文窗口与单价（`[[models]]`），没有写法与能力的信息，也不按服务推断（D10） |
+| 模型元数据与计量 | 上下文窗口与单价来自 profile 的 `[[models]]` 或 `--context-window`，没有内置的模型表；窗口只用来给自动摘要加 token 阈值（窗口减 `reserveTokens`，且须高于 `keepRecentBytes` 折算的 token 数），单价用来算每次回复的 `costUsd`；`Retry-After` 接受毫秒、小数秒与 HTTP 日期，退避减去至多四分之一的随机抖动，服务给的等待原样使用 | pi 内置各服务的模型表（`models.json` 可补充），按窗口识别不报错的超长输入与可恢复的截断，成本还支持分档价与服务端上报的成本；这里的超长识别仍只看错误（P10 ①），截断续写由 `--continue-on-length` 决定 |
 | 完整 TUI | 未实现，`chat` 是逐行 REPL | 路线图将其列为本期不做 |
 
 ### 系统提示词的组成
@@ -518,7 +522,7 @@ askTools = []                    # approveAll 时须为空（内置 assistant �
 
 `report.modelRequests` 是模型请求数（含摘要请求），与回合编号不同。
 
-`usage` 统计本次运行中每个回复的用量，失败的尝试也计入。被取消的请求记为 0，因为服务端在流的末尾才返回用量；实际计费以服务商账单为准。
+`usage` 统计本次运行中每个回复的用量，失败的尝试也计入。被取消的请求记为 0，因为服务端在流的末尾才返回用量；实际计费以服务商账单为准。`cacheWrite`（写入缓存的提示词 token）与 `reasoning`（输出中的推理 token）只在服务返回且不为 0 时出现；`costUsd` 只在 profile 的 `[[models]]` 给出该模型的单价时出现，是按单价算出的美元数（摘要请求也计入），同一运行内的多次回复相加。回复消息另带服务端返回的 `responseId` 与（和请求的不同时）`responseModel`。
 
 `message_update.delta` 的 `tool_call_args` 包含 `id` 和 `text`，`id` 与对应 `tool_call_start` 相同，便于关联交错返回的工具参数。旧事件缺少 `id` 时，反序列化为空字符串。
 
@@ -652,7 +656,7 @@ JSON 报告使用 `modelRequests`，达到上限时 `outcome` 为 `model_request
 IM 的提示文本使用 `[replies] modelRequestLimit`。
 原 `prompt::DEFAULT_INSTRUCTIONS` 当时移到了 `presets`，现在只在 `profiles/troubleshoot.md`。
 
-P1 的 SDK 接口调整：静态配置移入 `LoopSpec`；`LoopConfig` 持有钩子、交互宿主与队列。
+P1 的 SDK 接口调整：静态配置移入 `LoopSpec`；`LoopConfig` 持有钩子、交互宿主与队列。`LoopConfig::models`（按模型 ID 的 `ai::ModelMeta`：`context_window` 与 `cost`，`cost` 为每百万 token 的美元单价 `ai::ModelCost`）让循环给每次回复算出 `usage.cost_usd`（按请求的模型查，摘要请求也算）；`LoopConfig::cache_key` 随每个任务请求发送并记入请求审计（`Request::cache_key`），OpenAI 兼容 provider 在 `OpenAiConfig::prompt_cache_key` 为 true 时把它写成 `prompt_cache_key`。`OpenAiConfig::api_key` 是 `ApiKey`：`None`、`Fixed(token)`，或 `Dynamic(Arc<dyn ApiKeySource>)`——每次请求前调用一次取 token（pi 的 `getApiKey`，用于会过期的凭据），取不到时请求以 `ProviderError::ApiKey` 失败、不重试；`OpenAiConfig::headers` 随每个请求发送，`Authorization` 不接受。`RetryPolicy::jitter`（默认 0.25）从退避中随机减去至多这一比例，服务的 `Retry-After` 不减。
 原 `config.policy` 改为注册 `PolicyHook::new(policy)`；`Limits::continue_on_length` 改为 `ContinueOnLength::new(n)`。
 直接调用循环改为 `run_loop(context, prompts, config, &mut LoopControl::new(max_model_requests, approvals, cancel, sink))`，
 其中 `approvals` 是宿主持有的 `&mut ApprovalCache`；使用 `Runner` 时由它管理。

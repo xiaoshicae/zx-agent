@@ -285,6 +285,8 @@ mod tests {
             provider_error: None,
             timestamp: 1,
             duration_ms: None,
+            response_id: None,
+            response_model: None,
         })
     }
 

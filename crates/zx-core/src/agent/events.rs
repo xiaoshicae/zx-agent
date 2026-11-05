@@ -191,6 +191,10 @@ impl Interruption {
 /// request budget; those of an overflow recovery come between two attempts.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "a message_end carries the whole message; events are built once and handed on, and boxing the message would put a Box in every match on it"
+)]
 pub enum AgentEvent {
     /// The first event of a run.
     RunStart {

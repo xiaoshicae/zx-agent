@@ -45,6 +45,8 @@ pub(super) struct Totals {
     pub(super) input_tokens: u64,
     pub(super) output_tokens: u64,
     pub(super) cached_tokens: u64,
+    /// The cost of the responses that had prices; `None` until one had.
+    pub(super) cost_usd: Option<f64>,
 }
 
 struct TextState {
@@ -154,6 +156,9 @@ impl Output {
                 totals.input_tokens = totals.input_tokens.saturating_add(report.usage.input);
                 totals.output_tokens = totals.output_tokens.saturating_add(report.usage.output);
                 totals.cached_tokens = totals.cached_tokens.saturating_add(report.usage.cache_read);
+                if let Some(cost) = report.usage.cost_usd {
+                    totals.cost_usd = Some(totals.cost_usd.unwrap_or(0.0) + cost);
+                }
                 if self.debug {
                     return;
                 }
@@ -393,7 +398,13 @@ fn turn_line(report: &RunReport, elapsed: Duration) -> String {
         };
         format!(" · {} in · {} out{cached}", report.usage.input, report.usage.output)
     };
-    format!("[turn] {requests}{retries}{usage} · {}", elapsed_text(elapsed))
+    let cost = report.usage.cost_usd.map(cost_text).unwrap_or_default();
+    format!("[turn] {requests}{retries}{usage}{cost} · {}", elapsed_text(elapsed))
+}
+
+/// ` · $0.0123`: four decimals, since a turn costs a fraction of a cent.
+pub(super) fn cost_text(cost_usd: f64) -> String {
+    format!(" · ${cost_usd:.4}")
 }
 
 /// `name: <main argument> other=value`, or `name: <arguments as JSON>`; nothing is cut,

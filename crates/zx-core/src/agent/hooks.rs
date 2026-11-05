@@ -123,6 +123,10 @@ const SYSTEM_APPEND: &str =
 /// sources invalidates the summary instead.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "edit", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "an appended message is carried whole; a plan holds a few edits, and boxing the message would change the hook interface"
+)]
 pub enum ContextEdit {
     Append { message: Message },
     ReplaceText { index: usize, text: String },

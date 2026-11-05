@@ -262,6 +262,12 @@ pub(crate) struct BaseArgs {
     #[arg(long, default_value = "OPENAI_API_KEY")]
     pub(crate) api_key_env: String,
 
+    /// Tokens the model's context holds, for the profile's [[models]] entry of --model or in
+    /// place of one. With automatic summaries on, a summary also runs when the estimated
+    /// context reaches the window minus compaction.reserveTokens.
+    #[arg(long, value_name = "TOKENS", value_parser = clap::value_parser!(u64).range(1..))]
+    pub(crate) context_window: Option<u64>,
+
     /// How system prompt changes reach the model when a session is resumed. collapse: fold
     /// every version into the leading system message; works with any server. inline: send
     /// each change where it happened, which keeps the prompt cache and shows the model when
@@ -358,6 +364,23 @@ pub(crate) struct TransportArgs {
     /// Retries for transient provider errors.
     #[arg(long, default_value_t = 3)]
     pub(crate) max_retries: u32,
+
+    /// A header to send with every model request, as NAME: VALUE, such as a gateway's routing
+    /// header. Repeatable. Authorization is refused: the key comes from --api-key-env. The
+    /// value is visible in process listings and is not recorded in the session.
+    #[arg(long = "header", value_name = "NAME: VALUE", value_parser = parse_header)]
+    pub(crate) headers: Vec<(String, String)>,
+}
+
+fn parse_header(text: &str) -> Result<(String, String), String> {
+    let (name, value) = text
+        .split_once(':')
+        .ok_or_else(|| format!("expected NAME: VALUE, got {text:?}"))?;
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(format!("expected NAME: VALUE, got {text:?}"));
+    }
+    Ok((name.to_string(), value.trim().to_string()))
 }
 
 #[derive(Args)]
@@ -404,6 +427,12 @@ pub(crate) struct RequestArgs {
     /// Session file (JSONL). Created if missing; an existing one is continued.
     #[arg(long)]
     pub(crate) session: Option<PathBuf>,
+
+    /// Send the session ID as the request's prompt_cache_key, so that the requests of one
+    /// conversation share the server's prompt cache (OpenAI takes the field; servers that
+    /// reject unknown fields must not get it). The request audit records the key.
+    #[arg(long)]
+    pub(crate) prompt_cache_key: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -740,8 +769,21 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     if let Some(bytes) = options.base.compact_threshold_bytes {
         profile.compaction.trigger_bytes = (bytes > 0).then_some(bytes);
     }
+    // What is known about the models: the profile's entries, and the window given for
+    // this model on the command line.
+    let mut models = std::mem::take(&mut profile.models);
+    if let Some(window) = options.base.context_window {
+        models.entry(options.model.to_string()).or_default().context_window = Some(window);
+    }
+    // With automatic summaries on, a known window adds a token trigger below it.
+    if profile.compaction.trigger_bytes.is_some()
+        && let Some(window) = models.get(options.model).and_then(|meta| meta.context_window)
+    {
+        profile.compaction.derive_trigger_tokens(window);
+    }
     if options.base.no_auto_compact {
         profile.compaction.trigger_bytes = None;
+        profile.compaction.trigger_tokens = None;
     }
     if let Some(execution) = options.base.execution {
         profile.execution = match execution {
@@ -777,7 +819,7 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     let provider = OpenAiCompatible::new(OpenAiConfig {
         base_url: options.base.base_url.clone(),
         // Provider authentication and output filtering each need an owned copy.
-        api_key: api_key.clone(),
+        api_key: api_key.clone().into(),
         idle_timeout: Duration::from_secs(options.transport.idle_timeout_secs),
         max_response_bytes: options.request.max_response_bytes,
         max_sse_event_bytes: options.request.max_sse_event_bytes,
@@ -788,6 +830,8 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
         extra_fields,
         fill_missing_reasoning: options.request.fill_missing_reasoning,
         reasoning_format: options.request.reasoning_format,
+        headers: options.transport.headers.clone(),
+        prompt_cache_key: options.request.prompt_cache_key,
         ..OpenAiConfig::default()
     })?;
     // read_skill and read_output read files on this machine, whatever executor runs commands.
@@ -967,6 +1011,8 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     }
     // The built-in tools skip repeated names; this guards tools registered here later.
     config.spec.validate().map_err(anyhow::Error::msg)?;
+    config.models = models;
+    config.cache_key = options.request.prompt_cache_key.then(|| session.header().id.clone());
     Ok(PreparedSession {
         config,
         retry: RetryPolicy {

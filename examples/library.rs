@@ -48,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
     let api_key = std::env::var("OPENAI_API_KEY").ok();
     let provider = OpenAiCompatible::new(OpenAiConfig {
         base_url: std::env::var("ZX_BASE_URL").unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
-        api_key: api_key.clone(),
+        api_key: api_key.clone().into(),
         ..OpenAiConfig::default()
     })?;
     let mut config = LoopConfig::new(LoopSpec {

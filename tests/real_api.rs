@@ -90,7 +90,7 @@ impl Endpoint {
     fn provider(&self, api_key: String) -> OpenAiCompatible {
         OpenAiCompatible::new(OpenAiConfig {
             base_url: self.base_url.clone(),
-            api_key: Some(api_key),
+            api_key: api_key.into(),
             system_updates: self.system_updates,
             ..OpenAiConfig::default()
         })

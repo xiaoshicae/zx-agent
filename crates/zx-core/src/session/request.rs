@@ -19,6 +19,9 @@ pub struct RequestConfig {
     /// Absent unless set, so sessions recorded before it existed read back unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<Reasoning>,
+    /// The request's prompt cache key, absent unless set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_key: Option<String>,
     pub provider_options: Value,
 }
 
@@ -79,6 +82,7 @@ impl SessionStore {
             tools: request.tools.clone(),
             max_tokens: request.max_tokens,
             reasoning: request.reasoning,
+            cache_key: request.cache_key.clone(),
             provider_options,
         };
         self.ensure_format(3).await?;
@@ -124,6 +128,7 @@ impl SessionStore {
             tools: config.tools.clone(),
             max_tokens: config.max_tokens,
             reasoning: config.reasoning,
+            cache_key: config.cache_key.clone(),
         };
         Ok((config, request))
     }

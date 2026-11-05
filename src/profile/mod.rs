@@ -4,13 +4,14 @@
 mod context;
 pub mod skills;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 
+use crate::ai::{ModelCost, ModelMeta};
 use crate::executor::{Access, check_network};
 use crate::mcp::{check_server_name, tool_name as mcp_tool_name};
 use crate::policy::{AutoApprove, ProgramOptions};
@@ -189,6 +190,9 @@ pub struct Profile {
     pub container: ContainerSettings,
     /// External MCP servers; a profile's `[[mcp]]` list replaces the one it extends.
     pub mcp: Vec<McpServer>,
+    /// What is known about models, by ID (`[[models]]`): the context window and prices. A
+    /// profile's entries override those of the profile it extends, by ID.
+    pub models: HashMap<String, ModelMeta>,
 }
 
 impl Profile {
@@ -237,6 +241,7 @@ impl Profile {
             },
             skills: Vec::new(),
             compaction: compaction::Config::default(),
+            models: HashMap::new(),
             tool_output: output_store::Config::default(),
             execution: Execution::Local,
             container: ContainerSettings::default(),
@@ -307,6 +312,12 @@ impl Profile {
         if let Some(bytes) = raw.compaction.trigger_bytes {
             self.compaction.trigger_bytes = (bytes > 0).then_some(bytes);
         }
+        if let Some(tokens) = raw.compaction.trigger_tokens {
+            self.compaction.trigger_tokens = (tokens > 0).then_some(tokens);
+        }
+        if let Some(tokens) = raw.compaction.reserve_tokens {
+            self.compaction.reserve_tokens = tokens;
+        }
         if let Some(bytes) = raw.compaction.keep_recent_bytes {
             self.compaction.keep_recent_bytes = bytes;
         }
@@ -354,6 +365,30 @@ impl Profile {
         }
         if let Some(servers) = raw.mcp {
             self.mcp = servers;
+        }
+        for model in raw.models.unwrap_or_default() {
+            ensure!(!model.id.trim().is_empty(), "models: an entry has no id");
+            ensure!(
+                model.context_window.is_none_or(|window| window > 0),
+                "models.{}: contextWindow must be greater than zero",
+                model.id
+            );
+            if let Some(cost) = &model.cost {
+                ensure!(
+                    [cost.input, cost.output, cost.cache_read, cost.cache_write]
+                        .iter()
+                        .all(|price| price.is_finite() && *price >= 0.0),
+                    "models.{}: prices must be zero or more, in USD per million tokens",
+                    model.id
+                );
+            }
+            self.models.insert(
+                model.id,
+                ModelMeta {
+                    context_window: model.context_window,
+                    cost: model.cost,
+                },
+            );
         }
         Ok(())
     }
@@ -520,12 +555,27 @@ struct RawProfile {
     compaction: RawCompaction,
     tool_output: RawToolOutput,
     mcp: Option<Vec<McpServer>>,
+    models: Option<Vec<RawModel>>,
+}
+
+/// One `[[models]]` entry.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RawModel {
+    id: String,
+    #[serde(default)]
+    context_window: Option<u64>,
+    #[serde(default)]
+    cost: Option<ModelCost>,
 }
 
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 struct RawCompaction {
     trigger_bytes: Option<usize>,
+    /// 0 disables the token trigger; unset leaves it to the model's context window.
+    trigger_tokens: Option<u64>,
+    reserve_tokens: Option<u64>,
     keep_recent_bytes: Option<usize>,
     max_summary_tokens: Option<u32>,
     timeout_secs: Option<u64>,

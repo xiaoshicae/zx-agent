@@ -22,16 +22,33 @@ pub fn duration_ms(duration: Duration) -> u64 {
     duration.as_millis() as u64
 }
 
-/// Token counts of one response, or a sum of several.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Token counts of one response, or a sum of several. The counts a server did not report
+/// are 0 and left out of the JSON, so records written before they existed read back
+/// unchanged.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Usage {
-    /// Prompt tokens, including those served from the provider cache.
+    /// Prompt tokens, including those served from or written to the provider cache.
     pub input: u64,
+    /// Completion tokens, reasoning included.
     pub output: u64,
     /// Prompt tokens served from the provider cache.
     pub cache_read: u64,
+    /// Prompt tokens written to the provider cache (pi: `cacheWrite`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_write: u64,
+    /// Reasoning tokens, counted within `output` (pi: `reasoning`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub reasoning: u64,
     pub total_tokens: u64,
+    /// What the response cost in USD by the configured prices ([`ModelCost`]); absent
+    /// without prices. A sum adds the known costs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 impl Usage {
@@ -45,7 +62,57 @@ impl Usage {
         self.input = self.input.saturating_add(other.input);
         self.output = self.output.saturating_add(other.output);
         self.cache_read = self.cache_read.saturating_add(other.cache_read);
+        self.cache_write = self.cache_write.saturating_add(other.cache_write);
+        self.reasoning = self.reasoning.saturating_add(other.reasoning);
         self.total_tokens = self.total_tokens.saturating_add(other.total_tokens);
+        self.cost_usd = match (self.cost_usd, other.cost_usd) {
+            (None, None) => None,
+            (mine, theirs) => Some(mine.unwrap_or(0.0) + theirs.unwrap_or(0.0)),
+        };
+    }
+}
+
+/// What the host knows about a model, from its configuration (pi: `Model`). There is no
+/// built-in table of models: a service's models and prices are the host's to configure.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelMeta {
+    /// Tokens the model's context holds, input and output together; `None` when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    /// Prices, for the cost of each response; `None` leaves costs unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<ModelCost>,
+}
+
+/// Prices in USD per million tokens (pi: `ModelCost`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCost {
+    /// Prompt tokens neither served from nor written to the cache.
+    pub input: f64,
+    pub output: f64,
+    #[serde(default)]
+    pub cache_read: f64,
+    #[serde(default)]
+    pub cache_write: f64,
+}
+
+impl ModelCost {
+    /// The cost of `usage` in USD: the prompt tokens outside the cache at the input price,
+    /// the cached ones at theirs, the output at its price.
+    pub fn of(&self, usage: &Usage) -> f64 {
+        let fresh = usage
+            .input
+            .saturating_sub(usage.cache_read)
+            .saturating_sub(usage.cache_write);
+        // Token counts are far below 2^53, so the conversions are exact.
+        let tokens = |count: u64, price: f64| count as f64 * price;
+        (tokens(fresh, self.input)
+            + tokens(usage.cache_read, self.cache_read)
+            + tokens(usage.cache_write, self.cache_write)
+            + tokens(usage.output, self.output))
+            / 1_000_000.0
     }
 }
 
@@ -130,6 +197,8 @@ pub enum ProviderError {
     Protocol,
     /// A configured response or event byte budget was exceeded.
     ResourceLimit,
+    /// The host's API key source failed, so no request was sent.
+    ApiKey,
 }
 
 /// A model response, complete or failed.
@@ -149,6 +218,13 @@ pub struct AssistantMessage {
     pub timestamp: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    /// The ID the server gave the response (pi: `responseId`), when it sent one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_id: Option<String>,
+    /// The model the server reports having used, when it names one other than `model` (pi:
+    /// `responseModel`), such as a dated version of an alias.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_model: Option<String>,
 }
 
 impl AssistantMessage {
@@ -164,6 +240,8 @@ impl AssistantMessage {
             provider_error: None,
             timestamp: now_ms(),
             duration_ms: None,
+            response_id: None,
+            response_model: None,
         }
     }
 
@@ -326,6 +404,11 @@ pub struct Request {
     /// default; each provider maps a level to its own settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<Reasoning>,
+    /// A key for the server's prompt cache, such as the session ID, so that requests of one
+    /// conversation reuse the same cache (pi: `prompt_cache_key` from the session ID).
+    /// Providers send it only when configured to; the request audit records it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_key: Option<String>,
 }
 
 /// How hard a reasoning model thinks before it answers (pi: `ThinkingLevel`).
@@ -484,12 +567,15 @@ mod tests {
                 output: 2,
                 cache_read: 1,
                 total_tokens: 5,
+                ..Usage::default()
             },
             stop_reason: StopReason::ToolUse,
             error_message: None,
             provider_error: None,
             timestamp: 7,
             duration_ms: None,
+            response_id: None,
+            response_model: None,
         }
     }
 
@@ -611,7 +697,8 @@ mod tests {
                 input: 6,
                 output: 4,
                 cache_read: 2,
-                total_tokens: 10
+                total_tokens: 10,
+                ..Usage::default()
             }
         );
     }
@@ -623,12 +710,14 @@ mod tests {
             output: 1,
             cache_read: 0,
             total_tokens: u64::MAX,
+            ..Usage::default()
         };
         total.add(&Usage {
             input: 5,
             output: u64::MAX,
             cache_read: 3,
             total_tokens: 1,
+            ..Usage::default()
         });
         assert_eq!(
             total,
@@ -636,8 +725,74 @@ mod tests {
                 input: u64::MAX,
                 output: u64::MAX,
                 cache_read: 3,
-                total_tokens: u64::MAX
+                total_tokens: u64::MAX,
+                ..Usage::default()
             }
         );
+    }
+
+    #[test]
+    fn usage_sums_cache_writes_reasoning_and_known_costs() {
+        let mut total = Usage {
+            cache_write: 1,
+            reasoning: 2,
+            cost_usd: None,
+            ..Usage::default()
+        };
+        total.add(&Usage {
+            cache_write: 3,
+            reasoning: 4,
+            cost_usd: Some(0.5),
+            ..Usage::default()
+        });
+        total.add(&Usage {
+            cost_usd: Some(0.25),
+            ..Usage::default()
+        });
+        assert_eq!((total.cache_write, total.reasoning, total.cost_usd), (4, 6, Some(0.75)));
+        // Counts a server did not report stay out of the JSON.
+        let json = serde_json::to_value(Usage {
+            input: 1,
+            output: 2,
+            cache_read: 0,
+            total_tokens: 3,
+            ..Usage::default()
+        })
+        .unwrap();
+        assert_eq!(json, json!({"input": 1, "output": 2, "cacheRead": 0, "totalTokens": 3}));
+        let json = serde_json::to_value(total).unwrap();
+        assert_eq!(
+            (json["cacheWrite"].as_u64(), json["reasoning"].as_u64()),
+            (Some(4), Some(6))
+        );
+        assert_eq!(json["costUsd"].as_f64(), Some(0.75));
+    }
+
+    #[test]
+    fn prices_apply_per_million_tokens_with_the_cache_priced_separately() {
+        let cost = ModelCost {
+            input: 1.0,
+            output: 4.0,
+            cache_read: 0.1,
+            cache_write: 2.0,
+        };
+        let usage = Usage {
+            input: 1_000_000,
+            output: 500_000,
+            cache_read: 200_000,
+            cache_write: 100_000,
+            reasoning: 100_000,
+            total_tokens: 1_500_000,
+            cost_usd: None,
+        };
+        // 700k fresh at $1 + 200k cached at $0.1 + 100k written at $2 + 500k out at $4.
+        assert!((cost.of(&usage) - (0.7 + 0.02 + 0.2 + 2.0)).abs() < 1e-9);
+        // A cache count above the input never underflows.
+        let odd = Usage {
+            input: 10,
+            cache_read: 20,
+            ..Usage::default()
+        };
+        assert!((cost.of(&odd) - 20.0 * 0.1 / 1_000_000.0).abs() < 1e-12);
     }
 }

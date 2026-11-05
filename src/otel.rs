@@ -698,6 +698,7 @@ mod tests {
             output,
             cache_read: 0,
             total_tokens: input + output,
+            ..Usage::default()
         }
     }
 
@@ -714,6 +715,8 @@ mod tests {
                 provider_error: None,
                 timestamp: 0,
                 duration_ms: None,
+                response_id: None,
+                response_model: None,
             }),
             entry_id: None,
         }

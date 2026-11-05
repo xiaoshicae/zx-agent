@@ -1,11 +1,13 @@
 //! Bridge the loop's session operations to the Runner's session store.
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{ContextPreparation, Emit, HookChain, SessionRuntime};
-use crate::ai::{Message, Provider, Request, ToolCall, Usage};
+use crate::ai::{Message, ModelMeta, Provider, Request, ToolCall, Usage};
 use crate::compaction::{self, Trigger};
 use crate::session::{CustomMessage, Entry, RequestSource, SessionStore};
 
@@ -23,6 +25,8 @@ pub(super) struct RunnerSessionRuntime<'a> {
     pub(super) compaction_pause: &'a mut Option<String>,
     /// The attempt this host serves, for the events of an automatic compaction.
     pub(super) attempt: u32,
+    /// Prices by model, for the cost of summary responses.
+    pub(super) models: &'a HashMap<String, ModelMeta>,
 }
 
 #[async_trait]
@@ -82,12 +86,23 @@ impl SessionRuntime for RunnerSessionRuntime<'_> {
     }
 
     async fn prepare_context(&mut self, cancel: &CancellationToken) -> ContextPreparation {
-        let Some(limit) = self.compaction.trigger_bytes else {
+        if !self.compaction.automatic() {
             return ContextPreparation::Unchanged;
-        };
-        match compaction::context_bytes(&self.session.messages()) {
-            Ok(bytes) if bytes <= limit => return ContextPreparation::Unchanged,
-            Ok(_) => {}
+        }
+        // Either trigger runs a summary: the bytes of the context, or the tokens the last
+        // response reported plus an estimate for what came after it.
+        let messages = self.session.messages();
+        let measured = compaction::context_bytes(&messages).and_then(|bytes| {
+            let over_bytes = self.compaction.trigger_bytes.is_some_and(|limit| bytes > limit);
+            let over_tokens = match self.compaction.trigger_tokens {
+                Some(limit) => compaction::context_tokens(&messages)? > limit,
+                None => false,
+            };
+            Ok(over_bytes || over_tokens)
+        });
+        match measured {
+            Ok(false) => return ContextPreparation::Unchanged,
+            Ok(true) => {}
             Err(error) => {
                 return ContextPreparation::Failed {
                     error: format!("cannot measure context: {error:#}"),
@@ -114,6 +129,7 @@ impl SessionRuntime for RunnerSessionRuntime<'_> {
             to: self.to,
             hooks: self.hooks,
             attempt: self.attempt,
+            models: self.models,
         };
         let (report, messages) = host.run(Trigger::Automatic, cancel).await;
         if let Some(error) = report.persistence_error {

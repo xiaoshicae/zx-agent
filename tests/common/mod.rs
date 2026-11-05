@@ -218,6 +218,7 @@ pub fn fast_retry(max_retries: u32) -> RetryPolicy {
         max_retries,
         base_delay: Duration::from_millis(10),
         max_delay: Duration::from_millis(50),
+        ..RetryPolicy::default()
     }
 }
 

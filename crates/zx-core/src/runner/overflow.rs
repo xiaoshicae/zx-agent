@@ -1,12 +1,14 @@
 //! Recovery from a request the model rejected as too long for its context (pi: the overflow
 //! branch of AgentSession's post-run recovery, coding-agent/src/core/agent-session.ts).
 
+use std::collections::HashMap;
+
 use tokio_util::sync::CancellationToken;
 
 use super::accounting::RunAccounting;
 use super::omit_failed_attempt;
 use crate::agent::{AgentEvent, Emit, HookChain, LoopOutcome};
-use crate::ai::Provider;
+use crate::ai::{ModelMeta, Provider};
 use crate::compaction::{self, Trigger};
 use crate::session::SessionStore;
 
@@ -22,6 +24,8 @@ pub(super) struct OverflowRecovery<'a> {
     /// The attempt that failed, for the events of the summary.
     pub attempt: u32,
     pub cancel: &'a CancellationToken,
+    /// Prices by model, for the cost of the summary response.
+    pub models: &'a HashMap<String, ModelMeta>,
 }
 
 impl OverflowRecovery<'_> {
@@ -50,6 +54,7 @@ impl OverflowRecovery<'_> {
             to: self.to,
             hooks: self.hooks,
             attempt: self.attempt,
+            models: self.models,
         };
         let (report, messages) = host.run(Trigger::Overflow, self.cancel).await;
         accounting.model_requests = accounting.model_requests.saturating_add(report.requests);

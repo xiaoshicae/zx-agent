@@ -118,6 +118,7 @@ impl Runner {
             },
             hooks: &self.config.hooks,
             attempt: 1,
+            models: &self.config.models,
         };
         let report = host.run(Trigger::Manual, &child).await.0;
         if report.outcome == compaction::Outcome::Completed {
@@ -281,6 +282,7 @@ impl Runner {
                     compaction,
                     compaction_pause: &mut *compaction_pause,
                     attempt,
+                    models: &config.models,
                 };
                 let mut control = LoopControl::new(
                     accounting.remaining_model_requests(limits),
@@ -317,7 +319,7 @@ impl Runner {
                 // A context the model rejects as too long fails again however often it is
                 // sent; with automatic compaction enabled, compact once and continue (pi:
                 // AgentSession's overflow recovery). Not a retry: it has its own limit.
-                if is_context_overflow(&failed) && compaction.trigger_bytes.is_some() {
+                if is_context_overflow(&failed) && compaction.automatic() {
                     let error = last_error.clone().unwrap_or_default();
                     let refusal = if overflow_recovered && task_turns <= 1 {
                         Some("the context still overflowed after compacting it once".to_string())
@@ -346,6 +348,7 @@ impl Runner {
                         compaction_pause: &mut *compaction_pause,
                         attempt,
                         cancel: &run_cancel,
+                        models: &config.models,
                     };
                     match recovery.run(&error, entry_id.as_deref(), &mut accounting).await {
                         Ok(()) => {

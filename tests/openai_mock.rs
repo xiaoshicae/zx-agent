@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use common::mock_server::{MockServer, Reply};
 use common::{CancelOnFirstDelta, Collect, RunnerSetup, config, fast_retry};
 use zx_agent::agent::{AgentEvent, Event, EventSink};
-use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
+use zx_agent::ai::openai::{ApiKey, OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::{Message, PREAMBLE, ProviderError, StopReason, SystemPrompt};
 use zx_agent::compaction::Config;
@@ -33,7 +33,9 @@ fn setup(server: &MockServer, idle_timeout: Duration) -> RunnerSetup {
 
 fn setup_with_provider(server: &MockServer, mut settings: OpenAiConfig) -> RunnerSetup {
     settings.base_url = server.base_url.clone();
-    settings.api_key = Some("test-key".into());
+    if matches!(settings.api_key, ApiKey::None) {
+        settings.api_key = "test-key".into();
+    }
     settings.use_system_proxy = false;
     let provider = OpenAiCompatible::new(settings).unwrap();
     let mut config = config(Arc::new(provider), vec![Arc::new(BashTool::default())]);
@@ -454,4 +456,121 @@ async fn an_overflow_error_code_makes_the_runner_compact_and_continue() {
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
     assert_eq!(report.final_text, "answer");
     assert_eq!(server.requests().len(), 3);
+}
+
+/// Hands out `key-1`, `key-2`, ... or fails after `until` keys.
+struct RotatingKeys {
+    issued: std::sync::atomic::AtomicUsize,
+    until: usize,
+}
+
+impl zx_agent::ai::openai::ApiKeySource for RotatingKeys {
+    fn api_key(&self) -> Result<String, String> {
+        let n = self.issued.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        if n > self.until {
+            return Err("the token service is down".to_string());
+        }
+        Ok(format!("key-{n}"))
+    }
+}
+
+#[tokio::test]
+async fn custom_headers_and_a_dynamic_api_key_reach_every_request() {
+    let server = MockServer::start(vec![Reply::text("one"), Reply::text("two")]).await;
+    let (mut runner, _) = setup_with_provider(
+        &server,
+        OpenAiConfig {
+            headers: vec![("X-Route".into(), "blue".into())],
+            api_key: zx_agent::ai::openai::ApiKey::Dynamic(Arc::new(RotatingKeys {
+                issued: Default::default(),
+                until: 9,
+            })),
+            ..OpenAiConfig::default()
+        },
+    )
+    .build();
+
+    runner.run("first", &CancellationToken::new()).await;
+    runner.run("second", &CancellationToken::new()).await;
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    for (request, key) in requests.iter().zip(["key-1", "key-2"]) {
+        assert!(request.headers.contains("x-route: blue"), "{}", request.headers);
+        assert!(
+            request.headers.contains(&format!("authorization: bearer {key}")),
+            "{}",
+            request.headers
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_failing_api_key_source_fails_the_request_without_sending_or_retrying() {
+    let server = MockServer::start(vec![Reply::text("never")]).await;
+    let (mut runner, _) = RunnerSetup {
+        retry: fast_retry(3),
+        ..setup_with_provider(
+            &server,
+            OpenAiConfig {
+                api_key: zx_agent::ai::openai::ApiKey::Dynamic(Arc::new(RotatingKeys {
+                    issued: Default::default(),
+                    until: 0,
+                })),
+                ..OpenAiConfig::default()
+            },
+        )
+    }
+    .build();
+
+    let report = runner.run("go", &CancellationToken::new()).await;
+
+    assert_eq!((report.outcome, report.retries), (RunOutcome::Error, 0));
+    assert_eq!(provider_error(&runner), ProviderError::ApiKey);
+    assert!(
+        report
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("cannot get an API key: the token service is down"),
+        "{:?}",
+        report.error
+    );
+    assert!(server.requests().is_empty(), "nothing is sent without a key");
+}
+
+#[tokio::test]
+async fn the_cache_key_is_sent_as_prompt_cache_key_only_when_the_provider_is_told_to() {
+    let server = MockServer::start(vec![Reply::text("one"), Reply::text("two")]).await;
+    let mut setup = setup_with_provider(
+        &server,
+        OpenAiConfig {
+            prompt_cache_key: true,
+            ..OpenAiConfig::default()
+        },
+    );
+    setup.config.cache_key = Some("session-42".into());
+    let (mut runner, _) = setup.build();
+    runner.run("go", &CancellationToken::new()).await;
+    assert_eq!(server.requests()[0].body["prompt_cache_key"], "session-42");
+    // The audit replays the request with its key.
+    let replayed = runner
+        .session()
+        .entries()
+        .iter()
+        .find_map(|entry| match entry {
+            zx_agent::session::Entry::RequestStarted(started) => {
+                Some(runner.session().replay_request(&started.id).unwrap())
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(replayed.0.cache_key.as_deref(), Some("session-42"));
+    assert_eq!(replayed.1.cache_key.as_deref(), Some("session-42"));
+
+    let mut plain = setup_with_provider(&server, OpenAiConfig::default());
+    plain.config.cache_key = Some("session-42".into());
+    let (mut runner, _) = plain.build();
+    runner.run("go", &CancellationToken::new()).await;
+    assert!(server.requests()[1].body.get("prompt_cache_key").is_none());
 }

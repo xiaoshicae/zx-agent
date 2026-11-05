@@ -1063,6 +1063,7 @@ mod tests {
             .await
             .unwrap();
         let request = crate::ai::Request {
+            cache_key: None,
             model: "m".into(),
             messages: store.messages(),
             tools: vec![],

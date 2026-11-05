@@ -147,12 +147,15 @@ impl Provider for FauxProvider {
                             output: 5,
                             cache_read: 0,
                             total_tokens: 15,
+                            ..Usage::default()
                         },
                         stop_reason: if aborted { StopReason::Aborted } else { stop },
                         error_message: aborted.then(|| "Request was aborted".to_string()),
                         provider_error: None,
                         timestamp,
                         duration_ms: Some(0),
+                        response_id: None,
+                        response_model: None,
                     };
                     match message.stop_reason {
                         StopReason::Error | StopReason::Aborted => StreamEvent::Error(message),
@@ -199,6 +202,7 @@ mod tests {
             tools: vec![],
             max_tokens: None,
             reasoning: None,
+            cache_key: None,
         };
         provider.stream(request, CancellationToken::new()).collect().await
     }
@@ -262,6 +266,7 @@ mod tests {
             tools: vec![],
             max_tokens: None,
             reasoning: None,
+            cache_key: None,
         };
         let mut receiver = provider.stream(request, CancellationToken::new());
         let mut deltas = 0;

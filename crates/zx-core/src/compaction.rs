@@ -1,5 +1,6 @@
 //! Bounded, auditable summarization owned by the session host, not the agent loop.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::{Result, bail, ensure};
@@ -9,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent::{AgentEvent, Emit, HookChain, RequestKind};
 use crate::ai::{
-    AssistantMessage, ContentBlock, Delta, Message, PREAMBLE, Provider, Request, StopReason, StreamEvent,
+    AssistantMessage, ContentBlock, Delta, Message, ModelMeta, PREAMBLE, Provider, Request, StopReason, StreamEvent,
     SystemMessage, SystemPrompt, Usage, UserMessageKind, duration_ms, now_ms,
 };
 pub use crate::session::SummaryMode;
@@ -50,8 +51,16 @@ struct ModelFact {
 /// automatic trigger; manual compaction still uses the remaining bounded settings.
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// Serialized transcript threshold; None disables automatic summaries.
+    /// Serialized transcript threshold; None disables the byte trigger of automatic
+    /// summaries.
     pub trigger_bytes: Option<usize>,
+    /// Estimated context tokens above which an automatic summary runs, from the last
+    /// response's reported usage and the bytes added since ([`context_tokens`]); None
+    /// disables the token trigger. Either trigger runs a summary.
+    pub trigger_tokens: Option<u64>,
+    /// Tokens kept free below a model's context window when the token trigger is derived
+    /// from the window ([`Config::derive_trigger_tokens`]); pi's `reserveTokens`.
+    pub reserve_tokens: u64,
     /// Recent message budget. The complete latest input and all system messages survive.
     pub keep_recent_bytes: usize,
     /// Output token budget for the summary request, independently of task requests.
@@ -62,10 +71,15 @@ pub struct Config {
     pub mode: SummaryMode,
 }
 
+/// pi's default `reserveTokens` (coding-agent/src/core/compaction/compaction.ts).
+pub const DEFAULT_RESERVE_TOKENS: u64 = 16_384;
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             trigger_bytes: None,
+            trigger_tokens: None,
+            reserve_tokens: DEFAULT_RESERVE_TOKENS,
             keep_recent_bytes: 64 * 1024,
             max_summary_tokens: 2048,
             timeout: Duration::from_secs(120),
@@ -75,9 +89,39 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Whether automatic summaries are on: a byte or a token trigger is set.
+    pub fn automatic(&self) -> bool {
+        self.trigger_bytes.is_some() || self.trigger_tokens.is_some()
+    }
+
+    /// Set the token trigger from a model's context window, `reserve_tokens` below it (pi:
+    /// `contextWindow - reserveTokens`), unless one is set already. A window no larger than
+    /// the reserve leaves the trigger unset.
+    pub fn derive_trigger_tokens(&mut self, context_window: u64) {
+        let trigger = context_window.saturating_sub(self.reserve_tokens);
+        if self.trigger_tokens.is_none() && trigger > 0 && Self::leaves_room(trigger, self.keep_recent_bytes) {
+            self.trigger_tokens = Some(trigger);
+        }
+    }
+
+    /// Whether a token trigger lies above the recent messages a summary keeps, as
+    /// `triggerBytes` must: a summary could otherwise never bring the context under it.
+    fn leaves_room(trigger_tokens: u64, keep_recent_bytes: usize) -> bool {
+        trigger_tokens.saturating_mul(BYTES_PER_TOKEN as u64) > keep_recent_bytes as u64
+    }
+
     /// Reject budgets that cannot make progress or cannot bound external waiting.
     pub fn validate(&self) -> Result<()> {
         ensure!(self.keep_recent_bytes > 0, "keepRecentBytes must be greater than zero");
+        ensure!(
+            self.trigger_tokens.is_none_or(|tokens| tokens > 0),
+            "triggerTokens must be greater than zero (or absent to disable the token trigger)"
+        );
+        ensure!(
+            self.trigger_tokens
+                .is_none_or(|tokens| Self::leaves_room(tokens, self.keep_recent_bytes)),
+            "triggerTokens must exceed a quarter of keepRecentBytes, the tokens the kept recent messages take"
+        );
         ensure!(
             self.trigger_bytes.is_none_or(|bytes| bytes > self.keep_recent_bytes),
             "triggerBytes must exceed keepRecentBytes (or be zero to disable auto compaction)"
@@ -138,6 +182,35 @@ pub(crate) enum Trigger {
 /// tokenizer or a model context-window guarantee.
 pub fn context_bytes(messages: &[Message]) -> Result<usize> {
     Ok(serde_json::to_vec(&without_details(messages))?.len())
+}
+
+/// Bytes of serialized context that count as one token in an estimate (pi:
+/// `estimateTokens`, `Math.ceil(chars / 4)`).
+const BYTES_PER_TOKEN: usize = 4;
+
+/// An estimate of the tokens the next request's context holds (pi: `estimateContextTokens`):
+/// the prompt and output tokens the last answer with reported usage counted, plus a quarter
+/// of the bytes of the messages after it; without such an answer, a quarter of all bytes.
+/// Only an estimate: the usage counts the request as it was sent, and bytes are not tokens.
+pub fn context_tokens(messages: &[Message]) -> Result<u64> {
+    let counted = messages.iter().rposition(|message| {
+        matches!(message, Message::Assistant(answer)
+            if answer.usage.total_tokens > 0 && !matches!(answer.stop_reason, StopReason::Error | StopReason::Aborted))
+    });
+    let (known, rest) = match counted {
+        Some(index) => {
+            let Message::Assistant(answer) = &messages[index] else {
+                unreachable!("rposition found an assistant message")
+            };
+            (
+                answer.usage.input.saturating_add(answer.usage.output),
+                &messages[index + 1..],
+            )
+        }
+        None => (0, messages),
+    };
+    let bytes = context_bytes(rest)?;
+    Ok(known.saturating_add(bytes.div_ceil(BYTES_PER_TOKEN) as u64))
 }
 
 /// Bytes of one message as a model may see it.
@@ -233,6 +306,8 @@ pub(crate) struct Host<'a> {
     pub hooks: &'a HookChain,
     /// The attempt of the run that compacts; 1 for a manual compaction.
     pub attempt: u32,
+    /// Prices by model, for the cost of the summary response.
+    pub models: &'a HashMap<String, ModelMeta>,
 }
 
 struct Candidate {
@@ -374,7 +449,7 @@ impl Host<'_> {
             Ok(None) => {
                 let (reason, remedy) = match trigger {
                     Trigger::Manual => return (report, None),
-                    Trigger::Automatic => ("context exceeds triggerBytes", "raise the budget"),
+                    Trigger::Automatic => ("context exceeds triggerBytes or triggerTokens", "raise the budget"),
                     Trigger::Overflow => (
                         "the model rejected the context as too long",
                         "lower keepRecentBytes, use a model with a larger context",
@@ -455,6 +530,7 @@ impl Host<'_> {
             tools: Vec::new(),
             max_tokens: Some(self.config.max_summary_tokens),
             reasoning: None,
+            cache_key: None,
         };
         let source = RequestSource::Summary {
             attempt_id: attempt.clone(),
@@ -602,9 +678,12 @@ impl Host<'_> {
                 match event {
                     Some(StreamEvent::Start) => {}
                     Some(StreamEvent::Delta(delta)) => streamed.add(&delta)?,
-                    Some(StreamEvent::Done(message) | StreamEvent::Error(message)) => {
+                    Some(StreamEvent::Done(mut message) | StreamEvent::Error(mut message)) => {
                         // Also bounds a provider that delivers its content without deltas.
                         ResponseBytes::of(&message).check()?;
+                        if let Some(cost) = self.models.get(&message.model).and_then(|meta| meta.cost) {
+                            message.usage.cost_usd = Some(cost.of(&message.usage));
+                        }
                         return Ok(message);
                     }
                     None => return Err("summary stream ended without a final event".into()),

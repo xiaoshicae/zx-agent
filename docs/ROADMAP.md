@@ -534,7 +534,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P7 | 插件与 MCP | 已完成（PR #41）：范围按 D8 收窄，评审稿已合入（PR #36）并经用户确认；模块 A（Extension 接口，PR #38）、B1（MCP 客户端库，PR #40）、B2（CLI 接入与文档，PR #41）已完成；真实 MCP 服务器的验收待选定服务器；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已完成（PR #23），A2–A8（扩展 API）已完成（PR #25） |
 | P8 | 嵌入协议 `acp` | 不做（2026-11-02 用户决定，D10） |
 | P9 | 可选增强 | 进行中：token 预算（PR #47）、OpenTelemetry 追踪（PR #49）、crate 拆分（PR #52）、通用化整理（PR #54）、chat 交互体验（2026-11-05，见下文）已完成；剩更多 provider（如 Anthropic）。其余各项按 D10 不做或取消 |
-| P10 | 与 pi 的能力对齐 | 进行中：2026-11-05 对照 pi 列出 14 项缺口，见下文 P10；① 上下文超长后自动恢复已完成（PR #56）；② 容器沙箱已完成（PR #57）；③ edit 与 write 工具已完成（PR #58）；④ grep、find、ls 已完成（PR #59）；⑤ 运行中可调整的配置已完成：⑤a 推理强度（PR #60）、⑤b 续跑（PR #61）、⑤c 请求前替换模型与推理强度的钩子（PR #65）；⑥a 会话目录与续接已完成（PR #67）；⑥b fork 已完成（PR #68）；⑥c 会话内切换分支已完成（PR 待开）；⑦ 扩展能力与 ⑨ 消息队列已完成（PR 待开） |
+| P10 | 与 pi 的能力对齐 | 进行中：2026-11-05 对照 pi 列出 14 项缺口，见下文 P10；① 上下文超长后自动恢复已完成（PR #56）；② 容器沙箱已完成（PR #57）；③ edit 与 write 工具已完成（PR #58）；④ grep、find、ls 已完成（PR #59）；⑤ 运行中可调整的配置已完成：⑤a 推理强度（PR #60）、⑤b 续跑（PR #61）、⑤c 请求前替换模型与推理强度的钩子（PR #65）；⑥a 会话目录与续接已完成（PR #67）；⑥b fork 已完成（PR #68）；⑥c 会话内切换分支已完成（PR 待开）；⑦ 扩展能力与 ⑨ 消息队列已完成（PR 待开）；⑧ 模型元数据与计量已完成（PR 待开） |
 
 ### P0 场景默认值移出内核
 
@@ -1380,7 +1380,7 @@ chat 交互体验第三批（2026-11-05，基于合并 PR #65 之后的 `829afc8
 - [x] **⑤ 运行中可调整的配置**（中高；已完成（⑤a PR #60、⑤b PR #61、⑤c PR #65），2026-11-05，见下方实施记录）。推理强度作为一等配置并可在空闲时修改、变化写入会话（目前只能用 `--request-field` 静态传）；每次请求前可替换模型与推理强度的钩子（pi 的 `prepareRequest`、`prepareNextTurn`，`packages/agent/src/agent-loop.ts:195,228`；zx 的 `set_model` 只能空闲时调用，`crates/zx-core/src/agent_session.rs:222`）；不加新输入的续跑（pi 的 `continue()`；`Runner::run` 必须带提示词）。推理强度的写法遵守 D10：各 provider 显式映射。
 - [x] **⑥ 会话导航**（中；⑥a 会话目录与续接已完成（PR #67），⑥b fork 已完成（PR #68），⑥c 会话内切换分支已完成（PR 待开），2026-11-05，见下方实施记录）。列出会话、续接最近一次、fork 成新会话、在分支间切换（`packages/coding-agent/src/core/session-manager.ts`）。zx 只有 `--session <path>`；`SessionStore::branch`（`crates/zx-core/src/session.rs:486`）只在测试中调用。补 SDK 接口与 CLI，`chat` 加对应命令。
 - [x] **⑦ 扩展能力**（中高，嵌入；已完成（PR 待开），2026-11-05，见下方实施记录）。pi 的扩展可写自定义条目（`appendEntry`）、注入非用户消息（`sendMessage`）、运行中启停工具（`setActiveTools`）、注册命令（`registerCommand`）（`packages/coding-agent/src/core/extensions/types.ts`）。zx 的条目只有 9 种内部类型（`crates/zx-core/src/session.rs:142-151`），工具在构建时固定。自定义消息与“会话投影是上下文的唯一来源”（不变量 6）如何共存，先出方案再实施。
-- [ ] **⑧ 模型层的元数据与计量**（中）。在配置中写模型的上下文窗口、单价与输入类型（不内置厂商模型表，D10），用来按 token 设摘要阈值（现为字节）并计算成本；用量增加 cacheWrite 与推理 token；会话记录应答方返回的模型名与响应 ID；按会话的 prompt cache key；自定义请求头；每次请求动态取 API key；`Retry-After` 支持 HTTP 日期与毫秒写法，退避加抖动。
+- [x] **⑧ 模型层的元数据与计量**（中；已完成（PR 待开），2026-11-05，见下方实施记录）。在配置中写模型的上下文窗口、单价与输入类型（不内置厂商模型表，D10），用来按 token 设摘要阈值（现为字节）并计算成本；用量增加 cacheWrite 与推理 token；会话记录应答方返回的模型名与响应 ID；按会话的 prompt cache key；自定义请求头；每次请求动态取 API key；`Retry-After` 支持 HTTP 日期与毫秒写法，退避加抖动。
 - [x] **⑨ 消息队列**（低中；已完成（PR 待开，与 ⑦ 同一提交），2026-11-05，见下方实施记录）。队列模式 one-at-a-time（pi 默认，`packages/agent/src/types.ts:55`）；zx 一次取完（`crates/zx-core/src/agent/agent_loop/context.rs:128`）。队列消息目前只能是纯文本。
 - [ ] **⑩ 可观测**（中）。指标（运行耗时、结果计数、token、工具与 MCP 调用耗时）与跨进程传递 trace（W3C `traceparent`）（`packages/telemetry`）。zx 只导出 trace，trace ID 由 SDK 生成。待定：指标要开 opentelemetry 系列的 `metrics` feature，锁文件可能增加包。
 - [ ] **⑪ 行为评测框架**（中）。按 profile 运行场景用例，支持重复次数、两种变体配对比较、只用合成数据、产物落盘（`packages/evals`）。zx 只有一项摘要评测（`tests/real_api.rs`）。框架与离线用例可直接做；真实运行每次都要用户授权（红线 9）。
@@ -1404,6 +1404,25 @@ chat 交互体验第三批（2026-11-05，基于合并 PR #65 之后的 `829afc8
 - 本机 macOS 验证：stable 下 828 项通过、7 项付费测试跳过（基线 816 项，PR #55 的实测）；fmt、clippy、严格 Rustdoc 与 Rust 1.88.0 的全目标检查通过；Rust 1.88.0 下没有运行测试。自查脚本在改动的文件中只列出原有的 1 处（`src/chat/output.rs` 的 `let _ =`）。未新增依赖。没有对真实模型服务验证超长时的错误格式。
 
 ⑥ 分三步，各一个 PR：⑥a 会话目录、列出与续接；⑥b fork 成新会话（`--fork`、`/fork`，头部记下来源会话）；⑥c 会话内切换分支（`AgentSession` 的分支接口，chat 的 `/tree` 与 `/branch`）。会话目录的默认位置经用户决定（D12）。
+
+⑧ 实施记录（2026-11-05，PR 待开，基于 ⑦、⑨ 的提交 `6c53c48`）：
+
+| 环节 | 做法 |
+|---|---|
+| 元数据 | `ai::ModelMeta { context_window, cost }`、`ai::ModelCost`（美元每百万 token，`input` 为不经缓存的提示词 token）；没有内置模型表（D10）。配置：profile 的 `[[models]]`（按 `id` 覆盖继承的项，`contextWindow` 须大于零、单价不小于零）与 `--context-window`；SDK 为 `LoopConfig::models` |
+| 用量 | `Usage` 新增 `cache_write`、`reasoning`（为 0 时 JSON 省略）与 `cost_usd`（无单价时省略），`add` 把已知的成本相加；OpenAI 兼容 provider 读 `prompt_tokens_details.cache_write_tokens` 与 `completion_tokens_details.reasoning_tokens`（pi 的 `parseChunkUsage`）。成本在循环中按请求的模型算（`request_model`），摘要请求在 `compaction::Host` 中算；`RunReport::usage` 随之带成本，chat 的 `[turn]` 与 `/status` 显示 `$x.xxxx` |
+| 回复元数据 | `AssistantMessage` 新增 `response_id`（首个 chunk 的 `id`）与 `response_model`（chunk 的 `model` 与请求的不同时记下），都可选，随消息写入会话 |
+| token 阈值 | `compaction::Config` 新增 `trigger_tokens`、`reserve_tokens`（默认 16384）；`compaction::context_tokens` 按 pi 的 `estimateContextTokens` 估算：最近一次成功回复的输入加输出 token，加上其后消息字节数除以 4。`RunnerSessionRuntime::prepare_context` 两个阈值任一超过即摘要；`Config::automatic()` 取代各处的 `trigger_bytes.is_some()`。`derive_trigger_tokens(窗口)` 在没有显式值且“窗口减 reserve”高于 `keepRecentBytes` 折算的 token 数时设定（否则摘要永远压不到阈值以下，运行会以“无法压缩”失败）；CLI 在自动摘要开启且窗口已知时调用。`validate` 检查 `triggerTokens × 4 > keepRecentBytes` |
+| 缓存键 | `Request::cache_key`，`LoopConfig::cache_key` 随每个任务请求发送；`RequestConfig` 记录 `cacheKey`，`replay_request` 还原；`OpenAiConfig::prompt_cache_key` 为 true 时写成请求体的 `prompt_cache_key`（记入 `request_options` 的 `promptCacheKey`，`replay_body` 照用），与 `--request-field` 的同名字段冲突时报错；CLI 的 `--prompt-cache-key` 以会话 ID 为键 |
+| 请求头与 key | `OpenAiConfig::headers`（`--header`，可重复；名字与值在构造时检查，`Authorization` 拒绝；不写入会话）；`OpenAiConfig::api_key` 改为 `ApiKey { None, Fixed, Dynamic(Arc<dyn ApiKeySource>) }`，`Dynamic` 每次请求前取一次（pi 的 `getApiKey`），失败为新的 `ProviderError::ApiKey`：不发请求、不重试、不算超长。`From<Option<String>>` 等让 `api_key: key.into()` 照常写 |
+| Retry-After 与抖动 | `retry_after_ms`：`retry-after-ms`（毫秒，可带小数）、`retry-after`（秒，可带小数；或 RFC 9110 的 IMF-fixdate，自行解析，不引入依赖；已过去的日期为 0）。`RetryPolicy::jitter`（默认 0.25）：`delay_for` 从退避中随机减去至多这一比例（pi 的 `provider-retry.ts`），服务的提示原样使用，仍不超过 `max_delay`；随机数来自标准库随机种子的哈希，不引入 rand |
+| 不兼容的变更 | `Usage` 不再 `Eq`，新增字段（按字段写全的字面量要补 `..Usage::default()`）；`AssistantMessage` 新增两个字段；`Request` 新增 `cache_key`；`RetryPolicy` 新增 `jitter`；`OpenAiConfig::api_key` 类型改变；`ProviderError` 新增变体；`compaction::Config` 新增两个字段；`compaction::Host` 新增 `models` |
+| 与 pi 的不同 | 见 README“与 pi 的差异”的“模型元数据与计量”一行 |
+
+- clippy：`AgentEvent` 与 `ContextEdit` 因消息变大触发 `large_enum_variant`，以 `#[expect(..., reason)]` 标注（事件与编辑计划都是建一次就交出去，装箱会改每一处匹配与钩子接口）。
+- 测试：新增 21 项：`crates/zx-ai/src/types.rs` 单元 2 项（用量相加与 JSON 省略、单价计算），`openai.rs` 单元 6 项（缓存写入与推理 token、响应 ID 与模型名、三种 `Retry-After`、HTTP 日期、缓存键只在开启时发送并可还原、请求头与 key 的检查），`retry.rs` 单元 1 项（抖动的范围与服务提示），`tests/openai_mock.rs` 3 项（请求头与每次请求取 key、key 来源失败、`prompt_cache_key`），`tests/model_meta.rs` 6 项（见测试文件表），`tests/chat_cli.rs` 3 项（`[[models]]` 的成本显示与非法单价、`--header` 与 `--prompt-cache-key`、`--context-window` 的 token 阈值与不触发的三种情况）。既有测试的调整：`retry.rs` 的服务提示测试改用 `jitter: 0.0`；为新增字段补写法的字面量 21 处。
+- 反向验证：分别不按活跃单价算成本、`prompt_cache_key` 在关闭时也发送、HTTP 日期当作无效、token 阈值不触发摘要，每次都有对应测试失败，修改已还原。
+- 本机 macOS 验证：见下文“本次 PR 的验证”。
 
 ⑦、⑨ 实施记录（2026-11-05，PR 待开，基于 ⑥c 的提交 `19a0d8b`）：
 

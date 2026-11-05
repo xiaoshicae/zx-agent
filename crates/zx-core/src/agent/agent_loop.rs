@@ -26,8 +26,8 @@ use super::queue::{MessageQueues, Queue, QueueMode, QueuedMessage};
 use super::session_runtime::{ContextPreparation, SessionRuntime};
 use super::tool::{ActiveTools, Effects, ExecutionMode, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput};
 use crate::ai::{
-    AssistantMessage, Message, Provider, Reasoning, Request, StopReason, StreamEvent, SystemMessage, SystemPrompt,
-    ToolCall, ToolResultMessage, Usage, UserMessageKind, duration_ms, now_ms,
+    AssistantMessage, Message, ModelMeta, Provider, Reasoning, Request, StopReason, StreamEvent, SystemMessage,
+    SystemPrompt, ToolCall, ToolResultMessage, Usage, UserMessageKind, duration_ms, now_ms,
 };
 use crate::interaction::{Approval, ApprovalCache, ApprovalRequest, DEFAULT_APPROVAL_TIMEOUT, Interaction, NoHuman};
 
@@ -99,6 +99,13 @@ pub struct LoopConfig {
     pub active_tools: Arc<ActiveTools>,
     /// Slash commands extensions registered, for a frontend to run.
     pub commands: Vec<Arc<dyn SlashCommand>>,
+    /// What is known about models, by ID: the prices give each response a cost, the context
+    /// window can set the token trigger of automatic summaries. Empty by default: costs and
+    /// windows stay unknown.
+    pub models: HashMap<String, ModelMeta>,
+    /// Sent with every task request as its cache key ([`Request::cache_key`]), such as the
+    /// session ID; `None` sends none.
+    pub cache_key: Option<String>,
 }
 
 impl LoopConfig {
@@ -111,6 +118,8 @@ impl LoopConfig {
             queues: Arc::new(MessageQueues::default()),
             active_tools: Arc::new(ActiveTools::default()),
             commands: Vec::new(),
+            models: HashMap::new(),
+            cache_key: None,
         }
     }
 }
