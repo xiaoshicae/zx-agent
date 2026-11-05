@@ -17,6 +17,11 @@ const KEY_VAR: &str = "ZX_CHAT_TEST_KEY";
 const KEY: &str = "sk-chat-test-key";
 
 fn chat(server: &MockServer, cwd: &Path, args: &[&str]) -> Command {
+    chat_retrying(server, cwd, args, "0")
+}
+
+/// Like `chat`, with the given number of retries for transient errors.
+fn chat_retrying(server: &MockServer, cwd: &Path, args: &[&str], max_retries: &str) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_zx-agent"));
     command
         .arg("chat")
@@ -25,7 +30,7 @@ fn chat(server: &MockServer, cwd: &Path, args: &[&str]) -> Command {
             "--api-key-env",
             KEY_VAR,
             "--max-retries",
-            "0",
+            max_retries,
             "--idle-timeout-secs",
             "10",
         ])
@@ -747,6 +752,88 @@ async fn resuming_a_session_file_says_how_much_history_it_holds() {
     .await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(!stderr(&output).contains("resumed"), "{}", stderr(&output));
+}
+
+#[tokio::test]
+async fn a_retried_error_is_named_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![
+        Reply::Status(500, r#"{"error":{"message":"upstream exploded"}}"#),
+        Reply::text("recovered"),
+    ])
+    .await;
+    let mut child = chat_retrying(&server, dir.path(), &["--tools", ""], "1")
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"go\n/quit\n").await.unwrap();
+    drop(stdin);
+    let output = tokio::time::timeout(Duration::from_secs(15), child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "recovered\n");
+    let log = stderr(&output);
+    assert_eq!(log.matches("upstream exploded").count(), 1, "{log}");
+    assert!(log.contains("[retry] 1/1 in "), "{log}");
+    assert!(log.contains("ms (same error)\n"), "{log}");
+    assert!(log.contains("[turn] 2 requests · 1 retry · "), "{log}");
+}
+
+#[tokio::test]
+async fn a_turn_without_reported_usage_omits_the_token_counts() {
+    let dir = tempfile::tempdir().unwrap();
+    let answer = json!({"choices":[{"index":0,"delta":{"content":"no usage"},"finish_reason":"stop"}]});
+    let server = MockServer::start(vec![Reply::Sse(vec![answer])]).await;
+    let output = run(&server, dir.path(), &["--tools", ""], "go\n/quit\n").await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let log = stderr(&output);
+    assert!(log.contains("[turn] 1 request · "), "{log}");
+    assert!(!log.contains(" in · "), "{log}");
+}
+
+#[tokio::test]
+async fn show_thinking_streams_reasoning_on_stderr_only_when_asked() {
+    let reply = || {
+        Reply::Sse(vec![
+            json!({"choices":[{"index":0,"delta":{"reasoning_content":"让我想想"},"finish_reason":null}]}),
+            json!({"choices":[{"index":0,"delta":{"content":"答案"},"finish_reason":"stop"}]}),
+        ])
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![reply()]).await;
+    let output = run(&server, dir.path(), &["--tools", ""], "go\n/quit\n").await;
+    assert_eq!(stdout(&output), "答案\n");
+    assert!(!stderr(&output).contains("让我想想"), "{}", stderr(&output));
+
+    let server = MockServer::start(vec![reply()]).await;
+    let output = run(&server, dir.path(), &["--tools", "", "--show-thinking"], "go\n/quit\n").await;
+    assert_eq!(stdout(&output), "答案\n");
+    assert!(stderr(&output).contains("让我想想\n"), "{}", stderr(&output));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ctrl_c_twice_while_idle_exits() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![]).await;
+    let mut child = chat(&server, dir.path(), &["--tools", ""]).spawn().unwrap();
+    // Kept open: closing stdin would end the conversation by itself.
+    let _stdin = child.stdin.take().unwrap();
+    let mut errors = BufReader::new(child.stderr.take().unwrap()).lines();
+    read_error_until(&mut errors, "/help for commands").await;
+    signal(&child, "-INT").await;
+    read_error_until(&mut errors, "press Ctrl+C again").await;
+    signal(&child, "-INT").await;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .code(),
+        Some(0)
+    );
 }
 
 #[tokio::test]

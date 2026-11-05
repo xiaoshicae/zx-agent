@@ -43,6 +43,8 @@ use term::Tone;
 
 /// How often the status line is redrawn while a task runs.
 const TICK: Duration = Duration::from_secs(1);
+/// A second Ctrl+C within this long, while idle, exits.
+const QUIT_INTERRUPT_WINDOW: Duration = Duration::from_secs(2);
 const PROMPT: &str = "zx> ";
 const APPROVAL_MENU: &str = "  1/y allow once · 2 allow identical calls in this conversation · 3/n deny · 4 discuss";
 const APPROVAL_PROMPT: &str = "[approval] Choose 1, 2, 3 or 4:";
@@ -210,7 +212,13 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
     };
     let (interaction, mut approvals) = TerminalInteraction::channel();
     let interaction = Arc::new(interaction);
-    let output = Arc::new(Output::new(args.output, args.deltas, args.debug, args.color));
+    let output = Arc::new(Output::new(
+        args.output,
+        args.deltas,
+        args.debug,
+        args.color,
+        args.show_thinking,
+    ));
     let mut model = args.base.model.clone();
     let mut reasoning = args.request.reasoning;
     let storage = if args.no_session {
@@ -242,6 +250,7 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
     }
     banner(&output, &model, &built.about);
     let mut next_prompt: Option<String> = None;
+    let mut last_interrupt: Option<Instant> = None;
 
     loop {
         if mode == InputMode::Terminal {
@@ -257,12 +266,21 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
                 biased;
                 interrupt = signals.next() => {
                     match interrupt {
-                        Interrupt::Cancel => { output.line(Tone::Dim, "[chat] no active task; /quit to exit"); continue; }
+                        Interrupt::Cancel => {
+                            if last_interrupt.is_some_and(|at| at.elapsed() <= QUIT_INTERRUPT_WINDOW) {
+                                output.finish();
+                                return Ok(EXIT_COMPLETED);
+                            }
+                            last_interrupt = Some(Instant::now());
+                            output.line(Tone::Dim, "[chat] no active task; press Ctrl+C again to exit, or /quit");
+                            continue;
+                        }
                         Interrupt::Terminate => { output.finish(); return Ok(EXIT_ABORTED); }
                     }
                 }
                 line = input.recv() => match line {
                     Some(line) => {
+                        last_interrupt = None;
                         if mode == InputMode::Terminal { output.input_echoed(); }
                         line.context("cannot read terminal input")?
                     }
@@ -545,6 +563,8 @@ async fn drive_turn(session: &AgentSession, operation: Operation, io: &mut TurnI
     tokio::pin!(running);
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    // A status an earlier operation left behind must not tick on into this one.
+    io.output.clear_status();
     let mut pending: Option<Ticket> = None;
     let mut discussing = false;
     let mut queued_prompt = None;
@@ -859,6 +879,7 @@ fn help(output: &Output) {
         "/resume <ID>          switch to the session whose ID starts with <ID>",
         "/quit                 exit chat; Ctrl+D while idle does the same",
         "Ctrl+C                cancel the current task or approval; keep the conversation",
+        "                      twice within 2 seconds while idle: exit",
         "While a task runs, a typed line is steering: the model sees it before its next request.",
         "Lines pasted together are sent as one message; a slash command is always one line.",
         "Approvals: 1 or y allow once · 2 allow identical calls in this conversation · 3 or n deny · 4 discuss",
