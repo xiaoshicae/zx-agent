@@ -3,8 +3,6 @@
 //! Socket Mode needs no public URL: the channel opens a WebSocket to Slack and acknowledges
 //! each envelope before handling it (docs/serve-im-review.md, sections 3.4 and 9.1).
 
-use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -13,14 +11,11 @@ use reqwest::StatusCode;
 use reqwest::header::RETRY_AFTER;
 use serde_json::{Map, Value, json};
 use tokio::sync::mpsc;
-use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
-use zx_ai::sync::lock;
-use zx_core::agent::ApprovalResult;
 use zx_im::{
-    ApprovalId, CardLabels, Choice, ConversationId, Destination, ErrorReport, ImChannel, ImError, Inbound, MessageId,
-    MessageRef, Outbound, Seen, ThreadId, UserId, split_text,
+    ApprovalId, CardLabels, Cards, Choice, ConversationId, Destination, ErrorReport, ImChannel, ImError, Inbound,
+    MessageId, MessageRef, Outbound, Pacer, Seen, ThreadId, UserId, split_text,
 };
 
 /// Where the Web API lives.
@@ -95,12 +90,11 @@ impl SlackConfig {
 pub struct SlackChannel {
     config: SlackConfig,
     http: reqwest::Client,
-    /// When each chat may be posted to next. Concurrent sends reserve their turn under the
-    /// lock and wait without it.
-    next_post: Mutex<HashMap<String, Instant>>,
-    /// The request text of open cards, by card message, so that closing a card keeps it.
-    cards: Mutex<VecDeque<(MessageId, String)>>,
+    posts: Pacer,
+    cards: Cards,
 }
+
+type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 impl SlackChannel {
     pub fn new(config: SlackConfig) -> Result<Self, ImError> {
@@ -109,10 +103,10 @@ impl SlackChannel {
             .build()
             .map_err(|error| ImError::Config(format!("cannot build the HTTP client: {error}")))?;
         Ok(Self {
+            posts: Pacer::new(config.post_interval),
+            cards: Cards::new(CARD_CAPACITY),
             config,
             http,
-            next_post: Mutex::default(),
-            cards: Mutex::default(),
         })
     }
 
@@ -159,20 +153,8 @@ impl SlackChannel {
         }
     }
 
-    /// Wait for this chat's next posting turn.
-    async fn turn(&self, conversation: &str) {
-        let at = {
-            let mut next = lock(&self.next_post);
-            let now = Instant::now();
-            let at = next.get(conversation).copied().filter(|at| *at > now).unwrap_or(now);
-            next.insert(conversation.to_string(), at + self.config.post_interval);
-            at
-        };
-        tokio::time::sleep_until(at).await;
-    }
-
     async fn post(&self, to: &Destination, text: &str, blocks: Option<Value>) -> Result<MessageRef, ImError> {
-        self.turn(&to.conversation.0).await;
+        self.posts.turn(&to.conversation.0).await;
         let mut body = Map::new();
         body.insert("channel".into(), json!(to.conversation.0));
         body.insert("text".into(), json!(text));
@@ -210,18 +192,19 @@ impl SlackChannel {
             .map(drop)
     }
 
-    fn remember_card(&self, card: &MessageId, request: String) {
-        let mut cards = lock(&self.cards);
-        cards.push_back((card.clone(), request));
-        if cards.len() > CARD_CAPACITY {
-            cards.pop_front();
-        }
-    }
-
-    fn forget_card(&self, card: &MessageId) -> Option<String> {
-        let mut cards = lock(&self.cards);
-        let index = cards.iter().position(|(id, _)| id == card)?;
-        cards.remove(index).map(|(_, request)| request)
+    /// Open the Socket Mode connection at `url`; a failure is reported.
+    async fn open_socket(&self, url: &str) -> Option<Socket> {
+        let connected = tokio::time::timeout(self.config.request_timeout, tokio_tungstenite::connect_async(url)).await;
+        let failure = match connected {
+            Ok(Ok((socket, _))) => return Some(socket),
+            Ok(Err(error)) => format!("slack: cannot open the Socket Mode connection: {error}"),
+            Err(_) => format!(
+                "slack: opening the Socket Mode connection took longer than {} s",
+                self.config.request_timeout.as_secs()
+            ),
+        };
+        self.report(&ImError::Transport(failure));
+        None
     }
 
     /// Receive over one Socket Mode connection until it ends.
@@ -233,22 +216,8 @@ impl SlackChannel {
         seen: &mut Seen<(String, String)>,
         cancel: &CancellationToken,
     ) -> Ended {
-        let connected = tokio::time::timeout(self.config.request_timeout, tokio_tungstenite::connect_async(url)).await;
-        let mut socket = match connected {
-            Ok(Ok((socket, _))) => socket,
-            Ok(Err(error)) => {
-                self.report(&ImError::Transport(format!(
-                    "slack: cannot open the Socket Mode connection: {error}"
-                )));
-                return Ended::Failed;
-            }
-            Err(_) => {
-                self.report(&ImError::Transport(format!(
-                    "slack: opening the Socket Mode connection took longer than {} s",
-                    self.config.request_timeout.as_secs()
-                )));
-                return Ended::Failed;
-            }
+        let Some(mut socket) = self.open_socket(url).await else {
+            return Ended::Failed;
         };
         loop {
             let frame = tokio::select! {
@@ -397,7 +366,7 @@ impl ImChannel for SlackChannel {
                 ]);
                 let fallback = escape(&format!("{}: {tool}", labels.title));
                 let posted = self.post(to, &fallback, Some(blocks)).await?;
-                self.remember_card(&posted.id, request);
+                self.cards.remember(&posted.id, request);
                 Ok(posted)
             }
             Outbound::ApprovalResolved { .. } => {
@@ -434,7 +403,7 @@ impl ImChannel for SlackChannel {
             Outbound::ApprovalResolved { .. } => {
                 let result = resolution(&self.config.labels, message);
                 let mut blocks = Vec::new();
-                if let Some(request) = self.forget_card(&posted.id) {
+                if let Some(request) = self.cards.forget(&posted.id) {
                     blocks.push(section(&request));
                 }
                 blocks.push(section(&result));
@@ -616,13 +585,7 @@ fn resolution(labels: &CardLabels, message: &Outbound) -> String {
     let Outbound::ApprovalResolved { user, result, .. } = message else {
         return String::new();
     };
-    let what = match result {
-        ApprovalResult::AllowOnce | ApprovalResult::AllowSession | ApprovalResult::Remembered => &labels.allowed,
-        ApprovalResult::Denied => &labels.denied,
-        ApprovalResult::TimedOut => &labels.timed_out,
-        ApprovalResult::Cancelled => &labels.cancelled,
-        ApprovalResult::Failed => &labels.failed,
-    };
+    let what = labels.outcome(*result);
     // The mention is markup and stays as it is; only the label is text.
     match user {
         Some(user) => format!("{} (<@{user}>)", escape(what)),

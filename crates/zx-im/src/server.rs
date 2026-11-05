@@ -1,6 +1,8 @@
 //! The router: access control, one worker per thread, the shared run limit and the stop.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::Display;
+use std::future::Future;
 use std::hash::Hash;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
@@ -17,6 +19,7 @@ use crate::AgentSession;
 use crate::agent::ApprovalResult;
 use crate::interaction::Interaction;
 
+use super::status::{left_behind, replace_left_behind};
 use super::worker::{self, Retire, WorkerInput, WorkerSetup};
 use super::{
     ApprovalId, ConversationId, Destination, ImChannel, ImError, Inbound, MessageRef, Outbound, StatusStore, ThreadId,
@@ -31,7 +34,6 @@ const INBOX_CAPACITY: usize = 32;
 /// Idle notices of conversations, which the router handles at once.
 const RETIRE_CAPACITY: usize = 16;
 
-/// Defaults from docs/serve-im-review.md, section 3.6.
 const DEFAULT_MAX_RUNNING: NonZeroUsize = NonZeroUsize::new(4).expect("4 is not zero");
 const DEFAULT_IDLE: Duration = Duration::from_secs(30 * 60);
 /// Long enough for a platform's rate-limit queue, short enough that a platform that stopped
@@ -102,7 +104,7 @@ pub trait ServerSink: Send + Sync {
 /// Something for the operator.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ServerEvent {
-    /// An approval ended: who decided what (docs/serve-im-review.md, gap 4).
+    /// An approval ended: who decided what.
     Approval(ApprovalRecord),
     /// An idle conversation released its session; the next message opens it again.
     Released { key: SessionKey },
@@ -348,119 +350,58 @@ impl Shared {
         });
     }
 
+    /// `operation` within the outbound timeout. A failure, or the time running out, is
+    /// reported to the operator against `key` as `cannot <act>: <error>` or `<acting> took
+    /// longer than <n> s`, and leaves nothing.
+    pub(crate) async fn bounded<T, E: Display>(
+        &self,
+        key: Option<&SessionKey>,
+        act: &str,
+        acting: &str,
+        operation: impl Future<Output = Result<T, E>>,
+    ) -> Option<T> {
+        match tokio::time::timeout(self.outbound_timeout, operation).await {
+            Ok(Ok(value)) => Some(value),
+            Ok(Err(error)) => {
+                self.failed(key, format!("cannot {act}: {error}"));
+                None
+            }
+            Err(_) => {
+                self.failed(
+                    key,
+                    format!("{acting} took longer than {} s", self.outbound_timeout.as_secs()),
+                );
+                None
+            }
+        }
+    }
+
+    pub(crate) fn statuses(&self) -> Option<&dyn StatusStore> {
+        self.statuses.as_deref()
+    }
+
     /// Keep the status of a run that starts. A failure is reported; the run goes on.
     pub(crate) async fn keep_status(&self, key: &SessionKey, status: &MessageRef) {
-        let Some(statuses) = &self.statuses else {
-            return;
-        };
-        match tokio::time::timeout(self.outbound_timeout, statuses.insert(key, status)).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => self.failed(Some(key), format!("cannot keep status {}: {error}", status.id)),
-            Err(_) => self.failed(
-                Some(key),
-                format!(
-                    "keeping status {} took longer than {} s",
-                    status.id,
-                    self.outbound_timeout.as_secs()
-                ),
-            ),
+        if let Some(statuses) = self.statuses() {
+            let (act, acting) = (
+                format!("keep status {}", status.id),
+                format!("keeping status {}", status.id),
+            );
+            self.bounded(Some(key), &act, &acting, statuses.insert(key, status))
+                .await;
         }
     }
 
     /// Forget a status about to be replaced. A failure is reported.
     pub(crate) async fn forget_status(&self, key: &SessionKey, status: &MessageRef) {
-        let Some(statuses) = &self.statuses else {
-            return;
-        };
-        match tokio::time::timeout(self.outbound_timeout, statuses.remove(key, status)).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => self.failed(Some(key), format!("cannot forget status {}: {error}", status.id)),
-            Err(_) => self.failed(
-                Some(key),
-                format!(
-                    "forgetting status {} took longer than {} s",
-                    status.id,
-                    self.outbound_timeout.as_secs()
-                ),
-            ),
-        }
-    }
-}
-
-/// The statuses an earlier process left behind; none when nothing keeps statuses or they
-/// cannot be read, which is reported.
-async fn left_behind(shared: &Shared) -> Vec<(SessionKey, MessageRef)> {
-    let Some(statuses) = &shared.statuses else {
-        return Vec::new();
-    };
-    match tokio::time::timeout(shared.outbound_timeout, statuses.list()).await {
-        Ok(Ok(left)) => left,
-        Ok(Err(error)) => {
-            shared.failed(
-                None,
-                format!("cannot read the statuses an earlier process left: {error}"),
+        if let Some(statuses) = self.statuses() {
+            let (act, acting) = (
+                format!("forget status {}", status.id),
+                format!("forgetting status {}", status.id),
             );
-            Vec::new()
+            self.bounded(Some(key), &act, &acting, statuses.remove(key, status))
+                .await;
         }
-        Err(_) => {
-            shared.failed(
-                None,
-                format!(
-                    "reading the statuses an earlier process left took longer than {} s",
-                    shared.outbound_timeout.as_secs()
-                ),
-            );
-            Vec::new()
-        }
-    }
-}
-
-/// Replace each status in `left` with [`Replies::interrupted`], then forget it. Each is tried
-/// once, so a message the platform no longer lets the bot edit is not tried at every start.
-/// The stop gives up on the rest, which stay kept.
-async fn replace_left_behind(
-    left: Vec<(SessionKey, MessageRef)>,
-    channels: Vec<Arc<dyn ImChannel>>,
-    shared: Arc<Shared>,
-    stop: CancellationToken,
-) {
-    let text = Outbound::Text(shared.replies.interrupted.clone());
-    for (key, status) in left {
-        match channels.iter().find(|channel| channel.platform() == key.platform) {
-            Some(channel) => {
-                let replaced = tokio::select! {
-                    biased;
-                    () = stop.cancelled() => return,
-                    replaced = tokio::time::timeout(shared.outbound_timeout, channel.update(&status, &text)) => replaced,
-                };
-                match replaced {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => shared.failed(
-                        Some(&key),
-                        format!(
-                            "cannot replace status {} that an earlier process left: {error}",
-                            status.id
-                        ),
-                    ),
-                    Err(_) => shared.failed(
-                        Some(&key),
-                        format!(
-                            "replacing status {} that an earlier process left took longer than {} s",
-                            status.id,
-                            shared.outbound_timeout.as_secs()
-                        ),
-                    ),
-                }
-            }
-            None => shared.failed(
-                Some(&key),
-                format!(
-                    "cannot replace status {} that an earlier process left: no channel is named {:?}",
-                    status.id, key.platform
-                ),
-            ),
-        }
-        shared.forget_status(&key, &status).await;
     }
 }
 
