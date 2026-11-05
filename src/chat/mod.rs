@@ -186,6 +186,7 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
         let action = match commands::parse(line) {
             Command::Prompt(text) => drive_turn(&built.session, Operation::Prompt(text), &mut io).await?,
             Command::Compact => drive_turn(&built.session, Operation::Compact, &mut io).await?,
+            Command::Continue => drive_turn(&built.session, Operation::Continue, &mut io).await?,
             Command::New => Flow::New,
             Command::Model(None) => {
                 eprintln!("[chat] model={}", visible(&model));
@@ -261,6 +262,7 @@ struct TurnIo<'a> {
 
 enum Operation {
     Prompt(String),
+    Continue,
     Compact,
 }
 enum Report {
@@ -282,6 +284,7 @@ async fn drive_turn(session: &AgentSession, operation: Operation, io: &mut TurnI
     let running = async {
         match operation {
             Operation::Prompt(text) => session.prompt(text).await.map(Report::Task),
+            Operation::Continue => session.continue_run().await.map(Report::Task),
             Operation::Compact => session.compact().await.map(Report::Compact),
         }
     };
@@ -409,6 +412,7 @@ async fn drive_turn(session: &AgentSession, operation: Operation, io: &mut TurnI
                     Command::Reasoning(_) => eprintln!("[chat] wait for the current task or cancel it before changing the reasoning level"),
                     Command::Help => help(),
                     Command::Compact => eprintln!("[chat] session is busy; wait for the current operation or cancel it before /compact"),
+                    Command::Continue => eprintln!("[chat] session is busy; wait for the current operation or cancel it before /continue"),
                     Command::Invalid(message) => eprintln!("[chat] {}", visible(&message)),
                     Command::Empty => {}
                 }
@@ -517,6 +521,7 @@ fn help() {
                /reasoning [level]    show or change the reasoning level while idle: off, minimal,\n\
                                      low, medium, high, xhigh, or default to leave it to the server\n\
                /compact              summarize old context while retaining raw history\n\
+               /continue             continue without new input, such as after a failed answer\n\
                /quit                 exit chat\n\
                Ctrl+C                cancel the current task; keep the conversation"
     );

@@ -355,6 +355,96 @@ async fn the_reasoning_level_reaches_the_model_in_the_chosen_format_and_the_audi
     assert!(!unset.contains("reasoning"), "{unset}");
 }
 
+/// `zx-agent run --continue` against `server`, without a prompt.
+fn run_continue(server: &MockServer, dir: &std::path::Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_zx-agent"));
+    command
+        .args(["run", "--continue", "--model", "mock", "--base-url", &server.base_url])
+        .args([
+            "--max-retries",
+            "0",
+            "--api-key-env",
+            "ZX_RUN_CLI_TEST_KEY",
+            "--tools",
+            "",
+        ])
+        .current_dir(dir)
+        .env_remove("ZX_RUN_CLI_TEST_KEY")
+        .env_remove("ZX_MODEL")
+        .env_remove("ZX_BASE_URL")
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    command
+}
+
+#[tokio::test]
+async fn continue_answers_again_after_a_failed_run_without_repeating_the_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![
+        Reply::Status(400, r#"{"error":{"message":"bad request"}}"#),
+        Reply::text("second try"),
+        Reply::text("must not be requested"),
+    ])
+    .await;
+    let failed = run(&server, dir.path())
+        .args(["--session", "s.jsonl"])
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(failed.status.code(), Some(1));
+
+    let continued = run_continue(&server, dir.path())
+        .args(["--session", "s.jsonl"])
+        .output()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        continued.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&continued.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&continued.stdout), "second try\n");
+    let requests = server.requests();
+    let users: Vec<&Value> = requests[1].body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .collect();
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0]["content"], "go");
+
+    // Ending with a finished answer, there is nothing more to continue.
+    let finished = run_continue(&server, dir.path())
+        .args(["--session", "s.jsonl"])
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(finished.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&finished.stderr).contains("ends with a finished answer"));
+    assert_eq!(server.requests().len(), 2);
+}
+
+#[tokio::test]
+async fn continue_needs_an_existing_session_and_no_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::text("never sent")]).await;
+    for (extra, expected) in [
+        (&[][..], "--session"),
+        (&["--session", "missing.jsonl"][..], "missing.jsonl does not exist"),
+        (&["--session", "s.jsonl", "a prompt"][..], "cannot be used with"),
+    ] {
+        let output = run_continue(&server, dir.path()).args(extra).output().await.unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{extra:?}: {stderr}");
+        assert!(stderr.contains(expected), "{extra:?}: {stderr}");
+    }
+    assert!(server.requests().is_empty());
+    assert!(!dir.path().join("missing.jsonl").exists());
+}
+
 #[tokio::test]
 async fn bad_reasoning_settings_exit_2_before_any_request() {
     let dir = tempfile::tempdir().unwrap();

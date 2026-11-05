@@ -74,14 +74,29 @@ fn deny_same_user_inspection() -> std::io::Result<()> {
 /// Run one task and return its exit code. An `Err` is a configuration problem found
 /// before the run started.
 async fn run(args: RunArgs) -> Result<u8> {
-    let prompt = read_prompt(&args.prompt)?;
+    let prompt = match &args.prompt {
+        Some(prompt) => Some(read_prompt(prompt)?),
+        None => {
+            // Checked before anything starts: continuing a new session has nothing to answer.
+            let session = args.request.session.as_deref().context("--continue needs --session")?;
+            anyhow::ensure!(
+                session.exists(),
+                "--continue needs an existing session file; {} does not exist",
+                session.display()
+            );
+            None
+        }
+    };
     let telemetry = cli::start_telemetry()?;
     let session = build_session(&args).await?;
     // Kept until the run has ended: dropping it unsubscribes.
     let _traced = telemetry.as_ref().map(|telemetry| session.subscribe(telemetry.sink()));
     let cancel = CancellationToken::new();
     spawn_signal_handler(cancel.clone());
-    let report = session.prompt_with_cancel(prompt, &cancel).await?;
+    let report = match prompt {
+        Some(prompt) => session.prompt_with_cancel(prompt, &cancel).await?,
+        None => session.continue_with_cancel(&cancel).await?,
+    };
     print_report(&report, args.output);
     cli::finish_telemetry(telemetry).await;
     Ok(exit_code(report.outcome))
