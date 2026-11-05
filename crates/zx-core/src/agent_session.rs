@@ -21,7 +21,7 @@ use crate::ai::retry::RetryPolicy;
 use crate::ai::{Provider, Reasoning};
 use crate::compaction;
 use crate::runner::{Limits, RunReport, Runner};
-use crate::session::{CustomMessage, SessionStore, WritesStopped};
+use crate::session::{CustomMessage, Entry, SessionStore, WritesStopped};
 use crate::sync::lock;
 
 /// Provider and model selected together, so a switch cannot expose a mixed pair.
@@ -45,6 +45,10 @@ pub enum SessionError {
     UnknownTool,
     /// The session could not record an entry; see [`AgentSession::writes_stopped`].
     WriteFailed(String),
+    /// A prompt with this idempotency key was already submitted to the session.
+    DuplicateKey,
+    /// An idempotency key must contain at least one non-whitespace character.
+    InvalidKey,
 }
 
 impl fmt::Display for SessionError {
@@ -55,9 +59,15 @@ impl fmt::Display for SessionError {
             Self::EntryNotFound => f.write_str("no entry with that ID in the session"),
             Self::UnknownTool => f.write_str("no configured tool has that name"),
             Self::WriteFailed(error) => write!(f, "cannot write the session: {error}"),
+            Self::DuplicateKey => f.write_str("a prompt with this idempotency key was already submitted"),
+            Self::InvalidKey => f.write_str("idempotency key must not be empty"),
         }
     }
 }
+
+/// The `customType` of the session record that notes an idempotency key
+/// ([`AgentSession::prompt_once`]); reserved for the session.
+pub const IDEMPOTENCY_KEY_TYPE: &str = "idempotency_key";
 
 impl std::error::Error for SessionError {}
 
@@ -147,6 +157,47 @@ impl AgentSession {
         let mut active = self.acquire(cancel.clone())?;
         let report = active.runner().run_message(message, &cancel).await;
         Ok(report)
+    }
+
+    /// Run a prompt at most once per `key`, for hosts that retry a submission they are not
+    /// sure reached the session, such as after a lost reply or a restart. The key is
+    /// recorded in the session (a `custom` entry of type [`IDEMPOTENCY_KEY_TYPE`]) before the
+    /// prompt, on whichever branch is current, so a second call with the same key returns
+    /// DuplicateKey without a request, also from a session reopened from its file; the host
+    /// then reads the session for the answer, or continues the run that was interrupted.
+    /// A blank key returns InvalidKey. Otherwise like `prompt`.
+    pub async fn prompt_once(&self, key: &str, text: impl Into<String>) -> Result<RunReport, SessionError> {
+        self.prompt_once_with_cancel(key, text, &CancellationToken::new()).await
+    }
+
+    /// Like prompt_once, using a child of the caller's token, as prompt_with_cancel does.
+    pub async fn prompt_once_with_cancel(
+        &self,
+        key: &str,
+        text: impl Into<String>,
+        parent: &CancellationToken,
+    ) -> Result<RunReport, SessionError> {
+        if key.trim().is_empty() {
+            return Err(SessionError::InvalidKey);
+        }
+        let cancel = parent.child_token();
+        // The lease spans the check, the record and the run, so no other prompt can slip in
+        // between.
+        let mut active = self.acquire(cancel.clone())?;
+        let runner = active.runner();
+        let submitted = runner.session().entries().iter().any(|entry| match entry {
+            Entry::Custom(custom) => custom.custom_type == IDEMPOTENCY_KEY_TYPE && custom.data["key"] == key,
+            _ => false,
+        });
+        if submitted {
+            return Err(SessionError::DuplicateKey);
+        }
+        runner
+            .session_mut()
+            .append_custom_entry(IDEMPOTENCY_KEY_TYPE, serde_json::json!({ "key": key }))
+            .await
+            .map_err(|error| SessionError::WriteFailed(format!("{error:#}")))?;
+        Ok(runner.run(text, &cancel).await)
     }
 
     /// Continue the conversation without new input; see [`Runner::continue_run`] for what is

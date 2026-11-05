@@ -628,6 +628,7 @@ P2 增加 `zx_agent::AgentSession`；已有 `Runner` 可通过 `AgentSession::fr
 | `set_model(ModelRef { provider, model })` | 空闲时同步切换，运行中返回 `Busy`，空模型 ID 返回 `InvalidModel`。保留历史、工具、提示词、钩子、上限与审批缓存；会话头部仍记录初始模型 |
 | `branch(Option<&str>)` | 空闲时把对话移到会话树的另一点（pi 的 `navigateTree`）：`Some(条目 ID)` 让下一次提问接在该条目之后、`None` 回到第一条之前，都在那里开新分支；离开的分支留在会话中。运行中返回 `Busy`，ID 不存在返回 `EntryNotFound` 且位置不变。只移动内存中的位置、不写入，所以从文件续接的会话仍从文件末尾开始。接在一条回答之后而它的工具调用的结果在离开的分支上时，下一次运行先按未执行为这些调用补写错误结果，不再执行 |
 | `inspect(FnOnce(&SessionStore) -> T)` | 空闲时读取会话，例如列出条目或取当前位置（`leaf_id`）。闭包运行期间会话像运行中一样被占用，其他调用返回 `Busy`；不持锁调用闭包。运行中返回 `Busy` |
+| `prompt_once(key, text)`、`prompt_once_with_cancel` | 同一个幂等键只提交一次：先在会话里记下键（类型为 `idempotency_key` 的 `custom` 记录，在当前分支上），再按 `prompt` 运行；再次用同一个键调用返回 `DuplicateKey`、不发请求，从文件重新打开的会话也认得；空白的键返回 `InvalidKey`。宿主重试一次不确定是否送达的提交时用它，被拒后读会话取答案，或用 `continue_run` 接着被中断的运行 |
 | `prompt_message(QueuedMessage)`、`prompt_message_with_cancel` | 以任意消息开始一次运行：用户文本，或扩展的消息（pi 的 `sendMessage` 带 `triggerTurn`）；其余同 `prompt` |
 | `queues()` | 会话的两个队列：`steer_message`、`follow_up_message` 排入扩展的消息，`append_entry` 在运行期间排入要记录的状态（下一回合开始或运行结束时写入），`set_steering_mode`、`set_follow_up_mode` 设置取法（`QueueMode`） |
 | `active_tools()`、`set_active_tools(&[名字])` | 下一次请求提供给模型的工具（pi 的 `setActiveTools`），运行中改也对下一次请求生效，请求审计记录每次请求声明的工具；`set_active_tools` 先检查名字，不认识的返回 `UnknownTool`；`active_tools().reset()` 恢复全部。调用未激活的工具得到错误结果，不执行 |
