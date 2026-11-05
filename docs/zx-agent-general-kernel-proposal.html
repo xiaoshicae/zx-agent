@@ -311,7 +311,7 @@ tools = ["bash", "read_file", "read_skill", "read_output"]
 execution = "local"
 
 [limits]
-maxTurns = 30
+maxModelRequests = 30
 timeoutSecs = 900
 
 [extensions]
@@ -336,7 +336,7 @@ discover = true</code></pre>
 </table>
 <div class="box decide"><strong class="label">取舍</strong>嵌入协议选 ACP，而非自定义 JSON-RPC（pi 的 rpc 模式、Codex 的 app-server 属于后者）。理由：ACP 已被 Goose、OpenHands 等采用，实现后可直接接入现有编辑器和平台。终端界面先做 REPL，不做完整 TUI：pi 的 tui 包约 2 万行，投入与收益不匹配，完整界面可交给 ACP 客户端。</div>
 
-<p>P3 的 chat 每轮默认不限轮次、不限总时间、不自动续写；使用通用 assistant 说明。bash 先经过原命令策略，再询问人，read_file 保留原读取权限。审批默认超时 120 秒；<code>/approve &lt;id&gt; once|session</code> 或 <code>/deny &lt;id&gt; [reason]</code> 必须匹配当前主机请求编号，取消或超时后的旧答案不能授权新调用。</p>
+<p>P3 的 chat 每轮默认不限轮次、不限总时间、不自动续写；使用通用 assistant 说明。bash 先经过原命令策略，再询问人，read_file 保留原读取权限。审批默认超时 120 秒；菜单提供本次允许、会话允许、拒绝和讨论选项；选择仅在待审批时生效。</p>
 <pre><code>stdin thread -- bounded input --&gt; REPL -- prompt/steer/abort --&gt; AgentSession
                                   ^                               |
                                   | approval ticket + reply        |

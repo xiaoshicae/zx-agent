@@ -212,6 +212,11 @@ pub struct ToolResultMessage {
     /// How long `execute()` took; absent when the tool did not run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    /// Structured data for frontends and logs (pi: `details`). Recorded with the result but
+    /// never sent to the model: providers send `content` only, and summary requests and
+    /// context sizes leave it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
 }
 
 /// Whether user text starts a new answer, continues the preceding answer, or is a context
@@ -423,6 +428,26 @@ mod tests {
     }
 
     #[test]
+    fn tool_result_details_are_recorded_only_when_present() {
+        let result = ToolResultMessage {
+            tool_call_id: "c1".into(),
+            tool_name: "bash".into(),
+            content: "ok".into(),
+            is_error: false,
+            timestamp: 4,
+            duration_ms: None,
+            details: Some(json!({"exitCode": 0})),
+        };
+        let recorded = json!({
+            "role": "toolResult", "toolCallId": "c1", "toolName": "bash", "content": "ok",
+            "isError": false, "timestamp": 4, "details": {"exitCode": 0}
+        });
+        let message = Message::ToolResult(result);
+        assert_eq!(serde_json::to_value(&message).unwrap(), recorded);
+        assert_eq!(serde_json::from_value::<Message>(recorded).unwrap(), message);
+    }
+
+    #[test]
     fn messages_keep_the_session_file_format() {
         // Session files store messages in exactly this shape; changing it breaks existing files.
         let cases = [
@@ -468,6 +493,7 @@ mod tests {
                     is_error: false,
                     timestamp: 8,
                     duration_ms: Some(4),
+                    details: None,
                 }),
                 json!({
                     "role": "toolResult", "toolCallId": "c1", "toolName": "bash", "content": "ok",

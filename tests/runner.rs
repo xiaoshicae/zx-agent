@@ -170,9 +170,9 @@ fn setup(provider: &Arc<FauxProvider>) -> RunnerSetup {
     RunnerSetup::new(config)
 }
 
-fn limits(max_turns: u32, timeout: Option<Duration>) -> Limits {
+fn limits(max_model_requests: u32, timeout: Option<Duration>) -> Limits {
     Limits {
-        max_turns: Some(max_turns),
+        max_model_requests: Some(max_model_requests),
         timeout,
         ..Limits::default()
     }
@@ -202,7 +202,7 @@ async fn default_limits_allow_more_than_thirty_requests() {
     let report = runner.run("go", &CancellationToken::new()).await;
 
     assert_eq!(report.outcome, RunOutcome::Completed);
-    assert_eq!((report.turns, report.final_text.as_str()), (32, "done"));
+    assert_eq!((report.model_requests, report.final_text.as_str()), (32, "done"));
     assert_eq!(provider.requests().len(), 32);
 }
 
@@ -218,7 +218,7 @@ async fn default_limits_leave_truncated_answers_for_the_caller() {
     let report = runner.run("go", &CancellationToken::new()).await;
 
     assert_eq!(report.outcome, RunOutcome::Truncated);
-    assert_eq!((report.turns, report.final_text.as_str()), (1, "part one"));
+    assert_eq!((report.model_requests, report.final_text.as_str()), (1, "part one"));
     assert_eq!(provider.requests().len(), 1);
 }
 
@@ -233,11 +233,14 @@ async fn zero_turn_limit_does_not_call_the_provider() {
 
     let report = runner.run("go", &CancellationToken::new()).await;
 
-    assert_eq!(report.outcome, RunOutcome::MaxTurns);
-    assert_eq!(report.turns, 0);
+    assert_eq!(report.outcome, RunOutcome::ModelRequestLimit);
+    assert_eq!(report.model_requests, 0);
     assert!(report.final_text.is_empty());
     assert!(provider.requests().is_empty());
-    assert_eq!(report.error.as_deref(), Some("turn limit reached (max_turns = 0)"));
+    assert_eq!(
+        report.error.as_deref(),
+        Some("model request limit reached (max_model_requests = 0)")
+    );
 }
 
 fn token_budget(tokens: u64) -> Limits {
@@ -303,7 +306,10 @@ async fn an_unlimited_budget_can_explicitly_enable_continuation() {
     let report = runner.run("go", &CancellationToken::new()).await;
 
     assert_eq!(report.outcome, RunOutcome::Completed);
-    assert_eq!((report.turns, report.final_text.as_str()), (2, "part one, part two"));
+    assert_eq!(
+        (report.model_requests, report.final_text.as_str()),
+        (2, "part one, part two")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -326,10 +332,45 @@ async fn retries_transient_errors_without_repeating_the_prompt() {
     let report = runner.run("diagnose", &CancellationToken::new()).await;
 
     assert_eq!(report.outcome, RunOutcome::Completed);
-    assert_eq!((report.retries, report.turns, report.final_text.as_str()), (1, 2, "ok"));
+    assert_eq!(
+        (report.retries, report.model_requests, report.final_text.as_str()),
+        (1, 2, "ok")
+    );
     // The retry request has the prompt once and not the failed attempt.
     assert_eq!(summarize(&provider.requests()[1].messages), ["user:diagnose"]);
     assert!(sink.kinds().contains(&"retry_scheduled"));
+}
+
+#[tokio::test]
+async fn tool_result_details_are_recorded_and_survive_reopening_the_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("run.jsonl");
+    let details = json!({"exitCode": 0});
+    let provider = provider([
+        FauxStep::tool_call("c1", "echo", json!({"text": "hi", "details": details})),
+        FauxStep::text("done"),
+    ]);
+    let (mut runner, _) = RunnerSetup {
+        session: SessionStore::create(&path, header()).unwrap(),
+        ..RunnerSetup::new(config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]))
+    }
+    .build();
+
+    runner.run("go", &CancellationToken::new()).await;
+    drop(runner);
+
+    let recorded: Vec<Value> = read_lines(&path)
+        .into_iter()
+        .filter(|line| line["message"]["role"] == "toolResult")
+        .map(|line| line["message"]["details"].clone())
+        .collect();
+    assert_eq!(recorded, std::slice::from_ref(&details));
+    let reopened = SessionStore::open(&path).unwrap();
+    let kept = reopened.messages().into_iter().find_map(|message| match message {
+        Message::ToolResult(result) => result.details,
+        _ => None,
+    });
+    assert_eq!(kept, Some(details));
 }
 
 #[tokio::test]
@@ -438,7 +479,7 @@ async fn queued_input_waits_when_no_request_budget_is_left() {
 
     let report = runner.run("go", &CancellationToken::new()).await;
 
-    assert_eq!(report.outcome, RunOutcome::MaxTurns);
+    assert_eq!(report.outcome, RunOutcome::ModelRequestLimit);
     assert_eq!(summarize(&runner.session().messages()), ["user:go"]);
     assert_eq!(summarize(&queues.drain_steering()), ["user:later"]);
 }
@@ -560,7 +601,10 @@ async fn a_run_stops_at_the_turn_limit() {
 
     let report = runner.run("go", &CancellationToken::new()).await;
 
-    assert_eq!((report.outcome, report.turns), (RunOutcome::MaxTurns, 3));
+    assert_eq!(
+        (report.outcome, report.model_requests),
+        (RunOutcome::ModelRequestLimit, 3)
+    );
 }
 
 #[tokio::test]
@@ -610,7 +654,10 @@ async fn continues_a_truncated_answer_and_joins_the_parts() {
     let report = runner.run("go", &CancellationToken::new()).await;
 
     assert_eq!(report.outcome, RunOutcome::Completed);
-    assert_eq!((report.turns, report.final_text.as_str()), (2, "Part one, part two."));
+    assert_eq!(
+        (report.model_requests, report.final_text.as_str()),
+        (2, "Part one, part two.")
+    );
     let second = summarize(&provider.requests()[1].messages);
     assert_eq!(second[..2], ["user:go", "assistant:Part one, "]);
     assert!(

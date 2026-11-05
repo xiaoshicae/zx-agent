@@ -311,7 +311,7 @@ async fn an_explicit_cli_value_equal_to_the_old_default_still_overrides_the_file
     let dir = tempfile::tempdir().unwrap();
     profile(
         dir.path(),
-        "tools = []\n[limits]\nmaxTurns = 0\n[extensions]\ncontinueOnLength = 0",
+        "tools = []\n[limits]\nmaxModelRequests = 0\n[extensions]\ncontinueOnLength = 0",
     );
     let server = MockServer::start(vec![Reply::truncated("first\n"), Reply::text("second")]).await;
     let output = run(
@@ -320,7 +320,7 @@ async fn an_explicit_cli_value_equal_to_the_old_default_still_overrides_the_file
         &[
             "--profile",
             "profile.toml",
-            "--max-turns",
+            "--max-model-requests",
             "30",
             "--continue-on-length",
             "1",
@@ -336,7 +336,7 @@ async fn an_explicit_cli_value_equal_to_the_old_default_still_overrides_the_file
 #[tokio::test]
 async fn a_file_turn_budget_is_used_when_no_cli_override_was_given() {
     let dir = tempfile::tempdir().unwrap();
-    profile(dir.path(), "[limits]\nmaxTurns = 0");
+    profile(dir.path(), "[limits]\nmaxModelRequests = 0");
     let server = MockServer::start(vec![]).await;
     let output = run(&server, dir.path(), &["--profile", "profile.toml", "go"]).await;
     assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
@@ -439,7 +439,7 @@ async fn unattended_run_never_opens_a_terminal_approval_for_an_assistant_profile
 async fn invalid_configuration_exits_2_without_a_model_request_or_session_file() {
     for text in [
         "broken = true",
-        "[limits]\nmaxTurns = -1",
+        "[limits]\nmaxModelRequests = -1",
         "execution = 'container'",
         "[extensions]\nredaction = false",
         "[context]\nfiles = ['missing.md']",
@@ -479,11 +479,11 @@ fn flag_help(mode: &str, flag: &str) -> String {
 #[test]
 fn omitted_budget_flags_are_documented_as_profile_values() {
     for (mode, flag) in [
-        ("run", "--max-turns"),
+        ("run", "--max-model-requests"),
         ("run", "--timeout-secs"),
         ("run", "--continue-on-length"),
         ("run", "--token-budget"),
-        ("chat", "--max-turns"),
+        ("chat", "--max-model-requests"),
         ("chat", "--timeout-secs"),
         ("chat", "--token-budget"),
     ] {
@@ -636,7 +636,7 @@ async fn a_skill_is_subject_to_the_same_tool_policy_as_other_tools() {
 #[tokio::test]
 async fn chat_uses_the_profile_turn_budget() {
     let dir = tempfile::tempdir().unwrap();
-    profile(dir.path(), "[limits]\nmaxTurns = 0");
+    profile(dir.path(), "[limits]\nmaxModelRequests = 0");
     let server = MockServer::start(vec![]).await;
     let mut command = command(
         &server,
@@ -663,7 +663,7 @@ async fn chat_uses_the_profile_turn_budget() {
     assert!(
         reports
             .iter()
-            .any(|value| value["type"] == "run_end" && value["report"]["outcome"] == "max_turns")
+            .any(|value| value["type"] == "run_end" && value["report"]["outcome"] == "model_request_limit")
     );
     assert!(server.requests().is_empty());
 }
@@ -680,13 +680,7 @@ async fn chat_keeps_shell_approval_even_when_the_profile_has_no_ask_rule() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"go\n/approve 1 once\n/quit\n")
-        .await
-        .unwrap();
+    child.stdin.take().unwrap().write_all(b"go\n1\n/quit\n").await.unwrap();
     let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
         .await
         .unwrap()

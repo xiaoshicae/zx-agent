@@ -73,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
     });
     // Nobody can stop an unattended run, so it gets bounds of its own.
     let limits = Limits {
-        max_turns: Some(30),
+        max_model_requests: Some(30),
         timeout: Some(Duration::from_secs(15 * 60)),
         token_budget: None,
     };
@@ -82,8 +82,8 @@ async fn main() -> anyhow::Result<()> {
     let report = agent.prompt(task).await?;
     println!("{}", report.final_text);
     eprintln!(
-        "outcome: {:?}, turns: {}, tokens: {}",
-        report.outcome, report.turns, report.usage.total_tokens
+        "outcome: {:?}, model requests: {}, tokens: {}",
+        report.outcome, report.model_requests, report.usage.total_tokens
     );
     Ok(())
 }

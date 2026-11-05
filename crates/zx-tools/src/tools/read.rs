@@ -46,15 +46,6 @@ impl Tool for ReadFileTool {
         super::READ_FILE
     }
 
-    /// The mode of the executor: calls run one at a time when it handles one at a time.
-    fn execution_mode(&self) -> ExecutionMode {
-        self.executor.execution_mode()
-    }
-
-    fn effects(&self) -> Effects {
-        Effects::ReadOnly
-    }
-
     fn definition(&self) -> ToolDef {
         ToolDef {
             name: super::READ_FILE.to_string(),
@@ -75,6 +66,15 @@ impl Tool for ReadFileTool {
                 "additionalProperties": false
             }),
         }
+    }
+
+    /// The mode of the executor: calls run one at a time when it handles one at a time.
+    fn execution_mode(&self) -> ExecutionMode {
+        self.executor.execution_mode()
+    }
+
+    fn effects(&self) -> Effects {
+        Effects::ReadOnly
     }
 
     fn validate_arguments(&self, args: &Value) -> Result<(), String> {
@@ -164,10 +164,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     fn ctx(dir: &Path) -> ToolContext {
-        ToolContext {
-            cwd: dir.to_path_buf(),
-            cancel: CancellationToken::new(),
-        }
+        ToolContext::new(dir.to_path_buf(), CancellationToken::new())
     }
 
     #[tokio::test]

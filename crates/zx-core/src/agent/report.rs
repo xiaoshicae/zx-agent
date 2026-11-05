@@ -16,8 +16,8 @@ pub enum RunOutcome {
     Truncated,
     /// A request exhausted retries, an operational hook failed, or persistence failed.
     Error,
-    /// The turn budget ran out while the model still wanted to continue.
-    MaxTurns,
+    /// The model request budget ran out while the model still wanted to continue.
+    ModelRequestLimit,
     /// The wall-clock limit was reached.
     Timeout,
     /// The caller cancelled the run.
@@ -36,7 +36,7 @@ pub struct RunReport {
     pub final_text: String,
     /// Model requests made, summary requests included, saturating at `u32::MAX` for
     /// unbounded runs.
-    pub turns: u32,
+    pub model_requests: u32,
     pub retries: u32,
     /// Usage of every response in this run, failed attempts included. A cancelled request
     /// counts as zero: servers report usage only at the end of the stream.

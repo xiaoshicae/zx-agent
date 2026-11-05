@@ -1,6 +1,7 @@
 //! Streaming terminal output. Model text is rendered without executable control codes.
 
 use std::io::Write;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use zx_agent::agent::{AgentEvent, Event, EventSink};
@@ -12,16 +13,22 @@ use zx_agent::text::clip;
 use crate::cli::OutputMode;
 use crate::{JsonlEvents, write_line};
 
+use super::debug::DebugState;
+
 pub(super) struct Output {
     mode: OutputMode,
+    debug: bool,
+    debug_state: Mutex<DebugState>,
     wrote_text: AtomicBool,
     json: JsonlEvents,
 }
 
 impl Output {
-    pub(super) fn new(mode: OutputMode, deltas: bool) -> Self {
+    pub(super) fn new(mode: OutputMode, deltas: bool, debug: bool) -> Self {
         Self {
             mode,
+            debug,
+            debug_state: Mutex::new(DebugState::default()),
             wrote_text: AtomicBool::new(false),
             json: JsonlEvents { deltas },
         }
@@ -32,7 +39,9 @@ impl Output {
             // The `run_end` event, already written, carries the report.
             OutputMode::Jsonl => {}
             OutputMode::Text => {
-                if let Some(error) = &report.error {
+                if !self.debug
+                    && let Some(error) = &report.error
+                {
                     eprintln!("[chat] {}", visible(error));
                 }
             }
@@ -83,18 +92,42 @@ impl EventSink for Output {
                 if self.wrote_text.load(Ordering::SeqCst) || !text.is_empty() {
                     write_stdout("\n");
                 }
-                if let Some(error) = &message.error_message {
+                if !self.debug
+                    && let Some(error) = &message.error_message
+                {
                     eprintln!("[model] {:?}: {}", message.stop_reason, visible(error));
-                } else if message.stop_reason == StopReason::Length {
+                } else if !self.debug && message.stop_reason == StopReason::Length {
                     eprintln!("[model] response reached the output token limit");
                 }
             }
             // Everything else is printed as `run` prints it; `progress_line` covers every event.
             other => {
-                if let Some(line) = progress_line(other) {
-                    eprintln!("{line}");
+                if !self.debug {
+                    match other {
+                        AgentEvent::ToolExecutionStart { .. } => {}
+                        AgentEvent::ToolExecutionEnd {
+                            tool_name,
+                            is_error,
+                            duration_ms,
+                            ..
+                        } => {
+                            let status = if *is_error { "error" } else { "ok" };
+                            let duration = duration_ms.map(|ms| format!(" {ms}ms")).unwrap_or_default();
+                            eprintln!("[tool] {} -> {status}{duration}", visible(tool_name));
+                        }
+                        _ => {
+                            if let Some(line) = progress_line(other) {
+                                eprintln!("{line}");
+                            }
+                        }
+                    }
                 }
             }
+        }
+        // Emit after rendering the assistant message so the log starts on a new line.
+        if self.debug {
+            let mut state = self.debug_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.emit(event);
         }
     }
 }
@@ -109,6 +142,9 @@ pub(crate) fn progress_line(event: &AgentEvent) -> Option<String> {
             visible(tool_name),
             visible(&clip(&args.to_string(), 300))
         )),
+        AgentEvent::ToolExecutionUpdate { tool_name, content, .. } => {
+            Some(format!("[tool] {}: {}", visible(tool_name), visible(content)))
+        }
         AgentEvent::ToolExecutionEnd {
             tool_name,
             is_error,

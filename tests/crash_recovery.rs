@@ -163,6 +163,7 @@ fn result(id: &str, name: &str, content: &str) -> Message {
         is_error: false,
         timestamp: 0,
         duration_ms: None,
+        details: None,
     })
 }
 

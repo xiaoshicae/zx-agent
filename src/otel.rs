@@ -154,7 +154,7 @@ enum What {
     },
     RunEnd {
         outcome: RunOutcome,
-        turns: u32,
+        model_requests: u32,
         retries: u32,
         usage: Usage,
     },
@@ -230,7 +230,7 @@ impl Signal {
             },
             AgentEvent::RunEnd { report } => What::RunEnd {
                 outcome: report.outcome,
-                turns: report.turns,
+                model_requests: report.model_requests,
                 retries: report.retries,
                 usage: report.usage.clone(),
             },
@@ -317,6 +317,7 @@ impl Signal {
             AgentEvent::MessageStart { .. }
             | AgentEvent::MessageUpdate { .. }
             | AgentEvent::MessageEnd { .. }
+            | AgentEvent::ToolExecutionUpdate { .. }
             | AgentEvent::ContextEdited { .. } => return None,
         };
         Some(Self {
@@ -421,7 +422,7 @@ impl Runs {
             }
             What::RunEnd {
                 outcome,
-                turns,
+                model_requests,
                 retries,
                 usage,
             } => {
@@ -430,7 +431,7 @@ impl Runs {
                 if let Some(run) = spans.run.take() {
                     let span = run.span();
                     span.set_attribute(KeyValue::new("zx.outcome", name(&outcome)));
-                    span.set_attribute(KeyValue::new("zx.turns", i64::from(turns)));
+                    span.set_attribute(KeyValue::new("zx.model_requests", i64::from(model_requests)));
                     span.set_attribute(KeyValue::new("zx.retries", i64::from(retries)));
                     span.set_attributes(usage_attributes(&usage));
                     if outcome == RunOutcome::Error {
@@ -630,7 +631,7 @@ fn usage_attributes(usage: &Usage) -> Vec<KeyValue> {
     ]
 }
 
-/// The name a value has in events and reports, such as `max_turns`.
+/// The name a value has in events and reports, such as `model_request_limit`.
 fn name(value: &impl Serialize) -> String {
     match serde_json::to_value(value) {
         Ok(serde_json::Value::String(name)) => name,
@@ -716,7 +717,7 @@ mod tests {
             report: Box::new(RunReport {
                 outcome,
                 final_text: "the secret answer".into(),
-                turns: 1,
+                model_requests: 1,
                 retries: 0,
                 usage,
                 error: None,
@@ -797,6 +798,7 @@ mod tests {
                     tool_name: "bash".into(),
                     is_error: false,
                     duration_ms: Some(8),
+                    details: None,
                 },
             ),
             at(1021, AgentEvent::TurnEnd { turn: 1 }),
@@ -826,6 +828,7 @@ mod tests {
         assert_eq!(attribute(run, "zx.run.id").as_deref(), Some(RUN));
         assert_eq!(attribute(run, "zx.session.id").as_deref(), Some("s1"));
         assert_eq!(attribute(run, "zx.outcome").as_deref(), Some("completed"));
+        assert_eq!(attribute(run, "zx.model_requests").as_deref(), Some("1"));
         assert_eq!(attribute(request, "zx.usage.input_tokens").as_deref(), Some("10"));
         assert_eq!(attribute(request, "zx.usage.output_tokens").as_deref(), Some("5"));
         assert_eq!(attribute(request, "zx.stop_reason").as_deref(), Some("toolUse"));

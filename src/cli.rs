@@ -78,7 +78,7 @@ pub(crate) struct RunArgs {
     /// Maximum model requests for the run, failed attempts included. Defaults to the
     /// selected profile.
     #[arg(long)]
-    pub(crate) max_turns: Option<u32>,
+    pub(crate) max_model_requests: Option<u32>,
 
     /// Wall-clock limit for the whole run, in seconds. 0 disables it. Defaults to the
     /// selected profile.
@@ -95,7 +95,7 @@ pub(crate) struct RunArgs {
     pub(crate) transport: TransportArgs,
 
     /// Times to ask the model to continue an answer cut off by the output token limit.
-    /// Each continuation counts against --max-turns. Defaults to the selected profile.
+    /// Each continuation counts against --max-model-requests. Defaults to the selected profile.
     #[arg(long)]
     pub(crate) continue_on_length: Option<u32>,
 
@@ -118,7 +118,7 @@ pub(crate) struct ChatArgs {
 
     /// Maximum model requests per prompt. Defaults to the selected profile.
     #[arg(long)]
-    pub(crate) max_turns: Option<u32>,
+    pub(crate) max_model_requests: Option<u32>,
 
     /// Wall-clock limit per prompt, in seconds. 0 disables it. Defaults to the selected
     /// profile.
@@ -131,7 +131,7 @@ pub(crate) struct ChatArgs {
     #[arg(long)]
     pub(crate) token_budget: Option<u64>,
 
-    /// How long an approval request waits for /approve or /deny, in seconds. An unanswered
+    /// How long an approval request waits for a menu choice, in seconds. An unanswered
     /// request is denied, and the task goes on without the call.
     #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..))]
     pub(crate) approval_timeout_secs: u64,
@@ -145,6 +145,10 @@ pub(crate) struct ChatArgs {
     /// text: stream replies on stdout. jsonl: emit events and per-prompt reports.
     #[arg(long, value_enum, default_value_t = OutputMode::Text)]
     pub(crate) output: OutputMode,
+
+    /// Show detailed execution events on stderr in text mode.
+    #[arg(long)]
+    pub(crate) debug: bool,
 
     /// In jsonl mode, also emit streaming message_update events.
     #[arg(long)]
@@ -163,7 +167,7 @@ pub(crate) struct ServeArgs {
 
     /// Maximum model requests per prompt. Defaults to the selected profile.
     #[arg(long)]
-    pub(crate) max_turns: Option<u32>,
+    pub(crate) max_model_requests: Option<u32>,
 
     /// Wall-clock limit per prompt, in seconds. 0 disables it. Defaults to the selected
     /// profile.
@@ -470,7 +474,7 @@ pub(crate) async fn connect_mcp(base: &BaseArgs, default: Builtin, transport: &T
 
 /// Limits given on the command line. `None` keeps the selected profile's value.
 pub(crate) struct Budget {
-    pub(crate) max_turns: Option<u32>,
+    pub(crate) max_model_requests: Option<u32>,
     pub(crate) timeout_secs: Option<u64>,
     /// 0 disables the profile's budget.
     pub(crate) token_budget: Option<u64>,
@@ -600,8 +604,8 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
             .map(String::from)
             .collect();
     }
-    if let Some(turns) = options.budget.max_turns {
-        profile.limits.max_turns = Some(turns);
+    if let Some(turns) = options.budget.max_model_requests {
+        profile.limits.max_model_requests = Some(turns);
     }
     if let Some(secs) = options.budget.timeout_secs {
         profile.limits.timeout = (secs > 0).then(|| Duration::from_secs(secs));
@@ -915,11 +919,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn model_request_limit_is_available_in_each_mode() {
+        let flag = "--max-model-requests";
+        let cli = Cli::try_parse_from(["zx-agent", "run", "--model", "m", flag, "3", "go"]).unwrap();
+        match cli.command {
+            Command::Run(args) => assert_eq!(args.max_model_requests, Some(3)),
+            _ => panic!("run command"),
+        }
+        let cli = Cli::try_parse_from(["zx-agent", "chat", "--model", "m", flag, "3"]).unwrap();
+        match cli.command {
+            Command::Chat(args) => assert_eq!(args.max_model_requests, Some(3)),
+            _ => panic!("chat command"),
+        }
+        let cli =
+            Cli::try_parse_from(["zx-agent", "serve", "--config", "serve.toml", "--model", "m", flag, "3"]).unwrap();
+        match cli.command {
+            Command::Serve(args) => assert_eq!(args.max_model_requests, Some(3)),
+            _ => panic!("serve command"),
+        }
+        assert!(Cli::try_parse_from(["zx-agent", "run", "--model", "m", "--max-turns", "3", "go"]).is_err());
+    }
+
+    #[test]
     fn omitted_budgets_and_tools_keep_the_profile_values() {
         let cli = Cli::try_parse_from(["zx-agent", "run", "--model", "m", "go"]).unwrap();
         match cli.command {
             Command::Run(args) => {
-                assert_eq!(args.max_turns, None);
+                assert_eq!(args.max_model_requests, None);
                 assert_eq!(args.timeout_secs, None);
                 assert_eq!(args.continue_on_length, None);
                 assert_eq!(args.base.tools, None);
@@ -929,7 +955,7 @@ mod tests {
         let cli = Cli::try_parse_from(["zx-agent", "chat", "--model", "m"]).unwrap();
         match cli.command {
             Command::Chat(args) => {
-                assert_eq!(args.max_turns, None);
+                assert_eq!(args.max_model_requests, None);
                 assert_eq!(args.timeout_secs, None);
                 assert_eq!(args.output, OutputMode::Text);
             }
@@ -943,7 +969,7 @@ mod tests {
         match cli.command {
             Command::Serve(args) => {
                 assert_eq!(args.config, Path::new("serve.toml"));
-                assert_eq!(args.max_turns, None);
+                assert_eq!(args.max_model_requests, None);
                 assert_eq!(args.request.session, None);
             }
             Command::Run(_) | Command::Chat(_) => panic!("serve command"),

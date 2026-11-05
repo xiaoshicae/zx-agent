@@ -558,7 +558,7 @@ fn render(report: &RunReport, replies: &Replies) -> String {
         RunOutcome::Completed if answer.is_empty() => replies.no_answer.clone(),
         RunOutcome::Completed => answer.to_string(),
         RunOutcome::Truncated => noted(&replies.truncated),
-        RunOutcome::MaxTurns => noted(&replies.max_turns),
+        RunOutcome::ModelRequestLimit => noted(&replies.model_request_limit),
         RunOutcome::TokenBudget => noted(&replies.token_budget),
         // The last answer in the session may be an earlier run's, so it is not repeated.
         RunOutcome::Timeout => replies.timed_out.clone(),
@@ -584,7 +584,7 @@ mod tests {
         RunReport {
             outcome,
             final_text: final_text.into(),
-            turns: 1,
+            model_requests: 1,
             retries: 0,
             usage: Usage::default(),
             error: error.map(String::from),
@@ -613,8 +613,8 @@ mod tests {
             format!("part\n\n{}", replies.truncated)
         );
         assert_eq!(
-            render(&report(RunOutcome::MaxTurns, "", None), &replies),
-            replies.max_turns
+            render(&report(RunOutcome::ModelRequestLimit, "", None), &replies),
+            replies.model_request_limit
         );
         assert_eq!(
             render(&report(RunOutcome::TokenBudget, "part", None), &replies),

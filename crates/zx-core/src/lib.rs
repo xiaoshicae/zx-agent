@@ -9,6 +9,17 @@
 //! - [`prompt`]: system prompt assembly and the generated environment section
 //! - [`executor`]: where built-in tools run commands and read files
 //! - [`extensions`]: bundles of tools, hooks and prompt sections, and the built-in policies
+//!
+//! A session holds a conversation across runs. Each [`runner::Runner::run`] processes one
+//! prompt and may retry a failed provider response as another loop attempt. A task turn is
+//! one task response and its tool calls; a model request may also be a compaction summary,
+//! which consumes the request budget without creating a separate task turn. Retries and
+//! summary requests both consume the run's model-request budget.
+//!
+//! Embedders normally start with [`AgentSession`] or [`runner::Runner`]. [`agent::run_loop`]
+//! exposes the lower-level single-attempt loop. [`session::SessionLog`], [`agent::Tool`],
+//! [`agent::Hooks`], and [`interaction::Interaction`] are extension interfaces; modules such
+//! as [`executor`], [`compaction`], and [`output_store`] also provide default implementations.
 
 // The modules name the model layer and the shared helpers by these crate-root paths.
 use zx_ai::{self as ai, sync, text};

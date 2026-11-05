@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use serde_json::Value;
 
 use crate::agent::hooks::{HookContext, HookResult, HookStage, Hooks, TurnDecision, TurnDisposition, TurnSummary};
 use crate::agent::{LoopConfig, Tool, ToolOutput};
@@ -199,8 +200,8 @@ impl Hooks for ContinueOnLength {
     async fn finish_turn(&self, turn: &TurnSummary<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
         if turn.disposition == TurnDisposition::Stop
             && turn.response.stop_reason == StopReason::Length
-            && turn.remaining_turns != Some(0)
-            && turn.continuations < self.max_continuations
+            && turn.remaining_model_requests != Some(0)
+            && turn.answer_continuations < self.max_continuations
         {
             Ok(TurnDecision::ContinueAnswer(CONTINUE_PROMPT.to_string()))
         } else {
@@ -215,7 +216,9 @@ impl Hooks for ContinueOnLength {
 /// hidden as well; the bound keeps a long-running process from growing.
 const MAX_FILE_SECRETS: usize = 32;
 
-/// Redacts exact occurrences of configured secrets from tool output before persistence.
+/// Redacts exact occurrences of configured secrets from tool output before persistence:
+/// from the content, and from the strings and object keys of the details. Two keys that
+/// differ only by a secret become one, and numbers in the details are not redacted.
 ///
 /// Empty secrets are ignored. Longer matches run first so overlapping secrets do not
 /// leave a suffix visible. This does not discover unknown credentials or filter inputs.
@@ -331,10 +334,39 @@ impl Hooks for RedactSecrets {
         let mut secrets: Vec<&str> = self.secrets.iter().chain(&file_secrets).map(String::as_str).collect();
         secrets.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
         secrets.dedup();
-        for secret in secrets {
-            output.content = output.content.replace(secret, "[REDACTED]");
+        output.content = redact_text(&output.content, &secrets);
+        if let Some(details) = &mut output.details {
+            redact_json(details, &secrets);
         }
         Ok(output)
+    }
+}
+
+/// Replace each of `secrets`, longest first as given, with a marker.
+fn redact_text(text: &str, secrets: &[&str]) -> String {
+    let mut text = text.to_string();
+    for secret in secrets {
+        if text.contains(secret) {
+            text = text.replace(secret, "[REDACTED]");
+        }
+    }
+    text
+}
+
+fn redact_json(value: &mut Value, secrets: &[&str]) {
+    match value {
+        Value::String(text) => *text = redact_text(text, secrets),
+        Value::Array(items) => items.iter_mut().for_each(|item| redact_json(item, secrets)),
+        Value::Object(map) => {
+            *map = std::mem::take(map)
+                .into_iter()
+                .map(|(key, mut item)| {
+                    redact_json(&mut item, secrets);
+                    (redact_text(&key, secrets), item)
+                })
+                .collect();
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
 }
 

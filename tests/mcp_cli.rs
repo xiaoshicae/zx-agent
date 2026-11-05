@@ -139,7 +139,7 @@ async fn chat_asks_before_an_mcp_tool_that_needs_approval() {
         .spawn()
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
-    stdin.write_all(b"go\n/approve 1 once\n/quit\n").await.unwrap();
+    stdin.write_all(b"go\n1\n/quit\n").await.unwrap();
     stdin.shutdown().await.unwrap();
     drop(stdin);
     let output = tokio::time::timeout(WAIT, child.wait_with_output())

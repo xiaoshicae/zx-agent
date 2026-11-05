@@ -136,8 +136,8 @@ pub enum LoopOutcome {
     Error,
     /// Cancelled.
     Aborted,
-    /// The turn budget ran out while the model still wanted to continue.
-    MaxTurns,
+    /// The model request budget ran out while the model still wanted to continue.
+    ModelRequestLimit,
     /// The answer was cut off and no hook requested a continuation.
     Truncated,
     /// The token budget ran out while the model still wanted to continue.
@@ -229,6 +229,12 @@ pub enum AgentEvent {
         tool_name: String,
         args: Value,
     },
+    /// A filtered, transient progress update from a running tool.
+    ToolExecutionUpdate {
+        tool_call_id: String,
+        tool_name: String,
+        content: String,
+    },
     /// The tool policy's verdict on a call. A policy hook that fails denies the call.
     ToolDecision {
         tool_call_id: String,
@@ -258,6 +264,10 @@ pub enum AgentEvent {
         is_error: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         duration_ms: Option<u64>,
+        /// The tool's `ToolOutput::details` after the `after_tool` hooks, as recorded with the
+        /// result; absent when the tool gave none or they exceeded `MAX_DETAILS_BYTES`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        details: Option<Value>,
     },
     TurnEnd {
         turn: u32,
@@ -329,6 +339,7 @@ impl AgentEvent {
             AgentEvent::MessageUpdate { .. } => "message_update",
             AgentEvent::MessageEnd { .. } => "message_end",
             AgentEvent::ToolExecutionStart { .. } => "tool_execution_start",
+            AgentEvent::ToolExecutionUpdate { .. } => "tool_execution_update",
             AgentEvent::ToolDecision { .. } => "tool_decision",
             AgentEvent::ApprovalRequested { .. } => "approval_requested",
             AgentEvent::ApprovalResolved { .. } => "approval_resolved",
@@ -388,7 +399,7 @@ mod tests {
                 report: Box::new(RunReport {
                     outcome: RunOutcome::Completed,
                     final_text: "done".into(),
-                    turns: 1,
+                    model_requests: 1,
                     retries: 0,
                     usage: Usage::default(),
                     error: None,
@@ -439,6 +450,7 @@ mod tests {
                 tool_name: "bash".into(),
                 is_error: false,
                 duration_ms: None,
+                details: None,
             },
             AgentEvent::TurnEnd { turn: 1 },
             AgentEvent::AgentEnd {
@@ -515,6 +527,7 @@ mod tests {
             tool_name: "bash".into(),
             is_error: true,
             duration_ms: Some(5),
+            details: None,
         };
         assert_eq!(
             serde_json::to_value(&event).unwrap(),

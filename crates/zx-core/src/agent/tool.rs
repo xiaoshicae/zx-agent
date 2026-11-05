@@ -30,15 +30,59 @@ pub enum Effects {
     SideEffects,
 }
 
-/// What a tool receives besides its arguments.
+/// What a tool receives besides its arguments. Fields are only added over time, so code
+/// outside this crate builds one with [`ToolContext::new`].
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct ToolContext {
     pub cwd: PathBuf,
     /// Cancelled when the run is aborted or times out. Long-running tools must honor it. In
     /// a run it is the call's own token: a tool may cancel it to stop work of its own
     /// without stopping the run.
     pub cancel: CancellationToken,
+    /// The model's tool call ID, absent for direct SDK calls.
+    pub tool_call_id: Option<String>,
+    /// Bounded progress channel, installed by the loop. Use `report_progress` to send.
+    pub progress: Option<tokio::sync::mpsc::Sender<String>>,
 }
+
+impl ToolContext {
+    /// Context for a direct SDK call, without a loop or progress events.
+    pub fn new(cwd: PathBuf, cancel: CancellationToken) -> Self {
+        Self {
+            cwd,
+            cancel,
+            tool_call_id: None,
+            progress: None,
+        }
+    }
+
+    /// Queue a bounded progress update without blocking the tool (pi: `onUpdate`). Text
+    /// longer than [`MAX_PROGRESS_BYTES`] is cut at a character boundary. The loop passes
+    /// updates through the redaction hooks, then emits them as `tool_execution_update`
+    /// events; they are not recorded in the session and the model never sees them. Returns
+    /// false when the queue is full, the call has finished, or this is a direct call without
+    /// an observer; the update is then dropped.
+    pub fn report_progress(&self, text: impl Into<String>) -> bool {
+        let Some(progress) = &self.progress else { return false };
+        let mut text = text.into();
+        if text.len() > MAX_PROGRESS_BYTES {
+            let mut end = MAX_PROGRESS_BYTES;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+        }
+        progress.try_send(text).is_ok()
+    }
+}
+
+/// The most bytes of one progress update; longer text is cut.
+pub const MAX_PROGRESS_BYTES: usize = 16 * 1024;
+
+/// The most bytes of [`ToolOutput::details`], as compact JSON. Details are recorded with
+/// every result, so they get the same bound as a progress update.
+pub const MAX_DETAILS_BYTES: usize = 16 * 1024;
 
 /// What a tool returns. In JSON `content` is required and the flags default to `false`, so
 /// output that a hook process forgot cannot silently replace the result with nothing.
@@ -52,6 +96,12 @@ pub struct ToolOutput {
     /// Ask to stop after this batch. Takes effect only when every result in the batch sets it.
     #[serde(default)]
     pub terminate: bool,
+    /// Structured data for frontends and logs (pi: `details`). After the `after_tool` hooks,
+    /// the redaction hooks included, it is recorded with the result message and sent in the
+    /// `tool_execution_end` event; the model never sees it. Details larger than
+    /// [`MAX_DETAILS_BYTES`] as compact JSON are dropped from both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
 }
 
 impl ToolOutput {
@@ -68,7 +118,15 @@ impl ToolOutput {
         Self {
             content: content.into(),
             is_error: true,
-            terminate: false,
+            ..Default::default()
+        }
+    }
+
+    /// The same result with structured `details` for observers.
+    pub fn with_details(self, details: Value) -> Self {
+        Self {
+            details: Some(details),
+            ..self
         }
     }
 }
@@ -94,7 +152,20 @@ pub trait Tool: Send + Sync {
     fn effects(&self) -> Effects {
         Effects::SideEffects
     }
-    /// Validate before policy and approval. Override for schema and semantic checks;
+    /// Rewrite the model's arguments before they are checked, for an older argument shape
+    /// or a mistake models commonly make (pi: `prepareArguments`). Return `None` to keep
+    /// them as they are, which the default does.
+    ///
+    /// The rewritten arguments are what the schema check, `validate_arguments`, the
+    /// `before_tool` and `after_tool` hooks (the policy among them), approval and `execute`
+    /// see; `tool_execution_start` still shows the model's. The session keeps the model's original call, so the
+    /// rewrite must depend on nothing but `args`: an audit then derives the arguments that
+    /// ran from the recorded ones. Direct SDK calls skip this step.
+    fn prepare_arguments(&self, _args: &Value) -> Option<Value> {
+        None
+    }
+    /// Validate before policy and approval, after the declared JSON Schema has been checked.
+    /// Override for semantic checks;
     /// execute must still validate direct SDK calls. The default adds no checks.
     fn validate_arguments(&self, _args: &Value) -> Result<(), String> {
         Ok(())
@@ -107,4 +178,43 @@ pub trait Tool: Send + Sync {
     /// `name`, `definition`, `execution_mode` and `effects` methods must not panic: the loop
     /// tries them before a run's first request and fails the run if one does.
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn observed(capacity: usize) -> (ToolContext, tokio::sync::mpsc::Receiver<String>) {
+        let (progress, updates) = tokio::sync::mpsc::channel(capacity);
+        let ctx = ToolContext {
+            progress: Some(progress),
+            ..ToolContext::new(PathBuf::from("."), CancellationToken::new())
+        };
+        (ctx, updates)
+    }
+
+    #[test]
+    fn a_direct_call_has_nobody_to_report_progress_to() {
+        let ctx = ToolContext::new(PathBuf::from("."), CancellationToken::new());
+        assert!(!ctx.report_progress("step"));
+    }
+
+    #[test]
+    fn long_progress_is_cut_at_a_character_boundary() {
+        let (ctx, mut updates) = observed(1);
+        // Three bytes each, so the limit falls inside a character.
+        assert!(ctx.report_progress("界".repeat(MAX_PROGRESS_BYTES)));
+        let update = updates.try_recv().unwrap();
+        assert_eq!(update.len(), MAX_PROGRESS_BYTES / 3 * 3);
+        assert!(update.chars().all(|c| c == '界'));
+    }
+
+    #[test]
+    fn progress_is_dropped_when_the_queue_is_full() {
+        let (ctx, mut updates) = observed(1);
+        assert!(ctx.report_progress("first"));
+        assert!(!ctx.report_progress("second"));
+        assert_eq!(updates.try_recv().unwrap(), "first");
+        assert!(updates.try_recv().is_err());
+    }
 }

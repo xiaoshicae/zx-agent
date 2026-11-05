@@ -243,7 +243,7 @@ async fn invalid_tool_arguments_are_rejected_before_policy_and_approval() {
     assert_eq!(checks.load(Ordering::SeqCst), 0);
     assert_eq!(host.calls.load(Ordering::SeqCst), 0);
     assert!(
-        matches!(&provider.requests()[1].messages[2], Message::ToolResult(output) if output.is_error && output.content.contains("unknown field"))
+        matches!(&provider.requests()[1].messages[2], Message::ToolResult(output) if output.is_error && output.content.contains("Invalid arguments"))
     );
 }
 
@@ -380,7 +380,7 @@ async fn rejected_input_is_logged_and_omitted_without_retrying_the_model() {
     .build();
     let report = runner.run("go", &CancellationToken::new()).await;
     assert_eq!(
-        (report.outcome, report.turns, report.retries),
+        (report.outcome, report.model_requests, report.retries),
         (RunOutcome::Error, 0, 0)
     );
     assert!(provider.requests().is_empty());
@@ -604,7 +604,7 @@ async fn continuation_budget_is_not_reset_after_a_provider_retry() {
     .build();
     let report = runner.run("go", &CancellationToken::new()).await;
     assert_eq!(
-        (report.outcome, report.turns, report.retries),
+        (report.outcome, report.model_requests, report.retries),
         (RunOutcome::Truncated, 3, 1)
     );
     assert_eq!(report.final_text, "甲乙");
@@ -695,10 +695,7 @@ async fn a_secret_file_that_is_not_utf8_is_redacted_as_tools_print_it() {
     let printed = BashTool::default()
         .execute(
             json!({"command": "cat password"}),
-            &ToolContext {
-                cwd: dir.path().to_path_buf(),
-                cancel: CancellationToken::new(),
-            },
+            &ToolContext::new(dir.path().to_path_buf(), CancellationToken::new()),
         )
         .await
         .unwrap();
@@ -845,14 +842,14 @@ async fn a_hook_follow_up_obeys_the_turn_budget() {
     config.hooks.push(NextTurn(TurnDecision::FollowUp("next".into())));
     let (mut runner, _) = RunnerSetup {
         limits: Limits {
-            max_turns: Some(1),
+            max_model_requests: Some(1),
             ..Limits::default()
         },
         ..RunnerSetup::new(config)
     }
     .build();
     let report = runner.run("go", &CancellationToken::new()).await;
-    assert_eq!(report.outcome, RunOutcome::MaxTurns);
+    assert_eq!(report.outcome, RunOutcome::ModelRequestLimit);
     assert_eq!(provider.requests().len(), 1);
 }
 
@@ -900,7 +897,7 @@ async fn a_finish_hook_error_never_triggers_provider_retry() {
     .build();
     let report = runner.run("go", &CancellationToken::new()).await;
     assert_eq!(
-        (report.outcome, report.turns, report.retries),
+        (report.outcome, report.model_requests, report.retries),
         (RunOutcome::Error, 1, 0)
     );
     assert!(report.error.unwrap().contains("HTTP 503 from extension"));
@@ -1429,6 +1426,64 @@ async fn redaction_registered_first_still_runs_after_extensions() {
 
     let sent = summarize(&provider.requests()[1].messages);
     assert_eq!(sent.last().unwrap(), "tool:c1=ok [REDACTED]");
+}
+
+#[tokio::test]
+async fn progress_passes_only_the_redaction_hooks() {
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::tool_call(
+            "c1",
+            "echo",
+            json!({"text": "ok", "progress": ["plain", "with sk-registered-early inside"]}),
+        ),
+        FauxStep::text("done"),
+    ]));
+    let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
+    config
+        .hooks
+        .push(RedactSecrets::new(Some("sk-registered-early".into())));
+    // An extension that changes final output must not see transient progress.
+    config.hooks.push(LeakSecret);
+
+    let (_, sink) = run_prompt(&config, &mut Vec::new(), "go").await;
+
+    let updates: Vec<String> = sink
+        .events()
+        .into_iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolExecutionUpdate { content, .. } => Some(content),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(updates, ["plain", "with [REDACTED] inside"]);
+}
+
+#[tokio::test]
+async fn redaction_covers_the_strings_and_keys_of_details() {
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::tool_call(
+            "c1",
+            "echo",
+            json!({"text": "ok", "details": {"sk-registered-early": ["token sk-registered-early", 7, null]}}),
+        ),
+        FauxStep::text("done"),
+    ]));
+    let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
+    config
+        .hooks
+        .push(RedactSecrets::new(Some("sk-registered-early".into())));
+
+    let (_, sink) = run_prompt(&config, &mut Vec::new(), "go").await;
+
+    let details: Vec<_> = sink
+        .events()
+        .into_iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolExecutionEnd { details, .. } => details,
+            _ => None,
+        })
+        .collect();
+    assert_eq!(details, [json!({"[REDACTED]": ["token [REDACTED]", 7, null]})]);
 }
 
 #[tokio::test]

@@ -259,10 +259,10 @@ impl Profile {
             self.rules.ask_tools = tools;
         }
         self.rules.deny_tools.extend(raw.rules.deny_tools);
-        if let Some(turns) = raw.limits.max_turns {
-            self.limits.max_turns = match turns {
-                TurnLimit::Count(count) => Some(count),
-                TurnLimit::Unlimited(Unlimited::Unlimited) => None,
+        if let Some(turns) = raw.limits.max_model_requests {
+            self.limits.max_model_requests = match turns {
+                ModelRequestLimit::Count(count) => Some(count),
+                ModelRequestLimit::Unlimited(Unlimited::Unlimited) => None,
             };
         }
         if let Some(secs) = raw.limits.timeout_secs {
@@ -530,7 +530,7 @@ struct RawRules {
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 struct RawLimits {
-    max_turns: Option<TurnLimit>,
+    max_model_requests: Option<ModelRequestLimit>,
     timeout_secs: Option<u64>,
     /// 0 disables a budget that an earlier layer set.
     token_budget: Option<u64>,
@@ -538,7 +538,7 @@ struct RawLimits {
 
 #[derive(Deserialize)]
 #[serde(untagged)]
-enum TurnLimit {
+enum ModelRequestLimit {
     Count(u32),
     Unlimited(Unlimited),
 }
@@ -590,7 +590,7 @@ mod tests {
             assert_eq!(profile.name, selector);
             assert_eq!(profile.instructions, instructions);
             assert_eq!(profile.tools, ["bash", "read_file", "read_skill"]);
-            assert_eq!(profile.limits.max_turns, Some(30));
+            assert_eq!(profile.limits.max_model_requests, Some(30));
             assert_eq!(profile.limits.timeout, Some(Duration::from_secs(900)));
             assert_eq!(profile.continue_on_length, 1);
             assert!(profile.rules.auto_approve.is_empty());
@@ -598,7 +598,7 @@ mod tests {
         }
         let assistant = Profile::load(Some("assistant"), Builtin::Unattended).unwrap();
         assert_eq!(assistant.instructions, include_str!("../../profiles/assistant.md"));
-        assert_eq!(assistant.limits.max_turns, None);
+        assert_eq!(assistant.limits.max_model_requests, None);
         assert_eq!(assistant.limits.timeout, None);
         assert_eq!(assistant.continue_on_length, 0);
         assert_eq!(assistant.rules.ask_tools, ["bash"]);
@@ -722,14 +722,23 @@ mod tests {
         assert!(profile.tools.is_empty());
         assert_eq!(profile.rules.deny, ["secret"]);
         assert_eq!(profile.rules.ask_tools, ["bash"]);
-        assert_eq!(profile.limits.max_turns, None);
+        assert_eq!(profile.limits.max_model_requests, None);
     }
 
     #[test]
     fn zero_turns_and_unlimited_are_distinct_configurations() {
-        assert_eq!(load_file("[limits]\nmaxTurns = 0").unwrap().limits.max_turns, Some(0));
         assert_eq!(
-            load_file("[limits]\nmaxTurns = 'unlimited'").unwrap().limits.max_turns,
+            load_file("[limits]\nmaxModelRequests = 0")
+                .unwrap()
+                .limits
+                .max_model_requests,
+            Some(0)
+        );
+        assert_eq!(
+            load_file("[limits]\nmaxModelRequests = 'unlimited'")
+                .unwrap()
+                .limits
+                .max_model_requests,
             None
         );
         assert_eq!(load_file("[limits]\ntimeoutSecs = 0").unwrap().limits.timeout, None);
@@ -753,8 +762,9 @@ mod tests {
         for text in [
             "typo = true",
             "[limits]\nmax_turns = 2",
-            "[limits]\nmaxTurns = -1",
-            "[limits]\nmaxTurns = 'infinite'",
+            "[limits]\nmaxTurns = 2",
+            "[limits]\nmaxModelRequests = -1",
+            "[limits]\nmaxModelRequests = 'infinite'",
             "[limits]\ntokenBudget = -1",
             "[limits]\ntokenBudget = 'unlimited'",
         ] {

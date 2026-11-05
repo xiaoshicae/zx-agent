@@ -3,10 +3,10 @@
 pub mod agent_loop;
 pub mod events;
 pub mod hooks;
-mod host;
 pub mod policy;
 pub mod queue;
 mod report;
+mod session_runtime;
 pub mod tool;
 
 pub use agent_loop::{LoopConfig, LoopControl, LoopFailure, LoopResult, LoopSpec, run_loop};
@@ -19,8 +19,8 @@ pub use hooks::{
     CancelSignal, ContextEdit, HookChain, HookContext, HookError, HookFailure, HookOptions, HookPhase, HookResult,
     HookStage, Hooks, TurnDecision, TurnDisposition, TurnSummary,
 };
-pub(crate) use host::{ContextPreparation, SessionHost};
 pub use policy::{AllowAll, Decision, ToolPolicy};
 pub use queue::MessageQueues;
 pub use report::{RunOutcome, RunReport};
-pub use tool::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
+pub(crate) use session_runtime::{ContextPreparation, SessionRuntime};
+pub use tool::{Effects, ExecutionMode, MAX_DETAILS_BYTES, MAX_PROGRESS_BYTES, Tool, ToolContext, ToolOutput};

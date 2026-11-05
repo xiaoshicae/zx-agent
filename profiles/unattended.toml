@@ -6,7 +6,7 @@ tools = ["bash", "read_file", "read_skill"]
 execution = "local"
 
 [limits]
-maxTurns = 30
+maxModelRequests = 30
 timeoutSecs = 900
 
 [extensions]

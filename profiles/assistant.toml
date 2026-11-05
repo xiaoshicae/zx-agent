@@ -14,7 +14,7 @@ autoApprove = ["grep", "head", "tail", "wc", "jq"]
 autoApproveExcept = ["secret"]
 
 [limits]
-maxTurns = "unlimited"
+maxModelRequests = "unlimited"
 timeoutSecs = 0
 
 [extensions]

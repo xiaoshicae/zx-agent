@@ -34,7 +34,7 @@ pub struct BashTool {
 impl Default for BashTool {
     fn default() -> Self {
         Self {
-            shell: "bash".to_string(),
+            shell: String::from("bash"),
             default_timeout: Duration::from_secs(120),
             max_timeout: Duration::from_secs(600),
             hidden_env: Vec::new(),
@@ -196,7 +196,7 @@ impl Tool for BashTool {
         Ok(ToolOutput {
             content,
             is_error,
-            terminate: false,
+            ..ToolOutput::default()
         })
     }
 }
@@ -209,10 +209,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     fn ctx() -> ToolContext {
-        ToolContext {
-            cwd: std::env::temp_dir(),
-            cancel: CancellationToken::new(),
-        }
+        ToolContext::new(std::env::temp_dir(), CancellationToken::new())
     }
 
     #[test]

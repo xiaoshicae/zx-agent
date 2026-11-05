@@ -27,6 +27,7 @@ pub use log::{LoadedSession, LogRecord, SessionLog};
 pub use recovery::{InterruptedToolCall, StartRecord, ToolCallStartedEntry};
 pub use request::{RequestConfig, RequestConfigEntry, RequestSource, RequestStartedEntry};
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -218,6 +219,39 @@ impl Entry {
 pub struct ProjectedMessage {
     pub entry_id: String,
     pub message: Message,
+}
+
+/// Whether `message` carries tool result details, which are for observers only.
+fn has_details(message: &Message) -> bool {
+    matches!(message, Message::ToolResult(result) if result.details.is_some())
+}
+
+fn drop_details(message: &mut Message) {
+    if let Message::ToolResult(result) = message {
+        result.details = None;
+    }
+}
+
+/// `messages` as a model may see them: without tool result details. Summary requests and
+/// context sizes use this, since providers never send the details. Copies only when a
+/// message has details.
+pub(crate) fn without_details(messages: &[Message]) -> Cow<'_, [Message]> {
+    if !messages.iter().any(has_details) {
+        return Cow::Borrowed(messages);
+    }
+    let mut copy = messages.to_vec();
+    copy.iter_mut().for_each(drop_details);
+    Cow::Owned(copy)
+}
+
+/// [`without_details`] for records that keep their entry IDs.
+pub(crate) fn records_without_details(records: &[ProjectedMessage]) -> Cow<'_, [ProjectedMessage]> {
+    if !records.iter().any(|record| has_details(&record.message)) {
+        return Cow::Borrowed(records);
+    }
+    let mut copy = records.to_vec();
+    copy.iter_mut().for_each(|record| drop_details(&mut record.message));
+    Cow::Owned(copy)
 }
 
 /// A session tree, kept in memory and optionally stored by a [`SessionLog`].
@@ -597,6 +631,49 @@ mod tests {
 
     use super::*;
     use crate::ai::{AssistantMessage, StopReason, ToolCall, Usage};
+
+    fn result_with_details(details: Option<serde_json::Value>) -> Message {
+        Message::ToolResult(crate::ai::ToolResultMessage {
+            tool_call_id: "c1".into(),
+            tool_name: "bash".into(),
+            content: "visible".into(),
+            is_error: false,
+            timestamp: 1,
+            duration_ms: None,
+            details,
+        })
+    }
+
+    #[test]
+    fn messages_without_details_are_not_copied() {
+        let messages = vec![Message::user("go"), result_with_details(None)];
+        assert!(matches!(without_details(&messages), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn details_are_dropped_from_what_a_model_may_see_and_nothing_else() {
+        let messages = vec![
+            Message::user("go"),
+            result_with_details(Some(serde_json::json!({"marker": "for-observers"}))),
+        ];
+        let seen = without_details(&messages);
+        assert_eq!(*seen, [Message::user("go"), result_with_details(None)]);
+        assert!(matches!(&messages[1], Message::ToolResult(result) if result.details.is_some()));
+    }
+
+    #[test]
+    fn incremental_summary_input_leaves_details_out() {
+        let source = compaction::IncrementalSource {
+            previous_facts: Vec::new(),
+            records: vec![ProjectedMessage {
+                entry_id: "e1".into(),
+                message: result_with_details(Some(serde_json::json!({"marker": "for-observers"}))),
+            }],
+        };
+        let input = source.input().unwrap();
+        assert!(input.contains("visible"), "{input}");
+        assert!(!input.contains("for-observers"), "{input}");
+    }
 
     /// A session file with a v2 header followed by `entries`, one per line, unterminated.
     fn session_file(dir: &Path, entries: &[&str]) -> PathBuf {

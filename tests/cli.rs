@@ -171,7 +171,11 @@ async fn a_configuration_error_exits_2_before_any_request() {
 async fn the_turn_limit_exits_3() {
     let server = MockServer::start(vec![Reply::bash("c1", "echo hi")]).await;
 
-    let output = run(&server.base_url, &["--tools", "bash", "--max-turns", "1", "check"]).await;
+    let output = run(
+        &server.base_url,
+        &["--tools", "bash", "--max-model-requests", "1", "check"],
+    )
+    .await;
 
     assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
 }

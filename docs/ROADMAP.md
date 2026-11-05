@@ -41,7 +41,7 @@ G1–G4 是验收目标。当前会话日志可重建对话与提示词；G3 所
 | 编号 | 事项 | 结论 | 日期 | 状态 |
 |---|---|---|---|---|
 | D1 | MSRV | 升级到 1.88 | 2026-10-31 | 已完成：`rust-version = "1.88"`，已用 1.88.0 工具链编译并通过测试 |
-| D2 | 新依赖 | 已授权：tokio 的 `io-std` feature、`toml`、`rmcp`（MCP 官方 Rust SDK）、ACP 官方 Rust SDK、`rustyline`（可选）。在用到它们的阶段再引入。2026-11-02 追加 `opentelemetry`、`opentelemetry_sdk`、`opentelemetry-otlp`（P9 的 OpenTelemetry 追踪） | 2026-10-31 | 按阶段引入；`rmcp` 3.8.0 已于 P7 引入（PR #40）；三个 OpenTelemetry crate 0.33.1 已于 P9 引入（PR #49） |
+| D2 | 新依赖 | 已授权：tokio 的 `io-std` feature、`toml`、`rmcp`（MCP 官方 Rust SDK）、ACP 官方 Rust SDK、`rustyline`（可选）。在用到它们的阶段再引入。2026-11-02 追加 `opentelemetry`、`opentelemetry_sdk`、`opentelemetry-otlp`（P9 的 OpenTelemetry 追踪）。2026-11-04 追加 `chrono`（chat `--debug` 日志显示本地时间与时区；`default-features = false`，只开 `clock`）。2026-11-05 经用户确认追加 `jsonschema`（循环按工具声明的 JSON Schema 校验参数；`default-features = false`） | 2026-10-31 | 按阶段引入；`rmcp` 3.8.0 已于 P7 引入（PR #40）；三个 OpenTelemetry crate 0.33.1 已于 P9 引入（PR #49）；`chrono` 0.4.45 原为 `rmcp` 的间接依赖，2026-11-04 改为 `zx-agent` 的直接依赖；`jsonschema` 0.33.0 是 `zx-core` 的依赖，`Cargo.lock` 因此新增 35 个包，其 `rust-version` 为 1.71.1，未引入新的 rustls 加密后端 |
 | D3 | profile 文件格式 | TOML | 2026-10-31 | P4 落实 |
 | D4 | 会话 API 形态 | 进程内方法调用；暂不实现提交队列 / 事件队列（SQ/EQ） | 2026-10-31 | 已实现：P2 进程内共享会话 API |
 | D5 | 无人值守的命令执行环境 | 默认仍在本机执行，`run` 行为不变；容器执行须在 profile 或 CLI 中显式开启。理由：在 Kubernetes Job 中运行时 Pod 内通常没有 Docker；无网络的容器做不了在线排障，而在线访问方案尚未评审。此前的候选方案（`troubleshoot` 默认容器、没有 Docker 时拒绝启动）不采用 | 2026-11-01 | 已确认：P6 执行环境部分按此实现 |
@@ -605,8 +605,8 @@ P3 实施约定（2026-11-01）：
 
 - 新增 `chat` 子命令，采用通用交互说明；每次提问默认不限轮次、不限总时间、不自动续写，外部等待仍受 provider 和审批超时约束。`run` 的测试、帮助文本和默认行为保持兼容。
 - 共享连接、工具和会话选项，两个前端都组装同一个 `AgentSession`。chat 流式显示文本；可选 JSONL 沿用既有事件格式。
-- 所有 bash 调用在通过原命令策略后请求确认，read_file 沿用原读取能力。完整工具名、参数、工作目录和审批理由先展示；用 `/approve <id> once`、`/approve <id> session`、`/deny <id> [reason]` 回答。会话允许仍只匹配完全相同的工具和参数，明确拒绝不能被审批绕过。
-- 单一终端输入所有者协调普通输入与审批，审批通过有界请求通道和一次性回复传递，审批答案必须匹配当前请求编号，取消后丢弃过期请求，旧答案不能授权下一条命令。TTY 运行中普通输入作为 steering；管道脚本逐轮处理，只有待审批时读取审批命令，避免预读的 /quit 取消前一条任务。
+- 所有 bash 调用在通过原命令策略后请求确认，read_file 沿用原读取能力。完整工具名、参数、工作目录和审批理由先展示；通过菜单选择本次允许、会话允许、拒绝或讨论。会话允许仍只匹配完全相同的工具和参数，明确拒绝不能被审批绕过。
+- 单一终端输入所有者协调普通输入与审批，审批通过有界请求通道和一次性回复传递，审批选择只在存在待处理请求时生效，取消后丢弃过期请求。TTY 运行中普通输入作为 steering；管道脚本逐轮处理，只有待审批时读取审批选择，避免预读的 /quit 取消前一条任务。
 - 按 Tokio stdin 源码对交互终端的建议，使用进程生命周期的专用阻塞读取线程和有界通道；单行输入限制 1 MiB。无需启用 io-std 或新增 crate；退出不会等待 Tokio 无法取消的 stdin 读取。
 - `/new` 创建新会话并清空授权；启用文件会话时创建唯一的新文件，保留旧日志。`/model [id]` 查看或在空闲时切换同一 provider 的模型；运行中拒绝切换。P3 为 `/compact` 预留入口，P5 已接入共享会话压缩 API。
 - `/quit` 退出；Ctrl+C 只取消当前运行或待审批，不退出会话，空闲时保留会话；SIGTERM 取消并退出。审批输入结束时拒绝并结束当前运行，避免无人可答时继续等待。

@@ -1,6 +1,7 @@
 //! The line-oriented terminal frontend; model and tool work stays in AgentSession.
 
 mod commands;
+mod debug;
 mod input;
 mod interaction;
 mod output;
@@ -80,7 +81,7 @@ async fn build(
         file,
         default_profile: Builtin::Assistant,
         budget: cli::Budget {
-            max_turns: args.max_turns,
+            max_model_requests: args.max_model_requests,
             timeout_secs: args.timeout_secs,
             token_budget: args.token_budget,
             continue_on_length: None,
@@ -130,7 +131,7 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
     };
     let (interaction, mut approvals) = TerminalInteraction::channel();
     let interaction = Arc::new(interaction);
-    let output = Arc::new(Output::new(args.output, args.deltas));
+    let output = Arc::new(Output::new(args.output, args.deltas, args.debug));
     let mut model = args.base.model.clone();
     let mut built = build(
         &settings,
@@ -203,10 +204,6 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
                 help();
                 Flow::Continue
             }
-            Command::Approval { .. } => {
-                eprintln!("[approval] no pending request");
-                Flow::Continue
-            }
             Command::Invalid(message) => {
                 eprintln!("[chat] {}", visible(&message));
                 Flow::Continue
@@ -273,10 +270,12 @@ async fn drive_turn(session: &AgentSession, operation: Operation, io: &mut TurnI
     };
     tokio::pin!(running);
     let mut pending: Option<Ticket> = None;
+    let mut discussing = false;
     let mut queued_prompt = None;
     loop {
         if pending.as_ref().is_some_and(|ticket| ticket.reply.is_closed()) {
             pending = None;
+            discussing = false;
         }
         tokio::select! {
             biased;
@@ -311,6 +310,7 @@ async fn drive_turn(session: &AgentSession, operation: Operation, io: &mut TurnI
                 return Ok(if next.is_empty() { Flow::Continue } else { Flow::Prompt(next.join("\n\n")) });
             }
             () = expired(&mut pending), if pending.is_some() => {
+                discussing = false;
                 if let Some(ticket) = pending.take() {
                     eprintln!("[approval] request {} expired; the task goes on without the call", ticket.id);
                 }
@@ -322,13 +322,41 @@ async fn drive_turn(session: &AgentSession, operation: Operation, io: &mut TurnI
                     // Defensive fail-closed behavior; the core normally asks serially.
                     deny(previous, "superseded terminal approval");
                 }
+                discussing = false;
                 show_approval(&ticket, io.cwd);
                 pending = Some(ticket);
             }
             line = io.input.recv(), if io.mode == InputMode::Terminal || pending.is_some() => {
                 let command = match line {
                     Some(line) => match line.context("cannot read terminal input")? {
-                        Line::Text(text) => commands::parse(text),
+                        Line::Text(text) => {
+                            if pending.is_some() && text.trim() != "/quit" && text.trim() != "/new" {
+                                if discussing {
+                                    if text.trim().is_empty() {
+                                        eprintln!("[approval] enter a message to discuss this call");
+                                    } else if let Some(ticket) = pending.take() {
+                                        session.steer(text);
+                                        deny(ticket, "user wants to discuss this call");
+                                        discussing = false;
+                                    }
+                                } else {
+                                    match text.trim() {
+                                        "1" | "2" => {
+                                            let decision = if text.trim() == "1" { zx_agent::interaction::Approval::AllowOnce } else { zx_agent::interaction::Approval::AllowSession };
+                                            if let Some(ticket) = pending.take()
+                                                && ticket.reply.send(decision).is_err() {
+                                                eprintln!("[approval] request expired");
+                                            }
+                                        }
+                                        "3" => { if let Some(ticket) = pending.take() { deny(ticket, "declined by the user"); } }
+                                        "4" => { discussing = true; eprintln!("[approval] What would you like to discuss? The call will not run."); }
+                                        _ => eprintln!("[approval] choose 1, 2, 3 or 4"),
+                                    }
+                                }
+                                continue;
+                            }
+                            commands::parse(text)
+                        },
                         Line::Rejected(reason) => {
                             rejected(&reason);
                             continue;
@@ -342,21 +370,6 @@ async fn drive_turn(session: &AgentSession, operation: Operation, io: &mut TurnI
                     }
                 };
                 match command {
-                    Command::Approval { id, decision } => {
-                        match pending.take() {
-                            Some(ticket) if ticket.id == id => {
-                                if ticket.reply.send(decision).is_err() {
-                                    // A cancelled or timed-out confirmation cannot authorize a call.
-                                    eprintln!("[approval] request {id} expired");
-                                }
-                            }
-                            Some(ticket) => {
-                                eprintln!("[approval] request {id} is not pending; answer request {}", ticket.id);
-                                pending = Some(ticket);
-                            }
-                            None => eprintln!("[approval] no pending request"),
-                        }
-                    }
                     Command::Quit | Command::New => {
                         let next = if matches!(command, Command::New) { Flow::New } else { Flow::Exit(EXIT_COMPLETED) };
                         session.abort();
@@ -374,7 +387,7 @@ async fn drive_turn(session: &AgentSession, operation: Operation, io: &mut TurnI
                         session.steer(text);
                         eprintln!("[chat] steering input queued");
                     }
-                    Command::Prompt(_) => eprintln!("[approval] use /approve <id> once|session or /deny <id> [reason]"),
+                    Command::Prompt(_) => unreachable!("pending approval input is handled above"),
                     Command::Model(_) => eprintln!("[chat] wait for the current task or cancel it before changing models"),
                     Command::Help => help(),
                     Command::Compact => eprintln!("[chat] session is busy; wait for the current operation or cancel it before /compact"),
@@ -405,12 +418,32 @@ fn unread_input(session: &AgentSession) -> Vec<String> {
 
 fn show_approval(ticket: &Ticket, cwd: &Path) {
     eprintln!("\n[approval {}] tool={}", ticket.id, visible(&ticket.request.call.name));
-    eprintln!("[arguments] {}", visible(&ticket.request.call.arguments.to_string()));
+    if ticket.request.call.name == "bash"
+        && let Some(command) = ticket
+            .request
+            .call
+            .arguments
+            .get("command")
+            .and_then(|value| value.as_str())
+    {
+        eprintln!("[command] {}", visible(command));
+        if let Some(arguments) = ticket.request.call.arguments.as_object() {
+            let other: serde_json::Map<String, serde_json::Value> = arguments
+                .iter()
+                .filter(|(key, _)| key.as_str() != "command")
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            if !other.is_empty() {
+                eprintln!("[arguments] {}", visible(&serde_json::Value::Object(other).to_string()));
+            }
+        }
+    } else {
+        eprintln!("[arguments] {}", visible(&ticket.request.call.arguments.to_string()));
+    }
     eprintln!("[reason] {}", visible(&ticket.request.reason));
     eprintln!("[scope] runs in {:?} with this process's permissions", cwd);
     eprintln!(
-        "[approval] /approve {} once | /approve {} session | /deny {} [reason]",
-        ticket.id, ticket.id, ticket.id
+        "[approval] 1. Allow once\n           2. Allow identical calls in this conversation\n           3. Deny\n           4. Chat about this\n[approval] Choose 1, 2, 3 or 4:"
     );
 }
 
@@ -452,9 +485,6 @@ fn help() {
         "/new                  start a fresh conversation\n\
                /model [id]           show or change the model while idle\n\
                /compact              summarize old context while retaining raw history\n\
-               /approve <id> once    approve one exact call\n\
-               /approve <id> session approve identical calls in this conversation\n\
-               /deny <id> [reason]   reject the pending call\n\
                /quit                 exit chat\n\
                Ctrl+C                cancel the current task; keep the conversation"
     );

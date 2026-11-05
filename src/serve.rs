@@ -315,7 +315,7 @@ impl Sessions {
             file,
             default_profile: Builtin::Assistant,
             budget: Budget {
-                max_turns: self.args.max_turns,
+                max_model_requests: self.args.max_model_requests,
                 timeout_secs: self.args.timeout_secs,
                 token_budget: self.args.token_budget,
                 continue_on_length: None,
@@ -429,6 +429,15 @@ mod tests {
             (feishu.app_id_env.as_str(), feishu.app_secret_env.as_str()),
             (DEFAULT_APP_ID_ENV, DEFAULT_APP_SECRET_ENV)
         );
+    }
+
+    #[test]
+    fn request_limit_reply_can_be_configured() {
+        let config =
+            "[access]\nconversations = []\n[sessions]\ndir = \"d\"\n[replies]\nmodelRequestLimit = \"limit\"\n";
+        let file: ServeFile = toml::from_str(config).unwrap();
+        assert_eq!(file.replies.model_request_limit, "limit");
+        assert!(toml::from_str::<ServeFile>(&config.replace("modelRequestLimit", "maxTurns")).is_err());
     }
 
     #[test]
