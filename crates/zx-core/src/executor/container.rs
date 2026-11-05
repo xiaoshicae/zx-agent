@@ -1,7 +1,11 @@
 //! Commands and files inside one Docker container, isolated from this machine.
 //!
-//! The container has no network, a read-only root and workspace, a writable `/tmp` and no
-//! capabilities. Its PID 1 reads the stdin of the attached `docker run` client that the
+//! The container is the sandbox, and inside it the agent may do what its user may (decision D11
+//! in docs/ROADMAP.md): by default the workspace and the container's own files are writable
+//! and the network is Docker's default bridge. The walls stay: no privileged mode, no Docker
+//! socket, no host network or PID namespace, no capabilities, none of the agent's environment.
+//! A stricter sandbox, with a read-only workspace or root and no network, is a setting. Its
+//! PID 1 reads the stdin of the attached `docker run` client that the
 //! executor owns. Dropping the executor kills the client, and if the agent dies the pipe
 //! closes; either way the container is removed (`--rm`). Docker 29.9.2 behaved this way when
 //! tested on 2026-11-01; see docs/ROADMAP.md (P6).
@@ -21,6 +25,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use async_trait::async_trait;
+use serde::Deserialize;
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 use tokio_util::sync::CancellationToken;
@@ -48,11 +53,15 @@ const KEEPER_USER: &str = "0:0";
 const PROBE_ROOT: i32 = 90;
 const PROBE_MISSING: i32 = 91;
 const PROBE_NO_WORKSPACE: i32 = 93;
+const PROBE_READ_ONLY_WORKSPACE: i32 = 98;
+
+/// The user commands run as when the agent itself runs as root, or off Unix: nobody.
+const NOBODY: &str = "65534:65534";
 
 /// Checks that commands run as a non-root user, that the image has the required programs
-/// and that the user can read the workspace; prints the platform. Arguments: the shell
-/// commands run with, and the workspace.
-const PROBE: &str = r#"shell=$1 workspace=$2
+/// and that the user can read the workspace, and write it when it is mounted writable; prints
+/// the platform. Arguments: the shell commands run with, the workspace, and `rw` or `ro`.
+const PROBE: &str = r#"shell=$1 workspace=$2 access=$3
 uid=
 while read -r key value rest; do
   [ "$key" = "Uid:" ] && uid=$value
@@ -64,6 +73,7 @@ for program in "$shell" cat head uname; do
 done
 [ -z "$missing" ] || { echo "the image lacks:$missing" >&2; exit 91; }
 { [ -r "$workspace" ] && [ -x "$workspace" ]; } || exit 93
+[ "$access" = ro ] || [ -w "$workspace" ] || exit 98
 echo "arch=$(uname -m)"
 echo "kernel=$(uname -r)"
 echo "--- os-release"
@@ -93,6 +103,16 @@ if [ ! -f "$1" ]; then exit 96; fi
 if [ ! -r "$1" ]; then exit 97; fi
 exec head -c "$2" -- "$1""#;
 
+/// Whether the container may change a part of its file system. In configuration files,
+/// `readWrite` or `readOnly`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Access {
+    #[default]
+    ReadWrite,
+    ReadOnly,
+}
+
 /// How to start the container. Paths are absolute host paths, mounted at the same paths.
 #[derive(Clone, Debug)]
 pub struct ContainerConfig {
@@ -100,10 +120,20 @@ pub struct ContainerConfig {
     pub image: String,
     /// Docker client program; looked up on `PATH` unless it is a path.
     pub docker: PathBuf,
-    /// Mounted read-only at the same path; commands start here. Everything in it is readable
-    /// inside the container, so keep files the container must not read, such as the session
-    /// file, elsewhere.
+    /// Mounted at the same path; commands start here. Everything in it is readable inside the
+    /// container, and with [`Access::ReadWrite`] changeable, so keep files the container must
+    /// not read or change, such as the session file, elsewhere.
     pub workspace: PathBuf,
+    /// Whether commands may change the workspace, which holds the host's own files.
+    pub workspace_access: Access,
+    /// Whether commands may change the container's own files, such as installed packages.
+    /// Changes are discarded with the container. With [`Access::ReadOnly`] only a `/tmp` in
+    /// memory is writable.
+    pub root_access: Access,
+    /// Docker network the container joins: `bridge` (Docker's default), `none` for no
+    /// network, or a user-defined network. `host` and `container:<name>` are refused: they
+    /// share a network namespace outside the sandbox.
+    pub network: String,
     /// Shell that commands run with; the image must provide it.
     pub shell: String,
     /// `uid:gid` that commands run as. Must not be root: the keep-alive processes run as root,
@@ -118,15 +148,20 @@ pub struct ContainerConfig {
 }
 
 impl ContainerConfig {
-    /// Settings for `image` with the defaults: user nobody (`65534:65534`), 1 GiB of memory,
-    /// 256 processes, bash, and the `docker` client found on `PATH`.
+    /// Settings for `image` with the defaults: a writable workspace and root, the `bridge`
+    /// network, the agent's own `uid:gid` (so that files written in the workspace belong to
+    /// the agent's user; nobody, `65534:65534`, when the agent runs as root or off Unix), 1 GiB
+    /// of memory, 256 processes, bash, and the `docker` client found on `PATH`.
     pub fn new(image: impl Into<String>, workspace: impl Into<PathBuf>) -> Self {
         Self {
             image: image.into(),
             docker: PathBuf::from("docker"),
             workspace: workspace.into(),
+            workspace_access: Access::ReadWrite,
+            root_access: Access::ReadWrite,
+            network: "bridge".into(),
             shell: "bash".into(),
-            user: "65534:65534".into(),
+            user: default_user(),
             memory: "1g".into(),
             pids_limit: 256,
             label: String::new(),
@@ -144,6 +179,8 @@ impl ContainerConfig {
             "container user {:?} is root; commands must run as an unprivileged user",
             self.user
         );
+        // Profiles check it when they load; SDK callers may set the field directly.
+        check_network(&self.network)?;
         ensure!(!self.memory.trim().is_empty(), "container memory limit is empty");
         ensure!(self.pids_limit > 0, "container process limit must be greater than zero");
         ensure!(
@@ -159,6 +196,19 @@ impl ContainerConfig {
         );
         Ok(())
     }
+}
+
+/// Refuse an empty network and the networks that would share a namespace outside the sandbox:
+/// `host` and `container:<name>`. Configuration layers call this to report the mistake before
+/// anything starts; [`ContainerExecutor::start`] checks it as well.
+pub fn check_network(network: &str) -> Result<()> {
+    let name = network.trim().to_ascii_lowercase();
+    ensure!(!name.is_empty(), "container network is empty");
+    ensure!(
+        name != "host" && !name.starts_with("container:"),
+        "container network {network:?} would share a network namespace outside the sandbox; use bridge, none or a network of your own"
+    );
+    Ok(())
 }
 
 /// What the container reports about itself at start.
@@ -483,7 +533,14 @@ async fn probe(target: &Target, config: &ContainerConfig) -> Probe {
         None,
         PROBE,
         "zx-agent-probe",
-        [OsStr::new(&config.shell), config.workspace.as_os_str()],
+        [
+            OsStr::new(&config.shell),
+            config.workspace.as_os_str(),
+            OsStr::new(match config.workspace_access {
+                Access::ReadWrite => "rw",
+                Access::ReadOnly => "ro",
+            }),
+        ],
     );
     let output = match tokio::time::timeout(PROBE_TIMEOUT, command.output()).await {
         Ok(Ok(output)) => output,
@@ -500,6 +557,11 @@ async fn probe(target: &Target, config: &ContainerConfig) -> Probe {
         Some(PROBE_ROOT | PROBE_MISSING) => Probe::Unusable(text(&output.stderr)),
         Some(PROBE_NO_WORKSPACE) => Probe::Unusable(format!(
             "user {} cannot read the workspace {}; make it readable by others, or set container.user",
+            config.user,
+            config.workspace.display()
+        )),
+        Some(PROBE_READ_ONLY_WORKSPACE) => Probe::Unusable(format!(
+            "user {} cannot write the workspace {}; set container.user to its owner, or mount it read-only (container.workspace = \"readOnly\")",
             config.user,
             config.workspace.display()
         )),
@@ -530,11 +592,6 @@ fn run_args(config: &ContainerConfig, name: &str) -> Vec<String> {
         "--sig-proxy=false",
         "--pull",
         "never",
-        "--network",
-        "none",
-        "--read-only",
-        "--tmpfs",
-        "/tmp",
         "--cap-drop",
         "ALL",
         "--security-opt",
@@ -542,6 +599,14 @@ fn run_args(config: &ContainerConfig, name: &str) -> Vec<String> {
     ]
     .map(String::from)
     .into();
+    args.extend(["--network".into(), config.network.trim().into()]);
+    if config.root_access == Access::ReadOnly {
+        args.extend(["--read-only", "--tmpfs", "/tmp"].map(String::from));
+    }
+    let mount_options = match config.workspace_access {
+        Access::ReadWrite => "",
+        Access::ReadOnly => ",readonly",
+    };
     args.extend([
         "--name".into(),
         name.into(),
@@ -555,12 +620,30 @@ fn run_args(config: &ContainerConfig, name: &str) -> Vec<String> {
         "--user".into(),
         KEEPER_USER.into(),
         "--mount".into(),
-        format!("type=bind,source={workspace},target={workspace},readonly"),
+        format!("type=bind,source={workspace},target={workspace}{mount_options}"),
     ]);
     // No --workdir: PID 1 needs none, and an unreadable workspace would stop the container
     // from starting with Docker's own error instead of the probe's explanation.
     args.extend(["--entrypoint".into(), "cat".into(), config.image.clone()]);
     args
+}
+
+/// The agent's own `uid:gid`, so that files written in the workspace belong to its user; nobody
+/// when the agent runs as root, since commands must not.
+#[cfg(unix)]
+fn default_user() -> String {
+    // SAFETY: getuid and getgid take no arguments, always succeed and touch no memory.
+    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+    if uid == 0 {
+        NOBODY.into()
+    } else {
+        format!("{uid}:{gid}")
+    }
+}
+
+#[cfg(not(unix))]
+fn default_user() -> String {
+    NOBODY.into()
 }
 
 fn parse_platform(output: &str) -> Platform {
@@ -597,20 +680,40 @@ mod tests {
     }
 
     #[test]
-    fn the_container_is_hardened_and_tied_to_its_client() {
+    fn inside_the_walls_the_container_is_open_and_tied_to_its_client() {
         let args = run_args(&config(), "zx-agent-x");
         let joined = args.join(" ");
         for flag in [
             "run --interactive --rm --init --sig-proxy=false --pull never",
-            "--network none --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges",
+            "--cap-drop ALL --security-opt no-new-privileges --network bridge",
             "--name zx-agent-x --label zx-agent.session=s1",
             // The keep-alive processes run as root; commands get their user on docker exec.
             "--pids-limit 256 --memory 1g --user 0:0",
-            "--mount type=bind,source=/work,target=/work,readonly",
+            "--mount type=bind,source=/work,target=/work --entrypoint",
             "--entrypoint cat debian:bookworm-slim",
         ] {
             assert!(joined.contains(flag), "{flag:?} missing from {joined}");
         }
+        // The walls: nothing shares the host's namespaces, devices or Docker daemon.
+        for wall in [
+            "--privileged",
+            "--pid",
+            "--ipc",
+            "--uts",
+            "--userns",
+            "--device",
+            "--cap-add",
+        ] {
+            let breached = args
+                .iter()
+                .any(|arg| arg == wall || arg.starts_with(&format!("{wall}=")));
+            assert!(!breached, "{wall:?} in {joined}");
+        }
+        assert!(!joined.contains("docker.sock"), "{joined}");
+        assert!(
+            !joined.contains("--read-only") && !joined.contains("readonly"),
+            "{joined}"
+        );
         assert_eq!(args.iter().filter(|arg| *arg == "--mount").count(), 1, "{joined}");
         assert_eq!(args.last().map(String::as_str), Some("debian:bookworm-slim"));
         // No environment from the agent, and no working directory that could fail the start.
@@ -623,6 +726,50 @@ mod tests {
     }
 
     #[test]
+    fn a_strict_container_has_a_read_only_workspace_and_root_and_no_network() {
+        let strict = ContainerConfig {
+            workspace_access: Access::ReadOnly,
+            root_access: Access::ReadOnly,
+            network: "none".into(),
+            ..config()
+        };
+        let joined = run_args(&strict, "zx-agent-x").join(" ");
+        for flag in [
+            "--network none --read-only --tmpfs /tmp",
+            "--mount type=bind,source=/work,target=/work,readonly",
+        ] {
+            assert!(joined.contains(flag), "{flag:?} missing from {joined}");
+        }
+        // Each setting on its own: a read-only workspace in a writable container.
+        let joined = run_args(
+            &ContainerConfig {
+                workspace_access: Access::ReadOnly,
+                ..config()
+            },
+            "zx-agent-x",
+        )
+        .join(" ");
+        assert!(joined.contains("target=/work,readonly"), "{joined}");
+        assert!(!joined.contains("--read-only"), "{joined}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commands_run_as_the_agents_own_user_unless_it_is_root() {
+        use std::os::unix::fs::MetadataExt;
+        // A new file belongs to the process's user. Its group may be the directory's, as on
+        // macOS, so only the user is compared.
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let uid = file.as_file().metadata().unwrap().uid();
+        let user = ContainerConfig::new("image", "/work").user;
+        if uid == 0 {
+            assert_eq!(user, NOBODY);
+        } else {
+            assert_eq!(user.split(':').next(), Some(uid.to_string().as_str()), "{user}");
+        }
+    }
+
+    #[test]
     fn invalid_settings_are_rejected_before_docker_runs() {
         let cases = [
             ContainerConfig::new(" ", "/work"),
@@ -632,11 +779,34 @@ mod tests {
                 pids_limit: 0,
                 ..ContainerConfig::new("image", "/work")
             },
+            ContainerConfig {
+                network: " ".into(),
+                ..ContainerConfig::new("image", "/work")
+            },
         ];
         for config in cases {
             assert!(config.validate().is_err(), "{config:?}");
         }
         assert!(config().validate().is_ok());
+    }
+
+    #[test]
+    fn networks_shared_with_the_outside_are_refused() {
+        for network in ["host", " HOST ", "container:other"] {
+            let config = ContainerConfig {
+                network: network.into(),
+                ..config()
+            };
+            let error = config.validate().unwrap_err().to_string();
+            assert!(error.contains("outside the sandbox"), "{network:?}: {error}");
+        }
+        for network in ["bridge", "none", "my-net"] {
+            let config = ContainerConfig {
+                network: network.into(),
+                ..config()
+            };
+            assert!(config.validate().is_ok(), "{network}");
+        }
     }
 
     #[test]

@@ -49,9 +49,12 @@ path = "skills/rust-review/SKILL.md"
 | `tools` | 替换启用列表，支持 `bash`、`read_file`、`read_skill`、`read_output`；`[]` 禁用全部工具 |
 | `execution` | `local`（默认）或 `container`；其他值报错。`container` 时 bash 与 read_file 在 Docker 容器中执行，见 README 的“容器执行”。CLI `--execution` 优先 |
 | `container.image` | 容器镜像，`execution = "container"` 时必填，须已在本地；CLI `--container-image` 优先 |
-| `container.user` | 容器内运行命令的 `uid:gid`，默认 `65534:65534`；不能是 root（UID 0 或 `root`），启动时也会检查命令的实际 UID |
+| `container.user` | 容器内运行命令的 `uid:gid`，默认为运行 zx-agent 的用户（以 root 运行时为 `65534:65534`）；不能是 root（UID 0 或 `root`），启动时也会检查命令的实际 UID |
 | `container.memory` | Docker 写法的内存上限，默认 `1g` |
 | `container.pidsLimit` | 容器内进程数上限，大于零，默认 256 |
+| `container.network` | 容器加入的 Docker 网络，默认 `bridge`；`none` 为无网络；`host` 与 `container:<名字>` 会与沙箱外共用网络命名空间，报配置错误 |
+| `container.workspace` | `readWrite`（默认）或 `readOnly`：命令能否修改工作目录 |
+| `container.root` | `readWrite`（默认）或 `readOnly`：命令能否修改容器自身的文件；`readOnly` 时只有内存中的 `/tmp` 可写 |
 | `rules.allow` | bash 命令前缀白名单，沿用原管道检查；空列表表示只检查 deny |
 | `rules.deny` | 追加 bash 命令子串拒绝规则，原内置拒绝规则始终保留 |
 | `rules.autoApprove` | 替换不经审批直接执行的 bash 命令前缀；只在 bash 需要审批时起作用（chat、serve）。带引号、`$` 等 shell 语法或 URL 的命令仍要审批，拒绝规则始终优先，见 README 的“安全模型”。内置 assistant 为 `grep`、`head`、`tail`、`wc`、`jq`，unattended 与 troubleshoot 为空 |
@@ -59,6 +62,7 @@ path = "skills/rust-review/SKILL.md"
 | `rules.autoApproveOptions.<程序>` | 列出该程序（命令的第一个词，小写）的命令不经审批时可以带的选项：`long`（不带 `--` 的长选项名，`--name=value` 按名字比较）、`shortWithValue`（带值的单字母选项，值可紧跟，如 `-oyaml`）、`shortFlags`（不带值的单字母选项，须单独出现，如 `-A`）。其他选项一律审批；没有列出的程序不限选项。文件中列出的程序整组替换基线中同名的（内置 profile 都没有）。示例见 `deploy/kubernetes/profiles/kubernetes.toml` |
 | `rules.askTools` | 替换需审批的工具名列表；run 通过 NoHuman 明确拒绝，chat 交给终端审批。可以写内置工具名，也可以写 `[[mcp]]` 中配置过的 MCP 工具名（`<服务器名>__<工具名>`） |
 | `rules.denyTools` | 追加被拒绝的工具名；启用该工具或批准调用都不能覆盖拒绝。工具名的范围同 `askTools` |
+| `rules.approveAll` | `true` 时不询问任何审批：chat 与 serve 的 bash、`askTools` 与 MCP `allowTools` 以外的工具都直接执行；拒绝规则与命令策略仍然生效。只能与 `execution = "container"` 一起使用，且 `askTools` 须为空（内置 assistant 为 `["bash"]`，需写 `askTools = []`），见 README 的“容器执行” |
 | `limits.maxModelRequests` | 每轮模型请求数；`"unlimited"` 不限，`0` 不请求模型 |
 | `limits.timeoutSecs` | 每轮总时间上限，`0` 关闭 |
 | `limits.tokenBudget` | 每轮所有模型请求的输入加输出 token 上限，以服务返回的用量为准，摘要请求与失败的尝试也计入；每次请求之前检查，最后一次请求可能超出；`0` 关闭。用完时 run 以退出码 7 结束 |
@@ -80,7 +84,7 @@ path = "skills/rust-review/SKILL.md"
 
 连接地址、模型、认证环境变量名、传输与工具超时、输出模式和会话路径仍使用原 CLI 选项。TOML 不接受这些键，也不接受任意扩展名称；未知字段、错误类型、无效路径或不支持的配置均在请求模型前以退出码 2 报错。
 
-`run` 始终是无人值守前端，`chat` 始终保留 bash 的终端审批；`--profile` 不改变前端。例如 `run --profile assistant` 遇到 bash 的 Ask 会拒绝，`chat --profile troubleshoot` 仍会询问 shell 审批。
+`run` 始终是无人值守前端，`chat` 始终保留 bash 的终端审批（profile 设了 `rules.approveAll` 的容器执行除外）；`--profile` 不改变前端。例如 `run --profile assistant` 遇到 bash 的 Ask 会拒绝，`chat --profile troubleshoot` 仍会询问 shell 审批。
 
 ## MCP 服务器
 

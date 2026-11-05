@@ -6,7 +6,7 @@
 
 mod common;
 
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 use std::sync::Arc;
@@ -20,10 +20,13 @@ use tokio_util::sync::CancellationToken;
 use zx_agent::agent::{ExecutionMode, Tool};
 use zx_agent::ai::Message;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::executor::{CommandEnd, CommandOutput, ContainerConfig, ContainerExecutor, Executor, ShellCommand};
+use zx_agent::executor::{
+    Access, CommandEnd, CommandOutput, ContainerConfig, ContainerExecutor, Executor, ShellCommand,
+};
 use zx_agent::runner::RunOutcome;
 use zx_agent::tools::{BashTool, ReadFileTool};
 
+use common::fake_mcp::{Era, FakeMcp, tool};
 use common::mock_server::{MockServer, Reply};
 use common::{RunnerSetup, config};
 
@@ -192,8 +195,9 @@ async fn eventually(limit: Duration, mut ready: impl FnMut() -> bool) -> bool {
 }
 
 #[tokio::test]
-async fn start_runs_a_hardened_container_and_reports_its_platform() {
+async fn start_runs_a_container_open_inside_its_walls_and_reports_its_platform() {
     let fake = FakeDocker::new();
+    let user = fake.config().user;
 
     let executor = ContainerExecutor::start(fake.config()).await.unwrap();
 
@@ -202,15 +206,38 @@ async fn start_runs_a_hardened_container_and_reports_its_platform() {
     let calls = fake.calls();
     let run = calls.iter().find(|call| call[0] == "run").unwrap().join(" ");
     // The keep-alive processes run as root; the probe, like every call, as the command user.
-    for flag in ["--network none", "--read-only", "--user 0:0", "--pull never"] {
+    for flag in ["--network bridge", "--cap-drop ALL", "--user 0:0", "--pull never"] {
+        assert!(run.contains(flag), "{flag:?} missing from {run}");
+    }
+    assert!(!run.contains("--read-only") && !run.contains("readonly"), "{run}");
+    let probe = &fake.execs("zx-agent-probe")[0];
+    assert_eq!(probe[1..4], ["--user", user.as_str(), executor.name()]);
+    // The probe also checks that the user can write the workspace.
+    assert_eq!(
+        after(probe, "zx-agent-probe"),
+        ["bash".to_string(), fake.workspace().display().to_string(), "rw".into()]
+    );
+}
+
+#[tokio::test]
+async fn a_strict_container_is_started_read_only_and_offline() {
+    let fake = FakeDocker::new();
+    let config = ContainerConfig {
+        workspace_access: Access::ReadOnly,
+        root_access: Access::ReadOnly,
+        network: "none".into(),
+        ..fake.config()
+    };
+
+    ContainerExecutor::start(config).await.unwrap();
+
+    let calls = fake.calls();
+    let run = calls.iter().find(|call| call[0] == "run").unwrap().join(" ");
+    for flag in ["--network none", "--read-only --tmpfs /tmp", ",readonly"] {
         assert!(run.contains(flag), "{flag:?} missing from {run}");
     }
     let probe = &fake.execs("zx-agent-probe")[0];
-    assert_eq!(probe[1..4], ["--user", "65534:65534", executor.name()]);
-    assert_eq!(
-        after(probe, "zx-agent-probe"),
-        ["bash".to_string(), fake.workspace().display().to_string()]
-    );
+    assert_eq!(after(probe, "zx-agent-probe")[2], "ro");
 }
 
 #[tokio::test]
@@ -274,7 +301,26 @@ async fn start_explains_a_workspace_the_container_user_cannot_read() {
     assert_eq!(
         error,
         format!(
-            "container image fake:1 cannot be used: user 65534:65534 cannot read the workspace {}; make it readable by others, or set container.user",
+            "container image fake:1 cannot be used: user {} cannot read the workspace {}; make it readable by others, or set container.user",
+            fake.config().user,
+            fake.workspace().display()
+        )
+    );
+}
+
+#[tokio::test]
+async fn start_explains_a_writable_workspace_the_container_user_cannot_write() {
+    let fake = FakeDocker::new();
+    fake.answer("probe.code", "98");
+    fake.answer("probe.err", "");
+
+    let error = ContainerExecutor::start(fake.config()).await.err().unwrap().to_string();
+
+    assert_eq!(
+        error,
+        format!(
+            "container image fake:1 cannot be used: user {} cannot write the workspace {}; set container.user to its owner, or mount it read-only (container.workspace = \"readOnly\")",
+            fake.config().user,
             fake.workspace().display()
         )
     );
@@ -293,12 +339,13 @@ async fn commands_run_as_their_user_in_the_workspace_between_two_sweeps() {
     assert_eq!(stdout(&output), "hi\n");
     assert_eq!(output.stderr.bytes, b"warn\n");
     assert!(matches!(output.end, CommandEnd::Exited(3)), "{:?}", output.end);
+    let user = fake.config().user;
     let call = &fake.execs("zx-agent-run")[0];
     assert_eq!(
         call[1..5],
         [
             "--user".to_string(),
-            "65534:65534".to_string(),
+            user.clone(),
             "--workdir".to_string(),
             fake.workspace().display().to_string()
         ]
@@ -308,7 +355,7 @@ async fn commands_run_as_their_user_in_the_workspace_between_two_sweeps() {
     // One sweep clears what an earlier call may have left, one stops what this one left.
     let sweeps = fake.execs("zx-agent-sweep");
     assert_eq!(sweeps.len(), 2, "{sweeps:?}");
-    assert!(sweeps.iter().all(|sweep| sweep[1..3] == ["--user", "65534:65534"]));
+    assert!(sweeps.iter().all(|sweep| sweep[1..3] == ["--user", user.as_str()]));
 }
 
 #[tokio::test]
@@ -584,8 +631,13 @@ async fn start_real(image: &str, workspace: &Path) -> ContainerExecutor {
 const COUNT_SLEEPERS: &str =
     r#"for f in /proc/[0-9]*/cmdline; do tr '\0' ' ' < "$f" 2>/dev/null; echo; done | grep -c '^sleep 30'"#;
 
+/// The user that owns `workspace`, which the test process created: the agent's own user.
+fn owner(workspace: &Path) -> u32 {
+    std::fs::metadata(workspace).unwrap().uid()
+}
+
 #[tokio::test]
-async fn real_commands_run_as_nobody_in_a_read_only_workspace_without_network() {
+async fn real_commands_run_as_the_agents_user_with_a_writable_workspace_and_network() {
     let Some(image) = docker_image() else { return };
     let (_dir, workspace) = real_workspace();
     let executor = start_real(&image, &workspace).await;
@@ -593,18 +645,55 @@ async fn real_commands_run_as_nobody_in_a_read_only_workspace_without_network() 
     let output = run(
         &executor,
         &workspace,
-        "id -u; touch new 2>&1; touch /tmp/ok && echo tmp-writable; ls /sys/class/net",
+        "id -u; touch new && echo workspace-writable; touch /var/tmp/ok && echo root-writable; ls /sys/class/net",
+        Duration::from_secs(30),
+    )
+    .await;
+
+    let text = stdout(&output);
+    let uid = owner(&workspace);
+    // Root is mapped to nobody, since commands must not run as root.
+    let expected = if uid == 0 { 65534 } else { uid };
+    assert!(text.starts_with(&format!("{expected}\n")), "{text}");
+    assert!(text.contains("workspace-writable"), "{text}");
+    assert!(text.contains("root-writable"), "{text}");
+    assert!(text.contains("eth0"), "{text}");
+    // The file is the host's, and belongs to the agent's user.
+    let created = std::fs::metadata(workspace.join("new")).unwrap();
+    assert_eq!(created.uid(), uid);
+    assert!(!executor.platform().arch.is_empty());
+}
+
+#[tokio::test]
+async fn real_a_strict_container_has_a_read_only_workspace_and_root_and_no_network() {
+    let Some(image) = docker_image() else { return };
+    let (_dir, workspace) = real_workspace();
+    let executor = ContainerExecutor::start(ContainerConfig {
+        label: "zx-agent-test".into(),
+        user: "65534:65534".into(),
+        workspace_access: Access::ReadOnly,
+        root_access: Access::ReadOnly,
+        network: "none".into(),
+        ..ContainerConfig::new(&image, &workspace)
+    })
+    .await
+    .unwrap();
+
+    let output = run(
+        &executor,
+        &workspace,
+        "id -u; touch new 2>&1; touch /var/tmp/ok 2>&1; touch /tmp/ok && echo tmp-writable; ls /sys/class/net",
         Duration::from_secs(30),
     )
     .await;
 
     let text = stdout(&output);
     assert!(text.starts_with("65534\n"), "{text}");
-    assert!(text.contains("Read-only file system"), "{text}");
+    assert_eq!(text.matches("Read-only file system").count(), 2, "{text}");
     assert!(text.contains("tmp-writable"), "{text}");
     assert!(text.contains("lo"), "{text}");
     assert!(!text.contains("eth0"), "{text}");
-    assert!(!executor.platform().arch.is_empty());
+    assert!(!workspace.join("new").exists());
 }
 
 #[tokio::test]
@@ -728,11 +817,15 @@ async fn real_an_unreadable_workspace_is_refused_at_start() {
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let workspace = dir.path().canonicalize().unwrap();
 
-    let error = ContainerExecutor::start(ContainerConfig::new(&image, &workspace))
-        .await
-        .err()
-        .unwrap()
-        .to_string();
+    // Its owner, the default user, could read it; nobody cannot.
+    let error = ContainerExecutor::start(ContainerConfig {
+        user: "65534:65534".into(),
+        ..ContainerConfig::new(&image, &workspace)
+    })
+    .await
+    .err()
+    .unwrap()
+    .to_string();
 
     assert!(error.contains("cannot read the workspace"), "{error}");
 }
@@ -868,7 +961,14 @@ async fn run_in_container_mode_describes_the_container_and_runs_bash_there() {
         "{prompt}"
     );
     assert!(
-        prompt.contains(&format!("Working directory: {} (read-only)", workspace.display())),
+        prompt.contains(&format!(
+            "Working directory: {} (writable; changes are made to the host's files)",
+            workspace.display()
+        )),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("with network access (Docker network bridge)"),
         "{prompt}"
     );
     assert!(tool_result(&server, 1).starts_with("from-container\n"));
@@ -876,6 +976,144 @@ async fn run_in_container_mode_describes_the_container_and_runs_bash_there() {
     assert_eq!(exec[3..5], ["--workdir".to_string(), workspace.display().to_string()]);
     assert_eq!(after(exec, "zx-agent-run")[1], "echo hi");
     assert!(session.exists());
+}
+
+/// `zx-agent chat` in container mode with the fake docker, given `profile` and `input`.
+async fn zx_chat_in_container(fake: &FakeDocker, server: &MockServer, profile: &str, input: &str) -> Output {
+    const KEY_VAR: &str = "ZX_P10_CHAT_CONTAINER_TEST_KEY";
+    let outside = tempfile::tempdir().unwrap();
+    let profile_path = outside.path().join("sandbox.toml");
+    std::fs::write(&profile_path, profile).unwrap();
+    let session = outside.path().join("session.jsonl");
+    let path = std::env::var("PATH").unwrap_or_default();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_zx-agent"))
+        .args(["chat", "--model", "mock", "--base-url", &server.base_url])
+        .args(["--api-key-env", KEY_VAR, "--max-retries", "0", "--tools", "bash"])
+        .args(["--profile", profile_path.to_str().unwrap()])
+        .args(["--session", session.to_str().unwrap()])
+        .current_dir(fake.workspace())
+        .env(KEY_VAR, "sk-p10-container-test")
+        .env("PATH", format!("{}:{path}", fake.dir.path().display()))
+        .env_remove("ZX_MODEL")
+        .env_remove("ZX_BASE_URL")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(input.as_bytes()).await.unwrap();
+    drop(stdin);
+    tokio::time::timeout(Duration::from_secs(60), child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+const SANDBOX_PROFILE: &str = "execution = 'container'\n[container]\nimage = 'fake:1'\n";
+
+#[tokio::test]
+async fn chat_in_a_container_that_approves_every_call_runs_bash_without_asking() {
+    let fake = FakeDocker::new();
+    fake.answer("cmd.out", "from-container\n");
+    let server = MockServer::start(vec![Reply::bash("c1", "rm -r build"), Reply::text("done")]).await;
+    let profile = format!("{SANDBOX_PROFILE}[rules]\napproveAll = true\naskTools = []\n");
+
+    let output = zx_chat_in_container(&fake, &server, &profile, "go\n").await;
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr_of(&output));
+    assert!(!stderr_of(&output).contains("[approval"), "{}", stderr_of(&output));
+    assert_eq!(fake.execs("zx-agent-run").len(), 1);
+    assert!(tool_result(&server, 1).starts_with("from-container\n"));
+}
+
+#[tokio::test]
+async fn chat_in_a_container_still_asks_unless_the_profile_approves_every_call() {
+    let fake = FakeDocker::new();
+    let server = MockServer::start(vec![Reply::bash("c1", "rm -r build"), Reply::text("done")]).await;
+
+    // The input ends before an answer, which denies the call.
+    let output = zx_chat_in_container(&fake, &server, SANDBOX_PROFILE, "go\n").await;
+
+    assert!(stderr_of(&output).contains("[approval 1]"), "{}", stderr_of(&output));
+    assert!(fake.execs("zx-agent-run").is_empty());
+}
+
+#[tokio::test]
+async fn approving_every_call_outside_a_container_is_a_configuration_error() {
+    let fake = FakeDocker::new();
+    let server = MockServer::start(vec![]).await;
+    let profile = format!("{SANDBOX_PROFILE}[rules]\napproveAll = true\naskTools = []\n");
+    let outside = tempfile::tempdir().unwrap();
+    let profile_path = outside.path().join("sandbox.toml");
+    std::fs::write(&profile_path, profile).unwrap();
+
+    let output = zx_run(
+        &server,
+        &fake.workspace(),
+        Some(fake.dir.path()),
+        &[
+            "--profile",
+            profile_path.to_str().unwrap(),
+            "--execution",
+            "local",
+            "go",
+        ],
+    )
+    .await;
+
+    assert_eq!(output.status.code(), Some(2), "{}", stderr_of(&output));
+    assert!(
+        stderr_of(&output).contains("rules.approveAll needs execution"),
+        "{}",
+        stderr_of(&output)
+    );
+    assert!(server.requests().is_empty());
+    assert!(fake.calls().is_empty(), "no container was started");
+}
+
+#[tokio::test]
+async fn approving_every_call_also_runs_mcp_tools_outside_allow_tools() {
+    let fake = FakeDocker::new();
+    let mcp = FakeMcp::start(
+        Era::Modern,
+        vec![tool("query", "Instant query."), tool("range", "Range query.")],
+    )
+    .await;
+    let server = MockServer::start(vec![
+        Reply::tool_call("c1", "prom__range", json!({"q": "up"})),
+        Reply::text("done"),
+    ])
+    .await;
+    let outside = tempfile::tempdir().unwrap();
+    let profile_path = outside.path().join("sandbox.toml");
+    let profile = format!(
+        "tools = []\n{SANDBOX_PROFILE}[rules]\napproveAll = true\naskTools = []\n\
+         [[mcp]]\nname = \"prom\"\nurl = \"{}\"\ntools = [\"query\", \"range\"]\nallowTools = [\"query\"]\n",
+        mcp.url
+    );
+    std::fs::write(&profile_path, profile).unwrap();
+    let session = outside.path().join("session.jsonl");
+
+    let output = zx_run(
+        &server,
+        &fake.workspace(),
+        Some(fake.dir.path()),
+        &[
+            "--profile",
+            profile_path.to_str().unwrap(),
+            "--session",
+            session.to_str().unwrap(),
+            "go",
+        ],
+    )
+    .await;
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr_of(&output));
+    // `run` has nobody to ask, so a tool that asked would be refused instead.
+    assert_eq!(mcp.requests("tools/call").len(), 1);
+    assert!(!stderr_of(&output).contains("(asks)"), "{}", stderr_of(&output));
 }
 
 #[tokio::test]
@@ -1031,8 +1269,10 @@ async fn real_run_in_container_mode_executes_bash_in_the_container() {
     .await;
 
     assert_eq!(output.status.code(), Some(0), "{}", stderr_of(&output));
+    let uid = owner(&workspace);
+    let expected = if uid == 0 { 65534 } else { uid };
     assert!(
-        tool_result(&server, 1).starts_with("65534\npublic\n"),
+        tool_result(&server, 1).starts_with(&format!("{expected}\npublic\n")),
         "{}",
         tool_result(&server, 1)
     );

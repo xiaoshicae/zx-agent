@@ -7,7 +7,7 @@
 use std::path::Path;
 
 use crate::ai::{PREAMBLE, SystemPrompt, now_ms};
-use crate::executor::Platform;
+use crate::executor::{Access, ContainerConfig, Platform};
 
 /// Where commands run: [`environment_section`] or [`container_environment_section`].
 pub const ENVIRONMENT: &str = "environment";
@@ -45,18 +45,33 @@ pub fn environment_section(cwd: &Path) -> String {
     )
 }
 
-/// Facts about the container that commands run in, instead of this machine: its system,
-/// the read-only workspace, and the isolation that limits what commands can do.
-pub fn container_environment_section(cwd: &Path, image: &str, user: &str, platform: &Platform) -> String {
+/// Facts about the container that commands run in, instead of this machine: its system, the
+/// workspace (`config.workspace`, where commands start), and what commands may change and
+/// reach, as `config` sets it up.
+pub fn container_environment_section(config: &ContainerConfig, platform: &Platform) -> String {
     let name = pretty_name(&platform.os_release).unwrap_or_else(|| "Linux".to_string());
+    let workspace = match config.workspace_access {
+        Access::ReadWrite => "writable; changes are made to the host's files",
+        Access::ReadOnly => "read-only",
+    };
+    let network = match config.network.trim() {
+        "none" => "without network access".to_string(),
+        network => format!("with network access (Docker network {network})"),
+    };
+    let files = match config.root_access {
+        Access::ReadWrite => "the container's own files are writable and are discarded with the container",
+        Access::ReadOnly => "outside the working directory only /tmp is writable",
+    };
     format!(
-        "OS: {name}, Linux kernel {} ({}), in a container from image {image}\nRun started: {}\n\
-         Working directory: {} (read-only)\n\
-         Isolation: commands run as user {user} without network access; only /tmp is writable.",
+        "OS: {name}, Linux kernel {} ({}), in a container from image {}\nRun started: {}\n\
+         Working directory: {} ({workspace})\n\
+         Isolation: commands run as user {} {network}; {files}.",
         platform.kernel,
         platform.arch,
+        config.image,
         run_started(),
-        cwd.display()
+        config.workspace.display(),
+        config.user,
     )
 }
 
@@ -179,22 +194,45 @@ mod tests {
             kernel: "6.10.14-linuxkit".into(),
             arch: "aarch64".into(),
         };
-        let section =
-            container_environment_section(Path::new("/srv/app"), "debian:bookworm-slim", "65534:65534", &platform);
+        let open = ContainerConfig {
+            user: "1000:1000".into(),
+            ..ContainerConfig::new("debian:bookworm-slim", "/srv/app")
+        };
+        let section = container_environment_section(&open, &platform);
         let lines: Vec<&str> = section.lines().collect();
         assert_eq!(
             lines[0],
             "OS: Debian GNU/Linux 12 (bookworm), Linux kernel 6.10.14-linuxkit (aarch64), in a container from image debian:bookworm-slim"
         );
         assert!(lines[1].starts_with("Run started: "), "{section}");
+        assert_eq!(
+            lines[2],
+            "Working directory: /srv/app (writable; changes are made to the host's files)"
+        );
+        assert_eq!(
+            lines[3],
+            "Isolation: commands run as user 1000:1000 with network access (Docker network bridge); \
+             the container's own files are writable and are discarded with the container."
+        );
+        let unnamed = Platform::default();
+        assert!(container_environment_section(&open, &unnamed).starts_with("OS: Linux, Linux kernel"));
+    }
+
+    #[test]
+    fn a_strict_container_is_described_as_read_only_and_offline() {
+        let strict = ContainerConfig {
+            user: "65534:65534".into(),
+            workspace_access: Access::ReadOnly,
+            root_access: Access::ReadOnly,
+            network: "none".into(),
+            ..ContainerConfig::new("debian:bookworm-slim", "/srv/app")
+        };
+        let section = container_environment_section(&strict, &Platform::default());
+        let lines: Vec<&str> = section.lines().collect();
         assert_eq!(lines[2], "Working directory: /srv/app (read-only)");
         assert_eq!(
             lines[3],
-            "Isolation: commands run as user 65534:65534 without network access; only /tmp is writable."
-        );
-        let unnamed = Platform::default();
-        assert!(
-            container_environment_section(Path::new("/"), "x", "0:0", &unnamed).starts_with("OS: Linux, Linux kernel")
+            "Isolation: commands run as user 65534:65534 without network access; outside the working directory only /tmp is writable."
         );
     }
 

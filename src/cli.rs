@@ -267,9 +267,10 @@ pub(crate) struct BaseArgs {
     #[arg(long)]
     pub(crate) no_auto_compact: bool,
 
-    /// Where bash and read_file run. local: this machine. container: an isolated Docker
-    /// container without network access and with a read-only working directory.
-    /// Defaults to the selected profile.
+    /// Where bash and read_file run. local: this machine. container: a Docker container that
+    /// is the sandbox: by default the working directory and the container's files are
+    /// writable and it has network access; the profile's [container] section can make it
+    /// stricter. Defaults to the selected profile.
     #[arg(long, value_enum)]
     pub(crate) execution: Option<ExecutionArg>,
 
@@ -410,7 +411,8 @@ pub(crate) struct SessionOptions<'a> {
 #[derive(Default)]
 pub(crate) struct McpTools {
     servers: Vec<Arc<dyn Extension>>,
-    /// Tools that need approval: those not in their server's `allowTools`.
+    /// Tools that need approval: those not in their server's `allowTools`, unless the
+    /// profile approves every call.
     ask: Vec<String>,
     /// Variables holding the servers' tokens: hidden from commands, values redacted.
     token_env: Vec<String>,
@@ -443,7 +445,8 @@ pub(crate) async fn connect_mcp(base: &BaseArgs, default: Builtin, transport: &T
         let server = server.map_err(anyhow::Error::msg)?;
         let mut names = Vec::new();
         for (remote, name) in server.tool_names() {
-            if settings.allow_tools.contains(remote) {
+            // With approveAll nothing asks: the container is the sandbox (decision D11).
+            if settings.allow_tools.contains(remote) || profile.rules.approve_all {
                 names.push(name.clone());
             } else {
                 names.push(format!("{name} (asks)"));
@@ -489,6 +492,8 @@ pub(crate) struct PreparedSession {
     pub(crate) store: SessionStore,
     /// The profile's auto-approved commands, for frontend policies that also ask for bash.
     pub(crate) auto_approve: AutoApprove,
+    /// The profile's `rules.approveAll`: nothing waits for a person.
+    pub(crate) approve_all: bool,
     pub(crate) limits: Limits,
     pub(crate) compaction: compaction::Config,
 }
@@ -727,11 +732,12 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
         Execution::Local => (Arc::new(LocalExecutor), environment_section(&cwd)),
         Execution::Container => {
             let config = container_config(&profile.container, &cwd, &session_id)?;
-            let user = config.user.clone();
+            // The description needs the settings, which starting the container consumes.
+            let settings = config.clone();
             let container = ContainerExecutor::start(config)
                 .await
                 .context("cannot start the container for --execution container")?;
-            let environment = container_environment_section(&cwd, container.image(), &user, container.platform());
+            let environment = container_environment_section(&settings, container.platform());
             (Arc::new(container), environment)
         }
     };
@@ -860,15 +866,20 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
         },
         store: session,
         auto_approve,
+        approve_all: profile.rules.approve_all,
         limits: profile.limits,
         compaction: profile.compaction,
     })
 }
 
 impl PreparedSession {
-    /// Ask a person before every bash command, except those the profile auto-approves; other
-    /// tools follow the profile's rules. Chat and serve both work this way.
+    /// Ask a person before every bash command, except those the profile auto-approves, or
+    /// none when the profile approves every call; other tools follow the profile's rules.
+    /// Chat and serve both work this way.
     pub(crate) fn require_bash_approval(&mut self, reason: &str) {
+        if self.approve_all {
+            return;
+        }
         let policy = RulePolicy::new(vec![
             Rule {
                 matcher: RuleMatcher::Tool(BASH.into()),
@@ -910,6 +921,15 @@ fn container_config(settings: &ContainerSettings, cwd: &Path, label: &str) -> Re
     }
     if let Some(limit) = settings.pids_limit {
         config.pids_limit = limit;
+    }
+    if let Some(network) = &settings.network {
+        config.network.clone_from(network);
+    }
+    if let Some(access) = settings.workspace {
+        config.workspace_access = access;
+    }
+    if let Some(access) = settings.root {
+        config.root_access = access;
     }
     Ok(config)
 }
