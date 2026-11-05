@@ -4,9 +4,9 @@
 |-|-|
 | 版本 | `v0.1` |
 | 日期 | `2026-11-05` |
-| 状态 | 已实施，待评审合并 |
+| 状态 | 已实施（PR #71），待评审合并 |
 | Owner | 待指定 |
-| 对应 | `docs/ROADMAP.md`（P12 项目整理；P11 内核整理 ② 至 ⑥ 在同一 PR 中完成） |
+| 对应 | `docs/ROADMAP.md`（P12 项目整理；P11 内核整理 ② 至 ⑥ 在同一个 PR #71 中完成） |
 | 代码核对基线 | `a0c400f`（PR #70 的末尾提交）；行号以此为准 |
 | 目标 | 按 P11 对内核的做法整理整个项目：模块边界清楚、函数短、重复只留一份、注释只讲代码说不出的"为什么" |
 
@@ -66,7 +66,7 @@ P11（`docs/p11-kernel-cleanup-review.md`）只看 `zx-core`。用户 2026-11-05
 | ③ 根 crate | `e7fae2f` | `src/run.rs`（run 子命令）、`src/process.rs`（退出码、stdout 行、信号、JSON 行 sink）、`src/render.rs`（调用与事件的文案）从 `main.rs` 与 `chat/output.rs` 分出，chat 之外不再依赖 chat。`cli.rs`：`BudgetArgs` 以 `#[command(flatten)]` 进入四个子命令；`Shared::connect` 读指令文件并连 MCP，`SessionOptions` 带 `&Shared`；`prepare` 拆成 `secret_files`、`load_profile`、`provider`、`host_tools`、`check_session_outside`、`executor`、`hidden_env`、`hidden_values`、`rules_policy`；`resolve_cwd` 移到 `cli.rs`，`SessionFile`、`open_existing`、`create` 移到 `sessions.rs`；两处文档注释归位。chat：`Chat` 持有设置、交互与输出，`build` 与 `switch` 是它的方法；`opening` 选存储与要续接或复制的会话；`drive_turn` 以 `Pending` 枚举表示审批等待，`answer_approval` 处理等待期间的输入，`settle` 取消并报告。acp：`notice` 与 `compaction_update`；serve：`slack_channel`、`feishu_channel`、`exit_code`；otel：`finish` 与 `Open::for_call`；debug：`entry`、`reason_suffix`、`tokens`；profile：TOML 层（原始类型、叠加、`read_text`）在 `profile/file.rs`，`Builtin::ALL` 与 `Builtin::name` 选内置 profile，`known_tool` |
 | ④ IM | `c315a51` | `zx-im` 新增 `platform.rs`：`Seen`、`split_text` 搬入，新增 `Pacer` 与 `Cards`，两个平台 crate 改用；`CardLabels::outcome`；`Shared::bounded` 统一带超时的出站调用，状态记录、遗留状态、发送与更新六处改用，遗留状态的处理移到 `status.rs`；worker 的 `Decision` 枚举（`Open` / `By` / `Lapsed`）；飞书 `connect` 返回 `Connection`（`Open` / `Later`），握手拆成 `open_socket`，心跳帧 `ping()`；Slack `open_socket` 上报连接失败 |
 | ⑤ 测试辅助 | `1c0e5bb` | `tests/common/mod.rs` 新增 `zx_agent()`、`stdout`、`stderr`，11 个文件改用 |
-| ⑥ 注释与文档 | 本提交 | 行级的 pi 文件出处、PR 编号、决策编号与评审稿章节只保留在模块文档；标出 pi 对应标识符的注释（如 `(pi: \`ThinkingLevel\`)`）保留，模块文档说不出这层对应；README、`.claude/CLAUDE.md`、规则 04 的路径与名称随改动更新；本稿与 ROADMAP |
+| ⑥ 注释与文档 | `e5bd297`、`a9f65d9` | 行级的 pi 文件出处、PR 编号、决策编号与评审稿章节只保留在模块文档；标出 pi 对应标识符的注释（如 `(pi: \`ThinkingLevel\`)`）保留，模块文档说不出这层对应；README、`.claude/CLAUDE.md`、规则 04 的路径与名称随改动更新；本稿与 ROADMAP |
 
 修正的两处错误各有先失败后通过的回归测试：`tests/search_tools.rs` 的 `grep_notes_more_matches_when_just_over_the_limit`，`search.rs` 单元测试 `the_engine_marker_is_read_from_error_output_that_is_not_utf8`。另新增单元测试：`network_names_are_read_case_insensitively_and_written_back_as_docker_expects`（容器配置）、`an_error_chunk_ends_the_stream_as_a_provider_failure`（openai）、`builtin_names_are_spelt_as_extends_takes_them`（profile）。
 

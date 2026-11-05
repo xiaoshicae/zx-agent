@@ -536,8 +536,8 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P8 | 嵌入协议 `acp` | 进行中：2026-11-05 按 D13 重启，`acp` 子命令已实现（见下文 P8），待在 Zed 或 Wisp 上验证 |
 | P9 | 可选增强 | 进行中：token 预算（PR #47）、OpenTelemetry 追踪（PR #49）、crate 拆分（PR #52）、通用化整理（PR #54）、chat 交互体验（2026-11-05，见下文）已完成；剩更多 provider（如 Anthropic）。其余各项按 D10 不做或取消 |
 | P10 | 与 pi 的能力对齐 | 进行中：2026-11-05 对照 pi 列出 14 项缺口，见下文 P10；① 上下文超长后自动恢复已完成（PR #56）；② 容器沙箱已完成（PR #57）；③ edit 与 write 工具已完成（PR #58）；④ grep、find、ls 已完成（PR #59）；⑤ 运行中可调整的配置已完成：⑤a 推理强度（PR #60）、⑤b 续跑（PR #61）、⑤c 请求前替换模型与推理强度的钩子（PR #65）；⑥a 会话目录与续接已完成（PR #67）；⑥b fork 已完成（PR #68） |
-| P11 | 内核整理 | 已完成：2026-11-05 评审稿 `docs/p11-kernel-cleanup-review.md`；① 立项与搬家（PR #70），② 至 ⑥（本 PR，与 P12 同一个 PR） |
-| P12 | 项目整理 | 已完成（本 PR）：2026-11-05 评审稿 `docs/p12-project-cleanup-review.md`；① zx-tools、② 模型层、③ 根 crate、④ IM、⑤ 测试辅助、⑥ 注释与文档 |
+| P11 | 内核整理 | 已完成：2026-11-05 评审稿 `docs/p11-kernel-cleanup-review.md`；① 立项与搬家（PR #70），② 至 ⑥（PR #71，与 P12 同一个 PR） |
+| P12 | 项目整理 | 已完成（PR #71）：2026-11-05 评审稿 `docs/p12-project-cleanup-review.md`；① zx-tools、② 模型层、③ 根 crate、④ IM、⑤ 测试辅助、⑥ 注释与文档 |
 
 ### P0 场景默认值移出内核
 
@@ -1578,11 +1578,11 @@ D11 容器沙箱的实施要点（2026-11-05 用户决定）：
 2026-11-05 用户要求把 `zx-core` 做成轻量的微内核，并让内核“模块更清晰、代码更简洁、注释更精简，便于阅读和维护”。评审稿 `docs/p11-kernel-cleanup-review.md`（代码核对基线 `2367a3a`）记录了结论与方案：内核依赖 `zx-ai` 没有错，错在 `zx-ai` 混装了 OpenAI 驱动；内核里约三分之一的代码是默认实现而不是机制；两个超长函数和三份重复的借用包遮住了运行层的数据流；注释总量不多但重复、带历史。任务按下面的顺序各成一个 PR，每个 PR 跑 fmt、clippy、test 三条命令，改到会话格式的加跑 MSRV 检查与 `tests/request_audit.rs` 的固定文件比对：
 
 - [x] **① 立项与搬家**（已完成（PR #70），2026-11-05，见下方实施记录）：评审稿；规则 01 的注释条款；拆 `zx-ai-openai`；`executor`、`output_store`、`ContinueOnLength` 与 `RedactSecrets` 移到 `zx-tools`。
-- [x] **② 机械清理**（已完成，本 PR）：clippy pedantic 可自动修的（`Self` 重复、可 derive `Eq`、单臂 match）；`const fn` 建议用 1.88 工具链复核后再采纳；两处超长行；三对同名文件改名（`session/compaction.rs`、`runner/recovery.rs`、两个 `session_runtime.rs`）；`SessionHost` 命名统一。
-- [x] **③ 运行层**（已完成，本 PR）：拆 `Runner::start`（265 行）；三处同样八个字段的借用包合成 `RunContext`；暂停状态封成 `CompactionPause`；`overflow.rs` 消失。
-- [x] **④ 摘要宿主**（已完成，本 PR）：拆 `Host::run`（251 行），返回值只留 `Report`；摘要的两端交给 session；`carry(previous, new)` 合并 `merge` 与 `validate_merged`；`SummaryRequest::messages` 合并两处请求构造。
-- [x] **⑤ 会话**（已完成，本 PR）：校验分发与版本表搬回 `session.rs`；`EntryHead`；查找辅助；`enum Repair`；`without_details` 合成泛型；公开面收口。
-- [x] **⑥ 循环小改与注释**（已完成，本 PR）：`checkpoint`、`decide_next_turn` 拆分、`ToolRef`；注释按评审稿第 5 节的规则整理。
+- [x] **② 机械清理**（已完成，PR #71）：clippy pedantic 可自动修的（`Self` 重复、可 derive `Eq`、单臂 match）；`const fn` 建议用 1.88 工具链复核后再采纳；两处超长行；三对同名文件改名（`session/compaction.rs`、`runner/recovery.rs`、两个 `session_runtime.rs`）；`SessionHost` 命名统一。
+- [x] **③ 运行层**（已完成，PR #71）：拆 `Runner::start`（265 行）；三处同样八个字段的借用包合成 `RunContext`；暂停状态封成 `CompactionPause`；`overflow.rs` 消失。
+- [x] **④ 摘要宿主**（已完成，PR #71）：拆 `Host::run`（251 行），返回值只留 `Report`；摘要的两端交给 session；`carry(previous, new)` 合并 `merge` 与 `validate_merged`；`SummaryRequest::messages` 合并两处请求构造。
+- [x] **⑤ 会话**（已完成，PR #71）：校验分发与版本表搬回 `session.rs`；`EntryHead`；查找辅助；`enum Repair`；`without_details` 合成泛型；公开面收口。
+- [x] **⑥ 循环小改与注释**（已完成，PR #71）：`checkpoint`、`decide_next_turn` 拆分、`ToolRef`；注释按评审稿第 5 节的规则整理。
 
 ① 实施记录（2026-11-05，基于 `2367a3a`）：
 
@@ -1599,11 +1599,11 @@ D11 容器沙箱的实施要点（2026-11-05 用户决定）：
 - 本机 macOS 验证：`cargo fmt`、`cargo clippy --all-targets -- -D warnings`、`cargo test`（951 通过、0 失败、7 项付费测试跳过；`829afc8` 的基线为 944 通过，差额 7 项是 PR #66 新增的测试，移动的文件里测试属性的数量不变）、`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`、`cargo +1.88.0 check --all-targets` 均通过；`RUSTFLAGS="-W unused-crate-dependencies"` 对 zx-ai、zx-ai-openai、zx-core、zx-tools 的库检查无命中；自查脚本的命中与拆分前相同，只是路径随文件移动。
 - 未做，留给后续 PR 或另行决定：评审稿 2.2 节里 `prompt.rs` 为上层功能保留的三个段落名、`jsonschema` 的 feature 开关、`compaction.rs` 内嵌的两段摘要提示词。
 
-② 至 ⑥ 实施记录（2026-11-05，本 PR，基于 `a0c400f`）：五个提交依次为 ② 机械清理（`f2a96de`）、③ 运行层（`5b53810`：`runner/host.rs` 的 `RunHost` 同时是循环、摘要与重试的宿主，`RunStop` 与 `CompactionPause`，`overflow.rs` 消失）、④ 摘要宿主（`84946d8`：`Host::run` 拆成 `plan`、`begin`、`validate`、`complete`、`fail`，只返回 `Report`）、⑤ 会话（`ef94295`：`session/projection.rs` 与 `session/summary.rs`，`jsonl.rs` 的 `Repair` 枚举，`without_details` 合成泛型）、⑥ 循环小改与注释（`c04f0c8`：`checkpoint`，注释按规则 01 整理）。`Runner::start` 由 265 行减到 153 行，`Host::run` 251 行拆成都不超过 60 行的五段；内核产线代码 7828 → 8025 行（新文件各带模块文档）。度量与验证见 `docs/p12-project-cleanup-review.md` 第 4、5 节。
+② 至 ⑥ 实施记录（2026-11-05，PR #71，基于 `a0c400f`）：五个提交依次为 ② 机械清理（`f2a96de`）、③ 运行层（`5b53810`：`runner/host.rs` 的 `RunHost` 同时是循环、摘要与重试的宿主，`RunStop` 与 `CompactionPause`，`overflow.rs` 消失）、④ 摘要宿主（`84946d8`：`Host::run` 拆成 `plan`、`begin`、`validate`、`complete`、`fail`，只返回 `Report`）、⑤ 会话（`ef94295`：`session/projection.rs` 与 `session/summary.rs`，`jsonl.rs` 的 `Repair` 枚举，`without_details` 合成泛型）、⑥ 循环小改与注释（`c04f0c8`：`checkpoint`，注释按规则 01 整理）。`Runner::start` 由 265 行减到 153 行，`Host::run` 251 行拆成都不超过 60 行的五段；内核产线代码 7828 → 8025 行（新文件各带模块文档）。度量与验证见 `docs/p12-project-cleanup-review.md` 第 4、5 节。
 
 ### P12 项目整理
 
-2026-11-05 用户要求按 P11 的方式整理整个项目并直接实施。评审稿 `docs/p12-project-cleanup-review.md`（代码核对基线 `a0c400f`）记录结论、做法与度量。六项各一个提交，与 P11 ② 至 ⑥ 在同一个 PR：
+2026-11-05 用户要求按 P11 的方式整理整个项目并直接实施。评审稿 `docs/p12-project-cleanup-review.md`（代码核对基线 `a0c400f`）记录结论、做法与度量。六项各一个提交，与 P11 ② 至 ⑥ 在同一个 PR（#71）：
 
 - [x] **① `zx-tools`**（`a708397`）：工具共用的参数解析、路径、二进制判断与取消等待；一份 `prefix_within`；搜索工具统一的收尾与两处修正（`context = 0` 时的“还有更多”、非 UTF-8 的 stderr）；`capture.rs` 的 `Capture`；`executor/container/` 与 `policy/` 拆分；`Network` 枚举；`mcp.rs` 的 `connect` 拆分。
 - [x] **② 模型层**（`25102c0`）：`StreamEvent::ending`；读文件的函数移到 `zx_tools::files`，`zx-ai` 不再依赖 anyhow 与 libc；`stream_response` 拆成五段；`provider_failure`、`Accumulator::message`、`assistant_entry`；SSE 解析器的两段共用。
