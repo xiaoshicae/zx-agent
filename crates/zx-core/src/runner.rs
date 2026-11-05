@@ -5,16 +5,16 @@
 
 mod accounting;
 mod answer;
+mod host;
+mod interrupted;
 mod overflow;
-mod recovery;
-mod session_runtime;
 
 use accounting::RunAccounting;
 use answer::final_answer;
 #[cfg(test)]
 use answer::overlap;
+use host::RunHost;
 use overflow::OverflowRecovery;
-use session_runtime::RunnerSessionRuntime;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -256,7 +256,7 @@ impl Runner {
                 // The session projection, not an in-memory list, is what the model sees
                 // (pi: AgentSession replaces the context with the projection before each request).
                 let mut context = session.messages();
-                let mut session_runtime = RunnerSessionRuntime {
+                let mut host = RunHost {
                     session: &mut *session,
                     to,
                     hooks: &config.hooks,
@@ -275,7 +275,7 @@ impl Runner {
                 control.token_budget = accounting.remaining_tokens(limits);
                 control.prior_task_turns = accounting.task_turns;
                 control.prior_answer_continuations = accounting.answer_continuations;
-                control.session = Some(&mut session_runtime);
+                control.session = Some(&mut host);
                 control.trace = Some(&trace);
                 control.attempt_number = attempt;
                 let result = run_loop(&mut context, std::mem::take(&mut prompts), config, &mut control).await;
@@ -374,8 +374,8 @@ impl Runner {
                     break LoopOutcome::Error;
                 }
                 let cancelled = tokio::select! {
-                    _ = tokio::time::sleep(delay) => false,
-                    _ = run_cancel.cancelled() => true,
+                    () = tokio::time::sleep(delay) => false,
+                    () = run_cancel.cancelled() => true,
                 };
                 if cancelled {
                     break LoopOutcome::Aborted;

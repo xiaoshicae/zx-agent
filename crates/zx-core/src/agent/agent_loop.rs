@@ -21,7 +21,7 @@ use super::hooks::{
 };
 use super::policy::Decision;
 use super::queue::{MessageQueues, Queue};
-use super::session_runtime::{ContextPreparation, SessionRuntime};
+use super::session_host::{ContextPreparation, SessionHost};
 use super::tool::{Effects, ExecutionMode, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput};
 use crate::ai::{
     AssistantMessage, Message, Provider, Reasoning, Request, StopReason, StreamEvent, SystemMessage, SystemPrompt,
@@ -124,7 +124,7 @@ pub struct LoopControl<'a> {
     pub sink: &'a dyn EventSink,
     /// Records each step before the loop acts on it; the Runner supplies its session. Without
     /// one, the loop keeps messages and edits only in its context.
-    pub(crate) session: Option<&'a mut dyn SessionRuntime>,
+    pub(crate) session: Option<&'a mut dyn SessionHost>,
     /// The run this attempt belongs to; without one, `run_loop` is a run of its own.
     pub(crate) trace: Option<&'a RunTrace>,
     /// 1 for the first attempt of a run, plus one for each retry.
@@ -201,12 +201,11 @@ pub async fn run_loop(
     };
 
     let own_trace;
-    let trace = match control.trace {
-        Some(trace) => trace,
-        None => {
-            own_trace = RunTrace::new(None, config.spec.cwd.clone(), control.cancel.clone());
-            &own_trace
-        }
+    let trace = if let Some(trace) = control.trace {
+        trace
+    } else {
+        own_trace = RunTrace::new(None, config.spec.cwd.clone(), control.cancel.clone());
+        &own_trace
     };
 
     let mut engine = Engine {

@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::{ContextPreparation, Emit, HookChain, SessionRuntime};
+use crate::agent::{ContextPreparation, Emit, HookChain, SessionHost};
 use crate::ai::{Message, Provider, Request, ToolCall, Usage};
 use crate::compaction::{self, Trigger};
 use crate::session::{RequestSource, SessionStore};
@@ -11,7 +11,7 @@ use crate::session::{RequestSource, SessionStore};
 /// Records each step of a run in the session before the loop acts on it (pi: AgentSession
 /// writes on `message_end`), and prepares the context before each task request. A failed
 /// write stops the run: an unattended run must not keep acting without an audit trail.
-pub(super) struct RunnerSessionRuntime<'a> {
+pub(super) struct RunHost<'a> {
     pub(super) session: &'a mut SessionStore,
     pub(super) to: Emit<'a>,
     pub(super) hooks: &'a HookChain,
@@ -25,7 +25,7 @@ pub(super) struct RunnerSessionRuntime<'a> {
 }
 
 #[async_trait]
-impl SessionRuntime for RunnerSessionRuntime<'_> {
+impl SessionHost for RunHost<'_> {
     async fn append_message(&mut self, message: &Message) -> Result<String, String> {
         // The event that reports the message owns it, so the session stores a copy.
         self.session
@@ -103,26 +103,25 @@ impl SessionRuntime for RunnerSessionRuntime<'_> {
                 usage: report.usage,
             };
         }
-        match messages {
-            Some(messages) => ContextPreparation::Updated {
+        if let Some(messages) = messages {
+            ContextPreparation::Updated {
                 messages,
                 requests: report.requests,
                 usage: report.usage,
-            },
-            None => {
-                let error = report
-                    .error
-                    .unwrap_or_else(|| "automatic compaction made no progress".into());
-                // A paid summary request failed; repeating it on every prompt would keep
-                // paying for the same failure. Cancellation is the caller's choice.
-                if report.outcome == compaction::Outcome::Failed && report.requests > 0 {
-                    *self.compaction_pause = Some(error.clone());
-                }
-                ContextPreparation::Failed {
-                    error,
-                    requests: report.requests,
-                    usage: report.usage,
-                }
+            }
+        } else {
+            let error = report
+                .error
+                .unwrap_or_else(|| "automatic compaction made no progress".into());
+            // A paid summary request failed; repeating it on every prompt would keep
+            // paying for the same failure. Cancellation is the caller's choice.
+            if report.outcome == compaction::Outcome::Failed && report.requests > 0 {
+                *self.compaction_pause = Some(error.clone());
+            }
+            ContextPreparation::Failed {
+                error,
+                requests: report.requests,
+                usage: report.usage,
             }
         }
     }

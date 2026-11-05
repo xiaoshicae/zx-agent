@@ -340,7 +340,7 @@ CLI (main.rs + cli.rs + chat/ + acp.rs)
 | 重试判断 | `crates/zx-ai/src/retry.rs` | `ai/src/utils/retry.ts` |
 | 测试用 provider | `crates/zx-ai/src/faux.rs` | `ai/src/providers/faux.ts` |
 | agent 循环 | `crates/zx-core/src/agent/agent_loop.rs` | `agent/src/agent-loop.ts`（`runLoop`、`executeToolCalls`） |
-| 钩子宿主 | `crates/zx-core/src/agent/hooks.rs` | 输入、上下文、工具、回合与事件扩展点 |
+| 钩子宿主 | `crates/zx-core/src/agent/hooks/` | 输入、上下文、工具、回合与事件扩展点 |
 | 工具调用策略 | `crates/zx-tools/src/policy.rs` | `PolicyHook` 适配 `ToolPolicy`；命令策略与 deny → ask → allow 规则 |
 | 人机交互 | `crates/zx-core/src/interaction.rs` | 宿主审批与 `NoHuman` |
 | 扩展接口 | `crates/zx-core/src/extensions.rs` | 无对应实现：`Extension` 与 `register` |

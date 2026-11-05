@@ -13,21 +13,21 @@
 //! that a tool call with side effects started, so recovery can tell interrupted calls apart.
 //! Version 5 adds incremental summaries, which carry an earlier summary's facts over.
 
-mod compaction;
 mod directory;
-mod file;
+mod jsonl;
 mod log;
 mod recovery;
 mod request;
-pub use compaction::{
-    CompactionEntry, CompactionFailedEntry, CompactionPlan, CompactionStartedEntry, CompactionSummary,
-    FormatUpgradeEntry, MergedSummary, SummaryFact, SummaryMode, SummaryRequest,
-};
-pub(crate) use compaction::{MAX_STATEMENTS, MAX_SUMMARY_BYTES, cite_only};
+mod summary;
 pub use directory::{SessionInfo, SessionList, Unreadable, list_sessions};
 pub use log::{LoadedSession, LogRecord, SessionLog};
 pub use recovery::{InterruptedToolCall, StartRecord, ToolCallStartedEntry};
 pub use request::{RequestConfig, RequestConfigEntry, RequestSource, RequestStartedEntry};
+pub use summary::{
+    CompactionEntry, CompactionFailedEntry, CompactionPlan, CompactionStartedEntry, CompactionSummary,
+    FormatUpgradeEntry, MergedSummary, SummaryFact, SummaryMode, SummaryRequest,
+};
+pub(crate) use summary::{MAX_STATEMENTS, MAX_SUMMARY_BYTES, cite_only};
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use crate::ai::ContentBlock;
 use crate::ai::{Message, now_ms};
-use file::JsonlFile;
+use jsonl::JsonlFile;
 
 /// Format version written to new session headers. Version 5 adds incremental summaries.
 /// Version 4 adds `tool_call_started`.
@@ -87,7 +87,7 @@ impl fmt::Display for WritesStopped {
 }
 
 /// First line of a session file. Records where and with which model the session started.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionHeader {
     pub version: u32,
@@ -132,7 +132,7 @@ pub struct MessageEntry {
 }
 
 /// Changes what one earlier message contributes to model context, on this branch only.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextEditEntry {
     pub id: String,
@@ -162,60 +162,60 @@ impl Entry {
     /// The entry's id.
     pub fn id(&self) -> &str {
         match self {
-            Entry::Message(entry) => &entry.id,
-            Entry::ContextEdit(entry) => &entry.id,
-            Entry::CompactionFailed(entry) => &entry.id,
-            Entry::Compaction(entry) => &entry.id,
-            Entry::CompactionStarted(entry) => &entry.id,
-            Entry::FormatUpgrade(entry) => &entry.id,
-            Entry::RequestConfig(entry) => &entry.id,
-            Entry::RequestStarted(entry) => &entry.id,
-            Entry::ToolCallStarted(entry) => &entry.id,
+            Self::Message(entry) => &entry.id,
+            Self::ContextEdit(entry) => &entry.id,
+            Self::CompactionFailed(entry) => &entry.id,
+            Self::Compaction(entry) => &entry.id,
+            Self::CompactionStarted(entry) => &entry.id,
+            Self::FormatUpgrade(entry) => &entry.id,
+            Self::RequestConfig(entry) => &entry.id,
+            Self::RequestStarted(entry) => &entry.id,
+            Self::ToolCallStarted(entry) => &entry.id,
         }
     }
 
     /// The parent entry's id; `None` for a root entry.
     pub fn parent_id(&self) -> Option<&str> {
         match self {
-            Entry::Message(entry) => entry.parent_id.as_deref(),
-            Entry::ContextEdit(entry) => entry.parent_id.as_deref(),
-            Entry::CompactionFailed(entry) => entry.parent_id.as_deref(),
-            Entry::Compaction(entry) => entry.parent_id.as_deref(),
-            Entry::CompactionStarted(entry) => entry.parent_id.as_deref(),
-            Entry::FormatUpgrade(entry) => entry.parent_id.as_deref(),
-            Entry::RequestConfig(entry) => entry.parent_id.as_deref(),
-            Entry::RequestStarted(entry) => entry.parent_id.as_deref(),
-            Entry::ToolCallStarted(entry) => entry.parent_id.as_deref(),
+            Self::Message(entry) => entry.parent_id.as_deref(),
+            Self::ContextEdit(entry) => entry.parent_id.as_deref(),
+            Self::CompactionFailed(entry) => entry.parent_id.as_deref(),
+            Self::Compaction(entry) => entry.parent_id.as_deref(),
+            Self::CompactionStarted(entry) => entry.parent_id.as_deref(),
+            Self::FormatUpgrade(entry) => entry.parent_id.as_deref(),
+            Self::RequestConfig(entry) => entry.parent_id.as_deref(),
+            Self::RequestStarted(entry) => entry.parent_id.as_deref(),
+            Self::ToolCallStarted(entry) => entry.parent_id.as_deref(),
         }
     }
 
     /// The serialized `type`, such as `context_edit`.
     pub fn kind(&self) -> &'static str {
         match self {
-            Entry::Message(_) => "message",
-            Entry::ContextEdit(_) => "context_edit",
-            Entry::FormatUpgrade(_) => "format_upgrade",
-            Entry::CompactionStarted(_) => "compaction_started",
-            Entry::Compaction(_) => "compaction",
-            Entry::CompactionFailed(_) => "compaction_failed",
-            Entry::RequestConfig(_) => "request_config",
-            Entry::RequestStarted(_) => "request_started",
-            Entry::ToolCallStarted(_) => "tool_call_started",
+            Self::Message(_) => "message",
+            Self::ContextEdit(_) => "context_edit",
+            Self::FormatUpgrade(_) => "format_upgrade",
+            Self::CompactionStarted(_) => "compaction_started",
+            Self::Compaction(_) => "compaction",
+            Self::CompactionFailed(_) => "compaction_failed",
+            Self::RequestConfig(_) => "request_config",
+            Self::RequestStarted(_) => "request_started",
+            Self::ToolCallStarted(_) => "tool_call_started",
         }
     }
 
     /// When the entry was appended, in milliseconds since the Unix epoch.
     pub fn timestamp(&self) -> u64 {
         match self {
-            Entry::Message(entry) => entry.timestamp,
-            Entry::ContextEdit(entry) => entry.timestamp,
-            Entry::CompactionFailed(entry) => entry.timestamp,
-            Entry::Compaction(entry) => entry.timestamp,
-            Entry::CompactionStarted(entry) => entry.timestamp,
-            Entry::FormatUpgrade(entry) => entry.timestamp,
-            Entry::RequestConfig(entry) => entry.timestamp,
-            Entry::RequestStarted(entry) => entry.timestamp,
-            Entry::ToolCallStarted(entry) => entry.timestamp,
+            Self::Message(entry) => entry.timestamp,
+            Self::ContextEdit(entry) => entry.timestamp,
+            Self::CompactionFailed(entry) => entry.timestamp,
+            Self::Compaction(entry) => entry.timestamp,
+            Self::CompactionStarted(entry) => entry.timestamp,
+            Self::FormatUpgrade(entry) => entry.timestamp,
+            Self::RequestConfig(entry) => entry.timestamp,
+            Self::RequestStarted(entry) => entry.timestamp,
+            Self::ToolCallStarted(entry) => entry.timestamp,
         }
     }
 }
@@ -372,7 +372,7 @@ impl SessionStore {
     /// incomplete last line, such as a record still being written, is left out. Every append
     /// to the snapshot fails.
     pub fn read(path: &Path) -> Result<Self> {
-        let loaded = file::read(path)?;
+        let loaded = jsonl::read(path)?;
         let mut store = Self::replay(loaded).map_err(|error| anyhow!("{}: {error:#}", path.display()))?;
         store.path = Some(path.to_path_buf());
         store.stopped = Some(WritesStopped::ReadOnly);
@@ -516,7 +516,7 @@ impl SessionStore {
     /// copied. Fails without writing when this session already has entries, `leaf` is not
     /// in `source`, or the format versions of the two headers differ (see
     /// [`SessionStore::fork_header`]). A failed append stops writing, as any append does.
-    pub async fn copy_branch(&mut self, source: &SessionStore, leaf: &str) -> Result<usize> {
+    pub async fn copy_branch(&mut self, source: &Self, leaf: &str) -> Result<usize> {
         if !self.entries.is_empty() {
             bail!("a branch can only be copied into an empty session");
         }
@@ -712,7 +712,7 @@ mod tests {
 
     #[test]
     fn incremental_summary_input_leaves_details_out() {
-        let source = compaction::IncrementalSource {
+        let source = summary::IncrementalSource {
             previous_facts: Vec::new(),
             records: vec![ProjectedMessage {
                 entry_id: "e1".into(),

@@ -10,7 +10,7 @@ use crate::ai::{Message, Provider, Request, ToolCall, Usage};
 /// method returns an error (`prepare_context`: [`ContextPreparation::Unrecorded`]) and the loop
 /// stops at once, because an unattended run must not keep acting without an audit trail.
 #[async_trait]
-pub(crate) trait SessionRuntime: Send + Sync {
+pub(crate) trait SessionHost: Send + Sync {
     /// Record a finished message. Returns its entry ID.
     async fn append_message(&mut self, message: &Message) -> Result<String, String>;
 

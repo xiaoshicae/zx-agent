@@ -16,7 +16,7 @@ pub(super) const START_RECORDS_VERSION: u32 = 4;
 /// Written and flushed after checks and approval, immediately before a call with side
 /// effects runs. A start without a later result means that the call began and that its
 /// outcome is unknown.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolCallStartedEntry {
     pub id: String,

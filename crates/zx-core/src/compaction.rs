@@ -598,7 +598,7 @@ impl Host<'_> {
         let wait = async {
             let mut streamed = ResponseBytes::default();
             loop {
-                let event = tokio::select! { biased; _ = child.cancelled() => return Err("compaction cancelled".into()), event = stream.next() => event };
+                let event = tokio::select! { biased; () = child.cancelled() => return Err("compaction cancelled".into()), event = stream.next() => event };
                 match event {
                     Some(StreamEvent::Start) => {}
                     Some(StreamEvent::Delta(delta)) => streamed.add(&delta)?,

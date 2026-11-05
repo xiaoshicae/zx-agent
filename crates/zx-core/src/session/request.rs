@@ -34,7 +34,7 @@ pub struct RequestConfigEntry {
 }
 
 /// How to reconstruct the messages at dispatch, without copying the whole transcript.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum RequestSource {
     /// The session projection at this request entry's parent, not at the current leaf.
@@ -49,7 +49,7 @@ pub enum RequestSource {
 
 /// Written before Provider::stream. A missing response means dispatch was unresolved;
 /// the record alone cannot prove that a remote server accepted the request.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestStartedEntry {
     pub id: String,

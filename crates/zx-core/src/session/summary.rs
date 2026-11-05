@@ -57,7 +57,7 @@ impl SummaryMode {
 /// A model-produced fact with references to source message entries. In an incremental
 /// summary every fact has an `id`, `<attempt that created it>-<number>`, and a new fact may
 /// name the earlier facts it `supersedes`; full summaries have neither.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SummaryFact {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -70,7 +70,7 @@ pub struct SummaryFact {
 
 /// Facts and model inference are deliberately separate. References are validated;
 /// this does not establish that a model's assertion is entailed by its source.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CompactionSummary {
     pub facts: Vec<SummaryFact>,
@@ -141,7 +141,7 @@ impl CompactionSummary {
 }
 
 /// Information needed to reconstruct a summarization request with its source IDs.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SummaryRequest {
     pub provider: String,
@@ -151,7 +151,7 @@ pub struct SummaryRequest {
 }
 
 /// Append-only format transition; old headers remain unchanged.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FormatUpgradeEntry {
     pub id: String,
@@ -162,7 +162,7 @@ pub struct FormatUpgradeEntry {
 
 /// Written and flushed before the summary model is called. An unresolved attempt
 /// after cancellation or process failure has no effect on model context.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompactionStartedEntry {
     pub id: String,
