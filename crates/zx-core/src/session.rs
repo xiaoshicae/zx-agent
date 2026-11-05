@@ -488,14 +488,22 @@ impl SessionStore {
         bail!("entry {target} is not on the edit's branch")
     }
 
-    /// Move the leaf to an existing entry. The next append starts a new branch there.
-    /// Only the pointer moves; nothing is written until the next append.
+    /// Move the leaf to an existing entry (pi: `SessionManager.branch`). The next append
+    /// starts a new branch there; the entries after the old leaf stay in the session, on
+    /// their branch. Only the pointer moves; nothing is written until the next append, so a
+    /// session loaded from its log starts at its last entry again.
     pub fn branch(&mut self, id: &str) -> Result<()> {
         if !self.index.contains_key(id) {
             bail!("entry {id} not found");
         }
         self.leaf = Some(id.to_string());
         Ok(())
+    }
+
+    /// Move the leaf before the first entry (pi: `resetLeaf`): the projection is empty and
+    /// the next append is a new root. As with [`SessionStore::branch`], nothing is written.
+    pub fn reset_leaf(&mut self) {
+        self.leaf = None;
     }
 
     /// The header of a session that continues one of this session's branches, for

@@ -18,6 +18,10 @@ pub(super) enum Command {
     Resume(String),
     /// Continue in a copy of the current session.
     Fork,
+    /// Show the session tree.
+    Tree,
+    /// Continue from the entry whose ID starts with this prefix.
+    Branch(String),
     Quit,
     Help,
     Invalid(String),
@@ -46,6 +50,9 @@ pub(super) fn parse(line: String) -> Command {
         }
         "/resume" => Command::Resume(rest.to_string()),
         "/fork" if rest.is_empty() => Command::Fork,
+        "/tree" if rest.is_empty() => Command::Tree,
+        "/branch" if rest.is_empty() => Command::Invalid("give an entry ID: /branch <ID>; /tree lists them".into()),
+        "/branch" => Command::Branch(rest.to_string()),
         "/model" => Command::Model((!rest.is_empty()).then(|| rest.to_string())),
         "/reasoning" => Command::Reasoning((!rest.is_empty()).then(|| rest.to_string())),
         _ => Command::Invalid(format!("unknown command or arguments: {name}; use /help")),
@@ -73,11 +80,15 @@ mod tests {
             "/status extra",
             "/sessions extra",
             "/fork extra",
+            "/tree extra",
+            "/branch",
             "/resume",
             "/unknown",
         ] {
             assert!(matches!(parse(invalid.into()), Command::Invalid(_)), "{invalid}");
         }
+        assert!(matches!(parse("/tree".into()), Command::Tree));
+        assert!(matches!(parse("/branch 1a2b".into()), Command::Branch(id) if id == "1a2b"));
         assert!(matches!(parse("/model next".into()), Command::Model(Some(model)) if model == "next"));
         assert!(matches!(parse("/model".into()), Command::Model(None)));
         assert!(matches!(parse("/reasoning high".into()), Command::Reasoning(Some(level)) if level == "high"));

@@ -157,6 +157,11 @@ impl Runner {
         &self.session
     }
 
+    /// The session, for a branch switch between runs.
+    pub(crate) fn session_mut(&mut self) -> &mut SessionStore {
+        &mut self.session
+    }
+
     /// Run one prompt to completion. Never panics on provider or tool failures; the report
     /// says how the run ended.
     ///

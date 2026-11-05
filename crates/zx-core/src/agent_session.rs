@@ -34,6 +34,8 @@ pub enum SessionError {
     Busy,
     /// Model IDs must contain at least one non-whitespace character.
     InvalidModel,
+    /// The entry a branch switch names is not in the session.
+    EntryNotFound,
 }
 
 impl fmt::Display for SessionError {
@@ -41,6 +43,7 @@ impl fmt::Display for SessionError {
         match self {
             Self::Busy => f.write_str("session is running; use steer or follow_up to submit input"),
             Self::InvalidModel => f.write_str("model ID must not be empty"),
+            Self::EntryNotFound => f.write_str("no entry with that ID in the session"),
         }
     }
 }
@@ -262,6 +265,37 @@ impl AgentSession {
                 Ok(())
             }
         }
+    }
+
+    /// Move the conversation to another point of its session tree while idle (pi:
+    /// `navigateTree`): the next prompt continues after `entry`, or before the first entry
+    /// for `None`, on a new branch there. The entries of the branch left behind stay in the
+    /// session, and a prompt after an answer whose tool calls have their results on that
+    /// branch records those calls as not executed, as after a crash. Nothing is written
+    /// until the next append, so a session resumed from its file continues where the file
+    /// ends. A run returns Busy; an ID that is not in the session returns EntryNotFound,
+    /// and the position does not change.
+    pub fn branch(&self, entry: Option<&str>) -> Result<(), SessionError> {
+        let mut state = lock(&self.state);
+        match &mut *state {
+            State::Running(_) => Err(SessionError::Busy),
+            State::Idle(runner) => match entry {
+                // The store's only error is an unknown ID, which the variant names.
+                Some(id) => runner.session_mut().branch(id).map_err(|_| SessionError::EntryNotFound),
+                None => {
+                    runner.session_mut().reset_leaf();
+                    Ok(())
+                }
+            },
+        }
+    }
+
+    /// Read the session while idle, for example to list its entries or find the current
+    /// position. `f` runs with the conversation leased, as a prompt does: other calls get
+    /// Busy until it returns, and no lock is held while host code runs. A run returns Busy.
+    pub fn inspect<T>(&self, f: impl FnOnce(&SessionStore) -> T) -> Result<T, SessionError> {
+        let mut active = self.acquire(CancellationToken::new())?;
+        Ok(f(active.runner().session()))
     }
 
     fn acquire(&self, cancel: CancellationToken) -> Result<ActiveRun<'_>, SessionError> {

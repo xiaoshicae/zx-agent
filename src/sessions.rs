@@ -93,12 +93,21 @@ pub(crate) struct Forked {
     pub(crate) entries: usize,
 }
 
-/// Copy the branch of the session file `source` that ends at its last record into a new file
-/// in `dir`, started in `cwd` with `model` (pi: `createBranchedSession`). The source is read
-/// as a snapshot, without its lock, so a session that is open elsewhere, or in this chat,
-/// can be forked; it is not changed. A copy that fails part way leaves the new file as far as
-/// it got, and the error names it.
-pub(crate) async fn fork(source: &Path, dir: &Path, cwd: &Path, model: &str) -> Result<Forked> {
+/// Which branch of the source [`fork`] copies.
+pub(crate) enum Branch<'a> {
+    /// The branch that ends at the source's last record: where the file was last written.
+    Last,
+    /// The branch that ends at this entry, or nothing for `None`: the position of a session
+    /// that is open in this process, which `/branch` moves without writing.
+    At(Option<&'a str>),
+}
+
+/// Copy a branch of the session file `source` into a new file in `dir`, started in `cwd`
+/// with `model` (pi: `createBranchedSession`). The source is read as a snapshot, without its
+/// lock, so a session that is open elsewhere, or in this chat, can be forked; it is not
+/// changed. A copy that fails part way leaves the new file as far as it got, and the error
+/// names it.
+pub(crate) async fn fork(source: &Path, dir: &Path, cwd: &Path, model: &str, branch: Branch<'_>) -> Result<Forked> {
     let source = source
         .canonicalize()
         .with_context(|| format!("cannot fork {}", source.display()))?;
@@ -110,7 +119,11 @@ pub(crate) async fn fork(source: &Path, dir: &Path, cwd: &Path, model: &str) -> 
     create_dir(dir)?;
     let path = dir.join(file_name(&header));
     let mut forked = SessionStore::create(&path, header)?;
-    let entries = match source_store.leaf_id() {
+    let leaf = match branch {
+        Branch::Last => source_store.leaf_id(),
+        Branch::At(leaf) => leaf,
+    };
+    let entries = match leaf {
         Some(leaf) => forked
             .copy_branch(&source_store, leaf)
             .await
@@ -168,12 +181,18 @@ fn local_time(ms: u64) -> String {
 }
 
 fn preview(session: &SessionInfo) -> String {
-    let Some(prompt) = session.first_prompt.as_deref() else {
-        return "(no prompt)".to_string();
-    };
-    let line = prompt.lines().find(|line| !line.trim().is_empty()).unwrap_or("").trim();
+    match session.first_prompt.as_deref() {
+        Some(prompt) => preview_text(prompt),
+        None => "(no prompt)".to_string(),
+    }
+}
+
+/// The first non-empty line of `text`, at most [`PREVIEW_CHARS`] characters, with an
+/// ellipsis for what is left out and control characters made visible.
+pub(crate) fn preview_text(text: &str) -> String {
+    let line = text.lines().find(|line| !line.trim().is_empty()).unwrap_or("").trim();
     let mut shown: String = line.chars().take(PREVIEW_CHARS).collect();
-    if line.chars().count() > PREVIEW_CHARS || prompt.trim().lines().count() > 1 {
+    if line.chars().count() > PREVIEW_CHARS || text.trim().lines().count() > 1 {
         shown.push('…');
     }
     visible(&shown)

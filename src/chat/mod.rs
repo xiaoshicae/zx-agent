@@ -7,6 +7,7 @@ mod interaction;
 mod output;
 mod signals;
 mod term;
+mod tree;
 
 use std::ffi::OsStr;
 use std::io::IsTerminal;
@@ -40,6 +41,7 @@ use output::Output;
 pub(crate) use output::{progress_line, visible};
 use signals::{Interrupt, Signals};
 use term::Tone;
+use tree::Target;
 
 /// How often the status line is redrawn while a task runs.
 const TICK: Duration = Duration::from_secs(1);
@@ -236,7 +238,7 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
         (Storage::Directory(dir), _, Some(source)) => {
             let cwd = sessions::resolve_cwd(args.base.cwd.as_deref())?;
             let source = fork_source(dir, source).await?;
-            let forked = sessions::fork(&source, dir, &cwd, &model).await?;
+            let forked = sessions::fork(&source, dir, &cwd, &model, sessions::Branch::Last).await?;
             let notice = forked_line(&forked);
             (Some(forked.path), Some(notice))
         }
@@ -360,7 +362,7 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
                     Flow::Continue
                 }
             },
-            Command::Fork => match fork_current(&storage, &built.about, &model).await {
+            Command::Fork => match fork_current(&storage, &built.about, &model, &built.session).await {
                 Ok(forked) => {
                     output.line(Tone::Dim, &forked_line(&forked));
                     Flow::Resume(forked.path)
@@ -370,6 +372,14 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
                     Flow::Continue
                 }
             },
+            Command::Tree => {
+                show_tree(&output, &built.session);
+                Flow::Continue
+            }
+            Command::Branch(id) => {
+                switch_branch(&output, &built.session, &id);
+                Flow::Continue
+            }
             Command::Quit => Flow::Exit(EXIT_COMPLETED),
             Command::Help => {
                 help(&output);
@@ -482,12 +492,66 @@ async fn fork_source(dir: &Path, value: &str) -> Result<PathBuf> {
     Ok(session.path.clone())
 }
 
-/// /fork: copy the current session into a new file of the session directory.
-async fn fork_current(storage: &Storage, about: &About, model: &str) -> Result<sessions::Forked> {
+/// /fork: copy the current session, up to its current position, into a new file of the
+/// session directory.
+async fn fork_current(
+    storage: &Storage,
+    about: &About,
+    model: &str,
+    session: &AgentSession,
+) -> Result<sessions::Forked> {
     let (Some(dir), Some(current)) = (storage.dir(), about.session.as_deref()) else {
         anyhow::bail!("nothing to fork: the conversation is kept in memory");
     };
-    sessions::fork(current, dir, &about.cwd, model).await
+    // The position /branch moved is only in memory; the file's last record may be elsewhere.
+    let leaf = session.inspect(|store| store.leaf_id().map(str::to_string))?;
+    sessions::fork(current, dir, &about.cwd, model, sessions::Branch::At(leaf.as_deref())).await
+}
+
+/// /tree: the session tree, one line per message or summary.
+fn show_tree(output: &Output, session: &AgentSession) {
+    match session.inspect(tree::render) {
+        Ok(lines) => {
+            for line in lines {
+                output.line(Tone::Plain, &line);
+            }
+        }
+        Err(error) => output.line(Tone::Warn, &format!("[chat] cannot show the tree: {error}")),
+    }
+}
+
+/// /branch: continue after the entry named, or before the user's own message named.
+fn switch_branch(output: &Output, session: &AgentSession, id: &str) {
+    let found = session.inspect(|store| (tree::resolve(store, id), store.leaf_id().map(str::to_string)));
+    let (target, leaf) = match found {
+        Ok((Ok(target), leaf)) => (target, leaf),
+        Ok((Err(message), _)) => {
+            output.line(Tone::Warn, &format!("[chat] {message}"));
+            return;
+        }
+        Err(error) => {
+            output.line(Tone::Warn, &format!("[chat] cannot switch branch: {error}"));
+            return;
+        }
+    };
+    let (next, line) = match target {
+        Target::After { id, line } => (
+            Some(id.clone()),
+            format!("[chat] continuing after {id} ({line}); the next message starts a new branch there"),
+        ),
+        Target::Before { parent, id, prompt } => (
+            parent,
+            format!("[chat] continuing before your message {id} ({prompt}); the next message takes its place"),
+        ),
+    };
+    if next == leaf {
+        output.line(Tone::Dim, "[chat] already at that point");
+        return;
+    }
+    match session.branch(next.as_deref()) {
+        Ok(()) => output.line(Tone::Dim, &line),
+        Err(error) => output.line(Tone::Warn, &format!("[chat] cannot switch branch: {error}")),
+    }
 }
 
 fn forked_line(forked: &sessions::Forked) -> String {
@@ -749,6 +813,8 @@ async fn drive_turn(session: &AgentSession, operation: Operation, io: &mut TurnI
                     Command::Sessions => io.output.line(Tone::Warn, "[chat] wait for the current task or cancel it before /sessions"),
                     Command::Resume(_) => io.output.line(Tone::Warn, "[chat] wait for the current task or cancel it before /resume"),
                     Command::Fork => io.output.line(Tone::Warn, "[chat] wait for the current task or cancel it before /fork"),
+                    Command::Tree => io.output.line(Tone::Warn, "[chat] wait for the current task or cancel it before /tree"),
+                    Command::Branch(_) => io.output.line(Tone::Warn, "[chat] wait for the current task or cancel it before /branch"),
                     Command::Help => help(io.output),
                     Command::Compact => io.output.line(Tone::Warn, "[chat] session is busy; wait for the current operation or cancel it before /compact"),
                     Command::Invalid(message) => io.output.line(Tone::Warn, &format!("[chat] {}", visible(&message))),
@@ -933,6 +999,8 @@ fn help(output: &Output) {
         "/sessions             list the sessions in the session directory, most recent first",
         "/resume <ID>          switch to the session whose ID starts with <ID>",
         "/fork                 continue in a copy of this session; the original stays as it is",
+        "/tree                 show the session tree: every message on every branch, the current one marked",
+        "/branch <ID>          continue after the entry with that ID, or before your own message with that ID",
         "/quit                 exit chat; Ctrl+D while idle does the same",
         "Ctrl+C                cancel the current task or approval; keep the conversation",
         "                      twice within 2 seconds while idle: exit",

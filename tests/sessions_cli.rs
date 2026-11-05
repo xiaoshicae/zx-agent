@@ -461,3 +461,153 @@ async fn slash_fork_needs_a_session_file() {
     assert!(stderr(&output).contains("[chat] nothing to fork: the conversation is kept in memory"));
     assert!(!dirs.home.path().join(".zx-agent").exists());
 }
+
+/// A session file with two exchanges and known IDs: `<id>-1` user `first`, `<id>-2`
+/// assistant `one`, `<id>-3` user `second`, `<id>-4` assistant `two`.
+fn seed_tree(dir: &Path, id: &str, cwd: &Path) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    let header = json!({"type": "session", "version": 5, "id": id, "timestamp": 999,
+        "cwd": cwd.display().to_string(), "model": "mock"});
+    let mut lines = vec![header.to_string()];
+    let mut parent = serde_json::Value::Null;
+    for (n, (role, text)) in [
+        ("user", "first"),
+        ("assistant", "one"),
+        ("user", "second"),
+        ("assistant", "two"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let entry_id = format!("{id}-{}", n + 1);
+        let at = 1_000 + n as u64;
+        let message = if role == "user" {
+            json!({"role": "user", "content": text, "timestamp": at})
+        } else {
+            json!({"role": "assistant", "content": [{"type": "text", "text": text}], "provider": "mock",
+                "model": "mock", "usage": {"input": 1, "output": 1, "cacheRead": 0, "totalTokens": 2},
+                "stopReason": "stop", "timestamp": at})
+        };
+        lines.push(
+            json!({"type": "message", "id": entry_id, "parentId": parent, "timestamp": at, "message": message})
+                .to_string(),
+        );
+        parent = json!(entry_id);
+    }
+    let path = dir.join(format!("{id}.jsonl"));
+    std::fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+    path
+}
+
+#[tokio::test]
+async fn tree_lists_the_branches_and_branch_continues_after_an_entry() {
+    let dirs = Dirs::new();
+    seed_tree(&dirs.session_dir(), "cccc0003", &dirs.cwd());
+    let server = MockServer::start(vec![Reply::text("three")]).await;
+
+    let output = dirs
+        .chat(
+            &server,
+            &["--resume", "cccc"],
+            "/tree\n/branch cccc0003-2\nthird\n/tree\n/quit\n",
+        )
+        .await;
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let err = stderr(&output);
+    // Before the switch: one branch, every entry on it, the position at the end.
+    assert!(err.contains("[tree] 4 entries on 1 branch(es);"), "{err}");
+    assert!(err.contains("* cccc0003-1"), "{err}");
+    assert!(err.contains("> cccc0003-4"), "{err}");
+    assert!(err.contains("user       first"), "{err}");
+    assert!(err.contains("assistant  two"), "{err}");
+    assert!(
+        err.contains("[chat] continuing after cccc0003-2 (assistant one); the next message starts a new branch there"),
+        "{err}"
+    );
+    // The model sees the branch, not the exchange left behind.
+    assert_eq!(sent(&server, 0), ["first", "third"]);
+    // After the switch: the current branch reads straight down, the other is indented.
+    assert!(err.contains("    (branch after cccc0003-2)\n      cccc0003-3"), "{err}");
+    assert!(err.contains("assistant  three"), "{err}");
+    let files = files(&dirs.session_dir());
+    assert_eq!(files.len(), 1);
+    assert_eq!(prompts(&files[0]), ["first", "third"]);
+}
+
+#[tokio::test]
+async fn branch_before_a_user_message_lets_the_next_message_take_its_place() {
+    let dirs = Dirs::new();
+    seed_tree(&dirs.session_dir(), "cccc0003", &dirs.cwd());
+    let server = MockServer::start(vec![Reply::text("three")]).await;
+
+    let output = dirs
+        .chat(&server, &["--resume", "cccc"], "/branch cccc0003-3\nthird\n/quit\n")
+        .await;
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stderr(&output)
+            .contains("[chat] continuing before your message cccc0003-3 (second); the next message takes its place"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(sent(&server, 0), ["first", "third"]);
+}
+
+#[tokio::test]
+async fn fork_copies_the_branch_up_to_the_current_position() {
+    let dirs = Dirs::new();
+    let original = seed_tree(&dirs.session_dir(), "cccc0003", &dirs.cwd());
+    let server = MockServer::start(vec![Reply::text("three")]).await;
+
+    let output = dirs
+        .chat(
+            &server,
+            &["--resume", "cccc"],
+            "/branch cccc0003-2\n/fork\nthird\n/quit\n",
+        )
+        .await;
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("[chat] forked session cccc0003 (2 record(s)) into"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(sent(&server, 0), ["first", "third"]);
+    let files = files(&dirs.session_dir());
+    assert_eq!(files.len(), 2);
+    let fork = files.iter().find(|path| **path != original).unwrap();
+    assert_eq!(prompts(fork), ["first", "third"]);
+    assert_eq!(prompts(&original), ["first", "second"], "the original is unchanged");
+}
+
+#[tokio::test]
+async fn branch_needs_an_id_that_names_one_shown_entry() {
+    let dirs = Dirs::new();
+    seed_tree(&dirs.session_dir(), "cccc0003", &dirs.cwd());
+    let server = MockServer::start(vec![]).await;
+
+    let output = dirs
+        .chat(
+            &server,
+            &["--resume", "cccc"],
+            "/branch zz\n/branch cccc0003\n/branch cccc0003-4\n/branch\n/quit\n",
+        )
+        .await;
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.contains("[chat] no entry in /tree starts with zz"), "{err}");
+    assert!(
+        err.contains("[chat] cccc0003 names more than one entry; /tree shows the full IDs"),
+        "{err}"
+    );
+    assert!(err.contains("[chat] already at that point"), "{err}");
+    assert!(
+        err.contains("[chat] give an entry ID: /branch <ID>; /tree lists them"),
+        "{err}"
+    );
+    assert!(server.requests().is_empty());
+}
