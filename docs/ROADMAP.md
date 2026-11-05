@@ -51,6 +51,7 @@ G1–G4 是验收目标。当前会话日志可重建对话与提示词；G3 所
 | D9 | HTTP 客户端与 TLS | reqwest 升到 0.13（`json`、`stream`、`rustls`）。rustls 只用 aws-lc-rs 一个加密后端，HTTPS 的根证书改用系统信任库。理由：rmcp 只支持 reqwest 0.13，与 0.12 并存时 rustls 同时启用两个后端，`wss://` 连接会 panic（评审稿缺口 ①）；项目还没有使用者，用户授权按最合理的方式处理 | 2026-11-01 | 已完成（PR #36） |
 | D10 | 通用，不为场景定制 | zx-agent 是通用 Agent：代码只定义接口与通用机制，外部来适配。某个环境、平台或厂商才有的知识（如 kubectl 的只读选项、Kubernetes 的 token 路径、IM 文案的语言）放在 profile、部署清单或配置里；告警等外部系统由外部适配器调用 `run`、SDK 或 IM 接入，zx-agent 不解析它们的私有格式（如 Alertmanager）。provider 对协议方言的处理显式开启。同日决定：P9 只再做更多 provider（如 Anthropic），`--output-schema`、异步审批、OS 级沙箱不做，“由 webhook 或告警触发运行”取消；P8 `acp` 不做 | 2026-11-02 | 用户决定；已有代码中的定制已整理（PR #54），见 P9 的“通用化整理” |
 | D11 | 容器执行的权限 | 沙箱内给 agent 最大权限，限制只放在沙箱的外墙上：工作目录（含 `.git`）与根文件系统可写，网络默认开启，审批由 profile 决定、可以一律放行；命令默认以映射的宿主机用户运行，仍不允许 root（root 以后按需做成显式选项，并同时改造进程清理）。外墙不变：不加 `--privileged`、不挂 `docker.sock`、不用宿主机的网络与 PID 命名空间、API key 与环境变量不进容器、会话文件在工作目录之外。原严格模式（只读、无网络）保留为可选配置。取代 P6 中“工作目录只读挂载、网络固定为 `none`”的约定与状态表中的“容器联网已取消”；D5（默认在本机执行）不变。理由与各家做法见 P10 | 2026-11-05 | 用户决定；已完成（P10 ②，PR #57） |
+| D12 | chat 的会话默认落盘 | 不给 `--session` 时，chat 把每次对话存成 `~/.zx-agent/sessions/--<工作目录>--/<UTC 时间>_<会话 ID>.jsonl`（目录名的写法与 pi 相同；新建的目录 0700、文件 0600），`--session-dir` 换目录，`--no-session` 只保存在内存。`run` 不变：只在给出 `--session` 时写文件。取代此前 chat 默认只保存在内存的行为。理由：列出会话、续接最近一次、fork 都需要一个已知的位置，与 pi 一致 | 2026-11-05 | 用户决定（另一选项是只在给出 `--session-dir` 时落盘）；P10 ⑥a 落实 |
 
 D2 之外的新依赖、依赖升级，仍需先征得同意。
 
@@ -533,7 +534,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P7 | 插件与 MCP | 已完成（PR #41）：范围按 D8 收窄，评审稿已合入（PR #36）并经用户确认；模块 A（Extension 接口，PR #38）、B1（MCP 客户端库，PR #40）、B2（CLI 接入与文档，PR #41）已完成；真实 MCP 服务器的验收待选定服务器；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已完成（PR #23），A2–A8（扩展 API）已完成（PR #25） |
 | P8 | 嵌入协议 `acp` | 不做（2026-11-02 用户决定，D10） |
 | P9 | 可选增强 | 进行中：token 预算（PR #47）、OpenTelemetry 追踪（PR #49）、crate 拆分（PR #52）、通用化整理（PR #54）、chat 交互体验（2026-11-05，见下文）已完成；剩更多 provider（如 Anthropic）。其余各项按 D10 不做或取消 |
-| P10 | 与 pi 的能力对齐 | 进行中：2026-11-05 对照 pi 列出 14 项缺口，见下文 P10；① 上下文超长后自动恢复已完成（PR #56）；② 容器沙箱已完成（PR #57）；③ edit 与 write 工具已完成（PR #58）；④ grep、find、ls 已完成（PR #59）；⑤ 运行中可调整的配置已完成：⑤a 推理强度（PR #60）、⑤b 续跑（PR #61）、⑤c 请求前替换模型与推理强度的钩子（PR #65） |
+| P10 | 与 pi 的能力对齐 | 进行中：2026-11-05 对照 pi 列出 14 项缺口，见下文 P10；① 上下文超长后自动恢复已完成（PR #56）；② 容器沙箱已完成（PR #57）；③ edit 与 write 工具已完成（PR #58）；④ grep、find、ls 已完成（PR #59）；⑤ 运行中可调整的配置已完成：⑤a 推理强度（PR #60）、⑤b 续跑（PR #61）、⑤c 请求前替换模型与推理强度的钩子（PR #65）；⑥a 会话目录与续接已完成（PR #67） |
 
 ### P0 场景默认值移出内核
 
@@ -1377,7 +1378,7 @@ chat 交互体验第三批（2026-11-05，基于合并 PR #65 之后的 `829afc8
 - [x] **③ edit 与 write 工具**（高；已完成（PR #58），2026-11-05，见下方实施记录）。pi 默认工具集是 read、bash、edit、write（`packages/coding-agent/src/core/tools/edit.ts`、`write.ts`）：一次调用可做多处不重叠的精确替换，`details` 带 diff，同一文件的写入经 `file-mutation-queue.ts` 串行。zx 只有 `bash`、`read_file`（`crates/zx-tools/src/tools/mod.rs:24`），`Executor` 只有 `run` 与 `read_file`（`crates/zx-core/src/executor/mod.rs:83,88`）。做法：`Executor` 增加写文件；两个工具声明 `SideEffects`（不变量 10），`details` 带 diff 供审批与审计；同一文件的写入串行，不同文件仍可并行；规则策略可以用 `askTools` 管到它们。
 - [x] **④ grep、find、ls 只读工具**（中；已完成（PR #59），2026-11-05，见下方实施记录）。pi 用 ripgrep 与 fd，遵守 `.gitignore`，结果有上限（`grep.ts`、`find.ts`、`ls.ts`）。zx 只能经 bash 与命令白名单。声明为 `ReadOnly`，不必依赖白名单即可免审批。待定：经 `Executor` 调外部程序（不加依赖，容器中同样可用）还是用 Rust 实现（需新增 `ignore` 等依赖，红线 5）。
 - [x] **⑤ 运行中可调整的配置**（中高；已完成（⑤a PR #60、⑤b PR #61、⑤c PR #65），2026-11-05，见下方实施记录）。推理强度作为一等配置并可在空闲时修改、变化写入会话（目前只能用 `--request-field` 静态传）；每次请求前可替换模型与推理强度的钩子（pi 的 `prepareRequest`、`prepareNextTurn`，`packages/agent/src/agent-loop.ts:195,228`；zx 的 `set_model` 只能空闲时调用，`crates/zx-core/src/agent_session.rs:222`）；不加新输入的续跑（pi 的 `continue()`；`Runner::run` 必须带提示词）。推理强度的写法遵守 D10：各 provider 显式映射。
-- [ ] **⑥ 会话导航**（中）。列出会话、续接最近一次、fork 成新会话、在分支间切换（`packages/coding-agent/src/core/session-manager.ts`）。zx 只有 `--session <path>`；`SessionStore::branch`（`crates/zx-core/src/session.rs:486`）只在测试中调用。补 SDK 接口与 CLI，`chat` 加对应命令。
+- [ ] **⑥ 会话导航**（中；⑥a 会话目录与续接已完成（PR #67），2026-11-05；⑥b fork、⑥c 会话内切换分支待做）。列出会话、续接最近一次、fork 成新会话、在分支间切换（`packages/coding-agent/src/core/session-manager.ts`）。zx 只有 `--session <path>`；`SessionStore::branch`（`crates/zx-core/src/session.rs:486`）只在测试中调用。补 SDK 接口与 CLI，`chat` 加对应命令。
 - [ ] **⑦ 扩展能力**（中高，嵌入）。pi 的扩展可写自定义条目（`appendEntry`）、注入非用户消息（`sendMessage`）、运行中启停工具（`setActiveTools`）、注册命令（`registerCommand`）（`packages/coding-agent/src/core/extensions/types.ts`）。zx 的条目只有 9 种内部类型（`crates/zx-core/src/session.rs:142-151`），工具在构建时固定。自定义消息与“会话投影是上下文的唯一来源”（不变量 6）如何共存，先出方案再实施。
 - [ ] **⑧ 模型层的元数据与计量**（中）。在配置中写模型的上下文窗口、单价与输入类型（不内置厂商模型表，D10），用来按 token 设摘要阈值（现为字节）并计算成本；用量增加 cacheWrite 与推理 token；会话记录应答方返回的模型名与响应 ID；按会话的 prompt cache key；自定义请求头；每次请求动态取 API key；`Retry-After` 支持 HTTP 日期与毫秒写法，退避加抖动。
 - [ ] **⑨ 消息队列**（低中）。队列模式 one-at-a-time（pi 默认，`packages/agent/src/types.ts:55`）；zx 一次取完（`crates/zx-core/src/agent/agent_loop/context.rs:128`）。队列消息目前只能是纯文本。
@@ -1401,6 +1402,23 @@ chat 交互体验第三批（2026-11-05，基于合并 PR #65 之后的 `829afc8
 - 测试：新增 12 项：`crates/zx-ai/src/retry.rs` 单元测试 3 项（按状态与错误码、按通用措辞、限流与其他失败不算）；`tests/overflow_recovery.rs` 7 项（成功恢复：请求、投影、事件顺序与尝试编号；未开启自动摘要时不变；恢复后紧接着又过长；回答成功后可再次恢复；摘要失败暂停；预算用完；运行超时）；`tests/openai_mock.rs` 1 项（真实 HTTP 下带错误码的 400）；`tests/request_audit.rs` 1 项（恢复前后的三个请求都能从会话文件逐个还原）。
 - 反向验证：分别去掉运行层的恢复分支、“恢复后紧接着又过长”的拒绝、“回答成功后可再次恢复”的重置、摘要失败时的暂停、按错误码的识别，每次都有对应测试失败（依次 6、1、1、1、1 项），修改已还原。按错误码识别被去掉时，HTTP 端到端测试仍通过：错误文本包含响应体，其中的错误码也被通用措辞 `context_length` 命中，这条路径只由单元测试单独覆盖。
 - 本机 macOS 验证：stable 下 828 项通过、7 项付费测试跳过（基线 816 项，PR #55 的实测）；fmt、clippy、严格 Rustdoc 与 Rust 1.88.0 的全目标检查通过；Rust 1.88.0 下没有运行测试。自查脚本在改动的文件中只列出原有的 1 处（`src/chat/output.rs` 的 `let _ =`）。未新增依赖。没有对真实模型服务验证超长时的错误格式。
+
+⑥ 分三步，各一个 PR：⑥a 会话目录、列出与续接；⑥b fork 成新会话（`--fork`、`/fork`，头部记下来源会话）；⑥c 会话内切换分支（`AgentSession` 的分支接口，chat 的 `/tree` 与 `/branch`）。会话目录的默认位置经用户决定（D12）。
+
+⑥a 实施记录（2026-11-05，PR #67，基于 PR #65 合并后的 `829afc8`）：
+
+| 环节 | 做法 |
+|---|---|
+| 默认位置 | 按 D12：chat 不给 `--session` 时在 `~/.zx-agent/sessions/--<工作目录>--/` 新建 `<UTC 时间>_<会话 ID>.jsonl`，目录名与文件名的写法沿用 pi（`getDefaultSessionDirPath`、`createBranchedSession`）；`--session-dir` 换目录，`--no-session` 只保存在内存；`/new` 在会话目录中新建文件，用 `--session` 时仍在原文件旁边新建 |
+| 续接 | `chat --resume`：会话目录中本工作目录（按头部的 `cwd`）最近活动的会话，没有就新建并提示；`--resume <ID 前缀>`：前缀须恰好对应一个会话，否则以退出码 2 结束且不建文件。chat 中 `/resume <ID 前缀>` 空闲时切换，切到当前会话时提示已在其中 |
+| 列出 | `zx-agent sessions`（`--session-dir`、`--cwd`）与 chat 的 `/sessions`：每个会话一行，短 ID、最近活动的本地时间、上下文中的消息数、第一条提示词（首个非空行，至多 60 个字符），其他工作目录的会话注明 `cwd`；`/sessions` 用 `*` 标出当前会话。读不了的 `.jsonl` 文件另行报告，不修改 |
+| SDK | `session::list_sessions(dir)`：以只读快照（`SessionStore::read`，不加锁）读取目录中的 `*.jsonl`，按最近活动排序；`SessionList::latest_in(cwd)`、`SessionList::find(前缀)`。文件名与默认位置属于 CLI（`src/sessions.rs`），zx-core 不依赖 chrono |
+| 与 pi 的不同 | pi 的 `--continue` 续接最近一次、`--resume` 弹出选择列表、`--session` 也接受 ID；zx 的 `--continue` 已是“不加新输入的续跑”（⑤b），chat 是逐行 REPL，所以写成 `--resume [ID]` 加 `zx-agent sessions`。pi 的 agent 目录可由环境变量改，这里只有 `--session-dir` |
+
+- 测试：新增 16 项：`tests/sessions_cli.rs` 10 项（默认位置、文件名与 0700 / 0600 权限、每次对话一个文件；`--no-session` 不写文件；`--resume` 取本工作目录最近的会话且不新建文件；按 ID 前缀续接，前缀不唯一或无匹配时以退出码 2 结束且不建文件；没有可续的会话时新建；`--session-dir`；`zx-agent sessions` 的顺序、预览、其他工作目录与读不了的文件；空目录与不存在的目录且不创建目录；chat 的 `/sessions`、`/resume` 与切到当前会话；`/new` 在会话目录中新建），`session::directory` 单元测试 2 项（前缀唯一、按工作目录取最近），`src/sessions.rs` 单元测试 3 项（目录名、文件名、预览），CLI 解析 1 项（`--resume` 的两种写法与互斥的选项）。既有测试的调整：启动 chat 的测试构造器（`tests/chat_cli.rs`、`tests/mcp_cli.rs`、`tests/profiles_cli.rs`）把 `HOME` 设为工作目录下的 `.home`，真实 Docker 的 chat 测试加 `--no-session`，免得测试写进真实的家目录；断言未改。
+- 反向验证：分别让续接不按工作目录筛选、接受不唯一的前缀、按最旧排序、目录权限放宽为 0755、`/new` 在会话目录模式下不建文件，每次都有对应测试失败（各 1 至 2 项），修改已还原。
+- 本机 macOS 验证：stable 下 960 项通过、7 项付费测试跳过（基线 944 项，即 PR #65 合并后的实测）；fmt、clippy、严格 Rustdoc 与 Rust 1.88.0 的全目标检查通过；Rust 1.88.0 下没有运行测试。全部测试跑完后真实的 `~/.zx-agent` 仍不存在。自查脚本在改动的文件中没有新的命中。未新增依赖。
+- 未验证：家目录在工作目录之内（如在家目录中运行）又开启容器执行时，会话目录落在工作目录里，启动按既有检查报配置错误；这条路径没有专门的测试。
 
 ⑤ 分三步：⑤a 推理强度、⑤b 不加新输入的续跑、⑤c 每次请求前可替换模型与推理强度的钩子，各一个 PR。
 

@@ -14,6 +14,7 @@
 //! Version 5 adds incremental summaries, which carry an earlier summary's facts over.
 
 mod compaction;
+mod directory;
 mod file;
 mod log;
 mod recovery;
@@ -23,6 +24,7 @@ pub use compaction::{
     FormatUpgradeEntry, MergedSummary, SummaryFact, SummaryMode, SummaryRequest,
 };
 pub(crate) use compaction::{MAX_STATEMENTS, MAX_SUMMARY_BYTES, cite_only};
+pub use directory::{SessionInfo, SessionList, Unreadable, list_sessions};
 pub use log::{LoadedSession, LogRecord, SessionLog};
 pub use recovery::{InterruptedToolCall, StartRecord, ToolCallStartedEntry};
 pub use request::{RequestConfig, RequestConfigEntry, RequestSource, RequestStartedEntry};

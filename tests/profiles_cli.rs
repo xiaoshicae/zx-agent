@@ -29,6 +29,8 @@ fn command(server: &MockServer, dir: &Path, mode: &str, args: &[&str]) -> Comman
         ])
         .args(args)
         .current_dir(dir)
+        // chat keeps sessions under the home directory by default; never the real one.
+        .env("HOME", dir.join(".home"))
         .env("ZX_PROFILE_TEST_KEY", "sk-profile-key")
         .env_remove("ZX_MODEL")
         .env_remove("ZX_BASE_URL")
