@@ -72,8 +72,15 @@ pub(crate) enum Command {
 
 #[derive(Args)]
 pub(crate) struct RunArgs {
-    /// Task description. Use "-" to read it from stdin.
-    pub(crate) prompt: String,
+    /// Task description. Use "-" to read it from stdin. Omitted with --continue.
+    #[arg(required_unless_present = "continue_session", conflicts_with = "continue_session")]
+    pub(crate) prompt: Option<String>,
+
+    /// Continue the conversation in --session without new input: answer the input or tool
+    /// results it ends with, for example after a crash, or answer again after a failed or
+    /// cancelled answer. A session that ends with a finished answer exits with code 1.
+    #[arg(long = "continue", requires = "session")]
+    pub(crate) continue_session: bool,
 
     #[command(flatten)]
     pub(crate) base: BaseArgs,

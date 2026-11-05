@@ -477,6 +477,33 @@ async fn reasoning_command_changes_subsequent_requests() {
 }
 
 #[tokio::test]
+async fn continue_command_answers_again_after_a_failed_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![
+        Reply::Status(400, r#"{"error":{"message":"bad request"}}"#),
+        Reply::text("second try"),
+    ])
+    .await;
+    let output = run(
+        &server,
+        dir.path(),
+        &["--tools", ""],
+        "first\n/continue\n/continue\n/quit\n",
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(server.requests().len(), 2);
+    assert_eq!(users(&server, 1), ["first"]);
+    assert!(stdout(&output).contains("second try"), "{}", stdout(&output));
+    // The second /continue finds a finished answer and makes no request.
+    assert!(
+        stderr(&output).contains("ends with a finished answer"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[tokio::test]
 async fn new_command_starts_an_empty_conversation() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::text("one"), Reply::text("two")]).await;

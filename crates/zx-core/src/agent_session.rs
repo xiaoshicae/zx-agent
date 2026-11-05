@@ -111,6 +111,19 @@ impl AgentSession {
         Ok(report)
     }
 
+    /// Continue the conversation without new input; see [`Runner::continue_run`] for what is
+    /// answered. An overlap returns Busy.
+    pub async fn continue_run(&self) -> Result<RunReport, SessionError> {
+        self.continue_with_cancel(&CancellationToken::new()).await
+    }
+
+    /// Like continue_run, using a child of the caller's token, as prompt_with_cancel does.
+    pub async fn continue_with_cancel(&self, parent: &CancellationToken) -> Result<RunReport, SessionError> {
+        let cancel = parent.child_token();
+        let mut active = self.acquire(cancel.clone())?;
+        Ok(active.runner().continue_run(&cancel).await)
+    }
+
     /// Compact the retained conversation while holding the same exclusive lease as prompt.
     /// An overlap returns Busy; no eligible old prefix returns a no-op report.
     pub async fn compact(&self) -> Result<compaction::Report, SessionError> {

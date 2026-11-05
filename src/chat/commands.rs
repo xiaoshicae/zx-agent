@@ -9,6 +9,8 @@ pub(super) enum Command {
     /// server.
     Reasoning(Option<String>),
     Compact,
+    /// Continue without new input.
+    Continue,
     Quit,
     Help,
     Invalid(String),
@@ -29,6 +31,7 @@ pub(super) fn parse(line: String) -> Command {
         "/quit" if rest.is_empty() => Command::Quit,
         "/help" if rest.is_empty() => Command::Help,
         "/compact" if rest.is_empty() => Command::Compact,
+        "/continue" if rest.is_empty() => Command::Continue,
         "/model" => Command::Model((!rest.is_empty()).then(|| rest.to_string())),
         "/reasoning" => Command::Reasoning((!rest.is_empty()).then(|| rest.to_string())),
         _ => Command::Invalid(format!("unknown command or arguments: {name}; use /help")),
@@ -47,7 +50,13 @@ mod tests {
 
     #[test]
     fn slash_commands_validate_arguments_instead_of_forwarding_them_to_the_model() {
-        for invalid in ["/new extra", "/quit extra", "/compact extra", "/unknown"] {
+        for invalid in [
+            "/new extra",
+            "/quit extra",
+            "/compact extra",
+            "/continue extra",
+            "/unknown",
+        ] {
             assert!(matches!(parse(invalid.into()), Command::Invalid(_)), "{invalid}");
         }
         assert!(matches!(parse("/model next".into()), Command::Model(Some(model)) if model == "next"));
