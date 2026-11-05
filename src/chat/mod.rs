@@ -21,7 +21,7 @@ use tokio::time::MissedTickBehavior;
 use zx_agent::AgentSession;
 use zx_agent::agent::EventSink;
 use zx_agent::agent_session::{ModelRef, Subscription};
-use zx_agent::ai::Provider;
+use zx_agent::ai::{Message, Provider};
 use zx_agent::compaction;
 use zx_agent::interaction::Approval;
 use zx_agent::otel::Telemetry;
@@ -66,6 +66,15 @@ struct About {
     auto_approve: Vec<String>,
     cwd: PathBuf,
     session: Option<PathBuf>,
+    /// Set when the session file already held a conversation.
+    resumed: Option<Resumed>,
+}
+
+struct Resumed {
+    /// User and assistant messages in the model's context.
+    messages: usize,
+    /// When the last record was written.
+    last_activity_ms: Option<u64>,
 }
 
 struct Built {
@@ -129,6 +138,15 @@ async fn build(
         auto_approve: std::mem::take(&mut prepared.auto_approve_commands),
         cwd: prepared.config.spec.cwd.clone(),
         session: session_path,
+        resumed: (!prepared.store.entries().is_empty()).then(|| Resumed {
+            messages: prepared
+                .store
+                .messages()
+                .iter()
+                .filter(|message| matches!(message, Message::User { .. } | Message::Assistant(_)))
+                .count(),
+            last_activity_ms: prepared.store.entries().last().map(|entry| entry.timestamp()),
+        }),
     };
     let session = prepared.into_session(output.clone())?;
     let traced = settings.traces.clone().map(|sink| session.subscribe(sink));
@@ -165,7 +183,7 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
     };
     let (interaction, mut approvals) = TerminalInteraction::channel();
     let interaction = Arc::new(interaction);
-    let output = Arc::new(Output::new(args.output, args.deltas, args.debug));
+    let output = Arc::new(Output::new(args.output, args.deltas, args.debug, args.color));
     let mut model = args.base.model.clone();
     let mut built = build(
         &settings,
@@ -500,16 +518,19 @@ fn unread_input(session: &AgentSession, output: &Output) -> Vec<String> {
 
 fn show_approval(output: &Output, ticket: &Ticket) {
     let call = &ticket.request.call;
+    let style = output.style();
+    // The label is colored, the call itself is bold in the default color: it is what a
+    // person has to read.
     output.line(
-        Tone::Warn,
+        Tone::Plain,
         &format!(
-            "[approval {}] {}",
-            ticket.id,
-            output::describe_call(&call.name, &call.arguments)
+            "{} {}",
+            style.paint(Tone::Warn, &format!("[approval {}]", ticket.id)),
+            style.paint(Tone::Strong, &output::describe_call(&call.name, &call.arguments))
         ),
     );
-    if let Some(rest) = output::remaining_arguments(&call.arguments) {
-        output.line(Tone::Dim, &format!("  arguments: {rest}"));
+    for line in output::describe_arguments(&call.arguments) {
+        output.line(Tone::Plain, &format!("  {line}"));
     }
     output.line(Tone::Dim, &format!("  {}", visible(&ticket.request.reason)));
     output.line(Tone::Dim, APPROVAL_MENU);
@@ -558,6 +579,27 @@ fn banner(output: &Output, model: &str, about: &About) {
             visible(&about.cwd.display().to_string())
         ),
     );
+    if let Some(resumed) = &about.resumed {
+        let when = resumed
+            .last_activity_ms
+            // A timestamp beyond i64 cannot occur; without one the line just omits the time.
+            .and_then(|ms| i64::try_from(ms).ok())
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .map(|utc| {
+                format!(
+                    "; last activity {}",
+                    utc.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")
+                )
+            })
+            .unwrap_or_default();
+        output.line(
+            Tone::Dim,
+            &format!(
+                "[chat] resumed {} message(s) from the session file{when}",
+                resumed.messages
+            ),
+        );
+    }
     let approvals = if about.tools.iter().any(|tool| tool == BASH) {
         let asks = if about.auto_approve.is_empty() {
             "every bash command asks first".to_string()

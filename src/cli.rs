@@ -153,6 +153,18 @@ pub(crate) struct ChatArgs {
     /// In jsonl mode, also emit streaming message_update events.
     #[arg(long)]
     pub(crate) deltas: bool,
+
+    /// Color the text output on stderr. auto: on an interactive terminal unless NO_COLOR is
+    /// set or TERM is dumb. always: also when piped, e.g. into `less -R`.
+    #[arg(long, value_enum, default_value_t = ColorArg::Auto)]
+    pub(crate) color: ColorArg,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum ColorArg {
+    Auto,
+    Always,
+    Never,
 }
 
 #[derive(Args)]

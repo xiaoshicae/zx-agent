@@ -55,9 +55,9 @@ zx-agent chat --model "$ZX_MODEL" --session ./chat.jsonl
 
 直接输入问题即可开始下一轮。TTY 中运行时输入普通文本会作为 steering，在下一次模型请求前进入上下文；任务结束时还没被读到的 steering 作为下一轮提问发送（在提示符后回显），按 Ctrl+C 取消任务时则丢弃并提示。TTY 中一次粘贴的多行作为一条消息发送：读完一行后若还有整行在排队，就并入同一条消息；以 `/` 开头的命令始终只占一行；最后一行要按回车才算到达；合并后的消息同样不超过 1 MiB，放不下的行开始下一条消息（非 Unix 平台不合并）。通过管道输入脚本时逐轮、逐行消费，避免后面的命令提前打断任务。单行输入最多 1 MiB（含行尾）；超限或无效 UTF-8 的行会被整行丢弃并提示，对话和当前任务继续，不把截断片段发送给模型。
 
-文本模式下 stdout 只有模型的回答（stdout 是终端时回答前后各空一行），其余都在 stderr：启动时两行显示模型、profile、会话文件、工作目录、工具、自动放行的命令和权限范围；模型沉默超过 1 秒后显示一行每秒刷新的状态（`⠙ waiting for the model · 3s`，收到推理增量后改为 `thinking`，工具执行中为 `⠙ bash: <命令> · 2s`），活动结束后留下一行耗时（`· thought for 2.3s`），不到 1 秒的等待不留痕迹，状态行不擦除正在输入的回显；每个工具调用结束后一行 `[tool] bash: <命令> -> ok 12ms`（bash 显示命令，read_file 显示路径，其余显示参数 JSON，超过 80 字符截断），下面缩进显示结果的前 3 行和剩余行数，自动放行的命令同样显示；每轮结束一行 `[turn] 3 requests · 30 in · 15 out · 4.4s`（有重试或缓存命中时一并显示）。状态行只画在交互终端上，`--debug`、`TERM=dumb` 或 stderr 重定向时不画。
+文本模式下 stdout 只有模型的回答（stdout 是终端时回答前后各空一行），其余都在 stderr：启动时两行显示模型、profile、会话文件、工作目录、工具、自动放行的命令和权限范围；模型沉默超过 1 秒后显示一行每秒刷新的状态（`⠙ waiting for the model · 3s`，收到推理增量后改为 `thinking`，工具执行中为 `⠙ bash: <命令> · 2s`），活动结束后留下一行耗时（`· thought for 2.3s`），不到 1 秒的等待不留痕迹，状态行不擦除正在输入的回显；每个工具调用结束后一行 `[tool] bash: <命令> -> ok 12ms`（bash 显示命令，读写文件的工具显示路径，其余显示参数 JSON，超过 80 字符截断），下面缩进显示结果的前 3 行和剩余行数，自动放行的命令同样显示；结果的 `details` 带 `patch` 时（`edit_file`）改为显示补丁的前 20 行，增加的行绿色、删除的行红色；每轮结束一行 `[turn] 3 requests · 30 in · 15 out · 4.4s`（有重试或缓存命中时一并显示）。状态行只画在交互终端上，`--debug`、`TERM=dumb` 或 stderr 重定向时不画；宽度随终端（Unix 上每次绘制前查询），查不到时按 78 列。带 `--session` 打开已有的会话文件时，启动行后多一行 `[chat] resumed N message(s) from the session file; last activity <本地时间>`。
 
-上限取自所选 profile，内置的 assistant 每轮不限轮次、不限总时间、不自动续写；可用 `--max-model-requests` 和 `--timeout-secs` 设限。连接、工具、会话和输出选项与 `run` 共用；`chat --help` 列出实际支持项。`--output jsonl` 为每轮发送一个 `run_end`，`--deltas` 可包含增量。 文本模式可加 `--debug`，在 stderr 按时间线显示本地时间、请求与轮次、策略、审批、工具参数和过滤后的结果、重试、上下文编辑、压缩及用量；模型回复仍输出到 stdout。请求耗时从请求事件到记录响应事件，包含中间处理时间。调试信息可能含敏感内容，应谨慎保存；JSONL 模式不受此选项影响。事件不包含完整请求上下文，完整记录以会话日志为准。终端上按用途着色：提示符加粗，进度与状态行暗色，审批黄色，错误红色，`--debug` 的时间线按信息、警告、错误着色；设置 `NO_COLOR` 可关闭颜色，重定向时不会输出颜色码。
+上限取自所选 profile，内置的 assistant 每轮不限轮次、不限总时间、不自动续写；可用 `--max-model-requests` 和 `--timeout-secs` 设限。连接、工具、会话和输出选项与 `run` 共用；`chat --help` 列出实际支持项。`--output jsonl` 为每轮发送一个 `run_end`，`--deltas` 可包含增量。 文本模式可加 `--debug`，在 stderr 按时间线显示本地时间、请求与轮次、策略、审批、工具参数和过滤后的结果、重试、上下文编辑、压缩及用量；模型回复仍输出到 stdout。请求耗时从请求事件到记录响应事件，包含中间处理时间。调试信息可能含敏感内容，应谨慎保存；JSONL 模式不受此选项影响。事件不包含完整请求上下文，完整记录以会话日志为准。终端上按用途着色：提示符加粗，进度与状态行暗色，审批的标签加粗黄色而调用本身加粗默认色，工具结果的 `ok` 绿色、`error` 红色，`--debug` 的时间线按信息、警告、错误着色；默认只在交互终端上着色，设置 `NO_COLOR` 或 `TERM=dumb` 时不着色，`--color always` 在重定向时也保留颜色（如 `2>&1 | less -R`），`--color never` 关闭。
 
 | 输入 | 行为 |
 |---|---|
@@ -70,7 +70,7 @@ zx-agent chat --model "$ZX_MODEL" --session ./chat.jsonl
 | Ctrl+C | 取消当前任务或审批，继续保留会话；空闲时保持会话 |
 | EOF（Ctrl+D）、SIGTERM | EOF 结束会话，管道中的正常任务先完成；待审批时 EOF 拒绝并取消。SIGTERM 取消并退出 |
 
-chat 中的 bash 调用先经过原命令策略，再显示工具名、完整参数（bash 显示命令，另有参数时单独列出）和理由，等待审批；工作目录与权限范围在启动时显示一次。内置 assistant 的 `edit_file` 与 `write_file` 同样要审批；read_file 仍按原读取权限执行。profile 列出的只读命令不经审批直接执行（内置 assistant 为 `grep`、`head`、`tail`、`wc`、`jq`；Kubernetes 部署的 profile 另加只读的 kubectl 命令）；带 shell 语法、URL、profile 排除的字词（assistant 为 `secret`）或 profile 未列出的选项的命令仍要审批，见[安全模型](#安全模型)。待审批时输入菜单编号并按 Enter，`y`、`yes` 等同 1，`n`、`no` 等同 3，不区分大小写：
+chat 中的 bash 调用先经过原命令策略，再显示工具名、完整参数和理由，等待审批：bash 显示命令，其余参数逐项列出，多行或较长的字符串按行缩进显示并注明行数（一段最多显示 60 行，其余只计数并写明未显示），数组与对象按路径展开（如 `edits[0].oldText`），不做 JSON 转义；工作目录与权限范围在启动时显示一次。内置 assistant 的 `edit_file` 与 `write_file` 同样要审批；read_file 仍按原读取权限执行。profile 列出的只读命令不经审批直接执行（内置 assistant 为 `grep`、`head`、`tail`、`wc`、`jq`；Kubernetes 部署的 profile 另加只读的 kubectl 命令）；带 shell 语法、URL、profile 排除的字词（assistant 为 `secret`）或 profile 未列出的选项的命令仍要审批，见[安全模型](#安全模型)。待审批时输入菜单编号并按 Enter，`y`、`yes` 等同 1，`n`、`no` 等同 3，不区分大小写：
 
 ```text
 [approval 1] bash: ls -la
@@ -244,6 +244,7 @@ zx-agent run --base-url https://api.deepseek.com --model deepseek-flash \
 | `--timeout-secs` | profile：`run`（unattended）为 900，`chat`（assistant）为 0 | 整次运行的时间上限，0 表示不限制；`chat` 中为每轮上限 |
 | `--token-budget` | profile：内置 profile 都不设 | 本次运行所有模型请求的输入加输出 token 上限，以服务返回的用量为准，摘要请求、失败的尝试与缓存命中的输入都计入。每次请求之前检查，所以最后一次请求可能让总量超出预算；`run` 以退出码 7 结束。0 表示不限制；`chat` 与 `serve` 中为每轮上限。与 `--max-tokens`（每次回复的输出上限）不同 |
 | `--approval-timeout-secs` | 120 | 仅 `chat`：审批请求等待菜单选择或讨论输入的秒数，至少为 1。超时按拒绝处理，任务继续，REPL 立即提示该请求已过期 |
+| `--color` | auto | 仅 `chat`：stderr 文本输出的着色。auto 在交互终端上着色，设置了 `NO_COLOR` 或 `TERM=dumb` 时不着色；always 在重定向时也保留颜色；never 关闭。不影响状态行是否绘制 |
 | `--tool-timeout-secs` | 120 | bash 命令的默认超时，至少为 1。模型可以通过工具参数 `timeout_secs` 为单条命令申请更长时间，上限为本参数与 600 秒中较大的一个；整次运行仍受 `--timeout-secs` 限制 |
 | `--idle-timeout-secs` | 120 | 等待响应头，或两段流数据之间的最长等待时间，至少为 1 |
 | `--max-retries` | 3 | 遇到临时性错误时的重试次数 |
@@ -722,7 +723,7 @@ cargo fmt --check
 | `tests/agent_session.rs` | 共享提问与 Busy、取消与 future 丢弃后复用、队列边界、订阅和退订、回调重入与 panic 隔离、模型切换、授权撤销、先写审计再多订阅分发、有界订阅按序接收、通道满时丢弃计数且不阻塞运行、会话释放后有界订阅结束 |
 | `tests/openai_mock.rs` | 本地假 HTTP 服务上的端到端测试：SSE、执行 bash、回传工具结果、认证头、HTTP 错误重试、空闲超时、中途取消后保留已输出内容、成功状态下的 JSON 正文（错误对象与整份回答） |
 | `tests/cli.rs` | 编译出的程序：退出码 0 到 6、jsonl 输出、从 stdin 读提示词、bash 读不到 API key、系统提示词的生成段落、`--system-updates inline` |
-| `tests/chat_cli.rs` | 多轮历史、审批与授权范围（含 `y`、`n`）、审批过期后下一行作为新提问、只读命令自动放行、工具行显示命令与结果预览、每轮的 `[turn]` 行、`/status`、取消只报告一次、重置、模型切换、EOF、信号、超时、控制字符显示、恢复中断会话的提示、钩子失败的提示；Unix PTY 验证运行中插话、取消后丢弃残留插话、取消重置和退出、粘贴的多行合为一条消息、等待时的状态行、回答前后的空行 |
+| `tests/chat_cli.rs` | 多轮历史、审批与授权范围（含 `y`、`n`；write_file 的内容按行显示，edit_file 逐项列出且结果显示补丁）、审批过期后下一行作为新提问、只读命令自动放行、工具行显示命令与结果预览、每轮的 `[turn]` 行、`/status`、`--color always` 在管道中保留颜色、续接会话的提示、取消只报告一次、重置、模型切换、EOF、信号、超时、控制字符显示、恢复中断会话的提示、钩子失败的提示；Unix PTY 验证运行中插话、取消后丢弃残留插话、取消重置和退出、粘贴的多行合为一条消息、等待时的状态行、回答前后的空行 |
 | `tests/profiles_cli.rs` | profile 覆盖、显式默认值、预算参数的 help 写明取自 profile、不可绕过的 deny、上下文范围与审计、上下文默认值与越界链接、`--system-prompt-file` 兼容、skill 懒加载与脱敏、配置错误（含 provider 参数）退出码且不建会话文件 |
 | `tests/run_cli.rs` | `run` 在 P0 之后新增的约定：进度与报告行转义终端控制字符；另一个 `run` 正在写的会话文件不能再被打开写入；JSONL 事件的信封；为零的超时在请求前被拒绝；stdout 已关闭时退出码仍由运行结果决定；token 预算的退出码 7、最后一次请求可超出预算、profile 设置预算与命令行的 0 关闭；只在设置了 OTLP 地址时导出追踪，导出内容不含回答；`--request-field` 到达模型并写入请求审计，写错时以退出码 2 结束且不建会话文件；`--fill-missing-reasoning` 默认关闭，开启时写入请求审计（原有 `run` 测试仍在 `tests/cli.rs`） |
 | `tests/otel.rs` | 一次真实运行导出一条 trace：每次尝试、回合、模型请求与工具调用各一个 span，用量与工具属性正确；`src/otel.rs` 的单元测试另覆盖嵌套与时间、只含元数据、运行结束时关闭未结束的 span、手动摘要自成一条 trace、队列满时丢弃并计数 |

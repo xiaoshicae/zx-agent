@@ -9,9 +9,11 @@ use std::time::{Duration, Instant};
 
 /// One frame per tick.
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-/// A status line keeps under the usual 80 columns: a wrapped line cannot be redrawn with a
-/// carriage return.
-const STATUS_MAX_CHARS: usize = 78;
+/// The widest status line when the terminal's width cannot be asked: under the usual 80
+/// columns, because a wrapped line cannot be redrawn with a carriage return.
+const STATUS_FALLBACK_CHARS: usize = 78;
+/// A status line keeps at least this much of its text, whatever the terminal says.
+const STATUS_MIN_CHARS: usize = 20;
 /// A status is drawn once it has lasted this long, so short waits leave no trace.
 const STATUS_DELAY: Duration = Duration::from_secs(1);
 
@@ -22,9 +24,13 @@ pub(super) enum Tone {
     Plain,
     /// Progress and housekeeping.
     Dim,
+    /// Something to read carefully, such as a call awaiting approval.
+    Strong,
+    /// A call that succeeded, or a line a patch adds.
+    Ok,
     /// Approvals and recoverable problems.
     Warn,
-    /// Failures.
+    /// Failures, or a line a patch removes.
     Error,
     /// The input prompt.
     Prompt,
@@ -36,9 +42,13 @@ pub(super) struct Style {
 }
 
 impl Style {
+    pub(super) fn new(color: bool) -> Self {
+        Self { color }
+    }
+
     /// Colors go only to an interactive terminal that is not `dumb`, and never when `NO_COLOR`
     /// is set to a non-empty value (<https://no-color.org>).
-    pub(super) fn detect(stderr_is_terminal: bool) -> Self {
+    pub(super) fn auto(stderr_is_terminal: bool) -> Self {
         let color = stderr_is_terminal
             && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty())
             && std::env::var_os("TERM").is_none_or(|value| value != "dumb");
@@ -53,7 +63,10 @@ impl Style {
         let code = match tone {
             Tone::Plain => return text.to_string(),
             Tone::Dim => "2",
-            Tone::Warn => "33",
+            Tone::Strong => "1",
+            Tone::Ok => "32",
+            // Bold as well: plain yellow is faint on a light background.
+            Tone::Warn => "1;33",
             Tone::Error => "31",
             Tone::Prompt => "1",
         };
@@ -268,7 +281,7 @@ impl Terminal {
             Phase::Model { thinking: true } => format!("{} thinking · {elapsed}s", SPINNER[status.frame]),
             Phase::Tool { label } => format!("{} {label} · {elapsed}s", SPINNER[status.frame]),
         };
-        let text = clip_chars(&text, STATUS_MAX_CHARS);
+        let text = clip_chars(&text, status_max_chars());
         let chars = text.chars().count();
         let drawn = status.drawn_chars;
         let painted = self.style.paint(Tone::Dim, &text);
@@ -297,7 +310,7 @@ impl Terminal {
             Phase::Model { thinking: true } => format!("· thought for {elapsed}"),
             Phase::Tool { label } => format!("· {label} · {elapsed}"),
         };
-        let text = clip_chars(&text, STATUS_MAX_CHARS);
+        let text = clip_chars(&text, status_max_chars());
         let painted = self.style.paint(Tone::Dim, &text);
         let drawn = status.drawn_chars;
         self.rewrite_row(&painted, text.chars().count(), drawn);
@@ -369,6 +382,33 @@ pub(super) fn elapsed_text(duration: Duration) -> String {
     }
 }
 
+/// One less than the terminal's width, so that the cursor never wraps to the next row.
+fn status_max_chars() -> usize {
+    terminal_columns().map_or(STATUS_FALLBACK_CHARS, |columns| {
+        columns.saturating_sub(1).max(STATUS_MIN_CHARS)
+    })
+}
+
+/// The width of the terminal on stderr; `None` when it is not one or cannot say.
+#[cfg(unix)]
+fn terminal_columns() -> Option<usize> {
+    let mut size = libc::winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: TIOCGWINSZ fills one `winsize`, which `size` provides for the duration of the
+    // call; stderr is a descriptor of this process, and a failure only returns -1.
+    let result = unsafe { libc::ioctl(libc::STDERR_FILENO, libc::TIOCGWINSZ, &mut size) };
+    (result == 0 && size.ws_col > 0).then(|| usize::from(size.ws_col))
+}
+
+#[cfg(not(unix))]
+fn terminal_columns() -> Option<usize> {
+    None
+}
+
 fn clip_chars(text: &str, max_chars: usize) -> String {
     match text.char_indices().nth(max_chars) {
         Some((index, _)) => text[..index].to_string(),
@@ -384,9 +424,16 @@ mod tests {
     fn colors_wrap_text_only_when_enabled() {
         let on = Style { color: true };
         let off = Style { color: false };
-        assert_eq!(on.paint(Tone::Warn, "x"), "\x1b[33mx\x1b[0m");
+        assert_eq!(on.paint(Tone::Warn, "x"), "\x1b[1;33mx\x1b[0m");
+        assert_eq!(on.paint(Tone::Ok, "x"), "\x1b[32mx\x1b[0m");
         assert_eq!(on.paint(Tone::Plain, "x"), "x");
         assert_eq!(off.paint(Tone::Warn, "x"), "x");
+    }
+
+    #[test]
+    fn the_status_width_falls_back_without_a_terminal_and_never_drops_below_the_minimum() {
+        // The test's stderr is not a terminal, so the fallback applies.
+        assert_eq!(status_max_chars(), STATUS_FALLBACK_CHARS);
     }
 
     #[test]

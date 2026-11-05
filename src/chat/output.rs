@@ -13,7 +13,7 @@ use zx_agent::runner::RunReport;
 use zx_agent::sync::lock;
 use zx_agent::text::clip;
 
-use crate::cli::OutputMode;
+use crate::cli::{ColorArg, OutputMode};
 use crate::{JsonlEvents, write_line};
 
 use super::debug::DebugState;
@@ -21,8 +21,16 @@ use super::term::{Phase, Style, Terminal, Tone, elapsed_text};
 
 /// Lines of a tool result shown under its `[tool]` line.
 const PREVIEW_LINES: usize = 3;
+/// Lines of a patch shown under its `[tool]` line: a change deserves more than a result.
+const PATCH_PREVIEW_LINES: usize = 20;
 /// Characters kept of each previewed line.
 const PREVIEW_CHARS: usize = 120;
+/// Characters of an argument string shown inline in an approval; longer or multi-line ones
+/// become indented blocks.
+const INLINE_CHARS: usize = 80;
+/// Lines of one argument string shown in an approval. The rest is counted, so a person
+/// knows what was not shown before approving.
+const BLOCK_LINES: usize = 60;
 /// Characters of a call's label in progress and result lines; approvals show everything.
 const LABEL_CHARS: usize = 80;
 /// Argument fields that say what a call does, shown instead of the whole JSON.
@@ -55,9 +63,13 @@ pub(super) struct Output {
 }
 
 impl Output {
-    pub(super) fn new(mode: OutputMode, deltas: bool, debug: bool) -> Self {
+    pub(super) fn new(mode: OutputMode, deltas: bool, debug: bool, color: ColorArg) -> Self {
         let stderr_is_terminal = std::io::stderr().is_terminal();
-        let style = Style::detect(stderr_is_terminal);
+        let style = match color {
+            ColorArg::Auto => Style::auto(stderr_is_terminal),
+            ColorArg::Always => Style::new(true),
+            ColorArg::Never => Style::new(false),
+        };
         // A status line is redrawn in place, which a dumb terminal or a log cannot show; the
         // debug timeline prints every step itself.
         let dumb = std::env::var_os("TERM").is_some_and(|value| value == "dumb");
@@ -75,6 +87,10 @@ impl Output {
                 totals: Totals::default(),
             }),
         }
+    }
+
+    pub(super) fn style(&self) -> Style {
+        lock(&self.text).terminal.style()
     }
 
     /// One line of housekeeping on stderr.
@@ -184,14 +200,21 @@ impl Output {
             .labels
             .remove(&result.tool_call_id)
             .unwrap_or_else(|| result.tool_name.clone());
-        let status = if result.is_error { "error" } else { "ok" };
+        let style = state.terminal.style();
+        let status = if result.is_error {
+            style.paint(Tone::Error, "error")
+        } else {
+            style.paint(Tone::Ok, "ok")
+        };
         let duration = result.duration_ms.map(|ms| format!(" {ms}ms")).unwrap_or_default();
-        let tone = if result.is_error { Tone::Warn } else { Tone::Dim };
-        state
-            .terminal
-            .tool_done(tone, &format!("[tool] {label} -> {status}{duration}"));
-        for line in preview(&result.content) {
-            state.terminal.line(Tone::Dim, &format!("    {line}"));
+        let line = format!(
+            "{} {label} -> {status}{}",
+            style.paint(Tone::Dim, "[tool]"),
+            style.paint(Tone::Dim, &duration)
+        );
+        state.terminal.tool_done(Tone::Plain, &line);
+        for line in preview(result, style) {
+            state.terminal.line(Tone::Plain, &format!("    {line}"));
         }
     }
 }
@@ -316,30 +339,91 @@ pub(super) fn describe_call(name: &str, args: &Value) -> String {
     format!("{}: {}", visible(name), visible(&detail).replace('\n', " "))
 }
 
-/// The arguments [`describe_call`] left out, as JSON, when there are any.
-pub(super) fn remaining_arguments(args: &Value) -> Option<String> {
-    let fields = args.as_object()?;
-    let shown = LABEL_FIELDS
-        .iter()
-        .find(|field| fields.get(**field).is_some_and(Value::is_string))?;
-    let rest: serde_json::Map<String, Value> = fields
-        .iter()
-        .filter(|(key, _)| key.as_str() != *shown)
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect();
-    (!rest.is_empty()).then(|| visible(&Value::Object(rest).to_string()))
+/// The arguments [`describe_call`] left out, readable: scalars inline, long or multi-line
+/// strings as indented blocks with their line count, arrays and objects by path. Nothing is
+/// escaped as JSON, so a file to be written looks like the file.
+pub(super) fn describe_arguments(args: &Value) -> Vec<String> {
+    let mut lines = Vec::new();
+    match args.as_object() {
+        Some(fields) => {
+            let shown = LABEL_FIELDS
+                .iter()
+                .find(|field| fields.get(**field).is_some_and(Value::is_string))
+                .copied();
+            for (key, value) in fields {
+                if Some(key.as_str()) != shown {
+                    describe_value(key, value, &mut lines);
+                }
+            }
+        }
+        None => describe_value("arguments", args, &mut lines),
+    }
+    lines
 }
 
-/// The first lines of a tool result, each cut short, and how many more there are.
-fn preview(content: &str) -> Vec<String> {
-    let total = content.lines().count();
-    let mut lines: Vec<String> = content
+fn describe_value(path: &str, value: &Value, lines: &mut Vec<String>) {
+    match value {
+        Value::String(text) if text.contains('\n') || text.chars().count() > INLINE_CHARS => {
+            let total = text.lines().count();
+            let plural = if total == 1 { "" } else { "s" };
+            lines.push(format!("{path} ({total} line{plural}):"));
+            for line in text.lines().take(BLOCK_LINES) {
+                lines.push(format!("    {}", visible(line)));
+            }
+            if total > BLOCK_LINES {
+                lines.push(format!("    … {} more line(s) not shown", total - BLOCK_LINES));
+            }
+        }
+        Value::String(text) => lines.push(format!("{path}: {}", visible(text))),
+        Value::Array(items) if items.is_empty() => lines.push(format!("{path}: []")),
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                describe_value(&format!("{path}[{index}]"), item, lines);
+            }
+        }
+        Value::Object(fields) if fields.is_empty() => lines.push(format!("{path}: {{}}")),
+        Value::Object(fields) => {
+            for (key, item) in fields {
+                describe_value(&format!("{path}.{key}"), item, lines);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => lines.push(format!("{path}: {value}")),
+    }
+}
+
+/// Lines shown under a result line, painted: the first lines of the patch a tool put in its
+/// details (what `edit_file` changed), otherwise the first lines of its text.
+fn preview(result: &ToolResultMessage, style: Style) -> Vec<String> {
+    let patch = result
+        .details
+        .as_ref()
+        .and_then(|details| details.get("patch"))
+        .and_then(Value::as_str);
+    match patch {
+        Some(patch) => limited(patch, PATCH_PREVIEW_LINES, style, |line| {
+            // Unified diff: added and removed lines stand out, headers and context do not.
+            if line.starts_with('+') && !line.starts_with("+++") {
+                Tone::Ok
+            } else if line.starts_with('-') && !line.starts_with("---") {
+                Tone::Error
+            } else {
+                Tone::Dim
+            }
+        }),
+        None => limited(&result.content, PREVIEW_LINES, style, |_| Tone::Dim),
+    }
+}
+
+/// The first `max_lines` of `text`, each cut short and painted, then how many more there are.
+fn limited(text: &str, max_lines: usize, style: Style, tone: impl Fn(&str) -> Tone) -> Vec<String> {
+    let total = text.lines().count();
+    let mut lines: Vec<String> = text
         .lines()
-        .take(PREVIEW_LINES)
-        .map(|line| clip(&visible(line), PREVIEW_CHARS))
+        .take(max_lines)
+        .map(|line| style.paint(tone(line), &clip(&visible(line), PREVIEW_CHARS)))
         .collect();
-    if total > PREVIEW_LINES {
-        lines.push(format!("… {} more line(s)", total - PREVIEW_LINES));
+    if total > max_lines {
+        lines.push(style.paint(Tone::Dim, &format!("… {} more line(s)", total - max_lines)));
     }
     lines
 }
@@ -499,24 +583,75 @@ mod tests {
     }
 
     #[test]
-    fn remaining_arguments_are_listed_only_when_the_label_left_some_out() {
+    fn arguments_left_out_of_the_label_are_listed_readably() {
         assert_eq!(
-            remaining_arguments(&json!({"command": "ls", "timeout": 5})).as_deref(),
-            Some("{\"timeout\":5}")
+            describe_arguments(&json!({"command": "ls", "timeout": 5})),
+            ["timeout: 5"]
         );
-        assert_eq!(remaining_arguments(&json!({"command": "ls"})), None);
-        assert_eq!(remaining_arguments(&json!({"query": "up"})), None);
+        assert_eq!(describe_arguments(&json!({"command": "ls"})), Vec::<String>::new());
+        assert_eq!(
+            describe_arguments(&json!({"path": "notes.txt", "content": "one\ntwo\n"})),
+            ["content (2 lines):", "    one", "    two"]
+        );
+        assert_eq!(
+            describe_arguments(&json!({"path": "a.rs", "edits": [{"oldText": "x", "newText": "y\u{1b}"}]})),
+            ["edits[0].newText: y\\u{1b}", "edits[0].oldText: x"]
+        );
+        assert_eq!(
+            describe_arguments(&json!({"query": "up", "flags": [], "extra": {}, "on": true, "n": null})),
+            ["extra: {}", "flags: []", "n: null", "on: true", "query: up"]
+        );
+        assert_eq!(describe_arguments(&json!("text")), ["arguments: text"]);
+        let long = "x".repeat(INLINE_CHARS + 1);
+        assert_eq!(
+            describe_arguments(&json!({"note": long})),
+            ["note (1 line):".to_string(), format!("    {long}")]
+        );
+        let tall = (0..BLOCK_LINES + 2)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let lines = describe_arguments(&json!({"content": tall}));
+        assert_eq!(lines.len(), BLOCK_LINES + 2);
+        assert_eq!(lines[BLOCK_LINES + 1], "    … 2 more line(s) not shown");
+    }
+
+    fn result(content: &str, details: Option<Value>) -> ToolResultMessage {
+        ToolResultMessage {
+            tool_call_id: "c".into(),
+            tool_name: "t".into(),
+            content: content.into(),
+            is_error: false,
+            timestamp: 0,
+            duration_ms: None,
+            details,
+        }
     }
 
     #[test]
     fn previews_show_the_first_lines_and_count_the_rest() {
-        assert_eq!(preview(""), Vec::<String>::new());
-        assert_eq!(preview("one\ntwo"), ["one", "two"]);
+        let plain = Style::new(false);
+        assert_eq!(preview(&result("", None), plain), Vec::<String>::new());
+        assert_eq!(preview(&result("one\ntwo", None), plain), ["one", "two"]);
         let long = format!("{}\nb\nc\nd\ne", "a".repeat(PREVIEW_CHARS + 1));
-        let lines = preview(&long);
+        let lines = preview(&result(&long, None), plain);
         assert_eq!(lines.len(), PREVIEW_LINES + 1);
         assert_eq!(lines[0].chars().count(), PREVIEW_CHARS + 3, "{}", lines[0]);
         assert_eq!(lines[3], "… 2 more line(s)");
-        assert_eq!(preview("\u{1b}[2Jx"), ["\\u{1b}[2Jx"]);
+        assert_eq!(preview(&result("\u{1b}[2Jx", None), plain), ["\\u{1b}[2Jx"]);
+    }
+
+    #[test]
+    fn a_patch_in_the_details_is_previewed_instead_of_the_text_with_changes_colored() {
+        let patch = "--- f\n+++ f\n@@ -1,2 +1,2 @@\n-old\n+new\n same\n";
+        let message = result("Replaced 1 block in f.", Some(json!({"patch": patch, "path": "f"})));
+        assert_eq!(
+            preview(&message, Style::new(false)),
+            ["--- f", "+++ f", "@@ -1,2 +1,2 @@", "-old", "+new", " same"]
+        );
+        let colored = preview(&message, Style::new(true));
+        assert_eq!(colored[0], "\x1b[2m--- f\x1b[0m");
+        assert_eq!(colored[3], "\x1b[31m-old\x1b[0m");
+        assert_eq!(colored[4], "\x1b[32m+new\x1b[0m");
     }
 }

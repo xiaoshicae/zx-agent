@@ -1325,6 +1325,20 @@ chat 交互体验（2026-11-05，基于 `77efb18`，分支 `worktree-chat-ux`）
 - 反向验证：去掉 `poll(2)` 探测后，PTY 粘贴测试失败（单元测试经管道一次读入多行，由缓冲区判断合并，仍通过）；去掉 `[model] Aborted` 行的省略后，取消测试失败。修改已还原。回答结尾的换行曾错写到 stderr，脚本模式下 5 项既有测试因 stdout 少了换行而失败，改为由留下未完成行的那个流补换行后通过。
 - 本机 macOS 验证：stable 下 847 项通过、7 项付费测试跳过（基线 828 项，PR #56 的实测）；fmt、clippy 与 Rust 1.88.0 的全目标检查通过；自查脚本在改动的文件中列出 `src/chat/input.rs` 的 `unsafe`（`poll(2)`，有 SAFETY 注释）与 `src/chat/term.rs` 的 `let _ =`（替代原 `output.rs` 的同一处，写了理由）。PTY 实测的脚本与记录在本机临时目录，未入库。Windows 分支（`AsHandle` 复制 stdin）只编译检查过 cfg 之外的代码，没有在 Windows 上运行。
 
+chat 交互体验第二批（2026-11-05，基于合并 origin/main `6ed6a9b` 之后的 `8fc9f8a`；用户选定的四项，仍不加依赖）：
+
+| 环节 | 此前 | 改为 |
+|---|---|---|
+| 文件工具的审批 | PR #58 之后，`write_file` 的内容与 `edit_file` 的替换片段以 JSON 转义挤在一行 | 参数逐项列出（`describe_arguments`）：标量一行；多行或超过 80 字符的字符串按行缩进显示并注明行数，一段最多 60 行，其余只计数并写明未显示；数组与对象按路径展开（`edits[0].oldText`）；不做 JSON 转义，写入的文件看起来就是文件。字段按 serde_json 的键序排列，所以 `newText` 在 `oldText` 之前 |
+| 文件工具的结果 | `[tool]` 行下只显示结果文本的前 3 行 | 结果 `details` 带 `patch` 时改为显示补丁的前 20 行：增加的行绿色、删除的行红色、其余暗色；其他工具仍显示结果文本 |
+| 颜色 | 审批块整行黄色，命令反而不突出；`[tool]` 整行暗色；黄色在浅色背景上偏淡；只能靠 NO_COLOR 关 | 审批只给 `[approval N]` 标签上色，调用本身加粗默认色；`[tool]` 标签与耗时暗色，`ok` 绿、`error` 红，命令默认色；警告色改为加粗黄；新增 `--color auto\|always\|never`，默认 auto 与此前的判断相同 |
+| 状态行宽度 | 固定裁到 78 字符 | Unix 上每次绘制前用 `TIOCGWINSZ` 查询 stderr 的宽度，裁到宽度减一，最少保留 20 字符；查不到时仍为 78 |
+| 续接会话 | 打开已有会话文件时没有任何提示 | 启动行后多一行 `[chat] resumed N message(s) from the session file; last activity <本地时间>`，N 为投影中的 user 与 assistant 消息数，时间取最后一条记录的时间戳 |
+
+- 公开 API 与 CLI：`chat --help` 新增 `--color`；其余不变。
+- 测试：新增 6 项。单元测试 2 项（状态行宽度在非终端下的回退、补丁预览与着色），`describe_arguments` 的测试替换原 `remaining_arguments` 的；`tests/chat_cli.rs` 4 项：write_file 审批按行显示内容、edit_file 审批逐项列出且结果显示补丁、`--color always` 在管道中保留颜色、续接会话的提示（新会话不提示）。既有的空行测试改用 `--color never`。
+- 本机 macOS 验证：stable 下 900 项通过、7 项付费测试跳过（合并后的基线 894 项）；fmt、clippy 与 Rust 1.88.0 的全目标检查通过。`TIOCGWINSZ` 按 macOS 与 Linux gnu 的 `c_ulong` 类型直接传给 `ioctl`，把它定义为 `c_int` 的目标（如 musl）未编译验证。
+
 这些整理不改变行为，在改到相关代码时顺带完成：
 
 - [x] `run_loop` 参数过多（P1）：整理为 4 个参数，运行状态通过 `LoopControl` 借用

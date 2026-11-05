@@ -596,6 +596,108 @@ async fn status_shows_the_session_and_what_the_conversation_used() {
 }
 
 #[tokio::test]
+async fn a_file_write_approval_shows_the_content_as_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![
+        Reply::tool_call("c", "write_file", json!({"path": "notes.txt", "content": "one\ntwo\n"})),
+        Reply::text("done"),
+    ])
+    .await;
+    let output = run(&server, dir.path(), &[], "go\n1\n/quit\n").await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let log = stderr(&output);
+    assert!(
+        log.contains("[approval 1] write_file: notes.txt\n  content (2 lines):\n      one\n      two\n"),
+        "{log}"
+    );
+    assert!(log.contains("[tool] write_file: notes.txt -> ok"), "{log}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("notes.txt")).unwrap(),
+        "one\ntwo\n"
+    );
+}
+
+#[tokio::test]
+async fn an_edit_approval_lists_each_edit_and_its_result_shows_the_patch() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "hello\nworld\n").unwrap();
+    let server = MockServer::start(vec![
+        Reply::tool_call(
+            "c",
+            "edit_file",
+            json!({"path": "a.txt", "edits": [{"oldText": "hello", "newText": "bye"}]}),
+        ),
+        Reply::text("done"),
+    ])
+    .await;
+    let output = run(&server, dir.path(), &[], "go\n1\n/quit\n").await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let log = stderr(&output);
+    assert!(
+        log.contains("[approval 1] edit_file: a.txt\n  edits[0].newText: bye\n  edits[0].oldText: hello\n"),
+        "{log}"
+    );
+    assert!(log.contains("[tool] edit_file: a.txt -> ok"), "{log}");
+    assert!(log.contains("\n    -hello\n    +bye\n"), "{log}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+        "bye\nworld\n"
+    );
+}
+
+#[tokio::test]
+async fn color_always_keeps_colors_when_stderr_is_not_a_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::bash("c", "seq 1 2"), Reply::text("done")]).await;
+    let output = run(
+        &server,
+        dir.path(),
+        &["--tools", "bash", "--auto-approve-cmd", "seq", "--color", "always"],
+        "go\n/quit\n",
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let log = stderr(&output);
+    assert!(
+        log.contains("\x1b[2m[tool]\x1b[0m bash: seq 1 2 -> \x1b[32mok\x1b[0m"),
+        "{log}"
+    );
+    assert!(log.contains("\x1b[2m[turn] "), "{log}");
+}
+
+#[tokio::test]
+async fn resuming_a_session_file_says_how_much_history_it_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_context(dir.path(), 10).await;
+    let server = MockServer::start(vec![Reply::text("hi")]).await;
+    let output = run(
+        &server,
+        dir.path(),
+        &["--tools", "", "--session", "chat.jsonl"],
+        "hello\n/quit\n",
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let log = stderr(&output);
+    assert!(
+        log.contains("[chat] resumed 2 message(s) from the session file; last activity 20"),
+        "{log}"
+    );
+
+    let fresh = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::text("hi")]).await;
+    let output = run(
+        &server,
+        fresh.path(),
+        &["--tools", "", "--session", "new.jsonl"],
+        "hello\n/quit\n",
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(!stderr(&output).contains("resumed"), "{}", stderr(&output));
+}
+
+#[tokio::test]
 async fn a_shell_call_waits_for_an_approval_before_any_side_effect() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::bash("c", "printf approved > marker"), Reply::text("done")]).await;
@@ -1259,7 +1361,8 @@ async fn a_terminal_separates_answers_with_blank_lines() {
         .stdin(Stdio::from(slave.try_clone().unwrap()))
         .stdout(Stdio::from(slave.try_clone().unwrap()))
         .stderr(Stdio::from(slave));
-    command.env("TERM", "xterm").env("NO_COLOR", "1");
+    command.arg("--color").arg("never");
+    command.env("TERM", "xterm").env_remove("NO_COLOR");
     let mut child = command.spawn().unwrap();
     drop(command);
     let mut seen = Vec::new();
