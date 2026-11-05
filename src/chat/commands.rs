@@ -12,6 +12,10 @@ pub(super) enum Command {
     /// Continue without new input.
     Continue,
     Status,
+    /// List the sessions in the session directory.
+    Sessions,
+    /// Switch to the session whose ID starts with this prefix.
+    Resume(String),
     Quit,
     Help,
     Invalid(String),
@@ -34,6 +38,11 @@ pub(super) fn parse(line: String) -> Command {
         "/compact" if rest.is_empty() => Command::Compact,
         "/continue" if rest.is_empty() => Command::Continue,
         "/status" if rest.is_empty() => Command::Status,
+        "/sessions" if rest.is_empty() => Command::Sessions,
+        "/resume" if rest.is_empty() => {
+            Command::Invalid("give a session ID: /resume <ID>; /sessions lists them".into())
+        }
+        "/resume" => Command::Resume(rest.to_string()),
         "/model" => Command::Model((!rest.is_empty()).then(|| rest.to_string())),
         "/reasoning" => Command::Reasoning((!rest.is_empty()).then(|| rest.to_string())),
         _ => Command::Invalid(format!("unknown command or arguments: {name}; use /help")),
@@ -59,6 +68,8 @@ mod tests {
             "/compact extra",
             "/continue extra",
             "/status extra",
+            "/sessions extra",
+            "/resume",
             "/unknown",
         ] {
             assert!(matches!(parse(invalid.into()), Command::Invalid(_)), "{invalid}");
@@ -68,5 +79,6 @@ mod tests {
         assert!(matches!(parse("/reasoning high".into()), Command::Reasoning(Some(level)) if level == "high"));
         assert!(matches!(parse("/reasoning".into()), Command::Reasoning(None)));
         assert!(matches!(parse("/status".into()), Command::Status));
+        assert!(matches!(parse("/resume 0b7c".into()), Command::Resume(id) if id == "0b7c"));
     }
 }

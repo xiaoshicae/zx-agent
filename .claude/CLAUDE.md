@@ -36,7 +36,7 @@
 
 | 层 | 位置 | 职责 |
 |---|---|---|
-| CLI | `src/main.rs`、`src/cli.rs`、`src/chat/`、`src/serve.rs` | 共用参数与运行组装；run 处理单次任务；chat 管理单一输入所有者（终端里一次到达的多行合为一条消息）、审批、信号和 REPL，终端渲染（颜色、状态行、行的归属）在 `src/chat/term.rs`；serve 读取配置、为每个线程准备会话并隐藏 IM 凭据 |
+| CLI | `src/main.rs`、`src/cli.rs`、`src/chat/`、`src/serve.rs`、`src/sessions.rs` | 共用参数与运行组装；run 处理单次任务；sessions 是 chat 的会话目录（默认 `~/.zx-agent/sessions/--<工作目录>--/`）与 `zx-agent sessions`；chat 管理单一输入所有者（终端里一次到达的多行合为一条消息）、审批、信号和 REPL，终端渲染（颜色、状态行、行的归属）在 `src/chat/term.rs`；serve 读取配置、为每个线程准备会话并隐藏 IM 凭据 |
 | 场景配置 | `src/profile/`、`profiles/` | TOML 基线与覆盖、项目上下文、显式 skill 目录及按需读取、MCP 服务器（`[[mcp]]`）；不进入循环机制 |
 | 提示词 | `crates/zx-core/src/prompt.rs` | 生成系统提示词：说明 + `<environment>` + `<command_policy>` + `<project_context>` + `<available_skills>`（空段落不出现） |
 | 共享会话 | `crates/zx-core/src/agent_session.rs` | 共享调用与 Busy、RAII 归还运行权、取消、订阅与退订、空闲时切换模型 |
