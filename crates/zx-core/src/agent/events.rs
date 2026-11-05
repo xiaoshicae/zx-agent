@@ -175,9 +175,10 @@ impl Interruption {
 /// Events emitted while the agent runs (pi: `AgentEvent`, packages/agent/src/types.ts).
 ///
 /// A run is one prompt: `run_start`, then one attempt per try (`agent_start` to `agent_end`;
-/// a retry starts another), then `run_end`. A turn is one task request plus its tool calls.
-/// Summary requests of an automatic compaction belong to the turn they precede but are not
-/// turns themselves, although they count against the same request budget.
+/// a retry or a recovery from context overflow starts another), then `run_end`. A turn is one
+/// task request plus its tool calls. Summary requests of an automatic compaction belong to
+/// the turn they precede but are not turns themselves, although they count against the same
+/// request budget; those of an overflow recovery come between two attempts.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum AgentEvent {
@@ -191,7 +192,8 @@ pub enum AgentEvent {
     RunEnd {
         report: Box<RunReport>,
     },
-    /// Start of one attempt; `attempt` is 1 for the first and grows with each retry.
+    /// Start of one attempt; `attempt` is 1 for the first and grows with each retry or
+    /// recovery from context overflow.
     AgentStart {
         attempt: u32,
     },
@@ -283,6 +285,13 @@ pub enum AgentEvent {
         delay_ms: u64,
         error: String,
     },
+    /// Emitted by the runner when the model rejected a request as too long for its context
+    /// and automatic compaction is enabled. The failed answer is omitted from the context, a
+    /// summary follows (`compaction_start` with `automatic`), and a new attempt continues
+    /// from the compacted context. Once per run until an answer succeeds again.
+    ContextOverflow {
+        error: String,
+    },
     /// A recorded change to an existing model-visible message.
     ContextEdited {
         index: usize,
@@ -347,6 +356,7 @@ impl AgentEvent {
             AgentEvent::TurnEnd { .. } => "turn_end",
             AgentEvent::AgentEnd { .. } => "agent_end",
             AgentEvent::RetryScheduled { .. } => "retry_scheduled",
+            AgentEvent::ContextOverflow { .. } => "context_overflow",
             AgentEvent::ContextEdited { .. } => "context_edited",
             AgentEvent::HookFailed { .. } => "hook_failed",
             AgentEvent::CompactionStart { .. } => "compaction_start",

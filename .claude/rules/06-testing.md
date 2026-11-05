@@ -38,7 +38,8 @@ paths:
 | `tests/agent_loop.rs` | 循环语义 |
 | `tests/runner.rs` | 运行层：重试（含预算用完不重试、省略失败回答的事件）、上限（含 token 预算：FauxProvider 每次回答报告 15 个 token）、截断续写、持久化（含自定义 `SessionLog`、工具结果的 `details`）、恢复会话、排队输入只写一次 |
 | `tests/agent_session.rs` | 共享会话：Busy、取消与丢弃后复用、多订阅者、退订、回调重入与 panic、模型切换与审计、取出未被消费的排队输入、会话释放后有界订阅结束 |
-| `tests/openai_mock.rs` | 真实 HTTP 下的 provider：SSE、重试、空闲超时、中途取消、成功状态下的 JSON 正文 |
+| `tests/openai_mock.rs` | 真实 HTTP 下的 provider：SSE、重试、空闲超时、中途取消、成功状态下的 JSON 正文、带上下文过长错误码的 400 之后摘要并继续 |
+| `tests/overflow_recovery.rs` | 上下文过长后的恢复：省略失败回答、摘要一次再开始新的尝试（不算重试）、未开启自动摘要时行为不变、恢复后紧接着又过长时结束、回答成功后可再次恢复、摘要失败暂停自动摘要、预算用完与运行超时 |
 | `tests/cli.rs` | 原有 run 行为与退出码，P0 起逐字节保持；P6 默认值变更另行验收 |
 | `tests/run_cli.rs` | P0 之后新增的 run 约定（如进度与报告行转义终端控制字符、会话文件单写者、零超时被拒绝、stdout 关闭时的退出码、token 预算的退出码 7：假服务每次回答报告 12 个 token、只在设置了 OTLP 地址时导出追踪：测试中的假收集端只看请求，不解码 protobuf、`--request-field` 到达模型并写入请求审计，写错时以退出码 2 结束、`--fill-missing-reasoning` 默认关闭且开启时写入请求审计），新的 run 测试放这里，`tests/cli.rs` 不改 |
 | `tests/otel.rs` | OpenTelemetry 导出：真实运行经 `Telemetry` 产生的 span 层级与属性；测试用的导出器 `Kept` 在关闭后仍保留 span（SDK 的内存导出器关闭时会清空） |
@@ -46,7 +47,7 @@ paths:
 | `tests/profiles_cli.rs` | profile/CLI 覆盖与 deny、项目上下文范围、默认值与越界链接、`--system-prompt-file` 兼容、skill 懒加载、工具策略和审计 |
 | `tests/session_compaction.rs`、`tests/compaction.rs` | 追加升级、分支 / 引用与原始投影、自动 / 手动摘要、摘要源不含工具结果的 `details`、计费（摘要请求计入请求与 token 预算）、steering、失败、取消与超时 |
 | `tests/incremental_summary.rs` | 增量摘要（v5）：接续与只读新增记录、接续全量摘要、取代、淘汰、修正后的作废与重读、加载校验、请求还原、请求大小不随历史增长；摘要评测的脚本会话自检，以及用知道答案的假模型验证评分 |
-| `tests/request_audit.rs` | 请求审计（G3）：从会话文件还原每次请求、配置变化才追加、旧会话升级时机；固定会话 `tests/fixtures/replay-v4.jsonl` 与含增量摘要的 `replay-v5.jsonl` 的还原结果与期望文件逐字节比对，改变还原结果须同时升级转换版本或会话格式 |
+| `tests/request_audit.rs` | 请求审计（G3）：从会话文件还原每次请求、配置变化才追加、旧会话升级时机；上下文过长后恢复的三个请求；固定会话 `tests/fixtures/replay-v4.jsonl` 与含增量摘要的 `replay-v5.jsonl` 的还原结果与期望文件逐字节比对，改变还原结果须同时升级转换版本或会话格式 |
 | `tests/executor.rs` | 执行器接缝：工具只经自身执行器运行命令和读文件，结束方式的报告，执行方式随执行器 |
 | `tests/container.rs` | 容器执行：假 docker 程序（在测试目录里记录参数、按文件应答）覆盖启动、命令、读文件、清理、逐个执行（排队的调用在取消后记为未执行）、所用 shell 与 CLI；名字以 `real_` 开头的测试在设置 `ZX_DOCKER_TEST_IMAGE`（本地已有、带 bash 的镜像）时对真实 Docker 运行，否则打印提示后返回；工作目录要让容器用户可读（见 `real_workspace`） |
 | `tests/crash_recovery.rs` | 崩溃恢复：开始记录先于执行、中断调用的四种恢复结果且不重放、失败或取消的回答中的调用记为未执行、恢复事件在结果写入之后、旧格式会话、丢弃 future 与 SIGKILL 后恢复 |

@@ -15,7 +15,9 @@ use zx_agent::agent::{AgentEvent, Event, EventSink};
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::{Message, PREAMBLE, ProviderError, StopReason, SystemPrompt};
+use zx_agent::compaction::Config;
 use zx_agent::runner::RunOutcome;
+use zx_agent::session::SessionStore;
 use zx_agent::tools::BashTool;
 
 /// A runner whose provider talks to `server`, with a bash tool and a one-line system prompt.
@@ -396,4 +398,60 @@ async fn cancelling_mid_stream_keeps_the_text_received_so_far() {
         (answer.stop_reason, answer.text().as_str()),
         (StopReason::Aborted, "partial")
     );
+}
+
+/// A summary that cites the first record the summary request reads.
+fn summary_of_the_first_record(body: &serde_json::Value) -> Vec<serde_json::Value> {
+    let source = body["messages"].as_array().unwrap().last().unwrap()["content"]
+        .as_str()
+        .unwrap();
+    let records: Vec<serde_json::Value> = serde_json::from_str(source).unwrap();
+    let summary = json!({
+        "facts": [{"text": "Old observation", "sourceEntryIds": [records[0]["entryId"]]}],
+        "inferences": [],
+        "plans": ["Continue"]
+    });
+    vec![json!({"choices": [{"index": 0, "delta": {"content": summary.to_string()}, "finish_reason": "stop"}]})]
+}
+
+#[tokio::test]
+async fn an_overflow_error_code_makes_the_runner_compact_and_continue() {
+    // An HTTP 400 with the code, over the real provider. The error text quotes the body, so
+    // the code reaches the classification both as structured metadata and as text; the
+    // structured path alone is covered by the unit tests in zx-ai's retry module.
+    let server = MockServer::start(vec![
+        Reply::Status(
+            400,
+            r#"{"error":{"message":"Request too large for this model","code":"context_length_exceeded"}}"#,
+        ),
+        Reply::Dynamic(summary_of_the_first_record),
+        Reply::text("answer"),
+    ])
+    .await;
+    let mut session = SessionStore::in_memory(common::header());
+    session
+        .append_message(Message::user("observed ".repeat(600)))
+        .await
+        .unwrap();
+    session
+        .append_message(Message::user("most recent input"))
+        .await
+        .unwrap();
+    let (runner, _) = RunnerSetup {
+        session,
+        ..setup(&server, Duration::from_secs(10))
+    }
+    .build();
+    let compaction = Config {
+        trigger_bytes: Some(100_000),
+        keep_recent_bytes: 1,
+        ..Config::default()
+    };
+    let mut runner = runner.with_compaction(compaction).unwrap();
+
+    let report = runner.run("check", &CancellationToken::new()).await;
+
+    assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
+    assert_eq!(report.final_text, "answer");
+    assert_eq!(server.requests().len(), 3);
 }

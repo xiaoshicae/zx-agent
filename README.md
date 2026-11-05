@@ -78,7 +78,7 @@ chat 中的 bash 调用先经过原命令策略，再显示完整工具名、参
 
 命令策略的 Deny 始终优先。空输入不会授权；审批默认超时 120 秒，未收到答案不会执行工具。模型文本和诊断中的 ESC、回车及双向控制字符按字面显示，保留正常换行和制表符。
 
-`assistant` 默认在上下文超过 256 KiB 时自动压缩，`unattended` 与 `troubleshoot` 默认关闭。自动摘要消耗一次请求预算并统计用量；`/compact` 使用独立的有界请求并报告结果。可用 `--no-auto-compact` 禁用自动摘要，或 `--compact-threshold-bytes` 修改字节阈值。该阈值不是模型 token 窗口的保证；摘要有信息损失风险，引用校验也不证明事实正确。配置、审计和边界见[上下文管理](docs/PROFILES.md#上下文管理)。
+`assistant` 默认在上下文超过 256 KiB 时自动压缩，`unattended` 与 `troubleshoot` 默认关闭。自动摘要消耗一次请求预算并统计用量；`/compact` 使用独立的有界请求并报告结果。可用 `--no-auto-compact` 禁用自动摘要，或 `--compact-threshold-bytes` 修改字节阈值。该阈值不是模型 token 窗口的保证；开启自动摘要时，模型以上下文过长拒绝请求后，会先摘要一次再继续，见[上下文管理](docs/PROFILES.md#上下文管理)。摘要有信息损失风险，引用校验也不证明事实正确。配置、审计和边界见[上下文管理](docs/PROFILES.md#上下文管理)。
 
 TTY 中手动压缩时可暂存一个普通输入，完成后自动执行；Ctrl+C 取消压缩并明确清除暂存输入。`/model` 等待空闲，`/new` 与 `/quit` 和正常 EOF 退出码为 0；参数或配置错误、读取终端输入失败为 2，超限或无效 UTF-8 的输入行只会被丢弃，不会退出；SIGTERM 为 5。单轮模型或预算错误会报告后继续对话，JSONL 消费者可读取每轮报告的 `outcome`。这是逐行 REPL，尚未提供历史行编辑或完整 TUI。
 
@@ -339,6 +339,7 @@ CLI (main.rs + cli.rs + chat/)
 | 缺少结果的工具调用 | 有副作用的调用执行前先记录开始；下一次运行开始时，为缺少结果的调用写入"结果未知""未执行"等错误结果，不重放。运行被取消时，执行中的有副作用调用的结果写明"可能已改变状态，先检查再重试"，尚未开始的调用写明"未执行" | 发送时补占位（沿用 pi 的 transform-messages.ts）区分不了调用是否执行过；崩溃后需要依据记录判断 |
 | 中断调用的重放 | 不重放：进程崩溃或被取消后，中断的调用一律写成错误结果，由模型决定是否重试 | pi 的工具可声明 `replay: "safe"`，durable 运行时重启后用记录的参数自动重跑，记录时与当前定义都声明 `safe` 才重跑，连续中断达到上限即停（`packages/durable/src/harness/tool.ts`）。这适用于两个前提：重启后无人介入、自动续跑；工具耗时长、内部有大量嵌套调用（如 codemode），从头重跑代价大。zx-agent 两者都没有：进程结束即运行结束，工具都是单次调用，被打断后由模型重试只多一次请求。将来要做自动续跑或长时间的复合工具时再评估；届时重放语义另设字段，不复用 `Effects`，因为只读不等于可以安全重放 |
 | 工具接口 | 结果只有文本 `content`，另有只供观察者的 `details`（与 pi 一样随结果写入会话，不发给模型）；进度是文本。没有 pi 的图片内容、`structuredContent` 与 `outputSchema`、结果中的 `usage`、`label`，也没有让工具经同一套校验与钩子调用其他工具的 `runToolCall` | 尚无使用者：图片要改消息格式与 provider，`runToolCall` 在做 codemode 或子 agent 时才需要 |
+| 上下文过长的识别 | 按 HTTP 413、错误码（`context_length_exceeded` 等）与通用措辞（如 “maximum context”“prompt is too long”）识别，限流与服务端错误不算；不识别服务端截断输入而不报错的情况 | pi 按服务逐条匹配错误文本，并用模型的上下文窗口识别不报错的超长（`packages/ai/src/utils/overflow.ts`）。这里不按服务推断（D10），也没有模型的上下文窗口信息（见路线图 P10 ⑧） |
 | 上下文摘要 | 默认（全量模式）重新摘要时读取应用过 `context_edit` 的原始记录，不输入上一份摘要；可选的增量模式沿用上一份摘要的事实、只读新增记录，旧事实由程序原样保留，模型只能新增事实或标明取代旧事实。摘要中的每条事实必须引用来源条目，见 [PROFILES.md](docs/PROFILES.md) | pi 把上一份摘要交给模型更新，允许删去旧内容；这里优先保证每条事实可追溯、不经多次转述。全量模式的代价是摘要请求随历史增长，累计约 2 MiB 后无法再摘要；增量模式每次只读上一份摘要的事实（至多 64 KiB）与新增、被修正的记录，请求大小不随历史总长增长，用真实模型评测之后再决定是否设为默认（见[路线图](docs/ROADMAP.md)） |
 | 完整 TUI | 未实现，`chat` 是逐行 REPL | 路线图将其列为本期不做 |
 
@@ -433,7 +434,7 @@ pidsLimit = 256                  # 可选，容器内进程数上限
 
 每行一个事件。事件字段与信封字段在同一个 JSON 对象中：`schemaVersion`（当前为 1，不兼容的变化时加一）、`seq`（运行内从 1 开始递增）、`atMs`（毫秒时间戳）、`sessionId`、`runId`（每次运行一个；手动 `/compact` 使用自己的 ID）与 `type`。未加 `--deltas` 时省略的 `message_update` 会在 `seq` 中留下空缺。
 
-一次运行以 `run_start`（`model`、`provider`）开始，以 `run_end`（`report`）结束，中断调用的恢复事件在两者之间。每次尝试由 `agent_start`（`attempt`，重试时加一）与 `agent_end` 包围。回合（`turn_start` / `turn_end`，带 `turn`）只对应任务请求，成对出现；自动摘要的请求计入轮次预算，但不是回合。其余事件：
+一次运行以 `run_start`（`model`、`provider`）开始，以 `run_end`（`report`）结束，中断调用的恢复事件在两者之间。每次尝试由 `agent_start`（`attempt`，重试或从上下文过长恢复时加一）与 `agent_end` 包围。回合（`turn_start` / `turn_end`，带 `turn`）只对应任务请求，成对出现；自动摘要的请求计入轮次预算，但不是回合。其余事件：
 
 | `type` | 内容 |
 |---|---|
@@ -443,6 +444,7 @@ pidsLimit = 256                  # 可选，容器内进程数上限
 | `tool_decision` | 策略结论：`verdict`（`allow`、`deny`、`ask`）与 `reason`；策略钩子出错按 `deny` 报告 |
 | `approval_requested`、`approval_resolved` | 审批的询问与结果：`approval`（`allow_once`、`allow_session`、`remembered`、`denied`、`timed_out`、`cancelled`、`failed`）、`reason`、`waitMs`。会话内已授权过的同一调用不再询问，只有 `approval_resolved`（`remembered`） |
 | `retry_scheduled`、`context_edited`、`hook_failed` | 重试、上下文编辑（带编辑条目的 `entryId`）与钩子失败 |
+| `context_overflow` | 模型以上下文过长拒绝请求，且开启了自动摘要：带 `error`；随后省略失败的回答（`context_edited`），摘要一次（`compaction_start` 等，`automatic` 为 true），再开始新的尝试 |
 | `compaction_start`、`compaction_end`、`compaction_failed` | 摘要；带 `automatic`，成功事件包含条目 ID、前后字节数与用量 |
 | `tool_call_recovered` | `toolCallId`、`toolName` 与 `state`，取值见下文会话文件一节 |
 
@@ -474,7 +476,7 @@ run、chat 与 serve 在设置了下面任一标准变量时，用 OTLP/HTTP（p
 
 | span | 范围 | 属性与事件 |
 |---|---|---|
-| `run` | `run_start` 到 `run_end` | `zx.run.id`、`zx.session.id`、`zx.model`、`zx.provider`、`zx.outcome`、`zx.model_requests`、`zx.retries`、`zx.usage.input_tokens` / `output_tokens` / `cache_read_tokens`；事件 `retry_scheduled`、`tool_call_recovered` |
+| `run` | `run_start` 到 `run_end` | `zx.run.id`、`zx.session.id`、`zx.model`、`zx.provider`、`zx.outcome`、`zx.model_requests`、`zx.retries`、`zx.usage.input_tokens` / `output_tokens` / `cache_read_tokens`；事件 `retry_scheduled`、`context_overflow`（不含错误文本）、`tool_call_recovered` |
 | `attempt` | 每次尝试 | `zx.attempt`、`zx.outcome` |
 | `turn` | 每个回合 | `zx.turn` |
 | `request` | 每个模型请求；摘要请求在 `compaction` 之下 | `zx.request.kind`、`zx.model`、`zx.attempt`、用量、`zx.stop_reason` |

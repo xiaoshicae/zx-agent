@@ -210,6 +210,7 @@ enum What {
         attempt: u32,
         delay_ms: u64,
     },
+    Overflow,
     HookFailed {
         hook: String,
         phase: &'static str,
@@ -300,6 +301,8 @@ impl Signal {
                 attempt: *attempt,
                 delay_ms: *delay_ms,
             },
+            // The error text may quote the request, so only the fact is exported.
+            AgentEvent::ContextOverflow { .. } => What::Overflow,
             AgentEvent::HookFailed { hook, phase, .. } => What::HookFailed {
                 hook: hook.clone(),
                 phase,
@@ -565,6 +568,7 @@ impl Runs {
                 ];
                 event(spans.run.as_ref(), "retry_scheduled", at, attributes);
             }
+            What::Overflow => event(spans.run.as_ref(), "context_overflow", at, Vec::new()),
             What::HookFailed { hook, phase } => {
                 let attributes = vec![KeyValue::new("zx.hook", hook), KeyValue::new("zx.hook.phase", phase)];
                 event(spans.current(), "hook_failed", at, attributes);

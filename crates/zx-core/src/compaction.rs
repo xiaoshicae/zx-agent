@@ -127,7 +127,11 @@ pub struct Report {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Trigger {
     Manual,
+    /// The context exceeds `trigger_bytes` before a request.
     Automatic,
+    /// The model rejected a request as too long for its context. Checked like an automatic
+    /// summary, whatever the context's size in bytes.
+    Overflow,
 }
 
 /// Serialized transcript bytes as a model may see them (without tool result details), not a
@@ -336,7 +340,7 @@ impl Host<'_> {
     }
 
     pub async fn run(&mut self, trigger: Trigger, cancel: &CancellationToken) -> (Report, Option<Vec<Message>>) {
-        let automatic = trigger == Trigger::Automatic;
+        let automatic = trigger != Trigger::Manual;
         let mut report = Report {
             outcome: Outcome::Noop,
             requests: 0,
@@ -368,10 +372,19 @@ impl Host<'_> {
         let candidate = match setup {
             Ok(Some(candidate)) => candidate,
             Ok(None) => {
-                if automatic {
-                    report.outcome = Outcome::Failed;
-                    report.error = Some("context exceeds triggerBytes but cannot compact while preserving system messages and the latest input; raise the budget or start a new session".into());
-                }
+                let (reason, remedy) = match trigger {
+                    Trigger::Manual => return (report, None),
+                    Trigger::Automatic => ("context exceeds triggerBytes", "raise the budget"),
+                    Trigger::Overflow => (
+                        "the model rejected the context as too long",
+                        "lower keepRecentBytes, use a model with a larger context",
+                    ),
+                };
+                report.outcome = Outcome::Failed;
+                report.error = Some(format!(
+                    "{reason} but cannot compact while preserving system messages and the latest input; \
+                     {remedy} or start a new session"
+                ));
                 return (report, None);
             }
             Err(error) => {

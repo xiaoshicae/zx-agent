@@ -6,6 +6,8 @@ use crate::ai::Usage;
 
 #[derive(Default)]
 pub(super) struct RunAccounting {
+    /// Attempts made: the first, retries and recoveries from context overflow.
+    pub attempts: u32,
     pub task_turns: u32,
     pub model_requests: u32,
     pub retries: u32,
@@ -15,6 +17,7 @@ pub(super) struct RunAccounting {
 
 impl RunAccounting {
     pub fn record(&mut self, attempt: &LoopResult) {
+        self.attempts = self.attempts.saturating_add(1);
         self.task_turns = self.task_turns.saturating_add(attempt.task_turns);
         self.model_requests = self.model_requests.saturating_add(attempt.model_requests);
         self.answer_continuations = attempt.answer_continuations;

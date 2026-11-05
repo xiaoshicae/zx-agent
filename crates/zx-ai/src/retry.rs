@@ -121,6 +121,75 @@ pub fn is_retryable(message: &AssistantMessage) -> bool {
     RETRYABLE.iter().any(|pattern| mentions(&error, pattern))
 }
 
+/// Error codes that say the request was too long for the model. Codes, not vendor names: any
+/// service may use them.
+const OVERFLOW_CODES: &[&str] = &[
+    "context_length_exceeded",
+    "model_context_window_exceeded",
+    "request_too_large",
+];
+
+/// Phrases that say the request was too long for the model, for failures without such a code.
+/// Generic wording only, not one message per service (pi lists one per provider in
+/// overflow.ts).
+const OVERFLOW_TEXT: &[&str] = &[
+    "context length",
+    "context_length",
+    "maximum context",
+    "context window",
+    "context_window",
+    "context size",
+    "prompt is too long",
+    "prompt too long",
+    "request_too_large",
+    "too many tokens",
+];
+
+/// Throttling, which can also mention tokens ("too many tokens, please wait").
+const THROTTLING_TEXT: &[&str] = &["429", "rate limit", "rate_limit", "throttl", "too many requests"];
+
+/// Whether a failed response says the request was too long for the model's context: a
+/// smaller context may fix it, repeating the request never does (pi: `isContextOverflow` in
+/// packages/ai/src/utils/overflow.ts). An HTTP 413 or one of the overflow codes decides;
+/// throttling, server, credential and transport failures never count; otherwise the error
+/// text decides. Silent overflow, where a service truncates the input instead of failing, is
+/// not detected.
+pub fn is_context_overflow(message: &AssistantMessage) -> bool {
+    if message.stop_reason != StopReason::Error {
+        return false;
+    }
+    match &message.provider_error {
+        Some(ProviderError::Http { status: 413, .. }) => return true,
+        Some(ProviderError::Http { status, code, .. }) => {
+            if code.as_deref().is_some_and(overflow_code) {
+                return true;
+            }
+            if matches!(status, 401 | 403 | 408 | 429 | 500..=599) {
+                return false;
+            }
+        }
+        Some(ProviderError::Provider { code: Some(code) }) if overflow_code(code) => return true,
+        Some(
+            ProviderError::Transport | ProviderError::Timeout | ProviderError::Protocol | ProviderError::ResourceLimit,
+        ) => {
+            return false;
+        }
+        Some(ProviderError::Provider { .. }) | None => {}
+    }
+    let Some(error) = message.error_message.as_deref() else {
+        return false;
+    };
+    let error = error.to_lowercase();
+    if THROTTLING_TEXT.iter().any(|pattern| mentions(&error, pattern)) {
+        return false;
+    }
+    error.starts_with("http 413") || OVERFLOW_TEXT.iter().any(|pattern| error.contains(pattern))
+}
+
+fn overflow_code(code: &str) -> bool {
+    OVERFLOW_CODES.contains(&code.to_ascii_lowercase().as_str())
+}
+
 fn permanent_code(code: &str) -> bool {
     matches!(
         code.to_ascii_lowercase().as_str(),
@@ -215,6 +284,81 @@ mod tests {
             retry_after_ms: Some(120_000),
         });
         assert_eq!(policy.delay_for(1, &message), policy.max_delay);
+    }
+
+    fn http(status: u16, code: Option<&str>, error: &str) -> AssistantMessage {
+        let mut message = failed(error);
+        message.provider_error = Some(ProviderError::Http {
+            status,
+            code: code.map(str::to_string),
+            retry_after_ms: None,
+        });
+        message
+    }
+
+    #[test]
+    fn overflow_is_recognized_by_status_and_code() {
+        assert!(is_context_overflow(&http(413, None, "HTTP 413: Payload Too Large")));
+        assert!(is_context_overflow(&http(
+            400,
+            Some("context_length_exceeded"),
+            "HTTP 400: bad request"
+        )));
+        let mut streamed = failed("the stream failed");
+        streamed.provider_error = Some(ProviderError::Provider {
+            code: Some("Model_Context_Window_Exceeded".into()),
+        });
+        assert!(is_context_overflow(&streamed));
+    }
+
+    #[test]
+    fn overflow_is_recognized_by_generic_wording_without_a_code() {
+        for error in [
+            "HTTP 400: This model's maximum context length is 65536 tokens",
+            "HTTP 400: Your input exceeds the context window of this model",
+            "HTTP 400: prompt is too long: 213462 tokens > 200000 maximum",
+            "HTTP 400: the request exceeds the available context size",
+            "HTTP 413: request entity too large",
+        ] {
+            assert!(is_context_overflow(&failed(error)), "{error}");
+        }
+        assert!(is_context_overflow(&http(
+            400,
+            None,
+            "HTTP 400: too many tokens in the prompt"
+        )));
+    }
+
+    #[test]
+    fn throttling_and_other_failures_are_not_overflow() {
+        // Throttling may mention tokens, and a server error is not about the request's size.
+        assert!(!is_context_overflow(&http(
+            429,
+            None,
+            "HTTP 429: too many tokens, please wait"
+        )));
+        assert!(!is_context_overflow(&failed(
+            "ThrottlingException: rate limit, too many tokens"
+        )));
+        assert!(!is_context_overflow(&http(
+            503,
+            None,
+            "HTTP 503: maximum context of the queue"
+        )));
+        assert!(!is_context_overflow(&http(
+            400,
+            Some("invalid_request_error"),
+            "HTTP 400: unknown model"
+        )));
+        let mut transport = failed("connection reset; context length unknown");
+        transport.provider_error = Some(ProviderError::Transport);
+        assert!(!is_context_overflow(&transport));
+        assert!(!is_context_overflow(&AssistantMessage::failure(
+            "p",
+            "m",
+            StopReason::Aborted,
+            "context length exceeded"
+        )));
     }
 
     #[test]
