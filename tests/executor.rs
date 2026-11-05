@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use zx_agent::agent::{ExecutionMode, Tool, ToolContext};
 use zx_agent::executor::{Captured, CommandEnd, CommandOutput, Executor, ShellCommand};
-use zx_agent::tools::{BashTool, ReadFileTool};
+use zx_agent::tools::{BashTool, EditFileTool, ReadFileTool, WriteFileTool};
 
 /// What a tool asked its executor to do.
 #[derive(Debug, PartialEq)]
@@ -188,6 +188,8 @@ fn tools_declare_the_execution_mode_of_their_executor() {
     // On this machine, and with any executor that does not say otherwise, calls may overlap.
     assert_eq!(BashTool::default().execution_mode(), ExecutionMode::Parallel);
     assert_eq!(ReadFileTool::default().execution_mode(), ExecutionMode::Parallel);
+    assert_eq!(EditFileTool::default().execution_mode(), ExecutionMode::Parallel);
+    assert_eq!(WriteFileTool::default().execution_mode(), ExecutionMode::Parallel);
 
     let executor: Arc<dyn Executor> = Arc::new(OneAtATime);
     let bash = BashTool {
@@ -195,10 +197,54 @@ fn tools_declare_the_execution_mode_of_their_executor() {
         ..BashTool::default()
     };
     let read = ReadFileTool {
-        executor,
+        executor: Arc::clone(&executor),
         ..ReadFileTool::default()
+    };
+    let edit = EditFileTool {
+        executor: Arc::clone(&executor),
+        ..EditFileTool::default()
+    };
+    let write = WriteFileTool {
+        executor,
+        ..WriteFileTool::default()
     };
 
     assert_eq!(bash.execution_mode(), ExecutionMode::Sequential);
     assert_eq!(read.execution_mode(), ExecutionMode::Sequential);
+    assert_eq!(edit.execution_mode(), ExecutionMode::Sequential);
+    assert_eq!(write.execution_mode(), ExecutionMode::Sequential);
+}
+
+#[tokio::test]
+async fn the_file_tools_read_and_write_through_their_executor() {
+    let recorder = Arc::new(Recorder {
+        requests: Mutex::new(Vec::new()),
+        end: || CommandEnd::Exited(0),
+        file: "a\nb\n",
+    });
+    let edit = EditFileTool {
+        executor: recorder.clone(),
+        ..EditFileTool::default()
+    };
+
+    // The recorder reads but, like an executor written before writing existed, cannot write.
+    let error = edit
+        .execute(
+            json!({"path": "f.txt", "edits": [{"oldText": "a", "newText": "c"}]}),
+            &ctx(),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        "cannot write /work/f.txt: this executor does not support writing files"
+    );
+    assert_eq!(
+        *recorder.requests.lock().unwrap(),
+        [Request::Read {
+            path: PathBuf::from("/work/f.txt"),
+            max_bytes: 10 * 1024 * 1024,
+        }]
+    );
 }

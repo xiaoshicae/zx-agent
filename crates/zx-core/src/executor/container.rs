@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail, ensure};
 use async_trait::async_trait;
 use serde::Deserialize;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio_util::sync::CancellationToken;
 
@@ -43,6 +43,8 @@ const START_POLL: Duration = Duration::from_millis(100);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Longest wait for one file read. A FIFO swapped in after the checks would otherwise block.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// Longest wait for one file write, for the same reason.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Longest wait for one sweep of the command user's processes.
 const KILL_TIMEOUT: Duration = Duration::from_secs(10);
 /// The user that PID 1 and its `cat` run as: root without capabilities, so that commands,
@@ -68,7 +70,7 @@ while read -r key value rest; do
 done < /proc/self/status
 [ -n "$uid" ] && [ "$uid" != 0 ] || { echo "commands must not run as root (uid ${uid:-unknown})" >&2; exit 90; }
 missing=
-for program in "$shell" cat head uname; do
+for program in "$shell" cat head uname mkdir; do
   command -v "$program" >/dev/null 2>&1 || missing="$missing $program"
 done
 [ -z "$missing" ] || { echo "the image lacks:$missing" >&2; exit 91; }
@@ -94,6 +96,16 @@ const READ_DIRECTORY: i32 = 94;
 const READ_MISSING: i32 = 95;
 const READ_SPECIAL: i32 = 96;
 const READ_DENIED: i32 = 97;
+
+/// Refuses directories and special files, creates missing parent directories, then replaces
+/// the file's contents with its standard input. Arguments: the absolute path.
+const WRITE: &str = r#"case $1 in */?*) dir=${1%/*}; [ -z "$dir" ] || [ -d "$dir" ] || mkdir -p -- "$dir" || exit 99 ;; esac
+if [ -d "$1" ]; then exit 94; fi
+if [ -e "$1" ] && [ ! -f "$1" ]; then exit 96; fi
+exec cat > "$1""#;
+
+/// Exit code of the write script when it cannot create a parent directory.
+const WRITE_NO_DIRECTORY: i32 = 99;
 
 /// Refuses directories, missing, special and unreadable files; then reads a bounded prefix.
 /// Arguments: the path and the byte limit.
@@ -246,6 +258,22 @@ impl Target {
             .arg(&self.name)
             .args(["sh", "-c", script, label])
             .args(arguments);
+        command
+    }
+
+    /// Like [`Target::exec`], with the command's standard input open for the caller to write.
+    fn exec_with_input<I, S>(&self, script: &str, label: &str, arguments: I) -> Command
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut command = docker(&self.docker);
+        command
+            .args(["exec", "--interactive", "--user", &self.user])
+            .arg(&self.name)
+            .args(["sh", "-c", script, label])
+            .args(arguments)
+            .stdin(Stdio::piped());
         command
     }
 
@@ -480,6 +508,59 @@ impl Executor for ContainerExecutor {
             )),
             _ => Err(format!(
                 "cannot read {} in the container: {}",
+                path.display(),
+                text(&stderr)
+            )),
+        }
+    }
+
+    async fn write_file(&self, path: &Path, contents: &[u8]) -> Result<(), String> {
+        // A sweep for a command would also stop this write, so wait for any command to finish.
+        let _turn = self.turn.lock().await;
+        let mut command = self.target.exec_with_input(WRITE, "zx-agent-write", [path.as_os_str()]);
+        command.stdout(Stdio::null()).stderr(Stdio::piped());
+        let write = async {
+            let mut child = command.spawn().map_err(|e| format!("cannot run docker exec: {e}"))?;
+            let (stderr, stderr_reader) = spawn_reader(child.stderr.take());
+            if let Some(mut stdin) = child.stdin.take() {
+                // A script that refused the path exits without reading; its status explains why.
+                if let Err(error) = stdin.write_all(contents).await
+                    && error.kind() != std::io::ErrorKind::BrokenPipe
+                {
+                    return Err(format!("cannot write {}: {error}", path.display()));
+                }
+                // Dropping stdin closes it, which ends `cat`.
+            }
+            let status = child
+                .wait()
+                .await
+                .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+            if let Some(reader) = stderr_reader {
+                finish_reader(reader).await;
+            }
+            Ok::<_, String>((status, take_capture(&stderr).bytes))
+        };
+        let (status, stderr) = tokio::time::timeout(WRITE_TIMEOUT, write).await.map_err(|_| {
+            format!(
+                "writing {} in the container took longer than {}s",
+                path.display(),
+                WRITE_TIMEOUT.as_secs()
+            )
+        })??;
+        match status.code() {
+            Some(0) => Ok(()),
+            Some(READ_DIRECTORY) => Err(format!("{} is a directory", path.display())),
+            Some(READ_SPECIAL) => Err(format!(
+                "{} is not a regular file; special files are not supported",
+                path.display()
+            )),
+            Some(WRITE_NO_DIRECTORY) => Err(format!(
+                "cannot create the directory of {} in the container: {}",
+                path.display(),
+                text(&stderr)
+            )),
+            _ => Err(format!(
+                "cannot write {} in the container: {}",
                 path.display(),
                 text(&stderr)
             )),

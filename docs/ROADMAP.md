@@ -533,7 +533,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P7 | 插件与 MCP | 已完成（PR #41）：范围按 D8 收窄，评审稿已合入（PR #36）并经用户确认；模块 A（Extension 接口，PR #38）、B1（MCP 客户端库，PR #40）、B2（CLI 接入与文档，PR #41）已完成；真实 MCP 服务器的验收待选定服务器；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已完成（PR #23），A2–A8（扩展 API）已完成（PR #25） |
 | P8 | 嵌入协议 `acp` | 不做（2026-11-02 用户决定，D10） |
 | P9 | 可选增强 | 进行中：token 预算（PR #47）、OpenTelemetry 追踪（PR #49）、crate 拆分（PR #52）、通用化整理（PR #54）已完成；剩更多 provider（如 Anthropic）。其余各项按 D10 不做或取消 |
-| P10 | 与 pi 的能力对齐 | 进行中：2026-11-05 对照 pi 列出 14 项缺口，见下文 P10；① 上下文超长后自动恢复已完成（PR #56）；② 容器沙箱已完成（PR #57） |
+| P10 | 与 pi 的能力对齐 | 进行中：2026-11-05 对照 pi 列出 14 项缺口，见下文 P10；① 上下文超长后自动恢复已完成（PR #56）；② 容器沙箱已完成（PR #57）；③ edit 与 write 工具已实现 |
 
 ### P0 场景默认值移出内核
 
@@ -1325,7 +1325,7 @@ crate 拆分（2026-11-02，已完成，PR #52；基于 PR #51 合并后的 `640
 
 - [x] **① 上下文超长后自动恢复**（高；已完成（PR #56），2026-11-05，见下方实施记录）。pi 识别超长（`packages/ai/src/utils/overflow.ts:144`）后压缩一次再重试（`packages/coding-agent/src/core/agent-session.ts:3063`）。zx 把 `context_length_exceeded` 归为不重试的错误（`crates/zx-ai/src/retry.rs:130`），运行直接失败。做法：provider 按状态与错误码给出通用的“超长”分类，不按厂商写正则；运行层收到后做一次摘要再续跑，摘要与续跑都经现有的请求审计，保持不变量 6；没有配置摘要时照旧失败。
 - [x] **② 容器沙箱改为沙箱内最大权限**（D11；已完成（PR #57），2026-11-05，见下方实施记录）。是 ③ 在容器中可用的前提。
-- [ ] **③ edit 与 write 工具**（高）。pi 默认工具集是 read、bash、edit、write（`packages/coding-agent/src/core/tools/edit.ts`、`write.ts`）：一次调用可做多处不重叠的精确替换，`details` 带 diff，同一文件的写入经 `file-mutation-queue.ts` 串行。zx 只有 `bash`、`read_file`（`crates/zx-tools/src/tools/mod.rs:24`），`Executor` 只有 `run` 与 `read_file`（`crates/zx-core/src/executor/mod.rs:83,88`）。做法：`Executor` 增加写文件；两个工具声明 `SideEffects`（不变量 10），`details` 带 diff 供审批与审计；同一文件的写入串行，不同文件仍可并行；规则策略可以用 `askTools` 管到它们。
+- [x] **③ edit 与 write 工具**（高；已实现，2026-11-05，见下方实施记录）。pi 默认工具集是 read、bash、edit、write（`packages/coding-agent/src/core/tools/edit.ts`、`write.ts`）：一次调用可做多处不重叠的精确替换，`details` 带 diff，同一文件的写入经 `file-mutation-queue.ts` 串行。zx 只有 `bash`、`read_file`（`crates/zx-tools/src/tools/mod.rs:24`），`Executor` 只有 `run` 与 `read_file`（`crates/zx-core/src/executor/mod.rs:83,88`）。做法：`Executor` 增加写文件；两个工具声明 `SideEffects`（不变量 10），`details` 带 diff 供审批与审计；同一文件的写入串行，不同文件仍可并行；规则策略可以用 `askTools` 管到它们。
 - [ ] **④ grep、find、ls 只读工具**（中）。pi 用 ripgrep 与 fd，遵守 `.gitignore`，结果有上限（`grep.ts`、`find.ts`、`ls.ts`）。zx 只能经 bash 与命令白名单。声明为 `ReadOnly`，不必依赖白名单即可免审批。待定：经 `Executor` 调外部程序（不加依赖，容器中同样可用）还是用 Rust 实现（需新增 `ignore` 等依赖，红线 5）。
 - [ ] **⑤ 运行中可调整的配置**（中高）。推理强度作为一等配置并可在空闲时修改、变化写入会话（目前只能用 `--request-field` 静态传）；每次请求前可替换模型与推理强度的钩子（pi 的 `prepareRequest`、`prepareNextTurn`，`packages/agent/src/agent-loop.ts:195,228`；zx 的 `set_model` 只能空闲时调用，`crates/zx-core/src/agent_session.rs:222`）；不加新输入的续跑（pi 的 `continue()`；`Runner::run` 必须带提示词）。推理强度的写法遵守 D10：各 provider 显式映射。
 - [ ] **⑥ 会话导航**（中）。列出会话、续接最近一次、fork 成新会话、在分支间切换（`packages/coding-agent/src/core/session-manager.ts`）。zx 只有 `--session <path>`；`SessionStore::branch`（`crates/zx-core/src/session.rs:486`）只在测试中调用。补 SDK 接口与 CLI，`chat` 加对应命令。
@@ -1352,6 +1352,22 @@ crate 拆分（2026-11-02，已完成，PR #52；基于 PR #51 合并后的 `640
 - 测试：新增 12 项：`crates/zx-ai/src/retry.rs` 单元测试 3 项（按状态与错误码、按通用措辞、限流与其他失败不算）；`tests/overflow_recovery.rs` 7 项（成功恢复：请求、投影、事件顺序与尝试编号；未开启自动摘要时不变；恢复后紧接着又过长；回答成功后可再次恢复；摘要失败暂停；预算用完；运行超时）；`tests/openai_mock.rs` 1 项（真实 HTTP 下带错误码的 400）；`tests/request_audit.rs` 1 项（恢复前后的三个请求都能从会话文件逐个还原）。
 - 反向验证：分别去掉运行层的恢复分支、“恢复后紧接着又过长”的拒绝、“回答成功后可再次恢复”的重置、摘要失败时的暂停、按错误码的识别，每次都有对应测试失败（依次 6、1、1、1、1 项），修改已还原。按错误码识别被去掉时，HTTP 端到端测试仍通过：错误文本包含响应体，其中的错误码也被通用措辞 `context_length` 命中，这条路径只由单元测试单独覆盖。
 - 本机 macOS 验证：stable 下 828 项通过、7 项付费测试跳过（基线 816 项，PR #55 的实测）；fmt、clippy、严格 Rustdoc 与 Rust 1.88.0 的全目标检查通过；Rust 1.88.0 下没有运行测试。自查脚本在改动的文件中只列出原有的 1 处（`src/chat/output.rs` 的 `let _ =`）。未新增依赖。没有对真实模型服务验证超长时的错误格式。
+
+③ 实施记录（2026-11-05，基于 `38eaebf`，即 PR #57 合并后）：
+
+| 环节 | 做法 |
+|---|---|
+| 执行器 | `Executor` 新增 `write_file(path, contents)`：新建或覆盖普通文件、创建缺少的上级目录，拒绝目录与特殊文件；有默认实现（返回“不支持写文件”的错误），此前实现该 trait 的执行器不受影响。`LocalExecutor` 打开前后各查一次文件类型（与读文件相同，防止中途换成 FIFO）；`ContainerExecutor` 经 `docker exec --interactive` 以命令用户运行写入脚本，内容从标准输入传入，与命令、读文件共用逐个执行的次序，30 秒超时；启动检查增加 `mkdir` |
+| 工具 | `edit_file`（`EditFileTool`）与 `write_file`（`WriteFileTool`），名字沿用 `read_file` 的写法；都按执行器声明执行方式，`effects` 保持默认的 `SideEffects`（不变量 10）。`edit_file` 的语义照 pi：每处 `oldText` 与原文件比较、恰好出现一次、互不重叠，有一处失败就不写；精确匹配不到时忽略行尾空白、把弯引号、破折号与特殊空格当作 ASCII 再匹配，只重写被替换的行；保留 BOM 与 CRLF；拒绝二进制与非 UTF-8；`prepare_arguments` 改写三种旧写法（字符串形式的 `edits`、单个对象、顶层的 `oldText` / `newText`） |
+| diff | `details` 含 unified patch（3 行上下文，超过 12 KiB 截断，免得整份 `details` 超过 16 KiB 被丢弃）与第一处改动的行号。没有引入依赖：先去掉相同的首尾行，中间用 Myers 算法求最短编辑脚本，插入与删除超过 500 行时整段显示为删除再添加（时间与内存随这个数的平方增长） |
+| 按文件串行 | `FileMutationQueue`：按解析符号链接后的路径（文件不存在时解析其目录）给每个文件一把锁，`builtin_tools_with` 构造的两个工具共用一个；改同一文件的调用逐个执行，改不同文件的仍并行。锁只在有调用持有时存在 |
+| profile | 内置 assistant 启用两个工具并要求审批（`askTools` 加入两者）；`unattended`、`troubleshoot` 不启用；Kubernetes 部署的 profile 继承 assistant，显式列出原来的工具与 `askTools = ["bash"]`，部署行为不变 |
+| 与 pi 的不同 | 不做 Unicode NFKC 规范化（标准库没有，需新增依赖）；`write_file` 的 `details` 只含路径与字节数，pi 为空；patch 头只写路径，与 pi 的 `FILE_HEADERS_ONLY` 一致 |
+
+- 测试：新增 35 项：`edit_text` 单元测试 13 项（按原文件匹配、缺失 / 重复 / 空 / 重叠 / 无变化的报错、宽松匹配只重写所触及的行、宽松形式下计算重复、CRLF 的 oldText、BOM 与换行往返、多字节字符、patch 的上下文与行号、相邻改动合并与缺少末尾换行、新建与清空、超过搜索上限时整段显示、2000 组随机输入与 LCS 动态规划比对编辑数最少且两侧可还原、Myers 论文的例子），`FileMutationQueue` 2 项，`edit.rs` 单元测试 4 项（旧写法的改写、不改写的情形、patch 截断），`tests/file_tools.rs` 10 项，`tests/executor.rs` 1 项（不能写文件的执行器），`tests/container.rs` 4 项（假 docker 的写入参数与报错，真实 Docker 的写入与只读工作目录），`tests/chat_cli.rs` 1 项（默认 profile 下 write_file 先审批）。既有测试的调整：profile 单元测试中 assistant 与继承它的 profile 的 `askTools` 加入两个工具，Kubernetes profile 一项补上工具列表的断言；假 docker 增加 `--interactive` 与写入脚本的处理。
+- 反向验证：分别让同一文件不再串行、关掉宽松匹配、不恢复 BOM 与 CRLF、不改写旧写法、容器写入不带 `--interactive`，每次都有对应测试失败（各 1 项），修改已还原。
+- 本机 macOS 验证：stable 下 875 项通过、7 项付费测试跳过（基线 840 项，PR #57 合并后的实测）；fmt、clippy、严格 Rustdoc 与 Rust 1.88.0 的全目标检查通过；Rust 1.88.0 下没有运行测试。自查脚本在改动的文件中只列出原有的命中（`local.rs` 的 `unsafe` 与 `let _ =`，`container.rs` 的 `unsafe` 与 `let _ =`）。未新增依赖。
+- 未验证：本机 Docker 守护进程没有运行，新增的 2 项真实 Docker 测试（写入、只读工作目录拒绝写入）只打印了跳过提示，留待 CI 的 Linux 任务。没有用真实模型试过两个工具。
 
 ② 实施记录（2026-11-05，PR #57，基于 `77efb18`，即 PR #56 合并后）：
 

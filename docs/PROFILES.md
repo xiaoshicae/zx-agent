@@ -46,8 +46,8 @@ path = "skills/rust-review/SKILL.md"
 | `name` | 场景名称，省略时继承基线 |
 | `extends` | 可选的 `unattended`、`troubleshoot` 或 `assistant`；省略时使用当前前端的默认 profile；不支持文件链式继承 |
 | `instructions` | 替换场景说明的 UTF-8 文件；CLI `--system-prompt-file` 优先，它的读取方式与引入 profile 之前一致：可以是管道，不受 64 KiB 限制，只在启动时读取一次（`chat` 的 `/new` 沿用同一内容） |
-| `tools` | 替换启用列表，支持 `bash`、`read_file`、`read_skill`、`read_output`；`[]` 禁用全部工具 |
-| `execution` | `local`（默认）或 `container`；其他值报错。`container` 时 bash 与 read_file 在 Docker 容器中执行，见 README 的“容器执行”。CLI `--execution` 优先 |
+| `tools` | 替换启用列表，支持 `bash`、`read_file`、`edit_file`、`write_file`、`read_skill`、`read_output`；`[]` 禁用全部工具。内置 assistant 启用全部六个，并对 `bash`、`edit_file`、`write_file` 要求审批 |
+| `execution` | `local`（默认）或 `container`；其他值报错。`container` 时 bash、read_file、edit_file 与 write_file 在 Docker 容器中执行，见 README 的“容器执行”。CLI `--execution` 优先 |
 | `container.image` | 容器镜像，`execution = "container"` 时必填，须已在本地；CLI `--container-image` 优先 |
 | `container.user` | 容器内运行命令的 `uid:gid`，默认为运行 zx-agent 的用户（以 root 运行时为 `65534:65534`）；不能是 root（UID 0 或 `root`），启动时也会检查命令的实际 UID |
 | `container.memory` | Docker 写法的内存上限，默认 `1g` |

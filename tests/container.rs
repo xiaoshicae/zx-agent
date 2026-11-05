@@ -37,7 +37,8 @@ use common::{RunnerSetup, config};
 /// Logs every invocation's arguments to `calls/` and answers from files next to it:
 /// `run.fail` (docker run fails with this message), `probe.code` and `probe.err` (the start-up
 /// probe fails), `cmd.out`, `cmd.err`, `cmd.code` and `cmd.hang` (a command's result, or a
-/// command that never ends), `read.out` and `read.code` (a file read).
+/// command that never ends), `read.out` and `read.code` (a file read), `write.code` and
+/// `write.err` (a file write, whose input it saves as `write.in`).
 const FAKE_DOCKER: &str = r#"#!/bin/sh
 # The readiness check of FakeDocker::new, not recorded as a call.
 if [ "$1" = "--zx-ready" ]; then exit 0; fi
@@ -52,8 +53,11 @@ case "$1" in
     ;;
   exec)
     shift
-    # Skip the options before the container name: --user, and --workdir for commands.
-    while [ "${1#--}" != "$1" ]; do shift 2; done
+    # Skip the options before the container name: --user, --workdir for commands and
+    # --interactive, which takes no value, for writes.
+    while [ "${1#--}" != "$1" ]; do
+      if [ "$1" = --interactive ]; then shift; else shift 2; fi
+    done
     shift 4
     label=$1
     case "$label" in
@@ -71,6 +75,10 @@ case "$1" in
       zx-agent-read)
         if [ -f "$dir/read.out" ]; then cat "$dir/read.out"; fi
         exit "$(cat "$dir/read.code" 2>/dev/null || echo 0)" ;;
+      zx-agent-write)
+        cat > "$dir/write.in"
+        if [ -f "$dir/write.err" ]; then cat "$dir/write.err" >&2; fi
+        exit "$(cat "$dir/write.code" 2>/dev/null || echo 0)" ;;
       zx-agent-sweep)
         exit 0 ;;
     esac
@@ -572,6 +580,55 @@ async fn file_reads_map_each_refusal_to_an_actionable_error() {
 }
 
 #[tokio::test]
+async fn file_writes_pass_the_contents_on_standard_input_as_the_command_user() {
+    let fake = FakeDocker::new();
+    let user = fake.config().user;
+    let executor = ContainerExecutor::start(fake.config()).await.unwrap();
+
+    executor
+        .write_file(Path::new("/srv/new/app.conf"), b"port = 8080\n")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read(fake.dir.path().join("write.in")).unwrap(),
+        b"port = 8080\n"
+    );
+    let call = &fake.execs("zx-agent-write")[0];
+    assert_eq!(call[1..5], ["--interactive", "--user", user.as_str(), executor.name()]);
+    assert_eq!(after(call, "zx-agent-write"), ["/srv/new/app.conf".to_string()]);
+}
+
+#[tokio::test]
+async fn file_writes_map_each_refusal_to_an_actionable_error() {
+    let fake = FakeDocker::new();
+    let executor = ContainerExecutor::start(fake.config()).await.unwrap();
+    let path = Path::new("/srv/app.conf");
+    for (code, error, message) in [
+        ("94", "", "/srv/app.conf is a directory"),
+        (
+            "96",
+            "",
+            "/srv/app.conf is not a regular file; special files are not supported",
+        ),
+        (
+            "99",
+            "mkdir: cannot create directory '/srv': Permission denied",
+            "cannot create the directory of /srv/app.conf in the container: mkdir: cannot create directory '/srv': Permission denied",
+        ),
+        (
+            "2",
+            "sh: 1: cannot create /srv/app.conf: Read-only file system",
+            "cannot write /srv/app.conf in the container: sh: 1: cannot create /srv/app.conf: Read-only file system",
+        ),
+    ] {
+        fake.answer("write.code", code);
+        fake.answer("write.err", error);
+        assert_eq!(executor.write_file(path, b"x").await.unwrap_err(), message);
+    }
+}
+
+#[tokio::test]
 async fn dropping_the_executor_ends_the_docker_run_client() {
     let fake = FakeDocker::new();
     let executor = ContainerExecutor::start(fake.config()).await.unwrap();
@@ -848,6 +905,40 @@ async fn real_files_are_read_inside_the_container() {
     }
     let error = executor.read_file(Path::new("/etc/os-release"), 4).await.unwrap_err();
     assert!(error.contains("over the 4 byte limit"), "{error}");
+}
+
+#[tokio::test]
+async fn real_files_are_written_inside_the_container() {
+    let Some(image) = docker_image() else { return };
+    let (_dir, workspace) = real_workspace();
+    let executor = start_real(&image, &workspace).await;
+    let file = workspace.join("deep/dir/notes.txt");
+
+    executor.write_file(&file, b"first\n").await.unwrap();
+    executor.write_file(&file, b"second\n").await.unwrap();
+
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "second\n");
+    assert_eq!(std::fs::metadata(&file).unwrap().uid(), owner(&workspace));
+    let error = executor.write_file(&workspace.join("deep"), b"x").await.unwrap_err();
+    assert!(error.contains("is a directory"), "{error}");
+}
+
+#[tokio::test]
+async fn real_a_read_only_workspace_refuses_writes() {
+    let Some(image) = docker_image() else { return };
+    let (_dir, workspace) = real_workspace();
+    let executor = ContainerExecutor::start(ContainerConfig {
+        label: "zx-agent-test".into(),
+        workspace_access: Access::ReadOnly,
+        ..ContainerConfig::new(&image, &workspace)
+    })
+    .await
+    .unwrap();
+
+    let error = executor.write_file(&workspace.join("new.txt"), b"x").await.unwrap_err();
+
+    assert!(error.contains("Read-only file system"), "{error}");
+    assert!(!workspace.join("new.txt").exists());
 }
 
 #[tokio::test]
