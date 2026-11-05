@@ -535,7 +535,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P7 | 插件与 MCP | 已完成（PR #41）：范围按 D8 收窄，评审稿已合入（PR #36）并经用户确认；模块 A（Extension 接口，PR #38）、B1（MCP 客户端库，PR #40）、B2（CLI 接入与文档，PR #41）已完成；真实 MCP 服务器的验收待选定服务器；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已完成（PR #23），A2–A8（扩展 API）已完成（PR #25） |
 | P8 | 嵌入协议 `acp` | 不做（2026-11-02 用户决定，D10） |
 | P9 | 可选增强 | 进行中：token 预算（PR #47）、OpenTelemetry 追踪（PR #49）、crate 拆分（PR #52）、通用化整理（PR #54）、chat 交互体验（2026-11-05，见下文）已完成；剩更多 provider（如 Anthropic）。其余各项按 D10 不做或取消 |
-| P10 | 与 pi 的能力对齐 | 进行中：2026-11-05 对照 pi 列出 14 项缺口，见下文 P10；① 上下文超长后自动恢复已完成（PR #56）；② 容器沙箱已完成（PR #57）；③ edit 与 write 工具已完成（PR #58）；④ grep、find、ls 已完成（PR #59）；⑤ 运行中可调整的配置已完成：⑤a 推理强度（PR #60）、⑤b 续跑（PR #61）、⑤c 请求前替换模型与推理强度的钩子（PR #65）；⑥a 会话目录与续接已完成（PR #67）；⑥b fork 已完成（PR #68）；⑥c 会话内切换分支已完成（PR 待开）；⑦ 扩展能力与 ⑨ 消息队列已完成（PR 待开）；⑧ 模型元数据与计量已完成（PR 待开）；⑫ 幂等键已完成（PR 待开，rpc 模式按 D13 不做）；⑬ MCP 进度已完成（PR 待开） |
+| P10 | 与 pi 的能力对齐 | 进行中：2026-11-05 对照 pi 列出 14 项缺口，见下文 P10；① 上下文超长后自动恢复已完成（PR #56）；② 容器沙箱已完成（PR #57）；③ edit 与 write 工具已完成（PR #58）；④ grep、find、ls 已完成（PR #59）；⑤ 运行中可调整的配置已完成：⑤a 推理强度（PR #60）、⑤b 续跑（PR #61）、⑤c 请求前替换模型与推理强度的钩子（PR #65）；⑥a 会话目录与续接已完成（PR #67）；⑥b fork 已完成（PR #68）；⑥c 会话内切换分支已完成（PR 待开）；⑦ 扩展能力与 ⑨ 消息队列已完成（PR 待开）；⑧ 模型元数据与计量已完成（PR 待开）；⑫ 幂等键已完成（PR 待开，rpc 模式按 D13 不做）；⑬ MCP 进度已完成（PR 待开）；⑩ 可观测已完成（PR 待开） |
 
 ### P0 场景默认值移出内核
 
@@ -1383,7 +1383,7 @@ chat 交互体验第三批（2026-11-05，基于合并 PR #65 之后的 `829afc8
 - [x] **⑦ 扩展能力**（中高，嵌入；已完成（PR 待开），2026-11-05，见下方实施记录）。pi 的扩展可写自定义条目（`appendEntry`）、注入非用户消息（`sendMessage`）、运行中启停工具（`setActiveTools`）、注册命令（`registerCommand`）（`packages/coding-agent/src/core/extensions/types.ts`）。zx 的条目只有 9 种内部类型（`crates/zx-core/src/session.rs:142-151`），工具在构建时固定。自定义消息与“会话投影是上下文的唯一来源”（不变量 6）如何共存，先出方案再实施。
 - [x] **⑧ 模型层的元数据与计量**（中；已完成（PR 待开），2026-11-05，见下方实施记录）。在配置中写模型的上下文窗口、单价与输入类型（不内置厂商模型表，D10），用来按 token 设摘要阈值（现为字节）并计算成本；用量增加 cacheWrite 与推理 token；会话记录应答方返回的模型名与响应 ID；按会话的 prompt cache key；自定义请求头；每次请求动态取 API key；`Retry-After` 支持 HTTP 日期与毫秒写法，退避加抖动。
 - [x] **⑨ 消息队列**（低中；已完成（PR 待开，与 ⑦ 同一提交），2026-11-05，见下方实施记录）。队列模式 one-at-a-time（pi 默认，`packages/agent/src/types.ts:55`）；zx 一次取完（`crates/zx-core/src/agent/agent_loop/context.rs:128`）。队列消息目前只能是纯文本。
-- [ ] **⑩ 可观测**（中）。指标（运行耗时、结果计数、token、工具与 MCP 调用耗时）与跨进程传递 trace（W3C `traceparent`）（`packages/telemetry`）。zx 只导出 trace，trace ID 由 SDK 生成。待定：指标要开 opentelemetry 系列的 `metrics` feature，锁文件可能增加包。
+- [x] **⑩ 可观测**（中；已完成（PR 待开），2026-11-05，见下方实施记录）。指标（运行耗时、结果计数、token、工具与 MCP 调用耗时）与跨进程传递 trace（W3C `traceparent`）（`packages/telemetry`）。zx 只导出 trace，trace ID 由 SDK 生成。待定：指标要开 opentelemetry 系列的 `metrics` feature，锁文件可能增加包。
 - [ ] **⑪ 行为评测框架**（中）。按 profile 运行场景用例，支持重复次数、两种变体配对比较、只用合成数据、产物落盘（`packages/evals`）。zx 只有一项摘要评测（`tests/real_api.rs`）。框架与离线用例可直接做；真实运行每次都要用户授权（红线 9）。
 - [x] **⑫ 嵌入**（中；幂等键已完成（PR 待开），rpc 模式按 D13 不做，2026-11-05，见下方实施记录）。SDK 提交提示词的幂等键，防止宿主重试时重复提交。待定：给非 Rust 程序用的进程协议（类似 pi 的 rpc 模式，`packages/coding-agent/src/modes/rpc`）。ACP 已按 D10 不做，rpc 是否做由用户决定。
 - [x] **⑬ MCP 进度**（低中；已完成（PR 待开），2026-11-05，见下方实施记录）。转发服务器的进度通知，并按进度延长超时（`packages/mcp/src/client.ts`）；zx 的调用固定 120 秒超时（`crates/zx-tools/src/mcp.rs:36`）。rmcp 是否支持，实施前核对。
@@ -1405,6 +1405,23 @@ chat 交互体验第三批（2026-11-05，基于合并 PR #65 之后的 `829afc8
 - 本机 macOS 验证：stable 下 828 项通过、7 项付费测试跳过（基线 816 项，PR #55 的实测）；fmt、clippy、严格 Rustdoc 与 Rust 1.88.0 的全目标检查通过；Rust 1.88.0 下没有运行测试。自查脚本在改动的文件中只列出原有的 1 处（`src/chat/output.rs` 的 `let _ =`）。未新增依赖。没有对真实模型服务验证超长时的错误格式。
 
 ⑥ 分三步，各一个 PR：⑥a 会话目录、列出与续接；⑥b fork 成新会话（`--fork`、`/fork`，头部记下来源会话）；⑥c 会话内切换分支（`AgentSession` 的分支接口，chat 的 `/tree` 与 `/branch`）。会话目录的默认位置经用户决定（D12）。
+
+⑩ 实施记录（2026-11-05，PR 待开，基于 ⑬ 的提交 `4953da5`）：
+
+依赖的核实：`cargo tree -f '{p} {f}' -i opentelemetry-otlp` 显示 `http-proto` feature 已经带上 `metrics`，三个 OpenTelemetry crate 的 `metrics` feature 因此早已启用；`Cargo.toml` 与 `Cargo.lock` 都没有改动（锁文件仍为 287 个包）。pi 的 `packages/telemetry` 只定义契约：指标由 `packages/ai/src/telemetry.ts`（`pi.ai.request.duration`、`pi.ai.tokens`、`pi.ai.cost` 等）与 durable harness 定义，跨进程传递是 `propagation.inject / extract` 得到的不透明 carrier，存进 durable 的任务记录，调度时再取出作为父上下文或 link；pi 没有把 trace 上下文传给工具的子进程。
+
+| 环节 | 做法 |
+|---|---|
+| 指标 | 与 span 同源：导出任务在 span 结束时记录。`zx.runs`、`zx.run.duration`、`zx.request.duration`、`zx.tokens`（含 `cache_write` 与 `reasoning`）、`zx.cost`、`zx.tool.duration`（MCP 工具同样计入）、`zx.retries`、`zx.compaction.duration`、`zx.approval.wait`；时长单位为秒（语义约定），桶固定为 0.05 秒到 1 小时。摘要请求的回答没有 `message_end` 事件，其 token 在 `compaction_end` 时按被请求的模型计一次 |
+| 导出 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` 或 `OTEL_EXPORTER_OTLP_ENDPOINT` 设置时建立 `MetricExporter` + `PeriodicReader`（间隔取 `OTEL_METRIC_EXPORT_INTERVAL`，SDK 0.33 自己不读这个变量，默认 60 秒）；退出时先关 span 再关指标，周期读取器关闭时会再导出一次。只设追踪地址时不建指标导出器，反之亦然；`Telemetry::exports()` 说明导出哪些信号 |
+| traceparent | `TraceParent::parse` 经 SDK 的 `TraceContextPropagator` 解析，只接受合法值（版本、长度、小写十六进制、非零 ID），`tracestate` 原样保留；`Telemetry::sink_under(&parent)` 得到的 sink 让每个 `run` span（与手动摘要）以调用方的 span 为父。`run` 读 `TRACEPARENT` / `TRACESTATE`（`otel-cli` 的约定），不合法时打印原因并自成一条 trace；chat 与 serve 不读 |
+| span 属性 | `run` 与 `request` 的用量属性增加 `cache_write_tokens`、`reasoning_tokens`（不为零时）与 `cost_usd`（有单价时） |
+| 未做 | 把 trace 上下文传给工具的子进程（`TRACEPARENT` 环境变量）与模型、MCP 的 HTTP 请求（`traceparent` 头）：span 由后台任务按事件建立，SDK 0.33 不接受指定 span ID（`opentelemetry_sdk/src/trace/tracer.rs:188`），循环在执行工具时拿不到 span ID；要做需要内核增加一个 trace 上下文来源的接口。pi 也没有做 |
+
+- 测试：新增 6 项：`src/otel.rs` 单元 3 项（指标的属性与时长、traceparent 下的 trace 与父 span、traceparent 的解析与 7 种拒绝），`tests/otel.rs` 2 项（真实运行的指标、`sink_under`），`tests/run_cli.rs` 1 项（`TRACEPARENT` 的 ID 字节出现在导出的 protobuf 中，不合法时提示且不出现）。既有测试改动：`a_run_exports_its_trace_only_when_an_endpoint_is_configured` 改名为 `a_run_exports_its_trace_and_metrics_only_when_an_endpoint_is_configured`，期望两个请求（路径与内容）与新的提示文案；手动摘要的单元测试加上 token 只计一次与时长，未结束的请求的单元测试加上没有回答就不计时长；命令看不到收集器认证头的测试加入 `OTEL_EXPORTER_OTLP_METRICS_HEADERS`。
+- 反向验证：分别不记录指标（去掉 `instruments.runs.add`）、不把 traceparent 作为父上下文（`remote` 返回空上下文），每次都有对应测试失败，修改已还原。
+- 本机 macOS 验证：见下文“本次 PR 的验证”。
+- 未验证：没有对真实的 OpenTelemetry Collector 运行；假收集端只检查路径、`content-type` 与 protobuf 中的字符串和 ID 字节，不解码。
 
 ⑬ 实施记录（2026-11-05，PR 待开，基于 ⑫ 的提交 `0223eb7`）：
 

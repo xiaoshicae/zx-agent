@@ -21,7 +21,7 @@ use zx_agent::extensions::{
     self, ContinueOnLength, Extension, MIN_SECRET_CHARS, RedactSecrets, check_secret_files, short_secret_files,
 };
 use zx_agent::mcp::{Server, ServerConfig};
-use zx_agent::otel::{self, Telemetry};
+use zx_agent::otel::{self, Telemetry, TraceParent};
 use zx_agent::output_store::{self, OutputStore, ReadOutputTool, SpillOutputs};
 use zx_agent::policy::{AutoApprove, CommandPolicy, PolicyHook, Rule, RuleMatcher, RulePolicy};
 use zx_agent::profile::skills::{ReadSkillTool, TOOL_NAME};
@@ -656,15 +656,32 @@ fn request_fields(values: &[String]) -> Result<serde_json::Map<String, serde_jso
     Ok(fields)
 }
 
-/// Export traces when an OTLP endpoint is configured (`zx_agent::otel`), and say so on
-/// stderr. An endpoint the exporter refuses is a configuration error, reported before any
-/// session file is created.
+/// Export traces and metrics when an OTLP endpoint is configured (`zx_agent::otel`), and say
+/// so on stderr. An endpoint the exporter refuses is a configuration error, reported before
+/// any session file is created.
 pub(crate) fn start_telemetry() -> Result<Option<Telemetry>> {
     let telemetry = Telemetry::from_env().map_err(anyhow::Error::msg)?;
-    if telemetry.is_some() {
-        eprintln!("[otel] exporting traces over OTLP/HTTP");
+    if let Some(telemetry) = &telemetry {
+        eprintln!("[otel] exporting {} over OTLP/HTTP", telemetry.exports().describe());
     }
     Ok(telemetry)
+}
+
+/// The sink for an unattended run: the run continues the caller's trace when `TRACEPARENT`
+/// names one, as a scheduler or `otel-cli` sets it. A value that is not a traceparent is
+/// reported, and the run starts a trace of its own.
+pub(crate) fn run_sink(telemetry: &Telemetry) -> Arc<dyn EventSink> {
+    match TraceParent::from_env() {
+        Ok(Some(parent)) => {
+            eprintln!("[otel] continuing trace {}", parent.trace_id());
+            telemetry.sink_under(&parent)
+        }
+        Ok(None) => telemetry.sink(),
+        Err(error) => {
+            eprintln!("[otel] {error}; the run starts a trace of its own");
+            telemetry.sink()
+        }
+    }
 }
 
 /// Export the spans that remain. Telemetry never changes the outcome: failures only go to
