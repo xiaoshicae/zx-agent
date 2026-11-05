@@ -358,7 +358,7 @@ impl<'a> SessionFile<'a> {
         }
     }
 
-    fn path(&self) -> Option<&'a Path> {
+    pub(crate) fn path(&self) -> Option<&'a Path> {
         match self {
             Self::Memory => None,
             Self::Open(path) | Self::Create(path) => Some(path),
@@ -491,6 +491,10 @@ pub(crate) struct PreparedSession {
     pub(crate) auto_approve: AutoApprove,
     pub(crate) limits: Limits,
     pub(crate) compaction: compaction::Config,
+    /// The selected profile's name, for a frontend to show.
+    pub(crate) profile_name: String,
+    /// The profile's auto-approved command prefixes, for a frontend to show.
+    pub(crate) auto_approve_commands: Vec<String>,
 }
 
 /// Read `--system-prompt-file` once, at startup. As before profiles existed, it may be a
@@ -862,6 +866,8 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
         auto_approve,
         limits: profile.limits,
         compaction: profile.compaction,
+        profile_name: profile.name,
+        auto_approve_commands: profile.rules.auto_approve,
     })
 }
 

@@ -1,6 +1,5 @@
 //! Human-readable execution timeline for chat's text debug mode.
 
-use std::io::IsTerminal;
 use std::time::Instant;
 
 use chrono::{DateTime, Local};
@@ -19,13 +18,11 @@ pub(super) struct DebugState {
 }
 
 impl DebugState {
-    pub(super) fn emit(&mut self, event: &Event) {
+    /// Print the line for `event`, if it has one; `color` is the frontend's decision.
+    pub(super) fn emit(&mut self, event: &Event, color: bool) {
         let Some((severity, text)) = self.describe(event) else {
             return;
         };
-        let color = std::io::stderr().is_terminal()
-            && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty())
-            && std::env::var_os("TERM").is_none_or(|value| value != "dumb");
         eprintln!("{}", format_line(event.at_ms, severity, &text, color));
     }
 
