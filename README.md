@@ -2,13 +2,14 @@
 
 一个用 Rust 编写的通用 agent 内核，目标是让同一个内核支撑人机对话、无人值守运行和被其他程序嵌入。场景之间的差异将通过 profile（提示词、工具、规则、上限）和插件表达，不改内核。整体架构参考 [pi](https://github.com/earendil-works/pi)（commit `a92283056`）：分层方式、循环语义和会话文件格式都沿用 pi 的设计；与 pi 不同的地方列在[与 pi 的差异](#与-pi-的差异)一节。
 
-当前版本为 v0.1.0，已实现无人值守的 `run`、终端对话 `chat`、TOML profile、项目上下文、按需 skills 与上下文管理。嵌入协议 `acp` 和插件按[路线图](docs/ROADMAP.md)分阶段推进。
+当前版本为 v0.1.0，已实现无人值守的 `run`、终端对话 `chat`、ACP agent `acp`、TOML profile、项目上下文、按需 skills 与上下文管理。交互式界面由 ACP 客户端提供，见[路线图](docs/ROADMAP.md)的 D13。
 
 - **已具备**：
   - OpenAI 兼容的流式 provider，带事件队列、SSE 事件与响应大小上限
   - agent 回合循环：工具调用先检查、再并发执行，结果保持调用顺序
   - 长期 `AgentSession`：共享提问、单次运行互斥、取消后复用、多订阅者和模型切换
   - 终端 `chat`：流式回答、审批、运行中插话、Ctrl+C 后继续对话；等待与工具执行的状态行、工具结果预览、每轮用量、粘贴的多行合为一条消息
+  - ACP agent `acp`：经 stdio 的 Agent Client Protocol v1，编辑器（Zed 等）或终端客户端（Wisp 等）作为界面；流式回答与推理、工具调用与结果、审批经客户端完成、取消
   - 文件化的 profile（内置 `unattended`、`troubleshoot`、`assistant`）；显式 CLI 参数覆盖、deny 累加；特定环境的规则（如 kubectl 可带的选项）写在 profile 里，代码中不含
   - 项目 `AGENTS.md` 和显式上下文文件；`read_skill` 按需读取登记的 skill 正文
   - `bash`、`read_file`，改文件的 `edit_file`（多处精确替换，结果附 unified patch）与 `write_file`（新建或整体覆盖），以及只读的 `grep`、`find`、`ls`
@@ -95,6 +96,20 @@ chat 中的 bash 调用先经过原命令策略，再显示工具名、完整参
 `assistant` 默认在上下文超过 256 KiB 时自动压缩，`unattended` 与 `troubleshoot` 默认关闭。自动摘要消耗一次请求预算并统计用量；`/compact` 使用独立的有界请求并报告结果。可用 `--no-auto-compact` 禁用自动摘要，或 `--compact-threshold-bytes` 修改字节阈值。该阈值不是模型 token 窗口的保证；开启自动摘要时，模型以上下文过长拒绝请求后，会先摘要一次再继续，见[上下文管理](docs/PROFILES.md#上下文管理)。摘要有信息损失风险，引用校验也不证明事实正确。配置、审计和边界见[上下文管理](docs/PROFILES.md#上下文管理)。
 
 TTY 中手动压缩时可暂存一个普通输入，完成后自动执行；Ctrl+C 取消压缩并明确清除暂存输入。`/model` 等待空闲，`/new` 与 `/quit` 和正常 EOF 退出码为 0；参数或配置错误、读取终端输入失败为 2，超限或无效 UTF-8 的输入行只会被丢弃，不会退出；SIGTERM 为 5。单轮模型或预算错误会报告后继续对话，JSONL 消费者可读取每轮报告的 `outcome`。这是逐行 REPL，尚未提供历史行编辑或完整 TUI：方向键等控制序列会原样作为输入发送。
+
+### ACP 客户端
+
+```bash
+zx-agent acp --model "$ZX_MODEL"
+```
+
+`acp` 经 stdin 与 stdout 收发 [Agent Client Protocol](https://agentclientprotocol.com/) v1 的 JSON-RPC 消息，由实现了 ACP 的客户端启动并驱动：Zed、JetBrains、Neovim 与 Emacs 的插件，或 Wisp、bitrouter-tui 这类终端客户端（见[官方客户端目录](https://agentclientprotocol.com/overview/clients)，未逐一核实）。在客户端里把 agent 命令配置为上面这一行即可。连接、工具、profile、上限等参数与 `chat` 相同（`acp --help`），没有 `--output`、`--color` 这类终端显示参数：stdout 只走协议，其余诊断在 stderr。
+
+- 会话：客户端用 `session/new` 建会话，`cwd` 由客户端给出并覆盖 `--cwd`；每个会话一个独立的 `AgentSession`，只在内存中，进程结束即消失，不支持 `session/load`。客户端给的 `mcpServers` 被忽略，MCP 服务器只来自 profile。
+- 回合：`session/prompt` 的文本块合成一条提问，回合结束时应答 `stopReason`：完成为 `end_turn`，输出截断或 token 预算用尽为 `max_tokens`，请求次数上限为 `max_turn_requests`，取消为 `cancelled`；运行出错或超时以 JSON-RPC 错误应答，`message` 是原因。`session/cancel` 取消当前回合。
+- 更新：流式文本为 `agent_message_chunk`，推理增量为 `agent_thought_chunk`；每个工具调用先发 `tool_call`（标题如 `bash: ls -la`，种类按内置工具映射，带原始参数，`path` 参数作为位置），放行或批准后 `in_progress`，结束后 `completed` 或 `failed` 并附结果文本，`write_file` 附整个文件的 diff，`edit_file` 附补丁；重试、钩子失败、上下文过长为 `notice`，摘要为 `compaction_update`。
+- 审批：需要审批的调用发 `session/request_permission`，选项为允许一次、本会话允许相同调用、拒绝；客户端取消回合时按拒绝处理。`--approval-timeout-secs` 默认 3600 秒。
+- 实测：`tests/acp_cli.rs` 用手写的 JSON-RPC 客户端覆盖以上流程；另用 SDK 自带的示例客户端对假模型走通一次。没有在 Zed 或 Wisp 上验证。
 
 ### 场景配置
 
@@ -293,7 +308,7 @@ zx-agent run --base-url https://api.deepseek.com --model deepseek-flash \
 代码是一个 Cargo workspace，分为 7 个 crate。依赖只能自上而下，下层 crate 无法引用上层，分层由编译器保证：
 
 ```
-zx-agent    src/             CLI（run、chat、serve）、profile、OpenTelemetry 导出；
+zx-agent    src/             CLI（run、chat、serve、acp）、profile、OpenTelemetry 导出；
                              库以原有路径再导出下面各 crate
   ├─ zx-im-slack   crates/zx-im-slack   Slack 平台（依赖 tokio-tungstenite）
   ├─ zx-im-feishu  crates/zx-im-feishu  ⚑ D:5/CHINA FLAG: 飞书平台（依赖 tokio-tungstenite）
@@ -306,7 +321,7 @@ zx-agent    src/             CLI（run、chat、serve）、profile、OpenTelemet
 zx-im 与 zx-tools 都只依赖 zx-core 与 zx-ai，彼此不依赖；两个平台 crate 实现 zx-im 的 `ImChannel`。代码中没有针对特定场景、环境或平台文案语言的规则：场景是 profile 文件，Kubernetes 的规则在 `deploy/kubernetes/`，IM 的文案由配置替换。模块之间的关系：
 
 ```
-CLI (main.rs + cli.rs + chat/)
+CLI (main.rs + cli.rs + chat/ + acp.rs)
   ├─ profile/ + profiles/  文件化场景、上下文与 skill 工具
   └─ agent_session  共享会话、取消、订阅与模型切换           ← pi: coding-agent AgentSession
        └─ runner    独占运行、重试、轮次与时间上限、持久化
@@ -334,6 +349,7 @@ CLI (main.rs + cli.rs + chat/)
 | 系统提示词 | `crates/zx-core/src/prompt.rs` | `coding-agent/src/core/system-prompt.ts` |
 | 文件化配置 | `src/profile/`、`profiles/` | 加载与叠加 TOML、项目上下文、显式 skill 目录及按需读取；内置场景只有这些文件 |
 | 终端前端 | `src/chat/`、`src/cli.rs` | 单输入所有者、审批、显示与共享 CLI 选项 |
+| ACP 接入 | `src/acp.rs` | agent 一侧：会话、回合、事件到 `session/update` 的映射、审批到 `session/request_permission` 的映射 |
 | IM 接入 | `crates/zx-im/src/` | 无对应实现：`ImChannel` 平台接口；`Server` 按线程分派，每个线程一个任务独占会话，审批卡片与运行上限 |
 | IM 平台 | `crates/zx-im-slack/`、`crates/zx-im-feishu/` | 无对应实现：两个 `ImChannel` 实现，与接口分开，平台相关的代码只在这里 |
 
@@ -368,7 +384,7 @@ CLI (main.rs + cli.rs + chat/)
 | 不加新输入的续跑 | 以失败或被取消的回答结尾时，先省略该回答再续跑 | pi 的 `Agent.continue()` 遇到回答结尾时报错（排队的消息除外），失败后的重试由 `AgentSession` 另行处理；这里的续跑同时用于崩溃、超时或取消之后接着做 |
 | 请求前替换设置 | `prepare_request` 只能替换模型与推理强度 | pi 的 `prepareRequest` 还可以改写上下文；这里上下文只来自会话投影（不变量 6），改上下文用 `transform_context` 并写入会话 |
 | 推理强度 | 级别与 pi 相同，写法由 `--reasoning-format` 在三种中显式选择 | pi 按模型元数据与服务的 compat 设置（`thinkingFormat`）在十余种写法中选择，并按模型能力调整级别；这里没有模型元数据（见路线图 P10 ⑧），也不按服务推断（D10） |
-| 完整 TUI | 未实现，`chat` 是逐行 REPL | 路线图将其列为本期不做 |
+| 完整 TUI | 未实现，`chat` 是逐行 REPL；交互式界面由 ACP 客户端提供（`acp`） | pi 自带 TUI；这里按路线图的 D13 把界面交给实现 ACP 的开源客户端 |
 
 ### 系统提示词的组成
 
@@ -761,6 +777,7 @@ cargo fmt --check
 | `tests/openai_mock.rs` | 本地假 HTTP 服务上的端到端测试：SSE、执行 bash、回传工具结果、认证头、HTTP 错误重试、空闲超时、中途取消后保留已输出内容、成功状态下的 JSON 正文（错误对象与整份回答） |
 | `tests/cli.rs` | 编译出的程序：退出码 0 到 6、jsonl 输出、从 stdin 读提示词、bash 读不到 API key、系统提示词的生成段落、`--system-updates inline` |
 | `tests/chat_cli.rs` | 多轮历史、审批与授权范围（含 `y`、`n`；write_file 的内容按行显示，edit_file 逐项列出且结果显示补丁）、审批过期后下一行作为新提问、只读命令自动放行、工具行显示命令与结果预览、每轮的 `[turn]` 行、`/status`、`--color always` 在管道中保留颜色、续接会话的提示、取消只报告一次、重试错误只报一次、无用量的 `[turn]`、`--show-thinking`、空闲时 Ctrl+C 两次退出、重置、模型切换、EOF、信号、超时、控制字符显示、恢复中断会话的提示、钩子失败的提示；Unix PTY 验证运行中插话、取消后丢弃残留插话、取消重置和退出、粘贴的多行合为一条消息、等待时的状态行、回答前后的空行 |
+| `tests/acp_cli.rs` | `acp`：手写的 JSON-RPC 客户端经子进程 stdio 驱动：初始化与建会话、流式回答与 `end_turn`、工具调用的 `tool_call` 与权限请求、批准后执行与 `completed`、拒绝不执行且模型收到原因、`session/cancel` 得到 `cancelled` 后会话可继续、未知会话的错误、`write_file` 的 diff 与位置、自动放行的命令不问人且在会话的目录执行；stdout 的每一行都必须是协议消息 |
 | `tests/profiles_cli.rs` | profile 覆盖、显式默认值、预算参数的 help 写明取自 profile、不可绕过的 deny、上下文范围与审计、上下文默认值与越界链接、`--system-prompt-file` 兼容、skill 懒加载与脱敏、配置错误（含 provider 参数）退出码且不建会话文件 |
 | `tests/run_cli.rs` | `run` 在 P0 之后新增的约定：进度与报告行转义终端控制字符；另一个 `run` 正在写的会话文件不能再被打开写入；JSONL 事件的信封；为零的超时在请求前被拒绝；stdout 已关闭时退出码仍由运行结果决定；token 预算的退出码 7、最后一次请求可超出预算、profile 设置预算与命令行的 0 关闭；只在设置了 OTLP 地址时导出追踪，导出内容不含回答；`--request-field` 到达模型并写入请求审计，写错时以退出码 2 结束且不建会话文件；`--fill-missing-reasoning` 默认关闭，开启时写入请求审计；`--reasoning` 按三种写法到达模型并写入请求审计，写错或与 `--request-field` 冲突时以退出码 2 结束（原有 `run` 测试仍在 `tests/cli.rs`） |
 | `tests/otel.rs` | 一次真实运行导出一条 trace：每次尝试、回合、模型请求与工具调用各一个 span，用量与工具属性正确；`src/otel.rs` 的单元测试另覆盖嵌套与时间、只含元数据、运行结束时关闭未结束的 span、手动摘要自成一条 trace、队列满时丢弃并计数 |

@@ -33,6 +33,7 @@ zx-im-feishu = { path = "crates/zx-im-feishu" }
 zx-im-slack = { path = "crates/zx-im-slack" }
 zx-tools = { path = "crates/zx-tools" }
 
+agent-client-protocol = { version = "5.0", default-features = false, features = ["stdio"] }
 anyhow = "1"
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
@@ -79,6 +80,7 @@ zx-im-feishu.workspace = true
 zx-im-slack.workspace = true
 zx-tools.workspace = true
 
+agent-client-protocol.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true

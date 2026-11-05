@@ -691,7 +691,7 @@ async fn an_edit_approval_lists_each_edit_and_its_result_shows_the_patch() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let log = stderr(&output);
     assert!(
-        log.contains("[approval 1] edit_file: a.txt\n  edits[0].newText: bye\n  edits[0].oldText: hello\n"),
+        log.contains("[approval 1] edit_file: a.txt\n  edits[0].oldText: hello\n  edits[0].newText: bye\n"),
         "{log}"
     );
     assert!(log.contains("[tool] edit_file: a.txt -> ok"), "{log}");
