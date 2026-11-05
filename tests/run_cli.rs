@@ -308,6 +308,94 @@ async fn bad_request_fields_exit_2_before_any_request() {
 }
 
 #[tokio::test]
+async fn the_reasoning_level_reaches_the_model_in_the_chosen_format_and_the_audit() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::text("ok"), Reply::text("ok"), Reply::text("ok")]).await;
+    let cases: [(&[&str], &str, Value); 3] = [
+        (
+            &["--reasoning", "high"],
+            "effort.jsonl",
+            json!({"reasoning_effort": "high"}),
+        ),
+        (
+            &["--reasoning", "off", "--reasoning-format", "thinking"],
+            "thinking.jsonl",
+            json!({"thinking": {"type": "disabled"}}),
+        ),
+        (&[], "unset.jsonl", json!({})),
+    ];
+    for (index, (flags, session, expected)) in cases.into_iter().enumerate() {
+        let output = run(&server, dir.path())
+            .args(flags)
+            .args(["--session", session])
+            .output()
+            .await
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let body = &server.requests()[index].body;
+        let mut sent = serde_json::Map::new();
+        for field in ["reasoning_effort", "thinking", "reasoning"] {
+            if let Some(value) = body.get(field) {
+                sent.insert(field.into(), value.clone());
+            }
+        }
+        assert_eq!(Value::Object(sent), expected, "{flags:?}");
+    }
+    let effort = std::fs::read_to_string(dir.path().join("effort.jsonl")).unwrap();
+    assert!(effort.contains(r#""reasoning":"high""#), "{effort}");
+    let thinking = std::fs::read_to_string(dir.path().join("thinking.jsonl")).unwrap();
+    assert!(thinking.contains(r#""reasoning":"off""#), "{thinking}");
+    assert!(thinking.contains(r#""reasoningFormat":"thinking""#), "{thinking}");
+    let unset = std::fs::read_to_string(dir.path().join("unset.jsonl")).unwrap();
+    assert!(!unset.contains("reasoning"), "{unset}");
+}
+
+#[tokio::test]
+async fn bad_reasoning_settings_exit_2_before_any_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::text("never sent")]).await;
+    for (flags, expected) in [
+        (&["--reasoning", "max"][..], "unknown reasoning level"),
+        (
+            &["--reasoning", "low", "--reasoning-format", "guess"][..],
+            "unknown reasoning format",
+        ),
+        (
+            &["--reasoning", "low", "--request-field", r#"reasoning_effort="high""#][..],
+            "--request-field reasoning_effort conflicts with --reasoning",
+        ),
+        (
+            &[
+                "--reasoning",
+                "low",
+                "--reasoning-format",
+                "thinking",
+                "--request-field",
+                r#"thinking={"type":"enabled"}"#,
+            ][..],
+            "--request-field thinking conflicts with --reasoning",
+        ),
+    ] {
+        let output = run(&server, dir.path())
+            .args(flags)
+            .args(["--session", "audit.jsonl"])
+            .output()
+            .await
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{flags:?}: {stderr}");
+        assert!(stderr.contains(expected), "{flags:?}: {stderr}");
+    }
+    assert!(server.requests().is_empty());
+    assert!(!dir.path().join("audit.jsonl").exists());
+}
+
+#[tokio::test]
 async fn filling_missing_reasoning_is_off_unless_asked_and_the_audit_records_the_choice() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::text("ok"), Reply::text("ok")]).await;

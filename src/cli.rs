@@ -9,7 +9,10 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use zx_agent::AgentSession;
 use zx_agent::agent::{Decision, EventSink, HookOptions, Hooks, LoopConfig, LoopSpec, Tool};
-use zx_agent::ai::openai::{DEFAULT_MAX_RESPONSE_BYTES, OpenAiCompatible, OpenAiConfig, SystemUpdates};
+use zx_agent::ai::Reasoning;
+use zx_agent::ai::openai::{
+    DEFAULT_MAX_RESPONSE_BYTES, OpenAiCompatible, OpenAiConfig, ReasoningFormat, SystemUpdates,
+};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::sse::DEFAULT_MAX_EVENT_BYTES;
 use zx_agent::compaction;
@@ -322,6 +325,19 @@ pub(crate) struct RequestArgs {
     #[arg(long = "request-field", value_name = "KEY=JSON")]
     pub(crate) request_fields: Vec<String>,
 
+    /// How hard a reasoning model thinks: off, minimal, low, medium, high or xhigh. Unset,
+    /// requests carry no reasoning setting and the server decides. chat can change it with
+    /// /reasoning. The session's request audit records it.
+    #[arg(long, value_parser = parse_reasoning)]
+    pub(crate) reasoning: Option<Reasoning>,
+
+    /// How --reasoning is written in the request: effort (reasoning_effort, the OpenAI field;
+    /// off sends nothing), thinking (a thinking object, enabled or disabled, with
+    /// reasoning_effort) or reasoning-object (reasoning.effort). Check which fields the server
+    /// documents. The session's request audit records it.
+    #[arg(long, value_parser = parse_reasoning_format, default_value = "effort")]
+    pub(crate) reasoning_format: ReasoningFormat,
+
     /// Once one earlier answer carries reasoning_content, send the others with an empty one,
     /// for thinking-mode servers that reject a history in which only some answers carry it.
     /// The session's request audit records the choice.
@@ -502,6 +518,32 @@ pub(crate) struct PreparedSession {
 /// pipe and is not limited to the profile file budget, so it cannot be read again for a
 /// later conversation.
 /// `--request-field` values, each KEY=JSON, as the provider's extra fields.
+fn parse_reasoning(text: &str) -> Result<Reasoning, String> {
+    text.parse()
+}
+
+fn parse_reasoning_format(text: &str) -> Result<ReasoningFormat, String> {
+    text.parse()
+}
+
+/// Refuse --request-field values that --reasoning would also set: which one the server
+/// gets would not be clear from the command.
+fn check_reasoning_fields(request: &RequestArgs, fields: &serde_json::Map<String, serde_json::Value>) -> Result<()> {
+    if request.reasoning.is_some()
+        && let Some(field) = request
+            .reasoning_format
+            .fields()
+            .iter()
+            .find(|field| fields.contains_key(**field))
+    {
+        anyhow::bail!(
+            "--request-field {field} conflicts with --reasoning, which sets it with --reasoning-format {}; use one of them",
+            request.reasoning_format.as_str()
+        );
+    }
+    Ok(())
+}
+
 fn request_fields(values: &[String]) -> Result<serde_json::Map<String, serde_json::Value>> {
     let mut fields = serde_json::Map::new();
     for value in values {
@@ -671,6 +713,8 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
         .ok()
         .filter(|key| !key.is_empty());
     // Before the session file: invalid provider settings are configuration errors too.
+    let extra_fields = request_fields(&options.request.request_fields)?;
+    check_reasoning_fields(options.request, &extra_fields)?;
     let provider = OpenAiCompatible::new(OpenAiConfig {
         base_url: options.base.base_url.clone(),
         // Provider authentication and output filtering each need an owned copy.
@@ -682,8 +726,9 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
             SystemUpdatesArg::Collapse => SystemUpdates::Collapse,
             SystemUpdatesArg::Inline => SystemUpdates::Inline,
         },
-        extra_fields: request_fields(&options.request.request_fields)?,
+        extra_fields,
         fill_missing_reasoning: options.request.fill_missing_reasoning,
+        reasoning_format: options.request.reasoning_format,
         ..OpenAiConfig::default()
     })?;
     // read_skill and read_output read files on this machine, whatever executor runs commands.
@@ -796,6 +841,7 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
         tools,
         cwd,
         max_tokens: options.request.max_tokens,
+        reasoning: options.request.reasoning,
         sequential_tools: false,
     });
     push_built_in(&mut config, "command_policy", PolicyHook::new(Arc::new(policy)));

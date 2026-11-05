@@ -4,7 +4,7 @@ use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::ai::{Message, PREAMBLE, Request, SystemMessage, SystemPrompt, ToolDef, now_ms};
+use crate::ai::{Message, PREAMBLE, Reasoning, Request, SystemMessage, SystemPrompt, ToolDef, now_ms};
 
 use super::{CompactionStartedEntry, Entry, SessionStore, records_without_details};
 
@@ -16,10 +16,14 @@ pub struct RequestConfig {
     pub model: String,
     pub tools: Vec<ToolDef>,
     pub max_tokens: Option<u32>,
+    /// Absent unless set, so sessions recorded before it existed read back unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<Reasoning>,
     pub provider_options: Value,
 }
 
-/// Append only when model, tools, token budget or provider conversion options change.
+/// Append only when model, tools, token budget, reasoning level or provider conversion
+/// options change.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestConfigEntry {
@@ -74,6 +78,7 @@ impl SessionStore {
             model: request.model.clone(),
             tools: request.tools.clone(),
             max_tokens: request.max_tokens,
+            reasoning: request.reasoning,
             provider_options,
         };
         self.ensure_format(3).await?;
@@ -118,6 +123,7 @@ impl SessionStore {
             messages: self.request_messages(&started.source, started.parent_id.as_deref())?,
             tools: config.tools.clone(),
             max_tokens: config.max_tokens,
+            reasoning: config.reasoning,
         };
         Ok((config, request))
     }

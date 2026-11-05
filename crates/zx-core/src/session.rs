@@ -890,6 +890,7 @@ mod tests {
             messages: store.messages(),
             tools: vec![],
             max_tokens: None,
+            reasoning: None,
         };
         store
             .record_request(&request, "p", serde_json::json!({}), RequestSource::Projection)

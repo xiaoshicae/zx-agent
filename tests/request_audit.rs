@@ -260,6 +260,7 @@ async fn a_request_that_differs_from_the_persisted_projection_is_not_recorded() 
         messages: vec![Message::user("never persisted")],
         tools: vec![],
         max_tokens: None,
+        reasoning: None,
     };
 
     let recorded = store

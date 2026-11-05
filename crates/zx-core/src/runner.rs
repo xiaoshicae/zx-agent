@@ -27,7 +27,7 @@ use crate::agent::{
 };
 pub use crate::agent::{RunOutcome, RunReport};
 use crate::ai::retry::{RetryPolicy, is_context_overflow, is_retryable};
-use crate::ai::{Message, Provider, duration_ms};
+use crate::ai::{Message, Provider, Reasoning, duration_ms};
 use crate::compaction::{self, Trigger};
 use crate::interaction::ApprovalCache;
 use crate::session::{Entry, SessionStore};
@@ -140,6 +140,10 @@ impl Runner {
             std::mem::replace(&mut self.config.spec.provider, provider),
             std::mem::replace(&mut self.config.spec.model, model),
         )
+    }
+
+    pub(crate) fn replace_reasoning(&mut self, reasoning: Option<Reasoning>) -> Option<Reasoning> {
+        std::mem::replace(&mut self.config.spec.reasoning, reasoning)
     }
 
     /// Revoke exact-call approvals granted by this Runner's interaction host.
@@ -549,6 +553,7 @@ mod tests {
                 tools: vec![],
                 cwd: PathBuf::from("."),
                 max_tokens: None,
+                reasoning: None,
                 sequential_tools: false,
             });
             let mut runner = Runner::new(
@@ -586,6 +591,7 @@ mod tests {
             tools: vec![],
             cwd: PathBuf::from("."),
             max_tokens: None,
+            reasoning: None,
             sequential_tools: false,
         });
         let session = SessionStore::with_writer(SessionHeader::new(Path::new("."), "m"), Box::new(FailingWriter));
@@ -619,6 +625,7 @@ mod tests {
                 tools: vec![],
                 cwd: PathBuf::from("."),
                 max_tokens: None,
+                reasoning: None,
                 sequential_tools: false,
             });
             let session =
@@ -695,6 +702,7 @@ mod tests {
             tools: vec![tool],
             cwd: PathBuf::from("."),
             max_tokens: None,
+            reasoning: None,
             sequential_tools: false,
         });
         Runner::new(
@@ -810,6 +818,7 @@ mod tests {
             tools: vec![],
             cwd: PathBuf::from("."),
             max_tokens: None,
+            reasoning: None,
             sequential_tools: false,
         });
         config.hooks.push(Rewrite);

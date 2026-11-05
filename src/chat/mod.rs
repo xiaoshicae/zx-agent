@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 use zx_agent::AgentSession;
 use zx_agent::agent::EventSink;
 use zx_agent::agent_session::{ModelRef, Subscription};
-use zx_agent::ai::Provider;
+use zx_agent::ai::{Provider, Reasoning};
 use zx_agent::compaction;
 use zx_agent::otel::Telemetry;
 use zx_agent::profile::Builtin;
@@ -133,6 +133,7 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
     let interaction = Arc::new(interaction);
     let output = Arc::new(Output::new(args.output, args.deltas, args.debug));
     let mut model = args.base.model.clone();
+    let mut reasoning = args.request.reasoning;
     let mut built = build(
         &settings,
         &model,
@@ -190,6 +191,22 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
                 eprintln!("[chat] model={}", visible(&model));
                 Flow::Continue
             }
+            Command::Reasoning(None) => {
+                eprintln!("[chat] reasoning={}", reasoning_name(reasoning));
+                Flow::Continue
+            }
+            Command::Reasoning(Some(next)) => match parse_level(&next) {
+                Ok(level) => {
+                    built.session.set_reasoning(level)?;
+                    reasoning = level;
+                    eprintln!("[chat] reasoning={}", reasoning_name(reasoning));
+                    Flow::Continue
+                }
+                Err(message) => {
+                    eprintln!("[chat] {}", visible(&message));
+                    Flow::Continue
+                }
+            },
             Command::Model(Some(next)) => {
                 built.session.set_model(ModelRef {
                     provider: built.provider.clone(),
@@ -389,6 +406,7 @@ async fn drive_turn(session: &AgentSession, operation: Operation, io: &mut TurnI
                     }
                     Command::Prompt(_) => unreachable!("pending approval input is handled above"),
                     Command::Model(_) => eprintln!("[chat] wait for the current task or cancel it before changing models"),
+                    Command::Reasoning(_) => eprintln!("[chat] wait for the current task or cancel it before changing the reasoning level"),
                     Command::Help => help(),
                     Command::Compact => eprintln!("[chat] session is busy; wait for the current operation or cancel it before /compact"),
                     Command::Invalid(message) => eprintln!("[chat] {}", visible(&message)),
@@ -480,10 +498,24 @@ fn prompt() {
     let _ = stderr.write_all(b"zx> ").and_then(|()| stderr.flush());
 }
 
+/// A level for /reasoning, or `None` for `default`.
+fn parse_level(text: &str) -> Result<Option<Reasoning>, String> {
+    if text.trim().eq_ignore_ascii_case("default") {
+        return Ok(None);
+    }
+    text.parse().map(Some)
+}
+
+fn reasoning_name(reasoning: Option<Reasoning>) -> &'static str {
+    reasoning.map_or("default", Reasoning::as_str)
+}
+
 fn help() {
     eprintln!(
         "/new                  start a fresh conversation\n\
                /model [id]           show or change the model while idle\n\
+               /reasoning [level]    show or change the reasoning level while idle: off, minimal,\n\
+                                     low, medium, high, xhigh, or default to leave it to the server\n\
                /compact              summarize old context while retaining raw history\n\
                /quit                 exit chat\n\
                Ctrl+C                cancel the current task; keep the conversation"

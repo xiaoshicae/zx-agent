@@ -15,7 +15,7 @@ use super::provider::{EventReceiver, EventSender, Provider, event_channel, send_
 use super::sse::{DEFAULT_MAX_EVENT_BYTES, SseParser};
 use super::system_prompt::SystemPrompt;
 use super::types::{
-    AssistantMessage, ContentBlock, Delta, Message, ProviderError, Request, StopReason, StreamEvent, Usage,
+    AssistantMessage, ContentBlock, Delta, Message, ProviderError, Reasoning, Request, StopReason, StreamEvent, Usage,
     duration_ms, now_ms,
 };
 use crate::text::{clip, prefix_within};
@@ -62,6 +62,78 @@ pub struct OpenAiConfig {
     /// reasoning. Off unless set: other servers have no use for the field. Part of
     /// [`Provider::request_options`].
     pub fill_missing_reasoning: bool,
+    /// How a request's [`Reasoning`] level is written in the body. Part of
+    /// [`Provider::request_options`] when it is not the default.
+    pub reasoning_format: ReasoningFormat,
+}
+
+/// The request body fields a reasoning level is written as. Servers differ, and the provider
+/// does not guess from a server's name (pi chooses with its `thinkingFormat` compat setting);
+/// the formats are named after the field they write, not after a service.
+/// Nothing is sent for a request without a level.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReasoningFormat {
+    /// `reasoning_effort: "<level>"`, the OpenAI field. `off` sends nothing, since the field
+    /// has no such value.
+    #[default]
+    Effort,
+    /// `thinking: {"type": "enabled"}` with `reasoning_effort`, or `{"type": "disabled"}` for
+    /// `off`, for servers that switch thinking on and off with a `thinking` object.
+    Thinking,
+    /// `reasoning: {"effort": "<level>"}`, with `none` for `off`, for servers that take an
+    /// object named `reasoning`.
+    ReasoningObject,
+}
+
+impl ReasoningFormat {
+    /// The name used in request options and on the command line.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReasoningFormat::Effort => "effort",
+            ReasoningFormat::Thinking => "thinking",
+            ReasoningFormat::ReasoningObject => "reasoning-object",
+        }
+    }
+
+    /// The request body fields this format writes, which extra fields must not also set.
+    pub fn fields(self) -> &'static [&'static str] {
+        match self {
+            ReasoningFormat::Effort => &["reasoning_effort"],
+            ReasoningFormat::Thinking => &["thinking", "reasoning_effort"],
+            ReasoningFormat::ReasoningObject => &["reasoning"],
+        }
+    }
+}
+
+impl std::str::FromStr for ReasoningFormat {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        [
+            ReasoningFormat::Effort,
+            ReasoningFormat::Thinking,
+            ReasoningFormat::ReasoningObject,
+        ]
+        .into_iter()
+        .find(|format| format.as_str() == text.trim().to_ascii_lowercase())
+        .ok_or_else(|| format!("unknown reasoning format {text:?}; use effort, thinking or reasoning-object"))
+    }
+}
+
+/// Write `reasoning` into `body` as `format` says.
+fn apply_reasoning(body: &mut Value, reasoning: Reasoning, format: ReasoningFormat) {
+    let level = reasoning.as_str();
+    match (format, reasoning) {
+        (ReasoningFormat::Effort, Reasoning::Off) => {}
+        (ReasoningFormat::Effort, _) => body["reasoning_effort"] = json!(level),
+        (ReasoningFormat::Thinking, Reasoning::Off) => body["thinking"] = json!({"type": "disabled"}),
+        (ReasoningFormat::Thinking, _) => {
+            body["thinking"] = json!({"type": "enabled"});
+            body["reasoning_effort"] = json!(level);
+        }
+        (ReasoningFormat::ReasoningObject, Reasoning::Off) => body["reasoning"] = json!({"effort": "none"}),
+        (ReasoningFormat::ReasoningObject, _) => body["reasoning"] = json!({"effort": level}),
+    }
 }
 
 impl fmt::Debug for OpenAiConfig {
@@ -79,6 +151,7 @@ impl fmt::Debug for OpenAiConfig {
             .field("max_sse_event_bytes", &self.max_sse_event_bytes)
             .field("extra_fields", &self.extra_fields.keys().collect::<Vec<_>>())
             .field("fill_missing_reasoning", &self.fill_missing_reasoning)
+            .field("reasoning_format", &self.reasoning_format)
             .finish()
     }
 }
@@ -111,6 +184,7 @@ impl Default for OpenAiConfig {
             max_sse_event_bytes: DEFAULT_MAX_EVENT_BYTES,
             extra_fields: Map::new(),
             fill_missing_reasoning: false,
+            reasoning_format: ReasoningFormat::default(),
         }
     }
 }
@@ -172,6 +246,10 @@ impl Provider for OpenAiCompatible {
         }
         if self.config.fill_missing_reasoning {
             options["fillMissingReasoning"] = Value::Bool(true);
+        }
+        // Absent for the default, so that options recorded before formats existed still match.
+        if self.config.reasoning_format != ReasoningFormat::Effort {
+            options["reasoningFormat"] = json!(self.config.reasoning_format.as_str());
         }
         options
     }
@@ -504,6 +582,10 @@ pub fn build_body(request: &Request, config: &OpenAiConfig) -> Value {
     for (field, value) in &config.extra_fields {
         body[field.as_str()] = value.clone();
     }
+    // After the extra fields: a level chosen for this request wins over a fixed one.
+    if let Some(reasoning) = request.reasoning {
+        apply_reasoning(&mut body, reasoning, config.reasoning_format);
+    }
     body
 }
 
@@ -520,6 +602,7 @@ pub fn replay_body(request: &Request, provider: &str, options: &Value) -> anyhow
         #[serde(default)]
         extra_fields: Map<String, Value>,
         fill_missing_reasoning: Option<bool>,
+        reasoning_format: Option<String>,
     }
     let options: Options = serde_json::from_value(options.clone())?;
     anyhow::ensure!(
@@ -538,6 +621,10 @@ pub fn replay_body(request: &Request, provider: &str, options: &Value) -> anyhow
         value => anyhow::bail!("unknown system update mode {value:?}"),
     };
     check_extra_fields(&options.extra_fields)?;
+    let reasoning_format = match options.reasoning_format.as_deref() {
+        None => ReasoningFormat::Effort,
+        Some(name) => name.parse().map_err(anyhow::Error::msg)?,
+    };
     Ok(build_body(
         request,
         &OpenAiConfig {
@@ -545,6 +632,7 @@ pub fn replay_body(request: &Request, provider: &str, options: &Value) -> anyhow
             system_updates,
             extra_fields: options.extra_fields,
             fill_missing_reasoning,
+            reasoning_format,
             ..OpenAiConfig::default()
         },
     ))
@@ -1149,6 +1237,7 @@ mod tests {
             ],
             tools: vec![],
             max_tokens: Some(100),
+            reasoning: None,
         };
         let body = build_body(&request, &p_config(SystemUpdates::default()));
         let roles: Vec<&str> = body["messages"]
@@ -1192,6 +1281,7 @@ mod tests {
             ],
             tools: vec![],
             max_tokens: None,
+            reasoning: None,
         };
         let body = build_body(&request, &p_config(SystemUpdates::default()));
         assert_eq!(
@@ -1229,6 +1319,7 @@ mod tests {
             messages,
             tools: vec![],
             max_tokens: None,
+            reasoning: None,
         };
         let body = build_body(&request, &p_config(system_updates));
         body["messages"]
@@ -1423,6 +1514,7 @@ mod tests {
             messages,
             tools: vec![],
             max_tokens: None,
+            reasoning: None,
         };
         let body = build_body(&request, &p_config(SystemUpdates::default()));
         body["messages"]
@@ -1464,6 +1556,7 @@ mod tests {
             ],
             tools: vec![],
             max_tokens: None,
+            reasoning: None,
         }
     }
 
@@ -1520,6 +1613,7 @@ mod tests {
                 parameters: json!({"type": "object"}),
             }],
             max_tokens: Some(64),
+            reasoning: None,
         }
     }
 
@@ -1655,5 +1749,131 @@ mod tests {
             });
             assert!(replay_body(&replayable_request(), "p", &options).is_err(), "{field}");
         }
+    }
+
+    fn reasoned(reasoning: Option<Reasoning>, format: ReasoningFormat) -> Value {
+        let request = Request {
+            reasoning,
+            ..replayable_request()
+        };
+        let config = OpenAiConfig {
+            reasoning_format: format,
+            ..p_config(SystemUpdates::Collapse)
+        };
+        build_body(&request, &config)
+    }
+
+    /// The body's reasoning fields, so that assertions do not depend on the rest.
+    fn reasoning_fields(body: &Value) -> Value {
+        let mut fields = Map::new();
+        for field in ["reasoning_effort", "thinking", "reasoning"] {
+            if let Some(value) = body.get(field) {
+                fields.insert(field.into(), value.clone());
+            }
+        }
+        Value::Object(fields)
+    }
+
+    #[test]
+    fn each_reasoning_format_writes_its_own_fields() {
+        let cases = [
+            (
+                ReasoningFormat::Effort,
+                Reasoning::High,
+                json!({"reasoning_effort": "high"}),
+            ),
+            (ReasoningFormat::Effort, Reasoning::Off, json!({})),
+            (
+                ReasoningFormat::Thinking,
+                Reasoning::Low,
+                json!({"thinking": {"type": "enabled"}, "reasoning_effort": "low"}),
+            ),
+            (
+                ReasoningFormat::Thinking,
+                Reasoning::Off,
+                json!({"thinking": {"type": "disabled"}}),
+            ),
+            (
+                ReasoningFormat::ReasoningObject,
+                Reasoning::Xhigh,
+                json!({"reasoning": {"effort": "xhigh"}}),
+            ),
+            (
+                ReasoningFormat::ReasoningObject,
+                Reasoning::Off,
+                json!({"reasoning": {"effort": "none"}}),
+            ),
+        ];
+        for (format, level, expected) in cases {
+            assert_eq!(
+                reasoning_fields(&reasoned(Some(level), format)),
+                expected,
+                "{format:?} {level}"
+            );
+        }
+        // Without a level nothing is sent, whatever the format.
+        for format in [
+            ReasoningFormat::Effort,
+            ReasoningFormat::Thinking,
+            ReasoningFormat::ReasoningObject,
+        ] {
+            assert_eq!(reasoning_fields(&reasoned(None, format)), json!({}), "{format:?}");
+        }
+    }
+
+    #[test]
+    fn a_requests_reasoning_level_wins_over_a_fixed_extra_field() {
+        let config = OpenAiConfig {
+            extra_fields: fields(&[("reasoning_effort", json!("low"))]),
+            ..p_config(SystemUpdates::Collapse)
+        };
+        let request = Request {
+            reasoning: Some(Reasoning::High),
+            ..replayable_request()
+        };
+        assert_eq!(build_body(&request, &config)["reasoning_effort"], "high");
+        assert_eq!(build_body(&replayable_request(), &config)["reasoning_effort"], "low");
+    }
+
+    #[test]
+    fn the_reasoning_format_is_recorded_unless_it_is_the_default_and_replays() {
+        let default = OpenAiCompatible::new(p_config(SystemUpdates::Collapse)).unwrap();
+        assert!(default.request_options().get("reasoningFormat").is_none());
+        let config = OpenAiConfig {
+            reasoning_format: ReasoningFormat::Thinking,
+            ..p_config(SystemUpdates::Collapse)
+        };
+        let request = Request {
+            reasoning: Some(Reasoning::Medium),
+            ..replayable_request()
+        };
+        let body = build_body(&request, &config);
+        let options = OpenAiCompatible::new(config).unwrap().request_options();
+        assert_eq!(options["reasoningFormat"], "thinking");
+        assert_eq!(replay_body(&request, "p", &options).unwrap(), body);
+        let mut unknown = options.clone();
+        unknown["reasoningFormat"] = json!("guess");
+        assert!(replay_body(&request, "p", &unknown).is_err());
+    }
+
+    #[test]
+    fn reasoning_levels_and_formats_parse_by_name() {
+        for level in Reasoning::ALL {
+            assert_eq!(level.as_str().parse::<Reasoning>(), Ok(level));
+        }
+        assert_eq!(" HIGH ".parse::<Reasoning>(), Ok(Reasoning::High));
+        assert!(
+            "max"
+                .parse::<Reasoning>()
+                .unwrap_err()
+                .contains("off, minimal, low, medium, high, xhigh")
+        );
+        assert_eq!("Thinking".parse::<ReasoningFormat>(), Ok(ReasoningFormat::Thinking));
+        assert_eq!(
+            "reasoning-object".parse::<ReasoningFormat>(),
+            Ok(ReasoningFormat::ReasoningObject)
+        );
+        assert!("other".parse::<ReasoningFormat>().is_err());
+        assert_eq!(serde_json::to_value(Reasoning::Xhigh).unwrap(), "xhigh");
     }
 }
