@@ -15,7 +15,7 @@ use crate::ai::{
 pub use crate::session::SummaryMode;
 use crate::session::{
     CompactionPlan, CompactionSummary, MAX_STATEMENTS, MAX_SUMMARY_BYTES, MergedSummary, RequestSource, SessionStore,
-    SummaryFact, SummaryRequest, cite_only, records_without_details, summary_messages, superseded_by, without_details,
+    SummaryFact, SummaryRequest, cite_only, summary_messages, superseded_by, without_details,
 };
 
 const MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
@@ -461,7 +461,7 @@ impl Host<'_> {
         Ok(Some(Candidate {
             first_kept,
             source_ids: source.iter().map(|item| item.entry_id.clone()).collect(),
-            input: serde_json::to_string(&records_without_details(source))?,
+            input: serde_json::to_string(&without_details(source))?,
             retained,
             prefix_system,
             continues: None,

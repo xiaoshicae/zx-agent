@@ -8,10 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ai::{Message, StopReason, ToolCall, now_ms};
 
-use super::{Entry, SessionStore};
-
-/// First format version that records `tool_call_started`.
-pub(super) const START_RECORDS_VERSION: u32 = 4;
+use super::{Entry, START_RECORDS_VERSION, SessionStore};
 
 /// Written and flushed after checks and approval, immediately before a call with side
 /// effects runs. A start without a later result means that the call began and that its

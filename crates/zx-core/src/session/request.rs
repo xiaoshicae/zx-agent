@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::ai::{Message, Reasoning, Request, ToolDef, now_ms};
 
-use super::{CompactionStartedEntry, Entry, SessionStore, records_without_details};
+use super::{COMPACTION_VERSION, CompactionStartedEntry, Entry, SessionStore, without_details};
 
 /// Non-secret request fields. Authentication and transport credentials are not recorded.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -81,7 +81,7 @@ impl SessionStore {
             reasoning: request.reasoning,
             provider_options,
         };
-        self.ensure_format(3).await?;
+        self.ensure_format(COMPACTION_VERSION).await?;
         let existing = self.branch_path().into_iter().rev().find_map(|entry| match entry {
             Entry::RequestConfig(entry) => Some(entry),
             _ => None,
@@ -136,7 +136,10 @@ impl SessionStore {
     }
 
     pub(super) fn validate_request_entry(&self, entry: &Entry) -> Result<()> {
-        ensure!(self.format_version >= 3, "request audit requires format v3");
+        ensure!(
+            self.format_version >= COMPACTION_VERSION,
+            "request audit requires format v{COMPACTION_VERSION}"
+        );
         match entry {
             Entry::RequestConfig(config) => {
                 ensure!(
@@ -197,7 +200,7 @@ impl SessionStore {
                         let raw = Self::raw_projection_from(&path);
                         let source = Self::summarized_prefix(&raw, &attempt.first_kept_entry_id)?;
                         // As the summary request was built: without tool result details.
-                        serde_json::to_string(&records_without_details(source))?
+                        serde_json::to_string(&without_details(source))?
                     }
                 };
                 Ok(attempt.request.messages(content, *system_timestamp, *user_timestamp))

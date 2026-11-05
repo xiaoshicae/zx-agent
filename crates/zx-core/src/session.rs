@@ -16,26 +16,27 @@
 mod directory;
 mod jsonl;
 mod log;
+mod projection;
 mod recovery;
 mod request;
 mod summary;
 pub use directory::{SessionInfo, SessionList, Unreadable, list_sessions};
 pub use log::{LoadedSession, LogRecord, SessionLog};
+pub(crate) use projection::without_details;
 pub use recovery::{InterruptedToolCall, StartRecord, ToolCallStartedEntry};
 pub use request::{RequestConfig, RequestConfigEntry, RequestSource, RequestStartedEntry};
 pub use summary::{
-    CompactionEntry, CompactionFailedEntry, CompactionPlan, CompactionStartedEntry, CompactionSummary,
-    FormatUpgradeEntry, MergedSummary, SummaryFact, SummaryMode, SummaryRequest,
+    CompactionEntry, CompactionFailedEntry, CompactionPlan, CompactionStartedEntry, CompactionSummary, MergedSummary,
+    SummaryFact, SummaryMode, SummaryRequest,
 };
 pub(crate) use summary::{MAX_STATEMENTS, MAX_SUMMARY_BYTES, cite_only, summary_messages, superseded_by};
 
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
@@ -50,6 +51,14 @@ use jsonl::JsonlFile;
 /// system messages in the conversation; version 1 kept it in the header. Version 1 files still
 /// open: the old header field is ignored, and the next run records the prompt as a message.
 pub const SESSION_VERSION: u32 = 5;
+
+/// The format that adds auditable compaction, request records and append-only upgrades.
+pub(crate) const COMPACTION_VERSION: u32 = 3;
+/// The format that records that a tool call with side effects started.
+pub(crate) const START_RECORDS_VERSION: u32 = 4;
+/// The format that adds incremental summaries: `mode` and `continues` on attempts, fact IDs
+/// and `supersedes`, and `superseded` and `evicted` on results.
+pub(crate) const INCREMENTAL_SUMMARY_VERSION: u32 = 5;
 
 /// How long one append may wait for its log, such as a database that stopped answering.
 /// A file append finishes long before; a timed-out append stops writing, like a failed one.
@@ -143,6 +152,16 @@ pub struct ContextEditEntry {
     pub replacement: Option<String>,
 }
 
+/// Append-only format transition; old headers remain unchanged.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FormatUpgradeEntry {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub timestamp: u64,
+    pub version: u32,
+}
+
 /// One record of a session after the header: one line of a session file.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -226,39 +245,6 @@ impl Entry {
 pub struct ProjectedMessage {
     pub entry_id: String,
     pub message: Message,
-}
-
-/// Whether `message` carries tool result details, which are for observers only.
-fn has_details(message: &Message) -> bool {
-    matches!(message, Message::ToolResult(result) if result.details.is_some())
-}
-
-fn drop_details(message: &mut Message) {
-    if let Message::ToolResult(result) = message {
-        result.details = None;
-    }
-}
-
-/// `messages` as a model may see them: without tool result details. Summary requests and
-/// context sizes use this, since providers never send the details. Copies only when a
-/// message has details.
-pub(crate) fn without_details(messages: &[Message]) -> Cow<'_, [Message]> {
-    if !messages.iter().any(has_details) {
-        return Cow::Borrowed(messages);
-    }
-    let mut copy = messages.to_vec();
-    copy.iter_mut().for_each(drop_details);
-    Cow::Owned(copy)
-}
-
-/// [`without_details`] for records that keep their entry IDs.
-pub(crate) fn records_without_details(records: &[ProjectedMessage]) -> Cow<'_, [ProjectedMessage]> {
-    if !records.iter().any(|record| has_details(&record.message)) {
-        return Cow::Borrowed(records);
-    }
-    let mut copy = records.to_vec();
-    copy.iter_mut().for_each(|record| drop_details(&mut record.message));
-    Cow::Owned(copy)
 }
 
 /// A session tree, kept in memory and optionally stored by a [`SessionLog`].
@@ -581,30 +567,6 @@ impl SessionStore {
         self.compacted_projection()
     }
 
-    fn raw_projection_from(path: &[&Entry]) -> Vec<ProjectedMessage> {
-        // Later edits of the same target win.
-        let mut edits: HashMap<&str, &Option<String>> = HashMap::new();
-        for entry in path {
-            if let Entry::ContextEdit(edit) = entry {
-                edits.insert(edit.target_id.as_str(), &edit.replacement);
-            }
-        }
-        path.iter()
-            .filter_map(|entry| {
-                let Entry::Message(entry) = entry else { return None };
-                let message = match edits.get(entry.id.as_str()) {
-                    None => entry.message.clone(),
-                    Some(None) => return None,
-                    Some(Some(text)) => entry.message.with_replaced_text(text),
-                };
-                Some(ProjectedMessage {
-                    entry_id: entry.id.clone(),
-                    message,
-                })
-            })
-            .collect()
-    }
-
     /// The model-visible messages of the current branch.
     pub fn messages(&self) -> Vec<Message> {
         self.projection()
@@ -689,8 +651,66 @@ impl std::io::Write for FailingWriter {
     }
 }
 
+impl SessionStore {
+    /// The rules every record follows, when it is appended and when a session is loaded.
+    fn validate_entry(&self, entry: &Entry) -> Result<()> {
+        ensure!(
+            !entry.id().is_empty() && !self.index.contains_key(entry.id()),
+            "duplicate or empty entry ID {:?}",
+            entry.id()
+        );
+        if let Some(parent) = entry.parent_id() {
+            ensure!(self.index.contains_key(parent), "entry parent {parent:?} not found");
+        }
+        match entry {
+            Entry::Message(_) => {}
+            Entry::ContextEdit(edit) => self.validate_context_edit(edit)?,
+            Entry::FormatUpgrade(upgrade) => ensure!(
+                upgrade.version >= self.format_version && upgrade.version <= SESSION_VERSION,
+                "unsupported format upgrade {}",
+                upgrade.version
+            ),
+            Entry::CompactionStarted(started) => self.validate_compaction_started(started)?,
+            Entry::Compaction(done) => self.validate_compaction(done, entry.parent_id())?,
+            Entry::CompactionFailed(failed) => {
+                self.validate_attempt_completion(&failed.attempt_id, entry.parent_id())?;
+            }
+            Entry::RequestConfig(_) | Entry::RequestStarted(_) => self.validate_request_entry(entry)?,
+            Entry::ToolCallStarted(start) => {
+                ensure!(
+                    self.format_version >= START_RECORDS_VERSION,
+                    "tool call start records require a format upgrade to v{START_RECORDS_VERSION}"
+                );
+                self.validate_tool_call_start(start)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Effective file format, including appended upgrades.
+    pub fn format_version(&self) -> u32 {
+        self.format_version
+    }
+
+    /// Append a format upgrade before the first record that needs `version`.
+    /// The header is never rewritten.
+    pub(super) async fn ensure_format(&mut self, version: u32) -> Result<()> {
+        if self.format_version < version {
+            self.append(Entry::FormatUpgrade(FormatUpgradeEntry {
+                id: self.new_id(),
+                parent_id: self.leaf.clone(),
+                timestamp: now_ms(),
+                version,
+            }))
+            .await?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
     use std::fs::OpenOptions;
     use std::io::Write;
     use std::sync::mpsc;
