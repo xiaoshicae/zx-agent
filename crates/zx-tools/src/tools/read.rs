@@ -143,7 +143,9 @@ impl Tool for ReadFileTool {
     }
 }
 
-fn resolve(cwd: &Path, raw: &str) -> Result<PathBuf, String> {
+/// `raw` as a path: without a leading `@`, and against `cwd` when relative. Shared by the file
+/// tools.
+pub(super) fn resolve(cwd: &Path, raw: &str) -> Result<PathBuf, String> {
     // Some models prefix paths with '@'; pi's built-in tools strip it too.
     let raw = raw.trim();
     let raw = raw.strip_prefix('@').unwrap_or(raw);

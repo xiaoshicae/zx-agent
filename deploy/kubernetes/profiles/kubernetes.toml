@@ -4,8 +4,12 @@
 # without asking, and limits their options. zx-agent itself knows nothing about kubectl.
 name = "kubernetes"
 extends = "assistant"
+# The assistant's tools without edit_file and write_file: the Pod is for looking at
+# clusters, not for changing files.
+tools = ["bash", "read_file", "read_skill", "read_output"]
 
 [rules]
+askTools = ["bash"]
 # Replaces the assistant's list, so its commands are repeated here.
 autoApprove = [
   "kubectl get",

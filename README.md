@@ -11,8 +11,8 @@
   - 终端 `chat`：流式回答、审批、运行中插话、Ctrl+C 后继续对话；等待与工具执行的状态行、工具结果预览、每轮用量、粘贴的多行合为一条消息
   - 文件化的 profile（内置 `unattended`、`troubleshoot`、`assistant`）；显式 CLI 参数覆盖、deny 累加；特定环境的规则（如 kubectl 可带的选项）写在 profile 里，代码中不含
   - 项目 `AGENTS.md` 和显式上下文文件；`read_skill` 按需读取登记的 skill 正文
-  - `bash` 与 `read_file` 工具
-  - 可选的离线容器执行（`--execution container`）：bash 与 read_file 在无网络、工作目录只读的 Docker 容器中逐个执行，见[容器执行](#容器执行)
+  - `bash`、`read_file`，以及改文件的 `edit_file`（多处精确替换，结果附 unified patch）与 `write_file`（新建或整体覆盖）
+  - 可选的容器执行（`--execution container`）：bash 与 read_file 在作为沙箱的 Docker 容器中逐个执行；默认工作目录可写、可联网，也可配置为只读、无网络，见[容器执行](#容器执行)
   - 可选的自动 / 手动压缩：摘要引用源条目，原始历史保留
   - 长工具结果脱敏后落盘，`read_output` 按 UUID 分页读取
   - 声明式命令策略
@@ -70,7 +70,7 @@ zx-agent chat --model "$ZX_MODEL" --session ./chat.jsonl
 | Ctrl+C | 取消当前任务或审批，继续保留会话；空闲时保持会话 |
 | EOF（Ctrl+D）、SIGTERM | EOF 结束会话，管道中的正常任务先完成；待审批时 EOF 拒绝并取消。SIGTERM 取消并退出 |
 
-chat 中的 bash 调用先经过原命令策略，再显示工具名、完整参数（bash 显示命令，另有参数时单独列出）和理由，等待审批；工作目录与权限范围在启动时显示一次。read_file 仍按原读取权限执行。profile 列出的只读命令不经审批直接执行（内置 assistant 为 `grep`、`head`、`tail`、`wc`、`jq`；Kubernetes 部署的 profile 另加只读的 kubectl 命令）；带 shell 语法、URL、profile 排除的字词（assistant 为 `secret`）或 profile 未列出的选项的命令仍要审批，见[安全模型](#安全模型)。待审批时输入菜单编号并按 Enter，`y`、`yes` 等同 1，`n`、`no` 等同 3，不区分大小写：
+chat 中的 bash 调用先经过原命令策略，再显示工具名、完整参数（bash 显示命令，另有参数时单独列出）和理由，等待审批；工作目录与权限范围在启动时显示一次。内置 assistant 的 `edit_file` 与 `write_file` 同样要审批；read_file 仍按原读取权限执行。profile 列出的只读命令不经审批直接执行（内置 assistant 为 `grep`、`head`、`tail`、`wc`、`jq`；Kubernetes 部署的 profile 另加只读的 kubectl 命令）；带 shell 语法、URL、profile 排除的字词（assistant 为 `secret`）或 profile 未列出的选项的命令仍要审批，见[安全模型](#安全模型)。待审批时输入菜单编号并按 Enter，`y`、`yes` 等同 1，`n`、`no` 等同 3，不区分大小写：
 
 ```text
 [approval 1] bash: ls -la
@@ -235,7 +235,7 @@ zx-agent run --base-url https://api.deepseek.com --model deepseek-flash \
 | `--base-url` | `https://api.openai.com/v1`，或环境变量 `ZX_BASE_URL` | OpenAI 兼容地址 |
 | `--api-key-env` | `OPENAI_API_KEY` | 存放 API key 的**环境变量名**。key 不接受命令行传入，避免在进程列表中暴露 |
 | `--system-updates` | `collapse` | 恢复会话时，提示词的变化怎样发给模型。`collapse`：合并进开头的 system 消息，兼容不接受对话中途 system 消息的服务端；`inline`：在变化发生的位置发送，保持此前的请求前缀，便于服务端复用提示词缓存，模型也能看出提示词从哪里开始变化，但要求服务端接受对话中途的 system 消息，使用前需确认 |
-| `--tools` | profile：`run` 为 `bash,read_file`，`chat` 为 `bash,read_file,read_output`；有 skill 目录时加入 `read_skill` | 显式传入时替换工具集合；仅启用 `read_output` 时安装长结果落盘钩子 |
+| `--tools` | profile：`run` 为 `bash,read_file`，`chat` 为 `bash,read_file,edit_file,write_file,read_output`；有 skill 目录时加入 `read_skill` | 显式传入时替换工具集合；仅启用 `read_output` 时安装长结果落盘钩子 |
 | `--cwd` | 当前目录 | 工具的工作目录，同时写入 `<environment>` |
 | `--allow-cmd` / `--deny-cmd` | 无 | bash 命令白名单前缀 / 额外的拒绝子串，均可重复 |
 | `--auto-approve-cmd` | profile：`chat`（assistant）为一组只读命令，`run`（unattended）为空 | 不经审批直接执行的 bash 命令前缀，可重复，替换 profile 的清单；只在 bash 需要审批时起作用，见[安全模型](#安全模型) |
@@ -259,7 +259,7 @@ zx-agent run --base-url https://api.deepseek.com --model deepseek-flash \
 | `--system-prompt-file` | 所选 profile 的说明 | 替换所选 profile 的说明。只在启动时读取一次，可以是管道；`chat` 的 `/new` 沿用同一内容。下文生成的段落仍会追加在末尾 |
 | `--compact-threshold-bytes` | profile：run 关闭，chat 262144 | 自动摘要的序列化上下文字节阈值；0 关闭，非零值须大于 profile 的保留预算 |
 | `--no-auto-compact` | 关闭 | 禁用自动摘要，与上项互斥；保留手动 `/compact` |
-| `--execution` | profile 决定，内置 profile 为 `local` | `local`：在本机执行；`container`：bash 与 read_file 在无网络、工作目录只读的 Docker 容器中执行，见[容器执行](#容器执行) |
+| `--execution` | profile 决定，内置 profile 为 `local` | `local`：在本机执行；`container`：bash、read_file、edit_file 与 write_file 在作为沙箱的 Docker 容器中执行，默认工作目录可写、可联网，见[容器执行](#容器执行) |
 | `--container-image` | 无 | `--execution container` 使用的镜像，须已在本地（`docker pull`）；本机执行时给出该参数视为配置错误 |
 
 表中标注 profile 的默认值取自所选 profile，命令行显式传入时覆盖；`run --help` 与 `chat --help` 不再显示固定默认值。
@@ -293,7 +293,7 @@ CLI (main.rs + cli.rs + chat/)
             ├─ session  只追加的条目树 + 投影；SessionLog 存储 ← pi: SessionManager
             └─ agent    回合循环、工具执行、钩子与事件       ← pi: packages/agent/src/agent-loop.ts
                  ├─ ai    消息类型、流式事件协议、provider  ← pi: packages/ai
-                 └─ tools bash、read_file、输出截断         ← pi: coding-agent/src/core/tools
+                 └─ tools bash、read_file、edit_file、write_file、输出截断 ← pi: coding-agent/src/core/tools
 ```
 
 | 模块 | 文件 | 对应的 pi 实现 |
@@ -396,29 +396,49 @@ CLI (main.rs + cli.rs + chat/)
 
 `read_file` 只接受普通文件，默认单文件上限为 10 MiB，同时检查文件元数据与实际读取量。目录、FIFO 和设备文件会被拒绝，并且不会被打开：先查看路径类型再打开，打开后再检查一次，防止中途被替换。取消会停止等待文件 I/O；底层已经启动的普通文件 I/O 仍可能由 Tokio 的阻塞线程继续完成。每次最多返回 2000 行或 50 KiB（51200 字节），按行翻页；单行超过这个字节上限时只显示前缀，并注明该行被截断及其字节数。
 
+`edit_file` 与 `write_file` 改变文件，按有副作用处理（崩溃后恢复为“结果未知”）。内置 assistant 启用它们并要求审批，`unattended`、`troubleshoot` 与 Kubernetes 部署的 profile 不启用。它们不受命令白名单约束，可以写进程有权限写的任何普通文件，包括工作目录之外的；需要限制时，不启用它们，或使用容器执行。目录与特殊文件会被拒绝，写入不是原子的。`edit_file`（对应 pi 的 `edit`）：
+
+- 每处 `oldText` 都与原文件比较，必须恰好出现一次，彼此不能重叠；有一处失败就不写文件。精确匹配不到时，会忽略行尾空白、把弯引号、各种破折号与特殊空格当作 ASCII 字符再匹配一次；此时只有被替换的行按这种形式写回，其余行保持原字节。pi 还做 Unicode NFKC 规范化，标准库没有，这里不做。
+- 文件开头的 BOM 与 CRLF 换行保留；只编辑不超过 10 MiB 的 UTF-8 文本，含 NUL 字节的文件按二进制拒绝。
+- 结果的 `details` 含 unified patch（3 行上下文，超过 12 KiB 截断）与第一处改动的行号；diff 由程序自己计算（Myers 算法，插入与删除超过 500 行时整段显示为删除再添加），不引入依赖。
+- 模型常见的旧写法会先改写再校验：`edits` 写成 JSON 字符串或单个对象、`oldText` 与 `newText` 写在顶层（`prepare_arguments`）。
+- 同一批调用中改同一个文件（按解析符号链接后的路径）的 `edit_file` 与 `write_file` 逐个执行，改不同文件的仍可并行（对应 pi 的 file-mutation-queue）。
+
 MCP 工具（见上文“MCP 工具”）：服务器由使用者在 profile 中显式列出，工具也要逐个列出，没列出的工具连描述都不会进入上下文。工具描述与结果来自外部服务，可能含注入内容；`allowTools` 以外的工具每次都要审批，服务器给出的 annotations 不影响放行。工具一律按有副作用处理，中断后恢复为“结果未知”。响应体没有大小上限（rmcp 读取 JSON 响应时不限制，SSE 每个事件上限 16 MiB），交给模型的结果最多 2000 行或 50 KiB。
 
 ### 容器执行
 
-默认在本机执行。在 profile 中写 `execution = "container"` 并配置镜像，或使用 `--execution container --container-image <镜像>`，bash 与 read_file 改在 Docker 容器中执行；read_skill 与 read_output 仍读取本机文件。
+默认在本机执行。在 profile 中写 `execution = "container"` 并配置镜像，或使用 `--execution container --container-image <镜像>`，bash、read_file、edit_file 与 write_file 改在 Docker 容器中执行（写文件经 `docker exec --interactive` 从标准输入传入内容，以命令用户写入）；read_skill 与 read_output 仍读取本机文件。
 
 ```toml
 execution = "container"
 
 [container]
 image = "debian:bookworm-slim"   # 必填；须已在本地，不会自动拉取
-user = "65534:65534"             # 可选，默认 nobody
+user = "1000:1000"               # 可选，默认为运行 zx-agent 的用户（以 root 运行时为 nobody）
 memory = "1g"                    # 可选，Docker 的内存上限写法
 pidsLimit = 256                  # 可选，容器内进程数上限
+network = "bridge"               # 可选，默认 bridge；none 为无网络
+workspace = "readWrite"          # 可选，readOnly 时工作目录只读
+root = "readWrite"               # 可选，readOnly 时容器自身的文件只读，只有 /tmp 可写
+
+[rules]
+approveAll = true                # 可选：不再询问任何审批，只能与容器执行一起使用
+askTools = []                    # approveAll 时须为空（内置 assistant 为 ["bash"]）
 ```
 
-- 每个进程一个容器，在启动时创建；`chat` 的 `/new` 会换一个新容器。启动时检查命令不以 root 运行、镜像提供 bash 与 `cat`、`head`、`uname`，以及容器用户能读取工作目录。任一项不满足、镜像不在本地或 Docker 不可用时，以配置错误结束（退出码 2），不请求模型。
-- 隔离：无网络（`--network none`）、只读根文件系统、工作目录以只读方式挂载在同一路径、只有 `/tmp`（tmpfs）可写、去掉全部 capability、`no-new-privileges`、进程数与内存上限。命令以非 root 用户运行：`container.user` 为 UID 0 或 `root` 时报配置错误。保持容器存活的 PID 1 及其 `cat` 以去掉全部 capability 的 root 运行，命令无法向它们发信号。命令不继承 agent 的环境变量，API key 不进入容器。`<environment>` 描述容器的系统与这些限制，而不是宿主机。
-- 工作目录整体对容器只读可见，包括其中的硬链接和 `.zx-agent/outputs` 中已脱敏的工具结果。因此容器执行时，`--session` 指向的会话文件必须在工作目录之外，否则启动时报配置错误；遮蔽单个路径挡不住硬链接，也挡不住同目录中的其他会话文件。
-- 同一容器内的命令与文件读取逐条执行：容器执行器声明为串行，bash 与 read_file 随之声明 `Sequential`，同一批调用因此逐个检查、记录并执行，运行在其间被取消时，尚未轮到的调用在恢复时记为未执行。命令总用容器配置中、启动检查过的 shell。每条命令执行前后，以命令用户的身份终止该用户的全部进程（`kill -1`）：超时、取消、运行被丢弃或正常结束后，命令留下的后台进程都会被终止，用 `setsid` 脱离进程组的也不例外；命令写入 `/tmp` 的内容不影响清理。被信号终止的命令报告 `128 + 信号编号` 的退出码（如 137），而不是本机执行时的 `terminated by a signal`。
+容器就是沙箱：限制放在容器的外墙上，容器内默认给 agent 它的用户能有的全部权限（路线图决策 D11）。
+
+- 每个进程一个容器，在启动时创建；`chat` 的 `/new` 会换一个新容器。启动时检查命令不以 root 运行、镜像提供 bash 与 `cat`、`head`、`uname`、`mkdir`、容器用户能读取工作目录，工作目录可写时还检查能写入。任一项不满足、镜像不在本地或 Docker 不可用时，以配置错误结束（退出码 2），不请求模型。
+- 容器内默认放开：工作目录以读写方式挂载在同一路径，改动直接作用于宿主机上的文件；容器自身的文件可写（如 `/var/tmp`），随容器删除而丢弃；加入 Docker 默认的 `bridge` 网络，可以访问外部网络。命令默认以运行 zx-agent 的用户的 `uid:gid` 运行，在原生 Linux 上写出的文件属于该用户；zx-agent 以 root 运行时改用 nobody（`65534:65534`）。非 root 用户仍不能改 root 所有的系统文件（如安装软件包），需要的软件请装进镜像。
+- 外墙不变：不加 `--privileged`，不挂 Docker 的 socket，不使用宿主机的网络与 PID 命名空间（`network` 为 `host` 或 `container:<名字>` 时报配置错误），去掉全部 capability 并设 `no-new-privileges`（命令不能经 setuid 程序成为 root），进程数与内存上限。命令以非 root 用户运行：`container.user` 为 UID 0 或 `root` 时报配置错误。保持容器存活的 PID 1 及其 `cat` 以去掉全部 capability 的 root 运行，命令无法向它们发信号。命令不继承 agent 的环境变量，API key 不进入容器。`<environment>` 按实际配置描述容器的系统、工作目录是否可写、网络与可写范围，而不是宿主机。
+- 审批：容器执行本身不改变审批，chat 照常询问 bash。profile 设 `rules.approveAll = true` 后不再询问任何调用：chat 与 serve 的 bash、`askTools` 与 MCP 的 `allowTools` 以外的工具都直接执行，拒绝规则与命令策略仍然生效。它只能与容器执行一起使用，CLI 以 `--execution local` 覆盖时报配置错误。
+- 严格模式：`network = "none"`、`workspace = "readOnly"`、`root = "readOnly"` 即为此前的离线只读沙箱，适合只看不改的排障，可以分别设置。
+- 已知代价：可写又联网时，挂进容器的内容（代码、`.git` 中的远端地址等）可能被命令发送出去；凭据不进入容器这道墙仍然有效。工作目录整体对容器可见（可写时也可被修改），包括其中的硬链接和 `.zx-agent/outputs` 中已脱敏的工具结果。因此容器执行时，`--session` 指向的会话文件必须在工作目录之外，否则启动时报配置错误；遮蔽单个路径挡不住硬链接，也挡不住同目录中的其他会话文件。
+- 同一容器内的命令与文件读写逐条执行：容器执行器声明为串行，内置工具随之声明 `Sequential`，同一批调用因此逐个检查、记录并执行，运行在其间被取消时，尚未轮到的调用在恢复时记为未执行。命令总用容器配置中、启动检查过的 shell。每条命令执行前后，以命令用户的身份终止该用户的全部进程（`kill -1`）：超时、取消、运行被丢弃或正常结束后，命令留下的后台进程都会被终止，用 `setsid` 脱离进程组的也不例外；命令写入 `/tmp` 的内容不影响清理。被信号终止的命令报告 `128 + 信号编号` 的退出码（如 137），而不是本机执行时的 `terminated by a signal`。
 - 容器随 zx-agent 进程结束而删除，进程被 SIGKILL 时也一样（容器读取的 stdin 随之关闭）。容器带 `zx-agent.session=<会话 ID>` 标签，可用 `docker ps --filter label=zx-agent.session` 查看。
-- 原生 Linux 的 Docker 保留宿主机的文件权限：默认用户 65534 只能读取对其他用户可读的文件，工作目录本身也需要可读，否则启动时报错；需要时用 `container.user` 指定其他用户。macOS 的 Docker Desktop 把挂载的文件显示为容器用户所有（2026-11-01 实测），权限位不起限制作用。
-- 在线排障所需的网络与凭据访问尚未提供，见路线图 P6。
+- 原生 Linux 的 Docker 保留宿主机的文件权限：默认用户就是工作目录通常的所有者，可以读写；指定其他用户（如 65534）时，它只能读取对其他用户可读的文件，工作目录本身也需要可读，可写时还需要能写，否则启动时报错。macOS 的 Docker Desktop 把挂载的文件显示为容器用户所有（2026-11-01 实测），权限位不起限制作用。
+- 凭据不进入容器：需要凭据的在线访问（如集群 API）仍按路线图 P6 的方式在 Pod 中运行，不经容器执行。
 
 **局限（必须了解）**：
 
@@ -615,7 +635,7 @@ P1 的 SDK 接口调整：静态配置移入 `LoopSpec`；`LoopConfig` 持有钩
 - `interaction::Interaction`：由宿主回答审批；内核不读取终端。
 - `agent::EventSink`：订阅事件，收到带信封的 `agent::Event`（事件本体在 `event.event`）。任何 `Fn(&Event) + Send + Sync` 都可以直接用作 sink。事件发出时，它报告的消息与编辑已写入会话；sink 只接收事件，不参与持久化。导出器可用 `AgentSession::subscribe_bounded(capacity)` 得到有界通道：通道满时丢弃新事件并计数（`EventStream::dropped()`），不阻塞运行；会话释放、已发出的事件读完后，`recv` 返回 `None`。订阅句柄不持有 sink，sink 随会话释放。
 - `session::SessionLog`：会话记录存在哪里，见下文[会话存储](#会话存储)。
-- `executor::Executor`：工具执行命令与读文件的位置。`BashTool` 与 `ReadFileTool` 的 `executor` 字段默认是 `LocalExecutor`（本机）；`run` 结束、超时或取消时须终止命令启动的全部进程，`read_file` 只读不超过上限的普通文件。`execution_mode` 默认 `Parallel`；一次只能处理一个调用的执行器返回 `Sequential`，内置工具随之声明，循环就不会提前开始并记录只能排队等待的调用。`ContainerExecutor::start(ContainerConfig::new(image, workspace))` 启动[容器执行](#容器执行)所用的容器，`tools::builtin_tools_with` 用指定的执行器构造内置工具；容器随执行器释放而删除。
+- `executor::Executor`：工具执行命令与读写文件的位置。`BashTool`、`ReadFileTool`、`EditFileTool` 与 `WriteFileTool` 的 `executor` 字段默认是 `LocalExecutor`（本机）；`run` 结束、超时或取消时须终止命令启动的全部进程，`read_file` 只读不超过上限的普通文件，`write_file` 新建或覆盖普通文件并创建缺少的上级目录（默认实现返回错误，此前写的执行器不受影响）。`EditFileTool` 与 `WriteFileTool` 共用 `tools::FileMutationQueue` 时，同一文件的改动逐个进行。`execution_mode` 默认 `Parallel`；一次只能处理一个调用的执行器返回 `Sequential`，内置工具随之声明，循环就不会提前开始并记录只能排队等待的调用。`ContainerExecutor::start(ContainerConfig::new(image, workspace))` 启动[容器执行](#容器执行)所用的容器，`tools::builtin_tools_with` 用指定的执行器构造内置工具；容器随执行器释放而删除。
 - `agent::MessageQueues`：在运行期间注入引导消息或后续消息。
 - `im::ImChannel`：接入一个 IM 平台，见下文[IM 接入](#im-接入)。
 - `extensions::Extension`：把工具、钩子与系统提示词段落打包注册，见下文[扩展](#扩展)。
@@ -709,8 +729,9 @@ cargo fmt --check
 | `tests/session_compaction.rs`、`tests/compaction.rs` | v1/v2 追加升级、分支和引用、原始投影、省略保留边界后摘要仍生效、编辑摘要的变换计划在写入前被拒绝、摘要源与上下文字节统计不含工具结果的 `details`、摘要失败与取消、请求 / 用量预算、超时和上限 |
 | `tests/incremental_summary.rs` | 增量摘要（v5）：第一次读取整段前缀并给事实编号、之后只读旧事实与新增记录、可接续全量模式留下的摘要、取代与淘汰、修正只作废相关事实并在下一次重读、模型不能自带编号、加载时拒绝违反规则的记录、请求可从会话文件还原、多轮之后请求大小不随历史增长（与全量模式对照）；摘要评测的脚本会话自检，以及用知道答案的假模型验证评分 |
 | `tests/request_audit.rs` | 每次任务与摘要请求可从会话文件还原、配置只在变化时追加、旧会话首次请求前升级、与投影不一致的请求不记录、固定会话文件（v4 与含增量摘要的 v5）的还原结果不变（版本守护） |
-| `tests/executor.rs` | 执行器接缝：bash 与 read_file 只经自身执行器运行命令和读文件，命令的 6 种结束方式均正确报告，执行方式随执行器 |
-| `tests/container.rs` | 容器执行：用假 docker 程序验证启动参数与失败报告、命令与读文件的转发、超时 / 取消 / 丢弃后的清理、工具逐个执行（排队的调用在取消后记为未执行）、命令用配置的 shell、启动失败不留会话文件、CLI 接线与配置错误；设置 `ZX_DOCKER_TEST_IMAGE` 时另对真实 Docker 验证用户、只读工作目录与无网络、命令进程树与 `setsid` 子进程的终止、清理不受命令写入影响、命令逐条执行、容器内读文件、chat 中 Ctrl-C 后容器仍在、zx-agent 正常结束或被 SIGKILL 后容器删除（CI 在 Linux 上用 `debian:bookworm-slim` 运行）；另验证 root 用户与工作目录内的会话文件被拒绝 |
+| `tests/executor.rs` | 执行器接缝：bash 与 read_file 只经自身执行器运行命令和读文件，命令的 6 种结束方式均正确报告，执行方式随执行器；不能写文件的执行器让 edit_file 报错 |
+| `tests/file_tools.rs` | edit_file 与 write_file：新建、覆盖与上级目录，多处替换、BOM 与 CRLF、patch，每类失败后文件不变，取消，旧参数写法，同一批调用改同一文件时两处改动都生效 |
+| `tests/container.rs` | 容器执行：用假 docker 程序验证启动参数与失败报告、命令与读文件的转发、超时 / 取消 / 丢弃后的清理、工具逐个执行（排队的调用在取消后记为未执行）、命令用配置的 shell、启动失败不留会话文件、CLI 接线与配置错误；设置 `ZX_DOCKER_TEST_IMAGE` 时另对真实 Docker 验证默认的用户、可写工作目录与网络，严格模式的只读与无网络、命令进程树与 `setsid` 子进程的终止、清理不受命令写入影响、命令逐条执行、容器内读文件、chat 中 Ctrl-C 后容器仍在、zx-agent 正常结束或被 SIGKILL 后容器删除（CI 在 Linux 上用 `debian:bookworm-slim` 运行）；另验证 root 用户、共用宿主机网络与工作目录内的会话文件被拒绝，`rules.approveAll` 时 chat 不再询问 bash、run 执行 `allowTools` 以外的 MCP 工具，以及在本机执行时报配置错误 |
 | `tests/crash_recovery.rs` | 内置工具的副作用声明、开始记录先于执行（串行与并行批次）、中断批次的四种恢复结果且不重放、失败或取消的回答中的调用记为未执行、恢复事件在结果写入之后、旧格式会话、丢弃 future 后的同进程恢复、`run` 的 `[recover]` 输出；Unix 上 SIGKILL 掉正在执行命令的 `run`，再由下一次 `run` 恢复且不重放 |
 | `tests/output_store.rs` | 先脱敏后落盘、UUID 边界、文件权限、UTF-8 分页、容量、取消、写盘失败或超时时保留内联结果、目录越界与 `.gitignore` |
 | `tests/hooks.rs`、`tests/hooks_cli.rs` | 钩子组合与失败处理、审批范围与取消、审计变换、输入钩子被取消或运行被丢弃时不写入输入且插话留在队列、策略结论与审批事件（询问、会话内授权、拒绝、失败、超时、取消、等待时长）、观察者默认跳过增量、钩子上下文（会话、运行、工作目录与取消信号）、具名钩子、按阶段执行与先注册的脱敏仍在扩展之后、进度只经脱敏钩子、`details` 中字符串与对象键的脱敏、重名或声明名不一致的工具在请求前被拒绝、工具元数据 panic 时运行失败、`observes` 的 panic 被报告且运行继续、钩子不能追加 system 消息、工具取消自己的令牌不影响运行、续写预算、工具输出脱敏的 CLI 接线、脱敏失败在文本输出中的提示、非 UTF-8 密钥文件按有损解码匹配、无法匹配的密钥文件在启动时报配置错误、内置钩子的固定名称、短值在启动时提示 |

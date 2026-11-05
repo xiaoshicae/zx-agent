@@ -616,6 +616,34 @@ async fn a_shell_call_waits_for_an_approval_before_any_side_effect() {
 }
 
 #[tokio::test]
+async fn a_file_write_waits_for_an_approval_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![
+        Reply::tool_call("c", "write_file", json!({"path": "notes.txt", "content": "hello\n"})),
+        Reply::text("done"),
+    ])
+    .await;
+    // The default assistant profile enables write_file and asks before it runs.
+    let mut child = chat(&server, dir.path(), &[]).spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut errors = BufReader::new(child.stderr.take().unwrap()).lines();
+    stdin.write_all(b"go\n").await.unwrap();
+    read_error_until(&mut errors, "[approval] Choose 1, 2, 3 or 4:").await;
+    assert!(!dir.path().join("notes.txt").exists());
+    stdin.write_all(b"1\n/quit\n").await.unwrap();
+    drop(stdin);
+    let result = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(0));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("notes.txt")).unwrap(),
+        "hello\n"
+    );
+}
+
+#[tokio::test]
 async fn discussing_an_approval_sends_user_input_without_executing_the_call() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::bash("c", "printf no > marker"), Reply::text("explained")]).await;

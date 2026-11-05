@@ -1,7 +1,7 @@
 //! Where built-in tools run commands and read files.
 //!
 //! Tools keep their arguments, result format and truncation; an executor only runs a
-//! command or reads a file. [`LocalExecutor`] uses this machine; [`ContainerExecutor`]
+//! command, reads a file or writes one. [`LocalExecutor`] uses this machine; [`ContainerExecutor`]
 //! runs the same tools in an isolated Docker container.
 
 mod capture;
@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent::ExecutionMode;
 
-pub use container::{ContainerConfig, ContainerExecutor, Platform};
+pub use container::{Access, ContainerConfig, ContainerExecutor, Platform, check_network};
 pub use local::LocalExecutor;
 
 /// One shell command: `<shell> -c <command>` in `cwd`.
@@ -86,4 +86,18 @@ pub trait Executor: Send + Sync {
     /// files are errors whose text tells the model what to do instead. Callers that must
     /// respond to cancellation race this future against their token.
     async fn read_file(&self, path: &Path, max_bytes: u64) -> Result<Vec<u8>, String>;
+
+    /// Replace the contents of the file at `path` with `contents`, creating the file and its
+    /// missing parent directories. Directories and special files are refused. The write is
+    /// not atomic: a reader may see it half done, and dropping the future may leave it so.
+    /// Callers that must respond to cancellation check their token before calling.
+    ///
+    /// Defaults to an error, for executors written before this method existed; both built-in
+    /// executors write.
+    async fn write_file(&self, path: &Path, _contents: &[u8]) -> Result<(), String> {
+        Err(format!(
+            "cannot write {}: this executor does not support writing files",
+            path.display()
+        ))
+    }
 }

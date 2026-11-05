@@ -1,8 +1,12 @@
 //! Built-in tools (pi: coding-agent/src/core/tools).
 
 pub mod bash;
+pub mod edit;
+mod edit_text;
+pub mod mutation;
 pub mod read;
 pub mod truncate;
+pub mod write;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,7 +14,10 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 
 pub use bash::BashTool;
+pub use edit::EditFileTool;
+pub use mutation::FileMutationQueue;
 pub use read::ReadFileTool;
+pub use write::WriteFileTool;
 
 use crate::agent::Tool;
 use crate::executor::{Executor, LocalExecutor};
@@ -19,9 +26,13 @@ use crate::executor::{Executor, LocalExecutor};
 pub const BASH: &str = "bash";
 /// Name of the built-in file reading tool.
 pub const READ_FILE: &str = "read_file";
+/// Name of the built-in tool that replaces text in a file.
+pub const EDIT_FILE: &str = "edit_file";
+/// Name of the built-in tool that creates or overwrites a file.
+pub const WRITE_FILE: &str = "write_file";
 
 /// Names accepted by [`builtin_tools`].
-pub const BUILTIN_TOOL_NAMES: &[&str] = &[BASH, READ_FILE];
+pub const BUILTIN_TOOL_NAMES: &[&str] = &[BASH, READ_FILE, EDIT_FILE, WRITE_FILE];
 
 /// Build built-in tools by name, in the given order, without duplicates. `hidden_env` names
 /// environment variables that bash commands must not see, such as the API key variable.
@@ -30,7 +41,8 @@ pub fn builtin_tools(names: &[String], bash_timeout: Duration, hidden_env: &[Str
     builtin_tools_with(names, bash_timeout, hidden_env, Arc::new(LocalExecutor))
 }
 
-/// Like [`builtin_tools`], with bash and read_file running through `executor`.
+/// Like [`builtin_tools`], with the tools running commands and reading and writing files through
+/// `executor`. edit_file and write_file share one [`FileMutationQueue`].
 pub fn builtin_tools_with(
     names: &[String],
     bash_timeout: Duration,
@@ -38,6 +50,7 @@ pub fn builtin_tools_with(
     executor: Arc<dyn Executor>,
 ) -> Result<Vec<Arc<dyn Tool>>> {
     let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
+    let queue = Arc::new(FileMutationQueue::default());
     for name in names {
         let name = name.trim();
         if name.is_empty() || tools.iter().any(|tool| tool.name() == name) {
@@ -54,6 +67,15 @@ pub fn builtin_tools_with(
             READ_FILE => Arc::new(ReadFileTool {
                 executor: executor.clone(),
                 ..ReadFileTool::default()
+            }),
+            EDIT_FILE => Arc::new(EditFileTool {
+                executor: executor.clone(),
+                queue: queue.clone(),
+                ..EditFileTool::default()
+            }),
+            WRITE_FILE => Arc::new(WriteFileTool {
+                executor: executor.clone(),
+                queue: queue.clone(),
             }),
             other => bail!("unknown tool {other:?}; available: {}", BUILTIN_TOOL_NAMES.join(", ")),
         };

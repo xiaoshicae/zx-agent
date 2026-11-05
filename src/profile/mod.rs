@@ -11,6 +11,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 
+use crate::executor::{Access, check_network};
 use crate::mcp::{check_server_name, tool_name as mcp_tool_name};
 use crate::policy::{AutoApprove, ProgramOptions};
 use crate::runner::Limits;
@@ -79,6 +80,10 @@ pub struct Rules {
     pub ask_tools: Vec<String>,
     /// Tool names denied regardless of enabled tools or approval grants.
     pub deny_tools: Vec<String>,
+    /// Ask nobody: calls that would wait for an approval run instead, while deny rules and
+    /// the command policy still apply. Only with container execution, where the container is
+    /// the sandbox (decision D11), and not together with `ask_tools`.
+    pub approve_all: bool,
 }
 
 impl Rules {
@@ -146,6 +151,12 @@ pub struct ContainerSettings {
     pub memory: Option<String>,
     /// Maximum number of processes in the container.
     pub pids_limit: Option<u32>,
+    /// Docker network, such as `bridge` (the executor's default) or `none`.
+    pub network: Option<String>,
+    /// Whether commands may change the workspace; writable by default.
+    pub workspace: Option<Access>,
+    /// Whether commands may change the container's own files; writable by default.
+    pub root: Option<Access>,
 }
 
 /// Fully layered scene configuration. CLI overrides are applied by the frontend;
@@ -259,6 +270,9 @@ impl Profile {
             self.rules.ask_tools = tools;
         }
         self.rules.deny_tools.extend(raw.rules.deny_tools);
+        if let Some(approve_all) = raw.rules.approve_all {
+            self.rules.approve_all = approve_all;
+        }
         if let Some(turns) = raw.limits.max_model_requests {
             self.limits.max_model_requests = match turns {
                 ModelRequestLimit::Count(count) => Some(count),
@@ -323,6 +337,7 @@ impl Profile {
             (&mut self.container.image, container.image),
             (&mut self.container.user, container.user),
             (&mut self.container.memory, container.memory),
+            (&mut self.container.network, container.network),
         ] {
             if layer.is_some() {
                 *value = layer;
@@ -330,6 +345,12 @@ impl Profile {
         }
         if container.pids_limit.is_some() {
             self.container.pids_limit = container.pids_limit;
+        }
+        if container.workspace.is_some() {
+            self.container.workspace = container.workspace;
+        }
+        if container.root.is_some() {
+            self.container.root = container.root;
         }
         if let Some(servers) = raw.mcp {
             self.mcp = servers;
@@ -414,6 +435,7 @@ impl Profile {
             ("container.image", &self.container.image),
             ("container.user", &self.container.user),
             ("container.memory", &self.container.memory),
+            ("container.network", &self.container.network),
         ] {
             ensure!(
                 value.as_deref().is_none_or(|value| !value.trim().is_empty()),
@@ -424,10 +446,23 @@ impl Profile {
             self.container.pids_limit != Some(0),
             "container.pidsLimit must be greater than zero"
         );
+        if let Some(network) = &self.container.network {
+            check_network(network).context("container.network")?;
+        }
         ensure!(
             self.execution == Execution::Local || self.container.image.is_some(),
             "execution = \"container\" needs container.image (or --container-image)"
         );
+        if self.rules.approve_all {
+            ensure!(
+                self.execution == Execution::Container,
+                "rules.approveAll needs execution = \"container\": without the container as a sandbox, every command would run on this machine unasked"
+            );
+            ensure!(
+                self.rules.ask_tools.is_empty(),
+                "rules.approveAll asks for no approval, so rules.askTools must be empty"
+            );
+        }
         skills::validate(&self.skills)
     }
 
@@ -513,6 +548,9 @@ struct RawContainer {
     user: Option<String>,
     memory: Option<String>,
     pids_limit: Option<u32>,
+    network: Option<String>,
+    workspace: Option<Access>,
+    root: Option<Access>,
 }
 
 #[derive(Default, Deserialize)]
@@ -525,6 +563,7 @@ struct RawRules {
     auto_approve_options: BTreeMap<String, ProgramOptions>,
     ask_tools: Option<Vec<String>>,
     deny_tools: Vec<String>,
+    approve_all: Option<bool>,
 }
 
 #[derive(Default, Deserialize)]
@@ -601,7 +640,18 @@ mod tests {
         assert_eq!(assistant.limits.max_model_requests, None);
         assert_eq!(assistant.limits.timeout, None);
         assert_eq!(assistant.continue_on_length, 0);
-        assert_eq!(assistant.rules.ask_tools, ["bash"]);
+        assert_eq!(
+            assistant.tools,
+            [
+                "bash",
+                "read_file",
+                "edit_file",
+                "write_file",
+                "read_skill",
+                "read_output"
+            ]
+        );
+        assert_eq!(assistant.rules.ask_tools, ["bash", "edit_file", "write_file"]);
         assert_eq!(assistant.rules.auto_approve, ["grep", "head", "tail", "wc", "jq"]);
         assert_eq!(assistant.rules.auto_approve_except, ["secret"]);
         assert_eq!(assistant.compaction.trigger_bytes, Some(256 * 1024));
@@ -681,6 +731,7 @@ mod tests {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("deploy/kubernetes/profiles/kubernetes.toml");
         let profile = Profile::load(Some(path.to_str().unwrap()), Builtin::Unattended).unwrap();
         assert_eq!(profile.rules.ask_tools, ["bash"]);
+        assert_eq!(profile.tools, ["bash", "read_file", "read_skill", "read_output"]);
         let list = profile.rules.auto_approval();
         for command in [
             "kubectl get pods -A -o wide | grep -v Running",
@@ -721,7 +772,7 @@ mod tests {
         assert_eq!(profile.instructions, "自定义说明");
         assert!(profile.tools.is_empty());
         assert_eq!(profile.rules.deny, ["secret"]);
-        assert_eq!(profile.rules.ask_tools, ["bash"]);
+        assert_eq!(profile.rules.ask_tools, ["bash", "edit_file", "write_file"]);
         assert_eq!(profile.limits.max_model_requests, None);
     }
 
@@ -787,7 +838,8 @@ mod tests {
     fn container_execution_reads_its_settings_and_defaults_to_local() {
         assert_eq!(load_file("").unwrap().execution, Execution::Local);
         let profile = load_file(
-            "execution = 'container'\n[container]\nimage = 'debian:bookworm-slim'\nuser = '1000:1000'\nmemory = '512m'\npidsLimit = 64",
+            "execution = 'container'\n[container]\nimage = 'debian:bookworm-slim'\nuser = '1000:1000'\nmemory = '512m'\npidsLimit = 64\n\
+             network = 'none'\nworkspace = 'readOnly'\nroot = 'readOnly'",
         )
         .unwrap();
         assert_eq!(profile.execution, Execution::Container);
@@ -798,8 +850,36 @@ mod tests {
                 user: Some("1000:1000".into()),
                 memory: Some("512m".into()),
                 pids_limit: Some(64),
+                network: Some("none".into()),
+                workspace: Some(Access::ReadOnly),
+                root: Some(Access::ReadOnly),
             }
         );
+        // Unset, the sandbox settings are left to the executor, whose defaults are open.
+        let open = load_file("execution = 'container'\n[container]\nimage = 'x'").unwrap();
+        assert_eq!(
+            (open.container.network, open.container.workspace, open.container.root),
+            (None, None, None)
+        );
+    }
+
+    #[test]
+    fn approving_every_call_needs_the_container_and_no_tool_that_asks() {
+        let profile =
+            load_file("execution = 'container'\n[container]\nimage = 'x'\n[rules]\napproveAll = true\naskTools = []")
+                .unwrap();
+        assert!(profile.rules.approve_all);
+        assert!(!load_file("").unwrap().rules.approve_all);
+        for (text, expected) in [
+            ("[rules]\napproveAll = true", "needs execution = \"container\""),
+            (
+                "execution = 'container'\n[container]\nimage = 'x'\n[rules]\napproveAll = true\naskTools = ['bash']",
+                "rules.askTools must be empty",
+            ),
+        ] {
+            let error = format!("{:#}", load_file(text).unwrap_err());
+            assert!(error.contains(expected), "{text}: {error}");
+        }
     }
 
     #[test]
@@ -810,6 +890,11 @@ mod tests {
             "[container]\nimage = 'x'\npidsLimit = 0",
             "[container]\nimage = 'x'\nuser = ''",
             "[container]\nimage = 'x'\nnetwork = 'host'",
+            "[container]\nimage = 'x'\nnetwork = 'container:other'",
+            "[container]\nimage = 'x'\nnetwork = ' '",
+            "[container]\nimage = 'x'\nworkspace = 'ro'",
+            "[container]\nimage = 'x'\nroot = 'writable'",
+            "[rules]\napproveAll = 'yes'",
         ] {
             assert!(load_file(text).is_err(), "{text}");
         }
