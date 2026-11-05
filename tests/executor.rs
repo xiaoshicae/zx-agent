@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use zx_agent::agent::{ExecutionMode, Tool, ToolContext};
 use zx_agent::executor::{Captured, CommandEnd, CommandOutput, Executor, ShellCommand};
-use zx_agent::tools::{BashTool, EditFileTool, ReadFileTool, WriteFileTool};
+use zx_agent::tools::{BashTool, EditFileTool, GrepTool, ReadFileTool, SearchSettings, WriteFileTool};
 
 /// What a tool asked its executor to do.
 #[derive(Debug, PartialEq)]
@@ -213,6 +213,41 @@ fn tools_declare_the_execution_mode_of_their_executor() {
     assert_eq!(read.execution_mode(), ExecutionMode::Sequential);
     assert_eq!(edit.execution_mode(), ExecutionMode::Sequential);
     assert_eq!(write.execution_mode(), ExecutionMode::Sequential);
+}
+
+#[tokio::test]
+async fn grep_hands_its_script_to_its_executor_without_the_hidden_variables() {
+    let recorder = Recorder::new(|| CommandEnd::Exited(0));
+    let grep = GrepTool {
+        settings: SearchSettings {
+            executor: recorder.clone(),
+            hidden_env: vec!["SECRET_KEY".into()],
+            ..SearchSettings::default()
+        },
+    };
+
+    grep.execute(json!({"pattern": "it's", "path": "src"}), &ctx())
+        .await
+        .unwrap();
+
+    let requests = recorder.requests.lock().unwrap();
+    let [
+        Request::Run {
+            shell,
+            command,
+            cwd,
+            hidden_env,
+            ..
+        },
+    ] = requests.as_slice()
+    else {
+        panic!("one command: {requests:?}");
+    };
+    assert_eq!(shell, "sh");
+    assert_eq!(cwd, Path::new("/work"));
+    assert_eq!(hidden_env, &["SECRET_KEY".to_string()]);
+    // The pattern and the path reach the shell single-quoted.
+    assert!(command.contains(r"-- 'it'\''s' 'src'"), "{command}");
 }
 
 #[tokio::test]

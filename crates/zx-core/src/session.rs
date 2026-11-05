@@ -652,12 +652,15 @@ mod tests {
 
     #[test]
     fn details_are_dropped_from_what_a_model_may_see_and_nothing_else() {
+        // One user message for both sides: each `Message::user` takes the current time, and two
+        // calls a millisecond apart would differ (seen once in CI).
+        let prompt = Message::user("go");
         let messages = vec![
-            Message::user("go"),
+            prompt.clone(),
             result_with_details(Some(serde_json::json!({"marker": "for-observers"}))),
         ];
         let seen = without_details(&messages);
-        assert_eq!(*seen, [Message::user("go"), result_with_details(None)]);
+        assert_eq!(*seen, [prompt, result_with_details(None)]);
         assert!(matches!(&messages[1], Message::ToolResult(result) if result.details.is_some()));
     }
 

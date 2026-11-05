@@ -647,6 +647,9 @@ mod tests {
                 "read_file",
                 "edit_file",
                 "write_file",
+                "grep",
+                "find",
+                "ls",
                 "read_skill",
                 "read_output"
             ]

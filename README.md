@@ -11,7 +11,7 @@
   - 终端 `chat`：流式回答、审批、运行中插话、Ctrl+C 后继续对话；等待与工具执行的状态行、工具结果预览、每轮用量、粘贴的多行合为一条消息
   - 文件化的 profile（内置 `unattended`、`troubleshoot`、`assistant`）；显式 CLI 参数覆盖、deny 累加；特定环境的规则（如 kubectl 可带的选项）写在 profile 里，代码中不含
   - 项目 `AGENTS.md` 和显式上下文文件；`read_skill` 按需读取登记的 skill 正文
-  - `bash`、`read_file`，以及改文件的 `edit_file`（多处精确替换，结果附 unified patch）与 `write_file`（新建或整体覆盖）
+  - `bash`、`read_file`，改文件的 `edit_file`（多处精确替换，结果附 unified patch）与 `write_file`（新建或整体覆盖），以及只读的 `grep`、`find`、`ls`
   - 可选的容器执行（`--execution container`）：bash 与 read_file 在作为沙箱的 Docker 容器中逐个执行；默认工作目录可写、可联网，也可配置为只读、无网络，见[容器执行](#容器执行)
   - 可选的自动 / 手动压缩：摘要引用源条目，原始历史保留
   - 长工具结果脱敏后落盘，`read_output` 按 UUID 分页读取
@@ -235,7 +235,7 @@ zx-agent run --base-url https://api.deepseek.com --model deepseek-flash \
 | `--base-url` | `https://api.openai.com/v1`，或环境变量 `ZX_BASE_URL` | OpenAI 兼容地址 |
 | `--api-key-env` | `OPENAI_API_KEY` | 存放 API key 的**环境变量名**。key 不接受命令行传入，避免在进程列表中暴露 |
 | `--system-updates` | `collapse` | 恢复会话时，提示词的变化怎样发给模型。`collapse`：合并进开头的 system 消息，兼容不接受对话中途 system 消息的服务端；`inline`：在变化发生的位置发送，保持此前的请求前缀，便于服务端复用提示词缓存，模型也能看出提示词从哪里开始变化，但要求服务端接受对话中途的 system 消息，使用前需确认 |
-| `--tools` | profile：`run` 为 `bash,read_file`，`chat` 为 `bash,read_file,edit_file,write_file,read_output`；有 skill 目录时加入 `read_skill` | 显式传入时替换工具集合；仅启用 `read_output` 时安装长结果落盘钩子 |
+| `--tools` | profile：`run` 为 `bash,read_file`，`chat` 为 `bash,read_file,edit_file,write_file,grep,find,ls,read_output`；有 skill 目录时加入 `read_skill` | 显式传入时替换工具集合；仅启用 `read_output` 时安装长结果落盘钩子 |
 | `--cwd` | 当前目录 | 工具的工作目录，同时写入 `<environment>` |
 | `--allow-cmd` / `--deny-cmd` | 无 | bash 命令白名单前缀 / 额外的拒绝子串，均可重复 |
 | `--auto-approve-cmd` | profile：`chat`（assistant）为一组只读命令，`run`（unattended）为空 | 不经审批直接执行的 bash 命令前缀，可重复，替换 profile 的清单；只在 bash 需要审批时起作用，见[安全模型](#安全模型) |
@@ -404,6 +404,12 @@ CLI (main.rs + cli.rs + chat/)
 - 结果的 `details` 含 unified patch（3 行上下文，超过 12 KiB 截断）与第一处改动的行号；diff 由程序自己计算（Myers 算法，插入与删除超过 500 行时整段显示为删除再添加），不引入依赖。
 - 模型常见的旧写法会先改写再校验：`edits` 写成 JSON 字符串或单个对象、`oldText` 与 `newText` 写在顶层（`prepare_arguments`）。
 - 同一批调用中改同一个文件（按解析符号链接后的路径）的 `edit_file` 与 `write_file` 逐个执行，改不同文件的仍可并行（对应 pi 的 file-mutation-queue）。
+
+`grep`、`find`、`ls`（对应 pi 的同名工具）只读，经执行器运行系统程序，容器执行时在容器内运行。内置 assistant 启用它们且不需要审批，`unattended`、`troubleshoot` 与 Kubernetes 部署的 profile 不启用。与 `read_file` 一样，它们不受命令白名单约束，可以读取进程有权限读取的文件；需要限制时不启用它们。
+
+- 安装了 ripgrep（`rg`）时用它搜索，遵守 `.gitignore`；没有时退到 POSIX `grep -rn`（扩展正则）与 `find`，只跳过 `.git`、`.hg`、`.svn`，结果后注明 ripgrep 未安装、没有应用 `.gitignore`，`details.engine` 写明用的是哪个程序。pi 在缺少 rg 时自动下载，这里不下载。两种程序的正则写法略有不同，`grep` 的 `glob` 在退回时只比较文件名。
+- 模型给的模式与路径都以单引号整体传给 shell，不会被解释；测试覆盖了 `$(…)`、反引号与引号注入。
+- 输出有界：`grep` 默认至多 100 处匹配、`find` 1000 个路径、`ls` 500 项（`limit` 至多 2000），每行至多 500 字节，整体再按 2000 行或 50 KiB 截断；有更多结果时注明。默认 60 秒超时，可取消。
 
 MCP 工具（见上文“MCP 工具”）：服务器由使用者在 profile 中显式列出，工具也要逐个列出，没列出的工具连描述都不会进入上下文。工具描述与结果来自外部服务，可能含注入内容；`allowTools` 以外的工具每次都要审批，服务器给出的 annotations 不影响放行。工具一律按有副作用处理，中断后恢复为“结果未知”。响应体没有大小上限（rmcp 读取 JSON 响应时不限制，SSE 每个事件上限 16 MiB），交给模型的结果最多 2000 行或 50 KiB。
 
@@ -731,6 +737,7 @@ cargo fmt --check
 | `tests/incremental_summary.rs` | 增量摘要（v5）：第一次读取整段前缀并给事实编号、之后只读旧事实与新增记录、可接续全量模式留下的摘要、取代与淘汰、修正只作废相关事实并在下一次重读、模型不能自带编号、加载时拒绝违反规则的记录、请求可从会话文件还原、多轮之后请求大小不随历史增长（与全量模式对照）；摘要评测的脚本会话自检，以及用知道答案的假模型验证评分 |
 | `tests/request_audit.rs` | 每次任务与摘要请求可从会话文件还原、配置只在变化时追加、旧会话首次请求前升级、与投影不一致的请求不记录、固定会话文件（v4 与含增量摘要的 v5）的还原结果不变（版本守护） |
 | `tests/executor.rs` | 执行器接缝：bash 与 read_file 只经自身执行器运行命令和读文件，命令的 6 种结束方式均正确报告，执行方式随执行器；不能写文件的执行器让 edit_file 报错 |
+| `tests/search_tools.rs` | grep、find、ls 在本机（有无 ripgrep 时断言都成立）：匹配行的路径与行号、忽略大小写 / 字面量 / glob、点文件与跳过 `.git`、无结果与报错、limit、超长行截断、注入的模式与路径不被执行、取消 |
 | `tests/file_tools.rs` | edit_file 与 write_file：新建、覆盖与上级目录，多处替换、BOM 与 CRLF、patch，每类失败后文件不变，取消，旧参数写法，同一批调用改同一文件时两处改动都生效 |
 | `tests/container.rs` | 容器执行：用假 docker 程序验证启动参数与失败报告、命令与读文件的转发、超时 / 取消 / 丢弃后的清理、工具逐个执行（排队的调用在取消后记为未执行）、命令用配置的 shell、启动失败不留会话文件、CLI 接线与配置错误；设置 `ZX_DOCKER_TEST_IMAGE` 时另对真实 Docker 验证默认的用户、可写工作目录与网络，严格模式的只读与无网络、命令进程树与 `setsid` 子进程的终止、清理不受命令写入影响、命令逐条执行、容器内读文件、chat 中 Ctrl-C 后容器仍在、zx-agent 正常结束或被 SIGKILL 后容器删除（CI 在 Linux 上用 `debian:bookworm-slim` 运行）；另验证 root 用户、共用宿主机网络与工作目录内的会话文件被拒绝，`rules.approveAll` 时 chat 不再询问 bash、run 执行 `allowTools` 以外的 MCP 工具，以及在本机执行时报配置错误 |
 | `tests/crash_recovery.rs` | 内置工具的副作用声明、开始记录先于执行（串行与并行批次）、中断批次的四种恢复结果且不重放、失败或取消的回答中的调用记为未执行、恢复事件在结果写入之后、旧格式会话、丢弃 future 后的同进程恢复、`run` 的 `[recover]` 输出；Unix 上 SIGKILL 掉正在执行命令的 `run`，再由下一次 `run` 恢复且不重放 |
