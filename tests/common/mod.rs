@@ -5,6 +5,7 @@
     reason = "each test binary uses a different subset of these helpers; `expect` would fail in a binary that uses them all"
 )]
 
+pub mod evals;
 pub mod fake_feishu;
 pub mod fake_mcp;
 pub mod fake_slack;

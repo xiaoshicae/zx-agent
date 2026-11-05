@@ -22,6 +22,7 @@ paths:
 | `summary_eval` | `tests/common/summary_eval.rs` | 摘要评测：按脚本合成的 8 轮排障会话（24 条埋入的事实，其中 6 条后来被取代），`evaluate` 每轮之后摘要并评分（仍成立的事实写到了几条；被取代的事实是否只剩旧值，另计写着旧值的条数；从会话还原的摘要请求大小）；付费评测与常规测试共用 |
 | `FakeFeishu` / `TestFrame` | `tests/common/fake_feishu.rs` | 假 ⚑ D:5/CHINA FLAG: 飞书开放平台：token、长连接地址与消息接口（可按接口安排错误码或 429），长连接由测试逐帧收发；帧编解码独立于被测代码 |
 | `read_request` / `response` | `tests/common/http.rs` | 假服务读取一个 HTTP 请求、拼出响应 |
+| `evals` | `tests/common/evals.rs` | 行为评测框架（P10 ⑪，pi 的 `packages/evals`）：`Case`（工作目录文件、提示词、确定性评分）、`Variants`（控制与处理各一个 profile 文件）、`plan`（按轮次交替变体）、`Harness::run`（经编译出的程序运行一个 arm，家目录与工作目录隔离，超时记为 errored）、`summarize`（配对、每组的通过率与提升、阻塞的配对扣住标题数字、无提升 / 负提升 / 饱和 / 不稳定的标记、各变体的合计）、`Artifacts`（`protocol.json`、`expected-runs.json`、逐条追加的 `observations.jsonl`、`report.json` / `report.txt`，每个 arm 的目录在 `<变体>/<组>-<用例>-run<N>/`）；样例用例 `sample_cases` 与 `tests/fixtures/evals/` 的两个 profile，合成运行用 `MockServer` 按 arm 脚本化，真实运行在 `tests/real_api.rs` |
 | `FakeMcp` / `Reply` | `tests/common/fake_mcp.rs` | 假 MCP 服务器（Streamable HTTP），按规范手写、不用 rmcp：可选 2026-07-28（`server/discover`）或 2025-11-25（`initialize` 与会话）；工具一页一个；按工具安排结果、JSON-RPC 错误、不应答（`Hang`）或以 SSE 流按间隔发进度通知再给结果（`Progress`，令牌取自请求的 `_meta.progressToken`），并记录每个请求的方法、参数与请求头、被客户端放弃的调用 |
 | `FakeSlack` / `Answer` | `tests/common/fake_slack.rs` | 假 Slack：Web API 记录每次调用，可按方法安排错误、429 或指定的 JSON 应答；Socket Mode 连接由测试逐帧发送、读取确认 |
 | `MockServer` / `Reply` | `tests/common/mock_server.rs` | 本地假 HTTP 服务：返回 SSE 流（`Reply::text`、`Reply::bash`、任意工具调用 `Reply::tool_call`）、HTTP 错误，发出部分数据后卡住（`Stall`），或等待测试通知后结束（`Gate`）；记录请求，`wait_for_requests` 等到请求到达 |
@@ -73,7 +74,8 @@ paths:
 | `tests/im_slack.rs` | Slack channel 对假 Slack：@ 与私聊、确认与去重、忽略自己的消息、按钮点击、断线重连、连接失败的上报、`wss://` 握手失败（rustls 只有一个加密后端时报错而不是 panic）、凭据被拒、转义与拆分、卡片、限频与停止 |
 | `tests/serve_cli.rs` | `serve` 子命令：配置错误（含 `[replies]` 的未知字段）；配置的 `[replies]` 与 `[cardLabels]` 替换英文默认文案；对假 Slack 与假模型的完整流程（审批卡片、命令看不到 token、脱敏、会话文件、运维日志、SIGTERM）；被 SIGKILL 后重启，替换遗留的“处理中…” |
 | `tests/im_server.rs` | IM 服务：内存中的 `FakeChannel` 加脚本化模型，覆盖线程与会话、访问控制、审批卡片（批准、拒绝、非审批人、超时、取消）、运行上限与排队、插话、空闲释放与重开、停止与平台错误、停止时告知没有处理的消息（排队中的、运行没取走的插话、停止期间才收到的：`FakeChannel` 的 `late`）、停止取消的运行写明原因；运行中的状态（内存中的 `Statuses` 把记录与删除也写进 `Sent`，便于断言先后）：先删记录再写回答、启动时替换遗留的状态、平台拒绝或未配置、停止时放弃替换（`FakeChannel` 的 `updates`）、记录 / 删除 / 读取失败（`Broken`） |
-| `tests/real_api.rs` | 付费：真实模型 API，默认跳过；摘要评测另需 `ZX_E2E_EVAL=1` |
+| `tests/evals.rs` | 行为评测框架对脚本化模型：计划的交替、经程序的配对运行与报告（提升、饱和、不稳定、合计 token）、产物文件与每个 arm 的会话和工作目录、起不来的 arm 阻塞配对并扣住标题、手工构造的观测触发无提升 / 负提升 / 缺失与重复 arm 的标记 |
+| `tests/real_api.rs` | 付费：真实模型 API，默认跳过；摘要评测与行为评测另需 `ZX_E2E_EVAL=1` |
 
 只能在 Unix 上运行的测试（如进程组、信号相关的）加 `#[cfg(unix)]`。
 
