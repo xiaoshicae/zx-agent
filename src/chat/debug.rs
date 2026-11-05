@@ -252,6 +252,17 @@ impl DebugState {
                     format!("Retry {attempt}/{max_retries} in {delay_ms}ms{extra}"),
                 )
             }
+            ContextOverflow { error } => {
+                let extra = if self.last_error.as_deref() == Some(error) {
+                    String::new()
+                } else {
+                    format!(" · {error}")
+                };
+                (
+                    Severity::Warn,
+                    format!("Context too long for the model; compacting before another attempt{extra}"),
+                )
+            }
             ContextEdited {
                 index,
                 replacement,

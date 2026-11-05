@@ -5,6 +5,7 @@
 
 mod accounting;
 mod answer;
+mod overflow;
 mod recovery;
 mod session_runtime;
 
@@ -12,6 +13,7 @@ use accounting::RunAccounting;
 use answer::final_answer;
 #[cfg(test)]
 use answer::overlap;
+use overflow::OverflowRecovery;
 use session_runtime::RunnerSessionRuntime;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -21,10 +23,10 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{
-    AgentEvent, Emit, EventSink, LoopConfig, LoopControl, LoopFailure, LoopOutcome, RunTrace, run_loop,
+    AgentEvent, Emit, EventSink, HookChain, LoopConfig, LoopControl, LoopFailure, LoopOutcome, RunTrace, run_loop,
 };
 pub use crate::agent::{RunOutcome, RunReport};
-use crate::ai::retry::{RetryPolicy, is_retryable};
+use crate::ai::retry::{RetryPolicy, is_context_overflow, is_retryable};
 use crate::ai::{Message, Provider, duration_ms};
 use crate::compaction::{self, Trigger};
 use crate::interaction::ApprovalCache;
@@ -214,6 +216,7 @@ impl Runner {
         let mut prompts = vec![Message::user(prompt)];
         let mut accounting = RunAccounting::default();
         let mut last_error = None;
+        let mut overflow_recovered = false;
 
         let ending = match recovered {
             Err(error) => {
@@ -221,7 +224,7 @@ impl Runner {
                 LoopOutcome::Error
             }
             Ok(()) => loop {
-                let attempt = accounting.retries + 1;
+                let attempt = accounting.attempts + 1;
                 // The session projection, not an in-memory list, is what the model sees
                 // (pi: AgentSession replaces the context with the projection before each request).
                 let mut context = session.messages();
@@ -252,6 +255,8 @@ impl Runner {
                 if result.outcome != LoopOutcome::Error {
                     break result.outcome;
                 }
+                // More than one turn means an answer succeeded after any earlier recovery.
+                let task_turns = result.task_turns;
                 // Hook failures are distinct from failed provider responses and are not retried.
                 let (failed, entry_id) = match result.failure {
                     Some(LoopFailure::Provider { message, entry_id }) => (message, entry_id),
@@ -265,6 +270,50 @@ impl Runner {
                     }
                 };
                 last_error = failed.error_message.clone();
+                // A context the model rejects as too long fails again however often it is
+                // sent; with automatic compaction enabled, compact once and continue (pi:
+                // AgentSession's overflow recovery). Not a retry: it has its own limit.
+                if is_context_overflow(&failed) && compaction.trigger_bytes.is_some() {
+                    let error = last_error.clone().unwrap_or_default();
+                    let refusal = if overflow_recovered && task_turns <= 1 {
+                        Some("the context still overflowed after compacting it once".to_string())
+                    } else {
+                        compaction_pause.as_deref().map(|reason| {
+                            format!(
+                                "automatic compaction is paused because it failed earlier in this session ({reason})"
+                            )
+                        })
+                    };
+                    if let Some(refusal) = refusal {
+                        last_error = Some(format!("{error}; {refusal}"));
+                        break LoopOutcome::Error;
+                    }
+                    // A summary is a request, so it needs budget like a retry does.
+                    if !accounting.has_budget(limits) || run_cancel.is_cancelled() {
+                        break LoopOutcome::Error;
+                    }
+                    let recovery = OverflowRecovery {
+                        session: &mut *session,
+                        hooks: &config.hooks,
+                        to,
+                        provider: config.spec.provider.as_ref(),
+                        model: &config.spec.model,
+                        compaction,
+                        compaction_pause: &mut *compaction_pause,
+                        attempt,
+                        cancel: &run_cancel,
+                    };
+                    match recovery.run(&error, entry_id.as_deref(), &mut accounting).await {
+                        Ok(()) => {
+                            overflow_recovered = true;
+                            continue;
+                        }
+                        Err((outcome, error)) => {
+                            last_error = Some(error);
+                            break outcome;
+                        }
+                    }
+                }
                 let retryable = is_retryable(&failed);
                 // A retry is a request, so it needs budget; without any, the provider error
                 // is the reason the run ends.
@@ -290,24 +339,11 @@ impl Runner {
                 // Keep the failed attempt in the session but drop it from model context, then
                 // continue from the previous message (pi: AgentSession._prepareRetry and
                 // _omitRecoveryAttempt). No user message is repeated.
-                if let Some(target) = entry_id {
-                    let index = session.projection().iter().position(|item| item.entry_id == target);
-                    match session.append_context_edit(&target, None).await {
-                        Ok(edit) => {
-                            if let Some(index) = index {
-                                let event = AgentEvent::ContextEdited {
-                                    index,
-                                    replacement: None,
-                                    entry_id: Some(edit),
-                                };
-                                config.hooks.emit(event, to).await;
-                            }
-                        }
-                        Err(error) => {
-                            last_error = Some(format!("cannot omit the failed attempt: {error:#}"));
-                            break LoopOutcome::Error;
-                        }
-                    }
+                if let Some(target) = entry_id
+                    && let Err(error) = omit_failed_attempt(session, &config.hooks, to, &target).await
+                {
+                    last_error = Some(error);
+                    break LoopOutcome::Error;
                 }
                 let cancelled = tokio::select! {
                     _ = tokio::time::sleep(delay) => false,
@@ -392,6 +428,31 @@ impl Runner {
         config.hooks.emit(end, to).await;
         report
     }
+}
+
+/// Keep a failed answer in the session but drop it from the model context, so that the next
+/// attempt continues from the message before it without repeating the user message (pi:
+/// AgentSession._prepareRetry and _omitRecoveryAttempt).
+async fn omit_failed_attempt(
+    session: &mut SessionStore,
+    hooks: &HookChain,
+    to: Emit<'_>,
+    target: &str,
+) -> Result<(), String> {
+    let index = session.projection().iter().position(|item| item.entry_id == target);
+    let edit = session
+        .append_context_edit(target, None)
+        .await
+        .map_err(|error| format!("cannot omit the failed attempt: {error:#}"))?;
+    if let Some(index) = index {
+        let event = AgentEvent::ContextEdited {
+            index,
+            replacement: None,
+            entry_id: Some(edit),
+        };
+        hooks.emit(event, to).await;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

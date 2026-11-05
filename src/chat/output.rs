@@ -164,6 +164,10 @@ pub(crate) fn progress_line(event: &AgentEvent) -> Option<String> {
             "[retry] {attempt}/{max_retries} in {delay_ms}ms: {}",
             visible(error)
         )),
+        AgentEvent::ContextOverflow { error } => Some(format!(
+            "[overflow] context too long; compacting before another attempt: {}",
+            visible(error)
+        )),
         AgentEvent::CompactionStart { input_bytes, .. } => {
             Some(format!("[compact] summarizing {input_bytes} context bytes"))
         }

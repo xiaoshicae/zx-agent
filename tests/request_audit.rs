@@ -269,3 +269,40 @@ async fn a_request_that_differs_from_the_persisted_projection_is_not_recorded() 
     assert!(recorded.is_err());
     assert_eq!(store.entries().len(), before);
 }
+
+#[tokio::test]
+async fn requests_around_a_recovery_from_context_overflow_are_rebuilt_from_the_session_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s.jsonl");
+    let mut session = SessionStore::create(&path, header()).unwrap();
+    let old = session
+        .append_message(Message::user("observed ".repeat(600)))
+        .await
+        .unwrap();
+    let summary =
+        json!({"facts":[{"text":"Old observation","sourceEntryIds":[old]}],"inferences":[],"plans":["Continue"]});
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::Fail("HTTP 400: This model's maximum context length is 65536 tokens".into()),
+        FauxStep::text(summary.to_string()),
+        FauxStep::text("answer"),
+    ]));
+    let (runner, _) = RunnerSetup {
+        session,
+        ..RunnerSetup::new(config(provider.clone(), vec![]))
+    }
+    .build();
+    let compaction = Config {
+        trigger_bytes: Some(100_000),
+        keep_recent_bytes: 1,
+        ..Config::default()
+    };
+    let mut runner = runner.with_compaction(compaction).unwrap();
+
+    let report = runner.run("continue", &CancellationToken::new()).await;
+
+    assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
+    // The failed task request, the summary and the task request after it.
+    let sent = provider.requests();
+    assert_eq!(sent.len(), 3);
+    assert_eq!(replayed(&path), sent);
+}

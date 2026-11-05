@@ -50,6 +50,7 @@ G1–G4 是验收目标。当前会话日志可重建对话与提示词；G3 所
 | D8 | MCP 的范围 | 本项目只做 MCP 客户端：只接工具，只支持 Streamable HTTP。MCP 服务器与领域工具（如 Kubernetes、Prometheus 查询）由外部服务实现 | 2026-11-01 | 已确认：P7 按此评审，见 `docs/p7-mcp-review.md` |
 | D9 | HTTP 客户端与 TLS | reqwest 升到 0.13（`json`、`stream`、`rustls`）。rustls 只用 aws-lc-rs 一个加密后端，HTTPS 的根证书改用系统信任库。理由：rmcp 只支持 reqwest 0.13，与 0.12 并存时 rustls 同时启用两个后端，`wss://` 连接会 panic（评审稿缺口 ①）；项目还没有使用者，用户授权按最合理的方式处理 | 2026-11-01 | 已完成（PR #36） |
 | D10 | 通用，不为场景定制 | zx-agent 是通用 Agent：代码只定义接口与通用机制，外部来适配。某个环境、平台或厂商才有的知识（如 kubectl 的只读选项、Kubernetes 的 token 路径、IM 文案的语言）放在 profile、部署清单或配置里；告警等外部系统由外部适配器调用 `run`、SDK 或 IM 接入，zx-agent 不解析它们的私有格式（如 Alertmanager）。provider 对协议方言的处理显式开启。同日决定：P9 只再做更多 provider（如 Anthropic），`--output-schema`、异步审批、OS 级沙箱不做，“由 webhook 或告警触发运行”取消；P8 `acp` 不做 | 2026-11-02 | 用户决定；已有代码中的定制已整理（PR #54），见 P9 的“通用化整理” |
+| D11 | 容器执行的权限 | 沙箱内给 agent 最大权限，限制只放在沙箱的外墙上：工作目录（含 `.git`）与根文件系统可写，网络默认开启，审批由 profile 决定、可以一律放行；命令默认以映射的宿主机用户运行，仍不允许 root（root 以后按需做成显式选项，并同时改造进程清理）。外墙不变：不加 `--privileged`、不挂 `docker.sock`、不用宿主机的网络与 PID 命名空间、API key 与环境变量不进容器、会话文件在工作目录之外。原严格模式（只读、无网络）保留为可选配置。取代 P6 中“工作目录只读挂载、网络固定为 `none`”的约定与状态表中的“容器联网已取消”；D5（默认在本机执行）不变。理由与各家做法见 P10 | 2026-11-05 | 用户决定；待实施（P10 ②） |
 
 D2 之外的新依赖、依赖升级，仍需先征得同意。
 
@@ -516,7 +517,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 - 反向验证：分别去掉停止原因、运行开始时的记录、启动替换后的删除、停止时放弃替换、serve 的记录、记录文件的 0600 权限，以及把“先删后改”换成“先改后删”，每次都有对应测试失败（依次 3、5、3、1、1、1、4 项），修改已还原。“开始接收之前读出遗留记录”的顺序，没有能稳定复现竞争的测试，由代码结构保证。
 - 本机 macOS 验证：stable 与 Rust 1.88.0 各 753 项通过（基线 738 项，为 PR #45 的实测，其代码与 `9297885` 相同），6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过；自查脚本对改动的文件无命中；`tests/im_server.rs` 连续运行 20 次、`tests/serve_cli.rs` 3 次，均通过。未新增依赖，`Cargo.toml`、`Cargo.lock` 未改动。
 
-下面的 P0–P9 继续按各自验收标准推进。
+下面的 P0–P10 继续按各自验收标准推进。
 
 状态取值：未开始、进行中、已实现待 PR review、已完成。每个阶段完成时勾选任务，并记录完成日期和提交。
 
@@ -532,6 +533,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P7 | 插件与 MCP | 已完成（PR #41）：范围按 D8 收窄，评审稿已合入（PR #36）并经用户确认；模块 A（Extension 接口，PR #38）、B1（MCP 客户端库，PR #40）、B2（CLI 接入与文档，PR #41）已完成；真实 MCP 服务器的验收待选定服务器；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已完成（PR #23），A2–A8（扩展 API）已完成（PR #25） |
 | P8 | 嵌入协议 `acp` | 不做（2026-11-02 用户决定，D10） |
 | P9 | 可选增强 | 进行中：token 预算（PR #47）、OpenTelemetry 追踪（PR #49）、crate 拆分（PR #52）、通用化整理（PR #54）已完成；剩更多 provider（如 Anthropic）。其余各项按 D10 不做或取消 |
+| P10 | 与 pi 的能力对齐 | 进行中：2026-11-05 对照 pi 列出 14 项缺口，见下文 P10；① 上下文超长后自动恢复已完成（PR #56） |
 
 ### P0 场景默认值移出内核
 
@@ -1311,6 +1313,73 @@ crate 拆分（2026-11-02，已完成，PR #52；基于 PR #51 合并后的 `640
 - [x] `clip` 有两份实现（任意阶段）：已在 2026-11-01 整体设计评审后的修正中合为一处（见上文该节“整理”一行），现只有 `crates/zx-ai/src/text.rs` 中的一份；此处原先漏勾
 - [x] `BashTool::execute` 过长（P6）：同一处修正中拆出了可单测的纯函数，现为 23 行；此处原先漏勾
 
+### P10 与 pi 的能力对齐
+
+2026-11-05 用户要求逐项补齐。来源是同日按包对照 pi（`a92283056`）与本仓库（`c44154d`，PR #55 合并后）的结果：pi 的包（除 tui，完整 TUI 本期不做）分为模型层、循环、会话与运行、工具与运行模式（含 env）、辅助包（durable、mcp、telemetry、codemode、chord、evals）五块。下面的“zx 现状”依据源码与 grep，没有运行 pi，也没有运行测试；标“无”的多数是 grep 没有命中，不排除以别的名字实现的可能。抽查核实过的：超长处理、内置工具清单、`Executor` 的操作、队列取法、`branch` 只在测试中调用、没有指标导出。重要性是当时的判断，不是测量结果。
+
+已决定不做的不在此列：durable 的自动续跑与重放、codemode 与 `runToolCall`、工具结果中的图片与 `structuredContent`（README“与 pi 的差异”）；ACP、`--output-schema`、异步审批、OS 级沙箱（D10）；完整 TUI、多 Agent 协作、插件热加载（本期不做）；MCP 的 stdio、OAuth 与运行中更新工具列表（D8，`docs/p7-mcp-review.md`）。Anthropic provider 已在 P9。
+
+已对齐的（不再列出）：provider 不报错、工具三阶段执行、`prepare_arguments`、`details`、进度、`terminate`、回合结束决定、两个消息队列、取消、订阅、重试、手动与自动摘要、MCP 的 Streamable HTTP、OpenTelemetry span。
+
+实施顺序与任务（每项一个分支与 PR；标“待定”的先请用户决定，再动手）：
+
+- [x] **① 上下文超长后自动恢复**（高；已完成（PR #56），2026-11-05，见下方实施记录）。pi 识别超长（`packages/ai/src/utils/overflow.ts:144`）后压缩一次再重试（`packages/coding-agent/src/core/agent-session.ts:3063`）。zx 把 `context_length_exceeded` 归为不重试的错误（`crates/zx-ai/src/retry.rs:130`），运行直接失败。做法：provider 按状态与错误码给出通用的“超长”分类，不按厂商写正则；运行层收到后做一次摘要再续跑，摘要与续跑都经现有的请求审计，保持不变量 6；没有配置摘要时照旧失败。
+- [ ] **② 容器沙箱改为沙箱内最大权限**（D11）。是 ③ 在容器中可用的前提。
+- [ ] **③ edit 与 write 工具**（高）。pi 默认工具集是 read、bash、edit、write（`packages/coding-agent/src/core/tools/edit.ts`、`write.ts`）：一次调用可做多处不重叠的精确替换，`details` 带 diff，同一文件的写入经 `file-mutation-queue.ts` 串行。zx 只有 `bash`、`read_file`（`crates/zx-tools/src/tools/mod.rs:24`），`Executor` 只有 `run` 与 `read_file`（`crates/zx-core/src/executor/mod.rs:83,88`）。做法：`Executor` 增加写文件；两个工具声明 `SideEffects`（不变量 10），`details` 带 diff 供审批与审计；同一文件的写入串行，不同文件仍可并行；规则策略可以用 `askTools` 管到它们。
+- [ ] **④ grep、find、ls 只读工具**（中）。pi 用 ripgrep 与 fd，遵守 `.gitignore`，结果有上限（`grep.ts`、`find.ts`、`ls.ts`）。zx 只能经 bash 与命令白名单。声明为 `ReadOnly`，不必依赖白名单即可免审批。待定：经 `Executor` 调外部程序（不加依赖，容器中同样可用）还是用 Rust 实现（需新增 `ignore` 等依赖，红线 5）。
+- [ ] **⑤ 运行中可调整的配置**（中高）。推理强度作为一等配置并可在空闲时修改、变化写入会话（目前只能用 `--request-field` 静态传）；每次请求前可替换模型与推理强度的钩子（pi 的 `prepareRequest`、`prepareNextTurn`，`packages/agent/src/agent-loop.ts:195,228`；zx 的 `set_model` 只能空闲时调用，`crates/zx-core/src/agent_session.rs:222`）；不加新输入的续跑（pi 的 `continue()`；`Runner::run` 必须带提示词）。推理强度的写法遵守 D10：各 provider 显式映射。
+- [ ] **⑥ 会话导航**（中）。列出会话、续接最近一次、fork 成新会话、在分支间切换（`packages/coding-agent/src/core/session-manager.ts`）。zx 只有 `--session <path>`；`SessionStore::branch`（`crates/zx-core/src/session.rs:486`）只在测试中调用。补 SDK 接口与 CLI，`chat` 加对应命令。
+- [ ] **⑦ 扩展能力**（中高，嵌入）。pi 的扩展可写自定义条目（`appendEntry`）、注入非用户消息（`sendMessage`）、运行中启停工具（`setActiveTools`）、注册命令（`registerCommand`）（`packages/coding-agent/src/core/extensions/types.ts`）。zx 的条目只有 9 种内部类型（`crates/zx-core/src/session.rs:142-151`），工具在构建时固定。自定义消息与“会话投影是上下文的唯一来源”（不变量 6）如何共存，先出方案再实施。
+- [ ] **⑧ 模型层的元数据与计量**（中）。在配置中写模型的上下文窗口、单价与输入类型（不内置厂商模型表，D10），用来按 token 设摘要阈值（现为字节）并计算成本；用量增加 cacheWrite 与推理 token；会话记录应答方返回的模型名与响应 ID；按会话的 prompt cache key；自定义请求头；每次请求动态取 API key；`Retry-After` 支持 HTTP 日期与毫秒写法，退避加抖动。
+- [ ] **⑨ 消息队列**（低中）。队列模式 one-at-a-time（pi 默认，`packages/agent/src/types.ts:55`）；zx 一次取完（`crates/zx-core/src/agent/agent_loop/context.rs:128`）。队列消息目前只能是纯文本。
+- [ ] **⑩ 可观测**（中）。指标（运行耗时、结果计数、token、工具与 MCP 调用耗时）与跨进程传递 trace（W3C `traceparent`）（`packages/telemetry`）。zx 只导出 trace，trace ID 由 SDK 生成。待定：指标要开 opentelemetry 系列的 `metrics` feature，锁文件可能增加包。
+- [ ] **⑪ 行为评测框架**（中）。按 profile 运行场景用例，支持重复次数、两种变体配对比较、只用合成数据、产物落盘（`packages/evals`）。zx 只有一项摘要评测（`tests/real_api.rs`）。框架与离线用例可直接做；真实运行每次都要用户授权（红线 9）。
+- [ ] **⑫ 嵌入**（中）。SDK 提交提示词的幂等键，防止宿主重试时重复提交。待定：给非 Rust 程序用的进程协议（类似 pi 的 rpc 模式，`packages/coding-agent/src/modes/rpc`）。ACP 已按 D10 不做，rpc 是否做由用户决定。
+- [ ] **⑬ MCP 进度**（低中）。转发服务器的进度通知，并按进度延长超时（`packages/mcp/src/client.ts`）；zx 的调用固定 120 秒超时（`crates/zx-tools/src/mcp.rs:36`）。rmcp 是否支持，实施前核对。
+- [ ] **⑭ chat 的便利功能**（低）。提示词模板、`!cmd` 直接执行、路径中的 `~` 展开、用户级全局配置、导出、更多斜杠命令（现有 5 个）。
+
+① 实施记录（2026-11-05，PR #56，基于 `c44154d`）：
+
+| 环节 | 做法 |
+|---|---|
+| 识别 | `zx_ai::retry::is_context_overflow`：HTTP 413，或错误码 `context_length_exceeded`、`model_context_window_exceeded`、`request_too_large`（HTTP 与流内错误都认）即为过长；HTTP 401、403、408、429 与 5xx，以及传输、超时、协议与资源上限的失败一律不算；其余按通用措辞判断（如 “maximum context”“context window”“prompt is too long”“too many tokens”），提到 429、限流或 throttling 的不算，因为限流也会提到 token。不识别服务端截断输入而不报错的情况，那需要模型的上下文窗口（⑧） |
+| 恢复 | 运行层（`crates/zx-core/src/runner/overflow.rs`）在开启自动摘要（`trigger_bytes` 不为空）时：发出 `context_overflow` 事件，用 `context_edit` 省略失败的回答，以新的触发方式 `Trigger::Overflow` 摘要一次（按自动摘要的规则检查，不看上下文是否超过字节阈值），再从压缩后的投影开始新的尝试。不算重试，不占 `max_retries`；摘要的请求与用量计入本次运行；尝试编号随之加一（`RunAccounting::attempts`，此前等于重试次数加一） |
+| 次数 | 每次运行一次；恢复之后的尝试中有回答成功（该尝试开始了不止一个回合）才可以再次恢复，与 pi 在成功的回答之后清除 `_overflowRecoveryAttempted` 相同 |
+| 结束 | 未开启自动摘要时行为不变；自动摘要已暂停、预算用完、已取消、恢复后紧接着又过长、摘要失败或没有可摘要的范围时，以原错误加原因结束；付费的摘要请求失败同样暂停自动摘要；摘要中途取消或超时时，按取消或超时结束 |
+| 公开 API | `AgentEvent::ContextOverflow { error }`（`AgentEvent` 没有标 `#[non_exhaustive]`，按变体写全的 match 需要补上）、`zx_ai::retry::is_context_overflow`。OpenTelemetry 在 `run` span 上记 `context_overflow` 事件，不带错误文本；chat 的进度行与 `--debug` 日志各加一种显示 |
+| 与 pi 的不同 | pi 还在回答因 `length` 截断、但输出少于上限时压缩重试（`isRecoverableLength`），以及按上下文窗口识别不报错的超长；这两种都需要模型元数据，留给 ⑧。内置 `unattended` 与 `troubleshoot` profile 默认关闭自动摘要，所以 `run` 默认仍以原错误结束 |
+
+- 测试：新增 12 项：`crates/zx-ai/src/retry.rs` 单元测试 3 项（按状态与错误码、按通用措辞、限流与其他失败不算）；`tests/overflow_recovery.rs` 7 项（成功恢复：请求、投影、事件顺序与尝试编号；未开启自动摘要时不变；恢复后紧接着又过长；回答成功后可再次恢复；摘要失败暂停；预算用完；运行超时）；`tests/openai_mock.rs` 1 项（真实 HTTP 下带错误码的 400）；`tests/request_audit.rs` 1 项（恢复前后的三个请求都能从会话文件逐个还原）。
+- 反向验证：分别去掉运行层的恢复分支、“恢复后紧接着又过长”的拒绝、“回答成功后可再次恢复”的重置、摘要失败时的暂停、按错误码的识别，每次都有对应测试失败（依次 6、1、1、1、1 项），修改已还原。按错误码识别被去掉时，HTTP 端到端测试仍通过：错误文本包含响应体，其中的错误码也被通用措辞 `context_length` 命中，这条路径只由单元测试单独覆盖。
+- 本机 macOS 验证：stable 下 828 项通过、7 项付费测试跳过（基线 816 项，PR #55 的实测）；fmt、clippy、严格 Rustdoc 与 Rust 1.88.0 的全目标检查通过；Rust 1.88.0 下没有运行测试。自查脚本在改动的文件中只列出原有的 1 处（`src/chat/output.rs` 的 `let _ =`）。未新增依赖。没有对真实模型服务验证超长时的错误格式。
+
+D11 容器沙箱的实施要点（2026-11-05 用户决定）：
+
+| 环节 | 现在 | 改为 |
+|---|---|---|
+| 工作目录 | 只读挂载（`crates/zx-core/src/executor/container.rs:558`） | 可写，包括其中的 `.git` |
+| 根文件系统 | `--read-only`，只有 `/tmp` 可写 | 可写 |
+| 网络 | 固定 `--network none` | 默认开启 |
+| 审批 | chat 总是审批 bash（`docs/PROFILES.md` 第 83 行） | profile 新增“一律放行”的选项，拒绝规则仍然优先；内核不判断是否在容器中（G1），由 profile 决定 |
+| 运行用户 | 默认 65534，禁止 root（`container.rs:143`） | 默认映射宿主机用户的 UID:GID，仍禁止 root；在原生 Linux 上，写出的文件属主与宿主机用户一致 |
+| capability 与 `no-new-privileges` | 去掉全部 capability，`no-new-privileges` | 不变。非 root 用户本来没有 capability，保留它们不减少命令能做的事，还保证命令不能经 setuid 程序成为 root，否则按命令用户 `kill -1` 的清理就会失效 |
+| 严格模式 | 唯一模式 | 保留为可选配置：工作目录只读、根文件系统只读、无网络 |
+
+- 沙箱的外墙不变：不加 `--privileged`，不挂 `docker.sock`，不用宿主机的网络与 PID 命名空间，API key 与 agent 的环境变量不进容器，会话文件必须在工作目录之外（工作目录可写之后，这条用来防止审计记录被改），内存与进程数上限保留并可配置。
+- root：以后按需做成显式选项（`container.user = "root"`），同时把进程清理改为按 cgroup 或每条命令后重建容器。在那之前，需要的软件装进自定义镜像。
+- 已知代价：网络开启、工作目录可写时，挂进容器的内容（代码、`.git` 中的远端地址等）可能被发出去；凭据不进容器这道墙仍然有效。需要只看不改时用严格模式。
+- 测试：参数用假 docker 程序验证；真实 Docker 测试（`ZX_DOCKER_TEST_IMAGE`）覆盖写工作目录、联网与严格模式。原生 Linux 的 UID 映射只由 CI 覆盖。
+
+各家做法（2026-11-05 查阅，作为 D11 的依据；标“未核实”的只见于第三方资料）：
+
+| Agent | 容器或沙箱内的权限 | 运行用户 |
+|---|---|---|
+| pi | 不做沙箱，权限等同启动它的用户（`SECURITY.md`：“the Pi coding agent intentionally does not have a sandbox”） | 启动它的用户 |
+| Codex CLI | 默认 `workspace-write`：工作区与临时目录可写，网络默认关闭，审批 on-request；完全放开只建议在隔离环境中使用（developers.openai.com/codex/concepts/sandboxing） | 当前用户，靠操作系统级沙箱 |
+| Claude Code | devcontainer 中可跳过审批；文档同时提醒这挡不住恶意项目外传容器内的数据（code.claude.com/docs/en/devcontainer） | 要求非 root；以 root 运行时拒绝跳过审批 |
+| OpenHands | Docker 沙箱，工作区默认读写挂载（docs.openhands.dev/openhands/usage/sandboxes/docker） | 建议 `SANDBOX_USER_ID=$(id -u)` 与宿主机一致 |
+| Gemini CLI | Docker 或 Podman 沙箱 | Linux 上映射宿主机 UID/GID（`SANDBOX_SET_UID_GID`；默认值未核实） |
+
 ## 6. 推进方式
 
 - 每个阶段可以拆成多个提交；完成后在本文档中勾选任务、更新状态，并记录日期和提交。
@@ -1322,4 +1391,4 @@ crate 拆分（2026-11-02，已完成，PR #52；基于 PR #51 合并后的 `640
 
 ---
 
-ROADMAP.md · v0.8 · 2026年11月
+ROADMAP.md · v0.9 · 2026年11月
