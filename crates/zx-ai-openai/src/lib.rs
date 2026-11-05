@@ -72,8 +72,8 @@ pub struct OpenAiConfig {
 }
 
 /// The request body fields a reasoning level is written as. Servers differ, and the provider
-/// does not guess from a server's name (pi chooses with its `thinkingFormat` compat setting);
-/// the formats are named after the field they write, not after a service.
+/// does not guess from a server's name; the formats are named after the field they write, not
+/// after a service.
 /// Nothing is sent for a request without a level.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ReasoningFormat {
@@ -160,13 +160,11 @@ impl fmt::Debug for OpenAiConfig {
     }
 }
 
-/// How system prompt changes after the first one are sent (pi: the
-/// `supportsMidConvoSystemMessages` compat flag).
+/// How system prompt changes after the first one are sent.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SystemUpdates {
     /// Fold versions into one leading system message, for servers that reject mid-conversation
     /// system messages. Prompt changes can reduce reuse of the previous request prefix.
-    /// pi's default for OpenAI-compatible servers.
     #[default]
     Collapse,
     /// Send changes at their original positions. With other request settings unchanged,
@@ -243,7 +241,15 @@ impl Provider for OpenAiCompatible {
     fn request_options(&self) -> Value {
         // Version 1 filled missing reasoning in every request; version 2 only when the options
         // say so (`replay_body` keeps both).
-        let mut options = json!({"format":"openai-chat-completions","version":2,"systemUpdates":match self.config.system_updates { SystemUpdates::Collapse => "collapse", SystemUpdates::Inline => "inline" }});
+        let system_updates = match self.config.system_updates {
+            SystemUpdates::Collapse => "collapse",
+            SystemUpdates::Inline => "inline",
+        };
+        let mut options = json!({
+            "format": "openai-chat-completions",
+            "version": 2,
+            "systemUpdates": system_updates,
+        });
         // Absent unless set, like the reasoning fill below.
         if !self.config.extra_fields.is_empty() {
             options["extraFields"] = Value::Object(self.config.extra_fields.clone());
@@ -300,28 +306,18 @@ async fn run(
         result = stream_response(&client, &config, &url, &body, &mut acc, &mut tx) => result,
     };
 
-    // Failures keep the content streamed so far, like pi's providers.
+    // Failures keep the content streamed so far.
     let mut message = match outcome {
-        Ok(()) => acc.finish().unwrap_or_else(|error| {
-            let mut message = acc.failure(StopReason::Error, error);
-            message.provider_error = Some(ProviderError::Protocol);
-            message
-        }),
-        Err(Failure::Aborted) => acc.failure(StopReason::Aborted, "Request was aborted"),
+        Ok(()) => acc
+            .finish()
+            .unwrap_or_else(|error| acc.failure(StopReason::Error, error, Some(ProviderError::Protocol))),
+        Err(Failure::Aborted) => acc.failure(StopReason::Aborted, "Request was aborted", None),
         Err(Failure::Closed) => return,
-        Err(Failure::Error { details, message }) => {
-            let mut failed = acc.failure(StopReason::Error, message);
-            failed.provider_error = Some(details);
-            failed
-        }
+        Err(Failure::Error { details, message }) => acc.failure(StopReason::Error, message, Some(details)),
     };
     message.duration_ms = Some(duration_ms(started.elapsed()));
-    let event = match message.stop_reason {
-        StopReason::Error | StopReason::Aborted => StreamEvent::Error(message),
-        StopReason::Stop | StopReason::Length | StopReason::ToolUse => StreamEvent::Done(message),
-    };
     // Once the consumer closes, a terminal event has nobody left to report to.
-    send_event(&mut tx, event).await;
+    send_event(&mut tx, StreamEvent::ending(message)).await;
 }
 
 async fn stream_response(
@@ -332,89 +328,106 @@ async fn stream_response(
     acc: &mut Accumulator,
     tx: &mut EventSender,
 ) -> Result<(), Failure> {
-    let idle = config.idle_timeout;
+    let response = send_request(client, config, url, body).await?;
+    if !response.status().is_success() {
+        return Err(http_failure(response, config).await);
+    }
+    if answers_json(&response) {
+        return Err(json_body_failure(response, config).await);
+    }
+    if !send_event(tx, StreamEvent::Start).await {
+        return Err(Failure::Closed);
+    }
+    read_stream(response, config, acc, tx).await
+}
+
+/// Post `body` and wait for the response headers within the idle timeout.
+async fn send_request(
+    client: &reqwest::Client,
+    config: &OpenAiConfig,
+    url: &str,
+    body: &Value,
+) -> Result<reqwest::Response, Failure> {
     let mut request = client.post(url).json(body);
     if let Some(key) = config.api_key.as_deref().filter(|key| !key.is_empty()) {
         request = request.bearer_auth(key);
     }
-    let response = tokio::time::timeout(idle, request.send())
+    tokio::time::timeout(config.idle_timeout, request.send())
         .await
         .map_err(|_| {
             Failure::error(
                 ProviderError::Timeout,
                 format!(
                     "request timed out after {}s waiting for response headers",
-                    idle.as_secs()
+                    config.idle_timeout.as_secs()
                 ),
             )
         })?
-        .map_err(|e| transport_failure("request failed", &e))?;
+        .map_err(|e| transport_failure("request failed", &e))
+}
 
-    let status = response.status();
-    if !status.is_success() {
-        // Only numeric delay-seconds hints are used. Invalid/HTTP-date hints are optional
-        // and fall back to local backoff; they do not invalidate the HTTP error.
-        let retry_after_ms = response
-            .headers()
-            .get("retry-after")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.trim().parse::<u64>().ok())
-            .map(|seconds| seconds.saturating_mul(1000));
-        // Body errors only lose diagnostics; the HTTP status remains authoritative.
-        let bytes = diagnostic_body(response, idle, config.max_response_bytes).await;
-        let code = serde_json::from_slice::<Value>(&bytes)
-            .ok()
-            .and_then(|body| body.get("error").and_then(error_code));
-        let text = String::from_utf8_lossy(&bytes);
-        return Err(Failure::error(
-            ProviderError::Http {
-                status: status.as_u16(),
-                code,
-                retry_after_ms,
-            },
-            format!("HTTP {}: {}", status.as_u16(), clip(text.trim(), 2000)),
-        ));
-    }
+/// The failure of a response with an error status: the body's error code and the server's
+/// numeric Retry-After hint go with it. An invalid or HTTP-date hint is left to the local
+/// backoff, and a body that cannot be read only loses its excerpt; the status is authoritative.
+async fn http_failure(response: reqwest::Response, config: &OpenAiConfig) -> Failure {
+    let status = response.status().as_u16();
+    let retry_after_ms = response
+        .headers()
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|seconds| seconds.saturating_mul(1000));
+    let bytes = diagnostic_body(response, config).await;
+    let code = serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .and_then(|body| body.get("error").and_then(error_code));
+    Failure::error(
+        ProviderError::Http {
+            status,
+            code,
+            retry_after_ms,
+        },
+        format!("HTTP {status}: {}", excerpt(&String::from_utf8_lossy(&bytes))),
+    )
+}
 
-    // A gateway can put an error object under a success status, and a server that ignores
-    // `stream: true` sends the whole answer as JSON. Report what such a body says instead of
-    // a stream that ended without a finish_reason. Other content types are read as a stream,
-    // so a server that labels its stream oddly keeps working.
-    let content_type = response
+/// Whether the server answered with a JSON document rather than an event stream: a gateway
+/// can put an error object under a success status, and a server that ignores `stream: true`
+/// sends the whole answer as JSON. Other content types are read as a stream, so a server that
+/// labels its stream oddly keeps working.
+fn answers_json(response: &reqwest::Response) -> bool {
+    response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if content_type.starts_with("application/json") {
-        // Body errors only lose the excerpt; the content type already rules out a stream.
-        let bytes = diagnostic_body(response, idle, config.max_response_bytes).await;
-        let body = serde_json::from_slice::<Value>(&bytes).ok();
-        if let Some(error) = body.as_ref().and_then(|body| body.get("error")) {
-            let message = error
-                .get("message")
-                .and_then(Value::as_str)
-                .map_or_else(|| error.to_string(), str::to_string);
-            return Err(Failure::error(
-                ProviderError::Provider {
-                    code: error_code(error),
-                },
-                format!("provider error: {}", clip(message.trim(), 2000)),
-            ));
-        }
-        let text = String::from_utf8_lossy(&bytes);
-        return Err(Failure::error(
-            ProviderError::Protocol,
-            format!(
-                "the server answered with JSON instead of an event stream; it may not support streaming: {}",
-                clip(text.trim(), 2000)
-            ),
-        ));
-    }
+        .is_some_and(|value| value.to_ascii_lowercase().starts_with("application/json"))
+}
 
-    if !send_event(tx, StreamEvent::Start).await {
-        return Err(Failure::Closed);
+/// What a JSON body under a success status says: its error object, or else that the server
+/// did not stream. A body that cannot be read only loses its excerpt.
+async fn json_body_failure(response: reqwest::Response, config: &OpenAiConfig) -> Failure {
+    let bytes = diagnostic_body(response, config).await;
+    let body = serde_json::from_slice::<Value>(&bytes).ok();
+    if let Some(error) = body.as_ref().and_then(error_object) {
+        return provider_failure(error);
     }
+    Failure::error(
+        ProviderError::Protocol,
+        format!(
+            "the server answered with JSON instead of an event stream; it may not support streaming: {}",
+            excerpt(&String::from_utf8_lossy(&bytes))
+        ),
+    )
+}
+
+/// Read the event stream into `acc`, forwarding each delta, until `[DONE]` or its end.
+async fn read_stream(
+    response: reqwest::Response,
+    config: &OpenAiConfig,
+    acc: &mut Accumulator,
+    tx: &mut EventSender,
+) -> Result<(), Failure> {
+    let idle = config.idle_timeout;
     let mut parser = SseParser::new(config.max_sse_event_bytes);
     let mut body = response.bytes_stream();
     let mut received_bytes = 0;
@@ -430,7 +443,7 @@ async fn stream_response(
         if chunk.len() > config.max_response_bytes.saturating_sub(received_bytes) {
             return Err(Failure::error(
                 ProviderError::ResourceLimit,
-                format!("stream response exceeds the {} byte limit", config.max_response_bytes,),
+                format!("stream response exceeds the {} byte limit", config.max_response_bytes),
             ));
         }
         received_bytes += chunk.len();
@@ -460,28 +473,28 @@ async fn handle_data(data: &str, acc: &mut Accumulator, tx: &mut EventSender) ->
     }
     let chunk: Value = serde_json::from_str(data)
         .map_err(|e| Failure::error(ProviderError::Protocol, format!("invalid stream chunk: {e}")))?;
-    if let Some(error) = chunk.get("error").filter(|error| !error.is_null()) {
-        let text = error
-            .get("message")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .unwrap_or_else(|| error.to_string());
-        return Err(Failure::error(
-            ProviderError::Provider {
-                code: error_code(error),
-            },
-            format!("provider error: {text}"),
-        ));
+    if let Some(error) = error_object(&chunk) {
+        return Err(provider_failure(error));
     }
-    for delta in acc
-        .apply(&chunk)
-        .map_err(|e| Failure::error(ProviderError::Protocol, e))?
-    {
+    for delta in acc.apply(&chunk) {
         if !send_event(tx, StreamEvent::Delta(delta)).await {
             return Err(Failure::Closed);
         }
     }
     Ok(false)
+}
+
+/// The most characters of a server's text that a failure message keeps.
+const MAX_ERROR_EXCERPT_CHARS: usize = 2000;
+
+/// The start of a server's text, for a failure message.
+fn excerpt(text: &str) -> String {
+    clip(text.trim(), MAX_ERROR_EXCERPT_CHARS)
+}
+
+/// The error object of a body or chunk, when it has one.
+fn error_object(body: &Value) -> Option<&Value> {
+    body.get("error").filter(|error| !error.is_null())
 }
 
 fn error_code(error: &Value) -> Option<String> {
@@ -490,6 +503,20 @@ fn error_code(error: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .or_else(|| error.get("type").and_then(Value::as_str))
         .map(str::to_string)
+}
+
+/// The failure that an error object, in a body or in a stream chunk, reports.
+fn provider_failure(error: &Value) -> Failure {
+    let text = error
+        .get("message")
+        .and_then(Value::as_str)
+        .map_or_else(|| error.to_string(), str::to_string);
+    Failure::error(
+        ProviderError::Provider {
+            code: error_code(error),
+        },
+        format!("provider error: {}", excerpt(&text)),
+    )
 }
 
 fn transport_failure(operation: &str, error: &reqwest::Error) -> Failure {
@@ -501,16 +528,11 @@ fn transport_failure(operation: &str, error: &reqwest::Error) -> Failure {
     Failure::error(details, format!("{operation}: {}", with_causes(error)))
 }
 
-/// The start of a body read only to explain a failure, within `idle`. A body that cannot be
-/// read in time loses only the explanation, so it reads as empty; callers say why that is
-/// acceptable.
-async fn diagnostic_body(response: reqwest::Response, idle: Duration, max_response_bytes: usize) -> Vec<u8> {
-    match tokio::time::timeout(
-        idle,
-        read_error_body(response, MAX_ERROR_BODY_BYTES.min(max_response_bytes)),
-    )
-    .await
-    {
+/// The start of a body read only to explain a failure, within the idle timeout. A body that
+/// cannot be read in time loses only the explanation, so it reads as empty.
+async fn diagnostic_body(response: reqwest::Response, config: &OpenAiConfig) -> Vec<u8> {
+    let read = read_error_body(response, MAX_ERROR_BODY_BYTES.min(config.max_response_bytes));
+    match tokio::time::timeout(config.idle_timeout, read).await {
         Ok(Ok(bytes)) => bytes,
         Ok(Err(_)) | Err(_) => Vec::new(),
     }
@@ -646,7 +668,7 @@ pub fn replay_body(request: &Request, provider: &str, options: &Value) -> anyhow
 ///
 /// Providers reject a tool call without a result and a result without its call. A run
 /// cancelled between them leaves such gaps, so missing results get a placeholder and
-/// unmatched results are dropped (pi: packages/ai/src/api/transform-messages.ts).
+/// unmatched results are dropped.
 ///
 /// Reasoning is sent back only to the provider (`config.provider_name`) and model that
 /// produced it. System messages follow `config.system_updates`.
@@ -693,35 +715,10 @@ fn convert_messages(messages: &[Message], config: &OpenAiConfig, model: &str) ->
             }
             Message::Assistant(assistant) => {
                 flush_missing_results(&mut out, &mut pending);
-                let text = assistant.text();
-                let calls = assistant.tool_calls();
-                if text.is_empty() && calls.is_empty() {
-                    // An empty failed or aborted attempt carries nothing for the model.
-                    continue;
+                if let Some((entry, calls)) = assistant_entry(assistant, provider, model) {
+                    pending = calls;
+                    out.push(entry);
                 }
-                let mut entry = json!({
-                    "role": "assistant",
-                    "content": if text.is_empty() { Value::Null } else { Value::String(text) },
-                });
-                if let Some((field, reasoning)) = replayed_reasoning(assistant, provider, model) {
-                    entry[field] = Value::String(reasoning);
-                }
-                if !calls.is_empty() {
-                    entry["tool_calls"] = Value::Array(
-                        calls
-                            .iter()
-                            .map(|call| {
-                                json!({
-                                    "id": call.id,
-                                    "type": "function",
-                                    "function": { "name": call.name, "arguments": call.arguments.to_string() },
-                                })
-                            })
-                            .collect(),
-                    );
-                    pending = calls.into_iter().map(|call| call.id).collect();
-                }
-                out.push(entry);
             }
         }
     }
@@ -732,8 +729,38 @@ fn convert_messages(messages: &[Message], config: &OpenAiConfig, model: &str) ->
     out
 }
 
+/// The body entry of an assistant message and the ids of the tool calls it makes, or nothing
+/// for an empty failed or aborted attempt, which carries nothing for the model.
+fn assistant_entry(assistant: &AssistantMessage, provider: &str, model: &str) -> Option<(Value, Vec<String>)> {
+    let text = assistant.text();
+    let calls = assistant.tool_calls();
+    if text.is_empty() && calls.is_empty() {
+        return None;
+    }
+    let mut entry = json!({
+        "role": "assistant",
+        "content": if text.is_empty() { Value::Null } else { Value::String(text) },
+    });
+    if let Some((field, reasoning)) = replayed_reasoning(assistant, provider, model) {
+        entry[field] = Value::String(reasoning);
+    }
+    if !calls.is_empty() {
+        entry["tool_calls"] = calls
+            .iter()
+            .map(|call| {
+                json!({
+                    "id": call.id,
+                    "type": "function",
+                    "function": { "name": call.name, "arguments": call.arguments.to_string() },
+                })
+            })
+            .collect();
+    }
+    Some((entry, calls.into_iter().map(|call| call.id).collect()))
+}
+
 /// The reasoning to send back with an assistant message: the field it arrived in and its
-/// text. Reasoning is meaningful only to the model that produced it (pi: transform-messages.ts).
+/// text. Reasoning is meaningful only to the model that produced it.
 fn replayed_reasoning(assistant: &AssistantMessage, provider: &str, model: &str) -> Option<(&'static str, String)> {
     if assistant.provider != provider || assistant.model != model {
         return None;
@@ -820,22 +847,15 @@ impl Accumulator {
         }
     }
 
-    pub(crate) fn apply(&mut self, chunk: &Value) -> Result<Vec<Delta>, String> {
-        if let Some(error) = chunk.get("error").filter(|e| !e.is_null()) {
-            let message = error
-                .get("message")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .unwrap_or_else(|| error.to_string());
-            return Err(format!("provider error: {message}"));
-        }
+    /// Take in one chunk, as the deltas it carries. Error chunks are the caller's to notice.
+    pub(crate) fn apply(&mut self, chunk: &Value) -> Vec<Delta> {
         if let Some(usage) = chunk.get("usage").filter(|u| u.is_object()) {
             self.apply_usage(usage);
         }
 
         let mut deltas = Vec::new();
         let Some(choice) = chunk.get("choices").and_then(|choices| choices.get(0)) else {
-            return Ok(deltas);
+            return deltas;
         };
         if let Some(delta) = choice.get("delta") {
             let reasoning = REASONING_FIELDS.into_iter().find_map(|field| {
@@ -871,7 +891,7 @@ impl Accumulator {
         if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
             self.finish_reason = Some(reason.to_string());
         }
-        Ok(deltas)
+        deltas
     }
 
     fn apply_tool_call(&mut self, position: usize, call: &Value, deltas: &mut Vec<Delta>) {
@@ -931,7 +951,7 @@ impl Accumulator {
         self.usage.input = get("prompt_tokens");
         self.usage.output = get("completion_tokens");
         // OpenAI reports cache hits in `prompt_tokens_details.cached_tokens`, DeepSeek in
-        // `prompt_cache_hit_tokens` (pi: parseChunkUsage).
+        // `prompt_cache_hit_tokens`.
         self.usage.cache_read = usage
             .get("prompt_tokens_details")
             .and_then(|d| d.get("cached_tokens"))
@@ -969,16 +989,15 @@ impl Accumulator {
             .collect()
     }
 
+    /// The complete message, from the finish reason: only the known endings succeed, and any
+    /// other value means the server interrupted or rejected the answer. Fails on a stream
+    /// that ended without a finish reason.
     pub(crate) fn finish(&self) -> Result<AssistantMessage, String> {
-        let content = self.content();
-        let has_tool_calls = content.iter().any(|b| matches!(b, ContentBlock::ToolCall { .. }));
         let Some(reason) = self.finish_reason.as_deref() else {
             return Err("stream ended without a finish_reason".to_string());
         };
-        // pi: openai-completions.ts mapStopReason. Only the known endings succeed; any other
-        // value means the server interrupted or rejected the answer, so it is not reported
-        // as a complete one.
-        let (stop_reason, error_message) = match reason {
+        let has_tool_calls = self.blocks.iter().any(|block| matches!(block, Block::Tool { .. }));
+        let (stop_reason, error) = match reason {
             // Some servers report "stop" with tool calls.
             "stop" | "end" if has_tool_calls => (StopReason::ToolUse, None),
             "stop" | "end" => (StopReason::Stop, None),
@@ -993,32 +1012,38 @@ impl Accumulator {
                 Some(format!("the provider ended the response with finish_reason {other:?}")),
             ),
         };
-        Ok(AssistantMessage {
-            content,
-            provider: self.provider.clone(),
-            model: self.model.clone(),
-            usage: self.usage.clone(),
-            stop_reason,
-            // Prefixed so that an ending reason never shares a name with an error code that
-            // is retried, such as "timeout": an unknown ending is not retried (PR #16).
-            provider_error: error_message.is_some().then(|| ProviderError::Provider {
-                code: Some(format!("finish_reason:{reason}")),
-            }),
-            error_message,
-            timestamp: self.timestamp,
-            duration_ms: None,
-        })
+        // Prefixed so that an ending reason never shares a name with an error code that is
+        // retried, such as "timeout": an unknown ending is not retried.
+        let details = error.is_some().then(|| ProviderError::Provider {
+            code: Some(format!("finish_reason:{reason}")),
+        });
+        Ok(self.message(stop_reason, error, details))
     }
 
-    pub(crate) fn failure(&self, stop_reason: StopReason, error: impl Into<String>) -> AssistantMessage {
+    /// The message so far, ended by `stop_reason` with `error` and its `details`.
+    pub(crate) fn failure(
+        &self,
+        stop_reason: StopReason,
+        error: impl Into<String>,
+        details: Option<ProviderError>,
+    ) -> AssistantMessage {
+        self.message(stop_reason, Some(error.into()), details)
+    }
+
+    fn message(
+        &self,
+        stop_reason: StopReason,
+        error_message: Option<String>,
+        provider_error: Option<ProviderError>,
+    ) -> AssistantMessage {
         AssistantMessage {
             content: self.content(),
             provider: self.provider.clone(),
             model: self.model.clone(),
             usage: self.usage.clone(),
             stop_reason,
-            error_message: Some(error.into()),
-            provider_error: None,
+            error_message,
+            provider_error,
             timestamp: self.timestamp,
             duration_ms: None,
         }
@@ -1026,8 +1051,7 @@ impl Accumulator {
 }
 
 /// The most of an invalid argument text that its error keeps: enough for the model to see
-/// what it sent (pi: `parseToolCallArguments` adds the whole text), bounded so the session
-/// and the next request do not grow with it.
+/// what it sent, bounded so the session and the next request do not grow with it.
 const MAX_RECEIVED_ARGUMENTS: usize = 2048;
 
 fn parse_arguments(raw: &str) -> (Value, Option<String>) {
@@ -1055,7 +1079,7 @@ mod tests {
     use zx_ai::{SectionChange, SystemMessage, ToolDef, ToolResultMessage};
 
     fn apply_all(acc: &mut Accumulator, chunks: &[Value]) -> Vec<Delta> {
-        chunks.iter().flat_map(|c| acc.apply(c).unwrap()).collect()
+        chunks.iter().flat_map(|c| acc.apply(c)).collect()
     }
 
     #[test]
@@ -1094,10 +1118,9 @@ mod tests {
     #[test]
     fn reports_invalid_tool_arguments_and_missing_finish_reason() {
         let mut acc = Accumulator::new("p", "m", 1);
-        acc.apply(&json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"bash","arguments":"{\"command\":"}}]}}]}))
-            .unwrap();
+        acc.apply(&json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"bash","arguments":"{\"command\":"}}]}}]}));
         assert!(acc.finish().is_err());
-        let failed = acc.failure(StopReason::Error, "cut off");
+        let failed = acc.failure(StopReason::Error, "cut off", None);
         assert!(failed.tool_calls()[0].arguments_error.is_some());
     }
 
@@ -1152,20 +1175,36 @@ mod tests {
     }
 
     #[test]
-    fn stop_with_tool_calls_is_tool_use_and_errors_in_chunks_fail() {
+    fn stop_with_tool_calls_is_tool_use() {
         let mut acc = Accumulator::new("p", "m", 1);
-        acc.apply(&json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"x","arguments":"{}"}}]},"finish_reason":"stop"}]}))
-            .unwrap();
+        acc.apply(&json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c","function":{"name":"x","arguments":"{}"}}]},"finish_reason":"stop"}]}));
         assert_eq!(acc.finish().unwrap().stop_reason, StopReason::ToolUse);
-        assert!(acc.apply(&json!({"error":{"message":"overloaded"}})).is_err());
+    }
+
+    #[tokio::test]
+    async fn an_error_chunk_ends_the_stream_as_a_provider_failure() {
+        let mut acc = Accumulator::new("p", "m", 1);
+        let (mut tx, _rx) = event_channel();
+        let chunk = r#"{"error":{"message":"overloaded","code":"server_overloaded"}}"#;
+        match handle_data(chunk, &mut acc, &mut tx).await {
+            Err(Failure::Error { details, message }) => {
+                assert_eq!(
+                    details,
+                    ProviderError::Provider {
+                        code: Some("server_overloaded".into())
+                    }
+                );
+                assert_eq!(message, "provider error: overloaded");
+            }
+            Err(Failure::Aborted | Failure::Closed) | Ok(_) => panic!("expected a provider error"),
+        }
     }
 
     #[test]
     fn only_known_finish_reasons_succeed() {
         let finish = |reason: &str| {
             let mut acc = Accumulator::new("p", "m", 1);
-            acc.apply(&json!({"choices":[{"delta":{"content":"x"},"finish_reason":reason}]}))
-                .unwrap();
+            acc.apply(&json!({"choices":[{"delta":{"content":"x"},"finish_reason":reason}]}));
             acc.finish().unwrap()
         };
         assert_eq!(finish("stop").stop_reason, StopReason::Stop);
@@ -1188,8 +1227,7 @@ mod tests {
     fn an_unknown_finish_reason_is_not_retried_whatever_its_name() {
         for reason in ["timeout", "server_error", "rate_limit_exceeded", "network_error"] {
             let mut acc = Accumulator::new("p", "m", 1);
-            acc.apply(&json!({"choices":[{"delta":{"content":"x"},"finish_reason":reason}]}))
-                .unwrap();
+            acc.apply(&json!({"choices":[{"delta":{"content":"x"},"finish_reason":reason}]}));
             let message = acc.finish().unwrap();
 
             assert_eq!(message.stop_reason, StopReason::Error, "{reason}");
@@ -1454,16 +1492,14 @@ mod tests {
         let mut acc = Accumulator::new("p", "m", 1);
         acc.apply(
             &json!({"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_cache_hit_tokens":6}}),
-        )
-        .unwrap();
+        );
         assert_eq!(acc.usage.cache_read, 6);
     }
 
     #[test]
     fn a_missing_total_is_computed_without_overflowing() {
         let mut acc = Accumulator::new("p", "m", 1);
-        acc.apply(&json!({"choices":[],"usage":{"prompt_tokens":u64::MAX,"completion_tokens":1}}))
-            .unwrap();
+        acc.apply(&json!({"choices":[],"usage":{"prompt_tokens":u64::MAX,"completion_tokens":1}}));
         assert_eq!(acc.usage.total_tokens, u64::MAX);
     }
 

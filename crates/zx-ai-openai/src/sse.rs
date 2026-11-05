@@ -45,17 +45,12 @@ impl SseParser {
                 continue;
             }
             let line = String::from_utf8_lossy(&self.buffer);
-            let line = line.trim_end_matches(['\n', '\r']);
-            if line.is_empty() {
-                if !self.data.is_empty() {
-                    events.push(self.data.join("\n"));
-                    self.data.clear();
-                }
+            if line.trim_end_matches(['\n', '\r']).is_empty() {
+                events.extend(self.take_event());
                 self.event_bytes = 0;
-            } else if let Some(rest) = line.strip_prefix("data:") {
-                self.data.push(rest.strip_prefix(' ').unwrap_or(rest).to_string());
+            } else {
+                keep_data(&mut self.data, &line);
             }
-            // event/id/retry fields and comment lines are not needed here.
             self.buffer.clear();
         }
         Ok(events)
@@ -65,17 +60,26 @@ impl SseParser {
     pub fn finish(&mut self) -> Option<String> {
         let tail = std::mem::take(&mut self.buffer);
         self.event_bytes = 0;
-        let line = String::from_utf8_lossy(&tail);
-        if let Some(rest) = line.trim_end_matches(['\n', '\r']).strip_prefix("data:") {
-            self.data.push(rest.strip_prefix(' ').unwrap_or(rest).to_string());
-        }
+        keep_data(&mut self.data, &String::from_utf8_lossy(&tail));
+        self.take_event()
+    }
+
+    /// The event the data lines so far make up, if there are any.
+    fn take_event(&mut self) -> Option<String> {
         if self.data.is_empty() {
-            None
-        } else {
-            let event = self.data.join("\n");
-            self.data.clear();
-            Some(event)
+            return None;
         }
+        let event = self.data.join("\n");
+        self.data.clear();
+        Some(event)
+    }
+}
+
+/// Keep the payload of a `data:` line; event, id and retry fields and comment lines are not
+/// needed here.
+fn keep_data(data: &mut Vec<String>, line: &str) {
+    if let Some(rest) = line.trim_end_matches(['\n', '\r']).strip_prefix("data:") {
+        data.push(rest.strip_prefix(' ').unwrap_or(rest).to_string());
     }
 }
 

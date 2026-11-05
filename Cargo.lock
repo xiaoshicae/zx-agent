@@ -3308,9 +3308,7 @@ dependencies = [
 name = "zx-ai"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "futures",
- "libc",
  "serde",
  "serde_json",
  "tokio",

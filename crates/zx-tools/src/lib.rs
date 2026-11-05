@@ -16,6 +16,8 @@ use zx_core::{agent, extensions, prompt};
 
 pub mod continuation;
 pub mod executor;
+#[doc(hidden)]
+pub mod files;
 pub mod mcp;
 pub mod output_store;
 pub mod policy;

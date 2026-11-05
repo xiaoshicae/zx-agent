@@ -12,10 +12,10 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 
 use crate::executor::{Access, check_network};
+use crate::files::read_text_file;
 use crate::mcp::{check_server_name, tool_name as mcp_tool_name};
 use crate::policy::{AutoApprove, ProgramOptions};
 use crate::runner::Limits;
-use crate::text::read_text_file;
 use crate::tools::BUILTIN_TOOL_NAMES;
 use crate::{compaction, output_store};
 
