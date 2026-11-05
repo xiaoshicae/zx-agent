@@ -68,6 +68,8 @@ pub(crate) enum Command {
     Chat(ChatArgs),
     /// Answer chat messages from IM platforms, one session per thread, until stopped.
     Serve(ServeArgs),
+    /// Serve the Agent Client Protocol over stdio for an editor or a terminal client.
+    Acp(AcpArgs),
 }
 
 #[derive(Args)]
@@ -182,6 +184,38 @@ pub(crate) enum ColorArg {
 }
 
 #[derive(Args)]
+pub(crate) struct AcpArgs {
+    #[command(flatten)]
+    pub(crate) base: BaseArgs,
+
+    /// Maximum model requests per prompt. Defaults to the selected profile.
+    #[arg(long)]
+    pub(crate) max_model_requests: Option<u32>,
+
+    /// Wall-clock limit per prompt, in seconds. 0 disables it. Defaults to the selected
+    /// profile.
+    #[arg(long)]
+    pub(crate) timeout_secs: Option<u64>,
+
+    /// Tokens per prompt: input plus output of its model requests, as the provider reports
+    /// them. Checked before each request, so the last one may go over. 0 disables it.
+    /// Defaults to the selected profile.
+    #[arg(long)]
+    pub(crate) token_budget: Option<u64>,
+
+    /// How long a permission request waits for the client's answer, in seconds. An
+    /// unanswered request is denied, and the turn goes on without the call.
+    #[arg(long, default_value_t = 3600, value_parser = clap::value_parser!(u64).range(1..))]
+    pub(crate) approval_timeout_secs: u64,
+
+    #[command(flatten)]
+    pub(crate) transport: TransportArgs,
+
+    #[command(flatten)]
+    pub(crate) request: RequestArgs,
+}
+
+#[derive(Args)]
 pub(crate) struct ServeArgs {
     /// Serve configuration (TOML): platforms, who may use the bot, limits and the session
     /// directory. See README, section "IM 服务".
@@ -213,7 +247,7 @@ pub(crate) struct ServeArgs {
     pub(crate) request: RequestArgs,
 }
 
-#[derive(Args)]
+#[derive(Args, Clone)]
 pub(crate) struct BaseArgs {
     /// Model id passed to the provider.
     #[arg(long, env = "ZX_MODEL")]
@@ -1045,7 +1079,7 @@ mod tests {
                 assert_eq!(args.continue_on_length, None);
                 assert_eq!(args.base.tools, None);
             }
-            Command::Chat(_) | Command::Serve(_) => panic!("run command"),
+            Command::Chat(_) | Command::Serve(_) | Command::Acp(_) => panic!("run command"),
         }
         let cli = Cli::try_parse_from(["zx-agent", "chat", "--model", "m"]).unwrap();
         match cli.command {
@@ -1054,7 +1088,7 @@ mod tests {
                 assert_eq!(args.timeout_secs, None);
                 assert_eq!(args.output, OutputMode::Text);
             }
-            Command::Run(_) | Command::Serve(_) => panic!("chat command"),
+            Command::Run(_) | Command::Serve(_) | Command::Acp(_) => panic!("chat command"),
         }
     }
 
@@ -1067,7 +1101,7 @@ mod tests {
                 assert_eq!(args.max_model_requests, None);
                 assert_eq!(args.request.session, None);
             }
-            Command::Run(_) | Command::Chat(_) => panic!("serve command"),
+            Command::Run(_) | Command::Chat(_) | Command::Acp(_) => panic!("serve command"),
         }
         assert!(Cli::try_parse_from(["zx-agent", "serve", "--model", "m"]).is_err());
     }
@@ -1081,12 +1115,12 @@ mod tests {
                 assert_eq!(args.timeout_secs, Some(0));
                 assert_eq!(args.base.tools, Some(vec![String::new()]));
             }
-            Command::Run(_) | Command::Serve(_) => panic!("chat command"),
+            Command::Run(_) | Command::Serve(_) | Command::Acp(_) => panic!("chat command"),
         }
         let cli = Cli::try_parse_from(["zx-agent", "run", "--model", "m", "--timeout-secs", "900", "go"]).unwrap();
         match cli.command {
             Command::Run(args) => assert_eq!(args.timeout_secs, Some(900)),
-            Command::Chat(_) | Command::Serve(_) => panic!("run command"),
+            Command::Chat(_) | Command::Serve(_) | Command::Acp(_) => panic!("run command"),
         }
     }
 }

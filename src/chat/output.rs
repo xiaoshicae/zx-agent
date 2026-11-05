@@ -384,7 +384,7 @@ fn turn_line(report: &RunReport, elapsed: Duration) -> String {
 
 /// `name: <main argument> other=value`, or `name: <arguments as JSON>`; nothing is cut,
 /// control characters are escaped and a multi-line command stays on one line.
-pub(super) fn describe_call(name: &str, args: &Value) -> String {
+pub(crate) fn describe_call(name: &str, args: &Value) -> String {
     let mut labels = label_fields(args);
     let detail = match labels.next() {
         Some((_, main)) => {
@@ -657,6 +657,8 @@ mod tests {
         );
     }
 
+    // Fields keep the order they were sent in: serde_json's `preserve_order` is on for the
+    // whole workspace since the ACP SDK enables it.
     #[test]
     fn arguments_left_out_of_the_label_are_listed_readably() {
         assert_eq!(
@@ -674,11 +676,11 @@ mod tests {
         );
         assert_eq!(
             describe_arguments(&json!({"path": "a.rs", "edits": [{"oldText": "x", "newText": "y\u{1b}"}]})),
-            ["edits[0].newText: y\\u{1b}", "edits[0].oldText: x"]
+            ["edits[0].oldText: x", "edits[0].newText: y\\u{1b}"]
         );
         assert_eq!(
             describe_arguments(&json!({"query": "up", "flags": [], "extra": {}, "on": true, "n": null})),
-            ["extra: {}", "flags: []", "n: null", "on: true", "query: up"]
+            ["query: up", "flags: []", "extra: {}", "on: true", "n: null"]
         );
         assert_eq!(describe_arguments(&json!("text")), ["arguments: text"]);
         let long = "x".repeat(INLINE_CHARS + 1);

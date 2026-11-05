@@ -36,7 +36,7 @@ use commands::Command;
 use input::Line;
 use interaction::{TerminalInteraction, Ticket};
 use output::Output;
-pub(crate) use output::{progress_line, visible};
+pub(crate) use output::{describe_call, progress_line, visible};
 use signals::{Interrupt, Signals};
 use term::Tone;
 
