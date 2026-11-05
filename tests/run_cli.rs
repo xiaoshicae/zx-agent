@@ -272,7 +272,9 @@ async fn request_fields_reach_the_model_and_the_audit() {
     assert_eq!(body["reasoning_effort"], json!("low"));
     let audit = std::fs::read_to_string(dir.path().join("audit.jsonl")).unwrap();
     assert!(
-        audit.contains(r#""extraFields":{"reasoning_effort":"low","thinking":{"type":"disabled"}}"#),
+        // Fields keep the order they were given in: serde_json's `preserve_order` is on for
+        // the whole workspace since the ACP SDK enables it.
+        audit.contains(r#""extraFields":{"thinking":{"type":"disabled"},"reasoning_effort":"low"}"#),
         "{audit}"
     );
 }

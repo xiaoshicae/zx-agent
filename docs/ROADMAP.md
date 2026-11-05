@@ -41,7 +41,7 @@ G1–G4 是验收目标。当前会话日志可重建对话与提示词；G3 所
 | 编号 | 事项 | 结论 | 日期 | 状态 |
 |---|---|---|---|---|
 | D1 | MSRV | 升级到 1.88 | 2026-10-31 | 已完成：`rust-version = "1.88"`，已用 1.88.0 工具链编译并通过测试 |
-| D2 | 新依赖 | 已授权：tokio 的 `io-std` feature、`toml`、`rmcp`（MCP 官方 Rust SDK）、ACP 官方 Rust SDK、`rustyline`（可选）。在用到它们的阶段再引入。2026-11-02 追加 `opentelemetry`、`opentelemetry_sdk`、`opentelemetry-otlp`（P9 的 OpenTelemetry 追踪）。2026-11-04 追加 `chrono`（chat `--debug` 日志显示本地时间与时区；`default-features = false`，只开 `clock`）。2026-11-05 经用户确认追加 `jsonschema`（循环按工具声明的 JSON Schema 校验参数；`default-features = false`） | 2026-10-31 | 按阶段引入；`rmcp` 3.8.0 已于 P7 引入（PR #40）；三个 OpenTelemetry crate 0.33.1 已于 P9 引入（PR #49）；`chrono` 0.4.45 原为 `rmcp` 的间接依赖，2026-11-04 改为 `zx-agent` 的直接依赖；`jsonschema` 0.33.0 是 `zx-core` 的依赖，`Cargo.lock` 因此新增 35 个包，其 `rust-version` 为 1.71.1，未引入新的 rustls 加密后端 |
+| D2 | 新依赖 | 已授权：tokio 的 `io-std` feature、`toml`、`rmcp`（MCP 官方 Rust SDK）、ACP 官方 Rust SDK、`rustyline`（可选）。在用到它们的阶段再引入。2026-11-02 追加 `opentelemetry`、`opentelemetry_sdk`、`opentelemetry-otlp`（P9 的 OpenTelemetry 追踪）。2026-11-04 追加 `chrono`（chat `--debug` 日志显示本地时间与时区；`default-features = false`，只开 `clock`）。2026-11-05 经用户确认追加 `jsonschema`（循环按工具声明的 JSON Schema 校验参数；`default-features = false`） | 2026-10-31 | 按阶段引入；`rmcp` 3.8.0 已于 P7 引入（PR #40）；三个 OpenTelemetry crate 0.33.1 已于 P9 引入（PR #49）；`chrono` 0.4.45 原为 `rmcp` 的间接依赖，2026-11-04 改为 `zx-agent` 的直接依赖；`jsonschema` 0.33.0 是 `zx-core` 的依赖，`Cargo.lock` 因此新增 35 个包，其 `rust-version` 为 1.71.1，未引入新的 rustls 加密后端；`agent-client-protocol` 5.0.0（连同 `-schema` 1.15.1 与 `-derive`）于 2026-11-05 按 D13 引入为 `zx-agent` 的依赖，只开 `stdio` feature，`Cargo.lock` 新增 54 个包，其 `rust-version` 为 1.88.0，未引入新的 rustls 加密后端；它给 serde_json 打开了 `preserve_order`，整个 workspace 的 JSON 对象从此按插入序而不是键序输出，两处比较 JSON 字符串的断言随之调整 |
 | D3 | profile 文件格式 | TOML | 2026-10-31 | P4 落实 |
 | D4 | 会话 API 形态 | 进程内方法调用；暂不实现提交队列 / 事件队列（SQ/EQ） | 2026-10-31 | 已实现：P2 进程内共享会话 API |
 | D5 | 无人值守的命令执行环境 | 默认仍在本机执行，`run` 行为不变；容器执行须在 profile 或 CLI 中显式开启。理由：在 Kubernetes Job 中运行时 Pod 内通常没有 Docker；无网络的容器做不了在线排障，而在线访问方案尚未评审。此前的候选方案（`troubleshoot` 默认容器、没有 Docker 时拒绝启动）不采用 | 2026-11-01 | 已确认：P6 执行环境部分按此实现 |
@@ -49,10 +49,11 @@ G1–G4 是验收目标。当前会话日志可重建对话与提示词；G3 所
 | D7 | IM 长连接的 WebSocket 客户端 | 已授权：`tokio-tungstenite`（0.30，关掉默认 feature，只开 `connect` 与 `rustls-tls-webpki-roots`）。理由与依赖核对见 `docs/serve-im-review.md` 缺口 ① | 2026-11-01 | 已引入（PR #29） |
 | D8 | MCP 的范围 | 本项目只做 MCP 客户端：只接工具，只支持 Streamable HTTP。MCP 服务器与领域工具（如 Kubernetes、Prometheus 查询）由外部服务实现 | 2026-11-01 | 已确认：P7 按此评审，见 `docs/p7-mcp-review.md` |
 | D9 | HTTP 客户端与 TLS | reqwest 升到 0.13（`json`、`stream`、`rustls`）。rustls 只用 aws-lc-rs 一个加密后端，HTTPS 的根证书改用系统信任库。理由：rmcp 只支持 reqwest 0.13，与 0.12 并存时 rustls 同时启用两个后端，`wss://` 连接会 panic（评审稿缺口 ①）；项目还没有使用者，用户授权按最合理的方式处理 | 2026-11-01 | 已完成（PR #36） |
-| D10 | 通用，不为场景定制 | zx-agent 是通用 Agent：代码只定义接口与通用机制，外部来适配。某个环境、平台或厂商才有的知识（如 kubectl 的只读选项、Kubernetes 的 token 路径、IM 文案的语言）放在 profile、部署清单或配置里；告警等外部系统由外部适配器调用 `run`、SDK 或 IM 接入，zx-agent 不解析它们的私有格式（如 Alertmanager）。provider 对协议方言的处理显式开启。同日决定：P9 只再做更多 provider（如 Anthropic），`--output-schema`、异步审批、OS 级沙箱不做，“由 webhook 或告警触发运行”取消；P8 `acp` 不做 | 2026-11-02 | 用户决定；已有代码中的定制已整理（PR #54），见 P9 的“通用化整理” |
+| D10 | 通用，不为场景定制 | zx-agent 是通用 Agent：代码只定义接口与通用机制，外部来适配。某个环境、平台或厂商才有的知识（如 kubectl 的只读选项、Kubernetes 的 token 路径、IM 文案的语言）放在 profile、部署清单或配置里；告警等外部系统由外部适配器调用 `run`、SDK 或 IM 接入，zx-agent 不解析它们的私有格式（如 Alertmanager）。provider 对协议方言的处理显式开启。同日决定：P9 只再做更多 provider（如 Anthropic），`--output-schema`、异步审批、OS 级沙箱不做，“由 webhook 或告警触发运行”取消；P8 `acp` 不做 | 2026-11-02 | 用户决定；已有代码中的定制已整理（PR #54），见 P9 的“通用化整理”。2026-11-05 撤回其中“P8 `acp` 不做”一项，见 D13 |
 | D11 | 容器执行的权限 | 沙箱内给 agent 最大权限，限制只放在沙箱的外墙上：工作目录（含 `.git`）与根文件系统可写，网络默认开启，审批由 profile 决定、可以一律放行；命令默认以映射的宿主机用户运行，仍不允许 root（root 以后按需做成显式选项，并同时改造进程清理）。外墙不变：不加 `--privileged`、不挂 `docker.sock`、不用宿主机的网络与 PID 命名空间、API key 与环境变量不进容器、会话文件在工作目录之外。原严格模式（只读、无网络）保留为可选配置。取代 P6 中“工作目录只读挂载、网络固定为 `none`”的约定与状态表中的“容器联网已取消”；D5（默认在本机执行）不变。理由与各家做法见 P10 | 2026-11-05 | 用户决定；已完成（P10 ②，PR #57） |
 | D12 | chat 的会话默认落盘 | 不给 `--session` 时，chat 把每次对话存成 `~/.zx-agent/sessions/--<工作目录>--/<UTC 时间>_<会话 ID>.jsonl`（目录名的写法与 pi 相同；新建的目录 0700、文件 0600），`--session-dir` 换目录，`--no-session` 只保存在内存。`run` 不变：只在给出 `--session` 时写文件。取代此前 chat 默认只保存在内存的行为。理由：列出会话、续接最近一次、fork 都需要一个已知的位置，与 pi 一致 | 2026-11-05 | 用户决定（另一选项是只在给出 `--session-dir` 时落盘）；P10 ⑥a 落实 |
-| D13 | 不做 rpc 模式 | 不为非 Rust 程序另做进程协议（pi 的 `rpc` 模式：stdin/stdout 的 JSON 行命令与事件流）。现有途径已覆盖：无人值守经 `run`（退出码与 `--output jsonl`），交互经 `chat` 的管道 stdin（逐行命令）与 JSONL 事件，常驻服务经 `serve` 与 SDK。再做一套协议要重复 chat 的 REPL 与事件，且 pi 的 rpc 本身也没有幂等键。等有非 Rust 宿主的具体需求再评估 | 2026-11-05 | 按用户授权采纳建议（用户要求按建议推进，不逐项确认）；P10 ⑫ 只做幂等键 |
+| D13 | 人机界面协议 | 只维护内核，界面交给别人：ACP 是内核对人的唯一界面协议，交互式 UI 由实现 ACP 的开源客户端（Zed 等编辑器、Wisp 等终端客户端）提供，zx-agent 只实现 agent 一侧（`acp` 子命令）。`chat` 冻结为最小入口（没装客户端时的应急使用与 `--output jsonl` 的脚本化调用），不再加功能；`serve` 冻结，只修平台 API 变化导致的故障，是否拆出或下线等 ACP 用过一段时间再定；`run` 保留并维护，无人值守场景 ACP 覆盖不了；SDK 不变。与 D10 的通用原则一致：协议是开放标准，zx-agent 不解析任何客户端的私有格式 | 2026-11-05 | 用户决定；P8 据此重启。编号 D13 是因为同日另一分支先用了 D12 |
+| D14 | 不做 rpc 模式 | 不为非 Rust 程序另做进程协议（pi 的 `rpc` 模式：stdin/stdout 的 JSON 行命令与事件流）。非 Rust 的宿主经 ACP（D13）接入；无人值守经 `run`（退出码与 `--output jsonl`），常驻服务经 `serve` 与 SDK；pi 的 rpc 本身也没有幂等键 | 2026-11-05 | 按用户授权采纳建议（用户要求按建议推进，不逐项确认）；P10 ⑫ 只做幂等键 |
 
 D2 之外的新依赖、依赖升级，仍需先征得同意。
 
@@ -519,7 +520,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 - 反向验证：分别去掉停止原因、运行开始时的记录、启动替换后的删除、停止时放弃替换、serve 的记录、记录文件的 0600 权限，以及把“先删后改”换成“先改后删”，每次都有对应测试失败（依次 3、5、3、1、1、1、4 项），修改已还原。“开始接收之前读出遗留记录”的顺序，没有能稳定复现竞争的测试，由代码结构保证。
 - 本机 macOS 验证：stable 与 Rust 1.88.0 各 753 项通过（基线 738 项，为 PR #45 的实测，其代码与 `9297885` 相同），6 项付费测试跳过；fmt、clippy、严格 Rustdoc 与 MSRV 全目标检查通过；自查脚本对改动的文件无命中；`tests/im_server.rs` 连续运行 20 次、`tests/serve_cli.rs` 3 次，均通过。未新增依赖，`Cargo.toml`、`Cargo.lock` 未改动。
 
-下面的 P0–P10 继续按各自验收标准推进。
+下面的 P0–P11 继续按各自验收标准推进。
 
 状态取值：未开始、进行中、已实现待 PR review、已完成。每个阶段完成时勾选任务，并记录完成日期和提交。
 
@@ -533,9 +534,10 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P5 | 上下文管理 | 已完成（PR #9） |
 | P6 | 执行环境与崩溃恢复 | 进行中：崩溃恢复（PR #12）、执行环境接缝（PR #13）、离线容器执行（PR #14）已完成；在线访问评审稿已合入（PR #17），一期已完成：只读命令自动放行（PR #19）、环境变量保护与 ServiceAccount token 脱敏（PR #20）、常驻 Pod 部署包（PR #22）、多集群（PR #24）；容器联网已取消，改为常驻 Pod 部署。待部署方在真实集群上验收；服务模式与 IM 接入的评审稿已合入（PR #27），模块 A（IM 接口与服务，PR #28）、B（Slack 与 `serve`，PR #29）、C（⚑ D:5/CHINA FLAG: 飞书，PR #32）、D（部署，PR #33）已完成，真实平台验收待提供凭据 |
 | P7 | 插件与 MCP | 已完成（PR #41）：范围按 D8 收窄，评审稿已合入（PR #36）并经用户确认；模块 A（Extension 接口，PR #38）、B1（MCP 客户端库，PR #40）、B2（CLI 接入与文档，PR #41）已完成；真实 MCP 服务器的验收待选定服务器；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已完成（PR #23），A2–A8（扩展 API）已完成（PR #25） |
-| P8 | 嵌入协议 `acp` | 不做（2026-11-02 用户决定，D10） |
+| P8 | 嵌入协议 `acp` | 进行中：2026-11-05 按 D13 重启，`acp` 子命令已实现（见下文 P8），待在 Zed 或 Wisp 上验证 |
 | P9 | 可选增强 | 进行中：token 预算（PR #47）、OpenTelemetry 追踪（PR #49）、crate 拆分（PR #52）、通用化整理（PR #54）、chat 交互体验（2026-11-05，见下文）已完成；剩更多 provider（如 Anthropic）。其余各项按 D10 不做或取消 |
-| P10 | 与 pi 的能力对齐 | 进行中：2026-11-05 对照 pi 列出 14 项缺口，见下文 P10；① 上下文超长后自动恢复已完成（PR #56）；② 容器沙箱已完成（PR #57）；③ edit 与 write 工具已完成（PR #58）；④ grep、find、ls 已完成（PR #59）；⑤ 运行中可调整的配置已完成：⑤a 推理强度（PR #60）、⑤b 续跑（PR #61）、⑤c 请求前替换模型与推理强度的钩子（PR #65）；⑥a 会话目录与续接已完成（PR #67）；⑥b fork 已完成（PR #68）；⑥c 会话内切换分支已完成（PR 待开）；⑦ 扩展能力与 ⑨ 消息队列已完成（PR 待开）；⑧ 模型元数据与计量已完成（PR 待开）；⑫ 幂等键已完成（PR 待开，rpc 模式按 D13 不做）；⑬ MCP 进度已完成（PR 待开）；⑩ 可观测已完成（PR 待开） |
+| P10 | 与 pi 的能力对齐 | 进行中：2026-11-05 对照 pi 列出 14 项缺口，见下文 P10；① 上下文超长后自动恢复已完成（PR #56）；② 容器沙箱已完成（PR #57）；③ edit 与 write 工具已完成（PR #58）；④ grep、find、ls 已完成（PR #59）；⑤ 运行中可调整的配置已完成：⑤a 推理强度（PR #60）、⑤b 续跑（PR #61）、⑤c 请求前替换模型与推理强度的钩子（PR #65）；⑥a 会话目录与续接已完成（PR #67）；⑥b fork 已完成（PR #68）；⑥c 会话内切换分支已完成（PR 待开）；⑦ 扩展能力与 ⑨ 消息队列已完成（PR 待开）；⑧ 模型元数据与计量已完成（PR 待开）；⑫ 幂等键已完成（PR 待开，rpc 模式按 D14 不做）；⑬ MCP 进度已完成（PR 待开）；⑩ 可观测已完成（PR 待开）；⑭ chat 的便利功能按 D13 不做 |
+| P11 | 内核整理 | 进行中：2026-11-05 评审稿 `docs/p11-kernel-cleanup-review.md`；① 立项与搬家已完成（PR #70），② 至 ⑥ 见下文 P11 |
 
 ### P0 场景默认值移出内核
 
@@ -1192,14 +1194,29 @@ P7 模块 B2 实施记录（2026-11-01，PR #41）：
 
 ### P8 嵌入协议 `acp`
 
-2026-11-02 用户决定不做（D10），以下保留原计划。
+2026-11-02 曾按 D10 决定不做；2026-11-05 用户决定只维护内核、把界面交给实现 ACP 的开源客户端（D13），重启本阶段。
 
-目标：可被编辑器和其他平台驱动。依赖：ACP 官方 Rust SDK（D2 已授权，要求 MSRV 1.88）。
+目标：可被编辑器和终端客户端驱动。依赖：`agent-client-protocol` 5.0.0（D2）。
 
-- [ ] `acp` 子命令：通过 stdio 收发 ACP 消息
-- [ ] `AcpInteraction`：审批请求转发给客户端
+- [x] `acp` 子命令：经 stdio 收发 ACP v1 消息
+- [x] 审批转发给客户端：`Interaction` 映射为 `session/request_permission`
+- [ ] 在 Zed 或 Wisp 上实测
+- [ ] `session/load`：续接会话文件，需要先定会话文件的落盘约定
 
 验收：可被 ACP 客户端驱动，审批经客户端完成。
+
+实施记录（2026-11-05，基于 `829afc8`，分支 `worktree-acp`）：
+
+| 环节 | 做法 |
+|---|---|
+| 连接 | `Agent.v1()` 加三个请求处理器与一个通知处理器，`Stdio` 传输（SDK 的 `stdio` feature，内部用 `blocking` 线程读写）；`initialize` 回 `agentInfo` 与空能力：不支持 `session/load`、图片、音频与嵌入上下文。进程只有一个连接，客户端关闭 stdin 即退出 |
+| 会话 | `session/new` 用客户端给的 `cwd` 走 `cli::prepare`，覆盖 `--cwd`；会话只在内存中，ID 用会话头的 ID；每个会话一个 `AgentSession`，放在按 ID 索引的表里（`Mutex<HashMap>`，锁不跨 await）。客户端给的 `mcpServers` 被忽略，MCP 服务器只来自 profile，启动时连接一次 |
+| 回合 | `session/prompt` 的处理器把回合派生到 SDK 的任务里再返回，分发循环不被占住，`session/cancel` 与权限应答照常到达；回合结束后以 `stopReason` 应答：`Completed`→`end_turn`，`Truncated`/`TokenBudget`→`max_tokens`，`ModelRequestLimit`→`max_turn_requests`，`Aborted`→`cancelled`；`Error`/`Timeout` 以 JSON-RPC 内部错误应答，`message` 为运行的错误文本（SDK 的 `respond_with_internal_error` 把文本放在 `data`，客户端一般只显示 `message`，所以自己构造）；未知会话为 `invalid params` |
+| 事件映射 | 会话的 `EventSink` 就是 `Updates`：文本增量→`agent_message_chunk`（没有流式文本时在回答结束补发全文），推理→`agent_thought_chunk`；`tool_execution_start`→`tool_call`（pending，标题复用 chat 的 `describe_call`，种类按内置工具名映射，`path` 参数作为位置、相对路径按会话目录补全）；策略放行或审批通过→`in_progress`；工具结果→`completed`/`failed` 加内容：`write_file` 加整个文件的 `diff`，`edit_file` 用 `details.patch` 代替结果文本；重试、上下文过长、钩子失败→`notice`；摘要→`compaction_update`。未映射：`tool_execution_update` 的进度、用量 |
+| 审批 | `Permissions` 实现 `Interaction`：`session/request_permission` 带 `ToolCallUpdate`（标题、种类、原始参数）与三个选项 `allow-once`、`allow-session`、`reject-once`；`cancelled` 与未知结果都按拒绝处理。等待在回合的任务里，不占分发循环；`--approval-timeout-secs` 默认 3600 秒 |
+| 测试 | `tests/acp_cli.rs` 6 项：手写的 JSON-RPC 客户端经子进程 stdio 驱动，stdout 的每一行都必须解析为协议消息；`src/acp.rs` 单元测试 3 项（结束原因映射、提问文本、工具种类）。既有测试的调整：ACP SDK 给 serde_json 打开 `preserve_order`，两处按字母序写的 JSON 断言改为插入序（`tests/run_cli.rs` 的请求附加字段审计、`tests/chat_cli.rs` 的 edit 审批），chat 的一项单元测试同样调整 |
+| 验证 | 本机 macOS：stable 下 960 项通过、7 项付费测试跳过（基线 951）；fmt、clippy 与 Rust 1.88.0 的全目标检查通过；自查脚本无新增命中。另用 SDK 自带的 `yolo_one_shot_client` 示例（本地编译）对假模型走通一次：初始化、建会话、两段推理、`ls -la` 的 `tool_call` 与权限请求（示例客户端自动批准）、`in_progress`、`completed`、自动放行的 `wc` 不问人、五段回答、`EndTurn`。没有在 Zed 或 Wisp 上验证。合并 origin/main（PR #67、#68）之后 985 项通过、7 项付费测试跳过 |
+| 未做 | `session/load`、客户端提供的 MCP 服务器、客户端的 fs 与 terminal 能力、`session/set_mode`、用量上报、协议 v2 |
 
 ### P9 可选增强
 
@@ -1385,9 +1402,9 @@ chat 交互体验第三批（2026-11-05，基于合并 PR #65 之后的 `829afc8
 - [x] **⑨ 消息队列**（低中；已完成（PR 待开，与 ⑦ 同一提交），2026-11-05，见下方实施记录）。队列模式 one-at-a-time（pi 默认，`packages/agent/src/types.ts:55`）；zx 一次取完（`crates/zx-core/src/agent/agent_loop/context.rs:128`）。队列消息目前只能是纯文本。
 - [x] **⑩ 可观测**（中；已完成（PR 待开），2026-11-05，见下方实施记录）。指标（运行耗时、结果计数、token、工具与 MCP 调用耗时）与跨进程传递 trace（W3C `traceparent`）（`packages/telemetry`）。zx 只导出 trace，trace ID 由 SDK 生成。待定：指标要开 opentelemetry 系列的 `metrics` feature，锁文件可能增加包。
 - [ ] **⑪ 行为评测框架**（中）。按 profile 运行场景用例，支持重复次数、两种变体配对比较、只用合成数据、产物落盘（`packages/evals`）。zx 只有一项摘要评测（`tests/real_api.rs`）。框架与离线用例可直接做；真实运行每次都要用户授权（红线 9）。
-- [x] **⑫ 嵌入**（中；幂等键已完成（PR 待开），rpc 模式按 D13 不做，2026-11-05，见下方实施记录）。SDK 提交提示词的幂等键，防止宿主重试时重复提交。待定：给非 Rust 程序用的进程协议（类似 pi 的 rpc 模式，`packages/coding-agent/src/modes/rpc`）。ACP 已按 D10 不做，rpc 是否做由用户决定。
+- [x] **⑫ 嵌入**（中；幂等键已完成（PR 待开），rpc 模式按 D14 不做，2026-11-05，见下方实施记录）。SDK 提交提示词的幂等键，防止宿主重试时重复提交。待定：给非 Rust 程序用的进程协议（类似 pi 的 rpc 模式，`packages/coding-agent/src/modes/rpc`）。ACP 已按 D13 实施（P8），rpc 模式不再需要。
 - [x] **⑬ MCP 进度**（低中；已完成（PR 待开），2026-11-05，见下方实施记录）。转发服务器的进度通知，并按进度延长超时（`packages/mcp/src/client.ts`）；zx 的调用固定 120 秒超时（`crates/zx-tools/src/mcp.rs:36`）。rmcp 是否支持，实施前核对。
-- [ ] **⑭ chat 的便利功能**（低）。提示词模板、`!cmd` 直接执行、路径中的 `~` 展开、用户级全局配置、导出、更多斜杠命令（现有 5 个）。
+- [x] **⑭ chat 的便利功能**（低；按 D13 不做，2026-11-05）。提示词模板、`!cmd` 直接执行、路径中的 `~` 展开、用户级全局配置、导出、更多斜杠命令（现有 5 个）。D13 把 `chat` 冻结为最小入口，这些便利由实现 ACP 的客户端提供（编辑器的提示词库与斜杠命令、终端客户端的 shell 直通与路径补全、会话导出）；`run` 与 SDK 用不到它们。此前为 ⑥c、⑦ 与 ⑨ 加进 chat 的 `/tree`、`/branch`、`/queue` 与扩展命令是 SDK 能力的验证入口，不再扩充。
 
 ① 实施记录（2026-11-05，PR #56，基于 `c44154d`）：
 
@@ -1447,7 +1464,7 @@ rmcp 3.8.0 的核实（`~/.cargo/registry/src/*/rmcp-3.8.0/src/`）：每个请�
 | 接口 | `AgentSession::prompt_once(key, text)` 与 `prompt_once_with_cancel`：空白键返回新的 `SessionError::InvalidKey`；取得租约后先在会话中查键（所有分支），已有则返回新的 `SessionError::DuplicateKey`、不发请求；没有则先追加类型为 `IDEMPOTENCY_KEY_TYPE`（`idempotency_key`）的 `custom` 记录（`data.key`），再按 `prompt` 运行。查、记、跑都在同一份租约内，别的提问插不进来 |
 | 为什么是 custom 记录 | 键必须随会话持久化（宿主重启后重试也要认得），v6 的 `custom` 记录正是“不进上下文的状态”，不必再升格式；类型名保留给会话，README 注明 |
 | 中断的提交 | 键在提示词之前写入，所以提交后崩溃或失败的运行也占住键：重试被拒，宿主用 `continue_run` 接着做（⑤b 的路径），答案在会话里 |
-| rpc 模式 | 不做，见 D13 |
+| rpc 模式 | 不做，见 D14 |
 
 - 测试：新增 3 项（`tests/idempotency.rs`：键先于提示词且同键不再请求、空键被拒、不同键照常；重新打开的会话仍认得键；失败的提交同键被拒后 `continue_run` 完成）。既有测试未改。
 - 反向验证：让查键永远查不到，对应测试失败，修改已还原。
@@ -1655,6 +1672,32 @@ D11 容器沙箱的实施要点（2026-11-05 用户决定）：
 | Claude Code | devcontainer 中可跳过审批；文档同时提醒这挡不住恶意项目外传容器内的数据（code.claude.com/docs/en/devcontainer） | 要求非 root；以 root 运行时拒绝跳过审批 |
 | OpenHands | Docker 沙箱，工作区默认读写挂载（docs.openhands.dev/openhands/usage/sandboxes/docker） | 建议 `SANDBOX_USER_ID=$(id -u)` 与宿主机一致 |
 | Gemini CLI | Docker 或 Podman 沙箱 | Linux 上映射宿主机 UID/GID（`SANDBOX_SET_UID_GID`；默认值未核实） |
+
+### P11 内核整理
+
+2026-11-05 用户要求把 `zx-core` 做成轻量的微内核，并让内核“模块更清晰、代码更简洁、注释更精简，便于阅读和维护”。评审稿 `docs/p11-kernel-cleanup-review.md`（代码核对基线 `2367a3a`）记录了结论与方案：内核依赖 `zx-ai` 没有错，错在 `zx-ai` 混装了 OpenAI 驱动；内核里约三分之一的代码是默认实现而不是机制；两个超长函数和三份重复的借用包遮住了运行层的数据流；注释总量不多但重复、带历史。任务按下面的顺序各成一个 PR，每个 PR 跑 fmt、clippy、test 三条命令，改到会话格式的加跑 MSRV 检查与 `tests/request_audit.rs` 的固定文件比对：
+
+- [x] **① 立项与搬家**（已完成（PR #70），2026-11-05，见下方实施记录）：评审稿；规则 01 的注释条款；拆 `zx-ai-openai`；`executor`、`output_store`、`ContinueOnLength` 与 `RedactSecrets` 移到 `zx-tools`。
+- [ ] **② 机械清理**：clippy pedantic 可自动修的（`Self` 重复、可 derive `Eq`、单臂 match）；`const fn` 建议用 1.88 工具链复核后再采纳；两处超长行；三对同名文件改名（`session/compaction.rs`、`runner/recovery.rs`、两个 `session_runtime.rs`）；`SessionHost` 命名统一。
+- [ ] **③ 运行层**：拆 `Runner::start`（265 行）；三处同样八个字段的借用包合成 `RunContext`；暂停状态封成 `CompactionPause`；`overflow.rs` 消失。
+- [ ] **④ 摘要宿主**：拆 `Host::run`（251 行），返回值只留 `Report`；摘要的两端交给 session；`carry(previous, new)` 合并 `merge` 与 `validate_merged`；`SummaryRequest::messages` 合并两处请求构造。
+- [ ] **⑤ 会话**：校验分发与版本表搬回 `session.rs`；`EntryHead`；查找辅助；`enum Repair`；`without_details` 合成泛型；公开面收口。
+- [ ] **⑥ 循环小改与注释**：`checkpoint`、`decide_next_turn` 拆分、`ToolRef`；注释按评审稿第 5 节的规则整理。
+
+① 实施记录（2026-11-05，基于 `2367a3a`）：
+
+| 环节 | 做法 |
+|---|---|
+| 新 crate `zx-ai-openai` | `crates/zx-ai/src/openai.rs` 改名移动为 `crates/zx-ai-openai/src/lib.rs`，`sse.rs` 随之成为它的子模块；导入从 `super::` 改为 `zx_ai::`；`zx_ai::provider::send_event` 由 `pub(crate)` 改为 `pub`（provider 实现者用的辅助）；`zx-ai` 不再依赖 reqwest。根包以 `pub mod ai { pub use zx_ai::*; pub use zx_ai_openai as openai; pub use zx_ai_openai::sse; }` 保住 `zx_agent::ai::openai` 与 `ai::sse` 的路径 |
+| `executor` 移到 zx-tools | `crates/zx-core/src/executor/` 四个文件改名移动到 `crates/zx-tools/src/executor/`，内容不变；`container_environment_section` 从 `prompt.rs` 移到 `executor/container.rs`（`environment_section`，经 `executor` 以原名再导出），它的两个单元测试随之；`prompt.rs` 的 `run_started` 与 `pretty_name` 改为 `pub`，供描述别处环境的执行器使用；zx-tools 新增 tokio-util、uuid 为普通依赖，Unix 上 libc 由测试依赖改为普通依赖 |
+| `output_store` 移到 zx-tools | 改名移动，内容不变 |
+| 续写与脱敏钩子移到 zx-tools | `extensions.rs` 第 178–438 行拆成 `crates/zx-tools/src/continuation.rs`（`ContinueOnLength`、`CONTINUE_PROMPT`）与 `crates/zx-tools/src/redact.rs`（`RedactSecrets`、`check_secret_files`、`short_secret_files`、`MIN_SECRET_CHARS`），内容不变；`extensions.rs` 只留 `Extension` 与 `register` |
+| 公开路径 | `zx_agent::executor`、`output_store`、`ai::openai`、`ai::sse` 不变。`zx_agent::extensions::{ContinueOnLength, RedactSecrets, …}` 改为 `zx_agent::continuation::…` 与 `zx_agent::redact::…`，仓库内 5 处引用（`src/cli.rs`、`examples/library.rs`、`tests/hooks.rs`、`tests/runner.rs`、`tests/output_store.rs`）随之修改；`zx_agent::prompt::container_environment_section` 改为 `zx_agent::executor::container_environment_section`（`src/cli.rs` 一处） |
+| 依赖闭包 | 本机 macOS 上 `cargo tree -e normal` 去重计得：zx-ai 99 → 33，zx-core 140 → 102（不再含 reqwest；jsonschema 仍在），zx-im 141 → 103，zx-tools 152 不变，zx-agent 205 → 206（多出的是新 crate 本身；合并 PR #69 的 ACP 之后为 239）。锁文件只多出 `zx-ai-openai` 一项，未新增、未升级外部依赖 |
+| 文档 | README 的架构树、对应表与 crate 数；`.claude/CLAUDE.md` 的架构表与分层说明；规则 01 的注释条款按评审稿第 5 节改写，规则 01、04、05 里 `executor` 的路径随文件移动 |
+
+- 本机 macOS 验证：`cargo fmt`、`cargo clippy --all-targets -- -D warnings`、`cargo test`（951 通过、0 失败、7 项付费测试跳过；`829afc8` 的基线为 944 通过，差额 7 项是 PR #66 新增的测试，移动的文件里测试属性的数量不变）、`RUSTDOCFLAGS=-D warnings cargo doc --no-deps`、`cargo +1.88.0 check --all-targets` 均通过；`RUSTFLAGS="-W unused-crate-dependencies"` 对 zx-ai、zx-ai-openai、zx-core、zx-tools 的库检查无命中；自查脚本的命中与拆分前相同，只是路径随文件移动。
+- 未做，留给后续 PR 或另行决定：评审稿 2.2 节里 `prompt.rs` 为上层功能保留的三个段落名、`jsonschema` 的 feature 开关、`compaction.rs` 内嵌的两段摘要提示词。
 
 ## 6. 推进方式
 

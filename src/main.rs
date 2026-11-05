@@ -14,6 +14,7 @@ use zx_agent::ai::{Message, StopReason};
 use zx_agent::profile::Builtin;
 use zx_agent::runner::{RunOutcome, RunReport};
 
+mod acp;
 mod chat;
 mod cli;
 mod serve;
@@ -43,6 +44,7 @@ async fn main() -> ExitCode {
         Command::Chat(args) => chat::run(args).await,
         Command::Serve(args) => serve::run(args).await,
         Command::Sessions(args) => sessions::run(args).await,
+        Command::Acp(args) => acp::run(args).await,
     };
     match result {
         Ok(code) => ExitCode::from(code),

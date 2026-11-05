@@ -16,7 +16,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent::ExecutionMode;
 
-pub use container::{Access, ContainerConfig, ContainerExecutor, Platform, check_network};
+pub use container::{
+    Access, ContainerConfig, ContainerExecutor, Platform, check_network,
+    environment_section as container_environment_section,
+};
 pub use local::LocalExecutor;
 
 /// One shell command: `<shell> -c <command>` in `cwd`.

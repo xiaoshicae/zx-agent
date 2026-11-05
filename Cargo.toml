@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "crates/zx-ai",
+  "crates/zx-ai-openai",
   "crates/zx-core",
   "crates/zx-tools",
   "crates/zx-im",
@@ -11,6 +12,7 @@ members = [
 default-members = [
   ".",
   "crates/zx-ai",
+  "crates/zx-ai-openai",
   "crates/zx-core",
   "crates/zx-tools",
   "crates/zx-im",
@@ -27,12 +29,14 @@ publish = false
 
 [workspace.dependencies]
 zx-ai = { path = "crates/zx-ai" }
+zx-ai-openai = { path = "crates/zx-ai-openai" }
 zx-core = { path = "crates/zx-core" }
 zx-im = { path = "crates/zx-im" }
 zx-im-feishu = { path = "crates/zx-im-feishu" }
 zx-im-slack = { path = "crates/zx-im-slack" }
 zx-tools = { path = "crates/zx-tools" }
 
+agent-client-protocol = { version = "5.0", default-features = false, features = ["stdio"] }
 anyhow = "1"
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
@@ -73,12 +77,14 @@ path = "src/main.rs"
 
 [dependencies]
 zx-ai.workspace = true
+zx-ai-openai.workspace = true
 zx-core.workspace = true
 zx-im.workspace = true
 zx-im-feishu.workspace = true
 zx-im-slack.workspace = true
 zx-tools.workspace = true
 
+agent-client-protocol.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true

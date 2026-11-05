@@ -70,7 +70,7 @@ use zx_agent::agent::{
 };
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, PREAMBLE, StopReason, SystemPrompt};
-use zx_agent::extensions::ContinueOnLength;
+use zx_agent::continuation::ContinueOnLength;
 use zx_agent::runner::{Limits, RunOutcome};
 use zx_agent::session::{Entry, LoadedSession, LogRecord, SessionLog, SessionStore};
 
