@@ -4,6 +4,7 @@ use super::{
     AgentEvent, AssistantMessage, Engine, Halt, LoopResult, Message, Request, RequestKind, StopReason, StreamEvent,
     StreamExt,
 };
+use crate::agent::RequestSettings;
 
 impl Engine<'_, '_, '_> {
     /// Record and send a task request, then account for its response.
@@ -13,12 +14,23 @@ impl Engine<'_, '_, '_> {
         result: &mut LoopResult,
     ) -> Result<Option<AssistantMessage>, Halt> {
         let spec = &self.config.spec;
-        let request = Request {
+        let configured = RequestSettings {
             model: spec.model.clone(),
+            reasoning: spec.reasoning,
+        };
+        let turn = self.turn.unwrap_or_default();
+        let settings = self
+            .config
+            .hooks
+            .prepare_request(context, turn, configured, self.trace.context())
+            .await
+            .map_err(|error| Halt::Failed(self.hook_error(error)))?;
+        let request = Request {
+            model: settings.model,
             messages: context.to_vec(),
             tools: spec.tools.iter().map(|tool| tool.definition()).collect(),
             max_tokens: spec.max_tokens,
-            reasoning: spec.reasoning,
+            reasoning: settings.reasoning,
         };
         let request_entry = match self.control.session.as_deref_mut() {
             Some(session) => Some(
@@ -35,7 +47,7 @@ impl Engine<'_, '_, '_> {
         self.emit(AgentEvent::RequestStart {
             kind: RequestKind::Task,
             entry_id: request_entry,
-            model: spec.model.clone(),
+            model: request.model.clone(),
             attempt: self.control.attempt_number,
         })
         .await;

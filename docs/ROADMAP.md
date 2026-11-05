@@ -533,7 +533,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P7 | 插件与 MCP | 已完成（PR #41）：范围按 D8 收窄，评审稿已合入（PR #36）并经用户确认；模块 A（Extension 接口，PR #38）、B1（MCP 客户端库，PR #40）、B2（CLI 接入与文档，PR #41）已完成；真实 MCP 服务器的验收待选定服务器；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已完成（PR #23），A2–A8（扩展 API）已完成（PR #25） |
 | P8 | 嵌入协议 `acp` | 不做（2026-11-02 用户决定，D10） |
 | P9 | 可选增强 | 进行中：token 预算（PR #47）、OpenTelemetry 追踪（PR #49）、crate 拆分（PR #52）、通用化整理（PR #54）已完成；剩更多 provider（如 Anthropic）。其余各项按 D10 不做或取消 |
-| P10 | 与 pi 的能力对齐 | 进行中：2026-11-05 对照 pi 列出 14 项缺口，见下文 P10；① 上下文超长后自动恢复已完成（PR #56）；② 容器沙箱已完成（PR #57）；③ edit 与 write 工具已完成（PR #58）；④ grep、find、ls 已完成（PR #59）；⑤a 推理强度已完成（PR #60）；⑤b 续跑已完成（PR #61） |
+| P10 | 与 pi 的能力对齐 | 进行中：2026-11-05 对照 pi 列出 14 项缺口，见下文 P10；① 上下文超长后自动恢复已完成（PR #56）；② 容器沙箱已完成（PR #57）；③ edit 与 write 工具已完成（PR #58）；④ grep、find、ls 已完成（PR #59）；⑤ 运行中可调整的配置已完成：⑤a 推理强度（PR #60）、⑤b 续跑（PR #61）、⑤c 请求前替换模型与推理强度的钩子（PR 待开） |
 
 ### P0 场景默认值移出内核
 
@@ -1327,7 +1327,7 @@ crate 拆分（2026-11-02，已完成，PR #52；基于 PR #51 合并后的 `640
 - [x] **② 容器沙箱改为沙箱内最大权限**（D11；已完成（PR #57），2026-11-05，见下方实施记录）。是 ③ 在容器中可用的前提。
 - [x] **③ edit 与 write 工具**（高；已完成（PR #58），2026-11-05，见下方实施记录）。pi 默认工具集是 read、bash、edit、write（`packages/coding-agent/src/core/tools/edit.ts`、`write.ts`）：一次调用可做多处不重叠的精确替换，`details` 带 diff，同一文件的写入经 `file-mutation-queue.ts` 串行。zx 只有 `bash`、`read_file`（`crates/zx-tools/src/tools/mod.rs:24`），`Executor` 只有 `run` 与 `read_file`（`crates/zx-core/src/executor/mod.rs:83,88`）。做法：`Executor` 增加写文件；两个工具声明 `SideEffects`（不变量 10），`details` 带 diff 供审批与审计；同一文件的写入串行，不同文件仍可并行；规则策略可以用 `askTools` 管到它们。
 - [x] **④ grep、find、ls 只读工具**（中；已完成（PR #59），2026-11-05，见下方实施记录）。pi 用 ripgrep 与 fd，遵守 `.gitignore`，结果有上限（`grep.ts`、`find.ts`、`ls.ts`）。zx 只能经 bash 与命令白名单。声明为 `ReadOnly`，不必依赖白名单即可免审批。待定：经 `Executor` 调外部程序（不加依赖，容器中同样可用）还是用 Rust 实现（需新增 `ignore` 等依赖，红线 5）。
-- [ ] **⑤ 运行中可调整的配置**（中高）。推理强度作为一等配置并可在空闲时修改、变化写入会话（目前只能用 `--request-field` 静态传）；每次请求前可替换模型与推理强度的钩子（pi 的 `prepareRequest`、`prepareNextTurn`，`packages/agent/src/agent-loop.ts:195,228`；zx 的 `set_model` 只能空闲时调用，`crates/zx-core/src/agent_session.rs:222`）；不加新输入的续跑（pi 的 `continue()`；`Runner::run` 必须带提示词）。推理强度的写法遵守 D10：各 provider 显式映射。
+- [x] **⑤ 运行中可调整的配置**（中高；已完成（⑤a PR #60、⑤b PR #61、⑤c PR 待开），2026-11-05，见下方实施记录）。推理强度作为一等配置并可在空闲时修改、变化写入会话（目前只能用 `--request-field` 静态传）；每次请求前可替换模型与推理强度的钩子（pi 的 `prepareRequest`、`prepareNextTurn`，`packages/agent/src/agent-loop.ts:195,228`；zx 的 `set_model` 只能空闲时调用，`crates/zx-core/src/agent_session.rs:222`）；不加新输入的续跑（pi 的 `continue()`；`Runner::run` 必须带提示词）。推理强度的写法遵守 D10：各 provider 显式映射。
 - [ ] **⑥ 会话导航**（中）。列出会话、续接最近一次、fork 成新会话、在分支间切换（`packages/coding-agent/src/core/session-manager.ts`）。zx 只有 `--session <path>`；`SessionStore::branch`（`crates/zx-core/src/session.rs:486`）只在测试中调用。补 SDK 接口与 CLI，`chat` 加对应命令。
 - [ ] **⑦ 扩展能力**（中高，嵌入）。pi 的扩展可写自定义条目（`appendEntry`）、注入非用户消息（`sendMessage`）、运行中启停工具（`setActiveTools`）、注册命令（`registerCommand`）（`packages/coding-agent/src/core/extensions/types.ts`）。zx 的条目只有 9 种内部类型（`crates/zx-core/src/session.rs:142-151`），工具在构建时固定。自定义消息与“会话投影是上下文的唯一来源”（不变量 6）如何共存，先出方案再实施。
 - [ ] **⑧ 模型层的元数据与计量**（中）。在配置中写模型的上下文窗口、单价与输入类型（不内置厂商模型表，D10），用来按 token 设摘要阈值（现为字节）并计算成本；用量增加 cacheWrite 与推理 token；会话记录应答方返回的模型名与响应 ID；按会话的 prompt cache key；自定义请求头；每次请求动态取 API key；`Retry-After` 支持 HTTP 日期与毫秒写法，退避加抖动。
@@ -1369,6 +1369,21 @@ crate 拆分（2026-11-02，已完成，PR #52；基于 PR #51 合并后的 `640
 - 反向验证：分别不把级别写进请求体、审计不记录级别、运行中修改不生效、不检查与附加字段的冲突，每次都有对应测试失败（依次 3、1、2、1 项），修改已还原。
 - 本机 macOS 验证：stable 下 904 项通过、7 项付费测试跳过（基线 895 项，即 PR #59 分支的实测）；fmt、clippy、严格 Rustdoc 与 Rust 1.88.0 的全目标检查通过；Rust 1.88.0 下没有运行测试。自查脚本在改动的文件中只列出原有的 1 处（`src/chat/mod.rs` 的 `let _ =`）。未新增依赖。
 - 未验证：没有对真实模型服务发送过这三种写法，服务端是否接受、级别名是否被认可（如 `xhigh`、`minimal`）要看各服务的文档与实测。
+
+⑤c 实施记录（2026-11-05，PR 待开，基于 PR #61 合入 `claude/reasoning-level` 后的 `f706b43`）：
+
+| 环节 | 做法 |
+|---|---|
+| 接口 | `Hooks::prepare_request(&RequestPlan, &HookContext) -> HookResult<Option<RequestSettings>>`，有默认实现（返回 `None`），对应 pi 的 `prepareRequest`。`RequestPlan` 给出将要发送的上下文、回合序号与当前设置；`RequestSettings` 只有模型（同一 provider）与推理强度 |
+| 规则 | 每个任务请求发出前调用；各钩子按阶段与注册顺序接力，后一个看到前一个的选择；替换只对这一次请求有效。失败、panic、超时与空模型名都在发请求之前以 `Error` 结束运行，不触发重试，与其他钩子失败相同。摘要请求不调用 |
+| 审计 | 循环本身只改了“用什么设置构造请求”：请求审计照常记录实际发送的模型与推理强度（变化才追加 `request_config`），`replay_request` 还原的就是发出的请求；`request_start` 事件报告实际的模型 |
+| 与 pi 的不同 | pi 的 `prepareRequest` 还能改上下文；这里不能，发给模型的始终是会话投影（不变量 6），改上下文用 `transform_context` 并写入会话。pi 的 `prepareNextTurn` 没有单独实现，它要做的“下一次请求换设置”由本钩子按回合判断即可 |
+| 未做 | 只有 SDK 接口；外部钩子进程与 profile 配置暂不支持，`RequestSettings` 的 JSON 格式已由 `tests/hook_contract.rs` 固定，供以后接入 |
+
+- 测试：新增 5 项：`tests/prepare_request.rs` 4 项（钩子只替换第一次请求的模型与推理强度，钩子看到配置的设置与将要发送的上下文，`request_start` 报告实际的模型，每个请求都能从会话文件还原；两个钩子接力；失败与空模型名在请求前结束且允许重试时也不重试；panic），`tests/hook_contract.rs` 1 项（`RequestSettings` 的 JSON）。既有测试未改。
+- 反向验证：分别让请求不用钩子的设置、不检查空白模型名、钩子之间不接力，每次都有对应测试失败（2 项、1 项、2 项），修改已还原。
+- 本机 macOS 验证：stable 下 919 项通过、7 项付费测试跳过（基线 914 项，即 PR #61 的实测）；fmt、clippy、严格 Rustdoc 与 Rust 1.88.0 的全目标检查通过；Rust 1.88.0 下没有运行测试。自查脚本在改动的文件中没有新的命中。未新增依赖。
+- 未验证：钩子超时没有单独的测试，它与其他钩子共用同一层超时处理（`HookChain` 的 `call.run`）。
 
 ⑤b 实施记录（2026-11-05，PR #61，基于 PR #60 的 `c02fd68`）：
 

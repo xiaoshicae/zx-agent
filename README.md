@@ -347,6 +347,7 @@ CLI (main.rs + cli.rs + chat/)
 | 上下文过长的识别 | 按 HTTP 413、错误码（`context_length_exceeded` 等）与通用措辞（如 “maximum context”“prompt is too long”）识别，限流与服务端错误不算；不识别服务端截断输入而不报错的情况 | pi 按服务逐条匹配错误文本，并用模型的上下文窗口识别不报错的超长（`packages/ai/src/utils/overflow.ts`）。这里不按服务推断（D10），也没有模型的上下文窗口信息（见路线图 P10 ⑧） |
 | 上下文摘要 | 默认（全量模式）重新摘要时读取应用过 `context_edit` 的原始记录，不输入上一份摘要；可选的增量模式沿用上一份摘要的事实、只读新增记录，旧事实由程序原样保留，模型只能新增事实或标明取代旧事实。摘要中的每条事实必须引用来源条目，见 [PROFILES.md](docs/PROFILES.md) | pi 把上一份摘要交给模型更新，允许删去旧内容；这里优先保证每条事实可追溯、不经多次转述。全量模式的代价是摘要请求随历史增长，累计约 2 MiB 后无法再摘要；增量模式每次只读上一份摘要的事实（至多 64 KiB）与新增、被修正的记录，请求大小不随历史总长增长，用真实模型评测之后再决定是否设为默认（见[路线图](docs/ROADMAP.md)） |
 | 不加新输入的续跑 | 以失败或被取消的回答结尾时，先省略该回答再续跑 | pi 的 `Agent.continue()` 遇到回答结尾时报错（排队的消息除外），失败后的重试由 `AgentSession` 另行处理；这里的续跑同时用于崩溃、超时或取消之后接着做 |
+| 请求前替换设置 | `prepare_request` 只能替换模型与推理强度 | pi 的 `prepareRequest` 还可以改写上下文；这里上下文只来自会话投影（不变量 6），改上下文用 `transform_context` 并写入会话 |
 | 推理强度 | 级别与 pi 相同，写法由 `--reasoning-format` 在三种中显式选择 | pi 按模型元数据与服务的 compat 设置（`thinkingFormat`）在十余种写法中选择，并按模型能力调整级别；这里没有模型元数据（见路线图 P10 ⑧），也不按服务推断（D10） |
 | 完整 TUI | 未实现，`chat` 是逐行 REPL | 路线图将其列为本期不做 |
 
@@ -617,15 +618,16 @@ P1 的 SDK 接口调整：静态配置移入 `LoopSpec`；`LoopConfig` 持有钩
 直接调用循环改为 `run_loop(context, prompts, config, &mut LoopControl::new(max_model_requests, approvals, cancel, sink))`，
 其中 `approvals` 是宿主持有的 `&mut ApprovalCache`；使用 `Runner` 时由它管理。
 
-`Hooks` 的六个回调均有默认实现，最后一个参数都是 `&HookContext`：会话 ID、运行 ID（与事件的 `runId` 相同）、工作目录与运行的取消信号 `CancelSignal`；它标为 `#[non_exhaustive]`，以后只增加字段。`CancelSignal` 可以等待、查询，也可以派生自己的子令牌，但不能取消运行。`HookChain::push` 以类型名注册，每次回调默认超时 5 秒；类型名的格式不受保证，可能随编译器版本变化，需要稳定的名称时用 `push_with(hook, HookOptions { name, timeout })` 给出名称（用于 `hook_failed` 与追踪）和超时。CLI 的内置钩子使用固定名称：`command_policy`、`profile_rules`、`bash_approval`（chat 与 serve）、`continue_on_length`、`redact_secrets`、`spill_outputs`；MCP 服务器名不含 `_`，不会与之重名。`on_event` 收到带信封的 `Event`；每次调用都会被等待，所以默认不观察流式增量 `message_update`，需要时覆盖 `observes`（它 panic 时按不观察处理并报告 `hook_failed`）。并行执行工具时，同一钩子的 `on_event` 可能并发、乱序；运行被取消后，仍在等待的调用会被停止，可能收不到其余事件（包括 `run_end`）。需要完整、有序的事件流时用 `subscribe_bounded`。
+`Hooks` 的七个回调均有默认实现，最后一个参数都是 `&HookContext`：会话 ID、运行 ID（与事件的 `runId` 相同）、工作目录与运行的取消信号 `CancelSignal`；它标为 `#[non_exhaustive]`，以后只增加字段。`CancelSignal` 可以等待、查询，也可以派生自己的子令牌，但不能取消运行。`HookChain::push` 以类型名注册，每次回调默认超时 5 秒；类型名的格式不受保证，可能随编译器版本变化，需要稳定的名称时用 `push_with(hook, HookOptions { name, timeout })` 给出名称（用于 `hook_failed` 与追踪）和超时。CLI 的内置钩子使用固定名称：`command_policy`、`profile_rules`、`bash_approval`（chat 与 serve）、`continue_on_length`、`redact_secrets`、`spill_outputs`；MCP 服务器名不含 `_`，不会与之重名。`on_event` 收到带信封的 `Event`；每次调用都会被等待，所以默认不观察流式增量 `message_update`，需要时覆盖 `observes`（它 panic 时按不观察处理并报告 `hook_failed`）。并行执行工具时，同一钩子的 `on_event` 可能并发、乱序；运行被取消后，仍在等待的调用会被停止，可能收不到其余事件（包括 `run_end`）。需要完整、有序的事件流时用 `subscribe_bounded`。
 
 钩子分阶段执行：每个回调都按 `Policy`（内置工具策略）、`Extension`（默认）、`Redaction`（脱敏）、`Storage`（长结果落盘）的顺序，同一阶段内按注册顺序。阶段由钩子自己声明（`Hooks::stage`）：`PolicyHook`、`RedactSecrets`、`SpillOutputs` 各自声明所属阶段，因此无论宿主以什么顺序注册，`before_tool` 都先经过内置策略，`after_tool` 中扩展的改动都会再经过脱敏，落盘的总是脱敏后的结果。
 `before_tool` 取 Deny > Ask > Allow，首个 Deny 立即拒绝；同级 Ask 保留第一条理由。扩展用 `before_tool` 放行或拒绝；`ToolPolicy` 是内置策略经 `PolicyHook` 接入的方式，具体策略（如 `CommandPolicy`）在 `policy` 模块。`RulePolicy` 按 deny → ask → allow 匹配，同级按注册顺序，无匹配时拒绝。
-策略与审批的错误、panic、超时均拒绝执行；`after_tool` 失败会丢弃输出；输入、上下文与回合钩子失败会结束运行且不触发 provider 重试。`on_event` 的错误只生成 `hook_failed`，诊断不再递归送入钩子。
+策略与审批的错误、panic、超时均拒绝执行；`after_tool` 失败会丢弃输出；输入、上下文、请求准备与回合钩子失败会结束运行且不触发 provider 重试。`on_event` 的错误只生成 `hook_failed`，诊断不再递归送入钩子。
 
 `on_input` 完成后才写入输入：改写时依次追加原始输入和替换它的 `context_edit`，拒绝时追加原始输入和省略它的 `context_edit`，原始内容都留在会话中供审计。钩子被取消或运行 future 被丢弃时什么也不写，从队列取出的插话或后续消息仍留在队首，由下一次运行处理。两次追加之间进程崩溃时，原始输入会出现在投影中。
 `transform_context` 返回按顺序应用的 `ContextEdit`：追加消息（`Append { message }`）、替换文本或省略消息；不能追加、修改或省略 system 消息（系统提示词只来自配置，配置之外的段落会在下一次尝试开始时被删除），也不能用文本替换抹掉工具调用。会话根据压缩记录合成的摘要（`UserMessageKind::Summary`）不能被编辑、省略或追加；要修正摘要，应编辑它引用的原始消息，摘要随之失效，投影回到原始记录。包含这类编辑的计划在校验时整份拒绝，不写入任何条目。
 整份变换计划先校验，随后逐项持久化；写入失败时立即停止运行，不发送模型请求。写入失败前已追加的条目仍保留。
+`prepare_request` 在每个任务请求发出前调用（对应 pi 的 `prepareRequest`），看到将要发送的上下文、回合序号与当前设置（`RequestPlan`），可返回新的 `RequestSettings` 替换这一次请求的模型（同一 provider）与推理强度，返回 `None` 保持不变；例如简单的回合改用便宜的模型。各钩子按顺序接力，后一个看到前一个的选择；替换只对这一次请求有效，下一次请求重新从配置开始。请求审计记录每次请求实际使用的设置，`replay_request` 还原的就是发出的请求，`request_start` 事件报告实际的模型。与 pi 不同，它不能改上下文：发给模型的始终是会话投影（不变量 6），要改上下文用 `transform_context`。钩子失败、panic、超时或返回空模型名时，运行在发请求之前以 `Error` 结束；摘要请求不调用它。目前只有 SDK 接口，外部钩子进程还不支持。
 
 审批默认超时 120 秒。`NoHuman` 明确拒绝 Ask；`Approval::AllowOnce` 只允许一次，
 `AllowSession` 只缓存当前会话内完全相同的工具名和参数，仍须通过每次策略检查，可用 `AgentSession::clear_approvals` 或底层 `Runner::clear_approvals` 撤销；不会写入会话或跨进程恢复。
