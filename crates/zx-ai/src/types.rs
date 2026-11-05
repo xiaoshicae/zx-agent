@@ -231,6 +231,10 @@ pub enum UserMessageKind {
     /// It is not a stored message, so context edits cannot target it; editing one of its
     /// sources invalidates the summary instead.
     Summary,
+    /// Built by the session from a `custom_message` record that an extension appended (pi:
+    /// a `custom` message, which the model sees as a user message). Context edits target the
+    /// record.
+    Custom,
 }
 
 impl UserMessageKind {

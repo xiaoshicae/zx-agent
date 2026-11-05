@@ -21,6 +21,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
+use zx_agent::agent::QueuedMessage;
 use zx_agent::agent::{
     AgentEvent, Event, EventSink, ExecutionMode, HookContext, LoopConfig, LoopControl, LoopResult, LoopSpec,
     MessageQueues, Tool, ToolContext, ToolOutput, ToolPolicy, run_loop,
@@ -198,7 +199,7 @@ pub fn summarize(messages: &[Message]) -> Vec<String> {
 /// defaults most loop tests need. Returns the result and the events.
 pub async fn run_prompt(config: &LoopConfig, context: &mut Vec<Message>, prompt: &str) -> (LoopResult, Collect) {
     let sink = Collect::default();
-    let prompts = vec![Message::user(prompt)];
+    let prompts = vec![QueuedMessage::User(prompt.to_string())];
     let mut approvals = ApprovalCache::default();
     let cancel = CancellationToken::new();
     let mut control = LoopControl::new(Some(10), &mut approvals, &cancel, &sink);

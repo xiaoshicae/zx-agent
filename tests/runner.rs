@@ -65,7 +65,9 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use common::{EchoTool, RunnerSetup, config, fast_retry, header, read_lines, summarize};
-use zx_agent::agent::{AgentEvent, EVENT_SCHEMA_VERSION, HookContext, HookOptions, HookResult, Hooks, RequestKind};
+use zx_agent::agent::{
+    AgentEvent, EVENT_SCHEMA_VERSION, HookContext, HookOptions, HookResult, Hooks, QueuedMessage, RequestKind,
+};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, PREAMBLE, StopReason, SystemPrompt};
 use zx_agent::extensions::ContinueOnLength;
@@ -481,7 +483,7 @@ async fn queued_input_waits_when_no_request_budget_is_left() {
 
     assert_eq!(report.outcome, RunOutcome::ModelRequestLimit);
     assert_eq!(summarize(&runner.session().messages()), ["user:go"]);
-    assert_eq!(summarize(&queues.drain_steering()), ["user:later"]);
+    assert_eq!(queues.drain_steering(), [QueuedMessage::User("later".into())]);
 }
 
 #[tokio::test]

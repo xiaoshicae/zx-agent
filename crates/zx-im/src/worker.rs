@@ -15,6 +15,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::AgentSession;
+use crate::agent::QueuedMessage;
 use crate::agent_session::{SessionError, Subscription};
 use crate::ai::now_ms;
 use crate::runner::{RunOutcome, RunReport};
@@ -395,13 +396,27 @@ impl Worker {
         // The loop looks for input at the end of each turn, so a message steered after the
         // last look waits in the queue (docs/serve-im-review.md, gap 3).
         let leftover = match self.open.as_ref().map(|open| open.session.take_queued()) {
-            Some(Ok(texts)) => texts,
+            Some(Ok(messages)) => messages,
             Some(Err(error)) => {
                 self.out.failed(format!("cannot take the queued input: {error}"));
                 Vec::new()
             }
             None => Vec::new(),
         };
+        // The person's text starts the next run; a message an extension queued goes back
+        // to the queue, which that run takes before its first request.
+        let mut texts = Vec::new();
+        for message in leftover {
+            match message {
+                QueuedMessage::User(text) => texts.push(text),
+                custom @ QueuedMessage::Custom(_) => {
+                    if let Some(open) = &self.open {
+                        open.session.queues().steer_message(custom);
+                    }
+                }
+            }
+        }
+        let leftover = texts;
         if leftover.is_empty() {
             return;
         }

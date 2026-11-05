@@ -1,12 +1,13 @@
 //! Bridge the loop's session operations to the Runner's session store.
 
 use async_trait::async_trait;
+use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{ContextPreparation, Emit, HookChain, SessionRuntime};
 use crate::ai::{Message, Provider, Request, ToolCall, Usage};
 use crate::compaction::{self, Trigger};
-use crate::session::{RequestSource, SessionStore};
+use crate::session::{CustomMessage, Entry, RequestSource, SessionStore};
 
 /// Records each step of a run in the session before the loop acts on it (pi: AgentSession
 /// writes on `message_end`), and prepares the context before each task request. A failed
@@ -30,6 +31,25 @@ impl SessionRuntime for RunnerSessionRuntime<'_> {
         // The event that reports the message owns it, so the session stores a copy.
         self.session
             .append_message(message.clone())
+            .await
+            .map_err(|error| format!("cannot persist session entry: {error:#}"))
+    }
+
+    async fn append_custom_message(&mut self, message: &CustomMessage) -> Result<(String, Message), String> {
+        let id = self
+            .session
+            .append_custom_message(message.clone())
+            .await
+            .map_err(|error| format!("cannot persist session entry: {error:#}"))?;
+        match self.session.get(&id) {
+            Some(Entry::CustomMessage(entry)) => Ok((id, entry.projected())),
+            _ => Err(format!("custom message {id} was not recorded")),
+        }
+    }
+
+    async fn append_custom_entry(&mut self, custom_type: &str, data: Value) -> Result<String, String> {
+        self.session
+            .append_custom_entry(custom_type, data)
             .await
             .map_err(|error| format!("cannot persist session entry: {error:#}"))
     }

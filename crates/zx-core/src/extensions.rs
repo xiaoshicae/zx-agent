@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::agent::hooks::{HookContext, HookResult, HookStage, Hooks, TurnDecision, TurnDisposition, TurnSummary};
-use crate::agent::{LoopConfig, Tool, ToolOutput};
+use crate::agent::{LoopConfig, SlashCommand, Tool, ToolOutput, check_command_name};
 use crate::ai::{PREAMBLE, StopReason, ToolCall};
 use crate::prompt::GENERATED_SECTIONS;
 use crate::sync::lock;
@@ -82,18 +82,31 @@ pub trait Extension: Send + Sync {
     fn hooks(&self) -> Vec<Box<dyn Hooks>> {
         Vec::new()
     }
+
+    /// Slash commands for a frontend (pi: `registerCommand`). Names follow
+    /// [`check_command_name`] and must differ from every other registered command's.
+    fn commands(&self) -> Vec<Arc<dyn SlashCommand>> {
+        Vec::new()
+    }
 }
 
 /// Add `extensions` to `config`, in order: their tools after the existing ones, their hooks
-/// under each extension's name, their sections at the end of the system prompt. Everything is
-/// checked first, so on error `config` is unchanged.
+/// under each extension's name, their sections at the end of the system prompt, their
+/// commands after the existing ones. Everything is checked first, so on error `config` is
+/// unchanged.
 ///
 /// Errors: a blank or repeated extension name, a hook outside [`HookStage::Extension`], a
 /// tool name already in use or a tool that fails [`LoopSpec::validate`](crate::agent::LoopSpec::validate),
-/// and a section name that is malformed, reserved, already in the prompt or repeated.
+/// a section name that is malformed, reserved, already in the prompt or repeated, and a
+/// command name that is malformed or already registered.
 pub fn register(config: &mut LoopConfig, extensions: &[Arc<dyn Extension>]) -> Result<(), String> {
     let mut names = HashSet::new();
     let mut sections_seen = HashSet::new();
+    let mut commands_seen: HashSet<String> = config
+        .commands
+        .iter()
+        .map(|command| command.name().to_string())
+        .collect();
     let mut parts = Vec::new();
     for extension in extensions {
         let name = extension.name();
@@ -122,11 +135,22 @@ pub fn register(config: &mut LoopConfig, extensions: &[Arc<dyn Extension>]) -> R
                 ));
             }
         }
+        let commands = extension.commands();
+        for command in &commands {
+            let command = command.name();
+            check_command_name(command).map_err(|reason| format!("extension {name:?}: {reason}"))?;
+            if !commands_seen.insert(command.to_string()) {
+                return Err(format!(
+                    "extension {name:?}: a command named {command:?} is already registered"
+                ));
+            }
+        }
         parts.push(Parts {
             name,
             tools: extension.tools(),
             hooks,
             sections,
+            commands,
         });
     }
     // The loop's own check covers names, declarations and panics; on failure the tools are
@@ -146,6 +170,7 @@ pub fn register(config: &mut LoopConfig, extensions: &[Arc<dyn Extension>]) -> R
         for (section, content) in part.sections {
             config.spec.system_prompt = std::mem::take(&mut config.spec.system_prompt).with_section(&section, &content);
         }
+        config.commands.extend(part.commands);
     }
     Ok(())
 }
@@ -156,6 +181,7 @@ struct Parts<'a> {
     tools: Vec<Arc<dyn Tool>>,
     hooks: Vec<Box<dyn Hooks>>,
     sections: Vec<(String, String)>,
+    commands: Vec<Arc<dyn SlashCommand>>,
 }
 
 /// A section name renders as a tag (`<name>`), and the ones zx-agent generates hold facts the

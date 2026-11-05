@@ -316,12 +316,14 @@ impl Signal {
                 tool: tool_name.clone(),
                 state: *state,
             },
-            // Streaming, the other messages and context edits are content, not spans.
+            // Streaming, the other messages, context edits and extension records are
+            // content, not spans.
             AgentEvent::MessageStart { .. }
             | AgentEvent::MessageUpdate { .. }
             | AgentEvent::MessageEnd { .. }
             | AgentEvent::ToolExecutionUpdate { .. }
-            | AgentEvent::ContextEdited { .. } => return None,
+            | AgentEvent::ContextEdited { .. }
+            | AgentEvent::CustomEntry { .. } => return None,
         };
         Some(Self {
             run_id: event.run_id.clone(),
@@ -701,6 +703,7 @@ mod tests {
 
     fn answer(usage: Usage, stop: StopReason, content: Vec<ContentBlock>) -> AgentEvent {
         AgentEvent::MessageEnd {
+            custom: None,
             message: Message::Assistant(AssistantMessage {
                 content,
                 provider: "p".into(),

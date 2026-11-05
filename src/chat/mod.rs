@@ -20,7 +20,7 @@ use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
 use zx_agent::AgentSession;
-use zx_agent::agent::EventSink;
+use zx_agent::agent::{EventSink, QueueMode, QueuedMessage};
 use zx_agent::agent_session::{ModelRef, Subscription};
 use zx_agent::ai::{Message, Provider, Reasoning};
 use zx_agent::compaction;
@@ -113,6 +113,8 @@ struct Built {
     session: AgentSession,
     provider: Arc<dyn Provider>,
     about: About,
+    /// The commands extensions registered: name and description, for parsing and /help.
+    commands: Vec<(String, String)>,
     /// The trace export of this session, while it lasts.
     _traced: Option<Subscription>,
 }
@@ -180,11 +182,21 @@ async fn build(
         }),
     };
     let session = prepared.into_session(output.clone())?;
+    if let Some(mode) = settings.args.queue_mode {
+        session.queues().set_steering_mode(mode);
+        session.queues().set_follow_up_mode(mode);
+    }
+    let commands = session
+        .commands()
+        .iter()
+        .map(|command| (command.name().to_string(), command.description().to_string()))
+        .collect();
     let traced = settings.traces.clone().map(|sink| session.subscribe(sink));
     Ok(Built {
         session,
         provider,
         about,
+        commands,
         _traced: traced,
     })
 }
@@ -305,6 +317,7 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
             signals: &mut signals,
             mode,
             output: &output,
+            commands: &built.commands,
         };
         let line = match line {
             Line::Text(text) => text,
@@ -313,8 +326,22 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
                 continue;
             }
         };
-        let action = match commands::parse(line) {
+        let action = match commands::parse(line, &built.commands) {
             Command::Prompt(text) => drive_turn(&built.session, Operation::Prompt(text), &mut io).await?,
+            Command::Extension { name, args } => {
+                match run_extension_command(&built.session, &name, &args, &output).await {
+                    Some(message) => drive_turn(&built.session, Operation::Message(message), &mut io).await?,
+                    None => Flow::Continue,
+                }
+            }
+            Command::Queue(None) => {
+                output.line(Tone::Dim, &queue_line(&built.session));
+                Flow::Continue
+            }
+            Command::Queue(Some(mode)) => {
+                set_queue_mode(&built.session, &mode, &output);
+                Flow::Continue
+            }
             Command::Compact => drive_turn(&built.session, Operation::Compact, &mut io).await?,
             Command::Continue => drive_turn(&built.session, Operation::Continue, &mut io).await?,
             Command::New => Flow::New,
@@ -382,7 +409,7 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
             }
             Command::Quit => Flow::Exit(EXIT_COMPLETED),
             Command::Help => {
-                help(&output);
+                help(&output, &built.commands);
                 Flow::Continue
             }
             Command::Invalid(message) => {
@@ -629,10 +656,14 @@ struct TurnIo<'a> {
     signals: &'a mut Signals,
     mode: InputMode,
     output: &'a Output,
+    /// The commands extensions registered, for lines typed during the task.
+    commands: &'a [(String, String)],
 }
 
 enum Operation {
     Prompt(String),
+    /// A message an extension's command sends, as a prompt.
+    Message(QueuedMessage),
     Continue,
     Compact,
 }
@@ -674,6 +705,7 @@ async fn drive_turn(session: &AgentSession, operation: Operation, io: &mut TurnI
     let running = async {
         match operation {
             Operation::Prompt(text) => session.prompt(text).await.map(Report::Task),
+            Operation::Message(message) => session.prompt_message(message).await.map(Report::Task),
             Operation::Continue => session.continue_run().await.map(Report::Task),
             Operation::Compact => session.compact().await.map(Report::Compact),
         }
@@ -702,10 +734,11 @@ async fn drive_turn(session: &AgentSession, operation: Operation, io: &mut TurnI
                 // Steering meant for the cancelled task must not reach the next one.
                 let dropped = unread_input(session, io.output);
                 if !dropped.is_empty() {
+                    let described: Vec<String> = dropped.iter().map(describe_queued).collect();
                     io.output.line(Tone::Dim, &format!(
                         "[chat] cancellation discarded {} steering input(s): {}",
                         dropped.len(),
-                        visible(&dropped.join(" / "))
+                        visible(&described.join(" / "))
                     ));
                 }
                 return Ok(match interrupt {
@@ -720,7 +753,15 @@ async fn drive_turn(session: &AgentSession, operation: Operation, io: &mut TurnI
                 if !late.is_empty() {
                     io.output.line(Tone::Dim, "[chat] steering input arrived as the task ended; sending it as the next prompt");
                 }
-                let next: Vec<String> = queued_prompt.into_iter().chain(late).collect();
+                // The person's text becomes the next prompt; a message an extension queued
+                // goes back to the queue, which the next run takes before its first request.
+                let mut next: Vec<String> = queued_prompt.into_iter().collect();
+                for message in late {
+                    match message {
+                        QueuedMessage::User(text) => next.push(text),
+                        custom @ QueuedMessage::Custom(_) => session.queues().steer_message(custom),
+                    }
+                }
                 return Ok(if next.is_empty() { Flow::Continue } else { Flow::Prompt(next.join("\n\n")) });
             }
             () = expired(&mut pending), if pending.is_some() => {
@@ -773,7 +814,7 @@ async fn drive_turn(session: &AgentSession, operation: Operation, io: &mut TurnI
                                 }
                                 continue;
                             }
-                            commands::parse(text)
+                            commands::parse(text, io.commands)
                         },
                         Line::Rejected(reason) => {
                             rejected(io.output, &reason);
@@ -815,7 +856,17 @@ async fn drive_turn(session: &AgentSession, operation: Operation, io: &mut TurnI
                     Command::Fork => io.output.line(Tone::Warn, "[chat] wait for the current task or cancel it before /fork"),
                     Command::Tree => io.output.line(Tone::Warn, "[chat] wait for the current task or cancel it before /tree"),
                     Command::Branch(_) => io.output.line(Tone::Warn, "[chat] wait for the current task or cancel it before /branch"),
-                    Command::Help => help(io.output),
+                    Command::Help => help(io.output, io.commands),
+                    // Extension commands run at once, as in pi; a message they send waits
+                    // for the next request as steering input.
+                    Command::Extension { name, args } => {
+                        if let Some(message) = run_extension_command(session, &name, &args, io.output).await {
+                            session.queues().steer_message(message);
+                            io.output.line(Tone::Dim, "[chat] the command's message is queued as steering input");
+                        }
+                    }
+                    Command::Queue(None) => io.output.line(Tone::Dim, &queue_line(session)),
+                    Command::Queue(Some(mode)) => set_queue_mode(session, &mode, io.output),
                     Command::Compact => io.output.line(Tone::Warn, "[chat] session is busy; wait for the current operation or cancel it before /compact"),
                     Command::Invalid(message) => io.output.line(Tone::Warn, &format!("[chat] {}", visible(&message))),
                     Command::Empty => {}
@@ -836,7 +887,7 @@ async fn expired(pending: &mut Option<Ticket>) {
 }
 
 /// Input that `steer` queued and no run read; a task only reads it between turns.
-fn unread_input(session: &AgentSession, output: &Output) -> Vec<String> {
+fn unread_input(session: &AgentSession, output: &Output) -> Vec<QueuedMessage> {
     session.take_queued().unwrap_or_else(|error| {
         output.line(
             Tone::Error,
@@ -844,6 +895,58 @@ fn unread_input(session: &AgentSession, output: &Output) -> Vec<String> {
         );
         Vec::new()
     })
+}
+
+/// A queued message in one line, for notices.
+fn describe_queued(message: &QueuedMessage) -> String {
+    match message {
+        QueuedMessage::User(text) => text.clone(),
+        QueuedMessage::Custom(custom) => format!("[{}] {}", custom.custom_type, custom.content),
+    }
+}
+
+/// Run an extension's command and show what it says. Returns the message it sends, if any.
+async fn run_extension_command(
+    session: &AgentSession,
+    name: &str,
+    args: &str,
+    output: &Output,
+) -> Option<QueuedMessage> {
+    match session.run_command(name, args).await {
+        Ok(outcome) => {
+            for line in outcome.lines {
+                output.line(Tone::Plain, &visible(&line));
+            }
+            outcome.prompt
+        }
+        Err(error) => {
+            output.line(
+                Tone::Warn,
+                &format!("[chat] /{}: {}", visible(name), visible(&error.to_string())),
+            );
+            None
+        }
+    }
+}
+
+fn queue_line(session: &AgentSession) -> String {
+    format!(
+        "[chat] queue: steering={} follow-up={}",
+        session.queues().steering_mode().as_str(),
+        session.queues().follow_up_mode().as_str()
+    )
+}
+
+/// /queue <mode>: take queued input all at once or one message per request, both queues.
+fn set_queue_mode(session: &AgentSession, mode: &str, output: &Output) {
+    match mode.parse::<QueueMode>() {
+        Ok(mode) => {
+            session.queues().set_steering_mode(mode);
+            session.queues().set_follow_up_mode(mode);
+            output.line(Tone::Dim, &queue_line(session));
+        }
+        Err(message) => output.line(Tone::Warn, &format!("[chat] {}", visible(&message))),
+    }
 }
 
 fn show_approval(output: &Output, ticket: &Ticket) {
@@ -987,7 +1090,7 @@ fn status(output: &Output, model: &str, about: &About) {
     );
 }
 
-fn help(output: &Output) {
+fn help(output: &Output, commands: &[(String, String)]) {
     for line in [
         "/new                  start a fresh conversation; approvals granted so far are dropped",
         "/model [id]           show or change the model while idle",
@@ -1001,6 +1104,7 @@ fn help(output: &Output) {
         "/fork                 continue in a copy of this session; the original stays as it is",
         "/tree                 show the session tree: every message on every branch, the current one marked",
         "/branch <ID>          continue after the entry with that ID, or before your own message with that ID",
+        "/queue [mode]         show or change how input typed during a task is taken: all, or one-at-a-time",
         "/quit                 exit chat; Ctrl+D while idle does the same",
         "Ctrl+C                cancel the current task or approval; keep the conversation",
         "                      twice within 2 seconds while idle: exit",
@@ -1009,5 +1113,11 @@ fn help(output: &Output) {
         "Approvals: 1 or y allow once · 2 allow identical calls in this conversation · 3 or n deny · 4 discuss",
     ] {
         output.line(Tone::Plain, line);
+    }
+    for (name, description) in commands {
+        output.line(
+            Tone::Plain,
+            &format!("/{:<21} {} (extension command)", visible(name), visible(description)),
+        );
     }
 }

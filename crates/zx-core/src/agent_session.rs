@@ -6,17 +6,22 @@
 use std::fmt;
 use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
+use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::{Event, EventSink, LoopConfig, MessageQueues};
+use crate::agent::{
+    ActiveTools, CommandContext, CommandError, CommandOutcome, Event, EventSink, LoopConfig, MessageQueues,
+    QueuedMessage, SlashCommand,
+};
 use crate::ai::retry::RetryPolicy;
 use crate::ai::{Provider, Reasoning};
 use crate::compaction;
 use crate::runner::{Limits, RunReport, Runner};
-use crate::session::{SessionStore, WritesStopped};
+use crate::session::{CustomMessage, SessionStore, WritesStopped};
 use crate::sync::lock;
 
 /// Provider and model selected together, so a switch cannot expose a mixed pair.
@@ -28,7 +33,7 @@ pub struct ModelRef {
 }
 
 /// Session API errors. Operational failures remain in the run or compaction report.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionError {
     /// A prompt, compaction or model change overlaps an active operation; it is never queued.
     Busy,
@@ -36,6 +41,10 @@ pub enum SessionError {
     InvalidModel,
     /// The entry a branch switch names is not in the session.
     EntryNotFound,
+    /// A tool name that no configured tool has.
+    UnknownTool,
+    /// The session could not record an entry; see [`AgentSession::writes_stopped`].
+    WriteFailed(String),
 }
 
 impl fmt::Display for SessionError {
@@ -44,6 +53,8 @@ impl fmt::Display for SessionError {
             Self::Busy => f.write_str("session is running; use steer or follow_up to submit input"),
             Self::InvalidModel => f.write_str("model ID must not be empty"),
             Self::EntryNotFound => f.write_str("no entry with that ID in the session"),
+            Self::UnknownTool => f.write_str("no configured tool has that name"),
+            Self::WriteFailed(error) => write!(f, "cannot write the session: {error}"),
         }
     }
 }
@@ -78,9 +89,16 @@ enum State {
 /// ```
 pub struct AgentSession {
     state: Mutex<State>,
-    // Queues and events are genuinely shared with the Runner while a prompt owns it.
+    // Queues, the tool set and events are genuinely shared with the Runner while a prompt
+    // owns it.
     queues: Arc<MessageQueues>,
+    active_tools: Arc<ActiveTools>,
     events: Arc<EventHub>,
+    /// The configured tools' names, which the loop fixes when the Runner is built.
+    tool_names: Vec<String>,
+    commands: Vec<Arc<dyn SlashCommand>>,
+    cwd: PathBuf,
+    session_id: String,
 }
 
 impl AgentSession {
@@ -108,9 +126,26 @@ impl AgentSession {
         text: impl Into<String>,
         parent: &CancellationToken,
     ) -> Result<RunReport, SessionError> {
+        self.prompt_message_with_cancel(QueuedMessage::User(text.into()), parent)
+            .await
+    }
+
+    /// Run with any message as the input: the person's text, or a message from an
+    /// extension (pi: `sendMessage` with `triggerTurn` while idle). Otherwise like `prompt`.
+    pub async fn prompt_message(&self, message: QueuedMessage) -> Result<RunReport, SessionError> {
+        self.prompt_message_with_cancel(message, &CancellationToken::new())
+            .await
+    }
+
+    /// Like prompt_message, using a child of the caller's token, as prompt_with_cancel does.
+    pub async fn prompt_message_with_cancel(
+        &self,
+        message: QueuedMessage,
+        parent: &CancellationToken,
+    ) -> Result<RunReport, SessionError> {
         let cancel = parent.child_token();
         let mut active = self.acquire(cancel.clone())?;
-        let report = active.runner().run(text, &cancel).await;
+        let report = active.runner().run_message(message, &cancel).await;
         Ok(report)
     }
 
@@ -151,12 +186,90 @@ impl AgentSession {
         self.queues.follow_up(text);
     }
 
+    /// The conversation's queues: to steer or follow up with a message from an extension
+    /// (`steer_message`, `follow_up_message`), to record extension state during a run
+    /// (`append_entry`), and to choose how many queued messages a request takes
+    /// (`set_steering_mode`, `set_follow_up_mode`).
+    pub fn queues(&self) -> &MessageQueues {
+        &self.queues
+    }
+
+    /// The tools the next request offers, shared with the running loop and the hooks. A
+    /// change applies to the next request, also during a run; `set_active_tools` checks the
+    /// names first.
+    pub fn active_tools(&self) -> &ActiveTools {
+        &self.active_tools
+    }
+
+    /// Offer the model only `names` from the next request on (pi: `setActiveTools`), also
+    /// during a run. A name that no configured tool has returns UnknownTool and changes
+    /// nothing. An empty list offers no tool.
+    pub fn set_active_tools(&self, names: &[&str]) -> Result<(), SessionError> {
+        if names
+            .iter()
+            .any(|name| !self.tool_names.iter().any(|known| known == name))
+        {
+            return Err(SessionError::UnknownTool);
+        }
+        self.active_tools.set(names.iter().copied());
+        Ok(())
+    }
+
+    /// The slash commands extensions registered, in registration order.
+    pub fn commands(&self) -> &[Arc<dyn SlashCommand>] {
+        &self.commands
+    }
+
+    /// Run the registered command called `name` with `args`, also while a run is in
+    /// progress (pi: extension commands run at once). The caller shows the outcome's lines
+    /// and sends its `prompt`, if any, as it would the person's input.
+    pub async fn run_command(&self, name: &str, args: &str) -> Result<CommandOutcome, CommandError> {
+        let command = self
+            .commands
+            .iter()
+            .find(|command| command.name() == name)
+            .ok_or(CommandError::Unknown)?;
+        let ctx = CommandContext::new(
+            self.cwd.clone(),
+            Some(self.session_id.clone()),
+            self.queues.clone(),
+            self.active_tools.clone(),
+        );
+        command.run(args, &ctx).await.map_err(CommandError::Failed)
+    }
+
+    /// Record state of an extension in the session while idle (pi: `appendEntry`); during
+    /// a run, hooks and commands use `queues().append_entry` instead. Returns the entry's
+    /// ID. A run returns Busy; a write failure returns WriteFailed.
+    pub async fn append_entry(&self, custom_type: &str, data: Value) -> Result<String, SessionError> {
+        let mut active = self.acquire(CancellationToken::new())?;
+        active
+            .runner()
+            .session_mut()
+            .append_custom_entry(custom_type, data)
+            .await
+            .map_err(|error| SessionError::WriteFailed(format!("{error:#}")))
+    }
+
+    /// Record a message from an extension while idle, without starting a run (pi:
+    /// `sendMessage` while idle): the model sees it with the next prompt. Returns the
+    /// entry's ID. A run returns Busy; a write failure returns WriteFailed.
+    pub async fn append_custom_message(&self, message: CustomMessage) -> Result<String, SessionError> {
+        let mut active = self.acquire(CancellationToken::new())?;
+        active
+            .runner()
+            .session_mut()
+            .append_custom_message(message)
+            .await
+            .map_err(|error| SessionError::WriteFailed(format!("{error:#}")))
+    }
+
     /// Take the input that `steer` and `follow_up` queued and no run consumed: steering
     /// messages first, then follow-ups, each oldest first. A run looks for input at the end
     /// of each turn, so input queued as it ends waits for the next run; a host that starts
     /// runs itself calls this when one ends and prompts with what it gets. Returns Busy
     /// during a prompt or compaction, whose loop may still take the input.
-    pub fn take_queued(&self) -> Result<Vec<String>, SessionError> {
+    pub fn take_queued(&self) -> Result<Vec<QueuedMessage>, SessionError> {
         // Holding the state lock keeps a prompt from starting between the check and the take.
         let state = lock(&self.state);
         match &*state {
@@ -316,7 +429,13 @@ impl AgentSession {
 
 impl From<Runner> for AgentSession {
     fn from(mut runner: Runner) -> Self {
-        let queues = runner.config().queues.clone();
+        let config = runner.config();
+        let queues = config.queues.clone();
+        let active_tools = config.active_tools.clone();
+        let tool_names = config.spec.tools.iter().map(|tool| tool.name().to_string()).collect();
+        let commands = config.commands.clone();
+        let cwd = config.spec.cwd.clone();
+        let session_id = runner.session().header().id.clone();
         let events = Arc::new(EventHub::default());
         let initial = runner.replace_sink(events.clone());
         // The original sink is permanent; only additional subscribers use RAII handles.
@@ -324,7 +443,12 @@ impl From<Runner> for AgentSession {
         Self {
             state: Mutex::new(State::Idle(Box::new(runner))),
             queues,
+            active_tools,
             events,
+            tool_names,
+            commands,
+            cwd,
+            session_id,
         }
     }
 }

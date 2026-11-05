@@ -12,6 +12,8 @@
 //! Version 3 adds auditable compaction without rewriting earlier records. Version 4 records
 //! that a tool call with side effects started, so recovery can tell interrupted calls apart.
 //! Version 5 adds incremental summaries, which carry an earlier summary's facts over.
+//! Version 6 adds the records extensions append: `custom` entries, which stay out of model
+//! context, and `custom_message` entries, which the model sees as user messages.
 
 mod compaction;
 mod directory;
@@ -40,16 +42,20 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
 use crate::ai::ContentBlock;
-use crate::ai::{Message, now_ms};
+use crate::ai::{Message, UserMessageKind, now_ms};
 use file::JsonlFile;
 
-/// Format version written to new session headers. Version 5 adds incremental summaries.
+/// Format version written to new session headers. Version 6 adds the `custom` and
+/// `custom_message` records of extensions. Version 5 adds incremental summaries.
 /// Version 4 adds `tool_call_started`.
 /// Version 3 adds auditable compaction, request records and append-only format upgrades.
 /// Version 2 records the system prompt as
 /// system messages in the conversation; version 1 kept it in the header. Version 1 files still
 /// open: the old header field is ignored, and the next run records the prompt as a message.
-pub const SESSION_VERSION: u32 = 5;
+pub const SESSION_VERSION: u32 = 6;
+
+/// First format version with `custom` and `custom_message` records.
+const CUSTOM_RECORDS_VERSION: u32 = 6;
 
 /// How long one append may wait for its log, such as a database that stopped answering.
 /// A file append finishes long before; a timed-out append stops writing, like a failed one.
@@ -143,6 +149,57 @@ pub struct ContextEditEntry {
     pub replacement: Option<String>,
 }
 
+/// A message an extension sends to the model (pi: `CustomMessage`). The model sees its
+/// `content` as a user message; `custom_type`, `display` and `details` are for frontends
+/// and for the extension itself.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomMessage {
+    /// Names the extension or the kind of message, such as `jira_issue`; not blank.
+    pub custom_type: String,
+    pub content: String,
+    /// Whether a frontend shows the message to the person; it reaches the model either way.
+    pub display: bool,
+    /// Data for the extension, never sent to the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
+}
+
+/// State an extension keeps in the session (pi: `appendEntry`). Never in model context.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomEntry {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub timestamp: u64,
+    pub custom_type: String,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub data: serde_json::Value,
+}
+
+/// A [`CustomMessage`] in the tree: in model context as a user message, like a stored
+/// message, and a target for context edits.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomMessageEntry {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub timestamp: u64,
+    #[serde(flatten)]
+    pub message: CustomMessage,
+}
+
+impl CustomMessageEntry {
+    /// The message as the model sees it.
+    pub(crate) fn projected(&self) -> Message {
+        Message::User {
+            content: self.message.content.clone(),
+            timestamp: self.timestamp,
+            kind: UserMessageKind::Custom,
+        }
+    }
+}
+
 /// One record of a session after the header: one line of a session file.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -156,6 +213,8 @@ pub enum Entry {
     RequestConfig(RequestConfigEntry),
     RequestStarted(RequestStartedEntry),
     ToolCallStarted(ToolCallStartedEntry),
+    Custom(CustomEntry),
+    CustomMessage(CustomMessageEntry),
 }
 
 impl Entry {
@@ -171,6 +230,8 @@ impl Entry {
             Entry::RequestConfig(entry) => &entry.id,
             Entry::RequestStarted(entry) => &entry.id,
             Entry::ToolCallStarted(entry) => &entry.id,
+            Entry::Custom(entry) => &entry.id,
+            Entry::CustomMessage(entry) => &entry.id,
         }
     }
 
@@ -186,6 +247,8 @@ impl Entry {
             Entry::RequestConfig(entry) => entry.parent_id.as_deref(),
             Entry::RequestStarted(entry) => entry.parent_id.as_deref(),
             Entry::ToolCallStarted(entry) => entry.parent_id.as_deref(),
+            Entry::Custom(entry) => entry.parent_id.as_deref(),
+            Entry::CustomMessage(entry) => entry.parent_id.as_deref(),
         }
     }
 
@@ -201,6 +264,8 @@ impl Entry {
             Entry::RequestConfig(_) => "request_config",
             Entry::RequestStarted(_) => "request_started",
             Entry::ToolCallStarted(_) => "tool_call_started",
+            Entry::Custom(_) => "custom",
+            Entry::CustomMessage(_) => "custom_message",
         }
     }
 
@@ -216,6 +281,8 @@ impl Entry {
             Entry::RequestConfig(entry) => entry.timestamp,
             Entry::RequestStarted(entry) => entry.timestamp,
             Entry::ToolCallStarted(entry) => entry.timestamp,
+            Entry::Custom(entry) => entry.timestamp,
+            Entry::CustomMessage(entry) => entry.timestamp,
         }
     }
 }
@@ -450,6 +517,36 @@ impl SessionStore {
         self.append(entry).await
     }
 
+    /// Record state of an extension, which never reaches the model (pi: `appendEntry`).
+    /// Older sessions get a format upgrade to v6 first. `custom_type` must not be blank.
+    pub async fn append_custom_entry(&mut self, custom_type: &str, data: serde_json::Value) -> Result<String> {
+        ensure_custom_type(custom_type)?;
+        self.ensure_format(CUSTOM_RECORDS_VERSION).await?;
+        let entry = Entry::Custom(CustomEntry {
+            id: self.new_id(),
+            parent_id: self.leaf.clone(),
+            timestamp: now_ms(),
+            custom_type: custom_type.to_string(),
+            data,
+        });
+        self.append(entry).await
+    }
+
+    /// Record a message from an extension, which the model sees as a user message from now
+    /// on (pi: `sendMessage`). Older sessions get a format upgrade to v6 first. The
+    /// message's `custom_type` must not be blank.
+    pub async fn append_custom_message(&mut self, message: CustomMessage) -> Result<String> {
+        ensure_custom_type(&message.custom_type)?;
+        self.ensure_format(CUSTOM_RECORDS_VERSION).await?;
+        let entry = Entry::CustomMessage(CustomMessageEntry {
+            id: self.new_id(),
+            parent_id: self.leaf.clone(),
+            timestamp: now_ms(),
+            message,
+        });
+        self.append(entry).await
+    }
+
     /// The rules an edit follows, when it is appended and when a session is loaded: it
     /// targets an earlier message on its own branch, not a system message (prompt changes
     /// are new system messages), and a text replacement does not erase tool calls, whose
@@ -466,6 +563,8 @@ impl SessionStore {
                 }
                 Message::Assistant(_) | Message::User { .. } | Message::ToolResult(_) => {}
             },
+            // A custom message is a user message to the model, edited like one.
+            Some(Entry::CustomMessage(_)) => {}
             Some(
                 Entry::ContextEdit(_)
                 | Entry::FormatUpgrade(_)
@@ -474,7 +573,8 @@ impl SessionStore {
                 | Entry::CompactionFailed(_)
                 | Entry::RequestConfig(_)
                 | Entry::RequestStarted(_)
-                | Entry::ToolCallStarted(_),
+                | Entry::ToolCallStarted(_)
+                | Entry::Custom(_),
             ) => bail!("entry {target} is not a message"),
             None => bail!("entry {target} not found"),
         }
@@ -576,14 +676,26 @@ impl SessionStore {
         }
         path.iter()
             .filter_map(|entry| {
-                let Entry::Message(entry) = entry else { return None };
-                let message = match edits.get(entry.id.as_str()) {
-                    None => entry.message.clone(),
+                let (id, message) = match entry {
+                    Entry::Message(entry) => (&entry.id, Cow::Borrowed(&entry.message)),
+                    Entry::CustomMessage(entry) => (&entry.id, Cow::Owned(entry.projected())),
+                    Entry::ContextEdit(_)
+                    | Entry::FormatUpgrade(_)
+                    | Entry::CompactionStarted(_)
+                    | Entry::Compaction(_)
+                    | Entry::CompactionFailed(_)
+                    | Entry::RequestConfig(_)
+                    | Entry::RequestStarted(_)
+                    | Entry::ToolCallStarted(_)
+                    | Entry::Custom(_) => return None,
+                };
+                let message = match edits.get(id.as_str()) {
+                    None => message.into_owned(),
                     Some(None) => return None,
-                    Some(Some(text)) => entry.message.with_replaced_text(text),
+                    Some(Some(text)) => message.with_replaced_text(text),
                 };
                 Some(ProjectedMessage {
-                    entry_id: entry.id.clone(),
+                    entry_id: id.clone(),
                     message,
                 })
             })
@@ -657,6 +769,14 @@ impl SessionStore {
             }
         }
     }
+}
+
+/// A custom type names what an extension recorded; a blank one would name nothing.
+fn ensure_custom_type(custom_type: &str) -> Result<()> {
+    if custom_type.trim().is_empty() {
+        bail!("a custom record needs a customType");
+    }
+    Ok(())
 }
 
 /// A writer whose every write fails, like a full disk.

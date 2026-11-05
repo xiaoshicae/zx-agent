@@ -23,8 +23,8 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{
-    AgentEvent, Emit, EventSink, HookChain, LoopConfig, LoopControl, LoopFailure, LoopOutcome, MessageQueues, RunTrace,
-    run_loop,
+    AgentEvent, Emit, EventSink, HookChain, LoopConfig, LoopControl, LoopFailure, LoopOutcome, MessageQueues,
+    QueuedMessage, RunTrace, run_loop,
 };
 pub use crate::agent::{RunOutcome, RunReport};
 use crate::ai::retry::{RetryPolicy, is_context_overflow, is_retryable};
@@ -104,6 +104,8 @@ impl Runner {
             Some(self.session.header().id.clone()),
             self.config.spec.cwd.clone(),
             child.clone(),
+            self.config.queues.clone(),
+            self.config.active_tools.clone(),
         );
         let mut host = compaction::Host {
             session: &mut self.session,
@@ -178,7 +180,14 @@ impl Runner {
     /// }
     /// ```
     pub async fn run(&mut self, prompt: impl Into<String>, cancel: &CancellationToken) -> RunReport {
-        self.start(Start::Prompt(prompt.into()), cancel).await
+        self.run_message(QueuedMessage::User(prompt.into()), cancel).await
+    }
+
+    /// Run with any message as the input: the person's text, or a message from an
+    /// extension (pi: `sendMessage` with `triggerTurn` while idle). Otherwise like
+    /// [`Runner::run`].
+    pub async fn run_message(&mut self, message: QueuedMessage, cancel: &CancellationToken) -> RunReport {
+        self.start(Start::Message(message), cancel).await
     }
 
     /// Continue the conversation without new input (pi: `Agent.continue`): the model answers
@@ -216,6 +225,8 @@ impl Runner {
             Some(self.session.header().id.clone()),
             self.config.spec.cwd.clone(),
             run_cancel.clone(),
+            self.config.queues.clone(),
+            self.config.active_tools.clone(),
         );
         let start = AgentEvent::RunStart {
             model: self.config.spec.model.clone(),
@@ -244,14 +255,14 @@ impl Runner {
         let to = Emit { sink, trace: &trace };
         let begun = match (recovered, begin) {
             (Err(error), _) => Err(error),
-            (Ok(()), Start::Prompt(prompt)) => Ok(vec![Message::user(prompt)]),
+            (Ok(()), Start::Message(message)) => Ok(vec![message]),
             (Ok(()), Start::Continue) => continuation(session, &config.hooks, to, &config.queues).await,
         };
         let mut accounting = RunAccounting::default();
         let mut last_error = None;
         let mut overflow_recovered = false;
 
-        let ending = match begun {
+        let mut ending = match begun {
             Err(error) => {
                 last_error = Some(error);
                 LoopOutcome::Error
@@ -388,6 +399,13 @@ impl Runner {
             },
         };
 
+        // State that hooks asked to record during the last events is kept before the run
+        // is reported, so a host reading the session afterwards finds it.
+        if let Err(error) = record_pending_entries(session, &config.queues, &config.hooks, to).await {
+            last_error = Some(error);
+            ending = LoopOutcome::Error;
+        }
+
         let (outcome, error) = match ending {
             LoopOutcome::Truncated => (
                 RunOutcome::Truncated,
@@ -436,7 +454,9 @@ impl Runner {
                 | Entry::CompactionFailed(_)
                 | Entry::RequestConfig(_)
                 | Entry::RequestStarted(_)
-                | Entry::ToolCallStarted(_) => None,
+                | Entry::ToolCallStarted(_)
+                | Entry::Custom(_)
+                | Entry::CustomMessage(_) => None,
             })
             .collect();
         let messages: Vec<Message> = session
@@ -465,9 +485,30 @@ impl Runner {
 
 /// What a run starts from.
 enum Start {
-    Prompt(String),
+    Message(QueuedMessage),
     /// The session as it is; see [`Runner::continue_run`].
     Continue,
+}
+
+/// Record the custom entries that hooks queued and the loop has not written.
+async fn record_pending_entries(
+    session: &mut SessionStore,
+    queues: &MessageQueues,
+    hooks: &HookChain,
+    to: Emit<'_>,
+) -> Result<(), String> {
+    for entry in queues.take_entries() {
+        let id = session
+            .append_custom_entry(&entry.custom_type, entry.data)
+            .await
+            .map_err(|error| format!("cannot persist session entry: {error:#}"))?;
+        let event = AgentEvent::CustomEntry {
+            entry_id: Some(id),
+            custom_type: entry.custom_type,
+        };
+        hooks.emit(event, to).await;
+    }
+    Ok(())
 }
 
 /// The input a continuation starts with, after omitting a failed answer at the end; an error
@@ -477,7 +518,7 @@ async fn continuation(
     hooks: &HookChain,
     to: Emit<'_>,
     queues: &MessageQueues,
-) -> Result<Vec<Message>, String> {
+) -> Result<Vec<QueuedMessage>, String> {
     let projection = session.projection();
     let Some(last) = projection
         .iter()

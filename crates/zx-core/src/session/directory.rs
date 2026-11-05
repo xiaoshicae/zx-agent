@@ -118,7 +118,9 @@ fn info(path: PathBuf, store: &SessionStore) -> SessionInfo {
         | Entry::CompactionFailed(_)
         | Entry::RequestConfig(_)
         | Entry::RequestStarted(_)
-        | Entry::ToolCallStarted(_) => None,
+        | Entry::ToolCallStarted(_)
+        | Entry::Custom(_)
+        | Entry::CustomMessage(_) => None,
     });
     SessionInfo {
         id: header.id.clone(),

@@ -1892,3 +1892,36 @@ async fn a_hook_failure_is_reported_with_its_reason() {
         stderr(&output)
     );
 }
+
+#[tokio::test]
+async fn the_queue_mode_is_set_at_startup_and_changed_with_a_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![]).await;
+    let output = run(
+        &server,
+        dir.path(),
+        &["--tools", "", "--no-session", "--queue-mode", "one-at-a-time"],
+        "/queue\n/queue all\n/queue sometimes\n/quit\n",
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let err = stderr(&output);
+    assert!(
+        err.contains("[chat] queue: steering=one-at-a-time follow-up=one-at-a-time"),
+        "{err}"
+    );
+    assert!(err.contains("[chat] queue: steering=all follow-up=all"), "{err}");
+    assert!(
+        err.contains("[chat] unknown queue mode \"sometimes\"; use all or one-at-a-time"),
+        "{err}"
+    );
+
+    let rejected = run(
+        &server,
+        dir.path(),
+        &["--no-session", "--queue-mode", "some"],
+        "/quit\n",
+    )
+    .await;
+    assert_eq!(rejected.status.code(), Some(2), "{}", stderr(&rejected));
+}

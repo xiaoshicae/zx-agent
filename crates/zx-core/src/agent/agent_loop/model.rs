@@ -28,7 +28,14 @@ impl Engine<'_, '_, '_> {
         let request = Request {
             model: settings.model,
             messages: context.to_vec(),
-            tools: spec.tools.iter().map(|tool| tool.definition()).collect(),
+            // The active set may have changed since the last request; the audit records
+            // what each request declared.
+            tools: spec
+                .tools
+                .iter()
+                .filter(|tool| self.config.active_tools.is_active(tool.name()))
+                .map(|tool| tool.definition())
+                .collect(),
             max_tokens: spec.max_tokens,
             reasoning: settings.reasoning,
         };

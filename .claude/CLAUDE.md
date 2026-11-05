@@ -43,7 +43,7 @@
 | 运行层 | `crates/zx-core/src/runner.rs` | 持有可顺序复用的会话；以独占借用控制单次运行、重试、上限、审批缓存、持久化和报告 |
 | 会话 | `crates/zx-core/src/session.rs`、`crates/zx-core/src/session/` | 只追加的条目树与校验，投影出发给模型的消息；记录经 `SessionLog` 保存，默认是单写者的 JSONL 文件（`file.rs`） |
 | 上下文管理 | `crates/zx-core/src/compaction.rs`、`crates/zx-core/src/session/compaction.rs`、`crates/zx-core/src/output_store.rs` | 宿主摘要、追加升级与原始投影、脱敏后的长结果保存及分页 |
-| agent | `crates/zx-core/src/agent/` | 回合循环、工具执行、Hooks 宿主、事件、消息队列 |
+| agent | `crates/zx-core/src/agent/` | 回合循环、工具执行、Hooks 宿主、事件、消息队列（用户文本与扩展的消息、每队列的取法、扩展排队的状态记录）、活跃工具集、扩展的斜杠命令 |
 | ai | `crates/zx-ai/src/` | 消息类型、系统提示词段落、流式事件协议、provider 与重试判断；另有各 crate 共用的 `sync`、`text` |
 | 外层策略与交互 | `crates/zx-tools/src/policy.rs`、`crates/zx-core/src/extensions.rs`、`crates/zx-core/src/interaction.rs` | 命令与规则策略、续写、已知密钥脱敏、扩展的打包与注册（`Extension`、`register`）、宿主审批与 NoHuman |
 | 工具 | `crates/zx-tools/src/tools/` | bash、read_file、edit_file 与 write_file（共用按文件串行的 `FileMutationQueue`）、grep / find / ls（经执行器调用 ripgrep 或 POSIX 程序，参数单引号转义）、输出截断 |
@@ -139,7 +139,7 @@
 - **新工具**：实现 `agent::Tool`。参数定义成带 `#[serde(deny_unknown_fields)]` 的结构体再反序列化；输出要截断；要支持取消；不会改变任何状态的工具让 `effects()` 返回 `Effects::ReadOnly`，其余保留默认的 `SideEffects`（不变量 10）。要兼容旧的参数写法时覆盖 `prepare_arguments`，只依据参数本身改写。测试覆盖成功、参数错误、超时或取消三种情况。
 - **新策略**：内置策略实现 `agent::ToolPolicy`，通过 `policy::PolicyHook` 注册（运行在 `Policy` 阶段），无法判断时返回 `Decision::Deny`；扩展的放行判断写在 `Hooks::before_tool`。
 - **新扩展**：实现 `agent::Hooks`，按需覆盖默认方法；每个回调最后一个参数是 `&HookContext`（会话、运行、工作目录、只读的取消信号）。回调必须异步让出执行权。`transform_context` 不能追加 system 消息，系统提示词只来自配置。错误、panic、取消与超时由宿主处理，具体规则见 README。阶段（`Hooks::stage`）默认 `Extension`，只有内置的策略适配、脱敏与落盘声明其他阶段。用 `HookChain::push_with` 注册时给出名称。钩子输入输出的 JSON 格式由 `tests/hook_contract.rs` 固定，改动前先确认钩子进程与审批转发能否兼容。
-- **打包的扩展**：工具、钩子与提示词段落要一起注册时，实现 `extensions::Extension`，经 `extensions::register` 加入 `LoopConfig`。扩展的钩子只能声明 `Extension` 阶段；段落名不能是 `preamble`、`prompt::GENERATED_SECTIONS` 中的名字或提示词中已有的段落（同名段落会被原地替换）。行为由 `tests/extensions.rs` 覆盖。
+- **打包的扩展**：工具、钩子、提示词段落与命令要一起注册时，实现 `extensions::Extension`，经 `extensions::register` 加入 `LoopConfig`。扩展的钩子只能声明 `Extension` 阶段；段落名不能是 `preamble`、`prompt::GENERATED_SECTIONS` 中的名字或提示词中已有的段落（同名段落会被原地替换）；命令名只能是 ASCII 字母、数字、`_`、`-` 且不重名。运行中要发消息、记状态或改工具集，经 `HookContext` 的 `queues` 与 `active_tools`，不直接碰会话（运行期间会话归循环独占，状态在下一回合开始或运行结束时写入）。行为由 `tests/extensions.rs` 与 `tests/extension_capabilities.rs` 覆盖。
 - **上下文改动**：`on_input` 完成后才写入原始输入，改写或拒绝再追加 `context_edit`，钩子被取消时不写入；`transform_context` 返回 `ContextEdit` 计划，整份计划先校验，逐项写入成功后再请求模型。
 - **新的会话存储**：实现 `session::SessionLog`。`append` 在记录保存后才返回，同一 `seq` 已有记录时报错；新会话由后端保存头部后交给 `SessionStore::with_log`，续接时读出 `LoadedSession` 交给 `SessionStore::load`。用内存实现测往返，参照 `tests/runner.rs` 的 `TableLog`。
 - **新 IM 平台**：在独立的 crate 中实现 `zx_im::ImChannel`（参照 `crates/zx-im-slack`），遵守其文档列出的职责：立即确认投递、按消息 ID 去重（`zx_im::Seen`）、只转交发给机器人的消息、遵守限频、拆分超长文本（`zx_im::split_text`）。文案用 `CardLabels`，不写死语言或标点。协议用本地假服务测；与 `Server` 的配合参照 `tests/im_server.rs` 的 `FakeChannel`；Slack 的协议测试参照 `tests/im_slack.rs` 与 `tests/common/fake_slack.rs`。

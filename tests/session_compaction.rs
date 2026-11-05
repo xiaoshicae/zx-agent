@@ -56,9 +56,9 @@ async fn seeded(store: &mut SessionStore) -> (String, String) {
 }
 
 #[tokio::test]
-async fn new_sessions_use_v5_and_legacy_upgrade_preserves_every_existing_byte() {
+async fn new_sessions_use_the_current_version_and_legacy_upgrade_preserves_every_existing_byte() {
     let dir = tempfile::tempdir().unwrap();
-    assert_eq!(header().version, 5);
+    assert_eq!(header().version, SESSION_VERSION);
     for version in [1, 2] {
         let path = dir.path().join(format!("v{version}.jsonl"));
         let mut legacy_header = SessionHeader::new(Path::new("."), "m");

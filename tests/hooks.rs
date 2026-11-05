@@ -11,6 +11,7 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use common::{EchoTool, RunnerSetup, config, fast_retry, header, read_lines, run_prompt, summarize};
+use zx_agent::agent::QueuedMessage;
 use zx_agent::agent::{
     AgentEvent, ApprovalResult, CancelSignal, ContextEdit, Decision, Event, HookChain, HookContext, HookOptions,
     HookResult, HookStage, Hooks, LoopOutcome, Tool, ToolContext, ToolOutput, ToolVerdict, TurnDecision, TurnSummary,
@@ -874,7 +875,10 @@ async fn stopping_from_a_hook_preserves_queued_user_input() {
     config.hooks.push(StopAndQueue(config.queues.clone()));
     let (result, _) = run_prompt(&config, &mut Vec::new(), "go").await;
     assert_eq!(result.outcome, LoopOutcome::Completed);
-    assert_eq!(summarize(&config.queues.drain_steering()), ["user:pending user input"]);
+    assert_eq!(
+        config.queues.drain_steering(),
+        [QueuedMessage::User("pending user input".into())]
+    );
 }
 
 struct FinishFailure;

@@ -16,6 +16,7 @@ use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, Request, Usage, UserMessageKind};
 use zx_agent::compaction::{Config, Outcome, SummaryMode};
 use zx_agent::runner::Runner;
+use zx_agent::session::SESSION_VERSION;
 use zx_agent::session::{
     CompactionEntry, CompactionPlan, CompactionStartedEntry, CompactionSummary, Entry, MergedSummary, SessionStore,
     SummaryFact, SummaryRequest,
@@ -513,7 +514,11 @@ async fn incremental_summary_requests_are_rebuilt_from_the_session_file() {
         .collect();
 
     assert_eq!(rebuilt, sent);
-    assert_eq!(store.header().version, 5);
+    assert_eq!(
+        store.header().version,
+        SESSION_VERSION,
+        "a new session needs no upgrade"
+    );
 }
 
 #[tokio::test]

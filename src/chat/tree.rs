@@ -39,7 +39,9 @@ fn describe(entry: &Entry) -> Option<(&'static str, String)> {
                 "user",
                 match kind {
                     UserMessageKind::ContinueAnswer => format!("(continue) {}", preview_text(content)),
-                    UserMessageKind::Prompt | UserMessageKind::Summary => preview_text(content),
+                    UserMessageKind::Prompt | UserMessageKind::Summary | UserMessageKind::Custom => {
+                        preview_text(content)
+                    }
                 },
             ),
             Message::Assistant(answer) => ("assistant", describe_answer(answer)),
@@ -57,13 +59,22 @@ fn describe(entry: &Entry) -> Option<(&'static str, String)> {
             "compaction",
             format!("summary with {} fact(s)", compaction.summary.facts.len()),
         )),
+        Entry::CustomMessage(entry) => Some((
+            "custom",
+            format!(
+                "[{}] {}",
+                visible(&entry.message.custom_type),
+                preview_text(&entry.message.content)
+            ),
+        )),
         Entry::ContextEdit(_)
         | Entry::FormatUpgrade(_)
         | Entry::CompactionStarted(_)
         | Entry::CompactionFailed(_)
         | Entry::RequestConfig(_)
         | Entry::RequestStarted(_)
-        | Entry::ToolCallStarted(_) => None,
+        | Entry::ToolCallStarted(_)
+        | Entry::Custom(_) => None,
     }
 }
 

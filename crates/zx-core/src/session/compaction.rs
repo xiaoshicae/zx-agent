@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ai::{AssistantMessage, Message, Usage, UserMessageKind, now_ms};
 
-use super::{Entry, ProjectedMessage, SESSION_VERSION, SessionStore, records_without_details};
+use super::{CUSTOM_RECORDS_VERSION, Entry, ProjectedMessage, SESSION_VERSION, SessionStore, records_without_details};
 
 /// The format version that adds incremental summaries: `mode` and `continues` on attempts,
 /// fact IDs and `supersedes`, and `superseded` and `evicted` on results.
@@ -406,6 +406,26 @@ impl SessionStore {
         }
         match entry {
             Entry::Message(_) => {}
+            Entry::Custom(custom) => {
+                ensure!(
+                    self.format_version >= CUSTOM_RECORDS_VERSION,
+                    "custom records require a format upgrade to v{CUSTOM_RECORDS_VERSION}"
+                );
+                ensure!(
+                    !custom.custom_type.trim().is_empty(),
+                    "a custom record needs a customType"
+                );
+            }
+            Entry::CustomMessage(custom) => {
+                ensure!(
+                    self.format_version >= CUSTOM_RECORDS_VERSION,
+                    "custom records require a format upgrade to v{CUSTOM_RECORDS_VERSION}"
+                );
+                ensure!(
+                    !custom.message.custom_type.trim().is_empty(),
+                    "a custom record needs a customType"
+                );
+            }
             Entry::ContextEdit(edit) => self.validate_context_edit(edit)?,
             Entry::FormatUpgrade(upgrade) => {
                 ensure!(
@@ -480,7 +500,9 @@ impl SessionStore {
                 | Entry::CompactionStarted(_)
                 | Entry::RequestConfig(_)
                 | Entry::RequestStarted(_)
-                | Entry::ToolCallStarted(_) => false,
+                | Entry::ToolCallStarted(_)
+                | Entry::Custom(_)
+                | Entry::CustomMessage(_) => false,
             }),
             "compaction attempt already finished"
         );

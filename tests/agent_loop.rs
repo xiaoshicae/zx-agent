@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use common::{Collect, EchoTool, config, run_prompt, summarize, with_policy};
+use zx_agent::agent::QueuedMessage;
 use zx_agent::agent::{
     AgentEvent, Decision, ExecutionMode, LoopControl, LoopOutcome, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput,
     ToolPolicy, run_loop,
@@ -188,7 +189,12 @@ async fn cancellation_interrupts_a_waiting_policy() {
     let mut context = Vec::new();
     let mut approvals = ApprovalCache::default();
     let mut control = LoopControl::new(Some(10), &mut approvals, &cancel, &sink);
-    let mut running = Box::pin(run_loop(&mut context, vec![Message::user("go")], &config, &mut control));
+    let mut running = Box::pin(run_loop(
+        &mut context,
+        vec![QueuedMessage::User("go".into())],
+        &config,
+        &mut control,
+    ));
     tokio::select! {
         _ = entered.notified() => {}
         _ = &mut running => panic!("policy must still be waiting"),
@@ -274,7 +280,7 @@ async fn length_stop_fails_tool_calls_without_running_them() {
 async fn stops_at_the_turn_budget() {
     let provider = provider((0..5).map(|i| FauxStep::tool_call(&format!("c{i}"), "echo", json!({"text": "again"}))));
     let config = config(provider.clone(), vec![echo()]);
-    let prompts = vec![Message::user("go")];
+    let prompts = vec![QueuedMessage::User("go".into())];
 
     let result = run_loop(
         &mut Vec::new(),
@@ -366,7 +372,7 @@ async fn a_spent_budget_starts_no_new_turn_and_leaves_queued_input_queued() {
 
     let result = run_loop(
         &mut context,
-        vec![Message::user("go")],
+        vec![QueuedMessage::User("go".into())],
         &config,
         &mut LoopControl::new(
             Some(1),
@@ -382,7 +388,10 @@ async fn a_spent_budget_starts_no_new_turn_and_leaves_queued_input_queued() {
         (LoopOutcome::ModelRequestLimit, 1, 1)
     );
     assert_eq!(summarize(&context), ["user:go", "assistant:calls[c1]", "tool:c1=ok"]);
-    assert_eq!(summarize(&config.queues.drain_steering()), ["user:also check disk"]);
+    assert_eq!(
+        config.queues.drain_steering(),
+        [QueuedMessage::User("also check disk".into())]
+    );
     let turns: Vec<_> = events
         .kinds()
         .into_iter()
@@ -420,7 +429,7 @@ async fn cancellation_ends_the_loop() {
         tokio::time::sleep(Duration::from_millis(100)).await;
         trigger.cancel();
     });
-    let prompts = vec![Message::user("go")];
+    let prompts = vec![QueuedMessage::User("go".into())];
 
     let result = run_loop(
         &mut Vec::new(),

@@ -287,6 +287,20 @@ impl EventSink for Output {
                         self.tool_result(&mut state, result);
                     }
                 }
+                // A message an extension sent, shown when it asks for that (pi: `display`).
+                AgentEvent::MessageEnd {
+                    message: Message::User { content, .. },
+                    custom: Some(info),
+                    ..
+                } if info.display && !self.debug => {
+                    let style = state.terminal.style();
+                    state
+                        .terminal
+                        .line(Tone::Dim, &format!("[{}]", visible(&info.custom_type)));
+                    for line in limited(content, PREVIEW_LINES, style, |_| Tone::Plain) {
+                        state.terminal.line(Tone::Plain, &format!("  {line}"));
+                    }
+                }
                 AgentEvent::ToolExecutionStart {
                     tool_call_id,
                     tool_name,
@@ -519,7 +533,8 @@ fn progress_tone(event: &AgentEvent) -> Tone {
         | AgentEvent::AgentEnd { .. }
         | AgentEvent::ContextEdited { .. }
         | AgentEvent::CompactionStart { .. }
-        | AgentEvent::CompactionEnd { .. } => Tone::Dim,
+        | AgentEvent::CompactionEnd { .. }
+        | AgentEvent::CustomEntry { .. } => Tone::Dim,
     }
 }
 
@@ -580,6 +595,15 @@ pub(crate) fn progress_line(event: &AgentEvent) -> Option<String> {
         )),
         // The error names the hook and the phase: "<hook> after_tool failed: <reason>".
         AgentEvent::HookFailed { error, .. } => Some(format!("[hook] {}", visible(error))),
+        AgentEvent::CustomEntry { custom_type, entry_id } => Some(format!(
+            "[extension] recorded {}{}",
+            visible(custom_type),
+            if entry_id.is_some() {
+                ""
+            } else {
+                " (not kept: no session)"
+            }
+        )),
         AgentEvent::RunStart { .. }
         | AgentEvent::RunEnd { .. }
         | AgentEvent::AgentStart { .. }

@@ -81,16 +81,14 @@ impl SessionStore {
     /// result that a `context_edit` hides from the model still counts as recorded.
     pub fn interrupted_tool_calls(&self) -> Vec<InterruptedToolCall> {
         let path = self.branch_path();
-        let issuer = path.iter().enumerate().rev().find_map(|(index, entry)| {
-            if let Entry::Message(entry) = entry
-                && !matches!(entry.message, Message::ToolResult(_))
-            {
-                Some((index, entry))
-            } else {
-                None
-            }
+        let issuer = path.iter().enumerate().rev().find_map(|(index, entry)| match entry {
+            Entry::Message(entry) if !matches!(entry.message, Message::ToolResult(_)) => Some((index, Some(entry))),
+            // A custom message is a message to the model too: calls before it are answered
+            // or abandoned, not interrupted.
+            Entry::CustomMessage(_) => Some((index, None)),
+            _ => None,
         });
-        let Some((position, issuer)) = issuer else {
+        let Some((position, Some(issuer))) = issuer else {
             return Vec::new();
         };
         let Message::Assistant(answer) = &issuer.message else {

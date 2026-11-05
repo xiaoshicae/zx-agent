@@ -1,6 +1,7 @@
 //! Agent layer: the loop, tools, policy, and events (pi: packages/agent).
 
 pub mod agent_loop;
+pub mod command;
 pub mod events;
 pub mod hooks;
 pub mod policy;
@@ -10,9 +11,10 @@ mod session_runtime;
 pub mod tool;
 
 pub use agent_loop::{LoopConfig, LoopControl, LoopFailure, LoopResult, LoopSpec, run_loop};
+pub use command::{CommandContext, CommandError, CommandOutcome, SlashCommand, check_command_name};
 pub use events::{
-    AgentEvent, ApprovalResult, EVENT_SCHEMA_VERSION, Event, EventSink, Interruption, LoopOutcome, NullSink,
-    RequestKind, ToolVerdict,
+    AgentEvent, ApprovalResult, CustomMessageInfo, EVENT_SCHEMA_VERSION, Event, EventSink, Interruption, LoopOutcome,
+    NullSink, RequestKind, ToolVerdict,
 };
 pub(crate) use events::{Emit, RunTrace};
 pub use hooks::{
@@ -20,7 +22,9 @@ pub use hooks::{
     HookStage, Hooks, RequestPlan, RequestSettings, TurnDecision, TurnDisposition, TurnSummary,
 };
 pub use policy::{AllowAll, Decision, ToolPolicy};
-pub use queue::MessageQueues;
+pub use queue::{MessageQueues, PendingEntry, QueueMode, QueuedMessage};
 pub use report::{RunOutcome, RunReport};
 pub(crate) use session_runtime::{ContextPreparation, SessionRuntime};
-pub use tool::{Effects, ExecutionMode, MAX_DETAILS_BYTES, MAX_PROGRESS_BYTES, Tool, ToolContext, ToolOutput};
+pub use tool::{
+    ActiveTools, Effects, ExecutionMode, MAX_DETAILS_BYTES, MAX_PROGRESS_BYTES, Tool, ToolContext, ToolOutput,
+};

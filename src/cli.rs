@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use zx_agent::AgentSession;
-use zx_agent::agent::{Decision, EventSink, HookOptions, Hooks, LoopConfig, LoopSpec, Tool};
+use zx_agent::agent::{Decision, EventSink, HookOptions, Hooks, LoopConfig, LoopSpec, QueueMode, Tool};
 use zx_agent::ai::Reasoning;
 use zx_agent::ai::openai::{
     DEFAULT_MAX_RESPONSE_BYTES, OpenAiCompatible, OpenAiConfig, ReasoningFormat, SystemUpdates,
@@ -196,6 +196,16 @@ pub(crate) struct ChatArgs {
     /// directory; the original is not changed.
     #[arg(long, value_name = "ID|PATH", conflicts_with_all = ["session", "no_session", "resume"])]
     pub(crate) fork: Option<String>,
+
+    /// How input typed while a task runs is taken: `all` (default) sends every waiting
+    /// message before the next model request; `one-at-a-time` sends the oldest only, so
+    /// each gets an answer of its own. /queue changes it while chatting.
+    #[arg(long, value_name = "MODE", value_parser = parse_queue_mode)]
+    pub(crate) queue_mode: Option<QueueMode>,
+}
+
+fn parse_queue_mode(text: &str) -> Result<QueueMode, String> {
+    text.parse()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
