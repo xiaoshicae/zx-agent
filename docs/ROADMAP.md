@@ -533,7 +533,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P7 | 插件与 MCP | 已完成（PR #41）：范围按 D8 收窄，评审稿已合入（PR #36）并经用户确认；模块 A（Extension 接口，PR #38）、B1（MCP 客户端库，PR #40）、B2（CLI 接入与文档，PR #41）已完成；真实 MCP 服务器的验收待选定服务器；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已完成（PR #23），A2–A8（扩展 API）已完成（PR #25） |
 | P8 | 嵌入协议 `acp` | 不做（2026-11-02 用户决定，D10） |
 | P9 | 可选增强 | 进行中：token 预算（PR #47）、OpenTelemetry 追踪（PR #49）、crate 拆分（PR #52）、通用化整理（PR #54）已完成；剩更多 provider（如 Anthropic）。其余各项按 D10 不做或取消 |
-| P10 | 与 pi 的能力对齐 | 进行中：2026-11-05 对照 pi 列出 14 项缺口，见下文 P10；① 上下文超长后自动恢复已完成（PR #56）；② 容器沙箱已完成（PR #57）；③ edit 与 write 工具已完成（PR #58） |
+| P10 | 与 pi 的能力对齐 | 进行中：2026-11-05 对照 pi 列出 14 项缺口，见下文 P10；① 上下文超长后自动恢复已完成（PR #56）；② 容器沙箱已完成（PR #57）；③ edit 与 write 工具已完成（PR #58）；④ grep、find、ls 已实现 |
 
 ### P0 场景默认值移出内核
 
@@ -1326,7 +1326,7 @@ crate 拆分（2026-11-02，已完成，PR #52；基于 PR #51 合并后的 `640
 - [x] **① 上下文超长后自动恢复**（高；已完成（PR #56），2026-11-05，见下方实施记录）。pi 识别超长（`packages/ai/src/utils/overflow.ts:144`）后压缩一次再重试（`packages/coding-agent/src/core/agent-session.ts:3063`）。zx 把 `context_length_exceeded` 归为不重试的错误（`crates/zx-ai/src/retry.rs:130`），运行直接失败。做法：provider 按状态与错误码给出通用的“超长”分类，不按厂商写正则；运行层收到后做一次摘要再续跑，摘要与续跑都经现有的请求审计，保持不变量 6；没有配置摘要时照旧失败。
 - [x] **② 容器沙箱改为沙箱内最大权限**（D11；已完成（PR #57），2026-11-05，见下方实施记录）。是 ③ 在容器中可用的前提。
 - [x] **③ edit 与 write 工具**（高；已完成（PR #58），2026-11-05，见下方实施记录）。pi 默认工具集是 read、bash、edit、write（`packages/coding-agent/src/core/tools/edit.ts`、`write.ts`）：一次调用可做多处不重叠的精确替换，`details` 带 diff，同一文件的写入经 `file-mutation-queue.ts` 串行。zx 只有 `bash`、`read_file`（`crates/zx-tools/src/tools/mod.rs:24`），`Executor` 只有 `run` 与 `read_file`（`crates/zx-core/src/executor/mod.rs:83,88`）。做法：`Executor` 增加写文件；两个工具声明 `SideEffects`（不变量 10），`details` 带 diff 供审批与审计；同一文件的写入串行，不同文件仍可并行；规则策略可以用 `askTools` 管到它们。
-- [ ] **④ grep、find、ls 只读工具**（中）。pi 用 ripgrep 与 fd，遵守 `.gitignore`，结果有上限（`grep.ts`、`find.ts`、`ls.ts`）。zx 只能经 bash 与命令白名单。声明为 `ReadOnly`，不必依赖白名单即可免审批。待定：经 `Executor` 调外部程序（不加依赖，容器中同样可用）还是用 Rust 实现（需新增 `ignore` 等依赖，红线 5）。
+- [x] **④ grep、find、ls 只读工具**（中；已实现，2026-11-05，见下方实施记录）。pi 用 ripgrep 与 fd，遵守 `.gitignore`，结果有上限（`grep.ts`、`find.ts`、`ls.ts`）。zx 只能经 bash 与命令白名单。声明为 `ReadOnly`，不必依赖白名单即可免审批。待定：经 `Executor` 调外部程序（不加依赖，容器中同样可用）还是用 Rust 实现（需新增 `ignore` 等依赖，红线 5）。
 - [ ] **⑤ 运行中可调整的配置**（中高）。推理强度作为一等配置并可在空闲时修改、变化写入会话（目前只能用 `--request-field` 静态传）；每次请求前可替换模型与推理强度的钩子（pi 的 `prepareRequest`、`prepareNextTurn`，`packages/agent/src/agent-loop.ts:195,228`；zx 的 `set_model` 只能空闲时调用，`crates/zx-core/src/agent_session.rs:222`）；不加新输入的续跑（pi 的 `continue()`；`Runner::run` 必须带提示词）。推理强度的写法遵守 D10：各 provider 显式映射。
 - [ ] **⑥ 会话导航**（中）。列出会话、续接最近一次、fork 成新会话、在分支间切换（`packages/coding-agent/src/core/session-manager.ts`）。zx 只有 `--session <path>`；`SessionStore::branch`（`crates/zx-core/src/session.rs:486`）只在测试中调用。补 SDK 接口与 CLI，`chat` 加对应命令。
 - [ ] **⑦ 扩展能力**（中高，嵌入）。pi 的扩展可写自定义条目（`appendEntry`）、注入非用户消息（`sendMessage`）、运行中启停工具（`setActiveTools`）、注册命令（`registerCommand`）（`packages/coding-agent/src/core/extensions/types.ts`）。zx 的条目只有 9 种内部类型（`crates/zx-core/src/session.rs:142-151`），工具在构建时固定。自定义消息与“会话投影是上下文的唯一来源”（不变量 6）如何共存，先出方案再实施。
@@ -1352,6 +1352,22 @@ crate 拆分（2026-11-02，已完成，PR #52；基于 PR #51 合并后的 `640
 - 测试：新增 12 项：`crates/zx-ai/src/retry.rs` 单元测试 3 项（按状态与错误码、按通用措辞、限流与其他失败不算）；`tests/overflow_recovery.rs` 7 项（成功恢复：请求、投影、事件顺序与尝试编号；未开启自动摘要时不变；恢复后紧接着又过长；回答成功后可再次恢复；摘要失败暂停；预算用完；运行超时）；`tests/openai_mock.rs` 1 项（真实 HTTP 下带错误码的 400）；`tests/request_audit.rs` 1 项（恢复前后的三个请求都能从会话文件逐个还原）。
 - 反向验证：分别去掉运行层的恢复分支、“恢复后紧接着又过长”的拒绝、“回答成功后可再次恢复”的重置、摘要失败时的暂停、按错误码的识别，每次都有对应测试失败（依次 6、1、1、1、1 项），修改已还原。按错误码识别被去掉时，HTTP 端到端测试仍通过：错误文本包含响应体，其中的错误码也被通用措辞 `context_length` 命中，这条路径只由单元测试单独覆盖。
 - 本机 macOS 验证：stable 下 828 项通过、7 项付费测试跳过（基线 816 项，PR #55 的实测）；fmt、clippy、严格 Rustdoc 与 Rust 1.88.0 的全目标检查通过；Rust 1.88.0 下没有运行测试。自查脚本在改动的文件中只列出原有的 1 处（`src/chat/output.rs` 的 `let _ =`）。未新增依赖。没有对真实模型服务验证超长时的错误格式。
+
+④ 实施记录（2026-11-05，基于 PR #58 的 `7afb527`；实现方式经用户确认：经执行器调用系统程序，不新增依赖）：
+
+| 环节 | 做法 |
+|---|---|
+| 工具 | `grep`（`GrepTool`：pattern、path、glob、ignoreCase、literal、context、limit）、`find`（`FindTool`：glob、path、limit）、`ls`（`LsTool`：path、limit），名字与参数沿用 pi。都声明 `ReadOnly`，按执行器声明执行方式，共用 `SearchSettings`（执行器、隐藏的环境变量、60 秒超时） |
+| 实现 | 经 `Executor::run` 以 `sh -c` 运行脚本，容器执行时在容器内运行。安装了 ripgrep 时用 `rg`（`find` 用 `rg --files`），遵守 `.gitignore`；没有时退到 POSIX `grep -rnHI -E` 与 `find`，跳过 `.git`、`.hg`、`.svn`。脚本经标准错误报告用的是哪个程序，结果写进 `details.engine`，退回时注明没有应用 `.gitignore`。ripgrep 中后出现的 glob 优先，排除版本控制目录的 glob 放在模型给的之后 |
+| 安全 | 模型给的模式、路径与 glob 都经 `quote` 包成单引号整体传给 shell；单元测试用 `sh` 实际执行 `$(…)`、反引号、引号与换行注入，集成测试经三个工具验证没有命令被执行 |
+| 有界 | `head -n` 限制行数，`cut -c 1-501` 限制每行字节，2000 行这样的行不超过执行器保留的 1 MiB（它保留的是末尾，搜索要的是开头）；Rust 中再按字符边界截到 500 字节并注明，整体按 2000 行或 50 KiB 截断；`limit` 至多 2000 |
+| profile | 内置 assistant 启用三个工具，不要求审批；`unattended`、`troubleshoot` 不启用，`run` 的默认工具不变；Kubernetes 部署的 profile 已显式列出工具，不受影响 |
+| 与 pi 的不同 | pi 缺少 rg 或 fd 时自动下载，这里退到 POSIX 程序；`find` 在 pi 中用 fd，这里用 `rg --files` 或 `find`；退回时 `grep` 的正则是 POSIX 扩展正则（与 rg 的 Rust 正则写法略有不同），`glob` 只比较文件名 |
+
+- 测试：新增 20 项：`search` 单元测试 7 项（单引号转义、用 `sh` 实际执行 5 种注入写法、超长行按字符边界截断、find 的 glob 转换、版本控制目录的 glob 在模型的之后、limit 上限、参数检查），`tests/search_tools.rs` 12 项（只读声明、匹配行的路径与行号、忽略大小写 / 正则 / 字面量 / glob、点文件与跳过 `.git`、无结果与报错、limit、经三个工具的注入不被执行、find 按名字与按路径、find 的点文件 / limit / 无结果 / 报错、ls、超长行、取消），`tests/executor.rs` 1 项（grep 把脚本、`sh` 与隐藏变量交给执行器）。既有测试的调整：profile 单元测试中 assistant 的工具列表加入三个工具。
+- 反向验证：分别去掉单引号转义、不再跳过 `.git`，每次都有对应测试失败（依次 3、2 项），修改已还原。
+- 本机 macOS 验证：stable 下 895 项通过、7 项付费测试跳过（基线 875 项，即 PR #58 分支的实测）；fmt、clippy、严格 Rustdoc 与 Rust 1.88.0 的全目标检查通过；Rust 1.88.0 下没有运行测试。自查脚本对新增的文件无命中。未新增依赖。
+- 未验证：本机没有安装 ripgrep，集成测试只走了 POSIX 退回路径；rg 路径只有脚本文本的单元测试，实际运行要看装有 rg 的环境（CI 的 Linux 镜像是否预装未核实）。macOS 的 BSD `grep`、`find`、`cut` 已实测；GNU 版本只在 CI 的 Linux 任务中运行。
 
 ③ 实施记录（2026-11-05，PR #58，基于 `38eaebf`，即 PR #57 合并后）：
 

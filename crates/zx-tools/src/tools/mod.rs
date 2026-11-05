@@ -5,6 +5,7 @@ pub mod edit;
 mod edit_text;
 pub mod mutation;
 pub mod read;
+pub mod search;
 pub mod truncate;
 pub mod write;
 
@@ -17,6 +18,7 @@ pub use bash::BashTool;
 pub use edit::EditFileTool;
 pub use mutation::FileMutationQueue;
 pub use read::ReadFileTool;
+pub use search::{FindTool, GrepTool, LsTool, SearchSettings};
 pub use write::WriteFileTool;
 
 use crate::agent::Tool;
@@ -30,9 +32,15 @@ pub const READ_FILE: &str = "read_file";
 pub const EDIT_FILE: &str = "edit_file";
 /// Name of the built-in tool that creates or overwrites a file.
 pub const WRITE_FILE: &str = "write_file";
+/// Name of the built-in tool that searches file contents.
+pub const GREP: &str = "grep";
+/// Name of the built-in tool that finds files by glob.
+pub const FIND: &str = "find";
+/// Name of the built-in tool that lists a directory.
+pub const LS: &str = "ls";
 
 /// Names accepted by [`builtin_tools`].
-pub const BUILTIN_TOOL_NAMES: &[&str] = &[BASH, READ_FILE, EDIT_FILE, WRITE_FILE];
+pub const BUILTIN_TOOL_NAMES: &[&str] = &[BASH, READ_FILE, EDIT_FILE, WRITE_FILE, GREP, FIND, LS];
 
 /// Build built-in tools by name, in the given order, without duplicates. `hidden_env` names
 /// environment variables that bash commands must not see, such as the API key variable.
@@ -51,6 +59,11 @@ pub fn builtin_tools_with(
 ) -> Result<Vec<Arc<dyn Tool>>> {
     let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
     let queue = Arc::new(FileMutationQueue::default());
+    let search = SearchSettings {
+        executor: executor.clone(),
+        hidden_env: hidden_env.to_vec(),
+        ..SearchSettings::default()
+    };
     for name in names {
         let name = name.trim();
         if name.is_empty() || tools.iter().any(|tool| tool.name() == name) {
@@ -76,6 +89,15 @@ pub fn builtin_tools_with(
             WRITE_FILE => Arc::new(WriteFileTool {
                 executor: executor.clone(),
                 queue: queue.clone(),
+            }),
+            GREP => Arc::new(GrepTool {
+                settings: search.clone(),
+            }),
+            FIND => Arc::new(FindTool {
+                settings: search.clone(),
+            }),
+            LS => Arc::new(LsTool {
+                settings: search.clone(),
             }),
             other => bail!("unknown tool {other:?}; available: {}", BUILTIN_TOOL_NAMES.join(", ")),
         };
