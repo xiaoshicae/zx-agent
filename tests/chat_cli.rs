@@ -36,6 +36,8 @@ fn chat_retrying(server: &MockServer, cwd: &Path, args: &[&str], max_retries: &s
         ])
         .args(args)
         .current_dir(cwd)
+        // chat keeps sessions under the home directory by default; never the real one.
+        .env("HOME", cwd.join(".home"))
         .env(KEY_VAR, KEY)
         .env_remove("ZX_MODEL")
         .env_remove("ZX_BASE_URL")

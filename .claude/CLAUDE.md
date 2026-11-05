@@ -36,7 +36,7 @@
 
 | 层 | 位置 | 职责 |
 |---|---|---|
-| CLI | `src/main.rs`、`src/cli.rs`、`src/chat/`、`src/serve.rs` | 共用参数与运行组装；run 处理单次任务；chat 管理单一输入所有者（终端里一次到达的多行合为一条消息）、审批、信号和 REPL，终端渲染（颜色、状态行、行的归属）在 `src/chat/term.rs`；serve 读取配置、为每个线程准备会话并隐藏 IM 凭据 |
+| CLI | `src/main.rs`、`src/cli.rs`、`src/chat/`、`src/serve.rs`、`src/sessions.rs` | 共用参数与运行组装；run 处理单次任务；sessions 是 chat 的会话目录（默认 `~/.zx-agent/sessions/--<工作目录>--/`）与 `zx-agent sessions`；chat 管理单一输入所有者（终端里一次到达的多行合为一条消息）、审批、信号和 REPL，终端渲染（颜色、状态行、行的归属）在 `src/chat/term.rs`；serve 读取配置、为每个线程准备会话并隐藏 IM 凭据 |
 | 场景配置 | `src/profile/`、`profiles/` | TOML 基线与覆盖、项目上下文、显式 skill 目录及按需读取、MCP 服务器（`[[mcp]]`）；不进入循环机制 |
 | 提示词 | `crates/zx-core/src/prompt.rs` | 生成系统提示词：说明 + `<environment>` + `<command_policy>` + `<project_context>` + `<available_skills>`（空段落不出现） |
 | 共享会话 | `crates/zx-core/src/agent_session.rs` | 共享调用与 Busy、RAII 归还运行权、取消、订阅与退订、空闲时切换模型 |
@@ -68,7 +68,7 @@
 - **安全靠部署隔离**：策略只是第一道防线（检查边界见 README 的"安全模型"）。认证 key 只从环境变量读取，该变量从 bash 子进程环境中删除；Unix 上新建会话文件的权限为 0600，打开已有文件不修改权限；真正的隔离要靠不同账号或容器。
 - **扩展点都是 trait**：`Provider`、`Tool`、`ToolPolicy`、`Hooks`、`Interaction`、`EventSink`、`Executor`、`SessionLog`、`ImChannel`、`StatusStore`、`Extension`。新能力优先以实现 trait 的方式加入，不改循环本身。
 - **通用，不为场景定制**：代码只定义接口与通用机制。某个环境、平台或厂商才有的知识（kubectl 的只读选项、Kubernetes 的 token 路径、IM 文案的语言、告警的格式）写在 profile、部署清单或配置里，或由外部适配器实现接口、调用 `run` 或 SDK；不在代码里解析某个系统的私有格式。provider 对协议方言的处理也要显式开启（如 `--fill-missing-reasoning`），不按厂商推断。
-- **界面交给 ACP 客户端**（D12）：交互式 UI 由实现 ACP 的开源客户端提供，`acp` 只做协议与会话的映射，协议类型以 SDK 的 `v1::schema` 为准；`chat` 冻结为应急与脚本化入口，不再加功能；`serve` 冻结，只修平台故障；`run` 保留并维护。
+- **界面交给 ACP 客户端**（D13）：交互式 UI 由实现 ACP 的开源客户端提供，`acp` 只做协议与会话的映射，协议类型以 SDK 的 `v1::schema` 为准；`chat` 冻结为应急与脚本化入口，不再加功能；`serve` 冻结，只修平台故障；`run` 保留并维护。
 - **分层由 crate 边界保证**：内核（`zx-core`）引用不到工具、策略、MCP、IM 和 CLI，只依赖 `zx-core` 与 `zx-ai` 的嵌入方也不会引入 rmcp、tokio-tungstenite 和 OpenTelemetry。新模块放进它所属的层；需要引用上层时，说明分层或接口该改了。各 crate 在根部把下层引入为 `crate::ai`、`crate::agent`、`crate::sync` 等，所以模块内的路径与拆分前相同；跨 crate 使用、但不属于 API 的项写成 `#[doc(hidden)] pub` 并在文档注释里注明（如 `zx_ai::sync`、`SystemPrompt::has_section`）。
 
 ## 命令

@@ -18,6 +18,7 @@ mod acp;
 mod chat;
 mod cli;
 mod serve;
+mod sessions;
 
 use chat::{progress_line, visible};
 use cli::{Cli, Command, OutputMode, RunArgs};
@@ -42,6 +43,7 @@ async fn main() -> ExitCode {
         Command::Run(args) => run(args).await,
         Command::Chat(args) => chat::run(args).await,
         Command::Serve(args) => serve::run(args).await,
+        Command::Sessions(args) => sessions::run(args).await,
         Command::Acp(args) => acp::run(args).await,
     };
     match result {

@@ -48,6 +48,8 @@ fn program(mode: &str, model: &MockServer, dir: &Path, profile: &Path) -> Comman
         .args(["--max-retries", "0", "--api-key-env", KEY_VAR, "--no-context"])
         .args(["--profile", profile.to_str().unwrap()])
         .current_dir(dir)
+        // chat keeps sessions under the home directory by default; never the real one.
+        .env("HOME", dir.join(".home"))
         .env(TOKEN_VAR, TOKEN)
         .env_remove(KEY_VAR)
         .env_remove("ZX_MODEL")
