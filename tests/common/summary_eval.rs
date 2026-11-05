@@ -451,6 +451,7 @@ fn messages(round: usize, index: usize, step: Step) -> Vec<Message> {
                     is_error: false,
                     timestamp: now_ms(),
                     duration_ms: Some(350),
+                    details: None,
                 }),
             ]
         }

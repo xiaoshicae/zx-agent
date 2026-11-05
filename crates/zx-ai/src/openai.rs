@@ -1133,6 +1133,7 @@ mod tests {
                 is_error: false,
                 timestamp: 0,
                 duration_ms: None,
+                details: None,
             })
         };
         let request = Request {
@@ -1161,6 +1162,43 @@ mod tests {
         assert_eq!(body["messages"][4]["content"], "No result provided");
         assert_eq!(body["max_tokens"], 100);
         assert!(body.get("tools").is_none());
+    }
+
+    #[test]
+    fn tool_result_details_stay_out_of_the_body() {
+        let assistant = AssistantMessage {
+            content: vec![ContentBlock::ToolCall {
+                id: "a".into(),
+                name: "bash".into(),
+                arguments: json!({}),
+                arguments_error: None,
+            }],
+            ..AssistantMessage::failure("p", "m", StopReason::ToolUse, "")
+        };
+        let request = Request {
+            model: "m".into(),
+            messages: vec![
+                Message::user("go"),
+                Message::Assistant(assistant),
+                Message::ToolResult(ToolResultMessage {
+                    tool_call_id: "a".into(),
+                    tool_name: "bash".into(),
+                    content: "ok".into(),
+                    is_error: false,
+                    timestamp: 0,
+                    duration_ms: None,
+                    details: Some(json!({"onlyForObservers": true})),
+                }),
+            ],
+            tools: vec![],
+            max_tokens: None,
+        };
+        let body = build_body(&request, &p_config(SystemUpdates::default()));
+        assert_eq!(
+            body["messages"][2],
+            json!({"role": "tool", "tool_call_id": "a", "content": "ok"})
+        );
+        assert!(!body.to_string().contains("onlyForObservers"));
     }
 
     fn p_config(system_updates: SystemUpdates) -> OpenAiConfig {

@@ -13,7 +13,7 @@ use zx_agent::AgentSession;
 use zx_agent::agent::{AgentEvent, ContextEdit, Event, HookContext, HookOptions, Hooks};
 use zx_agent::agent_session::{ModelRef, SessionError};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{ContentBlock, Message, StopReason};
+use zx_agent::ai::{AssistantMessage, ContentBlock, Message, StopReason, ToolResultMessage};
 use zx_agent::compaction::{Config, Outcome, Report};
 use zx_agent::runner::{Limits, RunOutcome};
 use zx_agent::session::{Entry, SessionStore};
@@ -64,7 +64,7 @@ async fn manual_compaction_is_a_bounded_tool_free_request_and_survives_reuse() {
     assert_eq!(events.kinds(), ["compaction_start", "request_start", "compaction_end"]);
     let report = session.prompt("continue now").await.unwrap();
     assert_eq!(report.outcome, RunOutcome::Completed);
-    assert_eq!(report.turns, 1);
+    assert_eq!(report.model_requests, 1);
     assert_eq!(report.final_text, "finished");
     let requests = provider.requests();
     assert_eq!(requests[0].max_tokens, Some(2048));
@@ -99,7 +99,7 @@ async fn automatic_summary_counts_against_task_request_budget_and_usage() {
     let (runner, events) = RunnerSetup {
         session: store,
         limits: Limits {
-            max_turns: Some(2),
+            max_model_requests: Some(2),
             ..Limits::default()
         },
         ..RunnerSetup::new(config(provider.clone(), vec![]))
@@ -113,7 +113,7 @@ async fn automatic_summary_counts_against_task_request_budget_and_usage() {
         .unwrap();
     let report = runner.run("continue", &CancellationToken::new()).await;
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
-    assert_eq!(report.turns, 2);
+    assert_eq!(report.model_requests, 2);
     assert_eq!(report.usage.total_tokens, 30);
     assert_eq!(provider.requests().len(), 2);
     let messages = runner.session().messages();
@@ -171,11 +171,11 @@ async fn steering_received_during_a_summary_is_persisted_before_the_next_task_re
     assert!(
         matches!(provider.requests()[1].messages.last(), Some(Message::User { content, .. }) if content == "new correction")
     );
-    assert_eq!(report.turns, 2);
+    assert_eq!(report.model_requests, 2);
 }
 
 #[tokio::test]
-async fn summary_cannot_spend_an_extra_task_request_after_max_turns() {
+async fn summary_cannot_spend_an_extra_task_request_after_request_limit() {
     let (store, old) = seeded().await;
     let provider = Arc::new(FauxProvider::new([
         FauxStep::text(summary(&old)),
@@ -184,7 +184,7 @@ async fn summary_cannot_spend_an_extra_task_request_after_max_turns() {
     let (runner, _) = RunnerSetup {
         session: store,
         limits: Limits {
-            max_turns: Some(1),
+            max_model_requests: Some(1),
             ..Limits::default()
         },
         ..RunnerSetup::new(config(provider.clone(), vec![]))
@@ -197,8 +197,8 @@ async fn summary_cannot_spend_an_extra_task_request_after_max_turns() {
         })
         .unwrap();
     let report = runner.run("continue", &CancellationToken::new()).await;
-    assert_eq!(report.outcome, RunOutcome::MaxTurns);
-    assert_eq!(report.turns, 1);
+    assert_eq!(report.outcome, RunOutcome::ModelRequestLimit);
+    assert_eq!(report.model_requests, 1);
     assert_eq!(report.usage.total_tokens, 15);
     assert!(report.final_text.is_empty(), "a summary is never a task answer");
     assert_eq!(provider.requests().len(), 1);
@@ -254,6 +254,56 @@ async fn sdk_defaults_do_not_make_summary_requests() {
         entry,
         Entry::Message(_) | Entry::RequestConfig(_) | Entry::RequestStarted(_)
     )));
+}
+
+#[tokio::test]
+async fn summary_requests_and_context_sizes_leave_tool_result_details_out() {
+    let mut store = SessionStore::in_memory(header());
+    let old = store
+        .append_message(Message::user("observed ".repeat(600)))
+        .await
+        .unwrap();
+    let mut call = AssistantMessage::failure("faux", "m", StopReason::ToolUse, "");
+    call.content = vec![ContentBlock::ToolCall {
+        id: "c1".into(),
+        name: "echo".into(),
+        arguments: json!({}),
+        arguments_error: None,
+    }];
+    store.append_message(Message::Assistant(call)).await.unwrap();
+    let mut result = ToolResultMessage {
+        tool_call_id: "c1".into(),
+        tool_name: "echo".into(),
+        content: "the tool said hi".into(),
+        is_error: false,
+        timestamp: 1,
+        duration_ms: None,
+        details: None,
+    };
+    let without = {
+        let mut messages = store.messages();
+        messages.push(Message::ToolResult(result.clone()));
+        messages.push(Message::user("most recent input"));
+        zx_agent::compaction::context_bytes(&messages).unwrap()
+    };
+    result.details = Some(json!({"marker": "for-observers-only"}));
+    store.append_message(Message::ToolResult(result)).await.unwrap();
+    store.append_message(Message::user("most recent input")).await.unwrap();
+    let provider = Arc::new(FauxProvider::new([FauxStep::text(summary(&old))]));
+    let (runner, _) = RunnerSetup {
+        session: store,
+        ..RunnerSetup::new(config(provider.clone(), vec![]))
+    }
+    .build();
+    let mut runner = runner.with_compaction(budget()).unwrap();
+
+    let report = runner.compact(&CancellationToken::new()).await;
+
+    assert_eq!(report.outcome, Outcome::Completed, "{report:?}");
+    assert_eq!(report.input_bytes, without);
+    let source = serde_json::to_string(&provider.requests()[0].messages).unwrap();
+    assert!(source.contains("the tool said hi"), "{source}");
+    assert!(!source.contains("for-observers-only"), "{source}");
 }
 
 #[tokio::test]
@@ -313,7 +363,7 @@ async fn invalid_or_truncated_summaries_never_replace_context_or_retry_as_tasks(
             .unwrap();
         let report = runner.run("continue", &CancellationToken::new()).await;
         assert_eq!(report.outcome, RunOutcome::Error, "{report:?}");
-        assert_eq!(report.turns, 1);
+        assert_eq!(report.model_requests, 1);
         assert_eq!(report.retries, 0);
         assert!(report.final_text.is_empty());
         assert_eq!(provider.requests().len(), 1);
@@ -348,7 +398,7 @@ async fn a_failed_automatic_summary_is_not_paid_for_again_on_the_next_prompt() {
     assert_eq!(first.outcome, RunOutcome::Error, "{first:?}");
     let second = runner.run("try again", &CancellationToken::new()).await;
     assert_eq!(second.outcome, RunOutcome::Error, "{second:?}");
-    assert_eq!(second.turns, 0);
+    assert_eq!(second.model_requests, 0);
     assert!(
         second.error.as_deref().unwrap_or_default().contains("paused"),
         "{second:?}"
@@ -464,7 +514,7 @@ async fn an_input_that_cannot_fit_is_not_silently_truncated_or_sent_to_the_task_
     let input = "界".repeat(1000);
     let report = runner.run(&input, &CancellationToken::new()).await;
     assert_eq!(report.outcome, RunOutcome::Error);
-    assert_eq!(report.turns, 0);
+    assert_eq!(report.model_requests, 0);
     assert!(provider.requests().is_empty());
     assert!(matches!(&runner.session().messages()[0], Message::User{content,..} if content == &input));
 }
@@ -837,7 +887,7 @@ async fn the_run_timeout_also_bounds_automatic_compaction() {
         .unwrap();
     let report = runner.run("continue", &CancellationToken::new()).await;
     assert_eq!(report.outcome, RunOutcome::Timeout);
-    assert_eq!(report.turns, 1);
+    assert_eq!(report.model_requests, 1);
     assert_eq!(provider.requests().len(), 1);
     assert!(matches!(
         runner.session().entries().last(),
@@ -870,5 +920,5 @@ async fn a_single_large_old_message_does_not_force_the_entire_history_to_be_reta
         .unwrap();
     let report = runner.run("continue", &CancellationToken::new()).await;
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
-    assert_eq!(report.turns, 2);
+    assert_eq!(report.model_requests, 2);
 }

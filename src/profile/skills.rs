@@ -166,10 +166,7 @@ mod tests {
         }
     }
     fn ctx(dir: &std::path::Path) -> ToolContext {
-        ToolContext {
-            cwd: dir.into(),
-            cancel: CancellationToken::new(),
-        }
+        ToolContext::new(dir.into(), CancellationToken::new())
     }
 
     #[test]

@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::ai::{Message, PREAMBLE, Request, SystemMessage, SystemPrompt, ToolDef, now_ms};
 
-use super::{CompactionStartedEntry, Entry, SessionStore};
+use super::{CompactionStartedEntry, Entry, SessionStore, records_without_details};
 
 /// Non-secret request fields. Authentication and transport credentials are not recorded.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -192,7 +192,8 @@ impl SessionStore {
                             .into_iter()
                             .take_while(|item| item.entry_id != attempt.first_kept_entry_id)
                             .collect();
-                        serde_json::to_string(&source)?
+                        // As the summary request was built: without tool result details.
+                        serde_json::to_string(&records_without_details(&source))?
                     }
                 };
                 let system = Message::System(SystemMessage {

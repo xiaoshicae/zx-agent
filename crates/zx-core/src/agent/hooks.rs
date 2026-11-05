@@ -179,8 +179,9 @@ pub struct TurnSummary<'a> {
     pub response: &'a AssistantMessage,
     pub messages: &'a [Message],
     pub turn: u32,
-    pub continuations: u32,
-    pub remaining_turns: Option<u32>,
+    /// Answer continuations already scheduled in this run.
+    pub answer_continuations: u32,
+    pub remaining_model_requests: Option<u32>,
     pub disposition: TurnDisposition,
 }
 
@@ -213,24 +214,40 @@ pub enum HookStage {
 
 /// Hooks must yield while waiting. Blocking work prevents cooperative timeouts.
 /// Every method has a no-op default so implementers override only what they use.
+/// Hooks run in stage order, then registration order. Operational callbacks are bounded by
+/// their configured timeout and cancellation; observer failures are reported as diagnostics.
 #[async_trait]
 pub trait Hooks: Send + Sync {
+    /// Transform prompt text before it enters the model context. Transformations chain in
+    /// order. With a session, the original is recorded and a rewrite is recorded as an edit.
+    /// A failure rejects the input and stops the attempt; cancellation records no input.
     async fn on_input(&self, text: String, _ctx: &HookContext) -> HookResult<String> {
         Ok(text)
     }
 
+    /// Propose ordered edits before a task request. Each hook sees preceding edits; the full
+    /// plan is validated before it is applied. With a session, edits are recorded and affect
+    /// the session projection. Failure stops the attempt before the request.
     async fn transform_context(&self, _messages: &[Message], _ctx: &HookContext) -> HookResult<Vec<ContextEdit>> {
         Ok(Vec::new())
     }
 
+    /// Decide whether a tool call may run; the call and its arguments cannot be changed here.
+    /// Deny wins immediately, otherwise Ask wins over Allow. Failure blocks the tool call.
     async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<Decision> {
         Ok(Decision::Allow)
     }
 
+    /// Transform a tool's result before it is delivered and recorded. Results chain in hook
+    /// order, including results for blocked calls. Failure withholds the raw output and yields
+    /// an error result; it cannot undo effects of a tool that has already run.
     async fn after_tool(&self, _call: &ToolCall, output: ToolOutput, _ctx: &HookContext) -> HookResult<ToolOutput> {
         Ok(output)
     }
 
+    /// Decide what follows a successful task response, after tool results and `TurnEnd`.
+    /// Stop wins; otherwise the first non-default decision wins. A failure stops the attempt.
+    /// There is no corresponding decision hook at turn start; observe `TurnStart` in `on_event`.
     async fn finish_turn(&self, _turn: &TurnSummary<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
         Ok(TurnDecision::Default)
     }
@@ -512,6 +529,26 @@ impl HookChain {
         Ok(output)
     }
 
+    /// Filter transient progress through redaction hooks without invoking final-output hooks
+    /// or spilling it to storage. A failed redactor withholds the update.
+    pub(crate) async fn filter_tool_progress(
+        &self,
+        tool: &ToolCall,
+        mut output: ToolOutput,
+        ctx: &HookContext,
+    ) -> Result<ToolOutput, HookError> {
+        for entry in &self.hooks {
+            if entry.stage != HookStage::Redaction {
+                continue;
+            }
+            output = entry
+                .call(HookPhase::AfterTool)
+                .run(entry.hook.after_tool(tool, output, ctx), ctx.cancel.token())
+                .await?;
+        }
+        Ok(output)
+    }
+
     pub async fn finish_turn(&self, turn: &TurnSummary<'_>, ctx: &HookContext) -> Result<TurnDecision, HookError> {
         let mut decision = TurnDecision::Default;
         for entry in &self.hooks {
@@ -723,8 +760,8 @@ mod tests {
             response: &response,
             messages: &[],
             turn: 1,
-            continuations: 0,
-            remaining_turns: None,
+            answer_continuations: 0,
+            remaining_model_requests: None,
             disposition: TurnDisposition::Stop,
         };
         let first = TurnDecision::ContinueAnswer("first".into());

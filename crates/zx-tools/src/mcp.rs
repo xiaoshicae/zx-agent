@@ -340,7 +340,7 @@ impl Tool for McpTool {
             content,
             // Absent means false.
             is_error: result.is_error == Some(true),
-            terminate: false,
+            ..ToolOutput::default()
         })
     }
 }

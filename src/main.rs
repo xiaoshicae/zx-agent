@@ -25,7 +25,7 @@ use cli::{Cli, Command, OutputMode, RunArgs};
 const EXIT_COMPLETED: u8 = 0;
 const EXIT_ERROR: u8 = 1;
 const EXIT_USAGE: u8 = 2;
-const EXIT_MAX_TURNS: u8 = 3;
+const EXIT_MODEL_REQUEST_LIMIT: u8 = 3;
 const EXIT_TIMEOUT: u8 = 4;
 const EXIT_ABORTED: u8 = 5;
 const EXIT_TRUNCATED: u8 = 6;
@@ -114,7 +114,7 @@ async fn build_session(args: &RunArgs) -> Result<AgentSession> {
         file: cli::SessionFile::from_path(args.request.session.as_deref()),
         default_profile: Builtin::Unattended,
         budget: cli::Budget {
-            max_turns: args.max_turns,
+            max_model_requests: args.max_model_requests,
             timeout_secs: args.timeout_secs,
             token_budget: args.token_budget,
             continue_on_length: args.continue_on_length,
@@ -154,8 +154,8 @@ fn print_report(report: &RunReport, output: OutputMode) {
                 .map(|file| format!(" session={file}"))
                 .unwrap_or_default();
             eprintln!(
-                "[zx-agent] outcome={:?} turns={} retries={} tokens={} (in {} / out {}){error}{session}",
-                report.outcome, report.turns, report.retries, usage.total_tokens, usage.input, usage.output,
+                "[zx-agent] outcome={:?} model_requests={} retries={} tokens={} (in {} / out {}){error}{session}",
+                report.outcome, report.model_requests, report.retries, usage.total_tokens, usage.input, usage.output,
             );
         }
         // The `run_end` event, already written, carries the report.
@@ -167,7 +167,7 @@ fn exit_code(outcome: RunOutcome) -> u8 {
     match outcome {
         RunOutcome::Completed => EXIT_COMPLETED,
         RunOutcome::Error => EXIT_ERROR,
-        RunOutcome::MaxTurns => EXIT_MAX_TURNS,
+        RunOutcome::ModelRequestLimit => EXIT_MODEL_REQUEST_LIMIT,
         RunOutcome::Timeout => EXIT_TIMEOUT,
         RunOutcome::Aborted => EXIT_ABORTED,
         RunOutcome::Truncated => EXIT_TRUNCATED,

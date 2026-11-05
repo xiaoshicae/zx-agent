@@ -410,7 +410,7 @@ async fn steering_and_follow_ups_reach_the_model_at_their_defined_boundaries() {
     gate.release.notify_one();
     let report = running.await.unwrap();
     assert_eq!(
-        (report.outcome, report.turns, report.final_text.as_str()),
+        (report.outcome, report.model_requests, report.final_text.as_str()),
         (RunOutcome::Completed, 3, "followed")
     );
     let requests = provider.requests();

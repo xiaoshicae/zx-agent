@@ -8,7 +8,7 @@ execution = "local"
 denyTools = ["bash"]
 
 [limits]
-maxTurns = 12
+maxModelRequests = 12
 timeoutSecs = 300
 
 [extensions]

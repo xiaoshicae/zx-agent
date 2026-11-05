@@ -2,8 +2,8 @@
 
 mod common;
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -11,9 +11,14 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use common::{Collect, EchoTool, config, run_prompt, summarize, with_policy};
-use zx_agent::agent::{Decision, ExecutionMode, LoopControl, LoopOutcome, Tool, ToolPolicy, run_loop};
+use zx_agent::agent::{
+    AgentEvent, Decision, ExecutionMode, LoopControl, LoopOutcome, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput,
+    ToolPolicy, run_loop,
+};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{ContentBlock, EventReceiver, Message, PREAMBLE, Provider, Request, StopReason, SystemPrompt};
+use zx_agent::ai::{
+    ContentBlock, EventReceiver, Message, PREAMBLE, Provider, Request, StopReason, SystemPrompt, ToolDef,
+};
 use zx_agent::interaction::ApprovalCache;
 
 fn provider(steps: impl IntoIterator<Item = FauxStep>) -> Arc<FauxProvider> {
@@ -39,7 +44,7 @@ async fn runs_tools_until_the_model_answers() {
 
     let (result, _) = run_prompt(&config, &mut context, "go").await;
 
-    assert_eq!((result.outcome, result.turns), (LoopOutcome::Completed, 2));
+    assert_eq!((result.outcome, result.task_turns), (LoopOutcome::Completed, 2));
     assert_eq!(
         summarize(&context),
         ["user:go", "assistant:calls[c1]", "tool:c1=hi", "assistant:done"]
@@ -284,7 +289,7 @@ async fn stops_at_the_turn_budget() {
     )
     .await;
 
-    assert_eq!((result.outcome, result.turns), (LoopOutcome::MaxTurns, 2));
+    assert_eq!((result.outcome, result.task_turns), (LoopOutcome::ModelRequestLimit, 2));
     assert_eq!(provider.requests().len(), 2);
 }
 
@@ -373,8 +378,8 @@ async fn a_spent_budget_starts_no_new_turn_and_leaves_queued_input_queued() {
     .await;
 
     assert_eq!(
-        (result.outcome, result.turns, result.requests),
-        (LoopOutcome::MaxTurns, 1, 1)
+        (result.outcome, result.task_turns, result.model_requests),
+        (LoopOutcome::ModelRequestLimit, 1, 1)
     );
     assert_eq!(summarize(&context), ["user:go", "assistant:calls[c1]", "tool:c1=ok"]);
     assert_eq!(summarize(&config.queues.drain_steering()), ["user:also check disk"]);
@@ -504,4 +509,248 @@ async fn an_unchanged_prompt_adds_no_system_message() {
     run_with_prompt(&mut context, prompt("t1"), "a", "one").await;
     run_with_prompt(&mut context, prompt("t1"), "b", "two").await;
     assert_eq!(summarize(&context)[3..], ["user:b", "assistant:two"]);
+}
+
+// ---------------------------------------------------------------------------
+// Argument preparation, progress and details
+// ---------------------------------------------------------------------------
+
+/// Takes `text` and accepts the older name `cmd` for it. `boom` makes the preparation panic.
+#[derive(Default)]
+struct Renaming {
+    ran_with: Mutex<Vec<Value>>,
+}
+
+#[async_trait]
+impl Tool for Renaming {
+    fn name(&self) -> &str {
+        "renaming"
+    }
+
+    fn definition(&self) -> ToolDef {
+        ToolDef {
+            name: "renaming".into(),
+            description: "Echo text".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            }),
+        }
+    }
+
+    fn prepare_arguments(&self, args: &Value) -> Option<Value> {
+        assert!(args.get("boom").is_none(), "preparation bug");
+        args.get("cmd").map(|cmd| json!({"text": cmd}))
+    }
+
+    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<ToolOutput, String> {
+        self.ran_with.lock().unwrap().push(args.clone());
+        Ok(ToolOutput::ok(args["text"].as_str().unwrap_or_default()))
+    }
+}
+
+/// Allows every call and records the arguments it was asked about.
+#[derive(Default)]
+struct RecordingPolicy(Mutex<Vec<Value>>);
+
+#[async_trait]
+impl ToolPolicy for RecordingPolicy {
+    async fn check(&self, _tool_name: &str, args: &Value) -> Decision {
+        self.0.lock().unwrap().push(args.clone());
+        Decision::Allow
+    }
+}
+
+fn tool_result(messages: &[Message], index: usize) -> &zx_agent::ai::ToolResultMessage {
+    match &messages[index] {
+        Message::ToolResult(result) => result,
+        other => panic!("expected a tool result, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn policy_and_tool_see_prepared_arguments_while_the_context_keeps_the_original() {
+    let provider = provider([
+        FauxStep::tool_call("c1", "renaming", json!({"cmd": "hi"})),
+        FauxStep::text("done"),
+    ]);
+    let tool = Arc::new(Renaming::default());
+    let policy = Arc::new(RecordingPolicy::default());
+    let config = with_policy(config(provider.clone(), vec![tool.clone()]), policy.clone());
+    let mut context = Vec::new();
+
+    let (result, _) = run_prompt(&config, &mut context, "go").await;
+
+    assert_eq!(result.outcome, LoopOutcome::Completed);
+    assert_eq!(*policy.0.lock().unwrap(), [json!({"text": "hi"})]);
+    assert_eq!(*tool.ran_with.lock().unwrap(), [json!({"text": "hi"})]);
+    assert_eq!(summarize(&context)[2], "tool:c1=hi");
+    let Message::Assistant(answer) = &context[1] else {
+        panic!("expected the assistant message");
+    };
+    assert_eq!(answer.tool_calls()[0].arguments, json!({"cmd": "hi"}));
+}
+
+#[tokio::test]
+async fn prepared_arguments_must_still_match_the_schema() {
+    let provider = provider([
+        FauxStep::tool_call("c1", "renaming", json!({"cmd": 5})),
+        FauxStep::text("done"),
+    ]);
+    let tool = Arc::new(Renaming::default());
+    let config = config(provider.clone(), vec![tool.clone()]);
+
+    run_prompt(&config, &mut Vec::new(), "go").await;
+
+    assert!(tool.ran_with.lock().unwrap().is_empty());
+    let requests = provider.requests();
+    let result = tool_result(&requests[1].messages, 2);
+    assert!(result.is_error);
+    assert!(
+        result.content.starts_with("Invalid arguments for tool \"renaming\""),
+        "{}",
+        result.content
+    );
+}
+
+#[tokio::test]
+async fn a_panicking_argument_preparation_blocks_only_that_call() {
+    let provider = provider([
+        FauxStep::tool_call("c1", "renaming", json!({"boom": true})),
+        FauxStep::text("handled"),
+    ]);
+    let tool = Arc::new(Renaming::default());
+    let config = config(provider.clone(), vec![tool.clone()]);
+
+    let (result, _) = run_prompt(&config, &mut Vec::new(), "go").await;
+
+    assert_eq!(result.outcome, LoopOutcome::Completed);
+    assert!(tool.ran_with.lock().unwrap().is_empty());
+    let requests = provider.requests();
+    let result = tool_result(&requests[1].messages, 2);
+    assert!(result.is_error);
+    assert_eq!(result.content, "Tool renaming argument preparation panicked");
+}
+
+#[tokio::test]
+async fn progress_reaches_observers_in_order_before_the_call_ends_but_not_the_model() {
+    let provider = provider([
+        FauxStep::tool_call("c1", "echo", json!({"text": "hi", "progress": ["one", "two"]})),
+        FauxStep::text("done"),
+    ]);
+    let config = config(provider.clone(), vec![echo()]);
+
+    let (_, sink) = run_prompt(&config, &mut Vec::new(), "go").await;
+
+    let events = sink.events();
+    let updates: Vec<(String, String)> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolExecutionUpdate {
+                tool_call_id, content, ..
+            } => Some((tool_call_id.clone(), content.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(updates, [("c1".into(), "one".into()), ("c1".into(), "two".into())]);
+    let kinds = sink.kinds();
+    let last_update = kinds.iter().rposition(|kind| *kind == "tool_execution_update").unwrap();
+    let end = kinds.iter().position(|kind| *kind == "tool_execution_end").unwrap();
+    assert!(last_update < end);
+    assert_eq!(tool_result(&provider.requests()[1].messages, 2).content, "hi");
+}
+
+/// Keeps a copy of its context, to report progress after the call has finished.
+#[derive(Default)]
+struct KeepsContext(Mutex<Option<ToolContext>>);
+
+#[async_trait]
+impl Tool for KeepsContext {
+    fn name(&self) -> &str {
+        "keep"
+    }
+
+    fn definition(&self) -> ToolDef {
+        ToolDef {
+            name: "keep".into(),
+            description: "Keep the context".into(),
+            parameters: json!({"type": "object"}),
+        }
+    }
+
+    async fn execute(&self, _args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
+        *self.0.lock().unwrap() = Some(ctx.clone());
+        Ok(ToolOutput::ok("kept"))
+    }
+}
+
+#[tokio::test]
+async fn the_tool_gets_the_call_id_and_progress_after_the_call_is_dropped() {
+    let provider = provider([FauxStep::tool_call("c7", "keep", json!({})), FauxStep::text("done")]);
+    let tool = Arc::new(KeepsContext::default());
+    let config = config(provider, vec![tool.clone()]);
+
+    let (_, sink) = run_prompt(&config, &mut Vec::new(), "go").await;
+
+    let ctx = tool.0.lock().unwrap().take().unwrap();
+    assert_eq!(ctx.tool_call_id.as_deref(), Some("c7"));
+    assert!(!ctx.report_progress("late"));
+    assert!(!sink.kinds().contains(&"tool_execution_update"));
+}
+
+fn end_details(sink: &Collect) -> Vec<Option<Value>> {
+    sink.events()
+        .into_iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolExecutionEnd { details, .. } => Some(details),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn details_reach_the_end_event_and_the_result_message() {
+    let details = json!({"exitCode": 0, "files": ["a", "b"]});
+    let provider = provider([
+        FauxStep::tool_call("c1", "echo", json!({"text": "hi", "details": details})),
+        FauxStep::text("done"),
+    ]);
+    let config = config(provider, vec![echo()]);
+    let mut context = Vec::new();
+
+    let (_, sink) = run_prompt(&config, &mut context, "go").await;
+
+    assert_eq!(end_details(&sink), [Some(details.clone())]);
+    let result = tool_result(&context, 2);
+    assert_eq!(
+        (result.content.as_str(), result.details.as_ref()),
+        ("hi", Some(&details))
+    );
+}
+
+#[tokio::test]
+async fn details_over_the_limit_are_dropped_from_the_event_and_the_result() {
+    // As JSON a string also takes its two quotes: `fits` is exactly the limit, `over` one byte more.
+    let fits = "x".repeat(MAX_DETAILS_BYTES - 2);
+    let over = "x".repeat(MAX_DETAILS_BYTES - 1);
+    let provider = provider([
+        FauxStep::tool_calls(vec![
+            ("c1", "echo", json!({"text": "a", "details": fits})),
+            ("c2", "echo", json!({"text": "b", "details": over})),
+        ]),
+        FauxStep::text("done"),
+    ]);
+    let config = config(provider.clone(), vec![echo()]);
+
+    let (_, sink) = run_prompt(&config, &mut Vec::new(), "go").await;
+
+    let details = end_details(&sink);
+    assert_eq!(details.len(), 2);
+    assert!(details.contains(&Some(Value::String(fits))));
+    assert!(details.contains(&None));
+    let requests = provider.requests();
+    let over = tool_result(&requests[1].messages, 3);
+    assert_eq!((over.content.as_str(), over.details.as_ref()), ("b", None));
+    assert!(tool_result(&requests[1].messages, 2).details.is_some());
 }

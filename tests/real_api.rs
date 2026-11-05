@@ -110,7 +110,7 @@ impl Endpoint {
         );
         RunnerSetup {
             limits: Limits {
-                max_turns: Some(4),
+                max_model_requests: Some(4),
                 timeout: Some(Duration::from_secs(120)),
                 ..Limits::default()
             },
@@ -140,7 +140,7 @@ fn print_usage(test: &str, report: &RunReport) {
     let usage = &report.usage;
     eprintln!(
         "[real_api] {test}: {} tokens (in {} / out {}), {} turns, outcome {:?}",
-        usage.total_tokens, usage.input, usage.output, report.turns, report.outcome
+        usage.total_tokens, usage.input, usage.output, report.model_requests, report.outcome
     );
 }
 

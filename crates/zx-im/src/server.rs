@@ -147,8 +147,8 @@ pub struct Replies {
     pub no_answer: String,
     /// Appended to an answer cut off at the output limit.
     pub truncated: String,
-    /// Appended when the turn budget ran out.
-    pub max_turns: String,
+    /// Appended when the model request budget ran out.
+    pub model_request_limit: String,
     /// Appended when the token budget ran out.
     pub token_budget: String,
     /// A run that reached its time limit.
@@ -179,7 +179,7 @@ impl Default for Replies {
             nothing_to_cancel: "Nothing is running.".into(),
             no_answer: "(no answer)".into(),
             truncated: "(the answer reached the output limit and was cut off)".into(),
-            max_turns: "(the turn limit was reached; the task is not finished)".into(),
+            model_request_limit: "(the model request limit was reached; the task is not finished)".into(),
             token_budget: "(the token budget was reached; the task is not finished)".into(),
             timed_out: "The run timed out; the task is not finished.".into(),
             failed: "The run failed: ".into(),

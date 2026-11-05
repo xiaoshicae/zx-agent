@@ -30,10 +30,7 @@ async fn connect(fake: &FakeMcp, tools: &[&str]) -> Server {
 }
 
 fn context() -> ToolContext {
-    ToolContext {
-        cwd: PathBuf::from("."),
-        cancel: CancellationToken::new(),
-    }
+    ToolContext::new(PathBuf::from("."), CancellationToken::new())
 }
 
 fn the_tool(server: &Server, name: &str) -> Arc<dyn Tool> {

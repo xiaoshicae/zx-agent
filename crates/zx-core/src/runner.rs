@@ -1,35 +1,43 @@
 //! Run-level control around the loop (a small subset of pi's coding-agent AgentSession).
 //!
 //! The loop stops at the first provider error; this layer decides whether to retry, keeps
-//! the session as the source of model context, and enforces turn, time and token limits.
+//! the session as the source of model context, and enforces request, time and token limits.
 
+mod accounting;
+mod answer;
+mod recovery;
+mod session_runtime;
+
+use accounting::RunAccounting;
+use answer::final_answer;
+#[cfg(test)]
+use answer::overlap;
+use session_runtime::RunnerSessionRuntime;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{
-    AgentEvent, ContextPreparation, Effects, Emit, EventSink, HookChain, Interruption, LoopConfig, LoopControl,
-    LoopFailure, LoopOutcome, RunTrace, SessionHost, run_loop,
+    AgentEvent, Emit, EventSink, LoopConfig, LoopControl, LoopFailure, LoopOutcome, RunTrace, run_loop,
 };
 pub use crate::agent::{RunOutcome, RunReport};
 use crate::ai::retry::{RetryPolicy, is_retryable};
-use crate::ai::{Message, Provider, Request, ToolCall, ToolResultMessage, Usage, UserMessageKind, duration_ms, now_ms};
+use crate::ai::{Message, Provider, duration_ms};
 use crate::compaction::{self, Trigger};
 use crate::interaction::ApprovalCache;
-use crate::session::{Entry, RequestSource, SessionStore, StartRecord};
+use crate::session::{Entry, SessionStore};
 use crate::sync::AbortOnDrop;
 
-/// Bounds for one run. Defaults impose no turn or time limit.
+/// Bounds for one run. Defaults impose no request or time limit.
 /// Continuation is supplied by a finish_turn hook.
 #[derive(Clone, Debug, Default)]
 pub struct Limits {
     /// Model requests per run, failed attempts included. `None` disables the limit;
     /// `Some(0)` prevents any model request.
-    pub max_turns: Option<u32>,
+    pub max_model_requests: Option<u32>,
     /// Wall-clock limit for the whole run; `None` disables it.
     pub timeout: Option<Duration>,
     /// Tokens the run may use: input plus output of all its model requests as the provider
@@ -204,13 +212,8 @@ impl Runner {
         let sink = sink.as_ref();
         let to = Emit { sink, trace: &trace };
         let mut prompts = vec![Message::user(prompt)];
-        // Task turns, for numbering, and model requests, for the budget and the report.
-        let mut turns: u32 = 0;
-        let mut requests: u32 = 0;
-        let mut retries = 0;
-        let mut usage = Usage::default();
+        let mut accounting = RunAccounting::default();
         let mut last_error = None;
-        let mut continuations = 0;
 
         let ending = match recovered {
             Err(error) => {
@@ -218,11 +221,11 @@ impl Runner {
                 LoopOutcome::Error
             }
             Ok(()) => loop {
-                let attempt = retries + 1;
+                let attempt = accounting.retries + 1;
                 // The session projection, not an in-memory list, is what the model sees
                 // (pi: AgentSession replaces the context with the projection before each request).
                 let mut context = session.messages();
-                let mut host = RunnerHost {
+                let mut session_runtime = RunnerSessionRuntime {
                     session: &mut *session,
                     to,
                     hooks: &config.hooks,
@@ -233,24 +236,19 @@ impl Runner {
                     attempt,
                 };
                 let mut control = LoopControl::new(
-                    limits.max_turns.map(|limit| limit.saturating_sub(requests)),
+                    accounting.remaining_model_requests(limits),
                     &mut *approvals,
                     &run_cancel,
                     sink,
                 );
-                control.token_budget = limits
-                    .token_budget
-                    .map(|budget| budget.saturating_sub(usage.input_and_output()));
-                control.turn_offset = turns;
-                control.continuations = continuations;
-                control.host = Some(&mut host);
+                control.token_budget = accounting.remaining_tokens(limits);
+                control.prior_task_turns = accounting.task_turns;
+                control.prior_answer_continuations = accounting.answer_continuations;
+                control.session = Some(&mut session_runtime);
                 control.trace = Some(&trace);
-                control.attempt = attempt;
+                control.attempt_number = attempt;
                 let result = run_loop(&mut context, std::mem::take(&mut prompts), config, &mut control).await;
-                turns = turns.saturating_add(result.turns);
-                requests = requests.saturating_add(result.requests);
-                continuations = result.continuations;
-                usage.add(&result.usage);
+                accounting.record(&result);
                 if result.outcome != LoopOutcome::Error {
                     break result.outcome;
                 }
@@ -270,21 +268,18 @@ impl Runner {
                 let retryable = is_retryable(&failed);
                 // A retry is a request, so it needs budget; without any, the provider error
                 // is the reason the run ends.
-                let budget_left = limits.max_turns.is_none_or(|limit| requests < limit)
-                    && limits
-                        .token_budget
-                        .is_none_or(|budget| usage.input_and_output() < budget);
-                if !retryable || retries >= retry.max_retries || !budget_left || run_cancel.is_cancelled() {
+                let budget_left = accounting.has_budget(limits);
+                if !retryable || accounting.retries >= retry.max_retries || !budget_left || run_cancel.is_cancelled() {
                     break LoopOutcome::Error;
                 }
 
-                retries += 1;
-                let delay = retry.delay_for(retries, &failed);
+                accounting.retries += 1;
+                let delay = retry.delay_for(accounting.retries, &failed);
                 config
                     .hooks
                     .emit(
                         AgentEvent::RetryScheduled {
-                            attempt: retries,
+                            attempt: accounting.retries,
                             max_retries: retry.max_retries,
                             delay_ms: duration_ms(delay),
                             error: last_error.clone().unwrap_or_default(),
@@ -331,18 +326,20 @@ impl Runner {
             ),
             LoopOutcome::Completed => (RunOutcome::Completed, None),
             LoopOutcome::Error => (RunOutcome::Error, last_error),
-            LoopOutcome::MaxTurns => (
-                RunOutcome::MaxTurns,
+            LoopOutcome::ModelRequestLimit => (
+                RunOutcome::ModelRequestLimit,
                 Some(format!(
-                    "turn limit reached (max_turns = {})",
-                    limits.max_turns.expect("MaxTurns requires a configured turn limit")
+                    "model request limit reached (max_model_requests = {})",
+                    limits
+                        .max_model_requests
+                        .expect("ModelRequestLimit requires a configured request limit")
                 )),
             ),
             LoopOutcome::TokenBudget => (
                 RunOutcome::TokenBudget,
                 Some(format!(
                     "token budget reached ({} tokens used, token_budget = {})",
-                    usage.input_and_output(),
+                    accounting.usage.input_and_output(),
                     limits
                         .token_budget
                         .expect("TokenBudget requires a configured token budget")
@@ -383,9 +380,9 @@ impl Runner {
         let report = RunReport {
             outcome,
             final_text,
-            turns: requests,
-            retries,
-            usage,
+            model_requests: accounting.model_requests,
+            retries: accounting.retries,
+            usage: accounting.usage,
             error,
             session_file: session.path().map(|p| p.display().to_string()),
         };
@@ -395,265 +392,11 @@ impl Runner {
         config.hooks.emit(end, to).await;
         report
     }
-
-    /// Record an error result for each call that an interrupted run left without one, so
-    /// the next request cannot suggest that such a call did nothing. Calls are never run
-    /// again. Stops at the first result the session cannot record.
-    async fn recover_interrupted_calls(&mut self, trace: &RunTrace) -> Result<(), String> {
-        let Self {
-            config, session, sink, ..
-        } = self;
-        let to = Emit {
-            sink: sink.as_ref(),
-            trace,
-        };
-        for call in session.interrupted_tool_calls() {
-            let effects = config
-                .spec
-                .tools
-                .iter()
-                .find(|tool| tool.name() == call.tool_name)
-                .map(|tool| tool.effects());
-            let state = interruption(call.start, effects);
-            let event = AgentEvent::ToolCallRecovered {
-                tool_call_id: call.tool_call_id.clone(),
-                tool_name: call.tool_name.clone(),
-                state,
-            };
-            let result = Message::ToolResult(ToolResultMessage {
-                tool_call_id: call.tool_call_id,
-                tool_name: call.tool_name,
-                content: recovered_result(state).to_string(),
-                is_error: true,
-                timestamp: now_ms(),
-                duration_ms: None,
-            });
-            let start = AgentEvent::MessageStart { role: "toolResult" };
-            config.hooks.emit(start, to).await;
-            let entry_id = session
-                .append_message(result.clone())
-                .await
-                .map_err(|error| format!("cannot persist session entry: {error:#}"))?;
-            let end = AgentEvent::MessageEnd {
-                message: result,
-                entry_id: Some(entry_id),
-            };
-            config.hooks.emit(end, to).await;
-            // Reported once recorded, so the event never claims a result the session lacks.
-            config.hooks.emit(event, to).await;
-        }
-        Ok(())
-    }
-}
-
-/// What recovery may claim about an interrupted call. A start record means the call may
-/// have taken effect; its absence proves nothing for read-only tools, which are never
-/// recorded, or for tools that are no longer configured, whose effects are unknown.
-fn interruption(start: StartRecord, effects: Option<Effects>) -> Interruption {
-    match (start, effects) {
-        (StartRecord::Present, _) => Interruption::Started,
-        (StartRecord::NeverRun, _) => Interruption::NotStarted,
-        (StartRecord::Absent | StartRecord::Unavailable, Some(Effects::ReadOnly)) => Interruption::ReadOnly,
-        (StartRecord::Absent, Some(Effects::SideEffects)) => Interruption::NotStarted,
-        (StartRecord::Unavailable, Some(Effects::SideEffects))
-        | (StartRecord::Absent | StartRecord::Unavailable, None) => Interruption::StartUnknown,
-    }
-}
-
-/// The result the model sees for an interrupted call.
-fn recovered_result(state: Interruption) -> &'static str {
-    match state {
-        Interruption::Started => {
-            "Result unknown: this call started, but the agent stopped before its result was recorded. It may have changed state; check the current state before running it again."
-        }
-        Interruption::StartUnknown => {
-            "Result unknown: the agent stopped before this call's result was recorded, and whether the call started was not recorded. It may have changed state; check the current state before running it again."
-        }
-        Interruption::NotStarted => {
-            "Not executed: the agent stopped before this call started, so it had no effect. Run it again if it is still needed."
-        }
-        Interruption::ReadOnly => {
-            "No result: the agent stopped before this read-only call finished. It changed nothing; run it again if the result is still needed."
-        }
-    }
-}
-
-/// Join explicit continuation fragments, ignoring intervening system prompt updates.
-fn final_answer(messages: &[Message]) -> String {
-    let mut parts = Vec::new();
-    let mut end = messages.len();
-    while let Some((index, answer)) =
-        messages[..end]
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(index, message)| match message {
-                Message::Assistant(answer) => Some((index, answer)),
-                Message::System(_) | Message::User { .. } | Message::ToolResult(_) => None,
-            })
-    {
-        parts.push(answer.text());
-        let mut preceding = messages[..index]
-            .iter()
-            .enumerate()
-            .rev()
-            .filter(|(_, message)| !matches!(message, Message::System(_)));
-        match (preceding.next(), preceding.next()) {
-            (
-                Some((
-                    _,
-                    Message::User {
-                        kind: UserMessageKind::ContinueAnswer,
-                        ..
-                    },
-                )),
-                Some((previous, Message::Assistant(_))),
-            ) => end = previous + 1,
-            _ => break,
-        }
-    }
-    parts.reverse();
-    let mut joined = String::new();
-    for part in &parts {
-        // Models often restart the cut-off line instead of continuing it.
-        let repeated = overlap(&joined, part);
-        joined.push_str(&part[repeated..]);
-    }
-    joined
-}
-
-/// Length in bytes of the longest end of `previous` that `next` starts with. Matches shorter
-/// than 8 bytes are treated as coincidence, and only the last 1000 bytes are searched.
-fn overlap(previous: &str, next: &str) -> usize {
-    let longest = previous.len().min(next.len()).min(1000);
-    (8..=longest)
-        .rev()
-        .find(|&len| next.is_char_boundary(len) && previous.ends_with(&next[..len]))
-        .unwrap_or(0)
-}
-
-/// Records each step of a run in the session before the loop acts on it (pi: AgentSession
-/// writes on `message_end`), and prepares the context before each task request. A failed
-/// write stops the run: an unattended run must not keep acting without an audit trail.
-struct RunnerHost<'a> {
-    session: &'a mut SessionStore,
-    to: Emit<'a>,
-    hooks: &'a HookChain,
-    provider: &'a dyn Provider,
-    model: &'a str,
-    compaction: &'a compaction::Config,
-    /// Borrowed from the Runner, so the pause outlives one prompt and a dropped run.
-    compaction_pause: &'a mut Option<String>,
-    /// The attempt this host serves, for the events of an automatic compaction.
-    attempt: u32,
-}
-
-#[async_trait]
-impl SessionHost for RunnerHost<'_> {
-    async fn append_message(&mut self, message: &Message) -> Result<String, String> {
-        // The event that reports the message owns it, so the session stores a copy.
-        self.session
-            .append_message(message.clone())
-            .await
-            .map_err(|error| format!("cannot persist session entry: {error:#}"))
-    }
-
-    async fn edit_context(&mut self, index: usize, replacement: Option<&str>) -> Result<String, String> {
-        let projection = self.session.projection();
-        let target = projection
-            .get(index)
-            .ok_or_else(|| format!("context index {index} is out of bounds"))?;
-        self.session
-            .append_context_edit(&target.entry_id, replacement.map(str::to_string))
-            .await
-            .map_err(|error| format!("cannot persist context edit: {error:#}"))
-    }
-
-    async fn record_request(&mut self, request: &Request, provider: &dyn Provider) -> Result<String, String> {
-        let options = provider.request_options();
-        self.session
-            .record_request(request, provider.name(), options, RequestSource::Projection)
-            .await
-            .map_err(|error| format!("cannot persist request checkpoint: {error:#}"))
-    }
-
-    async fn record_tool_call_started(&mut self, call: &ToolCall) -> Result<(), String> {
-        self.session
-            .append_tool_call_started(&call.id, &call.name)
-            .await
-            .map(|_| ())
-            .map_err(|error| format!("cannot persist the start of tool call {:?}: {error:#}", call.id))
-    }
-
-    async fn prepare_context(&mut self, cancel: &CancellationToken) -> ContextPreparation {
-        let Some(limit) = self.compaction.trigger_bytes else {
-            return ContextPreparation::Unchanged;
-        };
-        match compaction::context_bytes(&self.session.messages()) {
-            Ok(bytes) if bytes <= limit => return ContextPreparation::Unchanged,
-            Ok(_) => {}
-            Err(error) => {
-                return ContextPreparation::Failed {
-                    error: format!("cannot measure context: {error:#}"),
-                    requests: 0,
-                    usage: Usage::default(),
-                };
-            }
-        }
-        if let Some(reason) = self.compaction_pause.as_deref() {
-            return ContextPreparation::Failed {
-                error: format!(
-                    "automatic compaction is paused because it failed earlier in this session ({reason}); \
-                     compact manually to retry, start a new session, or disable automatic compaction"
-                ),
-                requests: 0,
-                usage: Usage::default(),
-            };
-        }
-        let mut host = compaction::Host {
-            session: &mut *self.session,
-            provider: self.provider,
-            model: self.model,
-            config: self.compaction,
-            to: self.to,
-            hooks: self.hooks,
-            attempt: self.attempt,
-        };
-        let (report, messages) = host.run(Trigger::Automatic, cancel).await;
-        if let Some(error) = report.persistence_error {
-            return ContextPreparation::Unrecorded {
-                error,
-                requests: report.requests,
-                usage: report.usage,
-            };
-        }
-        match messages {
-            Some(messages) => ContextPreparation::Updated {
-                messages,
-                requests: report.requests,
-                usage: report.usage,
-            },
-            None => {
-                let error = report
-                    .error
-                    .unwrap_or_else(|| "automatic compaction made no progress".into());
-                // A paid summary request failed; repeating it on every prompt would keep
-                // paying for the same failure. Cancellation is the caller's choice.
-                if report.outcome == compaction::Outcome::Failed && report.requests > 0 {
-                    *self.compaction_pause = Some(error.clone());
-                }
-                ContextPreparation::Failed {
-                    error,
-                    requests: report.requests,
-                    usage: report.usage,
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
+    use async_trait::async_trait;
     use std::path::{Path, PathBuf};
 
     use super::*;
@@ -664,7 +407,7 @@ mod tests {
 
     #[test]
     fn default_turn_budget_is_unbounded() {
-        assert_eq!(Limits::default().max_turns, None);
+        assert_eq!(Limits::default().max_model_requests, None);
     }
 
     #[test]

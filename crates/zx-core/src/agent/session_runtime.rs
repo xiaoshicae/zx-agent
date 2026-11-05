@@ -1,5 +1,5 @@
 //! What the loop needs from the session it runs in. The Runner implements it over its session
-//! store; without a host, `run_loop` keeps everything in its in-memory context.
+//! store; without a session runtime, `run_loop` keeps everything in its in-memory context.
 
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
@@ -10,7 +10,7 @@ use crate::ai::{Message, Provider, Request, ToolCall, Usage};
 /// method returns an error (`prepare_context`: [`ContextPreparation::Unrecorded`]) and the loop
 /// stops at once, because an unattended run must not keep acting without an audit trail.
 #[async_trait]
-pub(crate) trait SessionHost: Send + Sync {
+pub(crate) trait SessionRuntime: Send + Sync {
     /// Record a finished message. Returns its entry ID.
     async fn append_message(&mut self, message: &Message) -> Result<String, String>;
 

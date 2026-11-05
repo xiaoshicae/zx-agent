@@ -76,10 +76,7 @@ impl Executor for Recorder {
 }
 
 fn ctx() -> ToolContext {
-    ToolContext {
-        cwd: PathBuf::from("/work"),
-        cancel: CancellationToken::new(),
-    }
+    ToolContext::new(PathBuf::from("/work"), CancellationToken::new())
 }
 
 #[tokio::test]

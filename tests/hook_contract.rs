@@ -80,12 +80,21 @@ fn tool_output_flags_default_to_false() {
             content: "done".into(),
             is_error: true,
             terminate: false,
+            details: None,
         },
         json!({"content": "done", "isError": true, "terminate": false}),
     );
     assert_eq!(
         serde_json::from_value::<ToolOutput>(json!({"content": "done"})).unwrap(),
         ToolOutput::ok("done")
+    );
+}
+
+#[test]
+fn tool_output_details_are_optional_and_kept_as_given() {
+    round_trip(
+        ToolOutput::ok("done").with_details(json!({"exitCode": 0, "lines": [1, 2]})),
+        json!({"content": "done", "isError": false, "terminate": false, "details": {"exitCode": 0, "lines": [1, 2]}}),
     );
 }
 
@@ -147,8 +156,8 @@ fn a_turn_summary_serializes_for_hook_processes() {
         response: &response,
         messages: &messages,
         turn: 2,
-        continuations: 1,
-        remaining_turns: Some(8),
+        answer_continuations: 1,
+        remaining_model_requests: Some(8),
         disposition: TurnDisposition::Stop,
     };
 
@@ -156,11 +165,15 @@ fn a_turn_summary_serializes_for_hook_processes() {
 
     assert_eq!(value["response"], serde_json::to_value(&response).unwrap());
     assert_eq!(value["messages"], serde_json::to_value(&messages).unwrap());
+    assert_eq!(value["answerContinuations"], 1);
+    assert_eq!(value["remainingModelRequests"], 8);
+    assert!(value.get("continuations").is_none());
+    assert!(value.get("remainingTurns").is_none());
     assert_eq!(
         (
             &value["turn"],
-            &value["continuations"],
-            &value["remainingTurns"],
+            &value["answerContinuations"],
+            &value["remainingModelRequests"],
             &value["disposition"]
         ),
         (&json!(2), &json!(1), &json!(8), &json!("stop"))

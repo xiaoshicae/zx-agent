@@ -36,13 +36,14 @@ use zx_agent::session::{SessionHeader, SessionStore};
 /// minutes, those of the unattended profiles (the kernel's own defaults are unlimited).
 pub fn test_limits() -> Limits {
     Limits {
-        max_turns: Some(30),
+        max_model_requests: Some(30),
         timeout: Some(Duration::from_secs(900)),
         token_budget: None,
     }
 }
 
-/// Echoes `text` after sleeping `ms`. Can inject queued messages while it runs.
+/// Echoes `text` after sleeping `ms`. Can inject queued messages while it runs, report each
+/// string in `progress` as a progress update, and return `details` as given.
 pub struct EchoTool {
     pub name: &'static str,
     pub mode: ExecutionMode,
@@ -79,8 +80,11 @@ impl Tool for EchoTool {
         self.mode
     }
 
-    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<ToolOutput, String> {
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        for update in args.get("progress").and_then(Value::as_array).into_iter().flatten() {
+            assert!(ctx.report_progress(update.as_str().unwrap_or_default()));
+        }
         if let Some(ms) = args.get("ms").and_then(Value::as_u64) {
             tokio::time::sleep(Duration::from_millis(ms)).await;
         }
@@ -100,6 +104,7 @@ impl Tool for EchoTool {
             content: args.get("text").and_then(Value::as_str).unwrap_or_default().to_string(),
             is_error: false,
             terminate: args.get("terminate").and_then(Value::as_bool).unwrap_or(false),
+            details: args.get("details").cloned(),
         })
     }
 }

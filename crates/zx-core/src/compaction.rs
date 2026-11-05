@@ -15,7 +15,7 @@ use crate::ai::{
 pub use crate::session::SummaryMode;
 use crate::session::{
     CompactionPlan, CompactionSummary, MAX_STATEMENTS, MAX_SUMMARY_BYTES, MergedSummary, RequestSource, SessionStore,
-    SummaryFact, SummaryRequest, cite_only,
+    SummaryFact, SummaryRequest, cite_only, records_without_details, without_details,
 };
 
 const MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
@@ -130,9 +130,15 @@ pub(crate) enum Trigger {
     Automatic,
 }
 
-/// Serialized transcript bytes, not a tokenizer or a model context-window guarantee.
+/// Serialized transcript bytes as a model may see them (without tool result details), not a
+/// tokenizer or a model context-window guarantee.
 pub fn context_bytes(messages: &[Message]) -> Result<usize> {
-    Ok(serde_json::to_vec(messages)?.len())
+    Ok(serde_json::to_vec(&without_details(messages))?.len())
+}
+
+/// Bytes of one message as a model may see it.
+fn message_bytes(message: &Message) -> Result<usize> {
+    Ok(serde_json::to_vec(&without_details(std::slice::from_ref(message))[0])?.len())
 }
 
 /// A full summary from the model's answer: its facts have no IDs and supersede nothing, and
@@ -260,7 +266,7 @@ impl Host<'_> {
             if matches!(item.message, Message::System(_)) {
                 continue;
             }
-            let next_bytes = bytes.saturating_add(serde_json::to_vec(&item.message)?.len());
+            let next_bytes = bytes.saturating_add(message_bytes(&item.message)?);
             // An oversized old message belongs in the source, rather than forcing
             // the entire prefix into the retained tail. Always keep at least one.
             if cut < raw.len() && next_bytes > self.config.keep_recent_bytes {
@@ -322,7 +328,7 @@ impl Host<'_> {
         Ok(Some(Candidate {
             first_kept,
             source_ids: source.iter().map(|item| item.entry_id.clone()).collect(),
-            input: serde_json::to_string(source)?,
+            input: serde_json::to_string(&records_without_details(source))?,
             retained,
             prefix_system,
             continues: None,

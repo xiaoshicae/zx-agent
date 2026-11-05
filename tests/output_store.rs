@@ -34,10 +34,7 @@ fn call(name: &str) -> ToolCall {
     }
 }
 fn ctx(cwd: &Path) -> ToolContext {
-    ToolContext {
-        cwd: cwd.into(),
-        cancel: CancellationToken::new(),
-    }
+    ToolContext::new(cwd.into(), CancellationToken::new())
 }
 fn parts(dir: &Path) -> (SpillOutputs, ReadOutputTool) {
     let store = OutputStore::new(dir, settings()).unwrap();
@@ -99,6 +96,7 @@ async fn exact_threshold_is_inline_and_error_and_terminate_flags_survive_spillin
         content: "界".repeat(86),
         is_error: true,
         terminate: true,
+        details: None,
     };
     let spilled = hook
         .after_tool(&call("bash"), output.clone(), &common::hook_context())
@@ -318,10 +316,7 @@ async fn cancellation_skips_writes_and_reads() {
             .is_err()
     );
     assert!(!dir.path().join(".zx-agent").exists());
-    let ctx = ToolContext {
-        cwd: dir.path().into(),
-        cancel,
-    };
+    let ctx = ToolContext::new(dir.path().into(), cancel);
     assert_eq!(
         reader
             .execute(json!({"id":uuid::Uuid::new_v4().to_string()}), &ctx)

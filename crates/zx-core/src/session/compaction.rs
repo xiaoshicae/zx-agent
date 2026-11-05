@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ai::{AssistantMessage, Message, Usage, UserMessageKind, now_ms};
 
-use super::{Entry, ProjectedMessage, SESSION_VERSION, SessionStore};
+use super::{Entry, ProjectedMessage, SESSION_VERSION, SessionStore, records_without_details};
 
 /// The format version that adds incremental summaries: `mode` and `continues` on attempts,
 /// fact IDs and `supersedes`, and `superseded` and `evicted` on results.
@@ -274,7 +274,7 @@ impl IncrementalSource {
             .collect();
         Ok(serde_json::to_string(&IncrementalInput {
             previous_facts,
-            records: &self.records,
+            records: &records_without_details(&self.records),
         })?)
     }
 }
