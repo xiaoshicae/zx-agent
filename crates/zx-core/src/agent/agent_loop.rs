@@ -21,7 +21,7 @@ use super::hooks::{
 };
 use super::policy::Decision;
 use super::queue::{MessageQueues, Queue};
-use super::session_host::{ContextPreparation, SessionHost};
+use super::session_host::{ContextPreparation, Prepared, SessionHost};
 use super::tool::{Effects, ExecutionMode, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput};
 use crate::ai::{
     AssistantMessage, Message, Provider, Reasoning, Request, StopReason, StreamEvent, SystemMessage, SystemPrompt,

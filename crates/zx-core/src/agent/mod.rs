@@ -22,5 +22,5 @@ pub use hooks::{
 pub use policy::{AllowAll, Decision, ToolPolicy};
 pub use queue::MessageQueues;
 pub use report::{RunOutcome, RunReport};
-pub(crate) use session_host::{ContextPreparation, SessionHost};
+pub(crate) use session_host::{ContextPreparation, Prepared, SessionHost};
 pub use tool::{Effects, ExecutionMode, MAX_DETAILS_BYTES, MAX_PROGRESS_BYTES, Tool, ToolContext, ToolOutput};

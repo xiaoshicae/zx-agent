@@ -30,7 +30,7 @@ pub use summary::{
 pub(crate) use summary::{MAX_STATEMENTS, MAX_SUMMARY_BYTES, cite_only};
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -412,6 +412,29 @@ impl SessionStore {
     /// Every entry in the order it was appended, on all branches.
     pub fn entries(&self) -> &[Entry] {
         &self.entries
+    }
+    /// The projected messages whose entries were appended at position `from` or later, so
+    /// that a run reports only its own answer and not an earlier run's.
+    pub(crate) fn messages_since(&self, from: usize) -> Vec<Message> {
+        let added: HashSet<&str> = self.entries[from..]
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Message(message) => Some(message.id.as_str()),
+                Entry::ContextEdit(_)
+                | Entry::FormatUpgrade(_)
+                | Entry::CompactionStarted(_)
+                | Entry::Compaction(_)
+                | Entry::CompactionFailed(_)
+                | Entry::RequestConfig(_)
+                | Entry::RequestStarted(_)
+                | Entry::ToolCallStarted(_) => None,
+            })
+            .collect();
+        self.projection()
+            .into_iter()
+            .filter(|projected| added.contains(projected.entry_id.as_str()))
+            .map(|projected| projected.message)
+            .collect()
     }
 
     /// The entry with `id`, on any branch.

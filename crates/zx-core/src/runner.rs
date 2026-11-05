@@ -7,31 +7,28 @@ mod accounting;
 mod answer;
 mod host;
 mod interrupted;
-mod overflow;
 
-use accounting::RunAccounting;
-use answer::final_answer;
-#[cfg(test)]
-use answer::overlap;
-use host::RunHost;
-use overflow::OverflowRecovery;
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
+use accounting::RunAccounting;
+use answer::final_answer;
+#[cfg(test)]
+use answer::overlap;
+use host::{CompactionPause, RunHost, RunStop};
+
 use crate::agent::{
-    AgentEvent, Emit, EventSink, HookChain, LoopConfig, LoopControl, LoopFailure, LoopOutcome, MessageQueues, RunTrace,
-    run_loop,
+    AgentEvent, Emit, EventSink, LoopConfig, LoopControl, LoopFailure, LoopOutcome, RunTrace, run_loop,
 };
 pub use crate::agent::{RunOutcome, RunReport};
 use crate::ai::retry::{RetryPolicy, is_context_overflow, is_retryable};
-use crate::ai::{Message, Provider, Reasoning, StopReason, duration_ms};
+use crate::ai::{Message, Provider, Reasoning};
 use crate::compaction::{self, Trigger};
 use crate::interaction::ApprovalCache;
-use crate::session::{Entry, SessionStore};
+use crate::session::SessionStore;
 use crate::sync::AbortOnDrop;
 
 /// Bounds for one run. Defaults impose no request or time limit.
@@ -58,10 +55,7 @@ pub struct Runner {
     sink: Arc<dyn EventSink>,
     approvals: ApprovalCache,
     compaction: compaction::Config,
-    /// Why automatic compaction is paused after a paid summary request failed. Kept across
-    /// prompts so the same failing summary is not paid for again on every prompt. A run only
-    /// borrows it, so the pause also survives a run whose future is dropped.
-    compaction_pause: Option<String>,
+    pause: CompactionPause,
 }
 
 impl Runner {
@@ -82,7 +76,7 @@ impl Runner {
             sink,
             approvals: ApprovalCache::default(),
             compaction: compaction::Config::default(),
-            compaction_pause: None,
+            pause: CompactionPause::default(),
         }
     }
 
@@ -105,24 +99,12 @@ impl Runner {
             self.config.spec.cwd.clone(),
             child.clone(),
         );
-        let mut host = compaction::Host {
-            session: &mut self.session,
-            provider: self.config.spec.provider.as_ref(),
-            model: &self.config.spec.model,
-            config: &self.compaction,
-            to: Emit {
-                sink: self.sink.as_ref(),
-                trace: &trace,
-            },
-            hooks: &self.config.hooks,
-            attempt: 1,
+        let to = Emit {
+            sink: self.sink.as_ref(),
+            trace: &trace,
         };
-        let report = host.run(Trigger::Manual, &child).await.0;
-        if report.outcome == compaction::Outcome::Completed {
-            // A summary succeeded, so automatic attempts may succeed again.
-            self.compaction_pause = None;
-        }
-        report
+        let mut host = RunHost::new(&mut self.session, to, &self.config, &self.compaction, &mut self.pause);
+        host.summarize(Trigger::Manual, &child).await.0
     }
 
     /// The loop configuration, for example to reach `config().queues` during a run.
@@ -136,7 +118,7 @@ impl Runner {
 
     pub(crate) fn replace_model(&mut self, provider: Arc<dyn Provider>, model: String) -> (Arc<dyn Provider>, String) {
         // Another model may produce a valid summary where the previous one failed.
-        self.compaction_pause = None;
+        self.pause.clear();
         (
             std::mem::replace(&mut self.config.spec.provider, provider),
             std::mem::replace(&mut self.config.spec.model, model),
@@ -152,7 +134,6 @@ impl Runner {
         self.approvals.clear();
     }
 
-    /// The session.
     pub fn session(&self) -> &SessionStore {
         &self.session
     }
@@ -196,17 +177,7 @@ impl Runner {
         // Dropping this future must cancel background providers even when the caller
         // keeps its parent token alive.
         let _cancel_on_drop = run_cancel.drop_guard_ref();
-        let timed_out = Arc::new(AtomicBool::new(false));
-        let _timer = self.limits.timeout.map(|limit| {
-            let token = run_cancel.clone();
-            let flag = timed_out.clone();
-            AbortOnDrop(tokio::spawn(async move {
-                tokio::time::sleep(limit).await;
-                flag.store(true, Ordering::SeqCst);
-                token.cancel();
-            }))
-        });
-
+        let timer = RunTimer::start(self.limits.timeout, &run_cancel);
         let trace = RunTrace::new(
             Some(self.session.header().id.clone()),
             self.config.spec.cwd.clone(),
@@ -233,214 +204,112 @@ impl Runner {
             sink,
             approvals,
             compaction,
-            compaction_pause,
+            pause,
         } = self;
         let sink = sink.as_ref();
         let to = Emit { sink, trace: &trace };
+        let mut host = RunHost::new(session, to, config, compaction, pause);
         let begun = match (recovered, begin) {
             (Err(error), _) => Err(error),
             (Ok(()), Start::Prompt(prompt)) => Ok(vec![Message::user(prompt)]),
-            (Ok(()), Start::Continue) => continuation(session, &config.hooks, to, &config.queues).await,
+            (Ok(()), Start::Continue) => host.continuation(&config.queues).await,
         };
         let mut accounting = RunAccounting::default();
-        let mut last_error = None;
-        let mut overflow_recovered = false;
-
-        let ending = match begun {
-            Err(error) => {
-                last_error = Some(error);
-                LoopOutcome::Error
-            }
-            Ok(mut prompts) => loop {
-                let attempt = accounting.attempts + 1;
-                // The session projection, not an in-memory list, is what the model sees
-                // (pi: AgentSession replaces the context with the projection before each request).
-                let mut context = session.messages();
-                let mut host = RunHost {
-                    session: &mut *session,
-                    to,
-                    hooks: &config.hooks,
-                    provider: config.spec.provider.as_ref(),
-                    model: &config.spec.model,
-                    compaction,
-                    compaction_pause: &mut *compaction_pause,
-                    attempt,
-                };
-                let mut control = LoopControl::new(
-                    accounting.remaining_model_requests(limits),
-                    &mut *approvals,
-                    &run_cancel,
-                    sink,
-                );
-                control.token_budget = accounting.remaining_tokens(limits);
-                control.prior_task_turns = accounting.task_turns;
-                control.prior_answer_continuations = accounting.answer_continuations;
-                control.session = Some(&mut host);
-                control.trace = Some(&trace);
-                control.attempt_number = attempt;
-                let result = run_loop(&mut context, std::mem::take(&mut prompts), config, &mut control).await;
-                accounting.record(&result);
-                if result.outcome != LoopOutcome::Error {
-                    break result.outcome;
-                }
-                // More than one turn means an answer succeeded after any earlier recovery.
-                let task_turns = result.task_turns;
-                // Hook failures are distinct from failed provider responses and are not retried.
-                let (failed, entry_id) = match result.failure {
-                    Some(LoopFailure::Provider { message, entry_id }) => (message, entry_id),
-                    Some(LoopFailure::Host(error)) => {
-                        last_error = Some(error);
-                        break LoopOutcome::Error;
-                    }
-                    None => {
-                        last_error = Some("loop failed without a diagnostic".into());
-                        break LoopOutcome::Error;
-                    }
-                };
-                last_error = failed.error_message.clone();
-                // A context the model rejects as too long fails again however often it is
-                // sent; with automatic compaction enabled, compact once and continue (pi:
-                // AgentSession's overflow recovery). Not a retry: it has its own limit.
-                if is_context_overflow(&failed) && compaction.trigger_bytes.is_some() {
-                    let error = last_error.clone().unwrap_or_default();
-                    let refusal = if overflow_recovered && task_turns <= 1 {
-                        Some("the context still overflowed after compacting it once".to_string())
-                    } else {
-                        compaction_pause.as_deref().map(|reason| {
-                            format!(
-                                "automatic compaction is paused because it failed earlier in this session ({reason})"
-                            )
-                        })
+        let stop = match begun {
+            Err(error) => RunStop::error(error),
+            Ok(mut prompts) => {
+                let mut overflow_recovered = false;
+                loop {
+                    let attempt = accounting.attempts + 1;
+                    host.attempt = attempt;
+                    // The session projection, not an in-memory list, is what the model sees.
+                    let mut context = host.session.messages();
+                    let mut control = LoopControl {
+                        token_budget: accounting.remaining_tokens(limits),
+                        prior_task_turns: accounting.task_turns,
+                        prior_answer_continuations: accounting.answer_continuations,
+                        session: Some(&mut host),
+                        trace: Some(&trace),
+                        attempt_number: attempt,
+                        ..LoopControl::new(
+                            accounting.remaining_model_requests(limits),
+                            &mut *approvals,
+                            &run_cancel,
+                            sink,
+                        )
                     };
-                    if let Some(refusal) = refusal {
-                        last_error = Some(format!("{error}; {refusal}"));
-                        break LoopOutcome::Error;
+                    let result = run_loop(&mut context, std::mem::take(&mut prompts), config, &mut control).await;
+                    accounting.record(&result);
+                    if result.outcome != LoopOutcome::Error {
+                        break RunStop {
+                            outcome: result.outcome,
+                            error: None,
+                        };
                     }
-                    // A summary is a request, so it needs budget like a retry does.
-                    if !accounting.has_budget(limits) || run_cancel.is_cancelled() {
-                        break LoopOutcome::Error;
-                    }
-                    let recovery = OverflowRecovery {
-                        session: &mut *session,
-                        hooks: &config.hooks,
-                        to,
-                        provider: config.spec.provider.as_ref(),
-                        model: &config.spec.model,
-                        compaction,
-                        compaction_pause: &mut *compaction_pause,
-                        attempt,
-                        cancel: &run_cancel,
+                    // Hook failures are distinct from failed provider responses and are not retried.
+                    let (failed, entry_id) = match result.failure {
+                        Some(LoopFailure::Provider { message, entry_id }) => (message, entry_id),
+                        Some(LoopFailure::Host(error)) => break RunStop::error(error),
+                        None => break RunStop::error("loop failed without a diagnostic"),
                     };
-                    match recovery.run(&error, entry_id.as_deref(), &mut accounting).await {
-                        Ok(()) => {
-                            overflow_recovered = true;
-                            continue;
+                    let error = failed.error_message.clone();
+                    if is_context_overflow(&failed) && compaction.trigger_bytes.is_some() {
+                        // A context the model rejects as too long fails again however often it
+                        // is sent: compact once and continue. Not a retry, so it has its own
+                        // limit: once per run, until an answer succeeds again (more than one
+                        // turn in the attempt).
+                        let overflow = error.clone().unwrap_or_default();
+                        let refusal = if overflow_recovered && result.task_turns <= 1 {
+                            Some("the context still overflowed after compacting it once".to_string())
+                        } else {
+                            host.pause.reason().map(|reason| {
+                                format!("automatic compaction is paused because it failed earlier in this session ({reason})")
+                            })
+                        };
+                        if let Some(refusal) = refusal {
+                            break RunStop::error(format!("{overflow}; {refusal}"));
                         }
-                        Err((outcome, error)) => {
-                            last_error = Some(error);
-                            break outcome;
+                        // A summary is a request, so it needs budget like a retry does.
+                        if !accounting.has_budget(limits) || run_cancel.is_cancelled() {
+                            break RunStop {
+                                outcome: LoopOutcome::Error,
+                                error,
+                            };
+                        }
+                        match host
+                            .recover_overflow(&overflow, entry_id.as_deref(), &mut accounting, &run_cancel)
+                            .await
+                        {
+                            Ok(()) => {
+                                overflow_recovered = true;
+                                continue;
+                            }
+                            Err(stop) => break stop,
                         }
                     }
+                    // A retry is a request, so it needs budget; without any, the provider error
+                    // is the reason the run ends.
+                    if !is_retryable(&failed)
+                        || accounting.retries >= retry.max_retries
+                        || !accounting.has_budget(limits)
+                        || run_cancel.is_cancelled()
+                    {
+                        break RunStop {
+                            outcome: LoopOutcome::Error,
+                            error,
+                        };
+                    }
+                    if let Err(stop) = host
+                        .schedule_retry(retry, &mut accounting, &failed, entry_id.as_deref(), &run_cancel)
+                        .await
+                    {
+                        break stop;
+                    }
                 }
-                let retryable = is_retryable(&failed);
-                // A retry is a request, so it needs budget; without any, the provider error
-                // is the reason the run ends.
-                let budget_left = accounting.has_budget(limits);
-                if !retryable || accounting.retries >= retry.max_retries || !budget_left || run_cancel.is_cancelled() {
-                    break LoopOutcome::Error;
-                }
-
-                accounting.retries += 1;
-                let delay = retry.delay_for(accounting.retries, &failed);
-                config
-                    .hooks
-                    .emit(
-                        AgentEvent::RetryScheduled {
-                            attempt: accounting.retries,
-                            max_retries: retry.max_retries,
-                            delay_ms: duration_ms(delay),
-                            error: last_error.clone().unwrap_or_default(),
-                        },
-                        to,
-                    )
-                    .await;
-                // Keep the failed attempt in the session but drop it from model context, then
-                // continue from the previous message (pi: AgentSession._prepareRetry and
-                // _omitRecoveryAttempt). No user message is repeated.
-                if let Some(target) = entry_id
-                    && let Err(error) = omit_failed_attempt(session, &config.hooks, to, &target).await
-                {
-                    last_error = Some(error);
-                    break LoopOutcome::Error;
-                }
-                let cancelled = tokio::select! {
-                    () = tokio::time::sleep(delay) => false,
-                    () = run_cancel.cancelled() => true,
-                };
-                if cancelled {
-                    break LoopOutcome::Aborted;
-                }
-            },
-        };
-
-        let (outcome, error) = match ending {
-            LoopOutcome::Truncated => (
-                RunOutcome::Truncated,
-                Some("the answer was cut off at the output token limit".to_string()),
-            ),
-            LoopOutcome::Completed => (RunOutcome::Completed, None),
-            LoopOutcome::Error => (RunOutcome::Error, last_error),
-            LoopOutcome::ModelRequestLimit => (
-                RunOutcome::ModelRequestLimit,
-                Some(format!(
-                    "model request limit reached (max_model_requests = {})",
-                    limits
-                        .max_model_requests
-                        .expect("ModelRequestLimit requires a configured request limit")
-                )),
-            ),
-            LoopOutcome::TokenBudget => (
-                RunOutcome::TokenBudget,
-                Some(format!(
-                    "token budget reached ({} tokens used, token_budget = {})",
-                    accounting.usage.input_and_output(),
-                    limits
-                        .token_budget
-                        .expect("TokenBudget requires a configured token budget")
-                )),
-            ),
-            LoopOutcome::Aborted if timed_out.load(Ordering::SeqCst) => {
-                let secs = limits.timeout.map(|t| t.as_secs()).unwrap_or_default();
-                (
-                    RunOutcome::Timeout,
-                    Some(format!("run exceeded the {secs}s time limit")),
-                )
             }
-            LoopOutcome::Aborted => (RunOutcome::Aborted, Some("run was cancelled".to_string())),
         };
-
-        // An earlier run's answer must not be reported as this run's.
-        let new_ids: HashSet<&str> = session.entries()[run_start..]
-            .iter()
-            .filter_map(|entry| match entry {
-                Entry::Message(message) => Some(message.id.as_str()),
-                Entry::ContextEdit(_)
-                | Entry::FormatUpgrade(_)
-                | Entry::CompactionStarted(_)
-                | Entry::Compaction(_)
-                | Entry::CompactionFailed(_)
-                | Entry::RequestConfig(_)
-                | Entry::RequestStarted(_)
-                | Entry::ToolCallStarted(_) => None,
-            })
-            .collect();
-        let messages: Vec<Message> = session
-            .projection()
-            .into_iter()
-            .filter(|projected| new_ids.contains(projected.entry_id.as_str()))
-            .map(|projected| projected.message)
-            .collect();
-        let final_text = final_answer(&messages);
+        let (outcome, error) = conclude(stop, limits, &accounting, timer.timed_out());
+        let final_text = final_answer(&host.session.messages_since(run_start));
         let report = RunReport {
             outcome,
             final_text,
@@ -448,7 +317,7 @@ impl Runner {
             retries: accounting.retries,
             usage: accounting.usage,
             error,
-            session_file: session.path().map(|p| p.display().to_string()),
+            session_file: host.session.path().map(|p| p.display().to_string()),
         };
         let end = AgentEvent::RunEnd {
             report: Box::new(report.clone()),
@@ -465,68 +334,74 @@ enum Start {
     Continue,
 }
 
-/// The input a continuation starts with, after omitting a failed answer at the end; an error
-/// when there is nothing for the model to answer.
-async fn continuation(
-    session: &mut SessionStore,
-    hooks: &HookChain,
-    to: Emit<'_>,
-    queues: &MessageQueues,
-) -> Result<Vec<Message>, String> {
-    let projection = session.projection();
-    let Some(last) = projection
-        .iter()
-        .rev()
-        .find(|item| !matches!(item.message, Message::System(_)))
-    else {
-        return Err("nothing to continue: the conversation is empty; send a prompt instead".into());
-    };
-    match &last.message {
-        Message::User { .. } | Message::ToolResult(_) => Ok(Vec::new()),
-        Message::Assistant(answer) if matches!(answer.stop_reason, StopReason::Error | StopReason::Aborted) => {
-            let failed = last.entry_id.clone();
-            omit_failed_attempt(session, hooks, to, &failed).await?;
-            Ok(Vec::new())
-        }
-        Message::Assistant(_) => {
-            let mut queued = queues.drain_steering();
-            if queued.is_empty() {
-                queued = queues.drain_follow_up();
-            }
-            if queued.is_empty() {
-                return Err(
-                    "nothing to continue: the conversation ends with a finished answer; send a prompt instead".into(),
-                );
-            }
-            Ok(queued)
-        }
-        Message::System(_) => Err("nothing to continue: the conversation has only system messages".into()),
+/// Cancels the run when its wall-clock limit passes, and remembers that it did.
+struct RunTimer {
+    timed_out: Arc<AtomicBool>,
+    _task: Option<AbortOnDrop<()>>,
+}
+
+impl RunTimer {
+    fn start(limit: Option<Duration>, cancel: &CancellationToken) -> Self {
+        let timed_out = Arc::new(AtomicBool::new(false));
+        let task = limit.map(|limit| {
+            let token = cancel.clone();
+            let flag = timed_out.clone();
+            AbortOnDrop(tokio::spawn(async move {
+                tokio::time::sleep(limit).await;
+                flag.store(true, Ordering::SeqCst);
+                token.cancel();
+            }))
+        });
+        Self { timed_out, _task: task }
+    }
+
+    fn timed_out(&self) -> bool {
+        self.timed_out.load(Ordering::SeqCst)
     }
 }
 
-/// Keep a failed answer in the session but drop it from the model context, so that the next
-/// attempt continues from the message before it without repeating the user message (pi:
-/// AgentSession._prepareRetry and _omitRecoveryAttempt).
-async fn omit_failed_attempt(
-    session: &mut SessionStore,
-    hooks: &HookChain,
-    to: Emit<'_>,
-    target: &str,
-) -> Result<(), String> {
-    let index = session.projection().iter().position(|item| item.entry_id == target);
-    let edit = session
-        .append_context_edit(target, None)
-        .await
-        .map_err(|error| format!("cannot omit the failed attempt: {error:#}"))?;
-    if let Some(index) = index {
-        let event = AgentEvent::ContextEdited {
-            index,
-            replacement: None,
-            entry_id: Some(edit),
-        };
-        hooks.emit(event, to).await;
+/// How the run ended, as the report states it.
+fn conclude(
+    stop: RunStop,
+    limits: &Limits,
+    accounting: &RunAccounting,
+    timed_out: bool,
+) -> (RunOutcome, Option<String>) {
+    match stop.outcome {
+        LoopOutcome::Completed => (RunOutcome::Completed, None),
+        LoopOutcome::Truncated => (
+            RunOutcome::Truncated,
+            Some("the answer was cut off at the output token limit".to_string()),
+        ),
+        LoopOutcome::Error => (RunOutcome::Error, stop.error),
+        LoopOutcome::ModelRequestLimit => (
+            RunOutcome::ModelRequestLimit,
+            Some(format!(
+                "model request limit reached (max_model_requests = {})",
+                limits
+                    .max_model_requests
+                    .expect("ModelRequestLimit requires a configured request limit")
+            )),
+        ),
+        LoopOutcome::TokenBudget => (
+            RunOutcome::TokenBudget,
+            Some(format!(
+                "token budget reached ({} tokens used, token_budget = {})",
+                accounting.usage.input_and_output(),
+                limits
+                    .token_budget
+                    .expect("TokenBudget requires a configured token budget")
+            )),
+        ),
+        LoopOutcome::Aborted if timed_out => {
+            let secs = limits.timeout.map(|t| t.as_secs()).unwrap_or_default();
+            (
+                RunOutcome::Timeout,
+                Some(format!("run exceeded the {secs}s time limit")),
+            )
+        }
+        LoopOutcome::Aborted => (RunOutcome::Aborted, Some("run was cancelled".to_string())),
     }
-    Ok(())
 }
 
 #[cfg(test)]
