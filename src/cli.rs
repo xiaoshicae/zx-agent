@@ -1,4 +1,4 @@
-//! Command-line settings and shared runtime assembly for run and chat.
+//! The command line, and the assembly of a session that run, chat, serve and acp share.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Once};
@@ -31,7 +31,7 @@ use zx_agent::runner::{Limits, Runner};
 use zx_agent::session::{SessionHeader, SessionStore};
 use zx_agent::tools::{self, BASH};
 
-use crate::sessions::{self, SessionsArgs};
+use crate::sessions::{self, SessionFile, SessionsArgs};
 
 /// Comma-separated secret files to redact, added to `--secret-file`; deployments set it, for
 /// example to the token that the platform mounts for the agent's own account.
@@ -91,21 +91,8 @@ pub(crate) struct RunArgs {
     #[command(flatten)]
     pub(crate) base: BaseArgs,
 
-    /// Maximum model requests for the run, failed attempts included. Defaults to the
-    /// selected profile.
-    #[arg(long)]
-    pub(crate) max_model_requests: Option<u32>,
-
-    /// Wall-clock limit for the whole run, in seconds. 0 disables it. Defaults to the
-    /// selected profile.
-    #[arg(long)]
-    pub(crate) timeout_secs: Option<u64>,
-
-    /// Tokens the run may use: input plus output of all its model requests, as the provider
-    /// reports them. Checked before each request, so the last one may go over; the run then
-    /// exits 7. 0 disables it. Defaults to the selected profile.
-    #[arg(long)]
-    pub(crate) token_budget: Option<u64>,
+    #[command(flatten)]
+    pub(crate) budget: BudgetArgs,
 
     #[command(flatten)]
     pub(crate) transport: TransportArgs,
@@ -132,20 +119,8 @@ pub(crate) struct ChatArgs {
     #[command(flatten)]
     pub(crate) base: BaseArgs,
 
-    /// Maximum model requests per prompt. Defaults to the selected profile.
-    #[arg(long)]
-    pub(crate) max_model_requests: Option<u32>,
-
-    /// Wall-clock limit per prompt, in seconds. 0 disables it. Defaults to the selected
-    /// profile.
-    #[arg(long)]
-    pub(crate) timeout_secs: Option<u64>,
-
-    /// Tokens per prompt: input plus output of its model requests, as the provider reports
-    /// them. Checked before each request, so the last one may go over. 0 disables it.
-    /// Defaults to the selected profile.
-    #[arg(long)]
-    pub(crate) token_budget: Option<u64>,
+    #[command(flatten)]
+    pub(crate) budget: BudgetArgs,
 
     /// How long an approval request waits for a menu choice, in seconds. An unanswered
     /// request is denied, and the task goes on without the call.
@@ -212,20 +187,8 @@ pub(crate) struct AcpArgs {
     #[command(flatten)]
     pub(crate) base: BaseArgs,
 
-    /// Maximum model requests per prompt. Defaults to the selected profile.
-    #[arg(long)]
-    pub(crate) max_model_requests: Option<u32>,
-
-    /// Wall-clock limit per prompt, in seconds. 0 disables it. Defaults to the selected
-    /// profile.
-    #[arg(long)]
-    pub(crate) timeout_secs: Option<u64>,
-
-    /// Tokens per prompt: input plus output of its model requests, as the provider reports
-    /// them. Checked before each request, so the last one may go over. 0 disables it.
-    /// Defaults to the selected profile.
-    #[arg(long)]
-    pub(crate) token_budget: Option<u64>,
+    #[command(flatten)]
+    pub(crate) budget: BudgetArgs,
 
     /// How long a permission request waits for the client's answer, in seconds. An
     /// unanswered request is denied, and the turn goes on without the call.
@@ -249,20 +212,8 @@ pub(crate) struct ServeArgs {
     #[command(flatten)]
     pub(crate) base: BaseArgs,
 
-    /// Maximum model requests per prompt. Defaults to the selected profile.
-    #[arg(long)]
-    pub(crate) max_model_requests: Option<u32>,
-
-    /// Wall-clock limit per prompt, in seconds. 0 disables it. Defaults to the selected
-    /// profile.
-    #[arg(long)]
-    pub(crate) timeout_secs: Option<u64>,
-
-    /// Tokens per prompt: input plus output of its model requests, as the provider reports
-    /// them. Checked before each request, so the last one may go over. 0 disables it.
-    /// Defaults to the selected profile.
-    #[arg(long)]
-    pub(crate) token_budget: Option<u64>,
+    #[command(flatten)]
+    pub(crate) budget: BudgetArgs,
 
     #[command(flatten)]
     pub(crate) transport: TransportArgs,
@@ -384,6 +335,26 @@ pub(crate) struct TransportArgs {
     pub(crate) max_retries: u32,
 }
 
+/// Limits per prompt; `None` keeps the selected profile's value. A run is one prompt.
+#[derive(Args)]
+pub(crate) struct BudgetArgs {
+    /// Maximum model requests per prompt, failed attempts included. Defaults to the selected
+    /// profile.
+    #[arg(long)]
+    pub(crate) max_model_requests: Option<u32>,
+
+    /// Wall-clock limit per prompt, in seconds. 0 disables it. Defaults to the selected
+    /// profile.
+    #[arg(long)]
+    pub(crate) timeout_secs: Option<u64>,
+
+    /// Tokens per prompt: input plus output of its model requests, as the provider reports
+    /// them. Checked before each request, so the last one may go over; a run then exits 7.
+    /// 0 disables it. Defaults to the selected profile.
+    #[arg(long)]
+    pub(crate) token_budget: Option<u64>,
+}
+
 #[derive(Args)]
 pub(crate) struct RequestArgs {
     /// Output token limit per response. Reasoning models count their reasoning against it,
@@ -442,30 +413,16 @@ pub(crate) enum OutputMode {
     Jsonl,
 }
 
-pub(crate) enum SessionFile<'a> {
-    Memory,
-    Open(&'a Path),
-    Create(&'a Path),
-    /// A new file in this directory, named after the session (`sessions::file_name`); the
-    /// directory is created when missing.
-    NewIn(&'a Path),
-}
-
-impl<'a> SessionFile<'a> {
-    pub(crate) fn from_path(path: Option<&'a Path>) -> Self {
-        match path {
-            Some(path) => Self::Open(path),
-            None => Self::Memory,
-        }
-    }
-
-    /// The session file, or for [`SessionFile::NewIn`] the directory it will be created in.
-    pub(crate) fn location(&self) -> Option<&'a Path> {
-        match self {
-            Self::Memory => None,
-            Self::Open(path) | Self::Create(path) | Self::NewIn(path) => Some(path),
-        }
-    }
+/// The working directory as `prepare` resolves it, which is what session headers record.
+pub(crate) fn resolve_cwd(cwd: Option<&Path>) -> Result<PathBuf> {
+    let cwd = match cwd {
+        Some(path) => path
+            .canonicalize()
+            .with_context(|| format!("invalid --cwd {}", path.display()))?,
+        None => std::env::current_dir()?,
+    };
+    anyhow::ensure!(cwd.is_dir(), "--cwd is not a directory: {}", cwd.display());
+    Ok(cwd)
 }
 
 /// `path` with its deepest existing ancestor resolved, so that a file that does not exist yet
@@ -494,23 +451,43 @@ pub(crate) struct SessionOptions<'a> {
     pub(crate) base: &'a BaseArgs,
     pub(crate) transport: &'a TransportArgs,
     pub(crate) request: &'a RequestArgs,
+    pub(crate) budget: &'a BudgetArgs,
     pub(crate) model: &'a str,
     pub(crate) file: SessionFile<'a>,
     pub(crate) default_profile: Builtin,
-    pub(crate) budget: Budget,
-    /// Text read once by [`read_instructions`]; `None` keeps the profile's instructions.
-    pub(crate) instructions: Option<&'a str>,
+    /// Times to continue an answer cut off by the output token limit; `None` keeps the
+    /// profile's value.
+    pub(crate) continue_on_length: Option<u32>,
+    pub(crate) shared: &'a Shared,
     /// Environment variables that hold credentials besides the API key, such as IM tokens:
     /// commands do not inherit them, and their values are redacted like the key's.
     pub(crate) hidden_env: &'a [String],
-    /// The profile's MCP servers, connected by [`connect_mcp`].
-    pub(crate) mcp: &'a McpTools,
+}
+
+/// What every session of a process shares: `--system-prompt-file`, read once, and the
+/// profile's MCP servers, connected once.
+pub(crate) struct Shared {
+    /// `None` keeps the profile's instructions.
+    instructions: Option<String>,
+    mcp: McpTools,
+}
+
+impl Shared {
+    /// Read the instructions and connect the MCP servers of the selected profile. A missing
+    /// token, a server that cannot be reached in time or a tool it lacks stops startup, like
+    /// other configuration errors.
+    pub(crate) async fn connect(base: &BaseArgs, default: Builtin, transport: &TransportArgs) -> Result<Self> {
+        Ok(Self {
+            instructions: read_instructions(base)?,
+            mcp: connect_mcp(base, default, transport).await?,
+        })
+    }
 }
 
 /// The profile's MCP servers, connected once per process and shared by every session it
-/// opens, as serve does for each thread (docs/p7-mcp-review.md, 2.3.3).
+/// opens, as serve does for each thread.
 #[derive(Default)]
-pub(crate) struct McpTools {
+struct McpTools {
     servers: Vec<Arc<dyn Extension>>,
     /// Tools that need approval: those not in their server's `allowTools`, unless the
     /// profile approves every call.
@@ -519,10 +496,9 @@ pub(crate) struct McpTools {
     token_env: Vec<String>,
 }
 
-/// Connect the MCP servers of the selected profile. A missing token, a server that cannot be
-/// reached in time or a tool it lacks stops startup, like other configuration errors. Prints
-/// one line per server on stderr, without the token or the URL's path.
-pub(crate) async fn connect_mcp(base: &BaseArgs, default: Builtin, transport: &TransportArgs) -> Result<McpTools> {
+/// Connect the MCP servers of the selected profile, printing one line per server on stderr,
+/// without the token or the URL's path.
+async fn connect_mcp(base: &BaseArgs, default: Builtin, transport: &TransportArgs) -> Result<McpTools> {
     let profile = Profile::load(base.profile.as_deref(), default)?;
     let mut configs = Vec::new();
     for server in &profile.mcp {
@@ -546,7 +522,7 @@ pub(crate) async fn connect_mcp(base: &BaseArgs, default: Builtin, transport: &T
         let server = server.map_err(anyhow::Error::msg)?;
         let mut names = Vec::new();
         for (remote, name) in server.tool_names() {
-            // With approveAll nothing asks: the container is the sandbox (decision D11).
+            // With approveAll nothing asks: the container is the sandbox.
             if settings.allow_tools.contains(remote) || profile.rules.approve_all {
                 names.push(name.clone());
             } else {
@@ -576,15 +552,6 @@ pub(crate) async fn connect_mcp(base: &BaseArgs, default: Builtin, transport: &T
     Ok(tools)
 }
 
-/// Limits given on the command line. `None` keeps the selected profile's value.
-pub(crate) struct Budget {
-    pub(crate) max_model_requests: Option<u32>,
-    pub(crate) timeout_secs: Option<u64>,
-    /// 0 disables the profile's budget.
-    pub(crate) token_budget: Option<u64>,
-    pub(crate) continue_on_length: Option<u32>,
-}
-
 /// A configured session with the hooks every mode shares. A mode adds only what is its own,
 /// such as chat's approval rule and interaction host, then calls `into_session`.
 pub(crate) struct PreparedSession {
@@ -603,10 +570,6 @@ pub(crate) struct PreparedSession {
     pub(crate) auto_approve_commands: Vec<String>,
 }
 
-/// Read `--system-prompt-file` once, at startup. As before profiles existed, it may be a
-/// pipe and is not limited to the profile file budget, so it cannot be read again for a
-/// later conversation.
-/// `--request-field` values, each KEY=JSON, as the provider's extra fields.
 fn parse_reasoning(text: &str) -> Result<Reasoning, String> {
     text.parse()
 }
@@ -633,6 +596,7 @@ fn check_reasoning_fields(request: &RequestArgs, fields: &serde_json::Map<String
     Ok(())
 }
 
+/// `--request-field` values, each KEY=JSON, as the provider's extra fields.
 fn request_fields(values: &[String]) -> Result<serde_json::Map<String, serde_json::Value>> {
     let mut fields = serde_json::Map::new();
     for value in values {
@@ -676,7 +640,10 @@ pub(crate) async fn finish_telemetry(telemetry: Option<Telemetry>) {
     }
 }
 
-pub(crate) fn read_instructions(base: &BaseArgs) -> Result<Option<String>> {
+/// Read `--system-prompt-file` once, at startup. As before profiles existed, it may be a
+/// pipe and is not limited to the profile file budget, so it cannot be read again for a
+/// later conversation.
+fn read_instructions(base: &BaseArgs) -> Result<Option<String>> {
     base.system_prompt_file
         .as_deref()
         .map(|path| std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display())))
@@ -687,12 +654,126 @@ pub(crate) fn read_instructions(base: &BaseArgs) -> Result<Option<String>> {
 /// precede the run. Configuration errors and a container that cannot start are reported
 /// before a new session file is created.
 pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSession> {
-    let cwd = sessions::resolve_cwd(options.base.cwd.as_deref())?;
-    // Both sources count: a file named at the command line must not drop the ones a
-    // deployment registered in the environment. A misspelt path would leave a secret
-    // unredacted without a word, so each must exist at startup, and every file must be one the
-    // redaction can match; one that disappears later is skipped, and one that becomes
-    // unusable later withholds the output (RedactSecrets::with_secret_files).
+    let cwd = resolve_cwd(options.base.cwd.as_deref())?;
+    let secret_files = secret_files(options.base)?;
+    let mut profile = load_profile(&options)?;
+    // The container mounts the workspace at its real path, which tools must use as well.
+    let cwd = match profile.execution {
+        Execution::Local => cwd,
+        Execution::Container => cwd
+            .canonicalize()
+            .with_context(|| format!("cannot resolve {}", cwd.display()))?,
+    };
+    let context = profile.context_section(&cwd).context(
+        "cannot load project instructions; --no-context skips AGENTS.md discovery and profile context files",
+    )?;
+    // Before the session file: invalid provider settings are configuration errors too.
+    let (provider, api_key) = provider(&options)?;
+    let host = host_tools(&mut profile, &cwd)?;
+    if profile.execution == Execution::Container {
+        check_session_outside(&options.file, &cwd)?;
+    }
+    let header = SessionHeader::new(&cwd, options.model);
+    // An existing session is opened first, for its ID. A new one is created only after the
+    // container, if any, has started, so that a failed start leaves no session file behind.
+    let opened = sessions::open_existing(&options.file)?;
+    let session_id = opened
+        .as_ref()
+        .map_or_else(|| header.id.clone(), |session| session.header().id.clone());
+    let (executor, environment) = executor(&profile, &cwd, &session_id).await?;
+    let session = match opened {
+        Some(session) => session,
+        None => sessions::create(options.file, header)?,
+    };
+    if session.recovered_tail_bytes() > 0 {
+        eprintln!(
+            "[session] recovered incomplete final record; removed {} bytes",
+            session.recovered_tail_bytes()
+        );
+    }
+
+    let hidden_env = hidden_env(&options);
+    let built_in: Vec<String> = profile.tools.iter().filter(|name| !host_tool(name)).cloned().collect();
+    let mut tools = tools::builtin_tools_with(
+        &built_in,
+        Duration::from_secs(options.transport.tool_timeout_secs),
+        &hidden_env,
+        executor,
+    )?;
+    tools.extend(host.tools);
+    let policy = CommandPolicy::new(&profile.rules.allow).deny_also(&profile.rules.deny);
+    // The command policy only concerns bash.
+    let command_policy = if tools.iter().any(|tool| tool.name() == BASH) {
+        policy.prompt_section().unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let system_prompt = build_system_prompt(
+        &profile.instructions,
+        &[
+            (prompt::ENVIRONMENT, &environment),
+            (prompt::COMMAND_POLICY, &command_policy),
+            (prompt::PROJECT_CONTEXT, &context),
+            (prompt::AVAILABLE_SKILLS, &host.catalog),
+        ],
+    );
+
+    let mut config = LoopConfig::new(LoopSpec {
+        provider: Arc::new(provider),
+        model: options.model.to_string(),
+        system_prompt,
+        tools,
+        cwd,
+        max_tokens: options.request.max_tokens,
+        reasoning: options.request.reasoning,
+        sequential_tools: false,
+    });
+    push_built_in(&mut config, "command_policy", PolicyHook::new(Arc::new(policy)));
+    extensions::register(&mut config, &options.shared.mcp.servers).map_err(anyhow::Error::msg)?;
+    let auto_approve = profile.rules.auto_approval();
+    if let Some(rules) = rules_policy(&mut profile, &options.shared.mcp.ask, auto_approve.clone()) {
+        push_built_in(&mut config, "profile_rules", PolicyHook::new(Arc::new(rules)));
+    }
+    // The hooks every mode shares. Each declares its stage, so the policies above run first
+    // and redaction runs before output is saved, whatever is registered later.
+    push_built_in(
+        &mut config,
+        "continue_on_length",
+        ContinueOnLength::new(profile.continue_on_length),
+    );
+    push_built_in(
+        &mut config,
+        "redact_secrets",
+        RedactSecrets::new(api_key.into_iter().chain(hidden_values(&options))).with_secret_files(secret_files),
+    );
+    if let Some(spill) = host.spill {
+        push_built_in(&mut config, "spill_outputs", spill);
+    }
+    // The built-in tools skip repeated names; this guards tools registered here later.
+    config.spec.validate().map_err(anyhow::Error::msg)?;
+    Ok(PreparedSession {
+        config,
+        retry: RetryPolicy {
+            max_retries: options.transport.max_retries,
+            ..RetryPolicy::default()
+        },
+        store: session,
+        auto_approve,
+        approve_all: profile.rules.approve_all,
+        limits: profile.limits,
+        compaction: profile.compaction,
+        profile_name: profile.name,
+        auto_approve_commands: profile.rules.auto_approve,
+    })
+}
+
+/// The secret files to redact: `--secret-file` and `ZX_SECRET_FILES`. Both sources count: a
+/// file named at the command line must not drop the ones a deployment registered in the
+/// environment. A misspelt path would leave a secret unredacted without a word, so each must
+/// exist at startup, and every file must be one the redaction can match; one that
+/// disappears later is skipped, and one that becomes unusable later withholds the output
+/// (`RedactSecrets::with_secret_files`).
+fn secret_files(base: &BaseArgs) -> Result<Vec<PathBuf>> {
     let from_environment: Vec<PathBuf> = match std::env::var_os(SECRET_FILES_ENV) {
         Some(value) => value
             .to_str()
@@ -704,7 +785,7 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     };
     let secret_files: Vec<PathBuf> = from_environment
         .into_iter()
-        .chain(options.base.secret_files.iter().cloned())
+        .chain(base.secret_files.iter().cloned())
         .filter(|path| !path.as_os_str().is_empty())
         .collect();
     for path in &secret_files {
@@ -725,8 +806,15 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
             );
         }
     });
-    let mut profile = Profile::load(options.base.profile.as_deref(), options.default_profile)?;
-    if let Some(tools) = &options.base.tools {
+    Ok(secret_files)
+}
+
+/// The selected profile with the command line's settings over it, validated. Explicit values
+/// replace the profile's; denied commands and context files add to it.
+fn load_profile(options: &SessionOptions<'_>) -> Result<Profile> {
+    let base = options.base;
+    let mut profile = Profile::load(base.profile.as_deref(), options.default_profile)?;
+    if let Some(tools) = &base.tools {
         profile.tools = tools
             .iter()
             .map(|name| name.trim())
@@ -743,37 +831,37 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     if let Some(tokens) = options.budget.token_budget {
         profile.limits.token_budget = (tokens > 0).then_some(tokens);
     }
-    if let Some(count) = options.budget.continue_on_length {
+    if let Some(count) = options.continue_on_length {
         profile.continue_on_length = count;
     }
-    if !options.base.allow_cmd.is_empty() {
-        profile.rules.allow.clone_from(&options.base.allow_cmd);
+    if !base.allow_cmd.is_empty() {
+        profile.rules.allow.clone_from(&base.allow_cmd);
     }
-    profile.rules.deny.extend_from_slice(&options.base.deny_cmd);
-    if !options.base.auto_approve_cmd.is_empty() {
-        profile.rules.auto_approve.clone_from(&options.base.auto_approve_cmd);
+    profile.rules.deny.extend_from_slice(&base.deny_cmd);
+    if !base.auto_approve_cmd.is_empty() {
+        profile.rules.auto_approve.clone_from(&base.auto_approve_cmd);
     }
-    if let Some(instructions) = options.instructions {
-        profile.instructions = instructions.to_string();
+    if let Some(instructions) = &options.shared.instructions {
+        profile.instructions.clone_from(instructions);
     }
-    if options.base.no_context {
+    if base.no_context {
         profile.context.discover = false;
         profile.context.files.clear();
     }
-    profile.context.files.extend_from_slice(&options.base.context_files);
-    if let Some(bytes) = options.base.compact_threshold_bytes {
+    profile.context.files.extend_from_slice(&base.context_files);
+    if let Some(bytes) = base.compact_threshold_bytes {
         profile.compaction.trigger_bytes = (bytes > 0).then_some(bytes);
     }
-    if options.base.no_auto_compact {
+    if base.no_auto_compact {
         profile.compaction.trigger_bytes = None;
     }
-    if let Some(execution) = options.base.execution {
+    if let Some(execution) = base.execution {
         profile.execution = match execution {
             ExecutionArg::Local => Execution::Local,
             ExecutionArg::Container => Execution::Container,
         };
     }
-    if let Some(image) = &options.base.container_image {
+    if let Some(image) = &base.container_image {
         anyhow::ensure!(
             profile.execution == Execution::Container,
             "--container-image needs container execution: add --execution container, or set execution = \"container\" in the profile"
@@ -781,21 +869,15 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
         profile.container.image = Some(image.clone());
     }
     profile.validate()?;
-    // The container mounts the workspace at its real path, which tools must use as well.
-    let cwd = match profile.execution {
-        Execution::Local => cwd,
-        Execution::Container => cwd
-            .canonicalize()
-            .with_context(|| format!("cannot resolve {}", cwd.display()))?,
-    };
-    let context = profile.context_section(&cwd).context(
-        "cannot load project instructions; --no-context skips AGENTS.md discovery and profile context files",
-    )?;
+    Ok(profile)
+}
+
+/// The provider of the command line's settings, and the API key it authenticates with.
+fn provider(options: &SessionOptions<'_>) -> Result<(OpenAiCompatible, Option<String>)> {
     // Local servers (vLLM, Ollama, llama.cpp) often need no key, so a missing key is allowed.
     let api_key = std::env::var(&options.base.api_key_env)
         .ok()
         .filter(|key| !key.is_empty());
-    // Before the session file: invalid provider settings are configuration errors too.
     let extra_fields = request_fields(&options.request.request_fields)?;
     check_reasoning_fields(options.request, &extra_fields)?;
     let provider = OpenAiCompatible::new(OpenAiConfig {
@@ -814,197 +896,134 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
         reasoning_format: options.request.reasoning_format,
         ..OpenAiConfig::default()
     })?;
-    // read_skill and read_output read files on this machine, whatever executor runs commands.
-    let mut host_tools: Vec<Arc<dyn Tool>> = Vec::new();
-    let catalog = if profile.tools.iter().any(|name| name == TOOL_NAME) && !profile.skills.is_empty() {
-        let tool = ReadSkillTool::new(std::mem::take(&mut profile.skills))?;
-        let catalog = tool.catalog();
-        host_tools.push(Arc::new(tool));
-        catalog
-    } else {
-        String::new()
-    };
-    let spill = if profile.tools.iter().any(|name| name == output_store::TOOL_NAME) {
-        let store = OutputStore::new(&cwd, profile.tool_output)?;
-        // The immutable path/config is used independently by the reading tool and writer hook.
-        let hook = SpillOutputs::new(store.clone(), vec![output_store::TOOL_NAME.into(), TOOL_NAME.into()]);
-        host_tools.push(Arc::new(ReadOutputTool::new(store)));
-        Some(hook)
-    } else {
-        None
-    };
+    Ok((provider, api_key))
+}
 
-    // The container reads the whole working directory: masking one path would leave hard links
-    // to the session file and earlier session files beside it readable.
-    if profile.execution == Execution::Container
-        && let Some(path) = options.file.location()
-    {
+/// Whether `name` is a tool of this machine rather than of the executor: read_skill and
+/// read_output read files here, whatever executor runs commands.
+fn host_tool(name: &str) -> bool {
+    name == TOOL_NAME || name == output_store::TOOL_NAME
+}
+
+/// The tools of this machine (see [`host_tool`]) that the profile enables, with the skill
+/// catalog for the prompt and the hook that saves long results.
+struct HostTools {
+    tools: Vec<Arc<dyn Tool>>,
+    catalog: String,
+    spill: Option<SpillOutputs>,
+}
+
+fn host_tools(profile: &mut Profile, cwd: &Path) -> Result<HostTools> {
+    let mut host = HostTools {
+        tools: Vec::new(),
+        catalog: String::new(),
+        spill: None,
+    };
+    if profile.tools.iter().any(|name| name == TOOL_NAME) && !profile.skills.is_empty() {
+        let tool = ReadSkillTool::new(std::mem::take(&mut profile.skills))?;
+        host.catalog = tool.catalog();
+        host.tools.push(Arc::new(tool));
+    }
+    if profile.tools.iter().any(|name| name == output_store::TOOL_NAME) {
+        let store = OutputStore::new(cwd, std::mem::take(&mut profile.tool_output))?;
+        // The immutable path/config is used independently by the reading tool and writer hook.
+        host.spill = Some(SpillOutputs::new(
+            store.clone(),
+            vec![output_store::TOOL_NAME.into(), TOOL_NAME.into()],
+        ));
+        host.tools.push(Arc::new(ReadOutputTool::new(store)));
+    }
+    Ok(host)
+}
+
+/// The container reads the whole working directory, so the session file must be outside it:
+/// masking one path would leave hard links to it and earlier session files beside it readable.
+fn check_session_outside(file: &SessionFile<'_>, cwd: &Path) -> Result<()> {
+    if let Some(path) = file.location() {
         anyhow::ensure!(
-            !resolve(path)?.starts_with(&cwd),
+            !resolve(path)?.starts_with(cwd),
             "--execution container needs the session file outside the working directory, which the container can read: {}; choose a --session path (in chat also --session-dir) outside {}",
             path.display(),
             cwd.display()
         );
     }
-    let header = SessionHeader::new(&cwd, options.model);
-    // An existing session is opened first, for its ID. A new one is created only after the
-    // container, if any, has started, so that a failed start leaves no session file behind.
-    let opened = match options.file {
-        SessionFile::Open(path) if path.exists() => Some(SessionStore::open(path)?),
-        SessionFile::Memory | SessionFile::Open(_) | SessionFile::Create(_) | SessionFile::NewIn(_) => None,
-    };
-    let session_id = opened
-        .as_ref()
-        .map_or_else(|| header.id.clone(), |session| session.header().id.clone());
-    let (executor, environment): (Arc<dyn Executor>, String) = match profile.execution {
-        Execution::Local => (Arc::new(LocalExecutor), environment_section(&cwd)),
+    Ok(())
+}
+
+/// Where commands run, started when it is a container, and the prompt section describing it.
+async fn executor(profile: &Profile, cwd: &Path, label: &str) -> Result<(Arc<dyn Executor>, String)> {
+    match profile.execution {
+        Execution::Local => {
+            let local: Arc<dyn Executor> = Arc::new(LocalExecutor);
+            Ok((local, environment_section(cwd)))
+        }
         Execution::Container => {
-            let config = container_config(&profile.container, &cwd, &session_id)?;
+            let config = container_config(&profile.container, cwd, label)?;
             // The description needs the settings, which starting the container consumes.
             let settings = config.clone();
             let container = ContainerExecutor::start(config)
                 .await
                 .context("cannot start the container for --execution container")?;
             let environment = container_environment_section(&settings, container.platform());
-            (Arc::new(container), environment)
+            let container: Arc<dyn Executor> = Arc::new(container);
+            Ok((container, environment))
         }
-    };
-    let session = match (opened, options.file) {
-        (Some(session), _) => session,
-        (None, SessionFile::Memory) => SessionStore::in_memory(header),
-        (None, SessionFile::Open(path) | SessionFile::Create(path)) => SessionStore::create(path, header)?,
-        (None, SessionFile::NewIn(dir)) => {
-            sessions::create_dir(dir)?;
-            SessionStore::create(&dir.join(sessions::file_name(&header)), header)?
-        }
-    };
-    if session.recovered_tail_bytes() > 0 {
-        eprintln!(
-            "[session] recovered incomplete final record; removed {} bytes",
-            session.recovered_tail_bytes()
-        );
     }
+}
 
-    // Commands must not inherit the key: `env` would put it into the session file and the context.
-    // The same goes for headers that authenticate to a trace collector.
-    let hidden_env: Vec<String> = std::iter::once(options.base.api_key_env.clone())
+/// Variables commands must not inherit: the API key, the other credentials and the headers
+/// that authenticate to a trace collector. `env` would put them into the session file and
+/// the context.
+fn hidden_env(options: &SessionOptions<'_>) -> Vec<String> {
+    std::iter::once(options.base.api_key_env.clone())
         .chain(options.hidden_env.iter().cloned())
-        .chain(options.mcp.token_env.iter().cloned())
+        .chain(options.shared.mcp.token_env.iter().cloned())
         .chain(otel::HEADER_VARIABLES.iter().map(|name| name.to_string()))
-        .collect();
-    let mut tools = tools::builtin_tools_with(
-        &profile
-            .tools
-            .iter()
-            .filter(|name| name.as_str() != TOOL_NAME && name.as_str() != output_store::TOOL_NAME)
-            .cloned()
-            .collect::<Vec<_>>(),
-        Duration::from_secs(options.transport.tool_timeout_secs),
-        &hidden_env,
-        executor,
-    )?;
-    tools.extend(host_tools);
-    let policy = CommandPolicy::new(&profile.rules.allow).deny_also(&profile.rules.deny);
-    // The command policy only concerns bash.
-    let command_policy = if tools.iter().any(|tool| tool.name() == BASH) {
-        policy.prompt_section().unwrap_or_default()
-    } else {
-        String::new()
-    };
-    let system_prompt = build_system_prompt(
-        &profile.instructions,
-        &[
-            (prompt::ENVIRONMENT, &environment),
-            (prompt::COMMAND_POLICY, &command_policy),
-            (prompt::PROJECT_CONTEXT, &context),
-            (prompt::AVAILABLE_SKILLS, &catalog),
-        ],
-    );
+        .collect()
+}
 
-    let mut config = LoopConfig::new(LoopSpec {
-        provider: Arc::new(provider),
-        model: options.model.to_string(),
-        system_prompt,
-        tools,
-        cwd,
-        max_tokens: options.request.max_tokens,
-        reasoning: options.request.reasoning,
-        sequential_tools: false,
-    });
-    push_built_in(&mut config, "command_policy", PolicyHook::new(Arc::new(policy)));
-    extensions::register(&mut config, &options.mcp.servers).map_err(anyhow::Error::msg)?;
-    // Every policy that asks for bash approval gets the list: the strictest verdict of all
-    // policies wins, so one that still asked would cancel the others' auto-approval.
-    let auto_approve = profile.rules.auto_approval();
-    let mut rules = Vec::new();
-    for tool in profile.rules.deny_tools {
-        rules.push(Rule {
+/// The values to redact of the hidden variables besides the key; an unset or empty variable
+/// holds nothing.
+fn hidden_values<'a>(options: &'a SessionOptions<'_>) -> impl Iterator<Item = String> + 'a {
+    options
+        .hidden_env
+        .iter()
+        .chain(&options.shared.mcp.token_env)
+        .filter_map(|name| std::env::var(name).ok())
+        .filter(|value| !value.is_empty())
+}
+
+/// The profile's tool rules and the MCP tools that ask, as one policy that allows the rest;
+/// none without rules. Every policy that asks for bash gets the auto-approved commands: the
+/// strictest verdict of all policies wins, so one that still asked would cancel the others'
+/// auto-approval.
+fn rules_policy(profile: &mut Profile, mcp_ask: &[String], auto_approve: AutoApprove) -> Option<RulePolicy> {
+    let denied = std::mem::take(&mut profile.rules.deny_tools)
+        .into_iter()
+        .map(|tool| Rule {
             matcher: RuleMatcher::Tool(tool),
             decision: Decision::Deny("tool denied by profile".into()),
         });
-    }
-    for tool in profile.rules.ask_tools {
-        rules.push(Rule {
+    let asked = std::mem::take(&mut profile.rules.ask_tools)
+        .into_iter()
+        .map(|tool| Rule {
             matcher: RuleMatcher::Tool(tool),
             decision: Decision::Ask("profile requires tool approval".into()),
         });
-    }
     // An MCP server's tools ask unless its allowTools lists them: annotations are hints.
-    for tool in &options.mcp.ask {
-        rules.push(Rule {
-            matcher: RuleMatcher::Tool(tool.clone()),
-            decision: Decision::Ask("MCP tool requires approval (not in the server's allowTools)".into()),
-        });
+    let mcp = mcp_ask.iter().map(|tool| Rule {
+        matcher: RuleMatcher::Tool(tool.clone()),
+        decision: Decision::Ask("MCP tool requires approval (not in the server's allowTools)".into()),
+    });
+    let mut rules: Vec<Rule> = denied.chain(asked).chain(mcp).collect();
+    if rules.is_empty() {
+        return None;
     }
-    if !rules.is_empty() {
-        rules.push(Rule {
-            matcher: RuleMatcher::Any,
-            decision: Decision::Allow,
-        });
-        push_built_in(
-            &mut config,
-            "profile_rules",
-            PolicyHook::new(Arc::new(RulePolicy::new(rules).auto_approve(auto_approve.clone()))),
-        );
-    }
-    // The hooks every mode shares. Each declares its stage, so the policies above run first
-    // and redaction runs before output is saved, whatever is registered later.
-    push_built_in(
-        &mut config,
-        "continue_on_length",
-        ContinueOnLength::new(profile.continue_on_length),
-    );
-    // An unset or empty variable holds nothing to redact.
-    let hidden_values = options
-        .hidden_env
-        .iter()
-        .chain(&options.mcp.token_env)
-        .filter_map(|name| std::env::var(name).ok())
-        .filter(|value| !value.is_empty());
-    push_built_in(
-        &mut config,
-        "redact_secrets",
-        RedactSecrets::new(api_key.into_iter().chain(hidden_values)).with_secret_files(secret_files),
-    );
-    if let Some(spill) = spill {
-        push_built_in(&mut config, "spill_outputs", spill);
-    }
-    // The built-in tools skip repeated names; this guards tools registered here later.
-    config.spec.validate().map_err(anyhow::Error::msg)?;
-    Ok(PreparedSession {
-        config,
-        retry: RetryPolicy {
-            max_retries: options.transport.max_retries,
-            ..RetryPolicy::default()
-        },
-        store: session,
-        auto_approve,
-        approve_all: profile.rules.approve_all,
-        limits: profile.limits,
-        compaction: profile.compaction,
-        profile_name: profile.name,
-        auto_approve_commands: profile.rules.auto_approve,
-    })
+    rules.push(Rule {
+        matcher: RuleMatcher::Any,
+        decision: Decision::Allow,
+    });
+    Some(RulePolicy::new(rules).auto_approve(auto_approve))
 }
 
 impl PreparedSession {
@@ -1078,18 +1097,18 @@ mod tests {
         let flag = "--max-model-requests";
         let cli = Cli::try_parse_from(["zx-agent", "run", "--model", "m", flag, "3", "go"]).unwrap();
         match cli.command {
-            Command::Run(args) => assert_eq!(args.max_model_requests, Some(3)),
+            Command::Run(args) => assert_eq!(args.budget.max_model_requests, Some(3)),
             _ => panic!("run command"),
         }
         let cli = Cli::try_parse_from(["zx-agent", "chat", "--model", "m", flag, "3"]).unwrap();
         match cli.command {
-            Command::Chat(args) => assert_eq!(args.max_model_requests, Some(3)),
+            Command::Chat(args) => assert_eq!(args.budget.max_model_requests, Some(3)),
             _ => panic!("chat command"),
         }
         let cli =
             Cli::try_parse_from(["zx-agent", "serve", "--config", "serve.toml", "--model", "m", flag, "3"]).unwrap();
         match cli.command {
-            Command::Serve(args) => assert_eq!(args.max_model_requests, Some(3)),
+            Command::Serve(args) => assert_eq!(args.budget.max_model_requests, Some(3)),
             _ => panic!("serve command"),
         }
         assert!(Cli::try_parse_from(["zx-agent", "run", "--model", "m", "--max-turns", "3", "go"]).is_err());
@@ -1100,8 +1119,8 @@ mod tests {
         let cli = Cli::try_parse_from(["zx-agent", "run", "--model", "m", "go"]).unwrap();
         match cli.command {
             Command::Run(args) => {
-                assert_eq!(args.max_model_requests, None);
-                assert_eq!(args.timeout_secs, None);
+                assert_eq!(args.budget.max_model_requests, None);
+                assert_eq!(args.budget.timeout_secs, None);
                 assert_eq!(args.continue_on_length, None);
                 assert_eq!(args.base.tools, None);
             }
@@ -1110,8 +1129,8 @@ mod tests {
         let cli = Cli::try_parse_from(["zx-agent", "chat", "--model", "m"]).unwrap();
         match cli.command {
             Command::Chat(args) => {
-                assert_eq!(args.max_model_requests, None);
-                assert_eq!(args.timeout_secs, None);
+                assert_eq!(args.budget.max_model_requests, None);
+                assert_eq!(args.budget.timeout_secs, None);
                 assert_eq!(args.output, OutputMode::Text);
             }
             Command::Run(_) | Command::Serve(_) | Command::Sessions(_) | Command::Acp(_) => panic!("chat command"),
@@ -1124,7 +1143,7 @@ mod tests {
         match cli.command {
             Command::Serve(args) => {
                 assert_eq!(args.config, Path::new("serve.toml"));
-                assert_eq!(args.max_model_requests, None);
+                assert_eq!(args.budget.max_model_requests, None);
                 assert_eq!(args.request.session, None);
             }
             Command::Run(_) | Command::Chat(_) | Command::Sessions(_) | Command::Acp(_) => panic!("serve command"),
@@ -1194,14 +1213,14 @@ mod tests {
             Cli::try_parse_from(["zx-agent", "chat", "--model", "m", "--timeout-secs", "0", "--tools", ""]).unwrap();
         match cli.command {
             Command::Chat(args) => {
-                assert_eq!(args.timeout_secs, Some(0));
+                assert_eq!(args.budget.timeout_secs, Some(0));
                 assert_eq!(args.base.tools, Some(vec![String::new()]));
             }
             Command::Run(_) | Command::Serve(_) | Command::Sessions(_) | Command::Acp(_) => panic!("chat command"),
         }
         let cli = Cli::try_parse_from(["zx-agent", "run", "--model", "m", "--timeout-secs", "900", "go"]).unwrap();
         match cli.command {
-            Command::Run(args) => assert_eq!(args.timeout_secs, Some(900)),
+            Command::Run(args) => assert_eq!(args.budget.timeout_secs, Some(900)),
             Command::Chat(_) | Command::Serve(_) | Command::Sessions(_) | Command::Acp(_) => panic!("run command"),
         }
     }

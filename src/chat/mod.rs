@@ -9,8 +9,10 @@ mod signals;
 mod term;
 
 use std::ffi::OsStr;
+use std::future::Future;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -20,7 +22,7 @@ use tokio::time::MissedTickBehavior;
 
 use zx_agent::AgentSession;
 use zx_agent::agent::EventSink;
-use zx_agent::agent_session::{ModelRef, Subscription};
+use zx_agent::agent_session::{ModelRef, SessionError, Subscription};
 use zx_agent::ai::{Message, Provider, Reasoning};
 use zx_agent::compaction;
 use zx_agent::interaction::Approval;
@@ -29,15 +31,15 @@ use zx_agent::profile::Builtin;
 use zx_agent::runner::RunReport;
 use zx_agent::tools::BASH;
 
-use crate::cli::{self, ChatArgs, SessionFile, SessionOptions};
-use crate::sessions;
-use crate::{EXIT_ABORTED, EXIT_COMPLETED};
+use crate::cli::{self, ChatArgs, SessionOptions};
+use crate::process::{EXIT_ABORTED, EXIT_COMPLETED};
+use crate::render::{describe_arguments, describe_call, visible};
+use crate::sessions::{self, SessionFile};
 
 use commands::Command;
 use input::Line;
 use interaction::{TerminalInteraction, Ticket};
 use output::Output;
-pub(crate) use output::{describe_call, progress_line, visible};
 use signals::{Interrupt, Signals};
 use term::Tone;
 
@@ -117,74 +119,92 @@ struct Built {
 
 struct Settings {
     args: ChatArgs,
-    /// `--system-prompt-file`, read once: it may be a pipe, and /new reuses the text.
-    instructions: Option<String>,
-    /// Connected once; /new reuses the connections.
-    mcp: cli::McpTools,
+    /// The instructions and the MCP connections; /new reuses them.
+    shared: cli::Shared,
     /// Where traces go, when an OTLP endpoint is configured.
     traces: Option<Arc<dyn EventSink>>,
 }
 
-async fn build(
-    settings: &Settings,
-    model: &str,
-    file: SessionFile<'_>,
-    interaction: &Arc<TerminalInteraction>,
-    output: &Arc<Output>,
-) -> Result<Built> {
-    let args = &settings.args;
-    let mut prepared = cli::prepare(SessionOptions {
-        base: &args.base,
-        transport: &args.transport,
-        request: &args.request,
-        model,
-        file,
-        default_profile: Builtin::Assistant,
-        budget: cli::Budget {
-            max_model_requests: args.max_model_requests,
-            timeout_secs: args.timeout_secs,
-            token_budget: args.token_budget,
+/// What every conversation of this chat is built with.
+struct Chat {
+    settings: Settings,
+    interaction: Arc<TerminalInteraction>,
+    output: Arc<Output>,
+}
+
+impl Chat {
+    async fn build(&self, model: &str, file: SessionFile<'_>) -> Result<Built> {
+        let settings = &self.settings;
+        let args = &settings.args;
+        let interaction = &self.interaction;
+        let output = &self.output;
+        let mut prepared = cli::prepare(SessionOptions {
+            base: &args.base,
+            transport: &args.transport,
+            request: &args.request,
+            budget: &args.budget,
+            model,
+            file,
+            default_profile: Builtin::Assistant,
             continue_on_length: None,
-        },
-        instructions: settings.instructions.as_deref(),
-        hidden_env: &[],
-        mcp: &settings.mcp,
-    })
-    .await?;
-    prepared.require_bash_approval("shell commands require interactive approval");
-    prepared.config.interaction = interaction.clone();
-    prepared.config.interaction_timeout = std::time::Duration::from_secs(settings.args.approval_timeout_secs);
-    let provider = prepared.config.spec.provider.clone();
-    let about = About {
-        profile: std::mem::take(&mut prepared.profile_name),
-        tools: prepared
-            .config
-            .spec
-            .tools
-            .iter()
-            .map(|tool| tool.name().to_string())
-            .collect(),
-        auto_approve: std::mem::take(&mut prepared.auto_approve_commands),
-        cwd: prepared.config.spec.cwd.clone(),
-        session: prepared.store.path().map(Path::to_path_buf),
-        resumed: (!prepared.store.entries().is_empty()).then(|| Resumed {
-            messages: prepared
-                .store
-                .messages()
+            shared: &settings.shared,
+            hidden_env: &[],
+        })
+        .await?;
+        prepared.require_bash_approval("shell commands require interactive approval");
+        prepared.config.interaction = interaction.clone();
+        prepared.config.interaction_timeout = std::time::Duration::from_secs(settings.args.approval_timeout_secs);
+        let provider = prepared.config.spec.provider.clone();
+        let about = About {
+            profile: std::mem::take(&mut prepared.profile_name),
+            tools: prepared
+                .config
+                .spec
+                .tools
                 .iter()
-                .filter(|message| matches!(message, Message::User { .. } | Message::Assistant(_)))
-                .count(),
-            last_activity_ms: prepared.store.entries().last().map(|entry| entry.timestamp()),
-        }),
-    };
-    let session = prepared.into_session(output.clone())?;
-    let traced = settings.traces.clone().map(|sink| session.subscribe(sink));
-    Ok(Built {
-        session,
-        provider,
-        about,
-        _traced: traced,
-    })
+                .map(|tool| tool.name().to_string())
+                .collect(),
+            auto_approve: std::mem::take(&mut prepared.auto_approve_commands),
+            cwd: prepared.config.spec.cwd.clone(),
+            session: prepared.store.path().map(Path::to_path_buf),
+            resumed: (!prepared.store.entries().is_empty()).then(|| Resumed {
+                messages: prepared
+                    .store
+                    .messages()
+                    .iter()
+                    .filter(|message| matches!(message, Message::User { .. } | Message::Assistant(_)))
+                    .count(),
+                last_activity_ms: prepared.store.entries().last().map(|entry| entry.timestamp()),
+            }),
+        };
+        let session = prepared.into_session(output.clone())?;
+        let traced = settings.traces.clone().map(|sink| session.subscribe(sink));
+        Ok(Built {
+            session,
+            provider,
+            about,
+            _traced: traced,
+        })
+    }
+
+    /// Replace the conversation with one on `file`; when that fails, the current one stays
+    /// and `what` says what could not be done.
+    async fn switch(&self, built: &mut Built, model: &str, file: SessionFile<'_>, what: &str) -> bool {
+        match self.build(model, file).await {
+            Ok(next) => {
+                *built = next;
+                self.output.reset_totals();
+                true
+            }
+            Err(error) => {
+                self.output.line(
+                    Tone::Error,
+                    &format!("[chat] cannot {what}: {}", visible(&format!("{error:#}"))),
+                );
+                false
+            }
+        }
+    }
 }
 
 pub(crate) async fn run(args: ChatArgs) -> Result<u8> {
@@ -196,68 +216,42 @@ pub(crate) async fn run(args: ChatArgs) -> Result<u8> {
 }
 
 async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> {
-    let instructions = cli::read_instructions(&args.base)?;
-    let mcp = cli::connect_mcp(&args.base, Builtin::Assistant, &args.transport).await?;
-    let settings = Settings {
-        args,
-        instructions,
-        mcp,
-        traces,
-    };
-    let args = &settings.args;
+    let shared = cli::Shared::connect(&args.base, Builtin::Assistant, &args.transport).await?;
     let mode = if std::io::stdin().is_terminal() {
         InputMode::Terminal
     } else {
         InputMode::Script
     };
     let (interaction, mut approvals) = TerminalInteraction::channel();
-    let interaction = Arc::new(interaction);
-    let output = Arc::new(Output::new(
-        args.output,
-        args.deltas,
-        args.debug,
-        args.color,
-        args.show_thinking,
-    ));
+    let chat = Chat {
+        output: Arc::new(Output::new(
+            args.output,
+            args.deltas,
+            args.debug,
+            args.color,
+            args.show_thinking,
+        )),
+        interaction: Arc::new(interaction),
+        settings: Settings { args, shared, traces },
+    };
+    let args = &chat.settings.args;
+    let output = &chat.output;
     let mut model = args.base.model.clone();
     let mut reasoning = args.request.reasoning;
-    let storage = if args.no_session {
-        Storage::Memory
-    } else if let Some(path) = &args.request.session {
-        Storage::File(path.clone())
-    } else if let Some(dir) = &args.session_dir {
-        Storage::Directory(dir.clone())
-    } else {
-        Storage::Directory(sessions::default_dir(&sessions::resolve_cwd(
-            args.base.cwd.as_deref(),
-        )?)?)
-    };
-    let (resumed, notice) = match (&storage, &args.resume, &args.fork) {
-        (Storage::Directory(dir), _, Some(source)) => {
-            let cwd = sessions::resolve_cwd(args.base.cwd.as_deref())?;
-            let source = fork_source(dir, source).await?;
-            let forked = sessions::fork(&source, dir, &cwd, &model).await?;
-            let notice = forked_line(&forked);
-            (Some(forked.path), Some(notice))
-        }
-        (Storage::Directory(dir), Some(id), None) => {
-            resume_target(dir, args.base.cwd.as_deref(), id.as_deref()).await?
-        }
-        (Storage::Memory | Storage::File(_) | Storage::Directory(_), _, _) => (None, None),
-    };
+    let (storage, resumed, notice) = opening(args, &model).await?;
     let file = match (&storage, &resumed) {
         (_, Some(path)) => SessionFile::Open(path),
         (Storage::Memory, None) => SessionFile::Memory,
         (Storage::File(path), None) => SessionFile::Open(path),
         (Storage::Directory(dir), None) => SessionFile::NewIn(dir),
     };
-    let mut built = build(&settings, &model, file, &interaction, &output).await?;
+    let mut built = chat.build(&model, file).await?;
     let mut signals = Signals::new().context("cannot register chat signal handlers")?;
     let mut input = input::spawn(mode)?;
     if let Some(notice) = notice {
         output.line(Tone::Dim, &notice);
     }
-    banner(&output, &model, &built.about);
+    banner(output, &model, &built.about);
     let mut next_prompt: Option<String> = None;
     let mut last_interrupt: Option<Instant> = None;
 
@@ -302,12 +296,12 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
             approvals: &mut approvals,
             signals: &mut signals,
             mode,
-            output: &output,
+            output,
         };
         let line = match line {
             Line::Text(text) => text,
             Line::Rejected(reason) => {
-                rejected(&output, &reason);
+                rejected(output, &reason);
                 continue;
             }
         };
@@ -346,11 +340,11 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
                 Flow::Continue
             }
             Command::Status => {
-                status(&output, &model, &built.about);
+                status(output, &model, &built.about);
                 Flow::Continue
             }
             Command::Sessions => {
-                list_sessions(&output, &storage, &built.about).await;
+                list_sessions(output, &storage, &built.about).await;
                 Flow::Continue
             }
             Command::Resume(id) => match find_session(&storage, &id, &built.about).await {
@@ -372,7 +366,7 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
             },
             Command::Quit => Flow::Exit(EXIT_COMPLETED),
             Command::Help => {
-                help(&output);
+                help(output);
                 Flow::Continue
             }
             Command::Invalid(message) => {
@@ -398,45 +392,58 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
                     }
                     Storage::Directory(dir) => SessionFile::NewIn(dir),
                 };
-                match build(&settings, &model, file, &interaction, &output).await {
-                    Ok(next) => {
-                        built = next;
-                        output.reset_totals();
-                        let file = built
-                            .about
-                            .session
-                            .as_deref()
-                            .map(|path| format!("; session={}", path.display()))
-                            .unwrap_or_default();
-                        output.line(Tone::Dim, &format!("[chat] new conversation{file}"));
-                    }
-                    Err(error) => output.line(
-                        Tone::Error,
-                        &format!(
-                            "[chat] cannot create new conversation: {}",
-                            visible(&format!("{error:#}"))
-                        ),
-                    ),
+                if chat.switch(&mut built, &model, file, "create new conversation").await {
+                    let file = built
+                        .about
+                        .session
+                        .as_deref()
+                        .map(|path| format!("; session={}", path.display()))
+                        .unwrap_or_default();
+                    output.line(Tone::Dim, &format!("[chat] new conversation{file}"));
                 }
             }
-            Flow::Resume(path) => match build(&settings, &model, SessionFile::Open(&path), &interaction, &output).await
-            {
-                Ok(next) => {
-                    built = next;
-                    output.reset_totals();
+            Flow::Resume(path) => {
+                if chat
+                    .switch(&mut built, &model, SessionFile::Open(&path), "resume the session")
+                    .await
+                {
                     output.line(
                         Tone::Dim,
                         &format!("[chat] session={}", visible(&path.display().to_string())),
                     );
-                    resumed_line(&output, &built.about);
+                    resumed_line(output, &built.about);
                 }
-                Err(error) => output.line(
-                    Tone::Error,
-                    &format!("[chat] cannot resume the session: {}", visible(&format!("{error:#}"))),
-                ),
-            },
+            }
         }
     }
+}
+
+/// Where the conversations are kept, the session to open first when `--resume` or `--fork`
+/// names one, and a line to show about that.
+async fn opening(args: &ChatArgs, model: &str) -> Result<(Storage, Option<PathBuf>, Option<String>)> {
+    let storage = if args.no_session {
+        Storage::Memory
+    } else if let Some(path) = &args.request.session {
+        Storage::File(path.clone())
+    } else if let Some(dir) = &args.session_dir {
+        Storage::Directory(dir.clone())
+    } else {
+        Storage::Directory(sessions::default_dir(&cli::resolve_cwd(args.base.cwd.as_deref())?)?)
+    };
+    let (resumed, notice) = match (&storage, &args.resume, &args.fork) {
+        (Storage::Directory(dir), _, Some(source)) => {
+            let cwd = cli::resolve_cwd(args.base.cwd.as_deref())?;
+            let source = fork_source(dir, source).await?;
+            let forked = sessions::fork(&source, dir, &cwd, model).await?;
+            let notice = forked_line(&forked);
+            (Some(forked.path), Some(notice))
+        }
+        (Storage::Directory(dir), Some(id), None) => {
+            resume_target(dir, args.base.cwd.as_deref(), id.as_deref()).await?
+        }
+        (Storage::Memory | Storage::File(_) | Storage::Directory(_), _, _) => (None, None),
+    };
+    Ok((storage, resumed, notice))
 }
 
 /// The session `--resume` opens, and a line to show when there is none to resume.
@@ -450,7 +457,7 @@ async fn resume_target(dir: &Path, cwd: Option<&Path>, id: Option<&str>) -> Resu
             Ok((Some(session.path.clone()), None))
         }
         None => {
-            let cwd = sessions::resolve_cwd(cwd)?;
+            let cwd = cli::resolve_cwd(cwd)?;
             Ok(match list.latest_in(&cwd) {
                 Some(session) => (Some(session.path.clone()), None),
                 None => (
@@ -594,6 +601,35 @@ enum Choice {
     Discuss,
 }
 
+/// The approval a call waits for, while the person decides.
+enum Pending {
+    None,
+    /// The menu is shown; the next line answers it.
+    Choosing(Ticket),
+    /// The person chose to discuss: the next line goes to the model, and the call is denied.
+    Discussing(Ticket),
+}
+
+impl Pending {
+    fn waiting(&self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    fn ticket_mut(&mut self) -> Option<&mut Ticket> {
+        match self {
+            Self::None => None,
+            Self::Choosing(ticket) | Self::Discussing(ticket) => Some(ticket),
+        }
+    }
+
+    fn take(&mut self) -> Option<Ticket> {
+        match std::mem::replace(self, Self::None) {
+            Self::None => None,
+            Self::Choosing(ticket) | Self::Discussing(ticket) => Some(ticket),
+        }
+    }
+}
+
 fn approval_choice(text: &str) -> Option<Choice> {
     match text.trim().to_ascii_lowercase().as_str() {
         "1" | "y" | "yes" => Some(Choice::Once),
@@ -619,21 +655,17 @@ async fn drive_turn(session: &AgentSession, operation: Operation, io: &mut TurnI
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     // A status an earlier operation left behind must not tick on into this one.
     io.output.clear_status();
-    let mut pending: Option<Ticket> = None;
-    let mut discussing = false;
+    let mut pending = Pending::None;
     let mut queued_prompt = None;
     loop {
-        if pending.as_ref().is_some_and(|ticket| ticket.reply.is_closed()) {
-            pending = None;
-            discussing = false;
+        if pending.ticket_mut().is_some_and(|ticket| ticket.reply.is_closed()) {
+            pending = Pending::None;
         }
         tokio::select! {
             biased;
             interrupt = io.signals.next() => {
-                session.abort();
                 drop(pending.take());
-                let report = running.await?;
-                report.print(io.output, started.elapsed());
+                settle(session, running.as_mut(), io.output, started).await?;
                 if queued_prompt.is_some() { io.output.line(Tone::Dim, "[chat] queued input cleared by cancellation"); }
                 // Steering meant for the cancelled task must not reach the next one.
                 let dropped = unread_input(session, io.output);
@@ -659,8 +691,7 @@ async fn drive_turn(session: &AgentSession, operation: Operation, io: &mut TurnI
                 let next: Vec<String> = queued_prompt.into_iter().chain(late).collect();
                 return Ok(if next.is_empty() { Flow::Continue } else { Flow::Prompt(next.join("\n\n")) });
             }
-            () = expired(&mut pending), if pending.is_some() => {
-                discussing = false;
+            () = expired(&mut pending), if pending.waiting() => {
                 if let Some(ticket) = pending.take() {
                     io.output.line(Tone::Warn, &format!("[approval] request {} expired; the task goes on without the call", ticket.id));
                 }
@@ -672,41 +703,16 @@ async fn drive_turn(session: &AgentSession, operation: Operation, io: &mut TurnI
                     // Defensive fail-closed behavior; the core normally asks serially.
                     deny(io.output, previous, "superseded terminal approval");
                 }
-                discussing = false;
                 show_approval(io.output, &ticket);
-                pending = Some(ticket);
+                pending = Pending::Choosing(ticket);
             }
-            line = io.input.recv(), if io.mode == InputMode::Terminal || pending.is_some() => {
+            line = io.input.recv(), if io.mode == InputMode::Terminal || pending.waiting() => {
                 if io.mode == InputMode::Terminal && line.is_some() { io.output.input_echoed(); }
                 let command = match line {
                     Some(line) => match line.context("cannot read terminal input")? {
                         Line::Text(text) => {
-                            if pending.is_some() && text.trim() != "/quit" && text.trim() != "/new" {
-                                if discussing {
-                                    if text.trim().is_empty() {
-                                        io.output.line(Tone::Warn, "[approval] enter a message to discuss this call");
-                                    } else if let Some(ticket) = pending.take() {
-                                        session.steer(text);
-                                        deny(io.output, ticket, "user wants to discuss this call");
-                                        discussing = false;
-                                    }
-                                } else {
-                                    match approval_choice(&text) {
-                                        Some(choice @ (Choice::Once | Choice::Session)) => {
-                                            let decision = match choice {
-                                                Choice::Once => Approval::AllowOnce,
-                                                _ => Approval::AllowSession,
-                                            };
-                                            if let Some(ticket) = pending.take()
-                                                && ticket.reply.send(decision).is_err() {
-                                                io.output.line(Tone::Warn, "[approval] request expired");
-                                            }
-                                        }
-                                        Some(Choice::Deny) => { if let Some(ticket) = pending.take() { deny(io.output, ticket, "declined by the user"); } }
-                                        Some(Choice::Discuss) => { discussing = true; io.output.line(Tone::Warn, "[approval] What would you like to discuss? The call will not run."); }
-                                        None => io.output.line(Tone::Warn, "[approval] choose 1, 2, 3 or 4"),
-                                    }
-                                }
+                            if pending.waiting() && text.trim() != "/quit" && text.trim() != "/new" {
+                                answer_approval(session, io.output, &mut pending, text);
                                 continue;
                             }
                             commands::parse(text)
@@ -718,17 +724,15 @@ async fn drive_turn(session: &AgentSession, operation: Operation, io: &mut TurnI
                     },
                     None => {
                         if let Some(ticket) = pending.take() { deny(io.output, ticket, "terminal input closed"); }
-                        session.abort();
-                        running.await?.print(io.output, started.elapsed());
+                        settle(session, running.as_mut(), io.output, started).await?;
                         return Ok(Flow::Exit(EXIT_COMPLETED));
                     }
                 };
                 match command {
                     Command::Quit | Command::New => {
                         let next = if matches!(command, Command::New) { Flow::New } else { Flow::Exit(EXIT_COMPLETED) };
-                        session.abort();
                         drop(pending.take());
-                        running.await?.print(io.output, started.elapsed());
+                        settle(session, running.as_mut(), io.output, started).await?;
                         return Ok(next);
                     }
                     Command::Prompt(text) if compact => {
@@ -737,7 +741,7 @@ async fn drive_turn(session: &AgentSession, operation: Operation, io: &mut TurnI
                             io.output.line(Tone::Dim, "[chat] input queued after compaction");
                         } else { io.output.line(Tone::Warn, "[chat] one input is already queued; wait for compaction or cancel it"); }
                     }
-                    Command::Prompt(text) if pending.is_none() => {
+                    Command::Prompt(text) if !pending.waiting() => {
                         session.steer(text);
                         io.output.line(Tone::Dim, "[chat] steering input queued");
                     }
@@ -760,12 +764,64 @@ async fn drive_turn(session: &AgentSession, operation: Operation, io: &mut TurnI
     }
 }
 
+/// Cancel the operation and report how far it got.
+async fn settle(
+    session: &AgentSession,
+    running: Pin<&mut impl Future<Output = Result<Report, SessionError>>>,
+    output: &Output,
+    started: Instant,
+) -> Result<()> {
+    session.abort();
+    running.await?.print(output, started.elapsed());
+    Ok(())
+}
+
 /// Completes once the core stops waiting for the pending approval: it timed out, or the
 /// task was cancelled. Never completes without one.
-async fn expired(pending: &mut Option<Ticket>) {
-    match pending {
+async fn expired(pending: &mut Pending) {
+    match pending.ticket_mut() {
         Some(ticket) => ticket.reply.closed().await,
         None => std::future::pending().await,
+    }
+}
+
+/// A line typed while a call waits for approval: a menu choice, or the message that
+/// discusses the call instead of running it.
+fn answer_approval(session: &AgentSession, output: &Output, pending: &mut Pending, text: String) {
+    match std::mem::replace(pending, Pending::None) {
+        Pending::None => {}
+        Pending::Discussing(ticket) => {
+            if text.trim().is_empty() {
+                output.line(Tone::Warn, "[approval] enter a message to discuss this call");
+                *pending = Pending::Discussing(ticket);
+            } else {
+                session.steer(text);
+                deny(output, ticket, "user wants to discuss this call");
+            }
+        }
+        Pending::Choosing(ticket) => match approval_choice(&text) {
+            Some(Choice::Once) => answer(output, ticket, Approval::AllowOnce),
+            Some(Choice::Session) => answer(output, ticket, Approval::AllowSession),
+            Some(Choice::Deny) => deny(output, ticket, "declined by the user"),
+            Some(Choice::Discuss) => {
+                output.line(
+                    Tone::Warn,
+                    "[approval] What would you like to discuss? The call will not run.",
+                );
+                *pending = Pending::Discussing(ticket);
+            }
+            None => {
+                output.line(Tone::Warn, "[approval] choose 1, 2, 3 or 4");
+                *pending = Pending::Choosing(ticket);
+            }
+        },
+    }
+}
+
+/// Send the person's decision; the core may have stopped waiting for it.
+fn answer(output: &Output, ticket: Ticket, decision: Approval) {
+    if ticket.reply.send(decision).is_err() {
+        output.line(Tone::Warn, "[approval] request expired");
     }
 }
 
@@ -790,10 +846,10 @@ fn show_approval(output: &Output, ticket: &Ticket) {
         &format!(
             "{} {}",
             style.paint(Tone::Warn, &format!("[approval {}]", ticket.id)),
-            style.paint(Tone::Strong, &output::describe_call(&call.name, &call.arguments))
+            style.paint(Tone::Strong, &describe_call(&call.name, &call.arguments))
         ),
     );
-    for line in output::describe_arguments(&call.arguments) {
+    for line in describe_arguments(&call.arguments) {
         output.line(Tone::Plain, &format!("  {line}"));
     }
     output.line(Tone::Dim, &format!("  {}", visible(&ticket.request.reason)));
@@ -842,7 +898,6 @@ fn reasoning_name(reasoning: Option<Reasoning>) -> &'static str {
     reasoning.map_or("default", Reasoning::as_str)
 }
 
-/// What the conversation runs on, once at startup.
 /// How much of an earlier conversation the session file held, when it held one.
 fn resumed_line(output: &Output, about: &About) {
     let Some(resumed) = &about.resumed else {
@@ -869,6 +924,7 @@ fn resumed_line(output: &Output, about: &About) {
     );
 }
 
+/// What the conversation runs on, once at startup.
 fn banner(output: &Output, model: &str, about: &About) {
     output.line(
         Tone::Dim,

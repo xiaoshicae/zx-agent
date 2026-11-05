@@ -374,6 +374,11 @@ impl Open {
         self.turn.as_ref().or(self.attempt.as_ref()).or(self.run.as_ref())
     }
 
+    /// The span of a tool call, or the innermost open one when the call has none.
+    fn for_call(&self, call: &str) -> Option<&Context> {
+        self.tools.get(call).or(self.current())
+    }
+
     /// End what an attempt holds open: tools, the request, a summary and the turn.
     fn end_attempt_parts(&mut self, at: SystemTime) {
         for (_, tool) in self.tools.drain() {
@@ -431,17 +436,13 @@ impl Runs {
             } => {
                 spans.end_attempt_parts(at);
                 end(spans.attempt.take(), at);
-                if let Some(run) = spans.run.take() {
-                    let span = run.span();
-                    span.set_attribute(KeyValue::new("zx.outcome", name(&outcome)));
-                    span.set_attribute(KeyValue::new("zx.model_requests", i64::from(model_requests)));
-                    span.set_attribute(KeyValue::new("zx.retries", i64::from(retries)));
-                    span.set_attributes(usage_attributes(&usage));
-                    if outcome == RunOutcome::Error {
-                        span.set_status(Status::error("error"));
-                    }
-                    span.end_with_timestamp(at);
-                }
+                let mut attributes = vec![
+                    KeyValue::new("zx.outcome", name(&outcome)),
+                    KeyValue::new("zx.model_requests", i64::from(model_requests)),
+                    KeyValue::new("zx.retries", i64::from(retries)),
+                ];
+                attributes.extend(usage_attributes(&usage));
+                finish(spans.run.take(), at, attributes, outcome == RunOutcome::Error);
                 open.remove(&run_id);
             }
             What::AttemptStart { attempt } => {
@@ -452,14 +453,8 @@ impl Runs {
             }
             What::AttemptEnd { outcome } => {
                 spans.end_attempt_parts(at);
-                if let Some(attempt) = spans.attempt.take() {
-                    let span = attempt.span();
-                    span.set_attribute(KeyValue::new("zx.outcome", name(&outcome)));
-                    if outcome == LoopOutcome::Error {
-                        span.set_status(Status::error("error"));
-                    }
-                    span.end_with_timestamp(at);
-                }
+                let attributes = vec![KeyValue::new("zx.outcome", name(&outcome))];
+                finish(spans.attempt.take(), at, attributes, outcome == LoopOutcome::Error);
             }
             What::TurnStart { turn } => {
                 end(spans.turn.take(), at);
@@ -480,15 +475,9 @@ impl Runs {
                 spans.request = Some(start(tracer, "request", at, attributes, parent));
             }
             What::Response { usage, stop } => {
-                if let Some(request) = spans.request.take() {
-                    let span = request.span();
-                    span.set_attributes(usage_attributes(&usage));
-                    span.set_attribute(KeyValue::new("zx.stop_reason", name(&stop)));
-                    if stop == StopReason::Error {
-                        span.set_status(Status::error("error"));
-                    }
-                    span.end_with_timestamp(at);
-                }
+                let mut attributes = usage_attributes(&usage);
+                attributes.push(KeyValue::new("zx.stop_reason", name(&stop)));
+                finish(spans.request.take(), at, attributes, stop == StopReason::Error);
             }
             What::ToolStart { call, tool } => {
                 let attributes = vec![
@@ -500,37 +489,21 @@ impl Runs {
             }
             What::Decision { call, verdict } => {
                 let attributes = vec![KeyValue::new("zx.verdict", name(&verdict))];
-                event(spans.tools.get(&call).or(spans.current()), "decision", at, attributes);
+                event(spans.for_call(&call), "decision", at, attributes);
             }
             What::ApprovalRequested { call } => {
-                event(
-                    spans.tools.get(&call).or(spans.current()),
-                    "approval_requested",
-                    at,
-                    Vec::new(),
-                );
+                event(spans.for_call(&call), "approval_requested", at, Vec::new());
             }
             What::ApprovalResolved { call, result, wait_ms } => {
                 let attributes = vec![
                     KeyValue::new("zx.approval.result", name(&result)),
                     KeyValue::new("zx.approval.wait_ms", saturate(wait_ms)),
                 ];
-                event(
-                    spans.tools.get(&call).or(spans.current()),
-                    "approval_resolved",
-                    at,
-                    attributes,
-                );
+                event(spans.for_call(&call), "approval_resolved", at, attributes);
             }
             What::ToolEnd { call, is_error } => {
-                if let Some(tool) = spans.tools.remove(&call) {
-                    let span = tool.span();
-                    span.set_attribute(KeyValue::new("zx.tool.is_error", is_error));
-                    if is_error {
-                        span.set_status(Status::error("error"));
-                    }
-                    span.end_with_timestamp(at);
-                }
+                let attributes = vec![KeyValue::new("zx.tool.is_error", is_error)];
+                finish(spans.tools.remove(&call), at, attributes, is_error);
             }
             What::CompactionStart { automatic, input_bytes } => {
                 end(spans.compaction.take(), at);
@@ -543,23 +516,16 @@ impl Runs {
             }
             What::CompactionEnd { usage, output_bytes } => {
                 end(spans.request.take(), at);
-                if let Some(compaction) = spans.compaction.take() {
-                    let span = compaction.span();
-                    span.set_attributes(usage_attributes(&usage));
-                    span.set_attribute(KeyValue::new(
-                        "zx.compaction.output_bytes",
-                        saturate_usize(output_bytes),
-                    ));
-                    span.end_with_timestamp(at);
-                }
+                let mut attributes = usage_attributes(&usage);
+                attributes.push(KeyValue::new(
+                    "zx.compaction.output_bytes",
+                    saturate_usize(output_bytes),
+                ));
+                finish(spans.compaction.take(), at, attributes, false);
             }
             What::CompactionFailed => {
                 end(spans.request.take(), at);
-                if let Some(compaction) = spans.compaction.take() {
-                    let span = compaction.span();
-                    span.set_status(Status::error("error"));
-                    span.end_with_timestamp(at);
-                }
+                finish(spans.compaction.take(), at, Vec::new(), true);
             }
             What::Retry { attempt, delay_ms } => {
                 let attributes = vec![
@@ -615,9 +581,20 @@ fn start(
     parent.with_span(span)
 }
 
+/// End `span` at `at`, if there is one.
 fn end(span: Option<Context>, at: SystemTime) {
+    finish(span, at, Vec::new(), false);
+}
+
+/// End `span` at `at` with what it reports, and as an error when it `failed`.
+fn finish(span: Option<Context>, at: SystemTime, attributes: Vec<KeyValue>, failed: bool) {
     if let Some(span) = span {
-        span.span().end_with_timestamp(at);
+        let span = span.span();
+        span.set_attributes(attributes);
+        if failed {
+            span.set_status(Status::error("error"));
+        }
+        span.end_with_timestamp(at);
     }
 }
 
