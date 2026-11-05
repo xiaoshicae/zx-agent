@@ -32,7 +32,7 @@
 
 ## 架构设计
 
-代码分为一个 workspace 中的 7 个 crate，上层依赖下层，下层 crate 引用不到上层：`zx-ai`（`crates/zx-ai`）← `zx-core`（`crates/zx-core`）← `zx-tools`（`crates/zx-tools`）与 `zx-im`（`crates/zx-im`），二者互不依赖；`zx-im-slack`、`zx-im-feishu`（`crates/zx-im-*`）实现 `zx-im` 的接口 ← `zx-agent`（根目录 `src/`，CLI、场景配置与追踪导出；库以原有路径再导出各 crate）。各层位置如下，架构图、模块与 pi 的对应表、参数说明见 README。
+代码分为一个 workspace 中的 8 个 crate，上层依赖下层，下层 crate 引用不到上层：`zx-ai`（`crates/zx-ai`，只含类型与 `Provider` 契约）← `zx-core`（`crates/zx-core`）← `zx-tools`（`crates/zx-tools`）与 `zx-im`（`crates/zx-im`），二者互不依赖；`zx-ai-openai`（`crates/zx-ai-openai`，OpenAI 兼容 provider，模型层里唯一依赖 reqwest 的 crate）只依赖 `zx-ai`，内核与它互不依赖；`zx-im-slack`、`zx-im-feishu`（`crates/zx-im-*`）实现 `zx-im` 的接口 ← `zx-agent`（根目录 `src/`，CLI、场景配置与追踪导出；库以原有路径再导出各 crate）。各层位置如下，架构图、模块与 pi 的对应表、参数说明见 README。
 
 | 层 | 位置 | 职责 |
 |---|---|---|
@@ -42,12 +42,12 @@
 | 共享会话 | `crates/zx-core/src/agent_session.rs` | 共享调用与 Busy、RAII 归还运行权、取消、订阅与退订、空闲时切换模型 |
 | 运行层 | `crates/zx-core/src/runner.rs` | 持有可顺序复用的会话；以独占借用控制单次运行、重试、上限、审批缓存、持久化和报告 |
 | 会话 | `crates/zx-core/src/session.rs`、`crates/zx-core/src/session/` | 只追加的条目树与校验，投影出发给模型的消息；记录经 `SessionLog` 保存，默认是单写者的 JSONL 文件（`file.rs`） |
-| 上下文管理 | `crates/zx-core/src/compaction.rs`、`crates/zx-core/src/session/compaction.rs`、`crates/zx-core/src/output_store.rs` | 宿主摘要、追加升级与原始投影、脱敏后的长结果保存及分页 |
+| 上下文管理 | `crates/zx-core/src/compaction.rs`、`crates/zx-core/src/session/compaction.rs`、`crates/zx-tools/src/output_store.rs` | 宿主摘要、追加升级与原始投影、脱敏后的长结果保存及分页 |
 | agent | `crates/zx-core/src/agent/` | 回合循环、工具执行、Hooks 宿主、事件、消息队列 |
-| ai | `crates/zx-ai/src/` | 消息类型、系统提示词段落、流式事件协议、provider 与重试判断；另有各 crate 共用的 `sync`、`text` |
-| 外层策略与交互 | `crates/zx-tools/src/policy.rs`、`crates/zx-core/src/extensions.rs`、`crates/zx-core/src/interaction.rs` | 命令与规则策略、续写、已知密钥脱敏、扩展的打包与注册（`Extension`、`register`）、宿主审批与 NoHuman |
+| ai | `crates/zx-ai/src/`、`crates/zx-ai-openai/src/` | 消息类型、系统提示词段落、流式事件协议、provider 契约与重试判断，另有各 crate 共用的 `sync`、`text`；OpenAI 兼容 provider 与 SSE 解析单独成 crate |
+| 外层策略与交互 | `crates/zx-tools/src/policy.rs`、`crates/zx-tools/src/continuation.rs`、`crates/zx-tools/src/redact.rs`、`crates/zx-core/src/extensions.rs`、`crates/zx-core/src/interaction.rs` | 命令与规则策略、续写、已知密钥脱敏、扩展的打包与注册（`Extension`、`register`）、宿主审批与 NoHuman |
 | 工具 | `crates/zx-tools/src/tools/` | bash、read_file、edit_file 与 write_file（共用按文件串行的 `FileMutationQueue`）、grep / find / ls（经执行器调用 ripgrep 或 POSIX 程序，参数单引号转义）、输出截断 |
-| 执行环境 | `crates/zx-core/src/executor/` | 工具执行命令与读写文件的位置；`LocalExecutor` 为本机，负责进程组、超时与取消、输出捕获上限；`ContainerExecutor` 在每个进程一个的 Docker 容器中执行，并在容器内按进程组终止命令 |
+| 执行环境 | `crates/zx-tools/src/executor/` | 工具执行命令与读写文件的位置；`LocalExecutor` 为本机，负责进程组、超时与取消、输出捕获上限；`ContainerExecutor` 在每个进程一个的 Docker 容器中执行，并在容器内按进程组终止命令 |
 | IM 接入 | `crates/zx-im/src/` | 平台接口 `ImChannel`；`Server` 做访问控制并按线程分派，每个线程一个任务独占会话、运行、审批卡片与空闲释放，任务之间只经 channel 通信；宿主经 `SessionFactory` 打开会话；运行中的状态经可选的 `StatusStore` 记录，重启时替换上个进程遗留的“处理中…”（`status.rs`）；回复与卡片文案（`Replies`、`CardLabels`）默认英文。平台实现在 `crates/zx-im-slack/`（经 Socket Mode 接收、经 Web API 发送）与 `crates/zx-im-feishu/` |
 | MCP 客户端 | `crates/zx-tools/src/mcp.rs` | 经 Streamable HTTP 连接外部 MCP 服务器（先 `server/discover`，旧服务器回退到 `initialize`），只把配置中列出的工具交给模型；`Server` 是一个 `Extension`。调用有超时、可取消，结果截断，工具一律按有副作用处理 |
 | ACP 接入 | `src/acp.rs` | agent 一侧：`session/new` 建会话、`session/prompt` 在派生任务里运行并在回合结束时应答、事件映射为 `session/update`、审批映射为 `session/request_permission`、`session/cancel` 取消；stdout 只走协议 |
@@ -69,11 +69,11 @@
 - **扩展点都是 trait**：`Provider`、`Tool`、`ToolPolicy`、`Hooks`、`Interaction`、`EventSink`、`Executor`、`SessionLog`、`ImChannel`、`StatusStore`、`Extension`。新能力优先以实现 trait 的方式加入，不改循环本身。
 - **通用，不为场景定制**：代码只定义接口与通用机制。某个环境、平台或厂商才有的知识（kubectl 的只读选项、Kubernetes 的 token 路径、IM 文案的语言、告警的格式）写在 profile、部署清单或配置里，或由外部适配器实现接口、调用 `run` 或 SDK；不在代码里解析某个系统的私有格式。provider 对协议方言的处理也要显式开启（如 `--fill-missing-reasoning`），不按厂商推断。
 - **界面交给 ACP 客户端**（D13）：交互式 UI 由实现 ACP 的开源客户端提供，`acp` 只做协议与会话的映射，协议类型以 SDK 的 `v1::schema` 为准；`chat` 冻结为应急与脚本化入口，不再加功能；`serve` 冻结，只修平台故障；`run` 保留并维护。
-- **分层由 crate 边界保证**：内核（`zx-core`）引用不到工具、策略、MCP、IM 和 CLI，只依赖 `zx-core` 与 `zx-ai` 的嵌入方也不会引入 rmcp、tokio-tungstenite 和 OpenTelemetry。新模块放进它所属的层；需要引用上层时，说明分层或接口该改了。各 crate 在根部把下层引入为 `crate::ai`、`crate::agent`、`crate::sync` 等，所以模块内的路径与拆分前相同；跨 crate 使用、但不属于 API 的项写成 `#[doc(hidden)] pub` 并在文档注释里注明（如 `zx_ai::sync`、`SystemPrompt::has_section`）。
+- **分层由 crate 边界保证**：内核（`zx-core`）引用不到工具、执行环境、策略、MCP、IM 和 CLI，只依赖 `zx-core` 与 `zx-ai` 的嵌入方不会引入 reqwest、rmcp、tokio-tungstenite 和 OpenTelemetry；provider 的实现各成 crate（`zx-ai-openai`），内核只认 `zx-ai` 的 `Provider` 契约。新模块放进它所属的层；需要引用上层时，说明分层或接口该改了。各 crate 在根部把下层引入为 `crate::ai`、`crate::agent`、`crate::sync` 等，所以模块内的路径与拆分前相同；跨 crate 使用、但不属于 API 的项写成 `#[doc(hidden)] pub` 并在文档注释里注明（如 `zx_ai::sync`、`SystemPrompt::has_section`）。
 
 ## 命令
 
-- 以下命令都在仓库根目录运行，覆盖全部 7 个 crate（test、clippy 与 doc 经 `Cargo.toml` 的 `default-members`）。在 `crates/*` 的目录里运行或加 `-p <crate>` 时只处理那一个 crate；集成测试都在根目录的 `tests/`，属于 `zx-agent`
+- 以下命令都在仓库根目录运行，覆盖全部 8 个 crate（test、clippy 与 doc 经 `Cargo.toml` 的 `default-members`）。在 `crates/*` 的目录里运行或加 `-p <crate>` 时只处理那一个 crate；集成测试都在根目录的 `tests/`，属于 `zx-agent`
 - 格式：`cargo fmt`（`rustfmt.toml`：`max_width = 120`）
 - lint：`cargo clippy --all-targets -- -D warnings`，要求零警告
 - 测试：`cargo test`，不需要网络和 API key。只跑一个集成测试文件：`cargo test --test agent_loop`；按名字过滤：`cargo test retries_transient`。付费的 `tests/real_api.rs` 默认跳过，见红线 9

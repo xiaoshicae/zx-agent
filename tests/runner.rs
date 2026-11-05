@@ -68,7 +68,7 @@ use common::{EchoTool, RunnerSetup, config, fast_retry, header, read_lines, summ
 use zx_agent::agent::{AgentEvent, EVENT_SCHEMA_VERSION, HookContext, HookOptions, HookResult, Hooks, RequestKind};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, PREAMBLE, StopReason, SystemPrompt};
-use zx_agent::extensions::ContinueOnLength;
+use zx_agent::continuation::ContinueOnLength;
 use zx_agent::runner::{Limits, RunOutcome};
 use zx_agent::session::{Entry, LoadedSession, LogRecord, SessionLog, SessionStore};
 

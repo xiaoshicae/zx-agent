@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "crates/zx-ai",
+  "crates/zx-ai-openai",
   "crates/zx-core",
   "crates/zx-tools",
   "crates/zx-im",
@@ -11,6 +12,7 @@ members = [
 default-members = [
   ".",
   "crates/zx-ai",
+  "crates/zx-ai-openai",
   "crates/zx-core",
   "crates/zx-tools",
   "crates/zx-im",
@@ -27,6 +29,7 @@ publish = false
 
 [workspace.dependencies]
 zx-ai = { path = "crates/zx-ai" }
+zx-ai-openai = { path = "crates/zx-ai-openai" }
 zx-core = { path = "crates/zx-core" }
 zx-im = { path = "crates/zx-im" }
 zx-im-feishu = { path = "crates/zx-im-feishu" }
@@ -74,6 +77,7 @@ path = "src/main.rs"
 
 [dependencies]
 zx-ai.workspace = true
+zx-ai-openai.workspace = true
 zx-core.workspace = true
 zx-im.workspace = true
 zx-im-feishu.workspace = true

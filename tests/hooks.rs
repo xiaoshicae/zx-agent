@@ -17,8 +17,9 @@ use zx_agent::agent::{
 };
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{EventReceiver, Message, Provider, Request, SectionChange, StopReason, SystemMessage, ToolCall};
-use zx_agent::extensions::{ContinueOnLength, RedactSecrets, check_secret_files, short_secret_files};
+use zx_agent::continuation::ContinueOnLength;
 use zx_agent::interaction::{Approval, ApprovalRequest, Interaction};
+use zx_agent::redact::{RedactSecrets, check_secret_files, short_secret_files};
 use zx_agent::runner::{Limits, RunOutcome};
 use zx_agent::session::{Entry, SessionStore};
 use zx_agent::tools::BashTool;
