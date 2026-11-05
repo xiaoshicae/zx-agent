@@ -172,7 +172,7 @@ impl Interruption {
     }
 }
 
-/// Events emitted while the agent runs (pi: `AgentEvent`, packages/agent/src/types.ts).
+/// Events emitted while the agent runs.
 ///
 /// A run is one prompt: `run_start`, then one attempt per try (`agent_start` to `agent_end`;
 /// a retry or a recovery from context overflow starts another), then `run_end`. A turn is one

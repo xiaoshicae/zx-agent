@@ -134,6 +134,7 @@ impl Runner {
         self.approvals.clear();
     }
 
+    /// The session the runner records in.
     pub fn session(&self) -> &SessionStore {
         &self.session
     }
@@ -157,7 +158,7 @@ impl Runner {
         self.start(Start::Prompt(prompt.into()), cancel).await
     }
 
-    /// Continue the conversation without new input (pi: `Agent.continue`): the model answers
+    /// Continue the conversation without new input: the model answers
     /// the session as it is. Runs like [`Runner::run`] otherwise, interrupted calls recovered
     /// first. Whether there is something to answer is checked after that recovery:
     ///

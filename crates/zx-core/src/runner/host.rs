@@ -156,8 +156,7 @@ impl<'a> RunHost<'a> {
     }
 
     /// Keep a failed answer in the session but drop it from the model context, so that the
-    /// next attempt continues from the message before it without repeating the user message
-    /// (pi: AgentSession._prepareRetry and _omitRecoveryAttempt).
+    /// next attempt continues from the message before it without repeating the user message.
     pub async fn omit_failed_attempt(&mut self, target: &str) -> Result<(), String> {
         let index = self
             .session
@@ -181,7 +180,7 @@ impl<'a> RunHost<'a> {
     }
 
     /// Omit the failed answer and summarize the old prefix, so that a new attempt can continue
-    /// from the compacted context (pi: AgentSession's overflow recovery). The summary's cost is
+    /// from the compacted context. The summary's cost is
     /// added to `accounting` whether or not it succeeds.
     pub async fn recover_overflow(
         &mut self,

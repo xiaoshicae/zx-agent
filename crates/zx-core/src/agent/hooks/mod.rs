@@ -250,8 +250,8 @@ pub trait Hooks: Send + Sync {
     }
 
     /// Change the model or reasoning level of the next task request, for example to use a
-    /// cheaper model for a simple turn (pi: `prepareRequest`, which may also change the
-    /// context; here the context stays the session projection). Return `None` to keep the
+    /// cheaper model for a simple turn. The context is not among
+    /// the settings: what the model sees is always the session projection. Return `None` to keep the
     /// settings. Changes chain in hook order and last for this request only; the request
     /// audit records the settings each request used. An empty model and a failure both stop
     /// the attempt before the request; summary requests do not call this hook.

@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use crate::ai::Message;
 use crate::sync::lock;
 
-/// Messages injected into a running loop (pi: `Agent.steeringQueue` / `followUpQueue`).
+/// Messages injected into a running loop.
 ///
 /// - Steering messages are taken after each turn and enter the conversation before the
 ///   next model request, while the task is still in progress.

@@ -26,7 +26,6 @@ impl<'a> Engine<'a, '_, '_> {
         if let Some(error) = &call.arguments_error {
             return Prepared::blocked(format!("Invalid arguments for tool {:?}: {error}", call.name));
         }
-        // pi: agent-loop.ts:704 (`prepareToolCallArguments` before validation).
         let rewritten = match std::panic::catch_unwind(AssertUnwindSafe(|| tool.prepare_arguments(&call.arguments))) {
             Ok(arguments) => arguments.map(|arguments| ToolCall {
                 arguments,

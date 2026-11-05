@@ -5,13 +5,8 @@
 //! messages a model sees are a projection of that branch: context edits can omit or replace
 //! earlier messages without touching the raw history, which stays available for auditing.
 //!
-//! A [`SessionLog`] keeps the entries: the JSONL session file, or a backend of the host's
-//! choice. The file's one exception to append-only is `open`, which cuts off an unfinished
-//! last line left by a crash or failed write, and reports how many bytes it removed.
-//!
-//! Version 3 adds auditable compaction without rewriting earlier records. Version 4 records
-//! that a tool call with side effects started, so recovery can tell interrupted calls apart.
-//! Version 5 adds incremental summaries, which carry an earlier summary's facts over.
+//! A [`SessionLog`] keeps the entries: the JSONL session file by default, or a backend of
+//! the host's choice. The format's history is with [`SESSION_VERSION`].
 
 mod directory;
 mod jsonl;
@@ -104,7 +99,7 @@ pub struct SessionHeader {
     pub timestamp: u64,
     pub cwd: String,
     pub model: String,
-    /// The session file this one was forked from (pi: `parentSession`); absent otherwise,
+    /// The session file this one was forked from; absent otherwise,
     /// and in files written before forks existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session: Option<String>,
@@ -521,7 +516,7 @@ impl SessionStore {
 
     /// Append the entries of `source` from its root to `leaf`, unchanged: the same IDs,
     /// parents, timestamps and content, so the projection, compactions and request audit of
-    /// that branch carry over (pi: `createBranchedSession`). Returns how many entries were
+    /// that branch carry over. Returns how many entries were
     /// copied. Fails without writing when this session already has entries, `leaf` is not
     /// in `source`, or the format versions of the two headers differ (see
     /// [`SessionStore::fork_header`]). A failed append stops writing, as any append does.
@@ -584,7 +579,7 @@ impl SessionStore {
         }
         if let Some(log) = &mut self.log {
             // Store before updating memory: an entry missing from the log must never become
-            // the parent of later entries (pi: SessionManager._appendEntry).
+            // the parent of later entries.
             let json = serde_json::to_string(&entry)?;
             let record = LogRecord {
                 seq: u64::try_from(self.entries.len())? + 1,

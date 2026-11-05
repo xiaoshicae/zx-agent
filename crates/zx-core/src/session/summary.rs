@@ -34,8 +34,8 @@ pub(crate) fn cite_only(facts: &[SummaryFact], ids: &[String]) -> Result<()> {
 #[serde(rename_all = "snake_case")]
 pub enum SummaryMode {
     /// Every summary reads all original records before its boundary again, never an earlier
-    /// summary (P5). A summary whose sources are corrected is invalid as a whole. Reading is
-    /// bounded at 2 MiB, so a long session eventually cannot be summarized.
+    /// summary. A summary whose sources are corrected is invalid as a whole. Reading is
+    /// bounded, so a long session eventually cannot be summarized this way.
     #[default]
     Full,
     /// A summary after an earlier one carries that one's facts over unchanged and reads only
@@ -92,7 +92,7 @@ impl CompactionSummary {
     pub(crate) fn validate_limits(&self) -> Result<()> {
         ensure!(
             serde_json::to_vec(self)?.len() <= MAX_SUMMARY_BYTES,
-            "summary exceeds 65536 bytes"
+            "summary exceeds {MAX_SUMMARY_BYTES} bytes"
         );
         ensure!(
             self.facts.len() <= MAX_STATEMENTS
