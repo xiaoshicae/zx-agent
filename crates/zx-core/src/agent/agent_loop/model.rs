@@ -18,6 +18,7 @@ impl Engine<'_, '_, '_> {
             messages: context.to_vec(),
             tools: spec.tools.iter().map(|tool| tool.definition()).collect(),
             max_tokens: spec.max_tokens,
+            reasoning: spec.reasoning,
         };
         let request_entry = match self.control.session.as_deref_mut() {
             Some(session) => Some(

@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex, Weak};
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{Event, EventSink, LoopConfig, MessageQueues};
-use crate::ai::Provider;
 use crate::ai::retry::RetryPolicy;
+use crate::ai::{Provider, Reasoning};
 use crate::compaction;
 use crate::runner::{Limits, RunReport, Runner};
 use crate::session::{SessionStore, WritesStopped};
@@ -235,6 +235,20 @@ impl AgentSession {
         // A custom provider's destructor is host code too; drop it without the state lock.
         drop(previous);
         Ok(())
+    }
+
+    /// Change the reasoning level of later task requests while idle; `None` leaves the
+    /// server's default. A run returns Busy. The change is recorded with the next request
+    /// (`request_config`); no request is made now.
+    pub fn set_reasoning(&self, reasoning: Option<Reasoning>) -> Result<(), SessionError> {
+        let mut state = lock(&self.state);
+        match &mut *state {
+            State::Running(_) => Err(SessionError::Busy),
+            State::Idle(runner) => {
+                runner.replace_reasoning(reasoning);
+                Ok(())
+            }
+        }
     }
 
     fn acquire(&self, cancel: CancellationToken) -> Result<ActiveRun<'_>, SessionError> {

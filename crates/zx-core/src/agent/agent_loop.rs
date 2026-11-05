@@ -24,8 +24,8 @@ use super::queue::{MessageQueues, Queue};
 use super::session_runtime::{ContextPreparation, SessionRuntime};
 use super::tool::{Effects, ExecutionMode, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput};
 use crate::ai::{
-    AssistantMessage, Message, Provider, Request, StopReason, StreamEvent, SystemMessage, SystemPrompt, ToolCall,
-    ToolResultMessage, Usage, UserMessageKind, duration_ms, now_ms,
+    AssistantMessage, Message, Provider, Reasoning, Request, StopReason, StreamEvent, SystemMessage, SystemPrompt,
+    ToolCall, ToolResultMessage, Usage, UserMessageKind, duration_ms, now_ms,
 };
 use crate::interaction::{Approval, ApprovalCache, ApprovalRequest, DEFAULT_APPROVAL_TIMEOUT, Interaction, NoHuman};
 
@@ -38,6 +38,9 @@ pub struct LoopSpec {
     pub tools: Vec<Arc<dyn Tool>>,
     pub cwd: PathBuf,
     pub max_tokens: Option<u32>,
+    /// Sent with every task request; `None` leaves the server's default. Summary requests
+    /// send none.
+    pub reasoning: Option<Reasoning>,
     pub sequential_tools: bool,
 }
 

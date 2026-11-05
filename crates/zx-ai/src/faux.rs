@@ -198,6 +198,7 @@ mod tests {
             messages: vec![],
             tools: vec![],
             max_tokens: None,
+            reasoning: None,
         };
         provider.stream(request, CancellationToken::new()).collect().await
     }
@@ -260,6 +261,7 @@ mod tests {
             messages: vec![],
             tools: vec![],
             max_tokens: None,
+            reasoning: None,
         };
         let mut receiver = provider.stream(request, CancellationToken::new());
         let mut deltas = 0;

@@ -17,10 +17,10 @@ use zx_agent::AgentSession;
 use zx_agent::agent::{AgentEvent, Decision, Event, HookContext, HookResult, Hooks, Tool, ToolContext, ToolOutput};
 use zx_agent::agent_session::{ModelRef, SessionError, Subscription};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{EventReceiver, Provider, Request, ToolDef};
+use zx_agent::ai::{EventReceiver, Provider, Reasoning, Request, ToolDef};
 use zx_agent::interaction::{Approval, ApprovalRequest, Interaction};
 use zx_agent::runner::RunOutcome;
-use zx_agent::session::SessionStore;
+use zx_agent::session::{Entry, SessionStore};
 
 struct NotifyingProvider {
     faux: FauxProvider,
@@ -325,6 +325,64 @@ async fn switching_models_preserves_history_and_uses_the_new_provider() {
         summarize(&requests[0].messages),
         ["user:first", "assistant:one", "user:second"]
     );
+}
+
+#[tokio::test]
+async fn the_reasoning_level_changes_between_prompts_and_is_recorded_for_the_audit() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("session.jsonl");
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::text("one"),
+        FauxStep::text("two"),
+        FauxStep::text("three"),
+    ]));
+    let mut loop_config = config(provider.clone(), vec![]);
+    loop_config.spec.reasoning = Some(Reasoning::Low);
+    let (runner, _) = RunnerSetup {
+        session: SessionStore::create(&file, header()).unwrap(),
+        ..RunnerSetup::new(loop_config)
+    }
+    .build();
+    let session = AgentSession::from(runner);
+
+    session.prompt("first").await.unwrap();
+    session.set_reasoning(Some(Reasoning::High)).unwrap();
+    session.prompt("second").await.unwrap();
+    session.set_reasoning(None).unwrap();
+    session.prompt("third").await.unwrap();
+
+    let sent: Vec<Option<Reasoning>> = provider.requests().iter().map(|request| request.reasoning).collect();
+    assert_eq!(sent, [Some(Reasoning::Low), Some(Reasoning::High), None]);
+    // Each change is a new request configuration, and every request rebuilds as sent.
+    let store = SessionStore::read(&file).unwrap();
+    let ids: Vec<String> = store
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::RequestStarted(started) => Some(started.id.clone()),
+            _ => None,
+        })
+        .collect();
+    let replayed: Vec<Request> = ids.iter().map(|id| store.replay_request(id).unwrap().1).collect();
+    assert_eq!(replayed, provider.requests());
+    let configs = store
+        .entries()
+        .iter()
+        .filter(|entry| matches!(entry, Entry::RequestConfig(_)))
+        .count();
+    assert_eq!(configs, 3);
+}
+
+#[tokio::test]
+async fn a_running_session_rejects_a_reasoning_change() {
+    let (session, provider, _) = setup([FauxStep::Hang, FauxStep::text("after")]);
+    let mut running = Box::pin(session.prompt("first"));
+    tokio::select! { _ = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
+    assert_eq!(session.set_reasoning(Some(Reasoning::High)), Err(SessionError::Busy));
+    session.abort();
+    running.await.unwrap();
+    session.prompt("second").await.unwrap();
+    assert_eq!(provider.faux.requests()[1].reasoning, None);
 }
 
 #[tokio::test]
