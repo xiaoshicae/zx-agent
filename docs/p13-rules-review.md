@@ -129,7 +129,7 @@ PR #71（P11 内核整理与 P12 项目整理）与 PR #75（规则与 lint）�
 
 本机 macOS，在合并后的分支上：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`（见下）、`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`、`cargo +1.88.0 check --all-targets` 与 `.claude/scripts/self-check.sh` 通过；自查脚本的命中只有既有的 `unsafe`（都带 `// SAFETY:`）与带注释的 `let _ =`。未新增依赖，`Cargo.lock` 未变。真实 Docker 的 `real_` 测试与付费 e2e 测试本次没有运行。
 
-`cargo test` 汇总：1086 通过、0 失败、8 跳过。
+`cargo test` 汇总：1086 通过、0 失败、8 跳过；合并 main 上的 PR #76（ACP 的 `session/list` 与 `session/resume`，其 `src/acp.rs` 的改动手工移到 `src/acp/mod.rs`）之后再跑一遍，1088 通过、0 失败、8 跳过。
 
 ## 8. 不做的事与遗留
 

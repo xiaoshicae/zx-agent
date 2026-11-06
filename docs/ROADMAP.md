@@ -1789,7 +1789,7 @@ D11 容器沙箱的实施要点（2026-11-05 用户决定）：
 - [x] **⑤ 根 crate**（`e680d75` 至 `daca52d`）：`list_sessions.rs` 消掉 `cli` 与 `sessions` 的循环；`cli/{mod,shared,prepare,execution}.rs`、`otel/{mod,signal,spans,metrics}.rs`、`acp/{mod,permissions,updates}.rs`、`chat/{storage,turn,info}.rs`；`with_telemetry`、`ModeSettings`、`env_value`；`apply` 与 `emit` 每个分支一行；`render` 的 `call_label`、`local_time`、`answer_end_line`、`Severity`；`First`、`Exporters` 枚举；命名、上下文、文档与可见性。
 - [x] **⑥ 文档**：本稿、规则 01 与 06、`docs/TESTS.md`、README 的会话格式版本。整个 P13 在一个 PR（#77）中完成。
 
-验证（本机 macOS，合并后的分支）：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`（1086 通过、0 失败、8 项付费测试跳过）、`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`、`cargo +1.88.0 check --all-targets` 与自查脚本通过；未新增依赖。真实 Docker 与付费 e2e 测试本次没有运行。
+验证（本机 macOS，合并后的分支）：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`（1086 通过、0 失败、8 项付费测试跳过；合并 PR #76 之后 1088 通过）、`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`、`cargo +1.88.0 check --all-targets` 与自查脚本通过；未新增依赖。真实 Docker 与付费 e2e 测试本次没有运行。
 
 ## 6. 推进方式
 
