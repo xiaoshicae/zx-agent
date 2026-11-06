@@ -21,15 +21,30 @@ const BOT_TOKEN: &str = "xoxb-test";
 /// Only reached when an expected event never comes.
 const WAIT: Duration = Duration::from_secs(10);
 
-fn channel_with(slack: &FakeSlack, post_interval: Duration) -> Arc<SlackChannel> {
+fn config(slack: &FakeSlack) -> SlackConfig {
     let mut config = SlackConfig::new(APP_TOKEN.into(), BOT_TOKEN.into());
     config.api_base = slack.api_base.clone();
+    config.post_interval = Duration::ZERO;
+    config
+}
+
+fn channel_with(slack: &FakeSlack, post_interval: Duration) -> Arc<SlackChannel> {
+    let mut config = config(slack);
     config.post_interval = post_interval;
     Arc::new(SlackChannel::new(config).unwrap())
 }
 
 fn channel(slack: &FakeSlack) -> Arc<SlackChannel> {
     channel_with(slack, Duration::ZERO)
+}
+
+/// A channel for `config` that passes each error it reports on as text.
+fn reporting(mut config: SlackConfig) -> (Arc<SlackChannel>, mpsc::UnboundedReceiver<String>) {
+    let (reported, reports) = mpsc::unbounded_channel();
+    config.on_error = Some(Arc::new(move |error: &ImError| {
+        reported.send(error.to_string()).ok();
+    }));
+    (Arc::new(SlackChannel::new(config).unwrap()), reports)
 }
 
 fn envelope(id: &str, kind: &str, payload: &Value) -> Value {
@@ -425,13 +440,8 @@ async fn posts_to_one_chat_are_spaced_out() {
 async fn a_failed_connection_attempt_is_reported_and_retried() {
     let mut slack = FakeSlack::start().await;
     slack.script("apps.connections.open", vec![Answer::Error("internal_error")]);
-    let (reported, mut reports) = mpsc::unbounded_channel();
-    let mut config = SlackConfig::new(APP_TOKEN.into(), BOT_TOKEN.into());
-    config.api_base = slack.api_base.clone();
-    config.on_error = Some(Arc::new(move |error: &ImError| {
-        reported.send(error.to_string()).ok();
-    }));
-    let running = run_channel(Arc::new(SlackChannel::new(config).unwrap()), WAIT);
+    let (channel, mut reports) = reporting(config(&slack));
+    let running = run_channel(channel, WAIT);
     let report = tokio::time::timeout(WAIT, reports.recv()).await.unwrap().unwrap();
     assert!(report.contains("internal_error"), "{report}");
     // The next attempt connects.
@@ -457,13 +467,8 @@ async fn a_failed_tls_handshake_is_reported_and_retried() {
         "apps.connections.open",
         vec![Answer::Json(json!({"ok": true, "url": tls_url}))],
     );
-    let (reported, mut reports) = mpsc::unbounded_channel();
-    let mut config = SlackConfig::new(APP_TOKEN.into(), BOT_TOKEN.into());
-    config.api_base = slack.api_base.clone();
-    config.on_error = Some(Arc::new(move |error: &ImError| {
-        reported.send(error.to_string()).ok();
-    }));
-    let running = run_channel(Arc::new(SlackChannel::new(config).unwrap()), WAIT);
+    let (channel, mut reports) = reporting(config(&slack));
+    let running = run_channel(channel, WAIT);
     let report = tokio::time::timeout(WAIT, reports.recv()).await.unwrap().unwrap();
     assert!(report.contains("cannot open the Socket Mode connection"), "{report}");
     // The next attempt gets the fake's plain socket.
@@ -478,4 +483,53 @@ async fn stopping_closes_the_connection() {
     let mut socket = slack.socket().await;
     running.stop().await.unwrap();
     assert!(socket.closed_by_client().await);
+}
+
+#[tokio::test]
+async fn stopping_does_not_wait_out_a_long_retry_after() {
+    let slack = FakeSlack::start().await;
+    slack.script(
+        "apps.connections.open",
+        vec![Answer::RateLimited {
+            retry_after_secs: 100_000,
+        }],
+    );
+    let running = run_channel(channel(&slack), WAIT);
+    slack.wait_for("apps.connections.open", 1).await;
+    tokio::time::timeout(WAIT, running.stop())
+        .await
+        .expect("the stop waited for the Retry-After")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_silent_connection_is_reported_and_opened_again() {
+    let mut slack = FakeSlack::start().await;
+    let mut config = config(&slack);
+    config.ping_interval = Duration::from_millis(100);
+    let (channel, mut reports) = reporting(config);
+    let running = run_channel(channel, WAIT);
+    // Answers nothing, not even the pings.
+    let first = slack.socket().await;
+    let report = tokio::time::timeout(WAIT, reports.recv()).await.unwrap().unwrap();
+    assert!(report.contains("silent"), "{report}");
+    let second = slack.socket().await;
+    assert_eq!(slack.calls("apps.connections.open").len(), 2);
+    drop((first, second));
+    running.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_message_without_text_is_not_passed_on() {
+    let mut slack = FakeSlack::start().await;
+    let mut running = run_channel(channel(&slack), WAIT);
+    let mut socket = slack.socket().await;
+    socket
+        .send(envelope("e1", "events_api", &direct("2.6", json!({"text": null}))))
+        .await;
+    socket
+        .send(envelope("e2", "events_api", &direct("2.7", json!({}))))
+        .await;
+    assert_eq!(running.next().await, message("2.7", in_thread("D1", None), "U1", "hi"));
+    running.stop().await.unwrap();
 }

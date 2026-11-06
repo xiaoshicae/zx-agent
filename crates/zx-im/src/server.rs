@@ -1,4 +1,6 @@
-//! The router: access control, one worker per thread, the shared run limit and the stop.
+//! The server and its contracts: the session key, the host's [`SessionFactory`], the
+//! operator's [`ServerSink`], the reply texts, the configuration, and what every
+//! conversation shares. Routing is in `router.rs`.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
@@ -11,28 +13,16 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use tokio::sync::{Semaphore, mpsc};
-use tokio::task::{JoinHandle, JoinSet};
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use crate::AgentSession;
 use crate::agent::ApprovalResult;
 use crate::interaction::Interaction;
 
+use super::router::Router;
 use super::status::{left_behind, replace_left_behind};
-use super::worker::{self, Retire, WorkerInput, WorkerSetup};
-use super::{
-    ApprovalId, ConversationId, Destination, ImChannel, ImError, Inbound, MessageRef, Outbound, StatusStore, ThreadId,
-    UserId,
-};
-
-/// Inbound events buffered between the channels and the router, which only passes them on.
-const INBOUND_CAPACITY: usize = 64;
-/// Input buffered for one conversation. People write slower than a conversation takes input;
-/// a full buffer drops the message and reports it.
-const INBOX_CAPACITY: usize = 32;
-/// Idle notices of conversations, which the router handles at once.
-const RETIRE_CAPACITY: usize = 16;
+use super::{ApprovalId, ConversationId, Destination, ImChannel, ImError, MessageRef, StatusStore, ThreadId, UserId};
 
 const DEFAULT_MAX_RUNNING: NonZeroUsize = NonZeroUsize::new(4).expect("4 is not zero");
 const DEFAULT_IDLE: Duration = Duration::from_secs(30 * 60);
@@ -69,7 +59,8 @@ impl SessionKey {
     }
 }
 
-pub(super) fn segment(id: &str) -> String {
+/// `id` as one part of a path, encoded as [`SessionKey::file_in`] says.
+pub(crate) fn segment(id: &str) -> String {
     if id.is_empty() {
         return "%".to_string();
     }
@@ -210,9 +201,10 @@ pub struct ServerConfig {
     pub outbound_timeout: Duration,
     pub replies: Replies,
     /// Keeps the status of each run while it runs, so that a crash or a kill does not leave
-    /// threads saying that the work goes on: the next start replaces those statuses with
-    /// [`Replies::interrupted`]. `None`, the default, keeps nothing.
-    /// [`StatusFiles`](super::StatusFiles) keeps them in a directory.
+    /// threads saying that the work goes on.
+    ///
+    /// The next start replaces those statuses with [`Replies::interrupted`]. `None`, the
+    /// default, keeps nothing. [`StatusFiles`](super::StatusFiles) keeps them in a directory.
     pub statuses: Option<Arc<dyn StatusStore>>,
 }
 
@@ -245,83 +237,58 @@ pub struct Server {
 }
 
 impl Server {
+    /// A server for `config` that opens sessions with `factory` and reports to `sink`.
     pub fn new(config: ServerConfig, factory: Arc<dyn SessionFactory>, sink: Arc<dyn ServerSink>) -> Self {
         Self { config, factory, sink }
     }
 
-    /// Serve `channels` until `cancel` is triggered or a channel fails. Stopping cancels the
-    /// runs and waits until each conversation has posted how it ended, [`Replies::stopped`]
-    /// for a cancelled run; a thread with messages that will not run, including those the
-    /// channels received during the stop, also gets [`Replies::stopping`]. A channel's error
-    /// is then returned. Two channels with the same platform name are a configuration error.
+    /// Serve `channels` until `cancel` is triggered or a channel fails.
+    ///
+    /// Stopping cancels the runs and waits until each conversation has posted how it ended,
+    /// [`Replies::stopped`] for a cancelled run; a thread with messages that will not run,
+    /// including those the channels received during the stop, also gets
+    /// [`Replies::stopping`]. A channel's error is then returned. Two channels with the same
+    /// platform name are a configuration error.
     ///
     /// With [`ServerConfig::statuses`], the statuses an earlier process left behind are read
     /// before anything is received, then replaced with [`Replies::interrupted`] while the
     /// server runs: each is tried once and then forgotten. The stop gives up on the rest,
     /// which stay for the next start.
     pub async fn run(self, channels: Vec<Arc<dyn ImChannel>>, cancel: &CancellationToken) -> Result<(), ImError> {
-        let mut platforms = HashSet::new();
-        for channel in &channels {
-            if !platforms.insert(channel.platform()) {
-                return Err(ImError::Config(format!(
-                    "more than one channel is named {:?}",
-                    channel.platform()
-                )));
-            }
-        }
-        let ServerConfig {
-            conversations,
-            approvers,
-            max_running,
-            idle,
-            outbound_timeout,
-            replies,
-            statuses,
-        } = self.config;
-        let shared = Arc::new(Shared {
-            factory: self.factory,
-            sink: self.sink,
-            approvers: group(approvers),
-            replies,
-            idle,
-            outbound_timeout,
-            permits: Arc::new(Semaphore::new(max_running.get())),
-            statuses,
-        });
+        distinct_platforms(&channels)?;
+        let Server {
+            mut config,
+            factory,
+            sink,
+        } = self;
+        // The chats served are the router's; the rest of the configuration is shared.
+        let allowed = group(std::mem::take(&mut config.conversations));
+        let shared = Arc::new(Shared::new(config, factory, sink));
         // Read before any run can start, so that no status of this process is among them.
         let left = left_behind(&shared).await;
         let stop = cancel.child_token();
-        let (tagged, mut inbound) = mpsc::channel(INBOUND_CAPACITY);
-        let mut channel_tasks = JoinSet::new();
-        for (index, channel) in channels.iter().enumerate() {
-            channel_tasks.spawn(receive(index, Arc::clone(channel), tagged.clone(), stop.clone()));
-        }
-        drop(tagged);
         let replacing = tokio::spawn(replace_left_behind(
             left,
             channels.clone(),
             Arc::clone(&shared),
             stop.clone(),
         ));
-        let (retire, mut retired) = mpsc::channel(RETIRE_CAPACITY);
-        let mut router = Router {
-            channels,
-            allowed: group(conversations),
-            shared,
-            stop,
-            retire,
-            workers: HashMap::new(),
-            tasks: JoinSet::new(),
-            refusals: JoinSet::new(),
-            replacing,
-        };
-        let result = router.serve(&mut inbound, &mut retired, &mut channel_tasks).await;
-        // A closed receiver makes waiting senders fail at once, so no worker can hold up the
-        // stop. The channels are read to the end instead.
-        drop(retired);
-        router.shutdown(inbound, channel_tasks).await;
-        result
+        Router::new(channels, allowed, shared, stop, replacing).run().await
     }
+}
+
+/// An error when two of `channels` have the same platform name.
+fn distinct_platforms(channels: &[Arc<dyn ImChannel>]) -> Result<(), ImError> {
+    let mut platforms = HashSet::new();
+    for channel in channels {
+        if !platforms.insert(channel.platform()) {
+            return Err(ImError::Config(format!(
+                "more than one channel is named {:?}",
+                channel.platform()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Settings and resources every conversation reads.
@@ -339,6 +306,30 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
+    /// What the conversations share, from everything in `config` but the chats served.
+    pub(crate) fn new(config: ServerConfig, factory: Arc<dyn SessionFactory>, sink: Arc<dyn ServerSink>) -> Self {
+        let ServerConfig {
+            // Taken by the router before.
+            conversations: _,
+            approvers,
+            max_running,
+            idle,
+            outbound_timeout,
+            replies,
+            statuses,
+        } = config;
+        Self {
+            factory,
+            sink,
+            approvers: group(approvers),
+            replies,
+            idle,
+            outbound_timeout,
+            permits: Arc::new(Semaphore::new(max_running.get())),
+            statuses,
+        }
+    }
+
     pub(crate) fn is_approver(&self, platform: &str, user: &UserId) -> bool {
         self.approvers.get(platform).is_some_and(|users| users.contains(user))
     }
@@ -351,26 +342,17 @@ impl Shared {
     }
 
     /// `operation` within the outbound timeout. A failure, or the time running out, is
-    /// reported to the operator against `key` as `cannot <act>: <error>` or `<acting> took
-    /// longer than <n> s`, and leaves nothing.
+    /// reported to the operator against `key` as [`timed`] words it, and leaves nothing.
     pub(crate) async fn bounded<T, E: Display>(
         &self,
         key: Option<&SessionKey>,
         act: &str,
-        acting: &str,
         operation: impl Future<Output = Result<T, E>>,
     ) -> Option<T> {
-        match tokio::time::timeout(self.outbound_timeout, operation).await {
-            Ok(Ok(value)) => Some(value),
-            Ok(Err(error)) => {
-                self.failed(key, format!("cannot {act}: {error}"));
-                None
-            }
-            Err(_) => {
-                self.failed(
-                    key,
-                    format!("{acting} took longer than {} s", self.outbound_timeout.as_secs()),
-                );
+        match timed(self.outbound_timeout, act, operation).await {
+            Ok(value) => Some(value),
+            Err(error) => {
+                self.failed(key, error);
                 None
             }
         }
@@ -383,294 +365,41 @@ impl Shared {
     /// Keep the status of a run that starts. A failure is reported; the run goes on.
     pub(crate) async fn keep_status(&self, key: &SessionKey, status: &MessageRef) {
         if let Some(statuses) = self.statuses() {
-            let (act, acting) = (
-                format!("keep status {}", status.id),
-                format!("keeping status {}", status.id),
-            );
-            self.bounded(Some(key), &act, &acting, statuses.insert(key, status))
-                .await;
+            let act = format!("keep status {}", status.id);
+            self.bounded(Some(key), &act, statuses.insert(key, status)).await;
         }
     }
 
     /// Forget a status about to be replaced. A failure is reported.
     pub(crate) async fn forget_status(&self, key: &SessionKey, status: &MessageRef) {
         if let Some(statuses) = self.statuses() {
-            let (act, acting) = (
-                format!("forget status {}", status.id),
-                format!("forgetting status {}", status.id),
-            );
-            self.bounded(Some(key), &act, &acting, statuses.remove(key, status))
-                .await;
+            let act = format!("forget status {}", status.id);
+            self.bounded(Some(key), &act, statuses.remove(key, status)).await;
         }
     }
 }
 
-fn group<T: Eq + Hash>(pairs: Vec<(String, T)>) -> HashMap<String, HashSet<T>> {
+/// `operation` within `timeout`. The error says what could not be done: `cannot <act>:
+/// <error>`, or `cannot <act>: took longer than <n> s`.
+pub(crate) async fn timed<T, E: Display>(
+    timeout: Duration,
+    act: &str,
+    operation: impl Future<Output = Result<T, E>>,
+) -> Result<T, String> {
+    match tokio::time::timeout(timeout, operation).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => Err(format!("cannot {act}: {error}")),
+        Err(_) => Err(format!("cannot {act}: took longer than {} s", timeout.as_secs())),
+    }
+}
+
+/// `pairs` by platform.
+pub(crate) fn group<T: Eq + Hash>(pairs: Vec<(String, T)>) -> HashMap<String, HashSet<T>> {
     let mut grouped: HashMap<String, HashSet<T>> = HashMap::new();
     for (platform, item) in pairs {
         grouped.entry(platform).or_default().insert(item);
     }
     grouped
-}
-
-/// Run one channel, tagging what it receives with its index for the router.
-async fn receive(
-    index: usize,
-    channel: Arc<dyn ImChannel>,
-    tagged: mpsc::Sender<(usize, Inbound)>,
-    stop: CancellationToken,
-) -> (usize, Result<(), ImError>) {
-    let (sender, mut receiver) = mpsc::channel(INBOUND_CAPACITY);
-    let forward = async move {
-        while let Some(event) = receiver.recv().await {
-            if tagged.send((index, event)).await.is_err() {
-                // The router no longer reads: the server is stopping.
-                break;
-            }
-        }
-    };
-    let (result, ()) = tokio::join!(channel.run(sender, &stop), forward);
-    (index, result)
-}
-
-struct WorkerHandle {
-    inbox: mpsc::Sender<WorkerInput>,
-    /// Input passed to the worker so far, compared with [`Retire::received`].
-    forwarded: u64,
-}
-
-struct Router {
-    channels: Vec<Arc<dyn ImChannel>>,
-    allowed: HashMap<String, HashSet<ConversationId>>,
-    shared: Arc<Shared>,
-    stop: CancellationToken,
-    retire: mpsc::Sender<Retire>,
-    workers: HashMap<SessionKey, WorkerHandle>,
-    tasks: JoinSet<()>,
-    /// Replies to chats the server does not serve.
-    refusals: JoinSet<()>,
-    /// Replaces the statuses an earlier process left behind.
-    replacing: JoinHandle<()>,
-}
-
-impl Router {
-    async fn serve(
-        &mut self,
-        inbound: &mut mpsc::Receiver<(usize, Inbound)>,
-        retired: &mut mpsc::Receiver<Retire>,
-        channel_tasks: &mut JoinSet<(usize, Result<(), ImError>)>,
-    ) -> Result<(), ImError> {
-        loop {
-            tokio::select! {
-                () = self.stop.cancelled() => return Ok(()),
-                Some((index, event)) = inbound.recv() => self.route(index, event),
-                Some(retire) = retired.recv() => self.retire(&retire),
-                Some(ended) = channel_tasks.join_next() => {
-                    let (index, result) =
-                        ended.map_err(|error| ImError::Transport(format!("a channel task failed: {error}")))?;
-                    result?;
-                    if !self.stop.is_cancelled() {
-                        return Err(ImError::Transport(format!(
-                            "the {} channel stopped while the server was running",
-                            self.channels[index].platform()
-                        )));
-                    }
-                }
-                Some(ended) = self.tasks.join_next() => {
-                    if let Err(error) = ended {
-                        self.shared.failed(None, format!("a conversation task failed: {error}"));
-                    }
-                }
-                Some(ended) = self.refusals.join_next() => {
-                    if let Err(error) = ended {
-                        self.shared.failed(None, format!("a reply task failed: {error}"));
-                    }
-                }
-            }
-        }
-    }
-
-    fn route(&mut self, index: usize, event: Inbound) {
-        let channel = Arc::clone(&self.channels[index]);
-        let platform = channel.platform().to_string();
-        match event {
-            Inbound::Message {
-                id,
-                at,
-                sender: _,
-                text,
-            } => {
-                // A message posted in the chat itself starts a thread under it.
-                let thread = at.thread.unwrap_or(ThreadId(id.0));
-                let key = SessionKey {
-                    platform,
-                    conversation: at.conversation,
-                    thread,
-                };
-                let served = self
-                    .allowed
-                    .get(&key.platform)
-                    .is_some_and(|chats| chats.contains(&key.conversation));
-                if served {
-                    self.message(channel, key, text);
-                } else {
-                    self.refuse(channel, key.destination());
-                }
-            }
-            Inbound::Decision {
-                at,
-                user,
-                approval,
-                choice,
-            } => {
-                // Cards are posted in a conversation's thread; a click elsewhere is not ours.
-                let Some(thread) = at.thread else {
-                    return;
-                };
-                let key = SessionKey {
-                    platform,
-                    conversation: at.conversation,
-                    thread,
-                };
-                self.decision(&key, WorkerInput::Decision { user, approval, choice });
-            }
-        }
-    }
-
-    /// Pass a message to the conversation's worker, starting one when there is none.
-    fn message(&mut self, channel: Arc<dyn ImChannel>, key: SessionKey, text: String) {
-        let input = WorkerInput::Message { text };
-        let input = match self.workers.get_mut(&key) {
-            Some(worker) => match worker.inbox.try_send(input) {
-                Ok(()) => {
-                    worker.forwarded += 1;
-                    return;
-                }
-                Err(mpsc::error::TrySendError::Full(_)) => None,
-                // The worker has ended, after a panic: a new one takes over.
-                Err(mpsc::error::TrySendError::Closed(input)) => Some(input),
-            },
-            None => Some(input),
-        };
-        let Some(input) = input else {
-            self.dropped(&key);
-            return;
-        };
-        let (inbox, receiver) = mpsc::channel(INBOX_CAPACITY);
-        self.tasks.spawn(worker::run(WorkerSetup {
-            key: key.clone(),
-            channel,
-            shared: Arc::clone(&self.shared),
-            inbox: receiver,
-            retire: self.retire.clone(),
-            stop: self.stop.clone(),
-        }));
-        let mut worker = WorkerHandle { inbox, forwarded: 0 };
-        // A new inbox has room for one message.
-        match worker.inbox.try_send(input) {
-            Ok(()) => worker.forwarded += 1,
-            Err(_) => self.dropped(&key),
-        }
-        self.workers.insert(key, worker);
-    }
-
-    /// Pass a click to the conversation's worker. Without a worker nothing is pending:
-    /// approvals end with their run, and the router ends only idle conversations.
-    fn decision(&mut self, key: &SessionKey, input: WorkerInput) {
-        let full = match self.workers.get_mut(key) {
-            Some(worker) => match worker.inbox.try_send(input) {
-                Ok(()) => {
-                    worker.forwarded += 1;
-                    false
-                }
-                Err(mpsc::error::TrySendError::Full(_)) => true,
-                // The worker has ended, and its approvals with it.
-                Err(mpsc::error::TrySendError::Closed(_)) => false,
-            },
-            None => false,
-        };
-        if full {
-            self.dropped(key);
-        }
-    }
-
-    fn dropped(&self, key: &SessionKey) {
-        self.shared.failed(
-            Some(key),
-            "too many messages wait in this conversation; one was dropped".into(),
-        );
-    }
-
-    /// Answer a chat the server does not serve, without holding up the router.
-    fn refuse(&mut self, channel: Arc<dyn ImChannel>, to: Destination) {
-        let shared = Arc::clone(&self.shared);
-        self.refusals.spawn(async move {
-            let text = Outbound::Text(shared.replies.unauthorized.clone());
-            match tokio::time::timeout(shared.outbound_timeout, channel.send(&to, &text)).await {
-                Ok(Ok(_)) => {}
-                Ok(Err(error)) => shared.failed(None, format!("cannot answer in {}: {error}", to.conversation)),
-                Err(_) => shared.failed(
-                    None,
-                    format!(
-                        "answering in {} took longer than {} s",
-                        to.conversation,
-                        shared.outbound_timeout.as_secs()
-                    ),
-                ),
-            }
-        });
-    }
-
-    fn retire(&mut self, retire: &Retire) {
-        // Equal counts mean the worker has taken everything sent to it and holds no session:
-        // without its inbox it ends. Otherwise a message is on its way and the worker goes on.
-        if self
-            .workers
-            .get(&retire.key)
-            .is_some_and(|worker| worker.forwarded == retire.received)
-        {
-            self.workers.remove(&retire.key);
-        }
-    }
-
-    async fn shutdown(
-        mut self,
-        mut inbound: mpsc::Receiver<(usize, Inbound)>,
-        mut channel_tasks: JoinSet<(usize, Result<(), ImError>)>,
-    ) {
-        self.stop.cancel();
-        // The platforms were told about these events already and will not send them again.
-        // Routed as usual, each message reaches a stopping worker, which answers that it will
-        // not run it. The channels stop sending once cancelled, and their tasks then drop
-        // the senders, which ends this loop; reading on means no channel waits on a full
-        // buffer meanwhile.
-        while let Some((index, event)) = inbound.recv().await {
-            self.route(index, event);
-        }
-        // Without their inboxes, workers end once their runs have stopped and they have
-        // posted.
-        self.workers.clear();
-        while let Some(ended) = self.tasks.join_next().await {
-            if let Err(error) = ended {
-                self.shared.failed(None, format!("a conversation task failed: {error}"));
-            }
-        }
-        // A channel may report an error while its connection closes; the server is stopping
-        // either way.
-        while channel_tasks.join_next().await.is_some() {}
-        while let Some(ended) = self.refusals.join_next().await {
-            if let Err(error) = ended {
-                self.shared.failed(None, format!("a reply task failed: {error}"));
-            }
-        }
-        // It gives up at the stop, which was triggered above.
-        if let Err(error) = self.replacing.await {
-            self.shared.failed(
-                None,
-                format!("replacing the statuses an earlier process left failed: {error}"),
-            );
-        }
-    }
 }
 
 #[cfg(test)]

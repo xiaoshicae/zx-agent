@@ -14,18 +14,14 @@ use tokio::task::{JoinError, JoinHandle};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::AgentSession;
-use crate::agent::QueuedMessage;
-use crate::agent_session::{SessionError, Subscription};
+use crate::agent_session::SessionError;
 use crate::ai::now_ms;
-use crate::runner::{RunOutcome, RunReport};
+use crate::runner::RunReport;
 
-use super::approval::{ApprovalEvents, ApprovalUpdate, Decided, ImApproval};
+use super::approval::{ApprovalUpdate, Decided};
+use super::outlet::{Opened, Outlet};
 use super::server::Shared;
-use super::{
-    ApprovalId, ApprovalRecord, Choice, Destination, ImChannel, MessageRef, Outbound, Replies, ServerEvent, SessionKey,
-    UserId,
-};
+use super::{ApprovalId, ApprovalRecord, Choice, ImChannel, MessageRef, Outbound, ServerEvent, SessionKey, UserId};
 
 /// Sent alone in a thread, cancels its run.
 const CANCEL_COMMAND: &str = "/cancel";
@@ -59,108 +55,112 @@ pub(crate) struct WorkerSetup {
     pub(crate) stop: CancellationToken,
 }
 
-/// Run one conversation until the router drops its inbox. A run in progress is cancelled by
-/// the stop, and its status then says so ([`Replies::stopped`]). Input does not run once the
-/// server stops; the worker reads its inbox to the end and posts [`Replies::stopping`] in a
-/// thread with messages it will not run.
+/// Run one conversation until the router drops its inbox.
+///
+/// A run in progress is cancelled by the stop, and its status then says so
+/// ([`Replies::stopped`]). Input does not run once the server stops; the worker reads its
+/// inbox to the end and posts [`Replies::stopping`] in a thread with messages it will not
+/// run.
 pub(crate) async fn run(setup: WorkerSetup) {
-    let WorkerSetup {
-        key,
-        channel,
-        shared,
-        mut inbox,
-        retire,
-        stop,
-    } = setup;
-    let (updates, mut updated) = mpsc::channel(UPDATE_CAPACITY);
-    let mut worker = Worker {
-        out: Outlet {
-            to: key.destination(),
-            key,
-            channel,
-            shared,
-        },
-        retire,
-        stop,
-        updates,
-        open: None,
-        phase: Phase::Idle { since: Instant::now() },
-        pending: Vec::new(),
-        unanswered: 0,
-    };
-    let mut received: u64 = 0;
-    let mut retiring = false;
-    let mut closing = false;
-    let mut inbox_open = true;
+    let mut worker = Worker::new(setup);
+    let mut lifecycle = Lifecycle::Serving;
     loop {
-        if closing && !inbox_open && matches!(worker.phase, Phase::Idle { .. }) {
+        if lifecycle == Lifecycle::Draining && matches!(worker.phase, Phase::Idle { .. }) {
             break;
         }
         tokio::select! {
             // Updates first: a card is registered, and closed, before the run that asked ends.
             biased;
-            Some(update) = updated.recv() => worker.approval(update).await,
-            () = worker.stop.cancelled(), if !closing => {
-                closing = true;
+            Some(update) = worker.updated.recv() => worker.approval(update).await,
+            () = worker.stop.cancelled(), if !lifecycle.closing() => {
+                lifecycle = Lifecycle::Stopping;
                 worker.stopping();
             }
-            input = inbox.recv(), if inbox_open => match input {
+            input = worker.inbox.recv(), if lifecycle.inbox_open() => match input {
                 Some(input) => {
-                    received += 1;
-                    retiring = false;
-                    if closing {
+                    worker.received += 1;
+                    if lifecycle == Lifecycle::Retiring {
+                        lifecycle = Lifecycle::Serving;
+                    }
+                    if lifecycle.closing() {
                         worker.refuse(input);
                     } else {
                         worker.input(input).await;
                     }
                 }
                 // The router ended this conversation, or the server is stopping.
-                None => {
-                    inbox_open = false;
-                    closing = true;
-                }
+                None => lifecycle = Lifecycle::Draining,
             },
             // A closing conversation waits for its inbox to close, not for the idle time.
-            step = step(&mut worker.phase, worker.out.shared.idle, retiring || closing) => match step {
+            step = step(&mut worker.phase, worker.out.shared.idle, lifecycle.ending()) => match step {
                 Step::Slot(slot) => worker.slot(slot).await,
-                Step::Ended(ended) => worker.ended(ended, closing).await,
-                Step::Idle => {
-                    worker.release();
-                    retiring = true;
-                    let retire = Retire { key: worker.out.key.clone(), received };
-                    if worker.retire.send(retire).await.is_err() {
-                        // The router no longer reads: the server is stopping.
-                        closing = true;
-                    }
-                }
+                Step::Ended(ended) => worker.ended(ended, lifecycle.closing()).await,
+                Step::Idle => lifecycle = worker.retire().await,
             },
         }
     }
     worker.answer_unanswered().await;
 }
 
-/// The session while it is held. Dropping it releases the session file.
-struct Opened {
-    // Shared with the task that runs the current prompt, as AgentSession is meant to be:
-    // meanwhile the worker steers, aborts and takes queued input through it.
-    session: Arc<AgentSession>,
-    _approvals: Subscription,
+/// Where the conversation is in its life, as the router and the server see it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Lifecycle {
+    /// Input runs; after the idle time the session is released.
+    Serving,
+    /// Idle with the session released and the router told; input serves again.
+    Retiring,
+    /// The server is stopping: input is refused while the inbox stays open.
+    Stopping,
+    /// The inbox is closed; the worker ends once its run has ended.
+    Draining,
+}
+
+impl Lifecycle {
+    /// Input does not run: the server is stopping, or the router ended the conversation.
+    fn closing(self) -> bool {
+        matches!(self, Self::Stopping | Self::Draining)
+    }
+
+    /// The inbox may still bring input.
+    fn inbox_open(self) -> bool {
+        self != Self::Draining
+    }
+
+    /// Nothing waits for the idle time any more.
+    fn ending(self) -> bool {
+        self != Self::Serving
+    }
 }
 
 type Slot = Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send>>;
 
 enum Phase {
-    /// No run and no input waiting; the session may be open or released.
-    Idle { since: Instant },
+    /// No run and no input waiting; the session is held until the idle time, or released.
+    Idle { since: Instant, open: Option<Opened> },
     /// Input waits for a run slot. The future keeps its place in the queue.
-    Waiting { slot: Slot, texts: Vec<String> },
+    Waiting {
+        slot: Slot,
+        texts: Vec<String>,
+        open: Opened,
+    },
     /// A prompt runs in its own task and holds a run slot; `status` is the message that
     /// says so, replaced by the answer at the end.
     Running {
         task: JoinHandle<Result<RunReport, SessionError>>,
         slot: OwnedSemaphorePermit,
         status: Option<MessageRef>,
+        open: Opened,
     },
+}
+
+impl Phase {
+    /// Idle from now, with the session held or released.
+    fn idle(open: Option<Opened>) -> Self {
+        Self::Idle {
+            since: Instant::now(),
+            open,
+        }
+    }
 }
 
 enum Step {
@@ -173,7 +173,7 @@ enum Step {
 /// branch interrupts loses nothing. `ending` is set once the conversation retires or closes.
 async fn step(phase: &mut Phase, idle: Duration, ending: bool) -> Step {
     match phase {
-        Phase::Idle { since } => {
+        Phase::Idle { since, .. } => {
             match since.checked_add(idle) {
                 Some(deadline) if !ending => tokio::time::sleep_until(deadline).await,
                 // Ending already, or an idle time too long to schedule: nothing to wait for.
@@ -204,75 +204,15 @@ enum Decision {
     Lapsed,
 }
 
-/// Where the conversation posts and reports. Separate from [`Worker`] so that posting
-/// borrows only these fields while the worker's own state stays with the worker.
-struct Outlet {
-    key: SessionKey,
-    to: Destination,
-    channel: Arc<dyn ImChannel>,
-    shared: Arc<Shared>,
-}
-
-impl Outlet {
-    /// Post text in the thread. A failure is reported to the operator and returns `None`.
-    async fn post(&self, text: String) -> Option<MessageRef> {
-        let message = Outbound::Text(text);
-        self.shared
-            .bounded(
-                Some(&self.key),
-                "post",
-                "posting",
-                self.channel.send(&self.to, &message),
-            )
-            .await
-    }
-
-    /// Replace a posted message. A failure is reported to the operator.
-    async fn replace(&self, posted: &MessageRef, message: Outbound) {
-        let (act, acting) = (
-            format!("update message {}", posted.id),
-            format!("updating message {}", posted.id),
-        );
-        self.shared
-            .bounded(Some(&self.key), &act, &acting, self.channel.update(posted, &message))
-            .await;
-    }
-
-    /// Open the session, with this thread as the host of its approvals.
-    async fn open(&self, updates: &mpsc::Sender<ApprovalUpdate>) -> Result<Opened, String> {
-        let interaction = Arc::new(ImApproval {
-            channel: Arc::clone(&self.channel),
-            to: self.to.clone(),
-            updates: updates.clone(),
-            outbound_timeout: self.shared.outbound_timeout,
-        });
-        let session = self.shared.factory.open(&self.key, interaction).await?;
-        let approvals = session.subscribe(Arc::new(ApprovalEvents {
-            updates: updates.clone(),
-            key: self.key.clone(),
-            sink: Arc::clone(&self.shared.sink),
-        }));
-        Ok(Opened {
-            session: Arc::new(session),
-            _approvals: approvals,
-        })
-    }
-
-    fn failed(&self, error: String) {
-        self.shared.failed(Some(&self.key), error);
-    }
-
-    fn replies(&self) -> &Replies {
-        &self.shared.replies
-    }
-}
-
 struct Worker {
     out: Outlet,
-    retire: mpsc::Sender<Retire>,
+    inbox: mpsc::Receiver<WorkerInput>,
+    /// Input taken from the inbox, for [`Retire::received`].
+    received: u64,
+    retire_to: mpsc::Sender<Retire>,
     stop: CancellationToken,
     updates: mpsc::Sender<ApprovalUpdate>,
-    open: Option<Opened>,
+    updated: mpsc::Receiver<ApprovalUpdate>,
     phase: Phase,
     pending: Vec<Pending>,
     /// Messages that will not run because the server is stopping.
@@ -280,6 +220,35 @@ struct Worker {
 }
 
 impl Worker {
+    fn new(setup: WorkerSetup) -> Self {
+        let WorkerSetup {
+            key,
+            channel,
+            shared,
+            inbox,
+            retire,
+            stop,
+        } = setup;
+        let (updates, updated) = mpsc::channel(UPDATE_CAPACITY);
+        Self {
+            out: Outlet {
+                to: key.destination(),
+                key,
+                channel,
+                shared,
+            },
+            inbox,
+            received: 0,
+            retire_to: retire,
+            stop,
+            updates,
+            updated,
+            phase: Phase::idle(None),
+            pending: Vec::new(),
+            unanswered: 0,
+        }
+    }
+
     async fn input(&mut self, input: WorkerInput) {
         match input {
             WorkerInput::Message { text } => self.message(text).await,
@@ -293,21 +262,21 @@ impl Worker {
             return;
         }
         match &mut self.phase {
-            Phase::Running { .. } => {
-                if let Some(open) = &self.open {
-                    open.session.steer(text);
-                }
-            }
+            Phase::Running { open, .. } => open.session.steer(text),
             Phase::Waiting { texts, .. } => texts.push(text),
-            Phase::Idle { .. } => self.begin(text).await,
+            Phase::Idle { open, .. } => {
+                let open = open.take();
+                self.begin(open, text).await;
+            }
         }
     }
 
-    /// Open the session if needed, then run `text` or wait for a slot.
-    async fn begin(&mut self, text: String) {
-        if self.open.is_none() {
-            match self.out.open(&self.updates).await {
-                Ok(opened) => self.open = Some(opened),
+    /// Open the session unless `open` holds it, then run `text` or wait for a slot.
+    async fn begin(&mut self, open: Option<Opened>, text: String) {
+        let open = match open {
+            Some(open) => open,
+            None => match self.out.open(&self.updates).await {
+                Ok(open) => open,
                 Err(error) => {
                     self.out
                         .post(format!("{}{error}", self.out.replies().cannot_open))
@@ -315,123 +284,117 @@ impl Worker {
                     self.out.failed(format!("cannot open the session: {error}"));
                     return;
                 }
-            }
-        }
+            },
+        };
         match Arc::clone(&self.out.shared.permits).try_acquire_owned() {
-            Ok(slot) => self.start(vec![text], slot).await,
+            Ok(slot) => self.start(open, vec![text], slot).await,
             Err(TryAcquireError::NoPermits) => {
                 self.phase = Phase::Waiting {
                     slot: Box::pin(Arc::clone(&self.out.shared.permits).acquire_owned()),
                     texts: vec![text],
+                    open,
                 };
                 self.out.post(self.out.replies().queued.clone()).await;
             }
             // The server never closes its semaphore.
-            Err(TryAcquireError::Closed) => self.out.failed("the run slots are closed".into()),
+            Err(TryAcquireError::Closed) => {
+                self.phase = Phase::idle(Some(open));
+                self.out.failed("the run slots are closed".into());
+            }
         }
     }
 
     /// Post that the work started, and run the input as one prompt.
-    async fn start(&mut self, texts: Vec<String>, slot: OwnedSemaphorePermit) {
-        let session = match &self.open {
-            Some(open) => Arc::clone(&open.session),
-            // Callers open the session first; without it there is nothing to run.
-            None => return,
-        };
+    async fn start(&mut self, open: Opened, texts: Vec<String>, slot: OwnedSemaphorePermit) {
         let status = self.out.post(self.out.replies().working.clone()).await;
         if let Some(status) = &status {
             // Kept before the run starts: should the process end from here on, the next
             // start replaces this status.
             self.out.shared.keep_status(&self.out.key, status).await;
         }
+        let session = Arc::clone(&open.session);
         let stop = self.stop.clone();
         let text = texts.join("\n\n");
         let task = tokio::spawn(async move { session.prompt_with_cancel(text, &stop).await });
-        self.phase = Phase::Running { task, slot, status };
+        self.phase = Phase::Running {
+            task,
+            slot,
+            status,
+            open,
+        };
+    }
+
+    /// Take the phase, leaving Idle without a session; the caller sets what follows.
+    fn take_phase(&mut self) -> Phase {
+        std::mem::replace(&mut self.phase, Phase::idle(None))
     }
 
     async fn slot(&mut self, slot: Result<OwnedSemaphorePermit, AcquireError>) {
-        let Phase::Waiting { texts, .. } = std::mem::replace(&mut self.phase, Phase::Idle { since: Instant::now() })
-        else {
-            return;
+        let (texts, open) = match self.take_phase() {
+            Phase::Waiting { texts, open, .. } => (texts, open),
+            // Only a waiting conversation gets a slot.
+            other => {
+                self.phase = other;
+                return;
+            }
         };
         match slot {
-            Ok(slot) => self.start(texts, slot).await,
+            Ok(slot) => self.start(open, texts, slot).await,
             // The server never closes its semaphore.
-            Err(_) => self.out.failed("the run slots are closed".into()),
+            Err(_) => {
+                self.phase = Phase::idle(Some(open));
+                self.out.failed("the run slots are closed".into());
+            }
         }
     }
 
     /// Post the answer, then run input that arrived as the run ended; while the server stops,
     /// that input is unanswered instead.
     async fn ended(&mut self, ended: Result<Result<RunReport, SessionError>, JoinError>, closing: bool) {
-        let Phase::Running { slot, status, .. } =
-            std::mem::replace(&mut self.phase, Phase::Idle { since: Instant::now() })
-        else {
-            return;
-        };
-        let replies = self.out.replies();
-        let answer = match ended {
-            // The stop cancels runs through their token. A `/cancel` just before the stop ends
-            // the same way and is told the same.
-            Ok(Ok(report)) if closing && matches!(report.outcome, RunOutcome::Aborted) => replies.stopped.clone(),
-            Ok(Ok(report)) => render(&report, replies),
-            // Only this worker prompts the session, one run at a time, so Busy cannot occur.
-            Ok(Err(error)) => format!("{}{error}", replies.failed),
-            Err(error) => format!("{}{error}", replies.failed),
-        };
-        match status {
-            Some(posted) => {
-                // Forgotten first: should the process end between the two, the status still
-                // says the work goes on, as it did before statuses were kept; the other order
-                // could have the next start replace this answer.
-                self.out.shared.forget_status(&self.out.key, &posted).await;
-                self.out.replace(&posted, Outbound::Text(answer)).await;
+        let (slot, status, open) = match self.take_phase() {
+            Phase::Running { slot, status, open, .. } => (slot, status, open),
+            // Only a running conversation ends a run.
+            other => {
+                self.phase = other;
+                return;
             }
-            None => {
-                self.out.post(answer).await;
-            }
-        }
-        // The loop looks for input at the end of each turn, so a message steered after the
-        // last look waits in the queue.
-        let leftover = match self.open.as_ref().map(|open| open.session.take_queued()) {
-            Some(Ok(messages)) => messages,
-            Some(Err(error)) => {
-                self.out.failed(format!("cannot take the queued input: {error}"));
+        };
+        self.out.answer(ended, status, closing).await;
+        let leftover = match open.leftover_texts() {
+            Ok(texts) => texts,
+            Err(error) => {
+                self.out.failed(error);
                 Vec::new()
             }
-            None => Vec::new(),
         };
-        // The person's text starts the next run; a message an extension queued goes back
-        // to the queue, which that run takes before its first request.
-        let mut texts = Vec::new();
-        for message in leftover {
-            match message {
-                QueuedMessage::User(text) => texts.push(text),
-                custom @ QueuedMessage::Custom(_) => {
-                    if let Some(open) = &self.open {
-                        open.session.queues().steer_message(custom);
-                    }
-                }
+        if closing || leftover.is_empty() {
+            self.unanswered += leftover.len();
+            self.phase = Phase::idle(Some(open));
+            return;
+        }
+        self.start(open, leftover, slot).await;
+    }
+
+    /// Leave Waiting for Idle, keeping the session: the texts that waited, or `None` when
+    /// the conversation was not waiting.
+    fn stop_waiting(&mut self) -> Option<Vec<String>> {
+        match self.take_phase() {
+            Phase::Waiting { texts, open, .. } => {
+                self.phase = Phase::idle(Some(open));
+                Some(texts)
+            }
+            other => {
+                self.phase = other;
+                None
             }
         }
-        let leftover = texts;
-        if leftover.is_empty() {
-            return;
-        }
-        if closing {
-            self.unanswered += leftover.len();
-            return;
-        }
-        self.start(leftover, slot).await;
     }
 
     /// The server is stopping: input waiting for a slot will not run. A run stops through
     /// its token and ends as usual.
     fn stopping(&mut self) {
-        if let Phase::Waiting { texts, .. } = &self.phase {
+        if let Some(texts) = self.stop_waiting() {
             self.unanswered += texts.len();
-            self.phase = Phase::Idle { since: Instant::now() };
         }
     }
 
@@ -441,6 +404,21 @@ impl Worker {
             WorkerInput::Message { text } if text.trim() != CANCEL_COMMAND => self.unanswered += 1,
             // The stop cancels the run already, approvals included, and drops what waits.
             WorkerInput::Message { .. } | WorkerInput::Decision { .. } => {}
+        }
+    }
+
+    /// Release the session and tell the router, which ends the conversation unless a message
+    /// is on its way: the conversation retires, or stops when the router no longer reads.
+    async fn retire(&mut self) -> Lifecycle {
+        self.release();
+        let retire = Retire {
+            key: self.out.key.clone(),
+            received: self.received,
+        };
+        match self.retire_to.send(retire).await {
+            Ok(()) => Lifecycle::Retiring,
+            // The router no longer reads: the server is stopping.
+            Err(_) => Lifecycle::Stopping,
         }
     }
 
@@ -458,18 +436,14 @@ impl Worker {
     }
 
     async fn cancel(&mut self) {
-        if matches!(self.phase, Phase::Running { .. }) {
+        if let Phase::Running { open, .. } = &self.phase {
             // The run ends as aborted, and its status message then says so.
-            if let Some(open) = &self.open {
-                open.session.abort();
-            }
+            open.session.abort();
             return;
         }
-        let text = if matches!(self.phase, Phase::Waiting { .. }) {
-            self.phase = Phase::Idle { since: Instant::now() };
-            self.out.replies().cancelled.clone()
-        } else {
-            self.out.replies().nothing_to_cancel.clone()
+        let text = match self.stop_waiting() {
+            Some(_) => self.out.replies().cancelled.clone(),
+            None => self.out.replies().nothing_to_cancel.clone(),
         };
         self.out.post(text).await;
     }
@@ -549,108 +523,13 @@ impl Worker {
 
     /// Release the session after the idle time, freeing its file for the next opening.
     fn release(&mut self) {
-        let released = self.open.take();
-        if let Some(opened) = released {
+        if let Phase::Idle { open, .. } = &mut self.phase
+            && let Some(opened) = open.take()
+        {
             drop(opened);
             self.out.shared.sink.emit(&ServerEvent::Released {
                 key: self.out.key.clone(),
             });
         }
-    }
-}
-
-/// The text that replaces the status message at the end of a run.
-fn render(report: &RunReport, replies: &Replies) -> String {
-    let answer = report.final_text.trim();
-    let noted = |note: &str| {
-        if answer.is_empty() {
-            note.to_string()
-        } else {
-            format!("{answer}\n\n{note}")
-        }
-    };
-    match report.outcome {
-        RunOutcome::Completed if answer.is_empty() => replies.no_answer.clone(),
-        RunOutcome::Completed => answer.to_string(),
-        RunOutcome::Truncated => noted(&replies.truncated),
-        RunOutcome::ModelRequestLimit => noted(&replies.model_request_limit),
-        RunOutcome::TokenBudget => noted(&replies.token_budget),
-        // The last answer in the session may be an earlier run's, so it is not repeated.
-        RunOutcome::Timeout => replies.timed_out.clone(),
-        RunOutcome::Aborted => replies.cancelled.clone(),
-        RunOutcome::Error => match &report.error {
-            Some(error) => format!("{}{error}", replies.failed),
-            // The reply leads into the error; without one, drop the separator it ends with,
-            // whatever the reply's language.
-            None => replies
-                .failed
-                .trim_end_matches(|c: char| c.is_whitespace() || c == ':' || c == '\u{ff1a}')
-                .to_string(),
-        },
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ai::Usage;
-
-    fn report(outcome: RunOutcome, final_text: &str, error: Option<&str>) -> RunReport {
-        RunReport {
-            outcome,
-            final_text: final_text.into(),
-            model_requests: 1,
-            retries: 0,
-            usage: Usage::default(),
-            error: error.map(String::from),
-            session_file: None,
-        }
-    }
-
-    #[test]
-    fn a_completed_run_posts_its_answer() {
-        let replies = Replies::default();
-        assert_eq!(
-            render(&report(RunOutcome::Completed, " done \n", None), &replies),
-            "done"
-        );
-        assert_eq!(
-            render(&report(RunOutcome::Completed, "", None), &replies),
-            replies.no_answer
-        );
-    }
-
-    #[test]
-    fn an_unfinished_answer_says_why_it_stopped() {
-        let replies = Replies::default();
-        assert_eq!(
-            render(&report(RunOutcome::Truncated, "part", None), &replies),
-            format!("part\n\n{}", replies.truncated)
-        );
-        assert_eq!(
-            render(&report(RunOutcome::ModelRequestLimit, "", None), &replies),
-            replies.model_request_limit
-        );
-        assert_eq!(
-            render(&report(RunOutcome::TokenBudget, "part", None), &replies),
-            format!("part\n\n{}", replies.token_budget)
-        );
-    }
-
-    #[test]
-    fn a_run_that_did_not_finish_does_not_repeat_an_earlier_answer() {
-        let replies = Replies::default();
-        assert_eq!(
-            render(&report(RunOutcome::Timeout, "earlier", None), &replies),
-            replies.timed_out
-        );
-        assert_eq!(
-            render(&report(RunOutcome::Aborted, "earlier", None), &replies),
-            replies.cancelled
-        );
-        assert_eq!(
-            render(&report(RunOutcome::Error, "earlier", Some("HTTP 500")), &replies),
-            format!("{}HTTP 500", replies.failed)
-        );
     }
 }

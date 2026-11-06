@@ -157,7 +157,12 @@ pub(crate) struct Socket {
 
 impl Socket {
     pub(crate) async fn send(&mut self, frame: &TestFrame) {
-        self.stream.send(Message::binary(frame.encode())).await.unwrap();
+        self.send_bytes(frame.encode()).await;
+    }
+
+    /// Send `bytes` as one binary message, as they are: for what is not a frame.
+    pub(crate) async fn send_bytes(&mut self, bytes: Vec<u8>) {
+        self.stream.send(Message::binary(bytes)).await.unwrap();
     }
 
     /// The next frame from the client.

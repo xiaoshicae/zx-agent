@@ -3,15 +3,17 @@
 //!
 //! A channel only moves messages. The server owns routing, sessions, the run limit and
 //! approvals, so supporting another platform means implementing the four methods of
-//! [`ImChannel`], in a crate of its own; [`split_text`], [`Seen`], [`Pacer`] and [`Cards`]
-//! help with the duties every platform has. The platforms of this workspace are such
-//! crates: `zx-im-slack` and `zx-im-feishu`.
+//! [`ImChannel`], in a crate of its own; [`split_text`], [`Seen`], [`Pacer`], [`Cards`],
+//! [`Backoff`] and [`Keepalive`] help with the duties every platform has. The platforms of
+//! this workspace are such crates: `zx-im-slack` and `zx-im-feishu`.
 //!
 //! The `zx-agent` crate re-exports this crate as `zx_agent::im`, with those platforms as
 //! `zx_agent::im::slack` and `zx_agent::im::feishu`.
 
 mod approval;
+mod outlet;
 mod platform;
+mod router;
 mod server;
 mod status;
 mod worker;
@@ -29,7 +31,10 @@ use zx_core::{AgentSession, agent, agent_session, interaction, runner};
 
 use crate::agent::ApprovalResult;
 
-pub use platform::{Cards, Pacer, Seen, split_text};
+pub use platform::{
+    Backoff, CARD_CAPACITY, Cards, Keepalive, MAX_TEXT_CHARS, Pacer, RATE_LIMIT_RETRIES, SEEN_CAPACITY, Seen,
+    card_update_refused, pause, split_text,
+};
 pub use server::{ApprovalRecord, Replies, Server, ServerConfig, ServerEvent, ServerSink, SessionFactory, SessionKey};
 pub use status::{StatusFiles, StatusStore};
 
@@ -59,7 +64,9 @@ pub trait ImChannel: Send + Sync {
     async fn send(&self, to: &Destination, message: &Outbound) -> Result<MessageRef, ImError>;
 
     /// Replace a posted message, such as an approval card once decided. Text longer than one
-    /// platform message replaces it with the first part and posts the rest as replies.
+    /// platform message replaces it with the first part and posts the rest as replies. An
+    /// [`Outbound::ApprovalRequest`] is refused with [`card_update_refused`]: a card is only
+    /// posted, and the server never asks for this.
     async fn update(&self, posted: &MessageRef, message: &Outbound) -> Result<(), ImError>;
 }
 
@@ -111,6 +118,17 @@ pub struct Destination {
 pub struct MessageRef {
     pub at: Destination,
     pub id: MessageId,
+}
+
+impl MessageRef {
+    /// The thread this message is in, or starts when it was posted in the chat itself: where
+    /// the parts after the first of a long text go.
+    pub fn thread(&self) -> Destination {
+        Destination {
+            conversation: self.at.conversation.clone(),
+            thread: Some(self.at.thread.clone().unwrap_or_else(|| ThreadId(self.id.0.clone()))),
+        }
+    }
 }
 
 /// An event from the platform.

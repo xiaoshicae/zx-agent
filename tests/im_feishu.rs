@@ -21,12 +21,26 @@ use zx_agent::im::{
 /// Only reached when an expected event never comes.
 const WAIT: Duration = Duration::from_secs(10);
 
-fn channel(fake: &FakeFeishu) -> Arc<FeishuChannel> {
+fn config(fake: &FakeFeishu) -> FeishuConfig {
     let mut config = FeishuConfig::new("cli_test".into(), "secret-test".into());
     config.api_base = fake.api_base.clone();
     config.token_url = fake.token_url.clone();
     config.post_interval = Duration::ZERO;
-    Arc::new(FeishuChannel::new(config).unwrap())
+    config
+}
+
+fn channel(fake: &FakeFeishu) -> Arc<FeishuChannel> {
+    Arc::new(FeishuChannel::new(config(fake)).unwrap())
+}
+
+/// A channel that passes each error it reports on as text.
+fn reporting_channel(fake: &FakeFeishu) -> (Arc<FeishuChannel>, mpsc::UnboundedReceiver<String>) {
+    let (reported, reports) = mpsc::unbounded_channel();
+    let mut config = config(fake);
+    config.on_error = Some(Arc::new(move |error: &ImError| {
+        reported.send(error.to_string()).ok();
+    }));
+    (Arc::new(FeishuChannel::new(config).unwrap()), reports)
 }
 
 fn payload(event_type: &str, event: &Value) -> Vec<u8> {
@@ -430,18 +444,28 @@ async fn a_rate_limited_call_waits_and_is_retried() {
 async fn a_busy_endpoint_is_reported_and_retried() {
     let mut fake = FakeFeishu::start(120).await;
     fake.script("endpoint", vec![Answer::Code(1)]);
-    let (reported, mut reports) = mpsc::unbounded_channel();
-    let mut config = FeishuConfig::new("cli_test".into(), "secret-test".into());
-    config.api_base = fake.api_base.clone();
-    config.token_url = fake.token_url.clone();
-    config.on_error = Some(Arc::new(move |error: &ImError| {
-        reported.send(error.to_string()).ok();
-    }));
-    let running = run_channel(Arc::new(FeishuChannel::new(config).unwrap()), WAIT);
+    let (channel, mut reports) = reporting_channel(&fake);
+    let running = run_channel(channel, WAIT);
     let report = tokio::time::timeout(WAIT, reports.recv()).await.unwrap().unwrap();
     assert!(report.contains("code 1"), "{report}");
     // The next attempt connects.
     fake.socket().await;
+    running.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_frame_that_cannot_be_decoded_is_reported_and_the_connection_goes_on() {
+    let mut fake = FakeFeishu::start(120).await;
+    let (channel, mut reports) = reporting_channel(&fake);
+    let mut running = run_channel(channel, WAIT);
+    let mut socket = fake.socket().await;
+    // Wire type 3, which the frame codec does not read.
+    socket.send_bytes(vec![0x0b]).await;
+    let report = tokio::time::timeout(WAIT, reports.recv()).await.unwrap().unwrap();
+    assert!(report.contains("malformed frame"), "{report}");
+    let event = text_message("om_1", "oc_d", "p2p", None, "still here", &json!([]));
+    socket.send(&TestFrame::event("f1", 1, 0, &received(&event))).await;
+    assert_eq!(running.next().await, message("om_1", at("oc_d", None), "still here"));
     running.stop().await.unwrap();
 }
 

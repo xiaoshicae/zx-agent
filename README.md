@@ -361,8 +361,8 @@ CLI (main.rs + cli/ + chat/ + acp/)
 | 文件化配置 | `src/profile/`、`profiles/` | 加载与叠加 TOML、项目上下文、显式 skill 目录及按需读取；内置场景只有这些文件 |
 | 终端前端 | `src/chat/`、`src/cli/`、`src/run.rs`、`src/process.rs`、`src/render.rs`、`src/sessions.rs`、`src/list_sessions.rs` | 单输入所有者、审批、显示；共享的 CLI 选项、进程共用的连接与会话组装；run 子命令；退出码、stdout 行、信号与追踪导出；终端与日志里调用与事件的文案；会话文件与 `zx-agent sessions` |
 | ACP 接入 | `src/acp/` | agent 一侧：会话、回合、事件到 `session/update` 的映射、审批到 `session/request_permission` 的映射 |
-| IM 接入 | `crates/zx-im/src/` | 无对应实现：`ImChannel` 平台接口；`Server` 按线程分派，每个线程一个任务独占会话，审批卡片与运行上限 |
-| IM 平台 | `crates/zx-im-slack/`、`crates/zx-im-feishu/` | 无对应实现：两个 `ImChannel` 实现，与接口分开，平台相关的代码只在这里 |
+| IM 接入 | `crates/zx-im/src/` | 无对应实现：`ImChannel` 平台接口；`Server` 按线程分派（`server.rs` 契约与配置、`router.rs` 分派、`worker.rs` 会话任务、`outlet.rs` 发帖与上报、`approval.rs` 审批卡片、`status.rs` 运行状态、`platform.rs` 平台共用的辅助），每个线程一个任务独占会话，审批卡片与运行上限 |
+| IM 平台 | `crates/zx-im-slack/`（`events.rs` 事件与卡片）、`crates/zx-im-feishu/`（`api.rs`、`connection.rs`、`frame.rs`、`events.rs`） | 无对应实现：两个 `ImChannel` 实现，与接口分开，平台相关的代码只在这里 |
 
 ### 与 pi 一致的关键语义
 
