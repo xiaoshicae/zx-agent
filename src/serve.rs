@@ -26,8 +26,8 @@ use zx_agent::interaction::Interaction;
 use zx_agent::otel::Telemetry;
 use zx_agent::profile::Builtin;
 
-use crate::cli::{self, ServeArgs, SessionOptions};
-use crate::process::{EXIT_COMPLETED, EXIT_ERROR, EXIT_USAGE, spawn_signal_handler, write_line};
+use crate::cli::{self, ServeArgs, SessionOptions, env_value};
+use crate::process::{EXIT_COMPLETED, EXIT_ERROR, EXIT_USAGE, spawn_signal_handler, with_telemetry, write_line};
 use crate::sessions::SessionFile;
 
 /// How long an approval card waits for a click.
@@ -156,52 +156,52 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
     );
     let platforms: HashSet<&str> = channels.iter().map(|channel| channel.platform()).collect();
     let (conversations, approvers) = access(&file.access, &platforms)?;
-    let telemetry = cli::start_telemetry()?;
-    let dir = file.sessions.dir;
-    std::fs::create_dir_all(&dir).with_context(|| format!("cannot create the session directory {}", dir.display()))?;
-    let running = dir.join(RUNNING_DIR);
-    std::fs::create_dir_all(&running).with_context(|| format!("cannot create {}", running.display()))?;
+    with_telemetry(async move |telemetry| {
+        let dir = file.sessions.dir;
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("cannot create the session directory {}", dir.display()))?;
+        let running = dir.join(RUNNING_DIR);
+        std::fs::create_dir_all(&running).with_context(|| format!("cannot create {}", running.display()))?;
 
-    // Once for the process: every thread's session shares the connections.
-    let shared = cli::Shared::connect(&args.base, Builtin::Assistant, &args.transport).await?;
-    let factory = Sessions {
-        args,
-        shared,
-        dir,
-        approval_timeout: Duration::from_secs(
-            file.limits
-                .approval_timeout_secs
-                .unwrap_or(DEFAULT_APPROVAL_TIMEOUT_SECS),
-        ),
-        hidden_env,
-        events: telemetry
-            .as_ref()
-            .map_or_else(|| Arc::new(NullSink) as Arc<dyn EventSink>, Telemetry::sink),
-    };
-    // A wrong model, profile or tool setting would otherwise surface only at the first
-    // message, in the chat; check it once with a session that is never stored.
-    factory
-        .prepare(SessionFile::Memory)
-        .await
-        .context("cannot prepare a session with these settings")?;
+        // Once for the process: every thread's session shares the connections.
+        let shared = cli::Shared::connect(&args.base, Builtin::Assistant, &args.transport).await?;
+        let factory = Sessions {
+            args,
+            shared,
+            dir,
+            approval_timeout: Duration::from_secs(
+                file.limits
+                    .approval_timeout_secs
+                    .unwrap_or(DEFAULT_APPROVAL_TIMEOUT_SECS),
+            ),
+            hidden_env,
+            events: telemetry.map_or_else(|| Arc::new(NullSink) as Arc<dyn EventSink>, Telemetry::sink),
+        };
+        // A wrong model, profile or tool setting would otherwise surface only at the first
+        // message, in the chat; check it once with a session that is never stored.
+        factory
+            .prepare(SessionFile::Memory)
+            .await
+            .context("cannot prepare a session with these settings")?;
 
-    let config = server_config(&file.limits, file.replies, running, conversations, approvers);
-    eprintln!(
-        "[serve] platforms={}; sessions in {}",
-        channels
-            .iter()
-            .map(|channel| channel.platform())
-            .collect::<Vec<_>>()
-            .join(","),
-        factory.dir.display()
-    );
-    let cancel = CancellationToken::new();
-    spawn_signal_handler(cancel.clone());
-    let served = Server::new(config, Arc::new(factory), Arc::new(Log))
-        .run(channels, &cancel)
-        .await;
-    cli::finish_telemetry(telemetry).await;
-    Ok(exit_code(served))
+        let config = server_config(&file.limits, file.replies, running, conversations, approvers);
+        eprintln!(
+            "[serve] platforms={}; sessions in {}",
+            channels
+                .iter()
+                .map(|channel| channel.platform())
+                .collect::<Vec<_>>()
+                .join(","),
+            factory.dir.display()
+        );
+        let cancel = CancellationToken::new();
+        spawn_signal_handler(cancel.clone());
+        let served = Server::new(config, Arc::new(factory), Arc::new(Log))
+            .run(channels, &cancel)
+            .await;
+        Ok(serve_exit_code(served))
+    })
+    .await
 }
 
 /// The serve configuration file at `path`. A startup read; nothing runs concurrently yet.
@@ -250,7 +250,7 @@ fn server_config(
 }
 
 /// How serving ended, as an exit code; a failure is reported on stderr.
-fn exit_code(served: Result<(), ImError>) -> u8 {
+fn serve_exit_code(served: Result<(), ImError>) -> u8 {
     match served {
         Ok(()) => EXIT_COMPLETED,
         Err(error @ ImError::Config(_)) => {
@@ -310,10 +310,7 @@ fn failure_log(platform: &'static str) -> ErrorReport {
 
 /// The value of a credential variable, which must be set and non-empty.
 fn secret(name: &str, what: &str) -> Result<String> {
-    match std::env::var(name) {
-        Ok(value) if !value.is_empty() => Ok(value),
-        _ => anyhow::bail!("{name} must hold {what}"),
-    }
+    env_value(name).with_context(|| format!("{name} must hold {what}"))
 }
 
 /// Split `platform:id` entries, each naming a configured platform.
@@ -356,6 +353,7 @@ impl Sessions {
             request: &self.args.request,
             budget: &self.args.budget,
             model: &self.args.base.model,
+            cwd: None,
             file,
             default_profile: Builtin::Assistant,
             continue_on_length: None,

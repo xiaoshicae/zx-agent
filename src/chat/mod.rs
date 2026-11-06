@@ -32,8 +32,8 @@ use zx_agent::profile::Builtin;
 use zx_agent::runner::RunReport;
 use zx_agent::tools::BASH;
 
-use crate::cli::{self, ChatArgs, SessionOptions};
-use crate::process::{EXIT_ABORTED, EXIT_COMPLETED};
+use crate::cli::{self, ChatArgs, ModeSettings, SessionOptions};
+use crate::process::{EXIT_ABORTED, EXIT_COMPLETED, with_telemetry};
 use crate::render::{describe_arguments, describe_call, visible};
 use crate::sessions::{self, SessionFile};
 
@@ -121,17 +121,9 @@ struct Built {
     _traced: Option<Subscription>,
 }
 
-struct Settings {
-    args: ChatArgs,
-    /// The instructions and the MCP connections; /new reuses them.
-    shared: cli::Shared,
-    /// Where traces go, when an OTLP endpoint is configured.
-    traces: Option<Arc<dyn EventSink>>,
-}
-
 /// What every conversation of this chat is built with.
 struct Chat {
-    settings: Settings,
+    settings: ModeSettings<ChatArgs>,
     interaction: Arc<TerminalInteraction>,
     output: Arc<Output>,
 }
@@ -148,6 +140,7 @@ impl Chat {
             request: &args.request,
             budget: &args.budget,
             model,
+            cwd: None,
             file,
             default_profile: Builtin::Assistant,
             continue_on_length: None,
@@ -222,11 +215,7 @@ impl Chat {
 }
 
 pub(crate) async fn run(args: ChatArgs) -> Result<u8> {
-    let telemetry = cli::start_telemetry()?;
-    let traces = telemetry.as_ref().map(Telemetry::sink);
-    let result = converse(args, traces).await;
-    cli::finish_telemetry(telemetry).await;
-    result
+    with_telemetry(async move |telemetry| converse(args, telemetry.map(Telemetry::sink)).await).await
 }
 
 #[expect(
@@ -251,7 +240,7 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
             args.show_thinking,
         )),
         interaction: Arc::new(interaction),
-        settings: Settings { args, shared, traces },
+        settings: ModeSettings { args, shared, traces },
     };
     let args = &chat.settings.args;
     let output = &chat.output;
@@ -489,7 +478,7 @@ async fn opening(args: &ChatArgs, model: &str) -> Result<(Storage, Option<PathBu
 
 /// The session `--resume` opens, and a line to show when there is none to resume.
 async fn resume_target(dir: &Path, cwd: Option<&Path>, id: Option<&str>) -> Result<(Option<PathBuf>, Option<String>)> {
-    let list = sessions::list(dir.to_path_buf()).await?;
+    let list = sessions::list(dir).await?;
     match id {
         Some(id) => {
             let session = list
@@ -520,7 +509,7 @@ async fn fork_source(dir: &Path, value: &str) -> Result<PathBuf> {
     if path.is_file() {
         return Ok(path.to_path_buf());
     }
-    let list = sessions::list(dir.to_path_buf()).await?;
+    let list = sessions::list(dir).await?;
     let session = list.find(value).with_context(|| {
         format!(
             "--fork: {value} is neither a session file nor a session in {}",
@@ -593,7 +582,7 @@ fn switch_branch(output: &Output, session: &AgentSession, id: &str) {
 }
 
 fn forked_line(forked: &sessions::Forked) -> String {
-    let short: String = forked.source_id.chars().take(sessions::SHORT_ID_CHARS).collect();
+    let short = sessions::short_id(&forked.source_id);
     format!(
         "[chat] forked session {} ({} record(s)) into {}",
         visible(&short),
@@ -611,7 +600,7 @@ async fn list_sessions(output: &Output, storage: &Storage, about: &About) {
         );
         return;
     };
-    let list = match sessions::list(dir.to_path_buf()).await {
+    let list = match sessions::list(dir).await {
         Ok(list) => list,
         Err(error) => {
             output.line(Tone::Warn, &format!("[chat] {}", visible(&format!("{error:#}"))));
@@ -652,7 +641,7 @@ async fn find_session(storage: &Storage, id: &str, about: &About) -> Result<Path
     let dir = storage
         .dir()
         .context("no session directory: the conversation is kept in memory")?;
-    let list = sessions::list(dir.to_path_buf()).await?;
+    let list = sessions::list(dir).await?;
     let path = list.find(id)?.path.clone();
     anyhow::ensure!(
         about.session.as_deref() != Some(path.as_path()),

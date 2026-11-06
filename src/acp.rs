@@ -41,8 +41,8 @@ use zx_agent::sync::lock;
 use zx_agent::text::clip;
 use zx_agent::tools::{BASH, EDIT_FILE, FIND, GREP, LS, READ_FILE, WRITE_FILE};
 
-use crate::cli::{self, AcpArgs, SessionOptions};
-use crate::process::EXIT_COMPLETED;
+use crate::cli::{self, AcpArgs, ModeSettings, SessionOptions};
+use crate::process::{EXIT_COMPLETED, with_telemetry};
 use crate::render::describe_call;
 use crate::sessions::{self, SessionFile};
 
@@ -53,14 +53,6 @@ const ALLOW_ONCE: &str = "allow-once";
 const ALLOW_SESSION: &str = "allow-session";
 const REJECT_ONCE: &str = "reject-once";
 
-/// What every session shares: the arguments, the instructions and MCP connections, and the
-/// trace export.
-struct Settings {
-    args: AcpArgs,
-    shared: cli::Shared,
-    traces: Option<Arc<dyn EventSink>>,
-}
-
 /// One ACP session: a conversation the client created with `session/new` or loaded with
 /// `session/load`.
 struct Live {
@@ -70,7 +62,7 @@ struct Live {
 }
 
 struct Host {
-    settings: Settings,
+    settings: ModeSettings<AcpArgs>,
     /// Sessions by ID. Handlers run one at a time on the dispatch loop but prompts run in
     /// spawned tasks, so the map is shared; locks are short and never held across an await.
     sessions: Mutex<HashMap<String, Arc<Live>>>,
@@ -121,7 +113,7 @@ impl Host {
             .session_dir(&request.cwd)
             .map_err(|error| failure(format!("{error:#}")))?
             .ok_or_else(|| unknown_session(id, "the agent keeps no session files (--no-session)"))?;
-        let list = sessions::list(dir.clone())
+        let list = sessions::list(&dir)
             .await
             .map_err(|error| failure(format!("{error:#}")))?;
         let Some(session) = list.sessions.iter().find(|session| session.id == id) else {
@@ -143,14 +135,13 @@ impl Host {
         replay: bool,
     ) -> Result<SessionId> {
         let args = &self.settings.args;
-        let mut base = args.base.clone();
-        base.cwd = Some(cwd.to_path_buf());
         let mut prepared = cli::prepare(SessionOptions {
-            base: &base,
+            base: &args.base,
             transport: &args.transport,
             request: &args.request,
             budget: &args.budget,
             model: &args.base.model,
+            cwd: Some(cwd),
             file,
             default_profile: Builtin::Assistant,
             continue_on_length: None,
@@ -184,11 +175,7 @@ impl Host {
 }
 
 pub(crate) async fn run(args: AcpArgs) -> Result<u8> {
-    let telemetry = cli::start_telemetry()?;
-    let traces = telemetry.as_ref().map(Telemetry::sink);
-    let result = serve(args, traces).await;
-    cli::finish_telemetry(telemetry).await;
-    result
+    with_telemetry(async move |telemetry| serve(args, telemetry.map(Telemetry::sink)).await).await
 }
 
 async fn serve(args: AcpArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> {
@@ -200,7 +187,7 @@ async fn serve(args: AcpArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> 
     // Without session files there is nothing to load.
     let load_session = !args.no_session;
     let host = Arc::new(Host {
-        settings: Settings { args, shared, traces },
+        settings: ModeSettings { args, shared, traces },
         sessions: Mutex::new(HashMap::new()),
     });
     let on_new = Arc::clone(&host);

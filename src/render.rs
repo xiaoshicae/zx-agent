@@ -177,6 +177,17 @@ pub(crate) fn progress_line(event: &AgentEvent) -> Option<String> {
     }
 }
 
+/// `ms` since the epoch in local time, written as `format` (chrono's strftime), or `None`
+/// for a time the calendar cannot hold.
+pub(crate) fn local_time(ms: u64, format: &str) -> Option<String> {
+    // A timestamp beyond i64, or past the year 262143, cannot occur; each caller shows its
+    // line without the time.
+    i64::try_from(ms)
+        .ok()
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map(|utc| utc.with_timezone(&chrono::Local).format(format).to_string())
+}
+
 /// Escape control characters, including bidirectional overrides, so that text from models,
 /// tools or servers cannot drive the terminal.
 pub(crate) fn visible(text: &str) -> String {
