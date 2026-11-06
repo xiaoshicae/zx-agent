@@ -39,6 +39,7 @@ pub struct RedactSecrets {
 }
 
 impl RedactSecrets {
+    /// A hook that redacts the given values; empty ones are ignored.
     pub fn new(secrets: impl IntoIterator<Item = String>) -> Self {
         Self {
             secrets: secrets.into_iter().filter(|secret| !secret.is_empty()).collect(),
@@ -48,15 +49,17 @@ impl RedactSecrets {
     }
 
     /// Also redact the contents of `files`, each holding one secret such as the token of a
-    /// Kubernetes ServiceAccount. A directory stands for every file directly inside it whose
-    /// name does not start with a dot, so a whole Kubernetes Secret volume can be given and keys
-    /// added to it later are covered. Every redaction reads them again, so a rotated value is
-    /// covered and earlier values stay redacted; surrounding whitespace is ignored. Content
-    /// that is not UTF-8 is matched as the built-in tools print it, decoded lossily. A file
-    /// that is missing, or that this process may not read, is skipped: commands running as
-    /// the same user cannot read it either. Any other failure, such as a file over 64 KiB or
-    /// one that is not a regular file, fails the hook, which discards the tool output; check
-    /// the files with [`check_secret_files`] before use to report those at startup.
+    /// Kubernetes ServiceAccount.
+    ///
+    /// A directory stands for every file directly inside it whose name does not start with a
+    /// dot, so a whole Kubernetes Secret volume can be given and keys added to it later are
+    /// covered. Every redaction reads them again, so a rotated value is covered and earlier
+    /// values stay redacted; surrounding whitespace is ignored. Content that is not UTF-8 is
+    /// matched as the built-in tools print it, decoded lossily. A file that is missing, or
+    /// that this process may not read, is skipped: commands running as the same user cannot
+    /// read it either. Any other failure, such as a file over 64 KiB or one that is not a
+    /// regular file, fails the hook, which discards the tool output; check the files with
+    /// [`check_secret_files`] before use to report those at startup.
     pub fn with_secret_files(mut self, files: impl IntoIterator<Item = PathBuf>) -> Self {
         self.files.extend(files);
         self
@@ -179,12 +182,14 @@ fn redact_json(value: &mut Value, secrets: &[&str]) {
 }
 
 /// Check before use that the secret files registered at `paths`, given as to
-/// [`RedactSecrets::with_secret_files`], can be redacted: each must be a regular file of at
-/// most 64 KiB. A larger file could never be matched whole in the output of a built-in tool,
-/// and it usually holds structured data, whose single values should be registered instead.
-/// Content that is not UTF-8 is fine. Files that are missing or that this process may not
-/// read are not errors here: the redaction skips them. Returns one message naming every file
-/// that cannot be used; a file that only becomes unusable later fails the redaction instead.
+/// [`RedactSecrets::with_secret_files`], can be redacted.
+///
+/// Each must be a regular file of at most 64 KiB. A larger file could never be matched whole
+/// in the output of a built-in tool, and it usually holds structured data, whose single
+/// values should be registered instead. Content that is not UTF-8 is fine. Files that are
+/// missing or that this process may not read are not errors here: the redaction skips them.
+/// Returns one message naming every file that cannot be used; a file that only becomes
+/// unusable later fails the redaction instead.
 pub fn check_secret_files(paths: &[PathBuf]) -> Result<(), String> {
     let mut problems = Vec::new();
     for path in paths {
@@ -212,10 +217,11 @@ pub fn check_secret_files(paths: &[PathBuf]) -> Result<(), String> {
 pub const MIN_SECRET_CHARS: usize = 8;
 
 /// The files at `paths`, given as to [`RedactSecrets::with_secret_files`], whose value is
-/// shorter than [`MIN_SECRET_CHARS`] characters, for a notice at startup: such a value is still
-/// redacted, and so is every other occurrence of the same text in tool output. Blank values,
-/// which redact nothing, are left out, as are files that cannot be read: [`check_secret_files`]
-/// reports those.
+/// shorter than [`MIN_SECRET_CHARS`] characters, for a notice at startup.
+///
+/// Such a value is still redacted, and so is every other occurrence of the same text in tool
+/// output. Blank values, which redact nothing, are left out, as are files that cannot be
+/// read: [`check_secret_files`] reports those.
 pub fn short_secret_files(paths: &[PathBuf]) -> Vec<PathBuf> {
     let mut short = Vec::new();
     for path in paths {

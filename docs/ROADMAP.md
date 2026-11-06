@@ -538,7 +538,8 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P9 | 可选增强 | 进行中：token 预算（PR #47）、OpenTelemetry 追踪（PR #49）、crate 拆分（PR #52）、通用化整理（PR #54）、chat 交互体验（2026-11-05，见下文）已完成；剩更多 provider（如 Anthropic）。其余各项按 D10 不做或取消 |
 | P10 | 与 pi 的能力对齐 | 已完成（PR #72，2026-11-06 合并；⑭ 按 D13 不做）：2026-11-05 对照 pi 列出 14 项缺口，见下文 P10；① 上下文超长后自动恢复已完成（PR #56）；② 容器沙箱已完成（PR #57）；③ edit 与 write 工具已完成（PR #58）；④ grep、find、ls 已完成（PR #59）；⑤ 运行中可调整的配置已完成：⑤a 推理强度（PR #60）、⑤b 续跑（PR #61）、⑤c 请求前替换模型与推理强度的钩子（PR #65）；⑥a 会话目录与续接已完成（PR #67）；⑥b fork 已完成（PR #68）；⑥c 会话内切换分支已完成（PR #72）；⑦ 扩展能力与 ⑨ 消息队列已完成（PR #72）；⑧ 模型元数据与计量已完成（PR #72）；⑫ 幂等键已完成（PR #72，rpc 模式按 D14 不做）；⑬ MCP 进度已完成（PR #72）；⑩ 可观测已完成（PR #72）；⑭ chat 的便利功能按 D13 不做；⑪ 行为评测框架已完成（PR #72，真实运行待授权） |
 | P11 | 内核整理 | 已完成：2026-11-05 评审稿 `docs/p11-kernel-cleanup-review.md`；① 立项与搬家（PR #70），② 至 ⑥（PR #71，与 P12 同一个 PR） |
-| P12 | 项目整理 | 已完成（PR #71）：2026-11-05 评审稿 `docs/p12-project-cleanup-review.md`；① zx-tools、② 模型层、③ 根 crate、④ IM、⑤ 测试辅助、⑥ 注释与文档 |
+| P12 | 项目整理 | 已完成（PR #71）：2026-11-05 评审稿 `docs/p12-project-cleanup-review.md`；① zx-tools、② 模型层、③ 根 crate、④ IM、⑤ 测试辅助、⑥ 注释与文档；⑦ 规则与 lint（PR #75） |
+| P13 | 按规则评审与整理 | 已完成（PR #77）：2026-11-06 评审稿 `docs/p13-rules-review.md`；① 测试辅助、② 工具与模型层、③ 内核、④ IM、⑤ 根 crate、⑥ 文档 |
 
 ### P0 场景默认值移出内核
 
@@ -1773,18 +1774,32 @@ D11 容器沙箱的实施要点（2026-11-05 用户决定）：
 - [x] **④ IM**（`c315a51`）：`zx-im` 的 `platform.rs`（`Pacer`、`Cards`）、`CardLabels::outcome`、`Shared::bounded`、worker 的 `Decision`；飞书的 `Connection`、`open_socket`、`ping`；Slack 的 `open_socket`。
 - [x] **⑤ 测试辅助**（`1c0e5bb`）：`tests/common` 的 `zx_agent()`、`stdout`、`stderr`。
 - [x] **⑥ 注释与文档**：行级的 pi 出处、PR 编号与决策编号只留在模块文档；README、`.claude/CLAUDE.md`、规则 04 随改动更新。
+- [x] **⑦ 规则与 lint**（PR #75）：`Cargo.toml` 的 `[workspace.lints]` 开一组挑过的 clippy 项（函数长度 80 行、认知复杂度、四个 `cast_*`、文档反引号之外的可读性项），阈值在 `clippy.toml`；清掉的命中里，`cli::prepare`、`Runner::start`、`RawProfile::apply`、`serve::run`、`compaction::Host::candidate` 再拆一次，按变体展开的 match 与冻结的 chat 带 `#[expect(lint, reason)]`；新增规则 09（尺寸与重复），规则 01 加命名与"搬代码连文档一起搬"，规则 05 加状态与数值转换的判断，规则 06 瘦身（测试文件目录移到 `docs/TESTS.md`）；`cargo doc` 进命令清单、PR 模板与 stop hook；`.claude/settings.json` 启用两个 hook。
 
 验证（本机 macOS）：`cargo fmt`、`cargo clippy --all-targets -- -D warnings`、`cargo test`（990 通过、0 失败、7 项付费测试跳过）、`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`、`cargo +1.88.0 check --all-targets` 通过；自查脚本的命中与基线相同；未新增依赖。真实 Docker 与付费 e2e 测试本次没有运行。
+
+### P13 按规则评审与整理
+
+2026-11-06 用户要求按 PR #75 定下的规则再完整评审一次代码并全面优化。评审稿 `docs/p13-rules-review.md`（代码核对基线 `ad16f31`，即 PR #75 的内容并入 main 的合并提交：PR #75 当时合并进了 `claude/project-cleanup` 而不是 main）记录结论、做法、行为变化与度量。五路只读评审，五个区域分别实施，四个区域在各自的 worktree 里完成并通过全部检查后合并：
+
+- [x] **① 测试辅助**（`12bbb37`）：`tests/common` 的 `json_lines`、`signal`、`session_dir`、`session_files`、`tool_call_answer`、`seeded_session`、`summary_json`、`replayed_requests`、`NotifyingProvider`，`tests/common/im.rs` 的 `run_channel`；`mock_server` 经 `http::read_request` 读请求，`Captured` 的三个访问器；四处 `sleep` 改为等请求开始。
+- [x] **② 工具与模型层**（`af9db5a` 至 `6f52767`）：不变量 8 的两处修正（搜索工具的 stderr、MCP 的协议错误）；`prefix_noted`；重试表每个短语一处；openai 拆成四个模块；`search/{mod,grep,find,ls}.rs`；MCP 调用自己记总期限；两个执行器共用的错误文案；常量有名字；文档与可见性。
+- [x] **③ 内核**（`182c8da` 至 `51d568d`）：`NoSession` 消掉六处 match；工具调用的执行与记录一份；`RunHost` 开启与关闭运行，`Runner::start` 约 30 行；`compaction/{mod,answer,host}.rs`、`agent_session/events.rs`、`agent_loop/turn.rs`；`PendingInput`、`RunStop`、`Trigger`；计价按请求的模型名（修正）；失败的缺省理由一处；命名、可见性与过期文档。
+- [x] **④ IM**（`a0f9c21` 至 `bcc24d5`）：`router.rs`、`outlet.rs`；worker 的 `Lifecycle` 与携带会话的 `Phase`；`platform.rs` 的 `Backoff`、`Keepalive` 与共用常量；`MessageRef::thread`；`split_text` 保证第一段；飞书拆成 `api.rs`、`connection.rs`、`events.rs`；Slack 的 `Retry-After` 封顶、等待响应取消、沉默期限（规则 04 的修正）；解析失败各写明原因或上报。
+- [x] **⑤ 根 crate**（`e680d75` 至 `daca52d`）：`list_sessions.rs` 消掉 `cli` 与 `sessions` 的循环；`cli/{mod,shared,prepare,execution}.rs`、`otel/{mod,signal,spans,metrics}.rs`、`acp/{mod,permissions,updates}.rs`、`chat/{storage,turn,info}.rs`；`with_telemetry`、`ModeSettings`、`env_value`；`apply` 与 `emit` 每个分支一行；`render` 的 `call_label`、`local_time`、`answer_end_line`、`Severity`；`First`、`Exporters` 枚举；命名、上下文、文档与可见性。
+- [x] **⑥ 文档**：本稿、规则 01 与 06、`docs/TESTS.md`、README 的会话格式版本。整个 P13 在一个 PR（#77）中完成。
+
+验证（本机 macOS，合并后的分支）：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`（1086 通过、0 失败、8 项付费测试跳过；合并 PR #76 之后 1088 通过）、`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`、`cargo +1.88.0 check --all-targets` 与自查脚本通过；未新增依赖。真实 Docker 与付费 e2e 测试本次没有运行。
 
 ## 6. 推进方式
 
 - 每个阶段可以拆成多个提交；完成后在本文档中勾选任务、更新状态，并记录日期和提交。
 - PR 合并后，在本文档中把阶段状态改为“已完成”，并记录 PR 编号与合并日期。也可以在 PR 中直接写成“已完成（PR #编号）”，合并后即准确；`.github/pull_request_template.md` 中有对应检查项。
-- 每个阶段结束时：`cargo fmt`、`cargo clippy --all-targets -- -D warnings`、`cargo test` 通过；用到新语法或新标准库 API 时，`cargo +1.88.0 check --all-targets` 也要通过。
+- 每个阶段结束时：`cargo fmt`、`cargo clippy --all-targets -- -D warnings`（含 `[workspace.lints]` 开的项）、`cargo test`、`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` 通过；用到新语法或新标准库 API 时，`cargo +1.88.0 check --all-targets` 也要通过。
 - 从 P0 起，`tests/cli.rs` 中 `run` 的测试不改即通过，以此保证兼容性；D5 若改变默认执行环境，仅在 P6 按明确的迁移规则更新相关测试，其余行为仍须保持兼容。
 - 需要新依赖时，先确认在 D2 的授权范围内；范围之外的要先征得同意。
 - 设计有变化时，先更新本文档，再改代码。
 
 ---
 
-ROADMAP.md · v0.10 · 2026年11月
+ROADMAP.md · v0.11 · 2026年11月

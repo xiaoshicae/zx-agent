@@ -1,21 +1,22 @@
-//! Shared conversation API around the exclusively owned Runner.
+//! Shared conversation API around the exclusively owned Runner; the subscribers of its
+//! events are in `events`.
 //!
 //! A prompt or compaction takes ownership of the Runner, without a lock across await.
 //! Its lease restores the Runner on completion, cancellation, panic or future drop.
 
+mod events;
+
 use std::fmt;
 use std::num::NonZeroUsize;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{
-    ActiveTools, CommandContext, CommandError, CommandOutcome, Event, EventSink, LoopConfig, MessageQueues,
-    QueuedMessage, SlashCommand,
+    ActiveTools, CommandContext, CommandError, CommandOutcome, EventSink, LoopConfig, MessageQueues, QueuedMessage,
+    SlashCommand,
 };
 use crate::ai::retry::RetryPolicy;
 use crate::ai::{Provider, Reasoning};
@@ -23,6 +24,9 @@ use crate::compaction;
 use crate::runner::{Limits, RunReport, Runner};
 use crate::session::{CustomMessage, Entry, SessionStore, WritesStopped};
 use crate::sync::lock;
+
+use events::EventHub;
+pub use events::{EventStream, Subscription};
 
 /// Provider and model selected together, so a switch cannot expose a mixed pair.
 pub struct ModelRef {
@@ -344,12 +348,7 @@ impl AgentSession {
     /// Callbacks must return promptly. A panic detaches only that subscriber, and is
     /// observable through the handle and failed_subscribers; other subscribers continue.
     pub fn subscribe(&self, sink: Arc<dyn EventSink>) -> Subscription {
-        let (listener, failed) = self.events.attach(sink);
-        Subscription {
-            events: Arc::downgrade(&self.events),
-            listener,
-            failed,
-        }
+        self.events.subscribe(sink)
     }
 
     /// Receive future events through a channel that holds at most `capacity` of them, for
@@ -357,22 +356,12 @@ impl AgentSession {
     /// dropped and counted, which also leaves a gap in their `seq`. Dropping the stream
     /// unsubscribes.
     pub fn subscribe_bounded(&self, capacity: NonZeroUsize) -> EventStream {
-        let (sender, receiver) = tokio::sync::mpsc::channel(capacity.get());
-        let dropped = Arc::new(AtomicU64::new(0));
-        let sink = Arc::new(BoundedSink {
-            sender,
-            dropped: dropped.clone(),
-        });
-        EventStream {
-            receiver,
-            dropped,
-            _subscription: self.subscribe(sink),
-        }
+        self.events.subscribe_bounded(capacity)
     }
 
     /// Number of subscribers detached because their callback panicked, initial sink included.
     pub fn failed_subscribers(&self) -> usize {
-        self.events.failures.load(Ordering::SeqCst)
+        self.events.failures()
     }
 
     /// Why the session no longer writes, or `None` while it does; see [`WritesStopped`]. A
@@ -490,7 +479,7 @@ impl From<Runner> for AgentSession {
         let events = Arc::new(EventHub::default());
         let initial = runner.replace_sink(events.clone());
         // The original sink is permanent; only additional subscribers use RAII handles.
-        drop(events.attach(initial));
+        events.attach_permanently(initial);
         Self {
             state: Mutex::new(State::Idle(Box::new(runner))),
             queues,
@@ -504,6 +493,8 @@ impl From<Runner> for AgentSession {
     }
 }
 
+/// The lease of the Runner for one operation.
+///
 /// Run ownership is restored by Drop even when an awaiting caller disappears.
 /// Option permits moving the Runner back exactly once; it is Some until Drop.
 struct ActiveRun<'a> {
@@ -528,126 +519,5 @@ impl Drop for ActiveRun<'_> {
             .take()
             .expect("an active lease returns its Runner exactly once");
         *lock(self.state) = State::Idle(runner);
-    }
-}
-
-/// Keeps an additional event subscriber attached. Dropping it unsubscribes; an already
-/// dispatched snapshot may still finish. The handle keeps neither the conversation nor the
-/// sink alive: the session owns its subscribers and releases them when it is dropped.
-#[must_use = "retain the subscription for as long as events are needed"]
-pub struct Subscription {
-    events: Weak<EventHub>,
-    /// Identifies the subscriber; the session holds the only strong reference.
-    listener: Weak<Listener>,
-    failed: Arc<AtomicBool>,
-}
-
-impl Subscription {
-    /// Whether a callback panic caused this subscriber to be detached.
-    pub fn has_panicked(&self) -> bool {
-        self.failed.load(Ordering::SeqCst)
-    }
-}
-
-impl Drop for Subscription {
-    fn drop(&mut self) {
-        if let Some(events) = self.events.upgrade() {
-            // The weak reference keeps the allocation, so no other listener can share its address.
-            lock(&events.listeners).retain(|listener| !std::ptr::eq(Arc::as_ptr(listener), self.listener.as_ptr()));
-        }
-    }
-}
-
-struct Listener {
-    sink: Arc<dyn EventSink>,
-    failed: Arc<AtomicBool>,
-}
-
-#[derive(Default)]
-struct EventHub {
-    listeners: Mutex<Vec<Arc<Listener>>>,
-    failures: AtomicUsize,
-}
-
-impl EventHub {
-    fn attach(&self, sink: Arc<dyn EventSink>) -> (Weak<Listener>, Arc<AtomicBool>) {
-        let failed = Arc::new(AtomicBool::new(false));
-        let listener = Arc::new(Listener {
-            sink,
-            failed: failed.clone(),
-        });
-        let handle = Arc::downgrade(&listener);
-        lock(&self.listeners).push(listener);
-        (handle, failed)
-    }
-}
-
-/// Events of an [`AgentSession`] through a bounded channel; see
-/// [`AgentSession::subscribe_bounded`].
-pub struct EventStream {
-    receiver: tokio::sync::mpsc::Receiver<Event>,
-    // Shared with the sink that counts: an atomic counter, read here and written there.
-    dropped: Arc<AtomicU64>,
-    _subscription: Subscription,
-}
-
-impl EventStream {
-    /// The next event; waits until one arrives. `None` once the session is gone and the
-    /// events it sent before are read.
-    pub async fn recv(&mut self) -> Option<Event> {
-        self.receiver.recv().await
-    }
-
-    /// The next event if one is waiting, without waiting.
-    pub fn try_recv(&mut self) -> Option<Event> {
-        self.receiver.try_recv().ok()
-    }
-
-    /// Events dropped so far because the channel was full.
-    pub fn dropped(&self) -> u64 {
-        self.dropped.load(Ordering::SeqCst)
-    }
-}
-
-struct BoundedSink {
-    sender: tokio::sync::mpsc::Sender<Event>,
-    dropped: Arc<AtomicU64>,
-}
-
-impl EventSink for BoundedSink {
-    fn emit(&self, event: &Event) {
-        match self.sender.try_send(event.clone()) {
-            Ok(()) => {}
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                self.dropped.fetch_add(1, Ordering::SeqCst);
-            }
-            // The stream is gone; its subscription is being dropped as well.
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
-        }
-    }
-}
-
-impl EventSink for EventHub {
-    fn emit(&self, event: &Event) {
-        // Snapshot only the Arc handles. Reentrant subscribe, unsubscribe and abort must
-        // never run under this lock.
-        let listeners = lock(&self.listeners).clone();
-        let mut failed = false;
-        for listener in &listeners {
-            if listener.failed.load(Ordering::SeqCst) {
-                continue;
-            }
-            if catch_unwind(AssertUnwindSafe(|| listener.sink.emit(event))).is_err() {
-                if !listener.failed.swap(true, Ordering::SeqCst) {
-                    self.failures.fetch_add(1, Ordering::SeqCst);
-                }
-                failed = true;
-            }
-        }
-        if failed {
-            // Snapshot references keep removed sinks alive until after unlocking, so even
-            // a custom destructor cannot run while the subscriber list is locked.
-            lock(&self.listeners).retain(|listener| !listener.failed.load(Ordering::SeqCst));
-        }
     }
 }

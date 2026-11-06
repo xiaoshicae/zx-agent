@@ -131,8 +131,10 @@ impl JsonlFile {
             .open(path)
             .with_context(|| format!("cannot create session file {}", path.display()))?;
         lock(&file, path)?;
-        writeln!(file, "{}", serde_json::to_string(&HeaderLine::Session(header.clone()))?)?;
-        file.flush()?;
+        let line = serde_json::to_string(&HeaderLine::Session(header.clone()))?;
+        writeln!(file, "{line}")
+            .and_then(|()| file.flush())
+            .with_context(|| format!("cannot write the header of {}", path.display()))?;
         Ok(Self {
             writer: Writer::spawn(Box::new(file))?,
             next_seq: 1,
@@ -271,7 +273,7 @@ impl SessionLog for JsonlFile {
 /// How long opening keeps trying a lock that another descriptor holds before reporting the file
 /// as in use. A program that this process is starting holds copies of its descriptors until it
 /// runs, so a store that was just dropped can keep its lock for a moment: under a millisecond
-/// in a measurement on macOS (2026-11-01), longer on a busy machine.
+/// when measured on macOS, longer on a busy machine.
 #[cfg(unix)]
 const LOCK_WAIT: Duration = Duration::from_millis(500);
 
@@ -296,7 +298,8 @@ fn lock(file: &File, path: &Path) -> Result<()> {
         }
         let error = std::io::Error::last_os_error();
         match error.kind() {
-            std::io::ErrorKind::Interrupted => continue,
+            // A signal interrupted the call: try again at once.
+            std::io::ErrorKind::Interrupted => {}
             std::io::ErrorKind::WouldBlock if started.elapsed() < LOCK_WAIT => {
                 // A synchronous pause: opening happens once per session, and it waits only
                 // while another descriptor holds the lock.

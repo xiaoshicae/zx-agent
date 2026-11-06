@@ -50,6 +50,9 @@ pub enum RequestSource {
     },
 }
 
+/// A model request as it is about to be sent: its configuration, and how to rebuild its
+/// messages.
+///
 /// Written before Provider::stream. A missing response means dispatch was unresolved;
 /// the record alone cannot prove that a remote server accepted the request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

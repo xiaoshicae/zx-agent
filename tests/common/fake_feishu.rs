@@ -21,7 +21,7 @@ const WAIT: Duration = Duration::from_secs(10);
 
 /// One API call.
 #[derive(Clone, Debug)]
-pub struct Call {
+pub(crate) struct Call {
     /// Which API: token, endpoint, create, reply, edit or patch.
     pub route: &'static str,
     /// Path and query.
@@ -33,7 +33,7 @@ pub struct Call {
 
 /// A scripted answer to one call of a route.
 #[derive(Clone, Debug)]
-pub enum Answer {
+pub(crate) enum Answer {
     /// Status 200 with this non-zero code.
     Code(i64),
     /// This HTTP status, with this code in the body.
@@ -42,7 +42,7 @@ pub enum Answer {
     RateLimited { reset_secs: u64 },
 }
 
-pub struct FakeFeishu {
+pub(crate) struct FakeFeishu {
     /// Pass as the channel's API base.
     pub api_base: String,
     /// Pass as the channel's token URL.
@@ -55,7 +55,7 @@ pub struct FakeFeishu {
 
 impl FakeFeishu {
     /// Start with this ping interval in the connection settings it hands out.
-    pub async fn start(ping_secs: u64) -> Self {
+    pub(crate) async fn start(ping_secs: u64) -> Self {
         let api = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let socket_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = format!(
@@ -106,19 +106,19 @@ impl FakeFeishu {
     }
 
     /// Answer the next calls of `route` this way, in order, before answering normally.
-    pub fn script(&self, route: &'static str, answers: Vec<Answer>) {
+    pub(crate) fn script(&self, route: &'static str, answers: Vec<Answer>) {
         self.scripted.lock().unwrap().entry(route).or_default().extend(answers);
     }
 
     /// The next long connection.
-    pub async fn socket(&mut self) -> Socket {
+    pub(crate) async fn socket(&mut self) -> Socket {
         tokio::time::timeout(WAIT, self.sockets.recv())
             .await
             .expect("the channel did not connect in time")
             .expect("the listener is alive")
     }
 
-    pub fn calls(&self, route: &str) -> Vec<Call> {
+    pub(crate) fn calls(&self, route: &str) -> Vec<Call> {
         self.calls
             .lock()
             .unwrap()
@@ -129,7 +129,7 @@ impl FakeFeishu {
     }
 
     /// Wait until `route` was called at least `count` times, and return its calls.
-    pub async fn wait_for(&self, route: &str, count: usize) -> Vec<Call> {
+    pub(crate) async fn wait_for(&self, route: &str, count: usize) -> Vec<Call> {
         tokio::time::timeout(WAIT, async {
             loop {
                 let notified = self.called.notified();
@@ -151,17 +151,22 @@ struct Settings {
 }
 
 /// One long connection, from the server's side.
-pub struct Socket {
+pub(crate) struct Socket {
     stream: WebSocketStream<TcpStream>,
 }
 
 impl Socket {
-    pub async fn send(&mut self, frame: &TestFrame) {
-        self.stream.send(Message::binary(frame.encode())).await.unwrap();
+    pub(crate) async fn send(&mut self, frame: &TestFrame) {
+        self.send_bytes(frame.encode()).await;
+    }
+
+    /// Send `bytes` as one binary message, as they are: for what is not a frame.
+    pub(crate) async fn send_bytes(&mut self, bytes: Vec<u8>) {
+        self.stream.send(Message::binary(bytes)).await.unwrap();
     }
 
     /// The next frame from the client.
-    pub async fn receive(&mut self) -> TestFrame {
+    pub(crate) async fn receive(&mut self) -> TestFrame {
         loop {
             let message = tokio::time::timeout(WAIT, self.stream.next())
                 .await
@@ -177,7 +182,7 @@ impl Socket {
     }
 
     /// The next data frame from the client, skipping its pings.
-    pub async fn receive_data(&mut self) -> TestFrame {
+    pub(crate) async fn receive_data(&mut self) -> TestFrame {
         loop {
             let frame = self.receive().await;
             if frame.method == 1 {
@@ -186,15 +191,15 @@ impl Socket {
         }
     }
 
-    pub async fn close(mut self) {
+    pub(crate) async fn close(mut self) {
         self.stream.close(None).await.ok();
     }
 
     /// Whether the client closed the connection, waiting for it.
-    pub async fn closed_by_client(&mut self) -> bool {
+    pub(crate) async fn closed_by_client(&mut self) -> bool {
         loop {
             match tokio::time::timeout(WAIT, self.stream.next()).await {
-                Ok(None | Some(Err(_)) | Some(Ok(Message::Close(_)))) => return true,
+                Ok(None | Some(Err(_) | Ok(Message::Close(_)))) => return true,
                 Ok(Some(Ok(_))) => {}
                 Err(_) => return false,
             }
@@ -204,7 +209,7 @@ impl Socket {
 
 /// A frame as the test sees it.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct TestFrame {
+pub(crate) struct TestFrame {
     pub seq_id: u64,
     pub log_id: u64,
     pub service: i32,
@@ -218,7 +223,7 @@ pub struct TestFrame {
 
 impl TestFrame {
     /// A data frame of type `event` carrying `payload`, as fragment `seq` of `sum`.
-    pub fn event(message_id: &str, sum: usize, seq: usize, payload: &[u8]) -> Self {
+    pub(crate) fn event(message_id: &str, sum: usize, seq: usize, payload: &[u8]) -> Self {
         TestFrame {
             seq_id: 7,
             log_id: 8,
@@ -237,7 +242,7 @@ impl TestFrame {
         }
     }
 
-    pub fn header(&self, key: &str) -> Option<&str> {
+    pub(crate) fn header(&self, key: &str) -> Option<&str> {
         self.headers
             .iter()
             .find(|(name, _)| name == key)
@@ -265,8 +270,8 @@ impl TestFrame {
         for (number, value) in [
             (1, self.seq_id),
             (2, self.log_id),
-            (3, self.service as i64 as u64),
-            (4, self.method as i64 as u64),
+            (3, i64::from(self.service).cast_unsigned()),
+            (4, i64::from(self.method).cast_unsigned()),
         ] {
             varint(&mut out, number << 3);
             varint(&mut out, value);
@@ -299,7 +304,7 @@ impl TestFrame {
             }
         }
         fn chunk<'a>(bytes: &mut &'a [u8]) -> &'a [u8] {
-            let length = varint(bytes) as usize;
+            let length = usize::try_from(varint(bytes)).unwrap();
             let (field, rest) = bytes.split_at(length);
             *bytes = rest;
             field
@@ -311,8 +316,8 @@ impl TestFrame {
             match varint(&mut bytes) {
                 0x08 => frame.seq_id = varint(&mut bytes),
                 0x10 => frame.log_id = varint(&mut bytes),
-                0x18 => frame.service = varint(&mut bytes) as i32,
-                0x20 => frame.method = varint(&mut bytes) as i32,
+                0x18 => frame.service = i32::try_from(varint(&mut bytes)).unwrap(),
+                0x20 => frame.method = i32::try_from(varint(&mut bytes)).unwrap(),
                 0x2a => {
                     let mut header = chunk(&mut bytes);
                     let (mut key, mut value) = (String::new(), String::new());
@@ -378,7 +383,7 @@ async fn answer(
         Some(Answer::RateLimited { reset_secs }) => response(
             "429 Too Many Requests",
             &[("x-ogw-ratelimit-reset", reset_secs.to_string())],
-            &json!({"code": 99991400, "msg": "request trigger frequency limit"}).to_string(),
+            &json!({"code": 99_991_400, "msg": "request trigger frequency limit"}).to_string(),
         ),
         None => response("200 OK", &[], &normal(route, &settings, &posted).to_string()),
     };

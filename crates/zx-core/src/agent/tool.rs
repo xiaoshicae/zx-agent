@@ -101,8 +101,8 @@ impl ToolContext {
     /// longer than [`MAX_PROGRESS_BYTES`] is cut at a character boundary. The loop passes
     /// updates through the redaction hooks, then emits them as `tool_execution_update`
     /// events; they are not recorded in the session and the model never sees them. Returns
-    /// false when the queue is full, the call has finished, or this is a direct call without
-    /// an observer; the update is then dropped.
+    /// false when the queue ([`MAX_QUEUED_PROGRESS`] updates) is full, the call has finished,
+    /// or this is a direct call without an observer; the update is then dropped.
     pub fn report_progress(&self, text: impl Into<String>) -> bool {
         let Some(progress) = &self.progress else { return false };
         let mut text = text.into();
@@ -119,6 +119,12 @@ impl ToolContext {
 
 /// The most bytes of one progress update; longer text is cut.
 pub const MAX_PROGRESS_BYTES: usize = 16 * 1024;
+
+/// The most progress updates one call may have queued before the loop takes them: a burst
+/// of a few lines between two polls of the loop fits, and a tool that keeps reporting faster
+/// than the loop emits events holds at most `MAX_QUEUED_PROGRESS * MAX_PROGRESS_BYTES` of
+/// updates in memory (512 KiB).
+pub const MAX_QUEUED_PROGRESS: usize = 32;
 
 /// The most bytes of [`ToolOutput::details`], as compact JSON. Details are recorded with
 /// every result, so they get the same bound as a progress update.

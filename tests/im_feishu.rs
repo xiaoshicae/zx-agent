@@ -8,10 +8,9 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 
 use common::fake_feishu::{Answer, FakeFeishu, TestFrame};
+use common::im::run_channel;
 use zx_agent::agent::ApprovalResult;
 use zx_agent::im::feishu::{FeishuChannel, FeishuConfig};
 use zx_agent::im::{
@@ -22,49 +21,35 @@ use zx_agent::im::{
 /// Only reached when an expected event never comes.
 const WAIT: Duration = Duration::from_secs(10);
 
-fn channel(fake: &FakeFeishu) -> Arc<FeishuChannel> {
+fn config(fake: &FakeFeishu) -> FeishuConfig {
     let mut config = FeishuConfig::new("cli_test".into(), "secret-test".into());
     config.api_base = fake.api_base.clone();
     config.token_url = fake.token_url.clone();
     config.post_interval = Duration::ZERO;
-    Arc::new(FeishuChannel::new(config).unwrap())
+    config
 }
 
-struct Running {
-    inbound: mpsc::Receiver<Inbound>,
-    cancel: CancellationToken,
-    task: JoinHandle<Result<(), ImError>>,
+fn channel(fake: &FakeFeishu) -> Arc<FeishuChannel> {
+    Arc::new(FeishuChannel::new(config(fake)).unwrap())
 }
 
-fn run(channel: Arc<FeishuChannel>) -> Running {
-    let (sender, inbound) = mpsc::channel(16);
-    let cancel = CancellationToken::new();
-    let stop = cancel.clone();
-    let task = tokio::spawn(async move { channel.run(sender, &stop).await });
-    Running { inbound, cancel, task }
+/// A channel that passes each error it reports on as text.
+fn reporting_channel(fake: &FakeFeishu) -> (Arc<FeishuChannel>, mpsc::UnboundedReceiver<String>) {
+    let (reported, reports) = mpsc::unbounded_channel();
+    let mut config = config(fake);
+    config.on_error = Some(Arc::new(move |error: &ImError| {
+        reported.send(error.to_string()).ok();
+    }));
+    (Arc::new(FeishuChannel::new(config).unwrap()), reports)
 }
 
-impl Running {
-    async fn next(&mut self) -> Inbound {
-        tokio::time::timeout(WAIT, self.inbound.recv())
-            .await
-            .expect("nothing was passed on in time")
-            .expect("the channel is running")
-    }
-
-    async fn stop(self) -> Result<(), ImError> {
-        self.cancel.cancel();
-        self.task.await.unwrap()
-    }
-}
-
-fn payload(event_type: &str, event: Value) -> Vec<u8> {
+fn payload(event_type: &str, event: &Value) -> Vec<u8> {
     json!({"schema": "2.0", "header": {"event_id": "ev1", "event_type": event_type}, "event": event})
         .to_string()
         .into_bytes()
 }
 
-fn text_message(id: &str, chat: &str, chat_type: &str, root: Option<&str>, text: &str, mentions: Value) -> Value {
+fn text_message(id: &str, chat: &str, chat_type: &str, root: Option<&str>, text: &str, mentions: &Value) -> Value {
     let mut message = json!({
         "message_id": id, "chat_id": chat, "chat_type": chat_type, "message_type": "text",
         "content": json!({"text": text}).to_string(), "mentions": mentions,
@@ -79,7 +64,7 @@ fn bot_mention() -> Value {
     json!([{"key": "@_user_1", "mentioned_type": "bot", "name": "zx", "id": {"open_id": "ou_bot"}}])
 }
 
-fn received(event: Value) -> Vec<u8> {
+fn received(event: &Value) -> Vec<u8> {
     payload("im.message.receive_v1", event)
 }
 
@@ -106,7 +91,7 @@ fn content(call_body: &Value) -> Value {
 #[tokio::test]
 async fn the_channel_connects_with_the_app_credentials_and_pings_at_once() {
     let mut fake = FakeFeishu::start(120).await;
-    let running = run(channel(&fake));
+    let running = run_channel(channel(&fake), WAIT);
     let mut socket = fake.socket().await;
     let ping = socket.receive().await;
     assert_eq!((ping.method, ping.service, ping.header("type")), (0, 33, Some("ping")));
@@ -122,19 +107,19 @@ async fn the_channel_connects_with_the_app_credentials_and_pings_at_once() {
 #[tokio::test]
 async fn a_group_mention_is_acknowledged_and_passed_on_without_the_bot() {
     let mut fake = FakeFeishu::start(120).await;
-    let mut running = run(channel(&fake));
+    let mut running = run_channel(channel(&fake), WAIT);
     let mut socket = fake.socket().await;
     let event = TestFrame::event(
         "f1",
         1,
         0,
-        &received(text_message(
+        &received(&text_message(
             "om_1",
             "oc_1",
             "group",
             None,
             "@_user_1 pods",
-            bot_mention(),
+            &bot_mention(),
         )),
     );
     socket.send(&event).await;
@@ -156,10 +141,17 @@ async fn a_group_mention_is_acknowledged_and_passed_on_without_the_bot() {
 #[tokio::test]
 async fn a_reply_names_the_root_of_its_thread() {
     let mut fake = FakeFeishu::start(120).await;
-    let mut running = run(channel(&fake));
+    let mut running = run_channel(channel(&fake), WAIT);
     let mut socket = fake.socket().await;
-    let event = text_message("om_2", "oc_1", "group", Some("om_root"), "@_user_1 more", bot_mention());
-    socket.send(&TestFrame::event("f1", 1, 0, &received(event))).await;
+    let event = text_message(
+        "om_2",
+        "oc_1",
+        "group",
+        Some("om_root"),
+        "@_user_1 more",
+        &bot_mention(),
+    );
+    socket.send(&TestFrame::event("f1", 1, 0, &received(&event))).await;
     assert_eq!(
         running.next().await,
         message("om_2", at("oc_1", Some("om_root")), "more")
@@ -170,17 +162,17 @@ async fn a_reply_names_the_root_of_its_thread() {
 #[tokio::test]
 async fn only_text_from_people_addressed_to_the_bot_is_passed_on() {
     let mut fake = FakeFeishu::start(120).await;
-    let mut running = run(channel(&fake));
+    let mut running = run_channel(channel(&fake), WAIT);
     let mut socket = fake.socket().await;
-    let unmentioned = text_message("om_1", "oc_1", "group", None, "chatter", json!([]));
-    let mut from_bot = text_message("om_2", "oc_d", "p2p", None, "echo", json!([]));
+    let unmentioned = text_message("om_1", "oc_1", "group", None, "chatter", &json!([]));
+    let mut from_bot = text_message("om_2", "oc_d", "p2p", None, "echo", &json!([]));
     from_bot["sender"]["sender_type"] = json!("bot");
-    let mut image = text_message("om_3", "oc_d", "p2p", None, "", json!([]));
+    let mut image = text_message("om_3", "oc_d", "p2p", None, "", &json!([]));
     image["message"]["message_type"] = json!("image");
-    let wanted = text_message("om_4", "oc_d", "p2p", None, "hi", json!([]));
+    let wanted = text_message("om_4", "oc_d", "p2p", None, "hi", &json!([]));
     for (n, event) in [unmentioned, from_bot, image, wanted].into_iter().enumerate() {
         socket
-            .send(&TestFrame::event(&format!("f{n}"), 1, 0, &received(event)))
+            .send(&TestFrame::event(&format!("f{n}"), 1, 0, &received(&event)))
             .await;
         socket.receive_data().await;
     }
@@ -191,12 +183,12 @@ async fn only_text_from_people_addressed_to_the_bot_is_passed_on() {
 #[tokio::test]
 async fn a_redelivered_message_is_passed_on_once() {
     let mut fake = FakeFeishu::start(120).await;
-    let mut running = run(channel(&fake));
+    let mut running = run_channel(channel(&fake), WAIT);
     let mut socket = fake.socket().await;
-    let once = text_message("om_1", "oc_d", "p2p", None, "once", json!([]));
-    let next = text_message("om_2", "oc_d", "p2p", None, "next", json!([]));
+    let once = text_message("om_1", "oc_d", "p2p", None, "once", &json!([]));
+    let next = text_message("om_2", "oc_d", "p2p", None, "next", &json!([]));
     for (frame_id, event) in [("f1", once.clone()), ("f2", once), ("f3", next)] {
-        socket.send(&TestFrame::event(frame_id, 1, 0, &received(event))).await;
+        socket.send(&TestFrame::event(frame_id, 1, 0, &received(&event))).await;
         assert_eq!(socket.receive_data().await.header("message_id"), Some(frame_id));
     }
     assert_eq!(running.next().await, message("om_1", at("oc_d", None), "once"));
@@ -207,9 +199,9 @@ async fn a_redelivered_message_is_passed_on_once() {
 #[tokio::test]
 async fn a_fragmented_event_is_joined_and_acknowledged_once() {
     let mut fake = FakeFeishu::start(120).await;
-    let mut running = run(channel(&fake));
+    let mut running = run_channel(channel(&fake), WAIT);
     let mut socket = fake.socket().await;
-    let whole = received(text_message("om_1", "oc_d", "p2p", None, "joined", json!([])));
+    let whole = received(&text_message("om_1", "oc_d", "p2p", None, "joined", &json!([])));
     let (first, second) = whole.split_at(whole.len() / 2);
     socket.send(&TestFrame::event("f9", 2, 1, second)).await;
     socket.send(&TestFrame::event("f9", 2, 0, first)).await;
@@ -217,8 +209,8 @@ async fn a_fragmented_event_is_joined_and_acknowledged_once() {
     assert_eq!((ack.header("message_id"), ack.header("seq")), (Some("f9"), Some("0")));
     assert_eq!(running.next().await, message("om_1", at("oc_d", None), "joined"));
     // The next data frame is the acknowledgement of a later event: the first fragment had none.
-    let later = text_message("om_2", "oc_d", "p2p", None, "later", json!([]));
-    socket.send(&TestFrame::event("f10", 1, 0, &received(later))).await;
+    let later = text_message("om_2", "oc_d", "p2p", None, "later", &json!([]));
+    socket.send(&TestFrame::event("f10", 1, 0, &received(&later))).await;
     assert_eq!(socket.receive_data().await.header("message_id"), Some("f10"));
     running.stop().await.unwrap();
 }
@@ -226,7 +218,7 @@ async fn a_fragmented_event_is_joined_and_acknowledged_once() {
 #[tokio::test]
 async fn a_card_click_becomes_a_decision_in_its_thread() {
     let mut fake = FakeFeishu::start(120).await;
-    let mut running = run(channel(&fake));
+    let mut running = run_channel(channel(&fake), WAIT);
     let mut socket = fake.socket().await;
     let click = json!({
         "operator": {"open_id": "ou_u2"},
@@ -234,7 +226,7 @@ async fn a_card_click_becomes_a_decision_in_its_thread() {
         "context": {"open_message_id": "om_card", "open_chat_id": "oc_1"},
     });
     socket
-        .send(&TestFrame::event("f1", 1, 0, &payload("card.action.trigger", click)))
+        .send(&TestFrame::event("f1", 1, 0, &payload("card.action.trigger", &click)))
         .await;
     socket.receive_data().await;
     assert_eq!(
@@ -252,7 +244,7 @@ async fn a_card_click_becomes_a_decision_in_its_thread() {
 #[tokio::test]
 async fn a_pong_can_shorten_the_ping_interval() {
     let mut fake = FakeFeishu::start(120).await;
-    let running = run(channel(&fake));
+    let running = run_channel(channel(&fake), WAIT);
     let mut socket = fake.socket().await;
     assert_eq!(socket.receive().await.header("type"), Some("ping"));
     let pong = TestFrame {
@@ -271,8 +263,8 @@ async fn a_pong_can_shorten_the_ping_interval() {
 async fn a_refused_endpoint_stops_the_channel_with_a_configuration_error() {
     let fake = FakeFeishu::start(120).await;
     fake.script("endpoint", vec![Answer::Code(19001)]);
-    let running = run(channel(&fake));
-    match running.task.await.unwrap() {
+    let running = run_channel(channel(&fake), WAIT);
+    match running.ended().await {
         Err(ImError::Config(error)) => assert!(error.contains("19001"), "{error}"),
         other => panic!("expected a configuration error, got {other:?}"),
     }
@@ -281,11 +273,11 @@ async fn a_refused_endpoint_stops_the_channel_with_a_configuration_error() {
 #[tokio::test]
 async fn a_dropped_connection_is_opened_again() {
     let mut fake = FakeFeishu::start(120).await;
-    let mut running = run(channel(&fake));
+    let mut running = run_channel(channel(&fake), WAIT);
     fake.socket().await.close().await;
     let mut second = fake.socket().await;
-    let event = text_message("om_1", "oc_d", "p2p", None, "back", json!([]));
-    second.send(&TestFrame::event("f1", 1, 0, &received(event))).await;
+    let event = text_message("om_1", "oc_d", "p2p", None, "back", &json!([]));
+    second.send(&TestFrame::event("f1", 1, 0, &received(&event))).await;
     assert_eq!(running.next().await, message("om_1", at("oc_d", None), "back"));
     assert_eq!(fake.calls("endpoint").len(), 2);
     running.stop().await.unwrap();
@@ -342,10 +334,10 @@ async fn text_without_a_thread_starts_a_message_and_the_token_is_reused() {
 async fn replies_in_a_direct_chat_stay_out_of_topics() {
     let mut fake = FakeFeishu::start(120).await;
     let channel = channel(&fake);
-    let mut running = run(Arc::clone(&channel));
+    let mut running = run_channel(Arc::clone(&channel), WAIT);
     let mut socket = fake.socket().await;
-    let event = text_message("om_d1", "oc_d", "p2p", None, "hi", json!([]));
-    socket.send(&TestFrame::event("f1", 1, 0, &received(event))).await;
+    let event = text_message("om_d1", "oc_d", "p2p", None, "hi", &json!([]));
+    socket.send(&TestFrame::event("f1", 1, 0, &received(&event))).await;
     running.next().await;
     channel
         .send(&at("oc_d", Some("om_d1")), &Outbound::Text("answer".into()))
@@ -382,7 +374,7 @@ async fn a_status_update_edits_the_message() {
 #[tokio::test]
 async fn a_refused_edit_posts_the_text_instead() {
     let fake = FakeFeishu::start(120).await;
-    fake.script("edit", vec![Answer::Code(230075)]);
+    fake.script("edit", vec![Answer::Code(230_075)]);
     let channel = channel(&fake);
     let posted = channel
         .send(&at("oc_1", Some("om_root")), &Outbound::Text("working".into()))
@@ -452,14 +444,8 @@ async fn a_rate_limited_call_waits_and_is_retried() {
 async fn a_busy_endpoint_is_reported_and_retried() {
     let mut fake = FakeFeishu::start(120).await;
     fake.script("endpoint", vec![Answer::Code(1)]);
-    let (reported, mut reports) = mpsc::unbounded_channel();
-    let mut config = FeishuConfig::new("cli_test".into(), "secret-test".into());
-    config.api_base = fake.api_base.clone();
-    config.token_url = fake.token_url.clone();
-    config.on_error = Some(Arc::new(move |error: &ImError| {
-        reported.send(error.to_string()).ok();
-    }));
-    let running = run(Arc::new(FeishuChannel::new(config).unwrap()));
+    let (channel, mut reports) = reporting_channel(&fake);
+    let running = run_channel(channel, WAIT);
     let report = tokio::time::timeout(WAIT, reports.recv()).await.unwrap().unwrap();
     assert!(report.contains("code 1"), "{report}");
     // The next attempt connects.
@@ -468,9 +454,25 @@ async fn a_busy_endpoint_is_reported_and_retried() {
 }
 
 #[tokio::test]
+async fn a_frame_that_cannot_be_decoded_is_reported_and_the_connection_goes_on() {
+    let mut fake = FakeFeishu::start(120).await;
+    let (channel, mut reports) = reporting_channel(&fake);
+    let mut running = run_channel(channel, WAIT);
+    let mut socket = fake.socket().await;
+    // Wire type 3, which the frame codec does not read.
+    socket.send_bytes(vec![0x0b]).await;
+    let report = tokio::time::timeout(WAIT, reports.recv()).await.unwrap().unwrap();
+    assert!(report.contains("malformed frame"), "{report}");
+    let event = text_message("om_1", "oc_d", "p2p", None, "still here", &json!([]));
+    socket.send(&TestFrame::event("f1", 1, 0, &received(&event))).await;
+    assert_eq!(running.next().await, message("om_1", at("oc_d", None), "still here"));
+    running.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn stopping_closes_the_connection() {
     let mut fake = FakeFeishu::start(120).await;
-    let running = run(channel(&fake));
+    let running = run_channel(channel(&fake), WAIT);
     let mut socket = fake.socket().await;
     running.stop().await.unwrap();
     assert!(socket.closed_by_client().await);

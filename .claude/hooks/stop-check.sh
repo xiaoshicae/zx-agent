@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stop：本会话用 Edit / Write 改过 Rust 代码或 Cargo.toml 时，结束前跑 CLAUDE.md「命令」里的格式、lint、测试检查。
+# Stop：本会话用 Edit / Write 改过 Rust 代码或 Cargo.toml 时，结束前跑 CLAUDE.md「命令」里的格式、lint、测试、文档检查。
 # 改动由 post-edit.sh 按会话记录，所以纯问答、以及同时在跑的其他会话的改动都不会触发。
 # - 第一次不通过：拦下（decision=block），把输出的最后部分交给 Claude 去修。
 # - 已经拦过一次（stop_hook_active=true）仍不通过：放行，用 systemMessage 提示用户，并清掉记录。
@@ -33,6 +33,7 @@ while IFS= read -r dir; do
     check cargo fmt --check
     check cargo clippy -q --all-targets -- -D warnings
     check cargo test -q
+    check env RUSTDOCFLAGS="-D warnings" cargo doc -q --no-deps
 done < <(sort -u "$mark")
 rm -f "$mark"
 exit 0

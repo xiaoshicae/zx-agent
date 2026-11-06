@@ -5,20 +5,50 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 
 /// One request as the server received it.
 #[derive(Clone, Debug)]
-pub struct Captured {
+pub(crate) struct Captured {
     /// Request line and headers, lowercased.
     pub headers: String,
     pub body: Value,
 }
 
+impl Captured {
+    /// The messages of the request, in order.
+    fn messages(&self) -> &[Value] {
+        self.body["messages"].as_array().map_or(&[], Vec::as_slice)
+    }
+
+    /// The texts of the user messages, in order.
+    pub(crate) fn user_texts(&self) -> Vec<String> {
+        self.messages()
+            .iter()
+            .filter(|message| message["role"] == "user")
+            .map(|message| message["content"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// The text of the leading system message.
+    pub(crate) fn system_text(&self) -> String {
+        self.messages()[0]["content"].as_str().unwrap().to_string()
+    }
+
+    /// The tool result messages, in order.
+    pub(crate) fn tool_results(&self) -> Vec<Value> {
+        self.messages()
+            .iter()
+            .filter(|message| message["role"] == "tool")
+            .cloned()
+            .collect()
+    }
+}
+
 /// The scripted answer to one request.
-pub enum Reply {
+pub(crate) enum Reply {
     /// Stream these chunks, then `[DONE]`.
     Sse(Vec<Value>),
     /// Build SSE chunks from the request body, e.g. to read a newly generated output ID.
@@ -35,7 +65,7 @@ pub enum Reply {
 
 impl Reply {
     /// A plain answer that ends normally.
-    pub fn text(text: &str) -> Self {
+    pub(crate) fn text(text: &str) -> Self {
         Reply::Sse(vec![
             json!({"choices": [{"index": 0, "delta": {"content": text}, "finish_reason": "stop"}]}),
             usage(),
@@ -43,12 +73,12 @@ impl Reply {
     }
 
     /// A request for one `bash` call running `command`.
-    pub fn bash(id: &str, command: &str) -> Self {
-        Self::tool_call(id, "bash", json!({"command": command}))
+    pub(crate) fn bash(id: &str, command: &str) -> Self {
+        Self::tool_call(id, "bash", &json!({"command": command}))
     }
 
     /// A request for one call of tool `name` with `arguments`.
-    pub fn tool_call(id: &str, name: &str, arguments: Value) -> Self {
+    pub(crate) fn tool_call(id: &str, name: &str, arguments: &Value) -> Self {
         let call = json!({"index": 0, "id": id, "type": "function",
             "function": {"name": name, "arguments": arguments.to_string()}});
         Reply::Sse(vec![
@@ -58,7 +88,7 @@ impl Reply {
     }
 
     /// An answer cut off at the output token limit.
-    pub fn truncated(text: &str) -> Self {
+    pub(crate) fn truncated(text: &str) -> Self {
         Reply::Sse(vec![
             json!({"choices": [{"index": 0, "delta": {"content": text}, "finish_reason": "length"}]}),
             usage(),
@@ -71,7 +101,7 @@ fn usage() -> Value {
 }
 
 /// A running fake server. It stops answering after the scripted replies are used up.
-pub struct MockServer {
+pub(crate) struct MockServer {
     /// Base URL to pass as `base_url`, ending in `/v1`.
     pub base_url: String,
     requests: Arc<Mutex<Vec<Captured>>>,
@@ -80,7 +110,7 @@ pub struct MockServer {
 
 impl MockServer {
     /// Start serving `replies`, one per connection in order.
-    pub async fn start(replies: Vec<Reply>) -> Self {
+    pub(crate) async fn start(replies: Vec<Reply>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -101,12 +131,12 @@ impl MockServer {
     }
 
     /// Requests received so far, in order.
-    pub fn requests(&self) -> Vec<Captured> {
+    pub(crate) fn requests(&self) -> Vec<Captured> {
         self.requests.lock().unwrap().clone()
     }
 
     /// Wait until at least `count` requests have arrived.
-    pub async fn wait_for_requests(&self, count: usize) {
+    pub(crate) async fn wait_for_requests(&self, count: usize) {
         loop {
             let notified = self.received.notified();
             if self.requests.lock().unwrap().len() >= count {
@@ -118,7 +148,10 @@ impl MockServer {
 }
 
 async fn answer(mut stream: TcpStream, reply: Reply, log: Arc<Mutex<Vec<Captured>>>, received: Arc<Notify>) {
-    let request = read_request(&mut stream).await;
+    // A client that closes without sending has nothing to answer.
+    let Some(request) = read_request(&mut stream).await else {
+        return;
+    };
     let reply = match reply {
         Reply::Dynamic(build) => Reply::Sse(build(&request.body)),
         reply => reply,
@@ -167,28 +200,12 @@ fn sse_events(chunks: &[Value]) -> String {
     chunks.iter().map(|chunk| format!("data: {chunk}\n\n")).collect()
 }
 
-async fn read_request(stream: &mut TcpStream) -> Captured {
-    let mut data = Vec::new();
-    let mut buf = [0u8; 4096];
-    let header_end = loop {
-        let n = stream.read(&mut buf).await.unwrap();
-        data.extend_from_slice(&buf[..n]);
-        if let Some(pos) = data.windows(4).position(|w| w == b"\r\n\r\n") {
-            break pos + 4;
-        }
-    };
-    let headers = String::from_utf8_lossy(&data[..header_end]).to_lowercase();
-    let length: usize = headers
-        .lines()
-        .find_map(|line| line.strip_prefix("content-length:"))
-        .map(|value| value.trim().parse().unwrap())
-        .unwrap_or(0);
-    while data.len() < header_end + length {
-        let n = stream.read(&mut buf).await.unwrap();
-        data.extend_from_slice(&buf[..n]);
-    }
-    Captured {
-        headers,
-        body: serde_json::from_slice(&data[header_end..header_end + length]).unwrap(),
-    }
+/// One request, as the fake records it: `None` when the client closed the connection first.
+async fn read_request(stream: &mut TcpStream) -> Option<Captured> {
+    let request = super::http::read_request(stream).await?;
+    let body = request.json();
+    Some(Captured {
+        headers: request.head_text().to_lowercase(),
+        body,
+    })
 }

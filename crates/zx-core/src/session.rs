@@ -26,6 +26,7 @@ pub use summary::{
 };
 pub(crate) use summary::{MAX_STATEMENTS, MAX_SUMMARY_BYTES, cite_only, summary_messages, superseded_by};
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -39,23 +40,23 @@ use crate::ai::ContentBlock;
 use crate::ai::{Message, UserMessageKind, now_ms};
 use jsonl::JsonlFile;
 
-/// Format version written to new session headers. Version 5 adds incremental summaries.
-/// Version 4 adds `tool_call_started`.
-/// Version 3 adds auditable compaction, request records and append-only format upgrades.
-/// Version 2 records the system prompt as
-/// system messages in the conversation; version 1 kept it in the header. Version 1 files still
-/// open: the old header field is ignored, and the next run records the prompt as a message.
+/// Format version written to new session headers. Version 6 adds the `custom` and
+/// `custom_message` records of extensions. Version 5 adds incremental summaries. Version 4
+/// adds `tool_call_started`. Version 3 adds auditable compaction, request records and
+/// append-only format upgrades. Version 2 records the system prompt as system messages in
+/// the conversation; version 1 kept it in the header. Version 1 files still open: the old
+/// header field is ignored, and the next run records the prompt as a message.
 pub const SESSION_VERSION: u32 = 6;
 
 /// The format that adds auditable compaction, request records and append-only upgrades.
-pub(crate) const COMPACTION_VERSION: u32 = 3;
+const COMPACTION_VERSION: u32 = 3;
 /// The format that records that a tool call with side effects started.
-pub(crate) const START_RECORDS_VERSION: u32 = 4;
+const START_RECORDS_VERSION: u32 = 4;
 /// The format that adds incremental summaries: `mode` and `continues` on attempts, fact IDs
 /// and `supersedes`, and `superseded` and `evicted` on results.
-pub(crate) const INCREMENTAL_SUMMARY_VERSION: u32 = 5;
+const INCREMENTAL_SUMMARY_VERSION: u32 = 5;
 /// First format version with the `custom` and `custom_message` records of extensions.
-pub(crate) const CUSTOM_RECORDS_VERSION: u32 = 6;
+const CUSTOM_RECORDS_VERSION: u32 = 6;
 
 /// How long one append may wait for its log, such as a database that stopped answering.
 /// A file append finishes long before; a timed-out append stops writing, like a failed one.
@@ -279,6 +280,25 @@ impl Entry {
         }
     }
 
+    /// The message the entry contributes to the model's context, with the entry's ID, before
+    /// context edits: a stored message as it is, an extension's message as a user message.
+    /// `None` for the records that are not messages.
+    pub(crate) fn projected(&self) -> Option<(&str, Cow<'_, Message>)> {
+        match self {
+            Self::Message(entry) => Some((&entry.id, Cow::Borrowed(&entry.message))),
+            Self::CustomMessage(entry) => Some((&entry.id, Cow::Owned(entry.projected()))),
+            Self::ContextEdit(_)
+            | Self::FormatUpgrade(_)
+            | Self::CompactionStarted(_)
+            | Self::Compaction(_)
+            | Self::CompactionFailed(_)
+            | Self::RequestConfig(_)
+            | Self::RequestStarted(_)
+            | Self::ToolCallStarted(_)
+            | Self::Custom(_) => None,
+        }
+    }
+
     /// When the entry was appended, in milliseconds since the Unix epoch.
     pub fn timestamp(&self) -> u64 {
         match self {
@@ -385,8 +405,7 @@ impl SessionStore {
         Ok(store)
     }
 
-    /// Create a new session file. Fails if the file exists. Unlike pi, the header is written
-    /// immediately, so even a run that crashes before the first answer leaves a record.
+    /// Create a new session file, with its header written at once. Fails if the file exists.
     /// On Unix the file stays locked while the store exists; see [`SessionStore::open`].
     pub fn create(path: &Path, header: SessionHeader) -> Result<Self> {
         let file = JsonlFile::create(path, &header)?;
@@ -462,19 +481,7 @@ impl SessionStore {
     pub(crate) fn messages_since(&self, from: usize) -> Vec<Message> {
         let added: HashSet<&str> = self.entries[from..]
             .iter()
-            .filter_map(|entry| match entry {
-                Entry::Message(message) => Some(message.id.as_str()),
-                Entry::CustomMessage(message) => Some(message.id.as_str()),
-                Entry::ContextEdit(_)
-                | Entry::FormatUpgrade(_)
-                | Entry::CompactionStarted(_)
-                | Entry::Compaction(_)
-                | Entry::CompactionFailed(_)
-                | Entry::RequestConfig(_)
-                | Entry::RequestStarted(_)
-                | Entry::ToolCallStarted(_)
-                | Entry::Custom(_) => None,
-            })
+            .filter_map(|entry| entry.projected().map(|(id, _)| id))
             .collect();
         self.projection()
             .into_iter()
@@ -506,8 +513,10 @@ impl SessionStore {
 
     /// Omit (`None`) or replace the text of a message on the current branch, for future
     /// model context only. The target keeps its original content in the log.
-    /// System and synthetic summary messages cannot be edited directly. Editing a
-    /// summary's original evidence invalidates it and restores the original projection.
+    /// System and synthetic summary messages cannot be edited directly. Editing a record that
+    /// a summary read corrects its evidence: a full summary is then invalid as a whole and
+    /// the originals are projected again, while an incremental summary loses only the facts
+    /// that cite the record.
     pub async fn append_context_edit(&mut self, target_id: &str, replacement: Option<String>) -> Result<String> {
         let entry = Entry::ContextEdit(ContextEditEntry {
             id: self.new_id(),
@@ -815,7 +824,7 @@ impl SessionStore {
 
     /// Append a format upgrade before the first record that needs `version`.
     /// The header is never rewritten.
-    pub(super) async fn ensure_format(&mut self, version: u32) -> Result<()> {
+    async fn ensure_format(&mut self, version: u32) -> Result<()> {
         if self.format_version < version {
             self.append(Entry::FormatUpgrade(FormatUpgradeEntry {
                 id: self.new_id(),
@@ -1056,6 +1065,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(clippy::too_many_lines, reason = "one entry of every kind")]
     async fn records_carry_the_serialized_type_of_every_entry_kind() {
         let (sender, records) = mpsc::channel();
         let mut old = header();

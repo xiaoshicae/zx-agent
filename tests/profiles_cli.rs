@@ -10,7 +10,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use common::mock_server::{MockServer, Reply};
-use common::{stderr, zx_agent};
+use common::{json_lines, stderr, stdout, zx_agent};
 use zx_agent::ai::Message;
 use zx_agent::session::SessionStore;
 
@@ -48,18 +48,11 @@ async fn run(server: &MockServer, dir: &Path, args: &[&str]) -> Output {
 }
 
 fn system(server: &MockServer, index: usize) -> String {
-    server.requests()[index].body["messages"][0]["content"]
-        .as_str()
-        .unwrap()
-        .into()
+    server.requests()[index].system_text()
 }
+
 fn tool_result(server: &MockServer, index: usize) -> String {
-    server.requests()[index].body["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|message| message["role"] == "tool")
-        .unwrap()["content"]
+    server.requests()[index].tool_results()[0]["content"]
         .as_str()
         .unwrap()
         .into()
@@ -330,7 +323,7 @@ async fn an_explicit_cli_value_equal_to_the_old_default_still_overrides_the_file
     .await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(server.requests().len(), 2);
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "first\nsecond\n");
+    assert_eq!(stdout(&output), "first\nsecond\n");
 }
 
 #[tokio::test]
@@ -656,10 +649,7 @@ async fn chat_uses_the_profile_turn_budget() {
         .unwrap()
         .unwrap();
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    let reports: Vec<Value> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
+    let reports: Vec<Value> = json_lines(&stdout(&output));
     assert!(
         reports
             .iter()

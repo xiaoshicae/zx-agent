@@ -3,42 +3,41 @@
 //! Socket Mode needs no public URL: the channel opens a WebSocket to Slack and acknowledges
 //! each envelope before handling it (docs/serve-im-review.md, sections 3.4 and 9.1).
 
+mod events;
+
 use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
 use reqwest::StatusCode;
-use reqwest::header::RETRY_AFTER;
+use reqwest::header::{HeaderMap, RETRY_AFTER};
 use serde_json::{Map, Value, json};
 use tokio::sync::mpsc;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{Bytes, Message};
 use tokio_util::sync::CancellationToken;
 use zx_im::{
-    ApprovalId, CardLabels, Cards, Choice, ConversationId, Destination, ErrorReport, ImChannel, ImError, Inbound,
-    MessageId, MessageRef, Outbound, Pacer, Seen, ThreadId, UserId, split_text,
+    Backoff, CARD_CAPACITY, CardLabels, Cards, Destination, ErrorReport, ImChannel, ImError, Inbound, Keepalive,
+    MAX_TEXT_CHARS, MessageId, MessageRef, Outbound, Pacer, RATE_LIMIT_RETRIES, SEEN_CAPACITY, Seen,
+    card_update_refused,
 };
 
+use events::{button, card_request, decisions, escape, message, resolution, section, split};
+
 /// Where the Web API lives.
-pub const DEFAULT_API_BASE: &str = "https://slack.com/api";
+const DEFAULT_API_BASE: &str = "https://slack.com/api";
 const PLATFORM: &str = "slack";
+/// Keepalive pings over the Socket Mode connection, by default: often enough to notice a
+/// connection that died within half a minute, rare enough to cost nothing.
+const DEFAULT_PING_INTERVAL: Duration = Duration::from_secs(10);
+/// Longest wait a `Retry-After` is given: Slack's rate limits are per minute (Rate limits,
+/// "Tiers"), so a longer value is more likely a bad header than a real wait; a send that
+/// waits is dropped by the server's outbound timeout, a connection attempt by the stop.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 /// `action_id`s of the two card buttons; their `value` is the approval ID.
 const ALLOW_ACTION: &str = "zx_allow_once";
 const DENY_ACTION: &str = "zx_deny";
-/// Messages remembered to drop redeliveries. Slack redelivers an event only for a short
-/// while, and this covers far more messages than arrive in that time.
-const SEEN_CAPACITY: usize = 1024;
-/// Waits between reconnection attempts, doubling up to the maximum.
-const RECONNECT_MIN: Duration = Duration::from_secs(1);
-const RECONNECT_MAX: Duration = Duration::from_secs(60);
-/// A rate-limited call is retried this many times after waiting as told.
-const MAX_RATE_LIMIT_RETRIES: u32 = 3;
-/// Characters per posted message; longer text is split. Slack recommends keeping message
-/// text within 4,000 characters (chat.postMessage, "Truncating content").
-const MAX_TEXT_CHARS: usize = 4000;
 /// Characters of a section block's text (Block Kit section block).
 const MAX_SECTION_CHARS: usize = 3000;
-/// Cards remembered so that closing one keeps the request it showed.
-const CARD_CAPACITY: usize = 256;
 /// Method errors that retrying cannot fix: the token or the app's setup is wrong.
 const SETUP_ERRORS: [&str; 9] = [
     "invalid_auth",
@@ -58,13 +57,17 @@ pub struct SlackConfig {
     pub app_token: String,
     /// Bot token (`xoxb-`) for posting.
     pub bot_token: String,
-    /// Web API base URL, [`DEFAULT_API_BASE`] unless a proxy or a test server is used.
+    /// Web API base URL: `https://slack.com/api` unless a proxy or a test server is used.
     pub api_base: String,
     /// Limit for each Web API call and for opening the WebSocket.
     pub request_timeout: Duration,
     /// Least time between two posts to one chat: Slack generally allows one message per
     /// second per channel (chat.postMessage, "Rate limiting").
     pub post_interval: Duration,
+    /// Time between two keepalive pings over the Socket Mode connection; a connection that
+    /// answers nothing for twice this, plus a margin, is taken as lost and opened again.
+    /// Ten seconds by default.
+    pub ping_interval: Duration,
     pub labels: CardLabels,
     /// Called with each failed attempt to connect, before the channel waits and tries
     /// again, so that an operator can see a platform that cannot be reached.
@@ -72,6 +75,7 @@ pub struct SlackConfig {
 }
 
 impl SlackConfig {
+    /// Settings for an app with these tokens, and the defaults of every other field.
     pub fn new(app_token: String, bot_token: String) -> Self {
         Self {
             app_token,
@@ -79,6 +83,7 @@ impl SlackConfig {
             api_base: DEFAULT_API_BASE.into(),
             request_timeout: Duration::from_secs(30),
             post_interval: Duration::from_secs(1),
+            ping_interval: DEFAULT_PING_INTERVAL,
             labels: CardLabels::default(),
             on_error: None,
         }
@@ -97,6 +102,7 @@ pub struct SlackChannel {
 type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 impl SlackChannel {
+    /// A channel for `config`. Fails when the HTTP client cannot be built.
     pub fn new(config: SlackConfig) -> Result<Self, ImError> {
         let http = reqwest::Client::builder()
             .timeout(config.request_timeout)
@@ -126,9 +132,9 @@ impl SlackChannel {
                 .await
                 .map_err(|error| ImError::Transport(format!("slack {method}: {error}")))?;
             let status = response.status();
-            if status == StatusCode::TOO_MANY_REQUESTS && retries < MAX_RATE_LIMIT_RETRIES {
+            if status == StatusCode::TOO_MANY_REQUESTS && retries < RATE_LIMIT_RETRIES {
                 retries += 1;
-                tokio::time::sleep(retry_after(&response)).await;
+                tokio::time::sleep(retry_after(response.headers())).await;
                 continue;
             }
             let answer: Value = response
@@ -144,6 +150,20 @@ impl SlackChannel {
             } else {
                 ImError::Transport(format!("slack {method}: {error}"))
             });
+        }
+    }
+
+    /// A Web API call without a body, given up when `cancel` is triggered: `None`.
+    async fn call_unless_cancelled(
+        &self,
+        method: &str,
+        token: &str,
+        cancel: &CancellationToken,
+    ) -> Option<Result<Value, ImError>> {
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => None,
+            answer = self.call(method, token, None) => Some(answer),
         }
     }
 
@@ -219,6 +239,7 @@ impl SlackChannel {
         let Some(mut socket) = self.open_socket(url).await else {
             return Ended::Failed;
         };
+        let mut keepalive = Keepalive::new(self.config.ping_interval);
         loop {
             let frame = tokio::select! {
                 () = cancel.cancelled() => {
@@ -226,34 +247,33 @@ impl SlackChannel {
                     socket.close(None).await.ok();
                     return Ended::Cancelled;
                 }
+                () = tokio::time::sleep_until(keepalive.next_ping()) => {
+                    if socket.send(Message::Ping(Bytes::new())).await.is_err() {
+                        return Ended::Lost;
+                    }
+                    keepalive.pinged();
+                    continue;
+                }
+                () = tokio::time::sleep_until(keepalive.deadline()) => return Ended::Silent(keepalive.silence()),
                 frame = socket.next() => frame,
             };
+            keepalive.alive();
             let text = match frame {
                 Some(Ok(Message::Text(text))) => text,
-                // tungstenite answers pings itself; Slack sends no binary frames.
+                // tungstenite answers pings itself, and the pongs answer ours; Slack sends no
+                // binary frames.
                 Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Binary(_) | Message::Frame(_))) => continue,
                 Some(Ok(Message::Close(_)) | Err(_)) | None => return Ended::Lost,
             };
-            let Ok(frame) = serde_json::from_str::<Value>(&text) else {
+            let Some(frame) = self.frame_of(&text) else {
                 continue;
             };
-            // Acknowledge first: Slack redelivers what is not acknowledged in time.
-            if let Some(envelope) = frame["envelope_id"].as_str() {
-                let ack = json!({ "envelope_id": envelope }).to_string();
-                if socket.send(Message::text(ack)).await.is_err() {
-                    return Ended::Lost;
-                }
+            if let Err(ended) = acknowledge(&mut socket, &frame).await {
+                return ended;
             }
-            let events = match frame["type"].as_str() {
-                Some("disconnect") => return Ended::Lost,
-                Some("events_api") => message(&frame["payload"], bot)
-                    .filter(|(key, _)| seen.insert(key))
-                    .map(|(_, event)| event)
-                    .into_iter()
-                    .collect(),
-                Some("interactive") => decisions(&frame["payload"]),
-                // hello, and envelope types this bot does not subscribe to.
-                _ => Vec::new(),
+            let events = match envelope(&frame, bot, seen) {
+                Envelope::Disconnect => return Ended::Lost,
+                Envelope::Events(events) => events,
             };
             for event in events {
                 if inbound.send(event).await.is_err() {
@@ -263,14 +283,72 @@ impl SlackChannel {
             }
         }
     }
+
+    /// `text` as a JSON frame; one that is not is reported and dropped.
+    fn frame_of(&self, text: &str) -> Option<Value> {
+        match serde_json::from_str(text) {
+            Ok(frame) => Some(frame),
+            Err(error) => {
+                self.report(&ImError::Transport(format!(
+                    "slack: a Socket Mode frame is not JSON: {error}"
+                )));
+                None
+            }
+        }
+    }
+}
+
+/// Acknowledge the envelope of `frame`, if it has one. Slack redelivers what is not
+/// acknowledged in time, so this comes before any handling.
+async fn acknowledge(socket: &mut Socket, frame: &Value) -> Result<(), Ended> {
+    if let Some(id) = frame["envelope_id"].as_str() {
+        let ack = json!({ "envelope_id": id }).to_string();
+        socket.send(Message::text(ack)).await.map_err(|_| Ended::Lost)?;
+    }
+    Ok(())
+}
+
+/// The address in the answer of `apps.connections.open`.
+fn connection_url(answer: &Value) -> Result<String, ImError> {
+    answer["url"]
+        .as_str()
+        .map(String::from)
+        .ok_or_else(|| ImError::Transport("slack apps.connections.open: no url in the answer".into()))
 }
 
 enum Ended {
     Cancelled,
     /// Slack asked to reconnect, or the connection dropped.
     Lost,
+    /// Nothing came over the connection for this long, not even answers to the pings.
+    Silent(Duration),
     /// The WebSocket could not be opened.
     Failed,
+}
+
+/// What a Socket Mode envelope asks for.
+enum Envelope {
+    /// Slack closes the connection soon; another is to be opened.
+    Disconnect,
+    /// The messages and clicks to pass on: none for `hello`, and for envelope types this bot
+    /// does not subscribe to.
+    Events(Vec<Inbound>),
+}
+
+/// What `frame` asks for; a redelivered message is left out.
+fn envelope(frame: &Value, bot: Option<&str>, seen: &mut Seen<(String, String)>) -> Envelope {
+    match frame["type"].as_str() {
+        Some("disconnect") => Envelope::Disconnect,
+        Some("events_api") => Envelope::Events(
+            message(&frame["payload"], bot)
+                .filter(|(key, _)| seen.insert(key))
+                .map(|(_, event)| event)
+                .into_iter()
+                .collect(),
+        ),
+        Some("interactive") => Envelope::Events(decisions(&frame["payload"])),
+        _ => Envelope::Events(Vec::new()),
+    }
 }
 
 #[async_trait]
@@ -280,15 +358,19 @@ impl ImChannel for SlackChannel {
     }
 
     async fn run(&self, inbound: mpsc::Sender<Inbound>, cancel: &CancellationToken) -> Result<(), ImError> {
-        let mut backoff = RECONNECT_MIN;
+        let mut backoff = Backoff::default();
         // The bot's own user ID tells its messages apart; asking also checks the bot token.
         let bot = loop {
-            match self.call("auth.test", &self.config.bot_token, None).await {
-                Ok(answer) => break answer["user_id"].as_str().map(String::from),
-                Err(error @ ImError::Config(_)) => return Err(error),
-                Err(error @ ImError::Transport(_)) => {
+            match self
+                .call_unless_cancelled("auth.test", &self.config.bot_token, cancel)
+                .await
+            {
+                None => return Ok(()),
+                Some(Ok(answer)) => break answer["user_id"].as_str().map(String::from),
+                Some(Err(error @ ImError::Config(_))) => return Err(error),
+                Some(Err(error @ ImError::Transport(_))) => {
                     self.report(&error);
-                    if !pause(&mut backoff, cancel).await {
+                    if !backoff.wait(cancel).await {
                         return Ok(());
                     }
                 }
@@ -296,13 +378,14 @@ impl ImChannel for SlackChannel {
         };
         let mut seen = Seen::new(SEEN_CAPACITY);
         loop {
-            if cancel.is_cancelled() {
-                return Ok(());
-            }
-            let url = match self.call("apps.connections.open", &self.config.app_token, None).await {
-                Ok(answer) => answer["url"].as_str().map(String::from),
-                Err(error @ ImError::Config(_)) => return Err(error),
-                Err(error @ ImError::Transport(_)) => {
+            let opened = self
+                .call_unless_cancelled("apps.connections.open", &self.config.app_token, cancel)
+                .await;
+            let url = match opened.map(|answer| answer.and_then(|answer| connection_url(&answer))) {
+                None => return Ok(()),
+                Some(Ok(url)) => Some(url),
+                Some(Err(error @ ImError::Config(_))) => return Err(error),
+                Some(Err(error @ ImError::Transport(_))) => {
                     self.report(&error);
                     None
                 }
@@ -314,9 +397,16 @@ impl ImChannel for SlackChannel {
             match ended {
                 Ended::Cancelled => return Ok(()),
                 // Slack refreshes connections every few hours; reconnect at once.
-                Ended::Lost => backoff = RECONNECT_MIN,
+                Ended::Lost => backoff.reset(),
+                Ended::Silent(silence) => {
+                    self.report(&ImError::Transport(format!(
+                        "slack: the Socket Mode connection was silent for {} s; opening it again",
+                        silence.as_secs()
+                    )));
+                    backoff.reset();
+                }
                 Ended::Failed => {
-                    if !pause(&mut backoff, cancel).await {
+                    if !backoff.wait(cancel).await {
                         return Ok(());
                     }
                 }
@@ -327,16 +417,12 @@ impl ImChannel for SlackChannel {
     async fn send(&self, to: &Destination, message: &Outbound) -> Result<MessageRef, ImError> {
         match message {
             Outbound::Text(text) => {
-                let mut parts = split(text, MAX_TEXT_CHARS).into_iter();
-                let first = parts.next().unwrap_or_default();
+                let (first, rest) = split(text, MAX_TEXT_CHARS);
                 let posted = self.post(to, &first, None).await?;
                 // The rest go to the same thread, which a first post in the chat itself starts.
-                let rest_to = Destination {
-                    conversation: to.conversation.clone(),
-                    thread: Some(to.thread.clone().unwrap_or_else(|| ThreadId(posted.id.0.clone()))),
-                };
-                for part in parts {
-                    self.post(&rest_to, &part, None).await?;
+                let thread = posted.thread();
+                for part in &rest {
+                    self.post(&thread, part, None).await?;
                 }
                 Ok(posted)
             }
@@ -369,8 +455,8 @@ impl ImChannel for SlackChannel {
                 self.cards.remember(&posted.id, request);
                 Ok(posted)
             }
-            Outbound::ApprovalResolved { .. } => {
-                let text = resolution(&self.config.labels, message);
+            Outbound::ApprovalResolved { user, result, .. } => {
+                let text = resolution(&self.config.labels, user.as_ref(), *result);
                 self.post(to, &text, None).await
             }
         }
@@ -379,29 +465,17 @@ impl ImChannel for SlackChannel {
     async fn update(&self, posted: &MessageRef, message: &Outbound) -> Result<(), ImError> {
         match message {
             Outbound::Text(text) => {
-                let mut parts = split(text, MAX_TEXT_CHARS).into_iter();
-                let first = parts.next().unwrap_or_default();
+                let (first, rest) = split(text, MAX_TEXT_CHARS);
                 self.edit(posted, &first, None).await?;
-                let thread = Destination {
-                    conversation: posted.at.conversation.clone(),
-                    thread: Some(
-                        posted
-                            .at
-                            .thread
-                            .clone()
-                            .unwrap_or_else(|| ThreadId(posted.id.0.clone())),
-                    ),
-                };
-                for part in parts {
-                    self.post(&thread, &part, None).await?;
+                let thread = posted.thread();
+                for part in &rest {
+                    self.post(&thread, part, None).await?;
                 }
                 Ok(())
             }
-            Outbound::ApprovalRequest { .. } => Err(ImError::Transport(
-                "an approval request is posted, not written over a message".into(),
-            )),
-            Outbound::ApprovalResolved { .. } => {
-                let result = resolution(&self.config.labels, message);
+            Outbound::ApprovalRequest { .. } => Err(card_update_refused()),
+            Outbound::ApprovalResolved { user, result, .. } => {
+                let result = resolution(&self.config.labels, user.as_ref(), *result);
                 let mut blocks = Vec::new();
                 if let Some(request) = self.cards.forget(&posted.id) {
                     blocks.push(section(&request));
@@ -413,244 +487,20 @@ impl ImChannel for SlackChannel {
     }
 }
 
-/// Wait out the current backoff, doubling it. Returns false when cancelled meanwhile.
-async fn pause(backoff: &mut Duration, cancel: &CancellationToken) -> bool {
-    let wait = *backoff;
-    *backoff = (*backoff * 2).min(RECONNECT_MAX);
-    tokio::select! {
-        () = cancel.cancelled() => false,
-        () = tokio::time::sleep(wait) => true,
-    }
-}
-
-/// The wait a 429 asks for; one second when the header is missing or unreadable.
-fn retry_after(response: &reqwest::Response) -> Duration {
-    let secs = response
-        .headers()
+/// The wait a 429 asks for in `headers`: one second when `Retry-After` is missing or
+/// unreadable, at most [`MAX_RETRY_AFTER`].
+fn retry_after(headers: &HeaderMap) -> Duration {
+    let secs = headers
         .get(RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.trim().parse().ok())
         .unwrap_or(1);
-    Duration::from_secs(secs)
-}
-
-/// A message addressed to the bot, with the key that identifies it among redeliveries.
-fn message(payload: &Value, bot: Option<&str>) -> Option<((String, String), Inbound)> {
-    // Socket Mode payloads are "identical to the typical Events API payloads", which wrap the
-    // event; the page's own example shows the bare event, so both are accepted.
-    let event = if payload["event"].is_object() {
-        &payload["event"]
-    } else {
-        payload
-    };
-    let addressed = match event["type"].as_str() {
-        Some("app_mention") => true,
-        Some("message") => event["channel_type"] == "im",
-        _ => false,
-    };
-    // Edits, deletions and joins carry a subtype; the bot's own posts carry a bot_id.
-    if !addressed || event.get("subtype").is_some() || event.get("bot_id").is_some() {
-        return None;
-    }
-    let user = event["user"].as_str()?;
-    if Some(user) == bot {
-        return None;
-    }
-    let channel = event["channel"].as_str()?;
-    let ts = event["ts"].as_str()?;
-    let text = unescape(&without_mention(event["text"].as_str().unwrap_or_default(), bot));
-    let inbound = Inbound::Message {
-        id: MessageId(ts.into()),
-        at: Destination {
-            conversation: ConversationId(channel.into()),
-            thread: event["thread_ts"].as_str().map(|ts| ThreadId(ts.into())),
-        },
-        sender: UserId(user.into()),
-        text,
-    };
-    Some(((channel.into(), ts.into()), inbound))
-}
-
-/// Clicks on the card buttons of a `block_actions` payload.
-fn decisions(payload: &Value) -> Vec<Inbound> {
-    if payload["type"] != "block_actions" {
-        return Vec::new();
-    }
-    let (Some(user), Some(channel)) = (
-        payload["user"]["id"].as_str(),
-        payload["channel"]["id"]
-            .as_str()
-            .or_else(|| payload["container"]["channel_id"].as_str()),
-    ) else {
-        return Vec::new();
-    };
-    // Older cards, or other senders, may leave the thread out of the value.
-    let fallback = payload["message"]["thread_ts"]
-        .as_str()
-        .or_else(|| payload["container"]["thread_ts"].as_str());
-    let actions = payload["actions"].as_array().map(Vec::as_slice).unwrap_or_default();
-    actions
-        .iter()
-        .filter_map(|action| {
-            let choice = match action["action_id"].as_str()? {
-                ALLOW_ACTION => Choice::AllowOnce,
-                DENY_ACTION => Choice::Deny,
-                _ => return None,
-            };
-            let value = action["value"].as_str()?;
-            let (thread, approval) = match value.split_once('/') {
-                Some((thread, approval)) => (Some(thread), approval),
-                None => (fallback, value),
-            };
-            Some(Inbound::Decision {
-                at: Destination {
-                    conversation: ConversationId(channel.into()),
-                    thread: thread.map(|ts| ThreadId(ts.into())),
-                },
-                user: UserId(user.into()),
-                approval: ApprovalId(approval.into()),
-                choice,
-            })
-        })
-        .collect()
-}
-
-/// The text with mentions of the bot removed.
-fn without_mention(text: &str, bot: Option<&str>) -> String {
-    match bot {
-        Some(bot) => text.replace(&format!("<@{bot}>"), "").trim().to_string(),
-        None => text.trim().to_string(),
-    }
-}
-
-/// Slack writes `&`, `<` and `>` as entities in message text.
-fn unescape(text: &str) -> String {
-    text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
-}
-
-/// `&`, `<` and `>` as entities, so that text is never read as a mention or a link.
-fn escape(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for c in text.chars() {
-        push_escaped(&mut escaped, c);
-    }
-    escaped
-}
-
-fn push_escaped(out: &mut String, c: char) {
-    match c {
-        '&' => out.push_str("&amp;"),
-        '<' => out.push_str("&lt;"),
-        '>' => out.push_str("&gt;"),
-        c => out.push(c),
-    }
-}
-
-/// Escaped text in parts of at most `max` characters, never cut inside an entity.
-fn split(text: &str, max: usize) -> Vec<String> {
-    split_text(text, max, push_escaped)
-}
-
-/// The escaped request shown on a card, within the length of a section block.
-fn card_request(labels: &CardLabels, tool: &str, summary: &str, reason: &str) -> String {
-    let head = format!("*{}*: `{}`\n```", escape(&labels.title), escape(tool));
-    let tail = format!("```\n{}: {}", escape(&labels.reason), escape(reason));
-    let room = MAX_SECTION_CHARS.saturating_sub(head.chars().count() + tail.chars().count() + 1);
-    let mut parts = split(summary, room).into_iter();
-    let mut summary = parts.next().unwrap_or_default();
-    // A part ends before the room does when the next entity would not fit, so whether the
-    // request was cut shows in the parts left, not in this part's length.
-    if parts.next().is_some() {
-        summary.push('…');
-    }
-    format!("{head}{summary}{tail}")
-}
-
-fn section(text: &str) -> Value {
-    json!({"type": "section", "text": {"type": "mrkdwn", "text": text}})
-}
-
-fn button(label: &str, action: &str, value: &str, style: &str) -> Value {
-    json!({
-        "type": "button",
-        "text": {"type": "plain_text", "text": label},
-        "action_id": action,
-        "value": value,
-        "style": style,
-    })
-}
-
-/// The escaped result line of a closed card: what happened, and a mention of who decided.
-fn resolution(labels: &CardLabels, message: &Outbound) -> String {
-    let Outbound::ApprovalResolved { user, result, .. } = message else {
-        return String::new();
-    };
-    let what = labels.outcome(*result);
-    // The mention is markup and stays as it is; only the label is text.
-    match user {
-        Some(user) => format!("{} (<@{user}>)", escape(what)),
-        None => escape(what),
-    }
+    Duration::from_secs(secs).min(MAX_RETRY_AFTER)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn text_is_escaped_and_split_without_breaking_an_entity() {
-        assert_eq!(escape("a < b && c > d"), "a &lt; b &amp;&amp; c &gt; d");
-        assert_eq!(split("ab<cd", 4), ["ab", "&lt;", "cd"]);
-        assert_eq!(split("", 10), [""]);
-    }
-
-    #[test]
-    fn a_split_prefers_the_last_line_break_of_the_part() {
-        assert_eq!(split("aaaa\nbbbb", 7), ["aaaa\n", "bbbb"]);
-        // A line break in the first half would leave too short a part; the cut is hard.
-        assert_eq!(split("a\nbbbbbbb", 6), ["a\nbbbb", "bbb"]);
-    }
-
-    #[test]
-    fn a_split_counts_characters_not_bytes() {
-        assert_eq!(split("界界界", 2), ["界界", "界"]);
-    }
-
-    #[test]
-    fn incoming_entities_are_restored() {
-        assert_eq!(unescape("a &lt; b &amp;&amp; c &gt; d"), "a < b && c > d");
-    }
-
-    #[test]
-    fn the_bot_mention_is_removed() {
-        assert_eq!(without_mention("<@UBOT> check <@U2>", Some("UBOT")), "check <@U2>");
-    }
-
-    #[test]
-    fn a_cut_request_ends_with_an_ellipsis_when_an_entity_ends_its_part_early() {
-        // The room for the request here (2974) is no multiple of the four characters of
-        // `&lt;`, so the part that fits ends two characters before the room does.
-        let labels = CardLabels {
-            title: "T".into(),
-            reason: "R".into(),
-            ..CardLabels::default()
-        };
-        let request = card_request(&labels, "bash", &"<".repeat(5000), "why");
-        assert!(request.chars().count() <= MAX_SECTION_CHARS);
-        assert!(request.contains("&lt;…```"), "{request}");
-        assert!(!card_request(&labels, "bash", "ls -l", "why").contains('…'));
-    }
-
-    #[test]
-    fn a_long_request_fits_in_a_section() {
-        let request = card_request(&CardLabels::default(), "bash", &"<".repeat(5000), "why");
-        assert!(
-            request.chars().count() <= MAX_SECTION_CHARS,
-            "{}",
-            request.chars().count()
-        );
-        assert!(request.contains("…"));
-    }
 
     #[test]
     fn seen_messages_are_dropped_and_old_ones_forgotten() {
@@ -662,5 +512,19 @@ mod tests {
             assert!(seen.insert(&key(n)));
         }
         assert!(seen.insert(&key(0)), "the oldest key is forgotten");
+    }
+
+    #[test]
+    fn a_retry_after_is_capped_and_defaults_to_one_second() {
+        use reqwest::header::HeaderValue;
+
+        let mut headers = HeaderMap::new();
+        assert_eq!(retry_after(&headers), Duration::from_secs(1));
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("soon"));
+        assert_eq!(retry_after(&headers), Duration::from_secs(1));
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("5"));
+        assert_eq!(retry_after(&headers), Duration::from_secs(5));
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("100000"));
+        assert_eq!(retry_after(&headers), MAX_RETRY_AFTER);
     }
 }

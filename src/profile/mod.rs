@@ -1,4 +1,4 @@
-//! File-based scene configuration, outside the agent loop. Loading is synchronous,
+//! File-based scenario configuration, outside the agent loop. Loading is synchronous,
 //! bounded startup I/O; tool and frontend assembly remains the caller's responsibility.
 
 mod context;
@@ -12,7 +12,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 
 use file::RawProfile;
-pub use file::read_text;
+use file::read_text;
 use skills::Skill;
 
 use crate::ai::ModelMeta;
@@ -24,7 +24,7 @@ use crate::tools::BUILTIN_TOOL_NAMES;
 use crate::{compaction, output_store};
 
 /// Maximum size of a profile, instructions, context file or skill body.
-pub const MAX_FILE_BYTES: u64 = 64 * 1024;
+const MAX_FILE_BYTES: u64 = 64 * 1024;
 
 /// Embedded baseline; custom profiles may extend one of these, never arbitrary files.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -48,7 +48,7 @@ struct Source {
 
 impl Builtin {
     /// Every embedded profile.
-    pub const ALL: [Builtin; 3] = [Self::Unattended, Self::Troubleshoot, Self::Assistant];
+    const ALL: [Builtin; 3] = [Self::Unattended, Self::Troubleshoot, Self::Assistant];
 
     /// The name `--profile` and `extends` select it by.
     pub fn name(self) -> &'static str {
@@ -186,11 +186,11 @@ pub struct ContainerSettings {
     pub root: Option<Access>,
 }
 
-/// Fully layered scene configuration. CLI overrides are applied by the frontend;
+/// Fully layered scenario configuration. CLI overrides are applied by the frontend;
 /// callers must keep deny rules additive and call `validate` before assembly.
 #[derive(Debug)]
 pub struct Profile {
-    /// Human-readable scene name.
+    /// Human-readable scenario name.
     pub name: String,
     /// Effective preamble, before generated machine and project sections.
     pub instructions: String,
@@ -345,7 +345,7 @@ impl Profile {
             );
         }
         self.compaction.validate()?;
-        self.tool_output.validate()?;
+        self.tool_output.validate().context("[toolOutput]")?;
         for (key, value) in [
             ("container.image", &self.container.image),
             ("container.user", &self.container.user),
@@ -366,7 +366,7 @@ impl Profile {
         }
         ensure!(
             self.execution == Execution::Local || self.container.image.is_some(),
-            "execution = \"container\" needs container.image (or --container-image)"
+            "execution = \"container\" needs container.image"
         );
         if self.rules.approve_all {
             ensure!(
@@ -448,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn embedded_profiles_preserve_the_existing_scene_defaults() {
+    fn embedded_profiles_preserve_the_existing_scenario_defaults() {
         for (selector, instructions) in [
             ("unattended", include_str!("../../profiles/unattended.md")),
             ("troubleshoot", include_str!("../../profiles/troubleshoot.md")),

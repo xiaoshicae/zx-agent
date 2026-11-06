@@ -33,7 +33,7 @@ fn script(task: &Task) -> Vec<Reply> {
             Reply::tool_call(
                 "c1",
                 "edit_file",
-                json!({"path": "greeting.txt", "edits": [{"oldText": "Helo", "newText": "Hello"}]}),
+                &json!({"path": "greeting.txt", "edits": [{"oldText": "Helo", "newText": "Hello"}]}),
             ),
             Reply::text("Fixed the typo.\nDONE"),
         ],
@@ -98,6 +98,10 @@ fn the_plan_alternates_the_variants_between_runs() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "a scripted evaluation: the runs, then the report and the artifacts"
+)]
 async fn paired_runs_through_the_binary_report_the_lift_and_keep_the_artifacts() {
     let dir = tempfile::tempdir().unwrap();
     let artifacts = Artifacts::create(dir.path());

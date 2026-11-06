@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::truncate::{MAX_BYTES, MAX_LINES, truncate_head};
-use super::{looks_binary, parse_args, resolve, unless_cancelled};
+use super::{DEFAULT_MAX_FILE_BYTES, looks_binary, parse_args, resolve, unless_cancelled};
 use crate::agent::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
 use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
@@ -24,7 +24,7 @@ pub struct ReadFileTool {
 impl Default for ReadFileTool {
     fn default() -> Self {
         Self {
-            max_file_bytes: 10 * 1024 * 1024,
+            max_file_bytes: DEFAULT_MAX_FILE_BYTES,
             executor: Arc::new(LocalExecutor),
         }
     }
@@ -88,7 +88,10 @@ impl Tool for ReadFileTool {
         let read = unless_cancelled(ctx, self.executor.read_file(&path, self.max_file_bytes)).await;
         let bytes = read.ok_or_else(|| "read cancelled".to_string())??;
         if looks_binary(&bytes) {
-            return Err(format!("{} looks like a binary file", path.display()));
+            return Err(format!(
+                "{} looks like a binary file; use bash with `file`, `xxd` or `strings` to inspect it",
+                path.display()
+            ));
         }
 
         let text = String::from_utf8_lossy(&bytes);

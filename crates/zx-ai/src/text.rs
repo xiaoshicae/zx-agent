@@ -21,6 +21,17 @@ pub fn prefix_within(text: &str, max_bytes: usize) -> &str {
     &text[..end]
 }
 
+/// `text` when it fits in `max_bytes`, else its longest start that does, ending on a
+/// character boundary, followed by the note `note` gives for the bytes kept and the bytes in
+/// all.
+pub fn prefix_noted(text: &str, max_bytes: usize, note: impl FnOnce(usize, usize) -> String) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let kept = prefix_within(text, max_bytes);
+    format!("{kept}{}", note(kept.len(), text.len()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -37,5 +48,12 @@ mod tests {
         // "界" is three bytes: four bytes hold one of them, not one and a third.
         assert_eq!(prefix_within("界界", 4), "界");
         assert_eq!(prefix_within("界", 2), "");
+    }
+
+    #[test]
+    fn a_noted_prefix_keeps_short_text_whole_and_notes_a_cut_with_its_counts() {
+        let note = |kept: usize, total: usize| format!(" [cut at {kept} of {total} bytes]");
+        assert_eq!(prefix_noted("short", 10, note), "short");
+        assert_eq!(prefix_noted("ab中cd", 3, note), "ab [cut at 2 of 7 bytes]");
     }
 }

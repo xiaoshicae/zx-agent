@@ -167,7 +167,7 @@ pub struct Platform {
 /// The agent's own `uid:gid`, so that files written in the workspace belong to its user; nobody
 /// when the agent runs as root, since commands must not.
 #[cfg(unix)]
-pub(super) fn default_user() -> String {
+fn default_user() -> String {
     // SAFETY: getuid and getgid take no arguments, always succeed and touch no memory.
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
     if uid == 0 {
@@ -178,7 +178,7 @@ pub(super) fn default_user() -> String {
 }
 
 #[cfg(not(unix))]
-pub(super) fn default_user() -> String {
+fn default_user() -> String {
     NOBODY.into()
 }
 

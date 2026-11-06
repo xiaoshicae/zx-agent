@@ -66,23 +66,26 @@ pub struct CommandOutput {
 /// Runs commands and reads files for the built-in tools.
 #[async_trait]
 pub trait Executor: Send + Sync {
-    /// Whether calls may run at the same time. The built-in tools declare the mode of their
-    /// executor. One that handles a single call at a time is `Sequential`, so that the loop
-    /// does not start a call, and record it as started, only for it to wait for another; a
-    /// run cancelled meanwhile then reports it as not executed. Defaults to `Parallel`;
-    /// [`ContainerExecutor`] is `Sequential`. Must not panic, like [`Tool::execution_mode`].
+    /// Whether calls may run at the same time.
+    ///
+    /// The built-in tools declare the mode of their executor. One that handles a single call
+    /// at a time is `Sequential`, so that the loop does not start a call, and record it as
+    /// started, only for it to wait for another; a run cancelled meanwhile then reports it as
+    /// not executed. Defaults to `Parallel`; [`ContainerExecutor`] is `Sequential`. Must not
+    /// panic, like [`Tool::execution_mode`].
     ///
     /// [`Tool::execution_mode`]: crate::agent::Tool::execution_mode
     fn execution_mode(&self) -> ExecutionMode {
         ExecutionMode::Parallel
     }
 
-    /// Run `command` until it exits, its timeout passes, or `cancel` fires. Then, and when the
-    /// future is dropped, the processes it started are stopped, background children included.
-    /// How far that reaches depends on the executor: [`LocalExecutor`] stops the command's
-    /// process group, so a child that leaves it (`setsid`, a daemon) can keep running;
-    /// [`ContainerExecutor`] stops every process of the command user. `Err` means the command
-    /// could not start; the text is for the model.
+    /// Run `command` until it exits, its timeout passes, or `cancel` fires.
+    ///
+    /// Then, and when the future is dropped, the processes it started are stopped, background
+    /// children included. How far that reaches depends on the executor: [`LocalExecutor`]
+    /// stops the command's process group, so a child that leaves it (`setsid`, a daemon) can
+    /// keep running; [`ContainerExecutor`] stops every process of the command user. `Err`
+    /// means the command could not start; the text is for the model.
     async fn run(&self, command: &ShellCommand<'_>, cancel: &CancellationToken) -> Result<CommandOutput, String>;
 
     /// Read a regular file of at most `max_bytes`. Directories, special files and larger
@@ -103,4 +106,31 @@ pub trait Executor: Send + Sync {
             path.display()
         ))
     }
+}
+
+/// The error for `path` being a directory where a file was expected, with what the model
+/// can do instead.
+fn directory_error(path: &Path) -> String {
+    format!("{} is a directory; use bash `ls` to list it", path.display())
+}
+
+/// The error for `path` being neither a regular file nor a directory.
+fn special_file_error(path: &Path) -> String {
+    format!(
+        "{} is not a regular file; special files are not supported",
+        path.display()
+    )
+}
+
+/// Check that the `bytes` read from `path` are within `max_bytes`; the error tells the model
+/// what to use instead.
+fn check_read_within(path: &Path, bytes: &[u8], max_bytes: u64) -> Result<(), String> {
+    let read = u64::try_from(bytes.len()).map_err(|e| format!("file length is out of range: {e}"))?;
+    if read > max_bytes {
+        return Err(format!(
+            "{} is over the {max_bytes} byte limit; use bash with head, tail, or grep instead",
+            path.display()
+        ));
+    }
+    Ok(())
 }

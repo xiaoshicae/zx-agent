@@ -10,9 +10,10 @@ use crate::ai::{Message, StopReason, ToolCall, now_ms};
 
 use super::{Entry, START_RECORDS_VERSION, SessionStore};
 
-/// Written and flushed after checks and approval, immediately before a call with side
-/// effects runs. A start without a later result means that the call began and that its
-/// outcome is unknown.
+/// A tool call with side effects that is about to run.
+///
+/// Written and flushed after checks and approval, immediately before the call runs. A start
+/// without a later result means that the call began and that its outcome is unknown.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolCallStartedEntry {

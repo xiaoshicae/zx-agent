@@ -58,6 +58,39 @@ tokio-util = "0.7"
 toml = { version = "1.1.8", default-features = false, features = ["parse", "serde", "std"] }
 uuid = { version = "1", features = ["v4"] }
 
+# Lints beyond clippy's defaults; clippy runs with `-D warnings`, so each is an error. The
+# thresholds are in clippy.toml; .claude/rules/09-size-and-duplication.md says what to do
+# with a hit.
+[workspace.lints.rust]
+# `pub` only where something outside the crate can reach it.
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+# Size.
+too_many_lines = "warn"
+cognitive_complexity = "warn"
+# Numbers: no silent truncation, wrap or sign change.
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
+cast_lossless = "warn"
+# Readability.
+enum_glob_use = "warn"
+wildcard_imports = "warn"
+match_same_arms = "warn"
+uninlined_format_args = "warn"
+struct_excessive_bools = "warn"
+needless_pass_by_value = "warn"
+semicolon_if_nothing_returned = "warn"
+redundant_closure_for_method_calls = "warn"
+items_after_statements = "warn"
+map_unwrap_or = "warn"
+unreadable_literal = "warn"
+unnested_or_patterns = "warn"
+manual_let_else = "warn"
+needless_continue = "warn"
+ignored_unit_patterns = "warn"
+
 [package]
 name = "zx-agent"
 description = "Minimal general-purpose agent kernel for interactive, unattended, and embedded use, modeled on pi"
@@ -66,6 +99,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+
+[lints]
+workspace = true
 
 [lib]
 name = "zx_agent"

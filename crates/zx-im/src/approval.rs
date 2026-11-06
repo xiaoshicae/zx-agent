@@ -16,6 +16,7 @@ use crate::agent::{AgentEvent, ApprovalResult, Event, EventSink};
 use crate::ai::ToolCall;
 use crate::interaction::{Approval, ApprovalRequest, Interaction};
 
+use super::server::timed;
 use super::{
     ApprovalId, Choice, Destination, ImChannel, MessageRef, Outbound, ServerEvent, ServerSink, SessionKey, UserId,
 };
@@ -68,16 +69,12 @@ impl Interaction for ImApproval {
             summary: summarize(&request.call),
             reason: request.reason.clone(),
         };
-        let card = match tokio::time::timeout(self.outbound_timeout, self.channel.send(&self.to, &card)).await {
-            Ok(Ok(posted)) => posted,
-            Ok(Err(error)) => return Err(format!("cannot post the approval request: {error}")),
-            Err(_) => {
-                return Err(format!(
-                    "posting the approval request took longer than {} s",
-                    self.outbound_timeout.as_secs()
-                ));
-            }
-        };
+        let card = timed(
+            self.outbound_timeout,
+            "post the approval request",
+            self.channel.send(&self.to, &card),
+        )
+        .await?;
         let (decide, decided) = oneshot::channel();
         self.updates
             .send(ApprovalUpdate::Posted(Posted {
@@ -137,7 +134,9 @@ impl EventSink for ApprovalEvents {
 
 /// The command of a bash call, or the arguments of any other call, at most
 /// [`MAX_SUMMARY_CHARS`] characters long.
-pub(crate) fn summarize(call: &ToolCall) -> String {
+fn summarize(call: &ToolCall) -> String {
+    // `command` is the argument of the bash tool (`zx-tools`), which this crate cannot see:
+    // the one coupling to a tool here, so that a shell command reads as one on the card.
     let text = match call.arguments.get("command").and_then(Value::as_str) {
         Some(command) => command.to_string(),
         None => call.arguments.to_string(),

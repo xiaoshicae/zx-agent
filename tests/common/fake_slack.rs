@@ -20,7 +20,7 @@ const WAIT: Duration = Duration::from_secs(10);
 
 /// One Web API call.
 #[derive(Clone, Debug)]
-pub struct ApiCall {
+pub(crate) struct ApiCall {
     pub method: String,
     pub authorization: String,
     /// The JSON body; `Null` when the body was empty.
@@ -29,7 +29,7 @@ pub struct ApiCall {
 
 /// A scripted answer to one call of a method.
 #[derive(Clone, Debug)]
-pub enum Answer {
+pub(crate) enum Answer {
     /// `{"ok": false, "error": ...}` with status 200, as Slack answers method errors.
     Error(&'static str),
     /// Status 429 with this `Retry-After`.
@@ -38,7 +38,7 @@ pub enum Answer {
     Json(Value),
 }
 
-pub struct FakeSlack {
+pub(crate) struct FakeSlack {
     /// Pass as the channel's Web API base.
     pub api_base: String,
     calls: Arc<Mutex<Vec<ApiCall>>>,
@@ -48,7 +48,7 @@ pub struct FakeSlack {
 }
 
 impl FakeSlack {
-    pub async fn start() -> Self {
+    pub(crate) async fn start() -> Self {
         let api = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let socket_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let socket_url = format!("ws://{}/link", socket_listener.local_addr().unwrap());
@@ -91,7 +91,7 @@ impl FakeSlack {
     }
 
     /// Answer the next calls of `method` this way, in order, before answering normally.
-    pub fn script(&self, method: &str, answers: Vec<Answer>) {
+    pub(crate) fn script(&self, method: &str, answers: Vec<Answer>) {
         self.scripted
             .lock()
             .unwrap()
@@ -101,14 +101,14 @@ impl FakeSlack {
     }
 
     /// The next Socket Mode connection.
-    pub async fn socket(&mut self) -> Socket {
+    pub(crate) async fn socket(&mut self) -> Socket {
         tokio::time::timeout(WAIT, self.sockets.recv())
             .await
             .expect("the channel did not connect in time")
             .expect("the listener is alive")
     }
 
-    pub fn calls(&self, method: &str) -> Vec<ApiCall> {
+    pub(crate) fn calls(&self, method: &str) -> Vec<ApiCall> {
         self.calls
             .lock()
             .unwrap()
@@ -119,7 +119,7 @@ impl FakeSlack {
     }
 
     /// Wait until `method` was called at least `count` times, and return its calls.
-    pub async fn wait_for(&self, method: &str, count: usize) -> Vec<ApiCall> {
+    pub(crate) async fn wait_for(&self, method: &str, count: usize) -> Vec<ApiCall> {
         tokio::time::timeout(WAIT, async {
             loop {
                 let notified = self.called.notified();
@@ -136,17 +136,17 @@ impl FakeSlack {
 }
 
 /// One Socket Mode connection, from the server's side.
-pub struct Socket {
+pub(crate) struct Socket {
     stream: WebSocketStream<TcpStream>,
 }
 
 impl Socket {
-    pub async fn send(&mut self, frame: Value) {
+    pub(crate) async fn send(&mut self, frame: Value) {
         self.stream.send(Message::text(frame.to_string())).await.unwrap();
     }
 
     /// The next text frame from the client, as JSON. Control frames are skipped.
-    pub async fn receive(&mut self) -> Value {
+    pub(crate) async fn receive(&mut self) -> Value {
         loop {
             let frame = tokio::time::timeout(WAIT, self.stream.next())
                 .await
@@ -162,10 +162,10 @@ impl Socket {
     }
 
     /// Whether the client closed the connection, waiting for it.
-    pub async fn closed_by_client(&mut self) -> bool {
+    pub(crate) async fn closed_by_client(&mut self) -> bool {
         loop {
             match tokio::time::timeout(WAIT, self.stream.next()).await {
-                Ok(None | Some(Err(_)) | Some(Ok(Message::Close(_)))) => return true,
+                Ok(None | Some(Err(_) | Ok(Message::Close(_)))) => return true,
                 Ok(Some(Ok(_))) => {}
                 Err(_) => return false,
             }

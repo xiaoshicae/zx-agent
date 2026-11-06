@@ -13,7 +13,7 @@ use super::{
     ContextEdit, DEFAULT_HOOK_TIMEOUT, HookContext, HookError, HookFailure, HookPhase, HookResult, HookStage, Hooks,
     RequestPlan, RequestSettings, TurnDecision, TurnSummary,
 };
-use crate::agent::{AgentEvent, Decision, Emit, Event, ToolOutput};
+use crate::agent::{AgentEvent, Decision, Event, EventTarget, ToolOutput};
 use crate::ai::{Message, ToolCall};
 
 pub(crate) struct HookCall<'a> {
@@ -96,6 +96,22 @@ impl RegisteredHook {
             timeout: self.timeout,
         }
     }
+
+    /// Run one callback of this hook in `phase`, bounded by the hook's timeout and the
+    /// run's cancellation.
+    async fn run<T>(
+        &self,
+        phase: HookPhase,
+        future: impl Future<Output = HookResult<T>>,
+        ctx: &HookContext,
+    ) -> Result<T, HookError> {
+        self.call(phase).run(future, ctx.cancel.token()).await
+    }
+
+    /// The error of this hook failing in `phase`.
+    fn error(&self, phase: HookPhase, failure: HookFailure) -> HookError {
+        self.call(phase).error(failure)
+    }
 }
 
 /// A chain owns its hooks, kept in stage order, and is borrowed by concurrent tool futures.
@@ -149,8 +165,7 @@ impl HookChain {
     pub async fn on_input(&self, mut text: String, ctx: &HookContext) -> Result<String, HookError> {
         for entry in &self.hooks {
             text = entry
-                .call(HookPhase::OnInput)
-                .run(entry.hook.on_input(text, ctx), ctx.cancel.token())
+                .run(HookPhase::OnInput, entry.hook.on_input(text, ctx), ctx)
                 .await?;
         }
         Ok(text)
@@ -165,14 +180,14 @@ impl HookChain {
         let mut projected = Cow::Borrowed(messages);
         let mut edits = Vec::new();
         for entry in &self.hooks {
-            let call = entry.call(HookPhase::TransformContext);
-            let changes = call
-                .run(entry.hook.transform_context(&projected, ctx), ctx.cancel.token())
+            let phase = HookPhase::TransformContext;
+            let changes = entry
+                .run(phase, entry.hook.transform_context(&projected, ctx), ctx)
                 .await?;
             for change in &changes {
                 change
                     .apply(projected.to_mut())
-                    .map_err(|reason| call.error(HookFailure::Rejected(reason)))?;
+                    .map_err(|reason| entry.error(phase, HookFailure::Rejected(reason)))?;
             }
             edits.extend(changes);
         }
@@ -189,18 +204,15 @@ impl HookChain {
     ) -> Result<RequestSettings, HookError> {
         let mut settings = settings;
         for entry in &self.hooks {
-            let call = entry.call(HookPhase::PrepareRequest);
+            let phase = HookPhase::PrepareRequest;
             let plan = RequestPlan {
                 messages,
                 turn,
                 settings: &settings,
             };
-            if let Some(next) = call
-                .run(entry.hook.prepare_request(&plan, ctx), ctx.cancel.token())
-                .await?
-            {
+            if let Some(next) = entry.run(phase, entry.hook.prepare_request(&plan, ctx), ctx).await? {
                 if next.model.trim().is_empty() {
-                    return Err(call.error(HookFailure::Rejected("chose an empty model".into())));
+                    return Err(entry.error(phase, HookFailure::Rejected("chose an empty model".into())));
                 }
                 settings = next;
             }
@@ -212,8 +224,7 @@ impl HookChain {
         let mut verdict = Decision::Allow;
         for entry in &self.hooks {
             let decision = entry
-                .call(HookPhase::BeforeTool)
-                .run(entry.hook.before_tool(tool, ctx), ctx.cancel.token())
+                .run(HookPhase::BeforeTool, entry.hook.before_tool(tool, ctx), ctx)
                 .await?;
             match decision {
                 Decision::Deny(_) => return Ok(decision),
@@ -227,16 +238,10 @@ impl HookChain {
     pub async fn after_tool(
         &self,
         tool: &ToolCall,
-        mut output: ToolOutput,
+        output: ToolOutput,
         ctx: &HookContext,
     ) -> Result<ToolOutput, HookError> {
-        for entry in &self.hooks {
-            output = entry
-                .call(HookPhase::AfterTool)
-                .run(entry.hook.after_tool(tool, output, ctx), ctx.cancel.token())
-                .await?;
-        }
-        Ok(output)
+        self.after_tool_in(|_| true, tool, output, ctx).await
     }
 
     /// Filter transient progress through redaction hooks without invoking final-output hooks
@@ -244,16 +249,25 @@ impl HookChain {
     pub(crate) async fn filter_tool_progress(
         &self,
         tool: &ToolCall,
+        output: ToolOutput,
+        ctx: &HookContext,
+    ) -> Result<ToolOutput, HookError> {
+        self.after_tool_in(|stage| stage == HookStage::Redaction, tool, output, ctx)
+            .await
+    }
+
+    /// Run `after_tool` of the hooks in the stages `selected` accepts, in order, each
+    /// seeing the preceding hook's output.
+    async fn after_tool_in(
+        &self,
+        selected: impl Fn(HookStage) -> bool,
+        tool: &ToolCall,
         mut output: ToolOutput,
         ctx: &HookContext,
     ) -> Result<ToolOutput, HookError> {
-        for entry in &self.hooks {
-            if entry.stage != HookStage::Redaction {
-                continue;
-            }
+        for entry in self.hooks.iter().filter(|entry| selected(entry.stage)) {
             output = entry
-                .call(HookPhase::AfterTool)
-                .run(entry.hook.after_tool(tool, output, ctx), ctx.cancel.token())
+                .run(HookPhase::AfterTool, entry.hook.after_tool(tool, output, ctx), ctx)
                 .await?;
         }
         Ok(output)
@@ -263,8 +277,7 @@ impl HookChain {
         let mut decision = TurnDecision::Default;
         for entry in &self.hooks {
             let next = entry
-                .call(HookPhase::FinishTurn)
-                .run(entry.hook.finish_turn(turn, ctx), ctx.cancel.token())
+                .run(HookPhase::FinishTurn, entry.hook.finish_turn(turn, ctx), ctx)
                 .await?;
             match next {
                 TurnDecision::Stop => return Ok(TurnDecision::Stop),
@@ -288,13 +301,12 @@ impl HookChain {
                 Ok(true) => {}
                 Ok(false) => continue,
                 Err(_) => {
-                    errors.push(entry.call(HookPhase::OnEvent).error(HookFailure::Panicked));
+                    errors.push(entry.error(HookPhase::OnEvent, HookFailure::Panicked));
                     continue;
                 }
             }
             if let Err(error) = entry
-                .call(HookPhase::OnEvent)
-                .run(entry.hook.on_event(event, ctx), ctx.cancel.token())
+                .run(HookPhase::OnEvent, entry.hook.on_event(event, ctx), ctx)
                 .await
             {
                 // Cancellation is a normal shutdown, not an observer failure.
@@ -307,20 +319,21 @@ impl HookChain {
     }
 
     /// Stamp `event`, hand it to the sink, then to the observing hooks.
-    pub(crate) async fn emit(&self, event: AgentEvent, to: Emit<'_>) {
+    pub(crate) async fn emit(&self, event: AgentEvent, target: EventTarget<'_>) {
         // What the event reports is already recorded; the sink sees it before observers do.
-        let event = to.trace.stamp(event);
-        to.sink.emit(&event);
-        for error in self.on_event(&event, to.trace.context()).await {
-            report_failure(error, to);
+        let event = target.trace.stamp(event);
+        target.sink.emit(&event);
+        for error in self.on_event(&event, target.trace.context()).await {
+            report_failure(error, target);
         }
     }
 }
 
-pub(crate) fn report_failure(error: HookError, to: Emit<'_>) -> String {
+/// Report a hook failure as a `hook_failed` event. Returns its description.
+pub(crate) fn report_failure(error: HookError, target: EventTarget<'_>) -> String {
     let text = error.to_string();
     // Diagnostics bypass hooks, preventing recursive observer failures.
-    to.direct(AgentEvent::HookFailed {
+    target.emit_unobserved(AgentEvent::HookFailed {
         hook: error.hook,
         phase: error.phase.as_str(),
         error: text.clone(),

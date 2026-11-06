@@ -22,7 +22,7 @@ impl<T> Drop for AbortOnDrop<T> {
 /// the data is never left half-updated and stays safe to use. Do not use this helper for a
 /// critical section that could leave partial state behind.
 pub fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]

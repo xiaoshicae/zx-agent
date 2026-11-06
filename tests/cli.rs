@@ -11,7 +11,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use common::mock_server::{MockServer, Reply};
-use common::{stderr, stdout, zx_agent as program};
+use common::{json_lines, stderr, stdout, zx_agent};
 
 /// The variable the program reads the API key from, and the fake key it holds.
 const KEY_VAR: &str = "ZX_CLI_TEST_KEY";
@@ -20,8 +20,8 @@ const KEY: &str = "sk-cli-test-key";
 const NO_SERVER: &str = "http://127.0.0.1:9/v1";
 
 /// `zx-agent run` against `base_url`, started in `dir`, with `args` after the common options.
-fn zx_agent(base_url: &str, dir: &Path, args: &[&str]) -> Command {
-    let mut command = program();
+fn run_against(base_url: &str, dir: &Path, args: &[&str]) -> Command {
+    let mut command = zx_agent();
     command
         .arg("run")
         .args(["--model", "mock-model", "--base-url", base_url])
@@ -40,7 +40,7 @@ fn zx_agent(base_url: &str, dir: &Path, args: &[&str]) -> Command {
 /// Run to completion from an empty temporary directory.
 async fn run(base_url: &str, args: &[&str]) -> Output {
     let dir = tempfile::tempdir().unwrap();
-    zx_agent(base_url, dir.path(), args).output().await.unwrap()
+    run_against(base_url, dir.path(), args).output().await.unwrap()
 }
 
 /// The `messages` array of request `index`.
@@ -66,10 +66,7 @@ async fn streaming_resource_limits_reach_the_provider() {
     .await;
 
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
-    let events: Vec<Value> = stdout(&output)
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
+    let events: Vec<Value> = json_lines(&stdout(&output));
     assert!(
         events
             .iter()
@@ -105,7 +102,7 @@ async fn repaired_session_tails_are_reported_on_stderr() {
         .unwrap();
     let server = MockServer::start(vec![Reply::text("ok")]).await;
 
-    let output = zx_agent(
+    let output = run_against(
         &server.base_url,
         dir.path(),
         &[
@@ -187,7 +184,7 @@ async fn the_time_limit_exits_4() {
 async fn sigterm_exits_5() {
     let server = MockServer::start(vec![Reply::Stall(vec![])]).await;
     let dir = tempfile::tempdir().unwrap();
-    let child = zx_agent(&server.base_url, dir.path(), &["--tools", "", "check"])
+    let child = run_against(&server.base_url, dir.path(), &["--tools", "", "check"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -223,10 +220,7 @@ async fn jsonl_output_is_one_event_per_line_ending_with_the_report() {
 
     let output = run(&server.base_url, &["--tools", "", "--output", "jsonl", "check"]).await;
 
-    let events: Vec<Value> = stdout(&output)
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
+    let events: Vec<Value> = json_lines(&stdout(&output));
     assert_eq!(events[0]["type"], "run_start");
     let report = events.last().unwrap();
     assert_eq!(report["type"], "run_end");
@@ -238,7 +232,7 @@ async fn jsonl_output_is_one_event_per_line_ending_with_the_report() {
 async fn a_dash_reads_the_prompt_from_stdin() {
     let server = MockServer::start(vec![Reply::text("ok")]).await;
     let dir = tempfile::tempdir().unwrap();
-    let mut child = zx_agent(&server.base_url, dir.path(), &["--tools", "", "-"])
+    let mut child = run_against(&server.base_url, dir.path(), &["--tools", "", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -310,7 +304,7 @@ async fn inline_updates_are_sent_where_the_prompt_changed() {
             cwd.to_str().unwrap(),
             "check",
         ];
-        let output = zx_agent(&server.base_url, dir.path(), &args).output().await.unwrap();
+        let output = run_against(&server.base_url, dir.path(), &args).output().await.unwrap();
         assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     }
 

@@ -3,6 +3,7 @@
 mod context;
 mod model;
 mod tools;
+mod turn;
 
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
@@ -16,20 +17,28 @@ use tokio_util::sync::CancellationToken;
 
 use super::command::SlashCommand;
 use super::events::CustomMessageInfo;
-use super::events::{AgentEvent, ApprovalResult, Emit, EventSink, LoopOutcome, RequestKind, RunTrace, ToolVerdict};
+use super::events::{
+    AgentEvent, ApprovalResult, EventSink, EventTarget, LoopOutcome, RequestKind, RunTrace, ToolVerdict,
+};
 use super::hooks::{
     ContextEdit, HookCall, HookChain, HookError, HookFailure, HookPhase, TurnDecision, TurnDisposition, TurnSummary,
     report_failure,
 };
 use super::policy::Decision;
 use super::queue::{MessageQueues, Queue, QueueMode, QueuedMessage};
-use super::session_host::{ContextPreparation, Prepared, SessionHost};
-use super::tool::{ActiveTools, Effects, ExecutionMode, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput};
+use super::session_host::{NoSession, Prepared, SessionHost};
+use super::tool::{
+    ActiveTools, Effects, ExecutionMode, MAX_DETAILS_BYTES, MAX_QUEUED_PROGRESS, Tool, ToolContext, ToolOutput,
+};
 use crate::ai::{
     AssistantMessage, Message, ModelMeta, Provider, Reasoning, Request, StopReason, StreamEvent, SystemMessage,
     SystemPrompt, ToolCall, ToolResultMessage, Usage, UserMessageKind, duration_ms, now_ms,
 };
 use crate::interaction::{Approval, ApprovalCache, ApprovalRequest, DEFAULT_APPROVAL_TIMEOUT, Interaction, NoHuman};
+
+pub(crate) use context::record_pending_entries;
+pub(crate) use model::price;
+use turn::{PendingInput, ResponseHandling, ToolProgress, TurnPreparation, TurnResponse};
 
 /// Static model and tool configuration, independent of per-run state and extensions.
 pub struct LoopSpec {
@@ -122,6 +131,18 @@ impl LoopConfig {
             cache_key: None,
         }
     }
+
+    /// The trace of a new run with a fresh ID, cancelled by `cancel`, whose hooks reach this
+    /// configuration's queues and tool set.
+    pub(crate) fn trace(&self, session_id: Option<String>, cancel: CancellationToken) -> RunTrace {
+        RunTrace::new(
+            session_id,
+            self.spec.cwd.clone(),
+            cancel,
+            self.queues.clone(),
+            self.active_tools.clone(),
+        )
+    }
 }
 
 /// State borrowed from the run owner; grants survive retries without sharing a lock.
@@ -171,6 +192,8 @@ impl<'a> LoopControl<'a> {
     }
 }
 
+/// Why an attempt failed, with the response when the provider failed.
+///
 /// Accounting follows actual responses, so context edits cannot change usage or retries.
 #[derive(Debug)]
 pub enum LoopFailure {
@@ -217,44 +240,43 @@ pub async fn run_loop(
         failure: None,
     };
 
+    // A run of its own that records nothing, unless the owner lends it a run and a session.
     let own_trace;
-    let trace = if let Some(trace) = control.trace {
-        trace
-    } else {
-        own_trace = RunTrace::new(
-            None,
-            config.spec.cwd.clone(),
-            control.cancel.clone(),
-            config.queues.clone(),
-            config.active_tools.clone(),
-        );
-        &own_trace
+    let trace = match control.trace {
+        Some(trace) => trace,
+        None => {
+            own_trace = config.trace(None, control.cancel.clone());
+            &own_trace
+        }
     };
-
+    let mut no_session = NoSession;
+    let session: &mut dyn SessionHost = match control.session.as_deref_mut() {
+        Some(session) => session,
+        None => &mut no_session,
+    };
     let mut engine = Engine {
         config,
-        control,
+        max_model_requests: control.max_model_requests,
+        token_budget: control.token_budget,
+        prior_task_turns: control.prior_task_turns,
+        attempt_number: control.attempt_number,
+        approvals: &mut *control.approvals,
+        cancel: control.cancel,
+        sink: control.sink,
+        session,
         trace,
         turn: None,
         validators: HashMap::new(),
     };
 
-    let attempt = engine.control.attempt_number;
+    let attempt = engine.attempt_number;
     engine.emit(AgentEvent::AgentStart { attempt }).await;
 
     match engine.run(context, prompts, &mut result).await {
         Ok(outcome) => result.outcome = outcome,
         Err(halt) => {
-            let (aborted, error) = match halt {
-                Halt::Failed(error) => (engine.control.cancel.is_cancelled(), error),
-                // Even when the run was also cancelled: its audit trail is incomplete.
-                Halt::Unrecorded(error) => (false, error),
-            };
-            result.outcome = if aborted {
-                LoopOutcome::Aborted
-            } else {
-                LoopOutcome::Error
-            };
+            let (outcome, error) = halt.into_outcome(engine.cancel);
+            result.outcome = outcome;
             result.failure = Some(LoopFailure::Host(error));
         }
     }
@@ -279,39 +301,68 @@ enum Halt {
     Unrecorded(String),
 }
 
-struct Engine<'a, 'b, 'c> {
+impl Halt {
+    /// How the attempt ended, and why. A failure after cancellation is an abort; a step the
+    /// session could not record is an error even then, as the audit trail is incomplete.
+    fn into_outcome(self, cancel: &CancellationToken) -> (LoopOutcome, String) {
+        match self {
+            Self::Failed(error) if cancel.is_cancelled() => (LoopOutcome::Aborted, error),
+            Self::Failed(error) | Self::Unrecorded(error) => (LoopOutcome::Error, error),
+        }
+    }
+}
+
+/// One attempt in progress: the configuration, what the run owner lent it, and its turn.
+struct Engine<'a, 'b> {
     config: &'a LoopConfig,
-    control: &'b mut LoopControl<'c>,
+    /// Model requests this attempt may make; `None` is unlimited.
+    max_model_requests: Option<u32>,
+    /// Tokens this attempt may use; `None` is unlimited.
+    token_budget: Option<u64>,
+    /// Task turns of earlier attempts, so that turn numbers continue across retries.
+    prior_task_turns: u32,
+    attempt_number: u32,
+    approvals: &'b mut ApprovalCache,
+    cancel: &'b CancellationToken,
+    sink: &'b dyn EventSink,
+    /// Records each step before the loop acts on it.
+    session: &'b mut dyn SessionHost,
     trace: &'b RunTrace,
     /// The number of the turn in progress, between its `turn_start` and `turn_end`.
     turn: Option<u32>,
     validators: HashMap<String, jsonschema::Validator>,
 }
 
-impl<'a> Engine<'a, '_, '_> {
-    fn to(&self) -> Emit<'_> {
-        Emit {
-            sink: self.control.sink,
+impl<'a, 'b> Engine<'a, 'b> {
+    /// Where this attempt's events go. Borrows nothing of the engine, so a call can hold it
+    /// while it records.
+    fn target(&self) -> EventTarget<'b> {
+        EventTarget {
+            sink: self.sink,
             trace: self.trace,
         }
     }
 
     async fn emit(&self, event: AgentEvent) {
-        self.config.hooks.emit(event, self.to()).await;
+        self.config.hooks.emit(event, self.target()).await;
     }
 
-    fn hook_error(&self, error: HookError) -> String {
-        report_failure(error, self.to())
+    /// Report a hook failure as a `hook_failed` event. Returns its description.
+    fn report_hook_failure(&self, error: HookError) -> String {
+        report_failure(error, self.target())
     }
 
-    /// Start the next task turn unless one is in progress.
-    async fn start_turn(&mut self, result: &mut LoopResult) {
-        if self.turn.is_none() {
-            result.task_turns = result.task_turns.saturating_add(1);
-            let turn = self.control.prior_task_turns.saturating_add(result.task_turns);
-            self.turn = Some(turn);
-            self.emit(AgentEvent::TurnStart { turn }).await;
+    /// Start the next task turn unless one is in progress. Returns the number of the turn
+    /// in progress.
+    async fn start_turn(&mut self, result: &mut LoopResult) -> u32 {
+        if let Some(turn) = self.turn {
+            return turn;
         }
+        result.task_turns = result.task_turns.saturating_add(1);
+        let turn = self.prior_task_turns.saturating_add(result.task_turns);
+        self.turn = Some(turn);
+        self.emit(AgentEvent::TurnStart { turn }).await;
+        turn
     }
 
     /// End the turn in progress, if there is one.
@@ -361,19 +412,19 @@ impl<'a> Engine<'a, '_, '_> {
         let mut pending = PendingInput::default();
 
         loop {
-            match self.prepare_turn(context, result, &mut pending).await? {
-                TurnPreparation::Ready => {}
+            let turn = match self.prepare_turn(context, result, &mut pending).await? {
+                TurnPreparation::Ready(turn) => turn,
                 TurnPreparation::Retry => continue,
                 TurnPreparation::Stop(outcome) => return Ok(outcome),
-            }
-            let Some(message) = self.request_model(context, result).await? else {
+            };
+            let Some(message) = self.request_model(context, result, turn).await? else {
                 return Ok(LoopOutcome::Aborted);
             };
             let response = match self.handle_response(context, result, message).await? {
                 ResponseHandling::Stop(outcome) => return Ok(outcome),
                 ResponseHandling::Continue(response) => response,
             };
-            if let Some(outcome) = self.decide_next_turn(context, result, &response, &mut pending).await? {
+            if let Some(outcome) = self.decide_next_turn(context, result, response, &mut pending).await? {
                 return Ok(outcome);
             }
         }
@@ -388,13 +439,15 @@ impl<'a> Engine<'a, '_, '_> {
     ) -> Result<ResponseHandling, Halt> {
         let stop = message.stop_reason;
         let calls = message.tool_calls();
-        // History owns a copy; finish_turn and accounting retain the actual response.
-        let recorded = Message::Assistant(message.clone());
+        // A failed response is kept twice: in the history and in the failure the run reports.
+        let failed = matches!(stop, StopReason::Error | StopReason::Aborted).then(|| message.clone());
+        let recorded = Message::Assistant(message);
         let entry_id = self.record_finished_message(&recorded).await?;
+        let index = context.len();
         context.push(recorded);
         // The turn in progress: the loop starts one at its top and ends it below.
-        let turn = self.control.prior_task_turns.saturating_add(result.task_turns);
-        if matches!(stop, StopReason::Error | StopReason::Aborted) {
+        let turn = self.prior_task_turns.saturating_add(result.task_turns);
+        if let Some(message) = failed {
             self.end_turn().await;
             result.failure = Some(LoopFailure::Provider {
                 message: Box::new(message),
@@ -422,111 +475,41 @@ impl<'a> Engine<'a, '_, '_> {
             context.extend(batch.results.into_iter().map(Message::ToolResult));
         }
         self.end_turn().await;
-        if self.control.cancel.is_cancelled() {
+        if self.cancel.is_cancelled() {
             return Ok(ResponseHandling::Stop(LoopOutcome::Aborted));
         }
-        Ok(ResponseHandling::Continue(Box::new(TurnResponse {
-            message,
+        Ok(ResponseHandling::Continue(TurnResponse {
+            index,
             turn,
             tool_progress,
-        })))
-    }
-
-    /// Ask the finish hook and decide whether another turn is needed.
-    async fn decide_next_turn(
-        &mut self,
-        context: &[Message],
-        result: &mut LoopResult,
-        response: &TurnResponse,
-        pending: &mut PendingInput,
-    ) -> Result<Option<LoopOutcome>, Halt> {
-        let config = self.config;
-        let TurnResponse {
-            message,
-            turn,
-            tool_progress,
-        } = response;
-        let turn = *turn;
-        let needs_more = *tool_progress == ToolProgress::Continue;
-        let stop = message.stop_reason;
-        let disposition = self.disposition(*tool_progress);
-        let remaining_model_requests = self
-            .control
-            .max_model_requests
-            .map(|limit| limit.saturating_sub(result.model_requests));
-        let summary = TurnSummary {
-            response: message,
-            messages: context,
-            turn,
-            answer_continuations: result.answer_continuations,
-            remaining_model_requests,
-            disposition,
-        };
-        let decision = config
-            .hooks
-            .finish_turn(&summary, self.trace.context())
-            .await
-            .map_err(|error| Halt::Failed(self.hook_error(error)))?;
-        if decision == TurnDecision::Stop {
-            return Ok(Some(completed(stop)));
-        }
-        // Inspect again: input may have arrived while the hook ran. It is taken at the top
-        // of the next turn; follow-ups only when the model has nothing left to do.
-        let steering = config.queues.has(Queue::Steering);
-        pending.take_follow_ups = !needs_more && !steering && config.queues.has(Queue::FollowUp);
-        let input_waiting = steering || pending.take_follow_ups;
-        match decision {
-            TurnDecision::ContinueAnswer(text) if disposition == TurnDisposition::Stop && !input_waiting => {
-                if remaining_model_requests == Some(0) {
-                    return Ok(Some(if stop == StopReason::Length {
-                        LoopOutcome::Truncated
-                    } else {
-                        LoopOutcome::ModelRequestLimit
-                    }));
-                }
-                result.answer_continuations = result.answer_continuations.saturating_add(1);
-                pending.requested = Some(Message::continuation(text));
-            }
-            TurnDecision::FollowUp(text) if disposition != TurnDisposition::Continue && !input_waiting => {
-                if remaining_model_requests == Some(0) {
-                    return Ok(Some(LoopOutcome::ModelRequestLimit));
-                }
-                pending.requested = Some(Message::user(text));
-            }
-            TurnDecision::Stop
-            | TurnDecision::Default
-            | TurnDecision::ContinueAnswer(_)
-            | TurnDecision::FollowUp(_) => {}
-        }
-        if !needs_more && !input_waiting && pending.requested.is_none() {
-            return Ok(Some(completed(stop)));
-        }
-        Ok(None)
-    }
-
-    /// What the normal loop would do after a response, before the finish hooks decide.
-    fn disposition(&self, tool_progress: ToolProgress) -> TurnDisposition {
-        let needs_more = tool_progress == ToolProgress::Continue;
-        // Inspect queues without consuming them: stopping or failing in a hook must
-        // leave accepted user input available to the next run.
-        let queues = &self.config.queues;
-        let queued = queues.has(Queue::Steering) || (!needs_more && queues.has(Queue::FollowUp));
-        if needs_more || queued {
-            TurnDisposition::Continue
-        } else if tool_progress == ToolProgress::Terminated {
-            TurnDisposition::Terminated
-        } else {
-            TurnDisposition::Stop
-        }
+        }))
     }
 
     /// The outcome that ends the attempt before the next request: cancellation, or a budget
     /// with no room for another request.
     fn checkpoint(&self, result: &LoopResult) -> Option<LoopOutcome> {
-        if self.control.cancel.is_cancelled() {
+        if self.cancel.is_cancelled() {
             return Some(LoopOutcome::Aborted);
         }
-        exhausted(self.control, result)
+        self.exhausted(result)
+    }
+
+    /// The outcome when a budget leaves no room for another request: requests first, then
+    /// tokens.
+    fn exhausted(&self, result: &LoopResult) -> Option<LoopOutcome> {
+        if self
+            .max_model_requests
+            .is_some_and(|limit| result.model_requests >= limit)
+        {
+            return Some(LoopOutcome::ModelRequestLimit);
+        }
+        if self
+            .token_budget
+            .is_some_and(|budget| result.usage.input_and_output() >= budget)
+        {
+            return Some(LoopOutcome::TokenBudget);
+        }
+        None
     }
 
     /// Gather input and prepare the context before a task request.
@@ -543,18 +526,17 @@ impl<'a> Engine<'a, '_, '_> {
         if let Some(outcome) = self.checkpoint(result) {
             return Ok(TurnPreparation::Stop(outcome));
         }
-        self.start_turn(result).await;
+        let turn = self.start_turn(result).await;
 
         // State an extension asked to record is written before the input it may refer to.
         self.record_pending_entries().await?;
         // Queued input is taken one message at a time, so a rejected message or a stopped
         // run leaves the rest of the queue for the next run.
         self.drain_queue(context, Queue::Steering).await?;
-        if std::mem::take(&mut pending.take_follow_ups) {
-            self.drain_queue(context, Queue::FollowUp).await?;
-        }
-        if let Some(message) = pending.requested.take() {
-            self.input(context, message, None).await?;
+        match std::mem::take(pending) {
+            PendingInput::None => {}
+            PendingInput::FollowUps => self.drain_queue(context, Queue::FollowUp).await?,
+            PendingInput::Requested(message) => self.input(context, *message, None).await?,
         }
         if let Some(outcome) = self.checkpoint(result) {
             return Ok(TurnPreparation::Stop(outcome));
@@ -563,7 +545,7 @@ impl<'a> Engine<'a, '_, '_> {
             .hooks
             .transform_context(context, self.trace.context())
             .await
-            .map_err(|error| Halt::Failed(self.hook_error(error)))?;
+            .map_err(|error| Halt::Failed(self.report_hook_failure(error)))?;
         for edit in edits {
             self.edit(context, edit).await?;
         }
@@ -581,63 +563,6 @@ impl<'a> Engine<'a, '_, '_> {
             // the context hooks again before the next task request.
             return Ok(TurnPreparation::Retry);
         }
-        Ok(TurnPreparation::Ready)
+        Ok(TurnPreparation::Ready(turn))
     }
-}
-
-/// The outcome when a budget leaves no room for another request: requests first, then tokens.
-fn exhausted(control: &LoopControl<'_>, result: &LoopResult) -> Option<LoopOutcome> {
-    if control
-        .max_model_requests
-        .is_some_and(|limit| result.model_requests >= limit)
-    {
-        return Some(LoopOutcome::ModelRequestLimit);
-    }
-
-    if control
-        .token_budget
-        .is_some_and(|budget| result.usage.input_and_output() >= budget)
-    {
-        return Some(LoopOutcome::TokenBudget);
-    }
-
-    None
-}
-
-fn completed(stop: StopReason) -> LoopOutcome {
-    if stop == StopReason::Length {
-        LoopOutcome::Truncated
-    } else {
-        LoopOutcome::Completed
-    }
-}
-
-#[derive(Default)]
-struct PendingInput {
-    requested: Option<Message>,
-    take_follow_ups: bool,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ToolProgress {
-    NoCalls,
-    Continue,
-    Terminated,
-}
-
-struct TurnResponse {
-    message: AssistantMessage,
-    turn: u32,
-    tool_progress: ToolProgress,
-}
-
-enum ResponseHandling {
-    Stop(LoopOutcome),
-    Continue(Box<TurnResponse>),
-}
-
-enum TurnPreparation {
-    Ready,
-    Retry,
-    Stop(LoopOutcome),
 }

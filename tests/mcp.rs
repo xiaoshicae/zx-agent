@@ -15,13 +15,18 @@ use zx_agent::agent::{Tool, ToolContext, ToolOutput};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::extensions::{Extension, register};
 use zx_agent::mcp::{Server, ServerConfig};
+use zx_agent::tools::truncate::MAX_BYTES;
 
 const TOKEN: &str = "mcp-token-1234";
 
 fn settings(fake: &FakeMcp, tools: &[&str]) -> ServerConfig {
     ServerConfig {
         token: Some(TOKEN.to_string()),
-        ..ServerConfig::new("prom", fake.url.clone(), tools.iter().map(|t| t.to_string()).collect())
+        ..ServerConfig::new(
+            "prom",
+            fake.url.clone(),
+            tools.iter().map(std::string::ToString::to_string).collect(),
+        )
     }
 }
 
@@ -175,7 +180,7 @@ async fn a_failed_tool_execution_is_an_error_result_for_the_model() {
 #[tokio::test]
 async fn a_protocol_error_fails_the_call_naming_the_server_and_not_the_token() {
     let fake = FakeMcp::start(Era::Legacy, three_tools()).await;
-    fake.reply("query", vec![Reply::Error(-32602, "unknown argument q2")]);
+    fake.reply("query", vec![Reply::Error(-32602, "unknown argument q2".into())]);
     let server = connect(&fake, &["query"]).await;
     let error = call(&server, "prom__query", json!({"q2": "x"})).await.unwrap_err();
     assert!(
@@ -183,6 +188,22 @@ async fn a_protocol_error_fails_the_call_naming_the_server_and_not_the_token() {
         "{error}"
     );
     assert!(!error.contains(TOKEN), "{error}");
+}
+
+#[tokio::test]
+async fn a_long_protocol_error_is_cut_like_a_result() {
+    let fake = FakeMcp::start(Era::Modern, three_tools()).await;
+    let message: String = (0..3000).map(|i| format!("line {i}\n")).collect();
+    fake.reply("query", vec![Reply::Error(-32000, message)]);
+    let server = connect(&fake, &["query"]).await;
+    let error = call(&server, "prom__query", json!({})).await.unwrap_err();
+    assert!(error.starts_with("MCP server prom: query failed: "), "{}", &error[..60]);
+    assert!(error.len() <= MAX_BYTES + 200, "{} bytes", error.len());
+    assert!(
+        error.ends_with("[error truncated; showing 2000 of 3000 lines]"),
+        "{}",
+        &error[error.len() - 60..]
+    );
 }
 
 #[tokio::test]
@@ -435,5 +456,24 @@ async fn the_total_timeout_ends_a_call_however_much_progress_comes() {
     }
     assert!((1..20).contains(&seen), "progress came, but not all of it: {seen}");
     // The client gave up on the stream, as a timeout without progress does.
+    fake.wait_abandoned(1).await;
+}
+
+#[tokio::test]
+async fn equal_bounds_on_a_call_still_report_that_no_answer_came() {
+    let fake = FakeMcp::start(Era::Modern, three_tools()).await;
+    fake.reply("query", vec![Reply::Hang]);
+    let server = Server::connect(ServerConfig {
+        call_timeout: Duration::from_millis(200),
+        max_call_timeout: Some(Duration::from_millis(200)),
+        ..settings(&fake, &["query"])
+    })
+    .await
+    .unwrap();
+
+    let error = call(&server, "prom__query", json!({})).await.unwrap_err();
+
+    // No progress came, so the call did not end "whatever its progress".
+    assert!(error.contains("did not answer within"), "{error}");
     fake.wait_abandoned(1).await;
 }

@@ -185,7 +185,7 @@ async fn run(executor: &dyn Executor, workspace: &Path, command: &str, timeout: 
     executor.run(&request, &CancellationToken::new()).await.unwrap()
 }
 
-fn stdout(output: &CommandOutput) -> String {
+fn captured_stdout(output: &CommandOutput) -> String {
     String::from_utf8_lossy(&output.stdout.bytes).into_owned()
 }
 
@@ -343,7 +343,7 @@ async fn commands_run_as_their_user_in_the_workspace_between_two_sweeps() {
 
     let output = run(&executor, &fake.workspace(), "echo hi", Duration::from_secs(10)).await;
 
-    assert_eq!(stdout(&output), "hi\n");
+    assert_eq!(captured_stdout(&output), "hi\n");
     assert_eq!(output.stderr.bytes, b"warn\n");
     assert!(matches!(output.end, CommandEnd::Exited(3)), "{:?}", output.end);
     let user = fake.config().user;
@@ -706,7 +706,7 @@ async fn real_commands_run_as_the_agents_user_with_a_writable_workspace_and_netw
     )
     .await;
 
-    let text = stdout(&output);
+    let text = captured_stdout(&output);
     let uid = owner(&workspace);
     // Root is mapped to nobody, since commands must not run as root.
     let expected = if uid == 0 { 65534 } else { uid };
@@ -743,7 +743,7 @@ async fn real_a_strict_container_has_a_read_only_workspace_and_root_and_no_netwo
     )
     .await;
 
-    let text = stdout(&output);
+    let text = captured_stdout(&output);
     assert!(text.starts_with("65534\n"), "{text}");
     assert_eq!(text.matches("Read-only file system").count(), 2, "{text}");
     assert!(text.contains("tmp-writable"), "{text}");
@@ -762,7 +762,7 @@ async fn real_a_timeout_stops_the_whole_command_tree() {
 
     assert!(matches!(output.end, CommandEnd::TimedOut), "{:?}", output.end);
     let left = run(&executor, &workspace, COUNT_SLEEPERS, Duration::from_secs(30)).await;
-    assert_eq!(stdout(&left).trim(), "0");
+    assert_eq!(captured_stdout(&left).trim(), "0");
 }
 
 #[tokio::test]
@@ -780,9 +780,9 @@ async fn real_background_children_end_with_their_command() {
     .await;
 
     assert!(matches!(output.end, CommandEnd::Exited(0)), "{:?}", output.end);
-    assert_eq!(stdout(&output), "started\n");
+    assert_eq!(captured_stdout(&output), "started\n");
     let left = run(&executor, &workspace, COUNT_SLEEPERS, Duration::from_secs(30)).await;
-    assert_eq!(stdout(&left).trim(), "0");
+    assert_eq!(captured_stdout(&left).trim(), "0");
 }
 
 #[tokio::test]
@@ -802,7 +802,7 @@ async fn real_a_child_that_left_the_process_group_ends_with_its_command() {
 
     assert!(matches!(output.end, CommandEnd::Exited(0)), "{:?}", output.end);
     let left = run(&executor, &workspace, COUNT_SLEEPERS, Duration::from_secs(30)).await;
-    assert_eq!(stdout(&left).trim(), "0");
+    assert_eq!(captured_stdout(&left).trim(), "0");
 }
 
 #[tokio::test]
@@ -822,7 +822,7 @@ async fn real_a_command_cannot_disable_its_own_cleanup() {
 
     assert!(matches!(output.end, CommandEnd::Exited(0)), "{:?}", output.end);
     let left = run(&executor, &workspace, COUNT_SLEEPERS, Duration::from_secs(30)).await;
-    assert_eq!(stdout(&left).trim(), "0");
+    assert_eq!(captured_stdout(&left).trim(), "0");
 }
 
 #[tokio::test]
@@ -858,7 +858,7 @@ async fn real_a_dropped_run_stops_its_command() {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let left = run(&executor, &workspace, COUNT_SLEEPERS, Duration::from_secs(30)).await;
-        if stdout(&left).trim() == "0" {
+        if captured_stdout(&left).trim() == "0" {
             break;
         }
         assert!(Instant::now() < deadline, "the dropped command kept running");
@@ -995,20 +995,13 @@ async fn zx_run(server: &MockServer, dir: &Path, docker_dir: Option<&Path>, args
 
 /// The leading system message of the first model request.
 fn system_prompt(server: &MockServer) -> String {
-    server.requests()[0].body["messages"][0]["content"]
-        .as_str()
-        .unwrap()
-        .to_string()
+    server.requests()[0].system_text()
 }
 
 /// The first tool result in model request `index`.
 fn tool_result(server: &MockServer, index: usize) -> String {
-    server.requests()[index].body["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|message| message["role"] == "tool")
-        .and_then(|message| message["content"].as_str())
+    server.requests()[index].tool_results()[0]["content"]
+        .as_str()
         .unwrap()
         .to_string()
 }
@@ -1168,7 +1161,7 @@ async fn approving_every_call_also_runs_mcp_tools_outside_allow_tools() {
     )
     .await;
     let server = MockServer::start(vec![
-        Reply::tool_call("c1", "prom__range", json!({"q": "up"})),
+        Reply::tool_call("c1", "prom__range", &json!({"q": "up"})),
         Reply::text("done"),
     ])
     .await;
@@ -1425,7 +1418,7 @@ async fn real_ctrl_c_in_chat_does_not_stop_the_container() {
             }
         })
         .await
-        .unwrap()
+        .unwrap();
     };
     // The banner follows start-up, so the container is running.
     wait_for("[chat] model=").await;

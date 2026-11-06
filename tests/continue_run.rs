@@ -12,11 +12,11 @@ use zx_agent::AgentSession;
 use zx_agent::agent::{AgentEvent, Tool};
 use zx_agent::agent_session::SessionError;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{AssistantMessage, ContentBlock, Message, StopReason};
+use zx_agent::ai::{Message, StopReason};
 use zx_agent::runner::{RunOutcome, Runner};
 use zx_agent::session::{Entry, SessionStore};
 
-use common::{Collect, EchoTool, RunnerSetup, config, header, summarize};
+use common::{Collect, EchoTool, RunnerSetup, config, header, summarize, tool_call_answer};
 
 fn runner(provider: &Arc<FauxProvider>, session: SessionStore) -> (Runner, Arc<Collect>) {
     let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(EchoTool::new("echo"))];
@@ -29,15 +29,7 @@ fn runner(provider: &Arc<FauxProvider>, session: SessionStore) -> (Runner, Arc<C
 
 /// An answer that asked for `echo` and was cut off by a crash before the call ran.
 fn call_answer() -> Message {
-    let mut answer = AssistantMessage::failure("faux", "test-model", StopReason::ToolUse, "");
-    answer.error_message = None;
-    answer.content = vec![ContentBlock::ToolCall {
-        id: "c1".into(),
-        name: "echo".into(),
-        arguments: json!({"text": "hi"}),
-        arguments_error: None,
-    }];
-    Message::Assistant(answer)
+    tool_call_answer("faux", "test-model", "echo", json!({"text": "hi"}))
 }
 
 #[tokio::test]
@@ -189,7 +181,7 @@ async fn a_running_session_refuses_to_continue() {
         .any(|event| matches!(event, AgentEvent::RequestStart { .. }))
     {
         tokio::select! {
-            _ = tokio::task::yield_now() => {}
+            () = tokio::task::yield_now() => {}
             _ = &mut running => panic!("must still be running"),
         }
     }

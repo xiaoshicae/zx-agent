@@ -7,10 +7,9 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 
 use common::fake_slack::{Answer, FakeSlack};
+use common::im::run_channel;
 use zx_agent::agent::ApprovalResult;
 use zx_agent::im::slack::{SlackChannel, SlackConfig};
 use zx_agent::im::{
@@ -22,9 +21,15 @@ const BOT_TOKEN: &str = "xoxb-test";
 /// Only reached when an expected event never comes.
 const WAIT: Duration = Duration::from_secs(10);
 
-fn channel_with(slack: &FakeSlack, post_interval: Duration) -> Arc<SlackChannel> {
+fn config(slack: &FakeSlack) -> SlackConfig {
     let mut config = SlackConfig::new(APP_TOKEN.into(), BOT_TOKEN.into());
     config.api_base = slack.api_base.clone();
+    config.post_interval = Duration::ZERO;
+    config
+}
+
+fn channel_with(slack: &FakeSlack, post_interval: Duration) -> Arc<SlackChannel> {
+    let mut config = config(slack);
     config.post_interval = post_interval;
     Arc::new(SlackChannel::new(config).unwrap())
 }
@@ -33,39 +38,20 @@ fn channel(slack: &FakeSlack) -> Arc<SlackChannel> {
     channel_with(slack, Duration::ZERO)
 }
 
-struct Running {
-    inbound: mpsc::Receiver<Inbound>,
-    cancel: CancellationToken,
-    task: JoinHandle<Result<(), ImError>>,
+/// A channel for `config` that passes each error it reports on as text.
+fn reporting(mut config: SlackConfig) -> (Arc<SlackChannel>, mpsc::UnboundedReceiver<String>) {
+    let (reported, reports) = mpsc::unbounded_channel();
+    config.on_error = Some(Arc::new(move |error: &ImError| {
+        reported.send(error.to_string()).ok();
+    }));
+    (Arc::new(SlackChannel::new(config).unwrap()), reports)
 }
 
-fn run(channel: Arc<SlackChannel>) -> Running {
-    let (sender, inbound) = mpsc::channel(16);
-    let cancel = CancellationToken::new();
-    let stop = cancel.clone();
-    let task = tokio::spawn(async move { channel.run(sender, &stop).await });
-    Running { inbound, cancel, task }
-}
-
-impl Running {
-    async fn next(&mut self) -> Inbound {
-        tokio::time::timeout(WAIT, self.inbound.recv())
-            .await
-            .expect("nothing was passed on in time")
-            .expect("the channel is running")
-    }
-
-    async fn stop(self) -> Result<(), ImError> {
-        self.cancel.cancel();
-        self.task.await.unwrap()
-    }
-}
-
-fn envelope(id: &str, kind: &str, payload: Value) -> Value {
+fn envelope(id: &str, kind: &str, payload: &Value) -> Value {
     json!({"envelope_id": id, "type": kind, "payload": payload, "accepts_response_payload": false})
 }
 
-fn event(event: Value) -> Value {
+fn event(event: &Value) -> Value {
     json!({"type": "event_callback", "event_id": "Ev1", "event": event})
 }
 
@@ -75,7 +61,7 @@ fn mention(ts: &str, thread: Option<&str>, text: &str) -> Value {
     if let Some(thread) = thread {
         mention["thread_ts"] = json!(thread);
     }
-    event(mention)
+    event(&mention)
 }
 
 fn direct(ts: &str, extra: Value) -> Value {
@@ -84,7 +70,7 @@ fn direct(ts: &str, extra: Value) -> Value {
     if let (Value::Object(message), Value::Object(extra)) = (&mut message, extra) {
         message.extend(extra);
     }
-    event(message)
+    event(&message)
 }
 
 fn in_thread(conversation: &str, thread: Option<&str>) -> Destination {
@@ -106,12 +92,12 @@ fn message(ts: &str, at: Destination, sender: &str, text: &str) -> Inbound {
 #[tokio::test]
 async fn a_mention_is_acknowledged_and_passed_on_without_the_bot_mention() {
     let mut slack = FakeSlack::start().await;
-    let mut running = run(channel(&slack));
+    let mut running = run_channel(channel(&slack), WAIT);
     let mut socket = slack.socket().await;
     socket.send(json!({"type": "hello", "num_connections": 1})).await;
     let text = "<@UBOT> pods in &lt;ns&gt; &amp; logs";
     socket
-        .send(envelope("e1", "events_api", mention("1.000100", None, text)))
+        .send(envelope("e1", "events_api", &mention("1.000100", None, text)))
         .await;
     assert_eq!(socket.receive().await, json!({"envelope_id": "e1"}));
     assert_eq!(
@@ -129,13 +115,13 @@ async fn a_mention_is_acknowledged_and_passed_on_without_the_bot_mention() {
 #[tokio::test]
 async fn a_mention_in_a_thread_names_the_thread() {
     let mut slack = FakeSlack::start().await;
-    let mut running = run(channel(&slack));
+    let mut running = run_channel(channel(&slack), WAIT);
     let mut socket = slack.socket().await;
     socket
         .send(envelope(
             "e1",
             "events_api",
-            mention("1.000200", Some("1.000100"), "<@UBOT> more"),
+            &mention("1.000200", Some("1.000100"), "<@UBOT> more"),
         ))
         .await;
     assert_eq!(
@@ -148,23 +134,23 @@ async fn a_mention_in_a_thread_names_the_thread() {
 #[tokio::test]
 async fn direct_messages_are_passed_on_but_not_the_bots_own_or_edits() {
     let mut slack = FakeSlack::start().await;
-    let mut running = run(channel(&slack));
+    let mut running = run_channel(channel(&slack), WAIT);
     let mut socket = slack.socket().await;
     let ignored = [
         direct("2.1", json!({"bot_id": "BBOT"})),
         direct("2.2", json!({"user": "UBOT"})),
         direct("2.3", json!({"subtype": "message_changed"})),
         event(
-            json!({"type": "message", "channel_type": "channel", "channel": "C1", "user": "U1", "text": "chatter", "ts": "2.4"}),
+            &json!({"type": "message", "channel_type": "channel", "channel": "C1", "user": "U1", "text": "chatter", "ts": "2.4"}),
         ),
     ];
     for (n, payload) in ignored.into_iter().enumerate() {
         let id = format!("ignored{n}");
-        socket.send(envelope(&id, "events_api", payload)).await;
+        socket.send(envelope(&id, "events_api", &payload)).await;
         assert_eq!(socket.receive().await, json!({ "envelope_id": id }));
     }
     socket
-        .send(envelope("e1", "events_api", direct("2.5", json!({}))))
+        .send(envelope("e1", "events_api", &direct("2.5", json!({}))))
         .await;
     assert_eq!(running.next().await, message("2.5", in_thread("D1", None), "U1", "hi"));
     running.stop().await.unwrap();
@@ -173,16 +159,16 @@ async fn direct_messages_are_passed_on_but_not_the_bots_own_or_edits() {
 #[tokio::test]
 async fn a_redelivered_message_is_passed_on_once() {
     let mut slack = FakeSlack::start().await;
-    let mut running = run(channel(&slack));
+    let mut running = run_channel(channel(&slack), WAIT);
     let mut socket = slack.socket().await;
     socket
-        .send(envelope("e1", "events_api", mention("3.1", None, "<@UBOT> once")))
+        .send(envelope("e1", "events_api", &mention("3.1", None, "<@UBOT> once")))
         .await;
     socket
-        .send(envelope("e2", "events_api", mention("3.1", None, "<@UBOT> once")))
+        .send(envelope("e2", "events_api", &mention("3.1", None, "<@UBOT> once")))
         .await;
     socket
-        .send(envelope("e3", "events_api", mention("3.2", None, "<@UBOT> next")))
+        .send(envelope("e3", "events_api", &mention("3.2", None, "<@UBOT> next")))
         .await;
     for id in ["e1", "e2", "e3"] {
         assert_eq!(socket.receive().await, json!({ "envelope_id": id }));
@@ -201,7 +187,7 @@ async fn a_redelivered_message_is_passed_on_once() {
 #[tokio::test]
 async fn a_button_click_becomes_a_decision_in_the_cards_thread() {
     let mut slack = FakeSlack::start().await;
-    let mut running = run(channel(&slack));
+    let mut running = run_channel(channel(&slack), WAIT);
     let mut socket = slack.socket().await;
     let click = |action: &str| {
         json!({
@@ -214,9 +200,9 @@ async fn a_button_click_becomes_a_decision_in_the_cards_thread() {
         })
     };
     socket
-        .send(envelope("i0", "interactive", click("something_else")))
+        .send(envelope("i0", "interactive", &click("something_else")))
         .await;
-    socket.send(envelope("i1", "interactive", click("zx_deny"))).await;
+    socket.send(envelope("i1", "interactive", &click("zx_deny"))).await;
     assert_eq!(socket.receive().await, json!({"envelope_id": "i0"}));
     assert_eq!(socket.receive().await, json!({"envelope_id": "i1"}));
     assert_eq!(
@@ -234,7 +220,7 @@ async fn a_button_click_becomes_a_decision_in_the_cards_thread() {
 #[tokio::test]
 async fn a_click_finds_its_thread_in_the_button_value() {
     let mut slack = FakeSlack::start().await;
-    let mut running = run(channel(&slack));
+    let mut running = run_channel(channel(&slack), WAIT);
     let mut socket = slack.socket().await;
     // Only fields the block_actions reference documents: no thread anywhere but the value.
     let click = json!({
@@ -244,7 +230,7 @@ async fn a_click_finds_its_thread_in_the_button_value() {
         "message": {"ts": "4.2"},
         "actions": [{"action_id": "zx_allow_once", "value": "4.1/A2", "type": "button"}],
     });
-    socket.send(envelope("i1", "interactive", click)).await;
+    socket.send(envelope("i1", "interactive", &click)).await;
     assert_eq!(
         running.next().await,
         Inbound::Decision {
@@ -260,11 +246,11 @@ async fn a_click_finds_its_thread_in_the_button_value() {
 #[tokio::test]
 async fn an_event_without_its_wrapper_is_passed_on_too() {
     let mut slack = FakeSlack::start().await;
-    let mut running = run(channel(&slack));
+    let mut running = run_channel(channel(&slack), WAIT);
     let mut socket = slack.socket().await;
     // The Socket Mode page's own example puts the bare event in the payload.
     let bare = json!({"type": "app_mention", "user": "U1", "text": "<@UBOT> bare", "ts": "4.5", "channel": "C1"});
-    socket.send(envelope("e1", "events_api", bare)).await;
+    socket.send(envelope("e1", "events_api", &bare)).await;
     assert_eq!(
         running.next().await,
         message("4.5", in_thread("C1", None), "U1", "bare")
@@ -275,14 +261,18 @@ async fn an_event_without_its_wrapper_is_passed_on_too() {
 #[tokio::test]
 async fn a_disconnect_message_makes_the_channel_reconnect() {
     let mut slack = FakeSlack::start().await;
-    let mut running = run(channel(&slack));
+    let mut running = run_channel(channel(&slack), WAIT);
     let mut first = slack.socket().await;
     first
         .send(json!({"type": "disconnect", "reason": "refresh_requested"}))
         .await;
     let mut second = slack.socket().await;
     second
-        .send(envelope("e1", "events_api", mention("5.1", None, "<@UBOT> still here")))
+        .send(envelope(
+            "e1",
+            "events_api",
+            &mention("5.1", None, "<@UBOT> still here"),
+        ))
         .await;
     assert_eq!(
         running.next().await,
@@ -296,8 +286,8 @@ async fn a_disconnect_message_makes_the_channel_reconnect() {
 async fn a_rejected_bot_token_stops_the_channel_with_a_configuration_error() {
     let slack = FakeSlack::start().await;
     slack.script("auth.test", vec![Answer::Error("invalid_auth")]);
-    let running = run(channel(&slack));
-    match running.task.await.unwrap() {
+    let running = run_channel(channel(&slack), WAIT);
+    match running.ended().await {
         Err(ImError::Config(error)) => assert!(error.contains("invalid_auth"), "{error}"),
         other => panic!("expected a configuration error, got {other:?}"),
     }
@@ -307,8 +297,8 @@ async fn a_rejected_bot_token_stops_the_channel_with_a_configuration_error() {
 async fn a_rejected_app_token_stops_the_channel_with_a_configuration_error() {
     let slack = FakeSlack::start().await;
     slack.script("apps.connections.open", vec![Answer::Error("not_allowed_token_type")]);
-    let running = run(channel(&slack));
-    match running.task.await.unwrap() {
+    let running = run_channel(channel(&slack), WAIT);
+    match running.ended().await {
         Err(ImError::Config(error)) => assert!(error.contains("not_allowed_token_type"), "{error}"),
         other => panic!("expected a configuration error, got {other:?}"),
     }
@@ -450,13 +440,8 @@ async fn posts_to_one_chat_are_spaced_out() {
 async fn a_failed_connection_attempt_is_reported_and_retried() {
     let mut slack = FakeSlack::start().await;
     slack.script("apps.connections.open", vec![Answer::Error("internal_error")]);
-    let (reported, mut reports) = mpsc::unbounded_channel();
-    let mut config = SlackConfig::new(APP_TOKEN.into(), BOT_TOKEN.into());
-    config.api_base = slack.api_base.clone();
-    config.on_error = Some(Arc::new(move |error: &ImError| {
-        reported.send(error.to_string()).ok();
-    }));
-    let running = run(Arc::new(SlackChannel::new(config).unwrap()));
+    let (channel, mut reports) = reporting(config(&slack));
+    let running = run_channel(channel, WAIT);
     let report = tokio::time::timeout(WAIT, reports.recv()).await.unwrap().unwrap();
     assert!(report.contains("internal_error"), "{report}");
     // The next attempt connects.
@@ -482,13 +467,8 @@ async fn a_failed_tls_handshake_is_reported_and_retried() {
         "apps.connections.open",
         vec![Answer::Json(json!({"ok": true, "url": tls_url}))],
     );
-    let (reported, mut reports) = mpsc::unbounded_channel();
-    let mut config = SlackConfig::new(APP_TOKEN.into(), BOT_TOKEN.into());
-    config.api_base = slack.api_base.clone();
-    config.on_error = Some(Arc::new(move |error: &ImError| {
-        reported.send(error.to_string()).ok();
-    }));
-    let running = run(Arc::new(SlackChannel::new(config).unwrap()));
+    let (channel, mut reports) = reporting(config(&slack));
+    let running = run_channel(channel, WAIT);
     let report = tokio::time::timeout(WAIT, reports.recv()).await.unwrap().unwrap();
     assert!(report.contains("cannot open the Socket Mode connection"), "{report}");
     // The next attempt gets the fake's plain socket.
@@ -499,8 +479,57 @@ async fn a_failed_tls_handshake_is_reported_and_retried() {
 #[tokio::test]
 async fn stopping_closes_the_connection() {
     let mut slack = FakeSlack::start().await;
-    let running = run(channel(&slack));
+    let running = run_channel(channel(&slack), WAIT);
     let mut socket = slack.socket().await;
     running.stop().await.unwrap();
     assert!(socket.closed_by_client().await);
+}
+
+#[tokio::test]
+async fn stopping_does_not_wait_out_a_long_retry_after() {
+    let slack = FakeSlack::start().await;
+    slack.script(
+        "apps.connections.open",
+        vec![Answer::RateLimited {
+            retry_after_secs: 100_000,
+        }],
+    );
+    let running = run_channel(channel(&slack), WAIT);
+    slack.wait_for("apps.connections.open", 1).await;
+    tokio::time::timeout(WAIT, running.stop())
+        .await
+        .expect("the stop waited for the Retry-After")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_silent_connection_is_reported_and_opened_again() {
+    let mut slack = FakeSlack::start().await;
+    let mut config = config(&slack);
+    config.ping_interval = Duration::from_millis(100);
+    let (channel, mut reports) = reporting(config);
+    let running = run_channel(channel, WAIT);
+    // Answers nothing, not even the pings.
+    let first = slack.socket().await;
+    let report = tokio::time::timeout(WAIT, reports.recv()).await.unwrap().unwrap();
+    assert!(report.contains("silent"), "{report}");
+    let second = slack.socket().await;
+    assert_eq!(slack.calls("apps.connections.open").len(), 2);
+    drop((first, second));
+    running.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_message_without_text_is_not_passed_on() {
+    let mut slack = FakeSlack::start().await;
+    let mut running = run_channel(channel(&slack), WAIT);
+    let mut socket = slack.socket().await;
+    socket
+        .send(envelope("e1", "events_api", &direct("2.6", json!({"text": null}))))
+        .await;
+    socket
+        .send(envelope("e2", "events_api", &direct("2.7", json!({}))))
+        .await;
+    assert_eq!(running.next().await, message("2.7", in_thread("D1", None), "U1", "hi"));
+    running.stop().await.unwrap();
 }

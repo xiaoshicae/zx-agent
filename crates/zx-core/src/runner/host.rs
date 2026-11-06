@@ -1,44 +1,35 @@
-//! What a run lends the loop and the summary host: the session it records in, the hooks and
+//! What a run lends the loop and the summarizer: the session it records in, the hooks and
 //! sink it reports to, and the model it summarizes with. The Runner builds one per run and
 //! the loop reaches it as its [`SessionHost`] (pi: AgentSession writes on `message_end`).
-
-use std::collections::HashMap;
 
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use super::accounting::RunAccounting;
+use super::answer::final_answer;
+use super::{Limits, RunTimer, Start, conclude};
 use crate::agent::{
-    AgentEvent, ContextPreparation, Emit, HookChain, LoopConfig, LoopOutcome, MessageQueues, Prepared, QueuedMessage,
-    SessionHost,
+    AgentEvent, ContextPreparation, EventTarget, LoopConfig, LoopOutcome, Prepared, QueuedMessage, RunReport,
+    SessionHost, record_pending_entries,
 };
 use crate::ai::retry::RetryPolicy;
-use crate::ai::{AssistantMessage, Message, ModelMeta, Provider, Request, StopReason, ToolCall, duration_ms};
-use crate::compaction::{self, Trigger};
+use crate::ai::{AssistantMessage, Message, Provider, Request, StopReason, ToolCall, duration_ms};
+use crate::compaction::{self, Summarizer, Trigger};
 use crate::session::{CustomMessage, Entry, RequestSource, SessionStore};
 
 /// How a run ends when it stops before a finished answer.
-pub(super) struct RunStop {
-    pub outcome: LoopOutcome,
-    /// The reason, for [`LoopOutcome::Error`]; the other outcomes explain themselves.
-    pub error: Option<String>,
+pub(super) enum RunStop {
+    /// The last attempt ended with this outcome, which explains itself; never
+    /// [`LoopOutcome::Error`], which `Failed` states with its reason.
+    Ended(LoopOutcome),
+    /// The run failed, for this reason.
+    Failed(String),
 }
 
-impl RunStop {
-    pub fn error(reason: impl Into<String>) -> Self {
-        Self {
-            outcome: LoopOutcome::Error,
-            error: Some(reason.into()),
-        }
-    }
-
-    pub fn aborted() -> Self {
-        Self {
-            outcome: LoopOutcome::Aborted,
-            error: None,
-        }
-    }
+/// The text for an entry the session could not record, with the cause.
+pub(super) fn persist_error(error: &anyhow::Error) -> String {
+    format!("cannot persist session entry: {error:#}")
 }
 
 /// Why automatic summaries are paused: a paid summary request failed, and repeating it on
@@ -49,11 +40,11 @@ impl RunStop {
 pub(super) struct CompactionPause(Option<String>);
 
 impl CompactionPause {
-    pub fn reason(&self) -> Option<&str> {
+    pub(super) fn reason(&self) -> Option<&str> {
         self.0.as_deref()
     }
 
-    pub fn clear(&mut self) {
+    pub(super) fn clear(&mut self) {
         self.0 = None;
     }
 
@@ -74,63 +65,118 @@ impl CompactionPause {
     }
 }
 
-/// A run's borrow of the Runner: the session, the hooks, the event sink and the model.
+/// A run's borrow of the Runner: the session, the configuration with its hooks and model,
+/// and the event sink.
 pub(super) struct RunHost<'a> {
     pub session: &'a mut SessionStore,
-    pub to: Emit<'a>,
-    pub hooks: &'a HookChain,
-    pub provider: &'a dyn Provider,
-    pub model: &'a str,
+    pub target: EventTarget<'a>,
+    pub config: &'a LoopConfig,
     pub compaction: &'a compaction::Config,
     pub pause: &'a mut CompactionPause,
     /// The attempt the host serves, for the events of a summary.
     pub attempt: u32,
-    /// Prices by model, for the cost of summary responses.
-    pub models: &'a HashMap<String, ModelMeta>,
 }
 
 impl<'a> RunHost<'a> {
-    pub fn new(
+    pub(super) fn new(
         session: &'a mut SessionStore,
-        to: Emit<'a>,
+        target: EventTarget<'a>,
         config: &'a LoopConfig,
         compaction: &'a compaction::Config,
         pause: &'a mut CompactionPause,
     ) -> Self {
         Self {
             session,
-            to,
-            hooks: &config.hooks,
-            provider: config.spec.provider.as_ref(),
-            model: &config.spec.model,
+            target,
+            config,
             compaction,
             pause,
             attempt: 1,
-            models: &config.models,
         }
+    }
+
+    pub(super) async fn emit(&self, event: AgentEvent) {
+        self.config.hooks.emit(event, self.target).await;
+    }
+
+    /// Open the run: announce it, record a result for each call an interrupted run left
+    /// without one, and find the input the run starts with. Returns that input, or why the
+    /// run cannot start, and the number of entries the session had: the run's answer is
+    /// what it adds after them.
+    pub(super) async fn open_run(&mut self, begin: Start) -> (Result<Vec<QueuedMessage>, String>, usize) {
+        let spec = &self.config.spec;
+        self.emit(AgentEvent::RunStart {
+            model: spec.model.clone(),
+            provider: spec.provider.name().into(),
+        })
+        .await;
+        // Entry IDs remain stable even when hooks omit messages from earlier runs.
+        let run_start = self.session.entries().len();
+        // Before any system prompt change or input, so that results directly follow their calls.
+        let prompts = match (self.recover_interrupted_calls().await, begin) {
+            (Err(error), _) => Err(error),
+            (Ok(()), Start::Message(message)) => Ok(vec![message]),
+            (Ok(()), Start::Continue) => self.continuation().await,
+        };
+        (prompts, run_start)
+    }
+
+    /// Close the run: keep the state hooks asked to record, then report how the run ended
+    /// and the answer it added after the first `run_start` entries.
+    pub(super) async fn close_run(
+        &mut self,
+        stop: RunStop,
+        run_start: usize,
+        limits: &Limits,
+        accounting: &RunAccounting,
+        timer: &RunTimer,
+    ) -> RunReport {
+        // State that hooks asked to record during the last events is kept before the run is
+        // reported, so a host reading the session afterwards finds it.
+        let config = self.config;
+        let target = self.target;
+        let stop = match record_pending_entries(config, self, target).await {
+            Ok(()) => stop,
+            Err(error) => RunStop::Failed(error),
+        };
+        let (outcome, error) = conclude(stop, limits, accounting, timer.timed_out());
+        let report = RunReport {
+            outcome,
+            final_text: final_answer(&self.session.messages_since(run_start)),
+            model_requests: accounting.model_requests,
+            retries: accounting.retries,
+            usage: accounting.usage.clone(),
+            error,
+            session_file: self.session.path().map(|path| path.display().to_string()),
+        };
+        self.emit(AgentEvent::RunEnd {
+            report: Box::new(report.clone()),
+        })
+        .await;
+        report
     }
 
     /// Summarize the old prefix with `trigger`; the pause follows the outcome. When the
     /// report says `Completed`, the session's projection is the new context.
-    pub async fn summarize(&mut self, trigger: Trigger, cancel: &CancellationToken) -> compaction::Report {
-        let mut host = compaction::Host {
+    pub(super) async fn summarize(&mut self, trigger: Trigger, cancel: &CancellationToken) -> compaction::Report {
+        let mut summarizer = Summarizer {
             session: &mut *self.session,
-            provider: self.provider,
-            model: self.model,
+            provider: self.config.spec.provider.as_ref(),
+            model: &self.config.spec.model,
             config: self.compaction,
-            to: self.to,
-            hooks: self.hooks,
+            target: self.target,
+            hooks: &self.config.hooks,
             attempt: self.attempt,
-            models: self.models,
+            models: &self.config.models,
         };
-        let report = host.run(trigger, cancel).await;
+        let report = summarizer.run(trigger, cancel).await;
         self.pause.note(&report);
         report
     }
 
     /// The input a continuation starts with, after omitting a failed answer at the end; an
     /// error when there is nothing for the model to answer.
-    pub async fn continuation(&mut self, queues: &MessageQueues) -> Result<Vec<QueuedMessage>, String> {
+    async fn continuation(&mut self) -> Result<Vec<QueuedMessage>, String> {
         let projection = self.session.projection();
         let Some(last) = projection
             .iter()
@@ -147,6 +193,7 @@ impl<'a> RunHost<'a> {
                 Ok(Vec::new())
             }
             Message::Assistant(_) => {
+                let queues = &self.config.queues;
                 let mut queued = queues.drain_steering();
                 if queued.is_empty() {
                     queued = queues.drain_follow_up();
@@ -163,27 +210,9 @@ impl<'a> RunHost<'a> {
         }
     }
 
-    /// Record the custom entries that hooks queued and the loop has not written (pi:
-    /// `appendEntry`), each announced as a `custom_entry` event.
-    pub async fn record_pending_entries(&mut self, queues: &MessageQueues) -> Result<(), String> {
-        for entry in queues.take_entries() {
-            let id = self
-                .session
-                .append_custom_entry(&entry.custom_type, entry.data)
-                .await
-                .map_err(|error| format!("cannot persist session entry: {error:#}"))?;
-            let event = AgentEvent::CustomEntry {
-                entry_id: Some(id),
-                custom_type: entry.custom_type,
-            };
-            self.hooks.emit(event, self.to).await;
-        }
-        Ok(())
-    }
-
     /// Keep a failed answer in the session but drop it from the model context, so that the
     /// next attempt continues from the message before it without repeating the user message.
-    pub async fn omit_failed_attempt(&mut self, target: &str) -> Result<(), String> {
+    pub(super) async fn omit_failed_attempt(&mut self, target: &str) -> Result<(), String> {
         let index = self
             .session
             .projection()
@@ -195,12 +224,12 @@ impl<'a> RunHost<'a> {
             .await
             .map_err(|error| format!("cannot omit the failed attempt: {error:#}"))?;
         if let Some(index) = index {
-            let event = AgentEvent::ContextEdited {
+            self.emit(AgentEvent::ContextEdited {
                 index,
                 replacement: None,
                 entry_id: Some(edit),
-            };
-            self.hooks.emit(event, self.to).await;
+            })
+            .await;
         }
         Ok(())
     }
@@ -208,39 +237,38 @@ impl<'a> RunHost<'a> {
     /// Omit the failed answer and summarize the old prefix, so that a new attempt can continue
     /// from the compacted context. The summary's cost is
     /// added to `accounting` whether or not it succeeds.
-    pub async fn recover_overflow(
+    pub(super) async fn recover_overflow(
         &mut self,
         error: &str,
         failed_entry: Option<&str>,
         accounting: &mut RunAccounting,
         cancel: &CancellationToken,
     ) -> Result<(), RunStop> {
-        let overflow = AgentEvent::ContextOverflow { error: error.into() };
-        self.hooks.emit(overflow, self.to).await;
+        self.emit(AgentEvent::ContextOverflow { error: error.into() }).await;
         if let Some(target) = failed_entry {
-            self.omit_failed_attempt(target).await.map_err(RunStop::error)?;
+            self.omit_failed_attempt(target).await.map_err(RunStop::Failed)?;
         }
         let report = self.summarize(Trigger::Overflow, cancel).await;
         accounting.model_requests = accounting.model_requests.saturating_add(report.requests);
         accounting.usage.add(&report.usage);
         if let Some(error) = report.persistence_error {
-            return Err(RunStop::error(error));
+            return Err(RunStop::Failed(error));
         }
         if report.outcome == compaction::Outcome::Completed {
             return Ok(());
         }
         if report.outcome == compaction::Outcome::Aborted {
-            return Err(RunStop::aborted());
+            return Err(RunStop::Ended(LoopOutcome::Aborted));
         }
         let reason = report.error.unwrap_or_else(|| "compaction made no progress".into());
-        Err(RunStop::error(format!(
+        Err(RunStop::Failed(format!(
             "{error}; compacting the context to recover failed: {reason}"
         )))
     }
 
     /// Announce a retry, omit the failed answer from the context and wait out the backoff.
     /// Ends the run when the session cannot record the edit or the wait is cancelled.
-    pub async fn schedule_retry(
+    pub(super) async fn schedule_retry(
         &mut self,
         retry: &RetryPolicy,
         accounting: &mut RunAccounting,
@@ -250,53 +278,55 @@ impl<'a> RunHost<'a> {
     ) -> Result<(), RunStop> {
         accounting.retries += 1;
         let delay = retry.delay_for(accounting.retries, failed);
-        let scheduled = AgentEvent::RetryScheduled {
+        self.emit(AgentEvent::RetryScheduled {
             attempt: accounting.retries,
             max_retries: retry.max_retries,
             delay_ms: duration_ms(delay),
-            error: failed.error_message.clone().unwrap_or_default(),
-        };
-        self.hooks.emit(scheduled, self.to).await;
+            error: failed.failure_reason().to_string(),
+        })
+        .await;
         if let Some(target) = failed_entry {
-            self.omit_failed_attempt(target).await.map_err(RunStop::error)?;
+            self.omit_failed_attempt(target).await.map_err(RunStop::Failed)?;
         }
         tokio::select! {
             () = tokio::time::sleep(delay) => Ok(()),
-            () = cancel.cancelled() => Err(RunStop::aborted()),
+            () = cancel.cancelled() => Err(RunStop::Ended(LoopOutcome::Aborted)),
         }
     }
 }
 
 #[async_trait]
 impl SessionHost for RunHost<'_> {
-    async fn append_message(&mut self, message: &Message) -> Result<String, String> {
+    async fn append_message(&mut self, message: &Message) -> Result<Option<String>, String> {
         // The event that reports the message owns it, so the session stores a copy.
         self.session
             .append_message(message.clone())
             .await
-            .map_err(|error| format!("cannot persist session entry: {error:#}"))
+            .map(Some)
+            .map_err(|error| persist_error(&error))
     }
 
-    async fn append_custom_message(&mut self, message: &CustomMessage) -> Result<(String, Message), String> {
+    async fn append_custom_message(&mut self, message: &CustomMessage) -> Result<(Option<String>, Message), String> {
         let id = self
             .session
             .append_custom_message(message.clone())
             .await
-            .map_err(|error| format!("cannot persist session entry: {error:#}"))?;
+            .map_err(|error| persist_error(&error))?;
         match self.session.get(&id) {
-            Some(Entry::CustomMessage(entry)) => Ok((id, entry.projected())),
+            Some(Entry::CustomMessage(entry)) => Ok((Some(id), entry.projected())),
             _ => Err(format!("custom message {id} was not recorded")),
         }
     }
 
-    async fn append_custom_entry(&mut self, custom_type: &str, data: Value) -> Result<String, String> {
+    async fn append_custom_entry(&mut self, custom_type: &str, data: Value) -> Result<Option<String>, String> {
         self.session
             .append_custom_entry(custom_type, data)
             .await
-            .map_err(|error| format!("cannot persist session entry: {error:#}"))
+            .map(Some)
+            .map_err(|error| persist_error(&error))
     }
 
-    async fn edit_context(&mut self, index: usize, replacement: Option<&str>) -> Result<String, String> {
+    async fn edit_context(&mut self, index: usize, replacement: Option<&str>) -> Result<Option<String>, String> {
         let projection = self.session.projection();
         let target = projection
             .get(index)
@@ -304,14 +334,16 @@ impl SessionHost for RunHost<'_> {
         self.session
             .append_context_edit(&target.entry_id, replacement.map(str::to_string))
             .await
+            .map(Some)
             .map_err(|error| format!("cannot persist context edit: {error:#}"))
     }
 
-    async fn record_request(&mut self, request: &Request, provider: &dyn Provider) -> Result<String, String> {
+    async fn record_request(&mut self, request: &Request, provider: &dyn Provider) -> Result<Option<String>, String> {
         let options = provider.request_options();
         self.session
             .record_request(request, provider.name(), options, RequestSource::Projection)
             .await
+            .map(Some)
             .map_err(|error| format!("cannot persist request checkpoint: {error:#}"))
     }
 

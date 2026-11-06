@@ -13,6 +13,11 @@ use crate::agent::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
 use crate::ai::ToolDef;
 use crate::executor::{Captured, CommandEnd, Executor, LocalExecutor, ShellCommand};
 
+/// The timeout of a call that sets none, unless the host configures another.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
+/// The most a call may ask for with `timeout_secs`, unless the host configures more.
+pub(super) const MAX_TIMEOUT: Duration = Duration::from_secs(600);
+
 /// Runs `<shell> -c <command>` in the working directory.
 pub struct BashTool {
     /// Shell program, looked up on `PATH`. A [`ContainerExecutor`] runs commands with the
@@ -36,8 +41,8 @@ impl Default for BashTool {
     fn default() -> Self {
         Self {
             shell: String::from("bash"),
-            default_timeout: Duration::from_secs(120),
-            max_timeout: Duration::from_secs(600),
+            default_timeout: DEFAULT_TIMEOUT,
+            max_timeout: MAX_TIMEOUT,
             hidden_env: Vec::new(),
             executor: Arc::new(LocalExecutor),
         }
@@ -56,8 +61,7 @@ impl BashTool {
     /// The limit for one call: what it asks for, else the default, never above the maximum.
     fn timeout_for(&self, requested_secs: Option<u64>) -> Duration {
         requested_secs
-            .map(Duration::from_secs)
-            .unwrap_or(self.default_timeout)
+            .map_or(self.default_timeout, Duration::from_secs)
             .min(self.max_timeout)
     }
 }

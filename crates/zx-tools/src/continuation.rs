@@ -6,7 +6,7 @@ use crate::agent::{HookContext, HookResult, Hooks, TurnDecision, TurnDisposition
 use crate::ai::StopReason;
 
 /// The unattended continuation text; the runtime does not depend on this wording.
-pub const CONTINUE_PROMPT: &str = "Your previous response was cut off at the output token limit. Continue exactly where it \
+const CONTINUE_PROMPT: &str = "Your previous response was cut off at the output token limit. Continue exactly where it \
 stopped, without repeating earlier text, and keep the rest concise.";
 
 /// Stateless continuation policy. The runtime supplies a per-run continuation count.
@@ -15,6 +15,7 @@ pub struct ContinueOnLength {
 }
 
 impl ContinueOnLength {
+    /// A hook that continues a cut-off answer at most `max_continuations` times per run.
     pub fn new(max_continuations: u32) -> Self {
         Self { max_continuations }
     }

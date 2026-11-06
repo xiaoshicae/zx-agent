@@ -27,7 +27,7 @@ use zx_agent::session::{SessionHeader, SessionStore};
 use zx_agent::tools::builtin_tools;
 
 use common::mock_server::{MockServer, Reply};
-use common::{RunnerSetup, config, header, read_lines, zx_agent};
+use common::{RunnerSetup, config, header, read_lines, stderr, tool_call_answer, zx_agent};
 
 fn definition(name: &str) -> ToolDef {
     ToolDef {
@@ -433,7 +433,7 @@ async fn the_recovery_event_follows_the_recorded_result() {
         .iter()
         .position(|event| matches!(event, AgentEvent::ToolCallRecovered { .. }))
         .unwrap();
-    assert!(recorded < reported, "{:?}", events);
+    assert!(recorded < reported, "{events:?}");
 }
 
 #[tokio::test]
@@ -485,7 +485,7 @@ async fn a_dropped_run_is_recovered_by_the_next_prompt() {
     {
         let mut running = Box::pin(session.prompt("start"));
         tokio::select! {
-            _ = hang.started.notified() => {}
+            () = hang.started.notified() => {}
             _ = &mut running => panic!("the run ended before its tool started"),
         }
         // Dropping the run future stops it before the result is recorded.
@@ -516,7 +516,7 @@ async fn result_after_cancelling_a_running_call(effects: Effects) -> (String, bo
     {
         let mut running = Box::pin(session.prompt_with_cancel("start", &cancel));
         tokio::select! {
-            _ = hang.started.notified() => {}
+            () = hang.started.notified() => {}
             _ = &mut running => panic!("the run ended before its tool started"),
         }
         cancel.cancel();
@@ -565,13 +565,7 @@ fn run_command(server: &MockServer, dir: &Path, args: &[&str]) -> Command {
 
 /// The tool message that the mock server's request `index` carried.
 fn sent_tool_result(server: &MockServer, index: usize) -> Value {
-    server.requests()[index].body["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|message| message["role"] == "tool")
-        .cloned()
-        .unwrap()
+    server.requests()[index].tool_results().remove(0)
 }
 
 #[tokio::test]
@@ -579,15 +573,8 @@ async fn run_reports_a_recovered_call_and_does_not_run_the_command_again() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = SessionStore::create(&dir.path().join("session.jsonl"), header()).unwrap();
     store.append_message(Message::user("fix it")).await.unwrap();
-    let mut call = AssistantMessage::failure("mock", "mock", StopReason::ToolUse, "");
-    call.error_message = None;
-    call.content = vec![ContentBlock::ToolCall {
-        id: "c1".into(),
-        name: "bash".into(),
-        arguments: json!({"command": "touch ran-again"}),
-        arguments_error: None,
-    }];
-    store.append_message(Message::Assistant(call)).await.unwrap();
+    let call = tool_call_answer("mock", "mock", "bash", json!({"command": "touch ran-again"}));
+    store.append_message(call).await.unwrap();
     store.append_tool_call_started("c1", "bash").await.unwrap();
     drop(store);
     let server = MockServer::start(vec![Reply::text("checked")]).await;
@@ -597,7 +584,7 @@ async fn run_reports_a_recovered_call_and_does_not_run_the_command_again() {
         .await
         .unwrap();
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     assert!(
         stderr.contains("[recover] bash c1: started, result unknown"),
@@ -654,7 +641,7 @@ async fn a_killed_run_is_recovered_by_the_next_run_without_repeating_the_command
         .await
         .unwrap();
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     assert!(
         stderr.contains("[recover] bash c1: started, result unknown"),

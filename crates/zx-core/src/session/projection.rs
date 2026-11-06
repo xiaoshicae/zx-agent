@@ -80,26 +80,14 @@ impl SessionStore {
         }
         path.iter()
             .filter_map(|entry| {
-                let (id, message) = match entry {
-                    Entry::Message(entry) => (&entry.id, Cow::Borrowed(&entry.message)),
-                    Entry::CustomMessage(entry) => (&entry.id, Cow::Owned(entry.projected())),
-                    Entry::ContextEdit(_)
-                    | Entry::FormatUpgrade(_)
-                    | Entry::CompactionStarted(_)
-                    | Entry::Compaction(_)
-                    | Entry::CompactionFailed(_)
-                    | Entry::RequestConfig(_)
-                    | Entry::RequestStarted(_)
-                    | Entry::ToolCallStarted(_)
-                    | Entry::Custom(_) => return None,
-                };
-                let message = match edits.get(id.as_str()) {
+                let (id, message) = entry.projected()?;
+                let message = match edits.get(id) {
                     None => message.into_owned(),
                     Some(None) => return None,
                     Some(Some(text)) => message.with_replaced_text(text),
                 };
                 Some(ProjectedMessage {
-                    entry_id: id.clone(),
+                    entry_id: id.to_string(),
                     message,
                 })
             })
@@ -170,7 +158,7 @@ impl SessionStore {
             return None;
         };
         if attempt.mode == SummaryMode::Full
-            && Self::any_source_corrected(&path[position + 1..], &attempt.source_entry_ids)
+            && Self::corrected_source(&path[position + 1..], &attempt.source_entry_ids).is_some()
         {
             return None;
         }
@@ -219,11 +207,13 @@ impl SessionStore {
             .collect()
     }
 
-    /// Whether a context edit on `path` targets one of `sources`: a summary that read them
-    /// no longer describes the branch.
-    pub(super) fn any_source_corrected(path: &[&Entry], sources: &[String]) -> bool {
-        path.iter()
-            .any(|entry| matches!(entry, Entry::ContextEdit(edit) if sources.contains(&edit.target_id)))
+    /// The first of `sources` that a context edit on `path` targets, in edit order: a summary
+    /// that read it no longer describes the branch.
+    pub(super) fn corrected_source<'p>(path: &[&'p Entry], sources: &[String]) -> Option<&'p str> {
+        path.iter().find_map(|entry| match entry {
+            Entry::ContextEdit(edit) if sources.contains(&edit.target_id) => Some(edit.target_id.as_str()),
+            _ => None,
+        })
     }
 
     /// How many leading messages of `raw` a summary that keeps `first_kept` replaces: those

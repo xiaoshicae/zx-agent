@@ -17,10 +17,10 @@ use super::http::{read_request, response};
 /// Only reached when an expected request never comes.
 const WAIT: Duration = Duration::from_secs(10);
 /// The session the 2025-11-25 server assigns.
-pub const SESSION: &str = "session-1";
+pub(crate) const SESSION: &str = "session-1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Era {
+pub(crate) enum Era {
     /// 2026-07-28: `server/discover`, and every request stands alone.
     Modern,
     /// 2025-11-25: the `initialize` handshake and a session.
@@ -29,11 +29,11 @@ pub enum Era {
 
 /// How the next call of a tool is answered. Without one, a call returns its arguments as text.
 #[derive(Clone, Debug)]
-pub enum Reply {
+pub(crate) enum Reply {
     /// The fields of the `tools/call` result, such as `{"content": [...], "isError": true}`.
     Result(Value),
-    /// A JSON-RPC error.
-    Error(i64, &'static str),
+    /// A JSON-RPC error, as its code and message.
+    Error(i64, String),
     /// No answer: the request stays open until the client closes it.
     Hang,
     /// Stream progress notifications, one every `every`, then the `tools/call` result, as a
@@ -48,7 +48,7 @@ pub enum Reply {
 
 /// One request the server received.
 #[derive(Clone, Debug)]
-pub struct Received {
+pub(crate) struct Received {
     /// `POST`, `GET` or `DELETE`.
     pub http_method: String,
     /// The JSON-RPC method; empty for `GET` and `DELETE`.
@@ -62,7 +62,7 @@ pub struct Received {
 }
 
 /// A tool as `tools/list` describes it, with one string argument `q`.
-pub fn tool(name: &str, description: &str) -> Value {
+pub(crate) fn tool(name: &str, description: &str) -> Value {
     json!({
         "name": name,
         "description": description,
@@ -80,14 +80,14 @@ struct State {
     changed: Notify,
 }
 
-pub struct FakeMcp {
+pub(crate) struct FakeMcp {
     /// The MCP endpoint.
     pub url: String,
     state: Arc<State>,
 }
 
 impl FakeMcp {
-    pub async fn start(era: Era, tools: Vec<Value>) -> Self {
+    pub(crate) async fn start(era: Era, tools: Vec<Value>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/mcp", listener.local_addr().unwrap());
         let state = Arc::new(State {
@@ -108,7 +108,7 @@ impl FakeMcp {
     }
 
     /// Answer the next calls of `tool` this way, in order, before answering normally.
-    pub fn reply(&self, tool: &str, replies: Vec<Reply>) {
+    pub(crate) fn reply(&self, tool: &str, replies: Vec<Reply>) {
         self.state
             .replies
             .lock()
@@ -118,17 +118,17 @@ impl FakeMcp {
             .extend(replies);
     }
 
-    pub fn received(&self) -> Vec<Received> {
+    pub(crate) fn received(&self) -> Vec<Received> {
         self.state.received.lock().unwrap().clone()
     }
 
     /// The requests with JSON-RPC method `method`.
-    pub fn requests(&self, method: &str) -> Vec<Received> {
+    pub(crate) fn requests(&self, method: &str) -> Vec<Received> {
         self.received().into_iter().filter(|r| r.method == method).collect()
     }
 
     /// Wait until `method` was requested at least `count` times.
-    pub async fn wait_for(&self, method: &str, count: usize) -> Vec<Received> {
+    pub(crate) async fn wait_for(&self, method: &str, count: usize) -> Vec<Received> {
         tokio::time::timeout(WAIT, async {
             loop {
                 let changed = self.state.changed.notified();
@@ -144,7 +144,7 @@ impl FakeMcp {
     }
 
     /// Wait until the client closed `count` unanswered calls.
-    pub async fn wait_abandoned(&self, count: usize) {
+    pub(crate) async fn wait_abandoned(&self, count: usize) {
         tokio::time::timeout(WAIT, async {
             loop {
                 let changed = self.state.changed.notified();
@@ -263,6 +263,10 @@ fn answer(state: &State, body: &Value) -> Option<Answer> {
 }
 
 /// The HTTP response to a JSON-RPC message sent whole; `None` leaves the request unanswered.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the fake server's whole protocol, one arm per method"
+)]
 fn answer_whole(state: &State, body: &Value) -> Option<String> {
     let method = body["method"].as_str().unwrap_or_default();
     let id = body["id"].clone();

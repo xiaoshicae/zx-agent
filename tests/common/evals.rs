@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use tokio::process::Command;
 
 /// A scenario: files to seed, the prompt, and a deterministic grade.
-pub struct Case {
+pub(crate) struct Case {
     /// The eval set, such as `edit`; lift is reported per set.
     pub set: &'static str,
     pub id: &'static str,
@@ -27,19 +27,19 @@ pub struct Case {
 }
 
 /// How a run is configured: a profile file for `--profile`.
-pub struct Variant {
+pub(crate) struct Variant {
     pub name: &'static str,
     pub profile: PathBuf,
 }
 
 /// The two arms of a comparison. Lift is the treatment's pass rate over the control's.
-pub struct Variants {
+pub(crate) struct Variants {
     pub control: Variant,
     pub treatment: Variant,
 }
 
 impl Variants {
-    pub fn named(&self, name: &str) -> &Variant {
+    pub(crate) fn named(&self, name: &str) -> &Variant {
         [&self.control, &self.treatment]
             .into_iter()
             .find(|variant| variant.name == name)
@@ -49,7 +49,7 @@ impl Variants {
 
 /// One arm: a case under a variant, in run number `run`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct Task {
+pub(crate) struct Task {
     pub set: String,
     pub id: String,
     pub variant: String,
@@ -58,7 +58,7 @@ pub struct Task {
 
 /// Every (case, variant, run) arm. Odd runs go control first, even runs treatment first, to
 /// reduce order bias (pi: plan.ts).
-pub fn plan(cases: &[Case], variants: &Variants, runs_per_variant: u32) -> Vec<Task> {
+pub(crate) fn plan(cases: &[Case], variants: &Variants, runs_per_variant: u32) -> Vec<Task> {
     assert!(runs_per_variant >= 1, "runs per variant must be at least 1");
     let mut tasks = Vec::new();
     for case in cases {
@@ -81,7 +81,7 @@ pub fn plan(cases: &[Case], variants: &Variants, runs_per_variant: u32) -> Vec<T
     tasks
 }
 
-pub fn case<'a>(cases: &'a [Case], task: &Task) -> &'a Case {
+pub(crate) fn case<'a>(cases: &'a [Case], task: &Task) -> &'a Case {
     cases
         .iter()
         .find(|case| case.set == task.set && case.id == task.id)
@@ -89,7 +89,7 @@ pub fn case<'a>(cases: &'a [Case], task: &Task) -> &'a Case {
 }
 
 /// What a finished run left behind, for grading.
-pub struct Outcome {
+pub(crate) struct Outcome {
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,
@@ -100,18 +100,18 @@ pub struct Outcome {
 
 impl Outcome {
     /// The final answer, as `run` printed it.
-    pub fn answer(&self) -> &str {
+    pub(crate) fn answer(&self) -> &str {
         self.stdout.trim()
     }
 
     /// A workspace file's content; `None` when it does not exist or is not UTF-8, which a
     /// grade reports as a fact about the run.
-    pub fn file(&self, relative: &str) -> Option<String> {
+    pub(crate) fn file(&self, relative: &str) -> Option<String> {
         std::fs::read_to_string(self.workspace.join(relative)).ok()
     }
 
     /// Tokens the run reported on its report line, when it got far enough to report.
-    pub fn tokens(&self) -> Option<u64> {
+    pub(crate) fn tokens(&self) -> Option<u64> {
         self.stderr.lines().rev().find_map(|line| {
             let fields = line.strip_prefix("[zx-agent] outcome=")?;
             fields
@@ -122,7 +122,7 @@ impl Outcome {
     }
 }
 
-pub enum Grade {
+pub(crate) enum Grade {
     Pass,
     Fail(String),
 }
@@ -130,7 +130,7 @@ pub enum Grade {
 /// Whether an arm produced a verdict.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Status {
+pub(crate) enum Status {
     Scored,
     /// The run could not start, was killed or timed out: no verdict, and the pair is blocked.
     Errored,
@@ -139,7 +139,7 @@ pub enum Status {
 /// The normalized outcome of one arm, as written to `observations.jsonl`.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Observation {
+pub(crate) struct Observation {
     #[serde(flatten)]
     pub task: Task,
     pub status: Status,
@@ -154,7 +154,7 @@ pub struct Observation {
 }
 
 /// Runs arms through the compiled binary, each in its own directory under `root`.
-pub struct Harness {
+pub(crate) struct Harness {
     pub root: PathBuf,
     pub model: String,
     pub api_key_env: String,
@@ -166,15 +166,47 @@ pub struct Harness {
 
 impl Harness {
     /// Where an arm's home, workspace and session live.
-    pub fn dir(&self, task: &Task) -> PathBuf {
+    pub(crate) fn dir(&self, task: &Task) -> PathBuf {
         self.root
             .join(&task.variant)
             .join(format!("{}-{}-run{}", task.set, task.id, task.run))
     }
 
-    /// Run one arm against the model at `base_url` and grade it. Nothing of the user's
-    /// environment is used: `HOME` is the arm's own directory.
-    pub async fn run(&self, task: &Task, case: &Case, variant: &Variant, base_url: &str) -> Observation {
+    /// The program for one arm, with its own `HOME` and workspace, so that nothing of the
+    /// user's environment is used.
+    fn command(
+        &self,
+        case: &Case,
+        variant: &Variant,
+        base_url: &str,
+        workspace: &Path,
+        home: &Path,
+        session: &Path,
+    ) -> Command {
+        let mut command = super::zx_agent();
+        command
+            .arg("run")
+            .args(["--model", &self.model, "--base-url", base_url])
+            .args(["--api-key-env", &self.api_key_env, "--max-retries", "0"])
+            .arg("--profile")
+            .arg(&variant.profile)
+            .arg("--session")
+            .arg(session)
+            .args(&self.extra_args)
+            .arg(case.prompt)
+            .current_dir(workspace)
+            .env("HOME", home)
+            .env_remove("ZX_MODEL")
+            .env_remove("ZX_BASE_URL")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        command
+    }
+
+    /// Run one arm against the model at `base_url` and grade it.
+    pub(crate) async fn run(&self, task: &Task, case: &Case, variant: &Variant, base_url: &str) -> Observation {
         let dir = self.dir(task);
         let workspace = dir.join("workspace");
         let home = dir.join("home");
@@ -199,25 +231,7 @@ impl Harness {
             tokens: None,
             session: None,
         };
-        let mut command = Command::new(env!("CARGO_BIN_EXE_zx-agent"));
-        command
-            .arg("run")
-            .args(["--model", &self.model, "--base-url", base_url])
-            .args(["--api-key-env", &self.api_key_env, "--max-retries", "0"])
-            .arg("--profile")
-            .arg(&variant.profile)
-            .arg("--session")
-            .arg(&session)
-            .args(&self.extra_args)
-            .arg(case.prompt)
-            .current_dir(&workspace)
-            .env("HOME", &home)
-            .env_remove("ZX_MODEL")
-            .env_remove("ZX_BASE_URL")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+        let mut command = self.command(case, variant, base_url, &workspace, &home, &session);
         let child = match command.spawn() {
             Ok(child) => child,
             Err(error) => return errored(format!("cannot start zx-agent: {error}"), None, started.elapsed()),
@@ -272,7 +286,7 @@ impl Harness {
 
 /// Run every arm of `tasks` in order against one model, recording each observation as it
 /// comes, so that an interrupted evaluation keeps what it did.
-pub async fn evaluate(
+pub(crate) async fn evaluate(
     harness: &Harness,
     cases: &[Case],
     variants: &Variants,
@@ -298,7 +312,7 @@ fn millis(duration: Duration) -> u64 {
 /// What the report says about one eval set.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Comparison {
+pub(crate) struct Comparison {
     pub set: String,
     /// Pairs with a verdict on both arms.
     pub pairs: usize,
@@ -314,7 +328,7 @@ pub struct Comparison {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum Flag {
+pub(crate) enum Flag {
     NoLift,
     NegativeDelta,
     ControlSaturated,
@@ -324,7 +338,7 @@ pub enum Flag {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct BlockedPair {
+pub(crate) struct BlockedPair {
     pub set: String,
     pub id: String,
     pub run: u32,
@@ -333,7 +347,7 @@ pub struct BlockedPair {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct VariantTotals {
+pub(crate) struct VariantTotals {
     pub runs: usize,
     pub scored: usize,
     pub passed: usize,
@@ -344,7 +358,7 @@ pub struct VariantTotals {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Report {
+pub(crate) struct Report {
     pub comparisons: Vec<Comparison>,
     pub blocked: Vec<BlockedPair>,
     pub totals: BTreeMap<String, VariantTotals>,
@@ -353,7 +367,7 @@ pub struct Report {
 /// Pair the arms of `expected` and compare the variants. A pair needs exactly one scored
 /// observation per variant; anything else blocks it, and a blocked pair withholds its set's
 /// headline lift (pi: report.ts).
-pub fn summarize(expected: &[Task], observations: &[Observation], variants: &Variants) -> Report {
+pub(crate) fn summarize(expected: &[Task], observations: &[Observation], variants: &Variants) -> Report {
     let mut groups: BTreeMap<(String, String, u32), Vec<&Observation>> = BTreeMap::new();
     for task in expected {
         groups.entry((task.set.clone(), task.id.clone(), task.run)).or_default();
@@ -486,7 +500,7 @@ impl SetPairs {
 }
 
 /// The report as text, for the terminal and `report.txt`.
-pub fn format_report(report: &Report) -> String {
+pub(crate) fn format_report(report: &Report) -> String {
     let mut text = String::new();
     let pairs: usize = report.comparisons.iter().map(|comparison| comparison.pairs).sum();
     text.push_str(&format!(
@@ -546,28 +560,28 @@ pub fn format_report(report: &Report) -> String {
 
 /// One evaluation's directory: the protocol, the planned cohort, the observations as they
 /// come, the report, and each arm's home, workspace and session under `<variant>/`.
-pub struct Artifacts {
+pub(crate) struct Artifacts {
     pub dir: PathBuf,
 }
 
 impl Artifacts {
     /// A new directory under `parent`, named by the time and the process.
-    pub fn create(parent: &Path) -> Self {
+    pub(crate) fn create(parent: &Path) -> Self {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
         let dir = parent.join(format!("{}_{}", now.as_millis(), std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         Self { dir }
     }
 
-    pub fn write_protocol(&self, protocol: &Value) {
+    pub(crate) fn write_protocol(&self, protocol: &Value) {
         self.write("protocol.json", &serde_json::to_string_pretty(protocol).unwrap());
     }
 
-    pub fn write_expected(&self, tasks: &[Task]) {
+    pub(crate) fn write_expected(&self, tasks: &[Task]) {
         self.write("expected-runs.json", &serde_json::to_string_pretty(tasks).unwrap());
     }
 
-    pub fn append_observation(&self, observation: &Observation) {
+    pub(crate) fn append_observation(&self, observation: &Observation) {
         use std::io::Write;
 
         let mut file = std::fs::OpenOptions::new()
@@ -578,7 +592,7 @@ impl Artifacts {
         writeln!(file, "{}", serde_json::to_string(observation).unwrap()).unwrap();
     }
 
-    pub fn write_report(&self, report: &Report) {
+    pub(crate) fn write_report(&self, report: &Report) {
         self.write("report.json", &serde_json::to_string_pretty(report).unwrap());
         self.write("report.txt", &format_report(report));
     }
@@ -589,7 +603,7 @@ impl Artifacts {
 }
 
 /// What an evaluation was: the model, the variants, the cases and the plan's size.
-pub fn protocol(model: &str, variants: &Variants, cases: &[Case], runs_per_variant: u32) -> Value {
+pub(crate) fn protocol(model: &str, variants: &Variants, cases: &[Case], runs_per_variant: u32) -> Value {
     let variant = |variant: &Variant| json!({"name": variant.name, "profile": variant.profile.display().to_string()});
     json!({
         "model": model,
@@ -602,7 +616,7 @@ pub fn protocol(model: &str, variants: &Variants, cases: &[Case], runs_per_varia
 
 /// The sample cases: an edit the model has to make, and an instruction the project notes
 /// give. The treatment profile adds the notes; the control is otherwise the same.
-pub fn sample_cases() -> Vec<Case> {
+pub(crate) fn sample_cases() -> Vec<Case> {
     vec![
         Case {
             set: "edit",
@@ -622,7 +636,7 @@ pub fn sample_cases() -> Vec<Case> {
 }
 
 /// The profiles under `tests/fixtures/evals/`.
-pub fn sample_variants() -> Variants {
+pub(crate) fn sample_variants() -> Variants {
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/evals");
     Variants {
         control: Variant {

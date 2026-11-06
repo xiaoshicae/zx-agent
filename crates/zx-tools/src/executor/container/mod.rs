@@ -40,7 +40,9 @@ use scripts::{
 };
 
 use super::capture::{Capture, await_end, collect};
-use super::{Captured, CommandEnd, CommandOutput, Executor, ShellCommand};
+use super::{
+    Captured, CommandEnd, CommandOutput, Executor, ShellCommand, check_read_within, directory_error, special_file_error,
+};
 use crate::agent::ExecutionMode;
 
 /// Longest wait for a new container to accept commands.
@@ -250,7 +252,7 @@ impl Executor for ContainerExecutor {
         // cleanup task has been queued for the next one.
         let _turn = tokio::select! {
             biased;
-            _ = cancel.cancelled() => return Ok(not_started()),
+            () = cancel.cancelled() => return Ok(not_started()),
             turn = self.turn.lock() => turn,
         };
         // An earlier run that was dropped may have left processes whose sweep is still queued.
@@ -311,21 +313,12 @@ impl Executor for ContainerExecutor {
         let (status, bytes, stderr) = within(READ_TIMEOUT, "reading", path, read).await?;
         match status.code() {
             Some(0) => {
-                let read = u64::try_from(bytes.len()).map_err(|e| format!("file length is out of range: {e}"))?;
-                if read > max_bytes {
-                    return Err(format!(
-                        "{} is over the {max_bytes} byte limit; use bash with head, tail, or grep instead",
-                        path.display()
-                    ));
-                }
+                check_read_within(path, &bytes, max_bytes)?;
                 Ok(bytes)
             }
-            Some(EXIT_DIRECTORY) => Err(format!("{} is a directory; use bash `ls` to list it", path.display())),
+            Some(EXIT_DIRECTORY) => Err(directory_error(path)),
             Some(EXIT_MISSING) => Err(format!("cannot read {}: no such file in the container", path.display())),
-            Some(EXIT_SPECIAL) => Err(format!(
-                "{} is not a regular file; special files are not supported",
-                path.display()
-            )),
+            Some(EXIT_SPECIAL) => Err(special_file_error(path)),
             Some(EXIT_DENIED) => Err(format!(
                 "cannot read {}: permission denied in the container",
                 path.display()
@@ -363,10 +356,7 @@ impl Executor for ContainerExecutor {
         match status.code() {
             Some(0) => Ok(()),
             Some(EXIT_DIRECTORY) => Err(format!("{} is a directory", path.display())),
-            Some(EXIT_SPECIAL) => Err(format!(
-                "{} is not a regular file; special files are not supported",
-                path.display()
-            )),
+            Some(EXIT_SPECIAL) => Err(special_file_error(path)),
             Some(EXIT_NO_DIRECTORY) => Err(format!(
                 "cannot create the directory of {} in the container: {}",
                 path.display(),

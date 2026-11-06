@@ -202,7 +202,11 @@ async fn file_caps_bound_both_writes_and_reads_and_invalid_utf8_is_refused() {
         .await
         .unwrap();
     assert!(kept.content.starts_with(&"x".repeat(513)));
-    assert!(kept.content.contains("over toolOutput.maxFileBytes"));
+    assert!(
+        kept.content.contains("over the 512 byte file limit"),
+        "{}",
+        kept.content
+    );
     assert!(!dir.path().join(".zx-agent").exists());
     let reference = spill(&hook, &"x".repeat(512)).await;
     let args = json!({"id":reference["outputId"]});

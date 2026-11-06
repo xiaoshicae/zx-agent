@@ -1,24 +1,27 @@
-//! What every subcommand shares of the process: exit codes, lines on stdout and the
-//! shutdown signals.
+//! What every subcommand shares of the process: exit codes, lines on stdout, the shutdown
+//! signals and the telemetry export.
 
 use std::io::Write;
+use std::sync::Arc;
 
+use anyhow::Result;
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::agent::{AgentEvent, Event, EventSink};
+use zx_agent::otel::{Telemetry, TraceParent};
 use zx_agent::runner::RunOutcome;
 
 /// Exit codes, so schedulers can react without parsing output.
 pub(crate) const EXIT_COMPLETED: u8 = 0;
 pub(crate) const EXIT_ERROR: u8 = 1;
 pub(crate) const EXIT_USAGE: u8 = 2;
-pub(crate) const EXIT_MODEL_REQUEST_LIMIT: u8 = 3;
-pub(crate) const EXIT_TIMEOUT: u8 = 4;
+const EXIT_MODEL_REQUEST_LIMIT: u8 = 3;
+const EXIT_TIMEOUT: u8 = 4;
 pub(crate) const EXIT_ABORTED: u8 = 5;
-pub(crate) const EXIT_TRUNCATED: u8 = 6;
-pub(crate) const EXIT_TOKEN_BUDGET: u8 = 7;
+const EXIT_TRUNCATED: u8 = 6;
+const EXIT_TOKEN_BUDGET: u8 = 7;
 
 /// The exit code that reports `outcome`.
 pub(crate) fn exit_code(outcome: RunOutcome) -> u8 {
@@ -104,5 +107,62 @@ impl EventSink for JsonlEvents {
             return;
         }
         write_line(event);
+    }
+}
+
+/// Run `mode` with the trace and metric export started, when an OTLP endpoint is configured,
+/// and finished once it returns.
+///
+/// An endpoint the exporter refuses is a configuration error, reported before `mode` starts;
+/// what remains to export is sent before the exit code is returned.
+pub(crate) async fn with_telemetry<M>(mode: M) -> Result<u8>
+where
+    M: AsyncFnOnce(Option<&Telemetry>) -> Result<u8>,
+{
+    let telemetry = start_telemetry()?;
+    let result = mode(telemetry.as_ref()).await;
+    finish_telemetry(telemetry).await;
+    result
+}
+
+/// Export traces and metrics when an OTLP endpoint is configured (`zx_agent::otel`), and say
+/// so on stderr.
+fn start_telemetry() -> Result<Option<Telemetry>> {
+    let telemetry = Telemetry::from_env().map_err(anyhow::Error::msg)?;
+    if let Some(telemetry) = &telemetry {
+        eprintln!("[otel] exporting {} over OTLP/HTTP", telemetry.exports().describe());
+    }
+    Ok(telemetry)
+}
+
+/// The sink for an unattended run: the run continues the caller's trace when `TRACEPARENT`
+/// names one, as a scheduler or `otel-cli` sets it. A value that is not a traceparent is
+/// reported, and the run starts a trace of its own.
+pub(crate) fn run_sink(telemetry: &Telemetry) -> Arc<dyn EventSink> {
+    match TraceParent::from_env() {
+        Ok(Some(parent)) => {
+            eprintln!("[otel] continuing trace {}", parent.trace_id());
+            telemetry.sink_under(&parent)
+        }
+        Ok(None) => telemetry.sink(),
+        Err(error) => {
+            eprintln!("[otel] {error}; the run starts a trace of its own");
+            telemetry.sink()
+        }
+    }
+}
+
+/// Export the spans that remain. Telemetry never changes the outcome: failures only go to
+/// stderr.
+async fn finish_telemetry(telemetry: Option<Telemetry>) {
+    let Some(telemetry) = telemetry else {
+        return;
+    };
+    let dropped = telemetry.dropped();
+    if dropped > 0 {
+        eprintln!("[otel] {dropped} event(s) were not exported: the queue was full");
+    }
+    if let Err(error) = telemetry.shutdown().await {
+        eprintln!("[otel] {error}");
     }
 }

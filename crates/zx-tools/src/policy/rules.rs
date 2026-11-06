@@ -23,9 +23,12 @@ pub enum RuleMatcher {
     CommandPrefix(String),
 }
 
+/// One rule: the calls it matches and the verdict on them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Rule {
+    /// The calls the rule applies to.
     pub matcher: RuleMatcher,
+    /// The verdict on a matching call.
     pub decision: Decision,
 }
 
@@ -58,6 +61,7 @@ pub struct RulePolicy {
 }
 
 impl RulePolicy {
+    /// A policy of `rules` alone, with nothing auto-approved.
     pub fn new(rules: Vec<Rule>) -> Self {
         Self {
             rules,

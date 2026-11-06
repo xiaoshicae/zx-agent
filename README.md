@@ -240,8 +240,8 @@ zx-agent run --base-url https://api.deepseek.com --model deepseek-flash \
 | `--model` | `deepseek-flash` 或 `deepseek-v4-pro` | 官方文档；2026-11-02 实测的是 `deepseek-flash`。文档写明 `deepseek-chat`、`deepseek-reasoner` 在 2026-07-24 之后停用；2026-11-01 用 `deepseek-chat` 的请求仍成功，原因未核实 |
 | `--api-key-env` | 存放 key 的环境变量名，如 `DEEPSEEK_API_KEY` | key 只从环境变量读取 |
 | 思考模式 | 默认开启。`--request-field 'thinking={"type":"disabled"}'` 关闭；`--request-field 'reasoning_effort="low"'` 调整强度（`low`、`high`、`max`） | 官方文档写明两个字段的格式，`thinking` 决定是否思考时优先。2026-11-02 用 `deepseek-flash` 实测：两个字段都被接受；关闭思考时三次运行的输入 token 都是 340，默认与 `low` 都是 365，说明该字段生效（服务端如何处理未核实）。输出 token 在同一设置下每次不同（默认三次为 202、2、2），不能据此比较思考强度 |
-| 思考内容 | 回答中的 `reasoning_content` 记入会话，之后的请求中回传给产生它的模型 | `crates/zx-ai-openai/src/lib.rs`。官方文档：带工具的请求必须回传全部 `reasoning_content`，否则返回 400 |
-| `--fill-missing-reasoning` | 历史中混有不带推理内容的回答（例如中途换过模型）时开启 | pi 记录过该服务对这种历史返回 “The `reasoning_content` in the thinking mode must be passed back to the API.”（pi #3668），开启后其余回答带上空的 `reasoning_content`。本项目没有实测这种情况；此前的版本对所有服务都这样做，现在默认关闭 |
+| 思考内容 | 回答中的 `reasoning_content` 记入会话，之后的请求中回传给产生它的模型 | `crates/zx-ai-openai/src/request.rs`。官方文档：带工具的请求必须回传全部 `reasoning_content`，否则返回 400 |
+| `--fill-missing-reasoning` | 历史中混有不带推理内容的回答（例如中途换过模型）时开启 | pi 记录过该服务对这种历史返回 “The `reasoning_content` in the thinking mode must be passed back to the API.”（pi #3668），开启后其余回答带上空的 `reasoning_content`。本项目没有实测这种情况，只有一次历史中完全不带推理内容的真实请求成功过；此前的版本对所有服务都这样做，现在默认关闭 |
 | 结构化输出 | `response_format` 只有 `text` 与 `json_object`，没有 `json_schema` | 官方文档 |
 
 ### run 退出码
@@ -330,7 +330,7 @@ zx-agent    src/             CLI（run、chat、serve、acp）、profile、OpenT
 zx-im 与 zx-tools 都只依赖 zx-core 与 zx-ai，彼此不依赖；zx-ai-openai 只依赖 zx-ai，内核与它互不依赖，所以只嵌入内核的程序不编译 HTTP 客户端；两个平台 crate 实现 zx-im 的 `ImChannel`。代码中没有针对特定场景、环境或平台文案语言的规则：场景是 profile 文件，Kubernetes 的规则在 `deploy/kubernetes/`，IM 的文案由配置替换。模块之间的关系：
 
 ```
-CLI (main.rs + cli.rs + chat/ + acp.rs)
+CLI (main.rs + cli/ + chat/ + acp/)
   ├─ profile/ + profiles/  文件化场景、上下文与 skill 工具
   └─ agent_session  共享会话、取消、订阅与模型切换           ← pi: coding-agent AgentSession
        └─ runner    独占运行、重试、轮次与时间上限、持久化
@@ -344,7 +344,7 @@ CLI (main.rs + cli.rs + chat/ + acp.rs)
 |---|---|---|
 | 消息与事件协议 | `crates/zx-ai/src/types.rs` | `ai/src/types.ts`（`AssistantMessageEvent`） |
 | provider 约定 | `crates/zx-ai/src/provider.rs` | `agent/src/types.ts`（`StreamFn` 约定） |
-| OpenAI 兼容 provider | `crates/zx-ai-openai/src/lib.rs` | `ai/src/api/openai-completions.ts`、`transform-messages.ts` |
+| OpenAI 兼容 provider | `crates/zx-ai-openai/src/`（`lib.rs` 为请求流程，`config.rs`、`request.rs`、`failure.rs`、`accumulate.rs` 为设置、请求体、失败与回答累积） | `ai/src/api/openai-completions.ts`、`transform-messages.ts` |
 | 重试判断 | `crates/zx-ai/src/retry.rs` | `ai/src/utils/retry.ts` |
 | 测试用 provider | `crates/zx-ai/src/faux.rs` | `ai/src/providers/faux.ts` |
 | agent 循环 | `crates/zx-core/src/agent/agent_loop.rs` | `agent/src/agent-loop.ts`（`runLoop`、`executeToolCalls`） |
@@ -356,13 +356,13 @@ CLI (main.rs + cli.rs + chat/ + acp.rs)
 | 执行环境 | `crates/zx-tools/src/executor/` | 无对应实现：本机与 Docker 容器两个 `Executor` |
 | 会话 | `crates/zx-core/src/session.rs` | `coding-agent/src/core/session-manager.ts` |
 | 运行控制 | `crates/zx-core/src/runner.rs` | `coding-agent/src/core/agent-session.ts`（`_startRun`、`_prepareRetry`） |
-| 共享会话 | `crates/zx-core/src/agent_session.rs` | `AgentSession` 的长期生命周期与多订阅者接口 |
+| 共享会话 | `crates/zx-core/src/agent_session.rs`、`crates/zx-core/src/agent_session/events.rs` | `AgentSession` 的长期生命周期与多订阅者接口 |
 | 系统提示词 | `crates/zx-core/src/prompt.rs` | `coding-agent/src/core/system-prompt.ts` |
 | 文件化配置 | `src/profile/`、`profiles/` | 加载与叠加 TOML、项目上下文、显式 skill 目录及按需读取；内置场景只有这些文件 |
-| 终端前端 | `src/chat/`、`src/cli.rs`、`src/run.rs`、`src/process.rs`、`src/render.rs` | 单输入所有者、审批、显示；共享的 CLI 选项与会话组装；run 子命令；退出码、stdout 行与信号；终端与日志里调用与事件的文案 |
-| ACP 接入 | `src/acp.rs` | agent 一侧：会话、回合、事件到 `session/update` 的映射、审批到 `session/request_permission` 的映射 |
-| IM 接入 | `crates/zx-im/src/` | 无对应实现：`ImChannel` 平台接口；`Server` 按线程分派，每个线程一个任务独占会话，审批卡片与运行上限 |
-| IM 平台 | `crates/zx-im-slack/`、`crates/zx-im-feishu/` | 无对应实现：两个 `ImChannel` 实现，与接口分开，平台相关的代码只在这里 |
+| 终端前端 | `src/chat/`、`src/cli/`、`src/run.rs`、`src/process.rs`、`src/render.rs`、`src/sessions.rs`、`src/list_sessions.rs` | 单输入所有者、审批、显示；共享的 CLI 选项、进程共用的连接与会话组装；run 子命令；退出码、stdout 行、信号与追踪导出；终端与日志里调用与事件的文案；会话文件与 `zx-agent sessions` |
+| ACP 接入 | `src/acp/` | agent 一侧：会话、回合、事件到 `session/update` 的映射、审批到 `session/request_permission` 的映射 |
+| IM 接入 | `crates/zx-im/src/` | 无对应实现：`ImChannel` 平台接口；`Server` 按线程分派（`server.rs` 契约与配置、`router.rs` 分派、`worker.rs` 会话任务、`outlet.rs` 发帖与上报、`approval.rs` 审批卡片、`status.rs` 运行状态、`platform.rs` 平台共用的辅助），每个线程一个任务独占会话，审批卡片与运行上限 |
+| IM 平台 | `crates/zx-im-slack/`（`events.rs` 事件与卡片）、`crates/zx-im-feishu/`（`api.rs`、`connection.rs`、`frame.rs`、`events.rs`） | 无对应实现：两个 `ImChannel` 实现，与接口分开，平台相关的代码只在这里 |
 
 ### 与 pi 一致的关键语义
 
@@ -613,7 +613,7 @@ run、chat 与 serve 在设置了下面的标准变量时，用 OTLP/HTTP（prot
 
 如果进程在写入最后一行时崩溃，未换行且确实未完成的尾记录会在下次打开时截掉，包括截断在 UTF-8 字符中间的情况。写入失败（如磁盘已满）后不再写入，因此留下的残缺同样只在文件末尾，按同一规则修复。CLI 会在 stderr 报告修复；库调用方可读取 `SessionStore::recovered_tail_bytes()`。完整记录缺少末尾换行时会补换行；已换行的损坏记录、未知记录类型和完整记录的字段错误会报错并保留文件。截掉尾记录发生在其余记录全部通过校验之后，因此打开失败时文件保持原样。
 
-新建会话格式为 v5，兼容读取 v1–v4。旧文件在首次写入请求或压缩记录前追加 `format_upgrade`（version 3），在首次写入 `tool_call_started` 前追加 `format_upgrade`（version 4），在第一次增量摘要前追加 `format_upgrade`（version 5），都不改写头部。只支持到 v4 的程序会拒绝打开 v5 会话。压缩时先追加 `compaction_started`，请求完成后追加 `compaction` 或 `compaction_failed`。未完成或失败记录不改变投影；成功记录保留全部 system、结构化摘要及 `firstKeptEntryId` 之后的原消息，原始历史仍可审计。默认的全量模式下，摘要来源是应用过 `context_edit` 的原始投影，不输入旧摘要；可选的增量模式（v5，见 [PROFILES.md](docs/PROFILES.md)）下，后一次摘要沿用前一次仍有效的事实，只读取其边界之后的记录与此后被修正的旧记录。
+新建会话格式为 v6，兼容读取 v1–v5。旧文件在首次写入请求或压缩记录前追加 `format_upgrade`（version 3），在首次写入 `tool_call_started` 前追加 `format_upgrade`（version 4），在第一次增量摘要前追加 `format_upgrade`（version 5），在首次写入扩展的 `custom` 或 `custom_message` 记录前追加 `format_upgrade`（version 6），都不改写头部。只支持到 v5 的程序会拒绝打开 v6 会话。压缩时先追加 `compaction_started`，请求完成后追加 `compaction` 或 `compaction_failed`。未完成或失败记录不改变投影；成功记录保留全部 system、结构化摘要及 `firstKeptEntryId` 之后的原消息，原始历史仍可审计。默认的全量模式下，摘要来源是应用过 `context_edit` 的原始投影，不输入旧摘要；可选的增量模式（v5，见 [PROFILES.md](docs/PROFILES.md)）下，后一次摘要沿用前一次仍有效的事实，只读取其边界之后的记录与此后被修正的旧记录。
 
 每次模型请求（任务请求与摘要请求）发出前，先追加 `request_started`；provider、模型、工具定义、`max_tokens` 或 provider 转换参数变化时，先追加一条 `request_config`。`request_started` 引用配置，并记录消息来源：会话投影（以该条目的父节点为准），或摘要尝试的源条目与请求时间戳。库调用方可用 `SessionStore::replay_request` 还原当时与 provider 无关的 `Request`，OpenAI 兼容服务可再用 `openai::replay_body` 重建请求体。会话文件不记录 API key、URL 和 HTTP 头；自定义 provider 通过 `Provider::request_options` 提供非机密的转换参数，默认为 `null`，此时只能还原到 `Request`。这些记录写入失败时不发请求，并中止运行。`request_started` 只表示准备发送，后面没有对应的回答，说明发送结果未知。
 
@@ -811,11 +811,12 @@ pub trait SessionLog: Send + Sync {
 
 ```bash
 cargo test                                   # 不需要网络和 API key；付费的真实 API 测试默认跳过
-cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets -- -D warnings    # clippy 默认项加 Cargo.toml 的 [workspace.lints]，阈值在 clippy.toml
 cargo fmt --check
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 ```
 
-在仓库根目录运行时，这三条命令覆盖全部 8 个 crate（test 与 clippy 经 `Cargo.toml` 的 `default-members`）。在 `crates/` 下某个 crate 的目录里运行，或加 `-p zx-core` 这样的参数，只处理那一个 crate；集成测试都在根目录的 `tests/`，属于 `zx-agent`。
+在仓库根目录运行时，这些命令覆盖全部 8 个 crate（test、clippy 与 doc 经 `Cargo.toml` 的 `default-members`）。在 `crates/` 下某个 crate 的目录里运行，或加 `-p zx-core` 这样的参数，只处理那一个 crate；集成测试都在根目录的 `tests/`，属于 `zx-agent`。
 
 | 测试文件 | 覆盖内容 |
 |---|---|
@@ -829,7 +830,7 @@ cargo fmt --check
 | `tests/acp_cli.rs` | `acp`：手写的 JSON-RPC 客户端经子进程 stdio 驱动：初始化与建会话、流式回答与 `end_turn`、工具调用的 `tool_call` 与权限请求、批准后执行与 `completed`、拒绝不执行且模型收到原因、`session/cancel` 得到 `cancelled` 后会话可继续、未知会话的错误、`write_file` 的 diff 与位置、自动放行的命令不问人且在会话的目录执行；会话文件在 cwd 的会话目录中，第二个进程 `session/load` 后回放对话再继续（模型看到此前的消息），工具调用连同结果的回放，`--session-dir`，`--no-session` 不落盘且不声明 `loadSession`，未知会话与 `--session` 的错误；`session/list` 的顺序、标题、时间、按 cwd 过滤与分页拒绝，`session/resume` 不回放地续接；stdout 的每一行都必须是协议消息 |
 | `tests/profiles_cli.rs` | profile 覆盖、显式默认值、预算参数的 help 写明取自 profile、不可绕过的 deny、上下文范围与审计、上下文默认值与越界链接、`--system-prompt-file` 兼容、skill 懒加载与脱敏、配置错误（含 provider 参数）退出码且不建会话文件 |
 | `tests/run_cli.rs` | `run` 在 P0 之后新增的约定：进度与报告行转义终端控制字符；另一个 `run` 正在写的会话文件不能再被打开写入；JSONL 事件的信封；为零的超时在请求前被拒绝；stdout 已关闭时退出码仍由运行结果决定；token 预算的退出码 7、最后一次请求可超出预算、profile 设置预算与命令行的 0 关闭；只在设置了 OTLP 地址时导出追踪与指标，导出内容不含回答；`TRACEPARENT` 让运行接续调用方的 trace，不合法时提示并自成一条；`--request-field` 到达模型并写入请求审计，写错时以退出码 2 结束且不建会话文件；`--fill-missing-reasoning` 默认关闭，开启时写入请求审计；`--reasoning` 按三种写法到达模型并写入请求审计，写错或与 `--request-field` 冲突时以退出码 2 结束（原有 `run` 测试仍在 `tests/cli.rs`） |
-| `tests/otel.rs` | 一次真实运行导出一条 trace：每次尝试、回合、模型请求与工具调用各一个 span，用量与工具属性正确；同一次运行经宿主的 `SdkMeterProvider` 导出指标（运行数、token、请求与工具调用的次数）；`sink_under` 让运行接续给定的 traceparent；`src/otel.rs` 的单元测试另覆盖嵌套与时间、只含元数据、运行结束时关闭未结束的 span、手动摘要自成一条 trace 且其 token 只计一次、指标的属性与时长、traceparent 的解析与拒绝、队列满时丢弃并计数 |
+| `tests/otel.rs` | 一次真实运行导出一条 trace：每次尝试、回合、模型请求与工具调用各一个 span，用量与工具属性正确；同一次运行经宿主的 `SdkMeterProvider` 导出指标（运行数、token、请求与工具调用的次数）；`sink_under` 让运行接续给定的 traceparent；`src/otel/` 的单元测试另覆盖嵌套与时间、只含元数据、运行结束时关闭未结束的 span、手动摘要自成一条 trace 且其 token 只计一次、指标的属性与时长、traceparent 的解析与拒绝、队列满时丢弃并计数 |
 | `tests/session_compaction.rs`、`tests/compaction.rs` | v1/v2 追加升级、分支和引用、原始投影、省略保留边界后摘要仍生效、编辑摘要的变换计划在写入前被拒绝、摘要源与上下文字节统计不含工具结果的 `details`、摘要失败与取消、请求 / 用量预算、超时和上限 |
 | `tests/incremental_summary.rs` | 增量摘要（v5）：第一次读取整段前缀并给事实编号、之后只读旧事实与新增记录、可接续全量模式留下的摘要、取代与淘汰、修正只作废相关事实并在下一次重读、模型不能自带编号、加载时拒绝违反规则的记录、请求可从会话文件还原、多轮之后请求大小不随历史增长（与全量模式对照）；摘要评测的脚本会话自检，以及用知道答案的假模型验证评分 |
 | `tests/request_audit.rs` | 每次任务与摘要请求可从会话文件还原、配置只在变化时追加、旧会话首次请求前升级、与投影不一致的请求不记录、固定会话文件（v4 与含增量摘要的 v5）的还原结果不变（版本守护） |

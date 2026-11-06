@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,8 +26,8 @@ use zx_agent::interaction::Interaction;
 use zx_agent::otel::Telemetry;
 use zx_agent::profile::Builtin;
 
-use crate::cli::{self, ServeArgs, SessionOptions};
-use crate::process::{EXIT_COMPLETED, EXIT_ERROR, EXIT_USAGE, spawn_signal_handler, write_line};
+use crate::cli::{self, ServeArgs, SessionOptions, env_value};
+use crate::process::{EXIT_COMPLETED, EXIT_ERROR, EXIT_USAGE, spawn_signal_handler, with_telemetry, write_line};
 use crate::sessions::SessionFile;
 
 /// How long an approval card waits for a click.
@@ -39,6 +39,9 @@ const DEFAULT_APP_SECRET_ENV: &str = "FEISHU_APP_SECRET";
 /// Under the session directory: the statuses of runs in progress (`StatusFiles`). The dot
 /// keeps it apart from the platform directories, whose encoded names never contain one.
 const RUNNING_DIR: &str = ".running";
+
+type Conversations = Vec<(String, ConversationId)>;
+type Approvers = Vec<(String, UserId)>;
 
 /// The serve configuration file.
 #[derive(Deserialize)]
@@ -133,12 +136,7 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
         args.request.session.is_none(),
         "--session does not apply to serve: each thread has its own session file under [sessions] dir"
     );
-    // Startup reads; nothing runs concurrently yet.
-    let text =
-        std::fs::read_to_string(&args.config).with_context(|| format!("cannot read {}", args.config.display()))?;
-    let file: ServeFile =
-        toml::from_str(&text).with_context(|| format!("invalid serve configuration {}", args.config.display()))?;
-
+    let file = read_file(&args.config)?;
     let mut channels: Vec<Arc<dyn ImChannel>> = Vec::new();
     let mut hidden_env = Vec::new();
     if let Some(slack) = &file.slack {
@@ -157,77 +155,102 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
         args.config.display()
     );
     let platforms: HashSet<&str> = channels.iter().map(|channel| channel.platform()).collect();
-    let conversations = entries(&file.access.conversations, &platforms, "access.conversations")?
+    let (conversations, approvers) = access(&file.access, &platforms)?;
+    with_telemetry(async move |telemetry| {
+        let dir = file.sessions.dir;
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("cannot create the session directory {}", dir.display()))?;
+        let running = dir.join(RUNNING_DIR);
+        std::fs::create_dir_all(&running).with_context(|| format!("cannot create {}", running.display()))?;
+
+        // Once for the process: every thread's session shares the connections.
+        let shared = cli::Shared::connect(&args.base, Builtin::Assistant, &args.transport).await?;
+        let factory = Sessions {
+            args,
+            shared,
+            dir,
+            approval_timeout: Duration::from_secs(
+                file.limits
+                    .approval_timeout_secs
+                    .unwrap_or(DEFAULT_APPROVAL_TIMEOUT_SECS),
+            ),
+            hidden_env,
+            events: telemetry.map_or_else(|| Arc::new(NullSink) as Arc<dyn EventSink>, Telemetry::sink),
+        };
+        // A wrong model, profile or tool setting would otherwise surface only at the first
+        // message, in the chat; check it once with a session that is never stored.
+        factory
+            .prepare(SessionFile::Memory)
+            .await
+            .context("cannot prepare a session with these settings")?;
+
+        let config = server_config(&file.limits, file.replies, running, conversations, approvers);
+        eprintln!(
+            "[serve] platforms={}; sessions in {}",
+            channels
+                .iter()
+                .map(|channel| channel.platform())
+                .collect::<Vec<_>>()
+                .join(","),
+            factory.dir.display()
+        );
+        let cancel = CancellationToken::new();
+        spawn_signal_handler(cancel.clone());
+        let served = Server::new(config, Arc::new(factory), Arc::new(Log))
+            .run(channels, &cancel)
+            .await;
+        Ok(serve_exit_code(served))
+    })
+    .await
+}
+
+/// The serve configuration file at `path`. A startup read; nothing runs concurrently yet.
+fn read_file(path: &Path) -> Result<ServeFile> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
+    toml::from_str(&text).with_context(|| format!("invalid serve configuration {}", path.display()))
+}
+
+/// The chats the bot answers in and the users who may approve, each on a configured platform.
+fn access(section: &AccessSection, platforms: &HashSet<&str>) -> Result<(Conversations, Approvers)> {
+    let conversations = entries(&section.conversations, platforms, "access.conversations")?
         .into_iter()
         .map(|(platform, id)| (platform, ConversationId(id)))
         .collect();
-    let approvers = entries(&file.access.approvers, &platforms, "access.approvers")?
+    let approvers = entries(&section.approvers, platforms, "access.approvers")?
         .into_iter()
         .map(|(platform, id)| (platform, UserId(id)))
         .collect();
-    let telemetry = cli::start_telemetry()?;
-    let dir = file.sessions.dir;
-    std::fs::create_dir_all(&dir).with_context(|| format!("cannot create the session directory {}", dir.display()))?;
-    let running = dir.join(RUNNING_DIR);
-    std::fs::create_dir_all(&running).with_context(|| format!("cannot create {}", running.display()))?;
+    Ok((conversations, approvers))
+}
 
-    // Once for the process: every thread's session shares the connections.
-    let shared = cli::Shared::connect(&args.base, Builtin::Assistant, &args.transport).await?;
-    let factory = Sessions {
-        args,
-        shared,
-        dir,
-        approval_timeout: Duration::from_secs(
-            file.limits
-                .approval_timeout_secs
-                .unwrap_or(DEFAULT_APPROVAL_TIMEOUT_SECS),
-        ),
-        hidden_env,
-        events: telemetry
-            .as_ref()
-            .map_or_else(|| Arc::new(NullSink) as Arc<dyn EventSink>, Telemetry::sink),
-    };
-    // A wrong model, profile or tool setting would otherwise surface only at the first
-    // message, in the chat; check it once with a session that is never stored.
-    factory
-        .prepare(SessionFile::Memory)
-        .await
-        .context("cannot prepare a session with these settings")?;
-
+/// The server's settings: the file's limits over the defaults, with the statuses of runs in
+/// progress kept in `running`, so that a crash or a kill cannot leave threads saying the work
+/// goes on.
+fn server_config(
+    limits: &LimitsSection,
+    replies: Replies,
+    running: PathBuf,
+    conversations: Conversations,
+    approvers: Approvers,
+) -> ServerConfig {
     let mut config = ServerConfig {
         conversations,
         approvers,
-        replies: file.replies,
-        // A crash or a kill must not leave threads saying the work goes on.
+        replies,
         statuses: Some(Arc::new(StatusFiles::new(running))),
         ..ServerConfig::default()
     };
-    if let Some(running) = file.limits.max_running {
+    if let Some(running) = limits.max_running {
         config.max_running = running;
     }
-    if let Some(secs) = file.limits.idle_secs {
+    if let Some(secs) = limits.idle_secs {
         config.idle = Duration::from_secs(secs);
     }
-    eprintln!(
-        "[serve] platforms={}; sessions in {}",
-        channels
-            .iter()
-            .map(|channel| channel.platform())
-            .collect::<Vec<_>>()
-            .join(","),
-        factory.dir.display()
-    );
-    let cancel = CancellationToken::new();
-    spawn_signal_handler(cancel.clone());
-    let served = Server::new(config, Arc::new(factory), Arc::new(Log))
-        .run(channels, &cancel)
-        .await;
-    cli::finish_telemetry(telemetry).await;
-    Ok(exit_code(served))
+    config
 }
 
 /// How serving ended, as an exit code; a failure is reported on stderr.
-fn exit_code(served: Result<(), ImError>) -> u8 {
+fn serve_exit_code(served: Result<(), ImError>) -> u8 {
     match served {
         Ok(()) => EXIT_COMPLETED,
         Err(error @ ImError::Config(_)) => {
@@ -287,10 +310,7 @@ fn failure_log(platform: &'static str) -> ErrorReport {
 
 /// The value of a credential variable, which must be set and non-empty.
 fn secret(name: &str, what: &str) -> Result<String> {
-    match std::env::var(name) {
-        Ok(value) if !value.is_empty() => Ok(value),
-        _ => anyhow::bail!("{name} must hold {what}"),
-    }
+    env_value(name).with_context(|| format!("{name} must hold {what}"))
 }
 
 /// Split `platform:id` entries, each naming a configured platform.
@@ -333,6 +353,7 @@ impl Sessions {
             request: &self.args.request,
             budget: &self.args.budget,
             model: &self.args.base.model,
+            cwd: None,
             file,
             default_profile: Builtin::Assistant,
             continue_on_length: None,

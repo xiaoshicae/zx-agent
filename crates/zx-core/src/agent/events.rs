@@ -85,14 +85,14 @@ impl RunTrace {
 
 /// Where the events of a run go: stamped by `trace`, then handed to `sink`.
 #[derive(Clone, Copy)]
-pub(crate) struct Emit<'a> {
+pub(crate) struct EventTarget<'a> {
     pub(crate) sink: &'a dyn EventSink,
     pub(crate) trace: &'a RunTrace,
 }
 
-impl Emit<'_> {
-    /// Stamp `event` and hand it to the sink only, bypassing `on_event` hooks.
-    pub(crate) fn direct(self, event: AgentEvent) {
+impl EventTarget<'_> {
+    /// Stamp `event` and hand it to the sink only, so that no `on_event` hook observes it.
+    pub(crate) fn emit_unobserved(self, event: AgentEvent) {
         self.sink.emit(&self.trace.stamp(event));
     }
 }
@@ -435,6 +435,7 @@ mod tests {
     use crate::agent::RunOutcome;
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "one event of every variant")]
     fn kind_matches_the_serialized_type() {
         // One event of every variant; add new variants here.
         let events = [

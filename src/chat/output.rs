@@ -15,7 +15,7 @@ use zx_agent::text::clip;
 
 use crate::cli::{ColorArg, OutputMode};
 use crate::process::{JsonlEvents, write_line};
-use crate::render::{describe_call, progress_line, visible};
+use crate::render::{Severity, answer_end_line, call_label, progress_line, visible};
 
 use super::debug::DebugState;
 use super::term::{Phase, Style, Terminal, Tone, elapsed_text};
@@ -25,9 +25,7 @@ const PREVIEW_LINES: usize = 3;
 /// Lines of a patch shown under its `[tool]` line: a change deserves more than a result.
 const PATCH_PREVIEW_LINES: usize = 20;
 /// Characters kept of each previewed line.
-const PREVIEW_CHARS: usize = 120;
-/// Characters of a call's label in progress and result lines; approvals show everything.
-const LABEL_CHARS: usize = 80;
+const LINE_PREVIEW_CHARS: usize = 120;
 /// What the conversation has used so far, for `/status`.
 #[derive(Clone, Copy, Default)]
 pub(super) struct Totals {
@@ -195,9 +193,7 @@ impl Output {
                 id, name, arguments, ..
             } = block
             {
-                state
-                    .labels
-                    .insert(id.clone(), clip(&describe_call(name, arguments), LABEL_CHARS));
+                state.labels.insert(id.clone(), call_label(name, arguments));
             }
         }
         if let Some(error) = &message.error_message {
@@ -206,18 +202,11 @@ impl Output {
         if self.debug {
             return;
         }
-        if let Some(error) = &message.error_message {
-            // A cancelled request is reported once, with the run's report.
-            if message.stop_reason != StopReason::Aborted {
-                state.terminal.line(
-                    Tone::Error,
-                    &format!("[model] {:?}: {}", message.stop_reason, visible(error)),
-                );
-            }
-        } else if message.stop_reason == StopReason::Length {
-            state
-                .terminal
-                .line(Tone::Warn, "[model] response reached the output token limit");
+        // A cancelled request is reported once, with the run's report.
+        if message.stop_reason != StopReason::Aborted
+            && let Some((severity, line)) = answer_end_line(message)
+        {
+            state.terminal.line(tone(severity), &line);
         }
     }
 
@@ -246,6 +235,7 @@ impl Output {
 }
 
 impl EventSink for Output {
+    #[expect(clippy::too_many_lines, reason = "chat is frozen; the event match stays as it is")]
     fn emit(&self, event: &Event) {
         if self.mode == OutputMode::Jsonl {
             self.json.emit(event);
@@ -310,7 +300,7 @@ impl EventSink for Output {
                         .labels
                         .get(tool_call_id)
                         .cloned()
-                        .unwrap_or_else(|| clip(&describe_call(tool_name, args), LABEL_CHARS));
+                        .unwrap_or_else(|| call_label(tool_name, args));
                     state.terminal.set_phase(Phase::Tool { label });
                 }
                 // The result line that follows says how the call ended.
@@ -349,9 +339,9 @@ impl EventSink for Output {
                 // Everything else is printed as `run` prints it; `progress_line` covers every event.
                 other => {
                     if !self.debug
-                        && let Some(line) = progress_line(other)
+                        && let Some((severity, line)) = progress_line(other)
                     {
-                        state.terminal.line(progress_tone(other), &line);
+                        state.terminal.line(tone(severity), &line);
                     }
                     // A summary is over: a manual one ends without a `run_end`.
                     if matches!(
@@ -431,7 +421,7 @@ fn limited(text: &str, max_lines: usize, style: Style, tone: impl Fn(&str) -> To
     let mut lines: Vec<String> = text
         .lines()
         .take(max_lines)
-        .map(|line| style.paint(tone(line), &clip(&visible(line), PREVIEW_CHARS)))
+        .map(|line| style.paint(tone(line), &clip(&visible(line), LINE_PREVIEW_CHARS)))
         .collect();
     if total > max_lines {
         lines.push(style.paint(Tone::Dim, &format!("… {} more line(s)", total - max_lines)));
@@ -439,32 +429,12 @@ fn limited(text: &str, max_lines: usize, style: Style, tone: impl Fn(&str) -> To
     lines
 }
 
-fn progress_tone(event: &AgentEvent) -> Tone {
-    match event {
-        AgentEvent::RetryScheduled { .. }
-        | AgentEvent::ContextOverflow { .. }
-        | AgentEvent::ToolCallRecovered { .. } => Tone::Warn,
-        AgentEvent::CompactionFailed { .. } | AgentEvent::HookFailed { .. } => Tone::Error,
-        AgentEvent::RunStart { .. }
-        | AgentEvent::RunEnd { .. }
-        | AgentEvent::AgentStart { .. }
-        | AgentEvent::TurnStart { .. }
-        | AgentEvent::RequestStart { .. }
-        | AgentEvent::MessageStart { .. }
-        | AgentEvent::MessageUpdate { .. }
-        | AgentEvent::MessageEnd { .. }
-        | AgentEvent::ToolExecutionStart { .. }
-        | AgentEvent::ToolExecutionUpdate { .. }
-        | AgentEvent::ToolDecision { .. }
-        | AgentEvent::ApprovalRequested { .. }
-        | AgentEvent::ApprovalResolved { .. }
-        | AgentEvent::ToolExecutionEnd { .. }
-        | AgentEvent::TurnEnd { .. }
-        | AgentEvent::AgentEnd { .. }
-        | AgentEvent::ContextEdited { .. }
-        | AgentEvent::CompactionStart { .. }
-        | AgentEvent::CompactionEnd { .. }
-        | AgentEvent::CustomEntry { .. } => Tone::Dim,
+/// The tone of a line by how serious it is: progress is dimmed.
+fn tone(severity: Severity) -> Tone {
+    match severity {
+        Severity::Info => Tone::Dim,
+        Severity::Warn => Tone::Warn,
+        Severity::Error => Tone::Error,
     }
 }
 
@@ -519,10 +489,10 @@ mod tests {
         let plain = Style::new(false);
         assert_eq!(preview(&result("", None), plain), Vec::<String>::new());
         assert_eq!(preview(&result("one\ntwo", None), plain), ["one", "two"]);
-        let long = format!("{}\nb\nc\nd\ne", "a".repeat(PREVIEW_CHARS + 1));
+        let long = format!("{}\nb\nc\nd\ne", "a".repeat(LINE_PREVIEW_CHARS + 1));
         let lines = preview(&result(&long, None), plain);
         assert_eq!(lines.len(), PREVIEW_LINES + 1);
-        assert_eq!(lines[0].chars().count(), PREVIEW_CHARS + 3, "{}", lines[0]);
+        assert_eq!(lines[0].chars().count(), LINE_PREVIEW_CHARS + 3, "{}", lines[0]);
         assert_eq!(lines[3], "… 2 more line(s)");
         assert_eq!(preview(&result("\u{1b}[2Jx", None), plain), ["\\u{1b}[2Jx"]);
     }

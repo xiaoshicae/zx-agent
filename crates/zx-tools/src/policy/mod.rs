@@ -24,6 +24,7 @@ pub struct PolicyHook {
 }
 
 impl PolicyHook {
+    /// The hook that asks `policy` about every tool call.
     pub fn new(policy: Arc<dyn ToolPolicy>) -> Self {
         Self { policy }
     }
@@ -69,7 +70,7 @@ pub(super) fn normalize_all(texts: impl IntoIterator<Item = impl AsRef<str>>) ->
 mod tests {
     use super::*;
 
-    fn denied(decision: Decision) -> bool {
+    fn denied(decision: &Decision) -> bool {
         matches!(decision, Decision::Deny(_))
     }
 
@@ -77,8 +78,8 @@ mod tests {
     fn denied_patterns_apply_without_allowlist() {
         let policy = CommandPolicy::new(Vec::<String>::new());
         assert_eq!(policy.evaluate("df -h"), Decision::Allow);
-        assert!(denied(policy.evaluate("sudo  RM -RF  /")));
-        assert!(denied(policy.evaluate("systemctl reboot")));
+        assert!(denied(&policy.evaluate("sudo  RM -RF  /")));
+        assert!(denied(&policy.evaluate("systemctl reboot")));
     }
 
     #[test]
@@ -92,20 +93,20 @@ mod tests {
             policy.evaluate("journalctl -u nginx --since '1 hour ago' | tail -n 50"),
             Decision::Allow
         );
-        assert!(denied(policy.evaluate("kubectl delete pod x")));
-        assert!(denied(policy.evaluate("kubectl get pods; rm x")));
-        assert!(denied(policy.evaluate("kubectl get pods && rm x")));
-        assert!(denied(policy.evaluate("grep x $(cat list)")));
-        assert!(denied(policy.evaluate("tail -n 5 log > out")));
-        assert!(denied(policy.evaluate("grep a || rm b")));
-        assert!(denied(policy.evaluate("grep a\nrm b")));
-        assert!(denied(policy.evaluate("grepx a")));
+        assert!(denied(&policy.evaluate("kubectl delete pod x")));
+        assert!(denied(&policy.evaluate("kubectl get pods; rm x")));
+        assert!(denied(&policy.evaluate("kubectl get pods && rm x")));
+        assert!(denied(&policy.evaluate("grep x $(cat list)")));
+        assert!(denied(&policy.evaluate("tail -n 5 log > out")));
+        assert!(denied(&policy.evaluate("grep a || rm b")));
+        assert!(denied(&policy.evaluate("grep a\nrm b")));
+        assert!(denied(&policy.evaluate("grepx a")));
     }
 
     #[test]
     fn extra_denied_patterns_apply_to_every_command() {
         let policy = CommandPolicy::new(Vec::<String>::new()).deny_also(["kubectl delete"]);
-        assert!(denied(policy.evaluate("KUBECTL  delete pod x")));
+        assert!(denied(&policy.evaluate("KUBECTL  delete pod x")));
         assert_eq!(policy.evaluate("kubectl get pods"), Decision::Allow);
     }
 
@@ -358,7 +359,7 @@ mod tests {
         .auto_approve(list.clone());
         assert_eq!(denied_by_rule.check("bash", &ls).await, Decision::Deny("denied".into()));
         let unmatched = RulePolicy::new(Vec::new()).auto_approve(list);
-        assert!(denied(unmatched.check("bash", &ls).await));
+        assert!(denied(&unmatched.check("bash", &ls).await));
     }
 
     #[test]
@@ -445,7 +446,7 @@ mod tests {
             "{ reboot; }",
             "uptime\nreboot",
         ] {
-            assert!(denied(policy.evaluate(command)), "{command}");
+            assert!(denied(&policy.evaluate(command)), "{command}");
         }
     }
 
@@ -509,7 +510,7 @@ mod tests {
             "kubectl get pods\nrm x",
         ] {
             assert!(
-                denied(allow.check("bash", &serde_json::json!({ "command": command })).await),
+                denied(&allow.check("bash", &serde_json::json!({ "command": command })).await),
                 "{command}"
             );
         }
@@ -524,6 +525,6 @@ mod tests {
                 .await,
             Decision::Allow
         );
-        assert!(denied(policy.check("bash", &serde_json::json!({})).await));
+        assert!(denied(&policy.check("bash", &serde_json::json!({})).await));
     }
 }

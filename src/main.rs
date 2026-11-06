@@ -7,6 +7,7 @@ use clap::Parser;
 mod acp;
 mod chat;
 mod cli;
+mod list_sessions;
 mod process;
 mod render;
 mod run;
@@ -26,7 +27,7 @@ async fn main() -> ExitCode {
         Command::Run(args) => run::run(args).await,
         Command::Chat(args) => chat::run(args).await,
         Command::Serve(args) => serve::run(args).await,
-        Command::Sessions(args) => sessions::run(args).await,
+        Command::Sessions(args) => list_sessions::run(args).await,
         Command::Acp(args) => acp::run(args).await,
     };
     match result {
@@ -38,11 +39,12 @@ async fn main() -> ExitCode {
     }
 }
 
-/// Mark this process non-dumpable before any command runs. Commands run as the same user,
-/// and ptrace access mode checks then refuse them this process's `/proc/<pid>/environ`,
-/// which holds the API key, unless they have CAP_SYS_PTRACE (ptrace(2),
-/// proc_pid_environ(5)). The same attribute turns off core dumps of this process
-/// (PR_SET_DUMPABLE(2const)). See docs/p6-online-access-review.md, section 3.3.
+/// Mark this process non-dumpable before any command runs.
+///
+/// Commands run as the same user, and ptrace access mode checks then refuse them this
+/// process's `/proc/<pid>/environ`, which holds the API key, unless they have CAP_SYS_PTRACE
+/// (ptrace(2), proc_pid_environ(5)). The same attribute turns off core dumps of this process
+/// (PR_SET_DUMPABLE(2const)).
 #[cfg(target_os = "linux")]
 fn deny_same_user_inspection() -> std::io::Result<()> {
     // prctl(2): int prctl(int op, ... /* unsigned long arg2, arg3, arg4, arg5 */).

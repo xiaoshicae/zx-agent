@@ -42,12 +42,7 @@ impl Dirs {
     /// Where chat keeps this working directory's sessions by default, spelled out as pi
     /// spells it.
     fn session_dir(&self) -> PathBuf {
-        let cwd = self.cwd().display().to_string();
-        let encoded = cwd.trim_start_matches('/').replace('/', "-");
-        self.home
-            .path()
-            .join(".zx-agent/sessions")
-            .join(format!("--{encoded}--"))
+        common::session_dir(self.home.path(), &self.cwd())
     }
 
     fn command(&self, args: &[&str]) -> Command {
@@ -93,15 +88,7 @@ impl Dirs {
 
 /// The session files in `dir`, by name.
 fn files(dir: &Path) -> Vec<PathBuf> {
-    let Ok(read_dir) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut files: Vec<PathBuf> = read_dir
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| path.extension().is_some_and(|extension| extension == "jsonl"))
-        .collect();
-    files.sort();
-    files
+    common::session_files(dir)
 }
 
 fn prompts(path: &Path) -> Vec<String> {
@@ -118,13 +105,7 @@ fn prompts(path: &Path) -> Vec<String> {
 
 /// The user messages the model received in request `index`.
 fn sent(server: &MockServer, index: usize) -> Vec<String> {
-    server.requests()[index].body["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|message| message["role"] == "user")
-        .map(|message| message["content"].as_str().unwrap().to_string())
-        .collect()
+    server.requests()[index].user_texts()
 }
 
 /// A session file with one prompt, last written at `at_ms`.

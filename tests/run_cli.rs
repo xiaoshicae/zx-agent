@@ -13,7 +13,7 @@ use tokio::process::Command;
 
 use common::http::{Request, read_request};
 use common::mock_server::{MockServer, Reply};
-use common::zx_agent;
+use common::{json_lines, stderr, stdout, zx_agent};
 
 /// An answer that would set the terminal title if a terminal ran it.
 const TITLE_ANSWER: &str = "before\u{1b}]0;CANARY\u{7}after";
@@ -47,7 +47,7 @@ async fn an_answer_written_to_a_pipe_keeps_its_exact_text() {
     let server = MockServer::start(vec![Reply::text(TITLE_ANSWER)]).await;
     let output = run(&server, dir.path()).output().await.unwrap();
     assert_eq!(output.status.code(), Some(0));
-    assert_eq!(String::from_utf8_lossy(&output.stdout), format!("{TITLE_ANSWER}\n"));
+    assert_eq!(stdout(&output), format!("{TITLE_ANSWER}\n"));
 }
 
 #[cfg(unix)]
@@ -112,7 +112,7 @@ async fn progress_and_report_lines_escape_terminal_control_characters() {
         .output()
         .await
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
     assert_eq!(server.requests().len(), 2, "{stderr}");
     assert!(!stderr.contains('\u{1b}'), "{stderr:?}");
@@ -149,7 +149,7 @@ async fn a_second_run_cannot_write_a_session_that_another_run_is_writing() {
         .await
         .unwrap();
 
-    let stderr = String::from_utf8_lossy(&second.stderr);
+    let stderr = stderr(&second);
     assert_eq!(second.status.code(), Some(2), "{stderr}");
     assert!(stderr.contains("is in use"), "{stderr}");
     assert_eq!(
@@ -195,12 +195,7 @@ async fn commands_cannot_read_the_agent_environment_through_proc() {
         .output()
         .await
         .unwrap();
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let result = server.requests()[1].body["messages"].to_string();
     assert!(result.contains("Permission denied"), "{result}");
     assert!(!result.contains(PROBE), "{result}");
@@ -240,12 +235,7 @@ async fn commands_cannot_see_the_headers_for_a_trace_collector() {
         .output()
         .await
         .unwrap();
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let result = server.requests()[1].body["messages"].to_string();
     assert!(result.contains("headers=[] traces=[] metrics=[]"), "{result}");
     assert!(!result.contains("collector-secret"), "{result}");
@@ -262,12 +252,7 @@ async fn request_fields_reach_the_model_and_the_audit() {
         .output()
         .await
         .unwrap();
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let body = &server.requests()[0].body;
     assert_eq!(body["thinking"], json!({"type": "disabled"}));
     assert_eq!(body["reasoning_effort"], json!("low"));
@@ -294,7 +279,7 @@ async fn bad_request_fields_exit_2_before_any_request() {
             .output()
             .await
             .unwrap();
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr(&output);
         assert_eq!(output.status.code(), Some(2), "{field}: {stderr}");
         assert!(stderr.contains(expected), "{field}: {stderr}");
     }
@@ -303,7 +288,7 @@ async fn bad_request_fields_exit_2_before_any_request() {
         .output()
         .await
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(2), "{stderr}");
     assert!(
         stderr.contains("--request-field seed is given more than once"),
@@ -337,12 +322,7 @@ async fn the_reasoning_level_reaches_the_model_in_the_chosen_format_and_the_audi
             .output()
             .await
             .unwrap();
-        assert_eq!(
-            output.status.code(),
-            Some(0),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
         let body = &server.requests()[index].body;
         let mut sent = serde_json::Map::new();
         for field in ["reasoning_effort", "thinking", "reasoning"] {
@@ -405,13 +385,8 @@ async fn continue_answers_again_after_a_failed_run_without_repeating_the_prompt(
         .await
         .unwrap();
 
-    assert_eq!(
-        continued.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&continued.stderr)
-    );
-    assert_eq!(String::from_utf8_lossy(&continued.stdout), "second try\n");
+    assert_eq!(continued.status.code(), Some(0), "{}", stderr(&continued));
+    assert_eq!(stdout(&continued), "second try\n");
     let requests = server.requests();
     let users: Vec<&Value> = requests[1].body["messages"]
         .as_array()
@@ -429,7 +404,7 @@ async fn continue_answers_again_after_a_failed_run_without_repeating_the_prompt(
         .await
         .unwrap();
     assert_eq!(finished.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&finished.stderr).contains("ends with a finished answer"));
+    assert!(stderr(&finished).contains("ends with a finished answer"));
     assert_eq!(server.requests().len(), 2);
 }
 
@@ -443,7 +418,7 @@ async fn continue_needs_an_existing_session_and_no_prompt() {
         (&["--session", "s.jsonl", "a prompt"][..], "cannot be used with"),
     ] {
         let output = run_continue(&server, dir.path()).args(extra).output().await.unwrap();
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr(&output);
         assert_eq!(output.status.code(), Some(2), "{extra:?}: {stderr}");
         assert!(stderr.contains(expected), "{extra:?}: {stderr}");
     }
@@ -483,7 +458,7 @@ async fn bad_reasoning_settings_exit_2_before_any_request() {
             .output()
             .await
             .unwrap();
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr(&output);
         assert_eq!(output.status.code(), Some(2), "{flags:?}: {stderr}");
         assert!(stderr.contains(expected), "{flags:?}: {stderr}");
     }
@@ -505,7 +480,7 @@ async fn filling_missing_reasoning_is_off_unless_asked_and_the_audit_records_the
             .output()
             .await
             .unwrap();
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr(&output);
         assert_eq!(output.status.code(), Some(0), "{session}: {stderr}");
         let audit = std::fs::read_to_string(dir.path().join(session)).unwrap();
         assert!(audit.contains(r#""version":2"#), "{audit}");
@@ -526,10 +501,7 @@ async fn jsonl_events_carry_the_envelope_of_their_run() {
         .unwrap();
 
     assert_eq!(output.status.code(), Some(0));
-    let lines: Vec<Value> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
+    let lines: Vec<Value> = json_lines(&stdout(&output));
     for (index, line) in lines.iter().enumerate() {
         assert_eq!(line["schemaVersion"], 1, "{line}");
         assert_eq!(line["seq"], index + 1, "{line}");
@@ -558,7 +530,7 @@ async fn a_zero_timeout_is_rejected_before_any_request() {
         let output = run(&server, dir.path()).args([flag, "0"]).output().await.unwrap();
 
         assert_eq!(output.status.code(), Some(2), "{flag}");
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr(&output);
         assert!(stderr.contains(flag), "{flag}: {stderr}");
     }
     assert!(server.requests().is_empty());
@@ -581,7 +553,7 @@ async fn the_token_budget_ends_a_run_with_exit_code_7_before_the_next_request() 
         .await
         .unwrap();
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(7), "{stderr}");
     assert!(stderr.contains("outcome=TokenBudget"), "{stderr}");
     assert!(
@@ -602,9 +574,9 @@ async fn the_last_request_may_take_a_run_over_its_token_budget() {
         .await
         .unwrap();
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "part one, part two\n");
+    assert_eq!(stdout(&output), "part one, part two\n");
     assert_eq!(server.requests().len(), 2);
 }
 
@@ -621,12 +593,7 @@ async fn a_profile_sets_the_token_budget_and_zero_on_the_command_line_disables_i
         .output()
         .await
         .unwrap();
-    assert_eq!(
-        output.status.code(),
-        Some(7),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_eq!(output.status.code(), Some(7), "{}", stderr(&output));
     assert_eq!(limited.requests().len(), 1);
 
     let unlimited = two_answers().await;
@@ -635,12 +602,7 @@ async fn a_profile_sets_the_token_budget_and_zero_on_the_command_line_disables_i
         .output()
         .await
         .unwrap();
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(unlimited.requests().len(), 2);
 }
 
@@ -693,7 +655,7 @@ async fn a_run_exports_its_trace_and_metrics_only_when_an_endpoint_is_configured
         .output()
         .await
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     assert!(
         stderr.contains("[otel] exporting traces and metrics over OTLP/HTTP"),
@@ -730,7 +692,7 @@ async fn a_run_exports_its_trace_and_metrics_only_when_an_endpoint_is_configured
         .output()
         .await
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = common::stderr(&output);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     assert!(!stderr.contains("[otel]"), "{stderr}");
     assert_eq!(received.lock().unwrap().len(), 2, "nothing more was sent");
@@ -753,7 +715,7 @@ async fn a_run_continues_the_trace_that_traceparent_names() {
         .output()
         .await
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     assert!(stderr.contains("[otel] exporting traces over OTLP/HTTP"), "{stderr}");
     assert!(
@@ -779,7 +741,7 @@ async fn a_run_continues_the_trace_that_traceparent_names() {
         .output()
         .await
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = common::stderr(&output);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     assert!(
         stderr.contains(
@@ -808,7 +770,7 @@ async fn a_closed_stdout_leaves_the_exit_code_to_the_outcome() {
 
         let output = child.wait_with_output().await.unwrap();
 
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr(&output);
         assert_eq!(output.status.code(), Some(0), "{mode}: {stderr}");
         assert_eq!(server.requests().len(), 1, "{mode}");
     }

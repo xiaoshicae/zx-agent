@@ -1,38 +1,26 @@
-//! Session files: where every mode opens or creates one, where chat keeps and forks them,
-//! and `zx-agent sessions`, which lists them.
+//! Session files: where every mode opens or creates one, and where chat keeps, lists and
+//! forks them.
 //!
 //! As in pi (`getDefaultSessionDirPath`), each working directory has its own directory under
 //! the home directory; `--session-dir` replaces it.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use clap::Args;
 
 use zx_agent::session::{self, SessionHeader, SessionInfo, SessionList, SessionStore};
 
-use crate::render::visible;
+use crate::render::{local_time, visible};
 
 /// Under the home directory: the sessions of every working directory.
 const SESSIONS_HOME: &str = ".zx-agent/sessions";
 /// Characters of a first prompt shown in a listing.
-const PREVIEW_CHARS: usize = 60;
+const PROMPT_PREVIEW_CHARS: usize = 60;
 /// Characters of a session ID shown in a listing; enough to tell sessions apart, and what
 /// `--resume` and `/resume` accept as a prefix.
-pub(crate) const SHORT_ID_CHARS: usize = 8;
-
-#[derive(Args)]
-pub(crate) struct SessionsArgs {
-    /// Directory of session files. Defaults to the one chat uses for --cwd:
-    /// ~/.zx-agent/sessions/--<cwd with / as ->--.
-    #[arg(long)]
-    pub(crate) session_dir: Option<PathBuf>,
-
-    /// Working directory whose default session directory is listed.
-    #[arg(long)]
-    pub(crate) cwd: Option<PathBuf>,
-}
+const SHORT_ID_CHARS: usize = 8;
+/// How a listing shows when a session was last active.
+const LISTING_TIME_FORMAT: &str = "%Y-%m-%d %H:%M";
 
 /// Where a mode keeps its session.
 #[derive(Clone, Copy)]
@@ -100,7 +88,7 @@ pub(crate) fn default_dir(cwd: &Path) -> Result<PathBuf> {
 
 /// Create `dir` and its missing parents, readable only by this user on Unix: session files
 /// hold the conversation and tool output. Existing directories keep their permissions.
-pub(crate) fn create_dir(dir: &Path) -> Result<()> {
+fn create_dir(dir: &Path) -> Result<()> {
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
@@ -112,7 +100,7 @@ pub(crate) fn create_dir(dir: &Path) -> Result<()> {
 
 /// `<UTC time>_<session ID>.jsonl`, as pi names them: sorted by name they are in the order
 /// they were started, and the ID in the name is the one `/resume` takes.
-pub(crate) fn file_name(header: &SessionHeader) -> String {
+fn file_name(header: &SessionHeader) -> String {
     let time = i64::try_from(header.timestamp)
         .ok()
         .and_then(chrono::DateTime::from_timestamp_millis)
@@ -141,10 +129,11 @@ pub(crate) enum Branch<'a> {
 }
 
 /// Copy a branch of the session file `source` into a new file in `dir`, started in `cwd`
-/// with `model` (pi: `createBranchedSession`). The source is read as a snapshot, without its
-/// lock, so a session that is open elsewhere, or in this chat, can be forked; it is not
-/// changed. A copy that fails part way leaves the new file as far as it got, and the error
-/// names it.
+/// with `model` (pi: `createBranchedSession`).
+///
+/// The source is read as a snapshot, without its lock, so a session that is open elsewhere,
+/// or in this chat, can be forked; it is not changed. A copy that fails part way leaves the
+/// new file as far as it got, and the error names it.
 pub(crate) async fn fork(source: &Path, dir: &Path, cwd: &Path, model: &str, branch: Branch<'_>) -> Result<Forked> {
     let source = source
         .canonicalize()
@@ -152,7 +141,7 @@ pub(crate) async fn fork(source: &Path, dir: &Path, cwd: &Path, model: &str, bra
     let read = source.clone();
     let source_store = tokio::task::spawn_blocking(move || SessionStore::read(&read))
         .await
-        .context("reading the session to fork stopped")??;
+        .with_context(|| format!("reading {} to fork it stopped", source.display()))??;
     let header = source_store.fork_header(cwd, model);
     create_dir(dir)?;
     let path = dir.join(file_name(&header));
@@ -176,10 +165,11 @@ pub(crate) async fn fork(source: &Path, dir: &Path, cwd: &Path, model: &str, bra
 }
 
 /// List the sessions in `dir`, reading files on a blocking thread.
-pub(crate) async fn list(dir: PathBuf) -> Result<SessionList> {
-    tokio::task::spawn_blocking(move || session::list_sessions(&dir))
+pub(crate) async fn list(dir: &Path) -> Result<SessionList> {
+    let read = dir.to_path_buf();
+    tokio::task::spawn_blocking(move || session::list_sessions(&read))
         .await
-        .context("listing the sessions stopped")?
+        .with_context(|| format!("listing the sessions in {} stopped", dir.display()))?
 }
 
 /// One line per session: short ID, last activity in local time, message count and the
@@ -196,8 +186,8 @@ pub(crate) fn lines(list: &SessionList, cwd: &Path) -> Vec<String> {
             };
             format!(
                 "{}  {}  {:>3} message(s)  {}{elsewhere}",
-                short_id(session),
-                local_time(session.last_activity_ms),
+                short_id(&session.id),
+                local_time(session.last_activity_ms, LISTING_TIME_FORMAT).unwrap_or_else(|| "-".to_string()),
                 session.messages,
                 preview(session)
             )
@@ -205,17 +195,9 @@ pub(crate) fn lines(list: &SessionList, cwd: &Path) -> Vec<String> {
         .collect()
 }
 
-pub(crate) fn short_id(session: &SessionInfo) -> String {
-    session.id.chars().take(SHORT_ID_CHARS).collect()
-}
-
-fn local_time(ms: u64) -> String {
-    i64::try_from(ms)
-        .ok()
-        .and_then(chrono::DateTime::from_timestamp_millis)
-        .map(|utc| utc.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
-        // Out of range only for a corrupt timestamp, which the listing still shows.
-        .unwrap_or_else(|| "-".to_string())
+/// The first [`SHORT_ID_CHARS`] of a session ID, as listings show it.
+pub(crate) fn short_id(id: &str) -> String {
+    id.chars().take(SHORT_ID_CHARS).collect()
 }
 
 fn preview(session: &SessionInfo) -> String {
@@ -225,44 +207,15 @@ fn preview(session: &SessionInfo) -> String {
     }
 }
 
-/// The first non-empty line of `text`, at most [`PREVIEW_CHARS`] characters, with an
+/// The first non-empty line of `text`, at most [`PROMPT_PREVIEW_CHARS`] characters, with an
 /// ellipsis for what is left out and control characters made visible.
 pub(crate) fn preview_text(text: &str) -> String {
     let line = text.lines().find(|line| !line.trim().is_empty()).unwrap_or("").trim();
-    let mut shown: String = line.chars().take(PREVIEW_CHARS).collect();
-    if line.chars().count() > PREVIEW_CHARS || text.trim().lines().count() > 1 {
+    let mut shown: String = line.chars().take(PROMPT_PREVIEW_CHARS).collect();
+    if line.chars().count() > PROMPT_PREVIEW_CHARS || text.trim().lines().count() > 1 {
         shown.push('…');
     }
     visible(&shown)
-}
-
-/// `zx-agent sessions`: sessions on stdout, newest first; the directory and files that could
-/// not be read on stderr.
-pub(crate) async fn run(args: SessionsArgs) -> Result<u8> {
-    let cwd = crate::cli::resolve_cwd(args.cwd.as_deref())?;
-    let dir = match args.session_dir {
-        Some(dir) => dir,
-        None => default_dir(&cwd)?,
-    };
-    let list = list(dir.clone()).await?;
-    let mut stdout = std::io::stdout().lock();
-    for line in lines(&list, &cwd) {
-        writeln!(stdout, "{line}")?;
-    }
-    stdout.flush()?;
-    for unreadable in &list.unreadable {
-        eprintln!(
-            "[sessions] cannot read {}: {}",
-            visible(&unreadable.path.display().to_string()),
-            visible(&unreadable.error)
-        );
-    }
-    eprintln!(
-        "[sessions] {} session(s) in {}",
-        list.sessions.len(),
-        visible(&dir.display().to_string())
-    );
-    Ok(crate::process::EXIT_COMPLETED)
 }
 
 #[cfg(test)]

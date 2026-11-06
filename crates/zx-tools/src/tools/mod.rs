@@ -46,11 +46,16 @@ pub const LS: &str = "ls";
 /// Names accepted by [`builtin_tools`].
 pub const BUILTIN_TOOL_NAMES: &[&str] = &[BASH, READ_FILE, EDIT_FILE, WRITE_FILE, GREP, FIND, LS];
 
+/// The largest file the text tools read or edit by default: enough for any source file, and
+/// far more than one call can show.
+const DEFAULT_MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
+
 /// Build built-in tools by name, in the given order, without duplicates. `hidden_env` names
 /// environment variables that bash commands must not see, such as the API key variable.
 /// The tools run on this machine; see [`builtin_tools_with`] for another executor.
 pub fn builtin_tools(names: &[String], bash_timeout: Duration, hidden_env: &[String]) -> Result<Vec<Arc<dyn Tool>>> {
-    builtin_tools_with(names, bash_timeout, hidden_env, Arc::new(LocalExecutor))
+    let local: Arc<dyn Executor> = Arc::new(LocalExecutor);
+    builtin_tools_with(names, bash_timeout, hidden_env, &local)
 }
 
 /// Like [`builtin_tools`], with the tools running commands and reading and writing files through
@@ -59,12 +64,12 @@ pub fn builtin_tools_with(
     names: &[String],
     bash_timeout: Duration,
     hidden_env: &[String],
-    executor: Arc<dyn Executor>,
+    executor: &Arc<dyn Executor>,
 ) -> Result<Vec<Arc<dyn Tool>>> {
     let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
     let queue = Arc::new(FileMutationQueue::default());
     let search = SearchSettings {
-        executor: executor.clone(),
+        executor: Arc::clone(executor),
         hidden_env: hidden_env.to_vec(),
         ..SearchSettings::default()
     };
@@ -76,22 +81,22 @@ pub fn builtin_tools_with(
         let tool: Arc<dyn Tool> = match name {
             BASH => Arc::new(BashTool {
                 default_timeout: bash_timeout,
-                max_timeout: bash_timeout.max(BashTool::default().max_timeout),
+                max_timeout: bash_timeout.max(bash::MAX_TIMEOUT),
                 hidden_env: hidden_env.to_vec(),
-                executor: executor.clone(),
+                executor: Arc::clone(executor),
                 ..BashTool::default()
             }),
             READ_FILE => Arc::new(ReadFileTool {
-                executor: executor.clone(),
+                executor: Arc::clone(executor),
                 ..ReadFileTool::default()
             }),
             EDIT_FILE => Arc::new(EditFileTool {
-                executor: executor.clone(),
+                executor: Arc::clone(executor),
                 queue: queue.clone(),
                 ..EditFileTool::default()
             }),
             WRITE_FILE => Arc::new(WriteFileTool {
-                executor: executor.clone(),
+                executor: Arc::clone(executor),
                 queue: queue.clone(),
             }),
             GREP => Arc::new(GrepTool {

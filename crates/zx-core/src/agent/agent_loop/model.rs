@@ -1,30 +1,41 @@
 //! Model request recording and streaming.
 
+use std::collections::HashMap;
+
 use super::{
-    AgentEvent, AssistantMessage, Engine, Halt, LoopResult, Message, Request, RequestKind, StopReason, StreamEvent,
-    StreamExt,
+    AgentEvent, AssistantMessage, Engine, Halt, LoopResult, Message, ModelMeta, Request, RequestKind, StopReason,
+    StreamEvent, StreamExt, Usage,
 };
 use crate::agent::RequestSettings;
 
-impl Engine<'_, '_, '_> {
-    /// Record and send a task request, then account for its response.
+/// Price `usage` by the cost of `model` in `models`, the model that was requested: that is
+/// the name the audit records, while a server may report another, such as a dated version
+/// of an alias. Without a known cost, the usage stays unpriced.
+pub(crate) fn price(models: &HashMap<String, ModelMeta>, model: &str, usage: &mut Usage) {
+    if let Some(cost) = models.get(model).and_then(|meta| meta.cost) {
+        usage.cost_usd = Some(cost.of(usage));
+    }
+}
+
+impl Engine<'_, '_> {
+    /// Record and send the task request of turn `turn`, then account for its response.
     pub(super) async fn request_model(
         &mut self,
         context: &[Message],
         result: &mut LoopResult,
+        turn: u32,
     ) -> Result<Option<AssistantMessage>, Halt> {
         let spec = &self.config.spec;
         let configured = RequestSettings {
             model: spec.model.clone(),
             reasoning: spec.reasoning,
         };
-        let turn = self.turn.unwrap_or_default();
         let settings = self
             .config
             .hooks
             .prepare_request(context, turn, configured, self.trace.context())
             .await
-            .map_err(|error| Halt::Failed(self.hook_error(error)))?;
+            .map_err(|error| Halt::Failed(self.report_hook_failure(error)))?;
         let request = Request {
             model: settings.model,
             messages: context.to_vec(),
@@ -40,33 +51,25 @@ impl Engine<'_, '_, '_> {
             reasoning: settings.reasoning,
             cache_key: self.config.cache_key.clone(),
         };
-        let request_entry = match self.control.session.as_deref_mut() {
-            Some(session) => Some(
-                session
-                    .record_request(&request, spec.provider.as_ref())
-                    .await
-                    .map_err(Halt::Unrecorded)?,
-            ),
-            None => None,
-        };
-        if self.control.cancel.is_cancelled() {
+        let request_entry = self
+            .session
+            .record_request(&request, spec.provider.as_ref())
+            .await
+            .map_err(Halt::Unrecorded)?;
+        if self.cancel.is_cancelled() {
             return Ok(None);
         }
         self.emit(AgentEvent::RequestStart {
             kind: RequestKind::Task,
             entry_id: request_entry,
             model: request.model.clone(),
-            attempt: self.control.attempt_number,
+            attempt: self.attempt_number,
         })
         .await;
         result.model_requests = result.model_requests.saturating_add(1);
         let model = request.model.clone();
         let mut message = self.stream(request).await;
-        // Priced by the model requested, which the audit records; the answer carries the
-        // server's own name of the model separately.
-        if let Some(cost) = self.config.models.get(&model).and_then(|meta| meta.cost) {
-            message.usage.cost_usd = Some(cost.of(&message.usage));
-        }
+        price(&self.config.models, &model, &mut message.usage);
         result.usage.add(&message.usage);
         Ok(Some(message))
     }
@@ -75,7 +78,7 @@ impl Engine<'_, '_, '_> {
     /// response and reports its end.
     async fn stream(&self, request: Request) -> AssistantMessage {
         let spec = &self.config.spec;
-        let mut events = spec.provider.stream(request, self.control.cancel.clone());
+        let mut events = spec.provider.stream(request, self.cancel.clone());
         let mut started = false;
         while let Some(event) = events.next().await {
             if !started {
@@ -88,7 +91,7 @@ impl Engine<'_, '_, '_> {
                 StreamEvent::Done(message) | StreamEvent::Error(message) => return message,
             }
         }
-        let stop = if self.control.cancel.is_cancelled() {
+        let stop = if self.cancel.is_cancelled() {
             StopReason::Aborted
         } else {
             StopReason::Error

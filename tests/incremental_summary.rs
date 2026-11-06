@@ -23,7 +23,7 @@ use zx_agent::session::{
 };
 
 use common::summary_eval::{PLANTED, Planted, ROUNDS, evaluate, round, text_of};
-use common::{RunnerSetup, config, header, read_lines};
+use common::{RunnerSetup, config, header, read_lines, replayed_requests};
 
 fn budget(mode: SummaryMode) -> Config {
     Config {
@@ -112,7 +112,7 @@ fn answer(texts: Vec<String>, supersede: Vec<usize>) -> FauxStep {
 }
 
 fn texts(texts: &[&str]) -> Vec<String> {
-    texts.iter().map(|text| text.to_string()).collect()
+    texts.iter().map(std::string::ToString::to_string).collect()
 }
 
 fn attempts(store: &SessionStore) -> Vec<&CompactionStartedEntry> {
@@ -504,14 +504,7 @@ async fn incremental_summary_requests_are_rebuilt_from_the_session_file() {
     let sent = two_summaries_in(&path).await;
 
     let store = SessionStore::read(&path).unwrap();
-    let rebuilt: Vec<Request> = store
-        .entries()
-        .iter()
-        .filter_map(|entry| match entry {
-            Entry::RequestStarted(started) => Some(store.replay_request(&started.id).unwrap().1),
-            _ => None,
-        })
-        .collect();
+    let rebuilt = replayed_requests(&store);
 
     assert_eq!(rebuilt, sent);
     assert_eq!(

@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering;
 
 use serde_json::json;
 
-use common::{EchoTool, RunnerSetup, config, header, summarize};
+use common::{EchoTool, NotifyingProvider, RunnerSetup, config, header, summarize};
 use zx_agent::AgentSession;
 use zx_agent::agent::Tool;
 use zx_agent::agent_session::SessionError;
@@ -154,12 +154,12 @@ async fn branching_to_the_root_starts_the_conversation_over_in_the_same_session(
 
 #[tokio::test]
 async fn branching_and_inspecting_wait_for_the_run_and_reject_unknown_entries() {
-    let provider = Arc::new(FauxProvider::new([FauxStep::Hang, FauxStep::text("later")]));
+    let provider = NotifyingProvider::new([FauxStep::Hang, FauxStep::text("later")]);
     let (runner, _) = RunnerSetup::new(config(provider.clone(), vec![])).build();
     let session = AgentSession::from(runner);
     let mut running = Box::pin(session.prompt("first"));
     tokio::select! {
-        () = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+        () = provider.started.notified() => {}
         _ = &mut running => panic!("must be running"),
     }
     assert_eq!(session.branch(None), Err(SessionError::Busy));

@@ -4,6 +4,7 @@
 
 use serde_json::Value;
 use zx_agent::agent::AgentEvent;
+use zx_agent::ai::{AssistantMessage, StopReason};
 use zx_agent::text::clip;
 
 /// Characters of an argument string shown inline in an approval; longer or multi-line ones
@@ -17,6 +18,14 @@ const BLOCK_LINES: usize = 60;
 const LABEL_FIELDS: [&str; 3] = ["command", "pattern", "path"];
 /// Characters of a call's arguments on a `[tool]` progress line.
 const PROGRESS_ARGS_CHARS: usize = 300;
+/// Characters of a call's label on a progress or result line, or as a client's title;
+/// approvals show everything.
+const LABEL_CHARS: usize = 80;
+
+/// [`describe_call`] cut to [`LABEL_CHARS`], for a line that lists the call.
+pub(crate) fn call_label(name: &str, args: &Value) -> String {
+    clip(&describe_call(name, args), LABEL_CHARS)
+}
 
 /// `name: <main argument> other=value`, or `name: <arguments as JSON>`; nothing is cut,
 /// control characters are escaped and a multi-line command stays on one line.
@@ -94,19 +103,53 @@ fn describe_value(path: &str, value: &Value, lines: &mut Vec<String>) {
     }
 }
 
-/// The stderr line for `event` in text output, shared by `run` and chat. Names, arguments and
-/// errors come from the model, servers or hooks, so they are escaped. Messages are left to
-/// each caller, which shows answers in its own way.
-pub(crate) fn progress_line(event: &AgentEvent) -> Option<String> {
-    match event {
-        AgentEvent::ToolExecutionStart { tool_name, args, .. } => Some(format!(
-            "[tool] {} {}",
-            visible(tool_name),
-            visible(&clip(&args.to_string(), PROGRESS_ARGS_CHARS))
-        )),
-        AgentEvent::ToolExecutionUpdate { tool_name, content, .. } => {
-            Some(format!("[tool] {}: {}", visible(tool_name), visible(content)))
-        }
+/// How serious a line is, for a terminal that colors lines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Severity {
+    /// Progress and housekeeping.
+    Info,
+    /// A recoverable problem.
+    Warn,
+    /// A failure.
+    Error,
+}
+
+/// The line about an answer that ended badly, with how serious that is: its error, or the
+/// output token limit it hit.
+pub(crate) fn answer_end_line(message: &AssistantMessage) -> Option<(Severity, String)> {
+    if let Some(error) = &message.error_message {
+        Some((
+            Severity::Error,
+            format!("[model] {:?}: {}", message.stop_reason, visible(error)),
+        ))
+    } else if message.stop_reason == StopReason::Length {
+        Some((
+            Severity::Warn,
+            "[model] Length: the response hit the output token limit".to_string(),
+        ))
+    } else {
+        None
+    }
+}
+
+/// The stderr line for `event` in text output, with how serious it is, shared by `run` and
+/// chat. Names, arguments and errors come from the model, servers or hooks, so they are
+/// escaped. Messages are left to each caller, which shows answers in its own way.
+#[expect(clippy::too_many_lines, reason = "one arm per event variant")]
+pub(crate) fn progress_line(event: &AgentEvent) -> Option<(Severity, String)> {
+    let line = match event {
+        AgentEvent::ToolExecutionStart { tool_name, args, .. } => (
+            Severity::Info,
+            format!(
+                "[tool] {} {}",
+                visible(tool_name),
+                visible(&clip(&args.to_string(), PROGRESS_ARGS_CHARS))
+            ),
+        ),
+        AgentEvent::ToolExecutionUpdate { tool_name, content, .. } => (
+            Severity::Info,
+            format!("[tool] {}: {}", visible(tool_name), visible(content)),
+        ),
         AgentEvent::ToolExecutionEnd {
             tool_name,
             is_error,
@@ -115,51 +158,67 @@ pub(crate) fn progress_line(event: &AgentEvent) -> Option<String> {
         } => {
             let status = if *is_error { "error" } else { "ok" };
             let duration = duration_ms.map(|ms| format!(" {ms}ms")).unwrap_or_default();
-            Some(format!("[tool] {} -> {status}{duration}", visible(tool_name)))
+            (
+                Severity::Info,
+                format!("[tool] {} -> {status}{duration}", visible(tool_name)),
+            )
         }
         AgentEvent::RetryScheduled {
             attempt,
             max_retries,
             delay_ms,
             error,
-        } => Some(format!(
-            "[retry] {attempt}/{max_retries} in {delay_ms}ms: {}",
-            visible(error)
-        )),
-        AgentEvent::ContextOverflow { error } => Some(format!(
-            "[overflow] context too long; compacting before another attempt: {}",
-            visible(error)
-        )),
-        AgentEvent::CompactionStart { input_bytes, .. } => {
-            Some(format!("[compact] summarizing {input_bytes} context bytes"))
-        }
+        } => (
+            Severity::Warn,
+            format!("[retry] {attempt}/{max_retries} in {delay_ms}ms: {}", visible(error)),
+        ),
+        AgentEvent::ContextOverflow { error } => (
+            Severity::Warn,
+            format!(
+                "[overflow] context too long; compacting before another attempt: {}",
+                visible(error)
+            ),
+        ),
+        AgentEvent::CompactionStart { input_bytes, .. } => (
+            Severity::Info,
+            format!("[compact] summarizing {input_bytes} context bytes"),
+        ),
         AgentEvent::CompactionEnd {
             input_bytes,
             output_bytes,
             ..
-        } => Some(format!("[compact] {input_bytes} -> {output_bytes} context bytes")),
-        AgentEvent::CompactionFailed { error, .. } => Some(format!("[compact] {}", visible(error))),
+        } => (
+            Severity::Info,
+            format!("[compact] {input_bytes} -> {output_bytes} context bytes"),
+        ),
+        AgentEvent::CompactionFailed { error, .. } => (Severity::Error, format!("[compact] {}", visible(error))),
         AgentEvent::ToolCallRecovered {
             tool_call_id,
             tool_name,
             state,
-        } => Some(format!(
-            "[recover] {} {}: {}",
-            visible(tool_name),
-            visible(tool_call_id),
-            state.describe()
-        )),
+        } => (
+            Severity::Warn,
+            format!(
+                "[recover] {} {}: {}",
+                visible(tool_name),
+                visible(tool_call_id),
+                state.describe()
+            ),
+        ),
         // The error names the hook and the phase: "<hook> after_tool failed: <reason>".
-        AgentEvent::HookFailed { error, .. } => Some(format!("[hook] {}", visible(error))),
-        AgentEvent::CustomEntry { custom_type, entry_id } => Some(format!(
-            "[extension] recorded {}{}",
-            visible(custom_type),
-            if entry_id.is_some() {
-                ""
-            } else {
-                " (not kept: no session)"
-            }
-        )),
+        AgentEvent::HookFailed { error, .. } => (Severity::Error, format!("[hook] {}", visible(error))),
+        AgentEvent::CustomEntry { custom_type, entry_id } => (
+            Severity::Info,
+            format!(
+                "[extension] recorded {}{}",
+                visible(custom_type),
+                if entry_id.is_some() {
+                    ""
+                } else {
+                    " (not kept: no session)"
+                }
+            ),
+        ),
         AgentEvent::RunStart { .. }
         | AgentEvent::RunEnd { .. }
         | AgentEvent::AgentStart { .. }
@@ -173,8 +232,20 @@ pub(crate) fn progress_line(event: &AgentEvent) -> Option<String> {
         | AgentEvent::ApprovalResolved { .. }
         | AgentEvent::TurnEnd { .. }
         | AgentEvent::AgentEnd { .. }
-        | AgentEvent::ContextEdited { .. } => None,
-    }
+        | AgentEvent::ContextEdited { .. } => return None,
+    };
+    Some(line)
+}
+
+/// `ms` since the epoch in local time, written as `format` (chrono's strftime), or `None`
+/// for a time the calendar cannot hold.
+pub(crate) fn local_time(ms: u64, format: &str) -> Option<String> {
+    // A timestamp beyond i64, or past the year 262143, cannot occur; each caller shows its
+    // line without the time.
+    i64::try_from(ms)
+        .ok()
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map(|utc| utc.with_timezone(&chrono::Local).format(format).to_string())
 }
 
 /// Escape control characters, including bidirectional overrides, so that text from models,
@@ -235,6 +306,13 @@ mod tests {
             describe_call("bash", &json!("not an object")),
             "bash: \"not an object\""
         );
+    }
+
+    #[test]
+    fn a_label_is_the_description_cut_short() {
+        assert_eq!(call_label("bash", &json!({"command": "ls -la"})), "bash: ls -la");
+        let long = call_label("bash", &json!({"command": "x".repeat(LABEL_CHARS)}));
+        assert_eq!(long, format!("bash: {}...", "x".repeat(LABEL_CHARS - "bash: ".len())));
     }
 
     // Fields keep the order they were sent in: serde_json's `preserve_order` is on for the

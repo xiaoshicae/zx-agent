@@ -5,12 +5,16 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::StreamExt;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use common::{EchoTool, RunnerSetup, config, header, read_lines};
+use common::{EchoTool, RunnerSetup, config, header, read_lines, seeded_session, summary_json};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{AssistantMessage, Message, ModelCost, ModelMeta, StopReason, Usage};
+use zx_agent::ai::provider::{EventReceiver, event_channel, send_event};
+use zx_agent::ai::{
+    AssistantMessage, Message, ModelCost, ModelMeta, Provider, Request, StopReason, StreamEvent, Usage,
+};
 use zx_agent::compaction::{self, Config, DEFAULT_RESERVE_TOKENS};
 use zx_agent::runner::RunOutcome;
 use zx_agent::session::{Entry, SessionStore};
@@ -81,25 +85,84 @@ async fn a_model_without_prices_has_no_cost() {
     );
 }
 
-fn summary(id: &str) -> String {
-    json!({"facts":[{"text":"Old observation","sourceEntryIds":[id]}],"inferences":["A guess"],"plans":["Continue"]})
-        .to_string()
+/// Answers like the faux provider, but names the model `served` in every response, as a
+/// server that resolves an alias to a dated version does.
+struct RenamingProvider {
+    faux: FauxProvider,
+    served: &'static str,
 }
 
-async fn seeded() -> (SessionStore, String) {
-    let mut store = SessionStore::in_memory(header());
-    let old = store
-        .append_message(Message::user("observed ".repeat(600)))
-        .await
+impl Provider for RenamingProvider {
+    fn name(&self) -> &str {
+        "renaming"
+    }
+
+    fn stream(&self, request: Request, cancel: CancellationToken) -> EventReceiver {
+        let mut events = self.faux.stream(request, cancel);
+        let served = self.served;
+        let (mut tx, rx) = event_channel();
+        tokio::spawn(async move {
+            while let Some(event) = events.next().await {
+                let event = match event {
+                    StreamEvent::Done(mut message) => {
+                        message.model = served.into();
+                        StreamEvent::Done(message)
+                    }
+                    StreamEvent::Error(mut message) => {
+                        message.model = served.into();
+                        StreamEvent::Error(message)
+                    }
+                    passed @ (StreamEvent::Start | StreamEvent::Delta(_)) => passed,
+                };
+                if !send_event(&mut tx, event).await {
+                    break;
+                }
+            }
+        });
+        rx
+    }
+}
+
+#[tokio::test]
+async fn costs_follow_the_requested_model_when_the_server_names_another() {
+    let (store, old) = seeded_session().await;
+    let provider = Arc::new(RenamingProvider {
+        faux: FauxProvider::new([FauxStep::text(summary_json(&old)), FauxStep::text("done")]),
+        served: "test-model-2026-01-01",
+    });
+    let mut config = config(provider, vec![]);
+    config.models.insert("test-model".into(), priced());
+    let (runner, _) = RunnerSetup {
+        session: store,
+        ..RunnerSetup::new(config)
+    }
+    .build();
+    let mut runner = runner
+        .with_compaction(Config {
+            keep_recent_bytes: 1,
+            ..Config::default()
+        })
         .unwrap();
-    store.append_message(Message::user("most recent input")).await.unwrap();
-    (store, old)
+
+    let compacted = runner.compact(&CancellationToken::new()).await;
+    let report = runner.run("go", &CancellationToken::new()).await;
+
+    assert_eq!(compacted.outcome, compaction::Outcome::Completed, "{compacted:?}");
+    assert_eq!(
+        compacted.usage.cost_usd,
+        Some(20.0),
+        "the summary is priced by the requested model"
+    );
+    assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
+    assert_eq!(report.usage.cost_usd, Some(20.0), "so is the answer");
+    let recorded = runner.session().latest_compaction().unwrap().usage.cost_usd;
+    assert_eq!(recorded, Some(20.0), "the compaction record carries the cost");
 }
 
 async fn run_with_token_trigger(trigger_tokens: u64) -> (RunOutcome, Vec<&'static str>, usize) {
-    let (store, old) = seeded().await;
+    let (store, old) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
-        FauxStep::text(summary(&old)),
+        FauxStep::text(summary_json(&old)),
         FauxStep::text("answer"),
     ]));
     let (runner, events) = RunnerSetup {
