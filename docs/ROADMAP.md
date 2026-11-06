@@ -539,7 +539,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P10 | 与 pi 的能力对齐 | 已完成（PR #72，2026-11-06 合并；⑭ 按 D13 不做）：2026-11-05 对照 pi 列出 14 项缺口，见下文 P10；① 上下文超长后自动恢复已完成（PR #56）；② 容器沙箱已完成（PR #57）；③ edit 与 write 工具已完成（PR #58）；④ grep、find、ls 已完成（PR #59）；⑤ 运行中可调整的配置已完成：⑤a 推理强度（PR #60）、⑤b 续跑（PR #61）、⑤c 请求前替换模型与推理强度的钩子（PR #65）；⑥a 会话目录与续接已完成（PR #67）；⑥b fork 已完成（PR #68）；⑥c 会话内切换分支已完成（PR #72）；⑦ 扩展能力与 ⑨ 消息队列已完成（PR #72）；⑧ 模型元数据与计量已完成（PR #72）；⑫ 幂等键已完成（PR #72，rpc 模式按 D14 不做）；⑬ MCP 进度已完成（PR #72）；⑩ 可观测已完成（PR #72）；⑭ chat 的便利功能按 D13 不做；⑪ 行为评测框架已完成（PR #72，真实运行待授权） |
 | P11 | 内核整理 | 已完成：2026-11-05 评审稿 `docs/p11-kernel-cleanup-review.md`；① 立项与搬家（PR #70），② 至 ⑥（PR #71，与 P12 同一个 PR） |
 | P12 | 项目整理 | 已完成（PR #71）：2026-11-05 评审稿 `docs/p12-project-cleanup-review.md`；① zx-tools、② 模型层、③ 根 crate、④ IM、⑤ 测试辅助、⑥ 注释与文档；⑦ 规则与 lint（PR #75） |
-| P13 | 按规则评审与整理 | 已实施，待合并：2026-11-06 评审稿 `docs/p13-rules-review.md`；① 测试辅助、② 工具与模型层、③ 内核、④ IM、⑤ 根 crate、⑥ 文档 |
+| P13 | 按规则评审与整理 | 已完成（PR #77）：2026-11-06 评审稿 `docs/p13-rules-review.md`；① 测试辅助、② 工具与模型层、③ 内核、④ IM、⑤ 根 crate、⑥ 文档 |
 
 ### P0 场景默认值移出内核
 
@@ -1772,7 +1772,7 @@ D11 容器沙箱的实施要点（2026-11-05 用户决定）：
 - [x] **③ 内核**（`182c8da` 至 `51d568d`）：`NoSession` 消掉六处 match；工具调用的执行与记录一份；`RunHost` 开启与关闭运行，`Runner::start` 约 30 行；`compaction/{mod,answer,host}.rs`、`agent_session/events.rs`、`agent_loop/turn.rs`；`PendingInput`、`RunStop`、`Trigger`；计价按请求的模型名（修正）；失败的缺省理由一处；命名、可见性与过期文档。
 - [x] **④ IM**（`a0f9c21` 至 `bcc24d5`）：`router.rs`、`outlet.rs`；worker 的 `Lifecycle` 与携带会话的 `Phase`；`platform.rs` 的 `Backoff`、`Keepalive` 与共用常量；`MessageRef::thread`；`split_text` 保证第一段；飞书拆成 `api.rs`、`connection.rs`、`events.rs`；Slack 的 `Retry-After` 封顶、等待响应取消、沉默期限（规则 04 的修正）；解析失败各写明原因或上报。
 - [x] **⑤ 根 crate**（`e680d75` 至 `daca52d`）：`list_sessions.rs` 消掉 `cli` 与 `sessions` 的循环；`cli/{mod,shared,prepare,execution}.rs`、`otel/{mod,signal,spans,metrics}.rs`、`acp/{mod,permissions,updates}.rs`、`chat/{storage,turn,info}.rs`；`with_telemetry`、`ModeSettings`、`env_value`；`apply` 与 `emit` 每个分支一行；`render` 的 `call_label`、`local_time`、`answer_end_line`、`Severity`；`First`、`Exporters` 枚举；命名、上下文、文档与可见性。
-- [x] **⑥ 文档**：本稿、规则 01 与 06、`docs/TESTS.md`、README 的会话格式版本。
+- [x] **⑥ 文档**：本稿、规则 01 与 06、`docs/TESTS.md`、README 的会话格式版本。整个 P13 在一个 PR（#77）中完成。
 
 验证（本机 macOS，合并后的分支）：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`（1086 通过、0 失败、8 项付费测试跳过）、`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`、`cargo +1.88.0 check --all-targets` 与自查脚本通过；未新增依赖。真实 Docker 与付费 e2e 测试本次没有运行。
 
