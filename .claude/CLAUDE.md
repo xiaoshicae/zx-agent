@@ -36,7 +36,7 @@
 
 | 层 | 位置 | 职责 |
 |---|---|---|
-| CLI | `src/main.rs`、`src/cli.rs`、`src/run.rs`、`src/process.rs`、`src/render.rs`、`src/chat/`、`src/serve.rs`、`src/sessions.rs` | main 只分派子命令；cli 是共用参数与会话组装（`Shared` 为一个进程的所有会话读一次指令文件、连一次 MCP，`prepare` 组装一个会话）；run 处理单次任务；process 是退出码、stdout 行、关机信号与 JSON 行 sink；render 是终端与日志里调用与事件的文案，run、chat、acp 与 sessions 共用；sessions 是会话文件的打开与创建、chat 的会话目录（默认 `~/.zx-agent/sessions/--<工作目录>--/`）与 `zx-agent sessions`；chat 管理单一输入所有者（终端里一次到达的多行合为一条消息）、审批、信号和 REPL，终端渲染（颜色、状态行、行的归属）在 `src/chat/term.rs`；serve 读取配置、为每个线程准备会话并隐藏 IM 凭据 |
+| CLI | `src/main.rs`、`src/cli/`、`src/run.rs`、`src/process.rs`、`src/render.rs`、`src/chat/`、`src/serve.rs`、`src/sessions.rs`、`src/list_sessions.rs` | main 只分派子命令；cli 是子命令与共用参数（`cli/mod.rs`）、一个进程的所有会话共用的东西（`cli/shared.rs`：`Shared` 读一次指令文件、连一次 MCP、查一次密钥文件）与一个会话的组装（`cli/prepare.rs`：`prepare`）；run 处理单次任务；process 是退出码、stdout 行、关机信号、JSON 行 sink 与追踪导出的包装（`with_telemetry`）；render 是终端与日志里调用与事件的文案，run、chat、acp 与 sessions 共用；sessions 是会话文件的打开与创建、chat 的会话目录（默认 `~/.zx-agent/sessions/--<工作目录>--/`）与列表行；list_sessions 是 `zx-agent sessions`；chat 管理单一输入所有者（终端里一次到达的多行合为一条消息）、审批、信号和 REPL（`chat/mod.rs` 是 REPL，`chat/turn.rs` 驱动一次操作，`chat/storage.rs` 管会话的存放与切换，`chat/info.rs` 是横幅、`/status` 与 `/help`），终端渲染（颜色、状态行、行的归属）在 `src/chat/term.rs`；serve 读取配置、为每个线程准备会话并隐藏 IM 凭据 |
 | 场景配置 | `src/profile/`、`profiles/` | TOML 基线与覆盖（文件格式与叠加在 `file.rs`）、项目上下文、显式 skill 目录及按需读取、MCP 服务器（`[[mcp]]`）；不进入循环机制 |
 | 提示词 | `crates/zx-core/src/prompt.rs` | 生成系统提示词：说明 + `<environment>` + `<command_policy>` + `<project_context>` + `<available_skills>`（空段落不出现） |
 | 共享会话 | `crates/zx-core/src/agent_session.rs` | 共享调用与 Busy、RAII 归还运行权、取消、订阅与退订、空闲时切换模型 |
@@ -50,8 +50,8 @@
 | 执行环境 | `crates/zx-tools/src/executor/` | 工具执行命令与读写文件的位置；`LocalExecutor` 为本机，负责进程组、超时与取消、输出捕获上限（`capture.rs` 的 `Capture` 读取输出，两种执行器共用）；`ContainerExecutor`（`container/`：配置在 `config.rs`、容器内脚本在 `scripts.rs`）在每个进程一个的 Docker 容器中执行，并在容器内按进程组终止命令 |
 | IM 接入 | `crates/zx-im/src/` | 平台接口 `ImChannel`；`Server` 做访问控制并按线程分派，每个线程一个任务独占会话、运行、审批卡片与空闲释放，任务之间只经 channel 通信；宿主经 `SessionFactory` 打开会话；运行中的状态经可选的 `StatusStore` 记录，重启时替换上个进程遗留的“处理中…”（`status.rs`）；回复与卡片文案（`Replies`、`CardLabels`）默认英文；平台共用的辅助（拆分长文本、去重、发送节奏、卡片文本）在 `platform.rs`。平台实现在 `crates/zx-im-slack/`（经 Socket Mode 接收、经 Web API 发送）与 `crates/zx-im-feishu/` |
 | MCP 客户端 | `crates/zx-tools/src/mcp.rs` | 经 Streamable HTTP 连接外部 MCP 服务器（先 `server/discover`，旧服务器回退到 `initialize`），只把配置中列出的工具交给模型；`Server` 是一个 `Extension`。调用有超时、可取消，结果截断，工具一律按有副作用处理 |
-| ACP 接入 | `src/acp.rs` | agent 一侧：`session/new` 建会话、`session/prompt` 在派生任务里运行并在回合结束时应答、事件映射为 `session/update`、审批映射为 `session/request_permission`、`session/cancel` 取消；stdout 只走协议 |
-| 追踪与指标导出 | `src/otel.rs` | 设置了 OTLP 地址的标准变量时，把运行事件转成 OpenTelemetry span 与指标（运行、请求、工具调用与摘要的次数和时长，token 与成本）经 OTLP/HTTP 导出；只含元数据，事件经有界通道交给一个后台任务，满时丢弃，运行不等待导出；`run` 的 sink 可带调用方的 traceparent |
+| ACP 接入 | `src/acp/` | agent 一侧：`session/new` 建会话、`session/prompt` 在派生任务里运行并在回合结束时应答、事件映射为 `session/update`、审批映射为 `session/request_permission`、`session/cancel` 取消；stdout 只走协议 |
+| 追踪与指标导出 | `src/otel/` | 设置了 OTLP 地址的标准变量时，把运行事件转成 OpenTelemetry span 与指标（运行、请求、工具调用与摘要的次数和时长，token 与成本）经 OTLP/HTTP 导出；只含元数据，事件经有界通道交给一个后台任务，满时丢弃，运行不等待导出；`run` 的 sink 可带调用方的 traceparent |
 
 一次运行的数据流：`main` 组装 `AgentSession` → `prompt_with_cancel` 独占取得 Runner → `Runner::run` 取会话投影作为上下文 → `run_loop` 先持久化提示词、输入和上下文改动，再经宿主准备步骤执行可选摘要 → 新增插话与钩子改动持久化后请求任务模型 → 执行工具、脱敏、可选落盘 → 循环经 Runner 实现的会话宿主（`agent::SessionHost`，crate 内部）先写完成消息，再发出事件 → runner 处理任务请求重试并汇总 `RunReport`，由 `main` 映射退出码。自动摘要单独记录、消耗请求预算且不重试；手动 compact 共用独占权并独立报告。
 
