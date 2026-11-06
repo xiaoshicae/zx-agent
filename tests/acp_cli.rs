@@ -4,7 +4,7 @@
 mod common;
 
 use std::collections::VecDeque;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
@@ -13,7 +13,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 
 use common::mock_server::{MockServer, Reply};
-use common::zx_agent;
+use common::{stderr, zx_agent};
 
 const KEY_VAR: &str = "ZX_ACP_TEST_KEY";
 
@@ -25,10 +25,52 @@ struct Acp {
     next_id: u64,
     /// Messages read while waiting for something else, in arrival order.
     inbox: VecDeque<Value>,
+    /// The agent's home directory, where its sessions go: its own, unless a test shares one
+    /// between two processes.
+    _home: Option<tempfile::TempDir>,
+}
+
+/// Where the agent keeps the sessions of `cwd` by default: the directory chat uses, spelled
+/// out as pi spells it.
+fn session_dir(home: &Path, cwd: &Path) -> PathBuf {
+    let encoded = cwd.display().to_string().trim_start_matches('/').replace('/', "-");
+    home.join(".zx-agent/sessions").join(format!("--{encoded}--"))
+}
+
+/// The session files in `dir`, by name.
+fn session_files(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// The text of every message in a model request, in order; tool calls have none.
+fn texts(request: &Value) -> Vec<&str> {
+    request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|message| message["content"].as_str())
+        .collect()
 }
 
 impl Acp {
     async fn start(server: &MockServer, cwd: &Path, args: &[&str]) -> Self {
+        Self::start_in(server, cwd, args, None).await
+    }
+
+    /// Start the agent with `home` as its home directory, or one of its own.
+    async fn start_in(server: &MockServer, cwd: &Path, args: &[&str], home: Option<&Path>) -> Self {
+        let own = match home {
+            Some(_) => None,
+            None => Some(tempfile::tempdir().unwrap()),
+        };
+        let home = home
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| own.as_ref().unwrap().path().to_path_buf());
         let mut child = zx_agent()
             .arg("acp")
             .args(["--model", "mock-model", "--base-url", &server.base_url])
@@ -43,6 +85,7 @@ impl Acp {
             .arg("--no-context")
             .args(args)
             .current_dir(cwd)
+            .env("HOME", &home)
             .env(KEY_VAR, "sk-acp-test-key")
             .env_remove("ZX_MODEL")
             .env_remove("ZX_BASE_URL")
@@ -60,6 +103,7 @@ impl Acp {
             lines,
             next_id: 1,
             inbox: VecDeque::new(),
+            _home: own,
         }
     }
 
@@ -111,17 +155,48 @@ impl Acp {
         self.write(json!({"jsonrpc": "2.0", "id": id, "result": result})).await;
     }
 
-    /// Initialize and create a session in `cwd`; the session ID.
-    async fn session(&mut self, cwd: &Path) -> String {
+    /// Initialize; the response, with the agent's capabilities.
+    async fn initialize(&mut self) -> Value {
         let initialized = self
             .request("initialize", json!({"protocolVersion": 1, "clientCapabilities": {}}))
             .await;
         assert_eq!(initialized["result"]["agentInfo"]["name"], "zx-agent", "{initialized}");
+        initialized
+    }
+
+    /// Initialize and create a session in `cwd`; the session ID.
+    async fn session(&mut self, cwd: &Path) -> String {
+        self.initialize().await;
         let created = self.request("session/new", json!({"cwd": cwd, "mcpServers": []})).await;
         created["result"]["sessionId"]
             .as_str()
             .unwrap_or_else(|| panic!("{created}"))
             .to_string()
+    }
+
+    /// Load `session_id` in `cwd`; the response. The replayed updates wait in the inbox.
+    async fn load(&mut self, session_id: &str, cwd: &Path) -> Value {
+        self.request(
+            "session/load",
+            json!({"sessionId": session_id, "cwd": cwd, "mcpServers": []}),
+        )
+        .await
+    }
+
+    /// The updates that arrived before the last response, in order.
+    fn replayed(&mut self) -> Vec<Value> {
+        self.inbox
+            .drain(..)
+            .map(|message| {
+                assert_eq!(message["method"], "session/update", "{message}");
+                message["params"]["update"].clone()
+            })
+            .collect()
+    }
+
+    /// Forget the updates of the turns so far.
+    fn discard_updates(&mut self) {
+        self.inbox.clear();
     }
 
     /// The next `session/update`, skipping nothing: tests assert the order of updates.
@@ -370,4 +445,197 @@ async fn a_file_write_shows_as_a_diff_and_an_auto_approved_command_asks_nobody()
     assert_eq!(text_of(&acp.next_update().await), "written");
     assert_eq!(acp.read().await["result"]["stopReason"], "end_turn");
     assert!(acp.finish().await.success());
+}
+
+#[tokio::test]
+async fn a_session_is_kept_in_the_directory_of_its_cwd_and_loaded_with_its_history() {
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let cwd = work.path().canonicalize().unwrap();
+    let server = MockServer::start(vec![Reply::text("hi there")]).await;
+    let mut first = Acp::start_in(&server, &cwd, &[], Some(home.path())).await;
+    let id = first.session(&cwd).await;
+    let response = first.prompt(&id, "hello").await;
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    first.finish().await;
+    // One file per session, named after it, in the directory chat uses for this cwd.
+    let files = session_files(&session_dir(home.path(), &cwd));
+    assert!(
+        files.len() == 1 && files[0].ends_with(&format!("_{id}.jsonl")),
+        "{files:?}"
+    );
+
+    // A later process loads it: the conversation is replayed before the response, and the
+    // next turn goes on from there, the model seeing the earlier one.
+    let server = MockServer::start(vec![Reply::text("still here")]).await;
+    let mut second = Acp::start_in(&server, &cwd, &[], Some(home.path())).await;
+    let initialized = second.initialize().await;
+    assert_eq!(
+        initialized["result"]["agentCapabilities"]["loadSession"], true,
+        "{initialized}"
+    );
+    let loaded = second.load(&id, &cwd).await;
+    assert!(loaded.get("error").is_none(), "{loaded}");
+    let replay: Vec<(String, String)> = second
+        .replayed()
+        .into_iter()
+        .map(|update| {
+            (
+                update["sessionUpdate"].as_str().unwrap().to_string(),
+                text_of(&update).to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        replay,
+        [
+            ("user_message_chunk".to_string(), "hello".to_string()),
+            ("agent_message_chunk".to_string(), "hi there".to_string()),
+        ]
+    );
+    let response = second.prompt(&id, "and now?").await;
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    let requests = server.requests();
+    let texts = texts(&requests[0].body);
+    assert!(texts.ends_with(&["hello", "hi there", "and now?"]), "{texts:?}");
+    second.finish().await;
+}
+
+#[tokio::test]
+async fn loading_replays_a_tool_call_with_its_result() {
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let cwd = work.path().canonicalize().unwrap();
+    std::fs::write(cwd.join("notes.txt"), "deploys on tuesdays\n").unwrap();
+    let server = MockServer::start(vec![
+        Reply::tool_call("c1", "read_file", json!({"path": "notes.txt"})),
+        Reply::text("noted"),
+    ])
+    .await;
+    let mut first = Acp::start_in(&server, &cwd, &[], Some(home.path())).await;
+    let id = first.session(&cwd).await;
+    let response = first.prompt(&id, "read it").await;
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    first.finish().await;
+
+    let server = MockServer::start(Vec::new()).await;
+    let mut second = Acp::start_in(&server, &cwd, &[], Some(home.path())).await;
+    second.initialize().await;
+    let loaded = second.load(&id, &cwd).await;
+    assert!(loaded.get("error").is_none(), "{loaded}");
+    let replay = second.replayed();
+    assert_eq!(replay.len(), 3, "{replay:?}");
+    assert_eq!(replay[0]["sessionUpdate"], "user_message_chunk");
+    assert_eq!(text_of(&replay[0]), "read it");
+    // The call comes as one update, with its result: the client never saw it run.
+    let call = &replay[1];
+    assert_eq!(call["sessionUpdate"], "tool_call", "{call}");
+    assert_eq!(call["toolCallId"], "c1");
+    assert_eq!(call["status"], "completed");
+    assert_eq!(call["kind"], "read");
+    assert_eq!(call["rawInput"]["path"], "notes.txt");
+    assert_eq!(
+        call["locations"][0]["path"],
+        cwd.join("notes.txt").display().to_string()
+    );
+    let shown = call["content"][0]["content"]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{call}"));
+    assert!(shown.contains("deploys on tuesdays"), "{shown}");
+    assert_eq!(replay[2]["sessionUpdate"], "agent_message_chunk");
+    assert_eq!(text_of(&replay[2]), "noted");
+    second.finish().await;
+}
+
+#[tokio::test]
+async fn loading_an_unknown_session_is_a_request_error() {
+    let work = tempfile::tempdir().unwrap();
+    let cwd = work.path().canonicalize().unwrap();
+    let server = MockServer::start(Vec::new()).await;
+    let mut acp = Acp::start(&server, &cwd, &[]).await;
+    acp.initialize().await;
+    let loaded = acp.load("no-such-session", &cwd).await;
+    assert_eq!(loaded["error"]["code"], -32602, "{loaded}");
+    let message = loaded["error"]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("unknown session no-such-session: no such session in "),
+        "{message}"
+    );
+    acp.finish().await;
+}
+
+#[tokio::test]
+async fn no_session_keeps_no_file_and_offers_no_loading() {
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let cwd = work.path().canonicalize().unwrap();
+    let server = MockServer::start(vec![Reply::text("gone soon")]).await;
+    let mut acp = Acp::start_in(&server, &cwd, &["--no-session"], Some(home.path())).await;
+    let initialized = acp.initialize().await;
+    assert_eq!(
+        initialized["result"]["agentCapabilities"]["loadSession"], false,
+        "{initialized}"
+    );
+    let created = acp.request("session/new", json!({"cwd": cwd, "mcpServers": []})).await;
+    let id = created["result"]["sessionId"].as_str().unwrap().to_string();
+    let response = acp.prompt(&id, "hello").await;
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    assert!(!home.path().join(".zx-agent").exists(), "no session file is written");
+    let loaded = acp.load("another", &cwd).await;
+    assert_eq!(loaded["error"]["code"], -32602, "{loaded}");
+    assert!(
+        loaded["error"]["message"].as_str().unwrap().contains("--no-session"),
+        "{loaded}"
+    );
+    acp.finish().await;
+}
+
+#[tokio::test]
+async fn session_dir_chooses_the_directory_and_a_live_session_is_replayed_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let cwd = work.path().canonicalize().unwrap();
+    let server = MockServer::start(vec![Reply::text("two"), Reply::text("four")]).await;
+    let mut acp = Acp::start(&server, &cwd, &["--session-dir", dir.path().to_str().unwrap()]).await;
+    let id = acp.session(&cwd).await;
+    let response = acp.prompt(&id, "one").await;
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    let files = session_files(dir.path());
+    assert!(
+        files.len() == 1 && files[0].ends_with(&format!("_{id}.jsonl")),
+        "{files:?}"
+    );
+    // A session this process holds is replayed as it is; its file stays open once.
+    acp.discard_updates();
+    let loaded = acp.load(&id, &cwd).await;
+    assert!(loaded.get("error").is_none(), "{loaded}");
+    let replayed = acp.replayed();
+    let kinds: Vec<&str> = replayed
+        .iter()
+        .map(|update| update["sessionUpdate"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["user_message_chunk", "agent_message_chunk"], "{replayed:?}");
+    assert_eq!(text_of(&replayed[1]), "two");
+    let response = acp.prompt(&id, "three").await;
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    let requests = server.requests();
+    let texts = texts(&requests[1].body);
+    assert!(texts.ends_with(&["one", "two", "three"]), "{texts:?}");
+    acp.finish().await;
+}
+
+#[tokio::test]
+async fn a_single_session_file_is_refused_before_the_connection() {
+    let work = tempfile::tempdir().unwrap();
+    let output = zx_agent()
+        .args(["acp", "--model", "m", "--session"])
+        .arg(work.path().join("one.jsonl"))
+        .env("HOME", work.path())
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .unwrap();
+    let errors = stderr(&output);
+    assert_eq!(output.status.code(), Some(2), "{errors}");
+    assert!(errors.contains("give --session-dir, not --session"), "{errors}");
 }

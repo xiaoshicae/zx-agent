@@ -205,6 +205,17 @@ pub(crate) struct AcpArgs {
     #[arg(long, default_value_t = 3600, value_parser = clap::value_parser!(u64).range(1..))]
     pub(crate) approval_timeout_secs: u64,
 
+    /// Directory for session files, one per session, where `session/load` finds them again.
+    /// Defaults to ~/.zx-agent/sessions/--<cwd with / as ->--, one directory per working
+    /// directory, shared with chat.
+    #[arg(long, conflicts_with = "session")]
+    pub(crate) session_dir: Option<PathBuf>,
+
+    /// Keep conversations in memory only: no session file is written, and `session/load` is
+    /// not offered.
+    #[arg(long, conflicts_with_all = ["session", "session_dir"])]
+    pub(crate) no_session: bool,
+
     #[command(flatten)]
     pub(crate) transport: TransportArgs,
 
