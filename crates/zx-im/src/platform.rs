@@ -242,7 +242,9 @@ impl Keepalive {
     /// Longest ping interval, so that a bad value from a server cannot stop pings or hide a
     /// dead connection for hours.
     pub const MAX_INTERVAL: Duration = Duration::from_secs(3600);
-    /// Added to twice the ping interval: an answer may be a few seconds late.
+    /// Added to twice the ping interval: an answer may be a few seconds late. At most the
+    /// interval itself, so that a short interval, as tests use, does not wait seconds for a
+    /// dead connection.
     const MARGIN: Duration = Duration::from_secs(5);
 
     /// Ping every `interval`, the first at once; the connection counts as alive now.
@@ -291,7 +293,7 @@ impl Keepalive {
 
     // The interval is at most MAX_INTERVAL, so this cannot overflow.
     fn silence_for(interval: Duration) -> Duration {
-        interval * 2 + Self::MARGIN
+        interval * 2 + Self::MARGIN.min(interval)
     }
 }
 
@@ -329,7 +331,8 @@ mod tests {
         assert!(keepalive.next_ping() <= pinged + Duration::from_secs(10));
         keepalive.set_interval(Duration::from_secs(3));
         assert!(keepalive.next_ping() <= pinged + Duration::from_secs(3));
-        assert_eq!(keepalive.silence(), Duration::from_secs(11));
+        // The margin shrinks to a short interval.
+        assert_eq!(keepalive.silence(), Duration::from_secs(9));
         assert_eq!(
             Keepalive::new(Duration::MAX).silence(),
             Keepalive::MAX_INTERVAL * 2 + Keepalive::MARGIN
