@@ -13,7 +13,7 @@ use super::{
     ContextEdit, DEFAULT_HOOK_TIMEOUT, HookContext, HookError, HookFailure, HookPhase, HookResult, HookStage, Hooks,
     RequestPlan, RequestSettings, TurnDecision, TurnSummary,
 };
-use crate::agent::{AgentEvent, Decision, Emit, Event, ToolOutput};
+use crate::agent::{AgentEvent, Decision, Event, EventTarget, ToolOutput};
 use crate::ai::{Message, ToolCall};
 
 pub(crate) struct HookCall<'a> {
@@ -307,20 +307,21 @@ impl HookChain {
     }
 
     /// Stamp `event`, hand it to the sink, then to the observing hooks.
-    pub(crate) async fn emit(&self, event: AgentEvent, to: Emit<'_>) {
+    pub(crate) async fn emit(&self, event: AgentEvent, target: EventTarget<'_>) {
         // What the event reports is already recorded; the sink sees it before observers do.
-        let event = to.trace.stamp(event);
-        to.sink.emit(&event);
-        for error in self.on_event(&event, to.trace.context()).await {
-            report_failure(error, to);
+        let event = target.trace.stamp(event);
+        target.sink.emit(&event);
+        for error in self.on_event(&event, target.trace.context()).await {
+            report_failure(error, target);
         }
     }
 }
 
-pub(crate) fn report_failure(error: HookError, to: Emit<'_>) -> String {
+/// Report a hook failure as a `hook_failed` event. Returns its description.
+pub(crate) fn report_failure(error: HookError, target: EventTarget<'_>) -> String {
     let text = error.to_string();
     // Diagnostics bypass hooks, preventing recursive observer failures.
-    to.direct(AgentEvent::HookFailed {
+    target.emit_unobserved(AgentEvent::HookFailed {
         hook: error.hook,
         phase: error.phase.as_str(),
         error: text.clone(),

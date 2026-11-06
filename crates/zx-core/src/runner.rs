@@ -21,7 +21,8 @@ use answer::overlap;
 use host::{CompactionPause, RunHost, RunStop};
 
 use crate::agent::{
-    AgentEvent, Emit, EventSink, LoopConfig, LoopControl, LoopFailure, LoopOutcome, QueuedMessage, RunTrace, run_loop,
+    AgentEvent, EventSink, EventTarget, LoopConfig, LoopControl, LoopFailure, LoopOutcome, QueuedMessage, RunTrace,
+    record_pending_entries, run_loop,
 };
 pub use crate::agent::{RunOutcome, RunReport};
 use crate::ai::retry::{RetryPolicy, is_context_overflow, is_retryable};
@@ -101,11 +102,17 @@ impl Runner {
             self.config.queues.clone(),
             self.config.active_tools.clone(),
         );
-        let to = Emit {
+        let target = EventTarget {
             sink: self.sink.as_ref(),
             trace: &trace,
         };
-        let mut host = RunHost::new(&mut self.session, to, &self.config, &self.compaction, &mut self.pause);
+        let mut host = RunHost::new(
+            &mut self.session,
+            target,
+            &self.config,
+            &self.compaction,
+            &mut self.pause,
+        );
         host.summarize(Trigger::Manual, &child).await
     }
 
@@ -204,7 +211,7 @@ impl Runner {
             model: self.config.spec.model.clone(),
             provider: self.config.spec.provider.name().into(),
         };
-        let to = Emit {
+        let to = EventTarget {
             sink: self.sink.as_ref(),
             trace: &trace,
         };
@@ -224,7 +231,7 @@ impl Runner {
             pause,
         } = self;
         let sink = sink.as_ref();
-        let to = Emit { sink, trace: &trace };
+        let to = EventTarget { sink, trace: &trace };
         let mut host = RunHost::new(session, to, config, compaction, pause);
         let begun = match (recovered, begin) {
             (Err(error), _) => Err(error),
@@ -247,7 +254,7 @@ impl Runner {
         };
         // State that hooks asked to record during the last events is kept before the run is
         // reported, so a host reading the session afterwards finds it.
-        let stop = match host.record_pending_entries(&config.queues).await {
+        let stop = match record_pending_entries(config, &mut host, to).await {
             Ok(()) => stop,
             Err(error) => RunStop::error(error),
         };

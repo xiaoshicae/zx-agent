@@ -10,8 +10,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::accounting::RunAccounting;
 use crate::agent::{
-    AgentEvent, ContextPreparation, Emit, HookChain, LoopConfig, LoopOutcome, MessageQueues, Prepared, QueuedMessage,
-    SessionHost,
+    AgentEvent, ContextPreparation, EventTarget, HookChain, LoopConfig, LoopOutcome, MessageQueues, Prepared,
+    QueuedMessage, SessionHost,
 };
 use crate::ai::retry::RetryPolicy;
 use crate::ai::{AssistantMessage, Message, ModelMeta, Provider, Request, StopReason, ToolCall, duration_ms};
@@ -77,7 +77,7 @@ impl CompactionPause {
 /// A run's borrow of the Runner: the session, the hooks, the event sink and the model.
 pub(super) struct RunHost<'a> {
     pub session: &'a mut SessionStore,
-    pub to: Emit<'a>,
+    pub target: EventTarget<'a>,
     pub hooks: &'a HookChain,
     pub provider: &'a dyn Provider,
     pub model: &'a str,
@@ -92,14 +92,14 @@ pub(super) struct RunHost<'a> {
 impl<'a> RunHost<'a> {
     pub(super) fn new(
         session: &'a mut SessionStore,
-        to: Emit<'a>,
+        target: EventTarget<'a>,
         config: &'a LoopConfig,
         compaction: &'a compaction::Config,
         pause: &'a mut CompactionPause,
     ) -> Self {
         Self {
             session,
-            to,
+            target,
             hooks: &config.hooks,
             provider: config.spec.provider.as_ref(),
             model: &config.spec.model,
@@ -118,7 +118,7 @@ impl<'a> RunHost<'a> {
             provider: self.provider,
             model: self.model,
             config: self.compaction,
-            to: self.to,
+            target: self.target,
             hooks: self.hooks,
             attempt: self.attempt,
             models: self.models,
@@ -163,24 +163,6 @@ impl<'a> RunHost<'a> {
         }
     }
 
-    /// Record the custom entries that hooks queued and the loop has not written (pi:
-    /// `appendEntry`), each announced as a `custom_entry` event.
-    pub(super) async fn record_pending_entries(&mut self, queues: &MessageQueues) -> Result<(), String> {
-        for entry in queues.take_entries() {
-            let id = self
-                .session
-                .append_custom_entry(&entry.custom_type, entry.data)
-                .await
-                .map_err(|error| format!("cannot persist session entry: {error:#}"))?;
-            let event = AgentEvent::CustomEntry {
-                entry_id: Some(id),
-                custom_type: entry.custom_type,
-            };
-            self.hooks.emit(event, self.to).await;
-        }
-        Ok(())
-    }
-
     /// Keep a failed answer in the session but drop it from the model context, so that the
     /// next attempt continues from the message before it without repeating the user message.
     pub(super) async fn omit_failed_attempt(&mut self, target: &str) -> Result<(), String> {
@@ -200,7 +182,7 @@ impl<'a> RunHost<'a> {
                 replacement: None,
                 entry_id: Some(edit),
             };
-            self.hooks.emit(event, self.to).await;
+            self.hooks.emit(event, self.target).await;
         }
         Ok(())
     }
@@ -216,7 +198,7 @@ impl<'a> RunHost<'a> {
         cancel: &CancellationToken,
     ) -> Result<(), RunStop> {
         let overflow = AgentEvent::ContextOverflow { error: error.into() };
-        self.hooks.emit(overflow, self.to).await;
+        self.hooks.emit(overflow, self.target).await;
         if let Some(target) = failed_entry {
             self.omit_failed_attempt(target).await.map_err(RunStop::error)?;
         }
@@ -256,7 +238,7 @@ impl<'a> RunHost<'a> {
             delay_ms: duration_ms(delay),
             error: failed.error_message.clone().unwrap_or_default(),
         };
-        self.hooks.emit(scheduled, self.to).await;
+        self.hooks.emit(scheduled, self.target).await;
         if let Some(target) = failed_entry {
             self.omit_failed_attempt(target).await.map_err(RunStop::error)?;
         }
@@ -269,34 +251,36 @@ impl<'a> RunHost<'a> {
 
 #[async_trait]
 impl SessionHost for RunHost<'_> {
-    async fn append_message(&mut self, message: &Message) -> Result<String, String> {
+    async fn append_message(&mut self, message: &Message) -> Result<Option<String>, String> {
         // The event that reports the message owns it, so the session stores a copy.
         self.session
             .append_message(message.clone())
             .await
+            .map(Some)
             .map_err(|error| format!("cannot persist session entry: {error:#}"))
     }
 
-    async fn append_custom_message(&mut self, message: &CustomMessage) -> Result<(String, Message), String> {
+    async fn append_custom_message(&mut self, message: &CustomMessage) -> Result<(Option<String>, Message), String> {
         let id = self
             .session
             .append_custom_message(message.clone())
             .await
             .map_err(|error| format!("cannot persist session entry: {error:#}"))?;
         match self.session.get(&id) {
-            Some(Entry::CustomMessage(entry)) => Ok((id, entry.projected())),
+            Some(Entry::CustomMessage(entry)) => Ok((Some(id), entry.projected())),
             _ => Err(format!("custom message {id} was not recorded")),
         }
     }
 
-    async fn append_custom_entry(&mut self, custom_type: &str, data: Value) -> Result<String, String> {
+    async fn append_custom_entry(&mut self, custom_type: &str, data: Value) -> Result<Option<String>, String> {
         self.session
             .append_custom_entry(custom_type, data)
             .await
+            .map(Some)
             .map_err(|error| format!("cannot persist session entry: {error:#}"))
     }
 
-    async fn edit_context(&mut self, index: usize, replacement: Option<&str>) -> Result<String, String> {
+    async fn edit_context(&mut self, index: usize, replacement: Option<&str>) -> Result<Option<String>, String> {
         let projection = self.session.projection();
         let target = projection
             .get(index)
@@ -304,14 +288,16 @@ impl SessionHost for RunHost<'_> {
         self.session
             .append_context_edit(&target.entry_id, replacement.map(str::to_string))
             .await
+            .map(Some)
             .map_err(|error| format!("cannot persist context edit: {error:#}"))
     }
 
-    async fn record_request(&mut self, request: &Request, provider: &dyn Provider) -> Result<String, String> {
+    async fn record_request(&mut self, request: &Request, provider: &dyn Provider) -> Result<Option<String>, String> {
         let options = provider.request_options();
         self.session
             .record_request(request, provider.name(), options, RequestSource::Projection)
             .await
+            .map(Some)
             .map_err(|error| format!("cannot persist request checkpoint: {error:#}"))
     }
 

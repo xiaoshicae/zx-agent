@@ -8,7 +8,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::{AgentEvent, Emit, HookChain, RequestKind};
+use crate::agent::{AgentEvent, EventTarget, HookChain, RequestKind, price};
 use crate::ai::{
     AssistantMessage, ContentBlock, Delta, Message, ModelMeta, Provider, Request, StopReason, StreamEvent, Usage,
     duration_ms, now_ms,
@@ -330,7 +330,7 @@ pub(crate) struct Host<'a> {
     pub provider: &'a dyn Provider,
     pub model: &'a str,
     pub config: &'a Config,
-    pub to: Emit<'a>,
+    pub target: EventTarget<'a>,
     pub hooks: &'a HookChain,
     /// The attempt of the run that compacts; 1 for a manual compaction.
     pub attempt: u32,
@@ -379,7 +379,7 @@ struct Failed {
 
 impl Host<'_> {
     async fn emit(&self, event: AgentEvent) {
-        self.hooks.emit(event, self.to).await;
+        self.hooks.emit(event, self.target).await;
     }
 
     /// Run one summary: choose what to summarize, record the attempt, ask the model, check
@@ -739,9 +739,7 @@ impl Host<'_> {
                     Some(StreamEvent::Done(mut message) | StreamEvent::Error(mut message)) => {
                         // Also bounds a provider that delivers its content without deltas.
                         ResponseBytes::of(&message).check()?;
-                        if let Some(cost) = self.models.get(&message.model).and_then(|meta| meta.cost) {
-                            message.usage.cost_usd = Some(cost.of(&message.usage));
-                        }
+                        price(self.models, self.model, &mut message.usage);
                         return Ok(message);
                     }
                     None => return Err("summary stream ended without a final event".into()),

@@ -1,7 +1,7 @@
 //! Resolve tool calls left unfinished by an interrupted run.
 
 use super::Runner;
-use crate::agent::{AgentEvent, Effects, Emit, Interruption, RunTrace};
+use crate::agent::{AgentEvent, Effects, EventTarget, Interruption, RunTrace};
 use crate::ai::{Message, ToolResultMessage, now_ms};
 use crate::session::StartRecord;
 
@@ -13,7 +13,7 @@ impl Runner {
         let Self {
             config, session, sink, ..
         } = self;
-        let to = Emit {
+        let to = EventTarget {
             sink: sink.as_ref(),
             trace,
         };
