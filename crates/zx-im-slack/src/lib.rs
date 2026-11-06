@@ -13,32 +13,21 @@ use serde_json::{Map, Value, json};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
+use zx_core::agent::ApprovalResult;
 use zx_im::{
-    ApprovalId, CardLabels, Cards, Choice, ConversationId, Destination, ErrorReport, ImChannel, ImError, Inbound,
-    MessageId, MessageRef, Outbound, Pacer, Seen, ThreadId, UserId, split_text,
+    ApprovalId, Backoff, CARD_CAPACITY, CardLabels, Cards, Choice, ConversationId, Destination, ErrorReport, ImChannel,
+    ImError, Inbound, MAX_TEXT_CHARS, MessageId, MessageRef, Outbound, Pacer, RATE_LIMIT_RETRIES, SEEN_CAPACITY, Seen,
+    ThreadId, UserId, card_update_refused, split_text,
 };
 
 /// Where the Web API lives.
-pub const DEFAULT_API_BASE: &str = "https://slack.com/api";
+const DEFAULT_API_BASE: &str = "https://slack.com/api";
 const PLATFORM: &str = "slack";
 /// `action_id`s of the two card buttons; their `value` is the approval ID.
 const ALLOW_ACTION: &str = "zx_allow_once";
 const DENY_ACTION: &str = "zx_deny";
-/// Messages remembered to drop redeliveries. Slack redelivers an event only for a short
-/// while, and this covers far more messages than arrive in that time.
-const SEEN_CAPACITY: usize = 1024;
-/// Waits between reconnection attempts, doubling up to the maximum.
-const RECONNECT_MIN: Duration = Duration::from_secs(1);
-const RECONNECT_MAX: Duration = Duration::from_secs(60);
-/// A rate-limited call is retried this many times after waiting as told.
-const MAX_RATE_LIMIT_RETRIES: u32 = 3;
-/// Characters per posted message; longer text is split. Slack recommends keeping message
-/// text within 4,000 characters (chat.postMessage, "Truncating content").
-const MAX_TEXT_CHARS: usize = 4000;
 /// Characters of a section block's text (Block Kit section block).
 const MAX_SECTION_CHARS: usize = 3000;
-/// Cards remembered so that closing one keeps the request it showed.
-const CARD_CAPACITY: usize = 256;
 /// Method errors that retrying cannot fix: the token or the app's setup is wrong.
 const SETUP_ERRORS: [&str; 9] = [
     "invalid_auth",
@@ -58,7 +47,7 @@ pub struct SlackConfig {
     pub app_token: String,
     /// Bot token (`xoxb-`) for posting.
     pub bot_token: String,
-    /// Web API base URL, [`DEFAULT_API_BASE`] unless a proxy or a test server is used.
+    /// Web API base URL: `https://slack.com/api` unless a proxy or a test server is used.
     pub api_base: String,
     /// Limit for each Web API call and for opening the WebSocket.
     pub request_timeout: Duration,
@@ -72,6 +61,7 @@ pub struct SlackConfig {
 }
 
 impl SlackConfig {
+    /// Settings for an app with these tokens, and the defaults of every other field.
     pub fn new(app_token: String, bot_token: String) -> Self {
         Self {
             app_token,
@@ -97,6 +87,7 @@ pub struct SlackChannel {
 type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 impl SlackChannel {
+    /// A channel for `config`. Fails when the HTTP client cannot be built.
     pub fn new(config: SlackConfig) -> Result<Self, ImError> {
         let http = reqwest::Client::builder()
             .timeout(config.request_timeout)
@@ -126,7 +117,7 @@ impl SlackChannel {
                 .await
                 .map_err(|error| ImError::Transport(format!("slack {method}: {error}")))?;
             let status = response.status();
-            if status == StatusCode::TOO_MANY_REQUESTS && retries < MAX_RATE_LIMIT_RETRIES {
+            if status == StatusCode::TOO_MANY_REQUESTS && retries < RATE_LIMIT_RETRIES {
                 retries += 1;
                 tokio::time::sleep(retry_after(&response)).await;
                 continue;
@@ -280,7 +271,7 @@ impl ImChannel for SlackChannel {
     }
 
     async fn run(&self, inbound: mpsc::Sender<Inbound>, cancel: &CancellationToken) -> Result<(), ImError> {
-        let mut backoff = RECONNECT_MIN;
+        let mut backoff = Backoff::default();
         // The bot's own user ID tells its messages apart; asking also checks the bot token.
         let bot = loop {
             match self.call("auth.test", &self.config.bot_token, None).await {
@@ -288,7 +279,7 @@ impl ImChannel for SlackChannel {
                 Err(error @ ImError::Config(_)) => return Err(error),
                 Err(error @ ImError::Transport(_)) => {
                     self.report(&error);
-                    if !pause(&mut backoff, cancel).await {
+                    if !backoff.wait(cancel).await {
                         return Ok(());
                     }
                 }
@@ -314,9 +305,9 @@ impl ImChannel for SlackChannel {
             match ended {
                 Ended::Cancelled => return Ok(()),
                 // Slack refreshes connections every few hours; reconnect at once.
-                Ended::Lost => backoff = RECONNECT_MIN,
+                Ended::Lost => backoff.reset(),
                 Ended::Failed => {
-                    if !pause(&mut backoff, cancel).await {
+                    if !backoff.wait(cancel).await {
                         return Ok(());
                     }
                 }
@@ -327,16 +318,12 @@ impl ImChannel for SlackChannel {
     async fn send(&self, to: &Destination, message: &Outbound) -> Result<MessageRef, ImError> {
         match message {
             Outbound::Text(text) => {
-                let mut parts = split(text, MAX_TEXT_CHARS).into_iter();
-                let first = parts.next().unwrap_or_default();
+                let (first, rest) = split(text, MAX_TEXT_CHARS);
                 let posted = self.post(to, &first, None).await?;
                 // The rest go to the same thread, which a first post in the chat itself starts.
-                let rest_to = Destination {
-                    conversation: to.conversation.clone(),
-                    thread: Some(to.thread.clone().unwrap_or_else(|| ThreadId(posted.id.0.clone()))),
-                };
-                for part in parts {
-                    self.post(&rest_to, &part, None).await?;
+                let thread = posted.thread();
+                for part in &rest {
+                    self.post(&thread, part, None).await?;
                 }
                 Ok(posted)
             }
@@ -369,8 +356,8 @@ impl ImChannel for SlackChannel {
                 self.cards.remember(&posted.id, request);
                 Ok(posted)
             }
-            Outbound::ApprovalResolved { .. } => {
-                let text = resolution(&self.config.labels, message);
+            Outbound::ApprovalResolved { user, result, .. } => {
+                let text = resolution(&self.config.labels, user.as_ref(), *result);
                 self.post(to, &text, None).await
             }
         }
@@ -379,29 +366,17 @@ impl ImChannel for SlackChannel {
     async fn update(&self, posted: &MessageRef, message: &Outbound) -> Result<(), ImError> {
         match message {
             Outbound::Text(text) => {
-                let mut parts = split(text, MAX_TEXT_CHARS).into_iter();
-                let first = parts.next().unwrap_or_default();
+                let (first, rest) = split(text, MAX_TEXT_CHARS);
                 self.edit(posted, &first, None).await?;
-                let thread = Destination {
-                    conversation: posted.at.conversation.clone(),
-                    thread: Some(
-                        posted
-                            .at
-                            .thread
-                            .clone()
-                            .unwrap_or_else(|| ThreadId(posted.id.0.clone())),
-                    ),
-                };
-                for part in parts {
-                    self.post(&thread, &part, None).await?;
+                let thread = posted.thread();
+                for part in &rest {
+                    self.post(&thread, part, None).await?;
                 }
                 Ok(())
             }
-            Outbound::ApprovalRequest { .. } => Err(ImError::Transport(
-                "an approval request is posted, not written over a message".into(),
-            )),
-            Outbound::ApprovalResolved { .. } => {
-                let result = resolution(&self.config.labels, message);
+            Outbound::ApprovalRequest { .. } => Err(card_update_refused()),
+            Outbound::ApprovalResolved { user, result, .. } => {
+                let result = resolution(&self.config.labels, user.as_ref(), *result);
                 let mut blocks = Vec::new();
                 if let Some(request) = self.cards.forget(&posted.id) {
                     blocks.push(section(&request));
@@ -410,16 +385,6 @@ impl ImChannel for SlackChannel {
                 self.edit(posted, &result, Some(Value::Array(blocks))).await
             }
         }
-    }
-}
-
-/// Wait out the current backoff, doubling it. Returns false when cancelled meanwhile.
-async fn pause(backoff: &mut Duration, cancel: &CancellationToken) -> bool {
-    let wait = *backoff;
-    *backoff = (*backoff * 2).min(RECONNECT_MAX);
-    tokio::select! {
-        () = cancel.cancelled() => false,
-        () = tokio::time::sleep(wait) => true,
     }
 }
 
@@ -488,6 +453,7 @@ fn decisions(payload: &Value) -> Vec<Inbound> {
     let fallback = payload["message"]["thread_ts"]
         .as_str()
         .or_else(|| payload["container"]["thread_ts"].as_str());
+    // A payload without actions has nothing to decide.
     let actions = payload["actions"].as_array().map(Vec::as_slice).unwrap_or_default();
     actions
         .iter()
@@ -546,8 +512,9 @@ fn push_escaped(out: &mut String, c: char) {
     }
 }
 
-/// Escaped text in parts of at most `max` characters, never cut inside an entity.
-fn split(text: &str, max: usize) -> Vec<String> {
+/// Escaped text in parts of at most `max` characters, never cut inside an entity: the first
+/// part and the rest.
+fn split(text: &str, max: usize) -> (String, Vec<String>) {
     split_text(text, max, push_escaped)
 }
 
@@ -556,11 +523,10 @@ fn card_request(labels: &CardLabels, tool: &str, summary: &str, reason: &str) ->
     let head = format!("*{}*: `{}`\n```", escape(&labels.title), escape(tool));
     let tail = format!("```\n{}: {}", escape(&labels.reason), escape(reason));
     let room = MAX_SECTION_CHARS.saturating_sub(head.chars().count() + tail.chars().count() + 1);
-    let mut parts = split(summary, room).into_iter();
-    let mut summary = parts.next().unwrap_or_default();
+    let (mut summary, rest) = split(summary, room);
     // A part ends before the room does when the next entity would not fit, so whether the
     // request was cut shows in the parts left, not in this part's length.
-    if parts.next().is_some() {
+    if !rest.is_empty() {
         summary.push('…');
     }
     format!("{head}{summary}{tail}")
@@ -581,11 +547,8 @@ fn button(label: &str, action: &str, value: &str, style: &str) -> Value {
 }
 
 /// The escaped result line of a closed card: what happened, and a mention of who decided.
-fn resolution(labels: &CardLabels, message: &Outbound) -> String {
-    let Outbound::ApprovalResolved { user, result, .. } = message else {
-        return String::new();
-    };
-    let what = labels.outcome(*result);
+fn resolution(labels: &CardLabels, user: Option<&UserId>, result: ApprovalResult) -> String {
+    let what = labels.outcome(result);
     // The mention is markup and stays as it is; only the label is text.
     match user {
         Some(user) => format!("{} (<@{user}>)", escape(what)),
@@ -597,23 +560,30 @@ fn resolution(labels: &CardLabels, message: &Outbound) -> String {
 mod tests {
     use super::*;
 
+    /// The parts of a split in order.
+    fn parts((first, rest): (String, Vec<String>)) -> Vec<String> {
+        let mut parts = vec![first];
+        parts.extend(rest);
+        parts
+    }
+
     #[test]
     fn text_is_escaped_and_split_without_breaking_an_entity() {
         assert_eq!(escape("a < b && c > d"), "a &lt; b &amp;&amp; c &gt; d");
-        assert_eq!(split("ab<cd", 4), ["ab", "&lt;", "cd"]);
-        assert_eq!(split("", 10), [""]);
+        assert_eq!(parts(split("ab<cd", 4)), ["ab", "&lt;", "cd"]);
+        assert_eq!(split("", 10), (String::new(), Vec::new()));
     }
 
     #[test]
     fn a_split_prefers_the_last_line_break_of_the_part() {
-        assert_eq!(split("aaaa\nbbbb", 7), ["aaaa\n", "bbbb"]);
+        assert_eq!(parts(split("aaaa\nbbbb", 7)), ["aaaa\n", "bbbb"]);
         // A line break in the first half would leave too short a part; the cut is hard.
-        assert_eq!(split("a\nbbbbbbb", 6), ["a\nbbbb", "bbb"]);
+        assert_eq!(parts(split("a\nbbbbbbb", 6)), ["a\nbbbb", "bbb"]);
     }
 
     #[test]
     fn a_split_counts_characters_not_bytes() {
-        assert_eq!(split("界界界", 2), ["界界", "界"]);
+        assert_eq!(parts(split("界界界", 2)), ["界界", "界"]);
     }
 
     #[test]

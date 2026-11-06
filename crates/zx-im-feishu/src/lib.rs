@@ -21,18 +21,20 @@ use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::{self, Message};
 use tokio_util::sync::CancellationToken;
 use zx_ai::sync::lock;
+use zx_core::agent::ApprovalResult;
 use zx_im::{
-    ApprovalId, CardLabels, Cards, Choice, ConversationId, Destination, ErrorReport, ImChannel, ImError, Inbound,
-    MessageId, MessageRef, Outbound, Pacer, Seen, ThreadId, UserId, split_text,
+    ApprovalId, Backoff, CARD_CAPACITY, CardLabels, Cards, Choice, ConversationId, Destination, ErrorReport, ImChannel,
+    ImError, Inbound, MAX_TEXT_CHARS, MessageId, MessageRef, Outbound, Pacer, RATE_LIMIT_RETRIES, SEEN_CAPACITY, Seen,
+    ThreadId, UserId, card_update_refused, pause, split_text,
 };
 
 use frame::Frame;
 
 /// Where the open API lives.
-pub const DEFAULT_API_BASE: &str = "https://open.feishu.cn";
+const DEFAULT_API_BASE: &str = "https://open.feishu.cn";
 /// The tenant token endpoint the documentation recommends; the older
 /// `/open-apis/auth/v3/tenant_access_token/internal` is marked as a historical version.
-pub const DEFAULT_TOKEN_URL: &str = "https://accounts.feishu.cn/oauth/v3/token";
+const DEFAULT_TOKEN_URL: &str = "https://accounts.feishu.cn/oauth/v3/token";
 const PLATFORM: &str = "feishu";
 /// Where the long connection's address is requested (Go SDK `ws/const.go`).
 const ENDPOINT_PATH: &str = "/callback/ws/endpoint";
@@ -51,34 +53,21 @@ const MAX_INTERVAL: Duration = Duration::from_secs(3600);
 /// Silence that counts as a dead connection: twice the ping interval plus this
 /// (`ws/client_session.go`).
 const DEADLINE_MARGIN: Duration = Duration::from_secs(5);
-/// Waits after failed connection attempts while the server has set no reconnect interval.
-const RECONNECT_MIN: Duration = Duration::from_secs(1);
-const RECONNECT_MAX: Duration = Duration::from_secs(60);
 /// Fragments of one message wait this long for the rest; the Go SDK keeps them for five
 /// seconds after each fragment (`ws/client_message.go`).
 const FRAGMENT_TTL: Duration = Duration::from_secs(5);
 /// Most messages with fragments waiting at once, and most fragments of one message.
 const MAX_PARTIAL: usize = 64;
 const MAX_FRAGMENTS: usize = 64;
-/// Messages remembered to drop redeliveries; the documentation says to deduplicate by
-/// `message_id` (im.message.receive_v1).
-const SEEN_CAPACITY: usize = 1024;
 /// A token is renewed when less than this remains; the Go SDK renews three minutes early.
 const TOKEN_MARGIN: Duration = Duration::from_secs(5 * 60);
 /// Longest token lifetime accepted; tenant tokens last at most two hours.
 const MAX_TOKEN_LIFETIME: Duration = Duration::from_secs(24 * 3600);
-/// A rate-limited call is retried this many times after waiting as told.
-const MAX_RATE_LIMIT_RETRIES: u32 = 3;
 /// Codes that mean a frequency limit: 99991400 from the gateway (frequency-control guide)
 /// and 230020 from the message APIs.
 const RATE_LIMIT_CODES: [i64; 2] = [99_991_400, 230_020];
 /// Header with the seconds to wait after a frequency limit.
 const RATE_LIMIT_RESET: &str = "x-ogw-ratelimit-reset";
-/// Characters per posted message; longer text is split. Requests may reach 150 KB, but
-/// long messages read badly; the Slack channel uses the same length.
-const MAX_TEXT_CHARS: usize = 4000;
-/// Cards remembered so that closing one keeps the request it showed.
-const CARD_CAPACITY: usize = 256;
 /// What the acknowledgement of an event carries: the Go SDK's answer for a handled event.
 const ACK_PAYLOAD: &[u8] = br#"{"code":200,"headers":null,"data":null}"#;
 
@@ -86,9 +75,10 @@ const ACK_PAYLOAD: &[u8] = br#"{"code":200,"headers":null,"data":null}"#;
 pub struct FeishuConfig {
     pub app_id: String,
     pub app_secret: String,
-    /// Open API base URL, [`DEFAULT_API_BASE`] unless a proxy or a test server is used.
+    /// Open API base URL: `https://open.feishu.cn` unless a proxy or a test server is used.
     pub api_base: String,
-    /// Tenant token endpoint, [`DEFAULT_TOKEN_URL`] by default.
+    /// Tenant token endpoint: `https://accounts.feishu.cn/oauth/v3/token` by default, the one
+    /// the documentation recommends.
     pub token_url: String,
     /// Limit for each API call and for opening the WebSocket.
     pub request_timeout: Duration,
@@ -102,6 +92,7 @@ pub struct FeishuConfig {
 }
 
 impl FeishuConfig {
+    /// Settings for the app `app_id` with `app_secret`, and the defaults of every other field.
     pub fn new(app_id: String, app_secret: String) -> Self {
         Self {
             app_id,
@@ -213,6 +204,7 @@ enum Connection {
 }
 
 impl FeishuChannel {
+    /// A channel for `config`. Fails when the HTTP client cannot be built.
     pub fn new(config: FeishuConfig) -> Result<Self, ImError> {
         let http = reqwest::Client::builder()
             .timeout(config.request_timeout)
@@ -299,7 +291,7 @@ impl FeishuChannel {
             let code = answer.as_ref().and_then(|answer| answer["code"].as_i64());
             let limited =
                 status == StatusCode::TOO_MANY_REQUESTS || code.is_some_and(|code| RATE_LIMIT_CODES.contains(&code));
-            if limited && retries < MAX_RATE_LIMIT_RETRIES {
+            if limited && retries < RATE_LIMIT_RETRIES {
                 retries += 1;
                 tokio::time::sleep(wait).await;
                 continue;
@@ -549,15 +541,17 @@ impl ImChannel for FeishuChannel {
 
     async fn run(&self, inbound: mpsc::Sender<Inbound>, cancel: &CancellationToken) -> Result<(), ImError> {
         let mut config = ClientConfig::default();
+        // The documentation says to deduplicate by `message_id` (im.message.receive_v1).
         let mut seen = Seen::new(SEEN_CAPACITY);
-        let mut backoff = RECONNECT_MIN;
+        // Used while the server has set no reconnect interval.
+        let mut backoff = Backoff::default();
         loop {
             if cancel.is_cancelled() {
                 return Ok(());
             }
             let wait = match self.connect(&mut config).await? {
                 Connection::Open(socket, service) => {
-                    backoff = RECONNECT_MIN;
+                    backoff.reset();
                     match self
                         .receive(*socket, service, &mut config, &inbound, &mut seen, cancel)
                         .await
@@ -569,14 +563,11 @@ impl ImChannel for FeishuChannel {
                 }
                 Connection::Later(reason) => {
                     self.report(&ImError::Transport(reason));
-                    let wait = config.reconnect.unwrap_or(backoff);
-                    backoff = (backoff * 2).min(RECONNECT_MAX);
-                    wait
+                    config.reconnect.unwrap_or_else(|| backoff.advance())
                 }
             };
-            tokio::select! {
-                () = cancel.cancelled() => return Ok(()),
-                () = tokio::time::sleep(wait) => {}
+            if !pause(wait, cancel).await {
+                return Ok(());
             }
         }
     }
@@ -584,16 +575,12 @@ impl ImChannel for FeishuChannel {
     async fn send(&self, to: &Destination, message: &Outbound) -> Result<MessageRef, ImError> {
         match message {
             Outbound::Text(text) => {
-                let mut parts = split(text).into_iter();
-                let first = parts.next().unwrap_or_default();
+                let (first, rest) = split(text);
                 let posted = self.post_text(to, &first).await?;
                 // The rest go to the same thread, which a first post in the chat itself starts.
-                let rest_to = Destination {
-                    conversation: to.conversation.clone(),
-                    thread: Some(to.thread.clone().unwrap_or_else(|| ThreadId(posted.id.0.clone()))),
-                };
-                for part in parts {
-                    self.post_text(&rest_to, &part).await?;
+                let thread = posted.thread();
+                for part in &rest {
+                    self.post_text(&thread, part).await?;
                 }
                 Ok(posted)
             }
@@ -626,25 +613,18 @@ impl ImChannel for FeishuChannel {
                 self.cards.remember(&posted.id, request);
                 Ok(posted)
             }
-            Outbound::ApprovalResolved { .. } => self.post_text(to, &resolution(&self.config.labels, message)).await,
+            Outbound::ApprovalResolved { user, result, .. } => {
+                let text = resolution(&self.config.labels, user.as_ref(), *result);
+                self.post_text(to, &text).await
+            }
         }
     }
 
     async fn update(&self, posted: &MessageRef, message: &Outbound) -> Result<(), ImError> {
         match message {
             Outbound::Text(text) => {
-                let mut parts = split(text).into_iter();
-                let first = parts.next().unwrap_or_default();
-                let thread = Destination {
-                    conversation: posted.at.conversation.clone(),
-                    thread: Some(
-                        posted
-                            .at
-                            .thread
-                            .clone()
-                            .unwrap_or_else(|| ThreadId(posted.id.0.clone())),
-                    ),
-                };
+                let (first, rest) = split(text);
+                let thread = posted.thread();
                 let path = format!("/open-apis/im/v1/messages/{}", posted.id.0);
                 let body = json!({"msg_type": "text", "content": text_content(&first)});
                 match self.api(Method::PUT, &path, &body).await {
@@ -656,20 +636,18 @@ impl ImChannel for FeishuChannel {
                     }
                     Err(error) => return Err(error.into()),
                 }
-                for part in parts {
-                    self.post_text(&thread, &part).await?;
+                for part in &rest {
+                    self.post_text(&thread, part).await?;
                 }
                 Ok(())
             }
-            Outbound::ApprovalRequest { .. } => Err(ImError::Transport(
-                "an approval request is posted, not written over a message".into(),
-            )),
-            Outbound::ApprovalResolved { .. } => {
+            Outbound::ApprovalRequest { .. } => Err(card_update_refused()),
+            Outbound::ApprovalResolved { user, result, .. } => {
                 let mut elements = Vec::new();
                 if let Some(request) = self.cards.forget(&posted.id) {
                     elements.push(markdown(&request));
                 }
-                elements.push(markdown(&resolution(&self.config.labels, message)));
+                elements.push(markdown(&resolution(&self.config.labels, user.as_ref(), *result)));
                 let path = format!("/open-apis/im/v1/messages/{}", posted.id.0);
                 self.api(Method::PATCH, &path, &json!({"content": card(&elements)}))
                     .await
@@ -838,8 +816,9 @@ fn rate_limit_wait(response: &reqwest::Response) -> Duration {
     Duration::from_secs(secs).min(MAX_INTERVAL)
 }
 
-fn split(text: &str) -> Vec<String> {
-    split_text(text, MAX_TEXT_CHARS, std::string::String::push)
+/// Text in parts of at most one message: the first part and the rest.
+fn split(text: &str) -> (String, Vec<String>) {
+    split_text(text, MAX_TEXT_CHARS, String::push)
 }
 
 /// The content of a text message: a JSON object as a string.
@@ -871,11 +850,8 @@ fn button(label: &str, kind: &str, value: &Value) -> Value {
 }
 
 /// The result of a closed card: what happened, and who decided.
-fn resolution(labels: &CardLabels, message: &Outbound) -> String {
-    let Outbound::ApprovalResolved { user, result, .. } = message else {
-        return String::new();
-    };
-    let what = labels.outcome(*result);
+fn resolution(labels: &CardLabels, user: Option<&UserId>, result: ApprovalResult) -> String {
+    let what = labels.outcome(result);
     match user {
         Some(user) => format!("{what} ({user})"),
         None => what.to_string(),
