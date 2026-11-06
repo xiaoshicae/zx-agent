@@ -14,7 +14,7 @@ use tokio::process::Command;
 
 use common::fake_mcp::{Era, FakeMcp, Reply as McpReply, tool};
 use common::mock_server::{MockServer, Reply};
-use common::zx_agent;
+use common::{stderr, stdout, zx_agent};
 
 const TOKEN_VAR: &str = "ZX_MCP_CLI_TEST_TOKEN";
 const TOKEN: &str = "mcp-cli-secret-5678";
@@ -69,11 +69,11 @@ fn run(model: &MockServer, dir: &Path, profile: &Path) -> Command {
 /// The tool results in the model's last request.
 fn tool_results(model: &MockServer) -> Vec<String> {
     let requests = model.requests();
-    requests.last().unwrap().body["messages"]
-        .as_array()
+    requests
+        .last()
         .unwrap()
+        .tool_results()
         .iter()
-        .filter(|message| message["role"] == "tool")
         .map(|message| message["content"].as_str().unwrap().to_string())
         .collect()
 }
@@ -95,9 +95,9 @@ async fn run_calls_an_mcp_tool_its_server_allows() {
         .output()
         .await
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "done\n");
+    assert_eq!(stdout(&output), "done\n");
     let startup = format!(
         "[mcp] prom: prom__query, prom__range (asks); protocol 2026-07-28; {}; the token is sent unencrypted",
         origin(&fake)
@@ -149,7 +149,7 @@ async fn chat_asks_before_an_mcp_tool_that_needs_approval() {
         .await
         .unwrap()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     assert!(
         stderr.contains("[approval 1]") && stderr.contains("prom__range"),
@@ -212,7 +212,7 @@ async fn startup_stops_when_an_mcp_server_cannot_be_used() {
     let unreachable = run(&model, dir.path(), &profile(dir.path(), "http://127.0.0.1:9/mcp", "[]"));
     for (mut command, expected) in [(unset, "must hold its token"), (unreachable, "MCP server prom:")] {
         let output = command.output().await.unwrap();
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr(&output);
         assert_eq!(output.status.code(), Some(2), "{stderr}");
         assert!(stderr.contains(expected), "{stderr}");
     }

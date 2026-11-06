@@ -4,7 +4,7 @@
 mod common;
 
 use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
@@ -13,7 +13,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 
 use common::mock_server::{MockServer, Reply};
-use common::{stderr, zx_agent};
+use common::{session_dir, stderr, zx_agent};
 
 const KEY_VAR: &str = "ZX_ACP_TEST_KEY";
 
@@ -30,21 +30,12 @@ struct Acp {
     _home: Option<tempfile::TempDir>,
 }
 
-/// Where the agent keeps the sessions of `cwd` by default: the directory chat uses, spelled
-/// out as pi spells it.
-fn session_dir(home: &Path, cwd: &Path) -> PathBuf {
-    let encoded = cwd.display().to_string().trim_start_matches('/').replace('/', "-");
-    home.join(".zx-agent/sessions").join(format!("--{encoded}--"))
-}
-
 /// The session files in `dir`, by name.
 fn session_files(dir: &Path) -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(dir)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
-    names
+    common::session_files(dir)
+        .iter()
+        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect()
 }
 
 /// The text of every message in a model request, in order; tool calls have none.

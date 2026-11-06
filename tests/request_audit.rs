@@ -18,7 +18,7 @@ use zx_agent::compaction::{Config, Outcome};
 use zx_agent::runner::RunOutcome;
 use zx_agent::session::{Entry, RequestSource, SessionHeader, SessionStore};
 
-use common::{EchoTool, RunnerSetup, config, header, read_lines};
+use common::{EchoTool, RunnerSetup, config, header, read_lines, replayed_requests};
 
 /// Every recorded request of `store`, rebuilt: the provider-neutral request and its
 /// OpenAI-compatible body in both system update modes.
@@ -89,11 +89,7 @@ fn request_ids(store: &SessionStore) -> Vec<String> {
 
 /// Every request rebuilt from a fresh snapshot of the file.
 fn replayed(path: &Path) -> Vec<Request> {
-    let store = SessionStore::read(path).unwrap();
-    request_ids(&store)
-        .iter()
-        .map(|id| store.replay_request(id).unwrap().1)
-        .collect()
+    replayed_requests(&SessionStore::read(path).unwrap())
 }
 
 fn types(path: &Path) -> Vec<String> {

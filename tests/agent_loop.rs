@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use common::{Collect, EchoTool, config, run_prompt, summarize, with_policy};
+use common::{Collect, EchoTool, NotifyingProvider, config, run_prompt, summarize, with_policy};
 use zx_agent::agent::QueuedMessage;
 use zx_agent::agent::{
     AgentEvent, Decision, ExecutionMode, LoopControl, LoopOutcome, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput,
@@ -421,12 +421,13 @@ async fn a_provider_error_ends_the_loop_after_a_start_end_pair() {
 
 #[tokio::test]
 async fn cancellation_ends_the_loop() {
-    let config = config(provider([FauxStep::Hang]), vec![]);
+    let provider = NotifyingProvider::new([FauxStep::Hang]);
+    let config = config(provider.clone(), vec![]);
     let cancel = CancellationToken::new();
     let trigger = cancel.clone();
-    // The delay only lets the request start; the assertion does not depend on timing.
+    // Cancelled once the request has started.
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        provider.started.notified().await;
         trigger.cancel();
     });
     let prompts = vec![QueuedMessage::User("go".into())];

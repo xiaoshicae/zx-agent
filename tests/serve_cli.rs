@@ -12,7 +12,7 @@ use tokio::process::Command;
 
 use common::fake_slack::FakeSlack;
 use common::mock_server::{MockServer, Reply};
-use common::zx_agent;
+use common::{json_lines, stderr, stdout, zx_agent};
 
 const APP_TOKEN: &str = "xapp-1-serve-test-token";
 const BOT_TOKEN: &str = "xoxb-serve-test-token";
@@ -121,7 +121,7 @@ async fn configuration_errors_are_reported_before_serving() {
             command.env_remove(variable);
         }
         let output = command.output().await.unwrap();
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr(&output);
         assert_eq!(output.status.code(), Some(2), "{config}: {stderr}");
         assert!(stderr.contains(expected), "{config}: expected {expected:?} in {stderr}");
         // Every error comes before the session directory is created.
@@ -202,12 +202,9 @@ async fn serve_answers_a_mention_with_an_approved_command_that_cannot_see_the_sl
         .await
         .unwrap()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
-    let log: Vec<Value> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
+    let log: Vec<Value> = json_lines(&stdout(&output));
     let approval_line = log
         .iter()
         .find(|line| line["type"] == "approval")
@@ -220,7 +217,7 @@ async fn serve_answers_a_mention_with_an_approved_command_that_cannot_see_the_sl
         ),
         (&json!("U2"), &json!("allow_once"), &json!("1700000001.000100"))
     );
-    assert!(!String::from_utf8_lossy(&output.stdout).contains(BOT_TOKEN));
+    assert!(!stdout(&output).contains(BOT_TOKEN));
     assert!(!stderr.contains(BOT_TOKEN) && !stderr.contains(APP_TOKEN));
 }
 
@@ -332,10 +329,5 @@ async fn a_status_left_by_a_killed_server_is_replaced_when_it_starts_again() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
 }

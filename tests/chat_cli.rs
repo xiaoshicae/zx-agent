@@ -7,11 +7,11 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines};
-use tokio::process::{Child, ChildStdout, Command};
+use tokio::process::{ChildStdout, Command};
 
 use common::mock_server::{MockServer, Reply};
-use common::{stderr, stdout, zx_agent};
-use zx_agent::ai::{AssistantMessage, ContentBlock, Message, StopReason};
+use common::{json_lines, signal, stderr, stdout, tool_call_answer, zx_agent};
+use zx_agent::ai::Message;
 use zx_agent::session::SessionStore;
 
 const KEY_VAR: &str = "ZX_CHAT_TEST_KEY";
@@ -62,13 +62,7 @@ async fn run(server: &MockServer, cwd: &Path, args: &[&str], input: &str) -> Out
 }
 
 fn users(server: &MockServer, index: usize) -> Vec<String> {
-    server.requests()[index].body["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|message| message["role"] == "user")
-        .map(|message| message["content"].as_str().unwrap().to_string())
-        .collect()
+    server.requests()[index].user_texts()
 }
 
 async fn seed_context(dir: &Path, bytes: usize) -> String {
@@ -206,10 +200,7 @@ async fn manual_compact_persists_a_summary_and_the_next_prompt_uses_it() {
     )
     .await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    let events: Vec<Value> = stdout(&output)
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
+    let events: Vec<Value> = json_lines(&stdout(&output));
     let compact = events
         .iter()
         .find(|event| event["type"] == "compaction_report")
@@ -247,10 +238,7 @@ async fn chat_automatically_compacts_at_its_default_byte_budget() {
     )
     .await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    let events: Vec<Value> = stdout(&output)
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
+    let events: Vec<Value> = json_lines(&stdout(&output));
     let start = events.iter().find(|event| event["type"] == "compaction_start").unwrap();
     assert_eq!(start["automatic"], true);
     let report = events.iter().find(|event| event["type"] == "run_end").unwrap();
@@ -304,10 +292,7 @@ async fn a_failed_manual_summary_is_reported_and_chat_can_accept_another_task() 
     )
     .await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    let events: Vec<Value> = stdout(&output)
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
+    let events: Vec<Value> = json_lines(&stdout(&output));
     assert_eq!(
         events
             .iter()
@@ -1345,18 +1330,6 @@ async fn read_terminal_until(terminal: &mut tokio::fs::File, seen: &mut Vec<u8>,
 }
 
 #[cfg(unix)]
-async fn signal(child: &Child, name: &str) {
-    assert!(
-        Command::new("kill")
-            .args([name, &child.id().unwrap().to_string()])
-            .status()
-            .await
-            .unwrap()
-            .success()
-    );
-}
-
-#[cfg(unix)]
 #[tokio::test]
 async fn streamed_output_is_visible_before_cancel_and_the_conversation_can_continue() {
     let dir = tempfile::tempdir().unwrap();
@@ -1828,15 +1801,8 @@ async fn resuming_an_interrupted_session_reports_the_recovered_call_without_runn
     let dir = tempfile::tempdir().unwrap();
     let mut store = SessionStore::create(&dir.path().join("chat.jsonl"), common::header()).unwrap();
     store.append_message(Message::user("fix it")).await.unwrap();
-    let mut call = AssistantMessage::failure("mock", "mock-model", StopReason::ToolUse, "");
-    call.error_message = None;
-    call.content = vec![ContentBlock::ToolCall {
-        id: "c1".into(),
-        name: "bash".into(),
-        arguments: json!({"command": "touch ran-again"}),
-        arguments_error: None,
-    }];
-    store.append_message(Message::Assistant(call)).await.unwrap();
+    let call = tool_call_answer("mock", "mock-model", "bash", json!({"command": "touch ran-again"}));
+    store.append_message(call).await.unwrap();
     store.append_tool_call_started("c1", "bash").await.unwrap();
     drop(store);
     let server = MockServer::start(vec![Reply::text("checked")]).await;
@@ -2041,10 +2007,7 @@ async fn a_known_context_window_adds_a_token_trigger_to_automatic_summaries() {
     )
     .await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    let events: Vec<Value> = stdout(&output)
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
+    let events: Vec<Value> = json_lines(&stdout(&output));
     assert!(
         events.iter().any(|event| event["type"] == "compaction_start"),
         "{events:?}"

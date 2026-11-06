@@ -64,7 +64,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use common::{EchoTool, RunnerSetup, config, fast_retry, header, read_lines, summarize};
+use common::{EchoTool, NotifyingProvider, RunnerSetup, config, fast_retry, header, read_lines, summarize};
 use zx_agent::agent::{
     AgentEvent, EVENT_SCHEMA_VERSION, HookContext, HookOptions, HookResult, Hooks, QueuedMessage, RequestKind,
 };
@@ -625,17 +625,17 @@ async fn a_run_stops_at_the_time_limit() {
 
 #[tokio::test]
 async fn the_caller_can_cancel_a_waiting_run() {
-    let provider = provider([FauxStep::Hang]);
+    let provider = NotifyingProvider::new([FauxStep::Hang]);
     let (mut runner, _) = RunnerSetup {
         limits: Limits::default(),
-        ..setup(&provider)
+        ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build();
     let cancel = CancellationToken::new();
     let trigger = cancel.clone();
-    // The delay only lets the request start; the assertion does not depend on timing.
+    // Cancelled once the request has started.
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        provider.started.notified().await;
         trigger.cancel();
     });
 

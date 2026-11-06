@@ -19,6 +19,15 @@ impl Request {
             .map(|(_, value)| value.as_str())
     }
 
+    /// The request line and the headers, one per line, as they were sent.
+    pub(crate) fn head_text(&self) -> String {
+        let mut text = format!("{} {}\n", self.method, self.path);
+        for (name, value) in &self.headers {
+            text.push_str(&format!("{name}: {value}\n"));
+        }
+        text
+    }
+
     /// The body as JSON; `Null` when empty.
     pub(crate) fn json(&self) -> serde_json::Value {
         if self.body.is_empty() {

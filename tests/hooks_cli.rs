@@ -6,7 +6,7 @@ use serde_json::json;
 use tokio::process::Command;
 
 use common::mock_server::{MockServer, Reply};
-use common::zx_agent;
+use common::{stderr, stdout, zx_agent};
 
 #[tokio::test]
 async fn known_api_key_is_redacted_before_model_events_and_session() {
@@ -43,17 +43,12 @@ async fn known_api_key_is_redacted_before_model_events_and_session() {
         .await
         .unwrap();
 
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let requests = server.requests();
     let messages = requests[1].body["messages"].to_string();
     assert!(!messages.contains(KEY), "raw key reached the next model request");
     assert!(messages.contains("[REDACTED]"));
-    assert!(!String::from_utf8_lossy(&output.stdout).contains(KEY));
+    assert!(!stdout(&output).contains(KEY));
     assert!(!std::fs::read_to_string(session).unwrap().contains(KEY));
 }
 
@@ -94,12 +89,7 @@ async fn secret_files_named_in_the_environment_are_redacted() {
         .await
         .unwrap();
 
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let messages = server.requests()[1].body["messages"].to_string();
     assert!(!messages.contains("remote-token-a"), "{messages}");
     assert!(!messages.contains("metrics-token-b"), "{messages}");
@@ -122,12 +112,7 @@ async fn secret_files_from_the_flag_add_to_those_in_the_environment() {
         .await
         .unwrap();
 
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let messages = server.requests()[1].body["messages"].to_string();
     assert!(!messages.contains("token-from-env"), "{messages}");
     assert!(!messages.contains("token-from-flag"), "{messages}");
@@ -146,7 +131,7 @@ async fn a_missing_secret_file_is_a_configuration_error() {
         .unwrap();
 
     assert_eq!(output.status.code(), Some(2));
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr(&output);
     assert!(stderr.contains("no-such-token"), "{stderr}");
     assert!(server.requests().is_empty());
 }
@@ -167,7 +152,7 @@ async fn a_secret_file_too_large_to_match_is_a_configuration_error() {
         .await
         .unwrap();
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(2), "{stderr}");
     assert!(
         stderr.contains(&secrets.join("bundle").display().to_string()),
@@ -195,7 +180,7 @@ async fn a_failed_redaction_is_reported_in_text_output() {
         .await
         .unwrap();
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     let reported = format!(
         "[hook] redact_secrets after_tool failed: cannot read a secret file to redact tool output: {} exceeds 65536 bytes",
@@ -221,13 +206,8 @@ async fn hook_failures_name_the_built_in_hook_in_jsonl_events() {
         .await
         .unwrap();
 
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let failures: Vec<(String, String)> = String::from_utf8_lossy(&output.stdout)
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let failures: Vec<(String, String)> = stdout(&output)
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
         .filter(|event| event["type"] == "hook_failed")
@@ -261,7 +241,7 @@ async fn a_short_secret_is_reported_at_startup_and_still_redacted() {
         .await
         .unwrap();
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     let notice: Vec<&str> = stderr.lines().filter(|line| line.starts_with("[secret] ")).collect();
     assert_eq!(notice.len(), 1, "{stderr}");

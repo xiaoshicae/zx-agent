@@ -10,6 +10,7 @@ pub(crate) mod fake_feishu;
 pub(crate) mod fake_mcp;
 pub(crate) mod fake_slack;
 pub(crate) mod http;
+pub(crate) mod im;
 pub(crate) mod mock_server;
 pub(crate) mod summary_eval;
 
@@ -22,17 +23,21 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
+use tokio::sync::Notify;
 use zx_agent::agent::QueuedMessage;
 use zx_agent::agent::{
     AgentEvent, Event, EventSink, ExecutionMode, HookContext, LoopConfig, LoopControl, LoopResult, LoopSpec,
     MessageQueues, Tool, ToolContext, ToolOutput, ToolPolicy, run_loop,
 };
+use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::retry::RetryPolicy;
-use zx_agent::ai::{Message, Provider, SystemPrompt, ToolDef};
+use zx_agent::ai::{
+    AssistantMessage, ContentBlock, EventReceiver, Message, Provider, Request, StopReason, SystemPrompt, ToolDef,
+};
 use zx_agent::interaction::ApprovalCache;
 use zx_agent::policy::PolicyHook;
 use zx_agent::runner::{Limits, Runner};
-use zx_agent::session::{SessionHeader, SessionStore};
+use zx_agent::session::{Entry, SessionHeader, SessionStore};
 
 /// The compiled `zx-agent`, for the tests that drive the program.
 pub(crate) fn zx_agent() -> tokio::process::Command {
@@ -47,6 +52,126 @@ pub(crate) fn stdout(output: &std::process::Output) -> String {
 /// What a finished program wrote to stderr, decoded lossily.
 pub(crate) fn stderr(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// Every line of `text` parsed as JSON, as the JSON-lines outputs are read.
+pub(crate) fn json_lines(text: &str) -> Vec<Value> {
+    text.lines().map(|line| serde_json::from_str(line).unwrap()).collect()
+}
+
+/// Send `name` (as `kill` spells it, such as `TERM`) to `child`.
+#[cfg(unix)]
+pub(crate) async fn signal(child: &tokio::process::Child, name: &str) {
+    assert!(
+        tokio::process::Command::new("kill")
+            .args([name, &child.id().unwrap().to_string()])
+            .status()
+            .await
+            .unwrap()
+            .success()
+    );
+}
+
+/// Where chat and acp keep the sessions of `cwd` under `home` by default, spelled out as pi
+/// spells it.
+pub(crate) fn session_dir(home: &Path, cwd: &Path) -> PathBuf {
+    let encoded = cwd.display().to_string().trim_start_matches('/').replace('/', "-");
+    home.join(".zx-agent/sessions").join(format!("--{encoded}--"))
+}
+
+/// The session files in `dir`, by name; none when the directory does not exist.
+pub(crate) fn session_files(dir: &Path) -> Vec<PathBuf> {
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = read_dir
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "jsonl"))
+        .collect();
+    files.sort();
+    files
+}
+
+/// An answer by `provider` and `model` that asked for `tool` with `arguments` and was cut
+/// off before the call ran: the shape a crash leaves in a session file.
+pub(crate) fn tool_call_answer(provider: &str, model: &str, tool: &str, arguments: Value) -> Message {
+    let mut answer = AssistantMessage::failure(provider, model, StopReason::ToolUse, "");
+    answer.error_message = None;
+    answer.content = vec![ContentBlock::ToolCall {
+        id: "c1".into(),
+        name: tool.into(),
+        arguments,
+        arguments_error: None,
+    }];
+    Message::Assistant(answer)
+}
+
+/// A session with one old message worth summarizing and a recent input; returns the old
+/// message's entry ID.
+pub(crate) async fn seeded_session() -> (SessionStore, String) {
+    let mut store = SessionStore::in_memory(header());
+    let old = store
+        .append_message(Message::user("observed ".repeat(600)))
+        .await
+        .unwrap();
+    store.append_message(Message::user("most recent input")).await.unwrap();
+    (store, old)
+}
+
+/// A summary citing `id`, as the JSON the model answers a summary request with.
+pub(crate) fn summary_json(id: &str) -> String {
+    json!({"facts":[{"text":"Old observation","sourceEntryIds":[id]}],"inferences":["A guess"],"plans":["Continue"]})
+        .to_string()
+}
+
+/// Every request of the session, rebuilt from its checkpoints, in order.
+pub(crate) fn replayed_requests(store: &SessionStore) -> Vec<Request> {
+    store
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::RequestStarted(started) => Some(store.replay_request(&started.id).unwrap().1),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A scripted provider that says when a request has started, for tests that need the run to
+/// be under way without waiting a fixed time.
+pub(crate) struct NotifyingProvider {
+    pub(crate) faux: FauxProvider,
+    /// Notified at each request, with a permit kept for a waiter that comes later.
+    pub(crate) started: Notify,
+    /// The cancellation token of the latest request.
+    pub(crate) token: Mutex<Option<CancellationToken>>,
+}
+
+impl NotifyingProvider {
+    pub(crate) fn new(steps: impl IntoIterator<Item = FauxStep>) -> Arc<Self> {
+        Arc::new(Self {
+            faux: FauxProvider::new(steps),
+            started: Notify::new(),
+            token: Mutex::new(None),
+        })
+    }
+
+    /// Every request received so far, in order.
+    pub(crate) fn requests(&self) -> Vec<Request> {
+        self.faux.requests()
+    }
+}
+
+impl Provider for NotifyingProvider {
+    fn name(&self) -> &str {
+        "notifying"
+    }
+
+    fn stream(&self, request: Request, cancel: CancellationToken) -> EventReceiver {
+        *self.token.lock().unwrap() = Some(cancel.clone());
+        let events = self.faux.stream(request, cancel);
+        self.started.notify_one();
+        events
+    }
 }
 
 /// The bounds the runner tests use unless they set their own: 30 model requests and 15
@@ -244,11 +369,7 @@ pub(crate) fn header() -> SessionHeader {
 
 /// Every line of a session file, parsed.
 pub(crate) fn read_lines(path: &Path) -> Vec<Value> {
-    std::fs::read_to_string(path)
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect()
+    json_lines(&std::fs::read_to_string(path).unwrap())
 }
 
 /// The parts of a runner, with test defaults: no retries, unattended preset limits,

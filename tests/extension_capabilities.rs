@@ -6,12 +6,11 @@ mod common;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::json;
 
-use common::{EchoTool, RunnerSetup, config, header, summarize};
+use common::{EchoTool, NotifyingProvider, RunnerSetup, config, header, summarize};
 use zx_agent::AgentSession;
 use zx_agent::agent::{
     AgentEvent, CommandContext, CommandError, CommandOutcome, Event, HookContext, HookResult, Hooks, LoopConfig,
@@ -360,7 +359,7 @@ fn command_names_must_be_well_formed_and_unique() {
 async fn an_idle_session_records_entries_and_messages_at_once_and_a_running_one_is_busy() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("session.jsonl");
-    let provider = Arc::new(FauxProvider::new([FauxStep::Hang, FauxStep::text("ok")]));
+    let provider = NotifyingProvider::new([FauxStep::Hang, FauxStep::text("ok")]);
     let (session, _) = session_in(&file, config(provider.clone(), vec![]));
 
     session.append_entry("state", json!({"n": 1})).await.unwrap();
@@ -377,7 +376,7 @@ async fn an_idle_session_records_entries_and_messages_at_once_and_a_running_one_
 
     let mut running = Box::pin(session.prompt("go"));
     tokio::select! {
-        () = tokio::time::sleep(Duration::from_millis(50)) => {}
+        () = provider.started.notified() => {}
         _ = &mut running => panic!("must be running"),
     }
     assert_eq!(session.append_entry("state", json!(2)).await, Err(SessionError::Busy));

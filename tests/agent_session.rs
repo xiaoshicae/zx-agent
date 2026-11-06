@@ -12,42 +12,20 @@ use serde_json::{Value, json};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-use common::{Collect, RunnerSetup, config, header, summarize};
+use common::{Collect, NotifyingProvider, RunnerSetup, config, header, summarize};
 use zx_agent::AgentSession;
 use zx_agent::agent::{
     AgentEvent, Decision, Event, HookContext, HookResult, Hooks, QueuedMessage, Tool, ToolContext, ToolOutput,
 };
 use zx_agent::agent_session::{ModelRef, SessionError, Subscription};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{EventReceiver, Provider, Reasoning, Request, ToolDef};
+use zx_agent::ai::{Reasoning, Request, ToolDef};
 use zx_agent::interaction::{Approval, ApprovalRequest, Interaction};
 use zx_agent::runner::RunOutcome;
 use zx_agent::session::{Entry, SessionStore};
 
-struct NotifyingProvider {
-    faux: FauxProvider,
-    started: Notify,
-    token: Mutex<Option<CancellationToken>>,
-}
-
-impl Provider for NotifyingProvider {
-    fn name(&self) -> &str {
-        "notifying"
-    }
-    fn stream(&self, request: Request, cancel: CancellationToken) -> EventReceiver {
-        *self.token.lock().unwrap() = Some(cancel.clone());
-        let events = self.faux.stream(request, cancel);
-        self.started.notify_one();
-        events
-    }
-}
-
 fn setup(steps: impl IntoIterator<Item = FauxStep>) -> (AgentSession, Arc<NotifyingProvider>, Arc<Collect>) {
-    let provider = Arc::new(NotifyingProvider {
-        faux: FauxProvider::new(steps),
-        started: Notify::new(),
-        token: Mutex::new(None),
-    });
+    let provider = NotifyingProvider::new(steps);
     let (runner, events) = RunnerSetup::new(config(provider.clone(), vec![])).build();
     (AgentSession::from(runner), provider, events)
 }

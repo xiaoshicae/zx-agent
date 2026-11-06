@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 
@@ -15,6 +15,36 @@ pub(crate) struct Captured {
     /// Request line and headers, lowercased.
     pub headers: String,
     pub body: Value,
+}
+
+impl Captured {
+    /// The messages of the request, in order.
+    fn messages(&self) -> &[Value] {
+        self.body["messages"].as_array().map_or(&[], Vec::as_slice)
+    }
+
+    /// The texts of the user messages, in order.
+    pub(crate) fn user_texts(&self) -> Vec<String> {
+        self.messages()
+            .iter()
+            .filter(|message| message["role"] == "user")
+            .map(|message| message["content"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// The text of the leading system message.
+    pub(crate) fn system_text(&self) -> String {
+        self.messages()[0]["content"].as_str().unwrap().to_string()
+    }
+
+    /// The tool result messages, in order.
+    pub(crate) fn tool_results(&self) -> Vec<Value> {
+        self.messages()
+            .iter()
+            .filter(|message| message["role"] == "tool")
+            .cloned()
+            .collect()
+    }
 }
 
 /// The scripted answer to one request.
@@ -118,7 +148,10 @@ impl MockServer {
 }
 
 async fn answer(mut stream: TcpStream, reply: Reply, log: Arc<Mutex<Vec<Captured>>>, received: Arc<Notify>) {
-    let request = read_request(&mut stream).await;
+    // A client that closes without sending has nothing to answer.
+    let Some(request) = read_request(&mut stream).await else {
+        return;
+    };
     let reply = match reply {
         Reply::Dynamic(build) => Reply::Sse(build(&request.body)),
         reply => reply,
@@ -167,27 +200,12 @@ fn sse_events(chunks: &[Value]) -> String {
     chunks.iter().map(|chunk| format!("data: {chunk}\n\n")).collect()
 }
 
-async fn read_request(stream: &mut TcpStream) -> Captured {
-    let mut data = Vec::new();
-    let mut buf = [0u8; 4096];
-    let header_end = loop {
-        let n = stream.read(&mut buf).await.unwrap();
-        data.extend_from_slice(&buf[..n]);
-        if let Some(pos) = data.windows(4).position(|w| w == b"\r\n\r\n") {
-            break pos + 4;
-        }
-    };
-    let headers = String::from_utf8_lossy(&data[..header_end]).to_lowercase();
-    let length: usize = headers
-        .lines()
-        .find_map(|line| line.strip_prefix("content-length:"))
-        .map_or(0, |value| value.trim().parse().unwrap());
-    while data.len() < header_end + length {
-        let n = stream.read(&mut buf).await.unwrap();
-        data.extend_from_slice(&buf[..n]);
-    }
-    Captured {
-        headers,
-        body: serde_json::from_slice(&data[header_end..header_end + length]).unwrap(),
-    }
+/// One request, as the fake records it: `None` when the client closed the connection first.
+async fn read_request(stream: &mut TcpStream) -> Option<Captured> {
+    let request = super::http::read_request(stream).await?;
+    let body = request.json();
+    Some(Captured {
+        headers: request.head_text().to_lowercase(),
+        body,
+    })
 }

@@ -16,24 +16,9 @@ use zx_agent::compaction::Config;
 use zx_agent::runner::{Limits, RunOutcome, Runner};
 use zx_agent::session::{Entry, SessionStore};
 
-use common::{Collect, EchoTool, RunnerSetup, config, fast_retry, header, test_limits};
+use common::{Collect, EchoTool, RunnerSetup, config, fast_retry, seeded_session, summary_json, test_limits};
 
 const OVERFLOW: &str = "HTTP 400: This model's maximum context length is 65536 tokens";
-
-fn summary(id: &str) -> String {
-    json!({"facts":[{"text":"Old observation","sourceEntryIds":[id]}],"inferences":[],"plans":["Continue"]}).to_string()
-}
-
-/// A session with an old message worth summarizing, and the ID of that message.
-async fn seeded() -> (SessionStore, String) {
-    let mut store = SessionStore::in_memory(header());
-    let old = store
-        .append_message(Message::user("observed ".repeat(600)))
-        .await
-        .unwrap();
-    store.append_message(Message::user("most recent input")).await.unwrap();
-    (store, old)
-}
 
 /// Automatic compaction is enabled, but the context stays below its byte threshold, so only
 /// an overflow makes the runner summarize.
@@ -71,10 +56,10 @@ fn failed_answers(messages: &[Message]) -> usize {
 
 #[tokio::test]
 async fn a_context_the_model_rejects_as_too_long_is_compacted_once_and_the_run_continues() {
-    let (session, old) = seeded().await;
+    let (session, old) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
         FauxStep::Fail(OVERFLOW.into()),
-        FauxStep::text(summary(&old)),
+        FauxStep::text(summary_json(&old)),
         FauxStep::text("answer"),
     ]));
     let (mut runner, events) = runner(&provider, session, test_limits());
@@ -145,7 +130,7 @@ async fn a_context_the_model_rejects_as_too_long_is_compacted_once_and_the_run_c
 
 #[tokio::test]
 async fn without_automatic_compaction_an_overflow_ends_the_run_as_before() {
-    let (session, _) = seeded().await;
+    let (session, _) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([FauxStep::Fail(OVERFLOW.into())]));
     let (mut runner, events) = RunnerSetup {
         session,
@@ -164,10 +149,10 @@ async fn without_automatic_compaction_an_overflow_ends_the_run_as_before() {
 
 #[tokio::test]
 async fn an_overflow_right_after_a_recovery_ends_the_run() {
-    let (session, old) = seeded().await;
+    let (session, old) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
         FauxStep::Fail(OVERFLOW.into()),
-        FauxStep::text(summary(&old)),
+        FauxStep::text(summary_json(&old)),
         FauxStep::Fail(OVERFLOW.into()),
         FauxStep::text("must not be requested"),
     ]));
@@ -186,10 +171,10 @@ async fn an_overflow_right_after_a_recovery_ends_the_run() {
 
 #[tokio::test]
 async fn an_answer_after_a_recovery_allows_another_recovery() {
-    let (session, old) = seeded().await;
+    let (session, old) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
         FauxStep::Fail(OVERFLOW.into()),
-        FauxStep::text(summary(&old)),
+        FauxStep::text(summary_json(&old)),
         FauxStep::tool_call("c1", "echo", json!({"text": "hi"})),
         FauxStep::Fail(OVERFLOW.into()),
     ]));
@@ -208,7 +193,7 @@ async fn an_answer_after_a_recovery_allows_another_recovery() {
 
 #[tokio::test]
 async fn a_failed_recovery_summary_pauses_automatic_compaction() {
-    let (session, _) = seeded().await;
+    let (session, _) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
         FauxStep::Fail(OVERFLOW.into()),
         FauxStep::text("not JSON"),
@@ -236,7 +221,7 @@ async fn a_failed_recovery_summary_pauses_automatic_compaction() {
 
 #[tokio::test]
 async fn an_overflow_without_request_budget_left_ends_the_run() {
-    let (session, _) = seeded().await;
+    let (session, _) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
         FauxStep::Fail(OVERFLOW.into()),
         FauxStep::text("must not be requested"),
@@ -257,7 +242,7 @@ async fn an_overflow_without_request_budget_left_ends_the_run() {
 
 #[tokio::test]
 async fn the_run_timeout_also_bounds_the_recovery_summary() {
-    let (session, _) = seeded().await;
+    let (session, _) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([FauxStep::Fail(OVERFLOW.into()), FauxStep::Hang]));
     let limits = Limits {
         timeout: Some(Duration::from_millis(200)),

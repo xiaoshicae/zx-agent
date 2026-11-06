@@ -9,12 +9,12 @@ use async_trait::async_trait;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use common::{EchoTool, RunnerSetup, config, fast_retry, header};
+use common::{EchoTool, RunnerSetup, config, fast_retry, header, replayed_requests};
 use zx_agent::agent::{AgentEvent, HookContext, HookResult, Hooks, RequestPlan, RequestSettings, Tool};
 use zx_agent::ai::Reasoning;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::runner::RunOutcome;
-use zx_agent::session::{Entry, SessionStore};
+use zx_agent::session::SessionStore;
 
 /// Uses `model` with high reasoning on the first turn only, and records what it saw.
 struct FirstTurnUpgrade {
@@ -101,15 +101,7 @@ async fn a_hook_changes_the_model_and_reasoning_of_one_request_and_the_audit_rec
         .collect();
     assert_eq!(started, ["big-model", "test-model"]);
     // Every request rebuilds from the session file with the settings it used.
-    let store = SessionStore::read(&path).unwrap();
-    let replayed: Vec<_> = store
-        .entries()
-        .iter()
-        .filter_map(|entry| match entry {
-            Entry::RequestStarted(started) => Some(store.replay_request(&started.id).unwrap().1),
-            _ => None,
-        })
-        .collect();
+    let replayed = replayed_requests(&SessionStore::read(&path).unwrap());
     assert_eq!(replayed, provider.requests());
 }
 

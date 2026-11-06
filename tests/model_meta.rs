@@ -8,7 +8,7 @@ use std::time::Duration;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use common::{EchoTool, RunnerSetup, config, header, read_lines};
+use common::{EchoTool, RunnerSetup, config, header, read_lines, seeded_session, summary_json};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{AssistantMessage, Message, ModelCost, ModelMeta, StopReason, Usage};
 use zx_agent::compaction::{self, Config, DEFAULT_RESERVE_TOKENS};
@@ -81,25 +81,10 @@ async fn a_model_without_prices_has_no_cost() {
     );
 }
 
-fn summary(id: &str) -> String {
-    json!({"facts":[{"text":"Old observation","sourceEntryIds":[id]}],"inferences":["A guess"],"plans":["Continue"]})
-        .to_string()
-}
-
-async fn seeded() -> (SessionStore, String) {
-    let mut store = SessionStore::in_memory(header());
-    let old = store
-        .append_message(Message::user("observed ".repeat(600)))
-        .await
-        .unwrap();
-    store.append_message(Message::user("most recent input")).await.unwrap();
-    (store, old)
-}
-
 async fn run_with_token_trigger(trigger_tokens: u64) -> (RunOutcome, Vec<&'static str>, usize) {
-    let (store, old) = seeded().await;
+    let (store, old) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
-        FauxStep::text(summary(&old)),
+        FauxStep::text(summary_json(&old)),
         FauxStep::text("answer"),
     ]));
     let (runner, events) = RunnerSetup {
