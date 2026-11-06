@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use super::{Entry, SessionStore};
+use super::SessionStore;
 use crate::ai::{Message, UserMessageKind};
 
 /// One session file in a directory, as [`list_sessions`] read it.
@@ -102,25 +102,16 @@ pub fn list_sessions(dir: &Path) -> Result<SessionList> {
 
 fn info(path: PathBuf, store: &SessionStore) -> SessionInfo {
     let header = store.header();
-    let first_prompt = store.entries().iter().find_map(|entry| match entry {
-        Entry::Message(entry) => match &entry.message {
+    let first_prompt = store.entries().iter().find_map(|entry| {
+        let (_, message) = entry.projected()?;
+        match &*message {
             Message::User {
                 content,
                 kind: UserMessageKind::Prompt,
                 ..
             } => Some(content.clone()),
             Message::User { .. } | Message::System(_) | Message::Assistant(_) | Message::ToolResult(_) => None,
-        },
-        Entry::ContextEdit(_)
-        | Entry::FormatUpgrade(_)
-        | Entry::CompactionStarted(_)
-        | Entry::Compaction(_)
-        | Entry::CompactionFailed(_)
-        | Entry::RequestConfig(_)
-        | Entry::RequestStarted(_)
-        | Entry::ToolCallStarted(_)
-        | Entry::Custom(_)
-        | Entry::CustomMessage(_) => None,
+        }
     });
     SessionInfo {
         id: header.id.clone(),

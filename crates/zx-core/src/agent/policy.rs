@@ -44,3 +44,17 @@ impl ToolPolicy for AllowAll {
         Decision::Allow
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn allow_all_allows_every_call_whatever_its_arguments() {
+        let decision = AllowAll.check("bash", &json!({"command": "rm -rf /"})).await;
+        assert_eq!(decision, Decision::Allow);
+        assert_eq!(AllowAll.check("unknown", &json!(null)).await, Decision::Allow);
+    }
+}

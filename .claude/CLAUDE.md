@@ -39,7 +39,7 @@
 | CLI | `src/main.rs`、`src/cli.rs`、`src/run.rs`、`src/process.rs`、`src/render.rs`、`src/chat/`、`src/serve.rs`、`src/sessions.rs` | main 只分派子命令；cli 是共用参数与会话组装（`Shared` 为一个进程的所有会话读一次指令文件、连一次 MCP，`prepare` 组装一个会话）；run 处理单次任务；process 是退出码、stdout 行、关机信号与 JSON 行 sink；render 是终端与日志里调用与事件的文案，run、chat、acp 与 sessions 共用；sessions 是会话文件的打开与创建、chat 的会话目录（默认 `~/.zx-agent/sessions/--<工作目录>--/`）与 `zx-agent sessions`；chat 管理单一输入所有者（终端里一次到达的多行合为一条消息）、审批、信号和 REPL，终端渲染（颜色、状态行、行的归属）在 `src/chat/term.rs`；serve 读取配置、为每个线程准备会话并隐藏 IM 凭据 |
 | 场景配置 | `src/profile/`、`profiles/` | TOML 基线与覆盖（文件格式与叠加在 `file.rs`）、项目上下文、显式 skill 目录及按需读取、MCP 服务器（`[[mcp]]`）；不进入循环机制 |
 | 提示词 | `crates/zx-core/src/prompt.rs` | 生成系统提示词：说明 + `<environment>` + `<command_policy>` + `<project_context>` + `<available_skills>`（空段落不出现） |
-| 共享会话 | `crates/zx-core/src/agent_session.rs` | 共享调用与 Busy、RAII 归还运行权、取消、订阅与退订、空闲时切换模型 |
+| 共享会话 | `crates/zx-core/src/agent_session.rs`、`crates/zx-core/src/agent_session/events.rs` | 共享调用与 Busy、RAII 归还运行权、取消、空闲时切换模型；订阅与退订、有界订阅在 `events.rs` |
 | 运行层 | `crates/zx-core/src/runner.rs` | 持有可顺序复用的会话；以独占借用控制单次运行、重试、上限、审批缓存、持久化和报告 |
 | 会话 | `crates/zx-core/src/session.rs`、`crates/zx-core/src/session/` | 只追加的条目树与校验，投影出发给模型的消息；记录经 `SessionLog` 保存，默认是单写者的 JSONL 文件（`jsonl.rs`） |
 | 上下文管理 | `crates/zx-core/src/compaction/`（`mod.rs` 预算与报告、`host.rs` 摘要执行者、`answer.rs` 模型回答的解析与合并）、`crates/zx-core/src/session/summary.rs`、`crates/zx-tools/src/output_store.rs` | 宿主摘要、追加升级与原始投影、脱敏后的长结果保存及分页 |

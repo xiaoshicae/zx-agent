@@ -64,6 +64,8 @@ pub struct SummaryFact {
     pub supersedes: Vec<String>,
 }
 
+/// A summary of the conversation: facts with the records they cite, inferences and plans.
+///
 /// Facts and model inference are deliberately separate. References are validated;
 /// this does not establish that a model's assertion is entailed by its source.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,18 +100,31 @@ impl CompactionSummary {
             self.facts.len() <= MAX_STATEMENTS
                 && self.inferences.len() <= MAX_STATEMENTS
                 && self.plans.len() <= MAX_STATEMENTS,
-            "too many summary statements"
+            "too many summary statements: {} facts, {} inferences, {} plans; at most {MAX_STATEMENTS} of each",
+            self.facts.len(),
+            self.inferences.len(),
+            self.plans.len()
         );
         ensure!(
             !self.facts.is_empty() || !self.inferences.is_empty() || !self.plans.is_empty(),
             "summary is empty"
         );
-        for fact in &self.facts {
-            ensure!(!fact.text.trim().is_empty(), "summary fact is empty");
-            ensure!(!fact.source_entry_ids.is_empty(), "summary fact has no sourceEntryIds");
+        for (index, fact) in self.facts.iter().enumerate() {
+            ensure!(
+                !fact.text.trim().is_empty(),
+                "summary fact {} is empty",
+                fact_label(index, fact)
+            );
+            ensure!(
+                !fact.source_entry_ids.is_empty(),
+                "summary fact {} has no sourceEntryIds",
+                fact_label(index, fact)
+            );
         }
-        for text in self.inferences.iter().chain(&self.plans) {
-            ensure!(!text.trim().is_empty(), "summary statement is empty");
+        for (kind, statements) in [("inference", &self.inferences), ("plan", &self.plans)] {
+            for (index, text) in statements.iter().enumerate() {
+                ensure!(!text.trim().is_empty(), "summary {kind} #{} is empty", index + 1);
+            }
         }
         Ok(())
     }
@@ -146,10 +161,18 @@ pub struct SummaryRequest {
     pub max_tokens: u32,
 }
 
+/// How an error names a fact: its ID, or its position from 1 when it has none.
+fn fact_label(index: usize, fact: &SummaryFact) -> String {
+    match &fact.id {
+        Some(id) => id.clone(),
+        None => format!("#{}", index + 1),
+    }
+}
+
 impl SummaryRequest {
     /// The messages of the request as it was sent: the instructions as the system prompt,
     /// `input` as the user message.
-    pub(crate) fn messages(&self, input: String, system_timestamp: u64, user_timestamp: u64) -> Vec<Message> {
+    pub(super) fn messages(&self, input: String, system_timestamp: u64, user_timestamp: u64) -> Vec<Message> {
         summary_messages(&self.instructions, input, system_timestamp, user_timestamp)
     }
 }
@@ -191,6 +214,8 @@ pub(crate) fn superseded_by(previous: &[SummaryFact], new: &[SummaryFact]) -> Re
     Ok(superseded)
 }
 
+/// A summary attempt: what it reads and keeps, and the request it makes.
+///
 /// Written and flushed before the summary model is called. An unresolved attempt
 /// after cancellation or process failure has no effect on model context.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -298,7 +323,10 @@ impl IncrementalSource {
             .previous_facts
             .iter()
             .map(|fact| PreviousFact {
-                id: fact.id.as_deref().unwrap_or_default(),
+                id: fact
+                    .id
+                    .as_deref()
+                    .expect("the effective facts of a summary are numbered"),
                 text: &fact.text,
                 source_entry_ids: &fact.source_entry_ids,
             })
@@ -430,13 +458,18 @@ impl SessionStore {
             .iter()
             .position(|entry| entry.id() == done.attempt_id)
             .expect("validate_attempt_completion located the attempt on this path");
-        ensure!(
-            !Self::any_source_corrected(&path[started + 1..], &source.source_entry_ids),
-            "compaction source changed during the summary request"
-        );
+        if let Some(corrected) = Self::corrected_source(&path[started + 1..], &source.source_entry_ids) {
+            bail!(
+                "compaction attempt {}: source {corrected} was corrected during the summary request",
+                done.attempt_id
+            );
+        }
         ensure!(
             done.first_kept_entry_id == source.first_kept_entry_id,
-            "compaction retained boundary changed"
+            "compaction attempt {}: the result keeps from entry {} but the attempt from {}",
+            done.attempt_id,
+            done.first_kept_entry_id,
+            source.first_kept_entry_id
         );
         match source.mode {
             SummaryMode::Full => {
@@ -490,8 +523,14 @@ impl SessionStore {
 
     fn validate_compaction_start_at(&self, entry: &CompactionStartedEntry, parent: Option<&str>) -> Result<()> {
         ensure!(
-            entry.request.max_tokens > 0 && !entry.request.model.trim().is_empty(),
-            "invalid summary request"
+            entry.request.max_tokens > 0,
+            "summary attempt {}: maxTokens must be greater than zero",
+            entry.id
+        );
+        ensure!(
+            !entry.request.model.trim().is_empty(),
+            "summary attempt {}: the model is empty",
+            entry.id
         );
         let path = self.branch_path_from(parent);
         match (entry.mode, &entry.continues) {
