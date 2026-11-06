@@ -1,7 +1,7 @@
 # zx-agent serve becomes the container's main process. With a shared process namespace the
 # pause container is PID 1: it reaps the processes commands leave behind, and /proc/1/environ
 # holds none of this container's variables, so the keys stay in zx-agent's own environment,
-# which commands cannot read (docs/serve-im-review.md, section 2.3.2). kubectl exec still
+# which commands cannot read. kubectl exec still
 # starts chat or run beside it.
 apiVersion: apps/v1
 kind: Deployment

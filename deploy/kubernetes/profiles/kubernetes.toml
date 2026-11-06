@@ -36,8 +36,8 @@ autoApprove = [
 # elsewhere (--server), use other credentials (--kubeconfig, --token, --user, --as), skip
 # certificate checks (--insecure-skip-tls-verify), write files (--profile-output,
 # --cache-dir), read any API path (--raw) or read manifests (--filename). kubectl v1.36.1
-# sent the kubeconfig token to an HTTPS address given with --server
-# (docs/p6-online-access-review.md, appendix 9.3, K1). Checked against kubectl v1.36.1.
+# sent the kubeconfig token to an HTTPS address given with --server. Checked against
+# kubectl v1.36.1.
 [rules.autoApproveOptions.kubectl]
 long = [
   "namespace",

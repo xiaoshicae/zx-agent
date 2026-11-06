@@ -1,5 +1,5 @@
 //! Feishu: messages and card clicks arrive over the long connection that the official SDKs
-//! use; posts go through the open API (docs/serve-im-review.md, section 3.5).
+//! use; posts go through the open API.
 //!
 //! The long connection has no published specification. This follows the official Go SDK
 //! (`larksuite/oapi-sdk-go`, branch `v3_main` at `db9f52d0`, package `ws`), with one change:

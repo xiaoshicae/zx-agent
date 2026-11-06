@@ -76,7 +76,7 @@ path = "skills/rust-review/SKILL.md"
 | `compaction.triggerTokens` | 按 token 估算的自动摘要阈值，0 关闭；与 `triggerBytes` 任一超过即摘要。估算 = 最近一次成功回复报告的输入加输出 token，加上其后消息的字节数除以 4。须高于 `keepRecentBytes` 折算的 token 数（字节除以 4），否则摘要永远压不到阈值以下。省略时，开启自动摘要（`triggerBytes` 非零）且模型的上下文窗口已知（`[[models]]` 或 `--context-window`）的话，取“窗口减 `reserveTokens`”，不满足上述条件时不设 |
 | `compaction.reserveTokens` | 按窗口推导 `triggerTokens` 时留出的 token 数，默认 16384（pi 的 `reserveTokens`） |
 | `[[models]]` | 模型的元数据，每项 `id`（必填）、`contextWindow`（token 数，大于零）、`cost`（美元每百万 token：`input`、`output`、`cacheRead`、`cacheWrite`，都不小于零；`input` 指既不读也不写缓存的提示词 token）。没有内置的模型表；按 `id` 覆盖所扩展 profile 的同名项。有单价时每次回复的 `usage.costUsd` 与 chat 的 `[turn]`、`/status` 显示成本 |
-| `compaction.maxSummaryTokens` | 摘要输出 token 上限，1–16384，默认 2048。有的服务把推理计入输出 token，推理可能用满上限而写不出摘要（见 `docs/ROADMAP.md` 的摘要评测记录），使用这类模型时需要调高；服务支持时也可以经 `--request-field` 关闭推理，但它同样作用于任务请求 |
+| `compaction.maxSummaryTokens` | 摘要输出 token 上限，1–16384，默认 2048。有的服务把推理计入输出 token，推理可能用满上限而写不出摘要（见 `docs/ROADMAP.md` 的验证记录），使用这类模型时需要调高；服务支持时也可以经 `--request-field` 关闭推理，但它同样作用于任务请求 |
 | `compaction.timeoutSecs` | 摘要流总超时，大于零，默认 120 秒 |
 | `toolOutput.thresholdBytes` | 超过此大小的工具结果落盘；0 关闭，否则为 256–maxFileBytes，默认 8192 |
 | `toolOutput.maxFileBytes` | 读写文件上限，1–1048576，默认 1 MiB |
@@ -91,7 +91,7 @@ path = "skills/rust-review/SKILL.md"
 
 ## MCP 服务器
 
-`[[mcp]]` 让模型调用外部 MCP 服务器的工具（只支持 Streamable HTTP）。MCP 服务器由外部服务提供，本项目只做客户端；设计见 [`p7-mcp-review.md`](p7-mcp-review.md)。
+`[[mcp]]` 让模型调用外部 MCP 服务器的工具（只支持 Streamable HTTP）。MCP 服务器由外部服务提供，本项目只做客户端。
 
 ```toml
 [[mcp]]
@@ -211,7 +211,7 @@ zx-agent run --model "$ZX_MODEL" --compact-threshold-bytes 262144 "处理长任�
 
 - 旧事实由程序原样保留：模型只返回新事实（`supersedes` 可列出被它取代的旧事实编号），推断与计划每次重新生成。每条事实带编号 `<创建它的尝试 ID>-<序号>`；接续全量模式留下的摘要时按同一规则推导编号。
 - 被取代的事实不再进入上下文，仍保留在之前的摘要记录中；去掉被取代的事实之后仍超过 128 条或 64 KiB 时，从最早的旧事实起逐条淘汰，摘要记录写明 `superseded` 与 `evicted`。
-- 已知问题：旧事实只能整条保留或整条取代。一条事实若把仍成立的细节（例如 JVM 启动参数）和会变化的对象（例如旧 Pod、旧的内存上限）写在一起，后者变化时整条被取代，仍成立的细节随之离开上下文。评测中三次都出现，决定不修复，详见 `docs/ROADMAP.md` 的"增量摘要的已知问题"。
+- 已知问题：旧事实只能整条保留或整条取代。一条事实若把仍成立的细节（例如 JVM 启动参数）和会变化的对象（例如旧 Pod、旧的内存上限）写在一起，后者变化时整条被取代，仍成立的细节随之离开上下文。评测中三次都出现，决定不修复，见 `docs/ROADMAP.md` 的已知缺口。
 - 修正被摘要覆盖的原消息时，只作废引用了它的事实，摘要其余部分照常生效；修正后的记录在下一次摘要时重新读取。
 - 记录（v5）：`compaction_started` 带 `mode: "incremental"` 与 `continues`（接续的摘要条目），请求审计据此还原增量请求。加载时校验：接续的是同一分支上最新的有效摘要，读取范围与记录相符，旧事实逐字沿用（只少了被取代与被淘汰的），被淘汰的是最早的一段。
 
