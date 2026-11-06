@@ -143,6 +143,23 @@ impl MessageQueues {
         lock(&self.follow_up).mode = mode;
     }
 
+    /// Withdraw the oldest queued message equal to `message`, from the steering queue if it
+    /// has one, else from the follow-up queue (pi: a queued submission's `abort`). Returns
+    /// whether one was queued. Works during a run too; a message the loop has already taken
+    /// is recorded even so, since it leaves the queue only once recorded.
+    pub fn withdraw(&self, message: &QueuedMessage) -> bool {
+        [Queue::Steering, Queue::FollowUp].into_iter().any(|queue| {
+            let mut lane = lock(self.lane(queue));
+            match lane.messages.iter().position(|queued| queued == message) {
+                Some(index) => {
+                    lane.messages.remove(index);
+                    true
+                }
+                None => false,
+            }
+        })
+    }
+
     /// Take every queued steering message, oldest first, whatever the mode.
     pub fn drain_steering(&self) -> Vec<QueuedMessage> {
         lock(&self.steering).messages.drain(..).collect()
@@ -241,6 +258,36 @@ mod tests {
         queues.remove_front(Queue::Steering, &"a".into());
         assert_eq!(queues.front(Queue::Steering), Some("b".into()));
         assert!(!queues.has(Queue::FollowUp));
+    }
+
+    #[test]
+    fn withdrawing_removes_the_oldest_equal_message_from_the_steering_queue_first() {
+        let queues = MessageQueues::default();
+        queues.steer("a");
+        queues.steer("b");
+        queues.steer("a");
+        queues.follow_up("a");
+
+        assert!(queues.withdraw(&"a".into()));
+        assert_eq!(texts(queues.drain_steering()), ["b", "a"]);
+        assert!(queues.withdraw(&"a".into()));
+        assert!(!queues.has(Queue::FollowUp));
+    }
+
+    #[test]
+    fn withdrawing_a_message_that_is_not_queued_changes_nothing() {
+        let queues = MessageQueues::default();
+        queues.follow_up("a");
+
+        assert!(!queues.withdraw(&"b".into()));
+        let custom = CustomMessage {
+            custom_type: "note".into(),
+            content: "a".into(),
+            display: false,
+            details: None,
+        };
+        assert!(!queues.withdraw(&QueuedMessage::Custom(custom)));
+        assert_eq!(texts(queues.drain_follow_up()), ["a"]);
     }
 
     #[test]

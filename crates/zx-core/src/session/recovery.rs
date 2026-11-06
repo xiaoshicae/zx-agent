@@ -230,6 +230,7 @@ mod tests {
             timestamp: 0,
             duration_ms: None,
             details: None,
+            usage: None,
         })
     }
 

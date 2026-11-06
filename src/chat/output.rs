@@ -454,6 +454,8 @@ mod tests {
             model_requests: 2,
             retries: 1,
             usage: Usage::default(),
+            tool_usage: std::collections::BTreeMap::new(),
+            denied_calls: 0,
             error: None,
             session_file: None,
         };
@@ -481,6 +483,7 @@ mod tests {
             timestamp: 0,
             duration_ms: None,
             details,
+            usage: None,
         }
     }
 

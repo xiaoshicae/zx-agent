@@ -462,7 +462,8 @@ fn prompt_text(blocks: &[ContentBlock]) -> String {
 fn stop_reason(report: &RunReport) -> Result<StopReason, String> {
     match report.outcome {
         RunOutcome::Completed => Ok(StopReason::EndTurn),
-        RunOutcome::Truncated | RunOutcome::TokenBudget => Ok(StopReason::MaxTokens),
+        // The protocol has no reason for a cost limit; tokens are what a cost is paid for.
+        RunOutcome::Truncated | RunOutcome::TokenBudget | RunOutcome::CostBudget => Ok(StopReason::MaxTokens),
         RunOutcome::ModelRequestLimit => Ok(StopReason::MaxTurnRequests),
         RunOutcome::Aborted => Ok(StopReason::Cancelled),
         RunOutcome::Error | RunOutcome::Timeout => Err(report
@@ -498,6 +499,8 @@ mod tests {
             model_requests: 1,
             retries: 0,
             usage: Usage::default(),
+            tool_usage: std::collections::BTreeMap::new(),
+            denied_calls: 0,
             error: error.map(str::to_string),
             session_file: None,
         }

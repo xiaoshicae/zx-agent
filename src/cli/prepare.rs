@@ -169,6 +169,12 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     let cwd = resolve_cwd(options.cwd.or(options.base.cwd.as_deref()))?;
     let mut profile = load_profile(&options)?;
     let models = model_meta(&mut profile, &options);
+    // Without prices every response costs nothing, and the budget would never stop a run.
+    anyhow::ensure!(
+        profile.limits.cost_budget.is_none() || models.get(options.model).is_some_and(|meta| meta.cost.is_some()),
+        "a cost budget needs the prices of the model {:?}: add them to the profile's [[models]]",
+        options.model
+    );
     // The container mounts the workspace at its real path, which tools must use as well.
     let cwd = match profile.execution {
         Execution::Local => cwd,
@@ -280,6 +286,9 @@ fn load_profile(options: &SessionOptions<'_>) -> Result<Profile> {
     }
     if let Some(tokens) = options.budget.token_budget {
         profile.limits.token_budget = (tokens > 0).then_some(tokens);
+    }
+    if let Some(amount) = options.budget.cost_budget {
+        profile.limits.cost_budget = (amount > 0.0).then_some(amount);
     }
     if let Some(count) = options.continue_on_length {
         profile.continue_on_length = count;

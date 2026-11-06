@@ -181,11 +181,13 @@ pub(crate) fn test_limits() -> Limits {
         max_model_requests: Some(30),
         timeout: Some(Duration::from_secs(900)),
         token_budget: None,
+        cost_budget: None,
     }
 }
 
-/// Echoes `text` after sleeping `ms`. Can inject queued messages while it runs, report each
-/// string in `progress` as a progress update, and return `details` as given.
+/// Echoes `text` after sleeping `ms`. Can inject queued messages while it runs (`steer`,
+/// `follow_up`) or withdraw a queued user message (`withdraw`), report each string in
+/// `progress` as a progress update, and return `details` and `usage` as given.
 pub(crate) struct EchoTool {
     pub name: &'static str,
     pub mode: ExecutionMode,
@@ -236,17 +238,28 @@ impl Tool for EchoTool {
         if let (Some(queues), Some(text)) = (&self.queues, args.get("follow_up").and_then(Value::as_str)) {
             queues.follow_up(text);
         }
+        if let (Some(queues), Some(text)) = (&self.queues, args.get("withdraw").and_then(Value::as_str)) {
+            assert!(
+                queues.withdraw(&QueuedMessage::User(text.into())),
+                "{text:?} is not queued"
+            );
+        }
         if args.get("panic").is_some() {
             panic!("tool bug");
         }
         if let Some(error) = args.get("fail").and_then(Value::as_str) {
             return Err(error.to_string());
         }
+        let usage = match args.get("usage") {
+            Some(usage) => Some(serde_json::from_value(usage.clone()).map_err(|error| error.to_string())?),
+            None => None,
+        };
         Ok(ToolOutput {
             content: args.get("text").and_then(Value::as_str).unwrap_or_default().to_string(),
             is_error: false,
             terminate: args.get("terminate").and_then(Value::as_bool).unwrap_or(false),
             details: args.get("details").cloned(),
+            usage,
         })
     }
 }

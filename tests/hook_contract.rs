@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use zx_agent::agent::{
     ContextEdit, Decision, HookContext, RequestSettings, ToolOutput, TurnDecision, TurnDisposition, TurnSummary,
 };
-use zx_agent::ai::{AssistantMessage, Message, Reasoning, StopReason, ToolCall};
+use zx_agent::ai::{AssistantMessage, Message, Reasoning, StopReason, ToolCall, Usage};
 use zx_agent::interaction::{Approval, ApprovalRequest};
 
 /// `value` serializes to `expected` and reads back unchanged.
@@ -101,6 +101,7 @@ fn tool_output_flags_default_to_false() {
             is_error: true,
             terminate: false,
             details: None,
+            usage: None,
         },
         json!({"content": "done", "isError": true, "terminate": false}),
     );
@@ -115,6 +116,26 @@ fn tool_output_details_are_optional_and_kept_as_given() {
     round_trip(
         &ToolOutput::ok("done").with_details(json!({"exitCode": 0, "lines": [1, 2]})),
         json!({"content": "done", "isError": false, "terminate": false, "details": {"exitCode": 0, "lines": [1, 2]}}),
+    );
+}
+
+#[test]
+fn tool_output_usage_is_optional_and_kept_as_given() {
+    let usage = Usage {
+        input: 20,
+        output: 4,
+        cache_read: 0,
+        cache_write: 0,
+        reasoning: 0,
+        total_tokens: 24,
+        cost_usd: None,
+    };
+    round_trip(
+        &ToolOutput::ok("done").with_usage(usage),
+        json!({
+            "content": "done", "isError": false, "terminate": false,
+            "usage": {"input": 20, "output": 4, "cacheRead": 0, "totalTokens": 24}
+        }),
     );
 }
 

@@ -331,6 +331,7 @@ async fn a_retained_boundary_never_splits_an_assistant_tool_result_exchange() {
             timestamp: 0,
             duration_ms: None,
             details: None,
+            usage: None,
         }))
         .await
         .unwrap();

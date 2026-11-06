@@ -6,14 +6,14 @@
 |---|---|
 | `src/**` 与 `crates/*/src/**` 中的 `mod tests` 与 `tests.rs` | 各模块的单元测试，写在被测模块里或其 `tests.rs` 中（规则 09）；包括会话文件和事件流的 JSON 格式；`src/chat/tree.rs` 的树渲染（当前分支优先、离开的分支缩进、不列出的记录、预览）与 ID 解析；`src/chat/commands.rs` 的扩展命令解析；`agent::queue` 的队列模式与扩展消息，`agent::command` 的命令名检查；自动放行按 profile 给出的选项与例外判断，`deploy/kubernetes/profiles/kubernetes.toml` 由 `src/profile` 的单元测试加载并检查。`#[cfg(test)]` 的辅助项（如 `SessionStore::with_writer`）只在所在 crate 的单元测试里可用 |
 | `tests/agent_loop.rs` | 循环语义 |
-| `tests/runner.rs` | 运行层：重试（含预算用完不重试、省略失败回答的事件）、上限（含 token 预算：FauxProvider 每次回答报告 15 个 token）、截断续写、持久化（含自定义 `SessionLog`、工具结果的 `details`）、恢复会话、排队输入只写一次 |
+| `tests/runner.rs` | 运行层：重试（含预算用完不重试、省略失败回答的事件）、上限（含 token 预算：FauxProvider 每次回答报告 15 个 token）、截断续写、持久化（含自定义 `SessionLog`、工具结果的 `details` 与 `usage`）、工具花费按工具名报告且不计入 token 预算、成本预算（每次回答按单价 0.01）、被策略与审批拒绝的调用计数、恢复会话、排队输入只写一次 |
 | `tests/agent_session.rs` | 共享会话：Busy、取消与丢弃后复用、多订阅者、退订、回调重入与 panic、模型切换与审计、推理强度的切换与审计、取出未被消费的排队输入、会话释放后有界订阅结束 |
 | `tests/openai_mock.rs` | 真实 HTTP 下的 provider：SSE、重试、空闲超时、中途取消、成功状态下的 JSON 正文、带上下文过长错误码的 400 之后摘要并继续、自定义请求头与每次请求取 key、key 来源失败不发请求不重试、`prompt_cache_key` 只在开启时发送并可从审计还原 |
 | `tests/prepare_request.rs` | 请求前替换设置（`Hooks::prepare_request`）：只对一次请求有效、钩子看到的计划、`request_start` 报告实际的模型、请求审计可还原、钩子按顺序接力、失败与空模型名在请求前结束且不重试、panic |
 | `tests/continue_run.rs` | 不加新输入的续跑：回答结尾的输入、崩溃后补写的结果（调用不再执行）、省略结尾失败的回答再答、完成的回答没有可续的（排队的后续消息除外）、空会话、请求可从会话文件还原、运行中返回 Busy |
 | `tests/overflow_recovery.rs` | 上下文过长后的恢复：省略失败回答、摘要一次再开始新的尝试（不算重试）、未开启自动摘要时行为不变、恢复后紧接着又过长时结束、回答成功后可再次恢复、摘要失败暂停自动摘要、预算用完与运行超时 |
 | `tests/cli.rs` | 原有 run 行为与退出码，P0 起逐字节保持；P6 默认值变更另行验收 |
-| `tests/run_cli.rs` | P0 之后新增的 run 约定（如进度与报告行转义终端控制字符、会话文件单写者、零超时被拒绝、stdout 关闭时的退出码、token 预算的退出码 7：假服务每次回答报告 12 个 token、只在设置了 OTLP 地址时导出追踪与指标：测试中的假收集端只看请求，不解码 protobuf，`TRACEPARENT` 接续调用方的 trace（按 ID 的字节查找）且不合法时提示、`--request-field` 到达模型并写入请求审计，写错时以退出码 2 结束、`--fill-missing-reasoning` 默认关闭且开启时写入请求审计、`--reasoning` 的三种写法与冲突检查、`--continue` 失败后续跑与参数检查），新的 run 测试放这里，`tests/cli.rs` 不改 |
+| `tests/run_cli.rs` | P0 之后新增的 run 约定（如进度与报告行转义终端控制字符、会话文件单写者、零超时被拒绝、stdout 关闭时的退出码、token 预算的退出码 7：假服务每次回答报告 12 个 token、成本预算的退出码 8 与没有单价时的配置错误、`--fail-on-denied` 的退出码 9、只在设置了 OTLP 地址时导出追踪与指标：测试中的假收集端只看请求，不解码 protobuf，`TRACEPARENT` 接续调用方的 trace（按 ID 的字节查找）且不合法时提示、`--request-field` 到达模型并写入请求审计，写错时以退出码 2 结束、`--fill-missing-reasoning` 默认关闭且开启时写入请求审计、`--reasoning` 的三种写法与冲突检查、`--continue` 失败后续跑与参数检查），新的 run 测试放这里，`tests/cli.rs` 不改 |
 | `tests/otel.rs` | OpenTelemetry 导出：真实运行经 `Telemetry` 产生的 span 层级与属性；经 `with_providers` 的指标（SDK 的 `InMemoryMetricExporter` 关闭时不清空，周期读取器关闭时再导出一次）；`sink_under` 接续给定的 traceparent；测试用的导出器 `Kept` 在关闭后仍保留 span（SDK 的内存导出器关闭时会清空） |
 | `tests/idempotency.rs` | 幂等提交（P10 ⑫）：键先于提示词写入且同键第二次不发请求、空键被拒、重新打开的会话仍认得键、失败的提交同键被拒后用 `continue_run` 接着做 |
 | `tests/model_meta.rs` | 模型元数据与计量（P10 ⑧）：按单价给回复算成本并在报告与会话文件中相加（服务端回报别的模型名时仍按请求的模型计价）、没有单价时没有成本、token 阈值触发与不触发自动摘要、上下文 token 的估算、按窗口推导阈值的条件、缓存键进入 provider 与请求审计 |

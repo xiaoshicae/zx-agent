@@ -1,5 +1,7 @@
 # Scheduled inspection: an unattended run with the read-only account. The answer is written
 # to the Pod log (kubectl logs); the exit code tells the result (README.md, "run 退出码").
+# Each run also keeps its session file, the audit record of every request and command, on
+# the volume zx-agent-inspect-sessions as sessions/<Pod name>.jsonl.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -23,6 +25,8 @@ spec:
             runAsNonRoot: true
             runAsUser: 10001
             runAsGroup: 10001
+            # The session volume is writable by this group.
+            fsGroup: 10001
             seccompProfile:
               type: RuntimeDefault
           containers:
@@ -32,10 +36,16 @@ spec:
               # commands cannot inspect (README.md, "安全模型").
               # The troubleshoot profile gives the report its fixed sections; without it,
               # run uses the neutral unattended profile.
-              command: ["zx-agent", "run", "--profile", "troubleshoot"]
+              # $(POD_NAME) is expanded by Kubernetes, without a shell: a file per run.
+              command:
+                ["zx-agent", "run", "--profile", "troubleshoot", "--session", "/data/sessions/$(POD_NAME).jsonl"]
               args:
                 - "检查所有命名空间中未就绪的 Pod 和最近一小时的 Warning 事件，列出问题和可能的原因。只读，不做任何修改。"
               env:
+                - name: POD_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.name
                 # kubectl reads this account's token, and so can commands: redact its value.
                 - name: ZX_SECRET_FILES
                   value: /var/run/secrets/kubernetes.io/serviceaccount/token
@@ -60,6 +70,8 @@ spec:
                 capabilities:
                   drop: ["ALL"]
               volumeMounts:
+                - name: sessions
+                  mountPath: /data
                 - name: tmp
                   mountPath: /tmp
               resources:
@@ -69,5 +81,8 @@ spec:
                 limits:
                   memory: 1Gi
           volumes:
+            - name: sessions
+              persistentVolumeClaim:
+                claimName: zx-agent-inspect-sessions
             - name: tmp
               emptyDir: {}

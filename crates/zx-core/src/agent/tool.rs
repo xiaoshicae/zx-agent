@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::ai::ToolDef;
+use crate::ai::{ToolDef, Usage};
 use crate::sync::lock;
 
 /// Which of the configured tools the model is offered (pi: `setActiveTools`). Shared by the
@@ -132,7 +132,7 @@ pub const MAX_DETAILS_BYTES: usize = 16 * 1024;
 
 /// What a tool returns. In JSON `content` is required and the flags default to `false`, so
 /// output that a hook process forgot cannot silently replace the result with nothing.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolOutput {
     /// Text returned to the model.
@@ -148,6 +148,12 @@ pub struct ToolOutput {
     /// [`MAX_DETAILS_BYTES`] as compact JSON are dropped from both.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<Value>,
+    /// What the tool spent on work of its own, such as a model it asked (pi: a result's
+    /// `usage`). Recorded with the result, sent in the `tool_execution_end` event and summed
+    /// by tool name in the run report; the model never sees it, and the token budget, which
+    /// bounds the run's own model requests, leaves it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
 }
 
 impl ToolOutput {
@@ -172,6 +178,14 @@ impl ToolOutput {
     pub fn with_details(self, details: Value) -> Self {
         Self {
             details: Some(details),
+            ..self
+        }
+    }
+
+    /// The same result with what the tool spent on work of its own.
+    pub fn with_usage(self, usage: Usage) -> Self {
+        Self {
+            usage: Some(usage),
             ..self
         }
     }

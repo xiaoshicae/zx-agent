@@ -78,6 +78,7 @@ async fn main() -> anyhow::Result<()> {
         max_model_requests: Some(30),
         timeout: Some(Duration::from_secs(15 * 60)),
         token_budget: None,
+        cost_budget: None,
     };
     let agent = AgentSession::new(config, RetryPolicy::default(), limits, session, sink);
 

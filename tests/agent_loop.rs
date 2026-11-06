@@ -2,6 +2,7 @@
 
 mod common;
 
+use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -18,7 +19,7 @@ use zx_agent::agent::{
 };
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{
-    ContentBlock, EventReceiver, Message, PREAMBLE, Provider, Request, StopReason, SystemPrompt, ToolDef,
+    ContentBlock, EventReceiver, Message, PREAMBLE, Provider, Request, StopReason, SystemPrompt, ToolDef, Usage,
 };
 use zx_agent::interaction::ApprovalCache;
 
@@ -353,6 +354,39 @@ async fn steering_enters_after_the_turn_and_follow_ups_after_the_answer() {
             "assistant:summary",
         ]
     );
+}
+
+#[tokio::test]
+async fn a_withdrawn_follow_up_is_never_taken() {
+    let provider = provider([
+        FauxStep::tool_call("c1", "echo", json!({"text": "ok", "withdraw": "then summarize"})),
+        FauxStep::text("done"),
+        FauxStep::text("stopped"),
+    ]);
+    let config = config(provider.clone(), vec![]);
+    let mut echo = EchoTool::new("echo");
+    echo.queues = Some(config.queues.clone());
+    let mut config = config;
+    config.spec.tools = vec![Arc::new(echo)];
+    config.queues.follow_up("then summarize");
+    config.queues.follow_up("and then stop");
+    let mut context = Vec::new();
+
+    let (result, _) = run_prompt(&config, &mut context, "go").await;
+
+    assert_eq!(result.outcome, LoopOutcome::Completed);
+    assert_eq!(
+        summarize(&context),
+        [
+            "user:go",
+            "assistant:calls[c1]",
+            "tool:c1=ok",
+            "assistant:done",
+            "user:and then stop",
+            "assistant:stopped",
+        ]
+    );
+    assert!(config.queues.drain_follow_up().is_empty());
 }
 
 #[tokio::test]
@@ -737,6 +771,56 @@ async fn details_reach_the_end_event_and_the_result_message() {
         (result.content.as_str(), result.details.as_ref()),
         ("hi", Some(&details))
     );
+}
+
+fn end_usages(sink: &Collect) -> Vec<Option<Usage>> {
+    sink.events()
+        .into_iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolExecutionEnd { usage, .. } => Some(usage),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn tool_usage_reaches_the_end_event_the_result_message_and_the_loop_result() {
+    let usage = json!({"input": 20, "output": 4, "cacheRead": 0, "totalTokens": 24, "costUsd": 0.001});
+    let provider = provider([
+        FauxStep::tool_call("c1", "echo", json!({"text": "hi", "usage": usage})),
+        FauxStep::tool_call("c2", "echo", json!({"text": "again", "usage": usage})),
+        FauxStep::text("done"),
+    ]);
+    let config = config(provider, vec![echo()]);
+    let mut context = Vec::new();
+
+    let (result, sink) = run_prompt(&config, &mut context, "go").await;
+
+    let reported: Usage = serde_json::from_value(usage).unwrap();
+    let mut both = reported.clone();
+    both.add(&reported);
+    assert_eq!(result.tool_usage, BTreeMap::from([("echo".to_string(), both)]));
+    // The model's own usage: three faux answers of 15 tokens, without the tool's.
+    assert_eq!(result.usage.input_and_output(), 45);
+    assert_eq!(end_usages(&sink), [Some(reported.clone()), Some(reported.clone())]);
+    assert_eq!(tool_result(&context, 2).usage.as_ref(), Some(&reported));
+    assert_eq!(tool_result(&context, 4).usage.as_ref(), Some(&reported));
+}
+
+#[tokio::test]
+async fn a_tool_without_usage_reports_none_and_the_loop_result_lists_no_tool() {
+    let provider = provider([
+        FauxStep::tool_call("c1", "echo", json!({"text": "hi"})),
+        FauxStep::text("done"),
+    ]);
+    let config = config(provider, vec![echo()]);
+    let mut context = Vec::new();
+
+    let (result, sink) = run_prompt(&config, &mut context, "go").await;
+
+    assert!(result.tool_usage.is_empty());
+    assert_eq!(end_usages(&sink), [None]);
+    assert_eq!(tool_result(&context, 2).usage, None);
 }
 
 #[tokio::test]

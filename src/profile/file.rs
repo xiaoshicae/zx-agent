@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 
 use super::skills::Skill;
@@ -102,6 +102,8 @@ struct RawLimits {
     timeout_secs: Option<u64>,
     /// 0 disables a budget that an earlier layer set.
     token_budget: Option<u64>,
+    /// In the unit of the `[[models]]` prices; 0 disables a budget that an earlier layer set.
+    cost_budget: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -146,7 +148,7 @@ impl RawProfile {
             profile.tools = tools;
         }
         self.rules.apply(&mut profile.rules);
-        self.limits.apply(&mut profile.limits);
+        self.limits.apply(&mut profile.limits)?;
         if let Some(count) = self.extensions.continue_on_length {
             profile.continue_on_length = count;
         }
@@ -234,7 +236,7 @@ impl RawRules {
 }
 
 impl RawLimits {
-    fn apply(self, limits: &mut Limits) {
+    fn apply(self, limits: &mut Limits) -> Result<()> {
         if let Some(turns) = self.max_model_requests {
             limits.max_model_requests = match turns {
                 ModelRequestLimit::Count(count) => Some(count),
@@ -247,7 +249,21 @@ impl RawLimits {
         if let Some(tokens) = self.token_budget {
             limits.token_budget = (tokens > 0).then_some(tokens);
         }
+        if let Some(amount) = self.cost_budget {
+            limits.cost_budget = cost_budget(amount).context("limits.costBudget")?;
+        }
+        Ok(())
     }
+}
+
+/// A cost budget as configured, in the unit of the prices: 0 disables it. Negative and
+/// non-finite amounts are errors.
+fn cost_budget(amount: f64) -> Result<Option<f64>> {
+    ensure!(
+        amount.is_finite() && amount >= 0.0,
+        "a cost budget must be zero (none) or a positive amount, not {amount}"
+    );
+    Ok((amount > 0.0).then_some(amount))
 }
 
 impl RawCompaction {

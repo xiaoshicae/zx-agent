@@ -3,7 +3,7 @@
 部署后可以这样使用：
 
 - 运维人员用 `kubectl exec` 进入常驻 Pod，用 chat 排障。`profiles/kubernetes.toml` 列出的只读 kubectl 命令直接执行，其余命令逐条确认（见仓库 README 的“安全模型”）。
-- CronJob 定时巡检，使用只读账号，结果写进 Pod 日志。
+- CronJob 定时巡检，使用只读账号，结果写进 Pod 日志，每次运行的会话文件留在自己的存储卷上。
 - kubectl 在 Pod 内运行，凭据来自 ServiceAccount，不需要另外提供 kubeconfig。ServiceAccount token 经 `ZX_SECRET_FILES` 登记脱敏。
 
 zx-agent 本身不针对 Kubernetes：kubectl 的规则、token 路径都在本目录的清单与 profile 中。IM 机器人见 `serve/`；告警等其他系统由外部适配器调用 `zx-agent run`（或发到 IM）来触发，zx-agent 不解析告警格式。
@@ -85,6 +85,12 @@ kubectl -n zx-agent logs job/inspect-now
 ```
 
 退出码的含义见仓库 README 的“run 退出码”一节。
+
+每次巡检把会话文件写到存储卷 `zx-agent-inspect-sessions` 的 `sessions/<Pod 名>.jsonl`。文件里有每次模型请求、每条命令和它的结果，是巡检的审计记录；进程崩溃或被杀时也留下已写入的部分，可以据此用 `run --continue` 接着跑。这块卷与常驻 Pod 的 `zx-agent-data` 分开，因为单节点读写的卷不一定能被另一个节点上的 Job 挂载。文件不会自动清理，按每小时一次的频率要定期删除旧文件，或调大卷的容量。读取文件需要一个挂载这块卷的临时 Pod，卷同一时间只能挂在一个节点上，所以要在巡检的 Job 不运行时做。
+
+无人值守时审批一律拒绝，模型可能绕开被拒的命令照样给出回答，退出码仍是 0。要让这种情况在 Job 状态里可见，在 `command` 中加 `--fail-on-denied`：有命令被拒时以退出码 9 结束，Job 记为失败。默认没有加，因为模型试探白名单外的命令并不少见，会让 Job 频繁标为失败。
+
+以上两项改动只经 `kubectl kustomize` 在本地渲染检查过（本体与打开 `multicluster` 组件各一次），没有在集群上运行；`$(POD_NAME)` 由 Kubernetes 在启动容器时展开，不经过 shell。
 
 ## 多集群
 

@@ -264,6 +264,7 @@ async fn summary_requests_and_context_sizes_leave_tool_result_details_out() {
         timestamp: 1,
         duration_ms: None,
         details: None,
+        usage: None,
     };
     let without = {
         let mut messages = store.messages();

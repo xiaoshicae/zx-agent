@@ -1,6 +1,8 @@
 //! What a run produced. Defined in the agent layer so that the `run_end` event can carry it;
 //! the runner re-exports both types.
 
+use std::collections::BTreeMap;
+
 use serde::Serialize;
 
 use crate::ai::Usage;
@@ -24,6 +26,8 @@ pub enum RunOutcome {
     Aborted,
     /// The token budget ran out while the model still wanted to continue.
     TokenBudget,
+    /// The cost budget ran out while the model still wanted to continue.
+    CostBudget,
 }
 
 /// Summary of a finished run.
@@ -41,8 +45,21 @@ pub struct RunReport {
     /// Usage of every response in this run, failed attempts included. A cancelled request
     /// counts as zero: servers report usage only at the end of the stream.
     pub usage: Usage,
+    /// What the tools spent on work of their own, by tool name (pi: the usage of tool
+    /// results); only the tools that reported some. Not part of `usage`.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub tool_usage: BTreeMap<String, Usage>,
+    /// Tool calls that a policy or an approval denied, so that they did not run. The model
+    /// sees each as an error result and may still complete the task, so a host that must
+    /// know whether every intended action ran checks this.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub denied_calls: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_file: Option<String>,
+}
+
+fn is_zero(count: &u32) -> bool {
+    *count == 0
 }

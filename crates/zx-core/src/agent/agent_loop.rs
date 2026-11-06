@@ -12,7 +12,7 @@ mod model;
 mod tools;
 mod turn;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::panic::AssertUnwindSafe;
 use std::time::Instant;
 
@@ -52,6 +52,11 @@ pub struct LoopControl<'a> {
     /// requests included. Checked before each request, so the last one may go over; `None`
     /// is unlimited.
     pub token_budget: Option<u64>,
+    /// What this attempt may spend, in the unit of the configured prices of the models it
+    /// asks, summary
+    /// requests included. Checked before each request like `token_budget`; a response
+    /// without a price counts as nothing. `None` is unlimited.
+    pub cost_budget: Option<f64>,
     /// Task turns of earlier attempts, so that turn numbers continue across retries.
     pub prior_task_turns: u32,
     /// Answer continuations scheduled in earlier attempts of this run.
@@ -79,6 +84,7 @@ impl<'a> LoopControl<'a> {
         Self {
             max_model_requests,
             token_budget: None,
+            cost_budget: None,
             prior_task_turns: 0,
             prior_answer_continuations: 0,
             approvals,
@@ -118,7 +124,23 @@ pub struct LoopResult {
     /// Total answer continuations scheduled in this run, including prior attempts.
     pub answer_continuations: u32,
     pub usage: Usage,
+    /// What the tools spent on work of their own, by tool name: the `usage` of their
+    /// results. Not part of `usage`, which the token budget counts.
+    pub tool_usage: BTreeMap<String, Usage>,
+    /// Tool calls that a policy or an approval denied in this attempt.
+    pub denied_calls: u32,
     pub failure: Option<LoopFailure>,
+}
+
+impl LoopResult {
+    /// Count the usage the tools reported with `results`.
+    fn count_tool_usage(&mut self, results: &[ToolResultMessage]) {
+        for result in results {
+            if let Some(usage) = &result.usage {
+                self.tool_usage.entry(result.tool_name.clone()).or_default().add(usage);
+            }
+        }
+    }
 }
 
 /// Append prompts and run until the model stops, the budget expires, or cancellation.
@@ -136,6 +158,8 @@ pub async fn run_loop(
         model_requests: 0,
         answer_continuations: control.prior_answer_continuations,
         usage: Usage::default(),
+        tool_usage: BTreeMap::new(),
+        denied_calls: 0,
         failure: None,
     };
 
@@ -157,6 +181,7 @@ pub async fn run_loop(
         config,
         max_model_requests: control.max_model_requests,
         token_budget: control.token_budget,
+        cost_budget: control.cost_budget,
         prior_task_turns: control.prior_task_turns,
         attempt_number: control.attempt_number,
         approvals: &mut *control.approvals,
@@ -166,6 +191,7 @@ pub async fn run_loop(
         trace,
         turn: None,
         validators: HashMap::new(),
+        denied_calls: 0,
     };
 
     let attempt = engine.attempt_number;
@@ -182,6 +208,7 @@ pub async fn run_loop(
 
     // A turn that stopped before its request finished still ends, so turn events pair up.
     engine.end_turn().await;
+    result.denied_calls = engine.denied_calls;
 
     engine
         .emit(AgentEvent::AgentEnd {
@@ -218,6 +245,8 @@ struct Engine<'a, 'b> {
     max_model_requests: Option<u32>,
     /// Tokens this attempt may use; `None` is unlimited.
     token_budget: Option<u64>,
+    /// What this attempt may spend, in the unit of the prices; `None` is unlimited.
+    cost_budget: Option<f64>,
     /// Task turns of earlier attempts, so that turn numbers continue across retries.
     prior_task_turns: u32,
     attempt_number: u32,
@@ -230,6 +259,8 @@ struct Engine<'a, 'b> {
     /// The number of the turn in progress, between its `turn_start` and `turn_end`.
     turn: Option<u32>,
     validators: HashMap<String, jsonschema::Validator>,
+    /// Tool calls that a policy or an approval denied.
+    denied_calls: u32,
 }
 
 impl<'a, 'b> Engine<'a, 'b> {
@@ -370,6 +401,7 @@ impl<'a, 'b> Engine<'a, 'b> {
             } else {
                 ToolProgress::Continue
             };
+            result.count_tool_usage(&batch.results);
             context.extend(batch.results.into_iter().map(Message::ToolResult));
         }
         self.end_turn().await;
@@ -393,7 +425,7 @@ impl<'a, 'b> Engine<'a, 'b> {
     }
 
     /// The outcome when a budget leaves no room for another request: requests first, then
-    /// tokens.
+    /// tokens, then cost.
     fn exhausted(&self, result: &LoopResult) -> Option<LoopOutcome> {
         if self
             .max_model_requests
@@ -406,6 +438,12 @@ impl<'a, 'b> Engine<'a, 'b> {
             .is_some_and(|budget| result.usage.input_and_output() >= budget)
         {
             return Some(LoopOutcome::TokenBudget);
+        }
+        if self
+            .cost_budget
+            .is_some_and(|budget| result.usage.cost_usd.unwrap_or(0.0) >= budget)
+        {
+            return Some(LoopOutcome::CostBudget);
         }
         None
     }

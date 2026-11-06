@@ -645,6 +645,16 @@ mod tests {
     }
 
     #[test]
+    fn a_cost_budget_of_zero_disables_it() {
+        assert_eq!(
+            load_file("[limits]\ncostBudget = 2.5").unwrap().limits.cost_budget,
+            Some(2.5)
+        );
+        assert_eq!(load_file("[limits]\ncostBudget = 0").unwrap().limits.cost_budget, None);
+        assert_eq!(load_file("").unwrap().limits.cost_budget, None);
+    }
+
+    #[test]
     fn unknown_fields_and_invalid_budget_values_are_rejected() {
         for text in [
             "typo = true",
@@ -654,6 +664,9 @@ mod tests {
             "[limits]\nmaxModelRequests = 'infinite'",
             "[limits]\ntokenBudget = -1",
             "[limits]\ntokenBudget = 'unlimited'",
+            "[limits]\ncostBudget = -0.5",
+            "[limits]\ncostBudget = nan",
+            "[limits]\ncostBudget = inf",
         ] {
             assert!(load_file(text).is_err(), "{text}");
         }

@@ -54,6 +54,11 @@ pub(crate) struct RunArgs {
     #[arg(long = "continue", requires = "session")]
     pub(crate) continue_session: bool,
 
+    /// Exit with code 9 instead of 0 when the run completed but a policy or an approval
+    /// denied at least one tool call, which the model may have worked around.
+    #[arg(long)]
+    pub(crate) fail_on_denied: bool,
+
     #[command(flatten)]
     pub(crate) base: BaseArgs,
 
@@ -376,6 +381,21 @@ pub(crate) struct BudgetArgs {
     /// 0 disables it. Defaults to the selected profile.
     #[arg(long)]
     pub(crate) token_budget: Option<u64>,
+
+    /// Spending per prompt, in the unit of the prices in the profile's [[models]] (any
+    /// currency, as long as every price uses it): the cost of its model requests by those
+    /// prices. Checked before each request, so the last one may go over; a run then exits 8.
+    /// The model must have prices. 0 disables it. Defaults to the selected profile.
+    #[arg(long, value_parser = parse_cost_budget)]
+    pub(crate) cost_budget: Option<f64>,
+}
+
+/// A cost budget on the command line: zero or a positive, finite amount.
+fn parse_cost_budget(text: &str) -> Result<f64, String> {
+    match text.trim().parse::<f64>() {
+        Ok(amount) if amount.is_finite() && amount >= 0.0 => Ok(amount),
+        _ => Err(format!("expected zero (none) or a positive amount, not {text:?}")),
+    }
 }
 
 #[derive(Args)]

@@ -153,7 +153,7 @@ impl Runs {
             What::Decision { call, verdict } => run.decision(&call, verdict),
             What::ApprovalRequested { call } => run.approval_requested(&call),
             What::ApprovalResolved { call, result, wait_ms } => run.approval_resolved(&call, result, wait_ms),
-            What::ToolEnd { call, is_error } => run.tool_end(&call, is_error),
+            What::ToolEnd { call, is_error, usage } => run.tool_end(&call, is_error, usage.as_ref()),
             What::CompactionStart {
                 automatic,
                 input_bytes,
@@ -364,22 +364,30 @@ impl OpenRun<'_> {
         }
     }
 
-    fn tool_end(&mut self, call: &str, is_error: bool) {
+    /// End the call's span; `usage` is what the tool spent on work of its own, counted
+    /// under its name like a model's tokens under the model.
+    fn tool_end(&mut self, call: &str, is_error: bool, usage: Option<&Usage>) {
         if let Some(tool) = self.spans.tools.remove(call) {
             let span = tool.cx.span();
             span.set_attribute(KeyValue::new("zx.tool.is_error", is_error));
+            if let Some(usage) = usage {
+                span.set_attributes(usage_attributes(usage));
+            }
             if is_error {
                 span.set_status(Status::error("error"));
             }
             span.end_with_timestamp(self.at);
             if let Some(instruments) = self.instruments {
                 let attributes = [
-                    KeyValue::new("zx.tool.name", tool.meta),
+                    KeyValue::new("zx.tool.name", tool.meta.clone()),
                     KeyValue::new("zx.tool.is_error", is_error),
                 ];
                 instruments
                     .tool_duration
                     .record(seconds(tool.since, self.at), &attributes);
+                if let Some(usage) = usage {
+                    instruments.count_tool_usage(usage, &tool.meta);
+                }
             }
         }
     }
@@ -699,6 +707,8 @@ mod tests {
                 model_requests: 1,
                 retries: 0,
                 usage,
+                tool_usage: std::collections::BTreeMap::new(),
+                denied_calls: 0,
                 error: None,
                 session_file: None,
             }),
@@ -759,6 +769,7 @@ mod tests {
                     is_error: false,
                     duration_ms: Some(8),
                     details: None,
+                    usage: None,
                 },
             ),
             at(1021, AgentEvent::TurnEnd { turn: 1 }),
@@ -911,6 +922,49 @@ mod tests {
         assert!(count == 1 && close(sum, 0.009), "{count} calls, {sum} s");
         let exported = format!("{all:?}");
         assert!(!exported.contains("secret"), "{exported}");
+    }
+
+    #[test]
+    fn tool_usage_is_set_on_the_tool_span_and_counted_under_the_tool() {
+        let mut signals = one_run();
+        assert!(matches!(signals[7].what, What::ToolEnd { .. }), "one_run changed shape");
+        let mut spent = usage(3, 2);
+        spent.cost_usd = Some(0.5);
+        signals[7] = at(
+            1020,
+            AgentEvent::ToolExecutionEnd {
+                tool_call_id: "c1".into(),
+                tool_name: "bash".into(),
+                is_error: false,
+                duration_ms: Some(8),
+                details: None,
+                usage: Some(spent),
+            },
+        );
+        let mut harness = Harness::new();
+        harness.apply(signals);
+
+        let spans = harness.spans();
+        let tool = span(&spans, "tool bash");
+        assert_eq!(attribute(tool, "zx.usage.input_tokens").as_deref(), Some("3"));
+        assert_eq!(attribute(tool, "zx.usage.output_tokens").as_deref(), Some("2"));
+        assert_eq!(attribute(tool, "zx.usage.cost_usd").as_deref(), Some("0.5"));
+        let all = harness.metrics();
+        let by_tool = [("zx.token.kind", "input"), ("zx.tool.name", "bash")];
+        assert_eq!(counted(&all, "zx.tokens", &by_tool), 3);
+        assert_eq!(
+            counted(
+                &all,
+                "zx.tokens",
+                &[("zx.token.kind", "output"), ("zx.tool.name", "bash")]
+            ),
+            2
+        );
+        // The model's own tokens stay under the model, not the tool.
+        assert_eq!(
+            counted(&all, "zx.tokens", &[("zx.token.kind", "input"), ("zx.model", "m")]),
+            10
+        );
     }
 
     #[test]

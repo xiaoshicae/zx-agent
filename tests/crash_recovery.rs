@@ -164,6 +164,7 @@ fn result(id: &str, name: &str, content: &str) -> Message {
         timestamp: 0,
         duration_ms: None,
         details: None,
+        usage: None,
     })
 }
 

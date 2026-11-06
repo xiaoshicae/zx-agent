@@ -152,6 +152,8 @@ pub enum LoopOutcome {
     Truncated,
     /// The token budget ran out while the model still wanted to continue.
     TokenBudget,
+    /// The cost budget ran out while the model still wanted to continue.
+    CostBudget,
 }
 
 /// What is known about a tool call that an interrupted run left without a result. The
@@ -295,6 +297,10 @@ pub enum AgentEvent {
         /// result; absent when the tool gave none or they exceeded `MAX_DETAILS_BYTES`.
         #[serde(skip_serializing_if = "Option::is_none")]
         details: Option<Value>,
+        /// What the tool spent on work of its own (`ToolOutput::usage`), as recorded with the
+        /// result; absent when the tool reported none.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        usage: Option<Usage>,
     },
     TurnEnd {
         turn: u32,
@@ -450,6 +456,8 @@ mod tests {
                     model_requests: 1,
                     retries: 0,
                     usage: Usage::default(),
+                    tool_usage: std::collections::BTreeMap::new(),
+                    denied_calls: 0,
                     error: None,
                     session_file: None,
                 }),
@@ -504,6 +512,7 @@ mod tests {
                 is_error: false,
                 duration_ms: None,
                 details: None,
+                usage: None,
             },
             AgentEvent::TurnEnd { turn: 1 },
             AgentEvent::AgentEnd {
@@ -581,6 +590,7 @@ mod tests {
             is_error: true,
             duration_ms: Some(5),
             details: None,
+            usage: None,
         };
         assert_eq!(
             serde_json::to_value(&event).unwrap(),

@@ -147,6 +147,7 @@ fn render(report: &RunReport, replies: &Replies) -> String {
         RunOutcome::Truncated => noted(&replies.truncated),
         RunOutcome::ModelRequestLimit => noted(&replies.model_request_limit),
         RunOutcome::TokenBudget => noted(&replies.token_budget),
+        RunOutcome::CostBudget => noted(&replies.cost_budget),
         // The last answer in the session may be an earlier run's, so it is not repeated.
         RunOutcome::Timeout => replies.timed_out.clone(),
         RunOutcome::Aborted => replies.cancelled.clone(),
@@ -174,6 +175,8 @@ mod tests {
             model_requests: 1,
             retries: 0,
             usage: Usage::default(),
+            tool_usage: std::collections::BTreeMap::new(),
+            denied_calls: 0,
             error: error.map(String::from),
             session_file: None,
         }

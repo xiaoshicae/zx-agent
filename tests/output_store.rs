@@ -97,6 +97,7 @@ async fn exact_threshold_is_inline_and_error_and_terminate_flags_survive_spillin
         is_error: true,
         terminate: true,
         details: None,
+        usage: None,
     };
     let spilled = hook
         .after_tool(&call("bash"), output.clone(), &common::hook_context())

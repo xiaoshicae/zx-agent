@@ -222,6 +222,7 @@ impl DebugState {
                 is_error,
                 duration_ms,
                 details: _,
+                usage: _,
             } => (
                 if *is_error { Severity::Warn } else { Severity::Info },
                 format!(
@@ -480,6 +481,7 @@ mod tests {
             is_error: true,
             duration_ms: None,
             details: None,
+            usage: None,
         };
         assert!(
             state

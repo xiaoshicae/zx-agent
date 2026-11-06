@@ -146,6 +146,8 @@ impl<'a> RunHost<'a> {
             model_requests: accounting.model_requests,
             retries: accounting.retries,
             usage: accounting.usage.clone(),
+            tool_usage: accounting.tool_usage.clone(),
+            denied_calls: accounting.denied_calls,
             error,
             session_file: self.session.path().map(|path| path.display().to_string()),
         };

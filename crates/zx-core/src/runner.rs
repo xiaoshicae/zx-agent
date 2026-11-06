@@ -46,6 +46,13 @@ pub struct Limits {
     /// reports them, summary requests and failed attempts included. Checked before each
     /// request, so the last one may go over. `None` disables the budget.
     pub token_budget: Option<u64>,
+    /// What the run may spend, in the unit of the configured prices (any currency, as long as
+    /// every price uses it): the cost of all its model requests by those prices
+    /// ([`LoopConfig::models`](crate::agent::LoopConfig::models)), summary requests and
+    /// failed attempts included. Checked before each request, so the last one may go over.
+    /// A response from a model without a price costs nothing here, so the host checks that
+    /// its models have prices. Tool usage is not counted. `None` disables the budget.
+    pub cost_budget: Option<f64>,
 }
 
 /// Runs prompts against one session, adding retries, limits, and persistence to the loop.
@@ -258,6 +265,7 @@ async fn attempts(
         let mut context = host.session.messages();
         let mut control = LoopControl {
             token_budget: accounting.remaining_tokens(shared.limits),
+            cost_budget: accounting.remaining_cost(shared.limits),
             prior_task_turns: accounting.task_turns,
             prior_answer_continuations: accounting.answer_continuations,
             session: Some(&mut *host),
@@ -416,6 +424,16 @@ fn conclude(
                 limits
                     .token_budget
                     .expect("TokenBudget requires a configured token budget")
+            )),
+        ),
+        LoopOutcome::CostBudget => (
+            RunOutcome::CostBudget,
+            Some(format!(
+                "cost budget reached ({:.4} spent, cost_budget = {})",
+                accounting.usage.cost_usd.unwrap_or(0.0),
+                limits
+                    .cost_budget
+                    .expect("CostBudget requires a configured cost budget")
             )),
         ),
         LoopOutcome::Aborted if timed_out => {

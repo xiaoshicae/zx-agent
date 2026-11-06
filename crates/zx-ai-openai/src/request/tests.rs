@@ -1,5 +1,5 @@
 use zx_ai::provider::Provider;
-use zx_ai::{SectionChange, StopReason, SystemMessage, ToolDef, ToolResultMessage};
+use zx_ai::{SectionChange, StopReason, SystemMessage, ToolDef, ToolResultMessage, Usage};
 
 use super::*;
 use crate::OpenAiCompatible;
@@ -33,6 +33,7 @@ fn body_pairs_tool_calls_with_results() {
             timestamp: 0,
             duration_ms: None,
             details: None,
+            usage: None,
         })
     };
     let request = Request {
@@ -89,6 +90,15 @@ fn tool_result_details_stay_out_of_the_body() {
                 timestamp: 0,
                 duration_ms: None,
                 details: Some(json!({"onlyForObservers": true})),
+                usage: Some(Usage {
+                    input: 1,
+                    output: 1,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                    total_tokens: 2,
+                    cost_usd: None,
+                }),
             }),
         ],
         tools: vec![],

@@ -10,10 +10,10 @@ use zx_agent::AgentSession;
 use zx_agent::agent::{AgentEvent, Event, EventSink};
 use zx_agent::ai::Message;
 use zx_agent::profile::Builtin;
-use zx_agent::runner::RunReport;
+use zx_agent::runner::{RunOutcome, RunReport};
 
 use crate::cli::{self, OutputMode, RunArgs};
-use crate::process::{JsonlEvents, exit_code, print_line, run_sink, spawn_signal_handler, with_telemetry};
+use crate::process::{EXIT_DENIED, JsonlEvents, exit_code, print_line, run_sink, spawn_signal_handler, with_telemetry};
 use crate::render::{answer_end_line, progress_line, visible};
 use crate::sessions::SessionFile;
 
@@ -44,7 +44,10 @@ pub(crate) async fn run(args: RunArgs) -> Result<u8> {
             None => session.continue_with_cancel(&cancel).await?,
         };
         print_report(&report, args.output);
-        Ok(exit_code(report.outcome))
+        Ok(match report.outcome {
+            RunOutcome::Completed if args.fail_on_denied && report.denied_calls > 0 => EXIT_DENIED,
+            outcome => exit_code(outcome),
+        })
     })
     .await
 }
@@ -107,13 +110,21 @@ fn print_report(report: &RunReport, output: OutputMode) {
                 .as_deref()
                 .map(|e| format!(" error={}", visible(e)))
                 .unwrap_or_default();
+            let denied = match report.denied_calls {
+                0 => String::new(),
+                count => format!(" denied_calls={count}"),
+            };
+            let cost = usage
+                .cost_usd
+                .map(|cost| format!(" cost={cost:.4}"))
+                .unwrap_or_default();
             let session = report
                 .session_file
                 .as_deref()
                 .map(|file| format!(" session={file}"))
                 .unwrap_or_default();
             eprintln!(
-                "[zx-agent] outcome={:?} model_requests={} retries={} tokens={} (in {} / out {}){error}{session}",
+                "[zx-agent] outcome={:?} model_requests={} retries={} tokens={} (in {} / out {}){cost}{denied}{error}{session}",
                 report.outcome, report.model_requests, report.retries, usage.total_tokens, usage.input, usage.output,
             );
         }

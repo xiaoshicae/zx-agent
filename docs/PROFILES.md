@@ -65,6 +65,7 @@ path = "skills/rust-review/SKILL.md"
 | `rules.approveAll` | `true` 时不询问任何审批：chat 与 serve 的 bash、`askTools` 与 MCP `allowTools` 以外的工具都直接执行；拒绝规则与命令策略仍然生效。只能与 `execution = "container"` 一起使用，且 `askTools` 须为空（内置 assistant 为 `["bash"]`，需写 `askTools = []`），见 README 的“容器执行” |
 | `limits.maxModelRequests` | 每轮模型请求数；`"unlimited"` 不限，`0` 不请求模型 |
 | `limits.timeoutSecs` | 每轮总时间上限，`0` 关闭 |
+| `limits.costBudget` | 每轮所有模型请求的花费上限，按 `[[models]]` 中该模型的单价计算，单位与单价相同（按人民币写单价，预算就是人民币）；摘要请求与失败的尝试也计入，工具报告的花费不计入；每次请求之前检查，最后一次请求可能超出；`0` 关闭，负数或非有限值报错。模型没有单价时 CLI 拒绝启动。用完时 run 以退出码 8 结束 |
 | `limits.tokenBudget` | 每轮所有模型请求的输入加输出 token 上限，以服务返回的用量为准，摘要请求与失败的尝试也计入；每次请求之前检查，最后一次请求可能超出；`0` 关闭。用完时 run 以退出码 7 结束 |
 | `extensions.continueOnLength` | 输出达到 token 上限后的续写次数；每次消耗一次模型请求预算 |
 | `extensions.redaction` | 仅接受 `true` 或省略；CLI 的已知认证 key 脱敏不可关闭 |

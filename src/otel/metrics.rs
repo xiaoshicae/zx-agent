@@ -76,6 +76,18 @@ impl Instruments {
 
     /// Add `usage` to the token counters of `model`, and its cost when it has one.
     pub(super) fn count_usage(&self, usage: &Usage, model: &str) {
+        self.count(usage, KeyValue::new("zx.model", model.to_string()));
+    }
+
+    /// Add what the tool `tool` spent on work of its own to the token and cost counters,
+    /// under `zx.tool.name` instead of a model.
+    pub(super) fn count_tool_usage(&self, usage: &Usage, tool: &str) {
+        self.count(usage, KeyValue::new("zx.tool.name", tool.to_string()));
+    }
+
+    /// Add `usage` to the token counters, and to the cost counter when it has a cost, under
+    /// `by`, the model or tool it belongs to.
+    fn count(&self, usage: &Usage, by: KeyValue) {
         let counts = [
             ("input", usage.input),
             ("output", usage.output),
@@ -85,15 +97,12 @@ impl Instruments {
         ];
         for (kind, count) in counts {
             if count > 0 {
-                let attributes = [
-                    KeyValue::new("zx.model", model.to_string()),
-                    KeyValue::new("zx.token.kind", kind),
-                ];
+                let attributes = [by.clone(), KeyValue::new("zx.token.kind", kind)];
                 self.tokens.add(count, &attributes);
             }
         }
         if let Some(cost) = usage.cost_usd {
-            self.cost.add(cost, &[KeyValue::new("zx.model", model.to_string())]);
+            self.cost.add(cost, &[by]);
         }
     }
 }

@@ -378,6 +378,7 @@ mod tests {
                 timestamp: 1,
                 duration_ms: None,
                 details: None,
+                usage: None,
             }))
             .await
             .unwrap();
