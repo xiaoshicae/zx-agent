@@ -4,6 +4,8 @@
 //! - `tool`: the tool interface, and the set of tools a run offers
 //! - `hooks`: the extension points around the loop, and the chain that runs them
 //! - `policy`: the decision on a tool call, and the policy interface
+//! - `interaction`: how a host approves a call the policy asks about, and the refusal when
+//!   nobody can
 //! - `queue`: messages injected into a running loop, and records extensions ask it to keep
 //! - `command`: the slash commands extensions register
 //! - `events`: what a run emits, the envelope of each event, and the sink that receives them
@@ -14,6 +16,7 @@ mod agent_loop;
 mod command;
 mod events;
 mod hooks;
+mod interaction;
 mod policy;
 mod queue;
 mod report;
@@ -31,6 +34,7 @@ pub use hooks::{
     CancelSignal, ContextEdit, DEFAULT_HOOK_TIMEOUT, HookChain, HookContext, HookError, HookFailure, HookOptions,
     HookPhase, HookResult, HookStage, Hooks, RequestPlan, RequestSettings, TurnDecision, TurnDisposition, TurnSummary,
 };
+pub use interaction::{Approval, ApprovalCache, ApprovalRequest, DEFAULT_APPROVAL_TIMEOUT, Interaction, NoHuman};
 pub use policy::{AllowAll, Decision, ToolPolicy};
 pub use queue::{MessageQueues, PendingEntry, QueueMode, QueuedMessage};
 pub use report::{RunOutcome, RunReport};

@@ -262,7 +262,7 @@ impl<'a> Engine<'a, '_> {
     /// Run a checked call, or take the result of a blocked one, then pass the result through
     /// the output hooks and report the call's end. The hooks see the call as it ran, with
     /// the arguments `Tool::prepare_arguments` rewrote.
-    async fn execute_checked<'c>(&self, call: &'c ToolCall, checked: Checked<'a, 'c>) -> Outcome {
+    async fn execute_checked<'c>(&self, call: &'c ToolCall, checked: Checked<'a, 'c>) -> CallOutput {
         let (ran, outcome) = match checked {
             Checked::Blocked(outcome) => (Cow::Borrowed(call), outcome),
             Checked::Ready(Runnable { tool, call: ran }) => {
@@ -276,7 +276,7 @@ impl<'a> Engine<'a, '_> {
     }
 
     /// Record the result of `call`, then report it.
-    async fn record_result(&mut self, call: &ToolCall, outcome: Outcome) -> Result<ToolResultMessage, Halt> {
+    async fn record_result(&mut self, call: &ToolCall, outcome: CallOutput) -> Result<ToolResultMessage, Halt> {
         let result = to_result(call, outcome);
         self.emit(AgentEvent::MessageStart { role: "toolResult" }).await;
         self.record_finished_message(&Message::ToolResult(result.clone()))
@@ -284,7 +284,7 @@ impl<'a> Engine<'a, '_> {
         Ok(result)
     }
 
-    async fn apply_output_hooks(&self, call: &ToolCall, outcome: Outcome) -> Outcome {
+    async fn apply_output_hooks(&self, call: &ToolCall, outcome: CallOutput) -> CallOutput {
         let mut output = match self
             .config
             .hooks
@@ -297,7 +297,7 @@ impl<'a> Engine<'a, '_> {
         };
         // Bounded here, after every hook, so that the event and the record carry the same.
         output.details = output.details.filter(details_fit);
-        Outcome {
+        CallOutput {
             output,
             duration_ms: outcome.duration_ms,
         }
@@ -307,7 +307,7 @@ impl<'a> Engine<'a, '_> {
         let mut results = Vec::new();
         for call in calls {
             self.tool_start(call).await;
-            let blocked = Outcome::blocked(format!(
+            let blocked = CallOutput::blocked(format!(
                 "Tool call {:?} was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments.",
                 call.name
             ));
@@ -329,7 +329,7 @@ impl<'a> Engine<'a, '_> {
         .await;
     }
 
-    async fn tool_end(&self, call: &ToolCall, outcome: &Outcome) {
+    async fn tool_end(&self, call: &ToolCall, outcome: &CallOutput) {
         self.emit(AgentEvent::ToolExecutionEnd {
             tool_call_id: call.id.clone(),
             tool_name: call.name.clone(),
@@ -342,17 +342,20 @@ impl<'a> Engine<'a, '_> {
     }
 }
 
+/// The results of one response's calls, in call order, and whether a tool asked to end the
+/// attempt.
 pub(super) struct Batch {
     pub(super) results: Vec<ToolResultMessage>,
     pub(super) terminate: bool,
 }
 
-struct Outcome {
+/// What one call produced, before it becomes a result message.
+struct CallOutput {
     output: ToolOutput,
     duration_ms: Option<u64>,
 }
 
-impl Outcome {
+impl CallOutput {
     fn blocked(text: impl Into<String>) -> Self {
         Self {
             output: ToolOutput::error(text),
@@ -374,13 +377,13 @@ fn blocked_by_policy(reason: &str) -> String {
 /// A call after its checks.
 enum Checked<'a, 'c> {
     /// The call does not run; this is its result.
-    Blocked(Outcome),
+    Blocked(CallOutput),
     Ready(Runnable<'a, 'c>),
 }
 
 impl Checked<'_, '_> {
     fn blocked(text: impl Into<String>) -> Self {
-        Self::Blocked(Outcome::blocked(text))
+        Self::Blocked(CallOutput::blocked(text))
     }
 }
 
@@ -412,10 +415,10 @@ fn interrupted(effects: Effects) -> &'static str {
     }
 }
 
-async fn execute(engine: &Engine<'_, '_>, tool: &dyn Tool, call: &ToolCall) -> Outcome {
+async fn execute(engine: &Engine<'_, '_>, tool: &dyn Tool, call: &ToolCall) -> CallOutput {
     let cancel = engine.cancel;
     if cancel.is_cancelled() {
-        return Outcome::blocked(NOT_STARTED);
+        return CallOutput::blocked(NOT_STARTED);
     }
     // A token of the call's own: cancelled with the run, while a tool that cancels it to
     // stop work of its own does not stop the run.
@@ -433,7 +436,7 @@ async fn execute(engine: &Engine<'_, '_>, tool: &dyn Tool, call: &ToolCall) -> O
         tokio::select! {
             biased;
             () = cancel.cancelled() => {
-                return Outcome {
+                return CallOutput {
                     output: ToolOutput::error(interrupted(tool.effects())),
                     duration_ms: Some(duration_ms(started.elapsed())),
                 };
@@ -455,7 +458,7 @@ async fn execute(engine: &Engine<'_, '_>, tool: &dyn Tool, call: &ToolCall) -> O
         Ok(Err(error)) => ToolOutput::error(error),
         Err(_) => ToolOutput::error(format!("Tool {} panicked", tool.name())),
     };
-    Outcome {
+    CallOutput {
         output,
         duration_ms: Some(duration_ms(started.elapsed())),
     }
@@ -484,8 +487,8 @@ async fn emit_progress(engine: &Engine<'_, '_>, call: &ToolCall, text: String) {
     }
 }
 
-fn to_result(call: &ToolCall, outcome: Outcome) -> ToolResultMessage {
-    let Outcome { output, duration_ms } = outcome;
+fn to_result(call: &ToolCall, outcome: CallOutput) -> ToolResultMessage {
+    let CallOutput { output, duration_ms } = outcome;
     let content = match (output.content.is_empty(), output.is_error) {
         (false, _) => output.content,
         (true, true) => "(tool failed without output)".to_string(),

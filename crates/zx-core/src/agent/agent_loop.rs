@@ -35,14 +35,14 @@ use super::session_host::{NoSession, Prepared, SessionHost, record_pending_entri
 use super::tool::{
     ActiveTools, Effects, ExecutionMode, MAX_DETAILS_BYTES, MAX_QUEUED_PROGRESS, Tool, ToolContext, ToolOutput,
 };
+use crate::agent::{Approval, ApprovalCache, ApprovalRequest, DEFAULT_APPROVAL_TIMEOUT, Interaction, NoHuman};
 use crate::ai::{
     AssistantMessage, Message, ModelMeta, Provider, Reasoning, Request, StopReason, StreamEvent, SystemMessage,
     SystemPrompt, ToolCall, ToolResultMessage, Usage, UserMessageKind, duration_ms, now_ms,
 };
-use crate::interaction::{Approval, ApprovalCache, ApprovalRequest, DEFAULT_APPROVAL_TIMEOUT, Interaction, NoHuman};
 
 pub use config::{LoopConfig, LoopSpec};
-use turn::{PendingInput, ResponseHandling, ToolProgress, TurnPreparation, TurnResponse};
+use turn::{AfterTools, PendingInput, ResponseHandling, TurnPreparation, TurnResponse};
 
 /// State borrowed from the run owner; grants survive retries without sharing a lock.
 pub struct LoopControl<'a> {
@@ -389,17 +389,17 @@ impl<'a, 'b> Engine<'a, 'b> {
             }));
         }
 
-        let mut tool_progress = ToolProgress::NoCalls;
+        let mut after_tools = AfterTools::NoCalls;
         if !calls.is_empty() {
             let batch = if stop == StopReason::Length {
                 self.reject_truncated_tools(&calls).await?
             } else {
                 self.execute_tools(&calls).await?
             };
-            tool_progress = if batch.terminate {
-                ToolProgress::Terminated
+            after_tools = if batch.terminate {
+                AfterTools::Terminated
             } else {
-                ToolProgress::Continue
+                AfterTools::Ran
             };
             result.count_tool_usage(&batch.results);
             context.extend(batch.results.into_iter().map(Message::ToolResult));
@@ -411,7 +411,7 @@ impl<'a, 'b> Engine<'a, 'b> {
         Ok(ResponseHandling::Continue(TurnResponse {
             index,
             turn,
-            tool_progress,
+            after_tools,
         }))
     }
 

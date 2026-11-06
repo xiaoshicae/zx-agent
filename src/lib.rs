@@ -41,7 +41,7 @@ pub mod ai {
 pub use zx_ai::sync;
 #[doc(hidden)]
 pub use zx_ai::text;
-pub use zx_core::{AgentSession, agent, agent_session, compaction, extensions, interaction, prompt, runner, session};
+pub use zx_core::{AgentSession, agent, agent_session, compaction, extensions, prompt, runner, session};
 #[doc(hidden)]
 pub use zx_tools::files;
 pub use zx_tools::{continuation, executor, mcp, output_store, policy, redact, tools};

@@ -24,6 +24,7 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use tokio::sync::Notify;
+use zx_agent::agent::ApprovalCache;
 use zx_agent::agent::QueuedMessage;
 use zx_agent::agent::{
     AgentEvent, Event, EventSink, ExecutionMode, HookContext, LoopConfig, LoopControl, LoopResult, LoopSpec,
@@ -34,7 +35,6 @@ use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::{
     AssistantMessage, ContentBlock, EventReceiver, Message, Provider, Request, StopReason, SystemPrompt, ToolDef,
 };
-use zx_agent::interaction::ApprovalCache;
 use zx_agent::policy::PolicyHook;
 use zx_agent::runner::{Limits, Runner};
 use zx_agent::session::{Entry, SessionHeader, SessionStore};

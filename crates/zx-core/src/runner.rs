@@ -22,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 use accounting::RunAccounting;
 use run_host::{CompactionPause, RunHost, RunStop};
 
+use crate::agent::ApprovalCache;
 use crate::agent::{
     EventSink, EventTarget, LoopConfig, LoopControl, LoopFailure, LoopOutcome, QueuedMessage, RunTrace, run_loop,
 };
@@ -29,7 +30,6 @@ pub use crate::agent::{RunOutcome, RunReport};
 use crate::ai::retry::{RetryPolicy, is_context_overflow, is_retryable};
 use crate::ai::{AssistantMessage, Provider, Reasoning};
 use crate::compaction::{self, Trigger};
-use crate::interaction::ApprovalCache;
 use crate::session::SessionStore;
 use crate::sync::AbortOnDrop;
 

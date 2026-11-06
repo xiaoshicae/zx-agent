@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::AgentSession;
+use zx_agent::agent::Interaction;
 use zx_agent::agent::{EventSink, NullSink};
 use zx_agent::ai::now_ms;
 use zx_agent::im::feishu::{FeishuChannel, FeishuConfig};
@@ -22,7 +23,6 @@ use zx_agent::im::{
     CardLabels, ConversationId, ErrorReport, ImChannel, ImError, Replies, Server, ServerConfig, ServerEvent,
     ServerSink, SessionFactory, SessionKey, StatusFiles, UserId,
 };
-use zx_agent::interaction::Interaction;
 use zx_agent::otel::Telemetry;
 use zx_agent::profile::Builtin;
 

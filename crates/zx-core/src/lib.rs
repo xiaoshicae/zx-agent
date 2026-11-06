@@ -2,14 +2,34 @@
 //! defines for everything scenario-specific (tools, hooks, policies, interaction, executors,
 //! session storage). The `zx-agent` crate re-exports these modules under the same names.
 //!
-//! - [`agent`]: the agent loop, tool execution, and tool policy (pi: packages/agent)
-//! - [`session`]: append-only JSONL session tree and its projection (pi: SessionManager)
-//! - [`agent_session`]: shared prompts, cancellation, subscriptions and model switching
-//! - [`runner`]: exclusive run ownership, retries, limits and persistence
-//! - [`compaction`]: bounded, auditable summaries of the conversation
-//! - [`prompt`]: system prompt assembly and the generated environment section
-//! - [`interaction`]: how a host approves tool calls, and the refusal when nobody can
-//! - [`extensions`]: bundles of tools, hooks and prompt sections
+//! The modules, from the bottom layer up; each uses only the modules listed before it:
+//!
+//! - [`session`]: the append-only session tree, every record's format and rules, and the
+//!   projection the model sees (pi: SessionManager)
+//! - [`agent`]: the loop of one attempt, tools, hooks, policy and approval, and events (pi:
+//!   packages/agent)
+//! - [`compaction`]: running one bounded, auditable summary of the conversation
+//! - [`runner`]: one run at a time: retries, limits, summaries and recovery around the loop
+//! - [`agent_session`]: a conversation shared by frontends: prompts, cancellation,
+//!   subscriptions and model switching
+//!
+//! Beside them, [`prompt`] assembles the system prompt and [`extensions`] bundles tools, hooks
+//! and prompt sections for a [`agent::LoopConfig`].
+//!
+//! # Where each feature lives
+//!
+//! The session owns what a feature records: the format, the checks a record passes both when
+//! it is appended and when a session is loaded, and the queries the projection and recovery
+//! need. The layers above act on it. A feature therefore spans several modules:
+//!
+//! | Feature | Records and rules, in `session` | What acts, above it |
+//! |---|---|---|
+//! | Summaries; the session file and the events say *compaction*, the code says both | `session/summary.rs` (types and limits), `summary/records.rs` (appending and checking the records), `summary/source.rs` (what a summary reads), `session/projection.rs` (the summary in the context) | `compaction.rs` (budgets and report), `compaction/summarizer.rs` (one summary), `compaction/answer.rs` (the model's answer), `runner/run_host.rs` (when to summarize) |
+//! | Interrupted tool calls | `session/recovery.rs` (start records, the calls left without results) | `agent/agent_loop/tools.rs` (records the start of a call with side effects), `runner/interrupted.rs` (records their results) |
+//! | Request audit | `session/request.rs` (request settings and per-request checkpoints) | `agent/agent_loop/model.rs` (task requests), `compaction/summarizer.rs` (summary requests) |
+//! | Context edits | `session.rs` (the rules of an edit), `session/projection.rs` (applying edits) | `agent/agent_loop/context.rs` (input and hook edits), `runner/run_host.rs` (omitting a failed answer) |
+//! | Approval | none: approvals are not recorded | `agent/interaction.rs` (the host interface and the session's grants), `agent/agent_loop/tools.rs` (asking) |
+//! | Events | none | `agent/events.rs` (the events and their envelope), `agent_session/subscribers.rs` (fan-out to subscribers) |
 //!
 //! A session holds a conversation across runs. Each [`runner::Runner::run`] processes one
 //! prompt and may retry a failed provider response as another loop attempt. A task turn is
@@ -19,7 +39,7 @@
 //!
 //! Embedders normally start with [`AgentSession`] or [`runner::Runner`]. [`agent::run_loop`]
 //! exposes the lower-level single-attempt loop. [`session::SessionLog`], [`agent::Tool`],
-//! [`agent::Hooks`], and [`interaction::Interaction`] are extension interfaces. The built-in
+//! [`agent::Hooks`], and [`agent::Interaction`] are extension interfaces. The built-in
 //! tools, executors, policies and hooks live in the `zx-tools` crate, providers in crates
 //! such as `zx-ai-openai`.
 
@@ -30,7 +50,6 @@ pub mod agent;
 pub mod agent_session;
 pub mod compaction;
 pub mod extensions;
-pub mod interaction;
 pub mod prompt;
 pub mod runner;
 pub mod session;

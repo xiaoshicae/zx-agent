@@ -8,11 +8,11 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
+use zx_agent::agent::{Approval, ApprovalRequest};
 use zx_agent::agent::{
     ContextEdit, Decision, HookContext, RequestSettings, ToolOutput, TurnDecision, TurnDisposition, TurnSummary,
 };
 use zx_agent::ai::{AssistantMessage, Message, Reasoning, StopReason, ToolCall, Usage};
-use zx_agent::interaction::{Approval, ApprovalRequest};
 
 /// `value` serializes to `expected` and reads back unchanged.
 fn round_trip<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(value: &T, expected: Value) {
