@@ -42,7 +42,7 @@
 | 共享会话 | `crates/zx-core/src/agent_session.rs`、`crates/zx-core/src/agent_session/subscribers.rs` | 共享调用与 Busy、RAII 归还运行权、取消、空闲时切换模型；订阅与退订、有界订阅在 `subscribers.rs` |
 | 运行层 | `crates/zx-core/src/runner.rs` | 持有可顺序复用的会话；以独占借用控制单次运行、重试、上限、审批缓存、持久化和报告 |
 | 会话 | `crates/zx-core/src/session.rs`、`crates/zx-core/src/session/` | 只追加的条目树与校验，投影出发给模型的消息；记录经 `SessionLog` 保存，默认是单写者的 JSONL 文件（`jsonl.rs`） |
-| 上下文管理 | `crates/zx-core/src/compaction.rs`（预算与报告）、`crates/zx-core/src/compaction/`（`summarizer.rs` 摘要执行者、`answer.rs` 模型回答的解析与合并）、`crates/zx-core/src/session/summary.rs`、`crates/zx-tools/src/output_store.rs` | 宿主摘要、追加升级与原始投影、脱敏后的长结果保存及分页 |
+| 上下文管理 | `crates/zx-core/src/compaction.rs`（预算与报告）、`crates/zx-core/src/compaction/`（`summarizer.rs` 摘要执行者、`answer.rs` 模型回答的解析与合并）、`crates/zx-core/src/session/summary.rs`（摘要记录的类型与上限）与 `session/summary/`（`records.rs` 记录的追加与校验、`source.rs` 摘要读取的内容与请求）、`crates/zx-tools/src/output_store.rs` | 宿主摘要、追加升级与原始投影、脱敏后的长结果保存及分页 |
 | agent | `crates/zx-core/src/agent/` | 回合循环、工具执行、Hooks 宿主、事件、消息队列（用户文本与扩展的消息、每队列的取法、扩展排队的状态记录）、活跃工具集、扩展的斜杠命令 |
 | ai | `crates/zx-ai/src/`、`crates/zx-ai-openai/src/` | 消息类型、系统提示词段落、流式事件协议、provider 契约与重试判断，另有各 crate 共用的 `sync`、`text`；OpenAI 兼容 provider 与 SSE 解析单独成 crate |
 | 外层策略与交互 | `crates/zx-tools/src/policy/`、`crates/zx-tools/src/continuation.rs`、`crates/zx-tools/src/redact.rs`、`crates/zx-core/src/extensions.rs`、`crates/zx-core/src/interaction.rs` | 命令与规则策略、续写、已知密钥脱敏、扩展的打包与注册（`Extension`、`register`）、宿主审批与 NoHuman |
@@ -104,7 +104,7 @@
 
 | 层次 | 位置 | 测什么 | 怎么驱动 |
 |---|---|---|---|
-| 单元测试 | 模块内的 `#[cfg(test)] mod tests` | 单个模块的逻辑和边界，可以测私有函数；包括会话文件和事件流的 JSON 格式 | 直接调用 |
+| 单元测试 | 被测模块里的 `#[cfg(test)] mod tests`，超过约 300 行时在 `foo/tests.rs`（规则 09） | 单个模块的逻辑和边界，可以测私有函数；包括会话文件和事件流的 JSON 格式 | 直接调用 |
 | 集成测试 | `tests/*.rs` | 跨模块的契约，只用公开 API：循环语义、运行层、HTTP provider、命令行 | `FauxProvider`、本地假 HTTP 服务、编译出的程序 |
 | 付费 e2e | `tests/real_api.rs` | 与真实模型 API 的兼容性 | 默认跳过，经用户授权才运行（红线 9） |
 

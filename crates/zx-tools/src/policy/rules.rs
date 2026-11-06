@@ -104,3 +104,187 @@ impl ToolPolicy for RulePolicy {
         verdict
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::policy::AutoApprove;
+
+    fn denied(decision: &Decision) -> bool {
+        matches!(decision, Decision::Deny(_))
+    }
+
+    #[tokio::test]
+    async fn rule_priority_is_deny_then_ask_then_allow_regardless_of_registration() {
+        let policy = RulePolicy::new(vec![
+            Rule {
+                matcher: RuleMatcher::Any,
+                decision: Decision::Allow,
+            },
+            Rule {
+                matcher: RuleMatcher::Tool("bash".into()),
+                decision: Decision::Ask("first ask".into()),
+            },
+            Rule {
+                matcher: RuleMatcher::Any,
+                decision: Decision::Ask("second ask".into()),
+            },
+            Rule {
+                matcher: RuleMatcher::CommandPrefix("rm".into()),
+                decision: Decision::Deny("first deny".into()),
+            },
+            Rule {
+                matcher: RuleMatcher::Tool("bash".into()),
+                decision: Decision::Deny("second deny".into()),
+            },
+        ]);
+        assert_eq!(
+            policy.check("bash", &serde_json::json!({"command": "rm x"})).await,
+            Decision::Deny("first deny".into())
+        );
+        assert_eq!(
+            policy.check("bash", &serde_json::json!({"command": "ls"})).await,
+            Decision::Deny("second deny".into())
+        );
+        assert_eq!(
+            policy.check("read_file", &serde_json::json!({})).await,
+            Decision::Ask("second ask".into())
+        );
+        let policy = RulePolicy::new(vec![
+            Rule {
+                matcher: RuleMatcher::Any,
+                decision: Decision::Allow,
+            },
+            Rule {
+                matcher: RuleMatcher::Tool("bash".into()),
+                decision: Decision::Ask("first".into()),
+            },
+            Rule {
+                matcher: RuleMatcher::Any,
+                decision: Decision::Ask("second".into()),
+            },
+        ]);
+        assert_eq!(
+            policy.check("bash", &serde_json::json!({})).await,
+            Decision::Ask("first".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn unmatched_and_empty_prefix_rules_fail_closed() {
+        let policy = RulePolicy::new(vec![
+            Rule {
+                matcher: RuleMatcher::CommandPrefix("".into()),
+                decision: Decision::Allow,
+            },
+            Rule {
+                matcher: RuleMatcher::CommandPrefix("ls".into()),
+                decision: Decision::Allow,
+            },
+        ]);
+        for (tool, args) in [
+            ("bash", serde_json::json!({"command": "lsx"})),
+            ("read_file", serde_json::json!({"command": "ls"})),
+            ("bash", serde_json::json!({})),
+        ] {
+            assert!(matches!(policy.check(tool, &args).await, Decision::Deny(_)));
+        }
+        assert_eq!(
+            policy.check("bash", &serde_json::json!({"command": "ls\t-a"})).await,
+            Decision::Allow
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_approval_turns_only_a_bash_ask_into_allow() {
+        let policy = RulePolicy::new(vec![
+            Rule {
+                matcher: RuleMatcher::Tool("bash".into()),
+                decision: Decision::Ask("approve bash".into()),
+            },
+            Rule {
+                matcher: RuleMatcher::Any,
+                decision: Decision::Ask("approve any".into()),
+            },
+        ])
+        .auto_approve(AutoApprove::new(["ls"]));
+        assert_eq!(
+            policy.check("bash", &serde_json::json!({"command": "ls -a"})).await,
+            Decision::Allow
+        );
+        assert_eq!(
+            policy.check("bash", &serde_json::json!({"command": "rm x"})).await,
+            Decision::Ask("approve bash".into())
+        );
+        assert_eq!(
+            policy.check("bash", &serde_json::json!({})).await,
+            Decision::Ask("approve bash".into())
+        );
+        assert_eq!(
+            policy.check("read_file", &serde_json::json!({"command": "ls"})).await,
+            Decision::Ask("approve any".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_approval_never_overrides_a_denial() {
+        let list = AutoApprove::new(["ls"]);
+        let ls = serde_json::json!({"command": "ls -a"});
+        let denied_by_rule = RulePolicy::new(vec![Rule {
+            matcher: RuleMatcher::CommandPrefix("ls".into()),
+            decision: Decision::Deny("denied".into()),
+        }])
+        .auto_approve(list.clone());
+        assert_eq!(denied_by_rule.check("bash", &ls).await, Decision::Deny("denied".into()));
+        let unmatched = RulePolicy::new(Vec::new()).auto_approve(list);
+        assert!(denied(&unmatched.check("bash", &ls).await));
+    }
+
+    #[tokio::test]
+    async fn command_prefix_rules_compare_like_the_allowlist() {
+        let deny = RulePolicy::new(vec![
+            Rule {
+                matcher: RuleMatcher::CommandPrefix("kubectl delete".into()),
+                decision: Decision::Deny("no deletes".into()),
+            },
+            Rule {
+                matcher: RuleMatcher::Any,
+                decision: Decision::Allow,
+            },
+        ]);
+        for command in ["kubectl  delete pod x", "KUBECTL delete pod x", "kubectl\tdelete pod x"] {
+            assert_eq!(
+                deny.check("bash", &serde_json::json!({ "command": command })).await,
+                Decision::Deny("no deletes".into()),
+                "{command}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_allow_prefix_does_not_let_a_second_command_through() {
+        let allow = RulePolicy::new(vec![Rule {
+            matcher: RuleMatcher::CommandPrefix("kubectl get".into()),
+            decision: Decision::Allow,
+        }]);
+        assert_eq!(
+            allow
+                .check("bash", &serde_json::json!({"command": "kubectl get pods -A"}))
+                .await,
+            Decision::Allow
+        );
+        for command in [
+            "kubectl get pods ; rm -rf ~/scratch",
+            "kubectl get pods && rm x",
+            "kubectl get pods | sh",
+            "kubectl get pods > /etc/hosts",
+            "kubectl get $(rm x)",
+            "kubectl get pods\nrm x",
+        ] {
+            assert!(
+                denied(&allow.check("bash", &serde_json::json!({ "command": command })).await),
+                "{command}"
+            );
+        }
+    }
+}

@@ -1,5 +1,10 @@
 //! File-based scenario configuration, outside the agent loop. Loading is synchronous,
 //! bounded startup I/O; tool and frontend assembly remains the caller's responsibility.
+//!
+//! - `file`: the TOML layer of a profile, and how one layer goes over another
+//! - `context`: the project context: `AGENTS.md` files from the Git root down to the working
+//!   directory
+//! - `skills`: explicit skill catalogs, whose bodies a tool reads on demand
 
 mod context;
 mod file;

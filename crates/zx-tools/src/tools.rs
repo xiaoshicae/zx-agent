@@ -1,4 +1,11 @@
 //! Built-in tools (pi: coding-agent/src/core/tools).
+//!
+//! - `bash`: run a shell command
+//! - `read`, `write` and `edit`: read a file in pages, write a whole file, replace exact text;
+//!   `edit_text` holds the replacement and its patch, `mutation` the queue that changes one file
+//!   at a time
+//! - `search`: `grep`, `find` and `ls`
+//! - `truncate`: the bounds every tool's output keeps
 
 pub mod bash;
 pub mod edit;

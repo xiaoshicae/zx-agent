@@ -1,5 +1,5 @@
 //! A scripted troubleshooting session for evaluating context summaries over several rounds of
-//! compaction, item 6 of the incremental summary design in `docs/ROADMAP.md`. Each round runs a
+//! compaction. Each round runs a
 //! few commands; the commands, their output and what the assistant says plant facts among
 //! routine noise. The round ends with the user's next request, and a summary follows.
 //!

@@ -1,5 +1,5 @@
 //! `zx-agent serve`: answers IM messages with one session per thread until stopped.
-//! Design: docs/serve-im-review.md; the server itself is `zx_agent::im::Server`.
+//! The server itself is `zx_agent::im::Server`.
 
 use std::collections::HashSet;
 use std::num::NonZeroUsize;

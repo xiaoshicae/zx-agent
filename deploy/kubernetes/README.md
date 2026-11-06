@@ -67,7 +67,7 @@ kubectl -n zx-agent exec -it deploy/zx-agent -- zx-agent chat \
 
 不带 `--profile` 时使用内置的 assistant，kubectl 命令都要逐条确认。
 
-同一个会话文件同一时间只能被一个 chat 或 run 打开。另一个人或任务再打开它时，会报告 `is in use` 并以退出码 2 结束。所以多人同时使用时，各自用不同的文件名。这项限制依赖文件系统的 `flock`：文件系统不支持时，打开会话会直接失败，不会退回到不加锁的写入（见 `docs/ROADMAP.md` 中 A1 的实施记录）。本次只在 ext4 的 local-path 卷上验证过。
+同一个会话文件同一时间只能被一个 chat 或 run 打开。另一个人或任务再打开它时，会报告 `is in use` 并以退出码 2 结束。所以多人同时使用时，各自用不同的文件名。这项限制依赖文件系统的 `flock`：文件系统不支持时，打开会话会直接失败，不会退回到不加锁的写入。本次只在 ext4 的 local-path 卷上验证过。
 
 单次任务：
 

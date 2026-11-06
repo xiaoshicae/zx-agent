@@ -1,7 +1,7 @@
 //! Slack: messages and button clicks arrive over Socket Mode, posts go through the Web API.
 //!
 //! Socket Mode needs no public URL: the channel opens a WebSocket to Slack and acknowledges
-//! each envelope before handling it (docs/serve-im-review.md, sections 3.4 and 9.1).
+//! each envelope before handling it.
 
 mod events;
 

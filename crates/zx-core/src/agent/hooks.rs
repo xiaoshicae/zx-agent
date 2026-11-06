@@ -1,4 +1,7 @@
 //! Ordered, bounded extension points. Hook failures never grant tool access.
+//!
+//! - `chain`: [`HookChain`], which runs the registered hooks in stage order, each call
+//!   bounded by its timeout and the run's cancellation
 
 mod chain;
 

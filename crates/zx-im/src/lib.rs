@@ -1,5 +1,5 @@
 //! Chat platforms: the [`ImChannel`] extension point, and a [`Server`] that answers each
-//! thread with its own [`AgentSession`]. Design: docs/serve-im-review.md.
+//! thread with its own [`AgentSession`].
 //!
 //! A channel only moves messages. The server owns routing, sessions, the run limit and
 //! approvals, so supporting another platform means implementing the four methods of

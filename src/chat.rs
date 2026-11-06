@@ -1,6 +1,15 @@
-//! The line-oriented terminal frontend; model and tool work stays in AgentSession. Where
-//! conversations are kept is in `storage`, a running operation in `turn`, the banner,
-//! `/status` and `/help` in `info`.
+//! The line-oriented terminal frontend; model and tool work stays in AgentSession.
+//!
+//! - `input`: the single owner of the terminal's input
+//! - `turn`: one operation of a conversation driven to its end
+//! - `interaction`: approval requests, answered through the input owner
+//! - `signals`: signals that cancel a prompt and leave the REPL running
+//! - `output` and `term`: streaming output, colors, and the status line
+//! - `commands`: slash commands, which never reach the model
+//! - `storage`: where conversations are kept, and which one opens first
+//! - `tree`: `/tree` and `/branch`
+//! - `info`: the banner, `/status` and `/help`
+//! - `debug`: the execution timeline of the debug mode
 
 mod commands;
 mod debug;

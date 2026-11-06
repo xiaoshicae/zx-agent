@@ -2,7 +2,7 @@
 //!
 //! [`ImApproval::confirm`] posts the card and waits for the worker to pass on a decision.
 //! The card is closed by the worker when the run reports `approval_resolved`, because the
-//! runtime drops `confirm` on timeout or cancellation (docs/serve-im-review.md, section 3.3).
+//! runtime drops `confirm` on timeout or cancellation.
 
 use std::sync::Arc;
 use std::time::Duration;

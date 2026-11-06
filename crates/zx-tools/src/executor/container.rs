@@ -15,6 +15,9 @@
 //! stopped too, nothing the command can write decides what is stopped, and the root processes
 //! that keep the container alive cannot be signalled. Because a sweep would also stop a
 //! concurrent call, the executor runs one command or file read at a time.
+//!
+//! - `config`: how the container is started and described: its settings and its network
+//! - `scripts`: the shell scripts that run inside it, and the exit codes they answer with
 
 mod config;
 mod scripts;

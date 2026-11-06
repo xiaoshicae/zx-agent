@@ -2,6 +2,11 @@
 //!
 //! The loop stops at the first provider error; this layer decides whether to retry, keeps
 //! the session as the source of model context, and enforces request, time and token limits.
+//!
+//! - `run_host`: what a run lends the loop and the summarizer, and how a run opens and closes
+//! - `interrupted`: results for the tool calls an interrupted run left unfinished
+//! - `accounting`: the costs of a run's attempts, and the budget that remains
+//! - `final_answer`: the answer, joined from the parts that continue a cut-off one
 
 mod accounting;
 mod final_answer;

@@ -1,4 +1,10 @@
 //! The agent loop. Extension behavior is supplied through bounded, ordered hooks.
+//!
+//! - `config`: what a loop runs with: [`LoopSpec`] and [`LoopConfig`]
+//! - `context`: input, queued messages and context edits, recorded before the loop uses them
+//! - `model`: recording a task request and streaming its response
+//! - `tools`: checking, approving, running and recording the calls of a response
+//! - `turn`: what follows a turn: the finish hooks' decision and the queued input
 
 mod config;
 mod context;

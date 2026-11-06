@@ -1,5 +1,8 @@
-//! The command line: the subcommands, their arguments and the value parsers. What a process
-//! shares between its sessions is in `shared`, the assembly of one session in `prepare`.
+//! The command line: the subcommands, their arguments and the value parsers.
+//!
+//! - `shared`: what every session of a process shares, read or connected once
+//! - `prepare`: the assembly of one session, shared by run, chat, serve and acp
+//! - `execution`: where a session's commands run: this machine or a Docker container
 
 mod execution;
 mod prepare;

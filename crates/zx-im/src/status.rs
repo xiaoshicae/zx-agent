@@ -1,5 +1,5 @@
 //! Statuses of runs in progress, kept so that the next start can replace those a crash left
-//! behind (docs/serve-im-review.md, gap 8, option c).
+//! behind.
 
 use std::fs::OpenOptions;
 use std::io::{self, Write};
