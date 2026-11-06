@@ -11,6 +11,7 @@
 //! `zx_agent::im::slack` and `zx_agent::im::feishu`.
 
 mod approval;
+mod outlet;
 mod platform;
 mod router;
 mod server;
