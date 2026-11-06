@@ -15,6 +15,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::agent::{Effects, HookContext, HookResult, HookStage, Hooks, Tool, ToolContext, ToolOutput};
 use crate::ai::{ToolCall, ToolDef};
+use crate::text::prefix_within;
 use crate::tools::{parse_args, unless_cancelled};
 
 /// Paging tool name; enabling spilling requires registering this tool too.
@@ -27,10 +28,11 @@ const FOOTER_BYTES: usize = 160;
 /// default directory lies inside the user's working tree.
 const GITIGNORE: &str = "# Created by zx-agent: stored tool results may contain sensitive data.\n*\n";
 
-/// Storage settings. A zero threshold in a profile maps to None (spilling disabled).
+/// Storage settings. The host maps its own notation to them, such as a zero threshold to
+/// `None`.
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// Relative to the tool cwd unless the profile loader already resolved an explicit path.
+    /// Relative to the tool cwd unless the host already resolved an explicit path.
     pub directory: PathBuf,
     /// Results larger than this size spill; None disables writes, retaining paged reads.
     pub threshold_bytes: Option<usize>,
@@ -49,20 +51,19 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Bound both disk writes and page size; allow disabling writes independently of reads.
+    /// Check the settings: the directory is named, the file size limit is within 1 MiB and
+    /// the threshold, when there is one, is at least 256 bytes and within that limit. Errors
+    /// name the field; the host adds its own name for the settings.
     pub fn validate(&self) -> Result<()> {
-        ensure!(
-            !self.directory.as_os_str().is_empty(),
-            "toolOutput.directory must not be empty"
-        );
+        ensure!(!self.directory.as_os_str().is_empty(), "directory must not be empty");
         ensure!(
             self.max_file_bytes > 0 && self.max_file_bytes <= MAX_FILE_BYTES,
-            "toolOutput.maxFileBytes must be 1..=1048576"
+            "max_file_bytes must be 1..={MAX_FILE_BYTES}"
         );
         if let Some(bytes) = self.threshold_bytes {
             ensure!(
                 bytes >= 256 && bytes <= self.max_file_bytes,
-                "toolOutput.thresholdBytes must be 256..=maxFileBytes (or zero to disable spilling)"
+                "threshold_bytes must be 256..=max_file_bytes, or unset to disable spilling"
             );
         }
         Ok(())
@@ -150,7 +151,7 @@ impl OutputStore {
     async fn write(&self, text: &str) -> HookResult<String> {
         if text.len() > self.config.max_file_bytes {
             return Err(format!(
-                "tool result is {} bytes, over toolOutput.maxFileBytes = {}",
+                "tool result is {} bytes, over the {} byte file limit",
                 text.len(),
                 self.config.max_file_bytes
             ));
@@ -229,8 +230,10 @@ impl OutputStore {
 /// timeout.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// An after_tool hook. Register after secret filtering and exempt paging tools to
-/// avoid turning every page into another file reference. HookChain bounds/cancels I/O.
+/// The hook that stores a long tool result as a file and leaves a reference in its place.
+///
+/// Register it after secret filtering, and exempt the paging tools so that a page does not
+/// become another file reference; the hook chain bounds and cancels its I/O.
 pub struct SpillOutputs {
     store: OutputStore,
     exempt_tools: Vec<String>,
@@ -350,12 +353,9 @@ impl Tool for ReadOutputTool {
             "output offset is out of range or inside a UTF-8 character; use the returned offset".to_string()
         })?;
         let limit = self.store.config.threshold_bytes.unwrap_or(DEFAULT_PAGE_BYTES) - FOOTER_BYTES;
-        let mut end = remaining.len().min(limit);
-        while !remaining.is_char_boundary(end) {
-            end -= 1;
-        }
-        let mut content = remaining[..end].to_string();
-        let next = args.offset + end;
+        let page = prefix_within(remaining, limit);
+        let mut content = page.to_string();
+        let next = args.offset + page.len();
         if next < text.len() {
             content.push_str(&format!(
                 "\n[Use read_output with id={:?}, offset={next} to continue.]",
