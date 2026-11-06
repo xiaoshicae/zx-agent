@@ -124,10 +124,7 @@ fn info(path: PathBuf, store: &SessionStore) -> SessionInfo {
         id: header.id.clone(),
         cwd: header.cwd.clone(),
         started_ms: header.timestamp,
-        last_activity_ms: store
-            .entries()
-            .last()
-            .map_or(header.timestamp, |entry| entry.timestamp()),
+        last_activity_ms: store.entries().last().map_or(header.timestamp, super::Entry::timestamp),
         messages: store
             .messages()
             .iter()

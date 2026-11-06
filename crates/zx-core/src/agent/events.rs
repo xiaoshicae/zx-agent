@@ -164,15 +164,15 @@ impl Interruption {
     /// A short description for progress output.
     pub fn describe(self) -> &'static str {
         match self {
-            Interruption::Started => "started, result unknown",
-            Interruption::StartUnknown => "start not recorded, result unknown",
-            Interruption::NotStarted => "not started",
-            Interruption::ReadOnly => "read-only, no result",
+            Self::Started => "started, result unknown",
+            Self::StartUnknown => "start not recorded, result unknown",
+            Self::NotStarted => "not started",
+            Self::ReadOnly => "read-only, no result",
         }
     }
 }
 
-/// Events emitted while the agent runs (pi: `AgentEvent`, packages/agent/src/types.ts).
+/// Events emitted while the agent runs.
 ///
 /// A run is one prompt: `run_start`, then one attempt per try (`agent_start` to `agent_end`;
 /// a retry or a recovery from context overflow starts another), then `run_end`. A turn is one
@@ -339,30 +339,30 @@ impl AgentEvent {
     /// The serialized `type` name, such as `turn_start`.
     pub fn kind(&self) -> &'static str {
         match self {
-            AgentEvent::RunStart { .. } => "run_start",
-            AgentEvent::RunEnd { .. } => "run_end",
-            AgentEvent::AgentStart { .. } => "agent_start",
-            AgentEvent::TurnStart { .. } => "turn_start",
-            AgentEvent::RequestStart { .. } => "request_start",
-            AgentEvent::MessageStart { .. } => "message_start",
-            AgentEvent::MessageUpdate { .. } => "message_update",
-            AgentEvent::MessageEnd { .. } => "message_end",
-            AgentEvent::ToolExecutionStart { .. } => "tool_execution_start",
-            AgentEvent::ToolExecutionUpdate { .. } => "tool_execution_update",
-            AgentEvent::ToolDecision { .. } => "tool_decision",
-            AgentEvent::ApprovalRequested { .. } => "approval_requested",
-            AgentEvent::ApprovalResolved { .. } => "approval_resolved",
-            AgentEvent::ToolExecutionEnd { .. } => "tool_execution_end",
-            AgentEvent::TurnEnd { .. } => "turn_end",
-            AgentEvent::AgentEnd { .. } => "agent_end",
-            AgentEvent::RetryScheduled { .. } => "retry_scheduled",
-            AgentEvent::ContextOverflow { .. } => "context_overflow",
-            AgentEvent::ContextEdited { .. } => "context_edited",
-            AgentEvent::HookFailed { .. } => "hook_failed",
-            AgentEvent::CompactionStart { .. } => "compaction_start",
-            AgentEvent::CompactionEnd { .. } => "compaction_end",
-            AgentEvent::CompactionFailed { .. } => "compaction_failed",
-            AgentEvent::ToolCallRecovered { .. } => "tool_call_recovered",
+            Self::RunStart { .. } => "run_start",
+            Self::RunEnd { .. } => "run_end",
+            Self::AgentStart { .. } => "agent_start",
+            Self::TurnStart { .. } => "turn_start",
+            Self::RequestStart { .. } => "request_start",
+            Self::MessageStart { .. } => "message_start",
+            Self::MessageUpdate { .. } => "message_update",
+            Self::MessageEnd { .. } => "message_end",
+            Self::ToolExecutionStart { .. } => "tool_execution_start",
+            Self::ToolExecutionUpdate { .. } => "tool_execution_update",
+            Self::ToolDecision { .. } => "tool_decision",
+            Self::ApprovalRequested { .. } => "approval_requested",
+            Self::ApprovalResolved { .. } => "approval_resolved",
+            Self::ToolExecutionEnd { .. } => "tool_execution_end",
+            Self::TurnEnd { .. } => "turn_end",
+            Self::AgentEnd { .. } => "agent_end",
+            Self::RetryScheduled { .. } => "retry_scheduled",
+            Self::ContextOverflow { .. } => "context_overflow",
+            Self::ContextEdited { .. } => "context_edited",
+            Self::HookFailed { .. } => "hook_failed",
+            Self::CompactionStart { .. } => "compaction_start",
+            Self::CompactionEnd { .. } => "compaction_end",
+            Self::CompactionFailed { .. } => "compaction_failed",
+            Self::ToolCallRecovered { .. } => "tool_call_recovered",
         }
     }
 }
@@ -379,7 +379,7 @@ where
     F: Fn(&Event) + Send + Sync,
 {
     fn emit(&self, event: &Event) {
-        self(event)
+        self(event);
     }
 }
 

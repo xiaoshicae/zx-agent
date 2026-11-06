@@ -6,6 +6,8 @@ pub const MAX_LINES: usize = 2000;
 /// Default byte limit for tool output (pi: DEFAULT_MAX_BYTES).
 pub const MAX_BYTES: usize = 50 * 1024;
 
+use crate::text::prefix_within;
+
 /// Truncated text and what was cut.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Truncated {
@@ -73,14 +75,6 @@ pub fn truncate_tail(text: &str, max_lines: usize, max_bytes: usize) -> Truncate
         total_lines: lines.len(),
         kept_lines: kept,
     }
-}
-
-fn prefix_within(text: &str, max_bytes: usize) -> &str {
-    let mut end = max_bytes.min(text.len());
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
 }
 
 fn suffix_within(text: &str, max_bytes: usize) -> &str {

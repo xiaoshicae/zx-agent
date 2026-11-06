@@ -100,11 +100,18 @@ impl Drop for Writer {
 pub(super) struct Unrepaired {
     path: PathBuf,
     file: File,
-    /// Where an incomplete final record starts.
-    truncate_at: Option<u64>,
-    /// Whether the last complete record lacks its newline.
-    terminate: bool,
+    repair: Repair,
     next_seq: u64,
+}
+
+/// What the file needs before the first append.
+enum Repair {
+    /// The file ends with a complete record and its newline.
+    Nothing,
+    /// Cut off the incomplete final record, which starts at this offset.
+    Truncate(u64),
+    /// The last complete record lacks its newline; add it.
+    Terminate,
 }
 
 impl JsonlFile {
@@ -148,11 +155,15 @@ impl JsonlFile {
         file.read_to_end(&mut content)
             .with_context(|| format!("cannot read session file {}", path.display()))?;
         let (loaded, truncate_at) = parse(&content, path)?;
+        let repair = match truncate_at {
+            Some(at) => Repair::Truncate(u64::try_from(at)?),
+            None if !content.is_empty() && !content.ends_with(b"\n") => Repair::Terminate,
+            None => Repair::Nothing,
+        };
         let unrepaired = Unrepaired {
             path: path.to_path_buf(),
             file,
-            truncate_at: truncate_at.map(u64::try_from).transpose()?,
-            terminate: truncate_at.is_none() && !content.is_empty() && !content.ends_with(b"\n"),
+            repair,
             next_seq: u64::try_from(loaded.records.len())? + 1,
         };
         Ok((loaded, unrepaired))
@@ -219,17 +230,17 @@ impl Unrepaired {
         let Self {
             path,
             file,
-            truncate_at,
-            terminate,
+            repair,
             next_seq,
         } = self;
-        if let Some(length) = truncate_at {
-            file.set_len(length)
-                .with_context(|| format!("cannot repair session file {}", path.display()))?;
-        } else if terminate {
-            (&file)
+        match repair {
+            Repair::Truncate(length) => file
+                .set_len(length)
+                .with_context(|| format!("cannot repair session file {}", path.display()))?,
+            Repair::Terminate => (&file)
                 .write_all(b"\n")
-                .with_context(|| format!("cannot repair session file {}", path.display()))?;
+                .with_context(|| format!("cannot repair session file {}", path.display()))?,
+            Repair::Nothing => {}
         }
         Ok(JsonlFile {
             writer: Writer::spawn(Box::new(file))?,

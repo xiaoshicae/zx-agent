@@ -9,10 +9,14 @@ pub mod search;
 pub mod truncate;
 pub mod write;
 
+use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
+use serde::Deserialize;
+use serde_json::Value;
 
 pub use bash::BashTool;
 pub use edit::EditFileTool;
@@ -21,7 +25,7 @@ pub use read::ReadFileTool;
 pub use search::{FindTool, GrepTool, LsTool, SearchSettings};
 pub use write::WriteFileTool;
 
-use crate::agent::Tool;
+use crate::agent::{Tool, ToolContext};
 use crate::executor::{Executor, LocalExecutor};
 
 /// Name of the built-in shell tool.
@@ -104,6 +108,44 @@ pub fn builtin_tools_with(
         tools.push(tool);
     }
     Ok(tools)
+}
+
+/// `args` as a tool's argument type; the error tells the model what was wrong.
+pub(crate) fn parse_args<'de, T: Deserialize<'de>>(args: &'de Value) -> Result<T, String> {
+    T::deserialize(args).map_err(|e| format!("invalid arguments: {e}"))
+}
+
+/// `raw` as a path: without a leading `@`, which some models put before paths, and against
+/// `cwd` when relative.
+pub(crate) fn resolve(cwd: &Path, raw: &str) -> Result<PathBuf, String> {
+    let raw = raw.trim();
+    let raw = raw.strip_prefix('@').unwrap_or(raw);
+    if raw.is_empty() {
+        return Err("path is empty".to_string());
+    }
+    let path = Path::new(raw);
+    Ok(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    })
+}
+
+/// How far into a file the text tools look for a NUL byte, which marks a binary file.
+const BINARY_SNIFF_BYTES: usize = 8192;
+
+/// Whether `bytes` start like a binary file, which the text tools refuse.
+pub(crate) fn looks_binary(bytes: &[u8]) -> bool {
+    bytes.iter().take(BINARY_SNIFF_BYTES).any(|&b| b == 0)
+}
+
+/// `operation`, unless the call is cancelled first.
+pub(crate) async fn unless_cancelled<T>(ctx: &ToolContext, operation: impl Future<Output = T>) -> Option<T> {
+    tokio::select! {
+        biased;
+        () = ctx.cancel.cancelled() => None,
+        value = operation => Some(value),
+    }
 }
 
 #[cfg(test)]

@@ -1,37 +1,20 @@
-use std::io::{IsTerminal, Read, Write};
+//! The `zx-agent` command: run, chat, serve, sessions and acp.
+
 use std::process::ExitCode;
-use std::sync::Arc;
 
-use anyhow::{Context, Result};
 use clap::Parser;
-#[cfg(unix)]
-use tokio::signal::unix::{SignalKind, signal};
-use tokio_util::sync::CancellationToken;
-
-use zx_agent::AgentSession;
-use zx_agent::agent::{AgentEvent, Event, EventSink};
-use zx_agent::ai::{Message, StopReason};
-use zx_agent::profile::Builtin;
-use zx_agent::runner::{RunOutcome, RunReport};
 
 mod acp;
 mod chat;
 mod cli;
+mod process;
+mod render;
+mod run;
 mod serve;
 mod sessions;
 
-use chat::{progress_line, visible};
-use cli::{Cli, Command, OutputMode, RunArgs};
-
-/// Exit codes, so schedulers can react without parsing output.
-const EXIT_COMPLETED: u8 = 0;
-const EXIT_ERROR: u8 = 1;
-const EXIT_USAGE: u8 = 2;
-const EXIT_MODEL_REQUEST_LIMIT: u8 = 3;
-const EXIT_TIMEOUT: u8 = 4;
-const EXIT_ABORTED: u8 = 5;
-const EXIT_TRUNCATED: u8 = 6;
-const EXIT_TOKEN_BUDGET: u8 = 7;
+use cli::{Cli, Command};
+use process::EXIT_USAGE;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -40,7 +23,7 @@ async fn main() -> ExitCode {
         eprintln!("[security] cannot stop commands from reading this process's environment: {error}");
     }
     let result = match Cli::parse().command {
-        Command::Run(args) => run(args).await,
+        Command::Run(args) => run::run(args).await,
         Command::Chat(args) => chat::run(args).await,
         Command::Serve(args) => serve::run(args).await,
         Command::Sessions(args) => sessions::run(args).await,
@@ -72,219 +55,5 @@ fn deny_same_user_inspection() -> std::io::Result<()> {
         Ok(())
     } else {
         Err(std::io::Error::last_os_error())
-    }
-}
-
-/// Run one task and return its exit code. An `Err` is a configuration problem found
-/// before the run started.
-async fn run(args: RunArgs) -> Result<u8> {
-    let prompt = match &args.prompt {
-        Some(prompt) => Some(read_prompt(prompt)?),
-        None => {
-            // Checked before anything starts: continuing a new session has nothing to answer.
-            let session = args.request.session.as_deref().context("--continue needs --session")?;
-            anyhow::ensure!(
-                session.exists(),
-                "--continue needs an existing session file; {} does not exist",
-                session.display()
-            );
-            None
-        }
-    };
-    let telemetry = cli::start_telemetry()?;
-    let session = build_session(&args).await?;
-    // Kept until the run has ended: dropping it unsubscribes.
-    let _traced = telemetry.as_ref().map(|telemetry| session.subscribe(telemetry.sink()));
-    let cancel = CancellationToken::new();
-    spawn_signal_handler(cancel.clone());
-    let report = match prompt {
-        Some(prompt) => session.prompt_with_cancel(prompt, &cancel).await?,
-        None => session.continue_with_cancel(&cancel).await?,
-    };
-    print_report(&report, args.output);
-    cli::finish_telemetry(telemetry).await;
-    Ok(exit_code(report.outcome))
-}
-
-fn read_prompt(arg: &str) -> Result<String> {
-    let prompt = if arg == "-" {
-        let mut text = String::new();
-        std::io::stdin()
-            .read_to_string(&mut text)
-            .context("cannot read the prompt from stdin")?;
-        text
-    } else {
-        arg.to_string()
-    };
-    anyhow::ensure!(!prompt.trim().is_empty(), "the prompt is empty");
-    Ok(prompt)
-}
-
-/// Assemble an unattended session from the selected profile, `unattended` unless another is
-/// given, without exposing interactive choices to the kernel.
-async fn build_session(args: &RunArgs) -> Result<AgentSession> {
-    let instructions = cli::read_instructions(&args.base)?;
-    let mcp = cli::connect_mcp(&args.base, Builtin::Unattended, &args.transport).await?;
-    let prepared = cli::prepare(cli::SessionOptions {
-        base: &args.base,
-        transport: &args.transport,
-        request: &args.request,
-        model: &args.base.model,
-        file: cli::SessionFile::from_path(args.request.session.as_deref()),
-        default_profile: Builtin::Unattended,
-        budget: cli::Budget {
-            max_model_requests: args.max_model_requests,
-            timeout_secs: args.timeout_secs,
-            token_budget: args.token_budget,
-            continue_on_length: args.continue_on_length,
-        },
-        instructions: instructions.as_deref(),
-        hidden_env: &[],
-        mcp: &mcp,
-    })
-    .await?;
-    let sink: Arc<dyn EventSink> = match args.output {
-        OutputMode::Text => Arc::new(TextProgress),
-        OutputMode::Jsonl => Arc::new(JsonlEvents { deltas: args.deltas }),
-    };
-    prepared.into_session(sink)
-}
-
-fn print_report(report: &RunReport, output: OutputMode) {
-    match output {
-        OutputMode::Text => {
-            if !report.final_text.is_empty() {
-                // A terminal would run control sequences in the answer; a pipe gets the exact text.
-                if std::io::stdout().is_terminal() {
-                    print_line(&visible(&report.final_text));
-                } else {
-                    print_line(&report.final_text);
-                }
-            }
-            let usage = &report.usage;
-            let error = report
-                .error
-                .as_deref()
-                .map(|e| format!(" error={}", visible(e)))
-                .unwrap_or_default();
-            let session = report
-                .session_file
-                .as_deref()
-                .map(|file| format!(" session={file}"))
-                .unwrap_or_default();
-            eprintln!(
-                "[zx-agent] outcome={:?} model_requests={} retries={} tokens={} (in {} / out {}){error}{session}",
-                report.outcome, report.model_requests, report.retries, usage.total_tokens, usage.input, usage.output,
-            );
-        }
-        // The `run_end` event, already written, carries the report.
-        OutputMode::Jsonl => {}
-    }
-}
-
-fn exit_code(outcome: RunOutcome) -> u8 {
-    match outcome {
-        RunOutcome::Completed => EXIT_COMPLETED,
-        RunOutcome::Error => EXIT_ERROR,
-        RunOutcome::ModelRequestLimit => EXIT_MODEL_REQUEST_LIMIT,
-        RunOutcome::Timeout => EXIT_TIMEOUT,
-        RunOutcome::Aborted => EXIT_ABORTED,
-        RunOutcome::Truncated => EXIT_TRUNCATED,
-        RunOutcome::TokenBudget => EXIT_TOKEN_BUDGET,
-    }
-}
-
-/// SIGINT and SIGTERM cancel the run; the report is still written.
-///
-/// The listeners are registered before this returns, so a signal that arrives once the run
-/// has started always cancels it instead of killing the process. The waiting task is detached
-/// on purpose: it lives until a signal arrives or the process exits.
-fn spawn_signal_handler(cancel: CancellationToken) {
-    match shutdown_signal() {
-        Ok(signal) => {
-            tokio::spawn(async move {
-                signal.await;
-                cancel.cancel();
-            });
-        }
-        // Without signal handling the run is still bounded by its own limits, so it continues.
-        Err(e) => eprintln!("zx-agent: cannot listen for shutdown signals: {e}"),
-    }
-}
-
-/// Register SIGINT and SIGTERM listeners; the future completes at the first signal.
-#[cfg(unix)]
-fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()>> {
-    let mut interrupt = signal(SignalKind::interrupt())?;
-    let mut terminate = signal(SignalKind::terminate())?;
-    Ok(async move {
-        // `recv` yields `None` only when the runtime shuts down, which ends the process anyway.
-        tokio::select! {
-            _ = interrupt.recv() => {}
-            _ = terminate.recv() => {}
-        }
-    })
-}
-
-/// Register a Ctrl+C listener; the future completes at the first Ctrl+C.
-#[cfg(not(unix))]
-fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()>> {
-    let mut ctrl_c = tokio::signal::windows::ctrl_c()?;
-    Ok(async move {
-        // `recv` yields `None` only when the runtime shuts down, which ends the process anyway.
-        ctrl_c.recv().await;
-    })
-}
-
-/// Print one JSON line on stdout.
-fn write_line(value: &impl serde::Serialize) {
-    // Events and reports hold only strings, numbers, and `serde_json::Value`, which always serialize.
-    let Ok(line) = serde_json::to_string(value) else {
-        return;
-    };
-    print_line(&line);
-}
-
-/// Print `text` and a newline on stdout, unlike `println!` without panicking when stdout is
-/// closed.
-fn print_line(text: &str) {
-    let mut out = std::io::stdout().lock();
-    // A closed stdout (for example a consumer that exited) leaves nobody to report to; the run
-    // continues and the exit code still tells the scheduler how it ended.
-    let _ = writeln!(out, "{text}").and_then(|()| out.flush());
-}
-
-/// Writes every event as one JSON line on stdout.
-struct JsonlEvents {
-    deltas: bool,
-}
-
-impl EventSink for JsonlEvents {
-    fn emit(&self, event: &Event) {
-        if !self.deltas && matches!(event.event, AgentEvent::MessageUpdate { .. }) {
-            return;
-        }
-        write_line(event);
-    }
-}
-
-/// Short progress lines on stderr, printed like chat's; the answer is printed with the report.
-struct TextProgress;
-
-impl EventSink for TextProgress {
-    fn emit(&self, event: &Event) {
-        if let AgentEvent::MessageEnd {
-            message: Message::Assistant(message),
-            ..
-        } = &event.event
-        {
-            if let Some(error) = &message.error_message {
-                eprintln!("[model] {:?}: {}", message.stop_reason, visible(error));
-            } else if message.stop_reason == StopReason::Length {
-                eprintln!("[model] Length: the response hit the output token limit");
-            }
-        } else if let Some(line) = progress_line(&event.event) {
-            eprintln!("{line}");
-        }
     }
 }

@@ -1,4 +1,5 @@
-//! Where chat keeps its session files, forks them, and `zx-agent sessions`, which lists them.
+//! Session files: where every mode opens or creates one, where chat keeps and forks them,
+//! and `zx-agent sessions`, which lists them.
 //!
 //! As in pi (`getDefaultSessionDirPath`), each working directory has its own directory under
 //! the home directory; `--session-dir` replaces it.
@@ -11,7 +12,7 @@ use clap::Args;
 
 use zx_agent::session::{self, SessionHeader, SessionInfo, SessionList, SessionStore};
 
-use crate::chat::visible;
+use crate::render::visible;
 
 /// Under the home directory: the sessions of every working directory.
 const SESSIONS_HOME: &str = ".zx-agent/sessions";
@@ -33,16 +34,53 @@ pub(crate) struct SessionsArgs {
     pub(crate) cwd: Option<PathBuf>,
 }
 
-/// The working directory as `prepare` resolves it, which is what session headers record.
-pub(crate) fn resolve_cwd(cwd: Option<&Path>) -> Result<PathBuf> {
-    let cwd = match cwd {
-        Some(path) => path
-            .canonicalize()
-            .with_context(|| format!("invalid --cwd {}", path.display()))?,
-        None => std::env::current_dir()?,
-    };
-    anyhow::ensure!(cwd.is_dir(), "--cwd is not a directory: {}", cwd.display());
-    Ok(cwd)
+/// Where a mode keeps its session.
+#[derive(Clone, Copy)]
+pub(crate) enum SessionFile<'a> {
+    Memory,
+    Open(&'a Path),
+    Create(&'a Path),
+    /// A new file in this directory, named after the session ([`file_name`]); the directory
+    /// is created when missing.
+    NewIn(&'a Path),
+}
+
+impl<'a> SessionFile<'a> {
+    pub(crate) fn from_path(path: Option<&'a Path>) -> Self {
+        match path {
+            Some(path) => Self::Open(path),
+            None => Self::Memory,
+        }
+    }
+
+    /// The session file, or for [`SessionFile::NewIn`] the directory it will be created in.
+    pub(crate) fn location(&self) -> Option<&'a Path> {
+        match self {
+            Self::Memory => None,
+            Self::Open(path) | Self::Create(path) | Self::NewIn(path) => Some(path),
+        }
+    }
+}
+
+/// The session `file` names when it exists already; opened before anything else is started,
+/// for its ID.
+pub(crate) fn open_existing(file: &SessionFile<'_>) -> Result<Option<SessionStore>> {
+    Ok(match file {
+        SessionFile::Open(path) if path.exists() => Some(SessionStore::open(path)?),
+        SessionFile::Memory | SessionFile::Open(_) | SessionFile::Create(_) | SessionFile::NewIn(_) => None,
+    })
+}
+
+/// A new session with `header`, kept where `file` says.
+pub(crate) fn create(file: SessionFile<'_>, header: SessionHeader) -> Result<SessionStore> {
+    Ok(match file {
+        SessionFile::Memory => SessionStore::in_memory(header),
+        SessionFile::Open(path) | SessionFile::Create(path) => SessionStore::create(path, header)?,
+        SessionFile::NewIn(dir) => {
+            create_dir(dir)?;
+            SessionStore::create(&dir.join(file_name(&header)), header)?
+        }
+    })
 }
 
 /// `~/.zx-agent/sessions/--<cwd>--`, with the separators of `cwd` turned into `-` as pi does,
@@ -182,7 +220,7 @@ fn preview(session: &SessionInfo) -> String {
 /// `zx-agent sessions`: sessions on stdout, newest first; the directory and files that could
 /// not be read on stderr.
 pub(crate) async fn run(args: SessionsArgs) -> Result<u8> {
-    let cwd = resolve_cwd(args.cwd.as_deref())?;
+    let cwd = crate::cli::resolve_cwd(args.cwd.as_deref())?;
     let dir = match args.session_dir {
         Some(dir) => dir,
         None => default_dir(&cwd)?,
@@ -205,7 +243,7 @@ pub(crate) async fn run(args: SessionsArgs) -> Result<u8> {
         list.sessions.len(),
         visible(&dir.display().to_string())
     );
-    Ok(crate::EXIT_COMPLETED)
+    Ok(crate::process::EXIT_COMPLETED)
 }
 
 #[cfg(test)]

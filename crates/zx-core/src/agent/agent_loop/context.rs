@@ -1,7 +1,7 @@
 //! Context updates and their ordered session records.
 
 use super::{
-    AgentEvent, ContextEdit, ContextPreparation, Engine, Halt, HookFailure, LoopResult, Message, Queue, Usage,
+    AgentEvent, ContextEdit, ContextPreparation, Engine, Halt, HookFailure, LoopResult, Message, Prepared, Queue,
     UserMessageKind,
 };
 
@@ -139,28 +139,16 @@ impl Engine<'_, '_, '_> {
     ) -> Result<u32, Halt> {
         let prepared = match self.control.session.as_deref_mut() {
             Some(session) => session.prepare_context(self.control.cancel).await,
-            None => ContextPreparation::Unchanged,
+            None => ContextPreparation::unchanged(),
         };
-        let (requests, usage, failure) = match prepared {
-            ContextPreparation::Unchanged => (0, Usage::default(), None),
-            ContextPreparation::Updated {
-                messages,
-                requests,
-                usage,
-            } => {
-                *context = messages;
-                (requests, usage, None)
-            }
-            ContextPreparation::Failed { error, requests, usage } => (requests, usage, Some(Halt::Failed(error))),
-            ContextPreparation::Unrecorded { error, requests, usage } => {
-                (requests, usage, Some(Halt::Unrecorded(error)))
-            }
-        };
-        result.usage.add(&usage);
-        result.model_requests = result.model_requests.saturating_add(requests);
-        if let Some(halt) = failure {
-            return Err(halt);
+        result.usage.add(&prepared.usage);
+        result.model_requests = result.model_requests.saturating_add(prepared.requests);
+        match prepared.result {
+            Prepared::Unchanged => {}
+            Prepared::Updated(messages) => *context = messages,
+            Prepared::Failed(error) => return Err(Halt::Failed(error)),
+            Prepared::Unrecorded(error) => return Err(Halt::Unrecorded(error)),
         }
-        Ok(requests)
+        Ok(prepared.requests)
     }
 }

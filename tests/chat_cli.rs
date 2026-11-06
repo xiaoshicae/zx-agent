@@ -10,6 +10,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdout, Command};
 
 use common::mock_server::{MockServer, Reply};
+use common::{stderr, stdout, zx_agent};
 use zx_agent::ai::{AssistantMessage, ContentBlock, Message, StopReason};
 use zx_agent::session::SessionStore;
 
@@ -22,7 +23,7 @@ fn chat(server: &MockServer, cwd: &Path, args: &[&str]) -> Command {
 
 /// Like `chat`, with the given number of retries for transient errors.
 fn chat_retrying(server: &MockServer, cwd: &Path, args: &[&str], max_retries: &str) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_zx-agent"));
+    let mut command = zx_agent();
     command
         .arg("chat")
         .args(["--model", "mock-model", "--base-url", &server.base_url])
@@ -58,13 +59,6 @@ async fn run(server: &MockServer, cwd: &Path, args: &[&str], input: &str) -> Out
         .await
         .unwrap()
         .unwrap()
-}
-
-fn stdout(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stdout).into_owned()
-}
-fn stderr(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
 fn users(server: &MockServer, index: usize) -> Vec<String> {

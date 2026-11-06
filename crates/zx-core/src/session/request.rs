@@ -4,9 +4,9 @@ use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::ai::{Message, PREAMBLE, Reasoning, Request, SystemMessage, SystemPrompt, ToolDef, now_ms};
+use crate::ai::{Message, Reasoning, Request, ToolDef, now_ms};
 
-use super::{CompactionStartedEntry, Entry, SessionStore, records_without_details};
+use super::{COMPACTION_VERSION, CompactionStartedEntry, Entry, SessionStore, without_details};
 
 /// Non-secret request fields. Authentication and transport credentials are not recorded.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -34,7 +34,7 @@ pub struct RequestConfigEntry {
 }
 
 /// How to reconstruct the messages at dispatch, without copying the whole transcript.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum RequestSource {
     /// The session projection at this request entry's parent, not at the current leaf.
@@ -49,7 +49,7 @@ pub enum RequestSource {
 
 /// Written before Provider::stream. A missing response means dispatch was unresolved;
 /// the record alone cannot prove that a remote server accepted the request.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestStartedEntry {
     pub id: String,
@@ -81,7 +81,7 @@ impl SessionStore {
             reasoning: request.reasoning,
             provider_options,
         };
-        self.ensure_format(3).await?;
+        self.ensure_format(COMPACTION_VERSION).await?;
         let existing = self.branch_path().into_iter().rev().find_map(|entry| match entry {
             Entry::RequestConfig(entry) => Some(entry),
             _ => None,
@@ -136,7 +136,10 @@ impl SessionStore {
     }
 
     pub(super) fn validate_request_entry(&self, entry: &Entry) -> Result<()> {
-        ensure!(self.format_version >= 3, "request audit requires format v3");
+        ensure!(
+            self.format_version >= COMPACTION_VERSION,
+            "request audit requires format v{COMPACTION_VERSION}"
+        );
         match entry {
             Entry::RequestConfig(config) => {
                 ensure!(
@@ -194,24 +197,13 @@ impl SessionStore {
                         .recorded_incremental_source(&path, previous, &attempt.first_kept_entry_id)?
                         .input()?,
                     None => {
-                        let source: Vec<_> = Self::raw_projection_from(&path)
-                            .into_iter()
-                            .take_while(|item| item.entry_id != attempt.first_kept_entry_id)
-                            .collect();
+                        let raw = Self::raw_projection_from(&path);
+                        let source = Self::summarized_prefix(&raw, &attempt.first_kept_entry_id)?;
                         // As the summary request was built: without tool result details.
-                        serde_json::to_string(&records_without_details(&source))?
+                        serde_json::to_string(&without_details(source))?
                     }
                 };
-                let system = Message::System(SystemMessage {
-                    sections: SystemPrompt::default()
-                        .diff(&SystemPrompt::default().with_section(PREAMBLE, &attempt.request.instructions)),
-                    timestamp: *system_timestamp,
-                });
-                let mut user = Message::user(content);
-                if let Message::User { timestamp, .. } = &mut user {
-                    *timestamp = *user_timestamp;
-                }
-                Ok(vec![system, user])
+                Ok(attempt.request.messages(content, *system_timestamp, *user_timestamp))
             }
         }
     }

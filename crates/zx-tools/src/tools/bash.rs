@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use super::parse_args;
 use super::truncate::{MAX_BYTES, MAX_LINES, truncate_tail};
 use crate::agent::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
 use crate::ai::ToolDef;
@@ -121,7 +122,7 @@ fn status(end: &CommandEnd, limit: Duration) -> (String, bool) {
 
 /// The same checks run before policy and approval, and again for direct SDK calls.
 fn parse(args: &Value) -> Result<Args, String> {
-    let args = Args::deserialize(args).map_err(|e| format!("invalid arguments: {e}"))?;
+    let args: Args = parse_args(args)?;
     if args.command.trim().is_empty() {
         return Err("command is empty".to_string());
     }
@@ -138,7 +139,6 @@ impl Tool for BashTool {
         super::BASH
     }
 
-    /// The mode of the executor: calls run one at a time when it handles one at a time.
     fn execution_mode(&self) -> ExecutionMode {
         self.executor.execution_mode()
     }

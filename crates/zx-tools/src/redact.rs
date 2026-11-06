@@ -11,8 +11,8 @@ use serde_json::Value;
 
 use crate::agent::{HookContext, HookResult, HookStage, Hooks, ToolOutput};
 use crate::ai::ToolCall;
+use crate::files::read_regular_file;
 use crate::sync::lock;
-use crate::text::read_regular_file;
 
 /// The largest secret file read, such as a token: anything bigger is not a single secret, and
 /// it could never be matched whole in the bounded output of a built-in tool.

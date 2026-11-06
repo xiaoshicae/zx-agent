@@ -3,21 +3,20 @@
 //!
 //! A channel only moves messages. The server owns routing, sessions, the run limit and
 //! approvals, so supporting another platform means implementing the four methods of
-//! [`ImChannel`], in a crate of its own; [`split_text`] and [`Seen`] help with two of the
-//! duties. The platforms of this workspace are such crates: `zx-im-slack` and
-//! `zx-im-feishu`.
+//! [`ImChannel`], in a crate of its own; [`split_text`], [`Seen`], [`Pacer`] and [`Cards`]
+//! help with the duties every platform has. The platforms of this workspace are such
+//! crates: `zx-im-slack` and `zx-im-feishu`.
 //!
 //! The `zx-agent` crate re-exports this crate as `zx_agent::im`, with those platforms as
 //! `zx_agent::im::slack` and `zx_agent::im::feishu`.
 
 mod approval;
+mod platform;
 mod server;
 mod status;
 mod worker;
 
-use std::collections::{HashSet, VecDeque};
 use std::fmt;
-use std::hash::Hash;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -30,6 +29,7 @@ use zx_core::{AgentSession, agent, agent_session, interaction, runner};
 
 use crate::agent::ApprovalResult;
 
+pub use platform::{Cards, Pacer, Seen, split_text};
 pub use server::{ApprovalRecord, Replies, Server, ServerConfig, ServerEvent, ServerSink, SessionFactory, SessionKey};
 pub use status::{StatusFiles, StatusStore};
 
@@ -166,6 +166,8 @@ pub enum Choice {
 /// Texts of approval cards, for every platform. The defaults are English, like [`Replies`];
 /// a deployment sets its users' language, for example in the configuration of `serve`
 /// (`[cardLabels]`, fields in camelCase, each optional).
+///
+/// [`outcome`](Self::outcome) picks the label that says how an approval ended.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct CardLabels {
@@ -199,71 +201,16 @@ impl Default for CardLabels {
     }
 }
 
-/// Text in parts of at most `max` characters, each written by `push`, which may write one
-/// character as several (an entity, for example) but never splits what it writes. A part
-/// ends at its last line break when that keeps at least half of it. Empty text is one empty
-/// part. For a channel that must split text longer than one platform message.
-pub fn split_text(text: &str, max: usize, push: fn(&mut String, char)) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut current = String::new();
-    let mut count = 0;
-    for c in text.chars() {
-        let mut piece = String::new();
-        push(&mut piece, c);
-        let size = piece.chars().count();
-        if count + size > max && count > 0 {
-            let cut = current
-                .rfind('\n')
-                .filter(|at| current[..*at].chars().count() >= max / 2);
-            match cut {
-                Some(at) => {
-                    let rest = current.split_off(at + 1);
-                    parts.push(std::mem::replace(&mut current, rest));
-                    count = current.chars().count();
-                }
-                None => {
-                    parts.push(std::mem::take(&mut current));
-                    count = 0;
-                }
-            }
+impl CardLabels {
+    /// The label of a closed card: what happened to the call.
+    pub fn outcome(&self, result: ApprovalResult) -> &str {
+        match result {
+            ApprovalResult::AllowOnce | ApprovalResult::AllowSession | ApprovalResult::Remembered => &self.allowed,
+            ApprovalResult::Denied => &self.denied,
+            ApprovalResult::TimedOut => &self.timed_out,
+            ApprovalResult::Cancelled => &self.cancelled,
+            ApprovalResult::Failed => &self.failed,
         }
-        current.push_str(&piece);
-        count += size;
-    }
-    parts.push(current);
-    parts
-}
-
-/// Messages a channel has passed on recently, to drop redeliveries; the oldest are
-/// forgotten first.
-pub struct Seen<K> {
-    order: VecDeque<K>,
-    keys: HashSet<K>,
-    capacity: usize,
-}
-
-impl<K: Clone + Eq + Hash> Seen<K> {
-    /// Remember the last `capacity` keys.
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            order: VecDeque::new(),
-            keys: HashSet::new(),
-            capacity,
-        }
-    }
-
-    /// Record `key`; false if it was seen already.
-    pub fn insert(&mut self, key: &K) -> bool {
-        if !self.keys.insert(key.clone()) {
-            return false;
-        }
-        self.order.push_back(key.clone());
-        if self.order.len() > self.capacity
-            && let Some(oldest) = self.order.pop_front()
-        {
-            self.keys.remove(&oldest);
-        }
-        true
     }
 }
 

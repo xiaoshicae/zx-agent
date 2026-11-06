@@ -27,7 +27,7 @@ pub enum RunOutcome {
 }
 
 /// Summary of a finished run.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunReport {
     pub outcome: RunOutcome,
