@@ -24,6 +24,7 @@ pub struct PolicyHook {
 }
 
 impl PolicyHook {
+    /// The hook that asks `policy` about every tool call.
     pub fn new(policy: Arc<dyn ToolPolicy>) -> Self {
         Self { policy }
     }

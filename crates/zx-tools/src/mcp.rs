@@ -14,35 +14,37 @@ use async_trait::async_trait;
 use rmcp::model::{
     CallToolRequest, CallToolRequestParams, CallToolResult, CancelledNotificationParam, ClientCapabilities,
     ClientConfig, ClientRequest, ContentBlock, Implementation, ProgressNotificationParam, ProgressToken,
-    ProtocolVersion, ResourceContents, ServerResult,
+    ProtocolVersion, RequestId, ResourceContents, ServerResult,
 };
-use rmcp::service::{NotificationContext, PeerRequestOptions, RunningService, ServiceError};
+use rmcp::service::{NotificationContext, Peer, PeerRequestOptions, RunningService, ServiceError};
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::{ClientHandler, ClientLifecycleMode, RoleClient, serve_client_with_lifecycle};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use tokio::sync::mpsc;
 
 use crate::agent::{Tool, ToolContext, ToolOutput};
 use crate::ai::ToolDef;
 use crate::ai::sync::lock;
 use crate::extensions::Extension;
-use crate::text::prefix_within;
+use crate::text::prefix_noted;
 use crate::tools::truncate::{MAX_BYTES, MAX_LINES, truncate_head};
 
 /// The longest tool name that OpenAI-compatible APIs accept: "a-z, A-Z, 0-9, or contain
 /// underscores and dashes, with a maximum length of 64" (openai-openapi, `FunctionObject`).
-pub const MAX_TOOL_NAME: usize = 64;
+const MAX_TOOL_NAME: usize = 64;
 /// Tool descriptions go with every request and are written by the server, so they are cut
 /// to this size.
-pub const MAX_DESCRIPTION_BYTES: usize = 4 * 1024;
+const MAX_DESCRIPTION_BYTES: usize = 4 * 1024;
 /// Default bound for connecting and listing the tools.
-pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default bound for one tool call.
-pub const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(120);
+const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// One MCP server and the tools to take from it. Build it with [`ServerConfig::new`] and
-/// struct update syntax. It holds the credential, so it does not implement `Debug`.
+/// One MCP server and the tools to take from it.
+///
+/// Build it with [`ServerConfig::new`] and struct update syntax. It holds the credential, so
+/// it does not implement `Debug`.
 pub struct ServerConfig {
     /// ASCII lowercase letters, digits and `-`. Tools reach the model as `<name>__<tool>`.
     pub name: String,
@@ -64,6 +66,8 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
+    /// The settings for `tools` of the server `name` at `url`: no token, and the default
+    /// timeouts (30 s to connect, 120 s without news for a call, no bound on a whole call).
     pub fn new(name: impl Into<String>, url: impl Into<String>, tools: Vec<String>) -> Self {
         Self {
             name: name.into(),
@@ -146,11 +150,7 @@ impl Server {
             tools.push(Arc::new(McpTool {
                 definition: ToolDef {
                     name: name.clone(),
-                    // A description is optional in MCP.
-                    description: bounded(
-                        offered.description.as_deref().unwrap_or_default(),
-                        MAX_DESCRIPTION_BYTES,
-                    ),
+                    description: description(offered.description.as_deref()),
                     parameters: Value::Object(offered.input_schema.as_ref().clone()),
                 },
                 remote: remote.clone(),
@@ -226,8 +226,8 @@ async fn connect_and_list(config: &ServerConfig) -> Result<(Client, Vec<rmcp::mo
 
 /// The name the model calls a server's tool by: `<server>__<tool>`, with characters other than
 /// ASCII letters, digits, `_` and `-` replaced by `_`. MCP allows tool names of up to 128
-/// characters, including `.`; model APIs allow fewer (see [`MAX_TOOL_NAME`]). A server name
-/// has no `_`, so the first `__` ends it. Errors when the name would be too long.
+/// characters, including `.`; model APIs allow fewer (`MAX_TOOL_NAME`). A server name has no
+/// `_`, so the first `__` ends it. Errors when the name would be too long.
 pub fn tool_name(server: &str, tool: &str) -> Result<String, String> {
     let tool: String = tool
         .chars()
@@ -265,12 +265,12 @@ pub fn check_server_name(name: &str) -> Result<(), String> {
     }
 }
 
-/// `text`, cut at a character boundary within `max` bytes.
-fn bounded(text: &str, max: usize) -> String {
-    if text.len() <= max {
-        return text.to_string();
-    }
-    format!("{} [description truncated]", prefix_within(text, max))
+/// A tool's description for the model, cut to `MAX_DESCRIPTION_BYTES`; a server need not
+/// give one.
+fn description(offered: Option<&str>) -> String {
+    prefix_noted(offered.unwrap_or_default(), MAX_DESCRIPTION_BYTES, |_, _| {
+        " [description truncated]".to_string()
+    })
 }
 
 /// Progress updates a call can hold before the server's notifications are dropped: a call
@@ -349,12 +349,137 @@ struct McpTool {
     client: Arc<Client>,
     /// Re-armed by every progress notification.
     timeout: Duration,
+    /// Bound on a whole call, however much progress comes; kept by the tool, not by rmcp,
+    /// whose timeout error does not say which of the two bounds passed.
     max_timeout: Option<Duration>,
 }
 
 impl McpTool {
+    /// The error of a failed call; the server's text in `error` is bounded like a result.
     fn failed(&self, error: &dyn std::fmt::Display) -> String {
-        format!("MCP server {}: {} failed: {error}", self.server, self.remote)
+        format!(
+            "MCP server {}: {} failed: {}",
+            self.server,
+            self.remote,
+            bounded(&error.to_string(), "error")
+        )
+    }
+
+    /// The error of a call that went `bound` without an answer or progress.
+    fn no_answer_within(&self, bound: Duration) -> String {
+        format!(
+            "MCP server {}: {} did not answer within {} s",
+            self.server,
+            self.remote,
+            bound.as_secs()
+        )
+    }
+
+    /// The error of a call that reported progress but did not finish within `bound`.
+    fn not_finished_within(&self, bound: Duration) -> String {
+        format!(
+            "MCP server {}: {} did not finish within {} s, whatever its progress",
+            self.server,
+            self.remote,
+            bound.as_secs()
+        )
+    }
+
+    /// Send the call and wait for its result, as [`Tool::execute`] describes for this tool.
+    async fn call(&self, arguments: Map<String, Value>, ctx: &ToolContext) -> Result<CallToolResult, String> {
+        let request = ClientRequest::CallToolRequest(CallToolRequest::new(
+            CallToolRequestParams::new(self.remote.clone()).with_arguments(arguments),
+        ));
+        let options = PeerRequestOptions::with_timeout(self.timeout).reset_timeout_on_progress();
+        let peer = self.client.peer();
+        let handle = peer
+            .send_cancellable_request(request, options)
+            .await
+            .map_err(|error| self.failed(&error))?;
+        let request_id = handle.id.clone();
+        // rmcp gives every request a progress token; the server's notifications come back
+        // with it, and the dispatcher hands them to this subscription.
+        let mut updates = self.client.service().subscribe(handle.progress_token.clone());
+        let mut progressed = false;
+        let answered = handle.await_response();
+        tokio::pin!(answered);
+        // The bound on the whole call; one without it never fires.
+        let expiry = async {
+            match self.max_timeout {
+                Some(bound) => {
+                    tokio::time::sleep(bound).await;
+                    bound
+                }
+                None => std::future::pending::<Duration>().await,
+            }
+        };
+        tokio::pin!(expiry);
+        let answer = loop {
+            tokio::select! {
+                answer = &mut answered => break answer,
+                Some(update) = updates.receiver.recv() => {
+                    progressed = true;
+                    // A full progress queue only loses this update.
+                    ctx.report_progress(progress_text(&update));
+                }
+                () = ctx.cancel.cancelled() => {
+                    give_up(peer, request_id, "cancelled by the agent").await;
+                    return Err(format!("MCP server {}: the call to {} was cancelled", self.server, self.remote));
+                }
+                bound = &mut expiry => {
+                    give_up(peer, request_id, "maximum total timeout exceeded").await;
+                    return Err(if progressed {
+                        self.not_finished_within(bound)
+                    } else {
+                        self.no_answer_within(bound)
+                    });
+                }
+            }
+        };
+        match answer {
+            Ok(ServerResult::CallToolResult(result)) => Ok(result),
+            Ok(_) => Err(format!(
+                "MCP server {}: {} answered with a result of another kind",
+                self.server, self.remote
+            )),
+            Err(ServiceError::Timeout { timeout }) => Err(self.no_answer_within(timeout)),
+            Err(error) => Err(self.failed(&error)),
+        }
+    }
+}
+
+/// Tell the server that the request `request_id` is given up, for `reason`. The notification
+/// is what makes the transport close the request's stream; one that cannot be sent leaves
+/// nothing more to do.
+async fn give_up(peer: &Peer<RoleClient>, request_id: RequestId, reason: &str) {
+    let _ = peer
+        .notify_cancelled(CancelledNotificationParam::new(
+            Some(request_id),
+            Some(reason.to_string()),
+        ))
+        .await;
+}
+
+/// `text` within the bounds of a tool result, with a note naming `what` was cut.
+fn bounded(text: &str, what: &str) -> String {
+    let kept = truncate_head(text, MAX_LINES, MAX_BYTES);
+    let mut content = kept.text;
+    if kept.truncated {
+        content.push_str(&format!(
+            "\n[{what} truncated; showing {} of {} lines]",
+            kept.kept_lines, kept.total_lines
+        ));
+    }
+    content
+}
+
+/// The tool output of a result: its text, bounded, and whether the server reported an error.
+fn output_of(result: &CallToolResult) -> ToolOutput {
+    ToolOutput {
+        content: bounded(&render(result), "result"),
+        // Absent means false.
+        is_error: result.is_error == Some(true),
+        ..ToolOutput::default()
     }
 }
 
@@ -396,85 +521,8 @@ impl Tool for McpTool {
         let Value::Object(arguments) = args else {
             return Err("the arguments must be a JSON object".to_string());
         };
-        let request = ClientRequest::CallToolRequest(CallToolRequest::new(
-            CallToolRequestParams::new(self.remote.clone()).with_arguments(arguments),
-        ));
-        let mut options = PeerRequestOptions::with_timeout(self.timeout).reset_timeout_on_progress();
-        if let Some(max) = self.max_timeout {
-            options = options.with_max_total_timeout(max);
-        }
-        let peer = self.client.peer();
-        let handle = peer
-            .send_cancellable_request(request, options)
-            .await
-            .map_err(|error| self.failed(&error))?;
-        let request_id = handle.id.clone();
-        // rmcp gives every request a progress token; the server's notifications come back
-        // with it, and the dispatcher hands them to this subscription.
-        let mut updates = self.client.service().subscribe(handle.progress_token.clone());
-        let answered = handle.await_response();
-        tokio::pin!(answered);
-        let answer = loop {
-            tokio::select! {
-                answer = &mut answered => break answer,
-                Some(update) = updates.receiver.recv() => {
-                    // A full progress queue only loses this update.
-                    ctx.report_progress(progress_text(&update));
-                }
-                () = ctx.cancel.cancelled() => {
-                    // The notification is what makes the transport close the request's
-                    // stream; a notification that cannot be sent leaves nothing more to do.
-                    let _ = peer
-                        .notify_cancelled(CancelledNotificationParam::new(
-                            Some(request_id),
-                            Some("cancelled by the agent".to_string()),
-                        ))
-                        .await;
-                    return Err(format!("MCP server {}: the call to {} was cancelled", self.server, self.remote));
-                }
-            }
-        };
-        let result = match answer {
-            Ok(ServerResult::CallToolResult(result)) => result,
-            Ok(_) => {
-                return Err(format!(
-                    "MCP server {}: {} answered with a result of another kind",
-                    self.server, self.remote
-                ));
-            }
-            Err(ServiceError::Timeout { timeout }) if self.max_timeout == Some(timeout) => {
-                return Err(format!(
-                    "MCP server {}: {} did not finish within {} s, whatever its progress",
-                    self.server,
-                    self.remote,
-                    timeout.as_secs()
-                ));
-            }
-            Err(ServiceError::Timeout { timeout }) => {
-                return Err(format!(
-                    "MCP server {}: {} did not answer within {} s",
-                    self.server,
-                    self.remote,
-                    timeout.as_secs()
-                ));
-            }
-            Err(error) => return Err(self.failed(&error)),
-        };
-        let text = render(&result);
-        let kept = truncate_head(&text, MAX_LINES, MAX_BYTES);
-        let mut content = kept.text;
-        if kept.truncated {
-            content.push_str(&format!(
-                "\n[result truncated; showing {} of {} lines]",
-                kept.kept_lines, kept.total_lines
-            ));
-        }
-        Ok(ToolOutput {
-            content,
-            // Absent means false.
-            is_error: result.is_error == Some(true),
-            ..ToolOutput::default()
-        })
+        let result = self.call(arguments, ctx).await?;
+        Ok(output_of(&result))
     }
 }
 
@@ -538,10 +586,16 @@ mod tests {
     }
 
     #[test]
-    fn long_descriptions_are_cut_at_a_character_boundary() {
-        assert_eq!(bounded("short", 10), "short");
-        let cut = bounded("ab中cd", 3);
-        assert_eq!(cut, "ab [description truncated]");
+    fn long_descriptions_are_cut_and_a_missing_one_is_empty() {
+        assert_eq!(description(Some("short")), "short");
+        assert_eq!(description(None), "");
+        let cut = description(Some(&"界".repeat(MAX_DESCRIPTION_BYTES)));
+        assert!(
+            cut.ends_with("界 [description truncated]"),
+            "{}",
+            &cut[cut.len() - 40..]
+        );
+        assert!(cut.len() <= MAX_DESCRIPTION_BYTES + " [description truncated]".len());
     }
 
     #[test]

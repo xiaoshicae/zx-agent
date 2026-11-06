@@ -12,7 +12,7 @@ use super::{Captured, CommandEnd, CommandOutput};
 use crate::sync::{AbortOnDrop, lock};
 
 /// Bytes kept per stream while reading. Older output is dropped; only the tail is returned.
-pub(super) const CAPTURE_LIMIT: usize = 1024 * 1024;
+const CAPTURE_LIMIT: usize = 1024 * 1024;
 /// How long to wait for output pipes after the process ends. Background children that
 /// inherited the pipes could otherwise keep them open forever.
 const PIPE_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -98,7 +98,7 @@ pub(super) async fn collect(child: &mut Child, stdout: Capture, stderr: Capture,
 }
 
 /// Kill the child if it still runs, and reap it.
-pub(super) async fn stop_child(child: &mut Child) {
+async fn stop_child(child: &mut Child) {
     // Fails only if the child already exited, which is the goal.
     let _ = child.start_kill();
     // Reap the child so it does not linger as a zombie; past the timeout, `kill_on_drop`

@@ -1,5 +1,6 @@
 //! Retry classification and backoff (pi: packages/ai/src/utils/retry.ts and overflow.ts; the
-//! defaults are those of coding-agent/src/core/settings-defaults.ts).
+//! jitter follows provider-retry.ts; the defaults are those of
+//! coding-agent/src/core/settings-defaults.ts).
 
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
@@ -12,12 +13,13 @@ use super::types::{AssistantMessage, ProviderError, StopReason};
 pub struct RetryPolicy {
     /// Retries after the first attempt. 0 disables retrying.
     pub max_retries: u32,
+    /// The delay before the first retry, doubled for each one after it.
     pub base_delay: Duration,
+    /// The longest wait before a retry, whatever the backoff or the server's hint says.
     pub max_delay: Duration,
     /// How much of a backoff is taken off at random, at most: 0.25 shortens each wait by up
-    /// to a quarter (pi: `provider-retry.ts`), so that clients that failed together do not
-    /// retry together. 0 waits exactly the backoff. A server's `Retry-After` is kept as it
-    /// is.
+    /// to a quarter, so that clients that failed together do not retry together. 0 waits
+    /// exactly the backoff. A server's `Retry-After` is kept as it is.
     pub jitter: f64,
 }
 
@@ -69,8 +71,9 @@ fn random_fraction() -> f64 {
     (hasher.finish() >> 11) as f64 / (1u64 << 53) as f64
 }
 
-/// Failures that retrying cannot fix: credentials, quota, and context size.
-const NON_RETRYABLE: &[&str] = &[
+/// Failures that retrying cannot fix: credentials and quota. A request too long for the
+/// model is permanent too; its wording is [`OVERFLOW_TEXT`].
+const PERMANENT_TEXT: &[&str] = &[
     "401",
     "403",
     "unauthorized",
@@ -78,18 +81,11 @@ const NON_RETRYABLE: &[&str] = &[
     "invalid_api_key",
     "insufficient_quota",
     "billing",
-    "context length",
-    "context_length",
-    "maximum context",
-    "too many tokens",
 ];
 
-/// Transient provider and transport failures.
-const RETRYABLE: &[&str] = &[
-    "429",
-    "rate limit",
-    "rate_limit",
-    "too many requests",
+/// Transient provider and transport failures other than rate limiting, whose wording is
+/// [`RATE_LIMIT_TEXT`].
+const TRANSIENT_TEXT: &[&str] = &[
     "overloaded",
     "server_busy",
     "500",
@@ -141,10 +137,10 @@ pub fn is_retryable(message: &AssistantMessage) -> bool {
         return false;
     };
     let error = error.to_lowercase();
-    if NON_RETRYABLE.iter().any(|pattern| mentions(&error, pattern)) {
+    if mentions_any(&error, PERMANENT_TEXT) || overflow_text(&error) {
         return false;
     }
-    RETRYABLE.iter().any(|pattern| mentions(&error, pattern))
+    mentions_any(&error, TRANSIENT_TEXT) || mentions_any(&error, RATE_LIMIT_TEXT)
 }
 
 /// Error codes that say the request was too long for the model. Codes, not vendor names: any
@@ -170,14 +166,16 @@ const OVERFLOW_TEXT: &[&str] = &[
     "too many tokens",
 ];
 
-/// Throttling, which can also mention tokens ("too many tokens, please wait").
-const THROTTLING_TEXT: &[&str] = &["429", "rate limit", "rate_limit", "throttl", "too many requests"];
+/// Rate limiting, which a retry may outlast and which can also mention tokens ("too many
+/// tokens, please wait"), so that it is never taken for an overflow.
+const RATE_LIMIT_TEXT: &[&str] = &["429", "rate limit", "rate_limit", "too many requests"];
 
-/// Whether a failed response says the request was too long for the model's context: a
-/// smaller context may fix it, repeating the request never does. An HTTP 413 or one of the overflow codes decides;
-/// throttling, server, credential and transport failures never count; otherwise the error
-/// text decides. Silent overflow, where a service truncates the input instead of failing, is
-/// not detected.
+/// Whether a failed response says the request was too long for the model's context.
+///
+/// A smaller context may fix it, repeating the request never does. An HTTP 413 or one of the
+/// overflow codes decides; throttling, server, credential and transport failures never count;
+/// otherwise the error text decides. Silent overflow, where a service truncates the input
+/// instead of failing, is not detected.
 pub fn is_context_overflow(message: &AssistantMessage) -> bool {
     if message.stop_reason != StopReason::Error {
         return false;
@@ -208,26 +206,39 @@ pub fn is_context_overflow(message: &AssistantMessage) -> bool {
         return false;
     };
     let error = error.to_lowercase();
-    if THROTTLING_TEXT.iter().any(|pattern| mentions(&error, pattern)) {
+    // Throttling, including a `ThrottlingException`, which the text fallback of
+    // `is_retryable` does not know: whether to retry on it is a separate decision.
+    if mentions_any(&error, RATE_LIMIT_TEXT) || error.contains("throttl") {
         return false;
     }
-    error.starts_with("http 413") || OVERFLOW_TEXT.iter().any(|pattern| error.contains(pattern))
+    error.starts_with("http 413") || overflow_text(&error)
 }
 
 fn overflow_code(code: &str) -> bool {
     OVERFLOW_CODES.contains(&code.to_ascii_lowercase().as_str())
 }
 
+/// Whether the lowercased `error` has one of the overflow phrases.
+fn overflow_text(error: &str) -> bool {
+    OVERFLOW_TEXT.iter().any(|pattern| error.contains(pattern))
+}
+
+/// Error codes that a retry cannot get past: credentials, quota, and the overflow codes.
 fn permanent_code(code: &str) -> bool {
-    matches!(
-        code.to_ascii_lowercase().as_str(),
-        "insufficient_quota"
-            | "billing_hard_limit_reached"
-            | "invalid_api_key"
-            | "context_length_exceeded"
-            | "authentication_error"
-            | "permission_error"
-    )
+    overflow_code(code)
+        || matches!(
+            code.to_ascii_lowercase().as_str(),
+            "insufficient_quota"
+                | "billing_hard_limit_reached"
+                | "invalid_api_key"
+                | "authentication_error"
+                | "permission_error"
+        )
+}
+
+/// Whether the lowercased `error` mentions one of `patterns`, as [`mentions`] decides.
+fn mentions_any(error: &str, patterns: &[&str]) -> bool {
+    patterns.iter().any(|pattern| mentions(error, pattern))
 }
 
 /// Whether `error` contains `pattern`. A number must stand alone, with no letter or digit
@@ -434,5 +445,24 @@ mod tests {
             StopReason::Aborted,
             "503"
         )));
+    }
+
+    #[test]
+    fn an_overflow_is_never_retried_whatever_else_the_error_says() {
+        // Every overflow phrase and code is permanent, including those that only the
+        // overflow tables knew: a transient phrase next to them does not make a retry.
+        for error in [
+            "HTTP 500: your input exceeds the context window of this model",
+            "HTTP 503: prompt is too long for the model",
+            "HTTP 502: request_too_large",
+        ] {
+            assert!(is_context_overflow(&failed(error)), "{error}");
+            assert!(!is_retryable(&failed(error)), "{error}");
+        }
+        for code in ["model_context_window_exceeded", "request_too_large"] {
+            let message = http(500, Some(code), "HTTP 500: rejected");
+            assert!(is_context_overflow(&message), "{code}");
+            assert!(!is_retryable(&message), "{code}");
+        }
     }
 }

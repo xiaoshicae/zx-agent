@@ -9,7 +9,7 @@ use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
 use super::capture::{Capture, await_end, collect};
-use super::{CommandOutput, Executor, ShellCommand};
+use super::{CommandOutput, Executor, ShellCommand, check_read_within, directory_error, special_file_error};
 
 /// Runs commands as child processes of the agent and reads files directly.
 ///
@@ -119,14 +119,7 @@ impl Executor for LocalExecutor {
             .read_to_end(&mut bytes)
             .await
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        let read_bytes = u64::try_from(bytes.len()).map_err(|e| format!("file length is out of range: {e}"))?;
-        if read_bytes > max_bytes {
-            return Err(format!(
-                "{} grew over the {} byte limit; use bash with head, tail, or grep instead",
-                path.display(),
-                max_bytes
-            ));
-        }
+        check_read_within(path, &bytes, max_bytes)?;
         Ok(bytes)
     }
 
@@ -168,13 +161,10 @@ impl Executor for LocalExecutor {
 /// Refuse what is not a regular file, with a hint for directories.
 fn regular_file(path: &Path, meta: &std::fs::Metadata) -> Result<(), String> {
     if meta.is_dir() {
-        return Err(format!("{} is a directory; use bash `ls` to list it", path.display()));
+        return Err(directory_error(path));
     }
     if !meta.is_file() {
-        return Err(format!(
-            "{} is not a regular file; special files are not supported",
-            path.display()
-        ));
+        return Err(special_file_error(path));
     }
     Ok(())
 }

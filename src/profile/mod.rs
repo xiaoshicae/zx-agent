@@ -345,7 +345,7 @@ impl Profile {
             );
         }
         self.compaction.validate()?;
-        self.tool_output.validate()?;
+        self.tool_output.validate().context("[toolOutput]")?;
         for (key, value) in [
             ("container.image", &self.container.image),
             ("container.user", &self.container.user),

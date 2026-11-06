@@ -134,24 +134,31 @@ impl CommandPolicy {
         Self {
             allow_prefixes: allow_prefixes
                 .into_iter()
-                .map(|p| normalize(p.as_ref()))
-                .filter(|p| !p.is_empty())
+                .map(|prefix| normalize(prefix.as_ref()))
+                .filter(|prefix| !prefix.is_empty())
                 .collect(),
-            denied_patterns: DEFAULT_DENIED_PATTERNS.iter().map(|p| normalize(p)).collect(),
+            denied_patterns: DEFAULT_DENIED_PATTERNS
+                .iter()
+                .map(|pattern| normalize(pattern))
+                .collect(),
         }
     }
 
     /// Add substrings to reject in every command.
     pub fn deny_also(mut self, patterns: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
         self.denied_patterns
-            .extend(patterns.into_iter().map(|p| normalize(p.as_ref())));
+            .extend(patterns.into_iter().map(|pattern| normalize(pattern.as_ref())));
         self
     }
 
     /// Decide on one shell command.
     pub fn evaluate(&self, command: &str) -> Decision {
         let normalized = normalize(command);
-        if let Some(pattern) = self.denied_patterns.iter().find(|p| normalized.contains(p.as_str())) {
+        if let Some(pattern) = self
+            .denied_patterns
+            .iter()
+            .find(|pattern| normalized.contains(pattern.as_str()))
+        {
             return Decision::Deny(format!("command matches the denied pattern {pattern:?}"));
         }
         if let Some(program) = denied_program(command) {
@@ -161,7 +168,7 @@ impl CommandPolicy {
             return Decision::Allow;
         }
         // Check the raw command too: normalization turns newlines into spaces.
-        if let Some(token) = ALLOWLIST_FORBIDDEN.iter().find(|t| command.contains(*t)) {
+        if let Some(token) = ALLOWLIST_FORBIDDEN.iter().find(|token| command.contains(*token)) {
             return Decision::Deny(format!(
                 "{token:?} is not allowed; only plain commands and '|' pipelines of allowlisted programs may run"
             ));
