@@ -10,7 +10,8 @@ pub mod sse;
 
 use std::collections::HashMap;
 use std::fmt;
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
 use serde_json::{Map, Value, json};
@@ -42,8 +43,17 @@ pub const RESERVED_FIELDS: [&str; 6] = ["model", "messages", "stream", "stream_o
 pub struct OpenAiConfig {
     /// Base URL without `/chat/completions`, e.g. `https://api.openai.com/v1`.
     pub base_url: String,
-    /// Sent as a bearer token when present. Local servers often need none.
-    pub api_key: Option<String>,
+    /// The bearer token, fixed or asked for before each request. Local servers often need
+    /// none.
+    pub api_key: ApiKey,
+    /// Headers added to every request, such as a gateway's routing header. `Authorization`
+    /// is refused: the key goes through `api_key`. Neither the names nor the values are
+    /// recorded in the session.
+    pub headers: Vec<(String, String)>,
+    /// Send the request's [`Request::cache_key`] as `prompt_cache_key`, for servers that take
+    /// one (OpenAI does). Off by default: other servers reject unknown fields. Part of
+    /// [`Provider::request_options`].
+    pub prompt_cache_key: bool,
     /// Name recorded on assistant messages.
     pub provider_name: String,
     /// Longest wait for response headers and between two stream chunks.
@@ -69,6 +79,73 @@ pub struct OpenAiConfig {
     /// How a request's [`Reasoning`] level is written in the body. Part of
     /// [`Provider::request_options`] when it is not the default.
     pub reasoning_format: ReasoningFormat,
+}
+
+/// Where the bearer token of a request comes from.
+#[derive(Clone, Default)]
+pub enum ApiKey {
+    /// No `Authorization` header.
+    #[default]
+    None,
+    /// The same token for every request.
+    Fixed(String),
+    /// A token asked for before every request, for credentials that expire (pi:
+    /// `getApiKey`). A failure fails the request with [`ProviderError::ApiKey`], which is
+    /// not retried.
+    Dynamic(Arc<dyn ApiKeySource>),
+}
+
+/// Supplies the bearer token for the next request; see [`ApiKey::Dynamic`].
+pub trait ApiKeySource: Send + Sync {
+    /// The token to send. Called before every request, on the request's task; it must not
+    /// block, and should return promptly or fail.
+    fn api_key(&self) -> Result<String, String>;
+}
+
+impl ApiKey {
+    /// A fixed token; an empty one is no token.
+    pub fn fixed(key: impl Into<String>) -> Self {
+        let key = key.into();
+        if key.is_empty() { Self::None } else { Self::Fixed(key) }
+    }
+
+    /// The token for the next request, or `None` to send no `Authorization` header.
+    fn resolve(&self) -> Result<Option<String>, String> {
+        match self {
+            Self::None => Ok(None),
+            Self::Fixed(key) => Ok(Some(key.clone())),
+            Self::Dynamic(source) => source.api_key().map(|key| (!key.is_empty()).then_some(key)),
+        }
+    }
+}
+
+impl fmt::Debug for ApiKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Debug output can reach logs and panic messages; the key must not.
+        f.write_str(match self {
+            Self::None => "none",
+            Self::Fixed(_) => "[REDACTED]",
+            Self::Dynamic(_) => "[dynamic]",
+        })
+    }
+}
+
+impl From<Option<String>> for ApiKey {
+    fn from(key: Option<String>) -> Self {
+        key.map_or(Self::None, Self::fixed)
+    }
+}
+
+impl From<String> for ApiKey {
+    fn from(key: String) -> Self {
+        Self::fixed(key)
+    }
+}
+
+impl From<&str> for ApiKey {
+    fn from(key: &str) -> Self {
+        Self::fixed(key)
+    }
 }
 
 /// The request body fields a reasoning level is written as. Servers differ, and the provider
@@ -145,7 +222,12 @@ impl fmt::Debug for OpenAiConfig {
         // Debug output can reach logs and panic messages; the key must not.
         f.debug_struct("OpenAiConfig")
             .field("base_url", &self.base_url)
-            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("api_key", &self.api_key)
+            .field(
+                "headers",
+                &self.headers.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(),
+            )
+            .field("prompt_cache_key", &self.prompt_cache_key)
             .field("provider_name", &self.provider_name)
             .field("idle_timeout", &self.idle_timeout)
             .field("connect_timeout", &self.connect_timeout)
@@ -176,7 +258,9 @@ impl Default for OpenAiConfig {
     fn default() -> Self {
         Self {
             base_url: "https://api.openai.com/v1".to_string(),
-            api_key: None,
+            api_key: ApiKey::None,
+            headers: Vec::new(),
+            prompt_cache_key: false,
             provider_name: "openai-compatible".to_string(),
             idle_timeout: Duration::from_secs(120),
             connect_timeout: Duration::from_secs(15),
@@ -192,9 +276,32 @@ impl Default for OpenAiConfig {
 }
 
 /// Refuse extra fields that would replace what the provider sets itself.
-fn check_extra_fields(fields: &Map<String, Value>) -> anyhow::Result<()> {
+fn check_extra_fields(fields: &Map<String, Value>, prompt_cache_key: bool) -> anyhow::Result<()> {
     if let Some(field) = fields.keys().find(|field| RESERVED_FIELDS.contains(&field.as_str())) {
         anyhow::bail!("request field {field:?} cannot be added: the provider sets it itself");
+    }
+    if prompt_cache_key && fields.contains_key("prompt_cache_key") {
+        anyhow::bail!("request field \"prompt_cache_key\" cannot be added: the provider sets it from the cache key");
+    }
+    Ok(())
+}
+
+/// Refuse headers the client cannot send: malformed ones, and `Authorization`, which the
+/// key sets.
+fn check_headers(headers: &[(String, String)]) -> anyhow::Result<()> {
+    for (name, value) in headers {
+        anyhow::ensure!(
+            reqwest::header::HeaderName::from_bytes(name.as_bytes()).is_ok(),
+            "invalid request header name {name:?}"
+        );
+        anyhow::ensure!(
+            reqwest::header::HeaderValue::from_str(value).is_ok(),
+            "invalid value for request header {name:?}"
+        );
+        anyhow::ensure!(
+            !name.eq_ignore_ascii_case("authorization"),
+            "the Authorization header comes from the API key; it cannot be set as a request header"
+        );
     }
     Ok(())
 }
@@ -222,7 +329,8 @@ impl OpenAiCompatible {
             !config.connect_timeout.is_zero(),
             "connect_timeout must be greater than zero"
         );
-        check_extra_fields(&config.extra_fields)?;
+        check_extra_fields(&config.extra_fields, config.prompt_cache_key)?;
+        check_headers(&config.headers)?;
         let mut builder = reqwest::Client::builder().connect_timeout(config.connect_timeout);
         if !config.use_system_proxy {
             builder = builder.no_proxy();
@@ -260,6 +368,9 @@ impl Provider for OpenAiCompatible {
         // Absent for the default, so that options recorded before formats existed still match.
         if self.config.reasoning_format != ReasoningFormat::Effort {
             options["reasoningFormat"] = json!(self.config.reasoning_format.as_str());
+        }
+        if self.config.prompt_cache_key {
+            options["promptCacheKey"] = Value::Bool(true);
         }
         options
     }
@@ -349,7 +460,15 @@ async fn send_request(
     body: &Value,
 ) -> Result<reqwest::Response, Failure> {
     let mut request = client.post(url).json(body);
-    if let Some(key) = config.api_key.as_deref().filter(|key| !key.is_empty()) {
+    for (name, value) in &config.headers {
+        request = request.header(name.as_str(), value.as_str());
+    }
+    // Asked for on every request, so a token that expired since the last one is replaced.
+    let key = config
+        .api_key
+        .resolve()
+        .map_err(|error| Failure::error(ProviderError::ApiKey, format!("cannot get an API key: {error}")))?;
+    if let Some(key) = key {
         request = request.bearer_auth(key);
     }
     tokio::time::timeout(config.idle_timeout, request.send())
@@ -367,16 +486,11 @@ async fn send_request(
 }
 
 /// The failure of a response with an error status: the body's error code and the server's
-/// numeric Retry-After hint go with it. An invalid or HTTP-date hint is left to the local
-/// backoff, and a body that cannot be read only loses its excerpt; the status is authoritative.
+/// Retry-After hint go with it. A hint the client cannot read is left to the local backoff,
+/// and a body that cannot be read only loses its excerpt; the status is authoritative.
 async fn http_failure(response: reqwest::Response, config: &OpenAiConfig) -> Failure {
     let status = response.status().as_u16();
-    let retry_after_ms = response
-        .headers()
-        .get("retry-after")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .map(|seconds| seconds.saturating_mul(1000));
+    let retry_after_ms = retry_after_ms(response.headers(), SystemTime::now());
     let bytes = diagnostic_body(response, config).await;
     let code = serde_json::from_slice::<Value>(&bytes)
         .ok()
@@ -569,6 +683,75 @@ fn with_causes(error: &dyn std::error::Error) -> String {
     text
 }
 
+/// The wait a server asks for, in milliseconds (pi: `provider-retry.ts`): `retry-after-ms`
+/// in milliseconds, else `retry-after` in seconds, decimals allowed, or as an HTTP date (the
+/// IMF-fixdate of RFC 9110, `Sun, 06 Nov 1994 08:49:37 GMT`), which counts from `now`; a
+/// date that has passed is a wait of 0. Unreadable values are `None`.
+fn retry_after_ms(headers: &reqwest::header::HeaderMap, now: SystemTime) -> Option<u64> {
+    let text = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+    let whole = |value: f64| (value.is_finite() && value >= 0.0).then(|| value.round() as u64);
+    if let Some(value) = text("retry-after-ms") {
+        return value.parse::<f64>().ok().and_then(whole);
+    }
+    let value = text("retry-after")?;
+    if let Ok(seconds) = value.parse::<f64>() {
+        return whole(seconds * 1000.0);
+    }
+    let at = http_date_epoch_secs(value)?;
+    let now = now.duration_since(UNIX_EPOCH).ok()?.as_secs();
+    Some(at.saturating_sub(now).saturating_mul(1000))
+}
+
+/// Seconds since the Unix epoch of an IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`), the
+/// one date format servers must send (RFC 9110 §5.6.7); the two obsolete formats are not
+/// read.
+fn http_date_epoch_secs(text: &str) -> Option<u64> {
+    let mut parts = text.split_ascii_whitespace();
+    let weekday = parts.next()?;
+    let day: i64 = parts.next()?.parse().ok()?;
+    let month = parts.next()?;
+    let year: i64 = parts.next()?.parse().ok()?;
+    let time = parts.next()?;
+    let zone = parts.next()?;
+    if parts.next().is_some() || !weekday.ends_with(',') || zone != "GMT" {
+        return None;
+    }
+    let month = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ]
+    .iter()
+    .position(|name| *name == month)? as i64
+        + 1;
+    let mut clock = time.split(':').map(|field| field.parse::<i64>().ok());
+    let (hour, minute, second) = (clock.next()??, clock.next()??, clock.next()??);
+    if clock.next().is_some()
+        || !(1..=31).contains(&day)
+        || !(0..24).contains(&hour)
+        || !(0..60).contains(&minute)
+        || !(0..61).contains(&second)
+    {
+        return None;
+    }
+    // Days since 1970-01-01 of a proleptic Gregorian date (Howard Hinnant's days_from_civil).
+    let (y, m) = if month <= 2 {
+        (year - 1, month + 9)
+    } else {
+        (year, month - 3)
+    };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * m + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    u64::try_from(days * 86_400 + hour * 3_600 + minute * 60 + second).ok()
+}
+
 // ---------------------------------------------------------------------------
 // Request body
 // ---------------------------------------------------------------------------
@@ -604,6 +787,11 @@ pub fn build_body(request: &Request, config: &OpenAiConfig) -> Value {
     if let Some(max_tokens) = request.max_tokens {
         body["max_tokens"] = json!(max_tokens);
     }
+    if config.prompt_cache_key
+        && let Some(key) = &request.cache_key
+    {
+        body["prompt_cache_key"] = json!(key);
+    }
     // Checked when the provider is built: none replaces a field set above.
     for (field, value) in &config.extra_fields {
         body[field.as_str()] = value.clone();
@@ -629,6 +817,7 @@ pub fn replay_body(request: &Request, provider: &str, options: &Value) -> anyhow
         extra_fields: Map<String, Value>,
         fill_missing_reasoning: Option<bool>,
         reasoning_format: Option<String>,
+        prompt_cache_key: Option<bool>,
     }
     let options: Options = serde_json::from_value(options.clone())?;
     anyhow::ensure!(
@@ -646,7 +835,8 @@ pub fn replay_body(request: &Request, provider: &str, options: &Value) -> anyhow
         "inline" => SystemUpdates::Inline,
         value => anyhow::bail!("unknown system update mode {value:?}"),
     };
-    check_extra_fields(&options.extra_fields)?;
+    let prompt_cache_key = options.prompt_cache_key.unwrap_or(false);
+    check_extra_fields(&options.extra_fields, prompt_cache_key)?;
     let reasoning_format = match options.reasoning_format.as_deref() {
         None => ReasoningFormat::Effort,
         Some(name) => name.parse().map_err(anyhow::Error::msg)?,
@@ -659,6 +849,7 @@ pub fn replay_body(request: &Request, provider: &str, options: &Value) -> anyhow
             extra_fields: options.extra_fields,
             fill_missing_reasoning,
             reasoning_format,
+            prompt_cache_key,
             ..OpenAiConfig::default()
         },
     ))
@@ -832,6 +1023,10 @@ pub(crate) struct Accumulator {
     tool_slots: HashMap<u64, usize>,
     usage: Usage,
     finish_reason: Option<String>,
+    /// The first `id` a chunk carried.
+    response_id: Option<String>,
+    /// The first `model` a chunk named, when it is not the one requested.
+    response_model: Option<String>,
 }
 
 impl Accumulator {
@@ -844,11 +1039,27 @@ impl Accumulator {
             tool_slots: HashMap::new(),
             usage: Usage::default(),
             finish_reason: None,
+            response_id: None,
+            response_model: None,
         }
     }
 
     /// Take in one chunk, as the deltas it carries. Error chunks are the caller's to notice.
     pub(crate) fn apply(&mut self, chunk: &Value) -> Vec<Delta> {
+        // The response ID comes from the first chunk that carries one; the model is kept only
+        // when it differs from the one requested.
+        if self.response_id.is_none()
+            && let Some(id) = chunk.get("id").and_then(Value::as_str).filter(|id| !id.is_empty())
+        {
+            self.response_id = Some(id.to_string());
+        }
+        if self.response_model.is_none()
+            && let Some(model) = chunk.get("model").and_then(Value::as_str)
+            && !model.is_empty()
+            && model != self.model
+        {
+            self.response_model = Some(model.to_string());
+        }
         if let Some(usage) = chunk.get("usage").filter(|u| u.is_object()) {
             self.apply_usage(usage);
         }
@@ -958,6 +1169,17 @@ impl Accumulator {
             .and_then(Value::as_u64)
             .or_else(|| usage.get("prompt_cache_hit_tokens").and_then(Value::as_u64))
             .unwrap_or(0);
+        // Reported by a few servers only (pi: `cache_write_tokens`, `reasoning_tokens`).
+        self.usage.cache_write = usage
+            .get("prompt_tokens_details")
+            .and_then(|d| d.get("cache_write_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        self.usage.reasoning = usage
+            .get("completion_tokens_details")
+            .and_then(|d| d.get("reasoning_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
         let total = get("total_tokens");
         self.usage.total_tokens = if total > 0 {
             total
@@ -1046,6 +1268,8 @@ impl Accumulator {
             provider_error,
             timestamp: self.timestamp,
             duration_ms: None,
+            response_id: self.response_id.clone(),
+            response_model: self.response_model.clone(),
         }
     }
 }
@@ -1110,7 +1334,8 @@ mod tests {
                 input: 12,
                 output: 5,
                 cache_read: 4,
-                total_tokens: 17
+                total_tokens: 17,
+                ..Usage::default()
             }
         );
     }
@@ -1279,6 +1504,7 @@ mod tests {
             tools: vec![],
             max_tokens: Some(100),
             reasoning: None,
+            cache_key: None,
         };
         let body = build_body(&request, &p_config(SystemUpdates::default()));
         let roles: Vec<&str> = body["messages"]
@@ -1323,6 +1549,7 @@ mod tests {
             tools: vec![],
             max_tokens: None,
             reasoning: None,
+            cache_key: None,
         };
         let body = build_body(&request, &p_config(SystemUpdates::default()));
         assert_eq!(
@@ -1361,6 +1588,7 @@ mod tests {
             tools: vec![],
             max_tokens: None,
             reasoning: None,
+            cache_key: None,
         };
         let body = build_body(&request, &p_config(system_updates));
         body["messages"]
@@ -1506,7 +1734,7 @@ mod tests {
     #[test]
     fn debug_output_never_contains_the_api_key() {
         let config = OpenAiConfig {
-            api_key: Some("sk-debug-secret".into()),
+            api_key: ApiKey::fixed("sk-debug-secret"),
             ..OpenAiConfig::default()
         };
         let debug = format!("{config:?}");
@@ -1554,6 +1782,7 @@ mod tests {
             tools: vec![],
             max_tokens: None,
             reasoning: None,
+            cache_key: None,
         };
         let body = build_body(&request, &p_config(SystemUpdates::default()));
         body["messages"]
@@ -1596,6 +1825,7 @@ mod tests {
             tools: vec![],
             max_tokens: None,
             reasoning: None,
+            cache_key: None,
         }
     }
 
@@ -1653,6 +1883,7 @@ mod tests {
             }],
             max_tokens: Some(64),
             reasoning: None,
+            cache_key: None,
         }
     }
 
@@ -1662,7 +1893,7 @@ mod tests {
         for system_updates in [SystemUpdates::Collapse, SystemUpdates::Inline] {
             let live = OpenAiConfig {
                 base_url: "https://example.invalid/v1".into(),
-                api_key: Some("sk-not-recorded".into()),
+                api_key: ApiKey::fixed("sk-not-recorded"),
                 ..p_config(system_updates)
             };
             let provider = OpenAiCompatible::new(live.clone()).unwrap();
@@ -1695,7 +1926,7 @@ mod tests {
     fn request_options_hold_only_the_conversion_policy() {
         let provider = OpenAiCompatible::new(OpenAiConfig {
             base_url: "https://example.invalid/v1".into(),
-            api_key: Some("sk-not-recorded".into()),
+            api_key: ApiKey::fixed("sk-not-recorded"),
             ..p_config(SystemUpdates::Inline)
         })
         .unwrap();
@@ -1914,5 +2145,173 @@ mod tests {
         );
         assert!("other".parse::<ReasoningFormat>().is_err());
         assert_eq!(serde_json::to_value(Reasoning::Xhigh).unwrap(), "xhigh");
+    }
+
+    #[test]
+    fn usage_counts_cache_writes_and_reasoning_tokens() {
+        let mut acc = Accumulator::new("p", "m", 0);
+        acc.apply(&json!({"choices": [{"index": 0, "delta": {"content": "x"}, "finish_reason": "stop"}]}));
+        acc.apply(&json!({"choices": [], "usage": {
+            "prompt_tokens": 20, "completion_tokens": 7, "total_tokens": 27,
+            "prompt_tokens_details": {"cached_tokens": 4, "cache_write_tokens": 6},
+            "completion_tokens_details": {"reasoning_tokens": 3}
+        }}));
+        let usage = acc.finish().unwrap().usage;
+        assert_eq!((usage.cache_read, usage.cache_write, usage.reasoning), (4, 6, 3));
+        assert_eq!((usage.input, usage.output, usage.total_tokens), (20, 7, 27));
+    }
+
+    #[test]
+    fn the_response_id_and_a_differing_model_name_are_kept() {
+        let mut acc = Accumulator::new("p", "gpt-x", 0);
+        acc.apply(&json!({"id": "chatcmpl-1", "model": "gpt-x-2026-01-01", "choices": [{"index": 0, "delta": {"content": "a"}}]}));
+        acc.apply(&json!({"id": "chatcmpl-2", "model": "other", "choices": [{"index": 0, "delta": {"content": "b"}, "finish_reason": "stop"}]}));
+        let message = acc.finish().unwrap();
+        assert_eq!(
+            message.response_id.as_deref(),
+            Some("chatcmpl-1"),
+            "the first id is kept"
+        );
+        assert_eq!(message.response_model.as_deref(), Some("gpt-x-2026-01-01"));
+
+        let mut same = Accumulator::new("p", "gpt-x", 0);
+        same.apply(&json!({"id": "", "model": "gpt-x", "choices": [{"index": 0, "delta": {"content": "a"}, "finish_reason": "stop"}]}));
+        let message = same.finish().unwrap();
+        assert_eq!((message.response_id, message.response_model), (None, None));
+        let failed = Accumulator::new("p", "gpt-x", 0).failure(StopReason::Error, "boom", None);
+        assert_eq!(failed.response_id, None);
+    }
+
+    #[test]
+    fn retry_after_hints_are_read_as_milliseconds_seconds_or_a_date() {
+        use reqwest::header::{HeaderMap, HeaderValue};
+        let now = UNIX_EPOCH + Duration::from_secs(784_111_777);
+        let headers = |name: &str, value: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                reqwest::header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                HeaderValue::from_str(value).unwrap(),
+            );
+            headers
+        };
+        assert_eq!(retry_after_ms(&headers("retry-after-ms", "1500.4"), now), Some(1500));
+        assert_eq!(retry_after_ms(&headers("retry-after", "2.5"), now), Some(2500));
+        assert_eq!(retry_after_ms(&headers("retry-after", "7"), now), Some(7000));
+        assert_eq!(
+            retry_after_ms(&headers("retry-after", "Sun, 06 Nov 1994 08:49:47 GMT"), now),
+            Some(10_000)
+        );
+        assert_eq!(
+            retry_after_ms(&headers("retry-after", "Sun, 06 Nov 1994 08:49:27 GMT"), now),
+            Some(0),
+            "a date that passed is a wait of 0"
+        );
+        assert_eq!(retry_after_ms(&headers("retry-after", "soon"), now), None);
+        assert_eq!(retry_after_ms(&headers("retry-after", "-3"), now), None);
+        assert_eq!(retry_after_ms(&HeaderMap::new(), now), None);
+        // retry-after-ms wins over retry-after.
+        let mut both = headers("retry-after-ms", "250");
+        both.insert("retry-after", HeaderValue::from_static("9"));
+        assert_eq!(retry_after_ms(&both, now), Some(250));
+    }
+
+    #[test]
+    fn http_dates_parse_to_epoch_seconds() {
+        assert_eq!(http_date_epoch_secs("Sun, 06 Nov 1994 08:49:37 GMT"), Some(784_111_777));
+        assert_eq!(http_date_epoch_secs("Thu, 01 Jan 1970 00:00:00 GMT"), Some(0));
+        assert_eq!(
+            http_date_epoch_secs("Tue, 29 Feb 2028 23:59:60 GMT"),
+            Some(1_835_481_600)
+        );
+        for bad in [
+            "Sun, 06 Nov 1994 08:49:37 PST",
+            "Sunday, 06-Nov-94 08:49:37 GMT",
+            "Sun Nov  6 08:49:37 1994",
+            "Sun, 32 Nov 1994 08:49:37 GMT",
+            "Sun, 06 Foo 1994 08:49:37 GMT",
+            "Sun, 06 Nov 1994 24:00:00 GMT",
+            "",
+        ] {
+            assert_eq!(http_date_epoch_secs(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_cache_key_is_sent_only_when_enabled_and_replays() {
+        let request = Request {
+            cache_key: Some("session-1".into()),
+            ..replayable_request()
+        };
+        let off = build_body(&request, &OpenAiConfig::default());
+        assert!(off.get("prompt_cache_key").is_none());
+        let config = OpenAiConfig {
+            prompt_cache_key: true,
+            ..OpenAiConfig::default()
+        };
+        let on = build_body(&request, &config);
+        assert_eq!(on["prompt_cache_key"], "session-1");
+        let provider = OpenAiCompatible::new(OpenAiConfig {
+            base_url: "https://example.invalid/v1".into(),
+            ..config
+        })
+        .unwrap();
+        assert_eq!(provider.request_options()["promptCacheKey"], true);
+        assert_eq!(
+            replay_body(&request, provider.name(), &provider.request_options()).unwrap(),
+            on
+        );
+        // Without a key there is nothing to send, whatever the setting.
+        let keyless = build_body(
+            &replayable_request(),
+            &OpenAiConfig {
+                prompt_cache_key: true,
+                ..OpenAiConfig::default()
+            },
+        );
+        assert!(keyless.get("prompt_cache_key").is_none());
+    }
+
+    #[test]
+    fn headers_are_checked_when_the_provider_is_built() {
+        let build = |headers: Vec<(&str, &str)>| {
+            OpenAiCompatible::new(OpenAiConfig {
+                base_url: "https://example.invalid/v1".into(),
+                headers: headers
+                    .into_iter()
+                    .map(|(name, value)| (name.to_string(), value.to_string()))
+                    .collect(),
+                ..OpenAiConfig::default()
+            })
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+        };
+        assert_eq!(build(vec![("X-Route", "blue"), ("x-tenant", "a b")]), Ok(()));
+        assert!(
+            build(vec![("Authorization", "Bearer x")])
+                .unwrap_err()
+                .contains("Authorization")
+        );
+        assert!(
+            build(vec![("bad name", "x")])
+                .unwrap_err()
+                .contains("invalid request header name")
+        );
+        assert!(
+            build(vec![("x-a", "line\nbreak")])
+                .unwrap_err()
+                .contains("invalid value")
+        );
+        let mut fields = Map::new();
+        fields.insert("prompt_cache_key".into(), json!("mine"));
+        let error = OpenAiCompatible::new(OpenAiConfig {
+            prompt_cache_key: true,
+            extra_fields: fields,
+            ..OpenAiConfig::default()
+        })
+        .map(|_| ())
+        .unwrap_err();
+        assert!(error.to_string().contains("prompt_cache_key"), "{error}");
+        assert!(matches!(ApiKey::fixed(""), ApiKey::None));
+        assert!(matches!(ApiKey::from(Some("k".to_string())), ApiKey::Fixed(key) if key == "k"));
     }
 }

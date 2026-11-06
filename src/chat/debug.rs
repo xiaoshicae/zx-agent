@@ -110,9 +110,17 @@ impl DebugState {
                 };
                 (severity, text)
             }
+            CustomEntry { entry_id, custom_type } => (
+                Severity::Info,
+                format!(
+                    "Extension state recorded · type={custom_type} · entry={}",
+                    entry_id.as_deref().unwrap_or("none")
+                ),
+            ),
             MessageEnd {
                 message: Message::ToolResult(result),
                 entry_id,
+                ..
             } => (
                 if result.is_error {
                     Severity::Warn
@@ -130,6 +138,7 @@ impl DebugState {
             MessageEnd {
                 message: Message::User { kind, .. },
                 entry_id,
+                ..
             } => (
                 Severity::Info,
                 format!(
@@ -140,6 +149,7 @@ impl DebugState {
             MessageEnd {
                 message: Message::System(_),
                 entry_id,
+                ..
             } => (
                 Severity::Info,
                 format!(
@@ -429,6 +439,7 @@ mod tests {
                 AgentEvent::MessageEnd {
                     message: Message::Assistant(message),
                     entry_id: None,
+                    custom: None,
                 },
             ))
             .unwrap()

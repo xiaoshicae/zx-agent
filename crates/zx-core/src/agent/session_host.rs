@@ -2,9 +2,11 @@
 //! store; without a session host, `run_loop` keeps everything in its in-memory context.
 
 use async_trait::async_trait;
+use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::ai::{Message, Provider, Request, ToolCall, Usage};
+use crate::session::CustomMessage;
 
 /// Records what the loop does, before the loop acts on it. When the session cannot record, a
 /// method returns an error (`prepare_context`: [`Prepared::Unrecorded`]) and the loop stops at
@@ -13,6 +15,13 @@ use crate::ai::{Message, Provider, Request, ToolCall, Usage};
 pub(crate) trait SessionHost: Send + Sync {
     /// Record a finished message. Returns its entry ID.
     async fn append_message(&mut self, message: &Message) -> Result<String, String>;
+
+    /// Record a message from an extension. Returns its entry ID and the message as the
+    /// projection holds it, which is what the loop keeps in its context.
+    async fn append_custom_message(&mut self, message: &CustomMessage) -> Result<(String, Message), String>;
+
+    /// Record state of an extension. Returns its entry ID.
+    async fn append_custom_entry(&mut self, custom_type: &str, data: Value) -> Result<String, String>;
 
     /// Record an edit of the message at `index` in the current projection, before the loop
     /// applies it: `None` omits the message, `Some` replaces its text. Returns the edit's

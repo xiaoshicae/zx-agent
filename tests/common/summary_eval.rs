@@ -471,6 +471,8 @@ fn assistant(block: ContentBlock, stop_reason: StopReason) -> Message {
         provider_error: None,
         timestamp: now_ms(),
         duration_ms: None,
+        response_id: None,
+        response_model: None,
     })
 }
 

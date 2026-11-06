@@ -21,11 +21,11 @@ use answer::overlap;
 use host::{CompactionPause, RunHost, RunStop};
 
 use crate::agent::{
-    AgentEvent, Emit, EventSink, LoopConfig, LoopControl, LoopFailure, LoopOutcome, RunTrace, run_loop,
+    AgentEvent, Emit, EventSink, LoopConfig, LoopControl, LoopFailure, LoopOutcome, QueuedMessage, RunTrace, run_loop,
 };
 pub use crate::agent::{RunOutcome, RunReport};
 use crate::ai::retry::{RetryPolicy, is_context_overflow, is_retryable};
-use crate::ai::{Message, Provider, Reasoning};
+use crate::ai::{Provider, Reasoning};
 use crate::compaction::{self, Trigger};
 use crate::interaction::ApprovalCache;
 use crate::session::SessionStore;
@@ -98,6 +98,8 @@ impl Runner {
             Some(self.session.header().id.clone()),
             self.config.spec.cwd.clone(),
             child.clone(),
+            self.config.queues.clone(),
+            self.config.active_tools.clone(),
         );
         let to = Emit {
             sink: self.sink.as_ref(),
@@ -139,6 +141,11 @@ impl Runner {
         &self.session
     }
 
+    /// The session, for a branch switch between runs.
+    pub(crate) fn session_mut(&mut self) -> &mut SessionStore {
+        &mut self.session
+    }
+
     /// Run one prompt to completion. Never panics on provider or tool failures; the report
     /// says how the run ended.
     ///
@@ -155,7 +162,14 @@ impl Runner {
     /// }
     /// ```
     pub async fn run(&mut self, prompt: impl Into<String>, cancel: &CancellationToken) -> RunReport {
-        self.start(Start::Prompt(prompt.into()), cancel).await
+        self.run_message(QueuedMessage::User(prompt.into()), cancel).await
+    }
+
+    /// Run with any message as the input: the person's text, or a message from an
+    /// extension (pi: `sendMessage` with `triggerTurn` while idle). Otherwise like
+    /// [`Runner::run`].
+    pub async fn run_message(&mut self, message: QueuedMessage, cancel: &CancellationToken) -> RunReport {
+        self.start(Start::Message(message), cancel).await
     }
 
     /// Continue the conversation without new input: the model answers
@@ -183,6 +197,8 @@ impl Runner {
             Some(self.session.header().id.clone()),
             self.config.spec.cwd.clone(),
             run_cancel.clone(),
+            self.config.queues.clone(),
+            self.config.active_tools.clone(),
         );
         let start = AgentEvent::RunStart {
             model: self.config.spec.model.clone(),
@@ -212,7 +228,7 @@ impl Runner {
         let mut host = RunHost::new(session, to, config, compaction, pause);
         let begun = match (recovered, begin) {
             (Err(error), _) => Err(error),
-            (Ok(()), Start::Prompt(prompt)) => Ok(vec![Message::user(prompt)]),
+            (Ok(()), Start::Message(message)) => Ok(vec![message]),
             (Ok(()), Start::Continue) => host.continuation(&config.queues).await,
         };
         let mut accounting = RunAccounting::default();
@@ -254,7 +270,7 @@ impl Runner {
                         None => break RunStop::error("loop failed without a diagnostic"),
                     };
                     let error = failed.error_message.clone();
-                    if is_context_overflow(&failed) && compaction.trigger_bytes.is_some() {
+                    if is_context_overflow(&failed) && compaction.automatic() {
                         // A context the model rejects as too long fails again however often it
                         // is sent: compact once and continue. Not a retry, so it has its own
                         // limit: once per run, until an answer succeeds again (more than one
@@ -309,6 +325,12 @@ impl Runner {
                 }
             }
         };
+        // State that hooks asked to record during the last events is kept before the run is
+        // reported, so a host reading the session afterwards finds it.
+        let stop = match host.record_pending_entries(&config.queues).await {
+            Ok(()) => stop,
+            Err(error) => RunStop::error(error),
+        };
         let (outcome, error) = conclude(stop, limits, &accounting, timer.timed_out());
         let final_text = final_answer(&host.session.messages_since(run_start));
         let report = RunReport {
@@ -330,7 +352,8 @@ impl Runner {
 
 /// What a run starts from.
 enum Start {
-    Prompt(String),
+    /// The person's text, or a message from an extension.
+    Message(QueuedMessage),
     /// The session as it is; see [`Runner::continue_run`].
     Continue,
 }
@@ -412,8 +435,8 @@ mod tests {
 
     use super::*;
     use crate::agent::{LoopSpec, NullSink};
-    use crate::ai::SystemPrompt;
     use crate::ai::faux::{FauxProvider, FauxStep};
+    use crate::ai::{Message, SystemPrompt};
     use crate::session::{FailingWriter, SessionHeader};
 
     #[test]

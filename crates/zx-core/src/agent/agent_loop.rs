@@ -14,18 +14,20 @@ use futures::future::join_all;
 use futures::{FutureExt, StreamExt};
 use tokio_util::sync::CancellationToken;
 
+use super::command::SlashCommand;
+use super::events::CustomMessageInfo;
 use super::events::{AgentEvent, ApprovalResult, Emit, EventSink, LoopOutcome, RequestKind, RunTrace, ToolVerdict};
 use super::hooks::{
     ContextEdit, HookCall, HookChain, HookError, HookFailure, HookPhase, TurnDecision, TurnDisposition, TurnSummary,
     report_failure,
 };
 use super::policy::Decision;
-use super::queue::{MessageQueues, Queue};
+use super::queue::{MessageQueues, Queue, QueueMode, QueuedMessage};
 use super::session_host::{ContextPreparation, Prepared, SessionHost};
-use super::tool::{Effects, ExecutionMode, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput};
+use super::tool::{ActiveTools, Effects, ExecutionMode, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput};
 use crate::ai::{
-    AssistantMessage, Message, Provider, Reasoning, Request, StopReason, StreamEvent, SystemMessage, SystemPrompt,
-    ToolCall, ToolResultMessage, Usage, UserMessageKind, duration_ms, now_ms,
+    AssistantMessage, Message, ModelMeta, Provider, Reasoning, Request, StopReason, StreamEvent, SystemMessage,
+    SystemPrompt, ToolCall, ToolResultMessage, Usage, UserMessageKind, duration_ms, now_ms,
 };
 use crate::interaction::{Approval, ApprovalCache, ApprovalRequest, DEFAULT_APPROVAL_TIMEOUT, Interaction, NoHuman};
 
@@ -85,14 +87,25 @@ impl LoopSpec {
     }
 }
 
-/// Host extensions and the static specification. Queues have shared ownership because
-/// frontends can submit input while a run borrows this configuration.
+/// Host extensions and the static specification. Queues and the active tool set have shared
+/// ownership because frontends and hooks change them while a run borrows this configuration.
 pub struct LoopConfig {
     pub spec: LoopSpec,
     pub hooks: HookChain,
     pub interaction: Arc<dyn Interaction>,
     pub interaction_timeout: Duration,
     pub queues: Arc<MessageQueues>,
+    /// Which of `spec.tools` the requests offer; every one by default.
+    pub active_tools: Arc<ActiveTools>,
+    /// Slash commands extensions registered, for a frontend to run.
+    pub commands: Vec<Arc<dyn SlashCommand>>,
+    /// What is known about models, by ID: the prices give each response a cost, the context
+    /// window can set the token trigger of automatic summaries. Empty by default: costs and
+    /// windows stay unknown.
+    pub models: HashMap<String, ModelMeta>,
+    /// Sent with every task request as its cache key ([`Request::cache_key`]), such as the
+    /// session ID; `None` sends none.
+    pub cache_key: Option<String>,
 }
 
 impl LoopConfig {
@@ -103,6 +116,10 @@ impl LoopConfig {
             interaction: Arc::new(NoHuman),
             interaction_timeout: DEFAULT_APPROVAL_TIMEOUT,
             queues: Arc::new(MessageQueues::default()),
+            active_tools: Arc::new(ActiveTools::default()),
+            commands: Vec::new(),
+            models: HashMap::new(),
+            cache_key: None,
         }
     }
 }
@@ -187,7 +204,7 @@ pub struct LoopResult {
 /// A request budget of `None` is unlimited; `Some(0)` makes no model request.
 pub async fn run_loop(
     context: &mut Vec<Message>,
-    prompts: Vec<Message>,
+    prompts: Vec<QueuedMessage>,
     config: &LoopConfig,
     control: &mut LoopControl<'_>,
 ) -> LoopResult {
@@ -204,7 +221,13 @@ pub async fn run_loop(
     let trace = if let Some(trace) = control.trace {
         trace
     } else {
-        own_trace = RunTrace::new(None, config.spec.cwd.clone(), control.cancel.clone());
+        own_trace = RunTrace::new(
+            None,
+            config.spec.cwd.clone(),
+            control.cancel.clone(),
+            config.queues.clone(),
+            config.active_tools.clone(),
+        );
         &own_trace
     };
 
@@ -302,7 +325,7 @@ impl<'a> Engine<'a, '_, '_> {
     async fn initialize(
         &mut self,
         context: &mut Vec<Message>,
-        prompts: Vec<Message>,
+        prompts: Vec<QueuedMessage>,
         result: &mut LoopResult,
     ) -> Result<(), Halt> {
         let config = self.config;
@@ -319,8 +342,11 @@ impl<'a> Engine<'a, '_, '_> {
             )
             .await?;
         }
+        // State an extension recorded before the run, such as from a command, precedes the
+        // input it may refer to.
+        self.record_pending_entries().await?;
         for message in prompts {
-            self.input(context, message, None).await?;
+            self.queued_input(context, message, None).await?;
         }
         Ok(())
     }
@@ -328,7 +354,7 @@ impl<'a> Engine<'a, '_, '_> {
     async fn run(
         &mut self,
         context: &mut Vec<Message>,
-        prompts: Vec<Message>,
+        prompts: Vec<QueuedMessage>,
         result: &mut LoopResult,
     ) -> Result<LoopOutcome, Halt> {
         self.initialize(context, prompts, result).await?;
@@ -518,6 +544,9 @@ impl<'a> Engine<'a, '_, '_> {
             return Ok(TurnPreparation::Stop(outcome));
         }
         self.start_turn(result).await;
+
+        // State an extension asked to record is written before the input it may refer to.
+        self.record_pending_entries().await?;
         // Queued input is taken one message at a time, so a rejected message or a stopped
         // run leaves the rest of the queue for the next run.
         self.drain_queue(context, Queue::Steering).await?;

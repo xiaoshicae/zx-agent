@@ -5,6 +5,7 @@
     reason = "each test binary uses a different subset of these helpers; `expect` would fail in a binary that uses them all"
 )]
 
+pub mod evals;
 pub mod fake_feishu;
 pub mod fake_mcp;
 pub mod fake_slack;
@@ -21,6 +22,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
+use zx_agent::agent::QueuedMessage;
 use zx_agent::agent::{
     AgentEvent, Event, EventSink, ExecutionMode, HookContext, LoopConfig, LoopControl, LoopResult, LoopSpec,
     MessageQueues, Tool, ToolContext, ToolOutput, ToolPolicy, run_loop,
@@ -213,7 +215,7 @@ pub fn summarize(messages: &[Message]) -> Vec<String> {
 /// defaults most loop tests need. Returns the result and the events.
 pub async fn run_prompt(config: &LoopConfig, context: &mut Vec<Message>, prompt: &str) -> (LoopResult, Collect) {
     let sink = Collect::default();
-    let prompts = vec![Message::user(prompt)];
+    let prompts = vec![QueuedMessage::User(prompt.to_string())];
     let mut approvals = ApprovalCache::default();
     let cancel = CancellationToken::new();
     let mut control = LoopControl::new(Some(10), &mut approvals, &cancel, &sink);
@@ -232,6 +234,7 @@ pub fn fast_retry(max_retries: u32) -> RetryPolicy {
         max_retries,
         base_delay: Duration::from_millis(10),
         max_delay: Duration::from_millis(50),
+        ..RetryPolicy::default()
     }
 }
 

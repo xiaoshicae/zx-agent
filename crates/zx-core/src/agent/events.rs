@@ -2,6 +2,7 @@
 //! sink that receives them.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Serialize;
@@ -9,7 +10,9 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use super::hooks::HookContext;
+use super::queue::MessageQueues;
 use super::report::RunReport;
+use super::tool::ActiveTools;
 use crate::ai::{Delta, Message, Usage, now_ms};
 
 /// Version of the event JSON, envelope and event types together. Raised on incompatible
@@ -46,10 +49,17 @@ pub(crate) struct RunTrace {
 }
 
 impl RunTrace {
-    /// A new run with a fresh ID, cancelled by `cancel`.
-    pub(crate) fn new(session_id: Option<String>, cwd: PathBuf, cancel: CancellationToken) -> Self {
+    /// A new run with a fresh ID, cancelled by `cancel`, whose hooks reach the loop's queues
+    /// and tool set.
+    pub(crate) fn new(
+        session_id: Option<String>,
+        cwd: PathBuf,
+        cancel: CancellationToken,
+        queues: Arc<MessageQueues>,
+        active_tools: Arc<ActiveTools>,
+    ) -> Self {
         Self {
-            context: HookContext::new(session_id, cwd, cancel),
+            context: HookContext::new(session_id, cwd, cancel).with_shared(queues, active_tools),
             seq: AtomicU64::new(0),
         }
     }
@@ -181,6 +191,10 @@ impl Interruption {
 /// request budget; those of an overflow recovery come between two attempts.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "a message_end carries the whole message; events are built once and handed on, and boxing the message would put a Box in every match on it"
+)]
 pub enum AgentEvent {
     /// The first event of a run.
     RunStart {
@@ -223,6 +237,17 @@ pub enum AgentEvent {
         /// The message's session entry; absent without a session.
         #[serde(skip_serializing_if = "Option::is_none")]
         entry_id: Option<String>,
+        /// Present when the message came from an extension: what its `custom_message`
+        /// record holds besides the content the model sees.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        custom: Option<CustomMessageInfo>,
+    },
+    /// An extension recorded state in the session (pi: `entry_appended` for a `custom`
+    /// entry). Without a session the entry is not kept, and `entry_id` is absent.
+    CustomEntry {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        entry_id: Option<String>,
+        custom_type: String,
     },
     /// Processing of a tool call begins: validation, policy and approval come before it
     /// runs, so `duration_ms` at the end covers only the execution.
@@ -363,8 +388,20 @@ impl AgentEvent {
             Self::CompactionEnd { .. } => "compaction_end",
             Self::CompactionFailed { .. } => "compaction_failed",
             Self::ToolCallRecovered { .. } => "tool_call_recovered",
+            Self::CustomEntry { .. } => "custom_entry",
         }
     }
+}
+
+/// What a `custom_message` record holds besides the content the model sees; see
+/// [`crate::session::CustomMessage`].
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomMessageInfo {
+    pub custom_type: String,
+    pub display: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
 }
 
 /// Receives events. Called from the running loop, possibly from concurrent tool futures,
@@ -431,6 +468,11 @@ mod tests {
             AgentEvent::MessageEnd {
                 message: Message::user("x"),
                 entry_id: Some("e".into()),
+                custom: None,
+            },
+            AgentEvent::CustomEntry {
+                entry_id: None,
+                custom_type: "state".into(),
             },
             AgentEvent::ToolExecutionStart {
                 tool_call_id: "c".into(),
@@ -545,9 +587,19 @@ mod tests {
         );
     }
 
+    fn trace(session_id: Option<&str>) -> RunTrace {
+        RunTrace::new(
+            session_id.map(str::to_string),
+            PathBuf::from("."),
+            CancellationToken::new(),
+            Arc::default(),
+            Arc::default(),
+        )
+    }
+
     #[test]
     fn the_envelope_shares_one_object_with_the_event() {
-        let trace = RunTrace::new(Some("session".into()), PathBuf::from("."), CancellationToken::new());
+        let trace = trace(Some("session"));
         let first = trace.stamp(AgentEvent::AgentStart { attempt: 1 });
         let second = trace.stamp(AgentEvent::TurnStart { turn: 1 });
 
@@ -567,8 +619,8 @@ mod tests {
 
     #[test]
     fn each_run_has_its_own_id_and_numbering() {
-        let first = RunTrace::new(None, PathBuf::from("."), CancellationToken::new());
-        let second = RunTrace::new(None, PathBuf::from("."), CancellationToken::new());
+        let first = trace(None);
+        let second = trace(None);
         first.stamp(AgentEvent::AgentStart { attempt: 1 });
 
         let event = second.stamp(AgentEvent::AgentStart { attempt: 1 });

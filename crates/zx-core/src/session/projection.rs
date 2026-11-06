@@ -80,14 +80,26 @@ impl SessionStore {
         }
         path.iter()
             .filter_map(|entry| {
-                let Entry::Message(entry) = entry else { return None };
-                let message = match edits.get(entry.id.as_str()) {
-                    None => entry.message.clone(),
+                let (id, message) = match entry {
+                    Entry::Message(entry) => (&entry.id, Cow::Borrowed(&entry.message)),
+                    Entry::CustomMessage(entry) => (&entry.id, Cow::Owned(entry.projected())),
+                    Entry::ContextEdit(_)
+                    | Entry::FormatUpgrade(_)
+                    | Entry::CompactionStarted(_)
+                    | Entry::Compaction(_)
+                    | Entry::CompactionFailed(_)
+                    | Entry::RequestConfig(_)
+                    | Entry::RequestStarted(_)
+                    | Entry::ToolCallStarted(_)
+                    | Entry::Custom(_) => return None,
+                };
+                let message = match edits.get(id.as_str()) {
+                    None => message.into_owned(),
                     Some(None) => return None,
-                    Some(Some(text)) => entry.message.with_replaced_text(text),
+                    Some(Some(text)) => message.with_replaced_text(text),
                 };
                 Some(ProjectedMessage {
-                    entry_id: entry.id.clone(),
+                    entry_id: id.clone(),
                     message,
                 })
             })

@@ -5,23 +5,27 @@
 //!
 //! A [`Server`] is an [`Extension`]: register it with [`crate::extensions::register`].
 
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, ClientCapabilities, ClientConfig, ContentBlock, Implementation,
-    ProtocolVersion, ResourceContents,
+    CallToolRequest, CallToolRequestParams, CallToolResult, CancelledNotificationParam, ClientCapabilities,
+    ClientConfig, ClientRequest, ContentBlock, Implementation, ProgressNotificationParam, ProgressToken,
+    ProtocolVersion, ResourceContents, ServerResult,
 };
-use rmcp::service::RunningService;
+use rmcp::service::{NotificationContext, PeerRequestOptions, RunningService, ServiceError};
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::{ClientHandler, ClientLifecycleMode, RoleClient, serve_client_with_lifecycle};
 use serde_json::Value;
+use tokio::sync::mpsc;
 
 use crate::agent::{Tool, ToolContext, ToolOutput};
 use crate::ai::ToolDef;
+use crate::ai::sync::lock;
 use crate::extensions::Extension;
 use crate::text::prefix_within;
 use crate::tools::truncate::{MAX_BYTES, MAX_LINES, truncate_head};
@@ -51,8 +55,12 @@ pub struct ServerConfig {
     pub tools: Vec<String>,
     /// Bound for connecting and listing the tools.
     pub connect_timeout: Duration,
-    /// Bound for each tool call.
+    /// Longest a call may go without an answer or a progress notification: each
+    /// notification starts it over (pi: the request timeout re-armed on progress).
     pub call_timeout: Duration,
+    /// Bound for a whole call, however much progress the server reports; `None` leaves only
+    /// `call_timeout`, the run's own timeout and cancellation.
+    pub max_call_timeout: Option<Duration>,
 }
 
 impl ServerConfig {
@@ -64,6 +72,7 @@ impl ServerConfig {
             tools,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             call_timeout: DEFAULT_CALL_TIMEOUT,
+            max_call_timeout: None,
         }
     }
 }
@@ -148,6 +157,7 @@ impl Server {
                 server: server.to_string(),
                 client: Arc::clone(&client),
                 timeout: config.call_timeout,
+                max_timeout: config.max_call_timeout,
             }));
             names.push((remote.clone(), name));
         }
@@ -263,9 +273,15 @@ fn bounded(text: &str, max: usize) -> String {
     format!("{} [description truncated]", prefix_within(text, max))
 }
 
-/// Identifies zx-agent and declares no optional capabilities: only tools are used.
+/// Progress updates a call can hold before the server's notifications are dropped: a call
+/// reads them as they come, and a burst beyond this only loses updates.
+const PROGRESS_UPDATES: usize = 16;
+
+/// Identifies zx-agent and declares no optional capabilities: only tools are used. Progress
+/// notifications are handed to the call they belong to, by the token rmcp gave its request.
 struct Handler {
     info: ClientConfig,
+    progress: Mutex<HashMap<ProgressToken, mpsc::Sender<ProgressNotificationParam>>>,
 }
 
 impl Handler {
@@ -275,6 +291,18 @@ impl Handler {
                 ClientCapabilities::default(),
                 Implementation::new("zx-agent", env!("CARGO_PKG_VERSION")),
             ),
+            progress: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The progress notifications carrying `token`, until the updates are dropped.
+    fn subscribe(&self, token: ProgressToken) -> ProgressUpdates<'_> {
+        let (sender, receiver) = mpsc::channel(PROGRESS_UPDATES);
+        lock(&self.progress).insert(token.clone(), sender);
+        ProgressUpdates {
+            handler: self,
+            token,
+            receiver,
         }
     }
 }
@@ -282,6 +310,33 @@ impl Handler {
 impl ClientHandler for Handler {
     fn get_info(&self) -> ClientConfig {
         self.info.clone()
+    }
+
+    fn on_progress(
+        &self,
+        params: ProgressNotificationParam,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl Future<Output = ()> + Send + '_ {
+        let sender = lock(&self.progress).get(&params.progress_token).cloned();
+        async move {
+            if let Some(sender) = sender {
+                // A notification for a call that ended, or one too many, is dropped.
+                sender.send(params).await.ok();
+            }
+        }
+    }
+}
+
+/// The progress of one call; dropping it stops the handler from keeping its notifications.
+struct ProgressUpdates<'a> {
+    handler: &'a Handler,
+    token: ProgressToken,
+    receiver: mpsc::Receiver<ProgressNotificationParam>,
+}
+
+impl Drop for ProgressUpdates<'_> {
+    fn drop(&mut self) {
+        lock(&self.handler.progress).remove(&self.token);
     }
 }
 
@@ -292,7 +347,24 @@ struct McpTool {
     remote: String,
     server: String,
     client: Arc<Client>,
+    /// Re-armed by every progress notification.
     timeout: Duration,
+    max_timeout: Option<Duration>,
+}
+
+impl McpTool {
+    fn failed(&self, error: &dyn std::fmt::Display) -> String {
+        format!("MCP server {}: {} failed: {error}", self.server, self.remote)
+    }
+}
+
+/// The line a progress notification contributes (pi: `message`, or `Progress <n>/<total>`).
+fn progress_text(update: &ProgressNotificationParam) -> String {
+    match (&update.message, update.total) {
+        (Some(message), _) if !message.is_empty() => message.clone(),
+        (_, Some(total)) => format!("progress {}/{total}", update.progress),
+        (_, None) => format!("progress {}", update.progress),
+    }
 }
 
 #[async_trait]
@@ -316,32 +388,77 @@ impl Tool for McpTool {
         }
     }
 
-    /// Stops waiting on `ctx.cancel` or after the timeout. Dropping the call makes rmcp end
-    /// the request: it closes the stream and sends `notifications/cancelled`.
+    /// Progress notifications of the call reach `ctx` as progress updates and re-arm the
+    /// timeout. Stops waiting on `ctx.cancel`, after `timeout` without an answer or progress,
+    /// or after `max_timeout` in all. Each of these ends the request on the server's side
+    /// with `notifications/cancelled`, which also closes the request's stream.
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
         let Value::Object(arguments) = args else {
             return Err("the arguments must be a JSON object".to_string());
         };
-        let call = self
-            .client
-            .call_tool(CallToolRequestParams::new(self.remote.clone()).with_arguments(arguments));
-        let answered = tokio::select! {
-            answered = tokio::time::timeout(self.timeout, call) => answered,
-            () = ctx.cancel.cancelled() => {
-                return Err(format!("MCP server {}: the call to {} was cancelled", self.server, self.remote));
+        let request = ClientRequest::CallToolRequest(CallToolRequest::new(
+            CallToolRequestParams::new(self.remote.clone()).with_arguments(arguments),
+        ));
+        let mut options = PeerRequestOptions::with_timeout(self.timeout).reset_timeout_on_progress();
+        if let Some(max) = self.max_timeout {
+            options = options.with_max_total_timeout(max);
+        }
+        let peer = self.client.peer();
+        let handle = peer
+            .send_cancellable_request(request, options)
+            .await
+            .map_err(|error| self.failed(&error))?;
+        let request_id = handle.id.clone();
+        // rmcp gives every request a progress token; the server's notifications come back
+        // with it, and the dispatcher hands them to this subscription.
+        let mut updates = self.client.service().subscribe(handle.progress_token.clone());
+        let answered = handle.await_response();
+        tokio::pin!(answered);
+        let answer = loop {
+            tokio::select! {
+                answer = &mut answered => break answer,
+                Some(update) = updates.receiver.recv() => {
+                    // A full progress queue only loses this update.
+                    ctx.report_progress(progress_text(&update));
+                }
+                () = ctx.cancel.cancelled() => {
+                    // The notification is what makes the transport close the request's
+                    // stream; a notification that cannot be sent leaves nothing more to do.
+                    let _ = peer
+                        .notify_cancelled(CancelledNotificationParam::new(
+                            Some(request_id),
+                            Some("cancelled by the agent".to_string()),
+                        ))
+                        .await;
+                    return Err(format!("MCP server {}: the call to {} was cancelled", self.server, self.remote));
+                }
             }
         };
-        let result = match answered {
-            Ok(Ok(result)) => result,
-            Ok(Err(error)) => return Err(format!("MCP server {}: {} failed: {error}", self.server, self.remote)),
-            Err(_) => {
+        let result = match answer {
+            Ok(ServerResult::CallToolResult(result)) => result,
+            Ok(_) => {
+                return Err(format!(
+                    "MCP server {}: {} answered with a result of another kind",
+                    self.server, self.remote
+                ));
+            }
+            Err(ServiceError::Timeout { timeout }) if self.max_timeout == Some(timeout) => {
+                return Err(format!(
+                    "MCP server {}: {} did not finish within {} s, whatever its progress",
+                    self.server,
+                    self.remote,
+                    timeout.as_secs()
+                ));
+            }
+            Err(ServiceError::Timeout { timeout }) => {
                 return Err(format!(
                     "MCP server {}: {} did not answer within {} s",
                     self.server,
                     self.remote,
-                    self.timeout.as_secs()
+                    timeout.as_secs()
                 ));
             }
+            Err(error) => return Err(self.failed(&error)),
         };
         let text = render(&result);
         let kept = truncate_head(&text, MAX_LINES, MAX_BYTES);
@@ -425,5 +542,23 @@ mod tests {
         assert_eq!(bounded("short", 10), "short");
         let cut = bounded("ab中cd", 3);
         assert_eq!(cut, "ab [description truncated]");
+    }
+
+    #[test]
+    fn progress_lines_prefer_the_servers_message() {
+        let update = |message: Option<&str>, progress: f64, total: Option<f64>| {
+            let token = ProgressToken(rmcp::model::NumberOrString::Number(1));
+            let mut update = ProgressNotificationParam::new(token, progress);
+            if let Some(total) = total {
+                update = update.with_total(total);
+            }
+            if let Some(message) = message {
+                update = update.with_message(message);
+            }
+            update
+        };
+        assert_eq!(progress_text(&update(Some("step 1"), 1.0, Some(3.0))), "step 1");
+        assert_eq!(progress_text(&update(Some(""), 2.0, Some(3.0))), "progress 2/3");
+        assert_eq!(progress_text(&update(None, 2.5, None)), "progress 2.5");
     }
 }

@@ -1886,3 +1886,182 @@ async fn a_hook_failure_is_reported_with_its_reason() {
         stderr(&output)
     );
 }
+
+#[tokio::test]
+async fn the_queue_mode_is_set_at_startup_and_changed_with_a_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![]).await;
+    let output = run(
+        &server,
+        dir.path(),
+        &["--tools", "", "--no-session", "--queue-mode", "one-at-a-time"],
+        "/queue\n/queue all\n/queue sometimes\n/quit\n",
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let err = stderr(&output);
+    assert!(
+        err.contains("[chat] queue: steering=one-at-a-time follow-up=one-at-a-time"),
+        "{err}"
+    );
+    assert!(err.contains("[chat] queue: steering=all follow-up=all"), "{err}");
+    assert!(
+        err.contains("[chat] unknown queue mode \"sometimes\"; use all or one-at-a-time"),
+        "{err}"
+    );
+
+    let rejected = run(
+        &server,
+        dir.path(),
+        &["--no-session", "--queue-mode", "some"],
+        "/quit\n",
+    )
+    .await;
+    assert_eq!(rejected.status.code(), Some(2), "{}", stderr(&rejected));
+}
+
+#[tokio::test]
+async fn a_profile_prices_the_model_and_the_cost_shows_in_turn_and_status_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("profile.toml"),
+        "extends = \"assistant\"\n\n[[models]]\nid = \"mock-model\"\ncost = { input = 1000000.0, output = 2000000.0 }\n",
+    )
+    .unwrap();
+    let server = MockServer::start(vec![Reply::text("answer")]).await;
+    let output = run(
+        &server,
+        dir.path(),
+        &["--profile", "profile.toml", "--tools", "", "--no-session"],
+        "hi\n/status\n/quit\n",
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let err = stderr(&output);
+    // The fake server reports 10 input and 2 output tokens: $10 + $4.
+    assert!(err.contains("· 10 in · 2 out · $14.0000 ·"), "{err}");
+    assert!(err.contains("· 10 in · 2 out · 0 cached · $14.0000"), "{err}");
+
+    std::fs::write(
+        dir.path().join("bad.toml"),
+        "extends = \"assistant\"\n\n[[models]]\nid = \"mock-model\"\ncost = { input = -1.0, output = 0.0 }\n",
+    )
+    .unwrap();
+    let refused = run(
+        &server,
+        dir.path(),
+        &["--profile", "bad.toml", "--no-session"],
+        "/quit\n",
+    )
+    .await;
+    assert_eq!(refused.status.code(), Some(2), "{}", stderr(&refused));
+    assert!(
+        stderr(&refused).contains("prices must be zero or more"),
+        "{}",
+        stderr(&refused)
+    );
+}
+
+#[tokio::test]
+async fn request_headers_and_the_prompt_cache_key_reach_the_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::text("answer")]).await;
+    let output = run(
+        &server,
+        dir.path(),
+        &[
+            "--tools",
+            "",
+            "--session",
+            "s.jsonl",
+            "--header",
+            "X-Route: blue",
+            "--header",
+            "x-tenant:a",
+            "--prompt-cache-key",
+        ],
+        "hi\n/quit\n",
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let request = &server.requests()[0];
+    assert!(request.headers.contains("x-route: blue"), "{}", request.headers);
+    assert!(request.headers.contains("x-tenant: a"), "{}", request.headers);
+    let session_id = SessionStore::open(&dir.path().join("s.jsonl"))
+        .unwrap()
+        .header()
+        .id
+        .clone();
+    assert_eq!(request.body["prompt_cache_key"], session_id);
+
+    let refused = run(
+        &server,
+        dir.path(),
+        &["--no-session", "--header", "Authorization: Bearer x"],
+        "/quit\n",
+    )
+    .await;
+    assert_eq!(refused.status.code(), Some(2), "{}", stderr(&refused));
+    assert!(stderr(&refused).contains("Authorization"), "{}", stderr(&refused));
+    let malformed = run(
+        &server,
+        dir.path(),
+        &["--no-session", "--header", "no-colon"],
+        "/quit\n",
+    )
+    .await;
+    assert_eq!(malformed.status.code(), Some(2), "{}", stderr(&malformed));
+}
+
+#[tokio::test]
+async fn a_known_context_window_adds_a_token_trigger_to_automatic_summaries() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = seed_context(dir.path(), 120 * 1024).await;
+    let server = MockServer::start(vec![Reply::text(&summary_json(&id)), Reply::text("answer")]).await;
+    // Some 120 KiB of context: about 30000 tokens by the estimate, below the 256 KiB byte
+    // budget but above the 23616 tokens a 40000-token window leaves under the reserve.
+    let output = run(
+        &server,
+        dir.path(),
+        &[
+            "--tools",
+            "",
+            "--session",
+            "chat.jsonl",
+            "--output",
+            "jsonl",
+            "--context-window",
+            "40000",
+        ],
+        "continue\n/quit\n",
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let events: Vec<Value> = stdout(&output)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(
+        events.iter().any(|event| event["type"] == "compaction_start"),
+        "{events:?}"
+    );
+    assert_eq!(server.requests().len(), 2);
+
+    // A window far above the context, a window too small to leave room for the recent
+    // messages, and summaries switched off: no summary.
+    for args in [
+        vec!["--context-window", "1000000"],
+        vec!["--context-window", "17000"],
+        vec!["--context-window", "40000", "--no-auto-compact"],
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        seed_context(dir.path(), 120 * 1024).await;
+        let server = MockServer::start(vec![Reply::text("answer")]).await;
+        let mut all = vec!["--tools", "", "--session", "chat.jsonl", "--output", "jsonl"];
+        all.extend(args.iter());
+        let output = run(&server, dir.path(), &all, "continue\n/quit\n").await;
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        assert!(!stdout(&output).contains("compaction_start"), "{args:?}");
+        assert_eq!(server.requests().len(), 1, "{args:?}");
+    }
+}

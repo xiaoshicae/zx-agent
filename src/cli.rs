@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use zx_agent::AgentSession;
-use zx_agent::agent::{Decision, EventSink, HookOptions, Hooks, LoopConfig, LoopSpec, Tool};
+use zx_agent::agent::{Decision, EventSink, HookOptions, Hooks, LoopConfig, LoopSpec, QueueMode, Tool};
 use zx_agent::ai::Reasoning;
 use zx_agent::ai::openai::{
     DEFAULT_MAX_RESPONSE_BYTES, OpenAiCompatible, OpenAiConfig, ReasoningFormat, SystemUpdates,
@@ -20,7 +20,7 @@ use zx_agent::continuation::ContinueOnLength;
 use zx_agent::executor::{ContainerConfig, ContainerExecutor, Executor, LocalExecutor, container_environment_section};
 use zx_agent::extensions::{self, Extension};
 use zx_agent::mcp::{Server, ServerConfig};
-use zx_agent::otel::{self, Telemetry};
+use zx_agent::otel::{self, Telemetry, TraceParent};
 use zx_agent::output_store::{self, OutputStore, ReadOutputTool, SpillOutputs};
 use zx_agent::policy::{AutoApprove, CommandPolicy, PolicyHook, Rule, RuleMatcher, RulePolicy};
 use zx_agent::profile::skills::{ReadSkillTool, TOOL_NAME};
@@ -173,6 +173,16 @@ pub(crate) struct ChatArgs {
     /// directory; the original is not changed.
     #[arg(long, value_name = "ID|PATH", conflicts_with_all = ["session", "no_session", "resume"])]
     pub(crate) fork: Option<String>,
+
+    /// How input typed while a task runs is taken: `all` (default) sends every waiting
+    /// message before the next model request; `one-at-a-time` sends the oldest only, so
+    /// each gets an answer of its own. /queue changes it while chatting.
+    #[arg(long, value_name = "MODE", value_parser = parse_queue_mode)]
+    pub(crate) queue_mode: Option<QueueMode>,
+}
+
+fn parse_queue_mode(text: &str) -> Result<QueueMode, String> {
+    text.parse()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -236,6 +246,12 @@ pub(crate) struct BaseArgs {
     /// accepted as an argument, so it does not appear in process listings.
     #[arg(long, default_value = "OPENAI_API_KEY")]
     pub(crate) api_key_env: String,
+
+    /// Tokens the model's context holds, for the profile's [[models]] entry of --model or in
+    /// place of one. With automatic summaries on, a summary also runs when the estimated
+    /// context reaches the window minus compaction.reserveTokens.
+    #[arg(long, value_name = "TOKENS", value_parser = clap::value_parser!(u64).range(1..))]
+    pub(crate) context_window: Option<u64>,
 
     /// How system prompt changes reach the model when a session is resumed. collapse: fold
     /// every version into the leading system message; works with any server. inline: send
@@ -333,6 +349,23 @@ pub(crate) struct TransportArgs {
     /// Retries for transient provider errors.
     #[arg(long, default_value_t = 3)]
     pub(crate) max_retries: u32,
+
+    /// A header to send with every model request, as NAME: VALUE, such as a gateway's routing
+    /// header. Repeatable. Authorization is refused: the key comes from --api-key-env. The
+    /// value is visible in process listings and is not recorded in the session.
+    #[arg(long = "header", value_name = "NAME: VALUE", value_parser = parse_header)]
+    pub(crate) headers: Vec<(String, String)>,
+}
+
+fn parse_header(text: &str) -> Result<(String, String), String> {
+    let (name, value) = text
+        .split_once(':')
+        .ok_or_else(|| format!("expected NAME: VALUE, got {text:?}"))?;
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(format!("expected NAME: VALUE, got {text:?}"));
+    }
+    Ok((name.to_string(), value.trim().to_string()))
 }
 
 /// Limits per prompt; `None` keeps the selected profile's value. A run is one prompt.
@@ -399,6 +432,12 @@ pub(crate) struct RequestArgs {
     /// Session file (JSONL). Created if missing; an existing one is continued.
     #[arg(long)]
     pub(crate) session: Option<PathBuf>,
+
+    /// Send the session ID as the request's prompt_cache_key, so that the requests of one
+    /// conversation share the server's prompt cache (OpenAI takes the field; servers that
+    /// reject unknown fields must not get it). The request audit records the key.
+    #[arg(long)]
+    pub(crate) prompt_cache_key: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -512,6 +551,7 @@ async fn connect_mcp(base: &BaseArgs, default: Builtin, transport: &TransportArg
         configs.push(ServerConfig {
             token,
             call_timeout: Duration::from_secs(server.timeout_secs.unwrap_or(transport.tool_timeout_secs)),
+            max_call_timeout: server.max_timeout_secs.map(Duration::from_secs),
             ..ServerConfig::new(server.name.as_str(), server.url.as_str(), server.tools.clone())
         });
     }
@@ -614,15 +654,32 @@ fn request_fields(values: &[String]) -> Result<serde_json::Map<String, serde_jso
     Ok(fields)
 }
 
-/// Export traces when an OTLP endpoint is configured (`zx_agent::otel`), and say so on
-/// stderr. An endpoint the exporter refuses is a configuration error, reported before any
-/// session file is created.
+/// Export traces and metrics when an OTLP endpoint is configured (`zx_agent::otel`), and say
+/// so on stderr. An endpoint the exporter refuses is a configuration error, reported before
+/// any session file is created.
 pub(crate) fn start_telemetry() -> Result<Option<Telemetry>> {
     let telemetry = Telemetry::from_env().map_err(anyhow::Error::msg)?;
-    if telemetry.is_some() {
-        eprintln!("[otel] exporting traces over OTLP/HTTP");
+    if let Some(telemetry) = &telemetry {
+        eprintln!("[otel] exporting {} over OTLP/HTTP", telemetry.exports().describe());
     }
     Ok(telemetry)
+}
+
+/// The sink for an unattended run: the run continues the caller's trace when `TRACEPARENT`
+/// names one, as a scheduler or `otel-cli` sets it. A value that is not a traceparent is
+/// reported, and the run starts a trace of its own.
+pub(crate) fn run_sink(telemetry: &Telemetry) -> Arc<dyn EventSink> {
+    match TraceParent::from_env() {
+        Ok(Some(parent)) => {
+            eprintln!("[otel] continuing trace {}", parent.trace_id());
+            telemetry.sink_under(&parent)
+        }
+        Ok(None) => telemetry.sink(),
+        Err(error) => {
+            eprintln!("[otel] {error}; the run starts a trace of its own");
+            telemetry.sink()
+        }
+    }
 }
 
 /// Export the spans that remain. Telemetry never changes the outcome: failures only go to
@@ -657,6 +714,18 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     let cwd = resolve_cwd(options.base.cwd.as_deref())?;
     let secret_files = secret_files(options.base)?;
     let mut profile = load_profile(&options)?;
+    // What is known about the models: the profile's entries, and the window given for
+    // this model on the command line.
+    let mut models = std::mem::take(&mut profile.models);
+    if let Some(window) = options.base.context_window {
+        models.entry(options.model.to_string()).or_default().context_window = Some(window);
+    }
+    // With automatic summaries on, a known window adds a token trigger below it.
+    if profile.compaction.trigger_bytes.is_some()
+        && let Some(window) = models.get(options.model).and_then(|meta| meta.context_window)
+    {
+        profile.compaction.derive_trigger_tokens(window);
+    }
     // The container mounts the workspace at its real path, which tools must use as well.
     let cwd = match profile.execution {
         Execution::Local => cwd,
@@ -751,6 +820,8 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     }
     // The built-in tools skip repeated names; this guards tools registered here later.
     config.spec.validate().map_err(anyhow::Error::msg)?;
+    config.models = models;
+    config.cache_key = options.request.prompt_cache_key.then(|| session.header().id.clone());
     Ok(PreparedSession {
         config,
         retry: RetryPolicy {
@@ -854,6 +925,7 @@ fn load_profile(options: &SessionOptions<'_>) -> Result<Profile> {
     }
     if base.no_auto_compact {
         profile.compaction.trigger_bytes = None;
+        profile.compaction.trigger_tokens = None;
     }
     if let Some(execution) = base.execution {
         profile.execution = match execution {
@@ -883,7 +955,7 @@ fn provider(options: &SessionOptions<'_>) -> Result<(OpenAiCompatible, Option<St
     let provider = OpenAiCompatible::new(OpenAiConfig {
         base_url: options.base.base_url.clone(),
         // Provider authentication and output filtering each need an owned copy.
-        api_key: api_key.clone(),
+        api_key: api_key.clone().into(),
         idle_timeout: Duration::from_secs(options.transport.idle_timeout_secs),
         max_response_bytes: options.request.max_response_bytes,
         max_sse_event_bytes: options.request.max_sse_event_bytes,
@@ -894,6 +966,8 @@ fn provider(options: &SessionOptions<'_>) -> Result<(OpenAiCompatible, Option<St
         extra_fields,
         fill_missing_reasoning: options.request.fill_missing_reasoning,
         reasoning_format: options.request.reasoning_format,
+        headers: options.transport.headers.clone(),
+        prompt_cache_key: options.request.prompt_cache_key,
         ..OpenAiConfig::default()
     })?;
     Ok((provider, api_key))

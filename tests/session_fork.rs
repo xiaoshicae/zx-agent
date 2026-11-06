@@ -11,7 +11,7 @@ use common::{RunnerSetup, config, header, read_lines};
 use zx_agent::ai::Message;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::runner::RunOutcome;
-use zx_agent::session::{Entry, SessionHeader, SessionStore};
+use zx_agent::session::{Entry, SESSION_VERSION, SessionHeader, SessionStore};
 
 fn ids(entries: &[&Entry]) -> Vec<String> {
     entries.iter().map(|entry| entry.id().to_string()).collect()
@@ -104,7 +104,9 @@ async fn a_branch_is_copied_only_into_an_empty_session_of_the_same_format() {
     let mut newer = SessionStore::in_memory(header());
     let error = newer.copy_branch(&source, &leaf).await.unwrap_err();
     assert!(
-        error.to_string().contains("format version 5 but its source 3"),
+        error
+            .to_string()
+            .contains(&format!("format version {SESSION_VERSION} but its source 3")),
         "{error}"
     );
 

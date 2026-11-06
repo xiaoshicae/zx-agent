@@ -2,12 +2,15 @@
 
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::{CancellationToken, WaitForCancellationFuture};
 
+use super::queue::MessageQueues;
+use super::tool::ActiveTools;
 use super::{AgentEvent, Decision, Event, ToolOutput};
 use crate::ai::{AssistantMessage, Message, Reasoning, ToolCall, UserMessageKind};
 
@@ -19,7 +22,8 @@ pub type HookResult<T> = Result<T, String>;
 
 /// What every hook call knows about the run it belongs to. Fields are only ever added, so
 /// the struct is `#[non_exhaustive]`: read its fields, and outside the crate build one with
-/// [`HookContext::new`]. In JSON the cancellation signal is left out.
+/// [`HookContext::new`]. In JSON the cancellation signal, the queues and the tool set are
+/// left out.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
@@ -34,16 +38,36 @@ pub struct HookContext {
     /// Set when the run is cancelled; the host then stops waiting for the hook.
     #[serde(skip)]
     pub cancel: CancelSignal,
+    /// The run's queues: a hook sends the model a message with `steer_message` or
+    /// `follow_up_message` (pi: `sendMessage`) and records state with `append_entry` (pi:
+    /// `appendEntry`). In a context built with [`HookContext::new`] they belong to no loop.
+    #[serde(skip)]
+    pub queues: Arc<MessageQueues>,
+    /// The tools the next request offers (pi: `setActiveTools`), shared with the run.
+    #[serde(skip)]
+    pub active_tools: Arc<ActiveTools>,
 }
 
 impl HookContext {
-    /// A context for a new run with a fresh ID, cancelled with `cancel`.
+    /// A context for a new run with a fresh ID, cancelled with `cancel`, with queues and a
+    /// tool set of its own.
     pub fn new(session_id: Option<String>, cwd: PathBuf, cancel: CancellationToken) -> Self {
         Self {
             session_id,
             run_id: uuid::Uuid::new_v4().to_string(),
             cwd,
             cancel: CancelSignal(cancel),
+            queues: Arc::default(),
+            active_tools: Arc::default(),
+        }
+    }
+
+    /// The same context, sharing the loop's queues and tool set.
+    pub(crate) fn with_shared(self, queues: Arc<MessageQueues>, active_tools: Arc<ActiveTools>) -> Self {
+        Self {
+            queues,
+            active_tools,
+            ..self
         }
     }
 }
@@ -95,6 +119,10 @@ const SYSTEM_APPEND: &str =
 /// sources invalidates the summary instead.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "edit", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "an appended message is carried whole; a plan holds a few edits, and boxing the message would change the hook interface"
+)]
 pub enum ContextEdit {
     Append { message: Message },
     ReplaceText { index: usize, text: String },

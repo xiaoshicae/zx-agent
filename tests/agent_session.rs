@@ -14,7 +14,9 @@ use tokio_util::sync::CancellationToken;
 
 use common::{Collect, RunnerSetup, config, header, summarize};
 use zx_agent::AgentSession;
-use zx_agent::agent::{AgentEvent, Decision, Event, HookContext, HookResult, Hooks, Tool, ToolContext, ToolOutput};
+use zx_agent::agent::{
+    AgentEvent, Decision, Event, HookContext, HookResult, Hooks, QueuedMessage, Tool, ToolContext, ToolOutput,
+};
 use zx_agent::agent_session::{ModelRef, SessionError, Subscription};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{EventReceiver, Provider, Reasoning, Request, ToolDef};
@@ -84,7 +86,14 @@ async fn take_queued_returns_input_no_run_consumed_steering_first() {
     session.follow_up("later");
     session.steer("now");
     session.steer("also now");
-    assert_eq!(session.take_queued().unwrap(), ["now", "also now", "later"]);
+    assert_eq!(
+        session.take_queued().unwrap(),
+        [
+            QueuedMessage::User("now".into()),
+            QueuedMessage::User("also now".into()),
+            QueuedMessage::User("later".into())
+        ]
+    );
     assert!(session.take_queued().unwrap().is_empty());
     session.prompt("second").await.unwrap();
     assert_eq!(
@@ -102,7 +111,7 @@ async fn take_queued_during_a_run_is_busy_and_leaves_the_input_queued() {
     assert_eq!(session.take_queued(), Err(SessionError::Busy));
     assert!(session.abort());
     assert_eq!(running.await.unwrap().outcome, RunOutcome::Aborted);
-    assert_eq!(session.take_queued().unwrap(), ["queued"]);
+    assert_eq!(session.take_queued().unwrap(), [QueuedMessage::User("queued".into())]);
 }
 
 #[tokio::test]

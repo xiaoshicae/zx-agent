@@ -1,6 +1,8 @@
 //! Retry classification and backoff (pi: packages/ai/src/utils/retry.ts and overflow.ts; the
 //! defaults are those of coding-agent/src/core/settings-defaults.ts).
 
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hasher};
 use std::time::Duration;
 
 use super::types::{AssistantMessage, ProviderError, StopReason};
@@ -12,27 +14,34 @@ pub struct RetryPolicy {
     pub max_retries: u32,
     pub base_delay: Duration,
     pub max_delay: Duration,
+    /// How much of a backoff is taken off at random, at most: 0.25 shortens each wait by up
+    /// to a quarter (pi: `provider-retry.ts`), so that clients that failed together do not
+    /// retry together. 0 waits exactly the backoff. A server's `Retry-After` is kept as it
+    /// is.
+    pub jitter: f64,
 }
 
 impl Default for RetryPolicy {
-    /// 3 retries, a 2 s base delay and a 60 s cap.
+    /// 3 retries, a 2 s base delay, a 60 s cap and up to a quarter of jitter.
     fn default() -> Self {
         Self {
             max_retries: 3,
             base_delay: Duration::from_secs(2),
             max_delay: Duration::from_secs(60),
+            jitter: 0.25,
         }
     }
 }
 
 impl RetryPolicy {
-    /// Delay before retry `attempt` (1-based): `base * 2^(attempt-1)`, capped.
+    /// The nominal delay before retry `attempt` (1-based): `base * 2^(attempt-1)`, capped.
     pub fn delay(&self, attempt: u32) -> Duration {
         let factor = 2u32.saturating_pow(attempt.saturating_sub(1));
         self.base_delay.saturating_mul(factor).min(self.max_delay)
     }
 
-    /// Backoff including a server's numeric Retry-After hint, capped by max_delay.
+    /// The wait before retry `attempt`: the nominal delay with jitter taken off, or the
+    /// server's `Retry-After` when that is longer; never above `max_delay`.
     pub fn delay_for(&self, attempt: u32, message: &AssistantMessage) -> Duration {
         let hint = match &message.provider_error {
             Some(ProviderError::Http {
@@ -41,8 +50,23 @@ impl RetryPolicy {
             }) => Duration::from_millis(*ms),
             _ => Duration::ZERO,
         };
-        self.delay(attempt).max(hint).min(self.max_delay)
+        self.jittered(self.delay(attempt)).max(hint).min(self.max_delay)
     }
+
+    /// `delay` shortened by a random share of at most `jitter`.
+    fn jittered(&self, delay: Duration) -> Duration {
+        let share = self.jitter.clamp(0.0, 1.0) * random_fraction();
+        delay.mul_f64(1.0 - share)
+    }
+}
+
+/// A number in `[0, 1)` from the standard library's randomly keyed hasher: enough to spread
+/// retries out, without a random number generator among the dependencies.
+fn random_fraction() -> f64 {
+    let mut hasher = RandomState::new().build_hasher();
+    hasher.write_u64(0x5eed);
+    // The top 53 bits of the hash make an exact double in [0, 1).
+    (hasher.finish() >> 11) as f64 / (1u64 << 53) as f64
 }
 
 /// Failures that retrying cannot fix: credentials, quota, and context size.
@@ -109,7 +133,8 @@ pub fn is_retryable(message: &AssistantMessage) -> bool {
             );
         }
         Some(ProviderError::Transport | ProviderError::Timeout) => return true,
-        Some(ProviderError::Protocol | ProviderError::ResourceLimit) => return false,
+        // A key source that fails needs the host's attention, not another try.
+        Some(ProviderError::Protocol | ProviderError::ResourceLimit | ProviderError::ApiKey) => return false,
         Some(ProviderError::Provider { code: None }) | None => {}
     }
     let Some(error) = message.error_message.as_deref() else {
@@ -169,7 +194,11 @@ pub fn is_context_overflow(message: &AssistantMessage) -> bool {
         }
         Some(ProviderError::Provider { code: Some(code) }) if overflow_code(code) => return true,
         Some(
-            ProviderError::Transport | ProviderError::Timeout | ProviderError::Protocol | ProviderError::ResourceLimit,
+            ProviderError::Transport
+            | ProviderError::Timeout
+            | ProviderError::Protocol
+            | ProviderError::ResourceLimit
+            | ProviderError::ApiKey,
         ) => {
             return false;
         }
@@ -223,6 +252,13 @@ mod tests {
         AssistantMessage::failure("p", "m", StopReason::Error, error)
     }
 
+    fn exact() -> RetryPolicy {
+        RetryPolicy {
+            jitter: 0.0,
+            ..RetryPolicy::default()
+        }
+    }
+
     #[test]
     fn backoff_doubles_and_caps() {
         let policy = RetryPolicy::default();
@@ -230,6 +266,27 @@ mod tests {
         assert_eq!(policy.delay(2), Duration::from_secs(4));
         assert_eq!(policy.delay(3), Duration::from_secs(8));
         assert_eq!(policy.delay(30), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn jitter_shortens_a_wait_by_at_most_its_share_and_never_a_server_hint() {
+        let policy = RetryPolicy::default();
+        let nominal = policy.delay(3);
+        let mut waits = Vec::new();
+        for _ in 0..64 {
+            let wait = policy.delay_for(3, &failed("HTTP 503"));
+            assert!(wait <= nominal && wait >= nominal.mul_f64(0.75), "{wait:?}");
+            waits.push(wait);
+        }
+        assert!(waits.iter().any(|wait| *wait != nominal), "the waits vary");
+        let mut hinted = failed("rate limited");
+        hinted.provider_error = Some(ProviderError::Http {
+            status: 429,
+            code: None,
+            retry_after_ms: Some(7000),
+        });
+        assert_eq!(policy.delay_for(1, &hinted), Duration::from_secs(7));
+        assert_eq!(exact().delay_for(1, &failed("HTTP 503")), Duration::from_secs(2));
     }
 
     #[test]
@@ -264,11 +321,14 @@ mod tests {
         assert!(!is_retryable(&message));
         message.provider_error = Some(ProviderError::ResourceLimit);
         assert!(!is_retryable(&message));
+        message.provider_error = Some(ProviderError::ApiKey);
+        assert!(!is_retryable(&message));
+        assert!(!is_context_overflow(&message));
     }
 
     #[test]
     fn server_retry_hints_respect_the_configured_delay_cap() {
-        let policy = RetryPolicy::default();
+        let policy = exact();
         let mut message = failed("rate limited");
         message.provider_error = Some(ProviderError::Http {
             status: 429,

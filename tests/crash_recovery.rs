@@ -424,6 +424,7 @@ async fn the_recovery_event_follows_the_recorded_result() {
                 AgentEvent::MessageEnd {
                     message: Message::ToolResult(_),
                     entry_id: Some(_),
+                    ..
                 }
             )
         })

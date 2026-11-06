@@ -36,7 +36,9 @@ pub(crate) async fn run(args: RunArgs) -> Result<u8> {
     let telemetry = cli::start_telemetry()?;
     let session = build_session(&args).await?;
     // Kept until the run has ended: dropping it unsubscribes.
-    let _traced = telemetry.as_ref().map(|telemetry| session.subscribe(telemetry.sink()));
+    let _traced = telemetry
+        .as_ref()
+        .map(|telemetry| session.subscribe(cli::run_sink(telemetry)));
     let cancel = CancellationToken::new();
     spawn_signal_handler(cancel.clone());
     let report = match prompt {

@@ -1,6 +1,8 @@
-//! The tool interface.
+//! The tool interface, and the set of tools a run declares.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -8,6 +10,44 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::ai::ToolDef;
+use crate::sync::lock;
+
+/// Which of the configured tools the model is offered (pi: `setActiveTools`). Shared by the
+/// loop, the host and the hooks: a change applies to the next request, also in the middle
+/// of a run, and the request audit records the tools each request declared. By default
+/// every configured tool is active.
+#[derive(Debug, Default)]
+pub struct ActiveTools {
+    /// `None` means every configured tool.
+    names: Mutex<Option<HashSet<String>>>,
+}
+
+impl ActiveTools {
+    /// Offer only `names` from the next request on. A name that no configured tool has
+    /// selects nothing; the host checks names, hooks do not have to.
+    pub fn set(&self, names: impl IntoIterator<Item = impl Into<String>>) {
+        *lock(&self.names) = Some(names.into_iter().map(Into::into).collect());
+    }
+
+    /// Offer every configured tool again.
+    pub fn reset(&self) {
+        *lock(&self.names) = None;
+    }
+
+    /// The selected names, sorted; `None` while every configured tool is active.
+    pub fn names(&self) -> Option<Vec<String>> {
+        lock(&self.names).as_ref().map(|names| {
+            let mut sorted: Vec<String> = names.iter().cloned().collect();
+            sorted.sort();
+            sorted
+        })
+    }
+
+    /// Whether the tool called `name` is offered.
+    pub fn is_active(&self, name: &str) -> bool {
+        lock(&self.names).as_ref().is_none_or(|names| names.contains(name))
+    }
+}
 
 /// Whether a tool may run alongside other calls from the same assistant message.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

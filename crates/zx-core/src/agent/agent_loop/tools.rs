@@ -23,6 +23,9 @@ impl<'a> Engine<'a, '_, '_> {
         let Some(tool) = self.find_tool(&call.name) else {
             return Prepared::blocked(format!("Tool {} not found", call.name));
         };
+        if !self.config.active_tools.is_active(&call.name) {
+            return Prepared::blocked(format!("Tool {} is not active", call.name));
+        }
         if let Some(error) = &call.arguments_error {
             return Prepared::blocked(format!("Invalid arguments for tool {:?}: {error}", call.name));
         }

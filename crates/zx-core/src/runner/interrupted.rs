@@ -48,6 +48,7 @@ impl Runner {
             let end = AgentEvent::MessageEnd {
                 message: result,
                 entry_id: Some(entry_id),
+                custom: None,
             };
             config.hooks.emit(end, to).await;
             // Reported once recorded, so the event never claims a result the session lacks.

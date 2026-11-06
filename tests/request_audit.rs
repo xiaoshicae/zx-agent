@@ -261,6 +261,7 @@ async fn a_request_that_differs_from_the_persisted_projection_is_not_recorded() 
         tools: vec![],
         max_tokens: None,
         reasoning: None,
+        cache_key: None,
     };
 
     let recorded = store

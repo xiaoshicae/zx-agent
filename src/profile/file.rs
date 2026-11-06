@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 use super::skills::Skill;
 use super::{Builtin, Execution, MAX_FILE_BYTES, McpServer, Profile};
+use crate::ai::{ModelCost, ModelMeta};
 use crate::compaction;
 use crate::executor::Access;
 use crate::files::read_text_file;
@@ -32,12 +33,27 @@ pub(super) struct RawProfile {
     compaction: RawCompaction,
     tool_output: RawToolOutput,
     mcp: Option<Vec<McpServer>>,
+    models: Option<Vec<RawModel>>,
+}
+
+/// One `[[models]]` entry.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RawModel {
+    id: String,
+    #[serde(default)]
+    context_window: Option<u64>,
+    #[serde(default)]
+    cost: Option<ModelCost>,
 }
 
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 struct RawCompaction {
     trigger_bytes: Option<usize>,
+    /// 0 disables the token trigger; unset leaves it to the model's context window.
+    trigger_tokens: Option<u64>,
+    reserve_tokens: Option<u64>,
     keep_recent_bytes: Option<usize>,
     max_summary_tokens: Option<u32>,
     timeout_secs: Option<u64>,
@@ -182,6 +198,12 @@ impl RawProfile {
         if let Some(bytes) = self.compaction.trigger_bytes {
             profile.compaction.trigger_bytes = (bytes > 0).then_some(bytes);
         }
+        if let Some(tokens) = self.compaction.trigger_tokens {
+            profile.compaction.trigger_tokens = (tokens > 0).then_some(tokens);
+        }
+        if let Some(tokens) = self.compaction.reserve_tokens {
+            profile.compaction.reserve_tokens = tokens;
+        }
         if let Some(bytes) = self.compaction.keep_recent_bytes {
             profile.compaction.keep_recent_bytes = bytes;
         }
@@ -229,6 +251,30 @@ impl RawProfile {
         }
         if let Some(servers) = self.mcp {
             profile.mcp = servers;
+        }
+        for model in self.models.unwrap_or_default() {
+            ensure!(!model.id.trim().is_empty(), "models: an entry has no id");
+            ensure!(
+                model.context_window.is_none_or(|window| window > 0),
+                "models.{}: contextWindow must be greater than zero",
+                model.id
+            );
+            if let Some(cost) = &model.cost {
+                ensure!(
+                    [cost.input, cost.output, cost.cache_read, cost.cache_write]
+                        .iter()
+                        .all(|price| price.is_finite() && *price >= 0.0),
+                    "models.{}: prices must be zero or more, in USD per million tokens",
+                    model.id
+                );
+            }
+            profile.models.insert(
+                model.id,
+                ModelMeta {
+                    context_window: model.context_window,
+                    cost: model.cost,
+                },
+            );
         }
         Ok(())
     }

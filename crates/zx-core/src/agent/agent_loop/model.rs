@@ -28,9 +28,17 @@ impl Engine<'_, '_, '_> {
         let request = Request {
             model: settings.model,
             messages: context.to_vec(),
-            tools: spec.tools.iter().map(|tool| tool.definition()).collect(),
+            // The active set may have changed since the last request; the audit records
+            // what each request declared.
+            tools: spec
+                .tools
+                .iter()
+                .filter(|tool| self.config.active_tools.is_active(tool.name()))
+                .map(|tool| tool.definition())
+                .collect(),
             max_tokens: spec.max_tokens,
             reasoning: settings.reasoning,
+            cache_key: self.config.cache_key.clone(),
         };
         let request_entry = match self.control.session.as_deref_mut() {
             Some(session) => Some(
@@ -52,7 +60,13 @@ impl Engine<'_, '_, '_> {
         })
         .await;
         result.model_requests = result.model_requests.saturating_add(1);
-        let message = self.stream(request).await;
+        let model = request.model.clone();
+        let mut message = self.stream(request).await;
+        // Priced by the model requested, which the audit records; the answer carries the
+        // server's own name of the model separately.
+        if let Some(cost) = self.config.models.get(&model).and_then(|meta| meta.cost) {
+            message.usage.cost_usd = Some(cost.of(&message.usage));
+        }
         result.usage.add(&message.usage);
         Ok(Some(message))
     }

@@ -6,17 +6,22 @@
 use std::fmt;
 use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
+use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::{Event, EventSink, LoopConfig, MessageQueues};
+use crate::agent::{
+    ActiveTools, CommandContext, CommandError, CommandOutcome, Event, EventSink, LoopConfig, MessageQueues,
+    QueuedMessage, SlashCommand,
+};
 use crate::ai::retry::RetryPolicy;
 use crate::ai::{Provider, Reasoning};
 use crate::compaction;
 use crate::runner::{Limits, RunReport, Runner};
-use crate::session::{SessionStore, WritesStopped};
+use crate::session::{CustomMessage, Entry, SessionStore, WritesStopped};
 use crate::sync::lock;
 
 /// Provider and model selected together, so a switch cannot expose a mixed pair.
@@ -28,12 +33,22 @@ pub struct ModelRef {
 }
 
 /// Session API errors. Operational failures remain in the run or compaction report.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionError {
     /// A prompt, compaction or model change overlaps an active operation; it is never queued.
     Busy,
     /// Model IDs must contain at least one non-whitespace character.
     InvalidModel,
+    /// The entry a branch switch names is not in the session.
+    EntryNotFound,
+    /// A tool name that no configured tool has.
+    UnknownTool,
+    /// The session could not record an entry; see [`AgentSession::writes_stopped`].
+    WriteFailed(String),
+    /// A prompt with this idempotency key was already submitted to the session.
+    DuplicateKey,
+    /// An idempotency key must contain at least one non-whitespace character.
+    InvalidKey,
 }
 
 impl fmt::Display for SessionError {
@@ -41,9 +56,18 @@ impl fmt::Display for SessionError {
         match self {
             Self::Busy => f.write_str("session is running; use steer or follow_up to submit input"),
             Self::InvalidModel => f.write_str("model ID must not be empty"),
+            Self::EntryNotFound => f.write_str("no entry with that ID in the session"),
+            Self::UnknownTool => f.write_str("no configured tool has that name"),
+            Self::WriteFailed(error) => write!(f, "cannot write the session: {error}"),
+            Self::DuplicateKey => f.write_str("a prompt with this idempotency key was already submitted"),
+            Self::InvalidKey => f.write_str("idempotency key must not be empty"),
         }
     }
 }
+
+/// The `customType` of the session record that notes an idempotency key
+/// ([`AgentSession::prompt_once`]); reserved for the session.
+pub const IDEMPOTENCY_KEY_TYPE: &str = "idempotency_key";
 
 impl std::error::Error for SessionError {}
 
@@ -75,9 +99,16 @@ enum State {
 /// ```
 pub struct AgentSession {
     state: Mutex<State>,
-    // Queues and events are genuinely shared with the Runner while a prompt owns it.
+    // Queues, the tool set and events are genuinely shared with the Runner while a prompt
+    // owns it.
     queues: Arc<MessageQueues>,
+    active_tools: Arc<ActiveTools>,
     events: Arc<EventHub>,
+    /// The configured tools' names, which the loop fixes when the Runner is built.
+    tool_names: Vec<String>,
+    commands: Vec<Arc<dyn SlashCommand>>,
+    cwd: PathBuf,
+    session_id: String,
 }
 
 impl AgentSession {
@@ -105,10 +136,68 @@ impl AgentSession {
         text: impl Into<String>,
         parent: &CancellationToken,
     ) -> Result<RunReport, SessionError> {
+        self.prompt_message_with_cancel(QueuedMessage::User(text.into()), parent)
+            .await
+    }
+
+    /// Run with any message as the input: the person's text, or a message from an
+    /// extension (pi: `sendMessage` with `triggerTurn` while idle). Otherwise like `prompt`.
+    pub async fn prompt_message(&self, message: QueuedMessage) -> Result<RunReport, SessionError> {
+        self.prompt_message_with_cancel(message, &CancellationToken::new())
+            .await
+    }
+
+    /// Like prompt_message, using a child of the caller's token, as prompt_with_cancel does.
+    pub async fn prompt_message_with_cancel(
+        &self,
+        message: QueuedMessage,
+        parent: &CancellationToken,
+    ) -> Result<RunReport, SessionError> {
         let cancel = parent.child_token();
         let mut active = self.acquire(cancel.clone())?;
-        let report = active.runner().run(text, &cancel).await;
+        let report = active.runner().run_message(message, &cancel).await;
         Ok(report)
+    }
+
+    /// Run a prompt at most once per `key`, for hosts that retry a submission they are not
+    /// sure reached the session, such as after a lost reply or a restart. The key is
+    /// recorded in the session (a `custom` entry of type [`IDEMPOTENCY_KEY_TYPE`]) before the
+    /// prompt, on whichever branch is current, so a second call with the same key returns
+    /// DuplicateKey without a request, also from a session reopened from its file; the host
+    /// then reads the session for the answer, or continues the run that was interrupted.
+    /// A blank key returns InvalidKey. Otherwise like `prompt`.
+    pub async fn prompt_once(&self, key: &str, text: impl Into<String>) -> Result<RunReport, SessionError> {
+        self.prompt_once_with_cancel(key, text, &CancellationToken::new()).await
+    }
+
+    /// Like prompt_once, using a child of the caller's token, as prompt_with_cancel does.
+    pub async fn prompt_once_with_cancel(
+        &self,
+        key: &str,
+        text: impl Into<String>,
+        parent: &CancellationToken,
+    ) -> Result<RunReport, SessionError> {
+        if key.trim().is_empty() {
+            return Err(SessionError::InvalidKey);
+        }
+        let cancel = parent.child_token();
+        // The lease spans the check, the record and the run, so no other prompt can slip in
+        // between.
+        let mut active = self.acquire(cancel.clone())?;
+        let runner = active.runner();
+        let submitted = runner.session().entries().iter().any(|entry| match entry {
+            Entry::Custom(custom) => custom.custom_type == IDEMPOTENCY_KEY_TYPE && custom.data["key"] == key,
+            _ => false,
+        });
+        if submitted {
+            return Err(SessionError::DuplicateKey);
+        }
+        runner
+            .session_mut()
+            .append_custom_entry(IDEMPOTENCY_KEY_TYPE, serde_json::json!({ "key": key }))
+            .await
+            .map_err(|error| SessionError::WriteFailed(format!("{error:#}")))?;
+        Ok(runner.run(text, &cancel).await)
     }
 
     /// Continue the conversation without new input; see [`Runner::continue_run`] for what is
@@ -148,12 +237,90 @@ impl AgentSession {
         self.queues.follow_up(text);
     }
 
+    /// The conversation's queues: to steer or follow up with a message from an extension
+    /// (`steer_message`, `follow_up_message`), to record extension state during a run
+    /// (`append_entry`), and to choose how many queued messages a request takes
+    /// (`set_steering_mode`, `set_follow_up_mode`).
+    pub fn queues(&self) -> &MessageQueues {
+        &self.queues
+    }
+
+    /// The tools the next request offers, shared with the running loop and the hooks. A
+    /// change applies to the next request, also during a run; `set_active_tools` checks the
+    /// names first.
+    pub fn active_tools(&self) -> &ActiveTools {
+        &self.active_tools
+    }
+
+    /// Offer the model only `names` from the next request on (pi: `setActiveTools`), also
+    /// during a run. A name that no configured tool has returns UnknownTool and changes
+    /// nothing. An empty list offers no tool.
+    pub fn set_active_tools(&self, names: &[&str]) -> Result<(), SessionError> {
+        if names
+            .iter()
+            .any(|name| !self.tool_names.iter().any(|known| known == name))
+        {
+            return Err(SessionError::UnknownTool);
+        }
+        self.active_tools.set(names.iter().copied());
+        Ok(())
+    }
+
+    /// The slash commands extensions registered, in registration order.
+    pub fn commands(&self) -> &[Arc<dyn SlashCommand>] {
+        &self.commands
+    }
+
+    /// Run the registered command called `name` with `args`, also while a run is in
+    /// progress (pi: extension commands run at once). The caller shows the outcome's lines
+    /// and sends its `prompt`, if any, as it would the person's input.
+    pub async fn run_command(&self, name: &str, args: &str) -> Result<CommandOutcome, CommandError> {
+        let command = self
+            .commands
+            .iter()
+            .find(|command| command.name() == name)
+            .ok_or(CommandError::Unknown)?;
+        let ctx = CommandContext::new(
+            self.cwd.clone(),
+            Some(self.session_id.clone()),
+            self.queues.clone(),
+            self.active_tools.clone(),
+        );
+        command.run(args, &ctx).await.map_err(CommandError::Failed)
+    }
+
+    /// Record state of an extension in the session while idle (pi: `appendEntry`); during
+    /// a run, hooks and commands use `queues().append_entry` instead. Returns the entry's
+    /// ID. A run returns Busy; a write failure returns WriteFailed.
+    pub async fn append_entry(&self, custom_type: &str, data: Value) -> Result<String, SessionError> {
+        let mut active = self.acquire(CancellationToken::new())?;
+        active
+            .runner()
+            .session_mut()
+            .append_custom_entry(custom_type, data)
+            .await
+            .map_err(|error| SessionError::WriteFailed(format!("{error:#}")))
+    }
+
+    /// Record a message from an extension while idle, without starting a run (pi:
+    /// `sendMessage` while idle): the model sees it with the next prompt. Returns the
+    /// entry's ID. A run returns Busy; a write failure returns WriteFailed.
+    pub async fn append_custom_message(&self, message: CustomMessage) -> Result<String, SessionError> {
+        let mut active = self.acquire(CancellationToken::new())?;
+        active
+            .runner()
+            .session_mut()
+            .append_custom_message(message)
+            .await
+            .map_err(|error| SessionError::WriteFailed(format!("{error:#}")))
+    }
+
     /// Take the input that `steer` and `follow_up` queued and no run consumed: steering
     /// messages first, then follow-ups, each oldest first. A run looks for input at the end
     /// of each turn, so input queued as it ends waits for the next run; a host that starts
     /// runs itself calls this when one ends and prompts with what it gets. Returns Busy
     /// during a prompt or compaction, whose loop may still take the input.
-    pub fn take_queued(&self) -> Result<Vec<String>, SessionError> {
+    pub fn take_queued(&self) -> Result<Vec<QueuedMessage>, SessionError> {
         // Holding the state lock keeps a prompt from starting between the check and the take.
         let state = lock(&self.state);
         match &*state {
@@ -264,6 +431,37 @@ impl AgentSession {
         }
     }
 
+    /// Move the conversation to another point of its session tree while idle (pi:
+    /// `navigateTree`): the next prompt continues after `entry`, or before the first entry
+    /// for `None`, on a new branch there. The entries of the branch left behind stay in the
+    /// session, and a prompt after an answer whose tool calls have their results on that
+    /// branch records those calls as not executed, as after a crash. Nothing is written
+    /// until the next append, so a session resumed from its file continues where the file
+    /// ends. A run returns Busy; an ID that is not in the session returns EntryNotFound,
+    /// and the position does not change.
+    pub fn branch(&self, entry: Option<&str>) -> Result<(), SessionError> {
+        let mut state = lock(&self.state);
+        match &mut *state {
+            State::Running(_) => Err(SessionError::Busy),
+            State::Idle(runner) => match entry {
+                // The store's only error is an unknown ID, which the variant names.
+                Some(id) => runner.session_mut().branch(id).map_err(|_| SessionError::EntryNotFound),
+                None => {
+                    runner.session_mut().reset_leaf();
+                    Ok(())
+                }
+            },
+        }
+    }
+
+    /// Read the session while idle, for example to list its entries or find the current
+    /// position. `f` runs with the conversation leased, as a prompt does: other calls get
+    /// Busy until it returns, and no lock is held while host code runs. A run returns Busy.
+    pub fn inspect<T>(&self, f: impl FnOnce(&SessionStore) -> T) -> Result<T, SessionError> {
+        let mut active = self.acquire(CancellationToken::new())?;
+        Ok(f(active.runner().session()))
+    }
+
     fn acquire(&self, cancel: CancellationToken) -> Result<ActiveRun<'_>, SessionError> {
         let mut state = lock(&self.state);
         match std::mem::replace(&mut *state, State::Running(cancel.clone())) {
@@ -282,7 +480,13 @@ impl AgentSession {
 
 impl From<Runner> for AgentSession {
     fn from(mut runner: Runner) -> Self {
-        let queues = runner.config().queues.clone();
+        let config = runner.config();
+        let queues = config.queues.clone();
+        let active_tools = config.active_tools.clone();
+        let tool_names = config.spec.tools.iter().map(|tool| tool.name().to_string()).collect();
+        let commands = config.commands.clone();
+        let cwd = config.spec.cwd.clone();
+        let session_id = runner.session().header().id.clone();
         let events = Arc::new(EventHub::default());
         let initial = runner.replace_sink(events.clone());
         // The original sink is permanent; only additional subscribers use RAII handles.
@@ -290,7 +494,12 @@ impl From<Runner> for AgentSession {
         Self {
             state: Mutex::new(State::Idle(Box::new(runner))),
             queues,
+            active_tools,
             events,
+            tool_names,
+            commands,
+            cwd,
+            session_id,
         }
     }
 }

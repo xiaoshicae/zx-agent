@@ -211,7 +211,8 @@ async fn commands_cannot_read_the_agent_environment_through_proc() {
 async fn commands_cannot_see_the_headers_for_a_trace_collector() {
     const TOKEN: &str = "Authorization=Bearer collector-secret";
     let dir = tempfile::tempdir().unwrap();
-    let command = "echo \"headers=[$OTEL_EXPORTER_OTLP_HEADERS] traces=[$OTEL_EXPORTER_OTLP_TRACES_HEADERS]\"";
+    let command = "echo \"headers=[$OTEL_EXPORTER_OTLP_HEADERS] traces=[$OTEL_EXPORTER_OTLP_TRACES_HEADERS] \
+                   metrics=[$OTEL_EXPORTER_OTLP_METRICS_HEADERS]\"";
     let server = MockServer::start(vec![Reply::bash("c", command), Reply::text("done")]).await;
     let output = zx_agent()
         .args(["run", "--model", "mock", "--base-url", &server.base_url])
@@ -227,8 +228,10 @@ async fn commands_cannot_see_the_headers_for_a_trace_collector() {
         .current_dir(dir.path())
         .env("OTEL_EXPORTER_OTLP_HEADERS", TOKEN)
         .env("OTEL_EXPORTER_OTLP_TRACES_HEADERS", TOKEN)
+        .env("OTEL_EXPORTER_OTLP_METRICS_HEADERS", TOKEN)
         .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
         .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        .env_remove("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
         .env_remove("ZX_RUN_CLI_TEST_KEY")
         .env_remove("ZX_MODEL")
         .env_remove("ZX_BASE_URL")
@@ -244,7 +247,7 @@ async fn commands_cannot_see_the_headers_for_a_trace_collector() {
         String::from_utf8_lossy(&output.stderr)
     );
     let result = server.requests()[1].body["messages"].to_string();
-    assert!(result.contains("headers=[] traces=[]"), "{result}");
+    assert!(result.contains("headers=[] traces=[] metrics=[]"), "{result}");
     assert!(!result.contains("collector-secret"), "{result}");
 }
 
@@ -661,11 +664,23 @@ async fn collector() -> (String, Arc<Mutex<Vec<Request>>>) {
 }
 
 fn contains(body: &[u8], text: &str) -> bool {
-    body.windows(text.len()).any(|window| window == text.as_bytes())
+    contains_bytes(body, text.as_bytes())
+}
+
+fn contains_bytes(body: &[u8], bytes: &[u8]) -> bool {
+    body.windows(bytes.len()).any(|window| window == bytes)
+}
+
+/// The bytes that a hex ID is sent as.
+fn hex(id: &str) -> Vec<u8> {
+    (0..id.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&id[at..at + 2], 16).unwrap())
+        .collect()
 }
 
 #[tokio::test]
-async fn a_run_exports_its_trace_only_when_an_endpoint_is_configured() {
+async fn a_run_exports_its_trace_and_metrics_only_when_an_endpoint_is_configured() {
     let dir = tempfile::tempdir().unwrap();
     let (endpoint, received) = collector().await;
 
@@ -673,28 +688,44 @@ async fn a_run_exports_its_trace_only_when_an_endpoint_is_configured() {
     let output = run(&server, dir.path())
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", &endpoint)
         .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        .env_remove("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
+        .env_remove("TRACEPARENT")
         .output()
         .await
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
-    assert!(stderr.contains("[otel] exporting traces over OTLP/HTTP"), "{stderr}");
+    assert!(
+        stderr.contains("[otel] exporting traces and metrics over OTLP/HTTP"),
+        "{stderr}"
+    );
     {
         let requests = received.lock().unwrap();
-        // The process exports what remains before it exits.
-        let request = requests.first().expect("the collector received the trace");
-        assert_eq!((request.method.as_str(), request.path.as_str()), ("POST", "/v1/traces"));
-        assert_eq!(request.header("content-type"), Some("application/x-protobuf"));
-        // Protobuf keeps strings as they are: the service and an attribute of the run span.
-        assert!(contains(&request.body, "zx-agent"));
-        assert!(contains(&request.body, "zx.run.id"));
-        assert!(!contains(&request.body, "the answer"), "no content leaves the process");
+        // The process exports what remains before it exits: the spans, then the metrics.
+        let mut paths: Vec<&str> = requests.iter().map(|request| request.path.as_str()).collect();
+        paths.sort_unstable();
+        assert_eq!(paths, ["/v1/metrics", "/v1/traces"]);
+        for request in requests.iter() {
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.header("content-type"), Some("application/x-protobuf"));
+            // Protobuf keeps strings as they are: the service name, and an attribute of the
+            // run span or the name of a metric.
+            assert!(contains(&request.body, "zx-agent"));
+            let marker = if request.path == "/v1/traces" {
+                "zx.run.id"
+            } else {
+                "zx.runs"
+            };
+            assert!(contains(&request.body, marker), "{}", request.path);
+            assert!(!contains(&request.body, "the answer"), "no content leaves the process");
+        }
     }
 
     let server = MockServer::start(vec![Reply::text("the answer")]).await;
     let output = run(&server, dir.path())
         .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
         .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        .env_remove("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
         .env("OTEL_SERVICE_NAME", "not-a-reason-to-export")
         .output()
         .await
@@ -702,7 +733,63 @@ async fn a_run_exports_its_trace_only_when_an_endpoint_is_configured() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     assert!(!stderr.contains("[otel]"), "{stderr}");
-    assert_eq!(received.lock().unwrap().len(), 1, "nothing more was sent");
+    assert_eq!(received.lock().unwrap().len(), 2, "nothing more was sent");
+}
+
+#[tokio::test]
+async fn a_run_continues_the_trace_that_traceparent_names() {
+    const TRACE_ID: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
+    const PARENT_SPAN_ID: &str = "00f067aa0ba902b7";
+    let dir = tempfile::tempdir().unwrap();
+    let (endpoint, received) = collector().await;
+    let traces = format!("{endpoint}/v1/traces");
+
+    let server = MockServer::start(vec![Reply::text("the answer")]).await;
+    let output = run(&server, dir.path())
+        .env("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", &traces)
+        .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .env_remove("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
+        .env("TRACEPARENT", format!("00-{TRACE_ID}-{PARENT_SPAN_ID}-01"))
+        .output()
+        .await
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert!(stderr.contains("[otel] exporting traces over OTLP/HTTP"), "{stderr}");
+    assert!(
+        stderr.contains("[otel] continuing trace 4bf92f3577b34da6a3ce929d0e0e4736"),
+        "{stderr}"
+    );
+    {
+        let requests = received.lock().unwrap();
+        assert_eq!(requests.len(), 1, "only traces were configured");
+        assert_eq!(requests[0].path, "/v1/traces");
+        // Protobuf keeps the IDs as bytes: the caller's trace, and its span as the run's parent.
+        assert!(contains_bytes(&requests[0].body, &hex(TRACE_ID)));
+        assert!(contains_bytes(&requests[0].body, &hex(PARENT_SPAN_ID)));
+    }
+
+    // A value that is not a traceparent is reported; the run goes on in a trace of its own.
+    let server = MockServer::start(vec![Reply::text("the answer")]).await;
+    let output = run(&server, dir.path())
+        .env("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", &traces)
+        .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .env_remove("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
+        .env("TRACEPARENT", "not-a-traceparent")
+        .output()
+        .await
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert!(
+        stderr.contains(
+            "[otel] TRACEPARENT is not a W3C traceparent: \"not-a-traceparent\"; the run starts a trace of its own"
+        ),
+        "{stderr}"
+    );
+    let requests = received.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(!contains_bytes(&requests[1].body, &hex(TRACE_ID)));
 }
 
 #[tokio::test]

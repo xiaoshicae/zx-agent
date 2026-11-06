@@ -2,17 +2,21 @@
 //! sink it reports to, and the model it summarizes with. The Runner builds one per run and
 //! the loop reaches it as its [`SessionHost`] (pi: AgentSession writes on `message_end`).
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
+use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use super::accounting::RunAccounting;
 use crate::agent::{
-    AgentEvent, ContextPreparation, Emit, HookChain, LoopConfig, LoopOutcome, MessageQueues, Prepared, SessionHost,
+    AgentEvent, ContextPreparation, Emit, HookChain, LoopConfig, LoopOutcome, MessageQueues, Prepared, QueuedMessage,
+    SessionHost,
 };
 use crate::ai::retry::RetryPolicy;
-use crate::ai::{AssistantMessage, Message, Provider, Request, StopReason, ToolCall, duration_ms};
+use crate::ai::{AssistantMessage, Message, ModelMeta, Provider, Request, StopReason, ToolCall, duration_ms};
 use crate::compaction::{self, Trigger};
-use crate::session::{RequestSource, SessionStore};
+use crate::session::{CustomMessage, Entry, RequestSource, SessionStore};
 
 /// How a run ends when it stops before a finished answer.
 pub(super) struct RunStop {
@@ -81,6 +85,8 @@ pub(super) struct RunHost<'a> {
     pub pause: &'a mut CompactionPause,
     /// The attempt the host serves, for the events of a summary.
     pub attempt: u32,
+    /// Prices by model, for the cost of summary responses.
+    pub models: &'a HashMap<String, ModelMeta>,
 }
 
 impl<'a> RunHost<'a> {
@@ -100,6 +106,7 @@ impl<'a> RunHost<'a> {
             compaction,
             pause,
             attempt: 1,
+            models: &config.models,
         }
     }
 
@@ -114,6 +121,7 @@ impl<'a> RunHost<'a> {
             to: self.to,
             hooks: self.hooks,
             attempt: self.attempt,
+            models: self.models,
         };
         let report = host.run(trigger, cancel).await;
         self.pause.note(&report);
@@ -122,7 +130,7 @@ impl<'a> RunHost<'a> {
 
     /// The input a continuation starts with, after omitting a failed answer at the end; an
     /// error when there is nothing for the model to answer.
-    pub async fn continuation(&mut self, queues: &MessageQueues) -> Result<Vec<Message>, String> {
+    pub async fn continuation(&mut self, queues: &MessageQueues) -> Result<Vec<QueuedMessage>, String> {
         let projection = self.session.projection();
         let Some(last) = projection
             .iter()
@@ -153,6 +161,24 @@ impl<'a> RunHost<'a> {
             }
             Message::System(_) => Err("nothing to continue: the conversation has only system messages".into()),
         }
+    }
+
+    /// Record the custom entries that hooks queued and the loop has not written (pi:
+    /// `appendEntry`), each announced as a `custom_entry` event.
+    pub async fn record_pending_entries(&mut self, queues: &MessageQueues) -> Result<(), String> {
+        for entry in queues.take_entries() {
+            let id = self
+                .session
+                .append_custom_entry(&entry.custom_type, entry.data)
+                .await
+                .map_err(|error| format!("cannot persist session entry: {error:#}"))?;
+            let event = AgentEvent::CustomEntry {
+                entry_id: Some(id),
+                custom_type: entry.custom_type,
+            };
+            self.hooks.emit(event, self.to).await;
+        }
+        Ok(())
     }
 
     /// Keep a failed answer in the session but drop it from the model context, so that the
@@ -251,6 +277,25 @@ impl SessionHost for RunHost<'_> {
             .map_err(|error| format!("cannot persist session entry: {error:#}"))
     }
 
+    async fn append_custom_message(&mut self, message: &CustomMessage) -> Result<(String, Message), String> {
+        let id = self
+            .session
+            .append_custom_message(message.clone())
+            .await
+            .map_err(|error| format!("cannot persist session entry: {error:#}"))?;
+        match self.session.get(&id) {
+            Some(Entry::CustomMessage(entry)) => Ok((id, entry.projected())),
+            _ => Err(format!("custom message {id} was not recorded")),
+        }
+    }
+
+    async fn append_custom_entry(&mut self, custom_type: &str, data: Value) -> Result<String, String> {
+        self.session
+            .append_custom_entry(custom_type, data)
+            .await
+            .map_err(|error| format!("cannot persist session entry: {error:#}"))
+    }
+
     async fn edit_context(&mut self, index: usize, replacement: Option<&str>) -> Result<String, String> {
         let projection = self.session.projection();
         let target = projection
@@ -279,12 +324,23 @@ impl SessionHost for RunHost<'_> {
     }
 
     async fn prepare_context(&mut self, cancel: &CancellationToken) -> ContextPreparation {
-        let Some(limit) = self.compaction.trigger_bytes else {
+        if !self.compaction.automatic() {
             return ContextPreparation::unchanged();
-        };
-        match compaction::context_bytes(&self.session.messages()) {
-            Ok(bytes) if bytes <= limit => return ContextPreparation::unchanged(),
-            Ok(_) => {}
+        }
+        // Either trigger runs a summary: the bytes of the context, or the tokens the last
+        // response reported plus an estimate for what came after it.
+        let messages = self.session.messages();
+        let measured = compaction::context_bytes(&messages).and_then(|bytes| {
+            let over_bytes = self.compaction.trigger_bytes.is_some_and(|limit| bytes > limit);
+            let over_tokens = match self.compaction.trigger_tokens {
+                Some(limit) => compaction::context_tokens(&messages)? > limit,
+                None => false,
+            };
+            Ok(over_bytes || over_tokens)
+        });
+        match measured {
+            Ok(false) => return ContextPreparation::unchanged(),
+            Ok(true) => {}
             Err(error) => return ContextPreparation::failed(format!("cannot measure context: {error:#}")),
         }
         if let Some(reason) = self.pause.reason() {

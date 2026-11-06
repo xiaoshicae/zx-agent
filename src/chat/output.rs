@@ -36,6 +36,8 @@ pub(super) struct Totals {
     pub(super) input_tokens: u64,
     pub(super) output_tokens: u64,
     pub(super) cached_tokens: u64,
+    /// The cost of the responses that had prices; `None` until one had.
+    pub(super) cost_usd: Option<f64>,
 }
 
 struct TextState {
@@ -145,6 +147,9 @@ impl Output {
                 totals.input_tokens = totals.input_tokens.saturating_add(report.usage.input);
                 totals.output_tokens = totals.output_tokens.saturating_add(report.usage.output);
                 totals.cached_tokens = totals.cached_tokens.saturating_add(report.usage.cache_read);
+                if let Some(cost) = report.usage.cost_usd {
+                    totals.cost_usd = Some(totals.cost_usd.unwrap_or(0.0) + cost);
+                }
                 if self.debug {
                     return;
                 }
@@ -282,6 +287,20 @@ impl EventSink for Output {
                         self.tool_result(&mut state, result);
                     }
                 }
+                // A message an extension sent, shown when it asks for that (pi: `display`).
+                AgentEvent::MessageEnd {
+                    message: Message::User { content, .. },
+                    custom: Some(info),
+                    ..
+                } if info.display && !self.debug => {
+                    let style = state.terminal.style();
+                    state
+                        .terminal
+                        .line(Tone::Dim, &format!("[{}]", visible(&info.custom_type)));
+                    for line in limited(content, PREVIEW_LINES, style, |_| Tone::Plain) {
+                        state.terminal.line(Tone::Plain, &format!("  {line}"));
+                    }
+                }
                 AgentEvent::ToolExecutionStart {
                     tool_call_id,
                     tool_name,
@@ -374,7 +393,13 @@ fn turn_line(report: &RunReport, elapsed: Duration) -> String {
         };
         format!(" · {} in · {} out{cached}", report.usage.input, report.usage.output)
     };
-    format!("[turn] {requests}{retries}{usage} · {}", elapsed_text(elapsed))
+    let cost = report.usage.cost_usd.map(cost_text).unwrap_or_default();
+    format!("[turn] {requests}{retries}{usage}{cost} · {}", elapsed_text(elapsed))
+}
+
+/// ` · $0.0123`: four decimals, since a turn costs a fraction of a cent.
+pub(super) fn cost_text(cost_usd: f64) -> String {
+    format!(" · ${cost_usd:.4}")
 }
 
 /// Lines shown under a result line, painted: the first lines of the patch a tool put in its
@@ -438,7 +463,8 @@ fn progress_tone(event: &AgentEvent) -> Tone {
         | AgentEvent::AgentEnd { .. }
         | AgentEvent::ContextEdited { .. }
         | AgentEvent::CompactionStart { .. }
-        | AgentEvent::CompactionEnd { .. } => Tone::Dim,
+        | AgentEvent::CompactionEnd { .. }
+        | AgentEvent::CustomEntry { .. } => Tone::Dim,
     }
 }
 

@@ -515,6 +515,7 @@ impl EventSink for Updates {
             | AgentEvent::TurnEnd { .. }
             | AgentEvent::AgentEnd { .. }
             | AgentEvent::ContextEdited { .. }
+            | AgentEvent::CustomEntry { .. }
             | AgentEvent::ToolCallRecovered { .. } => {}
         }
     }

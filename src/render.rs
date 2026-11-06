@@ -151,6 +151,15 @@ pub(crate) fn progress_line(event: &AgentEvent) -> Option<String> {
         )),
         // The error names the hook and the phase: "<hook> after_tool failed: <reason>".
         AgentEvent::HookFailed { error, .. } => Some(format!("[hook] {}", visible(error))),
+        AgentEvent::CustomEntry { custom_type, entry_id } => Some(format!(
+            "[extension] recorded {}{}",
+            visible(custom_type),
+            if entry_id.is_some() {
+                ""
+            } else {
+                " (not kept: no session)"
+            }
+        )),
         AgentEvent::RunStart { .. }
         | AgentEvent::RunEnd { .. }
         | AgentEvent::AgentStart { .. }
