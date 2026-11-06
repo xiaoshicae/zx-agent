@@ -242,6 +242,14 @@ impl AssistantMessage {
         }
     }
 
+    /// Why a failed response failed: its `error_message`, or one default text for a failed
+    /// response that carries none, so that every report of a failure names a reason.
+    pub fn failure_reason(&self) -> &str {
+        self.error_message
+            .as_deref()
+            .unwrap_or("the request failed without an error message")
+    }
+
     /// Concatenated text blocks.
     pub fn text(&self) -> String {
         self.content

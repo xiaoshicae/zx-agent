@@ -491,7 +491,6 @@ impl<'a, 'b> Engine<'a, 'b> {
         response: TurnResponse,
         pending: &mut PendingInput,
     ) -> Result<Option<LoopOutcome>, Halt> {
-        let config = self.config;
         let TurnResponse {
             index,
             turn,
@@ -503,29 +502,24 @@ impl<'a, 'b> Engine<'a, 'b> {
         let needs_more = tool_progress == ToolProgress::Continue;
         let stop = message.stop_reason;
         let disposition = self.disposition(tool_progress);
-        let remaining_model_requests = self
-            .max_model_requests
-            .map(|limit| limit.saturating_sub(result.model_requests));
+        let remaining = self.remaining_model_requests(result);
         let summary = TurnSummary {
             response: message,
             messages: context,
             turn,
             answer_continuations: result.answer_continuations,
-            remaining_model_requests,
+            remaining_model_requests: remaining,
             disposition,
         };
-        let decision = config
-            .hooks
-            .finish_turn(&summary, self.trace.context())
-            .await
-            .map_err(|error| Halt::Failed(self.report_hook_failure(error)))?;
+        let decision = self.finish_turn(&summary).await?;
         if decision == TurnDecision::Stop {
             return Ok(Some(completed(stop)));
         }
         // Inspect again: input may have arrived while the hook ran. It is taken at the top
         // of the next turn; follow-ups only when the model has nothing left to do.
-        let steering = config.queues.has(Queue::Steering);
-        let follow_ups = !needs_more && !steering && config.queues.has(Queue::FollowUp);
+        let queues = &self.config.queues;
+        let steering = queues.has(Queue::Steering);
+        let follow_ups = !needs_more && !steering && queues.has(Queue::FollowUp);
         if steering || follow_ups {
             *pending = if follow_ups {
                 PendingInput::FollowUps
@@ -534,15 +528,11 @@ impl<'a, 'b> Engine<'a, 'b> {
             };
             return Ok(None);
         }
-        let requested = match requested_input(decision, disposition, remaining_model_requests, stop) {
+        let requested = match requested_input(decision, disposition, remaining, stop) {
             Ok(requested) => requested,
             Err(outcome) => return Ok(Some(outcome)),
         };
-        if let Some(Message::User {
-            kind: UserMessageKind::ContinueAnswer,
-            ..
-        }) = &requested
-        {
+        if requested.as_ref().is_some_and(continues_answer) {
             result.answer_continuations = result.answer_continuations.saturating_add(1);
         }
         *pending = match requested {
@@ -551,6 +541,21 @@ impl<'a, 'b> Engine<'a, 'b> {
             None => return Ok(Some(completed(stop))),
         };
         Ok(None)
+    }
+
+    /// Ask the finish hooks what follows the turn `summary` describes.
+    async fn finish_turn(&self, summary: &TurnSummary<'_>) -> Result<TurnDecision, Halt> {
+        self.config
+            .hooks
+            .finish_turn(summary, self.trace.context())
+            .await
+            .map_err(|error| Halt::Failed(self.report_hook_failure(error)))
+    }
+
+    /// Model requests the attempt may still make; `None` is unlimited.
+    fn remaining_model_requests(&self, result: &LoopResult) -> Option<u32> {
+        self.max_model_requests
+            .map(|limit| limit.saturating_sub(result.model_requests))
     }
 
     /// What the normal loop would do after a response, before the finish hooks decide.
@@ -681,6 +686,17 @@ fn requested_input(
             Ok(None)
         }
     }
+}
+
+/// Whether `message` continues the preceding answer rather than starting a new one.
+fn continues_answer(message: &Message) -> bool {
+    matches!(
+        message,
+        Message::User {
+            kind: UserMessageKind::ContinueAnswer,
+            ..
+        }
+    )
 }
 
 /// The assistant message at `index` of `context`, if one is there.

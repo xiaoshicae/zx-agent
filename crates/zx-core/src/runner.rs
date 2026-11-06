@@ -15,14 +15,10 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use accounting::RunAccounting;
-use answer::final_answer;
-#[cfg(test)]
-use answer::overlap;
 use host::{CompactionPause, RunHost, RunStop};
 
 use crate::agent::{
-    AgentEvent, EventSink, EventTarget, LoopConfig, LoopControl, LoopFailure, LoopOutcome, QueuedMessage, RunTrace,
-    record_pending_entries, run_loop,
+    EventSink, EventTarget, LoopConfig, LoopControl, LoopFailure, LoopOutcome, QueuedMessage, RunTrace, run_loop,
 };
 pub use crate::agent::{RunOutcome, RunReport};
 use crate::ai::retry::{RetryPolicy, is_context_overflow, is_retryable};
@@ -95,13 +91,7 @@ impl Runner {
     pub async fn compact(&mut self, cancel: &CancellationToken) -> compaction::Report {
         let child = cancel.child_token();
         let _cancel_on_drop = child.drop_guard_ref();
-        let trace = RunTrace::new(
-            Some(self.session.header().id.clone()),
-            self.config.spec.cwd.clone(),
-            child.clone(),
-            self.config.queues.clone(),
-            self.config.active_tools.clone(),
-        );
+        let trace = self.config.trace(Some(self.session.header().id.clone()), child.clone());
         let target = EventTarget {
             sink: self.sink.as_ref(),
             trace: &trace,
@@ -148,7 +138,8 @@ impl Runner {
         &self.session
     }
 
-    /// The session, for a branch switch between runs.
+    /// The session, for what a host does to it between runs: a branch switch, or a record
+    /// of its own, such as an extension's state or an idempotency key.
     pub(crate) fn session_mut(&mut self) -> &mut SessionStore {
         &mut self.session
     }
@@ -200,26 +191,6 @@ impl Runner {
         // keeps its parent token alive.
         let _cancel_on_drop = run_cancel.drop_guard_ref();
         let timer = RunTimer::start(self.limits.timeout, &run_cancel);
-        let trace = RunTrace::new(
-            Some(self.session.header().id.clone()),
-            self.config.spec.cwd.clone(),
-            run_cancel.clone(),
-            self.config.queues.clone(),
-            self.config.active_tools.clone(),
-        );
-        let start = AgentEvent::RunStart {
-            model: self.config.spec.model.clone(),
-            provider: self.config.spec.provider.name().into(),
-        };
-        let to = EventTarget {
-            sink: self.sink.as_ref(),
-            trace: &trace,
-        };
-        self.config.hooks.emit(start, to).await;
-        // Entry IDs remain stable even when hooks omit messages from earlier runs.
-        let run_start = self.session.entries().len();
-        // Before any system prompt change or input, so that results directly follow their calls.
-        let recovered = self.recover_interrupted_calls(&trace).await;
         let Self {
             config,
             retry,
@@ -231,13 +202,10 @@ impl Runner {
             pause,
         } = self;
         let sink = sink.as_ref();
-        let to = EventTarget { sink, trace: &trace };
-        let mut host = RunHost::new(session, to, config, compaction, pause);
-        let begun = match (recovered, begin) {
-            (Err(error), _) => Err(error),
-            (Ok(()), Start::Message(message)) => Ok(vec![message]),
-            (Ok(()), Start::Continue) => host.continuation(&config.queues).await,
-        };
+        let trace = config.trace(Some(session.header().id.clone()), run_cancel.clone());
+        let target = EventTarget { sink, trace: &trace };
+        let mut host = RunHost::new(session, target, config, compaction, pause);
+        let (begun, run_start) = host.open_run(begin).await;
         let mut accounting = RunAccounting::default();
         let mut shared = Attempting {
             config,
@@ -249,31 +217,10 @@ impl Runner {
             trace: &trace,
         };
         let stop = match begun {
-            Err(error) => RunStop::error(error),
+            Err(error) => RunStop::Failed(error),
             Ok(prompts) => attempts(&mut host, prompts, &mut accounting, &mut shared).await,
         };
-        // State that hooks asked to record during the last events is kept before the run is
-        // reported, so a host reading the session afterwards finds it.
-        let stop = match record_pending_entries(config, &mut host, to).await {
-            Ok(()) => stop,
-            Err(error) => RunStop::error(error),
-        };
-        let (outcome, error) = conclude(stop, limits, &accounting, timer.timed_out());
-        let final_text = final_answer(&host.session.messages_since(run_start));
-        let report = RunReport {
-            outcome,
-            final_text,
-            model_requests: accounting.model_requests,
-            retries: accounting.retries,
-            usage: accounting.usage,
-            error,
-            session_file: host.session.path().map(|p| p.display().to_string()),
-        };
-        let end = AgentEvent::RunEnd {
-            report: Box::new(report.clone()),
-        };
-        config.hooks.emit(end, to).await;
-        report
+        host.close_run(stop, run_start, limits, &accounting, &timer).await
     }
 }
 
@@ -287,6 +234,9 @@ struct Attempting<'a> {
     sink: &'a dyn EventSink,
     trace: &'a RunTrace,
 }
+
+/// The reason reported for an attempt that ended with `Error` but named no failure.
+const NO_DIAGNOSTIC: &str = "loop failed without a diagnostic";
 
 /// Run `prompts`, then retry or recover from a context overflow as long as the budget and
 /// the retry policy allow, until an attempt ends the run.
@@ -318,16 +268,13 @@ async fn attempts(
         let result = run_loop(&mut context, std::mem::take(&mut prompts), shared.config, &mut control).await;
         accounting.record(&result);
         if result.outcome != LoopOutcome::Error {
-            break RunStop {
-                outcome: result.outcome,
-                error: None,
-            };
+            break RunStop::Ended(result.outcome);
         }
         // Hook failures are distinct from failed provider responses and are not retried.
         let (failed, entry_id) = match result.failure {
             Some(LoopFailure::Provider { message, entry_id }) => (message, entry_id),
-            Some(LoopFailure::Host(error)) => break RunStop::error(error),
-            None => break RunStop::error("loop failed without a diagnostic"),
+            Some(LoopFailure::Host(error)) => break RunStop::Failed(error),
+            None => break RunStop::Failed(NO_DIAGNOSTIC.into()),
         };
         let failure = Failure {
             message: failed,
@@ -357,13 +304,12 @@ async fn after_failure(
     shared: &Attempting<'_>,
 ) -> Result<(), RunStop> {
     let failed = &failure.message;
-    let error = failed.error_message.clone();
+    let error = failed.failure_reason();
     let out_of_budget = !accounting.has_budget(shared.limits) || shared.cancel.is_cancelled();
     if is_context_overflow(failed) && host.compaction.automatic() {
         // A context the model rejects as too long fails again however often it is sent:
         // compact once and continue. Not a retry, so it has its own limit: once per run,
         // until an answer succeeds again (more than one turn in the attempt).
-        let overflow = error.clone().unwrap_or_default();
         let refusal = if accounting.overflow_recovered && failure.task_turns <= 1 {
             Some("the context still overflowed after compacting it once".to_string())
         } else {
@@ -372,25 +318,19 @@ async fn after_failure(
             })
         };
         if let Some(refusal) = refusal {
-            return Err(RunStop::error(format!("{overflow}; {refusal}")));
+            return Err(RunStop::Failed(format!("{error}; {refusal}")));
         }
         if out_of_budget {
-            return Err(RunStop {
-                outcome: LoopOutcome::Error,
-                error,
-            });
+            return Err(RunStop::Failed(error.to_string()));
         }
-        host.recover_overflow(&overflow, failure.entry_id.as_deref(), accounting, shared.cancel)
+        host.recover_overflow(error, failure.entry_id.as_deref(), accounting, shared.cancel)
             .await?;
         accounting.overflow_recovered = true;
         return Ok(());
     }
     // Without budget, the provider error is the reason the run ends.
     if !is_retryable(failed) || accounting.retries >= shared.retry.max_retries || out_of_budget {
-        return Err(RunStop {
-            outcome: LoopOutcome::Error,
-            error,
-        });
+        return Err(RunStop::Failed(error.to_string()));
     }
     host.schedule_retry(
         shared.retry,
@@ -443,13 +383,17 @@ fn conclude(
     accounting: &RunAccounting,
     timed_out: bool,
 ) -> (RunOutcome, Option<String>) {
-    match stop.outcome {
+    let outcome = match stop {
+        RunStop::Failed(error) => return (RunOutcome::Error, Some(error)),
+        RunStop::Ended(outcome) => outcome,
+    };
+    match outcome {
         LoopOutcome::Completed => (RunOutcome::Completed, None),
         LoopOutcome::Truncated => (
             RunOutcome::Truncated,
             Some("the answer was cut off at the output token limit".to_string()),
         ),
-        LoopOutcome::Error => (RunOutcome::Error, stop.error),
+        LoopOutcome::Error => (RunOutcome::Error, Some(NO_DIAGNOSTIC.to_string())),
         LoopOutcome::ModelRequestLimit => (
             RunOutcome::ModelRequestLimit,
             Some(format!(
@@ -470,10 +414,11 @@ fn conclude(
             )),
         ),
         LoopOutcome::Aborted if timed_out => {
-            let secs = limits.timeout.map(|t| t.as_secs()).unwrap_or_default();
+            // Only the timer of a configured limit sets `timed_out`.
+            let limit = limits.timeout.expect("Timeout requires a configured time limit");
             (
                 RunOutcome::Timeout,
-                Some(format!("run exceeded the {secs}s time limit")),
+                Some(format!("run exceeded the {}s time limit", limit.as_secs())),
             )
         }
         LoopOutcome::Aborted => (RunOutcome::Aborted, Some("run was cancelled".to_string())),
@@ -486,7 +431,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::*;
-    use crate::agent::{LoopSpec, NullSink};
+    use crate::agent::{LoopSpec, NullSink, Tool};
     use crate::ai::faux::{FauxProvider, FauxStep};
     use crate::ai::{Message, SystemPrompt};
     use crate::session::{FailingWriter, SessionHeader};
@@ -501,30 +446,29 @@ mod tests {
         assert_eq!(Limits::default().token_budget, None);
     }
 
-    #[test]
-    fn a_final_answer_joins_marked_continuations_across_system_messages() {
-        let answer = |text: &str| {
-            let mut message = crate::ai::AssistantMessage::failure("p", "m", crate::ai::StopReason::Stop, "");
-            message.error_message = None;
-            message.content = vec![crate::ai::ContentBlock::Text { text: text.into() }];
-            Message::Assistant(message)
-        };
-        let update = Message::System(crate::ai::SystemMessage {
-            sections: vec![crate::ai::SectionChange {
-                name: "environment".into(),
-                content: Some("changed".into()),
-            }],
-            timestamp: 0,
-        });
-        let messages = [
-            Message::user("go"),
-            answer("甲"),
-            update,
-            Message::continuation("continue"),
-            answer("乙"),
-        ];
+    /// A loop over `provider` and `tools` with no system prompt.
+    fn config(provider: &Arc<FauxProvider>, tools: Vec<Arc<dyn Tool>>) -> LoopConfig {
+        LoopConfig::new(LoopSpec {
+            provider: provider.clone(),
+            model: "m".into(),
+            system_prompt: SystemPrompt::default(),
+            tools,
+            cwd: PathBuf::from("."),
+            max_tokens: None,
+            reasoning: None,
+            sequential_tools: false,
+        })
+    }
 
-        assert_eq!(final_answer(&messages), "甲乙");
+    /// A runner without retries or limits, whose events go nowhere.
+    fn runner(config: LoopConfig, session: SessionStore) -> Runner {
+        Runner::new(
+            config,
+            RetryPolicy::default(),
+            Limits::default(),
+            session,
+            Arc::new(NullSink),
+        )
     }
 
     /// Fails only the write of one entry type, like a disk filling up at that record.
@@ -567,29 +511,13 @@ mod tests {
                 FauxStep::text(summary),
                 FauxStep::text("must not execute"),
             ]));
-            let config = LoopConfig::new(LoopSpec {
-                provider: provider.clone(),
-                model: "m".into(),
-                system_prompt: SystemPrompt::default(),
-                tools: vec![],
-                cwd: PathBuf::from("."),
-                max_tokens: None,
-                reasoning: None,
-                sequential_tools: false,
-            });
-            let mut runner = Runner::new(
-                config,
-                RetryPolicy::default(),
-                Limits::default(),
-                store,
-                Arc::new(NullSink),
-            )
-            .with_compaction(compaction::Config {
-                trigger_bytes: Some(1024),
-                keep_recent_bytes: 1,
-                ..compaction::Config::default()
-            })
-            .unwrap();
+            let mut runner = runner(config(&provider, vec![]), store)
+                .with_compaction(compaction::Config {
+                    trigger_bytes: Some(1024),
+                    keep_recent_bytes: 1,
+                    ..compaction::Config::default()
+                })
+                .unwrap();
             let report = runner.run("continue", &CancellationToken::new()).await;
             assert_eq!(report.outcome, RunOutcome::Error, "{rejected}: {report:?}");
             assert!(report.error.unwrap().contains(&format!("disk full on {rejected}")));
@@ -605,24 +533,8 @@ mod tests {
     #[tokio::test]
     async fn a_session_write_failure_cancels_the_run() {
         let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
-        let config = LoopConfig::new(LoopSpec {
-            provider: provider.clone(),
-            model: "m".into(),
-            system_prompt: SystemPrompt::default(),
-            tools: vec![],
-            cwd: PathBuf::from("."),
-            max_tokens: None,
-            reasoning: None,
-            sequential_tools: false,
-        });
         let session = SessionStore::with_writer(SessionHeader::new(Path::new("."), "m"), Box::new(FailingWriter));
-        let mut runner = Runner::new(
-            config,
-            RetryPolicy::default(),
-            Limits::default(),
-            session,
-            Arc::new(NullSink),
-        );
+        let mut runner = runner(config(&provider, vec![]), session);
 
         let report = runner.run("go", &CancellationToken::new()).await;
 
@@ -639,25 +551,9 @@ mod tests {
     async fn a_request_checkpoint_write_failure_prevents_the_request() {
         for rejected in ["request_config", "request_started"] {
             let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
-            let config = LoopConfig::new(LoopSpec {
-                provider: provider.clone(),
-                model: "m".into(),
-                system_prompt: SystemPrompt::default(),
-                tools: vec![],
-                cwd: PathBuf::from("."),
-                max_tokens: None,
-                reasoning: None,
-                sequential_tools: false,
-            });
             let session =
                 SessionStore::with_writer(SessionHeader::new(Path::new("."), "m"), Box::new(RejectEntry(rejected)));
-            let mut runner = Runner::new(
-                config,
-                RetryPolicy::default(),
-                Limits::default(),
-                session,
-                Arc::new(NullSink),
-            );
+            let mut runner = runner(config(&provider, vec![]), session);
 
             let report = runner.run("go", &CancellationToken::new()).await;
 
@@ -693,7 +589,7 @@ mod tests {
     /// Counts its executions, which must never happen without an audit trail.
     struct Counted(std::sync::atomic::AtomicUsize);
     #[async_trait]
-    impl crate::agent::Tool for Counted {
+    impl Tool for Counted {
         fn name(&self) -> &str {
             "counted"
         }
@@ -714,27 +610,6 @@ mod tests {
         }
     }
 
-    fn counted_runner(tool: &Arc<Counted>, provider: &Arc<FauxProvider>, session: SessionStore) -> Runner {
-        let tool: Arc<dyn crate::agent::Tool> = tool.clone();
-        let config = LoopConfig::new(LoopSpec {
-            provider: provider.clone(),
-            model: "m".into(),
-            system_prompt: SystemPrompt::default(),
-            tools: vec![tool],
-            cwd: PathBuf::from("."),
-            max_tokens: None,
-            reasoning: None,
-            sequential_tools: false,
-        });
-        Runner::new(
-            config,
-            RetryPolicy::default(),
-            Limits::default(),
-            session,
-            Arc::new(NullSink),
-        )
-    }
-
     #[tokio::test]
     async fn a_start_record_write_failure_prevents_the_call() {
         // A v3 session must first record its upgrade to v4; either write can fail.
@@ -747,7 +622,7 @@ mod tests {
             let mut header = SessionHeader::new(Path::new("."), "m");
             header.version = version;
             let session = SessionStore::with_writer(header, Box::new(RejectEntry(rejected)));
-            let mut runner = counted_runner(&tool, &provider, session);
+            let mut runner = runner(config(&provider, vec![tool.clone()]), session);
 
             let report = runner.run("go", &CancellationToken::new()).await;
 
@@ -786,7 +661,7 @@ mod tests {
         session.append_tool_call_started("c1", "counted").await.unwrap();
         let tool = Arc::new(Counted(std::sync::atomic::AtomicUsize::new(0)));
         let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
-        let mut runner = counted_runner(&tool, &provider, session);
+        let mut runner = runner(config(&provider, vec![tool.clone()]), session);
 
         let report = runner.run("continue", &CancellationToken::new()).await;
 
@@ -795,11 +670,6 @@ mod tests {
         assert!(error.contains("disk full on a tool result"), "{error}");
         assert!(provider.requests().is_empty(), "requested without a recorded result");
         assert_eq!(tool.0.load(Ordering::SeqCst), 0, "recovery must not run calls again");
-    }
-
-    #[test]
-    fn short_overlaps_are_treated_as_coincidence() {
-        assert_eq!(overlap("step 1", "1 more"), 0);
     }
 
     #[tokio::test]
@@ -832,36 +702,15 @@ mod tests {
             }
         }
         let provider = Arc::new(FauxProvider::new([FauxStep::text("never")]));
-        let mut config = LoopConfig::new(LoopSpec {
-            provider: provider.clone(),
-            model: "m".into(),
-            system_prompt: SystemPrompt::default(),
-            tools: vec![],
-            cwd: PathBuf::from("."),
-            max_tokens: None,
-            reasoning: None,
-            sequential_tools: false,
-        });
+        let mut config = config(&provider, vec![]);
         config.hooks.push(Rewrite);
         let session = SessionStore::with_writer(SessionHeader::new(Path::new("."), "m"), Box::new(EditFailure));
-        let mut runner = Runner::new(
-            config,
-            RetryPolicy::default(),
-            Limits::default(),
-            session,
-            Arc::new(NullSink),
-        );
+        let mut runner = runner(config, session);
         let report = runner.run("original", &CancellationToken::new()).await;
         assert_eq!(report.outcome, RunOutcome::Error);
         assert!(report.error.unwrap().contains("disk full on edit"));
         assert!(provider.requests().is_empty());
         assert_eq!(runner.session().messages().len(), 1);
         assert!(matches!(&runner.session().messages()[0], Message::User { content, .. } if content == "original"));
-    }
-
-    #[test]
-    fn overlaps_are_measured_in_bytes_on_char_boundaries() {
-        // "端口错误" is 12 bytes, so it counts even though it is only 4 characters.
-        assert_eq!(overlap("数据库端口错误", "端口错误: 5433"), "端口错误".len());
     }
 }

@@ -325,7 +325,9 @@ fn merge(attempt: &str, previous: Vec<SummaryFact>, answer: ModelSummary, source
     })
 }
 
-pub(crate) struct Host<'a> {
+/// Runs one summary over a session: chooses what to summarize, records the attempt, asks
+/// the model, checks the answer and records the result or the failure.
+pub(crate) struct Summarizer<'a> {
     pub session: &'a mut SessionStore,
     pub provider: &'a dyn Provider,
     pub model: &'a str,
@@ -377,7 +379,7 @@ struct Failed {
     response: Option<AssistantMessage>,
 }
 
-impl Host<'_> {
+impl Summarizer<'_> {
     async fn emit(&self, event: AgentEvent) {
         self.hooks.emit(event, self.target).await;
     }
@@ -765,10 +767,7 @@ fn parse_answer(response: &Result<AssistantMessage, String>) -> Result<ModelSumm
         StopReason::Stop => Err("summary contains a tool call; tools are not permitted".into()),
         StopReason::Length => Err("summary reached the output token limit".into()),
         StopReason::ToolUse => Err("summary requested a tool call; tools are not permitted".into()),
-        StopReason::Error | StopReason::Aborted => Err(message
-            .error_message
-            .clone()
-            .unwrap_or_else(|| "summary request failed".into())),
+        StopReason::Error | StopReason::Aborted => Err(message.failure_reason().to_string()),
     }
 }
 
