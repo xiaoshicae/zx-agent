@@ -40,9 +40,8 @@ pub struct Usage {
     pub reasoning: u64,
     pub total_tokens: u64,
     /// What the response cost by the configured prices ([`ModelCost`]), in their unit;
-    /// absent without prices. A sum adds the known costs (pi: `cost.total`). Sessions and
-    /// hook processes written before the rename have `costUsd`, which still reads.
-    #[serde(default, alias = "costUsd", skip_serializing_if = "Option::is_none")]
+    /// absent without prices. A sum adds the known costs (pi: `cost.total`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_cost: Option<f64>,
 }
 
@@ -832,16 +831,6 @@ mod tests {
             (Some(4), Some(6))
         );
         assert_eq!(json["totalCost"].as_f64(), Some(0.75));
-    }
-
-    #[test]
-    fn a_cost_recorded_as_cost_usd_still_reads() {
-        let old = json!({"input": 1, "output": 2, "cacheRead": 0, "totalTokens": 3, "costUsd": 0.5});
-
-        let usage: Usage = serde_json::from_value(old).unwrap();
-
-        assert_eq!(usage.total_cost, Some(0.5));
-        assert_eq!(serde_json::to_value(&usage).unwrap()["totalCost"].as_f64(), Some(0.5));
     }
 
     #[test]

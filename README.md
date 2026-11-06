@@ -545,7 +545,7 @@ askTools = []                    # approveAll 时须为空（内置 assistant �
 
 `report.modelRequests` 是模型请求数（含摘要请求），与回合编号不同。`report.usage` 只含模型的用量；工具报告的花费（例如工具自己调用了模型）按工具名在 `report.toolUsage` 中，没有时省略该字段。`report.deniedCalls` 是被策略或审批拒绝的工具调用数，为零时省略。
 
-`usage` 统计本次运行中每个回复的用量，失败的尝试也计入。被取消的请求记为 0，因为服务端在流的末尾才返回用量；实际计费以服务商账单为准。`cacheWrite`（写入缓存的提示词 token）与 `reasoning`（输出中的推理 token）只在服务返回且不为 0 时出现；`totalCost` 只在 profile 的 `[[models]]` 给出该模型的单价时出现，是按单价算出的花费，单位与单价相同（摘要请求也计入；对应 pi 的 `cost.total`），同一运行内的多次回复相加。此前的版本把它写作 `costUsd`，读取会话文件与钩子进程的输出时两种写法都接受。回复消息另带服务端返回的 `responseId` 与（和请求的不同时）`responseModel`。
+`usage` 统计本次运行中每个回复的用量，失败的尝试也计入。被取消的请求记为 0，因为服务端在流的末尾才返回用量；实际计费以服务商账单为准。`cacheWrite`（写入缓存的提示词 token）与 `reasoning`（输出中的推理 token）只在服务返回且不为 0 时出现；`totalCost` 只在 profile 的 `[[models]]` 给出该模型的单价时出现，是按单价算出的花费，单位与单价相同（摘要请求也计入；对应 pi 的 `cost.total`），同一运行内的多次回复相加。回复消息另带服务端返回的 `responseId` 与（和请求的不同时）`responseModel`。
 
 `message_update.delta` 的 `tool_call_args` 包含 `id` 和 `text`，`id` 与对应 `tool_call_start` 相同，便于关联交错返回的工具参数。旧事件缺少 `id` 时，反序列化为空字符串。
 
