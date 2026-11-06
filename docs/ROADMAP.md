@@ -1611,7 +1611,7 @@ D11 容器沙箱的实施要点（2026-11-05 用户决定）：
 - [x] **④ IM**（`c315a51`）：`zx-im` 的 `platform.rs`（`Pacer`、`Cards`）、`CardLabels::outcome`、`Shared::bounded`、worker 的 `Decision`；飞书的 `Connection`、`open_socket`、`ping`；Slack 的 `open_socket`。
 - [x] **⑤ 测试辅助**（`1c0e5bb`）：`tests/common` 的 `zx_agent()`、`stdout`、`stderr`。
 - [x] **⑥ 注释与文档**：行级的 pi 出处、PR 编号与决策编号只留在模块文档；README、`.claude/CLAUDE.md`、规则 04 随改动更新。
-- [x] **⑦ 规则与 lint**（本 PR）：`Cargo.toml` 的 `[workspace.lints]` 开一组挑过的 clippy 项（函数长度 80 行、认知复杂度、四个 `cast_*`、文档反引号之外的可读性项），阈值在 `clippy.toml`；清掉的命中里，`cli::prepare`、`Runner::start`、`RawProfile::apply`、`serve::run`、`compaction::Host::candidate` 再拆一次，按变体展开的 match 与冻结的 chat 带 `#[expect(lint, reason)]`；新增规则 09（尺寸与重复），规则 01 加命名与"搬代码连文档一起搬"，规则 05 加状态与数值转换的判断，规则 06 瘦身（测试文件目录移到 `docs/TESTS.md`）；`cargo doc` 进命令清单、PR 模板与 stop hook；`.claude/settings.json` 启用两个 hook。
+- [x] **⑦ 规则与 lint**（PR #75）：`Cargo.toml` 的 `[workspace.lints]` 开一组挑过的 clippy 项（函数长度 80 行、认知复杂度、四个 `cast_*`、文档反引号之外的可读性项），阈值在 `clippy.toml`；清掉的命中里，`cli::prepare`、`Runner::start`、`RawProfile::apply`、`serve::run`、`compaction::Host::candidate` 再拆一次，按变体展开的 match 与冻结的 chat 带 `#[expect(lint, reason)]`；新增规则 09（尺寸与重复），规则 01 加命名与"搬代码连文档一起搬"，规则 05 加状态与数值转换的判断，规则 06 瘦身（测试文件目录移到 `docs/TESTS.md`）；`cargo doc` 进命令清单、PR 模板与 stop hook；`.claude/settings.json` 启用两个 hook。
 
 验证（本机 macOS）：`cargo fmt`、`cargo clippy --all-targets -- -D warnings`、`cargo test`（990 通过、0 失败、7 项付费测试跳过）、`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`、`cargo +1.88.0 check --all-targets` 通过；自查脚本的命中与基线相同；未新增依赖。真实 Docker 与付费 e2e 测试本次没有运行。
 
