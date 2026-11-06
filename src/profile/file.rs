@@ -318,6 +318,6 @@ impl RawContainer {
 
 /// Read a regular UTF-8 configuration file within [`MAX_FILE_BYTES`]. This is bounded,
 /// synchronous startup I/O; invalid files and read failures preserve their path in errors.
-pub fn read_text(path: &Path) -> Result<String> {
+pub(super) fn read_text(path: &Path) -> Result<String> {
     read_text_file(path, MAX_FILE_BYTES)
 }

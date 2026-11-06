@@ -8,13 +8,13 @@ use tokio_util::sync::CancellationToken;
 
 use zx_agent::AgentSession;
 use zx_agent::agent::{AgentEvent, Event, EventSink};
-use zx_agent::ai::{Message, StopReason};
+use zx_agent::ai::Message;
 use zx_agent::profile::Builtin;
 use zx_agent::runner::RunReport;
 
 use crate::cli::{self, OutputMode, RunArgs};
-use crate::process::{JsonlEvents, exit_code, print_line, spawn_signal_handler};
-use crate::render::{progress_line, visible};
+use crate::process::{JsonlEvents, exit_code, print_line, run_sink, spawn_signal_handler, with_telemetry};
+use crate::render::{answer_end_line, progress_line, visible};
 use crate::sessions::SessionFile;
 
 /// Run one task and return its exit code. An `Err` is a configuration problem found
@@ -33,25 +33,26 @@ pub(crate) async fn run(args: RunArgs) -> Result<u8> {
             None
         }
     };
-    let telemetry = cli::start_telemetry()?;
-    let session = build_session(&args).await?;
-    // Kept until the run has ended: dropping it unsubscribes.
-    let _traced = telemetry
-        .as_ref()
-        .map(|telemetry| session.subscribe(cli::run_sink(telemetry)));
-    let cancel = CancellationToken::new();
-    spawn_signal_handler(cancel.clone());
-    let report = match prompt {
-        Some(prompt) => session.prompt_with_cancel(prompt, &cancel).await?,
-        None => session.continue_with_cancel(&cancel).await?,
-    };
-    print_report(&report, args.output);
-    cli::finish_telemetry(telemetry).await;
-    Ok(exit_code(report.outcome))
+    with_telemetry(async move |telemetry| {
+        let session = build_session(&args).await?;
+        // Kept until the run has ended: dropping it unsubscribes.
+        let _traced = telemetry.map(|telemetry| session.subscribe(run_sink(telemetry)));
+        let cancel = CancellationToken::new();
+        spawn_signal_handler(cancel.clone());
+        let report = match prompt {
+            Some(prompt) => session.prompt_with_cancel(prompt, &cancel).await?,
+            None => session.continue_with_cancel(&cancel).await?,
+        };
+        print_report(&report, args.output);
+        Ok(exit_code(report.outcome))
+    })
+    .await
 }
 
 fn read_prompt(arg: &str) -> Result<String> {
     let prompt = if arg == "-" {
+        // A startup read: the session and the runtime's other tasks do not exist yet, so
+        // nothing waits while stdin is read to its end.
         let mut text = String::new();
         std::io::stdin()
             .read_to_string(&mut text)
@@ -74,6 +75,7 @@ async fn build_session(args: &RunArgs) -> Result<AgentSession> {
         request: &args.request,
         budget: &args.budget,
         model: &args.base.model,
+        cwd: None,
         file: SessionFile::from_path(args.request.session.as_deref()),
         default_profile: Builtin::Unattended,
         continue_on_length: args.continue_on_length,
@@ -130,12 +132,10 @@ impl EventSink for TextProgress {
             ..
         } = &event.event
         {
-            if let Some(error) = &message.error_message {
-                eprintln!("[model] {:?}: {}", message.stop_reason, visible(error));
-            } else if message.stop_reason == StopReason::Length {
-                eprintln!("[model] Length: the response hit the output token limit");
+            if let Some((_, line)) = answer_end_line(message) {
+                eprintln!("{line}");
             }
-        } else if let Some(line) = progress_line(&event.event) {
+        } else if let Some((_, line)) = progress_line(&event.event) {
             eprintln!("{line}");
         }
     }

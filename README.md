@@ -330,7 +330,7 @@ zx-agent    src/             CLI（run、chat、serve、acp）、profile、OpenT
 zx-im 与 zx-tools 都只依赖 zx-core 与 zx-ai，彼此不依赖；zx-ai-openai 只依赖 zx-ai，内核与它互不依赖，所以只嵌入内核的程序不编译 HTTP 客户端；两个平台 crate 实现 zx-im 的 `ImChannel`。代码中没有针对特定场景、环境或平台文案语言的规则：场景是 profile 文件，Kubernetes 的规则在 `deploy/kubernetes/`，IM 的文案由配置替换。模块之间的关系：
 
 ```
-CLI (main.rs + cli.rs + chat/ + acp.rs)
+CLI (main.rs + cli/ + chat/ + acp/)
   ├─ profile/ + profiles/  文件化场景、上下文与 skill 工具
   └─ agent_session  共享会话、取消、订阅与模型切换           ← pi: coding-agent AgentSession
        └─ runner    独占运行、重试、轮次与时间上限、持久化
@@ -359,8 +359,8 @@ CLI (main.rs + cli.rs + chat/ + acp.rs)
 | 共享会话 | `crates/zx-core/src/agent_session.rs` | `AgentSession` 的长期生命周期与多订阅者接口 |
 | 系统提示词 | `crates/zx-core/src/prompt.rs` | `coding-agent/src/core/system-prompt.ts` |
 | 文件化配置 | `src/profile/`、`profiles/` | 加载与叠加 TOML、项目上下文、显式 skill 目录及按需读取；内置场景只有这些文件 |
-| 终端前端 | `src/chat/`、`src/cli.rs`、`src/run.rs`、`src/process.rs`、`src/render.rs` | 单输入所有者、审批、显示；共享的 CLI 选项与会话组装；run 子命令；退出码、stdout 行与信号；终端与日志里调用与事件的文案 |
-| ACP 接入 | `src/acp.rs` | agent 一侧：会话、回合、事件到 `session/update` 的映射、审批到 `session/request_permission` 的映射 |
+| 终端前端 | `src/chat/`、`src/cli/`、`src/run.rs`、`src/process.rs`、`src/render.rs`、`src/sessions.rs`、`src/list_sessions.rs` | 单输入所有者、审批、显示；共享的 CLI 选项、进程共用的连接与会话组装；run 子命令；退出码、stdout 行、信号与追踪导出；终端与日志里调用与事件的文案；会话文件与 `zx-agent sessions` |
+| ACP 接入 | `src/acp/` | agent 一侧：会话、回合、事件到 `session/update` 的映射、审批到 `session/request_permission` 的映射 |
 | IM 接入 | `crates/zx-im/src/` | 无对应实现：`ImChannel` 平台接口；`Server` 按线程分派，每个线程一个任务独占会话，审批卡片与运行上限 |
 | IM 平台 | `crates/zx-im-slack/`、`crates/zx-im-feishu/` | 无对应实现：两个 `ImChannel` 实现，与接口分开，平台相关的代码只在这里 |
 
@@ -830,7 +830,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 | `tests/acp_cli.rs` | `acp`：手写的 JSON-RPC 客户端经子进程 stdio 驱动：初始化与建会话、流式回答与 `end_turn`、工具调用的 `tool_call` 与权限请求、批准后执行与 `completed`、拒绝不执行且模型收到原因、`session/cancel` 得到 `cancelled` 后会话可继续、未知会话的错误、`write_file` 的 diff 与位置、自动放行的命令不问人且在会话的目录执行；会话文件在 cwd 的会话目录中，第二个进程 `session/load` 后回放对话再继续（模型看到此前的消息），工具调用连同结果的回放，`--session-dir`，`--no-session` 不落盘且不声明 `loadSession`，未知会话与 `--session` 的错误；stdout 的每一行都必须是协议消息 |
 | `tests/profiles_cli.rs` | profile 覆盖、显式默认值、预算参数的 help 写明取自 profile、不可绕过的 deny、上下文范围与审计、上下文默认值与越界链接、`--system-prompt-file` 兼容、skill 懒加载与脱敏、配置错误（含 provider 参数）退出码且不建会话文件 |
 | `tests/run_cli.rs` | `run` 在 P0 之后新增的约定：进度与报告行转义终端控制字符；另一个 `run` 正在写的会话文件不能再被打开写入；JSONL 事件的信封；为零的超时在请求前被拒绝；stdout 已关闭时退出码仍由运行结果决定；token 预算的退出码 7、最后一次请求可超出预算、profile 设置预算与命令行的 0 关闭；只在设置了 OTLP 地址时导出追踪与指标，导出内容不含回答；`TRACEPARENT` 让运行接续调用方的 trace，不合法时提示并自成一条；`--request-field` 到达模型并写入请求审计，写错时以退出码 2 结束且不建会话文件；`--fill-missing-reasoning` 默认关闭，开启时写入请求审计；`--reasoning` 按三种写法到达模型并写入请求审计，写错或与 `--request-field` 冲突时以退出码 2 结束（原有 `run` 测试仍在 `tests/cli.rs`） |
-| `tests/otel.rs` | 一次真实运行导出一条 trace：每次尝试、回合、模型请求与工具调用各一个 span，用量与工具属性正确；同一次运行经宿主的 `SdkMeterProvider` 导出指标（运行数、token、请求与工具调用的次数）；`sink_under` 让运行接续给定的 traceparent；`src/otel.rs` 的单元测试另覆盖嵌套与时间、只含元数据、运行结束时关闭未结束的 span、手动摘要自成一条 trace 且其 token 只计一次、指标的属性与时长、traceparent 的解析与拒绝、队列满时丢弃并计数 |
+| `tests/otel.rs` | 一次真实运行导出一条 trace：每次尝试、回合、模型请求与工具调用各一个 span，用量与工具属性正确；同一次运行经宿主的 `SdkMeterProvider` 导出指标（运行数、token、请求与工具调用的次数）；`sink_under` 让运行接续给定的 traceparent；`src/otel/` 的单元测试另覆盖嵌套与时间、只含元数据、运行结束时关闭未结束的 span、手动摘要自成一条 trace 且其 token 只计一次、指标的属性与时长、traceparent 的解析与拒绝、队列满时丢弃并计数 |
 | `tests/session_compaction.rs`、`tests/compaction.rs` | v1/v2 追加升级、分支和引用、原始投影、省略保留边界后摘要仍生效、编辑摘要的变换计划在写入前被拒绝、摘要源与上下文字节统计不含工具结果的 `details`、摘要失败与取消、请求 / 用量预算、超时和上限 |
 | `tests/incremental_summary.rs` | 增量摘要（v5）：第一次读取整段前缀并给事实编号、之后只读旧事实与新增记录、可接续全量模式留下的摘要、取代与淘汰、修正只作废相关事实并在下一次重读、模型不能自带编号、加载时拒绝违反规则的记录、请求可从会话文件还原、多轮之后请求大小不随历史增长（与全量模式对照）；摘要评测的脚本会话自检，以及用知道答案的假模型验证评分 |
 | `tests/request_audit.rs` | 每次任务与摘要请求可从会话文件还原、配置只在变化时追加、旧会话首次请求前升级、与投影不一致的请求不记录、固定会话文件（v4 与含增量摘要的 v5）的还原结果不变（版本守护） |

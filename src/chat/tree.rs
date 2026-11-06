@@ -10,11 +10,13 @@ use std::collections::{HashMap, HashSet};
 use zx_agent::ai::{AssistantMessage, Message, StopReason, UserMessageKind};
 use zx_agent::session::{Entry, SessionStore};
 
-use super::visible;
+use crate::render::{local_time, visible};
 use crate::sessions::preview_text;
 
 /// Spaces per level of a branch left behind.
 const INDENT: &str = "    ";
+/// How the tree shows when an entry was written.
+const TREE_TIME_FORMAT: &str = "%m-%d %H:%M";
 
 /// Where `/branch` moves the conversation.
 pub(super) enum Target {
@@ -103,16 +105,6 @@ fn describe_answer(answer: &AssistantMessage) -> String {
     }
 }
 
-fn local_time(ms: u64) -> String {
-    i64::try_from(ms)
-        .ok()
-        .and_then(chrono::DateTime::from_timestamp_millis)
-        .map_or_else(
-            || "-".to_string(),
-            |utc| utc.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string(),
-        )
-}
-
 /// The nearest shown entry above `id`, by its ID; `None` at the start of the session.
 fn shown_ancestor<'a>(store: &'a SessionStore, mut id: Option<&'a str>) -> Option<&'a str> {
     while let Some(entry) = id.and_then(|id| store.get(id)) {
@@ -198,7 +190,7 @@ pub(super) fn render(store: &SessionStore) -> Vec<String> {
             lines.push(format!(
                 "{indent}{mark} {:<8}  {}  {kind:<10} {preview}",
                 visible(entry.id()),
-                local_time(entry.timestamp())
+                local_time(entry.timestamp(), TREE_TIME_FORMAT).unwrap_or_else(|| "-".to_string())
             ));
         }
         push(Some(entry.id()), visit.depth, &mut stack);
@@ -214,8 +206,9 @@ pub(super) fn render(store: &SessionStore) -> Vec<String> {
     lines
 }
 
-/// The entry `/branch <id>` names: a unique prefix of the ID of an entry the tree shows.
-pub(super) fn resolve(store: &SessionStore, id: &str) -> Result<Target, String> {
+/// The entry `/branch <id>` names, by a unique prefix of its ID among the entries the tree
+/// shows.
+pub(super) fn target(store: &SessionStore, id: &str) -> Result<Target, String> {
     let id = id.trim();
     if id.is_empty() {
         return Err("give an entry ID from /tree".to_string());
@@ -410,7 +403,7 @@ mod tests {
     #[tokio::test]
     async fn a_user_message_resolves_to_before_it_and_other_entries_to_after_them() {
         let (store, ids) = forked().await;
-        match resolve(&store, &ids[2]).unwrap() {
+        match target(&store, &ids[2]).unwrap() {
             Target::Before { parent, id, prompt } => {
                 assert_eq!(
                     (parent.as_deref(), id.as_str(), prompt.as_str()),
@@ -419,7 +412,7 @@ mod tests {
             }
             Target::After { .. } => panic!("a user message moves before itself"),
         }
-        match resolve(&store, &ids[3]).unwrap() {
+        match target(&store, &ids[3]).unwrap() {
             Target::After { id, line } => assert_eq!((id.as_str(), line.as_str()), (ids[3].as_str(), "assistant two")),
             Target::Before { .. } => panic!("an answer is continued after"),
         }
@@ -428,9 +421,9 @@ mod tests {
     #[tokio::test]
     async fn an_id_must_name_exactly_one_shown_entry() {
         let (store, ids) = forked().await;
-        assert_eq!(resolve(&store, "").err().unwrap(), "give an entry ID from /tree");
+        assert_eq!(target(&store, "").err().unwrap(), "give an entry ID from /tree");
         assert_eq!(
-            resolve(&store, "zzzz").err().unwrap(),
+            target(&store, "zzzz").err().unwrap(),
             "no entry in /tree starts with zzzz"
         );
         // Every ID starts with one of 16 characters: the first character of some ID is shared
@@ -438,8 +431,8 @@ mod tests {
         let shared: String = ids[0].chars().take(1).collect();
         let shared_count = ids.iter().filter(|id| id.starts_with(&shared)).count();
         if shared_count > 1 {
-            assert!(resolve(&store, &shared).is_err());
+            assert!(target(&store, &shared).is_err());
         }
-        assert!(resolve(&store, &ids[0]).is_ok());
+        assert!(target(&store, &ids[0]).is_ok());
     }
 }
