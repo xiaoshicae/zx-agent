@@ -17,6 +17,14 @@ const BLOCK_LINES: usize = 60;
 const LABEL_FIELDS: [&str; 3] = ["command", "pattern", "path"];
 /// Characters of a call's arguments on a `[tool]` progress line.
 const PROGRESS_ARGS_CHARS: usize = 300;
+/// Characters of a call's label on a progress or result line, or as a client's title;
+/// approvals show everything.
+const LABEL_CHARS: usize = 80;
+
+/// [`describe_call`] cut to [`LABEL_CHARS`], for a line that lists the call.
+pub(crate) fn call_label(name: &str, args: &Value) -> String {
+    clip(&describe_call(name, args), LABEL_CHARS)
+}
 
 /// `name: <main argument> other=value`, or `name: <arguments as JSON>`; nothing is cut,
 /// control characters are escaped and a multi-line command stays on one line.
@@ -246,6 +254,13 @@ mod tests {
             describe_call("bash", &json!("not an object")),
             "bash: \"not an object\""
         );
+    }
+
+    #[test]
+    fn a_label_is_the_description_cut_short() {
+        assert_eq!(call_label("bash", &json!({"command": "ls -la"})), "bash: ls -la");
+        let long = call_label("bash", &json!({"command": "x".repeat(LABEL_CHARS)}));
+        assert_eq!(long, format!("bash: {}...", "x".repeat(LABEL_CHARS - "bash: ".len())));
     }
 
     // Fields keep the order they were sent in: serde_json's `preserve_order` is on for the
