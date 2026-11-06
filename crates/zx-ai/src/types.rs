@@ -310,6 +310,10 @@ pub struct ToolResultMessage {
     /// context sizes leave it out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<Value>,
+    /// What the tool spent on work of its own, such as a model it asked (pi: a result's
+    /// `usage`). Recorded with the result and never sent to the model, like `details`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
 }
 
 /// Whether user text starts a new answer, continues the preceding answer, or is a context
@@ -615,6 +619,7 @@ mod tests {
             timestamp: 4,
             duration_ms: None,
             details: Some(json!({"exitCode": 0})),
+            usage: None,
         };
         let recorded = json!({
             "role": "toolResult", "toolCallId": "c1", "toolName": "bash", "content": "ok",
@@ -672,6 +677,7 @@ mod tests {
                     timestamp: 8,
                     duration_ms: Some(4),
                     details: None,
+                    usage: None,
                 }),
                 json!({
                     "role": "toolResult", "toolCallId": "c1", "toolName": "bash", "content": "ok",
@@ -683,6 +689,35 @@ mod tests {
             assert_eq!(serde_json::to_value(&message).unwrap(), expected);
             assert_eq!(serde_json::from_value::<Message>(expected).unwrap(), message);
         }
+    }
+
+    #[test]
+    fn tool_result_usage_is_recorded_only_when_present() {
+        let message = Message::ToolResult(ToolResultMessage {
+            tool_call_id: "c2".into(),
+            tool_name: "ask_model".into(),
+            content: "yes".into(),
+            is_error: false,
+            timestamp: 9,
+            duration_ms: None,
+            details: None,
+            usage: Some(Usage {
+                input: 20,
+                output: 4,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+                total_tokens: 24,
+                cost_usd: Some(0.001),
+            }),
+        });
+        let recorded = json!({
+            "role": "toolResult", "toolCallId": "c2", "toolName": "ask_model", "content": "yes",
+            "isError": false, "timestamp": 9,
+            "usage": {"input": 20, "output": 4, "cacheRead": 0, "totalTokens": 24, "costUsd": 0.001}
+        });
+        assert_eq!(serde_json::to_value(&message).unwrap(), recorded);
+        assert_eq!(serde_json::from_value::<Message>(recorded).unwrap(), message);
     }
 
     #[test]

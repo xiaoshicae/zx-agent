@@ -94,6 +94,8 @@ pub(super) enum What {
     ToolEnd {
         call: String,
         is_error: bool,
+        /// What the tool spent on work of its own, when it reported some.
+        usage: Option<Usage>,
     },
     CompactionStart {
         automatic: bool,
@@ -185,10 +187,14 @@ impl Signal {
                 wait_ms: *wait_ms,
             },
             AgentEvent::ToolExecutionEnd {
-                tool_call_id, is_error, ..
+                tool_call_id,
+                is_error,
+                usage,
+                ..
             } => What::ToolEnd {
                 call: tool_call_id.clone(),
                 is_error: *is_error,
+                usage: usage.clone(),
             },
             AgentEvent::CompactionStart { input_bytes, automatic } => What::CompactionStart {
                 automatic: *automatic,

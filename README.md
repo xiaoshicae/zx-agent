@@ -256,6 +256,8 @@ zx-agent run --base-url https://api.deepseek.com --model deepseek-flash \
 | 5 | 被 SIGINT 或 SIGTERM 中止 |
 | 6 | 截断：最终回答达到输出 token 上限，自动续写（`--continue-on-length`）后仍未完成；已生成的部分照常输出 |
 | 7 | 达到 `--token-budget` 预算：用量已达预算，模型还要继续 |
+| 8 | 达到 `--cost-budget` 预算：花费已达预算，模型还要继续 |
+| 9 | 只在给出 `--fail-on-denied` 时出现：模型给出了最终回答，但至少一次工具调用被策略或审批拒绝。不加这个参数时这种情况仍是 0，被拒的次数在报告的 `deniedCalls` 与文本模式最后一行的 `denied_calls=` 中 |
 
 ### 主要参数
 
@@ -273,6 +275,8 @@ zx-agent run --base-url https://api.deepseek.com --model deepseek-flash \
 | `--max-model-requests` | profile：`run`（unattended）为 30，`chat`（assistant）不限 | 本次运行的模型请求次数上限，失败的尝试也计入；`chat` 中为每轮上限 |
 | `--timeout-secs` | profile：`run`（unattended）为 900，`chat`（assistant）为 0 | 整次运行的时间上限，0 表示不限制；`chat` 中为每轮上限 |
 | `--token-budget` | profile：内置 profile 都不设 | 本次运行所有模型请求的输入加输出 token 上限，以服务返回的用量为准，摘要请求、失败的尝试与缓存命中的输入都计入。每次请求之前检查，所以最后一次请求可能让总量超出预算；`run` 以退出码 7 结束。0 表示不限制；`chat` 与 `serve` 中为每轮上限。与 `--max-tokens`（每次回复的输出上限）不同 |
+| `--cost-budget` | profile：内置 profile 都不设 | 本次运行所有模型请求的花费上限，按 profile `[[models]]` 中该模型的单价计算，单位与单价相同：单价按人民币写，预算就是人民币，换算由使用者负责，所有单价须用同一种货币。摘要请求与失败的尝试都计入，工具报告的花费不计入。每次请求之前检查，所以最后一次请求可能超出预算；`run` 以退出码 8 结束。模型没有单价时以退出码 2 拒绝启动，因为没有单价的回答不计花费，预算永远不会生效。0 表示不限制；`chat` 与 `serve` 中为每轮上限 |
+| `--fail-on-denied` | 关闭 | 仅 `run`。模型给出最终回答、但运行中有工具调用被策略或审批拒绝时，以退出码 9 代替 0。无人值守时审批一律拒绝，模型可能绕开被拒的操作继续完成，调度器需要区分时打开 |
 | `--approval-timeout-secs` | 120 | 仅 `chat`：审批请求等待菜单选择或讨论输入的秒数，至少为 1。超时按拒绝处理，任务继续，REPL 立即提示该请求已过期 |
 | `--color` | auto | 仅 `chat`：stderr 文本输出的着色。auto 在交互终端上着色，设置了 `NO_COLOR` 或 `TERM=dumb` 时不着色；always 在重定向时也保留颜色；never 关闭。不影响状态行是否绘制 |
 | `--show-thinking` | 关闭 | 仅 `chat`：把模型的推理增量以暗色流式显示在 stderr；默认只在状态行标 `thinking`。`--debug` 仍在回答结束时打印推理全文 |
@@ -392,7 +396,7 @@ CLI (main.rs + cli/ + chat/ + acp/)
 | 参数校验 | 循环按工具声明的 JSON Schema 严格校验（`jsonschema`），不转换类型；兼容旧写法或常见错误要由工具在 `prepare_arguments` 中显式改写。工具执行时仍反序列化成自己的参数类型 | pi 校验前先去掉可选字段的 `null`、按 schema 转换类型（`packages/ai/src/utils/validation.ts`）。这里只在工具声明的地方改写参数，策略与审批看到的参数才有据可查 |
 | 缺少结果的工具调用 | 有副作用的调用执行前先记录开始；下一次运行开始时，为缺少结果的调用写入"结果未知""未执行"等错误结果，不重放。运行被取消时，执行中的有副作用调用的结果写明"可能已改变状态，先检查再重试"，尚未开始的调用写明"未执行" | 发送时补占位（沿用 pi 的 transform-messages.ts）区分不了调用是否执行过；崩溃后需要依据记录判断 |
 | 中断调用的重放 | 不重放：进程崩溃或被取消后，中断的调用一律写成错误结果，由模型决定是否重试 | pi 的工具可声明 `replay: "safe"`，durable 运行时重启后用记录的参数自动重跑，记录时与当前定义都声明 `safe` 才重跑，连续中断达到上限即停（`packages/durable/src/harness/tool.ts`）。这适用于两个前提：重启后无人介入、自动续跑；工具耗时长、内部有大量嵌套调用（如 codemode），从头重跑代价大。zx-agent 两者都没有：进程结束即运行结束，工具都是单次调用，被打断后由模型重试只多一次请求。将来要做自动续跑或长时间的复合工具时再评估；届时重放语义另设字段，不复用 `Effects`，因为只读不等于可以安全重放 |
-| 工具接口 | 结果只有文本 `content`，另有只供观察者的 `details`（与 pi 一样随结果写入会话，不发给模型）；进度是文本。没有 pi 的图片内容、`structuredContent` 与 `outputSchema`、结果中的 `usage`、`label`，也没有让工具经同一套校验与钩子调用其他工具的 `runToolCall` | 尚无使用者：图片要改消息格式与 provider，`runToolCall` 在做 codemode 或子 agent 时才需要 |
+| 工具接口 | 结果只有文本 `content`，另有只供观察者的 `details` 与 `usage`（与 pi 一样随结果写入会话，不发给模型；`usage` 按工具名汇总进运行报告，不计入 token 预算）；进度是文本。没有 pi 的图片内容、`structuredContent` 与 `outputSchema`、`label`，也没有让工具经同一套校验与钩子调用其他工具的 `runToolCall` | 尚无使用者：图片要改消息格式与 provider，`runToolCall` 在做 codemode 或子 agent 时才需要 |
 | 上下文过长的识别 | 按 HTTP 413、错误码（`context_length_exceeded` 等）与通用措辞（如 “maximum context”“prompt is too long”）识别，限流与服务端错误不算；不识别服务端截断输入而不报错的情况 | pi 按服务逐条匹配错误文本，并用模型的上下文窗口识别不报错的超长（`packages/ai/src/utils/overflow.ts`）。这里不按服务推断（D10），也没有模型的上下文窗口信息（见路线图 P10 ⑧） |
 | 上下文摘要 | 默认（全量模式）重新摘要时读取应用过 `context_edit` 的原始记录，不输入上一份摘要；可选的增量模式沿用上一份摘要的事实、只读新增记录，旧事实由程序原样保留，模型只能新增事实或标明取代旧事实。摘要中的每条事实必须引用来源条目，见 [PROFILES.md](docs/PROFILES.md) | pi 把上一份摘要交给模型更新，允许删去旧内容；这里优先保证每条事实可追溯、不经多次转述。全量模式的代价是摘要请求随历史增长，累计约 2 MiB 后无法再摘要；增量模式每次只读上一份摘要的事实（至多 64 KiB）与新增、被修正的记录，请求大小不随历史总长增长，用真实模型评测之后再决定是否设为默认（见[路线图](docs/ROADMAP.md)） |
 | 不加新输入的续跑 | 以失败或被取消的回答结尾时，先省略该回答再续跑 | pi 的 `Agent.continue()` 遇到回答结尾时报错（排队的消息除外），失败后的重试由 `AgentSession` 另行处理；这里的续跑同时用于崩溃、超时或取消之后接着做 |
@@ -525,7 +529,7 @@ askTools = []                    # approveAll 时须为空（内置 assistant �
 | `request_start` | 调用 provider 之前发出：`kind`（`task` 或 `summary`）、`entryId`（会话中的 `request_started` 条目）、`model`、`attempt`。HTTP 失败的请求也有这条 |
 | `message_start`、`message_update`、`message_end` | 消息开始、流式增量（需加 `--deltas`）与完成；`message_end` 包括 system 消息，带会话条目的 `entryId`。扩展发来的消息也是一条 `message_end`（`message.role` 为 `user`、`kind` 为 `custom`），另带 `custom`：`customType`、`display`、可选的 `details` |
 | `custom_entry` | 扩展记录了状态：`customType` 与会话条目的 `entryId`（没有会话时缺省，记录也不保留） |
-| `tool_execution_start`、`tool_execution_end` | 一个工具调用的处理开始与结束；`durationMs` 只含执行 |
+| `tool_execution_start`、`tool_execution_end` | 一个工具调用的处理开始与结束；`durationMs` 只含执行；工具报告了自己的花费时，`tool_execution_end` 带 `usage` |
 | `tool_decision` | 策略结论：`verdict`（`allow`、`deny`、`ask`）与 `reason`；策略钩子出错按 `deny` 报告 |
 | `approval_requested`、`approval_resolved` | 审批的询问与结果：`approval`（`allow_once`、`allow_session`、`remembered`、`denied`、`timed_out`、`cancelled`、`failed`）、`reason`、`waitMs`。会话内已授权过的同一调用不再询问，只有 `approval_resolved`（`remembered`） |
 | `retry_scheduled`、`context_edited`、`hook_failed` | 重试、上下文编辑（带编辑条目的 `entryId`）与钩子失败 |
@@ -533,13 +537,13 @@ askTools = []                    # approveAll 时须为空（内置 assistant �
 | `compaction_start`、`compaction_end`、`compaction_failed` | 摘要；带 `automatic`，成功事件包含条目 ID、前后字节数与用量 |
 | `tool_call_recovered` | `toolCallId`、`toolName` 与 `state`，取值见下文会话文件一节 |
 
-事件内容完整，包括用户输入、工具参数、经 `after_tool` 处理后的工具输出与模型输出。工具执行中的进度（`tool_execution_update`）只出现在事件里，不写入会话文件；工具结果的 `details` 既在 `tool_execution_end` 中，也随工具结果写入会话。手动 `/compact` 另发 `compaction_report`，不产生任务回答或 `run_end`。`run` 的最后一行、`chat` 每轮的最后一行是 `run_end`：
+事件内容完整，包括用户输入、工具参数、经 `after_tool` 处理后的工具输出与模型输出。工具执行中的进度（`tool_execution_update`）只出现在事件里，不写入会话文件；工具结果的 `details` 与 `usage` 既在 `tool_execution_end` 中，也随工具结果写入会话。手动 `/compact` 另发 `compaction_report`，不产生任务回答或 `run_end`。`run` 的最后一行、`chat` 每轮的最后一行是 `run_end`：
 
 ```json
 {"schemaVersion":1,"seq":12,"atMs":1761700000000,"sessionId":"…","runId":"…","type":"run_end","report":{"outcome":"completed","finalText":"## Summary ...","modelRequests":3,"retries":0,"usage":{"input":1200,"output":300,"cacheRead":0,"totalTokens":1500},"sessionFile":"/var/log/zx-agent/run.jsonl"}}
 ```
 
-`report.modelRequests` 是模型请求数（含摘要请求），与回合编号不同。
+`report.modelRequests` 是模型请求数（含摘要请求），与回合编号不同。`report.usage` 只含模型的用量；工具报告的花费（例如工具自己调用了模型）按工具名在 `report.toolUsage` 中，没有时省略该字段。`report.deniedCalls` 是被策略或审批拒绝的工具调用数，为零时省略。
 
 `usage` 统计本次运行中每个回复的用量，失败的尝试也计入。被取消的请求记为 0，因为服务端在流的末尾才返回用量；实际计费以服务商账单为准。`cacheWrite`（写入缓存的提示词 token）与 `reasoning`（输出中的推理 token）只在服务返回且不为 0 时出现；`costUsd` 只在 profile 的 `[[models]]` 给出该模型的单价时出现，是按单价算出的美元数（摘要请求也计入），同一运行内的多次回复相加。回复消息另带服务端返回的 `responseId` 与（和请求的不同时）`responseModel`。
 
@@ -580,8 +584,8 @@ run、chat 与 serve 在设置了下面的标准变量时，用 OTLP/HTTP（prot
 | `zx.runs` | 计数 | `zx.outcome`、`zx.model` |
 | `zx.run.duration` | 直方图 | `zx.outcome`、`zx.model` |
 | `zx.request.duration` | 直方图，从请求到完整回答 | `zx.request.kind`、`zx.model`、`zx.stop_reason` |
-| `zx.tokens` | 计数，模型报告的用量（摘要请求的也计入，记在被请求的模型名下） | `zx.model`、`zx.token.kind`（`input`、`output`、`cache_read`、`cache_write`、`reasoning`；`reasoning` 包含在 `output` 内；为零的不记） |
-| `zx.cost` | 计数，USD，只在配置了单价时有 | `zx.model` |
+| `zx.tokens` | 计数，模型报告的用量（摘要请求的也计入，记在被请求的模型名下）；工具结果报告的用量记在工具名下 | `zx.model` 或 `zx.tool.name`、`zx.token.kind`（`input`、`output`、`cache_read`、`cache_write`、`reasoning`；`reasoning` 包含在 `output` 内；为零的不记） |
+| `zx.cost` | 计数，USD，只在配置了单价或工具报告了成本时有 | `zx.model` 或 `zx.tool.name` |
 | `zx.tool.duration` | 直方图，MCP 工具同样计入 | `zx.tool.name`、`zx.tool.is_error` |
 | `zx.retries` | 计数 | 无 |
 | `zx.compaction.duration` | 直方图 | `zx.compaction.automatic`、`zx.outcome`（`completed` / `failed`） |
@@ -666,7 +670,7 @@ P2 增加 `zx_agent::AgentSession`；已有 `Runner` 可通过 `AgentSession::fr
 | `inspect(FnOnce(&SessionStore) -> T)` | 空闲时读取会话，例如列出条目或取当前位置（`leaf_id`）。闭包运行期间会话像运行中一样被占用，其他调用返回 `Busy`；不持锁调用闭包。运行中返回 `Busy` |
 | `prompt_once(key, text)`、`prompt_once_with_cancel` | 同一个幂等键只提交一次：先在会话里记下键（类型为 `idempotency_key` 的 `custom` 记录，在当前分支上），再按 `prompt` 运行；再次用同一个键调用返回 `DuplicateKey`、不发请求，从文件重新打开的会话也认得；空白的键返回 `InvalidKey`。宿主重试一次不确定是否送达的提交时用它，被拒后读会话取答案，或用 `continue_run` 接着被中断的运行 |
 | `prompt_message(QueuedMessage)`、`prompt_message_with_cancel` | 以任意消息开始一次运行：用户文本，或扩展的消息（pi 的 `sendMessage` 带 `triggerTurn`）；其余同 `prompt` |
-| `queues()` | 会话的两个队列：`steer_message`、`follow_up_message` 排入扩展的消息，`append_entry` 在运行期间排入要记录的状态（下一回合开始或运行结束时写入），`set_steering_mode`、`set_follow_up_mode` 设置取法（`QueueMode`） |
+| `queues()` | 会话的两个队列：`steer_message`、`follow_up_message` 排入扩展的消息，`append_entry` 在运行期间排入要记录的状态（下一回合开始或运行结束时写入），`set_steering_mode`、`set_follow_up_mode` 设置取法（`QueueMode`），`withdraw` 撤回一条还在排队的消息（先找引导队列，再找后续队列，撤回最早一条相同的），运行中也可以调用；循环已经取走、正在写入的消息撤回不了 |
 | `active_tools()`、`set_active_tools(&[名字])` | 下一次请求提供给模型的工具（pi 的 `setActiveTools`），运行中改也对下一次请求生效，请求审计记录每次请求声明的工具；`set_active_tools` 先检查名字，不认识的返回 `UnknownTool`；`active_tools().reset()` 恢复全部。调用未激活的工具得到错误结果，不执行 |
 | `commands()`、`run_command(名字, 参数)` | 扩展注册的命令（`SlashCommand`）；运行中也可以调用。返回要显示的行与要发送的消息（`CommandOutcome`），没有这个命令返回 `CommandError::Unknown`，命令失败返回 `Failed` |
 | `append_entry(类型, data)`、`append_custom_message(消息)` | 空闲时立即写入扩展的状态或消息（pi 的 `appendEntry`、空闲时的 `sendMessage`），返回条目 ID；运行中返回 `Busy`，写入失败返回 `WriteFailed` |
@@ -722,7 +726,7 @@ P1 的 SDK 接口调整：静态配置移入 `LoopSpec`；`LoopConfig` 持有钩
 扩展点均为 trait：
 
 - `ai::Provider`：接入新的模型服务，必须遵守 `crates/zx-ai/src/provider.rs` 中的约定。
-- `agent::Tool`：自定义工具。返回 `Err` 等价于 pi 中的抛出异常，会变成错误结果交给模型。`effects()` 默认返回 `SideEffects`，Runner 会在执行前记录开始；不会改变任何状态的工具应返回 `Effects::ReadOnly`，否则中断后只能报告结果未知。可选的 `prepare_arguments` 在校验前改写模型给出的参数（如旧的参数名）；schema 校验、`validate_arguments`、`before_tool` 与 `after_tool` 钩子（含策略）、审批与执行都使用改写后的参数，`tool_execution_start` 事件与会话保留模型的原始调用，所以改写只能依赖参数本身；直接调用 `execute` 时不经过这一步。执行中可用 `ToolContext::report_progress` 报告进度：每条最多 16 KiB（`MAX_PROGRESS_BYTES`），经脱敏钩子后作为 `tool_execution_update` 事件发出，不写入会话、不发给模型，队列满或调用结束后丢弃。`ToolOutput::details` 存放给前端与日志的结构化数据（pi 的 `details`）：经 `after_tool` 钩子（含脱敏，只处理字符串与对象键）后，随 `tool_execution_end` 事件发出，并写入会话中工具结果消息的 `details` 字段；provider 只发送 `content`，摘要请求的输入与上下文字节统计都不含它，所以模型看不到。紧凑 JSON 超过 16 KiB（`MAX_DETAILS_BYTES`）时两处都不保留。`ToolContext` 标为 `#[non_exhaustive]`，以后只增加字段，在 zx-core 之外用 `ToolContext::new` 构造。
+- `agent::Tool`：自定义工具。返回 `Err` 等价于 pi 中的抛出异常，会变成错误结果交给模型。`effects()` 默认返回 `SideEffects`，Runner 会在执行前记录开始；不会改变任何状态的工具应返回 `Effects::ReadOnly`，否则中断后只能报告结果未知。可选的 `prepare_arguments` 在校验前改写模型给出的参数（如旧的参数名）；schema 校验、`validate_arguments`、`before_tool` 与 `after_tool` 钩子（含策略）、审批与执行都使用改写后的参数，`tool_execution_start` 事件与会话保留模型的原始调用，所以改写只能依赖参数本身；直接调用 `execute` 时不经过这一步。执行中可用 `ToolContext::report_progress` 报告进度：每条最多 16 KiB（`MAX_PROGRESS_BYTES`），经脱敏钩子后作为 `tool_execution_update` 事件发出，不写入会话、不发给模型，队列满或调用结束后丢弃。`ToolOutput::details` 存放给前端与日志的结构化数据（pi 的 `details`）：经 `after_tool` 钩子（含脱敏，只处理字符串与对象键）后，随 `tool_execution_end` 事件发出，并写入会话中工具结果消息的 `details` 字段；provider 只发送 `content`，摘要请求的输入与上下文字节统计都不含它，所以模型看不到。紧凑 JSON 超过 16 KiB（`MAX_DETAILS_BYTES`）时两处都不保留。`ToolOutput::usage`（`with_usage`）报告工具自己的花费，例如它调用了模型（pi 结果中的 `usage`）：随 `tool_execution_end` 发出、写入工具结果消息，按工具名汇总进 `RunReport::tool_usage` 并计入 OpenTelemetry 的 `zx.tokens` 与 `zx.cost`；不发给模型，也不计入 `Limits::token_budget`（它只限制运行自己的模型请求）。`ToolOutput` 因此不再实现 `Eq`，只有 `PartialEq`。`ToolContext` 标为 `#[non_exhaustive]`，以后只增加字段，在 zx-core 之外用 `ToolContext::new` 构造。
 - `agent::ToolPolicy`：内置风格的工具调用策略，经 `policy::PolicyHook` 注册，运行在 `Policy` 阶段；扩展改用 `Hooks::before_tool`。
 - `agent::Hooks`：输入、上下文、工具调用前后、回合结束与事件观察。钩子的输入输出类型（`Decision`、`TurnDecision`、`ContextEdit`、`ToolOutput`、`Approval`、`ApprovalRequest`、`ToolCall`、`HookContext`、`TurnSummary`）都有固定的 JSON 格式，供钩子进程与审批转发使用，格式由 `tests/hook_contract.rs` 固定。
 - `interaction::Interaction`：由宿主回答审批；内核不读取终端。
@@ -821,15 +825,15 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 | 测试文件 | 覆盖内容 |
 |---|---|
 | `src/**`、`crates/*/src/**`（单元测试） | 会话文件和事件流的 JSON 格式、事件信封与每次运行的编号、会话写入失败 / 超时 / 被中断后停止写入、单写者锁与只读快照、自定义存储的记录与重新加载、SSE 解析、流式累积、推理内容的记录与回传、请求体组装、错误链、重试判断、命令策略及其提示词、会话投影、崩溃恢复与文件权限、截断、bash（超时后杀掉整个进程组、取消、隐藏环境变量）、read_file、系统提示词的段落对比与两种发送模式 |
-| `tests/agent_loop.rs` | 循环语义：工具调用往返、并行与结果顺序、串行模式、参数改写（策略与工具看到改写后的参数，上下文保留原始调用）、进度只到事件、`details` 进入事件与结果消息、各类失败、length 截断、轮次上限、预算用完时不开新回合且排队输入留在队列、terminate、引导与后续消息、出错与中止、provider 未发最终事件、系统提示词的记录与增量更新 |
-| `tests/runner.rs` | 重试且不重复 prompt、失败记录留在文件中、工具结果的 `details` 写入会话文件并在重新打开后保留、放弃不可重试的错误、轮次、时间与 token 上限、调用方取消、截断续写与拼接、最终回答只取本次运行的消息、续跑会话、恢复会话时提示词变化写入文件、先写盘再转发事件、自定义 `SessionLog` 存储的会话重新加载后继续对话、事件的编号与 ID、`run_start` / `run_end`、尝试与请求起点及其会话条目、消息与上下文编辑的条目 ID、预算用完不重试并保留错误、重试省略失败回答的 `context_edited`、无预算时排队输入留在队列、运行在观察者处理时被丢弃时排队输入只写一次 |
+| `tests/agent_loop.rs` | 循环语义：工具调用往返、并行与结果顺序、串行模式、参数改写（策略与工具看到改写后的参数，上下文保留原始调用）、进度只到事件、`details` 与 `usage` 进入事件与结果消息、`usage` 按工具名汇总、各类失败、length 截断、轮次上限、预算用完时不开新回合且排队输入留在队列、terminate、引导与后续消息、撤回的后续消息不被取用、出错与中止、provider 未发最终事件、系统提示词的记录与增量更新 |
+| `tests/runner.rs` | 重试且不重复 prompt、失败记录留在文件中、工具结果的 `details` 写入会话文件并在重新打开后保留、工具的 `usage` 按工具名报告、写入会话文件且不计入 token 预算、放弃不可重试的错误、轮次、时间与 token 上限、调用方取消、截断续写与拼接、最终回答只取本次运行的消息、续跑会话、恢复会话时提示词变化写入文件、先写盘再转发事件、自定义 `SessionLog` 存储的会话重新加载后继续对话、事件的编号与 ID、`run_start` / `run_end`、尝试与请求起点及其会话条目、消息与上下文编辑的条目 ID、预算用完不重试并保留错误、重试省略失败回答的 `context_edited`、无预算时排队输入留在队列、运行在观察者处理时被丢弃时排队输入只写一次 |
 | `tests/agent_session.rs` | 共享提问与 Busy、取消与 future 丢弃后复用、队列边界、订阅和退订、回调重入与 panic 隔离、模型切换、授权撤销、先写审计再多订阅分发、有界订阅按序接收、通道满时丢弃计数且不阻塞运行、会话释放后有界订阅结束 |
 | `tests/openai_mock.rs` | 本地假 HTTP 服务上的端到端测试：SSE、执行 bash、回传工具结果、认证头、HTTP 错误重试、空闲超时、中途取消后保留已输出内容、成功状态下的 JSON 正文（错误对象与整份回答） |
 | `tests/cli.rs` | 编译出的程序：退出码 0 到 6、jsonl 输出、从 stdin 读提示词、bash 读不到 API key、系统提示词的生成段落、`--system-updates inline` |
 | `tests/chat_cli.rs` | 多轮历史、审批与授权范围（含 `y`、`n`；write_file 的内容按行显示，edit_file 逐项列出且结果显示补丁）、审批过期后下一行作为新提问、只读命令自动放行、工具行显示命令与结果预览、每轮的 `[turn]` 行、`/status`、`--color always` 在管道中保留颜色、续接会话的提示、取消只报告一次、重试错误只报一次、无用量的 `[turn]`、`--show-thinking`、空闲时 Ctrl+C 两次退出、重置、模型切换、EOF、信号、超时、控制字符显示、恢复中断会话的提示、钩子失败的提示；Unix PTY 验证运行中插话、取消后丢弃残留插话、取消重置和退出、粘贴的多行合为一条消息、等待时的状态行、回答前后的空行 |
 | `tests/acp_cli.rs` | `acp`：手写的 JSON-RPC 客户端经子进程 stdio 驱动：初始化与建会话、流式回答与 `end_turn`、工具调用的 `tool_call` 与权限请求、批准后执行与 `completed`、拒绝不执行且模型收到原因、`session/cancel` 得到 `cancelled` 后会话可继续、未知会话的错误、`write_file` 的 diff 与位置、自动放行的命令不问人且在会话的目录执行；会话文件在 cwd 的会话目录中，第二个进程 `session/load` 后回放对话再继续（模型看到此前的消息），工具调用连同结果的回放，`--session-dir`，`--no-session` 不落盘且不声明 `loadSession`，未知会话与 `--session` 的错误；`session/list` 的顺序、标题、时间、按 cwd 过滤与分页拒绝，`session/resume` 不回放地续接；stdout 的每一行都必须是协议消息 |
 | `tests/profiles_cli.rs` | profile 覆盖、显式默认值、预算参数的 help 写明取自 profile、不可绕过的 deny、上下文范围与审计、上下文默认值与越界链接、`--system-prompt-file` 兼容、skill 懒加载与脱敏、配置错误（含 provider 参数）退出码且不建会话文件 |
-| `tests/run_cli.rs` | `run` 在 P0 之后新增的约定：进度与报告行转义终端控制字符；另一个 `run` 正在写的会话文件不能再被打开写入；JSONL 事件的信封；为零的超时在请求前被拒绝；stdout 已关闭时退出码仍由运行结果决定；token 预算的退出码 7、最后一次请求可超出预算、profile 设置预算与命令行的 0 关闭；只在设置了 OTLP 地址时导出追踪与指标，导出内容不含回答；`TRACEPARENT` 让运行接续调用方的 trace，不合法时提示并自成一条；`--request-field` 到达模型并写入请求审计，写错时以退出码 2 结束且不建会话文件；`--fill-missing-reasoning` 默认关闭，开启时写入请求审计；`--reasoning` 按三种写法到达模型并写入请求审计，写错或与 `--request-field` 冲突时以退出码 2 结束（原有 `run` 测试仍在 `tests/cli.rs`） |
+| `tests/run_cli.rs` | `run` 在 P0 之后新增的约定：进度与报告行转义终端控制字符；另一个 `run` 正在写的会话文件不能再被打开写入；JSONL 事件的信封；为零的超时在请求前被拒绝；stdout 已关闭时退出码仍由运行结果决定；token 预算的退出码 7、最后一次请求可超出预算、profile 设置预算与命令行的 0 关闭；成本预算的退出码 8、模型没有单价或预算为负时以退出码 2 结束；被拒的调用数出现在报告行，`--fail-on-denied` 只在有被拒调用时把 0 换成 9；只在设置了 OTLP 地址时导出追踪与指标，导出内容不含回答；`TRACEPARENT` 让运行接续调用方的 trace，不合法时提示并自成一条；`--request-field` 到达模型并写入请求审计，写错时以退出码 2 结束且不建会话文件；`--fill-missing-reasoning` 默认关闭，开启时写入请求审计；`--reasoning` 按三种写法到达模型并写入请求审计，写错或与 `--request-field` 冲突时以退出码 2 结束（原有 `run` 测试仍在 `tests/cli.rs`） |
 | `tests/otel.rs` | 一次真实运行导出一条 trace：每次尝试、回合、模型请求与工具调用各一个 span，用量与工具属性正确；同一次运行经宿主的 `SdkMeterProvider` 导出指标（运行数、token、请求与工具调用的次数）；`sink_under` 让运行接续给定的 traceparent；`src/otel/` 的单元测试另覆盖嵌套与时间、只含元数据、运行结束时关闭未结束的 span、手动摘要自成一条 trace 且其 token 只计一次、指标的属性与时长、traceparent 的解析与拒绝、队列满时丢弃并计数 |
 | `tests/session_compaction.rs`、`tests/compaction.rs` | v1/v2 追加升级、分支和引用、原始投影、省略保留边界后摘要仍生效、编辑摘要的变换计划在写入前被拒绝、摘要源与上下文字节统计不含工具结果的 `details`、摘要失败与取消、请求 / 用量预算、超时和上限 |
 | `tests/incremental_summary.rs` | 增量摘要（v5）：第一次读取整段前缀并给事实编号、之后只读旧事实与新增记录、可接续全量模式留下的摘要、取代与淘汰、修正只作废相关事实并在下一次重读、模型不能自带编号、加载时拒绝违反规则的记录、请求可从会话文件还原、多轮之后请求大小不随历史增长（与全量模式对照）；摘要评测的脚本会话自检，以及用知道答案的假模型验证评分 |

@@ -39,20 +39,21 @@ impl HasMessage for ProjectedMessage {
     }
 }
 
-/// Whether `message` carries tool result details, which are for observers only.
+/// Whether `message` carries tool result details or usage, which are for observers only.
 fn has_details(message: &Message) -> bool {
-    matches!(message, Message::ToolResult(result) if result.details.is_some())
+    matches!(message, Message::ToolResult(result) if result.details.is_some() || result.usage.is_some())
 }
 
 fn drop_details(message: &mut Message) {
     if let Message::ToolResult(result) = message {
         result.details = None;
+        result.usage = None;
     }
 }
 
-/// `items` as a model may see them: without tool result details. Summary requests and
-/// context sizes use this, since providers never send the details. Copies only when a
-/// message has details.
+/// `items` as a model may see them: without tool result details and usage. Summary requests
+/// and context sizes use this, since providers never send either. Copies only when a
+/// message has them.
 pub(crate) fn without_details<T: HasMessage + Clone>(items: &[T]) -> Cow<'_, [T]> {
     if !items.iter().any(|item| has_details(item.message())) {
         return Cow::Borrowed(items);

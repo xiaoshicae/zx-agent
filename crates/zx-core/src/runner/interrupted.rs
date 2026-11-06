@@ -32,6 +32,7 @@ impl RunHost<'_> {
                 timestamp: now_ms(),
                 duration_ms: None,
                 details: None,
+                usage: None,
             });
             self.emit(AgentEvent::MessageStart { role: "toolResult" }).await;
             let entry_id = self

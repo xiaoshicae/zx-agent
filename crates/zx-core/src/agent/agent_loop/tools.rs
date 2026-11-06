@@ -32,7 +32,7 @@ impl<'a> Engine<'a, '_> {
             return Checked::blocked(format!("Tool {} is not active", call.name));
         }
         if let Some(error) = &call.arguments_error {
-            return Checked::Blocked(invalid_arguments(call, error));
+            return Checked::blocked(invalid_arguments(call, error));
         }
         let ran = match std::panic::catch_unwind(AssertUnwindSafe(|| tool.prepare_arguments(&call.arguments))) {
             Ok(None) => Cow::Borrowed(call),
@@ -42,11 +42,11 @@ impl<'a> Engine<'a, '_> {
             }),
             Err(_) => return Checked::blocked(format!("Tool {} argument preparation panicked", call.name)),
         };
-        if let Err(outcome) = self.validate_arguments(tool, &ran) {
-            return Checked::Blocked(outcome);
+        if let Err(text) = self.validate_arguments(tool, &ran) {
+            return Checked::blocked(text);
         }
-        if let Err(outcome) = self.authorize(&ran).await {
-            return Checked::Blocked(outcome);
+        if let Err(text) = self.authorize(&ran).await {
+            return Checked::blocked(text);
         }
         if self.cancel.is_cancelled() {
             return Checked::blocked(NOT_STARTED);
@@ -55,8 +55,8 @@ impl<'a> Engine<'a, '_> {
     }
 
     /// Check the arguments `call` runs with: a JSON object that fits the tool's declared
-    /// schema and passes the tool's own validation.
-    fn validate_arguments(&self, tool: &dyn Tool, call: &ToolCall) -> Result<(), Outcome> {
+    /// schema and passes the tool's own validation. An error is the text of the blocked result.
+    fn validate_arguments(&self, tool: &dyn Tool, call: &ToolCall) -> Result<(), String> {
         if !call.arguments.is_object() {
             return Err(invalid_arguments(call, "expected a JSON object"));
         }
@@ -68,21 +68,19 @@ impl<'a> Engine<'a, '_> {
         match std::panic::catch_unwind(AssertUnwindSafe(|| tool.validate_arguments(&call.arguments))) {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(invalid_arguments(call, error)),
-            Err(_) => Err(Outcome::blocked(format!(
-                "Tool {} argument validation panicked",
-                call.name
-            ))),
+            Err(_) => Err(format!("Tool {} argument validation panicked", call.name)),
         }
     }
 
     /// Run the policy on `call`, then ask the interaction host when it says so. An error is
-    /// the result of a call that may not run.
-    async fn authorize(&mut self, call: &ToolCall) -> Result<(), Outcome> {
+    /// the text of the result of a call that may not run.
+    async fn authorize(&mut self, call: &ToolCall) -> Result<(), String> {
         let verdict = match self.config.hooks.before_tool(call, self.trace.context()).await {
             Ok(verdict) => verdict,
             Err(error) => {
                 let reason = self.report_hook_failure(error);
                 self.decision(call, ToolVerdict::Deny, Some(reason.clone())).await;
+                self.denied_calls = self.denied_calls.saturating_add(1);
                 return Err(blocked_by_policy(&reason));
             }
         };
@@ -90,6 +88,7 @@ impl<'a> Engine<'a, '_> {
             Decision::Allow => self.decision(call, ToolVerdict::Allow, None).await,
             Decision::Deny(reason) => {
                 self.decision(call, ToolVerdict::Deny, Some(reason.clone())).await;
+                self.denied_calls = self.denied_calls.saturating_add(1);
                 return Err(blocked_by_policy(&reason));
             }
             Decision::Ask(reason) => {
@@ -97,7 +96,8 @@ impl<'a> Engine<'a, '_> {
                 if self.approvals.allows(call) {
                     self.approval_resolved(call, ApprovalResult::Remembered, None, 0).await;
                 } else if let Err(denied) = self.ask(call, reason).await {
-                    return Err(Outcome::blocked(format!("Approval denied: {denied}")));
+                    self.denied_calls = self.denied_calls.saturating_add(1);
+                    return Err(format!("Approval denied: {denied}"));
                 }
             }
         }
@@ -336,6 +336,7 @@ impl<'a> Engine<'a, '_> {
             is_error: outcome.output.is_error,
             duration_ms: outcome.duration_ms,
             details: outcome.output.details.clone(),
+            usage: outcome.output.usage.clone(),
         })
         .await;
     }
@@ -360,14 +361,14 @@ impl Outcome {
     }
 }
 
-/// The result of a call whose arguments are not valid for its tool.
-fn invalid_arguments(call: &ToolCall, reason: impl Display) -> Outcome {
-    Outcome::blocked(format!("Invalid arguments for tool {:?}: {reason}", call.name))
+/// The result text of a call whose arguments are not valid for its tool.
+fn invalid_arguments(call: &ToolCall, reason: impl Display) -> String {
+    format!("Invalid arguments for tool {:?}: {reason}", call.name)
 }
 
-/// The result of a call the policy denied.
-fn blocked_by_policy(reason: &str) -> Outcome {
-    Outcome::blocked(format!("Blocked by policy: {reason}"))
+/// The result text of a call the policy denied.
+fn blocked_by_policy(reason: &str) -> String {
+    format!("Blocked by policy: {reason}")
 }
 
 /// A call after its checks.
@@ -498,5 +499,6 @@ fn to_result(call: &ToolCall, outcome: Outcome) -> ToolResultMessage {
         timestamp: now_ms(),
         duration_ms,
         details: output.details,
+        usage: output.usage,
     }
 }

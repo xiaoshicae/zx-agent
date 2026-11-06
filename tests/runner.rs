@@ -56,6 +56,7 @@ async fn dropping_a_run_cancels_its_provider() {
     assert!(cancelled, "dropping the run left its provider active");
 }
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -66,10 +67,10 @@ use tokio_util::sync::CancellationToken;
 
 use common::{EchoTool, NotifyingProvider, RunnerSetup, config, fast_retry, header, read_lines, summarize};
 use zx_agent::agent::{
-    AgentEvent, EVENT_SCHEMA_VERSION, HookContext, HookOptions, HookResult, Hooks, QueuedMessage, RequestKind,
+    AgentEvent, Decision, EVENT_SCHEMA_VERSION, HookContext, HookOptions, HookResult, Hooks, QueuedMessage, RequestKind,
 };
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{Message, PREAMBLE, StopReason, SystemPrompt};
+use zx_agent::ai::{Message, ModelCost, ModelMeta, PREAMBLE, StopReason, SystemPrompt, ToolCall, Usage};
 use zx_agent::continuation::ContinueOnLength;
 use zx_agent::runner::{Limits, RunOutcome};
 use zx_agent::session::{Entry, LoadedSession, LogRecord, SessionLog, SessionStore};
@@ -296,6 +297,107 @@ async fn the_last_request_may_take_a_run_over_its_token_budget() {
     assert_eq!(report.usage.input_and_output(), 30);
 }
 
+/// A runner with the echo tool whose model costs 0.01 per faux answer (10 input tokens at
+/// 1000 per million; the 5 output tokens are free), in whatever currency the prices use.
+fn priced_runner(provider: &Arc<FauxProvider>, cost_budget: f64) -> zx_agent::runner::Runner {
+    let mut config = config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]);
+    let price = ModelCost {
+        input: 1000.0,
+        output: 0.0,
+        cache_read: 0.0,
+        cache_write: 0.0,
+    };
+    config.models.insert(
+        "test-model".into(),
+        ModelMeta {
+            context_window: None,
+            cost: Some(price),
+        },
+    );
+    RunnerSetup {
+        limits: Limits {
+            cost_budget: Some(cost_budget),
+            ..Limits::default()
+        },
+        ..RunnerSetup::new(config)
+    }
+    .build()
+    .0
+}
+
+#[tokio::test]
+async fn the_cost_budget_stops_a_run_before_the_request_it_cannot_pay_for() {
+    let provider = provider([
+        FauxStep::tool_call("c1", "echo", json!({"text": "ok"})),
+        FauxStep::text("must not be requested"),
+    ]);
+    let mut runner = priced_runner(&provider, 0.01);
+
+    let report = runner.run("go", &CancellationToken::new()).await;
+
+    assert_eq!(report.outcome, RunOutcome::CostBudget);
+    assert_eq!(provider.requests().len(), 1);
+    assert_eq!(
+        report.error.as_deref(),
+        Some("cost budget reached (0.0100 spent, cost_budget = 0.01)")
+    );
+}
+
+#[tokio::test]
+async fn the_last_request_may_take_a_run_over_its_cost_budget() {
+    let provider = provider([
+        FauxStep::tool_call("c1", "echo", json!({"text": "ok"})),
+        FauxStep::text("done"),
+    ]);
+    let mut runner = priced_runner(&provider, 0.015);
+
+    let report = runner.run("go", &CancellationToken::new()).await;
+
+    assert_eq!(
+        (report.outcome, report.final_text.as_str()),
+        (RunOutcome::Completed, "done")
+    );
+    assert!(
+        (report.usage.cost_usd.unwrap() - 0.02).abs() < 1e-9,
+        "{:?}",
+        report.usage
+    );
+}
+
+/// Denies `c1`, asks about `c2` (which nobody approves without a host), allows the rest.
+struct DenyFirstAskSecond;
+
+#[async_trait]
+impl Hooks for DenyFirstAskSecond {
+    async fn before_tool(&self, call: &ToolCall, _ctx: &HookContext) -> HookResult<Decision> {
+        Ok(match call.id.as_str() {
+            "c1" => Decision::Deny("not here".into()),
+            "c2" => Decision::Ask("check first".into()),
+            _ => Decision::Allow,
+        })
+    }
+}
+
+#[tokio::test]
+async fn calls_a_policy_or_an_approval_denied_are_counted_in_the_report() {
+    let provider = provider([
+        FauxStep::tool_calls(vec![
+            ("c1", "echo", json!({"text": "a"})),
+            ("c2", "echo", json!({"text": "b"})),
+            ("c3", "echo", json!({"text": "c"})),
+        ]),
+        FauxStep::text("done anyway"),
+    ]);
+    let mut config = config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]);
+    config.hooks.push(DenyFirstAskSecond);
+    let (mut runner, _) = RunnerSetup::new(config).build();
+
+    let report = runner.run("go", &CancellationToken::new()).await;
+
+    assert_eq!(report.outcome, RunOutcome::Completed);
+    assert_eq!(report.denied_calls, 2);
+}
+
 #[tokio::test]
 async fn an_unlimited_budget_can_explicitly_enable_continuation() {
     let provider = provider([FauxStep::truncated("part one, "), FauxStep::text("part two")]);
@@ -373,6 +475,49 @@ async fn tool_result_details_are_recorded_and_survive_reopening_the_session() {
         _ => None,
     });
     assert_eq!(kept, Some(details));
+}
+
+#[tokio::test]
+async fn tool_usage_is_reported_by_tool_recorded_in_the_file_and_left_out_of_the_token_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("run.jsonl");
+    let usage = json!({"input": 100, "output": 50, "cacheRead": 0, "totalTokens": 150});
+    let provider = provider([
+        FauxStep::tool_call("c1", "echo", json!({"text": "hi", "usage": usage})),
+        FauxStep::text("done"),
+    ]);
+    let (mut runner, _) = RunnerSetup {
+        session: SessionStore::create(&path, header()).unwrap(),
+        // Two faux answers of 15 tokens fit; the tool's 150 would not, if they counted.
+        limits: token_budget(16),
+        ..RunnerSetup::new(config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]))
+    }
+    .build();
+
+    let report = runner.run("go", &CancellationToken::new()).await;
+    drop(runner);
+
+    assert_eq!(
+        (report.outcome, report.usage.input_and_output()),
+        (RunOutcome::Completed, 30)
+    );
+    let reported: Usage = serde_json::from_value(usage.clone()).unwrap();
+    assert_eq!(
+        report.tool_usage,
+        BTreeMap::from([("echo".to_string(), reported.clone())])
+    );
+    let recorded: Vec<Value> = read_lines(&path)
+        .into_iter()
+        .filter(|line| line["message"]["role"] == "toolResult")
+        .map(|line| line["message"]["usage"].clone())
+        .collect();
+    assert_eq!(recorded, [usage]);
+    let reopened = SessionStore::open(&path).unwrap();
+    let kept = reopened.messages().into_iter().find_map(|message| match message {
+        Message::ToolResult(result) => result.usage,
+        _ => None,
+    });
+    assert_eq!(kept, Some(reported));
 }
 
 #[tokio::test]

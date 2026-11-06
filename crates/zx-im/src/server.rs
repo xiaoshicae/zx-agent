@@ -144,6 +144,8 @@ pub struct Replies {
     pub model_request_limit: String,
     /// Appended when the token budget ran out.
     pub token_budget: String,
+    /// Appended when the cost budget ran out.
+    pub cost_budget: String,
     /// A run that reached its time limit.
     pub timed_out: String,
     /// Followed by the error of a failed run.
@@ -174,6 +176,7 @@ impl Default for Replies {
             truncated: "(the answer reached the output limit and was cut off)".into(),
             model_request_limit: "(the model request limit was reached; the task is not finished)".into(),
             token_budget: "(the token budget was reached; the task is not finished)".into(),
+            cost_budget: "(the cost budget was reached; the task is not finished)".into(),
             timed_out: "The run timed out; the task is not finished.".into(),
             failed: "The run failed: ".into(),
             cannot_open: "Cannot open the session: ".into(),

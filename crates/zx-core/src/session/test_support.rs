@@ -30,6 +30,7 @@ pub(super) fn result_with_details(details: Option<serde_json::Value>) -> Message
         timestamp: 1,
         duration_ms: None,
         details,
+        usage: None,
     })
 }
 

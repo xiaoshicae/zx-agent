@@ -22,6 +22,9 @@ const EXIT_TIMEOUT: u8 = 4;
 pub(crate) const EXIT_ABORTED: u8 = 5;
 const EXIT_TRUNCATED: u8 = 6;
 const EXIT_TOKEN_BUDGET: u8 = 7;
+const EXIT_COST_BUDGET: u8 = 8;
+/// `run --fail-on-denied`: completed, but a policy or an approval denied a tool call.
+pub(crate) const EXIT_DENIED: u8 = 9;
 
 /// The exit code that reports `outcome`.
 pub(crate) fn exit_code(outcome: RunOutcome) -> u8 {
@@ -33,6 +36,7 @@ pub(crate) fn exit_code(outcome: RunOutcome) -> u8 {
         RunOutcome::Aborted => EXIT_ABORTED,
         RunOutcome::Truncated => EXIT_TRUNCATED,
         RunOutcome::TokenBudget => EXIT_TOKEN_BUDGET,
+        RunOutcome::CostBudget => EXIT_COST_BUDGET,
     }
 }
 

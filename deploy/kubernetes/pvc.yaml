@@ -8,3 +8,15 @@ spec:
   resources:
     requests:
       storage: 1Gi
+---
+# Session files of the scheduled inspections, one per run, kept until removed. Separate from
+# zx-agent-data: a ReadWriteOnce volume may not be mountable by a Job on another node.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: zx-agent-inspect-sessions
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi

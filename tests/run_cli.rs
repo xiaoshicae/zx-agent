@@ -606,6 +606,120 @@ async fn a_profile_sets_the_token_budget_and_zero_on_the_command_line_disables_i
     assert_eq!(unlimited.requests().len(), 2);
 }
 
+/// A profile whose model `mock` costs 0.01 per answer of the fake service (10 input tokens at
+/// 1000 per million; output free). The unit is whatever the prices use, such as CNY.
+fn priced_profile(dir: &std::path::Path) -> String {
+    let profile = dir.join("priced.toml");
+    std::fs::write(
+        &profile,
+        "[[models]]\nid = \"mock\"\ncost = { input = 1000.0, output = 0.0 }\n",
+    )
+    .unwrap();
+    profile.to_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn the_cost_budget_ends_a_run_with_exit_code_8_before_the_next_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = two_answers().await;
+    let profile = priced_profile(dir.path());
+
+    let output = run(&server, dir.path())
+        .args(["--profile", &profile, "--cost-budget", "0.01"])
+        .output()
+        .await
+        .unwrap();
+
+    let stderr = stderr(&output);
+    assert_eq!(output.status.code(), Some(8), "{stderr}");
+    assert!(stderr.contains("outcome=CostBudget"), "{stderr}");
+    assert!(stderr.contains("cost=0.0100"), "{stderr}");
+    assert_eq!(server.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn a_cost_budget_without_prices_for_the_model_is_a_configuration_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = two_answers().await;
+
+    let output = run(&server, dir.path())
+        .args(["--cost-budget", "0.01"])
+        .output()
+        .await
+        .unwrap();
+
+    let stderr = stderr(&output);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("[[models]]"), "{stderr}");
+    assert!(server.requests().is_empty());
+}
+
+#[tokio::test]
+async fn a_negative_cost_budget_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = two_answers().await;
+
+    let output = run(&server, dir.path())
+        .args(["--cost-budget=-1"])
+        .output()
+        .await
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(server.requests().is_empty());
+}
+
+/// `run` with bash allowed only for `ls`, against a model that runs `echo hi` and then answers.
+async fn run_with_a_denied_command(extra: &[&str]) -> std::process::Output {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::bash("c", "echo hi"), Reply::text("done")]).await;
+    zx_agent()
+        .args(["run", "--model", "mock", "--base-url", &server.base_url])
+        .args(["--max-retries", "0", "--api-key-env", "ZX_RUN_CLI_TEST_KEY"])
+        .args(["--tools", "bash", "--allow-cmd", "ls"])
+        .args(extra)
+        .arg("go")
+        .current_dir(dir.path())
+        .env_remove("ZX_RUN_CLI_TEST_KEY")
+        .env_remove("ZX_MODEL")
+        .env_remove("ZX_BASE_URL")
+        .stdin(Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_completed_run_with_a_denied_call_exits_0_and_reports_the_count() {
+    let output = run_with_a_denied_command(&[]).await;
+
+    let stderr = stderr(&output);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert!(stderr.contains("denied_calls=1"), "{stderr}");
+}
+
+#[tokio::test]
+async fn fail_on_denied_exits_9_when_a_completed_run_had_a_denied_call() {
+    let output = run_with_a_denied_command(&["--fail-on-denied"]).await;
+
+    let stderr = stderr(&output);
+    assert_eq!(output.status.code(), Some(9), "{stderr}");
+    assert!(stderr.contains("outcome=Completed"), "{stderr}");
+}
+
+#[tokio::test]
+async fn fail_on_denied_keeps_exit_code_0_when_nothing_was_denied() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::text("done")]).await;
+
+    let output = run(&server, dir.path()).arg("--fail-on-denied").output().await.unwrap();
+
+    let stderr = stderr(&output);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert!(!stderr.contains("denied_calls"), "{stderr}");
+}
+
 /// A trace collector that records each OTLP/HTTP request and answers it as accepted.
 async fn collector() -> (String, Arc<Mutex<Vec<Request>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
