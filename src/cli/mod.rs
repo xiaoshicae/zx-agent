@@ -1,6 +1,7 @@
 //! The command line: the subcommands, their arguments and the value parsers. What a process
 //! shares between its sessions is in `shared`, the assembly of one session in `prepare`.
 
+mod execution;
 mod prepare;
 mod shared;
 
