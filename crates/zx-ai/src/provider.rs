@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use super::types::{Request, StreamEvent};
 
 /// Buffered events per response before the producer waits for its consumer.
-pub const STREAM_EVENT_BUFFER: usize = 64;
+pub(crate) const STREAM_EVENT_BUFFER: usize = 64;
 
 /// Receiving side of one streamed response, with bounded buffering and backpressure.
 pub type EventReceiver = Receiver<StreamEvent>;

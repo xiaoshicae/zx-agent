@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use super::provider::{EventReceiver, Provider, event_channel, send_event};
+use super::provider::{EventReceiver, EventSender, Provider, event_channel, send_event};
 use super::types::{AssistantMessage, ContentBlock, Delta, Request, StopReason, StreamEvent, Usage, now_ms};
 use crate::sync::lock;
 
@@ -112,59 +112,83 @@ impl Provider for FauxProvider {
         };
         lock(&self.requests).push(request);
         let (mut tx, rx) = event_channel();
+        // Not awaited: the task ends with the response, at its final event, when the
+        // receiver is dropped or when `cancel` fires (the `Provider` contract).
         tokio::spawn(async move {
-            let failure = |stop, error: &str| AssistantMessage::failure("faux", &model, stop, error);
-            let event = match step {
-                None => StreamEvent::Error(failure(StopReason::Error, "faux provider: no scripted response left")),
-                Some(FauxStep::Fail(error)) => StreamEvent::Error(failure(StopReason::Error, &error)),
-                Some(FauxStep::Compute(_)) => StreamEvent::Error(failure(
-                    StopReason::Error,
-                    "faux provider: a computed step computed another",
-                )),
-                Some(FauxStep::Hang) => {
-                    cancel.cancelled().await;
-                    StreamEvent::Error(failure(StopReason::Aborted, "Request was aborted"))
-                }
-                Some(FauxStep::Respond { blocks, stop }) => {
-                    let timestamp = now_ms();
-                    if !send_event(&mut tx, StreamEvent::Start).await {
-                        return;
-                    }
-                    for block in &blocks {
-                        for delta in deltas_for(block) {
-                            if !send_event(&mut tx, StreamEvent::Delta(delta)).await {
-                                return;
-                            }
-                        }
-                    }
-                    let aborted = cancel.is_cancelled();
-                    let message = AssistantMessage {
-                        content: blocks,
-                        provider: "faux".to_string(),
-                        model: model.clone(),
-                        usage: Usage {
-                            input: 10,
-                            output: 5,
-                            cache_read: 0,
-                            total_tokens: 15,
-                            ..Usage::default()
-                        },
-                        stop_reason: if aborted { StopReason::Aborted } else { stop },
-                        error_message: aborted.then(|| "Request was aborted".to_string()),
-                        provider_error: None,
-                        timestamp,
-                        duration_ms: Some(0),
-                        response_id: None,
-                        response_model: None,
-                    };
-                    StreamEvent::ending(message)
-                }
-            };
-            // A failed terminal send only means its consumer has gone away.
-            send_event(&mut tx, event).await;
+            if let Some(event) = event_for(step, &model, &cancel, &mut tx).await {
+                // A failed terminal send only means its consumer has gone away.
+                send_event(&mut tx, event).await;
+            }
         });
         rx
     }
+}
+
+/// The final event of `step` for `model`, after its deltas went through `tx`; `None` once
+/// the consumer has gone away.
+async fn event_for(
+    step: Option<FauxStep>,
+    model: &str,
+    cancel: &CancellationToken,
+    tx: &mut EventSender,
+) -> Option<StreamEvent> {
+    let failure = |stop, error: &str| AssistantMessage::failure("faux", model, stop, error);
+    Some(match step {
+        None => StreamEvent::Error(failure(StopReason::Error, "faux provider: no scripted response left")),
+        Some(FauxStep::Fail(error)) => StreamEvent::Error(failure(StopReason::Error, &error)),
+        Some(FauxStep::Compute(_)) => StreamEvent::Error(failure(
+            StopReason::Error,
+            "faux provider: a computed step computed another",
+        )),
+        Some(FauxStep::Hang) => {
+            cancel.cancelled().await;
+            StreamEvent::Error(failure(StopReason::Aborted, "Request was aborted"))
+        }
+        Some(FauxStep::Respond { blocks, stop }) => respond(blocks, stop, model, cancel, tx).await?,
+    })
+}
+
+/// Stream `blocks` as deltas, then the message they make up, ended by `stop` or by `Aborted`
+/// when `cancel` fired meanwhile; `None` once the consumer has gone away.
+async fn respond(
+    blocks: Vec<ContentBlock>,
+    stop: StopReason,
+    model: &str,
+    cancel: &CancellationToken,
+    tx: &mut EventSender,
+) -> Option<StreamEvent> {
+    let timestamp = now_ms();
+    if !send_event(tx, StreamEvent::Start).await {
+        return None;
+    }
+    for block in &blocks {
+        for delta in deltas_for(block) {
+            if !send_event(tx, StreamEvent::Delta(delta)).await {
+                return None;
+            }
+        }
+    }
+    let aborted = cancel.is_cancelled();
+    let message = AssistantMessage {
+        content: blocks,
+        provider: "faux".to_string(),
+        model: model.to_string(),
+        usage: Usage {
+            input: 10,
+            output: 5,
+            cache_read: 0,
+            total_tokens: 15,
+            ..Usage::default()
+        },
+        stop_reason: if aborted { StopReason::Aborted } else { stop },
+        error_message: aborted.then(|| "Request was aborted".to_string()),
+        provider_error: None,
+        timestamp,
+        duration_ms: Some(0),
+        response_id: None,
+        response_model: None,
+    };
+    Some(StreamEvent::ending(message))
 }
 
 fn deltas_for(block: &ContentBlock) -> Vec<Delta> {
