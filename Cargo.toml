@@ -90,6 +90,9 @@ unnested_or_patterns = "warn"
 manual_let_else = "warn"
 needless_continue = "warn"
 ignored_unit_patterns = "warn"
+# Layout: one module file style, the one the Rust Reference encourages. The exception is
+# `tests/common/mod.rs`, which Cargo needs under that name.
+mod_module_files = "warn"
 
 [package]
 name = "zx-agent"

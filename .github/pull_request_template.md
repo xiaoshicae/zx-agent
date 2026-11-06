@@ -5,7 +5,7 @@
 ## 自查（规则 09）
 
 - [ ] 最长的新函数在 80 行内，或带着说明理由的 `#[expect(clippy::too_many_lines, reason = "...")]`
-- [ ] 没有新抄的第二份；共用的放在所属层的 `mod.rs`、`zx_im::platform` 或 `tests/common`
+- [ ] 没有新抄的第二份；共用的放在所属层的入口文件、`zx_im::platform` 或 `tests/common`
 - [ ] 新名字与仓库里的同义词一致；没有同名不同义
 - [ ] 搬过的代码带着文档一起搬；`pub` 最小
 
