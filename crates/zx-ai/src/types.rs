@@ -10,16 +10,13 @@ use super::system_prompt::SystemMessage;
 /// Milliseconds since the Unix epoch.
 pub fn now_ms() -> u64 {
     // The only failure is a system clock set before 1970; a zero timestamp is harmless then.
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(duration_ms)
-        .unwrap_or(0)
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, duration_ms)
 }
 
 /// Whole milliseconds of `duration`.
 pub fn duration_ms(duration: Duration) -> u64 {
-    // u128 -> u64: u64 milliseconds cover about 584 million years, so this cannot truncate in practice.
-    duration.as_millis() as u64
+    // u64 milliseconds cover about 584 million years; anything past them saturates.
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Token counts of one response, or a sum of several. The counts a server did not report

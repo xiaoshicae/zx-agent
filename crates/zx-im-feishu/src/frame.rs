@@ -57,8 +57,8 @@ impl Frame {
         put_varint_field(&mut out, 1, self.seq_id);
         put_varint_field(&mut out, 2, self.log_id);
         // int32 is a varint of the value sign-extended to 64 bits.
-        put_varint_field(&mut out, 3, i64::from(self.service) as u64);
-        put_varint_field(&mut out, 4, i64::from(self.method) as u64);
+        put_varint_field(&mut out, 3, i64::from(self.service).cast_unsigned());
+        put_varint_field(&mut out, 4, i64::from(self.method).cast_unsigned());
         for (key, value) in &self.headers {
             let mut header = Vec::with_capacity(key.len() + value.len() + 4);
             put_bytes_field(&mut header, 1, key.as_bytes());
@@ -80,9 +80,8 @@ impl Frame {
             match (key >> 3, key & 7) {
                 (1, VARINT) => frame.seq_id = reader.varint()?,
                 (2, VARINT) => frame.log_id = reader.varint()?,
-                // An int32 field keeps the low 32 bits of its varint.
-                (3, VARINT) => frame.service = reader.varint()? as u32 as i32,
-                (4, VARINT) => frame.method = reader.varint()? as u32 as i32,
+                (3, VARINT) => frame.service = int32(reader.varint()?),
+                (4, VARINT) => frame.method = int32(reader.varint()?),
                 (5, LENGTH_DELIMITED) => frame.headers.push(decode_header(reader.bytes()?)?),
                 (6, LENGTH_DELIMITED) => frame.payload_encoding = text(reader.bytes()?)?,
                 (7, LENGTH_DELIMITED) => frame.payload_type = text(reader.bytes()?)?,
@@ -113,14 +112,24 @@ fn text(bytes: &[u8]) -> Result<String, FrameError> {
     String::from_utf8(bytes.to_vec()).map_err(|_| FrameError("a string field is not UTF-8"))
 }
 
+/// An int32 field keeps the low 32 bits of its varint.
+fn int32(value: u64) -> i32 {
+    let [a, b, c, d, ..] = value.to_le_bytes();
+    i32::from_le_bytes([a, b, c, d])
+}
+
+fn low_byte(value: u64) -> u8 {
+    value.to_le_bytes()[0]
+}
+
 fn put_varint(out: &mut Vec<u8>, mut value: u64) {
     while value >= 0x80 {
-        // The low seven bits, with the continuation bit set; the cast keeps exactly them.
-        out.push((value as u8 & 0x7f) | 0x80);
+        // The low seven bits, with the continuation bit set.
+        out.push((low_byte(value) & 0x7f) | 0x80);
         value >>= 7;
     }
     // Below 0x80 now, so it fits in one byte.
-    out.push(value as u8);
+    out.push(low_byte(value));
 }
 
 fn put_varint_field(out: &mut Vec<u8>, field: u64, value: u64) {

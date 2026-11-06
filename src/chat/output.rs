@@ -246,6 +246,7 @@ impl Output {
 }
 
 impl EventSink for Output {
+    #[expect(clippy::too_many_lines, reason = "one arm per event variant")]
     fn emit(&self, event: &Event) {
         if self.mode == OutputMode::Jsonl {
             self.json.emit(event);

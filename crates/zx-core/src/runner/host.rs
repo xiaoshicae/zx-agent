@@ -26,14 +26,14 @@ pub(super) struct RunStop {
 }
 
 impl RunStop {
-    pub fn error(reason: impl Into<String>) -> Self {
+    pub(super) fn error(reason: impl Into<String>) -> Self {
         Self {
             outcome: LoopOutcome::Error,
             error: Some(reason.into()),
         }
     }
 
-    pub fn aborted() -> Self {
+    pub(super) fn aborted() -> Self {
         Self {
             outcome: LoopOutcome::Aborted,
             error: None,
@@ -49,11 +49,11 @@ impl RunStop {
 pub(super) struct CompactionPause(Option<String>);
 
 impl CompactionPause {
-    pub fn reason(&self) -> Option<&str> {
+    pub(super) fn reason(&self) -> Option<&str> {
         self.0.as_deref()
     }
 
-    pub fn clear(&mut self) {
+    pub(super) fn clear(&mut self) {
         self.0 = None;
     }
 
@@ -90,7 +90,7 @@ pub(super) struct RunHost<'a> {
 }
 
 impl<'a> RunHost<'a> {
-    pub fn new(
+    pub(super) fn new(
         session: &'a mut SessionStore,
         to: Emit<'a>,
         config: &'a LoopConfig,
@@ -112,7 +112,7 @@ impl<'a> RunHost<'a> {
 
     /// Summarize the old prefix with `trigger`; the pause follows the outcome. When the
     /// report says `Completed`, the session's projection is the new context.
-    pub async fn summarize(&mut self, trigger: Trigger, cancel: &CancellationToken) -> compaction::Report {
+    pub(super) async fn summarize(&mut self, trigger: Trigger, cancel: &CancellationToken) -> compaction::Report {
         let mut host = compaction::Host {
             session: &mut *self.session,
             provider: self.provider,
@@ -130,7 +130,7 @@ impl<'a> RunHost<'a> {
 
     /// The input a continuation starts with, after omitting a failed answer at the end; an
     /// error when there is nothing for the model to answer.
-    pub async fn continuation(&mut self, queues: &MessageQueues) -> Result<Vec<QueuedMessage>, String> {
+    pub(super) async fn continuation(&mut self, queues: &MessageQueues) -> Result<Vec<QueuedMessage>, String> {
         let projection = self.session.projection();
         let Some(last) = projection
             .iter()
@@ -165,7 +165,7 @@ impl<'a> RunHost<'a> {
 
     /// Record the custom entries that hooks queued and the loop has not written (pi:
     /// `appendEntry`), each announced as a `custom_entry` event.
-    pub async fn record_pending_entries(&mut self, queues: &MessageQueues) -> Result<(), String> {
+    pub(super) async fn record_pending_entries(&mut self, queues: &MessageQueues) -> Result<(), String> {
         for entry in queues.take_entries() {
             let id = self
                 .session
@@ -183,7 +183,7 @@ impl<'a> RunHost<'a> {
 
     /// Keep a failed answer in the session but drop it from the model context, so that the
     /// next attempt continues from the message before it without repeating the user message.
-    pub async fn omit_failed_attempt(&mut self, target: &str) -> Result<(), String> {
+    pub(super) async fn omit_failed_attempt(&mut self, target: &str) -> Result<(), String> {
         let index = self
             .session
             .projection()
@@ -208,7 +208,7 @@ impl<'a> RunHost<'a> {
     /// Omit the failed answer and summarize the old prefix, so that a new attempt can continue
     /// from the compacted context. The summary's cost is
     /// added to `accounting` whether or not it succeeds.
-    pub async fn recover_overflow(
+    pub(super) async fn recover_overflow(
         &mut self,
         error: &str,
         failed_entry: Option<&str>,
@@ -240,7 +240,7 @@ impl<'a> RunHost<'a> {
 
     /// Announce a retry, omit the failed answer from the context and wait out the backoff.
     /// Ends the run when the session cannot record the edit or the wait is cancelled.
-    pub async fn schedule_retry(
+    pub(super) async fn schedule_retry(
         &mut self,
         retry: &RetryPolicy,
         accounting: &mut RunAccounting,

@@ -21,7 +21,11 @@ const TOKEN: &str = "mcp-token-1234";
 fn settings(fake: &FakeMcp, tools: &[&str]) -> ServerConfig {
     ServerConfig {
         token: Some(TOKEN.to_string()),
-        ..ServerConfig::new("prom", fake.url.clone(), tools.iter().map(|t| t.to_string()).collect())
+        ..ServerConfig::new(
+            "prom",
+            fake.url.clone(),
+            tools.iter().map(std::string::ToString::to_string).collect(),
+        )
     }
 }
 

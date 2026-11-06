@@ -20,7 +20,7 @@ pub(super) fn load(cwd: &Path, config: &ProjectContext) -> Result<String> {
             continue;
         }
         let text = read_text(&path)?;
-        let header = format!("\n# Project instructions from {:?}\n", path);
+        let header = format!("\n# Project instructions from {path:?}\n");
         ensure!(
             section
                 .len()

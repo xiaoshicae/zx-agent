@@ -3,7 +3,7 @@
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 
-pub struct Request {
+pub(crate) struct Request {
     pub method: String,
     /// Path and query, as in the request line.
     pub path: String,
@@ -12,7 +12,7 @@ pub struct Request {
 }
 
 impl Request {
-    pub fn header(&self, name: &str) -> Option<&str> {
+    pub(crate) fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
             .find(|(key, _)| key.eq_ignore_ascii_case(name))
@@ -20,7 +20,7 @@ impl Request {
     }
 
     /// The body as JSON; `Null` when empty.
-    pub fn json(&self) -> serde_json::Value {
+    pub(crate) fn json(&self) -> serde_json::Value {
         if self.body.is_empty() {
             serde_json::Value::Null
         } else {
@@ -30,7 +30,7 @@ impl Request {
 }
 
 /// Read one request; `None` if the client closed the connection first.
-pub async fn read_request(stream: &mut TcpStream) -> Option<Request> {
+pub(crate) async fn read_request(stream: &mut TcpStream) -> Option<Request> {
     let mut data = Vec::new();
     let mut buf = [0u8; 4096];
     let header_end = loop {
@@ -75,7 +75,7 @@ pub async fn read_request(stream: &mut TcpStream) -> Option<Request> {
 
 /// A complete response that closes the connection. `status` is the code and reason, such as
 /// `"200 OK"`; `headers` are written as given.
-pub fn response(status: &str, headers: &[(&str, String)], body: &str) -> String {
+pub(crate) fn response(status: &str, headers: &[(&str, String)], body: &str) -> String {
     let extra: String = headers
         .iter()
         .map(|(key, value)| format!("{key}: {value}\r\n"))

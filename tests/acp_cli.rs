@@ -68,9 +68,7 @@ impl Acp {
             Some(_) => None,
             None => Some(tempfile::tempdir().unwrap()),
         };
-        let home = home
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| own.as_ref().unwrap().path().to_path_buf());
+        let home = home.map_or_else(|| own.as_ref().unwrap().path().to_path_buf(), Path::to_path_buf);
         let mut child = zx_agent()
             .arg("acp")
             .args(["--model", "mock-model", "--base-url", &server.base_url])
@@ -397,7 +395,7 @@ async fn an_unknown_session_is_a_request_error() {
 async fn a_file_write_shows_as_a_diff_and_an_auto_approved_command_asks_nobody() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![
-        Reply::tool_call("w", "write_file", json!({"path": "notes.txt", "content": "one\n"})),
+        Reply::tool_call("w", "write_file", &json!({"path": "notes.txt", "content": "one\n"})),
         Reply::bash("p", "pwd"),
         Reply::text("written"),
     ])
@@ -508,7 +506,7 @@ async fn loading_replays_a_tool_call_with_its_result() {
     let cwd = work.path().canonicalize().unwrap();
     std::fs::write(cwd.join("notes.txt"), "deploys on tuesdays\n").unwrap();
     let server = MockServer::start(vec![
-        Reply::tool_call("c1", "read_file", json!({"path": "notes.txt"})),
+        Reply::tool_call("c1", "read_file", &json!({"path": "notes.txt"})),
         Reply::text("noted"),
     ])
     .await;

@@ -244,20 +244,14 @@ async fn serve(args: AcpArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> 
         .on_receive_request(
             async move |request: PromptRequest, responder, cx| {
                 let Some(live) = on_prompt.session(&request.session_id) else {
-                    return responder.respond_with_error(Error::new(
-                        ErrorCode::INVALID_PARAMS,
-                        format!("unknown session {}", request.session_id.0),
-                    ));
+                    return responder
+                        .respond_with_error(unknown_session(&request.session_id.0, "no such session is open"));
                 };
                 let text = prompt_text(&request.prompt);
                 // The turn runs outside the dispatch loop, so cancellations and permission
                 // answers keep arriving; the response is sent when the turn ends.
                 cx.spawn(async move {
-                    let response = match live.session.prompt(text).await {
-                        Ok(report) => stop_reason(&report).map(PromptResponse::new),
-                        Err(error) => Err(error.to_string()),
-                    };
-                    match response {
+                    match answer_prompt(&live, text).await {
                         Ok(response) => responder.respond(response),
                         Err(message) => responder.respond_with_error(failure(message)),
                     }
@@ -278,6 +272,14 @@ async fn serve(args: AcpArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> 
         .await
         .context("the ACP connection failed")?;
     Ok(EXIT_COMPLETED)
+}
+
+/// The response to `session/prompt` once the turn ended: its stop reason, or the run's error.
+async fn answer_prompt(live: &Live, text: String) -> Result<PromptResponse, String> {
+    match live.session.prompt(text).await {
+        Ok(report) => stop_reason(&report).map(PromptResponse::new),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 /// A request error whose message says what went wrong: clients show the message, while the
@@ -555,6 +557,7 @@ impl Updates {
 }
 
 impl EventSink for Updates {
+    #[expect(clippy::too_many_lines, reason = "one arm per event variant")]
     fn emit(&self, event: &Event) {
         match &event.event {
             AgentEvent::MessageStart { role: "assistant" } => lock(&self.state).wrote_text = false,

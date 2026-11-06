@@ -15,20 +15,20 @@ use zx_agent::ai::{AssistantMessage, Message, Reasoning, StopReason, ToolCall};
 use zx_agent::interaction::{Approval, ApprovalRequest};
 
 /// `value` serializes to `expected` and reads back unchanged.
-fn round_trip<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(value: T, expected: Value) {
-    assert_eq!(serde_json::to_value(&value).unwrap(), expected);
-    assert_eq!(serde_json::from_value::<T>(expected).unwrap(), value);
+fn round_trip<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(value: &T, expected: Value) {
+    assert_eq!(serde_json::to_value(value).unwrap(), expected);
+    assert_eq!(serde_json::from_value::<T>(expected).unwrap(), *value);
 }
 
 #[test]
 fn decisions_name_the_verdict_and_give_a_reason_to_deny_or_ask() {
-    round_trip(Decision::Allow, json!({"decision": "allow"}));
+    round_trip(&Decision::Allow, json!({"decision": "allow"}));
     round_trip(
-        Decision::Deny("not on the list".into()),
+        &Decision::Deny("not on the list".into()),
         json!({"decision": "deny", "reason": "not on the list"}),
     );
     round_trip(
-        Decision::Ask("writes files".into()),
+        &Decision::Ask("writes files".into()),
         json!({"decision": "ask", "reason": "writes files"}),
     );
 }
@@ -36,14 +36,14 @@ fn decisions_name_the_verdict_and_give_a_reason_to_deny_or_ask() {
 #[test]
 fn request_settings_name_the_model_and_omit_an_unset_reasoning_level() {
     round_trip(
-        RequestSettings {
+        &RequestSettings {
             model: "small-model".into(),
             reasoning: None,
         },
         json!({"model": "small-model"}),
     );
     round_trip(
-        RequestSettings {
+        &RequestSettings {
             model: "big-model".into(),
             reasoning: Some(Reasoning::Xhigh),
         },
@@ -53,14 +53,14 @@ fn request_settings_name_the_model_and_omit_an_unset_reasoning_level() {
 
 #[test]
 fn turn_decisions_carry_the_text_of_a_continuation_or_follow_up() {
-    round_trip(TurnDecision::Default, json!({"decision": "default"}));
-    round_trip(TurnDecision::Stop, json!({"decision": "stop"}));
+    round_trip(&TurnDecision::Default, json!({"decision": "default"}));
+    round_trip(&TurnDecision::Stop, json!({"decision": "stop"}));
     round_trip(
-        TurnDecision::ContinueAnswer("continue".into()),
+        &TurnDecision::ContinueAnswer("continue".into()),
         json!({"decision": "continue_answer", "text": "continue"}),
     );
     round_trip(
-        TurnDecision::FollowUp("now summarize".into()),
+        &TurnDecision::FollowUp("now summarize".into()),
         json!({"decision": "follow_up", "text": "now summarize"}),
     );
 }
@@ -70,25 +70,25 @@ fn context_edits_name_the_edit_and_its_fields() {
     let message = Message::user("note");
     let message_json = serde_json::to_value(&message).unwrap();
     round_trip(
-        ContextEdit::Append { message },
+        &ContextEdit::Append { message },
         json!({"edit": "append", "message": message_json}),
     );
     round_trip(
-        ContextEdit::ReplaceText {
+        &ContextEdit::ReplaceText {
             index: 2,
             text: "shorter".into(),
         },
         json!({"edit": "replace_text", "index": 2, "text": "shorter"}),
     );
-    round_trip(ContextEdit::Omit { index: 3 }, json!({"edit": "omit", "index": 3}));
+    round_trip(&ContextEdit::Omit { index: 3 }, json!({"edit": "omit", "index": 3}));
 }
 
 #[test]
 fn approvals_name_their_scope_and_give_a_reason_to_deny() {
-    round_trip(Approval::AllowOnce, json!({"approval": "allow_once"}));
-    round_trip(Approval::AllowSession, json!({"approval": "allow_session"}));
+    round_trip(&Approval::AllowOnce, json!({"approval": "allow_once"}));
+    round_trip(&Approval::AllowSession, json!({"approval": "allow_session"}));
     round_trip(
-        Approval::Deny("not now".into()),
+        &Approval::Deny("not now".into()),
         json!({"approval": "deny", "reason": "not now"}),
     );
 }
@@ -96,7 +96,7 @@ fn approvals_name_their_scope_and_give_a_reason_to_deny() {
 #[test]
 fn tool_output_flags_default_to_false() {
     round_trip(
-        ToolOutput {
+        &ToolOutput {
             content: "done".into(),
             is_error: true,
             terminate: false,
@@ -113,7 +113,7 @@ fn tool_output_flags_default_to_false() {
 #[test]
 fn tool_output_details_are_optional_and_kept_as_given() {
     round_trip(
-        ToolOutput::ok("done").with_details(json!({"exitCode": 0, "lines": [1, 2]})),
+        &ToolOutput::ok("done").with_details(json!({"exitCode": 0, "lines": [1, 2]})),
         json!({"content": "done", "isError": false, "terminate": false, "details": {"exitCode": 0, "lines": [1, 2]}}),
     );
 }
@@ -134,7 +134,7 @@ fn approval_requests_carry_the_exact_call() {
         arguments_error: None,
     };
     round_trip(
-        ApprovalRequest {
+        &ApprovalRequest {
             call,
             reason: "review".into(),
         },
@@ -148,7 +148,7 @@ fn approval_requests_carry_the_exact_call() {
 #[test]
 fn a_tool_call_names_its_fields_as_in_messages() {
     round_trip(
-        ToolCall {
+        &ToolCall {
             id: "c1".into(),
             name: "bash".into(),
             arguments: Value::Null,

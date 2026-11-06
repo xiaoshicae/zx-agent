@@ -87,7 +87,7 @@ async fn run_calls_an_mcp_tool_its_server_allows() {
     let dir = tempfile::tempdir().unwrap();
     let fake = prom().await;
     let model = MockServer::start(vec![
-        Reply::tool_call("c1", "prom__query", json!({"q": "up"})),
+        Reply::tool_call("c1", "prom__query", &json!({"q": "up"})),
         Reply::text("done"),
     ])
     .await;
@@ -112,7 +112,7 @@ async fn run_refuses_an_mcp_tool_that_needs_approval() {
     let dir = tempfile::tempdir().unwrap();
     let fake = prom().await;
     let model = MockServer::start(vec![
-        Reply::tool_call("c1", "prom__range", json!({"q": "up"})),
+        Reply::tool_call("c1", "prom__range", &json!({"q": "up"})),
         Reply::text("done"),
     ])
     .await;
@@ -131,7 +131,7 @@ async fn chat_asks_before_an_mcp_tool_that_needs_approval() {
     let dir = tempfile::tempdir().unwrap();
     let fake = prom().await;
     let model = MockServer::start(vec![
-        Reply::tool_call("c1", "prom__range", json!({"q": "up"})),
+        Reply::tool_call("c1", "prom__range", &json!({"q": "up"})),
         Reply::text("done"),
     ])
     .await;
@@ -188,7 +188,7 @@ async fn the_mcp_token_is_redacted_from_tool_results() {
         )],
     );
     let model = MockServer::start(vec![
-        Reply::tool_call("c1", "prom__query", json!({})),
+        Reply::tool_call("c1", "prom__query", &json!({})),
         Reply::text("done"),
     ])
     .await;

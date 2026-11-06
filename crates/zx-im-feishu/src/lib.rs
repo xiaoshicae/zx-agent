@@ -41,7 +41,7 @@ const CONTROL: i32 = 0;
 const DATA: i32 = 1;
 /// Endpoint codes the Go SDK retries: 1 (system busy) and 1000040343. Any other non-zero
 /// code ends the client (`ws/client_transport.go`).
-const RETRY_CODES: [i64; 2] = [1, 1000040343];
+const RETRY_CODES: [i64; 2] = [1, 1_000_040_343];
 /// Handshake refusal for too many connections, with status 514 (`ws/const.go`).
 const EXCEED_CONN_LIMIT: &str = "1000040350";
 /// Ping interval until the server sends its own (`ws/client.go`).
@@ -71,7 +71,7 @@ const MAX_TOKEN_LIFETIME: Duration = Duration::from_secs(24 * 3600);
 const MAX_RATE_LIMIT_RETRIES: u32 = 3;
 /// Codes that mean a frequency limit: 99991400 from the gateway (frequency-control guide)
 /// and 230020 from the message APIs.
-const RATE_LIMIT_CODES: [i64; 2] = [99991400, 230020];
+const RATE_LIMIT_CODES: [i64; 2] = [99_991_400, 230_020];
 /// Header with the seconds to wait after a frequency limit.
 const RATE_LIMIT_RESET: &str = "x-ogw-ratelimit-reset";
 /// Characters per posted message; longer text is split. Requests may reach 150 KB, but
@@ -617,10 +617,10 @@ impl ImChannel for FeishuChannel {
                         "thread": to.thread.as_ref().map(|thread| &thread.0),
                     })
                 };
-                let card = card(vec![
+                let card = card(&[
                     markdown(&request),
-                    button(&labels.allow_once, "primary", value("allow_once")),
-                    button(&labels.deny, "danger", value("deny")),
+                    button(&labels.allow_once, "primary", &value("allow_once")),
+                    button(&labels.deny, "danger", &value("deny")),
                 ]);
                 let posted = self.post(to, "interactive", card).await?;
                 self.cards.remember(&posted.id, request);
@@ -671,7 +671,7 @@ impl ImChannel for FeishuChannel {
                 }
                 elements.push(markdown(&resolution(&self.config.labels, message)));
                 let path = format!("/open-apis/im/v1/messages/{}", posted.id.0);
-                self.api(Method::PATCH, &path, &json!({"content": card(elements)}))
+                self.api(Method::PATCH, &path, &json!({"content": card(&elements)}))
                     .await
                     .map(drop)
                     .map_err(ImError::from)
@@ -823,7 +823,7 @@ fn jitter(nonce: Duration) -> Duration {
         return Duration::ZERO;
     }
     // The low 64 bits of the UUID are random but for two variant bits.
-    let random = uuid::Uuid::new_v4().as_u128() as u64;
+    let (_, random) = uuid::Uuid::new_v4().as_u64_pair();
     Duration::from_millis(random % millis)
 }
 
@@ -839,7 +839,7 @@ fn rate_limit_wait(response: &reqwest::Response) -> Duration {
 }
 
 fn split(text: &str) -> Vec<String> {
-    split_text(text, MAX_TEXT_CHARS, |out, c| out.push(c))
+    split_text(text, MAX_TEXT_CHARS, std::string::String::push)
 }
 
 /// The content of a text message: a JSON object as a string.
@@ -848,7 +848,7 @@ fn text_content(text: &str) -> String {
 }
 
 /// A card in JSON 2.0 that can be updated, as a string.
-fn card(elements: Vec<Value>) -> String {
+fn card(elements: &[Value]) -> String {
     json!({
         "schema": "2.0",
         "config": {"update_multi": true},
@@ -861,7 +861,7 @@ fn markdown(content: &str) -> Value {
     json!({"tag": "markdown", "content": content})
 }
 
-fn button(label: &str, kind: &str, value: Value) -> Value {
+fn button(label: &str, kind: &str, value: &Value) -> Value {
     json!({
         "tag": "button",
         "type": kind,

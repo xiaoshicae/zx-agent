@@ -114,7 +114,7 @@ impl Server {
             .peer_info()
             .map(|info| info.protocol_version.to_string())
             .unwrap_or_default();
-        Self::with_tools(config, protocol_version, &listed, Arc::new(client))
+        Self::with_tools(config, protocol_version, &listed, &Arc::new(client))
     }
 
     /// The server with the configured tools among those it `listed`, as tools for the model.
@@ -122,7 +122,7 @@ impl Server {
         config: ServerConfig,
         protocol_version: String,
         listed: &[rmcp::model::Tool],
-        client: Arc<Client>,
+        client: &Arc<Client>,
     ) -> Result<Self, String> {
         let server = config.name.as_str();
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
@@ -155,7 +155,7 @@ impl Server {
                 },
                 remote: remote.clone(),
                 server: server.to_string(),
-                client: Arc::clone(&client),
+                client: Arc::clone(client),
                 timeout: config.call_timeout,
                 max_timeout: config.max_call_timeout,
             }));

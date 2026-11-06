@@ -5,13 +5,13 @@
     reason = "each test binary uses a different subset of these helpers; `expect` would fail in a binary that uses them all"
 )]
 
-pub mod evals;
-pub mod fake_feishu;
-pub mod fake_mcp;
-pub mod fake_slack;
-pub mod http;
-pub mod mock_server;
-pub mod summary_eval;
+pub(crate) mod evals;
+pub(crate) mod fake_feishu;
+pub(crate) mod fake_mcp;
+pub(crate) mod fake_slack;
+pub(crate) mod http;
+pub(crate) mod mock_server;
+pub(crate) mod summary_eval;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -35,23 +35,23 @@ use zx_agent::runner::{Limits, Runner};
 use zx_agent::session::{SessionHeader, SessionStore};
 
 /// The compiled `zx-agent`, for the tests that drive the program.
-pub fn zx_agent() -> tokio::process::Command {
+pub(crate) fn zx_agent() -> tokio::process::Command {
     tokio::process::Command::new(env!("CARGO_BIN_EXE_zx-agent"))
 }
 
 /// What a finished program wrote to stdout, decoded lossily.
-pub fn stdout(output: &std::process::Output) -> String {
+pub(crate) fn stdout(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
 /// What a finished program wrote to stderr, decoded lossily.
-pub fn stderr(output: &std::process::Output) -> String {
+pub(crate) fn stderr(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
 /// The bounds the runner tests use unless they set their own: 30 model requests and 15
 /// minutes, those of the unattended profiles (the kernel's own defaults are unlimited).
-pub fn test_limits() -> Limits {
+pub(crate) fn test_limits() -> Limits {
     Limits {
         max_model_requests: Some(30),
         timeout: Some(Duration::from_secs(900)),
@@ -61,7 +61,7 @@ pub fn test_limits() -> Limits {
 
 /// Echoes `text` after sleeping `ms`. Can inject queued messages while it runs, report each
 /// string in `progress` as a progress update, and return `details` as given.
-pub struct EchoTool {
+pub(crate) struct EchoTool {
     pub name: &'static str,
     pub mode: ExecutionMode,
     pub calls: AtomicUsize,
@@ -69,7 +69,7 @@ pub struct EchoTool {
 }
 
 impl EchoTool {
-    pub fn new(name: &'static str) -> Self {
+    pub(crate) fn new(name: &'static str) -> Self {
         Self {
             name,
             mode: ExecutionMode::Parallel,
@@ -127,7 +127,7 @@ impl Tool for EchoTool {
 }
 
 #[derive(Default)]
-pub struct Collect(pub Mutex<Vec<Event>>);
+pub(crate) struct Collect(pub Mutex<Vec<Event>>);
 
 impl EventSink for Collect {
     fn emit(&self, event: &Event) {
@@ -137,21 +137,21 @@ impl EventSink for Collect {
 
 impl Collect {
     /// The events with their envelopes.
-    pub fn envelopes(&self) -> Vec<Event> {
+    pub(crate) fn envelopes(&self) -> Vec<Event> {
         self.0.lock().unwrap().clone()
     }
 
     /// The events without their envelopes.
-    pub fn events(&self) -> Vec<AgentEvent> {
+    pub(crate) fn events(&self) -> Vec<AgentEvent> {
         self.envelopes().into_iter().map(|event| event.event).collect()
     }
 
-    pub fn kinds(&self) -> Vec<&'static str> {
+    pub(crate) fn kinds(&self) -> Vec<&'static str> {
         self.events().iter().map(AgentEvent::kind).collect()
     }
 
     /// Tool call ids of `tool_execution_end` events, in emission order.
-    pub fn tool_end_order(&self) -> Vec<String> {
+    pub(crate) fn tool_end_order(&self) -> Vec<String> {
         self.events()
             .into_iter()
             .filter_map(|event| match event {
@@ -162,7 +162,7 @@ impl Collect {
     }
 }
 
-pub fn config(provider: Arc<dyn Provider>, tools: Vec<Arc<dyn Tool>>) -> LoopConfig {
+pub(crate) fn config(provider: Arc<dyn Provider>, tools: Vec<Arc<dyn Tool>>) -> LoopConfig {
     LoopConfig::new(LoopSpec {
         provider,
         model: "test-model".to_string(),
@@ -176,13 +176,13 @@ pub fn config(provider: Arc<dyn Provider>, tools: Vec<Arc<dyn Tool>>) -> LoopCon
     })
 }
 
-pub fn with_policy(mut config: LoopConfig, policy: Arc<dyn ToolPolicy>) -> LoopConfig {
+pub(crate) fn with_policy(mut config: LoopConfig, policy: Arc<dyn ToolPolicy>) -> LoopConfig {
     config.hooks.push(PolicyHook::new(policy));
     config
 }
 
 /// Short text of each message, for compact assertions.
-pub fn summarize(messages: &[Message]) -> Vec<String> {
+pub(crate) fn summarize(messages: &[Message]) -> Vec<String> {
     messages
         .iter()
         .map(|message| match message {
@@ -213,7 +213,7 @@ pub fn summarize(messages: &[Message]) -> Vec<String> {
 
 /// Run one user `prompt` on `context` with a 10-turn budget and no cancellation, the
 /// defaults most loop tests need. Returns the result and the events.
-pub async fn run_prompt(config: &LoopConfig, context: &mut Vec<Message>, prompt: &str) -> (LoopResult, Collect) {
+pub(crate) async fn run_prompt(config: &LoopConfig, context: &mut Vec<Message>, prompt: &str) -> (LoopResult, Collect) {
     let sink = Collect::default();
     let prompts = vec![QueuedMessage::User(prompt.to_string())];
     let mut approvals = ApprovalCache::default();
@@ -224,12 +224,12 @@ pub async fn run_prompt(config: &LoopConfig, context: &mut Vec<Message>, prompt:
 }
 
 /// A hook context for calling a hook directly: a fresh run in the current directory.
-pub fn hook_context() -> HookContext {
+pub(crate) fn hook_context() -> HookContext {
     HookContext::new(None, PathBuf::from("."), CancellationToken::new())
 }
 
 /// Retries with millisecond delays, so retry tests stay fast.
-pub fn fast_retry(max_retries: u32) -> RetryPolicy {
+pub(crate) fn fast_retry(max_retries: u32) -> RetryPolicy {
     RetryPolicy {
         max_retries,
         base_delay: Duration::from_millis(10),
@@ -238,12 +238,12 @@ pub fn fast_retry(max_retries: u32) -> RetryPolicy {
     }
 }
 
-pub fn header() -> SessionHeader {
+pub(crate) fn header() -> SessionHeader {
     SessionHeader::new(Path::new("."), "test-model")
 }
 
 /// Every line of a session file, parsed.
-pub fn read_lines(path: &Path) -> Vec<Value> {
+pub(crate) fn read_lines(path: &Path) -> Vec<Value> {
     std::fs::read_to_string(path)
         .unwrap()
         .lines()
@@ -253,7 +253,7 @@ pub fn read_lines(path: &Path) -> Vec<Value> {
 
 /// The parts of a runner, with test defaults: no retries, unattended preset limits,
 /// an in-memory session. Override fields with struct update syntax, then `build`.
-pub struct RunnerSetup {
+pub(crate) struct RunnerSetup {
     pub config: LoopConfig,
     pub retry: RetryPolicy,
     pub limits: Limits,
@@ -261,7 +261,7 @@ pub struct RunnerSetup {
 }
 
 impl RunnerSetup {
-    pub fn new(config: LoopConfig) -> Self {
+    pub(crate) fn new(config: LoopConfig) -> Self {
         Self {
             config,
             retry: fast_retry(0),
@@ -271,20 +271,20 @@ impl RunnerSetup {
     }
 
     /// The runner and the sink that records its events.
-    pub fn build(self) -> (Runner, Arc<Collect>) {
+    pub(crate) fn build(self) -> (Runner, Arc<Collect>) {
         let sink = Arc::new(Collect::default());
         (self.build_with(sink.clone()), sink)
     }
 
     /// The runner, sending events to `sink`.
-    pub fn build_with(self, sink: Arc<dyn EventSink>) -> Runner {
+    pub(crate) fn build_with(self, sink: Arc<dyn EventSink>) -> Runner {
         Runner::new(self.config, self.retry, self.limits, self.session, sink)
     }
 }
 
 /// Cancels a token at the first streamed delta, to cancel a response mid-stream without
 /// depending on timing.
-pub struct CancelOnFirstDelta(pub CancellationToken);
+pub(crate) struct CancelOnFirstDelta(pub CancellationToken);
 
 impl EventSink for CancelOnFirstDelta {
     fn emit(&self, event: &Event) {
@@ -297,7 +297,7 @@ impl EventSink for CancelOnFirstDelta {
 /// A pseudo-terminal: the master end for the test, and the slave end to give a child as
 /// its terminal (stdin or stdout).
 #[cfg(unix)]
-pub fn pty() -> (tokio::fs::File, std::os::fd::OwnedFd) {
+pub(crate) fn pty() -> (tokio::fs::File, std::os::fd::OwnedFd) {
     use std::os::fd::{FromRawFd, OwnedFd};
     let mut master = -1;
     let mut slave = -1;

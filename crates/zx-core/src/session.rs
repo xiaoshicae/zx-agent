@@ -1056,6 +1056,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(clippy::too_many_lines, reason = "one entry of every kind")]
     async fn records_carry_the_serialized_type_of_every_entry_kind() {
         let (sender, records) = mpsc::channel();
         let mut old = header();

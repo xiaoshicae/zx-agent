@@ -131,6 +131,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::cognitive_complexity, reason = "one assertion per command")]
     fn slash_commands_validate_arguments_instead_of_forwarding_them_to_the_model() {
         for invalid in [
             "/new extra",

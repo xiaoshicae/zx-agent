@@ -56,8 +56,7 @@ impl BashTool {
     /// The limit for one call: what it asks for, else the default, never above the maximum.
     fn timeout_for(&self, requested_secs: Option<u64>) -> Duration {
         requested_secs
-            .map(Duration::from_secs)
-            .unwrap_or(self.default_timeout)
+            .map_or(self.default_timeout, Duration::from_secs)
             .min(self.max_timeout)
     }
 }

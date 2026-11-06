@@ -196,7 +196,7 @@ async fn cancellation_interrupts_a_waiting_policy() {
         &mut control,
     ));
     tokio::select! {
-        _ = entered.notified() => {}
+        () = entered.notified() => {}
         _ = &mut running => panic!("policy must still be waiting"),
     }
     cancel.cancel();

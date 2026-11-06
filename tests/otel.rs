@@ -100,7 +100,7 @@ fn points(all: &[ResourceMetrics], name: &str) -> Vec<(Vec<(String, String)>, u6
     };
     all.iter()
         .flat_map(ResourceMetrics::scope_metrics)
-        .flat_map(|scope| scope.metrics())
+        .flat_map(opentelemetry_sdk::metrics::data::ScopeMetrics::metrics)
         .filter(|metric| metric.name() == name)
         .flat_map(|metric| match metric.data() {
             AggregatedMetrics::U64(MetricData::Sum(sum)) => sum

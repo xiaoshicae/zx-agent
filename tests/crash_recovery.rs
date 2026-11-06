@@ -433,7 +433,7 @@ async fn the_recovery_event_follows_the_recorded_result() {
         .iter()
         .position(|event| matches!(event, AgentEvent::ToolCallRecovered { .. }))
         .unwrap();
-    assert!(recorded < reported, "{:?}", events);
+    assert!(recorded < reported, "{events:?}");
 }
 
 #[tokio::test]
@@ -485,7 +485,7 @@ async fn a_dropped_run_is_recovered_by_the_next_prompt() {
     {
         let mut running = Box::pin(session.prompt("start"));
         tokio::select! {
-            _ = hang.started.notified() => {}
+            () = hang.started.notified() => {}
             _ = &mut running => panic!("the run ended before its tool started"),
         }
         // Dropping the run future stops it before the result is recorded.
@@ -516,7 +516,7 @@ async fn result_after_cancelling_a_running_call(effects: Effects) -> (String, bo
     {
         let mut running = Box::pin(session.prompt_with_cancel("start", &cancel));
         tokio::select! {
-            _ = hang.started.notified() => {}
+            () = hang.started.notified() => {}
             _ = &mut running => panic!("the run ended before its tool started"),
         }
         cancel.cancel();

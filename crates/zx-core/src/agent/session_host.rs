@@ -50,7 +50,7 @@ pub(crate) struct ContextPreparation {
 
 impl ContextPreparation {
     /// No request was made and the context stays as it is.
-    pub fn unchanged() -> Self {
+    pub(crate) fn unchanged() -> Self {
         Self {
             requests: 0,
             usage: Usage::default(),
@@ -59,7 +59,7 @@ impl ContextPreparation {
     }
 
     /// Preparation failed before any request was made.
-    pub fn failed(error: String) -> Self {
+    pub(crate) fn failed(error: String) -> Self {
         Self {
             requests: 0,
             usage: Usage::default(),

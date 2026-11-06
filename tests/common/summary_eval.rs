@@ -21,7 +21,7 @@ use zx_agent::session::{Entry, RequestSource, SessionStore};
 use super::{RunnerSetup, config, header};
 
 /// Rounds in the scripted session; a summary follows each.
-pub const ROUNDS: usize = 8;
+pub(crate) const ROUNDS: usize = 8;
 
 /// Lines of routine access log in each round, most of a round's bytes.
 const LOG_LINES: usize = 100;
@@ -30,7 +30,7 @@ const LOG_LINES: usize = 100;
 const TASK: &str = "Checkout in namespace shop has been failing and slow since about 08:10 UTC. Find the cause, fix it with the smallest safe changes, and tell me the follow-ups.";
 
 /// A fact planted in the records of one round.
-pub struct Planted {
+pub(crate) struct Planted {
     pub id: &'static str,
     /// The round whose records first state it.
     pub round: usize,
@@ -45,18 +45,18 @@ pub struct Planted {
 
 impl Planted {
     /// Whether `text` states this fact.
-    pub fn stated_in(&self, text: &str) -> bool {
+    pub(crate) fn stated_in(&self, text: &str) -> bool {
         let text = text.to_lowercase();
         self.keys.iter().all(|group| group.iter().any(|key| text.contains(key)))
     }
 
     /// The planted fact that replaces this one.
-    pub fn replacement(&self) -> Option<&'static Planted> {
+    pub(crate) fn replacement(&self) -> Option<&'static Planted> {
         self.replaced_by.map(planted)
     }
 
     /// Whether the fact holds after `round`: stated by then, and not yet replaced.
-    pub fn holds_after(&self, round: usize) -> bool {
+    pub(crate) fn holds_after(&self, round: usize) -> bool {
         self.round <= round && self.replacement().is_none_or(|by| by.round > round)
     }
 
@@ -79,7 +79,7 @@ impl Planted {
 }
 
 /// The planted fact with this ID.
-pub fn planted(id: &str) -> &'static Planted {
+pub(crate) fn planted(id: &str) -> &'static Planted {
     PLANTED
         .iter()
         .find(|fact| fact.id == id)
@@ -87,7 +87,7 @@ pub fn planted(id: &str) -> &'static Planted {
 }
 
 /// Three facts per round; six of them are replaced later.
-pub static PLANTED: &[Planted] = &[
+pub(crate) static PLANTED: &[Planted] = &[
     Planted {
         id: "F1",
         round: 1,
@@ -286,7 +286,8 @@ enum Step {
 }
 
 /// The messages of round `n`, from 1 to [`ROUNDS`].
-pub fn round(n: usize) -> Vec<Message> {
+#[expect(clippy::too_many_lines, reason = "a scripted conversation, one round per arm")]
+pub(crate) fn round(n: usize) -> Vec<Message> {
     let steps = match n {
         1 => vec![
             Step::Run("kubectl get pods -n shop -o wide", PODS.into()),
@@ -477,7 +478,7 @@ fn assistant(block: ContentBlock, stop_reason: StopReason) -> Message {
 }
 
 /// The text a message carries: what was said, the commands run, and their output.
-pub fn text_of(message: &Message) -> String {
+pub(crate) fn text_of(message: &Message) -> String {
     match message {
         // The scripted session has no system messages.
         Message::System(_) => String::new(),
@@ -528,8 +529,7 @@ fn access_log(service: &str, round: usize) -> String {
 fn letters(mut n: usize) -> String {
     (0..7)
         .map(|_| {
-            // Below 26, so it fits a byte.
-            let letter = b'a' + (n % 26) as u8;
+            let letter = b'a' + u8::try_from(n % 26).unwrap();
             n /= 26;
             char::from(letter)
         })
@@ -765,7 +765,7 @@ const TOP: &str = concat!(
 );
 
 /// How one round's summary went, and what the summary in context states afterwards.
-pub struct RoundScore {
+pub(crate) struct RoundScore {
     pub outcome: Outcome,
     pub error: Option<String>,
     /// Bytes of the summary request's input, rebuilt from the session; 0 when none was sent.
@@ -789,7 +789,7 @@ pub struct RoundScore {
 }
 
 /// The scripted session summarized in one mode.
-pub struct Evaluation {
+pub(crate) struct Evaluation {
     pub mode: SummaryMode,
     pub rounds: Vec<RoundScore>,
     /// The facts of the summary in context at the end.
@@ -798,7 +798,7 @@ pub struct Evaluation {
 
 impl Evaluation {
     /// Print each round and the final facts, visible with `--nocapture`.
-    pub fn print(&self, model: &str) {
+    pub(crate) fn print(&self, model: &str) {
         let mode = format!("{:?}", self.mode).to_lowercase();
         let mut total = Usage::default();
         for (index, round) in self.rounds.iter().enumerate() {
@@ -838,7 +838,7 @@ impl Evaluation {
 /// and `model` under `budget`, its mode and budgets; score every summary. Only the user's
 /// next request stays out of a summary, whatever `budget` keeps. Panics if the session
 /// cannot be written or does not load again at the end.
-pub async fn evaluate(provider: Arc<dyn Provider>, model: &str, budget: Config, dir: &Path) -> Evaluation {
+pub(crate) async fn evaluate(provider: Arc<dyn Provider>, model: &str, budget: Config, dir: &Path) -> Evaluation {
     let mode = budget.mode;
     let path = dir.join(format!("{mode:?}.jsonl"));
     let mut store = SessionStore::create(&path, header()).unwrap();

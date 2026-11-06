@@ -419,6 +419,7 @@ enum What {
 }
 
 impl Signal {
+    #[expect(clippy::too_many_lines, reason = "one arm per event variant")]
     fn of(event: &Event, parent: Option<&SpanContext>) -> Option<Self> {
         let what = match &event.event {
             AgentEvent::RunStart { model, provider } => What::RunStart {
@@ -718,6 +719,7 @@ impl Runs {
         }
     }
 
+    #[expect(clippy::too_many_lines, reason = "one arm per signal")]
     fn apply(&mut self, signal: Signal) {
         let Signal {
             run_id,
@@ -1315,7 +1317,7 @@ mod tests {
     fn metric<'a>(all: &'a [ResourceMetrics], name: &str) -> Option<&'a Metric> {
         all.iter()
             .flat_map(ResourceMetrics::scope_metrics)
-            .flat_map(|scope| scope.metrics())
+            .flat_map(opentelemetry_sdk::metrics::data::ScopeMetrics::metrics)
             .find(|metric| metric.name() == name)
     }
 
@@ -1337,7 +1339,7 @@ mod tests {
             AggregatedMetrics::U64(MetricData::Sum(sum)) => sum
                 .data_points()
                 .filter(|point| has(point.attributes(), expected))
-                .map(|point| point.value())
+                .map(opentelemetry_sdk::metrics::data::SumDataPoint::value)
                 .sum(),
             other => panic!("{name} is not a u64 sum: {other:?}"),
         }

@@ -11,14 +11,14 @@ use tokio::sync::Notify;
 
 /// One request as the server received it.
 #[derive(Clone, Debug)]
-pub struct Captured {
+pub(crate) struct Captured {
     /// Request line and headers, lowercased.
     pub headers: String,
     pub body: Value,
 }
 
 /// The scripted answer to one request.
-pub enum Reply {
+pub(crate) enum Reply {
     /// Stream these chunks, then `[DONE]`.
     Sse(Vec<Value>),
     /// Build SSE chunks from the request body, e.g. to read a newly generated output ID.
@@ -35,7 +35,7 @@ pub enum Reply {
 
 impl Reply {
     /// A plain answer that ends normally.
-    pub fn text(text: &str) -> Self {
+    pub(crate) fn text(text: &str) -> Self {
         Reply::Sse(vec![
             json!({"choices": [{"index": 0, "delta": {"content": text}, "finish_reason": "stop"}]}),
             usage(),
@@ -43,12 +43,12 @@ impl Reply {
     }
 
     /// A request for one `bash` call running `command`.
-    pub fn bash(id: &str, command: &str) -> Self {
-        Self::tool_call(id, "bash", json!({"command": command}))
+    pub(crate) fn bash(id: &str, command: &str) -> Self {
+        Self::tool_call(id, "bash", &json!({"command": command}))
     }
 
     /// A request for one call of tool `name` with `arguments`.
-    pub fn tool_call(id: &str, name: &str, arguments: Value) -> Self {
+    pub(crate) fn tool_call(id: &str, name: &str, arguments: &Value) -> Self {
         let call = json!({"index": 0, "id": id, "type": "function",
             "function": {"name": name, "arguments": arguments.to_string()}});
         Reply::Sse(vec![
@@ -58,7 +58,7 @@ impl Reply {
     }
 
     /// An answer cut off at the output token limit.
-    pub fn truncated(text: &str) -> Self {
+    pub(crate) fn truncated(text: &str) -> Self {
         Reply::Sse(vec![
             json!({"choices": [{"index": 0, "delta": {"content": text}, "finish_reason": "length"}]}),
             usage(),
@@ -71,7 +71,7 @@ fn usage() -> Value {
 }
 
 /// A running fake server. It stops answering after the scripted replies are used up.
-pub struct MockServer {
+pub(crate) struct MockServer {
     /// Base URL to pass as `base_url`, ending in `/v1`.
     pub base_url: String,
     requests: Arc<Mutex<Vec<Captured>>>,
@@ -80,7 +80,7 @@ pub struct MockServer {
 
 impl MockServer {
     /// Start serving `replies`, one per connection in order.
-    pub async fn start(replies: Vec<Reply>) -> Self {
+    pub(crate) async fn start(replies: Vec<Reply>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -101,12 +101,12 @@ impl MockServer {
     }
 
     /// Requests received so far, in order.
-    pub fn requests(&self) -> Vec<Captured> {
+    pub(crate) fn requests(&self) -> Vec<Captured> {
         self.requests.lock().unwrap().clone()
     }
 
     /// Wait until at least `count` requests have arrived.
-    pub async fn wait_for_requests(&self, count: usize) {
+    pub(crate) async fn wait_for_requests(&self, count: usize) {
         loop {
             let notified = self.received.notified();
             if self.requests.lock().unwrap().len() >= count {
@@ -181,8 +181,7 @@ async fn read_request(stream: &mut TcpStream) -> Captured {
     let length: usize = headers
         .lines()
         .find_map(|line| line.strip_prefix("content-length:"))
-        .map(|value| value.trim().parse().unwrap())
-        .unwrap_or(0);
+        .map_or(0, |value| value.trim().parse().unwrap());
     while data.len() < header_end + length {
         let n = stream.read(&mut buf).await.unwrap();
         data.extend_from_slice(&buf[..n]);

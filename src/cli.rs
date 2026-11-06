@@ -1,5 +1,6 @@
 //! The command line, and the assembly of a session that run, chat, serve and acp share.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Once};
 use std::time::Duration;
@@ -9,12 +10,12 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use zx_agent::AgentSession;
 use zx_agent::agent::{Decision, EventSink, HookOptions, Hooks, LoopConfig, LoopSpec, QueueMode, Tool};
-use zx_agent::ai::Reasoning;
 use zx_agent::ai::openai::{
     DEFAULT_MAX_RESPONSE_BYTES, OpenAiCompatible, OpenAiConfig, ReasoningFormat, SystemUpdates,
 };
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::sse::DEFAULT_MAX_EVENT_BYTES;
+use zx_agent::ai::{ModelMeta, Reasoning};
 use zx_agent::compaction;
 use zx_agent::continuation::ContinueOnLength;
 use zx_agent::executor::{ContainerConfig, ContainerExecutor, Executor, LocalExecutor, container_environment_section};
@@ -115,6 +116,7 @@ pub(crate) struct RunArgs {
 }
 
 #[derive(Args)]
+#[expect(clippy::struct_excessive_bools, reason = "command-line switches")]
 pub(crate) struct ChatArgs {
     #[command(flatten)]
     pub(crate) base: BaseArgs,
@@ -725,18 +727,7 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     let cwd = resolve_cwd(options.base.cwd.as_deref())?;
     let secret_files = secret_files(options.base)?;
     let mut profile = load_profile(&options)?;
-    // What is known about the models: the profile's entries, and the window given for
-    // this model on the command line.
-    let mut models = std::mem::take(&mut profile.models);
-    if let Some(window) = options.base.context_window {
-        models.entry(options.model.to_string()).or_default().context_window = Some(window);
-    }
-    // With automatic summaries on, a known window adds a token trigger below it.
-    if profile.compaction.trigger_bytes.is_some()
-        && let Some(window) = models.get(options.model).and_then(|meta| meta.context_window)
-    {
-        profile.compaction.derive_trigger_tokens(window);
-    }
+    let models = model_meta(&mut profile, &options);
     // The container mounts the workspace at its real path, which tools must use as well.
     let cwd = match profile.execution {
         Execution::Local => cwd,
@@ -749,38 +740,17 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     )?;
     // Before the session file: invalid provider settings are configuration errors too.
     let (provider, api_key) = provider(&options)?;
-    let host = host_tools(&mut profile, &cwd)?;
-    if profile.execution == Execution::Container {
-        check_session_outside(&options.file, &cwd)?;
-    }
-    let header = SessionHeader::new(&cwd, options.model);
-    // An existing session is opened first, for its ID. A new one is created only after the
-    // container, if any, has started, so that a failed start leaves no session file behind.
-    let opened = sessions::open_existing(&options.file)?;
-    let session_id = opened
-        .as_ref()
-        .map_or_else(|| header.id.clone(), |session| session.header().id.clone());
-    let (executor, environment) = executor(&profile, &cwd, &session_id).await?;
-    let session = match opened {
-        Some(session) => session,
-        None => sessions::create(options.file, header)?,
-    };
-    if session.recovered_tail_bytes() > 0 {
-        eprintln!(
-            "[session] recovered incomplete final record; removed {} bytes",
-            session.recovered_tail_bytes()
-        );
-    }
-
+    let mut host = host_tools(&mut profile, &cwd)?;
+    let (session, executor, environment) = open_session(&options, &profile, &cwd).await?;
     let hidden_env = hidden_env(&options);
     let built_in: Vec<String> = profile.tools.iter().filter(|name| !host_tool(name)).cloned().collect();
     let mut tools = tools::builtin_tools_with(
         &built_in,
         Duration::from_secs(options.transport.tool_timeout_secs),
         &hidden_env,
-        executor,
+        &executor,
     )?;
-    tools.extend(host.tools);
+    tools.extend(std::mem::take(&mut host.tools));
     let policy = CommandPolicy::new(&profile.rules.allow).deny_also(&profile.rules.deny);
     // The command policy only concerns bash.
     let command_policy = if tools.iter().any(|tool| tool.name() == BASH) {
@@ -809,28 +779,10 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
         sequential_tools: false,
     });
     push_built_in(&mut config, "command_policy", PolicyHook::new(Arc::new(policy)));
-    extensions::register(&mut config, &options.shared.mcp.servers).map_err(anyhow::Error::msg)?;
     let auto_approve = profile.rules.auto_approval();
-    if let Some(rules) = rules_policy(&mut profile, &options.shared.mcp.ask, auto_approve.clone()) {
-        push_built_in(&mut config, "profile_rules", PolicyHook::new(Arc::new(rules)));
-    }
-    // The hooks every mode shares. Each declares its stage, so the policies above run first
-    // and redaction runs before output is saved, whatever is registered later.
-    push_built_in(
-        &mut config,
-        "continue_on_length",
-        ContinueOnLength::new(profile.continue_on_length),
-    );
-    push_built_in(
-        &mut config,
-        "redact_secrets",
-        RedactSecrets::new(api_key.into_iter().chain(hidden_values(&options))).with_secret_files(secret_files),
-    );
-    if let Some(spill) = host.spill {
-        push_built_in(&mut config, "spill_outputs", spill);
-    }
-    // The built-in tools skip repeated names; this guards tools registered here later.
-    config.spec.validate().map_err(anyhow::Error::msg)?;
+    let redaction =
+        RedactSecrets::new(api_key.into_iter().chain(hidden_values(&options))).with_secret_files(secret_files);
+    register_hooks(&mut config, &mut profile, &options, redaction, host.spill.take())?;
     config.models = models;
     config.cache_key = options.request.prompt_cache_key.then(|| session.header().id.clone());
     Ok(PreparedSession {
@@ -955,6 +907,22 @@ fn load_profile(options: &SessionOptions<'_>) -> Result<Profile> {
     Ok(profile)
 }
 
+/// What is known about the models: the profile's entries, and the window given for this
+/// model on the command line. With automatic summaries on, a known window adds a token
+/// trigger below it.
+fn model_meta(profile: &mut Profile, options: &SessionOptions<'_>) -> HashMap<String, ModelMeta> {
+    let mut models = std::mem::take(&mut profile.models);
+    if let Some(window) = options.base.context_window {
+        models.entry(options.model.to_string()).or_default().context_window = Some(window);
+    }
+    if profile.compaction.trigger_bytes.is_some()
+        && let Some(window) = models.get(options.model).and_then(|meta| meta.context_window)
+    {
+        profile.compaction.derive_trigger_tokens(window);
+    }
+    models
+}
+
 /// The provider of the command line's settings, and the API key it authenticates with.
 fn provider(options: &SessionOptions<'_>) -> Result<(OpenAiCompatible, Option<String>)> {
     // Local servers (vLLM, Ollama, llama.cpp) often need no key, so a missing key is allowed.
@@ -1021,6 +989,64 @@ fn host_tools(profile: &mut Profile, cwd: &Path) -> Result<HostTools> {
     Ok(host)
 }
 
+/// The session, where commands run, and the prompt section describing that. An existing
+/// session is opened first, for its ID; a new one is created only after the container, if
+/// any, has started, so that a failed start leaves no session file behind.
+async fn open_session(
+    options: &SessionOptions<'_>,
+    profile: &Profile,
+    cwd: &Path,
+) -> Result<(SessionStore, Arc<dyn Executor>, String)> {
+    if profile.execution == Execution::Container {
+        check_session_outside(&options.file, cwd)?;
+    }
+    let header = SessionHeader::new(cwd, options.model);
+    let opened = sessions::open_existing(&options.file)?;
+    let session_id = opened
+        .as_ref()
+        .map_or_else(|| header.id.clone(), |session| session.header().id.clone());
+    let (executor, environment) = executor(profile, cwd, &session_id).await?;
+    let session = match opened {
+        Some(session) => session,
+        None => sessions::create(options.file, header)?,
+    };
+    if session.recovered_tail_bytes() > 0 {
+        eprintln!(
+            "[session] recovered incomplete final record; removed {} bytes",
+            session.recovered_tail_bytes()
+        );
+    }
+    Ok((session, executor, environment))
+}
+
+/// The hooks every mode shares, after the command policy: the MCP servers, the profile's
+/// rules, continuation, `redaction` and `spill`. Each declares its stage, so the policies run
+/// first and redaction runs before output is saved, whatever is registered later.
+fn register_hooks(
+    config: &mut LoopConfig,
+    profile: &mut Profile,
+    options: &SessionOptions<'_>,
+    redaction: RedactSecrets,
+    spill: Option<SpillOutputs>,
+) -> Result<()> {
+    extensions::register(config, &options.shared.mcp.servers).map_err(anyhow::Error::msg)?;
+    let auto_approve = profile.rules.auto_approval();
+    if let Some(rules) = rules_policy(profile, &options.shared.mcp.ask, auto_approve) {
+        push_built_in(config, "profile_rules", PolicyHook::new(Arc::new(rules)));
+    }
+    push_built_in(
+        config,
+        "continue_on_length",
+        ContinueOnLength::new(profile.continue_on_length),
+    );
+    push_built_in(config, "redact_secrets", redaction);
+    if let Some(spill) = spill {
+        push_built_in(config, "spill_outputs", spill);
+    }
+    // The built-in tools skip repeated names; this guards tools registered here later.
+    config.spec.validate().map_err(anyhow::Error::msg)
+}
+
 /// The container reads the whole working directory, so the session file must be outside it:
 /// masking one path would leave hard links to it and earlier session files beside it readable.
 fn check_session_outside(file: &SessionFile<'_>, cwd: &Path) -> Result<()> {
@@ -1063,7 +1089,7 @@ fn hidden_env(options: &SessionOptions<'_>) -> Vec<String> {
     std::iter::once(options.base.api_key_env.clone())
         .chain(options.hidden_env.iter().cloned())
         .chain(options.shared.mcp.token_env.iter().cloned())
-        .chain(otel::HEADER_VARIABLES.iter().map(|name| name.to_string()))
+        .chain(otel::HEADER_VARIABLES.iter().map(std::string::ToString::to_string))
         .collect()
 }
 

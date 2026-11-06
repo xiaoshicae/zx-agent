@@ -69,18 +69,20 @@
 - **扩展点都是 trait**：`Provider`、`Tool`、`ToolPolicy`、`Hooks`、`Interaction`、`EventSink`、`Executor`、`SessionLog`、`ImChannel`、`StatusStore`、`Extension`。新能力优先以实现 trait 的方式加入，不改循环本身。
 - **通用，不为场景定制**：代码只定义接口与通用机制。某个环境、平台或厂商才有的知识（kubectl 的只读选项、Kubernetes 的 token 路径、IM 文案的语言、告警的格式）写在 profile、部署清单或配置里，或由外部适配器实现接口、调用 `run` 或 SDK；不在代码里解析某个系统的私有格式。provider 对协议方言的处理也要显式开启（如 `--fill-missing-reasoning`），不按厂商推断。
 - **界面交给 ACP 客户端**（D13）：交互式 UI 由实现 ACP 的开源客户端提供，`acp` 只做协议与会话的映射，协议类型以 SDK 的 `v1::schema` 为准；`chat` 冻结为应急与脚本化入口，不再加功能；`serve` 冻结，只修平台故障；`run` 保留并维护。
+- **同层互不依赖，入口只分派**：同一层的模块互不引用（run、acp、sessions 不引用 chat，两个 IM 平台互不引用），要共用的下沉到共同的下层（`render`、`process`、`zx_im::platform`）；`main.rs` 只分派子命令。拆分与重复的判断见规则 09。
 - **分层由 crate 边界保证**：内核（`zx-core`）引用不到工具、执行环境、策略、MCP、IM 和 CLI，只依赖 `zx-core` 与 `zx-ai` 的嵌入方不会引入 reqwest、rmcp、tokio-tungstenite 和 OpenTelemetry；provider 的实现各成 crate（`zx-ai-openai`），内核只认 `zx-ai` 的 `Provider` 契约。新模块放进它所属的层；需要引用上层时，说明分层或接口该改了。各 crate 在根部把下层引入为 `crate::ai`、`crate::agent`、`crate::sync` 等，所以模块内的路径与拆分前相同；跨 crate 使用、但不属于 API 的项写成 `#[doc(hidden)] pub` 并在文档注释里注明（如 `zx_ai::sync`、`SystemPrompt::has_section`）。
 
 ## 命令
 
 - 以下命令都在仓库根目录运行，覆盖全部 8 个 crate（test、clippy 与 doc 经 `Cargo.toml` 的 `default-members`）。在 `crates/*` 的目录里运行或加 `-p <crate>` 时只处理那一个 crate；集成测试都在根目录的 `tests/`，属于 `zx-agent`
 - 格式：`cargo fmt`（`rustfmt.toml`：`max_width = 120`）
-- lint：`cargo clippy --all-targets -- -D warnings`，要求零警告
+- lint：`cargo clippy --all-targets -- -D warnings`，要求零警告。范围是 clippy 的默认项加 `Cargo.toml` 的 `[workspace.lints]`（函数长度、数值转换、可读性，阈值在 `clippy.toml`）；有意保留的写法用 `#[expect(lint, reason = "...")]`，见规则 09
 - 测试：`cargo test`，不需要网络和 API key。只跑一个集成测试文件：`cargo test --test agent_loop`；按名字过滤：`cargo test retries_transient`。付费的 `tests/real_api.rs` 默认跳过，见红线 9
+- 文档：`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`，要求零警告；断掉的文档链接也算（引号必须有，否则 shell 把 `warnings` 当命令）
 - MSRV：`cargo +1.88.0 check --all-targets`，用到新语法或新标准库 API 时运行（本机已安装 1.88.0 工具链）
 - 自查：`.claude/scripts/self-check.sh`，列出需要说明理由的写法（`Rc` / `RefCell` / `unsafe`、`#[allow]`、生产代码里的 `unwrap()`、`let _ =`、调试宏）。每一处命中都要能说出理由
 
-改完代码后，格式、lint、测试三条命令都要通过。报告时附上 `test result` 那几行原始输出；没有实际运行，就不能说"已编译通过"或"测试通过"。
+改完代码后，格式、lint、测试、文档四条命令都要通过。报告时附上 `test result` 那几行原始输出；没有实际运行，就不能说"已编译通过"或"测试通过"。
 
 ## 工作方式
 

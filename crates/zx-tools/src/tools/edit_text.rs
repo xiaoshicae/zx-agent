@@ -256,6 +256,17 @@ fn line_diff<'a>(old: &[&'a str], new: &[&'a str]) -> Vec<(Op, &'a str)> {
         .collect()
 }
 
+/// `n` as a signed index. A slice has at most `isize::MAX` elements, so the lengths of the
+/// inputs and every index into them fit.
+fn signed(n: usize) -> isize {
+    isize::try_from(n).expect("a slice length fits in isize")
+}
+
+/// `n` as an index; the diagonal bounds keep it at or above zero.
+fn unsigned(n: isize) -> usize {
+    usize::try_from(n).expect("the diagonal bounds keep indices at or above zero")
+}
+
 /// The shortest edit script by Myers' greedy algorithm, or `None` when it needs more than
 /// [`MAX_DIFF_EDITS`] insertions and deletions.
 fn myers<'a>(a: &[&'a str], b: &[&'a str]) -> Option<Vec<(Op, &'a str)>> {
@@ -265,13 +276,13 @@ fn myers<'a>(a: &[&'a str], b: &[&'a str]) -> Option<Vec<(Op, &'a str)>> {
     let offset = limit + 1;
     let index = |k: isize| -> usize {
         // k is never below -(limit + 1), so the sum is never negative.
-        (k + offset as isize) as usize
+        unsigned(k + signed(offset))
     };
     let mut v = vec![0usize; 2 * limit + 3];
     let mut trace = Vec::new();
     for d in 0..=limit {
         trace.push(v.clone());
-        let d = d as isize;
+        let d = signed(d);
         let mut k = -d;
         while k <= d {
             let mut x = if k == -d || (k != d && v[index(k - 1)] < v[index(k + 1)]) {
@@ -280,7 +291,7 @@ fn myers<'a>(a: &[&'a str], b: &[&'a str]) -> Option<Vec<(Op, &'a str)>> {
                 v[index(k - 1)] + 1
             };
             // On diagonal k, y = x - k, and the bounds above keep it within 0..=m.
-            let mut y = (x as isize - k) as usize;
+            let mut y = unsigned(signed(x) - k);
             while x < n && y < m && a[x] == b[y] {
                 x += 1;
                 y += 1;
@@ -305,16 +316,16 @@ fn backtrack<'a>(
     let (mut x, mut y) = (a.len(), b.len());
     let mut ops = Vec::new();
     for (d, v) in trace.iter().enumerate().rev() {
-        let d = d as isize;
-        let k = x as isize - y as isize;
+        let d = signed(d);
+        let k = signed(x) - signed(y);
         let previous_k = if k == -d || (k != d && v[index(k - 1)] < v[index(k + 1)]) {
             k + 1
         } else {
             k - 1
         };
         let previous_x = v[index(previous_k)];
-        let previous_y = previous_x as isize - previous_k;
-        while x > previous_x && y as isize > previous_y {
+        let previous_y = signed(previous_x) - previous_k;
+        while x > previous_x && signed(y) > previous_y {
             ops.push((Op::Equal, a[x - 1]));
             x -= 1;
             y -= 1;
@@ -327,7 +338,7 @@ fn backtrack<'a>(
             }
         }
         x = previous_x;
-        y = previous_y.max(0) as usize;
+        y = unsigned(previous_y.max(0));
     }
     ops.reverse();
     ops
@@ -541,8 +552,12 @@ mod tests {
         };
         let alphabet = ["a\n", "b\n", "c\n", "d"];
         for _ in 0..2000 {
-            let old: Vec<&str> = (0..next(9)).map(|_| alphabet[next(4) as usize]).collect();
-            let new: Vec<&str> = (0..next(9)).map(|_| alphabet[next(4) as usize]).collect();
+            let old: Vec<&str> = (0..next(9))
+                .map(|_| alphabet[usize::try_from(next(4)).unwrap()])
+                .collect();
+            let new: Vec<&str> = (0..next(9))
+                .map(|_| alphabet[usize::try_from(next(4)).unwrap()])
+                .collect();
             let ops = line_diff(&old, &new);
             let side = |skip: Op| -> Vec<&str> { ops.iter().filter(|(op, _)| *op != skip).map(|(_, l)| *l).collect() };
             assert_eq!(side(Op::Insert), old, "{old:?} -> {new:?}");

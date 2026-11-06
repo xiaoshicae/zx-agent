@@ -25,7 +25,7 @@ use crate::agent::{
 };
 pub use crate::agent::{RunOutcome, RunReport};
 use crate::ai::retry::{RetryPolicy, is_context_overflow, is_retryable};
-use crate::ai::{Provider, Reasoning};
+use crate::ai::{AssistantMessage, Provider, Reasoning};
 use crate::compaction::{self, Trigger};
 use crate::interaction::ApprovalCache;
 use crate::session::SessionStore;
@@ -232,98 +232,18 @@ impl Runner {
             (Ok(()), Start::Continue) => host.continuation(&config.queues).await,
         };
         let mut accounting = RunAccounting::default();
+        let mut shared = Attempting {
+            config,
+            retry,
+            limits,
+            approvals,
+            cancel: &run_cancel,
+            sink,
+            trace: &trace,
+        };
         let stop = match begun {
             Err(error) => RunStop::error(error),
-            Ok(mut prompts) => {
-                let mut overflow_recovered = false;
-                loop {
-                    let attempt = accounting.attempts + 1;
-                    host.attempt = attempt;
-                    // The session projection, not an in-memory list, is what the model sees.
-                    let mut context = host.session.messages();
-                    let mut control = LoopControl {
-                        token_budget: accounting.remaining_tokens(limits),
-                        prior_task_turns: accounting.task_turns,
-                        prior_answer_continuations: accounting.answer_continuations,
-                        session: Some(&mut host),
-                        trace: Some(&trace),
-                        attempt_number: attempt,
-                        ..LoopControl::new(
-                            accounting.remaining_model_requests(limits),
-                            &mut *approvals,
-                            &run_cancel,
-                            sink,
-                        )
-                    };
-                    let result = run_loop(&mut context, std::mem::take(&mut prompts), config, &mut control).await;
-                    accounting.record(&result);
-                    if result.outcome != LoopOutcome::Error {
-                        break RunStop {
-                            outcome: result.outcome,
-                            error: None,
-                        };
-                    }
-                    // Hook failures are distinct from failed provider responses and are not retried.
-                    let (failed, entry_id) = match result.failure {
-                        Some(LoopFailure::Provider { message, entry_id }) => (message, entry_id),
-                        Some(LoopFailure::Host(error)) => break RunStop::error(error),
-                        None => break RunStop::error("loop failed without a diagnostic"),
-                    };
-                    let error = failed.error_message.clone();
-                    if is_context_overflow(&failed) && compaction.automatic() {
-                        // A context the model rejects as too long fails again however often it
-                        // is sent: compact once and continue. Not a retry, so it has its own
-                        // limit: once per run, until an answer succeeds again (more than one
-                        // turn in the attempt).
-                        let overflow = error.clone().unwrap_or_default();
-                        let refusal = if overflow_recovered && result.task_turns <= 1 {
-                            Some("the context still overflowed after compacting it once".to_string())
-                        } else {
-                            host.pause.reason().map(|reason| {
-                                format!("automatic compaction is paused because it failed earlier in this session ({reason})")
-                            })
-                        };
-                        if let Some(refusal) = refusal {
-                            break RunStop::error(format!("{overflow}; {refusal}"));
-                        }
-                        // A summary is a request, so it needs budget like a retry does.
-                        if !accounting.has_budget(limits) || run_cancel.is_cancelled() {
-                            break RunStop {
-                                outcome: LoopOutcome::Error,
-                                error,
-                            };
-                        }
-                        match host
-                            .recover_overflow(&overflow, entry_id.as_deref(), &mut accounting, &run_cancel)
-                            .await
-                        {
-                            Ok(()) => {
-                                overflow_recovered = true;
-                                continue;
-                            }
-                            Err(stop) => break stop,
-                        }
-                    }
-                    // A retry is a request, so it needs budget; without any, the provider error
-                    // is the reason the run ends.
-                    if !is_retryable(&failed)
-                        || accounting.retries >= retry.max_retries
-                        || !accounting.has_budget(limits)
-                        || run_cancel.is_cancelled()
-                    {
-                        break RunStop {
-                            outcome: LoopOutcome::Error,
-                            error,
-                        };
-                    }
-                    if let Err(stop) = host
-                        .schedule_retry(retry, &mut accounting, &failed, entry_id.as_deref(), &run_cancel)
-                        .await
-                    {
-                        break stop;
-                    }
-                }
-            }
+            Ok(prompts) => attempts(&mut host, prompts, &mut accounting, &mut shared).await,
         };
         // State that hooks asked to record during the last events is kept before the run is
         // reported, so a host reading the session afterwards finds it.
@@ -348,6 +268,131 @@ impl Runner {
         config.hooks.emit(end, to).await;
         report
     }
+}
+
+/// What every attempt of one run shares.
+struct Attempting<'a> {
+    config: &'a LoopConfig,
+    retry: &'a RetryPolicy,
+    limits: &'a Limits,
+    approvals: &'a mut ApprovalCache,
+    cancel: &'a CancellationToken,
+    sink: &'a dyn EventSink,
+    trace: &'a RunTrace,
+}
+
+/// Run `prompts`, then retry or recover from a context overflow as long as the budget and
+/// the retry policy allow, until an attempt ends the run.
+async fn attempts(
+    host: &mut RunHost<'_>,
+    mut prompts: Vec<QueuedMessage>,
+    accounting: &mut RunAccounting,
+    shared: &mut Attempting<'_>,
+) -> RunStop {
+    loop {
+        let attempt = accounting.attempts + 1;
+        host.attempt = attempt;
+        // The session projection, not an in-memory list, is what the model sees.
+        let mut context = host.session.messages();
+        let mut control = LoopControl {
+            token_budget: accounting.remaining_tokens(shared.limits),
+            prior_task_turns: accounting.task_turns,
+            prior_answer_continuations: accounting.answer_continuations,
+            session: Some(&mut *host),
+            trace: Some(shared.trace),
+            attempt_number: attempt,
+            ..LoopControl::new(
+                accounting.remaining_model_requests(shared.limits),
+                &mut *shared.approvals,
+                shared.cancel,
+                shared.sink,
+            )
+        };
+        let result = run_loop(&mut context, std::mem::take(&mut prompts), shared.config, &mut control).await;
+        accounting.record(&result);
+        if result.outcome != LoopOutcome::Error {
+            break RunStop {
+                outcome: result.outcome,
+                error: None,
+            };
+        }
+        // Hook failures are distinct from failed provider responses and are not retried.
+        let (failed, entry_id) = match result.failure {
+            Some(LoopFailure::Provider { message, entry_id }) => (message, entry_id),
+            Some(LoopFailure::Host(error)) => break RunStop::error(error),
+            None => break RunStop::error("loop failed without a diagnostic"),
+        };
+        let failure = Failure {
+            message: failed,
+            entry_id,
+            task_turns: result.task_turns,
+        };
+        if let Err(stop) = after_failure(host, &failure, accounting, shared).await {
+            break stop;
+        }
+    }
+}
+
+/// A failed provider response and where it happened.
+struct Failure {
+    message: Box<AssistantMessage>,
+    entry_id: Option<String>,
+    /// Task turns of the attempt that failed.
+    task_turns: u32,
+}
+
+/// Recover from a context overflow by compacting once, or schedule a retry; an error says
+/// why the run ends instead. Both are requests, so both need budget.
+async fn after_failure(
+    host: &mut RunHost<'_>,
+    failure: &Failure,
+    accounting: &mut RunAccounting,
+    shared: &Attempting<'_>,
+) -> Result<(), RunStop> {
+    let failed = &failure.message;
+    let error = failed.error_message.clone();
+    let out_of_budget = !accounting.has_budget(shared.limits) || shared.cancel.is_cancelled();
+    if is_context_overflow(failed) && host.compaction.automatic() {
+        // A context the model rejects as too long fails again however often it is sent:
+        // compact once and continue. Not a retry, so it has its own limit: once per run,
+        // until an answer succeeds again (more than one turn in the attempt).
+        let overflow = error.clone().unwrap_or_default();
+        let refusal = if accounting.overflow_recovered && failure.task_turns <= 1 {
+            Some("the context still overflowed after compacting it once".to_string())
+        } else {
+            host.pause.reason().map(|reason| {
+                format!("automatic compaction is paused because it failed earlier in this session ({reason})")
+            })
+        };
+        if let Some(refusal) = refusal {
+            return Err(RunStop::error(format!("{overflow}; {refusal}")));
+        }
+        if out_of_budget {
+            return Err(RunStop {
+                outcome: LoopOutcome::Error,
+                error,
+            });
+        }
+        host.recover_overflow(&overflow, failure.entry_id.as_deref(), accounting, shared.cancel)
+            .await?;
+        accounting.overflow_recovered = true;
+        return Ok(());
+    }
+    // Without budget, the provider error is the reason the run ends.
+    if !is_retryable(failed) || accounting.retries >= shared.retry.max_retries || out_of_budget {
+        return Err(RunStop {
+            outcome: LoopOutcome::Error,
+            error,
+        });
+    }
+    host.schedule_retry(
+        shared.retry,
+        accounting,
+        failed,
+        failure.entry_id.as_deref(),
+        shared.cancel,
+    )
+    .await
 }
 
 /// What a run starts from.

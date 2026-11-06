@@ -189,7 +189,7 @@ async fn a_running_session_refuses_to_continue() {
         .any(|event| matches!(event, AgentEvent::RequestStart { .. }))
     {
         tokio::select! {
-            _ = tokio::task::yield_now() => {}
+            () = tokio::task::yield_now() => {}
             _ = &mut running => panic!("must still be running"),
         }
     }

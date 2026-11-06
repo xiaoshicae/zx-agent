@@ -617,12 +617,11 @@ struct BoundedSink {
 impl EventSink for BoundedSink {
     fn emit(&self, event: &Event) {
         match self.sender.try_send(event.clone()) {
-            Ok(()) => {}
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 self.dropped.fetch_add(1, Ordering::SeqCst);
             }
-            // The stream is gone; its subscription is being dropped as well.
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
+            // A closed stream is gone; its subscription is being dropped as well.
+            Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
         }
     }
 }

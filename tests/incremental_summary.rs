@@ -112,7 +112,7 @@ fn answer(texts: Vec<String>, supersede: Vec<usize>) -> FauxStep {
 }
 
 fn texts(texts: &[&str]) -> Vec<String> {
-    texts.iter().map(|text| text.to_string()).collect()
+    texts.iter().map(std::string::ToString::to_string).collect()
 }
 
 fn attempts(store: &SessionStore) -> Vec<&CompactionStartedEntry> {

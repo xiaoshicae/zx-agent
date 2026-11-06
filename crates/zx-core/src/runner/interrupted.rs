@@ -64,9 +64,8 @@ impl Runner {
 fn interruption(start: StartRecord, effects: Option<Effects>) -> Interruption {
     match (start, effects) {
         (StartRecord::Present, _) => Interruption::Started,
-        (StartRecord::NeverRun, _) => Interruption::NotStarted,
+        (StartRecord::NeverRun, _) | (StartRecord::Absent, Some(Effects::SideEffects)) => Interruption::NotStarted,
         (StartRecord::Absent | StartRecord::Unavailable, Some(Effects::ReadOnly)) => Interruption::ReadOnly,
-        (StartRecord::Absent, Some(Effects::SideEffects)) => Interruption::NotStarted,
         (StartRecord::Unavailable, Some(Effects::SideEffects))
         | (StartRecord::Absent | StartRecord::Unavailable, None) => Interruption::StartUnknown,
     }

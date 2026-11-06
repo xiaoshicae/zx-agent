@@ -413,7 +413,7 @@ async fn run(
 
     let outcome = tokio::select! {
         biased;
-        _ = cancel.cancelled() => Err(Failure::Aborted),
+        () = cancel.cancelled() => Err(Failure::Aborted),
         result = stream_response(&client, &config, &url, &body, &mut acc, &mut tx) => result,
     };
 
@@ -695,7 +695,7 @@ fn retry_after_ms(headers: &reqwest::header::HeaderMap, now: SystemTime) -> Opti
             .map(str::trim)
             .filter(|value| !value.is_empty())
     };
-    let whole = |value: f64| (value.is_finite() && value >= 0.0).then(|| value.round() as u64);
+    let whole = whole_milliseconds;
     if let Some(value) = text("retry-after-ms") {
         return value.parse::<f64>().ok().and_then(whole);
     }
@@ -706,6 +706,16 @@ fn retry_after_ms(headers: &reqwest::header::HeaderMap, now: SystemTime) -> Opti
     let at = http_date_epoch_secs(value)?;
     let now = now.duration_since(UNIX_EPOCH).ok()?.as_secs();
     Some(at.saturating_sub(now).saturating_mul(1000))
+}
+
+/// `value` as whole milliseconds, for a finite, non-negative value.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "guarded: finite and non-negative; a value beyond u64 saturates"
+)]
+fn whole_milliseconds(value: f64) -> Option<u64> {
+    (value.is_finite() && value >= 0.0).then(|| value.round() as u64)
 }
 
 /// Seconds since the Unix epoch of an IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`), the
@@ -726,8 +736,8 @@ fn http_date_epoch_secs(text: &str) -> Option<u64> {
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ]
     .iter()
-    .position(|name| *name == month)? as i64
-        + 1;
+    .position(|name| *name == month)?;
+    let month = i64::try_from(month).ok()? + 1;
     let mut clock = time.split(':').map(|field| field.parse::<i64>().ok());
     let (hour, minute, second) = (clock.next()??, clock.next()??, clock.next()??);
     if clock.next().is_some()
@@ -1127,8 +1137,7 @@ impl Accumulator {
                     .get("id")
                     .and_then(Value::as_str)
                     .filter(|id| !id.is_empty())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| format!("call_{index}"));
+                    .map_or_else(|| format!("call_{index}"), str::to_string);
                 self.blocks.push(Block::Tool {
                     id: id.clone(),
                     name: name.to_string(),

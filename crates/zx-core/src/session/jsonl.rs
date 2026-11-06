@@ -296,7 +296,8 @@ fn lock(file: &File, path: &Path) -> Result<()> {
         }
         let error = std::io::Error::last_os_error();
         match error.kind() {
-            std::io::ErrorKind::Interrupted => continue,
+            // A signal interrupted the call: try again at once.
+            std::io::ErrorKind::Interrupted => {}
             std::io::ErrorKind::WouldBlock if started.elapsed() < LOCK_WAIT => {
                 // A synchronous pause: opening happens once per session, and it waits only
                 // while another descriptor holds the lock.

@@ -8,12 +8,13 @@ use anyhow::{Result, ensure};
 use serde::Deserialize;
 
 use super::skills::Skill;
-use super::{Builtin, Execution, MAX_FILE_BYTES, McpServer, Profile};
+use super::{Builtin, ContainerSettings, Execution, MAX_FILE_BYTES, McpServer, Profile, Rules};
 use crate::ai::{ModelCost, ModelMeta};
-use crate::compaction;
 use crate::executor::Access;
 use crate::files::read_text_file;
 use crate::policy::ProgramOptions;
+use crate::runner::Limits;
+use crate::{compaction, output_store};
 
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
@@ -144,37 +145,8 @@ impl RawProfile {
         if let Some(tools) = self.tools {
             profile.tools = tools;
         }
-        if let Some(allow) = self.rules.allow {
-            profile.rules.allow = allow;
-        }
-        profile.rules.deny.extend(self.rules.deny);
-        if let Some(prefixes) = self.rules.auto_approve {
-            profile.rules.auto_approve = prefixes;
-        }
-        profile.rules.auto_approve_except.extend(self.rules.auto_approve_except);
-        profile
-            .rules
-            .auto_approve_options
-            .extend(self.rules.auto_approve_options);
-        if let Some(tools) = self.rules.ask_tools {
-            profile.rules.ask_tools = tools;
-        }
-        profile.rules.deny_tools.extend(self.rules.deny_tools);
-        if let Some(approve_all) = self.rules.approve_all {
-            profile.rules.approve_all = approve_all;
-        }
-        if let Some(turns) = self.limits.max_model_requests {
-            profile.limits.max_model_requests = match turns {
-                ModelRequestLimit::Count(count) => Some(count),
-                ModelRequestLimit::Unlimited(Unlimited::Unlimited) => None,
-            };
-        }
-        if let Some(secs) = self.limits.timeout_secs {
-            profile.limits.timeout = (secs > 0).then(|| Duration::from_secs(secs));
-        }
-        if let Some(tokens) = self.limits.token_budget {
-            profile.limits.token_budget = (tokens > 0).then_some(tokens);
-        }
+        self.rules.apply(&mut profile.rules);
+        self.limits.apply(&mut profile.limits);
         if let Some(count) = self.extensions.continue_on_length {
             profile.continue_on_length = count;
         }
@@ -195,88 +167,152 @@ impl RawProfile {
                 })
                 .collect();
         }
-        if let Some(bytes) = self.compaction.trigger_bytes {
-            profile.compaction.trigger_bytes = (bytes > 0).then_some(bytes);
-        }
-        if let Some(tokens) = self.compaction.trigger_tokens {
-            profile.compaction.trigger_tokens = (tokens > 0).then_some(tokens);
-        }
-        if let Some(tokens) = self.compaction.reserve_tokens {
-            profile.compaction.reserve_tokens = tokens;
-        }
-        if let Some(bytes) = self.compaction.keep_recent_bytes {
-            profile.compaction.keep_recent_bytes = bytes;
-        }
-        if let Some(tokens) = self.compaction.max_summary_tokens {
-            profile.compaction.max_summary_tokens = tokens;
-        }
-        if let Some(secs) = self.compaction.timeout_secs {
-            profile.compaction.timeout = Duration::from_secs(secs);
-        }
-        if let Some(mode) = self.compaction.mode {
-            profile.compaction.mode = mode;
-        }
-        if let Some(path) = self.tool_output.directory {
-            ensure!(!path.as_os_str().is_empty(), "toolOutput.directory must not be empty");
-            profile.tool_output.directory = parent.join(path);
-        }
-        if let Some(bytes) = self.tool_output.threshold_bytes {
-            profile.tool_output.threshold_bytes = (bytes > 0).then_some(bytes);
-        }
-        if let Some(bytes) = self.tool_output.max_file_bytes {
-            profile.tool_output.max_file_bytes = bytes;
-        }
+        self.compaction.apply(&mut profile.compaction);
+        self.tool_output.apply(&mut profile.tool_output, parent)?;
         if let Some(execution) = self.execution {
             profile.execution = execution;
         }
-        let container = self.container;
+        self.container.apply(&mut profile.container);
+        if let Some(servers) = self.mcp {
+            profile.mcp = servers;
+        }
+        for model in self.models.unwrap_or_default() {
+            model.apply(profile)?;
+        }
+        Ok(())
+    }
+}
+
+impl RawModel {
+    /// Check the entry and record it under its id.
+    fn apply(self, profile: &mut Profile) -> Result<()> {
+        ensure!(!self.id.trim().is_empty(), "models: an entry has no id");
+        ensure!(
+            self.context_window.is_none_or(|window| window > 0),
+            "models.{}: contextWindow must be greater than zero",
+            self.id
+        );
+        if let Some(cost) = &self.cost {
+            ensure!(
+                [cost.input, cost.output, cost.cache_read, cost.cache_write]
+                    .iter()
+                    .all(|price| price.is_finite() && *price >= 0.0),
+                "models.{}: prices must be zero or more, in USD per million tokens",
+                self.id
+            );
+        }
+        profile.models.insert(
+            self.id,
+            ModelMeta {
+                context_window: self.context_window,
+                cost: self.cost,
+            },
+        );
+        Ok(())
+    }
+}
+
+impl RawRules {
+    fn apply(self, rules: &mut Rules) {
+        if let Some(allow) = self.allow {
+            rules.allow = allow;
+        }
+        rules.deny.extend(self.deny);
+        if let Some(prefixes) = self.auto_approve {
+            rules.auto_approve = prefixes;
+        }
+        rules.auto_approve_except.extend(self.auto_approve_except);
+        rules.auto_approve_options.extend(self.auto_approve_options);
+        if let Some(tools) = self.ask_tools {
+            rules.ask_tools = tools;
+        }
+        rules.deny_tools.extend(self.deny_tools);
+        if let Some(approve_all) = self.approve_all {
+            rules.approve_all = approve_all;
+        }
+    }
+}
+
+impl RawLimits {
+    fn apply(self, limits: &mut Limits) {
+        if let Some(turns) = self.max_model_requests {
+            limits.max_model_requests = match turns {
+                ModelRequestLimit::Count(count) => Some(count),
+                ModelRequestLimit::Unlimited(Unlimited::Unlimited) => None,
+            };
+        }
+        if let Some(secs) = self.timeout_secs {
+            limits.timeout = (secs > 0).then(|| Duration::from_secs(secs));
+        }
+        if let Some(tokens) = self.token_budget {
+            limits.token_budget = (tokens > 0).then_some(tokens);
+        }
+    }
+}
+
+impl RawCompaction {
+    fn apply(self, config: &mut compaction::Config) {
+        if let Some(bytes) = self.trigger_bytes {
+            config.trigger_bytes = (bytes > 0).then_some(bytes);
+        }
+        if let Some(tokens) = self.trigger_tokens {
+            config.trigger_tokens = (tokens > 0).then_some(tokens);
+        }
+        if let Some(tokens) = self.reserve_tokens {
+            config.reserve_tokens = tokens;
+        }
+        if let Some(bytes) = self.keep_recent_bytes {
+            config.keep_recent_bytes = bytes;
+        }
+        if let Some(tokens) = self.max_summary_tokens {
+            config.max_summary_tokens = tokens;
+        }
+        if let Some(secs) = self.timeout_secs {
+            config.timeout = Duration::from_secs(secs);
+        }
+        if let Some(mode) = self.mode {
+            config.mode = mode;
+        }
+    }
+}
+
+impl RawToolOutput {
+    fn apply(self, config: &mut output_store::Config, parent: &Path) -> Result<()> {
+        if let Some(path) = self.directory {
+            ensure!(!path.as_os_str().is_empty(), "toolOutput.directory must not be empty");
+            config.directory = parent.join(path);
+        }
+        if let Some(bytes) = self.threshold_bytes {
+            config.threshold_bytes = (bytes > 0).then_some(bytes);
+        }
+        if let Some(bytes) = self.max_file_bytes {
+            config.max_file_bytes = bytes;
+        }
+        Ok(())
+    }
+}
+
+impl RawContainer {
+    fn apply(self, settings: &mut ContainerSettings) {
         for (value, layer) in [
-            (&mut profile.container.image, container.image),
-            (&mut profile.container.user, container.user),
-            (&mut profile.container.memory, container.memory),
-            (&mut profile.container.network, container.network),
+            (&mut settings.image, self.image),
+            (&mut settings.user, self.user),
+            (&mut settings.memory, self.memory),
+            (&mut settings.network, self.network),
         ] {
             if layer.is_some() {
                 *value = layer;
             }
         }
-        if container.pids_limit.is_some() {
-            profile.container.pids_limit = container.pids_limit;
+        if self.pids_limit.is_some() {
+            settings.pids_limit = self.pids_limit;
         }
-        if container.workspace.is_some() {
-            profile.container.workspace = container.workspace;
+        if self.workspace.is_some() {
+            settings.workspace = self.workspace;
         }
-        if container.root.is_some() {
-            profile.container.root = container.root;
+        if self.root.is_some() {
+            settings.root = self.root;
         }
-        if let Some(servers) = self.mcp {
-            profile.mcp = servers;
-        }
-        for model in self.models.unwrap_or_default() {
-            ensure!(!model.id.trim().is_empty(), "models: an entry has no id");
-            ensure!(
-                model.context_window.is_none_or(|window| window > 0),
-                "models.{}: contextWindow must be greater than zero",
-                model.id
-            );
-            if let Some(cost) = &model.cost {
-                ensure!(
-                    [cost.input, cost.output, cost.cache_read, cost.cache_write]
-                        .iter()
-                        .all(|price| price.is_finite() && *price >= 0.0),
-                    "models.{}: prices must be zero or more, in USD per million tokens",
-                    model.id
-                );
-            }
-            profile.models.insert(
-                model.id,
-                ModelMeta {
-                    context_window: model.context_window,
-                    cost: model.cost,
-                },
-            );
-        }
-        Ok(())
     }
 }
 

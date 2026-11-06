@@ -44,7 +44,7 @@ async fn dropping_a_run_cancels_its_provider() {
     let cancel = CancellationToken::new();
     let mut running = Box::pin(runner.run("go", &cancel));
     tokio::select! {
-        _ = probe.started.notified() => {}
+        () = probe.started.notified() => {}
         _ = &mut running => panic!("the provider must still be running"),
     }
 

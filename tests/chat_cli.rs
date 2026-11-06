@@ -650,7 +650,11 @@ async fn status_shows_the_session_and_what_the_conversation_used() {
 async fn a_file_write_approval_shows_the_content_as_lines() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![
-        Reply::tool_call("c", "write_file", json!({"path": "notes.txt", "content": "one\ntwo\n"})),
+        Reply::tool_call(
+            "c",
+            "write_file",
+            &json!({"path": "notes.txt", "content": "one\ntwo\n"}),
+        ),
         Reply::text("done"),
     ])
     .await;
@@ -676,7 +680,7 @@ async fn an_edit_approval_lists_each_edit_and_its_result_shows_the_patch() {
         Reply::tool_call(
             "c",
             "edit_file",
-            json!({"path": "a.txt", "edits": [{"oldText": "hello", "newText": "bye"}]}),
+            &json!({"path": "a.txt", "edits": [{"oldText": "hello", "newText": "bye"}]}),
         ),
         Reply::text("done"),
     ])
@@ -854,7 +858,7 @@ async fn a_shell_call_waits_for_an_approval_before_any_side_effect() {
 async fn a_file_write_waits_for_an_approval_by_default() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![
-        Reply::tool_call("c", "write_file", json!({"path": "notes.txt", "content": "hello\n"})),
+        Reply::tool_call("c", "write_file", &json!({"path": "notes.txt", "content": "hello\n"})),
         Reply::text("done"),
     ])
     .await;
@@ -1323,7 +1327,7 @@ async fn read_error_until(lines: &mut Lines<BufReader<tokio::process::ChildStder
         }
     })
     .await
-    .unwrap()
+    .unwrap();
 }
 
 /// Read the terminal until `needle` has been seen, keeping everything read in `seen`.

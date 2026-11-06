@@ -15,8 +15,9 @@ use crate::ai::{
 };
 pub use crate::session::SummaryMode;
 use crate::session::{
-    CompactionPlan, CompactionSummary, MAX_STATEMENTS, MAX_SUMMARY_BYTES, MergedSummary, RequestSource, SessionStore,
-    SummaryFact, SummaryRequest, cite_only, summary_messages, superseded_by, without_details,
+    CompactionPlan, CompactionSummary, MAX_STATEMENTS, MAX_SUMMARY_BYTES, MergedSummary, ProjectedMessage,
+    RequestSource, SessionStore, SummaryFact, SummaryRequest, cite_only, summary_messages, superseded_by,
+    without_details,
 };
 
 const MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
@@ -384,7 +385,7 @@ impl Host<'_> {
     /// Run one summary: choose what to summarize, record the attempt, ask the model, check
     /// the answer, then record the result or the failure. When the outcome is `Completed`,
     /// the session's projection is the new context.
-    pub async fn run(&mut self, trigger: Trigger, cancel: &CancellationToken) -> Report {
+    pub(crate) async fn run(&mut self, trigger: Trigger, cancel: &CancellationToken) -> Report {
         let automatic = trigger != Trigger::Manual;
         let mut report = Report::default();
         let candidate = match self.plan(trigger, &mut report) {
@@ -471,15 +472,9 @@ impl Host<'_> {
         Ok(Some(candidate))
     }
 
-    fn candidate(&self) -> Result<Option<Candidate>> {
-        let store = &*self.session;
-        let raw = store.raw_projection();
-        let Some(last_user) = raw
-            .iter()
-            .rposition(|item| matches!(item.message, Message::User { .. }))
-        else {
-            return Ok(None);
-        };
+    /// Where the retained tail starts: the most recent messages within the recent-bytes
+    /// budget, never after the last input, and never between a call and its result.
+    fn cut(&self, raw: &[ProjectedMessage], last_user: usize) -> Result<usize> {
         let mut bytes = 0usize;
         let mut cut = raw.len();
         for (index, item) in raw.iter().enumerate().rev() {
@@ -502,6 +497,19 @@ impl Host<'_> {
         while cut > 0 && matches!(raw[cut].message, Message::ToolResult(_) | Message::System(_)) {
             cut -= 1;
         }
+        Ok(cut)
+    }
+
+    fn candidate(&self) -> Result<Option<Candidate>> {
+        let store = &*self.session;
+        let raw = store.raw_projection();
+        let Some(last_user) = raw
+            .iter()
+            .rposition(|item| matches!(item.message, Message::User { .. }))
+        else {
+            return Ok(None);
+        };
+        let cut = self.cut(&raw, last_user)?;
         if cut >= raw.len()
             || !raw[..cut]
                 .iter()
