@@ -18,7 +18,12 @@ paths:
 | `run_prompt` | `tests/common/mod.rs` | 用默认参数（10 轮、不取消）跑一次 `run_loop`，返回结果和事件 |
 | `RunnerSetup` | `tests/common/mod.rs` | 带测试默认值（不重试、默认上限、内存会话）的 runner 构造器，用结构体更新语法覆盖字段 |
 | `zx_agent` / `stdout` / `stderr` | `tests/common/mod.rs` | 编译出的程序，以及它写到两个输出的文本；驱动程序的测试都用这三个 |
-| `fast_retry` / `header` / `read_lines` | `tests/common/mod.rs` | 毫秒级退避的重试策略、会话头部、读取会话文件的每一行 |
+| `fast_retry` / `header` / `read_lines` / `json_lines` | `tests/common/mod.rs` | 毫秒级退避的重试策略、会话头部、读取会话文件的每一行、把 JSON 行文本解析成值 |
+| `NotifyingProvider` | `tests/common/mod.rs` | 每个请求开始时通知（`started`）并记下取消令牌的脚本化 provider，测试"运行中"的行为时等它，不用 `sleep` |
+| `seeded_session` / `summary_json` / `replayed_requests` | `tests/common/mod.rs` | 一条值得摘要的旧消息加一条新输入的会话、模型回答摘要请求的 JSON、从会话文件的检查点还原的全部请求 |
+| `tool_call_answer` / `session_dir` / `session_files` / `signal` | `tests/common/mod.rs` | 崩溃前已记录的工具调用回答、chat 与 acp 的默认会话目录及其中的文件、给子进程发信号（Unix） |
+| `Captured::user_texts` / `system_text` / `tool_results` | `tests/common/mock_server.rs` | 假模型服务记录的请求里的用户消息、系统消息与工具结果 |
+| `run_channel` / `Running` | `tests/common/im.rs` | 在自己的任务里运行一个 `ImChannel`，`next` 等它转交的事件，`stop` 取消并取回结果，`ended` 等它自行结束 |
 | `CancelOnFirstDelta` | `tests/common/mod.rs` | 收到第一段流式增量就取消，测试中途取消而不依赖计时 |
 | `pty` | `tests/common/mod.rs` | Unix 伪终端：主端给测试，从端给子进程当终端 |
 | `summary_eval` | `tests/common/summary_eval.rs` | 摘要评测：按脚本合成的 8 轮排障会话（24 条埋入的事实，其中 6 条后来被取代），`evaluate` 每轮之后摘要并评分（仍成立的事实写到了几条；被取代的事实是否只剩旧值，另计写着旧值的条数；从会话还原的摘要请求大小）；付费评测与常规测试共用 |
