@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::answer::{ModelSummary, ResponseBytes, full_summary, merge, parse_answer};
 use super::{Config, MAX_SOURCE_BYTES, Outcome, Report, Trigger, context_bytes, message_bytes};
-use crate::agent::{AgentEvent, EventTarget, HookChain, RequestKind, price};
+use crate::agent::{AgentEvent, EventTarget, HookChain, RequestKind};
 use crate::ai::{AssistantMessage, Message, ModelMeta, Provider, Request, StreamEvent, duration_ms, now_ms};
 use crate::session::{
     CompactionEntry, CompactionPlan, MergedSummary, ProjectedMessage, RequestSource, SessionStore, SummaryFact,
@@ -491,7 +491,7 @@ impl Summarizer<'_> {
                     Some(StreamEvent::Done(mut message) | StreamEvent::Error(mut message)) => {
                         // Also bounds a provider that delivers its content without deltas.
                         ResponseBytes::of(&message).validate()?;
-                        price(self.models, self.model, &mut message.usage);
+                        message.usage.price(self.models, self.model);
                         return Ok(message);
                     }
                     None => return Err("summary stream ended without a final event".into()),

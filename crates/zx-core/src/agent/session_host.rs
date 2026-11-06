@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
+use super::{AgentEvent, EventTarget, LoopConfig};
 use crate::ai::{Message, Provider, Request, ToolCall, Usage, UserMessageKind, now_ms};
 use crate::session::CustomMessage;
 
@@ -40,6 +41,25 @@ pub(crate) trait SessionHost: Send + Sync {
     /// replacement is already recorded; request costs, failed attempts included, count
     /// against the run's budget.
     async fn prepare_context(&mut self, cancel: &CancellationToken) -> ContextPreparation;
+}
+
+/// Record the custom entries extensions asked for since the last turn (pi: `appendEntry`),
+/// each announced as a `custom_entry` event. Without a session they are reported without an
+/// entry ID and not kept. An error means the session could not record one.
+pub(crate) async fn record_pending_entries(
+    config: &LoopConfig,
+    session: &mut dyn SessionHost,
+    target: EventTarget<'_>,
+) -> Result<(), String> {
+    for entry in config.queues.take_entries() {
+        let entry_id = session.append_custom_entry(&entry.custom_type, entry.data).await?;
+        let event = AgentEvent::CustomEntry {
+            entry_id,
+            custom_type: entry.custom_type,
+        };
+        config.hooks.emit(event, target).await;
+    }
+    Ok(())
 }
 
 /// The host of a run without a session: nothing is recorded, so no step can fail to be, and

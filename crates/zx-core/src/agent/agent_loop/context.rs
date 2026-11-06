@@ -1,29 +1,10 @@
 //! Context updates and their ordered session records.
 
 use super::{
-    AgentEvent, ContextEdit, CustomMessageInfo, Engine, EventTarget, Halt, HookFailure, LoopConfig, LoopResult,
-    Message, Prepared, Queue, QueueMode, QueuedMessage, SessionHost, UserMessageKind,
+    AgentEvent, ContextEdit, CustomMessageInfo, Engine, Halt, HookFailure, LoopResult, Message, Prepared, Queue,
+    QueueMode, QueuedMessage, UserMessageKind, record_pending_entries,
 };
 use crate::session::CustomMessage;
-
-/// Record the custom entries extensions asked for since the last turn (pi: `appendEntry`),
-/// each announced as a `custom_entry` event. Without a session they are reported without an
-/// entry ID and not kept. An error means the session could not record one.
-pub(crate) async fn record_pending_entries(
-    config: &LoopConfig,
-    session: &mut dyn SessionHost,
-    target: EventTarget<'_>,
-) -> Result<(), String> {
-    for entry in config.queues.take_entries() {
-        let entry_id = session.append_custom_entry(&entry.custom_type, entry.data).await?;
-        let event = AgentEvent::CustomEntry {
-            entry_id,
-            custom_type: entry.custom_type,
-        };
-        config.hooks.emit(event, target).await;
-    }
-    Ok(())
-}
 
 impl Engine<'_, '_> {
     /// Record a finished message, then report it. Returns its entry ID in a session.

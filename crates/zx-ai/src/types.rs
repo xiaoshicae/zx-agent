@@ -1,5 +1,6 @@
 //! Provider-neutral message and streaming types (pi: packages/ai/src/types.ts).
 
+use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -52,6 +53,15 @@ impl Usage {
     /// Input plus output tokens, saturating: what a token budget counts.
     pub fn input_and_output(&self) -> u64 {
         self.input.saturating_add(self.output)
+    }
+
+    /// Price these counts by the cost of `model` in `models`, the model that was requested:
+    /// that is the name the audit records, while a server may report another, such as a dated
+    /// version of an alias. Without a known cost, the usage stays unpriced.
+    pub fn price(&mut self, models: &HashMap<String, ModelMeta>, model: &str) {
+        if let Some(cost) = models.get(model).and_then(|meta| meta.cost) {
+            self.cost_usd = Some(cost.of(self));
+        }
     }
 
     /// Add `other` to these counts, saturating: servers report them, so they are untrusted.

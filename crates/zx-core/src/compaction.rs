@@ -2,11 +2,11 @@
 //! coding-agent/src/core/compaction/compaction.ts).
 //!
 //! [`Config`] holds the budgets and [`Report`] says what one summary cost and produced; the
-//! `host` module runs one summary over a session, and `answer` bounds, parses and merges the
+//! `summarizer` runs one summary over a session, and `answer` bounds, parses and merges the
 //! model's answer.
 
 mod answer;
-mod host;
+mod summarizer;
 
 use std::time::Duration;
 
@@ -17,7 +17,7 @@ use crate::ai::{Message, StopReason, Usage};
 pub use crate::session::SummaryMode;
 use crate::session::without_details;
 
-pub(crate) use host::Summarizer;
+pub(crate) use summarizer::Summarizer;
 
 /// The most bytes of original records one summary reads.
 const MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;

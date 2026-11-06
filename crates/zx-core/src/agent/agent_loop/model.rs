@@ -1,21 +1,10 @@
 //! Model request recording and streaming.
 
-use std::collections::HashMap;
-
 use super::{
-    AgentEvent, AssistantMessage, Engine, Halt, LoopResult, Message, ModelMeta, Request, RequestKind, StopReason,
-    StreamEvent, StreamExt, Usage,
+    AgentEvent, AssistantMessage, Engine, Halt, LoopResult, Message, Request, RequestKind, StopReason, StreamEvent,
+    StreamExt,
 };
 use crate::agent::RequestSettings;
-
-/// Price `usage` by the cost of `model` in `models`, the model that was requested: that is
-/// the name the audit records, while a server may report another, such as a dated version
-/// of an alias. Without a known cost, the usage stays unpriced.
-pub(crate) fn price(models: &HashMap<String, ModelMeta>, model: &str, usage: &mut Usage) {
-    if let Some(cost) = models.get(model).and_then(|meta| meta.cost) {
-        usage.cost_usd = Some(cost.of(usage));
-    }
-}
 
 impl Engine<'_, '_> {
     /// Record and send the task request of turn `turn`, then account for its response.
@@ -69,7 +58,7 @@ impl Engine<'_, '_> {
         result.model_requests = result.model_requests.saturating_add(1);
         let model = request.model.clone();
         let mut message = self.stream(request).await;
-        price(&self.config.models, &model, &mut message.usage);
+        message.usage.price(&self.config.models, &model);
         result.usage.add(&message.usage);
         Ok(Some(message))
     }

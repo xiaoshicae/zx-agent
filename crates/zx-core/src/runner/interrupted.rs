@@ -1,6 +1,6 @@
 //! Resolve tool calls left unfinished by an interrupted run.
 
-use super::host::{RunHost, persist_error};
+use super::run_host::{RunHost, persist_error};
 use crate::agent::{AgentEvent, Effects, Interruption};
 use crate::ai::{Message, ToolResultMessage, now_ms};
 use crate::session::StartRecord;
