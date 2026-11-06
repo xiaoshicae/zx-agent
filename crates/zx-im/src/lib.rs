@@ -12,6 +12,7 @@
 
 mod approval;
 mod platform;
+mod router;
 mod server;
 mod status;
 mod worker;

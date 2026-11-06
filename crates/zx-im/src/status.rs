@@ -36,9 +36,10 @@ pub trait StatusStore: Send + Sync {
     async fn list(&self) -> Result<Vec<(SessionKey, MessageRef)>, String>;
 }
 
-/// A [`StatusStore`] with one JSON file per status in a directory. A record is written under a
-/// temporary name and then renamed, so that a crash never leaves part of one. On Unix only the
-/// owner may read a record, as with session files.
+/// A [`StatusStore`] with one JSON file per status in a directory.
+///
+/// A record is written under a temporary name and then renamed, so that a crash never leaves
+/// part of one. On Unix only the owner may read a record, as with session files.
 pub struct StatusFiles {
     dir: PathBuf,
 }
@@ -130,13 +131,13 @@ struct Record {
     platform: String,
     conversation: String,
     thread: String,
-    status: Posted,
+    status: StoredStatus,
 }
 
-/// The status message, where it was posted.
+/// The status message as stored: where it was posted, and its ID.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct Posted {
+struct StoredStatus {
     conversation: String,
     thread: Option<String>,
     id: String,
@@ -148,7 +149,7 @@ impl Record {
             platform: key.platform.clone(),
             conversation: key.conversation.0.clone(),
             thread: key.thread.0.clone(),
-            status: Posted {
+            status: StoredStatus {
                 conversation: status.at.conversation.0.clone(),
                 thread: status.at.thread.as_ref().map(|thread| thread.0.clone()),
                 id: status.id.0.clone(),
@@ -180,19 +181,15 @@ pub(crate) async fn left_behind(shared: &Shared) -> Vec<(SessionKey, MessageRef)
         return Vec::new();
     };
     shared
-        .bounded(
-            None,
-            "read the statuses an earlier process left",
-            "reading the statuses an earlier process left",
-            statuses.list(),
-        )
+        .bounded(None, "read the statuses an earlier process left", statuses.list())
         .await
         .unwrap_or_default()
 }
 
-/// Replace each status in `left` with [`Replies::interrupted`], then forget it. Each is tried
-/// once, so a message the platform no longer lets the bot edit is not tried at every start.
-/// The stop gives up on the rest, which stay kept.
+/// Replace each status in `left` with [`Replies::interrupted`], then forget it.
+///
+/// Each is tried once, so a message the platform no longer lets the bot edit is not tried at
+/// every start. The stop gives up on the rest, which stay kept.
 pub(crate) async fn replace_left_behind(
     left: Vec<(SessionKey, MessageRef)>,
     channels: Vec<Arc<dyn ImChannel>>,
@@ -204,11 +201,10 @@ pub(crate) async fn replace_left_behind(
         match channels.iter().find(|channel| channel.platform() == key.platform) {
             Some(channel) => {
                 let act = format!("replace status {} that an earlier process left", status.id);
-                let acting = format!("replacing status {} that an earlier process left", status.id);
                 tokio::select! {
                     biased;
                     () = stop.cancelled() => return,
-                    _ = shared.bounded(Some(&key), &act, &acting, channel.update(&status, &text)) => {}
+                    _ = shared.bounded(Some(&key), &act, channel.update(&status, &text)) => {}
                 }
             }
             None => shared.failed(
