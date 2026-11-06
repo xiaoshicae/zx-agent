@@ -62,19 +62,19 @@ impl Builtin {
     fn source(self) -> Source {
         match self {
             Self::Unattended => Source {
-                toml: include_str!("../../profiles/unattended.toml"),
+                toml: include_str!("../profiles/unattended.toml"),
                 instructions_file: "unattended.md",
-                instructions: include_str!("../../profiles/unattended.md"),
+                instructions: include_str!("../profiles/unattended.md"),
             },
             Self::Troubleshoot => Source {
-                toml: include_str!("../../profiles/troubleshoot.toml"),
+                toml: include_str!("../profiles/troubleshoot.toml"),
                 instructions_file: "troubleshoot.md",
-                instructions: include_str!("../../profiles/troubleshoot.md"),
+                instructions: include_str!("../profiles/troubleshoot.md"),
             },
             Self::Assistant => Source {
-                toml: include_str!("../../profiles/assistant.toml"),
+                toml: include_str!("../profiles/assistant.toml"),
                 instructions_file: "assistant.md",
-                instructions: include_str!("../../profiles/assistant.md"),
+                instructions: include_str!("../profiles/assistant.md"),
             },
         }
     }
@@ -450,8 +450,8 @@ mod tests {
     #[test]
     fn embedded_profiles_preserve_the_existing_scenario_defaults() {
         for (selector, instructions) in [
-            ("unattended", include_str!("../../profiles/unattended.md")),
-            ("troubleshoot", include_str!("../../profiles/troubleshoot.md")),
+            ("unattended", include_str!("../profiles/unattended.md")),
+            ("troubleshoot", include_str!("../profiles/troubleshoot.md")),
         ] {
             let profile = Profile::load(Some(selector), Builtin::Assistant).unwrap();
             assert_eq!(profile.name, selector);
@@ -464,7 +464,7 @@ mod tests {
             assert_eq!(profile.compaction.trigger_bytes, None);
         }
         let assistant = Profile::load(Some("assistant"), Builtin::Unattended).unwrap();
-        assert_eq!(assistant.instructions, include_str!("../../profiles/assistant.md"));
+        assert_eq!(assistant.instructions, include_str!("../profiles/assistant.md"));
         assert_eq!(assistant.limits.max_model_requests, None);
         assert_eq!(assistant.limits.timeout, None);
         assert_eq!(assistant.continue_on_length, 0);

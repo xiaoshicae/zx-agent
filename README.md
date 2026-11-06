@@ -356,7 +356,7 @@ CLI (main.rs + cli/ + chat/ + acp/)
 | 执行环境 | `crates/zx-tools/src/executor/` | 无对应实现：本机与 Docker 容器两个 `Executor` |
 | 会话 | `crates/zx-core/src/session.rs` | `coding-agent/src/core/session-manager.ts` |
 | 运行控制 | `crates/zx-core/src/runner.rs` | `coding-agent/src/core/agent-session.ts`（`_startRun`、`_prepareRetry`） |
-| 共享会话 | `crates/zx-core/src/agent_session.rs`、`crates/zx-core/src/agent_session/events.rs` | `AgentSession` 的长期生命周期与多订阅者接口 |
+| 共享会话 | `crates/zx-core/src/agent_session.rs`、`crates/zx-core/src/agent_session/subscribers.rs` | `AgentSession` 的长期生命周期与多订阅者接口 |
 | 系统提示词 | `crates/zx-core/src/prompt.rs` | `coding-agent/src/core/system-prompt.ts` |
 | 文件化配置 | `src/profile/`、`profiles/` | 加载与叠加 TOML、项目上下文、显式 skill 目录及按需读取；内置场景只有这些文件 |
 | 终端前端 | `src/chat/`、`src/cli/`、`src/run.rs`、`src/process.rs`、`src/render.rs`、`src/sessions.rs`、`src/list_sessions.rs` | 单输入所有者、审批、显示；共享的 CLI 选项、进程共用的连接与会话组装；run 子命令；退出码、stdout 行、信号与追踪导出；终端与日志里调用与事件的文案；会话文件与 `zx-agent sessions` |

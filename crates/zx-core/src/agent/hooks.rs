@@ -1,5 +1,7 @@
 //! Ordered, bounded extension points. Hook failures never grant tool access.
 
+mod chain;
+
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,6 +15,9 @@ use super::queue::MessageQueues;
 use super::tool::ActiveTools;
 use super::{AgentEvent, Decision, Event, ToolOutput};
 use crate::ai::{AssistantMessage, Message, Reasoning, ToolCall, UserMessageKind};
+
+pub(crate) use chain::{HookCall, report_failure};
+pub use chain::{HookChain, HookOptions};
 
 /// Default bound for each individual hook invocation.
 pub const DEFAULT_HOOK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -398,11 +403,6 @@ impl fmt::Display for HookError {
 }
 
 impl std::error::Error for HookError {}
-
-mod chain;
-
-pub(crate) use chain::{HookCall, report_failure};
-pub use chain::{HookChain, HookOptions};
 
 #[cfg(test)]
 mod tests {

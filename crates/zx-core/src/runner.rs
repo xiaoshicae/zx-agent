@@ -4,9 +4,9 @@
 //! the session as the source of model context, and enforces request, time and token limits.
 
 mod accounting;
-mod answer;
-mod host;
+mod final_answer;
 mod interrupted;
+mod run_host;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,7 +15,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use accounting::RunAccounting;
-use host::{CompactionPause, RunHost, RunStop};
+use run_host::{CompactionPause, RunHost, RunStop};
 
 use crate::agent::{
     EventSink, EventTarget, LoopConfig, LoopControl, LoopFailure, LoopOutcome, QueuedMessage, RunTrace, run_loop,

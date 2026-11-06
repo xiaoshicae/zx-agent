@@ -1,10 +1,10 @@
 //! Shared conversation API around the exclusively owned Runner; the subscribers of its
-//! events are in `events`.
+//! events are in `subscribers`.
 //!
 //! A prompt or compaction takes ownership of the Runner, without a lock across await.
 //! Its lease restores the Runner on completion, cancellation, panic or future drop.
 
-mod events;
+mod subscribers;
 
 use std::fmt;
 use std::num::NonZeroUsize;
@@ -25,8 +25,8 @@ use crate::runner::{Limits, RunReport, Runner};
 use crate::session::{CustomMessage, Entry, SessionStore, WritesStopped};
 use crate::sync::lock;
 
-use events::EventHub;
-pub use events::{EventStream, Subscription};
+use subscribers::EventHub;
+pub use subscribers::{EventStream, Subscription};
 
 /// Provider and model selected together, so a switch cannot expose a mixed pair.
 pub struct ModelRef {
