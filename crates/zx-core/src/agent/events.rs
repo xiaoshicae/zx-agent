@@ -17,7 +17,7 @@ use crate::ai::{Delta, Message, Usage, now_ms};
 
 /// Version of the event JSON, envelope and event types together. Raised on incompatible
 /// changes; events without a version predate the envelope.
-pub const EVENT_SCHEMA_VERSION: u32 = 1;
+pub const EVENT_SCHEMA_VERSION: u32 = 2;
 
 /// One event, with what a trace needs to place it. In JSON the envelope fields and the
 /// event's own fields share one object, and `type` names the event.

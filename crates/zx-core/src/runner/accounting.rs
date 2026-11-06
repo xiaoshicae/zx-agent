@@ -52,7 +52,7 @@ impl RunAccounting {
     pub(super) fn remaining_cost(&self, limits: &Limits) -> Option<f64> {
         limits
             .cost_budget
-            .map(|limit| (limit - self.usage.cost_usd.unwrap_or(0.0)).max(0.0))
+            .map(|limit| (limit - self.usage.total_cost.unwrap_or(0.0)).max(0.0))
     }
 
     pub(super) fn has_budget(&self, limits: &Limits) -> bool {

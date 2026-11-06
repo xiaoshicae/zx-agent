@@ -21,7 +21,7 @@ pub(super) struct Instruments {
     /// Token usage the model reported, by model and kind: `input`, `output`, `cache_read`,
     /// `cache_write` and `reasoning` (counted within `output`).
     tokens: Counter<u64>,
-    /// Cost by the configured prices, in USD, by model.
+    /// Cost by the configured prices, in their unit, by model or tool.
     cost: Counter<f64>,
     /// By tool name and whether the result was an error.
     pub(super) tool_duration: Histogram<f64>,
@@ -57,8 +57,7 @@ impl Instruments {
                 .build(),
             cost: meter
                 .f64_counter("zx.cost")
-                .with_unit("USD")
-                .with_description("Cost of the answers by the configured prices.")
+                .with_description("Cost by the configured prices, in their unit, whatever the currency.")
                 .build(),
             tool_duration: duration("zx.tool.duration", "From a tool call's start to its result."),
             retries: meter
@@ -101,7 +100,7 @@ impl Instruments {
                 self.tokens.add(count, &attributes);
             }
         }
-        if let Some(cost) = usage.cost_usd {
+        if let Some(cost) = usage.total_cost {
             self.cost.add(cost, &[by]);
         }
     }

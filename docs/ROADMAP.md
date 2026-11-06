@@ -74,7 +74,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P9 | 可选增强 | 进行中：token 预算（PR #47）、OpenTelemetry（PR #49）、请求附加字段（PR #50）、crate 拆分（PR #52）、通用化整理（PR #54）已完成；剩更多 provider |
 | P10 | 与 pi 的能力对齐 | 已完成（最后一个是 PR #72）：上下文超长后恢复（PR #56）、容器沙箱（PR #57）、edit / write（PR #58）、grep / find / ls（PR #59）、推理强度与续跑（PR #60、#61、#65）、会话目录 / fork / 分支（PR #67、#68、#72）、扩展能力与消息队列、模型元数据与计量、幂等键、MCP 进度、可观测、行为评测框架（PR #72）；chat 的便利功能按 D13 不做 |
 | P11–P13 | 内核与项目整理、按规则评审 | 已完成（PR #70、#71、#75、#77）；模块文件布局（PR #78） |
-| P14 | 对照 pi durable 的小项与无人值守的缺口 | 已完成（PR #80）：工具结果上报用量（`ToolOutput::usage`，按工具名汇总进 `RunReport::tool_usage`，不计入 token 预算）、撤回排队的消息（`MessageQueues::withdraw`）、定时巡检保留会话文件、被拒调用计数（`deniedCalls`）与 `run --fail-on-denied`（退出码 9）、成本预算 `--cost-budget`（退出码 8，单位与 `[[models]]` 的单价相同）；对照基准为 pi `a92283056` 的 `packages/durable` |
+| P14 | 对照 pi durable 的小项与无人值守的缺口 | 已完成（PR #80）：工具结果上报用量（`ToolOutput::usage`，按工具名汇总进 `RunReport::tool_usage`，不计入 token 预算）、撤回排队的消息（`MessageQueues::withdraw`）、定时巡检保留会话文件、被拒调用计数（`deniedCalls`）与 `run --fail-on-denied`（退出码 9）、成本预算 `--cost-budget`（退出码 8，单位与 `[[models]]` 的单价相同）；对照基准为 pi `a92283056` 的 `packages/durable`。之后成本字段改为不带币种的 `totalCost`（PR #待定；旧的 `costUsd` 仍可读取，事件 `schemaVersion` 升为 2） |
 
 ## 5. 待办与已知缺口
 
@@ -99,7 +99,6 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | provider 契约的兜底 | 暂缓 | 取消后给 provider 的宽限期；`Done` / `Error` 与 `stop_reason` 的一致性检查 |
 | `JsonlFile::create` 在加锁或写头部失败后留下文件 | 暂缓 | 这两种失败无法在测试中稳定构造 |
 | `run` 的内置 profile 是否默认开启自动摘要 | 待用户决定 | unattended 与 troubleshoot 默认关闭，长时间排查撞到上下文上限时以退出码 1 结束；开启后可从上下文过长中恢复，代价是摘要丢失信息 |
-| 成本字段名写死 USD | 待用户决定 | `Usage::cost_usd`（会话与事件中的 `costUsd`）、`ModelCost` 的文档与 OpenTelemetry `zx.cost` 的单位写为 USD，实际是 `[[models]]` 单价的单位；改名会动已发布的会话格式 |
 | 定时巡检的会话文件不自动清理 | 已知局限 | 每次运行一个文件，在卷 `zx-agent-inspect-sessions` 上累积，需要部署方定期删除 |
 | 失败运行后排队输入的处置 | 待评估 | pi 的 `afterFailedRun`（`continue` / `withdraw`）；现在由宿主在运行结束后用 `take_queued` 自行处置 |
 | 工具触发的 `handoff` | 待评估 | pi 的 `control.handoff`；zx 没有 `reset` 条目，要先定会话格式 |

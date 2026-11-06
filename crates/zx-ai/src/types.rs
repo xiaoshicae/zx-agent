@@ -39,10 +39,11 @@ pub struct Usage {
     #[serde(default, skip_serializing_if = "is_zero")]
     pub reasoning: u64,
     pub total_tokens: u64,
-    /// What the response cost in USD by the configured prices ([`ModelCost`]); absent
-    /// without prices. A sum adds the known costs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cost_usd: Option<f64>,
+    /// What the response cost by the configured prices ([`ModelCost`]), in their unit;
+    /// absent without prices. A sum adds the known costs (pi: `cost.total`). Sessions and
+    /// hook processes written before the rename have `costUsd`, which still reads.
+    #[serde(default, alias = "costUsd", skip_serializing_if = "Option::is_none")]
+    pub total_cost: Option<f64>,
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -60,7 +61,7 @@ impl Usage {
     /// version of an alias. Without a known cost, the usage stays unpriced.
     pub fn price(&mut self, models: &HashMap<String, ModelMeta>, model: &str) {
         if let Some(cost) = models.get(model).and_then(|meta| meta.cost) {
-            self.cost_usd = Some(cost.of(self));
+            self.total_cost = Some(cost.of(self));
         }
     }
 
@@ -72,7 +73,7 @@ impl Usage {
         self.cache_write = self.cache_write.saturating_add(other.cache_write);
         self.reasoning = self.reasoning.saturating_add(other.reasoning);
         self.total_tokens = self.total_tokens.saturating_add(other.total_tokens);
-        self.cost_usd = match (self.cost_usd, other.cost_usd) {
+        self.total_cost = match (self.total_cost, other.total_cost) {
             (None, None) => None,
             (mine, theirs) => Some(mine.unwrap_or(0.0) + theirs.unwrap_or(0.0)),
         };
@@ -92,7 +93,8 @@ pub struct ModelMeta {
     pub cost: Option<ModelCost>,
 }
 
-/// Prices in USD per million tokens (pi: `ModelCost`).
+/// Prices per million tokens (pi: `ModelCost`), in one currency of the host's choosing:
+/// costs come out in that unit, and a cost budget is read in it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelCost {
@@ -106,7 +108,7 @@ pub struct ModelCost {
 }
 
 impl ModelCost {
-    /// The cost of `usage` in USD: the prompt tokens outside the cache at the input price,
+    /// The cost of `usage` in the prices' unit: the prompt tokens outside the cache at the input price,
     /// the cached ones at theirs, the output at its price.
     pub fn of(&self, usage: &Usage) -> f64 {
         let fresh = usage
@@ -708,13 +710,13 @@ mod tests {
                 cache_write: 0,
                 reasoning: 0,
                 total_tokens: 24,
-                cost_usd: Some(0.001),
+                total_cost: Some(0.001),
             }),
         });
         let recorded = json!({
             "role": "toolResult", "toolCallId": "c2", "toolName": "ask_model", "content": "yes",
             "isError": false, "timestamp": 9,
-            "usage": {"input": 20, "output": 4, "cacheRead": 0, "totalTokens": 24, "costUsd": 0.001}
+            "usage": {"input": 20, "output": 4, "cacheRead": 0, "totalTokens": 24, "totalCost": 0.001}
         });
         assert_eq!(serde_json::to_value(&message).unwrap(), recorded);
         assert_eq!(serde_json::from_value::<Message>(recorded).unwrap(), message);
@@ -797,20 +799,23 @@ mod tests {
         let mut total = Usage {
             cache_write: 1,
             reasoning: 2,
-            cost_usd: None,
+            total_cost: None,
             ..Usage::default()
         };
         total.add(&Usage {
             cache_write: 3,
             reasoning: 4,
-            cost_usd: Some(0.5),
+            total_cost: Some(0.5),
             ..Usage::default()
         });
         total.add(&Usage {
-            cost_usd: Some(0.25),
+            total_cost: Some(0.25),
             ..Usage::default()
         });
-        assert_eq!((total.cache_write, total.reasoning, total.cost_usd), (4, 6, Some(0.75)));
+        assert_eq!(
+            (total.cache_write, total.reasoning, total.total_cost),
+            (4, 6, Some(0.75))
+        );
         // Counts a server did not report stay out of the JSON.
         let json = serde_json::to_value(Usage {
             input: 1,
@@ -826,7 +831,17 @@ mod tests {
             (json["cacheWrite"].as_u64(), json["reasoning"].as_u64()),
             (Some(4), Some(6))
         );
-        assert_eq!(json["costUsd"].as_f64(), Some(0.75));
+        assert_eq!(json["totalCost"].as_f64(), Some(0.75));
+    }
+
+    #[test]
+    fn a_cost_recorded_as_cost_usd_still_reads() {
+        let old = json!({"input": 1, "output": 2, "cacheRead": 0, "totalTokens": 3, "costUsd": 0.5});
+
+        let usage: Usage = serde_json::from_value(old).unwrap();
+
+        assert_eq!(usage.total_cost, Some(0.5));
+        assert_eq!(serde_json::to_value(&usage).unwrap()["totalCost"].as_f64(), Some(0.5));
     }
 
     #[test]
@@ -844,9 +859,9 @@ mod tests {
             cache_write: 100_000,
             reasoning: 100_000,
             total_tokens: 1_500_000,
-            cost_usd: None,
+            total_cost: None,
         };
-        // 700k fresh at $1 + 200k cached at $0.1 + 100k written at $2 + 500k out at $4.
+        // 700k fresh at 1 + 200k cached at 0.1 + 100k written at 2 + 500k out at 4, per million.
         assert!((cost.of(&usage) - (0.7 + 0.02 + 0.2 + 2.0)).abs() < 1e-9);
         // A cache count above the input never underflows.
         let odd = Usage {

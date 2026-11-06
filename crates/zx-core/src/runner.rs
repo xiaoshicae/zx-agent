@@ -430,7 +430,7 @@ fn conclude(
             RunOutcome::CostBudget,
             Some(format!(
                 "cost budget reached ({:.4} spent, cost_budget = {})",
-                accounting.usage.cost_usd.unwrap_or(0.0),
+                accounting.usage.total_cost.unwrap_or(0.0),
                 limits
                     .cost_budget
                     .expect("CostBudget requires a configured cost budget")

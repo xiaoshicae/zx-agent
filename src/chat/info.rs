@@ -132,7 +132,7 @@ pub(super) fn status(output: &Output, model: &str, about: &About) {
             totals.input_tokens,
             totals.output_tokens,
             totals.cached_tokens,
-            totals.cost_usd.map(output::cost_text).unwrap_or_default()
+            totals.total_cost.map(output::cost_text).unwrap_or_default()
         ),
     );
 }

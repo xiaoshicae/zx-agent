@@ -19,7 +19,7 @@ use zx_agent::compaction::{self, Config, DEFAULT_RESERVE_TOKENS};
 use zx_agent::runner::RunOutcome;
 use zx_agent::session::{Entry, SessionStore};
 
-/// $1 per input token and $2 per output token: the faux provider reports 10 in, 5 out.
+/// 1 per input token and 2 per output token, in any currency: the faux provider reports 10 in, 5 out.
 fn priced() -> ModelMeta {
     ModelMeta {
         context_window: None,
@@ -51,13 +51,13 @@ async fn responses_are_priced_by_the_configured_model_and_summed_in_the_report()
     let report = runner.run("go", &CancellationToken::new()).await;
 
     assert_eq!(report.outcome, RunOutcome::Completed);
-    assert_eq!(report.usage.cost_usd, Some(40.0), "two answers at $20 each");
+    assert_eq!(report.usage.total_cost, Some(40.0), "two answers at 20 each");
     let costs: Vec<Option<f64>> = runner
         .session()
         .messages()
         .iter()
         .filter_map(|message| match message {
-            Message::Assistant(answer) => Some(answer.usage.cost_usd),
+            Message::Assistant(answer) => Some(answer.usage.total_cost),
             _ => None,
         })
         .collect();
@@ -66,7 +66,7 @@ async fn responses_are_priced_by_the_configured_model_and_summed_in_the_report()
     let recorded = read_lines(&file)
         .into_iter()
         .filter(|line| line["message"]["role"] == "assistant")
-        .map(|line| line["message"]["usage"]["costUsd"].as_f64())
+        .map(|line| line["message"]["usage"]["totalCost"].as_f64())
         .collect::<Vec<_>>();
     assert_eq!(recorded, [Some(20.0), Some(20.0)]);
 }
@@ -78,9 +78,9 @@ async fn a_model_without_prices_has_no_cost() {
     config.models.insert("another-model".into(), priced());
     let (mut runner, _) = RunnerSetup::new(config).build();
     let report = runner.run("go", &CancellationToken::new()).await;
-    assert_eq!(report.usage.cost_usd, None);
+    assert_eq!(report.usage.total_cost, None);
     assert!(
-        serde_json::to_value(&report.usage).unwrap().get("costUsd").is_none(),
+        serde_json::to_value(&report.usage).unwrap().get("totalCost").is_none(),
         "an unknown cost is left out of the JSON"
     );
 }
@@ -149,13 +149,13 @@ async fn costs_follow_the_requested_model_when_the_server_names_another() {
 
     assert_eq!(compacted.outcome, compaction::Outcome::Completed, "{compacted:?}");
     assert_eq!(
-        compacted.usage.cost_usd,
+        compacted.usage.total_cost,
         Some(20.0),
         "the summary is priced by the requested model"
     );
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
-    assert_eq!(report.usage.cost_usd, Some(20.0), "so is the answer");
-    let recorded = runner.session().latest_compaction().unwrap().usage.cost_usd;
+    assert_eq!(report.usage.total_cost, Some(20.0), "so is the answer");
+    let recorded = runner.session().latest_compaction().unwrap().usage.total_cost;
     assert_eq!(recorded, Some(20.0), "the compaction record carries the cost");
 }
 

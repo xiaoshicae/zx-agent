@@ -199,7 +199,7 @@ impl RawModel {
                 [cost.input, cost.output, cost.cache_read, cost.cache_write]
                     .iter()
                     .all(|price| price.is_finite() && *price >= 0.0),
-                "models.{}: prices must be zero or more, in USD per million tokens",
+                "models.{}: prices must be zero or more, per million tokens",
                 self.id
             );
         }
