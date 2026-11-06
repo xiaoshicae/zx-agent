@@ -2,11 +2,13 @@
 
 use std::time::Instant;
 
-use chrono::{DateTime, Local};
 use zx_agent::agent::{AgentEvent, ApprovalResult, Event, RunOutcome, ToolVerdict};
 use zx_agent::ai::{ContentBlock, Message, StopReason, Usage};
 
-use crate::render::visible;
+use crate::render::{Severity, local_time, visible};
+
+/// How the timeline shows when an event happened.
+const TIMELINE_TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.3f %:z";
 
 #[derive(Default)]
 pub(super) struct DebugState {
@@ -26,7 +28,7 @@ impl DebugState {
         eprintln!("{}", format_line(event.at_ms, severity, &text, color));
     }
 
-    #[expect(clippy::too_many_lines, reason = "one arm per event variant")]
+    #[expect(clippy::too_many_lines, reason = "chat is frozen; the event match stays as it is")]
     fn describe(&mut self, event: &Event) -> Option<(Severity, String)> {
         use AgentEvent::{
             AgentEnd, AgentStart, ApprovalRequested, ApprovalResolved, CompactionEnd, CompactionFailed,
@@ -116,12 +118,9 @@ impl DebugState {
                 };
                 (severity, text)
             }
-            CustomEntry { entry_id, custom_type } => (
-                Severity::Info,
-                format!(
-                    "Extension state recorded · type={custom_type} · entry={}",
-                    entry_id.as_deref().unwrap_or("none")
-                ),
+            CustomEntry { entry_id, custom_type } => recorded(
+                &format!("Extension state recorded · type={custom_type}"),
+                entry_id.as_deref(),
             ),
             MessageEnd {
                 message: Message::ToolResult(result),
@@ -145,24 +144,12 @@ impl DebugState {
                 message: Message::User { kind, .. },
                 entry_id,
                 ..
-            } => (
-                Severity::Info,
-                format!(
-                    "User input recorded · kind={kind:?} · entry={}",
-                    entry_id.as_deref().unwrap_or("none")
-                ),
-            ),
+            } => recorded(&format!("User input recorded · kind={kind:?}"), entry_id.as_deref()),
             MessageEnd {
                 message: Message::System(_),
                 entry_id,
                 ..
-            } => (
-                Severity::Info,
-                format!(
-                    "System prompt changes recorded · entry={}",
-                    entry_id.as_deref().unwrap_or("none")
-                ),
-            ),
+            } => recorded("System prompt changes recorded", entry_id.as_deref()),
             ToolExecutionStart {
                 tool_call_id,
                 tool_name,
@@ -248,28 +235,20 @@ impl DebugState {
                 max_retries,
                 delay_ms,
                 error,
-            } => {
-                let extra = if self.last_error.as_deref() == Some(error) {
-                    String::new()
-                } else {
-                    format!(" · {error}")
-                };
-                (
-                    Severity::Warn,
-                    format!("Retry {attempt}/{max_retries} in {delay_ms}ms{extra}"),
-                )
-            }
-            ContextOverflow { error } => {
-                let extra = if self.last_error.as_deref() == Some(error) {
-                    String::new()
-                } else {
-                    format!(" · {error}")
-                };
-                (
-                    Severity::Warn,
-                    format!("Context too long for the model; compacting before another attempt{extra}"),
-                )
-            }
+            } => (
+                Severity::Warn,
+                format!(
+                    "Retry {attempt}/{max_retries} in {delay_ms}ms{}",
+                    self.unless_last_error(error)
+                ),
+            ),
+            ContextOverflow { error } => (
+                Severity::Warn,
+                format!(
+                    "Context too long for the model; compacting before another attempt{}",
+                    self.unless_last_error(error)
+                ),
+            ),
             ContextEdited {
                 index,
                 replacement,
@@ -351,13 +330,20 @@ impl DebugState {
         };
         Some(item)
     }
+
+    /// ` · <error>`, unless it is the error reported just before.
+    fn unless_last_error(&self, error: &str) -> String {
+        if self.last_error.as_deref() == Some(error) {
+            String::new()
+        } else {
+            format!(" · {error}")
+        }
+    }
 }
 
-#[derive(Clone, Copy)]
-enum Severity {
-    Info,
-    Warn,
-    Error,
+/// `<what> · entry=<id>`: a record was written, or not kept without a session.
+fn recorded(what: &str, entry_id: Option<&str>) -> (Severity, String) {
+    (Severity::Info, format!("{what} · entry={}", entry_id.unwrap_or("none")))
 }
 
 /// ` · entry=<id>` when the event names its session entry.
@@ -378,17 +364,7 @@ fn tokens(usage: &Usage) -> String {
 }
 
 fn format_line(at_ms: u64, severity: Severity, text: &str, color: bool) -> String {
-    let time = i64::try_from(at_ms)
-        .ok()
-        .and_then(DateTime::from_timestamp_millis)
-        .map_or_else(
-            || format!("timestamp={at_ms}ms"),
-            |utc| {
-                utc.with_timezone(&Local)
-                    .format("%Y-%m-%d %H:%M:%S%.3f %:z")
-                    .to_string()
-            },
-        );
+    let time = local_time(at_ms, TIMELINE_TIME_FORMAT).unwrap_or_else(|| format!("timestamp={at_ms}ms"));
     let (label, ansi) = match severity {
         Severity::Info => ("debug", "36"),
         Severity::Warn => ("warn", "33"),

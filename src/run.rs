@@ -8,13 +8,13 @@ use tokio_util::sync::CancellationToken;
 
 use zx_agent::AgentSession;
 use zx_agent::agent::{AgentEvent, Event, EventSink};
-use zx_agent::ai::{Message, StopReason};
+use zx_agent::ai::Message;
 use zx_agent::profile::Builtin;
 use zx_agent::runner::RunReport;
 
 use crate::cli::{self, OutputMode, RunArgs};
 use crate::process::{JsonlEvents, exit_code, print_line, run_sink, spawn_signal_handler, with_telemetry};
-use crate::render::{progress_line, visible};
+use crate::render::{answer_end_line, progress_line, visible};
 use crate::sessions::SessionFile;
 
 /// Run one task and return its exit code. An `Err` is a configuration problem found
@@ -132,12 +132,10 @@ impl EventSink for TextProgress {
             ..
         } = &event.event
         {
-            if let Some(error) = &message.error_message {
-                eprintln!("[model] {:?}: {}", message.stop_reason, visible(error));
-            } else if message.stop_reason == StopReason::Length {
-                eprintln!("[model] Length: the response hit the output token limit");
+            if let Some((_, line)) = answer_end_line(message) {
+                eprintln!("{line}");
             }
-        } else if let Some(line) = progress_line(&event.event) {
+        } else if let Some((_, line)) = progress_line(&event.event) {
             eprintln!("{line}");
         }
     }

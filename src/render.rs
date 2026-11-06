@@ -4,6 +4,7 @@
 
 use serde_json::Value;
 use zx_agent::agent::AgentEvent;
+use zx_agent::ai::{AssistantMessage, StopReason};
 use zx_agent::text::clip;
 
 /// Characters of an argument string shown inline in an approval; longer or multi-line ones
@@ -102,19 +103,53 @@ fn describe_value(path: &str, value: &Value, lines: &mut Vec<String>) {
     }
 }
 
-/// The stderr line for `event` in text output, shared by `run` and chat. Names, arguments and
-/// errors come from the model, servers or hooks, so they are escaped. Messages are left to
-/// each caller, which shows answers in its own way.
-pub(crate) fn progress_line(event: &AgentEvent) -> Option<String> {
-    match event {
-        AgentEvent::ToolExecutionStart { tool_name, args, .. } => Some(format!(
-            "[tool] {} {}",
-            visible(tool_name),
-            visible(&clip(&args.to_string(), PROGRESS_ARGS_CHARS))
-        )),
-        AgentEvent::ToolExecutionUpdate { tool_name, content, .. } => {
-            Some(format!("[tool] {}: {}", visible(tool_name), visible(content)))
-        }
+/// How serious a line is, for a terminal that colors lines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Severity {
+    /// Progress and housekeeping.
+    Info,
+    /// A recoverable problem.
+    Warn,
+    /// A failure.
+    Error,
+}
+
+/// The line about an answer that ended badly, with how serious that is: its error, or the
+/// output token limit it hit.
+pub(crate) fn answer_end_line(message: &AssistantMessage) -> Option<(Severity, String)> {
+    if let Some(error) = &message.error_message {
+        Some((
+            Severity::Error,
+            format!("[model] {:?}: {}", message.stop_reason, visible(error)),
+        ))
+    } else if message.stop_reason == StopReason::Length {
+        Some((
+            Severity::Warn,
+            "[model] Length: the response hit the output token limit".to_string(),
+        ))
+    } else {
+        None
+    }
+}
+
+/// The stderr line for `event` in text output, with how serious it is, shared by `run` and
+/// chat. Names, arguments and errors come from the model, servers or hooks, so they are
+/// escaped. Messages are left to each caller, which shows answers in its own way.
+#[expect(clippy::too_many_lines, reason = "one arm per event variant")]
+pub(crate) fn progress_line(event: &AgentEvent) -> Option<(Severity, String)> {
+    let line = match event {
+        AgentEvent::ToolExecutionStart { tool_name, args, .. } => (
+            Severity::Info,
+            format!(
+                "[tool] {} {}",
+                visible(tool_name),
+                visible(&clip(&args.to_string(), PROGRESS_ARGS_CHARS))
+            ),
+        ),
+        AgentEvent::ToolExecutionUpdate { tool_name, content, .. } => (
+            Severity::Info,
+            format!("[tool] {}: {}", visible(tool_name), visible(content)),
+        ),
         AgentEvent::ToolExecutionEnd {
             tool_name,
             is_error,
@@ -123,51 +158,67 @@ pub(crate) fn progress_line(event: &AgentEvent) -> Option<String> {
         } => {
             let status = if *is_error { "error" } else { "ok" };
             let duration = duration_ms.map(|ms| format!(" {ms}ms")).unwrap_or_default();
-            Some(format!("[tool] {} -> {status}{duration}", visible(tool_name)))
+            (
+                Severity::Info,
+                format!("[tool] {} -> {status}{duration}", visible(tool_name)),
+            )
         }
         AgentEvent::RetryScheduled {
             attempt,
             max_retries,
             delay_ms,
             error,
-        } => Some(format!(
-            "[retry] {attempt}/{max_retries} in {delay_ms}ms: {}",
-            visible(error)
-        )),
-        AgentEvent::ContextOverflow { error } => Some(format!(
-            "[overflow] context too long; compacting before another attempt: {}",
-            visible(error)
-        )),
-        AgentEvent::CompactionStart { input_bytes, .. } => {
-            Some(format!("[compact] summarizing {input_bytes} context bytes"))
-        }
+        } => (
+            Severity::Warn,
+            format!("[retry] {attempt}/{max_retries} in {delay_ms}ms: {}", visible(error)),
+        ),
+        AgentEvent::ContextOverflow { error } => (
+            Severity::Warn,
+            format!(
+                "[overflow] context too long; compacting before another attempt: {}",
+                visible(error)
+            ),
+        ),
+        AgentEvent::CompactionStart { input_bytes, .. } => (
+            Severity::Info,
+            format!("[compact] summarizing {input_bytes} context bytes"),
+        ),
         AgentEvent::CompactionEnd {
             input_bytes,
             output_bytes,
             ..
-        } => Some(format!("[compact] {input_bytes} -> {output_bytes} context bytes")),
-        AgentEvent::CompactionFailed { error, .. } => Some(format!("[compact] {}", visible(error))),
+        } => (
+            Severity::Info,
+            format!("[compact] {input_bytes} -> {output_bytes} context bytes"),
+        ),
+        AgentEvent::CompactionFailed { error, .. } => (Severity::Error, format!("[compact] {}", visible(error))),
         AgentEvent::ToolCallRecovered {
             tool_call_id,
             tool_name,
             state,
-        } => Some(format!(
-            "[recover] {} {}: {}",
-            visible(tool_name),
-            visible(tool_call_id),
-            state.describe()
-        )),
+        } => (
+            Severity::Warn,
+            format!(
+                "[recover] {} {}: {}",
+                visible(tool_name),
+                visible(tool_call_id),
+                state.describe()
+            ),
+        ),
         // The error names the hook and the phase: "<hook> after_tool failed: <reason>".
-        AgentEvent::HookFailed { error, .. } => Some(format!("[hook] {}", visible(error))),
-        AgentEvent::CustomEntry { custom_type, entry_id } => Some(format!(
-            "[extension] recorded {}{}",
-            visible(custom_type),
-            if entry_id.is_some() {
-                ""
-            } else {
-                " (not kept: no session)"
-            }
-        )),
+        AgentEvent::HookFailed { error, .. } => (Severity::Error, format!("[hook] {}", visible(error))),
+        AgentEvent::CustomEntry { custom_type, entry_id } => (
+            Severity::Info,
+            format!(
+                "[extension] recorded {}{}",
+                visible(custom_type),
+                if entry_id.is_some() {
+                    ""
+                } else {
+                    " (not kept: no session)"
+                }
+            ),
+        ),
         AgentEvent::RunStart { .. }
         | AgentEvent::RunEnd { .. }
         | AgentEvent::AgentStart { .. }
@@ -181,8 +232,9 @@ pub(crate) fn progress_line(event: &AgentEvent) -> Option<String> {
         | AgentEvent::ApprovalResolved { .. }
         | AgentEvent::TurnEnd { .. }
         | AgentEvent::AgentEnd { .. }
-        | AgentEvent::ContextEdited { .. } => None,
-    }
+        | AgentEvent::ContextEdited { .. } => return None,
+    };
+    Some(line)
 }
 
 /// `ms` since the epoch in local time, written as `format` (chrono's strftime), or `None`
