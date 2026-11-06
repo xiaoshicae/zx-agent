@@ -26,7 +26,7 @@
   - 对 bash 命令隐藏 API key 所在的环境变量
   - 系统提示词记录在对话中，恢复会话时只追加有变化的段落
   - 运行 future 被丢弃时取消后台请求、定时任务和工具子进程组
-- **尚未实现**：插件与 MCP、其他 provider。详见[路线图](docs/ROADMAP.md)。
+- **尚未实现**：OpenAI 兼容以外的 provider（如 Anthropic）。插件（`Extension`）与 MCP 客户端已实现，见下文。详见[路线图](docs/ROADMAP.md)。
 
 ## 快速开始
 
@@ -354,7 +354,7 @@ CLI (main.rs + cli/ + chat/ + acp/)
 | agent 循环 | `crates/zx-core/src/agent/agent_loop.rs` | `agent/src/agent-loop.ts`（`runLoop`、`executeToolCalls`） |
 | 钩子宿主 | `crates/zx-core/src/agent/hooks/` | 输入、上下文、工具、回合与事件扩展点 |
 | 工具调用策略 | `crates/zx-tools/src/policy/` | `PolicyHook` 适配 `ToolPolicy`；命令策略与 deny → ask → allow 规则 |
-| 人机交互 | `crates/zx-core/src/interaction.rs` | 宿主审批与 `NoHuman` |
+| 人机交互 | `crates/zx-core/src/agent/interaction.rs` | 宿主审批与 `NoHuman` |
 | 扩展接口 | `crates/zx-core/src/extensions.rs` | 无对应实现：`Extension` 与 `register` |
 | 内置钩子 | `crates/zx-tools/src/continuation.rs`、`crates/zx-tools/src/redact.rs` | 截断续写与已知密钥脱敏 |
 | 执行环境 | `crates/zx-tools/src/executor/` | 无对应实现：本机与 Docker 容器两个 `Executor` |
@@ -729,7 +729,7 @@ P1 的 SDK 接口调整：静态配置移入 `LoopSpec`；`LoopConfig` 持有钩
 - `agent::Tool`：自定义工具。返回 `Err` 等价于 pi 中的抛出异常，会变成错误结果交给模型。`effects()` 默认返回 `SideEffects`，Runner 会在执行前记录开始；不会改变任何状态的工具应返回 `Effects::ReadOnly`，否则中断后只能报告结果未知。可选的 `prepare_arguments` 在校验前改写模型给出的参数（如旧的参数名）；schema 校验、`validate_arguments`、`before_tool` 与 `after_tool` 钩子（含策略）、审批与执行都使用改写后的参数，`tool_execution_start` 事件与会话保留模型的原始调用，所以改写只能依赖参数本身；直接调用 `execute` 时不经过这一步。执行中可用 `ToolContext::report_progress` 报告进度：每条最多 16 KiB（`MAX_PROGRESS_BYTES`），经脱敏钩子后作为 `tool_execution_update` 事件发出，不写入会话、不发给模型，队列满或调用结束后丢弃。`ToolOutput::details` 存放给前端与日志的结构化数据（pi 的 `details`）：经 `after_tool` 钩子（含脱敏，只处理字符串与对象键）后，随 `tool_execution_end` 事件发出，并写入会话中工具结果消息的 `details` 字段；provider 只发送 `content`，摘要请求的输入与上下文字节统计都不含它，所以模型看不到。紧凑 JSON 超过 16 KiB（`MAX_DETAILS_BYTES`）时两处都不保留。`ToolOutput::usage`（`with_usage`）报告工具自己的花费，例如它调用了模型（pi 结果中的 `usage`）：随 `tool_execution_end` 发出、写入工具结果消息，按工具名汇总进 `RunReport::tool_usage` 并计入 OpenTelemetry 的 `zx.tokens` 与 `zx.cost`；不发给模型，也不计入 `Limits::token_budget`（它只限制运行自己的模型请求）。`ToolOutput` 因此不再实现 `Eq`，只有 `PartialEq`。`ToolContext` 标为 `#[non_exhaustive]`，以后只增加字段，在 zx-core 之外用 `ToolContext::new` 构造。
 - `agent::ToolPolicy`：内置风格的工具调用策略，经 `policy::PolicyHook` 注册，运行在 `Policy` 阶段；扩展改用 `Hooks::before_tool`。
 - `agent::Hooks`：输入、上下文、工具调用前后、回合结束与事件观察。钩子的输入输出类型（`Decision`、`TurnDecision`、`ContextEdit`、`ToolOutput`、`Approval`、`ApprovalRequest`、`ToolCall`、`HookContext`、`TurnSummary`）都有固定的 JSON 格式，供钩子进程与审批转发使用，格式由 `tests/hook_contract.rs` 固定。
-- `interaction::Interaction`：由宿主回答审批；内核不读取终端。
+- `agent::Interaction`：由宿主回答审批；内核不读取终端。
 - `agent::EventSink`：订阅事件，收到带信封的 `agent::Event`（事件本体在 `event.event`）。任何 `Fn(&Event) + Send + Sync` 都可以直接用作 sink。事件发出时，它报告的消息与编辑已写入会话；sink 只接收事件，不参与持久化。导出器可用 `AgentSession::subscribe_bounded(capacity)` 得到有界通道：通道满时丢弃新事件并计数（`EventStream::dropped()`），不阻塞运行；会话释放、已发出的事件读完后，`recv` 返回 `None`。订阅句柄不持有 sink，sink 随会话释放。
 - `session::SessionLog`：会话记录存在哪里，见下文[会话存储](#会话存储)。
 - `executor::Executor`：工具执行命令与读写文件的位置。`BashTool`、`ReadFileTool`、`EditFileTool` 与 `WriteFileTool` 的 `executor` 字段默认是 `LocalExecutor`（本机）；`run` 结束、超时或取消时须终止命令启动的全部进程，`read_file` 只读不超过上限的普通文件，`write_file` 新建或覆盖普通文件并创建缺少的上级目录（默认实现返回错误，此前写的执行器不受影响）。`EditFileTool` 与 `WriteFileTool` 共用 `tools::FileMutationQueue` 时，同一文件的改动逐个进行。`execution_mode` 默认 `Parallel`；一次只能处理一个调用的执行器返回 `Sequential`，内置工具随之声明，循环就不会提前开始并记录只能排队等待的调用。`ContainerExecutor::start(ContainerConfig::new(image, workspace))` 启动[容器执行](#容器执行)所用的容器，`tools::builtin_tools_with` 用指定的执行器构造内置工具；容器随执行器释放而删除。

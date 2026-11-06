@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
-use zx_agent::interaction::{Approval, ApprovalRequest, Interaction};
+use zx_agent::agent::{Approval, ApprovalRequest, Interaction};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct RequestId(pub(super) u64);

@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use common::{Collect, EchoTool, NotifyingProvider, config, run_prompt, summarize, with_policy};
+use zx_agent::agent::ApprovalCache;
 use zx_agent::agent::QueuedMessage;
 use zx_agent::agent::{
     AgentEvent, Decision, ExecutionMode, LoopControl, LoopOutcome, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput,
@@ -21,7 +22,6 @@ use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{
     ContentBlock, EventReceiver, Message, PREAMBLE, Provider, Request, StopReason, SystemPrompt, ToolDef, Usage,
 };
-use zx_agent::interaction::ApprovalCache;
 
 fn provider(steps: impl IntoIterator<Item = FauxStep>) -> Arc<FauxProvider> {
     Arc::new(FauxProvider::new(steps))

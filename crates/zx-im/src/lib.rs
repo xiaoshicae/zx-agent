@@ -27,7 +27,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 // The modules name the model layer, the kernel and the shared helpers by these crate-root paths.
 use zx_ai as ai;
-use zx_core::{AgentSession, agent, agent_session, interaction, runner};
+use zx_core::{AgentSession, agent, agent_session, runner};
 
 use crate::agent::ApprovalResult;
 

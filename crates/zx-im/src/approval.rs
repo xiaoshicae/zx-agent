@@ -13,8 +13,8 @@ use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::agent::{AgentEvent, ApprovalResult, Event, EventSink};
+use crate::agent::{Approval, ApprovalRequest, Interaction};
 use crate::ai::ToolCall;
-use crate::interaction::{Approval, ApprovalRequest, Interaction};
 
 use super::server::timed;
 use super::{

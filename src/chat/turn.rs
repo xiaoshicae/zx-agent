@@ -10,10 +10,10 @@ use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
 use zx_agent::AgentSession;
+use zx_agent::agent::Approval;
 use zx_agent::agent::QueuedMessage;
 use zx_agent::agent_session::SessionError;
 use zx_agent::compaction;
-use zx_agent::interaction::Approval;
 use zx_agent::runner::RunReport;
 
 use super::commands::{self, Command};

@@ -18,14 +18,14 @@ impl Engine<'_, '_> {
         let TurnResponse {
             index,
             turn,
-            tool_progress,
+            after_tools,
         } = response;
         let message = answer_at(context, index).expect(
             "the turn's response stays at the index it was pushed at: the context only grows until the next turn",
         );
-        let needs_more = tool_progress == ToolProgress::Continue;
+        let needs_more = after_tools == AfterTools::Ran;
         let stop = message.stop_reason;
-        let disposition = self.disposition(tool_progress);
+        let disposition = self.disposition(after_tools);
         let remaining = self.remaining_model_requests(result);
         let summary = TurnSummary {
             response: message,
@@ -83,15 +83,15 @@ impl Engine<'_, '_> {
     }
 
     /// What the normal loop would do after a response, before the finish hooks decide.
-    fn disposition(&self, tool_progress: ToolProgress) -> TurnDisposition {
-        let needs_more = tool_progress == ToolProgress::Continue;
+    fn disposition(&self, after_tools: AfterTools) -> TurnDisposition {
+        let needs_more = after_tools == AfterTools::Ran;
         // Inspect queues without consuming them: stopping or failing in a hook must
         // leave accepted user input available to the next run.
         let queues = &self.config.queues;
         let queued = queues.has(Queue::Steering) || (!needs_more && queues.has(Queue::FollowUp));
         if needs_more || queued {
             TurnDisposition::Continue
-        } else if tool_progress == ToolProgress::Terminated {
+        } else if after_tools == AfterTools::Terminated {
             TurnDisposition::Terminated
         } else {
             TurnDisposition::Stop
@@ -171,10 +171,14 @@ pub(super) enum PendingInput {
     Requested(Box<Message>),
 }
 
+/// What the tool calls of one response leave for the loop.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum ToolProgress {
+pub(super) enum AfterTools {
+    /// The response called no tool.
     NoCalls,
-    Continue,
+    /// The calls ran; the model sees their results next.
+    Ran,
+    /// A tool asked the loop to end the attempt.
     Terminated,
 }
 
@@ -184,7 +188,7 @@ pub(super) struct TurnResponse {
     /// Where the response is in the context.
     pub(super) index: usize,
     pub(super) turn: u32,
-    pub(super) tool_progress: ToolProgress,
+    pub(super) after_tools: AfterTools,
 }
 
 pub(super) enum ResponseHandling {

@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::AgentSession;
 use crate::agent::ApprovalResult;
-use crate::interaction::Interaction;
+use crate::agent::Interaction;
 
 use super::router::Router;
 use super::status::{left_behind, replace_left_behind};

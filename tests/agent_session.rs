@@ -17,10 +17,10 @@ use zx_agent::AgentSession;
 use zx_agent::agent::{
     AgentEvent, Decision, Event, HookContext, HookResult, Hooks, QueuedMessage, Tool, ToolContext, ToolOutput,
 };
+use zx_agent::agent::{Approval, ApprovalRequest, Interaction};
 use zx_agent::agent_session::{ModelRef, SessionError, Subscription};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Reasoning, Request, ToolDef};
-use zx_agent::interaction::{Approval, ApprovalRequest, Interaction};
 use zx_agent::runner::RunOutcome;
 use zx_agent::session::{Entry, SessionStore};
 
