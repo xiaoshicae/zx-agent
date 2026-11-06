@@ -15,10 +15,10 @@ use tokio_util::sync::CancellationToken;
 use common::{Collect, NotifyingProvider, RunnerSetup, config, header, summarize};
 use zx_agent::AgentSession;
 use zx_agent::agent::{
-    AgentEvent, Decision, Event, HookContext, HookResult, Hooks, QueuedMessage, Tool, ToolContext, ToolOutput,
+    AgentEvent, Event, HookContext, HookResult, Hooks, PolicyDecision, QueuedMessage, Tool, ToolContext, ToolOutput,
 };
 use zx_agent::agent::{Approval, ApprovalRequest, Interaction};
-use zx_agent::agent_session::{ModelRef, SessionError, Subscription};
+use zx_agent::agent_session::{AgentSessionError, ModelRef, Subscription};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Reasoning, Request, ToolDef};
 use zx_agent::runner::RunOutcome;
@@ -86,7 +86,7 @@ async fn take_queued_during_a_run_is_busy_and_leaves_the_input_queued() {
     let mut running = Box::pin(session.prompt("first"));
     tokio::select! { () = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
     session.steer("queued");
-    assert_eq!(session.take_queued(), Err(SessionError::Busy));
+    assert_eq!(session.take_queued(), Err(AgentSessionError::Busy));
     assert!(session.abort());
     assert_eq!(running.await.unwrap().outcome, RunOutcome::Aborted);
     assert_eq!(session.take_queued().unwrap(), [QueuedMessage::User("queued".into())]);
@@ -100,7 +100,7 @@ async fn a_running_prompt_rejects_another_prompt_without_queueing_it() {
     let rejected = tokio::time::timeout(Duration::from_secs(1), session.prompt("must not enter history"))
         .await
         .unwrap();
-    assert!(matches!(rejected, Err(SessionError::Busy)));
+    assert!(matches!(rejected, Err(AgentSessionError::Busy)));
     assert_eq!(provider.faux.requests().len(), 1);
     assert!(session.abort());
     assert_eq!(running.await.unwrap().outcome, RunOutcome::Aborted);
@@ -365,7 +365,10 @@ async fn a_running_session_rejects_a_reasoning_change() {
     let (session, provider, _) = setup([FauxStep::Hang, FauxStep::text("after")]);
     let mut running = Box::pin(session.prompt("first"));
     tokio::select! { () = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
-    assert_eq!(session.set_reasoning(Some(Reasoning::High)), Err(SessionError::Busy));
+    assert_eq!(
+        session.set_reasoning(Some(Reasoning::High)),
+        Err(AgentSessionError::Busy)
+    );
     session.abort();
     running.await.unwrap();
     session.prompt("second").await.unwrap();
@@ -383,9 +386,9 @@ async fn a_running_session_rejects_model_changes_without_changing_the_provider()
             provider: next.clone(),
             model: "next".into()
         }),
-        Err(SessionError::Busy)
+        Err(AgentSessionError::Busy)
     );
-    assert_eq!(session.clear_approvals(), Err(SessionError::Busy));
+    assert_eq!(session.clear_approvals(), Err(AgentSessionError::Busy));
     session.abort();
     running.await.unwrap();
     assert_eq!(session.prompt("second").await.unwrap().final_text, "old provider");
@@ -402,7 +405,7 @@ async fn an_invalid_model_does_not_replace_the_current_configuration() {
                 provider: next.clone(),
                 model: invalid.into()
             }),
-            Err(SessionError::InvalidModel)
+            Err(AgentSessionError::InvalidModel)
         );
     }
     session.prompt("go").await.unwrap();
@@ -484,7 +487,8 @@ async fn concurrent_callers_share_one_running_prompt() {
         tasks.push(tokio::spawn(async move {
             barrier.wait().await;
             let result = session.prompt(format!("caller {index}")).await;
-            if matches!(&result, Err(SessionError::Busy)) && rejected.fetch_add(1, Ordering::SeqCst) + 1 == CALLERS - 1
+            if matches!(&result, Err(AgentSessionError::Busy))
+                && rejected.fetch_add(1, Ordering::SeqCst) + 1 == CALLERS - 1
             {
                 all_rejected.notify_one();
             }
@@ -507,7 +511,7 @@ async fn concurrent_callers_share_one_running_prompt() {
                 assert_eq!(report.outcome, RunOutcome::Aborted);
                 completed += 1;
             }
-            Err(error) => assert_eq!(error, SessionError::Busy),
+            Err(error) => assert_eq!(error, AgentSessionError::Busy),
         }
     }
     assert_eq!(completed, 1);
@@ -517,8 +521,8 @@ async fn concurrent_callers_share_one_running_prompt() {
 struct Ask;
 #[async_trait]
 impl Hooks for Ask {
-    async fn before_tool(&self, _call: &zx_agent::ai::ToolCall, _ctx: &HookContext) -> HookResult<Decision> {
-        Ok(Decision::Ask("review".into()))
+    async fn before_tool(&self, _call: &zx_agent::ai::ToolCall, _ctx: &HookContext) -> HookResult<PolicyDecision> {
+        Ok(PolicyDecision::Ask("review".into()))
     }
 }
 struct Approver(AtomicUsize);

@@ -14,7 +14,7 @@ use tokio::task::{JoinError, JoinHandle};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::agent_session::SessionError;
+use crate::agent_session::AgentSessionError;
 use crate::ai::now_ms;
 use crate::runner::RunReport;
 
@@ -146,7 +146,7 @@ enum Phase {
     /// A prompt runs in its own task and holds a run slot; `status` is the message that
     /// says so, replaced by the answer at the end.
     Running {
-        task: JoinHandle<Result<RunReport, SessionError>>,
+        task: JoinHandle<Result<RunReport, AgentSessionError>>,
         slot: OwnedSemaphorePermit,
         status: Option<MessageRef>,
         open: Opened,
@@ -165,7 +165,7 @@ impl Phase {
 
 enum Step {
     Slot(Result<OwnedSemaphorePermit, AcquireError>),
-    Ended(Result<Result<RunReport, SessionError>, JoinError>),
+    Ended(Result<Result<RunReport, AgentSessionError>, JoinError>),
     Idle,
 }
 
@@ -350,7 +350,7 @@ impl Worker {
 
     /// Post the answer, then run input that arrived as the run ended; while the server stops,
     /// that input is unanswered instead.
-    async fn ended(&mut self, ended: Result<Result<RunReport, SessionError>, JoinError>, closing: bool) {
+    async fn ended(&mut self, ended: Result<Result<RunReport, AgentSessionError>, JoinError>, closing: bool) {
         let (slot, status, open) = match self.take_phase() {
             Phase::Running { slot, status, open, .. } => (slot, status, open),
             // Only a running conversation ends a run.

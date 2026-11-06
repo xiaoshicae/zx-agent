@@ -20,7 +20,7 @@ use serde_json::Value;
 /// `reason`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "decision", content = "reason", rename_all = "snake_case")]
-pub enum Decision {
+pub enum PolicyDecision {
     Allow,
     /// The reason is shown to the model as the tool result.
     Deny(String),
@@ -32,7 +32,7 @@ pub enum Decision {
 #[async_trait]
 pub trait ToolPolicy: Send + Sync {
     /// Called after the tool is found and its arguments parsed, before it runs.
-    async fn check(&self, tool_name: &str, args: &Value) -> Decision;
+    async fn check(&self, tool_name: &str, args: &Value) -> PolicyDecision;
 }
 
 /// Policy that allows every call. For tests and fully trusted environments.
@@ -40,8 +40,8 @@ pub struct AllowAll;
 
 #[async_trait]
 impl ToolPolicy for AllowAll {
-    async fn check(&self, _tool_name: &str, _args: &Value) -> Decision {
-        Decision::Allow
+    async fn check(&self, _tool_name: &str, _args: &Value) -> PolicyDecision {
+        PolicyDecision::Allow
     }
 }
 
@@ -54,7 +54,7 @@ mod tests {
     #[tokio::test]
     async fn allow_all_allows_every_call_whatever_its_arguments() {
         let decision = AllowAll.check("bash", &json!({"command": "rm -rf /"})).await;
-        assert_eq!(decision, Decision::Allow);
-        assert_eq!(AllowAll.check("unknown", &json!(null)).await, Decision::Allow);
+        assert_eq!(decision, PolicyDecision::Allow);
+        assert_eq!(AllowAll.check("unknown", &json!(null)).await, PolicyDecision::Allow);
     }
 }

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use common::{RunnerSetup, config, header, read_lines, summarize};
 use zx_agent::AgentSession;
-use zx_agent::agent_session::{IDEMPOTENCY_KEY_TYPE, SessionError};
+use zx_agent::agent_session::{AgentSessionError, IDEMPOTENCY_KEY_TYPE};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::runner::RunOutcome;
 use zx_agent::session::SessionStore;
@@ -31,13 +31,13 @@ async fn a_key_is_recorded_before_its_prompt_and_runs_only_once() {
     assert_eq!(report.outcome, RunOutcome::Completed);
     assert_eq!(
         session.prompt_once("job-1", "first again").await.err(),
-        Some(SessionError::DuplicateKey)
+        Some(AgentSessionError::DuplicateKey)
     );
     assert_eq!(provider.requests().len(), 1, "the duplicate makes no request");
     assert_eq!(session.prompt_once("job-2", "second").await.unwrap().final_text, "two");
     assert_eq!(
         session.prompt_once("  ", "blank").await.err(),
-        Some(SessionError::InvalidKey)
+        Some(AgentSessionError::InvalidKey)
     );
     drop(session);
 
@@ -77,7 +77,7 @@ async fn a_key_survives_reopening_the_session_file() {
 
     assert_eq!(
         reopened.prompt_once("job-1", "first").await.err(),
-        Some(SessionError::DuplicateKey)
+        Some(AgentSessionError::DuplicateKey)
     );
     assert_eq!(provider.requests().len(), 1);
 }
@@ -97,7 +97,7 @@ async fn an_interrupted_submission_keeps_its_key_and_is_continued_not_repeated()
     // The host retries the same submission: refused, so it continues the run instead.
     assert_eq!(
         session.prompt_once("job-1", "first").await.err(),
-        Some(SessionError::DuplicateKey)
+        Some(AgentSessionError::DuplicateKey)
     );
     let report = session.continue_run().await.unwrap();
     assert_eq!(

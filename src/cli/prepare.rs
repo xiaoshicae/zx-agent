@@ -10,7 +10,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 use zx_agent::AgentSession;
-use zx_agent::agent::{Decision, EventSink, HookOptions, Hooks, LoopConfig, LoopSpec, Tool};
+use zx_agent::agent::{EventSink, HookOptions, Hooks, LoopConfig, LoopSpec, PolicyDecision, Tool};
 use zx_agent::ai::ModelMeta;
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig, SystemUpdates};
 use zx_agent::ai::retry::RetryPolicy;
@@ -104,11 +104,11 @@ impl PreparedSession {
         let policy = RulePolicy::new(vec![
             Rule {
                 matcher: RuleMatcher::Tool(BASH.into()),
-                decision: Decision::Ask(reason.into()),
+                decision: PolicyDecision::Ask(reason.into()),
             },
             Rule {
                 matcher: RuleMatcher::Any,
-                decision: Decision::Allow,
+                decision: PolicyDecision::Allow,
             },
         ])
         .auto_approve(std::mem::take(&mut self.auto_approve));
@@ -512,18 +512,18 @@ fn rules_policy(profile: &mut Profile, mcp_ask: &[String], auto_approve: AutoApp
         .into_iter()
         .map(|tool| Rule {
             matcher: RuleMatcher::Tool(tool),
-            decision: Decision::Deny("tool denied by profile".into()),
+            decision: PolicyDecision::Deny("tool denied by profile".into()),
         });
     let asked = std::mem::take(&mut profile.rules.ask_tools)
         .into_iter()
         .map(|tool| Rule {
             matcher: RuleMatcher::Tool(tool),
-            decision: Decision::Ask("profile requires tool approval".into()),
+            decision: PolicyDecision::Ask("profile requires tool approval".into()),
         });
     // An MCP server's tools ask unless its allowTools lists them: annotations are hints.
     let mcp = mcp_ask.iter().map(|tool| Rule {
         matcher: RuleMatcher::Tool(tool.clone()),
-        decision: Decision::Ask("MCP tool requires approval (not in the server's allowTools)".into()),
+        decision: PolicyDecision::Ask("MCP tool requires approval (not in the server's allowTools)".into()),
     });
     let mut rules: Vec<Rule> = denied.chain(asked).chain(mcp).collect();
     if rules.is_empty() {
@@ -531,7 +531,7 @@ fn rules_policy(profile: &mut Profile, mcp_ask: &[String], auto_approve: AutoApp
     }
     rules.push(Rule {
         matcher: RuleMatcher::Any,
-        decision: Decision::Allow,
+        decision: PolicyDecision::Allow,
     });
     Some(RulePolicy::new(rules).auto_approve(auto_approve))
 }

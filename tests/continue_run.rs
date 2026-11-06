@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use zx_agent::AgentSession;
 use zx_agent::agent::{AgentEvent, Tool};
-use zx_agent::agent_session::SessionError;
+use zx_agent::agent_session::AgentSessionError;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, StopReason};
 use zx_agent::runner::{RunOutcome, Runner};
@@ -186,7 +186,7 @@ async fn a_running_session_refuses_to_continue() {
         }
     }
 
-    assert_eq!(session.continue_run().await.err(), Some(SessionError::Busy));
+    assert_eq!(session.continue_run().await.err(), Some(AgentSessionError::Busy));
     session.abort();
     running.await.unwrap();
 }

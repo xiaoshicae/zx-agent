@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use zx_agent::AgentSession;
 use zx_agent::agent::{AgentEvent, ContextEdit, Event, HookContext, HookOptions, Hooks};
-use zx_agent::agent_session::{ModelRef, SessionError};
+use zx_agent::agent_session::{AgentSessionError, ModelRef};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{AssistantMessage, ContentBlock, Message, StopReason, ToolResultMessage};
 use zx_agent::compaction::{Config, Outcome, Report};
@@ -634,14 +634,14 @@ async fn pending_summary_shares_busy_cancel_and_drop_reuse_with_prompt() {
     let mut compact = Box::pin(session.compact_with_cancel(&parent));
     tokio::select! { biased; result = &mut compact => panic!("unexpected completion: {result:?}"), () = tokio::task::yield_now() => {} }
     assert!(events.kinds().contains(&"compaction_start"));
-    assert!(matches!(session.prompt("busy").await, Err(SessionError::Busy)));
-    assert!(matches!(session.compact().await, Err(SessionError::Busy)));
+    assert!(matches!(session.prompt("busy").await, Err(AgentSessionError::Busy)));
+    assert!(matches!(session.compact().await, Err(AgentSessionError::Busy)));
     assert_eq!(
         session.set_model(ModelRef {
             provider: provider.clone(),
             model: "other".into()
         }),
-        Err(SessionError::Busy)
+        Err(AgentSessionError::Busy)
     );
     drop(compact);
     assert!(!parent.is_cancelled());

@@ -19,7 +19,7 @@ pub use auto_approve::{AutoApprove, ProgramOptions};
 pub use command::{CommandPolicy, DEFAULT_DENIED_PATTERNS, DENIED_PROGRAMS};
 pub use rules::{Rule, RuleMatcher, RulePolicy};
 
-use crate::agent::{Decision, HookContext, HookResult, HookStage, Hooks, ToolPolicy};
+use crate::agent::{HookContext, HookResult, HookStage, Hooks, PolicyDecision, ToolPolicy};
 use crate::ai::ToolCall;
 
 /// Adapts an existing asynchronous policy to the bounded before_tool hook.
@@ -41,7 +41,7 @@ impl Hooks for PolicyHook {
         HookStage::Policy
     }
 
-    async fn before_tool(&self, call: &ToolCall, _ctx: &HookContext) -> HookResult<Decision> {
+    async fn before_tool(&self, call: &ToolCall, _ctx: &HookContext) -> HookResult<PolicyDecision> {
         Ok(self.policy.check(&call.name, &call.arguments).await)
     }
 }

@@ -10,15 +10,15 @@ use futures::FutureExt;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    ContextEdit, DEFAULT_HOOK_TIMEOUT, HookContext, HookError, HookFailure, HookPhase, HookResult, HookStage, Hooks,
+    ContextEdit, DEFAULT_HOOK_TIMEOUT, HookContext, HookError, HookFailure, HookPoint, HookResult, HookStage, Hooks,
     RequestPlan, RequestSettings, TurnDecision, TurnSummary,
 };
-use crate::agent::{AgentEvent, Decision, Event, EventTarget, ToolOutput};
+use crate::agent::{AgentEvent, Event, EventTarget, PolicyDecision, ToolOutput};
 use crate::ai::{Message, ToolCall};
 
 pub(crate) struct HookCall<'a> {
     pub name: &'a str,
-    pub phase: HookPhase,
+    pub phase: HookPoint,
     pub timeout: Duration,
 }
 
@@ -40,7 +40,7 @@ impl HookCall<'_> {
         tokio::pin!(guarded);
         // Ready observers still see the final event after cancellation. Pending
         // observers stop immediately; operational hooks give cancellation priority.
-        let result = if self.phase == HookPhase::OnEvent {
+        let result = if self.phase == HookPoint::OnEvent {
             tokio::select! {
                 biased;
                 result = &mut guarded => Some(result),
@@ -89,7 +89,7 @@ struct RegisteredHook {
 }
 
 impl RegisteredHook {
-    fn call(&self, phase: HookPhase) -> HookCall<'_> {
+    fn call(&self, phase: HookPoint) -> HookCall<'_> {
         HookCall {
             name: &self.name,
             phase,
@@ -101,7 +101,7 @@ impl RegisteredHook {
     /// run's cancellation.
     async fn run<T>(
         &self,
-        phase: HookPhase,
+        phase: HookPoint,
         future: impl Future<Output = HookResult<T>>,
         ctx: &HookContext,
     ) -> Result<T, HookError> {
@@ -109,7 +109,7 @@ impl RegisteredHook {
     }
 
     /// The error of this hook failing in `phase`.
-    fn error(&self, phase: HookPhase, failure: HookFailure) -> HookError {
+    fn error(&self, phase: HookPoint, failure: HookFailure) -> HookError {
         self.call(phase).error(failure)
     }
 }
@@ -165,7 +165,7 @@ impl HookChain {
     pub async fn on_input(&self, mut text: String, ctx: &HookContext) -> Result<String, HookError> {
         for entry in &self.hooks {
             text = entry
-                .run(HookPhase::OnInput, entry.hook.on_input(text, ctx), ctx)
+                .run(HookPoint::OnInput, entry.hook.on_input(text, ctx), ctx)
                 .await?;
         }
         Ok(text)
@@ -180,7 +180,7 @@ impl HookChain {
         let mut projected = Cow::Borrowed(messages);
         let mut edits = Vec::new();
         for entry in &self.hooks {
-            let phase = HookPhase::TransformContext;
+            let phase = HookPoint::TransformContext;
             let changes = entry
                 .run(phase, entry.hook.transform_context(&projected, ctx), ctx)
                 .await?;
@@ -204,7 +204,7 @@ impl HookChain {
     ) -> Result<RequestSettings, HookError> {
         let mut settings = settings;
         for entry in &self.hooks {
-            let phase = HookPhase::PrepareRequest;
+            let phase = HookPoint::PrepareRequest;
             let plan = RequestPlan {
                 messages,
                 turn,
@@ -220,16 +220,16 @@ impl HookChain {
         Ok(settings)
     }
 
-    pub async fn before_tool(&self, tool: &ToolCall, ctx: &HookContext) -> Result<Decision, HookError> {
-        let mut verdict = Decision::Allow;
+    pub async fn before_tool(&self, tool: &ToolCall, ctx: &HookContext) -> Result<PolicyDecision, HookError> {
+        let mut verdict = PolicyDecision::Allow;
         for entry in &self.hooks {
             let decision = entry
-                .run(HookPhase::BeforeTool, entry.hook.before_tool(tool, ctx), ctx)
+                .run(HookPoint::BeforeTool, entry.hook.before_tool(tool, ctx), ctx)
                 .await?;
             match decision {
-                Decision::Deny(_) => return Ok(decision),
-                Decision::Ask(_) if matches!(verdict, Decision::Allow) => verdict = decision,
-                Decision::Ask(_) | Decision::Allow => {}
+                PolicyDecision::Deny(_) => return Ok(decision),
+                PolicyDecision::Ask(_) if matches!(verdict, PolicyDecision::Allow) => verdict = decision,
+                PolicyDecision::Ask(_) | PolicyDecision::Allow => {}
             }
         }
         Ok(verdict)
@@ -267,7 +267,7 @@ impl HookChain {
     ) -> Result<ToolOutput, HookError> {
         for entry in self.hooks.iter().filter(|entry| selected(entry.stage)) {
             output = entry
-                .run(HookPhase::AfterTool, entry.hook.after_tool(tool, output, ctx), ctx)
+                .run(HookPoint::AfterTool, entry.hook.after_tool(tool, output, ctx), ctx)
                 .await?;
         }
         Ok(output)
@@ -277,7 +277,7 @@ impl HookChain {
         let mut decision = TurnDecision::Default;
         for entry in &self.hooks {
             let next = entry
-                .run(HookPhase::FinishTurn, entry.hook.finish_turn(turn, ctx), ctx)
+                .run(HookPoint::FinishTurn, entry.hook.finish_turn(turn, ctx), ctx)
                 .await?;
             match next {
                 TurnDecision::Stop => return Ok(TurnDecision::Stop),
@@ -301,12 +301,12 @@ impl HookChain {
                 Ok(true) => {}
                 Ok(false) => continue,
                 Err(_) => {
-                    errors.push(entry.error(HookPhase::OnEvent, HookFailure::Panicked));
+                    errors.push(entry.error(HookPoint::OnEvent, HookFailure::Panicked));
                     continue;
                 }
             }
             if let Err(error) = entry
-                .run(HookPhase::OnEvent, entry.hook.on_event(event, ctx), ctx)
+                .run(HookPoint::OnEvent, entry.hook.on_event(event, ctx), ctx)
                 .await
             {
                 // Cancellation is a normal shutdown, not an observer failure.

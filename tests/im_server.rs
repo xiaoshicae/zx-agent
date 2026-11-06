@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use common::{EchoTool, RunnerSetup, config, header, summarize};
 use zx_agent::AgentSession;
 use zx_agent::agent::Interaction;
-use zx_agent::agent::{ApprovalResult, Decision, NullSink, Tool};
+use zx_agent::agent::{ApprovalResult, NullSink, PolicyDecision, Tool};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::im::{
     ApprovalId, Choice, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId, MessageRef, Outbound,
@@ -217,11 +217,11 @@ impl SessionFactory for Factory {
         config.hooks.push(PolicyHook::new(Arc::new(RulePolicy::new(vec![
             Rule {
                 matcher: RuleMatcher::Tool("echo".into()),
-                decision: Decision::Ask("echo needs approval".into()),
+                decision: PolicyDecision::Ask("echo needs approval".into()),
             },
             Rule {
                 matcher: RuleMatcher::Any,
-                decision: Decision::Allow,
+                decision: PolicyDecision::Allow,
             },
         ]))));
         let path = key.file_in(self.dir.path());

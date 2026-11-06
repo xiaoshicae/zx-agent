@@ -12,7 +12,7 @@ use tokio::time::MissedTickBehavior;
 use zx_agent::AgentSession;
 use zx_agent::agent::Approval;
 use zx_agent::agent::QueuedMessage;
-use zx_agent::agent_session::SessionError;
+use zx_agent::agent_session::AgentSessionError;
 use zx_agent::compaction;
 use zx_agent::runner::RunReport;
 
@@ -264,7 +264,7 @@ pub(super) async fn drive_turn(session: &AgentSession, operation: Operation, io:
 /// Cancel the operation and report how far it got.
 async fn settle(
     session: &AgentSession,
-    running: Pin<&mut impl Future<Output = Result<Report, SessionError>>>,
+    running: Pin<&mut impl Future<Output = Result<Report, AgentSessionError>>>,
     output: &Output,
     started: Instant,
 ) -> Result<()> {

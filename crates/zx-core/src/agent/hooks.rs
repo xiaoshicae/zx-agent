@@ -16,7 +16,7 @@ use tokio_util::sync::{CancellationToken, WaitForCancellationFuture};
 
 use super::queue::MessageQueues;
 use super::tool::ActiveTools;
-use super::{AgentEvent, Decision, Event, ToolOutput};
+use super::{AgentEvent, Event, PolicyDecision, ToolOutput};
 use crate::ai::{AssistantMessage, Message, Reasoning, ToolCall, UserMessageKind};
 
 pub(crate) use chain::{HookCall, report_failure};
@@ -303,8 +303,8 @@ pub trait Hooks: Send + Sync {
 
     /// Decide whether a tool call may run; the call and its arguments cannot be changed here.
     /// Deny wins immediately, otherwise Ask wins over Allow. Failure blocks the tool call.
-    async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<Decision> {
-        Ok(Decision::Allow)
+    async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<PolicyDecision> {
+        Ok(PolicyDecision::Allow)
     }
 
     /// Transform a tool's result before it is delivered and recorded. Results chain in hook
@@ -350,8 +350,10 @@ pub trait Hooks: Send + Sync {
     }
 }
 
+/// Which extension point of the loop a hook call is at: one per [`Hooks`] method, and the
+/// approval wait. [`HookStage`] is something else: the order of hooks at the same point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HookPhase {
+pub enum HookPoint {
     OnInput,
     TransformContext,
     PrepareRequest,
@@ -362,7 +364,7 @@ pub enum HookPhase {
     Approval,
 }
 
-impl HookPhase {
+impl HookPoint {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::OnInput => "on_input",
@@ -389,7 +391,7 @@ pub enum HookFailure {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HookError {
     pub hook: String,
-    pub phase: HookPhase,
+    pub phase: HookPoint,
     pub failure: HookFailure,
 }
 
@@ -428,14 +430,14 @@ mod tests {
     }
 
     struct Verdict {
-        decision: Decision,
+        decision: PolicyDecision,
         index: usize,
         seen: Arc<Mutex<Vec<usize>>>,
     }
 
     #[async_trait]
     impl Hooks for Verdict {
-        async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<Decision> {
+        async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<PolicyDecision> {
             self.seen.lock().unwrap().push(self.index);
             Ok(self.decision.clone())
         }
@@ -446,25 +448,25 @@ mod tests {
         for (decisions, expected, visited) in [
             (
                 vec![
-                    Decision::Allow,
-                    Decision::Ask("first".into()),
-                    Decision::Ask("second".into()),
+                    PolicyDecision::Allow,
+                    PolicyDecision::Ask("first".into()),
+                    PolicyDecision::Ask("second".into()),
                 ],
-                Decision::Ask("first".into()),
+                PolicyDecision::Ask("first".into()),
                 vec![0, 1, 2],
             ),
             (
                 vec![
-                    Decision::Ask("ask".into()),
-                    Decision::Allow,
-                    Decision::Deny("deny".into()),
+                    PolicyDecision::Ask("ask".into()),
+                    PolicyDecision::Allow,
+                    PolicyDecision::Deny("deny".into()),
                 ],
-                Decision::Deny("deny".into()),
+                PolicyDecision::Deny("deny".into()),
                 vec![0, 1, 2],
             ),
             (
-                vec![Decision::Deny("first".into()), Decision::Allow],
-                Decision::Deny("first".into()),
+                vec![PolicyDecision::Deny("first".into()), PolicyDecision::Allow],
+                PolicyDecision::Deny("first".into()),
                 vec![0],
             ),
         ] {
@@ -565,7 +567,7 @@ mod tests {
     fn guard() -> HookCall<'static> {
         HookCall {
             name: "test",
-            phase: HookPhase::BeforeTool,
+            phase: HookPoint::BeforeTool,
             timeout: Duration::ZERO,
         }
     }
@@ -580,7 +582,7 @@ mod tests {
             error,
             HookError {
                 hook: "test".into(),
-                phase: HookPhase::BeforeTool,
+                phase: HookPoint::BeforeTool,
                 failure: HookFailure::Rejected("rejected".into())
             }
         );

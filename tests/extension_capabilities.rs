@@ -16,7 +16,7 @@ use zx_agent::agent::{
     AgentEvent, CommandContext, CommandError, CommandOutcome, Event, HookContext, HookResult, Hooks, LoopConfig,
     QueueMode, QueuedMessage, SlashCommand, ToolOutput,
 };
-use zx_agent::agent_session::SessionError;
+use zx_agent::agent_session::AgentSessionError;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, ToolCall, UserMessageKind};
 use zx_agent::extensions::{Extension, register};
@@ -178,7 +178,7 @@ async fn the_host_limits_the_tools_the_model_is_offered_and_the_audit_records_ea
     let context = summarize(&provider.requests()[1].messages);
     assert_eq!(context[2], "tool:c1=Tool note is not active!");
     assert_eq!(note_tool.calls.load(Ordering::SeqCst), 0, "an inactive tool never runs");
-    assert_eq!(session.set_active_tools(&["nope"]), Err(SessionError::UnknownTool));
+    assert_eq!(session.set_active_tools(&["nope"]), Err(AgentSessionError::UnknownTool));
     assert_eq!(session.active_tools().names(), Some(vec!["echo".to_string()]));
 
     session.active_tools().reset();
@@ -379,10 +379,13 @@ async fn an_idle_session_records_entries_and_messages_at_once_and_a_running_one_
         () = provider.started.notified() => {}
         _ = &mut running => panic!("must be running"),
     }
-    assert_eq!(session.append_entry("state", json!(2)).await, Err(SessionError::Busy));
+    assert_eq!(
+        session.append_entry("state", json!(2)).await,
+        Err(AgentSessionError::Busy)
+    );
     assert_eq!(
         session.append_custom_message(note("later")).await,
-        Err(SessionError::Busy)
+        Err(AgentSessionError::Busy)
     );
     assert!(session.abort());
     assert_eq!(running.await.unwrap().outcome, RunOutcome::Aborted);

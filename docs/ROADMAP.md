@@ -93,7 +93,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | 会话写入不 `fsync` | 已知局限 | 只调用 `flush`，断电时已写入的记录可能没有落盘 |
 | 打开大会话的耗时 | 暂缓 | 加载时每条请求记录都要构建一次分支路径，耗时高于线性 |
 | 保留近期用户消息原文；摘要前把较早的长工具结果换成引用 | 待评估 | 增量摘要之外的两项上下文管理改进 |
-| 审计中写明自动放行命中的前缀 | 暂缓 | 要改 `Decision` 的 JSON 契约（`tests/hook_contract.rs`） |
+| 审计中写明自动放行命中的前缀 | 暂缓 | 要改 `PolicyDecision` 的 JSON 契约（`tests/hook_contract.rs`） |
 | `cli::prepare` 拆成配置、进程级运行时与每会话三层 | 暂缓 | 改动面大 |
 | FauxProvider 在增量之间响应取消、可脚本化带 `ProviderError` 的失败 | 暂缓 | 有测试需要时再做 |
 | provider 契约的兜底 | 暂缓 | 取消后给 provider 的宽限期；`Done` / `Error` 与 `stop_reason` 的一致性检查 |

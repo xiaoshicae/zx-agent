@@ -11,7 +11,7 @@ use serde_json::json;
 use common::{EchoTool, NotifyingProvider, RunnerSetup, config, header, summarize};
 use zx_agent::AgentSession;
 use zx_agent::agent::Tool;
-use zx_agent::agent_session::SessionError;
+use zx_agent::agent_session::AgentSessionError;
 use zx_agent::ai::Message;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::runner::RunOutcome;
@@ -162,15 +162,15 @@ async fn branching_and_inspecting_wait_for_the_run_and_reject_unknown_entries() 
         () = provider.started.notified() => {}
         _ = &mut running => panic!("must be running"),
     }
-    assert_eq!(session.branch(None), Err(SessionError::Busy));
+    assert_eq!(session.branch(None), Err(AgentSessionError::Busy));
     assert_eq!(
         session.inspect(|store| store.entries().len()).err(),
-        Some(SessionError::Busy)
+        Some(AgentSessionError::Busy)
     );
     assert!(session.abort());
     assert_eq!(running.await.unwrap().outcome, RunOutcome::Aborted);
 
-    assert_eq!(session.branch(Some("nowhere")), Err(SessionError::EntryNotFound));
+    assert_eq!(session.branch(Some("nowhere")), Err(AgentSessionError::EntryNotFound));
     // The position did not move: the next prompt continues after the aborted answer.
     session.prompt("second").await.unwrap();
     let context = summarize(&provider.requests()[1].messages);
@@ -178,6 +178,6 @@ async fn branching_and_inspecting_wait_for_the_run_and_reject_unknown_entries() 
     assert_eq!(context[context.len() - 1], "user:second");
     // While `inspect` runs, the conversation is leased, as during a prompt.
     let during = session.inspect(|_| session.set_reasoning(None)).unwrap();
-    assert_eq!(during, Err(SessionError::Busy));
+    assert_eq!(during, Err(AgentSessionError::Busy));
     assert_eq!(session.set_reasoning(None), Ok(()));
 }

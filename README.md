@@ -658,9 +658,9 @@ P2 增加 `zx_agent::AgentSession`；已有 `Runner` 可通过 `AgentSession::fr
 
 | API | 契约 |
 |---|---|
-| `prompt`、`prompt_with_cancel` | 返回 `Result<RunReport, SessionError>`；重叠调用立即返回 `Busy`，不排队。provider、钩子和持久化失败由 `RunReport` 表达 |
+| `prompt`、`prompt_with_cancel` | 返回 `Result<RunReport, AgentSessionError>`；重叠调用立即返回 `Busy`，不排队。provider、钩子和持久化失败由 `RunReport` 表达 |
 | `continue_run`、`continue_with_cancel` | 不加新输入接着回答（`Runner::continue_run`），返回值与重叠时的行为同 `prompt`；没有可回答的内容时以 `Error` 结束、不发请求，规则见 `run --continue` |
-| `compact`、`compact_with_cancel` | 返回 `Result<compaction::Report, SessionError>`；与 prompt 共用独占权、Busy、取消和丢弃后复用；报告包含结果、请求数、用量、前后字节数和审计条目 ID |
+| `compact`、`compact_with_cancel` | 返回 `Result<compaction::Report, AgentSessionError>`；与 prompt 共用独占权、Busy、取消和丢弃后复用；报告包含结果、请求数、用量、前后字节数和审计条目 ID |
 | `steer`、`follow_up` | 分别在下一次模型请求前和当前任务结束时消费，沿用原有队列 |
 | `take_queued` | 空闲时取出排入队列但没有被运行消费的输入（`QueuedMessage`：用户文本或扩展的消息）：先引导消息、后后续消息，各自按先后；运行中返回 `Busy`。运行只在每个回合末查看队列，所以运行结束时才到的输入会留到下一次运行；自己发起运行的宿主应在运行结束时调用它，参照 `im::Server` |
 | `abort` | 只取消当前运行；空闲时返回 `false`。等待当前 `prompt` 返回，或 drop 它的 future 后，可继续提问；外部父令牌不受影响 |
@@ -676,7 +676,7 @@ P2 增加 `zx_agent::AgentSession`；已有 `Runner` 可通过 `AgentSession::fr
 | `append_entry(类型, data)`、`append_custom_message(消息)` | 空闲时立即写入扩展的状态或消息（pi 的 `appendEntry`、空闲时的 `sendMessage`），返回条目 ID；运行中返回 `Busy`，写入失败返回 `WriteFailed` |
 | `clear_approvals` | 空闲时撤销所有本会话授权，运行中返回 `Busy` |
 
-`ModelRef`、`SessionError` 和 `Subscription` 位于 `agent_session` 模块。新 provider 的认证和过滤配置由宿主负责。
+`ModelRef`、`AgentSessionError` 和 `Subscription` 位于 `agent_session` 模块。新 provider 的认证和过滤配置由宿主负责。
 构造时的 sink 持续接收事件；每条消息只写入会话一次，再通知所有订阅者。额外订阅示例：
 
 ```rust
@@ -728,7 +728,7 @@ P1 的 SDK 接口调整：静态配置移入 `LoopSpec`；`LoopConfig` 持有钩
 - `ai::Provider`：接入新的模型服务，必须遵守 `crates/zx-ai/src/provider.rs` 中的约定。
 - `agent::Tool`：自定义工具。返回 `Err` 等价于 pi 中的抛出异常，会变成错误结果交给模型。`effects()` 默认返回 `SideEffects`，Runner 会在执行前记录开始；不会改变任何状态的工具应返回 `Effects::ReadOnly`，否则中断后只能报告结果未知。可选的 `prepare_arguments` 在校验前改写模型给出的参数（如旧的参数名）；schema 校验、`validate_arguments`、`before_tool` 与 `after_tool` 钩子（含策略）、审批与执行都使用改写后的参数，`tool_execution_start` 事件与会话保留模型的原始调用，所以改写只能依赖参数本身；直接调用 `execute` 时不经过这一步。执行中可用 `ToolContext::report_progress` 报告进度：每条最多 16 KiB（`MAX_PROGRESS_BYTES`），经脱敏钩子后作为 `tool_execution_update` 事件发出，不写入会话、不发给模型，队列满或调用结束后丢弃。`ToolOutput::details` 存放给前端与日志的结构化数据（pi 的 `details`）：经 `after_tool` 钩子（含脱敏，只处理字符串与对象键）后，随 `tool_execution_end` 事件发出，并写入会话中工具结果消息的 `details` 字段；provider 只发送 `content`，摘要请求的输入与上下文字节统计都不含它，所以模型看不到。紧凑 JSON 超过 16 KiB（`MAX_DETAILS_BYTES`）时两处都不保留。`ToolOutput::usage`（`with_usage`）报告工具自己的花费，例如它调用了模型（pi 结果中的 `usage`）：随 `tool_execution_end` 发出、写入工具结果消息，按工具名汇总进 `RunReport::tool_usage` 并计入 OpenTelemetry 的 `zx.tokens` 与 `zx.cost`；不发给模型，也不计入 `Limits::token_budget`（它只限制运行自己的模型请求）。`ToolOutput` 因此不再实现 `Eq`，只有 `PartialEq`。`ToolContext` 标为 `#[non_exhaustive]`，以后只增加字段，在 zx-core 之外用 `ToolContext::new` 构造。
 - `agent::ToolPolicy`：内置风格的工具调用策略，经 `policy::PolicyHook` 注册，运行在 `Policy` 阶段；扩展改用 `Hooks::before_tool`。
-- `agent::Hooks`：输入、上下文、工具调用前后、回合结束与事件观察。钩子的输入输出类型（`Decision`、`TurnDecision`、`ContextEdit`、`ToolOutput`、`Approval`、`ApprovalRequest`、`ToolCall`、`HookContext`、`TurnSummary`）都有固定的 JSON 格式，供钩子进程与审批转发使用，格式由 `tests/hook_contract.rs` 固定。
+- `agent::Hooks`：输入、上下文、工具调用前后、回合结束与事件观察。钩子的输入输出类型（`PolicyDecision`、`TurnDecision`、`ContextEdit`、`ToolOutput`、`Approval`、`ApprovalRequest`、`ToolCall`、`HookContext`、`TurnSummary`）都有固定的 JSON 格式，供钩子进程与审批转发使用，格式由 `tests/hook_contract.rs` 固定。
 - `agent::Interaction`：由宿主回答审批；内核不读取终端。
 - `agent::EventSink`：订阅事件，收到带信封的 `agent::Event`（事件本体在 `event.event`）。任何 `Fn(&Event) + Send + Sync` 都可以直接用作 sink。事件发出时，它报告的消息与编辑已写入会话；sink 只接收事件，不参与持久化。导出器可用 `AgentSession::subscribe_bounded(capacity)` 得到有界通道：通道满时丢弃新事件并计数（`EventStream::dropped()`），不阻塞运行；会话释放、已发出的事件读完后，`recv` 返回 `None`。订阅句柄不持有 sink，sink 随会话释放。
 - `session::SessionLog`：会话记录存在哪里，见下文[会话存储](#会话存储)。
