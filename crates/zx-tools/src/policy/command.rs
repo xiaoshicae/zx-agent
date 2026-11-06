@@ -231,3 +231,132 @@ impl ToolPolicy for CommandPolicy {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn denied(decision: &Decision) -> bool {
+        matches!(decision, Decision::Deny(_))
+    }
+
+    #[test]
+    fn denied_patterns_apply_without_allowlist() {
+        let policy = CommandPolicy::new(Vec::<String>::new());
+        assert_eq!(policy.evaluate("df -h"), Decision::Allow);
+        assert!(denied(&policy.evaluate("sudo  RM -RF  /")));
+        assert!(denied(&policy.evaluate("systemctl reboot")));
+    }
+
+    #[test]
+    fn allowlist_accepts_pipelines_of_allowed_programs() {
+        let policy = CommandPolicy::new(["kubectl get", "grep", "journalctl", "tail"]);
+        assert_eq!(
+            policy.evaluate("kubectl get pods -A | grep -v Running"),
+            Decision::Allow
+        );
+        assert_eq!(
+            policy.evaluate("journalctl -u nginx --since '1 hour ago' | tail -n 50"),
+            Decision::Allow
+        );
+        assert!(denied(&policy.evaluate("kubectl delete pod x")));
+        assert!(denied(&policy.evaluate("kubectl get pods; rm x")));
+        assert!(denied(&policy.evaluate("kubectl get pods && rm x")));
+        assert!(denied(&policy.evaluate("grep x $(cat list)")));
+        assert!(denied(&policy.evaluate("tail -n 5 log > out")));
+        assert!(denied(&policy.evaluate("grep a || rm b")));
+        assert!(denied(&policy.evaluate("grep a\nrm b")));
+        assert!(denied(&policy.evaluate("grepx a")));
+    }
+
+    #[test]
+    fn extra_denied_patterns_apply_to_every_command() {
+        let policy = CommandPolicy::new(Vec::<String>::new()).deny_also(["kubectl delete"]);
+        assert!(denied(&policy.evaluate("KUBECTL  delete pod x")));
+        assert_eq!(policy.evaluate("kubectl get pods"), Decision::Allow);
+    }
+
+    #[test]
+    fn describes_the_allowlist_for_the_prompt() {
+        assert_eq!(CommandPolicy::new(Vec::<String>::new()).prompt_section(), None);
+        let section = CommandPolicy::new(["kubectl get", "grep"]).prompt_section().unwrap();
+        assert!(
+            section.contains("must start with one of: kubectl get, grep."),
+            "{section}"
+        );
+        assert!(
+            section.contains("Rejected syntax: ; & ` $( > < and line breaks."),
+            "{section}"
+        );
+    }
+
+    #[test]
+    fn denial_of_a_quoted_pipe_suggests_an_alternative() {
+        let policy = CommandPolicy::new(["grep"]);
+        let Decision::Deny(reason) = policy.evaluate("grep -n \"a|b\" file") else {
+            panic!("a quoted pipe must not pass the allowlist");
+        };
+        assert!(reason.contains("grep -e A -e B"), "{reason}");
+    }
+
+    #[test]
+    fn power_programs_are_denied_wherever_a_command_starts() {
+        let policy = CommandPolicy::new(Vec::<String>::new());
+        for command in [
+            "reboot",
+            "sudo reboot",
+            "sudo -u root reboot",
+            "/sbin/re''boot",
+            "sudo systemctl re\\boot",
+            "systemctl --no-wall poweroff",
+            "shutdown -h now",
+            "timeout -s KILL 5 halt",
+            "find / -exec reboot \\;",
+            "xargs reboot",
+            "bash -c \"reboot\"",
+            "init 6",
+            "sudo telinit 0",
+            "mkfs.ext4 /dev/sdb1",
+            "uptime; reboot",
+            "uptime && reboot",
+            "uptime | poweroff",
+            "echo `reboot`",
+            "echo $(reboot)",
+            "(reboot)",
+            "{ reboot; }",
+            "uptime\nreboot",
+        ] {
+            assert!(denied(&policy.evaluate(command)), "{command}");
+        }
+    }
+
+    #[test]
+    fn power_words_in_arguments_of_read_only_programs_are_allowed() {
+        let policy = CommandPolicy::new(Vec::<String>::new());
+        for command in [
+            "kubectl get pods -n asphalt-prod",
+            "last reboot",
+            "journalctl -b -1 --no-pager | grep -i reboot | tail -n 20",
+            "kubectl get events -A | grep -i shutdown",
+            "grep -c 'graceful shutdown' /var/log/app.log",
+            "sudo grep -i reboot /var/log/syslog",
+            "LANG=C env TZ=UTC grep -c shutdown /var/log/syslog",
+            "systemctl status reboot.target",
+            "kubectl logs reboot-job-1",
+        ] {
+            assert_eq!(policy.evaluate(command), Decision::Allow, "{command}");
+        }
+    }
+
+    #[tokio::test]
+    async fn only_bash_is_checked() {
+        let policy = CommandPolicy::new(["ls"]);
+        assert_eq!(
+            policy
+                .check("read_file", &serde_json::json!({"path": "/etc/hosts"}))
+                .await,
+            Decision::Allow
+        );
+        assert!(denied(&policy.check("bash", &serde_json::json!({})).await));
+    }
+}

@@ -341,3 +341,242 @@ fn incomplete_tail(raw: &[u8]) -> bool {
         },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+
+    use crate::ai::Message;
+    use crate::session::SessionStore;
+    use crate::session::test_support::{assistant, header, texts};
+
+    /// A session file with a v2 header followed by `entries`, one per line, unterminated.
+    fn session_file(dir: &Path, entries: &[&str]) -> PathBuf {
+        let path = dir.join("s.jsonl");
+        let header = r#"{"type":"session","version":2,"id":"h","timestamp":1,"cwd":"/","model":"m"}"#;
+        let lines: Vec<&str> = std::iter::once(header).chain(entries.iter().copied()).collect();
+        std::fs::write(&path, lines.join("\n")).unwrap();
+        path
+    }
+
+    fn user_entry(id: &str, parent: Option<&str>) -> String {
+        let parent = parent.map_or("null".to_string(), |p| format!("\"{p}\""));
+        format!(
+            r#"{{"type":"message","id":"{id}","parentId":{parent},"timestamp":1,"message":{{"role":"user","content":"{id}","timestamp":1}}}}"#
+        )
+    }
+
+    #[tokio::test]
+    async fn a_session_file_has_one_writer_at_a_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let store = SessionStore::create(&path, header()).unwrap();
+
+        let error = SessionStore::open(&path).err().unwrap().to_string();
+        assert!(error.contains("is in use"), "{error}");
+
+        drop(store);
+        let mut reopened = SessionStore::open(&path).unwrap();
+        reopened.append_message(Message::user("q")).await.unwrap();
+        let error = SessionStore::open(&path).err().unwrap().to_string();
+        assert!(error.contains("is in use"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_reads_a_session_in_use_without_changing_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let mut writer = SessionStore::create(&path, header()).unwrap();
+        writer.append_message(Message::user("q")).await.unwrap();
+        // A record the writer has not finished yet.
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{\"type\":\"mess")
+            .unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let mut snapshot = SessionStore::read(&path).unwrap();
+
+        assert_eq!(texts(&snapshot), ["q"]);
+        assert_eq!(snapshot.recovered_tail_bytes(), "{\"type\":\"mess".len());
+        let error = snapshot.append_message(Message::user("x")).await.unwrap_err();
+        assert!(error.to_string().contains("read-only"), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(SessionStore::open(&path).is_err(), "the writer still holds the file");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dropped_store_can_be_reopened_while_this_process_starts_programs() {
+        // A program being started holds copies of this process's descriptors until it runs,
+        // so the lock of a store that was just dropped can outlive the store for a moment.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        drop(SessionStore::create(&path, header()).unwrap());
+        let starting = std::sync::atomic::AtomicBool::new(true);
+
+        let failures = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while starting.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::process::Command::new("true").status().unwrap();
+                }
+            });
+            let failures: Vec<String> = (0..3000)
+                .filter_map(|_| SessionStore::open(&path).err().map(|error| error.to_string()))
+                .collect();
+            starting.store(false, std::sync::atomic::Ordering::Relaxed);
+            failures
+        });
+
+        assert!(
+            failures.is_empty(),
+            "{} reopenings failed: {:?}",
+            failures.len(),
+            failures.first()
+        );
+    }
+
+    #[test]
+    fn a_newer_session_with_a_cut_short_tail_is_left_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("future.jsonl");
+        std::fs::write(
+            &path,
+            "{\"type\":\"session\",\"version\":99,\"id\":\"h\",\"timestamp\":1,\"cwd\":\"/\",\"model\":\"m\"}\n{\"type\":\"mess",
+        )
+        .unwrap();
+        let original = std::fs::read(&path).unwrap();
+
+        assert!(SessionStore::open(&path).is_err());
+
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn damage_before_the_last_line_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = session_file(dir.path(), &["{broken", &user_entry("a", None)]);
+        assert!(SessionStore::open(&path).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_complete_last_line_without_newline_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = session_file(dir.path(), &[&user_entry("a", None)]);
+        let mut store = SessionStore::open(&path).unwrap();
+        store.append_message(Message::user("b")).await.unwrap();
+        drop(store);
+        assert_eq!(texts(&SessionStore::open(&path).unwrap()), ["a", "b"]);
+    }
+
+    #[tokio::test]
+    async fn recovers_a_tail_cut_inside_a_utf8_character() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("utf8.jsonl");
+        let mut store = SessionStore::create(&path, header()).unwrap();
+        store.append_message(Message::user("keep")).await.unwrap();
+        store.append_message(Message::user("中文")).await.unwrap();
+        drop(store);
+        let bytes = std::fs::read(&path).unwrap();
+        let cut = bytes.windows("中".len()).position(|w| w == "中".as_bytes()).unwrap() + 2;
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(u64::try_from(cut).unwrap())
+            .unwrap();
+
+        let reopened = SessionStore::open(&path);
+
+        assert!(reopened.is_ok(), "a partial UTF-8 tail was not repaired");
+        assert_eq!(texts(&reopened.unwrap()), ["keep"]);
+    }
+
+    #[test]
+    fn does_not_delete_a_corrupt_newline_terminated_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = session_file(dir.path(), &[&user_entry("a", None), "{broken}\n"]);
+        let original = std::fs::read(&path).unwrap();
+
+        let result = SessionStore::open(&path);
+
+        assert!(result.is_err(), "a complete corrupt record was silently discarded");
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn preserves_unknown_complete_records_even_without_a_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = session_file(dir.path(), &[&user_entry("a", None), r#"{"type":"future_kind"}"#]);
+        let original = std::fs::read(&path).unwrap();
+
+        assert!(SessionStore::open(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn an_incomplete_utf8_suffix_does_not_hide_an_earlier_syntax_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invalid.jsonl");
+        let mut store = SessionStore::create(&path, header()).unwrap();
+        store.append_message(Message::user("keep")).await.unwrap();
+        drop(store);
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{broken}\xe4\xb8")
+            .unwrap();
+        let original = std::fs::read(&path).unwrap();
+
+        assert!(
+            SessionStore::open(&path).is_err(),
+            "invalid JSON was mistaken for an interrupted UTF-8 write"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_session_files_are_private_to_the_owner() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("private.jsonl");
+        SessionStore::create(&path, header()).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[tokio::test]
+    async fn file_round_trip_and_recovery_from_partial_last_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        {
+            let mut store = SessionStore::create(&path, header()).unwrap();
+            store.append_message(Message::user("q")).await.unwrap();
+            store.append_message(assistant("a")).await.unwrap();
+        }
+        assert!(
+            SessionStore::create(&path, header()).is_err(),
+            "never overwrites a session"
+        );
+
+        // Simulate a crash in the middle of writing a third entry.
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(b"{\"type\":\"message\",\"id\":\"x").unwrap();
+        drop(file);
+
+        let mut store = SessionStore::open(&path).unwrap();
+        assert_eq!(texts(&store), ["q", "a"]);
+        store.append_message(Message::user("again")).await.unwrap();
+        drop(store);
+        let reopened = SessionStore::open(&path).unwrap();
+        assert_eq!(texts(&reopened), ["q", "a", "again"]);
+        assert_eq!(reopened.header().model, "m");
+    }
+}

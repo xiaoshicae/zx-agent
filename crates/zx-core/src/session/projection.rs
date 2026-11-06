@@ -240,3 +240,31 @@ pub(super) struct LatestCompaction<'s> {
     pub compaction: &'s CompactionEntry,
     pub attempt: &'s CompactionStartedEntry,
 }
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+
+    use super::*;
+    use crate::session::test_support::result_with_details;
+
+    #[test]
+    fn messages_without_details_are_not_copied() {
+        let messages = vec![Message::user("go"), result_with_details(None)];
+        assert!(matches!(without_details(&messages), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn details_are_dropped_from_what_a_model_may_see_and_nothing_else() {
+        // One user message for both sides: each `Message::user` takes the current time, and two
+        // calls a millisecond apart would differ (seen once in CI).
+        let prompt = Message::user("go");
+        let messages = vec![
+            prompt.clone(),
+            result_with_details(Some(serde_json::json!({"marker": "for-observers"}))),
+        ];
+        let seen = without_details(&messages);
+        assert_eq!(*seen, [prompt, result_with_details(None)]);
+        assert!(matches!(&messages[1], Message::ToolResult(result) if result.details.is_some()));
+    }
+}

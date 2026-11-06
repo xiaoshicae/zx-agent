@@ -1,4 +1,14 @@
 //! Agent layer: the loop, tools, policy, and events (pi: packages/agent).
+//!
+//! - `agent_loop`: one attempt of the loop (`run_loop`) and what it runs with
+//! - `tool`: the tool interface, and the set of tools a run offers
+//! - `hooks`: the extension points around the loop, and the chain that runs them
+//! - `policy`: the decision on a tool call, and the policy interface
+//! - `queue`: messages injected into a running loop, and records extensions ask it to keep
+//! - `command`: the slash commands extensions register
+//! - `events`: what a run emits, the envelope of each event, and the sink that receives them
+//! - `report`: what a run produced
+//! - `session_host`: what the loop needs from the session it records in
 
 mod agent_loop;
 mod command;

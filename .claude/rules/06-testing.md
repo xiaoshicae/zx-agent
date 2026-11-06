@@ -33,7 +33,8 @@ paths:
 | `FakeMcp` / `Reply` | `tests/common/fake_mcp.rs` | 假 MCP 服务器（Streamable HTTP），按规范手写、不用 rmcp：可选 2026-07-28（`server/discover`）或 2025-11-25（`initialize` 与会话）；工具一页一个；按工具安排结果、JSON-RPC 错误、不应答（`Hang`）或以 SSE 流按间隔发进度通知再给结果（`Progress`，令牌取自请求的 `_meta.progressToken`），并记录每个请求的方法、参数与请求头、被客户端放弃的调用 |
 | `FakeSlack` / `Answer` | `tests/common/fake_slack.rs` | 假 Slack：Web API 记录每次调用，可按方法安排错误、429 或指定的 JSON 应答；Socket Mode 连接由测试逐帧发送、读取确认 |
 | `MockServer` / `Reply` | `tests/common/mock_server.rs` | 本地假 HTTP 服务：返回 SSE 流（`Reply::text`、`Reply::bash`、任意工具调用 `Reply::tool_call`）、HTTP 错误，发出部分数据后卡住（`Stall`），或等待测试通知后结束（`Gate`）；记录请求，`wait_for_requests` 等到请求到达 |
-| `FailingWriter` / `SessionStore::with_writer` | `crates/zx-core/src/session.rs`（仅测试编译） | 让会话写入失败，测试不变量 5 和 7 |
+| `FailingWriter` / `SessionStore::with_writer` | `crates/zx-core/src/session/test_support.rs` 与 `session.rs`（仅测试编译） | 让会话写入失败，测试不变量 5 和 7；`FailingWriter` 经 `crate::session::FailingWriter` 引用 |
+| `header` / `assistant` / `texts` / `result_with_details` | `crates/zx-core/src/session/test_support.rs`（仅测试编译） | session 各子模块的单元测试共用：会话头部、一条回答、会话投影的文本、带 details 的工具结果 |
 | `SessionStore::read` | `crates/zx-core/src/session.rs` | 读取写入者仍在运行的会话文件（快照，不加锁、不修改文件）；写入者已释放时也可用 `SessionStore::open` |
 
 典型写法：循环测试参照 `tests/agent_loop.rs` 的 `runs_tools_until_the_model_answers`，用 `run_prompt` 跑完后断言 `result.outcome`，再用 `summarize(&context)` 断言消息序列；运行层测试参照 `tests/runner.rs`，写成 `RunnerSetup { retry: fast_retry(3), ..setup(&provider) }.build()`。

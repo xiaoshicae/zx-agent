@@ -11,7 +11,10 @@ paths:
 
 - **函数一屏**：目标 60 行以内，一个函数做一件事；写不出一句话文档的函数在做两件事。拆出来的函数按步骤命名（`load_profile`、`open_session`、`register_hooks`），不叫 `helper`、`do_x`。
 - **可以带 `#[expect(clippy::too_many_lines, reason = "...")]` 的只有两种**：按变体展开、每个分支一两行的 match（`one arm per event variant`）；一张数据表（`one event of every variant`）。冻结的模块（chat）只做不改行为的整理，也用这条。
-- **文件一个主题**：产线代码超过 600 行就按职责拆成子模块（`executor/container.rs` 与 `executor/container/{config,scripts}.rs`），不按类型拆（没有 `types.rs` 加 `impls.rs`）。入口文件只分派（`main.rs`）。
+- **文件一个主题**：一个文件讲几件事，就按职责拆成几个子模块（`session/summary.rs` 与 `session/summary/{records,source}.rs`），不论多长；不按类型拆（没有 `types.rs` 加 `impls.rs`）。入口文件只分派（`main.rs`）。
+- **600 行是检查线，不是上限**：产线代码（不含测试）超过 600 行时，确认它只讲一个主题。只讲一个主题的可以超过，拆开反而把一件事切成几处；讲了几件事的按上一条拆。
+- **父模块的文档是地图**：有子模块的入口文件，在 `//!` 里每个子模块写一行，说它管什么（参照 `session.rs`、`agent.rs`）。新增、改名或删除子模块时同步改这几行。
+- **测试跟着被测的代码走**：单元测试写在它所测代码的模块里，不集中在父模块（JSONL 文件的测试在 `session/jsonl.rs`，去掉 details 的测试在 `session/projection.rs`）。一个模块的测试超过约 300 行时，移到 `foo/tests.rs`，`foo.rs` 里只留 `#[cfg(test)] mod tests;`；不超过的留在文件里，免得多出只装一个 `tests.rs` 的目录。几个子模块的测试共用的辅助放进父模块的 `test_support.rs`（`#[cfg(test)] mod test_support;`），不复制。
 - **模块文件不用 `mod.rs`**：有子模块的模块写成 `foo.rs` 加 `foo/` 目录（Rust Reference 鼓励的写法，clippy 的 `mod_module_files` 会报 `mod.rs`）。唯一的例外是 `tests/common/mod.rs`：Cargo 靠这个名字不把它当成一个测试文件。
 - **状态用枚举**：两个 `Option`、`Option` 加 `bool`、`Result<Result<_>>` 表示的状态换成一个枚举（`Pending`、`Decision`、`Connection`），见规则 05。
 

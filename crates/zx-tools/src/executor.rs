@@ -3,6 +3,10 @@
 //! Tools keep their arguments, result format and truncation; an executor only runs a
 //! command, reads a file or writes one. [`LocalExecutor`] uses this machine; [`ContainerExecutor`]
 //! runs the same tools in an isolated Docker container.
+//!
+//! - `local`: commands and files on this machine
+//! - `container`: commands and files in one Docker container
+//! - `capture`: the bounded capture of a child's output, which both use
 
 mod capture;
 mod container;

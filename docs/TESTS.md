@@ -4,7 +4,7 @@
 
 | 文件 | 内容 |
 |---|---|
-| `src/**` 与 `crates/*/src/**` 中的 `mod tests` | 各模块的单元测试，包括会话文件和事件流的 JSON 格式；`src/chat/tree.rs` 的树渲染（当前分支优先、离开的分支缩进、不列出的记录、预览）与 ID 解析；`src/chat/commands.rs` 的扩展命令解析；`agent::queue` 的队列模式与扩展消息，`agent::command` 的命令名检查；自动放行按 profile 给出的选项与例外判断，`deploy/kubernetes/profiles/kubernetes.toml` 由 `src/profile` 的单元测试加载并检查。`#[cfg(test)]` 的辅助项（如 `SessionStore::with_writer`）只在所在 crate 的单元测试里可用 |
+| `src/**` 与 `crates/*/src/**` 中的 `mod tests` 与 `tests.rs` | 各模块的单元测试，写在被测模块里或其 `tests.rs` 中（规则 09）；包括会话文件和事件流的 JSON 格式；`src/chat/tree.rs` 的树渲染（当前分支优先、离开的分支缩进、不列出的记录、预览）与 ID 解析；`src/chat/commands.rs` 的扩展命令解析；`agent::queue` 的队列模式与扩展消息，`agent::command` 的命令名检查；自动放行按 profile 给出的选项与例外判断，`deploy/kubernetes/profiles/kubernetes.toml` 由 `src/profile` 的单元测试加载并检查。`#[cfg(test)]` 的辅助项（如 `SessionStore::with_writer`）只在所在 crate 的单元测试里可用 |
 | `tests/agent_loop.rs` | 循环语义 |
 | `tests/runner.rs` | 运行层：重试（含预算用完不重试、省略失败回答的事件）、上限（含 token 预算：FauxProvider 每次回答报告 15 个 token）、截断续写、持久化（含自定义 `SessionLog`、工具结果的 `details`）、恢复会话、排队输入只写一次 |
 | `tests/agent_session.rs` | 共享会话：Busy、取消与丢弃后复用、多订阅者、退订、回调重入与 panic、模型切换与审计、推理强度的切换与审计、取出未被消费的排队输入、会话释放后有界订阅结束 |
