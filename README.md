@@ -765,11 +765,12 @@ pub trait SessionLog: Send + Sync {
 
 ```bash
 cargo test                                   # 不需要网络和 API key；付费的真实 API 测试默认跳过
-cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets -- -D warnings    # clippy 默认项加 Cargo.toml 的 [workspace.lints]，阈值在 clippy.toml
 cargo fmt --check
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 ```
 
-在仓库根目录运行时，这三条命令覆盖全部 8 个 crate（test 与 clippy 经 `Cargo.toml` 的 `default-members`）。在 `crates/` 下某个 crate 的目录里运行，或加 `-p zx-core` 这样的参数，只处理那一个 crate；集成测试都在根目录的 `tests/`，属于 `zx-agent`。
+在仓库根目录运行时，这些命令覆盖全部 8 个 crate（test、clippy 与 doc 经 `Cargo.toml` 的 `default-members`）。在 `crates/` 下某个 crate 的目录里运行，或加 `-p zx-core` 这样的参数，只处理那一个 crate；集成测试都在根目录的 `tests/`，属于 `zx-agent`。
 
 | 测试文件 | 覆盖内容 |
 |---|---|

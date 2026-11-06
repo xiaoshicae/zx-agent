@@ -1611,6 +1611,7 @@ D11 容器沙箱的实施要点（2026-11-05 用户决定）：
 - [x] **④ IM**（`c315a51`）：`zx-im` 的 `platform.rs`（`Pacer`、`Cards`）、`CardLabels::outcome`、`Shared::bounded`、worker 的 `Decision`；飞书的 `Connection`、`open_socket`、`ping`；Slack 的 `open_socket`。
 - [x] **⑤ 测试辅助**（`1c0e5bb`）：`tests/common` 的 `zx_agent()`、`stdout`、`stderr`。
 - [x] **⑥ 注释与文档**：行级的 pi 出处、PR 编号与决策编号只留在模块文档；README、`.claude/CLAUDE.md`、规则 04 随改动更新。
+- [x] **⑦ 规则与 lint**（本 PR）：`Cargo.toml` 的 `[workspace.lints]` 开一组挑过的 clippy 项（函数长度 80 行、认知复杂度、四个 `cast_*`、文档反引号之外的可读性项），阈值在 `clippy.toml`；清掉的命中里，`cli::prepare`、`Runner::start`、`RawProfile::apply`、`serve::run`、`compaction::Host::candidate` 再拆一次，按变体展开的 match 与冻结的 chat 带 `#[expect(lint, reason)]`；新增规则 09（尺寸与重复），规则 01 加命名与"搬代码连文档一起搬"，规则 05 加状态与数值转换的判断，规则 06 瘦身（测试文件目录移到 `docs/TESTS.md`）；`cargo doc` 进命令清单、PR 模板与 stop hook；`.claude/settings.json` 启用两个 hook。
 
 验证（本机 macOS）：`cargo fmt`、`cargo clippy --all-targets -- -D warnings`、`cargo test`（990 通过、0 失败、7 项付费测试跳过）、`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`、`cargo +1.88.0 check --all-targets` 通过；自查脚本的命中与基线相同；未新增依赖。真实 Docker 与付费 e2e 测试本次没有运行。
 
@@ -1618,7 +1619,7 @@ D11 容器沙箱的实施要点（2026-11-05 用户决定）：
 
 - 每个阶段可以拆成多个提交；完成后在本文档中勾选任务、更新状态，并记录日期和提交。
 - PR 合并后，在本文档中把阶段状态改为“已完成”，并记录 PR 编号与合并日期。也可以在 PR 中直接写成“已完成（PR #编号）”，合并后即准确；`.github/pull_request_template.md` 中有对应检查项。
-- 每个阶段结束时：`cargo fmt`、`cargo clippy --all-targets -- -D warnings`、`cargo test` 通过；用到新语法或新标准库 API 时，`cargo +1.88.0 check --all-targets` 也要通过。
+- 每个阶段结束时：`cargo fmt`、`cargo clippy --all-targets -- -D warnings`（含 `[workspace.lints]` 开的项）、`cargo test`、`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps` 通过；用到新语法或新标准库 API 时，`cargo +1.88.0 check --all-targets` 也要通过。
 - 从 P0 起，`tests/cli.rs` 中 `run` 的测试不改即通过，以此保证兼容性；D5 若改变默认执行环境，仅在 P6 按明确的迁移规则更新相关测试，其余行为仍须保持兼容。
 - 需要新依赖时，先确认在 D2 的授权范围内；范围之外的要先征得同意。
 - 设计有变化时，先更新本文档，再改代码。
