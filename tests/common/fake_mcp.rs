@@ -32,8 +32,8 @@ pub(crate) enum Era {
 pub(crate) enum Reply {
     /// The fields of the `tools/call` result, such as `{"content": [...], "isError": true}`.
     Result(Value),
-    /// A JSON-RPC error.
-    Error(i64, &'static str),
+    /// A JSON-RPC error, as its code and message.
+    Error(i64, String),
     /// No answer: the request stays open until the client closes it.
     Hang,
     /// Stream progress notifications, one every `every`, then the `tools/call` result, as a
