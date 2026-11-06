@@ -3,6 +3,10 @@
 //! module only maps between the protocol and `AgentSession`: prompts become runs, run events
 //! become session updates, approvals become permission requests.
 //!
+//! Sessions are kept as files, one per session in the directory chat uses for the same
+//! working directory, so that a client can load one again in a later process; `session/load`
+//! replays the conversation to the client before it goes on.
+//!
 //! Stdout is the protocol channel: nothing else in this process may print there.
 
 use std::collections::HashMap;
@@ -13,11 +17,11 @@ use std::time::Duration;
 use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{
     AgentCapabilities, CancelNotification, CompactionId, CompactionStatus, CompactionUpdate, Content, ContentBlock,
-    ContentChunk, Diff, Implementation, InitializeRequest, InitializeResponse, NewSessionRequest, NewSessionResponse,
-    Notice, NoticeSeverity, PermissionOption, PermissionOptionKind, PromptRequest, PromptResponse,
-    RequestPermissionOutcome, RequestPermissionRequest, SessionId, SessionNotification, SessionUpdate, StopReason,
-    TextContent, ToolCall, ToolCallContent, ToolCallId, ToolCallLocation, ToolCallStatus, ToolCallUpdate,
-    ToolCallUpdateFields, ToolKind,
+    ContentChunk, Diff, Implementation, InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
+    NewSessionRequest, NewSessionResponse, Notice, NoticeSeverity, PermissionOption, PermissionOptionKind,
+    PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, SessionId, SessionNotification,
+    SessionUpdate, StopReason, TextContent, ToolCall, ToolCallContent, ToolCallId, ToolCallLocation, ToolCallStatus,
+    ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
 use agent_client_protocol::{Agent, Client, Error, ErrorCode, Stdio};
 use anyhow::{Context, Result};
@@ -27,11 +31,12 @@ use serde_json::Value;
 use zx_agent::AgentSession;
 use zx_agent::agent::{AgentEvent, ApprovalResult, Event, EventSink, RunOutcome, ToolVerdict};
 use zx_agent::agent_session::Subscription;
-use zx_agent::ai::{ContentBlock as MessageBlock, Delta, Message};
+use zx_agent::ai::{ContentBlock as MessageBlock, Delta, Message, UserMessageKind};
 use zx_agent::interaction::{Approval, ApprovalRequest, Interaction};
 use zx_agent::otel::Telemetry;
 use zx_agent::profile::Builtin;
 use zx_agent::runner::RunReport;
+use zx_agent::session::{Entry, ProjectedMessage, SessionStore};
 use zx_agent::sync::lock;
 use zx_agent::text::clip;
 use zx_agent::tools::{BASH, EDIT_FILE, FIND, GREP, LS, READ_FILE, WRITE_FILE};
@@ -39,7 +44,7 @@ use zx_agent::tools::{BASH, EDIT_FILE, FIND, GREP, LS, READ_FILE, WRITE_FILE};
 use crate::cli::{self, AcpArgs, SessionOptions};
 use crate::process::EXIT_COMPLETED;
 use crate::render::describe_call;
-use crate::sessions::SessionFile;
+use crate::sessions::{self, SessionFile};
 
 /// Characters of a tool call's title; the client shows the raw input in full.
 const TITLE_CHARS: usize = 80;
@@ -56,7 +61,8 @@ struct Settings {
     traces: Option<Arc<dyn EventSink>>,
 }
 
-/// One ACP session: a conversation the client created with `session/new`.
+/// One ACP session: a conversation the client created with `session/new` or loaded with
+/// `session/load`.
 struct Live {
     session: AgentSession,
     /// The trace export of this session, while it lasts.
@@ -75,8 +81,67 @@ impl Host {
         lock(&self.sessions).get(&*id.0).cloned()
     }
 
-    /// Prepare a session for `cwd`, the client's project directory, which overrides `--cwd`.
-    async fn open(&self, cx: &ConnectionTo<Client>, cwd: &Path) -> Result<SessionId> {
+    /// Where the sessions of `cwd` are kept: `--session-dir`, or chat's default directory
+    /// for that working directory; `None` with `--no-session`.
+    fn session_dir(&self, cwd: &Path) -> Result<Option<PathBuf>> {
+        let args = &self.settings.args;
+        if args.no_session {
+            return Ok(None);
+        }
+        match &args.session_dir {
+            Some(dir) => Ok(Some(dir.clone())),
+            None => sessions::default_dir(&cli::resolve_cwd(Some(cwd))?).map(Some),
+        }
+    }
+
+    /// Create a session for `cwd`, the client's project directory, which overrides `--cwd`.
+    /// Its file goes to the session directory, where `session/load` finds it again.
+    async fn create(&self, cx: &ConnectionTo<Client>, cwd: &Path) -> Result<SessionId> {
+        let dir = self.session_dir(cwd)?;
+        let file = match &dir {
+            Some(dir) => SessionFile::NewIn(dir),
+            None => SessionFile::Memory,
+        };
+        self.open(cx, cwd, file, false).await
+    }
+
+    /// Load the session `request` names from the session directory of its `cwd`, replaying
+    /// the conversation to the client first. A session this process holds already is
+    /// replayed as it is, without opening its file again.
+    async fn load(&self, cx: &ConnectionTo<Client>, request: &LoadSessionRequest) -> Result<SessionId, Error> {
+        let id = &*request.session_id.0;
+        if let Some(live) = self.session(&request.session_id) {
+            let updates = Updates::new(cx.clone(), request.session_id.clone(), request.cwd.clone());
+            live.session
+                .inspect(|store| updates.replay(store))
+                .map_err(|error| failure(format!("cannot replay session {id}: {error}")))?;
+            return Ok(request.session_id.clone());
+        }
+        let dir = self
+            .session_dir(&request.cwd)
+            .map_err(|error| failure(format!("{error:#}")))?
+            .ok_or_else(|| unknown_session(id, "the agent keeps no session files (--no-session)"))?;
+        let list = sessions::list(dir.clone())
+            .await
+            .map_err(|error| failure(format!("{error:#}")))?;
+        let Some(session) = list.sessions.iter().find(|session| session.id == id) else {
+            return Err(unknown_session(id, &format!("no such session in {}", dir.display())));
+        };
+        let path = session.path.clone();
+        self.open(cx, &request.cwd, SessionFile::Open(&path), true)
+            .await
+            .map_err(|error| failure(format!("{error:#}")))
+    }
+
+    /// Prepare a session on `file` for `cwd`; with `replay`, the client first sees the
+    /// conversation the file holds.
+    async fn open(
+        &self,
+        cx: &ConnectionTo<Client>,
+        cwd: &Path,
+        file: SessionFile<'_>,
+        replay: bool,
+    ) -> Result<SessionId> {
         let args = &self.settings.args;
         let mut base = args.base.clone();
         base.cwd = Some(cwd.to_path_buf());
@@ -86,7 +151,7 @@ impl Host {
             request: &args.request,
             budget: &args.budget,
             model: &args.base.model,
-            file: SessionFile::Memory,
+            file,
             default_profile: Builtin::Assistant,
             continue_on_length: None,
             shared: &self.settings.shared,
@@ -101,7 +166,10 @@ impl Host {
         });
         prepared.config.interaction_timeout = Duration::from_secs(args.approval_timeout_secs);
         let cwd = prepared.config.spec.cwd.clone();
-        let updates: Arc<dyn EventSink> = Arc::new(Updates::new(cx.clone(), id.clone(), cwd));
+        let updates = Arc::new(Updates::new(cx.clone(), id.clone(), cwd));
+        if replay {
+            updates.replay(&prepared.store);
+        }
         let session = prepared.into_session(updates)?;
         let traced = self.settings.traces.clone().map(|sink| session.subscribe(sink));
         lock(&self.sessions).insert(
@@ -124,12 +192,19 @@ pub(crate) async fn run(args: AcpArgs) -> Result<u8> {
 }
 
 async fn serve(args: AcpArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> {
+    anyhow::ensure!(
+        args.request.session.is_none(),
+        "acp keeps one file per session: give --session-dir, not --session"
+    );
     let shared = cli::Shared::connect(&args.base, Builtin::Assistant, &args.transport).await?;
+    // Without session files there is nothing to load.
+    let load_session = !args.no_session;
     let host = Arc::new(Host {
         settings: Settings { args, shared, traces },
         sessions: Mutex::new(HashMap::new()),
     });
     let on_new = Arc::clone(&host);
+    let on_load = Arc::clone(&host);
     let on_prompt = Arc::clone(&host);
     let on_cancel = Arc::clone(&host);
     Agent
@@ -139,7 +214,7 @@ async fn serve(args: AcpArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> 
             async move |request: InitializeRequest, responder, _cx| {
                 responder.respond(
                     InitializeResponse::new(request.protocol_version)
-                        .agent_capabilities(AgentCapabilities::new())
+                        .agent_capabilities(AgentCapabilities::new().load_session(load_session))
                         .agent_info(Implementation::new("zx-agent", env!("CARGO_PKG_VERSION"))),
                 )
             },
@@ -149,9 +224,19 @@ async fn serve(args: AcpArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> 
             async move |request: NewSessionRequest, responder, cx| {
                 // Session setup holds the dispatch loop, like any request handler; it is a
                 // few startup reads and, with MCP servers, nothing new: they are connected once.
-                match on_new.open(&cx, &request.cwd).await {
+                match on_new.create(&cx, &request.cwd).await {
                     Ok(id) => responder.respond(NewSessionResponse::new(id)),
                     Err(error) => responder.respond_with_error(failure(format!("{error:#}"))),
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: LoadSessionRequest, responder, cx| {
+                // The replay is sent before the response, as the protocol has it.
+                match on_load.load(&cx, &request).await {
+                    Ok(_) => responder.respond(LoadSessionResponse::new()),
+                    Err(error) => responder.respond_with_error(error),
                 }
             },
             agent_client_protocol::on_receive_request!(),
@@ -199,6 +284,11 @@ async fn serve(args: AcpArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> 
 /// SDK's own internal-error helper keeps the text in `data`.
 fn failure(message: String) -> Error {
     Error::new(ErrorCode::INTERNAL_ERROR, message)
+}
+
+/// The error for a session the agent does not have, with the reason.
+fn unknown_session(id: &str, why: &str) -> Error {
+    Error::new(ErrorCode::INVALID_PARAMS, format!("unknown session {id}: {why}"))
 }
 
 /// The text of a prompt: its text blocks, one per line. The agent advertises no image, audio
@@ -320,6 +410,90 @@ impl Updates {
 
     fn text_chunk(text: &str) -> ContentChunk {
         ContentChunk::new(ContentBlock::Text(TextContent::new(text)))
+    }
+
+    /// Replay the conversation `store` holds to a client that loads the session: what it
+    /// would have seen as the turns ran, without the streaming. The person's prompts, the
+    /// answers with their thoughts, and the tool calls with their results; an extension's
+    /// message when it asked to be shown. Summaries and the model's own continuations are
+    /// the model's, not the person's.
+    fn replay(&self, store: &SessionStore) {
+        let projection = store.projection();
+        for (index, item) in projection.iter().enumerate() {
+            match &item.message {
+                Message::User {
+                    content,
+                    kind: UserMessageKind::Prompt,
+                    ..
+                } => self.send(SessionUpdate::UserMessageChunk(Self::text_chunk(content))),
+                Message::User {
+                    content,
+                    kind: UserMessageKind::Custom,
+                    ..
+                } => {
+                    if let Some(Entry::CustomMessage(entry)) = store.get(&item.entry_id)
+                        && entry.message.display
+                    {
+                        self.send(SessionUpdate::UserMessageChunk(Self::text_chunk(content)));
+                    }
+                }
+                Message::User {
+                    kind: UserMessageKind::ContinueAnswer | UserMessageKind::Summary,
+                    ..
+                }
+                | Message::ToolResult(_)
+                | Message::System(_) => {}
+                Message::Assistant(message) => {
+                    for block in &message.content {
+                        match block {
+                            MessageBlock::Text { text } if !text.is_empty() => {
+                                self.send(SessionUpdate::AgentMessageChunk(Self::text_chunk(text)));
+                            }
+                            MessageBlock::Thinking { thinking, .. } if !thinking.is_empty() => {
+                                self.send(SessionUpdate::AgentThoughtChunk(Self::text_chunk(thinking)));
+                            }
+                            MessageBlock::Text { .. } | MessageBlock::Thinking { .. } => {}
+                            MessageBlock::ToolCall {
+                                id, name, arguments, ..
+                            } => {
+                                let call = self.recorded_call(id, name, arguments, &projection[index + 1..]);
+                                self.send(SessionUpdate::ToolCall(call));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A recorded call as one update: with its result when a later message holds one, else
+    /// still pending, which the next run settles.
+    fn recorded_call(&self, id: &str, name: &str, arguments: &Value, later: &[ProjectedMessage]) -> ToolCall {
+        let call = ToolCall::new(ToolCallId::new(id), title(name, arguments))
+            .kind(tool_kind(name))
+            .raw_input(arguments.clone())
+            .locations(self.locations(arguments));
+        let result = later.iter().find_map(|item| match &item.message {
+            Message::ToolResult(result) if result.tool_call_id == id => Some(result),
+            _ => None,
+        });
+        match result {
+            Some(result) => {
+                let status = if result.is_error {
+                    ToolCallStatus::Failed
+                } else {
+                    ToolCallStatus::Completed
+                };
+                let raw_output = result
+                    .details
+                    .clone()
+                    .unwrap_or_else(|| Value::String(result.content.clone()));
+                call.status(status)
+                    .content(self.result_content(name, Some(arguments), &result.content, result.details.as_ref()))
+                    .raw_output(raw_output)
+            }
+            None => call.status(ToolCallStatus::Pending),
+        }
     }
 
     fn tool_update(&self, id: &str, fields: ToolCallUpdateFields) {

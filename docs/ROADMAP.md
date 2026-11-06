@@ -534,7 +534,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P5 | 上下文管理 | 已完成（PR #9） |
 | P6 | 执行环境与崩溃恢复 | 进行中：崩溃恢复（PR #12）、执行环境接缝（PR #13）、离线容器执行（PR #14）已完成；在线访问评审稿已合入（PR #17），一期已完成：只读命令自动放行（PR #19）、环境变量保护与 ServiceAccount token 脱敏（PR #20）、常驻 Pod 部署包（PR #22）、多集群（PR #24）；容器联网已取消，改为常驻 Pod 部署。待部署方在真实集群上验收；服务模式与 IM 接入的评审稿已合入（PR #27），模块 A（IM 接口与服务，PR #28）、B（Slack 与 `serve`，PR #29）、C（⚑ D:5/CHINA FLAG: 飞书，PR #32）、D（部署，PR #33）已完成，真实平台验收待提供凭据 |
 | P7 | 插件与 MCP | 已完成（PR #41）：范围按 D8 收窄，评审稿已合入（PR #36）并经用户确认；模块 A（Extension 接口，PR #38）、B1（MCP 客户端库，PR #40）、B2（CLI 接入与文档，PR #41）已完成；真实 MCP 服务器的验收待选定服务器；前置设计中 A1（会话宿主拆分与可替换的会话存储）已完成（PR #21），B（追踪事件）已完成（PR #23），A2–A8（扩展 API）已完成（PR #25） |
-| P8 | 嵌入协议 `acp` | 进行中：2026-11-05 按 D13 重启，`acp` 子命令已实现（见下文 P8），待在 Zed 或 Wisp 上验证 |
+| P8 | 嵌入协议 `acp` | 进行中：2026-11-05 按 D13 重启，`acp` 子命令已实现（见下文 P8）；`session/load` 已完成（PR 待开）；待在 Zed 或 Wisp 上验证 |
 | P9 | 可选增强 | 进行中：token 预算（PR #47）、OpenTelemetry 追踪（PR #49）、crate 拆分（PR #52）、通用化整理（PR #54）、chat 交互体验（2026-11-05，见下文）已完成；剩更多 provider（如 Anthropic）。其余各项按 D10 不做或取消 |
 | P10 | 与 pi 的能力对齐 | 进行中：2026-11-05 对照 pi 列出 14 项缺口，见下文 P10；① 上下文超长后自动恢复已完成（PR #56）；② 容器沙箱已完成（PR #57）；③ edit 与 write 工具已完成（PR #58）；④ grep、find、ls 已完成（PR #59）；⑤ 运行中可调整的配置已完成：⑤a 推理强度（PR #60）、⑤b 续跑（PR #61）、⑤c 请求前替换模型与推理强度的钩子（PR #65）；⑥a 会话目录与续接已完成（PR #67）；⑥b fork 已完成（PR #68）；⑥c 会话内切换分支已完成（PR #72）；⑦ 扩展能力与 ⑨ 消息队列已完成（PR #72）；⑧ 模型元数据与计量已完成（PR #72）；⑫ 幂等键已完成（PR #72，rpc 模式按 D14 不做）；⑬ MCP 进度已完成（PR #72）；⑩ 可观测已完成（PR #72）；⑭ chat 的便利功能按 D13 不做；⑪ 行为评测框架已完成（PR #72，真实运行待授权） |
 | P11 | 内核整理 | 已完成：2026-11-05 评审稿 `docs/p11-kernel-cleanup-review.md`；① 立项与搬家（PR #70），② 至 ⑥（PR #71，与 P12 同一个 PR） |
@@ -1202,7 +1202,7 @@ P7 模块 B2 实施记录（2026-11-01，PR #41）：
 - [x] `acp` 子命令：经 stdio 收发 ACP v1 消息
 - [x] 审批转发给客户端：`Interaction` 映射为 `session/request_permission`
 - [ ] 在 Zed 或 Wisp 上实测
-- [ ] `session/load`：续接会话文件，需要先定会话文件的落盘约定
+- [x] `session/load`（已完成（PR 待开），2026-11-06，见下方实施记录）：续接会话文件；落盘约定沿用 P10 ⑥a 的会话目录
 
 验收：可被 ACP 客户端驱动，审批经客户端完成。
 
@@ -1218,6 +1218,21 @@ P7 模块 B2 实施记录（2026-11-01，PR #41）：
 | 测试 | `tests/acp_cli.rs` 6 项：手写的 JSON-RPC 客户端经子进程 stdio 驱动，stdout 的每一行都必须解析为协议消息；`src/acp.rs` 单元测试 3 项（结束原因映射、提问文本、工具种类）。既有测试的调整：ACP SDK 给 serde_json 打开 `preserve_order`，两处按字母序写的 JSON 断言改为插入序（`tests/run_cli.rs` 的请求附加字段审计、`tests/chat_cli.rs` 的 edit 审批），chat 的一项单元测试同样调整 |
 | 验证 | 本机 macOS：stable 下 960 项通过、7 项付费测试跳过（基线 951）；fmt、clippy 与 Rust 1.88.0 的全目标检查通过；自查脚本无新增命中。另用 SDK 自带的 `yolo_one_shot_client` 示例（本地编译）对假模型走通一次：初始化、建会话、两段推理、`ls -la` 的 `tool_call` 与权限请求（示例客户端自动批准）、`in_progress`、`completed`、自动放行的 `wc` 不问人、五段回答、`EndTurn`。没有在 Zed 或 Wisp 上验证。合并 origin/main（PR #67、#68）之后 985 项通过、7 项付费测试跳过 |
 | 未做 | `session/load`、客户端提供的 MCP 服务器、客户端的 fs 与 terminal 能力、`session/set_mode`、用量上报、协议 v2 |
+
+`session/load` 实施记录（2026-11-06，PR 待开，基于 PR #72 合并后的 `8b4357c`）：
+
+| 环节 | 做法 |
+|---|---|
+| 落盘约定 | 沿用 P10 ⑥a：`session/new` 的会话写到 `cwd` 的默认会话目录（`sessions::default_dir`，与 chat 相同），一个会话一个文件（`SessionFile::NewIn`）；`--session-dir` 改目录，`--no-session` 只留内存。`--session` 对多会话的 acp 没有意义，启动时以配置错误拒绝 |
+| 能力 | `initialize` 应答 `agentCapabilities.loadSession = !--no-session` |
+| 加载 | `session/load`：按 `cwd` 的会话目录 `sessions::list` 后按完整 ID 找文件，`SessionFile::Open` 走与新会话相同的 `cli::prepare`；本进程已持有的会话经 `AgentSession::inspect` 直接回放（运行中则报 Busy）；找不到为 `INVALID_PARAMS`，消息 `unknown session <id>: …` 说明目录或 `--no-session` |
+| 回放 | `Updates::replay` 遍历会话投影：`Prompt` 为 `user_message_chunk`，扩展消息按 `display`，回答的文本为 `agent_message_chunk`、推理为 `agent_thought_chunk`，每个工具调用一条 `tool_call`（种类、标题、原始参数、位置；有结果则 `completed` / `failed` 并附内容与原始输出，没有结果则 `pending`，由下一次运行补写）；摘要与续写提示不回放。回放在应答之前发出，与协议一致 |
+| 未做 | `session/resume`（不回放的续接）、`session/list` 与 fork：协议有定义，等客户端用上再做 |
+
+- 测试：新增 6 项（`tests/acp_cli.rs`）：会话文件在 cwd 的目录中且第二个进程加载后回放并接着对话（模型看到此前的消息）；工具调用连同结果的回放；未知会话；`--no-session` 不落盘且不声明 `loadSession`；`--session-dir` 与本进程已持有会话的回放；`--session` 在连接前被拒绝。既有测试的改动：假客户端给每个进程独立的 `HOME`，免得会话文件写进真实家目录。
+- 反向验证：分别让新会话留在内存、回放不发任何更新，各有 3 项测试失败，修改已还原。
+- 本机 macOS 验证：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`（1063 通过、0 失败、8 项付费测试跳过；基线 PR #72 合并后为 1057）、`cargo +1.88.0 check --all-targets`、`RUSTDOCFLAGS=-D warnings cargo doc --no-deps` 与自查脚本均通过。
+- 未验证：没有在 Zed 或 Wisp 上实测。
 
 ### P9 可选增强
 
