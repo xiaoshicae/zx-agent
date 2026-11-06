@@ -402,7 +402,7 @@ CLI (main.rs + cli/ + chat/ + acp/)
 | 不加新输入的续跑 | 以失败或被取消的回答结尾时，先省略该回答再续跑 | pi 的 `Agent.continue()` 遇到回答结尾时报错（排队的消息除外），失败后的重试由 `AgentSession` 另行处理；这里的续跑同时用于崩溃、超时或取消之后接着做 |
 | 请求前替换设置 | `prepare_request` 只能替换模型与推理强度 | pi 的 `prepareRequest` 还可以改写上下文；这里上下文只来自会话投影（不变量 6），改上下文用 `transform_context` 并写入会话 |
 | 推理强度 | 级别与 pi 相同，写法由 `--reasoning-format` 在三种中显式选择 | pi 按模型元数据与服务的 compat 设置（`thinkingFormat`）在十余种写法中选择，并按模型能力调整级别；这里的模型元数据只有上下文窗口与单价（`[[models]]`），没有写法与能力的信息，也不按服务推断（D10） |
-| 模型元数据与计量 | 上下文窗口与单价来自 profile 的 `[[models]]` 或 `--context-window`，没有内置的模型表；窗口只用来给自动摘要加 token 阈值（窗口减 `reserveTokens`，且须高于 `keepRecentBytes` 折算的 token 数），单价用来算每次回复的 `costUsd`；`Retry-After` 接受毫秒、小数秒与 HTTP 日期，退避减去至多四分之一的随机抖动，服务给的等待原样使用 | pi 内置各服务的模型表（`models.json` 可补充），按窗口识别不报错的超长输入与可恢复的截断，成本还支持分档价与服务端上报的成本；这里的超长识别仍只看错误（P10 ①），截断续写由 `--continue-on-length` 决定 |
+| 模型元数据与计量 | 上下文窗口与单价来自 profile 的 `[[models]]` 或 `--context-window`，没有内置的模型表；窗口只用来给自动摘要加 token 阈值（窗口减 `reserveTokens`，且须高于 `keepRecentBytes` 折算的 token 数），单价用来算每次回复的 `totalCost`（单位与单价相同，不限币种）；`Retry-After` 接受毫秒、小数秒与 HTTP 日期，退避减去至多四分之一的随机抖动，服务给的等待原样使用 | pi 内置各服务的模型表（`models.json` 可补充），按窗口识别不报错的超长输入与可恢复的截断，成本还支持分档价与服务端上报的成本；这里的超长识别仍只看错误（P10 ①），截断续写由 `--continue-on-length` 决定 |
 | 完整 TUI | 未实现，`chat` 是逐行 REPL；交互式界面由 ACP 客户端提供（`acp`） | pi 自带 TUI；这里按路线图的 D13 把界面交给实现 ACP 的开源客户端 |
 
 ### 系统提示词的组成
@@ -520,7 +520,7 @@ askTools = []                    # approveAll 时须为空（内置 assistant �
 
 ### 事件（`--output jsonl`）
 
-每行一个事件。事件字段与信封字段在同一个 JSON 对象中：`schemaVersion`（当前为 1，不兼容的变化时加一）、`seq`（运行内从 1 开始递增）、`atMs`（毫秒时间戳）、`sessionId`、`runId`（每次运行一个；手动 `/compact` 使用自己的 ID）与 `type`。未加 `--deltas` 时省略的 `message_update` 会在 `seq` 中留下空缺。
+每行一个事件。事件字段与信封字段在同一个 JSON 对象中：`schemaVersion`（当前为 2，不兼容的变化时加一；2 把用量中的 `costUsd` 改名为 `totalCost`）、`seq`（运行内从 1 开始递增）、`atMs`（毫秒时间戳）、`sessionId`、`runId`（每次运行一个；手动 `/compact` 使用自己的 ID）与 `type`。未加 `--deltas` 时省略的 `message_update` 会在 `seq` 中留下空缺。
 
 一次运行以 `run_start`（`model`、`provider`）开始，以 `run_end`（`report`）结束，中断调用的恢复事件在两者之间。每次尝试由 `agent_start`（`attempt`，重试或从上下文过长恢复时加一）与 `agent_end` 包围。回合（`turn_start` / `turn_end`，带 `turn`）只对应任务请求，成对出现；自动摘要的请求计入轮次预算，但不是回合。其余事件：
 
@@ -540,12 +540,12 @@ askTools = []                    # approveAll 时须为空（内置 assistant �
 事件内容完整，包括用户输入、工具参数、经 `after_tool` 处理后的工具输出与模型输出。工具执行中的进度（`tool_execution_update`）只出现在事件里，不写入会话文件；工具结果的 `details` 与 `usage` 既在 `tool_execution_end` 中，也随工具结果写入会话。手动 `/compact` 另发 `compaction_report`，不产生任务回答或 `run_end`。`run` 的最后一行、`chat` 每轮的最后一行是 `run_end`：
 
 ```json
-{"schemaVersion":1,"seq":12,"atMs":1761700000000,"sessionId":"…","runId":"…","type":"run_end","report":{"outcome":"completed","finalText":"## Summary ...","modelRequests":3,"retries":0,"usage":{"input":1200,"output":300,"cacheRead":0,"totalTokens":1500},"sessionFile":"/var/log/zx-agent/run.jsonl"}}
+{"schemaVersion":2,"seq":12,"atMs":1761700000000,"sessionId":"…","runId":"…","type":"run_end","report":{"outcome":"completed","finalText":"## Summary ...","modelRequests":3,"retries":0,"usage":{"input":1200,"output":300,"cacheRead":0,"totalTokens":1500},"sessionFile":"/var/log/zx-agent/run.jsonl"}}
 ```
 
 `report.modelRequests` 是模型请求数（含摘要请求），与回合编号不同。`report.usage` 只含模型的用量；工具报告的花费（例如工具自己调用了模型）按工具名在 `report.toolUsage` 中，没有时省略该字段。`report.deniedCalls` 是被策略或审批拒绝的工具调用数，为零时省略。
 
-`usage` 统计本次运行中每个回复的用量，失败的尝试也计入。被取消的请求记为 0，因为服务端在流的末尾才返回用量；实际计费以服务商账单为准。`cacheWrite`（写入缓存的提示词 token）与 `reasoning`（输出中的推理 token）只在服务返回且不为 0 时出现；`costUsd` 只在 profile 的 `[[models]]` 给出该模型的单价时出现，是按单价算出的美元数（摘要请求也计入），同一运行内的多次回复相加。回复消息另带服务端返回的 `responseId` 与（和请求的不同时）`responseModel`。
+`usage` 统计本次运行中每个回复的用量，失败的尝试也计入。被取消的请求记为 0，因为服务端在流的末尾才返回用量；实际计费以服务商账单为准。`cacheWrite`（写入缓存的提示词 token）与 `reasoning`（输出中的推理 token）只在服务返回且不为 0 时出现；`totalCost` 只在 profile 的 `[[models]]` 给出该模型的单价时出现，是按单价算出的花费，单位与单价相同（摘要请求也计入；对应 pi 的 `cost.total`），同一运行内的多次回复相加。回复消息另带服务端返回的 `responseId` 与（和请求的不同时）`responseModel`。
 
 `message_update.delta` 的 `tool_call_args` 包含 `id` 和 `text`，`id` 与对应 `tool_call_start` 相同，便于关联交错返回的工具参数。旧事件缺少 `id` 时，反序列化为空字符串。
 
@@ -568,7 +568,7 @@ run、chat 与 serve 在设置了下面的标准变量时，用 OTLP/HTTP（prot
 
 | span | 范围 | 属性与事件 |
 |---|---|---|
-| `run` | `run_start` 到 `run_end` | `zx.run.id`、`zx.session.id`、`zx.model`、`zx.provider`、`zx.outcome`、`zx.model_requests`、`zx.retries`、`zx.usage.input_tokens` / `output_tokens` / `cache_read_tokens`，不为零时另有 `cache_write_tokens` / `reasoning_tokens`，配置了单价时有 `cost_usd`；事件 `retry_scheduled`、`context_overflow`（不含错误文本）、`tool_call_recovered` |
+| `run` | `run_start` 到 `run_end` | `zx.run.id`、`zx.session.id`、`zx.model`、`zx.provider`、`zx.outcome`、`zx.model_requests`、`zx.retries`、`zx.usage.input_tokens` / `output_tokens` / `cache_read_tokens`，不为零时另有 `cache_write_tokens` / `reasoning_tokens`，配置了单价时有 `total_cost`；事件 `retry_scheduled`、`context_overflow`（不含错误文本）、`tool_call_recovered` |
 | `attempt` | 每次尝试 | `zx.attempt`、`zx.outcome` |
 | `turn` | 每个回合 | `zx.turn` |
 | `request` | 每个模型请求；摘要请求在 `compaction` 之下 | `zx.request.kind`、`zx.model`、`zx.attempt`、用量、`zx.stop_reason` |
@@ -585,7 +585,7 @@ run、chat 与 serve 在设置了下面的标准变量时，用 OTLP/HTTP（prot
 | `zx.run.duration` | 直方图 | `zx.outcome`、`zx.model` |
 | `zx.request.duration` | 直方图，从请求到完整回答 | `zx.request.kind`、`zx.model`、`zx.stop_reason` |
 | `zx.tokens` | 计数，模型报告的用量（摘要请求的也计入，记在被请求的模型名下）；工具结果报告的用量记在工具名下 | `zx.model` 或 `zx.tool.name`、`zx.token.kind`（`input`、`output`、`cache_read`、`cache_write`、`reasoning`；`reasoning` 包含在 `output` 内；为零的不记） |
-| `zx.cost` | 计数，USD，只在配置了单价或工具报告了成本时有 | `zx.model` 或 `zx.tool.name` |
+| `zx.cost` | 计数，单位与单价相同（不标单位），只在配置了单价或工具报告了成本时有 | `zx.model` 或 `zx.tool.name` |
 | `zx.tool.duration` | 直方图，MCP 工具同样计入 | `zx.tool.name`、`zx.tool.is_error` |
 | `zx.retries` | 计数 | 无 |
 | `zx.compaction.duration` | 直方图 | `zx.compaction.automatic`、`zx.outcome`（`completed` / `failed`） |
@@ -697,7 +697,7 @@ JSON 报告使用 `modelRequests`，达到上限时 `outcome` 为 `model_request
 IM 的提示文本使用 `[replies] modelRequestLimit`。
 原 `prompt::DEFAULT_INSTRUCTIONS` 当时移到了 `presets`，现在只在 `profiles/troubleshoot.md`。
 
-P1 的 SDK 接口调整：静态配置移入 `LoopSpec`；`LoopConfig` 持有钩子、交互宿主与队列。`LoopConfig::models`（按模型 ID 的 `ai::ModelMeta`：`context_window` 与 `cost`，`cost` 为每百万 token 的美元单价 `ai::ModelCost`）让循环给每次回复算出 `usage.cost_usd`（按请求的模型查，摘要请求也算）；`LoopConfig::cache_key` 随每个任务请求发送并记入请求审计（`Request::cache_key`），OpenAI 兼容 provider 在 `OpenAiConfig::prompt_cache_key` 为 true 时把它写成 `prompt_cache_key`。`OpenAiConfig::api_key` 是 `ApiKey`：`None`、`Fixed(token)`，或 `Dynamic(Arc<dyn ApiKeySource>)`——每次请求前调用一次取 token（pi 的 `getApiKey`，用于会过期的凭据），取不到时请求以 `ProviderError::ApiKey` 失败、不重试；`OpenAiConfig::headers` 随每个请求发送，`Authorization` 不接受。`RetryPolicy::jitter`（默认 0.25）从退避中随机减去至多这一比例，服务的 `Retry-After` 不减。
+P1 的 SDK 接口调整：静态配置移入 `LoopSpec`；`LoopConfig` 持有钩子、交互宿主与队列。`LoopConfig::models`（按模型 ID 的 `ai::ModelMeta`：`context_window` 与 `cost`，`cost` 为每百万 token 的单价 `ai::ModelCost`，币种由使用者决定、所有单价须一致）让循环给每次回复算出 `usage.total_cost`（按请求的模型查，摘要请求也算）；`LoopConfig::cache_key` 随每个任务请求发送并记入请求审计（`Request::cache_key`），OpenAI 兼容 provider 在 `OpenAiConfig::prompt_cache_key` 为 true 时把它写成 `prompt_cache_key`。`OpenAiConfig::api_key` 是 `ApiKey`：`None`、`Fixed(token)`，或 `Dynamic(Arc<dyn ApiKeySource>)`——每次请求前调用一次取 token（pi 的 `getApiKey`，用于会过期的凭据），取不到时请求以 `ProviderError::ApiKey` 失败、不重试；`OpenAiConfig::headers` 随每个请求发送，`Authorization` 不接受。`RetryPolicy::jitter`（默认 0.25）从退避中随机减去至多这一比例，服务的 `Retry-After` 不减。
 原 `config.policy` 改为注册 `PolicyHook::new(policy)`；`Limits::continue_on_length` 改为 `ContinueOnLength::new(n)`。
 直接调用循环改为 `run_loop(context, prompts, config, &mut LoopControl::new(max_model_requests, approvals, cancel, sink))`，
 其中 `approvals` 是宿主持有的 `&mut ApprovalCache`；使用 `Runner` 时由它管理。

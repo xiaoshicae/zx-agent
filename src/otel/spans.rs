@@ -570,8 +570,8 @@ fn usage_attributes(usage: &Usage) -> Vec<KeyValue> {
     if usage.reasoning > 0 {
         attributes.push(KeyValue::new("zx.usage.reasoning_tokens", saturate(usage.reasoning)));
     }
-    if let Some(cost) = usage.cost_usd {
-        attributes.push(KeyValue::new("zx.usage.cost_usd", cost));
+    if let Some(cost) = usage.total_cost {
+        attributes.push(KeyValue::new("zx.usage.total_cost", cost));
     }
     attributes
 }
@@ -929,7 +929,7 @@ mod tests {
         let mut signals = one_run();
         assert!(matches!(signals[7].what, What::ToolEnd { .. }), "one_run changed shape");
         let mut spent = usage(3, 2);
-        spent.cost_usd = Some(0.5);
+        spent.total_cost = Some(0.5);
         signals[7] = at(
             1020,
             AgentEvent::ToolExecutionEnd {
@@ -948,7 +948,7 @@ mod tests {
         let tool = span(&spans, "tool bash");
         assert_eq!(attribute(tool, "zx.usage.input_tokens").as_deref(), Some("3"));
         assert_eq!(attribute(tool, "zx.usage.output_tokens").as_deref(), Some("2"));
-        assert_eq!(attribute(tool, "zx.usage.cost_usd").as_deref(), Some("0.5"));
+        assert_eq!(attribute(tool, "zx.usage.total_cost").as_deref(), Some("0.5"));
         let all = harness.metrics();
         let by_tool = [("zx.token.kind", "input"), ("zx.tool.name", "bash")];
         assert_eq!(counted(&all, "zx.tokens", &by_tool), 3);

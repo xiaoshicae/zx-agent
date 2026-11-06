@@ -115,7 +115,7 @@ fn print_report(report: &RunReport, output: OutputMode) {
                 count => format!(" denied_calls={count}"),
             };
             let cost = usage
-                .cost_usd
+                .total_cost
                 .map(|cost| format!(" cost={cost:.4}"))
                 .unwrap_or_default();
             let session = report

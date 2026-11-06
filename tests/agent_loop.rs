@@ -785,7 +785,7 @@ fn end_usages(sink: &Collect) -> Vec<Option<Usage>> {
 
 #[tokio::test]
 async fn tool_usage_reaches_the_end_event_the_result_message_and_the_loop_result() {
-    let usage = json!({"input": 20, "output": 4, "cacheRead": 0, "totalTokens": 24, "costUsd": 0.001});
+    let usage = json!({"input": 20, "output": 4, "cacheRead": 0, "totalTokens": 24, "totalCost": 0.001});
     let provider = provider([
         FauxStep::tool_call("c1", "echo", json!({"text": "hi", "usage": usage})),
         FauxStep::tool_call("c2", "echo", json!({"text": "again", "usage": usage})),

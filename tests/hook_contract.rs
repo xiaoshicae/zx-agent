@@ -128,7 +128,7 @@ fn tool_output_usage_is_optional_and_kept_as_given() {
         cache_write: 0,
         reasoning: 0,
         total_tokens: 24,
-        cost_usd: None,
+        total_cost: None,
     };
     round_trip(
         &ToolOutput::ok("done").with_usage(usage),

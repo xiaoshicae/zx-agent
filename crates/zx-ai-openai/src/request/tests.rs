@@ -97,7 +97,7 @@ fn tool_result_details_stay_out_of_the_body() {
                     cache_write: 0,
                     reasoning: 0,
                     total_tokens: 2,
-                    cost_usd: None,
+                    total_cost: None,
                 }),
             }),
         ],

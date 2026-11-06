@@ -358,7 +358,7 @@ async fn the_last_request_may_take_a_run_over_its_cost_budget() {
         (RunOutcome::Completed, "done")
     );
     assert!(
-        (report.usage.cost_usd.unwrap() - 0.02).abs() < 1e-9,
+        (report.usage.total_cost.unwrap() - 0.02).abs() < 1e-9,
         "{:?}",
         report.usage
     );

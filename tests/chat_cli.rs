@@ -1908,9 +1908,9 @@ async fn a_profile_prices_the_model_and_the_cost_shows_in_turn_and_status_lines(
     .await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let err = stderr(&output);
-    // The fake server reports 10 input and 2 output tokens: $10 + $4.
-    assert!(err.contains("· 10 in · 2 out · $14.0000 ·"), "{err}");
-    assert!(err.contains("· 10 in · 2 out · 0 cached · $14.0000"), "{err}");
+    // The fake server reports 10 input and 2 output tokens: 10 + 4, in the prices' unit.
+    assert!(err.contains("· 10 in · 2 out · cost 14.0000 ·"), "{err}");
+    assert!(err.contains("· 10 in · 2 out · 0 cached · cost 14.0000"), "{err}");
 
     std::fs::write(
         dir.path().join("bad.toml"),

@@ -441,7 +441,7 @@ impl<'a, 'b> Engine<'a, 'b> {
         }
         if self
             .cost_budget
-            .is_some_and(|budget| result.usage.cost_usd.unwrap_or(0.0) >= budget)
+            .is_some_and(|budget| result.usage.total_cost.unwrap_or(0.0) >= budget)
         {
             return Some(LoopOutcome::CostBudget);
         }
