@@ -398,6 +398,7 @@ mod tests {
     use crate::agent::RunOutcome;
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "one event of every variant")]
     fn kind_matches_the_serialized_type() {
         // One event of every variant; add new variants here.
         let events = [

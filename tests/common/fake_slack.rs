@@ -165,7 +165,7 @@ impl Socket {
     pub async fn closed_by_client(&mut self) -> bool {
         loop {
             match tokio::time::timeout(WAIT, self.stream.next()).await {
-                Ok(None | Some(Err(_)) | Some(Ok(Message::Close(_)))) => return true,
+                Ok(None | Some(Err(_) | Ok(Message::Close(_)))) => return true,
                 Ok(Some(Ok(_))) => {}
                 Err(_) => return false,
             }

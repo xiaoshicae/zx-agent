@@ -26,14 +26,20 @@ impl DebugState {
         eprintln!("{}", format_line(event.at_ms, severity, &text, color));
     }
 
+    #[expect(clippy::too_many_lines, reason = "one arm per event variant")]
     fn describe(&mut self, event: &Event) -> Option<(Severity, String)> {
+        use AgentEvent::{
+            AgentEnd, AgentStart, ApprovalRequested, ApprovalResolved, CompactionEnd, CompactionFailed,
+            CompactionStart, ContextEdited, ContextOverflow, HookFailed, MessageEnd, MessageStart, MessageUpdate,
+            RequestStart, RetryScheduled, RunEnd, RunStart, ToolCallRecovered, ToolDecision, ToolExecutionEnd,
+            ToolExecutionStart, ToolExecutionUpdate, TurnEnd, TurnStart,
+        };
         if self.run_id != event.run_id {
             *self = Self {
                 run_id: event.run_id.clone(),
                 ..Self::default()
             };
         }
-        use AgentEvent::*;
         let item = match &event.event {
             RunStart { model, provider } => (
                 Severity::Info,
@@ -224,9 +230,7 @@ impl DebugState {
                 format!(
                     "Tool finished · {tool_name} · call={tool_call_id} · {} · {}",
                     if *is_error { "error" } else { "ok" },
-                    duration_ms
-                        .map(|ms| format!("{ms}ms"))
-                        .unwrap_or_else(|| "not executed / duration unavailable".into())
+                    duration_ms.map_or_else(|| "not executed / duration unavailable".into(), |ms| format!("{ms}ms"))
                 ),
             ),
             RetryScheduled {
@@ -367,12 +371,14 @@ fn format_line(at_ms: u64, severity: Severity, text: &str, color: bool) -> Strin
     let time = i64::try_from(at_ms)
         .ok()
         .and_then(DateTime::from_timestamp_millis)
-        .map(|utc| {
-            utc.with_timezone(&Local)
-                .format("%Y-%m-%d %H:%M:%S%.3f %:z")
-                .to_string()
-        })
-        .unwrap_or_else(|| format!("timestamp={at_ms}ms"));
+        .map_or_else(
+            || format!("timestamp={at_ms}ms"),
+            |utc| {
+                utc.with_timezone(&Local)
+                    .format("%Y-%m-%d %H:%M:%S%.3f %:z")
+                    .to_string()
+            },
+        );
     let (label, ansi) = match severity {
         Severity::Info => ("debug", "36"),
         Severity::Warn => ("warn", "33"),

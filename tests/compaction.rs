@@ -646,7 +646,7 @@ async fn pending_summary_shares_busy_cancel_and_drop_reuse_with_prompt() {
     let session = AgentSession::from(runner.with_compaction(budget()).unwrap());
     let parent = CancellationToken::new();
     let mut compact = Box::pin(session.compact_with_cancel(&parent));
-    tokio::select! { biased; result = &mut compact => panic!("unexpected completion: {result:?}"), _ = tokio::task::yield_now() => {} }
+    tokio::select! { biased; result = &mut compact => panic!("unexpected completion: {result:?}"), () = tokio::task::yield_now() => {} }
     assert!(events.kinds().contains(&"compaction_start"));
     assert!(matches!(session.prompt("busy").await, Err(SessionError::Busy)));
     assert!(matches!(session.compact().await, Err(SessionError::Busy)));
@@ -674,7 +674,7 @@ async fn aborting_summary_records_failure_and_the_session_is_immediately_reusabl
     let session = AgentSession::from(runner.with_compaction(budget()).unwrap());
     let compact = session.compact();
     tokio::pin!(compact);
-    tokio::select! { biased; result = &mut compact => panic!("unexpected completion: {result:?}"), _ = tokio::task::yield_now() => {} }
+    tokio::select! { biased; result = &mut compact => panic!("unexpected completion: {result:?}"), () = tokio::task::yield_now() => {} }
     assert!(session.abort());
     assert_eq!(compact.await.unwrap().outcome, Outcome::Aborted);
     assert_eq!(session.prompt("next").await.unwrap().final_text, "reused");

@@ -97,7 +97,7 @@ async fn take_queued_returns_input_no_run_consumed_steering_first() {
 async fn take_queued_during_a_run_is_busy_and_leaves_the_input_queued() {
     let (session, provider, _) = setup([FauxStep::Hang]);
     let mut running = Box::pin(session.prompt("first"));
-    tokio::select! { _ = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
+    tokio::select! { () = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
     session.steer("queued");
     assert_eq!(session.take_queued(), Err(SessionError::Busy));
     assert!(session.abort());
@@ -109,7 +109,7 @@ async fn take_queued_during_a_run_is_busy_and_leaves_the_input_queued() {
 async fn a_running_prompt_rejects_another_prompt_without_queueing_it() {
     let (session, provider, _) = setup([FauxStep::Hang, FauxStep::text("resumed")]);
     let mut running = Box::pin(session.prompt("first"));
-    tokio::select! { _ = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
+    tokio::select! { () = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
     let rejected = tokio::time::timeout(Duration::from_secs(1), session.prompt("must not enter history"))
         .await
         .unwrap();
@@ -130,7 +130,7 @@ async fn abort_does_not_cancel_the_callers_token_or_the_next_prompt() {
     let (session, provider, _) = setup([FauxStep::Hang, FauxStep::text("next answer")]);
     let parent = CancellationToken::new();
     let mut running = Box::pin(session.prompt_with_cancel("first", &parent));
-    tokio::select! { _ = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
+    tokio::select! { () = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
     assert!(session.abort());
     assert_eq!(running.await.unwrap().outcome, RunOutcome::Aborted);
     assert!(!parent.is_cancelled());
@@ -154,7 +154,7 @@ async fn cancelling_the_external_token_only_ends_its_prompt() {
     let (session, provider, _) = setup([FauxStep::Hang, FauxStep::text("done")]);
     let parent = CancellationToken::new();
     let mut running = Box::pin(session.prompt_with_cancel("first", &parent));
-    tokio::select! { _ = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
+    tokio::select! { () = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
     parent.cancel();
     assert_eq!(running.await.unwrap().outcome, RunOutcome::Aborted);
     assert_eq!(session.prompt("next").await.unwrap().outcome, RunOutcome::Completed);
@@ -164,7 +164,7 @@ async fn cancelling_the_external_token_only_ends_its_prompt() {
 async fn dropping_a_prompt_cancels_the_provider_and_returns_ownership() {
     let (session, provider, _) = setup([FauxStep::Hang, FauxStep::text("done")]);
     let mut running = Box::pin(session.prompt("first"));
-    tokio::select! { _ = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
+    tokio::select! { () = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
     drop(running);
     assert!(provider.token.lock().unwrap().as_ref().unwrap().is_cancelled());
     assert!(
@@ -228,7 +228,7 @@ async fn dropping_a_subscription_stops_future_notifications() {
 async fn subscriptions_added_during_a_run_receive_future_events_without_replay() {
     let (session, provider, _) = setup([FauxStep::Hang]);
     let mut running = Box::pin(session.prompt("first"));
-    tokio::select! { _ = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
+    tokio::select! { () = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
     let observer = Arc::new(Collect::default());
     let _subscription = session.subscribe(observer.clone());
     session.abort();
@@ -377,7 +377,7 @@ async fn the_reasoning_level_changes_between_prompts_and_is_recorded_for_the_aud
 async fn a_running_session_rejects_a_reasoning_change() {
     let (session, provider, _) = setup([FauxStep::Hang, FauxStep::text("after")]);
     let mut running = Box::pin(session.prompt("first"));
-    tokio::select! { _ = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
+    tokio::select! { () = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
     assert_eq!(session.set_reasoning(Some(Reasoning::High)), Err(SessionError::Busy));
     session.abort();
     running.await.unwrap();
@@ -389,7 +389,7 @@ async fn a_running_session_rejects_a_reasoning_change() {
 async fn a_running_session_rejects_model_changes_without_changing_the_provider() {
     let (session, provider, _) = setup([FauxStep::Hang, FauxStep::text("old provider")]);
     let mut running = Box::pin(session.prompt("first"));
-    tokio::select! { _ = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
+    tokio::select! { () = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
     let next = Arc::new(FauxProvider::new([FauxStep::text("must not run")]));
     assert_eq!(
         session.set_model(ModelRef {
@@ -442,8 +442,8 @@ impl Tool for GatedTool {
     async fn execute(&self, _args: Value, context: &ToolContext) -> Result<ToolOutput, String> {
         self.started.notify_one();
         tokio::select! {
-            _ = self.release.notified() => Ok(ToolOutput::ok("done")),
-            _ = context.cancel.cancelled() => Err("cancelled".into()),
+            () = self.release.notified() => Ok(ToolOutput::ok("done")),
+            () = context.cancel.cancelled() => Err("cancelled".into()),
         }
     }
 }
@@ -462,7 +462,7 @@ async fn steering_and_follow_ups_reach_the_model_at_their_defined_boundaries() {
     let (runner, _) = RunnerSetup::new(config(provider.clone(), vec![gate.clone()])).build();
     let session = AgentSession::from(runner);
     let mut running = Box::pin(session.prompt("go"));
-    tokio::select! { _ = gate.started.notified() => {}, _ = &mut running => panic!("tool must wait") }
+    tokio::select! { () = gate.started.notified() => {}, _ = &mut running => panic!("tool must wait") }
     session.steer("steering");
     session.follow_up("follow-up");
     gate.release.notify_one();

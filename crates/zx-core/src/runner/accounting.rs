@@ -13,6 +13,8 @@ pub(super) struct RunAccounting {
     pub retries: u32,
     pub answer_continuations: u32,
     pub usage: Usage,
+    /// A context overflow was recovered from once already.
+    pub overflow_recovered: bool,
 }
 
 impl RunAccounting {

@@ -302,7 +302,7 @@ async fn run(
 
     let outcome = tokio::select! {
         biased;
-        _ = cancel.cancelled() => Err(Failure::Aborted),
+        () = cancel.cancelled() => Err(Failure::Aborted),
         result = stream_response(&client, &config, &url, &body, &mut acc, &mut tx) => result,
     };
 
@@ -916,8 +916,7 @@ impl Accumulator {
                     .get("id")
                     .and_then(Value::as_str)
                     .filter(|id| !id.is_empty())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| format!("call_{index}"));
+                    .map_or_else(|| format!("call_{index}"), str::to_string);
                 self.blocks.push(Block::Tool {
                     id: id.clone(),
                     name: name.to_string(),

@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -39,6 +39,9 @@ const DEFAULT_APP_SECRET_ENV: &str = "FEISHU_APP_SECRET";
 /// Under the session directory: the statuses of runs in progress (`StatusFiles`). The dot
 /// keeps it apart from the platform directories, whose encoded names never contain one.
 const RUNNING_DIR: &str = ".running";
+
+type Conversations = Vec<(String, ConversationId)>;
+type Approvers = Vec<(String, UserId)>;
 
 /// The serve configuration file.
 #[derive(Deserialize)]
@@ -133,12 +136,7 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
         args.request.session.is_none(),
         "--session does not apply to serve: each thread has its own session file under [sessions] dir"
     );
-    // Startup reads; nothing runs concurrently yet.
-    let text =
-        std::fs::read_to_string(&args.config).with_context(|| format!("cannot read {}", args.config.display()))?;
-    let file: ServeFile =
-        toml::from_str(&text).with_context(|| format!("invalid serve configuration {}", args.config.display()))?;
-
+    let file = read_file(&args.config)?;
     let mut channels: Vec<Arc<dyn ImChannel>> = Vec::new();
     let mut hidden_env = Vec::new();
     if let Some(slack) = &file.slack {
@@ -157,14 +155,7 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
         args.config.display()
     );
     let platforms: HashSet<&str> = channels.iter().map(|channel| channel.platform()).collect();
-    let conversations = entries(&file.access.conversations, &platforms, "access.conversations")?
-        .into_iter()
-        .map(|(platform, id)| (platform, ConversationId(id)))
-        .collect();
-    let approvers = entries(&file.access.approvers, &platforms, "access.approvers")?
-        .into_iter()
-        .map(|(platform, id)| (platform, UserId(id)))
-        .collect();
+    let (conversations, approvers) = access(&file.access, &platforms)?;
     let telemetry = cli::start_telemetry()?;
     let dir = file.sessions.dir;
     std::fs::create_dir_all(&dir).with_context(|| format!("cannot create the session directory {}", dir.display()))?;
@@ -194,20 +185,7 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
         .await
         .context("cannot prepare a session with these settings")?;
 
-    let mut config = ServerConfig {
-        conversations,
-        approvers,
-        replies: file.replies,
-        // A crash or a kill must not leave threads saying the work goes on.
-        statuses: Some(Arc::new(StatusFiles::new(running))),
-        ..ServerConfig::default()
-    };
-    if let Some(running) = file.limits.max_running {
-        config.max_running = running;
-    }
-    if let Some(secs) = file.limits.idle_secs {
-        config.idle = Duration::from_secs(secs);
-    }
+    let config = server_config(&file.limits, file.replies, running, conversations, approvers);
     eprintln!(
         "[serve] platforms={}; sessions in {}",
         channels
@@ -224,6 +202,51 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
         .await;
     cli::finish_telemetry(telemetry).await;
     Ok(exit_code(served))
+}
+
+/// The serve configuration file at `path`. A startup read; nothing runs concurrently yet.
+fn read_file(path: &Path) -> Result<ServeFile> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
+    toml::from_str(&text).with_context(|| format!("invalid serve configuration {}", path.display()))
+}
+
+/// The chats the bot answers in and the users who may approve, each on a configured platform.
+fn access(section: &AccessSection, platforms: &HashSet<&str>) -> Result<(Conversations, Approvers)> {
+    let conversations = entries(&section.conversations, platforms, "access.conversations")?
+        .into_iter()
+        .map(|(platform, id)| (platform, ConversationId(id)))
+        .collect();
+    let approvers = entries(&section.approvers, platforms, "access.approvers")?
+        .into_iter()
+        .map(|(platform, id)| (platform, UserId(id)))
+        .collect();
+    Ok((conversations, approvers))
+}
+
+/// The server's settings: the file's limits over the defaults, with the statuses of runs in
+/// progress kept in `running`, so that a crash or a kill cannot leave threads saying the work
+/// goes on.
+fn server_config(
+    limits: &LimitsSection,
+    replies: Replies,
+    running: PathBuf,
+    conversations: Conversations,
+    approvers: Approvers,
+) -> ServerConfig {
+    let mut config = ServerConfig {
+        conversations,
+        approvers,
+        replies,
+        statuses: Some(Arc::new(StatusFiles::new(running))),
+        ..ServerConfig::default()
+    };
+    if let Some(running) = limits.max_running {
+        config.max_running = running;
+    }
+    if let Some(secs) = limits.idle_secs {
+        config.idle = Duration::from_secs(secs);
+    }
+    config
 }
 
 /// How serving ended, as an exit code; a failure is reported on stderr.

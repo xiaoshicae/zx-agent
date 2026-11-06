@@ -464,7 +464,7 @@ impl Router {
             tokio::select! {
                 () = self.stop.cancelled() => return Ok(()),
                 Some((index, event)) = inbound.recv() => self.route(index, event),
-                Some(retire) = retired.recv() => self.retire(retire),
+                Some(retire) = retired.recv() => self.retire(&retire),
                 Some(ended) = channel_tasks.join_next() => {
                     let (index, result) =
                         ended.map_err(|error| ImError::Transport(format!("a channel task failed: {error}")))?;
@@ -621,7 +621,7 @@ impl Router {
         });
     }
 
-    fn retire(&mut self, retire: Retire) {
+    fn retire(&mut self, retire: &Retire) {
         // Equal counts mean the worker has taken everything sent to it and holds no session:
         // without its inbox it ends. Otherwise a message is on its way and the worker goes on.
         if self

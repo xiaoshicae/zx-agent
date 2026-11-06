@@ -223,6 +223,7 @@ enum What {
 }
 
 impl Signal {
+    #[expect(clippy::too_many_lines, reason = "one arm per event variant")]
     fn of(event: &Event) -> Option<Self> {
         let what = match &event.event {
             AgentEvent::RunStart { model, provider } => What::RunStart {
@@ -407,6 +408,7 @@ impl Runs {
         }
     }
 
+    #[expect(clippy::too_many_lines, reason = "one arm per signal")]
     fn apply(&mut self, signal: Signal) {
         let Signal {
             run_id,
@@ -726,6 +728,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "one run's whole timeline, then its spans")]
     fn a_run_is_one_trace_of_nested_spans_that_carry_metadata_only() {
         let (exporter, _provider, mut runs) = runs();
         let command = json!({"command": "cat secret.txt"});

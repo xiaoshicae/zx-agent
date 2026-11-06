@@ -191,6 +191,10 @@ async fn serve(mut stream: TcpStream, state: Arc<State>) {
 }
 
 /// The HTTP response to a JSON-RPC message; `None` leaves the request unanswered.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the fake server's whole protocol, one arm per method"
+)]
 fn answer(state: &State, body: &Value) -> Option<String> {
     let method = body["method"].as_str().unwrap_or_default();
     let id = body["id"].clone();

@@ -174,7 +174,7 @@ impl Chat {
                     .iter()
                     .filter(|message| matches!(message, Message::User { .. } | Message::Assistant(_)))
                     .count(),
-                last_activity_ms: prepared.store.entries().last().map(|entry| entry.timestamp()),
+                last_activity_ms: prepared.store.entries().last().map(zx_agent::session::Entry::timestamp),
             }),
         };
         let session = prepared.into_session(output.clone())?;
@@ -215,6 +215,11 @@ pub(crate) async fn run(args: ChatArgs) -> Result<u8> {
     result
 }
 
+#[expect(
+    clippy::too_many_lines,
+    clippy::cognitive_complexity,
+    reason = "chat is frozen; the REPL stays as it is"
+)]
 async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> {
     let shared = cli::Shared::connect(&args.base, Builtin::Assistant, &args.transport).await?;
     let mode = if std::io::stdin().is_terminal() {
@@ -240,9 +245,8 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
     let mut reasoning = args.request.reasoning;
     let (storage, resumed, notice) = opening(args, &model).await?;
     let file = match (&storage, &resumed) {
-        (_, Some(path)) => SessionFile::Open(path),
+        (_, Some(path)) | (Storage::File(path), None) => SessionFile::Open(path),
         (Storage::Memory, None) => SessionFile::Memory,
-        (Storage::File(path), None) => SessionFile::Open(path),
         (Storage::Directory(dir), None) => SessionFile::NewIn(dir),
     };
     let mut built = chat.build(&model, file).await?;
@@ -640,6 +644,11 @@ fn approval_choice(text: &str) -> Option<Choice> {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    clippy::cognitive_complexity,
+    reason = "chat is frozen; the REPL stays as it is"
+)]
 async fn drive_turn(session: &AgentSession, operation: Operation, io: &mut TurnIo<'_>) -> Result<Flow> {
     let compact = matches!(operation, Operation::Compact);
     let started = Instant::now();

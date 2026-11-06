@@ -286,6 +286,7 @@ enum Step {
 }
 
 /// The messages of round `n`, from 1 to [`ROUNDS`].
+#[expect(clippy::too_many_lines, reason = "a scripted conversation, one round per arm")]
 pub fn round(n: usize) -> Vec<Message> {
     let steps = match n {
         1 => vec![
@@ -526,8 +527,7 @@ fn access_log(service: &str, round: usize) -> String {
 fn letters(mut n: usize) -> String {
     (0..7)
         .map(|_| {
-            // Below 26, so it fits a byte.
-            let letter = b'a' + (n % 26) as u8;
+            let letter = b'a' + u8::try_from(n % 26).unwrap();
             n /= 26;
             char::from(letter)
         })

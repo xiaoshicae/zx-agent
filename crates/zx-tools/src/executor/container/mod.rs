@@ -250,7 +250,7 @@ impl Executor for ContainerExecutor {
         // cleanup task has been queued for the next one.
         let _turn = tokio::select! {
             biased;
-            _ = cancel.cancelled() => return Ok(not_started()),
+            () = cancel.cancelled() => return Ok(not_started()),
             turn = self.turn.lock() => turn,
         };
         // An earlier run that was dropped may have left processes whose sweep is still queued.
