@@ -172,6 +172,20 @@ impl Acp {
         .await
     }
 
+    /// Resume `session_id` in `cwd`, without a replay; the response.
+    async fn resume(&mut self, session_id: &str, cwd: &Path) -> Value {
+        self.request(
+            "session/resume",
+            json!({"sessionId": session_id, "cwd": cwd, "mcpServers": []}),
+        )
+        .await
+    }
+
+    /// List the sessions with `params`; the response.
+    async fn list(&mut self, params: Value) -> Value {
+        self.request("session/list", params).await
+    }
+
     /// The updates that arrived before the last response, in order.
     fn replayed(&mut self) -> Vec<Value> {
         self.inbox
@@ -565,6 +579,11 @@ async fn no_session_keeps_no_file_and_offers_no_loading() {
         initialized["result"]["agentCapabilities"]["loadSession"], false,
         "{initialized}"
     );
+    let capabilities = &initialized["result"]["agentCapabilities"]["sessionCapabilities"];
+    assert!(
+        capabilities.get("list").is_none_or(Value::is_null) && capabilities.get("resume").is_none_or(Value::is_null),
+        "{initialized}"
+    );
     let created = acp.request("session/new", json!({"cwd": cwd, "mcpServers": []})).await;
     let id = created["result"]["sessionId"].as_str().unwrap().to_string();
     let response = acp.prompt(&id, "hello").await;
@@ -576,6 +595,8 @@ async fn no_session_keeps_no_file_and_offers_no_loading() {
         loaded["error"]["message"].as_str().unwrap().contains("--no-session"),
         "{loaded}"
     );
+    let listed = acp.list(json!({"cwd": cwd})).await;
+    assert_eq!(listed["result"]["sessions"], json!([]), "{listed}");
     acp.finish().await;
 }
 
@@ -610,6 +631,36 @@ async fn session_dir_chooses_the_directory_and_a_live_session_is_replayed_in_pla
     let requests = server.requests();
     let texts = texts(&requests[1].body);
     assert!(texts.ends_with(&["one", "two", "three"]), "{texts:?}");
+    // One directory for every working directory: a listing with a cwd keeps that cwd's
+    // sessions, one without lists them all.
+    let other = tempfile::tempdir().unwrap();
+    let other_cwd = other.path().canonicalize().unwrap();
+    let created = acp
+        .request("session/new", json!({"cwd": other_cwd, "mcpServers": []}))
+        .await;
+    let other_id = created["result"]["sessionId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{created}"))
+        .to_string();
+    let listed = acp.list(json!({"cwd": cwd})).await;
+    let ids: Vec<&str> = listed["result"]["sessions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{listed}"))
+        .iter()
+        .map(|session| session["sessionId"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, [id.as_str()], "{listed}");
+    let all = acp.list(json!({})).await;
+    let mut all_ids: Vec<&str> = all["result"]["sessions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{all}"))
+        .iter()
+        .map(|session| session["sessionId"].as_str().unwrap())
+        .collect();
+    all_ids.sort_unstable();
+    let mut expected = [id.as_str(), other_id.as_str()];
+    expected.sort_unstable();
+    assert_eq!(all_ids, expected, "{all}");
     acp.finish().await;
 }
 
@@ -627,4 +678,86 @@ async fn a_single_session_file_is_refused_before_the_connection() {
     let errors = stderr(&output);
     assert_eq!(output.status.code(), Some(2), "{errors}");
     assert!(errors.contains("give --session-dir, not --session"), "{errors}");
+}
+
+#[tokio::test]
+async fn sessions_are_listed_most_recent_first_with_their_first_prompt() {
+    let work = tempfile::tempdir().unwrap();
+    let cwd = work.path().canonicalize().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::text("one"), Reply::text("two")]).await;
+    let mut acp = Acp::start(&server, &cwd, &[]).await;
+    let initialized = acp.initialize().await;
+    let capabilities = &initialized["result"]["agentCapabilities"]["sessionCapabilities"];
+    assert_eq!(
+        (capabilities["list"].clone(), capabilities["resume"].clone()),
+        (json!({}), json!({})),
+        "{initialized}"
+    );
+    let mut ids = Vec::new();
+    for prompt in ["first question", "second question"] {
+        // Listed by last activity, which has millisecond resolution.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let created = acp.request("session/new", json!({"cwd": cwd, "mcpServers": []})).await;
+        let id = created["result"]["sessionId"].as_str().unwrap().to_string();
+        let response = acp.prompt(&id, prompt).await;
+        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        ids.push(id);
+    }
+
+    let listed = acp.list(json!({"cwd": cwd})).await;
+    let sessions = listed["result"]["sessions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{listed}"));
+    let listed_ids: Vec<&str> = sessions
+        .iter()
+        .map(|session| session["sessionId"].as_str().unwrap())
+        .collect();
+    assert_eq!(listed_ids, [ids[1].as_str(), ids[0].as_str()], "{listed}");
+    assert_eq!(sessions[0]["title"], "second question");
+    assert_eq!(sessions[1]["title"], "first question");
+    assert_eq!(sessions[0]["cwd"], cwd.display().to_string());
+    let updated = sessions[0]["updatedAt"].as_str().unwrap_or_else(|| panic!("{listed}"));
+    assert!(updated.contains('T') && updated.ends_with('Z'), "{updated}");
+    assert!(listed["result"]["nextCursor"].is_null(), "{listed}");
+    // Without a directory the agent's own is listed; another directory has none.
+    let all = acp.list(json!({})).await;
+    assert_eq!(all["result"]["sessions"].as_array().unwrap().len(), 2, "{all}");
+    let none = acp.list(json!({"cwd": elsewhere.path().canonicalize().unwrap()})).await;
+    assert_eq!(none["result"]["sessions"], json!([]), "{none}");
+    // A listing is one page: no cursor of ours exists.
+    let paged = acp.list(json!({"cwd": cwd, "cursor": "page-2"})).await;
+    assert_eq!(paged["error"]["code"], -32602, "{paged}");
+    acp.finish().await;
+}
+
+#[tokio::test]
+async fn resume_continues_a_session_without_replaying_it() {
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let cwd = work.path().canonicalize().unwrap();
+    let server = MockServer::start(vec![Reply::text("hi there")]).await;
+    let mut first = Acp::start_in(&server, &cwd, &[], Some(home.path())).await;
+    let id = first.session(&cwd).await;
+    let response = first.prompt(&id, "hello").await;
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    first.finish().await;
+
+    let server = MockServer::start(vec![Reply::text("still here")]).await;
+    let mut second = Acp::start_in(&server, &cwd, &[], Some(home.path())).await;
+    second.initialize().await;
+    let resumed = second.resume(&id, &cwd).await;
+    assert!(resumed.get("error").is_none(), "{resumed}");
+    assert!(second.replayed().is_empty(), "nothing is replayed");
+    let response = second.prompt(&id, "and now?").await;
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    let requests = server.requests();
+    let texts = texts(&requests[0].body);
+    assert!(texts.ends_with(&["hello", "hi there", "and now?"]), "{texts:?}");
+    // Resuming a session this process holds changes nothing; an unknown one is refused.
+    let again = second.resume(&id, &cwd).await;
+    assert!(again.get("error").is_none(), "{again}");
+    let unknown = second.resume("no-such-session", &cwd).await;
+    assert_eq!(unknown["error"]["code"], -32602, "{unknown}");
+    second.finish().await;
 }
