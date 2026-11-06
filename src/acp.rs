@@ -4,8 +4,9 @@
 //! become session updates, approvals become permission requests.
 //!
 //! Sessions are kept as files, one per session in the directory chat uses for the same
-//! working directory, so that a client can load one again in a later process; `session/load`
-//! replays the conversation to the client before it goes on.
+//! working directory, so that a client can list them and load one again in a later process:
+//! `session/load` replays the conversation to the client before it goes on, `session/resume`
+//! goes on without the replay.
 //!
 //! Stdout is the protocol channel: nothing else in this process may print there.
 
@@ -17,11 +18,13 @@ use std::time::Duration;
 use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{
     AgentCapabilities, CancelNotification, CompactionId, CompactionStatus, CompactionUpdate, Content, ContentBlock,
-    ContentChunk, Diff, Implementation, InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
-    NewSessionRequest, NewSessionResponse, Notice, NoticeSeverity, PermissionOption, PermissionOptionKind,
-    PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, SessionId, SessionNotification,
-    SessionUpdate, StopReason, TextContent, ToolCall, ToolCallContent, ToolCallId, ToolCallLocation, ToolCallStatus,
-    ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+    ContentChunk, Diff, Implementation, InitializeRequest, InitializeResponse, ListSessionsRequest,
+    ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse, Notice,
+    NoticeSeverity, PermissionOption, PermissionOptionKind, PromptRequest, PromptResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities, SessionId, SessionInfo,
+    SessionListCapabilities, SessionNotification, SessionResumeCapabilities, SessionUpdate, StopReason, TextContent,
+    ToolCall, ToolCallContent, ToolCallId, ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+    ToolKind,
 };
 use agent_client_protocol::{Agent, Client, Error, ErrorCode, Stdio};
 use anyhow::{Context, Result};
@@ -36,7 +39,7 @@ use zx_agent::interaction::{Approval, ApprovalRequest, Interaction};
 use zx_agent::otel::Telemetry;
 use zx_agent::profile::Builtin;
 use zx_agent::runner::RunReport;
-use zx_agent::session::{Entry, ProjectedMessage, SessionStore};
+use zx_agent::session::{Entry, ProjectedMessage, SessionInfo as StoredSession, SessionStore};
 use zx_agent::sync::lock;
 use zx_agent::text::clip;
 use zx_agent::tools::{BASH, EDIT_FILE, FIND, GREP, LS, READ_FILE, WRITE_FILE};
@@ -67,6 +70,12 @@ struct Live {
     session: AgentSession,
     /// The trace export of this session, while it lasts.
     _traced: Option<Subscription>,
+}
+
+/// Where a session the client names is.
+enum Located {
+    Live(Arc<Live>),
+    File(PathBuf),
 }
 
 struct Host {
@@ -105,32 +114,82 @@ impl Host {
         self.open(cx, cwd, file, false).await
     }
 
-    /// Load the session `request` names from the session directory of its `cwd`, replaying
-    /// the conversation to the client first. A session this process holds already is
-    /// replayed as it is, without opening its file again.
-    async fn load(&self, cx: &ConnectionTo<Client>, request: &LoadSessionRequest) -> Result<SessionId, Error> {
-        let id = &*request.session_id.0;
-        if let Some(live) = self.session(&request.session_id) {
-            let updates = Updates::new(cx.clone(), request.session_id.clone(), request.cwd.clone());
-            live.session
-                .inspect(|store| updates.replay(store))
-                .map_err(|error| failure(format!("cannot replay session {id}: {error}")))?;
-            return Ok(request.session_id.clone());
+    /// The session `id` for `cwd`: one this process holds, or the file it is kept in.
+    async fn locate(&self, id: &SessionId, cwd: &Path) -> Result<Located, Error> {
+        if let Some(live) = self.session(id) {
+            return Ok(Located::Live(live));
         }
+        let id = &*id.0;
         let dir = self
-            .session_dir(&request.cwd)
+            .session_dir(cwd)
             .map_err(|error| failure(format!("{error:#}")))?
             .ok_or_else(|| unknown_session(id, "the agent keeps no session files (--no-session)"))?;
         let list = sessions::list(dir.clone())
             .await
             .map_err(|error| failure(format!("{error:#}")))?;
-        let Some(session) = list.sessions.iter().find(|session| session.id == id) else {
-            return Err(unknown_session(id, &format!("no such session in {}", dir.display())));
+        match list.sessions.iter().find(|session| session.id == id) {
+            Some(session) => Ok(Located::File(session.path.clone())),
+            None => Err(unknown_session(id, &format!("no such session in {}", dir.display()))),
+        }
+    }
+
+    /// Load the session `request` names from the session directory of its `cwd`, replaying
+    /// the conversation to the client first. A session this process holds already is
+    /// replayed as it is, without opening its file again.
+    async fn load(&self, cx: &ConnectionTo<Client>, request: &LoadSessionRequest) -> Result<SessionId, Error> {
+        match self.locate(&request.session_id, &request.cwd).await? {
+            Located::Live(live) => {
+                let updates = Updates::new(cx.clone(), request.session_id.clone(), request.cwd.clone());
+                live.session
+                    .inspect(|store| updates.replay(store))
+                    .map_err(|error| failure(format!("cannot replay session {}: {error}", request.session_id.0)))?;
+                Ok(request.session_id.clone())
+            }
+            Located::File(path) => self
+                .open(cx, &request.cwd, SessionFile::Open(&path), true)
+                .await
+                .map_err(|error| failure(format!("{error:#}"))),
+        }
+    }
+
+    /// Continue the session `request` names without replaying it (`session/resume`): the
+    /// client keeps what it shows, and the conversation goes on from the file.
+    async fn resume(&self, cx: &ConnectionTo<Client>, request: &ResumeSessionRequest) -> Result<SessionId, Error> {
+        match self.locate(&request.session_id, &request.cwd).await? {
+            Located::Live(_) => Ok(request.session_id.clone()),
+            Located::File(path) => self
+                .open(cx, &request.cwd, SessionFile::Open(&path), false)
+                .await
+                .map_err(|error| failure(format!("{error:#}"))),
+        }
+    }
+
+    /// The sessions kept for `request.cwd`, or in the directory of the agent's own working
+    /// directory, most recently active first. A listing is one page, so a cursor is never
+    /// one of ours.
+    async fn list(&self, request: &ListSessionsRequest) -> Result<Vec<SessionInfo>, Error> {
+        if let Some(cursor) = &request.cursor {
+            return Err(Error::new(
+                ErrorCode::INVALID_PARAMS,
+                format!("unknown cursor {cursor:?}: a listing is one page"),
+            ));
+        }
+        let cwd = request.cwd.as_deref().or(self.settings.args.base.cwd.as_deref());
+        let cwd = cli::resolve_cwd(cwd).map_err(|error| failure(format!("{error:#}")))?;
+        let Some(dir) = self.session_dir(&cwd).map_err(|error| failure(format!("{error:#}")))? else {
+            return Ok(Vec::new());
         };
-        let path = session.path.clone();
-        self.open(cx, &request.cwd, SessionFile::Open(&path), true)
+        let list = sessions::list(dir)
             .await
-            .map_err(|error| failure(format!("{error:#}")))
+            .map_err(|error| failure(format!("{error:#}")))?;
+        // With `--session-dir`, one directory holds every working directory's sessions.
+        let cwd = cwd.display().to_string();
+        Ok(list
+            .sessions
+            .iter()
+            .filter(|session| request.cwd.is_none() || session.cwd == cwd)
+            .map(session_info)
+            .collect())
     }
 
     /// Prepare a session on `file` for `cwd`; with `replay`, the client first sees the
@@ -197,14 +256,15 @@ async fn serve(args: AcpArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> 
         "acp keeps one file per session: give --session-dir, not --session"
     );
     let shared = cli::Shared::connect(&args.base, Builtin::Assistant, &args.transport).await?;
-    // Without session files there is nothing to load.
-    let load_session = !args.no_session;
+    let capabilities = agent_capabilities(!args.no_session);
     let host = Arc::new(Host {
         settings: Settings { args, shared, traces },
         sessions: Mutex::new(HashMap::new()),
     });
     let on_new = Arc::clone(&host);
     let on_load = Arc::clone(&host);
+    let on_resume = Arc::clone(&host);
+    let on_list = Arc::clone(&host);
     let on_prompt = Arc::clone(&host);
     let on_cancel = Arc::clone(&host);
     Agent
@@ -214,7 +274,7 @@ async fn serve(args: AcpArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> 
             async move |request: InitializeRequest, responder, _cx| {
                 responder.respond(
                     InitializeResponse::new(request.protocol_version)
-                        .agent_capabilities(AgentCapabilities::new().load_session(load_session))
+                        .agent_capabilities(capabilities.clone())
                         .agent_info(Implementation::new("zx-agent", env!("CARGO_PKG_VERSION"))),
                 )
             },
@@ -238,6 +298,20 @@ async fn serve(args: AcpArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> 
                     Ok(_) => responder.respond(LoadSessionResponse::new()),
                     Err(error) => responder.respond_with_error(error),
                 }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: ResumeSessionRequest, responder, cx| match on_resume.resume(&cx, &request).await {
+                Ok(_) => responder.respond(ResumeSessionResponse::new()),
+                Err(error) => responder.respond_with_error(error),
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: ListSessionsRequest, responder, _cx| match on_list.list(&request).await {
+                Ok(sessions) => responder.respond(ListSessionsResponse::new(sessions)),
+                Err(error) => responder.respond_with_error(error),
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -289,6 +363,31 @@ fn failure(message: String) -> Error {
 /// The error for a session the agent does not have, with the reason.
 fn unknown_session(id: &str, why: &str) -> Error {
     Error::new(ErrorCode::INVALID_PARAMS, format!("unknown session {id}: {why}"))
+}
+
+/// What the agent offers: loading, listing and resuming sessions when it keeps their files.
+fn agent_capabilities(kept: bool) -> AgentCapabilities {
+    let capabilities = AgentCapabilities::new().load_session(kept);
+    if !kept {
+        return capabilities;
+    }
+    capabilities.session_capabilities(
+        SessionCapabilities::new()
+            .list(SessionListCapabilities::new())
+            .resume(SessionResumeCapabilities::new()),
+    )
+}
+
+/// A listed session as the client shows it: its first prompt as the title, its last
+/// activity as the time.
+fn session_info(session: &StoredSession) -> SessionInfo {
+    let updated_at = i64::try_from(session.last_activity_ms)
+        .ok()
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+    SessionInfo::new(SessionId::new(session.id.as_str()), PathBuf::from(&session.cwd))
+        .title(session.first_prompt.as_deref().map(sessions::preview_text))
+        .updated_at(updated_at)
 }
 
 /// The text of a prompt: its text blocks, one per line. The agent advertises no image, audio
