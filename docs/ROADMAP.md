@@ -74,7 +74,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P9 | 可选增强 | 进行中：token 预算（PR #47）、OpenTelemetry（PR #49）、请求附加字段（PR #50）、crate 拆分（PR #52）、通用化整理（PR #54）已完成；剩更多 provider |
 | P10 | 与 pi 的能力对齐 | 已完成（最后一个是 PR #72）：上下文超长后恢复（PR #56）、容器沙箱（PR #57）、edit / write（PR #58）、grep / find / ls（PR #59）、推理强度与续跑（PR #60、#61、#65）、会话目录 / fork / 分支（PR #67、#68、#72）、扩展能力与消息队列、模型元数据与计量、幂等键、MCP 进度、可观测、行为评测框架（PR #72）；chat 的便利功能按 D13 不做 |
 | P11–P13 | 内核与项目整理、按规则评审 | 已完成（PR #70、#71、#75、#77）；模块文件布局（PR #78） |
-| P14 | 对照 pi durable 的小项与无人值守的缺口 | 进行中（未提交）：工具结果上报用量（`ToolOutput::usage`，按工具名汇总进 `RunReport::tool_usage`，不计入 token 预算）、撤回排队的消息（`MessageQueues::withdraw`）、定时巡检保留会话文件、被拒调用计数（`deniedCalls`）与 `run --fail-on-denied`（退出码 9）、成本预算 `--cost-budget`（退出码 8，单位与 `[[models]]` 的单价相同）；对照基准为 pi `a92283056` 的 `packages/durable` |
+| P14 | 对照 pi durable 的小项与无人值守的缺口 | 已完成（PR #80）：工具结果上报用量（`ToolOutput::usage`，按工具名汇总进 `RunReport::tool_usage`，不计入 token 预算）、撤回排队的消息（`MessageQueues::withdraw`）、定时巡检保留会话文件、被拒调用计数（`deniedCalls`）与 `run --fail-on-denied`（退出码 9）、成本预算 `--cost-budget`（退出码 8，单位与 `[[models]]` 的单价相同）；对照基准为 pi `a92283056` 的 `packages/durable` |
 
 ## 5. 待办与已知缺口
 
