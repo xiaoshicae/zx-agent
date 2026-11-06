@@ -46,6 +46,10 @@ pub const LS: &str = "ls";
 /// Names accepted by [`builtin_tools`].
 pub const BUILTIN_TOOL_NAMES: &[&str] = &[BASH, READ_FILE, EDIT_FILE, WRITE_FILE, GREP, FIND, LS];
 
+/// The largest file the text tools read or edit by default: enough for any source file, and
+/// far more than one call can show.
+const DEFAULT_MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
+
 /// Build built-in tools by name, in the given order, without duplicates. `hidden_env` names
 /// environment variables that bash commands must not see, such as the API key variable.
 /// The tools run on this machine; see [`builtin_tools_with`] for another executor.
@@ -77,7 +81,7 @@ pub fn builtin_tools_with(
         let tool: Arc<dyn Tool> = match name {
             BASH => Arc::new(BashTool {
                 default_timeout: bash_timeout,
-                max_timeout: bash_timeout.max(BashTool::default().max_timeout),
+                max_timeout: bash_timeout.max(bash::MAX_TIMEOUT),
                 hidden_env: hidden_env.to_vec(),
                 executor: Arc::clone(executor),
                 ..BashTool::default()

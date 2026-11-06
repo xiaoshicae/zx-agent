@@ -48,7 +48,7 @@ pub fn truncate_head(text: &str, max_lines: usize, max_bytes: usize) -> Truncate
 }
 
 /// Keep the end. Suits command output and logs, where the latest lines matter most.
-pub fn truncate_tail(text: &str, max_lines: usize, max_bytes: usize) -> Truncated {
+pub(crate) fn truncate_tail(text: &str, max_lines: usize, max_bytes: usize) -> Truncated {
     let lines: Vec<&str> = text.split_inclusive('\n').collect();
     let mut kept_rev: Vec<&str> = Vec::new();
     let mut bytes = 0;

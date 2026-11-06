@@ -130,7 +130,26 @@ pub(crate) fn apply_edits(content: &str, edits: &[Edit], path: &str) -> Result<S
     } else {
         content
     };
+    let replacements = locate(&edits, base, &tolerant_content, path)?;
+    check_overlaps(&replacements, path)?;
+    let changed = replace_touched_lines(content, base, &replacements);
+    if changed == content {
+        return Err(format!(
+            "no changes made to {path}: the replacement produced identical content"
+        ));
+    }
+    Ok(changed)
+}
 
+/// Where each of `edits` matches in `base`, in order of position. Errors name an edit that
+/// is not found, or that is found more than once in the tolerant form of the content.
+fn locate<'a>(
+    edits: &'a [Edit],
+    base: &str,
+    tolerant_content: &str,
+    path: &str,
+) -> Result<Vec<Replacement<'a>>, String> {
+    let total = edits.len();
     let mut replacements = Vec::with_capacity(total);
     for (index, edit) in edits.iter().enumerate() {
         let Some((start, len)) = find(base, &edit.old_text) else {
@@ -154,6 +173,11 @@ pub(crate) fn apply_edits(content: &str, edits: &[Edit], path: &str) -> Result<S
         });
     }
     replacements.sort_by_key(|replacement| replacement.start);
+    Ok(replacements)
+}
+
+/// Check that no two of `replacements`, sorted by position, touch the same bytes.
+fn check_overlaps(replacements: &[Replacement<'_>], path: &str) -> Result<(), String> {
     for pair in replacements.windows(2) {
         if pair[0].start + pair[0].len > pair[1].start {
             return Err(format!(
@@ -162,14 +186,7 @@ pub(crate) fn apply_edits(content: &str, edits: &[Edit], path: &str) -> Result<S
             ));
         }
     }
-
-    let changed = replace_touched_lines(content, base, &replacements);
-    if changed == content {
-        return Err(format!(
-            "no changes made to {path}: the replacement produced identical content"
-        ));
-    }
-    Ok(changed)
+    Ok(())
 }
 
 /// `original` with the lines that `replacements`, matched in `base`, touch rewritten from

@@ -11,11 +11,11 @@ use super::edit_text::{
     Edit, apply_edits, line_ending, normalize_to_lf, restore_line_endings, split_bom, unified_patch,
 };
 use super::mutation::FileMutationQueue;
-use super::{looks_binary, parse_args, resolve, unless_cancelled};
+use super::{DEFAULT_MAX_FILE_BYTES, looks_binary, parse_args, resolve, unless_cancelled};
 use crate::agent::{ExecutionMode, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput};
 use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
-use crate::text::prefix_within;
+use crate::text::prefix_noted;
 
 /// The most bytes of the patch in a result's details: details over the loop's limit are
 /// dropped whole, so a long patch is cut to leave room for the other fields.
@@ -34,7 +34,7 @@ pub struct EditFileTool {
 impl Default for EditFileTool {
     fn default() -> Self {
         Self {
-            max_file_bytes: 10 * 1024 * 1024,
+            max_file_bytes: DEFAULT_MAX_FILE_BYTES,
             executor: Arc::new(LocalExecutor),
             queue: Arc::default(),
         }
@@ -178,7 +178,7 @@ impl Tool for EditFileTool {
         let mut details = Map::new();
         details.insert("path".into(), json!(path.display().to_string()));
         if let Some((patch, first_changed_line)) = unified_patch(shown, &original, &changed) {
-            details.insert("patch".into(), json!(clip(&patch, MAX_PATCH_BYTES)));
+            details.insert("patch".into(), json!(bounded_patch(&patch)));
             details.insert("firstChangedLine".into(), json!(first_changed_line));
         }
         let count = args.edits.len();
@@ -192,13 +192,11 @@ fn is_single_edit(value: &Value) -> bool {
     value.get("oldText").is_some_and(Value::is_string) && value.get("newText").is_some_and(Value::is_string)
 }
 
-/// `text` cut at a character boundary to at most `max_bytes`, with a note when it was cut.
-fn clip(text: &str, max_bytes: usize) -> String {
-    if text.len() <= max_bytes {
-        return text.to_string();
-    }
-    let kept = prefix_within(text, max_bytes);
-    format!("{kept}\n[patch cut at {} of {} bytes]\n", kept.len(), text.len())
+/// `patch` within [`MAX_PATCH_BYTES`], with a note when it was cut.
+fn bounded_patch(patch: &str) -> String {
+    prefix_noted(patch, MAX_PATCH_BYTES, |kept, total| {
+        format!("\n[patch cut at {kept} of {total} bytes]\n")
+    })
 }
 
 #[cfg(test)]
@@ -252,11 +250,17 @@ mod tests {
     }
 
     #[test]
-    fn a_long_patch_is_cut_at_a_character_boundary() {
-        let text = "界".repeat(10);
-        let clipped = clip(&text, 10);
-        assert!(clipped.starts_with(&"界".repeat(3)), "{clipped}");
-        assert!(clipped.contains("[patch cut at 9 of 30 bytes]"), "{clipped}");
-        assert_eq!(clip("short", 10), "short");
+    fn a_long_patch_is_cut_at_a_character_boundary_with_a_note() {
+        // The limit falls inside a character; what is kept is a String, so it ends before it.
+        let text = format!("x{}", "界".repeat(MAX_PATCH_BYTES / 3 + 10));
+        let cut = bounded_patch(&text);
+        let (kept, note) = cut.split_once("\n[patch cut at ").expect("the patch is cut");
+        assert!(
+            text.starts_with(kept) && kept.len() <= MAX_PATCH_BYTES,
+            "{} bytes kept",
+            kept.len()
+        );
+        assert_eq!(note, format!("{} of {} bytes]\n", kept.len(), text.len()));
+        assert_eq!(bounded_patch("short"), "short");
     }
 }
