@@ -23,7 +23,7 @@ use super::hooks::{
 };
 use super::policy::Decision;
 use super::queue::{MessageQueues, Queue, QueueMode, QueuedMessage};
-use super::session_runtime::{ContextPreparation, SessionRuntime};
+use super::session_host::{ContextPreparation, Prepared, SessionHost};
 use super::tool::{ActiveTools, Effects, ExecutionMode, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput};
 use crate::ai::{
     AssistantMessage, Message, ModelMeta, Provider, Reasoning, Request, StopReason, StreamEvent, SystemMessage,
@@ -141,7 +141,7 @@ pub struct LoopControl<'a> {
     pub sink: &'a dyn EventSink,
     /// Records each step before the loop acts on it; the Runner supplies its session. Without
     /// one, the loop keeps messages and edits only in its context.
-    pub(crate) session: Option<&'a mut dyn SessionRuntime>,
+    pub(crate) session: Option<&'a mut dyn SessionHost>,
     /// The run this attempt belongs to; without one, `run_loop` is a run of its own.
     pub(crate) trace: Option<&'a RunTrace>,
     /// 1 for the first attempt of a run, plus one for each retry.
@@ -218,18 +218,17 @@ pub async fn run_loop(
     };
 
     let own_trace;
-    let trace = match control.trace {
-        Some(trace) => trace,
-        None => {
-            own_trace = RunTrace::new(
-                None,
-                config.spec.cwd.clone(),
-                control.cancel.clone(),
-                config.queues.clone(),
-                config.active_tools.clone(),
-            );
-            &own_trace
-        }
+    let trace = if let Some(trace) = control.trace {
+        trace
+    } else {
+        own_trace = RunTrace::new(
+            None,
+            config.spec.cwd.clone(),
+            control.cancel.clone(),
+            config.queues.clone(),
+            config.active_tools.clone(),
+        );
+        &own_trace
     };
 
     let mut engine = Engine {
@@ -361,7 +360,6 @@ impl<'a> Engine<'a, '_, '_> {
         self.initialize(context, prompts, result).await?;
         let mut pending = PendingInput::default();
 
-        // main loop
         loop {
             match self.prepare_turn(context, result, &mut pending).await? {
                 TurnPreparation::Ready => {}
@@ -451,16 +449,7 @@ impl<'a> Engine<'a, '_, '_> {
         let turn = *turn;
         let needs_more = *tool_progress == ToolProgress::Continue;
         let stop = message.stop_reason;
-        // Inspect queues without consuming them: stopping or failing in a hook must
-        // leave accepted user input available to the next run.
-        let queued = config.queues.has(Queue::Steering) || (!needs_more && config.queues.has(Queue::FollowUp));
-        let disposition = if needs_more || queued {
-            TurnDisposition::Continue
-        } else if *tool_progress == ToolProgress::Terminated {
-            TurnDisposition::Terminated
-        } else {
-            TurnDisposition::Stop
-        };
+        let disposition = self.disposition(*tool_progress);
         let remaining_model_requests = self
             .control
             .max_model_requests
@@ -515,6 +504,31 @@ impl<'a> Engine<'a, '_, '_> {
         Ok(None)
     }
 
+    /// What the normal loop would do after a response, before the finish hooks decide.
+    fn disposition(&self, tool_progress: ToolProgress) -> TurnDisposition {
+        let needs_more = tool_progress == ToolProgress::Continue;
+        // Inspect queues without consuming them: stopping or failing in a hook must
+        // leave accepted user input available to the next run.
+        let queues = &self.config.queues;
+        let queued = queues.has(Queue::Steering) || (!needs_more && queues.has(Queue::FollowUp));
+        if needs_more || queued {
+            TurnDisposition::Continue
+        } else if tool_progress == ToolProgress::Terminated {
+            TurnDisposition::Terminated
+        } else {
+            TurnDisposition::Stop
+        }
+    }
+
+    /// The outcome that ends the attempt before the next request: cancellation, or a budget
+    /// with no room for another request.
+    fn checkpoint(&self, result: &LoopResult) -> Option<LoopOutcome> {
+        if self.control.cancel.is_cancelled() {
+            return Some(LoopOutcome::Aborted);
+        }
+        exhausted(self.control, result)
+    }
+
     /// Gather input and prepare the context before a task request.
     async fn prepare_turn(
         &mut self,
@@ -524,18 +538,11 @@ impl<'a> Engine<'a, '_, '_> {
     ) -> Result<TurnPreparation, Halt> {
         let config = self.config;
         // A turn exists to make a request: without budget, or once cancelled, none is made,
-        // and queued input stays queued for the next run. The first turn of an attempt
-        // starts with it, before the prompt, so this is checked before taking input as
-        // well; a summary request may also have used the budget inside the current turn.
-        if self.control.cancel.is_cancelled() {
-            return Ok(TurnPreparation::Stop(LoopOutcome::Aborted));
-        }
-
-        if let Some(outcome) = exhausted(self.control, result) {
+        // and queued input stays queued for the next run. Checked before taking input as
+        // well, because a summary request can use the budget inside the turn.
+        if let Some(outcome) = self.checkpoint(result) {
             return Ok(TurnPreparation::Stop(outcome));
         }
-
-        // A new turn, unless one is in progress.
         self.start_turn(result).await;
 
         // State an extension asked to record is written before the input it may refer to.
@@ -549,10 +556,7 @@ impl<'a> Engine<'a, '_, '_> {
         if let Some(message) = pending.requested.take() {
             self.input(context, message, None).await?;
         }
-        if self.control.cancel.is_cancelled() {
-            return Ok(TurnPreparation::Stop(LoopOutcome::Aborted));
-        }
-        if let Some(outcome) = exhausted(self.control, result) {
+        if let Some(outcome) = self.checkpoint(result) {
             return Ok(TurnPreparation::Stop(outcome));
         }
         let edits = config
@@ -563,21 +567,18 @@ impl<'a> Engine<'a, '_, '_> {
         for edit in edits {
             self.edit(context, edit).await?;
         }
-        if self.control.cancel.is_cancelled() {
-            return Ok(TurnPreparation::Stop(LoopOutcome::Aborted));
+        if let Some(outcome) = self.checkpoint(result) {
+            return Ok(TurnPreparation::Stop(outcome));
         }
         // Summary requests count against the budget but are reported as a compaction,
         // not as turns of their own.
         let requests = self.prepare_context(context, result).await?;
-        if self.control.cancel.is_cancelled() {
-            return Ok(TurnPreparation::Stop(LoopOutcome::Aborted));
-        }
-        if let Some(outcome) = exhausted(self.control, result) {
+        if let Some(outcome) = self.checkpoint(result) {
             return Ok(TurnPreparation::Stop(outcome));
         }
         if requests > 0 {
-            // Preparation is a request boundary too. Drain newly arrived steering
-            // and record context hooks again before the next task request.
+            // Preparation is a request boundary too: drain newly arrived steering and run
+            // the context hooks again before the next task request.
             return Ok(TurnPreparation::Retry);
         }
         Ok(TurnPreparation::Ready)

@@ -14,6 +14,7 @@ use tokio::process::Command;
 
 use common::fake_mcp::{Era, FakeMcp, Reply as McpReply, tool};
 use common::mock_server::{MockServer, Reply};
+use common::zx_agent;
 
 const TOKEN_VAR: &str = "ZX_MCP_CLI_TEST_TOKEN";
 const TOKEN: &str = "mcp-cli-secret-5678";
@@ -42,7 +43,7 @@ fn profile(dir: &Path, url: &str, builtin_tools: &str) -> PathBuf {
 
 /// `zx-agent <mode>` against `model` with `profile`, the token set and no API key.
 fn program(mode: &str, model: &MockServer, dir: &Path, profile: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_zx-agent"));
+    let mut command = zx_agent();
     command
         .args([mode, "--model", "mock", "--base-url", &model.base_url])
         .args(["--max-retries", "0", "--api-key-env", KEY_VAR, "--no-context"])

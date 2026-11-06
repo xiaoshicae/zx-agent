@@ -36,9 +36,10 @@ use zx_agent::sync::lock;
 use zx_agent::text::clip;
 use zx_agent::tools::{BASH, EDIT_FILE, FIND, GREP, LS, READ_FILE, WRITE_FILE};
 
-use crate::EXIT_COMPLETED;
-use crate::chat::describe_call;
-use crate::cli::{self, AcpArgs, SessionFile, SessionOptions};
+use crate::cli::{self, AcpArgs, SessionOptions};
+use crate::process::EXIT_COMPLETED;
+use crate::render::describe_call;
+use crate::sessions::SessionFile;
 
 /// Characters of a tool call's title; the client shows the raw input in full.
 const TITLE_CHARS: usize = 80;
@@ -47,12 +48,11 @@ const ALLOW_ONCE: &str = "allow-once";
 const ALLOW_SESSION: &str = "allow-session";
 const REJECT_ONCE: &str = "reject-once";
 
-/// What every session shares: the arguments, the instructions read once, the MCP
-/// connections made once and the trace export.
+/// What every session shares: the arguments, the instructions and MCP connections, and the
+/// trace export.
 struct Settings {
     args: AcpArgs,
-    instructions: Option<String>,
-    mcp: cli::McpTools,
+    shared: cli::Shared,
     traces: Option<Arc<dyn EventSink>>,
 }
 
@@ -84,18 +84,13 @@ impl Host {
             base: &base,
             transport: &args.transport,
             request: &args.request,
+            budget: &args.budget,
             model: &args.base.model,
             file: SessionFile::Memory,
             default_profile: Builtin::Assistant,
-            budget: cli::Budget {
-                max_model_requests: args.max_model_requests,
-                timeout_secs: args.timeout_secs,
-                token_budget: args.token_budget,
-                continue_on_length: None,
-            },
-            instructions: self.settings.instructions.as_deref(),
+            continue_on_length: None,
+            shared: &self.settings.shared,
             hidden_env: &[],
-            mcp: &self.settings.mcp,
         })
         .await?;
         let id = SessionId::new(prepared.store.header().id.as_str());
@@ -129,15 +124,9 @@ pub(crate) async fn run(args: AcpArgs) -> Result<u8> {
 }
 
 async fn serve(args: AcpArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> {
-    let instructions = cli::read_instructions(&args.base)?;
-    let mcp = cli::connect_mcp(&args.base, Builtin::Assistant, &args.transport).await?;
+    let shared = cli::Shared::connect(&args.base, Builtin::Assistant, &args.transport).await?;
     let host = Arc::new(Host {
-        settings: Settings {
-            args,
-            instructions,
-            mcp,
-            traces,
-        },
+        settings: Settings { args, shared, traces },
         sessions: Mutex::new(HashMap::new()),
     });
     let on_new = Arc::clone(&host);
@@ -483,31 +472,29 @@ impl EventSink for Updates {
                 max_retries,
                 delay_ms,
                 error,
-            } => self.send(SessionUpdate::Notice(
-                Notice::new(
-                    NoticeSeverity::Warning,
-                    format!("Retrying the model request ({attempt}/{max_retries}) in {delay_ms}ms"),
-                )
-                .description(error.clone()),
+            } => self.send(notice(
+                NoticeSeverity::Warning,
+                format!("Retrying the model request ({attempt}/{max_retries}) in {delay_ms}ms"),
+                error,
             )),
-            AgentEvent::ContextOverflow { error } => self.send(SessionUpdate::Notice(
-                Notice::new(
-                    NoticeSeverity::Warning,
-                    "The context is too long for the model; summarizing before another attempt",
-                )
-                .description(error.clone()),
+            AgentEvent::ContextOverflow { error } => self.send(notice(
+                NoticeSeverity::Warning,
+                "The context is too long for the model; summarizing before another attempt",
+                error,
             )),
-            AgentEvent::HookFailed { hook, phase, error } => self.send(SessionUpdate::Notice(
-                Notice::new(NoticeSeverity::Error, format!("Hook {hook} failed in {phase}")).description(error.clone()),
-            )),
-            AgentEvent::CompactionStart { .. } => self.send(SessionUpdate::CompactionUpdate(CompactionUpdate::new(
-                CompactionId::new(event.run_id.as_str()),
-                CompactionStatus::InProgress,
-            ))),
-            AgentEvent::CompactionEnd { .. } => self.send(SessionUpdate::CompactionUpdate(CompactionUpdate::new(
-                CompactionId::new(event.run_id.as_str()),
-                CompactionStatus::Completed,
-            ))),
+            AgentEvent::HookFailed { hook, phase, error } => {
+                self.send(notice(
+                    NoticeSeverity::Error,
+                    format!("Hook {hook} failed in {phase}"),
+                    error,
+                ));
+            }
+            AgentEvent::CompactionStart { .. } => {
+                self.send(compaction_update(&event.run_id, CompactionStatus::InProgress));
+            }
+            AgentEvent::CompactionEnd { .. } => {
+                self.send(compaction_update(&event.run_id, CompactionStatus::Completed));
+            }
             AgentEvent::CompactionFailed { error, .. } => self.send(SessionUpdate::CompactionUpdate(
                 CompactionUpdate::new(CompactionId::new(event.run_id.as_str()), CompactionStatus::Failed)
                     .error(error.clone()),
@@ -532,6 +519,16 @@ impl EventSink for Updates {
             | AgentEvent::ToolCallRecovered { .. } => {}
         }
     }
+}
+
+/// A notice to the client, described by the error or reason behind it.
+fn notice(severity: NoticeSeverity, title: impl Into<String>, description: &str) -> SessionUpdate {
+    SessionUpdate::Notice(Notice::new(severity, title).description(description.to_string()))
+}
+
+/// The state of the summary that runs as `run_id`.
+fn compaction_update(run_id: &str, status: CompactionStatus) -> SessionUpdate {
+    SessionUpdate::CompactionUpdate(CompactionUpdate::new(CompactionId::new(run_id), status))
 }
 
 /// A short title for a call, as the client lists it; the raw input carries everything.

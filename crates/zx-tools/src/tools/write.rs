@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::mutation::FileMutationQueue;
-use super::read::resolve;
+use super::{parse_args, resolve, unless_cancelled};
 use crate::agent::{ExecutionMode, Tool, ToolContext, ToolOutput};
 use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
@@ -63,27 +63,25 @@ impl Tool for WriteFileTool {
         }
     }
 
-    /// The mode of the executor: calls run one at a time when it handles one at a time.
     fn execution_mode(&self) -> ExecutionMode {
         self.executor.execution_mode()
     }
 
     fn validate_arguments(&self, args: &Value) -> Result<(), String> {
-        let args = Args::deserialize(args).map_err(|e| format!("invalid arguments: {e}"))?;
+        let args: Args = parse_args(args)?;
         resolve(Path::new("."), &args.path).map(|_| ())
     }
 
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
-        let args: Args = serde_json::from_value(args).map_err(|e| format!("invalid arguments: {e}"))?;
+        let args: Args = parse_args(&args)?;
         let path = resolve(&ctx.cwd, &args.path)?;
-        let _turn = tokio::select! {
-            biased;
-            _ = ctx.cancel.cancelled() => return Err("write cancelled before it started".to_string()),
-            turn = self.queue.turn(&path) => turn,
-        };
+        let cancelled = || "write cancelled before it started".to_string();
+        let _turn = unless_cancelled(ctx, self.queue.turn(&path))
+            .await
+            .ok_or_else(cancelled)?;
         // Checked last before writing: a write is not interrupted once it has started.
         if ctx.cancel.is_cancelled() {
-            return Err("write cancelled before it started".to_string());
+            return Err(cancelled());
         }
         self.executor.write_file(&path, args.content.as_bytes()).await?;
         let bytes = args.content.len();

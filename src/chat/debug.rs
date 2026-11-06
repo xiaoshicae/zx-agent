@@ -4,9 +4,9 @@ use std::time::Instant;
 
 use chrono::{DateTime, Local};
 use zx_agent::agent::{AgentEvent, ApprovalResult, Event, RunOutcome, ToolVerdict};
-use zx_agent::ai::{ContentBlock, Message, StopReason};
+use zx_agent::ai::{ContentBlock, Message, StopReason, Usage};
 
-use super::output::visible;
+use crate::render::visible;
 
 #[derive(Default)]
 pub(super) struct DebugState {
@@ -61,15 +61,13 @@ impl DebugState {
                 self.requests = self.requests.saturating_add(1);
                 self.request_started = Some(Instant::now());
                 let turn = self.turn.map(|turn| format!(" · turn={turn}")).unwrap_or_default();
-                let entry = entry_id
-                    .as_deref()
-                    .map(|id| format!(" · entry={id}"))
-                    .unwrap_or_default();
                 (
                     Severity::Info,
                     format!(
-                        "Request #{} · {:?} · model={model}{turn} · attempt={attempt}{entry}",
-                        self.requests, kind
+                        "Request #{} · {:?} · model={model}{turn} · attempt={attempt}{}",
+                        self.requests,
+                        kind,
+                        entry(entry_id.as_deref())
                     ),
                 )
             }
@@ -82,10 +80,11 @@ impl DebugState {
                     .take()
                     .map(|start| format!(" · elapsed={:.2}s", start.elapsed().as_secs_f64()))
                     .unwrap_or_default();
-                let usage = &message.usage;
                 let mut text = format!(
-                    "Response #{} · {:?}{elapsed} · tokens in={} out={} cache={} total={}",
-                    self.requests, message.stop_reason, usage.input, usage.output, usage.cache_read, usage.total_tokens
+                    "Response #{} · {:?}{elapsed} · {}",
+                    self.requests,
+                    message.stop_reason,
+                    tokens(&message.usage)
                 );
                 if let Some(error) = &message.error_message {
                     text.push_str(&format!("\n  error: {error}"));
@@ -122,23 +121,20 @@ impl DebugState {
                 message: Message::ToolResult(result),
                 entry_id,
                 ..
-            } => {
-                let entry = entry_id
-                    .as_deref()
-                    .map(|id| format!(" · entry={id}"))
-                    .unwrap_or_default();
-                (
-                    if result.is_error {
-                        Severity::Warn
-                    } else {
-                        Severity::Info
-                    },
-                    format!(
-                        "Tool result · {} · call={}{entry}\n  {}",
-                        result.tool_name, result.tool_call_id, result.content
-                    ),
-                )
-            }
+            } => (
+                if result.is_error {
+                    Severity::Warn
+                } else {
+                    Severity::Info
+                },
+                format!(
+                    "Tool result · {} · call={}{}\n  {}",
+                    result.tool_name,
+                    result.tool_call_id,
+                    entry(entry_id.as_deref()),
+                    result.content
+                ),
+            ),
             MessageEnd {
                 message: Message::User { kind, .. },
                 entry_id,
@@ -193,7 +189,7 @@ impl DebugState {
                 },
                 format!(
                     "Tool policy · {tool_name} · call={tool_call_id} · {verdict:?}{}",
-                    reason.as_deref().map(|r| format!(" · {r}")).unwrap_or_default()
+                    reason_suffix(reason.as_deref())
                 ),
             ),
             ApprovalRequested {
@@ -224,7 +220,7 @@ impl DebugState {
                 },
                 format!(
                     "Approval resolved · {tool_name} · call={tool_call_id} · {approval:?} · {wait_ms}ms{}",
-                    reason.as_deref().map(|r| format!(" · {r}")).unwrap_or_default()
+                    reason_suffix(reason.as_deref())
                 ),
             ),
             ToolExecutionEnd {
@@ -301,8 +297,8 @@ impl DebugState {
                 (
                     Severity::Info,
                     format!(
-                        "Compaction finished · {input_bytes} → {output_bytes} bytes · automatic={automatic} · entry={entry_id} · tokens in={} out={} cache={} total={}",
-                        usage.input, usage.output, usage.cache_read, usage.total_tokens
+                        "Compaction finished · {input_bytes} → {output_bytes} bytes · automatic={automatic} · entry={entry_id} · {}",
+                        tokens(usage)
                     ),
                 )
             }
@@ -325,17 +321,13 @@ impl DebugState {
                 ),
             ),
             RunEnd { report } => {
-                let usage = &report.usage;
                 let mut text = format!(
-                    "Task finished · {:?} · model_requests={} · observed_requests={} · retries={} · tokens in={} out={} cache={} total={}",
+                    "Task finished · {:?} · model_requests={} · observed_requests={} · retries={} · {}",
                     report.outcome,
                     report.model_requests,
                     self.requests,
                     report.retries,
-                    usage.input,
-                    usage.output,
-                    usage.cache_read,
-                    usage.total_tokens
+                    tokens(&report.usage)
                 );
                 if let Some(path) = &report.session_file {
                     text.push_str(&format!(" · session={path}"));
@@ -362,6 +354,23 @@ enum Severity {
     Info,
     Warn,
     Error,
+}
+
+/// ` · entry=<id>` when the event names its session entry.
+fn entry(entry_id: Option<&str>) -> String {
+    entry_id.map(|id| format!(" · entry={id}")).unwrap_or_default()
+}
+
+/// ` · <reason>` when there is one.
+fn reason_suffix(reason: Option<&str>) -> String {
+    reason.map(|reason| format!(" · {reason}")).unwrap_or_default()
+}
+
+fn tokens(usage: &Usage) -> String {
+    format!(
+        "tokens in={} out={} cache={} total={}",
+        usage.input, usage.output, usage.cache_read, usage.total_tokens
+    )
 }
 
 fn format_line(at_ms: u64, severity: Severity, text: &str, color: bool) -> String {

@@ -157,10 +157,7 @@ impl Provider for FauxProvider {
                         response_id: None,
                         response_model: None,
                     };
-                    match message.stop_reason {
-                        StopReason::Error | StopReason::Aborted => StreamEvent::Error(message),
-                        StopReason::Stop | StopReason::Length | StopReason::ToolUse => StreamEvent::Done(message),
-                    }
+                    StreamEvent::ending(message)
                 }
             };
             // A failed terminal send only means its consumer has gone away.

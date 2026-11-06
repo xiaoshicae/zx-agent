@@ -22,8 +22,7 @@ pub const AVAILABLE_SKILLS: &str = "available_skills";
 pub const GENERATED_SECTIONS: [&str; 4] = [ENVIRONMENT, COMMAND_POLICY, PROJECT_CONTEXT, AVAILABLE_SKILLS];
 
 /// `instructions` as the preamble, followed by every non-empty section. Sections are wrapped
-/// in tags of their names, so the model can tell generated facts from instructions
-/// (pi: `buildSystemPromptSections`).
+/// in tags of their names, so the model can tell generated facts from instructions.
 pub fn build_system_prompt(instructions: &str, sections: &[(&str, &str)]) -> SystemPrompt {
     sections.iter().fold(
         SystemPrompt::default().with_section(PREAMBLE, instructions),

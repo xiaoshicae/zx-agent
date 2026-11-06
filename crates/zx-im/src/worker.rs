@@ -191,10 +191,17 @@ struct Pending {
     id: ApprovalId,
     tool_call_id: String,
     card: MessageRef,
-    /// Until someone decides.
-    decide: Option<oneshot::Sender<Decided>>,
-    /// Who decided, once someone has.
-    user: Option<UserId>,
+    decision: Decision,
+}
+
+/// How far a card's decision has come.
+enum Decision {
+    /// Nobody has clicked yet; the first approver's click goes here.
+    Open(oneshot::Sender<Decided>),
+    /// Who decided.
+    By(UserId),
+    /// A click came after the run stopped waiting; the card closes without a decider.
+    Lapsed,
 }
 
 /// Where the conversation posts and reports. Separate from [`Worker`] so that posting
@@ -210,33 +217,25 @@ impl Outlet {
     /// Post text in the thread. A failure is reported to the operator and returns `None`.
     async fn post(&self, text: String) -> Option<MessageRef> {
         let message = Outbound::Text(text);
-        match tokio::time::timeout(self.shared.outbound_timeout, self.channel.send(&self.to, &message)).await {
-            Ok(Ok(posted)) => Some(posted),
-            Ok(Err(error)) => {
-                self.failed(format!("cannot post: {error}"));
-                None
-            }
-            Err(_) => {
-                self.failed(format!(
-                    "posting took longer than {} s",
-                    self.shared.outbound_timeout.as_secs()
-                ));
-                None
-            }
-        }
+        self.shared
+            .bounded(
+                Some(&self.key),
+                "post",
+                "posting",
+                self.channel.send(&self.to, &message),
+            )
+            .await
     }
 
     /// Replace a posted message. A failure is reported to the operator.
     async fn replace(&self, posted: &MessageRef, message: Outbound) {
-        match tokio::time::timeout(self.shared.outbound_timeout, self.channel.update(posted, &message)).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => self.failed(format!("cannot update message {}: {error}", posted.id)),
-            Err(_) => self.failed(format!(
-                "updating message {} took longer than {} s",
-                posted.id,
-                self.shared.outbound_timeout.as_secs()
-            )),
-        }
+        let (act, acting) = (
+            format!("update message {}", posted.id),
+            format!("updating message {}", posted.id),
+        );
+        self.shared
+            .bounded(Some(&self.key), &act, &acting, self.channel.update(posted, &message))
+            .await;
     }
 
     /// Open the session, with this thread as the host of its approvals.
@@ -394,7 +393,7 @@ impl Worker {
             }
         }
         // The loop looks for input at the end of each turn, so a message steered after the
-        // last look waits in the queue (docs/serve-im-review.md, gap 3).
+        // last look waits in the queue.
         let leftover = match self.open.as_ref().map(|open| open.session.take_queued()) {
             Some(Ok(messages)) => messages,
             Some(Err(error)) => {
@@ -486,19 +485,17 @@ impl Worker {
         }
         let pending = &mut self.pending[index];
         // The first approver's click decides; later clicks on the card change nothing.
-        let Some(decide) = pending.decide.take() else {
+        let Decision::Open(decide) = std::mem::replace(&mut pending.decision, Decision::Lapsed) else {
             return;
         };
         // Sending fails when confirm stopped waiting (timeout or cancellation); the run's
         // approval_resolved event then closes the card without a decider.
-        if decide
-            .send(Decided {
-                user: user.clone(),
-                choice,
-            })
-            .is_ok()
-        {
-            pending.user = Some(user);
+        let decided = Decided {
+            user: user.clone(),
+            choice,
+        };
+        if decide.send(decided).is_ok() {
+            pending.decision = Decision::By(user);
         }
     }
 
@@ -508,8 +505,7 @@ impl Worker {
                 id: posted.id,
                 tool_call_id: posted.tool_call_id,
                 card: posted.card,
-                decide: Some(posted.decide),
-                user: None,
+                decision: Decision::Open(posted.decide),
             }),
             ApprovalUpdate::Resolved {
                 tool_call_id,
@@ -523,13 +519,17 @@ impl Worker {
                     .map(|index| self.pending.swap_remove(index));
                 let (approval, user) = match pending {
                     Some(pending) => {
+                        let user = match pending.decision {
+                            Decision::By(user) => Some(user),
+                            Decision::Open(_) | Decision::Lapsed => None,
+                        };
                         let closed = Outbound::ApprovalResolved {
                             id: pending.id.clone(),
-                            user: pending.user.clone(),
+                            user: user.clone(),
                             result,
                         };
                         self.out.replace(&pending.card, closed).await;
-                        (Some(pending.id), pending.user)
+                        (Some(pending.id), user)
                     }
                     // No card: posting it failed, so the approval ended without one.
                     None => (None, None),

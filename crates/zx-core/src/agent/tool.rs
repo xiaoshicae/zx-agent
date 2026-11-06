@@ -55,7 +55,7 @@ pub enum ExecutionMode {
     /// May run concurrently with other calls from the same assistant message.
     #[default]
     Parallel,
-    /// Forces the whole batch of calls to run one at a time (pi: `executionMode: "sequential"`).
+    /// Forces the whole batch of calls to run one at a time.
     Sequential,
 }
 
@@ -97,7 +97,7 @@ impl ToolContext {
         }
     }
 
-    /// Queue a bounded progress update without blocking the tool (pi: `onUpdate`). Text
+    /// Queue a bounded progress update without blocking the tool. Text
     /// longer than [`MAX_PROGRESS_BYTES`] is cut at a character boundary. The loop passes
     /// updates through the redaction hooks, then emits them as `tool_execution_update`
     /// events; they are not recorded in the session and the model never sees them. Returns
@@ -136,7 +136,7 @@ pub struct ToolOutput {
     /// Ask to stop after this batch. Takes effect only when every result in the batch sets it.
     #[serde(default)]
     pub terminate: bool,
-    /// Structured data for frontends and logs (pi: `details`). After the `after_tool` hooks,
+    /// Structured data for frontends and logs. After the `after_tool` hooks,
     /// the redaction hooks included, it is recorded with the result message and sent in the
     /// `tool_execution_end` event; the model never sees it. Details larger than
     /// [`MAX_DETAILS_BYTES`] as compact JSON are dropped from both.
@@ -174,8 +174,8 @@ impl ToolOutput {
 /// A tool the model can call.
 ///
 /// Arguments arrive as raw JSON; tools validate them by deserializing into their own
-/// argument type. `Err` is the equivalent of throwing in pi: it becomes an error result
-/// that the model sees, and the loop continues.
+/// argument type. `Err` becomes an error result that the model sees, and the loop
+/// continues.
 #[async_trait]
 pub trait Tool: Send + Sync {
     /// Name the model calls the tool by. Must match `definition().name`.
@@ -193,7 +193,7 @@ pub trait Tool: Send + Sync {
         Effects::SideEffects
     }
     /// Rewrite the model's arguments before they are checked, for an older argument shape
-    /// or a mistake models commonly make (pi: `prepareArguments`). Return `None` to keep
+    /// or a mistake models commonly make. Return `None` to keep
     /// them as they are, which the default does.
     ///
     /// The rewritten arguments are what the schema check, `validate_arguments`, the

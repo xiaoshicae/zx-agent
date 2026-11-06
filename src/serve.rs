@@ -26,10 +26,11 @@ use zx_agent::interaction::Interaction;
 use zx_agent::otel::Telemetry;
 use zx_agent::profile::Builtin;
 
-use crate::cli::{self, Budget, ServeArgs, SessionFile, SessionOptions};
-use crate::{EXIT_COMPLETED, EXIT_ERROR, EXIT_USAGE, spawn_signal_handler, write_line};
+use crate::cli::{self, ServeArgs, SessionOptions};
+use crate::process::{EXIT_COMPLETED, EXIT_ERROR, EXIT_USAGE, spawn_signal_handler, write_line};
+use crate::sessions::SessionFile;
 
-/// How long an approval card waits for a click; docs/serve-im-review.md, section 3.6.
+/// How long an approval card waits for a click.
 const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 600;
 const DEFAULT_APP_TOKEN_ENV: &str = "SLACK_APP_TOKEN";
 const DEFAULT_BOT_TOKEN_ENV: &str = "SLACK_BOT_TOKEN";
@@ -141,34 +142,14 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
     let mut channels: Vec<Arc<dyn ImChannel>> = Vec::new();
     let mut hidden_env = Vec::new();
     if let Some(slack) = &file.slack {
-        let mut config = SlackConfig::new(
-            secret(&slack.app_token_env, "the Slack app-level token")?,
-            secret(&slack.bot_token_env, "the Slack bot token")?,
-        );
-        if let Some(base) = &slack.api_base {
-            config.api_base.clone_from(base);
-        }
-        config.labels.clone_from(&file.card_labels);
-        config.on_error = Some(failure_log("slack"));
-        channels.push(Arc::new(SlackChannel::new(config).map_err(anyhow::Error::msg)?));
-        hidden_env.extend([slack.app_token_env.clone(), slack.bot_token_env.clone()]);
+        let (channel, secrets) = slack_channel(slack, &file.card_labels)?;
+        channels.push(channel);
+        hidden_env.extend(secrets);
     }
     if let Some(feishu) = &file.feishu {
-        let mut config = FeishuConfig::new(
-            secret(&feishu.app_id_env, "the Feishu App ID")?,
-            secret(&feishu.app_secret_env, "the Feishu App Secret")?,
-        );
-        if let Some(base) = &feishu.api_base {
-            config.api_base.clone_from(base);
-        }
-        if let Some(url) = &feishu.token_url {
-            config.token_url.clone_from(url);
-        }
-        config.labels.clone_from(&file.card_labels);
-        config.on_error = Some(failure_log("feishu"));
-        channels.push(Arc::new(FeishuChannel::new(config).map_err(anyhow::Error::msg)?));
-        // The App ID is not a secret; the App Secret is.
-        hidden_env.push(feishu.app_secret_env.clone());
+        let (channel, secrets) = feishu_channel(feishu, &file.card_labels)?;
+        channels.push(channel);
+        hidden_env.extend(secrets);
     }
     anyhow::ensure!(
         !channels.is_empty(),
@@ -190,12 +171,11 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
     let running = dir.join(RUNNING_DIR);
     std::fs::create_dir_all(&running).with_context(|| format!("cannot create {}", running.display()))?;
 
-    let instructions = cli::read_instructions(&args.base)?;
     // Once for the process: every thread's session shares the connections.
-    let mcp = cli::connect_mcp(&args.base, Builtin::Assistant, &args.transport).await?;
+    let shared = cli::Shared::connect(&args.base, Builtin::Assistant, &args.transport).await?;
     let factory = Sessions {
         args,
-        instructions,
+        shared,
         dir,
         approval_timeout: Duration::from_secs(
             file.limits
@@ -203,7 +183,6 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
                 .unwrap_or(DEFAULT_APPROVAL_TIMEOUT_SECS),
         ),
         hidden_env,
-        mcp,
         events: telemetry
             .as_ref()
             .map_or_else(|| Arc::new(NullSink) as Arc<dyn EventSink>, Telemetry::sink),
@@ -244,17 +223,59 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
         .run(channels, &cancel)
         .await;
     cli::finish_telemetry(telemetry).await;
+    Ok(exit_code(served))
+}
+
+/// How serving ended, as an exit code; a failure is reported on stderr.
+fn exit_code(served: Result<(), ImError>) -> u8 {
     match served {
-        Ok(()) => Ok(EXIT_COMPLETED),
+        Ok(()) => EXIT_COMPLETED,
         Err(error @ ImError::Config(_)) => {
             eprintln!("zx-agent: {error}");
-            Ok(EXIT_USAGE)
+            EXIT_USAGE
         }
         Err(error @ ImError::Transport(_)) => {
             eprintln!("zx-agent: {error}");
-            Ok(EXIT_ERROR)
+            EXIT_ERROR
         }
     }
+}
+
+/// The Slack channel of its section, and the variables holding its tokens.
+fn slack_channel(section: &SlackSection, labels: &CardLabels) -> Result<(Arc<dyn ImChannel>, Vec<String>)> {
+    let mut config = SlackConfig::new(
+        secret(&section.app_token_env, "the Slack app-level token")?,
+        secret(&section.bot_token_env, "the Slack bot token")?,
+    );
+    if let Some(base) = &section.api_base {
+        config.api_base.clone_from(base);
+    }
+    config.labels.clone_from(labels);
+    config.on_error = Some(failure_log("slack"));
+    let channel = SlackChannel::new(config).map_err(anyhow::Error::msg)?;
+    Ok((
+        Arc::new(channel),
+        vec![section.app_token_env.clone(), section.bot_token_env.clone()],
+    ))
+}
+
+/// The Feishu channel of its section, and the variable holding its secret: the App ID is
+/// not one.
+fn feishu_channel(section: &FeishuSection, labels: &CardLabels) -> Result<(Arc<dyn ImChannel>, Vec<String>)> {
+    let mut config = FeishuConfig::new(
+        secret(&section.app_id_env, "the Feishu App ID")?,
+        secret(&section.app_secret_env, "the Feishu App Secret")?,
+    );
+    if let Some(base) = &section.api_base {
+        config.api_base.clone_from(base);
+    }
+    if let Some(url) = &section.token_url {
+        config.token_url.clone_from(url);
+    }
+    config.labels.clone_from(labels);
+    config.on_error = Some(failure_log("feishu"));
+    let channel = FeishuChannel::new(config).map_err(anyhow::Error::msg)?;
+    Ok((Arc::new(channel), vec![section.app_secret_env.clone()]))
 }
 
 /// Reports a platform's failed connection attempts as `failed` lines, like the server's own.
@@ -293,14 +314,13 @@ fn entries(entries: &[String], platforms: &HashSet<&str>, field: &str) -> Result
 /// Opens each thread's session like chat does, with approvals in the thread.
 struct Sessions {
     args: ServeArgs,
-    instructions: Option<String>,
+    /// The instructions and the MCP servers, shared by every thread's session.
+    shared: cli::Shared,
     dir: PathBuf,
     approval_timeout: Duration,
     /// Variables holding IM credentials: commands do not inherit them, and their values are
     /// redacted.
     hidden_env: Vec<String>,
-    /// The profile's MCP servers, shared by every thread's session.
-    mcp: cli::McpTools,
     /// Where each session's events go: the trace export, or nowhere.
     events: Arc<dyn EventSink>,
 }
@@ -311,18 +331,13 @@ impl Sessions {
             base: &self.args.base,
             transport: &self.args.transport,
             request: &self.args.request,
+            budget: &self.args.budget,
             model: &self.args.base.model,
             file,
             default_profile: Builtin::Assistant,
-            budget: Budget {
-                max_model_requests: self.args.max_model_requests,
-                timeout_secs: self.args.timeout_secs,
-                token_budget: self.args.token_budget,
-                continue_on_length: None,
-            },
-            instructions: self.instructions.as_deref(),
+            continue_on_length: None,
+            shared: &self.shared,
             hidden_env: &self.hidden_env,
-            mcp: &self.mcp,
         })
         .await?;
         prepared.require_bash_approval("shell commands require approval in the chat");

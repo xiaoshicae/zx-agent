@@ -503,6 +503,17 @@ pub enum StreamEvent {
     Error(AssistantMessage),
 }
 
+impl StreamEvent {
+    /// The event that ends a stream with `message`: `Error` when it failed or was aborted,
+    /// `Done` otherwise.
+    pub fn ending(message: AssistantMessage) -> Self {
+        match message.stop_reason {
+            StopReason::Error | StopReason::Aborted => Self::Error(message),
+            StopReason::Stop | StopReason::Length | StopReason::ToolUse => Self::Done(message),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;

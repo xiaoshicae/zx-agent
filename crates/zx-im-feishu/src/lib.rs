@@ -8,7 +8,7 @@
 
 mod frame;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -21,10 +21,9 @@ use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::{self, Message};
 use tokio_util::sync::CancellationToken;
 use zx_ai::sync::lock;
-use zx_core::agent::ApprovalResult;
 use zx_im::{
-    ApprovalId, CardLabels, Choice, ConversationId, Destination, ErrorReport, ImChannel, ImError, Inbound, MessageId,
-    MessageRef, Outbound, Seen, ThreadId, UserId, split_text,
+    ApprovalId, CardLabels, Cards, Choice, ConversationId, Destination, ErrorReport, ImChannel, ImError, Inbound,
+    MessageId, MessageRef, Outbound, Pacer, Seen, ThreadId, UserId, split_text,
 };
 
 use frame::Frame;
@@ -127,12 +126,10 @@ pub struct FeishuChannel {
     /// The tenant token and when it expires. An async lock, held across the renewal, so that
     /// concurrent calls wait for one renewal instead of each starting their own.
     token: tokio::sync::Mutex<Option<(String, Instant)>>,
-    /// When each chat may be posted to next; sends reserve their turn under the lock.
-    next_post: Mutex<HashMap<String, Instant>>,
+    posts: Pacer,
     /// Direct chats seen so far: replies there do not open a topic.
     direct: Mutex<HashSet<String>>,
-    /// The request text of open cards, so that closing a card keeps it.
-    cards: Mutex<VecDeque<(MessageId, String)>>,
+    cards: Cards,
 }
 
 /// Why an API call did not succeed.
@@ -206,6 +203,15 @@ enum Ended {
     Lost,
 }
 
+/// How an attempt to open the long connection went.
+enum Connection {
+    /// The socket is boxed: the other variant is a short reason.
+    Open(Box<Socket>, i32),
+    /// A failure worth retrying, with the reason; the address, which carries a ticket, is
+    /// never in it.
+    Later(String),
+}
+
 impl FeishuChannel {
     pub fn new(config: FeishuConfig) -> Result<Self, ImError> {
         let http = reqwest::Client::builder()
@@ -213,12 +219,12 @@ impl FeishuChannel {
             .build()
             .map_err(|error| ImError::Config(format!("cannot build the HTTP client: {error}")))?;
         Ok(Self {
+            posts: Pacer::new(config.post_interval),
+            cards: Cards::new(CARD_CAPACITY),
             config,
             http,
             token: tokio::sync::Mutex::new(None),
-            next_post: Mutex::default(),
             direct: Mutex::default(),
-            cards: Mutex::default(),
         })
     }
 
@@ -321,22 +327,10 @@ impl FeishuChannel {
         }
     }
 
-    /// Wait for this chat's next posting turn.
-    async fn turn(&self, conversation: &str) {
-        let at = {
-            let mut next = lock(&self.next_post);
-            let now = Instant::now();
-            let at = next.get(conversation).copied().filter(|at| *at > now).unwrap_or(now);
-            next.insert(conversation.to_string(), at + self.config.post_interval);
-            at
-        };
-        tokio::time::sleep_until(at).await;
-    }
-
     /// Post `content` of type `msg_type`: a reply in the thread when `to` names one,
     /// otherwise a new message in the chat.
     async fn post(&self, to: &Destination, msg_type: &str, content: String) -> Result<MessageRef, ImError> {
-        self.turn(&to.conversation.0).await;
+        self.posts.turn(&to.conversation.0).await;
         let answer = match &to.thread {
             Some(root) => {
                 let direct = lock(&self.direct).contains(&to.conversation.0);
@@ -363,24 +357,9 @@ impl FeishuChannel {
         self.post(to, "text", text_content(text)).await
     }
 
-    fn remember_card(&self, card: &MessageId, request: String) {
-        let mut cards = lock(&self.cards);
-        cards.push_back((card.clone(), request));
-        if cards.len() > CARD_CAPACITY {
-            cards.pop_front();
-        }
-    }
-
-    fn forget_card(&self, card: &MessageId) -> Option<String> {
-        let mut cards = lock(&self.cards);
-        let index = cards.iter().position(|(id, _)| id == card)?;
-        cards.remove(index).map(|(_, request)| request)
-    }
-
-    /// Ask for the long connection's address and open it. `Ok(Err(reason))` is a failure
-    /// worth retrying; an error is one that retrying cannot fix. No reason shows the address,
-    /// which carries a ticket.
-    async fn connect(&self, config: &mut ClientConfig) -> Result<Result<(Socket, i32), String>, ImError> {
+    /// Ask for the long connection's address and open it. An error is a failure that
+    /// retrying cannot fix.
+    async fn connect(&self, config: &mut ClientConfig) -> Result<Connection, ImError> {
         let url = format!("{}{ENDPOINT_PATH}", self.config.api_base.trim_end_matches('/'));
         let body = json!({
             "AppID": self.config.app_id,
@@ -390,17 +369,24 @@ impl FeishuChannel {
         let response = match self.http.post(&url).header("locale", "zh").json(&body).send().await {
             Ok(response) if response.status() == StatusCode::OK => response,
             Ok(response) => {
-                return Ok(Err(format!("feishu long connection: HTTP {}", response.status())));
+                return Ok(Connection::Later(format!(
+                    "feishu long connection: HTTP {}",
+                    response.status()
+                )));
             }
-            Err(error) => return Ok(Err(format!("feishu long connection: {error}"))),
+            Err(error) => return Ok(Connection::Later(format!("feishu long connection: {error}"))),
         };
         let Ok(answer) = response.json::<Value>().await else {
-            return Ok(Err("feishu long connection: the answer is not JSON".into()));
+            return Ok(Connection::Later(
+                "feishu long connection: the answer is not JSON".into(),
+            ));
         };
         match answer["code"].as_i64() {
             Some(0) => {}
             Some(code) if RETRY_CODES.contains(&code) => {
-                return Ok(Err(format!("feishu long connection: code {code}, retrying")));
+                return Ok(Connection::Later(format!(
+                    "feishu long connection: code {code}, retrying"
+                )));
             }
             code => {
                 let detail = answer["msg"].as_str().unwrap_or("no message");
@@ -411,12 +397,20 @@ impl FeishuChannel {
         }
         // The address carries a ticket: it is used, never shown.
         let Some(address) = answer["data"]["URL"].as_str() else {
-            return Ok(Err("feishu long connection: no address in the answer".into()));
+            return Ok(Connection::Later(
+                "feishu long connection: no address in the answer".into(),
+            ));
         };
         config.update(&answer["data"]["ClientConfig"]);
+        self.open_socket(address).await
+    }
+
+    /// Open the WebSocket at `address`. A refused handshake is a configuration error when
+    /// the platform says the app may not connect, or has too many connections.
+    async fn open_socket(&self, address: &str) -> Result<Connection, ImError> {
         let service = service_id(address);
         match tokio::time::timeout(self.config.request_timeout, tokio_tungstenite::connect_async(address)).await {
-            Ok(Ok((socket, _))) => Ok(Ok((socket, service))),
+            Ok(Ok((socket, _))) => Ok(Connection::Open(Box::new(socket), service)),
             Ok(Err(tungstenite::Error::Http(response))) => {
                 let status = response.status();
                 let auth = response
@@ -429,11 +423,15 @@ impl FeishuChannel {
                         auth.unwrap_or("none")
                     )))
                 } else {
-                    Ok(Err(format!("feishu long connection: handshake refused, HTTP {status}")))
+                    Ok(Connection::Later(format!(
+                        "feishu long connection: handshake refused, HTTP {status}"
+                    )))
                 }
             }
-            Ok(Err(error)) => Ok(Err(format!("feishu long connection: cannot connect: {error}"))),
-            Err(_) => Ok(Err(format!(
+            Ok(Err(error)) => Ok(Connection::Later(format!(
+                "feishu long connection: cannot connect: {error}"
+            ))),
+            Err(_) => Ok(Connection::Later(format!(
                 "feishu long connection: connecting took longer than {} s",
                 self.config.request_timeout.as_secs()
             ))),
@@ -463,13 +461,7 @@ impl FeishuChannel {
                     return Ended::Cancelled;
                 }
                 () = tokio::time::sleep_until(next_ping) => {
-                    let ping = Frame {
-                        service,
-                        method: CONTROL,
-                        headers: vec![("type".into(), "ping".into())],
-                        ..Frame::default()
-                    };
-                    if socket.send(Message::binary(ping.encode())).await.is_err() {
+                    if socket.send(Message::binary(ping(service).encode())).await.is_err() {
                         return Ended::Lost;
                     }
                     last_ping = Instant::now();
@@ -564,10 +556,10 @@ impl ImChannel for FeishuChannel {
                 return Ok(());
             }
             let wait = match self.connect(&mut config).await? {
-                Ok((socket, service)) => {
+                Connection::Open(socket, service) => {
                     backoff = RECONNECT_MIN;
                     match self
-                        .receive(socket, service, &mut config, &inbound, &mut seen, cancel)
+                        .receive(*socket, service, &mut config, &inbound, &mut seen, cancel)
                         .await
                     {
                         Ended::Cancelled => return Ok(()),
@@ -575,7 +567,7 @@ impl ImChannel for FeishuChannel {
                         Ended::Lost => jitter(config.nonce),
                     }
                 }
-                Err(reason) => {
+                Connection::Later(reason) => {
                     self.report(&ImError::Transport(reason));
                     let wait = config.reconnect.unwrap_or(backoff);
                     backoff = (backoff * 2).min(RECONNECT_MAX);
@@ -631,7 +623,7 @@ impl ImChannel for FeishuChannel {
                     button(&labels.deny, "danger", value("deny")),
                 ]);
                 let posted = self.post(to, "interactive", card).await?;
-                self.remember_card(&posted.id, request);
+                self.cards.remember(&posted.id, request);
                 Ok(posted)
             }
             Outbound::ApprovalResolved { .. } => self.post_text(to, &resolution(&self.config.labels, message)).await,
@@ -674,7 +666,7 @@ impl ImChannel for FeishuChannel {
             )),
             Outbound::ApprovalResolved { .. } => {
                 let mut elements = Vec::new();
-                if let Some(request) = self.forget_card(&posted.id) {
+                if let Some(request) = self.cards.forget(&posted.id) {
                     elements.push(markdown(&request));
                 }
                 elements.push(markdown(&resolution(&self.config.labels, message)));
@@ -685,6 +677,16 @@ impl ImChannel for FeishuChannel {
                     .map_err(ImError::from)
             }
         }
+    }
+}
+
+/// The ping that keeps the long connection alive.
+fn ping(service: i32) -> Frame {
+    Frame {
+        service,
+        method: CONTROL,
+        headers: vec![("type".into(), "ping".into())],
+        ..Frame::default()
     }
 }
 
@@ -873,16 +875,10 @@ fn resolution(labels: &CardLabels, message: &Outbound) -> String {
     let Outbound::ApprovalResolved { user, result, .. } = message else {
         return String::new();
     };
-    let what = match result {
-        ApprovalResult::AllowOnce | ApprovalResult::AllowSession | ApprovalResult::Remembered => &labels.allowed,
-        ApprovalResult::Denied => &labels.denied,
-        ApprovalResult::TimedOut => &labels.timed_out,
-        ApprovalResult::Cancelled => &labels.cancelled,
-        ApprovalResult::Failed => &labels.failed,
-    };
+    let what = labels.outcome(*result);
     match user {
         Some(user) => format!("{what} ({user})"),
-        None => what.clone(),
+        None => what.to_string(),
     }
 }
 

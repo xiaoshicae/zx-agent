@@ -1,4 +1,5 @@
-//! Retry classification and backoff (pi: packages/ai/src/utils/retry.ts).
+//! Retry classification and backoff (pi: packages/ai/src/utils/retry.ts and overflow.ts; the
+//! defaults are those of coding-agent/src/core/settings-defaults.ts).
 
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
@@ -21,8 +22,7 @@ pub struct RetryPolicy {
 }
 
 impl Default for RetryPolicy {
-    /// pi defaults: 3 retries, 2s base delay, 60s cap (coding-agent/src/core/settings-defaults.ts),
-    /// up to a quarter of jitter.
+    /// 3 retries, a 2 s base delay, a 60 s cap and up to a quarter of jitter.
     fn default() -> Self {
         Self {
             max_retries: 3,
@@ -110,7 +110,7 @@ const RETRYABLE: &[&str] = &[
 
 /// Whether a failed response is transient. Structured metadata takes precedence; messages
 /// without it (from providers that report none, or read from older session files) use the
-/// pi text fallback.
+/// text fallback.
 pub fn is_retryable(message: &AssistantMessage) -> bool {
     if message.stop_reason != StopReason::Error {
         return false;
@@ -156,8 +156,7 @@ const OVERFLOW_CODES: &[&str] = &[
 ];
 
 /// Phrases that say the request was too long for the model, for failures without such a code.
-/// Generic wording only, not one message per service (pi lists one per provider in
-/// overflow.ts).
+/// Generic wording only, not one message per service.
 const OVERFLOW_TEXT: &[&str] = &[
     "context length",
     "context_length",
@@ -175,8 +174,7 @@ const OVERFLOW_TEXT: &[&str] = &[
 const THROTTLING_TEXT: &[&str] = &["429", "rate limit", "rate_limit", "throttl", "too many requests"];
 
 /// Whether a failed response says the request was too long for the model's context: a
-/// smaller context may fix it, repeating the request never does (pi: `isContextOverflow` in
-/// packages/ai/src/utils/overflow.ts). An HTTP 413 or one of the overflow codes decides;
+/// smaller context may fix it, repeating the request never does. An HTTP 413 or one of the overflow codes decides;
 /// throttling, server, credential and transport failures never count; otherwise the error
 /// text decides. Silent overflow, where a service truncates the input instead of failing, is
 /// not detected.
@@ -234,7 +232,7 @@ fn permanent_code(code: &str) -> bool {
 
 /// Whether `error` contains `pattern`. A number must stand alone, with no letter or digit
 /// right before or after it, so status codes do not match inside request ids such as
-/// `9d500a1b` (pi: `(?<![a-z0-9])(?:429|500|...)(?![a-z0-9])` in retry.ts).
+/// `9d500a1b`.
 fn mentions(error: &str, pattern: &str) -> bool {
     if !pattern.bytes().all(|byte| byte.is_ascii_digit()) {
         return error.contains(pattern);

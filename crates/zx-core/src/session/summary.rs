@@ -5,13 +5,9 @@ use std::collections::HashSet;
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
-use crate::ai::{AssistantMessage, Message, Usage, UserMessageKind, now_ms};
+use crate::ai::{AssistantMessage, Message, PREAMBLE, SystemMessage, SystemPrompt, Usage, UserMessageKind, now_ms};
 
-use super::{CUSTOM_RECORDS_VERSION, Entry, ProjectedMessage, SESSION_VERSION, SessionStore, records_without_details};
-
-/// The format version that adds incremental summaries: `mode` and `continues` on attempts,
-/// fact IDs and `supersedes`, and `superseded` and `evicted` on results.
-pub(super) const INCREMENTAL_SUMMARY_VERSION: u32 = 5;
+use super::{COMPACTION_VERSION, Entry, INCREMENTAL_SUMMARY_VERSION, ProjectedMessage, SessionStore, without_details};
 
 /// The largest serialized summary, carried facts included.
 pub(crate) const MAX_SUMMARY_BYTES: usize = 64 * 1024;
@@ -38,8 +34,8 @@ pub(crate) fn cite_only(facts: &[SummaryFact], ids: &[String]) -> Result<()> {
 #[serde(rename_all = "snake_case")]
 pub enum SummaryMode {
     /// Every summary reads all original records before its boundary again, never an earlier
-    /// summary (P5). A summary whose sources are corrected is invalid as a whole. Reading is
-    /// bounded at 2 MiB, so a long session eventually cannot be summarized.
+    /// summary. A summary whose sources are corrected is invalid as a whole. Reading is
+    /// bounded, so a long session eventually cannot be summarized this way.
     #[default]
     Full,
     /// A summary after an earlier one carries that one's facts over unchanged and reads only
@@ -57,7 +53,7 @@ impl SummaryMode {
 /// A model-produced fact with references to source message entries. In an incremental
 /// summary every fact has an `id`, `<attempt that created it>-<number>`, and a new fact may
 /// name the earlier facts it `supersedes`; full summaries have neither.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SummaryFact {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -70,7 +66,7 @@ pub struct SummaryFact {
 
 /// Facts and model inference are deliberately separate. References are validated;
 /// this does not establish that a model's assertion is entailed by its source.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CompactionSummary {
     pub facts: Vec<SummaryFact>,
@@ -96,7 +92,7 @@ impl CompactionSummary {
     pub(crate) fn validate_limits(&self) -> Result<()> {
         ensure!(
             serde_json::to_vec(self)?.len() <= MAX_SUMMARY_BYTES,
-            "summary exceeds 65536 bytes"
+            "summary exceeds {MAX_SUMMARY_BYTES} bytes"
         );
         ensure!(
             self.facts.len() <= MAX_STATEMENTS
@@ -141,7 +137,7 @@ impl CompactionSummary {
 }
 
 /// Information needed to reconstruct a summarization request with its source IDs.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SummaryRequest {
     pub provider: String,
@@ -150,19 +146,54 @@ pub struct SummaryRequest {
     pub max_tokens: u32,
 }
 
-/// Append-only format transition; old headers remain unchanged.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FormatUpgradeEntry {
-    pub id: String,
-    pub parent_id: Option<String>,
-    pub timestamp: u64,
-    pub version: u32,
+impl SummaryRequest {
+    /// The messages of the request as it was sent: the instructions as the system prompt,
+    /// `input` as the user message.
+    pub(crate) fn messages(&self, input: String, system_timestamp: u64, user_timestamp: u64) -> Vec<Message> {
+        summary_messages(&self.instructions, input, system_timestamp, user_timestamp)
+    }
+}
+
+/// The two messages of a summary request, built the same way when it is sent and when it is
+/// replayed from the session.
+pub(crate) fn summary_messages(
+    instructions: &str,
+    input: String,
+    system_timestamp: u64,
+    user_timestamp: u64,
+) -> Vec<Message> {
+    vec![
+        Message::System(SystemMessage {
+            sections: SystemPrompt::default().diff(&SystemPrompt::default().with_section(PREAMBLE, instructions)),
+            timestamp: system_timestamp,
+        }),
+        Message::User {
+            content: input,
+            timestamp: user_timestamp,
+            kind: UserMessageKind::Prompt,
+        },
+    ]
+}
+
+/// The earlier facts that `new` supersedes, each once, in the order named. An error names a
+/// fact that is not among `previous`.
+pub(crate) fn superseded_by(previous: &[SummaryFact], new: &[SummaryFact]) -> Result<Vec<String>> {
+    let mut superseded: Vec<String> = Vec::new();
+    for id in new.iter().flat_map(|fact| &fact.supersedes) {
+        ensure!(
+            previous.iter().any(|fact| fact.id.as_ref() == Some(id)),
+            "a new fact supersedes {id:?}, which is not an earlier fact that still holds"
+        );
+        if !superseded.contains(id) {
+            superseded.push(id.clone());
+        }
+    }
+    Ok(superseded)
 }
 
 /// Written and flushed before the summary model is called. An unresolved attempt
 /// after cancellation or process failure has no effect on model context.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompactionStartedEntry {
     pub id: String,
@@ -274,17 +305,12 @@ impl IncrementalSource {
             .collect();
         Ok(serde_json::to_string(&IncrementalInput {
             previous_facts,
-            records: &records_without_details(&self.records),
+            records: &without_details(&self.records),
         })?)
     }
 }
 
 impl SessionStore {
-    /// Effective file format, including appended upgrades.
-    pub fn format_version(&self) -> u32 {
-        self.format_version
-    }
-
     /// Persist a format upgrade and request metadata before contacting a model. An
     /// incremental summary needs format v5; a full one, v3.
     pub async fn begin_compaction(&mut self, plan: CompactionPlan) -> Result<String> {
@@ -302,28 +328,13 @@ impl SessionStore {
         // Validate the plan before even appending an upgrade.
         self.validate_compaction_start(&entry)?;
         let version = match entry.mode {
-            SummaryMode::Full => 3,
+            SummaryMode::Full => COMPACTION_VERSION,
             SummaryMode::Incremental => INCREMENTAL_SUMMARY_VERSION,
         };
         self.ensure_format(version).await?;
         entry.parent_id = self.leaf.clone();
         entry.id = self.new_id();
         self.append(Entry::CompactionStarted(entry)).await
-    }
-
-    /// Append a format upgrade before the first record that needs `version`.
-    /// The header is never rewritten.
-    pub(super) async fn ensure_format(&mut self, version: u32) -> Result<()> {
-        if self.format_version < version {
-            self.append(Entry::FormatUpgrade(FormatUpgradeEntry {
-                id: self.new_id(),
-                parent_id: self.leaf.clone(),
-                timestamp: now_ms(),
-                version,
-            }))
-            .await?;
-        }
-        Ok(())
     }
 
     /// Commit a validated full summary. Persistence precedes projection changes.
@@ -395,96 +406,60 @@ impl SessionStore {
         }
     }
 
-    pub(super) fn validate_entry(&self, entry: &Entry) -> Result<()> {
+    /// The rules a summary attempt follows when it is recorded: the format allows it and its
+    /// plan matches the branch.
+    pub(super) fn validate_compaction_started(&self, started: &CompactionStartedEntry) -> Result<()> {
         ensure!(
-            !entry.id().is_empty() && !self.index.contains_key(entry.id()),
-            "duplicate or empty entry ID {:?}",
-            entry.id()
+            self.format_version >= COMPACTION_VERSION,
+            "compaction requires a format upgrade to v{COMPACTION_VERSION}"
         );
-        if let Some(parent) = entry.parent_id() {
-            ensure!(self.index.contains_key(parent), "entry parent {parent:?} not found");
-        }
-        match entry {
-            Entry::Message(_) => {}
-            Entry::Custom(custom) => {
+        ensure!(
+            started.mode == SummaryMode::Full || self.format_version >= INCREMENTAL_SUMMARY_VERSION,
+            "incremental summaries require a format upgrade to v{INCREMENTAL_SUMMARY_VERSION}"
+        );
+        self.validate_compaction_start(started)
+    }
+
+    /// The rules a summary result follows: its attempt is still open on this branch, no
+    /// source was corrected meanwhile, and the summary cites and carries only what the
+    /// attempt allows.
+    pub(super) fn validate_compaction(&self, done: &CompactionEntry, parent: Option<&str>) -> Result<()> {
+        let source = self.validate_attempt_completion(&done.attempt_id, parent)?;
+        let path = self.branch_path_from(parent);
+        let started = path
+            .iter()
+            .position(|entry| entry.id() == done.attempt_id)
+            .expect("validate_attempt_completion located the attempt on this path");
+        ensure!(
+            !Self::any_source_corrected(&path[started + 1..], &source.source_entry_ids),
+            "compaction source changed during the summary request"
+        );
+        ensure!(
+            done.first_kept_entry_id == source.first_kept_entry_id,
+            "compaction retained boundary changed"
+        );
+        match source.mode {
+            SummaryMode::Full => {
+                self.validate_compaction_start_at(source, parent)?;
                 ensure!(
-                    self.format_version >= CUSTOM_RECORDS_VERSION,
-                    "custom records require a format upgrade to v{CUSTOM_RECORDS_VERSION}"
+                    done.superseded.is_empty() && done.evicted.is_empty(),
+                    "a full summary supersedes and evicts nothing"
                 );
-                ensure!(
-                    !custom.custom_type.trim().is_empty(),
-                    "a custom record needs a customType"
-                );
+                done.summary.validate(&source.source_entry_ids)?;
             }
-            Entry::CustomMessage(custom) => {
-                ensure!(
-                    self.format_version >= CUSTOM_RECORDS_VERSION,
-                    "custom records require a format upgrade to v{CUSTOM_RECORDS_VERSION}"
-                );
-                ensure!(
-                    !custom.message.custom_type.trim().is_empty(),
-                    "a custom record needs a customType"
-                );
-            }
-            Entry::ContextEdit(edit) => self.validate_context_edit(edit)?,
-            Entry::FormatUpgrade(upgrade) => {
-                ensure!(
-                    upgrade.version >= self.format_version && upgrade.version <= SESSION_VERSION,
-                    "unsupported format upgrade {}",
-                    upgrade.version
-                );
-            }
-            Entry::CompactionStarted(started) => {
-                ensure!(self.format_version >= 3, "compaction requires a format upgrade to v3");
-                ensure!(
-                    started.mode == SummaryMode::Full || self.format_version >= INCREMENTAL_SUMMARY_VERSION,
-                    "incremental summaries require a format upgrade to v{INCREMENTAL_SUMMARY_VERSION}"
-                );
-                self.validate_compaction_start(started)?;
-            }
-            Entry::Compaction(done) => {
-                let source = self.validate_attempt_completion(&done.attempt_id, entry.parent_id())?;
-                let path = self.branch_path_from(entry.parent_id());
-                let started = path
-                    .iter()
-                    .position(|entry| entry.id() == done.attempt_id)
-                    .expect("validate_attempt_completion located the attempt on this path");
-                ensure!(!path[started + 1..].iter().any(|entry| matches!(entry, Entry::ContextEdit(edit) if source.source_entry_ids.contains(&edit.target_id))), "compaction source changed during the summary request");
-                ensure!(
-                    done.first_kept_entry_id == source.first_kept_entry_id,
-                    "compaction retained boundary changed"
-                );
-                match source.mode {
-                    SummaryMode::Full => {
-                        self.validate_compaction_start_at(source, entry.parent_id())?;
-                        ensure!(
-                            done.superseded.is_empty() && done.evicted.is_empty(),
-                            "a full summary supersedes and evicts nothing"
-                        );
-                        done.summary.validate(&source.source_entry_ids)?;
-                    }
-                    SummaryMode::Incremental => {
-                        self.validate_compaction_start(source)?;
-                        self.validate_merged(source, done)?;
-                    }
-                }
-            }
-            Entry::CompactionFailed(failed) => {
-                self.validate_attempt_completion(&failed.attempt_id, entry.parent_id())?;
-            }
-            Entry::RequestConfig(_) | Entry::RequestStarted(_) => self.validate_request_entry(entry)?,
-            Entry::ToolCallStarted(start) => {
-                ensure!(
-                    self.format_version >= super::recovery::START_RECORDS_VERSION,
-                    "tool call start records require a format upgrade to v4"
-                );
-                self.validate_tool_call_start(start)?;
+            SummaryMode::Incremental => {
+                self.validate_compaction_start(source)?;
+                self.validate_merged(source, done)?;
             }
         }
         Ok(())
     }
 
-    fn validate_attempt_completion(&self, id: &str, parent: Option<&str>) -> Result<&CompactionStartedEntry> {
+    pub(super) fn validate_attempt_completion(
+        &self,
+        id: &str,
+        parent: Option<&str>,
+    ) -> Result<&CompactionStartedEntry> {
         let path = self.branch_path_from(parent);
         ensure!(
             path.iter().any(|entry| entry.id() == id),
@@ -551,7 +526,7 @@ impl SessionStore {
 
     /// Where the retained messages start in `raw`: at `first_kept`, which must not split a
     /// tool exchange or be a system message.
-    fn retained_from(raw: &[ProjectedMessage], first_kept: &str) -> Result<usize> {
+    pub(super) fn retained_from(raw: &[ProjectedMessage], first_kept: &str) -> Result<usize> {
         let cut = raw
             .iter()
             .position(|item| item.entry_id == first_kept)
@@ -561,6 +536,15 @@ impl SessionStore {
             "compaction cannot split a tool exchange or retain from a system message"
         );
         Ok(cut)
+    }
+
+    /// The records before `first_kept`: what a full summary read.
+    pub(super) fn summarized_prefix<'a>(
+        raw: &'a [ProjectedMessage],
+        first_kept: &str,
+    ) -> Result<&'a [ProjectedMessage]> {
+        let cut = Self::retained_from(raw, first_kept)?;
+        Ok(&raw[..cut])
     }
 
     /// An incremental result: the new facts are numbered after the attempt, in order, and
@@ -591,16 +575,7 @@ impl SessionStore {
             );
         }
         cite_only(new, &attempt.source_entry_ids)?;
-        let mut superseded: Vec<String> = Vec::new();
-        for id in new.iter().flat_map(|fact| &fact.supersedes) {
-            ensure!(
-                previous.iter().any(|fact| fact.id.as_ref() == Some(id)),
-                "a new fact supersedes {id:?}, which is not an earlier fact that still holds"
-            );
-            if !superseded.contains(id) {
-                superseded.push(id.clone());
-            }
-        }
+        let superseded = superseded_by(&previous, new)?;
         ensure!(
             done.superseded == superseded,
             "superseded facts must be exactly those the new facts name"
@@ -623,88 +598,6 @@ impl SessionStore {
             "earlier facts must be carried over unchanged"
         );
         Ok(())
-    }
-
-    /// Original projected messages, applying context edits but ignoring every summary.
-    pub fn raw_projection(&self) -> Vec<ProjectedMessage> {
-        Self::raw_projection_from(&self.branch_path())
-    }
-
-    /// Latest successful, still-valid summary on the active branch.
-    pub fn latest_compaction(&self) -> Option<&CompactionEntry> {
-        self.latest_compaction_at(self.leaf.as_deref())
-    }
-
-    fn latest_compaction_at(&self, leaf: Option<&str>) -> Option<&CompactionEntry> {
-        let path = self.branch_path_from(leaf);
-        self.latest_compaction_on(&path).map(|latest| latest.compaction)
-    }
-
-    /// The latest successful summary on `path` that still holds. Invalid or incomplete control
-    /// records never hide original evidence, and a correction of a full summary's evidence
-    /// invalidates it as a whole: the projection falls back to the originals. An incremental
-    /// summary stays, without the facts that cite corrected records ([`Self::effective_facts`]).
-    fn latest_compaction_on<'s>(&'s self, path: &[&'s Entry]) -> Option<LatestCompaction<'s>> {
-        let (position, compaction) = path.iter().enumerate().rev().find_map(|(index, entry)| {
-            if let Entry::Compaction(entry) = entry {
-                Some((index, entry))
-            } else {
-                None
-            }
-        })?;
-        let Some(Entry::CompactionStarted(attempt)) = self.get(&compaction.attempt_id) else {
-            return None;
-        };
-        if attempt.mode == SummaryMode::Full
-            && path[position + 1..].iter().any(
-                |entry| matches!(entry, Entry::ContextEdit(edit) if attempt.source_entry_ids.contains(&edit.target_id)),
-            )
-        {
-            return None;
-        }
-        Some(LatestCompaction {
-            position,
-            compaction,
-            attempt,
-        })
-    }
-
-    /// The facts of `latest` that still hold at the end of `path`, each with its ID: an
-    /// incremental summary loses the facts that cite a record corrected after it. A full
-    /// summary, which a correction invalidates as a whole, keeps all of its facts, with IDs
-    /// numbered after its attempt, so that an incremental summary can continue it.
-    fn effective_facts(path: &[&Entry], latest: &LatestCompaction<'_>) -> Vec<SummaryFact> {
-        let corrected = Self::corrected_after(path, latest.position);
-        latest
-            .compaction
-            .summary
-            .facts
-            .iter()
-            .enumerate()
-            .filter(|(_, fact)| {
-                latest.attempt.mode == SummaryMode::Full
-                    || !fact.source_entry_ids.iter().any(|id| corrected.contains(id.as_str()))
-            })
-            .map(|(index, fact)| SummaryFact {
-                id: Some(
-                    fact.id
-                        .clone()
-                        .unwrap_or_else(|| format!("{}-{}", latest.attempt.id, index + 1)),
-                ),
-                ..fact.clone()
-            })
-            .collect()
-    }
-
-    /// The targets of the context edits on `path` after `position`.
-    fn corrected_after<'p>(path: &[&'p Entry], position: usize) -> HashSet<&'p str> {
-        path[position + 1..]
-            .iter()
-            .filter_map(|entry| match entry {
-                Entry::ContextEdit(edit) => Some(edit.target_id.as_str()),
-                _ => None,
-            })
-            .collect()
     }
 
     /// What an incremental summary at the end of `path` reads when it continues `previous`,
@@ -758,66 +651,4 @@ impl SessionStore {
         self.incremental_source_at(path, previous, first_kept)?
             .ok_or_else(|| anyhow::anyhow!("no new records to summarize after the previous summary"))
     }
-
-    /// How many leading messages of `raw` a summary that keeps `first_kept` replaces: those
-    /// recorded before it in branch order. Cutting by branch order, not by finding the kept
-    /// message in the projection, matters when a later context edit omits that message: the
-    /// summary must still replace everything recorded before it.
-    fn summarized_count(path: &[&Entry], raw: &[ProjectedMessage], first_kept: &str) -> Result<usize> {
-        let boundary = path
-            .iter()
-            .position(|entry| entry.id() == first_kept)
-            .ok_or_else(|| anyhow::anyhow!("summary boundary {first_kept:?} is not on this branch"))?;
-        let summarized: HashSet<&str> = path[..boundary].iter().map(|entry| entry.id()).collect();
-        Ok(raw
-            .iter()
-            .take_while(|item| summarized.contains(item.entry_id.as_str()))
-            .count())
-    }
-
-    pub(super) fn compacted_projection(&self) -> Vec<ProjectedMessage> {
-        self.compacted_projection_at(self.leaf.as_deref())
-    }
-
-    pub(super) fn compacted_projection_at(&self, leaf: Option<&str>) -> Vec<ProjectedMessage> {
-        let path = self.branch_path_from(leaf);
-        let raw = Self::raw_projection_from(&path);
-        let Some(latest) = self.latest_compaction_on(&path) else {
-            return raw;
-        };
-        let Ok(cut) = Self::summarized_count(&path, &raw, &latest.compaction.first_kept_entry_id) else {
-            // A summary's boundary is validated to be on its branch; without one, the
-            // originals are the only safe projection.
-            return raw;
-        };
-        let compaction = latest.compaction;
-        let message = match latest.attempt.mode {
-            SummaryMode::Full => compaction.summary.message(compaction.timestamp),
-            SummaryMode::Incremental => CompactionSummary {
-                facts: Self::effective_facts(&path, &latest),
-                inferences: compaction.summary.inferences.clone(),
-                plans: compaction.summary.plans.clone(),
-            }
-            .message(compaction.timestamp),
-        };
-        let mut projected: Vec<_> = raw[..cut]
-            .iter()
-            .filter(|item| matches!(item.message, Message::System(_)))
-            .cloned()
-            .collect();
-        projected.push(ProjectedMessage {
-            entry_id: compaction.id.clone(),
-            message,
-        });
-        projected.extend(raw.into_iter().skip(cut));
-        projected
-    }
-}
-
-/// The latest summary on a branch that still holds: its position on the path, its entry and
-/// its attempt.
-struct LatestCompaction<'s> {
-    position: usize,
-    compaction: &'s CompactionEntry,
-    attempt: &'s CompactionStartedEntry,
 }

@@ -14,19 +14,17 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use super::parse_args;
 use super::truncate::{MAX_BYTES, MAX_LINES, truncate_head};
 use crate::agent::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
 use crate::ai::ToolDef;
 use crate::executor::{CommandEnd, Executor, LocalExecutor, ShellCommand};
+use crate::text::prefix_within;
 
 /// Longest wait for one search.
 const TIMEOUT: Duration = Duration::from_secs(60);
 /// Longest line shown, in bytes; longer matching lines are cut (pi: `GREP_MAX_LINE_LENGTH`).
 const MAX_LINE_BYTES: usize = 500;
-/// Cuts every output line to one byte more than shown, so that the cut is still noticed.
-/// [`MAX_LINES`] lines of this length stay under the 1 MiB the executor keeps of a command's
-/// output, which keeps the end; the start, which a search shows, is never dropped.
-const CUT: &str = "cut -c 1-501";
 /// The marker a script writes to standard error to say which program searched.
 const ENGINE_MARKER: &str = "zx-engine=";
 /// Directories of version control systems, skipped when `.gitignore` cannot be read.
@@ -35,6 +33,13 @@ const VCS_DIRECTORIES: [&str; 3] = [".git", ".hg", ".svn"];
 /// `text` as one single-quoted shell word: nothing in it is interpreted.
 pub(crate) fn quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
+}
+
+/// The filter that cuts every output line to one byte more than shown, so that the cut is
+/// still noticed. [`MAX_LINES`] lines of this length stay under what the executor keeps of a
+/// command's output, which keeps the end; the start, which a search shows, is never dropped.
+fn cut_command() -> String {
+    format!("cut -c 1-{}", MAX_LINE_BYTES + 1)
 }
 
 /// What the three tools share: where they run and what commands must not see.
@@ -93,8 +98,9 @@ impl SearchSettings {
             CommandEnd::WaitFailed(error) => return Err(format!("the search could not be waited for: {error}")),
         }
         let mut engine = None;
-        let stderr: Vec<&str> = std::str::from_utf8(&output.stderr.bytes)
-            .unwrap_or_default()
+        // Lossily, like stdout: a stray byte must not hide the engine marker or an error.
+        let stderr_text = String::from_utf8_lossy(&output.stderr.bytes);
+        let stderr: Vec<&str> = stderr_text
             .lines()
             .filter(|line| match line.strip_prefix(ENGINE_MARKER) {
                 Some(name) => {
@@ -137,11 +143,7 @@ fn bound(text: &str) -> (String, bool) {
     let mut lines = String::with_capacity(text.len().min(MAX_BYTES * 2));
     for line in text.lines() {
         if line.len() > MAX_LINE_BYTES {
-            let mut end = MAX_LINE_BYTES;
-            while !line.is_char_boundary(end) {
-                end -= 1;
-            }
-            lines.push_str(&line[..end]);
+            lines.push_str(prefix_within(line, MAX_LINE_BYTES));
             lines.push_str(" [line cut]");
             cut = true;
         } else {
@@ -174,8 +176,41 @@ fn report(searched: &Searched, lines: &str, notes: &mut Vec<String>) -> ToolOutp
         }
         text.push_str(&format!("[{note}]\n"));
     }
-    let engine = searched.engine.clone().unwrap_or_default();
-    ToolOutput::ok(text).with_details(json!({ "engine": engine }))
+    let output = ToolOutput::ok(text);
+    match &searched.engine {
+        Some(engine) => output.with_details(json!({ "engine": engine })),
+        None => output,
+    }
+}
+
+/// What a search says about its result: when nothing was found, when more exists than is
+/// shown, and when lines were cut (`None`: cuts go unmentioned).
+struct Wording {
+    empty: &'static str,
+    more: String,
+    cut: Option<&'static str>,
+}
+
+/// The result of a search that shows at most `shown` of its lines: the lines, then the notes
+/// `wording` gives, then which program searched and what it reported.
+fn finish(searched: &Searched, shown: usize, wording: Wording) -> Result<ToolOutput, String> {
+    if let Some(error) = failed(searched) {
+        return Err(error);
+    }
+    if searched.stdout.trim().is_empty() {
+        return Ok(ToolOutput::ok(wording.empty));
+    }
+    let mut all: Vec<&str> = searched.stdout.lines().collect();
+    let more = all.len() > shown || searched.dropped > 0;
+    all.truncate(shown);
+    let (text, cut) = bound(&all.join("\n"));
+    let mut notes = Vec::new();
+    if more {
+        notes.push(wording.more);
+    } else if let Some(note) = wording.cut.filter(|_| cut) {
+        notes.push(note.to_string());
+    }
+    Ok(report(searched, &text, &mut notes))
 }
 
 /// The error when a search produced nothing but errors.
@@ -235,7 +270,7 @@ struct GrepArgs {
 
 impl GrepArgs {
     fn parse(args: &Value) -> Result<Self, String> {
-        let args = Self::deserialize(args).map_err(|e| format!("invalid arguments: {e}"))?;
+        let args: Self = parse_args(args)?;
         if args.pattern.is_empty() {
             return Err("pattern is empty".into());
         }
@@ -283,10 +318,11 @@ impl GrepArgs {
         grep.push(format!("-e {pattern} -- {path}"));
         format!(
             "if command -v rg >/dev/null 2>&1; then echo {ENGINE_MARKER}rg >&2; {}; \
-             else echo {ENGINE_MARKER}grep >&2; {}; fi | head -n {} | {CUT}",
+             else echo {ENGINE_MARKER}grep >&2; {}; fi | head -n {} | {}",
             rg.join(" "),
             grep.join(" "),
-            lines + 1
+            lines + 1,
+            cut_command()
         )
     }
 }
@@ -332,28 +368,19 @@ impl Tool for GrepTool {
         // A match with its context, and the separator between groups of them.
         let lines = limit.saturating_mul(2 * args.context + 2).min(MAX_LINES);
         let searched = self.settings.run(&args.script(lines), ctx).await?;
-        if let Some(error) = failed(&searched) {
-            return Err(error);
-        }
-        if searched.stdout.trim().is_empty() {
-            return Ok(ToolOutput::ok("No matches found."));
-        }
-        let mut all: Vec<&str> = searched.stdout.lines().collect();
-        let mut notes = Vec::new();
-        let more = all.len() > lines;
-        all.truncate(lines);
-        if args.context == 0 && all.len() > limit {
-            all.truncate(limit);
-        }
-        let (text, cut) = bound(&all.join("\n"));
-        if more || searched.dropped > 0 {
-            notes.push(format!(
-                "more matches exist; showing about {limit}. Narrow the pattern, path or glob, or raise limit"
-            ));
-        } else if cut {
-            notes.push("long lines or output were cut".into());
-        }
-        Ok(report(&searched, &text, &mut notes))
+        // Without context every line is a match, so only `limit` of them are shown.
+        let shown = if args.context == 0 { limit } else { lines };
+        finish(
+            &searched,
+            shown,
+            Wording {
+                empty: "No matches found.",
+                more: format!(
+                    "more matches exist; showing about {limit}. Narrow the pattern, path or glob, or raise limit"
+                ),
+                cut: Some("long lines or output were cut"),
+            },
+        )
     }
 }
 
@@ -382,7 +409,7 @@ struct FindArgs {
 
 impl FindArgs {
     fn parse(args: &Value) -> Result<Self, String> {
-        let args = Self::deserialize(args).map_err(|e| format!("invalid arguments: {e}"))?;
+        let args: Self = parse_args(args)?;
         if args.pattern.trim().is_empty() {
             return Err("pattern is empty".into());
         }
@@ -420,9 +447,10 @@ impl FindArgs {
              rg --no-config --files --hidden --color=never --glob {} {excluded}; \
              else echo {ENGINE_MARKER}find >&2; \
              find . \\( {prune} \\) -prune -o {test} -type f -print | sed 's|^\\./||'; \
-             fi | LC_ALL=C sort | head -n {} | {CUT}",
+             fi | LC_ALL=C sort | head -n {} | {}",
             quote(pattern),
-            limit + 1
+            limit + 1,
+            cut_command()
         )
     }
 }
@@ -460,25 +488,17 @@ impl Tool for FindTool {
         let args = FindArgs::parse(&args)?;
         let limit = positive(args.limit, FIND_LIMIT, "limit")?;
         let searched = self.settings.run(&args.script(limit), ctx).await?;
-        if let Some(error) = failed(&searched) {
-            return Err(error);
-        }
-        if searched.stdout.trim().is_empty() {
-            return Ok(ToolOutput::ok("No files found."));
-        }
-        let mut all: Vec<&str> = searched.stdout.lines().collect();
-        let mut notes = Vec::new();
-        if all.len() > limit {
-            all.truncate(limit);
-            notes.push(format!(
-                "more files match; showing the first {limit}. Narrow the pattern or path, or raise limit"
-            ));
-        }
-        let (text, cut) = bound(&all.join("\n"));
-        if cut && notes.is_empty() {
-            notes.push("long paths or output were cut".into());
-        }
-        Ok(report(&searched, &text, &mut notes))
+        finish(
+            &searched,
+            limit,
+            Wording {
+                empty: "No files found.",
+                more: format!(
+                    "more files match; showing the first {limit}. Narrow the pattern or path, or raise limit"
+                ),
+                cut: Some("long paths or output were cut"),
+            },
+        )
     }
 }
 
@@ -506,7 +526,7 @@ struct LsArgs {
 
 impl LsArgs {
     fn parse(args: &Value) -> Result<Self, String> {
-        let args = Self::deserialize(args).map_err(|e| format!("invalid arguments: {e}"))?;
+        let args: Self = parse_args(args)?;
         positive(args.limit, LS_LIMIT, "limit")?;
         Ok(args)
     }
@@ -543,32 +563,65 @@ impl Tool for LsTool {
         let limit = positive(args.limit, LS_LIMIT, "limit")?;
         let path = quote(&search_path(args.path.as_deref()));
         // -A: dotfiles without . and ..; -p: '/' after directories; -1: one per line.
-        let script = format!("LC_ALL=C ls -1Ap -- {path} | head -n {} | {CUT}", limit + 1);
+        let script = format!("LC_ALL=C ls -1Ap -- {path} | head -n {} | {}", limit + 1, cut_command());
         let searched = self.settings.run(&script, ctx).await?;
-        if let Some(error) = failed(&searched) {
-            return Err(error);
-        }
-        if searched.stdout.trim().is_empty() {
-            return Ok(ToolOutput::ok("(empty directory)"));
-        }
-        let mut all: Vec<&str> = searched.stdout.lines().collect();
-        let mut notes = Vec::new();
-        if all.len() > limit {
-            all.truncate(limit);
-            notes.push(format!(
-                "more entries exist; showing the first {limit}. Raise limit to see more"
-            ));
-        }
-        let (text, _) = bound(&all.join("\n"));
-        let mut output = report(&searched, &text, &mut notes);
-        output.details = None;
-        Ok(output)
+        finish(
+            &searched,
+            limit,
+            Wording {
+                empty: "(empty directory)",
+                more: format!("more entries exist; showing the first {limit}. Raise limit to see more"),
+                cut: None,
+            },
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
+
+    use tokio_util::sync::CancellationToken;
+
+    use crate::executor::{Captured, CommandOutput};
+
+    /// An executor whose searches find one line and print `stderr` as given.
+    struct StderrBytes(Vec<u8>);
+
+    #[async_trait]
+    impl Executor for StderrBytes {
+        async fn run(&self, _: &ShellCommand<'_>, _: &CancellationToken) -> Result<CommandOutput, String> {
+            Ok(CommandOutput {
+                stdout: Captured {
+                    bytes: b"src/a.rs:1:hit\n".to_vec(),
+                    dropped: 0,
+                },
+                stderr: Captured {
+                    bytes: self.0.clone(),
+                    dropped: 0,
+                },
+                end: CommandEnd::Exited(0),
+            })
+        }
+
+        async fn read_file(&self, _: &Path, _: u64) -> Result<Vec<u8>, String> {
+            Err("not a file executor".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn the_engine_marker_is_read_from_error_output_that_is_not_utf8() {
+        let tool = GrepTool {
+            settings: SearchSettings {
+                executor: Arc::new(StderrBytes(b"zx-engine=grep\n\xff".to_vec())),
+                ..SearchSettings::default()
+            },
+        };
+        let ctx = ToolContext::new(PathBuf::from("."), CancellationToken::new());
+        let output = tool.execute(json!({"pattern": "hit"}), &ctx).await.unwrap();
+        assert_eq!(output.details.unwrap()["engine"], "grep", "{}", output.content);
+    }
 
     #[test]
     fn quoting_leaves_nothing_for_the_shell_to_interpret() {

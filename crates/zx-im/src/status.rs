@@ -4,12 +4,14 @@
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 
-use super::server::segment;
-use super::{ConversationId, Destination, MessageId, MessageRef, SessionKey, ThreadId};
+use super::server::{Shared, segment};
+use super::{ConversationId, Destination, ImChannel, MessageId, MessageRef, Outbound, SessionKey, ThreadId};
 
 /// The extension of a record file; a record is written under another name first.
 const RECORD: &str = "json";
@@ -168,6 +170,56 @@ impl Record {
             id: MessageId(self.status.id),
         };
         (key, status)
+    }
+}
+
+/// The statuses an earlier process left behind; none when nothing keeps statuses or they
+/// cannot be read, which is reported.
+pub(crate) async fn left_behind(shared: &Shared) -> Vec<(SessionKey, MessageRef)> {
+    let Some(statuses) = shared.statuses() else {
+        return Vec::new();
+    };
+    shared
+        .bounded(
+            None,
+            "read the statuses an earlier process left",
+            "reading the statuses an earlier process left",
+            statuses.list(),
+        )
+        .await
+        .unwrap_or_default()
+}
+
+/// Replace each status in `left` with [`Replies::interrupted`], then forget it. Each is tried
+/// once, so a message the platform no longer lets the bot edit is not tried at every start.
+/// The stop gives up on the rest, which stay kept.
+pub(crate) async fn replace_left_behind(
+    left: Vec<(SessionKey, MessageRef)>,
+    channels: Vec<Arc<dyn ImChannel>>,
+    shared: Arc<Shared>,
+    stop: CancellationToken,
+) {
+    let text = Outbound::Text(shared.replies.interrupted.clone());
+    for (key, status) in left {
+        match channels.iter().find(|channel| channel.platform() == key.platform) {
+            Some(channel) => {
+                let act = format!("replace status {} that an earlier process left", status.id);
+                let acting = format!("replacing status {} that an earlier process left", status.id);
+                tokio::select! {
+                    biased;
+                    () = stop.cancelled() => return,
+                    _ = shared.bounded(Some(&key), &act, &acting, channel.update(&status, &text)) => {}
+                }
+            }
+            None => shared.failed(
+                Some(&key),
+                format!(
+                    "cannot replace status {} that an earlier process left: no channel is named {:?}",
+                    status.id, key.platform
+                ),
+            ),
+        }
+        shared.forget_status(&key, &status).await;
     }
 }
 

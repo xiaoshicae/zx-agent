@@ -13,13 +13,14 @@ use tokio::process::Command;
 
 use common::http::{Request, read_request};
 use common::mock_server::{MockServer, Reply};
+use common::zx_agent;
 
 /// An answer that would set the terminal title if a terminal ran it.
 const TITLE_ANSWER: &str = "before\u{1b}]0;CANARY\u{7}after";
 
 /// `zx-agent run` without tools against `server`.
 fn run(server: &MockServer, dir: &std::path::Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_zx-agent"));
+    let mut command = zx_agent();
     command
         .args(["run", "--model", "mock", "--base-url", &server.base_url])
         .args([
@@ -100,7 +101,7 @@ async fn progress_and_report_lines_escape_terminal_control_characters() {
         Reply::Status(400, "bad\u{1b}[2J"),
     ])
     .await;
-    let output = Command::new(env!("CARGO_BIN_EXE_zx-agent"))
+    let output = zx_agent()
         .args(["run", "--model", "mock", "--base-url", &server.base_url])
         .args(["--max-retries", "0", "--api-key-env", "ZX_RUN_CLI_TEST_KEY", "go"])
         .current_dir(dir.path())
@@ -173,7 +174,7 @@ async fn commands_cannot_read_the_agent_environment_through_proc() {
     const PROBE: &str = "visible-in-the-agent-environment";
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::bash("c", "cat /proc/$PPID/environ"), Reply::text("done")]).await;
-    let output = Command::new(env!("CARGO_BIN_EXE_zx-agent"))
+    let output = zx_agent()
         .args(["run", "--model", "mock", "--base-url", &server.base_url])
         .args([
             "--max-retries",
@@ -213,7 +214,7 @@ async fn commands_cannot_see_the_headers_for_a_trace_collector() {
     let command = "echo \"headers=[$OTEL_EXPORTER_OTLP_HEADERS] traces=[$OTEL_EXPORTER_OTLP_TRACES_HEADERS] \
                    metrics=[$OTEL_EXPORTER_OTLP_METRICS_HEADERS]\"";
     let server = MockServer::start(vec![Reply::bash("c", command), Reply::text("done")]).await;
-    let output = Command::new(env!("CARGO_BIN_EXE_zx-agent"))
+    let output = zx_agent()
         .args(["run", "--model", "mock", "--base-url", &server.base_url])
         .args([
             "--max-retries",
@@ -362,7 +363,7 @@ async fn the_reasoning_level_reaches_the_model_in_the_chosen_format_and_the_audi
 
 /// `zx-agent run --continue` against `server`, without a prompt.
 fn run_continue(server: &MockServer, dir: &std::path::Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_zx-agent"));
+    let mut command = zx_agent();
     command
         .args(["run", "--continue", "--model", "mock", "--base-url", &server.base_url])
         .args([

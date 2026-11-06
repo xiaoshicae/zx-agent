@@ -7,7 +7,7 @@ pub mod hooks;
 pub mod policy;
 pub mod queue;
 mod report;
-mod session_runtime;
+mod session_host;
 pub mod tool;
 
 pub use agent_loop::{LoopConfig, LoopControl, LoopFailure, LoopResult, LoopSpec, run_loop};
@@ -24,7 +24,7 @@ pub use hooks::{
 pub use policy::{AllowAll, Decision, ToolPolicy};
 pub use queue::{MessageQueues, PendingEntry, QueueMode, QueuedMessage};
 pub use report::{RunOutcome, RunReport};
-pub(crate) use session_runtime::{ContextPreparation, SessionRuntime};
+pub(crate) use session_host::{ContextPreparation, Prepared, SessionHost};
 pub use tool::{
     ActiveTools, Effects, ExecutionMode, MAX_DETAILS_BYTES, MAX_PROGRESS_BYTES, Tool, ToolContext, ToolOutput,
 };

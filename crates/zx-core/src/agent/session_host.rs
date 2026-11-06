@@ -1,5 +1,5 @@
 //! What the loop needs from the session it runs in. The Runner implements it over its session
-//! store; without a session runtime, `run_loop` keeps everything in its in-memory context.
+//! store; without a session host, `run_loop` keeps everything in its in-memory context.
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -9,10 +9,10 @@ use crate::ai::{Message, Provider, Request, ToolCall, Usage};
 use crate::session::CustomMessage;
 
 /// Records what the loop does, before the loop acts on it. When the session cannot record, a
-/// method returns an error (`prepare_context`: [`ContextPreparation::Unrecorded`]) and the loop
-/// stops at once, because an unattended run must not keep acting without an audit trail.
+/// method returns an error (`prepare_context`: [`Prepared::Unrecorded`]) and the loop stops at
+/// once, because an unattended run must not keep acting without an audit trail.
 #[async_trait]
-pub(crate) trait SessionRuntime: Send + Sync {
+pub(crate) trait SessionHost: Send + Sync {
     /// Record a finished message. Returns its entry ID.
     async fn append_message(&mut self, message: &Message) -> Result<String, String>;
 
@@ -40,24 +40,41 @@ pub(crate) trait SessionRuntime: Send + Sync {
     async fn prepare_context(&mut self, cancel: &CancellationToken) -> ContextPreparation;
 }
 
-/// The result of preparing the context. The loop knows neither profiles nor compaction policy.
-pub(crate) enum ContextPreparation {
+/// What preparing the context cost and produced. The loop knows neither profiles nor
+/// compaction policy; the cost counts against the run's budget whatever the result.
+pub(crate) struct ContextPreparation {
+    pub requests: u32,
+    pub usage: Usage,
+    pub result: Prepared,
+}
+
+impl ContextPreparation {
+    /// No request was made and the context stays as it is.
+    pub fn unchanged() -> Self {
+        Self {
+            requests: 0,
+            usage: Usage::default(),
+            result: Prepared::Unchanged,
+        }
+    }
+
+    /// Preparation failed before any request was made.
+    pub fn failed(error: String) -> Self {
+        Self {
+            requests: 0,
+            usage: Usage::default(),
+            result: Prepared::Failed(error),
+        }
+    }
+}
+
+/// How the context looks after preparation.
+pub(crate) enum Prepared {
     Unchanged,
-    Updated {
-        messages: Vec<Message>,
-        requests: u32,
-        usage: Usage,
-    },
+    /// The context was replaced, by a summary for example.
+    Updated(Vec<Message>),
     /// Preparation failed; the context is unchanged.
-    Failed {
-        error: String,
-        requests: u32,
-        usage: Usage,
-    },
+    Failed(String),
     /// The session could not record the preparation, so the run must stop.
-    Unrecorded {
-        error: String,
-        requests: u32,
-        usage: Usage,
-    },
+    Unrecorded(String),
 }

@@ -11,6 +11,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use common::mock_server::{MockServer, Reply};
+use common::{stderr, stdout, zx_agent as program};
 
 /// The variable the program reads the API key from, and the fake key it holds.
 const KEY_VAR: &str = "ZX_CLI_TEST_KEY";
@@ -20,7 +21,7 @@ const NO_SERVER: &str = "http://127.0.0.1:9/v1";
 
 /// `zx-agent run` against `base_url`, started in `dir`, with `args` after the common options.
 fn zx_agent(base_url: &str, dir: &Path, args: &[&str]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_zx-agent"));
+    let mut command = program();
     command
         .arg("run")
         .args(["--model", "mock-model", "--base-url", base_url])
@@ -40,14 +41,6 @@ fn zx_agent(base_url: &str, dir: &Path, args: &[&str]) -> Command {
 async fn run(base_url: &str, args: &[&str]) -> Output {
     let dir = tempfile::tempdir().unwrap();
     zx_agent(base_url, dir.path(), args).output().await.unwrap()
-}
-
-fn stdout(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stdout).into_owned()
-}
-
-fn stderr(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
 /// The `messages` array of request `index`.

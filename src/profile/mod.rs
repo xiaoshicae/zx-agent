@@ -2,25 +2,26 @@
 //! bounded startup I/O; tool and frontend assembly remains the caller's responsibility.
 
 mod context;
+mod file;
 pub mod skills;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 
-use crate::ai::{ModelCost, ModelMeta};
+use file::RawProfile;
+pub use file::read_text;
+use skills::Skill;
+
+use crate::ai::ModelMeta;
 use crate::executor::{Access, check_network};
 use crate::mcp::{check_server_name, tool_name as mcp_tool_name};
 use crate::policy::{AutoApprove, ProgramOptions};
 use crate::runner::Limits;
-use crate::text::read_text_file;
 use crate::tools::BUILTIN_TOOL_NAMES;
 use crate::{compaction, output_store};
-
-use skills::Skill;
 
 /// Maximum size of a profile, instructions, context file or skill body.
 pub const MAX_FILE_BYTES: u64 = 64 * 1024;
@@ -37,24 +38,44 @@ pub enum Builtin {
     Assistant,
 }
 
+/// An embedded profile's files.
+struct Source {
+    toml: &'static str,
+    /// What the TOML names as its instructions, which must be `instructions`.
+    instructions_file: &'static str,
+    instructions: &'static str,
+}
+
 impl Builtin {
-    fn source(self) -> (&'static str, &'static str, &'static str) {
+    /// Every embedded profile.
+    pub const ALL: [Builtin; 3] = [Self::Unattended, Self::Troubleshoot, Self::Assistant];
+
+    /// The name `--profile` and `extends` select it by.
+    pub fn name(self) -> &'static str {
         match self {
-            Self::Unattended => (
-                include_str!("../../profiles/unattended.toml"),
-                "unattended.md",
-                include_str!("../../profiles/unattended.md"),
-            ),
-            Self::Troubleshoot => (
-                include_str!("../../profiles/troubleshoot.toml"),
-                "troubleshoot.md",
-                include_str!("../../profiles/troubleshoot.md"),
-            ),
-            Self::Assistant => (
-                include_str!("../../profiles/assistant.toml"),
-                "assistant.md",
-                include_str!("../../profiles/assistant.md"),
-            ),
+            Self::Unattended => "unattended",
+            Self::Troubleshoot => "troubleshoot",
+            Self::Assistant => "assistant",
+        }
+    }
+
+    fn source(self) -> Source {
+        match self {
+            Self::Unattended => Source {
+                toml: include_str!("../../profiles/unattended.toml"),
+                instructions_file: "unattended.md",
+                instructions: include_str!("../../profiles/unattended.md"),
+            },
+            Self::Troubleshoot => Source {
+                toml: include_str!("../../profiles/troubleshoot.toml"),
+                instructions_file: "troubleshoot.md",
+                instructions: include_str!("../../profiles/troubleshoot.md"),
+            },
+            Self::Assistant => Source {
+                toml: include_str!("../../profiles/assistant.toml"),
+                instructions_file: "assistant.md",
+                instructions: include_str!("../../profiles/assistant.md"),
+            },
         }
     }
 }
@@ -83,7 +104,7 @@ pub struct Rules {
     pub deny_tools: Vec<String>,
     /// Ask nobody: calls that would wait for an approval run instead, while deny rules and
     /// the command policy still apply. Only with container execution, where the container is
-    /// the sandbox (decision D11), and not together with `ask_tools`.
+    /// the sandbox, and not together with `ask_tools`.
     pub approve_all: bool,
 }
 
@@ -97,8 +118,8 @@ impl Rules {
     }
 }
 
-/// An external MCP server whose listed tools the model may call (docs/p7-mcp-review.md). The
-/// frontends connect it at startup; whether a call runs is up to the rules.
+/// An external MCP server whose listed tools the model may call. The frontends connect it at
+/// startup; whether a call runs is up to the rules.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct McpServer {
@@ -205,13 +226,12 @@ impl Profile {
     /// paths use the process working directory; paths inside TOML use its parent.
     /// Unknown fields, unsupported backends and invalid files are errors.
     pub fn load(selector: Option<&str>, default: Builtin) -> Result<Self> {
-        let selector = match selector {
-            None => return Self::builtin(default),
-            Some("unattended") => return Self::builtin(Builtin::Unattended),
-            Some("troubleshoot") => return Self::builtin(Builtin::Troubleshoot),
-            Some("assistant") => return Self::builtin(Builtin::Assistant),
-            Some(selector) => selector,
+        let Some(selector) = selector else {
+            return Self::builtin(default);
         };
+        if let Some(builtin) = Builtin::ALL.into_iter().find(|builtin| builtin.name() == selector) {
+            return Self::builtin(builtin);
+        }
         ensure!(!selector.trim().is_empty(), "profile selector is empty");
         let path = Path::new(selector)
             .canonicalize()
@@ -221,21 +241,21 @@ impl Profile {
         let mut profile = Self::builtin(raw.extends.unwrap_or(default))?;
         // A canonical file path always has a parent, but keep this error actionable.
         let parent = path.parent().context("profile has no parent directory")?;
-        profile.overlay(raw, parent)?;
+        raw.apply(&mut profile, parent)?;
         profile.validate()?;
         Ok(profile)
     }
 
     fn builtin(kind: Builtin) -> Result<Self> {
-        let (source, filename, instructions) = kind.source();
-        let mut raw: RawProfile = toml::from_str(source).context("invalid embedded profile")?;
+        let source = kind.source();
+        let mut raw: RawProfile = toml::from_str(source.toml).context("invalid embedded profile")?;
         ensure!(
-            raw.instructions.take().as_deref() == Some(Path::new(filename)),
+            raw.instructions.take().as_deref() == Some(Path::new(source.instructions_file)),
             "embedded instructions path is inconsistent"
         );
         let mut profile = Self {
             name: String::new(),
-            instructions: instructions.into(),
+            instructions: source.instructions.into(),
             tools: Vec::new(),
             rules: Rules::default(),
             limits: Limits::default(),
@@ -252,150 +272,9 @@ impl Profile {
             container: ContainerSettings::default(),
             mcp: Vec::new(),
         };
-        profile.overlay(raw, Path::new("."))?;
+        raw.apply(&mut profile, Path::new("."))?;
         profile.validate()?;
         Ok(profile)
-    }
-
-    fn overlay(&mut self, raw: RawProfile, parent: &Path) -> Result<()> {
-        if let Some(name) = raw.name {
-            self.name = name;
-        }
-        if let Some(path) = raw.instructions {
-            self.instructions = read_text(&parent.join(path))?;
-        }
-        if let Some(tools) = raw.tools {
-            self.tools = tools;
-        }
-        if let Some(allow) = raw.rules.allow {
-            self.rules.allow = allow;
-        }
-        self.rules.deny.extend(raw.rules.deny);
-        if let Some(prefixes) = raw.rules.auto_approve {
-            self.rules.auto_approve = prefixes;
-        }
-        self.rules.auto_approve_except.extend(raw.rules.auto_approve_except);
-        self.rules.auto_approve_options.extend(raw.rules.auto_approve_options);
-        if let Some(tools) = raw.rules.ask_tools {
-            self.rules.ask_tools = tools;
-        }
-        self.rules.deny_tools.extend(raw.rules.deny_tools);
-        if let Some(approve_all) = raw.rules.approve_all {
-            self.rules.approve_all = approve_all;
-        }
-        if let Some(turns) = raw.limits.max_model_requests {
-            self.limits.max_model_requests = match turns {
-                ModelRequestLimit::Count(count) => Some(count),
-                ModelRequestLimit::Unlimited(Unlimited::Unlimited) => None,
-            };
-        }
-        if let Some(secs) = raw.limits.timeout_secs {
-            self.limits.timeout = (secs > 0).then(|| Duration::from_secs(secs));
-        }
-        if let Some(tokens) = raw.limits.token_budget {
-            self.limits.token_budget = (tokens > 0).then_some(tokens);
-        }
-        if let Some(count) = raw.extensions.continue_on_length {
-            self.continue_on_length = count;
-        }
-        ensure!(raw.extensions.redaction != Some(false), "redaction cannot be disabled");
-        if let Some(discover) = raw.context.discover {
-            self.context.discover = discover;
-        }
-        self.context
-            .files
-            .extend(raw.context.files.into_iter().map(|path| parent.join(path)));
-        if let Some(skills) = raw.skills {
-            self.skills = skills
-                .into_iter()
-                .map(|mut skill| {
-                    skill.path = parent.join(skill.path);
-                    skill
-                })
-                .collect();
-        }
-        if let Some(bytes) = raw.compaction.trigger_bytes {
-            self.compaction.trigger_bytes = (bytes > 0).then_some(bytes);
-        }
-        if let Some(tokens) = raw.compaction.trigger_tokens {
-            self.compaction.trigger_tokens = (tokens > 0).then_some(tokens);
-        }
-        if let Some(tokens) = raw.compaction.reserve_tokens {
-            self.compaction.reserve_tokens = tokens;
-        }
-        if let Some(bytes) = raw.compaction.keep_recent_bytes {
-            self.compaction.keep_recent_bytes = bytes;
-        }
-        if let Some(tokens) = raw.compaction.max_summary_tokens {
-            self.compaction.max_summary_tokens = tokens;
-        }
-        if let Some(secs) = raw.compaction.timeout_secs {
-            self.compaction.timeout = Duration::from_secs(secs);
-        }
-        if let Some(mode) = raw.compaction.mode {
-            self.compaction.mode = mode;
-        }
-        if let Some(path) = raw.tool_output.directory {
-            ensure!(!path.as_os_str().is_empty(), "toolOutput.directory must not be empty");
-            self.tool_output.directory = parent.join(path);
-        }
-        if let Some(bytes) = raw.tool_output.threshold_bytes {
-            self.tool_output.threshold_bytes = (bytes > 0).then_some(bytes);
-        }
-        if let Some(bytes) = raw.tool_output.max_file_bytes {
-            self.tool_output.max_file_bytes = bytes;
-        }
-        if let Some(execution) = raw.execution {
-            self.execution = execution;
-        }
-        let container = raw.container;
-        for (value, layer) in [
-            (&mut self.container.image, container.image),
-            (&mut self.container.user, container.user),
-            (&mut self.container.memory, container.memory),
-            (&mut self.container.network, container.network),
-        ] {
-            if layer.is_some() {
-                *value = layer;
-            }
-        }
-        if container.pids_limit.is_some() {
-            self.container.pids_limit = container.pids_limit;
-        }
-        if container.workspace.is_some() {
-            self.container.workspace = container.workspace;
-        }
-        if container.root.is_some() {
-            self.container.root = container.root;
-        }
-        if let Some(servers) = raw.mcp {
-            self.mcp = servers;
-        }
-        for model in raw.models.unwrap_or_default() {
-            ensure!(!model.id.trim().is_empty(), "models: an entry has no id");
-            ensure!(
-                model.context_window.is_none_or(|window| window > 0),
-                "models.{}: contextWindow must be greater than zero",
-                model.id
-            );
-            if let Some(cost) = &model.cost {
-                ensure!(
-                    [cost.input, cost.output, cost.cache_read, cost.cache_write]
-                        .iter()
-                        .all(|price| price.is_finite() && *price >= 0.0),
-                    "models.{}: prices must be zero or more, in USD per million tokens",
-                    model.id
-                );
-            }
-            self.models.insert(
-                model.id,
-                ModelMeta {
-                    context_window: model.context_window,
-                    cost: model.cost,
-                },
-            );
-        }
-        Ok(())
     }
 
     /// The names the model calls the configured MCP tools by, checking the `[[mcp]]` entries.
@@ -443,12 +322,7 @@ impl Profile {
     pub fn validate(&self) -> Result<()> {
         ensure!(!self.name.trim().is_empty(), "profile name is empty");
         for name in &self.tools {
-            ensure!(
-                name == skills::TOOL_NAME
-                    || name == output_store::TOOL_NAME
-                    || BUILTIN_TOOL_NAMES.contains(&name.as_str()),
-                "unknown tool {name:?}"
-            );
+            ensure!(known_tool(name), "unknown tool {name:?}");
         }
         for pattern in self
             .rules
@@ -466,10 +340,7 @@ impl Profile {
         let mcp_tools = self.mcp_tool_names()?;
         for tool in self.rules.ask_tools.iter().chain(&self.rules.deny_tools) {
             ensure!(
-                tool == skills::TOOL_NAME
-                    || tool == output_store::TOOL_NAME
-                    || BUILTIN_TOOL_NAMES.contains(&tool.as_str())
-                    || mcp_tools.contains(tool),
+                known_tool(tool) || mcp_tools.contains(tool),
                 "unknown tool in rule {tool:?}"
             );
         }
@@ -516,6 +387,11 @@ impl Profile {
     }
 }
 
+/// Whether `name` is a tool the host registers itself: a built-in, read_skill or read_output.
+fn known_tool(name: &str) -> bool {
+    name == skills::TOOL_NAME || name == output_store::TOOL_NAME || BUILTIN_TOOL_NAMES.contains(&name)
+}
+
 /// A program name of `rules.autoApproveOptions` is one lowercase word, since commands are
 /// compared without case; options are written without their dashes, and a letter is either
 /// a flag or takes a value.
@@ -546,129 +422,10 @@ fn check_program_options(program: &str, options: &ProgramOptions) -> Result<()> 
     Ok(())
 }
 
-#[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-struct RawProfile {
-    name: Option<String>,
-    extends: Option<Builtin>,
-    instructions: Option<PathBuf>,
-    tools: Option<Vec<String>>,
-    // Unknown backends fail to deserialize instead of being ignored.
-    execution: Option<Execution>,
-    container: RawContainer,
-    rules: RawRules,
-    limits: RawLimits,
-    extensions: RawExtensions,
-    context: RawContext,
-    skills: Option<Vec<Skill>>,
-    compaction: RawCompaction,
-    tool_output: RawToolOutput,
-    mcp: Option<Vec<McpServer>>,
-    models: Option<Vec<RawModel>>,
-}
-
-/// One `[[models]]` entry.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct RawModel {
-    id: String,
-    #[serde(default)]
-    context_window: Option<u64>,
-    #[serde(default)]
-    cost: Option<ModelCost>,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-struct RawCompaction {
-    trigger_bytes: Option<usize>,
-    /// 0 disables the token trigger; unset leaves it to the model's context window.
-    trigger_tokens: Option<u64>,
-    reserve_tokens: Option<u64>,
-    keep_recent_bytes: Option<usize>,
-    max_summary_tokens: Option<u32>,
-    timeout_secs: Option<u64>,
-    /// `full` (the default) or `incremental`.
-    mode: Option<compaction::SummaryMode>,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-struct RawToolOutput {
-    directory: Option<PathBuf>,
-    threshold_bytes: Option<usize>,
-    max_file_bytes: Option<usize>,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-struct RawContainer {
-    image: Option<String>,
-    user: Option<String>,
-    memory: Option<String>,
-    pids_limit: Option<u32>,
-    network: Option<String>,
-    workspace: Option<Access>,
-    root: Option<Access>,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-struct RawRules {
-    allow: Option<Vec<String>>,
-    deny: Vec<String>,
-    auto_approve: Option<Vec<String>>,
-    auto_approve_except: Vec<String>,
-    auto_approve_options: BTreeMap<String, ProgramOptions>,
-    ask_tools: Option<Vec<String>>,
-    deny_tools: Vec<String>,
-    approve_all: Option<bool>,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-struct RawLimits {
-    max_model_requests: Option<ModelRequestLimit>,
-    timeout_secs: Option<u64>,
-    /// 0 disables a budget that an earlier layer set.
-    token_budget: Option<u64>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum ModelRequestLimit {
-    Count(u32),
-    Unlimited(Unlimited),
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum Unlimited {
-    Unlimited,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-struct RawExtensions {
-    redaction: Option<bool>,
-    continue_on_length: Option<u32>,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-struct RawContext {
-    discover: Option<bool>,
-    files: Vec<PathBuf>,
-}
-
-/// Read a regular UTF-8 configuration file within [`MAX_FILE_BYTES`]. This is bounded,
-/// synchronous startup I/O; invalid files and read failures preserve their path in errors.
-pub fn read_text(path: &Path) -> Result<String> {
-    read_text_file(path, MAX_FILE_BYTES)
-}
-
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     fn load_file(text: &str) -> Result<Profile> {
@@ -676,6 +433,18 @@ mod tests {
         let path = dir.path().join("profile.toml");
         std::fs::write(&path, text).unwrap();
         Profile::load(Some(path.to_str().unwrap()), Builtin::Troubleshoot)
+    }
+
+    #[test]
+    fn builtin_names_are_spelt_as_extends_takes_them() {
+        for builtin in Builtin::ALL {
+            let parsed: Builtin = serde_json::from_value(serde_json::Value::String(builtin.name().into())).unwrap();
+            assert_eq!(parsed, builtin);
+            assert_eq!(
+                Profile::load(Some(builtin.name()), Builtin::Unattended).unwrap().name,
+                { Profile::load(None, builtin).unwrap().name }
+            );
+        }
     }
 
     #[test]
@@ -723,7 +492,7 @@ mod tests {
 
     #[test]
     fn no_embedded_profile_names_a_program_of_a_particular_environment() {
-        for kind in [Builtin::Unattended, Builtin::Troubleshoot, Builtin::Assistant] {
+        for kind in Builtin::ALL {
             let profile = Profile::load(None, kind).unwrap();
             assert!(profile.rules.auto_approve_options.is_empty(), "{kind:?}");
             assert!(

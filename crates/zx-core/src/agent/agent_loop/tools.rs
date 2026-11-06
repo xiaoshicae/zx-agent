@@ -29,7 +29,6 @@ impl<'a> Engine<'a, '_, '_> {
         if let Some(error) = &call.arguments_error {
             return Prepared::blocked(format!("Invalid arguments for tool {:?}: {error}", call.name));
         }
-        // pi: agent-loop.ts:704 (`prepareToolCallArguments` before validation).
         let rewritten = match std::panic::catch_unwind(AssertUnwindSafe(|| tool.prepare_arguments(&call.arguments))) {
             Ok(arguments) => arguments.map(|arguments| ToolCall {
                 arguments,
@@ -423,7 +422,7 @@ async fn execute(engine: &Engine<'_, '_, '_>, tool: &dyn Tool, call: &ToolCall) 
     let result = loop {
         tokio::select! {
             biased;
-            _ = cancel.cancelled() => {
+            () = cancel.cancelled() => {
                 return Outcome {
                     output: ToolOutput::error(interrupted(tool.effects())),
                     duration_ms: Some(duration_ms(started.elapsed())),
@@ -466,7 +465,7 @@ async fn emit_progress(engine: &Engine<'_, '_, '_>, call: &ToolCall, text: Strin
                     tool_name: call.name.clone(),
                     content: output.content,
                 })
-                .await
+                .await;
         }
         Err(error) => {
             engine.hook_error(error);

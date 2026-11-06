@@ -684,6 +684,11 @@ impl Open {
             .or(self.run.as_ref().map(|run| &run.cx))
     }
 
+    /// The span of a tool call, or the innermost open one when the call has none.
+    fn for_call(&self, call: &str) -> Option<&Context> {
+        self.tools.get(call).map(|tool| &tool.cx).or(self.current())
+    }
+
     /// End what an attempt holds open: tools, the request, a summary and the turn.
     fn end_attempt_parts(&mut self, at: SystemTime) {
         for (_, tool) in self.tools.drain() {
@@ -782,14 +787,8 @@ impl Runs {
             }
             What::AttemptEnd { outcome } => {
                 spans.end_attempt_parts(at);
-                if let Some(attempt) = spans.attempt.take() {
-                    let span = attempt.span();
-                    span.set_attribute(KeyValue::new("zx.outcome", name(&outcome)));
-                    if outcome == LoopOutcome::Error {
-                        span.set_status(Status::error("error"));
-                    }
-                    span.end_with_timestamp(at);
-                }
+                let attributes = vec![KeyValue::new("zx.outcome", name(&outcome))];
+                finish(spans.attempt.take(), at, attributes, outcome == LoopOutcome::Error);
             }
             What::TurnStart { turn } => {
                 end(spans.turn.take(), at);
@@ -864,17 +863,17 @@ impl Runs {
             }
             What::Decision { call, verdict } => {
                 let attributes = vec![KeyValue::new("zx.verdict", name(&verdict))];
-                event(spans.tool_or_current(&call), "decision", at, attributes);
+                event(spans.for_call(&call), "decision", at, attributes);
             }
             What::ApprovalRequested { call } => {
-                event(spans.tool_or_current(&call), "approval_requested", at, Vec::new());
+                event(spans.for_call(&call), "approval_requested", at, Vec::new());
             }
             What::ApprovalResolved { call, result, wait_ms } => {
                 let attributes = vec![
                     KeyValue::new("zx.approval.result", name(&result)),
                     KeyValue::new("zx.approval.wait_ms", saturate(wait_ms)),
                 ];
-                event(spans.tool_or_current(&call), "approval_resolved", at, attributes);
+                event(spans.for_call(&call), "approval_resolved", at, attributes);
                 if let Some(instruments) = instruments {
                     let attributes = [KeyValue::new("zx.approval.result", name(&result))];
                     instruments
@@ -1006,13 +1005,6 @@ impl Runs {
     }
 }
 
-impl Open {
-    /// The tool call's span, or the innermost open one when the call is unknown.
-    fn tool_or_current(&self, call: &str) -> Option<&Context> {
-        self.tools.get(call).map(|tool| &tool.cx).or(self.current())
-    }
-}
-
 fn start(
     tracer: &SdkTracer,
     name: impl Into<Cow<'static, str>>,
@@ -1035,9 +1027,20 @@ fn remote(parent: SpanContext) -> Context {
     Context::new().with_remote_span_context(parent)
 }
 
+/// End `span` at `at`, if there is one.
 fn end(span: Option<Context>, at: SystemTime) {
+    finish(span, at, Vec::new(), false);
+}
+
+/// End `span` at `at` with what it reports, and as an error when it `failed`.
+fn finish(span: Option<Context>, at: SystemTime, attributes: Vec<KeyValue>, failed: bool) {
     if let Some(span) = span {
-        span.span().end_with_timestamp(at);
+        let span = span.span();
+        span.set_attributes(attributes);
+        if failed {
+            span.set_status(Status::error("error"));
+        }
+        span.end_with_timestamp(at);
     }
 }
 

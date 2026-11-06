@@ -10,9 +10,10 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::{Child, ChildStdin, ChildStdout};
 
 use common::mock_server::{MockServer, Reply};
+use common::zx_agent;
 
 const KEY_VAR: &str = "ZX_ACP_TEST_KEY";
 
@@ -28,7 +29,7 @@ struct Acp {
 
 impl Acp {
     async fn start(server: &MockServer, cwd: &Path, args: &[&str]) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_zx-agent"))
+        let mut child = zx_agent()
             .arg("acp")
             .args(["--model", "mock-model", "--base-url", &server.base_url])
             .args([

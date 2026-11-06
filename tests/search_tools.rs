@@ -148,6 +148,17 @@ async fn grep_shows_at_most_the_limit() {
 }
 
 #[tokio::test]
+async fn grep_notes_more_matches_when_just_over_the_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("many.txt"), "match\n".repeat(5)).unwrap();
+
+    let output = grep(dir.path(), json!({"pattern": "match", "limit": 3})).await.unwrap();
+
+    assert_eq!(lines(&output).len(), 3, "{}", output.content);
+    assert!(output.content.contains("more matches exist"), "{}", output.content);
+}
+
+#[tokio::test]
 async fn hostile_patterns_and_paths_are_searched_for_not_run() {
     let dir = project();
     for value in [

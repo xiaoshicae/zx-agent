@@ -71,8 +71,8 @@ pub struct PendingEntry {
     pub data: Value,
 }
 
-/// Messages injected into a running loop (pi: `Agent.steeringQueue` / `followUpQueue`),
-/// and the custom entries extensions append while a run owns the session.
+/// Messages injected into a running loop, and the custom entries extensions append while a
+/// run owns the session.
 ///
 /// - Steering messages are taken after each turn and enter the conversation before the
 ///   next model request, while the task is still in progress.

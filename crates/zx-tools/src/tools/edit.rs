@@ -11,15 +11,15 @@ use super::edit_text::{
     Edit, apply_edits, line_ending, normalize_to_lf, restore_line_endings, split_bom, unified_patch,
 };
 use super::mutation::FileMutationQueue;
-use super::read::resolve;
-use crate::agent::{ExecutionMode, Tool, ToolContext, ToolOutput};
+use super::{looks_binary, parse_args, resolve, unless_cancelled};
+use crate::agent::{ExecutionMode, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput};
 use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
+use crate::text::prefix_within;
 
-/// The most bytes of the patch in a result's details. Details over the loop's limit
-/// (`MAX_DETAILS_BYTES`, 16 KiB) are dropped whole, so a long patch is cut to leave room for
-/// the other fields.
-const MAX_PATCH_BYTES: usize = 12 * 1024;
+/// The most bytes of the patch in a result's details: details over the loop's limit are
+/// dropped whole, so a long patch is cut to leave room for the other fields.
+const MAX_PATCH_BYTES: usize = MAX_DETAILS_BYTES - 4 * 1024;
 
 /// Replaces exact, unique, non-overlapping pieces of text in one file.
 pub struct EditFileTool {
@@ -89,7 +89,6 @@ impl Tool for EditFileTool {
         }
     }
 
-    /// The mode of the executor: calls run one at a time when it handles one at a time.
     fn execution_mode(&self) -> ExecutionMode {
         self.executor.execution_mode()
     }
@@ -136,7 +135,7 @@ impl Tool for EditFileTool {
     }
 
     fn validate_arguments(&self, args: &Value) -> Result<(), String> {
-        let args = Args::deserialize(args).map_err(|e| format!("invalid arguments: {e}"))?;
+        let args: Args = parse_args(args)?;
         if args.edits.is_empty() {
             return Err("edits must contain at least one replacement".into());
         }
@@ -144,21 +143,16 @@ impl Tool for EditFileTool {
     }
 
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
-        let args: Args = serde_json::from_value(args).map_err(|e| format!("invalid arguments: {e}"))?;
+        let args: Args = parse_args(&args)?;
         let shown = args.path.trim();
         let path = resolve(&ctx.cwd, &args.path)?;
         let cancelled = || "edit cancelled before the file was changed".to_string();
-        let _turn = tokio::select! {
-            biased;
-            _ = ctx.cancel.cancelled() => return Err(cancelled()),
-            turn = self.queue.turn(&path) => turn,
-        };
-        let bytes = tokio::select! {
-            biased;
-            _ = ctx.cancel.cancelled() => return Err(cancelled()),
-            read = self.executor.read_file(&path, self.max_file_bytes) => read?,
-        };
-        if bytes.iter().take(8192).any(|&b| b == 0) {
+        let _turn = unless_cancelled(ctx, self.queue.turn(&path))
+            .await
+            .ok_or_else(cancelled)?;
+        let read = unless_cancelled(ctx, self.executor.read_file(&path, self.max_file_bytes)).await;
+        let bytes = read.ok_or_else(cancelled)??;
+        if looks_binary(&bytes) {
             return Err(format!(
                 "{} looks like a binary file; edit_file edits text only",
                 path.display()
@@ -203,11 +197,8 @@ fn clip(text: &str, max_bytes: usize) -> String {
     if text.len() <= max_bytes {
         return text.to_string();
     }
-    let mut end = max_bytes;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}\n[patch cut at {end} of {} bytes]\n", &text[..end], text.len())
+    let kept = prefix_within(text, max_bytes);
+    format!("{kept}\n[patch cut at {} of {} bytes]\n", kept.len(), text.len())
 }
 
 #[cfg(test)]
