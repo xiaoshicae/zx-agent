@@ -205,8 +205,8 @@ fn clip(text: &str, max_bytes: usize) -> String {
 mod tests {
     use super::*;
 
-    fn prepared(args: Value) -> Option<Value> {
-        EditFileTool::default().prepare_arguments(&args)
+    fn prepared(args: &Value) -> Option<Value> {
+        EditFileTool::default().prepare_arguments(args)
     }
 
     #[test]
@@ -214,15 +214,15 @@ mod tests {
         let edit = json!({"oldText": "a", "newText": "b"});
         let expected = json!({"path": "f", "edits": [edit.clone()]});
         assert_eq!(
-            prepared(json!({"path": "f", "edits": edit.to_string()})),
+            prepared(&json!({"path": "f", "edits": edit.to_string()})),
             Some(expected.clone())
         );
         assert_eq!(
-            prepared(json!({"path": "f", "edits": edit.clone()})),
+            prepared(&json!({"path": "f", "edits": edit.clone()})),
             Some(expected.clone())
         );
         assert_eq!(
-            prepared(json!({"path": "f", "edits": json!([edit.clone()]).to_string()})),
+            prepared(&json!({"path": "f", "edits": json!([edit.clone()]).to_string()})),
             Some(expected)
         );
     }
@@ -231,11 +231,11 @@ mod tests {
     fn top_level_old_and_new_text_become_one_more_edit() {
         let first = json!({"oldText": "a", "newText": "b"});
         assert_eq!(
-            prepared(json!({"path": "f", "oldText": "x", "newText": "y"})),
+            prepared(&json!({"path": "f", "oldText": "x", "newText": "y"})),
             Some(json!({"path": "f", "edits": [{"oldText": "x", "newText": "y"}]}))
         );
         assert_eq!(
-            prepared(json!({"path": "f", "edits": [first.clone()], "oldText": "x", "newText": "y"})),
+            prepared(&json!({"path": "f", "edits": [first.clone()], "oldText": "x", "newText": "y"})),
             Some(json!({"path": "f", "edits": [first, {"oldText": "x", "newText": "y"}]}))
         );
     }
@@ -243,12 +243,12 @@ mod tests {
     #[test]
     fn well_formed_and_unrecognized_arguments_are_left_alone() {
         assert_eq!(
-            prepared(json!({"path": "f", "edits": [{"oldText": "a", "newText": "b"}]})),
+            prepared(&json!({"path": "f", "edits": [{"oldText": "a", "newText": "b"}]})),
             None
         );
-        assert_eq!(prepared(json!({"path": "f", "edits": "not json"})), None);
-        assert_eq!(prepared(json!({"path": "f", "oldText": 1, "newText": "y"})), None);
-        assert_eq!(prepared(json!("text")), None);
+        assert_eq!(prepared(&json!({"path": "f", "edits": "not json"})), None);
+        assert_eq!(prepared(&json!({"path": "f", "oldText": 1, "newText": "y"})), None);
+        assert_eq!(prepared(&json!("text")), None);
     }
 
     #[test]

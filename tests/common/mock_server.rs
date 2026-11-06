@@ -44,11 +44,11 @@ impl Reply {
 
     /// A request for one `bash` call running `command`.
     pub fn bash(id: &str, command: &str) -> Self {
-        Self::tool_call(id, "bash", json!({"command": command}))
+        Self::tool_call(id, "bash", &json!({"command": command}))
     }
 
     /// A request for one call of tool `name` with `arguments`.
-    pub fn tool_call(id: &str, name: &str, arguments: Value) -> Self {
+    pub fn tool_call(id: &str, name: &str, arguments: &Value) -> Self {
         let call = json!({"index": 0, "id": id, "type": "function",
             "function": {"name": name, "arguments": arguments.to_string()}});
         Reply::Sse(vec![
@@ -181,8 +181,7 @@ async fn read_request(stream: &mut TcpStream) -> Captured {
     let length: usize = headers
         .lines()
         .find_map(|line| line.strip_prefix("content-length:"))
-        .map(|value| value.trim().parse().unwrap())
-        .unwrap_or(0);
+        .map_or(0, |value| value.trim().parse().unwrap());
     while data.len() < header_end + length {
         let n = stream.read(&mut buf).await.unwrap();
         data.extend_from_slice(&buf[..n]);

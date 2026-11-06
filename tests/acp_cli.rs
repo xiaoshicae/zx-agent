@@ -322,7 +322,7 @@ async fn an_unknown_session_is_a_request_error() {
 async fn a_file_write_shows_as_a_diff_and_an_auto_approved_command_asks_nobody() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![
-        Reply::tool_call("w", "write_file", json!({"path": "notes.txt", "content": "one\n"})),
+        Reply::tool_call("w", "write_file", &json!({"path": "notes.txt", "content": "one\n"})),
         Reply::bash("p", "pwd"),
         Reply::text("written"),
     ])

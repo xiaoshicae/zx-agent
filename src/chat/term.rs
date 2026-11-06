@@ -65,12 +65,11 @@ impl Style {
         let code = match tone {
             Tone::Plain => return text.to_string(),
             Tone::Dim => "2",
-            Tone::Strong => "1",
+            Tone::Strong | Tone::Prompt => "1",
             Tone::Ok => "32",
             // Bold as well: plain yellow is faint on a light background.
             Tone::Warn => "1;33",
             Tone::Error => "31",
-            Tone::Prompt => "1",
         };
         if self.color {
             format!("\x1b[{code}m{text}\x1b[0m")
@@ -140,6 +139,10 @@ struct StatusLine {
     frame: usize,
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent switches of a terminal, not states of one thing"
+)]
 pub(super) struct Terminal {
     style: Style,
     glyphs: Glyphs,
@@ -265,13 +268,13 @@ impl Terminal {
     /// What the run does now. A wait that turns into thinking keeps its start time and its
     /// row; any other change settles what was shown and starts a fresh status.
     pub(super) fn set_phase(&mut self, phase: Phase) {
-        if !self.live {
-            return;
-        }
         enum Change {
             Same,
             Wait,
             Other,
+        }
+        if !self.live {
+            return;
         }
         let change = match &self.status {
             Some(status) if status.phase == phase => Change::Same,

@@ -381,6 +381,7 @@ impl Updates {
 }
 
 impl EventSink for Updates {
+    #[expect(clippy::too_many_lines, reason = "one arm per event variant")]
     fn emit(&self, event: &Event) {
         match &event.event {
             AgentEvent::MessageStart { role: "assistant" } => lock(&self.state).wrote_text = false,

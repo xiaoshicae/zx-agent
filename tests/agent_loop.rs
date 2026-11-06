@@ -190,7 +190,7 @@ async fn cancellation_interrupts_a_waiting_policy() {
     let mut control = LoopControl::new(Some(10), &mut approvals, &cancel, &sink);
     let mut running = Box::pin(run_loop(&mut context, vec![Message::user("go")], &config, &mut control));
     tokio::select! {
-        _ = entered.notified() => {}
+        () = entered.notified() => {}
         _ = &mut running => panic!("policy must still be waiting"),
     }
     cancel.cancel();

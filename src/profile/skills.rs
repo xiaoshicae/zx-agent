@@ -133,7 +133,7 @@ impl Tool for ReadSkillTool {
         // Skills are registered files on this machine, wherever commands run.
         let bytes = tokio::select! {
             biased;
-            _ = ctx.cancel.cancelled() => return Err("skill read cancelled".into()),
+            () = ctx.cancel.cancelled() => return Err("skill read cancelled".into()),
             result = LocalExecutor.read_file(&skill.path, MAX_FILE_BYTES) => result?,
         };
         let text = String::from_utf8(bytes).map_err(|error| format!("skill {:?} is not UTF-8: {error}", skill.name))?;

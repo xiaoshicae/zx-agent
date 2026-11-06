@@ -194,7 +194,7 @@ impl Socket {
     pub async fn closed_by_client(&mut self) -> bool {
         loop {
             match tokio::time::timeout(WAIT, self.stream.next()).await {
-                Ok(None | Some(Err(_)) | Some(Ok(Message::Close(_)))) => return true,
+                Ok(None | Some(Err(_) | Ok(Message::Close(_)))) => return true,
                 Ok(Some(Ok(_))) => {}
                 Err(_) => return false,
             }
@@ -265,8 +265,8 @@ impl TestFrame {
         for (number, value) in [
             (1, self.seq_id),
             (2, self.log_id),
-            (3, self.service as i64 as u64),
-            (4, self.method as i64 as u64),
+            (3, i64::from(self.service).cast_unsigned()),
+            (4, i64::from(self.method).cast_unsigned()),
         ] {
             varint(&mut out, number << 3);
             varint(&mut out, value);
@@ -299,7 +299,7 @@ impl TestFrame {
             }
         }
         fn chunk<'a>(bytes: &mut &'a [u8]) -> &'a [u8] {
-            let length = varint(bytes) as usize;
+            let length = usize::try_from(varint(bytes)).unwrap();
             let (field, rest) = bytes.split_at(length);
             *bytes = rest;
             field
@@ -311,8 +311,8 @@ impl TestFrame {
             match varint(&mut bytes) {
                 0x08 => frame.seq_id = varint(&mut bytes),
                 0x10 => frame.log_id = varint(&mut bytes),
-                0x18 => frame.service = varint(&mut bytes) as i32,
-                0x20 => frame.method = varint(&mut bytes) as i32,
+                0x18 => frame.service = i32::try_from(varint(&mut bytes)).unwrap(),
+                0x20 => frame.method = i32::try_from(varint(&mut bytes)).unwrap(),
                 0x2a => {
                     let mut header = chunk(&mut bytes);
                     let (mut key, mut value) = (String::new(), String::new());
@@ -378,7 +378,7 @@ async fn answer(
         Some(Answer::RateLimited { reset_secs }) => response(
             "429 Too Many Requests",
             &[("x-ogw-ratelimit-reset", reset_secs.to_string())],
-            &json!({"code": 99991400, "msg": "request trigger frequency limit"}).to_string(),
+            &json!({"code": 99_991_400, "msg": "request trigger frequency limit"}).to_string(),
         ),
         None => response("200 OK", &[], &normal(route, &settings, &posted).to_string()),
     };

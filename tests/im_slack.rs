@@ -61,11 +61,11 @@ impl Running {
     }
 }
 
-fn envelope(id: &str, kind: &str, payload: Value) -> Value {
+fn envelope(id: &str, kind: &str, payload: &Value) -> Value {
     json!({"envelope_id": id, "type": kind, "payload": payload, "accepts_response_payload": false})
 }
 
-fn event(event: Value) -> Value {
+fn event(event: &Value) -> Value {
     json!({"type": "event_callback", "event_id": "Ev1", "event": event})
 }
 
@@ -75,7 +75,7 @@ fn mention(ts: &str, thread: Option<&str>, text: &str) -> Value {
     if let Some(thread) = thread {
         mention["thread_ts"] = json!(thread);
     }
-    event(mention)
+    event(&mention)
 }
 
 fn direct(ts: &str, extra: Value) -> Value {
@@ -84,7 +84,7 @@ fn direct(ts: &str, extra: Value) -> Value {
     if let (Value::Object(message), Value::Object(extra)) = (&mut message, extra) {
         message.extend(extra);
     }
-    event(message)
+    event(&message)
 }
 
 fn in_thread(conversation: &str, thread: Option<&str>) -> Destination {
@@ -111,7 +111,7 @@ async fn a_mention_is_acknowledged_and_passed_on_without_the_bot_mention() {
     socket.send(json!({"type": "hello", "num_connections": 1})).await;
     let text = "<@UBOT> pods in &lt;ns&gt; &amp; logs";
     socket
-        .send(envelope("e1", "events_api", mention("1.000100", None, text)))
+        .send(envelope("e1", "events_api", &mention("1.000100", None, text)))
         .await;
     assert_eq!(socket.receive().await, json!({"envelope_id": "e1"}));
     assert_eq!(
@@ -135,7 +135,7 @@ async fn a_mention_in_a_thread_names_the_thread() {
         .send(envelope(
             "e1",
             "events_api",
-            mention("1.000200", Some("1.000100"), "<@UBOT> more"),
+            &mention("1.000200", Some("1.000100"), "<@UBOT> more"),
         ))
         .await;
     assert_eq!(
@@ -155,16 +155,16 @@ async fn direct_messages_are_passed_on_but_not_the_bots_own_or_edits() {
         direct("2.2", json!({"user": "UBOT"})),
         direct("2.3", json!({"subtype": "message_changed"})),
         event(
-            json!({"type": "message", "channel_type": "channel", "channel": "C1", "user": "U1", "text": "chatter", "ts": "2.4"}),
+            &json!({"type": "message", "channel_type": "channel", "channel": "C1", "user": "U1", "text": "chatter", "ts": "2.4"}),
         ),
     ];
     for (n, payload) in ignored.into_iter().enumerate() {
         let id = format!("ignored{n}");
-        socket.send(envelope(&id, "events_api", payload)).await;
+        socket.send(envelope(&id, "events_api", &payload)).await;
         assert_eq!(socket.receive().await, json!({ "envelope_id": id }));
     }
     socket
-        .send(envelope("e1", "events_api", direct("2.5", json!({}))))
+        .send(envelope("e1", "events_api", &direct("2.5", json!({}))))
         .await;
     assert_eq!(running.next().await, message("2.5", in_thread("D1", None), "U1", "hi"));
     running.stop().await.unwrap();
@@ -176,13 +176,13 @@ async fn a_redelivered_message_is_passed_on_once() {
     let mut running = run(channel(&slack));
     let mut socket = slack.socket().await;
     socket
-        .send(envelope("e1", "events_api", mention("3.1", None, "<@UBOT> once")))
+        .send(envelope("e1", "events_api", &mention("3.1", None, "<@UBOT> once")))
         .await;
     socket
-        .send(envelope("e2", "events_api", mention("3.1", None, "<@UBOT> once")))
+        .send(envelope("e2", "events_api", &mention("3.1", None, "<@UBOT> once")))
         .await;
     socket
-        .send(envelope("e3", "events_api", mention("3.2", None, "<@UBOT> next")))
+        .send(envelope("e3", "events_api", &mention("3.2", None, "<@UBOT> next")))
         .await;
     for id in ["e1", "e2", "e3"] {
         assert_eq!(socket.receive().await, json!({ "envelope_id": id }));
@@ -214,9 +214,9 @@ async fn a_button_click_becomes_a_decision_in_the_cards_thread() {
         })
     };
     socket
-        .send(envelope("i0", "interactive", click("something_else")))
+        .send(envelope("i0", "interactive", &click("something_else")))
         .await;
-    socket.send(envelope("i1", "interactive", click("zx_deny"))).await;
+    socket.send(envelope("i1", "interactive", &click("zx_deny"))).await;
     assert_eq!(socket.receive().await, json!({"envelope_id": "i0"}));
     assert_eq!(socket.receive().await, json!({"envelope_id": "i1"}));
     assert_eq!(
@@ -244,7 +244,7 @@ async fn a_click_finds_its_thread_in_the_button_value() {
         "message": {"ts": "4.2"},
         "actions": [{"action_id": "zx_allow_once", "value": "4.1/A2", "type": "button"}],
     });
-    socket.send(envelope("i1", "interactive", click)).await;
+    socket.send(envelope("i1", "interactive", &click)).await;
     assert_eq!(
         running.next().await,
         Inbound::Decision {
@@ -264,7 +264,7 @@ async fn an_event_without_its_wrapper_is_passed_on_too() {
     let mut socket = slack.socket().await;
     // The Socket Mode page's own example puts the bare event in the payload.
     let bare = json!({"type": "app_mention", "user": "U1", "text": "<@UBOT> bare", "ts": "4.5", "channel": "C1"});
-    socket.send(envelope("e1", "events_api", bare)).await;
+    socket.send(envelope("e1", "events_api", &bare)).await;
     assert_eq!(
         running.next().await,
         message("4.5", in_thread("C1", None), "U1", "bare")
@@ -282,7 +282,11 @@ async fn a_disconnect_message_makes_the_channel_reconnect() {
         .await;
     let mut second = slack.socket().await;
     second
-        .send(envelope("e1", "events_api", mention("5.1", None, "<@UBOT> still here")))
+        .send(envelope(
+            "e1",
+            "events_api",
+            &mention("5.1", None, "<@UBOT> still here"),
+        ))
         .await;
     assert_eq!(
         running.next().await,

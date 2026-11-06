@@ -205,7 +205,7 @@ impl Executor for SlowReads {
 fn file_tool_config(
     provider: Arc<FauxProvider>,
     cwd: PathBuf,
-    executor: Arc<dyn Executor>,
+    executor: &Arc<dyn Executor>,
 ) -> zx_agent::agent::LoopConfig {
     let names = ["edit_file", "write_file"].map(String::from);
     let tools = builtin_tools_with(&names, Duration::from_secs(5), &[], executor).unwrap();
@@ -233,7 +233,8 @@ async fn two_edits_of_one_file_in_one_batch_both_take_effect() {
         ]),
         FauxStep::text("done"),
     ]));
-    let config = file_tool_config(provider, dir.path().to_path_buf(), Arc::new(SlowReads));
+    let executor: Arc<dyn Executor> = Arc::new(SlowReads);
+    let config = file_tool_config(provider, dir.path().to_path_buf(), &executor);
 
     let (result, _) = run_prompt(&config, &mut Vec::new(), "edit").await;
 
@@ -284,7 +285,8 @@ async fn old_argument_shapes_are_rewritten_before_the_checks() {
         ),
         FauxStep::text("done"),
     ]));
-    let config = file_tool_config(provider, dir.path().to_path_buf(), Arc::new(LocalExecutor));
+    let executor: Arc<dyn Executor> = Arc::new(LocalExecutor);
+    let config = file_tool_config(provider, dir.path().to_path_buf(), &executor);
 
     let (result, _) = run_prompt(&config, &mut Vec::new(), "edit").await;
 

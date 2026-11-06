@@ -200,9 +200,10 @@ fn local_time(ms: u64) -> String {
     i64::try_from(ms)
         .ok()
         .and_then(chrono::DateTime::from_timestamp_millis)
-        .map(|utc| utc.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
-        // Out of range only for a corrupt timestamp, which the listing still shows.
-        .unwrap_or_else(|| "-".to_string())
+        .map_or_else(
+            || "-".to_string(),
+            |utc| utc.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string(),
+        )
 }
 
 fn preview(session: &SessionInfo) -> String {

@@ -210,7 +210,7 @@ async fn cancellation_interrupts_a_pending_approval() {
     let (mut runner, _) = RunnerSetup::new(config).build();
     let cancel = CancellationToken::new();
     let mut running = Box::pin(runner.run("go", &cancel));
-    tokio::select! { _ = entered.notified() => {}, _ = &mut running => panic!("must wait for approval") }
+    tokio::select! { () = entered.notified() => {}, _ = &mut running => panic!("must wait for approval") }
     cancel.cancel();
     let report = tokio::time::timeout(Duration::from_secs(1), running).await.unwrap();
     assert_eq!(report.outcome, RunOutcome::Aborted);
@@ -466,32 +466,32 @@ impl Hooks for BadOutput {
 
 #[tokio::test]
 async fn failed_output_hooks_withhold_raw_results_from_events_and_persistence() {
+    struct SecretTool;
+    #[async_trait]
+    impl zx_agent::agent::Tool for SecretTool {
+        fn name(&self) -> &str {
+            "echo"
+        }
+        fn definition(&self) -> zx_agent::ai::ToolDef {
+            zx_agent::ai::ToolDef {
+                name: "echo".into(),
+                description: "secret".into(),
+                parameters: json!({}),
+            }
+        }
+        async fn execute(
+            &self,
+            _args: serde_json::Value,
+            _ctx: &zx_agent::agent::ToolContext,
+        ) -> Result<ToolOutput, String> {
+            Ok(ToolOutput::ok("raw-tool-secret"))
+        }
+    }
     for hook in [BadOutput::Error, BadOutput::Panic, BadOutput::Pending] {
         let provider = Arc::new(FauxProvider::new([
             FauxStep::tool_call("c", "echo", json!({})),
             FauxStep::text("handled"),
         ]));
-        struct SecretTool;
-        #[async_trait]
-        impl zx_agent::agent::Tool for SecretTool {
-            fn name(&self) -> &str {
-                "echo"
-            }
-            fn definition(&self) -> zx_agent::ai::ToolDef {
-                zx_agent::ai::ToolDef {
-                    name: "echo".into(),
-                    description: "secret".into(),
-                    parameters: json!({}),
-                }
-            }
-            async fn execute(
-                &self,
-                _args: serde_json::Value,
-                _ctx: &zx_agent::agent::ToolContext,
-            ) -> Result<ToolOutput, String> {
-                Ok(ToolOutput::ok("raw-tool-secret"))
-            }
-        }
         let mut config = config(provider.clone(), vec![Arc::new(SecretTool)]);
         config.hooks.push_with(
             hook,

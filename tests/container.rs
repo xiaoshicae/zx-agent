@@ -1168,7 +1168,7 @@ async fn approving_every_call_also_runs_mcp_tools_outside_allow_tools() {
     )
     .await;
     let server = MockServer::start(vec![
-        Reply::tool_call("c1", "prom__range", json!({"q": "up"})),
+        Reply::tool_call("c1", "prom__range", &json!({"q": "up"})),
         Reply::text("done"),
     ])
     .await;
@@ -1425,7 +1425,7 @@ async fn real_ctrl_c_in_chat_does_not_stop_the_container() {
             }
         })
         .await
-        .unwrap()
+        .unwrap();
     };
     // The banner follows start-up, so the container is running.
     wait_for("[chat] model=").await;

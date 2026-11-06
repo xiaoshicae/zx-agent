@@ -58,13 +58,13 @@ impl Running {
     }
 }
 
-fn payload(event_type: &str, event: Value) -> Vec<u8> {
+fn payload(event_type: &str, event: &Value) -> Vec<u8> {
     json!({"schema": "2.0", "header": {"event_id": "ev1", "event_type": event_type}, "event": event})
         .to_string()
         .into_bytes()
 }
 
-fn text_message(id: &str, chat: &str, chat_type: &str, root: Option<&str>, text: &str, mentions: Value) -> Value {
+fn text_message(id: &str, chat: &str, chat_type: &str, root: Option<&str>, text: &str, mentions: &Value) -> Value {
     let mut message = json!({
         "message_id": id, "chat_id": chat, "chat_type": chat_type, "message_type": "text",
         "content": json!({"text": text}).to_string(), "mentions": mentions,
@@ -79,7 +79,7 @@ fn bot_mention() -> Value {
     json!([{"key": "@_user_1", "mentioned_type": "bot", "name": "zx", "id": {"open_id": "ou_bot"}}])
 }
 
-fn received(event: Value) -> Vec<u8> {
+fn received(event: &Value) -> Vec<u8> {
     payload("im.message.receive_v1", event)
 }
 
@@ -128,13 +128,13 @@ async fn a_group_mention_is_acknowledged_and_passed_on_without_the_bot() {
         "f1",
         1,
         0,
-        &received(text_message(
+        &received(&text_message(
             "om_1",
             "oc_1",
             "group",
             None,
             "@_user_1 pods",
-            bot_mention(),
+            &bot_mention(),
         )),
     );
     socket.send(&event).await;
@@ -158,8 +158,15 @@ async fn a_reply_names_the_root_of_its_thread() {
     let mut fake = FakeFeishu::start(120).await;
     let mut running = run(channel(&fake));
     let mut socket = fake.socket().await;
-    let event = text_message("om_2", "oc_1", "group", Some("om_root"), "@_user_1 more", bot_mention());
-    socket.send(&TestFrame::event("f1", 1, 0, &received(event))).await;
+    let event = text_message(
+        "om_2",
+        "oc_1",
+        "group",
+        Some("om_root"),
+        "@_user_1 more",
+        &bot_mention(),
+    );
+    socket.send(&TestFrame::event("f1", 1, 0, &received(&event))).await;
     assert_eq!(
         running.next().await,
         message("om_2", at("oc_1", Some("om_root")), "more")
@@ -172,15 +179,15 @@ async fn only_text_from_people_addressed_to_the_bot_is_passed_on() {
     let mut fake = FakeFeishu::start(120).await;
     let mut running = run(channel(&fake));
     let mut socket = fake.socket().await;
-    let unmentioned = text_message("om_1", "oc_1", "group", None, "chatter", json!([]));
-    let mut from_bot = text_message("om_2", "oc_d", "p2p", None, "echo", json!([]));
+    let unmentioned = text_message("om_1", "oc_1", "group", None, "chatter", &json!([]));
+    let mut from_bot = text_message("om_2", "oc_d", "p2p", None, "echo", &json!([]));
     from_bot["sender"]["sender_type"] = json!("bot");
-    let mut image = text_message("om_3", "oc_d", "p2p", None, "", json!([]));
+    let mut image = text_message("om_3", "oc_d", "p2p", None, "", &json!([]));
     image["message"]["message_type"] = json!("image");
-    let wanted = text_message("om_4", "oc_d", "p2p", None, "hi", json!([]));
+    let wanted = text_message("om_4", "oc_d", "p2p", None, "hi", &json!([]));
     for (n, event) in [unmentioned, from_bot, image, wanted].into_iter().enumerate() {
         socket
-            .send(&TestFrame::event(&format!("f{n}"), 1, 0, &received(event)))
+            .send(&TestFrame::event(&format!("f{n}"), 1, 0, &received(&event)))
             .await;
         socket.receive_data().await;
     }
@@ -193,10 +200,10 @@ async fn a_redelivered_message_is_passed_on_once() {
     let mut fake = FakeFeishu::start(120).await;
     let mut running = run(channel(&fake));
     let mut socket = fake.socket().await;
-    let once = text_message("om_1", "oc_d", "p2p", None, "once", json!([]));
-    let next = text_message("om_2", "oc_d", "p2p", None, "next", json!([]));
+    let once = text_message("om_1", "oc_d", "p2p", None, "once", &json!([]));
+    let next = text_message("om_2", "oc_d", "p2p", None, "next", &json!([]));
     for (frame_id, event) in [("f1", once.clone()), ("f2", once), ("f3", next)] {
-        socket.send(&TestFrame::event(frame_id, 1, 0, &received(event))).await;
+        socket.send(&TestFrame::event(frame_id, 1, 0, &received(&event))).await;
         assert_eq!(socket.receive_data().await.header("message_id"), Some(frame_id));
     }
     assert_eq!(running.next().await, message("om_1", at("oc_d", None), "once"));
@@ -209,7 +216,7 @@ async fn a_fragmented_event_is_joined_and_acknowledged_once() {
     let mut fake = FakeFeishu::start(120).await;
     let mut running = run(channel(&fake));
     let mut socket = fake.socket().await;
-    let whole = received(text_message("om_1", "oc_d", "p2p", None, "joined", json!([])));
+    let whole = received(&text_message("om_1", "oc_d", "p2p", None, "joined", &json!([])));
     let (first, second) = whole.split_at(whole.len() / 2);
     socket.send(&TestFrame::event("f9", 2, 1, second)).await;
     socket.send(&TestFrame::event("f9", 2, 0, first)).await;
@@ -217,8 +224,8 @@ async fn a_fragmented_event_is_joined_and_acknowledged_once() {
     assert_eq!((ack.header("message_id"), ack.header("seq")), (Some("f9"), Some("0")));
     assert_eq!(running.next().await, message("om_1", at("oc_d", None), "joined"));
     // The next data frame is the acknowledgement of a later event: the first fragment had none.
-    let later = text_message("om_2", "oc_d", "p2p", None, "later", json!([]));
-    socket.send(&TestFrame::event("f10", 1, 0, &received(later))).await;
+    let later = text_message("om_2", "oc_d", "p2p", None, "later", &json!([]));
+    socket.send(&TestFrame::event("f10", 1, 0, &received(&later))).await;
     assert_eq!(socket.receive_data().await.header("message_id"), Some("f10"));
     running.stop().await.unwrap();
 }
@@ -234,7 +241,7 @@ async fn a_card_click_becomes_a_decision_in_its_thread() {
         "context": {"open_message_id": "om_card", "open_chat_id": "oc_1"},
     });
     socket
-        .send(&TestFrame::event("f1", 1, 0, &payload("card.action.trigger", click)))
+        .send(&TestFrame::event("f1", 1, 0, &payload("card.action.trigger", &click)))
         .await;
     socket.receive_data().await;
     assert_eq!(
@@ -284,8 +291,8 @@ async fn a_dropped_connection_is_opened_again() {
     let mut running = run(channel(&fake));
     fake.socket().await.close().await;
     let mut second = fake.socket().await;
-    let event = text_message("om_1", "oc_d", "p2p", None, "back", json!([]));
-    second.send(&TestFrame::event("f1", 1, 0, &received(event))).await;
+    let event = text_message("om_1", "oc_d", "p2p", None, "back", &json!([]));
+    second.send(&TestFrame::event("f1", 1, 0, &received(&event))).await;
     assert_eq!(running.next().await, message("om_1", at("oc_d", None), "back"));
     assert_eq!(fake.calls("endpoint").len(), 2);
     running.stop().await.unwrap();
@@ -344,8 +351,8 @@ async fn replies_in_a_direct_chat_stay_out_of_topics() {
     let channel = channel(&fake);
     let mut running = run(Arc::clone(&channel));
     let mut socket = fake.socket().await;
-    let event = text_message("om_d1", "oc_d", "p2p", None, "hi", json!([]));
-    socket.send(&TestFrame::event("f1", 1, 0, &received(event))).await;
+    let event = text_message("om_d1", "oc_d", "p2p", None, "hi", &json!([]));
+    socket.send(&TestFrame::event("f1", 1, 0, &received(&event))).await;
     running.next().await;
     channel
         .send(&at("oc_d", Some("om_d1")), &Outbound::Text("answer".into()))
@@ -382,7 +389,7 @@ async fn a_status_update_edits_the_message() {
 #[tokio::test]
 async fn a_refused_edit_posts_the_text_instead() {
     let fake = FakeFeishu::start(120).await;
-    fake.script("edit", vec![Answer::Code(230075)]);
+    fake.script("edit", vec![Answer::Code(230_075)]);
     let channel = channel(&fake);
     let posted = channel
         .send(&at("oc_1", Some("om_root")), &Outbound::Text("working".into()))
