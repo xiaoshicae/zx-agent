@@ -101,7 +101,7 @@ impl CancelSignal {
     }
 
     /// The run's own token, for the host that waits on hooks.
-    pub(crate) fn token(&self) -> &CancellationToken {
+    fn token(&self) -> &CancellationToken {
         &self.0
     }
 }
@@ -257,10 +257,12 @@ pub enum HookStage {
     Storage,
 }
 
-/// Hooks must yield while waiting. Blocking work prevents cooperative timeouts.
-/// Every method has a no-op default so implementers override only what they use.
-/// Hooks run in stage order, then registration order. Operational callbacks are bounded by
-/// their configured timeout and cancellation; observer failures are reported as diagnostics.
+/// The callbacks an extension runs at the loop's extension points. Every method has a no-op
+/// default, so implementers override only what they use.
+///
+/// Hooks must yield while waiting: blocking work prevents cooperative timeouts. Hooks run
+/// in stage order, then registration order. Operational callbacks are bounded by their
+/// configured timeout and cancellation; observer failures are reported as diagnostics.
 #[async_trait]
 pub trait Hooks: Send + Sync {
     /// Transform prompt text before it enters the model context. Transformations chain in
@@ -332,8 +334,9 @@ pub trait Hooks: Send + Sync {
         !matches!(event, AgentEvent::MessageUpdate { .. })
     }
 
-    /// The stage this hook runs in. Only the kernel's tool policy adapter, secret redaction
-    /// and output storage declare a stage other than [`HookStage::Extension`].
+    /// The stage this hook runs in. Only the built-in tool policy adapter, secret redaction
+    /// and output storage, which live in the zx-tools crate, declare a stage other than
+    /// [`HookStage::Extension`].
     fn stage(&self) -> HookStage {
         HookStage::Extension
     }

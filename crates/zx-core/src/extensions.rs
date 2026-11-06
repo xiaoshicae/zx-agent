@@ -91,58 +91,18 @@ pub trait Extension: Send + Sync {
 /// a section name that is malformed, reserved, already in the prompt or repeated, and a
 /// command name that is malformed or already registered.
 pub fn register(config: &mut LoopConfig, extensions: &[Arc<dyn Extension>]) -> Result<(), String> {
-    let mut names = HashSet::new();
-    let mut sections_seen = HashSet::new();
-    let mut commands_seen: HashSet<String> = config
-        .commands
-        .iter()
-        .map(|command| command.name().to_string())
-        .collect();
-    let mut parts = Vec::new();
-    for extension in extensions {
-        let name = extension.name();
-        if name.trim().is_empty() {
-            return Err("an extension has a blank name".to_string());
-        }
-        if !names.insert(name) {
-            return Err(format!("more than one extension is named {name:?}"));
-        }
-        let hooks = extension.hooks();
-        if let Some(stage) = hooks
+    let mut claimed = Claimed {
+        names: HashSet::new(),
+        sections: HashSet::new(),
+        commands: config
+            .commands
             .iter()
-            .map(|hook| hook.stage())
-            .find(|stage| *stage != HookStage::Extension)
-        {
-            return Err(format!(
-                "extension {name:?}: a hook declares the {stage:?} stage; extension hooks run in the Extension stage"
-            ));
-        }
-        let sections = extension.prompt_sections();
-        for (section, _) in &sections {
-            check_section_name(section).map_err(|reason| format!("extension {name:?}: {reason}"))?;
-            if config.spec.system_prompt.has_section(section) || !sections_seen.insert(section.clone()) {
-                return Err(format!(
-                    "extension {name:?}: the system prompt already has a section named {section:?}"
-                ));
-            }
-        }
-        let commands = extension.commands();
-        for command in &commands {
-            let command = command.name();
-            check_command_name(command).map_err(|reason| format!("extension {name:?}: {reason}"))?;
-            if !commands_seen.insert(command.to_string()) {
-                return Err(format!(
-                    "extension {name:?}: a command named {command:?} is already registered"
-                ));
-            }
-        }
-        parts.push(Parts {
-            name,
-            tools: extension.tools(),
-            hooks,
-            sections,
-            commands,
-        });
+            .map(|command| command.name().to_string())
+            .collect(),
+    };
+    let mut parts = Vec::with_capacity(extensions.len());
+    for extension in extensions {
+        parts.push(check_extension(config, extension.as_ref(), &mut claimed)?);
     }
     // The loop's own check covers names, declarations and panics; on failure the tools are
     // taken out again, so nothing is registered.
@@ -173,6 +133,67 @@ struct Parts<'a> {
     hooks: Vec<Box<dyn Hooks>>,
     sections: Vec<(String, String)>,
     commands: Vec<Arc<dyn SlashCommand>>,
+}
+
+/// The names the extensions checked so far have claimed, so that a repeat is an error;
+/// `commands` starts with the commands `config` already has.
+struct Claimed<'a> {
+    names: HashSet<&'a str>,
+    sections: HashSet<String>,
+    commands: HashSet<String>,
+}
+
+/// Check one extension's name, hooks, sections and commands against `config` and what
+/// earlier extensions claimed, and collect what it adds. Its tools are checked with the
+/// others by [`LoopSpec::validate`](crate::agent::LoopSpec::validate).
+fn check_extension<'a>(
+    config: &LoopConfig,
+    extension: &'a dyn Extension,
+    claimed: &mut Claimed<'a>,
+) -> Result<Parts<'a>, String> {
+    let name = extension.name();
+    if name.trim().is_empty() {
+        return Err("an extension has a blank name".to_string());
+    }
+    if !claimed.names.insert(name) {
+        return Err(format!("more than one extension is named {name:?}"));
+    }
+    let hooks = extension.hooks();
+    if let Some(stage) = hooks
+        .iter()
+        .map(|hook| hook.stage())
+        .find(|stage| *stage != HookStage::Extension)
+    {
+        return Err(format!(
+            "extension {name:?}: a hook declares the {stage:?} stage; extension hooks run in the Extension stage"
+        ));
+    }
+    let sections = extension.prompt_sections();
+    for (section, _) in &sections {
+        check_section_name(section).map_err(|reason| format!("extension {name:?}: {reason}"))?;
+        if config.spec.system_prompt.has_section(section) || !claimed.sections.insert(section.clone()) {
+            return Err(format!(
+                "extension {name:?}: the system prompt already has a section named {section:?}"
+            ));
+        }
+    }
+    let commands = extension.commands();
+    for command in &commands {
+        let command = command.name();
+        check_command_name(command).map_err(|reason| format!("extension {name:?}: {reason}"))?;
+        if !claimed.commands.insert(command.to_string()) {
+            return Err(format!(
+                "extension {name:?}: a command named {command:?} is already registered"
+            ));
+        }
+    }
+    Ok(Parts {
+        name,
+        tools: extension.tools(),
+        hooks,
+        sections,
+        commands,
+    })
 }
 
 /// A section name renders as a tag (`<name>`), and the ones zx-agent generates hold facts the

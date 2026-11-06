@@ -1,23 +1,34 @@
 //! Context updates and their ordered session records.
 
 use super::{
-    AgentEvent, ContextEdit, ContextPreparation, CustomMessageInfo, Engine, Halt, HookFailure, LoopResult, Message,
-    Prepared, Queue, QueueMode, QueuedMessage, UserMessageKind, now_ms,
+    AgentEvent, ContextEdit, CustomMessageInfo, Engine, EventTarget, Halt, HookFailure, LoopConfig, LoopResult,
+    Message, Prepared, Queue, QueueMode, QueuedMessage, SessionHost, UserMessageKind,
 };
 use crate::session::CustomMessage;
 
-impl Engine<'_, '_, '_> {
-    /// Record a finished message. Returns its entry ID in a session.
-    pub(super) async fn record(&mut self, message: &Message) -> Result<Option<String>, Halt> {
-        match self.control.session.as_deref_mut() {
-            Some(session) => Ok(Some(session.append_message(message).await.map_err(Halt::Unrecorded)?)),
-            None => Ok(None),
-        }
+/// Record the custom entries extensions asked for since the last turn (pi: `appendEntry`),
+/// each announced as a `custom_entry` event. Without a session they are reported without an
+/// entry ID and not kept. An error means the session could not record one.
+pub(crate) async fn record_pending_entries(
+    config: &LoopConfig,
+    session: &mut dyn SessionHost,
+    target: EventTarget<'_>,
+) -> Result<(), String> {
+    for entry in config.queues.take_entries() {
+        let entry_id = session.append_custom_entry(&entry.custom_type, entry.data).await?;
+        let event = AgentEvent::CustomEntry {
+            entry_id,
+            custom_type: entry.custom_type,
+        };
+        config.hooks.emit(event, target).await;
     }
+    Ok(())
+}
 
+impl Engine<'_, '_> {
     /// Record a finished message, then report it. Returns its entry ID in a session.
     pub(super) async fn record_finished_message(&mut self, message: &Message) -> Result<Option<String>, Halt> {
-        let id = self.record(message).await?;
+        let id = self.session.append_message(message).await.map_err(Halt::Unrecorded)?;
         self.emit(AgentEvent::MessageEnd {
             message: message.clone(),
             entry_id: id.clone(),
@@ -34,14 +45,14 @@ impl Engine<'_, '_, '_> {
     /// Append `message`, which is the message at the front of a queue if `queued` names one.
     /// It leaves the queue as soon as it is recorded, before observers see it: a run dropped
     /// while they run cannot take the same input again.
-    pub(super) async fn append_from(
+    async fn append_from(
         &mut self,
         context: &mut Vec<Message>,
         message: Message,
         queued: Option<(Queue, &QueuedMessage)>,
     ) -> Result<(), Halt> {
         self.emit(AgentEvent::MessageStart { role: message.role() }).await;
-        let id = self.record(&message).await?;
+        let id = self.session.append_message(&message).await.map_err(Halt::Unrecorded)?;
         if let Some((queue, original)) = queued {
             self.config.queues.remove_front(queue, original);
         }
@@ -64,23 +75,11 @@ impl Engine<'_, '_, '_> {
         queue: Option<Queue>,
     ) -> Result<(), Halt> {
         self.emit(AgentEvent::MessageStart { role: "user" }).await;
-        let (id, projected) = match self.control.session.as_deref_mut() {
-            Some(session) => {
-                let (id, projected) = session
-                    .append_custom_message(&message)
-                    .await
-                    .map_err(Halt::Unrecorded)?;
-                (Some(id), projected)
-            }
-            None => (
-                None,
-                Message::User {
-                    content: message.content.clone(),
-                    timestamp: now_ms(),
-                    kind: UserMessageKind::Custom,
-                },
-            ),
-        };
+        let (id, projected) = self
+            .session
+            .append_custom_message(&message)
+            .await
+            .map_err(Halt::Unrecorded)?;
         if let Some(queue) = queue {
             self.config
                 .queues
@@ -106,15 +105,11 @@ impl Engine<'_, '_, '_> {
             ContextEdit::ReplaceText { index, text } => (*index, Some(text.clone())),
             ContextEdit::Omit { index } => (*index, None),
         };
-        let entry_id = match self.control.session.as_deref_mut() {
-            Some(session) => Some(
-                session
-                    .edit_context(index, replacement.as_deref())
-                    .await
-                    .map_err(Halt::Unrecorded)?,
-            ),
-            None => None,
-        };
+        let entry_id = self
+            .session
+            .edit_context(index, replacement.as_deref())
+            .await
+            .map_err(Halt::Unrecorded)?;
         edit.apply(context).map_err(Halt::Failed)?;
         self.emit(AgentEvent::ContextEdited {
             index,
@@ -145,7 +140,9 @@ impl Engine<'_, '_, '_> {
         };
         let text = content.clone();
         let transformed = match self.config.hooks.on_input(text.clone(), self.trace.context()).await {
-            Err(error) if error.failure == HookFailure::Cancelled => return Err(Halt::Failed(self.hook_error(error))),
+            Err(error) if error.failure == HookFailure::Cancelled => {
+                return Err(Halt::Failed(self.report_hook_failure(error)));
+            }
             transformed => transformed,
         };
         let queued = QueuedMessage::User(text.clone());
@@ -167,7 +164,7 @@ impl Engine<'_, '_, '_> {
             Err(error) => {
                 // A rejected input remains in the audit log but is omitted from requests.
                 self.edit(context, ContextEdit::Omit { index }).await?;
-                Err(Halt::Failed(self.hook_error(error)))
+                Err(Halt::Failed(self.report_hook_failure(error)))
             }
         }
     }
@@ -198,26 +195,12 @@ impl Engine<'_, '_, '_> {
         Ok(())
     }
 
-    /// Record the custom entries extensions asked for since the last turn (pi:
-    /// `appendEntry`). Without a session they are reported without an entry ID and not kept.
+    /// Record the custom entries extensions asked for; see [`record_pending_entries`].
     pub(super) async fn record_pending_entries(&mut self) -> Result<(), Halt> {
-        for entry in self.config.queues.take_entries() {
-            let entry_id = match self.control.session.as_deref_mut() {
-                Some(session) => Some(
-                    session
-                        .append_custom_entry(&entry.custom_type, entry.data)
-                        .await
-                        .map_err(Halt::Unrecorded)?,
-                ),
-                None => None,
-            };
-            self.emit(AgentEvent::CustomEntry {
-                entry_id,
-                custom_type: entry.custom_type,
-            })
-            .await;
-        }
-        Ok(())
+        let target = self.target();
+        record_pending_entries(self.config, self.session, target)
+            .await
+            .map_err(Halt::Unrecorded)
     }
 
     /// Prepare the context and account for any summary requests, even on failure.
@@ -226,10 +209,7 @@ impl Engine<'_, '_, '_> {
         context: &mut Vec<Message>,
         result: &mut LoopResult,
     ) -> Result<u32, Halt> {
-        let prepared = match self.control.session.as_deref_mut() {
-            Some(session) => session.prepare_context(self.control.cancel).await,
-            None => ContextPreparation::unchanged(),
-        };
+        let prepared = self.session.prepare_context(self.cancel).await;
         result.usage.add(&prepared.usage);
         result.model_requests = result.model_requests.saturating_add(prepared.requests);
         match prepared.result {
