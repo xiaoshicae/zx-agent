@@ -15,8 +15,8 @@ use common::{Collect, EchoTool, NotifyingProvider, config, run_prompt, summarize
 use zx_agent::agent::ApprovalCache;
 use zx_agent::agent::QueuedMessage;
 use zx_agent::agent::{
-    AgentEvent, Decision, ExecutionMode, LoopControl, LoopOutcome, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput,
-    ToolPolicy, run_loop,
+    AgentEvent, ExecutionMode, LoopControl, LoopOutcome, MAX_DETAILS_BYTES, PolicyDecision, Tool, ToolContext,
+    ToolOutput, ToolPolicy, run_loop,
 };
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{
@@ -139,7 +139,7 @@ struct PanickingPolicy;
 
 #[async_trait]
 impl ToolPolicy for PanickingPolicy {
-    async fn check(&self, _tool_name: &str, _args: &Value) -> Decision {
+    async fn check(&self, _tool_name: &str, _args: &Value) -> PolicyDecision {
         panic!("policy bug");
     }
 }
@@ -170,7 +170,7 @@ struct WaitingPolicy(Arc<tokio::sync::Notify>);
 
 #[async_trait]
 impl ToolPolicy for WaitingPolicy {
-    async fn check(&self, _tool_name: &str, _args: &Value) -> Decision {
+    async fn check(&self, _tool_name: &str, _args: &Value) -> PolicyDecision {
         self.0.notify_one();
         std::future::pending().await
     }
@@ -211,11 +211,11 @@ async fn cancellation_interrupts_a_waiting_policy() {
 
 #[async_trait]
 impl ToolPolicy for DenyEcho {
-    async fn check(&self, tool_name: &str, _args: &Value) -> Decision {
+    async fn check(&self, tool_name: &str, _args: &Value) -> PolicyDecision {
         if tool_name == "echo" {
-            Decision::Deny("echo is disabled".into())
+            PolicyDecision::Deny("echo is disabled".into())
         } else {
-            Decision::Allow
+            PolicyDecision::Allow
         }
     }
 }
@@ -600,9 +600,9 @@ struct RecordingPolicy(Mutex<Vec<Value>>);
 
 #[async_trait]
 impl ToolPolicy for RecordingPolicy {
-    async fn check(&self, _tool_name: &str, args: &Value) -> Decision {
+    async fn check(&self, _tool_name: &str, args: &Value) -> PolicyDecision {
         self.0.lock().unwrap().push(args.clone());
-        Decision::Allow
+        PolicyDecision::Allow
     }
 }
 

@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use zx_agent::agent::{Approval, ApprovalRequest};
 use zx_agent::agent::{
-    ContextEdit, Decision, HookContext, RequestSettings, ToolOutput, TurnDecision, TurnDisposition, TurnSummary,
+    ContextEdit, HookContext, PolicyDecision, RequestSettings, ToolOutput, TurnDecision, TurnDisposition, TurnSummary,
 };
 use zx_agent::ai::{AssistantMessage, Message, Reasoning, StopReason, ToolCall, Usage};
 
@@ -22,13 +22,13 @@ fn round_trip<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(val
 
 #[test]
 fn decisions_name_the_verdict_and_give_a_reason_to_deny_or_ask() {
-    round_trip(&Decision::Allow, json!({"decision": "allow"}));
+    round_trip(&PolicyDecision::Allow, json!({"decision": "allow"}));
     round_trip(
-        &Decision::Deny("not on the list".into()),
+        &PolicyDecision::Deny("not on the list".into()),
         json!({"decision": "deny", "reason": "not on the list"}),
     );
     round_trip(
-        &Decision::Ask("writes files".into()),
+        &PolicyDecision::Ask("writes files".into()),
         json!({"decision": "ask", "reason": "writes files"}),
     );
 }

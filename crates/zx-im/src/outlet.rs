@@ -8,7 +8,7 @@ use tokio::task::JoinError;
 
 use crate::AgentSession;
 use crate::agent::QueuedMessage;
-use crate::agent_session::{SessionError, Subscription};
+use crate::agent_session::{AgentSessionError, Subscription};
 use crate::runner::{RunOutcome, RunReport};
 
 use super::approval::{ApprovalEvents, ApprovalUpdate, ImApproval};
@@ -94,7 +94,7 @@ impl Outlet {
     /// Replace the status with how the run ended, or post that when no status was posted.
     pub(crate) async fn answer(
         &self,
-        ended: Result<Result<RunReport, SessionError>, JoinError>,
+        ended: Result<Result<RunReport, AgentSessionError>, JoinError>,
         status: Option<MessageRef>,
         closing: bool,
     ) {

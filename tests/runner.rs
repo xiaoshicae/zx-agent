@@ -67,7 +67,8 @@ use tokio_util::sync::CancellationToken;
 
 use common::{EchoTool, NotifyingProvider, RunnerSetup, config, fast_retry, header, read_lines, summarize};
 use zx_agent::agent::{
-    AgentEvent, Decision, EVENT_SCHEMA_VERSION, HookContext, HookOptions, HookResult, Hooks, QueuedMessage, RequestKind,
+    AgentEvent, EVENT_SCHEMA_VERSION, HookContext, HookOptions, HookResult, Hooks, PolicyDecision, QueuedMessage,
+    RequestKind,
 };
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, ModelCost, ModelMeta, PREAMBLE, StopReason, SystemPrompt, ToolCall, Usage};
@@ -369,11 +370,11 @@ struct DenyFirstAskSecond;
 
 #[async_trait]
 impl Hooks for DenyFirstAskSecond {
-    async fn before_tool(&self, call: &ToolCall, _ctx: &HookContext) -> HookResult<Decision> {
+    async fn before_tool(&self, call: &ToolCall, _ctx: &HookContext) -> HookResult<PolicyDecision> {
         Ok(match call.id.as_str() {
-            "c1" => Decision::Deny("not here".into()),
-            "c2" => Decision::Ask("check first".into()),
-            _ => Decision::Allow,
+            "c1" => PolicyDecision::Deny("not here".into()),
+            "c2" => PolicyDecision::Ask("check first".into()),
+            _ => PolicyDecision::Allow,
         })
     }
 }

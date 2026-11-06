@@ -6,9 +6,9 @@ use std::fmt::Display;
 use serde_json::Value;
 
 use super::{
-    AgentEvent, Approval, ApprovalRequest, ApprovalResult, AssertUnwindSafe, Decision, Effects, Engine, ExecutionMode,
-    FutureExt, Halt, HookCall, HookFailure, HookPhase, Instant, MAX_DETAILS_BYTES, MAX_QUEUED_PROGRESS, Message, Tool,
-    ToolCall, ToolContext, ToolOutput, ToolResultMessage, ToolVerdict, duration_ms, join_all, now_ms,
+    AgentEvent, Approval, ApprovalRequest, ApprovalResult, AssertUnwindSafe, Effects, Engine, ExecutionMode, FutureExt,
+    Halt, HookCall, HookFailure, HookPoint, Instant, MAX_DETAILS_BYTES, MAX_QUEUED_PROGRESS, Message, PolicyDecision,
+    Tool, ToolCall, ToolContext, ToolOutput, ToolResultMessage, ToolVerdict, duration_ms, join_all, now_ms,
 };
 
 impl<'a> Engine<'a, '_> {
@@ -85,13 +85,13 @@ impl<'a> Engine<'a, '_> {
             }
         };
         match verdict {
-            Decision::Allow => self.decision(call, ToolVerdict::Allow, None).await,
-            Decision::Deny(reason) => {
+            PolicyDecision::Allow => self.decision(call, ToolVerdict::Allow, None).await,
+            PolicyDecision::Deny(reason) => {
                 self.decision(call, ToolVerdict::Deny, Some(reason.clone())).await;
                 self.denied_calls = self.denied_calls.saturating_add(1);
                 return Err(blocked_by_policy(&reason));
             }
-            Decision::Ask(reason) => {
+            PolicyDecision::Ask(reason) => {
                 self.decision(call, ToolVerdict::Ask, Some(reason.clone())).await;
                 if self.approvals.allows(call) {
                     self.approval_resolved(call, ApprovalResult::Remembered, None, 0).await;
@@ -118,7 +118,7 @@ impl<'a> Engine<'a, '_> {
         };
         let guard = HookCall {
             name: "Interaction::confirm",
-            phase: HookPhase::Approval,
+            phase: HookPoint::Approval,
             timeout: self.config.interaction_timeout,
         };
         let asked = Instant::now();

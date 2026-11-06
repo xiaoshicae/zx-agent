@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use super::{begins_with, command_of, normalize};
-use crate::agent::{Decision, ToolPolicy};
+use crate::agent::{PolicyDecision, ToolPolicy};
 use crate::tools::BASH;
 
 /// Patterns rejected for every `bash` command, compared as substrings after lowercasing and
@@ -152,31 +152,31 @@ impl CommandPolicy {
     }
 
     /// Decide on one shell command.
-    pub fn evaluate(&self, command: &str) -> Decision {
+    pub fn evaluate(&self, command: &str) -> PolicyDecision {
         let normalized = normalize(command);
         if let Some(pattern) = self
             .denied_patterns
             .iter()
             .find(|pattern| normalized.contains(pattern.as_str()))
         {
-            return Decision::Deny(format!("command matches the denied pattern {pattern:?}"));
+            return PolicyDecision::Deny(format!("command matches the denied pattern {pattern:?}"));
         }
         if let Some(program) = denied_program(command) {
-            return Decision::Deny(format!("command runs the denied program {program:?}"));
+            return PolicyDecision::Deny(format!("command runs the denied program {program:?}"));
         }
         if self.allow_prefixes.is_empty() {
-            return Decision::Allow;
+            return PolicyDecision::Allow;
         }
         // Check the raw command too: normalization turns newlines into spaces.
         if let Some(token) = ALLOWLIST_FORBIDDEN.iter().find(|token| command.contains(*token)) {
-            return Decision::Deny(format!(
+            return PolicyDecision::Deny(format!(
                 "{token:?} is not allowed; only plain commands and '|' pipelines of allowlisted programs may run"
             ));
         }
         for segment in normalized.split('|') {
             let segment = segment.trim();
             if segment.is_empty() {
-                return Decision::Deny("empty pipeline segment (is '||' used?)".to_string());
+                return PolicyDecision::Deny("empty pipeline segment (is '||' used?)".to_string());
             }
             let allowed = self.allow_prefixes.iter().any(|prefix| begins_with(segment, prefix));
             if !allowed {
@@ -187,13 +187,13 @@ impl CommandPolicy {
                 } else {
                     ""
                 };
-                return Decision::Deny(format!(
+                return PolicyDecision::Deny(format!(
                     "{segment:?} is not in the command allowlist ({}){hint}",
                     self.allow_prefixes.join(", ")
                 ));
             }
         }
-        Decision::Allow
+        PolicyDecision::Allow
     }
 
     /// The rules for the system prompt, so the model knows them before its first command
@@ -221,13 +221,13 @@ impl CommandPolicy {
 
 #[async_trait]
 impl ToolPolicy for CommandPolicy {
-    async fn check(&self, tool_name: &str, args: &Value) -> Decision {
+    async fn check(&self, tool_name: &str, args: &Value) -> PolicyDecision {
         if tool_name != BASH {
-            return Decision::Allow;
+            return PolicyDecision::Allow;
         }
         match command_of(args) {
             Some(command) => self.evaluate(command),
-            None => Decision::Deny("missing \"command\" argument".to_string()),
+            None => PolicyDecision::Deny("missing \"command\" argument".to_string()),
         }
     }
 }
@@ -236,14 +236,14 @@ impl ToolPolicy for CommandPolicy {
 mod tests {
     use super::*;
 
-    fn denied(decision: &Decision) -> bool {
-        matches!(decision, Decision::Deny(_))
+    fn denied(decision: &PolicyDecision) -> bool {
+        matches!(decision, PolicyDecision::Deny(_))
     }
 
     #[test]
     fn denied_patterns_apply_without_allowlist() {
         let policy = CommandPolicy::new(Vec::<String>::new());
-        assert_eq!(policy.evaluate("df -h"), Decision::Allow);
+        assert_eq!(policy.evaluate("df -h"), PolicyDecision::Allow);
         assert!(denied(&policy.evaluate("sudo  RM -RF  /")));
         assert!(denied(&policy.evaluate("systemctl reboot")));
     }
@@ -253,11 +253,11 @@ mod tests {
         let policy = CommandPolicy::new(["kubectl get", "grep", "journalctl", "tail"]);
         assert_eq!(
             policy.evaluate("kubectl get pods -A | grep -v Running"),
-            Decision::Allow
+            PolicyDecision::Allow
         );
         assert_eq!(
             policy.evaluate("journalctl -u nginx --since '1 hour ago' | tail -n 50"),
-            Decision::Allow
+            PolicyDecision::Allow
         );
         assert!(denied(&policy.evaluate("kubectl delete pod x")));
         assert!(denied(&policy.evaluate("kubectl get pods; rm x")));
@@ -273,7 +273,7 @@ mod tests {
     fn extra_denied_patterns_apply_to_every_command() {
         let policy = CommandPolicy::new(Vec::<String>::new()).deny_also(["kubectl delete"]);
         assert!(denied(&policy.evaluate("KUBECTL  delete pod x")));
-        assert_eq!(policy.evaluate("kubectl get pods"), Decision::Allow);
+        assert_eq!(policy.evaluate("kubectl get pods"), PolicyDecision::Allow);
     }
 
     #[test]
@@ -293,7 +293,7 @@ mod tests {
     #[test]
     fn denial_of_a_quoted_pipe_suggests_an_alternative() {
         let policy = CommandPolicy::new(["grep"]);
-        let Decision::Deny(reason) = policy.evaluate("grep -n \"a|b\" file") else {
+        let PolicyDecision::Deny(reason) = policy.evaluate("grep -n \"a|b\" file") else {
             panic!("a quoted pipe must not pass the allowlist");
         };
         assert!(reason.contains("grep -e A -e B"), "{reason}");
@@ -344,7 +344,7 @@ mod tests {
             "systemctl status reboot.target",
             "kubectl logs reboot-job-1",
         ] {
-            assert_eq!(policy.evaluate(command), Decision::Allow, "{command}");
+            assert_eq!(policy.evaluate(command), PolicyDecision::Allow, "{command}");
         }
     }
 
@@ -355,7 +355,7 @@ mod tests {
             policy
                 .check("read_file", &serde_json::json!({"path": "/etc/hosts"}))
                 .await,
-            Decision::Allow
+            PolicyDecision::Allow
         );
         assert!(denied(&policy.check("bash", &serde_json::json!({})).await));
     }

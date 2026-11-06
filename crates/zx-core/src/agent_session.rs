@@ -38,7 +38,7 @@ pub struct ModelRef {
 
 /// Session API errors. Operational failures remain in the run or compaction report.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SessionError {
+pub enum AgentSessionError {
     /// A prompt, compaction or model change overlaps an active operation; it is never queued.
     Busy,
     /// Model IDs must contain at least one non-whitespace character.
@@ -55,7 +55,7 @@ pub enum SessionError {
     InvalidKey,
 }
 
-impl fmt::Display for SessionError {
+impl fmt::Display for AgentSessionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Busy => f.write_str("session is running; use steer or follow_up to submit input"),
@@ -73,7 +73,7 @@ impl fmt::Display for SessionError {
 /// ([`AgentSession::prompt_once`]); reserved for the session.
 pub const IDEMPOTENCY_KEY_TYPE: &str = "idempotency_key";
 
-impl std::error::Error for SessionError {}
+impl std::error::Error for AgentSessionError {}
 
 enum State {
     // A full Runner is only needed while idle, so keep the state enum small.
@@ -88,10 +88,10 @@ enum State {
 /// use std::sync::Arc;
 /// use zx_core::AgentSession;
 /// use zx_core::agent::Event;
-/// use zx_core::agent_session::SessionError;
+/// use zx_core::agent_session::AgentSessionError;
 /// use zx_core::runner::Runner;
 ///
-/// # async fn example(runner: Runner) -> Result<(), SessionError> {
+/// # async fn example(runner: Runner) -> Result<(), AgentSessionError> {
 /// let session = AgentSession::from(runner);
 /// let _subscription = session.subscribe(Arc::new(|event: &Event| {
 ///     println!("{} #{} {}", event.run_id, event.seq, event.event.kind());
@@ -129,7 +129,7 @@ impl AgentSession {
 
     /// Run a prompt against the retained conversation. Overlapping calls return Busy.
     /// Dropping the future cancels its work and immediately releases the conversation.
-    pub async fn prompt(&self, text: impl Into<String>) -> Result<RunReport, SessionError> {
+    pub async fn prompt(&self, text: impl Into<String>) -> Result<RunReport, AgentSessionError> {
         self.prompt_with_cancel(text, &CancellationToken::new()).await
     }
 
@@ -139,14 +139,14 @@ impl AgentSession {
         &self,
         text: impl Into<String>,
         parent: &CancellationToken,
-    ) -> Result<RunReport, SessionError> {
+    ) -> Result<RunReport, AgentSessionError> {
         self.prompt_message_with_cancel(QueuedMessage::User(text.into()), parent)
             .await
     }
 
     /// Run with any message as the input: the person's text, or a message from an
     /// extension (pi: `sendMessage` with `triggerTurn` while idle). Otherwise like `prompt`.
-    pub async fn prompt_message(&self, message: QueuedMessage) -> Result<RunReport, SessionError> {
+    pub async fn prompt_message(&self, message: QueuedMessage) -> Result<RunReport, AgentSessionError> {
         self.prompt_message_with_cancel(message, &CancellationToken::new())
             .await
     }
@@ -156,7 +156,7 @@ impl AgentSession {
         &self,
         message: QueuedMessage,
         parent: &CancellationToken,
-    ) -> Result<RunReport, SessionError> {
+    ) -> Result<RunReport, AgentSessionError> {
         let cancel = parent.child_token();
         let mut active = self.acquire(cancel.clone())?;
         let report = active.runner().run_message(message, &cancel).await;
@@ -170,7 +170,7 @@ impl AgentSession {
     /// DuplicateKey without a request, also from a session reopened from its file; the host
     /// then reads the session for the answer, or continues the run that was interrupted.
     /// A blank key returns InvalidKey. Otherwise like `prompt`.
-    pub async fn prompt_once(&self, key: &str, text: impl Into<String>) -> Result<RunReport, SessionError> {
+    pub async fn prompt_once(&self, key: &str, text: impl Into<String>) -> Result<RunReport, AgentSessionError> {
         self.prompt_once_with_cancel(key, text, &CancellationToken::new()).await
     }
 
@@ -180,9 +180,9 @@ impl AgentSession {
         key: &str,
         text: impl Into<String>,
         parent: &CancellationToken,
-    ) -> Result<RunReport, SessionError> {
+    ) -> Result<RunReport, AgentSessionError> {
         if key.trim().is_empty() {
-            return Err(SessionError::InvalidKey);
+            return Err(AgentSessionError::InvalidKey);
         }
         let cancel = parent.child_token();
         // The lease spans the check, the record and the run, so no other prompt can slip in
@@ -194,24 +194,24 @@ impl AgentSession {
             _ => false,
         });
         if submitted {
-            return Err(SessionError::DuplicateKey);
+            return Err(AgentSessionError::DuplicateKey);
         }
         runner
             .session_mut()
             .append_custom_entry(IDEMPOTENCY_KEY_TYPE, serde_json::json!({ "key": key }))
             .await
-            .map_err(|error| SessionError::WriteFailed(format!("{error:#}")))?;
+            .map_err(|error| AgentSessionError::WriteFailed(format!("{error:#}")))?;
         Ok(runner.run(text, &cancel).await)
     }
 
     /// Continue the conversation without new input; see [`Runner::continue_run`] for what is
     /// answered. An overlap returns Busy.
-    pub async fn continue_run(&self) -> Result<RunReport, SessionError> {
+    pub async fn continue_run(&self) -> Result<RunReport, AgentSessionError> {
         self.continue_with_cancel(&CancellationToken::new()).await
     }
 
     /// Like continue_run, using a child of the caller's token, as prompt_with_cancel does.
-    pub async fn continue_with_cancel(&self, parent: &CancellationToken) -> Result<RunReport, SessionError> {
+    pub async fn continue_with_cancel(&self, parent: &CancellationToken) -> Result<RunReport, AgentSessionError> {
         let cancel = parent.child_token();
         let mut active = self.acquire(cancel.clone())?;
         Ok(active.runner().continue_run(&cancel).await)
@@ -219,13 +219,16 @@ impl AgentSession {
 
     /// Compact the retained conversation while holding the same exclusive lease as prompt.
     /// An overlap returns Busy; no eligible old prefix returns a no-op report.
-    pub async fn compact(&self) -> Result<compaction::Report, SessionError> {
+    pub async fn compact(&self) -> Result<compaction::Report, AgentSessionError> {
         self.compact_with_cancel(&CancellationToken::new()).await
     }
 
     /// Like compact, using a child token. Abort or future drop leaves the parent token
     /// untouched, restores the Runner, and keeps incomplete summary attempts out of context.
-    pub async fn compact_with_cancel(&self, parent: &CancellationToken) -> Result<compaction::Report, SessionError> {
+    pub async fn compact_with_cancel(
+        &self,
+        parent: &CancellationToken,
+    ) -> Result<compaction::Report, AgentSessionError> {
         let cancel = parent.child_token();
         let mut active = self.acquire(cancel.clone())?;
         Ok(active.runner().compact(&cancel).await)
@@ -259,12 +262,12 @@ impl AgentSession {
     /// Offer the model only `names` from the next request on (pi: `setActiveTools`), also
     /// during a run. A name that no configured tool has returns UnknownTool and changes
     /// nothing. An empty list offers no tool.
-    pub fn set_active_tools(&self, names: &[&str]) -> Result<(), SessionError> {
+    pub fn set_active_tools(&self, names: &[&str]) -> Result<(), AgentSessionError> {
         if names
             .iter()
             .any(|name| !self.tool_names.iter().any(|known| known == name))
         {
-            return Err(SessionError::UnknownTool);
+            return Err(AgentSessionError::UnknownTool);
         }
         self.active_tools.set(names.iter().copied());
         Ok(())
@@ -296,27 +299,27 @@ impl AgentSession {
     /// Record state of an extension in the session while idle (pi: `appendEntry`); during
     /// a run, hooks and commands use `queues().append_entry` instead. Returns the entry's
     /// ID. A run returns Busy; a write failure returns WriteFailed.
-    pub async fn append_entry(&self, custom_type: &str, data: Value) -> Result<String, SessionError> {
+    pub async fn append_entry(&self, custom_type: &str, data: Value) -> Result<String, AgentSessionError> {
         let mut active = self.acquire(CancellationToken::new())?;
         active
             .runner()
             .session_mut()
             .append_custom_entry(custom_type, data)
             .await
-            .map_err(|error| SessionError::WriteFailed(format!("{error:#}")))
+            .map_err(|error| AgentSessionError::WriteFailed(format!("{error:#}")))
     }
 
     /// Record a message from an extension while idle, without starting a run (pi:
     /// `sendMessage` while idle): the model sees it with the next prompt. Returns the
     /// entry's ID. A run returns Busy; a write failure returns WriteFailed.
-    pub async fn append_custom_message(&self, message: CustomMessage) -> Result<String, SessionError> {
+    pub async fn append_custom_message(&self, message: CustomMessage) -> Result<String, AgentSessionError> {
         let mut active = self.acquire(CancellationToken::new())?;
         active
             .runner()
             .session_mut()
             .append_custom_message(message)
             .await
-            .map_err(|error| SessionError::WriteFailed(format!("{error:#}")))
+            .map_err(|error| AgentSessionError::WriteFailed(format!("{error:#}")))
     }
 
     /// Take the input that `steer` and `follow_up` queued and no run consumed: steering
@@ -324,11 +327,11 @@ impl AgentSession {
     /// of each turn, so input queued as it ends waits for the next run; a host that starts
     /// runs itself calls this when one ends and prompts with what it gets. Returns Busy
     /// during a prompt or compaction, whose loop may still take the input.
-    pub fn take_queued(&self) -> Result<Vec<QueuedMessage>, SessionError> {
+    pub fn take_queued(&self) -> Result<Vec<QueuedMessage>, AgentSessionError> {
         // Holding the state lock keeps a prompt from starting between the check and the take.
         let state = lock(&self.state);
         match &*state {
-            State::Running(_) => Err(SessionError::Busy),
+            State::Running(_) => Err(AgentSessionError::Busy),
             State::Idle(_) => Ok(self.queues.take_all()),
         }
     }
@@ -367,35 +370,35 @@ impl AgentSession {
     /// Why the session no longer writes, or `None` while it does; see [`WritesStopped`]. A
     /// session that stopped writing fails every later prompt, so a host that keeps sessions
     /// open checks this after a failed run. Busy during a prompt or compaction.
-    pub fn writes_stopped(&self) -> Result<Option<WritesStopped>, SessionError> {
+    pub fn writes_stopped(&self) -> Result<Option<WritesStopped>, AgentSessionError> {
         match &*lock(&self.state) {
             State::Idle(runner) => Ok(runner.session().writes_stopped().cloned()),
-            State::Running(_) => Err(SessionError::Busy),
+            State::Running(_) => Err(AgentSessionError::Busy),
         }
     }
 
     /// Revoke all session approvals while idle. A concurrent run returns Busy.
-    pub fn clear_approvals(&self) -> Result<(), SessionError> {
+    pub fn clear_approvals(&self) -> Result<(), AgentSessionError> {
         match &mut *lock(&self.state) {
             State::Idle(runner) => {
                 runner.clear_approvals();
                 Ok(())
             }
-            State::Running(_) => Err(SessionError::Busy),
+            State::Running(_) => Err(AgentSessionError::Busy),
         }
     }
 
     /// Switch provider and model while idle. Empty IDs return InvalidModel; a run returns
     /// Busy. History, tools, hooks, limits and exact-call approval grants are retained.
     /// No request is made and the session header keeps its original starting model.
-    pub fn set_model(&self, model: ModelRef) -> Result<(), SessionError> {
+    pub fn set_model(&self, model: ModelRef) -> Result<(), AgentSessionError> {
         let previous = {
             let mut state = lock(&self.state);
             match &mut *state {
-                State::Running(_) => return Err(SessionError::Busy),
+                State::Running(_) => return Err(AgentSessionError::Busy),
                 State::Idle(runner) => {
                     if model.model.trim().is_empty() {
-                        return Err(SessionError::InvalidModel);
+                        return Err(AgentSessionError::InvalidModel);
                     }
                     runner.replace_model(model.provider, model.model)
                 }
@@ -409,10 +412,10 @@ impl AgentSession {
     /// Change the reasoning level of later task requests while idle; `None` leaves the
     /// server's default. A run returns Busy. The change is recorded with the next request
     /// (`request_config`); no request is made now.
-    pub fn set_reasoning(&self, reasoning: Option<Reasoning>) -> Result<(), SessionError> {
+    pub fn set_reasoning(&self, reasoning: Option<Reasoning>) -> Result<(), AgentSessionError> {
         let mut state = lock(&self.state);
         match &mut *state {
-            State::Running(_) => Err(SessionError::Busy),
+            State::Running(_) => Err(AgentSessionError::Busy),
             State::Idle(runner) => {
                 runner.replace_reasoning(reasoning);
                 Ok(())
@@ -428,13 +431,16 @@ impl AgentSession {
     /// until the next append, so a session resumed from its file continues where the file
     /// ends. A run returns Busy; an ID that is not in the session returns EntryNotFound,
     /// and the position does not change.
-    pub fn branch(&self, entry: Option<&str>) -> Result<(), SessionError> {
+    pub fn branch(&self, entry: Option<&str>) -> Result<(), AgentSessionError> {
         let mut state = lock(&self.state);
         match &mut *state {
-            State::Running(_) => Err(SessionError::Busy),
+            State::Running(_) => Err(AgentSessionError::Busy),
             State::Idle(runner) => match entry {
                 // The store's only error is an unknown ID, which the variant names.
-                Some(id) => runner.session_mut().branch(id).map_err(|_| SessionError::EntryNotFound),
+                Some(id) => runner
+                    .session_mut()
+                    .branch(id)
+                    .map_err(|_| AgentSessionError::EntryNotFound),
                 None => {
                     runner.session_mut().reset_leaf();
                     Ok(())
@@ -446,12 +452,12 @@ impl AgentSession {
     /// Read the session while idle, for example to list its entries or find the current
     /// position. `f` runs with the conversation leased, as a prompt does: other calls get
     /// Busy until it returns, and no lock is held while host code runs. A run returns Busy.
-    pub fn inspect<T>(&self, f: impl FnOnce(&SessionStore) -> T) -> Result<T, SessionError> {
+    pub fn inspect<T>(&self, f: impl FnOnce(&SessionStore) -> T) -> Result<T, AgentSessionError> {
         let mut active = self.acquire(CancellationToken::new())?;
         Ok(f(active.runner().session()))
     }
 
-    fn acquire(&self, cancel: CancellationToken) -> Result<ActiveRun<'_>, SessionError> {
+    fn acquire(&self, cancel: CancellationToken) -> Result<ActiveRun<'_>, AgentSessionError> {
         let mut state = lock(&self.state);
         match std::mem::replace(&mut *state, State::Running(cancel.clone())) {
             State::Idle(runner) => Ok(ActiveRun {
@@ -461,7 +467,7 @@ impl AgentSession {
             }),
             busy @ State::Running(_) => {
                 *state = busy;
-                Err(SessionError::Busy)
+                Err(AgentSessionError::Busy)
             }
         }
     }

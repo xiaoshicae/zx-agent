@@ -26,10 +26,10 @@ use super::events::{
     AgentEvent, ApprovalResult, EventSink, EventTarget, LoopOutcome, RequestKind, RunTrace, ToolVerdict,
 };
 use super::hooks::{
-    ContextEdit, HookCall, HookChain, HookError, HookFailure, HookPhase, TurnDecision, TurnDisposition, TurnSummary,
+    ContextEdit, HookCall, HookChain, HookError, HookFailure, HookPoint, TurnDecision, TurnDisposition, TurnSummary,
     report_failure,
 };
-use super::policy::Decision;
+use super::policy::PolicyDecision;
 use super::queue::{MessageQueues, Queue, QueueMode, QueuedMessage};
 use super::session_host::{NoSession, Prepared, SessionHost, record_pending_entries};
 use super::tool::{
@@ -110,7 +110,7 @@ pub enum LoopFailure {
         entry_id: Option<String>,
     },
     /// A hook or context preparation failed, or the session could not record.
-    Host(String),
+    Halted(String),
 }
 
 /// Result of one loop attempt. Only provider failures qualify for provider retries.
@@ -202,7 +202,7 @@ pub async fn run_loop(
         Err(halt) => {
             let (outcome, error) = halt.into_outcome(engine.cancel);
             result.outcome = outcome;
-            result.failure = Some(LoopFailure::Host(error));
+            result.failure = Some(LoopFailure::Halted(error));
         }
     }
 

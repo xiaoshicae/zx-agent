@@ -286,7 +286,7 @@ async fn attempts(
         // Hook failures are distinct from failed provider responses and are not retried.
         let (failed, entry_id) = match result.failure {
             Some(LoopFailure::Provider { message, entry_id }) => (message, entry_id),
-            Some(LoopFailure::Host(error)) => break RunStop::Failed(error),
+            Some(LoopFailure::Halted(error)) => break RunStop::Failed(error),
             None => break RunStop::Failed(NO_DIAGNOSTIC.into()),
         };
         let failure = Failure {

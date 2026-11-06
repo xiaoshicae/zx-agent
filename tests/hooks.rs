@@ -13,8 +13,9 @@ use tokio_util::sync::CancellationToken;
 use common::{EchoTool, RunnerSetup, config, fast_retry, header, read_lines, run_prompt, summarize};
 use zx_agent::agent::QueuedMessage;
 use zx_agent::agent::{
-    AgentEvent, ApprovalResult, CancelSignal, ContextEdit, Decision, Event, HookChain, HookContext, HookOptions,
-    HookResult, HookStage, Hooks, LoopOutcome, Tool, ToolContext, ToolOutput, ToolVerdict, TurnDecision, TurnSummary,
+    AgentEvent, ApprovalResult, CancelSignal, ContextEdit, Event, HookChain, HookContext, HookOptions, HookResult,
+    HookStage, Hooks, LoopOutcome, PolicyDecision, Tool, ToolContext, ToolOutput, ToolVerdict, TurnDecision,
+    TurnSummary,
 };
 use zx_agent::agent::{Approval, ApprovalRequest, Interaction};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
@@ -25,10 +26,10 @@ use zx_agent::runner::{Limits, RunOutcome};
 use zx_agent::session::{Entry, SessionStore};
 use zx_agent::tools::BashTool;
 
-struct Verdict(Decision);
+struct Verdict(PolicyDecision);
 #[async_trait]
 impl Hooks for Verdict {
-    async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<Decision> {
+    async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<PolicyDecision> {
         Ok(self.0.clone())
     }
 }
@@ -41,8 +42,10 @@ async fn a_later_allow_does_not_override_an_ask_without_a_human() {
     ]));
     let tool = Arc::new(EchoTool::new("echo"));
     let mut config = config(provider.clone(), vec![tool.clone()]);
-    config.hooks.push(Verdict(Decision::Ask("review required".into())));
-    config.hooks.push(Verdict(Decision::Allow));
+    config
+        .hooks
+        .push(Verdict(PolicyDecision::Ask("review required".into())));
+    config.hooks.push(Verdict(PolicyDecision::Allow));
     let (result, _) = run_prompt(&config, &mut Vec::new(), "go").await;
     assert_eq!(result.outcome, LoopOutcome::Completed);
     assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
@@ -84,7 +87,7 @@ async fn allow_once_and_session_approvals_have_different_scopes() {
             calls: AtomicUsize::new(0),
         });
         let mut config = config(provider, vec![tool.clone()]);
-        config.hooks.push(Verdict(Decision::Ask("review".into())));
+        config.hooks.push(Verdict(PolicyDecision::Ask("review".into())));
         config.interaction = host.clone();
         let (result, _) = run_prompt(&config, &mut Vec::new(), "go").await;
         assert_eq!(result.outcome, LoopOutcome::Completed);
@@ -96,11 +99,11 @@ async fn allow_once_and_session_approvals_have_different_scopes() {
 struct SwitchPolicy(Arc<AtomicBool>);
 #[async_trait]
 impl Hooks for SwitchPolicy {
-    async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<Decision> {
+    async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<PolicyDecision> {
         Ok(if self.0.load(Ordering::SeqCst) {
-            Decision::Deny("revoked".into())
+            PolicyDecision::Deny("revoked".into())
         } else {
-            Decision::Ask("review".into())
+            PolicyDecision::Ask("review".into())
         })
     }
 }
@@ -173,7 +176,7 @@ async fn approval_errors_panics_and_timeouts_block_execution_and_preserve_the_lo
         ]));
         let tool = Arc::new(EchoTool::new("echo"));
         let mut config = config(provider.clone(), vec![tool.clone()]);
-        config.hooks.push(Verdict(Decision::Ask("review".into())));
+        config.hooks.push(Verdict(PolicyDecision::Ask("review".into())));
         config.interaction = Arc::new(host);
         config.interaction_timeout = Duration::ZERO;
         let (result, _) = run_prompt(&config, &mut Vec::new(), "go").await;
@@ -206,7 +209,7 @@ async fn cancellation_interrupts_a_pending_approval() {
     let entered = Arc::new(tokio::sync::Notify::new());
     let tool = Arc::new(EchoTool::new("echo"));
     let mut config = config(provider, vec![tool.clone()]);
-    config.hooks.push(Verdict(Decision::Ask("review".into())));
+    config.hooks.push(Verdict(PolicyDecision::Ask("review".into())));
     config.interaction = Arc::new(WaitingHost(entered.clone()));
     let (mut runner, _) = RunnerSetup::new(config).build();
     let cancel = CancellationToken::new();
@@ -221,9 +224,9 @@ async fn cancellation_interrupts_a_pending_approval() {
 struct CountBefore(Arc<AtomicUsize>);
 #[async_trait]
 impl Hooks for CountBefore {
-    async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<Decision> {
+    async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<PolicyDecision> {
         self.0.fetch_add(1, Ordering::SeqCst);
-        Ok(Decision::Ask("review".into()))
+        Ok(PolicyDecision::Ask("review".into()))
     }
 }
 
@@ -1013,9 +1016,9 @@ fn pairs(expected: &[(&str, &str)]) -> Vec<(String, String)> {
 #[tokio::test]
 async fn the_policy_verdict_of_every_call_is_reported_with_its_reason() {
     for (decision, verdict, reason) in [
-        (Decision::Allow, ToolVerdict::Allow, None),
+        (PolicyDecision::Allow, ToolVerdict::Allow, None),
         (
-            Decision::Deny("not on the list".into()),
+            PolicyDecision::Deny("not on the list".into()),
             ToolVerdict::Deny,
             Some("not on the list".to_string()),
         ),
@@ -1086,7 +1089,7 @@ async fn approvals_are_reported_when_asked_and_when_remembered() {
             FauxStep::text("done"),
         ]));
         let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
-        config.hooks.push(Verdict(Decision::Ask("review".into())));
+        config.hooks.push(Verdict(PolicyDecision::Ask("review".into())));
         config.interaction = Arc::new(Approver {
             approval,
             calls: AtomicUsize::new(0),
@@ -1115,7 +1118,7 @@ async fn a_resolved_approval_reports_how_long_it_waited() {
         FauxStep::text("done"),
     ]));
     let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
-    config.hooks.push(Verdict(Decision::Ask("review".into())));
+    config.hooks.push(Verdict(PolicyDecision::Ask("review".into())));
     config.interaction = Arc::new(SlowApprover(Duration::from_millis(20)));
 
     let (_, events) = run_prompt(&config, &mut Vec::new(), "go").await;
@@ -1144,7 +1147,7 @@ async fn approvals_that_fail_or_time_out_report_how_they_ended() {
             FauxStep::text("handled"),
         ]));
         let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
-        config.hooks.push(Verdict(Decision::Ask("review".into())));
+        config.hooks.push(Verdict(PolicyDecision::Ask("review".into())));
         config.interaction = Arc::new(host);
         config.interaction_timeout = Duration::ZERO;
 
@@ -1167,7 +1170,7 @@ async fn an_approval_interrupted_by_cancellation_is_reported_as_cancelled() {
     let provider = Arc::new(FauxProvider::new([FauxStep::tool_call("c", "echo", json!({}))]));
     let entered = Arc::new(tokio::sync::Notify::new());
     let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
-    config.hooks.push(Verdict(Decision::Ask("review".into())));
+    config.hooks.push(Verdict(PolicyDecision::Ask("review".into())));
     config.interaction = Arc::new(WaitingHost(entered.clone()));
     let (mut runner, events) = RunnerSetup::new(config).build();
     let cancel = CancellationToken::new();
@@ -1254,9 +1257,9 @@ impl Hooks for ContextProbe {
         self.record("transform_context", ctx);
         Ok(Vec::new())
     }
-    async fn before_tool(&self, _call: &ToolCall, ctx: &HookContext) -> HookResult<Decision> {
+    async fn before_tool(&self, _call: &ToolCall, ctx: &HookContext) -> HookResult<PolicyDecision> {
         self.record("before_tool", ctx);
-        Ok(Decision::Allow)
+        Ok(PolicyDecision::Allow)
     }
     async fn after_tool(&self, _call: &ToolCall, output: ToolOutput, ctx: &HookContext) -> HookResult<ToolOutput> {
         self.record("after_tool", ctx);
@@ -1355,9 +1358,9 @@ struct Staged {
 }
 #[async_trait]
 impl Hooks for Staged {
-    async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<Decision> {
+    async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<PolicyDecision> {
         self.order.lock().unwrap().push(format!("before:{}", self.tag));
-        Ok(Decision::Allow)
+        Ok(PolicyDecision::Allow)
     }
     async fn after_tool(&self, _call: &ToolCall, output: ToolOutput, _ctx: &HookContext) -> HookResult<ToolOutput> {
         self.order.lock().unwrap().push(format!("after:{}", self.tag));
