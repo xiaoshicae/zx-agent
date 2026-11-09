@@ -444,11 +444,6 @@ impl SessionStore {
         path
     }
 
-    /// The model-visible messages of the current branch, with their source entries.
-    pub fn projection(&self) -> Vec<ProjectedMessage> {
-        self.compacted_projection()
-    }
-
     /// The model-visible messages of the current branch.
     pub fn messages(&self) -> Vec<Message> {
         self.projection()

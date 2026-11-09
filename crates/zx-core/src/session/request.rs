@@ -188,7 +188,7 @@ impl SessionStore {
     fn request_messages(&self, source: &RequestSource, parent: Option<&str>) -> Result<Vec<Message>> {
         match source {
             RequestSource::Projection => Ok(self
-                .compacted_projection_at(parent)
+                .projection_at(parent)
                 .into_iter()
                 .map(|item| item.message)
                 .collect()),
