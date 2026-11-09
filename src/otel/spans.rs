@@ -214,15 +214,13 @@ impl OpenRun<'_> {
         self.spans.end_attempt_parts(self.at);
         end(self.spans.attempt.take(), self.at);
         if let Some(run) = self.spans.run.take() {
-            let span = run.cx.span();
-            span.set_attribute(KeyValue::new("zx.outcome", name(&outcome)));
-            span.set_attribute(KeyValue::new("zx.model_requests", i64::from(model_requests)));
-            span.set_attribute(KeyValue::new("zx.retries", i64::from(retries)));
-            span.set_attributes(usage_attributes(usage));
-            if outcome == RunOutcome::Error {
-                span.set_status(Status::error("error"));
-            }
-            span.end_with_timestamp(self.at);
+            let mut attributes = vec![
+                KeyValue::new("zx.outcome", name(&outcome)),
+                KeyValue::new("zx.model_requests", i64::from(model_requests)),
+                KeyValue::new("zx.retries", i64::from(retries)),
+            ];
+            attributes.extend(usage_attributes(usage));
+            finish(&run.cx, self.at, attributes, outcome == RunOutcome::Error);
             if let Some(instruments) = self.instruments {
                 let attributes = [
                     KeyValue::new("zx.outcome", name(&outcome)),
@@ -246,13 +244,10 @@ impl OpenRun<'_> {
 
     fn attempt_end(&mut self, outcome: RunOutcome) {
         self.spans.end_attempt_parts(self.at);
-        let attributes = vec![KeyValue::new("zx.outcome", name(&outcome))];
-        finish(
-            self.spans.attempt.take(),
-            self.at,
-            attributes,
-            outcome == RunOutcome::Error,
-        );
+        if let Some(attempt) = self.spans.attempt.take() {
+            let attributes = vec![KeyValue::new("zx.outcome", name(&outcome))];
+            finish(&attempt, self.at, attributes, outcome == RunOutcome::Error);
+        }
     }
 
     fn turn_start(&mut self, turn: u32) {
@@ -296,13 +291,9 @@ impl OpenRun<'_> {
 
     fn response(&mut self, model: &str, usage: &Usage, stop: StopReason) {
         if let Some(request) = self.spans.request.take() {
-            let span = request.cx.span();
-            span.set_attributes(usage_attributes(usage));
-            span.set_attribute(KeyValue::new("zx.stop_reason", name(&stop)));
-            if stop == StopReason::Error {
-                span.set_status(Status::error("error"));
-            }
-            span.end_with_timestamp(self.at);
+            let mut attributes = usage_attributes(usage);
+            attributes.push(KeyValue::new("zx.stop_reason", name(&stop)));
+            finish(&request.cx, self.at, attributes, stop == StopReason::Error);
             if let Some(instruments) = self.instruments {
                 let attributes = [
                     KeyValue::new("zx.request.kind", name(&request.meta.kind)),
@@ -368,15 +359,11 @@ impl OpenRun<'_> {
     /// under its name like a model's tokens under the model.
     fn tool_end(&mut self, call: &str, is_error: bool, usage: Option<&Usage>) {
         if let Some(tool) = self.spans.tools.remove(call) {
-            let span = tool.cx.span();
-            span.set_attribute(KeyValue::new("zx.tool.is_error", is_error));
+            let mut attributes = vec![KeyValue::new("zx.tool.is_error", is_error)];
             if let Some(usage) = usage {
-                span.set_attributes(usage_attributes(usage));
+                attributes.extend(usage_attributes(usage));
             }
-            if is_error {
-                span.set_status(Status::error("error"));
-            }
-            span.end_with_timestamp(self.at);
+            finish(&tool.cx, self.at, attributes, is_error);
             if let Some(instruments) = self.instruments {
                 let attributes = [
                     KeyValue::new("zx.tool.name", tool.meta.clone()),
@@ -415,10 +402,9 @@ impl OpenRun<'_> {
             request.meta.model
         });
         if let Some(compaction) = self.spans.compaction.take() {
-            let span = compaction.cx.span();
-            span.set_attributes(usage_attributes(usage));
-            span.set_attribute(KeyValue::new("zx.compaction.output_bytes", saturate(output_bytes)));
-            span.end_with_timestamp(self.at);
+            let mut attributes = usage_attributes(usage);
+            attributes.push(KeyValue::new("zx.compaction.output_bytes", saturate(output_bytes)));
+            finish(&compaction.cx, self.at, attributes, false);
             if let Some(instruments) = self.instruments {
                 instruments.compaction_duration.record(
                     seconds(compaction.since, self.at),
@@ -437,9 +423,7 @@ impl OpenRun<'_> {
     fn compaction_failed(&mut self) {
         end(self.spans.request.take().map(|request| request.cx), self.at);
         if let Some(compaction) = self.spans.compaction.take() {
-            let span = compaction.cx.span();
-            span.set_status(Status::error("error"));
-            span.end_with_timestamp(self.at);
+            finish(&compaction.cx, self.at, Vec::new(), true);
             if let Some(instruments) = self.instruments {
                 instruments.compaction_duration.record(
                     seconds(compaction.since, self.at),
@@ -518,19 +502,20 @@ fn remote(parent: SpanContext) -> Context {
 
 /// End `span` at `at`, if there is one.
 fn end(span: Option<Context>, at: SystemTime) {
-    finish(span, at, Vec::new(), false);
+    if let Some(span) = span {
+        finish(&span, at, Vec::new(), false);
+    }
 }
 
-/// End `span` at `at` with what it reports, and as an error when it `failed`.
-fn finish(span: Option<Context>, at: SystemTime, attributes: Vec<KeyValue>, failed: bool) {
-    if let Some(span) = span {
-        let span = span.span();
-        span.set_attributes(attributes);
-        if failed {
-            span.set_status(Status::error("error"));
-        }
-        span.end_with_timestamp(at);
+/// End `span` at `at` with what it reports, and as an error when it `failed`. Every span
+/// ends here.
+fn finish(span: &Context, at: SystemTime, attributes: Vec<KeyValue>, failed: bool) {
+    let span = span.span();
+    span.set_attributes(attributes);
+    if failed {
+        span.set_status(Status::error("error"));
     }
+    span.end_with_timestamp(at);
 }
 
 fn event(span: Option<&Context>, name: &'static str, at: SystemTime, attributes: Vec<KeyValue>) {

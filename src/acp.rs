@@ -106,21 +106,18 @@ impl Host {
     }
 
     /// The session `id` for `cwd`: one this process holds, or the file it is kept in.
-    async fn locate(&self, id: &SessionId, cwd: &Path) -> Result<Located, Error> {
+    async fn locate(&self, id: &SessionId, cwd: &Path) -> Result<Located> {
         if let Some(live) = self.session(id) {
             return Ok(Located::Live(live));
         }
         let id = &*id.0;
         let dir = self
-            .session_dir(cwd)
-            .map_err(|error| failure(format!("{error:#}")))?
+            .session_dir(cwd)?
             .ok_or_else(|| unknown_session(id, "the agent keeps no session files (--no-session)"))?;
-        let list = sessions::list(&dir)
-            .await
-            .map_err(|error| failure(format!("{error:#}")))?;
+        let list = sessions::list(&dir).await?;
         match list.sessions.iter().find(|session| session.id == id) {
             Some(session) => Ok(Located::File(session.path.clone())),
-            None => Err(unknown_session(id, &format!("no such session in {}", dir.display()))),
+            None => Err(unknown_session(id, &format!("no such session in {}", dir.display())).into()),
         }
     }
 
@@ -129,37 +126,31 @@ impl Host {
     ///
     /// A session this process holds already is replayed as it is, without opening its file
     /// again.
-    async fn load(&self, cx: &ConnectionTo<Client>, request: &LoadSessionRequest) -> Result<SessionId, Error> {
+    async fn load(&self, cx: &ConnectionTo<Client>, request: &LoadSessionRequest) -> Result<SessionId> {
         match self.locate(&request.session_id, &request.cwd).await? {
             Located::Live(live) => {
                 let updates = Updates::new(cx.clone(), request.session_id.clone(), request.cwd.clone());
                 live.session
                     .inspect(|store| updates.replay(store))
-                    .map_err(|error| failure(format!("cannot replay session {}: {error}", request.session_id.0)))?;
+                    .with_context(|| format!("cannot replay session {}", request.session_id.0))?;
                 Ok(request.session_id.clone())
             }
             Located::File(path) => {
-                let prepared = self
-                    .prepare_session(cx, &request.cwd, SessionFile::Open(&path))
-                    .await
-                    .map_err(|error| failure(format!("{error:#}")))?;
+                let prepared = self.prepare_session(cx, &request.cwd, SessionFile::Open(&path)).await?;
                 prepared.updates.replay(&prepared.session.store);
-                self.start(prepared).map_err(|error| failure(format!("{error:#}")))
+                self.start(prepared)
             }
         }
     }
 
     /// Continue the session `request` names without replaying it (`session/resume`): the
     /// client keeps what it shows, and the conversation goes on from the file.
-    async fn resume(&self, cx: &ConnectionTo<Client>, request: &ResumeSessionRequest) -> Result<SessionId, Error> {
+    async fn resume(&self, cx: &ConnectionTo<Client>, request: &ResumeSessionRequest) -> Result<SessionId> {
         match self.locate(&request.session_id, &request.cwd).await? {
             Located::Live(_) => Ok(request.session_id.clone()),
             Located::File(path) => {
-                let prepared = self
-                    .prepare_session(cx, &request.cwd, SessionFile::Open(&path))
-                    .await
-                    .map_err(|error| failure(format!("{error:#}")))?;
-                self.start(prepared).map_err(|error| failure(format!("{error:#}")))
+                let prepared = self.prepare_session(cx, &request.cwd, SessionFile::Open(&path)).await?;
+                self.start(prepared)
             }
         }
     }
@@ -167,21 +158,20 @@ impl Host {
     /// The sessions kept for `request.cwd`, or in the directory of the agent's own working
     /// directory, most recently active first. A listing is one page, so a cursor is never
     /// one of ours.
-    async fn list(&self, request: &ListSessionsRequest) -> Result<Vec<SessionInfo>, Error> {
+    async fn list(&self, request: &ListSessionsRequest) -> Result<Vec<SessionInfo>> {
         if let Some(cursor) = &request.cursor {
             return Err(Error::new(
                 ErrorCode::INVALID_PARAMS,
                 format!("unknown cursor {cursor:?}: a listing is one page"),
-            ));
+            )
+            .into());
         }
         let cwd = request.cwd.as_deref().or(self.settings.args.base.cwd.as_deref());
-        let cwd = cli::resolve_cwd(cwd).map_err(|error| failure(format!("{error:#}")))?;
-        let Some(dir) = self.session_dir(&cwd).map_err(|error| failure(format!("{error:#}")))? else {
+        let cwd = cli::resolve_cwd(cwd)?;
+        let Some(dir) = self.session_dir(&cwd)? else {
             return Ok(Vec::new());
         };
-        let list = sessions::list(&dir)
-            .await
-            .map_err(|error| failure(format!("{error:#}")))?;
+        let list = sessions::list(&dir).await?;
         // With `--session-dir`, one directory holds every working directory's sessions.
         let cwd = cwd.display().to_string();
         Ok(list
@@ -262,7 +252,7 @@ impl Host {
         // startup reads and, with MCP servers, nothing new: they are connected once.
         match self.create(cx, &request.cwd).await {
             Ok(id) => responder.respond(NewSessionResponse::new(id)),
-            Err(error) => responder.respond_with_error(failure(format!("{error:#}"))),
+            Err(error) => responder.respond_with_error(protocol_error(error)),
         }
     }
 
@@ -275,7 +265,7 @@ impl Host {
     ) -> Result<(), Error> {
         match self.load(cx, request).await {
             Ok(_) => responder.respond(LoadSessionResponse::new()),
-            Err(error) => responder.respond_with_error(error),
+            Err(error) => responder.respond_with_error(protocol_error(error)),
         }
     }
 
@@ -288,7 +278,7 @@ impl Host {
     ) -> Result<(), Error> {
         match self.resume(cx, request).await {
             Ok(_) => responder.respond(ResumeSessionResponse::new()),
-            Err(error) => responder.respond_with_error(error),
+            Err(error) => responder.respond_with_error(protocol_error(error)),
         }
     }
 
@@ -300,7 +290,7 @@ impl Host {
     ) -> Result<(), Error> {
         match self.list(request).await {
             Ok(sessions) => responder.respond(ListSessionsResponse::new(sessions)),
-            Err(error) => responder.respond_with_error(error),
+            Err(error) => responder.respond_with_error(protocol_error(error)),
         }
     }
 
@@ -319,7 +309,7 @@ impl Host {
         cx.spawn(async move {
             match answer_prompt(&live, text).await {
                 Ok(response) => responder.respond(response),
-                Err(message) => responder.respond_with_error(failure(message)),
+                Err(error) => responder.respond_with_error(protocol_error(error)),
             }
         })
     }
@@ -398,17 +388,19 @@ async fn serve(args: AcpArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> 
 }
 
 /// The response to `session/prompt` once the turn ended: its stop reason, or the run's error.
-async fn answer_prompt(live: &Live, text: String) -> Result<PromptResponse, String> {
-    match live.session.prompt(text).await {
-        Ok(report) => stop_reason(&report).map(PromptResponse::new),
-        Err(error) => Err(error.to_string()),
-    }
+async fn answer_prompt(live: &Live, text: String) -> Result<PromptResponse> {
+    let report = live.session.prompt(text).await?;
+    stop_reason(&report).map(PromptResponse::new)
 }
 
-/// A request error whose message says what went wrong: clients show the message, while the
-/// SDK's own internal-error helper keeps the text in `data`.
-fn failure(message: String) -> Error {
-    Error::new(ErrorCode::INTERNAL_ERROR, message)
+/// The error a failed request answers with. An error the protocol defines, such as an
+/// unknown session, keeps its code; anything else is an internal error whose message is the
+/// whole chain of causes. Clients show the message: the SDK's own conversion from `anyhow`
+/// would send a generic one, with only the outermost cause in `data`.
+fn protocol_error(error: anyhow::Error) -> Error {
+    error
+        .downcast::<Error>()
+        .unwrap_or_else(|error| Error::new(ErrorCode::INTERNAL_ERROR, format!("{error:#}")))
 }
 
 /// The error for a session the agent does not have, with the reason.
@@ -459,17 +451,19 @@ fn prompt_text(blocks: &[ContentBlock]) -> String {
 
 /// How a finished run answers `session/prompt`. Limits that end a turn have a stop reason;
 /// a failed or timed-out run is a request error, with the run's message.
-fn stop_reason(report: &RunReport) -> Result<StopReason, String> {
+fn stop_reason(report: &RunReport) -> Result<StopReason> {
     match report.outcome {
         RunOutcome::Completed => Ok(StopReason::EndTurn),
         // The protocol has no reason for a cost limit; tokens are what a cost is paid for.
         RunOutcome::Truncated | RunOutcome::TokenBudget | RunOutcome::CostBudget => Ok(StopReason::MaxTokens),
         RunOutcome::ModelRequestLimit => Ok(StopReason::MaxTurnRequests),
         RunOutcome::Aborted => Ok(StopReason::Cancelled),
-        RunOutcome::Error | RunOutcome::Timeout => Err(report
-            .error
-            .clone()
-            .unwrap_or_else(|| format!("the run ended with {:?}", report.outcome))),
+        RunOutcome::Error | RunOutcome::Timeout => Err(anyhow::Error::msg(
+            report
+                .error
+                .clone()
+                .unwrap_or_else(|| format!("the run ended with {:?}", report.outcome)),
+        )),
     }
 }
 
@@ -506,34 +500,30 @@ mod tests {
         }
     }
 
+    /// The stop reason, or the message of the request error as the client gets it.
+    fn answer(report: &RunReport) -> Result<StopReason, String> {
+        stop_reason(report).map_err(|error| protocol_error(error).message)
+    }
+
     #[test]
     fn outcomes_map_to_stop_reasons_and_failures_to_request_errors() {
+        assert_eq!(answer(&report(RunOutcome::Completed, None)), Ok(StopReason::EndTurn));
+        assert_eq!(answer(&report(RunOutcome::Truncated, None)), Ok(StopReason::MaxTokens));
         assert_eq!(
-            stop_reason(&report(RunOutcome::Completed, None)),
-            Ok(StopReason::EndTurn)
-        );
-        assert_eq!(
-            stop_reason(&report(RunOutcome::Truncated, None)),
+            answer(&report(RunOutcome::TokenBudget, None)),
             Ok(StopReason::MaxTokens)
         );
         assert_eq!(
-            stop_reason(&report(RunOutcome::TokenBudget, None)),
-            Ok(StopReason::MaxTokens)
-        );
-        assert_eq!(
-            stop_reason(&report(RunOutcome::ModelRequestLimit, None)),
+            answer(&report(RunOutcome::ModelRequestLimit, None)),
             Ok(StopReason::MaxTurnRequests)
         );
+        assert_eq!(answer(&report(RunOutcome::Aborted, None)), Ok(StopReason::Cancelled));
         assert_eq!(
-            stop_reason(&report(RunOutcome::Aborted, None)),
-            Ok(StopReason::Cancelled)
-        );
-        assert_eq!(
-            stop_reason(&report(RunOutcome::Error, Some("boom"))),
+            answer(&report(RunOutcome::Error, Some("boom"))),
             Err("boom".to_string())
         );
         assert_eq!(
-            stop_reason(&report(RunOutcome::Timeout, None)),
+            answer(&report(RunOutcome::Timeout, None)),
             Err("the run ended with Timeout".to_string())
         );
     }
