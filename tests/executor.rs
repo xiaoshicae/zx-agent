@@ -222,7 +222,6 @@ async fn grep_hands_its_script_to_its_executor_without_the_hidden_variables() {
         settings: SearchSettings {
             executor: recorder.clone(),
             hidden_env: vec!["SECRET_KEY".into()],
-            ..SearchSettings::default()
         },
     };
 

@@ -731,7 +731,7 @@ P1 的 SDK 接口调整：静态配置移入 `LoopSpec`；`LoopConfig` 持有钩
 - `agent::Interaction`：由宿主回答审批；内核不读取终端。
 - `agent::EventSink`：订阅事件，收到带信封的 `agent::Event`（事件本体在 `event.event`）。任何 `Fn(&Event) + Send + Sync` 都可以直接用作 sink。事件发出时，它报告的消息与编辑已写入会话；sink 只接收事件，不参与持久化。导出器可用 `AgentSession::subscribe_bounded(capacity)` 得到有界通道：通道满时丢弃新事件并计数（`EventStream::dropped()`），不阻塞运行；会话释放、已发出的事件读完后，`recv` 返回 `None`。订阅句柄不持有 sink，sink 随会话释放。
 - `session::SessionLog`：会话记录存在哪里，见下文[会话存储](#会话存储)。
-- `executor::Executor`：工具执行命令与读写文件的位置。`BashTool`、`ReadFileTool`、`EditFileTool` 与 `WriteFileTool` 的 `executor` 字段默认是 `LocalExecutor`（本机）；`run` 结束、超时或取消时须终止命令启动的全部进程，`read_file` 只读不超过上限的普通文件，`write_file` 新建或覆盖普通文件并创建缺少的上级目录（默认实现返回错误，此前写的执行器不受影响）。`EditFileTool` 与 `WriteFileTool` 共用 `tools::FileMutationQueue` 时，同一文件的改动逐个进行。`execution_mode` 默认 `Parallel`；一次只能处理一个调用的执行器返回 `Sequential`，内置工具随之声明，循环就不会提前开始并记录只能排队等待的调用。`ContainerExecutor::start(ContainerConfig::new(image, workspace))` 启动[容器执行](#容器执行)所用的容器，`tools::builtin_tools_with` 用指定的执行器构造内置工具；容器随执行器释放而删除。
+- `executor::Executor`：工具执行命令与读写文件的位置。`BashTool`、`ReadFileTool`、`EditFileTool` 与 `WriteFileTool` 的 `executor` 字段默认是 `LocalExecutor`（本机）；`run` 结束、超时或取消时须终止命令启动的全部进程，`read_file` 只读不超过上限的普通文件，`write_file` 新建或覆盖普通文件并创建缺少的上级目录（默认实现返回错误，此前写的执行器不受影响）。`EditFileTool` 与 `WriteFileTool` 共用 `tools::FileMutationQueue` 时，同一文件的改动逐个进行。`execution_mode` 默认 `Parallel`；一次只能处理一个调用的执行器返回 `Sequential`，内置工具随之声明，循环就不会提前开始并记录只能排队等待的调用。`ContainerExecutor::start(ContainerConfig::new(image, workspace))` 启动[容器执行](#容器执行)所用的容器，`tools::builtin_tools` 用指定的执行器构造内置工具；容器随执行器释放而删除。
 - `agent::MessageQueues`：在运行期间注入引导消息或后续消息（用户文本或扩展的 `QueuedMessage::Custom`），排入扩展要记录的状态，设置每个队列的取法。
 - `agent::SlashCommand`：扩展注册给前端的斜杠命令，见下文[扩展](#扩展)。
 - `im::ImChannel`：接入一个 IM 平台，见下文[IM 接入](#im-接入)。

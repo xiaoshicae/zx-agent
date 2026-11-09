@@ -253,7 +253,7 @@ fn assemble_tools(
     host: &mut HostTools,
 ) -> Result<Vec<Arc<dyn Tool>>> {
     let built_in: Vec<String> = profile.tools.iter().filter(|name| !host_tool(name)).cloned().collect();
-    let mut tools = tools::builtin_tools_with(
+    let mut tools = tools::builtin_tools(
         &built_in,
         Duration::from_secs(options.transport.tool_timeout_secs),
         hidden_env,

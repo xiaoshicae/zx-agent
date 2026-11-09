@@ -16,17 +16,22 @@ use std::time::Duration;
 
 use serde_json::json;
 
-use super::truncate::{MAX_BYTES, MAX_LINES, truncate_head};
+use super::path_text;
+use super::truncate::{MAX_BYTES, MAX_LINES, truncate_head, truncate_head_noted};
 use crate::agent::{ToolContext, ToolOutput};
 use crate::executor::{CommandEnd, Executor, LocalExecutor, ShellCommand};
 use crate::text::{prefix_noted, prefix_within};
 
-/// Longest wait for one search.
+/// Longest wait for one search: a search that takes longer is better narrowed than waited for,
+/// and the error says so.
 const TIMEOUT: Duration = Duration::from_secs(60);
 /// Longest line shown, in bytes; longer matching lines are cut (pi: `GREP_MAX_LINE_LENGTH`).
 const MAX_LINE_BYTES: usize = 500;
 /// The marker a script writes to standard error to say which program searched.
 const ENGINE_MARKER: &str = "zx-engine=";
+/// The name the engine marker gives ripgrep; any other name is the POSIX program that searched
+/// instead.
+const RIPGREP: &str = "rg";
 /// Directories of version control systems, skipped when `.gitignore` cannot be read.
 const VCS_DIRECTORIES: [&str; 3] = [".git", ".hg", ".svn"];
 /// The note after a line cut to [`MAX_LINE_BYTES`].
@@ -76,7 +81,7 @@ fn first_lines(shown: usize) -> String {
 /// standard error.
 fn choose_engine(rg: &str, name: &str, fallback: &str) -> String {
     format!(
-        "if command -v rg >/dev/null 2>&1; then echo {ENGINE_MARKER}rg >&2; {rg}; \
+        "if command -v rg >/dev/null 2>&1; then echo {ENGINE_MARKER}{RIPGREP} >&2; {rg}; \
          else echo {ENGINE_MARKER}{name} >&2; {fallback}; fi"
     )
 }
@@ -91,31 +96,6 @@ fn ripgrep_excludes() -> String {
         .join(" ")
 }
 
-/// The program a search script chose, from its marker.
-enum Engine {
-    Ripgrep,
-    /// The POSIX program that searched instead, by name.
-    Fallback(String),
-}
-
-impl Engine {
-    fn parse(name: &str) -> Self {
-        if name == "rg" {
-            Self::Ripgrep
-        } else {
-            Self::Fallback(name.to_string())
-        }
-    }
-
-    /// The program's name, as the script wrote it.
-    fn name(&self) -> &str {
-        match self {
-            Self::Ripgrep => "rg",
-            Self::Fallback(name) => name,
-        }
-    }
-}
-
 /// What the three tools share: where they run and what commands must not see.
 #[derive(Clone)]
 pub struct SearchSettings {
@@ -123,8 +103,6 @@ pub struct SearchSettings {
     pub executor: Arc<dyn Executor>,
     /// Environment variables the programs must not see, such as the API key variable.
     pub hidden_env: Vec<String>,
-    /// Longest wait for one call.
-    pub timeout: Duration,
 }
 
 impl Default for SearchSettings {
@@ -132,7 +110,6 @@ impl Default for SearchSettings {
         Self {
             executor: Arc::new(LocalExecutor),
             hidden_env: Vec::new(),
-            timeout: TIMEOUT,
         }
     }
 }
@@ -142,8 +119,9 @@ struct Searched {
     stdout: String,
     /// Standard error without the engine marker.
     stderr: String,
-    /// The program the script chose, from its marker.
-    engine: Option<Engine>,
+    /// The name of the program the script chose, from its marker: [`RIPGREP`] or a POSIX
+    /// program.
+    engine: Option<String>,
     /// Bytes the executor dropped because there were too many.
     dropped: usize,
 }
@@ -155,7 +133,7 @@ impl SearchSettings {
             shell: "sh",
             command: script,
             cwd: &ctx.cwd,
-            timeout: self.timeout,
+            timeout: TIMEOUT,
             hidden_env: &self.hidden_env,
         };
         let output = self.executor.run(&command, &ctx.cancel).await?;
@@ -164,7 +142,7 @@ impl SearchSettings {
             CommandEnd::TimedOut => {
                 return Err(format!(
                     "the search took longer than {}s and was stopped; narrow the path or the pattern",
-                    self.timeout.as_secs()
+                    TIMEOUT.as_secs()
                 ));
             }
             CommandEnd::Cancelled => return Err("the search was cancelled".into()),
@@ -178,7 +156,7 @@ impl SearchSettings {
             .lines()
             .filter(|line| match line.strip_prefix(ENGINE_MARKER) {
                 Some(name) => {
-                    engine = Some(Engine::parse(name));
+                    engine = Some(name.to_string());
                     false
                 }
                 None => true,
@@ -215,7 +193,7 @@ fn bound(text: &str) -> (String, bool) {
 /// The result text: the lines, then notes on what was cut, which program searched and the
 /// errors the programs reported alongside their results.
 fn report(searched: &Searched, lines: &str, notes: &mut Vec<String>) -> ToolOutput {
-    if let Some(Engine::Fallback(program)) = &searched.engine {
+    if let Some(program) = searched.engine.as_deref().filter(|name| *name != RIPGREP) {
         notes.push(format!(
             "ripgrep is not installed, so {program} searched and .gitignore was not applied"
         ));
@@ -234,7 +212,7 @@ fn report(searched: &Searched, lines: &str, notes: &mut Vec<String>) -> ToolOutp
     }
     let output = ToolOutput::ok(text);
     match &searched.engine {
-        Some(engine) => output.with_details(json!({ "engine": engine.name() })),
+        Some(engine) => output.with_details(json!({ "engine": engine })),
         None => output,
     }
 }
@@ -274,21 +252,12 @@ fn failed(searched: &Searched) -> Option<String> {
     if !searched.stdout.trim().is_empty() || searched.stderr.trim().is_empty() {
         return None;
     }
-    let kept = truncate_head(searched.stderr.trim(), MAX_LINES, MAX_BYTES);
-    let mut text = kept.text;
-    if kept.truncated {
-        text.push_str(&format!(
-            "\n[errors truncated; showing {} of {} lines]",
-            kept.kept_lines, kept.total_lines
-        ));
-    }
-    Some(text)
+    Some(truncate_head_noted(searched.stderr.trim(), "errors"))
 }
 
-/// `raw`, or `.` when absent or blank, without a leading `@` (as read_file accepts).
+/// `raw`, or `.` when absent or blank, read as read_file reads a path.
 fn search_path(raw: Option<&str>) -> String {
-    let raw = raw.map(str::trim).unwrap_or_default();
-    let raw = raw.strip_prefix('@').unwrap_or(raw);
+    let raw = path_text(raw.unwrap_or_default());
     if raw.is_empty() { ".".into() } else { raw.into() }
 }
 

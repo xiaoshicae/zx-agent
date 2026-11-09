@@ -47,6 +47,20 @@ pub fn truncate_head(text: &str, max_lines: usize, max_bytes: usize) -> Truncate
     }
 }
 
+/// Keep the beginning within the tool output bounds and, when something was cut, add a note
+/// naming `what` was cut and how many of its lines are shown.
+pub(crate) fn truncate_head_noted(text: &str, what: &str) -> String {
+    let kept = truncate_head(text, MAX_LINES, MAX_BYTES);
+    let mut content = kept.text;
+    if kept.truncated {
+        content.push_str(&format!(
+            "\n[{what} truncated; showing {} of {} lines]",
+            kept.kept_lines, kept.total_lines
+        ));
+    }
+    content
+}
+
 /// Keep the end. Suits command output and logs, where the latest lines matter most.
 pub(crate) fn truncate_tail(text: &str, max_lines: usize, max_bytes: usize) -> Truncated {
     let lines: Vec<&str> = text.split_inclusive('\n').collect();

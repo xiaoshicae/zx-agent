@@ -20,6 +20,7 @@ use zx_agent::AgentSession;
 use zx_agent::agent::{AgentEvent, Effects, Interruption, Tool, ToolContext, ToolOutput};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{AssistantMessage, ContentBlock, Message, StopReason, ToolCall, ToolDef, ToolResultMessage};
+use zx_agent::executor::{Executor, LocalExecutor};
 use zx_agent::output_store::{self, OutputStore, ReadOutputTool};
 use zx_agent::profile::skills::ReadSkillTool;
 use zx_agent::runner::RunOutcome;
@@ -196,7 +197,14 @@ fn recovered(events: &[AgentEvent]) -> Vec<(String, Interruption)> {
 #[test]
 fn only_bash_among_the_built_in_tools_has_side_effects() {
     let dir = tempfile::tempdir().unwrap();
-    let mut tools = builtin_tools(&["bash".into(), "read_file".into()], Duration::from_secs(1), &[]).unwrap();
+    let local: Arc<dyn Executor> = Arc::new(LocalExecutor);
+    let mut tools = builtin_tools(
+        &["bash".into(), "read_file".into()],
+        Duration::from_secs(1),
+        &[],
+        &local,
+    )
+    .unwrap();
     let store = OutputStore::new(dir.path(), output_store::Config::default()).unwrap();
     tools.push(Arc::new(ReadOutputTool::new(store)));
     tools.push(Arc::new(ReadSkillTool::new(Vec::new()).unwrap()));

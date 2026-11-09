@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use zx_agent::agent::{RunOutcome, Tool, ToolContext};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::executor::{CommandOutput, Executor, LocalExecutor, ShellCommand};
-use zx_agent::tools::{EditFileTool, FileMutationQueue, WriteFileTool, builtin_tools_with};
+use zx_agent::tools::{EditFileTool, FileMutationQueue, WriteFileTool, builtin_tools};
 
 use common::{config, run_prompt};
 
@@ -208,7 +208,7 @@ fn file_tool_config(
     executor: &Arc<dyn Executor>,
 ) -> zx_agent::agent::LoopConfig {
     let names = ["edit_file", "write_file"].map(String::from);
-    let tools = builtin_tools_with(&names, Duration::from_secs(5), &[], executor).unwrap();
+    let tools = builtin_tools(&names, Duration::from_secs(5), &[], executor).unwrap();
     let mut config = config(provider, tools);
     config.spec.cwd = cwd;
     config

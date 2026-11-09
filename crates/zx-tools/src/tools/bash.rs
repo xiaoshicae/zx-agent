@@ -18,13 +18,14 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 /// The most a call may ask for with `timeout_secs`, unless the host configures more.
 pub(super) const MAX_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// Runs `<shell> -c <command>` in the working directory.
+/// The shell program, looked up on `PATH`; the tool is named after it. A [`ContainerExecutor`]
+/// runs commands with the shell of its own configuration instead.
+///
+/// [`ContainerExecutor`]: crate::executor::ContainerExecutor
+const SHELL: &str = "bash";
+
+/// Runs `bash -c <command>` in the working directory.
 pub struct BashTool {
-    /// Shell program, looked up on `PATH`. A [`ContainerExecutor`] runs commands with the
-    /// shell of its own configuration instead.
-    ///
-    /// [`ContainerExecutor`]: crate::executor::ContainerExecutor
-    pub shell: String,
     /// Timeout when the call does not set `timeout_secs`.
     pub default_timeout: Duration,
     /// Upper bound for `timeout_secs`.
@@ -40,7 +41,6 @@ pub struct BashTool {
 impl Default for BashTool {
     fn default() -> Self {
         Self {
-            shell: String::from("bash"),
             default_timeout: DEFAULT_TIMEOUT,
             max_timeout: MAX_TIMEOUT,
             hidden_env: Vec::new(),
@@ -184,7 +184,7 @@ impl Tool for BashTool {
         let args = parse(&args)?;
         let limit = self.timeout_for(args.timeout_secs);
         let request = ShellCommand {
-            shell: &self.shell,
+            shell: SHELL,
             command: &args.command,
             cwd: &ctx.cwd,
             timeout: limit,
@@ -207,10 +207,13 @@ impl Tool for BashTool {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::*;
     use std::time::Instant;
+
     use tokio::process::Command;
     use tokio_util::sync::CancellationToken;
+
+    use super::*;
+    use crate::tools::search::quote;
 
     fn ctx() -> ToolContext {
         ToolContext::new(std::env::temp_dir(), CancellationToken::new())
@@ -349,8 +352,7 @@ mod tests {
     async fn dropping_a_command_stops_its_background_children() {
         let dir = tempfile::tempdir().unwrap();
         let pid_path = dir.path().join("child.pid");
-        let quoted = pid_path.to_string_lossy().replace('\'', "'\\''");
-        let command = format!("sleep 30 & echo $! > '{quoted}'; wait");
+        let command = format!("sleep 30 & echo $! > {}; wait", quote(&pid_path.to_string_lossy()));
         let running =
             tokio::spawn(async move { BashTool::default().execute(json!({"command": command}), &ctx()).await });
         // Wait for the child's published PID rather than assuming that spawn has finished.

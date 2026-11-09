@@ -20,10 +20,8 @@ use crate::text::prefix_noted;
 /// dropped whole, so a long patch is cut to leave room for the other fields.
 const MAX_PATCH_BYTES: usize = MAX_DETAILS_BYTES - 4 * 1024;
 
-/// Replaces exact, unique, non-overlapping pieces of text in one file.
+/// Replaces exact, unique, non-overlapping pieces of text in one file of at most 10 MiB.
 pub struct EditFileTool {
-    /// Larger files are refused.
-    pub max_file_bytes: u64,
     /// Where files are read and written. Defaults to this machine.
     pub executor: Arc<dyn Executor>,
     /// Shared with `write_file`, so that changes to one file happen one at a time.
@@ -33,7 +31,6 @@ pub struct EditFileTool {
 impl Default for EditFileTool {
     fn default() -> Self {
         Self {
-            max_file_bytes: DEFAULT_MAX_FILE_BYTES,
             executor: Arc::new(LocalExecutor),
             queue: Arc::default(),
         }
@@ -149,7 +146,7 @@ impl Tool for EditFileTool {
         let _turn = unless_cancelled(ctx, self.queue.turn(&path))
             .await
             .ok_or_else(cancelled)?;
-        let read = unless_cancelled(ctx, self.executor.read_file(&path, self.max_file_bytes)).await;
+        let read = unless_cancelled(ctx, self.executor.read_file(&path, DEFAULT_MAX_FILE_BYTES)).await;
         let bytes = read.ok_or_else(cancelled)??;
         if looks_binary(&bytes) {
             return Err(format!(
