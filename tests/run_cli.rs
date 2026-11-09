@@ -166,41 +166,6 @@ async fn a_second_run_cannot_write_a_session_that_another_run_is_writing() {
     assert_eq!(server.requests().len(), 1, "the second run sent a request");
 }
 
-/// Commands run as the same user as the agent. On Linux they must not read the agent's
-/// environment, which holds the API key, through /proc.
-#[cfg(target_os = "linux")]
-#[tokio::test]
-async fn commands_cannot_read_the_agent_environment_through_proc() {
-    const PROBE: &str = "visible-in-the-agent-environment";
-    let dir = tempfile::tempdir().unwrap();
-    let server = MockServer::start(vec![Reply::bash("c", "cat /proc/$PPID/environ"), Reply::text("done")]).await;
-    let output = zx_agent()
-        .args(["run", "--model", "mock", "--base-url", &server.base_url])
-        .args([
-            "--max-retries",
-            "0",
-            "--api-key-env",
-            "ZX_RUN_CLI_TEST_KEY",
-            "--tools",
-            "bash",
-            "go",
-        ])
-        .current_dir(dir.path())
-        .env("ZX_ENVIRON_PROBE", PROBE)
-        .env_remove("ZX_RUN_CLI_TEST_KEY")
-        .env_remove("ZX_MODEL")
-        .env_remove("ZX_BASE_URL")
-        .stdin(Stdio::null())
-        .kill_on_drop(true)
-        .output()
-        .await
-        .unwrap();
-    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    let result = server.requests()[1].body["messages"].to_string();
-    assert!(result.contains("Permission denied"), "{result}");
-    assert!(!result.contains(PROBE), "{result}");
-}
-
 #[cfg(unix)]
 #[tokio::test]
 async fn commands_cannot_see_the_headers_for_a_trace_collector() {

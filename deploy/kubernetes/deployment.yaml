@@ -53,7 +53,6 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
-            # Never add SYS_PTRACE: it would let commands read the agent's environment.
             capabilities:
               drop: ["ALL"]
           volumeMounts:

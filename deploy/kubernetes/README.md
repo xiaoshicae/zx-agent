@@ -240,9 +240,8 @@ kubectl -n zx-agent rollout restart deploy/zx-agent
   - 读到的 key 会被脱敏，不会进入模型上下文。
   - 被诱导的命令仍可能把 key 发往外部。在 chat 中，这类命令需要人工确认。
   - 能 `kubectl exec` 进这个 Pod 的人，本来就能读到 key。
-  - 启用 `serve` 组件后，这条限制不再存在：主进程是 zx-agent（不可 dump），PID 1 是 pause，`/proc/1/environ` 中没有容器的环境变量。实测见“验证记录”。
-- **定时巡检**：Pod 的主进程就是 zx-agent。它在 Linux 上把自身设为不可 dump，命令读不到它的环境。
-- 不要给容器添加 `SYS_PTRACE` 能力，否则命令可以读取 agent 的环境变量。
+  - 启用 `serve` 组件后，PID 1 是 pause，`/proc/1/environ` 中没有容器的环境变量；API key 与 IM 凭据只在 zx-agent 进程自身的环境中，同一用户的命令可以从它的 `/proc/<pid>/environ` 读到，读到的值同样被脱敏。
+- **定时巡检**：Pod 的主进程就是 zx-agent，同一用户的命令可以从它的 `/proc/<pid>/environ` 读到 API key；读到的 key 被脱敏，不会进入模型上下文。
 - 会话文件在 `/data` 中。命令与 agent 以同一用户运行，能够修改这些文件，这是本机执行的限制。
 - Pod 能访问哪些网络地址，由集群决定。需要限制时使用 NetworkPolicy。注意默认拒绝出网也会挡住 DNS，需要单独放行集群 DNS。
 
@@ -277,7 +276,7 @@ kubectl delete namespace zx-agent
 | chat | 通过 `-i` 管道和 `-it` 终端两种方式运行。`kubectl get` 直接执行；`rollout restart` 先请求审批，未启用 `operator.yaml` 时，批准后被拒绝 |
 | 写权限 | 启用 `operator.yaml` 后，下列操作在审批或直接执行后都成功：`rollout restart`（Deployment、StatefulSet、DaemonSet）、`scale`（Deployment、StatefulSet）、`delete pod`。`kubectl -v=6` 显示 `scale` 请求的是 `…/scale` 子资源 |
 | 定时巡检 | `create job --from=cronjob` 试跑完成，`kubectl logs` 显示回答。巡检账号用 `auth can-i` 检查：`list pods` 为 yes，`patch deployments`、`delete pods` 为 no；在巡检 Pod 中执行写命令被拒绝 |
-| 脱敏与 `/proc` | 命令读出 ServiceAccount token 和 PID 1 环境中的 API key，工具结果里都是 `[REDACTED]`；假模型收到的 8 个请求中不含 token，也不含 API key。命令读 agent 自身的 `/proc/<pid>/environ` 时得到 `Permission denied`。巡检 Pod 的 PID 1 是 zx-agent，读它的环境同样被拒绝 |
+| 脱敏与 `/proc` | 命令读出 ServiceAccount token 和 PID 1 环境中的 API key，工具结果里都是 `[REDACTED]`；假模型收到的 8 个请求中不含 token，也不含 API key。命令读 agent 自身的 `/proc/<pid>/environ` 时得到 `Permission denied`。巡检 Pod 的 PID 1 是 zx-agent，读它的环境同样被拒绝（agent 不再把自身设为不可 dump 之后，读 agent 自身的环境不再被拒绝，这两项不再成立，未重新实测） |
 | 会话文件锁（PR #21） | chat 运行期间持有会话文件的 `flock`。另一个 `kubectl exec` 中对同一文件的 run 报告 `is in use`，退出码 2；chat 结束后，同一文件可以再次使用 |
 | 清理 | `delete -k` 删除了全部对象，包括集群级的角色和绑定；从 CronJob 创建的 Job 被一并回收；卷被删除；删除命名空间后没有残留 |
 
@@ -301,7 +300,7 @@ kubectl delete namespace zx-agent
 | 项 | 结果 |
 |-|-|
 | 进程 | PID 1 为 `/pause`，`zx-agent serve --config /etc/zx-agent-serve/serve.toml` 为 7 号进程 |
-| `/proc` 保护 | `/proc/1/environ` 中没有 `OPENAI_API_KEY`；读 serve 的 `/proc/7/environ` 得到 `Permission denied` |
+| `/proc` 保护 | `/proc/1/environ` 中没有 `OPENAI_API_KEY`；读 serve 的 `/proc/7/environ` 得到 `Permission denied`（agent 不再把自身设为不可 dump 之后，后一项不再成立，未重新实测） |
 | 孤儿进程 | 执行 `(sleep 1 &)` 后 3 秒，没有状态为 `Z` 的进程 |
 | chat | serve 运行期间，`kubectl exec -i` 启动 chat 并输入 `/quit`，退出码 0 |
 | 日志 | stderr 有启动行 `[serve] platforms=slack; sessions in /data/sessions`；连不上 Slack 时，每次重试都有一行 `{"type":"failed","platform":"slack",...}`，间隔 1、2 秒递增；日志中没有出现任何一个凭据值 |
