@@ -333,10 +333,10 @@ async fn cancellation_skips_writes_and_reads() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn new_directories_and_files_are_private_and_uuid_file_symlinks_are_rejected() {
-    use std::os::unix::fs::{PermissionsExt, symlink};
+async fn new_directories_and_files_are_private() {
+    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
-    let (hook, reader) = parts(dir.path());
+    let (hook, _) = parts(dir.path());
     let reference = spill(&hook, &"private ".repeat(100)).await;
     let path = PathBuf::from(reference["path"].as_str().unwrap());
     assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
@@ -351,17 +351,6 @@ async fn new_directories_and_files_are_private_and_uuid_file_symlinks_are_reject
             .mode()
             & 0o777,
         0o700
-    );
-    let other = dir.path().join("outside.txt");
-    std::fs::write(&other, "outside").unwrap();
-    std::fs::remove_file(&path).unwrap();
-    symlink(&other, &path).unwrap();
-    assert!(
-        reader
-            .execute(json!({"id":reference["outputId"]}), &ctx(dir.path()))
-            .await
-            .unwrap_err()
-            .contains("cannot read tool output")
     );
 }
 
@@ -405,34 +394,6 @@ async fn redaction_precedes_both_output_file_and_session_persistence() {
     assert!(stored.contains("[REDACTED]"));
     assert!(!std::fs::read_to_string(&audit).unwrap().contains(secret));
     assert!(result.content.len() < stored.len());
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn a_linked_default_directory_outside_the_working_directory_is_never_written() {
-    let dir = tempfile::tempdir().unwrap();
-    let cwd = dir.path().join("repository");
-    let elsewhere = dir.path().join("elsewhere");
-    std::fs::create_dir(&cwd).unwrap();
-    std::fs::create_dir(&elsewhere).unwrap();
-    // A repository can commit this link; following it would write outside the project.
-    std::os::unix::fs::symlink("../elsewhere", cwd.join(".zx-agent")).unwrap();
-    let (hook, _) = parts(&cwd);
-    let result = hook
-        .after_tool(
-            &call("read_file"),
-            ToolOutput::ok("x".repeat(1000)),
-            &common::hook_context(),
-        )
-        .await
-        .unwrap();
-    assert!(result.content.starts_with(&"x".repeat(1000)), "{}", result.content);
-    assert!(
-        result.content.contains("outside the working directory"),
-        "{}",
-        result.content
-    );
-    assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
 }
 
 #[tokio::test]

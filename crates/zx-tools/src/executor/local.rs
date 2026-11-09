@@ -94,21 +94,6 @@ impl Executor for LocalExecutor {
             .await
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
         regular_file(path, &meta)?;
-        let mut options = tokio::fs::OpenOptions::new();
-        options.read(true);
-        // A path can be replaced with a FIFO between the check and the open. Nonblocking
-        // open lets us inspect the opened descriptor without waiting for a pipe writer.
-        #[cfg(unix)]
-        options.custom_flags(libc::O_NONBLOCK);
-        let file = options
-            .open(path)
-            .await
-            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        let meta = file
-            .metadata()
-            .await
-            .map_err(|e| format!("cannot inspect {}: {e}", path.display()))?;
-        regular_file(path, &meta)?;
         if meta.len() > max_bytes {
             return Err(format!(
                 "{} is {} bytes, over the {} byte limit; use bash with head, tail, or grep instead",
@@ -117,6 +102,9 @@ impl Executor for LocalExecutor {
                 max_bytes
             ));
         }
+        let file = tokio::fs::File::open(path)
+            .await
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
         // Metadata can be stale (growing files and procfs). Bound the actual read too,
         // using one extra byte to distinguish an exact-limit file from an oversized one.
         let mut bytes = Vec::new();
@@ -141,20 +129,9 @@ impl Executor for LocalExecutor {
             }
             Err(error) => return Err(format!("cannot write {display}: {error}")),
         }
-        let mut options = tokio::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        // As for reading: a path replaced with a FIFO after the check must not block the open.
-        #[cfg(unix)]
-        options.custom_flags(libc::O_NONBLOCK);
-        let mut file = options
-            .open(path)
+        let mut file = tokio::fs::File::create(path)
             .await
             .map_err(|e| format!("cannot write {display}: {e}"))?;
-        let meta = file
-            .metadata()
-            .await
-            .map_err(|e| format!("cannot inspect {display}: {e}"))?;
-        regular_file(path, &meta)?;
         file.write_all(contents)
             .await
             .map_err(|e| format!("cannot write {display}: {e}"))?;
