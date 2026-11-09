@@ -13,7 +13,7 @@ zx-agent 本身不针对 Kubernetes：kubectl 的规则、token 路径都在本�
 | 文件 | 内容 |
 |-|-|
 | `Dockerfile` | 镜像：zx-agent，以及 bash、kubectl、curl、jq、tini；以 10001 号非 root 用户运行 |
-| `profiles/` | 装进镜像的 `/usr/local/share/zx-agent/profiles/`。`kubernetes.toml` 在内置的 assistant 之上加入只读 kubectl 命令，并列出它们可以带的选项；chat 与 serve 用 `--profile` 指定 |
+| `profiles/` | 装进镜像的 `/usr/local/share/zx-agent/profiles/`。`kubernetes.toml` 在内置的 assistant 之上加入只读 kubectl 命令，并列出它们可以带的选项，chat 与 serve 用 `--profile` 指定；`troubleshoot.toml` 在内置的 unattended 之上换成要求排障报告固定小节的说明（`troubleshoot.md`），定时巡检与单次任务使用 |
 | `kustomization.yaml` | 命名空间、清单列表、镜像地址 |
 | `serviceaccounts.yaml` | 两个账号：常驻 Pod 用 `zx-agent`，定时巡检用 `zx-agent-inspect` |
 | `rbac.yaml` | 两个账号都绑定 Kubernetes 预置的只读角色 `view`（不含 Secret） |
@@ -72,10 +72,11 @@ kubectl -n zx-agent exec -it deploy/zx-agent -- zx-agent chat \
 单次任务：
 
 ```sh
-kubectl -n zx-agent exec deploy/zx-agent -- zx-agent run --profile troubleshoot --session /data/<名字>.jsonl "<任务>"
+kubectl -n zx-agent exec deploy/zx-agent -- zx-agent run \
+  --profile /usr/local/share/zx-agent/profiles/troubleshoot.toml --session /data/<名字>.jsonl "<任务>"
 ```
 
-`--profile troubleshoot` 让回答按排障报告的固定小节组织；不带时使用中性的 unattended。
+这个 profile 让回答按排障报告的固定小节组织；不带 `--profile` 时使用内置的、中性的 unattended。
 
 定时巡检：任务描述和执行时间在 `cronjob.yaml` 的 `args` 与 `schedule` 中修改。立即试跑一次，并查看结果：
 

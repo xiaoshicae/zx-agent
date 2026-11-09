@@ -259,7 +259,7 @@ pub(crate) struct BaseArgs {
     #[arg(long = "secret-file", value_delimiter = ',')]
     pub(crate) secret_files: Vec<PathBuf>,
 
-    /// Embedded profile name (unattended, troubleshoot, assistant) or path to a TOML file.
+    /// Embedded profile name (unattended, assistant) or path to a TOML file.
     #[arg(long)]
     pub(crate) profile: Option<String>,
 }

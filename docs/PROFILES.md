@@ -1,9 +1,9 @@
 # 场景配置与上下文管理
 
-`run` 默认使用 `unattended`，`chat` 与 `serve` 默认使用 `assistant`；`troubleshoot` 与 `unattended` 的上限、工具相同，另要求回答按排障报告的固定小节组织，需要时显式选择。三个内置 profile 的 TOML 和说明文件位于 `profiles/`，构建时嵌入二进制，发布后的程序无需额外查找安装目录。它们不含任何特定环境的规则：例如 Kubernetes 中只读 kubectl 命令的放行与可带的选项，在部署目录的 `deploy/kubernetes/profiles/kubernetes.toml`。
+`run` 默认使用 `unattended`，`chat` 与 `serve` 默认使用 `assistant`。两个内置 profile 的 TOML 和说明文件位于 `profiles/`，构建时嵌入二进制，发布后的程序无需额外查找安装目录。它们不含任何特定环境的规则：例如 Kubernetes 中只读 kubectl 命令的放行与可带的选项，在部署目录的 `deploy/kubernetes/profiles/kubernetes.toml`；要求回答按排障报告的固定小节组织的 `troubleshoot` 也在那里（`troubleshoot.toml`，扩展 `unattended`，只换说明）。
 
 ```bash
-zx-agent run --model "$ZX_MODEL" --profile troubleshoot "检查磁盘使用情况"
+zx-agent run --model "$ZX_MODEL" --profile deploy/kubernetes/profiles/troubleshoot.toml "检查磁盘使用情况"
 zx-agent chat --model "$ZX_MODEL" --profile assistant
 # 从仓库根目录使用完整的只读代码评审示例
 zx-agent run --model "$ZX_MODEL" --profile examples/profiles/review.toml "评审 src/profile/ 的实现"
@@ -43,7 +43,7 @@ path = "skills/rust-review/SKILL.md"
 | 配置 | 语义 |
 |---|---|
 | `name` | 场景名称，省略时继承基线 |
-| `extends` | 可选的 `unattended`、`troubleshoot` 或 `assistant`；省略时使用当前前端的默认 profile；不支持文件链式继承 |
+| `extends` | 可选的 `unattended` 或 `assistant`；省略时使用当前前端的默认 profile；不支持文件链式继承 |
 | `instructions` | 替换场景说明的 UTF-8 文件，至多 64 KiB；每次建会话时读取（`chat` 的 `/new` 读取当时的内容） |
 | `tools` | 替换启用列表，支持 `bash`、`read_file`、`edit_file`、`write_file`、`grep`、`find`、`ls`、`read_skill`、`read_output`；`[]` 禁用全部工具。内置 assistant 启用全部，并对 `bash`、`edit_file`、`write_file` 要求审批 |
 | `execution` | `local`（默认）或 `container`；其他值报错。`container` 时 bash、read_file、edit_file 与 write_file 在 Docker 容器中执行，见 README 的“容器执行” |
@@ -56,7 +56,7 @@ path = "skills/rust-review/SKILL.md"
 | `container.root` | `readWrite`（默认）或 `readOnly`：命令能否修改容器自身的文件；`readOnly` 时只有内存中的 `/tmp` 可写 |
 | `rules.allow` | bash 命令前缀白名单，沿用原管道检查；空列表表示只检查 deny |
 | `rules.deny` | 追加 bash 命令子串拒绝规则，原内置拒绝规则始终保留 |
-| `rules.autoApprove` | 替换不经审批直接执行的 bash 命令前缀；只在 bash 需要审批时起作用（chat、serve）。带引号、`$` 等 shell 语法或 URL 的命令仍要审批，拒绝规则始终优先，见 README 的“安全模型”。内置 assistant 为 `grep`、`head`、`tail`、`wc`、`jq`，unattended 与 troubleshoot 为空 |
+| `rules.autoApprove` | 替换不经审批直接执行的 bash 命令前缀；只在 bash 需要审批时起作用（chat、serve）。带引号、`$` 等 shell 语法或 URL 的命令仍要审批，拒绝规则始终优先，见 README 的“安全模型”。内置 assistant 为 `grep`、`head`、`tail`、`wc`、`jq`，unattended 为空 |
 | `rules.autoApproveExcept` | 追加字词：命令中出现其中之一（不分大小写，作为子串比较）时仍要审批。内置 assistant 为 `["secret"]`，可追加、不能清除 |
 | `rules.autoApproveOptions.<程序>` | 列出该程序（命令的第一个词，小写）的命令不经审批时可以带的选项：`long`（不带 `--` 的长选项名，`--name=value` 按名字比较）、`shortWithValue`（带值的单字母选项，值可紧跟，如 `-oyaml`）、`shortFlags`（不带值的单字母选项，须单独出现，如 `-A`）。其他选项一律审批；没有列出的程序不限选项。文件中列出的程序整组替换基线中同名的（内置 profile 都没有）。示例见 `deploy/kubernetes/profiles/kubernetes.toml` |
 | `rules.askTools` | 替换需审批的工具名列表；run 通过 NoHuman 明确拒绝，chat 交给终端审批。可以写内置工具名，也可以写 `[[mcp]]` 中配置过的 MCP 工具名（`<服务器名>__<工具名>`） |
@@ -67,7 +67,7 @@ path = "skills/rust-review/SKILL.md"
 | `limits.costBudget` | 每轮所有模型请求的花费上限，按 `[[models]]` 中该模型的单价计算，单位与单价相同（按人民币写单价，预算就是人民币）；摘要请求与失败的尝试也计入，工具报告的花费不计入；每次请求之前检查，最后一次请求可能超出；`0` 关闭，负数或非有限值报错。模型没有单价时 CLI 拒绝启动。用完时 run 以退出码 8 结束 |
 | `limits.tokenBudget` | 每轮所有模型请求的输入加输出 token 上限，以服务返回的用量为准，摘要请求与失败的尝试也计入；每次请求之前检查，最后一次请求可能超出；`0` 关闭。用完时 run 以退出码 7 结束 |
 | `extensions.continueOnLength` | 输出达到 token 上限后的续写次数；每次消耗一次模型请求预算 |
-| `context.discover` | 是否自动发现项目 AGENTS.md；`assistant` 默认开启，`unattended` 与 `troubleshoot` 默认关闭 |
+| `context.discover` | 是否自动发现项目 AGENTS.md；`assistant` 默认开启，`unattended` 默认关闭 |
 | `context.files` | 追加显式上下文文件 |
 | `skills` | 显式登记 name、description、path 的目录；正文按需读取 |
 | `compaction.triggerBytes` | 自动摘要阈值，0 关闭；非零须大于 `keepRecentBytes`，且超出部分不能多于 2 MiB（一次摘要最多读取的原始记录） |
@@ -86,7 +86,7 @@ path = "skills/rust-review/SKILL.md"
 
 连接地址、模型、认证环境变量名、传输与工具超时、输出模式和会话路径仍使用原 CLI 选项。TOML 不接受这些键，也不接受任意扩展名称；未知字段、错误类型、无效路径或不支持的配置均在请求模型前以退出码 2 报错。
 
-`run` 始终是无人值守前端，`chat` 始终保留 bash 的终端审批（profile 设了 `rules.approveAll` 的容器执行除外）；`--profile` 不改变前端。例如 `run --profile assistant` 遇到 bash 的 Ask 会拒绝，`chat --profile troubleshoot` 仍会询问 shell 审批。
+`run` 始终是无人值守前端，`chat` 始终保留 bash 的终端审批（profile 设了 `rules.approveAll` 的容器执行除外）；`--profile` 不改变前端。例如 `run --profile assistant` 遇到 bash 的 Ask 会拒绝，`chat --profile unattended` 仍会询问 shell 审批。
 
 ## MCP 服务器
 
@@ -120,7 +120,7 @@ maxTimeoutSecs = 600                        # 可选：一次调用的总上限�
 
 开启自动发现时，从最近 Git 根目录到工具 cwd，依次加载各层 `AGENTS.md`。Git worktree 的 `.git` 文件也被识别为边界；没有 Git 根目录时只检查 cwd。不会隐式读取用户主目录里的其他 AI 配置。
 
-`chat` 默认使用的 `assistant` 开启自动发现；`run` 默认使用的 `unattended`（以及 `troubleshoot`）关闭，无人值守运行不读取仓库里的说明。`run` 需要项目说明时，在自定义 profile 中设置 `[context] discover = true`，或用 `files` 显式列出。
+`chat` 默认使用的 `assistant` 开启自动发现；`run` 默认使用的 `unattended` 关闭，无人值守运行不读取仓库里的说明。`run` 需要项目说明时，在自定义 profile 中设置 `[context] discover = true`，或用 `files` 显式列出。
 
 自动发现的 `AGENTS.md` 可以是符号链接，但解析后的路径必须位于 Git 根目录内（没有 Git 根目录时为 cwd），否则在请求模型前以退出码 2 报错。这样仓库内容就不能让程序读取并发送仓库外的文件。profile 中的上下文文件由使用者显式指定，不受这条限制。
 
@@ -160,7 +160,7 @@ profile 的目录信息 → 系统提示词 → 模型选择 read_skill(name)
 
 ## 上下文管理
 
-`assistant` 默认在序列化上下文超过 256 KiB 时自动摘要，`unattended` 与 `troubleshoot` 默认关闭。触发值继承所选 profile，与前端名称无硬编码关联。手动 `/compact` 和 SDK `AgentSession::compact()` 共用独占运行权；没有旧消息可压缩时返回 Noop，不调用模型。
+`assistant` 默认在序列化上下文超过 256 KiB 时自动摘要，`unattended` 默认关闭。触发值继承所选 profile，与前端名称无硬编码关联。手动 `/compact` 和 SDK `AgentSession::compact()` 共用独占运行权；没有旧消息可压缩时返回 Noop，不调用模型。
 
 ```toml
 [compaction]
@@ -216,7 +216,7 @@ cost = { input = 0.27, output = 1.10, cacheRead = 0.07 }   # 每百万 token 的
 
 ## 工具结果落盘
 
-`chat` 使用的 `assistant` 默认启用 `read_output`；`run` 使用的 `unattended`（以及 `troubleshoot`）默认不启用，工具结果保持内联，与 P5 之前一致，也不会向可能只读的工作目录写文件。启用后，工具返回的文本超过 8 KiB 时，在最后一个 `after_tool` 钩子中脱敏后写入文件，会话和模型只收到 `{outputId, path, bytes, readWith}` 引用。SDK 默认不安装这一钩子；显式 `--tools` 未启用 `read_output` 时也不安装，保留工具本来的有界输出。
+`chat` 使用的 `assistant` 默认启用 `read_output`；`run` 使用的 `unattended` 默认不启用，工具结果保持内联，与 P5 之前一致，也不会向可能只读的工作目录写文件。启用后，工具返回的文本超过 8 KiB 时，在最后一个 `after_tool` 钩子中脱敏后写入文件，会话和模型只收到 `{outputId, path, bytes, readWith}` 引用。SDK 默认不安装这一钩子；显式 `--tools` 未启用 `read_output` 时也不安装，保留工具本来的有界输出。
 
 ```toml
 [toolOutput]

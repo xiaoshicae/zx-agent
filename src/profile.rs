@@ -37,8 +37,6 @@ const MAX_FILE_BYTES: u64 = 64 * 1024;
 pub enum Builtin {
     /// A neutral agent without a human operator, the default of `run`.
     Unattended,
-    /// Unattended troubleshooting with a fixed report format.
-    Troubleshoot,
     /// A conversation with a person, the default of `chat` and `serve`.
     Assistant,
 }
@@ -53,13 +51,12 @@ struct Source {
 
 impl Builtin {
     /// Every embedded profile.
-    const ALL: [Builtin; 3] = [Self::Unattended, Self::Troubleshoot, Self::Assistant];
+    const ALL: [Builtin; 2] = [Self::Unattended, Self::Assistant];
 
     /// The name `--profile` and `extends` select it by.
     pub fn name(self) -> &'static str {
         match self {
             Self::Unattended => "unattended",
-            Self::Troubleshoot => "troubleshoot",
             Self::Assistant => "assistant",
         }
     }
@@ -70,11 +67,6 @@ impl Builtin {
                 toml: include_str!("../profiles/unattended.toml"),
                 instructions_file: "unattended.md",
                 instructions: include_str!("../profiles/unattended.md"),
-            },
-            Self::Troubleshoot => Source {
-                toml: include_str!("../profiles/troubleshoot.toml"),
-                instructions_file: "troubleshoot.md",
-                instructions: include_str!("../profiles/troubleshoot.md"),
             },
             Self::Assistant => Source {
                 toml: include_str!("../profiles/assistant.toml"),

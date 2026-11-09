@@ -631,7 +631,7 @@ async fn chat_uses_the_profile_turn_budget() {
 #[tokio::test]
 async fn chat_keeps_shell_approval_even_when_the_profile_has_no_ask_rule() {
     let dir = tempfile::tempdir().unwrap();
-    profile(dir.path(), "extends = 'troubleshoot'\n[rules]\naskTools = []");
+    profile(dir.path(), "extends = 'unattended'\n[rules]\naskTools = []");
     let server = MockServer::start(vec![Reply::bash("c", "printf approved > marker"), Reply::text("done")]).await;
     let mut command = command(&server, dir.path(), "chat", &["--profile", "profile.toml"]);
     let mut child = command
