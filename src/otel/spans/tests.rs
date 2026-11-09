@@ -10,7 +10,7 @@ use serde_json::json;
 
 use super::*;
 use crate::agent::{AgentEvent, RunReport};
-use crate::ai::{AssistantMessage, ContentBlock, Message};
+use crate::ai::{AssistantMessage, ContentBlock, Message, ToolCall};
 use crate::otel::TraceParent;
 use crate::otel::signal::event;
 
@@ -120,12 +120,12 @@ fn run_end(outcome: RunOutcome, usage: Usage) -> AgentEvent {
 /// A run with one request, one tool call and one answer, from 1000 ms to 1023 ms.
 fn one_run() -> Vec<Signal> {
     let command = json!({"command": "cat secret.txt"});
-    let call = ContentBlock::ToolCall {
+    let call = ContentBlock::ToolCall(ToolCall {
         id: "c1".into(),
         name: "bash".into(),
         arguments: command.clone(),
         arguments_error: None,
-    };
+    });
     vec![
         at(
             1000,

@@ -279,7 +279,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use zx_agent::ai::{ContentBlock, ToolResultMessage, Usage};
+    use zx_agent::ai::{ContentBlock, ToolCall, ToolResultMessage, Usage};
     use zx_agent::session::SessionHeader;
 
     fn answer(text: &str, calls: &[&str]) -> Message {
@@ -288,12 +288,12 @@ mod tests {
             content.push(ContentBlock::Text { text: text.into() });
         }
         for call in calls {
-            content.push(ContentBlock::ToolCall {
+            content.push(ContentBlock::ToolCall(ToolCall {
                 id: format!("call-{call}"),
                 name: (*call).into(),
                 arguments: json!({}),
                 arguments_error: None,
-            });
+            }));
         }
         Message::Assistant(AssistantMessage {
             content,

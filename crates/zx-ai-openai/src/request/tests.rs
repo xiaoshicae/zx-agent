@@ -1,5 +1,5 @@
 use zx_ai::provider::Provider;
-use zx_ai::{SectionChange, StopReason, SystemMessage, ToolDef, ToolResultMessage, Usage};
+use zx_ai::{SectionChange, StopReason, SystemMessage, ToolCall, ToolDef, ToolResultMessage, Usage};
 
 use super::*;
 use crate::OpenAiCompatible;
@@ -9,18 +9,18 @@ use crate::config::{ApiKey, RESERVED_FIELDS};
 fn body_pairs_tool_calls_with_results() {
     let assistant = AssistantMessage {
         content: vec![
-            ContentBlock::ToolCall {
+            ContentBlock::ToolCall(ToolCall {
                 id: "a".into(),
                 name: "bash".into(),
                 arguments: json!({}),
                 arguments_error: None,
-            },
-            ContentBlock::ToolCall {
+            }),
+            ContentBlock::ToolCall(ToolCall {
                 id: "b".into(),
                 name: "bash".into(),
                 arguments: json!({}),
                 arguments_error: None,
-            },
+            }),
         ],
         ..AssistantMessage::failure("p", "m", StopReason::ToolUse, "")
     };
@@ -69,12 +69,12 @@ fn body_pairs_tool_calls_with_results() {
 #[test]
 fn tool_result_details_stay_out_of_the_body() {
     let assistant = AssistantMessage {
-        content: vec![ContentBlock::ToolCall {
+        content: vec![ContentBlock::ToolCall(ToolCall {
             id: "a".into(),
             name: "bash".into(),
             arguments: json!({}),
             arguments_error: None,
-        }],
+        })],
         ..AssistantMessage::failure("p", "m", StopReason::ToolUse, "")
     };
     let request = Request {

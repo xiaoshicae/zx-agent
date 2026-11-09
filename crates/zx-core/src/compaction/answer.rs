@@ -4,7 +4,7 @@
 use anyhow::{Result, ensure};
 use serde::Deserialize;
 
-use crate::ai::{AssistantMessage, ContentBlock, Delta, StopReason};
+use crate::ai::{AssistantMessage, ContentBlock, Delta, StopReason, ToolCall};
 use crate::session::{
     CompactionSummary, MAX_STATEMENTS, MAX_SUMMARY_BYTES, MergedSummary, SummaryFact, cite_only, superseded_by,
 };
@@ -153,9 +153,9 @@ impl ResponseBytes {
         for block in &message.content {
             match block {
                 ContentBlock::Text { text } => bytes.answer = bytes.answer.saturating_add(text.len()),
-                ContentBlock::ToolCall {
+                ContentBlock::ToolCall(ToolCall {
                     id, name, arguments, ..
-                } => {
+                }) => {
                     let call = id.len() + name.len() + arguments.to_string().len();
                     bytes.answer = bytes.answer.saturating_add(call);
                 }

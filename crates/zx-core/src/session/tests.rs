@@ -36,12 +36,12 @@ async fn a_text_replacement_cannot_erase_tool_calls() {
     store.append_message(Message::user("q")).await.unwrap();
     let mut answer = AssistantMessage::failure("p", "m", StopReason::ToolUse, "");
     answer.error_message = None;
-    answer.content = vec![ContentBlock::ToolCall {
+    answer.content = vec![ContentBlock::ToolCall(ToolCall {
         id: "c1".into(),
         name: "bash".into(),
         arguments: serde_json::json!({}),
         arguments_error: None,
-    }];
+    })];
     let target = store.append_message(Message::Assistant(answer)).await.unwrap();
 
     let error = store
@@ -200,12 +200,12 @@ async fn records_carry_the_serialized_type_of_every_entry_kind() {
         arguments: serde_json::json!({}),
         arguments_error: None,
     };
-    call.content = vec![ContentBlock::ToolCall {
+    call.content = vec![ContentBlock::ToolCall(ToolCall {
         id: tool_call.id.clone(),
         name: tool_call.name.clone(),
         arguments: tool_call.arguments.clone(),
         arguments_error: None,
-    }];
+    })];
     store.append_message(Message::Assistant(call)).await.unwrap();
     store.append_context_edit(&first, None).await.unwrap();
     store

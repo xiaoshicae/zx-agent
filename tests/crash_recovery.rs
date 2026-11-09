@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 use zx_agent::AgentSession;
 use zx_agent::agent::{AgentEvent, Effects, Interruption, Tool, ToolContext, ToolOutput};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{AssistantMessage, ContentBlock, Message, StopReason, ToolDef, ToolResultMessage};
+use zx_agent::ai::{AssistantMessage, ContentBlock, Message, StopReason, ToolCall, ToolDef, ToolResultMessage};
 use zx_agent::output_store::{self, OutputStore, ReadOutputTool};
 use zx_agent::profile::skills::ReadSkillTool;
 use zx_agent::runner::RunOutcome;
@@ -145,11 +145,13 @@ fn answer(calls: &[(&str, &str)]) -> Message {
     answer.error_message = None;
     answer.content = calls
         .iter()
-        .map(|(id, name)| ContentBlock::ToolCall {
-            id: (*id).into(),
-            name: (*name).into(),
-            arguments: json!({}),
-            arguments_error: None,
+        .map(|(id, name)| {
+            ContentBlock::ToolCall(ToolCall {
+                id: (*id).into(),
+                name: (*name).into(),
+                arguments: json!({}),
+                arguments_error: None,
+            })
         })
         .collect();
     Message::Assistant(answer)

@@ -310,17 +310,17 @@ async fn serialized_summary_records_use_camel_case_fields_and_snake_case_tags() 
 
 #[tokio::test]
 async fn a_retained_boundary_never_splits_an_assistant_tool_result_exchange() {
-    use zx_agent::ai::{AssistantMessage, ContentBlock, StopReason, ToolResultMessage};
+    use zx_agent::ai::{AssistantMessage, ContentBlock, StopReason, ToolCall, ToolResultMessage};
     let mut store = SessionStore::in_memory(header());
     let old = store.append_message(Message::user("old evidence")).await.unwrap();
     let mut assistant = AssistantMessage::failure("faux", "m", StopReason::ToolUse, "");
     assistant.error_message = None;
-    assistant.content = vec![ContentBlock::ToolCall {
+    assistant.content = vec![ContentBlock::ToolCall(ToolCall {
         id: "c".into(),
         name: "read_file".into(),
         arguments: json!({"path":"x"}),
         arguments_error: None,
-    }];
+    })];
     let call = store.append_message(Message::Assistant(assistant)).await.unwrap();
     let result = store
         .append_message(Message::ToolResult(ToolResultMessage {

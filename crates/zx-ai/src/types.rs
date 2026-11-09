@@ -155,25 +155,18 @@ pub enum ContentBlock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
     },
-    #[serde(rename_all = "camelCase")]
-    ToolCall {
-        id: String,
-        name: String,
-        arguments: Value,
-        /// Set when the streamed arguments were not valid JSON (pi: `ToolCall.argumentsError`).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        arguments_error: Option<String>,
-    },
+    ToolCall(ToolCall),
 }
 
-/// A tool call extracted from an assistant message. In JSON its fields are named as in the
-/// message's `toolCall` block.
+/// A tool call the model asked for: the `toolCall` block of an assistant message, whose JSON
+/// holds these fields beside the block's `type`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: Value,
+    /// Set when the streamed arguments were not valid JSON (pi: `ToolCall.argumentsError`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arguments_error: Option<String>,
 }
@@ -277,17 +270,7 @@ impl AssistantMessage {
         self.content
             .iter()
             .filter_map(|block| match block {
-                ContentBlock::ToolCall {
-                    id,
-                    name,
-                    arguments,
-                    arguments_error,
-                } => Some(ToolCall {
-                    id: id.clone(),
-                    name: name.clone(),
-                    arguments: arguments.clone(),
-                    arguments_error: arguments_error.clone(),
-                }),
+                ContentBlock::ToolCall(call) => Some(call.clone()),
                 _ => None,
             })
             .collect()

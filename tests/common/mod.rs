@@ -33,7 +33,8 @@ use zx_agent::agent::{
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::{
-    AssistantMessage, ContentBlock, EventReceiver, Message, Provider, Request, StopReason, SystemPrompt, ToolDef,
+    AssistantMessage, ContentBlock, EventReceiver, Message, Provider, Request, StopReason, SystemPrompt, ToolCall,
+    ToolDef,
 };
 use zx_agent::policy::PolicyHook;
 use zx_agent::runner::{Limits, Runner};
@@ -97,12 +98,12 @@ pub(crate) fn session_files(dir: &Path) -> Vec<PathBuf> {
 pub(crate) fn tool_call_answer(provider: &str, model: &str, tool: &str, arguments: Value) -> Message {
     let mut answer = AssistantMessage::failure(provider, model, StopReason::ToolUse, "");
     answer.error_message = None;
-    answer.content = vec![ContentBlock::ToolCall {
+    answer.content = vec![ContentBlock::ToolCall(ToolCall {
         id: "c1".into(),
         name: tool.into(),
         arguments,
         arguments_error: None,
-    }];
+    })];
     Message::Assistant(answer)
 }
 

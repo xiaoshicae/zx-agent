@@ -197,7 +197,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::ai::{AssistantMessage, ContentBlock, ToolResultMessage};
+    use crate::ai::{AssistantMessage, ContentBlock, ToolCall, ToolResultMessage};
     use crate::session::SessionHeader;
 
     fn store(version: u32) -> SessionStore {
@@ -211,11 +211,13 @@ mod tests {
         answer.error_message = None;
         answer.content = calls
             .iter()
-            .map(|(id, name)| ContentBlock::ToolCall {
-                id: (*id).into(),
-                name: (*name).into(),
-                arguments: json!({}),
-                arguments_error: None,
+            .map(|(id, name)| {
+                ContentBlock::ToolCall(ToolCall {
+                    id: (*id).into(),
+                    name: (*name).into(),
+                    arguments: json!({}),
+                    arguments_error: None,
+                })
             })
             .collect();
         Message::Assistant(answer)

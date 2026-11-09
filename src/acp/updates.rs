@@ -16,7 +16,8 @@ use serde_json::Value;
 
 use zx_agent::agent::{AgentEvent, ApprovalResult, Event, EventSink, ToolVerdict};
 use zx_agent::ai::{
-    AssistantMessage, ContentBlock as MessageBlock, Delta, Message, ToolResultMessage, UserMessageKind,
+    AssistantMessage, ContentBlock as MessageBlock, Delta, Message, ToolCall as MessageCall, ToolResultMessage,
+    UserMessageKind,
 };
 use zx_agent::session::{Entry, ProjectedMessage, SessionStore};
 use zx_agent::sync::lock;
@@ -107,9 +108,9 @@ impl Updates {
                                 self.send(SessionUpdate::AgentThoughtChunk(Self::text_chunk(thinking)));
                             }
                             MessageBlock::Text { .. } | MessageBlock::Thinking { .. } => {}
-                            MessageBlock::ToolCall {
+                            MessageBlock::ToolCall(MessageCall {
                                 id, name, arguments, ..
-                            } => {
+                            }) => {
                                 let call = self.recorded_call(id, name, arguments, &projection[index + 1..]);
                                 self.send(SessionUpdate::ToolCall(call));
                             }
@@ -235,7 +236,7 @@ impl Updates {
         let wrote_text = {
             let mut state = lock(&self.state);
             for block in &message.content {
-                if let MessageBlock::ToolCall { id, arguments, .. } = block {
+                if let MessageBlock::ToolCall(MessageCall { id, arguments, .. }) = block {
                     state.calls.insert(id.clone(), arguments.clone());
                 }
             }

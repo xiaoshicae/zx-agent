@@ -629,12 +629,12 @@ mod tests {
         );
         assert!(ContextEdit::Omit { index: 1 }.apply(&mut messages).is_err());
         let mut response = AssistantMessage::failure("p", "m", StopReason::ToolUse, "unused");
-        response.content = vec![crate::ai::ContentBlock::ToolCall {
+        response.content = vec![crate::ai::ContentBlock::ToolCall(crate::ai::ToolCall {
             id: "c".into(),
             name: "echo".into(),
             arguments: json!({}),
             arguments_error: None,
-        }];
+        })];
         messages.push(Message::Assistant(response));
         assert!(
             ContextEdit::ReplaceText {

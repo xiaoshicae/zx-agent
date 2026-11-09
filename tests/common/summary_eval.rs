@@ -14,7 +14,9 @@ use std::sync::Arc;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use zx_agent::ai::{AssistantMessage, ContentBlock, Message, Provider, StopReason, ToolResultMessage, Usage, now_ms};
+use zx_agent::ai::{
+    AssistantMessage, ContentBlock, Message, Provider, StopReason, ToolCall, ToolResultMessage, Usage, now_ms,
+};
 use zx_agent::compaction::{Config, Outcome, SummaryMode};
 use zx_agent::session::{Entry, RequestSource, SessionStore};
 
@@ -437,12 +439,12 @@ fn messages(round: usize, index: usize, step: Step) -> Vec<Message> {
             let id = format!("r{round}c{index}");
             vec![
                 assistant(
-                    ContentBlock::ToolCall {
+                    ContentBlock::ToolCall(ToolCall {
                         id: id.clone(),
                         name: "bash".into(),
                         arguments: json!({ "command": command }),
                         arguments_error: None,
-                    },
+                    }),
                     StopReason::ToolUse,
                 ),
                 Message::ToolResult(ToolResultMessage {
@@ -490,7 +492,7 @@ pub(crate) fn text_of(message: &Message) -> String {
             .map(|block| match block {
                 ContentBlock::Text { text } => text.clone(),
                 ContentBlock::Thinking { thinking, .. } => thinking.clone(),
-                ContentBlock::ToolCall { arguments, .. } => arguments.to_string(),
+                ContentBlock::ToolCall(ToolCall { arguments, .. }) => arguments.to_string(),
             })
             .collect::<Vec<_>>()
             .join("\n"),

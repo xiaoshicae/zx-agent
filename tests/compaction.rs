@@ -13,7 +13,7 @@ use zx_agent::AgentSession;
 use zx_agent::agent::{AgentEvent, ContextEdit, Event, HookContext, HookOptions, Hooks};
 use zx_agent::agent_session::{AgentSessionError, ModelRef};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{AssistantMessage, ContentBlock, Message, StopReason, ToolResultMessage};
+use zx_agent::ai::{AssistantMessage, ContentBlock, Message, StopReason, ToolCall, ToolResultMessage};
 use zx_agent::compaction::{Config, Outcome, Report};
 use zx_agent::runner::{Limits, RunOutcome};
 use zx_agent::session::{Entry, SessionStore};
@@ -249,12 +249,12 @@ async fn summary_requests_and_context_sizes_leave_tool_result_details_out() {
         .await
         .unwrap();
     let mut call = AssistantMessage::failure("faux", "m", StopReason::ToolUse, "");
-    call.content = vec![ContentBlock::ToolCall {
+    call.content = vec![ContentBlock::ToolCall(ToolCall {
         id: "c1".into(),
         name: "echo".into(),
         arguments: json!({}),
         arguments_error: None,
-    }];
+    })];
     store.append_message(Message::Assistant(call)).await.unwrap();
     let mut result = ToolResultMessage {
         tool_call_id: "c1".into(),

@@ -18,7 +18,8 @@ use zx_agent::agent::{
 };
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{
-    ContentBlock, EventReceiver, Message, PREAMBLE, Provider, Request, StopReason, SystemPrompt, ToolDef, Usage,
+    ContentBlock, EventReceiver, Message, PREAMBLE, Provider, Request, StopReason, SystemPrompt, ToolCall, ToolDef,
+    Usage,
 };
 
 fn provider(steps: impl IntoIterator<Item = FauxStep>) -> Arc<FauxProvider> {
@@ -254,12 +255,12 @@ async fn failures_become_error_results_and_the_loop_continues() {
 #[tokio::test]
 async fn length_stop_fails_tool_calls_without_running_them() {
     let cut_off = FauxStep::Respond {
-        blocks: vec![ContentBlock::ToolCall {
+        blocks: vec![ContentBlock::ToolCall(ToolCall {
             id: "t".into(),
             name: "echo".into(),
             arguments: json!({"text": "cut"}),
             arguments_error: None,
-        }],
+        })],
         stop: StopReason::Length,
     };
     let provider = provider([cut_off, FauxStep::text("retried")]);
