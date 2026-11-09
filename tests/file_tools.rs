@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use zx_agent::agent::{LoopOutcome, Tool, ToolContext};
+use zx_agent::agent::{RunOutcome, Tool, ToolContext};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::executor::{CommandOutput, Executor, LocalExecutor, ShellCommand};
 use zx_agent::tools::{EditFileTool, FileMutationQueue, WriteFileTool, builtin_tools_with};
@@ -238,7 +238,7 @@ async fn two_edits_of_one_file_in_one_batch_both_take_effect() {
 
     let (result, _) = run_prompt(&config, &mut Vec::new(), "edit").await;
 
-    assert_eq!(result.outcome, LoopOutcome::Completed);
+    assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(std::fs::read_to_string(dir.path().join("f.txt")).unwrap(), "ONE\nTWO\n");
 }
 
@@ -290,6 +290,6 @@ async fn old_argument_shapes_are_rewritten_before_the_checks() {
 
     let (result, _) = run_prompt(&config, &mut Vec::new(), "edit").await;
 
-    assert_eq!(result.outcome, LoopOutcome::Completed);
+    assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(std::fs::read_to_string(dir.path().join("f.txt")).unwrap(), "A\nB\n");
 }

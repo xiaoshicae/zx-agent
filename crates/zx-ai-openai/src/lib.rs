@@ -86,13 +86,17 @@ async fn run(
 ) {
     let started = Instant::now();
     let mut acc = Accumulator::new(&config.provider_name, &request.model, now_ms());
-    let body = request::build_body(&request, &config);
-    let url = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
+    let post = Post {
+        client: &client,
+        config: &config,
+        url: format!("{}/chat/completions", config.base_url.trim_end_matches('/')),
+        body: request::build_body(&request, &config),
+    };
 
     let outcome = tokio::select! {
         biased;
         () = cancel.cancelled() => Err(Failure::Aborted),
-        result = stream_response(&client, &config, &url, &body, &mut acc, &mut tx) => result,
+        result = stream_response(&post, &mut acc, &mut tx) => result,
     };
 
     // Failures keep the content streamed so far.
@@ -109,15 +113,19 @@ async fn run(
     send_event(&mut tx, StreamEvent::ending(message)).await;
 }
 
-async fn stream_response(
-    client: &reqwest::Client,
-    config: &OpenAiConfig,
-    url: &str,
-    body: &Value,
-    acc: &mut Accumulator,
-    tx: &mut EventSender,
-) -> Result<(), Failure> {
-    let response = send_request(client, config, url, body).await?;
+/// A request ready to post: the client, the provider's settings, where it goes and its body.
+struct Post<'a> {
+    client: &'a reqwest::Client,
+    config: &'a OpenAiConfig,
+    url: String,
+    body: Value,
+}
+
+/// Post the request, check its answer, and stream the answer into `acc`, forwarding each
+/// delta through `tx`.
+async fn stream_response(post: &Post<'_>, acc: &mut Accumulator, tx: &mut EventSender) -> Result<(), Failure> {
+    let config = post.config;
+    let response = send_request(post).await?;
     if !response.status().is_success() {
         return Err(http_failure(response, config).await);
     }
@@ -130,14 +138,10 @@ async fn stream_response(
     read_stream(response, config, acc, tx).await
 }
 
-/// Post `body` and wait for the response headers within the idle timeout.
-async fn send_request(
-    client: &reqwest::Client,
-    config: &OpenAiConfig,
-    url: &str,
-    body: &Value,
-) -> Result<reqwest::Response, Failure> {
-    let mut request = client.post(url).json(body);
+/// Post the request and wait for the response headers within the idle timeout.
+async fn send_request(post: &Post<'_>) -> Result<reqwest::Response, Failure> {
+    let config = post.config;
+    let mut request = post.client.post(&post.url).json(&post.body);
     for (name, value) in &config.headers {
         request = request.header(name.as_str(), value.as_str());
     }

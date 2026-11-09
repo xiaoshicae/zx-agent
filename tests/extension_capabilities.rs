@@ -112,15 +112,15 @@ async fn a_hook_sends_the_model_a_message_and_records_state_during_the_run() {
             event,
             AgentEvent::MessageEnd {
                 message: Message::User { kind: UserMessageKind::Custom, content, .. },
-                entry_id: Some(_),
                 custom: Some(info),
+                ..
             } if content == "echo ran" && info.custom_type == "note" && info.display && info.details == Some(json!({"n": 1}))
         )),
         "{events:?}"
     );
     assert!(events.iter().any(|event| matches!(
         event,
-        AgentEvent::CustomEntry { entry_id: Some(_), custom_type } if custom_type == "calls"
+        AgentEvent::CustomEntry { custom_type, .. } if custom_type == "calls"
     )));
 }
 

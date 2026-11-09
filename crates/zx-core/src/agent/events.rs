@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::hooks::HookContext;
 use super::queue::MessageQueues;
-use super::report::RunReport;
+use super::report::{RunOutcome, RunReport};
 use super::tool::ActiveTools;
 use crate::ai::{Delta, Message, Usage, now_ms};
 
@@ -32,7 +32,7 @@ pub struct Event {
     pub seq: u64,
     /// When the event was emitted, in milliseconds since the Unix epoch.
     pub at_ms: u64,
-    /// The session's ID; absent when `run_loop` runs without a session.
+    /// The session's ID; absent only for a hook context built without one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     /// The run that emitted the event: one prompt, or one manual compaction.
@@ -67,6 +67,11 @@ impl RunTrace {
     /// What every hook of this run is told.
     pub(crate) fn context(&self) -> &HookContext {
         &self.context
+    }
+
+    /// The run's cancellation.
+    pub(crate) fn cancel(&self) -> &CancellationToken {
+        self.context.cancel.token()
     }
 
     /// The event with the next sequence number. Events are stamped in the order they are
@@ -136,26 +141,6 @@ pub enum ApprovalResult {
     Failed,
 }
 
-/// How one `run_loop` call ended.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LoopOutcome {
-    /// The model answered without further tool calls and no queued message remained.
-    Completed,
-    /// A provider or operational hook failed, or the session could not record.
-    Error,
-    /// Cancelled.
-    Aborted,
-    /// The model request budget ran out while the model still wanted to continue.
-    ModelRequestLimit,
-    /// The answer was cut off and no hook requested a continuation.
-    Truncated,
-    /// The token budget ran out while the model still wanted to continue.
-    TokenBudget,
-    /// The cost budget ran out while the model still wanted to continue.
-    CostBudget,
-}
-
 /// What is known about a tool call that an interrupted run left without a result. The
 /// result recorded during recovery tells the model the same thing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -220,9 +205,8 @@ pub enum AgentEvent {
     /// as on an HTTP error, start here too.
     RequestStart {
         kind: RequestKind,
-        /// The `request_started` record in the session; absent without a session.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        entry_id: Option<String>,
+        /// The `request_started` record in the session.
+        entry_id: String,
         model: String,
         attempt: u32,
     },
@@ -233,22 +217,20 @@ pub enum AgentEvent {
     MessageUpdate {
         delta: Delta,
     },
-    /// A finished message, already recorded when the run has a session.
+    /// A finished message, already recorded in the session.
     MessageEnd {
         message: Message,
-        /// The message's session entry; absent without a session.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        entry_id: Option<String>,
+        /// The message's session entry.
+        entry_id: String,
         /// Present when the message came from an extension: what its `custom_message`
         /// record holds besides the content the model sees.
         #[serde(skip_serializing_if = "Option::is_none")]
         custom: Option<CustomMessageInfo>,
     },
     /// An extension recorded state in the session (pi: `entry_appended` for a `custom`
-    /// entry). Without a session the entry is not kept, and `entry_id` is absent.
+    /// entry).
     CustomEntry {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        entry_id: Option<String>,
+        entry_id: String,
         custom_type: String,
     },
     /// Processing of a tool call begins: validation, policy and approval come before it
@@ -307,7 +289,7 @@ pub enum AgentEvent {
     },
     /// End of one attempt. The runner may still retry afterwards.
     AgentEnd {
-        outcome: LoopOutcome,
+        outcome: RunOutcome,
     },
     /// Emitted by the runner before waiting to retry a failed response.
     RetryScheduled {
@@ -327,9 +309,8 @@ pub enum AgentEvent {
     ContextEdited {
         index: usize,
         replacement: Option<String>,
-        /// The `context_edit` session entry; absent without a session.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        entry_id: Option<String>,
+        /// The `context_edit` session entry.
+        entry_id: String,
     },
     /// A hook failure. Observer failures produce diagnostics without stopping the run.
     HookFailed {
@@ -466,7 +447,7 @@ mod tests {
             AgentEvent::TurnStart { turn: 1 },
             AgentEvent::RequestStart {
                 kind: RequestKind::Task,
-                entry_id: None,
+                entry_id: "r".into(),
                 model: "m".into(),
                 attempt: 1,
             },
@@ -476,11 +457,11 @@ mod tests {
             },
             AgentEvent::MessageEnd {
                 message: Message::user("x"),
-                entry_id: Some("e".into()),
+                entry_id: "e".into(),
                 custom: None,
             },
             AgentEvent::CustomEntry {
-                entry_id: None,
+                entry_id: "c".into(),
                 custom_type: "state".into(),
             },
             AgentEvent::ToolExecutionStart {
@@ -516,7 +497,7 @@ mod tests {
             },
             AgentEvent::TurnEnd { turn: 1 },
             AgentEvent::AgentEnd {
-                outcome: LoopOutcome::Completed,
+                outcome: RunOutcome::Completed,
             },
             AgentEvent::RetryScheduled {
                 attempt: 1,
@@ -527,7 +508,7 @@ mod tests {
             AgentEvent::ContextEdited {
                 index: 0,
                 replacement: None,
-                entry_id: None,
+                entry_id: "x".into(),
             },
             AgentEvent::HookFailed {
                 hook: "test".into(),

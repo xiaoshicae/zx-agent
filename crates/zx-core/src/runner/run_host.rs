@@ -1,35 +1,30 @@
 //! What a run lends the loop and the summarizer: the session it records in, the hooks and
 //! sink it reports to, and the model it summarizes with. The Runner builds one per run and
-//! the loop reaches it as its [`SessionHost`] (pi: AgentSession writes on `message_end`).
+//! the loop reaches it as its [`SessionHost`]: recording goes to the session as it would
+//! without a run, and preparing the context may summarize it (pi: AgentSession writes on
+//! `message_end`).
 
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
+use super::Start;
 use super::accounting::RunAccounting;
-use super::final_answer::final_answer;
-use super::{Limits, RunTimer, Start, conclude};
 use crate::agent::{
-    AgentEvent, ContextPreparation, EventTarget, LoopConfig, LoopOutcome, Prepared, QueuedMessage, RunReport,
-    SessionHost, record_pending_entries,
+    AgentEvent, ContextPreparation, EventTarget, LoopConfig, Prepared, QueuedMessage, RunOutcome, SessionHost,
 };
 use crate::ai::retry::RetryPolicy;
 use crate::ai::{AssistantMessage, Message, Provider, Request, StopReason, ToolCall, duration_ms};
 use crate::compaction::{self, Summarizer, Trigger};
-use crate::session::{CustomMessage, Entry, RequestSource, SessionStore};
+use crate::session::{CustomMessage, SessionStore};
 
 /// How a run ends when it stops before a finished answer.
 pub(super) enum RunStop {
     /// The last attempt ended with this outcome, which explains itself; never
-    /// [`LoopOutcome::Error`], which `Failed` states with its reason.
-    Ended(LoopOutcome),
+    /// [`RunOutcome::Error`], which `Failed` states with its reason.
+    Ended(RunOutcome),
     /// The run failed, for this reason.
     Failed(String),
-}
-
-/// The text for an entry the session could not record, with the cause.
-pub(super) fn persist_error(error: &anyhow::Error) -> String {
-    format!("cannot persist session entry: {error:#}")
 }
 
 /// Why automatic summaries are paused: a paid summary request failed, and repeating it on
@@ -121,43 +116,6 @@ impl<'a> RunHost<'a> {
         (prompts, run_start)
     }
 
-    /// Close the run: keep the state hooks asked to record, then report how the run ended
-    /// and the answer it added after the first `run_start` entries.
-    pub(super) async fn close_run(
-        &mut self,
-        stop: RunStop,
-        run_start: usize,
-        limits: &Limits,
-        accounting: &RunAccounting,
-        timer: &RunTimer,
-    ) -> RunReport {
-        // State that hooks asked to record during the last events is kept before the run is
-        // reported, so a host reading the session afterwards finds it.
-        let config = self.config;
-        let target = self.target;
-        let stop = match record_pending_entries(config, self, target).await {
-            Ok(()) => stop,
-            Err(error) => RunStop::Failed(error),
-        };
-        let (outcome, error) = conclude(stop, limits, accounting, timer.timed_out());
-        let report = RunReport {
-            outcome,
-            final_text: final_answer(&self.session.messages_since(run_start)),
-            model_requests: accounting.model_requests,
-            retries: accounting.retries,
-            usage: accounting.usage.clone(),
-            tool_usage: accounting.tool_usage.clone(),
-            denied_calls: accounting.denied_calls,
-            error,
-            session_file: self.session.path().map(|path| path.display().to_string()),
-        };
-        self.emit(AgentEvent::RunEnd {
-            report: Box::new(report.clone()),
-        })
-        .await;
-        report
-    }
-
     /// Summarize the old prefix with `trigger`; the pause follows the outcome. When the
     /// report says `Completed`, the session's projection is the new context.
     pub(super) async fn summarize(&mut self, trigger: Trigger, cancel: &CancellationToken) -> compaction::Report {
@@ -229,7 +187,7 @@ impl<'a> RunHost<'a> {
             self.emit(AgentEvent::ContextEdited {
                 index,
                 replacement: None,
-                entry_id: Some(edit),
+                entry_id: edit,
             })
             .await;
         }
@@ -242,14 +200,12 @@ impl<'a> RunHost<'a> {
     pub(super) async fn recover_overflow(
         &mut self,
         error: &str,
-        failed_entry: Option<&str>,
+        failed_entry: &str,
         accounting: &mut RunAccounting,
         cancel: &CancellationToken,
     ) -> Result<(), RunStop> {
         self.emit(AgentEvent::ContextOverflow { error: error.into() }).await;
-        if let Some(target) = failed_entry {
-            self.omit_failed_attempt(target).await.map_err(RunStop::Failed)?;
-        }
+        self.omit_failed_attempt(failed_entry).await.map_err(RunStop::Failed)?;
         let report = self.summarize(Trigger::Overflow, cancel).await;
         accounting.model_requests = accounting.model_requests.saturating_add(report.requests);
         accounting.usage.add(&report.usage);
@@ -260,7 +216,7 @@ impl<'a> RunHost<'a> {
             return Ok(());
         }
         if report.outcome == compaction::Outcome::Aborted {
-            return Err(RunStop::Ended(LoopOutcome::Aborted));
+            return Err(RunStop::Ended(RunOutcome::Aborted));
         }
         let reason = report.error.unwrap_or_else(|| "compaction made no progress".into());
         Err(RunStop::Failed(format!(
@@ -275,7 +231,7 @@ impl<'a> RunHost<'a> {
         retry: &RetryPolicy,
         accounting: &mut RunAccounting,
         failed: &AssistantMessage,
-        failed_entry: Option<&str>,
+        failed_entry: &str,
         cancel: &CancellationToken,
     ) -> Result<(), RunStop> {
         accounting.retries += 1;
@@ -287,79 +243,48 @@ impl<'a> RunHost<'a> {
             error: failed.failure_reason().to_string(),
         })
         .await;
-        if let Some(target) = failed_entry {
-            self.omit_failed_attempt(target).await.map_err(RunStop::Failed)?;
-        }
+        self.omit_failed_attempt(failed_entry).await.map_err(RunStop::Failed)?;
         tokio::select! {
             () = tokio::time::sleep(delay) => Ok(()),
-            () = cancel.cancelled() => Err(RunStop::Ended(LoopOutcome::Aborted)),
+            () = cancel.cancelled() => Err(RunStop::Ended(RunOutcome::Aborted)),
         }
     }
 }
 
 #[async_trait]
 impl SessionHost for RunHost<'_> {
-    async fn append_message(&mut self, message: &Message) -> Result<Option<String>, String> {
-        // The event that reports the message owns it, so the session stores a copy.
-        self.session
-            .append_message(message.clone())
-            .await
-            .map(Some)
-            .map_err(|error| persist_error(&error))
+    fn messages(&self) -> Vec<Message> {
+        self.session.messages()
     }
 
-    async fn append_custom_message(&mut self, message: &CustomMessage) -> Result<(Option<String>, Message), String> {
-        let id = self
-            .session
-            .append_custom_message(message.clone())
-            .await
-            .map_err(|error| persist_error(&error))?;
-        match self.session.get(&id) {
-            Some(Entry::CustomMessage(entry)) => Ok((Some(id), entry.projected())),
-            _ => Err(format!("custom message {id} was not recorded")),
-        }
+    async fn append_message(&mut self, message: &Message) -> Result<String, String> {
+        SessionHost::append_message(&mut *self.session, message).await
     }
 
-    async fn append_custom_entry(&mut self, custom_type: &str, data: Value) -> Result<Option<String>, String> {
-        self.session
-            .append_custom_entry(custom_type, data)
-            .await
-            .map(Some)
-            .map_err(|error| persist_error(&error))
+    async fn append_custom_message(&mut self, message: &CustomMessage) -> Result<(String, Message), String> {
+        SessionHost::append_custom_message(&mut *self.session, message).await
     }
 
-    async fn edit_context(&mut self, index: usize, replacement: Option<&str>) -> Result<Option<String>, String> {
-        let projection = self.session.projection();
-        let target = projection
-            .get(index)
-            .ok_or_else(|| format!("context index {index} is out of bounds"))?;
-        self.session
-            .append_context_edit(&target.entry_id, replacement.map(str::to_string))
-            .await
-            .map(Some)
-            .map_err(|error| format!("cannot persist context edit: {error:#}"))
+    async fn append_custom_entry(&mut self, custom_type: &str, data: Value) -> Result<String, String> {
+        SessionHost::append_custom_entry(&mut *self.session, custom_type, data).await
     }
 
-    async fn record_request(&mut self, request: &Request, provider: &dyn Provider) -> Result<Option<String>, String> {
-        let options = provider.request_options();
-        self.session
-            .record_request(request, provider.name(), options, RequestSource::Projection)
-            .await
-            .map(Some)
-            .map_err(|error| format!("cannot persist request checkpoint: {error:#}"))
+    async fn edit_context(&mut self, index: usize, replacement: Option<&str>) -> Result<String, String> {
+        SessionHost::edit_context(&mut *self.session, index, replacement).await
+    }
+
+    async fn record_request(&mut self, request: &Request, provider: &dyn Provider) -> Result<String, String> {
+        SessionHost::record_request(&mut *self.session, request, provider).await
     }
 
     async fn record_tool_call_started(&mut self, call: &ToolCall) -> Result<(), String> {
-        self.session
-            .append_tool_call_started(&call.id, &call.name)
-            .await
-            .map(|_| ())
-            .map_err(|error| format!("cannot persist the start of tool call {:?}: {error:#}", call.id))
+        SessionHost::record_tool_call_started(&mut *self.session, call).await
     }
 
+    /// Summarize first when automatic summaries are on and the context passes a trigger.
     async fn prepare_context(&mut self, cancel: &CancellationToken) -> ContextPreparation {
         if !self.compaction.automatic() {
-            return ContextPreparation::unchanged();
+            return ContextPreparation::ready();
         }
         // Either trigger runs a summary: the bytes of the context, or the tokens the last
         // response reported plus an estimate for what came after it.
@@ -373,7 +298,7 @@ impl SessionHost for RunHost<'_> {
             Ok(over_bytes || over_tokens)
         });
         match measured {
-            Ok(false) => return ContextPreparation::unchanged(),
+            Ok(false) => return ContextPreparation::ready(),
             Ok(true) => {}
             Err(error) => return ContextPreparation::failed(format!("cannot measure context: {error:#}")),
         }
@@ -387,7 +312,7 @@ impl SessionHost for RunHost<'_> {
         let result = if let Some(error) = report.persistence_error {
             Prepared::Unrecorded(error)
         } else if report.outcome == compaction::Outcome::Completed {
-            Prepared::Updated(self.session.messages())
+            Prepared::Ready
         } else {
             Prepared::Failed(
                 report

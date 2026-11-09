@@ -1,51 +1,57 @@
-//! What the loop needs from the session it runs in. The Runner implements it over its session
-//! store; a run without a session gets [`NoSession`], which records nothing, so `run_loop`
-//! keeps everything in its in-memory context.
+//! What the loop needs from the session it runs in: a place to record each step before acting
+//! on it, the projection it sends the model, and a chance to prepare that context before a
+//! request. A [`SessionStore`] is a host on its own; the Runner's host adds summaries.
 
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use super::{AgentEvent, EventTarget, LoopConfig};
-use crate::ai::{Message, Provider, Request, ToolCall, Usage, UserMessageKind, now_ms};
-use crate::session::CustomMessage;
+use crate::ai::{Message, Provider, Request, ToolCall, Usage};
+use crate::session::{CustomMessage, Entry, RequestSource, SessionStore};
 
-/// Records what the loop does, before the loop acts on it. When the session cannot record, a
-/// method returns an error (`prepare_context`: [`Prepared::Unrecorded`]) and the loop stops at
-/// once, because an unattended run must not keep acting without an audit trail. A host
-/// without a session records nothing and returns no entry IDs.
+/// Records what the loop does, before the loop acts on it, and gives the loop the context it
+/// sends: the session's projection. When the session cannot record, a method returns an error
+/// (`prepare_context`: [`Prepared::Unrecorded`]) and the loop stops at once, because an
+/// unattended run must not keep acting without an audit trail.
 #[async_trait]
 pub(crate) trait SessionHost: Send + Sync {
+    /// The messages the model sees now: the session's projection.
+    fn messages(&self) -> Vec<Message>;
+
     /// Record a finished message. Returns its entry ID.
-    async fn append_message(&mut self, message: &Message) -> Result<Option<String>, String>;
+    async fn append_message(&mut self, message: &Message) -> Result<String, String>;
 
     /// Record a message from an extension. Returns its entry ID and the message as the
-    /// projection holds it, which is what the loop keeps in its context.
-    async fn append_custom_message(&mut self, message: &CustomMessage) -> Result<(Option<String>, Message), String>;
+    /// projection holds it.
+    async fn append_custom_message(&mut self, message: &CustomMessage) -> Result<(String, Message), String>;
 
     /// Record state of an extension. Returns its entry ID.
-    async fn append_custom_entry(&mut self, custom_type: &str, data: Value) -> Result<Option<String>, String>;
+    async fn append_custom_entry(&mut self, custom_type: &str, data: Value) -> Result<String, String>;
 
-    /// Record an edit of the message at `index` in the current projection, before the loop
-    /// applies it: `None` omits the message, `Some` replaces its text. Returns the edit's
-    /// entry ID.
-    async fn edit_context(&mut self, index: usize, replacement: Option<&str>) -> Result<Option<String>, String>;
+    /// Record an edit of the message at `index` in the current projection: `None` omits the
+    /// message, `Some` replaces its text. Returns the edit's entry ID.
+    async fn edit_context(&mut self, index: usize, replacement: Option<&str>) -> Result<String, String>;
 
     /// Record a request before it is sent. Returns the ID of its `request_started` entry.
-    async fn record_request(&mut self, request: &Request, provider: &dyn Provider) -> Result<Option<String>, String>;
+    async fn record_request(&mut self, request: &Request, provider: &dyn Provider) -> Result<String, String>;
 
     /// Record that a call with side effects is about to run, after its checks and approval.
     async fn record_tool_call_started(&mut self, call: &ToolCall) -> Result<(), String>;
 
-    /// Prepare the context before a task request, for example by summarizing it. A
-    /// replacement is already recorded; request costs, failed attempts included, count
-    /// against the run's budget.
+    /// Prepare the context before a task request, for example by summarizing it; what it
+    /// records is in the projection afterwards. Request costs, failed attempts included,
+    /// count against the run's budget.
     async fn prepare_context(&mut self, cancel: &CancellationToken) -> ContextPreparation;
 }
 
+/// The text for an entry the session could not record, with the cause.
+pub(crate) fn persist_error(error: &anyhow::Error) -> String {
+    format!("cannot persist session entry: {error:#}")
+}
+
 /// Record the custom entries extensions asked for since the last turn (pi: `appendEntry`),
-/// each announced as a `custom_entry` event. Without a session they are reported without an
-/// entry ID and not kept. An error means the session could not record one.
+/// each announced as a `custom_entry` event. An error means the session could not record one.
 pub(crate) async fn record_pending_entries(
     config: &LoopConfig,
     session: &mut dyn SessionHost,
@@ -62,47 +68,67 @@ pub(crate) async fn record_pending_entries(
     Ok(())
 }
 
-/// The host of a run without a session: nothing is recorded, so no step can fail to be, and
-/// the loop keeps messages and edits only in its context.
-pub(crate) struct NoSession;
-
+/// A session on its own: every step is recorded in the store, and the context is never
+/// prepared, as no one summarizes it.
 #[async_trait]
-impl SessionHost for NoSession {
-    async fn append_message(&mut self, _message: &Message) -> Result<Option<String>, String> {
-        Ok(None)
+impl SessionHost for SessionStore {
+    fn messages(&self) -> Vec<Message> {
+        SessionStore::messages(self)
     }
 
-    async fn append_custom_message(&mut self, message: &CustomMessage) -> Result<(Option<String>, Message), String> {
-        let projected = Message::User {
-            content: message.content.clone(),
-            timestamp: now_ms(),
-            kind: UserMessageKind::Custom,
-        };
-        Ok((None, projected))
+    async fn append_message(&mut self, message: &Message) -> Result<String, String> {
+        // The event that reports the message owns it, so the session stores a copy.
+        SessionStore::append_message(self, message.clone())
+            .await
+            .map_err(|error| persist_error(&error))
     }
 
-    async fn append_custom_entry(&mut self, _custom_type: &str, _data: Value) -> Result<Option<String>, String> {
-        Ok(None)
+    async fn append_custom_message(&mut self, message: &CustomMessage) -> Result<(String, Message), String> {
+        let id = SessionStore::append_custom_message(self, message.clone())
+            .await
+            .map_err(|error| persist_error(&error))?;
+        match self.get(&id) {
+            Some(Entry::CustomMessage(entry)) => Ok((id, entry.projected())),
+            _ => Err(format!("custom message {id} was not recorded")),
+        }
     }
 
-    async fn edit_context(&mut self, _index: usize, _replacement: Option<&str>) -> Result<Option<String>, String> {
-        Ok(None)
+    async fn append_custom_entry(&mut self, custom_type: &str, data: Value) -> Result<String, String> {
+        SessionStore::append_custom_entry(self, custom_type, data)
+            .await
+            .map_err(|error| persist_error(&error))
     }
 
-    async fn record_request(&mut self, _request: &Request, _provider: &dyn Provider) -> Result<Option<String>, String> {
-        Ok(None)
+    async fn edit_context(&mut self, index: usize, replacement: Option<&str>) -> Result<String, String> {
+        let projection = self.projection();
+        let target = projection
+            .get(index)
+            .ok_or_else(|| format!("context index {index} is out of bounds"))?;
+        self.append_context_edit(&target.entry_id, replacement.map(str::to_string))
+            .await
+            .map_err(|error| format!("cannot persist context edit: {error:#}"))
     }
 
-    async fn record_tool_call_started(&mut self, _call: &ToolCall) -> Result<(), String> {
-        Ok(())
+    async fn record_request(&mut self, request: &Request, provider: &dyn Provider) -> Result<String, String> {
+        let options = provider.request_options();
+        SessionStore::record_request(self, request, provider.name(), options, RequestSource::Projection)
+            .await
+            .map_err(|error| format!("cannot persist request checkpoint: {error:#}"))
+    }
+
+    async fn record_tool_call_started(&mut self, call: &ToolCall) -> Result<(), String> {
+        self.append_tool_call_started(&call.id, &call.name)
+            .await
+            .map(|_| ())
+            .map_err(|error| format!("cannot persist the start of tool call {:?}: {error:#}", call.id))
     }
 
     async fn prepare_context(&mut self, _cancel: &CancellationToken) -> ContextPreparation {
-        ContextPreparation::unchanged()
+        ContextPreparation::ready()
     }
 }
 
-/// What preparing the context cost and produced. The loop knows neither profiles nor
+/// What preparing the context cost and how it ended. The loop knows neither profiles nor
 /// compaction policy; the cost counts against the run's budget whatever the result.
 pub(crate) struct ContextPreparation {
     pub requests: u32,
@@ -111,12 +137,12 @@ pub(crate) struct ContextPreparation {
 }
 
 impl ContextPreparation {
-    /// No request was made and the context stays as it is.
-    pub(crate) fn unchanged() -> Self {
+    /// No request was made; the context is ready as it is.
+    pub(crate) fn ready() -> Self {
         Self {
             requests: 0,
             usage: Usage::default(),
-            result: Prepared::Unchanged,
+            result: Prepared::Ready,
         }
     }
 
@@ -130,11 +156,10 @@ impl ContextPreparation {
     }
 }
 
-/// How the context looks after preparation.
+/// How preparing the context ended.
 pub(crate) enum Prepared {
-    Unchanged,
-    /// The context was replaced, by a summary for example.
-    Updated(Vec<Message>),
+    /// The projection is the context to send, summarized or not.
+    Ready,
     /// Preparation failed; the context is unchanged.
     Failed(String),
     /// The session could not record the preparation, so the run must stop.

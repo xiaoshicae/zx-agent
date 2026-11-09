@@ -11,12 +11,10 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use common::{Collect, EchoTool, NotifyingProvider, config, run_prompt, summarize, with_policy};
-use zx_agent::agent::ApprovalCache;
+use common::{Collect, EchoTool, NotifyingProvider, config, run_attempt, run_prompt, summarize, with_policy};
 use zx_agent::agent::QueuedMessage;
 use zx_agent::agent::{
-    AgentEvent, ExecutionMode, LoopControl, LoopOutcome, MAX_DETAILS_BYTES, PolicyDecision, Tool, ToolContext,
-    ToolOutput, ToolPolicy, run_loop,
+    AgentEvent, ExecutionMode, MAX_DETAILS_BYTES, PolicyDecision, RunOutcome, Tool, ToolContext, ToolOutput, ToolPolicy,
 };
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{
@@ -46,7 +44,7 @@ async fn runs_tools_until_the_model_answers() {
 
     let (result, _) = run_prompt(&config, &mut context, "go").await;
 
-    assert_eq!((result.outcome, result.task_turns), (LoopOutcome::Completed, 2));
+    assert_eq!((result.outcome, result.task_turns), (RunOutcome::Completed, 2));
     assert_eq!(
         summarize(&context),
         ["user:go", "assistant:calls[c1]", "tool:c1=hi", "assistant:done"]
@@ -156,7 +154,7 @@ async fn a_panicking_policy_blocks_the_tool_and_the_model_can_continue() {
 
     let (result, _) = run_prompt(&config, &mut context, "go").await;
 
-    assert_eq!(result.outcome, LoopOutcome::Completed);
+    assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
     let tool_result = &provider.requests()[1].messages[2];
     let Message::ToolResult(tool_result) = tool_result else {
@@ -187,14 +185,12 @@ async fn cancellation_interrupts_a_waiting_policy() {
     );
     let cancel = CancellationToken::new();
     let sink = Collect::default();
-    let mut context = Vec::new();
-    let mut approvals = ApprovalCache::default();
-    let mut control = LoopControl::new(Some(10), &mut approvals, &cancel, &sink);
-    let mut running = Box::pin(run_loop(
-        &mut context,
-        vec![QueuedMessage::User("go".into())],
+    let mut running = Box::pin(run_attempt(
         &config,
-        &mut control,
+        vec![QueuedMessage::User("go".into())],
+        Some(10),
+        &cancel,
+        &sink,
     ));
     tokio::select! {
         () = entered.notified() => {}
@@ -202,10 +198,10 @@ async fn cancellation_interrupts_a_waiting_policy() {
     }
     cancel.cancel();
 
-    let result = tokio::time::timeout(Duration::from_secs(1), running)
+    let (result, _) = tokio::time::timeout(Duration::from_secs(1), running)
         .await
         .expect("cancellation must interrupt the policy");
-    assert_eq!(result.outcome, LoopOutcome::Aborted);
+    assert_eq!(result.outcome, RunOutcome::Aborted);
     assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
 }
 
@@ -239,7 +235,7 @@ async fn failures_become_error_results_and_the_loop_continues() {
 
     let (result, _) = run_prompt(&config, &mut context, "go").await;
 
-    assert_eq!(result.outcome, LoopOutcome::Completed);
+    assert_eq!(result.outcome, RunOutcome::Completed);
     // One case per kind of failure: not found, invalid arguments, denied, error, panic.
     assert_eq!(
         summarize(&context)[2..7],
@@ -283,20 +279,16 @@ async fn stops_at_the_turn_budget() {
     let config = config(provider.clone(), vec![echo()]);
     let prompts = vec![QueuedMessage::User("go".into())];
 
-    let result = run_loop(
-        &mut Vec::new(),
-        prompts,
+    let (result, _) = run_attempt(
         &config,
-        &mut LoopControl::new(
-            Some(2),
-            &mut ApprovalCache::default(),
-            &CancellationToken::new(),
-            &Collect::default(),
-        ),
+        prompts,
+        Some(2),
+        &CancellationToken::new(),
+        &Collect::default(),
     )
     .await;
 
-    assert_eq!((result.outcome, result.task_turns), (LoopOutcome::ModelRequestLimit, 2));
+    assert_eq!((result.outcome, result.task_turns), (RunOutcome::ModelRequestLimit, 2));
     assert_eq!(provider.requests().len(), 2);
 }
 
@@ -317,7 +309,7 @@ async fn terminate_ends_only_when_every_result_asks() {
 
     let (result, _) = run_prompt(&config, &mut Vec::new(), "go").await;
 
-    assert_eq!(result.outcome, LoopOutcome::Completed);
+    assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!((provider.requests().len(), provider.remaining()), (2, 1));
 }
 
@@ -341,7 +333,7 @@ async fn steering_enters_after_the_turn_and_follow_ups_after_the_answer() {
 
     let (result, _) = run_prompt(&config, &mut context, "go").await;
 
-    assert_eq!(result.outcome, LoopOutcome::Completed);
+    assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(
         summarize(&context),
         [
@@ -374,7 +366,7 @@ async fn a_withdrawn_follow_up_is_never_taken() {
 
     let (result, _) = run_prompt(&config, &mut context, "go").await;
 
-    assert_eq!(result.outcome, LoopOutcome::Completed);
+    assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(
         summarize(&context),
         [
@@ -401,25 +393,20 @@ async fn a_spent_budget_starts_no_new_turn_and_leaves_queued_input_queued() {
     echo.queues = Some(config.queues.clone());
     let mut config = config;
     config.spec.tools = vec![Arc::new(echo)];
-    let mut context = Vec::new();
     let events = Collect::default();
 
-    let result = run_loop(
-        &mut context,
-        vec![QueuedMessage::User("go".into())],
+    let (result, context) = run_attempt(
         &config,
-        &mut LoopControl::new(
-            Some(1),
-            &mut ApprovalCache::default(),
-            &CancellationToken::new(),
-            &events,
-        ),
+        vec![QueuedMessage::User("go".into())],
+        Some(1),
+        &CancellationToken::new(),
+        &events,
     )
     .await;
 
     assert_eq!(
         (result.outcome, result.task_turns, result.model_requests),
-        (LoopOutcome::ModelRequestLimit, 1, 1)
+        (RunOutcome::ModelRequestLimit, 1, 1)
     );
     assert_eq!(summarize(&context), ["user:go", "assistant:calls[c1]", "tool:c1=ok"]);
     assert_eq!(
@@ -444,7 +431,7 @@ async fn a_provider_error_ends_the_loop_after_a_start_end_pair() {
 
     let (result, sink) = run_prompt(&config, &mut Vec::new(), "go").await;
 
-    assert_eq!(result.outcome, LoopOutcome::Error);
+    assert_eq!(result.outcome, RunOutcome::Error);
     // A failure before streaming still produces a start/end pair for the assistant message.
     let kinds = sink.kinds();
     assert_eq!(
@@ -466,15 +453,9 @@ async fn cancellation_ends_the_loop() {
     });
     let prompts = vec![QueuedMessage::User("go".into())];
 
-    let result = run_loop(
-        &mut Vec::new(),
-        prompts,
-        &config,
-        &mut LoopControl::new(Some(10), &mut ApprovalCache::default(), &cancel, &Collect::default()),
-    )
-    .await;
+    let (result, _) = run_attempt(&config, prompts, Some(10), &cancel, &Collect::default()).await;
 
-    assert_eq!(result.outcome, LoopOutcome::Aborted);
+    assert_eq!(result.outcome, RunOutcome::Aborted);
 }
 
 /// Breaks the provider contract: its stream ends without a `Done` or `Error` event.
@@ -499,7 +480,7 @@ async fn a_stream_without_a_final_event_is_an_error() {
 
     let (result, _) = run_prompt(&config, &mut context, "go").await;
 
-    assert_eq!(result.outcome, LoopOutcome::Error);
+    assert_eq!(result.outcome, RunOutcome::Error);
     let Some(Message::Assistant(answer)) = context.last() else {
         panic!("the failure is recorded as an assistant message: {context:?}");
     };
@@ -626,7 +607,7 @@ async fn policy_and_tool_see_prepared_arguments_while_the_context_keeps_the_orig
 
     let (result, _) = run_prompt(&config, &mut context, "go").await;
 
-    assert_eq!(result.outcome, LoopOutcome::Completed);
+    assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(*policy.0.lock().unwrap(), [json!({"text": "hi"})]);
     assert_eq!(*tool.ran_with.lock().unwrap(), [json!({"text": "hi"})]);
     assert_eq!(summarize(&context)[2], "tool:c1=hi");
@@ -669,7 +650,7 @@ async fn a_panicking_argument_preparation_blocks_only_that_call() {
 
     let (result, _) = run_prompt(&config, &mut Vec::new(), "go").await;
 
-    assert_eq!(result.outcome, LoopOutcome::Completed);
+    assert_eq!(result.outcome, RunOutcome::Completed);
     assert!(tool.ran_with.lock().unwrap().is_empty());
     let requests = provider.requests();
     let result = tool_result(&requests[1].messages, 2);

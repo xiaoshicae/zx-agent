@@ -656,7 +656,7 @@ async fn a_retried_failure_is_reported_as_a_context_edit() {
         })
         .unwrap();
     let kinds = sink.kinds();
-    let reported: Vec<Option<String>> = sink
+    let reported: Vec<String> = sink
         .events()
         .into_iter()
         .filter_map(|event| match event {
@@ -664,7 +664,7 @@ async fn a_retried_failure_is_reported_as_a_context_edit() {
             _ => None,
         })
         .collect();
-    assert_eq!(reported, [Some(edit)]);
+    assert_eq!(reported, [edit]);
     let scheduled = kinds.iter().position(|kind| *kind == "retry_scheduled").unwrap();
     let edited = kinds.iter().position(|kind| *kind == "context_edited").unwrap();
     let second_attempt = kinds.iter().rposition(|kind| *kind == "agent_start").unwrap();
@@ -1038,7 +1038,7 @@ async fn attempts_and_requests_are_numbered_and_name_their_request_records() {
         })
         .collect();
     assert_eq!(attempts, [1, 2]);
-    let requests: Vec<(RequestKind, u32, Option<String>)> = all
+    let requests: Vec<(RequestKind, u32, String)> = all
         .iter()
         .filter_map(|event| match event {
             AgentEvent::RequestStart {
@@ -1050,12 +1050,12 @@ async fn attempts_and_requests_are_numbered_and_name_their_request_records() {
             _ => None,
         })
         .collect();
-    let recorded: Vec<Option<String>> = runner
+    let recorded: Vec<String> = runner
         .session()
         .entries()
         .iter()
         .filter_map(|entry| match entry {
-            Entry::RequestStarted(started) => Some(Some(started.id.clone())),
+            Entry::RequestStarted(started) => Some(started.id.clone()),
             _ => None,
         })
         .collect();
@@ -1093,7 +1093,7 @@ async fn messages_and_context_edits_name_their_session_entries() {
 
     runner.run("go", &CancellationToken::new()).await;
 
-    let reported: Vec<(&'static str, Option<String>)> = events
+    let reported: Vec<(&'static str, String)> = events
         .events()
         .into_iter()
         .filter_map(|event| match event {
@@ -1102,12 +1102,12 @@ async fn messages_and_context_edits_name_their_session_entries() {
             _ => None,
         })
         .collect();
-    let recorded: Vec<(&'static str, Option<String>)> = runner
+    let recorded: Vec<(&'static str, String)> = runner
         .session()
         .entries()
         .iter()
         .filter(|entry| matches!(entry, Entry::Message(_) | Entry::ContextEdit(_)))
-        .map(|entry| (entry.kind(), Some(entry.id().to_string())))
+        .map(|entry| (entry.kind(), entry.id().to_string()))
         .collect();
     assert_eq!(reported, recorded);
     assert_eq!(reported.len(), 3, "the input, its rewrite and the answer");

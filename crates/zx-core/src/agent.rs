@@ -1,6 +1,6 @@
 //! Agent layer: the loop, tools, policy, and events (pi: packages/agent).
 //!
-//! - `agent_loop`: one attempt of the loop (`run_loop`) and what it runs with
+//! - `agent_loop`: one attempt of the loop ([`Attempt`]) and what it runs with
 //! - `tool`: the tool interface, and the set of tools a run offers
 //! - `hooks`: the extension points around the loop, and the chain that runs them
 //! - `policy`: the decision on a tool call, and the policy interface
@@ -23,13 +23,13 @@ mod report;
 mod session_host;
 mod tool;
 
-pub use agent_loop::{LoopConfig, LoopControl, LoopFailure, LoopResult, LoopSpec, run_loop};
+pub use agent_loop::{Attempt, AttemptFailure, AttemptResult, LoopConfig, LoopSpec};
 pub use command::{CommandContext, CommandError, CommandOutcome, SlashCommand, check_command_name};
+pub(crate) use events::EventTarget;
 pub use events::{
-    AgentEvent, ApprovalResult, CustomMessageInfo, EVENT_SCHEMA_VERSION, Event, EventSink, Interruption, LoopOutcome,
-    NullSink, RequestKind, ToolVerdict,
+    AgentEvent, ApprovalResult, CustomMessageInfo, EVENT_SCHEMA_VERSION, Event, EventSink, Interruption, NullSink,
+    RequestKind, ToolVerdict,
 };
-pub(crate) use events::{EventTarget, RunTrace};
 pub use hooks::{
     CancelSignal, ContextEdit, DEFAULT_HOOK_TIMEOUT, HookChain, HookContext, HookError, HookFailure, HookOptions,
     HookPoint, HookResult, HookStage, Hooks, RequestPlan, RequestSettings, TurnDecision, TurnDisposition, TurnSummary,
@@ -38,7 +38,7 @@ pub use interaction::{Approval, ApprovalCache, ApprovalRequest, DEFAULT_APPROVAL
 pub use policy::{AllowAll, PolicyDecision, ToolPolicy};
 pub use queue::{MessageQueues, PendingEntry, QueueMode, QueuedMessage};
 pub use report::{RunOutcome, RunReport};
-pub(crate) use session_host::{ContextPreparation, Prepared, SessionHost, record_pending_entries};
+pub(crate) use session_host::{ContextPreparation, Prepared, SessionHost, persist_error, record_pending_entries};
 pub use tool::{
     ActiveTools, Effects, ExecutionMode, MAX_DETAILS_BYTES, MAX_PROGRESS_BYTES, MAX_QUEUED_PROGRESS, Tool, ToolContext,
     ToolOutput,

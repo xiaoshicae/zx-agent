@@ -20,11 +20,13 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use accounting::RunAccounting;
+use final_answer::final_answer;
 use run_host::{CompactionPause, RunHost, RunStop};
 
 use crate::agent::ApprovalCache;
 use crate::agent::{
-    EventSink, EventTarget, LoopConfig, LoopControl, LoopFailure, LoopOutcome, QueuedMessage, RunTrace, run_loop,
+    AgentEvent, Attempt, AttemptFailure, AttemptResult, EventSink, EventTarget, LoopConfig, QueuedMessage,
+    record_pending_entries,
 };
 pub use crate::agent::{RunOutcome, RunReport};
 use crate::ai::retry::{RetryPolicy, is_context_overflow, is_retryable};
@@ -213,89 +215,215 @@ impl Runner {
             compaction,
             pause,
         } = self;
-        let sink = sink.as_ref();
         let trace = config.trace(Some(session.header().id.clone()), run_cancel.clone());
-        let target = EventTarget { sink, trace: &trace };
-        let mut host = RunHost::new(session, target, config, compaction, pause);
-        let (begun, run_start) = host.open_run(begin).await;
-        let mut accounting = RunAccounting::default();
-        let mut shared = Attempting {
-            config,
+        let target = EventTarget {
+            sink: sink.as_ref(),
+            trace: &trace,
+        };
+        let run = Run {
+            host: RunHost::new(session, target, config, compaction, pause),
             retry,
             limits,
             approvals,
-            cancel: &run_cancel,
-            sink,
-            trace: &trace,
+            accounting: RunAccounting::default(),
+            timer,
         };
-        let stop = match begun {
-            Err(error) => RunStop::Failed(error),
-            Ok(prompts) => attempts(&mut host, prompts, &mut accounting, &mut shared).await,
-        };
-        host.close_run(stop, run_start, limits, &accounting, &timer).await
+        run.run(begin).await
     }
 }
 
-/// What every attempt of one run shares.
-struct Attempting<'a> {
-    config: &'a LoopConfig,
+/// One run in progress: the host it records through, what it borrows from the Runner, and
+/// what its attempts have spent so far.
+struct Run<'a> {
+    host: RunHost<'a>,
     retry: &'a RetryPolicy,
     limits: &'a Limits,
     approvals: &'a mut ApprovalCache,
-    cancel: &'a CancellationToken,
-    sink: &'a dyn EventSink,
-    trace: &'a RunTrace,
+    accounting: RunAccounting,
+    timer: RunTimer,
 }
 
 /// The reason reported for an attempt that ended with `Error` but named no failure.
 const NO_DIAGNOSTIC: &str = "loop failed without a diagnostic";
 
-/// Run `prompts`, then retry or recover from a context overflow as long as the budget and
-/// the retry policy allow, until an attempt ends the run.
-async fn attempts(
-    host: &mut RunHost<'_>,
-    mut prompts: Vec<QueuedMessage>,
-    accounting: &mut RunAccounting,
-    shared: &mut Attempting<'_>,
-) -> RunStop {
-    loop {
-        let attempt = accounting.attempts + 1;
-        host.attempt = attempt;
-        // The session projection, not an in-memory list, is what the model sees.
-        let mut context = host.session.messages();
-        let mut control = LoopControl {
-            token_budget: accounting.remaining_tokens(shared.limits),
-            cost_budget: accounting.remaining_cost(shared.limits),
-            prior_task_turns: accounting.task_turns,
-            prior_answer_continuations: accounting.answer_continuations,
-            session: Some(&mut *host),
-            trace: Some(shared.trace),
-            attempt_number: attempt,
-            ..LoopControl::new(
-                accounting.remaining_model_requests(shared.limits),
-                &mut *shared.approvals,
-                shared.cancel,
-                shared.sink,
-            )
+impl Run<'_> {
+    /// Open the run from `begin`, run its attempts, and report how it ended.
+    async fn run(mut self, begin: Start) -> RunReport {
+        let (begun, run_start) = self.host.open_run(begin).await;
+        let stop = match begun {
+            Err(error) => RunStop::Failed(error),
+            Ok(prompts) => self.attempts(prompts).await,
         };
-        let result = run_loop(&mut context, std::mem::take(&mut prompts), shared.config, &mut control).await;
-        accounting.record(&result);
-        if result.outcome != LoopOutcome::Error {
-            break RunStop::Ended(result.outcome);
+        self.close(stop, run_start).await
+    }
+
+    /// Run `prompts`, then retry or recover from a context overflow as long as the budget
+    /// and the retry policy allow, until an attempt ends the run.
+    async fn attempts(&mut self, mut prompts: Vec<QueuedMessage>) -> RunStop {
+        loop {
+            let result = self.attempt(std::mem::take(&mut prompts)).await;
+            if result.outcome != RunOutcome::Error {
+                break RunStop::Ended(result.outcome);
+            }
+            // Hook failures are distinct from failed provider responses and are not retried.
+            let (message, entry_id) = match result.failure {
+                Some(AttemptFailure::Provider { message, entry_id }) => (message, entry_id),
+                Some(AttemptFailure::Halted(error)) => break RunStop::Failed(error),
+                None => break RunStop::Failed(NO_DIAGNOSTIC.into()),
+            };
+            let failure = Failure {
+                message,
+                entry_id,
+                task_turns: result.task_turns,
+            };
+            if let Err(stop) = self.after_failure(&failure).await {
+                break stop;
+            }
         }
-        // Hook failures are distinct from failed provider responses and are not retried.
-        let (failed, entry_id) = match result.failure {
-            Some(LoopFailure::Provider { message, entry_id }) => (message, entry_id),
-            Some(LoopFailure::Halted(error)) => break RunStop::Failed(error),
-            None => break RunStop::Failed(NO_DIAGNOSTIC.into()),
+    }
+
+    /// Run one attempt with what is left of the run's budgets, and account for it.
+    async fn attempt(&mut self, prompts: Vec<QueuedMessage>) -> AttemptResult {
+        let number = self.accounting.attempts + 1;
+        self.host.attempt = number;
+        let (config, target) = (self.host.config, self.host.target);
+        let mut attempt = Attempt::in_run(config, &mut self.host, &mut *self.approvals, target.sink, target.trace);
+        attempt.max_model_requests = self.accounting.remaining_model_requests(self.limits);
+        attempt.token_budget = self.accounting.remaining_tokens(self.limits);
+        attempt.cost_budget = self.accounting.remaining_cost(self.limits);
+        attempt.prior_task_turns = self.accounting.task_turns;
+        attempt.prior_answer_continuations = self.accounting.answer_continuations;
+        attempt.attempt_number = number;
+        let result = attempt.run(prompts).await;
+        self.accounting.record(&result);
+        result
+    }
+
+    /// Recover from a context overflow by compacting once, or schedule a retry; an error
+    /// says why the run ends instead. Both are requests, so both need budget.
+    async fn after_failure(&mut self, failure: &Failure) -> Result<(), RunStop> {
+        let cancel = self.host.target.trace.cancel();
+        let failed = &failure.message;
+        let error = failed.failure_reason();
+        let out_of_budget = !self.accounting.has_budget(self.limits) || cancel.is_cancelled();
+        if is_context_overflow(failed) && self.host.compaction.automatic() {
+            // A context the model rejects as too long fails again however often it is sent:
+            // compact once and continue. Not a retry, so it has its own limit: once per run,
+            // until an answer succeeds again (more than one turn in the attempt).
+            let refusal = if self.accounting.overflow_recovered && failure.task_turns <= 1 {
+                Some("the context still overflowed after compacting it once".to_string())
+            } else {
+                self.host.pause.reason().map(|reason| {
+                    format!("automatic compaction is paused because it failed earlier in this session ({reason})")
+                })
+            };
+            if let Some(refusal) = refusal {
+                return Err(RunStop::Failed(format!("{error}; {refusal}")));
+            }
+            if out_of_budget {
+                return Err(RunStop::Failed(error.to_string()));
+            }
+            self.host
+                .recover_overflow(error, &failure.entry_id, &mut self.accounting, cancel)
+                .await?;
+            self.accounting.overflow_recovered = true;
+            return Ok(());
+        }
+        // Without budget, the provider error is the reason the run ends.
+        if !is_retryable(failed) || self.accounting.retries >= self.retry.max_retries || out_of_budget {
+            return Err(RunStop::Failed(error.to_string()));
+        }
+        self.host
+            .schedule_retry(self.retry, &mut self.accounting, failed, &failure.entry_id, cancel)
+            .await
+    }
+
+    /// Close the run: keep the state hooks asked to record, then report how the run ended
+    /// and the answer it added after the first `run_start` entries.
+    async fn close(mut self, stop: RunStop, run_start: usize) -> RunReport {
+        // State that hooks asked to record during the last events is kept before the run is
+        // reported, so a host reading the session afterwards finds it.
+        let (config, target) = (self.host.config, self.host.target);
+        let stop = match record_pending_entries(config, &mut self.host, target).await {
+            Ok(()) => stop,
+            Err(error) => RunStop::Failed(error),
         };
-        let failure = Failure {
-            message: failed,
-            entry_id,
-            task_turns: result.task_turns,
+        let (outcome, error) = self.conclude(stop);
+        let accounting = &self.accounting;
+        let session = &self.host.session;
+        let report = RunReport {
+            outcome,
+            final_text: final_answer(&session.messages_since(run_start)),
+            model_requests: accounting.model_requests,
+            retries: accounting.retries,
+            usage: accounting.usage.clone(),
+            tool_usage: accounting.tool_usage.clone(),
+            denied_calls: accounting.denied_calls,
+            error,
+            session_file: session.path().map(|path| path.display().to_string()),
         };
-        if let Err(stop) = after_failure(host, &failure, accounting, shared).await {
-            break stop;
+        self.host
+            .emit(AgentEvent::RunEnd {
+                report: Box::new(report.clone()),
+            })
+            .await;
+        report
+    }
+
+    /// How the run ended, as the report states it.
+    fn conclude(&self, stop: RunStop) -> (RunOutcome, Option<String>) {
+        let (limits, accounting, timed_out) = (self.limits, &self.accounting, self.timer.timed_out());
+        let outcome = match stop {
+            RunStop::Failed(error) => return (RunOutcome::Error, Some(error)),
+            RunStop::Ended(outcome) => outcome,
+        };
+        match outcome {
+            RunOutcome::Completed => (RunOutcome::Completed, None),
+            RunOutcome::Truncated => (
+                RunOutcome::Truncated,
+                Some("the answer was cut off at the output token limit".to_string()),
+            ),
+            RunOutcome::Error => (RunOutcome::Error, Some(NO_DIAGNOSTIC.to_string())),
+            RunOutcome::ModelRequestLimit => (
+                RunOutcome::ModelRequestLimit,
+                Some(format!(
+                    "model request limit reached (max_model_requests = {})",
+                    limits
+                        .max_model_requests
+                        .expect("ModelRequestLimit requires a configured request limit")
+                )),
+            ),
+            RunOutcome::TokenBudget => (
+                RunOutcome::TokenBudget,
+                Some(format!(
+                    "token budget reached ({} tokens used, token_budget = {})",
+                    accounting.usage.input_and_output(),
+                    limits
+                        .token_budget
+                        .expect("TokenBudget requires a configured token budget")
+                )),
+            ),
+            RunOutcome::CostBudget => (
+                RunOutcome::CostBudget,
+                Some(format!(
+                    "cost budget reached ({:.4} spent, cost_budget = {})",
+                    accounting.usage.total_cost.unwrap_or(0.0),
+                    limits
+                        .cost_budget
+                        .expect("CostBudget requires a configured cost budget")
+                )),
+            ),
+            // An attempt never ends with `Timeout`: the timer cancels it, and only `timed_out`
+            // tells that cancellation from the caller's.
+            RunOutcome::Aborted | RunOutcome::Timeout if timed_out => {
+                // Only the timer of a configured limit sets `timed_out`.
+                let limit = limits.timeout.expect("Timeout requires a configured time limit");
+                (
+                    RunOutcome::Timeout,
+                    Some(format!("run exceeded the {}s time limit", limit.as_secs())),
+                )
+            }
+            RunOutcome::Aborted | RunOutcome::Timeout => (RunOutcome::Aborted, Some("run was cancelled".to_string())),
         }
     }
 }
@@ -303,56 +431,9 @@ async fn attempts(
 /// A failed provider response and where it happened.
 struct Failure {
     message: Box<AssistantMessage>,
-    entry_id: Option<String>,
+    entry_id: String,
     /// Task turns of the attempt that failed.
     task_turns: u32,
-}
-
-/// Recover from a context overflow by compacting once, or schedule a retry; an error says
-/// why the run ends instead. Both are requests, so both need budget.
-async fn after_failure(
-    host: &mut RunHost<'_>,
-    failure: &Failure,
-    accounting: &mut RunAccounting,
-    shared: &Attempting<'_>,
-) -> Result<(), RunStop> {
-    let failed = &failure.message;
-    let error = failed.failure_reason();
-    let out_of_budget = !accounting.has_budget(shared.limits) || shared.cancel.is_cancelled();
-    if is_context_overflow(failed) && host.compaction.automatic() {
-        // A context the model rejects as too long fails again however often it is sent:
-        // compact once and continue. Not a retry, so it has its own limit: once per run,
-        // until an answer succeeds again (more than one turn in the attempt).
-        let refusal = if accounting.overflow_recovered && failure.task_turns <= 1 {
-            Some("the context still overflowed after compacting it once".to_string())
-        } else {
-            host.pause.reason().map(|reason| {
-                format!("automatic compaction is paused because it failed earlier in this session ({reason})")
-            })
-        };
-        if let Some(refusal) = refusal {
-            return Err(RunStop::Failed(format!("{error}; {refusal}")));
-        }
-        if out_of_budget {
-            return Err(RunStop::Failed(error.to_string()));
-        }
-        host.recover_overflow(error, failure.entry_id.as_deref(), accounting, shared.cancel)
-            .await?;
-        accounting.overflow_recovered = true;
-        return Ok(());
-    }
-    // Without budget, the provider error is the reason the run ends.
-    if !is_retryable(failed) || accounting.retries >= shared.retry.max_retries || out_of_budget {
-        return Err(RunStop::Failed(error.to_string()));
-    }
-    host.schedule_retry(
-        shared.retry,
-        accounting,
-        failed,
-        failure.entry_id.as_deref(),
-        shared.cancel,
-    )
-    .await
 }
 
 /// What a run starts from.
@@ -386,65 +467,6 @@ impl RunTimer {
 
     fn timed_out(&self) -> bool {
         self.timed_out.load(Ordering::SeqCst)
-    }
-}
-
-/// How the run ended, as the report states it.
-fn conclude(
-    stop: RunStop,
-    limits: &Limits,
-    accounting: &RunAccounting,
-    timed_out: bool,
-) -> (RunOutcome, Option<String>) {
-    let outcome = match stop {
-        RunStop::Failed(error) => return (RunOutcome::Error, Some(error)),
-        RunStop::Ended(outcome) => outcome,
-    };
-    match outcome {
-        LoopOutcome::Completed => (RunOutcome::Completed, None),
-        LoopOutcome::Truncated => (
-            RunOutcome::Truncated,
-            Some("the answer was cut off at the output token limit".to_string()),
-        ),
-        LoopOutcome::Error => (RunOutcome::Error, Some(NO_DIAGNOSTIC.to_string())),
-        LoopOutcome::ModelRequestLimit => (
-            RunOutcome::ModelRequestLimit,
-            Some(format!(
-                "model request limit reached (max_model_requests = {})",
-                limits
-                    .max_model_requests
-                    .expect("ModelRequestLimit requires a configured request limit")
-            )),
-        ),
-        LoopOutcome::TokenBudget => (
-            RunOutcome::TokenBudget,
-            Some(format!(
-                "token budget reached ({} tokens used, token_budget = {})",
-                accounting.usage.input_and_output(),
-                limits
-                    .token_budget
-                    .expect("TokenBudget requires a configured token budget")
-            )),
-        ),
-        LoopOutcome::CostBudget => (
-            RunOutcome::CostBudget,
-            Some(format!(
-                "cost budget reached ({:.4} spent, cost_budget = {})",
-                accounting.usage.total_cost.unwrap_or(0.0),
-                limits
-                    .cost_budget
-                    .expect("CostBudget requires a configured cost budget")
-            )),
-        ),
-        LoopOutcome::Aborted if timed_out => {
-            // Only the timer of a configured limit sets `timed_out`.
-            let limit = limits.timeout.expect("Timeout requires a configured time limit");
-            (
-                RunOutcome::Timeout,
-                Some(format!("run exceeded the {}s time limit", limit.as_secs())),
-            )
-        }
-        LoopOutcome::Aborted => (RunOutcome::Aborted, Some("run was cancelled".to_string())),
     }
 }
 

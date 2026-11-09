@@ -340,7 +340,7 @@ impl Summarizer<'_> {
         .await;
         self.emit(AgentEvent::RequestStart {
             kind: RequestKind::Summary,
-            entry_id: Some(request_entry),
+            entry_id: request_entry,
             model: self.model.into(),
             attempt: self.attempt,
         })

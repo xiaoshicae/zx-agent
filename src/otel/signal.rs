@@ -8,9 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use opentelemetry::trace::SpanContext;
 use tokio::sync::mpsc;
 
-use crate::agent::{
-    AgentEvent, ApprovalResult, Event, EventSink, Interruption, LoopOutcome, RequestKind, RunOutcome, ToolVerdict,
-};
+use crate::agent::{AgentEvent, ApprovalResult, Event, EventSink, Interruption, RequestKind, RunOutcome, ToolVerdict};
 use crate::ai::{Message, StopReason, Usage};
 
 /// Passes the events that spans and metrics need to the exporter task.
@@ -59,7 +57,7 @@ pub(super) enum What {
         attempt: u32,
     },
     AttemptEnd {
-        outcome: LoopOutcome,
+        outcome: RunOutcome,
     },
     TurnStart {
         turn: u32,

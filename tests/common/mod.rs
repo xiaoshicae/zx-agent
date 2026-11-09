@@ -27,8 +27,8 @@ use tokio::sync::Notify;
 use zx_agent::agent::ApprovalCache;
 use zx_agent::agent::QueuedMessage;
 use zx_agent::agent::{
-    AgentEvent, Event, EventSink, ExecutionMode, HookContext, LoopConfig, LoopControl, LoopResult, LoopSpec,
-    MessageQueues, Tool, ToolContext, ToolOutput, ToolPolicy, run_loop,
+    AgentEvent, Attempt, AttemptResult, Event, EventSink, ExecutionMode, HookContext, LoopConfig, LoopSpec,
+    MessageQueues, Tool, ToolContext, ToolOutput, ToolPolicy,
 };
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::retry::RetryPolicy;
@@ -349,16 +349,45 @@ pub(crate) fn summarize(messages: &[Message]) -> Vec<String> {
         .collect()
 }
 
-/// Run one user `prompt` on `context` with a 10-turn budget and no cancellation, the
-/// defaults most loop tests need. Returns the result and the events.
-pub(crate) async fn run_prompt(config: &LoopConfig, context: &mut Vec<Message>, prompt: &str) -> (LoopResult, Collect) {
+/// Run one user `prompt` after the messages of `context` with a 10-request budget and no
+/// cancellation, the defaults most loop tests need. The attempt runs over an in-memory
+/// session that starts with `context`; afterwards `context` is that session's projection.
+/// Returns the result and the events.
+pub(crate) async fn run_prompt(
+    config: &LoopConfig,
+    context: &mut Vec<Message>,
+    prompt: &str,
+) -> (AttemptResult, Collect) {
+    let mut session = SessionStore::in_memory(header());
+    for message in context.iter() {
+        session.append_message(message.clone()).await.unwrap();
+    }
     let sink = Collect::default();
-    let prompts = vec![QueuedMessage::User(prompt.to_string())];
     let mut approvals = ApprovalCache::default();
     let cancel = CancellationToken::new();
-    let mut control = LoopControl::new(Some(10), &mut approvals, &cancel, &sink);
-    let result = run_loop(context, prompts, config, &mut control).await;
+    let mut attempt = Attempt::new(config, &mut session, &mut approvals, &cancel, &sink);
+    attempt.max_model_requests = Some(10);
+    let result = attempt.run(vec![QueuedMessage::User(prompt.to_string())]).await;
+    *context = session.messages();
     (result, sink)
+}
+
+/// Run one attempt with `prompts` over a new in-memory session, with at most
+/// `max_model_requests`, stopped by `cancel` and reporting to `sink`. Returns the result and
+/// the session's projection.
+pub(crate) async fn run_attempt(
+    config: &LoopConfig,
+    prompts: Vec<QueuedMessage>,
+    max_model_requests: Option<u32>,
+    cancel: &CancellationToken,
+    sink: &dyn EventSink,
+) -> (AttemptResult, Vec<Message>) {
+    let mut session = SessionStore::in_memory(header());
+    let mut approvals = ApprovalCache::default();
+    let mut attempt = Attempt::new(config, &mut session, &mut approvals, cancel, sink);
+    attempt.max_model_requests = max_model_requests;
+    let result = attempt.run(prompts).await;
+    (result, session.messages())
 }
 
 /// A hook context for calling a hook directly: a fresh run in the current directory.

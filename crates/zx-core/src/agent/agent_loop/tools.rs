@@ -2,28 +2,25 @@
 
 use std::borrow::Cow;
 use std::fmt::Display;
+use std::sync::Arc;
 
 use serde_json::Value;
 
 use super::{
-    AgentEvent, Approval, ApprovalRequest, ApprovalResult, AssertUnwindSafe, Effects, Engine, ExecutionMode, FutureExt,
-    Halt, HookCall, HookFailure, HookPoint, Instant, MAX_DETAILS_BYTES, MAX_QUEUED_PROGRESS, Message, PolicyDecision,
-    Tool, ToolCall, ToolContext, ToolOutput, ToolResultMessage, ToolVerdict, duration_ms, join_all, now_ms,
+    AgentEvent, Approval, ApprovalRequest, ApprovalResult, AssertUnwindSafe, Attempt, Effects, ExecutionMode,
+    FutureExt, Halt, HookCall, HookFailure, HookPoint, Instant, MAX_DETAILS_BYTES, MAX_QUEUED_PROGRESS, Message,
+    PolicyDecision, Tool, ToolCall, ToolContext, ToolOutput, ToolResultMessage, ToolVerdict, duration_ms, join_all,
+    now_ms,
 };
 
-impl<'a> Engine<'a, '_> {
-    fn find_tool(&self, name: &str) -> Option<&'a dyn Tool> {
-        self.config
-            .spec
-            .tools
-            .iter()
-            .find(|tool| tool.name() == name)
-            .map(AsRef::as_ref)
+impl Attempt<'_> {
+    fn find_tool(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.config.spec.tools.iter().find(|tool| tool.name() == name).cloned()
     }
 
     /// Resolve `call` and check its arguments, then run the policy and ask for approval
     /// when needed. A blocked call carries the result the model sees instead.
-    async fn check<'c>(&mut self, call: &'c ToolCall) -> Checked<'a, 'c> {
+    async fn check<'c>(&mut self, call: &'c ToolCall) -> Checked<'c> {
         // Resolve and validate before running policy or asking the host.
         let Some(tool) = self.find_tool(&call.name) else {
             return Checked::blocked(format!("Tool {} not found", call.name));
@@ -42,13 +39,13 @@ impl<'a> Engine<'a, '_> {
             }),
             Err(_) => return Checked::blocked(format!("Tool {} argument preparation panicked", call.name)),
         };
-        if let Err(text) = self.validate_arguments(tool, &ran) {
+        if let Err(text) = self.validate_arguments(tool.as_ref(), &ran) {
             return Checked::blocked(text);
         }
         if let Err(text) = self.authorize(&ran).await {
             return Checked::blocked(text);
         }
-        if self.cancel.is_cancelled() {
+        if self.trace.cancel().is_cancelled() {
             return Checked::blocked(NOT_STARTED);
         }
         Checked::Ready(Runnable { tool, call: ran })
@@ -122,7 +119,9 @@ impl<'a> Engine<'a, '_> {
             timeout: self.config.interaction_timeout,
         };
         let asked = Instant::now();
-        let answer = guard.run(self.config.interaction.confirm(&request), self.cancel).await;
+        let answer = guard
+            .run(self.config.interaction.confirm(&request), self.trace.cancel())
+            .await;
         let waited = duration_ms(asked.elapsed());
         match answer {
             Ok(Approval::AllowOnce) => {
@@ -175,6 +174,11 @@ impl<'a> Engine<'a, '_> {
         .await;
     }
 
+    /// Check, run and record the calls of one response. Each call's start is recorded before
+    /// it runs (invariant 10), and the two orders keep that true differently: in sequence,
+    /// each call is checked, started and run before the next is checked; in parallel, every
+    /// call is checked, approvals included, before any start is recorded, so that a crash
+    /// while one call waits for approval leaves no start for calls that never ran.
     pub(super) async fn execute_tools(&mut self, calls: &[ToolCall]) -> Result<Batch, Halt> {
         let sequential = self.config.spec.sequential_tools
             || calls.iter().any(|call| {
@@ -189,8 +193,7 @@ impl<'a> Engine<'a, '_> {
     }
 
     async fn sequential(&mut self, calls: &[ToolCall]) -> Result<Batch, Halt> {
-        let mut results = Vec::new();
-        let mut terminate = true;
+        let mut batch = Batch::default();
         for call in calls {
             self.tool_start(call).await;
             let checked = self.check(call).await;
@@ -198,16 +201,12 @@ impl<'a> Engine<'a, '_> {
                 self.record_start(runnable).await?;
             }
             let outcome = self.execute_checked(call, checked).await;
-            terminate &= outcome.output.terminate;
-            results.push(self.record_result(call, outcome).await?);
-            if self.cancel.is_cancelled() {
+            batch.add(self.record_result(call, outcome).await?);
+            if self.trace.cancel().is_cancelled() {
                 break;
             }
         }
-        Ok(Batch {
-            terminate: terminate && !results.is_empty(),
-            results,
-        })
+        Ok(batch)
     }
 
     async fn parallel(&mut self, calls: &[ToolCall]) -> Result<Batch, Halt> {
@@ -218,7 +217,7 @@ impl<'a> Engine<'a, '_> {
             self.tool_start(call).await;
             let checked = self.check(call).await;
             slots.push((call, checked));
-            if self.cancel.is_cancelled() {
+            if self.trace.cancel().is_cancelled() {
                 break;
             }
         }
@@ -238,17 +237,16 @@ impl<'a> Engine<'a, '_> {
         )
         .await;
         // Phase 3: record results in model call order, regardless of completion order.
-        let terminate = !outcomes.is_empty() && outcomes.iter().all(|(_, result)| result.output.terminate);
-        let mut results = Vec::with_capacity(outcomes.len());
+        let mut batch = Batch::default();
         for (call, outcome) in outcomes {
-            results.push(self.record_result(call, outcome).await?);
+            batch.add(self.record_result(call, outcome).await?);
         }
-        Ok(Batch { results, terminate })
+        Ok(batch)
     }
 
     /// Record the start of a call with side effects; an error means it must not run.
     /// Read-only calls are not recorded.
-    async fn record_start(&mut self, runnable: &Runnable<'_, '_>) -> Result<(), Halt> {
+    async fn record_start(&mut self, runnable: &Runnable<'_>) -> Result<(), Halt> {
         match runnable.tool.effects() {
             Effects::SideEffects => self
                 .session
@@ -262,11 +260,11 @@ impl<'a> Engine<'a, '_> {
     /// Run a checked call, or take the result of a blocked one, then pass the result through
     /// the output hooks and report the call's end. The hooks see the call as it ran, with
     /// the arguments `Tool::prepare_arguments` rewrote.
-    async fn execute_checked<'c>(&self, call: &'c ToolCall, checked: Checked<'a, 'c>) -> CallOutput {
+    async fn execute_checked<'c>(&self, call: &'c ToolCall, checked: Checked<'c>) -> CallOutput {
         let (ran, outcome) = match checked {
             Checked::Blocked(outcome) => (Cow::Borrowed(call), outcome),
             Checked::Ready(Runnable { tool, call: ran }) => {
-                let outcome = execute(self, tool, &ran).await;
+                let outcome = execute(self, tool.as_ref(), &ran).await;
                 (ran, outcome)
             }
         };
@@ -275,13 +273,15 @@ impl<'a> Engine<'a, '_> {
         outcome
     }
 
-    /// Record the result of `call`, then report it.
-    async fn record_result(&mut self, call: &ToolCall, outcome: CallOutput) -> Result<ToolResultMessage, Halt> {
+    /// Record the result of `call`, then report it. Returns the result and whether the tool
+    /// asked to end the attempt.
+    async fn record_result(&mut self, call: &ToolCall, outcome: CallOutput) -> Result<(ToolResultMessage, bool), Halt> {
+        let terminate = outcome.output.terminate;
         let result = to_result(call, outcome);
         self.emit(AgentEvent::MessageStart { role: "toolResult" }).await;
         self.record_finished_message(&Message::ToolResult(result.clone()))
             .await?;
-        Ok(result)
+        Ok((result, terminate))
     }
 
     async fn apply_output_hooks(&self, call: &ToolCall, outcome: CallOutput) -> CallOutput {
@@ -303,8 +303,11 @@ impl<'a> Engine<'a, '_> {
         }
     }
 
+    /// Answer every call of a response cut off at the output token limit without running it
+    /// (invariant 4). Calls that never ran cannot end the attempt, whatever an output hook
+    /// sets on their results.
     pub(super) async fn reject_truncated_tools(&mut self, calls: &[ToolCall]) -> Result<Batch, Halt> {
-        let mut results = Vec::new();
+        let mut batch = Batch::default();
         for call in calls {
             self.tool_start(call).await;
             let blocked = CallOutput::blocked(format!(
@@ -312,12 +315,10 @@ impl<'a> Engine<'a, '_> {
                 call.name
             ));
             let outcome = self.execute_checked(call, Checked::Blocked(blocked)).await;
-            results.push(self.record_result(call, outcome).await?);
+            batch.add(self.record_result(call, outcome).await?);
         }
-        Ok(Batch {
-            results,
-            terminate: false,
-        })
+        batch.terminate = false;
+        Ok(batch)
     }
 
     async fn tool_start(&self, call: &ToolCall) {
@@ -342,11 +343,20 @@ impl<'a> Engine<'a, '_> {
     }
 }
 
-/// The results of one response's calls, in call order, and whether a tool asked to end the
-/// attempt.
+/// The results of one response's calls, in call order, and whether they end the attempt.
+#[derive(Default)]
 pub(super) struct Batch {
     pub(super) results: Vec<ToolResultMessage>,
+    /// Every call asked to end the attempt; false while there is no call.
     pub(super) terminate: bool,
+}
+
+impl Batch {
+    /// Add a recorded result, and whether its tool asked to end the attempt.
+    fn add(&mut self, (result, terminate): (ToolResultMessage, bool)) {
+        self.terminate = terminate && (self.results.is_empty() || self.terminate);
+        self.results.push(result);
+    }
 }
 
 /// What one call produced, before it becomes a result message.
@@ -375,13 +385,13 @@ fn blocked_by_policy(reason: &str) -> String {
 }
 
 /// A call after its checks.
-enum Checked<'a, 'c> {
+enum Checked<'c> {
     /// The call does not run; this is its result.
     Blocked(CallOutput),
-    Ready(Runnable<'a, 'c>),
+    Ready(Runnable<'c>),
 }
 
-impl Checked<'_, '_> {
+impl Checked<'_> {
     fn blocked(text: impl Into<String>) -> Self {
         Self::Blocked(CallOutput::blocked(text))
     }
@@ -389,8 +399,8 @@ impl Checked<'_, '_> {
 
 /// A call that may run: its tool, and the call as it runs, owned when
 /// `Tool::prepare_arguments` rewrote its arguments.
-struct Runnable<'a, 'c> {
-    tool: &'a dyn Tool,
+struct Runnable<'c> {
+    tool: Arc<dyn Tool>,
     call: Cow<'c, ToolCall>,
 }
 
@@ -415,8 +425,8 @@ fn interrupted(effects: Effects) -> &'static str {
     }
 }
 
-async fn execute(engine: &Engine<'_, '_>, tool: &dyn Tool, call: &ToolCall) -> CallOutput {
-    let cancel = engine.cancel;
+async fn execute(engine: &Attempt<'_>, tool: &dyn Tool, call: &ToolCall) -> CallOutput {
+    let cancel = engine.trace.cancel();
     if cancel.is_cancelled() {
         return CallOutput::blocked(NOT_STARTED);
     }
@@ -464,7 +474,7 @@ async fn execute(engine: &Engine<'_, '_>, tool: &dyn Tool, call: &ToolCall) -> C
     }
 }
 
-async fn emit_progress(engine: &Engine<'_, '_>, call: &ToolCall, text: String) {
+async fn emit_progress(engine: &Attempt<'_>, call: &ToolCall, text: String) {
     match engine
         .config
         .hooks

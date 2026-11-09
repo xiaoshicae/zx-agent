@@ -75,7 +75,7 @@ impl DebugState {
                         "Request #{} · {:?} · model={model}{turn} · attempt={attempt}{}",
                         self.requests,
                         kind,
-                        entry(entry_id.as_deref())
+                        entry(entry_id)
                     ),
                 )
             }
@@ -118,10 +118,9 @@ impl DebugState {
                 };
                 (severity, text)
             }
-            CustomEntry { entry_id, custom_type } => recorded(
-                &format!("Extension state recorded · type={custom_type}"),
-                entry_id.as_deref(),
-            ),
+            CustomEntry { entry_id, custom_type } => {
+                recorded(&format!("Extension state recorded · type={custom_type}"), entry_id)
+            }
             MessageEnd {
                 message: Message::ToolResult(result),
                 entry_id,
@@ -136,7 +135,7 @@ impl DebugState {
                     "Tool result · {} · call={}{}\n  {}",
                     result.tool_name,
                     result.tool_call_id,
-                    entry(entry_id.as_deref()),
+                    entry(entry_id),
                     result.content
                 ),
             ),
@@ -144,12 +143,12 @@ impl DebugState {
                 message: Message::User { kind, .. },
                 entry_id,
                 ..
-            } => recorded(&format!("User input recorded · kind={kind:?}"), entry_id.as_deref()),
+            } => recorded(&format!("User input recorded · kind={kind:?}"), entry_id),
             MessageEnd {
                 message: Message::System(_),
                 entry_id,
                 ..
-            } => recorded("System prompt changes recorded", entry_id.as_deref()),
+            } => recorded("System prompt changes recorded", entry_id),
             ToolExecutionStart {
                 tool_call_id,
                 tool_name,
@@ -258,7 +257,7 @@ impl DebugState {
                 Severity::Info,
                 format!(
                     "Context edited · index={index} · entry={} · replacement={}",
-                    entry_id.as_deref().unwrap_or("none"),
+                    entry_id,
                     replacement.as_deref().unwrap_or("<omitted>")
                 ),
             ),
@@ -342,14 +341,14 @@ impl DebugState {
     }
 }
 
-/// `<what> · entry=<id>`: a record was written, or not kept without a session.
-fn recorded(what: &str, entry_id: Option<&str>) -> (Severity, String) {
-    (Severity::Info, format!("{what} · entry={}", entry_id.unwrap_or("none")))
+/// `<what> · entry=<id>`: a record was written.
+fn recorded(what: &str, entry_id: &str) -> (Severity, String) {
+    (Severity::Info, format!("{what} · entry={entry_id}"))
 }
 
-/// ` · entry=<id>` when the event names its session entry.
-fn entry(entry_id: Option<&str>) -> String {
-    entry_id.map(|id| format!(" · entry={id}")).unwrap_or_default()
+/// ` · entry=<id>`: the session entry the event names.
+fn entry(entry_id: &str) -> String {
+    format!(" · entry={entry_id}")
 }
 
 /// ` · <reason>` when there is one.
@@ -402,7 +401,7 @@ mod tests {
         let mut state = DebugState::default();
         let request = |attempt| AgentEvent::RequestStart {
             kind: RequestKind::Task,
-            entry_id: None,
+            entry_id: "r".into(),
             model: "model".into(),
             attempt,
         };
@@ -421,7 +420,7 @@ mod tests {
                 "a",
                 AgentEvent::MessageEnd {
                     message: Message::Assistant(message),
-                    entry_id: None,
+                    entry_id: "e".into(),
                     custom: None,
                 },
             ))

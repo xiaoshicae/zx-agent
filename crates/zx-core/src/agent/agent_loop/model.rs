@@ -1,20 +1,20 @@
 //! Model request recording and streaming.
 
 use super::{
-    AgentEvent, AssistantMessage, Engine, Halt, LoopResult, Message, Request, RequestKind, StopReason, StreamEvent,
+    AgentEvent, AssistantMessage, Attempt, AttemptResult, Halt, Request, RequestKind, StopReason, StreamEvent,
     StreamExt,
 };
 use crate::agent::RequestSettings;
 
-impl Engine<'_, '_> {
+impl Attempt<'_> {
     /// Record and send the task request of turn `turn`, then account for its response.
     pub(super) async fn request_model(
         &mut self,
-        context: &[Message],
-        result: &mut LoopResult,
+        result: &mut AttemptResult,
         turn: u32,
     ) -> Result<Option<AssistantMessage>, Halt> {
         let spec = &self.config.spec;
+        let messages = self.session.messages();
         let configured = RequestSettings {
             model: spec.model.clone(),
             reasoning: spec.reasoning,
@@ -22,12 +22,12 @@ impl Engine<'_, '_> {
         let settings = self
             .config
             .hooks
-            .prepare_request(context, turn, configured, self.trace.context())
+            .prepare_request(&messages, turn, configured, self.trace.context())
             .await
             .map_err(|error| Halt::Failed(self.report_hook_failure(error)))?;
         let request = Request {
             model: settings.model,
-            messages: context.to_vec(),
+            messages,
             // The active set may have changed since the last request; the audit records
             // what each request declared.
             tools: spec
@@ -45,7 +45,7 @@ impl Engine<'_, '_> {
             .record_request(&request, spec.provider.as_ref())
             .await
             .map_err(Halt::Unrecorded)?;
-        if self.cancel.is_cancelled() {
+        if self.trace.cancel().is_cancelled() {
             return Ok(None);
         }
         self.emit(AgentEvent::RequestStart {
@@ -67,7 +67,7 @@ impl Engine<'_, '_> {
     /// response and reports its end.
     async fn stream(&self, request: Request) -> AssistantMessage {
         let spec = &self.config.spec;
-        let mut events = spec.provider.stream(request, self.cancel.clone());
+        let mut events = spec.provider.stream(request, self.trace.cancel().clone());
         let mut started = false;
         while let Some(event) = events.next().await {
             if !started {
@@ -80,7 +80,7 @@ impl Engine<'_, '_> {
                 StreamEvent::Done(message) | StreamEvent::Error(message) => return message,
             }
         }
-        let stop = if self.cancel.is_cancelled() {
+        let stop = if self.trace.cancel().is_cancelled() {
             StopReason::Aborted
         } else {
             StopReason::Error
