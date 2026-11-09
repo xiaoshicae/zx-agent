@@ -346,7 +346,7 @@ impl Run<'_> {
         let (config, target) = (self.host.config, self.host.target);
         let stop = match record_pending_entries(config, &mut self.host, target).await {
             Ok(()) => stop,
-            Err(error) => RunStop::Failed(error),
+            Err(error) => RunStop::Failed(format!("{error:#}")),
         };
         let (outcome, error) = self.conclude(stop);
         let accounting = &self.accounting;

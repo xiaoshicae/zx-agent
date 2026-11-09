@@ -109,7 +109,7 @@ impl<'a> RunHost<'a> {
         let run_start = self.session.entries().len();
         // Before any system prompt change or input, so that results directly follow their calls.
         let prompts = match (self.recover_interrupted_calls().await, begin) {
-            (Err(error), _) => Err(error),
+            (Err(error), _) => Err(format!("{error:#}")),
             (Ok(()), Start::Message(message)) => Ok(vec![message]),
             (Ok(()), Start::Continue) => self.continuation().await,
         };
@@ -257,27 +257,27 @@ impl SessionHost for RunHost<'_> {
         self.session.messages()
     }
 
-    async fn append_message(&mut self, message: &Message) -> Result<String, String> {
+    async fn append_message(&mut self, message: &Message) -> anyhow::Result<String> {
         SessionHost::append_message(&mut *self.session, message).await
     }
 
-    async fn append_custom_message(&mut self, message: &CustomMessage) -> Result<(String, Message), String> {
+    async fn append_custom_message(&mut self, message: &CustomMessage) -> anyhow::Result<(String, Message)> {
         SessionHost::append_custom_message(&mut *self.session, message).await
     }
 
-    async fn append_custom_entry(&mut self, custom_type: &str, data: Value) -> Result<String, String> {
+    async fn append_custom_entry(&mut self, custom_type: &str, data: Value) -> anyhow::Result<String> {
         SessionHost::append_custom_entry(&mut *self.session, custom_type, data).await
     }
 
-    async fn edit_context(&mut self, index: usize, replacement: Option<&str>) -> Result<String, String> {
+    async fn edit_context(&mut self, index: usize, replacement: Option<&str>) -> anyhow::Result<String> {
         SessionHost::edit_context(&mut *self.session, index, replacement).await
     }
 
-    async fn record_request(&mut self, request: &Request, provider: &dyn Provider) -> Result<String, String> {
+    async fn record_request(&mut self, request: &Request, provider: &dyn Provider) -> anyhow::Result<String> {
         SessionHost::record_request(&mut *self.session, request, provider).await
     }
 
-    async fn record_tool_call_started(&mut self, call: &ToolCall) -> Result<(), String> {
+    async fn record_tool_call_started(&mut self, call: &ToolCall) -> anyhow::Result<()> {
         SessionHost::record_tool_call_started(&mut *self.session, call).await
     }
 
@@ -310,7 +310,7 @@ impl SessionHost for RunHost<'_> {
         }
         let report = self.summarize(Trigger::Automatic, cancel).await;
         let result = if let Some(error) = report.persistence_error {
-            Prepared::Unrecorded(error)
+            Prepared::Unrecorded(anyhow::Error::msg(error))
         } else if report.outcome == compaction::Outcome::Completed {
             Prepared::Ready
         } else {

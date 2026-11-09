@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use anyhow::{Context, Result, anyhow};
 use opentelemetry::metrics::MeterProvider;
 use opentelemetry::propagation::TextMapPropagator;
 use opentelemetry::trace::{SpanContext, TraceContextExt, TracerProvider};
@@ -142,7 +143,7 @@ impl TraceParent {
 
     /// From `TRACEPARENT` and `TRACESTATE`: `Ok(None)` when `TRACEPARENT` is unset or empty,
     /// an error naming the variable when it is set but not a valid header value.
-    pub fn from_env() -> Result<Option<Self>, String> {
+    pub fn from_env() -> Result<Option<Self>> {
         // A value that is not UTF-8 cannot be a traceparent either: it counts as unset.
         let [parent, state] =
             TRACE_CONTEXT_VARIABLES.map(|name| std::env::var(name).ok().filter(|value| !value.trim().is_empty()));
@@ -151,7 +152,7 @@ impl TraceParent {
         };
         Self::parse(&parent, state.as_deref())
             .map(Some)
-            .ok_or_else(|| format!("{} is not a W3C traceparent: {parent:?}", TRACE_CONTEXT_VARIABLES[0]))
+            .ok_or_else(|| anyhow!("{} is not a W3C traceparent: {parent:?}", TRACE_CONTEXT_VARIABLES[0]))
     }
 
     /// The trace's ID, as 32 hex digits.
@@ -184,7 +185,7 @@ impl Telemetry {
     /// is; `None` when neither is: nothing is then sent anywhere. The SDK reads the other
     /// standard variables, such as `OTEL_EXPORTER_OTLP_HEADERS`. Needs a Tokio runtime. An error
     /// is a configuration that the exporter refuses, such as an invalid endpoint or interval.
-    pub fn from_env() -> Result<Option<Self>, String> {
+    pub fn from_env() -> Result<Option<Self>> {
         let mut resource = Resource::builder();
         if std::env::var_os("OTEL_SERVICE_NAME").is_none() {
             resource = resource.with_service_name(SERVICE_NAME);
@@ -201,7 +202,7 @@ impl Telemetry {
             let exporter = SpanExporter::builder()
                 .with_http()
                 .build()
-                .map_err(|error| format!("cannot set up the OTLP span exporter: {error}"))?;
+                .context("cannot set up the OTLP span exporter")?;
             tracer_provider = tracer_provider.with_batch_exporter(exporter);
         }
         Ok(Some(Self::new(tracer_provider.build(), exporters)))
@@ -270,7 +271,7 @@ impl Telemetry {
     /// at most `SHUTDOWN_TIMEOUT` for the collector each time.
     ///
     /// Events emitted afterwards are dropped.
-    pub async fn shutdown(self) -> Result<(), String> {
+    pub async fn shutdown(self) -> Result<()> {
         let Self {
             tracer_provider,
             exporters,
@@ -279,31 +280,31 @@ impl Telemetry {
             ..
         } = self;
         stop.cancel();
-        task.await.map_err(|error| format!("the span task failed: {error}"))?;
+        task.await.context("the span task failed")?;
         // Shutting down blocks until the last batch is sent or the time is up.
         tokio::task::spawn_blocking(move || {
             tracer_provider
                 .shutdown_with_timeout(SHUTDOWN_TIMEOUT)
-                .map_err(|error| format!("cannot export the remaining spans: {error}"))?;
+                .context("cannot export the remaining spans")?;
             if let Some(meter_provider) = exporters.meter_provider() {
                 meter_provider
                     .shutdown_with_timeout(SHUTDOWN_TIMEOUT)
-                    .map_err(|error| format!("cannot export the remaining metrics: {error}"))?;
+                    .context("cannot export the remaining metrics")?;
             }
             Ok(())
         })
         .await
-        .map_err(|error| format!("the export failed: {error}"))?
+        .context("the export failed")?
     }
 }
 
 /// A meter provider that exports over OTLP/HTTP at the configured interval.
-fn meter_provider(resource: Resource) -> Result<SdkMeterProvider, String> {
+fn meter_provider(resource: Resource) -> Result<SdkMeterProvider> {
     let interval = metric_interval_from_env()?;
     let exporter = MetricExporter::builder()
         .with_http()
         .build()
-        .map_err(|error| format!("cannot set up the OTLP metric exporter: {error}"))?;
+        .context("cannot set up the OTLP metric exporter")?;
     let reader = PeriodicReader::builder(exporter).with_interval(interval).build();
     Ok(SdkMeterProvider::builder()
         .with_reader(reader)
@@ -317,7 +318,7 @@ fn any_set(names: &[&str]) -> bool {
         .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
 }
 
-fn metric_interval_from_env() -> Result<Duration, String> {
+fn metric_interval_from_env() -> Result<Duration> {
     match std::env::var(METRIC_INTERVAL_VARIABLE) {
         Ok(value) if !value.trim().is_empty() => value
             .trim()
@@ -326,7 +327,7 @@ fn metric_interval_from_env() -> Result<Duration, String> {
             .filter(|millis| *millis > 0)
             .map(Duration::from_millis)
             .ok_or_else(|| {
-                format!("{METRIC_INTERVAL_VARIABLE} must be a number of milliseconds greater than zero, not {value:?}")
+                anyhow!("{METRIC_INTERVAL_VARIABLE} must be a number of milliseconds greater than zero, not {value:?}")
             }),
         // Unset or empty; a value that is not UTF-8 is not a number either and counts as unset.
         _ => Ok(DEFAULT_METRIC_INTERVAL),
