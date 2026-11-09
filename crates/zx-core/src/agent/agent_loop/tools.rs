@@ -180,11 +180,10 @@ impl Attempt<'_> {
     /// call is checked, approvals included, before any start is recorded, so that a crash
     /// while one call waits for approval leaves no start for calls that never ran.
     pub(super) async fn execute_tools(&mut self, calls: &[ToolCall]) -> Result<Batch, Halt> {
-        let sequential = self.config.spec.sequential_tools
-            || calls.iter().any(|call| {
-                self.find_tool(&call.name)
-                    .is_some_and(|tool| tool.execution_mode() == ExecutionMode::Sequential)
-            });
+        let sequential = calls.iter().any(|call| {
+            self.find_tool(&call.name)
+                .is_some_and(|tool| tool.execution_mode() == ExecutionMode::Sequential)
+        });
         if sequential {
             self.sequential(calls).await
         } else {

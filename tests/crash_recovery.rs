@@ -17,7 +17,7 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::AgentSession;
-use zx_agent::agent::{AgentEvent, Effects, Interruption, Tool, ToolContext, ToolOutput};
+use zx_agent::agent::{AgentEvent, Effects, ExecutionMode, Interruption, Tool, ToolContext, ToolOutput};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{AssistantMessage, ContentBlock, Message, StopReason, ToolCall, ToolDef, ToolResultMessage};
 use zx_agent::executor::{Executor, LocalExecutor};
@@ -42,6 +42,7 @@ fn definition(name: &str) -> ToolDef {
 struct StartProbe {
     name: &'static str,
     effects: Effects,
+    mode: ExecutionMode,
     session: PathBuf,
 }
 
@@ -56,6 +57,9 @@ impl Tool for StartProbe {
     fn effects(&self) -> Effects {
         self.effects
     }
+    fn execution_mode(&self) -> ExecutionMode {
+        self.mode
+    }
     async fn execute(&self, _args: Value, _ctx: &ToolContext) -> Result<ToolOutput, String> {
         let text = std::fs::read_to_string(&self.session).map_err(|error| error.to_string())?;
         let starts = text
@@ -67,9 +71,15 @@ impl Tool for StartProbe {
 }
 
 fn probe(name: &'static str, effects: Effects, session: &Path) -> Arc<dyn Tool> {
+    probe_in(name, effects, ExecutionMode::Parallel, session)
+}
+
+/// A probe that runs in `mode`; a sequential one makes its whole batch run in sequence.
+fn probe_in(name: &'static str, effects: Effects, mode: ExecutionMode, session: &Path) -> Arc<dyn Tool> {
     Arc::new(StartProbe {
         name,
         effects,
+        mode,
         session: session.to_path_buf(),
     })
 }
@@ -227,14 +237,12 @@ async fn each_start_is_on_disk_before_its_call_runs_and_reads_are_not_recorded()
         FauxStep::text("done"),
     ]));
     let tools = vec![
-        probe("write", Effects::SideEffects, &path),
-        probe("read", Effects::ReadOnly, &path),
+        probe_in("write", Effects::SideEffects, ExecutionMode::Sequential, &path),
+        probe_in("read", Effects::ReadOnly, ExecutionMode::Sequential, &path),
     ];
-    let mut config = config(provider.clone(), tools);
-    config.spec.sequential_tools = true;
     let (mut runner, _) = RunnerSetup {
         session: SessionStore::create(&path, header()).unwrap(),
-        ..RunnerSetup::new(config)
+        ..RunnerSetup::new(config(provider.clone(), tools))
     }
     .build();
 

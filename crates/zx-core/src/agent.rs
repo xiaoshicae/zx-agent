@@ -35,7 +35,7 @@ pub use hooks::{
     HookPoint, HookResult, HookStage, Hooks, RequestPlan, RequestSettings, TurnDecision, TurnDisposition, TurnSummary,
 };
 pub use interaction::{Approval, ApprovalCache, ApprovalRequest, DEFAULT_APPROVAL_TIMEOUT, Interaction, NoHuman};
-pub use policy::{AllowAll, PolicyDecision, ToolPolicy};
+pub use policy::{PolicyDecision, ToolPolicy};
 pub use queue::{MessageQueues, PendingEntry, QueueMode, QueuedMessage};
 pub use report::{RunOutcome, RunReport};
 pub(crate) use session_host::{ContextPreparation, PERSIST_FAILED, Prepared, SessionHost, record_pending_entries};

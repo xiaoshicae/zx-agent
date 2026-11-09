@@ -186,7 +186,6 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
         cwd,
         max_tokens: options.request.max_tokens,
         reasoning: options.request.reasoning,
-        sequential_tools: false,
     });
     push_built_in(&mut config, "command_policy", PolicyHook::new(Arc::new(policy)));
     // Each session's redaction owns its list: the hook reads the files again before every use.

@@ -637,7 +637,7 @@ run、chat 与 serve 在设置了下面的标准变量时，用 OTLP/HTTP（prot
 
 ```rust
 let mut config = LoopConfig::new(LoopSpec {
-    provider, model, system_prompt, tools, cwd, max_tokens: None, sequential_tools: false,
+    provider, model, system_prompt, tools, cwd, max_tokens: None,
 });
 config.hooks.push(PolicyHook::new(policy));
 let agent = AgentSession::new(config, RetryPolicy::default(), Limits::default(), session, sink);

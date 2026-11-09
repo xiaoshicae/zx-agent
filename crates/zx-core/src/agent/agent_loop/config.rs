@@ -26,7 +26,6 @@ pub struct LoopSpec {
     /// Sent with every task request; `None` leaves the server's default. Summary requests
     /// send none.
     pub reasoning: Option<Reasoning>,
-    pub sequential_tools: bool,
 }
 
 impl LoopSpec {

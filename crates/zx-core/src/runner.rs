@@ -501,7 +501,6 @@ mod tests {
             cwd: PathBuf::from("."),
             max_tokens: None,
             reasoning: None,
-            sequential_tools: false,
         })
     }
 

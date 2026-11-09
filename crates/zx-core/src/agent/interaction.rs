@@ -36,9 +36,6 @@ pub enum Approval {
 #[async_trait]
 pub trait Interaction: Send + Sync {
     async fn confirm(&self, request: &ApprovalRequest) -> Result<Approval, String>;
-
-    /// Optional notification supplied by the host; must return promptly.
-    fn notify(&self, _text: &str) {}
 }
 
 /// Unattended interaction: an Ask verdict always becomes a denial.

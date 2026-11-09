@@ -63,7 +63,6 @@ async fn main() -> anyhow::Result<()> {
         cwd: cwd.clone(),
         max_tokens: None,
         reasoning: None,
-        sequential_tools: false,
     });
     // Continue once if an answer stops at the output token limit.
     config.hooks.push(ContinueOnLength::new(1));
