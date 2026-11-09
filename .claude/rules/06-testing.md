@@ -15,7 +15,7 @@ paths:
 | `EchoTool` | `tests/common/mod.rs` | 可设置延迟、失败、panic、terminate，执行时还能注入引导消息或后续消息、报告进度（`progress`）、返回 `details` |
 | `Collect` | `tests/common/mod.rs` | 收集事件；`envelopes()` 返回带信封（`seq`、`runId` 等）的事件，`events()` 返回事件本体，`kinds()` 返回事件类型序列，`tool_end_order()` 返回工具完成的顺序 |
 | `summarize` | `tests/common/mod.rs` | 把消息列表压缩成 `"tool:c1=hi"` 这样的短字符串 |
-| `run_prompt` | `tests/common/mod.rs` | 用默认参数（10 轮、不取消）跑一次 `run_loop`，返回结果和事件 |
+| `run_prompt` / `run_attempt` | `tests/common/mod.rs` | `run_prompt`：在以给定消息开头的内存会话上，用默认参数（至多 10 次模型请求、不取消）跑一次 `Attempt`，返回结果和事件，并把会话投影写回传入的消息；`run_attempt`：在新的内存会话上按给定的预算、取消令牌和事件接收方跑一次，返回结果和会话投影 |
 | `RunnerSetup` | `tests/common/mod.rs` | 带测试默认值（不重试、默认上限、内存会话）的 runner 构造器，用结构体更新语法覆盖字段 |
 | `zx_agent` / `stdout` / `stderr` | `tests/common/mod.rs` | 编译出的程序，以及它写到两个输出的文本；驱动程序的测试都用这三个 |
 | `fast_retry` / `header` / `read_lines` / `json_lines` | `tests/common/mod.rs` | 毫秒级退避的重试策略、会话头部、读取会话文件的每一行、把 JSON 行文本解析成值 |

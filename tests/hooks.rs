@@ -14,7 +14,7 @@ use common::{EchoTool, RunnerSetup, config, fast_retry, header, read_lines, run_
 use zx_agent::agent::QueuedMessage;
 use zx_agent::agent::{
     AgentEvent, ApprovalResult, CancelSignal, ContextEdit, Event, HookChain, HookContext, HookOptions, HookResult,
-    HookStage, Hooks, LoopOutcome, PolicyDecision, Tool, ToolContext, ToolOutput, ToolVerdict, TurnDecision,
+    HookStage, Hooks, PolicyDecision, RunOutcome, Tool, ToolContext, ToolOutput, ToolVerdict, TurnDecision,
     TurnSummary,
 };
 use zx_agent::agent::{Approval, ApprovalRequest, Interaction};
@@ -22,7 +22,7 @@ use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{EventReceiver, Message, Provider, Request, SectionChange, StopReason, SystemMessage, ToolCall};
 use zx_agent::continuation::ContinueOnLength;
 use zx_agent::redact::{RedactSecrets, check_secret_files, short_secret_files};
-use zx_agent::runner::{Limits, RunOutcome};
+use zx_agent::runner::Limits;
 use zx_agent::session::{Entry, SessionStore};
 use zx_agent::tools::BashTool;
 
@@ -47,7 +47,7 @@ async fn a_later_allow_does_not_override_an_ask_without_a_human() {
         .push(Verdict(PolicyDecision::Ask("review required".into())));
     config.hooks.push(Verdict(PolicyDecision::Allow));
     let (result, _) = run_prompt(&config, &mut Vec::new(), "go").await;
-    assert_eq!(result.outcome, LoopOutcome::Completed);
+    assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
     assert!(
         matches!(&provider.requests()[1].messages[2], Message::ToolResult(output) if output.is_error && output.content.contains("no human"))
@@ -90,7 +90,7 @@ async fn allow_once_and_session_approvals_have_different_scopes() {
         config.hooks.push(Verdict(PolicyDecision::Ask("review".into())));
         config.interaction = host.clone();
         let (result, _) = run_prompt(&config, &mut Vec::new(), "go").await;
-        assert_eq!(result.outcome, LoopOutcome::Completed);
+        assert_eq!(result.outcome, RunOutcome::Completed);
         assert_eq!(host.calls.load(Ordering::SeqCst), confirmations);
         assert_eq!(tool.calls.load(Ordering::SeqCst), executions);
     }
@@ -180,7 +180,7 @@ async fn approval_errors_panics_and_timeouts_block_execution_and_preserve_the_lo
         config.interaction = Arc::new(host);
         config.interaction_timeout = Duration::ZERO;
         let (result, _) = run_prompt(&config, &mut Vec::new(), "go").await;
-        assert_eq!(result.outcome, LoopOutcome::Completed);
+        assert_eq!(result.outcome, RunOutcome::Completed);
         assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
         assert!(
             matches!(&provider.requests()[1].messages[2], Message::ToolResult(output) if output.is_error && output.content.contains(expected))
@@ -878,7 +878,7 @@ async fn stopping_from_a_hook_preserves_queued_user_input() {
     let mut config = config(provider, vec![]);
     config.hooks.push(StopAndQueue(config.queues.clone()));
     let (result, _) = run_prompt(&config, &mut Vec::new(), "go").await;
-    assert_eq!(result.outcome, LoopOutcome::Completed);
+    assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(
         config.queues.drain_steering(),
         [QueuedMessage::User("pending user input".into())]
@@ -1504,7 +1504,7 @@ async fn tools_with_the_same_name_are_rejected_before_any_request() {
 
     let (result, _) = run_prompt(&config, &mut Vec::new(), "go").await;
 
-    assert_eq!(result.outcome, LoopOutcome::Error);
+    assert_eq!(result.outcome, RunOutcome::Error);
     let error = format!("{:?}", result.failure);
     assert!(error.contains("more than one tool is named \\\"echo\\\""), "{error}");
     assert!(provider.requests().is_empty());
@@ -1534,7 +1534,7 @@ async fn a_hook_cannot_append_system_messages() {
 
     let (result, _) = run_prompt(&config, &mut Vec::new(), "go").await;
 
-    assert_eq!(result.outcome, LoopOutcome::Error);
+    assert_eq!(result.outcome, RunOutcome::Error);
     let error = format!("{:?}", result.failure);
     assert!(error.contains("system prompt comes from the configuration"), "{error}");
     assert!(provider.requests().is_empty());
@@ -1556,7 +1556,7 @@ async fn a_panic_in_observes_is_reported_and_the_run_continues() {
 
     let (result, sink) = run_prompt(&config, &mut Vec::new(), "go").await;
 
-    assert_eq!(result.outcome, LoopOutcome::Completed);
+    assert_eq!(result.outcome, RunOutcome::Completed);
     assert!(sink.kinds().contains(&"hook_failed"), "{:?}", sink.kinds());
 }
 
@@ -1601,7 +1601,7 @@ async fn a_tool_declared_under_another_name_is_rejected_before_any_request() {
 
     let (result, _) = run_prompt(&config, &mut Vec::new(), "go").await;
 
-    assert_eq!(result.outcome, LoopOutcome::Error);
+    assert_eq!(result.outcome, RunOutcome::Error);
     let error = format!("{:?}", result.failure);
     assert!(error.contains("declares itself as \\\"other\\\""), "{error}");
     assert!(provider.requests().is_empty());
@@ -1619,7 +1619,7 @@ async fn a_tool_whose_definition_panics_fails_the_run_before_any_request() {
 
     let (result, _) = run_prompt(&config, &mut Vec::new(), "go").await;
 
-    assert_eq!(result.outcome, LoopOutcome::Error);
+    assert_eq!(result.outcome, RunOutcome::Error);
     let error = format!("{:?}", result.failure);
     assert!(error.contains("panicked"), "{error}");
     assert!(provider.requests().is_empty());
@@ -1661,7 +1661,7 @@ async fn a_tool_cancelling_its_token_stops_only_itself() {
 
     let (result, _) = run_prompt(&config, &mut context, "go").await;
 
-    assert_eq!(result.outcome, LoopOutcome::Completed);
+    assert_eq!(result.outcome, RunOutcome::Completed);
     assert!(
         summarize(&context).contains(&"tool:c1=stopped its own work".to_string()),
         "{:?}",

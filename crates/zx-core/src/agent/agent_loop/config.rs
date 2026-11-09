@@ -34,7 +34,7 @@ impl LoopSpec {
     /// each tool must declare the name it is called by and no two may share one. A tool's
     /// `name`, `definition`, `execution_mode` and `effects` must not panic; they are tried
     /// here, so that a panic fails the run before its first request instead of escaping it.
-    /// `run_loop` checks before its first request.
+    /// An attempt checks before its first request.
     pub fn validate(&self) -> Result<(), String> {
         self.validators().map(|_| ())
     }

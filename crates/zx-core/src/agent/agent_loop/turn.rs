@@ -1,35 +1,35 @@
 //! What follows a turn: the finish hooks' decision, the queued input that takes precedence
 //! over it, and the outcome that ends the attempt instead.
 
+use std::ops::ControlFlow;
+
 use super::{
-    AssistantMessage, Engine, Halt, LoopOutcome, LoopResult, Message, Queue, StopReason, TurnDecision, TurnDisposition,
-    TurnSummary, UserMessageKind,
+    AssistantMessage, Attempt, AttemptResult, Halt, Message, Queue, RunOutcome, StopReason, TurnDecision,
+    TurnDisposition, TurnSummary, UserMessageKind,
 };
 
-impl Engine<'_, '_> {
-    /// Ask the finish hook and decide whether another turn is needed.
+impl Attempt<'_> {
+    /// Ask the finish hook and decide whether another turn is needed. Breaks with the
+    /// outcome that ends the attempt.
     pub(super) async fn decide_next_turn(
         &mut self,
-        context: &[Message],
-        result: &mut LoopResult,
+        result: &mut AttemptResult,
         response: TurnResponse,
         pending: &mut PendingInput,
-    ) -> Result<Option<LoopOutcome>, Halt> {
+    ) -> Result<ControlFlow<RunOutcome>, Halt> {
         let TurnResponse {
-            index,
+            response,
             turn,
             after_tools,
         } = response;
-        let message = answer_at(context, index).expect(
-            "the turn's response stays at the index it was pushed at: the context only grows until the next turn",
-        );
         let needs_more = after_tools == AfterTools::Ran;
-        let stop = message.stop_reason;
+        let stop = response.stop_reason;
         let disposition = self.disposition(after_tools);
         let remaining = self.remaining_model_requests(result);
+        let messages = self.session.messages();
         let summary = TurnSummary {
-            response: message,
-            messages: context,
+            response: &response,
+            messages: &messages,
             turn,
             answer_continuations: result.answer_continuations,
             remaining_model_requests: remaining,
@@ -37,7 +37,7 @@ impl Engine<'_, '_> {
         };
         let decision = self.finish_turn(&summary).await?;
         if decision == TurnDecision::Stop {
-            return Ok(Some(completed(stop)));
+            return Ok(ControlFlow::Break(completed(stop)));
         }
         // Inspect again: input may have arrived while the hook ran. It is taken at the top
         // of the next turn; follow-ups only when the model has nothing left to do.
@@ -50,11 +50,11 @@ impl Engine<'_, '_> {
             } else {
                 PendingInput::None
             };
-            return Ok(None);
+            return Ok(ControlFlow::Continue(()));
         }
         let requested = match requested_input(decision, disposition, remaining, stop) {
             Ok(requested) => requested,
-            Err(outcome) => return Ok(Some(outcome)),
+            Err(outcome) => return Ok(ControlFlow::Break(outcome)),
         };
         if requested.as_ref().is_some_and(continues_answer) {
             result.answer_continuations = result.answer_continuations.saturating_add(1);
@@ -62,9 +62,9 @@ impl Engine<'_, '_> {
         *pending = match requested {
             Some(message) => PendingInput::Requested(Box::new(message)),
             None if needs_more => PendingInput::None,
-            None => return Ok(Some(completed(stop))),
+            None => return Ok(ControlFlow::Break(completed(stop))),
         };
-        Ok(None)
+        Ok(ControlFlow::Continue(()))
     }
 
     /// Ask the finish hooks what follows the turn `summary` describes.
@@ -77,7 +77,7 @@ impl Engine<'_, '_> {
     }
 
     /// Model requests the attempt may still make; `None` is unlimited.
-    fn remaining_model_requests(&self, result: &LoopResult) -> Option<u32> {
+    fn remaining_model_requests(&self, result: &AttemptResult) -> Option<u32> {
         self.max_model_requests
             .map(|limit| limit.saturating_sub(result.model_requests))
     }
@@ -107,21 +107,21 @@ fn requested_input(
     disposition: TurnDisposition,
     remaining_model_requests: Option<u32>,
     stop: StopReason,
-) -> Result<Option<Message>, LoopOutcome> {
+) -> Result<Option<Message>, RunOutcome> {
     match decision {
         TurnDecision::ContinueAnswer(text) if disposition == TurnDisposition::Stop => {
             if remaining_model_requests == Some(0) {
                 return Err(if stop == StopReason::Length {
-                    LoopOutcome::Truncated
+                    RunOutcome::Truncated
                 } else {
-                    LoopOutcome::ModelRequestLimit
+                    RunOutcome::ModelRequestLimit
                 });
             }
             Ok(Some(Message::continuation(text)))
         }
         TurnDecision::FollowUp(text) if disposition != TurnDisposition::Continue => {
             if remaining_model_requests == Some(0) {
-                return Err(LoopOutcome::ModelRequestLimit);
+                return Err(RunOutcome::ModelRequestLimit);
             }
             Ok(Some(Message::user(text)))
         }
@@ -142,19 +142,11 @@ fn continues_answer(message: &Message) -> bool {
     )
 }
 
-/// The assistant message at `index` of `context`, if one is there.
-fn answer_at(context: &[Message], index: usize) -> Option<&AssistantMessage> {
-    match context.get(index)? {
-        Message::Assistant(message) => Some(message),
-        Message::System(_) | Message::User { .. } | Message::ToolResult(_) => None,
-    }
-}
-
-fn completed(stop: StopReason) -> LoopOutcome {
+fn completed(stop: StopReason) -> RunOutcome {
     if stop == StopReason::Length {
-        LoopOutcome::Truncated
+        RunOutcome::Truncated
     } else {
-        LoopOutcome::Completed
+        RunOutcome::Completed
     }
 }
 
@@ -182,23 +174,9 @@ pub(super) enum AfterTools {
     Terminated,
 }
 
-/// A turn whose response and tool results are in the context.
-#[derive(Clone, Copy)]
+/// A turn whose response and tool results are recorded.
 pub(super) struct TurnResponse {
-    /// Where the response is in the context.
-    pub(super) index: usize,
+    pub(super) response: AssistantMessage,
     pub(super) turn: u32,
     pub(super) after_tools: AfterTools,
-}
-
-pub(super) enum ResponseHandling {
-    Stop(LoopOutcome),
-    Continue(TurnResponse),
-}
-
-pub(super) enum TurnPreparation {
-    /// The turn with this number is ready for its request.
-    Ready(u32),
-    Retry,
-    Stop(LoopOutcome),
 }

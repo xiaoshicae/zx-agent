@@ -36,7 +36,7 @@ pub type HookResult<T> = Result<T, String>;
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct HookContext {
-    /// The session's ID; absent when `run_loop` runs without a session.
+    /// The session's ID; absent only in a context built with [`HookContext::new`] without one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     /// The run: one prompt or one manual compaction, as in the events' `runId`.
@@ -109,7 +109,7 @@ impl CancelSignal {
     }
 
     /// The run's own token, for the host that waits on hooks.
-    fn token(&self) -> &CancellationToken {
+    pub(crate) fn token(&self) -> &CancellationToken {
         &self.0
     }
 }

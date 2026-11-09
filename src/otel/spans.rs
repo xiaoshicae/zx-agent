@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::metrics::Instruments;
 use super::signal::{Signal, What};
-use crate::agent::{ApprovalResult, Interruption, LoopOutcome, RequestKind, RunOutcome, ToolVerdict};
+use crate::agent::{ApprovalResult, Interruption, RequestKind, RunOutcome, ToolVerdict};
 use crate::ai::{StopReason, Usage};
 
 /// Builds spans and records metrics from signals, one task owning every open span.
@@ -244,14 +244,14 @@ impl OpenRun<'_> {
         self.spans.attempt = Some(start(self.tracer, "attempt", self.at, attributes, parent));
     }
 
-    fn attempt_end(&mut self, outcome: LoopOutcome) {
+    fn attempt_end(&mut self, outcome: RunOutcome) {
         self.spans.end_attempt_parts(self.at);
         let attributes = vec![KeyValue::new("zx.outcome", name(&outcome))];
         finish(
             self.spans.attempt.take(),
             self.at,
             attributes,
-            outcome == LoopOutcome::Error,
+            outcome == RunOutcome::Error,
         );
     }
 
@@ -695,7 +695,7 @@ mod tests {
                 response_id: None,
                 response_model: None,
             }),
-            entry_id: None,
+            entry_id: "e".into(),
         }
     }
 
@@ -738,7 +738,7 @@ mod tests {
                 1003,
                 AgentEvent::RequestStart {
                     kind: RequestKind::Task,
-                    entry_id: None,
+                    entry_id: "r".into(),
                     model: "m".into(),
                     attempt: 1,
                 },
@@ -776,7 +776,7 @@ mod tests {
             at(
                 1022,
                 AgentEvent::AgentEnd {
-                    outcome: LoopOutcome::Completed,
+                    outcome: RunOutcome::Completed,
                 },
             ),
             at(1023, run_end(RunOutcome::Completed, usage(10, 5))),
@@ -1018,7 +1018,7 @@ mod tests {
                 1003,
                 AgentEvent::RequestStart {
                     kind: RequestKind::Task,
-                    entry_id: None,
+                    entry_id: "r".into(),
                     model: "m".into(),
                     attempt: 1,
                 },
@@ -1052,7 +1052,7 @@ mod tests {
                 1001,
                 AgentEvent::RequestStart {
                     kind: RequestKind::Summary,
-                    entry_id: None,
+                    entry_id: "r".into(),
                     model: "m".into(),
                     attempt: 1,
                 },

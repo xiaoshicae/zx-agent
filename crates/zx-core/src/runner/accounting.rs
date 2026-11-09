@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use super::Limits;
-use crate::agent::LoopResult;
+use crate::agent::AttemptResult;
 use crate::ai::Usage;
 
 #[derive(Default)]
@@ -24,7 +24,7 @@ pub(super) struct RunAccounting {
 }
 
 impl RunAccounting {
-    pub(super) fn record(&mut self, attempt: &LoopResult) {
+    pub(super) fn record(&mut self, attempt: &AttemptResult) {
         self.attempts = self.attempts.saturating_add(1);
         self.task_turns = self.task_turns.saturating_add(attempt.task_turns);
         self.model_requests = self.model_requests.saturating_add(attempt.model_requests);

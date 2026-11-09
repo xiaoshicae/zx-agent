@@ -1,5 +1,5 @@
-//! What a run produced. Defined in the agent layer so that the `run_end` event can carry it;
-//! the runner re-exports both types.
+//! What a run produced, and how a run or one attempt of it ended. Defined in the agent layer
+//! so that the `agent_end` and `run_end` events can carry them; the runner re-exports both.
 
 use std::collections::BTreeMap;
 
@@ -7,22 +7,24 @@ use serde::Serialize;
 
 use crate::ai::Usage;
 
-/// How a run ended.
+/// How a run, or one attempt of it, ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunOutcome {
-    /// The model gave a final answer.
+    /// The model answered without further tool calls and no queued message remained.
     Completed,
-    /// The final answer stayed cut off at the output token limit after the allowed
-    /// continuations. `final_text` holds what was produced.
+    /// The answer stayed cut off at the output token limit and no hook asked to continue it.
+    /// A run's `final_text` holds what was produced.
     Truncated,
-    /// A request exhausted retries, an operational hook failed, or persistence failed.
+    /// A provider failed past its retries, an operational hook failed, or the session could
+    /// not record a step.
     Error,
     /// The model request budget ran out while the model still wanted to continue.
     ModelRequestLimit,
-    /// The wall-clock limit was reached.
+    /// The run's wall-clock limit was reached. Only a run ends this way: its attempt reports
+    /// `Aborted`, the cancellation the timer caused.
     Timeout,
-    /// The caller cancelled the run.
+    /// Cancelled.
     Aborted,
     /// The token budget ran out while the model still wanted to continue.
     TokenBudget,
