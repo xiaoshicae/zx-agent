@@ -49,7 +49,6 @@ pub(crate) use summary::{MAX_STATEMENTS, MAX_SUMMARY_BYTES, cite_only, summary_m
 pub(crate) use test_support::FailingWriter;
 
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -83,33 +82,21 @@ const APPEND_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Why a store no longer writes. Each case asks for something different before a session can
 /// be written again, so hosts such as a server that keeps sessions open can match on it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum WritesStopped {
     /// An append was dropped while it waited for its log, so the log may or may not hold the
     /// record. Open the session again from its storage before writing.
+    #[error("an earlier append was interrupted before its log answered, so its outcome is unknown")]
     Interrupted,
     /// An append did not finish within this time; its outcome is unknown, as above.
+    #[error("an earlier append did not finish within {0:?}, so its outcome is unknown")]
     TimedOut(Duration),
     /// An append failed with this error. Remove the cause, then open the session again.
+    #[error("an earlier write failed: {0}")]
     Failed(String),
     /// The store is a snapshot from [`SessionStore::read`], which never writes.
+    #[error("it was read as a snapshot, which is read-only")]
     ReadOnly,
-}
-
-impl fmt::Display for WritesStopped {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Interrupted => {
-                f.write_str("an earlier append was interrupted before its log answered, so its outcome is unknown")
-            }
-            Self::TimedOut(timeout) => write!(
-                f,
-                "an earlier append did not finish within {timeout:?}, so its outcome is unknown"
-            ),
-            Self::Failed(error) => write!(f, "an earlier write failed: {error}"),
-            Self::ReadOnly => f.write_str("it was read as a snapshot, which is read-only"),
-        }
-    }
 }
 
 /// A session tree, kept in memory and optionally stored by a [`SessionLog`].

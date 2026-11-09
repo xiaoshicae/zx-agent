@@ -236,21 +236,12 @@ impl CardLabels {
 pub type ErrorReport = Arc<dyn Fn(&ImError) + Send + Sync>;
 
 /// Why a channel call failed.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ImError {
     /// Settings or credentials the platform rejects; retrying does not help.
+    #[error("configuration error: {0}")]
     Config(String),
     /// The platform could not be reached or refused the call; a later call may succeed.
+    #[error("{0}")]
     Transport(String),
 }
-
-impl fmt::Display for ImError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Config(message) => write!(f, "configuration error: {message}"),
-            Self::Transport(message) => f.write_str(message),
-        }
-    }
-}
-
-impl std::error::Error for ImError {}

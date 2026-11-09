@@ -69,24 +69,15 @@ pub struct CommandOutcome {
 }
 
 /// Why [`crate::AgentSession::run_command`] ran no command.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum CommandError {
     /// No extension registered a command with that name.
+    #[error("unknown command")]
     Unknown,
     /// The command ran and failed with this message.
+    #[error("command failed: {0}")]
     Failed(String),
 }
-
-impl std::fmt::Display for CommandError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Unknown => f.write_str("unknown command"),
-            Self::Failed(reason) => write!(f, "command failed: {reason}"),
-        }
-    }
-}
-
-impl std::error::Error for CommandError {}
 
 /// The rule a command name follows: ASCII letters, digits, `_` and `-`, starting with a
 /// letter, so that `/name args` splits at the first space and the name cannot be mistaken

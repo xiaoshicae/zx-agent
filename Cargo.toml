@@ -52,6 +52,7 @@ rmcp = { version = "3.8", default-features = false, features = ["client", "trans
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
+thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync", "signal", "io-util", "fs", "net"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 tokio-util = "0.7"
