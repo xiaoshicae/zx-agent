@@ -28,7 +28,7 @@
 | `tests/session_compaction.rs`、`tests/compaction.rs` | 追加升级、分支 / 引用与原始投影、自动 / 手动摘要、摘要源不含工具结果的 `details`、计费（摘要请求计入请求与 token 预算）、steering、失败、取消与超时 |
 | `tests/incremental_summary.rs` | 增量摘要（v5）：接续与只读新增记录、接续全量摘要、取代、淘汰、修正后的作废与重读、加载校验、请求还原、请求大小不随历史增长；摘要评测的脚本会话自检，以及用知道答案的假模型验证评分 |
 | `tests/request_audit.rs` | 请求审计（G3）：从会话文件还原每次请求、配置变化才追加、旧会话升级时机；上下文过长后恢复的三个请求；固定会话 `tests/fixtures/replay-v4.jsonl` 与含增量摘要的 `replay-v5.jsonl` 的还原结果与期望文件逐字节比对，改变还原结果须同时升级转换版本或会话格式 |
-| `tests/executor.rs` | 执行器接缝：工具只经自身执行器运行命令和读写文件（grep 的脚本、shell 与隐藏变量），结束方式的报告，执行方式随执行器，不能写文件的执行器 |
+| `tests/executor.rs` | 执行器接缝：工具只经自身执行器运行命令和读写文件（grep 的脚本与 shell），本机执行器对 bash 与搜索的命令都隐藏变量，结束方式的报告，执行方式随执行器，不能写文件的执行器 |
 | `tests/search_tools.rs` | grep、find、ls 在本机：有无 ripgrep 时断言都要成立（本机没有 rg，CI 可能有）；注入的模式与路径不被执行 |
 | `tests/file_tools.rs` | edit_file 与 write_file 在本机：新建、覆盖、多处替换、BOM 与 CRLF、patch，每类失败后文件不变，取消，旧参数写法；同一批调用改同一文件（`SlowReads` 执行器让两次读取都先于写入）时两处改动都生效 |
 | `tests/compaction.rs` | 会话宿主的摘要：手动 compact 是有界、无工具的请求且会话可复用；自动摘要计入任务请求预算、用量与 token 预算，不能超出请求上限；摘要期间收到的 steering 在下一次任务请求前持久化；SDK 默认不发摘要请求；摘要请求与上下文大小不含工具结果的 `details`；重复摘要读原文而不是旧摘要；无效或截断的摘要不替换上下文、不当作任务重试；失败的自动摘要下一次 prompt 不再付费；运行的 future 被丢弃后暂停仍在；已知的 API key 在事件与会话文件前脱敏 |

@@ -17,8 +17,13 @@ use super::{CommandOutput, Executor, ShellCommand, check_read_within, directory_
 /// or is cancelled. A process that leaves the group, for example with `setsid` or by
 /// daemonizing, is not tracked and can outlive the command: this machine offers no portable
 /// way to find it. Use [`super::ContainerExecutor`] when that must not happen.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct LocalExecutor;
+#[derive(Clone, Debug, Default)]
+pub struct LocalExecutor {
+    /// Environment variables removed before every command runs, such as the one holding the
+    /// API key. Commands otherwise inherit the agent's whole environment, and `env` or
+    /// `echo $NAME` would put a secret into the tool result.
+    pub hidden_env: Vec<String>,
+}
 
 /// Owns the process group until it has been signalled, including future-drop paths.
 struct ProcessGroup(Option<u32>);
@@ -62,7 +67,7 @@ impl Executor for LocalExecutor {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        for name in request.hidden_env {
+        for name in &self.hidden_env {
             command.env_remove(name);
         }
         // Lead a new process group so a timeout can stop pipelines and background children.

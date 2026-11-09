@@ -174,8 +174,7 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     let (provider, api_key) = provider(&options)?;
     let mut host = host_tools(&mut profile, &cwd)?;
     let (session, executor, environment) = open_session(&options, &profile, &cwd).await?;
-    let hidden_env = hidden_env(&options);
-    let tools = assemble_tools(&profile, &options, &hidden_env, &executor, &mut host)?;
+    let tools = assemble_tools(&profile, &options, &executor, &mut host)?;
     let policy = CommandPolicy::new(&profile.rules.allow).deny_also(&profile.rules.deny);
     let command_policy = command_policy_section(&policy, &tools);
     let system_prompt = build_system_prompt(
@@ -248,17 +247,12 @@ fn settle(options: &SessionOptions<'_>) -> Result<(PathBuf, Profile, HashMap<Str
 fn assemble_tools(
     profile: &Profile,
     options: &SessionOptions<'_>,
-    hidden_env: &[String],
     executor: &Arc<dyn Executor>,
     host: &mut HostTools,
 ) -> Result<Vec<Arc<dyn Tool>>> {
     let built_in: Vec<String> = profile.tools.iter().filter(|name| !host_tool(name)).cloned().collect();
-    let mut tools = tools::builtin_tools(
-        &built_in,
-        Duration::from_secs(options.transport.tool_timeout_secs),
-        hidden_env,
-        executor,
-    )?;
+    let timeout = Duration::from_secs(options.transport.tool_timeout_secs);
+    let mut tools = tools::builtin_tools(&built_in, timeout, executor)?;
     tools.extend(std::mem::take(&mut host.tools));
     Ok(tools)
 }
@@ -448,7 +442,8 @@ fn host_tools(profile: &mut Profile, cwd: &Path) -> Result<HostTools> {
     Ok(host)
 }
 
-/// The session, where commands run, and the prompt section describing that.
+/// The session, where commands run (on this machine without the variables of [`hidden_env`]),
+/// and the prompt section describing that.
 ///
 /// An existing session is opened first, for its ID; a new one is created only after the
 /// container, if any, has started, so that a failed start leaves no session file behind.
@@ -465,7 +460,7 @@ async fn open_session(
     let session_id = opened
         .as_ref()
         .map_or_else(|| header.id.clone(), |session| session.header().id.clone());
-    let (executor, environment) = executor(profile, cwd, &session_id).await?;
+    let (executor, environment) = executor(profile, cwd, &session_id, hidden_env(options)).await?;
     let session = match opened {
         Some(session) => session,
         None => sessions::create(options.file, header)?,

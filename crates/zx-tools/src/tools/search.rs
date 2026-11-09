@@ -96,20 +96,18 @@ fn ripgrep_excludes() -> String {
         .join(" ")
 }
 
-/// What the three tools share: where they run and what commands must not see.
+/// What the three tools share: where they run.
 #[derive(Clone)]
 pub struct SearchSettings {
-    /// Where the programs run. Defaults to this machine.
+    /// Where the programs run, and so what they must not see: on this machine, the variables
+    /// in [`LocalExecutor::hidden_env`]. Defaults to this machine, hiding nothing.
     pub executor: Arc<dyn Executor>,
-    /// Environment variables the programs must not see, such as the API key variable.
-    pub hidden_env: Vec<String>,
 }
 
 impl Default for SearchSettings {
     fn default() -> Self {
         Self {
-            executor: Arc::new(LocalExecutor),
-            hidden_env: Vec::new(),
+            executor: Arc::new(LocalExecutor::default()),
         }
     }
 }
@@ -134,7 +132,6 @@ impl SearchSettings {
             command: script,
             cwd: &ctx.cwd,
             timeout: TIMEOUT,
-            hidden_env: &self.hidden_env,
         };
         let output = self.executor.run(&command, &ctx.cancel).await?;
         match output.end {
@@ -320,7 +317,6 @@ mod tests {
                     stdout: stdout.to_vec(),
                     stderr: stderr.to_vec(),
                 }),
-                ..SearchSettings::default()
             },
         }
     }

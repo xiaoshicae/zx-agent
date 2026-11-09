@@ -58,20 +58,20 @@ pub const BUILTIN_TOOL_NAMES: &[&str] = &[BASH, READ_FILE, EDIT_FILE, WRITE_FILE
 const DEFAULT_MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Build built-in tools by name, in the given order, without duplicates, running commands and
-/// reading and writing files through `executor`. `hidden_env` names environment variables
-/// that bash commands must not see, such as the API key variable. edit_file and write_file
-/// share one [`FileMutationQueue`]. Errors: a name that is not in [`BUILTIN_TOOL_NAMES`].
+/// reading and writing files through `executor`, which also decides what commands must not
+/// see (see [`LocalExecutor::hidden_env`]). edit_file and write_file share one
+/// [`FileMutationQueue`]. Errors: a name that is not in [`BUILTIN_TOOL_NAMES`].
+///
+/// [`LocalExecutor::hidden_env`]: crate::executor::LocalExecutor::hidden_env
 pub fn builtin_tools(
     names: &[String],
     bash_timeout: Duration,
-    hidden_env: &[String],
     executor: &Arc<dyn Executor>,
 ) -> Result<Vec<Arc<dyn Tool>>> {
     let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
     let queue = Arc::new(FileMutationQueue::default());
     let search = SearchSettings {
         executor: Arc::clone(executor),
-        hidden_env: hidden_env.to_vec(),
     };
     for name in names {
         let name = name.trim();
@@ -82,7 +82,6 @@ pub fn builtin_tools(
             BASH => Arc::new(BashTool {
                 default_timeout: bash_timeout,
                 max_timeout: bash_timeout.max(bash::MAX_TIMEOUT),
-                hidden_env: hidden_env.to_vec(),
                 executor: Arc::clone(executor),
             }),
             READ_FILE => Arc::new(ReadFileTool {
@@ -168,7 +167,7 @@ mod tests {
     use crate::executor::LocalExecutor;
 
     fn local() -> Arc<dyn Executor> {
-        Arc::new(LocalExecutor)
+        Arc::new(LocalExecutor::default())
     }
 
     fn names(tools: &[Arc<dyn Tool>]) -> Vec<&str> {
@@ -178,13 +177,13 @@ mod tests {
     #[test]
     fn builds_tools_in_order_without_duplicates_or_blanks() {
         let requested = ["read_file", " bash ", "read_file", ""].map(String::from);
-        let tools = builtin_tools(&requested, Duration::from_secs(5), &[], &local()).unwrap();
+        let tools = builtin_tools(&requested, Duration::from_secs(5), &local()).unwrap();
         assert_eq!(names(&tools), ["read_file", "bash"]);
     }
 
     #[test]
     fn rejects_unknown_tool_names() {
-        let error = builtin_tools(&["curl".to_string()], Duration::from_secs(5), &[], &local())
+        let error = builtin_tools(&["curl".to_string()], Duration::from_secs(5), &local())
             .err()
             .unwrap()
             .to_string();
@@ -193,7 +192,7 @@ mod tests {
 
     #[test]
     fn bash_gets_the_default_timeout_and_keeps_the_larger_maximum() {
-        let tools = builtin_tools(&["bash".to_string()], Duration::from_secs(7), &[], &local()).unwrap();
+        let tools = builtin_tools(&["bash".to_string()], Duration::from_secs(7), &local()).unwrap();
         let description = tools[0].definition().description;
         assert!(
             description.contains("after 7s unless timeout_secs is set (max 600s)"),

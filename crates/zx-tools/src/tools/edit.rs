@@ -31,7 +31,7 @@ pub struct EditFileTool {
 impl Default for EditFileTool {
     fn default() -> Self {
         Self {
-            executor: Arc::new(LocalExecutor),
+            executor: Arc::new(LocalExecutor::default()),
             queue: Arc::default(),
         }
     }

@@ -23,7 +23,7 @@ pub struct WriteFileTool {
 impl Default for WriteFileTool {
     fn default() -> Self {
         Self {
-            executor: Arc::new(LocalExecutor),
+            executor: Arc::new(LocalExecutor::default()),
             queue: Arc::default(),
         }
     }

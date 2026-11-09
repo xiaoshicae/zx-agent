@@ -57,6 +57,7 @@ use common::{RunnerSetup, config, fast_retry};
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig, SystemUpdates};
 use zx_agent::ai::{Message, Provider};
 use zx_agent::compaction::{Config, Outcome, SummaryMode};
+use zx_agent::executor::LocalExecutor;
 use zx_agent::policy::CommandPolicy;
 use zx_agent::prompt::{build_system_prompt, environment_section};
 use zx_agent::runner::{Limits, RunOutcome, RunReport};
@@ -136,7 +137,9 @@ impl Endpoint {
     fn setup_with_bash(&self, cwd: &Path, allowed: &[&str]) -> RunnerSetup {
         let mut setup = self.setup(self.api_key(), cwd);
         let bash = BashTool {
-            hidden_env: vec![self.api_key_env.clone()],
+            executor: Arc::new(LocalExecutor {
+                hidden_env: vec![self.api_key_env.clone()],
+            }),
             ..BashTool::default()
         };
         setup.config.spec.tools = vec![Arc::new(bash)];

@@ -11,6 +11,7 @@ use zx_agent::agent::{AgentEvent, Event, LoopConfig, LoopSpec};
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::continuation::ContinueOnLength;
+use zx_agent::executor::LocalExecutor;
 use zx_agent::policy::{CommandPolicy, PolicyHook};
 use zx_agent::prompt::{build_system_prompt, environment_section};
 use zx_agent::redact::RedactSecrets;
@@ -42,7 +43,9 @@ async fn main() -> anyhow::Result<()> {
     );
     // The key must not reach commands, where `env` would reveal it.
     let bash = BashTool {
-        hidden_env: vec!["OPENAI_API_KEY".to_string()],
+        executor: Arc::new(LocalExecutor {
+            hidden_env: vec!["OPENAI_API_KEY".to_string()],
+        }),
         ..BashTool::default()
     };
 

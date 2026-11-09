@@ -30,11 +30,8 @@ pub struct BashTool {
     pub default_timeout: Duration,
     /// Upper bound for `timeout_secs`.
     pub max_timeout: Duration,
-    /// Environment variables removed before the command runs, such as the one holding the
-    /// API key. Commands otherwise inherit the agent's whole environment, and `env` or
-    /// `echo $NAME` would put a secret into the tool result.
-    pub hidden_env: Vec<String>,
-    /// Where commands run. Defaults to this machine.
+    /// Where commands run, and so what they must not see: on this machine, the variables in
+    /// [`LocalExecutor::hidden_env`]. Defaults to this machine, hiding nothing.
     pub executor: Arc<dyn Executor>,
 }
 
@@ -43,8 +40,7 @@ impl Default for BashTool {
         Self {
             default_timeout: DEFAULT_TIMEOUT,
             max_timeout: MAX_TIMEOUT,
-            hidden_env: Vec::new(),
-            executor: Arc::new(LocalExecutor),
+            executor: Arc::new(LocalExecutor::default()),
         }
     }
 }
@@ -188,7 +184,6 @@ impl Tool for BashTool {
             command: &args.command,
             cwd: &ctx.cwd,
             timeout: limit,
-            hidden_env: &self.hidden_env,
         };
         let output = self.executor.run(&request, &ctx.cancel).await?;
         let mut content = streams(&output.stdout, &output.stderr);
@@ -405,7 +400,9 @@ mod tests {
         assert!(visible.content.starts_with("[visible]\n"), "{}", visible.content);
 
         let tool = BashTool {
-            hidden_env: vec!["CARGO_MANIFEST_DIR".to_string()],
+            executor: Arc::new(LocalExecutor {
+                hidden_env: vec!["CARGO_MANIFEST_DIR".to_string()],
+            }),
             ..BashTool::default()
         };
         let hidden = tool.execute(probe, &ctx()).await.unwrap();

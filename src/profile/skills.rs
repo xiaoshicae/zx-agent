@@ -131,10 +131,11 @@ impl Tool for ReadSkillTool {
         let args: Args = serde_json::from_value(args).map_err(|error| format!("invalid arguments: {error}"))?;
         let skill = self.find(&args.name)?;
         // Skills are registered files on this machine, wherever commands run.
+        let local = LocalExecutor::default();
         let bytes = tokio::select! {
             biased;
             () = ctx.cancel.cancelled() => return Err("skill read cancelled".into()),
-            result = LocalExecutor.read_file(&skill.path, MAX_FILE_BYTES) => result?,
+            result = local.read_file(&skill.path, MAX_FILE_BYTES) => result?,
         };
         let text = String::from_utf8(bytes).map_err(|error| format!("skill {:?} is not UTF-8: {error}", skill.name))?;
         let remaining = text.get(args.offset..).ok_or_else(|| {

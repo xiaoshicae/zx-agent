@@ -180,7 +180,6 @@ async fn run(executor: &dyn Executor, workspace: &Path, command: &str, timeout: 
         command,
         cwd: workspace,
         timeout,
-        hidden_env: &[],
     };
     executor.run(&request, &CancellationToken::new()).await.unwrap()
 }
@@ -389,7 +388,6 @@ async fn a_cancelled_command_is_stopped_inside_the_container() {
         command: "sleep 30",
         cwd: &workspace,
         timeout: Duration::from_secs(60),
-        hidden_env: &[],
     };
 
     let running = executor.run(&request, &cancel);
@@ -415,7 +413,6 @@ async fn a_run_cancelled_before_it_starts_runs_nothing() {
         command: "echo never",
         cwd: &workspace,
         timeout: Duration::from_secs(60),
-        hidden_env: &[],
     };
 
     let output = executor.run(&request, &cancel).await.unwrap();
@@ -528,7 +525,6 @@ async fn commands_run_with_the_shell_checked_at_start() {
         command: "echo hi",
         cwd: &workspace,
         timeout: Duration::from_secs(10),
-        hidden_env: &[],
     };
 
     executor.run(&request, &CancellationToken::new()).await.unwrap();

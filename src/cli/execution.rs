@@ -51,10 +51,17 @@ fn resolve_location(path: &Path) -> Result<PathBuf> {
 }
 
 /// Where commands run, started when it is a container, and the prompt section describing it.
-pub(super) async fn executor(profile: &Profile, cwd: &Path, label: &str) -> Result<(Arc<dyn Executor>, String)> {
+/// On this machine commands do not see the variables `hidden_env` names; in a container they
+/// see none of the agent's environment.
+pub(super) async fn executor(
+    profile: &Profile,
+    cwd: &Path,
+    label: &str,
+    hidden_env: Vec<String>,
+) -> Result<(Arc<dyn Executor>, String)> {
     match profile.execution {
         Execution::Local => {
-            let local: Arc<dyn Executor> = Arc::new(LocalExecutor);
+            let local: Arc<dyn Executor> = Arc::new(LocalExecutor { hidden_env });
             Ok((local, environment_section(cwd)))
         }
         Execution::Container => {

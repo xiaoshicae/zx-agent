@@ -34,9 +34,6 @@ pub struct ShellCommand<'a> {
     pub command: &'a str,
     pub cwd: &'a Path,
     pub timeout: Duration,
-    /// Environment variables the command must not see, such as the API key variable.
-    /// An executor whose commands never inherit the agent's environment has nothing to remove.
-    pub hidden_env: &'a [String],
 }
 
 /// What was kept of one output stream: the most recent bytes, up to the executor's limit.

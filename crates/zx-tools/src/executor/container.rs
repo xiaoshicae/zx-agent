@@ -287,7 +287,7 @@ impl Executor for ContainerExecutor {
         };
         // An earlier run that was dropped may have left processes whose sweep is still queued.
         self.target.sweep().await;
-        // Commands never inherit the agent's environment, so `hidden_env` has nothing to remove.
+        // Commands never inherit the agent's environment, so there is nothing to hide from them.
         // The shell is the one the start-up probe found, whatever the tool was configured with.
         let mut command = self.target.exec(
             Some(request.cwd),
