@@ -32,7 +32,9 @@ use zx_agent::agent::{
 };
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::retry::RetryPolicy;
-use zx_agent::ai::{AssistantMessage, ContentBlock, EventReceiver, Message, Provider, Request, StopReason, ToolCall, ToolDef};
+use zx_agent::ai::{
+    AssistantMessage, ContentBlock, EventReceiver, Message, Provider, Request, StopReason, ToolCall, ToolDef,
+};
 use zx_agent::policy::PolicyHook;
 use zx_agent::runner::{Limits, Runner};
 use zx_agent::session::{Entry, SessionHeader, SessionStore};
