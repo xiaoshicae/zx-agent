@@ -286,11 +286,7 @@ impl AgentSession {
     /// during a prompt or compaction, whose loop may still take the input.
     pub fn take_queued(&self) -> Result<Vec<QueuedMessage>, AgentSessionError> {
         // Holding the state lock keeps a prompt from starting between the check and the take.
-        let state = lock(&self.state);
-        match &*state {
-            State::Running(_) => Err(AgentSessionError::Busy),
-            State::Idle(_) => Ok(self.queues.take_all()),
-        }
+        self.idle(|_| self.queues.take_all())
     }
 
     /// Cancel only the active prompt or compaction. Returns false when idle.
@@ -328,56 +324,45 @@ impl AgentSession {
     /// session that stopped writing fails every later prompt, so a host that keeps sessions
     /// open checks this after a failed run. Busy during a prompt or compaction.
     pub fn writes_stopped(&self) -> Result<Option<WritesStopped>, AgentSessionError> {
-        match &*lock(&self.state) {
-            State::Idle(runner) => Ok(runner.session().writes_stopped().cloned()),
-            State::Running(_) => Err(AgentSessionError::Busy),
-        }
+        self.idle(|runner| runner.session().writes_stopped().cloned())
     }
 
     /// Revoke all session approvals while idle. A concurrent run returns Busy.
     pub fn clear_approvals(&self) -> Result<(), AgentSessionError> {
-        match &mut *lock(&self.state) {
-            State::Idle(runner) => {
-                runner.clear_approvals();
-                Ok(())
-            }
-            State::Running(_) => Err(AgentSessionError::Busy),
-        }
+        self.idle(Runner::clear_approvals)
     }
 
     /// Switch provider and model while idle. Empty IDs return InvalidModel; a run returns
     /// Busy. History, tools, hooks, limits and exact-call approval grants are retained.
     /// No request is made and the session header keeps its original starting model.
     pub fn set_model(&self, model: ModelRef) -> Result<(), AgentSessionError> {
-        let previous = {
-            let mut state = lock(&self.state);
-            match &mut *state {
-                State::Running(_) => return Err(AgentSessionError::Busy),
-                State::Idle(runner) => {
-                    if model.model.trim().is_empty() {
-                        return Err(AgentSessionError::InvalidModel);
-                    }
-                    runner.replace_model(model.provider, model.model)
-                }
+        let switched = self.idle(|runner| {
+            if model.model.trim().is_empty() {
+                return Err(model);
             }
-        };
-        // A custom provider's destructor is host code too; drop it without the state lock.
-        drop(previous);
-        Ok(())
+            Ok(runner.replace_model(model.provider, model.model))
+        })?;
+        // A custom provider's destructor is host code too: the replaced provider, or the
+        // rejected one, is dropped here, without the state lock.
+        match switched {
+            Ok(previous) => {
+                drop(previous);
+                Ok(())
+            }
+            Err(rejected) => {
+                drop(rejected);
+                Err(AgentSessionError::InvalidModel)
+            }
+        }
     }
 
     /// Change the reasoning level of later task requests while idle; `None` leaves the
     /// server's default. A run returns Busy. The change is recorded with the next request
     /// (`request_config`); no request is made now.
     pub fn set_reasoning(&self, reasoning: Option<Reasoning>) -> Result<(), AgentSessionError> {
-        let mut state = lock(&self.state);
-        match &mut *state {
-            State::Running(_) => Err(AgentSessionError::Busy),
-            State::Idle(runner) => {
-                runner.replace_reasoning(reasoning);
-                Ok(())
-            }
-        }
+        self.idle(|runner| {
+            runner.replace_reasoning(reasoning);
+        })
     }
 
     /// Move the conversation to another point of its session tree while idle (pi:
@@ -389,21 +374,17 @@ impl AgentSession {
     /// ends. A run returns Busy; an ID that is not in the session returns EntryNotFound,
     /// and the position does not change.
     pub fn branch(&self, entry: Option<&str>) -> Result<(), AgentSessionError> {
-        let mut state = lock(&self.state);
-        match &mut *state {
-            State::Running(_) => Err(AgentSessionError::Busy),
-            State::Idle(runner) => match entry {
-                // The store's only error is an unknown ID, which the variant names.
-                Some(id) => runner
-                    .session_mut()
-                    .branch(id)
-                    .map_err(|_| AgentSessionError::EntryNotFound),
-                None => {
-                    runner.session_mut().reset_leaf();
-                    Ok(())
-                }
-            },
-        }
+        self.idle(|runner| match entry {
+            // The store's only error is an unknown ID, which the variant names.
+            Some(id) => runner
+                .session_mut()
+                .branch(id)
+                .map_err(|_| AgentSessionError::EntryNotFound),
+            None => {
+                runner.session_mut().reset_leaf();
+                Ok(())
+            }
+        })?
     }
 
     /// Read the session while idle, for example to list its entries or find the current
@@ -412,6 +393,20 @@ impl AgentSession {
     pub fn inspect<T>(&self, f: impl FnOnce(&SessionStore) -> T) -> Result<T, AgentSessionError> {
         let mut active = self.acquire(CancellationToken::new())?;
         Ok(f(active.runner().session()))
+    }
+
+    /// Run `f` on the Runner under the state lock while idle; a run returns Busy. For quick
+    /// changes of the kernel's own state only: `f` must not call host code, and what it
+    /// returns is dropped after the lock is released, so it can hand back a host object,
+    /// such as a replaced provider, to drop there. When busy, `f` is dropped unlocked too.
+    fn idle<T>(&self, f: impl FnOnce(&mut Runner) -> T) -> Result<T, AgentSessionError> {
+        let mut state = lock(&self.state);
+        let State::Idle(runner) = &mut *state else {
+            drop(state);
+            drop(f);
+            return Err(AgentSessionError::Busy);
+        };
+        Ok(f(runner))
     }
 
     fn acquire(&self, cancel: CancellationToken) -> Result<ActiveRun<'_>, AgentSessionError> {
