@@ -120,13 +120,10 @@ impl<'a> RunHost<'a> {
     pub(super) async fn summarize(&mut self, trigger: Trigger, cancel: &CancellationToken) -> Summarized {
         let mut summarizer = Summarizer {
             session: &mut *self.session,
-            provider: self.config.provider.as_ref(),
-            model: &self.config.model,
-            config: self.compaction,
+            config: self.config,
+            compaction: self.compaction,
             target: self.target,
-            hooks: &self.config.hooks,
             attempt: self.attempt,
-            models: &self.config.models,
         };
         let summarized = summarizer.run(trigger, cancel).await;
         self.pause.note(&summarized.report);

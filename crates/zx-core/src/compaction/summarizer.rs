@@ -1,16 +1,14 @@
 //! The summarizer: one summary over a session, from choosing what to summarize to recording
 //! the result or the failure.
 
-use std::collections::HashMap;
-
 use anyhow::{Context, Result, bail, ensure};
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use super::answer::{ModelSummary, ResponseBytes, full_summary, merge, parse_answer};
 use super::{Config, MAX_SOURCE_BYTES, Outcome, Report, Summarized, Trigger, context_bytes, message_bytes};
-use crate::agent::{AgentEvent, EventTarget, HookChain, RequestKind};
-use crate::ai::{AssistantMessage, Message, ModelMeta, Provider, Request, StreamEvent, duration_ms, now_ms};
+use crate::agent::{AgentEvent, EventTarget, LoopConfig, RequestKind};
+use crate::ai::{AssistantMessage, Message, Request, StreamEvent, duration_ms, now_ms};
 use crate::session::{
     CompactionEntry, CompactionPlan, MergedSummary, ProjectedMessage, RequestSource, SessionStore, SummaryFact,
     SummaryMode, SummaryRequest, summary_messages, without_details,
@@ -39,15 +37,13 @@ const INCREMENTAL_SUMMARY_INSTRUCTIONS: &str = "Update a summary of a conversati
 /// the model, checks the answer and records the result or the failure.
 pub(crate) struct Summarizer<'a> {
     pub session: &'a mut SessionStore,
-    pub provider: &'a dyn Provider,
-    pub model: &'a str,
-    pub config: &'a Config,
+    /// The loop's configuration: the model that summarizes, its prices, and the hooks that
+    /// receive the events.
+    pub config: &'a LoopConfig,
+    pub compaction: &'a Config,
     pub target: EventTarget<'a>,
-    pub hooks: &'a HookChain,
     /// The attempt of the run that compacts; 1 for a manual compaction.
     pub attempt: u32,
-    /// Prices by model, for the cost of the summary response.
-    pub models: &'a HashMap<String, ModelMeta>,
 }
 
 /// What a summary would read and keep, chosen from the current projection.
@@ -99,7 +95,7 @@ enum Cause {
 
 impl Summarizer<'_> {
     async fn emit(&self, event: AgentEvent) {
-        self.hooks.emit(event, self.target).await;
+        self.config.hooks.emit(event, self.target).await;
     }
 
     /// Run one summary: choose what to summarize, record the attempt, ask the model, check
@@ -181,7 +177,7 @@ impl Summarizer<'_> {
             "original summary source exceeds {MAX_SOURCE_BYTES} bytes; start a new session"
         );
         if trigger != Trigger::Manual
-            && let Some(limit) = self.config.trigger_bytes
+            && let Some(limit) = self.compaction.trigger_bytes
         {
             ensure!(
                 context_bytes(&candidate.retained)? < limit,
@@ -203,12 +199,12 @@ impl Summarizer<'_> {
             let next_bytes = bytes.saturating_add(message_bytes(&item.message)?);
             // An oversized old message belongs in the source, rather than forcing
             // the entire prefix into the retained tail. Always keep at least one.
-            if cut < raw.len() && next_bytes > self.config.keep_recent_bytes {
+            if cut < raw.len() && next_bytes > self.compaction.keep_recent_bytes {
                 break;
             }
             bytes = next_bytes;
             cut = index;
-            if bytes >= self.config.keep_recent_bytes {
+            if bytes >= self.compaction.keep_recent_bytes {
                 break;
             }
         }
@@ -247,7 +243,7 @@ impl Summarizer<'_> {
         {
             return Ok(None);
         }
-        if self.config.mode == SummaryMode::Incremental
+        if self.compaction.mode == SummaryMode::Incremental
             && let Some(previous) = previous
         {
             return self.incremental_candidate(&raw, cut, previous);
@@ -313,13 +309,13 @@ impl Summarizer<'_> {
             // A copy: the attempt records the sources, and the answer is checked against them.
             source_entry_ids: source_ids.clone(),
             request: SummaryRequest {
-                provider: self.provider.name().into(),
-                model: self.model.into(),
+                provider: self.config.provider.name().into(),
+                model: self.config.model.clone(),
                 instructions: instructions.into(),
-                max_tokens: self.config.max_summary_tokens,
+                max_tokens: self.compaction.max_summary_tokens,
             },
             input_bytes,
-            mode: self.config.mode,
+            mode: self.compaction.mode,
             continues,
         };
         let id = self
@@ -349,7 +345,7 @@ impl Summarizer<'_> {
         self.emit(AgentEvent::RequestStart {
             kind: RequestKind::Summary,
             entry_id: request_entry,
-            model: self.model.into(),
+            model: self.config.model.clone(),
             attempt: self.attempt,
         })
         .await;
@@ -367,10 +363,10 @@ impl Summarizer<'_> {
         let system_timestamp = now_ms();
         let user_timestamp = now_ms();
         let request = Request {
-            model: self.model.into(),
+            model: self.config.model.clone(),
             messages: summary_messages(instructions, input, system_timestamp, user_timestamp),
             tools: Vec::new(),
-            max_tokens: Some(self.config.max_summary_tokens),
+            max_tokens: Some(self.compaction.max_summary_tokens),
             reasoning: None,
             cache_key: None,
         };
@@ -379,10 +375,10 @@ impl Summarizer<'_> {
             system_timestamp,
             user_timestamp,
         };
-        let options = self.provider.request_options();
+        let options = self.config.provider.request_options();
         let entry = self
             .session
-            .record_request(&request, self.provider.name(), options, source)
+            .record_request(&request, self.config.provider.name(), options, source)
             .await
             .context("cannot persist summary request checkpoint")?;
         Ok((request, entry))
@@ -398,7 +394,7 @@ impl Summarizer<'_> {
         trigger: Trigger,
         cancel: &CancellationToken,
     ) -> Result<(MergedSummary, usize)> {
-        let merged = match self.config.mode {
+        let merged = match self.compaction.mode {
             SummaryMode::Full => MergedSummary {
                 summary: full_summary(answer, &open.source_ids)?,
                 superseded: Vec::new(),
@@ -424,7 +420,7 @@ impl Summarizer<'_> {
             report.input_bytes
         );
         ensure!(
-            !trigger.is_automatic() || self.config.trigger_bytes.is_none_or(|limit| output_bytes <= limit),
+            !trigger.is_automatic() || self.compaction.trigger_bytes.is_none_or(|limit| output_bytes <= limit),
             "retained context still exceeds triggerBytes; reduce retained input or raise the budget"
         );
         if cancel.is_cancelled() {
@@ -491,7 +487,7 @@ impl Summarizer<'_> {
     async fn request_summary(&self, request: Request, cancel: &CancellationToken) -> Result<AssistantMessage, String> {
         let child = cancel.child_token();
         let _cancel_on_drop = child.drop_guard_ref();
-        let mut stream = self.provider.stream(request, child.clone());
+        let mut stream = self.config.provider.stream(request, child.clone());
         let wait = async {
             let mut streamed = ResponseBytes::default();
             loop {
@@ -502,18 +498,18 @@ impl Summarizer<'_> {
                     Some(StreamEvent::Done(mut message) | StreamEvent::Error(mut message)) => {
                         // Also bounds a provider that delivers its content without deltas.
                         ResponseBytes::of(&message).validate()?;
-                        message.usage.price(self.models, self.model);
+                        message.usage.price(&self.config.models, &self.config.model);
                         return Ok(message);
                     }
                     None => return Err("summary stream ended without a final event".into()),
                 }
             }
         };
-        match tokio::time::timeout(self.config.timeout, wait).await {
+        match tokio::time::timeout(self.compaction.timeout, wait).await {
             Ok(result) => result,
             Err(_) => Err(format!(
                 "summary timed out after {}ms",
-                duration_ms(self.config.timeout)
+                duration_ms(self.compaction.timeout)
             )),
         }
     }
