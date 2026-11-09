@@ -1,6 +1,5 @@
 //! `read_file` tool: read a text file in pages.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -8,7 +7,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::truncate::{MAX_BYTES, MAX_LINES, truncate_head};
-use super::{DEFAULT_MAX_FILE_BYTES, looks_binary, parse_args, resolve, unless_cancelled};
+use super::{DEFAULT_MAX_FILE_BYTES, check_path, looks_binary, parse_args, resolve, unless_cancelled};
 use crate::agent::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
 use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
@@ -79,7 +78,7 @@ impl Tool for ReadFileTool {
 
     fn validate_arguments(&self, args: &Value) -> Result<(), String> {
         let args: Args = parse_args(args)?;
-        resolve(Path::new("."), &args.path).map(|_| ())
+        check_path(&args.path)
     }
 
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {

@@ -1,6 +1,5 @@
 //! `edit_file` tool: exact text replacements in one file (pi: coding-agent/src/core/tools/edit.ts).
 
-use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -11,7 +10,7 @@ use super::edit_text::{
     Edit, apply_edits, line_ending, normalize_to_lf, restore_line_endings, split_bom, unified_patch,
 };
 use super::mutation::FileMutationQueue;
-use super::{DEFAULT_MAX_FILE_BYTES, looks_binary, parse_args, resolve, unless_cancelled};
+use super::{DEFAULT_MAX_FILE_BYTES, check_path, looks_binary, parse_args, resolve, unless_cancelled};
 use crate::agent::{ExecutionMode, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput};
 use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
@@ -139,7 +138,7 @@ impl Tool for EditFileTool {
         if args.edits.is_empty() {
             return Err("edits must contain at least one replacement".into());
         }
-        resolve(Path::new("."), &args.path).map(|_| ())
+        check_path(&args.path)
     }
 
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {

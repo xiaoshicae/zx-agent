@@ -210,6 +210,37 @@ impl Output {
         }
     }
 
+    /// Retry `attempt` of `max_retries` is scheduled: say so, unless the failed response just
+    /// said it, and show the wait in the status line.
+    fn retry_scheduled(&self, state: &mut TextState, attempt: u32, max_retries: u32, delay_ms: u64, error: &str) {
+        if !self.debug {
+            // The failed response was reported just before; name it only once.
+            let line = if state.last_error.as_deref() == Some(error) {
+                format!("[retry] {attempt}/{max_retries} in {delay_ms}ms (same error)")
+            } else {
+                format!("[retry] {attempt}/{max_retries} in {delay_ms}ms: {}", visible(error))
+            };
+            state.terminal.line(Tone::Warn, &line);
+        }
+        state.terminal.set_phase(Phase::Retry { attempt, max_retries });
+    }
+
+    /// An event with no line of chat's own: print it as `run` does, and clear the status line
+    /// when a summary is over, as a manual one ends without a `run_end`.
+    fn progress(&self, state: &mut TextState, event: &AgentEvent) {
+        if !self.debug
+            && let Some((severity, line)) = progress_line(event)
+        {
+            state.terminal.line(tone(severity), &line);
+        }
+        if matches!(
+            event,
+            AgentEvent::CompactionEnd { .. } | AgentEvent::CompactionFailed { .. }
+        ) {
+            state.terminal.clear_status();
+        }
+    }
+
     fn tool_result(&self, state: &mut TextState, result: &ToolResultMessage) {
         let label = state
             .labels
@@ -234,8 +265,26 @@ impl Output {
     }
 }
 
+/// A call starts: the status line names it, with the label its call was shown with.
+fn tool_started(state: &mut TextState, call: &str, tool: &str, args: &Value) {
+    let label = state
+        .labels
+        .get(call)
+        .cloned()
+        .unwrap_or_else(|| call_label(tool, args));
+    state.terminal.set_phase(Phase::Tool { label });
+}
+
+/// A message an extension sent and asked to show: its type, then a preview of its content.
+fn custom_message(state: &mut TextState, custom_type: &str, content: &str) {
+    let style = state.terminal.style();
+    state.terminal.line(Tone::Dim, &format!("[{}]", visible(custom_type)));
+    for line in limited(content, PREVIEW_LINES, style, |_| Tone::Plain) {
+        state.terminal.line(Tone::Plain, &format!("  {line}"));
+    }
+}
+
 impl EventSink for Output {
-    #[expect(clippy::too_many_lines, reason = "chat is frozen; the event match stays as it is")]
     fn emit(&self, event: &Event) {
         if self.mode == OutputMode::Jsonl {
             self.json.emit(event);
@@ -282,27 +331,12 @@ impl EventSink for Output {
                     message: Message::User { content, .. },
                     custom: Some(info),
                     ..
-                } if info.display && !self.debug => {
-                    let style = state.terminal.style();
-                    state
-                        .terminal
-                        .line(Tone::Dim, &format!("[{}]", visible(&info.custom_type)));
-                    for line in limited(content, PREVIEW_LINES, style, |_| Tone::Plain) {
-                        state.terminal.line(Tone::Plain, &format!("  {line}"));
-                    }
-                }
+                } if info.display && !self.debug => custom_message(&mut state, &info.custom_type, content),
                 AgentEvent::ToolExecutionStart {
                     tool_call_id,
                     tool_name,
                     args,
-                } => {
-                    let label = state
-                        .labels
-                        .get(tool_call_id)
-                        .cloned()
-                        .unwrap_or_else(|| call_label(tool_name, args));
-                    state.terminal.set_phase(Phase::Tool { label });
-                }
+                } => tool_started(&mut state, tool_call_id, tool_name, args),
                 // The result line that follows says how the call ended.
                 AgentEvent::ToolExecutionEnd { .. } => {}
                 AgentEvent::ApprovalRequested { .. } | AgentEvent::RunEnd { .. } => state.terminal.clear_status(),
@@ -321,36 +355,9 @@ impl EventSink for Output {
                     max_retries,
                     delay_ms,
                     error,
-                } => {
-                    if !self.debug {
-                        // The failed response was reported just before; name it only once.
-                        let line = if state.last_error.as_deref() == Some(error.as_str()) {
-                            format!("[retry] {attempt}/{max_retries} in {delay_ms}ms (same error)")
-                        } else {
-                            format!("[retry] {attempt}/{max_retries} in {delay_ms}ms: {}", visible(error))
-                        };
-                        state.terminal.line(Tone::Warn, &line);
-                    }
-                    state.terminal.set_phase(Phase::Retry {
-                        attempt: *attempt,
-                        max_retries: *max_retries,
-                    });
-                }
+                } => self.retry_scheduled(&mut state, *attempt, *max_retries, *delay_ms, error),
                 // Everything else is printed as `run` prints it; `progress_line` covers every event.
-                other => {
-                    if !self.debug
-                        && let Some((severity, line)) = progress_line(other)
-                    {
-                        state.terminal.line(tone(severity), &line);
-                    }
-                    // A summary is over: a manual one ends without a `run_end`.
-                    if matches!(
-                        other,
-                        AgentEvent::CompactionEnd { .. } | AgentEvent::CompactionFailed { .. }
-                    ) {
-                        state.terminal.clear_status();
-                    }
-                }
+                other => self.progress(&mut state, other),
             }
         }
         // Emit after rendering the assistant message so the log starts on a new line.

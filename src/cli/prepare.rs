@@ -3,7 +3,7 @@
 //! registers.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -166,22 +166,7 @@ fn request_fields(values: &[String]) -> Result<serde_json::Map<String, serde_jso
 /// Configuration errors and a container that cannot start are reported before a new session
 /// file is created.
 pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSession> {
-    let cwd = resolve_cwd(options.cwd.or(options.base.cwd.as_deref()))?;
-    let mut profile = load_profile(&options)?;
-    let models = model_meta(&mut profile, &options);
-    // Without prices every response costs nothing, and the budget would never stop a run.
-    anyhow::ensure!(
-        profile.limits.cost_budget.is_none() || models.get(options.model).is_some_and(|meta| meta.cost.is_some()),
-        "a cost budget needs the prices of the model {:?}: add them to the profile's [[models]]",
-        options.model
-    );
-    // The container mounts the workspace at its real path, which tools must use as well.
-    let cwd = match profile.execution {
-        Execution::Local => cwd,
-        Execution::Container => cwd
-            .canonicalize()
-            .with_context(|| format!("cannot resolve {}", cwd.display()))?,
-    };
+    let (cwd, mut profile, models) = settle(&options)?;
     let context = profile.context_section(&cwd).context(
         "cannot load project instructions; --no-context skips AGENTS.md discovery and profile context files",
     )?;
@@ -235,6 +220,29 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     })
 }
 
+/// The working directory, the profile with the command line over it, and what is known about
+/// the models. A cost budget needs the model's prices; container execution uses the
+/// directory's real path.
+fn settle(options: &SessionOptions<'_>) -> Result<(PathBuf, Profile, HashMap<String, ModelMeta>)> {
+    let cwd = resolve_cwd(options.cwd.or(options.base.cwd.as_deref()))?;
+    let mut profile = load_profile(options)?;
+    let models = model_meta(&mut profile, options);
+    // Without prices every response costs nothing, and the budget would never stop a run.
+    anyhow::ensure!(
+        profile.limits.cost_budget.is_none() || models.get(options.model).is_some_and(|meta| meta.cost.is_some()),
+        "a cost budget needs the prices of the model {:?}: add them to the profile's [[models]]",
+        options.model
+    );
+    // The container mounts the workspace at its real path, which tools must use as well.
+    let cwd = match profile.execution {
+        Execution::Local => cwd,
+        Execution::Container => cwd
+            .canonicalize()
+            .with_context(|| format!("cannot resolve {}", cwd.display()))?,
+    };
+    Ok((cwd, profile, models))
+}
+
 /// The built-in tools the profile enables, running on `executor`, and the tools of this
 /// machine.
 fn assemble_tools(
@@ -268,9 +276,8 @@ fn command_policy_section(policy: &CommandPolicy, tools: &[Arc<dyn Tool>]) -> St
 /// The selected profile with the command line's settings over it, validated. Explicit values
 /// replace the profile's; denied commands and context files add to it.
 fn load_profile(options: &SessionOptions<'_>) -> Result<Profile> {
-    let base = options.base;
-    let mut profile = Profile::load(base.profile.as_deref(), options.default_profile)?;
-    if let Some(tools) = &base.tools {
+    let mut profile = Profile::load(options.base.profile.as_deref(), options.default_profile)?;
+    if let Some(tools) = &options.base.tools {
         profile.tools = tools
             .iter()
             .map(|name| name.trim())
@@ -278,6 +285,17 @@ fn load_profile(options: &SessionOptions<'_>) -> Result<Profile> {
             .map(String::from)
             .collect();
     }
+    apply_budgets(&mut profile, options);
+    apply_rules(&mut profile, options.base);
+    apply_context(&mut profile, options);
+    apply_execution(&mut profile, options.base)?;
+    profile.validate()?;
+    Ok(profile)
+}
+
+/// `--max-model-requests`, `--timeout-secs`, the token and cost budgets and
+/// `--continue-on-length`; a zero timeout or budget removes the profile's.
+fn apply_budgets(profile: &mut Profile, options: &SessionOptions<'_>) {
     if let Some(turns) = options.budget.max_model_requests {
         profile.limits.max_model_requests = Some(turns);
     }
@@ -293,6 +311,10 @@ fn load_profile(options: &SessionOptions<'_>) -> Result<Profile> {
     if let Some(count) = options.continue_on_length {
         profile.continue_on_length = count;
     }
+}
+
+/// The command rules: an allowlist or auto-approval list replaces the profile's, denials add.
+fn apply_rules(profile: &mut Profile, base: &BaseArgs) {
     if !base.allow_cmd.is_empty() {
         profile.rules.allow.clone_from(&base.allow_cmd);
     }
@@ -300,6 +322,12 @@ fn load_profile(options: &SessionOptions<'_>) -> Result<Profile> {
     if !base.auto_approve_cmd.is_empty() {
         profile.rules.auto_approve.clone_from(&base.auto_approve_cmd);
     }
+}
+
+/// What the model is told and kept: the instructions, the project context and the summary
+/// triggers.
+fn apply_context(profile: &mut Profile, options: &SessionOptions<'_>) {
+    let base = options.base;
     if let Some(instructions) = &options.shared.instructions {
         profile.instructions.clone_from(instructions);
     }
@@ -315,6 +343,10 @@ fn load_profile(options: &SessionOptions<'_>) -> Result<Profile> {
         profile.compaction.trigger_bytes = None;
         profile.compaction.trigger_tokens = None;
     }
+}
+
+/// Where commands run. An image needs container execution, and container execution an image.
+fn apply_execution(profile: &mut Profile, base: &BaseArgs) -> Result<()> {
     if let Some(execution) = base.execution {
         profile.execution = match execution {
             ExecutionArg::Local => Execution::Local,
@@ -333,8 +365,7 @@ fn load_profile(options: &SessionOptions<'_>) -> Result<Profile> {
         profile.execution == Execution::Local || profile.container.image.is_some(),
         "execution = \"container\" needs container.image: set it in the profile, or give --container-image"
     );
-    profile.validate()?;
-    Ok(profile)
+    Ok(())
 }
 
 /// What is known about the models: the profile's entries, and the window given for this

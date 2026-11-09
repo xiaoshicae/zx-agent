@@ -1,6 +1,5 @@
 //! `write_file` tool: create or replace a whole file (pi: coding-agent/src/core/tools/write.ts).
 
-use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -8,7 +7,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::mutation::FileMutationQueue;
-use super::{parse_args, resolve, unless_cancelled};
+use super::{check_path, parse_args, resolve, unless_cancelled};
 use crate::agent::{ExecutionMode, Tool, ToolContext, ToolOutput};
 use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
@@ -69,7 +68,7 @@ impl Tool for WriteFileTool {
 
     fn validate_arguments(&self, args: &Value) -> Result<(), String> {
         let args: Args = parse_args(args)?;
-        resolve(Path::new("."), &args.path).map(|_| ())
+        check_path(&args.path)
     }
 
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
