@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use serde_json::json;
+use tokio_util::sync::CancellationToken;
 
 use common::{EchoTool, NotifyingProvider, RunnerSetup, config, header, summarize};
 use zx_agent::AgentSession;
@@ -56,12 +57,12 @@ async fn branching_to_an_earlier_answer_continues_there_and_keeps_the_branch_lef
         FauxStep::text("three"),
     ]));
     let session = file_session(&file, provider.clone(), vec![]);
-    session.prompt("first").await.unwrap();
-    session.prompt("second").await.unwrap();
+    session.prompt("first", &CancellationToken::new()).await.unwrap();
+    session.prompt("second", &CancellationToken::new()).await.unwrap();
     let one = answer_id(&session, "one");
 
     session.branch(Some(&one)).unwrap();
-    let report = session.prompt("third").await.unwrap();
+    let report = session.prompt("third", &CancellationToken::new()).await.unwrap();
 
     assert_eq!(report.final_text, "three");
     assert_eq!(
@@ -107,7 +108,7 @@ async fn a_prompt_after_an_answer_with_unanswered_calls_records_them_as_not_exec
         FauxStep::text("again"),
     ]));
     let session = file_session(&file, provider.clone(), vec![echo.clone()]);
-    session.prompt("first").await.unwrap();
+    session.prompt("first", &CancellationToken::new()).await.unwrap();
     assert_eq!(echo.calls.load(Ordering::SeqCst), 1);
     let calling = entry_id(
         &session,
@@ -115,7 +116,7 @@ async fn a_prompt_after_an_answer_with_unanswered_calls_records_them_as_not_exec
     );
 
     session.branch(Some(&calling)).unwrap();
-    let report = session.prompt("second").await.unwrap();
+    let report = session.prompt("second", &CancellationToken::new()).await.unwrap();
 
     assert_eq!(report.outcome, RunOutcome::Completed);
     assert_eq!(echo.calls.load(Ordering::SeqCst), 1, "the call is not run again");
@@ -135,10 +136,10 @@ async fn branching_to_the_root_starts_the_conversation_over_in_the_same_session(
     let file = dir.path().join("session.jsonl");
     let provider = Arc::new(FauxProvider::new([FauxStep::text("one"), FauxStep::text("fresh")]));
     let session = file_session(&file, provider.clone(), vec![]);
-    session.prompt("first").await.unwrap();
+    session.prompt("first", &CancellationToken::new()).await.unwrap();
 
     session.branch(None).unwrap();
-    session.prompt("new").await.unwrap();
+    session.prompt("new", &CancellationToken::new()).await.unwrap();
 
     assert_eq!(summarize(&provider.requests()[1].messages), ["user:new"]);
     drop(session);
@@ -157,7 +158,8 @@ async fn branching_and_inspecting_wait_for_the_run_and_reject_unknown_entries() 
     let provider = NotifyingProvider::new([FauxStep::Hang, FauxStep::text("later")]);
     let (runner, _) = RunnerSetup::new(config(provider.clone(), vec![])).build();
     let session = AgentSession::from(runner);
-    let mut running = Box::pin(session.prompt("first"));
+    let cancel = CancellationToken::new();
+    let mut running = Box::pin(session.prompt("first", &cancel));
     tokio::select! {
         () = provider.started.notified() => {}
         _ = &mut running => panic!("must be running"),
@@ -172,7 +174,7 @@ async fn branching_and_inspecting_wait_for_the_run_and_reject_unknown_entries() 
 
     assert_eq!(session.branch(Some("nowhere")), Err(AgentSessionError::EntryNotFound));
     // The position did not move: the next prompt continues after the aborted answer.
-    session.prompt("second").await.unwrap();
+    session.prompt("second", &CancellationToken::new()).await.unwrap();
     let context = summarize(&provider.requests()[1].messages);
     assert_eq!(context[0], "user:first");
     assert_eq!(context[context.len() - 1], "user:second");

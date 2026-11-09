@@ -76,6 +76,7 @@ enum State {
 ///
 /// ```no_run
 /// use std::sync::Arc;
+/// use tokio_util::sync::CancellationToken;
 /// use zx_core::AgentSession;
 /// use zx_core::agent::Event;
 /// use zx_core::agent_session::AgentSessionError;
@@ -86,8 +87,9 @@ enum State {
 /// let _subscription = session.subscribe(Arc::new(|event: &Event| {
 ///     println!("{} #{} {}", event.run_id, event.seq, event.event.kind());
 /// }));
-/// let first = session.prompt("Inspect the logs.").await?;
-/// let second = session.prompt("Summarize the findings.").await?;
+/// let cancel = CancellationToken::new();
+/// let first = session.prompt("Inspect the logs.", &cancel).await?;
+/// let second = session.prompt("Summarize the findings.", &cancel).await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -117,39 +119,21 @@ impl AgentSession {
         Self::from(Runner::new(config, retry, limits, session, sink))
     }
 
-    /// Run a prompt against the retained conversation. Overlapping calls return Busy.
-    /// Dropping the future cancels its work and immediately releases the conversation.
-    pub async fn prompt(&self, text: impl Into<String>) -> Result<RunReport, AgentSessionError> {
-        self.prompt_with_cancel(text, &CancellationToken::new()).await
-    }
-
-    /// Like prompt, using a child of the caller's token. Neither abort nor future drop
-    /// cancels that parent token or any subsequent prompt.
-    pub async fn prompt_with_cancel(
+    /// Run a prompt against the retained conversation: the person's text, or a message from
+    /// an extension (pi: `sendMessage` with `triggerTurn` while idle). Overlapping calls
+    /// return Busy. The run uses a child of `cancel`: cancelling `cancel` cancels the run, but
+    /// neither abort nor dropping the future cancels `cancel` or any later prompt. Dropping
+    /// the future cancels its work and immediately releases the conversation.
+    pub async fn prompt(
         &self,
-        text: impl Into<String>,
-        parent: &CancellationToken,
+        message: impl Into<QueuedMessage>,
+        cancel: &CancellationToken,
     ) -> Result<RunReport, AgentSessionError> {
-        self.prompt_message_with_cancel(QueuedMessage::User(text.into()), parent)
-            .await
-    }
-
-    /// Run with any message as the input: the person's text, or a message from an
-    /// extension (pi: `sendMessage` with `triggerTurn` while idle). Otherwise like `prompt`.
-    pub async fn prompt_message(&self, message: QueuedMessage) -> Result<RunReport, AgentSessionError> {
-        self.prompt_message_with_cancel(message, &CancellationToken::new())
-            .await
-    }
-
-    /// Like prompt_message, using a child of the caller's token, as prompt_with_cancel does.
-    pub async fn prompt_message_with_cancel(
-        &self,
-        message: QueuedMessage,
-        parent: &CancellationToken,
-    ) -> Result<RunReport, AgentSessionError> {
-        let cancel = parent.child_token();
+        // The conversion is host code: it runs before the conversation is leased.
+        let message = message.into();
+        let cancel = cancel.child_token();
         let mut active = self.acquire(cancel.clone())?;
-        let report = active.runner().run_message(message, &cancel).await;
+        let report = active.runner().run(message, &cancel).await;
         Ok(report)
     }
 
@@ -160,21 +144,16 @@ impl AgentSession {
     /// DuplicateKey without a request, also from a session reopened from its file; the host
     /// then reads the session for the answer, or continues the run that was interrupted.
     /// A blank key returns InvalidKey. Otherwise like `prompt`.
-    pub async fn prompt_once(&self, key: &str, text: impl Into<String>) -> Result<RunReport, AgentSessionError> {
-        self.prompt_once_with_cancel(key, text, &CancellationToken::new()).await
-    }
-
-    /// Like prompt_once, using a child of the caller's token, as prompt_with_cancel does.
-    pub async fn prompt_once_with_cancel(
+    pub async fn prompt_once(
         &self,
         key: &str,
-        text: impl Into<String>,
-        parent: &CancellationToken,
+        message: impl Into<QueuedMessage>,
+        cancel: &CancellationToken,
     ) -> Result<RunReport, AgentSessionError> {
         if key.trim().is_empty() {
             return Err(AgentSessionError::InvalidKey);
         }
-        let cancel = parent.child_token();
+        let cancel = cancel.child_token();
         // The lease spans the check, the record and the run, so no other prompt can slip in
         // between.
         let mut active = self.acquire(cancel.clone())?;
@@ -191,35 +170,23 @@ impl AgentSession {
             .append_custom_entry(IDEMPOTENCY_KEY_TYPE, serde_json::json!({ "key": key }))
             .await
             .map_err(|error| AgentSessionError::WriteFailed(format!("{error:#}")))?;
-        Ok(runner.run(text, &cancel).await)
+        Ok(runner.run(message, &cancel).await)
     }
 
     /// Continue the conversation without new input; see [`Runner::continue_run`] for what is
-    /// answered. An overlap returns Busy.
-    pub async fn continue_run(&self) -> Result<RunReport, AgentSessionError> {
-        self.continue_with_cancel(&CancellationToken::new()).await
-    }
-
-    /// Like continue_run, using a child of the caller's token, as prompt_with_cancel does.
-    pub async fn continue_with_cancel(&self, parent: &CancellationToken) -> Result<RunReport, AgentSessionError> {
-        let cancel = parent.child_token();
+    /// answered. An overlap returns Busy; `cancel` works as for `prompt`.
+    pub async fn continue_run(&self, cancel: &CancellationToken) -> Result<RunReport, AgentSessionError> {
+        let cancel = cancel.child_token();
         let mut active = self.acquire(cancel.clone())?;
         Ok(active.runner().continue_run(&cancel).await)
     }
 
     /// Compact the retained conversation while holding the same exclusive lease as prompt.
-    /// An overlap returns Busy; no eligible old prefix returns a no-op report.
-    pub async fn compact(&self) -> Result<compaction::Report, AgentSessionError> {
-        self.compact_with_cancel(&CancellationToken::new()).await
-    }
-
-    /// Like compact, using a child token. Abort or future drop leaves the parent token
-    /// untouched, restores the Runner, and keeps incomplete summary attempts out of context.
-    pub async fn compact_with_cancel(
-        &self,
-        parent: &CancellationToken,
-    ) -> Result<compaction::Report, AgentSessionError> {
-        let cancel = parent.child_token();
+    /// An overlap returns Busy; no eligible old prefix returns a no-op report. The summary
+    /// uses a child of `cancel`: abort or future drop leaves `cancel` untouched, restores the
+    /// Runner, and keeps incomplete summary attempts out of context.
+    pub async fn compact(&self, cancel: &CancellationToken) -> Result<compaction::Report, AgentSessionError> {
+        let cancel = cancel.child_token();
         let mut active = self.acquire(cancel.clone())?;
         Ok(active.runner().compact(&cancel).await)
     }

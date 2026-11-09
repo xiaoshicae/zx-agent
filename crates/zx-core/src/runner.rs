@@ -158,8 +158,9 @@ impl Runner {
         &mut self.session
     }
 
-    /// Run one prompt to completion. Never panics on provider or tool failures; the report
-    /// says how the run ended.
+    /// Run one prompt to completion: the person's text, or a message from an extension (pi:
+    /// `sendMessage` with `triggerTurn` while idle). Never panics on provider or tool
+    /// failures; the report says how the run ended.
     ///
     /// One runner owns one active conversation. Overlapping runs are rejected by borrowing:
     ///
@@ -173,15 +174,8 @@ impl Runner {
     ///     tokio::join!(first, second);
     /// }
     /// ```
-    pub async fn run(&mut self, prompt: impl Into<String>, cancel: &CancellationToken) -> RunReport {
-        self.run_message(QueuedMessage::User(prompt.into()), cancel).await
-    }
-
-    /// Run with any message as the input: the person's text, or a message from an
-    /// extension (pi: `sendMessage` with `triggerTurn` while idle). Otherwise like
-    /// [`Runner::run`].
-    pub async fn run_message(&mut self, message: QueuedMessage, cancel: &CancellationToken) -> RunReport {
-        self.start(Start::Message(message), cancel).await
+    pub async fn run(&mut self, message: impl Into<QueuedMessage>, cancel: &CancellationToken) -> RunReport {
+        self.start(Start::Message(message.into()), cancel).await
     }
 
     /// Continue the conversation without new input: the model answers

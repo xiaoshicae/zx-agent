@@ -53,7 +53,7 @@
 | ACP 接入 | `src/acp/` | agent 一侧：`session/new` 建会话、`session/prompt` 在派生任务里运行并在回合结束时应答、事件映射为 `session/update`、审批映射为 `session/request_permission`、`session/cancel` 取消；stdout 只走协议 |
 | 追踪与指标导出 | `src/otel/` | 设置了 OTLP 地址的标准变量时，把运行事件转成 OpenTelemetry span 与指标（运行、请求、工具调用与摘要的次数和时长，token 与成本）经 OTLP/HTTP 导出；只含元数据，事件经有界通道交给一个后台任务，满时丢弃，运行不等待导出；`run` 的 sink 可带调用方的 traceparent |
 
-一次运行的数据流：`main` 组装 `AgentSession` → `prompt_with_cancel` 独占取得 Runner → `Runner::run` 开始一次运行（`Run`），每次尝试是一个 `Attempt` → 尝试先持久化提示词、输入和上下文改动，再经宿主准备步骤执行可选摘要 → 新增插话与钩子改动持久化后请求任务模型，发出的上下文就是此刻的会话投影 → 执行工具、脱敏、可选落盘 → 循环不保存对话副本，每一步都经会话宿主（`agent::SessionHost`，crate 内部；`SessionStore` 自身就是宿主，Runner 的 `RunHost` 在其上加摘要）先写入，再发出事件 → `Run` 处理任务请求重试并汇总 `RunReport`，由 `main` 映射退出码。自动摘要单独记录、消耗请求预算且不重试；手动 compact 共用独占权并独立报告。
+一次运行的数据流：`main` 组装 `AgentSession` → `prompt` 独占取得 Runner → `Runner::run` 开始一次运行（`Run`），每次尝试是一个 `Attempt` → 尝试先持久化提示词、输入和上下文改动，再经宿主准备步骤执行可选摘要 → 新增插话与钩子改动持久化后请求任务模型，发出的上下文就是此刻的会话投影 → 执行工具、脱敏、可选落盘 → 循环不保存对话副本，每一步都先写入会话宿主（`agent::SessionHost`，crate 内部）借给循环的会话（`SessionStore` 自身就是宿主，Runner 的 `RunHost` 在其上加摘要），再发出事件 → `Run` 处理任务请求重试并汇总 `RunReport`，由 `main` 映射退出码。自动摘要单独记录、消耗请求预算且不重试；手动 compact 共用独占权并独立报告。
 
 设计取舍（改动前先理解原因；必须保持的约束见下文"不变量"）：
 

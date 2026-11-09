@@ -140,15 +140,15 @@ async fn request_config_is_appended_only_when_the_configuration_changes() {
     .build();
     let session = AgentSession::from(runner);
 
-    session.prompt("a").await.unwrap();
-    session.prompt("b").await.unwrap();
+    session.prompt("a", &CancellationToken::new()).await.unwrap();
+    session.prompt("b", &CancellationToken::new()).await.unwrap();
     session
         .set_model(ModelRef {
             provider: second.clone(),
             model: "other-model".into(),
         })
         .unwrap();
-    session.prompt("c").await.unwrap();
+    session.prompt("c", &CancellationToken::new()).await.unwrap();
 
     let configs = types(&path).iter().filter(|kind| *kind == "request_config").count();
     assert_eq!(configs, 2, "{:?}", types(&path));
@@ -223,7 +223,7 @@ async fn summary_requests_are_rebuilt_from_the_compaction_attempt() {
             .unwrap(),
     );
 
-    let report = session.compact().await.unwrap();
+    let report = session.compact(&CancellationToken::new()).await.unwrap();
 
     assert_eq!(report.outcome, Outcome::Completed, "{report:?}");
     let reopened = SessionStore::read(&path).unwrap();

@@ -28,6 +28,7 @@ use agent_client_protocol::v1::schema::{
 };
 use agent_client_protocol::{Agent, Client, Error, ErrorCode, Responder, Stdio, V1};
 use anyhow::{Context, Result};
+use tokio_util::sync::CancellationToken;
 
 use zx_agent::AgentSession;
 use zx_agent::agent::{EventSink, RunOutcome};
@@ -374,7 +375,7 @@ async fn serve(args: AcpArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> 
 
 /// The response to `session/prompt` once the turn ended: its stop reason, or the run's error.
 async fn answer_prompt(live: &Live, text: String) -> Result<PromptResponse> {
-    let report = live.session.prompt(text).await?;
+    let report = live.session.prompt(text, &CancellationToken::new()).await?;
     stop_reason(&report).map(PromptResponse::new)
 }
 

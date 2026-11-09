@@ -6,6 +6,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio_util::sync::CancellationToken;
+
 use zx_agent::AgentSession;
 use zx_agent::agent::{AgentEvent, Event, LoopConfig};
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
@@ -81,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let agent = AgentSession::new(config, RetryPolicy::default(), limits, session, sink);
 
-    let report = agent.prompt(task).await?;
+    let report = agent.prompt(task, &CancellationToken::new()).await?;
     println!("{}", report.final_text);
     eprintln!(
         "outcome: {:?}, model requests: {}, tokens: {}",

@@ -495,7 +495,8 @@ async fn a_dropped_run_is_recovered_by_the_next_prompt() {
     let (runner, _) = RunnerSetup::new(config(provider.clone(), tools)).build();
     let session = AgentSession::from(runner);
     {
-        let mut running = Box::pin(session.prompt("start"));
+        let cancel = CancellationToken::new();
+        let mut running = Box::pin(session.prompt("start", &cancel));
         tokio::select! {
             () = hang.started.notified() => {}
             _ = &mut running => panic!("the run ended before its tool started"),
@@ -503,7 +504,7 @@ async fn a_dropped_run_is_recovered_by_the_next_prompt() {
         // Dropping the run future stops it before the result is recorded.
     }
 
-    let report = session.prompt("again").await.unwrap();
+    let report = session.prompt("again", &CancellationToken::new()).await.unwrap();
 
     assert_eq!(report.outcome, RunOutcome::Completed);
     let results = results(&provider.requests()[1].messages);
@@ -526,7 +527,7 @@ async fn result_after_cancelling_a_running_call(effects: Effects) -> (String, bo
     let session = AgentSession::from(runner);
     let cancel = CancellationToken::new();
     {
-        let mut running = Box::pin(session.prompt_with_cancel("start", &cancel));
+        let mut running = Box::pin(session.prompt("start", &cancel));
         tokio::select! {
             () = hang.started.notified() => {}
             _ = &mut running => panic!("the run ended before its tool started"),
@@ -534,7 +535,7 @@ async fn result_after_cancelling_a_running_call(effects: Effects) -> (String, bo
         cancel.cancel();
         assert_eq!(running.await.unwrap().outcome, RunOutcome::Aborted);
     }
-    let report = session.prompt("again").await.unwrap();
+    let report = session.prompt("again", &CancellationToken::new()).await.unwrap();
     assert_eq!(report.outcome, RunOutcome::Completed);
     let results = results(&provider.requests()[1].messages);
     assert_eq!(results.len(), 1, "{results:?}");
