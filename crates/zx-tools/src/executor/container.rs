@@ -54,10 +54,6 @@ const START_TIMEOUT: Duration = Duration::from_secs(60);
 const START_POLL: Duration = Duration::from_millis(100);
 /// Longest wait for one readiness probe.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
-/// Longest wait for one file read. A FIFO swapped in after the checks would otherwise block.
-const READ_TIMEOUT: Duration = Duration::from_secs(30);
-/// Longest wait for one file write, for the same reason.
-const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Longest wait for one sweep of the command user's processes.
 const KILL_TIMEOUT: Duration = Duration::from_secs(10);
 /// The user that PID 1 and its `cat` run as: root without capabilities, so that commands,
@@ -203,35 +199,66 @@ impl ContainerExecutor {
     }
 }
 
-/// Wait for a file script to end and drain its error output; `verb` names the operation
-/// in an error.
-async fn script_end(
-    mut child: Child,
-    stderr: Capture,
-    verb: &str,
-    path: &Path,
-) -> Result<(ExitStatus, Vec<u8>), String> {
-    let status = child
-        .wait()
-        .await
-        .map_err(|e| format!("cannot {verb} {}: {e}", path.display()))?;
-    Ok((status, stderr.finish().await.bytes))
+/// A file operation: the words that name it in errors, and the longest wait for it.
+struct FileOperation {
+    /// Such as `read`.
+    verb: &'static str,
+    /// Such as `reading`.
+    doing: &'static str,
+    timeout: Duration,
 }
 
-/// Run `operation` within `timeout`; `doing` names it in the error, such as `reading`.
-async fn within<T>(
-    timeout: Duration,
-    doing: &str,
-    path: &Path,
-    operation: impl Future<Output = Result<T, String>>,
-) -> Result<T, String> {
-    tokio::time::timeout(timeout, operation).await.map_err(|_| {
-        format!(
-            "{doing} {} in the container took longer than {}s",
-            path.display(),
-            timeout.as_secs()
-        )
-    })?
+/// Reading one file. A FIFO swapped in after the checks would otherwise block.
+const READING: FileOperation = FileOperation {
+    verb: "read",
+    doing: "reading",
+    timeout: Duration::from_secs(30),
+};
+
+/// Writing one file, with a time limit for the same reason.
+const WRITING: FileOperation = FileOperation {
+    verb: "write",
+    doing: "writing",
+    timeout: Duration::from_secs(30),
+};
+
+impl ContainerExecutor {
+    /// Run the file script `command` for `path` on this executor's turn, within the time
+    /// `operation` allows. `transfer` takes the pipes it needs from the started script and moves
+    /// the file's bytes through them; then the script's exit status and error output are
+    /// collected. Returns the status, what `transfer` returned and the error output.
+    async fn file_script<T, F>(
+        &self,
+        mut command: Command,
+        operation: &FileOperation,
+        path: &Path,
+        transfer: impl FnOnce(&mut Child) -> F,
+    ) -> Result<(ExitStatus, T, Vec<u8>), String>
+    where
+        F: Future<Output = Result<T, String>>,
+    {
+        // A sweep for a command would also stop this script, so wait for any command to finish.
+        let _turn = self.turn.lock().await;
+        command.stderr(Stdio::piped());
+        let script = async {
+            let mut child = command.spawn().map_err(|e| format!("cannot run docker exec: {e}"))?;
+            let stderr = Capture::spawn(child.stderr.take());
+            let moved = transfer(&mut child).await?;
+            let status = child
+                .wait()
+                .await
+                .map_err(|e| format!("cannot {} {}: {e}", operation.verb, path.display()))?;
+            Ok((status, moved, stderr.finish().await.bytes))
+        };
+        tokio::time::timeout(operation.timeout, script).await.map_err(|_| {
+            format!(
+                "{} {} in the container took longer than {}s",
+                operation.doing,
+                path.display(),
+                operation.timeout.as_secs()
+            )
+        })?
+    }
 }
 
 /// The result of a command that never started because its run was cancelled first.
@@ -287,8 +314,6 @@ impl Executor for ContainerExecutor {
     }
 
     async fn read_file(&self, path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {
-        // A sweep for a command would also stop this read, so wait for any command to finish.
-        let _turn = self.turn.lock().await;
         let limit = max_bytes.saturating_add(1);
         let limit_text = limit.to_string();
         let mut command = self.target.exec(
@@ -298,22 +323,22 @@ impl Executor for ContainerExecutor {
             "zx-agent-read",
             [path.as_os_str(), OsStr::new(&limit_text)],
         );
-        command.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let read = async {
-            let mut child = command.spawn().map_err(|e| format!("cannot run docker exec: {e}"))?;
-            let stderr = Capture::spawn(child.stderr.take());
-            let mut bytes = Vec::new();
-            if let Some(stdout) = child.stdout.take() {
-                stdout
-                    .take(limit)
-                    .read_to_end(&mut bytes)
-                    .await
-                    .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        command.stdout(Stdio::piped());
+        let read = |child: &mut Child| {
+            let stdout = child.stdout.take();
+            async move {
+                let mut bytes = Vec::new();
+                if let Some(stdout) = stdout {
+                    stdout
+                        .take(limit)
+                        .read_to_end(&mut bytes)
+                        .await
+                        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+                }
+                Ok(bytes)
             }
-            let (status, stderr) = script_end(child, stderr, "read", path).await?;
-            Ok::<_, String>((status, bytes, stderr))
         };
-        let (status, bytes, stderr) = within(READ_TIMEOUT, "reading", path, read).await?;
+        let (status, bytes, stderr) = self.file_script(command, &READING, path, read).await?;
         match status.code() {
             Some(0) => {
                 check_read_within(path, &bytes, max_bytes)?;
@@ -335,27 +360,26 @@ impl Executor for ContainerExecutor {
     }
 
     async fn write_file(&self, path: &Path, contents: &[u8]) -> Result<(), String> {
-        // A sweep for a command would also stop this write, so wait for any command to finish.
-        let _turn = self.turn.lock().await;
         let mut command = self
             .target
             .exec(None, Input::Piped, WRITE, "zx-agent-write", [path.as_os_str()]);
-        command.stdout(Stdio::null()).stderr(Stdio::piped());
-        let write = async {
-            let mut child = command.spawn().map_err(|e| format!("cannot run docker exec: {e}"))?;
-            let stderr = Capture::spawn(child.stderr.take());
-            if let Some(mut stdin) = child.stdin.take() {
-                // A script that refused the path exits without reading; its status explains why.
-                if let Err(error) = stdin.write_all(contents).await
-                    && error.kind() != std::io::ErrorKind::BrokenPipe
-                {
-                    return Err(format!("cannot write {}: {error}", path.display()));
+        command.stdout(Stdio::null());
+        let write = |child: &mut Child| {
+            let stdin = child.stdin.take();
+            async move {
+                if let Some(mut stdin) = stdin {
+                    // A script that refused the path exits without reading; its status explains why.
+                    if let Err(error) = stdin.write_all(contents).await
+                        && error.kind() != std::io::ErrorKind::BrokenPipe
+                    {
+                        return Err(format!("cannot write {}: {error}", path.display()));
+                    }
+                    // Dropping stdin closes it, which ends `cat`.
                 }
-                // Dropping stdin closes it, which ends `cat`.
+                Ok(())
             }
-            script_end(child, stderr, "write", path).await
         };
-        let (status, stderr) = within(WRITE_TIMEOUT, "writing", path, write).await?;
+        let (status, (), stderr) = self.file_script(command, &WRITING, path, write).await?;
         match status.code() {
             Some(0) => Ok(()),
             Some(EXIT_DIRECTORY) => Err(format!("{} is a directory", path.display())),
