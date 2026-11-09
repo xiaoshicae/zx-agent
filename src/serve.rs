@@ -137,31 +137,12 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
         "--session does not apply to serve: each thread has its own session file under [sessions] dir"
     );
     let file = read_file(&args.config)?;
-    let mut channels: Vec<Arc<dyn ImChannel>> = Vec::new();
-    let mut hidden_env = Vec::new();
-    if let Some(slack) = &file.slack {
-        let (channel, secrets) = slack_channel(slack, &file.card_labels)?;
-        channels.push(channel);
-        hidden_env.extend(secrets);
-    }
-    if let Some(feishu) = &file.feishu {
-        let (channel, secrets) = feishu_channel(feishu, &file.card_labels)?;
-        channels.push(channel);
-        hidden_env.extend(secrets);
-    }
-    anyhow::ensure!(
-        !channels.is_empty(),
-        "{}: no IM platform is configured; add a [slack] or [feishu] section",
-        args.config.display()
-    );
+    let Platforms { channels, hidden_env } = platforms(&file, &args.config)?;
     let platforms: HashSet<&str> = channels.iter().map(|channel| channel.platform()).collect();
     let (conversations, approvers) = access(&file.access, &platforms)?;
     with_telemetry(async move |telemetry| {
         let dir = file.sessions.dir;
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("cannot create the session directory {}", dir.display()))?;
-        let running = dir.join(RUNNING_DIR);
-        std::fs::create_dir_all(&running).with_context(|| format!("cannot create {}", running.display()))?;
+        let running = create_session_dirs(&dir)?;
 
         // Once for the process: every thread's session shares the connections.
         let shared = cli::Shared::connect(&args.base, Builtin::Assistant, &args.transport).await?;
@@ -202,6 +183,44 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
         Ok(serve_exit_code(served))
     })
     .await
+}
+
+/// The configured IM platforms: a channel for each, and the environment variables that hold
+/// their secrets, which commands must not see.
+struct Platforms {
+    channels: Vec<Arc<dyn ImChannel>>,
+    hidden_env: Vec<String>,
+}
+
+/// The platforms `file` configures. An error when it configures none.
+fn platforms(file: &ServeFile, path: &Path) -> Result<Platforms> {
+    let mut channels: Vec<Arc<dyn ImChannel>> = Vec::new();
+    let mut hidden_env = Vec::new();
+    if let Some(slack) = &file.slack {
+        let (channel, secrets) = slack_channel(slack, &file.card_labels)?;
+        channels.push(channel);
+        hidden_env.extend(secrets);
+    }
+    if let Some(feishu) = &file.feishu {
+        let (channel, secrets) = feishu_channel(feishu, &file.card_labels)?;
+        channels.push(channel);
+        hidden_env.extend(secrets);
+    }
+    anyhow::ensure!(
+        !channels.is_empty(),
+        "{}: no IM platform is configured; add a [slack] or [feishu] section",
+        path.display()
+    );
+    Ok(Platforms { channels, hidden_env })
+}
+
+/// Create the session directory `dir` and the directory of the runs in progress under it.
+/// Returns the latter. A startup write; nothing runs concurrently yet.
+fn create_session_dirs(dir: &Path) -> Result<PathBuf> {
+    std::fs::create_dir_all(dir).with_context(|| format!("cannot create the session directory {}", dir.display()))?;
+    let running = dir.join(RUNNING_DIR);
+    std::fs::create_dir_all(&running).with_context(|| format!("cannot create {}", running.display()))?;
+    Ok(running)
 }
 
 /// The serve configuration file at `path`. A startup read; nothing runs concurrently yet.

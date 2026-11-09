@@ -143,6 +143,12 @@ pub(crate) fn resolve(cwd: &Path, raw: &str) -> Result<PathBuf, String> {
     })
 }
 
+/// Check that `raw` names a path, before the call runs: the working directory is not known
+/// yet, so only the form is checked, as [`resolve`] reads it.
+pub(crate) fn check_path(raw: &str) -> Result<(), String> {
+    resolve(Path::new("."), raw).map(|_| ())
+}
+
 /// How far into a file the text tools look for a NUL byte, which marks a binary file.
 const BINARY_SNIFF_BYTES: usize = 8192;
 
