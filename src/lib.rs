@@ -30,11 +30,10 @@
 //! those crates directly.
 
 /// The model layer: the types and the provider contract of `zx-ai`, and the OpenAI-compatible
-/// provider of `zx-ai-openai` as `openai`, with its SSE parser as `sse`.
+/// provider of `zx-ai-openai` as `openai`.
 pub mod ai {
     pub use zx_ai::*;
     pub use zx_ai_openai as openai;
-    pub use zx_ai_openai::sse;
 }
 /// The lock helper of every crate; not part of the API.
 #[doc(hidden)]

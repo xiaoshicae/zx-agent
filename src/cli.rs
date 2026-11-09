@@ -15,8 +15,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use zx_agent::agent::QueueMode;
 use zx_agent::ai::Reasoning;
-use zx_agent::ai::openai::{DEFAULT_MAX_RESPONSE_BYTES, ReasoningFormat};
-use zx_agent::ai::sse::DEFAULT_MAX_EVENT_BYTES;
+use zx_agent::ai::openai::{DEFAULT_MAX_EVENT_BYTES, DEFAULT_MAX_RESPONSE_BYTES, ReasoningFormat};
 
 pub(crate) use prepare::{PreparedSession, SessionOptions, prepare};
 pub(crate) use shared::{ModeSettings, Shared};

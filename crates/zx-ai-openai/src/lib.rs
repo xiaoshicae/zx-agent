@@ -7,16 +7,17 @@
 //! contract. The `zx-agent` crate re-exports this crate as `zx_agent::ai::openai`.
 //!
 //! The settings are in `config.rs`, the request body in `request.rs`, the failures of a
-//! request in `failure.rs` and the message built from the stream in `accumulate.rs`; this
-//! module holds the provider and the HTTP flow of one request.
+//! request in `failure.rs`, the message built from the stream in `accumulate.rs` and the parser
+//! of the stream's events in `sse.rs`; this module holds the provider and the HTTP flow of one
+//! request.
 
 mod accumulate;
 mod config;
 mod failure;
 mod request;
-pub mod sse;
+mod sse;
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use serde_json::Value;
@@ -30,7 +31,13 @@ use failure::{
     Failure, answers_json, error_object, http_failure, json_body_failure, provider_failure, transport_failure,
 };
 pub use request::replay_body;
+pub use sse::DEFAULT_MAX_EVENT_BYTES;
 use sse::SseParser;
+
+/// Longest wait for a connection to the server to be established. Fixed, unlike
+/// [`OpenAiConfig::idle_timeout`]: how long a server takes to answer varies with the model and
+/// the request, how long connecting takes does not.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Streaming provider for the OpenAI Chat Completions protocol.
 pub struct OpenAiCompatible {
@@ -44,7 +51,7 @@ impl OpenAiCompatible {
     /// client that cannot be built.
     pub fn new(config: OpenAiConfig) -> anyhow::Result<Self> {
         config.check()?;
-        let mut builder = reqwest::Client::builder().connect_timeout(config.connect_timeout);
+        let mut builder = reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT);
         if !config.use_system_proxy {
             builder = builder.no_proxy();
         }
