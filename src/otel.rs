@@ -112,13 +112,6 @@ impl Exporters {
             Self::Metrics(provider) | Self::TracesAndMetrics(provider) => Some(provider),
         }
     }
-
-    fn into_meter_provider(self) -> Option<SdkMeterProvider> {
-        match self {
-            Self::Traces => None,
-            Self::Metrics(provider) | Self::TracesAndMetrics(provider) => Some(provider),
-        }
-    }
 }
 
 /// A W3C trace context received from the caller: the values of the `traceparent` and
@@ -192,30 +185,25 @@ impl Telemetry {
     /// standard variables, such as `OTEL_EXPORTER_OTLP_HEADERS`. Needs a Tokio runtime. An error
     /// is a configuration that the exporter refuses, such as an invalid endpoint or interval.
     pub fn from_env() -> Result<Option<Self>, String> {
-        let exports = match (any_set(&ENDPOINT_VARIABLES), any_set(&METRIC_ENDPOINT_VARIABLES)) {
-            (true, true) => Exports::TracesAndMetrics,
-            (true, false) => Exports::Traces,
-            (false, true) => Exports::Metrics,
-            (false, false) => return Ok(None),
-        };
         let mut resource = Resource::builder();
         if std::env::var_os("OTEL_SERVICE_NAME").is_none() {
             resource = resource.with_service_name(SERVICE_NAME);
         }
         let resource = resource.build();
-        let mut tracer_provider = SdkTracerProvider::builder().with_resource(resource.clone());
-        if exports.traces() {
+        let exporters = match (any_set(&ENDPOINT_VARIABLES), any_set(&METRIC_ENDPOINT_VARIABLES)) {
+            (true, true) => Exporters::TracesAndMetrics(meter_provider(resource.clone())?),
+            (true, false) => Exporters::Traces,
+            (false, true) => Exporters::Metrics(meter_provider(resource.clone())?),
+            (false, false) => return Ok(None),
+        };
+        let mut tracer_provider = SdkTracerProvider::builder().with_resource(resource);
+        if exporters.exports().traces() {
             let exporter = SpanExporter::builder()
                 .with_http()
                 .build()
                 .map_err(|error| format!("cannot set up the OTLP span exporter: {error}"))?;
             tracer_provider = tracer_provider.with_batch_exporter(exporter);
         }
-        let exporters = match exports {
-            Exports::Traces => Exporters::Traces,
-            Exports::Metrics => Exporters::Metrics(meter_provider(resource)?),
-            Exports::TracesAndMetrics => Exporters::TracesAndMetrics(meter_provider(resource)?),
-        };
         Ok(Some(Self::new(tracer_provider.build(), exporters)))
     }
 
@@ -297,7 +285,7 @@ impl Telemetry {
             tracer_provider
                 .shutdown_with_timeout(SHUTDOWN_TIMEOUT)
                 .map_err(|error| format!("cannot export the remaining spans: {error}"))?;
-            if let Some(meter_provider) = exporters.into_meter_provider() {
+            if let Some(meter_provider) = exporters.meter_provider() {
                 meter_provider
                     .shutdown_with_timeout(SHUTDOWN_TIMEOUT)
                     .map_err(|error| format!("cannot export the remaining metrics: {error}"))?;

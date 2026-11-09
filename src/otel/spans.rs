@@ -396,7 +396,7 @@ impl OpenRun<'_> {
         end(self.spans.compaction.take().map(|compaction| compaction.cx), self.at);
         let attributes = vec![
             KeyValue::new("zx.compaction.automatic", automatic),
-            KeyValue::new("zx.compaction.input_bytes", saturate_usize(input_bytes)),
+            KeyValue::new("zx.compaction.input_bytes", saturate(input_bytes)),
         ];
         // A manual compaction belongs to no run, so it starts a trace of its own,
         // under the caller's span if there is one.
@@ -417,10 +417,7 @@ impl OpenRun<'_> {
         if let Some(compaction) = self.spans.compaction.take() {
             let span = compaction.cx.span();
             span.set_attributes(usage_attributes(usage));
-            span.set_attribute(KeyValue::new(
-                "zx.compaction.output_bytes",
-                saturate_usize(output_bytes),
-            ));
+            span.set_attribute(KeyValue::new("zx.compaction.output_bytes", saturate(output_bytes)));
             span.end_with_timestamp(self.at);
             if let Some(instruments) = self.instruments {
                 instruments.compaction_duration.record(
@@ -586,12 +583,8 @@ fn name(value: &impl Serialize) -> String {
 }
 
 /// Attribute integers are signed; counts beyond them show as the largest one.
-fn saturate(value: u64) -> i64 {
-    i64::try_from(value).unwrap_or(i64::MAX)
-}
-
-fn saturate_usize(value: usize) -> i64 {
-    i64::try_from(value).unwrap_or(i64::MAX)
+fn saturate(value: impl TryInto<i64>) -> i64 {
+    value.try_into().unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]
