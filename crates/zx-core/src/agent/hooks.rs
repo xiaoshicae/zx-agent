@@ -5,7 +5,6 @@
 
 mod chain;
 
-use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -379,35 +378,26 @@ impl HookPoint {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum HookFailure {
+    #[error("failed: {0}")]
     Rejected(String),
+    #[error("timed out after {}ms", .0.as_millis())]
     TimedOut(Duration),
+    #[error("panicked")]
     Panicked,
+    #[error("was cancelled")]
     Cancelled,
 }
 
 /// Structured host-side failure for one callback.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{hook} {} {failure}", .phase.as_str())]
 pub struct HookError {
     pub hook: String,
     pub phase: HookPoint,
     pub failure: HookFailure,
 }
-
-impl fmt::Display for HookError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} {} ", self.hook, self.phase.as_str())?;
-        match &self.failure {
-            HookFailure::Rejected(reason) => write!(f, "failed: {reason}"),
-            HookFailure::TimedOut(timeout) => write!(f, "timed out after {}ms", timeout.as_millis()),
-            HookFailure::Panicked => f.write_str("panicked"),
-            HookFailure::Cancelled => f.write_str("was cancelled"),
-        }
-    }
-}
-
-impl std::error::Error for HookError {}
 
 #[cfg(test)]
 mod tests {

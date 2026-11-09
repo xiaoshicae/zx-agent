@@ -474,7 +474,7 @@ enum Halt {
     /// A hook or context preparation failed; if the run was cancelled, it was aborted.
     Failed(String),
     /// The session could not record a step, so the loop must not act on it.
-    Unrecorded(String),
+    Unrecorded(anyhow::Error),
 }
 
 impl Halt {
@@ -483,7 +483,8 @@ impl Halt {
     fn into_outcome(self, cancel: &CancellationToken) -> (RunOutcome, String) {
         match self {
             Self::Failed(error) if cancel.is_cancelled() => (RunOutcome::Aborted, error),
-            Self::Failed(error) | Self::Unrecorded(error) => (RunOutcome::Error, error),
+            Self::Failed(error) => (RunOutcome::Error, error),
+            Self::Unrecorded(error) => (RunOutcome::Error, format!("{error:#}")),
         }
     }
 }

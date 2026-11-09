@@ -1,8 +1,9 @@
 //! Resolve tool calls left unfinished by an interrupted run.
 
+use anyhow::{Context, Result};
+
 use super::run_host::RunHost;
-use crate::agent::persist_error;
-use crate::agent::{AgentEvent, Effects, Interruption};
+use crate::agent::{AgentEvent, Effects, Interruption, PERSIST_FAILED};
 use crate::ai::{Message, ToolResultMessage, now_ms};
 use crate::session::StartRecord;
 
@@ -10,7 +11,7 @@ impl RunHost<'_> {
     /// Record an error result for each call that an interrupted run left without one, so
     /// the next request cannot suggest that such a call did nothing. Calls are never run
     /// again. Stops at the first result the session cannot record.
-    pub(super) async fn recover_interrupted_calls(&mut self) -> Result<(), String> {
+    pub(super) async fn recover_interrupted_calls(&mut self) -> Result<()> {
         for call in self.session.interrupted_tool_calls() {
             let effects = self
                 .config
@@ -40,7 +41,7 @@ impl RunHost<'_> {
                 .session
                 .append_message(result.clone())
                 .await
-                .map_err(|error| persist_error(&error))?;
+                .context(PERSIST_FAILED)?;
             self.emit(AgentEvent::MessageEnd {
                 message: result,
                 entry_id,

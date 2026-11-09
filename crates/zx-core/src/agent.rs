@@ -38,7 +38,7 @@ pub use interaction::{Approval, ApprovalCache, ApprovalRequest, DEFAULT_APPROVAL
 pub use policy::{AllowAll, PolicyDecision, ToolPolicy};
 pub use queue::{MessageQueues, PendingEntry, QueueMode, QueuedMessage};
 pub use report::{RunOutcome, RunReport};
-pub(crate) use session_host::{ContextPreparation, Prepared, SessionHost, persist_error, record_pending_entries};
+pub(crate) use session_host::{ContextPreparation, PERSIST_FAILED, Prepared, SessionHost, record_pending_entries};
 pub use tool::{
     ActiveTools, Effects, ExecutionMode, MAX_DETAILS_BYTES, MAX_PROGRESS_BYTES, MAX_QUEUED_PROGRESS, Tool, ToolContext,
     ToolOutput,

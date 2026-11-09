@@ -2,6 +2,7 @@
 //! on it, the projection it sends the model, and a chance to prepare that context before a
 //! request. A [`SessionStore`] is a host on its own; the Runner's host adds summaries.
 
+use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -20,24 +21,24 @@ pub(crate) trait SessionHost: Send + Sync {
     fn messages(&self) -> Vec<Message>;
 
     /// Record a finished message. Returns its entry ID.
-    async fn append_message(&mut self, message: &Message) -> Result<String, String>;
+    async fn append_message(&mut self, message: &Message) -> Result<String>;
 
     /// Record a message from an extension. Returns its entry ID and the message as the
     /// projection holds it.
-    async fn append_custom_message(&mut self, message: &CustomMessage) -> Result<(String, Message), String>;
+    async fn append_custom_message(&mut self, message: &CustomMessage) -> Result<(String, Message)>;
 
     /// Record state of an extension. Returns its entry ID.
-    async fn append_custom_entry(&mut self, custom_type: &str, data: Value) -> Result<String, String>;
+    async fn append_custom_entry(&mut self, custom_type: &str, data: Value) -> Result<String>;
 
     /// Record an edit of the message at `index` in the current projection: `None` omits the
     /// message, `Some` replaces its text. Returns the edit's entry ID.
-    async fn edit_context(&mut self, index: usize, replacement: Option<&str>) -> Result<String, String>;
+    async fn edit_context(&mut self, index: usize, replacement: Option<&str>) -> Result<String>;
 
     /// Record a request before it is sent. Returns the ID of its `request_started` entry.
-    async fn record_request(&mut self, request: &Request, provider: &dyn Provider) -> Result<String, String>;
+    async fn record_request(&mut self, request: &Request, provider: &dyn Provider) -> Result<String>;
 
     /// Record that a call with side effects is about to run, after its checks and approval.
-    async fn record_tool_call_started(&mut self, call: &ToolCall) -> Result<(), String>;
+    async fn record_tool_call_started(&mut self, call: &ToolCall) -> Result<()>;
 
     /// Prepare the context before a task request, for example by summarizing it; what it
     /// records is in the projection afterwards. Request costs, failed attempts included,
@@ -45,10 +46,8 @@ pub(crate) trait SessionHost: Send + Sync {
     async fn prepare_context(&mut self, cancel: &CancellationToken) -> ContextPreparation;
 }
 
-/// The text for an entry the session could not record, with the cause.
-pub(crate) fn persist_error(error: &anyhow::Error) -> String {
-    format!("cannot persist session entry: {error:#}")
-}
+/// The context of the error for an entry the session could not record.
+pub(crate) const PERSIST_FAILED: &str = "cannot persist session entry";
 
 /// Record the custom entries extensions asked for since the last turn (pi: `appendEntry`),
 /// each announced as a `custom_entry` event. An error means the session could not record one.
@@ -56,7 +55,7 @@ pub(crate) async fn record_pending_entries(
     config: &LoopConfig,
     session: &mut dyn SessionHost,
     target: EventTarget<'_>,
-) -> Result<(), String> {
+) -> Result<()> {
     for entry in config.queues.take_entries() {
         let entry_id = session.append_custom_entry(&entry.custom_type, entry.data).await?;
         let event = AgentEvent::CustomEntry {
@@ -76,51 +75,51 @@ impl SessionHost for SessionStore {
         SessionStore::messages(self)
     }
 
-    async fn append_message(&mut self, message: &Message) -> Result<String, String> {
+    async fn append_message(&mut self, message: &Message) -> Result<String> {
         // The event that reports the message owns it, so the session stores a copy.
         SessionStore::append_message(self, message.clone())
             .await
-            .map_err(|error| persist_error(&error))
+            .context(PERSIST_FAILED)
     }
 
-    async fn append_custom_message(&mut self, message: &CustomMessage) -> Result<(String, Message), String> {
+    async fn append_custom_message(&mut self, message: &CustomMessage) -> Result<(String, Message)> {
         let id = SessionStore::append_custom_message(self, message.clone())
             .await
-            .map_err(|error| persist_error(&error))?;
+            .context(PERSIST_FAILED)?;
         match self.get(&id) {
             Some(Entry::CustomMessage(entry)) => Ok((id, entry.projected())),
-            _ => Err(format!("custom message {id} was not recorded")),
+            _ => bail!("custom message {id} was not recorded"),
         }
     }
 
-    async fn append_custom_entry(&mut self, custom_type: &str, data: Value) -> Result<String, String> {
+    async fn append_custom_entry(&mut self, custom_type: &str, data: Value) -> Result<String> {
         SessionStore::append_custom_entry(self, custom_type, data)
             .await
-            .map_err(|error| persist_error(&error))
+            .context(PERSIST_FAILED)
     }
 
-    async fn edit_context(&mut self, index: usize, replacement: Option<&str>) -> Result<String, String> {
+    async fn edit_context(&mut self, index: usize, replacement: Option<&str>) -> Result<String> {
         let projection = self.projection();
         let target = projection
             .get(index)
-            .ok_or_else(|| format!("context index {index} is out of bounds"))?;
+            .ok_or_else(|| anyhow!("context index {index} is out of bounds"))?;
         self.append_context_edit(&target.entry_id, replacement.map(str::to_string))
             .await
-            .map_err(|error| format!("cannot persist context edit: {error:#}"))
+            .context("cannot persist context edit")
     }
 
-    async fn record_request(&mut self, request: &Request, provider: &dyn Provider) -> Result<String, String> {
+    async fn record_request(&mut self, request: &Request, provider: &dyn Provider) -> Result<String> {
         let options = provider.request_options();
         SessionStore::record_request(self, request, provider.name(), options, RequestSource::Projection)
             .await
-            .map_err(|error| format!("cannot persist request checkpoint: {error:#}"))
+            .context("cannot persist request checkpoint")
     }
 
-    async fn record_tool_call_started(&mut self, call: &ToolCall) -> Result<(), String> {
+    async fn record_tool_call_started(&mut self, call: &ToolCall) -> Result<()> {
         self.append_tool_call_started(&call.id, &call.name)
             .await
             .map(|_| ())
-            .map_err(|error| format!("cannot persist the start of tool call {:?}: {error:#}", call.id))
+            .with_context(|| format!("cannot persist the start of tool call {:?}", call.id))
     }
 
     async fn prepare_context(&mut self, _cancel: &CancellationToken) -> ContextPreparation {
@@ -163,5 +162,5 @@ pub(crate) enum Prepared {
     /// Preparation failed; the context is unchanged.
     Failed(String),
     /// The session could not record the preparation, so the run must stop.
-    Unrecorded(String),
+    Unrecorded(anyhow::Error),
 }

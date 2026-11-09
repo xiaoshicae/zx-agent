@@ -6,7 +6,6 @@
 
 mod subscribers;
 
-use std::fmt;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -37,43 +36,34 @@ pub struct ModelRef {
 }
 
 /// Session API errors. Operational failures remain in the run or compaction report.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum AgentSessionError {
     /// A prompt, compaction or model change overlaps an active operation; it is never queued.
+    #[error("session is running; use steer or follow_up to submit input")]
     Busy,
     /// Model IDs must contain at least one non-whitespace character.
+    #[error("model ID must not be empty")]
     InvalidModel,
     /// The entry a branch switch names is not in the session.
+    #[error("no entry with that ID in the session")]
     EntryNotFound,
     /// A tool name that no configured tool has.
+    #[error("no configured tool has that name")]
     UnknownTool,
     /// The session could not record an entry; see [`AgentSession::writes_stopped`].
+    #[error("cannot write the session: {0}")]
     WriteFailed(String),
     /// A prompt with this idempotency key was already submitted to the session.
+    #[error("a prompt with this idempotency key was already submitted")]
     DuplicateKey,
     /// An idempotency key must contain at least one non-whitespace character.
+    #[error("idempotency key must not be empty")]
     InvalidKey,
-}
-
-impl fmt::Display for AgentSessionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Busy => f.write_str("session is running; use steer or follow_up to submit input"),
-            Self::InvalidModel => f.write_str("model ID must not be empty"),
-            Self::EntryNotFound => f.write_str("no entry with that ID in the session"),
-            Self::UnknownTool => f.write_str("no configured tool has that name"),
-            Self::WriteFailed(error) => write!(f, "cannot write the session: {error}"),
-            Self::DuplicateKey => f.write_str("a prompt with this idempotency key was already submitted"),
-            Self::InvalidKey => f.write_str("idempotency key must not be empty"),
-        }
-    }
 }
 
 /// The `customType` of the session record that notes an idempotency key
 /// ([`AgentSession::prompt_once`]); reserved for the session.
 pub const IDEMPOTENCY_KEY_TYPE: &str = "idempotency_key";
-
-impl std::error::Error for AgentSessionError {}
 
 enum State {
     // A full Runner is only needed while idle, so keep the state enum small.

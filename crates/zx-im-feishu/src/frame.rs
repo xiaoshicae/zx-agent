@@ -11,8 +11,6 @@
 //! Every field is written, zero values included, so that a decoder that requires them is
 //! satisfied; unknown fields are skipped when reading.
 
-use std::fmt;
-
 const VARINT: u64 = 0;
 const FIXED64: u64 = 1;
 const LENGTH_DELIMITED: u64 = 2;
@@ -32,16 +30,9 @@ pub(crate) struct Frame {
 }
 
 /// Why bytes are not a frame.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[error("malformed frame: {0}")]
 pub(crate) struct FrameError(&'static str);
-
-impl fmt::Display for FrameError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "malformed frame: {}", self.0)
-    }
-}
-
-impl std::error::Error for FrameError {}
 
 impl Frame {
     /// The value of the first header named `key`.

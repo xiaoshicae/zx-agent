@@ -132,7 +132,7 @@ where
 /// Export traces and metrics when an OTLP endpoint is configured (`zx_agent::otel`), and say
 /// so on stderr.
 fn start_telemetry() -> Result<Option<Telemetry>> {
-    let telemetry = Telemetry::from_env().map_err(anyhow::Error::msg)?;
+    let telemetry = Telemetry::from_env()?;
     if let Some(telemetry) = &telemetry {
         eprintln!("[otel] exporting {} over OTLP/HTTP", telemetry.exports().describe());
     }
@@ -150,7 +150,7 @@ pub(crate) fn run_sink(telemetry: &Telemetry) -> Arc<dyn EventSink> {
         }
         Ok(None) => telemetry.sink(),
         Err(error) => {
-            eprintln!("[otel] {error}; the run starts a trace of its own");
+            eprintln!("[otel] {error:#}; the run starts a trace of its own");
             telemetry.sink()
         }
     }
@@ -167,6 +167,6 @@ async fn finish_telemetry(telemetry: Option<Telemetry>) {
         eprintln!("[otel] {dropped} event(s) were not exported: the queue was full");
     }
     if let Err(error) = telemetry.shutdown().await {
-        eprintln!("[otel] {error}");
+        eprintln!("[otel] {error:#}");
     }
 }
