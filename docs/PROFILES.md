@@ -28,7 +28,6 @@ maxModelRequests = 12
 timeoutSecs = 300
 
 [extensions]
-redaction = true
 continueOnLength = 0
 
 [context]
@@ -68,7 +67,6 @@ path = "skills/rust-review/SKILL.md"
 | `limits.costBudget` | 每轮所有模型请求的花费上限，按 `[[models]]` 中该模型的单价计算，单位与单价相同（按人民币写单价，预算就是人民币）；摘要请求与失败的尝试也计入，工具报告的花费不计入；每次请求之前检查，最后一次请求可能超出；`0` 关闭，负数或非有限值报错。模型没有单价时 CLI 拒绝启动。用完时 run 以退出码 8 结束 |
 | `limits.tokenBudget` | 每轮所有模型请求的输入加输出 token 上限，以服务返回的用量为准，摘要请求与失败的尝试也计入；每次请求之前检查，最后一次请求可能超出；`0` 关闭。用完时 run 以退出码 7 结束 |
 | `extensions.continueOnLength` | 输出达到 token 上限后的续写次数；每次消耗一次模型请求预算 |
-| `extensions.redaction` | 仅接受 `true` 或省略；CLI 的已知认证 key 脱敏不可关闭 |
 | `context.discover` | 是否自动发现项目 AGENTS.md；`assistant` 默认开启，`unattended` 与 `troubleshoot` 默认关闭 |
 | `context.files` | 追加显式上下文文件 |
 | `skills` | 显式登记 name、description、path 的目录；正文按需读取 |

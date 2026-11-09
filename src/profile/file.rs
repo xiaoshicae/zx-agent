@@ -10,7 +10,6 @@ use serde::Deserialize;
 use super::skills::Skill;
 use super::{Builtin, ContainerSettings, Execution, MAX_FILE_BYTES, McpServer, Profile, Rules};
 use crate::ai::{ModelCost, ModelMeta};
-use crate::executor::Access;
 use crate::files::read_text_file;
 use crate::policy::ProgramOptions;
 use crate::runner::Limits;
@@ -25,7 +24,7 @@ pub(super) struct RawProfile {
     tools: Option<Vec<String>>,
     // Unknown backends fail to deserialize instead of being ignored.
     execution: Option<Execution>,
-    container: RawContainer,
+    container: ContainerSettings,
     rules: RawRules,
     limits: RawLimits,
     extensions: RawExtensions,
@@ -72,18 +71,6 @@ struct RawToolOutput {
 
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-struct RawContainer {
-    image: Option<String>,
-    user: Option<String>,
-    memory: Option<String>,
-    pids_limit: Option<u32>,
-    network: Option<String>,
-    workspace: Option<Access>,
-    root: Option<Access>,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 struct RawRules {
     allow: Option<Vec<String>>,
     deny: Vec<String>,
@@ -122,7 +109,6 @@ enum Unlimited {
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 struct RawExtensions {
-    redaction: Option<bool>,
     continue_on_length: Option<u32>,
 }
 
@@ -152,7 +138,6 @@ impl RawProfile {
         if let Some(count) = self.extensions.continue_on_length {
             profile.continue_on_length = count;
         }
-        ensure!(self.extensions.redaction != Some(false), "redaction cannot be disabled");
         if let Some(discover) = self.context.discover {
             profile.context.discover = discover;
         }
@@ -308,27 +293,25 @@ impl RawToolOutput {
     }
 }
 
-impl RawContainer {
-    fn apply(self, settings: &mut ContainerSettings) {
-        for (value, layer) in [
-            (&mut settings.image, self.image),
-            (&mut settings.user, self.user),
-            (&mut settings.memory, self.memory),
-            (&mut settings.network, self.network),
-        ] {
-            if layer.is_some() {
-                *value = layer;
-            }
-        }
-        if self.pids_limit.is_some() {
-            settings.pids_limit = self.pids_limit;
-        }
-        if self.workspace.is_some() {
-            settings.workspace = self.workspace;
-        }
-        if self.root.is_some() {
-            settings.root = self.root;
-        }
+impl ContainerSettings {
+    /// Lay this layer over `settings`: each value set here replaces the one there.
+    fn apply(self, settings: &mut Self) {
+        let Self {
+            image,
+            user,
+            memory,
+            pids_limit,
+            network,
+            workspace,
+            root,
+        } = self;
+        settings.image = image.or(settings.image.take());
+        settings.user = user.or(settings.user.take());
+        settings.memory = memory.or(settings.memory.take());
+        settings.pids_limit = pids_limit.or(settings.pids_limit);
+        settings.network = network.or(settings.network.take());
+        settings.workspace = workspace.or(settings.workspace);
+        settings.root = root.or(settings.root);
     }
 }
 

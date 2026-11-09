@@ -324,12 +324,9 @@ fn invalid_container_settings_are_configuration_errors() {
 
 #[test]
 fn redaction_cannot_be_removed_by_a_profile() {
-    assert!(
-        load_file("[extensions]\nredaction = false")
-            .unwrap_err()
-            .to_string()
-            .contains("cannot be disabled")
-    );
+    // Redaction has no switch: a profile that tries to set one is refused.
+    let error = format!("{:#}", load_file("[extensions]\nredaction = false").unwrap_err());
+    assert!(error.contains("unknown field `redaction`"), "{error}");
 }
 
 #[test]

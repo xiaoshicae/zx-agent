@@ -434,7 +434,6 @@ async fn invalid_configuration_exits_2_without_a_model_request_or_session_file()
         "broken = true",
         "[limits]\nmaxModelRequests = -1",
         "execution = 'container'",
-        "[extensions]\nredaction = false",
         "[context]\nfiles = ['missing.md']",
     ] {
         let dir = tempfile::tempdir().unwrap();

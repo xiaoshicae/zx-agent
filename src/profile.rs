@@ -173,7 +173,9 @@ pub enum Execution {
 }
 
 /// Container settings for `Execution::Container`; unset values use the executor defaults.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// A profile's `[container]` section, whose values replace those of the profile it extends.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct ContainerSettings {
     /// Required in container mode; the image must already be present locally.
     pub image: Option<String>,
