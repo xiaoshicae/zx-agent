@@ -15,7 +15,7 @@ use super::{
 
 impl Attempt<'_> {
     fn find_tool(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        self.config.spec.tools.iter().find(|tool| tool.name() == name).cloned()
+        self.config.tools.iter().find(|tool| tool.name() == name).cloned()
     }
 
     /// Resolve `call` and check its arguments, then run the policy and ask for approval
@@ -433,7 +433,7 @@ async fn execute(engine: &Attempt<'_>, tool: &dyn Tool, call: &ToolCall) -> Call
     // stop work of its own does not stop the run.
     let (progress, mut updates) = tokio::sync::mpsc::channel(MAX_QUEUED_PROGRESS);
     let ctx = ToolContext {
-        cwd: engine.config.spec.cwd.clone(),
+        cwd: engine.config.cwd.clone(),
         cancel: cancel.child_token(),
         tool_call_id: Some(call.id.clone()),
         progress: Some(progress),

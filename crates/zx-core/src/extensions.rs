@@ -87,7 +87,7 @@ pub trait Extension: Send + Sync {
 /// unchanged.
 ///
 /// Errors: a blank or repeated extension name, a hook outside [`HookStage::Extension`], a
-/// tool name already in use or a tool that fails [`LoopSpec::validate`](crate::agent::LoopSpec::validate),
+/// tool name already in use or a tool that fails [`LoopConfig::validate`](crate::agent::LoopConfig::validate),
 /// a section name that is malformed, reserved, already in the prompt or repeated, and a
 /// command name that is malformed or already registered.
 pub fn register(config: &mut LoopConfig, extensions: &[Arc<dyn Extension>]) -> Result<(), String> {
@@ -106,12 +106,12 @@ pub fn register(config: &mut LoopConfig, extensions: &[Arc<dyn Extension>]) -> R
     }
     // The loop's own check covers names, declarations and panics; on failure the tools are
     // taken out again, so nothing is registered.
-    let existing = config.spec.tools.len();
+    let existing = config.tools.len();
     for part in &mut parts {
-        config.spec.tools.append(&mut part.tools);
+        config.tools.append(&mut part.tools);
     }
-    if let Err(error) = config.spec.validate() {
-        config.spec.tools.truncate(existing);
+    if let Err(error) = config.validate() {
+        config.tools.truncate(existing);
         return Err(format!("extension tools: {error}"));
     }
     for part in parts {
@@ -119,7 +119,7 @@ pub fn register(config: &mut LoopConfig, extensions: &[Arc<dyn Extension>]) -> R
             config.hooks.push_extension_hook(part.name, hook);
         }
         for (section, content) in part.sections {
-            config.spec.system_prompt = std::mem::take(&mut config.spec.system_prompt).with_section(&section, &content);
+            config.system_prompt = std::mem::take(&mut config.system_prompt).with_section(&section, &content);
         }
         config.commands.extend(part.commands);
     }
@@ -145,7 +145,7 @@ struct Claimed<'a> {
 
 /// Check one extension's name, hooks, sections and commands against `config` and what
 /// earlier extensions claimed, and collect what it adds. Its tools are checked with the
-/// others by [`LoopSpec::validate`](crate::agent::LoopSpec::validate).
+/// others by [`LoopConfig::validate`](crate::agent::LoopConfig::validate).
 fn check_extension<'a>(
     config: &LoopConfig,
     extension: &'a dyn Extension,
@@ -171,7 +171,7 @@ fn check_extension<'a>(
     let sections = extension.prompt_sections();
     for (section, _) in &sections {
         check_section_name(section).map_err(|reason| format!("extension {name:?}: {reason}"))?;
-        if config.spec.system_prompt.has_section(section) || !claimed.sections.insert(section.clone()) {
+        if config.system_prompt.has_section(section) || !claimed.sections.insert(section.clone()) {
             return Err(format!(
                 "extension {name:?}: the system prompt already has a section named {section:?}"
             ));

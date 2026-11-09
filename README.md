@@ -636,9 +636,7 @@ run、chat 与 serve 在设置了下面的标准变量时，用 OTLP/HTTP（prot
 完整示例见 `examples/library.rs`（参与编译检查）。核心步骤如下：
 
 ```rust
-let mut config = LoopConfig::new(LoopSpec {
-    provider, model, system_prompt, tools, cwd, max_tokens: None,
-});
+let mut config = LoopConfig { system_prompt, tools, cwd, ..LoopConfig::new(provider, model) };
 config.hooks.push(PolicyHook::new(policy));
 let agent = AgentSession::new(config, RetryPolicy::default(), Limits::default(), session, sink);
 let report = agent.prompt("任务描述").await?;
@@ -690,7 +688,7 @@ JSON 报告使用 `modelRequests`，达到上限时 `outcome` 为 `model_request
 IM 的提示文本使用 `[replies] modelRequestLimit`。
 原 `prompt::DEFAULT_INSTRUCTIONS` 当时移到了 `presets`，现在只在 `deploy/kubernetes/profiles/troubleshoot.md`。
 
-P1 的 SDK 接口调整：静态配置移入 `LoopSpec`；`LoopConfig` 持有钩子、交互宿主与队列。`LoopConfig::models`（按模型 ID 的 `ai::ModelMeta`：`context_window` 与 `cost`，`cost` 为每百万 token 的单价 `ai::ModelCost`，币种由使用者决定、所有单价须一致）让循环给每次回复算出 `usage.total_cost`（按请求的模型查，摘要请求也算）；`LoopConfig::cache_key` 随每个任务请求发送并记入请求审计（`Request::cache_key`），OpenAI 兼容 provider 在 `OpenAiConfig::prompt_cache_key` 为 true 时把它写成 `prompt_cache_key`。`OpenAiConfig::api_key` 是 `ApiKey`：`None`、`Fixed(token)`，或 `Dynamic(Arc<dyn ApiKeySource>)`——每次请求前调用一次取 token（pi 的 `getApiKey`，用于会过期的凭据），取不到时请求以 `ProviderError::ApiKey` 失败、不重试；`OpenAiConfig::headers` 随每个请求发送，`Authorization` 不接受。`RetryPolicy::jitter`（默认 0.25）从退避中随机减去至多这一比例，服务的 `Retry-After` 不减。
+P1 的 SDK 接口调整：`LoopConfig` 持有模型、工具、钩子、交互宿主与队列，`LoopConfig::new(provider, model)` 以外的字段取默认值（无系统提示词、无工具、工作目录为 `.`），用结构体更新语法覆盖。`LoopConfig::models`（按模型 ID 的 `ai::ModelMeta`：`context_window` 与 `cost`，`cost` 为每百万 token 的单价 `ai::ModelCost`，币种由使用者决定、所有单价须一致）让循环给每次回复算出 `usage.total_cost`（按请求的模型查，摘要请求也算）；`LoopConfig::cache_key` 随每个任务请求发送并记入请求审计（`Request::cache_key`），OpenAI 兼容 provider 在 `OpenAiConfig::prompt_cache_key` 为 true 时把它写成 `prompt_cache_key`。`OpenAiConfig::api_key` 是 `ApiKey`：`None`、`Fixed(token)`，或 `Dynamic(Arc<dyn ApiKeySource>)`——每次请求前调用一次取 token（pi 的 `getApiKey`，用于会过期的凭据），取不到时请求以 `ProviderError::ApiKey` 失败、不重试；`OpenAiConfig::headers` 随每个请求发送，`Authorization` 不接受。`RetryPolicy::jitter`（默认 0.25）从退避中随机减去至多这一比例，服务的 `Retry-After` 不减。
 原 `config.policy` 改为注册 `PolicyHook::new(policy)`；`Limits::continue_on_length` 改为 `ContinueOnLength::new(n)`。
 直接调用循环用 `Attempt`：`Attempt::new(config, &mut session, &mut approvals, &cancel, &sink)` 在一个 `SessionStore` 上开始一次尝试（不需要落盘时用 `SessionStore::in_memory`），按需设置 `max_model_requests`、`token_budget`、`cost_budget`，再 `.run(prompts)`；每一步先记入会话，发给模型的就是会话投影，跑完后的对话从 `session.messages()` 读取。`approvals` 是宿主持有的 `&mut ApprovalCache`；使用 `Runner` 时由它管理，并在尝试之外加上重试、上限与摘要。
 

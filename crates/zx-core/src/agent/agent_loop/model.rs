@@ -13,14 +13,13 @@ impl Attempt<'_> {
         result: &mut AttemptResult,
         turn: u32,
     ) -> Result<Option<AssistantMessage>, Halt> {
-        let spec = &self.config.spec;
+        let config = self.config;
         let messages = self.session.messages();
         let configured = RequestSettings {
-            model: spec.model.clone(),
-            reasoning: spec.reasoning,
+            model: config.model.clone(),
+            reasoning: config.reasoning,
         };
-        let settings = self
-            .config
+        let settings = config
             .hooks
             .prepare_request(&messages, turn, configured, self.trace.context())
             .await
@@ -30,19 +29,19 @@ impl Attempt<'_> {
             messages,
             // The active set may have changed since the last request; the audit records
             // what each request declared.
-            tools: spec
+            tools: config
                 .tools
                 .iter()
-                .filter(|tool| self.config.active_tools.is_active(tool.name()))
+                .filter(|tool| config.active_tools.is_active(tool.name()))
                 .map(|tool| tool.definition())
                 .collect(),
-            max_tokens: spec.max_tokens,
+            max_tokens: config.max_tokens,
             reasoning: settings.reasoning,
-            cache_key: self.config.cache_key.clone(),
+            cache_key: config.cache_key.clone(),
         };
         let request_entry = self
             .session
-            .record_request(&request, spec.provider.as_ref())
+            .record_request(&request, config.provider.as_ref())
             .await
             .map_err(Halt::Unrecorded)?;
         if self.trace.cancel().is_cancelled() {
@@ -58,7 +57,7 @@ impl Attempt<'_> {
         result.model_requests = result.model_requests.saturating_add(1);
         let model = request.model.clone();
         let mut message = self.stream(request).await;
-        message.usage.price(&self.config.models, &model);
+        message.usage.price(&config.models, &model);
         result.usage.add(&message.usage);
         Ok(Some(message))
     }
@@ -66,8 +65,8 @@ impl Attempt<'_> {
     /// Stream one response, reporting its start and its deltas. The caller records the
     /// response and reports its end.
     async fn stream(&self, request: Request) -> AssistantMessage {
-        let spec = &self.config.spec;
-        let mut events = spec.provider.stream(request, self.trace.cancel().clone());
+        let config = self.config;
+        let mut events = config.provider.stream(request, self.trace.cancel().clone());
         let mut started = false;
         while let Some(event) = events.next().await {
             if !started {
@@ -89,8 +88,8 @@ impl Attempt<'_> {
             self.emit(AgentEvent::MessageStart { role: "assistant" }).await;
         }
         AssistantMessage::failure(
-            spec.provider.name(),
-            &spec.model,
+            config.provider.name(),
+            &config.model,
             stop,
             "provider stream ended without a final event",
         )

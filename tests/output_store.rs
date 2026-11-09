@@ -382,7 +382,7 @@ async fn redaction_precedes_both_output_file_and_session_persistence() {
             Arc::new(ReadOutputTool::new(store.clone())),
         ],
     );
-    config.spec.cwd = dir.path().into();
+    config.cwd = dir.path().into();
     config.hooks.push(RedactSecrets::new([secret.into()]));
     config.hooks.push(SpillOutputs::new(store, vec![TOOL_NAME.into()]));
     let audit = dir.path().join("session.jsonl");
@@ -468,7 +468,7 @@ async fn a_storage_error_keeps_the_redacted_result_inline_and_the_run_continues(
             Arc::new(ReadOutputTool::new(store.clone())),
         ],
     );
-    config.spec.cwd = dir.path().into();
+    config.cwd = dir.path().into();
     config.hooks.push(SpillOutputs::new(store, vec![]));
     let (mut runner, _) = RunnerSetup::new(config).build();
     let report = runner.run("go", &CancellationToken::new()).await;

@@ -856,7 +856,7 @@ pub(crate) async fn evaluate(provider: Arc<dyn Provider>, model: &str, budget: C
         }
         let sent_before = summary_requests(&store).len();
         let mut loop_config = config(Arc::clone(&provider), vec![]);
-        loop_config.spec.model = model.into();
+        loop_config.model = model.into();
         let (runner, _) = RunnerSetup {
             session: store,
             ..RunnerSetup::new(loop_config)

@@ -329,7 +329,7 @@ async fn steering_enters_after_the_turn_and_follow_ups_after_the_answer() {
     let mut echo = EchoTool::new("echo");
     echo.queues = Some(config.queues.clone());
     let mut config = config;
-    config.spec.tools = vec![Arc::new(echo)];
+    config.tools = vec![Arc::new(echo)];
     let mut context = Vec::new();
 
     let (result, _) = run_prompt(&config, &mut context, "go").await;
@@ -360,7 +360,7 @@ async fn a_withdrawn_follow_up_is_never_taken() {
     let mut echo = EchoTool::new("echo");
     echo.queues = Some(config.queues.clone());
     let mut config = config;
-    config.spec.tools = vec![Arc::new(echo)];
+    config.tools = vec![Arc::new(echo)];
     config.queues.follow_up("then summarize");
     config.queues.follow_up("and then stop");
     let mut context = Vec::new();
@@ -393,7 +393,7 @@ async fn a_spent_budget_starts_no_new_turn_and_leaves_queued_input_queued() {
     let mut echo = EchoTool::new("echo");
     echo.queues = Some(config.queues.clone());
     let mut config = config;
-    config.spec.tools = vec![Arc::new(echo)];
+    config.tools = vec![Arc::new(echo)];
     let events = Collect::default();
 
     let (result, context) = run_attempt(
@@ -504,7 +504,7 @@ fn prompt(started: &str) -> SystemPrompt {
 /// Run `text` on `context` with `system_prompt`; the model answers `answer`.
 async fn run_with_prompt(context: &mut Vec<Message>, system_prompt: SystemPrompt, text: &str, answer: &str) {
     let mut config = config(provider([FauxStep::text(answer)]), vec![]);
-    config.spec.system_prompt = system_prompt;
+    config.system_prompt = system_prompt;
     run_prompt(&config, context, text).await;
 }
 

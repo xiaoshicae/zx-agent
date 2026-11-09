@@ -468,9 +468,9 @@ impl From<Runner> for AgentSession {
         let config = runner.config();
         let queues = config.queues.clone();
         let active_tools = config.active_tools.clone();
-        let tool_names = config.spec.tools.iter().map(|tool| tool.name().to_string()).collect();
+        let tool_names = config.tools.iter().map(|tool| tool.name().to_string()).collect();
         let commands = config.commands.clone();
-        let cwd = config.spec.cwd.clone();
+        let cwd = config.cwd.clone();
         let session_id = runner.session().header().id.clone();
         let events = Arc::new(EventHub::default());
         let initial = runner.replace_sink(events.clone());

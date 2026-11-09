@@ -6,7 +6,7 @@
 //! host before acting on it and reads the session's projection whenever it needs the context,
 //! so what the model sees is always what the session holds.
 //!
-//! - `config`: what a loop runs with: [`LoopSpec`] and [`LoopConfig`]
+//! - `config`: what a loop runs with: [`LoopConfig`]
 //! - `context`: input, queued messages and context edits, recorded before the loop uses them
 //! - `model`: recording a task request and streaming its response
 //! - `tools`: checking, approving, running and recording the calls of a response
@@ -48,7 +48,7 @@ use crate::ai::{
 };
 use crate::session::SessionStore;
 
-pub use config::{LoopConfig, LoopSpec};
+pub use config::LoopConfig;
 use turn::{AfterTools, PendingInput, TurnResponse};
 
 /// Why an attempt failed, with the response when the provider failed.
@@ -308,9 +308,9 @@ impl<'a> Attempt<'a> {
     /// Validate the specification and record the system prompt's changes and the input.
     async fn initialize(&mut self, prompts: Vec<QueuedMessage>, result: &mut AttemptResult) -> Result<(), Halt> {
         let config = self.config;
-        self.validators = config.spec.validators().map_err(Halt::Failed)?;
+        self.validators = config.validators().map_err(Halt::Failed)?;
         self.start_turn(result).await;
-        let changes = SystemPrompt::from_transcript(&self.session.messages()).diff(&config.spec.system_prompt);
+        let changes = SystemPrompt::from_transcript(&self.session.messages()).diff(&config.system_prompt);
         if !changes.is_empty() {
             self.append(Message::System(SystemMessage {
                 sections: changes,

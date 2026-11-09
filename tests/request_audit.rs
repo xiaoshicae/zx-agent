@@ -109,8 +109,8 @@ async fn every_dispatched_request_is_rebuilt_exactly_from_the_session_file() {
     ]));
     let tool: Arc<dyn Tool> = Arc::new(EchoTool::new("echo"));
     let mut config = config(provider.clone(), vec![tool]);
-    config.spec.system_prompt = SystemPrompt::default().with_section(PREAMBLE, "Be brief.");
-    config.spec.max_tokens = Some(256);
+    config.system_prompt = SystemPrompt::default().with_section(PREAMBLE, "Be brief.");
+    config.max_tokens = Some(256);
     let (mut runner, _) = RunnerSetup {
         session: SessionStore::create(&path, header()).unwrap(),
         ..RunnerSetup::new(config)

@@ -10,7 +10,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 use zx_agent::AgentSession;
-use zx_agent::agent::{EventSink, HookOptions, Hooks, LoopConfig, LoopSpec, PolicyDecision, Tool};
+use zx_agent::agent::{EventSink, HookOptions, Hooks, LoopConfig, PolicyDecision, Tool};
 use zx_agent::ai::ModelMeta;
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
@@ -178,15 +178,14 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
             (prompt::AVAILABLE_SKILLS, &host.catalog),
         ],
     );
-    let mut config = LoopConfig::new(LoopSpec {
-        provider: Arc::new(provider),
-        model: options.model.to_string(),
+    let mut config = LoopConfig {
         system_prompt,
         tools,
         cwd,
         max_tokens: options.request.max_tokens,
         reasoning: options.request.reasoning,
-    });
+        ..LoopConfig::new(Arc::new(provider), options.model)
+    };
     push_built_in(&mut config, "command_policy", PolicyHook::new(Arc::new(policy)));
     // Each session's redaction owns its list: the hook reads the files again before every use.
     let redaction = RedactSecrets::new(api_key.into_iter().chain(hidden_values(&options)))
@@ -424,7 +423,7 @@ fn register_hooks(
         push_built_in(config, "spill_outputs", spill);
     }
     // The built-in tools skip repeated names; this guards tools registered here later.
-    config.spec.validate().map_err(anyhow::Error::msg)?;
+    config.validate().map_err(anyhow::Error::msg)?;
     Ok(auto_approve)
 }
 

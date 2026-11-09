@@ -1283,7 +1283,7 @@ async fn every_hook_method_knows_the_session_run_and_working_directory() {
     ]));
     let probe = ContextProbe::default();
     let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
-    config.spec.cwd = PathBuf::from("/srv/work");
+    config.cwd = PathBuf::from("/srv/work");
     config.hooks.push(probe.clone());
     let (mut runner, events) = RunnerSetup::new(config).build();
 

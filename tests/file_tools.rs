@@ -210,7 +210,7 @@ fn file_tool_config(
     let names = ["edit_file", "write_file"].map(String::from);
     let tools = builtin_tools(&names, Duration::from_secs(5), executor).unwrap();
     let mut config = config(provider, tools);
-    config.spec.cwd = cwd;
+    config.cwd = cwd;
     config
 }
 

@@ -15,7 +15,6 @@ impl RunHost<'_> {
         for call in self.session.interrupted_tool_calls() {
             let effects = self
                 .config
-                .spec
                 .tools
                 .iter()
                 .find(|tool| tool.name() == call.tool_name)

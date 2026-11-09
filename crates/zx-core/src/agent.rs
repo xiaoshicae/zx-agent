@@ -23,7 +23,7 @@ mod report;
 mod session_host;
 mod tool;
 
-pub use agent_loop::{Attempt, AttemptFailure, AttemptResult, LoopConfig, LoopSpec};
+pub use agent_loop::{Attempt, AttemptFailure, AttemptResult, LoopConfig};
 pub use command::{CommandContext, CommandError, CommandOutcome, SlashCommand, check_command_name};
 pub(crate) use events::EventTarget;
 pub use events::{

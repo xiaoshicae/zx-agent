@@ -115,10 +115,10 @@ impl Endpoint {
     /// up costs: 256 output tokens per response, 4 turns, 2 minutes, no retries.
     fn setup(&self, api_key: String, cwd: &Path) -> RunnerSetup {
         let mut config = config(Arc::new(self.provider(api_key)), vec![]);
-        config.spec.model = self.model.clone();
-        config.spec.cwd = cwd.to_path_buf();
-        config.spec.max_tokens = Some(256);
-        config.spec.system_prompt = build_system_prompt(
+        config.model = self.model.clone();
+        config.cwd = cwd.to_path_buf();
+        config.max_tokens = Some(256);
+        config.system_prompt = build_system_prompt(
             "You are a test assistant. Follow the user's instructions exactly and keep answers short.",
             &[("environment", &environment_section(cwd))],
         );
@@ -142,7 +142,7 @@ impl Endpoint {
             }),
             ..BashTool::default()
         };
-        setup.config.spec.tools = vec![Arc::new(bash)];
+        setup.config.tools = vec![Arc::new(bash)];
         setup
             .config
             .hooks
@@ -224,7 +224,7 @@ async fn an_answer_over_the_output_limit_is_reported_as_truncated() {
     let endpoint = Endpoint::from_env();
     let dir = tempfile::tempdir().unwrap();
     let mut setup = endpoint.setup(endpoint.api_key(), dir.path());
-    setup.config.spec.max_tokens = Some(16);
+    setup.config.max_tokens = Some(16);
     let (mut runner, _) = setup.build();
 
     let report = runner

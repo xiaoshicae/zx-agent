@@ -133,13 +133,13 @@ impl Runner {
         // Another model may produce a valid summary where the previous one failed.
         self.pause.clear();
         (
-            std::mem::replace(&mut self.config.spec.provider, provider),
-            std::mem::replace(&mut self.config.spec.model, model),
+            std::mem::replace(&mut self.config.provider, provider),
+            std::mem::replace(&mut self.config.model, model),
         )
     }
 
     pub(crate) fn replace_reasoning(&mut self, reasoning: Option<Reasoning>) -> Option<Reasoning> {
-        std::mem::replace(&mut self.config.spec.reasoning, reasoning)
+        std::mem::replace(&mut self.config.reasoning, reasoning)
     }
 
     /// Revoke exact-call approvals granted by this Runner's interaction host.
@@ -473,12 +473,12 @@ impl RunTimer {
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     use super::*;
-    use crate::agent::{LoopSpec, NullSink, Tool};
+    use crate::agent::{NullSink, Tool};
+    use crate::ai::Message;
     use crate::ai::faux::{FauxProvider, FauxStep};
-    use crate::ai::{Message, SystemPrompt};
     use crate::session::{FailingWriter, SessionHeader};
 
     #[test]
@@ -493,15 +493,10 @@ mod tests {
 
     /// A loop over `provider` and `tools` with no system prompt.
     fn config(provider: &Arc<FauxProvider>, tools: Vec<Arc<dyn Tool>>) -> LoopConfig {
-        LoopConfig::new(LoopSpec {
-            provider: provider.clone(),
-            model: "m".into(),
-            system_prompt: SystemPrompt::default(),
+        LoopConfig {
             tools,
-            cwd: PathBuf::from("."),
-            max_tokens: None,
-            reasoning: None,
-        })
+            ..LoopConfig::new(provider.clone(), "m")
+        }
     }
 
     /// A runner without retries or limits, whose events go nowhere.

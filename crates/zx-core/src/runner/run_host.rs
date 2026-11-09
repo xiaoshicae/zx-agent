@@ -99,10 +99,10 @@ impl<'a> RunHost<'a> {
     /// run cannot start, and the number of entries the session had: the run's answer is
     /// what it adds after them.
     pub(super) async fn open_run(&mut self, begin: Start) -> (Result<Vec<QueuedMessage>, String>, usize) {
-        let spec = &self.config.spec;
+        let config = self.config;
         self.emit(AgentEvent::RunStart {
-            model: spec.model.clone(),
-            provider: spec.provider.name().into(),
+            model: config.model.clone(),
+            provider: config.provider.name().into(),
         })
         .await;
         // Entry IDs remain stable even when hooks omit messages from earlier runs.
@@ -121,8 +121,8 @@ impl<'a> RunHost<'a> {
     pub(super) async fn summarize(&mut self, trigger: Trigger, cancel: &CancellationToken) -> compaction::Report {
         let mut summarizer = Summarizer {
             session: &mut *self.session,
-            provider: self.config.spec.provider.as_ref(),
-            model: &self.config.spec.model,
+            provider: self.config.provider.as_ref(),
+            model: &self.config.model,
             config: self.compaction,
             target: self.target,
             hooks: &self.config.hooks,

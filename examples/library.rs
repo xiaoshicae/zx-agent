@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use zx_agent::AgentSession;
-use zx_agent::agent::{AgentEvent, Event, LoopConfig, LoopSpec};
+use zx_agent::agent::{AgentEvent, Event, LoopConfig};
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::continuation::ContinueOnLength;
@@ -55,15 +55,12 @@ async fn main() -> anyhow::Result<()> {
         api_key: api_key.clone().into(),
         ..OpenAiConfig::default()
     })?;
-    let mut config = LoopConfig::new(LoopSpec {
-        provider: Arc::new(provider),
-        model: model.clone(),
+    let mut config = LoopConfig {
         system_prompt,
         tools: vec![Arc::new(bash), Arc::new(ReadFileTool::default())],
         cwd: cwd.clone(),
-        max_tokens: None,
-        reasoning: None,
-    });
+        ..LoopConfig::new(Arc::new(provider), model.clone())
+    };
     // Continue once if an answer stops at the output token limit.
     config.hooks.push(ContinueOnLength::new(1));
     config.hooks.push(PolicyHook::new(Arc::new(policy)));

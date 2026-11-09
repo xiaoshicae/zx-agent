@@ -324,7 +324,7 @@ async fn the_reasoning_level_changes_between_prompts_and_is_recorded_for_the_aud
         FauxStep::text("three"),
     ]));
     let mut loop_config = config(provider.clone(), vec![]);
-    loop_config.spec.reasoning = Some(Reasoning::Low);
+    loop_config.reasoning = Some(Reasoning::Low);
     let (runner, _) = RunnerSetup {
         session: SessionStore::create(&file, header()).unwrap(),
         ..RunnerSetup::new(loop_config)

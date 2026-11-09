@@ -27,15 +27,12 @@ use tokio::sync::Notify;
 use zx_agent::agent::ApprovalCache;
 use zx_agent::agent::QueuedMessage;
 use zx_agent::agent::{
-    AgentEvent, Attempt, AttemptResult, Event, EventSink, ExecutionMode, HookContext, LoopConfig, LoopSpec,
-    MessageQueues, Tool, ToolContext, ToolOutput, ToolPolicy,
+    AgentEvent, Attempt, AttemptResult, Event, EventSink, ExecutionMode, HookContext, LoopConfig, MessageQueues, Tool,
+    ToolContext, ToolOutput, ToolPolicy,
 };
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::retry::RetryPolicy;
-use zx_agent::ai::{
-    AssistantMessage, ContentBlock, EventReceiver, Message, Provider, Request, StopReason, SystemPrompt, ToolCall,
-    ToolDef,
-};
+use zx_agent::ai::{AssistantMessage, ContentBlock, EventReceiver, Message, Provider, Request, StopReason, ToolCall, ToolDef};
 use zx_agent::policy::PolicyHook;
 use zx_agent::runner::{Limits, Runner};
 use zx_agent::session::{Entry, SessionHeader, SessionStore};
@@ -327,16 +324,11 @@ impl Collect {
 }
 
 pub(crate) fn config(provider: Arc<dyn Provider>, tools: Vec<Arc<dyn Tool>>) -> LoopConfig {
-    LoopConfig::new(LoopSpec {
-        provider,
-        model: "test-model".to_string(),
-        // Empty, so runs add no system message; system prompt tests set their own.
-        system_prompt: SystemPrompt::default(),
+    // No system prompt, so runs add no system message; system prompt tests set their own.
+    LoopConfig {
         tools,
-        cwd: PathBuf::from("."),
-        max_tokens: None,
-        reasoning: None,
-    })
+        ..LoopConfig::new(provider, "test-model")
+    }
 }
 
 pub(crate) fn with_policy(mut config: LoopConfig, policy: Arc<dyn ToolPolicy>) -> LoopConfig {

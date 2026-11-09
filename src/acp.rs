@@ -205,7 +205,7 @@ impl Host {
             session_id: id.clone(),
         });
         session.config.interaction_timeout = Duration::from_secs(args.approval_timeout_secs);
-        let cwd = session.config.spec.cwd.clone();
+        let cwd = session.config.cwd.clone();
         let updates = Arc::new(Updates::new(cx.clone(), id.clone(), cwd));
         Ok(Prepared { session, updates, id })
     }
