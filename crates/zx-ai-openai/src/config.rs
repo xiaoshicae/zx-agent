@@ -343,6 +343,23 @@ mod tests {
     }
 
     #[test]
+    fn zero_stream_budgets_are_rejected() {
+        for config in [
+            OpenAiConfig {
+                max_response_bytes: 0,
+                ..OpenAiConfig::default()
+            },
+            OpenAiConfig {
+                max_sse_event_bytes: 0,
+                ..OpenAiConfig::default()
+            },
+        ] {
+            let error = OpenAiCompatible::new(config).err().expect("a zero budget is rejected");
+            assert!(error.to_string().contains("must be greater than zero"), "{error}");
+        }
+    }
+
+    #[test]
     fn reasoning_levels_and_formats_parse_by_name() {
         for level in Reasoning::ALL {
             assert_eq!(level.as_str().parse::<Reasoning>(), Ok(level));

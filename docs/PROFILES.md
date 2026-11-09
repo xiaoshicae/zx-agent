@@ -44,10 +44,10 @@ path = "skills/rust-review/SKILL.md"
 |---|---|
 | `name` | 场景名称，省略时继承基线 |
 | `extends` | 可选的 `unattended`、`troubleshoot` 或 `assistant`；省略时使用当前前端的默认 profile；不支持文件链式继承 |
-| `instructions` | 替换场景说明的 UTF-8 文件；CLI `--system-prompt-file` 优先，它的读取方式与引入 profile 之前一致：可以是管道，不受 64 KiB 限制，只在启动时读取一次（`chat` 的 `/new` 沿用同一内容） |
+| `instructions` | 替换场景说明的 UTF-8 文件，至多 64 KiB；每次建会话时读取（`chat` 的 `/new` 读取当时的内容） |
 | `tools` | 替换启用列表，支持 `bash`、`read_file`、`edit_file`、`write_file`、`grep`、`find`、`ls`、`read_skill`、`read_output`；`[]` 禁用全部工具。内置 assistant 启用全部，并对 `bash`、`edit_file`、`write_file` 要求审批 |
-| `execution` | `local`（默认）或 `container`；其他值报错。`container` 时 bash、read_file、edit_file 与 write_file 在 Docker 容器中执行，见 README 的“容器执行”。CLI `--execution` 优先 |
-| `container.image` | 容器镜像，`execution = "container"` 时必填，须已在本地；CLI `--container-image` 优先 |
+| `execution` | `local`（默认）或 `container`；其他值报错。`container` 时 bash、read_file、edit_file 与 write_file 在 Docker 容器中执行，见 README 的“容器执行” |
+| `container.image` | 容器镜像，`execution = "container"` 时必填，须已在本地（`docker pull`） |
 | `container.user` | 容器内运行命令的 `uid:gid`，默认为运行 zx-agent 的用户（以 root 运行时为 `65534:65534`）；不能是 root（UID 0 或 `root`），启动时也会检查命令的实际 UID |
 | `container.memory` | Docker 写法的内存上限，默认 `1g` |
 | `container.pidsLimit` | 容器内进程数上限，大于零，默认 256 |
@@ -72,7 +72,7 @@ path = "skills/rust-review/SKILL.md"
 | `skills` | 显式登记 name、description、path 的目录；正文按需读取 |
 | `compaction.triggerBytes` | 自动摘要阈值，0 关闭；非零须大于 `keepRecentBytes`，且超出部分不能多于 2 MiB（一次摘要最多读取的原始记录） |
 | `compaction.keepRecentBytes` | 近期消息的序列化字节预算，大于零；完整保留最新输入和全部 system，可因此超出保留预算 |
-| `compaction.triggerTokens` | 按 token 估算的自动摘要阈值，0 关闭；与 `triggerBytes` 任一超过即摘要。估算 = 最近一次成功回复报告的输入加输出 token，加上其后消息的字节数除以 4。须高于 `keepRecentBytes` 折算的 token 数（字节除以 4），否则摘要永远压不到阈值以下。省略时，开启自动摘要（`triggerBytes` 非零）且模型的上下文窗口已知（`[[models]]` 或 `--context-window`）的话，取“窗口减 `reserveTokens`”，不满足上述条件时不设 |
+| `compaction.triggerTokens` | 按 token 估算的自动摘要阈值，0 关闭；与 `triggerBytes` 任一超过即摘要。估算 = 最近一次成功回复报告的输入加输出 token，加上其后消息的字节数除以 4。须高于 `keepRecentBytes` 折算的 token 数（字节除以 4），否则摘要永远压不到阈值以下。省略时，开启自动摘要（`triggerBytes` 非零）且模型的上下文窗口已知（`[[models]]`）的话，取“窗口减 `reserveTokens`”，不满足上述条件时不设 |
 | `compaction.reserveTokens` | 按窗口推导 `triggerTokens` 时留出的 token 数，默认 16384（pi 的 `reserveTokens`） |
 | `[[models]]` | 模型的元数据，每项 `id`（必填）、`contextWindow`（token 数，大于零）、`cost`（每百万 token 的单价，币种自定，所有单价用同一种：`input`、`output`、`cacheRead`、`cacheWrite`，都不小于零；`input` 指既不读也不写缓存的提示词 token）。没有内置的模型表；按 `id` 覆盖所扩展 profile 的同名项。有单价时每次回复的 `usage.totalCost` 与 chat 的 `[turn]`、`/status` 显示成本 |
 | `compaction.maxSummaryTokens` | 摘要输出 token 上限，1–16384，默认 2048。有的服务把推理计入输出 token，推理可能用满上限而写不出摘要（见 `docs/ROADMAP.md` 的验证记录），使用这类模型时需要调高；服务支持时也可以经 `--request-field` 关闭推理，但它同样作用于任务请求 |
@@ -82,7 +82,7 @@ path = "skills/rust-review/SKILL.md"
 | `toolOutput.directory` | 显式路径相对 TOML 文件；省略时为工具 cwd 下的 `.zx-agent/outputs` |
 | `[[mcp]]` | 外部 MCP 服务器，可写多段，见下文“MCP 服务器”；子 profile 的整组替换基线的（内置 profile 都没有） |
 
-未提供的值继承基线。叠加顺序为 **内置基线 < profile 文件 < 显式命令行参数**；即使 CLI 值恰好等于旧默认值，也按显式覆盖处理。`--allow-cmd`、`--auto-approve-cmd` 分别替换文件的 allow、autoApprove；`--deny-cmd` 追加到文件和内置 deny，不能清除拒绝规则。重复的 `--context-file` 追加文件。在本机执行时给出 `--container-image` 视为配置错误，避免误以为命令已在容器中执行。
+未提供的值继承基线。叠加顺序为 **内置基线 < profile 文件 < 显式命令行参数**；即使 CLI 值恰好等于旧默认值，也按显式覆盖处理。命令行只覆盖 `--tools` 与预算（`--max-model-requests`、`--timeout-secs`、`--token-budget`、`--cost-budget`）；其余配置（命令规则、说明、上下文、摘要、模型元数据、续写与执行环境）只写在 profile 中。
 
 连接地址、模型、认证环境变量名、传输与工具超时、输出模式和会话路径仍使用原 CLI 选项。TOML 不接受这些键，也不接受任意扩展名称；未知字段、错误类型、无效路径或不支持的配置均在请求模型前以退出码 2 报错。
 
@@ -120,20 +120,23 @@ maxTimeoutSecs = 600                        # 可选：一次调用的总上限�
 
 开启自动发现时，从最近 Git 根目录到工具 cwd，依次加载各层 `AGENTS.md`。Git worktree 的 `.git` 文件也被识别为边界；没有 Git 根目录时只检查 cwd。不会隐式读取用户主目录里的其他 AI 配置。
 
-`chat` 默认使用的 `assistant` 开启自动发现；`run` 默认使用的 `unattended`（以及 `troubleshoot`）关闭，无人值守运行不读取仓库里的说明。`run` 需要项目说明时，用 `--context-file AGENTS.md` 显式指定，或在自定义 profile 中设置 `[context] discover = true`。
+`chat` 默认使用的 `assistant` 开启自动发现；`run` 默认使用的 `unattended`（以及 `troubleshoot`）关闭，无人值守运行不读取仓库里的说明。`run` 需要项目说明时，在自定义 profile 中设置 `[context] discover = true`，或用 `files` 显式列出。
 
-自动发现的 `AGENTS.md` 可以是符号链接，但解析后的路径必须位于 Git 根目录内（没有 Git 根目录时为 cwd），否则在请求模型前以退出码 2 报错。这样仓库内容就不能让程序读取并发送仓库外的文件。`--context-file` 与 profile 中的上下文文件由使用者显式指定，不受这条限制。
+自动发现的 `AGENTS.md` 可以是符号链接，但解析后的路径必须位于 Git 根目录内（没有 Git 根目录时为 cwd），否则在请求模型前以退出码 2 报错。这样仓库内容就不能让程序读取并发送仓库外的文件。profile 中的上下文文件由使用者显式指定，不受这条限制。
 
-项目说明会进入系统提示词，可能引导模型的行为，但不能改变工具和规则。在不可信的仓库中运行时，建议使用 `--no-context`。
+项目说明会进入系统提示词，可能引导模型的行为，但不能改变工具和规则。在不可信的仓库中运行时，建议使用 `[context] discover = false` 的 profile。
 
-```bash
-zx-agent run --model "$ZX_MODEL" --context-file ./extra-context.md "分析当前项目"
-zx-agent chat --model "$ZX_MODEL" --no-context
+```toml
+extends = "assistant"
+
+[context]
+discover = false              # 不读取仓库里的 AGENTS.md
+files = ["extra-context.md"]  # 相对本文件所在目录
 ```
 
-`--context-file` 相对启动目录解析，即使工具 cwd 通过 `--cwd` 改到别处。`--no-context` 同时关闭自动发现和 profile 中的显式上下文文件，不能与 `--context-file` 同时使用。相同 canonical 路径只加载一次。
+`context.files` 相对 TOML 文件所在目录解析，与 `--cwd` 无关；它在各层之间累加，子 profile 不能清除所扩展 profile 的文件（内置 profile 都没有）。相同 canonical 路径只加载一次。
 
-上下文追加到生成的 `project_context` 提示词段落，沿用现有系统提示词持久化和更新机制。只读普通 UTF-8 文件，每个文件最多 64 KiB；上下文总量包含路径标题和分隔符，最多 256 KiB。超限报错，不静默截断指令；报错会提示可以用 `--no-context` 跳过项目上下文。
+上下文追加到生成的 `project_context` 提示词段落，沿用现有系统提示词持久化和更新机制。只读普通 UTF-8 文件，每个文件最多 64 KiB；上下文总量包含路径标题和分隔符，最多 256 KiB。超限报错，不静默截断指令；报错会提示可以用 `[context] discover = false` 跳过自动发现。
 
 ## 按需加载 skills
 
@@ -175,12 +178,7 @@ contextWindow = 128000
 cost = { input = 0.27, output = 1.10, cacheRead = 0.07 }   # 每百万 token 的单价，币种自定
 ```
 
-```bash
-zx-agent chat --model "$ZX_MODEL" --no-auto-compact
-zx-agent run --model "$ZX_MODEL" --compact-threshold-bytes 262144 "处理长任务"
-```
-
-两个选项互斥；`--compact-threshold-bytes 0` 也关闭自动触发。`--no-auto-compact` 不影响手动 `/compact`。SDK 默认不自动压缩，原构造器不变；宿主可在 Runner 上调用 `with_compaction(Config)` 校验并启用。
+`triggerBytes = 0`（且不设 `triggerTokens`，或设为 0）关闭自动摘要，不影响手动 `/compact`；`run` 要自动摘要时，在扩展 `unattended` 的 profile 中设置非零的 `triggerBytes`。SDK 默认不自动压缩，原构造器不变；宿主可在 Runner 上调用 `with_compaction(Config)` 校验并启用。
 
 自动步骤在输入和上下文钩子的改动持久化之后、任务模型请求之前执行。一次摘要占用一次 `--max-model-requests`，其 usage 与失败成本也计入本轮报告，并受整轮时间限制。摘要的工具列表为空；失败不重试成任务请求。付费的自动摘要请求失败后，本会话暂停自动摘要：之后需要摘要时直接报错并说明原因，不再自动发请求；手动 `/compact` 成功或切换模型后恢复，新会话也重新开始。手动摘要单独返回 `compaction_report`，不占下一轮 prompt 的预算。
 

@@ -13,7 +13,7 @@ use tokio::process::Command;
 
 use common::http::{Request, read_request};
 use common::mock_server::{MockServer, Reply};
-use common::{json_lines, stderr, stdout, zx_agent};
+use common::{ProfileFile, json_lines, stderr, stdout, zx_agent};
 
 /// An answer that would set the terminal title if a terminal ran it.
 const TITLE_ANSWER: &str = "before\u{1b}]0;CANARY\u{7}after";
@@ -537,7 +537,8 @@ async fn a_zero_timeout_is_rejected_before_any_request() {
     assert!(server.requests().is_empty());
 }
 
-/// A cut-off answer, which `run` asks the model to continue (`--continue-on-length` is 1),
+/// A cut-off answer, which `run` asks the model to continue (the unattended profile's
+/// `continueOnLength` is 1),
 /// then the rest. Each answer of the fake service reports 12 tokens: 10 in, 2 out.
 async fn two_answers() -> MockServer {
     MockServer::start(vec![Reply::truncated("part one, "), Reply::text("part two")]).await
@@ -674,10 +675,11 @@ async fn a_negative_cost_budget_is_rejected() {
 async fn run_with_a_denied_command(extra: &[&str]) -> std::process::Output {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::bash("c", "echo hi"), Reply::text("done")]).await;
+    let profile = ProfileFile::new("unattended", "[rules]\nallow = [\"ls\"]");
     zx_agent()
         .args(["run", "--model", "mock", "--base-url", &server.base_url])
         .args(["--max-retries", "0", "--api-key-env", "ZX_RUN_CLI_TEST_KEY"])
-        .args(["--tools", "bash", "--allow-cmd", "ls"])
+        .args(["--tools", "bash", "--profile", profile.path()])
         .args(extra)
         .arg("go")
         .current_dir(dir.path())

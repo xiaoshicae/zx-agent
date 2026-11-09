@@ -81,9 +81,7 @@ async fn build_session(args: &RunArgs) -> Result<AgentSession> {
         cwd: None,
         file: SessionFile::from_path(args.request.session.as_deref()),
         default_profile: Builtin::Unattended,
-        continue_on_length: args.continue_on_length,
         shared: &shared,
-        hidden_env: &[],
     })
     .await?;
     let sink: Arc<dyn EventSink> = match args.output {

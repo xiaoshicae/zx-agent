@@ -18,7 +18,7 @@ pub(super) fn check_session_outside(file: &SessionFile<'_>, cwd: &Path) -> Resul
     if let Some(path) = file.location() {
         anyhow::ensure!(
             !resolve_location(path)?.starts_with(cwd),
-            "--execution container needs the session file outside the working directory, which the container can read: {}; choose a --session path (in chat also --session-dir) outside {}",
+            "container execution needs the session file outside the working directory, which the container can read: {}; choose a --session path (in chat also --session-dir) outside {}",
             path.display(),
             cwd.display()
         );
@@ -70,7 +70,7 @@ pub(super) async fn executor(
             let settings = config.clone();
             let container = ContainerExecutor::start(config)
                 .await
-                .context("cannot start the container for --execution container")?;
+                .context("cannot start the container for container execution")?;
             let environment = container_environment_section(&settings, container.platform());
             let container: Arc<dyn Executor> = Arc::new(container);
             Ok((container, environment))

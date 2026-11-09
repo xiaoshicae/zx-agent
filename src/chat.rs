@@ -105,9 +105,7 @@ impl Chat {
             cwd: None,
             file,
             default_profile: Builtin::Assistant,
-            continue_on_length: None,
             shared: &settings.shared,
-            hidden_env: &[],
         })
         .await?;
         prepared.require_bash_approval("shell commands require interactive approval");

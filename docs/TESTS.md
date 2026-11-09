@@ -12,7 +12,7 @@
 | `tests/prepare_request.rs` | 请求前替换设置（`Hooks::prepare_request`）：只对一次请求有效、钩子看到的计划、`request_start` 报告实际的模型、请求审计可还原、钩子按顺序接力、失败与空模型名在请求前结束且不重试、panic |
 | `tests/continue_run.rs` | 不加新输入的续跑：回答结尾的输入、崩溃后补写的结果（调用不再执行）、省略结尾失败的回答再答、完成的回答没有可续的（排队的后续消息除外）、空会话、请求可从会话文件还原、运行中返回 Busy |
 | `tests/overflow_recovery.rs` | 上下文过长后的恢复：省略失败回答、摘要一次再开始新的尝试（不算重试）、未开启自动摘要时行为不变、恢复后紧接着又过长时结束、回答成功后可再次恢复、摘要失败暂停自动摘要、预算用完与运行超时 |
-| `tests/cli.rs` | 原有 run 行为与退出码，P0 起逐字节保持；P6 默认值变更另行验收 |
+| `tests/cli.rs` | 原有 run 行为与退出码，P0 起保持；P6 默认值变更另行验收；移除与 profile 重复的命令行参数时，用到它们的测试改经 profile 文件驱动 |
 | `tests/run_cli.rs` | P0 之后新增的 run 约定（如进度与报告行转义终端控制字符、会话文件单写者、零超时被拒绝、stdout 关闭时的退出码、token 预算的退出码 7：假服务每次回答报告 12 个 token、成本预算的退出码 8 与没有单价时的配置错误、`--fail-on-denied` 的退出码 9、只在设置了 OTLP 地址时导出追踪与指标：测试中的假收集端只看请求，不解码 protobuf，`TRACEPARENT` 接续调用方的 trace（按 ID 的字节查找）且不合法时提示、`--request-field` 到达模型并写入请求审计，写错时以退出码 2 结束、`--fill-missing-reasoning` 默认关闭且开启时写入请求审计、`--reasoning` 的三种写法与冲突检查、`--continue` 失败后续跑与参数检查），新的 run 测试放这里，`tests/cli.rs` 不改 |
 | `tests/otel.rs` | OpenTelemetry 导出：真实运行经 `Telemetry` 产生的 span 层级与属性；经 `with_providers` 的指标（SDK 的 `InMemoryMetricExporter` 关闭时不清空，周期读取器关闭时再导出一次）；`sink_under` 接续给定的 traceparent；测试用的导出器 `Kept` 在关闭后仍保留 span（SDK 的内存导出器关闭时会清空） |
 | `tests/idempotency.rs` | 幂等提交（P10 ⑫）：键先于提示词写入且同键第二次不发请求、空键被拒、重新打开的会话仍认得键、失败的提交同键被拒后用 `continue_run` 接着做 |
@@ -22,9 +22,9 @@
 | `tests/session_branch.rs` | 会话内切换分支（P10 ⑥c）：`AgentSession::branch` 到更早的回答后继续且离开的分支仍在文件里、接在带未答调用的回答后把调用记为未执行且不再执行、回到根重新开始、运行中返回 Busy、未知条目被拒且位置不变、`inspect` 期间会话被占用 |
 | `tests/session_fork.rs` | 复制分支成新会话（P10 ⑥b）：只复制选中的分支、条目逐字节相同、头部的 `parentSession` 与格式版本、副本可重新打开并追加、源文件不变、复制来的请求能从副本还原；目标不为空、叶子不存在、格式版本不同时不写入；没有 `parentSession` 的头部保持原格式 |
 | `tests/sessions_cli.rs` | 会话目录（P10 ⑥a、⑥b）：chat 默认的位置、文件名与权限，`--no-session`，`--resume` 取本工作目录最近的会话或按 ID 前缀，`--session-dir`，`zx-agent sessions` 的顺序与预览，chat 的 `/sessions`、`/resume` 与 `/new`；`--fork` 按 ID 或文件复制、找不到时不建文件，`/fork` 之后只写副本，`--no-session` 时没有可复制的文件；`/tree` 的分支与标记、`/branch` 接在条目之后或自己的消息之前、`/fork` 复制到移动后的位置、ID 不唯一或不存在时的提示（固定 ID 的种子会话 `seed_tree`）。每个测试有自己的 `HOME`；启动 chat 的其他测试构造器同样把 `HOME` 设到临时目录，新的构造器也要这样做，否则会写进真实的家目录 |
-| `tests/chat_cli.rs` | chat 的脚本 stdin、审批与过期（含 `y`、`n` 别名，默认 profile 下 write_file 先审批，文件内容与编辑逐项显示）、工具行与结果预览（含 edit_file 的补丁）、`[turn]` 行与 `/status`、`--color`、续接会话的提示、重试错误只报一次、无用量的 `[turn]`、`--show-thinking`、`--queue-mode` 与 `/queue`、`[[models]]` 的单价与 `[turn]` / `/status` 的成本、`--header` 与 `--prompt-cache-key`、`--context-window` 推导的 token 阈值、信号与超时（取消只报告一次，空闲时 Ctrl+C 两次退出）、取消后丢弃残留插话、钩子失败的提示、Unicode、模型与推理强度的切换、`/continue`、会话重置和 Unix PTY（插话、粘贴合并、等待时的状态行、回答前后的空行） |
+| `tests/chat_cli.rs` | chat 的脚本 stdin、审批与过期（含 `y`、`n` 别名，默认 profile 下 write_file 先审批，文件内容与编辑逐项显示）、工具行与结果预览（含 edit_file 的补丁）、`[turn]` 行与 `/status`、`--color`、续接会话的提示、重试错误只报一次、无用量的 `[turn]`、`--show-thinking`、`--queue-mode` 与 `/queue`、`[[models]]` 的单价与 `[turn]` / `/status` 的成本、`--header` 与 `--prompt-cache-key`、`[[models]]` 的 `contextWindow` 推导的 token 阈值、信号与超时（取消只报告一次，空闲时 Ctrl+C 两次退出）、取消后丢弃残留插话、钩子失败的提示、Unicode、模型与推理强度的切换、`/continue`、会话重置和 Unix PTY（插话、粘贴合并、等待时的状态行、回答前后的空行） |
 | `tests/acp_cli.rs` | `acp`：手写的 JSON-RPC 客户端经子进程 stdio 驱动：初始化与建会话、流式回答、工具调用与权限请求（批准、拒绝）、取消、未知会话、`write_file` 的 diff 与自动放行；会话落盘与 `session/load`（第二个进程回放后继续、工具调用连同结果、`--session-dir`、`--no-session`、未知会话、`--session` 被拒；`session/list` 的顺序、标题、时间、按 cwd 过滤与 `cursor` 拒绝；`session/resume` 不回放）；每个进程有自己的 `HOME`；stdout 的每一行都必须是协议消息 |
-| `tests/profiles_cli.rs` | profile/CLI 覆盖与 deny、项目上下文范围、默认值与越界链接、`--system-prompt-file` 兼容、skill 懒加载、工具策略和审计 |
+| `tests/profiles_cli.rs` | profile/CLI 覆盖与 deny、项目上下文范围、默认值与越界链接、skill 懒加载、工具策略和审计 |
 | `tests/session_compaction.rs`、`tests/compaction.rs` | 追加升级、分支 / 引用与原始投影、自动 / 手动摘要、摘要源不含工具结果的 `details`、计费（摘要请求计入请求与 token 预算）、steering、失败、取消与超时 |
 | `tests/incremental_summary.rs` | 增量摘要（v5）：接续与只读新增记录、接续全量摘要、取代、淘汰、修正后的作废与重读、加载校验、请求还原、请求大小不随历史增长；摘要评测的脚本会话自检，以及用知道答案的假模型验证评分 |
 | `tests/request_audit.rs` | 请求审计（G3）：从会话文件还原每次请求、配置变化才追加、旧会话升级时机；上下文过长后恢复的三个请求；固定会话 `tests/fixtures/replay-v4.jsonl` 与含增量摘要的 `replay-v5.jsonl` 的还原结果与期望文件逐字节比对，改变还原结果须同时升级转换版本或会话格式 |

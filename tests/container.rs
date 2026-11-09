@@ -27,7 +27,7 @@ use zx_agent::tools::{BashTool, ReadFileTool};
 
 use common::fake_mcp::{Era, FakeMcp, tool};
 use common::mock_server::{MockServer, Reply};
-use common::{RunnerSetup, config, stderr, zx_agent};
+use common::{ProfileFile, RunnerSetup, config, stderr, zx_agent};
 
 // ---------------------------------------------------------------------------
 // Fake docker
@@ -1004,6 +1004,7 @@ fn tool_result(server: &MockServer, index: usize) -> String {
 
 #[tokio::test]
 async fn run_in_container_mode_describes_the_container_and_runs_bash_there() {
+    let profile = container_profile("unattended", "fake:1");
     let fake = FakeDocker::new();
     fake.answer("cmd.out", "from-container\n");
     let workspace = fake.workspace();
@@ -1016,10 +1017,8 @@ async fn run_in_container_mode_describes_the_container_and_runs_bash_there() {
         &workspace,
         Some(fake.dir.path()),
         &[
-            "--execution",
-            "container",
-            "--container-image",
-            "fake:1",
+            "--profile",
+            profile.path(),
             "--tools",
             "bash",
             "--session",
@@ -1088,6 +1087,14 @@ async fn zx_chat_in_container(fake: &FakeDocker, server: &MockServer, profile: &
 
 const SANDBOX_PROFILE: &str = "execution = 'container'\n[container]\nimage = 'fake:1'\n";
 
+/// A profile extending the built-in `extends` that runs commands in a container of `image`.
+fn container_profile(extends: &str, image: &str) -> ProfileFile {
+    ProfileFile::new(
+        extends,
+        &format!("execution = \"container\"\n[container]\nimage = \"{image}\""),
+    )
+}
+
 #[tokio::test]
 async fn chat_in_a_container_that_approves_every_call_runs_bash_without_asking() {
     let fake = FakeDocker::new();
@@ -1119,22 +1126,17 @@ async fn chat_in_a_container_still_asks_unless_the_profile_approves_every_call()
 async fn approving_every_call_outside_a_container_is_a_configuration_error() {
     let fake = FakeDocker::new();
     let server = MockServer::start(vec![]).await;
-    let profile = format!("{SANDBOX_PROFILE}[rules]\napproveAll = true\naskTools = []\n");
-    let outside = tempfile::tempdir().unwrap();
-    let profile_path = outside.path().join("sandbox.toml");
-    std::fs::write(&profile_path, profile).unwrap();
+    // The sandbox's image, but with commands on this machine.
+    let profile = ProfileFile::new(
+        "unattended",
+        "execution = 'local'\n[container]\nimage = 'fake:1'\n[rules]\napproveAll = true\naskTools = []\n",
+    );
 
     let output = zx_run(
         &server,
         &fake.workspace(),
         Some(fake.dir.path()),
-        &[
-            "--profile",
-            profile_path.to_str().unwrap(),
-            "--execution",
-            "local",
-            "go",
-        ],
+        &["--profile", profile.path(), "go"],
     )
     .await;
 
@@ -1193,6 +1195,7 @@ async fn approving_every_call_also_runs_mcp_tools_outside_allow_tools() {
 
 #[tokio::test]
 async fn container_execution_refuses_a_session_file_the_container_could_read() {
+    let profile = container_profile("unattended", "fake:1");
     let fake = FakeDocker::new();
     let workspace = fake.workspace();
     let server = MockServer::start(vec![]).await;
@@ -1203,15 +1206,7 @@ async fn container_execution_refuses_a_session_file_the_container_could_read() {
             &server,
             &workspace,
             Some(fake.dir.path()),
-            &[
-                "--execution",
-                "container",
-                "--container-image",
-                "fake:1",
-                "--session",
-                session,
-                "go",
-            ],
+            &["--profile", profile.path(), "--session", session, "go"],
         )
         .await;
 
@@ -1228,34 +1223,16 @@ async fn container_execution_refuses_a_session_file_the_container_could_read() {
 }
 
 #[tokio::test]
-async fn a_container_image_without_container_execution_is_a_configuration_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let server = MockServer::start(vec![]).await;
-
-    let output = zx_run(
-        &server,
-        dir.path(),
-        None,
-        &["--container-image", "x", "--session", "s.jsonl", "go"],
-    )
-    .await;
-
-    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
-    assert!(stderr(&output).contains("--container-image needs container execution"));
-    assert!(server.requests().is_empty());
-    assert!(!dir.path().join("s.jsonl").exists());
-}
-
-#[tokio::test]
 async fn container_execution_without_an_image_fails_before_the_session_is_created() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![]).await;
+    let profile = ProfileFile::new("unattended", "execution = \"container\"");
 
     let output = zx_run(
         &server,
         dir.path(),
         None,
-        &["--execution", "container", "--session", "s.jsonl", "go"],
+        &["--profile", profile.path(), "--session", "s.jsonl", "go"],
     )
     .await;
 
@@ -1267,6 +1244,7 @@ async fn container_execution_without_an_image_fails_before_the_session_is_create
 
 #[tokio::test]
 async fn a_container_that_cannot_start_stops_the_run_before_any_request() {
+    let profile = container_profile("unattended", "fake:1");
     let fake = FakeDocker::new();
     fake.answer("run.fail", "Unable to find image 'fake:1' locally");
     let workspace = fake.workspace();
@@ -1276,7 +1254,7 @@ async fn a_container_that_cannot_start_stops_the_run_before_any_request() {
         &server,
         &workspace,
         Some(fake.dir.path()),
-        &["--execution", "container", "--container-image", "fake:1", "go"],
+        &["--profile", profile.path(), "go"],
     )
     .await;
 
@@ -1289,6 +1267,7 @@ async fn a_container_that_cannot_start_stops_the_run_before_any_request() {
 
 #[tokio::test]
 async fn a_container_that_cannot_start_leaves_no_session_file() {
+    let profile = container_profile("unattended", "fake:1");
     let fake = FakeDocker::new();
     fake.answer("run.fail", "Unable to find image 'fake:1' locally");
     let workspace = fake.workspace();
@@ -1301,10 +1280,8 @@ async fn a_container_that_cannot_start_leaves_no_session_file() {
         &workspace,
         Some(fake.dir.path()),
         &[
-            "--execution",
-            "container",
-            "--container-image",
-            "fake:1",
+            "--profile",
+            profile.path(),
             "--session",
             session.to_str().unwrap(),
             "go",
@@ -1319,6 +1296,7 @@ async fn a_container_that_cannot_start_leaves_no_session_file() {
 #[tokio::test]
 async fn real_run_in_container_mode_executes_bash_in_the_container() {
     let Some(image) = docker_image() else { return };
+    let profile = container_profile("unattended", &image);
     let (_dir, workspace) = real_workspace();
     std::fs::write(workspace.join("app.log"), "public\n").unwrap();
     let sessions = tempfile::tempdir().unwrap();
@@ -1330,10 +1308,8 @@ async fn real_run_in_container_mode_executes_bash_in_the_container() {
         &workspace,
         None,
         &[
-            "--execution",
-            "container",
-            "--container-image",
-            &image,
+            "--profile",
+            profile.path(),
             "--tools",
             "bash",
             "--session",
@@ -1375,6 +1351,7 @@ async fn real_run_in_container_mode_executes_bash_in_the_container() {
 async fn real_ctrl_c_in_chat_does_not_stop_the_container() {
     const KEY_VAR: &str = "ZX_P6_CONTAINER_TEST_KEY";
     let Some(image) = docker_image() else { return };
+    let profile = container_profile("assistant", &image);
     let (_dir, workspace) = real_workspace();
     let call = json!({"index": 0, "id": "r1", "type": "function",
         "function": {"name": "read_file", "arguments": "{\"path\":\"/etc/os-release\"}"}});
@@ -1389,7 +1366,7 @@ async fn real_ctrl_c_in_chat_does_not_stop_the_container() {
     let mut chat = zx_agent()
         .args(["chat", "--model", "mock", "--base-url", &server.base_url])
         .args(["--api-key-env", KEY_VAR, "--max-retries", "0", "--tools", "read_file"])
-        .args(["--execution", "container", "--container-image", &image])
+        .args(["--profile", profile.path()])
         // The session file would have to be outside the workspace; this test needs none.
         .arg("--no-session")
         .current_dir(&workspace)
@@ -1444,6 +1421,7 @@ async fn real_ctrl_c_in_chat_does_not_stop_the_container() {
 async fn real_a_killed_zx_agent_leaves_no_container_behind() {
     const KEY_VAR: &str = "ZX_P6_CONTAINER_TEST_KEY";
     let Some(image) = docker_image() else { return };
+    let profile = container_profile("unattended", &image);
     let (_dir, workspace) = real_workspace();
     let sessions = tempfile::tempdir().unwrap();
     let session = sessions.path().join("session.jsonl");
@@ -1451,7 +1429,7 @@ async fn real_a_killed_zx_agent_leaves_no_container_behind() {
     let mut agent = zx_agent()
         .args(["run", "--model", "mock", "--base-url", &server.base_url])
         .args(["--api-key-env", KEY_VAR, "--max-retries", "0", "--tools", "bash"])
-        .args(["--execution", "container", "--container-image", &image])
+        .args(["--profile", profile.path()])
         .args(["--session", session.to_str().unwrap(), "go"])
         .current_dir(&workspace)
         .env(KEY_VAR, "sk-p6-container-test")

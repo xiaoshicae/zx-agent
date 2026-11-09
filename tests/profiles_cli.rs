@@ -226,7 +226,7 @@ async fn a_configured_output_directory_is_relative_to_the_profile_file() {
 }
 
 #[tokio::test]
-async fn run_keeps_auto_compaction_disabled_unless_the_cli_explicitly_enables_it() {
+async fn run_keeps_auto_compaction_disabled_unless_a_profile_enables_it() {
     for enable in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let mut store = SessionStore::create(&dir.path().join("audit.jsonl"), common::header()).unwrap();
@@ -246,7 +246,8 @@ async fn run_keeps_auto_compaction_disabled_unless_the_cli_explicitly_enables_it
         let server = MockServer::start(replies).await;
         let mut args = vec!["--tools", "", "--session", "audit.jsonl", "--output", "jsonl"];
         if enable {
-            args.extend(["--compact-threshold-bytes", "262144"]);
+            profile(dir.path(), "[compaction]\ntriggerBytes = 262144");
+            args.extend(["--profile", "profile.toml"]);
         }
         args.push("continue");
         let output = run(&server, dir.path(), &args).await;
@@ -304,21 +305,13 @@ async fn an_explicit_cli_value_equal_to_the_old_default_still_overrides_the_file
     let dir = tempfile::tempdir().unwrap();
     profile(
         dir.path(),
-        "tools = []\n[limits]\nmaxModelRequests = 0\n[extensions]\ncontinueOnLength = 0",
+        "tools = []\n[limits]\nmaxModelRequests = 0\n[extensions]\ncontinueOnLength = 1",
     );
     let server = MockServer::start(vec![Reply::truncated("first\n"), Reply::text("second")]).await;
     let output = run(
         &server,
         dir.path(),
-        &[
-            "--profile",
-            "profile.toml",
-            "--max-model-requests",
-            "30",
-            "--continue-on-length",
-            "1",
-            "go",
-        ],
+        &["--profile", "profile.toml", "--max-model-requests", "30", "go"],
     )
     .await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
@@ -337,29 +330,19 @@ async fn a_file_turn_budget_is_used_when_no_cli_override_was_given() {
 }
 
 #[tokio::test]
-async fn cli_instructions_and_tool_selection_override_file_values() {
+async fn cli_tool_selection_overrides_the_file_and_its_instructions_apply() {
     let dir = tempfile::tempdir().unwrap();
     profile(dir.path(), "instructions = 'profile.md'\ntools = ['read_file']");
     std::fs::write(dir.path().join("profile.md"), "PROFILE ONLY").unwrap();
-    std::fs::write(dir.path().join("cli.md"), "CLI ONLY").unwrap();
     let server = MockServer::start(vec![Reply::text("ok")]).await;
     let output = run(
         &server,
         dir.path(),
-        &[
-            "--profile",
-            "profile.toml",
-            "--tools",
-            "bash,read_file",
-            "--system-prompt-file",
-            "cli.md",
-            "go",
-        ],
+        &["--profile", "profile.toml", "--tools", "bash,read_file", "go"],
     )
     .await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert!(system(&server, 0).contains("CLI ONLY"));
-    assert!(!system(&server, 0).contains("PROFILE ONLY"));
+    assert!(system(&server, 0).contains("PROFILE ONLY"));
     let tools = server.requests()[0].body["tools"].as_array().unwrap().clone();
     assert_eq!(
         tools
@@ -371,28 +354,18 @@ async fn cli_instructions_and_tool_selection_override_file_values() {
 }
 
 #[tokio::test]
-async fn file_and_cli_denials_both_apply_even_when_cli_allows_the_command() {
-    for (command, cli_deny) in [
-        ("printf file-deny > marker", "cli-deny"),
-        ("printf cli-deny > marker", "cli-deny"),
-    ] {
+async fn every_profile_denial_applies_even_when_the_profile_allows_the_command() {
+    for command in ["printf file-deny > marker", "printf other-deny > marker"] {
         let dir = tempfile::tempdir().unwrap();
-        profile(dir.path(), "[rules]\ndeny = ['file-deny']");
+        profile(
+            dir.path(),
+            "[rules]\nallow = ['printf']\ndeny = ['file-deny', 'other-deny']",
+        );
         let server = MockServer::start(vec![Reply::bash("c", command), Reply::text("done")]).await;
         let output = run(
             &server,
             dir.path(),
-            &[
-                "--profile",
-                "profile.toml",
-                "--tools",
-                "bash",
-                "--allow-cmd",
-                "printf",
-                "--deny-cmd",
-                cli_deny,
-                "go",
-            ],
+            &["--profile", "profile.toml", "--tools", "bash", "go"],
         )
         .await;
         assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
@@ -473,7 +446,6 @@ fn omitted_budget_flags_are_documented_as_profile_values() {
     for (mode, flag) in [
         ("run", "--max-model-requests"),
         ("run", "--timeout-secs"),
-        ("run", "--continue-on-length"),
         ("run", "--token-budget"),
         ("chat", "--max-model-requests"),
         ("chat", "--timeout-secs"),
@@ -488,7 +460,10 @@ fn omitted_budget_flags_are_documented_as_profile_values() {
 
 #[tokio::test]
 async fn invalid_provider_settings_exit_2_without_a_session_file() {
-    for args in [["--max-response-bytes", "0"], ["--max-sse-event-bytes", "0"]] {
+    for args in [
+        ["--request-field", "model=\"other\""],
+        ["--header", "Authorization: Bearer x"],
+    ] {
         let dir = tempfile::tempdir().unwrap();
         let server = MockServer::start(vec![]).await;
         let mut all = args.to_vec();
@@ -536,32 +511,28 @@ async fn project_context_is_scoped_to_cwd_and_recorded_in_the_audit_log() {
 }
 
 #[tokio::test]
-async fn no_context_disables_both_discovery_and_profile_files() {
+async fn a_profile_without_discovery_does_not_load_agents_md() {
     let dir = tempfile::tempdir().unwrap();
-    profile(dir.path(), "[context]\ndiscover = true\nfiles = ['missing.md']");
+    profile(dir.path(), "extends = 'assistant'\n[context]\ndiscover = false");
     std::fs::write(dir.path().join("AGENTS.md"), "SHOULD NOT LOAD").unwrap();
     let server = MockServer::start(vec![Reply::text("ok")]).await;
-    let output = run(
-        &server,
-        dir.path(),
-        &["--profile", "profile.toml", "--no-context", "go"],
-    )
-    .await;
+    let output = run(&server, dir.path(), &["--profile", "profile.toml", "go"]).await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(!system(&server, 0).contains("SHOULD NOT LOAD"));
 }
 
 #[tokio::test]
-async fn explicit_context_paths_use_the_launch_directory_even_with_a_different_cwd() {
+async fn profile_context_paths_use_the_profile_directory_even_with_a_different_cwd() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().join("other");
     std::fs::create_dir(&cwd).unwrap();
     std::fs::write(dir.path().join("extra.md"), "EXPLICIT CONTEXT").unwrap();
+    profile(dir.path(), "[context]\nfiles = ['extra.md']");
     let server = MockServer::start(vec![Reply::text("ok")]).await;
     let output = run(
         &server,
         dir.path(),
-        &["--cwd", cwd.to_str().unwrap(), "--context-file", "extra.md", "go"],
+        &["--profile", "profile.toml", "--cwd", cwd.to_str().unwrap(), "go"],
     )
     .await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
@@ -729,45 +700,6 @@ async fn a_project_context_error_names_the_option_that_skips_it() {
     let server = MockServer::start(vec![]).await;
     let output = run(&server, dir.path(), &["--profile", "assistant", "go"]).await;
     assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
-    assert!(stderr(&output).contains("--no-context"), "{}", stderr(&output));
+    assert!(stderr(&output).contains("discover = false"), "{}", stderr(&output));
     assert!(server.requests().is_empty());
-}
-
-#[tokio::test]
-async fn an_explicit_system_prompt_file_is_not_limited_to_the_profile_file_budget() {
-    let dir = tempfile::tempdir().unwrap();
-    let prompt = format!("{}END OF LARGE PROMPT", "x".repeat(70 * 1024));
-    std::fs::write(dir.path().join("large.md"), &prompt).unwrap();
-    let server = MockServer::start(vec![Reply::text("ok")]).await;
-    let output = run(&server, dir.path(), &["--system-prompt-file", "large.md", "go"]).await;
-    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert!(system(&server, 0).contains("END OF LARGE PROMPT"));
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn an_explicit_system_prompt_file_can_be_a_pipe() {
-    let dir = tempfile::tempdir().unwrap();
-    let server = MockServer::start(vec![Reply::text("ok")]).await;
-    let mut command = command(
-        &server,
-        dir.path(),
-        "run",
-        &["--system-prompt-file", "/dev/stdin", "go"],
-    );
-    let mut child = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut stdin = child.stdin.take().unwrap();
-    stdin.write_all(b"PIPED INSTRUCTIONS").await.unwrap();
-    drop(stdin);
-    let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert!(system(&server, 0).contains("PIPED INSTRUCTIONS"));
 }

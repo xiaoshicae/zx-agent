@@ -195,9 +195,7 @@ impl Host {
             cwd: Some(cwd),
             file,
             default_profile: Builtin::Assistant,
-            continue_on_length: None,
             shared: &self.settings.shared,
-            hidden_env: &[],
         })
         .await?;
         let id = SessionId::new(session.store.header().id.as_str());

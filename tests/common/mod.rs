@@ -55,6 +55,31 @@ pub(crate) fn stderr(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+/// A profile file in a directory of its own, for `--profile`: settings the command line does
+/// not take, such as command rules, context files or container execution. Removed on drop.
+pub(crate) struct ProfileFile {
+    _dir: tempfile::TempDir,
+    path: String,
+}
+
+impl ProfileFile {
+    /// A profile that extends the built-in `extends` with `body`, the rest of its TOML.
+    pub(crate) fn new(extends: &str, body: &str) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profile.toml");
+        std::fs::write(&path, format!("extends = \"{extends}\"\n{body}")).unwrap();
+        Self {
+            path: path.to_str().unwrap().to_string(),
+            _dir: dir,
+        }
+    }
+
+    /// The file's path, as `--profile` takes it.
+    pub(crate) fn path(&self) -> &str {
+        &self.path
+    }
+}
+
 /// Every line of `text` parsed as JSON, as the JSON-lines outputs are read.
 pub(crate) fn json_lines(text: &str) -> Vec<Value> {
     text.lines().map(|line| serde_json::from_str(line).unwrap()).collect()
