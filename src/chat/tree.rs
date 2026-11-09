@@ -124,36 +124,52 @@ struct Visit {
     starts_branch: bool,
 }
 
-/// The tree as lines for the terminal: a header, the shown entries, and the position.
-pub(super) fn render(store: &SessionStore) -> Vec<String> {
-    let entries = store.entries();
-    let on_path: HashSet<&str> = store.branch_path().iter().map(|entry| entry.id()).collect();
-    let leaf = store.leaf_id();
-    // Children in append order, under `None` for a root; an entry whose parent is missing is
-    // a root as well, as in pi.
-    let mut children: HashMap<Option<&str>, Vec<usize>> = HashMap::new();
-    for (index, entry) in entries.iter().enumerate() {
-        let parent = entry.parent_id().filter(|parent| store.get(parent).is_some());
-        children.entry(parent).or_default().push(index);
+/// The entries of a session as a forest: the children of each entry and the entries on the
+/// current branch.
+struct Forest<'a> {
+    entries: &'a [Entry],
+    /// Children in append order, under `None` for a root; an entry whose parent is missing is
+    /// a root as well, as in pi.
+    children: HashMap<Option<&'a str>, Vec<usize>>,
+    on_path: HashSet<&'a str>,
+}
+
+impl<'a> Forest<'a> {
+    fn new(store: &'a SessionStore) -> Self {
+        let entries = store.entries();
+        let mut children: HashMap<Option<&str>, Vec<usize>> = HashMap::new();
+        for (index, entry) in entries.iter().enumerate() {
+            let parent = entry.parent_id().filter(|parent| store.get(parent).is_some());
+            children.entry(parent).or_default().push(index);
+        }
+        let on_path = store.branch_path().iter().map(|entry| entry.id()).collect();
+        Self {
+            entries,
+            children,
+            on_path,
+        }
     }
-    let branches = entries
-        .iter()
-        .filter(|entry| !children.contains_key(&Some(entry.id())))
-        .count();
-    let mut lines = vec![format!(
-        "[tree] {} entries on {branches} branch(es); * marks the current branch, > the current position",
-        entries.len()
-    )];
-    let mut shown = 0;
-    let mut stack: Vec<Visit> = Vec::new();
-    // Depth first; at every fork the branch that goes on is listed first (pi: the branch
-    // holding the leaf comes first) and the others are indented under it.
-    let push = |parent: Option<&str>, depth: usize, stack: &mut Vec<Visit>| {
-        let Some(ids) = children.get(&parent) else {
+
+    /// The number of branches: the entries no other entry follows.
+    fn branches(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| !self.children.contains_key(&Some(entry.id())))
+            .count()
+    }
+
+    /// Push the children of `parent` to visit next. The tree is walked depth first, and at
+    /// every fork the branch that goes on is listed first (pi: the branch holding the leaf
+    /// comes first) and the others are indented under it.
+    fn push_children(&self, parent: Option<&str>, depth: usize, stack: &mut Vec<Visit>) {
+        let Some(ids) = self.children.get(&parent) else {
             return;
         };
         let mut ordered: Vec<usize> = ids.clone();
-        if let Some(position) = ordered.iter().position(|&index| on_path.contains(entries[index].id())) {
+        if let Some(position) = ordered
+            .iter()
+            .position(|&index| self.on_path.contains(self.entries[index].id()))
+        {
             let preferred = ordered.remove(position);
             ordered.insert(0, preferred);
         }
@@ -166,8 +182,22 @@ pub(super) fn render(store: &SessionStore) -> Vec<String> {
                 starts_branch: side,
             });
         }
-    };
-    push(None, 0, &mut stack);
+    }
+}
+
+/// The tree as lines for the terminal: a header, the shown entries, and the position.
+pub(super) fn render(store: &SessionStore) -> Vec<String> {
+    let forest = Forest::new(store);
+    let entries = forest.entries;
+    let leaf = store.leaf_id();
+    let mut lines = vec![format!(
+        "[tree] {} entries on {} branch(es); * marks the current branch, > the current position",
+        entries.len(),
+        forest.branches()
+    )];
+    let mut shown = 0;
+    let mut stack: Vec<Visit> = Vec::new();
+    forest.push_children(None, 0, &mut stack);
     while let Some(visit) = stack.pop() {
         let entry = &entries[visit.index];
         let indent = INDENT.repeat(visit.depth);
@@ -182,7 +212,7 @@ pub(super) fn render(store: &SessionStore) -> Vec<String> {
             shown += 1;
             let mark = if leaf == Some(entry.id()) {
                 '>'
-            } else if on_path.contains(entry.id()) {
+            } else if forest.on_path.contains(entry.id()) {
                 '*'
             } else {
                 ' '
@@ -193,7 +223,7 @@ pub(super) fn render(store: &SessionStore) -> Vec<String> {
                 local_time(entry.timestamp(), TREE_TIME_FORMAT).unwrap_or_else(|| "-".to_string())
             ));
         }
-        push(Some(entry.id()), visit.depth, &mut stack);
+        forest.push_children(Some(entry.id()), visit.depth, &mut stack);
     }
     let position = match leaf {
         Some(id) => format!("after {}", visible(id)),
