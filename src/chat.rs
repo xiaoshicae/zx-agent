@@ -24,11 +24,12 @@ mod tree;
 mod turn;
 
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use tokio::sync::mpsc;
 
 use zx_agent::AgentSession;
 use zx_agent::agent::{EventSink, QueueMode, QueuedMessage};
@@ -45,7 +46,7 @@ use crate::sessions::SessionFile;
 use commands::Command;
 use info::{About, banner, help, resumed_line, status};
 use input::Line;
-use interaction::TerminalInteraction;
+use interaction::{TerminalInteraction, Ticket};
 use output::Output;
 use signals::{Interrupt, Signals};
 use storage::{Storage, find_session, fork_current, forked_line, list_sessions, new_file, opening};
@@ -158,11 +159,6 @@ pub(crate) async fn run(args: ChatArgs) -> Result<u8> {
     with_telemetry(async move |telemetry| converse(args, telemetry.map(Telemetry::sink)).await).await
 }
 
-#[expect(
-    clippy::too_many_lines,
-    clippy::cognitive_complexity,
-    reason = "chat is frozen; the REPL stays as it is"
-)]
 async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> {
     let shared = cli::Shared::connect(&args.base, Builtin::Assistant, &args.transport).await?;
     let mode = if std::io::stdin().is_terminal() {
@@ -170,7 +166,7 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
     } else {
         InputMode::Script
     };
-    let (interaction, mut approvals) = TerminalInteraction::channel();
+    let (interaction, approvals) = TerminalInteraction::channel();
     let chat = Chat {
         output: Arc::new(Output::new(
             args.output,
@@ -184,206 +180,306 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
     };
     let args = &chat.settings.args;
     let output = &chat.output;
-    let mut model = args.base.model.clone();
-    let mut reasoning = args.request.reasoning;
+    let model = args.base.model.clone();
     let (storage, first) = opening(args, &model).await?;
     let file = match (&storage, first.path()) {
         (_, Some(path)) | (Storage::File(path), None) => SessionFile::Open(path),
         (Storage::Memory, None) => SessionFile::Memory,
         (Storage::Directory(dir), None) => SessionFile::NewIn(dir),
     };
-    let mut built = chat.build(&model, file).await?;
-    let mut signals = Signals::new().context("cannot register chat signal handlers")?;
-    let mut input = input::spawn(mode)?;
+    let built = chat.build(&model, file).await?;
+    let mut terminal = Terminal {
+        signals: Signals::new().context("cannot register chat signal handlers")?,
+        input: input::spawn(mode)?,
+        approvals,
+        mode,
+        next_prompt: None,
+        last_interrupt: None,
+    };
     if let Some(notice) = first.notice() {
         output.line(Tone::Dim, &notice);
     }
     banner(output, &model, &built.about);
-    let mut next_prompt: Option<String> = None;
-    let mut last_interrupt: Option<Instant> = None;
-
+    let mut repl = Repl {
+        chat: &chat,
+        storage,
+        built,
+        model,
+        reasoning: args.request.reasoning,
+    };
     loop {
-        if mode == InputMode::Terminal {
-            output.prompt(PROMPT);
-        }
-        let line = if let Some(text) = next_prompt.take() {
-            if mode == InputMode::Terminal {
-                output.echo(&visible(&text));
-            }
-            Line::Text(text)
-        } else {
-            tokio::select! {
-                biased;
-                interrupt = signals.next() => {
-                    match interrupt {
-                        Interrupt::Cancel => {
-                            if last_interrupt.is_some_and(|at| at.elapsed() <= QUIT_INTERRUPT_WINDOW) {
-                                output.finish();
-                                return Ok(EXIT_COMPLETED);
-                            }
-                            last_interrupt = Some(Instant::now());
-                            output.line(Tone::Dim, "[chat] no active task; press Ctrl+C again to exit, or /quit");
-                            continue;
-                        }
-                        Interrupt::Terminate => { output.finish(); return Ok(EXIT_ABORTED); }
-                    }
-                }
-                line = input.recv() => match line {
-                    Some(line) => {
-                        last_interrupt = None;
-                        if mode == InputMode::Terminal { output.input_echoed(); }
-                        line.context("cannot read terminal input")?
-                    }
-                    None => { output.finish(); return Ok(EXIT_COMPLETED); }
-                },
+        let line = match terminal.read(output).await? {
+            Read::Line(line) => line,
+            Read::Again => continue,
+            Read::Exit(code) => {
+                output.finish();
+                return Ok(code);
             }
         };
-        let mut io = TurnIo {
-            input: &mut input,
-            approvals: &mut approvals,
-            signals: &mut signals,
-            mode,
-            output,
-            commands: &built.commands,
-        };
-        let line = match line {
+        let text = match line {
             Line::Text(text) => text,
             Line::Rejected(reason) => {
                 rejected(output, &reason);
                 continue;
             }
         };
-        let action = match commands::parse(line, &built.commands) {
-            Command::Prompt(text) => drive_turn(&built.session, Operation::Prompt(text), &mut io).await?,
-            Command::Extension { name, args } => {
-                match run_extension_command(&built.session, &name, &args, output).await {
-                    Some(message) => drive_turn(&built.session, Operation::Message(message), &mut io).await?,
-                    None => Flow::Continue,
+        let command = commands::parse(text, &repl.built.commands);
+        let flow = repl.command(command, &mut terminal).await?;
+        if let Some(code) = repl.follow(flow, &mut terminal).await {
+            output.finish();
+            return Ok(code);
+        }
+    }
+}
+
+/// What a read of the terminal gave while no task runs.
+enum Read {
+    Line(Line),
+    /// Nothing to do this time, such as after one Ctrl+C.
+    Again,
+    /// The chat ends with this exit code.
+    Exit(u8),
+}
+
+/// The terminal side of the REPL: its input, approvals and signals, and what the next read
+/// starts from.
+struct Terminal {
+    input: input::Input,
+    approvals: mpsc::Receiver<Ticket>,
+    signals: Signals,
+    mode: InputMode,
+    /// A prompt to send next without reading, such as input that arrived as a task ended.
+    next_prompt: Option<String>,
+    /// When Ctrl+C was last pressed while idle; a second one soon after exits.
+    last_interrupt: Option<Instant>,
+}
+
+impl Terminal {
+    /// Read the next line, or the prompt queued for it. Ctrl+C twice, SIGTERM or the end of
+    /// input end the chat.
+    async fn read(&mut self, output: &Output) -> Result<Read> {
+        if self.mode == InputMode::Terminal {
+            output.prompt(PROMPT);
+        }
+        if let Some(text) = self.next_prompt.take() {
+            if self.mode == InputMode::Terminal {
+                output.echo(&visible(&text));
+            }
+            return Ok(Read::Line(Line::Text(text)));
+        }
+        tokio::select! {
+            biased;
+            interrupt = self.signals.next() => Ok(match interrupt {
+                Interrupt::Cancel => {
+                    if self.last_interrupt.is_some_and(|at| at.elapsed() <= QUIT_INTERRUPT_WINDOW) {
+                        Read::Exit(EXIT_COMPLETED)
+                    } else {
+                        self.last_interrupt = Some(Instant::now());
+                        output.line(Tone::Dim, "[chat] no active task; press Ctrl+C again to exit, or /quit");
+                        Read::Again
+                    }
                 }
-            }
-            Command::Queue(None) => {
-                output.line(Tone::Dim, &queue_line(&built.session));
-                Flow::Continue
-            }
-            Command::Queue(Some(mode)) => {
-                set_queue_mode(&built.session, &mode, output);
-                Flow::Continue
-            }
-            Command::Compact => drive_turn(&built.session, Operation::Compact, &mut io).await?,
-            Command::Continue => drive_turn(&built.session, Operation::Continue, &mut io).await?,
-            Command::New => Flow::New,
-            Command::Model(None) => {
-                output.line(Tone::Dim, &format!("[chat] model={}", visible(&model)));
-                Flow::Continue
-            }
-            Command::Reasoning(None) => {
-                output.line(Tone::Dim, &format!("[chat] reasoning={}", reasoning_name(reasoning)));
-                Flow::Continue
-            }
-            Command::Reasoning(Some(next)) => match parse_level(&next) {
-                Ok(level) => {
-                    built.session.set_reasoning(level)?;
-                    reasoning = level;
-                    output.line(Tone::Dim, &format!("[chat] reasoning={}", reasoning_name(reasoning)));
-                    Flow::Continue
+                Interrupt::Terminate => Read::Exit(EXIT_ABORTED),
+            }),
+            line = self.input.recv() => match line {
+                Some(line) => {
+                    self.last_interrupt = None;
+                    if self.mode == InputMode::Terminal {
+                        output.input_echoed();
+                    }
+                    Ok(Read::Line(line.context("cannot read terminal input")?))
                 }
-                Err(message) => {
-                    output.line(Tone::Warn, &format!("[chat] {}", visible(&message)));
-                    Flow::Continue
-                }
+                None => Ok(Read::Exit(EXIT_COMPLETED)),
             },
-            Command::Model(Some(next)) => {
-                built.session.set_model(ModelRef {
-                    provider: built.provider.clone(),
-                    model: next.clone(),
-                })?;
-                model = next;
-                output.line(Tone::Dim, &format!("[chat] model={}", visible(&model)));
+        }
+    }
+
+    /// The terminal as one operation uses it, with the commands extensions registered.
+    fn io<'a>(&'a mut self, output: &'a Output, commands: &'a [(String, String)]) -> TurnIo<'a> {
+        TurnIo {
+            input: &mut self.input,
+            approvals: &mut self.approvals,
+            signals: &mut self.signals,
+            mode: self.mode,
+            output,
+            commands,
+        }
+    }
+}
+
+/// The conversation side of the REPL: the conversation, the model and reasoning level it runs
+/// with, and where conversations are kept.
+struct Repl<'a> {
+    chat: &'a Chat,
+    storage: Storage,
+    built: Built,
+    model: String,
+    reasoning: Option<Reasoning>,
+}
+
+impl Repl<'_> {
+    /// Carry out `command` typed while no task runs.
+    async fn command(&mut self, command: Command, terminal: &mut Terminal) -> Result<Flow> {
+        let output = &*self.chat.output;
+        let session = &self.built.session;
+        Ok(match command {
+            Command::Prompt(text) => self.operate(Operation::Prompt(text), terminal).await?,
+            Command::Extension { name, args } => match run_extension_command(session, &name, &args, output).await {
+                Some(message) => self.operate(Operation::Message(message), terminal).await?,
+                None => Flow::Continue,
+            },
+            Command::Queue(None) => self.say(Tone::Dim, &queue_line(session)),
+            Command::Queue(Some(mode)) => {
+                set_queue_mode(session, &mode, output);
                 Flow::Continue
             }
+            Command::Compact => self.operate(Operation::Compact, terminal).await?,
+            Command::Continue => self.operate(Operation::Continue, terminal).await?,
+            Command::New => Flow::New,
+            Command::Model(None) => self.say(Tone::Dim, &format!("[chat] model={}", visible(&self.model))),
+            Command::Model(Some(next)) => self.set_model(next)?,
+            Command::Reasoning(None) => self.say(
+                Tone::Dim,
+                &format!("[chat] reasoning={}", reasoning_name(self.reasoning)),
+            ),
+            Command::Reasoning(Some(next)) => self.set_reasoning(&next)?,
             Command::Status => {
-                status(output, &model, &built.about);
+                status(output, &self.model, &self.built.about);
                 Flow::Continue
             }
             Command::Sessions => {
-                list_sessions(output, &storage, &built.about).await;
+                list_sessions(output, &self.storage, &self.built.about).await;
                 Flow::Continue
             }
-            Command::Resume(id) => match find_session(&storage, &id, &built.about).await {
+            Command::Resume(id) => match find_session(&self.storage, &id, &self.built.about).await {
                 Ok(path) => Flow::Resume(path),
-                Err(error) => {
-                    output.line(Tone::Warn, &format!("[chat] {}", visible(&format!("{error:#}"))));
-                    Flow::Continue
-                }
+                Err(error) => self.say(Tone::Warn, &format!("[chat] {}", visible(&format!("{error:#}")))),
             },
-            Command::Fork => match fork_current(&storage, &built.about, &model, &built.session).await {
-                Ok(forked) => {
-                    output.line(Tone::Dim, &forked_line(&forked));
-                    Flow::Resume(forked.path)
-                }
-                Err(error) => {
-                    output.line(Tone::Warn, &format!("[chat] {}", visible(&format!("{error:#}"))));
-                    Flow::Continue
-                }
-            },
+            Command::Fork => self.fork().await,
             Command::Tree => {
-                show_tree(output, &built.session);
+                show_tree(output, session);
                 Flow::Continue
             }
             Command::Branch(id) => {
-                switch_branch(output, &built.session, &id);
+                switch_branch(output, session, &id);
                 Flow::Continue
             }
             Command::Quit => Flow::Exit(EXIT_COMPLETED),
             Command::Help => {
-                help(output, &built.commands);
+                help(output, &self.built.commands);
                 Flow::Continue
             }
-            Command::Invalid(message) => {
-                output.line(Tone::Warn, &format!("[chat] {}", visible(&message)));
-                Flow::Continue
-            }
+            Command::Invalid(message) => self.say(Tone::Warn, &format!("[chat] {}", visible(&message))),
             Command::Empty => Flow::Continue,
-        };
-        match action {
+        })
+    }
+
+    /// Run `operation` while the terminal takes steering, approvals and signals.
+    async fn operate(&self, operation: Operation, terminal: &mut Terminal) -> Result<Flow> {
+        let mut io = terminal.io(&self.chat.output, &self.built.commands);
+        drive_turn(&self.built.session, operation, &mut io).await
+    }
+
+    /// Print `text` and go on.
+    fn say(&self, tone: Tone, text: &str) -> Flow {
+        self.chat.output.line(tone, text);
+        Flow::Continue
+    }
+
+    /// /model with a model ID: the next prompts use it, with the same provider.
+    fn set_model(&mut self, next: String) -> Result<Flow> {
+        self.built.session.set_model(ModelRef {
+            provider: self.built.provider.clone(),
+            model: next.clone(),
+        })?;
+        self.model = next;
+        Ok(self.say(Tone::Dim, &format!("[chat] model={}", visible(&self.model))))
+    }
+
+    /// /reasoning with a level, or a warning when it names none.
+    fn set_reasoning(&mut self, next: &str) -> Result<Flow> {
+        match parse_level(next) {
+            Ok(level) => {
+                self.built.session.set_reasoning(level)?;
+                self.reasoning = level;
+                Ok(self.say(
+                    Tone::Dim,
+                    &format!("[chat] reasoning={}", reasoning_name(self.reasoning)),
+                ))
+            }
+            Err(message) => Ok(self.say(Tone::Warn, &format!("[chat] {}", visible(&message)))),
+        }
+    }
+
+    /// /fork: copy the conversation into a new session file and go on there.
+    async fn fork(&self) -> Flow {
+        match fork_current(&self.storage, &self.built.about, &self.model, &self.built.session).await {
+            Ok(forked) => {
+                self.chat.output.line(Tone::Dim, &forked_line(&forked));
+                Flow::Resume(forked.path)
+            }
+            Err(error) => self.say(Tone::Warn, &format!("[chat] {}", visible(&format!("{error:#}")))),
+        }
+    }
+
+    /// Do what `flow` asks of the REPL. Returns the exit code when the chat ends.
+    async fn follow(&mut self, flow: Flow, terminal: &mut Terminal) -> Option<u8> {
+        match flow {
             Flow::Continue => {}
-            Flow::Prompt(text) => next_prompt = Some(text),
-            Flow::Exit(code) => {
-                output.finish();
-                return Ok(code);
+            Flow::Prompt(text) => terminal.next_prompt = Some(text),
+            Flow::Exit(code) => return Some(code),
+            Flow::New => self.new_conversation().await,
+            Flow::Resume(path) => self.resume(&path).await,
+        }
+        None
+    }
+
+    /// /new: a new conversation where conversations are kept.
+    async fn new_conversation(&mut self) {
+        let sibling;
+        let file = match &self.storage {
+            Storage::Memory => SessionFile::Memory,
+            Storage::File(original) => {
+                sibling = new_file(original);
+                SessionFile::Create(&sibling)
             }
-            Flow::New => {
-                let sibling;
-                let file = match &storage {
-                    Storage::Memory => SessionFile::Memory,
-                    Storage::File(original) => {
-                        sibling = new_file(original);
-                        SessionFile::Create(&sibling)
-                    }
-                    Storage::Directory(dir) => SessionFile::NewIn(dir),
-                };
-                if chat.switch(&mut built, &model, file, "create new conversation").await {
-                    let file = built
-                        .about
-                        .session
-                        .as_deref()
-                        .map(|path| format!("; session={}", path.display()))
-                        .unwrap_or_default();
-                    output.line(Tone::Dim, &format!("[chat] new conversation{file}"));
-                }
-            }
-            Flow::Resume(path) => {
-                if chat
-                    .switch(&mut built, &model, SessionFile::Open(&path), "resume the session")
-                    .await
-                {
-                    output.line(
-                        Tone::Dim,
-                        &format!("[chat] session={}", visible(&path.display().to_string())),
-                    );
-                    resumed_line(output, &built.about);
-                }
-            }
+            Storage::Directory(dir) => SessionFile::NewIn(dir),
+        };
+        if self
+            .chat
+            .switch(&mut self.built, &self.model, file, "create new conversation")
+            .await
+        {
+            let file = self
+                .built
+                .about
+                .session
+                .as_deref()
+                .map(|path| format!("; session={}", path.display()))
+                .unwrap_or_default();
+            self.chat
+                .output
+                .line(Tone::Dim, &format!("[chat] new conversation{file}"));
+        }
+    }
+
+    /// Go on with the session in `path`.
+    async fn resume(&mut self, path: &Path) {
+        if self
+            .chat
+            .switch(
+                &mut self.built,
+                &self.model,
+                SessionFile::Open(path),
+                "resume the session",
+            )
+            .await
+        {
+            self.chat.output.line(
+                Tone::Dim,
+                &format!("[chat] session={}", visible(&path.display().to_string())),
+            );
+            resumed_line(&self.chat.output, &self.built.about);
         }
     }
 }

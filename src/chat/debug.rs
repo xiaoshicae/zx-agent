@@ -2,8 +2,8 @@
 
 use std::time::Instant;
 
-use zx_agent::agent::{AgentEvent, ApprovalResult, Event, RunOutcome, ToolVerdict};
-use zx_agent::ai::{ContentBlock, Message, StopReason, Usage};
+use zx_agent::agent::{AgentEvent, ApprovalResult, Event, RequestKind, RunOutcome, RunReport, ToolVerdict};
+use zx_agent::ai::{AssistantMessage, ContentBlock, Message, StopReason, ToolResultMessage, Usage};
 
 use crate::render::{Severity, local_time, visible};
 
@@ -28,7 +28,7 @@ impl DebugState {
         eprintln!("{}", format_line(event.at_ms, severity, &text, color));
     }
 
-    #[expect(clippy::too_many_lines, reason = "chat is frozen; the event match stays as it is")]
+    #[expect(clippy::too_many_lines, reason = "one arm per event variant")]
     fn describe(&mut self, event: &Event) -> Option<(Severity, String)> {
         use AgentEvent::{
             AgentEnd, AgentStart, ApprovalRequested, ApprovalResolved, CompactionEnd, CompactionFailed,
@@ -65,59 +65,11 @@ impl DebugState {
                 entry_id,
                 model,
                 attempt,
-            } => {
-                self.requests = self.requests.saturating_add(1);
-                self.request_started = Some(Instant::now());
-                let turn = self.turn.map(|turn| format!(" · turn={turn}")).unwrap_or_default();
-                (
-                    Severity::Info,
-                    format!(
-                        "Request #{} · {:?} · model={model}{turn} · attempt={attempt}{}",
-                        self.requests,
-                        kind,
-                        entry(entry_id)
-                    ),
-                )
-            }
+            } => self.request(*kind, entry_id, model, *attempt),
             MessageEnd {
                 message: Message::Assistant(message),
                 ..
-            } => {
-                let elapsed = self
-                    .request_started
-                    .take()
-                    .map(|start| format!(" · elapsed={:.2}s", start.elapsed().as_secs_f64()))
-                    .unwrap_or_default();
-                let mut text = format!(
-                    "Response #{} · {:?}{elapsed} · {}",
-                    self.requests,
-                    message.stop_reason,
-                    tokens(&message.usage)
-                );
-                if let Some(error) = &message.error_message {
-                    text.push_str(&format!("\n  error: {error}"));
-                    self.last_error = Some(error.clone());
-                }
-                if let Some(error) = &message.provider_error {
-                    text.push_str(&format!("\n  provider error: {error:?}"));
-                }
-                for block in &message.content {
-                    if let ContentBlock::Thinking { thinking, signature } = block {
-                        text.push_str(&format!("\n  reasoning: {thinking}"));
-                        if let Some(signature) = signature {
-                            text.push_str(&format!("\n  reasoning signature: {signature}"));
-                        }
-                    }
-                }
-                let severity = if message.stop_reason == StopReason::Error {
-                    Severity::Error
-                } else if message.stop_reason == StopReason::Aborted || message.stop_reason == StopReason::Length {
-                    Severity::Warn
-                } else {
-                    Severity::Info
-                };
-                (severity, text)
-            }
+            } => self.response(message),
             CustomEntry { entry_id, custom_type } => {
                 recorded(&format!("Extension state recorded · type={custom_type}"), entry_id)
             }
@@ -125,20 +77,7 @@ impl DebugState {
                 message: Message::ToolResult(result),
                 entry_id,
                 ..
-            } => (
-                if result.is_error {
-                    Severity::Warn
-                } else {
-                    Severity::Info
-                },
-                format!(
-                    "Tool result · {} · call={}{}\n  {}",
-                    result.tool_name,
-                    result.tool_call_id,
-                    entry(entry_id),
-                    result.content
-                ),
-            ),
+            } => tool_result(result, entry_id),
             MessageEnd {
                 message: Message::User { kind, .. },
                 entry_id,
@@ -173,17 +112,7 @@ impl DebugState {
                 tool_name,
                 verdict,
                 reason,
-            } => (
-                if matches!(verdict, ToolVerdict::Ask | ToolVerdict::Deny) {
-                    Severity::Warn
-                } else {
-                    Severity::Info
-                },
-                format!(
-                    "Tool policy · {tool_name} · call={tool_call_id} · {verdict:?}{}",
-                    reason_suffix(reason.as_deref())
-                ),
-            ),
+            } => tool_decision(tool_call_id, tool_name, *verdict, reason.as_deref()),
             ApprovalRequested {
                 tool_call_id,
                 tool_name,
@@ -198,23 +127,7 @@ impl DebugState {
                 approval,
                 reason,
                 wait_ms,
-            } => (
-                if matches!(
-                    approval,
-                    ApprovalResult::Denied
-                        | ApprovalResult::TimedOut
-                        | ApprovalResult::Cancelled
-                        | ApprovalResult::Failed
-                ) {
-                    Severity::Warn
-                } else {
-                    Severity::Info
-                },
-                format!(
-                    "Approval resolved · {tool_name} · call={tool_call_id} · {approval:?} · {wait_ms}ms{}",
-                    reason_suffix(reason.as_deref())
-                ),
-            ),
+            } => approval_resolved(tool_call_id, tool_name, *approval, reason.as_deref(), *wait_ms),
             ToolExecutionEnd {
                 tool_call_id,
                 tool_name,
@@ -222,14 +135,7 @@ impl DebugState {
                 duration_ms,
                 details: _,
                 usage: _,
-            } => (
-                if *is_error { Severity::Warn } else { Severity::Info },
-                format!(
-                    "Tool finished · {tool_name} · call={tool_call_id} · {} · {}",
-                    if *is_error { "error" } else { "ok" },
-                    duration_ms.map_or_else(|| "not executed / duration unavailable".into(), |ms| format!("{ms}ms"))
-                ),
-            ),
+            } => tool_finished(tool_call_id, tool_name, *is_error, *duration_ms),
             RetryScheduled {
                 attempt,
                 max_retries,
@@ -303,32 +209,89 @@ impl DebugState {
                     state.describe()
                 ),
             ),
-            RunEnd { report } => {
-                let mut text = format!(
-                    "Task finished · {:?} · model_requests={} · observed_requests={} · retries={} · {}",
-                    report.outcome,
-                    report.model_requests,
-                    self.requests,
-                    report.retries,
-                    tokens(&report.usage)
-                );
-                if let Some(path) = &report.session_file {
-                    text.push_str(&format!(" · session={path}"));
-                }
-                if let Some(error) = &report.error
-                    && self.last_error.as_deref() != Some(error)
-                {
-                    text.push_str(&format!("\n  error: {error}"));
-                }
-                let severity = match report.outcome {
-                    RunOutcome::Error => Severity::Error,
-                    RunOutcome::Completed => Severity::Info,
-                    _ => Severity::Warn,
-                };
-                (severity, text)
-            }
+            RunEnd { report } => self.run_finished(report),
         };
         Some(item)
+    }
+
+    /// A model request starts: it is counted and timed.
+    fn request(&mut self, kind: RequestKind, entry_id: &str, model: &str, attempt: u32) -> (Severity, String) {
+        self.requests = self.requests.saturating_add(1);
+        self.request_started = Some(Instant::now());
+        let turn = self.turn.map(|turn| format!(" · turn={turn}")).unwrap_or_default();
+        (
+            Severity::Info,
+            format!(
+                "Request #{} · {:?} · model={model}{turn} · attempt={attempt}{}",
+                self.requests,
+                kind,
+                entry(entry_id)
+            ),
+        )
+    }
+
+    /// A response: how it ended, how long it took and what it used, its errors and reasoning.
+    fn response(&mut self, message: &AssistantMessage) -> (Severity, String) {
+        let elapsed = self
+            .request_started
+            .take()
+            .map(|start| format!(" · elapsed={:.2}s", start.elapsed().as_secs_f64()))
+            .unwrap_or_default();
+        let mut text = format!(
+            "Response #{} · {:?}{elapsed} · {}",
+            self.requests,
+            message.stop_reason,
+            tokens(&message.usage)
+        );
+        if let Some(error) = &message.error_message {
+            text.push_str(&format!("\n  error: {error}"));
+            self.last_error = Some(error.clone());
+        }
+        if let Some(error) = &message.provider_error {
+            text.push_str(&format!("\n  provider error: {error:?}"));
+        }
+        for block in &message.content {
+            if let ContentBlock::Thinking { thinking, signature } = block {
+                text.push_str(&format!("\n  reasoning: {thinking}"));
+                if let Some(signature) = signature {
+                    text.push_str(&format!("\n  reasoning signature: {signature}"));
+                }
+            }
+        }
+        let severity = if message.stop_reason == StopReason::Error {
+            Severity::Error
+        } else if message.stop_reason == StopReason::Aborted || message.stop_reason == StopReason::Length {
+            Severity::Warn
+        } else {
+            Severity::Info
+        };
+        (severity, text)
+    }
+
+    /// The task ended: its report, with an error the timeline did not show yet.
+    fn run_finished(&self, report: &RunReport) -> (Severity, String) {
+        let mut text = format!(
+            "Task finished · {:?} · model_requests={} · observed_requests={} · retries={} · {}",
+            report.outcome,
+            report.model_requests,
+            self.requests,
+            report.retries,
+            tokens(&report.usage)
+        );
+        if let Some(path) = &report.session_file {
+            text.push_str(&format!(" · session={path}"));
+        }
+        if let Some(error) = &report.error
+            && self.last_error.as_deref() != Some(error)
+        {
+            text.push_str(&format!("\n  error: {error}"));
+        }
+        let severity = match report.outcome {
+            RunOutcome::Error => Severity::Error,
+            RunOutcome::Completed => Severity::Info,
+            _ => Severity::Warn,
+        };
+        (severity, text)
     }
 
     /// ` · <error>`, unless it is the error reported just before.
@@ -339,6 +302,75 @@ impl DebugState {
             format!(" · {error}")
         }
     }
+}
+
+/// A tool's result as the model sees it; a warning when it is an error.
+fn tool_result(result: &ToolResultMessage, entry_id: &str) -> (Severity, String) {
+    (
+        if result.is_error {
+            Severity::Warn
+        } else {
+            Severity::Info
+        },
+        format!(
+            "Tool result · {} · call={}{}\n  {}",
+            result.tool_name,
+            result.tool_call_id,
+            entry(entry_id),
+            result.content
+        ),
+    )
+}
+
+/// The policy's verdict on a call; a warning unless it allows the call.
+fn tool_decision(call: &str, tool: &str, verdict: ToolVerdict, reason: Option<&str>) -> (Severity, String) {
+    (
+        if matches!(verdict, ToolVerdict::Ask | ToolVerdict::Deny) {
+            Severity::Warn
+        } else {
+            Severity::Info
+        },
+        format!(
+            "Tool policy · {tool} · call={call} · {verdict:?}{}",
+            reason_suffix(reason)
+        ),
+    )
+}
+
+/// How an approval ended and how long it waited; a warning unless the call may run.
+fn approval_resolved(
+    call: &str,
+    tool: &str,
+    approval: ApprovalResult,
+    reason: Option<&str>,
+    wait_ms: u64,
+) -> (Severity, String) {
+    (
+        if matches!(
+            approval,
+            ApprovalResult::Denied | ApprovalResult::TimedOut | ApprovalResult::Cancelled | ApprovalResult::Failed
+        ) {
+            Severity::Warn
+        } else {
+            Severity::Info
+        },
+        format!(
+            "Approval resolved · {tool} · call={call} · {approval:?} · {wait_ms}ms{}",
+            reason_suffix(reason)
+        ),
+    )
+}
+
+/// A call finished, or never ran; a warning when it failed.
+fn tool_finished(call: &str, tool: &str, is_error: bool, duration_ms: Option<u64>) -> (Severity, String) {
+    (
+        if is_error { Severity::Warn } else { Severity::Info },
+        format!(
+            "Tool finished · {tool} · call={call} · {} · {}",
+            if is_error { "error" } else { "ok" },
+            duration_ms.map_or_else(|| "not executed / duration unavailable".into(), |ms| format!("{ms}ms"))
+        ),
+    )
 }
 
 /// `<what> · entry=<id>`: a record was written.
