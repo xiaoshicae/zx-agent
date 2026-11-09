@@ -134,7 +134,7 @@ where
 fn start_telemetry() -> Result<Option<Telemetry>> {
     let telemetry = Telemetry::from_env()?;
     if let Some(telemetry) = &telemetry {
-        eprintln!("[otel] exporting {} over OTLP/HTTP", telemetry.exports().describe());
+        eprintln!("[otel] exporting {} over OTLP/HTTP", telemetry.exports());
     }
     Ok(telemetry)
 }

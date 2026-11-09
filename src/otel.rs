@@ -67,31 +67,9 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// `service.name`, unless `OTEL_SERVICE_NAME` sets one.
 const SERVICE_NAME: &str = "zx-agent";
 
-/// Which signals a [`Telemetry`] exports: traces need a trace endpoint, metrics a metric one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Exports {
-    Traces,
-    Metrics,
-    TracesAndMetrics,
-}
-
-impl Exports {
-    /// The signals, for a message: `traces`, `metrics` or `traces and metrics`.
-    pub fn describe(self) -> &'static str {
-        match self {
-            Self::Traces => "traces",
-            Self::Metrics => "metrics",
-            Self::TracesAndMetrics => "traces and metrics",
-        }
-    }
-
-    fn traces(self) -> bool {
-        matches!(self, Self::Traces | Self::TracesAndMetrics)
-    }
-}
-
-/// What goes out, with the meter provider where metrics do. Spans are built either way,
-/// since the metrics are recorded as they end, so the tracer provider is always there.
+/// What goes out, with the meter provider where metrics do: traces need a trace endpoint,
+/// metrics a metric one. Spans are built either way, since the metrics are recorded as they
+/// end, so the tracer provider is always there.
 enum Exporters {
     Traces,
     Metrics(SdkMeterProvider),
@@ -99,12 +77,17 @@ enum Exporters {
 }
 
 impl Exporters {
-    fn exports(&self) -> Exports {
+    /// The signals, for a message: `traces`, `metrics` or `traces and metrics`.
+    fn describe(&self) -> &'static str {
         match self {
-            Self::Traces => Exports::Traces,
-            Self::Metrics(_) => Exports::Metrics,
-            Self::TracesAndMetrics(_) => Exports::TracesAndMetrics,
+            Self::Traces => "traces",
+            Self::Metrics(_) => "metrics",
+            Self::TracesAndMetrics(_) => "traces and metrics",
         }
+    }
+
+    fn traces(&self) -> bool {
+        matches!(self, Self::Traces | Self::TracesAndMetrics(_))
     }
 
     fn meter_provider(&self) -> Option<&SdkMeterProvider> {
@@ -198,7 +181,7 @@ impl Telemetry {
             (false, false) => return Ok(None),
         };
         let mut tracer_provider = SdkTracerProvider::builder().with_resource(resource);
-        if exporters.exports().traces() {
+        if exporters.traces() {
             let exporter = SpanExporter::builder()
                 .with_http()
                 .build()
@@ -237,9 +220,9 @@ impl Telemetry {
         }
     }
 
-    /// What goes out.
-    pub fn exports(&self) -> Exports {
-        self.exporters.exports()
+    /// What goes out, for a message: `traces`, `metrics` or `traces and metrics`.
+    pub fn exports(&self) -> &'static str {
+        self.exporters.describe()
     }
 
     /// The sink to give a session: it passes each event on without waiting. Every run starts

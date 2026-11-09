@@ -250,10 +250,8 @@ impl Host {
     ) -> Result<(), Error> {
         // Session setup holds the dispatch loop, like any request handler; it is a few
         // startup reads and, with MCP servers, nothing new: they are connected once.
-        match self.create(cx, &request.cwd).await {
-            Ok(id) => responder.respond(NewSessionResponse::new(id)),
-            Err(error) => responder.respond_with_error(protocol_error(error)),
-        }
+        let result = self.create(cx, &request.cwd).await;
+        responder.respond_with_result(result.map(NewSessionResponse::new).map_err(protocol_error))
     }
 
     /// `session/load`: the replay is sent before the response, as the protocol has it.
@@ -263,10 +261,8 @@ impl Host {
         responder: Responder<LoadSessionResponse, V1>,
         cx: &ConnectionTo<Client>,
     ) -> Result<(), Error> {
-        match self.load(cx, request).await {
-            Ok(_) => responder.respond(LoadSessionResponse::new()),
-            Err(error) => responder.respond_with_error(protocol_error(error)),
-        }
+        let result = self.load(cx, request).await;
+        responder.respond_with_result(result.map(|_| LoadSessionResponse::new()).map_err(protocol_error))
     }
 
     /// `session/resume`: the session goes on from its file, with nothing replayed.
@@ -276,10 +272,8 @@ impl Host {
         responder: Responder<ResumeSessionResponse, V1>,
         cx: &ConnectionTo<Client>,
     ) -> Result<(), Error> {
-        match self.resume(cx, request).await {
-            Ok(_) => responder.respond(ResumeSessionResponse::new()),
-            Err(error) => responder.respond_with_error(protocol_error(error)),
-        }
+        let result = self.resume(cx, request).await;
+        responder.respond_with_result(result.map(|_| ResumeSessionResponse::new()).map_err(protocol_error))
     }
 
     /// `session/list`: the sessions kept for a working directory.
@@ -288,10 +282,8 @@ impl Host {
         request: &ListSessionsRequest,
         responder: Responder<ListSessionsResponse, V1>,
     ) -> Result<(), Error> {
-        match self.list(request).await {
-            Ok(sessions) => responder.respond(ListSessionsResponse::new(sessions)),
-            Err(error) => responder.respond_with_error(protocol_error(error)),
-        }
+        let result = self.list(request).await;
+        responder.respond_with_result(result.map(ListSessionsResponse::new).map_err(protocol_error))
     }
 
     /// `session/prompt`: the turn runs outside the dispatch loop, so cancellations and
@@ -306,12 +298,7 @@ impl Host {
             return responder.respond_with_error(unknown_session(&request.session_id.0, "no such session is open"));
         };
         let text = prompt_text(&request.prompt);
-        cx.spawn(async move {
-            match answer_prompt(&live, text).await {
-                Ok(response) => responder.respond(response),
-                Err(error) => responder.respond_with_error(protocol_error(error)),
-            }
-        })
+        cx.spawn(async move { responder.respond_with_result(answer_prompt(&live, text).await.map_err(protocol_error)) })
     }
 
     /// `session/cancel`: abort the session's turn, if it has one.

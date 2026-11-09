@@ -15,7 +15,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use zx_agent::agent::QueueMode;
 use zx_agent::ai::Reasoning;
-use zx_agent::ai::openai::{DEFAULT_MAX_EVENT_BYTES, DEFAULT_MAX_RESPONSE_BYTES, ReasoningFormat};
+use zx_agent::ai::openai::{DEFAULT_MAX_EVENT_BYTES, DEFAULT_MAX_RESPONSE_BYTES, ReasoningFormat, SystemUpdates};
 
 pub(crate) use prepare::{PreparedSession, SessionOptions, prepare};
 pub(crate) use shared::{ModeSettings, Shared};
@@ -251,8 +251,8 @@ pub(crate) struct BaseArgs {
     /// every version into the leading system message; works with any server. inline: send
     /// each change where it happened, which keeps the prompt cache and shows the model when
     /// the prompt changed, but needs a server that accepts system messages mid-conversation.
-    #[arg(long, value_enum, default_value_t = SystemUpdatesArg::Collapse)]
-    pub(crate) system_updates: SystemUpdatesArg,
+    #[arg(long, value_parser = parse_system_updates, default_value = "collapse")]
+    pub(crate) system_updates: SystemUpdates,
 
     /// Replace the selected profile's instructions with the contents of this file. It is read
     /// once at startup and may be a pipe; the generated sections are still appended.
@@ -449,12 +449,6 @@ pub(crate) struct RequestArgs {
     pub(crate) prompt_cache_key: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub(crate) enum SystemUpdatesArg {
-    Collapse,
-    Inline,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub(crate) enum OutputMode {
     Text,
@@ -466,6 +460,10 @@ fn parse_reasoning(text: &str) -> Result<Reasoning, String> {
 }
 
 fn parse_reasoning_format(text: &str) -> Result<ReasoningFormat, String> {
+    text.parse()
+}
+
+fn parse_system_updates(text: &str) -> Result<SystemUpdates, String> {
     text.parse()
 }
 

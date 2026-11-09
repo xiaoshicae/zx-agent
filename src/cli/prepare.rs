@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use zx_agent::AgentSession;
 use zx_agent::agent::{EventSink, HookOptions, Hooks, LoopConfig, LoopSpec, PolicyDecision, Tool};
 use zx_agent::ai::ModelMeta;
-use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig, SystemUpdates};
+use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::compaction;
 use zx_agent::continuation::ContinueOnLength;
@@ -30,9 +30,7 @@ use zx_agent::session::{SessionHeader, SessionStore};
 use zx_agent::tools::{self, BASH};
 
 use super::execution::{check_session_outside, executor};
-use super::{
-    BaseArgs, BudgetArgs, ExecutionArg, RequestArgs, Shared, SystemUpdatesArg, TransportArgs, env_value, resolve_cwd,
-};
+use super::{BaseArgs, BudgetArgs, ExecutionArg, RequestArgs, Shared, TransportArgs, env_value, resolve_cwd};
 use crate::sessions::{self, SessionFile};
 
 /// Register a built-in hook under a fixed name, which `hook_failed` events and `[hook]` lines
@@ -391,10 +389,7 @@ fn provider(options: &SessionOptions<'_>) -> Result<(OpenAiCompatible, Option<St
         idle_timeout: Duration::from_secs(options.transport.idle_timeout_secs),
         max_response_bytes: options.request.max_response_bytes,
         max_sse_event_bytes: options.request.max_sse_event_bytes,
-        system_updates: match options.base.system_updates {
-            SystemUpdatesArg::Collapse => SystemUpdates::Collapse,
-            SystemUpdatesArg::Inline => SystemUpdates::Inline,
-        },
+        system_updates: options.base.system_updates,
         extra_fields,
         fill_missing_reasoning: options.request.fill_missing_reasoning,
         reasoning_format: options.request.reasoning_format,
