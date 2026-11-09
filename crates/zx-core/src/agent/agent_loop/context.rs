@@ -1,15 +1,26 @@
 //! Context updates and their ordered session records.
 
 use super::{
-    AgentEvent, Attempt, AttemptResult, ContextEdit, CustomMessageInfo, EventTarget, Halt, HookFailure, Message,
-    Prepared, Queue, QueueMode, QueuedMessage, UserMessageKind, record_pending_entries,
+    AgentEvent, Attempt, AttemptResult, Context, ContextEdit, CustomMessageInfo, Entry, EventTarget, Halt, HookFailure,
+    Message, PERSIST_FAILED, Queue, QueueMode, QueuedMessage, UserMessageKind, anyhow, record_pending_entries,
 };
 use crate::session::CustomMessage;
 
 impl Attempt<'_> {
+    /// Record `message` in the session. Returns its entry ID.
+    async fn append_message(&mut self, message: &Message) -> Result<String, Halt> {
+        // The event that reports the message owns it, so the session stores a copy.
+        self.host
+            .session()
+            .append_message(message.clone())
+            .await
+            .context(PERSIST_FAILED)
+            .map_err(Halt::Unrecorded)
+    }
+
     /// Record a finished message, then report it. Returns its entry ID.
     pub(super) async fn record_finished_message(&mut self, message: &Message) -> Result<String, Halt> {
-        let id = self.session.append_message(message).await.map_err(Halt::Unrecorded)?;
+        let id = self.append_message(message).await?;
         self.emit(AgentEvent::MessageEnd {
             message: message.clone(),
             entry_id: id.clone(),
@@ -28,7 +39,7 @@ impl Attempt<'_> {
     /// while they run cannot take the same input again.
     async fn append_from(&mut self, message: Message, queued: Option<(Queue, &QueuedMessage)>) -> Result<(), Halt> {
         self.emit(AgentEvent::MessageStart { role: message.role() }).await;
-        let id = self.session.append_message(&message).await.map_err(Halt::Unrecorded)?;
+        let id = self.append_message(&message).await?;
         if let Some((queue, original)) = queued {
             self.config.queues.remove_front(queue, original);
         }
@@ -45,11 +56,16 @@ impl Attempt<'_> {
     /// `custom_message` entry, without input hooks, and seen by the model as a user message.
     async fn custom_message(&mut self, message: CustomMessage, queue: Option<Queue>) -> Result<(), Halt> {
         self.emit(AgentEvent::MessageStart { role: "user" }).await;
-        let (id, projected) = self
-            .session
-            .append_custom_message(&message)
+        let session = self.host.session();
+        let id = session
+            .append_custom_message(message.clone())
             .await
+            .context(PERSIST_FAILED)
             .map_err(Halt::Unrecorded)?;
+        let projected = match session.get(&id) {
+            Some(Entry::CustomMessage(entry)) => entry.projected(),
+            _ => return Err(Halt::Unrecorded(anyhow!("custom message {id} was not recorded"))),
+        };
         if let Some(queue) = queue {
             self.config
                 .queues
@@ -76,10 +92,16 @@ impl Attempt<'_> {
             ContextEdit::ReplaceText { index, text } => (index, Some(text)),
             ContextEdit::Omit { index } => (index, None),
         };
-        let entry_id = self
-            .session
-            .edit_context(index, replacement.as_deref())
+        let session = self.host.session();
+        let target = session
+            .projection()
+            .get(index)
+            .map(|target| target.entry_id.clone())
+            .ok_or_else(|| Halt::Unrecorded(anyhow!("context index {index} is out of bounds")))?;
+        let entry_id = session
+            .append_context_edit(&target, replacement.clone())
             .await
+            .context("cannot persist context edit")
             .map_err(Halt::Unrecorded)?;
         self.emit(AgentEvent::ContextEdited {
             index,
@@ -113,7 +135,7 @@ impl Attempt<'_> {
         let queued = QueuedMessage::User(text.clone());
         self.append_from(message, queue.map(|queue| (queue, &queued))).await?;
         // The input is the last message of the projection now.
-        let index = self.session.messages().len() - 1;
+        let index = self.host.session().messages().len() - 1;
         match transformed {
             Ok(replacement) if replacement != text => {
                 self.edit(ContextEdit::ReplaceText {
@@ -158,7 +180,7 @@ impl Attempt<'_> {
             sink: self.sink,
             trace: self.trace.get(),
         };
-        record_pending_entries(self.config, &mut *self.session, target)
+        record_pending_entries(self.config, self.host.session(), target)
             .await
             .map_err(Halt::Unrecorded)
     }
@@ -166,13 +188,9 @@ impl Attempt<'_> {
     /// Prepare the context and account for any summary requests, even on failure. Returns
     /// how many requests preparing it made.
     pub(super) async fn prepare_context(&mut self, result: &mut AttemptResult) -> Result<u32, Halt> {
-        let prepared = self.session.prepare_context(self.trace.cancel()).await;
+        let prepared = self.host.prepare_context(self.trace.cancel()).await;
         result.usage.add(&prepared.usage);
         result.model_requests = result.model_requests.saturating_add(prepared.requests);
-        match prepared.result {
-            Prepared::Ready => Ok(prepared.requests),
-            Prepared::Failed(error) => Err(Halt::Failed(error)),
-            Prepared::Unrecorded(error) => Err(Halt::Unrecorded(error)),
-        }
+        prepared.result.map(|()| prepared.requests)
     }
 }

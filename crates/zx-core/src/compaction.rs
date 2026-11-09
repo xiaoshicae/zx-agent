@@ -140,8 +140,6 @@ pub struct Report {
     pub entry_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    #[serde(skip)]
-    pub(crate) persistence_error: Option<String>,
 }
 
 impl Report {
@@ -156,11 +154,23 @@ impl Report {
         self.error = Some("compaction cancelled".into());
         self
     }
+}
 
-    /// The session could not record a step, so the run must stop.
-    fn unrecorded(mut self, error: String) -> Self {
-        self.persistence_error = Some(error.clone());
-        self.failed(error)
+/// What one summary did, and whether the session recorded all of it.
+pub(crate) struct Summarized {
+    pub report: Report,
+    /// The session could not record a step of the summary, so a run must stop (invariant 7).
+    /// The report's `error` states the same.
+    pub unrecorded: Option<anyhow::Error>,
+}
+
+impl Summarized {
+    /// A summary whose every step the session recorded, or that recorded none.
+    fn recorded(report: Report) -> Self {
+        Self {
+            report,
+            unrecorded: None,
+        }
     }
 }
 

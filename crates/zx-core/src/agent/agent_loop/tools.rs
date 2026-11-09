@@ -7,7 +7,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use super::{
-    AgentEvent, Approval, ApprovalRequest, ApprovalResult, AssertUnwindSafe, Attempt, Effects, ExecutionMode,
+    AgentEvent, Approval, ApprovalRequest, ApprovalResult, AssertUnwindSafe, Attempt, Context, Effects, ExecutionMode,
     FutureExt, Halt, HookCall, HookFailure, HookPoint, Instant, MAX_DETAILS_BYTES, MAX_QUEUED_PROGRESS, Message,
     PolicyDecision, Tool, ToolCall, ToolContext, ToolOutput, ToolResultMessage, ToolVerdict, duration_ms, join_all,
     now_ms,
@@ -246,11 +246,15 @@ impl Attempt<'_> {
     /// Record the start of a call with side effects; an error means it must not run.
     /// Read-only calls are not recorded.
     async fn record_start(&mut self, runnable: &Runnable<'_>) -> Result<(), Halt> {
+        let call = &runnable.call;
         match runnable.tool.effects() {
             Effects::SideEffects => self
-                .session
-                .record_tool_call_started(&runnable.call)
+                .host
+                .session()
+                .append_tool_call_started(&call.id, &call.name)
                 .await
+                .map(|_| ())
+                .with_context(|| format!("cannot persist the start of tool call {:?}", call.id))
                 .map_err(Halt::Unrecorded),
             Effects::ReadOnly => Ok(()),
         }

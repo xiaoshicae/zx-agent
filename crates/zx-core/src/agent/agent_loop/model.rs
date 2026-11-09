@@ -1,8 +1,8 @@
 //! Model request recording and streaming.
 
 use super::{
-    AgentEvent, AssistantMessage, Attempt, AttemptResult, Halt, Request, RequestKind, StopReason, StreamEvent,
-    StreamExt,
+    AgentEvent, AssistantMessage, Attempt, AttemptResult, Context, Halt, Request, RequestKind, RequestSource,
+    StopReason, StreamEvent, StreamExt,
 };
 use crate::agent::RequestSettings;
 
@@ -14,7 +14,7 @@ impl Attempt<'_> {
         turn: u32,
     ) -> Result<Option<AssistantMessage>, Halt> {
         let config = self.config;
-        let messages = self.session.messages();
+        let messages = self.host.session().messages();
         let configured = RequestSettings {
             model: config.model.clone(),
             reasoning: config.reasoning,
@@ -39,10 +39,18 @@ impl Attempt<'_> {
             reasoning: settings.reasoning,
             cache_key: config.cache_key.clone(),
         };
+        let provider = config.provider.as_ref();
         let request_entry = self
-            .session
-            .record_request(&request, config.provider.as_ref())
+            .host
+            .session()
+            .record_request(
+                &request,
+                provider.name(),
+                provider.request_options(),
+                RequestSource::Projection,
+            )
             .await
+            .context("cannot persist request checkpoint")
             .map_err(Halt::Unrecorded)?;
         if self.trace.cancel().is_cancelled() {
             return Ok(None);

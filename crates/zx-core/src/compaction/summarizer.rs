@@ -3,12 +3,12 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use super::answer::{ModelSummary, ResponseBytes, full_summary, merge, parse_answer};
-use super::{Config, MAX_SOURCE_BYTES, Outcome, Report, Trigger, context_bytes, message_bytes};
+use super::{Config, MAX_SOURCE_BYTES, Outcome, Report, Summarized, Trigger, context_bytes, message_bytes};
 use crate::agent::{AgentEvent, EventTarget, HookChain, RequestKind};
 use crate::ai::{AssistantMessage, Message, ModelMeta, Provider, Request, StreamEvent, duration_ms, now_ms};
 use crate::session::{
@@ -84,9 +84,17 @@ struct OpenSummary {
 /// A summary that did not complete, to record with the attempt.
 struct Failed {
     attempt_id: String,
-    error: String,
-    /// The final response, when one arrived; stream failures are already in `error`.
+    cause: Cause,
+    /// The final response, when one arrived; stream failures are already in `cause`.
     response: Option<AssistantMessage>,
+}
+
+/// Why a summary did not complete.
+enum Cause {
+    /// The request failed, or its answer was not a valid summary.
+    Rejected(anyhow::Error),
+    /// The session could not record the result.
+    Unrecorded(anyhow::Error),
 }
 
 impl Summarizer<'_> {
@@ -97,19 +105,24 @@ impl Summarizer<'_> {
     /// Run one summary: choose what to summarize, record the attempt, ask the model, check
     /// the answer, then record the result or the failure. When the outcome is `Completed`,
     /// the session's projection is the new context.
-    pub(crate) async fn run(&mut self, trigger: Trigger, cancel: &CancellationToken) -> Report {
+    pub(crate) async fn run(&mut self, trigger: Trigger, cancel: &CancellationToken) -> Summarized {
         let mut report = Report::default();
         let candidate = match self.plan(trigger, &mut report) {
             Ok(Some(candidate)) => candidate,
-            Ok(None) => return report,
-            Err(error) => return report.failed(format!("{error:#}")),
+            Ok(None) => return Summarized::recorded(report),
+            Err(error) => return Summarized::recorded(report.failed(format!("{error:#}"))),
         };
         if cancel.is_cancelled() {
-            return report.aborted();
+            return Summarized::recorded(report.aborted());
         }
         let (mut open, request) = match self.begin(candidate, report.input_bytes, trigger).await {
             Ok(begun) => begun,
-            Err(error) => return report.unrecorded(error),
+            Err(error) => {
+                return Summarized {
+                    report: report.failed(format!("{error:#}")),
+                    unrecorded: Some(error),
+                };
+            }
         };
         report.requests = 1;
         let response = self.request_summary(request, cancel).await;
@@ -120,26 +133,21 @@ impl Summarizer<'_> {
             .map_err(anyhow::Error::msg)
             .and_then(|answer| self.validate(&mut open, answer, &report, trigger, cancel));
         let committed = match validated {
-            Ok((merged, output_bytes)) => match self
+            Ok((merged, output_bytes)) => self
                 .session
                 .append_merged_compaction(&open.id, merged, report.usage.clone())
                 .await
-            {
-                Ok(id) => Ok((id, output_bytes)),
-                Err(error) => {
-                    let message = format!("cannot persist compaction result: {error:#}");
-                    report.persistence_error = Some(message.clone());
-                    Err(anyhow::Error::msg(message))
-                }
-            },
-            Err(error) => Err(error),
+                .context("cannot persist compaction result")
+                .map(|id| (id, output_bytes))
+                .map_err(Cause::Unrecorded),
+            Err(error) => Err(Cause::Rejected(error)),
         };
         match committed {
-            Ok((id, output_bytes)) => self.complete(report, id, output_bytes, trigger).await,
-            Err(error) => {
+            Ok((id, output_bytes)) => Summarized::recorded(self.complete(report, id, output_bytes, trigger).await),
+            Err(cause) => {
                 let failed = Failed {
                     attempt_id: open.id,
-                    error: format!("{error:#}"),
+                    cause,
                     response: response.ok(),
                 };
                 self.fail(report, failed, trigger, cancel).await
@@ -282,7 +290,7 @@ impl Summarizer<'_> {
         candidate: Candidate,
         input_bytes: usize,
         trigger: Trigger,
-    ) -> Result<(OpenSummary, Request), String> {
+    ) -> Result<(OpenSummary, Request)> {
         let Candidate {
             first_kept,
             source_ids,
@@ -318,7 +326,7 @@ impl Summarizer<'_> {
             .session
             .begin_compaction(plan)
             .await
-            .map_err(|error| format!("cannot persist compaction request: {error:#}"))?;
+            .context("cannot persist compaction request")?;
         let (request, request_entry) = self.record_request(&id, instructions, input).await?;
         self.announce(input_bytes, request_entry, trigger).await;
         let open = OpenSummary {
@@ -355,7 +363,7 @@ impl Summarizer<'_> {
         attempt_id: &str,
         instructions: &str,
         input: String,
-    ) -> Result<(Request, String), String> {
+    ) -> Result<(Request, String)> {
         let system_timestamp = now_ms();
         let user_timestamp = now_ms();
         let request = Request {
@@ -376,7 +384,7 @@ impl Summarizer<'_> {
             .session
             .record_request(&request, self.provider.name(), options, source)
             .await
-            .map_err(|error| format!("cannot persist summary request checkpoint: {error:#}"))?;
+            .context("cannot persist summary request checkpoint")?;
         Ok((request, entry))
     }
 
@@ -452,20 +460,23 @@ impl Summarizer<'_> {
         failed: Failed,
         trigger: Trigger,
         cancel: &CancellationToken,
-    ) -> Report {
+    ) -> Summarized {
         report.outcome = if cancel.is_cancelled() {
             Outcome::Aborted
         } else {
             Outcome::Failed
         };
-        let mut error = failed.error;
+        let (mut error, mut unrecorded) = match failed.cause {
+            Cause::Rejected(error) => (format!("{error:#}"), None),
+            Cause::Unrecorded(error) => (format!("{error:#}"), Some(error)),
+        };
         if let Err(write_error) = self
             .session
             .fail_compaction(&failed.attempt_id, error.clone(), report.usage.clone(), failed.response)
             .await
         {
             error = format!("cannot persist compaction failure: {write_error:#}; {error}");
-            report.persistence_error = Some(error.clone());
+            unrecorded = Some(anyhow::Error::msg(error.clone()));
         }
         self.emit(AgentEvent::CompactionFailed {
             error: error.clone(),
@@ -473,7 +484,7 @@ impl Summarizer<'_> {
         })
         .await;
         report.error = Some(error);
-        report
+        Summarized { report, unrecorded }
     }
 
     /// Send the summary request and collect its response, bounded in size and time.

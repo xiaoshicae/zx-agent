@@ -117,7 +117,7 @@ impl Runner {
             &self.compaction,
             &mut self.pause,
         );
-        host.summarize(Trigger::Manual, &child).await
+        host.summarize(Trigger::Manual, &child).await.report
     }
 
     /// The loop configuration, for example to reach `config().queues` during a run.
@@ -340,11 +340,11 @@ impl Run<'_> {
 
     /// Close the run: keep the state hooks asked to record, then report how the run ended
     /// and the answer it added after the first `run_start` entries.
-    async fn close(mut self, stop: RunStop, run_start: usize) -> RunReport {
+    async fn close(self, stop: RunStop, run_start: usize) -> RunReport {
         // State that hooks asked to record during the last events is kept before the run is
         // reported, so a host reading the session afterwards finds it.
         let (config, target) = (self.host.config, self.host.target);
-        let stop = match record_pending_entries(config, &mut self.host, target).await {
+        let stop = match record_pending_entries(config, self.host.session, target).await {
             Ok(()) => stop,
             Err(error) => RunStop::Failed(format!("{error:#}")),
         };
