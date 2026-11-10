@@ -14,11 +14,11 @@ resources:
 # Optional components: uncomment `components:` and the ones wanted.
 # - multicluster: other clusters (README.md, "多集群"), after creating the ConfigMap
 #   zx-agent-kubeconfig and the Secret zx-agent-clusters.
-# - serve: the IM service (README.md, "IM 服务"), after creating the ConfigMap zx-agent-serve
+# - im: the IM service (README.md, "IM 服务"), after creating the ConfigMap zx-agent-im-config
 #   and the Secret zx-agent-im.
 # components:
 #   - multicluster
-#   - serve
+#   - im
 images:
   # Replace with the image built from deploy/kubernetes/Dockerfile and pushed to a registry
   # the cluster can pull from.

@@ -37,7 +37,7 @@ const MAX_FILE_BYTES: u64 = 64 * 1024;
 pub enum Builtin {
     /// A neutral agent without a human operator, the default of `run`.
     Unattended,
-    /// A conversation with a person, the default of `chat` and `serve`.
+    /// A conversation with a person, the default of `chat` and `im`.
     Assistant,
 }
 

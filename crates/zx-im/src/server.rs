@@ -119,7 +119,7 @@ pub struct ApprovalRecord {
 }
 
 /// Texts the server posts besides the model's answers. The defaults are English; a
-/// deployment sets its users' language, for example in the configuration of `serve`
+/// deployment sets its users' language, for example in the configuration of `zx-agent im`
 /// (`[replies]`, fields in camelCase, each optional).
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]

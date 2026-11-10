@@ -13,7 +13,7 @@ use super::output::Output;
 use super::term::Tone;
 use crate::cli::{self, ChatArgs};
 use crate::render::visible;
-use crate::sessions::{self, Forked};
+use crate::session_files::{self, Forked};
 
 /// Where conversations are kept.
 pub(super) enum Storage {
@@ -81,13 +81,15 @@ pub(super) async fn opening(args: &ChatArgs, model: &str) -> Result<(Storage, Fi
     } else if let Some(dir) = &args.session_dir {
         Storage::Directory(dir.clone())
     } else {
-        Storage::Directory(sessions::default_dir(&cli::resolve_cwd(args.base.cwd.as_deref())?)?)
+        Storage::Directory(session_files::default_dir(&cli::resolve_cwd(
+            args.base.cwd.as_deref(),
+        )?)?)
     };
     let first = match (&storage, &args.resume, &args.fork) {
         (Storage::Directory(dir), _, Some(source)) => {
             let cwd = cli::resolve_cwd(args.base.cwd.as_deref())?;
             let source = fork_source(dir, source).await?;
-            First::Fork(sessions::fork(&source, dir, &cwd, model, sessions::Branch::Last).await?)
+            First::Fork(session_files::fork(&source, dir, &cwd, model, session_files::Branch::Last).await?)
         }
         (Storage::Directory(dir), Some(id), None) => {
             resume_target(dir, args.base.cwd.as_deref(), id.as_deref()).await?
@@ -99,7 +101,7 @@ pub(super) async fn opening(args: &ChatArgs, model: &str) -> Result<(Storage, Fi
 
 /// The session `--resume` opens, or why there is none to resume.
 async fn resume_target(dir: &Path, cwd: Option<&Path>, id: Option<&str>) -> Result<First> {
-    let list = sessions::list(dir).await?;
+    let list = session_files::list(dir).await?;
     match id {
         Some(id) => {
             let session = list
@@ -127,7 +129,7 @@ async fn fork_source(dir: &Path, value: &str) -> Result<PathBuf> {
     if path.is_file() {
         return Ok(path.to_path_buf());
     }
-    let list = sessions::list(dir).await?;
+    let list = session_files::list(dir).await?;
     let session = list.find(value).with_context(|| {
         format!(
             "--fork: {value} is neither a session file nor a session in {}",
@@ -150,11 +152,18 @@ pub(super) async fn fork_current(
     };
     // The position /branch moved is only in memory; the file's last record may be elsewhere.
     let leaf = session.inspect(|store| store.leaf_id().map(str::to_string))?;
-    sessions::fork(current, dir, &about.cwd, model, sessions::Branch::At(leaf.as_deref())).await
+    session_files::fork(
+        current,
+        dir,
+        &about.cwd,
+        model,
+        session_files::Branch::At(leaf.as_deref()),
+    )
+    .await
 }
 
 pub(super) fn forked_line(forked: &Forked) -> String {
-    let short = sessions::short_id(&forked.source_id);
+    let short = session_files::short_id(&forked.source_id);
     format!(
         "[chat] forked session {} ({} record(s)) into {}",
         visible(&short),
@@ -172,14 +181,14 @@ pub(super) async fn list_sessions(output: &Output, storage: &Storage, about: &Ab
         );
         return;
     };
-    let list = match sessions::list(dir).await {
+    let list = match session_files::list(dir).await {
         Ok(list) => list,
         Err(error) => {
             output.line(Tone::Warn, &format!("[chat] {}", visible(&format!("{error:#}"))));
             return;
         }
     };
-    let lines = sessions::lines(&list, &about.cwd);
+    let lines = session_files::lines(&list, &about.cwd);
     for (session, line) in list.sessions.iter().zip(lines) {
         let mark = if about.session.as_deref() == Some(session.path.as_path()) {
             "* "
@@ -213,7 +222,7 @@ pub(super) async fn find_session(storage: &Storage, id: &str, about: &About) -> 
     let dir = storage
         .dir()
         .context("no session directory: the conversation is kept in memory")?;
-    let list = sessions::list(dir).await?;
+    let list = session_files::list(dir).await?;
     let path = list.find(id)?.path.clone();
     anyhow::ensure!(
         about.session.as_deref() != Some(path.as_path()),

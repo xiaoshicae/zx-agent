@@ -15,7 +15,7 @@ use zx_agent::runner::{RunOutcome, RunReport};
 use crate::cli::{self, OutputMode, RunArgs};
 use crate::process::{EXIT_DENIED, JsonlEvents, exit_code, print_line, run_sink, spawn_signal_handler, with_telemetry};
 use crate::render::{answer_end_line, progress_line, visible};
-use crate::sessions::SessionFile;
+use crate::session_files::SessionFile;
 
 /// Run one task and return its exit code. An `Err` is a configuration problem found
 /// before the run started.

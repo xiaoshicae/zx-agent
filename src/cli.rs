@@ -1,7 +1,7 @@
 //! The command line: the subcommands, their arguments and the value parsers.
 //!
 //! - `shared`: what every session of a process shares, read or connected once
-//! - `prepare`: the assembly of one session, shared by run, chat, serve and acp
+//! - `prepare`: the assembly of one session, shared by run, chat, im and acp
 //! - `execution`: where a session's commands run: this machine or a Docker container
 
 mod execution;
@@ -34,7 +34,7 @@ pub(crate) enum Command {
     /// Start a conversation with streaming output and terminal approvals.
     Chat(ChatArgs),
     /// Answer chat messages from IM platforms, one session per thread, until stopped.
-    Serve(ServeArgs),
+    Im(ImArgs),
     /// List the session files chat keeps for a working directory, most recent first.
     Sessions(SessionsArgs),
     /// Serve the Agent Client Protocol over stdio for an editor or a terminal client.
@@ -190,8 +190,8 @@ pub(crate) struct AcpArgs {
 }
 
 #[derive(Args)]
-pub(crate) struct ServeArgs {
-    /// Serve configuration (TOML): platforms, who may use the bot, limits and the session
+pub(crate) struct ImArgs {
+    /// IM service configuration (TOML): platforms, who may use the bot, limits and the session
     /// directory. See README, section "IM 服务".
     #[arg(long)]
     pub(crate) config: PathBuf,
@@ -428,11 +428,10 @@ mod tests {
             Command::Chat(args) => assert_eq!(args.budget.max_model_requests, Some(3)),
             _ => panic!("chat command"),
         }
-        let cli =
-            Cli::try_parse_from(["zx-agent", "serve", "--config", "serve.toml", "--model", "m", flag, "3"]).unwrap();
+        let cli = Cli::try_parse_from(["zx-agent", "im", "--config", "im.toml", "--model", "m", flag, "3"]).unwrap();
         match cli.command {
-            Command::Serve(args) => assert_eq!(args.budget.max_model_requests, Some(3)),
-            _ => panic!("serve command"),
+            Command::Im(args) => assert_eq!(args.budget.max_model_requests, Some(3)),
+            _ => panic!("im command"),
         }
         assert!(Cli::try_parse_from(["zx-agent", "run", "--model", "m", "--max-turns", "3", "go"]).is_err());
     }
@@ -446,7 +445,7 @@ mod tests {
                 assert_eq!(args.budget.timeout_secs, None);
                 assert_eq!(args.base.tools, None);
             }
-            Command::Chat(_) | Command::Serve(_) | Command::Sessions(_) | Command::Acp(_) => panic!("run command"),
+            Command::Chat(_) | Command::Im(_) | Command::Sessions(_) | Command::Acp(_) => panic!("run command"),
         }
         let cli = Cli::try_parse_from(["zx-agent", "chat", "--model", "m"]).unwrap();
         match cli.command {
@@ -455,22 +454,22 @@ mod tests {
                 assert_eq!(args.budget.timeout_secs, None);
                 assert_eq!(args.output, OutputMode::Text);
             }
-            Command::Run(_) | Command::Serve(_) | Command::Sessions(_) | Command::Acp(_) => panic!("chat command"),
+            Command::Run(_) | Command::Im(_) | Command::Sessions(_) | Command::Acp(_) => panic!("chat command"),
         }
     }
 
     #[test]
-    fn serve_takes_a_configuration_file_and_the_shared_settings() {
-        let cli = Cli::try_parse_from(["zx-agent", "serve", "--config", "serve.toml", "--model", "m"]).unwrap();
+    fn im_takes_a_configuration_file_and_the_shared_settings() {
+        let cli = Cli::try_parse_from(["zx-agent", "im", "--config", "im.toml", "--model", "m"]).unwrap();
         match cli.command {
-            Command::Serve(args) => {
-                assert_eq!(args.config, Path::new("serve.toml"));
+            Command::Im(args) => {
+                assert_eq!(args.config, Path::new("im.toml"));
                 assert_eq!(args.budget.max_model_requests, None);
                 assert_eq!(args.request.session, None);
             }
-            Command::Run(_) | Command::Chat(_) | Command::Sessions(_) | Command::Acp(_) => panic!("serve command"),
+            Command::Run(_) | Command::Chat(_) | Command::Sessions(_) | Command::Acp(_) => panic!("im command"),
         }
-        assert!(Cli::try_parse_from(["zx-agent", "serve", "--model", "m"]).is_err());
+        assert!(Cli::try_parse_from(["zx-agent", "im", "--model", "m"]).is_err());
     }
 
     #[test]
@@ -479,7 +478,7 @@ mod tests {
             let cli = Cli::try_parse_from(["zx-agent", "chat", "--model", "m"].iter().chain(args)).unwrap();
             match cli.command {
                 Command::Chat(args) => (args.resume, args.session_dir, args.no_session),
-                Command::Run(_) | Command::Serve(_) | Command::Sessions(_) | Command::Acp(_) => {
+                Command::Run(_) | Command::Im(_) | Command::Sessions(_) | Command::Acp(_) => {
                     panic!("chat command")
                 }
             }
@@ -525,7 +524,7 @@ mod tests {
         .unwrap();
         match cli.command {
             Command::Chat(args) => assert_eq!(args.fork.as_deref(), Some("0b7c")),
-            Command::Run(_) | Command::Serve(_) | Command::Sessions(_) | Command::Acp(_) => panic!("chat command"),
+            Command::Run(_) | Command::Im(_) | Command::Sessions(_) | Command::Acp(_) => panic!("chat command"),
         }
     }
 
@@ -538,12 +537,12 @@ mod tests {
                 assert_eq!(args.budget.timeout_secs, Some(0));
                 assert_eq!(args.base.tools, Some(vec![String::new()]));
             }
-            Command::Run(_) | Command::Serve(_) | Command::Sessions(_) | Command::Acp(_) => panic!("chat command"),
+            Command::Run(_) | Command::Im(_) | Command::Sessions(_) | Command::Acp(_) => panic!("chat command"),
         }
         let cli = Cli::try_parse_from(["zx-agent", "run", "--model", "m", "--timeout-secs", "900", "go"]).unwrap();
         match cli.command {
             Command::Run(args) => assert_eq!(args.budget.timeout_secs, Some(900)),
-            Command::Chat(_) | Command::Serve(_) | Command::Sessions(_) | Command::Acp(_) => panic!("run command"),
+            Command::Chat(_) | Command::Im(_) | Command::Sessions(_) | Command::Acp(_) => panic!("run command"),
         }
     }
 }

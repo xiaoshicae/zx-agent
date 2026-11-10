@@ -1,6 +1,6 @@
 # 场景配置与上下文管理
 
-`run` 默认使用 `unattended`，`chat` 与 `serve` 默认使用 `assistant`。两个内置 profile 的 TOML 和说明文件位于 `profiles/`，构建时嵌入二进制，发布后的程序无需额外查找安装目录。它们不含任何特定环境的规则：例如 Kubernetes 中只读 kubectl 命令的放行与可带的选项，在部署目录的 `deploy/kubernetes/profiles/kubernetes.toml`；要求回答按排障报告的固定小节组织的 `troubleshoot` 也在那里（`troubleshoot.toml`，扩展 `unattended`，只换说明）。
+`run` 默认使用 `unattended`，`chat` 与 `im` 默认使用 `assistant`。两个内置 profile 的 TOML 和说明文件位于 `profiles/`，构建时嵌入二进制，发布后的程序无需额外查找安装目录。它们不含任何特定环境的规则：例如 Kubernetes 中只读 kubectl 命令的放行与可带的选项，在部署目录的 `deploy/kubernetes/profiles/kubernetes.toml`；要求回答按排障报告的固定小节组织的 `troubleshoot` 也在那里（`troubleshoot.toml`，扩展 `unattended`，只换说明）。
 
 ```bash
 zx-agent run --model "$ZX_MODEL" --profile deploy/kubernetes/profiles/troubleshoot.toml "检查磁盘使用情况"
@@ -56,12 +56,12 @@ path = "skills/rust-review/SKILL.md"
 | `container.root` | `readWrite`（默认）或 `readOnly`：命令能否修改容器自身的文件；`readOnly` 时只有内存中的 `/tmp` 可写 |
 | `rules.allow` | bash 命令前缀白名单，沿用原管道检查；空列表表示只检查 deny |
 | `rules.deny` | 追加 bash 命令子串拒绝规则，原内置拒绝规则始终保留 |
-| `rules.autoApprove` | 替换不经审批直接执行的 bash 命令前缀；只在 bash 需要审批时起作用（chat、serve）。带引号、`$` 等 shell 语法或 URL 的命令仍要审批，拒绝规则始终优先，见 README 的“安全模型”。内置 assistant 为 `grep`、`head`、`tail`、`wc`、`jq`，unattended 为空 |
+| `rules.autoApprove` | 替换不经审批直接执行的 bash 命令前缀；只在 bash 需要审批时起作用（chat、im）。带引号、`$` 等 shell 语法或 URL 的命令仍要审批，拒绝规则始终优先，见 README 的“安全模型”。内置 assistant 为 `grep`、`head`、`tail`、`wc`、`jq`，unattended 为空 |
 | `rules.autoApproveExcept` | 追加字词：命令中出现其中之一（不分大小写，作为子串比较）时仍要审批。内置 assistant 为 `["secret"]`，可追加、不能清除 |
 | `rules.autoApproveOptions.<程序>` | 列出该程序（命令的第一个词，小写）的命令不经审批时可以带的选项：`long`（不带 `--` 的长选项名，`--name=value` 按名字比较）、`shortWithValue`（带值的单字母选项，值可紧跟，如 `-oyaml`）、`shortFlags`（不带值的单字母选项，须单独出现，如 `-A`）。其他选项一律审批；没有列出的程序不限选项。文件中列出的程序整组替换基线中同名的（内置 profile 都没有）。示例见 `deploy/kubernetes/profiles/kubernetes.toml` |
 | `rules.askTools` | 替换需审批的工具名列表；run 通过 NoHuman 明确拒绝，chat 交给终端审批。可以写内置工具名，也可以写 `[[mcp]]` 中配置过的 MCP 工具名（`<服务器名>__<工具名>`） |
 | `rules.denyTools` | 追加被拒绝的工具名；启用该工具或批准调用都不能覆盖拒绝。工具名的范围同 `askTools` |
-| `rules.approveAll` | `true` 时不询问任何审批：chat 与 serve 的 bash、`askTools` 与 MCP `allowTools` 以外的工具都直接执行；拒绝规则与命令策略仍然生效。只能与 `execution = "container"` 一起使用，且 `askTools` 须为空（内置 assistant 为 `["bash"]`，需写 `askTools = []`），见 README 的“容器执行” |
+| `rules.approveAll` | `true` 时不询问任何审批：chat 与 im 的 bash、`askTools` 与 MCP `allowTools` 以外的工具都直接执行；拒绝规则与命令策略仍然生效。只能与 `execution = "container"` 一起使用，且 `askTools` 须为空（内置 assistant 为 `["bash"]`，需写 `askTools = []`），见 README 的“容器执行” |
 | `limits.maxModelRequests` | 每轮模型请求数；`"unlimited"` 不限，`0` 不请求模型 |
 | `limits.timeoutSecs` | 每轮总时间上限，`0` 关闭 |
 | `limits.costBudget` | 每轮所有模型请求的花费上限，按 `[[models]]` 中该模型的单价计算，单位与单价相同（按人民币写单价，预算就是人民币）；摘要请求与失败的尝试也计入，工具报告的花费不计入；每次请求之前检查，最后一次请求可能超出；`0` 关闭，负数或非有限值报错。模型没有单价时 CLI 拒绝启动。用完时 run 以退出码 8 结束 |
@@ -109,10 +109,10 @@ maxTimeoutSecs = 600                        # 可选：一次调用的总上限�
 | `url` | MCP 端点，`http://` 或 `https://` |
 | `tokenEnv` | 存放 token 的环境变量；设置后必须有值。命令看不到这个变量，它的值在工具输出中替换为 `[REDACTED]` |
 | `tools` | 交给模型的工具，按服务器给出的名字，至少一个。服务器没有列出的工具时启动失败 |
-| `allowTools` | `tools` 中不经审批直接执行的工具。其余的每次调用都要审批：chat 在终端询问，serve 发审批卡片，run 没有人审批而拒绝 |
+| `allowTools` | `tools` 中不经审批直接执行的工具。其余的每次调用都要审批：chat 在终端询问，im 发审批卡片，run 没有人审批而拒绝 |
 | `timeoutSecs` | 单次调用的上限，大于零 |
 
-- 每个进程启动时连接一次：run、chat 在组装会话前，serve 在开始接收消息前，各线程共用连接。连不上、token 变量没有值、服务器缺少列出的工具时，以退出码 2 报错。
+- 每个进程启动时连接一次：run、chat 在组装会话前，im 在开始接收消息前，各线程共用连接。连不上、token 变量没有值、服务器缺少列出的工具时，以退出码 2 报错。
 - 连接成功时，stderr 每个服务器一行，例如 `[mcp] prom: prom__query, prom__query_range (asks); protocol 2026-07-28; https://prom-mcp.monitoring.svc`。只写地址的协议、主机与端口；经 `http://` 发送 token 时另加 `the token is sent unencrypted`。
 - 服务器给出的工具注释（annotations）只是提示，不据此放行；工具一律按有副作用处理。
 
