@@ -97,7 +97,7 @@ chat 中的 bash 调用先经过原命令策略，再显示工具名、完整参
 [approval] Choose 1, 2, 3 or 4:
 ```
 
-1 仅允许本次调用；2 本会话允许工具名与参数完全相同的调用；3 拒绝；4 讨论此调用（不执行，输入的消息会交给当前任务）。命令策略的 Deny 始终优先。空输入不会授权；审批默认超时 120 秒（`config.toml` 的 `chat.approvalTimeoutSecs`），未收到答案不会执行工具。模型文本和诊断中的 ESC、回车及双向控制字符按字面显示，保留正常换行和制表符。
+1 仅允许本次调用；2 本会话允许工具名与参数完全相同的调用；3 拒绝；4 讨论此调用（不执行，输入的消息会交给当前任务）。命令策略的 Deny 始终优先。空输入不会授权；审批默认超时 600 秒（`config.toml` 的 `approvalTimeoutSecs`，chat、acp 与 im 共用），未收到答案不会执行工具。模型文本和诊断中的 ESC、回车及双向控制字符按字面显示，保留正常换行和制表符。
 
 `assistant` 默认在上下文超过 256 KiB 时自动压缩，`unattended` 默认关闭。自动摘要消耗一次请求预算并统计用量；`/compact` 使用独立的有界请求并报告结果。字节阈值由 agent 的 `compaction.triggerBytes` 设置，0 关闭自动摘要。该阈值不是模型 token 窗口的保证；开启自动摘要时，模型以上下文过长拒绝请求后，会先摘要一次再继续，见[上下文管理](docs/CONFIGURATION.md#上下文管理)。摘要有信息损失风险，引用校验也不证明事实正确。配置、审计和边界见[上下文管理](docs/CONFIGURATION.md#上下文管理)。
 
@@ -114,7 +114,7 @@ zx-agent acp
 - 会话：客户端用 `session/new` 建会话，`cwd` 由客户端给出并覆盖 `--cwd`；每个会话一个独立的 `AgentSession`，记录在自己的会话文件里：在 chat 为同一工作目录使用的目录 `~/.zx-agent/sessions/--<cwd>--/`（`ZX_AGENT_HOME` 下的 `sessions/`），`--no-session` 只留在内存（此时 `initialize` 不声明 `loadSession`）；`--session` 不适用于 acp（一个会话一个文件），给了以配置错误退出。`session/load` 按 ID 在该目录里找到会话文件并续接：先把对话回放给客户端（提问为 `user_message_chunk`，回答与推理为 `agent_message_chunk` / `agent_thought_chunk`，每个工具调用连同结果为一条 `tool_call`，没有结果的为 `pending`，扩展要求显示的消息也回放；摘要与续写提示不回放），再应答；本进程已持有的会话直接回放。`session/resume` 同样续接但不回放，客户端自己保留显示的内容。`session/list` 列出 `cwd` 的会话目录里的会话（`sessionId`、`cwd`、首条提问作 `title`、最近活动时间作 `updatedAt`，最近的在前；不给 `cwd` 则列出 agent 自己工作目录的那份），一次一页，给了 `cursor` 报错。`initialize` 以 `sessionCapabilities.list` / `resume` 声明这两项（`--no-session` 时不声明，列表为空）。协议里的 `session/fork` 仍标为不稳定（SDK 要开 `unstable_session_fork`），没有实现。客户端给的 `mcpServers` 被忽略，MCP 服务器只来自 `config.toml`。
 - 回合：`session/prompt` 的文本块合成一条提问，回合结束时应答 `stopReason`：完成为 `end_turn`，输出截断或 token 预算用尽为 `max_tokens`，请求次数上限为 `max_turn_requests`，取消为 `cancelled`；运行出错或超时以 JSON-RPC 错误应答，`message` 是原因。`session/cancel` 取消当前回合。
 - 更新：流式文本为 `agent_message_chunk`，推理增量为 `agent_thought_chunk`；每个工具调用先发 `tool_call`（标题如 `bash: ls -la`，种类按内置工具映射，带原始参数，`path` 参数作为位置），放行或批准后 `in_progress`，结束后 `completed` 或 `failed` 并附结果文本，`write_file` 附整个文件的 diff，`edit_file` 附补丁；重试、钩子失败、上下文过长为 `notice`，摘要为 `compaction_update`。
-- 审批：需要审批的调用发 `session/request_permission`，选项为允许一次、本会话允许相同调用、拒绝；客户端取消回合时按拒绝处理。等待客户端答复默认 3600 秒（`config.toml` 的 `acp.approvalTimeoutSecs`）。
+- 审批：需要审批的调用发 `session/request_permission`，选项为允许一次、本会话允许相同调用、拒绝；客户端取消回合时按拒绝处理。等待客户端答复默认 600 秒（`config.toml` 的 `approvalTimeoutSecs`，与 chat、im 共用）。
 - 实测：`tests/acp_cli.rs` 用手写的 JSON-RPC 客户端覆盖以上流程，含会话落盘、`session/load`、`session/resume` 与 `session/list`；另用 SDK 自带的示例客户端对假模型走通一次。没有在 Zed 或 Wisp 上验证。
 
 ### 配置与 agent
@@ -195,8 +195,7 @@ conversations = ["slack:C0123456789"]   # 只在这些频道或私聊中回答�
 approvers = ["slack:U0123456789"]       # 只有这些用户的点击能批准写操作
 
 [limits]
-maxRunning = 4              # 同时运行的会话数，默认 4，其余排队
-approvalTimeoutSecs = 600   # 审批卡片的等待时长，默认 600，超时按拒绝处理
+maxRunning = 4              # 同时运行的会话数，默认 4，其余排队；审批卡片的等待时长是 config.toml 的 approvalTimeoutSecs
 idleSecs = 1800             # 会话空闲多久后释放其文件锁，默认 1800
 
 [sessions]
@@ -309,7 +308,7 @@ zx-agent run --tools "" "Reply with the single word: ok"
 
 表中标注 agent 的默认值取自所用的 agent，命令行显式传入时覆盖；`run --help` 与 `chat --help` 不显示固定默认值。其余设置不在命令行上：
 
-- 环境写在 `config.toml`：服务地址（`provider.baseUrl`，`ZX_BASE_URL` 优先）、存放 key 的变量名（`provider.apiKeyEnv`）、系统提示词更新的发送方式（`provider.systemUpdates`）、推理强度与写法（`reasoning`、`provider.reasoningFormat`）、`provider.fillMissingReasoning`、`provider.promptCacheKey`、额外的请求字段与请求头（`provider.requestFields`、`provider.headers`）、空闲超时与重试次数（`provider.idleTimeoutSecs`、`provider.maxRetries`）、输出 token 上限（`maxTokens`）、bash 的默认超时（`toolTimeoutSecs`；模型可经工具参数 `timeout_secs` 为单条命令申请更长时间，上限为该值与 600 秒中较大的一个）、要脱敏的密钥文件（`secretFiles`）、chat 与 acp 的审批等待时间（`chat.approvalTimeoutSecs`、`acp.approvalTimeoutSecs`）、执行环境（`execution`、`[container]`）、模型元数据（`[[models]]`）与 MCP 服务器（`[[mcp]]`）。
+- 环境写在 `config.toml`：服务地址（`provider.baseUrl`，`ZX_BASE_URL` 优先）、存放 key 的变量名（`provider.apiKeyEnv`）、系统提示词更新的发送方式（`provider.systemUpdates`）、推理强度与写法（`reasoning`、`provider.reasoningFormat`）、`provider.fillMissingReasoning`、`provider.promptCacheKey`、额外的请求字段与请求头（`provider.requestFields`、`provider.headers`）、空闲超时与重试次数（`provider.idleTimeoutSecs`、`provider.maxRetries`）、输出 token 上限（`maxTokens`）、bash 的默认超时（`toolTimeoutSecs`；模型可经工具参数 `timeout_secs` 为单条命令申请更长时间，上限为该值与 600 秒中较大的一个）、要脱敏的密钥文件（`secretFiles`）、chat、acp 与 im 共用的审批等待时间（`approvalTimeoutSecs`）、执行环境（`execution`、`[container]`）、模型元数据（`[[models]]`）与 MCP 服务器（`[[mcp]]`）。
 - 角色写在 agent：权限（`[permissions]`）、说明（front matter 之后的正文）、项目上下文（`[context]`）、自动摘要（`[compaction]`）与续写次数（`continueOnLength`）。
 - 会话目录随主目录移动（`ZX_AGENT_HOME`），没有单独的参数；任务运行中输入的取法（`QueueMode`）只经 SDK 设置。
 

@@ -30,8 +30,6 @@ use crate::cli::{self, ImArgs, SessionOptions, env_value};
 use crate::process::{EXIT_COMPLETED, EXIT_ERROR, EXIT_USAGE, spawn_signal_handler, with_telemetry, write_line};
 use crate::session_files::SessionFile;
 
-/// How long an approval card waits for a click.
-const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 600;
 const DEFAULT_APP_TOKEN_ENV: &str = "SLACK_APP_TOKEN";
 const DEFAULT_BOT_TOKEN_ENV: &str = "SLACK_BOT_TOKEN";
 const DEFAULT_APP_ID_ENV: &str = "FEISHU_APP_ID";
@@ -119,7 +117,6 @@ struct AccessSection {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct LimitsSection {
     max_running: Option<NonZeroUsize>,
-    approval_timeout_secs: Option<u64>,
     idle_secs: Option<u64>,
 }
 
@@ -152,11 +149,6 @@ pub(crate) async fn run(args: ImArgs) -> Result<u8> {
             args,
             shared,
             dir,
-            approval_timeout: Duration::from_secs(
-                file.limits
-                    .approval_timeout_secs
-                    .unwrap_or(DEFAULT_APPROVAL_TIMEOUT_SECS),
-            ),
             events: telemetry.map_or_else(|| Arc::new(NullSink) as Arc<dyn EventSink>, Telemetry::sink),
         };
         // A wrong model, agent or tool setting would otherwise surface only at the first
@@ -357,7 +349,6 @@ struct Sessions {
     /// The MCP servers, secret files and IM credentials, shared by every thread's session.
     shared: cli::Shared,
     dir: PathBuf,
-    approval_timeout: Duration,
     /// Where each session's events go: the trace export, or nowhere.
     events: Arc<dyn EventSink>,
 }
@@ -375,7 +366,7 @@ impl Sessions {
         })
         .await?;
         prepared.require_bash_approval("shell commands require approval in the chat");
-        prepared.config.interaction_timeout = self.approval_timeout;
+        prepared.config.interaction_timeout = self.shared.settings.approval_timeout;
         Ok(prepared)
     }
 
@@ -529,5 +520,7 @@ mod tests {
         let base = "[access]\nconversations = []\n[sessions]\ndir = \"d\"\n";
         assert!(toml::from_str::<ConfigFile>(&format!("{base}[teams]\n")).is_err());
         assert!(toml::from_str::<ConfigFile>(&format!("{base}[limits]\nmaxRunning = 0\n")).is_err());
+        // The approval timeout is config.toml's, shared with chat and acp.
+        assert!(toml::from_str::<ConfigFile>(&format!("{base}[limits]\napprovalTimeoutSecs = 60\n")).is_err());
     }
 }

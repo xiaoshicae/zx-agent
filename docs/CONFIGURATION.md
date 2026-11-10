@@ -28,6 +28,7 @@ model = "my-model"
 reasoning = "high"                 # off、minimal、low、medium、high、xhigh；chat 的 /reasoning 可以改
 maxTokens = 4096
 toolTimeoutSecs = 120
+approvalTimeoutSecs = 600          # chat、acp 与 im 的审批等待
 secretFiles = ["/var/run/secrets/kubernetes.io/serviceaccount/token"]
 
 [provider]
@@ -41,12 +42,6 @@ requestFields = { temperature = 0.2 }   # 不能与 reasoning 写入的字段（
 headers = { X-Route = "eu" }
 idleTimeoutSecs = 120
 maxRetries = 3
-
-[chat]
-approvalTimeoutSecs = 120
-
-[acp]
-approvalTimeoutSecs = 3600
 
 [container]
 image = "debian:bookworm-slim"
@@ -72,6 +67,7 @@ tools = ["query", "query_range"]
 | `model` | 模型 ID；`--model` 与 `ZX_MODEL` 优先 |
 | `reasoning` | 推理强度：`off`、`minimal`、`low`、`medium`、`high` 或 `xhigh`。不设时请求不带推理设置，由服务决定；chat 的 `/reasoning` 可以改。会话的请求审计记录它 |
 | `maxTokens` | 每次回复的输出 token 上限；推理模型的推理也算在内，太小可能让回答为空。不设时请求不带上限 |
+| `approvalTimeoutSecs` | 审批请求等待答复的时间，秒，至少 1，默认 600：chat 的菜单选择、acp 客户端的答复与 im 的审批卡片共用这一个值；超时视为拒绝，任务不带这次调用继续。原来的 `[chat]`、`[acp]` 表与 IM 配置文件的 `limits.approvalTimeoutSecs` 已去掉，写了报未知键 |
 | `toolTimeoutSecs` | bash 命令的默认超时，也是 MCP 调用的默认超时，秒，至少 1，默认 120 |
 | `secretFiles` | 存放密钥的文件（如为 agent 挂载的 token），或这类文件的目录（以 `.` 开头的文件跳过），其内容在工具输出中替换为 `[REDACTED]`；相对路径相对 `config.toml` 所在目录。启动时每个路径都必须存在，每个文件都必须是至多 64 KiB 的普通文件；每次脱敏前重新读取。环境变量 `ZX_SECRET_FILES`（逗号分隔）中的文件另外加上，不替换这里的 |
 | `provider.baseUrl` | OpenAI 兼容服务的地址（不含 `/chat/completions`），默认 `https://api.openai.com/v1`；`ZX_BASE_URL` 优先 |
@@ -84,8 +80,6 @@ tools = ["query", "query_range"]
 | `provider.headers` | 每个请求都发送的请求头，表：名字 → 值，如网关的路由头。`Authorization` 被拒绝：key 来自 `apiKeyEnv`。不记录在会话中 |
 | `provider.idleTimeoutSecs` | 等待响应头或下一段流的最长时间，秒，至少 1，默认 120 |
 | `provider.maxRetries` | 临时性错误的重试次数，默认 3 |
-| `chat.approvalTimeoutSecs` | chat 的审批等待菜单选择的时间，秒，至少 1，默认 120；超时视为拒绝，任务不带这次调用继续 |
-| `acp.approvalTimeoutSecs` | acp 的审批请求等待客户端答复的时间，秒，至少 1，默认 3600；超时视为拒绝 |
 | `execution` | `local`（默认）或 `container`；其他值报错。`container` 时 bash、read_file、edit_file 与 write_file 在 Docker 容器中执行，见 README 的“容器执行” |
 | `container.image` | 容器镜像，`execution = "container"` 时必填，须已在本地（`docker pull`） |
 | `container.user` | 容器内运行命令的 `uid:gid`，默认为运行 zx-agent 的用户（以 root 运行时为 `65534:65534`）；不能是 root（UID 0 或 `root`），启动时也会检查命令的实际 UID |

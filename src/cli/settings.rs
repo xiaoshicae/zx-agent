@@ -28,10 +28,9 @@ const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 120;
 const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 120;
 /// Retries for transient provider errors by default.
 const DEFAULT_MAX_RETRIES: u32 = 3;
-/// How long chat waits for an approval by default, in seconds.
-const DEFAULT_CHAT_APPROVAL_SECS: u64 = 120;
-/// How long acp waits for the client's answer to a permission request by default, in seconds.
-const DEFAULT_ACP_APPROVAL_SECS: u64 = 3600;
+/// How long chat, acp and im wait for an approval by default, in seconds: long enough to
+/// notice a card in an IM thread, short enough that a forgotten one does not hold a task.
+const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 600;
 
 /// config.toml with the command line over it, the defaults filled in.
 pub(crate) struct Settings {
@@ -49,10 +48,8 @@ pub(crate) struct Settings {
     pub(super) idle_timeout: Duration,
     pub(super) max_retries: u32,
     pub(super) tool_timeout: Duration,
-    /// How long chat waits for an approval.
-    pub(crate) chat_approval_timeout: Duration,
-    /// How long acp waits for the client's answer to a permission request.
-    pub(crate) acp_approval_timeout: Duration,
+    /// How long chat, acp and im wait for an approval.
+    pub(crate) approval_timeout: Duration,
     /// The rest of config.toml: where commands run, the MCP servers, the models, the secret
     /// files and where long tool results go.
     pub(super) config: Config,
@@ -107,8 +104,7 @@ impl Settings {
             idle_timeout: seconds(provider.idle_timeout_secs, DEFAULT_IDLE_TIMEOUT_SECS),
             max_retries: provider.max_retries.unwrap_or(DEFAULT_MAX_RETRIES),
             tool_timeout: seconds(config.tool_timeout_secs, DEFAULT_TOOL_TIMEOUT_SECS),
-            chat_approval_timeout: seconds(config.chat.approval_timeout_secs, DEFAULT_CHAT_APPROVAL_SECS),
-            acp_approval_timeout: seconds(config.acp.approval_timeout_secs, DEFAULT_ACP_APPROVAL_SECS),
+            approval_timeout: seconds(config.approval_timeout_secs, DEFAULT_APPROVAL_TIMEOUT_SECS),
             config,
             home,
         })
@@ -117,7 +113,7 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
-    use zx_agent::config::{FrontendSettings, ProviderSettings};
+    use zx_agent::config::ProviderSettings;
 
     use super::*;
 
@@ -129,6 +125,7 @@ mod tests {
             reasoning: Some(Reasoning::Low),
             max_tokens: Some(512),
             tool_timeout_secs: Some(30),
+            approval_timeout_secs: Some(60),
             provider: ProviderSettings {
                 base_url: Some("http://file/v1".into()),
                 api_key_env: Some("FILE_KEY".into()),
@@ -139,12 +136,6 @@ mod tests {
                 idle_timeout_secs: Some(15),
                 max_retries: Some(0),
                 ..ProviderSettings::default()
-            },
-            chat: FrontendSettings {
-                approval_timeout_secs: Some(60),
-            },
-            acp: FrontendSettings {
-                approval_timeout_secs: Some(600),
             },
             ..Config::default()
         }
@@ -171,8 +162,7 @@ mod tests {
         assert_eq!(settings.tool_timeout, Duration::from_secs(30));
         assert_eq!(settings.idle_timeout, Duration::from_secs(15));
         assert_eq!(settings.max_retries, 0);
-        assert_eq!(settings.chat_approval_timeout, Duration::from_secs(60));
-        assert_eq!(settings.acp_approval_timeout, Duration::from_secs(600));
+        assert_eq!(settings.approval_timeout, Duration::from_secs(60));
     }
 
     #[test]
@@ -188,8 +178,7 @@ mod tests {
         assert_eq!(settings.tool_timeout, Duration::from_secs(120));
         assert_eq!(settings.idle_timeout, Duration::from_secs(120));
         assert_eq!(settings.max_retries, 3);
-        assert_eq!(settings.chat_approval_timeout, Duration::from_secs(120));
-        assert_eq!(settings.acp_approval_timeout, Duration::from_secs(3600));
+        assert_eq!(settings.approval_timeout, Duration::from_secs(600));
     }
 
     #[test]

@@ -198,7 +198,7 @@ impl Host {
             cx: cx.clone(),
             session_id: id.clone(),
         });
-        session.config.interaction_timeout = self.settings.shared.settings.acp_approval_timeout;
+        session.config.interaction_timeout = self.settings.shared.settings.approval_timeout;
         let cwd = session.config.cwd.clone();
         let updates = Arc::new(Updates::new(cx.clone(), id.clone(), cwd));
         Ok(Prepared { session, updates, id })

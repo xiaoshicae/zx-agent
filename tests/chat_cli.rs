@@ -1369,7 +1369,7 @@ async fn an_expired_approval_frees_the_next_scripted_line() {
         Reply::text("second answer"),
     ])
     .await;
-    config(dir.path(), "[chat]\napprovalTimeoutSecs = 1");
+    configure(dir.path(), "approvalTimeoutSecs = 1", "");
     let mut child = chat(&server, dir.path(), &["--tools", "bash", "--output", "jsonl"])
         .spawn()
         .unwrap();

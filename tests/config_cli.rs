@@ -179,10 +179,7 @@ async fn the_former_command_line_settings_are_read_from_config_toml() {
 async fn invalid_settings_exit_2_naming_their_key() {
     for (text, key) in [
         ("toolTimeoutSecs = 0", "toolTimeoutSecs must be at least 1"),
-        (
-            "[chat]\napprovalTimeoutSecs = 0",
-            "chat.approvalTimeoutSecs must be at least 1",
-        ),
+        ("approvalTimeoutSecs = 0", "approvalTimeoutSecs must be at least 1"),
         (
             "[provider]\nidleTimeoutSecs = 0",
             "provider.idleTimeoutSecs must be at least 1",

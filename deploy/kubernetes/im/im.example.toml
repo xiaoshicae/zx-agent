@@ -15,7 +15,6 @@ approvers = ["slack:U0123456789"]
 
 [limits]
 maxRunning = 4
-approvalTimeoutSecs = 600
 idleSecs = 1800
 
 [sessions]

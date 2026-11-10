@@ -100,7 +100,7 @@ impl Chat {
         .await?;
         prepared.require_bash_approval("shell commands require interactive approval");
         prepared.config.interaction = interaction.clone();
-        prepared.config.interaction_timeout = settings.shared.settings.chat_approval_timeout;
+        prepared.config.interaction_timeout = settings.shared.settings.approval_timeout;
         let provider = prepared.config.provider.clone();
         let about = About::of(&mut prepared);
         let session = prepared.into_session(output.clone())?;

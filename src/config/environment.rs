@@ -101,15 +101,6 @@ pub struct ProviderSettings {
     pub max_retries: Option<u32>,
 }
 
-/// The settings of one frontend, such as `[chat]`.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-pub struct FrontendSettings {
-    /// How long an approval request waits for an answer, in seconds; an unanswered request
-    /// is denied.
-    pub approval_timeout_secs: Option<u64>,
-}
-
 /// `config.toml`, checked: the environment every agent of this user runs in.
 #[derive(Debug, Default)]
 pub struct Config {
@@ -123,15 +114,14 @@ pub struct Config {
     pub max_tokens: Option<u32>,
     /// Default bash command timeout, and that of MCP calls, in seconds.
     pub tool_timeout_secs: Option<u64>,
+    /// How long an approval request of chat, acp or im waits for an answer, in seconds; an
+    /// unanswered request is denied.
+    pub approval_timeout_secs: Option<u64>,
     /// Files holding secrets to redact from tool output, or directories of such files;
     /// absolute after load.
     pub secret_files: Vec<PathBuf>,
     /// How the model is reached.
     pub provider: ProviderSettings,
-    /// `[chat]`: the settings of chat.
-    pub chat: FrontendSettings,
-    /// `[acp]`: the settings of acp.
-    pub acp: FrontendSettings,
     /// Where bash and read_file run.
     pub execution: Execution,
     /// Used when `execution` is `Container`.
@@ -151,10 +141,9 @@ struct RawConfig {
     reasoning: Option<String>,
     max_tokens: Option<u32>,
     tool_timeout_secs: Option<u64>,
+    approval_timeout_secs: Option<u64>,
     secret_files: Vec<PathBuf>,
     provider: RawProvider,
-    chat: FrontendSettings,
-    acp: FrontendSettings,
     // Unknown backends fail to deserialize instead of being ignored.
     execution: Option<Execution>,
     container: ContainerSettings,
@@ -290,10 +279,9 @@ impl RawConfig {
             reasoning: parsed("reasoning", self.reasoning)?,
             max_tokens: self.max_tokens,
             tool_timeout_secs: positive("toolTimeoutSecs", self.tool_timeout_secs)?,
+            approval_timeout_secs: positive("approvalTimeoutSecs", self.approval_timeout_secs)?,
             secret_files: secret_files(self.secret_files, parent)?,
             provider: self.provider.into_settings()?,
-            chat: self.chat.checked("chat")?,
-            acp: self.acp.checked("acp")?,
             execution: self.execution.unwrap_or_default(),
             container: self.container,
             tool_output: self.tool_output.into_config(parent)?,
@@ -321,14 +309,6 @@ impl RawProvider {
             idle_timeout_secs: positive("provider.idleTimeoutSecs", self.idle_timeout_secs)?,
             max_retries: self.max_retries,
         })
-    }
-}
-
-impl FrontendSettings {
-    /// These settings, checked; `table` names them in errors.
-    fn checked(self, table: &str) -> Result<Self> {
-        positive(&format!("{table}.approvalTimeoutSecs"), self.approval_timeout_secs)?;
-        Ok(self)
     }
 }
 
@@ -464,12 +444,12 @@ mod tests {
     #[test]
     fn the_model_and_its_provider_are_read_with_the_spellings_of_the_former_options() {
         let config = load_text(
-            "model = 'm1'\nreasoning = 'high'\nmaxTokens = 512\ntoolTimeoutSecs = 30\n\
+            "model = 'm1'\nreasoning = 'high'\nmaxTokens = 512\ntoolTimeoutSecs = 30\napprovalTimeoutSecs = 60\n\
              [provider]\nbaseUrl = 'http://localhost:8000/v1'\n\
              apiKeyEnv = 'LOCAL_KEY'\nsystemUpdates = 'inline'\nreasoningFormat = 'thinking'\n\
              fillMissingReasoning = true\npromptCacheKey = true\nidleTimeoutSecs = 15\nmaxRetries = 0\n\
              requestFields = { thinking = { type = 'disabled' }, top_k = 5 }\n\
-             headers = { X-Route = 'eu' }\n[chat]\napprovalTimeoutSecs = 60\n[acp]\napprovalTimeoutSecs = 600",
+             headers = { X-Route = 'eu' }",
         )
         .unwrap();
         assert_eq!(config.model.as_deref(), Some("m1"));
@@ -493,8 +473,7 @@ mod tests {
                 max_retries: Some(0),
             }
         );
-        assert_eq!(config.chat.approval_timeout_secs, Some(60));
-        assert_eq!(config.acp.approval_timeout_secs, Some(600));
+        assert_eq!(config.approval_timeout_secs, Some(60));
     }
 
     #[test]
@@ -517,15 +496,10 @@ mod tests {
                 "[provider]\nidleTimeoutSecs = 0",
                 "provider.idleTimeoutSecs must be at least 1",
             ),
-            (
-                "[chat]\napprovalTimeoutSecs = 0",
-                "chat.approvalTimeoutSecs must be at least 1",
-            ),
-            (
-                "[acp]\napprovalTimeoutSecs = 0",
-                "acp.approvalTimeoutSecs must be at least 1",
-            ),
-            ("[chat]\nqueueMode = 'all'", "unknown field `queueMode`"),
+            ("approvalTimeoutSecs = 0", "approvalTimeoutSecs must be at least 1"),
+            ("[chat]\nqueueMode = 'all'", "unknown field `chat`"),
+            ("[chat]\napprovalTimeoutSecs = 60", "unknown field `chat`"),
+            ("[acp]\napprovalTimeoutSecs = 60", "unknown field `acp`"),
             (
                 "[provider]\nheaders = { Authorization = 'Bearer x' }",
                 "provider.headers: Authorization",
