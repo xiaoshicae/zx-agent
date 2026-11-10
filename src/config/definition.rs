@@ -1,5 +1,5 @@
 //! An agent: what it does and may do. Each mode runs a built-in agent (`run` the unattended
-//! one; `chat`, `serve` and `acp` the assistant), which a file of the same name in the
+//! one; `chat`, `im` and `acp` the assistant), which a file of the same name in the
 //! `agents/` directory of the zx-agent home replaces.
 
 use std::path::{Path, PathBuf};
@@ -23,7 +23,7 @@ const AGENTS_DIR: &str = "agents";
 pub enum Builtin {
     /// A neutral agent without a human operator, the default of `run`.
     Unattended,
-    /// A conversation with a person, the default of `chat`, `serve` and `acp`.
+    /// A conversation with a person, the default of `chat`, `im` and `acp`.
     Assistant,
 }
 

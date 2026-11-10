@@ -1,5 +1,5 @@
 //! Chat platforms: the [`ImChannel`] extension point, and a [`Server`] that answers each
-//! thread with its own [`AgentSession`].
+//! conversation, a direct chat or a thread, with its own [`AgentSession`].
 //!
 //! A channel only moves messages. The server owns routing, sessions, the run limit and
 //! approvals, so supporting another platform means implementing the four methods of
@@ -27,7 +27,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 // The modules name the model layer, the kernel and the shared helpers by these crate-root paths.
 use zx_ai as ai;
-use zx_core::{AgentSession, agent, agent_session, runner};
+use zx_core::{AgentSession, agent, agent_session, runner, session};
 
 use crate::agent::ApprovalResult;
 
@@ -35,7 +35,9 @@ pub use platform::{
     Backoff, CARD_CAPACITY, Cards, Keepalive, MAX_TEXT_CHARS, Pacer, RATE_LIMIT_RETRIES, SEEN_CAPACITY, Seen,
     card_update_refused, pause, split_text,
 };
-pub use server::{ApprovalRecord, Replies, Server, ServerConfig, ServerEvent, ServerSink, SessionFactory, SessionKey};
+pub use server::{
+    ApprovalRecord, Opening, Replies, Server, ServerConfig, ServerEvent, ServerSink, SessionFactory, SessionKey,
+};
 pub use status::{StatusFiles, StatusStore};
 
 /// One chat platform, such as Slack.
@@ -45,9 +47,15 @@ pub use status::{StatusFiles, StatusStore};
 /// - it acknowledges each delivery to the platform at once and only then hands the event
 ///   over, since platforms resend what is not acknowledged within seconds;
 /// - it passes each message on at most once, deduplicating redeliveries;
-/// - it passes on only messages addressed to the bot (mentions in a chat, direct messages),
-///   never the bot's own;
+/// - it passes on direct messages, messages in a group that mention the bot, and replies in
+///   a group's threads, each with its [`ChatKind`] and [`Addressee`]; never the bot's own,
+///   nor a message posted in a group itself that does not mention the bot. The server
+///   decides which to answer;
 /// - it queues its sends to stay within the platform's rate limits.
+///
+/// [`thread_history`](Self::thread_history), [`display_name`](Self::display_name) and
+/// [`acknowledge`](Self::acknowledge) have defaults that do nothing, for a platform, or an
+/// app without the permissions, that cannot.
 #[async_trait]
 pub trait ImChannel: Send + Sync {
     /// Name used in configuration, logs and session paths, such as `"slack"`. Unique among
@@ -68,6 +76,25 @@ pub trait ImChannel: Send + Sync {
     /// [`Outbound::ApprovalRequest`] is refused with [`card_update_refused`]: a card is only
     /// posted, and the server never asks for this.
     async fn update(&self, posted: &MessageRef, message: &Outbound) -> Result<(), ImError>;
+
+    /// What people said in the thread `at` so far, oldest first: at most the `limit` latest
+    /// messages, without those of bots. Read when the bot is first mentioned in a thread
+    /// someone else started. The default reads nothing.
+    async fn thread_history(&self, _at: &Destination, _limit: usize) -> Result<Vec<Said>, ImError> {
+        Ok(Vec::new())
+    }
+
+    /// The name people see for `user`, or `None` when the platform gives none. The default
+    /// knows no names; the server then shows the user's ID.
+    async fn display_name(&self, _user: &UserId) -> Result<Option<String>, ImError> {
+        Ok(None)
+    }
+
+    /// Show that `message` was taken in, such as with a reaction: a message steered into a
+    /// run that is already answering. The default shows nothing.
+    async fn acknowledge(&self, _message: &MessageRef) -> Result<(), ImError> {
+        Ok(())
+    }
 }
 
 macro_rules! id {
@@ -131,13 +158,43 @@ impl MessageRef {
     }
 }
 
+/// The kind of chat a message was posted in, which sets what one conversation is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatKind {
+    /// One person and the bot: the whole chat is one conversation.
+    Direct,
+    /// A channel or a group: each thread is a conversation.
+    Group,
+}
+
+/// Whom a message is meant for, as its mentions tell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Addressee {
+    /// The bot: the message mentions it, or was posted in a direct chat.
+    Bot,
+    /// Other people: the message mentions someone, but not the bot.
+    Others,
+    /// Nobody in particular: the message mentions no one.
+    Nobody,
+}
+
+/// A message someone posted earlier, as [`ImChannel::thread_history`] reads it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Said {
+    pub id: MessageId,
+    pub sender: UserId,
+    pub text: String,
+}
+
 /// An event from the platform.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Inbound {
-    /// A message addressed to the bot: a mention in a chat, or a direct message.
+    /// A message from a person; see [`ImChannel`] for which messages a channel passes on.
     Message {
         id: MessageId,
         at: Destination,
+        chat: ChatKind,
+        addressee: Addressee,
         sender: UserId,
         text: String,
     },
@@ -182,7 +239,7 @@ pub enum Choice {
 }
 
 /// Texts of approval cards, for every platform. The defaults are English, like [`Replies`];
-/// a deployment sets its users' language, for example in the configuration of `serve`
+/// a deployment sets its users' language, for example in the configuration of `zx-agent im`
 /// (`[cardLabels]`, fields in camelCase, each optional).
 ///
 /// [`outcome`](Self::outcome) picks the label that says how an approval ended.

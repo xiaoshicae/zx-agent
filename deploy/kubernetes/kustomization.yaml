@@ -14,13 +14,13 @@ resources:
 # Optional components: uncomment `components:` and the ones wanted.
 # - multicluster: other clusters (README.md, "多集群"), after creating the ConfigMap
 #   zx-agent-kubeconfig and the Secret zx-agent-clusters.
-# - serve: the IM service (README.md, "IM 服务"), after creating the ConfigMap zx-agent-serve
+# - im: the IM service (README.md, "IM 服务"), after creating the ConfigMap zx-agent-im-config
 #   and the Secret zx-agent-im.
 # components:
 #   - multicluster
-#   - serve
+#   - im
 # This deployment's agents, which replace the built-in ones of their names: assistant.md for
-# chat and serve, unattended.md for run. The Pods mount them at /data/.zx-agent/agents, the
+# chat and im, unattended.md for run. The Pods mount them at /data/.zx-agent/agents, the
 # agents directory of the zx-agent home (~/.zx-agent; the home directory is /data).
 configMapGenerator:
   - name: zx-agent-agents

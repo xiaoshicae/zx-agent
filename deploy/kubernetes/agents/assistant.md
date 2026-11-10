@@ -1,5 +1,5 @@
 +++
-# Agent for conversations in the resident Pod: chat (kubectl exec) and serve. The
+# Agent for conversations in the resident Pod: chat (kubectl exec) and im. The
 # kustomization puts it in the ConfigMap zx-agent-agents, mounted at /data/.zx-agent/agents,
 # where it replaces the built-in assistant. It adds the read-only kubectl commands to the
 # assistant's commands that run without asking, and limits their options. zx-agent itself

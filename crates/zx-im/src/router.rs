@@ -1,5 +1,5 @@
-//! The router: access control, one worker per thread, replies to chats not served, and the
-//! stop.
+//! The router: access control, one worker per conversation, replies to chats not served,
+//! and the stop.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -9,8 +9,11 @@ use tokio::task::{Id, JoinError, JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use super::server::Shared;
-use super::worker::{self, Retire, WorkerInput, WorkerSetup};
-use super::{ConversationId, Destination, ImChannel, ImError, Inbound, Outbound, SessionKey, ThreadId};
+use super::worker::{self, Incoming, Retire, WorkerInput, WorkerSetup};
+use super::{
+    Addressee, ChatKind, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId, MessageRef, Outbound,
+    SessionKey, ThreadId,
+};
 
 /// Inbound events buffered between the channels and the router, which only passes them on.
 const INBOUND_CAPACITY: usize = 64;
@@ -19,6 +22,29 @@ const INBOUND_CAPACITY: usize = 64;
 const INBOX_CAPACITY: usize = 32;
 /// Idle notices of conversations, which the router handles at once.
 const RETIRE_CAPACITY: usize = 16;
+
+/// The conversation a message belongs to: the direct chat, or the thread in a group. A
+/// mention posted in a group itself starts a thread under it; anything else posted there
+/// belongs to no conversation, `None`.
+fn conversation(
+    platform: String,
+    chat: ChatKind,
+    addressee: Addressee,
+    id: &MessageId,
+    at: &Destination,
+) -> Option<SessionKey> {
+    let thread = match (chat, &at.thread) {
+        (ChatKind::Direct, _) => None,
+        (ChatKind::Group, Some(thread)) => Some(thread.clone()),
+        (ChatKind::Group, None) if addressee == Addressee::Bot => Some(ThreadId(id.0.clone())),
+        (ChatKind::Group, None) => return None,
+    };
+    Some(SessionKey {
+        platform,
+        conversation: at.conversation.clone(),
+        thread,
+    })
+}
 
 /// Run one channel, tagging what it receives with its index for the router.
 async fn receive(
@@ -153,23 +179,29 @@ impl Router {
             Inbound::Message {
                 id,
                 at,
-                sender: _,
+                chat,
+                addressee,
+                sender,
                 text,
             } => {
-                // A message posted in the chat itself starts a thread under it.
-                let thread = at.thread.unwrap_or(ThreadId(id.0));
-                let key = SessionKey {
-                    platform,
-                    conversation: at.conversation,
-                    thread,
+                let Some(key) = conversation(platform, chat, addressee, &id, &at) else {
+                    return;
                 };
                 let served = self
                     .allowed
                     .get(&key.platform)
                     .is_some_and(|chats| chats.contains(&key.conversation));
                 if served {
-                    self.message(channel, key, text);
-                } else {
+                    let incoming = Incoming {
+                        message: MessageRef { at, id },
+                        sender,
+                        addressee,
+                        text,
+                    };
+                    self.message(channel, key, incoming);
+                } else if addressee == Addressee::Bot {
+                    // Only a message meant for the bot hears why it gets no answer; the
+                    // rest of a group's talk is none of its business.
                     self.refuse(channel, key.destination());
                 }
             }
@@ -179,23 +211,23 @@ impl Router {
                 approval,
                 choice,
             } => {
-                // Cards are posted in a conversation's thread; a click elsewhere is not ours.
-                let Some(thread) = at.thread else {
-                    return;
-                };
+                // Cards are posted where the conversation posts: its thread, or the direct
+                // chat itself.
                 let key = SessionKey {
                     platform,
                     conversation: at.conversation,
-                    thread,
+                    thread: at.thread,
                 };
                 self.decision(&key, WorkerInput::Decision { user, approval, choice });
             }
         }
     }
 
-    /// Pass a message to the conversation's worker, starting one when there is none.
-    fn message(&mut self, channel: Arc<dyn ImChannel>, key: SessionKey, text: String) {
-        let input = WorkerInput::Message { text };
+    /// Pass a message to the conversation's worker, starting one when there is none: for a
+    /// message meant for the bot, or one in a thread the bot took part in before.
+    fn message(&mut self, channel: Arc<dyn ImChannel>, key: SessionKey, incoming: Incoming) {
+        let mentioned = incoming.addressee == Addressee::Bot;
+        let input = WorkerInput::Message(incoming);
         let input = match self.workers.get_mut(&key) {
             Some(worker) => match worker.inbox.try_send(input) {
                 Ok(()) => {
@@ -206,6 +238,8 @@ impl Router {
                 // The worker has ended, after a panic: a new one takes over.
                 Err(mpsc::error::TrySendError::Closed(input)) => Some(input),
             },
+            // Talk in a thread the bot never joined is not a conversation with it.
+            None if !mentioned && !self.shared.factory.has_session(&key) => return,
             None => Some(input),
         };
         let Some(input) = input else {

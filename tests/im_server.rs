@@ -3,6 +3,7 @@
 //! restart.
 mod common;
 
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -20,14 +21,18 @@ use zx_agent::agent::Interaction;
 use zx_agent::agent::{ApprovalResult, NullSink, PolicyDecision, Tool};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::im::{
-    ApprovalId, Choice, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId, MessageRef, Outbound,
-    Replies, Server, ServerConfig, ServerEvent, ServerSink, SessionFactory, SessionKey, StatusStore, ThreadId, UserId,
+    Addressee, ApprovalId, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId,
+    MessageRef, Opening, Outbound, Replies, Said, Server, ServerConfig, ServerEvent, ServerSink, SessionFactory,
+    SessionKey, StatusStore, ThreadId, UserId,
 };
 use zx_agent::policy::{PolicyHook, Rule, RuleMatcher, RulePolicy};
 use zx_agent::session::SessionStore;
 
 const PLATFORM: &str = "fake";
 const CHAT: &str = "C1";
+/// A direct chat with the asker.
+const DIRECT: &str = "D1";
+const ASKER: &str = "U-asker";
 const APPROVER: &str = "U-approver";
 const OTHER: &str = "U-other";
 /// Only reached when an expected message never comes.
@@ -49,6 +54,8 @@ enum Sent {
     Kept(MessageRef),
     /// A status forgotten by [`Statuses`].
     Forgot(MessageRef),
+    /// A message acknowledged as taken in.
+    Acknowledged(MessageRef),
 }
 
 /// How the platform answers an update; it records the update either way.
@@ -72,10 +79,27 @@ struct FakeChannel {
     next: AtomicUsize,
     fail: Option<String>,
     updates: Updates,
+    /// What every thread holds before the bot is mentioned there.
+    history: Vec<Said>,
+    /// Users' names; the others have none.
+    names: HashMap<String, String>,
 }
 
 #[async_trait]
 impl ImChannel for FakeChannel {
+    async fn thread_history(&self, _at: &Destination, _limit: usize) -> Result<Vec<Said>, ImError> {
+        Ok(self.history.clone())
+    }
+
+    async fn display_name(&self, user: &UserId) -> Result<Option<String>, ImError> {
+        Ok(self.names.get(&user.0).cloned())
+    }
+
+    async fn acknowledge(&self, message: &MessageRef) -> Result<(), ImError> {
+        self.sent.send(Sent::Acknowledged(message.clone())).unwrap();
+        Ok(())
+    }
+
     fn platform(&self) -> &str {
         self.name
     }
@@ -205,7 +229,16 @@ struct Factory {
 
 #[async_trait]
 impl SessionFactory for Factory {
-    async fn open(&self, key: &SessionKey, interaction: Arc<dyn Interaction>) -> Result<AgentSession, String> {
+    fn has_session(&self, key: &SessionKey) -> bool {
+        key.has_file_in(self.dir.path())
+    }
+
+    async fn open(
+        &self,
+        key: &SessionKey,
+        opening: Opening,
+        interaction: Arc<dyn Interaction>,
+    ) -> Result<AgentSession, String> {
         self.opened.fetch_add(1, Ordering::SeqCst);
         if let Some(error) = &self.fail {
             return Err(error.clone());
@@ -224,7 +257,9 @@ impl SessionFactory for Factory {
                 decision: PolicyDecision::Allow,
             },
         ]))));
-        let path = key.file_in(self.dir.path());
+        let path = key
+            .file_in(self.dir.path(), opening)
+            .map_err(|error| error.to_string())?;
         let store = if path.exists() {
             SessionStore::open(&path)
         } else {
@@ -262,6 +297,8 @@ struct Setup {
     statuses: Option<Vec<(SessionKey, MessageRef)>>,
     broken: Option<Broken>,
     updates: Updates,
+    history: Vec<Said>,
+    names: HashMap<String, String>,
 }
 
 impl Default for Setup {
@@ -269,7 +306,10 @@ impl Default for Setup {
         Self {
             steps: Vec::new(),
             config: ServerConfig {
-                conversations: vec![(PLATFORM.into(), ConversationId(CHAT.into()))],
+                conversations: vec![
+                    (PLATFORM.into(), ConversationId(CHAT.into())),
+                    (PLATFORM.into(), ConversationId(DIRECT.into())),
+                ],
                 approvers: vec![(PLATFORM.into(), UserId(APPROVER.into()))],
                 ..ServerConfig::default()
             },
@@ -280,6 +320,8 @@ impl Default for Setup {
             statuses: None,
             broken: None,
             updates: Updates::default(),
+            history: Vec::new(),
+            names: HashMap::new(),
         }
     }
 }
@@ -321,6 +363,8 @@ fn start(setup: Setup) -> Harness {
         next: AtomicUsize::new(0),
         fail: setup.fail_channel,
         updates: setup.updates,
+        history: setup.history,
+        names: setup.names,
     });
     let (events_to, events) = mpsc::unbounded_channel();
     let mut config = setup.config;
@@ -356,15 +400,37 @@ fn text(text: &str) -> Outbound {
     Outbound::Text(text.into())
 }
 
-/// A message in `chat`; `thread` is `None` for one posted in the chat itself.
+/// The direct chat with the asker.
+fn direct() -> Destination {
+    Destination {
+        conversation: ConversationId(DIRECT.into()),
+        thread: None,
+    }
+}
+
+/// A message from the asker in group `chat` that mentions the bot; `thread` is `None` for one
+/// posted in the chat itself.
 fn message(chat: &str, id: &str, thread: Option<&str>, text: &str) -> Inbound {
+    group_message(chat, id, thread, ASKER, Addressee::Bot, text)
+}
+
+fn group_message(
+    chat: &str,
+    id: &str,
+    thread: Option<&str>,
+    sender: &str,
+    addressee: Addressee,
+    text: &str,
+) -> Inbound {
     Inbound::Message {
         id: MessageId(id.into()),
         at: Destination {
             conversation: ConversationId(chat.into()),
             thread: thread.map(|root| ThreadId(root.into())),
         },
-        sender: UserId("U-asker".into()),
+        chat: ChatKind::Group,
+        addressee,
+        sender: UserId(sender.into()),
         text: text.into(),
     }
 }
@@ -374,8 +440,28 @@ impl Harness {
         self.inject.send(message(chat, id, thread, text)).await.unwrap();
     }
 
+    /// The asker mentions the bot in the group chat.
     async fn say(&self, id: &str, thread: Option<&str>, text: &str) {
         self.say_in(CHAT, id, thread, text).await;
+    }
+
+    /// `sender` writes in a thread of the group chat, to `addressee`.
+    async fn say_as(&self, sender: &str, id: &str, thread: &str, addressee: Addressee, text: &str) {
+        let message = group_message(CHAT, id, Some(thread), sender, addressee, text);
+        self.inject.send(message).await.unwrap();
+    }
+
+    /// The asker writes in the direct chat.
+    async fn say_directly(&self, id: &str, text: &str) {
+        let message = Inbound::Message {
+            id: MessageId(id.into()),
+            at: direct(),
+            chat: ChatKind::Direct,
+            addressee: Addressee::Bot,
+            sender: UserId(ASKER.into()),
+            text: text.into(),
+        };
+        self.inject.send(message).await.unwrap();
     }
 
     async fn click(&self, root: &str, user: &str, approval: &ApprovalId, choice: Choice) {
@@ -407,6 +493,18 @@ impl Harness {
                 posted
             }
             other => panic!("expected a post of {message:?}, got {other:?}"),
+        }
+    }
+
+    /// Expect message `id` in `at` acknowledged.
+    async fn acknowledged(&mut self, at: &Destination, id: &str) {
+        let expected = MessageRef {
+            at: at.clone(),
+            id: MessageId(id.into()),
+        };
+        match self.next().await {
+            Sent::Acknowledged(actual) => assert_eq!(actual, expected),
+            other => panic!("expected an acknowledgement of {id}, got {other:?}"),
         }
     }
 
@@ -481,7 +579,7 @@ fn key(root: &str) -> SessionKey {
     SessionKey {
         platform: PLATFORM.into(),
         conversation: ConversationId(CHAT.into()),
-        thread: ThreadId(root.into()),
+        thread: Some(ThreadId(root.into())),
     }
 }
 
@@ -506,7 +604,7 @@ async fn a_message_in_the_chat_is_answered_in_a_thread_under_it() {
     h.say("m1", None, "hello").await;
     let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
     h.updated(&status, text("answer")).await;
-    assert_eq!(h.requests(), [["user:hello"]]);
+    assert_eq!(h.requests(), [["user:U-asker: hello"]]);
     h.stop().await.unwrap();
 }
 
@@ -523,7 +621,10 @@ async fn a_reply_in_the_thread_continues_its_session() {
     h.say("m2", Some("m1"), "second").await;
     let status = h.posted(&thread("m1"), working).await;
     h.updated(&status, text("two")).await;
-    assert_eq!(h.requests()[1], ["user:first", "assistant:one", "user:second"]);
+    assert_eq!(
+        h.requests()[1],
+        ["user:U-asker: first", "assistant:one", "user:U-asker: second"]
+    );
     assert_eq!(h.factory.opened.load(Ordering::SeqCst), 1);
     h.stop().await.unwrap();
 }
@@ -541,7 +642,7 @@ async fn each_thread_has_a_session_of_its_own() {
     h.say("m2", None, "unrelated").await;
     let status = h.posted(&thread("m2"), working).await;
     h.updated(&status, text("two")).await;
-    assert_eq!(h.requests()[1], ["user:unrelated"]);
+    assert_eq!(h.requests()[1], ["user:U-asker: unrelated"]);
     assert_eq!(h.factory.opened.load(Ordering::SeqCst), 2);
     h.stop().await.unwrap();
 }
@@ -583,7 +684,7 @@ async fn an_approver_allows_a_call_and_the_card_shows_the_decision() {
     assert_eq!(h.factory.echo.calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         h.requests()[1],
-        ["user:run echo", "assistant:calls[c1]", "tool:c1=done"]
+        ["user:U-asker: run echo", "assistant:calls[c1]", "tool:c1=done"]
     );
     match h.event().await {
         ServerEvent::Approval(record) => {
@@ -725,7 +826,7 @@ async fn the_run_limit_makes_other_threads_wait_their_turn() {
     h.updated(&status_a, text("a done")).await;
     let status_b = h.posted(&thread("b"), working).await;
     h.updated(&status_b, text("b done")).await;
-    assert_eq!(h.requests()[2], ["user:task b"]);
+    assert_eq!(h.requests()[2], ["user:U-asker: task b"]);
     h.stop().await.unwrap();
 }
 
@@ -739,6 +840,7 @@ async fn a_message_during_a_run_is_steered_into_it() {
     let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
     let (id, card) = h.card(&thread("m1")).await;
     h.say("m2", Some("m1"), "also check the logs").await;
+    h.acknowledged(&thread("m1"), "m2").await;
     h.click("m1", APPROVER, &id, Choice::AllowOnce).await;
     h.updated(
         &card,
@@ -753,10 +855,10 @@ async fn a_message_during_a_run_is_steered_into_it() {
     assert_eq!(
         h.requests()[1],
         [
-            "user:run echo",
+            "user:U-asker: run echo",
             "assistant:calls[c1]",
             "tool:c1=done",
-            "user:also check the logs"
+            "user:U-asker: also check the logs"
         ]
     );
     h.stop().await.unwrap();
@@ -776,17 +878,15 @@ async fn an_idle_conversation_releases_its_session_and_reopens_it() {
     h.say("m1", None, "first").await;
     let status = h.posted(&thread("m1"), working.clone()).await;
     h.updated(&status, text("one")).await;
-    let key = SessionKey {
-        platform: PLATFORM.into(),
-        conversation: ConversationId(CHAT.into()),
-        thread: ThreadId("m1".into()),
-    };
-    assert_eq!(h.event().await, ServerEvent::Released { key });
+    assert_eq!(h.event().await, ServerEvent::Released { key: key("m1") });
     h.say("m2", Some("m1"), "second").await;
     let status = h.posted(&thread("m1"), working).await;
     h.updated(&status, text("two")).await;
     assert_eq!(h.factory.opened.load(Ordering::SeqCst), 2);
-    assert_eq!(h.requests()[1], ["user:first", "assistant:one", "user:second"]);
+    assert_eq!(
+        h.requests()[1],
+        ["user:U-asker: first", "assistant:one", "user:U-asker: second"]
+    );
     h.stop().await.unwrap();
 }
 
@@ -845,6 +945,7 @@ async fn stopping_tells_a_thread_about_steering_its_run_did_not_take_in() {
     let status = h.posted(&thread("m1"), text(&replies.working)).await;
     let (id, card) = h.card(&thread("m1")).await;
     h.say("m2", Some("m1"), "also check the logs").await;
+    h.acknowledged(&thread("m1"), "m2").await;
     // The worker answers this click only after it has steered the message before it.
     h.click("m1", OTHER, &id, Choice::AllowOnce).await;
     h.posted(&thread("m1"), text(&replies.not_approver)).await;
@@ -1090,7 +1191,7 @@ async fn a_session_that_cannot_be_opened_is_reported_and_tried_again() {
     h.posted(&thread("m1"), refused.clone()).await;
     match h.event().await {
         ServerEvent::Failed { key: Some(key), error } => {
-            assert_eq!(key.thread, ThreadId("m1".into()));
+            assert_eq!(key.thread, Some(ThreadId("m1".into())));
             assert!(error.contains("disk full"), "{error}");
         }
         other => panic!("expected a failure, got {other:?}"),
@@ -1113,6 +1214,8 @@ async fn two_channels_with_one_name_are_a_configuration_error() {
             next: AtomicUsize::new(0),
             fail: None,
             updates: Updates::default(),
+            history: Vec::new(),
+            names: HashMap::new(),
         })
     };
     let h = start(Setup::default());
@@ -1126,4 +1229,202 @@ struct NullServerSink;
 
 impl ServerSink for NullServerSink {
     fn emit(&self, _event: &ServerEvent) {}
+}
+
+#[tokio::test]
+async fn a_direct_chat_is_one_conversation_answered_in_the_chat() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("one"), FauxStep::text("two")],
+        ..Setup::default()
+    });
+    let working = text(&h.replies.working.clone());
+    h.say_directly("d1", "first").await;
+    let status = h.posted(&direct(), working.clone()).await;
+    h.updated(&status, text("one")).await;
+    h.say_directly("d2", "second").await;
+    let status = h.posted(&direct(), working).await;
+    h.updated(&status, text("two")).await;
+    // One person: no names before their words.
+    assert_eq!(h.requests()[1], ["user:first", "assistant:one", "user:second"]);
+    assert_eq!(h.factory.opened.load(Ordering::SeqCst), 1);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn new_starts_a_new_session_and_keeps_the_earlier_one() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("one"), FauxStep::text("two")],
+        ..Setup::default()
+    });
+    let working = text(&h.replies.working.clone());
+    h.say_directly("d1", "first").await;
+    let status = h.posted(&direct(), working.clone()).await;
+    h.updated(&status, text("one")).await;
+    h.say_directly("d2", " /new ").await;
+    h.posted(&direct(), text(&h.replies.new_session.clone())).await;
+    h.say_directly("d3", "second").await;
+    let status = h.posted(&direct(), working).await;
+    h.updated(&status, text("two")).await;
+    assert_eq!(h.requests()[1], ["user:second"]);
+    let key = SessionKey {
+        platform: PLATFORM.into(),
+        conversation: ConversationId(DIRECT.into()),
+        thread: None,
+    };
+    let mut files: Vec<_> = std::fs::read_dir(key.dir_in(h.factory.dir.path()))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    files.sort();
+    assert_eq!(files, ["1.jsonl", "2.jsonl"]);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn new_during_a_run_cancels_it_and_then_starts_over() {
+    let mut h = start(Setup {
+        steps: vec![echo_call(), FauxStep::text("fresh")],
+        ..Setup::default()
+    });
+    h.say_directly("d1", "run echo").await;
+    let status = h.posted(&direct(), text(&h.replies.working.clone())).await;
+    // The card shows that the run is waiting, its request answered.
+    let (id, card) = h.card(&direct()).await;
+    h.say_directly("d2", "/new").await;
+    let closed = Outbound::ApprovalResolved {
+        id,
+        user: None,
+        result: ApprovalResult::Cancelled,
+    };
+    h.updated(&card, closed).await;
+    h.updated(&status, text(&h.replies.cancelled.clone())).await;
+    h.posted(&direct(), text(&h.replies.new_session.clone())).await;
+    h.say_directly("d3", "again").await;
+    let status = h.posted(&direct(), text(&h.replies.working.clone())).await;
+    h.updated(&status, text("fresh")).await;
+    assert_eq!(h.requests()[1], ["user:again"]);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_person_just_answered_goes_on_without_a_mention() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("one"), FauxStep::text("two")],
+        ..Setup::default()
+    });
+    let working = text(&h.replies.working.clone());
+    h.say("m1", None, "first").await;
+    let status = h.posted(&thread("m1"), working.clone()).await;
+    h.updated(&status, text("one")).await;
+    h.say_as(ASKER, "m2", "m1", Addressee::Nobody, "and then?").await;
+    let status = h.posted(&thread("m1"), working).await;
+    h.updated(&status, text("two")).await;
+    assert_eq!(
+        h.requests()[1],
+        ["user:U-asker: first", "assistant:one", "user:U-asker: and then?"]
+    );
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn talk_between_people_in_the_thread_is_recorded_but_not_answered() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("one"), FauxStep::text("two")],
+        names: HashMap::from([(OTHER.to_string(), "Li".to_string())]),
+        ..Setup::default()
+    });
+    let working = text(&h.replies.working.clone());
+    h.say("m1", None, "why is checkout slow?").await;
+    let status = h.posted(&thread("m1"), working.clone()).await;
+    h.updated(&status, text("one")).await;
+    // The asker turns to someone else, who answers; then the asker speaks without a mention.
+    h.say_as(ASKER, "m2", "m1", Addressee::Others, "@Li any idea?").await;
+    h.say_as(OTHER, "m3", "m1", Addressee::Nobody, "the cache was flushed")
+        .await;
+    h.say_as(ASKER, "m4", "m1", Addressee::Nobody, "makes sense").await;
+    // Only a mention brings the bot back; what it did not answer is in its context.
+    h.say("m5", Some("m1"), "so what now?").await;
+    let status = h.posted(&thread("m1"), working).await;
+    h.updated(&status, text("two")).await;
+    assert_eq!(
+        h.requests()[1],
+        [
+            "user:U-asker: why is checkout slow?",
+            "assistant:one",
+            "user:U-asker: @Li any idea?",
+            "user:Li: the cache was flushed",
+            "user:U-asker: makes sense",
+            "user:U-asker: so what now?",
+        ]
+    );
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn talk_where_the_bot_never_took_part_is_left_alone() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("one")],
+        ..Setup::default()
+    });
+    h.say_as(OTHER, "m1", "t1", Addressee::Nobody, "lunch?").await;
+    let elsewhere = group_message("C2", "m2", Some("t2"), OTHER, Addressee::Nobody, "lunch?");
+    h.inject.send(elsewhere).await.unwrap();
+    h.say("m3", None, "hello").await;
+    // The first thing the server does is answer the mention: no refusal, no run before it.
+    let status = h.posted(&thread("m3"), text(&h.replies.working.clone())).await;
+    h.updated(&status, text("one")).await;
+    assert_eq!(h.factory.opened.load(Ordering::SeqCst), 1);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_first_mention_in_a_thread_reads_what_was_said_there() {
+    let earlier = |id: &str, sender: &str, text: &str| Said {
+        id: MessageId(id.into()),
+        sender: UserId(sender.into()),
+        text: text.into(),
+    };
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("one")],
+        history: vec![earlier("t1", OTHER, "the deploy failed"), earlier("m2", ASKER, "why?")],
+        names: HashMap::from([(OTHER.to_string(), "Li".to_string())]),
+        ..Setup::default()
+    });
+    h.say("m2", Some("t1"), "why?").await;
+    let status = h.posted(&thread("t1"), text(&h.replies.working.clone())).await;
+    h.updated(&status, text("one")).await;
+    // The mention itself is the prompt, not part of what came before.
+    assert_eq!(h.requests()[0], ["user:Li: the deploy failed", "user:U-asker: why?"]);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn talk_in_a_thread_after_its_session_was_released_is_still_recorded() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("one"), FauxStep::text("two")],
+        config: ServerConfig {
+            idle: Duration::from_millis(20),
+            ..Setup::default().config
+        },
+        ..Setup::default()
+    });
+    let working = text(&h.replies.working.clone());
+    h.say("m1", None, "first").await;
+    let status = h.posted(&thread("m1"), working.clone()).await;
+    h.updated(&status, text("one")).await;
+    assert_eq!(h.event().await, ServerEvent::Released { key: key("m1") });
+    h.say_as(OTHER, "m2", "m1", Addressee::Nobody, "fixed it").await;
+    h.say("m3", Some("m1"), "confirm?").await;
+    let status = h.posted(&thread("m1"), working).await;
+    h.updated(&status, text("two")).await;
+    assert_eq!(
+        h.requests()[1],
+        [
+            "user:U-asker: first",
+            "assistant:one",
+            "user:U-other: fixed it",
+            "user:U-asker: confirm?"
+        ]
+    );
+    h.stop().await.unwrap();
 }

@@ -1,4 +1,4 @@
-# zx-agent serve becomes the container's main process. With a shared process namespace the
+# zx-agent im becomes the container's main process. With a shared process namespace the
 # pause container is PID 1: it reaps the processes commands leave behind, and /proc/1/environ
 # holds none of this container's variables: the keys are only in zx-agent's own environment,
 # where commands running as the same user can read them and redaction replaces their values
@@ -15,9 +15,9 @@ spec:
         - name: zx-agent
           command:
             - zx-agent
-            - serve
+            - im
             - --config
-            - /etc/zx-agent-serve/serve.toml
+            - /etc/zx-agent-im/im.toml
           env:
             # Each platform reads only its own keys; the Secret holds the ones in use.
             - name: SLACK_APP_TOKEN
@@ -47,10 +47,10 @@ spec:
                   optional: true
           volumeMounts:
             # Not /etc/zx-agent: the multicluster component mounts its kubeconfig there.
-            - name: serve-config
-              mountPath: /etc/zx-agent-serve
+            - name: im-config
+              mountPath: /etc/zx-agent-im
               readOnly: true
       volumes:
-        - name: serve-config
+        - name: im-config
           configMap:
-            name: zx-agent-serve
+            name: zx-agent-im-config

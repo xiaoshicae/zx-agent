@@ -1,4 +1,4 @@
-//! `zx-agent serve`: configuration errors, and the whole path against a fake Slack and a fake
+//! `zx-agent im`: configuration errors, and the whole path against a fake Slack and a fake
 //! model: a mention, an approval card and its click, hidden and redacted Slack tokens, the
 //! session file, the operator log, the stop, and a restart after a kill.
 mod common;
@@ -14,19 +14,19 @@ use common::fake_slack::FakeSlack;
 use common::mock_server::{MockServer, Reply};
 use common::{fake_model_config, json_lines, stderr, stdout, zx_agent};
 
-const APP_TOKEN: &str = "xapp-1-serve-test-token";
-const BOT_TOKEN: &str = "xoxb-serve-test-token";
+const APP_TOKEN: &str = "xapp-1-im-test-token";
+const BOT_TOKEN: &str = "xoxb-im-test-token";
 /// Only reached when the server never answers.
 const WAIT: Duration = Duration::from_secs(20);
 
-/// `zx-agent serve` with `config`, in `dir`, against `model`; Slack tokens are set, and the
+/// `zx-agent im` with `config`, in `dir`, against `model`; Slack tokens are set, and the
 /// zx-agent home in `dir` has a config.toml without retries.
-fn serve(dir: &Path, config: &Path, model: &str) -> Command {
+fn im(dir: &Path, config: &Path, model: &str) -> Command {
     let home = dir.join(".zx-agent-home");
-    common::write_config(&home, &fake_model_config("ZX_SERVE_CLI_TEST_KEY", "", ""));
+    common::write_config(&home, &fake_model_config("ZX_IM_CLI_TEST_KEY", "", ""));
     let mut command = zx_agent();
     command
-        .args(["serve", "--config", config.to_str().unwrap(), "--model", "mock"])
+        .args(["im", "--config", config.to_str().unwrap(), "--model", "mock"])
         .current_dir(dir)
         .env("ZX_AGENT_HOME", &home)
         .env("ZX_BASE_URL", model)
@@ -40,7 +40,7 @@ fn serve(dir: &Path, config: &Path, model: &str) -> Command {
 }
 
 fn write_config(dir: &Path, text: &str) -> std::path::PathBuf {
-    let path = dir.join("serve.toml");
+    let path = dir.join("im.toml");
     std::fs::write(&path, text).unwrap();
     path
 }
@@ -95,12 +95,7 @@ async fn configuration_errors_are_reported_before_serving() {
             None,
             "which is not configured",
         ),
-        (
-            VALID,
-            &["--session", "x.jsonl"],
-            None,
-            "--session does not apply to serve",
-        ),
+        (VALID, &["--session", "x.jsonl"], None, "--session does not apply to im"),
         (
             "[slack]\ntoken = \"x\"\n[access]\nconversations = []\n[sessions]\ndir = \"s\"\n",
             &[],
@@ -117,7 +112,7 @@ async fn configuration_errors_are_reported_before_serving() {
     for (config, extra, unset, expected) in cases {
         let dir = tempfile::tempdir().unwrap();
         let path = write_config(dir.path(), config);
-        let mut command = serve(dir.path(), &path, "http://127.0.0.1:9/v1");
+        let mut command = im(dir.path(), &path, "http://127.0.0.1:9/v1");
         command.args(extra);
         if let Some(variable) = unset {
             command.env_remove(variable);
@@ -133,13 +128,13 @@ async fn configuration_errors_are_reported_before_serving() {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         created.sort();
-        assert_eq!(created, [".zx-agent-home", "serve.toml"], "{config}");
+        assert_eq!(created, [".zx-agent-home", "im.toml"], "{config}");
     }
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn serve_answers_a_mention_with_an_approved_command_that_cannot_see_the_slack_tokens() {
+async fn im_answers_a_mention_with_an_approved_command_that_cannot_see_the_slack_tokens() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("token.txt"), format!("{BOT_TOKEN}\n")).unwrap();
     let command = "echo app=$SLACK_APP_TOKEN bot=$SLACK_BOT_TOKEN; cat token.txt";
@@ -150,7 +145,7 @@ async fn serve_answers_a_mention_with_an_approved_command_that_cannot_see_the_sl
         &format!("{VALID}\n[limits]\nidleSecs = 600\n")
             .replace("[slack]\n", &format!("[slack]\napiBase = \"{}\"\n", slack.api_base)),
     );
-    let child = serve(dir.path(), &config, &model.base_url)
+    let child = im(dir.path(), &config, &model.base_url)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -194,7 +189,7 @@ async fn serve_answers_a_mention_with_an_approved_command_that_cannot_see_the_sl
     assert!(result.contains("[REDACTED]"), "{result}");
     assert!(!result.contains(APP_TOKEN) && !result.contains(BOT_TOKEN), "{result}");
 
-    let session = dir.path().join("sessions/slack/C1/1700000001%2E000100.jsonl");
+    let session = dir.path().join("sessions/slack/C1/1700000001%2E000100/1.jsonl");
     let recorded = std::fs::read_to_string(&session).unwrap();
     assert!(recorded.contains("run it"));
     assert!(!recorded.contains(BOT_TOKEN));
@@ -238,7 +233,7 @@ async fn configured_replies_and_card_labels_replace_the_english_defaults() {
         )
         .replace("[slack]\n", &format!("[slack]\napiBase = \"{}\"\n", slack.api_base)),
     );
-    let _child = serve(dir.path(), &config, &model.base_url)
+    let _child = im(dir.path(), &config, &model.base_url)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -288,7 +283,7 @@ async fn a_status_left_by_a_killed_server_is_replaced_when_it_starts_again() {
         dir.path(),
         &VALID.replace("[slack]\n", &format!("[slack]\napiBase = \"{}\"\n", slack.api_base)),
     );
-    let mut first = serve(dir.path(), &config, &model.base_url)
+    let mut first = im(dir.path(), &config, &model.base_url)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -308,7 +303,7 @@ async fn a_status_left_by_a_killed_server_is_replaced_when_it_starts_again() {
         .collect();
     assert_eq!(left, ["slack.C1.1700000000%2E000001.json"]);
 
-    let second = serve(dir.path(), &config, &model.base_url)
+    let second = im(dir.path(), &config, &model.base_url)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

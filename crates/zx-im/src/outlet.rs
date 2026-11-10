@@ -1,5 +1,6 @@
-//! Where a conversation posts and reports, the session it holds while it serves, and the
-//! text that replaces the status message when a run ends.
+//! Where a conversation posts and reports, the session it holds while it serves, how the
+//! model reads what people said there, and the text that replaces the status message when a
+//! run ends.
 
 use std::sync::Arc;
 
@@ -10,10 +11,17 @@ use crate::AgentSession;
 use crate::agent::QueuedMessage;
 use crate::agent_session::{AgentSessionError, Subscription};
 use crate::runner::{RunOutcome, RunReport};
+use crate::session::CustomMessage;
 
 use super::approval::{ApprovalEvents, ApprovalUpdate, ImApproval};
 use super::server::Shared;
-use super::{Destination, ImChannel, MessageRef, Outbound, Replies, SessionKey};
+use super::{Destination, ImChannel, MessageRef, Opening, Outbound, Replies, SessionKey, UserId};
+
+/// Messages read from a thread the bot is first mentioned in: enough to follow a discussion,
+/// few enough not to crowd the context.
+const HISTORY_MESSAGES: usize = 50;
+/// The kind of the custom messages that record what people said without the bot answering.
+const SAID_TYPE: &str = "im_message";
 
 /// The session while it is held. Dropping it releases the session file.
 pub(crate) struct Opened {
@@ -55,7 +63,7 @@ pub(crate) struct Outlet {
 }
 
 impl Outlet {
-    /// Post text in the thread. A failure is reported to the operator and returns `None`.
+    /// Post text in the conversation. A failure is reported to the operator and returns `None`.
     pub(crate) async fn post(&self, text: String) -> Option<MessageRef> {
         let message = Outbound::Text(text);
         self.shared
@@ -71,15 +79,20 @@ impl Outlet {
             .await;
     }
 
-    /// Open the session, with this thread as the host of its approvals.
-    pub(crate) async fn open(&self, updates: &mpsc::Sender<ApprovalUpdate>) -> Result<Opened, String> {
+    /// Open the session that `opening` names, with this conversation as the host of its
+    /// approvals.
+    pub(crate) async fn open(
+        &self,
+        updates: &mpsc::Sender<ApprovalUpdate>,
+        opening: Opening,
+    ) -> Result<Opened, String> {
         let interaction = Arc::new(ImApproval {
             channel: Arc::clone(&self.channel),
             to: self.to.clone(),
             updates: updates.clone(),
             outbound_timeout: self.shared.outbound_timeout,
         });
-        let session = self.shared.factory.open(&self.key, interaction).await?;
+        let session = self.shared.factory.open(&self.key, opening, interaction).await?;
         let approvals = session.subscribe(Arc::new(ApprovalEvents {
             updates: updates.clone(),
             key: self.key.clone(),
@@ -126,8 +139,77 @@ impl Outlet {
         self.shared.failed(Some(&self.key), error);
     }
 
+    /// `text` as the model reads it: in a group, after its sender's name, since several
+    /// people talk there.
+    pub(crate) async fn attributed(&self, sender: &UserId, text: &str) -> String {
+        if self.key.thread.is_none() {
+            return text.to_string();
+        }
+        let name = self.shared.name_of(self.channel.as_ref(), &self.key, sender).await;
+        format!("{name}: {text}")
+    }
+
+    /// Show the sender that a message reached the run that is answering. A failure is
+    /// reported to the operator.
+    pub(crate) async fn acknowledge(&self, message: &MessageRef) {
+        let act = format!("acknowledge message {}", message.id);
+        self.shared
+            .bounded(Some(&self.key), &act, self.channel.acknowledge(message))
+            .await;
+    }
+
+    /// Record what was said in the thread before the bot was mentioned there by `trigger`, in
+    /// a session that has nothing yet: the first answer then knows the talk it joins. Nothing
+    /// is read when `trigger` started the thread.
+    pub(crate) async fn read_thread(&self, opened: &Opened, trigger: &MessageRef) {
+        let Some(thread) = &self.key.thread else {
+            return;
+        };
+        if thread.0 == trigger.id.0 {
+            return;
+        }
+        match opened.session.inspect(|store| store.entries().is_empty()) {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => {
+                self.failed(format!("cannot read the session: {error}"));
+                return;
+            }
+        }
+        let history = self
+            .shared
+            .bounded(
+                Some(&self.key),
+                "read the thread",
+                self.channel.thread_history(&self.to, HISTORY_MESSAGES),
+            )
+            .await;
+        // A failure was reported; the conversation goes on without the earlier messages.
+        let Some(history) = history else {
+            return;
+        };
+        for earlier in history.into_iter().filter(|earlier| earlier.id != trigger.id) {
+            let content = self.attributed(&earlier.sender, &earlier.text).await;
+            if let Err(error) = opened.session.append_custom_message(said(content)).await {
+                self.failed(format!("cannot record the thread: {error}"));
+                return;
+            }
+        }
+    }
+
     pub(crate) fn replies(&self) -> &Replies {
         &self.shared.replies
+    }
+}
+
+/// What someone said without the bot answering, as the session records it: the model reads
+/// it with the next prompt.
+pub(crate) fn said(content: String) -> CustomMessage {
+    CustomMessage {
+        custom_type: SAID_TYPE.into(),
+        content,
+        display: true,
+        details: None,
     }
 }
 

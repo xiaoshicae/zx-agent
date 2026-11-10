@@ -1,5 +1,5 @@
 +++
-# The default of chat, serve and acp: a conversation with a person.
+# The default of chat, im and acp: a conversation with a person.
 tools = ["bash", "read_file", "edit_file", "write_file", "grep", "find", "ls", "read_skill", "read_output"]
 continueOnLength = 0
 

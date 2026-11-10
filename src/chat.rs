@@ -41,7 +41,7 @@ use zx_agent::otel::Telemetry;
 use crate::cli::{self, ChatArgs, ModeSettings, SessionOptions};
 use crate::process::{EXIT_ABORTED, EXIT_COMPLETED, with_telemetry};
 use crate::render::visible;
-use crate::sessions::SessionFile;
+use crate::session_files::SessionFile;
 
 use commands::Command;
 use info::{About, banner, help, resumed_line, status};

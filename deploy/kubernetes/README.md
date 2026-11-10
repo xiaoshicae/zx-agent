@@ -6,14 +6,14 @@
 - CronJob 定时巡检，使用只读账号，结果写进 Pod 日志，每次运行的会话文件留在自己的存储卷上。
 - kubectl 在 Pod 内运行，凭据来自 ServiceAccount，不需要另外提供 kubeconfig。ServiceAccount token 经 `ZX_SECRET_FILES` 登记脱敏。
 
-zx-agent 本身不针对 Kubernetes：kubectl 的规则、token 路径都在本目录的清单与 agent 中。IM 机器人见 `serve/`；告警等其他系统由外部适配器调用 `zx-agent run`（或发到 IM）来触发，zx-agent 不解析告警格式。
+zx-agent 本身不针对 Kubernetes：kubectl 的规则、token 路径都在本目录的清单与 agent 中。IM 机器人见 `im/`；告警等其他系统由外部适配器调用 `zx-agent run`（或发到 IM）来触发，zx-agent 不解析告警格式。
 
 ## 目录内容
 
 | 文件 | 内容 |
 |-|-|
 | `Dockerfile` | 镜像：zx-agent，以及 bash、kubectl、curl、jq、tini；以 10001 号非 root 用户运行 |
-| `agents/` | 本部署的 agent，由 `kustomization.yaml` 生成 ConfigMap `zx-agent-agents`，挂载到两种 Pod 的 `/data/.zx-agent/agents`，即 zx-agent 主目录（`~/.zx-agent`，Pod 中的家目录是 `/data`）的 `agents/`，替换同名的内置 agent。`assistant.md` 在内置的 assistant 之上加入只读 kubectl 命令，并列出它们可以带的选项，chat 与 serve 使用；`unattended.md` 在内置的 unattended 之上换成要求排障报告固定小节的说明，定时巡检与单次任务使用 |
+| `agents/` | 本部署的 agent，由 `kustomization.yaml` 生成 ConfigMap `zx-agent-agents`，挂载到两种 Pod 的 `/data/.zx-agent/agents`，即 zx-agent 主目录（`~/.zx-agent`，Pod 中的家目录是 `/data`）的 `agents/`，替换同名的内置 agent。`assistant.md` 在内置的 assistant 之上加入只读 kubectl 命令，并列出它们可以带的选项，chat 与 im 使用；`unattended.md` 在内置的 unattended 之上换成要求排障报告固定小节的说明，定时巡检与单次任务使用 |
 | `kustomization.yaml` | 命名空间、清单列表、镜像地址 |
 | `serviceaccounts.yaml` | 两个账号：常驻 Pod 用 `zx-agent`，定时巡检用 `zx-agent-inspect` |
 | `rbac.yaml` | 两个账号都绑定 Kubernetes 预置的只读角色 `view`（不含 Secret） |
@@ -21,7 +21,7 @@ zx-agent 本身不针对 Kubernetes：kubectl 的规则、token 路径都在本�
 | `pvc.yaml` | 会话文件的存储卷，挂载在 `/data` |
 | `deployment.yaml` | 常驻 Pod |
 | `cronjob.yaml` | 定时巡检，默认每小时一次 |
-| `serve/` | 可选：常驻 Pod 运行 `zx-agent serve`，接入 IM。kustomize 组件开启进程命名空间共享、改主进程、挂上配置与凭据；`serve.example.toml` 是配置示例 |
+| `im/` | 可选：常驻 Pod 运行 `zx-agent im`，接入 IM。kustomize 组件开启进程命名空间共享、改主进程、挂上配置与凭据；`im.example.toml` 是配置示例 |
 | `multicluster/` | 可选：访问其他集群。kustomize 组件给两种 Pod 挂上 kubeconfig 与 token 目录；`remote.yaml` 在每个远端集群执行一次 |
 
 ## 部署
@@ -174,7 +174,7 @@ kubectl -n zx-agent create configmap zx-agent-kubeconfig --from-file=kubeconfig=
 
 ## IM 服务
 
-启用 `serve` 组件后，常驻 Pod 的主进程是 `zx-agent serve`：在 IM 中 @ 机器人排障，写操作在 IM 中审批。用法、配置项与平台应用的设置见仓库根目录 README 的“IM 服务”。
+启用 `im` 组件后，常驻 Pod 的主进程是 `zx-agent im`：在 IM 中 @ 机器人排障，写操作在 IM 中审批。用法、配置项与平台应用的设置见仓库根目录 README 的“IM 服务”。
 
 - Pod 设置 `shareProcessNamespace: true`。PID 1 是 pause：命令留下的进程由它回收，`/proc/1/environ` 中也没有容器的环境变量（见下文“安全说明”）。
 - 用 `kubectl exec` 启动 chat 或 run 的方式不变，定时巡检不受影响。
@@ -189,15 +189,15 @@ kubectl -n zx-agent create configmap zx-agent-kubeconfig --from-file=kubeconfig=
 
    ⚑ D:5/CHINA FLAG: 飞书用 `feishu-app-id` 与 `feishu-app-secret` 两个键（Subject to Legal/Export Compliance approval）。
 
-2. 由 `serve/serve.example.toml` 复制出 `serve.toml`，填好聊天与审批人，再创建 ConfigMap `zx-agent-serve`：
+2. 由 `im/im.example.toml` 复制出 `im.toml`，填好聊天与审批人，再创建 ConfigMap `zx-agent-im-config`：
 
    ```sh
-   kubectl -n zx-agent create configmap zx-agent-serve --from-file=serve.toml
+   kubectl -n zx-agent create configmap zx-agent-im-config --from-file=im.toml
    ```
 
-3. 在 `kustomization.yaml` 中取消 `components:` 与 `- serve` 的注释，然后执行 `kubectl apply -k deploy/kubernetes`。
+3. 在 `kustomization.yaml` 中取消 `components:` 与 `- im` 的注释，然后执行 `kubectl apply -k deploy/kubernetes`。
 
-serve 只在启动时读取配置与凭据。修改 ConfigMap 或 Secret 之后，需要重启：
+im 只在启动时读取配置与凭据。修改 ConfigMap 或 Secret 之后，需要重启：
 
 ```sh
 kubectl -n zx-agent rollout restart deploy/zx-agent
@@ -238,7 +238,7 @@ kubectl -n zx-agent rollout restart deploy/zx-agent
   - 读到的 key 会被脱敏，不会进入模型上下文。
   - 被诱导的命令仍可能把 key 发往外部。在 chat 中，这类命令需要人工确认。
   - 能 `kubectl exec` 进这个 Pod 的人，本来就能读到 key。
-  - 启用 `serve` 组件后，PID 1 是 pause，`/proc/1/environ` 中没有容器的环境变量；API key 与 IM 凭据只在 zx-agent 进程自身的环境中，同一用户的命令可以从它的 `/proc/<pid>/environ` 读到，读到的值同样被脱敏。
+  - 启用 `im` 组件后，PID 1 是 pause，`/proc/1/environ` 中没有容器的环境变量；API key 与 IM 凭据只在 zx-agent 进程自身的环境中，同一用户的命令可以从它的 `/proc/<pid>/environ` 读到，读到的值同样被脱敏。
 - **定时巡检**：Pod 的主进程就是 zx-agent，同一用户的命令可以从它的 `/proc/<pid>/environ` 读到 API key；读到的 key 被脱敏，不会进入模型上下文。
 - 会话文件在 `/data` 中。命令与 agent 以同一用户运行，能够修改这些文件，这是本机执行的限制。
 - Pod 能访问哪些网络地址，由集群决定。需要限制时使用 NetworkPolicy。注意默认拒绝出网也会挡住 DNS，需要单独放行集群 DNS。
@@ -252,7 +252,7 @@ kubectl -n zx-agent delete secret zx-agent-model
 kubectl delete namespace zx-agent
 ```
 
-启用了 IM 服务时，在 `delete -k` 之后还要删除 `zx-agent-serve`（ConfigMap）和 `zx-agent-im`（Secret）。启用了多集群时，在 `delete -k` 之后还要删除 `zx-agent-kubeconfig`（ConfigMap）和 `zx-agent-clusters`（Secret），再在每个远端集群执行上一节的 `kubectl delete -f`。
+启用了 IM 服务时，在 `delete -k` 之后还要删除 `zx-agent-im-config`（ConfigMap）和 `zx-agent-im`（Secret）。启用了多集群时，在 `delete -k` 之后还要删除 `zx-agent-kubeconfig`（ConfigMap）和 `zx-agent-clusters`（Secret），再在每个远端集群执行上一节的 `kubectl delete -f`。
 
 `kubectl delete -k` 会删除清单中的对象，包括集群级的 ClusterRoleBinding 和存储卷声明。会话文件是否随之删除，取决于 StorageClass 的回收策略：`Delete` 时删除，`Retain` 时保留在卷上。可以用 `kubectl get storageclass` 查看。
 
@@ -289,7 +289,7 @@ kubectl delete namespace zx-agent
 | 新增集群 | 用 `create … --dry-run=client -o yaml \| apply` 给 Secret 加一个 key；约 56 秒后新文件出现在 Pod 中，内容随即被脱敏；Pod 没有重启。用 `--save-config` 创建的对象，之后 `apply` 不再提示缺少注解 |
 | 清理 | 本集群对象按“清理”一节删除；远端执行 `kubectl delete -f remote.yaml --ignore-not-found`，退出码 0。不加该参数时，因 token 已随 Namespace 删除，命令报 NotFound 并以 1 退出 |
 
-**IM 服务**（基于 PR #32 的 `c272f41` 加上本次改动，镜像标签为 `serve-d1`）：
+**IM 服务**（基于 PR #32 的 `c272f41` 加上本次改动，镜像标签为 `serve-d1`。当时子命令、组件、ConfigMap 与挂载路径的名字是 `serve`、`zx-agent-serve`、`/etc/zx-agent-serve/serve.toml`，现为 `im`、`zx-agent-im-config`、`/etc/zx-agent-im/im.toml`；下面保留当时的原样，改名后未重新实测）：
 
 - 没有真实平台的凭据，所以 `serve.toml` 中 Slack 的 `apiBase` 指向一个拒绝连接的地址（`127.0.0.1:9`），Secret 中放的是假 token。
 - 清单为本目录原样，只在 `kustomization.yaml` 中启用了 `serve` 组件、改了镜像标签。

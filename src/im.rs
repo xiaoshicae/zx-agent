@@ -1,4 +1,4 @@
-//! `zx-agent serve`: answers IM messages with one session per thread until stopped.
+//! `zx-agent im`: answers IM messages, one session per conversation, until stopped.
 //! The server itself is `zx_agent::im::Server`.
 
 use std::collections::HashSet;
@@ -21,14 +21,14 @@ use zx_agent::config::Builtin;
 use zx_agent::im::feishu::{FeishuChannel, FeishuConfig};
 use zx_agent::im::slack::{SlackChannel, SlackConfig};
 use zx_agent::im::{
-    CardLabels, ConversationId, ErrorReport, ImChannel, ImError, Replies, Server, ServerConfig, ServerEvent,
+    CardLabels, ConversationId, ErrorReport, ImChannel, ImError, Opening, Replies, Server, ServerConfig, ServerEvent,
     ServerSink, SessionFactory, SessionKey, StatusFiles, UserId,
 };
 use zx_agent::otel::Telemetry;
 
-use crate::cli::{self, ServeArgs, SessionOptions, env_value};
+use crate::cli::{self, ImArgs, SessionOptions, env_value};
 use crate::process::{EXIT_COMPLETED, EXIT_ERROR, EXIT_USAGE, spawn_signal_handler, with_telemetry, write_line};
-use crate::sessions::SessionFile;
+use crate::session_files::SessionFile;
 
 /// How long an approval card waits for a click.
 const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 600;
@@ -43,10 +43,10 @@ const RUNNING_DIR: &str = ".running";
 type Conversations = Vec<(String, ConversationId)>;
 type Approvers = Vec<(String, UserId)>;
 
-/// The serve configuration file.
+/// The IM service configuration file.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct ServeFile {
+struct ConfigFile {
     slack: Option<SlackSection>,
     feishu: Option<FeishuSection>,
     access: AccessSection,
@@ -131,10 +131,10 @@ struct SessionsSection {
 
 /// Serve until SIGINT or SIGTERM, or until a platform fails. An `Err` is a configuration
 /// problem found before serving started.
-pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
+pub(crate) async fn run(args: ImArgs) -> Result<u8> {
     anyhow::ensure!(
         args.base.session.is_none(),
-        "--session does not apply to serve: each thread has its own session file under [sessions] dir"
+        "--session does not apply to im: each conversation has its own session files under [sessions] dir"
     );
     let file = read_file(&args.config)?;
     let Platforms { channels, hidden_env } = platforms(&file, &args.config)?;
@@ -168,7 +168,7 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
 
         let config = server_config(&file.limits, file.replies, running, conversations, approvers);
         eprintln!(
-            "[serve] platforms={}; sessions in {}",
+            "[im] platforms={}; sessions in {}",
             channels
                 .iter()
                 .map(|channel| channel.platform())
@@ -194,7 +194,7 @@ struct Platforms {
 }
 
 /// The platforms `file` configures. An error when it configures none.
-fn platforms(file: &ServeFile, path: &Path) -> Result<Platforms> {
+fn platforms(file: &ConfigFile, path: &Path) -> Result<Platforms> {
     let mut channels: Vec<Arc<dyn ImChannel>> = Vec::new();
     let mut hidden_env = Vec::new();
     if let Some(slack) = &file.slack {
@@ -224,10 +224,10 @@ fn create_session_dirs(dir: &Path) -> Result<PathBuf> {
     Ok(running)
 }
 
-/// The serve configuration file at `path`. A startup read; nothing runs concurrently yet.
-fn read_file(path: &Path) -> Result<ServeFile> {
+/// The IM service configuration file at `path`. A startup read; nothing runs concurrently yet.
+fn read_file(path: &Path) -> Result<ConfigFile> {
     let text = std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
-    toml::from_str(&text).with_context(|| format!("invalid serve configuration {}", path.display()))
+    toml::from_str(&text).with_context(|| format!("invalid IM service configuration {}", path.display()))
 }
 
 /// The chats the bot answers in and the users who may approve, each on a configured platform.
@@ -351,9 +351,9 @@ fn entries(entries: &[String], platforms: &HashSet<&str>, field: &str) -> Result
         .collect()
 }
 
-/// Opens each thread's session like chat does, with approvals in the thread.
+/// Opens each conversation's session like chat does, with approvals in the conversation.
 struct Sessions {
-    args: ServeArgs,
+    args: ImArgs,
     /// The MCP servers, secret files and IM credentials, shared by every thread's session.
     shared: cli::Shared,
     dir: PathBuf,
@@ -379,10 +379,18 @@ impl Sessions {
         Ok(prepared)
     }
 
-    async fn open_session(&self, key: &SessionKey, interaction: Arc<dyn Interaction>) -> Result<AgentSession> {
-        let path = key.file_in(&self.dir);
+    async fn open_session(
+        &self,
+        key: &SessionKey,
+        opening: Opening,
+        interaction: Arc<dyn Interaction>,
+    ) -> Result<AgentSession> {
+        // A short listing and directory creation before the session file, like prepare's own
+        // startup reads.
+        let path = key
+            .file_in(&self.dir, opening)
+            .with_context(|| format!("cannot list {}", key.dir_in(&self.dir).display()))?;
         if let Some(parent) = path.parent() {
-            // A short directory creation before the session file, like prepare's own startup reads.
             std::fs::create_dir_all(parent).with_context(|| format!("cannot create {}", parent.display()))?;
         }
         let mut prepared = self.prepare(SessionFile::Open(&path)).await?;
@@ -395,11 +403,26 @@ impl Sessions {
 
 #[async_trait]
 impl SessionFactory for Sessions {
-    async fn open(&self, key: &SessionKey, interaction: Arc<dyn Interaction>) -> Result<AgentSession, String> {
-        self.open_session(key, interaction)
+    async fn open(
+        &self,
+        key: &SessionKey,
+        opening: Opening,
+        interaction: Arc<dyn Interaction>,
+    ) -> Result<AgentSession, String> {
+        self.open_session(key, opening, interaction)
             .await
             .map_err(|error| format!("{error:#}"))
     }
+
+    /// A listing of the conversation's directory: a few names.
+    fn has_session(&self, key: &SessionKey) -> bool {
+        key.has_file_in(&self.dir)
+    }
+}
+
+/// The thread of `key` in a log line: `null` for a direct chat.
+fn thread(key: &SessionKey) -> Value {
+    json!(key.thread.as_ref().map(|thread| thread.0.as_str()))
 }
 
 /// Writes the server's events as JSON lines on stdout, for the operator's log collection.
@@ -412,7 +435,7 @@ impl ServerSink for Log {
                 "type": "approval",
                 "platform": record.key.platform,
                 "conversation": record.key.conversation.0,
-                "thread": record.key.thread.0,
+                "thread": thread(&record.key),
                 "toolCallId": record.tool_call_id,
                 "tool": record.tool,
                 "approval": record.approval.as_ref().map(|id| id.0.as_str()),
@@ -424,7 +447,7 @@ impl ServerSink for Log {
                 "type": "released",
                 "platform": key.platform,
                 "conversation": key.conversation.0,
-                "thread": key.thread.0,
+                "thread": thread(key),
                 "timeMs": now_ms(),
             }),
             ServerEvent::Failed { key, error } => {
@@ -432,7 +455,7 @@ impl ServerSink for Log {
                 if let (Some(key), Value::Object(fields)) = (key, &mut line) {
                     fields.insert("platform".into(), json!(key.platform));
                     fields.insert("conversation".into(), json!(key.conversation.0));
-                    fields.insert("thread".into(), json!(key.thread.0));
+                    fields.insert("thread".into(), thread(key));
                 }
                 line
             }
@@ -471,7 +494,7 @@ mod tests {
 
     #[test]
     fn a_feishu_section_defaults_its_variables() {
-        let file: ServeFile =
+        let file: ConfigFile =
             toml::from_str("[feishu]\n[access]\nconversations = []\n[sessions]\ndir = \"d\"\n").unwrap();
         let feishu = file.feishu.unwrap();
         assert_eq!(
@@ -484,15 +507,15 @@ mod tests {
     fn request_limit_reply_can_be_configured() {
         let config =
             "[access]\nconversations = []\n[sessions]\ndir = \"d\"\n[replies]\nmodelRequestLimit = \"limit\"\n";
-        let file: ServeFile = toml::from_str(config).unwrap();
+        let file: ConfigFile = toml::from_str(config).unwrap();
         assert_eq!(file.replies.model_request_limit, "limit");
-        assert!(toml::from_str::<ServeFile>(&config.replace("modelRequestLimit", "maxTurns")).is_err());
+        assert!(toml::from_str::<ConfigFile>(&config.replace("modelRequestLimit", "maxTurns")).is_err());
     }
 
     #[test]
     fn a_configuration_needs_access_and_a_session_directory() {
-        assert!(toml::from_str::<ServeFile>("[slack]\n").is_err());
-        let file: ServeFile =
+        assert!(toml::from_str::<ConfigFile>("[slack]\n").is_err());
+        let file: ConfigFile =
             toml::from_str("[slack]\n[access]\nconversations = []\n[sessions]\ndir = \"/data/sessions\"\n").unwrap();
         let slack = file.slack.unwrap();
         assert_eq!(
@@ -504,7 +527,7 @@ mod tests {
     #[test]
     fn unknown_keys_and_a_zero_run_limit_are_refused() {
         let base = "[access]\nconversations = []\n[sessions]\ndir = \"d\"\n";
-        assert!(toml::from_str::<ServeFile>(&format!("{base}[teams]\n")).is_err());
-        assert!(toml::from_str::<ServeFile>(&format!("{base}[limits]\nmaxRunning = 0\n")).is_err());
+        assert!(toml::from_str::<ConfigFile>(&format!("{base}[teams]\n")).is_err());
+        assert!(toml::from_str::<ConfigFile>(&format!("{base}[limits]\nmaxRunning = 0\n")).is_err());
     }
 }

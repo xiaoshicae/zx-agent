@@ -51,7 +51,7 @@ impl StatusFiles {
     }
 
     /// `<platform>.<conversation>.<message>.json`, each part encoded like the parts of a
-    /// session path ([`SessionKey::file_in`]), which never contain a `.`.
+    /// session directory ([`SessionKey::dir_in`]), which never contain a `.`.
     fn path(&self, key: &SessionKey, status: &MessageRef) -> PathBuf {
         self.dir.join(format!(
             "{}.{}.{}.{RECORD}",
@@ -130,7 +130,8 @@ impl StatusStore for StatusFiles {
 struct Record {
     platform: String,
     conversation: String,
-    thread: String,
+    /// `None` for a direct chat.
+    thread: Option<String>,
     status: StoredStatus,
 }
 
@@ -148,7 +149,7 @@ impl Record {
         Self {
             platform: key.platform.clone(),
             conversation: key.conversation.0.clone(),
-            thread: key.thread.0.clone(),
+            thread: key.thread.as_ref().map(|thread| thread.0.clone()),
             status: StoredStatus {
                 conversation: status.at.conversation.0.clone(),
                 thread: status.at.thread.as_ref().map(|thread| thread.0.clone()),
@@ -161,7 +162,7 @@ impl Record {
         let key = SessionKey {
             platform: self.platform,
             conversation: ConversationId(self.conversation),
-            thread: ThreadId(self.thread),
+            thread: self.thread.map(ThreadId),
         };
         let status = MessageRef {
             at: Destination {
@@ -227,7 +228,7 @@ mod tests {
         SessionKey {
             platform: platform.into(),
             conversation: ConversationId(conversation.into()),
-            thread: ThreadId(thread.into()),
+            thread: Some(ThreadId(thread.into())),
         }
     }
 
