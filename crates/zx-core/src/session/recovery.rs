@@ -32,8 +32,6 @@ pub enum StartRecord {
     /// No entry: a call with side effects never began. Read-only calls are never recorded,
     /// so for them this says nothing.
     Absent,
-    /// The call was issued before the session recorded starts (format before v4).
-    Unavailable,
     /// The answer that issued the call ended with `Error` or `Aborted`: the loop runs no
     /// call of such an answer, so this one never began.
     NeverRun,
@@ -54,17 +52,14 @@ impl SessionStore {
     /// if the call is not on the current branch, has another name, already has a result, or
     /// has already started.
     pub async fn append_tool_call_started(&mut self, tool_call_id: &str, tool_name: &str) -> Result<String> {
-        let mut entry = ToolCallStartedEntry {
-            id: String::new(),
+        self.append(Entry::ToolCallStarted(ToolCallStartedEntry {
+            id: self.new_id(),
             parent_id: self.leaf.clone(),
             timestamp: now_ms(),
             tool_call_id: tool_call_id.into(),
             tool_name: tool_name.into(),
-        };
-        self.validate_tool_call_start(&entry)?;
-        entry.parent_id = self.leaf.clone();
-        entry.id = self.new_id();
-        self.append(Entry::ToolCallStarted(entry)).await
+        }))
+        .await
     }
 
     /// The calls of the branch's last assistant message that have no result, in call order.

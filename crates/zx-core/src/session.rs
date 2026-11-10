@@ -510,7 +510,7 @@ impl SessionStore {
             Entry::Custom(custom) => ensure_custom_type(&custom.custom_type)?,
             Entry::CustomMessage(custom) => ensure_custom_type(&custom.message.custom_type)?,
             Entry::ContextEdit(edit) => self.validate_context_edit(edit)?,
-            Entry::CompactionStarted(started) => self.validate_compaction_started(started)?,
+            Entry::CompactionStarted(started) => self.validate_compaction_start(started)?,
             Entry::Compaction(done) => self.validate_compaction(done, entry.parent_id())?,
             Entry::CompactionFailed(failed) => {
                 self.validate_attempt_completion(&failed.attempt_id, entry.parent_id())?;

@@ -15,7 +15,7 @@ impl SessionStore {
     /// Persist the attempt and its request metadata before contacting a model. Fails
     /// without writing anything if the plan does not match the branch.
     pub async fn begin_compaction(&mut self, plan: CompactionPlan) -> Result<String> {
-        let mut entry = CompactionStartedEntry {
+        self.append(Entry::CompactionStarted(CompactionStartedEntry {
             id: self.new_id(),
             parent_id: self.leaf.clone(),
             timestamp: now_ms(),
@@ -25,11 +25,8 @@ impl SessionStore {
             input_bytes: plan.input_bytes,
             mode: plan.mode,
             continues: plan.continues,
-        };
-        self.validate_compaction_start(&entry)?;
-        entry.parent_id = self.leaf.clone();
-        entry.id = self.new_id();
-        self.append(Entry::CompactionStarted(entry)).await
+        }))
+        .await
     }
 
     /// Commit a validated full summary. Persistence precedes projection changes.
@@ -170,11 +167,7 @@ impl SessionStore {
     }
 
     /// The rules a summary attempt follows when it is recorded: its plan matches the branch.
-    pub(in crate::session) fn validate_compaction_started(&self, started: &CompactionStartedEntry) -> Result<()> {
-        self.validate_compaction_start(started)
-    }
-
-    fn validate_compaction_start(&self, entry: &CompactionStartedEntry) -> Result<()> {
+    pub(in crate::session) fn validate_compaction_start(&self, entry: &CompactionStartedEntry) -> Result<()> {
         self.validate_compaction_start_at(entry, entry.parent_id.as_deref())
     }
 
