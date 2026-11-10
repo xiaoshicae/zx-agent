@@ -1,4 +1,4 @@
-//! What extensions can do at run time (P10 item 7): send the model messages, record state,
+//! What extensions can do at run time: send the model messages, record state,
 //! change the tools the model is offered, register commands; and how queued input is taken
 //! (item 9).
 mod common;

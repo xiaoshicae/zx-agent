@@ -1,4 +1,4 @@
-//! Forking a session (P10 item 6b; pi: `createBranchedSession`): a new session starts with one
+//! Forking a session (pi: `createBranchedSession`): a new session starts with one
 //! branch of another, copied unchanged, and records where it came from.
 
 mod common;

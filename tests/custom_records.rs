@@ -1,4 +1,4 @@
-//! The records extensions append to a session (P10 item 7): `custom` entries, which stay out
+//! The records extensions append to a session: `custom` entries, which stay out
 //! of model context, and `custom_message` entries, which the model sees as user messages.
 mod common;
 
