@@ -77,7 +77,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | P7 | 扩展接口与 MCP 客户端 | 已完成：会话宿主与可替换存储（PR #21）、追踪事件（PR #23）、扩展 API（PR #25）、`Extension`（PR #38）、MCP 客户端（PR #40、#41）；真实 MCP 服务器的验收待选定服务器 |
 | P8 | ACP agent `acp` | 进行中：按 D13 重启，`acp` 子命令已实现；`session/load`（PR #74），`session/list` 与 `session/resume`（PR #76）；待在 Zed 或 Wisp 上实测 |
 | P9 | 可选增强 | 进行中：token 预算（PR #47）、OpenTelemetry（PR #49）、请求附加字段（PR #50）、crate 拆分（PR #52）、通用化整理（PR #54）已完成；剩更多 provider |
-| P10 | 与 pi 的能力对齐 | 已完成（最后一个是 PR #72）：上下文超长后恢复（PR #56）、容器沙箱（PR #57）、edit / write（PR #58）、grep / find / ls（PR #59）、推理强度与续跑（PR #60、#61、#65）、会话目录 / fork / 分支（PR #67、#68、#72）、扩展能力与消息队列、模型元数据与计量、幂等键（D18 去掉）、MCP 进度、可观测、行为评测框架（PR #72）；chat 的便利功能按 D13 不做 |
+| P10 | 与 pi 的能力对齐 | 已完成（最后一个是 PR #72）：上下文超长后恢复（PR #56）、容器沙箱（PR #57）、edit / write（PR #58）、grep / find / ls（PR #59）、推理强度与续跑（PR #60、#61、#65）、会话目录 / fork / 分支（PR #67、#68、#72）、扩展能力与消息队列、模型元数据与计量、幂等键（D18 去掉）、MCP 进度、可观测、行为评测框架（PR #72；2026-11-10 去掉，见第 7 节）；chat 的便利功能按 D13 不做 |
 | P11–P13 | 内核与项目整理、按规则评审 | 已完成（PR #70、#71、#75、#77）；模块文件布局（PR #78） |
 | P14 | 对照 pi durable 的小项与无人值守的缺口 | 已完成（PR #80）：工具结果上报用量（`ToolOutput::usage`，按工具名汇总进 `RunReport::tool_usage`，不计入 token 预算）、撤回排队的消息（`MessageQueues::withdraw`）、定时巡检保留会话文件、被拒调用计数（`deniedCalls`）与 `run --fail-on-denied`（退出码 9）、成本预算 `--cost-budget`（退出码 8，单位与 `[[models]]` 的单价相同）；对照基准为 pi `a92283056` 的 `packages/durable`。之后成本字段改为不带币种的 `totalCost`（PR #82；事件 `schemaVersion` 升为 2） |
 | P15 | IM 对话模型（D16） | 进行中：实现已提交（PR #92）；`zx-im` 的消息带会话种类（私聊 / 群聊）与对象（机器人 / 别人 / 无人），`ImChannel` 新增读线程历史、查名字、回执三个带默认实现的方法；会话文件改为每个会话一个目录、按序号新建。Slack 实现全部三项；⚑ D:5/CHINA FLAG: 飞书只做消息分类，三项沿用默认（不读历史、用 open_id、不回执），待按需补上。待在真实 Slack 工作区验证线程回复事件带 `thread_ts`（官方事件页未写明） |
@@ -87,7 +87,6 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | 事项 | 状态 | 说明 |
 |---|---|---|
 | 更多 provider（如 Anthropic Messages API） | 未开始 | ⚑ D:5/CHINA FLAG: DeepSeek 经 OpenAI 兼容接口直接可用，不单独写 provider；服务端的设置经 `config.toml` 的 `provider.requestFields` 传递 |
-| 行为评测的真实运行 | 待授权 | 框架在 `tests/common/evals.rs`，合成运行已通过；付费运行需用户设置 `ZX_E2E_AUTHORIZED` |
 | 真实 IM 平台验收 | 待凭据 | 在 Slack 工作区与 ⚑ D:5/CHINA FLAG: 飞书租户中各跑通一次 @、回答与审批；换 HTTP 客户端与 TLS（D9）之后，对这两个平台的 HTTPS 连接没有验证过 |
 | 真实集群验收 | 待部署方 | 常驻 Pod 部署包与多集群配置没有在真实集群上执行过；只读规则只看命令字面 |
 | 真实 MCP 服务器验收 | 待选定服务器 | 对一个 Streamable HTTP 服务器跑通列出、调用与审批；HTTPS 的 MCP 服务器未测 |
@@ -125,6 +124,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 - durable 的自动续跑与重放、codemode 与 `runToolCall`、工具结果中的图片与 `structuredContent`（README"与 pi 的差异"）
 - MCP 的 stdio、OAuth 与运行中更新工具列表（D8）
 - 完整 TUI、多 Agent 协作、插件热加载、WASM 插件、云端托管运行时
+- A/B 行为评测框架（pi 的 `packages/evals`，PR #72 的 `tests/common/evals.rs`）：2026-11-10 去掉，所有者批准。没有对真实模型运行过：第 6 节没有它的记录，第 5 节去掉前写的是"待授权"（"合成运行已通过；付费运行需用户设置 `ZX_E2E_AUTHORIZED`"）。理由：没有计划比较 agent 文件；要比较时再重建
 
 ## 8. 推进方式
 

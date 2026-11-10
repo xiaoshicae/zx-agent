@@ -30,19 +30,6 @@
 //! ZX_E2E_BASE_URL=https://api.example.com/v1 ZX_E2E_MODEL=model-id ZX_E2E_API_KEY_ENV=NAME_OF_KEY_VARIABLE \
 //!     cargo test --test real_api summaries_over_eight_rounds -- --ignored --nocapture
 //! ```
-//!
-//! The behaviour evals, `behaviour_evals_pair_two_agents_against_the_real_api`, run the
-//! sample cases of `tests/common/evals.rs` through the compiled binary under two agents
-//! (`tests/fixtures/evals/`), once per variant unless `ZX_E2E_EVAL_RUNS` says more, and pair
-//! the arms. They also need `ZX_E2E_EVAL=1`; each arm is one short run of a few hundred
-//! tokens. The artifacts (protocol, observations, report and every arm's session) stay in a
-//! temporary directory whose path is printed:
-//!
-//! ```text
-//! ZX_E2E_AUTHORIZED=1 ZX_E2E_EVAL=1 \
-//! ZX_E2E_BASE_URL=https://api.example.com/v1 ZX_E2E_MODEL=model-id ZX_E2E_API_KEY_ENV=NAME_OF_KEY_VARIABLE \
-//!     cargo test --test real_api behaviour_evals -- --ignored --nocapture
-//! ```
 
 mod common;
 
@@ -356,66 +343,5 @@ async fn summaries_over_eight_rounds_of_a_scripted_session() {
         not_made.is_empty(),
         "summaries that were not made:\n{}",
         not_made.join("\n")
-    );
-}
-
-/// The behaviour evals of `tests/common/evals.rs` against the real API: the sample cases
-/// under the control and treatment agents, `ZX_E2E_EVAL_RUNS` runs per variant (default
-/// 1), paired and compared. The artifacts, with every arm's session, stay in a temporary
-/// directory whose path is printed. A low pass rate is data; the test fails only when an arm
-/// did not finish, which blocks its pair.
-#[tokio::test]
-#[ignore = "calls a paid model API; needs ZX_E2E_AUTHORIZED=1 and the API owner's consent"]
-async fn behaviour_evals_pair_two_agents_against_the_real_api() {
-    use common::evals::{
-        Artifacts, Harness, evaluate, format_report, plan, protocol, sample_cases, sample_variants, summarize,
-    };
-
-    if std::env::var("ZX_E2E_EVAL").as_deref() != Ok("1") {
-        eprintln!(
-            "[real_api] behaviour evals skipped: they run the sample cases twice per run; set ZX_E2E_EVAL=1 to run them"
-        );
-        return;
-    }
-    let endpoint = Endpoint::from_env();
-    let runs_per_variant: u32 = match std::env::var("ZX_E2E_EVAL_RUNS") {
-        Ok(value) => value
-            .parse()
-            .ok()
-            .filter(|runs| *runs >= 1)
-            .unwrap_or_else(|| panic!("ZX_E2E_EVAL_RUNS must be a positive number, not {value:?}")),
-        Err(_) => 1,
-    };
-    let cases = sample_cases();
-    let variants = sample_variants();
-    let tasks = plan(&cases, &variants, runs_per_variant);
-    // Kept after the run, also when it fails, so that every arm's session can be read.
-    let dir = tempfile::Builder::new().prefix("zx-evals-").tempdir().unwrap().keep();
-    let artifacts = Artifacts::create(&dir);
-    eprintln!(
-        "[behaviour evals] {} arm(s) against {}; artifacts in {}",
-        tasks.len(),
-        endpoint.model,
-        artifacts.dir.display()
-    );
-    artifacts.write_protocol(&protocol(&endpoint.model, &variants, &cases, runs_per_variant));
-    artifacts.write_expected(&tasks);
-    let harness = Harness {
-        root: artifacts.dir.clone(),
-        model: endpoint.model.clone(),
-        api_key_env: endpoint.api_key_env.clone(),
-        extra_config: "maxTokens = 1024".to_string(),
-        timeout: Duration::from_secs(300),
-    };
-
-    let observations = evaluate(&harness, &cases, &variants, &tasks, &endpoint.base_url, &artifacts).await;
-    let report = summarize(&tasks, &observations, &variants);
-    artifacts.write_report(&report);
-    eprint!("{}", format_report(&report));
-
-    assert!(
-        report.blocked.is_empty(),
-        "arms that did not finish: {:?}",
-        report.blocked
     );
 }
