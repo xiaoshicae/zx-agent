@@ -661,7 +661,7 @@ let agent = AgentSession::new(config, RetryPolicy::default(), Limits::default(),
 let report = agent.prompt("任务描述", &CancellationToken::new()).await?;
 ```
 
-`Limits::default()` 不限制轮次、运行时间和 token 用量；`LoopConfig::new` 默认没有钩子，不自动续写、压缩或落盘工具结果。库不带场景：说明、上限、续写次数与策略都由嵌入方给出。`examples/library.rs` 演示了一个无人值守场景的完整组装（自己的说明、30 轮与 15 分钟上限、续写一次、命令策略与脱敏）。原来的 `presets` 模块已删除，CLI 的场景只在 `agents/*.md`。`prompt`、`prompt_once`、`continue_run` 与 `compact` 都接收一个取消令牌，运行用它的子令牌：取消传入的令牌会取消运行，`abort` 或丢弃 future 不会取消传入的令牌；不需要外部取消时传 `&CancellationToken::new()`。
+`Limits::default()` 不限制轮次、运行时间和 token 用量；`LoopConfig::new` 默认没有钩子，不自动续写、压缩或落盘工具结果。库不带场景：说明、上限、续写次数与策略都由嵌入方给出。`examples/library.rs` 演示了一个无人值守场景的完整组装（自己的说明、30 轮与 15 分钟上限、续写一次、命令策略与脱敏）。原来的 `presets` 模块已删除，CLI 的场景只在 `agents/*.md`。`prompt`、`continue_run` 与 `compact` 都接收一个取消令牌，运行用它的子令牌：取消传入的令牌会取消运行，`abort` 或丢弃 future 不会取消传入的令牌；不需要外部取消时传 `&CancellationToken::new()`。
 
 P2 增加 `zx_agent::AgentSession`；已有 `Runner` 可通过 `AgentSession::from(runner)` 转为共享会话。
 调用 `prompt` 只需 `&self`，可由多个前端持有 `Arc<AgentSession>`；同一时刻仅一个调用获得运行权。
@@ -677,7 +677,6 @@ P2 增加 `zx_agent::AgentSession`；已有 `Runner` 可通过 `AgentSession::fr
 | `set_model(ModelRef { provider, model })` | 空闲时同步切换，运行中返回 `Busy`，空模型 ID 返回 `InvalidModel`。保留历史、工具、提示词、钩子、上限与审批缓存；会话头部仍记录初始模型 |
 | `branch(Option<&str>)` | 空闲时把对话移到会话树的另一点（pi 的 `navigateTree`）：`Some(条目 ID)` 让下一次提问接在该条目之后、`None` 回到第一条之前，都在那里开新分支；离开的分支留在会话中。运行中返回 `Busy`，ID 不存在返回 `EntryNotFound` 且位置不变。只移动内存中的位置、不写入，所以从文件续接的会话仍从文件末尾开始。接在一条回答之后而它的工具调用的结果在离开的分支上时，下一次运行先按未执行为这些调用补写错误结果，不再执行 |
 | `inspect(FnOnce(&SessionStore) -> T)` | 空闲时读取会话，例如列出条目或取当前位置（`leaf_id`）。闭包运行期间会话像运行中一样被占用，其他调用返回 `Busy`；不持锁调用闭包。运行中返回 `Busy` |
-| `prompt_once(key, 消息, &cancel)` | 同一个幂等键只提交一次：先在会话里记下键（类型为 `idempotency_key` 的 `custom` 记录，在当前分支上），再按 `prompt` 运行；再次用同一个键调用返回 `DuplicateKey`、不发请求，从文件重新打开的会话也认得；空白的键返回 `InvalidKey`。宿主重试一次不确定是否送达的提交时用它，被拒后读会话取答案，或用 `continue_run` 接着被中断的运行 |
 | `queues()` | 会话的两个队列：`steer`、`follow_up` 排入用户文本，分别在下一次模型请求前和当前任务结束时消费；`steer_message`、`follow_up_message` 排入扩展的消息，`append_entry` 在运行期间排入要记录的状态（下一回合开始或运行结束时写入），`set_steering_mode`、`set_follow_up_mode` 设置取法（`QueueMode`），`withdraw` 撤回一条还在排队的消息（先找引导队列，再找后续队列，撤回最早一条相同的），运行中也可以调用；循环已经取走、正在写入的消息撤回不了 |
 | `active_tools()` | 下一次请求提供给模型的工具（pi 的 `setActiveTools`）：`set(名字)` 选择、`reset()` 恢复全部，运行中改也对下一次请求生效，请求审计记录每次请求声明的工具；不认识的名字不选中任何工具。调用未激活的工具得到错误结果，不执行 |
 | `commands()`、`run_command(名字, 参数)` | 扩展注册的命令（`SlashCommand`）；运行中也可以调用。返回要显示的行与要发送的消息（`CommandOutcome`），没有这个命令返回 `CommandError::Unknown`，命令失败返回 `Failed` |
