@@ -7,7 +7,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
-use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::AgentSession;
@@ -24,12 +23,10 @@ use super::interaction::Ticket;
 use super::output::Output;
 use super::signals::{Interrupt, Signals};
 use super::term::Tone;
-use super::{Flow, InputMode, queue_line, rejected, run_extension_command, set_queue_mode};
+use super::{Flow, InputMode, rejected, run_extension_command};
 use crate::process::{EXIT_ABORTED, EXIT_COMPLETED};
 use crate::render::{describe_arguments, describe_call, visible};
 
-/// How often the status line is redrawn while a task runs.
-const TICK: Duration = Duration::from_secs(1);
 const APPROVAL_MENU: &str = "  1/y allow once · 2 allow identical calls in this conversation · 3/n deny · 4 discuss";
 const APPROVAL_PROMPT: &str = "[approval] Choose 1, 2, 3 or 4:";
 
@@ -140,10 +137,6 @@ pub(super) async fn drive_turn(session: &AgentSession, operation: Operation, io:
         }
     };
     tokio::pin!(running);
-    let mut tick = tokio::time::interval(TICK);
-    tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    // A status an earlier operation left behind must not tick on into this one.
-    io.output.clear_status();
     loop {
         if state
             .pending
@@ -170,7 +163,6 @@ pub(super) async fn drive_turn(session: &AgentSession, operation: Operation, io:
                     return Ok(flow);
                 }
             }
-            _ = tick.tick() => io.output.tick(),
         }
     }
 }
@@ -314,7 +306,7 @@ async fn busy(session: &AgentSession, io: &TurnIo<'_>, state: &mut TurnState, co
             }
         }
         Command::Prompt(text) if !state.pending.waiting() => {
-            session.steer(text);
+            session.queues().steer(text);
             output.line(Tone::Dim, "[chat] steering input queued");
         }
         Command::Prompt(_) => unreachable!("pending approval input is handled above"),
@@ -335,20 +327,6 @@ async fn busy(session: &AgentSession, io: &TurnIo<'_>, state: &mut TurnState, co
             Tone::Warn,
             "[chat] wait for the current task or cancel it before /status",
         ),
-        Command::Sessions => output.line(
-            Tone::Warn,
-            "[chat] wait for the current task or cancel it before /sessions",
-        ),
-        Command::Resume(_) => output.line(
-            Tone::Warn,
-            "[chat] wait for the current task or cancel it before /resume",
-        ),
-        Command::Fork => output.line(Tone::Warn, "[chat] wait for the current task or cancel it before /fork"),
-        Command::Tree => output.line(Tone::Warn, "[chat] wait for the current task or cancel it before /tree"),
-        Command::Branch(_) => output.line(
-            Tone::Warn,
-            "[chat] wait for the current task or cancel it before /branch",
-        ),
         Command::Help => help(output, io.commands),
         // Extension commands run at once, as in pi; a message they send waits for the next
         // request as steering input.
@@ -358,8 +336,6 @@ async fn busy(session: &AgentSession, io: &TurnIo<'_>, state: &mut TurnState, co
                 output.line(Tone::Dim, "[chat] the command's message is queued as steering input");
             }
         }
-        Command::Queue(None) => output.line(Tone::Dim, &queue_line(session)),
-        Command::Queue(Some(mode)) => set_queue_mode(session, &mode, output),
         Command::Compact => output.line(
             Tone::Warn,
             "[chat] session is busy; wait for the current operation or cancel it before /compact",
@@ -400,7 +376,7 @@ fn answer_approval(session: &AgentSession, output: &Output, pending: &mut Pendin
                 output.line(Tone::Warn, "[approval] enter a message to discuss this call");
                 *pending = Pending::Discussing(ticket);
             } else {
-                session.steer(text);
+                session.queues().steer(text);
                 deny(output, ticket, "user wants to discuss this call");
             }
         }

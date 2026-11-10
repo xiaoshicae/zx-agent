@@ -172,14 +172,13 @@ async fn the_host_limits_the_tools_the_model_is_offered_and_the_audit_records_ea
     );
     let (session, _) = session_in(&file, config);
 
-    session.set_active_tools(&["echo"]).unwrap();
+    session.active_tools().set(["echo"]);
     session.prompt("go", &CancellationToken::new()).await.unwrap();
 
     assert_eq!(tool_names(&provider, 0), ["echo"]);
     let context = summarize(&provider.requests()[1].messages);
     assert_eq!(context[2], "tool:c1=Tool note is not active!");
     assert_eq!(note_tool.calls.load(Ordering::SeqCst), 0, "an inactive tool never runs");
-    assert_eq!(session.set_active_tools(&["nope"]), Err(AgentSessionError::UnknownTool));
     assert_eq!(session.active_tools().names(), Some(vec!["echo".to_string()]));
 
     session.active_tools().reset();
@@ -425,7 +424,7 @@ async fn run_with_mode(mode: QueueMode) -> Vec<Vec<String>> {
     ]));
     let mut config = config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]);
     config.hooks.push(TwoSteers);
-    config.queues.set_steering_mode(mode);
+    config.queues.set_mode(mode);
     let (runner, _) = RunnerSetup::new(config).build();
     let session = AgentSession::from(runner);
     session.prompt("go", &CancellationToken::new()).await.unwrap();

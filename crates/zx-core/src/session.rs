@@ -41,10 +41,10 @@ pub(crate) use projection::without_details;
 pub use recovery::{InterruptedToolCall, StartRecord, ToolCallStartedEntry};
 pub use request::{RequestConfig, RequestConfigEntry, RequestSource, RequestStartedEntry};
 pub use summary::{
-    CompactionEntry, CompactionFailedEntry, CompactionPlan, CompactionStartedEntry, CompactionSummary, MergedSummary,
-    SummaryFact, SummaryMode, SummaryRequest,
+    CompactionEntry, CompactionFailedEntry, CompactionPlan, CompactionStartedEntry, CompactionSummary, SummaryFact,
+    SummaryRequest,
 };
-pub(crate) use summary::{MAX_STATEMENTS, MAX_SUMMARY_BYTES, cite_only, summary_messages, superseded_by};
+pub(crate) use summary::{MAX_SUMMARY_BYTES, summary_input, summary_messages};
 #[cfg(test)]
 pub(crate) use test_support::FailingWriter;
 
@@ -61,7 +61,7 @@ use jsonl::JsonlFile;
 /// The session format: written to every new header, and the only version a session may have
 /// to be created or loaded. A change to the format raises it, and sessions of any other
 /// version are refused.
-pub const SESSION_VERSION: u32 = 6;
+pub const SESSION_VERSION: u32 = 7;
 
 /// How long one append may wait for its log, such as a database that stopped answering.
 /// A file append finishes long before; a timed-out append stops writing, like a failed one.
@@ -270,9 +270,8 @@ impl SessionStore {
     /// Omit (`None`) or replace the text of a message on the current branch, for future
     /// model context only. The target keeps its original content in the log.
     /// System and synthetic summary messages cannot be edited directly. Editing a record that
-    /// a summary read corrects its evidence: a full summary is then invalid as a whole and
-    /// the originals are projected again, while an incremental summary loses only the facts
-    /// that cite the record.
+    /// a summary read corrects its evidence: the summary is then invalid as a whole and the
+    /// originals are projected again.
     pub async fn append_context_edit(&mut self, target_id: &str, replacement: Option<String>) -> Result<String> {
         let entry = Entry::ContextEdit(ContextEditEntry {
             id: self.new_id(),

@@ -42,8 +42,6 @@ pub struct ContainerConfig {
     pub root_access: Access,
     /// Docker network the container joins.
     pub network: Network,
-    /// Shell that commands run with; the image must provide it.
-    pub shell: String,
     /// `uid:gid` that commands run as. Must not be root: the keep-alive processes run as root,
     /// and cleanup stops every process of this user.
     pub user: String,
@@ -59,7 +57,7 @@ impl ContainerConfig {
     /// Settings for `image` with the defaults: a writable workspace and root, the `bridge`
     /// network, the agent's own `uid:gid` (so that files written in the workspace belong to
     /// the agent's user; nobody, `65534:65534`, when the agent runs as root or off Unix), 1 GiB
-    /// of memory, 256 processes, bash, and the `docker` client found on `PATH`.
+    /// of memory, 256 processes, and the `docker` client found on `PATH`.
     pub fn new(image: impl Into<String>, workspace: impl Into<PathBuf>) -> Self {
         Self {
             image: image.into(),
@@ -68,7 +66,6 @@ impl ContainerConfig {
             workspace_access: Access::ReadWrite,
             root_access: Access::ReadWrite,
             network: Network::Bridge,
-            shell: "bash".into(),
             user: default_user(),
             memory: "1g".into(),
             pids_limit: 256,
@@ -78,7 +75,6 @@ impl ContainerConfig {
 
     pub(super) fn validate(&self) -> Result<()> {
         ensure!(!self.image.trim().is_empty(), "container image is empty");
-        ensure!(!self.shell.trim().is_empty(), "container shell is empty");
         ensure!(!self.user.trim().is_empty(), "container user is empty");
         // The start-up probe also checks the effective UID, which catches names mapped to 0.
         let uid = self.user.split(':').next().unwrap_or_default().trim();

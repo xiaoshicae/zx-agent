@@ -19,8 +19,7 @@
 //! - [`im`]: chat platforms, and a server that answers each thread with its own session
 //! - [`extensions`]: bundles of tools, hooks and prompt sections
 //! - [`mcp`]: the tools of external MCP servers, as an extension
-//! - [`otel`]: OpenTelemetry traces and metrics of runs, exported when an OTLP endpoint is
-//!   configured
+//! - [`otel`]: OpenTelemetry traces of runs, exported when an OTLP endpoint is configured
 //!
 //! The modules live in the crates of this workspace and are re-exported here under the paths
 //! they always had: [`ai`] is `zx-ai`, with the provider of `zx-ai-openai` as `ai::openai`;

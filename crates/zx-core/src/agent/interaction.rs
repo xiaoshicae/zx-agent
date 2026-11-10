@@ -55,11 +55,6 @@ pub struct ApprovalCache {
 }
 
 impl ApprovalCache {
-    /// Revoke every session approval.
-    pub fn clear(&mut self) {
-        self.calls.clear();
-    }
-
     pub(crate) fn allows(&self, call: &ToolCall) -> bool {
         self.calls
             .iter()

@@ -18,30 +18,17 @@
 //! directories.
 //!
 //! The summary evaluation, `summaries_over_eight_rounds_of_a_scripted_session`, costs far more:
-//! 16 summaries that read about 0.6 MiB of records in all, about 270,000 input tokens on the one
-//! model it has been measured on. It also needs `ZX_E2E_EVAL=1`, and otherwise only prints that
-//! it was skipped. It fails when a summary is not made. `ZX_E2E_SUMMARY_TOKENS` sets each
-//! summary's output budget (default 2048, at most 16384), which a model whose reasoning counts
-//! as output needs raised. It keeps its two session files, with every round's summary, in a
-//! temporary directory and prints the path. Run it on its own:
+//! 8 summaries that read about 0.5 MiB of records in all. It also needs `ZX_E2E_EVAL=1`, and
+//! otherwise only prints that it was skipped. It fails when a summary is not made.
+//! `ZX_E2E_SUMMARY_TOKENS` sets each summary's output budget (default 2048, at most 16384),
+//! which a model whose reasoning counts as output needs raised. It keeps its session file,
+//! with every round's summary, in a temporary directory and prints the path. Run it on its
+//! own:
 //!
 //! ```text
 //! ZX_E2E_AUTHORIZED=1 ZX_E2E_EVAL=1 \
 //! ZX_E2E_BASE_URL=https://api.example.com/v1 ZX_E2E_MODEL=model-id ZX_E2E_API_KEY_ENV=NAME_OF_KEY_VARIABLE \
 //!     cargo test --test real_api summaries_over_eight_rounds -- --ignored --nocapture
-//! ```
-//!
-//! The behaviour evals, `behaviour_evals_pair_two_agents_against_the_real_api`, run the
-//! sample cases of `tests/common/evals.rs` through the compiled binary under two agents
-//! (`tests/fixtures/evals/`), once per variant unless `ZX_E2E_EVAL_RUNS` says more, and pair
-//! the arms. They also need `ZX_E2E_EVAL=1`; each arm is one short run of a few hundred
-//! tokens. The artifacts (protocol, observations, report and every arm's session) stay in a
-//! temporary directory whose path is printed:
-//!
-//! ```text
-//! ZX_E2E_AUTHORIZED=1 ZX_E2E_EVAL=1 \
-//! ZX_E2E_BASE_URL=https://api.example.com/v1 ZX_E2E_MODEL=model-id ZX_E2E_API_KEY_ENV=NAME_OF_KEY_VARIABLE \
-//!     cargo test --test real_api behaviour_evals -- --ignored --nocapture
 //! ```
 
 mod common;
@@ -52,13 +39,14 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
-use common::summary_eval::{Evaluation, ROUNDS, evaluate};
+use common::summary_eval::evaluate;
 use common::{RunnerSetup, config, fast_retry};
+use zx_agent::agent::PolicyDecision;
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig, SystemUpdates};
 use zx_agent::ai::{Message, Provider};
-use zx_agent::compaction::{Config, Outcome, SummaryMode};
+use zx_agent::compaction::{Config, Outcome};
 use zx_agent::executor::LocalExecutor;
-use zx_agent::policy::CommandPolicy;
+use zx_agent::policy::{AutoApprove, PolicyHook, Rule, RuleMatcher, RulePolicy};
 use zx_agent::prompt::{build_system_prompt, environment_section};
 use zx_agent::runner::{Limits, RunOutcome, RunReport};
 use zx_agent::session::SessionStore;
@@ -132,7 +120,8 @@ impl Endpoint {
         }
     }
 
-    /// `setup` with a bash tool limited to `allowed` programs. The key variable is hidden
+    /// `setup` with a bash tool that runs only commands starting with one of `allowed`; the
+    /// others ask, and with nobody to approve them are refused. The key variable is hidden
     /// from commands.
     fn setup_with_bash(&self, cwd: &Path, allowed: &[&str]) -> RunnerSetup {
         let mut setup = self.setup(self.api_key(), cwd);
@@ -143,10 +132,12 @@ impl Endpoint {
             ..BashTool::default()
         };
         setup.config.tools = vec![Arc::new(bash)];
-        setup
-            .config
-            .hooks
-            .push(zx_agent::policy::PolicyHook::new(Arc::new(CommandPolicy::new(allowed))));
+        let policy = RulePolicy::new(vec![Rule {
+            matcher: RuleMatcher::Tool("bash".into()),
+            decision: PolicyDecision::Ask("only the allowed programs run".into()),
+        }])
+        .auto_approve(AutoApprove::new(allowed));
+        setup.config.hooks.push(PolicyHook::new(Arc::new(policy)));
         setup
     }
 }
@@ -213,7 +204,7 @@ async fn a_policy_denial_reaches_the_model_and_the_run_completes() {
 
     assert_eq!(report.outcome, RunOutcome::Completed, "{:?}", report.error);
     let denied = runner.session().messages().into_iter().any(|message| {
-        matches!(message, Message::ToolResult(result) if result.is_error && result.content.starts_with("Blocked by policy"))
+        matches!(message, Message::ToolResult(result) if result.is_error && result.content.starts_with("Approval denied"))
     });
     assert!(denied, "the model saw a policy denial");
 }
@@ -288,19 +279,18 @@ async fn an_invalid_key_fails_without_retrying() {
     assert!(error.starts_with("HTTP 4"), "{error}");
 }
 
-/// Item 6 of the incremental summary design: the scripted session of `common::summary_eval`
-/// summarized after each of its rounds, in full and then in incremental mode. Prints each
-/// round's score and the final facts. Fails when a summary is not made, since the scores then
+/// The scripted session of `common::summary_eval` summarized after each of its rounds.
+/// Prints each round's score and the final facts. Fails when a summary is not made, since the scores then
 /// mean nothing; otherwise asserts only what holds whatever the model answers. Each summary
 /// has the default budgets, 2048 output tokens and 2 minutes, unless `ZX_E2E_SUMMARY_TOKENS`
-/// sets the output budget. The two session files stay in a temporary directory, whose path
-/// is printed first.
+/// sets the output budget. The session file stays in a temporary directory, whose path is
+/// printed first.
 #[tokio::test]
 #[ignore = "calls a paid model API; needs ZX_E2E_AUTHORIZED=1 and the API owner's consent"]
 async fn summaries_over_eight_rounds_of_a_scripted_session() {
     if std::env::var("ZX_E2E_EVAL").as_deref() != Ok("1") {
         eprintln!(
-            "[real_api] summary evaluation skipped: its 16 summaries read about 0.6 MiB of records; set ZX_E2E_EVAL=1 to run it"
+            "[real_api] summary evaluation skipped: its 8 summaries read about 0.5 MiB of records; set ZX_E2E_EVAL=1 to run it"
         );
         return;
     }
@@ -312,13 +302,12 @@ async fn summaries_over_eight_rounds_of_a_scripted_session() {
             .unwrap_or_else(|_| panic!("ZX_E2E_SUMMARY_TOKENS must be a number of tokens, not {value:?}")),
         Err(_) => Config::default().max_summary_tokens,
     };
-    let budget = |mode| Config {
-        mode,
+    let budget = Config {
         max_summary_tokens,
         ..Config::default()
     };
     // Rejected here, before any request.
-    budget(SummaryMode::Full).validate().unwrap();
+    budget.validate().unwrap();
     // Kept after the run, also when it fails, so that every round's summary can be read in
     // the session files.
     let dir = tempfile::Builder::new()
@@ -332,105 +321,27 @@ async fn summaries_over_eight_rounds_of_a_scripted_session() {
     );
     let provider: Arc<dyn Provider> = Arc::new(endpoint.provider(endpoint.api_key()));
 
-    let full = evaluate(Arc::clone(&provider), &endpoint.model, budget(SummaryMode::Full), &dir).await;
-    full.print(&endpoint.model);
-    let incremental = evaluate(provider, &endpoint.model, budget(SummaryMode::Incremental), &dir).await;
-    incremental.print(&endpoint.model);
+    let evaluation = evaluate(provider, &endpoint.model, budget, &dir).await;
+    evaluation.print(&endpoint.model);
 
-    // A summary that was not made has no score, and an incremental one that has no earlier
-    // summary to continue reads everything, as a full one does.
-    let not_made: Vec<String> = [&full, &incremental]
-        .into_iter()
-        .flat_map(|evaluation| {
-            evaluation
-                .rounds
-                .iter()
-                .enumerate()
-                .filter(|(_, round)| round.outcome != Outcome::Completed)
-                .map(move |(index, round)| {
-                    format!(
-                        "{:?} round {}: {:?}, {}",
-                        evaluation.mode,
-                        index + 1,
-                        round.outcome,
-                        round.error.as_deref().unwrap_or("no error")
-                    )
-                })
+    // A summary that was not made has no score.
+    let not_made: Vec<String> = evaluation
+        .rounds
+        .iter()
+        .enumerate()
+        .filter(|(_, round)| round.outcome != Outcome::Completed)
+        .map(|(index, round)| {
+            format!(
+                "round {}: {:?}, {}",
+                index + 1,
+                round.outcome,
+                round.error.as_deref().unwrap_or("no error")
+            )
         })
         .collect();
     assert!(
         not_made.is_empty(),
         "summaries that were not made:\n{}",
         not_made.join("\n")
-    );
-    // The last full summary reads all eight rounds again, about 113 KiB; an incremental one
-    // reads the last round, about 16 KiB, and at most 64 KiB of earlier facts.
-    let last = |evaluation: &Evaluation| evaluation.rounds[ROUNDS - 1].request_bytes;
-    assert!(
-        last(&incremental) < last(&full),
-        "incremental {} bytes, full {} bytes",
-        last(&incremental),
-        last(&full)
-    );
-}
-
-/// The behaviour evals of `tests/common/evals.rs` against the real API: the sample cases
-/// under the control and treatment agents, `ZX_E2E_EVAL_RUNS` runs per variant (default
-/// 1), paired and compared. The artifacts, with every arm's session, stay in a temporary
-/// directory whose path is printed. A low pass rate is data; the test fails only when an arm
-/// did not finish, which blocks its pair.
-#[tokio::test]
-#[ignore = "calls a paid model API; needs ZX_E2E_AUTHORIZED=1 and the API owner's consent"]
-async fn behaviour_evals_pair_two_agents_against_the_real_api() {
-    use common::evals::{
-        Artifacts, Harness, evaluate, format_report, plan, protocol, sample_cases, sample_variants, summarize,
-    };
-
-    if std::env::var("ZX_E2E_EVAL").as_deref() != Ok("1") {
-        eprintln!(
-            "[real_api] behaviour evals skipped: they run the sample cases twice per run; set ZX_E2E_EVAL=1 to run them"
-        );
-        return;
-    }
-    let endpoint = Endpoint::from_env();
-    let runs_per_variant: u32 = match std::env::var("ZX_E2E_EVAL_RUNS") {
-        Ok(value) => value
-            .parse()
-            .ok()
-            .filter(|runs| *runs >= 1)
-            .unwrap_or_else(|| panic!("ZX_E2E_EVAL_RUNS must be a positive number, not {value:?}")),
-        Err(_) => 1,
-    };
-    let cases = sample_cases();
-    let variants = sample_variants();
-    let tasks = plan(&cases, &variants, runs_per_variant);
-    // Kept after the run, also when it fails, so that every arm's session can be read.
-    let dir = tempfile::Builder::new().prefix("zx-evals-").tempdir().unwrap().keep();
-    let artifacts = Artifacts::create(&dir);
-    eprintln!(
-        "[behaviour evals] {} arm(s) against {}; artifacts in {}",
-        tasks.len(),
-        endpoint.model,
-        artifacts.dir.display()
-    );
-    artifacts.write_protocol(&protocol(&endpoint.model, &variants, &cases, runs_per_variant));
-    artifacts.write_expected(&tasks);
-    let harness = Harness {
-        root: artifacts.dir.clone(),
-        model: endpoint.model.clone(),
-        api_key_env: endpoint.api_key_env.clone(),
-        extra_config: "maxTokens = 1024".to_string(),
-        timeout: Duration::from_secs(300),
-    };
-
-    let observations = evaluate(&harness, &cases, &variants, &tasks, &endpoint.base_url, &artifacts).await;
-    let report = summarize(&tasks, &observations, &variants);
-    artifacts.write_report(&report);
-    eprint!("{}", format_report(&report));
-
-    assert!(
-        report.blocked.is_empty(),
-        "arms that did not finish: {:?}",
-        report.blocked
     );
 }

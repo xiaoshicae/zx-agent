@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, ensure};
 
 pub use definition::{AgentDefinition, Builtin, ProjectContext};
-pub use environment::{Config, ContainerSettings, Execution, FrontendSettings, McpServer, ProviderSettings};
+pub use environment::{Config, ContainerSettings, Execution, McpServer, ProviderSettings};
 pub use permissions::{Entry, Permissions};
 
 use crate::files::read_text_file;

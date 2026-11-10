@@ -471,17 +471,6 @@ fn redaction_cannot_be_removed_by_an_agent() {
 }
 
 #[test]
-fn summaries_are_full_unless_the_agent_asks_for_incremental_ones() {
-    assert_eq!(load(Builtin::Unattended).compaction.mode, compaction::SummaryMode::Full);
-    assert_eq!(load(Builtin::Assistant).compaction.mode, compaction::SummaryMode::Full);
-    let incremental = load_file("extends = 'assistant'\n[compaction]\nmode = 'incremental'").unwrap();
-    assert_eq!(incremental.compaction.mode, compaction::SummaryMode::Incremental);
-    // Other settings still come from the extended agent.
-    assert_eq!(incremental.compaction.trigger_bytes, Some(256 * 1024));
-    assert!(load_file("[compaction]\nmode = 'partial'").is_err());
-}
-
-#[test]
 fn context_management_settings_overlay_individually_and_validate() {
     let agent = load_file("extends = 'assistant'\n[compaction]\ntriggerBytes = 0\nmaxSummaryTokens = 1024").unwrap();
     assert_eq!(agent.compaction.trigger_bytes, None);
@@ -489,6 +478,8 @@ fn context_management_settings_overlay_individually_and_validate() {
     assert_eq!(agent.compaction.max_summary_tokens, 1024);
     for text in [
         "[compaction]\nkeepRecentBytes = 0",
+        "[compaction]\ntriggerBytes = 100\nkeepRecentBytes = 200",
+        "[compaction]\nmaxSummaryTokens = 0",
         "[compaction]\ntimeoutSecs = 0",
         "[compaction]\nunknown = 1",
     ] {

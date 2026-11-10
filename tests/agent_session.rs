@@ -64,9 +64,9 @@ async fn sdk_prompts_preserve_empty_and_unicode_input() {
 async fn take_queued_returns_input_no_run_consumed_steering_first() {
     let (session, provider, _) = setup([FauxStep::text("one"), FauxStep::text("two")]);
     session.prompt("first", &CancellationToken::new()).await.unwrap();
-    session.follow_up("later");
-    session.steer("now");
-    session.steer("also now");
+    session.queues().follow_up("later");
+    session.queues().steer("now");
+    session.queues().steer("also now");
     assert_eq!(
         session.take_queued().unwrap(),
         [
@@ -89,7 +89,7 @@ async fn take_queued_during_a_run_is_busy_and_leaves_the_input_queued() {
     let cancel = CancellationToken::new();
     let mut running = Box::pin(session.prompt("first", &cancel));
     tokio::select! { () = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
-    session.steer("queued");
+    session.queues().steer("queued");
     assert_eq!(session.take_queued(), Err(AgentSessionError::Busy));
     assert!(session.abort());
     assert_eq!(running.await.unwrap().outcome, RunOutcome::Aborted);
@@ -284,7 +284,7 @@ async fn a_panicking_subscriber_is_detached_without_silencing_other_subscribers(
     let (session, _, initial) = setup([FauxStep::text("one"), FauxStep::text("two")]);
     let calls = Arc::new(AtomicUsize::new(0));
     let callback_calls = calls.clone();
-    let failed = session.subscribe(Arc::new(move |_: &Event| {
+    let _failed = session.subscribe(Arc::new(move |_: &Event| {
         callback_calls.fetch_add(1, Ordering::SeqCst);
         panic!("subscriber bug");
     }));
@@ -292,14 +292,12 @@ async fn a_panicking_subscriber_is_detached_without_silencing_other_subscribers(
     let _observer = session.subscribe(observer.clone());
     session.prompt("first", &CancellationToken::new()).await.unwrap();
     session.prompt("second", &CancellationToken::new()).await.unwrap();
-    assert!(failed.has_panicked());
-    assert_eq!(session.failed_subscribers(), 1);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(observer.events(), initial.events());
 }
 
 #[tokio::test]
-async fn a_panicking_initial_sink_is_also_counted_and_isolated() {
+async fn a_panicking_initial_sink_is_also_isolated() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let runner =
         RunnerSetup::new(config(provider, vec![])).build_with(Arc::new(|_: &Event| panic!("initial sink bug")));
@@ -310,7 +308,6 @@ async fn a_panicking_initial_sink_is_also_counted_and_isolated() {
         session.prompt("go", &CancellationToken::new()).await.unwrap().outcome,
         RunOutcome::Completed
     );
-    assert_eq!(session.failed_subscribers(), 1);
     assert!(observer.kinds().contains(&"agent_end"));
 }
 
@@ -319,10 +316,9 @@ async fn a_subscription_does_not_keep_the_conversation_alive() {
     let (session, _, _) = setup([]);
     let session = Arc::new(session);
     let weak = Arc::downgrade(&session);
-    let subscription = session.subscribe(Arc::new(Collect::default()));
+    let _subscription = session.subscribe(Arc::new(Collect::default()));
     drop(session);
     assert!(weak.upgrade().is_none());
-    assert!(!subscription.has_panicked());
 }
 
 #[tokio::test]
@@ -423,7 +419,6 @@ async fn a_running_session_rejects_model_changes_without_changing_the_provider()
         }),
         Err(AgentSessionError::Busy)
     );
-    assert_eq!(session.clear_approvals(), Err(AgentSessionError::Busy));
     session.abort();
     running.await.unwrap();
     assert_eq!(
@@ -496,8 +491,8 @@ async fn steering_and_follow_ups_reach_the_model_at_their_defined_boundaries() {
     let cancel = CancellationToken::new();
     let mut running = Box::pin(session.prompt("go", &cancel));
     tokio::select! { () = gate.started.notified() => {}, _ = &mut running => panic!("tool must wait") }
-    session.steer("steering");
-    session.follow_up("follow-up");
+    session.queues().steer("steering");
+    session.queues().follow_up("follow-up");
     gate.release.notify_one();
     let report = running.await.unwrap();
     assert_eq!(
@@ -580,7 +575,7 @@ impl Interaction for Approver {
 }
 
 #[tokio::test]
-async fn model_switching_retains_approval_grants_and_explicit_revocation_removes_them() {
+async fn model_switching_retains_approval_grants() {
     let steps = || {
         [
             FauxStep::tool_call("c", "echo", json!({"text": "same"})),
@@ -588,7 +583,7 @@ async fn model_switching_retains_approval_grants_and_explicit_revocation_removes
         ]
     };
     let first = Arc::new(FauxProvider::new(steps()));
-    let next = Arc::new(FauxProvider::new(steps().into_iter().chain(steps())));
+    let next = Arc::new(FauxProvider::new(steps()));
     let host = Arc::new(Approver(AtomicUsize::new(0)));
     let mut config = config(first, vec![Arc::new(common::EchoTool::new("echo"))]);
     config.hooks.push(Ask);
@@ -604,9 +599,6 @@ async fn model_switching_retains_approval_grants_and_explicit_revocation_removes
         .unwrap();
     session.prompt("two", &CancellationToken::new()).await.unwrap();
     assert_eq!(host.0.load(Ordering::SeqCst), 1);
-    session.clear_approvals().unwrap();
-    session.prompt("three", &CancellationToken::new()).await.unwrap();
-    assert_eq!(host.0.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
@@ -670,24 +662,8 @@ async fn subscriber_callbacks_see_messages_only_after_the_single_audit_write() {
         })));
     }
     session.prompt("go", &CancellationToken::new()).await.unwrap();
-    assert_eq!(session.failed_subscribers(), 0);
     assert_eq!(observed.load(Ordering::SeqCst), 4);
     assert_eq!(SessionStore::read(&file).unwrap().messages().len(), 2);
-}
-
-#[tokio::test]
-async fn a_bounded_subscription_receives_the_events_in_order() {
-    let (session, _, initial) = setup([FauxStep::text("done")]);
-    let mut stream = session.subscribe_bounded(std::num::NonZeroUsize::new(1024).unwrap());
-
-    session.prompt("go", &CancellationToken::new()).await.unwrap();
-
-    let mut received = Vec::new();
-    while let Some(event) = stream.try_recv() {
-        received.push(event);
-    }
-    assert_eq!(received, initial.envelopes());
-    assert_eq!(stream.dropped(), 0);
 }
 
 /// Refuses every record, like a database that no longer accepts writes.
@@ -709,55 +685,18 @@ async fn a_session_reports_why_it_stopped_writing() {
     }
     .build();
     let session = AgentSession::from(runner);
-    assert_eq!(session.writes_stopped().unwrap(), None);
+    let writes_stopped = || session.inspect(|store| store.writes_stopped().cloned()).unwrap();
+    assert_eq!(writes_stopped(), None);
 
     let report = session.prompt("go", &CancellationToken::new()).await.unwrap();
 
     assert_eq!(report.outcome, RunOutcome::Error);
     assert!(
         matches!(
-            session.writes_stopped().unwrap(),
+            writes_stopped(),
             Some(zx_agent::session::WritesStopped::Failed(error)) if error.contains("the database is read-only")
         ),
         "{:?}",
-        session.writes_stopped()
+        writes_stopped()
     );
-}
-
-#[tokio::test]
-async fn a_bounded_subscription_ends_when_the_session_is_dropped() {
-    let (session, _, _) = setup([FauxStep::text("done")]);
-    let mut stream = session.subscribe_bounded(std::num::NonZeroUsize::new(1024).unwrap());
-    session.prompt("go", &CancellationToken::new()).await.unwrap();
-
-    drop(session);
-
-    let mut received = 0;
-    let ended = tokio::time::timeout(Duration::from_secs(5), async {
-        while stream.recv().await.is_some() {
-            received += 1;
-        }
-    })
-    .await;
-    assert!(ended.is_ok(), "recv kept waiting after the session was dropped");
-    assert!(received > 0);
-}
-
-#[tokio::test]
-async fn a_full_bounded_subscription_drops_and_counts_events_without_blocking_the_run() {
-    let (session, _, initial) = setup([FauxStep::text("done")]);
-    let mut stream = session.subscribe_bounded(std::num::NonZeroUsize::new(2).unwrap());
-
-    let report = tokio::time::timeout(Duration::from_secs(5), session.prompt("go", &CancellationToken::new()))
-        .await
-        .expect("a full channel must not block the run")
-        .unwrap();
-
-    assert_eq!(report.outcome, RunOutcome::Completed);
-    let all = initial.envelopes();
-    let kept: Vec<u64> = std::iter::from_fn(|| stream.try_recv())
-        .map(|event| event.seq)
-        .collect();
-    assert_eq!(kept, [1, 2]);
-    assert_eq!(stream.dropped(), u64::try_from(all.len()).unwrap() - 2);
 }

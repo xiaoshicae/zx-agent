@@ -27,7 +27,7 @@ use zx_agent::tools::{BashTool, ReadFileTool};
 
 use common::fake_mcp::{Era, FakeMcp, tool};
 use common::mock_server::{MockServer, Reply};
-use common::{AgentHome, RunnerSetup, config, stderr, zx_agent};
+use common::{AgentHome, Home, RunnerSetup, config, stderr, zx_agent_in};
 
 // ---------------------------------------------------------------------------
 // Fake docker
@@ -511,31 +511,6 @@ async fn a_call_queued_behind_a_running_command_is_recorded_as_not_executed_when
 }
 
 #[tokio::test]
-async fn commands_run_with_the_shell_checked_at_start() {
-    let fake = FakeDocker::new();
-    let config = ContainerConfig {
-        shell: "zsh".into(),
-        ..fake.config()
-    };
-    let executor = ContainerExecutor::start(config).await.unwrap();
-    let workspace = fake.workspace();
-    // A tool configured with another shell, such as `BashTool::shell` left at its default.
-    let request = ShellCommand {
-        shell: "bash",
-        command: "echo hi",
-        cwd: &workspace,
-        timeout: Duration::from_secs(10),
-    };
-
-    executor.run(&request, &CancellationToken::new()).await.unwrap();
-
-    let probe = &fake.execs("zx-agent-probe")[0];
-    assert_eq!(after(probe, "zx-agent-probe")[0], "zsh");
-    let call = &fake.execs("zx-agent-run")[0];
-    assert_eq!(after(call, "zx-agent-run"), ["zsh".to_string(), "echo hi".to_string()]);
-}
-
-#[tokio::test]
 async fn file_reads_map_each_refusal_to_an_actionable_error() {
     let fake = FakeDocker::new();
     let executor = ContainerExecutor::start(fake.config()).await.unwrap();
@@ -967,16 +942,13 @@ async fn real_dropping_the_executor_removes_the_container() {
 /// `zx-agent run` in `dir` against the mock server. `docker_dir` goes first on PATH, so that
 /// its `docker` replaces the real one.
 async fn zx_run(server: &MockServer, dir: &Path, docker_dir: Option<&Path>, home: &AgentHome, args: &[&str]) -> Output {
-    let mut command = zx_agent();
+    let mut command = zx_agent_in(dir, Home::Agent(home.path()));
     command
         .args(["run", "--model", "mock"])
         .env("ZX_BASE_URL", &server.base_url)
         .args(args)
-        .current_dir(dir)
-        .env("ZX_AGENT_HOME", home.path())
         .env("OPENAI_API_KEY", "sk-p6-container-test")
-        .stdin(Stdio::null())
-        .kill_on_drop(true);
+        .stdin(Stdio::null());
     if let Some(docker_dir) = docker_dir {
         let path = std::env::var("PATH").unwrap_or_default();
         command.env("PATH", format!("{}:{path}", docker_dir.display()));
@@ -1050,19 +1022,16 @@ async fn zx_chat_in_container(fake: &FakeDocker, server: &MockServer, agent: &st
     let home = container_home("fake:1").with_agent("assistant", agent);
     let session = outside.path().join("session.jsonl");
     let path = std::env::var("PATH").unwrap_or_default();
-    let mut child = zx_agent()
+    let mut child = zx_agent_in(&fake.workspace(), Home::Agent(home.path()))
         .args(["chat", "--model", "mock"])
         .env("ZX_BASE_URL", &server.base_url)
         .args(["--tools", "bash"])
         .args(["--session", session.to_str().unwrap()])
-        .current_dir(fake.workspace())
-        .env("ZX_AGENT_HOME", home.path())
         .env("OPENAI_API_KEY", "sk-p10-container-test")
         .env("PATH", format!("{}:{path}", fake.dir.path().display()))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
         .spawn()
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
@@ -1114,26 +1083,6 @@ async fn chat_in_a_container_still_asks_unless_the_agent_approves_every_call() {
 }
 
 #[tokio::test]
-async fn approving_every_call_outside_a_container_is_a_configuration_error() {
-    let fake = FakeDocker::new();
-    let server = MockServer::start(vec![]).await;
-    // The sandbox's image, but with commands on this machine.
-    let home = AgentHome::new("execution = 'local'\n[container]\nimage = 'fake:1'\n")
-        .with_agent("unattended", "[permissions]\napproveAll = true\nask = []\n");
-
-    let output = zx_run(&server, &fake.workspace(), Some(fake.dir.path()), &home, &["go"]).await;
-
-    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
-    assert!(
-        stderr(&output).contains("permissions.approveAll needs execution"),
-        "{}",
-        stderr(&output)
-    );
-    assert!(server.requests().is_empty());
-    assert!(fake.calls().is_empty(), "no container was started");
-}
-
-#[tokio::test]
 async fn approving_every_call_also_runs_mcp_tools_the_agent_does_not_allow() {
     let fake = FakeDocker::new();
     let mcp = FakeMcp::start(
@@ -1169,7 +1118,6 @@ async fn approving_every_call_also_runs_mcp_tools_the_agent_does_not_allow() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     // `run` has nobody to ask, so a tool that asked would be refused instead.
     assert_eq!(mcp.requests("tools/call").len(), 1);
-    assert!(!stderr(&output).contains("(asks)"), "{}", stderr(&output));
 }
 
 #[tokio::test]
@@ -1200,20 +1148,6 @@ async fn container_execution_refuses_a_session_file_the_container_could_read() {
     }
     assert!(server.requests().is_empty());
     assert!(fake.calls().is_empty(), "no container was started");
-}
-
-#[tokio::test]
-async fn container_execution_without_an_image_fails_before_the_session_is_created() {
-    let dir = tempfile::tempdir().unwrap();
-    let server = MockServer::start(vec![]).await;
-    let home = AgentHome::new("execution = \"container\"");
-
-    let output = zx_run(&server, dir.path(), None, &home, &["--session", "s.jsonl", "go"]).await;
-
-    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
-    assert!(stderr(&output).contains("needs container.image"));
-    assert!(server.requests().is_empty());
-    assert!(!dir.path().join("s.jsonl").exists());
 }
 
 #[tokio::test]
@@ -1318,20 +1252,17 @@ async fn real_ctrl_c_in_chat_does_not_stop_the_container() {
     ])
     .await;
     // Its own process group stands in for a terminal's foreground group.
-    let mut chat = zx_agent()
+    let mut chat = zx_agent_in(&workspace, Home::Agent(home.path()))
         .args(["chat", "--model", "mock"])
         .env("ZX_BASE_URL", &server.base_url)
         .args(["--tools", "read_file"])
-        .env("ZX_AGENT_HOME", home.path())
         // The session file would have to be outside the workspace; this test needs none.
         .arg("--no-session")
-        .current_dir(&workspace)
         .env("OPENAI_API_KEY", "sk-p6-container-test")
         .process_group(0)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
         .spawn()
         .unwrap();
     let mut errors = BufReader::new(chat.stderr.take().unwrap()).lines();
@@ -1379,18 +1310,15 @@ async fn real_a_killed_zx_agent_leaves_no_container_behind() {
     let sessions = tempfile::tempdir().unwrap();
     let session = sessions.path().join("session.jsonl");
     let server = MockServer::start(vec![Reply::bash("c1", "sleep 30")]).await;
-    let mut agent = zx_agent()
+    let mut agent = zx_agent_in(&workspace, Home::Agent(home.path()))
         .args(["run", "--model", "mock"])
         .env("ZX_BASE_URL", &server.base_url)
         .args(["--tools", "bash"])
-        .env("ZX_AGENT_HOME", home.path())
         .args(["--session", session.to_str().unwrap(), "go"])
-        .current_dir(&workspace)
         .env("OPENAI_API_KEY", "sk-p6-container-test")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .kill_on_drop(true)
         .spawn()
         .unwrap();
     // The model's request comes after start-up, so the container is running.

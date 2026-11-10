@@ -15,9 +15,9 @@ paths:
 | `EchoTool` | `tests/common/mod.rs` | 可设置延迟、失败、panic、terminate，执行时还能注入引导消息或后续消息、报告进度（`progress`）、返回 `details` |
 | `Collect` | `tests/common/mod.rs` | 收集事件；`envelopes()` 返回带信封（`seq`、`runId` 等）的事件，`events()` 返回事件本体，`kinds()` 返回事件类型序列，`tool_end_order()` 返回工具完成的顺序 |
 | `summarize` | `tests/common/mod.rs` | 把消息列表压缩成 `"tool:c1=hi"` 这样的短字符串 |
-| `run_prompt` / `run_attempt` | `tests/common/mod.rs` | `run_prompt`：在以给定消息开头的内存会话上，用默认参数（至多 10 次模型请求、不取消）跑一次 `Attempt`，返回结果和事件，并把会话投影写回传入的消息；`run_attempt`：在新的内存会话上按给定的预算、取消令牌和事件接收方跑一次，返回结果和会话投影 |
+| `run_prompt` | `tests/common/mod.rs` | 在以给定消息开头的内存会话上，用默认参数（至多 10 次模型请求、不取消）跑一次 `Attempt`，返回结果和事件，并把会话投影写回传入的消息 |
 | `RunnerSetup` | `tests/common/mod.rs` | 带测试默认值（不重试、默认上限、内存会话）的 runner 构造器，用结构体更新语法覆盖字段 |
-| `zx_agent` / `stdout` / `stderr` | `tests/common/mod.rs` | 编译出的程序，以及它写到两个输出的文本；驱动程序的测试都用这三个 |
+| `zx_agent` / `zx_agent_in` / `Home` / `stdout` / `stderr` | `tests/common/mod.rs` | 编译出的程序，以及它写到两个输出的文本；`zx_agent_in` 在给定的工作目录、以给定的主目录启动它（`Home::Agent` 设 `ZX_AGENT_HOME`，`Home::User` 设 `HOME` 并去掉 `ZX_AGENT_HOME`，chat 与 acp 的默认会话目录在其下），测试结束时杀掉；驱动程序的测试都用这几个 |
 | `AgentHome` / `write_config` / `write_agent` / `fake_model_config` | `tests/common/mod.rs` | 测试自己的 zx-agent 主目录：`AgentHome` 是交给 `ZX_AGENT_HOME` 的临时目录，带 `config.toml` 与替换内置 agent 的 `agents/<名字>.md`；`write_config`、`write_agent` 写进测试设了 `HOME` 时的 `<HOME>/.zx-agent`；`fake_model_config` 是对假模型的 `config.toml`（key 所在的变量、不重试，再加给出的键），服务地址经 `ZX_BASE_URL` 传入。权限、上下文、摘要、模型元数据、执行环境与 provider 设置没有命令行参数，驱动程序的测试经它们设置。`zx_agent()` 默认指向一个空的主目录，并去掉 `ZX_MODEL`、`ZX_BASE_URL`、`OPENAI_API_KEY`，开发者自己的配置不会进入测试 |
 | `fast_retry` / `header` / `read_lines` / `json_lines` | `tests/common/mod.rs` | 毫秒级退避的重试策略、会话头部、读取会话文件的每一行、把 JSON 行文本解析成值 |
 | `NotifyingProvider` | `tests/common/mod.rs` | 每个请求开始时通知（`started`）并记下取消令牌的脚本化 provider，测试"运行中"的行为时等它，不用 `sleep` |
@@ -25,12 +25,10 @@ paths:
 | `tool_call_answer` / `session_dir` / `session_files` / `signal` | `tests/common/mod.rs` | 崩溃前已记录的工具调用回答、chat 与 acp 的默认会话目录及其中的文件、给子进程发信号（Unix） |
 | `Captured::user_texts` / `system_text` / `tool_results` | `tests/common/mock_server.rs` | 假模型服务记录的请求里的用户消息、系统消息与工具结果 |
 | `run_channel` / `Running` | `tests/common/im.rs` | 在自己的任务里运行一个 `ImChannel`，`next` 等它转交的事件，`stop` 取消并取回结果，`ended` 等它自行结束 |
-| `CancelOnFirstDelta` | `tests/common/mod.rs` | 收到第一段流式增量就取消，测试中途取消而不依赖计时 |
 | `pty` | `tests/common/mod.rs` | Unix 伪终端：主端给测试，从端给子进程当终端 |
 | `summary_eval` | `tests/common/summary_eval.rs` | 摘要评测：按脚本合成的 8 轮排障会话（24 条埋入的事实，其中 6 条后来被取代），`evaluate` 每轮之后摘要并评分（仍成立的事实写到了几条；被取代的事实是否只剩旧值，另计写着旧值的条数；从会话还原的摘要请求大小）；付费评测与常规测试共用 |
 | `FakeFeishu` / `TestFrame` | `tests/common/fake_feishu.rs` | 假 ⚑ D:5/CHINA FLAG: 飞书开放平台：token、长连接地址与消息接口（可按接口安排错误码或 429），长连接由测试逐帧收发；帧编解码独立于被测代码 |
 | `read_request` / `response` | `tests/common/http.rs` | 假服务读取一个 HTTP 请求、拼出响应 |
-| `evals` | `tests/common/evals.rs` | 行为评测框架（P10 ⑪，pi 的 `packages/evals`）：`Case`（工作目录文件、提示词、确定性评分）、`Variants`（控制与处理各一个 agent 目录，复制进该 arm 主目录的 `agents/`）、`plan`（按轮次交替变体）、`Harness::run`（经编译出的程序运行一个 arm，家目录与工作目录隔离，超时记为 errored）、`summarize`（配对、每组的通过率与提升、阻塞的配对扣住标题数字、无提升 / 负提升 / 饱和 / 不稳定的标记、各变体的合计）、`Artifacts`（`protocol.json`、`expected-runs.json`、逐条追加的 `observations.jsonl`、`report.json` / `report.txt`，每个 arm 的目录在 `<变体>/<组>-<用例>-run<N>/`）；样例用例 `sample_cases` 与 `tests/fixtures/evals/` 的两个 agent 目录，合成运行用 `MockServer` 按 arm 脚本化，真实运行在 `tests/real_api.rs` |
 | `FakeMcp` / `Reply` | `tests/common/fake_mcp.rs` | 假 MCP 服务器（Streamable HTTP），按规范手写、不用 rmcp：可选 2026-07-28（`server/discover`）或 2025-11-25（`initialize` 与会话）；工具一页一个；按工具安排结果、JSON-RPC 错误、不应答（`Hang`）或以 SSE 流按间隔发进度通知再给结果（`Progress`，令牌取自请求的 `_meta.progressToken`），并记录每个请求的方法、参数与请求头、被客户端放弃的调用 |
 | `FakeSlack` / `Answer` | `tests/common/fake_slack.rs` | 假 Slack：Web API 记录每次调用，可按方法安排错误、429 或指定的 JSON 应答；Socket Mode 连接由测试逐帧发送、读取确认 |
 | `MockServer` / `Reply` | `tests/common/mock_server.rs` | 本地假 HTTP 服务：返回 SSE 流（`Reply::text`、`Reply::bash`、任意工具调用 `Reply::tool_call`）、HTTP 错误，发出部分数据后卡住（`Stall`），或等待测试通知后结束（`Gate`）；记录请求，`wait_for_requests` 等到请求到达 |
@@ -43,7 +41,7 @@ paths:
 ## 约定
 
 - 只能在 Unix 上运行的测试（如进程组、信号相关的）加 `#[cfg(unix)]`。
-- 启动 chat 的测试构造器把 `HOME` 设到临时目录，新的构造器也要这样做，否则会写进真实的家目录。
+- 驱动程序的测试经 `zx_agent()`（指向空的主目录、去掉 `ZX_MODEL`、`ZX_BASE_URL`、`OPENAI_API_KEY`）或 `zx_agent_in` 启动，要自己的主目录时用 `zx_agent_in` 的 `Home`，开发者的配置与真实的家目录都进不了测试。
 - 测试函数同样受 `too_many_lines` 约束；一个脚本化场景或一张"每个变体一条"的表可以带 `#[expect(clippy::too_many_lines, reason = "...")]`，理由说明它是什么表（规则 09）。
 - 新的 `tests/*.rs` 文件在 `docs/TESTS.md` 里登记一行。
 

@@ -1,8 +1,8 @@
 //! System prompt: instructions followed by generated sections (pi: coding-agent system-prompt.ts).
 //!
-//! Facts the model needs, such as the operating system and the command policy, are written
-//! into the prompt at startup instead of being left for the model to discover: discovering
-//! them costs turns, and an allowlist may forbid the commands that would reveal them.
+//! Facts the model needs, such as the operating system and the start time, are written into
+//! the prompt at startup instead of being left for the model to discover: discovering them
+//! costs turns, and a policy may deny or ask for the commands that would reveal them.
 
 use std::path::Path;
 
@@ -11,15 +11,13 @@ use crate::ai::{PREAMBLE, SystemPrompt, now_ms};
 /// Where commands run: [`environment_section`] for this machine; an executor that runs
 /// commands elsewhere describes that place instead, with [`run_started`] and [`pretty_name`].
 pub const ENVIRONMENT: &str = "environment";
-/// The commands bash may run, when bash is enabled.
-pub const COMMAND_POLICY: &str = "command_policy";
 /// Repository instructions such as AGENTS.md.
 pub const PROJECT_CONTEXT: &str = "project_context";
 /// The catalog of skills the model can read.
 pub const AVAILABLE_SKILLS: &str = "available_skills";
 /// The sections zx-agent generates after the preamble, in this order. Extensions may not
 /// use these names, present or not, nor the preamble's.
-pub const GENERATED_SECTIONS: [&str; 4] = [ENVIRONMENT, COMMAND_POLICY, PROJECT_CONTEXT, AVAILABLE_SKILLS];
+pub const GENERATED_SECTIONS: [&str; 3] = [ENVIRONMENT, PROJECT_CONTEXT, AVAILABLE_SKILLS];
 
 /// `instructions` as the preamble, followed by every non-empty section. Sections are wrapped
 /// in tags of their names, so the model can tell generated facts from instructions.
@@ -169,7 +167,7 @@ mod tests {
     fn wraps_non_empty_sections_in_tags() {
         let prompt = build_system_prompt(
             "Do the task.\n",
-            &[("environment", "OS: linux"), ("command_policy", "")],
+            &[("environment", "OS: linux"), ("project_context", "")],
         );
         assert_eq!(
             prompt.render(),

@@ -329,7 +329,7 @@ pub trait Hooks: Send + Sync {
     /// overlap and finish out of `seq` order. Once the run is cancelled, a call that is
     /// still pending is stopped, so an observer can miss the remaining events, `run_end`
     /// among them. An exporter that needs every event, in order, uses
-    /// [`AgentSession::subscribe_bounded`](crate::AgentSession::subscribe_bounded).
+    /// [`AgentSession::subscribe`](crate::AgentSession::subscribe).
     async fn on_event(&self, _event: &Event, _ctx: &HookContext) -> HookResult<()> {
         Ok(())
     }

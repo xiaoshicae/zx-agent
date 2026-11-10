@@ -389,6 +389,19 @@ mod tests {
     }
 
     #[test]
+    fn fields_the_provider_sets_itself_cannot_be_added() {
+        for field in RESERVED_FIELDS {
+            let mut fields = Map::new();
+            fields.insert(field.into(), json!("other"));
+            let error = check_extra_fields(&fields, false).unwrap_err().to_string();
+            assert!(
+                error.contains(&format!("request field {field:?} cannot be added")),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
     fn headers_are_checked_when_the_provider_is_built() {
         let build = |headers: Vec<(&str, &str)>| {
             OpenAiCompatible::new(OpenAiConfig {

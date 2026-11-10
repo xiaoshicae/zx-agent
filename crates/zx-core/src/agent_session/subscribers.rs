@@ -1,9 +1,7 @@
-//! The subscribers of a conversation's events: the hub that fans each event out, the handle
-//! that keeps a subscriber attached, and the bounded stream for exporters.
+//! The subscribers of a conversation's events: the hub that fans each event out and the
+//! handle that keeps a subscriber attached.
 
-use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use crate::agent::{Event, EventSink};
@@ -17,35 +15,26 @@ pub struct Subscription {
     events: Weak<EventHub>,
     /// Identifies the subscriber; the session holds the only strong reference.
     listener: Weak<Listener>,
-    failed: Arc<AtomicBool>,
-}
-
-impl Subscription {
-    /// Whether a callback panic caused this subscriber to be detached.
-    pub fn has_panicked(&self) -> bool {
-        self.failed.load(Ordering::SeqCst)
-    }
 }
 
 impl Drop for Subscription {
     fn drop(&mut self) {
         if let Some(events) = self.events.upgrade() {
-            // The weak reference keeps the allocation, so no other listener can share its address.
-            lock(&events.listeners).retain(|listener| !std::ptr::eq(Arc::as_ptr(listener), self.listener.as_ptr()));
+            events.detach(self.listener.as_ptr());
         }
     }
 }
 
+/// One attached sink. Each attachment is its own allocation, so its address identifies it
+/// even when the same sink is attached twice.
 struct Listener {
     sink: Arc<dyn EventSink>,
-    failed: Arc<AtomicBool>,
 }
 
-/// Fans each event out to the attached subscribers, isolating one that panics.
+/// Fans each event out to the attached subscribers, detaching one that panics.
 #[derive(Default)]
 pub(super) struct EventHub {
     listeners: Mutex<Vec<Arc<Listener>>>,
-    failures: AtomicUsize,
 }
 
 impl EventHub {
@@ -55,116 +44,40 @@ impl EventHub {
         drop(self.attach(sink));
     }
 
-    /// Attach `sink`. Returns the listener's handle and its failure flag, for a
-    /// [`Subscription`] that detaches it again.
-    fn attach(&self, sink: Arc<dyn EventSink>) -> (Weak<Listener>, Arc<AtomicBool>) {
-        let failed = Arc::new(AtomicBool::new(false));
-        let listener = Arc::new(Listener {
-            sink,
-            failed: failed.clone(),
-        });
+    /// Attach `sink`. Returns the listener's handle, for a [`Subscription`] that detaches it
+    /// again.
+    fn attach(&self, sink: Arc<dyn EventSink>) -> Weak<Listener> {
+        let listener = Arc::new(Listener { sink });
         let handle = Arc::downgrade(&listener);
         lock(&self.listeners).push(listener);
-        (handle, failed)
+        handle
     }
 
     /// Attach `sink` until the returned subscription is dropped.
     pub(super) fn subscribe(self: &Arc<Self>, sink: Arc<dyn EventSink>) -> Subscription {
-        let (listener, failed) = self.attach(sink);
         Subscription {
             events: Arc::downgrade(self),
-            listener,
-            failed,
+            listener: self.attach(sink),
         }
     }
 
-    /// Attach a channel that holds at most `capacity` events; see
-    /// [`AgentSession::subscribe_bounded`](crate::AgentSession::subscribe_bounded).
-    pub(super) fn subscribe_bounded(self: &Arc<Self>, capacity: NonZeroUsize) -> EventStream {
-        let (sender, receiver) = tokio::sync::mpsc::channel(capacity.get());
-        let dropped = Arc::new(AtomicU64::new(0));
-        let sink = Arc::new(BoundedSink {
-            sender,
-            dropped: dropped.clone(),
-        });
-        EventStream {
-            receiver,
-            dropped,
-            _subscription: self.subscribe(sink),
-        }
-    }
-
-    /// Number of subscribers detached because their callback panicked.
-    pub(super) fn failures(&self) -> usize {
-        self.failures.load(Ordering::SeqCst)
-    }
-}
-
-/// Events of an [`AgentSession`](crate::AgentSession) through a bounded channel; see
-/// [`AgentSession::subscribe_bounded`](crate::AgentSession::subscribe_bounded).
-pub struct EventStream {
-    receiver: tokio::sync::mpsc::Receiver<Event>,
-    // Shared with the sink that counts: an atomic counter, read here and written there.
-    dropped: Arc<AtomicU64>,
-    _subscription: Subscription,
-}
-
-impl EventStream {
-    /// The next event; waits until one arrives. `None` once the session is gone and the
-    /// events it sent before are read.
-    pub async fn recv(&mut self) -> Option<Event> {
-        self.receiver.recv().await
-    }
-
-    /// The next event if one is waiting, without waiting.
-    pub fn try_recv(&mut self) -> Option<Event> {
-        self.receiver.try_recv().ok()
-    }
-
-    /// Events dropped so far because the channel was full.
-    pub fn dropped(&self) -> u64 {
-        self.dropped.load(Ordering::SeqCst)
-    }
-}
-
-struct BoundedSink {
-    sender: tokio::sync::mpsc::Sender<Event>,
-    dropped: Arc<AtomicU64>,
-}
-
-impl EventSink for BoundedSink {
-    fn emit(&self, event: &Event) {
-        match self.sender.try_send(event.clone()) {
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                self.dropped.fetch_add(1, Ordering::SeqCst);
-            }
-            // A closed stream is gone; its subscription is being dropped as well.
-            Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
-        }
+    /// Detach the listener at `address`. A weak reference or a snapshot keeps the
+    /// allocation, so no other listener can share the address meanwhile.
+    fn detach(&self, address: *const Listener) {
+        lock(&self.listeners).retain(|listener| !std::ptr::eq(Arc::as_ptr(listener), address));
     }
 }
 
 impl EventSink for EventHub {
     fn emit(&self, event: &Event) {
         // Snapshot only the Arc handles. Reentrant subscribe, unsubscribe and abort must
-        // never run under this lock.
+        // never run under this lock. The snapshot also keeps detached sinks alive until
+        // after unlocking, so even a custom destructor cannot run while the list is locked.
         let listeners = lock(&self.listeners).clone();
-        let mut failed = false;
         for listener in &listeners {
-            if listener.failed.load(Ordering::SeqCst) {
-                continue;
-            }
             if catch_unwind(AssertUnwindSafe(|| listener.sink.emit(event))).is_err() {
-                if !listener.failed.swap(true, Ordering::SeqCst) {
-                    self.failures.fetch_add(1, Ordering::SeqCst);
-                }
-                failed = true;
+                self.detach(Arc::as_ptr(listener));
             }
-        }
-        if failed {
-            // Snapshot references keep removed sinks alive until after unlocking, so even
-            // a custom destructor cannot run while the subscriber list is locked.
-            lock(&self.listeners).retain(|listener| !listener.failed.load(Ordering::SeqCst));
         }
     }
 }

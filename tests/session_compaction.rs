@@ -6,7 +6,7 @@ use serde_json::json;
 
 use zx_agent::ai::{Message, SystemMessage, SystemPrompt, Usage, now_ms};
 use zx_agent::session::{
-    CompactionPlan, CompactionSummary, Entry, SESSION_VERSION, SessionStore, SummaryFact, SummaryMode, SummaryRequest,
+    CompactionPlan, CompactionSummary, Entry, SESSION_VERSION, SessionStore, SummaryFact, SummaryRequest,
 };
 
 use common::{header, summarize};
@@ -14,10 +14,8 @@ use common::{header, summarize};
 fn summary(id: &str) -> CompactionSummary {
     CompactionSummary {
         facts: vec![SummaryFact {
-            id: None,
             text: "The old observation".into(),
             source_entry_ids: vec![id.into()],
-            supersedes: Vec::new(),
         }],
         inferences: vec!["An inference".into()],
         plans: vec!["Continue the task".into()],
@@ -41,8 +39,6 @@ fn plan(store: &SessionStore, first_kept: &str) -> CompactionPlan {
             max_tokens: 100,
         },
         input_bytes: 1000,
-        mode: SummaryMode::Full,
-        continues: None,
     }
 }
 

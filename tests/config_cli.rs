@@ -10,19 +10,17 @@ use std::time::Duration;
 use tokio::process::Command;
 
 use common::mock_server::{MockServer, Reply};
-use common::{AgentHome, stderr, write_config, zx_agent};
+use common::{AgentHome, Home, stderr, write_config, zx_agent_in};
 
-/// `run` in `cwd` without a model on the command line; the caller adds the home.
-fn run(cwd: &Path, args: &[&str]) -> Command {
-    let mut command = zx_agent();
+/// `run` in `cwd` with `home`, without a model on the command line.
+fn run(cwd: &Path, home: Home<'_>, args: &[&str]) -> Command {
+    let mut command = zx_agent_in(cwd, home);
     command
         .args(["run", "--tools", ""])
         .args(args)
         .arg("go")
-        .current_dir(cwd)
         .env_remove("OPENAI_API_KEY")
-        .stdin(Stdio::null())
-        .kill_on_drop(true);
+        .stdin(Stdio::null());
     command
 }
 
@@ -49,9 +47,7 @@ async fn config_toml_is_found_in_dot_zx_agent_under_home() {
     let home = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::text("ok")]).await;
     write_config(&home.path().join(".zx-agent"), &model_and_url("home-model", &server));
-    let mut command = run(home.path(), &[]);
-    command.env("HOME", home.path()).env_remove("ZX_AGENT_HOME");
-    let output = output(command).await;
+    let output = output(run(home.path(), Home::User(home.path()), &[])).await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(requested_model(&server), "home-model");
 }
@@ -63,8 +59,8 @@ async fn zx_agent_home_replaces_dot_zx_agent_under_home() {
     write_config(&home.path().join(".zx-agent"), &model_and_url("home-model", &ignored));
     let server = MockServer::start(vec![Reply::text("ok")]).await;
     let elsewhere = AgentHome::new(&model_and_url("elsewhere-model", &server));
-    let mut command = run(home.path(), &[]);
-    command.env("HOME", home.path()).env("ZX_AGENT_HOME", elsewhere.path());
+    let mut command = run(home.path(), Home::Agent(elsewhere.path()), &[]);
+    command.env("HOME", home.path());
     let output = output(command).await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(requested_model(&server), "elsewhere-model");
@@ -75,10 +71,8 @@ async fn zx_agent_home_replaces_dot_zx_agent_under_home() {
 async fn a_relative_zx_agent_home_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![]).await;
-    let mut command = run(dir.path(), &["--model", "m"]);
-    command
-        .env("ZX_AGENT_HOME", "relative/home")
-        .env("ZX_BASE_URL", &server.base_url);
+    let mut command = run(dir.path(), Home::Agent(Path::new("relative/home")), &["--model", "m"]);
+    command.env("ZX_BASE_URL", &server.base_url);
     let output = output(command).await;
     assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
     assert!(
@@ -93,8 +87,8 @@ async fn a_relative_zx_agent_home_is_refused() {
 async fn chosen(env: &[(&str, &str)], flags: &[&str], file: &MockServer) -> Output {
     let home = AgentHome::new(&model_and_url("file-model", file));
     let dir = tempfile::tempdir().unwrap();
-    let mut command = run(dir.path(), flags);
-    command.env("ZX_AGENT_HOME", home.path()).envs(env.iter().copied());
+    let mut command = run(dir.path(), Home::Agent(home.path()), flags);
+    command.envs(env.iter().copied());
     output(command).await
 }
 
@@ -126,36 +120,6 @@ async fn the_model_comes_from_the_flag_then_the_variable_then_the_file_and_the_b
 }
 
 #[tokio::test]
-async fn without_a_model_anywhere_the_run_names_where_to_set_one() {
-    let home = AgentHome::new("");
-    let dir = tempfile::tempdir().unwrap();
-    let mut command = run(dir.path(), &[]);
-    command.env("ZX_AGENT_HOME", home.path());
-    let output = output(command).await;
-    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
-    let expected = format!(
-        "no model: pass --model, set ZX_MODEL, or set model in {}",
-        home.path().join("config.toml").display()
-    );
-    assert!(stderr(&output).contains(&expected), "{}", stderr(&output));
-}
-
-#[tokio::test]
-async fn an_unknown_key_in_config_toml_stops_the_run() {
-    let server = MockServer::start(vec![]).await;
-    let home = AgentHome::new("modle = \"typo\"\n");
-    let dir = tempfile::tempdir().unwrap();
-    let mut command = run(dir.path(), &["--model", "m"]);
-    command
-        .env("ZX_AGENT_HOME", home.path())
-        .env("ZX_BASE_URL", &server.base_url);
-    let output = output(command).await;
-    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
-    assert!(stderr(&output).contains("unknown field `modle`"), "{}", stderr(&output));
-    assert!(server.requests().is_empty());
-}
-
-#[tokio::test]
 async fn the_former_command_line_settings_are_read_from_config_toml() {
     let server = MockServer::start(vec![Reply::text("ok")]).await;
     let home = AgentHome::new(&format!(
@@ -164,45 +128,11 @@ async fn the_former_command_line_settings_are_read_from_config_toml() {
         server.base_url
     ));
     let dir = tempfile::tempdir().unwrap();
-    let mut command = run(dir.path(), &[]);
-    command.env("ZX_AGENT_HOME", home.path());
-    let output = output(command).await;
+    let output = output(run(dir.path(), Home::Agent(home.path()), &[])).await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let request = &server.requests()[0];
     assert_eq!(request.body["max_tokens"], 77);
     assert_eq!(request.body["reasoning_effort"], "low");
     assert_eq!(request.body["seed"], 7);
     assert!(request.headers.contains("x-route: blue"), "{}", request.headers);
-}
-
-#[tokio::test]
-async fn invalid_settings_exit_2_naming_their_key() {
-    for (text, key) in [
-        ("toolTimeoutSecs = 0", "toolTimeoutSecs must be at least 1"),
-        (
-            "[chat]\napprovalTimeoutSecs = 0",
-            "chat.approvalTimeoutSecs must be at least 1",
-        ),
-        (
-            "[provider]\nidleTimeoutSecs = 0",
-            "provider.idleTimeoutSecs must be at least 1",
-        ),
-        (
-            "[provider]\nheaders = { Authorization = 'x' }",
-            "provider.headers: Authorization",
-        ),
-        ("secretFiles = ['missing-token']", "missing-token"),
-    ] {
-        let server = MockServer::start(vec![]).await;
-        let home = AgentHome::new(text);
-        let dir = tempfile::tempdir().unwrap();
-        let mut command = run(dir.path(), &["--model", "m"]);
-        command
-            .env("ZX_AGENT_HOME", home.path())
-            .env("ZX_BASE_URL", &server.base_url);
-        let output = output(command).await;
-        assert_eq!(output.status.code(), Some(2), "{text}: {}", stderr(&output));
-        assert!(stderr(&output).contains(key), "{text}: {}", stderr(&output));
-        assert!(server.requests().is_empty());
-    }
 }

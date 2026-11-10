@@ -29,7 +29,8 @@ use zx_agent::tools::builtin_tools;
 
 use common::mock_server::{MockServer, Reply};
 use common::{
-    RunnerSetup, config, fake_model_config, header, read_lines, stderr, tool_call_answer, write_config, zx_agent,
+    Home, RunnerSetup, config, fake_model_config, header, read_lines, stderr, tool_call_answer, write_config,
+    zx_agent_in,
 };
 
 fn definition(name: &str) -> ToolDef {
@@ -529,17 +530,14 @@ fn run_command(server: &MockServer, dir: &Path, args: &[&str]) -> Command {
     const KEY_VAR: &str = "ZX_P6_RECOVERY_TEST_KEY";
     let home = dir.join(".home");
     write_config(&home, &fake_model_config(KEY_VAR, "", ""));
-    let mut command = zx_agent();
+    let mut command = zx_agent_in(dir, Home::Agent(&home));
     command
         .args(["run", "--model", "mock", "--tools", "bash"])
         .args(args)
-        .current_dir(dir)
-        .env("ZX_AGENT_HOME", &home)
         .env("ZX_BASE_URL", &server.base_url)
         .env(KEY_VAR, "sk-p6-test")
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+        .stderr(Stdio::piped());
     command
 }
 

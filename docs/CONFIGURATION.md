@@ -28,6 +28,7 @@ model = "my-model"
 reasoning = "high"                 # off、minimal、low、medium、high、xhigh；chat 的 /reasoning 可以改
 maxTokens = 4096
 toolTimeoutSecs = 120
+approvalTimeoutSecs = 600          # chat、acp 与 im 的审批等待
 secretFiles = ["/var/run/secrets/kubernetes.io/serviceaccount/token"]
 
 [provider]
@@ -41,12 +42,6 @@ requestFields = { temperature = 0.2 }   # 不能与 reasoning 写入的字段（
 headers = { X-Route = "eu" }
 idleTimeoutSecs = 120
 maxRetries = 3
-
-[chat]
-approvalTimeoutSecs = 120
-
-[acp]
-approvalTimeoutSecs = 3600
 
 [container]
 image = "debian:bookworm-slim"
@@ -72,6 +67,7 @@ tools = ["query", "query_range"]
 | `model` | 模型 ID；`--model` 与 `ZX_MODEL` 优先 |
 | `reasoning` | 推理强度：`off`、`minimal`、`low`、`medium`、`high` 或 `xhigh`。不设时请求不带推理设置，由服务决定；chat 的 `/reasoning` 可以改。会话的请求审计记录它 |
 | `maxTokens` | 每次回复的输出 token 上限；推理模型的推理也算在内，太小可能让回答为空。不设时请求不带上限 |
+| `approvalTimeoutSecs` | 审批请求等待答复的时间，秒，至少 1，默认 600：chat 的菜单选择、acp 客户端的答复与 im 的审批卡片共用这一个值；超时视为拒绝，任务不带这次调用继续 |
 | `toolTimeoutSecs` | bash 命令的默认超时，也是 MCP 调用的默认超时，秒，至少 1，默认 120 |
 | `secretFiles` | 存放密钥的文件（如为 agent 挂载的 token），或这类文件的目录（以 `.` 开头的文件跳过），其内容在工具输出中替换为 `[REDACTED]`；相对路径相对 `config.toml` 所在目录。启动时每个路径都必须存在，每个文件都必须是至多 64 KiB 的普通文件；每次脱敏前重新读取。环境变量 `ZX_SECRET_FILES`（逗号分隔）中的文件另外加上，不替换这里的 |
 | `provider.baseUrl` | OpenAI 兼容服务的地址（不含 `/chat/completions`），默认 `https://api.openai.com/v1`；`ZX_BASE_URL` 优先 |
@@ -84,8 +80,6 @@ tools = ["query", "query_range"]
 | `provider.headers` | 每个请求都发送的请求头，表：名字 → 值，如网关的路由头。`Authorization` 被拒绝：key 来自 `apiKeyEnv`。不记录在会话中 |
 | `provider.idleTimeoutSecs` | 等待响应头或下一段流的最长时间，秒，至少 1，默认 120 |
 | `provider.maxRetries` | 临时性错误的重试次数，默认 3 |
-| `chat.approvalTimeoutSecs` | chat 的审批等待菜单选择的时间，秒，至少 1，默认 120；超时视为拒绝，任务不带这次调用继续 |
-| `acp.approvalTimeoutSecs` | acp 的审批请求等待客户端答复的时间，秒，至少 1，默认 3600；超时视为拒绝 |
 | `execution` | `local`（默认）或 `container`；其他值报错。`container` 时 bash、read_file、edit_file 与 write_file 在 Docker 容器中执行，见 README 的“容器执行” |
 | `container.image` | 容器镜像，`execution = "container"` 时必填，须已在本地（`docker pull`） |
 | `container.user` | 容器内运行命令的 `uid:gid`，默认为运行 zx-agent 的用户（以 root 运行时为 `65534:65534`）；不能是 root（UID 0 或 `root`），启动时也会检查命令的实际 UID |
@@ -104,7 +98,7 @@ tools = ["query", "query_range"]
 
 ### 优先级
 
-只有两个键可以从别处覆盖：模型取 **`--model` > `ZX_MODEL` > `config.toml`**，服务地址取 **`ZX_BASE_URL` > `provider.baseUrl` > 内置默认值**。其余的键只写在 `config.toml` 中，没有对应的命令行参数（原来的 `--base-url`、`--api-key-env`、`--system-updates`、`--reasoning`、`--reasoning-format`、`--fill-missing-reasoning`、`--prompt-cache-key`、`--request-field`、`--header`、`--idle-timeout-secs`、`--max-retries`、`--max-tokens`、`--tool-timeout-secs`、`--secret-file`、`--approval-timeout-secs` 已去掉）。`--model` 不是必填；`--model`、`ZX_MODEL` 与 `config.toml` 都没有给出模型时，以退出码 2 报错：`no model: pass --model, set ZX_MODEL, or set model in <config.toml 的路径>`。
+只有两个键可以从别处覆盖：模型取 **`--model` > `ZX_MODEL` > `config.toml`**，服务地址取 **`ZX_BASE_URL` > `provider.baseUrl` > 内置默认值**。其余的键只写在 `config.toml` 中，没有对应的命令行参数。`--model` 不是必填；`--model`、`ZX_MODEL` 与 `config.toml` 都没有给出模型时，以退出码 2 报错：`no model: pass --model, set ZX_MODEL, or set model in <config.toml 的路径>`。
 
 ### 没有项目级配置文件
 
@@ -209,7 +203,7 @@ shortFlags = ["A"]
 
 注意两种 `bash(...)` 的比较方式不同：`deny` 的文本在命令中**任何位置**出现都算，`allow` 的文本必须是命令的**开头**（按词比较）。
 
-只允许一部分命令时，写 `ask = ["bash"]` 加上 `allow = ["bash(kubectl get)", ...]`：`allow` 覆盖的命令直接执行，其余命令要审批，在 run 中因为没有人审批而被拒绝。没有命令白名单（原来的 `rules.allow`）：SDK 仍可以给 `CommandPolicy` 传白名单，命令行总是传空的。
+只允许一部分命令时，写 `ask = ["bash"]` 加上 `allow = ["bash(kubectl get)", ...]`：`allow` 覆盖的命令直接执行，其余命令要审批，在 run 中因为没有人审批而被拒绝。没有命令白名单，SDK 的 `CommandPolicy` 也不接受白名单。
 
 工具名不认识、条目为空、`bash()` 中没有文本、`bash(` 没有右括号时，以退出码 2 报错，错误信息带键名（如 `permissions.deny`）。
 
@@ -224,7 +218,6 @@ url = "https://prom-mcp.monitoring.svc/mcp"
 tokenEnv = "PROM_MCP_TOKEN"                 # 可选：以 Authorization: Bearer 发送
 tools = ["query", "query_range"]            # 交给模型的工具，其余不暴露
 timeoutSecs = 60                            # 可选：一次调用多久没有应答也没有进度通知就超时，默认同 toolTimeoutSecs
-maxTimeoutSecs = 600                        # 可选：一次调用的总上限，不管进度；省略则只受 timeoutSecs、本轮超时与取消约束
 ```
 
 | 配置 | 语义 |
@@ -233,11 +226,11 @@ maxTimeoutSecs = 600                        # 可选：一次调用的总上限�
 | `url` | MCP 端点，`http://` 或 `https://` |
 | `tokenEnv` | 存放 token 的环境变量；设置后必须有值。命令看不到这个变量，它的值在工具输出中替换为 `[REDACTED]` |
 | `tools` | 交给模型的工具，按服务器给出的名字，至少一个。服务器没有列出的工具时启动失败 |
-| `timeoutSecs` | 单次调用的上限，大于零 |
+| `timeoutSecs` | 一次调用多久没有应答也没有进度通知就超时，秒，大于零；每条进度通知重新计时。一直报告进度的调用只受本轮超时（`--timeout-secs`）与取消约束（与 pi 相同，没有不看进度的总上限） |
 
-- MCP 工具默认每次调用都要审批：chat 在终端询问，im 发审批卡片，run 没有人审批而拒绝。要直接执行，在 agent 的 `permissions.allow` 中写模型看到的工具名，如 `allow = ["prom__query"]`（原来 `[[mcp]]` 的 `allowTools` 已去掉，写了报未知字段）。
-- 每个进程启动时连接一次：run、chat 在组装会话前，im 在开始接收消息前，各线程共用连接。连不上、token 变量没有值、服务器缺少列出的工具时，以退出码 2 报错。
-- 连接成功时，stderr 每个服务器一行，例如 `[mcp] prom: prom__query, prom__query_range (asks); protocol 2026-07-28; https://prom-mcp.monitoring.svc`。只写地址的协议、主机与端口；经 `http://` 发送 token 时另加 `the token is sent unencrypted`。
+- MCP 工具默认每次调用都要审批：chat 在终端询问，im 发审批卡片，run 没有人审批而拒绝。要直接执行，在 agent 的 `permissions.allow` 中写模型看到的工具名，如 `allow = ["prom__query"]`。
+- 每个进程启动时连接一次：run、chat 在组装会话前，im 在开始接收消息前，各会话共用连接。连不上、token 变量没有值、服务器缺少列出的工具时，以退出码 2 报错。
+- 连接成功时，stderr 每个服务器一行，例如 `[mcp] prom: prom__query, prom__query_range; protocol 2026-07-28; https://prom-mcp.monitoring.svc`。哪些工具要审批取决于每个会话的 agent（在组装会话时决定），这一行不标出；只写地址的协议、主机与端口；经 `http://` 发送 token 时另加 `the token is sent unencrypted`。
 - 服务器给出的工具注释（annotations）只是提示，不据此放行；工具一律按有副作用处理。
 
 
@@ -297,8 +290,6 @@ reserveTokens = 16384
 keepRecentBytes = 65536
 maxSummaryTokens = 2048
 timeoutSecs = 120
-mode = "full"              # 或 "incremental"，见下文"增量模式"
-
 ```
 
 模型的上下文窗口与单价写在 `config.toml` 的 `[[models]]` 中：
@@ -318,7 +309,6 @@ cost = { input = 0.27, output = 1.10, cacheRead = 0.07 }   # 每百万 token 的
 | `compaction.reserveTokens` | 按窗口推导 `triggerTokens` 时留出的 token 数，默认 16384（pi 的 `reserveTokens`） |
 | `compaction.maxSummaryTokens` | 摘要输出 token 上限，1–16384，默认 2048。有的服务把推理计入输出 token，推理可能用满上限而写不出摘要（见 `docs/ROADMAP.md` 的验证记录），使用这类模型时需要调高；服务支持时也可以经 `provider.requestFields` 关闭推理，但它同样作用于任务请求 |
 | `compaction.timeoutSecs` | 摘要流总超时，大于零，默认 120 秒 |
-| `compaction.mode` | `full`（默认）或 `incremental`，见下文“增量模式” |
 
 `triggerBytes = 0`（且不设 `triggerTokens`，或设为 0）关闭自动摘要，不影响手动 `/compact`；`run` 要自动摘要时，在主目录的 `agents/unattended.md` 中设置非零的 `triggerBytes`。SDK 默认不自动压缩，原构造器不变；宿主可在 Runner 上调用 `with_compaction(Config)` 校验并启用。
 
@@ -326,7 +316,7 @@ cost = { input = 0.27, output = 1.10, cacheRead = 0.07 }   # 每百万 token 的
 
 开启自动摘要时，模型以上下文过长拒绝请求（HTTP 413、`context_length_exceeded` 等错误码，或 “maximum context length”“prompt is too long” 等通用措辞；限流与服务端错误不算）后，运行不直接失败：先用 `context_edit` 省略失败的回答（记录保留），再摘要一次，然后从压缩后的上下文开始新的尝试，不重复用户消息（pi：`AgentSession` 的 overflow 恢复）。这不算重试，不占 `provider.maxRetries`；摘要请求计入请求与 token 预算，预算用完时以原错误结束。每次运行只恢复一次，之后又有回答成功时才可以再次恢复；恢复后紧接着又过长，或摘要失败、没有可摘要的范围，都以原错误加原因结束。付费的摘要请求失败同样暂停自动摘要。没有开启自动摘要时（`run` 的内置 agent 默认关闭），行为不变，以原错误结束。事件为 `context_overflow`。
 
-预算按内部消息 JSON 的字节数估算（不含工具结果的 `details`，它不发给模型），不是 tokenizer，也不包含工具定义或 HTTP 封装；不能据此保证适合每个模型的 token 窗口。保留最近约 64 KiB、完整的最新用户输入、全部 system 更新，边界不拆开工具调用与结果。保留范围会向前扩到最新输入，并保留它之后的全部消息；单个任务过长也可能超过预算。若保留部分无法缩到阈值内，明确停止，不截断指令或最新输入。摘要源最多 2 MiB，摘要响应和结构化正文最多 64 KiB；源过大时需新建会话，无法无限压缩同一份原始历史。
+预算按内部消息 JSON 的字节数估算（不含工具结果的 `details`，它不发给模型），不是 tokenizer，也不包含工具定义或 HTTP 封装；不能据此保证适合每个模型的 token 窗口。保留最近约 64 KiB、完整的最新用户输入、全部 system 更新，边界不拆开工具调用与结果。保留范围会向前扩到最新输入，并保留它之后的全部消息；单个任务过长也可能超过预算。若保留部分无法缩到阈值内，明确停止，不截断指令或最新输入。摘要源最多 2 MiB（`MAX_SOURCE_BYTES`），摘要响应和结构化正文最多 64 KiB；每次摘要都重新读取边界之前的全部原始记录，历史累计超过 2 MiB 后无法再摘要，需要 `/new` 开新会话。
 
 审计流程如下：
 
@@ -340,21 +330,11 @@ cost = { input = 0.27, output = 1.10, cacheRead = 0.07 }   # 每百万 token 的
                               全部 system + 成功摘要 + 保留范围 → 任务请求
 ```
 
-会话格式只有当前一个版本（见 README 的“会话文件”）。开始记录保存源 ID、保留边界、摘要请求配置；成功记录保存摘要、用量和开始记录的引用。失败或进程退出后未完成的尝试不改变投影。保留边界按条目在分支上的先后计算：保留范围的第一条消息之后被 `context_edit` 省略，摘要仍替代它之前的全部记录。全量模式（默认）的重压缩始终读取应用过 `context_edit` 的原始投影，不读取旧摘要；各分支独立。两种模式的摘要源都去掉工具结果的 `details`，请求审计还原时同样去掉。
+会话格式只有当前一个版本（见 README 的“会话文件”）。开始记录保存源 ID、保留边界、摘要请求配置；成功记录保存摘要、用量和开始记录的引用。失败或进程退出后未完成的尝试不改变投影。保留边界按条目在分支上的先后计算：保留范围的第一条消息之后被 `context_edit` 省略，摘要仍替代它之前的全部记录。重压缩始终读取应用过 `context_edit` 的原始投影，不读取旧摘要；各分支独立。摘要源去掉工具结果的 `details`，请求审计还原时同样去掉。
 
-摘要字段为 `facts: [{text, sourceEntryIds}]`、`inferences: [string]`、`plans: [string]`。每条事实至少引用一个本次源条目；无效引用、无效 JSON、工具调用、输出截断或超限均拒绝提交。引用存在只证明出处可定位，**不证明模型的陈述正确或摘要无信息损失**。system 和合成摘要不能直接通过 `context_edit` 改写；全量模式下，修正被摘要覆盖的原消息后，旧摘要失效，投影恢复到已应用修正的原始记录。钩子看到的合成摘要是 `kind` 为 `summary` 的 user 消息，变换计划若编辑、省略或追加这类消息，会在校验时被整份拒绝，不写入任何条目。
+摘要字段为 `facts: [{text, sourceEntryIds}]`、`inferences: [string]`、`plans: [string]`。每条事实至少引用一个本次源条目；无效引用、无效 JSON、工具调用、输出截断或超限均拒绝提交。引用存在只证明出处可定位，**不证明模型的陈述正确或摘要无信息损失**。system 和合成摘要不能直接通过 `context_edit` 改写；修正被摘要覆盖的原消息后，旧摘要失效，投影恢复到已应用修正的原始记录。钩子看到的合成摘要是 `kind` 为 `summary` 的 user 消息，变换计划若编辑、省略或追加这类消息，会在校验时被整份拒绝，不写入任何条目。
 
-### 增量模式
-
-`mode = "incremental"` 时（默认为 `full`），会话中的第一次摘要与全量模式读取相同的范围；之后每次摘要只读取上一份摘要中仍有效的事实，加上该摘要边界之后的原始记录，以及此后被 `context_edit` 修正、仍然可见的旧记录。摘要请求的大小因此取决于上一份摘要（至多 64 KiB）与本次读取的记录，不随历史总长增长，长会话不会因历史累计超过约 2 MiB 而无法再摘要；单次摘要的输入仍以 2 MiB 为限。这一模式尚未用真实模型评测，评测之后再决定是否设为默认。
-
-- 旧事实由程序原样保留：模型只返回新事实（`supersedes` 可列出被它取代的旧事实编号），推断与计划每次重新生成。每条事实带编号 `<创建它的尝试 ID>-<序号>`；接续全量模式留下的摘要时按同一规则推导编号。
-- 被取代的事实不再进入上下文，仍保留在之前的摘要记录中；去掉被取代的事实之后仍超过 128 条或 64 KiB 时，从最早的旧事实起逐条淘汰，摘要记录写明 `superseded` 与 `evicted`。
-- 已知问题：旧事实只能整条保留或整条取代。一条事实若把仍成立的细节（例如 JVM 启动参数）和会变化的对象（例如旧 Pod、旧的内存上限）写在一起，后者变化时整条被取代，仍成立的细节随之离开上下文。评测中三次都出现，决定不修复，见 `docs/ROADMAP.md` 的已知缺口。
-- 修正被摘要覆盖的原消息时，只作废引用了它的事实，摘要其余部分照常生效；修正后的记录在下一次摘要时重新读取。
-- 记录：`compaction_started` 带 `mode: "incremental"` 与 `continues`（接续的摘要条目），请求审计据此还原增量请求。加载时校验：接续的是同一分支上最新的有效摘要，读取范围与记录相符，旧事实逐字沿用（只少了被取代与被淘汰的），被淘汰的是最早的一段。
-
-`compact` 与 prompt 重叠时返回 Busy，运行中也不能切模型或清授权。取消、超时或丢弃 future 会释放运行权，未完成记录保留供审计。TTY 手动压缩期间可暂存一个普通输入，成功或失败返回后执行；Ctrl+C 清除暂存输入并报告。管道脚本仍按操作顺序消费。
+`compact` 与 prompt 重叠时返回 Busy，运行中也不能切模型。取消、超时或丢弃 future 会释放运行权，未完成记录保留供审计。TTY 手动压缩期间可暂存一个普通输入，成功或失败返回后执行；Ctrl+C 清除暂存输入并报告。管道脚本仍按操作顺序消费。
 
 ## 工具结果落盘
 

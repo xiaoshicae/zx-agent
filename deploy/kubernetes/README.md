@@ -87,7 +87,7 @@ kubectl -n zx-agent logs job/inspect-now
 
 每次巡检把会话文件写到存储卷 `zx-agent-inspect-sessions` 的 `sessions/<Pod 名>.jsonl`。文件里有每次模型请求、每条命令和它的结果，是巡检的审计记录；进程崩溃或被杀时也留下已写入的部分，可以据此用 `run --continue` 接着跑。这块卷与常驻 Pod 的 `zx-agent-data` 分开，因为单节点读写的卷不一定能被另一个节点上的 Job 挂载。文件不会自动清理，按每小时一次的频率要定期删除旧文件，或调大卷的容量。读取文件需要一个挂载这块卷的临时 Pod，卷同一时间只能挂在一个节点上，所以要在巡检的 Job 不运行时做。
 
-无人值守时审批一律拒绝，模型可能绕开被拒的命令照样给出回答，退出码仍是 0。要让这种情况在 Job 状态里可见，在 `command` 中加 `--fail-on-denied`：有命令被拒时以退出码 9 结束，Job 记为失败。默认没有加，因为模型试探白名单外的命令并不少见，会让 Job 频繁标为失败。
+无人值守时审批一律拒绝，模型可能绕开被拒的命令照样给出回答，退出码仍是 0。要让这种情况在 Job 状态里可见，在 `command` 中加 `--fail-on-denied`：有命令被拒时以退出码 9 结束，Job 记为失败。默认没有加，因为模型试探 `allow` 之外的命令并不少见，会让 Job 频繁标为失败。
 
 以上两项改动只经 `kubectl kustomize` 在本地渲染检查过（本体与打开 `multicluster` 组件各一次），没有在集群上运行；`$(POD_NAME)` 由 Kubernetes 在启动容器时展开，不经过 shell。
 
@@ -222,7 +222,7 @@ kubectl -n zx-agent rollout restart deploy/zx-agent
 | `zx-agent` | 常驻 Pod：chat 与单次任务 | `view`；启用 `operator.yaml` 后，另有下表的写权限 |
 | `zx-agent-inspect` | 定时巡检 | `view` |
 
-`operator.yaml` 只开放以下写操作。每一项都在验证集群上实测过，见“验证记录”：
+`operator.yaml` 只开放以下写操作。每一项都在验证集群上实测过，见 `docs/ROADMAP.md` 第 6 节：
 
 | 命令 | 需要的权限 |
 |-|-|
@@ -258,56 +258,7 @@ kubectl delete namespace zx-agent
 
 ## 验证记录
 
-**环境**（2026-11-01，结果均为单次观测）：
-
-- 集群：本机 Docker Desktop 自带的 Kubernetes v1.36.1，2 个 arm64 节点；默认 StorageClass 为 local-path（ext4），回收策略 `Delete`。
-- 代码：完整验证基于 `dd43cce`。rebase 到包含 PR #21（会话文件单写者）的 `5c20655` 之后，换用新标签的镜像复验了以下几项：会话锁、脱敏、`/proc` 保护、chat 审批、定时巡检。
-- 清单：通过一个 overlay 把命名空间换成 `zx-agent-e2e`、镜像换成本地构建的 `zx-agent:e2e`，其余清单原样使用。
-- 镜像：没有推送到镜像仓库，这个集群可以直接使用本地镜像。
-- 模型：按脚本应答的假服务，不产生费用。
-
-| 项 | 结果 |
-|-|-|
-| 镜像 | 构建成功：zx-agent 0.1.0、kubectl v1.36.1（校验和检查通过）、jq 1.6。以 uid 10001 运行，PID 1 是 tini |
-| 只读账号 | Pod 内 `kubectl get pods` 成功；读 Secret、`rollout restart` 都被拒绝（Forbidden） |
-| run | `kubectl exec … zx-agent run` 执行 `kubectl get pods` 并回答，退出码 0，会话文件写在 `/data` |
-| chat | 通过 `-i` 管道和 `-it` 终端两种方式运行。`kubectl get` 直接执行；`rollout restart` 先请求审批，未启用 `operator.yaml` 时，批准后被拒绝 |
-| 写权限 | 启用 `operator.yaml` 后，下列操作在审批或直接执行后都成功：`rollout restart`（Deployment、StatefulSet、DaemonSet）、`scale`（Deployment、StatefulSet）、`delete pod`。`kubectl -v=6` 显示 `scale` 请求的是 `…/scale` 子资源 |
-| 定时巡检 | `create job --from=cronjob` 试跑完成，`kubectl logs` 显示回答。巡检账号用 `auth can-i` 检查：`list pods` 为 yes，`patch deployments`、`delete pods` 为 no；在巡检 Pod 中执行写命令被拒绝 |
-| 脱敏与 `/proc` | 命令读出 ServiceAccount token 和 PID 1 环境中的 API key，工具结果里都是 `[REDACTED]`；假模型收到的 8 个请求中不含 token，也不含 API key。命令读 agent 自身的 `/proc/<pid>/environ` 时得到 `Permission denied`。巡检 Pod 的 PID 1 是 zx-agent，读它的环境同样被拒绝（agent 不再把自身设为不可 dump 之后，读 agent 自身的环境不再被拒绝，这两项不再成立，未重新实测） |
-| 会话文件锁（PR #21） | chat 运行期间持有会话文件的 `flock`。另一个 `kubectl exec` 中对同一文件的 run 报告 `is in use`，退出码 2；chat 结束后，同一文件可以再次使用 |
-| 清理 | `delete -k` 删除了全部对象，包括集群级的角色和绑定；从 CronJob 创建的 Job 被一并回收；卷被删除；删除命名空间后没有残留 |
-
-**多集群**（基于 `e33f6fb` 上的分支，镜像标签为 `e2e-mc`）：只有一个集群可用，所以由同一集群扮演远端。`remote.yaml` 创建的只读账号作为远端身份，kubeconfig 中的 `remote` context 指向同一个 API server，但使用这个账号的 token。
-
-| 项 | 结果 |
-|-|-|
-| 远端准备 | `kubectl apply -f remote.yaml` 之后，token Secret 自动填入了 token 和 CA；该 token 的 JWT 中没有 `exp` |
-| 身份 | 常驻 Pod 中 `kubectl auth whoami`：默认 context 为 `system:serviceaccount:zx-agent-e2e:zx-agent`，`--context remote` 为 `system:serviceaccount:zx-agent-remote:zx-agent`。巡检 Pod 中两者分别为 `zx-agent-inspect` 与同一个远端账号 |
-| run 与脱敏 | run 通过 `--context remote` 读到 Pod 列表；命令读出远端 token 时，工具结果是 `[REDACTED]`（`ZX_SECRET_FILES` 指向 token 目录） |
-| chat | `kubectl config get-contexts` 与 `kubectl get pods … --context remote` 都不经审批直接执行 |
-| 新增集群 | 用 `create … --dry-run=client -o yaml \| apply` 给 Secret 加一个 key；约 56 秒后新文件出现在 Pod 中，内容随即被脱敏；Pod 没有重启。用 `--save-config` 创建的对象，之后 `apply` 不再提示缺少注解 |
-| 清理 | 本集群对象按“清理”一节删除；远端执行 `kubectl delete -f remote.yaml --ignore-not-found`，退出码 0。不加该参数时，因 token 已随 Namespace 删除，命令报 NotFound 并以 1 退出 |
-
-**IM 服务**（基于 PR #32 的 `c272f41` 加上本次改动，镜像标签为 `serve-d1`。当时子命令、组件、ConfigMap 与挂载路径的名字是 `serve`、`zx-agent-serve`、`/etc/zx-agent-serve/serve.toml`，现为 `im`、`zx-agent-im-config`、`/etc/zx-agent-im/im.toml`；下面保留当时的原样，改名后未重新实测）：
-
-- 没有真实平台的凭据，所以 `serve.toml` 中 Slack 的 `apiBase` 指向一个拒绝连接的地址（`127.0.0.1:9`），Secret 中放的是假 token。
-- 清单为本目录原样，只在 `kustomization.yaml` 中启用了 `serve` 组件、改了镜像标签。
-- 上文“IM 服务”中的每条命令都执行过。
-
-| 项 | 结果 |
-|-|-|
-| 进程 | PID 1 为 `/pause`，`zx-agent serve --config /etc/zx-agent-serve/serve.toml` 为 7 号进程 |
-| `/proc` 保护 | `/proc/1/environ` 中没有 `OPENAI_API_KEY`；读 serve 的 `/proc/7/environ` 得到 `Permission denied`（agent 不再把自身设为不可 dump 之后，后一项不再成立，未重新实测） |
-| 孤儿进程 | 执行 `(sleep 1 &)` 后 3 秒，没有状态为 `Z` 的进程 |
-| chat | serve 运行期间，`kubectl exec -i` 启动 chat 并输入 `/quit`，退出码 0 |
-| 日志 | stderr 有启动行 `[serve] platforms=slack; sessions in /data/sessions`；连不上 Slack 时，每次重试都有一行 `{"type":"failed","platform":"slack",...}`，间隔 1、2 秒递增；日志中没有出现任何一个凭据值 |
-| 停止 | 向 serve 发送 SIGTERM 后，容器以退出码 0 结束（`Completed`）并重启 |
-| 重启 | `kubectl rollout restart` 完成 |
-| 两个组件 | 同时启用 `serve` 与 `multicluster` 渲染：挂载 `/etc/zx-agent-serve` 与 `/etc/zx-agent`，两组环境变量都在，不冲突 |
-| 清理 | 按“清理”一节删除后，命名空间与两个 ClusterRoleBinding 都已不存在 |
-
-未验证：x86_64 镜像与其他集群（如 GKE）、推送到镜像仓库、真实模型、真正分属两个集群的多集群访问、kubeconfig 中 exec 插件（如云厂商认证插件）方式的凭据、真实的 Slack 工作区与 ⚑ D:5/CHINA FLAG: 飞书租户（IM 服务只对连不上的地址验证了启动、日志与停止）。
+见 [`docs/ROADMAP.md`](../../docs/ROADMAP.md) 第 6 节。
 
 ---
 

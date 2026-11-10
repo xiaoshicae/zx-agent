@@ -13,7 +13,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 
 use common::mock_server::{MockServer, Reply};
-use common::{fake_model_config, session_dir, stderr, write_agent, write_config, zx_agent};
+use common::{Home, fake_model_config, session_dir, stderr, write_agent, write_config, zx_agent_in};
 
 const KEY_VAR: &str = "ZX_ACP_TEST_KEY";
 
@@ -64,19 +64,15 @@ impl Acp {
             &home.join(".zx-agent"),
             &fake_model_config(KEY_VAR, "", "idleTimeoutSecs = 10"),
         );
-        let mut child = zx_agent()
+        let mut child = zx_agent_in(cwd, Home::User(&home))
             .arg("acp")
             .args(["--model", "mock-model"])
             .args(args)
-            .current_dir(cwd)
-            .env("HOME", &home)
-            .env_remove("ZX_AGENT_HOME")
             .env("ZX_BASE_URL", &server.base_url)
             .env(KEY_VAR, "sk-acp-test-key")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
-            .kill_on_drop(true)
             .spawn()
             .unwrap();
         let stdin = child.stdin.take().unwrap();
@@ -641,18 +637,16 @@ async fn a_live_session_is_replayed_in_place() {
 #[tokio::test]
 async fn a_single_session_file_is_refused_before_the_connection() {
     let work = tempfile::tempdir().unwrap();
-    let output = zx_agent()
+    let output = zx_agent_in(work.path(), Home::User(work.path()))
         .args(["acp", "--model", "m", "--session"])
         .arg(work.path().join("one.jsonl"))
-        .env("HOME", work.path())
-        .env_remove("ZX_AGENT_HOME")
         .stdin(Stdio::null())
         .output()
         .await
         .unwrap();
     let errors = stderr(&output);
     assert_eq!(output.status.code(), Some(2), "{errors}");
-    assert!(errors.contains("--session does not apply"), "{errors}");
+    assert!(errors.contains("unexpected argument '--session'"), "{errors}");
 }
 
 #[tokio::test]

@@ -50,14 +50,6 @@ fn a_recorded_session_rebuilds_to_the_requests_it_sent() {
     assert_fixture_rebuilds("replay-full");
 }
 
-/// The same for incremental summaries: the fixture holds a tool call, a first incremental
-/// summary, a correction of a summarized tool result, a second summary that reads it again
-/// and supersedes an earlier fact, and a request after it.
-#[test]
-fn a_recorded_incremental_session_rebuilds_to_the_requests_it_sent() {
-    assert_fixture_rebuilds("replay-incremental");
-}
-
 /// `tests/fixtures/<name>.jsonl` rebuilds to `tests/fixtures/<name>.expected.json`, byte for
 /// byte as pretty-printed JSON, so that the order of fields counts too.
 fn assert_fixture_rebuilds(name: &str) {
@@ -203,28 +195,6 @@ async fn only_request_checkpoints_can_be_replayed() {
     let message = store.append_message(Message::user("not a request")).await.unwrap();
     assert!(store.replay_request(&message).is_err());
     assert!(store.replay_request("missing").is_err());
-}
-
-#[tokio::test]
-async fn a_request_that_differs_from_the_persisted_projection_is_not_recorded() {
-    let mut store = SessionStore::in_memory(header());
-    store.append_message(Message::user("persisted")).await.unwrap();
-    let before = store.entries().len();
-    let request = Request {
-        model: "test-model".into(),
-        messages: vec![Message::user("never persisted")],
-        tools: vec![],
-        max_tokens: None,
-        reasoning: None,
-        cache_key: None,
-    };
-
-    let recorded = store
-        .record_request(&request, "faux", serde_json::Value::Null, RequestSource::Projection)
-        .await;
-
-    assert!(recorded.is_err());
-    assert_eq!(store.entries().len(), before);
 }
 
 #[tokio::test]

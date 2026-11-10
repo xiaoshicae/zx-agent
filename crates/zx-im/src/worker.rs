@@ -315,7 +315,7 @@ impl Worker {
         let text = self.out.attributed(&incoming.sender, &incoming.text).await;
         let steered = match &mut self.phase {
             Phase::Running { open, .. } => {
-                open.session.steer(text);
+                open.session.queues().steer(text);
                 true
             }
             Phase::Waiting { texts, .. } => {

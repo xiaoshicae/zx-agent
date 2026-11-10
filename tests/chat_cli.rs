@@ -10,7 +10,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{ChildStdout, Command};
 
 use common::mock_server::{MockServer, Reply};
-use common::{json_lines, signal, stderr, stdout, tool_call_answer, write_agent, write_config, zx_agent};
+use common::{Home, json_lines, signal, stderr, stdout, tool_call_answer, write_agent, write_config, zx_agent_in};
 use zx_agent::ai::Message;
 use zx_agent::session::SessionStore;
 
@@ -27,21 +27,17 @@ fn chat_retrying(server: &MockServer, cwd: &Path, args: &[&str], max_retries: &s
     if !agent_home(cwd).join("config.toml").exists() {
         write_config(&agent_home(cwd), &base_config(max_retries, "", ""));
     }
-    let mut command = zx_agent();
+    // chat keeps sessions under the home directory by default; never the real one.
+    let mut command = zx_agent_in(cwd, Home::User(&cwd.join(".home")));
     command
         .arg("chat")
         .args(["--model", "mock-model"])
         .args(args)
-        .current_dir(cwd)
-        // chat keeps sessions under the home directory by default; never the real one.
-        .env("HOME", cwd.join(".home"))
-        .env_remove("ZX_AGENT_HOME")
         .env("ZX_BASE_URL", &server.base_url)
         .env(KEY_VAR, KEY)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+        .stderr(Stdio::piped());
     command
 }
 
@@ -686,26 +682,6 @@ async fn a_turn_without_reported_usage_omits_the_token_counts() {
     assert!(!log.contains(" in · "), "{log}");
 }
 
-#[tokio::test]
-async fn show_thinking_streams_reasoning_on_stderr_only_when_asked() {
-    let reply = || {
-        Reply::Sse(vec![
-            json!({"choices":[{"index":0,"delta":{"reasoning_content":"让我想想"},"finish_reason":null}]}),
-            json!({"choices":[{"index":0,"delta":{"content":"答案"},"finish_reason":"stop"}]}),
-        ])
-    };
-    let dir = tempfile::tempdir().unwrap();
-    let server = MockServer::start(vec![reply()]).await;
-    let output = run(&server, dir.path(), &["--tools", ""], "go\n/quit\n").await;
-    assert_eq!(stdout(&output), "答案\n");
-    assert!(!stderr(&output).contains("让我想想"), "{}", stderr(&output));
-
-    let server = MockServer::start(vec![reply()]).await;
-    let output = run(&server, dir.path(), &["--tools", "", "--show-thinking"], "go\n/quit\n").await;
-    assert_eq!(stdout(&output), "答案\n");
-    assert!(stderr(&output).contains("让我想想\n"), "{}", stderr(&output));
-}
-
 #[cfg(unix)]
 #[tokio::test]
 async fn ctrl_c_twice_while_idle_exits() {
@@ -1007,130 +983,6 @@ async fn provider_error_control_sequences_are_displayed_literally() {
     assert!(stderr(&output).contains("\\u{1b}"));
 }
 
-#[cfg(unix)]
-#[tokio::test]
-async fn debug_starts_on_a_new_line_and_respects_no_color() {
-    for no_color in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
-        let server = MockServer::start(vec![Reply::text("last assistant line")]).await;
-        let (mut terminal, slave) = common::pty();
-        let mut command = chat(&server, dir.path(), &["--tools", "", "--debug"]);
-        command
-            .stdout(Stdio::from(slave.try_clone().unwrap()))
-            .stderr(Stdio::from(slave));
-        command.env("TERM", "xterm").env("TZ", "Asia/Shanghai");
-        if no_color {
-            command.env("NO_COLOR", "1");
-        } else {
-            command.env_remove("NO_COLOR");
-        }
-        let mut child = command.spawn().unwrap();
-        drop(command);
-        let mut stdin = child.stdin.take().unwrap();
-        stdin.write_all(b"go\n/quit\n").await.unwrap();
-        drop(stdin);
-        let mut bytes = Vec::new();
-        let reader = tokio::spawn(async move {
-            let mut chunk = [0; 4096];
-            while let Ok(n) = terminal.read(&mut chunk).await {
-                if n == 0 {
-                    break;
-                }
-                bytes.extend_from_slice(&chunk[..n]);
-            }
-            bytes
-        });
-        let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(status.success());
-        let output = String::from_utf8(reader.await.unwrap()).unwrap();
-        let after = output.split_once("last assistant line").expect(&output).1;
-        assert!(after.starts_with("\r\n") || after.starts_with('\n'), "{output:?}");
-        assert!(after.contains("Response #1"), "{output:?}");
-        assert!(output.contains("+08:00]"), "{output:?}");
-        if no_color {
-            assert!(!output.contains("\x1b[36m"), "{output:?}");
-        } else {
-            assert!(output.contains("\x1b[36m[debug "), "{output:?}");
-        }
-    }
-}
-
-#[tokio::test]
-async fn debug_shows_execution_events_and_filtered_tool_results() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("credentials.txt"), format!("prefix {KEY} suffix")).unwrap();
-    let tool = json!({"choices":[{"index":0,"delta":{"tool_calls":[{
-        "index":0,"id":"read","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"credentials.txt\"}"}
-    }]},"finish_reason":"tool_calls"}]});
-    let server = MockServer::start(vec![Reply::Sse(vec![tool]), Reply::text("done")]).await;
-    let output = run(
-        &server,
-        dir.path(),
-        &["--tools", "read_file", "--debug"],
-        "read\n/quit\n",
-    )
-    .await;
-    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    let debug = stderr(&output);
-    for expected in [
-        "Request #1 · Task",
-        "turn=1 · attempt=1",
-        "Request #2 · Task",
-        "turn=2 · attempt=1",
-        "Tool call · read_file",
-        "Tool policy · read_file",
-        "Tool finished · read_file",
-        "Tool result · read_file",
-        "credentials.txt",
-        "[REDACTED]",
-        "Response #2",
-        "Task finished",
-        "tokens in=",
-    ] {
-        assert!(debug.contains(expected), "missing {expected}: {debug}");
-    }
-    assert!(!debug.contains(KEY), "{debug}");
-    assert_eq!(stdout(&output), "done\n");
-}
-
-#[tokio::test]
-async fn debug_shows_policy_approval_and_denied_tool_result() {
-    let dir = tempfile::tempdir().unwrap();
-    let server = MockServer::start(vec![Reply::bash("c", "printf forbidden > marker"), Reply::text("done")]).await;
-    let output = run(&server, dir.path(), &["--tools", "bash", "--debug"], "go\n3\n/quit\n").await;
-    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert!(!dir.path().join("marker").exists());
-    let log = stderr(&output);
-    for expected in [
-        "Tool call · bash",
-        "Tool policy · bash",
-        "Approval requested · bash",
-        "Approval resolved · bash",
-        "Denied",
-        "not executed / duration unavailable",
-        "Tool result · bash",
-        "Task finished",
-    ] {
-        assert!(log.contains(expected), "missing {expected}: {log}");
-    }
-}
-
-#[tokio::test]
-async fn debug_reports_model_failure_without_repeating_the_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let server = MockServer::start(vec![Reply::Status(400, "provider-failure-marker")]).await;
-    let output = run(&server, dir.path(), &["--tools", "", "--debug"], "go\n/quit\n").await;
-    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    let log = stderr(&output);
-    assert!(log.contains("Request #1 · Task"), "{log}");
-    assert!(log.contains("Response #1 · Error · elapsed="), "{log}");
-    assert!(log.contains("Task finished · Error"), "{log}");
-    assert_eq!(log.matches("provider-failure-marker").count(), 1, "{log}");
-}
-
 #[tokio::test]
 async fn an_approved_command_is_shown_with_the_request_and_again_with_its_result() {
     let dir = tempfile::tempdir().unwrap();
@@ -1141,25 +993,6 @@ async fn an_approved_command_is_shown_with_the_request_and_again_with_its_result
     assert_eq!(log.matches("printf example > marker").count(), 2, "{log}");
     assert!(log.contains("[approval 1] bash: printf example > marker"), "{log}");
     assert!(log.contains("[tool] bash: printf example > marker -> ok"), "{log}");
-    assert!(!log.contains("[debug "));
-}
-
-#[tokio::test]
-async fn debug_does_not_change_jsonl_events() {
-    let dir = tempfile::tempdir().unwrap();
-    let server = MockServer::start(vec![Reply::text("done")]).await;
-    let output = run(
-        &server,
-        dir.path(),
-        &["--tools", "", "--debug", "--output", "jsonl"],
-        "go\n/quit\n",
-    )
-    .await;
-    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert!(!stderr(&output).contains("[debug "));
-    for line in stdout(&output).lines() {
-        serde_json::from_str::<Value>(line).unwrap();
-    }
 }
 
 #[tokio::test]
@@ -1316,38 +1149,6 @@ async fn lines_pasted_together_into_a_terminal_are_one_message() {
     let report = read_event_until(&mut events, |event| event["type"] == "run_end").await;
     assert_eq!(report["report"]["finalText"], "got it");
     assert_eq!(users(&server, 0), ["第一行：日志\n第二行：ERROR\n请分析"]);
-    terminal.write_all(b"/quit\n").await.unwrap();
-    terminal.flush().await.unwrap();
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .code(),
-        Some(0)
-    );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn a_terminal_shows_a_status_line_while_the_model_is_silent() {
-    let dir = tempfile::tempdir().unwrap();
-    let server = MockServer::start(vec![Reply::Stall(vec![])]).await;
-    let (mut terminal, slave) = common::pty();
-    let mut command = chat(&server, dir.path(), &["--tools", ""]);
-    command
-        .stdin(Stdio::from(slave.try_clone().unwrap()))
-        .stdout(Stdio::from(slave.try_clone().unwrap()))
-        .stderr(Stdio::from(slave));
-    command.env("TERM", "xterm").env_remove("NO_COLOR");
-    let mut child = command.spawn().unwrap();
-    drop(command);
-    terminal.write_all(b"go\n").await.unwrap();
-    terminal.flush().await.unwrap();
-    let mut seen = Vec::new();
-    read_terminal_until(&mut terminal, &mut seen, "waiting for the model · ").await;
-    let output = String::from_utf8_lossy(&seen).into_owned();
-    assert!(output.contains("\x1b[2m"), "the status is dimmed: {output:?}");
     terminal.write_all(b"/quit\n").await.unwrap();
     terminal.flush().await.unwrap();
     assert_eq!(
@@ -1564,7 +1365,7 @@ async fn an_expired_approval_frees_the_next_scripted_line() {
         Reply::text("second answer"),
     ])
     .await;
-    config(dir.path(), "[chat]\napprovalTimeoutSecs = 1");
+    configure(dir.path(), "approvalTimeoutSecs = 1", "");
     let mut child = chat(&server, dir.path(), &["--tools", "bash", "--output", "jsonl"])
         .spawn()
         .unwrap();
@@ -1754,30 +1555,6 @@ async fn a_hook_failure_is_reported_with_its_reason() {
 }
 
 #[tokio::test]
-async fn the_queue_mode_is_all_at_startup_and_changed_with_a_command() {
-    let dir = tempfile::tempdir().unwrap();
-    let server = MockServer::start(vec![]).await;
-    let output = run(
-        &server,
-        dir.path(),
-        &["--tools", "", "--no-session"],
-        "/queue\n/queue one-at-a-time\n/queue sometimes\n/quit\n",
-    )
-    .await;
-    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    let err = stderr(&output);
-    assert!(err.contains("[chat] queue: steering=all follow-up=all"), "{err}");
-    assert!(
-        err.contains("[chat] queue: steering=one-at-a-time follow-up=one-at-a-time"),
-        "{err}"
-    );
-    assert!(
-        err.contains("[chat] unknown queue mode \"sometimes\"; use all or one-at-a-time"),
-        "{err}"
-    );
-}
-
-#[tokio::test]
 async fn config_prices_the_model_and_the_cost_shows_in_turn_and_status_lines() {
     let dir = tempfile::tempdir().unwrap();
     config(
@@ -1797,18 +1574,6 @@ async fn config_prices_the_model_and_the_cost_shows_in_turn_and_status_lines() {
     // The fake server reports 10 input and 2 output tokens: 10 + 4, in the prices' unit.
     assert!(err.contains("· 10 in · 2 out · cost 14.0000 ·"), "{err}");
     assert!(err.contains("· 10 in · 2 out · 0 cached · cost 14.0000"), "{err}");
-
-    config(
-        dir.path(),
-        "[[models]]\nid = \"mock-model\"\ncost = { input = -1.0, output = 0.0 }\n",
-    );
-    let refused = run(&server, dir.path(), &["--no-session"], "/quit\n").await;
-    assert_eq!(refused.status.code(), Some(2), "{}", stderr(&refused));
-    assert!(
-        stderr(&refused).contains("prices must be zero or more"),
-        "{}",
-        stderr(&refused)
-    );
 }
 
 #[tokio::test]
@@ -1836,23 +1601,6 @@ async fn request_headers_and_the_prompt_cache_key_reach_the_server() {
         .id
         .clone();
     assert_eq!(request.body["prompt_cache_key"], session_id);
-
-    config(dir.path(), "headers = { Authorization = 'Bearer x' }");
-    let refused = run(&server, dir.path(), &["--no-session"], "/quit\n").await;
-    assert_eq!(refused.status.code(), Some(2), "{}", stderr(&refused));
-    assert!(
-        stderr(&refused).contains("provider.headers: Authorization"),
-        "{}",
-        stderr(&refused)
-    );
-    config(dir.path(), "headers = { 'no colon' = 'x' }");
-    let malformed = run(&server, dir.path(), &["--no-session"], "/quit\n").await;
-    assert_eq!(malformed.status.code(), Some(2), "{}", stderr(&malformed));
-    assert!(
-        stderr(&malformed).contains("invalid request header name"),
-        "{}",
-        stderr(&malformed)
-    );
 }
 
 #[tokio::test]

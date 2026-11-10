@@ -9,12 +9,12 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::AgentSession;
-use zx_agent::agent::{AgentEvent, Event, LoopConfig};
+use zx_agent::agent::{AgentEvent, Event, LoopConfig, PolicyDecision};
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::continuation::ContinueOnLength;
 use zx_agent::executor::LocalExecutor;
-use zx_agent::policy::{CommandPolicy, PolicyHook};
+use zx_agent::policy::{AutoApprove, CommandPolicy, PolicyHook, Rule, RuleMatcher, RulePolicy};
 use zx_agent::prompt::{build_system_prompt, environment_section};
 use zx_agent::redact::RedactSecrets;
 use zx_agent::runner::Limits;
@@ -33,16 +33,21 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| "Report disk and memory usage.".to_string());
     let model = std::env::var("ZX_MODEL")?;
     let cwd = std::env::current_dir()?;
-    // Read-only diagnostics only. `ps` is left out: on Linux, `ps e` can print the environment
-    // of the user's processes, which includes this process's API key.
-    let policy = CommandPolicy::new(["df", "free", "uptime", "head", "sort"]);
-    let system_prompt = build_system_prompt(
-        INSTRUCTIONS,
-        &[
-            ("environment", &environment_section(&cwd)),
-            ("command_policy", &policy.prompt_section().unwrap_or_default()),
-        ],
-    );
+    // Read-only diagnostics only: other commands ask, and nobody is there to approve them.
+    // `ps` is left out: on Linux, `ps e` can print the environment of the user's processes,
+    // which includes this process's API key.
+    let rules = RulePolicy::new(vec![
+        Rule {
+            matcher: RuleMatcher::Tool("bash".to_string()),
+            decision: PolicyDecision::Ask("only read-only diagnostics run unattended".to_string()),
+        },
+        Rule {
+            matcher: RuleMatcher::Any,
+            decision: PolicyDecision::Allow,
+        },
+    ])
+    .auto_approve(AutoApprove::new(["df", "free", "uptime", "head", "sort"]));
+    let system_prompt = build_system_prompt(INSTRUCTIONS, &[("environment", &environment_section(&cwd))]);
     // The key must not reach commands, where `env` would reveal it.
     let bash = BashTool {
         executor: Arc::new(LocalExecutor {
@@ -65,7 +70,8 @@ async fn main() -> anyhow::Result<()> {
     };
     // Continue once if an answer stops at the output token limit.
     config.hooks.push(ContinueOnLength::new(1));
-    config.hooks.push(PolicyHook::new(Arc::new(policy)));
+    config.hooks.push(PolicyHook::new(Arc::new(CommandPolicy::new())));
+    config.hooks.push(PolicyHook::new(Arc::new(rules)));
     config.hooks.push(RedactSecrets::new(api_key));
     let session = SessionStore::in_memory(SessionHeader::new(&cwd, &model));
     // Any `Fn(&Event)` is an event sink.

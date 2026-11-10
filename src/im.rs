@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use zx_agent::AgentSession;
 use zx_agent::agent::Interaction;
-use zx_agent::agent::{EventSink, NullSink};
+use zx_agent::agent::NullSink;
 use zx_agent::ai::now_ms;
 use zx_agent::config::Builtin;
 use zx_agent::im::feishu::{FeishuChannel, FeishuConfig};
@@ -26,12 +26,10 @@ use zx_agent::im::{
 };
 use zx_agent::otel::Telemetry;
 
-use crate::cli::{self, ImArgs, SessionOptions, env_value};
+use crate::cli::{self, ImArgs, env_value};
 use crate::process::{EXIT_COMPLETED, EXIT_ERROR, EXIT_USAGE, spawn_signal_handler, with_telemetry, write_line};
 use crate::session_files::SessionFile;
 
-/// How long an approval card waits for a click.
-const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 600;
 const DEFAULT_APP_TOKEN_ENV: &str = "SLACK_APP_TOKEN";
 const DEFAULT_BOT_TOKEN_ENV: &str = "SLACK_BOT_TOKEN";
 const DEFAULT_APP_ID_ENV: &str = "FEISHU_APP_ID";
@@ -119,7 +117,6 @@ struct AccessSection {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct LimitsSection {
     max_running: Option<NonZeroUsize>,
-    approval_timeout_secs: Option<u64>,
     idle_secs: Option<u64>,
 }
 
@@ -132,10 +129,6 @@ struct SessionsSection {
 /// Serve until SIGINT or SIGTERM, or until a platform fails. An `Err` is a configuration
 /// problem found before serving started.
 pub(crate) async fn run(args: ImArgs) -> Result<u8> {
-    anyhow::ensure!(
-        args.base.session.is_none(),
-        "--session does not apply to im: each conversation has its own session files under [sessions] dir"
-    );
     let file = read_file(&args.config)?;
     let Platforms { channels, hidden_env } = platforms(&file, &args.config)?;
     let platforms: HashSet<&str> = channels.iter().map(|channel| channel.platform()).collect();
@@ -145,20 +138,11 @@ pub(crate) async fn run(args: ImArgs) -> Result<u8> {
         let running = create_session_dirs(&dir)?;
 
         // Once for the process: every thread's session shares the connections.
-        let shared = cli::Shared::connect(&args.base, Builtin::Assistant)
+        let shared = cli::Shared::connect(args.base, args.budget, Builtin::Assistant)
             .await?
-            .with_hidden_env(hidden_env);
-        let factory = Sessions {
-            args,
-            shared,
-            dir,
-            approval_timeout: Duration::from_secs(
-                file.limits
-                    .approval_timeout_secs
-                    .unwrap_or(DEFAULT_APPROVAL_TIMEOUT_SECS),
-            ),
-            events: telemetry.map_or_else(|| Arc::new(NullSink) as Arc<dyn EventSink>, Telemetry::sink),
-        };
+            .with_hidden_env(hidden_env)
+            .with_traces(telemetry.map(Telemetry::sink));
+        let factory = Sessions { shared, dir };
         // A wrong model, agent or tool setting would otherwise surface only at the first
         // message, in the chat; check it once with a session that is never stored.
         factory
@@ -353,29 +337,17 @@ fn entries(entries: &[String], platforms: &HashSet<&str>, field: &str) -> Result
 
 /// Opens each conversation's session like chat does, with approvals in the conversation.
 struct Sessions {
-    args: ImArgs,
-    /// The MCP servers, secret files and IM credentials, shared by every thread's session.
+    /// The command line, MCP servers, secret files, IM credentials and trace export, shared
+    /// by every thread's session.
     shared: cli::Shared,
     dir: PathBuf,
-    approval_timeout: Duration,
-    /// Where each session's events go: the trace export, or nowhere.
-    events: Arc<dyn EventSink>,
 }
 
 impl Sessions {
     async fn prepare(&self, file: SessionFile<'_>) -> Result<cli::PreparedSession> {
-        let mut prepared = cli::prepare(SessionOptions {
-            base: &self.args.base,
-            budget: &self.args.budget,
-            model: &self.shared.settings.model,
-            cwd: None,
-            file,
-            agent: Builtin::Assistant,
-            shared: &self.shared,
-        })
-        .await?;
+        let mut prepared = cli::prepare(&self.shared, &self.shared.settings.model, None, file).await?;
         prepared.require_bash_approval("shell commands require approval in the chat");
-        prepared.config.interaction_timeout = self.approval_timeout;
+        prepared.config.interaction_timeout = self.shared.settings.approval_timeout;
         Ok(prepared)
     }
 
@@ -397,7 +369,7 @@ impl Sessions {
         prepared.config.interaction = interaction;
         // The session file is the record of each conversation; the operator log holds
         // approvals and failures (Log), and traces, when exported, the timeline.
-        prepared.into_session(Arc::clone(&self.events))
+        prepared.into_session(Arc::new(NullSink))
     }
 }
 
@@ -529,5 +501,7 @@ mod tests {
         let base = "[access]\nconversations = []\n[sessions]\ndir = \"d\"\n";
         assert!(toml::from_str::<ConfigFile>(&format!("{base}[teams]\n")).is_err());
         assert!(toml::from_str::<ConfigFile>(&format!("{base}[limits]\nmaxRunning = 0\n")).is_err());
+        // The approval timeout is config.toml's, shared with chat and acp.
+        assert!(toml::from_str::<ConfigFile>(&format!("{base}[limits]\napprovalTimeoutSecs = 60\n")).is_err());
     }
 }

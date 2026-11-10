@@ -31,7 +31,7 @@ impl From<&str> for QueuedMessage {
     }
 }
 
-/// How many queued messages a run takes at a time (pi: `QueueMode`).
+/// How many queued messages a run takes at a time, from either queue (pi: `QueueMode`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum QueueMode {
     /// Every queued message, oldest first, before the next request.
@@ -40,28 +40,6 @@ pub enum QueueMode {
     /// Only the oldest; the rest wait for later requests, so each gets a turn of its own
     /// (pi's default).
     OneAtATime,
-}
-
-impl QueueMode {
-    /// The name on the command line: `all` or `one-at-a-time`.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::All => "all",
-            Self::OneAtATime => "one-at-a-time",
-        }
-    }
-}
-
-impl std::str::FromStr for QueueMode {
-    type Err = String;
-
-    fn from_str(text: &str) -> Result<Self, Self::Err> {
-        match text.trim() {
-            "all" => Ok(Self::All),
-            "one-at-a-time" | "one" => Ok(Self::OneAtATime),
-            other => Err(format!("unknown queue mode {other:?}; use all or one-at-a-time")),
-        }
-    }
 }
 
 /// A record an extension asked for during a run, kept until the loop can write it.
@@ -77,19 +55,14 @@ pub struct PendingEntry {
 /// - Steering messages are taken after each turn and enter the conversation before the
 ///   next model request, while the task is still in progress.
 /// - Follow-up messages are taken only when the agent would otherwise stop.
-/// - Each queue takes all of its messages at once or one at a time ([`QueueMode`]).
+/// - Both queues take all of their messages at once or one at a time ([`QueueMode`]).
 /// - Custom entries are recorded at the start of the next turn, or when the run ends.
 #[derive(Debug, Default)]
 pub struct MessageQueues {
-    steering: Mutex<Lane>,
-    follow_up: Mutex<Lane>,
+    steering: Mutex<VecDeque<QueuedMessage>>,
+    follow_up: Mutex<VecDeque<QueuedMessage>>,
+    mode: Mutex<QueueMode>,
     entries: Mutex<Vec<PendingEntry>>,
-}
-
-#[derive(Debug, Default)]
-struct Lane {
-    messages: VecDeque<QueuedMessage>,
-    mode: QueueMode,
 }
 
 impl MessageQueues {
@@ -105,12 +78,12 @@ impl MessageQueues {
 
     /// Queue any message for the next turn of the current task.
     pub fn steer_message(&self, message: QueuedMessage) {
-        lock(&self.steering).messages.push_back(message);
+        lock(&self.steering).push_back(message);
     }
 
     /// Queue any message for after the current task finishes.
     pub fn follow_up_message(&self, message: QueuedMessage) {
-        lock(&self.follow_up).messages.push_back(message);
+        lock(&self.follow_up).push_back(message);
     }
 
     /// Ask the loop to record state of an extension (pi: `appendEntry`) at the start of its
@@ -123,24 +96,14 @@ impl MessageQueues {
         });
     }
 
-    /// How steering messages are taken.
-    pub fn steering_mode(&self) -> QueueMode {
-        lock(&self.steering).mode
+    /// How queued messages are taken.
+    pub fn mode(&self) -> QueueMode {
+        *lock(&self.mode)
     }
 
-    /// How follow-up messages are taken.
-    pub fn follow_up_mode(&self) -> QueueMode {
-        lock(&self.follow_up).mode
-    }
-
-    /// Change how steering messages are taken, from the next time the loop looks.
-    pub fn set_steering_mode(&self, mode: QueueMode) {
-        lock(&self.steering).mode = mode;
-    }
-
-    /// Change how follow-up messages are taken, from the next time the loop looks.
-    pub fn set_follow_up_mode(&self, mode: QueueMode) {
-        lock(&self.follow_up).mode = mode;
+    /// Change how queued messages are taken, from the next time the loop looks.
+    pub fn set_mode(&self, mode: QueueMode) {
+        *lock(&self.mode) = mode;
     }
 
     /// Withdraw the oldest queued message equal to `message`, from the steering queue if it
@@ -149,10 +112,10 @@ impl MessageQueues {
     /// is recorded even so, since it leaves the queue only once recorded.
     pub fn withdraw(&self, message: &QueuedMessage) -> bool {
         [Queue::Steering, Queue::FollowUp].into_iter().any(|queue| {
-            let mut lane = lock(self.lane(queue));
-            match lane.messages.iter().position(|queued| queued == message) {
+            let mut messages = lock(self.lane(queue));
+            match messages.iter().position(|queued| queued == message) {
                 Some(index) => {
-                    lane.messages.remove(index);
+                    messages.remove(index);
                     true
                 }
                 None => false,
@@ -162,12 +125,12 @@ impl MessageQueues {
 
     /// Take every queued steering message, oldest first, whatever the mode.
     pub fn drain_steering(&self) -> Vec<QueuedMessage> {
-        lock(&self.steering).messages.drain(..).collect()
+        lock(&self.steering).drain(..).collect()
     }
 
     /// Take every queued follow-up message, oldest first, whatever the mode.
     pub fn drain_follow_up(&self) -> Vec<QueuedMessage> {
-        lock(&self.follow_up).messages.drain(..).collect()
+        lock(&self.follow_up).drain(..).collect()
     }
 
     /// Take every queued message: steering first, then follow-ups, each oldest first.
@@ -186,27 +149,23 @@ impl MessageQueues {
     /// session has recorded it, so input that a cancelled or dropped run never recorded is
     /// still queued for the next run.
     pub(crate) fn front(&self, queue: Queue) -> Option<QueuedMessage> {
-        lock(self.lane(queue)).messages.front().cloned()
+        lock(self.lane(queue)).front().cloned()
     }
 
     /// Remove the oldest message of `queue` after the session recorded it, unless a frontend
     /// drained the queue in the meantime and it now starts with another message.
     pub(crate) fn remove_front(&self, queue: Queue, message: &QueuedMessage) {
-        let mut lane = lock(self.lane(queue));
-        if lane.messages.front() == Some(message) {
-            lane.messages.pop_front();
+        let mut messages = lock(self.lane(queue));
+        if messages.front() == Some(message) {
+            messages.pop_front();
         }
     }
 
     pub(crate) fn has(&self, queue: Queue) -> bool {
-        !lock(self.lane(queue)).messages.is_empty()
+        !lock(self.lane(queue)).is_empty()
     }
 
-    pub(crate) fn mode(&self, queue: Queue) -> QueueMode {
-        lock(self.lane(queue)).mode
-    }
-
-    fn lane(&self, queue: Queue) -> &Mutex<Lane> {
+    fn lane(&self, queue: Queue) -> &Mutex<VecDeque<QueuedMessage>> {
         match queue {
             Queue::Steering => &self.steering,
             Queue::FollowUp => &self.follow_up,
@@ -331,14 +290,10 @@ mod tests {
     }
 
     #[test]
-    fn queue_modes_are_named_and_default_to_all() {
+    fn the_queue_mode_defaults_to_all_and_can_be_changed() {
         let queues = MessageQueues::default();
-        assert_eq!(queues.steering_mode(), QueueMode::All);
-        queues.set_follow_up_mode(QueueMode::OneAtATime);
-        assert_eq!(queues.mode(Queue::FollowUp), QueueMode::OneAtATime);
-        assert_eq!("one-at-a-time".parse::<QueueMode>(), Ok(QueueMode::OneAtATime));
-        assert_eq!("all".parse::<QueueMode>(), Ok(QueueMode::All));
-        assert!("some".parse::<QueueMode>().is_err());
-        assert_eq!(QueueMode::OneAtATime.as_str(), "one-at-a-time");
+        assert_eq!(queues.mode(), QueueMode::All);
+        queues.set_mode(QueueMode::OneAtATime);
+        assert_eq!(queues.mode(), QueueMode::OneAtATime);
     }
 }

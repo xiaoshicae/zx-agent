@@ -1,8 +1,11 @@
-//! `run` output contracts added after P0, against the local fake HTTP service. The original
-//! run tests stay byte-identical in tests/cli.rs.
+//! `zx-agent run` as a separate process against the local fake server: exit codes, output
+//! modes and their escaping, the session and `--continue`, provider and reasoning settings,
+//! budgets, denied calls, trace export, and the wiring that only main.rs does. No network or
+//! API key needed.
 mod common;
 
-use std::process::Stdio;
+use std::path::{Path, PathBuf};
+use std::process::{Output, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -13,38 +16,331 @@ use tokio::process::Command;
 
 use common::http::{Request, read_request};
 use common::mock_server::{MockServer, Reply};
-use common::{AgentHome, fake_model_config, json_lines, stderr, stdout, write_config, zx_agent};
+use common::{AgentHome, Home, fake_model_config, json_lines, stderr, stdout, write_config, zx_agent_in};
+
+/// The variable the program reads the API key from, and the fake key it holds.
+const KEY_VAR: &str = "ZX_RUN_CLI_TEST_KEY";
+const KEY: &str = "sk-run-cli-test-key";
 
 /// An answer that would set the terminal title if a terminal ran it.
 const TITLE_ANSWER: &str = "before\u{1b}]0;CANARY\u{7}after";
 
+/// A zx-agent home in `dir`: a config.toml for the fake model, with `top` before its
+/// `[provider]` table and `rest` after the test's provider keys.
+fn home(dir: &Path, top: &str, rest: &str) -> PathBuf {
+    let home = dir.join(".home");
+    write_config(&home, &fake_model_config(KEY_VAR, top, rest));
+    home
+}
+
+/// `zx-agent run` in `dir` against `server`, with the zx-agent home `home`, the API key set
+/// and stdin closed; the caller adds the options and the prompt.
+fn program(server: &MockServer, dir: &Path, home: &Path) -> Command {
+    let mut command = zx_agent_in(dir, Home::Agent(home));
+    command
+        .arg("run")
+        .env("ZX_BASE_URL", &server.base_url)
+        .env(KEY_VAR, KEY)
+        .stdin(Stdio::null());
+    command
+}
+
 /// `zx-agent run` without tools against `server`.
-fn run(server: &MockServer, dir: &std::path::Path) -> Command {
+fn run(server: &MockServer, dir: &Path) -> Command {
     run_with(server, dir, "", "")
 }
 
 /// `zx-agent run` without tools against `server`, with a config.toml in a zx-agent home of
 /// `dir` that has `top` before its `[provider]` table and `rest` after the test's provider
 /// keys.
-fn run_with(server: &MockServer, dir: &std::path::Path, top: &str, rest: &str) -> Command {
-    let mut command = zx_agent();
-    command
-        .args(["run", "--model", "mock", "--tools", "", "go"])
-        .current_dir(dir)
-        .env("ZX_AGENT_HOME", home(dir, top, rest))
-        .env("ZX_BASE_URL", &server.base_url)
-        .env_remove("ZX_RUN_CLI_TEST_KEY")
-        .stdin(Stdio::null())
-        .kill_on_drop(true);
+fn run_with(server: &MockServer, dir: &Path, top: &str, rest: &str) -> Command {
+    let mut command = program(server, dir, &home(dir, top, rest));
+    command.args(["--model", "mock", "--tools", "", "go"]);
     command
 }
 
-/// A zx-agent home in `dir`: a config.toml for the fake model, with `top` and `rest`.
-fn home(dir: &std::path::Path, top: &str, rest: &str) -> std::path::PathBuf {
-    let home = dir.join(".home");
-    write_config(&home, &fake_model_config("ZX_RUN_CLI_TEST_KEY", top, rest));
-    home
+/// `zx-agent run` against `server`, started in `dir`, with `args` after the model.
+fn run_against(server: &MockServer, dir: &Path, args: &[&str]) -> Command {
+    run_configured(server, dir, "", args)
 }
+
+/// Like [`run_against`], with `provider` added to the `[provider]` table of the config.toml in
+/// a zx-agent home of `dir`.
+fn run_configured(server: &MockServer, dir: &Path, provider: &str, args: &[&str]) -> Command {
+    let mut command = program(server, dir, &home(dir, "", provider));
+    command.args(["--model", "mock-model"]).args(args);
+    command
+}
+
+/// Run to completion from an empty temporary directory.
+async fn run_once(server: &MockServer, args: &[&str]) -> Output {
+    let dir = tempfile::tempdir().unwrap();
+    run_against(server, dir.path(), args).output().await.unwrap()
+}
+
+/// The `messages` array of request `index`.
+fn sent_messages(server: &MockServer, index: usize) -> Vec<Value> {
+    server.requests()[index].body["messages"].as_array().unwrap().clone()
+}
+
+#[tokio::test]
+async fn streaming_resource_limits_reach_the_provider() {
+    // One event over the provider's default limit of 1 MiB per SSE event.
+    let server = MockServer::start(vec![Reply::text(&"x".repeat(1024 * 1024))]).await;
+    let output = run_once(&server, &["--tools", "", "--output", "jsonl", "check"]).await;
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let events: Vec<Value> = json_lines(&stdout(&output));
+    assert!(
+        events
+            .iter()
+            .any(|event| event["message"]["providerError"]["kind"] == "resource_limit")
+    );
+}
+
+#[tokio::test]
+async fn repaired_session_tails_are_reported_on_stderr() {
+    use std::io::Write;
+    use zx_agent::ai::Message;
+    use zx_agent::session::{SessionHeader, SessionStore};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    let mut session = SessionStore::create(&path, SessionHeader::new(dir.path(), "mock-model")).unwrap();
+    session.append_message(Message::user("earlier")).await.unwrap();
+    drop(session);
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"{\"type\":\"mess")
+        .unwrap();
+    let server = MockServer::start(vec![Reply::text("ok")]).await;
+
+    let output = run_against(
+        &server,
+        dir.path(),
+        &[
+            "--tools",
+            "",
+            "--session",
+            path.to_str().unwrap(),
+            "--output",
+            "jsonl",
+            "continue",
+        ],
+    )
+    .output()
+    .await
+    .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stderr(&output).contains("recovered incomplete final record"));
+    for line in stdout(&output).lines() {
+        serde_json::from_str::<Value>(line).unwrap();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Exit codes
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_completed_run_prints_the_answer_and_exits_0() {
+    let server = MockServer::start(vec![Reply::text("All good.")]).await;
+
+    let output = run_once(&server, &["--tools", "", "check"]).await;
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "All good.\n");
+}
+
+#[tokio::test]
+async fn a_provider_error_exits_1() {
+    let server = MockServer::start(vec![Reply::Status(401, "{\"error\":{\"message\":\"bad key\"}}")]).await;
+
+    let output = run_once(&server, &["--tools", "", "check"]).await;
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+}
+
+#[tokio::test]
+async fn the_turn_limit_exits_3() {
+    let server = MockServer::start(vec![Reply::bash("c1", "echo hi")]).await;
+
+    let output = run_once(&server, &["--tools", "bash", "--max-model-requests", "1", "check"]).await;
+
+    assert_eq!(output.status.code(), Some(3), "{}", stderr(&output));
+}
+
+#[tokio::test]
+async fn the_time_limit_exits_4() {
+    let server = MockServer::start(vec![Reply::Stall(vec![])]).await;
+
+    let output = run_once(&server, &["--tools", "", "--timeout-secs", "1", "check"]).await;
+
+    assert_eq!(output.status.code(), Some(4), "{}", stderr(&output));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn sigterm_exits_5() {
+    let server = MockServer::start(vec![Reply::Stall(vec![])]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let child = run_against(&server, dir.path(), &["--tools", "", "check"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Once the request arrives, the run is in progress and its signal handler is installed.
+    server.wait_for_requests(1).await;
+    let pid = child.id().unwrap().to_string();
+    let killed = Command::new("kill").args(["-TERM", &pid]).status().await.unwrap();
+    assert!(killed.success());
+
+    let output = child.wait_with_output().await.unwrap();
+
+    assert_eq!(output.status.code(), Some(5), "{}", stderr(&output));
+}
+
+#[tokio::test]
+async fn a_truncated_answer_is_printed_and_exits_6() {
+    let server = MockServer::start(vec![Reply::truncated("Part")]).await;
+
+    let home = AgentHome::agent("unattended", "continueOnLength = 0");
+    let dir = tempfile::tempdir().unwrap();
+    let output = run_against(&server, dir.path(), &["--tools", "", "check"])
+        .env("ZX_AGENT_HOME", home.path())
+        .output()
+        .await
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(6), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "Part\n");
+}
+
+// ---------------------------------------------------------------------------
+// Input and output
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn jsonl_output_is_one_event_per_line_ending_with_the_report() {
+    let server = MockServer::start(vec![Reply::text("All good.")]).await;
+
+    let output = run_once(&server, &["--tools", "", "--output", "jsonl", "check"]).await;
+
+    let events: Vec<Value> = json_lines(&stdout(&output));
+    assert_eq!(events[0]["type"], "run_start");
+    let report = events.last().unwrap();
+    assert_eq!(report["type"], "run_end");
+    assert_eq!(report["report"]["outcome"], "completed");
+    assert_eq!(report["report"]["finalText"], "All good.");
+}
+
+#[tokio::test]
+async fn a_dash_reads_the_prompt_from_stdin() {
+    let server = MockServer::start(vec![Reply::text("ok")]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut child = run_against(&server, dir.path(), &["--tools", "", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"from stdin").await.unwrap();
+    // Closing stdin ends the prompt.
+    drop(stdin);
+
+    let output = child.wait_with_output().await.unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(sent_messages(&server, 0).last().unwrap()["content"], "from stdin");
+}
+
+// ---------------------------------------------------------------------------
+// Wiring done in main.rs
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn bash_commands_cannot_read_the_api_key() {
+    let server = MockServer::start(vec![
+        Reply::bash("c1", &format!("printenv {KEY_VAR}; echo status=$?")),
+        Reply::text("done"),
+    ])
+    .await;
+
+    let output = run_once(&server, &["--tools", "bash", "check"]).await;
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let tool_result = sent_messages(&server, 1)
+        .into_iter()
+        .find(|message| message["role"] == "tool")
+        .unwrap();
+    let content = tool_result["content"].as_str().unwrap();
+    assert!(content.contains("status=1") && !content.contains(KEY), "{content}");
+}
+
+#[tokio::test]
+async fn the_system_prompt_states_the_environment() {
+    let server = MockServer::start(vec![Reply::text("ok")]).await;
+
+    let home = AgentHome::agent("unattended", "[permissions]\nallow = [\"bash(grep)\"]");
+    let dir = tempfile::tempdir().unwrap();
+    run_against(&server, dir.path(), &["--tools", "bash", "check"])
+        .env("ZX_AGENT_HOME", home.path())
+        .output()
+        .await
+        .unwrap();
+
+    let system = sent_messages(&server, 0)[0]["content"].as_str().unwrap().to_string();
+    assert!(system.contains("<environment>\nOS: "), "{system}");
+    // The permissions are enforced, not stated: the prompt has no command policy section.
+    assert!(!system.contains("<command_policy>"), "{system}");
+}
+
+#[tokio::test]
+async fn inline_updates_are_sent_where_the_prompt_changed() {
+    let server = MockServer::start(vec![Reply::text("one"), Reply::text("two")]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = dir.path().join("s.jsonl");
+    let session = session.to_str().unwrap();
+    // Changing the working directory changes the <environment> section.
+    for name in ["first", "second"] {
+        let cwd = dir.path().join(name);
+        std::fs::create_dir(&cwd).unwrap();
+        let args = [
+            "--tools",
+            "",
+            "--session",
+            session,
+            "--cwd",
+            cwd.to_str().unwrap(),
+            "check",
+        ];
+        let output = run_configured(&server, dir.path(), "systemUpdates = 'inline'", &args)
+            .output()
+            .await
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    }
+
+    let messages = sent_messages(&server, 1);
+    let roles: Vec<&str> = messages
+        .iter()
+        .map(|message| message["role"].as_str().unwrap())
+        .collect();
+    assert_eq!(roles, ["system", "user", "assistant", "system", "user"]);
+    let update = messages[3]["content"].as_str().unwrap();
+    assert!(
+        update.starts_with("Updated system prompt section \"environment\""),
+        "{update}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Output, sessions, settings, budgets and traces
+// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn an_answer_written_to_a_pipe_keeps_its_exact_text() {
@@ -106,13 +402,8 @@ async fn progress_and_report_lines_escape_terminal_control_characters() {
         Reply::Status(400, "bad\u{1b}[2J"),
     ])
     .await;
-    let output = zx_agent()
-        .args(["run", "--model", "mock", "go"])
-        .current_dir(dir.path())
-        .env("ZX_AGENT_HOME", home(dir.path(), "", ""))
-        .env("ZX_BASE_URL", &server.base_url)
-        .env_remove("ZX_RUN_CLI_TEST_KEY")
-        .kill_on_drop(true)
+    let output = program(&server, dir.path(), &home(dir.path(), "", ""))
+        .args(["--model", "mock", "go"])
         .output()
         .await
         .unwrap();
@@ -178,20 +469,14 @@ async fn commands_cannot_see_the_headers_for_a_trace_collector() {
     let command = "echo \"headers=[$OTEL_EXPORTER_OTLP_HEADERS] traces=[$OTEL_EXPORTER_OTLP_TRACES_HEADERS] \
                    metrics=[$OTEL_EXPORTER_OTLP_METRICS_HEADERS]\"";
     let server = MockServer::start(vec![Reply::bash("c", command), Reply::text("done")]).await;
-    let output = zx_agent()
-        .args(["run", "--model", "mock", "--tools", "bash", "go"])
-        .current_dir(dir.path())
-        .env("ZX_AGENT_HOME", home(dir.path(), "", ""))
-        .env("ZX_BASE_URL", &server.base_url)
+    let output = program(&server, dir.path(), &home(dir.path(), "", ""))
+        .args(["--model", "mock", "--tools", "bash", "go"])
         .env("OTEL_EXPORTER_OTLP_HEADERS", TOKEN)
         .env("OTEL_EXPORTER_OTLP_TRACES_HEADERS", TOKEN)
         .env("OTEL_EXPORTER_OTLP_METRICS_HEADERS", TOKEN)
         .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
         .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
         .env_remove("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
-        .env_remove("ZX_RUN_CLI_TEST_KEY")
-        .stdin(Stdio::null())
-        .kill_on_drop(true)
         .output()
         .await
         .unwrap();
@@ -226,32 +511,6 @@ async fn request_fields_reach_the_model_and_the_audit() {
         json!({"thinking": {"type": "disabled"}, "reasoning_effort": "low"}),
         "{audit}"
     );
-}
-
-#[tokio::test]
-async fn bad_request_fields_exit_2_before_any_request() {
-    let dir = tempfile::tempdir().unwrap();
-    let server = MockServer::start(vec![Reply::text("never sent")]).await;
-    for (fields, expected) in [
-        (
-            r#"requestFields = { model = "other" }"#,
-            r#"request field "model" cannot be added"#,
-        ),
-        ("requestFields = { seed = 1, seed = 2 }", "duplicate key"),
-        (r#"requestFields = "seed=1""#, "invalid type"),
-    ] {
-        let output = run_with(&server, dir.path(), "", fields)
-            .args(["--session", "audit.jsonl"])
-            .output()
-            .await
-            .unwrap();
-        let stderr = stderr(&output);
-        assert_eq!(output.status.code(), Some(2), "{fields}: {stderr}");
-        assert!(stderr.contains(expected), "{fields}: {stderr}");
-        assert!(stderr.contains("config.toml"), "{fields}: {stderr}");
-    }
-    assert!(server.requests().is_empty());
-    assert!(!dir.path().join("audit.jsonl").exists());
 }
 
 #[tokio::test]
@@ -299,16 +558,9 @@ async fn the_reasoning_level_reaches_the_model_in_the_chosen_format_and_the_audi
 }
 
 /// `zx-agent run --continue` against `server`, without a prompt.
-fn run_continue(server: &MockServer, dir: &std::path::Path) -> Command {
-    let mut command = zx_agent();
-    command
-        .args(["run", "--continue", "--model", "mock", "--tools", ""])
-        .current_dir(dir)
-        .env("ZX_AGENT_HOME", home(dir, "", ""))
-        .env("ZX_BASE_URL", &server.base_url)
-        .env_remove("ZX_RUN_CLI_TEST_KEY")
-        .stdin(Stdio::null())
-        .kill_on_drop(true);
+fn run_continue(server: &MockServer, dir: &Path) -> Command {
+    let mut command = program(server, dir, &home(dir, "", ""));
+    command.args(["--continue", "--model", "mock", "--tools", ""]);
     command
 }
 
@@ -376,41 +628,6 @@ async fn continue_needs_an_existing_session_and_no_prompt() {
 }
 
 #[tokio::test]
-async fn bad_reasoning_settings_exit_2_before_any_request() {
-    let dir = tempfile::tempdir().unwrap();
-    let server = MockServer::start(vec![Reply::text("never sent")]).await;
-    for (top, provider, expected) in [
-        ("reasoning = 'max'", "", "unknown reasoning level"),
-        (
-            "reasoning = 'low'",
-            "reasoningFormat = 'guess'",
-            "unknown reasoning format",
-        ),
-        (
-            "reasoning = 'low'",
-            "requestFields = { reasoning_effort = 'high' }",
-            "provider.requestFields.reasoning_effort conflicts with reasoning",
-        ),
-        (
-            "reasoning = 'low'",
-            "reasoningFormat = 'thinking'\nrequestFields = { thinking = { type = 'enabled' } }",
-            "provider.requestFields.thinking conflicts with reasoning",
-        ),
-    ] {
-        let output = run_with(&server, dir.path(), top, provider)
-            .args(["--session", "audit.jsonl"])
-            .output()
-            .await
-            .unwrap();
-        let stderr = stderr(&output);
-        assert_eq!(output.status.code(), Some(2), "{top} {provider}: {stderr}");
-        assert!(stderr.contains(expected), "{top} {provider}: {stderr}");
-    }
-    assert!(server.requests().is_empty());
-    assert!(!dir.path().join("audit.jsonl").exists());
-}
-
-#[tokio::test]
 async fn filling_missing_reasoning_is_off_unless_asked_and_the_audit_records_the_choice() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::text("ok"), Reply::text("ok")]).await;
@@ -463,24 +680,6 @@ async fn jsonl_events_carry_the_envelope_of_their_run() {
         (end["type"].clone(), end["report"]["finalText"].clone()),
         (json!("run_end"), json!("ok"))
     );
-}
-
-#[tokio::test]
-async fn a_zero_timeout_is_rejected_before_any_request() {
-    let dir = tempfile::tempdir().unwrap();
-    let server = MockServer::start(vec![Reply::text("never sent")]).await;
-
-    for (top, provider, key) in [
-        ("toolTimeoutSecs = 0", "", "toolTimeoutSecs"),
-        ("", "idleTimeoutSecs = 0", "provider.idleTimeoutSecs"),
-    ] {
-        let output = run_with(&server, dir.path(), top, provider).output().await.unwrap();
-
-        assert_eq!(output.status.code(), Some(2), "{key}");
-        let stderr = stderr(&output);
-        assert!(stderr.contains(&format!("{key} must be at least 1")), "{key}: {stderr}");
-    }
-    assert!(server.requests().is_empty());
 }
 
 /// A cut-off answer, which `run` asks the model to continue (the unattended agent's
@@ -617,16 +816,10 @@ async fn run_with_a_denied_command(extra: &[&str]) -> std::process::Output {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::bash("c", "echo hi"), Reply::text("done")]).await;
     let home = AgentHome::agent("unattended", "[permissions]\nask = [\"bash\"]\nallow = [\"bash(ls)\"]");
-    zx_agent()
-        .args(["run", "--model", "mock", "--tools", "bash"])
-        .env("ZX_BASE_URL", &server.base_url)
-        .env("ZX_AGENT_HOME", home.path())
+    program(&server, dir.path(), home.path())
+        .args(["--model", "mock", "--tools", "bash"])
         .args(extra)
         .arg("go")
-        .current_dir(dir.path())
-        .env_remove("ZX_RUN_CLI_TEST_KEY")
-        .stdin(Stdio::null())
-        .kill_on_drop(true)
         .output()
         .await
         .unwrap()
@@ -698,7 +891,7 @@ fn hex(id: &str) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn a_run_exports_its_trace_and_metrics_only_when_an_endpoint_is_configured() {
+async fn a_run_exports_its_trace_only_when_an_endpoint_is_configured() {
     let dir = tempfile::tempdir().unwrap();
     let (endpoint, received) = collector().await;
 
@@ -713,30 +906,20 @@ async fn a_run_exports_its_trace_and_metrics_only_when_an_endpoint_is_configured
         .unwrap();
     let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
-    assert!(
-        stderr.contains("[otel] exporting traces and metrics over OTLP/HTTP"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("[otel] exporting traces over OTLP/HTTP"), "{stderr}");
     {
         let requests = received.lock().unwrap();
-        // The process exports what remains before it exits: the spans, then the metrics.
-        let mut paths: Vec<&str> = requests.iter().map(|request| request.path.as_str()).collect();
-        paths.sort_unstable();
-        assert_eq!(paths, ["/v1/metrics", "/v1/traces"]);
-        for request in requests.iter() {
-            assert_eq!(request.method, "POST");
-            assert_eq!(request.header("content-type"), Some("application/x-protobuf"));
-            // Protobuf keeps strings as they are: the service name, and an attribute of the
-            // run span or the name of a metric.
-            assert!(contains(&request.body, "zx-agent"));
-            let marker = if request.path == "/v1/traces" {
-                "zx.run.id"
-            } else {
-                "zx.runs"
-            };
-            assert!(contains(&request.body, marker), "{}", request.path);
-            assert!(!contains(&request.body, "the answer"), "no content leaves the process");
-        }
+        // The process exports the spans before it exits, and no metrics, even under the
+        // endpoint variable that would name both.
+        let paths: Vec<&str> = requests.iter().map(|request| request.path.as_str()).collect();
+        assert_eq!(paths, ["/v1/traces"]);
+        let request = &requests[0];
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.header("content-type"), Some("application/x-protobuf"));
+        // Protobuf keeps strings as they are: the service name, and an attribute of the run span.
+        assert!(contains(&request.body, "zx-agent"));
+        assert!(contains(&request.body, "zx.run.id"));
+        assert!(!contains(&request.body, "the answer"), "no content leaves the process");
     }
 
     let server = MockServer::start(vec![Reply::text("the answer")]).await;
@@ -751,7 +934,7 @@ async fn a_run_exports_its_trace_and_metrics_only_when_an_endpoint_is_configured
     let stderr = common::stderr(&output);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     assert!(!stderr.contains("[otel]"), "{stderr}");
-    assert_eq!(received.lock().unwrap().len(), 2, "nothing more was sent");
+    assert_eq!(received.lock().unwrap().len(), 1, "nothing more was sent");
 }
 
 #[tokio::test]

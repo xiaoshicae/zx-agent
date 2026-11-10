@@ -16,9 +16,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-pub(crate) use prepare::{PreparedSession, SessionOptions, prepare};
+pub(crate) use prepare::{PreparedSession, prepare};
 pub(crate) use settings::Settings;
-pub(crate) use shared::{ModeSettings, Shared};
+pub(crate) use shared::Shared;
 
 #[derive(Parser)]
 #[command(name = "zx-agent", version, about = "Minimal general-purpose agent kernel")]
@@ -58,6 +58,11 @@ pub(crate) struct RunArgs {
     #[arg(long)]
     pub(crate) fail_on_denied: bool,
 
+    /// Session file (JSONL). Created if missing; an existing one is continued. Without it
+    /// the run is kept in memory only.
+    #[arg(long)]
+    pub(crate) session: Option<PathBuf>,
+
     #[command(flatten)]
     pub(crate) base: BaseArgs,
 
@@ -74,7 +79,6 @@ pub(crate) struct RunArgs {
 }
 
 #[derive(Args)]
-#[expect(clippy::struct_excessive_bools, reason = "command-line switches")]
 pub(crate) struct ChatArgs {
     #[command(flatten)]
     pub(crate) base: BaseArgs,
@@ -86,14 +90,6 @@ pub(crate) struct ChatArgs {
     #[arg(long, value_enum, default_value_t = OutputMode::Text)]
     pub(crate) output: OutputMode,
 
-    /// Show detailed execution events on stderr in text mode.
-    #[arg(long)]
-    pub(crate) debug: bool,
-
-    /// Stream the model's reasoning, dimmed, on stderr in text mode.
-    #[arg(long)]
-    pub(crate) show_thinking: bool,
-
     /// In jsonl mode, also emit streaming message_update events.
     #[arg(long)]
     pub(crate) deltas: bool,
@@ -102,6 +98,11 @@ pub(crate) struct ChatArgs {
     /// set or TERM is dumb. always: also when piped, e.g. into `less -R`.
     #[arg(long, value_enum, default_value_t = ColorArg::Auto)]
     pub(crate) color: ColorArg,
+
+    /// Session file (JSONL). Created if missing; an existing one is continued; /new creates
+    /// another beside it. Without it, each conversation gets a file in the session directory.
+    #[arg(long)]
+    pub(crate) session: Option<PathBuf>,
 
     /// Keep the conversation in memory only: no session file is written.
     #[arg(long, conflicts_with_all = ["session", "resume"])]
@@ -112,12 +113,6 @@ pub(crate) struct ChatArgs {
     /// working directory, or the one whose ID starts with the value (see `zx-agent sessions`).
     #[arg(long, value_name = "ID", num_args = 0..=1, conflicts_with = "session")]
     pub(crate) resume: Option<Option<String>>,
-
-    /// Start with a copy of another session: a session file, or the session in the session
-    /// directory whose ID starts with the value. The copy is a new file in the session
-    /// directory; the original is not changed.
-    #[arg(long, value_name = "ID|PATH", conflicts_with_all = ["session", "no_session", "resume"])]
-    pub(crate) fork: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -138,7 +133,7 @@ pub(crate) struct AcpArgs {
     /// Keep conversations in memory only: no session file is written, and `session/load` is
     /// not offered. Otherwise each session has a file in sessions/--<cwd with / as ->-- of
     /// the zx-agent home, the directory chat uses.
-    #[arg(long, conflicts_with = "session")]
+    #[arg(long)]
     pub(crate) no_session: bool,
 }
 
@@ -177,10 +172,6 @@ pub(crate) struct BaseArgs {
     /// Enabled tools, comma-separated. Defaults to the agent's; explicit values replace them.
     #[arg(long, value_delimiter = ',')]
     pub(crate) tools: Option<Vec<String>>,
-
-    /// Session file (JSONL). Created if missing; an existing one is continued.
-    #[arg(long)]
-    pub(crate) session: Option<PathBuf>,
 }
 
 /// Limits per prompt; `None` keeps the agent's value. A run is one prompt.
@@ -294,11 +285,13 @@ mod tests {
             Command::Im(args) => {
                 assert_eq!(args.config, Path::new("im.toml"));
                 assert_eq!(args.budget.max_model_requests, None);
-                assert_eq!(args.base.session, None);
             }
             Command::Run(_) | Command::Chat(_) | Command::Sessions(_) | Command::Acp(_) => panic!("im command"),
         }
         assert!(Cli::try_parse_from(["zx-agent", "im", "--model", "m"]).is_err());
+        // Each conversation of im, and each session of acp, has a file of its own.
+        assert!(Cli::try_parse_from(["zx-agent", "im", "--config", "im.toml", "--session", "s.jsonl"]).is_err());
+        assert!(Cli::try_parse_from(["zx-agent", "acp", "--session", "s.jsonl"]).is_err());
     }
 
     #[test]
@@ -326,20 +319,8 @@ mod tests {
         }
         // run keeps its storage: a file only when --session names one.
         assert!(Cli::try_parse_from(["zx-agent", "run", "--model", "m", "--resume", "go"]).is_err());
-        assert!(Cli::try_parse_from(["zx-agent", "run", "--model", "m", "--fork", "a", "go"]).is_err());
-        for conflict in [
-            &["--fork", "a", "--resume"][..],
-            &["--fork", "a", "--session", "s.jsonl"],
-            &["--fork", "a", "--no-session"],
-        ] {
-            let args = ["zx-agent", "chat", "--model", "m"].iter().chain(conflict);
-            assert!(Cli::try_parse_from(args).is_err(), "{conflict:?}");
-        }
-        let cli = Cli::try_parse_from(["zx-agent", "chat", "--model", "m", "--fork", "0b7c"]).unwrap();
-        match cli.command {
-            Command::Chat(args) => assert_eq!(args.fork.as_deref(), Some("0b7c")),
-            Command::Run(_) | Command::Im(_) | Command::Sessions(_) | Command::Acp(_) => panic!("chat command"),
-        }
+        // chat starts from no copy of another session.
+        assert!(Cli::try_parse_from(["zx-agent", "chat", "--model", "m", "--fork", "0b7c"]).is_err());
     }
 
     #[test]

@@ -4,16 +4,21 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 
 use super::read_text;
-use crate::ai::openai::{ReasoningFormat, SystemUpdates};
+use crate::ai::openai::OpenAiConfig;
+use crate::ai::retry::RetryPolicy;
 use crate::ai::{ModelCost, ModelMeta, Reasoning};
 use crate::executor::{Access, check_network};
 use crate::mcp::{check_server_name, tool_name as mcp_tool_name};
 use crate::output_store;
+
+/// The variable holding the API key when config.toml names none.
+const DEFAULT_API_KEY_ENV: &str = "OPENAI_API_KEY";
 
 /// Where bash and read_file run.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -64,50 +69,33 @@ pub struct McpServer {
     /// The server's tools to offer the model, by the names the server gives them.
     pub tools: Vec<String>,
     /// Longest a call may go without an answer or a progress notification, in seconds;
-    /// unset uses `toolTimeoutSecs`.
+    /// unset uses `toolTimeoutSecs`. A call that keeps reporting progress is bounded by the
+    /// run's timeout and cancellation.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
-    /// Bound for a whole call, in seconds, however much progress the server reports; unset
-    /// leaves only `timeoutSecs`, the run's timeout and cancellation.
-    #[serde(default)]
-    pub max_timeout_secs: Option<u64>,
 }
 
-/// The `[provider]` table: how the model is reached. Unset values leave the choice to the
-/// command line or its default.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// The `[provider]` table over the built-in defaults, the provider's own: how the model is
+/// reached.
+#[derive(Clone, Debug)]
 pub struct ProviderSettings {
-    /// OpenAI-compatible base URL, without `/chat/completions`.
-    pub base_url: Option<String>,
+    /// Where requests go and how they are written; the key is left to the frontend, which
+    /// reads it from `api_key_env`.
+    pub openai: OpenAiConfig,
     /// Name of the variable holding the API key.
-    pub api_key_env: Option<String>,
-    /// How system prompt changes reach the model.
-    pub system_updates: Option<SystemUpdates>,
-    /// How a reasoning level is written into the request.
-    pub reasoning_format: Option<ReasoningFormat>,
-    /// Send an empty `reasoning_content` with answers that lack one.
-    pub fill_missing_reasoning: bool,
-    /// Send the session ID as the request's `prompt_cache_key`.
-    pub prompt_cache_key: bool,
-    /// Fields added to every request body, such as a server's switch for thinking; the
-    /// provider refuses fields it sets itself.
-    pub request_fields: serde_json::Map<String, serde_json::Value>,
-    /// Headers sent with every request, such as a gateway's routing header; never
-    /// `Authorization`, which comes from the API key.
-    pub headers: Vec<(String, String)>,
-    /// Longest wait for response headers or the next stream chunk, in seconds.
-    pub idle_timeout_secs: Option<u64>,
-    /// Retries for transient provider errors.
-    pub max_retries: Option<u32>,
+    pub api_key_env: String,
+    /// How transient provider errors are retried; the file sets only the count.
+    pub retry: RetryPolicy,
 }
 
-/// The settings of one frontend, such as `[chat]`.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-pub struct FrontendSettings {
-    /// How long an approval request waits for an answer, in seconds; an unanswered request
-    /// is denied.
-    pub approval_timeout_secs: Option<u64>,
+impl Default for ProviderSettings {
+    fn default() -> Self {
+        Self {
+            openai: OpenAiConfig::default(),
+            api_key_env: DEFAULT_API_KEY_ENV.to_string(),
+            retry: RetryPolicy::default(),
+        }
+    }
 }
 
 /// `config.toml`, checked: the environment every agent of this user runs in.
@@ -115,7 +103,7 @@ pub struct FrontendSettings {
 pub struct Config {
     /// Where the file is, or would be; `None` without a home directory.
     pub path: Option<PathBuf>,
-    /// The model ID, unless the command line names one.
+    /// The model ID, unless `--model` or `ZX_MODEL` names one.
     pub model: Option<String>,
     /// How hard a reasoning model thinks.
     pub reasoning: Option<Reasoning>,
@@ -123,15 +111,14 @@ pub struct Config {
     pub max_tokens: Option<u32>,
     /// Default bash command timeout, and that of MCP calls, in seconds.
     pub tool_timeout_secs: Option<u64>,
+    /// How long an approval request of chat, acp or im waits for an answer, in seconds; an
+    /// unanswered request is denied.
+    pub approval_timeout_secs: Option<u64>,
     /// Files holding secrets to redact from tool output, or directories of such files;
     /// absolute after load.
     pub secret_files: Vec<PathBuf>,
     /// How the model is reached.
     pub provider: ProviderSettings,
-    /// `[chat]`: the settings of chat.
-    pub chat: FrontendSettings,
-    /// `[acp]`: the settings of acp.
-    pub acp: FrontendSettings,
     /// Where bash and read_file run.
     pub execution: Execution,
     /// Used when `execution` is `Container`.
@@ -151,10 +138,9 @@ struct RawConfig {
     reasoning: Option<String>,
     max_tokens: Option<u32>,
     tool_timeout_secs: Option<u64>,
+    approval_timeout_secs: Option<u64>,
     secret_files: Vec<PathBuf>,
     provider: RawProvider,
-    chat: FrontendSettings,
-    acp: FrontendSettings,
     // Unknown backends fail to deserialize instead of being ignored.
     execution: Option<Execution>,
     container: ContainerSettings,
@@ -234,10 +220,6 @@ impl Config {
                 server.timeout_secs != Some(0),
                 "MCP server {name}: timeoutSecs must be greater than zero"
             );
-            ensure!(
-                server.max_timeout_secs != Some(0),
-                "MCP server {name}: maxTimeoutSecs must be greater than zero"
-            );
             let first = names.len();
             for tool in &server.tools {
                 let model_name = mcp_tool_name(name, tool).map_err(anyhow::Error::msg)?;
@@ -290,10 +272,9 @@ impl RawConfig {
             reasoning: parsed("reasoning", self.reasoning)?,
             max_tokens: self.max_tokens,
             tool_timeout_secs: positive("toolTimeoutSecs", self.tool_timeout_secs)?,
+            approval_timeout_secs: positive("approvalTimeoutSecs", self.approval_timeout_secs)?,
             secret_files: secret_files(self.secret_files, parent)?,
             provider: self.provider.into_settings()?,
-            chat: self.chat.checked("chat")?,
-            acp: self.acp.checked("acp")?,
             execution: self.execution.unwrap_or_default(),
             container: self.container,
             tool_output: self.tool_output.into_config(parent)?,
@@ -308,27 +289,37 @@ impl RawConfig {
 }
 
 impl RawProvider {
+    /// The settings over the defaults, checked.
     fn into_settings(self) -> Result<ProviderSettings> {
-        Ok(ProviderSettings {
-            base_url: non_empty("provider.baseUrl", self.base_url)?,
-            api_key_env: non_empty("provider.apiKeyEnv", self.api_key_env)?,
-            system_updates: parsed("provider.systemUpdates", self.system_updates)?,
-            reasoning_format: parsed("provider.reasoningFormat", self.reasoning_format)?,
-            fill_missing_reasoning: self.fill_missing_reasoning,
-            prompt_cache_key: self.prompt_cache_key,
-            request_fields: request_fields(self.request_fields)?,
-            headers: headers(self.headers)?,
-            idle_timeout_secs: positive("provider.idleTimeoutSecs", self.idle_timeout_secs)?,
-            max_retries: self.max_retries,
-        })
-    }
-}
-
-impl FrontendSettings {
-    /// These settings, checked; `table` names them in errors.
-    fn checked(self, table: &str) -> Result<Self> {
-        positive(&format!("{table}.approvalTimeoutSecs"), self.approval_timeout_secs)?;
-        Ok(self)
+        let mut settings = ProviderSettings::default();
+        let ProviderSettings {
+            openai,
+            api_key_env,
+            retry,
+        } = &mut settings;
+        if let Some(url) = non_empty("provider.baseUrl", self.base_url)? {
+            openai.base_url = url;
+        }
+        if let Some(env) = non_empty("provider.apiKeyEnv", self.api_key_env)? {
+            *api_key_env = env;
+        }
+        if let Some(updates) = parsed("provider.systemUpdates", self.system_updates)? {
+            openai.system_updates = updates;
+        }
+        if let Some(format) = parsed("provider.reasoningFormat", self.reasoning_format)? {
+            openai.reasoning_format = format;
+        }
+        openai.fill_missing_reasoning = self.fill_missing_reasoning;
+        openai.prompt_cache_key = self.prompt_cache_key;
+        openai.extra_fields = request_fields(self.request_fields)?;
+        openai.headers = headers(self.headers)?;
+        if let Some(secs) = positive("provider.idleTimeoutSecs", self.idle_timeout_secs)? {
+            openai.idle_timeout = Duration::from_secs(secs);
+        }
+        if let Some(retries) = self.max_retries {
+            retry.max_retries = retries;
+        }
+        Ok(settings)
     }
 }
 
@@ -379,7 +370,7 @@ fn non_empty(key: &str, value: Option<String>) -> Result<Option<String>> {
     Ok(value)
 }
 
-/// `value` parsed as the command line parses the option of the same name.
+/// `value` parsed by its type, with `key` naming it in the error.
 fn parsed<T: std::str::FromStr<Err = String>>(key: &str, value: Option<String>) -> Result<Option<T>> {
     value
         .map(|text| text.parse().map_err(|error: String| anyhow::anyhow!("{key}: {error}")))
@@ -435,6 +426,8 @@ impl RawModel {
 
 #[cfg(test)]
 mod tests {
+    use crate::ai::openai::{ReasoningFormat, SystemUpdates};
+
     use super::*;
 
     fn load_text(text: &str) -> Result<Config> {
@@ -455,7 +448,9 @@ mod tests {
         let config = Config::load(&path).unwrap();
         assert_eq!(config.path.as_deref(), Some(path.as_path()));
         assert_eq!(config.model, None);
-        assert_eq!(config.provider, ProviderSettings::default());
+        assert_eq!(config.provider.openai.base_url, "https://api.openai.com/v1");
+        assert_eq!(config.provider.api_key_env, "OPENAI_API_KEY");
+        assert_eq!(config.provider.retry.max_retries, 3);
         assert_eq!(config.execution, Execution::Local);
         assert_eq!(config.tool_output.threshold_bytes, Some(8 * 1024));
         assert!(config.mcp.is_empty() && config.models.is_empty());
@@ -464,12 +459,12 @@ mod tests {
     #[test]
     fn the_model_and_its_provider_are_read_with_the_spellings_of_the_former_options() {
         let config = load_text(
-            "model = 'm1'\nreasoning = 'high'\nmaxTokens = 512\ntoolTimeoutSecs = 30\n\
+            "model = 'm1'\nreasoning = 'high'\nmaxTokens = 512\ntoolTimeoutSecs = 30\napprovalTimeoutSecs = 60\n\
              [provider]\nbaseUrl = 'http://localhost:8000/v1'\n\
              apiKeyEnv = 'LOCAL_KEY'\nsystemUpdates = 'inline'\nreasoningFormat = 'thinking'\n\
              fillMissingReasoning = true\npromptCacheKey = true\nidleTimeoutSecs = 15\nmaxRetries = 0\n\
              requestFields = { thinking = { type = 'disabled' }, top_k = 5 }\n\
-             headers = { X-Route = 'eu' }\n[chat]\napprovalTimeoutSecs = 60\n[acp]\napprovalTimeoutSecs = 600",
+             headers = { X-Route = 'eu' }",
         )
         .unwrap();
         assert_eq!(config.model.as_deref(), Some("m1"));
@@ -478,23 +473,18 @@ mod tests {
         let mut fields = serde_json::Map::new();
         fields.insert("thinking".into(), serde_json::json!({"type": "disabled"}));
         fields.insert("top_k".into(), serde_json::json!(5));
-        assert_eq!(
-            config.provider,
-            ProviderSettings {
-                base_url: Some("http://localhost:8000/v1".into()),
-                api_key_env: Some("LOCAL_KEY".into()),
-                system_updates: Some(SystemUpdates::Inline),
-                reasoning_format: Some(ReasoningFormat::Thinking),
-                fill_missing_reasoning: true,
-                prompt_cache_key: true,
-                request_fields: fields,
-                headers: vec![("X-Route".into(), "eu".into())],
-                idle_timeout_secs: Some(15),
-                max_retries: Some(0),
-            }
-        );
-        assert_eq!(config.chat.approval_timeout_secs, Some(60));
-        assert_eq!(config.acp.approval_timeout_secs, Some(600));
+        let provider = &config.provider;
+        let openai = &provider.openai;
+        assert_eq!(openai.base_url, "http://localhost:8000/v1");
+        assert_eq!(provider.api_key_env, "LOCAL_KEY");
+        assert_eq!(openai.system_updates, SystemUpdates::Inline);
+        assert_eq!(openai.reasoning_format, ReasoningFormat::Thinking);
+        assert!(openai.fill_missing_reasoning && openai.prompt_cache_key);
+        assert_eq!(openai.extra_fields, fields);
+        assert_eq!(openai.headers, [("X-Route".to_string(), "eu".to_string())]);
+        assert_eq!(openai.idle_timeout, Duration::from_secs(15));
+        assert_eq!(provider.retry.max_retries, 0);
+        assert_eq!(config.approval_timeout_secs, Some(60));
     }
 
     #[test]
@@ -517,15 +507,10 @@ mod tests {
                 "[provider]\nidleTimeoutSecs = 0",
                 "provider.idleTimeoutSecs must be at least 1",
             ),
-            (
-                "[chat]\napprovalTimeoutSecs = 0",
-                "chat.approvalTimeoutSecs must be at least 1",
-            ),
-            (
-                "[acp]\napprovalTimeoutSecs = 0",
-                "acp.approvalTimeoutSecs must be at least 1",
-            ),
-            ("[chat]\nqueueMode = 'all'", "unknown field `queueMode`"),
+            ("approvalTimeoutSecs = 0", "approvalTimeoutSecs must be at least 1"),
+            ("[chat]\nqueueMode = 'all'", "unknown field `chat`"),
+            ("[chat]\napprovalTimeoutSecs = 60", "unknown field `chat`"),
+            ("[acp]\napprovalTimeoutSecs = 60", "unknown field `acp`"),
             (
                 "[provider]\nheaders = { Authorization = 'Bearer x' }",
                 "provider.headers: Authorization",
@@ -538,6 +523,8 @@ mod tests {
                 "[provider]\nrequestFields = { ' ' = 1 }",
                 "provider.requestFields: a field has no name",
             ),
+            ("[provider]\nrequestFields = { seed = 1, seed = 2 }", "duplicate key"),
+            ("[provider]\nrequestFields = 'seed=1'", "invalid type"),
             ("[provider]\nmaxRetries = -1", "maxRetries"),
             ("secretFiles = ['']", "secretFiles: an entry is empty"),
             ("maxTokens = 'many'", "maxTokens"),
@@ -650,8 +637,7 @@ mod tests {
     }
 
     const PROM: &str = "[[mcp]]\nname = 'prom'\nurl = 'https://prom.example/mcp'\ntokenEnv = 'PROM_TOKEN'\n\
-                        tools = ['query', 'range']\ntimeoutSecs = 30\n\
-                        maxTimeoutSecs = 600\n";
+                        tools = ['query', 'range']\ntimeoutSecs = 30\n";
 
     #[test]
     fn mcp_servers_are_read_from_the_file() {
@@ -664,7 +650,6 @@ mod tests {
                 token_env: Some("PROM_TOKEN".into()),
                 tools: vec!["query".into(), "range".into()],
                 timeout_secs: Some(30),
-                max_timeout_secs: Some(600),
             }]
         );
         assert_eq!(config.mcp_tool_names().unwrap(), ["prom__query", "prom__range"]);
@@ -684,8 +669,8 @@ mod tests {
                 "timeoutSecs must be greater than zero",
             ),
             (
-                server("tools = ['query']\nmaxTimeoutSecs = 0"),
-                "maxTimeoutSecs must be greater than zero",
+                server("tools = ['query']\nmaxTimeoutSecs = 600"),
+                "unknown field `maxTimeoutSecs`",
             ),
             (server("tools = ['query']\ntokenEnv = ' '"), "tokenEnv is empty"),
             (server("tools = ['a.b', 'a_b']"), "like another of its tools"),

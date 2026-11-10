@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use serde_json::Value;
-use zx_agent::agent::{AgentEvent, ApprovalResult, Event, EventSink, RequestKind};
+use zx_agent::agent::{AgentEvent, Event, EventSink};
 use zx_agent::ai::{AssistantMessage, ContentBlock, Delta, Message, StopReason, ToolCall, ToolResultMessage};
 use zx_agent::compaction::{self, Outcome};
 use zx_agent::runner::RunReport;
@@ -17,8 +17,7 @@ use crate::cli::{ColorArg, OutputMode};
 use crate::process::{JsonlEvents, write_line};
 use crate::render::{Severity, answer_end_line, call_label, progress_line, visible};
 
-use super::debug::DebugState;
-use super::term::{Phase, Style, Terminal, Tone, elapsed_text};
+use super::term::{Style, Terminal, Tone, elapsed_text};
 
 /// Lines of a tool result shown under its `[tool]` line.
 const PREVIEW_LINES: usize = 3;
@@ -50,35 +49,23 @@ struct TextState {
 
 pub(super) struct Output {
     mode: OutputMode,
-    debug: bool,
-    /// Stream reasoning, dimmed, on stderr.
-    show_thinking: bool,
-    debug_state: Mutex<DebugState>,
     json: JsonlEvents,
     text: Mutex<TextState>,
 }
 
 impl Output {
-    pub(super) fn new(mode: OutputMode, deltas: bool, debug: bool, color: ColorArg, show_thinking: bool) -> Self {
-        let stderr_is_terminal = std::io::stderr().is_terminal();
+    pub(super) fn new(mode: OutputMode, deltas: bool, color: ColorArg) -> Self {
         let style = match color {
-            ColorArg::Auto => Style::auto(stderr_is_terminal),
+            ColorArg::Auto => Style::auto(std::io::stderr().is_terminal()),
             ColorArg::Always => Style::new(true),
             ColorArg::Never => Style::new(false),
         };
-        // A status line is redrawn in place, which a dumb terminal or a log cannot show; the
-        // debug timeline prints every step itself.
-        let dumb = std::env::var_os("TERM").is_some_and(|value| value == "dumb");
-        let live = stderr_is_terminal && !dumb && !debug && mode == OutputMode::Text;
         let spaced = std::io::stdout().is_terminal();
         Self {
             mode,
-            debug,
-            show_thinking,
-            debug_state: Mutex::new(DebugState::default()),
             json: JsonlEvents { deltas },
             text: Mutex::new(TextState {
-                terminal: Terminal::new(style, live, spaced),
+                terminal: Terminal::new(style, spaced),
                 labels: HashMap::new(),
                 wrote_text: false,
                 totals: Totals::default(),
@@ -115,16 +102,6 @@ impl Output {
         lock(&self.text).terminal.finish();
     }
 
-    /// Redraw the status line; nothing happens while there is none.
-    pub(super) fn tick(&self) {
-        lock(&self.text).terminal.tick();
-    }
-
-    /// Drop the status line: the operation it described is over.
-    pub(super) fn clear_status(&self) {
-        lock(&self.text).terminal.clear_status();
-    }
-
     pub(super) fn totals(&self) -> Totals {
         lock(&self.text).totals
     }
@@ -147,9 +124,6 @@ impl Output {
                 totals.cached_tokens = totals.cached_tokens.saturating_add(report.usage.cache_read);
                 if let Some(cost) = report.usage.total_cost {
                     totals.total_cost = Some(totals.total_cost.unwrap_or(0.0) + cost);
-                }
-                if self.debug {
-                    return;
                 }
                 if let Some(error) = &report.error {
                     state.terminal.line(Tone::Error, &format!("[chat] {}", visible(error)));
@@ -179,100 +153,74 @@ impl Output {
             },
         }
     }
+}
 
-    /// Finish the answer: text that was not streamed, labels for its calls, and how it ended.
-    fn answer_ended(&self, state: &mut TextState, message: &AssistantMessage) {
-        state.terminal.end_aside();
-        let text = message.text();
-        if !state.wrote_text && !text.is_empty() {
-            state.terminal.answer_text(&visible(&text));
-        }
-        state.terminal.end_answer();
-        for block in &message.content {
-            if let ContentBlock::ToolCall(ToolCall {
-                id, name, arguments, ..
-            }) = block
-            {
-                state.labels.insert(id.clone(), call_label(name, arguments));
-            }
-        }
-        if let Some(error) = &message.error_message {
-            state.last_error = Some(error.clone());
-        }
-        if self.debug {
-            return;
-        }
-        // A cancelled request is reported once, with the run's report.
-        if message.stop_reason != StopReason::Aborted
-            && let Some((severity, line)) = answer_end_line(message)
+/// Finish the answer: text that was not streamed, labels for its calls, and how it ended.
+fn answer_ended(state: &mut TextState, message: &AssistantMessage) {
+    let text = message.text();
+    if !state.wrote_text && !text.is_empty() {
+        state.terminal.answer_text(&visible(&text));
+    }
+    state.terminal.end_answer();
+    for block in &message.content {
+        if let ContentBlock::ToolCall(ToolCall {
+            id, name, arguments, ..
+        }) = block
         {
-            state.terminal.line(tone(severity), &line);
+            state.labels.insert(id.clone(), call_label(name, arguments));
         }
     }
-
-    /// Retry `attempt` of `max_retries` is scheduled: say so, unless the failed response just
-    /// said it, and show the wait in the status line.
-    fn retry_scheduled(&self, state: &mut TextState, attempt: u32, max_retries: u32, delay_ms: u64, error: &str) {
-        if !self.debug {
-            // The failed response was reported just before; name it only once.
-            let line = if state.last_error.as_deref() == Some(error) {
-                format!("[retry] {attempt}/{max_retries} in {delay_ms}ms (same error)")
-            } else {
-                format!("[retry] {attempt}/{max_retries} in {delay_ms}ms: {}", visible(error))
-            };
-            state.terminal.line(Tone::Warn, &line);
-        }
-        state.terminal.set_phase(Phase::Retry { attempt, max_retries });
+    if let Some(error) = &message.error_message {
+        state.last_error = Some(error.clone());
     }
-
-    /// An event with no line of chat's own: print it as `run` does, and clear the status line
-    /// when a summary is over, as a manual one ends without a `run_end`.
-    fn progress(&self, state: &mut TextState, event: &AgentEvent) {
-        if !self.debug
-            && let Some((severity, line)) = progress_line(event)
-        {
-            state.terminal.line(tone(severity), &line);
-        }
-        if matches!(
-            event,
-            AgentEvent::CompactionEnd { .. } | AgentEvent::CompactionFailed { .. }
-        ) {
-            state.terminal.clear_status();
-        }
-    }
-
-    fn tool_result(&self, state: &mut TextState, result: &ToolResultMessage) {
-        let label = state
-            .labels
-            .remove(&result.tool_call_id)
-            .unwrap_or_else(|| result.tool_name.clone());
-        let style = state.terminal.style();
-        let status = if result.is_error {
-            style.paint(Tone::Error, "error")
-        } else {
-            style.paint(Tone::Ok, "ok")
-        };
-        let duration = result.duration_ms.map(|ms| format!(" {ms}ms")).unwrap_or_default();
-        let line = format!(
-            "{} {label} -> {status}{}",
-            style.paint(Tone::Dim, "[tool]"),
-            style.paint(Tone::Dim, &duration)
-        );
-        state.terminal.tool_done(Tone::Plain, &line);
-        for line in preview(result, style) {
-            state.terminal.line(Tone::Plain, &format!("    {line}"));
-        }
+    // A cancelled request is reported once, with the run's report.
+    if message.stop_reason != StopReason::Aborted
+        && let Some((severity, line)) = answer_end_line(message)
+    {
+        state.terminal.line(tone(severity), &line);
     }
 }
 
-/// A call starts: the status line names it, with the label its call was shown with.
-fn tool_started(state: &mut TextState, call: &str, tool: &str, args: &Value) {
+/// The line that says how a call ended, then a preview of what it returned.
+fn tool_result(state: &mut TextState, result: &ToolResultMessage) {
     let label = state
         .labels
-        .get(call)
-        .cloned()
-        .unwrap_or_else(|| call_label(tool, args));
-    state.terminal.set_phase(Phase::Tool { label });
+        .remove(&result.tool_call_id)
+        .unwrap_or_else(|| result.tool_name.clone());
+    let style = state.terminal.style();
+    let status = if result.is_error {
+        style.paint(Tone::Error, "error")
+    } else {
+        style.paint(Tone::Ok, "ok")
+    };
+    let duration = result.duration_ms.map(|ms| format!(" {ms}ms")).unwrap_or_default();
+    let line = format!(
+        "{} {label} -> {status}{}",
+        style.paint(Tone::Dim, "[tool]"),
+        style.paint(Tone::Dim, &duration)
+    );
+    state.terminal.line(Tone::Plain, &line);
+    for line in preview(result, style) {
+        state.terminal.line(Tone::Plain, &format!("    {line}"));
+    }
+}
+
+/// Retry `attempt` of `max_retries` is scheduled: say so, unless the failed response just
+/// said it.
+fn retry_scheduled(state: &mut TextState, attempt: u32, max_retries: u32, delay_ms: u64, error: &str) {
+    let line = if state.last_error.as_deref() == Some(error) {
+        format!("[retry] {attempt}/{max_retries} in {delay_ms}ms (same error)")
+    } else {
+        format!("[retry] {attempt}/{max_retries} in {delay_ms}ms: {}", visible(error))
+    };
+    state.terminal.line(Tone::Warn, &line);
+}
+
+/// An event with no line of chat's own: print it as `run` does.
+fn progress(state: &mut TextState, event: &AgentEvent) {
+    if let Some((severity, line)) = progress_line(event) {
+        state.terminal.line(tone(severity), &line);
+    }
 }
 
 /// A message an extension sent and asked to show: its type, then a preview of its content.
@@ -290,80 +238,40 @@ impl EventSink for Output {
             self.json.emit(event);
             return;
         }
-        {
-            let mut state = lock(&self.text);
-            match &event.event {
-                AgentEvent::RunStart { .. } => state.last_error = None,
-                AgentEvent::RequestStart { kind, .. } => state.terminal.set_phase(match kind {
-                    RequestKind::Task => Phase::Model { thinking: false },
-                    RequestKind::Summary => Phase::Summary,
-                }),
-                AgentEvent::MessageStart { role: "assistant" } => state.wrote_text = false,
-                AgentEvent::MessageUpdate {
-                    delta: Delta::Text { text },
-                } => {
-                    state.terminal.answer_text(&visible(text));
-                    state.wrote_text = true;
-                }
-                AgentEvent::MessageUpdate {
-                    delta: Delta::Thinking { text },
-                } => {
-                    if self.show_thinking {
-                        state.terminal.aside_text(&visible(text));
-                    } else {
-                        state.terminal.set_phase(Phase::Model { thinking: true });
-                    }
-                }
-                AgentEvent::MessageEnd {
-                    message: Message::Assistant(message),
-                    ..
-                } => self.answer_ended(&mut state, message),
-                AgentEvent::MessageEnd {
-                    message: Message::ToolResult(result),
-                    ..
-                } => {
-                    if !self.debug {
-                        self.tool_result(&mut state, result);
-                    }
-                }
-                // A message an extension sent, shown when it asks for that (pi: `display`).
-                AgentEvent::MessageEnd {
-                    message: Message::User { content, .. },
-                    custom: Some(info),
-                    ..
-                } if info.display && !self.debug => custom_message(&mut state, &info.custom_type, content),
-                AgentEvent::ToolExecutionStart {
-                    tool_call_id,
-                    tool_name,
-                    args,
-                } => tool_started(&mut state, tool_call_id, tool_name, args),
-                // The result line that follows says how the call ended.
-                AgentEvent::ToolExecutionEnd { .. } => {}
-                AgentEvent::ApprovalRequested { .. } | AgentEvent::RunEnd { .. } => state.terminal.clear_status(),
-                // The call starts only now; `tool_execution_start` came before the question.
-                AgentEvent::ApprovalResolved {
-                    tool_call_id,
-                    approval: ApprovalResult::AllowOnce | ApprovalResult::AllowSession | ApprovalResult::Remembered,
-                    ..
-                } => {
-                    if let Some(label) = state.labels.get(tool_call_id).cloned() {
-                        state.terminal.set_phase(Phase::Tool { label });
-                    }
-                }
-                AgentEvent::RetryScheduled {
-                    attempt,
-                    max_retries,
-                    delay_ms,
-                    error,
-                } => self.retry_scheduled(&mut state, *attempt, *max_retries, *delay_ms, error),
-                // Everything else is printed as `run` prints it; `progress_line` covers every event.
-                other => self.progress(&mut state, other),
+        let mut state = lock(&self.text);
+        match &event.event {
+            AgentEvent::RunStart { .. } => state.last_error = None,
+            AgentEvent::MessageStart { role: "assistant" } => state.wrote_text = false,
+            AgentEvent::MessageUpdate {
+                delta: Delta::Text { text },
+            } => {
+                state.terminal.answer_text(&visible(text));
+                state.wrote_text = true;
             }
-        }
-        // Emit after rendering the assistant message so the log starts on a new line.
-        if self.debug {
-            let color = lock(&self.text).terminal.style().color();
-            lock(&self.debug_state).emit(event, color);
+            AgentEvent::MessageEnd {
+                message: Message::Assistant(message),
+                ..
+            } => answer_ended(&mut state, message),
+            AgentEvent::MessageEnd {
+                message: Message::ToolResult(result),
+                ..
+            } => tool_result(&mut state, result),
+            // A message an extension sent, shown when it asks for that (pi: `display`).
+            AgentEvent::MessageEnd {
+                message: Message::User { content, .. },
+                custom: Some(info),
+                ..
+            } if info.display => custom_message(&mut state, &info.custom_type, content),
+            // The result line that follows says how the call ended.
+            AgentEvent::ToolExecutionStart { .. } | AgentEvent::ToolExecutionEnd { .. } => {}
+            AgentEvent::RetryScheduled {
+                attempt,
+                max_retries,
+                delay_ms,
+                error,
+            } => retry_scheduled(&mut state, *attempt, *max_retries, *delay_ms, error),
+            // Everything else is printed as `run` prints it; `progress_line` covers every event.
+            other => progress(&mut state, other),
         }
     }
 }

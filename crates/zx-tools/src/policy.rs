@@ -1,9 +1,8 @@
-//! The built-in tool-call policies: rules by tool or command prefix, the command policy of
-//! the `bash` tool, and the auto-approval of plain commands; the loop sees them only through
-//! Hooks.
+//! The built-in tool-call policies: rules by tool, the command policy of the `bash` tool, and
+//! the auto-approval of plain commands; the loop sees them only through Hooks.
 //!
-//! - `rules`: rules by tool name or bash command prefix
-//! - `command`: the command policy of `bash`: denied patterns and programs, and the allowlist
+//! - `rules`: rules by tool name
+//! - `command`: the command policy of `bash`: denied patterns and programs
 //! - `auto_approve`: the bash commands that run without asking where a rule would ask
 
 mod auto_approve;

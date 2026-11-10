@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use crate::agent::{AgentEvent, ApprovalResult, Event, EventSink, Interruption, RequestKind, RunOutcome, ToolVerdict};
 use crate::ai::{Message, StopReason, Usage};
 
-/// Passes the events that spans and metrics need to the exporter task.
+/// Passes the events that spans need to the exporter task.
 pub(super) struct SignalSink {
     pub(super) sender: mpsc::Sender<Signal>,
     pub(super) dropped: Arc<AtomicU64>,
@@ -69,7 +69,6 @@ pub(super) enum What {
         attempt: u32,
     },
     Response {
-        model: String,
         usage: Usage,
         stop: StopReason,
     },
@@ -153,7 +152,6 @@ impl Signal {
                 message: Message::Assistant(message),
                 ..
             } => What::Response {
-                model: message.model.clone(),
                 usage: message.usage.clone(),
                 stop: message.stop_reason,
             },

@@ -14,7 +14,7 @@ use tokio::process::Command;
 
 use common::fake_mcp::{Era, FakeMcp, Reply as McpReply, tool};
 use common::mock_server::{MockServer, Reply};
-use common::{stderr, stdout, write_agent, write_config, zx_agent};
+use common::{Home, stderr, stdout, write_agent, write_config, zx_agent_in};
 
 const TOKEN_VAR: &str = "ZX_MCP_CLI_TEST_TOKEN";
 const TOKEN: &str = "mcp-cli-secret-5678";
@@ -57,17 +57,14 @@ fn agent_home(dir: &Path, url: &str, builtin_tools: &str) -> PathBuf {
 /// `zx-agent <mode>` against `model` with the zx-agent home `home`, the token set and no API
 /// key.
 fn program(mode: &str, model: &MockServer, dir: &Path, home: &Path) -> Command {
-    let mut command = zx_agent();
+    // chat keeps sessions under the zx-agent home by default; never the real one.
+    let mut command = zx_agent_in(dir, Home::Agent(home));
     command
         .args([mode, "--model", "mock"])
-        .current_dir(dir)
         .env("ZX_BASE_URL", &model.base_url)
-        // chat keeps sessions under the zx-agent home by default; never the real one.
-        .env("ZX_AGENT_HOME", home)
         .env(TOKEN_VAR, TOKEN)
         .env_remove(KEY_VAR)
-        .env_remove("ZX_SECRET_FILES")
-        .kill_on_drop(true);
+        .env_remove("ZX_SECRET_FILES");
     command
 }
 
@@ -110,7 +107,7 @@ async fn run_calls_an_mcp_tool_its_server_allows() {
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     assert_eq!(stdout(&output), "done\n");
     let startup = format!(
-        "[mcp] prom: prom__query, prom__range (asks); protocol 2026-07-28; {}; the token is sent unencrypted",
+        "[mcp] prom: prom__query, prom__range; protocol 2026-07-28; {}; the token is sent unencrypted",
         origin(&fake)
     );
     assert!(stderr.contains(&startup), "{stderr}");

@@ -5,7 +5,6 @@
     reason = "each test binary uses a different subset of these helpers; `expect` would fail in a binary that uses them all"
 )]
 
-pub(crate) mod evals;
 pub(crate) mod fake_feishu;
 pub(crate) mod fake_mcp;
 pub(crate) mod fake_slack;
@@ -28,14 +27,13 @@ use zx_agent::agent::ApprovalCache;
 use zx_agent::agent::QueuedMessage;
 use zx_agent::agent::{
     AgentEvent, Attempt, AttemptResult, Event, EventSink, ExecutionMode, HookContext, LoopConfig, MessageQueues, Tool,
-    ToolContext, ToolOutput, ToolPolicy,
+    ToolContext, ToolOutput,
 };
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::{
     AssistantMessage, ContentBlock, EventReceiver, Message, Provider, Request, StopReason, ToolCall, ToolDef,
 };
-use zx_agent::policy::PolicyHook;
 use zx_agent::runner::{Limits, Runner};
 use zx_agent::session::{Entry, SessionHeader, SessionStore};
 
@@ -43,8 +41,8 @@ use zx_agent::session::{Entry, SessionHeader, SessionStore};
 ///
 /// It runs without the variables a developer may have set for zx-agent, and with a zx-agent
 /// home directory that holds nothing, so that no `config.toml` or agent of the real home
-/// reaches a test. A test that needs a home of its own sets `ZX_AGENT_HOME` again (see
-/// [`AgentHome`]), or removes it and sets `HOME`.
+/// reaches a test. A test that needs a home of its own starts the program with
+/// [`zx_agent_in`].
 pub(crate) fn zx_agent() -> tokio::process::Command {
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_zx-agent"));
     command
@@ -53,6 +51,28 @@ pub(crate) fn zx_agent() -> tokio::process::Command {
         .env_remove("ZX_BASE_URL")
         // The default variable of the API key: a developer's key must not reach a fake model.
         .env_remove("OPENAI_API_KEY");
+    command
+}
+
+/// Where a test's program finds its zx-agent home.
+#[derive(Clone, Copy)]
+pub(crate) enum Home<'a> {
+    /// `ZX_AGENT_HOME` names this directory, such as an [`AgentHome`].
+    Agent(&'a Path),
+    /// `HOME` is this directory and `ZX_AGENT_HOME` is unset: the zx-agent home is its
+    /// `.zx-agent`, where chat and acp keep their sessions by default.
+    User(&'a Path),
+}
+
+/// [`zx_agent`] started in `cwd` with the zx-agent home `home`, and killed when the test
+/// drops it. The caller adds the arguments, the model's address and the key.
+pub(crate) fn zx_agent_in(cwd: &Path, home: Home<'_>) -> tokio::process::Command {
+    let mut command = zx_agent();
+    command.current_dir(cwd).kill_on_drop(true);
+    match home {
+        Home::Agent(dir) => command.env("ZX_AGENT_HOME", dir),
+        Home::User(dir) => command.env("HOME", dir).env_remove("ZX_AGENT_HOME"),
+    };
     command
 }
 
@@ -395,11 +415,6 @@ pub(crate) fn config(provider: Arc<dyn Provider>, tools: Vec<Arc<dyn Tool>>) -> 
     }
 }
 
-pub(crate) fn with_policy(mut config: LoopConfig, policy: Arc<dyn ToolPolicy>) -> LoopConfig {
-    config.hooks.push(PolicyHook::new(policy));
-    config
-}
-
 /// Short text of each message, for compact assertions.
 pub(crate) fn summarize(messages: &[Message]) -> Vec<String> {
     messages
@@ -451,24 +466,6 @@ pub(crate) async fn run_prompt(
     let result = attempt.run(vec![QueuedMessage::User(prompt.to_string())]).await;
     *context = session.messages();
     (result, sink)
-}
-
-/// Run one attempt with `prompts` over a new in-memory session, with at most
-/// `max_model_requests`, stopped by `cancel` and reporting to `sink`. Returns the result and
-/// the session's projection.
-pub(crate) async fn run_attempt(
-    config: &LoopConfig,
-    prompts: Vec<QueuedMessage>,
-    max_model_requests: Option<u32>,
-    cancel: &CancellationToken,
-    sink: &dyn EventSink,
-) -> (AttemptResult, Vec<Message>) {
-    let mut session = SessionStore::in_memory(header());
-    let mut approvals = ApprovalCache::default();
-    let mut attempt = Attempt::new(config, &mut session, &mut approvals, cancel, sink);
-    attempt.max_model_requests = max_model_requests;
-    let result = attempt.run(prompts).await;
-    (result, session.messages())
 }
 
 /// A hook context for calling a hook directly: a fresh run in the current directory.
@@ -523,18 +520,6 @@ impl RunnerSetup {
     /// The runner, sending events to `sink`.
     pub(crate) fn build_with(self, sink: Arc<dyn EventSink>) -> Runner {
         Runner::new(self.config, self.retry, self.limits, self.session, sink)
-    }
-}
-
-/// Cancels a token at the first streamed delta, to cancel a response mid-stream without
-/// depending on timing.
-pub(crate) struct CancelOnFirstDelta(pub CancellationToken);
-
-impl EventSink for CancelOnFirstDelta {
-    fn emit(&self, event: &Event) {
-        if matches!(event.event, AgentEvent::MessageUpdate { .. }) {
-            self.0.cancel();
-        }
     }
 }
 

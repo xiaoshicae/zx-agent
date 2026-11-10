@@ -12,7 +12,7 @@ use tokio::process::Command;
 
 use common::fake_slack::FakeSlack;
 use common::mock_server::{MockServer, Reply};
-use common::{fake_model_config, json_lines, stderr, stdout, zx_agent};
+use common::{Home, fake_model_config, json_lines, stderr, stdout, zx_agent_in};
 
 const APP_TOKEN: &str = "xapp-1-im-test-token";
 const BOT_TOKEN: &str = "xoxb-im-test-token";
@@ -24,18 +24,15 @@ const WAIT: Duration = Duration::from_secs(20);
 fn im(dir: &Path, config: &Path, model: &str) -> Command {
     let home = dir.join(".zx-agent-home");
     common::write_config(&home, &fake_model_config("ZX_IM_CLI_TEST_KEY", "", ""));
-    let mut command = zx_agent();
+    let mut command = zx_agent_in(dir, Home::Agent(&home));
     command
         .args(["im", "--config", config.to_str().unwrap(), "--model", "mock"])
-        .current_dir(dir)
-        .env("ZX_AGENT_HOME", &home)
         .env("ZX_BASE_URL", model)
         .env("SLACK_APP_TOKEN", APP_TOKEN)
         .env("SLACK_BOT_TOKEN", BOT_TOKEN)
         .env("FEISHU_APP_ID", "cli_test")
         .env("FEISHU_APP_SECRET", "secret-test")
-        .env_remove("ZX_SECRET_FILES")
-        .kill_on_drop(true);
+        .env_remove("ZX_SECRET_FILES");
     command
 }
 
@@ -95,7 +92,12 @@ async fn configuration_errors_are_reported_before_serving() {
             None,
             "which is not configured",
         ),
-        (VALID, &["--session", "x.jsonl"], None, "--session does not apply to im"),
+        (
+            VALID,
+            &["--session", "x.jsonl"],
+            None,
+            "unexpected argument '--session'",
+        ),
         (
             "[slack]\ntoken = \"x\"\n[access]\nconversations = []\n[sessions]\ndir = \"s\"\n",
             &[],

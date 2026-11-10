@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
@@ -13,11 +14,12 @@ use zx_agent::AgentSession;
 use zx_agent::agent::{AgentEvent, ContextEdit, Event, HookContext, HookOptions, Hooks};
 use zx_agent::agent_session::{AgentSessionError, ModelRef};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{AssistantMessage, ContentBlock, Message, StopReason, ToolCall, ToolResultMessage};
+use zx_agent::ai::{AssistantMessage, ContentBlock, Message, Request, StopReason, ToolCall, ToolResultMessage};
 use zx_agent::compaction::{Config, Outcome, Report};
 use zx_agent::runner::{Limits, RunOutcome};
 use zx_agent::session::{Entry, SessionStore};
 
+use common::summary_eval::{PLANTED, Planted, ROUNDS, evaluate, round, text_of};
 use common::{RunnerSetup, config, fast_retry, header, seeded_session, summary_json};
 
 fn budget() -> Config {
@@ -932,4 +934,78 @@ async fn a_single_large_old_message_does_not_force_the_entire_history_to_be_reta
     let report = runner.run("continue", &CancellationToken::new()).await;
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
     assert_eq!(report.model_requests, 2);
+}
+
+#[test]
+fn each_planted_fact_of_the_scripted_session_first_appears_in_its_round() {
+    let rounds: Vec<Vec<String>> = (1..=ROUNDS).map(|n| round(n).iter().map(text_of).collect()).collect();
+    let stated = |fact: &Planted, n: usize| rounds[n - 1].iter().any(|text| fact.stated_in(text));
+
+    for fact in PLANTED {
+        assert!(fact.stated_in(fact.text), "{} states itself", fact.id);
+        let first = (1..=ROUNDS).find(|n| stated(fact, *n));
+        assert_eq!(first, Some(fact.round), "{}", fact.id);
+        // Otherwise a summary could state it again after its replacement.
+        if let Some(by) = fact.replacement() {
+            let after = (by.round + 1..=ROUNDS).find(|n| stated(fact, *n));
+            assert_eq!(after, None, "{} after its replacement {}", fact.id, by.id);
+        }
+    }
+}
+
+/// A summarizer that knows the planted facts. It states each one that a record it reads
+/// states, citing that record, unless the input also states its replacement.
+fn oracle(request: &Request) -> FauxStep {
+    let Message::User { content, .. } = &request.messages[1] else {
+        panic!("a summary request ends with its input");
+    };
+    let records: Vec<Value> = serde_json::from_str(content).unwrap();
+    // The text of each record, without its entry ID and timestamps, whose digits could
+    // match a planted number.
+    let texts: Vec<(&Value, String)> = records
+        .iter()
+        .map(|record| {
+            let message = Message::deserialize(&record["message"]).unwrap();
+            (&record["entryId"], text_of(&message))
+        })
+        .collect();
+    let source = |fact: &Planted| texts.iter().find(|(_, text)| fact.stated_in(text)).map(|(id, _)| *id);
+    let facts: Vec<Value> = PLANTED
+        .iter()
+        .filter_map(|fact| {
+            let cited = source(fact)?;
+            let replaced = fact.replacement().is_some_and(|by| source(by).is_some());
+            (!replaced).then(|| json!({"text": fact.text, "sourceEntryIds": [cited]}))
+        })
+        .collect();
+    FauxStep::text(json!({"facts": facts, "inferences": ["A scripted incident"], "plans": ["Continue"]}).to_string())
+}
+
+#[tokio::test]
+async fn the_evaluation_scores_a_summarizer_that_keeps_every_fact_as_keeping_them_all() {
+    let dir = tempfile::tempdir().unwrap();
+    let provider = Arc::new(FauxProvider::new((0..ROUNDS).map(|_| FauxStep::compute(oracle))));
+
+    let evaluation = evaluate(provider, "faux-model", Config::default(), dir.path()).await;
+
+    // Captured; shown when an assertion fails.
+    evaluation.print("faux-model");
+    for (index, round) in evaluation.rounds.iter().enumerate() {
+        let round_number = index + 1;
+        assert_eq!(
+            round.outcome,
+            Outcome::Completed,
+            "round {round_number}: {:?}",
+            round.error
+        );
+        assert!(round.request_bytes > 0, "round {round_number}");
+        assert_eq!(
+            (round.kept, round.stale, round.old_values),
+            (round.expected, 0, 0),
+            "round {round_number}"
+        );
+    }
+    // 24 planted facts, 6 of them replaced.
+    assert_eq!(evaluation.rounds[ROUNDS - 1].expected, 18);
+    assert_eq!(evaluation.facts.len(), 18);
 }
