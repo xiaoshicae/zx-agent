@@ -14,7 +14,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use common::mock_server::{MockServer, Reply};
-use common::{stderr, stdout, zx_agent};
+use common::{fake_model_config, stderr, stdout, write_config, zx_agent};
 use zx_agent::ai::Message;
 use zx_agent::session::{SESSION_VERSION, SessionStore};
 
@@ -46,6 +46,7 @@ impl Dirs {
     }
 
     fn command(&self, args: &[&str]) -> Command {
+        write_config(&self.home.path().join(".zx-agent"), &fake_model_config(KEY_VAR, "", ""));
         let mut command = zx_agent();
         command
             .args(args)
@@ -53,8 +54,6 @@ impl Dirs {
             .env("HOME", self.home.path())
             .env_remove("ZX_AGENT_HOME")
             .env(KEY_VAR, "sk-sessions-test")
-            .env_remove("ZX_MODEL")
-            .env_remove("ZX_BASE_URL")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -63,10 +62,8 @@ impl Dirs {
     }
 
     async fn chat(&self, server: &MockServer, args: &[&str], input: &str) -> Output {
-        let mut command = self.command(&["chat", "--model", "mock", "--base-url", &server.base_url]);
-        command
-            .args(["--api-key-env", KEY_VAR, "--max-retries", "0", "--tools", ""])
-            .args(args);
+        let mut command = self.command(&["chat", "--model", "mock", "--tools", ""]);
+        command.args(args).env("ZX_BASE_URL", &server.base_url);
         let mut child = command.spawn().unwrap();
         let mut stdin = child.stdin.take().unwrap();
         stdin.write_all(input.as_bytes()).await.unwrap();
@@ -149,7 +146,7 @@ async fn chat_keeps_each_conversation_in_its_own_file_under_the_home_directory()
         use std::os::unix::fs::PermissionsExt;
         let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&dirs.session_dir()), 0o700);
-        assert_eq!(mode(&dirs.home.path().join(".zx-agent")), 0o700);
+        assert_eq!(mode(&dirs.home.path().join(".zx-agent/sessions")), 0o700);
         assert_eq!(mode(&files[0]), 0o600);
     }
 }
@@ -160,9 +157,9 @@ async fn the_default_session_directory_follows_zx_agent_home() {
     let elsewhere = tempfile::tempdir().unwrap();
     let agent_home = elsewhere.path().join("agent-home");
     let server = MockServer::start(vec![Reply::text("one")]).await;
-    let mut command = dirs.command(&["chat", "--model", "mock", "--base-url", &server.base_url]);
+    let mut command = dirs.command(&["chat", "--model", "mock", "--tools", ""]);
     command
-        .args(["--api-key-env", KEY_VAR, "--max-retries", "0", "--tools", ""])
+        .env("ZX_BASE_URL", &server.base_url)
         .env("ZX_AGENT_HOME", &agent_home);
     let mut child = command.spawn().unwrap();
     let mut stdin = child.stdin.take().unwrap();
@@ -183,7 +180,7 @@ async fn the_default_session_directory_follows_zx_agent_home() {
         files(&agent_home.join("sessions").join(format!("--{encoded}--"))).len(),
         1
     );
-    assert!(!dirs.home.path().join(".zx-agent").exists());
+    assert!(!dirs.home.path().join(".zx-agent/sessions").exists());
 
     let mut listing = dirs.command(&["sessions"]);
     listing.env("ZX_AGENT_HOME", &agent_home);
@@ -202,7 +199,7 @@ async fn no_session_keeps_the_conversation_in_memory() {
     let output = dirs.chat(&server, &["--no-session"], "hello\n/sessions\n/quit\n").await;
 
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert!(!dirs.home.path().join(".zx-agent").exists());
+    assert!(!dirs.home.path().join(".zx-agent/sessions").exists());
     assert!(stderr(&output).contains("session=memory"));
     assert!(stderr(&output).contains("[chat] no session directory"));
 }
@@ -265,26 +262,6 @@ async fn resume_without_an_earlier_session_starts_a_new_one() {
 }
 
 #[tokio::test]
-async fn session_dir_replaces_the_default_directory() {
-    let dirs = Dirs::new();
-    let custom = dirs.home.path().join("custom");
-    seed(&custom, "aaaa0001", &dirs.cwd(), 1_000, "kept here");
-    let server = MockServer::start(vec![Reply::text("ok")]).await;
-
-    let output = dirs
-        .chat(
-            &server,
-            &["--session-dir", custom.to_str().unwrap(), "--resume"],
-            "next\n/quit\n",
-        )
-        .await;
-
-    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert_eq!(sent(&server, 0), ["kept here", "next"]);
-    assert!(!dirs.session_dir().exists());
-}
-
-#[tokio::test]
 async fn sessions_lists_the_most_recent_first_and_reports_unreadable_files() {
     let dirs = Dirs::new();
     let dir = dirs.session_dir();
@@ -309,17 +286,13 @@ async fn sessions_lists_the_most_recent_first_and_reports_unreadable_files() {
 #[tokio::test]
 async fn sessions_finds_none_where_no_session_was_kept() {
     let dirs = Dirs::new();
-    let custom = dirs.home.path().join("nothing-here");
 
-    let default = dirs.sessions(&[]).await;
-    let explicit = dirs.sessions(&["--session-dir", custom.to_str().unwrap()]).await;
+    let output = dirs.sessions(&[]).await;
 
-    for output in [default, explicit] {
-        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-        assert_eq!(stdout(&output), "");
-        assert!(stderr(&output).contains("[sessions] 0 session(s) in"));
-    }
-    assert!(!custom.exists(), "listing creates no directory");
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    assert!(stderr(&output).contains("[sessions] 0 session(s) in"));
+    assert!(!dirs.session_dir().exists(), "listing creates no directory");
 }
 
 #[tokio::test]
@@ -474,7 +447,7 @@ async fn slash_fork_needs_a_session_file() {
 
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(stderr(&output).contains("[chat] nothing to fork: the conversation is kept in memory"));
-    assert!(!dirs.home.path().join(".zx-agent").exists());
+    assert!(!dirs.home.path().join(".zx-agent/sessions").exists());
 }
 
 /// A session file with two exchanges and known IDs: `<id>-1` user `first`, `<id>-2`

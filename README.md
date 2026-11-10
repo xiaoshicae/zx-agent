@@ -1,8 +1,8 @@
 # zx-agent
 
-一个用 Rust 编写的通用 agent 内核，目标是让同一个内核支撑人机对话、无人值守运行和被其他程序嵌入。场景之间的差异将通过 profile（提示词、工具、规则、上限）和插件表达，不改内核。整体架构参考 [pi](https://github.com/earendil-works/pi)（commit `a92283056`）：分层方式、循环语义和会话文件格式都沿用 pi 的设计；与 pi 不同的地方列在[与 pi 的差异](#与-pi-的差异)一节。
+一个用 Rust 编写的通用 agent 内核，目标是让同一个内核支撑人机对话、无人值守运行和被其他程序嵌入。场景之间的差异将通过 agent（提示词、工具、权限、上限）和插件表达，不改内核。整体架构参考 [pi](https://github.com/earendil-works/pi)（commit `a92283056`）：分层方式、循环语义和会话文件格式都沿用 pi 的设计；与 pi 不同的地方列在[与 pi 的差异](#与-pi-的差异)一节。
 
-当前版本为 v0.1.0，已实现无人值守的 `run`、终端对话 `chat`、ACP agent `acp`、TOML profile、项目上下文、按需 skills 与上下文管理。交互式界面由 ACP 客户端提供，见[路线图](docs/ROADMAP.md)的 D13。
+当前版本为 v0.1.0，已实现无人值守的 `run`、终端对话 `chat`、ACP agent `acp`、主目录中的 `config.toml` 与 agent 文件、项目上下文、按需 skills 与上下文管理。交互式界面由 ACP 客户端提供，见[路线图](docs/ROADMAP.md)的 D13。
 
 - **已具备**：
   - OpenAI 兼容的流式 provider，带事件队列、SSE 事件与响应大小上限
@@ -10,15 +10,15 @@
   - 长期 `AgentSession`：共享提问、单次运行互斥、取消后复用、多订阅者和模型切换
   - 终端 `chat`：流式回答、审批、运行中插话、Ctrl+C 后继续对话；等待与工具执行的状态行、工具结果预览、每轮用量、粘贴的多行合为一条消息
   - ACP agent `acp`：经 stdio 的 Agent Client Protocol v1，编辑器（Zed 等）或终端客户端（Wisp 等）作为界面；流式回答与推理、工具调用与结果、审批经客户端完成、取消、会话落盘、`session/load` / `session/resume` 续接与 `session/list` 列出会话
-  - 文件化的 profile（内置 `unattended`、`assistant`）；显式 CLI 参数覆盖、deny 累加；特定环境的规则（如 kubectl 可带的选项）写在 profile 里，代码中不含
+  - 主目录（`~/.zx-agent`，或 `ZX_AGENT_HOME`）中的 `config.toml`（模型、provider、执行环境、MCP 服务器）与 agent 文件（Markdown 加 TOML front matter：说明、工具、权限、上限；替换内置的 `unattended`、`assistant`）；特定环境的规则（如 kubectl 可带的选项）写在部署的 agent 里，代码中不含
   - 项目 `AGENTS.md` 和显式上下文文件；`read_skill` 按需读取登记的 skill 正文
   - `bash`、`read_file`，改文件的 `edit_file`（多处精确替换，结果附 unified patch）与 `write_file`（新建或整体覆盖），以及只读的 `grep`、`find`、`ls`
-  - 可选的容器执行（profile 的 `execution = "container"`）：bash 与 read_file 在作为沙箱的 Docker 容器中逐个执行；默认工作目录可写、可联网，也可配置为只读、无网络，见[容器执行](#容器执行)
+  - 可选的容器执行（`config.toml` 的 `execution = "container"`）：bash 与 read_file 在作为沙箱的 Docker 容器中逐个执行；默认工作目录可写、可联网，也可配置为只读、无网络，见[容器执行](#容器执行)
   - 可选的自动 / 手动压缩：摘要引用源条目，原始历史保留
   - 长工具结果脱敏后落盘，`read_output` 按 UUID 分页读取
   - 声明式命令策略
   - 结构化错误分类与自动重试
-  - 可选的轮次上限与时间上限；`run` 的默认值在 `unattended` profile
+  - 可选的轮次上限与时间上限；`run` 的默认值在内置的 `unattended` agent
   - 只追加的会话记录：默认存为 JSONL 文件（可续跑，同一时间只有一个写入者），也可经 `SessionLog` 存到数据库等其他位置
   - JSONL 事件流输出，流式工具参数携带调用 ID
   - 可配置的截断续写（`run` 默认续写 1 次）
@@ -34,15 +34,24 @@
 
 ```bash
 cargo build --release
-export OPENAI_API_KEY=...            # 变量名可通过 --api-key-env 修改
+export OPENAI_API_KEY=...            # 变量名可在 config.toml 的 provider.apiKeyEnv 中修改
 ./target/release/zx-agent run --model <模型 ID> "检查本机磁盘与内存使用情况，找出资源占用最高的进程"
+```
+
+模型、服务地址等写进 `~/.zx-agent/config.toml` 后就不必每次传入，见[配置说明](docs/CONFIGURATION.md)：
+
+```toml
+model = "<模型 ID>"
+
+[provider]
+baseUrl = "https://api.openai.com/v1"
+apiKeyEnv = "OPENAI_API_KEY"
 ```
 
 本地或私有部署的模型（vLLM、Ollama、llama.cpp server 等 OpenAI 兼容服务）：
 
 ```bash
-./target/release/zx-agent run \
-  --base-url http://127.0.0.1:11434/v1 --model <模型名> \
+ZX_BASE_URL=http://127.0.0.1:11434/v1 ./target/release/zx-agent run --model <模型名> \
   "排查 nginx 返回 502 的原因"
 ```
 
@@ -51,30 +60,30 @@ export OPENAI_API_KEY=...            # 变量名可通过 --api-key-env 修改
 ### 终端对话
 
 ```bash
-zx-agent chat --model "$ZX_MODEL"                          # 新对话，存入会话目录
-zx-agent chat --model "$ZX_MODEL" --resume                 # 续接本工作目录最近一次的对话
-zx-agent sessions                                          # 列出本工作目录的会话
-zx-agent chat --model "$ZX_MODEL" --fork 0b7c              # 在某个会话的副本上继续，原会话不变
-zx-agent chat --model "$ZX_MODEL" --session ./chat.jsonl   # 指定会话文件
+zx-agent chat                          # 新对话，存入会话目录（模型取自 config.toml）
+zx-agent chat --resume                 # 续接本工作目录最近一次的对话
+zx-agent sessions                      # 列出本工作目录的会话
+zx-agent chat --fork 0b7c              # 在某个会话的副本上继续，原会话不变
+zx-agent chat --session ./chat.jsonl   # 指定会话文件
 ```
 
-不给 `--session` 时，chat 把每次对话存成一个会话文件：`~/.zx-agent/sessions/--<工作目录>--/<UTC 时间>_<会话 ID>.jsonl`，目录名是去掉开头 `/`、其余 `/` 换成 `-` 的工作目录，与 pi 相同；新建的目录权限 0700、文件 0600。`--session-dir` 换一个目录，`--no-session` 只保存在内存。`--resume` 续接会话目录中本工作目录最近活动的会话（没有就新建并提示），`--resume <ID 前缀>` 续接 ID 以它开头的唯一会话，找不到或不唯一时以退出码 2 结束。`--fork <ID 前缀|文件>` 把一个会话复制成会话目录中的新文件，在副本上继续（对应 pi 的 `--fork`）：复制源会话最后一条记录所在的分支（chat 里的 `/fork` 则复制到当前位置，见 `/branch`），条目原样保留（ID、时间、请求审计与摘要都在），新文件头部的 `parentSession` 记下源文件的绝对路径，`cwd` 与 `model` 是这次启动的；源文件不加锁读取、不被修改，别的进程正在写的会话也能复制。`zx-agent sessions`（可加 `--session-dir`、`--cwd`）每个会话输出一行：会话 ID 的前 8 个字符、最近活动的本地时间、上下文中的消息数、第一条提示词的首行（至多 60 个字符），按最近活动排序，其他工作目录的会话注明 `cwd`；读不了的文件在 stderr 报告。`run` 不变，只在给出 `--session` 时写文件。
+不给 `--session` 时，chat 把每次对话存成一个会话文件：`~/.zx-agent/sessions/--<工作目录>--/<UTC 时间>_<会话 ID>.jsonl`（`ZX_AGENT_HOME` 设置时在它下面），目录名是去掉开头 `/`、其余 `/` 换成 `-` 的工作目录，与 pi 相同；新建的目录权限 0700、文件 0600。`--no-session` 只保存在内存。`--resume` 续接会话目录中本工作目录最近活动的会话（没有就新建并提示），`--resume <ID 前缀>` 续接 ID 以它开头的唯一会话，找不到或不唯一时以退出码 2 结束。`--fork <ID 前缀|文件>` 把一个会话复制成会话目录中的新文件，在副本上继续（对应 pi 的 `--fork`）：复制源会话最后一条记录所在的分支（chat 里的 `/fork` 则复制到当前位置，见 `/branch`），条目原样保留（ID、时间、请求审计与摘要都在），新文件头部的 `parentSession` 记下源文件的绝对路径，`cwd` 与 `model` 是这次启动的；源文件不加锁读取、不被修改，别的进程正在写的会话也能复制。`zx-agent sessions`（可加 `--cwd`）每个会话输出一行：会话 ID 的前 8 个字符、最近活动的本地时间、上下文中的消息数、第一条提示词的首行（至多 60 个字符），按最近活动排序，其他工作目录的会话注明 `cwd`；读不了的文件在 stderr 报告。`run` 不变，只在给出 `--session` 时写文件。
 
 直接输入问题即可开始下一轮。TTY 中运行时输入普通文本会作为 steering，在下一次模型请求前进入上下文；任务结束时还没被读到的 steering 作为下一轮提问发送（在提示符后回显），按 Ctrl+C 取消任务时则丢弃并提示。TTY 中一次粘贴的多行作为一条消息发送：读完一行后若还有整行在排队，就并入同一条消息；以 `/` 开头的命令始终只占一行；最后一行要按回车才算到达；合并后的消息同样不超过 1 MiB，放不下的行开始下一条消息（非 Unix 平台不合并）。通过管道输入脚本时逐轮、逐行消费，避免后面的命令提前打断任务。单行输入最多 1 MiB（含行尾）；超限或无效 UTF-8 的行会被整行丢弃并提示，对话和当前任务继续，不把截断片段发送给模型。
 
-文本模式下 stdout 只有模型的回答（stdout 是终端时回答前后各空一行），其余都在 stderr：启动时两行显示模型、profile、会话文件、工作目录、工具、自动放行的命令和权限范围；模型沉默超过 1 秒后显示一行每秒刷新的状态（`⠙ waiting for the model · 3s`，收到推理增量后改为 `thinking`，工具执行中为 `⠙ bash: <命令> · 2s`，等待重试时为 `⠙ waiting to retry 1/3 · 1s`，摘要请求时为 `⠙ summarizing · 3s`），活动结束后留下一行耗时（`· thought for 2.3s`），不到 1 秒的等待不留痕迹，状态行不擦除正在输入的回显；每个工具调用结束后一行 `[tool] bash: <命令> -> ok 12ms`（bash 显示命令，搜索工具显示模式与路径，读写文件的工具显示路径，其余显示参数 JSON，超过 80 字符截断），下面缩进显示结果的前 3 行和剩余行数，自动放行的命令同样显示；结果的 `details` 带 `patch` 时（`edit_file`）改为显示补丁的前 20 行，增加的行绿色、删除的行红色；每轮结束一行 `[turn] 3 requests · 30 in · 15 out · 4.4s`（有重试或缓存命中时一并显示；服务端没有返回用量或请求被取消时省略 in 与 out 两段）。模型请求失败后的 `[retry]` 行不重复刚打印过的错误文本，只写 `(same error)`。状态行只画在交互终端上，`--debug`、`TERM=dumb` 或 stderr 重定向时不画；宽度随终端（Unix 上每次绘制前查询），查不到时按 78 列；`LC_ALL`、`LC_CTYPE` 或 `LANG` 指明非 UTF-8 编码时用 ASCII 字符。带 `--session` 打开已有的会话文件时，启动行后多一行 `[chat] resumed N message(s) from the session file; last activity <本地时间>`。
+文本模式下 stdout 只有模型的回答（stdout 是终端时回答前后各空一行），其余都在 stderr：启动时两行显示模型、agent、会话文件、工作目录、工具、自动放行的命令和权限范围；模型沉默超过 1 秒后显示一行每秒刷新的状态（`⠙ waiting for the model · 3s`，收到推理增量后改为 `thinking`，工具执行中为 `⠙ bash: <命令> · 2s`，等待重试时为 `⠙ waiting to retry 1/3 · 1s`，摘要请求时为 `⠙ summarizing · 3s`），活动结束后留下一行耗时（`· thought for 2.3s`），不到 1 秒的等待不留痕迹，状态行不擦除正在输入的回显；每个工具调用结束后一行 `[tool] bash: <命令> -> ok 12ms`（bash 显示命令，搜索工具显示模式与路径，读写文件的工具显示路径，其余显示参数 JSON，超过 80 字符截断），下面缩进显示结果的前 3 行和剩余行数，自动放行的命令同样显示；结果的 `details` 带 `patch` 时（`edit_file`）改为显示补丁的前 20 行，增加的行绿色、删除的行红色；每轮结束一行 `[turn] 3 requests · 30 in · 15 out · 4.4s`（有重试或缓存命中时一并显示；服务端没有返回用量或请求被取消时省略 in 与 out 两段）。模型请求失败后的 `[retry]` 行不重复刚打印过的错误文本，只写 `(same error)`。状态行只画在交互终端上，`--debug`、`TERM=dumb` 或 stderr 重定向时不画；宽度随终端（Unix 上每次绘制前查询），查不到时按 78 列；`LC_ALL`、`LC_CTYPE` 或 `LANG` 指明非 UTF-8 编码时用 ASCII 字符。带 `--session` 打开已有的会话文件时，启动行后多一行 `[chat] resumed N message(s) from the session file; last activity <本地时间>`。
 
-上限取自所选 profile，内置的 assistant 每轮不限轮次、不限总时间、不自动续写；可用 `--max-model-requests` 和 `--timeout-secs` 设限。连接、工具、会话和输出选项与 `run` 共用；`chat --help` 列出实际支持项。`--output jsonl` 为每轮发送一个 `run_end`，`--deltas` 可包含增量。 文本模式可加 `--debug`，在 stderr 按时间线显示本地时间、请求与轮次、策略、审批、工具参数和过滤后的结果、重试、上下文编辑、压缩及用量；模型回复仍输出到 stdout。请求耗时从请求事件到记录响应事件，包含中间处理时间。调试信息可能含敏感内容，应谨慎保存；JSONL 模式不受此选项影响。事件不包含完整请求上下文，完整记录以会话日志为准。终端上按用途着色：提示符加粗，进度与状态行暗色，审批的标签加粗黄色而调用本身加粗默认色，工具结果的 `ok` 绿色、`error` 红色，`--debug` 的时间线按信息、警告、错误着色；默认只在交互终端上着色，设置 `NO_COLOR` 或 `TERM=dumb` 时不着色，`--color always` 在重定向时也保留颜色（如 `2>&1 | less -R`），`--color never` 关闭。
+上限取自 agent，内置的 assistant 每轮不限轮次、不限总时间、不自动续写；可用 `--max-model-requests` 和 `--timeout-secs` 设限。工具、会话和输出选项与 `run` 共用；`chat --help` 列出实际支持项。`--output jsonl` 为每轮发送一个 `run_end`，`--deltas` 可包含增量。 文本模式可加 `--debug`，在 stderr 按时间线显示本地时间、请求与轮次、策略、审批、工具参数和过滤后的结果、重试、上下文编辑、压缩及用量；模型回复仍输出到 stdout。请求耗时从请求事件到记录响应事件，包含中间处理时间。调试信息可能含敏感内容，应谨慎保存；JSONL 模式不受此选项影响。事件不包含完整请求上下文，完整记录以会话日志为准。终端上按用途着色：提示符加粗，进度与状态行暗色，审批的标签加粗黄色而调用本身加粗默认色，工具结果的 `ok` 绿色、`error` 红色，`--debug` 的时间线按信息、警告、错误着色；默认只在交互终端上着色，设置 `NO_COLOR` 或 `TERM=dumb` 时不着色，`--color always` 在重定向时也保留颜色（如 `2>&1 | less -R`），`--color never` 关闭。
 
 | 输入 | 行为 |
 |---|---|
 | `/help` | 查看命令 |
 | `/model`、`/model <id>` | 查看模型，或空闲时切换同一 provider 的模型，保留历史 |
 | `/reasoning`、`/reasoning <级别>` | 查看推理强度，或空闲时修改（`off`、`minimal`、`low`、`medium`、`high`、`xhigh`；`default` 表示不发送，交给服务端），之后的任务请求按新值发送并记入请求审计 |
-| `/new` | 创建新会话，清空历史和授权；运行中先取消任务。在会话目录中新建文件；用 `--session` 时在同目录创建唯一新文件；都保留旧日志。重新加载 profile、其说明与项目说明 |
+| `/new` | 创建新会话，清空历史和授权；运行中先取消任务。在会话目录中新建文件；用 `--session` 时在同目录创建唯一新文件；都保留旧日志。重新加载 agent、其说明与项目说明 |
 | `/compact` | 请求模型压缩旧上下文，保留原始日志；没有可压缩范围时不发请求。运行中拒绝重叠调用 |
 | `/continue` | 不加新输入，让模型接着回答当前对话：例如回答失败或被取消后重答一次。规则同 `run --continue` |
-| `/status` | 显示模型、profile、会话文件、工作目录，以及本会话累计的轮数、请求数与 token 用量（`/new` 后清零）；运行中等待空闲 |
+| `/status` | 显示模型、agent、会话文件、工作目录，以及本会话累计的轮数、请求数与 token 用量（`/new` 后清零）；运行中等待空闲 |
 | `/sessions` | 列出会话目录中的会话，格式同 `zx-agent sessions`，当前会话以 `*` 标出；用 `--session` 时列出该文件所在的目录。运行中等待空闲 |
 | `/resume <ID 前缀>` | 空闲时切换到会话目录中 ID 以此开头的唯一会话，在其上继续，授权与用量统计重新开始 |
 | `/fork` | 空闲时把当前会话复制到当前位置（`/branch` 移动过就是移动后的位置）成会话目录中的新文件并切换过去，之后的对话只写进副本，原文件停在复制时的样子；规则同 `--fork`。`--no-session` 时没有可复制的文件 |
@@ -86,66 +95,82 @@ zx-agent chat --model "$ZX_MODEL" --session ./chat.jsonl   # 指定会话文件
 | Ctrl+C | 取消当前任务或审批，继续保留会话；空闲时保持会话，2 秒内连按两次则退出（退出码 0） |
 | EOF（Ctrl+D）、SIGTERM | EOF 结束会话，管道中的正常任务先完成；待审批时 EOF 拒绝并取消。SIGTERM 取消并退出 |
 
-chat 中的 bash 调用先经过原命令策略，再显示工具名、完整参数和理由，等待审批：bash 显示命令，其余参数逐项列出，多行或较长的字符串按行缩进显示并注明行数（一段最多显示 60 行，其余只计数并写明未显示），数组与对象按路径展开（如 `edits[0].oldText`），不做 JSON 转义；工作目录与权限范围在启动时显示一次。内置 assistant 的 `edit_file` 与 `write_file` 同样要审批；read_file 仍按原读取权限执行。profile 列出的只读命令不经审批直接执行（内置 assistant 为 `grep`、`head`、`tail`、`wc`、`jq`；Kubernetes 部署的 profile 另加只读的 kubectl 命令）；带 shell 语法、URL、profile 排除的字词（assistant 为 `secret`）或 profile 未列出的选项的命令仍要审批，见[安全模型](#安全模型)。待审批时输入菜单编号并按 Enter，`y`、`yes` 等同 1，`n`、`no` 等同 3，不区分大小写：
+chat 中的 bash 调用先经过原命令策略，再显示工具名、完整参数和理由，等待审批：bash 显示命令，其余参数逐项列出，多行或较长的字符串按行缩进显示并注明行数（一段最多显示 60 行，其余只计数并写明未显示），数组与对象按路径展开（如 `edits[0].oldText`），不做 JSON 转义；工作目录与权限范围在启动时显示一次。内置 assistant 的 `edit_file` 与 `write_file` 同样要审批；read_file 仍按原读取权限执行。agent 的 `permissions.allow` 列出的只读命令不经审批直接执行（内置 assistant 为 `grep`、`head`、`tail`、`wc`、`jq`；Kubernetes 部署的 agent 另加只读的 kubectl 命令）；带 shell 语法、URL、`permissions.allowExcept` 的字词（assistant 为 `secret`）或 `permissions.allowOptions` 未列出的选项的命令仍要审批，见[安全模型](#安全模型)。待审批时输入菜单编号并按 Enter，`y`、`yes` 等同 1，`n`、`no` 等同 3，不区分大小写：
 
 ```text
 [approval 1] bash: ls -la
-  profile requires tool approval
+  the agent requires tool approval
   1/y allow once · 2 allow identical calls in this conversation · 3/n deny · 4 discuss
 [approval] Choose 1, 2, 3 or 4:
 ```
 
-1 仅允许本次调用；2 本会话允许工具名与参数完全相同的调用；3 拒绝；4 讨论此调用（不执行，输入的消息会交给当前任务）。命令策略的 Deny 始终优先。空输入不会授权；审批默认超时 120 秒，未收到答案不会执行工具。模型文本和诊断中的 ESC、回车及双向控制字符按字面显示，保留正常换行和制表符。
+1 仅允许本次调用；2 本会话允许工具名与参数完全相同的调用；3 拒绝；4 讨论此调用（不执行，输入的消息会交给当前任务）。命令策略的 Deny 始终优先。空输入不会授权；审批默认超时 120 秒（`config.toml` 的 `chat.approvalTimeoutSecs`），未收到答案不会执行工具。模型文本和诊断中的 ESC、回车及双向控制字符按字面显示，保留正常换行和制表符。
 
-`assistant` 默认在上下文超过 256 KiB 时自动压缩，`unattended` 默认关闭。自动摘要消耗一次请求预算并统计用量；`/compact` 使用独立的有界请求并报告结果。字节阈值由 profile 的 `compaction.triggerBytes` 设置，0 关闭自动摘要。该阈值不是模型 token 窗口的保证；开启自动摘要时，模型以上下文过长拒绝请求后，会先摘要一次再继续，见[上下文管理](docs/PROFILES.md#上下文管理)。摘要有信息损失风险，引用校验也不证明事实正确。配置、审计和边界见[上下文管理](docs/PROFILES.md#上下文管理)。
+`assistant` 默认在上下文超过 256 KiB 时自动压缩，`unattended` 默认关闭。自动摘要消耗一次请求预算并统计用量；`/compact` 使用独立的有界请求并报告结果。字节阈值由 agent 的 `compaction.triggerBytes` 设置，0 关闭自动摘要。该阈值不是模型 token 窗口的保证；开启自动摘要时，模型以上下文过长拒绝请求后，会先摘要一次再继续，见[上下文管理](docs/CONFIGURATION.md#上下文管理)。摘要有信息损失风险，引用校验也不证明事实正确。配置、审计和边界见[上下文管理](docs/CONFIGURATION.md#上下文管理)。
 
 TTY 中手动压缩时可暂存一个普通输入，完成后自动执行；Ctrl+C 取消压缩并明确清除暂存输入。`/model` 等待空闲，`/new` 与 `/quit` 和正常 EOF 退出码为 0；参数或配置错误、读取终端输入失败为 2，超限或无效 UTF-8 的输入行只会被丢弃，不会退出；SIGTERM 为 5。单轮模型或预算错误会报告后继续对话，JSONL 消费者可读取每轮报告的 `outcome`。这是逐行 REPL，尚未提供历史行编辑或完整 TUI：方向键等控制序列会原样作为输入发送。
 
 ### ACP 客户端
 
 ```bash
-zx-agent acp --model "$ZX_MODEL"
+zx-agent acp
 ```
 
-`acp` 经 stdin 与 stdout 收发 [Agent Client Protocol](https://agentclientprotocol.com/) v1 的 JSON-RPC 消息，由实现了 ACP 的客户端启动并驱动：Zed、JetBrains、Neovim 与 Emacs 的插件，或 Wisp、bitrouter-tui 这类终端客户端（见[官方客户端目录](https://agentclientprotocol.com/overview/clients)，未逐一核实）。在客户端里把 agent 命令配置为上面这一行即可。连接、工具、profile、上限等参数与 `chat` 相同（`acp --help`），没有 `--output`、`--color` 这类终端显示参数：stdout 只走协议，其余诊断在 stderr。
+`acp` 经 stdin 与 stdout 收发 [Agent Client Protocol](https://agentclientprotocol.com/) v1 的 JSON-RPC 消息，由实现了 ACP 的客户端启动并驱动：Zed、JetBrains、Neovim 与 Emacs 的插件，或 Wisp、bitrouter-tui 这类终端客户端（见[官方客户端目录](https://agentclientprotocol.com/overview/clients)，未逐一核实）。在客户端里把 agent 命令配置为上面这一行即可。模型、工具、上限等参数与 `chat` 相同（`acp --help`），没有 `--output`、`--color` 这类终端显示参数：stdout 只走协议，其余诊断在 stderr。
 
-- 会话：客户端用 `session/new` 建会话，`cwd` 由客户端给出并覆盖 `--cwd`；每个会话一个独立的 `AgentSession`，记录在自己的会话文件里：默认在 chat 为同一工作目录使用的目录 `~/.zx-agent/sessions/--<cwd>--/`，`--session-dir` 改目录，`--no-session` 只留在内存（此时 `initialize` 不声明 `loadSession`）；`--session` 不适用于 acp（一个会话一个文件），给了以配置错误退出。`session/load` 按 ID 在该目录里找到会话文件并续接：先把对话回放给客户端（提问为 `user_message_chunk`，回答与推理为 `agent_message_chunk` / `agent_thought_chunk`，每个工具调用连同结果为一条 `tool_call`，没有结果的为 `pending`，扩展要求显示的消息也回放；摘要与续写提示不回放），再应答；本进程已持有的会话直接回放。`session/resume` 同样续接但不回放，客户端自己保留显示的内容。`session/list` 列出 `cwd` 的会话目录里的会话（`sessionId`、`cwd`、首条提问作 `title`、最近活动时间作 `updatedAt`，最近的在前；`--session-dir` 下一个目录放所有工作目录的会话，按 `cwd` 过滤；不给 `cwd` 则列出 agent 自己工作目录的那份），一次一页，给了 `cursor` 报错。`initialize` 以 `sessionCapabilities.list` / `resume` 声明这两项（`--no-session` 时不声明，列表为空）。协议里的 `session/fork` 仍标为不稳定（SDK 要开 `unstable_session_fork`），没有实现。客户端给的 `mcpServers` 被忽略，MCP 服务器只来自 profile。
+- 会话：客户端用 `session/new` 建会话，`cwd` 由客户端给出并覆盖 `--cwd`；每个会话一个独立的 `AgentSession`，记录在自己的会话文件里：在 chat 为同一工作目录使用的目录 `~/.zx-agent/sessions/--<cwd>--/`（`ZX_AGENT_HOME` 下的 `sessions/`），`--no-session` 只留在内存（此时 `initialize` 不声明 `loadSession`）；`--session` 不适用于 acp（一个会话一个文件），给了以配置错误退出。`session/load` 按 ID 在该目录里找到会话文件并续接：先把对话回放给客户端（提问为 `user_message_chunk`，回答与推理为 `agent_message_chunk` / `agent_thought_chunk`，每个工具调用连同结果为一条 `tool_call`，没有结果的为 `pending`，扩展要求显示的消息也回放；摘要与续写提示不回放），再应答；本进程已持有的会话直接回放。`session/resume` 同样续接但不回放，客户端自己保留显示的内容。`session/list` 列出 `cwd` 的会话目录里的会话（`sessionId`、`cwd`、首条提问作 `title`、最近活动时间作 `updatedAt`，最近的在前；不给 `cwd` 则列出 agent 自己工作目录的那份），一次一页，给了 `cursor` 报错。`initialize` 以 `sessionCapabilities.list` / `resume` 声明这两项（`--no-session` 时不声明，列表为空）。协议里的 `session/fork` 仍标为不稳定（SDK 要开 `unstable_session_fork`），没有实现。客户端给的 `mcpServers` 被忽略，MCP 服务器只来自 `config.toml`。
 - 回合：`session/prompt` 的文本块合成一条提问，回合结束时应答 `stopReason`：完成为 `end_turn`，输出截断或 token 预算用尽为 `max_tokens`，请求次数上限为 `max_turn_requests`，取消为 `cancelled`；运行出错或超时以 JSON-RPC 错误应答，`message` 是原因。`session/cancel` 取消当前回合。
 - 更新：流式文本为 `agent_message_chunk`，推理增量为 `agent_thought_chunk`；每个工具调用先发 `tool_call`（标题如 `bash: ls -la`，种类按内置工具映射，带原始参数，`path` 参数作为位置），放行或批准后 `in_progress`，结束后 `completed` 或 `failed` 并附结果文本，`write_file` 附整个文件的 diff，`edit_file` 附补丁；重试、钩子失败、上下文过长为 `notice`，摘要为 `compaction_update`。
-- 审批：需要审批的调用发 `session/request_permission`，选项为允许一次、本会话允许相同调用、拒绝；客户端取消回合时按拒绝处理。`--approval-timeout-secs` 默认 3600 秒。
+- 审批：需要审批的调用发 `session/request_permission`，选项为允许一次、本会话允许相同调用、拒绝；客户端取消回合时按拒绝处理。等待客户端答复默认 3600 秒（`config.toml` 的 `acp.approvalTimeoutSecs`）。
 - 实测：`tests/acp_cli.rs` 用手写的 JSON-RPC 客户端覆盖以上流程，含会话落盘、`session/load`、`session/resume` 与 `session/list`；另用 SDK 自带的示例客户端对假模型走通一次。没有在 Zed 或 Wisp 上验证。
 
-### 场景配置
+### 配置与 agent
 
-`run` 默认使用 `profiles/unattended.toml`（中性的无人值守说明，30 轮、15 分钟），`chat` 与 `serve` 默认使用 `profiles/assistant.toml`。两者均嵌入发布二进制，不含任何特定环境（如 Kubernetes）的规则。可用 `--profile` 选择内置名称或自定义 TOML，例如 Kubernetes 部署中按排障报告的固定小节作答的 `deploy/kubernetes/profiles/troubleshoot.toml`（扩展 unattended，只换说明）：
+配置分两部分，都放在 zx-agent 主目录（`~/.zx-agent`，或环境变量 `ZX_AGENT_HOME` 给出的绝对路径）中，都可以没有：
 
-```bash
-zx-agent run --model "$ZX_MODEL" --profile examples/profiles/review.toml "评审 src/profile/ 的实现"
-zx-agent chat --model "$ZX_MODEL" --profile assistant
+- `config.toml`：环境——模型与 provider、请求选项、执行环境、MCP 服务器、模型的单价与上下文窗口。模型取 `--model` > `ZX_MODEL` > 文件；服务地址取 `ZX_BASE_URL` > 文件 > `https://api.openai.com/v1`；其余只在文件中设置。没有项目级的配置文件：项目内容不能改变环境与权限。
+- agent：角色——说明、工具、权限、上限、项目上下文、skills 与摘要。`run` 使用内置的 `unattended`（中性的无人值守说明，30 轮、15 分钟），`chat`、`serve` 与 `acp` 使用内置的 `assistant`，二者是仓库的 `agents/*.md`，嵌入发布二进制，不含任何特定环境（如 Kubernetes）的规则。主目录下的 `agents/unattended.md`、`agents/assistant.md` 存在时替换同名的内置 agent；其他名字的文件不会被读取，也没有选择 agent 的命令行参数。
+
+agent 文件是 Markdown：第一行 `+++` 到下一行 `+++` 之间是 TOML front matter，之后是说明。`extends` 可以扩展一个内置 agent；文件写了的键整个替换继承的值，表逐键合并：
+
+```markdown
++++
+extends = "unattended"
+
+[permissions]
+ask = ["bash"]
+allow = ["bash(kubectl get)", "bash(kubectl describe)", "bash(grep)"]
++++
 ```
 
-配置按内置基线、文件、显式 CLI 参数叠加；deny 规则累加。命令规则、说明、项目上下文、摘要、上下文窗口、续写与执行环境只在 profile 中设置，命令行只覆盖工具、预算与连接参数。`chat` 默认加载 Git 根目录到工具 cwd 的 `AGENTS.md`，`run` 默认不加载；自动发现的文件解析后必须位于项目内。profile 的 `[context]` 可追加文件或关闭自动发现。skills 通过 profile 登记目录，模型调用 `read_skill` 时才读取正文。配置格式、路径规则、读取预算和完整示例见[场景配置说明](docs/PROFILES.md)。
+`chat` 默认加载 Git 根目录到工具 cwd 的 `AGENTS.md`，`run` 默认不加载；自动发现的文件解析后必须位于项目内。agent 的 `[context]` 可追加文件或关闭自动发现。skills 通过 agent 登记目录，模型调用 `read_skill` 时才读取正文。格式、权限、路径规则、读取预算和完整示例见[配置说明](docs/CONFIGURATION.md)。
 
 ### 无人值守示例
 
 可用于 cron、systemd timer、Kubernetes Job 等定时或批处理任务：
 
 ```bash
-cat > inspect.toml <<'EOF'
+export ZX_AGENT_HOME=/etc/zx-agent-inspect   # 其中 agents/unattended.md 为下面的文件
+mkdir -p "$ZX_AGENT_HOME/agents"
+cat > "$ZX_AGENT_HOME/agents/unattended.md" <<'EOF'
++++
 extends = "unattended"
 
-[rules]
-allow = ["kubectl get", "kubectl describe", "kubectl logs", "grep", "tail", "head"]
+[permissions]
+ask = ["bash"]
+allow = ["bash(kubectl get)", "bash(kubectl describe)", "bash(kubectl logs)", "bash(grep)", "bash(tail)", "bash(head)"]
++++
 EOF
 zx-agent run \
-  --model "$ZX_MODEL" --base-url "$ZX_BASE_URL" \
-  --profile inspect.toml --tools bash \
+  --model "$ZX_MODEL" --tools bash \
   --max-model-requests 20 --timeout-secs 600 \
   --session "/var/log/zx-agent/$(date +%Y%m%d-%H%M%S).jsonl" \
   --output jsonl \
   "命名空间 shop 中的 Pod 频繁重启，排查原因" > events.jsonl
 echo "exit code: $?"
 ```
+
+`allow` 之外的 bash 命令要审批，`run` 没有人审批，因此拒绝。
 
 在 Kubernetes 中常驻部署（`kubectl exec` 进 Pod 对话、CronJob 定时巡检、可选的写权限）：见 [deploy/kubernetes/README.md](deploy/kubernetes/README.md)。
 
@@ -196,25 +221,25 @@ allowed = "已批准"
 | Slack 应用 | 打开 Socket Mode 与 Interactivity；订阅 bot 事件 `app_mention` 与 `message.im`。bot token 需要读取 @ 消息的权限（Slack 文档两处分别写作 `app_mentions:read` 与 `app_mentions.read`，以应用设置页显示的为准）、`im:history` 与 `chat:write`；app-level token 带 `connections:write`（Slack 的权限页把 `apps.connections.open` 列为它的适用方法） |
 | ⚑ D:5/CHINA FLAG: 飞书应用 | 企业自建应用；事件与回调的订阅方式都选长连接；订阅事件 `im.message.receive_v1` 与回调 `card.action.trigger`；开通发送消息的权限，群聊只开通读取 @ 机器人消息的权限（`im:message.group_at_msg:readonly`）。连接方式没有公开文档，按官方 Go SDK 实现 |
 | 使用 | Slack：频道中 @ 机器人，回答在这条消息的线程里；线程中追问时同样要 @ 机器人。⚑ D:5/CHINA FLAG: 飞书：群里 @ 机器人，回答以话题回复；在话题中追问时同样要 @。两个平台的私聊都直接发送。单独发送 `/cancel` 取消本线程的任务 |
-| 审批 | 与 chat 相同，默认使用 assistant profile（可用 `--profile` 换成部署自己的，如 Kubernetes 的那份）：自动放行清单中的只读命令直接执行，其余 bash 命令发审批卡片，只有 `approvers` 中的用户点击才生效 |
+| 审批 | 与 chat 相同，使用 assistant agent（主目录的 `agents/assistant.md` 可换成部署自己的，如 Kubernetes 的那份）：自动放行清单中的只读命令直接执行，其余 bash 命令发审批卡片，只有 `approvers` 中的用户点击才生效 |
 | 文案 | 状态、提示与审批卡片的文字默认英文，用配置文件的 `[replies]`、`[cardLabels]` 替换；`deploy/kubernetes/serve/serve.example.toml` 带一份中文 |
 | 凭据 | Slack 的两个 token 与 ⚑ D:5/CHINA FLAG: 飞书的 App Secret 只从环境变量读取。命令的环境中删除这些变量，命令输出中出现它们的值时脱敏 |
 | 日志 | stdout 每行一个 JSON：`approval`（审批记录：线程、工具调用、审批人、结果、时间）、`released`（释放空闲会话）、`failed`（未能发出的消息、连不上平台、停止时各线程没有处理的消息数等）。对话内容在会话文件中 |
 | 退出 | 收到 SIGINT 或 SIGTERM 时取消进行中的任务，其状态改为 `stopped` 的文案（中文示例：“服务正在停止：本次任务已取消，请稍后重新发送。”）。还没处理的消息不再处理，包括排队中的、任务没取走的插话和停止期间才收到的，所在线程收到一句提示，请用户稍后重新发送。各线程发出结果后以 0 退出；配置错误与被拒的凭据为 2；平台连接意外结束为 1 |
 | 崩溃之后 | 进程崩溃（如被 SIGKILL、因内存不足被杀）时，上述消息会丢失，也没有提示，见 `docs/ROADMAP.md` 的已知缺口。正在运行的任务在 `<dir>/.running/` 下各有一个记录文件；下次启动时，serve 把这些任务遗留的 `working` 状态改为 `interrupted` 的文案（中文示例：“服务重启过：这次任务没有完成，请重新发送。”），再删除记录 |
 
-其余参数与 `chat` 相同（`--model`、`--base-url`、`--api-key-env`、`--profile`、`--max-model-requests`、`--timeout-secs` 等）；`--max-model-requests` 与 `--timeout-secs` 作用于每一次运行。不接受 `--session`。
+其余参数与 `chat` 相同（`--model`、`--tools`、`--max-model-requests`、`--timeout-secs` 等），环境同样取自 `config.toml`；`--config` 是 IM 服务自己的配置文件，不是 `config.toml`；`--max-model-requests` 与 `--timeout-secs` 作用于每一次运行。不接受 `--session`。
 
 ### MCP 工具
 
-在 profile 中用 `[[mcp]]` 列出外部 MCP 服务器及其工具，run、chat、serve 启动时各连接一次，模型以 `<服务器名>__<工具名>` 调用这些工具。只支持 Streamable HTTP；MCP 服务器由外部服务提供。配置项见 [场景配置说明](docs/PROFILES.md#mcp-服务器)。
+在 `config.toml` 中用 `[[mcp]]` 列出外部 MCP 服务器及其工具，run、chat、serve 启动时各连接一次，模型以 `<服务器名>__<工具名>` 调用这些工具。只支持 Streamable HTTP；MCP 服务器由外部服务提供。配置项见 [场景配置说明](docs/CONFIGURATION.md#mcp-服务器)。
 
 ```bash
-export PROM_MCP_TOKEN=...   # 与 profile 中的 tokenEnv 一致
-./target/release/zx-agent chat --model <模型 ID> --profile prom.toml
+export PROM_MCP_TOKEN=...   # 与 config.toml 中的 tokenEnv 一致
+./target/release/zx-agent chat
 ```
 
-- 只有 `tools` 列出的工具交给模型；`allowTools` 中的直接执行，其余每次都要审批（run 中没有人审批，因此拒绝）。`rules.denyTools` 可以拒绝其中任何一个。
+- 只有 `tools` 列出的工具交给模型；agent 的 `permissions.allow` 列出的（如 `prom__query`）直接执行，其余每次都要审批（run 中没有人审批，因此拒绝）。`permissions.deny` 可以拒绝其中任何一个。
 - token 只以 `Authorization: Bearer` 发给该服务器，命令看不到存放它的变量，工具输出中出现它的值时脱敏。
 - 连不上、token 变量没有值、服务器缺少列出的工具时，以退出码 2 报错；成功时 stderr 每个服务器一行 `[mcp] …`。
 
@@ -226,26 +251,31 @@ export PROM_MCP_TOKEN=...   # 与 profile 中的 tokenEnv 一致
 
 该服务的 API 兼容 OpenAI 格式（官方文档原文：“The DeepSeek API uses an API format compatible with OpenAI/Anthropic.”，https://api-docs.deepseek.com/ ，2026-11-02 读取），用现有的 OpenAI 兼容 provider 即可。key 放在环境变量 `DEEPSEEK_API_KEY` 中：
 
-```bash
-zx-agent run --base-url https://api.deepseek.com --model deepseek-flash \
-  --api-key-env DEEPSEEK_API_KEY --tools "" "Reply with the single word: ok"
+```toml
+# ~/.zx-agent/config.toml
+model = "deepseek-flash"
 
-# 关闭思考模式
-zx-agent run --base-url https://api.deepseek.com --model deepseek-flash \
-  --api-key-env DEEPSEEK_API_KEY --tools "" \
-  --request-field 'thinking={"type":"disabled"}' "Reply with the single word: ok"
+[provider]
+baseUrl = "https://api.deepseek.com"
+apiKeyEnv = "DEEPSEEK_API_KEY"
+# 关闭思考模式时加上：
+# requestFields = { thinking = { type = "disabled" } }
 ```
 
-2026-11-02 实测：两条命令都以 0 退出，回答为 `ok`，报告行的输入 token 分别为 365 与 340。
+```bash
+zx-agent run --tools "" "Reply with the single word: ok"
+```
+
+2026-11-02 用当时的命令行参数（`--base-url`、`--api-key-env`、`--request-field`，与上面的键含义相同）实测：默认与关闭思考两种设置都以 0 退出，回答为 `ok`，报告行的输入 token 分别为 365 与 340。改为 `config.toml` 之后没有再对该服务实测。
 
 | 设置 | 值 | 依据 |
 |---|---|---|
-| `--base-url` | `https://api.deepseek.com` | 官方文档的 base_url，2026-11-02 实测可用。2026-11-01 的付费测试用的是 `https://api.deepseek.com/v1`，6 项通过（见 `docs/ROADMAP.md` 的验证记录） |
-| `--model` | `deepseek-flash` 或 `deepseek-v4-pro` | 官方文档；2026-11-02 实测的是 `deepseek-flash`。文档写明 `deepseek-chat`、`deepseek-reasoner` 在 2026-07-24 之后停用；2026-11-01 用 `deepseek-chat` 的请求仍成功，原因未核实 |
-| `--api-key-env` | 存放 key 的环境变量名，如 `DEEPSEEK_API_KEY` | key 只从环境变量读取 |
-| 思考模式 | 默认开启。`--request-field 'thinking={"type":"disabled"}'` 关闭；`--request-field 'reasoning_effort="low"'` 调整强度（`low`、`high`、`max`） | 官方文档写明两个字段的格式，`thinking` 决定是否思考时优先。2026-11-02 用 `deepseek-flash` 实测：两个字段都被接受；关闭思考时三次运行的输入 token 都是 340，默认与 `low` 都是 365，说明该字段生效（服务端如何处理未核实）。输出 token 在同一设置下每次不同（默认三次为 202、2、2），不能据此比较思考强度 |
+| `provider.baseUrl` | `https://api.deepseek.com` | 官方文档的 base_url，2026-11-02 实测可用。2026-11-01 的付费测试用的是 `https://api.deepseek.com/v1`，6 项通过（见 `docs/ROADMAP.md` 的验证记录） |
+| `model` | `deepseek-flash` 或 `deepseek-v4-pro` | 官方文档；2026-11-02 实测的是 `deepseek-flash`。文档写明 `deepseek-chat`、`deepseek-reasoner` 在 2026-07-24 之后停用；2026-11-01 用 `deepseek-chat` 的请求仍成功，原因未核实 |
+| `provider.apiKeyEnv` | 存放 key 的环境变量名，如 `DEEPSEEK_API_KEY` | key 只从环境变量读取 |
+| 思考模式 | 默认开启。`provider.requestFields` 中写 `thinking = { type = "disabled" }` 关闭，写 `reasoning_effort = "low"` 调整强度（`low`、`high`、`max`） | 官方文档写明两个字段的格式，`thinking` 决定是否思考时优先。2026-11-02 用 `deepseek-flash` 实测：两个字段都被接受；关闭思考时三次运行的输入 token 都是 340，默认与 `low` 都是 365，说明该字段生效（服务端如何处理未核实）。输出 token 在同一设置下每次不同（默认三次为 202、2、2），不能据此比较思考强度 |
 | 思考内容 | 回答中的 `reasoning_content` 记入会话，之后的请求中回传给产生它的模型 | `crates/zx-ai-openai/src/request.rs`。官方文档：带工具的请求必须回传全部 `reasoning_content`，否则返回 400 |
-| `--fill-missing-reasoning` | 历史中混有不带推理内容的回答（例如中途换过模型）时开启 | pi 记录过该服务对这种历史返回 “The `reasoning_content` in the thinking mode must be passed back to the API.”（pi #3668），开启后其余回答带上空的 `reasoning_content`。本项目没有实测这种情况，只有一次历史中完全不带推理内容的真实请求成功过；此前的版本对所有服务都这样做，现在默认关闭 |
+| `provider.fillMissingReasoning` | 历史中混有不带推理内容的回答（例如中途换过模型）时开启 | pi 记录过该服务对这种历史返回 “The `reasoning_content` in the thinking mode must be passed back to the API.”（pi #3668），开启后其余回答带上空的 `reasoning_content`。本项目没有实测这种情况，只有一次历史中完全不带推理内容的真实请求成功过；此前的版本对所有服务都这样做，现在默认关闭 |
 | 结构化输出 | `response_format` 只有 `text` 与 `json_object`，没有 `json_schema` | 官方文档 |
 
 ### run 退出码
@@ -258,7 +288,7 @@ zx-agent run --base-url https://api.deepseek.com --model deepseek-flash \
 | 3 | 达到 `--max-model-requests` 上限 |
 | 4 | 达到 `--timeout-secs` 时间上限 |
 | 5 | 被 SIGINT 或 SIGTERM 中止 |
-| 6 | 截断：最终回答达到输出 token 上限，自动续写（profile 的 `extensions.continueOnLength`）后仍未完成；已生成的部分照常输出 |
+| 6 | 截断：最终回答达到输出 token 上限，自动续写（agent 的 `continueOnLength`）后仍未完成；已生成的部分照常输出 |
 | 7 | 达到 `--token-budget` 预算：用量已达预算，模型还要继续 |
 | 8 | 达到 `--cost-budget` 预算：花费已达预算，模型还要继续 |
 | 9 | 只在给出 `--fail-on-denied` 时出现：模型给出了最终回答，但至少一次工具调用被策略或审批拒绝。不加这个参数时这种情况仍是 0，被拒的次数在报告的 `deniedCalls` 与文本模式最后一行的 `denied_calls=` 中 |
@@ -267,42 +297,31 @@ zx-agent run --base-url https://api.deepseek.com --model deepseek-flash \
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--model` | 环境变量 `ZX_MODEL` | 模型 ID |
-| `--base-url` | `https://api.openai.com/v1`，或环境变量 `ZX_BASE_URL` | OpenAI 兼容地址 |
-| `--api-key-env` | `OPENAI_API_KEY` | 存放 API key 的**环境变量名**。key 不接受命令行传入，避免在进程列表中暴露 |
-| `--system-updates` | `collapse` | 恢复会话时，提示词的变化怎样发给模型。`collapse`：合并进开头的 system 消息，兼容不接受对话中途 system 消息的服务端；`inline`：在变化发生的位置发送，保持此前的请求前缀，便于服务端复用提示词缓存，模型也能看出提示词从哪里开始变化，但要求服务端接受对话中途的 system 消息，使用前需确认 |
-| `--tools` | profile：`run` 为 `bash,read_file`，`chat` 为 `bash,read_file,edit_file,write_file,grep,find,ls,read_output`；有 skill 目录时加入 `read_skill` | 显式传入时替换工具集合；仅启用 `read_output` 时安装长结果落盘钩子 |
+| `--model` | 环境变量 `ZX_MODEL`，再取 `config.toml` 的 `model` | 模型 ID；三处都没有时以退出码 2 结束 |
+| `--tools` | agent：`run` 为 `bash,read_file`，`chat` 为 `bash,read_file,edit_file,write_file,grep,find,ls,read_output`；有 skill 目录时加入 `read_skill` | 显式传入时替换工具集合；仅启用 `read_output` 时安装长结果落盘钩子 |
 | `--cwd` | 当前目录 | 工具的工作目录，同时写入 `<environment>` |
-| `--secret-file` | 无；另读取环境变量 `ZX_SECRET_FILES`（逗号分隔） | 内容需要从工具输出中过滤的凭据文件，或存放这类文件的目录，可重复；与环境变量中的文件合并登记。登记的路径在启动时必须存在，其中每个文件须为不超过 64 KiB 的普通文件，否则启动时报配置错误，见[安全模型](#安全模型) |
-| `--max-model-requests` | profile：`run`（unattended）为 30，`chat`（assistant）不限 | 本次运行的模型请求次数上限，失败的尝试也计入；`chat` 中为每轮上限 |
-| `--timeout-secs` | profile：`run`（unattended）为 900，`chat`（assistant）为 0 | 整次运行的时间上限，0 表示不限制；`chat` 中为每轮上限 |
-| `--token-budget` | profile：内置 profile 都不设 | 本次运行所有模型请求的输入加输出 token 上限，以服务返回的用量为准，摘要请求、失败的尝试与缓存命中的输入都计入。每次请求之前检查，所以最后一次请求可能让总量超出预算；`run` 以退出码 7 结束。0 表示不限制；`chat` 与 `serve` 中为每轮上限。与 `--max-tokens`（每次回复的输出上限）不同 |
-| `--cost-budget` | profile：内置 profile 都不设 | 本次运行所有模型请求的花费上限，按 profile `[[models]]` 中该模型的单价计算，单位与单价相同：单价按人民币写，预算就是人民币，换算由使用者负责，所有单价须用同一种货币。摘要请求与失败的尝试都计入，工具报告的花费不计入。每次请求之前检查，所以最后一次请求可能超出预算；`run` 以退出码 8 结束。模型没有单价时以退出码 2 拒绝启动，因为没有单价的回答不计花费，预算永远不会生效。0 表示不限制；`chat` 与 `serve` 中为每轮上限 |
+| `--max-model-requests` | agent：`run`（unattended）为 30，`chat`（assistant）不限 | 本次运行的模型请求次数上限，失败的尝试也计入；`chat` 中为每轮上限 |
+| `--timeout-secs` | agent：`run`（unattended）为 900，`chat`（assistant）为 0 | 整次运行的时间上限，0 表示不限制；`chat` 中为每轮上限 |
+| `--token-budget` | agent：内置 agent 都不设 | 本次运行所有模型请求的输入加输出 token 上限，以服务返回的用量为准，摘要请求、失败的尝试与缓存命中的输入都计入。每次请求之前检查，所以最后一次请求可能让总量超出预算；`run` 以退出码 7 结束。0 表示不限制；`chat` 与 `serve` 中为每轮上限。与 `config.toml` 的 `maxTokens`（每次回复的输出上限）不同 |
+| `--cost-budget` | agent：内置 agent 都不设 | 本次运行所有模型请求的花费上限，按 `config.toml` 的 `[[models]]` 中该模型的单价计算，单位与单价相同：单价按人民币写，预算就是人民币，换算由使用者负责，所有单价须用同一种货币。摘要请求与失败的尝试都计入，工具报告的花费不计入。每次请求之前检查，所以最后一次请求可能超出预算；`run` 以退出码 8 结束。模型没有单价时以退出码 2 拒绝启动，因为没有单价的回答不计花费，预算永远不会生效。0 表示不限制；`chat` 与 `serve` 中为每轮上限 |
 | `--fail-on-denied` | 关闭 | 仅 `run`。模型给出最终回答、但运行中有工具调用被策略或审批拒绝时，以退出码 9 代替 0。无人值守时审批一律拒绝，模型可能绕开被拒的操作继续完成，调度器需要区分时打开 |
-| `--approval-timeout-secs` | 120 | 仅 `chat`：审批请求等待菜单选择或讨论输入的秒数，至少为 1。超时按拒绝处理，任务继续，REPL 立即提示该请求已过期 |
 | `--color` | auto | 仅 `chat`：stderr 文本输出的着色。auto 在交互终端上着色，设置了 `NO_COLOR` 或 `TERM=dumb` 时不着色；always 在重定向时也保留颜色；never 关闭。不影响状态行是否绘制 |
 | `--show-thinking` | 关闭 | 仅 `chat`：把模型的推理增量以暗色流式显示在 stderr；默认只在状态行标 `thinking`。`--debug` 仍在回答结束时打印推理全文 |
-| `--tool-timeout-secs` | 120 | bash 命令的默认超时，至少为 1。模型可以通过工具参数 `timeout_secs` 为单条命令申请更长时间，上限为本参数与 600 秒中较大的一个；整次运行仍受 `--timeout-secs` 限制 |
-| `--idle-timeout-secs` | 120 | 等待响应头，或两段流数据之间的最长等待时间，至少为 1 |
-| `--max-retries` | 3 | 遇到临时性错误时的重试次数 |
-| `--max-tokens` | 无（由服务端决定） | 每次回复的输出 token 上限。推理模型的推理部分也计入这个上限，设得太小时回答可能为空 |
-| `--request-field` | 无 | 加到每个请求体中的字段，写作 `KEY=JSON`，可重复，用于服务端自己的设置，如思考模式。zx-agent 自己设置的字段（`model`、`messages`、`stream`、`stream_options`、`tools`、`max_tokens`）不能用它改写。会话的请求审计（`request_config` 条目的 `extraFields`）记录这些字段，还原请求时一并加入 |
-| `--reasoning` | 不设，请求不带推理设置 | 推理强度：`off`、`minimal`、`low`、`medium`、`high`、`xhigh`（对应 pi 的 `ThinkingLevel`）。每个任务请求都带上，摘要请求不带；chat 可用 `/reasoning` 修改。请求审计（`request_config` 的 `reasoning`）记录，还原时一并加入 |
-| `--reasoning-format` | `effort` | 推理强度写进请求体的方式，按服务端文档选择，不按服务名推断：`effort` 写 `reasoning_effort`（OpenAI 的字段，`off` 时不写）；`thinking` 写 `thinking: {"type": "enabled"}` 加 `reasoning_effort`，`off` 时为 `{"type": "disabled"}`；`reasoning-object` 写 `reasoning: {"effort": …}`，`off` 时为 `none`。与 `--request-field` 设置同一字段时报配置错误；非默认值记入请求审计（`reasoningFormat`） |
-| `--fill-missing-reasoning` | 关闭 | 请求中只要有一条回答带 `reasoning_content`，就给其余回答补上空的 `reasoning_content`，用于拒绝“只有部分回答带推理内容”的历史的思考模式服务端。请求审计记录这一选择（`fillMissingReasoning`）。此前的版本对所有服务端都这样做，那时记录的请求仍按当时的方式还原 |
 | `--session` | `run`：无（只保存在内存）；`chat`：会话目录中的新文件 | 会话文件路径。文件不存在则创建；已存在则在原有对话上继续 |
-| `--session-dir` | `~/.zx-agent/sessions/--<工作目录>--` | 只用于 `chat`，不能与 `--session` 同用：新会话文件所在的目录，也是 `--resume`、`/sessions`、`/resume` 查找的目录。`zx-agent sessions` 也接受 |
-| `--no-session` | 关闭 | 只用于 `chat`：只保存在内存，不写会话文件 |
+| `--no-session` | 关闭 | 只用于 `chat` 与 `acp`：只保存在内存，不写会话文件 |
 | `--resume [ID 前缀]` | 关闭 | 只用于 `chat`，不能与 `--session` 同用：续接会话目录中的会话，见上文“终端对话” |
 | `--fork <ID 前缀\|文件>` | 关闭 | 只用于 `chat`，不能与 `--session`、`--no-session`、`--resume` 同用：在一个会话的副本上继续，副本写进会话目录，见上文“终端对话” |
-| `--queue-mode <all\|one-at-a-time>` | `all` | 只用于 `chat`：任务运行中输入的取法，见上文 `/queue` |
-| `--header <NAME: VALUE>` | 无 | 随每个模型请求发送的请求头，可重复，如网关的路由头。`Authorization` 不接受（key 来自 `--api-key-env`）；值会出现在进程列表里，不写入会话 |
-| `--prompt-cache-key` | 关闭 | 把会话 ID 作为请求的 `prompt_cache_key` 发送，同一会话的请求共用服务端的提示词缓存（OpenAI 接受该字段；拒绝未知字段的服务不要开）。请求审计记录该键 |
 | `--continue` | 关闭 | 只用于 `run`，须同时给出已存在的 `--session`，不能再给提示词。不加新输入，让模型接着回答会话（对应 pi 的 `continue()`）：先照常为中断的调用补写结果；会话以输入或工具结果结尾时直接请求模型，例如崩溃之后；以失败或被取消的回答结尾时（其中的调用从未执行），用 `context_edit` 省略该回答再请求，与重试相同；以完成的回答结尾时，有排队的插话或后续消息就把它作为输入，否则以退出码 1 结束、不发请求 |
 | `--output` | `text` | `text`：进度与诊断（工具、重试、摘要、恢复、钩子失败）输出到 stderr，最终回答输出到 stdout；stdout 是终端时转义回答中的控制字符，输出到管道时保持原文。`jsonl`：每个事件一行 JSON，输出到 stdout。`run` 在两种模式下遇到已关闭的 stdout（如读取方已退出）都不再写出，退出码仍由运行结果决定 |
 | `--deltas` | 关闭 | 仅用于 `jsonl`：同时输出流式的 `message_update` 事件 |
 
-表中标注 profile 的默认值取自所选 profile，命令行显式传入时覆盖；`run --help` 与 `chat --help` 不再显示固定默认值。命令规则（`rules.allow`、`rules.deny`、`rules.autoApprove`）、说明（`instructions`）、项目上下文（`[context]`）、自动摘要（`[compaction]`）、模型的上下文窗口（`[[models]]` 的 `contextWindow`）、续写次数（`extensions.continueOnLength`）与执行环境（`execution`、`[container]`）没有命令行参数，写在 profile 中，见 [PROFILES.md](docs/PROFILES.md)。流式响应的字节上限固定为每次请求 16 MiB、每个 SSE 事件 1 MiB（均含封装），SDK 可经 `OpenAiConfig` 修改。
+表中标注 agent 的默认值取自所用的 agent，命令行显式传入时覆盖；`run --help` 与 `chat --help` 不显示固定默认值。其余设置不在命令行上：
+
+- 环境写在 `config.toml`：服务地址（`provider.baseUrl`，`ZX_BASE_URL` 优先）、存放 key 的变量名（`provider.apiKeyEnv`）、系统提示词更新的发送方式（`provider.systemUpdates`）、推理强度与写法（`reasoning`、`provider.reasoningFormat`）、`provider.fillMissingReasoning`、`provider.promptCacheKey`、额外的请求字段与请求头（`provider.requestFields`、`provider.headers`）、空闲超时与重试次数（`provider.idleTimeoutSecs`、`provider.maxRetries`）、输出 token 上限（`maxTokens`）、bash 的默认超时（`toolTimeoutSecs`；模型可经工具参数 `timeout_secs` 为单条命令申请更长时间，上限为该值与 600 秒中较大的一个）、要脱敏的密钥文件（`secretFiles`）、chat 与 acp 的审批等待时间（`chat.approvalTimeoutSecs`、`acp.approvalTimeoutSecs`）、执行环境（`execution`、`[container]`）、模型元数据（`[[models]]`）与 MCP 服务器（`[[mcp]]`）。
+- 角色写在 agent：权限（`[permissions]`）、说明（front matter 之后的正文）、项目上下文（`[context]`）、自动摘要（`[compaction]`）与续写次数（`continueOnLength`）。
+- 会话目录随主目录移动（`ZX_AGENT_HOME`），没有单独的参数；任务运行中输入的取法用 chat 的 `/queue` 设置。
+
+见 [CONFIGURATION.md](docs/CONFIGURATION.md)。流式响应的字节上限固定为每次请求 16 MiB、每个 SSE 事件 1 MiB（均含封装），SDK 可经 `OpenAiConfig` 修改。
 
 重试优先依据结构化的 HTTP 状态和错误码。服务端数值秒形式的 `Retry-After` 会参与退避计算，仍受 `RetryPolicy::max_delay` 约束（默认 60 秒）；HTTP 日期形式和无效提示使用本地退避。未提供结构化元数据的 provider 保留错误文本判断。服务端以 `stop`、`end`、`length`、`tool_calls`、`function_call` 以外的 `finish_reason` 结束回答时（如 `content_filter`），按 provider 错误处理，错误码为 `finish_reason:<取值>`（如 `finish_reason:content_filter`），不与可重试的错误码同名，因此不重试；这组正常取值与 pi 的 `openai-completions.ts` 相同。以 `stop` 或 `end` 结束但带工具调用时按工具调用处理，以兼容这样上报的服务端。成功状态的响应若 `Content-Type` 为 `application/json`，不按事件流解析：正文含 `error` 对象时与流内的错误对象一样报告其信息与错误码，否则按协议错误报告（服务端可能不支持流式）并附正文摘录，不重试。
 
@@ -313,7 +332,7 @@ zx-agent run --base-url https://api.deepseek.com --model deepseek-flash \
 代码是一个 Cargo workspace，分为 8 个 crate。依赖只能自上而下，下层 crate 无法引用上层，分层由编译器保证：
 
 ```
-zx-agent    src/             CLI（run、chat、serve、acp）、profile、OpenTelemetry 导出；
+zx-agent    src/             CLI（run、chat、serve、acp）、config.toml 与 agent、OpenTelemetry 导出；
                              库以原有路径再导出下面各 crate
   ├─ zx-im-slack   crates/zx-im-slack   Slack 平台（依赖 tokio-tungstenite）
   ├─ zx-im-feishu  crates/zx-im-feishu  ⚑ D:5/CHINA FLAG: 飞书平台（依赖 tokio-tungstenite）
@@ -324,11 +343,11 @@ zx-agent    src/             CLI（run、chat、serve、acp）、profile、OpenT
   └─ zx-ai-openai  crates/zx-ai-openai  OpenAI 兼容 provider 与 SSE 解析（依赖 reqwest），只依赖 zx-ai
 ```
 
-zx-im 与 zx-tools 都只依赖 zx-core 与 zx-ai，彼此不依赖；zx-ai-openai 只依赖 zx-ai，内核与它互不依赖，所以只嵌入内核的程序不编译 HTTP 客户端；两个平台 crate 实现 zx-im 的 `ImChannel`。代码中没有针对特定场景、环境或平台文案语言的规则：场景是 profile 文件，Kubernetes 的规则在 `deploy/kubernetes/`，IM 的文案由配置替换。模块之间的关系：
+zx-im 与 zx-tools 都只依赖 zx-core 与 zx-ai，彼此不依赖；zx-ai-openai 只依赖 zx-ai，内核与它互不依赖，所以只嵌入内核的程序不编译 HTTP 客户端；两个平台 crate 实现 zx-im 的 `ImChannel`。代码中没有针对特定场景、环境或平台文案语言的规则：场景是 agent 文件，Kubernetes 的规则在 `deploy/kubernetes/`，IM 的文案由配置替换。模块之间的关系：
 
 ```
 CLI (main.rs + cli/ + chat/ + acp/)
-  ├─ profile/ + profiles/  文件化场景、上下文与 skill 工具
+  ├─ config/ + agents/  config.toml、agent 文件、上下文与 skill 工具
   └─ agent_session  共享会话、取消、订阅与模型切换           ← pi: coding-agent AgentSession
        └─ runner    独占运行、重试、轮次与时间上限、持久化
             ├─ session  只追加的条目树 + 投影；SessionLog 存储 ← pi: SessionManager
@@ -355,8 +374,8 @@ CLI (main.rs + cli/ + chat/ + acp/)
 | 运行控制 | `crates/zx-core/src/runner.rs` | `coding-agent/src/core/agent-session.ts`（`_startRun`、`_prepareRetry`） |
 | 共享会话 | `crates/zx-core/src/agent_session.rs`、`crates/zx-core/src/agent_session/subscribers.rs` | `AgentSession` 的长期生命周期与多订阅者接口 |
 | 系统提示词 | `crates/zx-core/src/prompt.rs` | `coding-agent/src/core/system-prompt.ts` |
-| 文件化配置 | `src/profile/`、`profiles/` | 加载与叠加 TOML、项目上下文、显式 skill 目录及按需读取；内置场景只有这些文件 |
-| 终端前端 | `src/chat/`、`src/cli/`、`src/run.rs`、`src/process.rs`、`src/render.rs`、`src/sessions.rs`、`src/list_sessions.rs` | 单输入所有者、审批、显示；共享的 CLI 选项、进程共用的连接与会话组装；run 子命令；退出码、stdout 行、信号与追踪导出；终端与日志里调用与事件的文案；会话文件与 `zx-agent sessions` |
+| 文件化配置 | `src/config/`、`agents/` | `config.toml`、agent 文件（front matter 与说明、合并与权限）、项目上下文、显式 skill 目录及按需读取；内置场景只有这些文件 |
+| 终端前端 | `src/chat/`、`src/cli/`（`settings.rs`：`config.toml` 与命令行的合并）、`src/run.rs`、`src/process.rs`、`src/render.rs`、`src/sessions.rs`、`src/list_sessions.rs` | 单输入所有者、审批、显示；共享的 CLI 选项、进程共用的连接与会话组装；run 子命令；退出码、stdout 行、信号与追踪导出；终端与日志里调用与事件的文案；会话文件与 `zx-agent sessions` |
 | ACP 接入 | `src/acp/` | agent 一侧：会话、回合、事件到 `session/update` 的映射、审批到 `session/request_permission` 的映射 |
 | IM 接入 | `crates/zx-im/src/` | 无对应实现：`ImChannel` 平台接口；`Server` 按线程分派（`server.rs` 契约与配置、`router.rs` 分派、`worker.rs` 会话任务、`outlet.rs` 发帖与上报、`approval.rs` 审批卡片、`status.rs` 运行状态、`platform.rs` 平台共用的辅助），每个线程一个任务独占会话，审批卡片与运行上限 |
 | IM 平台 | `crates/zx-im-slack/`（`events.rs` 事件与卡片）、`crates/zx-im-feishu/`（`api.rs`、`connection.rs`、`frame.rs`、`events.rs`） | 无对应实现：两个 `ImChannel` 实现，与接口分开，平台相关的代码只在这里 |
@@ -370,7 +389,7 @@ CLI (main.rs + cli/ + chat/ + acp/)
 5. **回复因 `length` 截断时，不执行其中的工具调用**，因为参数可能不完整。
 6. **两个消息队列**：引导消息在每个轮次结束后插入；后续消息在 agent 本来要停下时才插入。每个队列可设为一次取全部（`all`）或一次取一条（`one-at-a-time`，其余等后面的请求），对应 pi 的 `QueueMode`。队列里除了用户文本，还可以是扩展发来的消息（`QueuedMessage::Custom`）。
 7. **发给模型的上下文以会话文件的投影为准。** 重试时不重复用户消息：先追加一条 `context_edit` 把失败的回答从投影中省略，再从上一条消息续跑。失败记录本身仍保留在文件中，供审计。
-8. **系统提示词是对话的一部分。** 会话中第一条 system 消息记录完整的提示词，之后提示词有变化时，只追加一条记录变化段落的 system 消息，不改写之前的版本。因此会话文件能还原每次请求实际使用的提示词。发给模型时，默认把所有版本合并成开头的一条，与 pi 对 OpenAI 兼容服务的默认做法一致；服务端支持时可以按位置发送（`--system-updates inline`）。
+8. **系统提示词是对话的一部分。** 会话中第一条 system 消息记录完整的提示词，之后提示词有变化时，只追加一条记录变化段落的 system 消息，不改写之前的版本。因此会话文件能还原每次请求实际使用的提示词。发给模型时，默认把所有版本合并成开头的一条，与 pi 对 OpenAI 兼容服务的默认做法一致；服务端支持时可以按位置发送（`config.toml` 的 `provider.systemUpdates = "inline"`）。
 
 ### 与 pi 的差异
 
@@ -378,12 +397,12 @@ CLI (main.rs + cli/ + chat/ + acp/)
 |---|---|---|
 | 轮次与时间上限 | 有（`--max-model-requests`、`--timeout-secs`） | 无人值守时没有人能手动中止 |
 | 工具调用确认 | SDK 支持宿主审批；`run` 使用 `NoHuman` 拒绝 Ask | 无人值守时没有人可以回答确认请求 |
-| 输出被截断 | 自动请模型续写（profile 的 `extensions.continueOnLength`），仍未完成则以退出码 6 结束 | pi 不自动续写，交给用户决定；无人值守时没有人可以决定 |
+| 输出被截断 | 自动请模型续写（agent 的 `continueOnLength`），仍未完成则以退出码 6 结束 | pi 不自动续写，交给用户决定；无人值守时没有人可以决定 |
 | 会话文件写入失败 | 立即中止运行，之后不再写入该文件 | 不允许在缺少审计记录的情况下继续执行操作；未写完的记录只会留在文件末尾，可按尾记录修复 |
 | 会话文件创建时机 | 启动时立即创建并写入头部 | 进程中途崩溃也能留下记录 |
-| 会话目录与续接 | chat 默认存入 `~/.zx-agent/sessions/--<工作目录>--/`，`--resume [ID 前缀]` 续接，`--fork` 与 `/fork` 在副本上继续，`zx-agent sessions` 与 `/sessions` 列出；`run` 默认不存 | pi 的 `--continue` 续接最近一次、`--resume` 弹出选择列表、`--session` 也接受 ID，agent 目录可由环境变量改；这里的 `--continue` 已是不加新输入的续跑，chat 是逐行 REPL，目录只由 `--session-dir` 改 |
+| 会话目录与续接 | chat 默认存入 `~/.zx-agent/sessions/--<工作目录>--/`，`--resume [ID 前缀]` 续接，`--fork` 与 `/fork` 在副本上继续，`zx-agent sessions` 与 `/sessions` 列出；`run` 默认不存 | pi 的 `--continue` 续接最近一次、`--resume` 弹出选择列表、`--session` 也接受 ID，agent 目录可由环境变量改；这里的 `--continue` 已是不加新输入的续跑，chat 是逐行 REPL，目录随 zx-agent 主目录（`ZX_AGENT_HOME`）改 |
 | 会话内切换分支 | `/tree` 列出会话树，`/branch <ID>` 移到某条目之后或自己某条消息之前；SDK 为 `AgentSession::branch` 与 `inspect`。位置只在内存中，与 pi 相同 | pi 的 `/tree` 是可选择的界面，切换时可让模型为离开的分支写一份摘要（`branch_summary` 条目）并给条目加标签（`label`）；这里是逐行 REPL，不做分支摘要与标签 |
-| 队列模式的默认值 | 两个队列默认 `all`，一次取完排队的消息 | pi 默认 `one-at-a-time`。这里沿用此前的行为，`--queue-mode`、`/queue` 或 SDK 可改 |
+| 队列模式的默认值 | 两个队列默认 `all`，一次取完排队的消息 | pi 默认 `one-at-a-time`。这里沿用此前的行为，`/queue` 或 SDK 可改 |
 | 扩展的消息、状态、工具与命令 | 扩展经 `HookContext` 的 `queues` 与 `active_tools` 在运行中发消息（`custom_message` 记录，模型看到的是用户消息，只有文本）、记状态（`custom` 记录，运行中先排队、下一回合开始或运行结束时写入）、改下一次请求提供的工具；命令由 `Extension::commands` 注册，前端（chat）调度，运行中也立即执行 | pi 的 `sendMessage` 可带图片，`appendEntry` 随时直接写入；这里会话在运行期间归循环独占，所以延后到安全点写入。pi 用一条 system 消息向模型声明工具集的增减；这里请求只声明当前活跃的工具，请求审计记录每次请求声明了哪些 |
 | 环境信息 | 启动时由程序写入系统提示词，见下文 | pi 只写入工作目录；无人值守时没有人提供这些信息，白名单也可能禁止 `uname`、`date` 等命令 |
 | 参数校验 | 循环按工具声明的 JSON Schema 严格校验（`jsonschema`），不转换类型；兼容旧写法或常见错误要由工具在 `prepare_arguments` 中显式改写。工具执行时仍反序列化成自己的参数类型 | pi 校验前先去掉可选字段的 `null`、按 schema 转换类型（`packages/ai/src/utils/validation.ts`）。这里只在工具声明的地方改写参数，策略与审批看到的参数才有据可查 |
@@ -391,11 +410,11 @@ CLI (main.rs + cli/ + chat/ + acp/)
 | 中断调用的重放 | 不重放：进程崩溃或被取消后，中断的调用一律写成错误结果，由模型决定是否重试 | pi 的工具可声明 `replay: "safe"`，durable 运行时重启后用记录的参数自动重跑，记录时与当前定义都声明 `safe` 才重跑，连续中断达到上限即停（`packages/durable/src/harness/tool.ts`）。这适用于两个前提：重启后无人介入、自动续跑；工具耗时长、内部有大量嵌套调用（如 codemode），从头重跑代价大。zx-agent 两者都没有：进程结束即运行结束，工具都是单次调用，被打断后由模型重试只多一次请求。将来要做自动续跑或长时间的复合工具时再评估；届时重放语义另设字段，不复用 `Effects`，因为只读不等于可以安全重放 |
 | 工具接口 | 结果只有文本 `content`，另有只供观察者的 `details` 与 `usage`（与 pi 一样随结果写入会话，不发给模型；`usage` 按工具名汇总进运行报告，不计入 token 预算）；进度是文本。没有 pi 的图片内容、`structuredContent` 与 `outputSchema`、`label`，也没有让工具经同一套校验与钩子调用其他工具的 `runToolCall` | 尚无使用者：图片要改消息格式与 provider，`runToolCall` 在做 codemode 或子 agent 时才需要 |
 | 上下文过长的识别 | 按 HTTP 413、错误码（`context_length_exceeded` 等）与通用措辞（如 “maximum context”“prompt is too long”）识别，限流与服务端错误不算；不识别服务端截断输入而不报错的情况 | pi 按服务逐条匹配错误文本，并用模型的上下文窗口识别不报错的超长（`packages/ai/src/utils/overflow.ts`）。这里不按服务推断（D10），也没有模型的上下文窗口信息（见路线图 P10 ⑧） |
-| 上下文摘要 | 默认（全量模式）重新摘要时读取应用过 `context_edit` 的原始记录，不输入上一份摘要；可选的增量模式沿用上一份摘要的事实、只读新增记录，旧事实由程序原样保留，模型只能新增事实或标明取代旧事实。摘要中的每条事实必须引用来源条目，见 [PROFILES.md](docs/PROFILES.md) | pi 把上一份摘要交给模型更新，允许删去旧内容；这里优先保证每条事实可追溯、不经多次转述。全量模式的代价是摘要请求随历史增长，累计约 2 MiB 后无法再摘要；增量模式每次只读上一份摘要的事实（至多 64 KiB）与新增、被修正的记录，请求大小不随历史总长增长，用真实模型评测之后再决定是否设为默认（见[路线图](docs/ROADMAP.md)） |
+| 上下文摘要 | 默认（全量模式）重新摘要时读取应用过 `context_edit` 的原始记录，不输入上一份摘要；可选的增量模式沿用上一份摘要的事实、只读新增记录，旧事实由程序原样保留，模型只能新增事实或标明取代旧事实。摘要中的每条事实必须引用来源条目，见 [CONFIGURATION.md](docs/CONFIGURATION.md) | pi 把上一份摘要交给模型更新，允许删去旧内容；这里优先保证每条事实可追溯、不经多次转述。全量模式的代价是摘要请求随历史增长，累计约 2 MiB 后无法再摘要；增量模式每次只读上一份摘要的事实（至多 64 KiB）与新增、被修正的记录，请求大小不随历史总长增长，用真实模型评测之后再决定是否设为默认（见[路线图](docs/ROADMAP.md)） |
 | 不加新输入的续跑 | 以失败或被取消的回答结尾时，先省略该回答再续跑 | pi 的 `Agent.continue()` 遇到回答结尾时报错（排队的消息除外），失败后的重试由 `AgentSession` 另行处理；这里的续跑同时用于崩溃、超时或取消之后接着做 |
 | 请求前替换设置 | `prepare_request` 只能替换模型与推理强度 | pi 的 `prepareRequest` 还可以改写上下文；这里上下文只来自会话投影（不变量 6），改上下文用 `transform_context` 并写入会话 |
-| 推理强度 | 级别与 pi 相同，写法由 `--reasoning-format` 在三种中显式选择 | pi 按模型元数据与服务的 compat 设置（`thinkingFormat`）在十余种写法中选择，并按模型能力调整级别；这里的模型元数据只有上下文窗口与单价（`[[models]]`），没有写法与能力的信息，也不按服务推断（D10） |
-| 模型元数据与计量 | 上下文窗口与单价来自 profile 的 `[[models]]`，没有内置的模型表；窗口只用来给自动摘要加 token 阈值（窗口减 `reserveTokens`，且须高于 `keepRecentBytes` 折算的 token 数），单价用来算每次回复的 `totalCost`（单位与单价相同，不限币种）；`Retry-After` 接受毫秒、小数秒与 HTTP 日期，退避减去至多四分之一的随机抖动，服务给的等待原样使用 | pi 内置各服务的模型表（`models.json` 可补充），按窗口识别不报错的超长输入与可恢复的截断，成本还支持分档价与服务端上报的成本；这里的超长识别仍只看错误（P10 ①），截断续写由 profile 的 `extensions.continueOnLength` 决定 |
+| 推理强度 | 级别与 pi 相同，写法由 `config.toml` 的 `provider.reasoningFormat` 在三种中显式选择 | pi 按模型元数据与服务的 compat 设置（`thinkingFormat`）在十余种写法中选择，并按模型能力调整级别；这里的模型元数据只有上下文窗口与单价（`[[models]]`），没有写法与能力的信息，也不按服务推断（D10） |
+| 模型元数据与计量 | 上下文窗口与单价来自 `config.toml` 的 `[[models]]`，没有内置的模型表；窗口只用来给自动摘要加 token 阈值（窗口减 `reserveTokens`，且须高于 `keepRecentBytes` 折算的 token 数），单价用来算每次回复的 `totalCost`（单位与单价相同，不限币种）；`Retry-After` 接受毫秒、小数秒与 HTTP 日期，退避减去至多四分之一的随机抖动，服务给的等待原样使用 | pi 内置各服务的模型表（`models.json` 可补充），按窗口识别不报错的超长输入与可恢复的截断，成本还支持分档价与服务端上报的成本；这里的超长识别仍只看错误（P10 ①），截断续写由 agent 的 `continueOnLength` 决定 |
 | 完整 TUI | 未实现，`chat` 是逐行 REPL；交互式界面由 ACP 客户端提供（`acp`） | pi 自带 TUI；这里按路线图的 D13 把界面交给实现 ACP 的开源客户端 |
 
 ### 系统提示词的组成
@@ -404,15 +423,15 @@ CLI (main.rs + cli/ + chat/ + acp/)
 
 | 部分 | 内容 | 何时出现 |
 |---|---|---|
-| 说明 | 所选 profile 的说明（`run` 默认为中性的无人值守说明，`chat` 默认为通用对话说明） | 总是 |
+| 说明 | agent 的说明（`run` 默认为中性的无人值守说明，`chat` 默认为通用对话说明） | 总是 |
 | `<environment>` | 操作系统与版本、CPU 架构、启动时间（UTC）与本地时区、工作目录；容器执行时描述容器、镜像与隔离方式 | 总是 |
-| `<command_policy>` | 允许的命令前缀、禁止的语法、引号内 `\|` 的写法提示 | 启用了 bash 且设置了命令白名单（profile 的 `rules.allow`）时 |
-| `<project_context>` | 项目说明文件：自动发现的 AGENTS.md，以及 profile 列出的文件 | 有项目说明时 |
+| `<command_policy>` | 允许的命令前缀、禁止的语法、引号内 `\|` 的写法提示 | 启用了 bash 且设置了命令白名单时；只有 SDK 能设置白名单（`CommandPolicy::new`），命令行不设，因此 CLI 的提示词没有这一段 |
+| `<project_context>` | 项目说明文件：自动发现的 AGENTS.md，以及 agent 列出的文件 | 有项目说明时 |
 | `<available_skills>` | 已注册 skill 的名称与描述；正文由 `read_skill` 按需读取 | 启用 `read_skill` 且注册了 skill 时 |
 
 本机执行时，这些信息都通过读文件获得（如 `/etc/os-release`、`/etc/localtime`），不执行命令；容器执行时，容器的系统信息来自启动检查在容器内运行的 `uname` 与 `/etc/os-release`。主机名和用户名不会写入，因为提示词会发送给第三方模型。
 
-恢复会话时，程序重新生成提示词，只把有变化的段落追加为一条新的 system 消息。启动时间按分钟记录；跨分钟恢复时，`<environment>` 通常会出现在更新中。发给模型的方式由 `--system-updates` 决定：
+恢复会话时，程序重新生成提示词，只把有变化的段落追加为一条新的 system 消息。启动时间按分钟记录；跨分钟恢复时，`<environment>` 通常会出现在更新中。发给模型的方式由 `config.toml` 的 `provider.systemUpdates` 决定：
 
 - `collapse`（默认）：最新版本合并到开头的 system 消息。开头变化会影响服务端对既有请求前缀的缓存复用。
 - `inline`：更新出现在对话中变化发生的位置，内容为 `Updated system prompt section "environment": …`。在模型、工具等发送配置不变时，之前的请求前缀保持不变，便于复用缓存；是否实际命中由服务端决定。
@@ -422,9 +441,10 @@ CLI (main.rs + cli/ + chat/ + acp/)
 `CommandPolicy` 只检查 `bash` 工具：
 
 - 所有命令都会匹配一组危险模式：`rm -rf /` 等多词模式在转小写、合并空白后按子串匹配；`shutdown`、`reboot`、`poweroff`、`halt`、`mkfs`（含 `mkfs.<类型>`）以及 `init 0`、`init 6` 按程序匹配，即出现在命令的词中（先去掉引号与反斜杠，按路径的文件名比较），但 `grep`、`last`、`journalctl`、`cat`、`echo` 等只读程序的参数不算，因此 `last reboot`、`grep -i shutdown` 可以执行。这组规则同样容易绕过，只起减速作用。
-- 设置 `rules.allow` 后，命令只能是由白名单程序组成的管道（`a | b`），并且拒绝 `;`、`&`、`` ` ``、`$(`、`>`、`<` 和换行。检查只识别这些符号：变量展开（如 `$VAR`）和通配符不会被拒绝，白名单程序自身的参数也不检查，例如允许 `find` 就等于允许 `find -exec`。
+- agent 的 `permissions.deny` 中的 `bash(<文本>)` 追加拒绝的模式：命令中**任何位置**出现该文本（不分大小写）即拒绝，与上面的多词模式一样按子串匹配。
+- SDK 可以给 `CommandPolicy` 传命令白名单：命令只能是由白名单程序组成的管道（`a | b`），并且拒绝 `;`、`&`、`` ` ``、`$(`、`>`、`<` 和换行。检查只识别这些符号：变量展开（如 `$VAR`）和通配符不会被拒绝，白名单程序自身的参数也不检查，例如允许 `find` 就等于允许 `find -exec`。CLI 不再设白名单（原来的 `rules.allow` 已去掉）：要只让部分命令运行，在 agent 中写 `ask = ["bash"]` 与 `allow = ["bash(<前缀>)", …]`，其余命令要审批，`run` 没有人审批而拒绝。
 
-示例（白名单为 `kubectl get`、`grep`）：
+SDK 白名单的示例（白名单为 `kubectl get`、`grep`）：
 
 | 命令 | 结果 |
 |---|---|
@@ -433,14 +453,14 @@ CLI (main.rs + cli/ + chat/ + acp/)
 | `kubectl get pods && rm x` | 拒绝：包含 `&` |
 | `grep x $(cat list)` | 拒绝：包含 `$(` |
 
-自动放行（profile 的 `rules.autoApprove`）只决定是否询问，不决定能运行什么。bash 需要审批时（如 chat），满足以下条件的命令不经审批直接执行：
+自动放行（agent 的 `permissions.allow` 中的 `bash(<前缀>)`）只决定是否询问，不决定能运行什么。bash 需要审批时（如 chat，或 agent 的 `ask` 含 `bash`），满足以下条件的命令不经审批直接执行：
 
 - 是由清单中的前缀组成的管道；
 - 只由字母、数字、空白和 `- _ . / : = , @ + | ^ ~ !` 组成。引号、`\`、`$`、通配符、花括号、括号、`#` 以及白名单拒绝的语法都会改为询问：它们能让 shell 实际执行的内容与字面不同，例如 `kubectl get sec""rets` 去掉引号后就是 `secrets`；
-- 不含 URL（`://`），也不含 profile 的 `rules.autoApproveExcept` 列出的字词（不分大小写，作为子串比较；内置 assistant 为 `secret`）；
-- 程序在 profile 的 `rules.autoApproveOptions` 中列出了可带的选项时，只能带这些选项，其他选项一律询问；没有列出的程序不限选项。
+- 不含 URL（`://`），也不含 agent 的 `permissions.allowExcept` 列出的字词（不分大小写，作为子串比较；内置 assistant 为 `secret`）；
+- 程序在 agent 的 `permissions.allowOptions` 中列出了可带的选项时，只能带这些选项，其他选项一律询问；没有列出的程序不限选项。
 
-这些检查不包含任何具体程序的知识：哪些选项只是选择读什么、怎么显示，由 profile 给出。Kubernetes 部署的 `deploy/kubernetes/profiles/kubernetes.toml` 列出了 kubectl 的只读选项（如 `-n`、`--context`、`-o`、`--tail`），其他选项都要询问，例如 `--server`、`--kubeconfig`、`--token`、`--insecure-skip-tls-verify`（2026-11-01 实测，kubectl v1.36.1 把 kubeconfig 中的 token 发给了 `--server` 指定的 HTTPS 地址）、`--raw`（可读任意 API 路径）、`--user` 与 `--cluster`、`--profile-output` 与 `--cache-dir`（写文件，实测 `--profile-output` 会覆盖目标文件）、`-f`、`-w`、`-v`。自己把 kubectl 之类的程序加进 `autoApprove` 时，要同时列出它可带的选项，否则它的任何选项都不会触发询问。
+这些检查不包含任何具体程序的知识：哪些选项只是选择读什么、怎么显示，由 agent 给出。Kubernetes 部署的 `deploy/kubernetes/agents/assistant.md` 列出了 kubectl 的只读选项（如 `-n`、`--context`、`-o`、`--tail`），其他选项都要询问，例如 `--server`、`--kubeconfig`、`--token`、`--insecure-skip-tls-verify`（2026-11-01 实测，kubectl v1.36.1 把 kubeconfig 中的 token 发给了 `--server` 指定的 HTTPS 地址）、`--raw`（可读任意 API 路径）、`--user` 与 `--cluster`、`--profile-output` 与 `--cache-dir`（写文件，实测 `--profile-output` 会覆盖目标文件）、`-f`、`-w`、`-v`。自己把 kubectl 之类的程序加进 `allow` 时，要同时列出它可带的选项，否则它的任何选项都不会触发询问。
 
 拒绝规则始终优先。内置 assistant 清单只收不能执行其他程序、不能写文件的命令：`grep`、`head`、`tail`、`wc`、`jq`。检查同样只看字面；这些命令能读到什么取决于运行它们的账号与凭据，读到的内容会进入模型上下文。
 
@@ -448,7 +468,7 @@ CLI (main.rs + cli/ + chat/ + acp/)
 
 `read_file` 只接受普通文件，默认单文件上限为 10 MiB，同时检查文件元数据与实际读取量。目录、FIFO 和设备文件会被拒绝，并且不会被打开：先查看路径类型再打开。取消会停止等待文件 I/O；底层已经启动的普通文件 I/O 仍可能由 Tokio 的阻塞线程继续完成。每次最多返回 2000 行或 50 KiB（51200 字节），按行翻页；单行超过这个字节上限时只显示前缀，并注明该行被截断及其字节数。
 
-`edit_file` 与 `write_file` 改变文件，按有副作用处理（崩溃后恢复为“结果未知”）。内置 assistant 启用它们并要求审批，`unattended` 与 Kubernetes 部署的 profile 不启用。它们不受命令白名单约束，可以写进程有权限写的任何普通文件，包括工作目录之外的；需要限制时，不启用它们，或使用容器执行。目录与特殊文件会被拒绝，写入不是原子的。`edit_file`（对应 pi 的 `edit`）：
+`edit_file` 与 `write_file` 改变文件，按有副作用处理（崩溃后恢复为“结果未知”）。内置 assistant 启用它们并要求审批，`unattended` 与 Kubernetes 部署的 agent 不启用。它们不受命令白名单约束，可以写进程有权限写的任何普通文件，包括工作目录之外的；需要限制时，不启用它们，或使用容器执行。目录与特殊文件会被拒绝，写入不是原子的。`edit_file`（对应 pi 的 `edit`）：
 
 - 每处 `oldText` 都与原文件比较，必须恰好出现一次，彼此不能重叠；有一处失败就不写文件。精确匹配不到时，会忽略行尾空白、把弯引号、各种破折号与特殊空格当作 ASCII 字符再匹配一次；此时只有被替换的行按这种形式写回，其余行保持原字节。pi 还做 Unicode NFKC 规范化，标准库没有，这里不做。
 - 文件开头的 BOM 与 CRLF 换行保留；只编辑不超过 10 MiB 的 UTF-8 文本，含 NUL 字节的文件按二进制拒绝。
@@ -456,17 +476,17 @@ CLI (main.rs + cli/ + chat/ + acp/)
 - 模型常见的旧写法会先改写再校验：`edits` 写成 JSON 字符串或单个对象、`oldText` 与 `newText` 写在顶层（`prepare_arguments`）。
 - 同一批调用中改同一个文件（按解析符号链接后的路径）的 `edit_file` 与 `write_file` 逐个执行，改不同文件的仍可并行（对应 pi 的 file-mutation-queue）。
 
-`grep`、`find`、`ls`（对应 pi 的同名工具）只读，经执行器运行系统程序，容器执行时在容器内运行。内置 assistant 启用它们且不需要审批，`unattended` 与 Kubernetes 部署的 profile 不启用。与 `read_file` 一样，它们不受命令白名单约束，可以读取进程有权限读取的文件；需要限制时不启用它们。
+`grep`、`find`、`ls`（对应 pi 的同名工具）只读，经执行器运行系统程序，容器执行时在容器内运行。内置 assistant 启用它们且不需要审批，`unattended` 与 Kubernetes 部署的 agent 不启用。与 `read_file` 一样，它们不受命令白名单约束，可以读取进程有权限读取的文件；需要限制时不启用它们。
 
 - 安装了 ripgrep（`rg`）时用它搜索，遵守 `.gitignore`；没有时退到 POSIX `grep -rn`（扩展正则）与 `find`，只跳过 `.git`、`.hg`、`.svn`，结果后注明 ripgrep 未安装、没有应用 `.gitignore`，`details.engine` 写明用的是哪个程序。pi 在缺少 rg 时自动下载，这里不下载。两种程序的正则写法略有不同，`grep` 的 `glob` 在退回时只比较文件名。
 - 模型给的模式与路径都以单引号整体传给 shell，不会被解释；测试覆盖了 `$(…)`、反引号与引号注入。
 - 输出有界：`grep` 默认至多 100 处匹配、`find` 1000 个路径、`ls` 500 项（`limit` 至多 2000），每行至多 500 字节，整体再按 2000 行或 50 KiB 截断；有更多结果时注明。默认 60 秒超时，可取消。
 
-MCP 工具（见上文“MCP 工具”）：服务器由使用者在 profile 中显式列出，工具也要逐个列出，没列出的工具连描述都不会进入上下文。工具描述与结果来自外部服务，可能含注入内容；`allowTools` 以外的工具每次都要审批，服务器给出的 annotations 不影响放行。工具一律按有副作用处理，中断后恢复为“结果未知”。响应体没有大小上限（rmcp 读取 JSON 响应时不限制，SSE 每个事件上限 16 MiB），交给模型的结果最多 2000 行或 50 KiB。
+MCP 工具（见上文“MCP 工具”）：服务器由使用者在 `config.toml` 中显式列出，工具也要逐个列出，没列出的工具连描述都不会进入上下文。工具描述与结果来自外部服务，可能含注入内容；agent 的 `permissions.allow` 以外的工具每次都要审批，服务器给出的 annotations 不影响放行。工具一律按有副作用处理，中断后恢复为“结果未知”。响应体没有大小上限（rmcp 读取 JSON 响应时不限制，SSE 每个事件上限 16 MiB），交给模型的结果最多 2000 行或 50 KiB。
 
 ### 容器执行
 
-默认在本机执行。在 profile 中写 `execution = "container"` 并配置镜像（`container.image`），bash、read_file、edit_file 与 write_file 改在 Docker 容器中执行（写文件经 `docker exec --interactive` 从标准输入传入内容，以命令用户写入）；read_skill 与 read_output 仍读取本机文件。
+默认在本机执行。在 `config.toml` 中写 `execution = "container"` 并配置镜像（`container.image`），bash、read_file、edit_file 与 write_file 改在 Docker 容器中执行（写文件经 `docker exec --interactive` 从标准输入传入内容，以命令用户写入）；read_skill 与 read_output 仍读取本机文件。
 
 ```toml
 execution = "container"
@@ -479,10 +499,18 @@ pidsLimit = 256                  # 可选，容器内进程数上限
 network = "bridge"               # 可选，默认 bridge；none 为无网络
 workspace = "readWrite"          # 可选，readOnly 时工作目录只读
 root = "readWrite"               # 可选，readOnly 时容器自身的文件只读，只有 /tmp 可写
+```
 
-[rules]
-approveAll = true                # 可选：不再询问任何审批，只能与容器执行一起使用
-askTools = []                    # approveAll 时须为空（内置 assistant 为 ["bash"]）
+不再询问审批写在 agent 中（如 `agents/assistant.md`）：
+
+```markdown
++++
+extends = "assistant"
+
+[permissions]
+approveAll = true                # 不再询问任何审批，只能与容器执行一起使用
+ask = []                         # approveAll 时须为空
++++
 ```
 
 容器就是沙箱：限制放在容器的外墙上，容器内默认给 agent 它的用户能有的全部权限（路线图决策 D11）。
@@ -490,9 +518,9 @@ askTools = []                    # approveAll 时须为空（内置 assistant �
 - 每个进程一个容器，在启动时创建；`chat` 的 `/new` 会换一个新容器。启动时检查命令不以 root 运行、镜像提供 bash 与 `cat`、`head`、`uname`、`mkdir`、容器用户能读取工作目录，工作目录可写时还检查能写入。任一项不满足、镜像不在本地或 Docker 不可用时，以配置错误结束（退出码 2），不请求模型。
 - 容器内默认放开：工作目录以读写方式挂载在同一路径，改动直接作用于宿主机上的文件；容器自身的文件可写（如 `/var/tmp`），随容器删除而丢弃；加入 Docker 默认的 `bridge` 网络，可以访问外部网络。命令默认以运行 zx-agent 的用户的 `uid:gid` 运行，在原生 Linux 上写出的文件属于该用户；zx-agent 以 root 运行时改用 nobody（`65534:65534`）。非 root 用户仍不能改 root 所有的系统文件（如安装软件包），需要的软件请装进镜像。
 - 外墙不变：不加 `--privileged`，不挂 Docker 的 socket，不使用宿主机的网络与 PID 命名空间（`network` 为 `host` 或 `container:<名字>` 时报配置错误），去掉全部 capability 并设 `no-new-privileges`（命令不能经 setuid 程序成为 root），进程数与内存上限。命令以非 root 用户运行：`container.user` 为 UID 0 或 `root` 时报配置错误。保持容器存活的 PID 1 及其 `cat` 以去掉全部 capability 的 root 运行，命令无法向它们发信号。命令不继承 agent 的环境变量，API key 不进入容器。`<environment>` 按实际配置描述容器的系统、工作目录是否可写、网络与可写范围，而不是宿主机。
-- 审批：容器执行本身不改变审批，chat 照常询问 bash。profile 设 `rules.approveAll = true` 后不再询问任何调用：chat 与 serve 的 bash、`askTools` 与 MCP 的 `allowTools` 以外的工具都直接执行，拒绝规则与命令策略仍然生效。它只能与容器执行一起使用，否则报配置错误。
+- 审批：容器执行本身不改变审批，chat 照常询问 bash。agent 设 `permissions.approveAll = true` 后不再询问任何调用：chat 与 serve 的 bash、`ask` 中的工具与 MCP 工具都直接执行，拒绝规则与命令策略仍然生效。它只能与容器执行一起使用，否则报配置错误。
 - 严格模式：`network = "none"`、`workspace = "readOnly"`、`root = "readOnly"` 即为此前的离线只读沙箱，适合只看不改的排障，可以分别设置。
-- 已知代价：可写又联网时，挂进容器的内容（代码、`.git` 中的远端地址等）可能被命令发送出去；凭据不进入容器这道墙仍然有效。工作目录整体对容器可见（可写时也可被修改），包括其中的硬链接和 `.zx-agent/outputs` 中已脱敏的工具结果。因此容器执行时，`--session` 指向的会话文件必须在工作目录之外，否则启动时报配置错误；chat 的会话目录同样如此（在家目录中运行时默认目录就在工作目录里，改用 `--session-dir` 或 `--no-session`）；遮蔽单个路径挡不住硬链接，也挡不住同目录中的其他会话文件。
+- 已知代价：可写又联网时，挂进容器的内容（代码、`.git` 中的远端地址等）可能被命令发送出去；凭据不进入容器这道墙仍然有效。工作目录整体对容器可见（可写时也可被修改），包括其中的硬链接和 `.zx-agent/outputs` 中已脱敏的工具结果。因此容器执行时，`--session` 指向的会话文件必须在工作目录之外，否则启动时报配置错误；chat 的会话目录同样如此（在家目录中运行时默认目录就在工作目录里，改用另一个 `ZX_AGENT_HOME` 或 `--no-session`）；遮蔽单个路径挡不住硬链接，也挡不住同目录中的其他会话文件。
 - 同一容器内的命令与文件读写逐条执行：容器执行器声明为串行，内置工具随之声明 `Sequential`，同一批调用因此逐个检查、记录并执行，运行在其间被取消时，尚未轮到的调用在恢复时记为未执行。命令总用容器配置中、启动检查过的 shell。每条命令执行前后，以命令用户的身份终止该用户的全部进程（`kill -1`）：超时、取消、运行被丢弃或正常结束后，命令留下的后台进程都会被终止，用 `setsid` 脱离进程组的也不例外；命令写入 `/tmp` 的内容不影响清理。被信号终止的命令报告 `128 + 信号编号` 的退出码（如 137），而不是本机执行时的 `terminated by a signal`。
 - 容器随 zx-agent 进程结束而删除，进程被 SIGKILL 时也一样（容器读取的 stdin 随之关闭）。容器带 `zx-agent.session=<会话 ID>` 标签，可用 `docker ps --filter label=zx-agent.session` 查看。
 - 原生 Linux 的 Docker 保留宿主机的文件权限：默认用户就是工作目录通常的所有者，可以读写；指定其他用户（如 65534）时，它只能读取对其他用户可读的文件，工作目录本身也需要可读，可写时还需要能写，否则启动时报错。macOS 的 Docker Desktop 把挂载的文件显示为容器用户所有（2026-11-01 实测），权限位不起限制作用。
@@ -502,12 +530,12 @@ askTools = []                    # approveAll 时须为空（内置 assistant �
 
 - 策略只是第一道防线，**不是安全边界**。生产环境请以最小权限账号运行，并放在容器或虚拟机中，必要时限制网络访问。
 - `read_file` 不受命令白名单约束，可以读取进程有权限读取的普通文件。需要限制时，使用 `--tools bash` 关闭它。
-- 项目上下文（`AGENTS.md` 与 profile 中的上下文文件）会进入系统提示词并发送给模型服务方，可能引导模型的行为。自动发现的 `AGENTS.md` 不能通过符号链接指向项目外；在不可信仓库中运行时，建议使用 `[context] discover = false` 的 profile。
-- `run` 和 `chat` 在 `after_tool` 中将认证 API key 的完整字面值替换为 `[REDACTED]`，处理后的结果才会写入会话、事件并回传模型。其他凭据文件用 `--secret-file` 或 `ZX_SECRET_FILES` 登记，两者合并，例如 Kubernetes Pod 中 ServiceAccount 的 token（`deploy/kubernetes/` 的清单经 `ZX_SECRET_FILES` 登记 `/var/run/secrets/kubernetes.io/serviceaccount/token`）或其他集群的 token；程序本身不预设任何路径。登记目录时，表示其中名字不以点开头的文件，之后新增的文件也会过滤。这些文件在每次过滤前重新读取，文件中的当前值总是过滤；轮换下来的旧值在过期前仍然有效，因此还会保留最近 32 个继续过滤。过滤是对文件内容（去掉首尾空白）的精确替换；内容不是 UTF-8 时，按 bash 与 read_file 输出所用的有损解码匹配，与文件被完整打印时的样子一致。文件不存在或本进程无权读取时跳过。启动时，登记的路径必须存在，其中每个文件须为不超过 64 KiB 的普通文件：更大的文件不可能整段出现在一次工具输出中（至多 50 KiB），通常是结构化数据，应改为逐个登记其中的值。启动之后才出现超过上限、不是普通文件或其他读取错误时，过滤器失败。短于 8 个字符的值照常过滤，但输出中所有相同的文本都会被替换，包括与密钥无关的内容（例如 `admin`、`5432`）；启动时在 stderr 以 `[secret] <文件>: …` 指出这些文件，不显示值本身，每个进程只提示一次（参照 GitLab 对可遮蔽变量至少 8 个字符的要求）。SDK 可用 `RedactSecrets` 显式配置其他密钥，或用 `with_secret_files` 登记这类文件，并用 `check_secret_files` 与 `short_secret_files` 在启动时做同样的检查；过滤器失败时丢弃原始输出，返回错误结果。
-- 长工具结果的文件同样在脱敏后写入，Unix 新目录 / 文件权限为 0700 / 0600；结果目录默认 `.zx-agent/outputs`，不会自动删除，目录中写入忽略全部文件的 `.gitignore`。写入失败时结果保持内联。`run` 默认不落盘。保存的是工具已经截断的结果，详见[工具结果落盘](docs/PROFILES.md#工具结果落盘)。
+- 项目上下文（`AGENTS.md` 与 agent 中的上下文文件）会进入系统提示词并发送给模型服务方，可能引导模型的行为。自动发现的 `AGENTS.md` 不能通过符号链接指向项目外；在不可信仓库中运行时，建议使用 `[context] discover = false` 的 agent。
+- `run` 和 `chat` 在 `after_tool` 中将认证 API key 的完整字面值替换为 `[REDACTED]`，处理后的结果才会写入会话、事件并回传模型。其他凭据文件用 `config.toml` 的 `secretFiles` 或环境变量 `ZX_SECRET_FILES` 登记，两者合并，例如 Kubernetes Pod 中 ServiceAccount 的 token（`deploy/kubernetes/` 的清单经 `ZX_SECRET_FILES` 登记 `/var/run/secrets/kubernetes.io/serviceaccount/token`）或其他集群的 token；程序本身不预设任何路径。登记目录时，表示其中名字不以点开头的文件，之后新增的文件也会过滤。这些文件在每次过滤前重新读取，文件中的当前值总是过滤；轮换下来的旧值在过期前仍然有效，因此还会保留最近 32 个继续过滤。过滤是对文件内容（去掉首尾空白）的精确替换；内容不是 UTF-8 时，按 bash 与 read_file 输出所用的有损解码匹配，与文件被完整打印时的样子一致。文件不存在或本进程无权读取时跳过。启动时，登记的路径必须存在，其中每个文件须为不超过 64 KiB 的普通文件：更大的文件不可能整段出现在一次工具输出中（至多 50 KiB），通常是结构化数据，应改为逐个登记其中的值。启动之后才出现超过上限、不是普通文件或其他读取错误时，过滤器失败。短于 8 个字符的值照常过滤，但输出中所有相同的文本都会被替换，包括与密钥无关的内容（例如 `admin`、`5432`）；启动时在 stderr 以 `[secret] <文件>: …` 指出这些文件，不显示值本身，每个进程只提示一次（参照 GitLab 对可遮蔽变量至少 8 个字符的要求）。SDK 可用 `RedactSecrets` 显式配置其他密钥，或用 `with_secret_files` 登记这类文件，并用 `check_secret_files` 与 `short_secret_files` 在启动时做同样的检查；过滤器失败时丢弃原始输出，返回错误结果。
+- 长工具结果的文件同样在脱敏后写入，Unix 新目录 / 文件权限为 0700 / 0600；结果目录默认 `.zx-agent/outputs`，不会自动删除，目录中写入忽略全部文件的 `.gitignore`。写入失败时结果保持内联。`run` 默认不落盘。保存的是工具已经截断的结果，详见[工具结果落盘](docs/CONFIGURATION.md#工具结果落盘)。
 - 该过滤不识别未知密钥、编码或拆分后的密钥，也不处理用户输入、模型输出和工具调用参数。这些内容及工具输出中的其他敏感数据仍可能进入模型请求、会话和事件；请控制会话文件访问权限。chat 默认把会话文件写到家目录下（见“终端对话”），新建的目录与文件只有当前用户可读写，不会自动删除；不想留下记录时用 `--no-session`。
-- 认证 key 只从环境变量读取；bash 命令启动前删除 `--api-key-env` 指定的变量。但本机执行时，工具与 agent 以同一系统用户运行，仍可通过其他途径读取凭证，例如 Linux 上读取 agent 的 `/proc/<pid>/environ`；这样读到的 key 若完整出现在工具输出中，会被上面的过滤替换，编码或拆分后的形式则不会。需要隔离时，请使用容器执行，或以不同账号运行。
-- 除 `--api-key-env` 指定的变量外，其他环境变量（如云厂商凭证）bash 命令仍然可以读到。需要时请在启动 zx-agent 前清理环境变量。
+- 认证 key 只从环境变量读取；bash 命令启动前删除 `provider.apiKeyEnv` 指定的变量。但本机执行时，工具与 agent 以同一系统用户运行，仍可通过其他途径读取凭证，例如 Linux 上读取 agent 的 `/proc/<pid>/environ`；这样读到的 key 若完整出现在工具输出中，会被上面的过滤替换，编码或拆分后的形式则不会。需要隔离时，请使用容器执行，或以不同账号运行。
+- 除 `provider.apiKeyEnv` 指定的变量外，其他环境变量（如云厂商凭证）bash 命令仍然可以读到。需要时请在启动 zx-agent 前清理环境变量。
 
 ## 输出格式
 
@@ -538,7 +566,7 @@ askTools = []                    # approveAll 时须为空（内置 assistant �
 
 `report.modelRequests` 是模型请求数（含摘要请求），与回合编号不同。`report.usage` 只含模型的用量；工具报告的花费（例如工具自己调用了模型）按工具名在 `report.toolUsage` 中，没有时省略该字段。`report.deniedCalls` 是被策略或审批拒绝的工具调用数，为零时省略。
 
-`usage` 统计本次运行中每个回复的用量，失败的尝试也计入。被取消的请求记为 0，因为服务端在流的末尾才返回用量；实际计费以服务商账单为准。`cacheWrite`（写入缓存的提示词 token）与 `reasoning`（输出中的推理 token）只在服务返回且不为 0 时出现；`totalCost` 只在 profile 的 `[[models]]` 给出该模型的单价时出现，是按单价算出的花费，单位与单价相同（摘要请求也计入；对应 pi 的 `cost.total`），同一运行内的多次回复相加。回复消息另带服务端返回的 `responseId` 与（和请求的不同时）`responseModel`。
+`usage` 统计本次运行中每个回复的用量，失败的尝试也计入。被取消的请求记为 0，因为服务端在流的末尾才返回用量；实际计费以服务商账单为准。`cacheWrite`（写入缓存的提示词 token）与 `reasoning`（输出中的推理 token）只在服务返回且不为 0 时出现；`totalCost` 只在 `config.toml` 的 `[[models]]` 给出该模型的单价时出现，是按单价算出的花费，单位与单价相同（摘要请求也计入；对应 pi 的 `cost.total`），同一运行内的多次回复相加。回复消息另带服务端返回的 `responseId` 与（和请求的不同时）`responseModel`。
 
 `message_update.delta` 的 `tool_call_args` 包含 `id` 和 `text`，`id` 与对应 `tool_call_start` 相同，便于关联交错返回的工具参数。旧事件缺少 `id` 时，反序列化为空字符串。
 
@@ -610,7 +638,7 @@ run、chat 与 serve 在设置了下面的标准变量时，用 OTLP/HTTP（prot
 
 如果进程在写入最后一行时崩溃，未换行且确实未完成的尾记录会在下次打开时截掉，包括截断在 UTF-8 字符中间的情况。写入失败（如磁盘已满）后不再写入，因此留下的残缺同样只在文件末尾，按同一规则修复。CLI 会在 stderr 报告修复；库调用方可读取 `SessionStore::recovered_tail_bytes()`。完整记录缺少末尾换行时会补换行；已换行的损坏记录、未知记录类型和完整记录的字段错误会报错并保留文件。截掉尾记录发生在其余记录全部通过校验之后，因此打开失败时文件保持原样。
 
-会话格式的版本是 6（`session::SESSION_VERSION`），只读写这一个版本：头部版本不是 6 的文件，无论更旧还是更新，打开、读取都报错（`session format version <N> is not supported; only version 6 can be read or written`），文件保持原样；`SessionStore::create` 也拒绝其他版本的头部。格式变化时提高版本号，此前的文件随之无法打开，不做升级或兼容读取。压缩时先追加 `compaction_started`，请求完成后追加 `compaction` 或 `compaction_failed`。未完成或失败记录不改变投影；成功记录保留全部 system、结构化摘要及 `firstKeptEntryId` 之后的原消息，原始历史仍可审计。默认的全量模式下，摘要来源是应用过 `context_edit` 的原始投影，不输入旧摘要；可选的增量模式（见 [PROFILES.md](docs/PROFILES.md)）下，后一次摘要沿用前一次仍有效的事实，只读取其边界之后的记录与此后被修正的旧记录。
+会话格式的版本是 6（`session::SESSION_VERSION`），只读写这一个版本：头部版本不是 6 的文件，无论更旧还是更新，打开、读取都报错（`session format version <N> is not supported; only version 6 can be read or written`），文件保持原样；`SessionStore::create` 也拒绝其他版本的头部。格式变化时提高版本号，此前的文件随之无法打开，不做升级或兼容读取。压缩时先追加 `compaction_started`，请求完成后追加 `compaction` 或 `compaction_failed`。未完成或失败记录不改变投影；成功记录保留全部 system、结构化摘要及 `firstKeptEntryId` 之后的原消息，原始历史仍可审计。默认的全量模式下，摘要来源是应用过 `context_edit` 的原始投影，不输入旧摘要；可选的增量模式（见 [CONFIGURATION.md](docs/CONFIGURATION.md)）下，后一次摘要沿用前一次仍有效的事实，只读取其边界之后的记录与此后被修正的旧记录。
 
 每次模型请求（任务请求与摘要请求）发出前，先追加 `request_started`；provider、模型、工具定义、`max_tokens` 或 provider 转换参数变化时，先追加一条 `request_config`。`request_started` 引用配置，并记录消息来源：会话投影（以该条目的父节点为准），或摘要尝试的源条目与请求时间戳。库调用方可用 `SessionStore::replay_request` 还原当时与 provider 无关的 `Request`，OpenAI 兼容服务可再用 `openai::replay_body` 重建请求体。会话文件不记录 API key、URL 和 HTTP 头；自定义 provider 通过 `Provider::request_options` 提供非机密的转换参数，默认为 `null`，此时只能还原到 `Request`。这些记录写入失败时不发请求，并中止运行。`request_started` 只表示准备发送，后面没有对应的回答，说明发送结果未知。
 
@@ -642,7 +670,7 @@ let agent = AgentSession::new(config, RetryPolicy::default(), Limits::default(),
 let report = agent.prompt("任务描述", &CancellationToken::new()).await?;
 ```
 
-`Limits::default()` 不限制轮次、运行时间和 token 用量；`LoopConfig::new` 默认没有钩子，不自动续写、压缩或落盘工具结果。库不带场景：说明、上限、续写次数与策略都由嵌入方给出。`examples/library.rs` 演示了一个无人值守场景的完整组装（自己的说明、30 轮与 15 分钟上限、续写一次、命令策略与脱敏）。原来的 `presets` 模块已删除，CLI 的场景只在 `profiles/*.toml`。`prompt`、`prompt_once`、`continue_run` 与 `compact` 都接收一个取消令牌，运行用它的子令牌：取消传入的令牌会取消运行，`abort` 或丢弃 future 不会取消传入的令牌；不需要外部取消时传 `&CancellationToken::new()`。
+`Limits::default()` 不限制轮次、运行时间和 token 用量；`LoopConfig::new` 默认没有钩子，不自动续写、压缩或落盘工具结果。库不带场景：说明、上限、续写次数与策略都由嵌入方给出。`examples/library.rs` 演示了一个无人值守场景的完整组装（自己的说明、30 轮与 15 分钟上限、续写一次、命令策略与脱敏）。原来的 `presets` 模块已删除，CLI 的场景只在 `agents/*.md`。`prompt`、`prompt_once`、`continue_run` 与 `compact` 都接收一个取消令牌，运行用它的子令牌：取消传入的令牌会取消运行，`abort` 或丢弃 future 不会取消传入的令牌；不需要外部取消时传 `&CancellationToken::new()`。
 
 P2 增加 `zx_agent::AgentSession`；已有 `Runner` 可通过 `AgentSession::from(runner)` 转为共享会话。
 调用 `prompt` 只需 `&self`，可由多个前端持有 `Arc<AgentSession>`；同一时刻仅一个调用获得运行权。
@@ -683,16 +711,16 @@ let second = agent.prompt("结合上面的证据总结", &cancel).await?;
 P5 保持原构造器兼容。自动压缩通过 `Runner::new(...).with_compaction(compaction::Config { trigger_bytes: Some(256 * 1024), ..Default::default() })?` 显式启用，再转为 `AgentSession`。手动压缩默认最多 2048 输出 token、120 秒，无可压缩范围时返回 `Noop`。SDK 落盘需显式注册同配置的 `OutputStore`、`ReadOutputTool` 和 `SpillOutputs`，写入钩子放在脱敏之后，并排除分页工具。
 
 SDK 中的模型请求预算使用 `Limits::max_model_requests: Option<u32>`，`None` 表示不限，
-`Some(0)` 表示不调用模型。CLI 使用 `--max-model-requests`，profile 使用 `maxModelRequests`；
+`Some(0)` 表示不调用模型。CLI 使用 `--max-model-requests`，agent 使用 `limits.maxModelRequests`；
 JSON 报告使用 `modelRequests`，达到上限时 `outcome` 为 `model_request_limit`。
 IM 的提示文本使用 `[replies] modelRequestLimit`。
-原 `prompt::DEFAULT_INSTRUCTIONS` 当时移到了 `presets`，现在只在 `deploy/kubernetes/profiles/troubleshoot.md`。
+原 `prompt::DEFAULT_INSTRUCTIONS` 当时移到了 `presets`，现在只在 `deploy/kubernetes/agents/unattended.md`。
 
 P1 的 SDK 接口调整：`LoopConfig` 持有模型、工具、钩子、交互宿主与队列，`LoopConfig::new(provider, model)` 以外的字段取默认值（无系统提示词、无工具、工作目录为 `.`），用结构体更新语法覆盖。`LoopConfig::models`（按模型 ID 的 `ai::ModelMeta`：`context_window` 与 `cost`，`cost` 为每百万 token 的单价 `ai::ModelCost`，币种由使用者决定、所有单价须一致）让循环给每次回复算出 `usage.total_cost`（按请求的模型查，摘要请求也算）；`LoopConfig::cache_key` 随每个任务请求发送并记入请求审计（`Request::cache_key`），OpenAI 兼容 provider 在 `OpenAiConfig::prompt_cache_key` 为 true 时把它写成 `prompt_cache_key`。`OpenAiConfig::api_key` 是 `ApiKey`：`None`、`Fixed(token)`，或 `Dynamic(Arc<dyn ApiKeySource>)`——每次请求前调用一次取 token（pi 的 `getApiKey`，用于会过期的凭据），取不到时请求以 `ProviderError::ApiKey` 失败、不重试；`OpenAiConfig::headers` 随每个请求发送，`Authorization` 不接受。`RetryPolicy::jitter`（默认 0.25）从退避中随机减去至多这一比例，服务的 `Retry-After` 不减。
 原 `config.policy` 改为注册 `PolicyHook::new(policy)`；`Limits::continue_on_length` 改为 `ContinueOnLength::new(n)`。
 直接调用循环用 `Attempt`：`Attempt::new(config, &mut session, &mut approvals, &cancel, &sink)` 在一个 `SessionStore` 上开始一次尝试（不需要落盘时用 `SessionStore::in_memory`），按需设置 `max_model_requests`、`token_budget`、`cost_budget`，再 `.run(prompts)`；每一步先记入会话，发给模型的就是会话投影，跑完后的对话从 `session.messages()` 读取。`approvals` 是宿主持有的 `&mut ApprovalCache`；使用 `Runner` 时由它管理，并在尝试之外加上重试、上限与摘要。
 
-`Hooks` 的七个回调均有默认实现，最后一个参数都是 `&HookContext`：会话 ID、运行 ID（与事件的 `runId` 相同）、工作目录、运行的取消信号 `CancelSignal`，以及运行的队列 `queues` 与工具集 `active_tools`（见下文“扩展”）；它标为 `#[non_exhaustive]`，以后只增加字段。`CancelSignal` 可以等待、查询，也可以派生自己的子令牌，但不能取消运行。`HookChain::push` 以类型名注册，每次回调默认超时 5 秒；类型名的格式不受保证，可能随编译器版本变化，需要稳定的名称时用 `push_with(hook, HookOptions { name, timeout })` 给出名称（用于 `hook_failed` 与追踪）和超时。CLI 的内置钩子使用固定名称：`command_policy`、`profile_rules`、`bash_approval`（chat 与 serve）、`continue_on_length`、`redact_secrets`、`spill_outputs`；MCP 服务器名不含 `_`，不会与之重名。`on_event` 收到带信封的 `Event`；每次调用都会被等待，所以默认不观察流式增量 `message_update`，需要时覆盖 `observes`（它 panic 时按不观察处理并报告 `hook_failed`）。并行执行工具时，同一钩子的 `on_event` 可能并发、乱序；运行被取消后，仍在等待的调用会被停止，可能收不到其余事件（包括 `run_end`）。需要完整、有序的事件流时用 `subscribe_bounded`。
+`Hooks` 的七个回调均有默认实现，最后一个参数都是 `&HookContext`：会话 ID、运行 ID（与事件的 `runId` 相同）、工作目录、运行的取消信号 `CancelSignal`，以及运行的队列 `queues` 与工具集 `active_tools`（见下文“扩展”）；它标为 `#[non_exhaustive]`，以后只增加字段。`CancelSignal` 可以等待、查询，也可以派生自己的子令牌，但不能取消运行。`HookChain::push` 以类型名注册，每次回调默认超时 5 秒；类型名的格式不受保证，可能随编译器版本变化，需要稳定的名称时用 `push_with(hook, HookOptions { name, timeout })` 给出名称（用于 `hook_failed` 与追踪）和超时。CLI 的内置钩子使用固定名称：`command_policy`、`agent_permissions`、`bash_approval`（chat 与 serve）、`continue_on_length`、`redact_secrets`、`spill_outputs`；MCP 服务器名不含 `_`，不会与之重名。`on_event` 收到带信封的 `Event`；每次调用都会被等待，所以默认不观察流式增量 `message_update`，需要时覆盖 `observes`（它 panic 时按不观察处理并报告 `hook_failed`）。并行执行工具时，同一钩子的 `on_event` 可能并发、乱序；运行被取消后，仍在等待的调用会被停止，可能收不到其余事件（包括 `run_end`）。需要完整、有序的事件流时用 `subscribe_bounded`。
 
 钩子分阶段执行：每个回调都按 `Policy`（内置工具策略）、`Extension`（默认）、`Redaction`（脱敏）、`Storage`（长结果落盘）的顺序，同一阶段内按注册顺序。阶段由钩子自己声明（`Hooks::stage`）：`PolicyHook`、`RedactSecrets`、`SpillOutputs` 各自声明所属阶段，因此无论宿主以什么顺序注册，`before_tool` 都先经过内置策略，`after_tool` 中扩展的改动都会再经过脱敏，落盘的总是脱敏后的结果。
 `before_tool` 取 Deny > Ask > Allow，首个 Deny 立即拒绝；同级 Ask 保留第一条理由。扩展用 `before_tool` 放行或拒绝；`ToolPolicy` 是内置策略经 `PolicyHook` 接入的方式，具体策略（如 `CommandPolicy`）在 `policy` 模块。`RulePolicy` 按 deny → ask → allow 匹配，同级按注册顺序，无匹配时拒绝。
@@ -819,11 +847,12 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 | `tests/runner.rs` | 重试且不重复 prompt、失败记录留在文件中、工具结果的 `details` 写入会话文件并在重新打开后保留、工具的 `usage` 按工具名报告、写入会话文件且不计入 token 预算、放弃不可重试的错误、轮次、时间与 token 上限、调用方取消、截断续写与拼接、最终回答只取本次运行的消息、续跑会话、恢复会话时提示词变化写入文件、先写盘再转发事件、自定义 `SessionLog` 存储的会话重新加载后继续对话、事件的编号与 ID、`run_start` / `run_end`、尝试与请求起点及其会话条目、消息与上下文编辑的条目 ID、预算用完不重试并保留错误、重试省略失败回答的 `context_edited`、无预算时排队输入留在队列、运行在观察者处理时被丢弃时排队输入只写一次 |
 | `tests/agent_session.rs` | 共享提问与 Busy、取消与 future 丢弃后复用、队列边界、订阅和退订、回调重入与 panic 隔离、模型切换、授权撤销、先写审计再多订阅分发、有界订阅按序接收、通道满时丢弃计数且不阻塞运行、会话释放后有界订阅结束 |
 | `tests/openai_mock.rs` | 本地假 HTTP 服务上的端到端测试：SSE、执行 bash、回传工具结果、认证头、HTTP 错误重试、空闲超时、中途取消后保留已输出内容、成功状态下的 JSON 正文（错误对象与整份回答） |
-| `tests/cli.rs` | 编译出的程序：退出码 0 到 6、jsonl 输出、从 stdin 读提示词、bash 读不到 API key、系统提示词的生成段落、`--system-updates inline` |
+| `tests/cli.rs` | 编译出的程序：退出码 0 到 6、jsonl 输出、从 stdin 读提示词、bash 读不到 API key、系统提示词的生成段落、`provider.systemUpdates = "inline"` |
 | `tests/chat_cli.rs` | 多轮历史、审批与授权范围（含 `y`、`n`；write_file 的内容按行显示，edit_file 逐项列出且结果显示补丁）、审批过期后下一行作为新提问、只读命令自动放行、工具行显示命令与结果预览、每轮的 `[turn]` 行、`/status`、`--color always` 在管道中保留颜色、续接会话的提示、取消只报告一次、重试错误只报一次、无用量的 `[turn]`、`--show-thinking`、空闲时 Ctrl+C 两次退出、重置、模型切换、EOF、信号、超时、控制字符显示、恢复中断会话的提示、钩子失败的提示；Unix PTY 验证运行中插话、取消后丢弃残留插话、取消重置和退出、粘贴的多行合为一条消息、等待时的状态行、回答前后的空行 |
-| `tests/acp_cli.rs` | `acp`：手写的 JSON-RPC 客户端经子进程 stdio 驱动：初始化与建会话、流式回答与 `end_turn`、工具调用的 `tool_call` 与权限请求、批准后执行与 `completed`、拒绝不执行且模型收到原因、`session/cancel` 得到 `cancelled` 后会话可继续、未知会话的错误、`write_file` 的 diff 与位置、自动放行的命令不问人且在会话的目录执行；会话文件在 cwd 的会话目录中，第二个进程 `session/load` 后回放对话再继续（模型看到此前的消息），工具调用连同结果的回放，`--session-dir`，`--no-session` 不落盘且不声明 `loadSession`，未知会话与 `--session` 的错误；`session/list` 的顺序、标题、时间、按 cwd 过滤与分页拒绝，`session/resume` 不回放地续接；stdout 的每一行都必须是协议消息 |
-| `tests/profiles_cli.rs` | profile 覆盖、显式默认值、预算参数的 help 写明取自 profile、不可绕过的 deny、上下文范围与审计、上下文默认值与越界链接、skill 懒加载与脱敏、配置错误（含 provider 参数）退出码且不建会话文件 |
-| `tests/run_cli.rs` | `run` 在 P0 之后新增的约定：进度与报告行转义终端控制字符；另一个 `run` 正在写的会话文件不能再被打开写入；JSONL 事件的信封；为零的超时在请求前被拒绝；stdout 已关闭时退出码仍由运行结果决定；token 预算的退出码 7、最后一次请求可超出预算、profile 设置预算与命令行的 0 关闭；成本预算的退出码 8、模型没有单价或预算为负时以退出码 2 结束；被拒的调用数出现在报告行，`--fail-on-denied` 只在有被拒调用时把 0 换成 9；只在设置了 OTLP 地址时导出追踪与指标，导出内容不含回答；`TRACEPARENT` 让运行接续调用方的 trace，不合法时提示并自成一条；`--request-field` 到达模型并写入请求审计，写错时以退出码 2 结束且不建会话文件；`--fill-missing-reasoning` 默认关闭，开启时写入请求审计；`--reasoning` 按三种写法到达模型并写入请求审计，写错或与 `--request-field` 冲突时以退出码 2 结束（原有 `run` 测试仍在 `tests/cli.rs`） |
+| `tests/acp_cli.rs` | `acp`：手写的 JSON-RPC 客户端经子进程 stdio 驱动：初始化与建会话、流式回答与 `end_turn`、工具调用的 `tool_call` 与权限请求、批准后执行与 `completed`、拒绝不执行且模型收到原因、`session/cancel` 得到 `cancelled` 后会话可继续、未知会话的错误、`write_file` 的 diff 与位置、自动放行的命令不问人且在会话的目录执行；会话文件在 cwd 的会话目录中，第二个进程 `session/load` 后回放对话再继续（模型看到此前的消息），工具调用连同结果的回放，活着的会话原地回放，`--no-session` 不落盘且不声明 `loadSession`，未知会话与 `--session` 的错误；`session/list` 的顺序、标题、时间、按 cwd 过滤与分页拒绝，`session/resume` 不回放地续接；stdout 的每一行都必须是协议消息 |
+| `tests/agents_cli.rs` | 主目录的 agent 替换内置 agent、其他文件名不读取、没有说明也不扩展的 agent 被拒绝、命令行覆盖、预算参数的 help 写明取自 agent、不可绕过的 deny、`ask` 加 `allow` 在 run 中拒绝其余命令、上下文范围与审计、上下文默认值与越界链接、skill 懒加载与脱敏、配置错误（含 `[provider]` 与 `config.toml`）退出码且不建会话文件 |
+| `tests/config_cli.rs` | `config.toml`：在 `~/.zx-agent` 与 `ZX_AGENT_HOME` 下找到、相对的 `ZX_AGENT_HOME` 被拒绝、模型取 `--model` > `ZX_MODEL` > 文件而服务地址取 `ZX_BASE_URL` > 文件、没有模型时的错误文本、未知键、原命令行设置从文件读取并到达请求、无效值以退出码 2 结束并给出键名 |
+| `tests/run_cli.rs` | `run` 在 P0 之后新增的约定：进度与报告行转义终端控制字符；另一个 `run` 正在写的会话文件不能再被打开写入；JSONL 事件的信封；为零的超时在请求前被拒绝；stdout 已关闭时退出码仍由运行结果决定；token 预算的退出码 7、最后一次请求可超出预算、agent 设置预算与命令行的 0 关闭；成本预算的退出码 8、模型没有单价或预算为负时以退出码 2 结束；被拒的调用数出现在报告行，`--fail-on-denied` 只在有被拒调用时把 0 换成 9；只在设置了 OTLP 地址时导出追踪与指标，导出内容不含回答；`TRACEPARENT` 让运行接续调用方的 trace，不合法时提示并自成一条；`provider.requestFields` 到达模型并写入请求审计，写错时以退出码 2 结束且不建会话文件；`provider.fillMissingReasoning` 默认关闭，开启时写入请求审计；`reasoning` 按三种写法到达模型并写入请求审计，写错或与 `provider.requestFields` 冲突时以退出码 2 结束（原有 `run` 测试仍在 `tests/cli.rs`） |
 | `tests/otel.rs` | 一次真实运行导出一条 trace：每次尝试、回合、模型请求与工具调用各一个 span，用量与工具属性正确；同一次运行经宿主的 `SdkMeterProvider` 导出指标（运行数、token、请求与工具调用的次数）；`sink_under` 让运行接续给定的 traceparent；`src/otel/` 的单元测试另覆盖嵌套与时间、只含元数据、运行结束时关闭未结束的 span、手动摘要自成一条 trace 且其 token 只计一次、指标的属性与时长、traceparent 的解析与拒绝、队列满时丢弃并计数 |
 | `tests/session_compaction.rs`、`tests/compaction.rs` | 分支和引用、原始投影、省略保留边界后摘要仍生效、编辑摘要的变换计划在写入前被拒绝、摘要源与上下文字节统计不含工具结果的 `details`、摘要失败与取消、请求 / 用量预算、超时和上限 |
 | `tests/incremental_summary.rs` | 增量摘要：第一次读取整段前缀并给事实编号、之后只读旧事实与新增记录、可接续全量模式留下的摘要、取代与淘汰、修正只作废相关事实并在下一次重读、模型不能自带编号、加载时拒绝违反规则的记录、请求可从会话文件还原、多轮之后请求大小不随历史增长（与全量模式对照）；摘要评测的脚本会话自检，以及用知道答案的假模型验证评分 |
@@ -837,11 +866,11 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 | `tests/hooks.rs`、`tests/hooks_cli.rs` | 钩子组合与失败处理、审批范围与取消、审计变换、输入钩子被取消或运行被丢弃时不写入输入且插话留在队列、策略结论与审批事件（询问、会话内授权、拒绝、失败、超时、取消、等待时长）、观察者默认跳过增量、钩子上下文（会话、运行、工作目录与取消信号）、具名钩子、按阶段执行与先注册的脱敏仍在扩展之后、进度只经脱敏钩子、`details` 中字符串与对象键的脱敏、重名或声明名不一致的工具在请求前被拒绝、工具元数据 panic 时运行失败、`observes` 的 panic 被报告且运行继续、钩子不能追加 system 消息、工具取消自己的令牌不影响运行、续写预算、工具输出脱敏的 CLI 接线、脱敏失败在文本输出中的提示、非 UTF-8 密钥文件按有损解码匹配、无法匹配的密钥文件在启动时报配置错误、内置钩子的固定名称、短值在启动时提示 |
 | `tests/hook_contract.rs` | 钩子输入输出的 JSON 契约：策略结论、回合决定、上下文编辑、审批及其请求、工具输出（含可选的 `details`）与调用、钩子上下文、回合摘要 |
 | `tests/evals.rs` | 行为评测框架（`tests/common/evals.rs`）对脚本化的模型：计划按轮次交替两个变体；用例经编译出的程序在各自的家目录与工作目录下运行、按确定性的评分配对比较，报告提升、饱和与不稳定，产物（协议、计划、逐条观测、报告、每个 arm 的会话）落盘；起不来的 arm 阻塞配对并扣住标题数字；无提升、负提升与缺失或重复的 arm 的标记 |
-| `tests/real_api.rs` | 真实模型 API（付费，默认跳过）：文本回答与用量、工具往返、策略拒绝、输出截断、恢复会话、无效 key 不重试；摘要评测（全量与增量模式各对 8 轮的脚本会话做 8 次摘要，另需 `ZX_E2E_EVAL=1`）；行为评测（样例用例在 `tests/fixtures/evals/` 的两个 profile 下配对运行，另需 `ZX_E2E_EVAL=1`，`ZX_E2E_EVAL_RUNS` 设每个变体的运行次数） |
+| `tests/real_api.rs` | 真实模型 API（付费，默认跳过）：文本回答与用量、工具往返、策略拒绝、输出截断、恢复会话、无效 key 不重试；摘要评测（全量与增量模式各对 8 轮的脚本会话做 8 次摘要，另需 `ZX_E2E_EVAL=1`）；行为评测（样例用例在 `tests/fixtures/evals/` 的两组 agent 下配对运行，另需 `ZX_E2E_EVAL=1`，`ZX_E2E_EVAL_RUNS` 设每个变体的运行次数） |
 
 新增回归还覆盖：取消与 future 丢弃、特殊文件与读取上限、UTF-8 尾记录修复及损坏记录保留、交错工具参数 ID、有界队列背压、结构化错误与数值 `Retry-After`、响应预算和 CLI 参数接线。P0 回归覆盖内核不限轮次、无时限、不自动续写，以及零轮次、显式续写与预设取值。Rustdoc 的编译失败用例保护单一运行的借用约束。
 
-`tests/real_api.rs` 会产生费用。每个测试都标为 `#[ignore]`，而且没有设置 `ZX_E2E_AUTHORIZED=1` 时，在发出请求前就失败。服务地址、模型和 key 所在的变量名都从环境变量读取，运行方式见该文件开头的注释。摘要评测的用量远高于其余测试（16 次摘要合计读取约 0.6 MiB 的记录，在一个模型上实测约 27 万输入 token），未设置 `ZX_E2E_EVAL=1` 时只打印跳过；任一次摘要没有完成时测试失败。推理计入输出 token 的模型可用 `ZX_E2E_SUMMARY_TOKENS` 调高每次摘要的输出预算（默认 2048）。行为评测（`behaviour_evals_pair_two_agents_against_the_real_api`）同样需要 `ZX_E2E_EVAL=1`：样例用例在控制与处理两个 profile 下各运行一次（`ZX_E2E_EVAL_RUNS` 可增加），每个 arm 是一次几百 token 的短运行；通过率低是数据，只有 arm 没有跑完才失败；产物留在打印出的临时目录里。
+`tests/real_api.rs` 会产生费用。每个测试都标为 `#[ignore]`，而且没有设置 `ZX_E2E_AUTHORIZED=1` 时，在发出请求前就失败。服务地址、模型和 key 所在的变量名都从环境变量读取，运行方式见该文件开头的注释。摘要评测的用量远高于其余测试（16 次摘要合计读取约 0.6 MiB 的记录，在一个模型上实测约 27 万输入 token），未设置 `ZX_E2E_EVAL=1` 时只打印跳过；任一次摘要没有完成时测试失败。推理计入输出 token 的模型可用 `ZX_E2E_SUMMARY_TOKENS` 调高每次摘要的输出预算（默认 2048）。行为评测（`behaviour_evals_pair_two_agents_against_the_real_api`）同样需要 `ZX_E2E_EVAL=1`：样例用例在控制与处理两组 agent 下各运行一次（`ZX_E2E_EVAL_RUNS` 可增加），每个 arm 是一次几百 token 的短运行；通过率低是数据，只有 arm 没有跑完才失败；产物留在打印出的临时目录里。
 
 ## CI 与发布
 

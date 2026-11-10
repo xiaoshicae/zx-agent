@@ -2,7 +2,7 @@
 //! forks them.
 //!
 //! As in pi (`getDefaultSessionDirPath`), each working directory has its own directory under
-//! the zx-agent home directory; `--session-dir` replaces it.
+//! the zx-agent home directory, which `ZX_AGENT_HOME` moves.
 
 use std::path::{Path, PathBuf};
 
@@ -75,7 +75,7 @@ pub(crate) fn create(file: SessionFile<'_>, header: SessionHeader) -> Result<Ses
 /// `sessions/--<cwd>--` in the zx-agent home directory (`ZX_AGENT_HOME`, else `~/.zx-agent`).
 pub(crate) fn default_dir(cwd: &Path) -> Result<PathBuf> {
     let home = config::home()?.context(
-        "cannot find the home directory for session files; set ZX_AGENT_HOME, or give --session-dir or --no-session",
+        "cannot find the home directory for session files; set ZX_AGENT_HOME, or give --session or --no-session",
     )?;
     Ok(dir_in(&home, cwd))
 }

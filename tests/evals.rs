@@ -19,7 +19,7 @@ fn harness(root: PathBuf) -> Harness {
         root,
         model: "mock".to_string(),
         api_key_env: "ZX_EVALS_TEST_KEY".to_string(),
-        extra_args: Vec::new(),
+        extra_config: String::new(),
         timeout: Duration::from_secs(60),
     }
 }

@@ -12,26 +12,28 @@ use tokio::process::Command;
 
 use common::fake_slack::FakeSlack;
 use common::mock_server::{MockServer, Reply};
-use common::{json_lines, stderr, stdout, zx_agent};
+use common::{fake_model_config, json_lines, stderr, stdout, zx_agent};
 
 const APP_TOKEN: &str = "xapp-1-serve-test-token";
 const BOT_TOKEN: &str = "xoxb-serve-test-token";
 /// Only reached when the server never answers.
 const WAIT: Duration = Duration::from_secs(20);
 
-/// `zx-agent serve` with `config`, in `dir`, against `model`; Slack tokens are set.
+/// `zx-agent serve` with `config`, in `dir`, against `model`; Slack tokens are set, and the
+/// zx-agent home in `dir` has a config.toml without retries.
 fn serve(dir: &Path, config: &Path, model: &str) -> Command {
+    let home = dir.join(".zx-agent-home");
+    common::write_config(&home, &fake_model_config("ZX_SERVE_CLI_TEST_KEY", "", ""));
     let mut command = zx_agent();
     command
         .args(["serve", "--config", config.to_str().unwrap(), "--model", "mock"])
-        .args(["--base-url", model, "--max-retries", "0"])
         .current_dir(dir)
+        .env("ZX_AGENT_HOME", &home)
+        .env("ZX_BASE_URL", model)
         .env("SLACK_APP_TOKEN", APP_TOKEN)
         .env("SLACK_BOT_TOKEN", BOT_TOKEN)
         .env("FEISHU_APP_ID", "cli_test")
         .env("FEISHU_APP_SECRET", "secret-test")
-        .env_remove("ZX_MODEL")
-        .env_remove("ZX_BASE_URL")
         .env_remove("ZX_SECRET_FILES")
         .kill_on_drop(true);
     command
@@ -124,12 +126,14 @@ async fn configuration_errors_are_reported_before_serving() {
         let stderr = stderr(&output);
         assert_eq!(output.status.code(), Some(2), "{config}: {stderr}");
         assert!(stderr.contains(expected), "{config}: expected {expected:?} in {stderr}");
-        // Every error comes before the session directory is created.
-        let created: Vec<_> = std::fs::read_dir(dir.path())
+        // Every error comes before the session directory is created; the zx-agent home is
+        // the test's.
+        let mut created: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect();
-        assert_eq!(created, ["serve.toml"], "{config}");
+        created.sort();
+        assert_eq!(created, [".zx-agent-home", "serve.toml"], "{config}");
     }
 }
 

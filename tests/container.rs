@@ -967,17 +967,14 @@ async fn real_dropping_the_executor_removes_the_container() {
 /// `zx-agent run` in `dir` against the mock server. `docker_dir` goes first on PATH, so that
 /// its `docker` replaces the real one.
 async fn zx_run(server: &MockServer, dir: &Path, docker_dir: Option<&Path>, home: &AgentHome, args: &[&str]) -> Output {
-    const KEY_VAR: &str = "ZX_P6_CONTAINER_TEST_KEY";
     let mut command = zx_agent();
     command
-        .args(["run", "--model", "mock", "--base-url", &server.base_url])
-        .args(["--api-key-env", KEY_VAR, "--max-retries", "0"])
+        .args(["run", "--model", "mock"])
+        .env("ZX_BASE_URL", &server.base_url)
         .args(args)
         .current_dir(dir)
         .env("ZX_AGENT_HOME", home.path())
-        .env(KEY_VAR, "sk-p6-container-test")
-        .env_remove("ZX_MODEL")
-        .env_remove("ZX_BASE_URL")
+        .env("OPENAI_API_KEY", "sk-p6-container-test")
         .stdin(Stdio::null())
         .kill_on_drop(true);
     if let Some(docker_dir) = docker_dir {
@@ -1049,21 +1046,19 @@ async fn run_in_container_mode_describes_the_container_and_runs_bash_there() {
 /// `zx-agent chat` in container mode with the fake docker, given `agent` (the assistant's,
 /// with this front matter over it) and `input`.
 async fn zx_chat_in_container(fake: &FakeDocker, server: &MockServer, agent: &str, input: &str) -> Output {
-    const KEY_VAR: &str = "ZX_P10_CHAT_CONTAINER_TEST_KEY";
     let outside = tempfile::tempdir().unwrap();
     let home = container_home("fake:1").with_agent("assistant", agent);
     let session = outside.path().join("session.jsonl");
     let path = std::env::var("PATH").unwrap_or_default();
     let mut child = zx_agent()
-        .args(["chat", "--model", "mock", "--base-url", &server.base_url])
-        .args(["--api-key-env", KEY_VAR, "--max-retries", "0", "--tools", "bash"])
+        .args(["chat", "--model", "mock"])
+        .env("ZX_BASE_URL", &server.base_url)
+        .args(["--tools", "bash"])
         .args(["--session", session.to_str().unwrap()])
         .current_dir(fake.workspace())
         .env("ZX_AGENT_HOME", home.path())
-        .env(KEY_VAR, "sk-p10-container-test")
+        .env("OPENAI_API_KEY", "sk-p10-container-test")
         .env("PATH", format!("{}:{path}", fake.dir.path().display()))
-        .env_remove("ZX_MODEL")
-        .env_remove("ZX_BASE_URL")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1310,7 +1305,6 @@ async fn real_run_in_container_mode_executes_bash_in_the_container() {
 /// SIGINT on its own, so this test passes even without the separate group.
 #[tokio::test]
 async fn real_ctrl_c_in_chat_does_not_stop_the_container() {
-    const KEY_VAR: &str = "ZX_P6_CONTAINER_TEST_KEY";
     let Some(image) = docker_image() else { return };
     let home = container_home(&image);
     let (_dir, workspace) = real_workspace();
@@ -1325,15 +1319,14 @@ async fn real_ctrl_c_in_chat_does_not_stop_the_container() {
     .await;
     // Its own process group stands in for a terminal's foreground group.
     let mut chat = zx_agent()
-        .args(["chat", "--model", "mock", "--base-url", &server.base_url])
-        .args(["--api-key-env", KEY_VAR, "--max-retries", "0", "--tools", "read_file"])
+        .args(["chat", "--model", "mock"])
+        .env("ZX_BASE_URL", &server.base_url)
+        .args(["--tools", "read_file"])
         .env("ZX_AGENT_HOME", home.path())
         // The session file would have to be outside the workspace; this test needs none.
         .arg("--no-session")
         .current_dir(&workspace)
-        .env(KEY_VAR, "sk-p6-container-test")
-        .env_remove("ZX_MODEL")
-        .env_remove("ZX_BASE_URL")
+        .env("OPENAI_API_KEY", "sk-p6-container-test")
         .process_group(0)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1380,7 +1373,6 @@ async fn real_ctrl_c_in_chat_does_not_stop_the_container() {
 
 #[tokio::test]
 async fn real_a_killed_zx_agent_leaves_no_container_behind() {
-    const KEY_VAR: &str = "ZX_P6_CONTAINER_TEST_KEY";
     let Some(image) = docker_image() else { return };
     let home = container_home(&image);
     let (_dir, workspace) = real_workspace();
@@ -1388,14 +1380,13 @@ async fn real_a_killed_zx_agent_leaves_no_container_behind() {
     let session = sessions.path().join("session.jsonl");
     let server = MockServer::start(vec![Reply::bash("c1", "sleep 30")]).await;
     let mut agent = zx_agent()
-        .args(["run", "--model", "mock", "--base-url", &server.base_url])
-        .args(["--api-key-env", KEY_VAR, "--max-retries", "0", "--tools", "bash"])
+        .args(["run", "--model", "mock"])
+        .env("ZX_BASE_URL", &server.base_url)
+        .args(["--tools", "bash"])
         .env("ZX_AGENT_HOME", home.path())
         .args(["--session", session.to_str().unwrap(), "go"])
         .current_dir(&workspace)
-        .env(KEY_VAR, "sk-p6-container-test")
-        .env_remove("ZX_MODEL")
-        .env_remove("ZX_BASE_URL")
+        .env("OPENAI_API_KEY", "sk-p6-container-test")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

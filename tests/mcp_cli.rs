@@ -47,7 +47,8 @@ fn agent_home(dir: &Path, url: &str, builtin_tools: &str) -> PathBuf {
         &home,
         &format!(
             "[[mcp]]\nname = \"prom\"\nurl = \"{url}\"\ntokenEnv = \"{TOKEN_VAR}\"\n\
-             tools = [\"query\", \"range\"]\n"
+             tools = [\"query\", \"range\"]\n\
+             [provider]\napiKeyEnv = \"{KEY_VAR}\"\nmaxRetries = 0\n"
         ),
     );
     home
@@ -58,9 +59,9 @@ fn agent_home(dir: &Path, url: &str, builtin_tools: &str) -> PathBuf {
 fn program(mode: &str, model: &MockServer, dir: &Path, home: &Path) -> Command {
     let mut command = zx_agent();
     command
-        .args([mode, "--model", "mock", "--base-url", &model.base_url])
-        .args(["--max-retries", "0", "--api-key-env", KEY_VAR])
+        .args([mode, "--model", "mock"])
         .current_dir(dir)
+        .env("ZX_BASE_URL", &model.base_url)
         // chat keeps sessions under the zx-agent home by default; never the real one.
         .env("ZX_AGENT_HOME", home)
         .env(TOKEN_VAR, TOKEN)

@@ -28,7 +28,9 @@ use zx_agent::session::SessionStore;
 use zx_agent::tools::builtin_tools;
 
 use common::mock_server::{MockServer, Reply};
-use common::{RunnerSetup, config, header, read_lines, stderr, tool_call_answer, zx_agent};
+use common::{
+    RunnerSetup, config, fake_model_config, header, read_lines, stderr, tool_call_answer, write_config, zx_agent,
+};
 
 fn definition(name: &str) -> ToolDef {
     ToolDef {
@@ -525,15 +527,16 @@ async fn a_read_only_call_cancelled_while_running_is_reported_as_harmless() {
 /// `zx-agent run` with bash against the mock server, without retries.
 fn run_command(server: &MockServer, dir: &Path, args: &[&str]) -> Command {
     const KEY_VAR: &str = "ZX_P6_RECOVERY_TEST_KEY";
+    let home = dir.join(".home");
+    write_config(&home, &fake_model_config(KEY_VAR, "", ""));
     let mut command = zx_agent();
     command
-        .args(["run", "--model", "mock", "--base-url", &server.base_url])
-        .args(["--tools", "bash", "--api-key-env", KEY_VAR, "--max-retries", "0"])
+        .args(["run", "--model", "mock", "--tools", "bash"])
         .args(args)
         .current_dir(dir)
+        .env("ZX_AGENT_HOME", &home)
+        .env("ZX_BASE_URL", &server.base_url)
         .env(KEY_VAR, "sk-p6-test")
-        .env_remove("ZX_MODEL")
-        .env_remove("ZX_BASE_URL")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);

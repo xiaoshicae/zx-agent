@@ -160,8 +160,8 @@ pub(crate) struct Harness {
     pub root: PathBuf,
     pub model: String,
     pub api_key_env: String,
-    /// Added to every `run` command, such as `--max-retries 1`.
-    pub extra_args: Vec<String>,
+    /// Added at the top of every arm's config.toml, such as `maxTokens = 1024`.
+    pub extra_config: String,
     /// Longest an arm may take; a run still going is killed and recorded as errored.
     pub timeout: Duration,
 }
@@ -186,20 +186,21 @@ impl Harness {
         session: &Path,
     ) -> Command {
         install_agents(&variant.agents, &home.join(".zx-agent/agents"));
+        super::write_config(
+            &home.join(".zx-agent"),
+            &super::fake_model_config(&self.api_key_env, &self.extra_config, ""),
+        );
         let mut command = super::zx_agent();
         command
             .arg("run")
-            .args(["--model", &self.model, "--base-url", base_url])
-            .args(["--api-key-env", &self.api_key_env, "--max-retries", "0"])
+            .args(["--model", &self.model])
             .arg("--session")
             .arg(session)
-            .args(&self.extra_args)
             .arg(case.prompt)
             .current_dir(workspace)
             .env("HOME", home)
             .env_remove("ZX_AGENT_HOME")
-            .env_remove("ZX_MODEL")
-            .env_remove("ZX_BASE_URL")
+            .env("ZX_BASE_URL", base_url)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

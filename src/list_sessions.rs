@@ -12,10 +12,7 @@ use crate::sessions;
 /// read go to stderr.
 pub(crate) async fn run(args: SessionsArgs) -> Result<u8> {
     let cwd = resolve_cwd(args.cwd.as_deref())?;
-    let dir = match args.session_dir {
-        Some(dir) => dir,
-        None => sessions::default_dir(&cwd)?,
-    };
+    let dir = sessions::default_dir(&cwd)?;
     let list = sessions::list(&dir).await?;
     for line in sessions::lines(&list, &cwd) {
         print_line(&line);

@@ -2,7 +2,7 @@
 //! it is: what it leaves out keeps the built-in default. The command line and its variables
 //! go over it; that is up to the frontend.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
@@ -64,7 +64,7 @@ pub struct McpServer {
     /// The server's tools to offer the model, by the names the server gives them.
     pub tools: Vec<String>,
     /// Longest a call may go without an answer or a progress notification, in seconds;
-    /// unset uses `--tool-timeout-secs`.
+    /// unset uses `toolTimeoutSecs`.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
     /// Bound for a whole call, in seconds, however much progress the server reports; unset
@@ -89,6 +89,25 @@ pub struct ProviderSettings {
     pub fill_missing_reasoning: bool,
     /// Send the session ID as the request's `prompt_cache_key`.
     pub prompt_cache_key: bool,
+    /// Fields added to every request body, such as a server's switch for thinking; the
+    /// provider refuses fields it sets itself.
+    pub request_fields: serde_json::Map<String, serde_json::Value>,
+    /// Headers sent with every request, such as a gateway's routing header; never
+    /// `Authorization`, which comes from the API key.
+    pub headers: Vec<(String, String)>,
+    /// Longest wait for response headers or the next stream chunk, in seconds.
+    pub idle_timeout_secs: Option<u64>,
+    /// Retries for transient provider errors.
+    pub max_retries: Option<u32>,
+}
+
+/// The settings of one frontend, such as `[chat]`.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+pub struct FrontendSettings {
+    /// How long an approval request waits for an answer, in seconds; an unanswered request
+    /// is denied.
+    pub approval_timeout_secs: Option<u64>,
 }
 
 /// `config.toml`, checked: the environment every agent of this user runs in.
@@ -98,10 +117,21 @@ pub struct Config {
     pub path: Option<PathBuf>,
     /// The model ID, unless the command line names one.
     pub model: Option<String>,
-    /// How hard a reasoning model thinks, unless the command line says.
+    /// How hard a reasoning model thinks.
     pub reasoning: Option<Reasoning>,
+    /// Output token limit per response.
+    pub max_tokens: Option<u32>,
+    /// Default bash command timeout, and that of MCP calls, in seconds.
+    pub tool_timeout_secs: Option<u64>,
+    /// Files holding secrets to redact from tool output, or directories of such files;
+    /// absolute after load.
+    pub secret_files: Vec<PathBuf>,
     /// How the model is reached.
     pub provider: ProviderSettings,
+    /// `[chat]`: the settings of chat.
+    pub chat: FrontendSettings,
+    /// `[acp]`: the settings of acp.
+    pub acp: FrontendSettings,
     /// Where bash and read_file run.
     pub execution: Execution,
     /// Used when `execution` is `Container`.
@@ -119,7 +149,12 @@ pub struct Config {
 struct RawConfig {
     model: Option<String>,
     reasoning: Option<String>,
+    max_tokens: Option<u32>,
+    tool_timeout_secs: Option<u64>,
+    secret_files: Vec<PathBuf>,
     provider: RawProvider,
+    chat: FrontendSettings,
+    acp: FrontendSettings,
     // Unknown backends fail to deserialize instead of being ignored.
     execution: Option<Execution>,
     container: ContainerSettings,
@@ -137,6 +172,10 @@ struct RawProvider {
     reasoning_format: Option<String>,
     fill_missing_reasoning: bool,
     prompt_cache_key: bool,
+    request_fields: serde_json::Map<String, serde_json::Value>,
+    headers: BTreeMap<String, String>,
+    idle_timeout_secs: Option<u64>,
+    max_retries: Option<u32>,
 }
 
 #[derive(Default, Deserialize)]
@@ -249,7 +288,12 @@ impl RawConfig {
             path: Some(path.to_path_buf()),
             model: non_empty("model", self.model)?,
             reasoning: parsed("reasoning", self.reasoning)?,
+            max_tokens: self.max_tokens,
+            tool_timeout_secs: positive("toolTimeoutSecs", self.tool_timeout_secs)?,
+            secret_files: secret_files(self.secret_files, parent)?,
             provider: self.provider.into_settings()?,
+            chat: self.chat.checked("chat")?,
+            acp: self.acp.checked("acp")?,
             execution: self.execution.unwrap_or_default(),
             container: self.container,
             tool_output: self.tool_output.into_config(parent)?,
@@ -272,8 +316,58 @@ impl RawProvider {
             reasoning_format: parsed("provider.reasoningFormat", self.reasoning_format)?,
             fill_missing_reasoning: self.fill_missing_reasoning,
             prompt_cache_key: self.prompt_cache_key,
+            request_fields: request_fields(self.request_fields)?,
+            headers: headers(self.headers)?,
+            idle_timeout_secs: positive("provider.idleTimeoutSecs", self.idle_timeout_secs)?,
+            max_retries: self.max_retries,
         })
     }
+}
+
+impl FrontendSettings {
+    /// These settings, checked; `table` names them in errors.
+    fn checked(self, table: &str) -> Result<Self> {
+        positive(&format!("{table}.approvalTimeoutSecs"), self.approval_timeout_secs)?;
+        Ok(self)
+    }
+}
+
+/// `value`, which must be at least 1 when it is set.
+fn positive(key: &str, value: Option<u64>) -> Result<Option<u64>> {
+    ensure!(value != Some(0), "{key} must be at least 1");
+    Ok(value)
+}
+
+/// The secret files, relative to `parent`, the directory of config.toml.
+fn secret_files(paths: Vec<PathBuf>, parent: &Path) -> Result<Vec<PathBuf>> {
+    ensure!(
+        paths.iter().all(|path| !path.as_os_str().is_empty()),
+        "secretFiles: an entry is empty"
+    );
+    Ok(paths.into_iter().map(|path| parent.join(path)).collect())
+}
+
+/// The request fields, whose names must not be empty.
+fn request_fields(
+    fields: serde_json::Map<String, serde_json::Value>,
+) -> Result<serde_json::Map<String, serde_json::Value>> {
+    ensure!(
+        fields.keys().all(|field| !field.trim().is_empty()),
+        "provider.requestFields: a field has no name"
+    );
+    Ok(fields)
+}
+
+/// The headers, without `Authorization`, which comes from the API key.
+fn headers(headers: BTreeMap<String, String>) -> Result<Vec<(String, String)>> {
+    for name in headers.keys() {
+        ensure!(!name.trim().is_empty(), "provider.headers: a header has no name");
+        ensure!(
+            !name.trim().eq_ignore_ascii_case("authorization"),
+            "provider.headers: Authorization comes from the API key (provider.apiKeyEnv); it cannot be set as a header"
+        );
+    }
+    Ok(headers.into_iter().collect())
 }
 
 /// `value`, which must not be empty when it is set.
@@ -368,15 +462,22 @@ mod tests {
     }
 
     #[test]
-    fn the_model_and_its_provider_are_read_with_the_command_line_spellings() {
+    fn the_model_and_its_provider_are_read_with_the_spellings_of_the_former_options() {
         let config = load_text(
-            "model = 'm1'\nreasoning = 'high'\n[provider]\nbaseUrl = 'http://localhost:8000/v1'\n\
+            "model = 'm1'\nreasoning = 'high'\nmaxTokens = 512\ntoolTimeoutSecs = 30\n\
+             [provider]\nbaseUrl = 'http://localhost:8000/v1'\n\
              apiKeyEnv = 'LOCAL_KEY'\nsystemUpdates = 'inline'\nreasoningFormat = 'thinking'\n\
-             fillMissingReasoning = true\npromptCacheKey = true",
+             fillMissingReasoning = true\npromptCacheKey = true\nidleTimeoutSecs = 15\nmaxRetries = 0\n\
+             requestFields = { thinking = { type = 'disabled' }, top_k = 5 }\n\
+             headers = { X-Route = 'eu' }\n[chat]\napprovalTimeoutSecs = 60\n[acp]\napprovalTimeoutSecs = 600",
         )
         .unwrap();
         assert_eq!(config.model.as_deref(), Some("m1"));
         assert_eq!(config.reasoning, Some(Reasoning::High));
+        assert_eq!((config.max_tokens, config.tool_timeout_secs), (Some(512), Some(30)));
+        let mut fields = serde_json::Map::new();
+        fields.insert("thinking".into(), serde_json::json!({"type": "disabled"}));
+        fields.insert("top_k".into(), serde_json::json!(5));
         assert_eq!(
             config.provider,
             ProviderSettings {
@@ -386,8 +487,64 @@ mod tests {
                 reasoning_format: Some(ReasoningFormat::Thinking),
                 fill_missing_reasoning: true,
                 prompt_cache_key: true,
+                request_fields: fields,
+                headers: vec![("X-Route".into(), "eu".into())],
+                idle_timeout_secs: Some(15),
+                max_retries: Some(0),
             }
         );
+        assert_eq!(config.chat.approval_timeout_secs, Some(60));
+        assert_eq!(config.acp.approval_timeout_secs, Some(600));
+    }
+
+    #[test]
+    fn secret_files_are_relative_to_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "secretFiles = ['token', '/run/secrets/other']").unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(
+            config.secret_files,
+            [dir.path().join("token"), PathBuf::from("/run/secrets/other")]
+        );
+    }
+
+    #[test]
+    fn invalid_values_of_the_former_options_name_their_key() {
+        for (text, expected) in [
+            ("toolTimeoutSecs = 0", "toolTimeoutSecs must be at least 1"),
+            (
+                "[provider]\nidleTimeoutSecs = 0",
+                "provider.idleTimeoutSecs must be at least 1",
+            ),
+            (
+                "[chat]\napprovalTimeoutSecs = 0",
+                "chat.approvalTimeoutSecs must be at least 1",
+            ),
+            (
+                "[acp]\napprovalTimeoutSecs = 0",
+                "acp.approvalTimeoutSecs must be at least 1",
+            ),
+            ("[chat]\nqueueMode = 'all'", "unknown field `queueMode`"),
+            (
+                "[provider]\nheaders = { Authorization = 'Bearer x' }",
+                "provider.headers: Authorization",
+            ),
+            (
+                "[provider]\nheaders = { ' ' = 'x' }",
+                "provider.headers: a header has no name",
+            ),
+            (
+                "[provider]\nrequestFields = { ' ' = 1 }",
+                "provider.requestFields: a field has no name",
+            ),
+            ("[provider]\nmaxRetries = -1", "maxRetries"),
+            ("secretFiles = ['']", "secretFiles: an entry is empty"),
+            ("maxTokens = 'many'", "maxTokens"),
+        ] {
+            let error = error(text);
+            assert!(error.contains(expected), "{text}: {error}");
+        }
     }
 
     #[test]

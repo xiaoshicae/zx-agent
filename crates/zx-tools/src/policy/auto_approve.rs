@@ -165,7 +165,7 @@ mod tests {
         assert!(!AutoApprove::default().covers("grep x"));
     }
 
-    /// Read-only kubectl options, as a deployment's profile lists them; this crate knows none.
+    /// Read-only kubectl options, as a deployment's agent lists them; this crate knows none.
     fn kubectl_read_only() -> ProgramOptions {
         ProgramOptions {
             long: [

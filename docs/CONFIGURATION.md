@@ -26,6 +26,9 @@ zx-agent 的配置分两部分：
 ```toml
 model = "deepseek-chat"
 reasoning = "high"                 # off、minimal、low、medium、high、xhigh；chat 的 /reasoning 可以改
+maxTokens = 4096
+toolTimeoutSecs = 120
+secretFiles = ["/var/run/secrets/kubernetes.io/serviceaccount/token"]
 
 [provider]
 baseUrl = "https://api.deepseek.com/v1"
@@ -34,8 +37,17 @@ systemUpdates = "collapse"         # 或 inline
 reasoningFormat = "thinking"       # effort、thinking 或 reasoning-object
 fillMissingReasoning = true
 promptCacheKey = false
+requestFields = { thinking = { type = "disabled" } }
+headers = { X-Route = "eu" }
+idleTimeoutSecs = 120
+maxRetries = 3
 
-execution = "local"                # 或 container，见 README 的“容器执行”
+[chat]
+approvalTimeoutSecs = 120
+
+[acp]
+approvalTimeoutSecs = 3600
+
 [container]
 image = "debian:bookworm-slim"
 
@@ -53,16 +65,27 @@ url = "https://prom-mcp.monitoring.svc/mcp"
 tools = ["query", "query_range"]
 ```
 
+顶层的键（`model`、`reasoning`、`execution` 等）要写在第一个 `[表]` 之前。
+
 | 键 | 语义 |
 |---|---|
-| `model` | 模型 ID |
-| `reasoning` | 推理强度，同 `--reasoning` |
-| `provider.baseUrl` | OpenAI 兼容服务的地址（不含 `/chat/completions`），默认 `https://api.openai.com/v1` |
-| `provider.apiKeyEnv` | 存放 API key 的环境变量名，默认 `OPENAI_API_KEY`；key 只从环境变量读取 |
-| `provider.systemUpdates` | 续接会话时系统提示词的变化怎样发给模型：`collapse`（默认）或 `inline`，同 `--system-updates` |
-| `provider.reasoningFormat` | 推理强度写进请求的方式：`effort`（默认）、`thinking` 或 `reasoning-object`，同 `--reasoning-format` |
-| `provider.fillMissingReasoning` | 同 `--fill-missing-reasoning`；文件与命令行任一处打开即打开 |
-| `provider.promptCacheKey` | 同 `--prompt-cache-key`；文件与命令行任一处打开即打开 |
+| `model` | 模型 ID；`--model` 与 `ZX_MODEL` 优先 |
+| `reasoning` | 推理强度：`off`、`minimal`、`low`、`medium`、`high` 或 `xhigh`。不设时请求不带推理设置，由服务决定；chat 的 `/reasoning` 可以改。会话的请求审计记录它 |
+| `maxTokens` | 每次回复的输出 token 上限；推理模型的推理也算在内，太小可能让回答为空。不设时请求不带上限 |
+| `toolTimeoutSecs` | bash 命令的默认超时，也是 MCP 调用的默认超时，秒，至少 1，默认 120 |
+| `secretFiles` | 存放密钥的文件（如为 agent 挂载的 token），或这类文件的目录（以 `.` 开头的文件跳过），其内容在工具输出中替换为 `[REDACTED]`；相对路径相对 `config.toml` 所在目录。启动时每个路径都必须存在，每个文件都必须是至多 64 KiB 的普通文件；每次脱敏前重新读取。环境变量 `ZX_SECRET_FILES`（逗号分隔）中的文件另外加上，不替换这里的 |
+| `provider.baseUrl` | OpenAI 兼容服务的地址（不含 `/chat/completions`），默认 `https://api.openai.com/v1`；`ZX_BASE_URL` 优先 |
+| `provider.apiKeyEnv` | 存放 API key 的环境变量名，默认 `OPENAI_API_KEY`；key 只从环境变量读取，不出现在命令行与进程列表中 |
+| `provider.systemUpdates` | 续接会话时系统提示词的变化怎样发给模型。`collapse`（默认）：所有版本合进开头的 system 消息，任何服务都能接受。`inline`：每次变化发在它发生的位置，保留提示词缓存，也让模型看到提示词何时变了，但服务必须接受对话中间的 system 消息 |
+| `provider.reasoningFormat` | `reasoning` 写进请求的方式：`effort`（默认；OpenAI 的 `reasoning_effort`，`off` 不发送）、`thinking`（`thinking` 对象，开或关，加上 `reasoning_effort`）或 `reasoning-object`（`reasoning.effort`）。以服务的文档为准。请求审计记录它 |
+| `provider.fillMissingReasoning` | `true` 时，只要此前有一个回答带 `reasoning_content`，其余回答发送时补一个空的，用于拒绝“只有部分回答带推理”的思考模式服务。请求审计记录这一选择 |
+| `provider.promptCacheKey` | `true` 时把会话 ID 作为请求的 `prompt_cache_key` 发送，让同一对话的请求共用服务的提示词缓存（OpenAI 接受这个字段；拒绝未知字段的服务不能打开）。请求审计记录这个 key |
+| `provider.requestFields` | 加到每个请求体中的字段，表：字段名 → 值（TOML 的值按 JSON 发送），用于某些服务提供的设置，如 ⚑ D:5/CHINA FLAG: DeepSeek 的 `thinking = { type = "disabled" }`。zx-agent 自己设置的字段（如 `model`、`max_tokens`）被拒绝；与 `reasoning` 写入的字段冲突时也拒绝。请求审计记录它们 |
+| `provider.headers` | 每个请求都发送的请求头，表：名字 → 值，如网关的路由头。`Authorization` 被拒绝：key 来自 `apiKeyEnv`。不记录在会话中 |
+| `provider.idleTimeoutSecs` | 等待响应头或下一段流的最长时间，秒，至少 1，默认 120 |
+| `provider.maxRetries` | 临时性错误的重试次数，默认 3 |
+| `chat.approvalTimeoutSecs` | chat 的审批等待菜单选择的时间，秒，至少 1，默认 120；超时视为拒绝，任务不带这次调用继续 |
+| `acp.approvalTimeoutSecs` | acp 的审批请求等待客户端答复的时间，秒，至少 1，默认 3600；超时视为拒绝 |
 | `execution` | `local`（默认）或 `container`；其他值报错。`container` 时 bash、read_file、edit_file 与 write_file 在 Docker 容器中执行，见 README 的“容器执行” |
 | `container.image` | 容器镜像，`execution = "container"` 时必填，须已在本地（`docker pull`） |
 | `container.user` | 容器内运行命令的 `uid:gid`，默认为运行 zx-agent 的用户（以 root 运行时为 `65534:65534`）；不能是 root（UID 0 或 `root`），启动时也会检查命令的实际 UID |
@@ -77,13 +100,15 @@ tools = ["query", "query_range"]
 | `[[models]]` | 模型的元数据，每项 `id`（必填）、`contextWindow`（token 数，大于零）、`cost`（每百万 token 的单价，币种自定，所有单价用同一种：`input`、`output`、`cacheRead`、`cacheWrite`，都不小于零；`input` 指既不读也不写缓存的提示词 token）。没有内置的模型表。有单价时每次回复的 `usage.totalCost` 与 chat 的 `[turn]`、`/status` 显示成本；`--cost-budget` 与 `limits.costBudget` 需要所用模型的单价 |
 | `[[mcp]]` | 外部 MCP 服务器，可写多段，见下文“MCP 服务器” |
 
+值无效时（如超时为 0、请求头写了 `Authorization`、字段名为空）以退出码 2 报错，错误信息带键名与文件路径。
+
 ### 优先级
 
-每个键单独决定：**命令行 > 环境变量（只有 `ZX_MODEL` 与 `ZX_BASE_URL`）> config.toml > 内置默认值**。`--model` 不再必填；命令行、`ZX_MODEL` 与 `config.toml` 都没有给出模型时，以退出码 2 报错：`no model: pass --model, set ZX_MODEL, or set model in <config.toml 的路径>`。`--fill-missing-reasoning` 与 `--prompt-cache-key` 是开关，只能打开文件中关闭的设置。
+只有两个键可以从别处覆盖：模型取 **`--model` > `ZX_MODEL` > `config.toml`**，服务地址取 **`ZX_BASE_URL` > `provider.baseUrl` > 内置默认值**。其余的键只写在 `config.toml` 中，没有对应的命令行参数（原来的 `--base-url`、`--api-key-env`、`--system-updates`、`--reasoning`、`--reasoning-format`、`--fill-missing-reasoning`、`--prompt-cache-key`、`--request-field`、`--header`、`--idle-timeout-secs`、`--max-retries`、`--max-tokens`、`--tool-timeout-secs`、`--secret-file`、`--approval-timeout-secs` 已去掉）。`--model` 不是必填；`--model`、`ZX_MODEL` 与 `config.toml` 都没有给出模型时，以退出码 2 报错：`no model: pass --model, set ZX_MODEL, or set model in <config.toml 的路径>`。
 
 ### 没有项目级配置文件
 
-只读主目录里的 `config.toml`，不读工作目录或仓库里的配置。项目内容不能改变环境或权限：`baseUrl`、`apiKeyEnv` 与 MCP 的 `url`、`tokenEnv` 可以把密钥发到别处，`[[models]]` 的单价可以让花费预算失效，`execution` 可以让命令离开容器；把这些去掉之后剩下的键不值得单独支持。项目对 zx-agent 的贡献仍是 `AGENTS.md`（见“项目上下文”）。
+只读主目录里的 `config.toml`，不读工作目录或仓库里的配置。项目内容不能改变环境或权限：`baseUrl`、`apiKeyEnv` 与 MCP 的 `url`、`tokenEnv` 可以把密钥发到别处，`[[models]]` 的单价可以让花费预算失效，`execution` 可以让命令离开容器；把这些去掉之后剩下的键不值得单独支持。项目对 zx-agent 的贡献仍是 `AGENTS.md`（见“项目上下文”）。要为某个项目换一套配置，用另一个 `ZX_AGENT_HOME`。
 
 `serve` 的 `--config <serve.toml>` 是 IM 服务的配置文件（平台、访问名单、会话目录），与 `config.toml` 无关，见 README 的“IM 服务”。
 
@@ -198,7 +223,7 @@ name = "prom"                               # 小写 ASCII 字母、数字与 -
 url = "https://prom-mcp.monitoring.svc/mcp"
 tokenEnv = "PROM_MCP_TOKEN"                 # 可选：以 Authorization: Bearer 发送
 tools = ["query", "query_range"]            # 交给模型的工具，其余不暴露
-timeoutSecs = 60                            # 可选：一次调用多久没有应答也没有进度通知就超时，默认同 --tool-timeout-secs
+timeoutSecs = 60                            # 可选：一次调用多久没有应答也没有进度通知就超时，默认同 toolTimeoutSecs
 maxTimeoutSecs = 600                        # 可选：一次调用的总上限，不管进度；省略则只受 timeoutSecs、本轮超时与取消约束
 ```
 
@@ -291,7 +316,7 @@ cost = { input = 0.27, output = 1.10, cacheRead = 0.07 }   # 每百万 token 的
 | `compaction.keepRecentBytes` | 近期消息的序列化字节预算，大于零；完整保留最新输入和全部 system，可因此超出保留预算 |
 | `compaction.triggerTokens` | 按 token 估算的自动摘要阈值，0 关闭；与 `triggerBytes` 任一超过即摘要。估算 = 最近一次成功回复报告的输入加输出 token，加上其后消息的字节数除以 4。须高于 `keepRecentBytes` 折算的 token 数（字节除以 4），否则摘要永远压不到阈值以下。省略时，开启自动摘要（`triggerBytes` 非零）且模型的上下文窗口已知（`config.toml` 的 `[[models]]`）的话，取“窗口减 `reserveTokens`”，不满足上述条件时不设 |
 | `compaction.reserveTokens` | 按窗口推导 `triggerTokens` 时留出的 token 数，默认 16384（pi 的 `reserveTokens`） |
-| `compaction.maxSummaryTokens` | 摘要输出 token 上限，1–16384，默认 2048。有的服务把推理计入输出 token，推理可能用满上限而写不出摘要（见 `docs/ROADMAP.md` 的验证记录），使用这类模型时需要调高；服务支持时也可以经 `--request-field` 关闭推理，但它同样作用于任务请求 |
+| `compaction.maxSummaryTokens` | 摘要输出 token 上限，1–16384，默认 2048。有的服务把推理计入输出 token，推理可能用满上限而写不出摘要（见 `docs/ROADMAP.md` 的验证记录），使用这类模型时需要调高；服务支持时也可以经 `provider.requestFields` 关闭推理，但它同样作用于任务请求 |
 | `compaction.timeoutSecs` | 摘要流总超时，大于零，默认 120 秒 |
 | `compaction.mode` | `full`（默认）或 `incremental`，见下文“增量模式” |
 
@@ -299,7 +324,7 @@ cost = { input = 0.27, output = 1.10, cacheRead = 0.07 }   # 每百万 token 的
 
 自动步骤在输入和上下文钩子的改动持久化之后、任务模型请求之前执行。一次摘要占用一次 `--max-model-requests`，其 usage 与失败成本也计入本轮报告，并受整轮时间限制。摘要的工具列表为空；失败不重试成任务请求。付费的自动摘要请求失败后，本会话暂停自动摘要：之后需要摘要时直接报错并说明原因，不再自动发请求；手动 `/compact` 成功或切换模型后恢复，新会话也重新开始。手动摘要单独返回 `compaction_report`，不占下一轮 prompt 的预算。
 
-开启自动摘要时，模型以上下文过长拒绝请求（HTTP 413、`context_length_exceeded` 等错误码，或 “maximum context length”“prompt is too long” 等通用措辞；限流与服务端错误不算）后，运行不直接失败：先用 `context_edit` 省略失败的回答（记录保留），再摘要一次，然后从压缩后的上下文开始新的尝试，不重复用户消息（pi：`AgentSession` 的 overflow 恢复）。这不算重试，不占 `--max-retries`；摘要请求计入请求与 token 预算，预算用完时以原错误结束。每次运行只恢复一次，之后又有回答成功时才可以再次恢复；恢复后紧接着又过长，或摘要失败、没有可摘要的范围，都以原错误加原因结束。付费的摘要请求失败同样暂停自动摘要。没有开启自动摘要时（`run` 的内置 agent 默认关闭），行为不变，以原错误结束。事件为 `context_overflow`。
+开启自动摘要时，模型以上下文过长拒绝请求（HTTP 413、`context_length_exceeded` 等错误码，或 “maximum context length”“prompt is too long” 等通用措辞；限流与服务端错误不算）后，运行不直接失败：先用 `context_edit` 省略失败的回答（记录保留），再摘要一次，然后从压缩后的上下文开始新的尝试，不重复用户消息（pi：`AgentSession` 的 overflow 恢复）。这不算重试，不占 `provider.maxRetries`；摘要请求计入请求与 token 预算，预算用完时以原错误结束。每次运行只恢复一次，之后又有回答成功时才可以再次恢复；恢复后紧接着又过长，或摘要失败、没有可摘要的范围，都以原错误加原因结束。付费的摘要请求失败同样暂停自动摘要。没有开启自动摘要时（`run` 的内置 agent 默认关闭），行为不变，以原错误结束。事件为 `context_overflow`。
 
 预算按内部消息 JSON 的字节数估算（不含工具结果的 `details`，它不发给模型），不是 tokenizer，也不包含工具定义或 HTTP 封装；不能据此保证适合每个模型的 token 窗口。保留最近约 64 KiB、完整的最新用户输入、全部 system 更新，边界不拆开工具调用与结果。保留范围会向前扩到最新输入，并保留它之后的全部消息；单个任务过长也可能超过预算。若保留部分无法缩到阈值内，明确停止，不截断指令或最新输入。摘要源最多 2 MiB，摘要响应和结构化正文最多 64 KiB；源过大时需新建会话，无法无限压缩同一份原始历史。
 

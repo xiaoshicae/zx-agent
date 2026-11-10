@@ -21,28 +21,23 @@ fn chat(server: &MockServer, cwd: &Path, args: &[&str]) -> Command {
     chat_retrying(server, cwd, args, "0")
 }
 
-/// Like `chat`, with the given number of retries for transient errors.
+/// Like `chat`, with the given number of retries for transient errors, unless the test wrote
+/// a config.toml of its own with [`configure`].
 fn chat_retrying(server: &MockServer, cwd: &Path, args: &[&str], max_retries: &str) -> Command {
+    if !agent_home(cwd).join("config.toml").exists() {
+        write_config(&agent_home(cwd), &base_config(max_retries, "", ""));
+    }
     let mut command = zx_agent();
     command
         .arg("chat")
-        .args(["--model", "mock-model", "--base-url", &server.base_url])
-        .args([
-            "--api-key-env",
-            KEY_VAR,
-            "--max-retries",
-            max_retries,
-            "--idle-timeout-secs",
-            "10",
-        ])
+        .args(["--model", "mock-model"])
         .args(args)
         .current_dir(cwd)
         // chat keeps sessions under the home directory by default; never the real one.
         .env("HOME", cwd.join(".home"))
         .env_remove("ZX_AGENT_HOME")
+        .env("ZX_BASE_URL", &server.base_url)
         .env(KEY_VAR, KEY)
-        .env_remove("ZX_MODEL")
-        .env_remove("ZX_BASE_URL")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -367,10 +362,11 @@ async fn model_command_changes_subsequent_requests_without_losing_history() {
 async fn reasoning_command_changes_subsequent_requests() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::text("one"), Reply::text("two"), Reply::text("three")]).await;
+    configure(dir.path(), "reasoning = 'low'", "");
     let output = run(
         &server,
         dir.path(),
-        &["--tools", "", "--reasoning", "low"],
+        &["--tools", ""],
         "first\n/reasoning high\nsecond\n/reasoning bogus\n/reasoning default\nthird\n/reasoning\n/quit\n",
     )
     .await;
@@ -1568,13 +1564,10 @@ async fn an_expired_approval_frees_the_next_scripted_line() {
         Reply::text("second answer"),
     ])
     .await;
-    let mut child = chat(
-        &server,
-        dir.path(),
-        &["--tools", "bash", "--approval-timeout-secs", "1", "--output", "jsonl"],
-    )
-    .spawn()
-    .unwrap();
+    config(dir.path(), "[chat]\napprovalTimeoutSecs = 1");
+    let mut child = chat(&server, dir.path(), &["--tools", "bash", "--output", "jsonl"])
+        .spawn()
+        .unwrap();
     let mut stdin = child.stdin.take().unwrap();
     let mut events = BufReader::new(child.stdout.take().unwrap()).lines();
     let mut errors = BufReader::new(child.stderr.take().unwrap()).lines();
@@ -1741,13 +1734,12 @@ async fn a_hook_failure_is_reported_with_its_reason() {
     ])
     .await;
 
-    let output = run(
-        &server,
+    configure(
         dir.path(),
-        &["--tools", "bash", "--secret-file", token.to_str().unwrap()],
-        "go\n1\n/quit\n",
-    )
-    .await;
+        &format!("secretFiles = [{:?}]", token.to_str().unwrap()),
+        "",
+    );
+    let output = run(&server, dir.path(), &["--tools", "bash"], "go\n1\n/quit\n").await;
 
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let reported = format!(
@@ -1762,36 +1754,27 @@ async fn a_hook_failure_is_reported_with_its_reason() {
 }
 
 #[tokio::test]
-async fn the_queue_mode_is_set_at_startup_and_changed_with_a_command() {
+async fn the_queue_mode_is_all_at_startup_and_changed_with_a_command() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![]).await;
     let output = run(
         &server,
         dir.path(),
-        &["--tools", "", "--no-session", "--queue-mode", "one-at-a-time"],
-        "/queue\n/queue all\n/queue sometimes\n/quit\n",
+        &["--tools", "", "--no-session"],
+        "/queue\n/queue one-at-a-time\n/queue sometimes\n/quit\n",
     )
     .await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let err = stderr(&output);
+    assert!(err.contains("[chat] queue: steering=all follow-up=all"), "{err}");
     assert!(
         err.contains("[chat] queue: steering=one-at-a-time follow-up=one-at-a-time"),
         "{err}"
     );
-    assert!(err.contains("[chat] queue: steering=all follow-up=all"), "{err}");
     assert!(
         err.contains("[chat] unknown queue mode \"sometimes\"; use all or one-at-a-time"),
         "{err}"
     );
-
-    let rejected = run(
-        &server,
-        dir.path(),
-        &["--no-session", "--queue-mode", "some"],
-        "/quit\n",
-    )
-    .await;
-    assert_eq!(rejected.status.code(), Some(2), "{}", stderr(&rejected));
 }
 
 #[tokio::test]
@@ -1832,20 +1815,14 @@ async fn config_prices_the_model_and_the_cost_shows_in_turn_and_status_lines() {
 async fn request_headers_and_the_prompt_cache_key_reach_the_server() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::text("answer")]).await;
+    config(
+        dir.path(),
+        "headers = { X-Route = 'blue', x-tenant = 'a' }\npromptCacheKey = true",
+    );
     let output = run(
         &server,
         dir.path(),
-        &[
-            "--tools",
-            "",
-            "--session",
-            "s.jsonl",
-            "--header",
-            "X-Route: blue",
-            "--header",
-            "x-tenant:a",
-            "--prompt-cache-key",
-        ],
+        &["--tools", "", "--session", "s.jsonl"],
         "hi\n/quit\n",
     )
     .await;
@@ -1860,23 +1837,22 @@ async fn request_headers_and_the_prompt_cache_key_reach_the_server() {
         .clone();
     assert_eq!(request.body["prompt_cache_key"], session_id);
 
-    let refused = run(
-        &server,
-        dir.path(),
-        &["--no-session", "--header", "Authorization: Bearer x"],
-        "/quit\n",
-    )
-    .await;
+    config(dir.path(), "headers = { Authorization = 'Bearer x' }");
+    let refused = run(&server, dir.path(), &["--no-session"], "/quit\n").await;
     assert_eq!(refused.status.code(), Some(2), "{}", stderr(&refused));
-    assert!(stderr(&refused).contains("Authorization"), "{}", stderr(&refused));
-    let malformed = run(
-        &server,
-        dir.path(),
-        &["--no-session", "--header", "no-colon"],
-        "/quit\n",
-    )
-    .await;
+    assert!(
+        stderr(&refused).contains("provider.headers: Authorization"),
+        "{}",
+        stderr(&refused)
+    );
+    config(dir.path(), "headers = { 'no colon' = 'x' }");
+    let malformed = run(&server, dir.path(), &["--no-session"], "/quit\n").await;
     assert_eq!(malformed.status.code(), Some(2), "{}", stderr(&malformed));
+    assert!(
+        stderr(&malformed).contains("invalid request header name"),
+        "{}",
+        stderr(&malformed)
+    );
 }
 
 #[tokio::test]
@@ -1936,7 +1912,24 @@ fn agent(dir: &Path, front: &str) {
     write_agent(&dir.join(".home/.zx-agent"), "assistant", front);
 }
 
-/// Write `text` as the config.toml of chat in `dir`, whose home is `dir/.home`.
-fn config(dir: &Path, text: &str) {
-    write_config(&dir.join(".home/.zx-agent"), text);
+/// The zx-agent home of chat in `dir`, whose home directory is `dir/.home`.
+fn agent_home(dir: &Path) -> std::path::PathBuf {
+    dir.join(".home/.zx-agent")
+}
+
+/// The config.toml of these tests: the key in [`KEY_VAR`], `max_retries` retries, a 10-second
+/// idle timeout, `top` before the `[provider]` table and `rest` after its keys.
+fn base_config(max_retries: &str, top: &str, rest: &str) -> String {
+    format!("{top}\n[provider]\napiKeyEnv = \"{KEY_VAR}\"\nmaxRetries = {max_retries}\nidleTimeoutSecs = 10\n{rest}\n")
+}
+
+/// Write the config.toml of chat in `dir`, without retries, with `top` and `rest` as
+/// [`base_config`] places them.
+fn configure(dir: &Path, top: &str, rest: &str) {
+    write_config(&agent_home(dir), &base_config("0", top, rest));
+}
+
+/// Write the config.toml of chat in `dir` with `tables` after the provider's keys.
+fn config(dir: &Path, tables: &str) {
+    configure(dir, "", tables);
 }

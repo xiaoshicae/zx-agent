@@ -12,32 +12,27 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use common::mock_server::{MockServer, Reply};
-use common::{agent_text, json_lines, stderr, stdout, write_agent_file, write_config, zx_agent};
+use common::{agent_text, fake_model_config, json_lines, stderr, stdout, write_agent_file, write_config, zx_agent};
 use zx_agent::ai::Message;
 use zx_agent::session::SessionStore;
 
+const KEY_VAR: &str = "ZX_AGENTS_TEST_KEY";
+
 fn command(server: &MockServer, dir: &Path, mode: &str, args: &[&str]) -> Command {
+    if !agent_home(dir).join("config.toml").exists() {
+        config(dir, "");
+    }
     let mut command = zx_agent();
     command
         .arg(mode)
-        .args([
-            "--model",
-            "mock",
-            "--base-url",
-            &server.base_url,
-            "--max-retries",
-            "0",
-            "--api-key-env",
-            "ZX_AGENTS_TEST_KEY",
-        ])
+        .args(["--model", "mock"])
         .args(args)
         .current_dir(dir)
         // chat keeps sessions under the home directory by default; never the real one.
         .env("HOME", dir.join(".home"))
         .env_remove("ZX_AGENT_HOME")
-        .env("ZX_AGENTS_TEST_KEY", "sk-agents-key")
-        .env_remove("ZX_MODEL")
-        .env_remove("ZX_BASE_URL")
+        .env("ZX_BASE_URL", &server.base_url)
+        .env(KEY_VAR, "sk-agents-key")
         .stdin(Stdio::null())
         .kill_on_drop(true);
     command
@@ -80,8 +75,9 @@ fn agent_as(dir: &Path, builtin: &str, front: &str, body: &str) {
 fn agent_home(dir: &Path) -> std::path::PathBuf {
     dir.join(".home/.zx-agent")
 }
-fn config(dir: &Path, text: &str) {
-    write_config(&agent_home(dir), text);
+/// Write the config.toml of runs in `dir`: `top`, then the provider settings of these tests.
+fn config(dir: &Path, top: &str) {
+    write_config(&agent_home(dir), &fake_model_config(KEY_VAR, top, ""));
 }
 fn skill_reply() -> Reply {
     Reply::Sse(vec![
@@ -469,18 +465,17 @@ fn omitted_budget_flags_are_documented_as_agent_values() {
 
 #[tokio::test]
 async fn invalid_provider_settings_exit_2_without_a_session_file() {
-    for args in [
-        ["--request-field", "model=\"other\""],
-        ["--header", "Authorization: Bearer x"],
+    for provider in [
+        "requestFields = { model = 'other' }",
+        "headers = { Authorization = 'Bearer x' }",
     ] {
         let dir = tempfile::tempdir().unwrap();
+        write_config(&agent_home(dir.path()), &fake_model_config(KEY_VAR, "", provider));
         let server = MockServer::start(vec![]).await;
-        let mut all = args.to_vec();
-        all.extend(["--session", "audit.jsonl", "go"]);
-        let output = run(&server, dir.path(), &all).await;
-        assert_eq!(output.status.code(), Some(2), "{args:?}: {}", stderr(&output));
+        let output = run(&server, dir.path(), &["--session", "audit.jsonl", "go"]).await;
+        assert_eq!(output.status.code(), Some(2), "{provider}: {}", stderr(&output));
         assert!(server.requests().is_empty());
-        assert!(!dir.path().join("audit.jsonl").exists(), "{args:?}");
+        assert!(!dir.path().join("audit.jsonl").exists(), "{provider}");
     }
 }
 

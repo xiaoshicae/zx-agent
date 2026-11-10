@@ -63,7 +63,7 @@ impl SessionHost for SessionStore {
     }
 }
 
-/// What preparing the context cost and how it ended. The loop knows neither profiles nor
+/// What preparing the context cost and how it ended. The loop knows neither agents nor
 /// compaction policy; the cost counts against the run's budget whatever the result.
 pub(crate) struct ContextPreparation {
     pub requests: u32,

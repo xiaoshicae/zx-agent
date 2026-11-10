@@ -419,7 +419,7 @@ async fn behaviour_evals_pair_two_agents_against_the_real_api() {
         root: artifacts.dir.clone(),
         model: endpoint.model.clone(),
         api_key_env: endpoint.api_key_env.clone(),
-        extra_args: vec!["--max-tokens".to_string(), "1024".to_string()],
+        extra_config: "maxTokens = 1024".to_string(),
         timeout: Duration::from_secs(300),
     };
 

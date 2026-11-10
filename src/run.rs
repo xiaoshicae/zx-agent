@@ -24,7 +24,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<u8> {
         Some(prompt) => Some(read_prompt(prompt)?),
         None => {
             // Checked before anything starts: continuing a new session has nothing to answer.
-            let session = args.request.session.as_deref().context("--continue needs --session")?;
+            let session = args.base.session.as_deref().context("--continue needs --session")?;
             anyhow::ensure!(
                 session.exists(),
                 "--continue needs an existing session file; {} does not exist",
@@ -71,15 +71,13 @@ fn read_prompt(arg: &str) -> Result<String> {
 /// Assemble an unattended session from the selected agent, `unattended` unless another is
 /// given, without exposing interactive choices to the kernel.
 async fn build_session(args: &RunArgs) -> Result<AgentSession> {
-    let shared = cli::Shared::connect(&args.base, &args.request, &args.transport, Builtin::Unattended).await?;
+    let shared = cli::Shared::connect(&args.base, Builtin::Unattended).await?;
     let prepared = cli::prepare(cli::SessionOptions {
         base: &args.base,
-        transport: &args.transport,
-        request: &args.request,
         budget: &args.budget,
         model: &shared.settings.model,
         cwd: None,
-        file: SessionFile::from_path(args.request.session.as_deref()),
+        file: SessionFile::from_path(args.base.session.as_deref()),
         agent: Builtin::Unattended,
         shared: &shared,
     })

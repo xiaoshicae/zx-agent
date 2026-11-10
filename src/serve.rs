@@ -133,7 +133,7 @@ struct SessionsSection {
 /// problem found before serving started.
 pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
     anyhow::ensure!(
-        args.request.session.is_none(),
+        args.base.session.is_none(),
         "--session does not apply to serve: each thread has its own session file under [sessions] dir"
     );
     let file = read_file(&args.config)?;
@@ -145,7 +145,7 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
         let running = create_session_dirs(&dir)?;
 
         // Once for the process: every thread's session shares the connections.
-        let shared = cli::Shared::connect(&args.base, &args.request, &args.transport, Builtin::Assistant)
+        let shared = cli::Shared::connect(&args.base, Builtin::Assistant)
             .await?
             .with_hidden_env(hidden_env);
         let factory = Sessions {
@@ -366,8 +366,6 @@ impl Sessions {
     async fn prepare(&self, file: SessionFile<'_>) -> Result<cli::PreparedSession> {
         let mut prepared = cli::prepare(SessionOptions {
             base: &self.args.base,
-            transport: &self.args.transport,
-            request: &self.args.request,
             budget: &self.args.budget,
             model: &self.shared.settings.model,
             cwd: None,

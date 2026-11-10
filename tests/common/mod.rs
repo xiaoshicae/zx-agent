@@ -50,8 +50,17 @@ pub(crate) fn zx_agent() -> tokio::process::Command {
     command
         .env("ZX_AGENT_HOME", EMPTY_HOME)
         .env_remove("ZX_MODEL")
-        .env_remove("ZX_BASE_URL");
+        .env_remove("ZX_BASE_URL")
+        // The default variable of the API key: a developer's key must not reach a fake model.
+        .env_remove("OPENAI_API_KEY");
     command
+}
+
+/// The config.toml of a test against a fake model: `top` before the `[provider]` table, the
+/// API key in the variable `key_env`, no retries, and `rest` after these provider keys (more
+/// of them, or further tables). The model's address goes in `ZX_BASE_URL`.
+pub(crate) fn fake_model_config(key_env: &str, top: &str, rest: &str) -> String {
+    format!("{top}\n[provider]\napiKeyEnv = \"{key_env}\"\nmaxRetries = 0\n{rest}\n")
 }
 
 /// The zx-agent home of [`zx_agent`]: nothing creates it, so it holds no configuration.

@@ -17,7 +17,7 @@
 | 编号 | 目标 | 验收标准 |
 |---|---|---|
 | G1 | 一个内核支撑三类场景 | 三个前端共用同一个 `AgentSession`；内核中不出现“当前是不是交互模式”的判断 |
-| G2 | 不改内核即可适配新场景 | 新增一个场景只需新增 profile 文件、提示词或插件 |
+| G2 | 不改内核即可适配新场景 | 新增一个场景只需新增 agent 文件、提示词或插件 |
 | G3 | 保持可审计与安全 | `.claude/CLAUDE.md` 中的不变量全部保留；每次模型请求都能从会话文件还原 |
 | G4 | 渐进迁移 | 保持现有 `run` 行为兼容，测试全部通过；D5 若改变默认执行环境，在 P6 明确迁移方式并单独验收 |
 
@@ -27,7 +27,7 @@ G1–G4 是验收目标。当前会话日志可重建对话与提示词；G3 所
 
 ## 2. 设计原则
 
-1. **机制在内核，策略在外层**：内核只提供循环、会话、钩子和事件；上限、续写、提示词、能否问人都由 profile 决定。
+1. **机制在内核，策略在外层**：内核只提供循环、会话、钩子和事件；上限、续写、提示词、能否问人都由 agent 与前端决定。
 2. **内核不直接面对人**：需要人的地方都经过 `Interaction` 接口；没有人时有确定的回退，即拒绝。
 3. **会话日志是唯一事实来源**：模型可见的内容都先记录；原始历史永不改写，压缩和编辑都以追加条目表达。
 4. **前端只消费事件、生产输入**：界面、日志、协议适配器都是事件的订阅者。
@@ -41,19 +41,20 @@ G1–G4 是验收目标。当前会话日志可重建对话与提示词；G3 所
 |---|---|---|---|---|
 | D1 | MSRV | 升级到 1.88 | 2026-10-31 | 已完成：`rust-version = "1.88"`，已用 1.88.0 工具链编译并通过测试 |
 | D2 | 新依赖 | 已授权：tokio 的 `io-std` feature、`toml`、`rmcp`（MCP 官方 Rust SDK）、ACP 官方 Rust SDK、`rustyline`（可选）。在用到它们的阶段再引入。2026-11-02 追加 `opentelemetry`、`opentelemetry_sdk`、`opentelemetry-otlp`（P9 的 OpenTelemetry 追踪）。2026-11-04 追加 `chrono`（chat `--debug` 日志显示本地时间与时区；`default-features = false`，只开 `clock`）。2026-11-05 经用户确认追加 `jsonschema`（循环按工具声明的 JSON Schema 校验参数；`default-features = false`）。2026-11-09 经用户同意追加 `thiserror`（错误类型派生 `Display` 与 `Error`） | 2026-10-31 | 按阶段引入；`rmcp` 3.8.0 已于 P7 引入（PR #40）；三个 OpenTelemetry crate 0.33.1 已于 P9 引入（PR #49）；`chrono` 0.4.45 原为 `rmcp` 的间接依赖，2026-11-04 改为 `zx-agent` 的直接依赖；`jsonschema` 0.33.0 是 `zx-core` 的依赖，`Cargo.lock` 因此新增 35 个包，其 `rust-version` 为 1.71.1，未引入新的 rustls 加密后端；`agent-client-protocol` 5.0.0（连同 `-schema` 1.15.1 与 `-derive`）于 2026-11-05 按 D13 引入为 `zx-agent` 的依赖，只开 `stdio` feature，`Cargo.lock` 新增 54 个包，其 `rust-version` 为 1.88.0，未引入新的 rustls 加密后端；它给 serde_json 打开了 `preserve_order`，整个 workspace 的 JSON 对象从此按插入序而不是键序输出，两处比较 JSON 字符串的断言随之调整；`thiserror` 2.0.21 原为 opentelemetry、rmcp、tungstenite 的间接依赖，2026-11-09 改为 `zx-core`、`zx-im`、`zx-im-feishu` 的直接依赖，`Cargo.lock` 没有新增包，其 `rust-version` 为 1.77 |
-| D3 | profile 文件格式 | TOML | 2026-10-31 | P4 落实 |
+| D3 | profile 文件格式 | TOML | 2026-10-31 | P4 落实；D16 起 profile 拆为 `config.toml` 与 agent 文件，agent 的 front matter 仍是 TOML |
 | D4 | 会话 API 形态 | 进程内方法调用；暂不实现提交队列 / 事件队列（SQ/EQ） | 2026-10-31 | 已实现：P2 进程内共享会话 API |
-| D5 | 无人值守的命令执行环境 | 默认仍在本机执行，`run` 行为不变；容器执行须在 profile 中显式开启（原有的 CLI 参数 `--execution`、`--container-image` 于 2026-11-09 移除，与 profile 重复）。理由：在 Kubernetes Job 中运行时 Pod 内通常没有 Docker；无网络的容器做不了在线排障，而在线访问方案尚未评审。此前的候选方案（`troubleshoot` 默认容器、没有 Docker 时拒绝启动）不采用 | 2026-11-01 | 已确认：P6 执行环境部分按此实现 |
+| D5 | 无人值守的命令执行环境 | 默认仍在本机执行，`run` 行为不变；容器执行须在 profile 中显式开启（原有的 CLI 参数 `--execution`、`--container-image` 于 2026-11-09 移除，与 profile 重复；D16 起写在 `config.toml`）。理由：在 Kubernetes Job 中运行时 Pod 内通常没有 Docker；无网络的容器做不了在线排障，而在线访问方案尚未评审。此前的候选方案（`troubleshoot` 默认容器、没有 Docker 时拒绝启动）不采用 | 2026-11-01 | 已确认：P6 执行环境部分按此实现 |
 | D6 | 项目定位 | 改为“通用内核 + 场景配置” | 2026-10-31 | 已完成：README、`.claude/CLAUDE.md` 已更新 |
 | D7 | IM 长连接的 WebSocket 客户端 | 已授权：`tokio-tungstenite`（0.30，关掉默认 feature，只开 `connect` 与 `rustls-tls-webpki-roots`） | 2026-11-01 | 已引入（PR #29） |
 | D8 | MCP 的范围 | 本项目只做 MCP 客户端：只接工具，只支持 Streamable HTTP。MCP 服务器与领域工具（如 Kubernetes、Prometheus 查询）由外部服务实现 | 2026-11-01 | 已确认：P7 按此实现 |
 | D9 | HTTP 客户端与 TLS | reqwest 升到 0.13（`json`、`stream`、`rustls`）。rustls 只用 aws-lc-rs 一个加密后端，HTTPS 的根证书改用系统信任库。理由：rmcp 只支持 reqwest 0.13，与 0.12 并存时 rustls 同时启用两个后端，`wss://` 连接会 panic；项目还没有使用者，用户授权按最合理的方式处理 | 2026-11-01 | 已完成（PR #36） |
-| D10 | 通用，不为场景定制 | zx-agent 是通用 Agent：代码只定义接口与通用机制，外部来适配。某个环境、平台或厂商才有的知识（如 kubectl 的只读选项、Kubernetes 的 token 路径、IM 文案的语言）放在 profile、部署清单或配置里；告警等外部系统由外部适配器调用 `run`、SDK 或 IM 接入，zx-agent 不解析它们的私有格式（如 Alertmanager）。provider 对协议方言的处理显式开启。同日决定：P9 只再做更多 provider（如 Anthropic），`--output-schema`、异步审批、OS 级沙箱不做，“由 webhook 或告警触发运行”取消；P8 `acp` 不做 | 2026-11-02 | 用户决定；已有代码中的定制已整理（PR #54）。2026-11-05 撤回其中“P8 `acp` 不做”一项，见 D13 |
-| D11 | 容器执行的权限 | 沙箱内给 agent 最大权限，限制只放在沙箱的外墙上：工作目录（含 `.git`）与根文件系统可写，网络默认开启，审批由 profile 决定、可以一律放行；命令默认以映射的宿主机用户运行，仍不允许 root（root 以后按需做成显式选项，并同时改造进程清理）。外墙不变：不加 `--privileged`、不挂 `docker.sock`、不用宿主机的网络与 PID 命名空间、API key 与环境变量不进容器、会话文件在工作目录之外。原严格模式（只读、无网络）保留为可选配置。取代 P6 中“工作目录只读挂载、网络固定为 `none`”的约定与状态表中的“容器联网已取消”；D5（默认在本机执行）不变 | 2026-11-05 | 用户决定；已完成（P10 ②，PR #57） |
-| D12 | chat 的会话默认落盘 | 不给 `--session` 时，chat 把每次对话存成 `~/.zx-agent/sessions/--<工作目录>--/<UTC 时间>_<会话 ID>.jsonl`（目录名的写法与 pi 相同；新建的目录 0700、文件 0600），`--session-dir` 换目录，`--no-session` 只保存在内存。`run` 不变：只在给出 `--session` 时写文件。取代此前 chat 默认只保存在内存的行为。理由：列出会话、续接最近一次、fork 都需要一个已知的位置，与 pi 一致 | 2026-11-05 | 用户决定（另一选项是只在给出 `--session-dir` 时落盘）；P10 ⑥a 落实 |
+| D10 | 通用，不为场景定制 | zx-agent 是通用 Agent：代码只定义接口与通用机制，外部来适配。某个环境、平台或厂商才有的知识（如 kubectl 的只读选项、Kubernetes 的 token 路径、IM 文案的语言）放在 agent、部署清单或配置里；告警等外部系统由外部适配器调用 `run`、SDK 或 IM 接入，zx-agent 不解析它们的私有格式（如 Alertmanager）。provider 对协议方言的处理显式开启。同日决定：P9 只再做更多 provider（如 Anthropic），`--output-schema`、异步审批、OS 级沙箱不做，“由 webhook 或告警触发运行”取消；P8 `acp` 不做 | 2026-11-02 | 用户决定；已有代码中的定制已整理（PR #54）。2026-11-05 撤回其中“P8 `acp` 不做”一项，见 D13 |
+| D11 | 容器执行的权限 | 沙箱内给 agent 最大权限，限制只放在沙箱的外墙上：工作目录（含 `.git`）与根文件系统可写，网络默认开启，审批由 agent 决定、可以一律放行；命令默认以映射的宿主机用户运行，仍不允许 root（root 以后按需做成显式选项，并同时改造进程清理）。外墙不变：不加 `--privileged`、不挂 `docker.sock`、不用宿主机的网络与 PID 命名空间、API key 与环境变量不进容器、会话文件在工作目录之外。原严格模式（只读、无网络）保留为可选配置。取代 P6 中“工作目录只读挂载、网络固定为 `none`”的约定与状态表中的“容器联网已取消”；D5（默认在本机执行）不变 | 2026-11-05 | 用户决定；已完成（P10 ②，PR #57） |
+| D12 | chat 的会话默认落盘 | 不给 `--session` 时，chat 把每次对话存成 `~/.zx-agent/sessions/--<工作目录>--/<UTC 时间>_<会话 ID>.jsonl`（目录名的写法与 pi 相同；新建的目录 0700、文件 0600），`--session-dir` 换目录（D16 起去掉，目录随 `ZX_AGENT_HOME` 移动），`--no-session` 只保存在内存。`run` 不变：只在给出 `--session` 时写文件。取代此前 chat 默认只保存在内存的行为。理由：列出会话、续接最近一次、fork 都需要一个已知的位置，与 pi 一致 | 2026-11-05 | 用户决定（另一选项是只在给出 `--session-dir` 时落盘）；P10 ⑥a 落实 |
 | D13 | 人机界面协议 | 只维护内核，界面交给别人：ACP 是内核对人的唯一界面协议，交互式 UI 由实现 ACP 的开源客户端（Zed 等编辑器、Wisp 等终端客户端）提供，zx-agent 只实现 agent 一侧（`acp` 子命令）。`chat` 冻结为最小入口（没装客户端时的应急使用与 `--output jsonl` 的脚本化调用），不再加功能；`serve` 冻结，只修平台 API 变化导致的故障，是否拆出或下线等 ACP 用过一段时间再定；`run` 保留并维护，无人值守场景 ACP 覆盖不了；SDK 不变。与 D10 的通用原则一致：协议是开放标准，zx-agent 不解析任何客户端的私有格式 | 2026-11-05 | 用户决定；P8 据此重启。编号 D13 是因为同日另一分支先用了 D12 |
 | D14 | 不做 rpc 模式 | 不为非 Rust 程序另做进程协议（pi 的 `rpc` 模式：stdin/stdout 的 JSON 行命令与事件流）。非 Rust 的宿主经 ACP（D13）接入；无人值守经 `run`（退出码与 `--output jsonl`），常驻服务经 `serve` 与 SDK；pi 的 rpc 本身也没有幂等键 | 2026-11-05 | 按用户授权采纳建议（用户要求按建议推进，不逐项确认）；P10 ⑫ 只做幂等键 |
 | D15 | 会话格式只保留当前版本 | 项目还没有使用者，也没有要保留的会话文件：只读写当前的会话格式（`SESSION_VERSION` = 6），头部是其他版本（更旧或更新）的会话一律拒绝打开，`SessionStore::create` 也不接受其他版本的头部。删除旧格式的升级记录（`format_upgrade`）与按版本区分的校验、“开始记录不可用”的恢复状态、请求转换参数版本 1 的还原。今后格式变化时提高版本号，此前的文件随之无法打开，不写升级代码。取代此前“修改持久化格式前先确认旧文件还能读取”的约定 | 2026-11-09 | 所有者决定；已实施（分支 `simplify-formats`） |
+| D16 | 配置拆为 `config.toml` 与 agent | 主流 agent（Claude Code、Codex、Gemini CLI、OpenCode、pi）都自动发现用户配置文件，把模型与 provider 放在里面，把 Markdown 说明与设置分开，用 allow / ask / deny 表达权限；zx-agent 此前每次都要 `--model` 与 `--profile <路径>`，TOML 中不接受模型与服务地址，一个 profile 混着角色与环境，有 8 个权限开关、各有合并规则，不写 `extends` 的 profile 还随子命令变化。改为：① 主目录 `~/.zx-agent`（`ZX_AGENT_HOME` 可改，须为绝对路径），其中 `config.toml` 是环境（模型、provider 与请求选项、执行环境与容器、`[toolOutput]`、`[[models]]`、`[[mcp]]`、`secretFiles`、chat 与 acp 的审批等待），会话目录随主目录移动；不用 `~/.agents/`，那个目录由多个工具共用（Codex 读取 `$HOME/.agents/skills`），通用的 `config.toml` 会冲突。② 模型取 `--model` > `ZX_MODEL` > 文件，服务地址取 `ZX_BASE_URL` > 文件 > 默认；原来的 provider、超时、重试、请求字段、请求头、推理、密钥文件、审批等待等命令行参数去掉，只写在文件中；`--session-dir`、`--queue-mode` 去掉。③ 没有项目级配置文件：项目内容不能改变环境或权限（`baseUrl`、`apiKeyEnv` 与 MCP 的 `url`、`tokenEnv` 能把密钥发到别处，单价能让花费预算失效，`execution` 能让命令离开容器），去掉这些之后剩下的键不值得支持；项目的贡献仍是 AGENTS.md。④ agent 是 Markdown 文件（`+++` 之间的 TOML front matter 加说明），内置 `assistant`（chat、serve、acp）与 `unattended`（run）；主目录 `agents/<名字>.md` 替换同名内置 agent，其他文件名不读取，没有 `--agent`（2026-11-10 所有者决定）。⑤ 不写 `extends` 时从不随子命令变化的空基线开始，且必须有说明；一条合并规则：文件写了的键整个替换，表逐键合并，没有累加的列表。⑥ `[permissions]`：`ask`、`allow`（`bash(<前缀>)` 或 MCP 工具名）、`allowExcept`、`allowOptions`、`deny`（工具名或 `bash(<文本>)`，任何位置匹配）、`approveAll`，只改语法，策略引擎不变；去掉命令白名单 `rules.allow`，等价写法为 `ask = ["bash"]` 加 `allow` 条目 | 2026-11-10 | 所有者决定；已实施（分支 `config-agents`） |
 
 D2 之外的新依赖、依赖升级，仍需先征得同意。
 
@@ -81,7 +82,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 
 | 事项 | 状态 | 说明 |
 |---|---|---|
-| 更多 provider（如 Anthropic Messages API） | 未开始 | ⚑ D:5/CHINA FLAG: DeepSeek 经 OpenAI 兼容接口直接可用，不单独写 provider；服务端的设置经 `--request-field` 传递 |
+| 更多 provider（如 Anthropic Messages API） | 未开始 | ⚑ D:5/CHINA FLAG: DeepSeek 经 OpenAI 兼容接口直接可用，不单独写 provider；服务端的设置经 `config.toml` 的 `provider.requestFields` 传递 |
 | 行为评测的真实运行 | 待授权 | 框架在 `tests/common/evals.rs`，合成运行已通过；付费运行需用户设置 `ZX_E2E_AUTHORIZED` |
 | 真实 IM 平台验收 | 待凭据 | 在 Slack 工作区与 ⚑ D:5/CHINA FLAG: 飞书租户中各跑通一次 @、回答与审批；换 HTTP 客户端与 TLS（D9）之后，对这两个平台的 HTTPS 连接没有验证过 |
 | 真实集群验收 | 待部署方 | 常驻 Pod 部署包与多集群配置没有在真实集群上执行过；只读规则只看命令字面 |
@@ -99,7 +100,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | FauxProvider 在增量之间响应取消、可脚本化带 `ProviderError` 的失败 | 暂缓 | 有测试需要时再做 |
 | provider 契约的兜底 | 暂缓 | 取消后给 provider 的宽限期；`Done` / `Error` 与 `stop_reason` 的一致性检查 |
 | `JsonlFile::create` 在加锁或写头部失败后留下文件 | 暂缓 | 这两种失败无法在测试中稳定构造 |
-| `run` 的内置 profile 是否默认开启自动摘要 | 待用户决定 | unattended（以及扩展它的部署 profile troubleshoot）默认关闭，长时间排查撞到上下文上限时以退出码 1 结束；开启后可从上下文过长中恢复，代价是摘要丢失信息 |
+| `run` 的内置 agent 是否默认开启自动摘要 | 待用户决定 | unattended（以及扩展它的部署 agent `deploy/kubernetes/agents/unattended.md`）默认关闭，长时间排查撞到上下文上限时以退出码 1 结束；开启后可从上下文过长中恢复，代价是摘要丢失信息 |
 | 定时巡检的会话文件不自动清理 | 已知局限 | 每次运行一个文件，在卷 `zx-agent-inspect-sessions` 上累积，需要部署方定期删除 |
 | 失败运行后排队输入的处置 | 待评估 | pi 的 `afterFailedRun`（`continue` / `withdraw`）；现在由宿主在运行结束后用 `take_queued` 自行处置 |
 | 工具触发的 `handoff` | 待评估 | pi 的 `control.handoff`；zx 没有 `reset` 条目，要先定会话格式 |

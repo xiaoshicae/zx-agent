@@ -31,7 +31,7 @@ use zx_agent::session::{SessionHeader, SessionStore};
 use zx_agent::tools::{self, BASH};
 
 use super::execution::{check_session_outside, executor};
-use super::{BaseArgs, BudgetArgs, RequestArgs, Settings, Shared, TransportArgs, env_value, resolve_cwd};
+use super::{BaseArgs, BudgetArgs, Settings, Shared, env_value, resolve_cwd};
 use crate::sessions::{self, SessionFile};
 
 /// Register a built-in hook under a fixed name, which `hook_failed` events and `[hook]` lines
@@ -54,8 +54,6 @@ fn push_built_in(config: &mut LoopConfig, name: &str, hook: impl Hooks + 'static
 /// process shares.
 pub(crate) struct SessionOptions<'a> {
     pub(crate) base: &'a BaseArgs,
-    pub(crate) transport: &'a TransportArgs,
-    pub(crate) request: &'a RequestArgs,
     pub(crate) budget: &'a BudgetArgs,
     pub(crate) model: &'a str,
     /// The working directory, over `--cwd`: a client's project directory. `None` keeps the
@@ -118,40 +116,22 @@ impl PreparedSession {
     }
 }
 
-/// Refuse --request-field values that the reasoning level would also set: which one the
-/// server gets would not be clear from the command.
-fn check_reasoning_fields(settings: &Settings, fields: &serde_json::Map<String, serde_json::Value>) -> Result<()> {
+/// Refuse request fields that the reasoning level would also set: which one the server gets
+/// would not be clear from the configuration.
+fn check_reasoning_fields(settings: &Settings) -> Result<()> {
     if settings.reasoning.is_some()
         && let Some(field) = settings
             .reasoning_format
             .fields()
             .iter()
-            .find(|field| fields.contains_key(**field))
+            .find(|field| settings.request_fields.contains_key(**field))
     {
         anyhow::bail!(
-            "--request-field {field} conflicts with --reasoning, which sets it with --reasoning-format {}; use one of them",
+            "provider.requestFields.{field} conflicts with reasoning, which sets it with provider.reasoningFormat {}; use one of them",
             settings.reasoning_format.as_str()
         );
     }
     Ok(())
-}
-
-/// `--request-field` values, each KEY=JSON, as the provider's extra fields.
-fn request_fields(values: &[String]) -> Result<serde_json::Map<String, serde_json::Value>> {
-    let mut fields = serde_json::Map::new();
-    for value in values {
-        let (field, json) = value
-            .split_once('=')
-            .filter(|(field, _)| !field.is_empty())
-            .with_context(|| format!("--request-field {value:?} is not of the form KEY=JSON"))?;
-        let parsed =
-            serde_json::from_str(json).with_context(|| format!("--request-field {field}: the value is not JSON"))?;
-        anyhow::ensure!(
-            fields.insert(field.to_string(), parsed).is_none(),
-            "--request-field {field} is given more than once"
-        );
-    }
-    Ok(fields)
 }
 
 /// Assemble a session: startup reads, short session appends and, in container mode, starting
@@ -185,7 +165,7 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
         system_prompt,
         tools,
         cwd,
-        max_tokens: options.request.max_tokens,
+        max_tokens: options.shared.settings.max_tokens,
         reasoning: options.shared.settings.reasoning,
         ..LoopConfig::new(Arc::new(provider), options.model)
     };
@@ -203,7 +183,7 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     Ok(PreparedSession {
         config,
         retry: RetryPolicy {
-            max_retries: options.transport.max_retries,
+            max_retries: options.shared.settings.max_retries,
             ..RetryPolicy::default()
         },
         store: session,
@@ -248,8 +228,7 @@ fn assemble_tools(
     host: &mut HostTools,
 ) -> Result<Vec<Arc<dyn Tool>>> {
     let built_in: Vec<String> = agent.tools.iter().filter(|name| !host_tool(name)).cloned().collect();
-    let timeout = Duration::from_secs(options.transport.tool_timeout_secs);
-    let mut tools = tools::builtin_tools(&built_in, timeout, executor)?;
+    let mut tools = tools::builtin_tools(&built_in, options.shared.settings.tool_timeout, executor)?;
     tools.extend(std::mem::take(&mut host.tools));
     Ok(tools)
 }
@@ -320,21 +299,21 @@ fn provider(options: &SessionOptions<'_>) -> Result<(OpenAiCompatible, Option<St
     let settings = &options.shared.settings;
     // Local servers (vLLM, Ollama, llama.cpp) often need no key, so a missing key is allowed.
     let api_key = env_value(&settings.api_key_env);
-    let extra_fields = request_fields(&options.request.request_fields)?;
-    check_reasoning_fields(settings, &extra_fields)?;
+    check_reasoning_fields(settings)?;
     let provider = OpenAiCompatible::new(OpenAiConfig {
         base_url: settings.base_url.clone(),
         // Provider authentication and output filtering each need an owned copy.
         api_key: api_key.clone().into(),
-        idle_timeout: Duration::from_secs(options.transport.idle_timeout_secs),
+        idle_timeout: settings.idle_timeout,
         system_updates: settings.system_updates,
-        extra_fields,
+        extra_fields: settings.request_fields.clone(),
         fill_missing_reasoning: settings.fill_missing_reasoning,
         reasoning_format: settings.reasoning_format,
-        headers: options.transport.headers.clone(),
+        headers: settings.headers.clone(),
         prompt_cache_key: settings.prompt_cache_key,
         ..OpenAiConfig::default()
-    })?;
+    })
+    .context("invalid [provider] settings in config.toml")?;
     Ok((provider, api_key))
 }
 

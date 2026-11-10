@@ -11,7 +11,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use common::mock_server::{MockServer, Reply};
-use common::{AgentHome, json_lines, stderr, stdout, zx_agent};
+use common::{AgentHome, fake_model_config, json_lines, stderr, stdout, write_config, zx_agent};
 
 /// The variable the program reads the API key from, and the fake key it holds.
 const KEY_VAR: &str = "ZX_CLI_TEST_KEY";
@@ -21,17 +21,23 @@ const NO_SERVER: &str = "http://127.0.0.1:9/v1";
 
 /// `zx-agent run` against `base_url`, started in `dir`, with `args` after the common options.
 fn run_against(base_url: &str, dir: &Path, args: &[&str]) -> Command {
+    run_configured(base_url, dir, "", args)
+}
+
+/// Like [`run_against`], with `provider` added to the `[provider]` table of the config.toml in
+/// a zx-agent home of `dir`.
+fn run_configured(base_url: &str, dir: &Path, provider: &str, args: &[&str]) -> Command {
+    let home = dir.join(".home");
+    write_config(&home, &fake_model_config(KEY_VAR, "", provider));
     let mut command = zx_agent();
     command
         .arg("run")
-        .args(["--model", "mock-model", "--base-url", base_url])
-        .args(["--api-key-env", KEY_VAR, "--max-retries", "0"])
+        .args(["--model", "mock-model"])
         .args(args)
         .current_dir(dir)
+        .env("ZX_AGENT_HOME", &home)
+        .env("ZX_BASE_URL", base_url)
         .env(KEY_VAR, KEY)
-        // Settings from the developer's shell must not change the test.
-        .env_remove("ZX_MODEL")
-        .env_remove("ZX_BASE_URL")
         .stdin(Stdio::null())
         .kill_on_drop(true);
     command
@@ -289,15 +295,16 @@ async fn inline_updates_are_sent_where_the_prompt_changed() {
         let args = [
             "--tools",
             "",
-            "--system-updates",
-            "inline",
             "--session",
             session,
             "--cwd",
             cwd.to_str().unwrap(),
             "check",
         ];
-        let output = run_against(&server.base_url, dir.path(), &args).output().await.unwrap();
+        let output = run_configured(&server.base_url, dir.path(), "systemUpdates = 'inline'", &args)
+            .output()
+            .await
+            .unwrap();
         assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     }
 
