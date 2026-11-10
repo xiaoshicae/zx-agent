@@ -13,7 +13,8 @@ use common::im::run_channel;
 use zx_agent::agent::ApprovalResult;
 use zx_agent::im::slack::{SlackChannel, SlackConfig};
 use zx_agent::im::{
-    ApprovalId, Choice, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId, Outbound, ThreadId, UserId,
+    Addressee, ApprovalId, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId,
+    MessageRef, Outbound, Said, ThreadId, UserId,
 };
 
 const APP_TOKEN: &str = "xapp-test";
@@ -80,10 +81,22 @@ fn in_thread(conversation: &str, thread: Option<&str>) -> Destination {
     }
 }
 
+/// A message in a channel that mentions the bot.
 fn message(ts: &str, at: Destination, sender: &str, text: &str) -> Inbound {
+    said(ts, at, ChatKind::Group, Addressee::Bot, text, sender)
+}
+
+/// A message from U1 in the direct chat D1.
+fn direct_message(ts: &str, text: &str) -> Inbound {
+    said(ts, in_thread("D1", None), ChatKind::Direct, Addressee::Bot, text, "U1")
+}
+
+fn said(ts: &str, at: Destination, chat: ChatKind, addressee: Addressee, text: &str, sender: &str) -> Inbound {
     Inbound::Message {
         id: MessageId(ts.into()),
         at,
+        chat,
+        addressee,
         sender: UserId(sender.into()),
         text: text.into(),
     }
@@ -152,7 +165,7 @@ async fn direct_messages_are_passed_on_but_not_the_bots_own_or_edits() {
     socket
         .send(envelope("e1", "events_api", &direct("2.5", json!({}))))
         .await;
-    assert_eq!(running.next().await, message("2.5", in_thread("D1", None), "U1", "hi"));
+    assert_eq!(running.next().await, direct_message("2.5", "hi"));
     running.stop().await.unwrap();
 }
 
@@ -530,6 +543,142 @@ async fn a_message_without_text_is_not_passed_on() {
     socket
         .send(envelope("e2", "events_api", &direct("2.7", json!({}))))
         .await;
-    assert_eq!(running.next().await, message("2.7", in_thread("D1", None), "U1", "hi"));
+    assert_eq!(running.next().await, direct_message("2.7", "hi"));
     running.stop().await.unwrap();
+}
+
+/// A message in channel C1 from U1, in the thread `thread` when given.
+fn channel_message(ts: &str, thread: Option<&str>, text: &str) -> Value {
+    let mut message =
+        json!({"type": "message", "channel_type": "channel", "channel": "C1", "user": "U1", "text": text, "ts": ts});
+    if let Some(thread) = thread {
+        message["thread_ts"] = json!(thread);
+    }
+    event(&message)
+}
+
+#[tokio::test]
+async fn replies_in_a_thread_are_passed_on_with_whom_they_mention() {
+    let mut slack = FakeSlack::start().await;
+    let mut running = run_channel(channel(&slack), WAIT);
+    let mut socket = slack.socket().await;
+    let thread = Some("6.0");
+    let frames = [
+        channel_message("6.1", None, "chatter in the channel"),
+        channel_message("6.2", thread, "and then?"),
+        channel_message("6.3", thread, "<@U2> over to you"),
+        channel_message("6.4", thread, "<@UBOT> you too"),
+    ];
+    for (n, frame) in frames.iter().enumerate() {
+        socket.send(envelope(&format!("e{n}"), "events_api", frame)).await;
+    }
+    let at = in_thread("C1", thread);
+    let group = |ts, addressee, text| said(ts, at.clone(), ChatKind::Group, addressee, text, "U1");
+    assert_eq!(running.next().await, group("6.2", Addressee::Nobody, "and then?"));
+    assert_eq!(
+        running.next().await,
+        group("6.3", Addressee::Others, "<@U2> over to you")
+    );
+    assert_eq!(running.next().await, group("6.4", Addressee::Bot, "you too"));
+    running.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_mention_that_arrives_as_both_events_is_passed_on_once() {
+    let mut slack = FakeSlack::start().await;
+    let mut running = run_channel(channel(&slack), WAIT);
+    let mut socket = slack.socket().await;
+    socket
+        .send(envelope("e1", "events_api", &mention("7.1", None, "<@UBOT> once")))
+        .await;
+    socket
+        .send(envelope(
+            "e2",
+            "events_api",
+            &channel_message("7.1", None, "<@UBOT> once"),
+        ))
+        .await;
+    socket
+        .send(envelope("e3", "events_api", &mention("7.2", None, "<@UBOT> next")))
+        .await;
+    assert_eq!(
+        running.next().await,
+        message("7.1", in_thread("C1", None), "U1", "once")
+    );
+    assert_eq!(
+        running.next().await,
+        message("7.2", in_thread("C1", None), "U1", "next")
+    );
+    running.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_thread_is_read_without_the_messages_of_bots_or_edits() {
+    let slack = FakeSlack::start().await;
+    slack.script(
+        "conversations.replies",
+        vec![Answer::Json(json!({"ok": true, "messages": [
+            {"type": "message", "user": "U1", "text": "root &amp; all", "ts": "8.0", "thread_ts": "8.0"},
+            {"type": "message", "bot_id": "B9", "text": "a bot says", "ts": "8.1"},
+            {"type": "message", "subtype": "channel_join", "user": "U3", "text": "joined", "ts": "8.2"},
+            {"type": "message", "user": "U2", "text": "me too", "ts": "8.3"},
+        ]}))],
+    );
+    let read = channel(&slack)
+        .thread_history(&in_thread("C1", Some("8.0")), 50)
+        .await
+        .unwrap();
+    let earlier = |ts: &str, sender: &str, text: &str| Said {
+        id: MessageId(ts.into()),
+        sender: UserId(sender.into()),
+        text: text.into(),
+    };
+    assert_eq!(
+        read,
+        [earlier("8.0", "U1", "root & all"), earlier("8.3", "U2", "me too")]
+    );
+    let call = &slack.calls("conversations.replies")[0];
+    assert_eq!(
+        (call.arg("channel"), call.arg("ts"), call.arg("limit")),
+        (Some("C1"), Some("8.0"), Some("50"))
+    );
+    assert_eq!(call.authorization, format!("Bearer {BOT_TOKEN}"));
+}
+
+#[tokio::test]
+async fn a_name_is_the_display_name_or_else_the_real_name() {
+    let slack = FakeSlack::start().await;
+    slack.script(
+        "users.info",
+        vec![
+            Answer::Json(json!({"ok": true, "user": {"profile": {"display_name": "ann", "real_name": "Ann Lee"}}})),
+            Answer::Json(json!({"ok": true, "user": {"profile": {"display_name": "", "real_name": "Bob Ray"}}})),
+        ],
+    );
+    let channel = channel(&slack);
+    let [ann, bob, nameless] = ["U1", "U2", "U3"].map(|user| UserId(user.into()));
+    assert_eq!(channel.display_name(&ann).await.unwrap().as_deref(), Some("ann"));
+    assert_eq!(channel.display_name(&bob).await.unwrap().as_deref(), Some("Bob Ray"));
+    // The fake's own answer has no name at all.
+    assert_eq!(channel.display_name(&nameless).await.unwrap(), None);
+    assert_eq!(slack.calls("users.info")[0].arg("user"), Some("U1"));
+}
+
+#[tokio::test]
+async fn an_acknowledgement_is_a_reaction_and_a_repeated_one_is_no_error() {
+    let slack = FakeSlack::start().await;
+    slack.script("reactions.add", vec![Answer::Error("already_reacted")]);
+    let channel = channel(&slack);
+    let steered = MessageRef {
+        at: in_thread("C1", Some("9.0")),
+        id: MessageId("9.1".into()),
+    };
+    channel.acknowledge(&steered).await.unwrap();
+    channel.acknowledge(&steered).await.unwrap();
+    let calls = slack.calls("reactions.add");
+    assert_eq!(calls.len(), 2);
+    assert_eq!(
+        calls[1].body,
+        json!({"channel": "C1", "timestamp": "9.1", "name": "eyes"})
+    );
 }

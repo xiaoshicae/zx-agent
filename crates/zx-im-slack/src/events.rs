@@ -1,15 +1,20 @@
-//! What arrives over Socket Mode, messages addressed to the bot and button clicks, and the
-//! escaped text and blocks the channel posts.
+//! What arrives over Socket Mode, people's messages and button clicks, a thread's history,
+//! and the escaped text and blocks the channel posts.
 
 use serde_json::{Value, json};
 use zx_core::agent::ApprovalResult;
 use zx_im::{
-    ApprovalId, CardLabels, Choice, ConversationId, Destination, Inbound, MessageId, ThreadId, UserId, split_text,
+    Addressee, ApprovalId, CardLabels, ChatKind, Choice, ConversationId, Destination, Inbound, MessageId, Said,
+    ThreadId, UserId, split_text,
 };
 
 use super::{ALLOW_ACTION, DENY_ACTION, MAX_SECTION_CHARS};
 
-/// A message addressed to the bot, with the key that identifies it among redeliveries.
+/// A message from a person, with the key that identifies it among redeliveries: a direct
+/// message, a channel message that mentions the bot, or a reply in a channel's thread.
+///
+/// A mention can arrive twice, as `app_mention` and as a channel `message`; both carry the
+/// same key, so the second is left out as a redelivery.
 pub(crate) fn message(payload: &Value, bot: Option<&str>) -> Option<((String, String), Inbound)> {
     // Socket Mode payloads are "identical to the typical Events API payloads", which wrap the
     // event; the page's own example shows the bare event, so both are accepted.
@@ -18,13 +23,13 @@ pub(crate) fn message(payload: &Value, bot: Option<&str>) -> Option<((String, St
     } else {
         payload
     };
-    let addressed = match event["type"].as_str() {
-        Some("app_mention") => true,
-        Some("message") => event["channel_type"] == "im",
-        _ => false,
+    let chat = match (event["type"].as_str(), event["channel_type"].as_str()) {
+        (Some("app_mention"), _) | (Some("message"), Some("channel" | "group")) => ChatKind::Group,
+        (Some("message"), Some("im")) => ChatKind::Direct,
+        _ => return None,
     };
     // Edits, deletions and joins carry a subtype; the bot's own posts carry a bot_id.
-    if !addressed || event.get("subtype").is_some() || event.get("bot_id").is_some() {
+    if event.get("subtype").is_some() || event.get("bot_id").is_some() {
         return None;
     }
     let user = event["user"].as_str()?;
@@ -35,17 +40,58 @@ pub(crate) fn message(payload: &Value, bot: Option<&str>) -> Option<((String, St
     let ts = event["ts"].as_str()?;
     // A message without text has nothing for the model: not passed on, like one without a
     // sender.
-    let text = unescape(&without_mention(event["text"].as_str()?, bot));
+    let raw = event["text"].as_str()?;
+    let thread = event["thread_ts"].as_str().map(|ts| ThreadId(ts.into()));
+    let addressee = match (chat, event["type"].as_str()) {
+        (ChatKind::Direct, _) | (ChatKind::Group, Some("app_mention")) => Addressee::Bot,
+        (ChatKind::Group, _) => addressee(raw, bot),
+    };
+    // Talk in the channel itself is none of the bot's business unless it is mentioned.
+    if chat == ChatKind::Group && thread.is_none() && addressee != Addressee::Bot {
+        return None;
+    }
     let inbound = Inbound::Message {
         id: MessageId(ts.into()),
         at: Destination {
             conversation: ConversationId(channel.into()),
-            thread: event["thread_ts"].as_str().map(|ts| ThreadId(ts.into())),
+            thread,
         },
+        chat,
+        addressee,
         sender: UserId(user.into()),
-        text,
+        text: unescape(&without_mention(raw, bot)),
     };
     Some(((channel.into(), ts.into()), inbound))
+}
+
+/// Whom a channel message is meant for, by its user mentions (`<@U…>`).
+fn addressee(text: &str, bot: Option<&str>) -> Addressee {
+    if bot.is_some_and(|bot| text.contains(&format!("<@{bot}>"))) {
+        Addressee::Bot
+    } else if text.contains("<@") {
+        Addressee::Others
+    } else {
+        Addressee::Nobody
+    }
+}
+
+/// What people said in a `conversations.replies` answer, oldest first: messages of bots,
+/// edits and joins, and those without a sender or text, left out.
+pub(crate) fn history(answer: &Value) -> Vec<Said> {
+    let Some(messages) = answer["messages"].as_array() else {
+        return Vec::new();
+    };
+    messages
+        .iter()
+        .filter(|message| message.get("subtype").is_none() && message.get("bot_id").is_none())
+        .filter_map(|message| {
+            Some(Said {
+                id: MessageId(message["ts"].as_str()?.into()),
+                sender: UserId(message["user"].as_str()?.into()),
+                text: unescape(message["text"].as_str()?.trim()),
+            })
+        })
+        .collect()
 }
 
 /// Clicks on the card buttons of a `block_actions` payload.

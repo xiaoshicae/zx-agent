@@ -23,8 +23,20 @@ const WAIT: Duration = Duration::from_secs(10);
 pub(crate) struct ApiCall {
     pub method: String,
     pub authorization: String,
+    /// The arguments in the query, decoded, in order.
+    pub args: Vec<(String, String)>,
     /// The JSON body; `Null` when the body was empty.
     pub body: Value,
+}
+
+impl ApiCall {
+    /// The query argument `name`.
+    pub(crate) fn arg(&self, name: &str) -> Option<&str> {
+        self.args
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    }
 }
 
 /// A scripted answer to one call of a method.
@@ -184,9 +196,11 @@ async fn answer(
     let Some(request) = read_request(&mut stream).await else {
         return;
     };
+    let (path, query) = request.path.split_once('?').unwrap_or((&request.path, ""));
     let call = ApiCall {
-        method: request.path.trim_start_matches("/api/").to_string(),
+        method: path.trim_start_matches("/api/").to_string(),
         authorization: request.header("authorization").unwrap_or_default().to_string(),
+        args: query_args(query),
         body: request.json(),
     };
     let scripted = scripted
@@ -221,6 +235,40 @@ fn normal(call: &ApiCall, socket_url: &str, posted: &Mutex<u64>) -> Value {
             json!({"ok": true, "channel": call.body["channel"], "ts": format!("1700000000.{:06}", *count)})
         }
         "chat.update" => json!({"ok": true, "channel": call.body["channel"], "ts": call.body["ts"]}),
+        "conversations.replies" => json!({"ok": true, "messages": []}),
+        "users.info" => json!({"ok": true, "user": {"id": call.arg("user"), "profile": {"display_name": ""}}}),
+        "reactions.add" => json!({"ok": true}),
         other => json!({"ok": false, "error": format!("unknown_method {other}")}),
     }
+}
+
+/// `a=1&b=x%20y` as pairs, `+` and `%XX` decoded.
+fn query_args(query: &str) -> Vec<(String, String)> {
+    query
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            (decode(key), decode(value))
+        })
+        .collect()
+}
+
+fn decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => out.push(b' '),
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap();
+                out.push(u8::from_str_radix(hex, 16).unwrap());
+                i += 2;
+            }
+            byte => out.push(byte),
+        }
+        i += 1;
+    }
+    String::from_utf8(out).unwrap()
 }
