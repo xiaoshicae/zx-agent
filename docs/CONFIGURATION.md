@@ -67,7 +67,7 @@ tools = ["query", "query_range"]
 | `model` | 模型 ID；`--model` 与 `ZX_MODEL` 优先 |
 | `reasoning` | 推理强度：`off`、`minimal`、`low`、`medium`、`high` 或 `xhigh`。不设时请求不带推理设置，由服务决定；chat 的 `/reasoning` 可以改。会话的请求审计记录它 |
 | `maxTokens` | 每次回复的输出 token 上限；推理模型的推理也算在内，太小可能让回答为空。不设时请求不带上限 |
-| `approvalTimeoutSecs` | 审批请求等待答复的时间，秒，至少 1，默认 600：chat 的菜单选择、acp 客户端的答复与 im 的审批卡片共用这一个值；超时视为拒绝，任务不带这次调用继续。原来的 `[chat]`、`[acp]` 表与 IM 配置文件的 `limits.approvalTimeoutSecs` 已去掉，写了报未知键 |
+| `approvalTimeoutSecs` | 审批请求等待答复的时间，秒，至少 1，默认 600：chat 的菜单选择、acp 客户端的答复与 im 的审批卡片共用这一个值；超时视为拒绝，任务不带这次调用继续 |
 | `toolTimeoutSecs` | bash 命令的默认超时，也是 MCP 调用的默认超时，秒，至少 1，默认 120 |
 | `secretFiles` | 存放密钥的文件（如为 agent 挂载的 token），或这类文件的目录（以 `.` 开头的文件跳过），其内容在工具输出中替换为 `[REDACTED]`；相对路径相对 `config.toml` 所在目录。启动时每个路径都必须存在，每个文件都必须是至多 64 KiB 的普通文件；每次脱敏前重新读取。环境变量 `ZX_SECRET_FILES`（逗号分隔）中的文件另外加上，不替换这里的 |
 | `provider.baseUrl` | OpenAI 兼容服务的地址（不含 `/chat/completions`），默认 `https://api.openai.com/v1`；`ZX_BASE_URL` 优先 |
@@ -98,7 +98,7 @@ tools = ["query", "query_range"]
 
 ### 优先级
 
-只有两个键可以从别处覆盖：模型取 **`--model` > `ZX_MODEL` > `config.toml`**，服务地址取 **`ZX_BASE_URL` > `provider.baseUrl` > 内置默认值**。其余的键只写在 `config.toml` 中，没有对应的命令行参数（原来的 `--base-url`、`--api-key-env`、`--system-updates`、`--reasoning`、`--reasoning-format`、`--fill-missing-reasoning`、`--prompt-cache-key`、`--request-field`、`--header`、`--idle-timeout-secs`、`--max-retries`、`--max-tokens`、`--tool-timeout-secs`、`--secret-file`、`--approval-timeout-secs` 已去掉）。`--model` 不是必填；`--model`、`ZX_MODEL` 与 `config.toml` 都没有给出模型时，以退出码 2 报错：`no model: pass --model, set ZX_MODEL, or set model in <config.toml 的路径>`。
+只有两个键可以从别处覆盖：模型取 **`--model` > `ZX_MODEL` > `config.toml`**，服务地址取 **`ZX_BASE_URL` > `provider.baseUrl` > 内置默认值**。其余的键只写在 `config.toml` 中，没有对应的命令行参数。`--model` 不是必填；`--model`、`ZX_MODEL` 与 `config.toml` 都没有给出模型时，以退出码 2 报错：`no model: pass --model, set ZX_MODEL, or set model in <config.toml 的路径>`。
 
 ### 没有项目级配置文件
 
@@ -203,7 +203,7 @@ shortFlags = ["A"]
 
 注意两种 `bash(...)` 的比较方式不同：`deny` 的文本在命令中**任何位置**出现都算，`allow` 的文本必须是命令的**开头**（按词比较）。
 
-只允许一部分命令时，写 `ask = ["bash"]` 加上 `allow = ["bash(kubectl get)", ...]`：`allow` 覆盖的命令直接执行，其余命令要审批，在 run 中因为没有人审批而被拒绝。没有命令白名单（原来的 `rules.allow`，SDK 的 `CommandPolicy` 也不再接受白名单）。
+只允许一部分命令时，写 `ask = ["bash"]` 加上 `allow = ["bash(kubectl get)", ...]`：`allow` 覆盖的命令直接执行，其余命令要审批，在 run 中因为没有人审批而被拒绝。没有命令白名单，SDK 的 `CommandPolicy` 也不接受白名单。
 
 工具名不认识、条目为空、`bash()` 中没有文本、`bash(` 没有右括号时，以退出码 2 报错，错误信息带键名（如 `permissions.deny`）。
 
@@ -226,10 +226,10 @@ timeoutSecs = 60                            # 可选：一次调用多久没有�
 | `url` | MCP 端点，`http://` 或 `https://` |
 | `tokenEnv` | 存放 token 的环境变量；设置后必须有值。命令看不到这个变量，它的值在工具输出中替换为 `[REDACTED]` |
 | `tools` | 交给模型的工具，按服务器给出的名字，至少一个。服务器没有列出的工具时启动失败 |
-| `timeoutSecs` | 一次调用多久没有应答也没有进度通知就超时，秒，大于零；每条进度通知重新计时。一直报告进度的调用只受本轮超时（`--timeout-secs`）与取消约束（与 pi 相同，没有不看进度的总上限；原来的 `maxTimeoutSecs` 已去掉，写了报未知字段） |
+| `timeoutSecs` | 一次调用多久没有应答也没有进度通知就超时，秒，大于零；每条进度通知重新计时。一直报告进度的调用只受本轮超时（`--timeout-secs`）与取消约束（与 pi 相同，没有不看进度的总上限） |
 
-- MCP 工具默认每次调用都要审批：chat 在终端询问，im 发审批卡片，run 没有人审批而拒绝。要直接执行，在 agent 的 `permissions.allow` 中写模型看到的工具名，如 `allow = ["prom__query"]`（原来 `[[mcp]]` 的 `allowTools` 已去掉，写了报未知字段）。
-- 每个进程启动时连接一次：run、chat 在组装会话前，im 在开始接收消息前，各线程共用连接。连不上、token 变量没有值、服务器缺少列出的工具时，以退出码 2 报错。
+- MCP 工具默认每次调用都要审批：chat 在终端询问，im 发审批卡片，run 没有人审批而拒绝。要直接执行，在 agent 的 `permissions.allow` 中写模型看到的工具名，如 `allow = ["prom__query"]`。
+- 每个进程启动时连接一次：run、chat 在组装会话前，im 在开始接收消息前，各会话共用连接。连不上、token 变量没有值、服务器缺少列出的工具时，以退出码 2 报错。
 - 连接成功时，stderr 每个服务器一行，例如 `[mcp] prom: prom__query, prom__query_range; protocol 2026-07-28; https://prom-mcp.monitoring.svc`。哪些工具要审批取决于每个会话的 agent（在组装会话时决定），这一行不标出；只写地址的协议、主机与端口；经 `http://` 发送 token 时另加 `the token is sent unencrypted`。
 - 服务器给出的工具注释（annotations）只是提示，不据此放行；工具一律按有副作用处理。
 
