@@ -554,16 +554,14 @@ ask = []                         # approveAll 时须为空
 
 模型失败消息可附带 `providerError`，区分 HTTP、服务端流内错误、传输、超时、协议与资源上限。HTTP 元数据包含 `status`、可选 `code` 和 `retryAfterMs`；给人看的原因仍在 `errorMessage` 中。
 
-### OpenTelemetry 追踪与指标
+### OpenTelemetry 追踪
 
-run、chat 与 im 在设置了下面的标准变量时，用 OTLP/HTTP（protobuf）导出追踪与指标，并在 stderr 打印 `[otel] exporting traces and metrics over OTLP/HTTP`（只设了一类信号的地址时，只导出那一类，提示也只写那一类）；都没设时不导出，也不建立任何连接。
+run、chat 与 im 在设置了下面的标准变量时，用 OTLP/HTTP（protobuf）导出追踪，并在 stderr 打印 `[otel] exporting traces over OTLP/HTTP`；都没设时不导出，也不建立任何连接。只导出 span，不导出指标（D19）：运行数、时长、token 与成本都在 span 上，需要指标时由收集端从 span 推导（如 OpenTelemetry Collector 的 `spanmetrics` connector）；`OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` 与 `OTEL_METRIC_EXPORT_INTERVAL` 不再读取。
 
 | 变量 | 说明 |
 |---|---|
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | 追踪的完整地址，原样使用，如 `http://collector:4318/v1/traces` |
-| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | 指标的完整地址，原样使用 |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | 基础地址，追踪后接 `/v1/traces`、指标后接 `/v1/metrics` |
-| `OTEL_METRIC_EXPORT_INTERVAL` | 指标导出的间隔，毫秒，默认 60000；退出时再导出一次剩余部分 |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | 基础地址，后接 `/v1/traces` |
 | `TRACEPARENT`、`TRACESTATE` | 只有 `run` 读取：W3C `traceparent` / `tracestate` 头的值（`otel-cli` 与调度脚本会这样传），运行接续调用方的 trace，见下文 |
 | 其余标准变量 | 由 OpenTelemetry SDK 读取，如 `OTEL_EXPORTER_OTLP_HEADERS`（认证头）、`OTEL_RESOURCE_ATTRIBUTES`。服务名取 `OTEL_SERVICE_NAME`，没设时为 `zx-agent` |
 
@@ -575,28 +573,14 @@ run、chat 与 im 在设置了下面的标准变量时，用 OTLP/HTTP（protobu
 | `attempt` | 每次尝试 | `zx.attempt`、`zx.outcome` |
 | `turn` | 每个回合 | `zx.turn` |
 | `request` | 每个模型请求；摘要请求在 `compaction` 之下 | `zx.request.kind`、`zx.model`、`zx.attempt`、用量、`zx.stop_reason` |
-| `tool <工具名>` | 每个工具调用 | `zx.tool.name`、`zx.tool.call_id`、`zx.tool.is_error`；事件 `decision`（`zx.verdict`）、`approval_requested`、`approval_resolved`（`zx.approval.result`、`zx.approval.wait_ms`） |
+| `tool <工具名>` | 每个工具调用 | `zx.tool.name`、`zx.tool.call_id`、`zx.tool.is_error`，工具结果报告了自己的用量时另有用量；事件 `decision`（`zx.verdict`）、`approval_requested`、`approval_resolved`（`zx.approval.result`、`zx.approval.wait_ms`） |
 | `compaction` | 每次摘要；手动 `/compact` 不属于任何运行，自成一条 trace | `zx.compaction.automatic`、`zx.compaction.input_bytes` / `output_bytes`、用量 |
 
 钩子失败是当前 span 上的事件 `hook_failed`（`zx.hook`、`zx.hook.phase`）。trace ID 由 SDK 生成，用 `zx.run.id` 对应到 JSONL 事件与会话文件。`run` 在 `TRACEPARENT` 设为合法的 W3C `traceparent` 值时接续调用方的 trace：`run` span 的 trace ID 取自其中，父 span 是其中的 span，`TRACESTATE` 原样带上，stderr 打印 `[otel] continuing trace <trace ID>`；值不合法时打印原因，运行照常进行并自成一条 trace。chat 与 im 是长期运行的进程，不读取这两个变量。工具的子进程与模型、MCP 的请求没有传递 trace 上下文：span 由后台任务按事件建立，循环不知道 span ID。
 
-同一批事件也记录下面的指标（时长的单位是秒，直方图的桶从 0.05 秒到 1 小时）：
+只导出元数据：不包含用户输入、模型输出、工具参数与结果，也不包含理由与错误文本，因为它们可能引用前者。事件经有界队列交给后台任务，队列满时丢弃，运行不会等待导出；退出时报告丢弃的条数，并导出剩余的 span，最多等待 5 秒。`OTEL_EXPORTER_OTLP_HEADERS`、`OTEL_EXPORTER_OTLP_TRACES_HEADERS`、`OTEL_EXPORTER_OTLP_METRICS_HEADERS` 可能带认证头（最后一个本进程不用，但可能是为别的程序设的），命令看不到这三个变量。
 
-| 指标 | 类型 | 属性 |
-|---|---|---|
-| `zx.runs` | 计数 | `zx.outcome`、`zx.model` |
-| `zx.run.duration` | 直方图 | `zx.outcome`、`zx.model` |
-| `zx.request.duration` | 直方图，从请求到完整回答 | `zx.request.kind`、`zx.model`、`zx.stop_reason` |
-| `zx.tokens` | 计数，模型报告的用量（摘要请求的也计入，记在被请求的模型名下）；工具结果报告的用量记在工具名下 | `zx.model` 或 `zx.tool.name`、`zx.token.kind`（`input`、`output`、`cache_read`、`cache_write`、`reasoning`；`reasoning` 包含在 `output` 内；为零的不记） |
-| `zx.cost` | 计数，单位与单价相同（不标单位），只在配置了单价或工具报告了成本时有 | `zx.model` 或 `zx.tool.name` |
-| `zx.tool.duration` | 直方图，MCP 工具同样计入 | `zx.tool.name`、`zx.tool.is_error` |
-| `zx.retries` | 计数 | 无 |
-| `zx.compaction.duration` | 直方图 | `zx.compaction.automatic`、`zx.outcome`（`completed` / `failed`） |
-| `zx.approval.wait` | 直方图，等待审批的时间 | `zx.approval.result` |
-
-只导出元数据：不包含用户输入、模型输出、工具参数与结果，也不包含理由与错误文本，因为它们可能引用前者。事件经有界队列交给后台任务，队列满时丢弃，运行不会等待导出；退出时报告丢弃的条数，并导出剩余部分（先 span 后指标），各最多等待 5 秒。`OTEL_EXPORTER_OTLP_HEADERS`、`OTEL_EXPORTER_OTLP_TRACES_HEADERS`、`OTEL_EXPORTER_OTLP_METRICS_HEADERS` 可能带认证头，命令看不到这三个变量。
-
-作为库使用时，`otel::Telemetry::from_env()` 按上述变量建立导出，`Telemetry::with_provider` 使用宿主自己的 `SdkTracerProvider`（只有追踪），`with_providers` 再加上 `SdkMeterProvider`；`exports()` 说明导出哪些信号。把 `sink()` 交给会话（`into_session` 或 `AgentSession::subscribe`）；要接续调用方的 trace，用 `TraceParent::parse`（或 `TraceParent::from_env`）得到上下文，再把 `sink_under(&parent)` 交给会话。退出前调用 `shutdown().await`。
+作为库使用时，`otel::Telemetry::from_env()` 按上述变量建立导出，`Telemetry::with_provider` 使用宿主自己的 `SdkTracerProvider`。把 `sink()` 交给会话（`into_session` 或 `AgentSession::subscribe`）；要接续调用方的 trace，用 `TraceParent::parse`（或 `TraceParent::from_env`）得到上下文，再把 `sink_under(&parent)` 交给会话。退出前调用 `shutdown().await`。
 
 ### 会话文件（`--session`）
 
@@ -833,8 +817,8 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 | `tests/acp_cli.rs` | `acp`：手写的 JSON-RPC 客户端经子进程 stdio 驱动：初始化与建会话、流式回答与 `end_turn`、工具调用的 `tool_call` 与权限请求、批准后执行与 `completed`、拒绝不执行且模型收到原因、`session/cancel` 得到 `cancelled` 后会话可继续、未知会话的错误、`write_file` 的 diff 与位置、自动放行的命令不问人且在会话的目录执行；会话文件在 cwd 的会话目录中，第二个进程 `session/load` 后回放对话再继续（模型看到此前的消息），工具调用连同结果的回放，活着的会话原地回放，`--no-session` 不落盘且不声明 `loadSession`，未知会话与 `--session` 的错误；`session/list` 的顺序、标题、时间、按 cwd 过滤与分页拒绝，`session/resume` 不回放地续接；stdout 的每一行都必须是协议消息 |
 | `tests/agents_cli.rs` | 主目录的 agent 替换内置 agent、其他文件名不读取、没有说明也不扩展的 agent 被拒绝、命令行覆盖、预算参数的 help 写明取自 agent、不可绕过的 deny、`ask` 加 `allow` 在 run 中拒绝其余命令、上下文范围与审计、上下文默认值与越界链接、skill 懒加载与脱敏、配置错误（含 `[provider]` 与 `config.toml`）退出码且不建会话文件 |
 | `tests/config_cli.rs` | `config.toml`：在 `~/.zx-agent` 与 `ZX_AGENT_HOME` 下找到、相对的 `ZX_AGENT_HOME` 被拒绝、模型取 `--model` > `ZX_MODEL` > 文件而服务地址取 `ZX_BASE_URL` > 文件、没有模型时的错误文本、未知键、原命令行设置从文件读取并到达请求、无效值以退出码 2 结束并给出键名 |
-| `tests/run_cli.rs` | `run` 在 P0 之后新增的约定：进度与报告行转义终端控制字符；另一个 `run` 正在写的会话文件不能再被打开写入；JSONL 事件的信封；为零的超时在请求前被拒绝；stdout 已关闭时退出码仍由运行结果决定；token 预算的退出码 7、最后一次请求可超出预算、agent 设置预算与命令行的 0 关闭；成本预算的退出码 8、模型没有单价或预算为负时以退出码 2 结束；被拒的调用数出现在报告行，`--fail-on-denied` 只在有被拒调用时把 0 换成 9；只在设置了 OTLP 地址时导出追踪与指标，导出内容不含回答；`TRACEPARENT` 让运行接续调用方的 trace，不合法时提示并自成一条；`provider.requestFields` 到达模型并写入请求审计，写错时以退出码 2 结束且不建会话文件；`provider.fillMissingReasoning` 默认关闭，开启时写入请求审计；`reasoning` 按三种写法到达模型并写入请求审计，写错或与 `provider.requestFields` 冲突时以退出码 2 结束（原有 `run` 测试仍在 `tests/cli.rs`） |
-| `tests/otel.rs` | 一次真实运行导出一条 trace：每次尝试、回合、模型请求与工具调用各一个 span，用量与工具属性正确；同一次运行经宿主的 `SdkMeterProvider` 导出指标（运行数、token、请求与工具调用的次数）；`sink_under` 让运行接续给定的 traceparent；`src/otel/` 的单元测试另覆盖嵌套与时间、只含元数据、运行结束时关闭未结束的 span、手动摘要自成一条 trace 且其 token 只计一次、指标的属性与时长、traceparent 的解析与拒绝、队列满时丢弃并计数 |
+| `tests/run_cli.rs` | `run` 在 P0 之后新增的约定：进度与报告行转义终端控制字符；另一个 `run` 正在写的会话文件不能再被打开写入；JSONL 事件的信封；为零的超时在请求前被拒绝；stdout 已关闭时退出码仍由运行结果决定；token 预算的退出码 7、最后一次请求可超出预算、agent 设置预算与命令行的 0 关闭；成本预算的退出码 8、模型没有单价或预算为负时以退出码 2 结束；被拒的调用数出现在报告行，`--fail-on-denied` 只在有被拒调用时把 0 换成 9；只在设置了 OTLP 地址时导出追踪、不导出指标，导出内容不含回答；`TRACEPARENT` 让运行接续调用方的 trace，不合法时提示并自成一条；`provider.requestFields` 到达模型并写入请求审计，写错时以退出码 2 结束且不建会话文件；`provider.fillMissingReasoning` 默认关闭，开启时写入请求审计；`reasoning` 按三种写法到达模型并写入请求审计，写错或与 `provider.requestFields` 冲突时以退出码 2 结束（原有 `run` 测试仍在 `tests/cli.rs`） |
+| `tests/otel.rs` | 一次真实运行导出一条 trace：每次尝试、回合、模型请求与工具调用各一个 span，用量与工具属性正确；`sink_under` 让运行接续给定的 traceparent；`src/otel/` 的单元测试另覆盖嵌套与时间、只含元数据、运行结束时关闭未结束的 span、手动摘要自成一条 trace、工具报告的用量在工具的 span 上、traceparent 的解析与拒绝、队列满时丢弃并计数 |
 | `tests/session_compaction.rs`、`tests/compaction.rs` | 分支和引用、原始投影、省略保留边界后摘要仍生效、编辑摘要的变换计划在写入前被拒绝、摘要源与上下文字节统计不含工具结果的 `details`、摘要失败与取消、请求 / 用量预算、超时和上限；摘要评测的脚本会话自检，以及用知道答案的假模型验证评分 |
 | `tests/request_audit.rs` | 每次任务与摘要请求可从会话文件还原、配置只在变化时追加、固定会话文件的还原结果逐字节不变（版本守护） |
 | `tests/executor.rs` | 执行器接缝：bash 与 read_file 只经自身执行器运行命令和读文件，命令的 6 种结束方式均正确报告，执行方式随执行器；不能写文件的执行器让 edit_file 报错 |

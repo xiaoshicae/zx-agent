@@ -114,7 +114,7 @@ impl EventSink for JsonlEvents {
     }
 }
 
-/// Run `mode` with the trace and metric export started, when an OTLP endpoint is configured,
+/// Run `mode` with the trace export started, when an OTLP endpoint is configured,
 /// and finished once it returns.
 ///
 /// An endpoint the exporter refuses is a configuration error, reported before `mode` starts;
@@ -129,12 +129,12 @@ where
     result
 }
 
-/// Export traces and metrics when an OTLP endpoint is configured (`zx_agent::otel`), and say
-/// so on stderr.
+/// Export traces when an OTLP endpoint is configured (`zx_agent::otel`), and say so on
+/// stderr.
 fn start_telemetry() -> Result<Option<Telemetry>> {
     let telemetry = Telemetry::from_env()?;
-    if let Some(telemetry) = &telemetry {
-        eprintln!("[otel] exporting {} over OTLP/HTTP", telemetry.exports());
+    if telemetry.is_some() {
+        eprintln!("[otel] exporting traces over OTLP/HTTP");
     }
     Ok(telemetry)
 }

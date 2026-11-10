@@ -13,8 +13,8 @@
 | `tests/continue_run.rs` | 不加新输入的续跑：回答结尾的输入、崩溃后补写的结果（调用不再执行）、省略结尾失败的回答再答、完成的回答没有可续的（排队的后续消息除外）、空会话、请求可从会话文件还原、运行中返回 Busy |
 | `tests/overflow_recovery.rs` | 上下文过长后的恢复：省略失败回答、摘要一次再开始新的尝试（不算重试）、未开启自动摘要时行为不变、恢复后紧接着又过长时结束、回答成功后可再次恢复、摘要失败暂停自动摘要、预算用完与运行超时 |
 | `tests/cli.rs` | 原有 run 行为与退出码，P0 起保持；P6 默认值变更另行验收；移除的命令行参数改由 `config.toml` 或 agent 文件给出时，用到它们的测试改经测试主目录中的文件驱动 |
-| `tests/run_cli.rs` | P0 之后新增的 run 约定（如进度与报告行转义终端控制字符、会话文件单写者、零超时被拒绝、stdout 关闭时的退出码、token 预算的退出码 7：假服务每次回答报告 12 个 token、成本预算的退出码 8 与没有单价时的配置错误、`--fail-on-denied` 的退出码 9、只在设置了 OTLP 地址时导出追踪与指标：测试中的假收集端只看请求，不解码 protobuf，`TRACEPARENT` 接续调用方的 trace（按 ID 的字节查找）且不合法时提示、`provider.requestFields` 到达模型并写入请求审计，写错时以退出码 2 结束、`provider.fillMissingReasoning` 默认关闭且开启时写入请求审计、`reasoning` 的三种写法与冲突检查、`--continue` 失败后续跑与参数检查），新的 run 测试放这里，`tests/cli.rs` 不改 |
-| `tests/otel.rs` | OpenTelemetry 导出：真实运行经 `Telemetry` 产生的 span 层级与属性；经 `with_providers` 的指标（SDK 的 `InMemoryMetricExporter` 关闭时不清空，周期读取器关闭时再导出一次）；`sink_under` 接续给定的 traceparent；测试用的导出器 `Kept` 在关闭后仍保留 span（SDK 的内存导出器关闭时会清空） |
+| `tests/run_cli.rs` | P0 之后新增的 run 约定（如进度与报告行转义终端控制字符、会话文件单写者、零超时被拒绝、stdout 关闭时的退出码、token 预算的退出码 7：假服务每次回答报告 12 个 token、成本预算的退出码 8 与没有单价时的配置错误、`--fail-on-denied` 的退出码 9、只在设置了 OTLP 地址时导出追踪且不导出指标：测试中的假收集端只看请求，不解码 protobuf，`TRACEPARENT` 接续调用方的 trace（按 ID 的字节查找）且不合法时提示、`provider.requestFields` 到达模型并写入请求审计，写错时以退出码 2 结束、`provider.fillMissingReasoning` 默认关闭且开启时写入请求审计、`reasoning` 的三种写法与冲突检查、`--continue` 失败后续跑与参数检查），新的 run 测试放这里，`tests/cli.rs` 不改 |
+| `tests/otel.rs` | OpenTelemetry 导出：真实运行经 `Telemetry` 产生的 span 层级与属性（含 token 用量）；`sink_under` 接续给定的 traceparent；测试用的导出器 `Kept` 在关闭后仍保留 span（SDK 的内存导出器关闭时会清空） |
 | `tests/model_meta.rs` | 模型元数据与计量（P10 ⑧）：按单价给回复算成本并在报告与会话文件中相加（服务端回报别的模型名时仍按请求的模型计价）、没有单价时没有成本、token 阈值触发与不触发自动摘要、上下文 token 的估算、按窗口推导阈值的条件、缓存键进入 provider 与请求审计 |
 | `tests/extension_capabilities.rs` | 扩展的运行期能力（P10 ⑦）与队列模式（⑨）：钩子在运行中发消息与记状态（记录顺序、事件、投影）、运行最后的事件中记的状态在报告前写入、宿主限制工具且审计记录每次请求声明的工具、钩子改下一次请求的工具、扩展命令经会话运行且其消息开始一次运行、命令名的检查、空闲时直接写入与运行中 Busy、`one-at-a-time` 每条排队消息各占一个回合 |
 | `tests/custom_records.rs` | 扩展的会话记录：`custom_message` 投影为用户消息且可被 `context_edit` 省略、`custom` 不进投影、文件中的字段写法与重新打开、空类型不写入 |

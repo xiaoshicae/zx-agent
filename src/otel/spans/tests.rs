@@ -1,10 +1,6 @@
 use std::time::UNIX_EPOCH;
 
-use opentelemetry::metrics::MeterProvider as _;
 use opentelemetry::trace::{SpanId, TracerProvider};
-use opentelemetry_sdk::metrics::InMemoryMetricExporter;
-use opentelemetry_sdk::metrics::SdkMeterProvider;
-use opentelemetry_sdk::metrics::data::{AggregatedMetrics, Metric, MetricData, ResourceMetrics};
 use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SpanData};
 use serde_json::json;
 
@@ -17,13 +13,10 @@ use crate::otel::signal::event;
 const RUN: &str = "6f1c2c4e-0000-4000-8000-000000000001";
 const TRACEPARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
 
-/// Spans built synchronously into an in-memory exporter, metrics collected on demand;
-/// the providers must stay alive.
+/// Spans built synchronously into an in-memory exporter; the provider must stay alive.
 struct Harness {
     spans: InMemorySpanExporter,
     _tracer_provider: SdkTracerProvider,
-    metrics: InMemoryMetricExporter,
-    meter_provider: SdkMeterProvider,
     runs: Runs,
 }
 
@@ -31,17 +24,10 @@ impl Harness {
     fn new() -> Self {
         let spans = InMemorySpanExporter::default();
         let tracer_provider = SdkTracerProvider::builder().with_simple_exporter(spans.clone()).build();
-        let metrics = InMemoryMetricExporter::default();
-        let meter_provider = SdkMeterProvider::builder()
-            .with_periodic_exporter(metrics.clone())
-            .build();
-        let instruments = Instruments::new(&meter_provider.meter("test"));
-        let runs = Runs::new(tracer_provider.tracer("test"), Some(instruments));
+        let runs = Runs::new(tracer_provider.tracer("test"));
         Self {
             spans,
             _tracer_provider: tracer_provider,
-            metrics,
-            meter_provider,
             runs,
         }
     }
@@ -54,12 +40,6 @@ impl Harness {
 
     fn spans(&self) -> Vec<SpanData> {
         self.spans.get_finished_spans().unwrap()
-    }
-
-    /// What a collection exports now.
-    fn metrics(&self) -> Vec<ResourceMetrics> {
-        self.meter_provider.force_flush().unwrap();
-        self.metrics.get_finished_metrics().unwrap()
     }
 }
 
@@ -203,58 +183,6 @@ fn ms(time: SystemTime) -> u64 {
     u64::try_from(time.duration_since(UNIX_EPOCH).unwrap().as_millis()).unwrap()
 }
 
-/// `None` when nothing was recorded: an instrument without measurements is not exported.
-fn metric<'a>(all: &'a [ResourceMetrics], name: &str) -> Option<&'a Metric> {
-    all.iter()
-        .flat_map(ResourceMetrics::scope_metrics)
-        .flat_map(opentelemetry_sdk::metrics::data::ScopeMetrics::metrics)
-        .find(|metric| metric.name() == name)
-}
-
-fn has<'a>(attributes: impl Iterator<Item = &'a KeyValue>, expected: &[(&str, &str)]) -> bool {
-    let attributes: Vec<(String, String)> = attributes
-        .map(|attribute| (attribute.key.to_string(), attribute.value.as_str().into_owned()))
-        .collect();
-    expected
-        .iter()
-        .all(|(key, value)| attributes.iter().any(|(k, v)| k == key && v == value))
-}
-
-/// The sum of a `u64` counter's points that carry `expected`.
-fn counted(all: &[ResourceMetrics], name: &str, expected: &[(&str, &str)]) -> u64 {
-    let Some(metric) = metric(all, name) else {
-        return 0;
-    };
-    match metric.data() {
-        AggregatedMetrics::U64(MetricData::Sum(sum)) => sum
-            .data_points()
-            .filter(|point| has(point.attributes(), expected))
-            .map(opentelemetry_sdk::metrics::data::SumDataPoint::value)
-            .sum(),
-        other => panic!("{name} is not a u64 sum: {other:?}"),
-    }
-}
-
-/// The count and sum of an `f64` histogram's points that carry `expected`.
-fn timed(all: &[ResourceMetrics], name: &str, expected: &[(&str, &str)]) -> (u64, f64) {
-    let Some(metric) = metric(all, name) else {
-        return (0, 0.0);
-    };
-    match metric.data() {
-        AggregatedMetrics::F64(MetricData::Histogram(histogram)) => histogram
-            .data_points()
-            .filter(|point| has(point.attributes(), expected))
-            .fold((0, 0.0), |(count, sum), point| {
-                (count + point.count(), sum + point.sum())
-            }),
-        other => panic!("{name} is not an f64 histogram: {other:?}"),
-    }
-}
-
-fn close(actual: f64, expected: f64) -> bool {
-    (actual - expected).abs() < 1e-9
-}
-
 #[test]
 fn a_run_is_one_trace_of_nested_spans_that_carry_metadata_only() {
     let mut harness = Harness::new();
@@ -290,44 +218,7 @@ fn a_run_is_one_trace_of_nested_spans_that_carry_metadata_only() {
 }
 
 #[test]
-fn metrics_count_runs_requests_tokens_and_tool_durations() {
-    let mut harness = Harness::new();
-    harness.apply(one_run());
-
-    let all = harness.metrics();
-    assert_eq!(
-        counted(&all, "zx.runs", &[("zx.outcome", "completed"), ("zx.model", "m")]),
-        1
-    );
-    assert_eq!(counted(&all, "zx.runs", &[("zx.outcome", "error")]), 0);
-    let (count, sum) = timed(&all, "zx.run.duration", &[("zx.outcome", "completed")]);
-    assert!(count == 1 && close(sum, 0.023), "{count} runs, {sum} s");
-    let expected = [
-        ("zx.request.kind", "task"),
-        ("zx.model", "m"),
-        ("zx.stop_reason", "toolUse"),
-    ];
-    let (count, sum) = timed(&all, "zx.request.duration", &expected);
-    assert!(count == 1 && close(sum, 0.007), "{count} requests, {sum} s");
-    assert_eq!(
-        counted(&all, "zx.tokens", &[("zx.token.kind", "input"), ("zx.model", "m")]),
-        10
-    );
-    assert_eq!(counted(&all, "zx.tokens", &[("zx.token.kind", "output")]), 5);
-    // Zero counts make no series: the run reported no cached, written or reasoning tokens.
-    assert_eq!(counted(&all, "zx.tokens", &[("zx.token.kind", "cache_read")]), 0);
-    let (count, sum) = timed(
-        &all,
-        "zx.tool.duration",
-        &[("zx.tool.name", "bash"), ("zx.tool.is_error", "false")],
-    );
-    assert!(count == 1 && close(sum, 0.009), "{count} calls, {sum} s");
-    let exported = format!("{all:?}");
-    assert!(!exported.contains("secret"), "{exported}");
-}
-
-#[test]
-fn tool_usage_is_set_on_the_tool_span_and_counted_under_the_tool() {
+fn tool_usage_is_set_on_the_tool_span() {
     let mut signals = one_run();
     assert!(matches!(signals[7].what, What::ToolEnd { .. }), "one_run changed shape");
     let mut spent = usage(3, 2);
@@ -351,22 +242,9 @@ fn tool_usage_is_set_on_the_tool_span_and_counted_under_the_tool() {
     assert_eq!(attribute(tool, "zx.usage.input_tokens").as_deref(), Some("3"));
     assert_eq!(attribute(tool, "zx.usage.output_tokens").as_deref(), Some("2"));
     assert_eq!(attribute(tool, "zx.usage.total_cost").as_deref(), Some("0.5"));
-    let all = harness.metrics();
-    let by_tool = [("zx.token.kind", "input"), ("zx.tool.name", "bash")];
-    assert_eq!(counted(&all, "zx.tokens", &by_tool), 3);
-    assert_eq!(
-        counted(
-            &all,
-            "zx.tokens",
-            &[("zx.token.kind", "output"), ("zx.tool.name", "bash")]
-        ),
-        2
-    );
-    // The model's own tokens stay under the model, not the tool.
-    assert_eq!(
-        counted(&all, "zx.tokens", &[("zx.token.kind", "input"), ("zx.model", "m")]),
-        10
-    );
+    // The model's own tokens stay on the request, not the tool.
+    let request = span(&spans, "request");
+    assert_eq!(attribute(request, "zx.usage.input_tokens").as_deref(), Some("10"));
 }
 
 #[test]
@@ -433,10 +311,6 @@ fn spans_left_open_end_when_their_run_does() {
     assert!(spans.iter().all(|span| ms(span.end_time) == 1050), "{spans:?}");
     assert_eq!(attribute(span(&spans, "run"), "zx.outcome").as_deref(), Some("aborted"));
     assert!(harness.runs.open.is_empty());
-    // A request without an answer has no duration to report; the run has.
-    let all = harness.metrics();
-    assert_eq!(timed(&all, "zx.request.duration", &[]).0, 0);
-    assert_eq!(counted(&all, "zx.runs", &[("zx.outcome", "aborted")]), 1);
 }
 
 #[test]
@@ -483,17 +357,4 @@ fn a_manual_compaction_is_a_trace_of_its_own_and_is_forgotten_when_it_ends() {
     );
     assert_eq!(attribute(compaction, "zx.usage.input_tokens").as_deref(), Some("7"));
     assert!(harness.runs.open.is_empty());
-    // The summary's tokens are counted once, for the model that was asked.
-    let all = harness.metrics();
-    assert_eq!(
-        counted(&all, "zx.tokens", &[("zx.token.kind", "input"), ("zx.model", "m")]),
-        7
-    );
-    assert_eq!(
-        counted(&all, "zx.tokens", &[("zx.token.kind", "output"), ("zx.model", "m")]),
-        3
-    );
-    let expected = [("zx.compaction.automatic", "false"), ("zx.outcome", "completed")];
-    let (count, sum) = timed(&all, "zx.compaction.duration", &expected);
-    assert!(count == 1 && close(sum, 0.010), "{count} summaries, {sum} s");
 }

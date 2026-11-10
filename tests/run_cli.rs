@@ -698,7 +698,7 @@ fn hex(id: &str) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn a_run_exports_its_trace_and_metrics_only_when_an_endpoint_is_configured() {
+async fn a_run_exports_its_trace_only_when_an_endpoint_is_configured() {
     let dir = tempfile::tempdir().unwrap();
     let (endpoint, received) = collector().await;
 
@@ -713,30 +713,20 @@ async fn a_run_exports_its_trace_and_metrics_only_when_an_endpoint_is_configured
         .unwrap();
     let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
-    assert!(
-        stderr.contains("[otel] exporting traces and metrics over OTLP/HTTP"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("[otel] exporting traces over OTLP/HTTP"), "{stderr}");
     {
         let requests = received.lock().unwrap();
-        // The process exports what remains before it exits: the spans, then the metrics.
-        let mut paths: Vec<&str> = requests.iter().map(|request| request.path.as_str()).collect();
-        paths.sort_unstable();
-        assert_eq!(paths, ["/v1/metrics", "/v1/traces"]);
-        for request in requests.iter() {
-            assert_eq!(request.method, "POST");
-            assert_eq!(request.header("content-type"), Some("application/x-protobuf"));
-            // Protobuf keeps strings as they are: the service name, and an attribute of the
-            // run span or the name of a metric.
-            assert!(contains(&request.body, "zx-agent"));
-            let marker = if request.path == "/v1/traces" {
-                "zx.run.id"
-            } else {
-                "zx.runs"
-            };
-            assert!(contains(&request.body, marker), "{}", request.path);
-            assert!(!contains(&request.body, "the answer"), "no content leaves the process");
-        }
+        // The process exports the spans before it exits, and no metrics, even under the
+        // endpoint variable that would name both.
+        let paths: Vec<&str> = requests.iter().map(|request| request.path.as_str()).collect();
+        assert_eq!(paths, ["/v1/traces"]);
+        let request = &requests[0];
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.header("content-type"), Some("application/x-protobuf"));
+        // Protobuf keeps strings as they are: the service name, and an attribute of the run span.
+        assert!(contains(&request.body, "zx-agent"));
+        assert!(contains(&request.body, "zx.run.id"));
+        assert!(!contains(&request.body, "the answer"), "no content leaves the process");
     }
 
     let server = MockServer::start(vec![Reply::text("the answer")]).await;
@@ -751,7 +741,7 @@ async fn a_run_exports_its_trace_and_metrics_only_when_an_endpoint_is_configured
     let stderr = common::stderr(&output);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     assert!(!stderr.contains("[otel]"), "{stderr}");
-    assert_eq!(received.lock().unwrap().len(), 2, "nothing more was sent");
+    assert_eq!(received.lock().unwrap().len(), 1, "nothing more was sent");
 }
 
 #[tokio::test]
