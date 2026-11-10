@@ -60,7 +60,7 @@ cost = { input = 0.27, output = 1.10, cacheRead = 0.07 }   # 每百万 token 的
 
 ### 容器执行
 
-`execution = "container"` 时 bash、read_file、edit_file 与 write_file 在 Docker 容器中执行；行为与安全边界见 README 的“容器执行”。
+`execution = "container"` 时 bash、read_file、edit_file、write_file 与搜索工具（grep、find、ls）在 Docker 容器中执行；行为与安全边界见 README 的“容器执行”。
 
 | 键 | 语义 |
 |---|---|
