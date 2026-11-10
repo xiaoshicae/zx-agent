@@ -11,7 +11,7 @@ use crate::agent::{AgentEvent, EventTarget, LoopConfig, RequestKind};
 use crate::ai::{AssistantMessage, Message, Request, StreamEvent, duration_ms, now_ms};
 use crate::session::{
     CompactionEntry, CompactionPlan, MergedSummary, ProjectedMessage, RequestSource, SessionStore, SummaryFact,
-    SummaryMode, SummaryRequest, summary_messages, without_details,
+    SummaryMode, SummaryRequest, summary_input, summary_messages,
 };
 
 const SUMMARY_INSTRUCTIONS: &str = "Summarize the supplied original conversation records. \
@@ -522,7 +522,7 @@ fn full_candidate(raw: &[ProjectedMessage], cut: usize) -> Result<Candidate> {
     Ok(Candidate {
         first_kept: raw[cut].entry_id.clone(),
         source_ids: source.iter().map(|item| item.entry_id.clone()).collect(),
-        input: serde_json::to_string(&without_details(source))?,
+        input: summary_input(source)?,
         retained,
         prefix_system,
         continues: None,

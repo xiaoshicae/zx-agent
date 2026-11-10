@@ -43,6 +43,12 @@ pub(crate) fn summary_messages(
     ]
 }
 
+/// The content of a full summary request: the records it reads, without tool result
+/// details. The same when the request is sent and when it is replayed.
+pub(crate) fn summary_input(records: &[ProjectedMessage]) -> Result<String> {
+    Ok(serde_json::to_string(&without_details(records))?)
+}
+
 /// What an incremental summary that continues an earlier one reads: that summary's facts
 /// that still hold, and the records to summarize.
 pub(crate) struct IncrementalSource {

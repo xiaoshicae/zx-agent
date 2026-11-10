@@ -206,28 +206,6 @@ async fn only_request_checkpoints_can_be_replayed() {
 }
 
 #[tokio::test]
-async fn a_request_that_differs_from_the_persisted_projection_is_not_recorded() {
-    let mut store = SessionStore::in_memory(header());
-    store.append_message(Message::user("persisted")).await.unwrap();
-    let before = store.entries().len();
-    let request = Request {
-        model: "test-model".into(),
-        messages: vec![Message::user("never persisted")],
-        tools: vec![],
-        max_tokens: None,
-        reasoning: None,
-        cache_key: None,
-    };
-
-    let recorded = store
-        .record_request(&request, "faux", serde_json::Value::Null, RequestSource::Projection)
-        .await;
-
-    assert!(recorded.is_err());
-    assert_eq!(store.entries().len(), before);
-}
-
-#[tokio::test]
 async fn requests_around_a_recovery_from_context_overflow_are_rebuilt_from_the_session_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");

@@ -105,8 +105,7 @@ const TRANSIENT_TEXT: &[&str] = &[
 ];
 
 /// Whether a failed response is transient. Structured metadata takes precedence; messages
-/// without it (from providers that report none, or read from older session files) use the
-/// text fallback.
+/// without it, from providers that report none, use the text fallback.
 pub fn is_retryable(message: &AssistantMessage) -> bool {
     if message.stop_reason != StopReason::Error {
         return false;

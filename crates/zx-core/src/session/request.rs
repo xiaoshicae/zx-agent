@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::ai::{Message, Reasoning, Request, ToolDef, now_ms};
 
-use super::{CompactionStartedEntry, Entry, SessionStore, without_details};
+use super::{CompactionStartedEntry, Entry, SessionStore, summary_input};
 
 /// Non-secret request fields. Authentication and transport credentials are not recorded.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -66,8 +66,9 @@ pub struct RequestStartedEntry {
 }
 
 impl SessionStore {
-    /// Persist configuration changes and a dispatch checkpoint before a model call.
-    /// Checks messages against the audit projection; any failure prevents dispatch.
+    /// Persist configuration changes and a dispatch checkpoint before a model call; any
+    /// failure prevents dispatch. The checkpoint records how to rebuild the messages, not the
+    /// messages: the caller sends the ones `source` names, as of the current leaf.
     pub async fn record_request(
         &mut self,
         request: &Request,
@@ -75,10 +76,6 @@ impl SessionStore {
         provider_options: Value,
         source: RequestSource,
     ) -> Result<String> {
-        ensure!(
-            request.messages == self.request_messages(&source, self.leaf.as_deref())?,
-            "request messages differ from the persisted session projection"
-        );
         let config = RequestConfig {
             provider: provider.into(),
             model: request.model.clone(),
@@ -201,9 +198,7 @@ impl SessionStore {
                         .input()?,
                     None => {
                         let raw = Self::raw_projection_from(&path);
-                        let source = Self::summarized_prefix(&raw, &attempt.first_kept_entry_id)?;
-                        // As the summary request was built: without tool result details.
-                        serde_json::to_string(&without_details(source))?
+                        summary_input(Self::summarized_prefix(&raw, &attempt.first_kept_entry_id)?)?
                     }
                 };
                 Ok(attempt.request.messages(content, *system_timestamp, *user_timestamp))

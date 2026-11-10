@@ -511,31 +511,6 @@ async fn a_call_queued_behind_a_running_command_is_recorded_as_not_executed_when
 }
 
 #[tokio::test]
-async fn commands_run_with_the_shell_checked_at_start() {
-    let fake = FakeDocker::new();
-    let config = ContainerConfig {
-        shell: "zsh".into(),
-        ..fake.config()
-    };
-    let executor = ContainerExecutor::start(config).await.unwrap();
-    let workspace = fake.workspace();
-    // A tool configured with another shell, such as `BashTool::shell` left at its default.
-    let request = ShellCommand {
-        shell: "bash",
-        command: "echo hi",
-        cwd: &workspace,
-        timeout: Duration::from_secs(10),
-    };
-
-    executor.run(&request, &CancellationToken::new()).await.unwrap();
-
-    let probe = &fake.execs("zx-agent-probe")[0];
-    assert_eq!(after(probe, "zx-agent-probe")[0], "zsh");
-    let call = &fake.execs("zx-agent-run")[0];
-    assert_eq!(after(call, "zx-agent-run"), ["zsh".to_string(), "echo hi".to_string()]);
-}
-
-#[tokio::test]
 async fn file_reads_map_each_refusal_to_an_actionable_error() {
     let fake = FakeDocker::new();
     let executor = ContainerExecutor::start(fake.config()).await.unwrap();

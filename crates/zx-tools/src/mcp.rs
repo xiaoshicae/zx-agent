@@ -492,14 +492,6 @@ impl Tool for McpTool {
     // `effects` stays `SideEffects`: the server's annotations are hints, so a call that was
     // interrupted is reported as possibly having changed state.
 
-    fn validate_arguments(&self, args: &Value) -> Result<(), String> {
-        if args.is_object() {
-            Ok(())
-        } else {
-            Err("the arguments must be a JSON object".to_string())
-        }
-    }
-
     /// Progress notifications of the call reach `ctx` as progress updates and re-arm the
     /// timeout. Stops waiting on `ctx.cancel`, after `timeout` without an answer or progress,
     /// or after `max_timeout` in all. Each of these ends the request on the server's side

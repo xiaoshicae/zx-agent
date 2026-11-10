@@ -265,9 +265,9 @@ async fn long_results_are_truncated() {
 async fn arguments_must_be_a_json_object() {
     let fake = FakeMcp::start(Era::Modern, three_tools()).await;
     let server = connect(&fake, &["query"]).await;
-    let tool = the_tool(&server, "prom__query");
-    assert!(tool.validate_arguments(&json!({"q": "up"})).is_ok());
-    assert!(tool.validate_arguments(&json!(["up"])).is_err());
+    // The loop rejects non-objects before any tool sees them; a direct call is refused too.
+    let refused = call(&server, "prom__query", json!(["up"])).await.unwrap_err();
+    assert_eq!(refused, "the arguments must be a JSON object");
     assert!(fake.requests("tools/call").is_empty());
 }
 

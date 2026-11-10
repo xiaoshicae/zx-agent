@@ -48,6 +48,8 @@ use super::{
 };
 use crate::agent::ExecutionMode;
 
+/// The shell every command runs with; the start-up probe checks that the image has it.
+const SHELL: &str = "bash";
 /// Longest wait for a new container to accept commands.
 const START_TIMEOUT: Duration = Duration::from_secs(60);
 /// Pause between readiness probes while the container starts.
@@ -114,9 +116,6 @@ impl Target {
 /// Runs commands and reads files in one container that lives as long as this value.
 pub struct ContainerExecutor {
     target: Target,
-    image: String,
-    /// The shell of the configuration, checked at start; commands always run with it.
-    shell: String,
     platform: Platform,
     /// Taken by one command or file read at a time, because a sweep stops every process of
     /// the command user. Shared (`Arc`) with the cleanup task of a dropped run, which outlives
@@ -174,8 +173,6 @@ impl ContainerExecutor {
         };
         Ok(Self {
             target,
-            image: config.image,
-            shell: config.shell,
             platform,
             turn: Arc::new(tokio::sync::Mutex::new(())),
             _client: client,
@@ -186,11 +183,6 @@ impl ContainerExecutor {
     /// What the container reported at start.
     pub fn platform(&self) -> &Platform {
         &self.platform
-    }
-
-    /// The image the container runs.
-    pub fn image(&self) -> &str {
-        &self.image
     }
 
     /// The container's name, for example to find it with `docker ps`.
@@ -288,13 +280,13 @@ impl Executor for ContainerExecutor {
         // An earlier run that was dropped may have left processes whose sweep is still queued.
         self.target.sweep().await;
         // Commands never inherit the agent's environment, so there is nothing to hide from them.
-        // The shell is the one the start-up probe found, whatever the tool was configured with.
+        // Always bash, which the start-up probe found, whatever shell the tool asks for.
         let mut command = self.target.exec(
             Some(request.cwd),
             Input::Closed,
             RUN,
             "zx-agent-run",
-            [self.shell.as_str(), request.command],
+            [SHELL, request.command],
         );
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = command
@@ -446,7 +438,7 @@ async fn probe(target: &Target, config: &ContainerConfig) -> Probe {
         PROBE,
         "zx-agent-probe",
         [
-            OsStr::new(&config.shell),
+            OsStr::new(SHELL),
             config.workspace.as_os_str(),
             OsStr::new(match config.workspace_access {
                 Access::ReadWrite => "rw",

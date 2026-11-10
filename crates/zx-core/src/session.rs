@@ -44,7 +44,9 @@ pub use summary::{
     CompactionEntry, CompactionFailedEntry, CompactionPlan, CompactionStartedEntry, CompactionSummary, MergedSummary,
     SummaryFact, SummaryMode, SummaryRequest,
 };
-pub(crate) use summary::{MAX_STATEMENTS, MAX_SUMMARY_BYTES, cite_only, summary_messages, superseded_by};
+pub(crate) use summary::{
+    MAX_STATEMENTS, MAX_SUMMARY_BYTES, cite_only, summary_input, summary_messages, superseded_by,
+};
 #[cfg(test)]
 pub(crate) use test_support::FailingWriter;
 

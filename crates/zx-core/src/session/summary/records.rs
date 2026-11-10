@@ -123,17 +123,13 @@ impl SessionStore {
         );
         match source.mode {
             SummaryMode::Full => {
-                self.validate_compaction_start_at(source, parent)?;
                 ensure!(
                     done.superseded.is_empty() && done.evicted.is_empty(),
                     "a full summary supersedes and evicts nothing"
                 );
                 done.summary.validate(&source.source_entry_ids)?;
             }
-            SummaryMode::Incremental => {
-                self.validate_compaction_start(source)?;
-                self.validate_merged(source, done)?;
-            }
+            SummaryMode::Incremental => self.validate_merged(source, done)?,
         }
         Ok(())
     }
