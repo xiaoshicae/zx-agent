@@ -476,3 +476,35 @@ fn rules_policy(agent: &mut AgentDefinition, mcp_ask: &[String], auto_approve: A
     });
     Some(RulePolicy::new(rules).auto_approve(auto_approve))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(text: &str) -> Config {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, text).unwrap();
+        Config::load(&path).unwrap()
+    }
+
+    #[test]
+    fn request_fields_that_the_reasoning_level_sets_are_refused() {
+        for (text, expected) in [
+            (
+                "reasoning = 'low'\n[provider]\nrequestFields = { reasoning_effort = 'high' }",
+                "provider.requestFields.reasoning_effort conflicts with reasoning",
+            ),
+            (
+                "reasoning = 'low'\n[provider]\nreasoningFormat = 'thinking'\n\
+                 requestFields = { thinking = { type = 'enabled' } }",
+                "provider.requestFields.thinking conflicts with reasoning",
+            ),
+        ] {
+            let error = format!("{:#}", check_reasoning_fields(&config(text)).unwrap_err());
+            assert!(error.contains(expected), "{text}: {error}");
+        }
+        // Without a reasoning level, the field is the only one that sets it.
+        check_reasoning_fields(&config("[provider]\nrequestFields = { reasoning_effort = 'high' }")).unwrap();
+    }
+}

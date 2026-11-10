@@ -10,7 +10,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{ChildStdout, Command};
 
 use common::mock_server::{MockServer, Reply};
-use common::{json_lines, signal, stderr, stdout, tool_call_answer, write_agent, write_config, zx_agent};
+use common::{Home, json_lines, signal, stderr, stdout, tool_call_answer, write_agent, write_config, zx_agent_in};
 use zx_agent::ai::Message;
 use zx_agent::session::SessionStore;
 
@@ -27,21 +27,17 @@ fn chat_retrying(server: &MockServer, cwd: &Path, args: &[&str], max_retries: &s
     if !agent_home(cwd).join("config.toml").exists() {
         write_config(&agent_home(cwd), &base_config(max_retries, "", ""));
     }
-    let mut command = zx_agent();
+    // chat keeps sessions under the home directory by default; never the real one.
+    let mut command = zx_agent_in(cwd, Home::User(&cwd.join(".home")));
     command
         .arg("chat")
         .args(["--model", "mock-model"])
         .args(args)
-        .current_dir(cwd)
-        // chat keeps sessions under the home directory by default; never the real one.
-        .env("HOME", cwd.join(".home"))
-        .env_remove("ZX_AGENT_HOME")
         .env("ZX_BASE_URL", &server.base_url)
         .env(KEY_VAR, KEY)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+        .stderr(Stdio::piped());
     command
 }
 
@@ -1578,18 +1574,6 @@ async fn config_prices_the_model_and_the_cost_shows_in_turn_and_status_lines() {
     // The fake server reports 10 input and 2 output tokens: 10 + 4, in the prices' unit.
     assert!(err.contains("· 10 in · 2 out · cost 14.0000 ·"), "{err}");
     assert!(err.contains("· 10 in · 2 out · 0 cached · cost 14.0000"), "{err}");
-
-    config(
-        dir.path(),
-        "[[models]]\nid = \"mock-model\"\ncost = { input = -1.0, output = 0.0 }\n",
-    );
-    let refused = run(&server, dir.path(), &["--no-session"], "/quit\n").await;
-    assert_eq!(refused.status.code(), Some(2), "{}", stderr(&refused));
-    assert!(
-        stderr(&refused).contains("prices must be zero or more"),
-        "{}",
-        stderr(&refused)
-    );
 }
 
 #[tokio::test]
@@ -1617,23 +1601,6 @@ async fn request_headers_and_the_prompt_cache_key_reach_the_server() {
         .id
         .clone();
     assert_eq!(request.body["prompt_cache_key"], session_id);
-
-    config(dir.path(), "headers = { Authorization = 'Bearer x' }");
-    let refused = run(&server, dir.path(), &["--no-session"], "/quit\n").await;
-    assert_eq!(refused.status.code(), Some(2), "{}", stderr(&refused));
-    assert!(
-        stderr(&refused).contains("provider.headers: Authorization"),
-        "{}",
-        stderr(&refused)
-    );
-    config(dir.path(), "headers = { 'no colon' = 'x' }");
-    let malformed = run(&server, dir.path(), &["--no-session"], "/quit\n").await;
-    assert_eq!(malformed.status.code(), Some(2), "{}", stderr(&malformed));
-    assert!(
-        stderr(&malformed).contains("invalid request header name"),
-        "{}",
-        stderr(&malformed)
-    );
 }
 
 #[tokio::test]

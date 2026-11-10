@@ -523,6 +523,8 @@ mod tests {
                 "[provider]\nrequestFields = { ' ' = 1 }",
                 "provider.requestFields: a field has no name",
             ),
+            ("[provider]\nrequestFields = { seed = 1, seed = 2 }", "duplicate key"),
+            ("[provider]\nrequestFields = 'seed=1'", "invalid type"),
             ("[provider]\nmaxRetries = -1", "maxRetries"),
             ("secretFiles = ['']", "secretFiles: an entry is empty"),
             ("maxTokens = 'many'", "maxTokens"),

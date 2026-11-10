@@ -135,8 +135,9 @@ mod tests {
         std::fs::create_dir_all(root.join(".git")).unwrap();
         std::fs::write(dir.path().join("secret.txt"), "OUTSIDE SECRET").unwrap();
         std::os::unix::fs::symlink("../secret.txt", root.join("AGENTS.md")).unwrap();
-        let error = load(&root, &config()).unwrap_err();
-        assert!(format!("{error:#}").contains("outside the project root"), "{error:#}");
+        let error = format!("{:#}", load(&root, &config()).unwrap_err());
+        assert!(error.contains("outside the project root"), "{error}");
+        assert!(!error.contains("OUTSIDE SECRET"), "{error}");
     }
 
     #[cfg(unix)]

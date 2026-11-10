@@ -12,7 +12,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use common::mock_server::{MockServer, Reply};
-use common::{agent_text, fake_model_config, json_lines, stderr, stdout, write_agent_file, write_config, zx_agent};
+use common::{
+    Home, agent_text, fake_model_config, json_lines, stderr, stdout, write_agent_file, write_config, zx_agent_in,
+};
 use zx_agent::ai::Message;
 use zx_agent::session::SessionStore;
 
@@ -22,19 +24,15 @@ fn command(server: &MockServer, dir: &Path, mode: &str, args: &[&str]) -> Comman
     if !agent_home(dir).join("config.toml").exists() {
         config(dir, "");
     }
-    let mut command = zx_agent();
+    // chat keeps sessions under the home directory by default; never the real one.
+    let mut command = zx_agent_in(dir, Home::User(&dir.join(".home")));
     command
         .arg(mode)
         .args(["--model", "mock"])
         .args(args)
-        .current_dir(dir)
-        // chat keeps sessions under the home directory by default; never the real one.
-        .env("HOME", dir.join(".home"))
-        .env_remove("ZX_AGENT_HOME")
         .env("ZX_BASE_URL", &server.base_url)
         .env(KEY_VAR, "sk-agents-key")
-        .stdin(Stdio::null())
-        .kill_on_drop(true);
+        .stdin(Stdio::null());
     command
 }
 
@@ -272,22 +270,6 @@ async fn run_keeps_auto_compaction_disabled_unless_the_agent_enables_it() {
 }
 
 #[tokio::test]
-async fn invalid_context_budgets_fail_before_creating_a_session_or_calling_the_model() {
-    for text in [
-        "[compaction]\ntriggerBytes = 100\nkeepRecentBytes = 200",
-        "[compaction]\nmaxSummaryTokens = 0",
-    ] {
-        let dir = tempfile::tempdir().unwrap();
-        agent(dir.path(), text);
-        let server = MockServer::start(vec![]).await;
-        let output = run(&server, dir.path(), &["--session", "audit.jsonl", "go"]).await;
-        assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
-        assert!(server.requests().is_empty());
-        assert!(!dir.path().join("audit.jsonl").exists());
-    }
-}
-
-#[tokio::test]
 async fn an_agent_file_gives_the_instructions_and_resolves_paths_relative_to_itself() {
     let dir = tempfile::tempdir().unwrap();
     agent_as(
@@ -388,44 +370,29 @@ async fn unattended_run_never_opens_a_terminal_approval_for_an_agent_extending_t
 }
 
 #[tokio::test]
-async fn invalid_configuration_exits_2_without_a_model_request_or_session_file() {
-    for text in [
-        "broken = true",
-        "[limits]\nmaxModelRequests = -1",
-        "[context]\nfiles = ['missing.md']",
-        // A built-in tool runs without asking unless it is in ask; ask names tools only.
-        "[permissions]\nallow = ['read_file']",
-        "[permissions]\nask = ['bash(ls)']",
-        "[permissions]\ndeny = ['bash(']",
-        "[rules]\naskTools = ['bash']",
+async fn a_configuration_error_exits_2_without_a_model_request_or_session_file() {
+    // One error of each step that comes before the session file, as the config.toml (the
+    // keys before `[provider]`, then the provider's) and the agent's front matter; the rules
+    // themselves are unit tests of the configuration.
+    for (step, top, provider, front) in [
+        ("config.toml", "broken = true", "", None),
+        ("agent file", "", "", Some("broken = true")),
+        ("context file", "", "", Some("[context]\nfiles = ['missing.md']")),
+        ("provider settings", "", "requestFields = { model = 'other' }", None),
     ] {
         let dir = tempfile::tempdir().unwrap();
-        agent(dir.path(), text);
+        write_config(&agent_home(dir.path()), &fake_model_config(KEY_VAR, top, provider));
+        if let Some(front) = front {
+            agent(dir.path(), front);
+        }
         let server = MockServer::start(vec![]).await;
         let output = run(&server, dir.path(), &["--session", "audit.jsonl", "go"]).await;
-        assert_eq!(output.status.code(), Some(2), "{text}: {}", stderr(&output));
-        assert!(server.requests().is_empty());
-        assert!(!dir.path().join("audit.jsonl").exists());
-    }
-}
-
-#[tokio::test]
-async fn an_invalid_config_toml_exits_2_without_a_model_request_or_session_file() {
-    for text in [
-        "broken = true",
-        "execution = 'container'",
-        "[toolOutput]\nthresholdBytes = 1",
-        "[toolOutput]\nmaxFileBytes = 1048577",
-        "[[mcp]]\nname = 'prom'\nurl = 'https://prom.example/mcp'\ntools = []",
-    ] {
-        let dir = tempfile::tempdir().unwrap();
-        config(dir.path(), text);
-        let server = MockServer::start(vec![]).await;
-        let output = run(&server, dir.path(), &["--session", "audit.jsonl", "go"]).await;
-        assert_eq!(output.status.code(), Some(2), "{text}: {}", stderr(&output));
-        assert!(stderr(&output).contains("config.toml"), "{text}: {}", stderr(&output));
-        assert!(server.requests().is_empty());
-        assert!(!dir.path().join("audit.jsonl").exists());
+        assert_eq!(output.status.code(), Some(2), "{step}: {}", stderr(&output));
+        if step == "config.toml" {
+            assert!(stderr(&output).contains("config.toml"), "{step}: {}", stderr(&output));
+        }
+        assert!(server.requests().is_empty(), "{step}");
+        assert!(!dir.path().join("audit.jsonl").exists(), "{step}");
     }
 }
 
@@ -460,22 +427,6 @@ fn omitted_budget_flags_are_documented_as_agent_values() {
         let help = flag_help(mode, flag);
         assert!(!help.contains("[default:"), "{mode} {flag}: {help}");
         assert!(help.contains("agent"), "{mode} {flag}: {help}");
-    }
-}
-
-#[tokio::test]
-async fn invalid_provider_settings_exit_2_without_a_session_file() {
-    for provider in [
-        "requestFields = { model = 'other' }",
-        "headers = { Authorization = 'Bearer x' }",
-    ] {
-        let dir = tempfile::tempdir().unwrap();
-        write_config(&agent_home(dir.path()), &fake_model_config(KEY_VAR, "", provider));
-        let server = MockServer::start(vec![]).await;
-        let output = run(&server, dir.path(), &["--session", "audit.jsonl", "go"]).await;
-        assert_eq!(output.status.code(), Some(2), "{provider}: {}", stderr(&output));
-        assert!(server.requests().is_empty());
-        assert!(!dir.path().join("audit.jsonl").exists(), "{provider}");
     }
 }
 
@@ -664,22 +615,6 @@ async fn unattended_runs_do_not_load_project_instructions_by_default() {
     assert!(!system(&server, 0).contains("REPOSITORY INSTRUCTIONS"));
 }
 
-#[cfg(unix)]
-#[tokio::test]
-async fn a_discovered_link_outside_the_project_stops_the_run_before_any_request() {
-    let dir = tempfile::tempdir().unwrap();
-    let project = dir.path().join("project");
-    std::fs::create_dir_all(project.join(".git")).unwrap();
-    std::fs::write(dir.path().join("secret.txt"), "OUTSIDE SECRET").unwrap();
-    std::os::unix::fs::symlink("../secret.txt", project.join("AGENTS.md")).unwrap();
-    let server = MockServer::start(vec![Reply::text("ok")]).await;
-    agent(&project, "extends = 'assistant'");
-    let output = run(&server, &project, &["go"]).await;
-    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
-    assert!(server.requests().is_empty());
-    assert!(!stderr(&output).contains("OUTSIDE SECRET"));
-}
-
 #[tokio::test]
 async fn a_project_context_error_names_the_option_that_skips_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -702,21 +637,6 @@ async fn a_users_agent_replaces_the_built_in_one_and_other_files_are_ignored() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(system(&server, 0).contains("MY OWN INSTRUCTIONS"));
     assert!(server.requests()[0].body.get("tools").is_none());
-}
-
-#[tokio::test]
-async fn an_agent_file_without_extends_or_instructions_is_refused() {
-    let dir = tempfile::tempdir().unwrap();
-    write_agent_file(&agent_home(dir.path()), "unattended", "+++\ntools = ['bash']\n+++\n");
-    let server = MockServer::start(vec![]).await;
-    let output = run(&server, dir.path(), &["go"]).await;
-    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
-    assert!(
-        stderr(&output).contains("has no instructions: write them below the front matter or extend a built-in agent"),
-        "{}",
-        stderr(&output)
-    );
-    assert!(server.requests().is_empty());
 }
 
 #[tokio::test]

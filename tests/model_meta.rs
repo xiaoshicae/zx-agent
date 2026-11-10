@@ -270,7 +270,10 @@ fn the_token_trigger_is_derived_from_a_context_window_below_its_reserve() {
     );
     assert!(Config::default().validate().is_ok());
     assert!(!Config::default().automatic());
-    assert!(small.automatic() || !small.automatic());
+    assert!(
+        !small.automatic(),
+        "nothing turns summaries on when the window is within the reserve"
+    );
 }
 
 #[tokio::test]

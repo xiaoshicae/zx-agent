@@ -8,7 +8,7 @@ use serde_json::json;
 use tokio::process::Command;
 
 use common::mock_server::{MockServer, Reply};
-use common::{AgentHome, fake_model_config, stderr, stdout, write_config, zx_agent};
+use common::{AgentHome, Home, fake_model_config, stderr, stdout, write_config, zx_agent_in};
 
 #[tokio::test]
 async fn known_api_key_is_redacted_before_model_events_and_session() {
@@ -27,7 +27,7 @@ async fn known_api_key_is_redacted_before_model_events_and_session() {
     .await;
 
     let home = AgentHome::new(&fake_model_config(KEY_VAR, "", ""));
-    let output = zx_agent()
+    let output = zx_agent_in(dir.path(), Home::Agent(home.path()))
         .args(["run", "--model", "mock", "--tools", "read_file"])
         .args([
             "--output",
@@ -36,11 +36,8 @@ async fn known_api_key_is_redacted_before_model_events_and_session() {
             session.to_str().unwrap(),
             "read credentials.txt",
         ])
-        .current_dir(dir.path())
-        .env("ZX_AGENT_HOME", home.path())
         .env("ZX_BASE_URL", &server.base_url)
         .env(KEY_VAR, KEY)
-        .kill_on_drop(true)
         .output()
         .await
         .unwrap();
@@ -69,14 +66,11 @@ fn run_bash_redacting(server: &MockServer, dir: &Path, secret_files: &[&Path]) -
         .collect();
     let top = format!("secretFiles = [{}]", files.join(", "));
     write_config(&home, &fake_model_config("ZX_HOOKS_CLI_TEST_KEY", &top, ""));
-    let mut command = zx_agent();
+    let mut command = zx_agent_in(dir, Home::Agent(&home));
     command
         .args(["run", "--model", "mock", "--tools", "bash", "go"])
-        .current_dir(dir)
-        .env("ZX_AGENT_HOME", &home)
         .env("ZX_BASE_URL", &server.base_url)
-        .env_remove("ZX_SECRET_FILES")
-        .kill_on_drop(true);
+        .env_remove("ZX_SECRET_FILES");
     command
 }
 

@@ -478,6 +478,8 @@ fn context_management_settings_overlay_individually_and_validate() {
     assert_eq!(agent.compaction.max_summary_tokens, 1024);
     for text in [
         "[compaction]\nkeepRecentBytes = 0",
+        "[compaction]\ntriggerBytes = 100\nkeepRecentBytes = 200",
+        "[compaction]\nmaxSummaryTokens = 0",
         "[compaction]\ntimeoutSecs = 0",
         "[compaction]\nunknown = 1",
     ] {

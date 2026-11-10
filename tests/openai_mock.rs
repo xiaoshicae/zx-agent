@@ -10,7 +10,7 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use common::mock_server::{MockServer, Reply};
-use common::{CancelOnFirstDelta, Collect, RunnerSetup, config, fast_retry};
+use common::{Collect, RunnerSetup, config, fast_retry};
 use zx_agent::agent::{AgentEvent, Event, EventSink};
 use zx_agent::ai::openai::{ApiKey, OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
@@ -19,6 +19,18 @@ use zx_agent::compaction::Config;
 use zx_agent::runner::RunOutcome;
 use zx_agent::session::SessionStore;
 use zx_agent::tools::BashTool;
+
+/// Cancels a token at the first streamed delta, to cancel a response mid-stream without
+/// depending on timing.
+struct CancelOnFirstDelta(CancellationToken);
+
+impl EventSink for CancelOnFirstDelta {
+    fn emit(&self, event: &Event) {
+        if matches!(event.event, AgentEvent::MessageUpdate { .. }) {
+            self.0.cancel();
+        }
+    }
+}
 
 /// A runner whose provider talks to `server`, with a bash tool and a one-line system prompt.
 fn setup(server: &MockServer, idle_timeout: Duration) -> RunnerSetup {

@@ -11,16 +11,18 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use common::{Collect, EchoTool, NotifyingProvider, config, run_attempt, run_prompt, summarize, with_policy};
-use zx_agent::agent::QueuedMessage;
+use common::{Collect, EchoTool, NotifyingProvider, config, header, run_prompt, summarize};
 use zx_agent::agent::{
-    AgentEvent, ExecutionMode, MAX_DETAILS_BYTES, PolicyDecision, RunOutcome, Tool, ToolContext, ToolOutput, ToolPolicy,
+    AgentEvent, ApprovalCache, Attempt, AttemptResult, EventSink, ExecutionMode, LoopConfig, MAX_DETAILS_BYTES,
+    PolicyDecision, QueuedMessage, RunOutcome, Tool, ToolContext, ToolOutput, ToolPolicy,
 };
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{
     ContentBlock, EventReceiver, Message, PREAMBLE, Provider, Request, StopReason, SystemPrompt, ToolCall, ToolDef,
     Usage,
 };
+use zx_agent::policy::PolicyHook;
+use zx_agent::session::SessionStore;
 
 fn provider(steps: impl IntoIterator<Item = FauxStep>) -> Arc<FauxProvider> {
     Arc::new(FauxProvider::new(steps))
@@ -28,6 +30,29 @@ fn provider(steps: impl IntoIterator<Item = FauxStep>) -> Arc<FauxProvider> {
 
 fn echo() -> Arc<EchoTool> {
     Arc::new(EchoTool::new("echo"))
+}
+
+fn with_policy(mut config: LoopConfig, policy: Arc<dyn ToolPolicy>) -> LoopConfig {
+    config.hooks.push(PolicyHook::new(policy));
+    config
+}
+
+/// Run one attempt with `prompts` over a new in-memory session, with at most
+/// `max_model_requests`, stopped by `cancel` and reporting to `sink`. Returns the result and
+/// the session's projection.
+async fn run_attempt(
+    config: &LoopConfig,
+    prompts: Vec<QueuedMessage>,
+    max_model_requests: Option<u32>,
+    cancel: &CancellationToken,
+    sink: &dyn EventSink,
+) -> (AttemptResult, Vec<Message>) {
+    let mut session = SessionStore::in_memory(header());
+    let mut approvals = ApprovalCache::default();
+    let mut attempt = Attempt::new(config, &mut session, &mut approvals, cancel, sink);
+    attempt.max_model_requests = max_model_requests;
+    let result = attempt.run(prompts).await;
+    (result, session.messages())
 }
 
 // ---------------------------------------------------------------------------

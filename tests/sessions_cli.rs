@@ -13,7 +13,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use common::mock_server::{MockServer, Reply};
-use common::{fake_model_config, stderr, stdout, write_config, zx_agent};
+use common::{Home, fake_model_config, stderr, stdout, write_config, zx_agent_in};
 use zx_agent::ai::Message;
 use zx_agent::session::{SESSION_VERSION, SessionStore};
 
@@ -46,17 +46,13 @@ impl Dirs {
 
     fn command(&self, args: &[&str]) -> Command {
         write_config(&self.home.path().join(".zx-agent"), &fake_model_config(KEY_VAR, "", ""));
-        let mut command = zx_agent();
+        let mut command = zx_agent_in(self.work.path(), Home::User(self.home.path()));
         command
             .args(args)
-            .current_dir(self.work.path())
-            .env("HOME", self.home.path())
-            .env_remove("ZX_AGENT_HOME")
             .env(KEY_VAR, "sk-sessions-test")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            .stderr(Stdio::piped());
         command
     }
 
