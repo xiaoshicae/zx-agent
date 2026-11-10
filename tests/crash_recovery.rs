@@ -24,7 +24,7 @@ use zx_agent::executor::{Executor, LocalExecutor};
 use zx_agent::output_store::{self, OutputStore, ReadOutputTool};
 use zx_agent::profile::skills::ReadSkillTool;
 use zx_agent::runner::RunOutcome;
-use zx_agent::session::{SessionHeader, SessionStore};
+use zx_agent::session::SessionStore;
 use zx_agent::tools::builtin_tools;
 
 use common::mock_server::{MockServer, Reply};
@@ -446,42 +446,6 @@ async fn the_recovery_event_follows_the_recorded_result() {
         .position(|event| matches!(event, AgentEvent::ToolCallRecovered { .. }))
         .unwrap();
     assert!(recorded < reported, "{events:?}");
-}
-
-#[tokio::test]
-async fn sessions_from_before_start_records_report_an_unknown_start() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("v3.jsonl");
-    let mut legacy = SessionHeader::new(Path::new("."), "test-model");
-    legacy.version = 3;
-    let mut store = SessionStore::create(&path, legacy).unwrap();
-    store.append_message(Message::user("fix it")).await.unwrap();
-    store
-        .append_message(answer(&[("c1", "write"), ("c2", "read")]))
-        .await
-        .unwrap();
-    drop(store);
-    let write = Counted::new("write", Effects::SideEffects);
-    let read = Counted::new("read", Effects::ReadOnly);
-    let tools: Vec<Arc<dyn Tool>> = vec![write.clone(), read.clone()];
-    let provider = Arc::new(FauxProvider::new([FauxStep::text("checked")]));
-    let (mut runner, events) = RunnerSetup {
-        session: SessionStore::open(&path).unwrap(),
-        ..RunnerSetup::new(config(provider, tools))
-    }
-    .build();
-
-    let report = runner.run("continue", &CancellationToken::new()).await;
-
-    assert_eq!(report.outcome, RunOutcome::Completed);
-    assert_eq!(
-        recovered(&events.events()),
-        [
-            ("c1".into(), Interruption::StartUnknown),
-            ("c2".into(), Interruption::ReadOnly)
-        ]
-    );
-    assert_eq!(write.runs.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

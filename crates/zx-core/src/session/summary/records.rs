@@ -9,11 +9,11 @@ use super::{
     SummaryFact, SummaryMode, cite_only, superseded_by,
 };
 use crate::ai::{AssistantMessage, Message, Usage, now_ms};
-use crate::session::{COMPACTION_VERSION, Entry, INCREMENTAL_SUMMARY_VERSION, SessionStore};
+use crate::session::{Entry, SessionStore};
 
 impl SessionStore {
-    /// Persist a format upgrade and request metadata before contacting a model. An
-    /// incremental summary needs format v5; a full one, v3.
+    /// Persist the attempt and its request metadata before contacting a model. Fails
+    /// without writing anything if the plan does not match the branch.
     pub async fn begin_compaction(&mut self, plan: CompactionPlan) -> Result<String> {
         let mut entry = CompactionStartedEntry {
             id: self.new_id(),
@@ -26,13 +26,7 @@ impl SessionStore {
             mode: plan.mode,
             continues: plan.continues,
         };
-        // Validate the plan before even appending an upgrade.
         self.validate_compaction_start(&entry)?;
-        let version = match entry.mode {
-            SummaryMode::Full => COMPACTION_VERSION,
-            SummaryMode::Incremental => INCREMENTAL_SUMMARY_VERSION,
-        };
-        self.ensure_format(version).await?;
         entry.parent_id = self.leaf.clone();
         entry.id = self.new_id();
         self.append(Entry::CompactionStarted(entry)).await
@@ -107,20 +101,6 @@ impl SessionStore {
         }
     }
 
-    /// The rules a summary attempt follows when it is recorded: the format allows it and its
-    /// plan matches the branch.
-    pub(in crate::session) fn validate_compaction_started(&self, started: &CompactionStartedEntry) -> Result<()> {
-        ensure!(
-            self.format_version >= COMPACTION_VERSION,
-            "compaction requires a format upgrade to v{COMPACTION_VERSION}"
-        );
-        ensure!(
-            started.mode == SummaryMode::Full || self.format_version >= INCREMENTAL_SUMMARY_VERSION,
-            "incremental summaries require a format upgrade to v{INCREMENTAL_SUMMARY_VERSION}"
-        );
-        self.validate_compaction_start(started)
-    }
-
     /// The rules a summary result follows: its attempt is still open on this branch, no
     /// source was corrected meanwhile, and the summary cites and carries only what the
     /// attempt allows.
@@ -177,7 +157,6 @@ impl SessionStore {
                 Entry::CompactionFailed(failed) => failed.attempt_id == id,
                 Entry::Message(_)
                 | Entry::ContextEdit(_)
-                | Entry::FormatUpgrade(_)
                 | Entry::CompactionStarted(_)
                 | Entry::RequestConfig(_)
                 | Entry::RequestStarted(_)
@@ -188,6 +167,11 @@ impl SessionStore {
             "compaction attempt already finished"
         );
         self.compaction_attempt(id)
+    }
+
+    /// The rules a summary attempt follows when it is recorded: its plan matches the branch.
+    pub(in crate::session) fn validate_compaction_started(&self, started: &CompactionStartedEntry) -> Result<()> {
+        self.validate_compaction_start(started)
     }
 
     fn validate_compaction_start(&self, entry: &CompactionStartedEntry) -> Result<()> {

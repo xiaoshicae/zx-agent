@@ -140,9 +140,7 @@ async fn a_log_receives_numbered_records_that_load_into_the_same_session() {
 #[expect(clippy::too_many_lines, reason = "one entry of every kind")]
 async fn records_carry_the_serialized_type_of_every_entry_kind() {
     let (sender, records) = mpsc::channel();
-    let mut old = header();
-    old.version = 2;
-    let mut store = SessionStore::with_log(old, Box::new(ChannelLog(sender)));
+    let mut store = SessionStore::with_log(header(), Box::new(ChannelLog(sender)));
     let first = store.append_message(Message::user("old")).await.unwrap();
     store.append_message(assistant("a")).await.unwrap();
     let kept = store.append_message(Message::user("recent")).await.unwrap();
@@ -212,6 +210,16 @@ async fn records_carry_the_serialized_type_of_every_entry_kind() {
         .append_tool_call_started(&tool_call.id, &tool_call.name)
         .await
         .unwrap();
+    store.append_custom_entry("state", serde_json::json!(1)).await.unwrap();
+    store
+        .append_custom_message(CustomMessage {
+            custom_type: "note".into(),
+            content: "remember".into(),
+            display: true,
+            details: None,
+        })
+        .await
+        .unwrap();
 
     let mut kinds: Vec<&str> = store.entries().iter().map(Entry::kind).collect();
     for ((_, json), entry) in records.try_iter().zip(store.entries()) {
@@ -221,7 +229,7 @@ async fn records_carry_the_serialized_type_of_every_entry_kind() {
     }
     kinds.sort_unstable();
     kinds.dedup();
-    assert_eq!(kinds.len(), 9, "every entry kind was checked: {kinds:?}");
+    assert_eq!(kinds.len(), 10, "every entry kind was checked: {kinds:?}");
 }
 
 #[tokio::test]
@@ -360,17 +368,46 @@ async fn a_partial_write_stops_later_writes_and_leaves_a_repairable_tail() {
     assert_eq!(texts(&reopened), ["kept"]);
 }
 
+/// The message for a session of `version`, which is not the current one.
+fn unsupported(version: u32) -> String {
+    format!("session format version {version} is not supported; only version {SESSION_VERSION} can be read or written")
+}
+
 #[test]
-fn newer_session_versions_are_refused() {
+fn sessions_of_an_older_or_newer_version_are_refused_and_left_unchanged() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("future.jsonl");
-    std::fs::write(
-        &path,
-        r#"{"type":"session","version":99,"id":"h","timestamp":1,"cwd":"/","model":"m"}"#,
-    )
-    .unwrap();
-    let error = SessionStore::open(&path).err().unwrap().to_string();
-    assert!(error.contains("newer than the supported version"), "{error}");
+    for version in [1, SESSION_VERSION - 1, SESSION_VERSION + 1] {
+        let path = dir.path().join(format!("v{version}.jsonl"));
+        let header =
+            serde_json::json!({"type":"session","version":version,"id":"h","timestamp":1,"cwd":"/","model":"m"});
+        let message =
+            serde_json::json!({"type":"message","id":"a","parentId":null,"timestamp":2,"message":Message::user("hi")});
+        let content = format!("{header}\n{message}\n");
+        std::fs::write(&path, &content).unwrap();
+
+        let opened = SessionStore::open(&path).err().unwrap().to_string();
+        let read = SessionStore::read(&path).err().unwrap().to_string();
+
+        let expected = format!("{}: {}", path.display(), unsupported(version));
+        assert_eq!(opened, expected);
+        assert_eq!(read, expected);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+    }
+}
+
+#[test]
+fn a_session_of_another_version_is_not_created() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s.jsonl");
+    let older = SessionHeader {
+        version: SESSION_VERSION - 1,
+        ..header()
+    };
+
+    let error = SessionStore::create(&path, older).err().unwrap().to_string();
+
+    assert_eq!(error, unsupported(SESSION_VERSION - 1));
+    assert!(!path.exists());
 }
 
 #[tokio::test]

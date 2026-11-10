@@ -21,8 +21,7 @@ pub fn duration_ms(duration: Duration) -> u64 {
 }
 
 /// Token counts of one response, or a sum of several. The counts a server did not report
-/// are 0 and left out of the JSON, so records written before they existed read back
-/// unchanged.
+/// are 0 and left out of the JSON.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Usage {
@@ -172,7 +171,7 @@ pub struct ToolCall {
 }
 
 /// Machine-readable provider failure details. Human-readable text stays in
-/// AssistantMessage::error_message. Optional metadata keeps older sessions readable.
+/// AssistantMessage::error_message. Optional metadata is left out of the JSON when absent.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum ProviderError {

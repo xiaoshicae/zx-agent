@@ -16,7 +16,7 @@ use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, PREAMBLE, Request, SystemPrompt};
 use zx_agent::compaction::{Config, Outcome};
 use zx_agent::runner::RunOutcome;
-use zx_agent::session::{Entry, RequestSource, SessionHeader, SessionStore};
+use zx_agent::session::{Entry, RequestSource, SessionStore};
 
 use common::{EchoTool, RunnerSetup, config, header, read_lines, replayed_requests};
 
@@ -39,40 +39,35 @@ fn replays(store: &SessionStore) -> serde_json::Value {
 }
 
 /// A recorded session must keep rebuilding to the requests it sent. The fixture holds a tool
-/// call, a retried failure hidden by a context edit, a manual summary and a request after it.
+/// call, a retried failure hidden by a context edit, a full summary and a request after it.
 /// If a change to the projection, to summaries or to the OpenAI conversion alters this
-/// output, older sessions would no longer show what was sent: keep the old behavior for them
-/// behind a new request conversion version or a session format upgrade, then regenerate the
-/// expected file.
+/// output, sessions written before it would no longer show what they sent. Only the current
+/// format is read, so raise `SESSION_VERSION`, or the request conversion version for a
+/// change to the OpenAI conversion, so that such sessions are refused instead; then update
+/// the fixture's header or options and regenerate the expected file.
 #[test]
 fn a_recorded_session_rebuilds_to_the_requests_it_sent() {
-    assert_fixture_rebuilds("replay-v4");
+    assert_fixture_rebuilds("replay-full");
 }
 
-/// The same for incremental summaries (format v5): the fixture holds a tool call, a first
-/// incremental summary, a correction of a summarized tool result, a second summary that reads
-/// it again and supersedes an earlier fact, and a request after it.
+/// The same for incremental summaries: the fixture holds a tool call, a first incremental
+/// summary, a correction of a summarized tool result, a second summary that reads it again
+/// and supersedes an earlier fact, and a request after it.
 #[test]
 fn a_recorded_incremental_session_rebuilds_to_the_requests_it_sent() {
-    assert_fixture_rebuilds("replay-v5");
+    assert_fixture_rebuilds("replay-incremental");
 }
 
-/// `tests/fixtures/<name>.jsonl` rebuilds to `tests/fixtures/<name>.expected.json`.
+/// `tests/fixtures/<name>.jsonl` rebuilds to `tests/fixtures/<name>.expected.json`, byte for
+/// byte as pretty-printed JSON, so that the order of fields counts too.
 fn assert_fixture_rebuilds(name: &str) {
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let store = SessionStore::read(&fixtures.join(format!("{name}.jsonl"))).unwrap();
-    let expected: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(fixtures.join(format!("{name}.expected.json"))).unwrap())
-            .unwrap();
+    let expected = std::fs::read_to_string(fixtures.join(format!("{name}.expected.json"))).unwrap();
 
-    let rebuilt = replays(&store);
+    let rebuilt = format!("{}\n", serde_json::to_string_pretty(&replays(&store)).unwrap());
 
-    assert_eq!(
-        rebuilt,
-        expected,
-        "rebuilt requests changed:\n{}",
-        serde_json::to_string_pretty(&rebuilt).unwrap()
-    );
+    assert!(rebuilt == expected, "rebuilt requests changed:\n{rebuilt}");
 }
 
 /// Request checkpoint IDs on the session's entry list, in file order.
@@ -157,42 +152,6 @@ async fn request_config_is_appended_only_when_the_configuration_changes() {
     let rebuilt = replayed(&path);
     assert_eq!(rebuilt, sent);
     assert_eq!(rebuilt[2].model, "other-model");
-}
-
-#[tokio::test]
-async fn legacy_sessions_upgrade_once_before_the_first_request() {
-    let dir = tempfile::tempdir().unwrap();
-    for version in [1, 2] {
-        let path = dir.path().join(format!("v{version}.jsonl"));
-        let mut legacy = SessionHeader::new(Path::new("."), "test-model");
-        legacy.version = version;
-        let mut store = SessionStore::create(&path, legacy).unwrap();
-        store.append_message(Message::user("earlier")).await.unwrap();
-        drop(store);
-        let before = std::fs::read(&path).unwrap();
-
-        for answer in ["one", "two"] {
-            let provider = Arc::new(FauxProvider::new([FauxStep::text(answer)]));
-            let (mut runner, _) = RunnerSetup {
-                session: SessionStore::open(&path).unwrap(),
-                ..RunnerSetup::new(config(provider, vec![]))
-            }
-            .build();
-            let report = runner.run("go", &CancellationToken::new()).await;
-            assert_eq!(report.outcome, RunOutcome::Completed);
-        }
-
-        assert!(std::fs::read(&path).unwrap().starts_with(&before));
-        let kinds = types(&path);
-        assert_eq!(kinds.iter().filter(|kind| *kind == "format_upgrade").count(), 1);
-        let upgrade = kinds.iter().position(|kind| kind == "format_upgrade").unwrap();
-        let config = kinds.iter().position(|kind| kind == "request_config").unwrap();
-        assert!(upgrade < config, "v{version}: {kinds:?}");
-        let reopened = SessionStore::open(&path).unwrap();
-        assert_eq!(reopened.header().version, version);
-        assert_eq!(reopened.format_version(), 3);
-        assert_eq!(replayed(&path).len(), 2);
-    }
 }
 
 #[tokio::test]

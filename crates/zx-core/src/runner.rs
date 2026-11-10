@@ -523,15 +523,13 @@ mod tests {
     #[tokio::test]
     async fn compaction_write_failures_cancel_before_any_further_model_request() {
         for rejected in [
-            "format_upgrade",
             "compaction_started",
             "request_config",
             "request_started",
             "compaction",
             "compaction_failed",
         ] {
-            let mut header = SessionHeader::new(Path::new("."), "m");
-            header.version = 2;
+            let header = SessionHeader::new(Path::new("."), "m");
             let mut store = SessionStore::with_writer(header, Box::new(RejectEntry(rejected)));
             let old = store.append_message(Message::user("x".repeat(4096))).await.unwrap();
             store.append_message(Message::user("recent")).await.unwrap();
@@ -645,33 +643,24 @@ mod tests {
 
     #[tokio::test]
     async fn a_start_record_write_failure_prevents_the_call() {
-        // A v3 session must first record its upgrade to v4; either write can fail.
-        for (version, rejected) in [(4, "tool_call_started"), (3, "format_upgrade")] {
-            let tool = Arc::new(Counted(std::sync::atomic::AtomicUsize::new(0)));
-            let provider = Arc::new(FauxProvider::new([
-                FauxStep::tool_call("c1", "counted", serde_json::json!({})),
-                FauxStep::text("never sent"),
-            ]));
-            let mut header = SessionHeader::new(Path::new("."), "m");
-            header.version = version;
-            let session = SessionStore::with_writer(header, Box::new(RejectEntry(rejected)));
-            let mut runner = runner(config(&provider, vec![tool.clone()]), session);
+        let tool = Arc::new(Counted(std::sync::atomic::AtomicUsize::new(0)));
+        let provider = Arc::new(FauxProvider::new([
+            FauxStep::tool_call("c1", "counted", serde_json::json!({})),
+            FauxStep::text("never sent"),
+        ]));
+        let session = SessionStore::with_writer(
+            SessionHeader::new(Path::new("."), "m"),
+            Box::new(RejectEntry("tool_call_started")),
+        );
+        let mut runner = runner(config(&provider, vec![tool.clone()]), session);
 
-            let report = runner.run("go", &CancellationToken::new()).await;
+        let report = runner.run("go", &CancellationToken::new()).await;
 
-            assert_eq!(report.outcome, RunOutcome::Error, "{rejected}");
-            let error = report.error.unwrap_or_default();
-            assert!(
-                error.contains(&format!("disk full on {rejected}")),
-                "{rejected}: {error}"
-            );
-            assert_eq!(
-                tool.0.load(Ordering::SeqCst),
-                0,
-                "{rejected}: ran without a start record"
-            );
-            assert_eq!(provider.requests().len(), 1, "{rejected}");
-        }
+        assert_eq!(report.outcome, RunOutcome::Error);
+        let error = report.error.unwrap_or_default();
+        assert!(error.contains("disk full on tool_call_started"), "{error}");
+        assert_eq!(tool.0.load(Ordering::SeqCst), 0, "ran without a start record");
+        assert_eq!(provider.requests().len(), 1);
     }
 
     #[tokio::test]

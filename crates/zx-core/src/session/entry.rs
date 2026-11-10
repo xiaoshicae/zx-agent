@@ -16,13 +16,13 @@ use crate::ai::{Message, UserMessageKind, now_ms};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionHeader {
+    /// The session format, [`SESSION_VERSION`]; a session of any other version is refused.
     pub version: u32,
     pub id: String,
     pub timestamp: u64,
     pub cwd: String,
     pub model: String,
-    /// The session file this one was forked from; absent otherwise,
-    /// and in files written before forks existed.
+    /// The session file this one was forked from; absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session: Option<String>,
 }
@@ -120,23 +120,12 @@ impl CustomMessageEntry {
     }
 }
 
-/// Append-only format transition; old headers remain unchanged.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FormatUpgradeEntry {
-    pub id: String,
-    pub parent_id: Option<String>,
-    pub timestamp: u64,
-    pub version: u32,
-}
-
 /// One record of a session after the header: one line of a session file.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Entry {
     Message(MessageEntry),
     ContextEdit(ContextEditEntry),
-    FormatUpgrade(FormatUpgradeEntry),
     CompactionStarted(CompactionStartedEntry),
     Compaction(CompactionEntry),
     CompactionFailed(CompactionFailedEntry),
@@ -156,7 +145,6 @@ impl Entry {
             Self::CompactionFailed(entry) => &entry.id,
             Self::Compaction(entry) => &entry.id,
             Self::CompactionStarted(entry) => &entry.id,
-            Self::FormatUpgrade(entry) => &entry.id,
             Self::RequestConfig(entry) => &entry.id,
             Self::RequestStarted(entry) => &entry.id,
             Self::ToolCallStarted(entry) => &entry.id,
@@ -173,7 +161,6 @@ impl Entry {
             Self::CompactionFailed(entry) => entry.parent_id.as_deref(),
             Self::Compaction(entry) => entry.parent_id.as_deref(),
             Self::CompactionStarted(entry) => entry.parent_id.as_deref(),
-            Self::FormatUpgrade(entry) => entry.parent_id.as_deref(),
             Self::RequestConfig(entry) => entry.parent_id.as_deref(),
             Self::RequestStarted(entry) => entry.parent_id.as_deref(),
             Self::ToolCallStarted(entry) => entry.parent_id.as_deref(),
@@ -187,7 +174,6 @@ impl Entry {
         match self {
             Self::Message(_) => "message",
             Self::ContextEdit(_) => "context_edit",
-            Self::FormatUpgrade(_) => "format_upgrade",
             Self::CompactionStarted(_) => "compaction_started",
             Self::Compaction(_) => "compaction",
             Self::CompactionFailed(_) => "compaction_failed",
@@ -207,7 +193,6 @@ impl Entry {
             Self::Message(entry) => Some((&entry.id, Cow::Borrowed(&entry.message))),
             Self::CustomMessage(entry) => Some((&entry.id, Cow::Owned(entry.projected()))),
             Self::ContextEdit(_)
-            | Self::FormatUpgrade(_)
             | Self::CompactionStarted(_)
             | Self::Compaction(_)
             | Self::CompactionFailed(_)
@@ -226,7 +211,6 @@ impl Entry {
             Self::CompactionFailed(entry) => entry.timestamp,
             Self::Compaction(entry) => entry.timestamp,
             Self::CompactionStarted(entry) => entry.timestamp,
-            Self::FormatUpgrade(entry) => entry.timestamp,
             Self::RequestConfig(entry) => entry.timestamp,
             Self::RequestStarted(entry) => entry.timestamp,
             Self::ToolCallStarted(entry) => entry.timestamp,

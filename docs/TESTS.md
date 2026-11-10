@@ -18,22 +18,22 @@
 | `tests/idempotency.rs` | 幂等提交（P10 ⑫）：键先于提示词写入且同键第二次不发请求、空键被拒、重新打开的会话仍认得键、失败的提交同键被拒后用 `continue_run` 接着做 |
 | `tests/model_meta.rs` | 模型元数据与计量（P10 ⑧）：按单价给回复算成本并在报告与会话文件中相加（服务端回报别的模型名时仍按请求的模型计价）、没有单价时没有成本、token 阈值触发与不触发自动摘要、上下文 token 的估算、按窗口推导阈值的条件、缓存键进入 provider 与请求审计 |
 | `tests/extension_capabilities.rs` | 扩展的运行期能力（P10 ⑦）与队列模式（⑨）：钩子在运行中发消息与记状态（记录顺序、事件、投影）、运行最后的事件中记的状态在报告前写入、宿主限制工具且审计记录每次请求声明的工具、钩子改下一次请求的工具、扩展命令经会话运行且其消息开始一次运行、命令名的检查、空闲时直接写入与运行中 Busy、`one-at-a-time` 每条排队消息各占一个回合 |
-| `tests/custom_records.rs` | 扩展的会话记录（格式 v6）：`custom_message` 投影为用户消息且可被 `context_edit` 省略、`custom` 不进投影、旧会话先升级到 v6 且文件中的字段写法、没有升级的记录被拒绝、空类型不写入 |
+| `tests/custom_records.rs` | 扩展的会话记录：`custom_message` 投影为用户消息且可被 `context_edit` 省略、`custom` 不进投影、文件中的字段写法与重新打开、空类型不写入 |
 | `tests/session_branch.rs` | 会话内切换分支（P10 ⑥c）：`AgentSession::branch` 到更早的回答后继续且离开的分支仍在文件里、接在带未答调用的回答后把调用记为未执行且不再执行、回到根重新开始、运行中返回 Busy、未知条目被拒且位置不变、`inspect` 期间会话被占用 |
-| `tests/session_fork.rs` | 复制分支成新会话（P10 ⑥b）：只复制选中的分支、条目逐字节相同、头部的 `parentSession` 与格式版本、副本可重新打开并追加、源文件不变、复制来的请求能从副本还原；目标不为空、叶子不存在、格式版本不同时不写入；没有 `parentSession` 的头部保持原格式 |
+| `tests/session_fork.rs` | 复制分支成新会话（P10 ⑥b）：只复制选中的分支、条目逐字节相同、头部的 `parentSession`、副本可重新打开并追加、源文件不变、复制来的请求能从副本还原；目标不为空、叶子不存在时不写入；没有 `parentSession` 的头部保持原格式 |
 | `tests/sessions_cli.rs` | 会话目录（P10 ⑥a、⑥b）：chat 默认的位置、文件名与权限，`--no-session`，`--resume` 取本工作目录最近的会话或按 ID 前缀，`--session-dir`，`zx-agent sessions` 的顺序与预览，chat 的 `/sessions`、`/resume` 与 `/new`；`--fork` 按 ID 或文件复制、找不到时不建文件，`/fork` 之后只写副本，`--no-session` 时没有可复制的文件；`/tree` 的分支与标记、`/branch` 接在条目之后或自己的消息之前、`/fork` 复制到移动后的位置、ID 不唯一或不存在时的提示（固定 ID 的种子会话 `seed_tree`）。每个测试有自己的 `HOME`；启动 chat 的其他测试构造器同样把 `HOME` 设到临时目录，新的构造器也要这样做，否则会写进真实的家目录 |
 | `tests/chat_cli.rs` | chat 的脚本 stdin、审批与过期（含 `y`、`n` 别名，默认 profile 下 write_file 先审批，文件内容与编辑逐项显示）、工具行与结果预览（含 edit_file 的补丁）、`[turn]` 行与 `/status`、`--color`、续接会话的提示、重试错误只报一次、无用量的 `[turn]`、`--show-thinking`、`--queue-mode` 与 `/queue`、`[[models]]` 的单价与 `[turn]` / `/status` 的成本、`--header` 与 `--prompt-cache-key`、`[[models]]` 的 `contextWindow` 推导的 token 阈值、信号与超时（取消只报告一次，空闲时 Ctrl+C 两次退出）、取消后丢弃残留插话、钩子失败的提示、Unicode、模型与推理强度的切换、`/continue`、会话重置和 Unix PTY（插话、粘贴合并、等待时的状态行、回答前后的空行） |
 | `tests/acp_cli.rs` | `acp`：手写的 JSON-RPC 客户端经子进程 stdio 驱动：初始化与建会话、流式回答、工具调用与权限请求（批准、拒绝）、取消、未知会话、`write_file` 的 diff 与自动放行；会话落盘与 `session/load`（第二个进程回放后继续、工具调用连同结果、`--session-dir`、`--no-session`、未知会话、`--session` 被拒；`session/list` 的顺序、标题、时间、按 cwd 过滤与 `cursor` 拒绝；`session/resume` 不回放）；每个进程有自己的 `HOME`；stdout 的每一行都必须是协议消息 |
 | `tests/profiles_cli.rs` | profile/CLI 覆盖与 deny、项目上下文范围、默认值与越界链接、skill 懒加载、工具策略和审计 |
-| `tests/session_compaction.rs`、`tests/compaction.rs` | 追加升级、分支 / 引用与原始投影、自动 / 手动摘要、摘要源不含工具结果的 `details`、计费（摘要请求计入请求与 token 预算）、steering、失败、取消与超时 |
-| `tests/incremental_summary.rs` | 增量摘要（v5）：接续与只读新增记录、接续全量摘要、取代、淘汰、修正后的作废与重读、加载校验、请求还原、请求大小不随历史增长；摘要评测的脚本会话自检，以及用知道答案的假模型验证评分 |
-| `tests/request_audit.rs` | 请求审计（G3）：从会话文件还原每次请求、配置变化才追加、旧会话升级时机；上下文过长后恢复的三个请求；固定会话 `tests/fixtures/replay-v4.jsonl` 与含增量摘要的 `replay-v5.jsonl` 的还原结果与期望文件逐字节比对，改变还原结果须同时升级转换版本或会话格式 |
+| `tests/session_compaction.rs`、`tests/compaction.rs` | 分支 / 引用与原始投影、自动 / 手动摘要、摘要源不含工具结果的 `details`、计费（摘要请求计入请求与 token 预算）、steering、失败、取消与超时 |
+| `tests/incremental_summary.rs` | 增量摘要：接续与只读新增记录、接续全量摘要、取代、淘汰、修正后的作废与重读、加载校验、请求还原、请求大小不随历史增长；摘要评测的脚本会话自检，以及用知道答案的假模型验证评分 |
+| `tests/request_audit.rs` | 请求审计（G3）：从会话文件还原每次请求、配置变化才追加；上下文过长后恢复的三个请求；固定会话 `tests/fixtures/replay-full.jsonl` 与含增量摘要的 `replay-incremental.jsonl` 的还原结果（格式化后的 JSON）与期望文件逐字节比对，改变还原结果须同时提高会话格式或转换版本，使此前的文件被拒绝 |
 | `tests/executor.rs` | 执行器接缝：工具只经自身执行器运行命令和读写文件（grep 的脚本与 shell），本机执行器对 bash 与搜索的命令都隐藏变量，结束方式的报告，执行方式随执行器，不能写文件的执行器 |
 | `tests/search_tools.rs` | grep、find、ls 在本机：有无 ripgrep 时断言都要成立（本机没有 rg，CI 可能有）；注入的模式与路径不被执行 |
 | `tests/file_tools.rs` | edit_file 与 write_file 在本机：新建、覆盖、多处替换、BOM 与 CRLF、patch，每类失败后文件不变，取消，旧参数写法；同一批调用改同一文件（`SlowReads` 执行器让两次读取都先于写入）时两处改动都生效 |
 | `tests/compaction.rs` | 会话宿主的摘要：手动 compact 是有界、无工具的请求且会话可复用；自动摘要计入任务请求预算、用量与 token 预算，不能超出请求上限；摘要期间收到的 steering 在下一次任务请求前持久化；SDK 默认不发摘要请求；摘要请求与上下文大小不含工具结果的 `details`；重复摘要读原文而不是旧摘要；无效或截断的摘要不替换上下文、不当作任务重试；失败的自动摘要下一次 prompt 不再付费；运行的 future 被丢弃后暂停仍在；已知的 API key 在事件与会话文件前脱敏 |
 | `tests/container.rs` | 容器执行：假 docker 程序（在测试目录里记录参数、按文件应答）覆盖启动（默认放开与严格模式）、命令、读写文件、清理、逐个执行（排队的调用在取消后记为未执行）、所用 shell 与 CLI（含 `rules.approveAll` 下 chat 不询问 bash、run 执行 `allowTools` 以外的 MCP 工具、本机执行时报错）；名字以 `real_` 开头的测试在设置 `ZX_DOCKER_TEST_IMAGE`（本地已有、带 bash 的镜像）时对真实 Docker 运行，否则打印提示后返回；工作目录要让容器用户可读（见 `real_workspace`） |
-| `tests/crash_recovery.rs` | 崩溃恢复：开始记录先于执行、中断调用的四种恢复结果且不重放、失败或取消的回答中的调用记为未执行、恢复事件在结果写入之后、旧格式会话、丢弃 future 与 SIGKILL 后恢复 |
+| `tests/crash_recovery.rs` | 崩溃恢复：开始记录先于执行、中断调用的四种恢复结果且不重放、失败或取消的回答中的调用记为未执行、恢复事件在结果写入之后、丢弃 future 与 SIGKILL 后恢复 |
 | `tests/output_store.rs` | 脱敏顺序、UUID 与文件边界、Unix 权限、UTF-8 分页、容量、取消、存储超时与错误回退 |
 | `tests/hooks.rs`、`tests/hooks_cli.rs` | 六个钩子、钩子上下文、具名注册与阶段顺序、审批与失败回退、变换持久化（钩子不能追加 system 消息）、`observes` 的 panic 隔离、工具的声明名与元数据检查、工具取消自己的令牌、已知密钥脱敏接线（含进度与 `details`）、钩子失败的文本输出、密钥文件的有损解码匹配与启动检查、内置钩子的固定名称、短值提示 |
 | `tests/hook_contract.rs` | 钩子输入输出的 JSON 契约（含 `RequestSettings`），改格式会破坏钩子进程与审批转发 |

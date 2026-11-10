@@ -1,4 +1,4 @@
-{"type":"session","version":5,"id":"a2e60293-dd70-4154-b9d3-24ce06c569f6","timestamp":1793552553724,"cwd":".","model":"test-model"}
+{"type":"session","version":6,"id":"a2e60293-dd70-4154-b9d3-24ce06c569f6","timestamp":1793552553724,"cwd":".","model":"test-model"}
 {"type":"message","id":"d3d1899c","parentId":null,"timestamp":1793552553726,"message":{"role":"system","sections":[{"name":"preamble","content":"You are a test agent."},{"name":"environment","content":"OS: test"}],"timestamp":1793552553726}}
 {"type":"message","id":"5a430567","parentId":"d3d1899c","timestamp":1793552553726,"message":{"role":"user","content":"Which pods run?","timestamp":1793552553726}}
 {"type":"request_config","id":"39b131ef","parentId":"5a430567","timestamp":1793552553726,"config":{"provider":"fixture","model":"test-model","tools":[{"name":"echo","description":"Return the given text.","parameters":{"properties":{"text":{"type":"string"}},"required":["text"],"type":"object"}}],"maxTokens":512,"providerOptions":{"format":"openai-chat-completions","systemUpdates":"collapse","version":1}}}

@@ -70,7 +70,6 @@ fn describe(entry: &Entry) -> Option<(&'static str, String)> {
             ),
         )),
         Entry::ContextEdit(_)
-        | Entry::FormatUpgrade(_)
         | Entry::CompactionStarted(_)
         | Entry::CompactionFailed(_)
         | Entry::RequestConfig(_)

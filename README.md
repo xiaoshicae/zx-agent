@@ -593,24 +593,24 @@ run、chat 与 serve 在设置了下面的标准变量时，用 OTLP/HTTP（prot
 第一行是头部，之后每行一个条目，条目之间通过 `parentId` 连成一棵树：
 
 ```json
-{"type":"session","version":4,"id":"…","timestamp":1761700000000,"cwd":"/srv","model":"…"}
+{"type":"session","version":6,"id":"…","timestamp":1761700000000,"cwd":"/srv","model":"…"}
 {"type":"message","id":"f0e1d2c3","parentId":null,"timestamp":…,"message":{"role":"system","sections":[{"name":"preamble","content":"…"},{"name":"environment","content":"…"}],"timestamp":…}}
 {"type":"message","id":"a1b2c3d4","parentId":"f0e1d2c3","timestamp":…,"message":{"role":"user","content":"…","timestamp":…}}
 {"type":"message","id":"b2c3d4e5","parentId":"a1b2c3d4","timestamp":…,"message":{"role":"assistant","stopReason":"error","errorMessage":"HTTP 503: …",…}}
 {"type":"context_edit","id":"c3d4e5f6","parentId":"b2c3d4e5","timestamp":…,"targetId":"b2c3d4e5","replacement":null}
 ```
 
-复制出来的会话（`--fork`、`/fork`）在头部多一个 `parentSession`，值为源会话文件的绝对路径；其他会话没有这个字段，旧版本的程序读取时忽略它。
+复制出来的会话（`--fork`、`/fork`）在头部多一个 `parentSession`，值为源会话文件的绝对路径；其他会话没有这个字段。
 
-格式版本 6 增加扩展的两种记录：`custom`（`customType`、可选的 `data`）只是扩展的状态，不进入模型上下文；`custom_message`（`customType`、`content`、`display`、可选的 `details`）是扩展发给模型的消息，投影成一条 `kind` 为 `custom` 的用户消息，可以像用户消息一样被 `context_edit` 省略或替换。旧版本的会话在第一条这样的记录之前先追加 `format_upgrade` 到 6；旧版本的程序读不了含这两种记录的文件。
+扩展有两种记录：`custom`（`customType`、可选的 `data`）只是扩展的状态，不进入模型上下文；`custom_message`（`customType`、`content`、`display`、可选的 `details`）是扩展发给模型的消息，投影成一条 `kind` 为 `custom` 的用户消息，可以像用户消息一样被 `context_edit` 省略或替换。
 
-`context_edit` 不能指向 system 或合成摘要消息：提示词变化以新的 system 消息记录，摘要通过新压缩生成。修正被摘要引用的原消息会使该摘要失效，投影回到已应用修正的原始记录。版本 1 的文件（头部带 `systemPrompt`）仍可打开，下次运行会把提示词作为 system 消息补进对话。
+`context_edit` 不能指向 system 或合成摘要消息：提示词变化以新的 system 消息记录，摘要通过新压缩生成。修正被摘要引用的原消息会使该摘要失效，投影回到已应用修正的原始记录。
 
 同一会话文件同一时间只能有一个写入者。创建或打开时用 `flock(2)` 加独占锁，锁持续到会话关闭；进程退出（包括被 SIGKILL）时由系统释放。其他进程，或同一进程里的另一个 `SessionStore`，再打开该文件会报错（`is in use`），`run` 与 `chat` 以退出码 2 结束，不写入任何内容。报错前最多重试 0.5 秒：本进程正在启动的子进程在运行自己的程序之前持有父进程文件描述符的副本，刚关闭的会话可能因此短暂保持锁定。文件系统不支持 `flock` 时打开失败；Unix 以外的平台不加锁。只查看内容可用 `SessionStore::read`：不加锁、不修改文件，未写完的尾记录不计入，得到的快照不能追加。
 
 如果进程在写入最后一行时崩溃，未换行且确实未完成的尾记录会在下次打开时截掉，包括截断在 UTF-8 字符中间的情况。写入失败（如磁盘已满）后不再写入，因此留下的残缺同样只在文件末尾，按同一规则修复。CLI 会在 stderr 报告修复；库调用方可读取 `SessionStore::recovered_tail_bytes()`。完整记录缺少末尾换行时会补换行；已换行的损坏记录、未知记录类型和完整记录的字段错误会报错并保留文件。截掉尾记录发生在其余记录全部通过校验之后，因此打开失败时文件保持原样。
 
-新建会话格式为 v6，兼容读取 v1–v5。旧文件在首次写入请求或压缩记录前追加 `format_upgrade`（version 3），在首次写入 `tool_call_started` 前追加 `format_upgrade`（version 4），在第一次增量摘要前追加 `format_upgrade`（version 5），在首次写入扩展的 `custom` 或 `custom_message` 记录前追加 `format_upgrade`（version 6），都不改写头部。只支持到 v5 的程序会拒绝打开 v6 会话。压缩时先追加 `compaction_started`，请求完成后追加 `compaction` 或 `compaction_failed`。未完成或失败记录不改变投影；成功记录保留全部 system、结构化摘要及 `firstKeptEntryId` 之后的原消息，原始历史仍可审计。默认的全量模式下，摘要来源是应用过 `context_edit` 的原始投影，不输入旧摘要；可选的增量模式（v5，见 [PROFILES.md](docs/PROFILES.md)）下，后一次摘要沿用前一次仍有效的事实，只读取其边界之后的记录与此后被修正的旧记录。
+会话格式的版本是 6（`session::SESSION_VERSION`），只读写这一个版本：头部版本不是 6 的文件，无论更旧还是更新，打开、读取都报错（`session format version <N> is not supported; only version 6 can be read or written`），文件保持原样；`SessionStore::create` 也拒绝其他版本的头部。格式变化时提高版本号，此前的文件随之无法打开，不做升级或兼容读取。压缩时先追加 `compaction_started`，请求完成后追加 `compaction` 或 `compaction_failed`。未完成或失败记录不改变投影；成功记录保留全部 system、结构化摘要及 `firstKeptEntryId` 之后的原消息，原始历史仍可审计。默认的全量模式下，摘要来源是应用过 `context_edit` 的原始投影，不输入旧摘要；可选的增量模式（见 [PROFILES.md](docs/PROFILES.md)）下，后一次摘要沿用前一次仍有效的事实，只读取其边界之后的记录与此后被修正的旧记录。
 
 每次模型请求（任务请求与摘要请求）发出前，先追加 `request_started`；provider、模型、工具定义、`max_tokens` 或 provider 转换参数变化时，先追加一条 `request_config`。`request_started` 引用配置，并记录消息来源：会话投影（以该条目的父节点为准），或摘要尝试的源条目与请求时间戳。库调用方可用 `SessionStore::replay_request` 还原当时与 provider 无关的 `Request`，OpenAI 兼容服务可再用 `openai::replay_body` 重建请求体。会话文件不记录 API key、URL 和 HTTP 头；自定义 provider 通过 `Provider::request_options` 提供非机密的转换参数，默认为 `null`，此时只能还原到 `Request`。这些记录写入失败时不发请求，并中止运行。`request_started` 只表示准备发送，后面没有对应的回答，说明发送结果未知。
 
@@ -627,7 +627,7 @@ run、chat 与 serve 在设置了下面的标准变量时，用 OTLP/HTTP（prot
 
 文本输出在 stderr 打印 `[recover] <工具名> <调用 ID>: <状态>`。只处理分支末尾的调用：之后已有其他消息、已被 `context_edit` 省略或已被摘要替代的调用不补结果；这些情况下，发给模型时仍补 `No result provided` 占位。重试时省略的失败回答属于"已被省略"。
 
-`providerError` 仍是可选消息字段；续写请求可带 `kind: "continueAnswer"`，报告据此拼接答案。普通 user 消息的 JSON 不变，旧文件缺少 `kind` 时按普通输入处理。
+`providerError` 仍是可选消息字段；续写请求可带 `kind: "continueAnswer"`，报告据此拼接答案。普通输入不写 `kind`，缺少 `kind` 的 user 消息按普通输入处理。
 
 ## 作为库使用
 
@@ -775,7 +775,7 @@ pub trait SessionLog: Send + Sync {
 
 `session::list_sessions(dir)` 读取一个目录中的 `*.jsonl` 会话文件，与 `SessionStore::read` 一样不加锁、不修改文件，按最近活动排序，返回 `SessionList`：`latest_in(cwd)` 取某个工作目录（按头部的 `cwd` 比较）最近的会话，`find(前缀)` 取 ID 以它开头的唯一会话；读不了的文件列在 `unreadable`。每个文件都完整读取，耗时与会话大小成正比，是阻塞 I/O。
 
-复制一个分支成新会话（pi 的 `createBranchedSession`）：用源会话的 `fork_header(cwd, model)` 新建会话（新的 ID 与时间，源会话的格式版本，源文件写进 `parent_session`），再调用 `copy_branch(&源会话, 叶子条目 ID)`，按从根到叶子的顺序原样追加这条分支上的条目，返回条目数。目标会话必须为空、两边头部的格式版本必须相同，否则不写入任何内容并报错；中途写入失败时与其他追加一样停写。源会话只被读取，可以是 `SessionStore::read` 得到的快照。
+复制一个分支成新会话（pi 的 `createBranchedSession`）：用源会话的 `fork_header(cwd, model)` 新建会话（新的 ID 与时间，源文件写进 `parent_session`），再调用 `copy_branch(&源会话, 叶子条目 ID)`，按从根到叶子的顺序原样追加这条分支上的条目，返回条目数。目标会话必须为空、叶子必须在源会话中，否则不写入任何内容并报错；中途写入失败时与其他追加一样停写。源会话只被读取，可以是 `SessionStore::read` 得到的快照。
 
 在会话内切换分支：`SessionStore::branch(条目 ID)` 把叶子移到已有的条目，`reset_leaf()` 移到第一条之前（pi 的 `branch`、`resetLeaf`），之后追加的条目在那里开新分支；都只移动指针、不写入。打开或读取会话时叶子总是最后一条记录。`branch_path()` 给出根到叶子的条目，`entries()` 给出全部条目（含离开的分支），条目的 `parent_id()` 连成树。
 
@@ -825,14 +825,14 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 | `tests/profiles_cli.rs` | profile 覆盖、显式默认值、预算参数的 help 写明取自 profile、不可绕过的 deny、上下文范围与审计、上下文默认值与越界链接、skill 懒加载与脱敏、配置错误（含 provider 参数）退出码且不建会话文件 |
 | `tests/run_cli.rs` | `run` 在 P0 之后新增的约定：进度与报告行转义终端控制字符；另一个 `run` 正在写的会话文件不能再被打开写入；JSONL 事件的信封；为零的超时在请求前被拒绝；stdout 已关闭时退出码仍由运行结果决定；token 预算的退出码 7、最后一次请求可超出预算、profile 设置预算与命令行的 0 关闭；成本预算的退出码 8、模型没有单价或预算为负时以退出码 2 结束；被拒的调用数出现在报告行，`--fail-on-denied` 只在有被拒调用时把 0 换成 9；只在设置了 OTLP 地址时导出追踪与指标，导出内容不含回答；`TRACEPARENT` 让运行接续调用方的 trace，不合法时提示并自成一条；`--request-field` 到达模型并写入请求审计，写错时以退出码 2 结束且不建会话文件；`--fill-missing-reasoning` 默认关闭，开启时写入请求审计；`--reasoning` 按三种写法到达模型并写入请求审计，写错或与 `--request-field` 冲突时以退出码 2 结束（原有 `run` 测试仍在 `tests/cli.rs`） |
 | `tests/otel.rs` | 一次真实运行导出一条 trace：每次尝试、回合、模型请求与工具调用各一个 span，用量与工具属性正确；同一次运行经宿主的 `SdkMeterProvider` 导出指标（运行数、token、请求与工具调用的次数）；`sink_under` 让运行接续给定的 traceparent；`src/otel/` 的单元测试另覆盖嵌套与时间、只含元数据、运行结束时关闭未结束的 span、手动摘要自成一条 trace 且其 token 只计一次、指标的属性与时长、traceparent 的解析与拒绝、队列满时丢弃并计数 |
-| `tests/session_compaction.rs`、`tests/compaction.rs` | v1/v2 追加升级、分支和引用、原始投影、省略保留边界后摘要仍生效、编辑摘要的变换计划在写入前被拒绝、摘要源与上下文字节统计不含工具结果的 `details`、摘要失败与取消、请求 / 用量预算、超时和上限 |
-| `tests/incremental_summary.rs` | 增量摘要（v5）：第一次读取整段前缀并给事实编号、之后只读旧事实与新增记录、可接续全量模式留下的摘要、取代与淘汰、修正只作废相关事实并在下一次重读、模型不能自带编号、加载时拒绝违反规则的记录、请求可从会话文件还原、多轮之后请求大小不随历史增长（与全量模式对照）；摘要评测的脚本会话自检，以及用知道答案的假模型验证评分 |
-| `tests/request_audit.rs` | 每次任务与摘要请求可从会话文件还原、配置只在变化时追加、旧会话首次请求前升级、与投影不一致的请求不记录、固定会话文件（v4 与含增量摘要的 v5）的还原结果不变（版本守护） |
+| `tests/session_compaction.rs`、`tests/compaction.rs` | 分支和引用、原始投影、省略保留边界后摘要仍生效、编辑摘要的变换计划在写入前被拒绝、摘要源与上下文字节统计不含工具结果的 `details`、摘要失败与取消、请求 / 用量预算、超时和上限 |
+| `tests/incremental_summary.rs` | 增量摘要：第一次读取整段前缀并给事实编号、之后只读旧事实与新增记录、可接续全量模式留下的摘要、取代与淘汰、修正只作废相关事实并在下一次重读、模型不能自带编号、加载时拒绝违反规则的记录、请求可从会话文件还原、多轮之后请求大小不随历史增长（与全量模式对照）；摘要评测的脚本会话自检，以及用知道答案的假模型验证评分 |
+| `tests/request_audit.rs` | 每次任务与摘要请求可从会话文件还原、配置只在变化时追加、与投影不一致的请求不记录、固定会话文件（全量摘要与增量摘要各一份）的还原结果逐字节不变（版本守护） |
 | `tests/executor.rs` | 执行器接缝：bash 与 read_file 只经自身执行器运行命令和读文件，命令的 6 种结束方式均正确报告，执行方式随执行器；不能写文件的执行器让 edit_file 报错 |
 | `tests/search_tools.rs` | grep、find、ls 在本机（有无 ripgrep 时断言都成立）：匹配行的路径与行号、忽略大小写 / 字面量 / glob、点文件与跳过 `.git`、无结果与报错、limit、超长行截断、注入的模式与路径不被执行、取消 |
 | `tests/file_tools.rs` | edit_file 与 write_file：新建、覆盖与上级目录，多处替换、BOM 与 CRLF、patch，每类失败后文件不变，取消，旧参数写法，同一批调用改同一文件时两处改动都生效 |
 | `tests/container.rs` | 容器执行：用假 docker 程序验证启动参数与失败报告、命令与读文件的转发、超时 / 取消 / 丢弃后的清理、工具逐个执行（排队的调用在取消后记为未执行）、命令用配置的 shell、启动失败不留会话文件、CLI 接线与配置错误；设置 `ZX_DOCKER_TEST_IMAGE` 时另对真实 Docker 验证默认的用户、可写工作目录与网络，严格模式的只读与无网络、命令进程树与 `setsid` 子进程的终止、清理不受命令写入影响、命令逐条执行、容器内读文件、chat 中 Ctrl-C 后容器仍在、zx-agent 正常结束或被 SIGKILL 后容器删除（CI 在 Linux 上用 `debian:bookworm-slim` 运行）；另验证 root 用户、共用宿主机网络与工作目录内的会话文件被拒绝，`rules.approveAll` 时 chat 不再询问 bash、run 执行 `allowTools` 以外的 MCP 工具，以及在本机执行时报配置错误 |
-| `tests/crash_recovery.rs` | 内置工具的副作用声明、开始记录先于执行（串行与并行批次）、中断批次的四种恢复结果且不重放、失败或取消的回答中的调用记为未执行、恢复事件在结果写入之后、旧格式会话、丢弃 future 后的同进程恢复、`run` 的 `[recover]` 输出；Unix 上 SIGKILL 掉正在执行命令的 `run`，再由下一次 `run` 恢复且不重放 |
+| `tests/crash_recovery.rs` | 内置工具的副作用声明、开始记录先于执行（串行与并行批次）、中断批次的四种恢复结果且不重放、失败或取消的回答中的调用记为未执行、恢复事件在结果写入之后、丢弃 future 后的同进程恢复、`run` 的 `[recover]` 输出；Unix 上 SIGKILL 掉正在执行命令的 `run`，再由下一次 `run` 恢复且不重放 |
 | `tests/output_store.rs` | 先脱敏后落盘、UUID 边界、文件权限、UTF-8 分页、容量、取消、写盘失败或超时时保留内联结果、目录越界与 `.gitignore` |
 | `tests/hooks.rs`、`tests/hooks_cli.rs` | 钩子组合与失败处理、审批范围与取消、审计变换、输入钩子被取消或运行被丢弃时不写入输入且插话留在队列、策略结论与审批事件（询问、会话内授权、拒绝、失败、超时、取消、等待时长）、观察者默认跳过增量、钩子上下文（会话、运行、工作目录与取消信号）、具名钩子、按阶段执行与先注册的脱敏仍在扩展之后、进度只经脱敏钩子、`details` 中字符串与对象键的脱敏、重名或声明名不一致的工具在请求前被拒绝、工具元数据 panic 时运行失败、`observes` 的 panic 被报告且运行继续、钩子不能追加 system 消息、工具取消自己的令牌不影响运行、续写预算、工具输出脱敏的 CLI 接线、脱敏失败在文本输出中的提示、非 UTF-8 密钥文件按有损解码匹配、无法匹配的密钥文件在启动时报配置错误、内置钩子的固定名称、短值在启动时提示 |
 | `tests/hook_contract.rs` | 钩子输入输出的 JSON 契约：策略结论、回合决定、上下文编辑、审批及其请求、工具输出（含可选的 `details`）与调用、钩子上下文、回合摘要 |

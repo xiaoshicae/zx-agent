@@ -349,14 +349,17 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use crate::ai::Message;
-    use crate::session::SessionStore;
     use crate::session::test_support::{assistant, header, texts};
+    use crate::session::{SESSION_VERSION, SessionStore};
 
-    /// A session file with a v2 header followed by `entries`, one per line, unterminated.
+    /// A session file with a header followed by `entries`, one per line, unterminated.
     fn session_file(dir: &Path, entries: &[&str]) -> PathBuf {
         let path = dir.join("s.jsonl");
-        let header = r#"{"type":"session","version":2,"id":"h","timestamp":1,"cwd":"/","model":"m"}"#;
-        let lines: Vec<&str> = std::iter::once(header).chain(entries.iter().copied()).collect();
+        let header =
+            format!(r#"{{"type":"session","version":{SESSION_VERSION},"id":"h","timestamp":1,"cwd":"/","model":"m"}}"#);
+        let lines: Vec<&str> = std::iter::once(header.as_str())
+            .chain(entries.iter().copied())
+            .collect();
         std::fs::write(&path, lines.join("\n")).unwrap();
         path
     }

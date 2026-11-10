@@ -6,7 +6,7 @@
 //! earlier messages without touching the raw history, which stays available for auditing.
 //!
 //! A [`SessionLog`] keeps the entries: the JSONL session file by default, or a backend of
-//! the host's choice. The format's history is with [`SESSION_VERSION`].
+//! the host's choice. Only the current format, [`SESSION_VERSION`], is read and written.
 //!
 //! - `entry`: the header and the entries of the tree
 //! - `log` and `jsonl`: where the entries are kept, and the JSONL session file
@@ -33,8 +33,8 @@ mod test_support;
 mod tests;
 pub use directory::{SessionInfo, SessionList, Unreadable, list_sessions};
 pub use entry::{
-    ContextEditEntry, CustomEntry, CustomMessage, CustomMessageEntry, Entry, FormatUpgradeEntry, MessageEntry,
-    ProjectedMessage, SessionHeader,
+    ContextEditEntry, CustomEntry, CustomMessage, CustomMessageEntry, Entry, MessageEntry, ProjectedMessage,
+    SessionHeader,
 };
 pub use log::{LoadedSession, LogRecord, SessionLog};
 pub(crate) use projection::without_details;
@@ -58,23 +58,10 @@ use crate::ai::{Message, now_ms};
 use entry::HeaderLine;
 use jsonl::JsonlFile;
 
-/// Format version written to new session headers. Version 6 adds the `custom` and
-/// `custom_message` records of extensions. Version 5 adds incremental summaries. Version 4
-/// adds `tool_call_started`. Version 3 adds auditable compaction, request records and
-/// append-only format upgrades. Version 2 records the system prompt as system messages in
-/// the conversation; version 1 kept it in the header. Version 1 files still open: the old
-/// header field is ignored, and the next run records the prompt as a message.
+/// The session format: written to every new header, and the only version a session may have
+/// to be created or loaded. A change to the format raises it, and sessions of any other
+/// version are refused.
 pub const SESSION_VERSION: u32 = 6;
-
-/// The format that adds auditable compaction, request records and append-only upgrades.
-const COMPACTION_VERSION: u32 = 3;
-/// The format that records that a tool call with side effects started.
-const START_RECORDS_VERSION: u32 = 4;
-/// The format that adds incremental summaries: `mode` and `continues` on attempts, fact IDs
-/// and `supersedes`, and `superseded` and `evicted` on results.
-const INCREMENTAL_SUMMARY_VERSION: u32 = 5;
-/// First format version with the `custom` and `custom_message` records of extensions.
-const CUSTOM_RECORDS_VERSION: u32 = 6;
 
 /// How long one append may wait for its log, such as a database that stopped answering.
 /// A file append finishes long before; a timed-out append stops writing, like a failed one.
@@ -114,7 +101,6 @@ pub struct SessionStore {
     stopped: Option<WritesStopped>,
     append_timeout: Duration,
     header: SessionHeader,
-    format_version: u32,
     entries: Vec<Entry>,
     index: HashMap<String, usize>,
     leaf: Option<String>,
@@ -129,7 +115,6 @@ impl SessionStore {
             log: None,
             stopped: None,
             append_timeout: APPEND_TIMEOUT,
-            format_version: header.version,
             header,
             entries: Vec::new(),
             index: HashMap::new(),
@@ -147,8 +132,8 @@ impl SessionStore {
     }
 
     /// Rebuild a stored session from `loaded` and append to `log` from then on. Checks the
-    /// format version and every record, as opening a session file does. The leaf is the last
-    /// entry.
+    /// format version, which must be [`SESSION_VERSION`], and every record, as opening a
+    /// session file does. The leaf is the last entry.
     pub fn load(loaded: LoadedSession, log: Box<dyn SessionLog>) -> Result<Self> {
         let mut store = Self::replay(loaded)?;
         store.log = Some(log);
@@ -161,12 +146,7 @@ impl SessionStore {
             records,
             repaired_bytes,
         } = loaded;
-        if header.version > SESSION_VERSION {
-            bail!(
-                "session version {} is newer than the supported version {SESSION_VERSION}",
-                header.version
-            );
-        }
+        ensure_current_version(&header)?;
         let mut store = Self::in_memory(header);
         for (position, record) in (1..).zip(&records) {
             let entry: Entry = serde_json::from_str(record).map_err(|error| anyhow!("entry {position}: {error}"))?;
@@ -179,9 +159,11 @@ impl SessionStore {
         Ok(store)
     }
 
-    /// Create a new session file, with its header written at once. Fails if the file exists.
-    /// On Unix the file stays locked while the store exists; see [`SessionStore::open`].
+    /// Create a new session file, with its header written at once. Fails if the file exists
+    /// or the header's version is not [`SESSION_VERSION`], which no session could load. On
+    /// Unix the file stays locked while the store exists; see [`SessionStore::open`].
     pub fn create(path: &Path, header: SessionHeader) -> Result<Self> {
+        ensure_current_version(&header)?;
         let file = JsonlFile::create(path, &header)?;
         Ok(Self {
             path: Some(path.to_path_buf()),
@@ -303,10 +285,8 @@ impl SessionStore {
     }
 
     /// Record state of an extension, which never reaches the model (pi: `appendEntry`).
-    /// Older sessions get a format upgrade to v6 first. `custom_type` must not be blank.
+    /// `custom_type` must not be blank.
     pub async fn append_custom_entry(&mut self, custom_type: &str, data: serde_json::Value) -> Result<String> {
-        ensure_custom_type(custom_type)?;
-        self.ensure_format(CUSTOM_RECORDS_VERSION).await?;
         let entry = Entry::Custom(CustomEntry {
             id: self.new_id(),
             parent_id: self.leaf.clone(),
@@ -318,11 +298,8 @@ impl SessionStore {
     }
 
     /// Record a message from an extension, which the model sees as a user message from now
-    /// on (pi: `sendMessage`). Older sessions get a format upgrade to v6 first. The
-    /// message's `custom_type` must not be blank.
+    /// on (pi: `sendMessage`). The message's `custom_type` must not be blank.
     pub async fn append_custom_message(&mut self, message: CustomMessage) -> Result<String> {
-        ensure_custom_type(&message.custom_type)?;
-        self.ensure_format(CUSTOM_RECORDS_VERSION).await?;
         let entry = Entry::CustomMessage(CustomMessageEntry {
             id: self.new_id(),
             parent_id: self.leaf.clone(),
@@ -352,7 +329,6 @@ impl SessionStore {
             Some(Entry::CustomMessage(_)) => {}
             Some(
                 Entry::ContextEdit(_)
-                | Entry::FormatUpgrade(_)
                 | Entry::CompactionStarted(_)
                 | Entry::Compaction(_)
                 | Entry::CompactionFailed(_)
@@ -391,11 +367,9 @@ impl SessionStore {
 
     /// The header of a session that continues one of this session's branches, for
     /// [`SessionStore::copy_branch`]: a fresh ID and start time, the given working directory
-    /// and model, this session's file as `parent_session`, and this session's format
-    /// version, which the copied entries were written under.
+    /// and model, and this session's file as `parent_session`.
     pub fn fork_header(&self, cwd: &Path, model: &str) -> SessionHeader {
         SessionHeader {
-            version: self.header.version,
             parent_session: self.path.as_ref().map(|path| path.display().to_string()),
             ..SessionHeader::new(cwd, model)
         }
@@ -403,23 +377,15 @@ impl SessionStore {
 
     /// Append the entries of `source` from its root to `leaf`, unchanged: the same IDs,
     /// parents, timestamps and content, so the projection, compactions and request audit of
-    /// that branch carry over. Returns how many entries were
-    /// copied. Fails without writing when this session already has entries, `leaf` is not
-    /// in `source`, or the format versions of the two headers differ (see
-    /// [`SessionStore::fork_header`]). A failed append stops writing, as any append does.
+    /// that branch carry over. Returns how many entries were copied. Fails without writing
+    /// when this session already has entries or `leaf` is not in `source`. A failed append
+    /// stops writing, as any append does.
     pub async fn copy_branch(&mut self, source: &Self, leaf: &str) -> Result<usize> {
         if !self.entries.is_empty() {
             bail!("a branch can only be copied into an empty session");
         }
         if source.get(leaf).is_none() {
             bail!("entry {leaf} not found");
-        }
-        if self.header.version != source.header.version {
-            bail!(
-                "the session has format version {} but its source {}; start it with fork_header",
-                self.header.version,
-                source.header.version
-            );
         }
         let path = source.branch_path_from(Some(leaf));
         for entry in &path {
@@ -493,9 +459,6 @@ impl SessionStore {
     }
 
     fn insert(&mut self, entry: Entry) {
-        if let Entry::FormatUpgrade(upgrade) = &entry {
-            self.format_version = upgrade.version;
-        }
         let id = entry.id().to_string();
         self.index.insert(id.clone(), self.entries.len());
         self.entries.push(entry);
@@ -511,6 +474,16 @@ impl SessionStore {
             }
         }
     }
+}
+
+/// Only the current format is read and written: a session of another version is refused.
+fn ensure_current_version(header: &SessionHeader) -> Result<()> {
+    ensure!(
+        header.version == SESSION_VERSION,
+        "session format version {} is not supported; only version {SESSION_VERSION} can be read or written",
+        header.version
+    );
+    Ok(())
 }
 
 /// A custom type names what an extension recorded; a blank one would name nothing.
@@ -534,59 +507,16 @@ impl SessionStore {
         }
         match entry {
             Entry::Message(_) => {}
-            Entry::Custom(custom) => {
-                ensure!(
-                    self.format_version >= CUSTOM_RECORDS_VERSION,
-                    "custom records require a format upgrade to v{CUSTOM_RECORDS_VERSION}"
-                );
-                ensure_custom_type(&custom.custom_type)?;
-            }
-            Entry::CustomMessage(custom) => {
-                ensure!(
-                    self.format_version >= CUSTOM_RECORDS_VERSION,
-                    "custom records require a format upgrade to v{CUSTOM_RECORDS_VERSION}"
-                );
-                ensure_custom_type(&custom.message.custom_type)?;
-            }
+            Entry::Custom(custom) => ensure_custom_type(&custom.custom_type)?,
+            Entry::CustomMessage(custom) => ensure_custom_type(&custom.message.custom_type)?,
             Entry::ContextEdit(edit) => self.validate_context_edit(edit)?,
-            Entry::FormatUpgrade(upgrade) => ensure!(
-                upgrade.version >= self.format_version && upgrade.version <= SESSION_VERSION,
-                "unsupported format upgrade {}",
-                upgrade.version
-            ),
             Entry::CompactionStarted(started) => self.validate_compaction_started(started)?,
             Entry::Compaction(done) => self.validate_compaction(done, entry.parent_id())?,
             Entry::CompactionFailed(failed) => {
                 self.validate_attempt_completion(&failed.attempt_id, entry.parent_id())?;
             }
             Entry::RequestConfig(_) | Entry::RequestStarted(_) => self.validate_request_entry(entry)?,
-            Entry::ToolCallStarted(start) => {
-                ensure!(
-                    self.format_version >= START_RECORDS_VERSION,
-                    "tool call start records require a format upgrade to v{START_RECORDS_VERSION}"
-                );
-                self.validate_tool_call_start(start)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Effective file format, including appended upgrades.
-    pub fn format_version(&self) -> u32 {
-        self.format_version
-    }
-
-    /// Append a format upgrade before the first record that needs `version`.
-    /// The header is never rewritten.
-    async fn ensure_format(&mut self, version: u32) -> Result<()> {
-        if self.format_version < version {
-            self.append(Entry::FormatUpgrade(FormatUpgradeEntry {
-                id: self.new_id(),
-                parent_id: self.leaf.clone(),
-                timestamp: now_ms(),
-                version,
-            }))
-            .await?;
+            Entry::ToolCallStarted(start) => self.validate_tool_call_start(start)?,
         }
         Ok(())
     }

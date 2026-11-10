@@ -507,11 +507,7 @@ async fn incremental_summary_requests_are_rebuilt_from_the_session_file() {
     let rebuilt = replayed_requests(&store);
 
     assert_eq!(rebuilt, sent);
-    assert_eq!(
-        store.header().version,
-        SESSION_VERSION,
-        "a new session needs no upgrade"
-    );
+    assert_eq!(store.header().version, SESSION_VERSION);
 }
 
 #[tokio::test]
