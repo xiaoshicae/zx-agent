@@ -652,7 +652,7 @@ async fn a_single_session_file_is_refused_before_the_connection() {
         .unwrap();
     let errors = stderr(&output);
     assert_eq!(output.status.code(), Some(2), "{errors}");
-    assert!(errors.contains("--session does not apply"), "{errors}");
+    assert!(errors.contains("unexpected argument '--session'"), "{errors}");
 }
 
 #[tokio::test]

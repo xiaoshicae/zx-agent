@@ -133,6 +133,7 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
         output: output_mode,
         deltas,
         color,
+        session,
         no_session,
         resume,
     } = args;
@@ -153,7 +154,7 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
     let output = &chat.output;
     let model = chat.shared.settings.model.clone();
     let resume = resume.as_ref().map(Option::as_deref);
-    let (storage, first) = opening(no_session, resume, &chat.shared.base).await?;
+    let (storage, first) = opening(no_session, session, resume, chat.shared.base.cwd.as_deref()).await?;
     let file = match (&storage, first.path()) {
         (_, Some(path)) | (Storage::File(path), None) => SessionFile::Open(path),
         (Storage::Memory, None) => SessionFile::Memory,

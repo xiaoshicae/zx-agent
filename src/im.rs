@@ -129,10 +129,6 @@ struct SessionsSection {
 /// Serve until SIGINT or SIGTERM, or until a platform fails. An `Err` is a configuration
 /// problem found before serving started.
 pub(crate) async fn run(args: ImArgs) -> Result<u8> {
-    anyhow::ensure!(
-        args.base.session.is_none(),
-        "--session does not apply to im: each conversation has its own session files under [sessions] dir"
-    );
     let file = read_file(&args.config)?;
     let Platforms { channels, hidden_env } = platforms(&file, &args.config)?;
     let platforms: HashSet<&str> = channels.iter().map(|channel| channel.platform()).collect();

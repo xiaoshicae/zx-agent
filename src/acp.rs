@@ -283,10 +283,6 @@ pub(crate) async fn run(args: AcpArgs) -> Result<u8> {
 }
 
 async fn serve(args: AcpArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> {
-    anyhow::ensure!(
-        args.base.session.is_none(),
-        "acp keeps one file per session in the session directory of the zx-agent home; --session does not apply"
-    );
     let shared = cli::Shared::connect(args.base, args.budget, Builtin::Assistant)
         .await?
         .with_traces(traces);

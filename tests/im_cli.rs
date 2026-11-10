@@ -95,7 +95,12 @@ async fn configuration_errors_are_reported_before_serving() {
             None,
             "which is not configured",
         ),
-        (VALID, &["--session", "x.jsonl"], None, "--session does not apply to im"),
+        (
+            VALID,
+            &["--session", "x.jsonl"],
+            None,
+            "unexpected argument '--session'",
+        ),
         (
             "[slack]\ntoken = \"x\"\n[access]\nconversations = []\n[sessions]\ndir = \"s\"\n",
             &[],

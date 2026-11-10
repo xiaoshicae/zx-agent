@@ -1,6 +1,7 @@
 //! `zx-agent run`: one task to completion without a person; the exit code reports the outcome.
 
 use std::io::{IsTerminal, Read};
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -23,6 +24,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<u8> {
     let RunArgs {
         prompt,
         fail_on_denied,
+        session,
         base,
         budget,
         output,
@@ -33,7 +35,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<u8> {
         Some(prompt) => Some(read_prompt(prompt)?),
         None => {
             // Checked before anything starts: continuing a new session has nothing to answer.
-            let session = base.session.as_deref().context("--continue needs --session")?;
+            let session = session.as_deref().context("--continue needs --session")?;
             anyhow::ensure!(
                 session.exists(),
                 "--continue needs an existing session file; {} does not exist",
@@ -46,7 +48,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<u8> {
         let shared = cli::Shared::connect(base, budget, Builtin::Unattended)
             .await?
             .with_traces(telemetry.map(run_sink));
-        let session = build_session(&shared, output, deltas).await?;
+        let session = build_session(&shared, session.as_deref(), output, deltas).await?;
         let cancel = CancellationToken::new();
         spawn_signal_handler(cancel.clone());
         let report = match prompt {
@@ -80,9 +82,13 @@ fn read_prompt(arg: &str) -> Result<String> {
 
 /// Assemble an unattended session of the `unattended` agent, or the user's file that
 /// replaces it, without exposing interactive choices to the kernel.
-async fn build_session(shared: &cli::Shared, output: OutputMode, deltas: bool) -> Result<AgentSession> {
-    let file = SessionFile::from_path(shared.base.session.as_deref());
-    let prepared = cli::prepare(shared, &shared.settings.model, None, file).await?;
+async fn build_session(
+    shared: &cli::Shared,
+    session: Option<&Path>,
+    output: OutputMode,
+    deltas: bool,
+) -> Result<AgentSession> {
+    let prepared = cli::prepare(shared, &shared.settings.model, None, SessionFile::from_path(session)).await?;
     let sink: Arc<dyn EventSink> = match output {
         OutputMode::Text => Arc::new(TextProgress),
         OutputMode::Jsonl => Arc::new(JsonlEvents { deltas }),

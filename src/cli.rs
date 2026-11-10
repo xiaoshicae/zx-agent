@@ -58,6 +58,11 @@ pub(crate) struct RunArgs {
     #[arg(long)]
     pub(crate) fail_on_denied: bool,
 
+    /// Session file (JSONL). Created if missing; an existing one is continued. Without it
+    /// the run is kept in memory only.
+    #[arg(long)]
+    pub(crate) session: Option<PathBuf>,
+
     #[command(flatten)]
     pub(crate) base: BaseArgs,
 
@@ -94,6 +99,11 @@ pub(crate) struct ChatArgs {
     #[arg(long, value_enum, default_value_t = ColorArg::Auto)]
     pub(crate) color: ColorArg,
 
+    /// Session file (JSONL). Created if missing; an existing one is continued; /new creates
+    /// another beside it. Without it, each conversation gets a file in the session directory.
+    #[arg(long)]
+    pub(crate) session: Option<PathBuf>,
+
     /// Keep the conversation in memory only: no session file is written.
     #[arg(long, conflicts_with_all = ["session", "resume"])]
     pub(crate) no_session: bool,
@@ -123,7 +133,7 @@ pub(crate) struct AcpArgs {
     /// Keep conversations in memory only: no session file is written, and `session/load` is
     /// not offered. Otherwise each session has a file in sessions/--<cwd with / as ->-- of
     /// the zx-agent home, the directory chat uses.
-    #[arg(long, conflicts_with = "session")]
+    #[arg(long)]
     pub(crate) no_session: bool,
 }
 
@@ -162,10 +172,6 @@ pub(crate) struct BaseArgs {
     /// Enabled tools, comma-separated. Defaults to the agent's; explicit values replace them.
     #[arg(long, value_delimiter = ',')]
     pub(crate) tools: Option<Vec<String>>,
-
-    /// Session file (JSONL). Created if missing; an existing one is continued.
-    #[arg(long)]
-    pub(crate) session: Option<PathBuf>,
 }
 
 /// Limits per prompt; `None` keeps the agent's value. A run is one prompt.
@@ -279,11 +285,13 @@ mod tests {
             Command::Im(args) => {
                 assert_eq!(args.config, Path::new("im.toml"));
                 assert_eq!(args.budget.max_model_requests, None);
-                assert_eq!(args.base.session, None);
             }
             Command::Run(_) | Command::Chat(_) | Command::Sessions(_) | Command::Acp(_) => panic!("im command"),
         }
         assert!(Cli::try_parse_from(["zx-agent", "im", "--model", "m"]).is_err());
+        // Each conversation of im, and each session of acp, has a file of its own.
+        assert!(Cli::try_parse_from(["zx-agent", "im", "--config", "im.toml", "--session", "s.jsonl"]).is_err());
+        assert!(Cli::try_parse_from(["zx-agent", "acp", "--session", "s.jsonl"]).is_err());
     }
 
     #[test]
