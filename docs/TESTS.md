@@ -1,49 +1,51 @@
 # 测试文件一览
 
-每个测试文件覆盖什么。写测试用到的设施与约定在 `.claude/rules/06-testing.md`，原则在 `.claude/CLAUDE.md` 的"测试"一节。
+每个测试文件覆盖什么，具体行为见测试名。设施与约定见 `.claude/rules/06-testing.md`。
+
+单元测试写在被测模块里或其 `tests.rs` 中，覆盖各模块的逻辑与边界，包括会话文件与事件的 JSON 格式；`config.toml` 与 agent 文件（含 `deploy/kubernetes/agents/*.md`）的配置规则也在这一层测。
 
 | 文件 | 内容 |
 |---|---|
-| `src/**` 与 `crates/*/src/**` 中的 `mod tests` 与 `tests.rs` | 各模块的单元测试，写在被测模块里或其 `tests.rs` 中（规则 09）；包括会话文件和事件流的 JSON 格式、事件信封与每次运行的编号、会话写入失败 / 超时 / 被中断后停止写入、单写者锁与只读快照、自定义存储的记录与重新加载、SSE 解析、流式累积、推理内容的记录与回传、请求体组装、错误链、重试判断、命令策略及其提示词、会话投影、崩溃恢复与文件权限、截断、bash（超时后杀掉整个进程组、取消、隐藏环境变量）、read_file、系统提示词的段落对比与两种发送模式；`src/chat/commands.rs` 的内置与扩展命令解析；`agent::queue` 的队列模式与扩展消息，`agent::command` 的命令名检查；自动放行按 agent 给出的选项与例外判断，`deploy/kubernetes/agents/*.md` 由 `src/config` 的单元测试加载并检查；`config.toml` 与 agent 文件的每条配置规则在这一层测，经程序的只有 `tests/agents_cli.rs` 的一条（配置错误以退出码 2 结束）和没有单元测试的规则。`#[cfg(test)]` 的辅助项（如 `SessionStore::with_writer`）只在所在 crate 的单元测试里可用 |
-| `tests/agent_loop.rs` | 循环语义：工具调用往返、并行与结果顺序、串行模式、参数改写（策略与工具看到改写后的参数，上下文保留原始调用）、进度只到事件、`details` 与 `usage` 进入事件与结果消息、`usage` 按工具名汇总、各类失败、length 截断、轮次上限、预算用完时不开新回合且排队输入留在队列、terminate、引导与后续消息、撤回的后续消息不被取用、出错与中止、provider 未发最终事件、系统提示词的记录与增量更新 |
-| `tests/runner.rs` | 运行层：重试（含预算用完不重试、省略失败回答的事件）、上限（含 token 预算：FauxProvider 每次回答报告 15 个 token）、截断续写、持久化（含自定义 `SessionLog`、工具结果的 `details` 与 `usage`）、工具花费按工具名报告且不计入 token 预算、成本预算（每次回答按单价 0.01）、被策略与审批拒绝的调用计数、恢复会话、排队输入只写一次（运行在观察者处理时被丢弃时）；另有重试不重复 prompt、失败记录留在文件中、工具结果的 `details` 在重新打开后保留、放弃不可重试的错误、时间上限与调用方取消、截断续写的拼接、最终回答只取本次运行的消息、恢复会话时提示词变化写入文件、先写盘再转发事件、事件的编号与 ID、`run_start` / `run_end`、尝试与请求起点及其会话条目、消息与上下文编辑的条目 ID、无预算时排队输入留在队列 |
-| `tests/agent_session.rs` | 共享会话：Busy、取消与丢弃后复用、多订阅者、退订、回调重入与 panic、模型切换与审计、推理强度的切换与审计、取出未被消费的排队输入、写入停止的原因、队列边界、模型切换后保留的授权、先写审计再分发给多个订阅者 |
-| `tests/openai_mock.rs` | 真实 HTTP 下的 provider：SSE、重试、空闲超时、中途取消、成功状态下的 JSON 正文、带上下文过长错误码的 400 之后摘要并继续、自定义请求头与每次请求取 key、key 来源失败不发请求不重试、`prompt_cache_key` 只在开启时发送并可从审计还原；另有执行 bash 并回传工具结果、认证头、中途取消后保留已输出内容、成功状态下的 JSON 正文分错误对象与整份回答两种 |
-| `tests/prepare_request.rs` | 请求前替换设置（`Hooks::prepare_request`）：只对一次请求有效、钩子看到的计划、`request_start` 报告实际的模型、请求审计可还原、钩子按顺序接力、失败与空模型名在请求前结束且不重试、panic |
-| `tests/continue_run.rs` | 不加新输入的续跑：回答结尾的输入、崩溃后补写的结果（调用不再执行）、省略结尾失败的回答再答、完成的回答没有可续的（排队的后续消息除外）、空会话、请求可从会话文件还原、运行中返回 Busy |
-| `tests/overflow_recovery.rs` | 上下文过长后的恢复：省略失败回答、摘要一次再开始新的尝试（不算重试）、未开启自动摘要时行为不变、恢复后紧接着又过长时结束、回答成功后可再次恢复、摘要失败暂停自动摘要、预算用完与运行超时 |
-| `tests/run_cli.rs` | `run` 子命令：退出码 0 到 6、jsonl 输出与 `-` 从 stdin 读提示词、流式资源上限、修复会话残尾的提示、bash 读不到 API key、系统提示词的 `<environment>` 与 `inline` 更新、进度与报告行转义终端控制字符、会话文件单写者、stdout 关闭时的退出码、token 预算的退出码 7：假服务每次回答报告 12 个 token、成本预算的退出码 8 与没有单价时的配置错误、`--fail-on-denied` 的退出码 9、只在设置了 OTLP 地址时导出追踪且不导出指标：测试中的假收集端只看请求，不解码 protobuf，`TRACEPARENT` 接续调用方的 trace（按 ID 的字节查找）且不合法时提示、`provider.requestFields` 到达模型并写入请求审计、`provider.fillMissingReasoning` 默认关闭且开启时写入请求审计、`reasoning` 的三种写法、`--continue` 失败后续跑与参数检查；另有最后一次请求可超出 token 预算、agent 设置的预算由命令行的 0 关闭、为负的成本预算以退出码 2 结束、被拒的调用数出现在报告行、导出的追踪不含回答 |
-| `tests/otel.rs` | OpenTelemetry 导出：真实运行经 `Telemetry` 产生的 span 层级与属性（含 token 用量）；`sink_under` 接续给定的 traceparent；测试用的导出器 `Kept` 在关闭后仍保留 span（SDK 的内存导出器关闭时会清空）；每次尝试、回合、模型请求与工具调用各一个 span；`src/otel/` 的单元测试另覆盖嵌套与时间、只含元数据、运行结束时关闭未结束的 span、手动摘要自成一条 trace、工具报告的用量在工具的 span 上、traceparent 的解析与拒绝、队列满时丢弃并计数 |
-| `tests/model_meta.rs` | 模型元数据与计量（P10 ⑧）：按单价给回复算成本并在报告与会话文件中相加（服务端回报别的模型名时仍按请求的模型计价）、没有单价时没有成本、token 阈值触发与不触发自动摘要、上下文 token 的估算、按窗口推导阈值的条件、缓存键进入 provider 与请求审计 |
-| `tests/extension_capabilities.rs` | 扩展的运行期能力（P10 ⑦）与队列模式（⑨）：钩子在运行中发消息与记状态（记录顺序、事件、投影）、运行最后的事件中记的状态在报告前写入、宿主限制工具且审计记录每次请求声明的工具、钩子改下一次请求的工具、扩展命令经会话运行且其消息开始一次运行、命令名的检查、空闲时直接写入与运行中 Busy、`one-at-a-time` 每条排队消息各占一个回合 |
-| `tests/custom_records.rs` | 扩展的会话记录：`custom_message` 投影为用户消息且可被 `context_edit` 省略、`custom` 不进投影、文件中的字段写法与重新打开、空类型不写入 |
-| `tests/session_branch.rs` | 会话内切换分支（P10 ⑥c）：`AgentSession::branch` 到更早的回答后继续且离开的分支仍在文件里、接在带未答调用的回答后把调用记为未执行且不再执行、回到根重新开始、运行中返回 Busy、未知条目被拒且位置不变、`inspect` 期间会话被占用 |
-| `tests/session_fork.rs` | 复制分支成新会话（P10 ⑥b）：只复制选中的分支、条目逐字节相同、头部的 `parentSession`、副本可重新打开并追加、源文件不变、复制来的请求能从副本还原；目标不为空、叶子不存在时不写入；没有 `parentSession` 的头部保持原格式 |
-| `tests/sessions_cli.rs` | 会话目录（P10 ⑥a）：chat 默认的位置、文件名与权限，`--no-session`，`--resume` 取本工作目录最近的会话或按 ID 前缀，默认会话目录随 `ZX_AGENT_HOME` 移动，`zx-agent sessions` 的顺序与预览，chat 的 `/new`。每个测试有自己的 `HOME`（`zx_agent_in` 的 `Home::User`） |
-| `tests/chat_cli.rs` | chat 的脚本 stdin、审批与过期（含 `y`、`n` 别名，默认 agent 下 write_file 先审批，文件内容与编辑逐项显示）、工具行与结果预览（含 edit_file 的补丁）、`[turn]` 行与 `/status`、`--color`、续接会话的提示、重试错误只报一次、无用量的 `[turn]`、`[[models]]` 的单价与 `[turn]` / `/status` 的成本、`provider.headers` 与 `provider.promptCacheKey`、`[[models]]` 的 `contextWindow` 推导的 token 阈值、信号与超时（取消只报告一次，空闲时 Ctrl+C 两次退出）、取消后丢弃残留插话、钩子失败的提示、Unicode、模型与推理强度的切换、`/continue`、会话重置和 Unix PTY（插话、粘贴合并、回答前后的空行、取消重置和退出）；另有多轮历史、授权范围、审批过期后下一行作为新提问、只读命令自动放行、`--color always` 在管道中保留颜色、EOF、控制字符显示、恢复中断会话的提示 |
-| `tests/acp_cli.rs` | `acp`：手写的 JSON-RPC 客户端经子进程 stdio 驱动：初始化与建会话、流式回答、工具调用与权限请求（批准、拒绝）、取消、未知会话、`write_file` 的 diff 与自动放行；会话落盘与 `session/load`（第二个进程回放后继续、工具调用连同结果、活着的会话原地回放、`--no-session`、未知会话、`--session` 不是 acp 的参数；`session/list` 的顺序、标题、时间、按 cwd 过滤与 `cursor` 拒绝；`session/resume` 不回放）；每个进程有自己的 `HOME`；stdout 的每一行都必须是协议消息。细节：流式回答以 `end_turn` 结束，工具调用报告为 `tool_call`、批准后执行为 `completed`，拒绝时不执行且模型收到原因，`session/cancel` 得到 `cancelled` 后会话可继续，`write_file` 的 diff 带位置，自动放行的命令不问人且在会话的目录执行，会话文件在 cwd 的会话目录中，`session/load` 后模型看到此前的消息，`--no-session` 不落盘且不声明 `loadSession` |
-| `tests/agents_cli.rs` | 主目录的 agent 替换内置 agent、其他文件名不读取、agent/CLI 覆盖与 deny、`ask` 加 `allow` 在 run 中拒绝其余命令、项目上下文范围与默认值、skill 懒加载与脱敏、工具策略和审计、预算参数的 help 写明取自 agent、不可绕过的 deny；配置错误以退出码 2 结束，不请求模型、不建会话文件（会话文件之前的每一步各一例：`config.toml`、agent 文件、上下文文件、provider 设置） |
-| `tests/config_cli.rs` | `config.toml` 的位置（`~/.zx-agent`、`ZX_AGENT_HOME`，相对路径被拒绝）、模型取 `--model` > `ZX_MODEL` > 文件、服务地址取 `ZX_BASE_URL` > 文件、原命令行设置从文件读取并到达请求 |
-| `tests/session_compaction.rs`、`tests/compaction.rs` | 分支 / 引用与原始投影、自动 / 手动摘要、摘要源不含工具结果的 `details`、计费（摘要请求计入请求与 token 预算）、steering、失败、取消与超时、摘要的上限、省略保留边界后摘要仍生效、编辑摘要的变换计划在写入前被拒绝、上下文字节统计同样不含 `details` |
-| `tests/request_audit.rs` | 请求审计（G3）：从会话文件还原每次任务与摘要请求、配置变化才追加；上下文过长后恢复的三个请求；固定会话 `tests/fixtures/replay-full.jsonl` 的还原结果（格式化后的 JSON）与期望文件逐字节比对，改变还原结果须同时提高会话格式或转换版本，使此前的文件被拒绝 |
-| `tests/executor.rs` | 执行器接缝：工具只经自身执行器运行命令和读写文件（grep 的脚本与 shell），本机执行器对 bash 与搜索的命令都隐藏变量，结束方式的报告（6 种），执行方式随执行器，编辑工具经执行器读写文件，不能写文件的执行器让 edit_file 报错 |
-| `tests/search_tools.rs` | grep、find、ls 在本机：有无 ripgrep 时断言都要成立（本机没有 rg，CI 可能有）；注入的模式与路径不被执行；匹配行的路径与行号、忽略大小写 / 字面量 / glob、点文件与跳过 `.git`、无结果与报错、limit、超长行截断、取消 |
-| `tests/file_tools.rs` | edit_file 与 write_file 在本机：新建、覆盖与上级目录、多处替换、BOM 与 CRLF、patch，每类失败后文件不变，取消，旧参数写法；同一批调用改同一文件（`SlowReads` 执行器让两次读取都先于写入）时两处改动都生效 |
-| `tests/compaction.rs` | 会话宿主的摘要：手动 compact 是有界、无工具的请求且会话可复用；自动摘要计入任务请求预算、用量与 token 预算，不能超出请求上限；摘要期间收到的 steering 在下一次任务请求前持久化；SDK 默认不发摘要请求；摘要请求与上下文大小不含工具结果的 `details`；重复摘要读原文而不是旧摘要；无效或截断的摘要不替换上下文、不当作任务重试；失败的自动摘要下一次 prompt 不再付费；运行的 future 被丢弃后暂停仍在；已知的 API key 在事件与会话文件前脱敏；摘要评测的脚本会话自检，以及用知道答案的假模型验证评分 |
-| `tests/container.rs` | 容器执行：假 docker 程序（在测试目录里记录参数、按文件应答）覆盖启动（默认放开与严格模式）、命令、读写文件、清理、逐个执行（排队的调用在取消后记为未执行）与 CLI（含 `permissions.approveAll` 下 chat 不询问 bash、run 执行 agent 没有放行的 MCP 工具）；名字以 `real_` 开头的测试在设置 `ZX_DOCKER_TEST_IMAGE`（本地已有、带 bash 的镜像）时对真实 Docker 运行，否则打印提示后返回；工作目录要让容器用户可读（见 `real_workspace`）。假 docker 另验证启动参数与失败报告、命令与读文件的转发、超时 / 取消 / 丢弃后的清理、启动失败不留会话文件、root 用户、共用宿主机网络与工作目录内的会话文件被拒绝；真实 Docker 验证默认的用户、可写工作目录与网络，严格模式的只读与无网络、命令进程树与 `setsid` 子进程的终止、清理不受命令写入影响、命令逐条执行、容器内读文件、chat 中 Ctrl-C 后容器仍在、zx-agent 正常结束或被 SIGKILL 后容器删除（CI 在 Linux 上用 `debian:bookworm-slim` 运行） |
-| `tests/crash_recovery.rs` | 崩溃恢复：开始记录先于执行、中断调用的四种恢复结果且不重放、失败或取消的回答中的调用记为未执行、恢复事件在结果写入之后、丢弃 future 与 SIGKILL 后恢复；另有内置工具的副作用声明、串行与并行批次、`run` 的 `[recover]` 输出、SIGKILL 掉正在执行命令的 `run` 后由下一次 `run` 恢复且不重放 |
-| `tests/output_store.rs` | 脱敏顺序、UUID 与文件边界、Unix 权限、UTF-8 分页、容量、取消、存储超时与错误回退（保留内联结果）、目录越界与 `.gitignore` |
-| `tests/hooks.rs`、`tests/hooks_cli.rs` | 六个钩子、钩子上下文、具名注册与阶段顺序、审批与失败回退、变换持久化（钩子不能追加 system 消息）、`observes` 的 panic 隔离、工具的声明名与元数据检查、工具取消自己的令牌、已知密钥脱敏接线（含进度与 `details`）、钩子失败的文本输出、密钥文件的有损解码匹配与启动检查、内置钩子的固定名称、短值提示；另有审批范围与取消、输入钩子被取消或运行被丢弃时不写入输入且插话留在队列、策略结论与审批事件（询问、会话内授权、拒绝、失败、超时、取消、等待时长）、观察者默认跳过增量、按阶段执行且先注册的脱敏仍在扩展之后、进度只经脱敏钩子、`details` 中字符串与对象键的脱敏、重名或声明名不一致的工具在请求前被拒绝、工具元数据 panic 时运行失败、续写预算 |
-| `tests/hook_contract.rs` | 钩子输入输出的 JSON 契约（策略结论、回合决定、上下文编辑、审批及其请求、工具输出（含可选的 `details`）与调用、钩子上下文、回合摘要、`RequestSettings`），改格式会破坏钩子进程与审批转发 |
-| `tests/extensions.rs` | `extensions::register`：扩展的工具、钩子与提示词段落加入循环；钩子以扩展名报告失败；拒绝非 `Extension` 阶段的钩子、重名的工具与扩展、保留或已有的段落名，出错时不注册任何内容 |
-| `tests/mcp.rs` | MCP 客户端对假 MCP 服务器：两种协议、只交出配置的工具与命名、每个请求带 token、调用与结果的呈现、执行错误与协议错误、超时与取消后放弃请求、截断（结果与协议错误的文本都截）、连接失败与配置错误、经循环调用；进度通知到达工具上下文并重置超时（两种协议） |
-| `tests/mcp_cli.rs` | 编译出的程序带 `config.toml` 的 `[[mcp]]` 与放行其中一个工具的 agent：run 调用放行的工具、拒绝要审批的工具，chat 在审批后调用，im 在开始服务前连接；命令看不到 token 变量，token 的值被脱敏；用不了的服务器让启动以退出码 2 失败 |
-| `tests/im_feishu.rs` | ⚑ D:5/CHINA FLAG: 飞书 channel 对假开放平台：ping 与 pong、确认、分片（含校验和不是数字的帧被丢弃）、去重、重连、无法解码的帧上报后连接继续、群 @ 与私聊、话题里不 @ 的回复按提到谁分类、卡片点击、token、话题回复、编辑与改发、卡片、限频与停止 |
-| `tests/im_slack.rs` | Slack channel 对假 Slack：@ 与私聊、线程里不 @ 的回复按提到谁分类、同一 @ 经两种事件送来只转交一次、读线程（不含机器人与编辑）、名字、表情回执、确认与去重、忽略自己的消息、按钮点击、断线重连、连接失败的上报、`wss://` 握手失败（rustls 只有一个加密后端时报错而不是 panic）、凭据被拒、没有正文的消息不转交、沉默的连接上报后重连、停止不等待过长的 `Retry-After`、转义与拆分、卡片、限频与停止 |
-| `tests/im_cli.rs` | `im` 子命令：配置错误（含 `[replies]` 的未知字段）；配置的 `[replies]` 与 `[cardLabels]` 替换英文默认文案；对假 Slack 与假模型的完整流程（审批卡片、命令看不到 token、脱敏、会话文件、运维日志、SIGTERM）；被 SIGKILL 后重启，替换遗留的“处理中…” |
-| `tests/im_server.rs` | IM 服务：内存中的 `FakeChannel` 加脚本化模型，覆盖线程与会话、私聊一个会话与 `/new`（含运行中）、接话不必 @、别人的讨论只记录不回答、没参与过的线程不理会、第一次被 @ 时读线程（带名字）、释放后仍记录、访问控制、审批卡片（批准、拒绝、非审批人、超时、取消）、运行上限与排队、插话、空闲释放与重开、停止与平台错误、停止时告知没有处理的消息（排队中的、运行没取走的插话、停止期间才收到的：`FakeChannel` 的 `late`）、停止取消的运行写明原因；运行中的状态（内存中的 `Statuses` 把记录与删除也写进 `Sent`，便于断言先后）：先删记录再写回答、启动时替换遗留的状态、平台拒绝或未配置、停止时放弃替换（`FakeChannel` 的 `updates`）、记录 / 删除 / 读取失败（`Broken`） |
-| `tests/real_api.rs` | 付费：真实模型 API，默认跳过：文本回答与用量、工具往返、策略拒绝、输出截断、恢复会话、无效 key 不重试；摘要评测（对 8 轮的脚本会话做 8 次摘要）另需 `ZX_E2E_EVAL=1` |
+| `tests/agent_loop.rs` | 循环语义：工具往返与顺序、失败、截断、上限、队列 |
+| `tests/runner.rs` | 运行层：重试、上限与预算、续写、持久化、恢复会话 |
+| `tests/agent_session.rs` | 共享会话：Busy、取消、订阅、模型与推理强度切换 |
+| `tests/openai_mock.rs` | 真实 HTTP 下的 provider：SSE、重试、超时、取消、错误正文 |
+| `tests/prepare_request.rs` | `Hooks::prepare_request` 对单次请求的替换 |
+| `tests/continue_run.rs` | 不加新输入的续跑 |
+| `tests/overflow_recovery.rs` | 上下文过长后摘要并开始新的尝试 |
+| `tests/run_cli.rs` | `run`：退出码 0 到 9、jsonl 输出、追踪导出、请求设置 |
+| `tests/otel.rs` | OpenTelemetry 的 span 层级、属性与 traceparent |
+| `tests/model_meta.rs` | 模型单价、成本与 token 阈值 |
+| `tests/extension_capabilities.rs` | 扩展在运行中发消息、记状态、改工具集与命令 |
+| `tests/custom_records.rs` | 扩展的 `custom` 与 `custom_message` 记录 |
+| `tests/session_branch.rs` | `AgentSession::branch` 切换分支 |
+| `tests/session_fork.rs` | 复制分支成新会话 |
+| `tests/sessions_cli.rs` | chat 的会话目录、`--resume` 与 `zx-agent sessions` |
+| `tests/chat_cli.rs` | chat：审批、输出行、信号、PTY |
+| `tests/acp_cli.rs` | `acp` 经 stdio 的协议、权限请求与会话加载 |
+| `tests/agents_cli.rs` | agent 文件、权限、上下文与 skill；配置错误以退出码 2 结束 |
+| `tests/config_cli.rs` | `config.toml` 的位置与优先级 |
+| `tests/session_compaction.rs` | 会话层的摘要记录、引用与校验 |
+| `tests/compaction.rs` | 宿主的手动与自动摘要、计费、失败与上限 |
+| `tests/request_audit.rs` | 从会话文件还原请求（G3），含固定会话的逐字节比对 |
+| `tests/executor.rs` | 工具只经执行器运行命令与读写文件 |
+| `tests/search_tools.rs` | grep、find、ls |
+| `tests/file_tools.rs` | edit_file 与 write_file |
+| `tests/container.rs` | 容器执行；`real_` 测试在设置 `ZX_DOCKER_TEST_IMAGE` 时用真实 Docker |
+| `tests/crash_recovery.rs` | 崩溃后补写中断调用的结果且不重放 |
+| `tests/output_store.rs` | 长结果落盘与分页 |
+| `tests/hooks.rs` | 钩子、审批、策略事件与脱敏 |
+| `tests/hooks_cli.rs` | 程序中的密钥脱敏与钩子失败输出 |
+| `tests/hook_contract.rs` | 钩子输入输出的 JSON 契约 |
+| `tests/extensions.rs` | `extensions::register` 的注册与拒绝 |
+| `tests/mcp.rs` | MCP 客户端对假服务器 |
+| `tests/mcp_cli.rs` | `[[mcp]]` 接入 run、chat 与 im |
+| `tests/im_feishu.rs` | ⚑ D:5/CHINA FLAG: 飞书 channel 对假开放平台 |
+| `tests/im_slack.rs` | Slack channel 对假 Slack |
+| `tests/im_cli.rs` | `im` 子命令的配置与完整流程 |
+| `tests/im_server.rs` | IM 服务的会话划分、接话、审批与停止 |
+| `tests/real_api.rs` | 付费的真实模型 API，默认跳过（红线 9） |
 
 ---
 
-TESTS.md · v0.1 · 2026年11月
+TESTS.md · v0.2 · 2026年11月

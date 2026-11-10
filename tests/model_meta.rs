@@ -1,4 +1,4 @@
-//! Model metadata and metering (P10 item 8): prices give responses a cost, a context window
+//! Model metadata and metering: prices give responses a cost, a context window
 //! adds a token trigger to automatic summaries, and the cache key is audited.
 mod common;
 

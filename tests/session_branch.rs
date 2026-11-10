@@ -1,4 +1,4 @@
-//! Switching branches within a session (P10 item 6c): `AgentSession::branch` moves the
+//! Switching branches within a session: `AgentSession::branch` moves the
 //! conversation to another point of its tree, `inspect` reads the tree while idle.
 mod common;
 
