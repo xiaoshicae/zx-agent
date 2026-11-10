@@ -42,7 +42,7 @@
 | 共享会话 | `crates/zx-core/src/agent_session.rs`、`crates/zx-core/src/agent_session/subscribers.rs` | 共享调用与 Busy、RAII 归还运行权、取消、空闲时切换模型；订阅与退订在 `subscribers.rs` |
 | 运行层 | `crates/zx-core/src/runner.rs` | 持有可顺序复用的会话；以独占借用控制单次运行、重试、上限、审批缓存、持久化和报告 |
 | 会话 | `crates/zx-core/src/session.rs`、`crates/zx-core/src/session/` | 只追加的条目树与校验，投影出发给模型的消息；记录经 `SessionLog` 保存，默认是单写者的 JSONL 文件（`jsonl.rs`） |
-| 上下文管理 | `crates/zx-core/src/compaction.rs`（预算与报告）、`crates/zx-core/src/compaction/`（`summarizer.rs` 摘要执行者、`answer.rs` 模型回答的解析与合并）、`crates/zx-core/src/session/summary.rs`（摘要记录的类型与上限）与 `session/summary/`（`records.rs` 记录的追加与校验、`source.rs` 摘要读取的内容与请求）、`crates/zx-tools/src/output_store.rs` | 宿主摘要、追加升级与原始投影、脱敏后的长结果保存及分页 |
+| 上下文管理 | `crates/zx-core/src/compaction.rs`（预算与报告）、`crates/zx-core/src/compaction/`（`summarizer.rs` 摘要执行者、`answer.rs` 模型回答的解析）、`crates/zx-core/src/session/summary.rs`（摘要记录的类型与上限）与 `session/summary/`（`records.rs` 记录的追加与校验、`source.rs` 摘要读取的内容与请求）、`crates/zx-tools/src/output_store.rs` | 宿主摘要、追加升级与原始投影、脱敏后的长结果保存及分页 |
 | agent | `crates/zx-core/src/agent/` | 回合循环、工具执行、Hooks 宿主、事件、消息队列（用户文本与扩展的消息、每队列的取法、扩展排队的状态记录）、活跃工具集、扩展的斜杠命令 |
 | ai | `crates/zx-ai/src/`、`crates/zx-ai-openai/src/` | 消息类型、系统提示词段落、流式事件协议、provider 契约与重试判断，另有各 crate 共用的 `sync`、`text`；OpenAI 兼容 provider 与 SSE 解析单独成 crate |
 | 外层策略与交互 | `crates/zx-tools/src/policy/`、`crates/zx-tools/src/continuation.rs`、`crates/zx-tools/src/redact.rs`、`crates/zx-core/src/extensions.rs`、`crates/zx-core/src/agent/interaction.rs` | 命令与规则策略、续写、已知密钥脱敏、扩展的打包与注册（`Extension`、`register`）、宿主审批与 NoHuman |
@@ -61,7 +61,7 @@
 - **配置与文件内容分工**：`config.toml` 决定环境（模型、provider、执行环境、MCP），agent 决定角色（说明、工具、权限、上限）；命令行只剩 `--model`、`--tools`、预算与会话参数，显式传参覆盖文件；agent 文件写了的键整个替换继承的值，没有累加的列表。没有项目级配置文件：项目内容不能改变环境或权限。项目上下文和 skill 正文不能更改控制策略。自动发现的 AGENTS.md 解析后必须位于项目根目录内，`run` 的默认 agent 不自动发现，避免仓库内容让程序读取并发送项目外的文件；`run` 默认不落盘。skill 目录启动时只读取元数据，正文由工具按需读取并经过既有流水线，不隐式执行脚本或加载全局 AI 配置。
 - **共享 API、独占执行**：AgentSession 的短锁只切换 Runner 所有权，不跨 await。重叠 prompt 和运行中改配置返回 Busy；取消、panic 或 future 丢弃后由 RAII 归还。订阅列表先取快照再调用，单个 subscriber panic 会被隔离并摘除，不持锁调用宿主回调。
 - **会话既是审计日志，也是模型上下文的唯一来源**：修正上下文靠追加 `context_edit`，提示词变化靠追加 system 消息，原始记录始终保留。可替换的只是最底层的记录保存（`SessionLog`）。`SessionStore` 负责先写后改内存、写失败后停写，以及每种记录的格式、追加与加载时同一套校验、投影和恢复所需的查询；摘要请求、补写中断调用的结果等执行在上层（`compaction`、`runner`）。一个功能因此横跨几个模块，功能到文件的对照见 `crates/zx-core/src/lib.rs` 的模块文档。持久化走 crate 内部的会话宿主并以 `Result` 返回错误，`EventSink` 只接收事件。
-- **摘要不替代证据**：用开始、成功或失败记录审计摘要；全量模式（默认）重新摘要读取原始投影，保留全部 system；可选的增量模式由宿主原样沿用上一份摘要的事实、只读新增记录，模型只能新增事实或标明取代旧事实。摘要引用只校验来源存在；原始事实被修正后，全量摘要整份失效，增量摘要只作废引用它的事实。预算与真实模型信息保真是不同的验收项。
+- **摘要不替代证据**：用开始、成功或失败记录审计摘要；每次重新摘要都读取原始投影，保留全部 system，不读旧摘要（摘要源至多 2 MiB，超过后要开新会话）。摘要引用只校验来源存在；原始事实被修正后，摘要整份失效。预算与真实模型信息保真是不同的验收项。
 - **终端输入只有一个所有者**：chat 的专用线程通过有界通道提供逐行输入；REPL 协调提问、审批和信号，Interaction 不直接读 stdin。审批回复必须匹配主机生成的请求编号，取消后失效；TTY 运行中输入 steering，管道脚本逐轮消费。按 Tokio stdin 源码对交互终端的建议避免不可取消的 stdin 阻塞任务卡住运行时退出。
 - **事实由程序提供，不让模型去查**：操作系统、启动时间在启动时写进系统提示词。这样不浪费轮次，也不会被权限拦住。
 - **兼容性默认保守，能力按需打开**：提示词更新默认合并到开头（`collapse`，与 pi 对 OpenAI 兼容服务的默认一致），服务端支持时才按位置发送（`inline`）。

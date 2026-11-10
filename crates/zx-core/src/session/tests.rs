@@ -155,8 +155,6 @@ async fn records_carry_the_serialized_type_of_every_entry_kind() {
             max_tokens: 10,
         },
         input_bytes: 1,
-        mode: SummaryMode::Full,
-        continues: None,
     };
     let attempt = store.begin_compaction(plan()).await.unwrap();
     store
@@ -166,10 +164,8 @@ async fn records_carry_the_serialized_type_of_every_entry_kind() {
     let attempt = store.begin_compaction(plan()).await.unwrap();
     let summary = CompactionSummary {
         facts: vec![SummaryFact {
-            id: None,
             text: "fact".into(),
             source_entry_ids: vec![first.clone()],
-            supersedes: Vec::new(),
         }],
         inferences: vec![],
         plans: vec![],

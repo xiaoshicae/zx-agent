@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use zx_agent::ai::{
     AssistantMessage, ContentBlock, Message, Provider, StopReason, ToolCall, ToolResultMessage, Usage, now_ms,
 };
-use zx_agent::compaction::{Config, Outcome, SummaryMode};
+use zx_agent::compaction::{Config, Outcome};
 use zx_agent::session::{Entry, RequestSource, SessionStore};
 
 use super::{RunnerSetup, config, header};
@@ -786,14 +786,10 @@ pub(crate) struct RoundScore {
     /// Replaced planted facts that a fact states without stating the replacement too, an
     /// account of what happened earlier included; another fact may state the replacement.
     pub old_values: usize,
-    /// Earlier facts that this round's summary superseded or evicted.
-    pub superseded: usize,
-    pub evicted: usize,
 }
 
-/// The scripted session summarized in one mode.
+/// The scripted session, summarized after each round.
 pub(crate) struct Evaluation {
-    pub mode: SummaryMode,
     pub rounds: Vec<RoundScore>,
     /// The facts of the summary in context at the end.
     pub facts: Vec<String>,
@@ -802,12 +798,11 @@ pub(crate) struct Evaluation {
 impl Evaluation {
     /// Print each round and the final facts, visible with `--nocapture`.
     pub(crate) fn print(&self, model: &str) {
-        let mode = format!("{:?}", self.mode).to_lowercase();
         let mut total = Usage::default();
         for (index, round) in self.rounds.iter().enumerate() {
             total.add(&round.usage);
             eprintln!(
-                "[summary eval] {model} {mode} round {}: {:?}, request {} bytes, {} tokens in / {} out, {} facts, kept {}/{}, stale {}, old values {}, superseded {}, evicted {}",
+                "[summary eval] {model} round {}: {:?}, request {} bytes, {} tokens in / {} out, {} facts, kept {}/{}, stale {}, old values {}",
                 index + 1,
                 round.outcome,
                 round.request_bytes,
@@ -817,16 +812,14 @@ impl Evaluation {
                 round.kept,
                 round.expected,
                 round.stale,
-                round.old_values,
-                round.superseded,
-                round.evicted
+                round.old_values
             );
             if let Some(error) = &round.error {
                 eprintln!("[summary eval]   error: {error}");
             }
         }
         eprintln!(
-            "[summary eval] {model} {mode}: {} tokens in / {} out over {} summaries; the final facts:",
+            "[summary eval] {model}: {} tokens in / {} out over {} summaries; the final facts:",
             total.input,
             total.output,
             self.rounds.len()
@@ -838,12 +831,11 @@ impl Evaluation {
 }
 
 /// Write the scripted session in `dir` and, after each round, summarize it with `provider`
-/// and `model` under `budget`, its mode and budgets; score every summary. Only the user's
+/// and `model` under the budgets of `budget`; score every summary. Only the user's
 /// next request stays out of a summary, whatever `budget` keeps. Panics if the session
 /// cannot be written or does not load again at the end.
 pub(crate) async fn evaluate(provider: Arc<dyn Provider>, model: &str, budget: Config, dir: &Path) -> Evaluation {
-    let mode = budget.mode;
-    let path = dir.join(format!("{mode:?}.jsonl"));
+    let path = dir.join("summaries.jsonl");
     let mut store = SessionStore::create(&path, header()).unwrap();
     store.append_message(Message::user(TASK)).await.unwrap();
     drop(store);
@@ -884,7 +876,6 @@ pub(crate) async fn evaluate(provider: Arc<dyn Provider>, model: &str, budget: C
         facts = summary.map_or_else(Vec::new, |done| {
             done.summary.facts.iter().map(|fact| fact.text.clone()).collect()
         });
-        let this_round = summary.filter(|done| report.entry_id.as_deref() == Some(done.id.as_str()));
         rounds.push(RoundScore {
             outcome: report.outcome,
             error: report.error,
@@ -898,13 +889,11 @@ pub(crate) async fn evaluate(provider: Arc<dyn Provider>, model: &str, budget: C
                 .count(),
             stale: PLANTED.iter().filter(|fact| fact.stale_in(n, &facts)).count(),
             old_values: PLANTED.iter().filter(|fact| fact.old_value_in(n, &facts)).count(),
-            superseded: this_round.map_or(0, |done| done.superseded.len()),
-            evicted: this_round.map_or(0, |done| done.evicted.len()),
         });
     }
     // The session, the model's answers included, passes every check when loaded again.
     SessionStore::read(&path).unwrap();
-    Evaluation { mode, rounds, facts }
+    Evaluation { rounds, facts }
 }
 
 /// IDs of the summary requests recorded in `store`, oldest first.

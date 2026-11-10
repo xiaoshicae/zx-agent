@@ -8,10 +8,7 @@ use anyhow::Result;
 
 use crate::ai::Message;
 
-use super::{
-    CompactionEntry, CompactionStartedEntry, CompactionSummary, Entry, ProjectedMessage, SessionStore, SummaryFact,
-    SummaryMode,
-};
+use super::{CompactionEntry, Entry, ProjectedMessage, SessionStore};
 
 /// What carries a message: a message itself, or a projected one with its entry.
 pub(crate) trait HasMessage {
@@ -104,24 +101,15 @@ impl SessionStore {
     pub(super) fn projection_at(&self, leaf: Option<&str>) -> Vec<ProjectedMessage> {
         let path = self.branch_path_from(leaf);
         let raw = Self::raw_projection_from(&path);
-        let Some(latest) = self.latest_compaction_on(&path) else {
+        let Some(compaction) = self.latest_compaction_on(&path) else {
             return raw;
         };
-        let Ok(cut) = Self::summarized_count(&path, &raw, &latest.compaction.first_kept_entry_id) else {
+        let Ok(cut) = Self::summarized_count(&path, &raw, &compaction.first_kept_entry_id) else {
             // A summary's boundary is validated to be on its branch; without one, the
             // originals are the only safe projection.
             return raw;
         };
-        let compaction = latest.compaction;
-        let message = match latest.attempt.mode {
-            SummaryMode::Full => compaction.summary.message(compaction.timestamp),
-            SummaryMode::Incremental => CompactionSummary {
-                facts: Self::effective_facts(&path, &latest),
-                inferences: compaction.summary.inferences.clone(),
-                plans: compaction.summary.plans.clone(),
-            }
-            .message(compaction.timestamp),
-        };
+        let message = compaction.summary.message(compaction.timestamp);
         let mut projected: Vec<_> = raw[..cut]
             .iter()
             .filter(|item| matches!(item.message, Message::System(_)))
@@ -138,14 +126,12 @@ impl SessionStore {
     /// Latest successful, still-valid summary on the active branch.
     pub fn latest_compaction(&self) -> Option<&CompactionEntry> {
         self.latest_compaction_on(&self.branch_path())
-            .map(|latest| latest.compaction)
     }
 
     /// The latest successful summary on `path` that still holds. Invalid or incomplete control
-    /// records never hide original evidence, and a correction of a full summary's evidence
-    /// invalidates it as a whole: the projection falls back to the originals. An incremental
-    /// summary stays, without the facts that cite corrected records ([`Self::effective_facts`]).
-    pub(super) fn latest_compaction_on<'s>(&'s self, path: &[&'s Entry]) -> Option<LatestCompaction<'s>> {
+    /// records never hide original evidence, and a correction of a summary's evidence
+    /// invalidates it as a whole: the projection falls back to the originals.
+    fn latest_compaction_on<'s>(&'s self, path: &[&'s Entry]) -> Option<&'s CompactionEntry> {
         let (position, compaction) = path.iter().enumerate().rev().find_map(|(index, entry)| {
             if let Entry::Compaction(entry) = entry {
                 Some((index, entry))
@@ -156,54 +142,10 @@ impl SessionStore {
         let Some(Entry::CompactionStarted(attempt)) = self.get(&compaction.attempt_id) else {
             return None;
         };
-        if attempt.mode == SummaryMode::Full
-            && Self::corrected_source(&path[position + 1..], &attempt.source_entry_ids).is_some()
-        {
+        if Self::corrected_source(&path[position + 1..], &attempt.source_entry_ids).is_some() {
             return None;
         }
-        Some(LatestCompaction {
-            position,
-            compaction,
-            attempt,
-        })
-    }
-
-    /// The facts of `latest` that still hold at the end of `path`, each with its ID: an
-    /// incremental summary loses the facts that cite a record corrected after it. A full
-    /// summary, which a correction invalidates as a whole, keeps all of its facts, with IDs
-    /// numbered after its attempt, so that an incremental summary can continue it.
-    pub(super) fn effective_facts(path: &[&Entry], latest: &LatestCompaction<'_>) -> Vec<SummaryFact> {
-        let corrected = Self::corrected_after(path, latest.position);
-        latest
-            .compaction
-            .summary
-            .facts
-            .iter()
-            .enumerate()
-            .filter(|(_, fact)| {
-                latest.attempt.mode == SummaryMode::Full
-                    || !fact.source_entry_ids.iter().any(|id| corrected.contains(id.as_str()))
-            })
-            .map(|(index, fact)| SummaryFact {
-                id: Some(
-                    fact.id
-                        .clone()
-                        .unwrap_or_else(|| format!("{}-{}", latest.attempt.id, index + 1)),
-                ),
-                ..fact.clone()
-            })
-            .collect()
-    }
-
-    /// The targets of the context edits on `path` after `position`.
-    pub(super) fn corrected_after<'p>(path: &[&'p Entry], position: usize) -> HashSet<&'p str> {
-        path[position + 1..]
-            .iter()
-            .filter_map(|entry| match entry {
-                Entry::ContextEdit(edit) => Some(edit.target_id.as_str()),
-                _ => None,
-            })
-            .collect()
+        Some(compaction)
     }
 
     /// The first of `sources` that a context edit on `path` targets, in edit order: a summary
@@ -219,7 +161,7 @@ impl SessionStore {
     /// recorded before it in branch order. Cutting by branch order, not by finding the kept
     /// message in the projection, matters when a later context edit omits that message: the
     /// summary must still replace everything recorded before it.
-    pub(super) fn summarized_count(path: &[&Entry], raw: &[ProjectedMessage], first_kept: &str) -> Result<usize> {
+    fn summarized_count(path: &[&Entry], raw: &[ProjectedMessage], first_kept: &str) -> Result<usize> {
         let boundary = path
             .iter()
             .position(|entry| entry.id() == first_kept)
@@ -230,14 +172,6 @@ impl SessionStore {
             .take_while(|item| summarized.contains(item.entry_id.as_str()))
             .count())
     }
-}
-
-/// The latest summary on a branch that still holds: its position on the path, its entry and
-/// its attempt.
-pub(super) struct LatestCompaction<'s> {
-    pub position: usize,
-    pub compaction: &'s CompactionEntry,
-    pub attempt: &'s CompactionStartedEntry,
 }
 
 #[cfg(test)]

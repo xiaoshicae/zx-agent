@@ -18,12 +18,12 @@
 //! directories.
 //!
 //! The summary evaluation, `summaries_over_eight_rounds_of_a_scripted_session`, costs far more:
-//! 16 summaries that read about 0.6 MiB of records in all, about 270,000 input tokens on the one
-//! model it has been measured on. It also needs `ZX_E2E_EVAL=1`, and otherwise only prints that
-//! it was skipped. It fails when a summary is not made. `ZX_E2E_SUMMARY_TOKENS` sets each
-//! summary's output budget (default 2048, at most 16384), which a model whose reasoning counts
-//! as output needs raised. It keeps its two session files, with every round's summary, in a
-//! temporary directory and prints the path. Run it on its own:
+//! 8 summaries that read about 0.5 MiB of records in all. It also needs `ZX_E2E_EVAL=1`, and
+//! otherwise only prints that it was skipped. It fails when a summary is not made.
+//! `ZX_E2E_SUMMARY_TOKENS` sets each summary's output budget (default 2048, at most 16384),
+//! which a model whose reasoning counts as output needs raised. It keeps its session file,
+//! with every round's summary, in a temporary directory and prints the path. Run it on its
+//! own:
 //!
 //! ```text
 //! ZX_E2E_AUTHORIZED=1 ZX_E2E_EVAL=1 \
@@ -52,12 +52,12 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
-use common::summary_eval::{Evaluation, ROUNDS, evaluate};
+use common::summary_eval::evaluate;
 use common::{RunnerSetup, config, fast_retry};
 use zx_agent::agent::PolicyDecision;
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig, SystemUpdates};
 use zx_agent::ai::{Message, Provider};
-use zx_agent::compaction::{Config, Outcome, SummaryMode};
+use zx_agent::compaction::{Config, Outcome};
 use zx_agent::executor::LocalExecutor;
 use zx_agent::policy::{AutoApprove, PolicyHook, Rule, RuleMatcher, RulePolicy};
 use zx_agent::prompt::{build_system_prompt, environment_section};
@@ -292,19 +292,18 @@ async fn an_invalid_key_fails_without_retrying() {
     assert!(error.starts_with("HTTP 4"), "{error}");
 }
 
-/// Item 6 of the incremental summary design: the scripted session of `common::summary_eval`
-/// summarized after each of its rounds, in full and then in incremental mode. Prints each
-/// round's score and the final facts. Fails when a summary is not made, since the scores then
+/// The scripted session of `common::summary_eval` summarized after each of its rounds.
+/// Prints each round's score and the final facts. Fails when a summary is not made, since the scores then
 /// mean nothing; otherwise asserts only what holds whatever the model answers. Each summary
 /// has the default budgets, 2048 output tokens and 2 minutes, unless `ZX_E2E_SUMMARY_TOKENS`
-/// sets the output budget. The two session files stay in a temporary directory, whose path
-/// is printed first.
+/// sets the output budget. The session file stays in a temporary directory, whose path is
+/// printed first.
 #[tokio::test]
 #[ignore = "calls a paid model API; needs ZX_E2E_AUTHORIZED=1 and the API owner's consent"]
 async fn summaries_over_eight_rounds_of_a_scripted_session() {
     if std::env::var("ZX_E2E_EVAL").as_deref() != Ok("1") {
         eprintln!(
-            "[real_api] summary evaluation skipped: its 16 summaries read about 0.6 MiB of records; set ZX_E2E_EVAL=1 to run it"
+            "[real_api] summary evaluation skipped: its 8 summaries read about 0.5 MiB of records; set ZX_E2E_EVAL=1 to run it"
         );
         return;
     }
@@ -316,13 +315,12 @@ async fn summaries_over_eight_rounds_of_a_scripted_session() {
             .unwrap_or_else(|_| panic!("ZX_E2E_SUMMARY_TOKENS must be a number of tokens, not {value:?}")),
         Err(_) => Config::default().max_summary_tokens,
     };
-    let budget = |mode| Config {
-        mode,
+    let budget = Config {
         max_summary_tokens,
         ..Config::default()
     };
     // Rejected here, before any request.
-    budget(SummaryMode::Full).validate().unwrap();
+    budget.validate().unwrap();
     // Kept after the run, also when it fails, so that every round's summary can be read in
     // the session files.
     let dir = tempfile::Builder::new()
@@ -336,45 +334,28 @@ async fn summaries_over_eight_rounds_of_a_scripted_session() {
     );
     let provider: Arc<dyn Provider> = Arc::new(endpoint.provider(endpoint.api_key()));
 
-    let full = evaluate(Arc::clone(&provider), &endpoint.model, budget(SummaryMode::Full), &dir).await;
-    full.print(&endpoint.model);
-    let incremental = evaluate(provider, &endpoint.model, budget(SummaryMode::Incremental), &dir).await;
-    incremental.print(&endpoint.model);
+    let evaluation = evaluate(provider, &endpoint.model, budget, &dir).await;
+    evaluation.print(&endpoint.model);
 
-    // A summary that was not made has no score, and an incremental one that has no earlier
-    // summary to continue reads everything, as a full one does.
-    let not_made: Vec<String> = [&full, &incremental]
-        .into_iter()
-        .flat_map(|evaluation| {
-            evaluation
-                .rounds
-                .iter()
-                .enumerate()
-                .filter(|(_, round)| round.outcome != Outcome::Completed)
-                .map(move |(index, round)| {
-                    format!(
-                        "{:?} round {}: {:?}, {}",
-                        evaluation.mode,
-                        index + 1,
-                        round.outcome,
-                        round.error.as_deref().unwrap_or("no error")
-                    )
-                })
+    // A summary that was not made has no score.
+    let not_made: Vec<String> = evaluation
+        .rounds
+        .iter()
+        .enumerate()
+        .filter(|(_, round)| round.outcome != Outcome::Completed)
+        .map(|(index, round)| {
+            format!(
+                "round {}: {:?}, {}",
+                index + 1,
+                round.outcome,
+                round.error.as_deref().unwrap_or("no error")
+            )
         })
         .collect();
     assert!(
         not_made.is_empty(),
         "summaries that were not made:\n{}",
         not_made.join("\n")
-    );
-    // The last full summary reads all eight rounds again, about 113 KiB; an incremental one
-    // reads the last round, about 16 KiB, and at most 64 KiB of earlier facts.
-    let last = |evaluation: &Evaluation| evaluation.rounds[ROUNDS - 1].request_bytes;
-    assert!(
-        last(&incremental) < last(&full),
-        "incremental {} bytes, full {} bytes",
-        last(&incremental),
-        last(&full)
     );
 }
 

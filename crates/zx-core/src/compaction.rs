@@ -2,8 +2,8 @@
 //! coding-agent/src/core/compaction/compaction.ts).
 //!
 //! [`Config`] holds the budgets and [`Report`] says what one summary cost and produced; the
-//! `summarizer` runs one summary over a session, and `answer` bounds, parses and merges the
-//! model's answer.
+//! `summarizer` runs one summary over a session, and `answer` bounds and parses the model's
+//! answer.
 
 mod answer;
 mod summarizer;
@@ -14,7 +14,6 @@ use anyhow::{Result, ensure};
 use serde::Serialize;
 
 use crate::ai::{Message, StopReason, Usage};
-pub use crate::session::SummaryMode;
 use crate::session::without_details;
 
 pub(crate) use summarizer::Summarizer;
@@ -42,8 +41,6 @@ pub struct Config {
     pub max_summary_tokens: u32,
     /// Bound for the whole summary stream, including a hung provider.
     pub timeout: Duration,
-    /// How a summary after an earlier one reads the history. `Full` by default.
-    pub mode: SummaryMode,
 }
 
 /// The default of [`Config::reserve_tokens`] (pi: the default `reserveTokens`).
@@ -58,7 +55,6 @@ impl Default for Config {
             keep_recent_bytes: 64 * 1024,
             max_summary_tokens: 2048,
             timeout: Duration::from_secs(120),
-            mode: SummaryMode::Full,
         }
     }
 }

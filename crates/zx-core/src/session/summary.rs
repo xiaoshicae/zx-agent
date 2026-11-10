@@ -17,14 +17,14 @@ use crate::ai::{AssistantMessage, Message, Usage, UserMessageKind};
 
 pub(crate) use source::{summary_input, summary_messages};
 
-/// The largest serialized summary, carried facts included.
+/// The largest serialized summary.
 pub(crate) const MAX_SUMMARY_BYTES: usize = 64 * 1024;
 
 /// The most facts, inferences or plans one summary holds.
-pub(crate) const MAX_STATEMENTS: usize = 128;
+const MAX_STATEMENTS: usize = 128;
 
 /// Every fact cites only records in `ids`.
-pub(crate) fn cite_only(facts: &[SummaryFact], ids: &[String]) -> Result<()> {
+fn cite_only(facts: &[SummaryFact], ids: &[String]) -> Result<()> {
     let sources: HashSet<&str> = ids.iter().map(String::as_str).collect();
     for fact in facts {
         for id in &fact.source_entry_ids {
@@ -37,39 +37,12 @@ pub(crate) fn cite_only(facts: &[SummaryFact], ids: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// How a summary reads the history before its boundary.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SummaryMode {
-    /// Every summary reads all original records before its boundary again, never an earlier
-    /// summary. A summary whose sources are corrected is invalid as a whole. Reading is
-    /// bounded, so a long session eventually cannot be summarized this way.
-    #[default]
-    Full,
-    /// A summary after an earlier one carries that one's facts over unchanged and reads only
-    /// the original records after its boundary, plus earlier records corrected since. A
-    /// correction invalidates only the facts that cite the corrected record.
-    Incremental,
-}
-
-impl SummaryMode {
-    fn is_full(&self) -> bool {
-        *self == Self::Full
-    }
-}
-
-/// A model-produced fact with references to source message entries. In an incremental
-/// summary every fact has an `id`, `<attempt that created it>-<number>`, and a new fact may
-/// name the earlier facts it `supersedes`; full summaries have neither.
+/// A model-produced fact with references to source message entries.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SummaryFact {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
     pub text: String,
     pub source_entry_ids: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub supersedes: Vec<String>,
 }
 
 /// A summary of the conversation: facts with the records they cite, inferences and plans.
@@ -85,21 +58,15 @@ pub struct CompactionSummary {
 }
 
 impl CompactionSummary {
-    /// A full summary: within the limits, without fact IDs, and every fact cites `ids`.
+    /// A valid summary of the records `ids`: within the limits, and every fact cites `ids`.
     pub(crate) fn validate(&self, ids: &[String]) -> Result<()> {
         self.validate_limits()?;
-        ensure!(
-            self.facts
-                .iter()
-                .all(|fact| fact.id.is_none() && fact.supersedes.is_empty()),
-            "a full summary has no fact IDs or supersedes"
-        );
         cite_only(&self.facts, ids)
     }
 
-    /// The bounds every summary keeps, carried facts included: at most 64 KiB and 128
-    /// statements of each kind, nothing empty, and every fact cites at least one record.
-    pub(crate) fn validate_limits(&self) -> Result<()> {
+    /// The bounds every summary keeps: at most 64 KiB and 128 statements of each kind,
+    /// nothing empty, and every fact cites at least one record.
+    fn validate_limits(&self) -> Result<()> {
         ensure!(
             serde_json::to_vec(self)?.len() <= MAX_SUMMARY_BYTES,
             "summary exceeds {MAX_SUMMARY_BYTES} bytes"
@@ -118,15 +85,11 @@ impl CompactionSummary {
             "summary is empty"
         );
         for (index, fact) in self.facts.iter().enumerate() {
-            ensure!(
-                !fact.text.trim().is_empty(),
-                "summary fact {} is empty",
-                fact_label(index, fact)
-            );
+            ensure!(!fact.text.trim().is_empty(), "summary fact #{} is empty", index + 1);
             ensure!(
                 !fact.source_entry_ids.is_empty(),
-                "summary fact {} has no sourceEntryIds",
-                fact_label(index, fact)
+                "summary fact #{} has no sourceEntryIds",
+                index + 1
             );
         }
         for (kind, statements) in [("inference", &self.inferences), ("plan", &self.plans)] {
@@ -169,30 +132,6 @@ pub struct SummaryRequest {
     pub max_tokens: u32,
 }
 
-/// How an error names a fact: its ID, or its position from 1 when it has none.
-fn fact_label(index: usize, fact: &SummaryFact) -> String {
-    match &fact.id {
-        Some(id) => id.clone(),
-        None => format!("#{}", index + 1),
-    }
-}
-
-/// The earlier facts that `new` supersedes, each once, in the order named. An error names a
-/// fact that is not among `previous`.
-pub(crate) fn superseded_by(previous: &[SummaryFact], new: &[SummaryFact]) -> Result<Vec<String>> {
-    let mut superseded: Vec<String> = Vec::new();
-    for id in new.iter().flat_map(|fact| &fact.supersedes) {
-        ensure!(
-            previous.iter().any(|fact| fact.id.as_ref() == Some(id)),
-            "a new fact supersedes {id:?}, which is not an earlier fact that still holds"
-        );
-        if !superseded.contains(id) {
-            superseded.push(id.clone());
-        }
-    }
-    Ok(superseded)
-}
-
 /// A summary attempt: what it reads and keeps, and the request it makes.
 ///
 /// Written and flushed before the summary model is called. An unresolved attempt
@@ -204,17 +143,10 @@ pub struct CompactionStartedEntry {
     pub parent_id: Option<String>,
     pub timestamp: u64,
     pub first_kept_entry_id: String,
-    /// The records the summary reads, in branch order. An incremental summary that continues
-    /// an earlier one reads the corrected earlier records first, then those after its boundary.
+    /// The records the summary reads, in branch order.
     pub source_entry_ids: Vec<String>,
     pub request: SummaryRequest,
     pub input_bytes: usize,
-    /// Written only for incremental summaries (format v5).
-    #[serde(default, skip_serializing_if = "SummaryMode::is_full")]
-    pub mode: SummaryMode,
-    /// The summary an incremental one continues: its facts are carried over.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub continues: Option<String>,
 }
 
 /// A successful summary and retained boundary; raw records are never removed.
@@ -226,15 +158,8 @@ pub struct CompactionEntry {
     pub timestamp: u64,
     pub attempt_id: String,
     pub first_kept_entry_id: String,
-    /// For an incremental summary: the carried facts that still hold, then the new ones.
     pub summary: CompactionSummary,
     pub usage: Usage,
-    /// IDs of earlier facts that a new fact superseded; they stay in earlier records only.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub superseded: Vec<String>,
-    /// IDs of the oldest earlier facts left out to stay within the limits.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub evicted: Vec<String>,
 }
 
 /// A failed or cancelled summary attempt, kept outside model context.
@@ -257,15 +182,4 @@ pub struct CompactionPlan {
     pub source_entry_ids: Vec<String>,
     pub request: SummaryRequest,
     pub input_bytes: usize,
-    pub mode: SummaryMode,
-    /// The summary an incremental one continues; `None` otherwise.
-    pub continues: Option<String>,
-}
-
-/// The result of an incremental summary: the merged summary, and the earlier facts it no
-/// longer carries.
-pub struct MergedSummary {
-    pub summary: CompactionSummary,
-    pub superseded: Vec<String>,
-    pub evicted: Vec<String>,
 }

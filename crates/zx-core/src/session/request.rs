@@ -190,17 +190,8 @@ impl SessionStore {
                 user_timestamp,
             } => {
                 let attempt = self.summary_attempt(attempt_id, &self.branch_path_from(parent))?;
-                let path = self.branch_path_from(attempt.parent_id.as_deref());
-                let content = match &attempt.continues {
-                    // An incremental summary reads the earlier facts and the records it names.
-                    Some(previous) => self
-                        .recorded_incremental_source(&path, previous, &attempt.first_kept_entry_id)?
-                        .input()?,
-                    None => {
-                        let raw = Self::raw_projection_from(&path);
-                        summary_input(Self::summarized_prefix(&raw, &attempt.first_kept_entry_id)?)?
-                    }
-                };
+                let raw = Self::raw_projection_from(&self.branch_path_from(attempt.parent_id.as_deref()));
+                let content = summary_input(Self::summarized_prefix(&raw, &attempt.first_kept_entry_id)?)?;
                 Ok(attempt.request.messages(content, *system_timestamp, *user_timestamp))
             }
         }

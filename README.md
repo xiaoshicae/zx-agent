@@ -411,7 +411,7 @@ CLI (main.rs + cli/ + chat/ + acp/)
 | 中断调用的重放 | 不重放：进程崩溃或被取消后，中断的调用一律写成错误结果，由模型决定是否重试 | pi 的工具可声明 `replay: "safe"`，durable 运行时重启后用记录的参数自动重跑，记录时与当前定义都声明 `safe` 才重跑，连续中断达到上限即停（`packages/durable/src/harness/tool.ts`）。这适用于两个前提：重启后无人介入、自动续跑；工具耗时长、内部有大量嵌套调用（如 codemode），从头重跑代价大。zx-agent 两者都没有：进程结束即运行结束，工具都是单次调用，被打断后由模型重试只多一次请求。将来要做自动续跑或长时间的复合工具时再评估；届时重放语义另设字段，不复用 `Effects`，因为只读不等于可以安全重放 |
 | 工具接口 | 结果只有文本 `content`，另有只供观察者的 `details` 与 `usage`（与 pi 一样随结果写入会话，不发给模型；`usage` 按工具名汇总进运行报告，不计入 token 预算）；进度是文本。没有 pi 的图片内容、`structuredContent` 与 `outputSchema`、`label`，也没有让工具经同一套校验与钩子调用其他工具的 `runToolCall` | 尚无使用者：图片要改消息格式与 provider，`runToolCall` 在做 codemode 或子 agent 时才需要 |
 | 上下文过长的识别 | 按 HTTP 413、错误码（`context_length_exceeded` 等）与通用措辞（如 “maximum context”“prompt is too long”）识别，限流与服务端错误不算；不识别服务端截断输入而不报错的情况 | pi 按服务逐条匹配错误文本，并用模型的上下文窗口识别不报错的超长（`packages/ai/src/utils/overflow.ts`）。这里不按服务推断（D10），也没有模型的上下文窗口信息（见路线图 P10 ⑧） |
-| 上下文摘要 | 默认（全量模式）重新摘要时读取应用过 `context_edit` 的原始记录，不输入上一份摘要；可选的增量模式沿用上一份摘要的事实、只读新增记录，旧事实由程序原样保留，模型只能新增事实或标明取代旧事实。摘要中的每条事实必须引用来源条目，见 [CONFIGURATION.md](docs/CONFIGURATION.md) | pi 把上一份摘要交给模型更新，允许删去旧内容；这里优先保证每条事实可追溯、不经多次转述。全量模式的代价是摘要请求随历史增长，累计约 2 MiB 后无法再摘要；增量模式每次只读上一份摘要的事实（至多 64 KiB）与新增、被修正的记录，请求大小不随历史总长增长，用真实模型评测之后再决定是否设为默认（见[路线图](docs/ROADMAP.md)） |
+| 上下文摘要 | 每次重新摘要都读取应用过 `context_edit` 的原始记录，不输入上一份摘要。摘要中的每条事实必须引用来源条目，见 [CONFIGURATION.md](docs/CONFIGURATION.md) | pi 把上一份摘要交给模型更新，允许删去旧内容；这里优先保证每条事实可追溯、不经多次转述。代价是摘要请求随历史增长，累计约 2 MiB 后无法再摘要，需要 `/new` 开新会话（见[路线图](docs/ROADMAP.md)的 D18） |
 | 不加新输入的续跑 | 以失败或被取消的回答结尾时，先省略该回答再续跑 | pi 的 `Agent.continue()` 遇到回答结尾时报错（排队的消息除外），失败后的重试由 `AgentSession` 另行处理；这里的续跑同时用于崩溃、超时或取消之后接着做 |
 | 请求前替换设置 | `prepare_request` 只能替换模型与推理强度 | pi 的 `prepareRequest` 还可以改写上下文；这里上下文只来自会话投影（不变量 6），改上下文用 `transform_context` 并写入会话 |
 | 推理强度 | 级别与 pi 相同，写法由 `config.toml` 的 `provider.reasoningFormat` 在三种中显式选择 | pi 按模型元数据与服务的 compat 设置（`thinkingFormat`）在十余种写法中选择，并按模型能力调整级别；这里的模型元数据只有上下文窗口与单价（`[[models]]`），没有写法与能力的信息，也不按服务推断（D10） |
@@ -612,7 +612,7 @@ run、chat 与 im 在设置了下面的标准变量时，用 OTLP/HTTP（protobu
 第一行是头部，之后每行一个条目，条目之间通过 `parentId` 连成一棵树：
 
 ```json
-{"type":"session","version":6,"id":"…","timestamp":1761700000000,"cwd":"/srv","model":"…"}
+{"type":"session","version":7,"id":"…","timestamp":1761700000000,"cwd":"/srv","model":"…"}
 {"type":"message","id":"f0e1d2c3","parentId":null,"timestamp":…,"message":{"role":"system","sections":[{"name":"preamble","content":"…"},{"name":"environment","content":"…"}],"timestamp":…}}
 {"type":"message","id":"a1b2c3d4","parentId":"f0e1d2c3","timestamp":…,"message":{"role":"user","content":"…","timestamp":…}}
 {"type":"message","id":"b2c3d4e5","parentId":"a1b2c3d4","timestamp":…,"message":{"role":"assistant","stopReason":"error","errorMessage":"HTTP 503: …",…}}
@@ -629,7 +629,7 @@ run、chat 与 im 在设置了下面的标准变量时，用 OTLP/HTTP（protobu
 
 如果进程在写入最后一行时崩溃，未换行且确实未完成的尾记录会在下次打开时截掉，包括截断在 UTF-8 字符中间的情况。写入失败（如磁盘已满）后不再写入，因此留下的残缺同样只在文件末尾，按同一规则修复。CLI 会在 stderr 报告修复；库调用方可读取 `SessionStore::recovered_tail_bytes()`。完整记录缺少末尾换行时会补换行；已换行的损坏记录、未知记录类型和完整记录的字段错误会报错并保留文件。截掉尾记录发生在其余记录全部通过校验之后，因此打开失败时文件保持原样。
 
-会话格式的版本是 6（`session::SESSION_VERSION`），只读写这一个版本：头部版本不是 6 的文件，无论更旧还是更新，打开、读取都报错（`session format version <N> is not supported; only version 6 can be read or written`），文件保持原样；`SessionStore::create` 也拒绝其他版本的头部。格式变化时提高版本号，此前的文件随之无法打开，不做升级或兼容读取。压缩时先追加 `compaction_started`，请求完成后追加 `compaction` 或 `compaction_failed`。未完成或失败记录不改变投影；成功记录保留全部 system、结构化摘要及 `firstKeptEntryId` 之后的原消息，原始历史仍可审计。默认的全量模式下，摘要来源是应用过 `context_edit` 的原始投影，不输入旧摘要；可选的增量模式（见 [CONFIGURATION.md](docs/CONFIGURATION.md)）下，后一次摘要沿用前一次仍有效的事实，只读取其边界之后的记录与此后被修正的旧记录。
+会话格式的版本是 7（`session::SESSION_VERSION`），只读写这一个版本：头部版本不是 7 的文件，无论更旧还是更新，打开、读取都报错（`session format version <N> is not supported; only version 7 can be read or written`），文件保持原样；`SessionStore::create` 也拒绝其他版本的头部。格式变化时提高版本号，此前的文件随之无法打开，不做升级或兼容读取。压缩时先追加 `compaction_started`，请求完成后追加 `compaction` 或 `compaction_failed`。未完成或失败记录不改变投影；成功记录保留全部 system、结构化摘要及 `firstKeptEntryId` 之后的原消息，原始历史仍可审计。摘要来源是应用过 `context_edit` 的原始投影，不输入旧摘要。
 
 每次模型请求（任务请求与摘要请求）发出前，先追加 `request_started`；provider、模型、工具定义、`max_tokens` 或 provider 转换参数变化时，先追加一条 `request_config`。`request_started` 引用配置，并记录消息来源：会话投影（以该条目的父节点为准），或摘要尝试的源条目与请求时间戳。库调用方可用 `SessionStore::replay_request` 还原当时与 provider 无关的 `Request`，OpenAI 兼容服务可再用 `openai::replay_body` 重建请求体。会话文件不记录 API key、URL 和 HTTP 头；自定义 provider 通过 `Provider::request_options` 提供非机密的转换参数，默认为 `null`，此时只能还原到 `Request`。这些记录写入失败时不发请求，并中止运行。`request_started` 只表示准备发送，后面没有对应的回答，说明发送结果未知。
 
@@ -844,9 +844,8 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 | `tests/config_cli.rs` | `config.toml`：在 `~/.zx-agent` 与 `ZX_AGENT_HOME` 下找到、相对的 `ZX_AGENT_HOME` 被拒绝、模型取 `--model` > `ZX_MODEL` > 文件而服务地址取 `ZX_BASE_URL` > 文件、没有模型时的错误文本、未知键、原命令行设置从文件读取并到达请求、无效值以退出码 2 结束并给出键名 |
 | `tests/run_cli.rs` | `run` 在 P0 之后新增的约定：进度与报告行转义终端控制字符；另一个 `run` 正在写的会话文件不能再被打开写入；JSONL 事件的信封；为零的超时在请求前被拒绝；stdout 已关闭时退出码仍由运行结果决定；token 预算的退出码 7、最后一次请求可超出预算、agent 设置预算与命令行的 0 关闭；成本预算的退出码 8、模型没有单价或预算为负时以退出码 2 结束；被拒的调用数出现在报告行，`--fail-on-denied` 只在有被拒调用时把 0 换成 9；只在设置了 OTLP 地址时导出追踪与指标，导出内容不含回答；`TRACEPARENT` 让运行接续调用方的 trace，不合法时提示并自成一条；`provider.requestFields` 到达模型并写入请求审计，写错时以退出码 2 结束且不建会话文件；`provider.fillMissingReasoning` 默认关闭，开启时写入请求审计；`reasoning` 按三种写法到达模型并写入请求审计，写错或与 `provider.requestFields` 冲突时以退出码 2 结束（原有 `run` 测试仍在 `tests/cli.rs`） |
 | `tests/otel.rs` | 一次真实运行导出一条 trace：每次尝试、回合、模型请求与工具调用各一个 span，用量与工具属性正确；同一次运行经宿主的 `SdkMeterProvider` 导出指标（运行数、token、请求与工具调用的次数）；`sink_under` 让运行接续给定的 traceparent；`src/otel/` 的单元测试另覆盖嵌套与时间、只含元数据、运行结束时关闭未结束的 span、手动摘要自成一条 trace 且其 token 只计一次、指标的属性与时长、traceparent 的解析与拒绝、队列满时丢弃并计数 |
-| `tests/session_compaction.rs`、`tests/compaction.rs` | 分支和引用、原始投影、省略保留边界后摘要仍生效、编辑摘要的变换计划在写入前被拒绝、摘要源与上下文字节统计不含工具结果的 `details`、摘要失败与取消、请求 / 用量预算、超时和上限 |
-| `tests/incremental_summary.rs` | 增量摘要：第一次读取整段前缀并给事实编号、之后只读旧事实与新增记录、可接续全量模式留下的摘要、取代与淘汰、修正只作废相关事实并在下一次重读、模型不能自带编号、加载时拒绝违反规则的记录、请求可从会话文件还原、多轮之后请求大小不随历史增长（与全量模式对照）；摘要评测的脚本会话自检，以及用知道答案的假模型验证评分 |
-| `tests/request_audit.rs` | 每次任务与摘要请求可从会话文件还原、配置只在变化时追加、固定会话文件（全量摘要与增量摘要各一份）的还原结果逐字节不变（版本守护） |
+| `tests/session_compaction.rs`、`tests/compaction.rs` | 分支和引用、原始投影、省略保留边界后摘要仍生效、编辑摘要的变换计划在写入前被拒绝、摘要源与上下文字节统计不含工具结果的 `details`、摘要失败与取消、请求 / 用量预算、超时和上限；摘要评测的脚本会话自检，以及用知道答案的假模型验证评分 |
+| `tests/request_audit.rs` | 每次任务与摘要请求可从会话文件还原、配置只在变化时追加、固定会话文件的还原结果逐字节不变（版本守护） |
 | `tests/executor.rs` | 执行器接缝：bash 与 read_file 只经自身执行器运行命令和读文件，命令的 6 种结束方式均正确报告，执行方式随执行器；不能写文件的执行器让 edit_file 报错 |
 | `tests/search_tools.rs` | grep、find、ls 在本机（有无 ripgrep 时断言都成立）：匹配行的路径与行号、忽略大小写 / 字面量 / glob、点文件与跳过 `.git`、无结果与报错、limit、超长行截断、注入的模式与路径不被执行、取消 |
 | `tests/file_tools.rs` | edit_file 与 write_file：新建、覆盖与上级目录，多处替换、BOM 与 CRLF、patch，每类失败后文件不变，取消，旧参数写法，同一批调用改同一文件时两处改动都生效 |
@@ -856,7 +855,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 | `tests/hooks.rs`、`tests/hooks_cli.rs` | 钩子组合与失败处理、审批范围与取消、审计变换、输入钩子被取消或运行被丢弃时不写入输入且插话留在队列、策略结论与审批事件（询问、会话内授权、拒绝、失败、超时、取消、等待时长）、观察者默认跳过增量、钩子上下文（会话、运行、工作目录与取消信号）、具名钩子、按阶段执行与先注册的脱敏仍在扩展之后、进度只经脱敏钩子、`details` 中字符串与对象键的脱敏、重名或声明名不一致的工具在请求前被拒绝、工具元数据 panic 时运行失败、`observes` 的 panic 被报告且运行继续、钩子不能追加 system 消息、工具取消自己的令牌不影响运行、续写预算、工具输出脱敏的 CLI 接线、脱敏失败在文本输出中的提示、非 UTF-8 密钥文件按有损解码匹配、无法匹配的密钥文件在启动时报配置错误、内置钩子的固定名称、短值在启动时提示 |
 | `tests/hook_contract.rs` | 钩子输入输出的 JSON 契约：策略结论、回合决定、上下文编辑、审批及其请求、工具输出（含可选的 `details`）与调用、钩子上下文、回合摘要 |
 | `tests/evals.rs` | 行为评测框架（`tests/common/evals.rs`）对脚本化的模型：计划按轮次交替两个变体；用例经编译出的程序在各自的家目录与工作目录下运行、按确定性的评分配对比较，报告提升、饱和与不稳定，产物（协议、计划、逐条观测、报告、每个 arm 的会话）落盘；起不来的 arm 阻塞配对并扣住标题数字；无提升、负提升与缺失或重复的 arm 的标记 |
-| `tests/real_api.rs` | 真实模型 API（付费，默认跳过）：文本回答与用量、工具往返、策略拒绝、输出截断、恢复会话、无效 key 不重试；摘要评测（全量与增量模式各对 8 轮的脚本会话做 8 次摘要，另需 `ZX_E2E_EVAL=1`）；行为评测（样例用例在 `tests/fixtures/evals/` 的两组 agent 下配对运行，另需 `ZX_E2E_EVAL=1`，`ZX_E2E_EVAL_RUNS` 设每个变体的运行次数） |
+| `tests/real_api.rs` | 真实模型 API（付费，默认跳过）：文本回答与用量、工具往返、策略拒绝、输出截断、恢复会话、无效 key 不重试；摘要评测（对 8 轮的脚本会话做 8 次摘要，另需 `ZX_E2E_EVAL=1`）；行为评测（样例用例在 `tests/fixtures/evals/` 的两组 agent 下配对运行，另需 `ZX_E2E_EVAL=1`，`ZX_E2E_EVAL_RUNS` 设每个变体的运行次数） |
 
 新增回归还覆盖：取消与 future 丢弃、特殊文件与读取上限、UTF-8 尾记录修复及损坏记录保留、交错工具参数 ID、有界队列背压、结构化错误与数值 `Retry-After`、响应预算和 CLI 参数接线。P0 回归覆盖内核不限轮次、无时限、不自动续写，以及零轮次、显式续写与预设取值。Rustdoc 的编译失败用例保护单一运行的借用约束。
 

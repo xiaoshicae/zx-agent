@@ -49,8 +49,6 @@ struct RawCompaction {
     keep_recent_bytes: Option<usize>,
     max_summary_tokens: Option<u32>,
     timeout_secs: Option<u64>,
-    /// `full` (the default) or `incremental`.
-    mode: Option<compaction::SummaryMode>,
 }
 
 #[derive(Default, Deserialize)]
@@ -202,9 +200,6 @@ impl RawCompaction {
         }
         if let Some(secs) = self.timeout_secs {
             config.timeout = Duration::from_secs(secs);
-        }
-        if let Some(mode) = self.mode {
-            config.mode = mode;
         }
     }
 }

@@ -26,12 +26,11 @@
 | `tests/agents_cli.rs` | 主目录的 agent 替换内置 agent、其他文件名不读取、agent/CLI 覆盖与 deny、`ask` 加 `allow` 在 run 中拒绝其余命令、项目上下文范围、默认值与越界链接、skill 懒加载、工具策略和审计 |
 | `tests/config_cli.rs` | `config.toml` 的位置（`~/.zx-agent`、`ZX_AGENT_HOME`，相对路径被拒绝）、模型与服务地址的优先级、没有模型时的错误、未知键、原命令行设置从文件读取、无效值的键名 |
 | `tests/session_compaction.rs`、`tests/compaction.rs` | 分支 / 引用与原始投影、自动 / 手动摘要、摘要源不含工具结果的 `details`、计费（摘要请求计入请求与 token 预算）、steering、失败、取消与超时 |
-| `tests/incremental_summary.rs` | 增量摘要：接续与只读新增记录、接续全量摘要、取代、淘汰、修正后的作废与重读、加载校验、请求还原、请求大小不随历史增长；摘要评测的脚本会话自检，以及用知道答案的假模型验证评分 |
-| `tests/request_audit.rs` | 请求审计（G3）：从会话文件还原每次请求、配置变化才追加；上下文过长后恢复的三个请求；固定会话 `tests/fixtures/replay-full.jsonl` 与含增量摘要的 `replay-incremental.jsonl` 的还原结果（格式化后的 JSON）与期望文件逐字节比对，改变还原结果须同时提高会话格式或转换版本，使此前的文件被拒绝 |
+| `tests/request_audit.rs` | 请求审计（G3）：从会话文件还原每次请求、配置变化才追加；上下文过长后恢复的三个请求；固定会话 `tests/fixtures/replay-full.jsonl` 的还原结果（格式化后的 JSON）与期望文件逐字节比对，改变还原结果须同时提高会话格式或转换版本，使此前的文件被拒绝 |
 | `tests/executor.rs` | 执行器接缝：工具只经自身执行器运行命令和读写文件（grep 的脚本与 shell），本机执行器对 bash 与搜索的命令都隐藏变量，结束方式的报告，执行方式随执行器，编辑工具经执行器读写文件 |
 | `tests/search_tools.rs` | grep、find、ls 在本机：有无 ripgrep 时断言都要成立（本机没有 rg，CI 可能有）；注入的模式与路径不被执行 |
 | `tests/file_tools.rs` | edit_file 与 write_file 在本机：新建、覆盖、多处替换、BOM 与 CRLF、patch，每类失败后文件不变，取消，旧参数写法；同一批调用改同一文件（`SlowReads` 执行器让两次读取都先于写入）时两处改动都生效 |
-| `tests/compaction.rs` | 会话宿主的摘要：手动 compact 是有界、无工具的请求且会话可复用；自动摘要计入任务请求预算、用量与 token 预算，不能超出请求上限；摘要期间收到的 steering 在下一次任务请求前持久化；SDK 默认不发摘要请求；摘要请求与上下文大小不含工具结果的 `details`；重复摘要读原文而不是旧摘要；无效或截断的摘要不替换上下文、不当作任务重试；失败的自动摘要下一次 prompt 不再付费；运行的 future 被丢弃后暂停仍在；已知的 API key 在事件与会话文件前脱敏 |
+| `tests/compaction.rs` | 会话宿主的摘要：手动 compact 是有界、无工具的请求且会话可复用；自动摘要计入任务请求预算、用量与 token 预算，不能超出请求上限；摘要期间收到的 steering 在下一次任务请求前持久化；SDK 默认不发摘要请求；摘要请求与上下文大小不含工具结果的 `details`；重复摘要读原文而不是旧摘要；无效或截断的摘要不替换上下文、不当作任务重试；失败的自动摘要下一次 prompt 不再付费；运行的 future 被丢弃后暂停仍在；已知的 API key 在事件与会话文件前脱敏；摘要评测的脚本会话自检，以及用知道答案的假模型验证评分 |
 | `tests/container.rs` | 容器执行：假 docker 程序（在测试目录里记录参数、按文件应答）覆盖启动（默认放开与严格模式）、命令、读写文件、清理、逐个执行（排队的调用在取消后记为未执行）与 CLI（含 `permissions.approveAll` 下 chat 不询问 bash、run 执行 agent 没有放行的 MCP 工具、本机执行时报错）；名字以 `real_` 开头的测试在设置 `ZX_DOCKER_TEST_IMAGE`（本地已有、带 bash 的镜像）时对真实 Docker 运行，否则打印提示后返回；工作目录要让容器用户可读（见 `real_workspace`） |
 | `tests/crash_recovery.rs` | 崩溃恢复：开始记录先于执行、中断调用的四种恢复结果且不重放、失败或取消的回答中的调用记为未执行、恢复事件在结果写入之后、丢弃 future 与 SIGKILL 后恢复 |
 | `tests/output_store.rs` | 脱敏顺序、UUID 与文件边界、Unix 权限、UTF-8 分页、容量、取消、存储超时与错误回退 |
