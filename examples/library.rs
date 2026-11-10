@@ -6,11 +6,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio_util::sync::CancellationToken;
+
 use zx_agent::AgentSession;
-use zx_agent::agent::{AgentEvent, Event, LoopConfig, LoopSpec};
+use zx_agent::agent::{AgentEvent, Event, LoopConfig};
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::continuation::ContinueOnLength;
+use zx_agent::executor::LocalExecutor;
 use zx_agent::policy::{CommandPolicy, PolicyHook};
 use zx_agent::prompt::{build_system_prompt, environment_section};
 use zx_agent::redact::RedactSecrets;
@@ -42,7 +45,9 @@ async fn main() -> anyhow::Result<()> {
     );
     // The key must not reach commands, where `env` would reveal it.
     let bash = BashTool {
-        hidden_env: vec!["OPENAI_API_KEY".to_string()],
+        executor: Arc::new(LocalExecutor {
+            hidden_env: vec!["OPENAI_API_KEY".to_string()],
+        }),
         ..BashTool::default()
     };
 
@@ -52,16 +57,12 @@ async fn main() -> anyhow::Result<()> {
         api_key: api_key.clone().into(),
         ..OpenAiConfig::default()
     })?;
-    let mut config = LoopConfig::new(LoopSpec {
-        provider: Arc::new(provider),
-        model: model.clone(),
+    let mut config = LoopConfig {
         system_prompt,
         tools: vec![Arc::new(bash), Arc::new(ReadFileTool::default())],
         cwd: cwd.clone(),
-        max_tokens: None,
-        reasoning: None,
-        sequential_tools: false,
-    });
+        ..LoopConfig::new(Arc::new(provider), model.clone())
+    };
     // Continue once if an answer stops at the output token limit.
     config.hooks.push(ContinueOnLength::new(1));
     config.hooks.push(PolicyHook::new(Arc::new(policy)));
@@ -82,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let agent = AgentSession::new(config, RetryPolicy::default(), limits, session, sink);
 
-    let report = agent.prompt(task).await?;
+    let report = agent.prompt(task, &CancellationToken::new()).await?;
     println!("{}", report.final_text);
     eprintln!(
         "outcome: {:?}, model requests: {}, tokens: {}",

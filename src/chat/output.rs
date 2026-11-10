@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 use zx_agent::agent::{AgentEvent, ApprovalResult, Event, EventSink, RequestKind};
-use zx_agent::ai::{AssistantMessage, ContentBlock, Delta, Message, StopReason, ToolResultMessage};
+use zx_agent::ai::{AssistantMessage, ContentBlock, Delta, Message, StopReason, ToolCall, ToolResultMessage};
 use zx_agent::compaction::{self, Outcome};
 use zx_agent::runner::RunReport;
 use zx_agent::sync::lock;
@@ -189,9 +189,9 @@ impl Output {
         }
         state.terminal.end_answer();
         for block in &message.content {
-            if let ContentBlock::ToolCall {
+            if let ContentBlock::ToolCall(ToolCall {
                 id, name, arguments, ..
-            } = block
+            }) = block
             {
                 state.labels.insert(id.clone(), call_label(name, arguments));
             }

@@ -34,7 +34,7 @@ async fn prom() -> FakeMcp {
 fn profile(dir: &Path, url: &str, builtin_tools: &str) -> PathBuf {
     let path = dir.join("mcp.toml");
     let text = format!(
-        "tools = {builtin_tools}\n[[mcp]]\nname = \"prom\"\nurl = \"{url}\"\ntokenEnv = \"{TOKEN_VAR}\"\n\
+        "tools = {builtin_tools}\n[context]\ndiscover = false\n[[mcp]]\nname = \"prom\"\nurl = \"{url}\"\ntokenEnv = \"{TOKEN_VAR}\"\n\
          tools = [\"query\", \"range\"]\nallowTools = [\"query\"]\n"
     );
     std::fs::write(&path, text).unwrap();
@@ -46,7 +46,7 @@ fn program(mode: &str, model: &MockServer, dir: &Path, profile: &Path) -> Comman
     let mut command = zx_agent();
     command
         .args([mode, "--model", "mock", "--base-url", &model.base_url])
-        .args(["--max-retries", "0", "--api-key-env", KEY_VAR, "--no-context"])
+        .args(["--max-retries", "0", "--api-key-env", KEY_VAR])
         .args(["--profile", profile.to_str().unwrap()])
         .current_dir(dir)
         // chat keeps sessions under the home directory by default; never the real one.

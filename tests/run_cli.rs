@@ -13,7 +13,7 @@ use tokio::process::Command;
 
 use common::http::{Request, read_request};
 use common::mock_server::{MockServer, Reply};
-use common::{json_lines, stderr, stdout, zx_agent};
+use common::{ProfileFile, json_lines, stderr, stdout, zx_agent};
 
 /// An answer that would set the terminal title if a terminal ran it.
 const TITLE_ANSWER: &str = "before\u{1b}]0;CANARY\u{7}after";
@@ -164,41 +164,6 @@ async fn a_second_run_cannot_write_a_session_that_another_run_is_writing() {
         .unwrap();
     assert_eq!(first.status.code(), Some(0));
     assert_eq!(server.requests().len(), 1, "the second run sent a request");
-}
-
-/// Commands run as the same user as the agent. On Linux they must not read the agent's
-/// environment, which holds the API key, through /proc.
-#[cfg(target_os = "linux")]
-#[tokio::test]
-async fn commands_cannot_read_the_agent_environment_through_proc() {
-    const PROBE: &str = "visible-in-the-agent-environment";
-    let dir = tempfile::tempdir().unwrap();
-    let server = MockServer::start(vec![Reply::bash("c", "cat /proc/$PPID/environ"), Reply::text("done")]).await;
-    let output = zx_agent()
-        .args(["run", "--model", "mock", "--base-url", &server.base_url])
-        .args([
-            "--max-retries",
-            "0",
-            "--api-key-env",
-            "ZX_RUN_CLI_TEST_KEY",
-            "--tools",
-            "bash",
-            "go",
-        ])
-        .current_dir(dir.path())
-        .env("ZX_ENVIRON_PROBE", PROBE)
-        .env_remove("ZX_RUN_CLI_TEST_KEY")
-        .env_remove("ZX_MODEL")
-        .env_remove("ZX_BASE_URL")
-        .stdin(Stdio::null())
-        .kill_on_drop(true)
-        .output()
-        .await
-        .unwrap();
-    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    let result = server.requests()[1].body["messages"].to_string();
-    assert!(result.contains("Permission denied"), "{result}");
-    assert!(!result.contains(PROBE), "{result}");
 }
 
 #[cfg(unix)]
@@ -537,7 +502,8 @@ async fn a_zero_timeout_is_rejected_before_any_request() {
     assert!(server.requests().is_empty());
 }
 
-/// A cut-off answer, which `run` asks the model to continue (`--continue-on-length` is 1),
+/// A cut-off answer, which `run` asks the model to continue (the unattended profile's
+/// `continueOnLength` is 1),
 /// then the rest. Each answer of the fake service reports 12 tokens: 10 in, 2 out.
 async fn two_answers() -> MockServer {
     MockServer::start(vec![Reply::truncated("part one, "), Reply::text("part two")]).await
@@ -674,10 +640,11 @@ async fn a_negative_cost_budget_is_rejected() {
 async fn run_with_a_denied_command(extra: &[&str]) -> std::process::Output {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::bash("c", "echo hi"), Reply::text("done")]).await;
+    let profile = ProfileFile::new("unattended", "[rules]\nallow = [\"ls\"]");
     zx_agent()
         .args(["run", "--model", "mock", "--base-url", &server.base_url])
         .args(["--max-retries", "0", "--api-key-env", "ZX_RUN_CLI_TEST_KEY"])
-        .args(["--tools", "bash", "--allow-cmd", "ls"])
+        .args(["--tools", "bash", "--profile", profile.path()])
         .args(extra)
         .arg("go")
         .current_dir(dir.path())

@@ -1,5 +1,5 @@
-//! What every session of a process shares: `--system-prompt-file`, read once, the profile's
-//! MCP servers, connected once, and the secret files to redact, checked once.
+//! What every session of a process shares: the profile's MCP servers, connected once, the
+//! secret files to redact, checked once, and the variables commands must not see.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,28 +19,35 @@ use super::{BaseArgs, TransportArgs, env_value};
 /// example to the token that the platform mounts for the agent's own account.
 const SECRET_FILES_ENV: &str = "ZX_SECRET_FILES";
 
-/// What every session of a process shares: the instructions, the MCP servers and the secret
-/// files.
+/// What every session of a process shares: the MCP servers, the secret files and the hidden
+/// variables.
 pub(crate) struct Shared {
-    /// `None` keeps the profile's instructions.
-    pub(super) instructions: Option<String>,
     pub(super) mcp: McpTools,
     /// The files whose contents are redacted from tool output.
     pub(super) secret_files: Vec<PathBuf>,
+    /// Variables that hold credentials besides the API key, such as IM tokens: commands do
+    /// not inherit them, and their values are redacted like the key's.
+    pub(super) hidden_env: Vec<String>,
 }
 
 impl Shared {
-    /// Read the instructions, connect the MCP servers of the selected profile and check the
-    /// secret files.
+    /// Connect the MCP servers of the selected profile and check the secret files.
     ///
     /// A missing token, a server that cannot be reached in time, a tool it lacks or a secret
     /// file that cannot be used stops startup, like other configuration errors.
     pub(crate) async fn connect(base: &BaseArgs, default: Builtin, transport: &TransportArgs) -> Result<Self> {
         Ok(Self {
-            instructions: read_instructions(base)?,
             mcp: connect_mcp(base, default, transport).await?,
             secret_files: secret_files(base)?,
+            hidden_env: Vec::new(),
         })
+    }
+
+    /// Hide `names` from commands and redact their values: credentials besides the API key,
+    /// such as the IM platforms' tokens of serve.
+    pub(crate) fn with_hidden_env(mut self, names: Vec<String>) -> Self {
+        self.hidden_env = names;
+        self
     }
 }
 
@@ -50,15 +57,6 @@ pub(crate) struct ModeSettings<A> {
     pub(crate) args: A,
     pub(crate) shared: Shared,
     pub(crate) traces: Option<Arc<dyn EventSink>>,
-}
-
-/// Read `--system-prompt-file` once, at startup: it may be a pipe and is not held to the
-/// profile file budget, so it cannot be read again for a later conversation.
-fn read_instructions(base: &BaseArgs) -> Result<Option<String>> {
-    base.system_prompt_file
-        .as_deref()
-        .map(|path| std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display())))
-        .transpose()
 }
 
 /// The profile's MCP servers, connected once per process and shared by every session it

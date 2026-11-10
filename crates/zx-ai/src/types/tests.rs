@@ -46,12 +46,12 @@ fn assistant() -> AssistantMessage {
             ContentBlock::Text {
                 text: "Checking.".into(),
             },
-            ContentBlock::ToolCall {
+            ContentBlock::ToolCall(ToolCall {
                 id: "c1".into(),
                 name: "bash".into(),
                 arguments: json!({"command": "ls"}),
                 arguments_error: None,
-            },
+            }),
         ],
         provider: "p".into(),
         model: "m".into(),
@@ -151,6 +151,31 @@ fn messages_keep_the_session_file_format() {
     for (message, expected) in cases {
         assert_eq!(serde_json::to_value(&message).unwrap(), expected);
         assert_eq!(serde_json::from_value::<Message>(expected).unwrap(), message);
+    }
+}
+
+#[test]
+fn tool_call_blocks_keep_the_session_file_format_with_and_without_an_arguments_error() {
+    // Compared as text, so the order of the fields counts too.
+    let cases = [
+        (
+            None,
+            r#"{"type":"toolCall","id":"c1","name":"bash","arguments":{"command":"ls"}}"#,
+        ),
+        (
+            Some("expected value".to_string()),
+            r#"{"type":"toolCall","id":"c1","name":"bash","arguments":{"command":"ls"},"argumentsError":"expected value"}"#,
+        ),
+    ];
+    for (arguments_error, recorded) in cases {
+        let block = ContentBlock::ToolCall(ToolCall {
+            id: "c1".into(),
+            name: "bash".into(),
+            arguments: json!({"command": "ls"}),
+            arguments_error,
+        });
+        assert_eq!(serde_json::to_string(&block).unwrap(), recorded);
+        assert_eq!(serde_json::from_str::<ContentBlock>(recorded).unwrap(), block);
     }
 }
 

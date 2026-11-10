@@ -34,27 +34,3 @@ pub trait ToolPolicy: Send + Sync {
     /// Called after the tool is found and its arguments parsed, before it runs.
     async fn check(&self, tool_name: &str, args: &Value) -> PolicyDecision;
 }
-
-/// Policy that allows every call. For tests and fully trusted environments.
-pub struct AllowAll;
-
-#[async_trait]
-impl ToolPolicy for AllowAll {
-    async fn check(&self, _tool_name: &str, _args: &Value) -> PolicyDecision {
-        PolicyDecision::Allow
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn allow_all_allows_every_call_whatever_its_arguments() {
-        let decision = AllowAll.check("bash", &json!({"command": "rm -rf /"})).await;
-        assert_eq!(decision, PolicyDecision::Allow);
-        assert_eq!(AllowAll.check("unknown", &json!(null)).await, PolicyDecision::Allow);
-    }
-}

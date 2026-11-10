@@ -28,6 +28,7 @@ use agent_client_protocol::v1::schema::{
 };
 use agent_client_protocol::{Agent, Client, Error, ErrorCode, Responder, Stdio, V1};
 use anyhow::{Context, Result};
+use tokio_util::sync::CancellationToken;
 
 use zx_agent::AgentSession;
 use zx_agent::agent::{EventSink, RunOutcome};
@@ -195,9 +196,7 @@ impl Host {
             cwd: Some(cwd),
             file,
             default_profile: Builtin::Assistant,
-            continue_on_length: None,
             shared: &self.settings.shared,
-            hidden_env: &[],
         })
         .await?;
         let id = SessionId::new(session.store.header().id.as_str());
@@ -207,7 +206,7 @@ impl Host {
             session_id: id.clone(),
         });
         session.config.interaction_timeout = Duration::from_secs(args.approval_timeout_secs);
-        let cwd = session.config.spec.cwd.clone();
+        let cwd = session.config.cwd.clone();
         let updates = Arc::new(Updates::new(cx.clone(), id.clone(), cwd));
         Ok(Prepared { session, updates, id })
     }
@@ -250,10 +249,8 @@ impl Host {
     ) -> Result<(), Error> {
         // Session setup holds the dispatch loop, like any request handler; it is a few
         // startup reads and, with MCP servers, nothing new: they are connected once.
-        match self.create(cx, &request.cwd).await {
-            Ok(id) => responder.respond(NewSessionResponse::new(id)),
-            Err(error) => responder.respond_with_error(protocol_error(error)),
-        }
+        let result = self.create(cx, &request.cwd).await;
+        responder.respond_with_result(result.map(NewSessionResponse::new).map_err(protocol_error))
     }
 
     /// `session/load`: the replay is sent before the response, as the protocol has it.
@@ -263,10 +260,8 @@ impl Host {
         responder: Responder<LoadSessionResponse, V1>,
         cx: &ConnectionTo<Client>,
     ) -> Result<(), Error> {
-        match self.load(cx, request).await {
-            Ok(_) => responder.respond(LoadSessionResponse::new()),
-            Err(error) => responder.respond_with_error(protocol_error(error)),
-        }
+        let result = self.load(cx, request).await;
+        responder.respond_with_result(result.map(|_| LoadSessionResponse::new()).map_err(protocol_error))
     }
 
     /// `session/resume`: the session goes on from its file, with nothing replayed.
@@ -276,10 +271,8 @@ impl Host {
         responder: Responder<ResumeSessionResponse, V1>,
         cx: &ConnectionTo<Client>,
     ) -> Result<(), Error> {
-        match self.resume(cx, request).await {
-            Ok(_) => responder.respond(ResumeSessionResponse::new()),
-            Err(error) => responder.respond_with_error(protocol_error(error)),
-        }
+        let result = self.resume(cx, request).await;
+        responder.respond_with_result(result.map(|_| ResumeSessionResponse::new()).map_err(protocol_error))
     }
 
     /// `session/list`: the sessions kept for a working directory.
@@ -288,10 +281,8 @@ impl Host {
         request: &ListSessionsRequest,
         responder: Responder<ListSessionsResponse, V1>,
     ) -> Result<(), Error> {
-        match self.list(request).await {
-            Ok(sessions) => responder.respond(ListSessionsResponse::new(sessions)),
-            Err(error) => responder.respond_with_error(protocol_error(error)),
-        }
+        let result = self.list(request).await;
+        responder.respond_with_result(result.map(ListSessionsResponse::new).map_err(protocol_error))
     }
 
     /// `session/prompt`: the turn runs outside the dispatch loop, so cancellations and
@@ -306,12 +297,7 @@ impl Host {
             return responder.respond_with_error(unknown_session(&request.session_id.0, "no such session is open"));
         };
         let text = prompt_text(&request.prompt);
-        cx.spawn(async move {
-            match answer_prompt(&live, text).await {
-                Ok(response) => responder.respond(response),
-                Err(error) => responder.respond_with_error(protocol_error(error)),
-            }
-        })
+        cx.spawn(async move { responder.respond_with_result(answer_prompt(&live, text).await.map_err(protocol_error)) })
     }
 
     /// `session/cancel`: abort the session's turn, if it has one.
@@ -389,7 +375,7 @@ async fn serve(args: AcpArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> 
 
 /// The response to `session/prompt` once the turn ended: its stop reason, or the run's error.
 async fn answer_prompt(live: &Live, text: String) -> Result<PromptResponse> {
-    let report = live.session.prompt(text).await?;
+    let report = live.session.prompt(text, &CancellationToken::new()).await?;
     stop_reason(&report).map(PromptResponse::new)
 }
 

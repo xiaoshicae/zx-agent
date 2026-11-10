@@ -75,55 +75,19 @@ impl Config {
 #[derive(Clone)]
 pub struct OutputStore {
     config: Config,
-    /// The tool cwd when the configured directory is relative to it. The resolved directory
-    /// must stay inside, so a link committed to a repository cannot redirect writes.
-    root: Option<PathBuf>,
 }
 
 impl OutputStore {
     /// Resolve a relative directory against cwd and validate, without creating files.
     pub fn new(cwd: &Path, mut config: Config) -> Result<Self> {
         config.validate()?;
-        let root = config.directory.is_relative().then(|| cwd.to_path_buf());
         config.directory = cwd.join(config.directory);
-        Ok(Self { config, root })
+        Ok(Self { config })
     }
 
-    /// Check that the deepest existing part of the directory resolves inside `root`, so the
-    /// missing parts are created inside it too; then create it with its ignore file.
+    /// Create the directory with its ignore file.
     async fn prepare_directory(&self) -> Result<(), String> {
         let directory = &self.config.directory;
-        if let Some(root) = &self.root {
-            let root = tokio::fs::canonicalize(root)
-                .await
-                .map_err(|error| format!("cannot resolve working directory {}: {error}", root.display()))?;
-            let mut existing = directory.as_path();
-            let resolved = loop {
-                match tokio::fs::canonicalize(existing).await {
-                    Ok(resolved) => break resolved,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        existing = existing
-                            .parent()
-                            .ok_or_else(|| format!("cannot resolve output directory {}", directory.display()))?;
-                    }
-                    Err(error) => {
-                        return Err(format!(
-                            "cannot create output directory {}: cannot resolve {}: {error}",
-                            directory.display(),
-                            existing.display()
-                        ));
-                    }
-                }
-            };
-            if !resolved.starts_with(&root) {
-                return Err(format!(
-                    "output directory {} resolves to {}, outside the working directory {}",
-                    directory.display(),
-                    resolved.display(),
-                    root.display()
-                ));
-            }
-        }
         let mut builder = tokio::fs::DirBuilder::new();
         builder.recursive(true);
         #[cfg(unix)]
@@ -192,22 +156,13 @@ impl OutputStore {
     }
 
     async fn read(&self, path: &Path) -> Result<String, String> {
-        let mut options = tokio::fs::OpenOptions::new();
-        options.read(true);
-        // Reject symlinks and inspect special files without waiting on a FIFO writer.
-        #[cfg(unix)]
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-        let file = options
-            .open(path)
+        let file = tokio::fs::File::open(path)
             .await
             .map_err(|error| format!("cannot read tool output {}: {error}", path.display()))?;
         let meta = file
             .metadata()
             .await
             .map_err(|error| format!("cannot inspect tool output {}: {error}", path.display()))?;
-        if !meta.is_file() {
-            return Err(format!("{} is not a regular output file", path.display()));
-        }
         let max = u64::try_from(self.config.max_file_bytes)
             .map_err(|error| format!("output byte limit is out of range: {error}"))?;
         if meta.len() > max {

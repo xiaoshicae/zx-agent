@@ -37,8 +37,6 @@ pub struct OpenAiConfig {
     pub provider_name: String,
     /// Longest wait for response headers and between two stream chunks.
     pub idle_timeout: Duration,
-    /// Longest wait for a connection to the server to be established.
-    pub connect_timeout: Duration,
     /// Honor HTTP(S)_PROXY environment variables.
     pub use_system_proxy: bool,
     /// How system prompt changes after the first one reach the model.
@@ -73,7 +71,6 @@ impl Default for OpenAiConfig {
             prompt_cache_key: false,
             provider_name: "openai-compatible".to_string(),
             idle_timeout: Duration::from_secs(120),
-            connect_timeout: Duration::from_secs(15),
             use_system_proxy: true,
             system_updates: SystemUpdates::default(),
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
@@ -99,10 +96,6 @@ impl OpenAiConfig {
         );
         // Zero would time out every request at once rather than disable the limit.
         anyhow::ensure!(!self.idle_timeout.is_zero(), "idle_timeout must be greater than zero");
-        anyhow::ensure!(
-            !self.connect_timeout.is_zero(),
-            "connect_timeout must be greater than zero"
-        );
         check_extra_fields(&self.extra_fields, self.prompt_cache_key)?;
         check_headers(&self.headers)
     }
@@ -121,7 +114,6 @@ impl fmt::Debug for OpenAiConfig {
             .field("prompt_cache_key", &self.prompt_cache_key)
             .field("provider_name", &self.provider_name)
             .field("idle_timeout", &self.idle_timeout)
-            .field("connect_timeout", &self.connect_timeout)
             .field("use_system_proxy", &self.use_system_proxy)
             .field("system_updates", &self.system_updates)
             .field("max_response_bytes", &self.max_response_bytes)
@@ -338,22 +330,32 @@ mod tests {
     }
 
     #[test]
-    fn zero_timeouts_are_rejected() {
+    fn a_zero_idle_timeout_is_rejected() {
+        let config = OpenAiConfig {
+            idle_timeout: Duration::ZERO,
+            ..OpenAiConfig::default()
+        };
+        let error = OpenAiCompatible::new(config).err().expect("a zero timeout is rejected");
+        assert!(
+            error.to_string().contains("timeout must be greater than zero"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn zero_stream_budgets_are_rejected() {
         for config in [
             OpenAiConfig {
-                idle_timeout: Duration::ZERO,
+                max_response_bytes: 0,
                 ..OpenAiConfig::default()
             },
             OpenAiConfig {
-                connect_timeout: Duration::ZERO,
+                max_sse_event_bytes: 0,
                 ..OpenAiConfig::default()
             },
         ] {
-            let error = OpenAiCompatible::new(config).err().expect("a zero timeout is rejected");
-            assert!(
-                error.to_string().contains("timeout must be greater than zero"),
-                "{error}"
-            );
+            let error = OpenAiCompatible::new(config).err().expect("a zero budget is rejected");
+            assert!(error.to_string().contains("must be greater than zero"), "{error}");
         }
     }
 

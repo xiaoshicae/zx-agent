@@ -6,7 +6,7 @@ fn load_file(text: &str) -> Result<Profile> {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("profile.toml");
     std::fs::write(&path, text).unwrap();
-    Profile::load(Some(path.to_str().unwrap()), Builtin::Troubleshoot)
+    Profile::load(Some(path.to_str().unwrap()), Builtin::Unattended)
 }
 
 #[test]
@@ -23,12 +23,18 @@ fn builtin_names_are_spelt_as_extends_takes_them() {
 
 #[test]
 fn embedded_profiles_preserve_the_existing_scenario_defaults() {
-    for (selector, instructions) in [
-        ("unattended", include_str!("../../profiles/unattended.md")),
-        ("troubleshoot", include_str!("../../profiles/troubleshoot.md")),
+    let troubleshoot = Path::new(env!("CARGO_MANIFEST_DIR")).join("deploy/kubernetes/profiles/troubleshoot.toml");
+    for (selector, name, instructions) in [
+        ("unattended", "unattended", include_str!("../../profiles/unattended.md")),
+        // The deployment's report profile keeps the unattended limits and tools.
+        (
+            troubleshoot.to_str().unwrap(),
+            "troubleshoot",
+            include_str!("../../deploy/kubernetes/profiles/troubleshoot.md"),
+        ),
     ] {
         let profile = Profile::load(Some(selector), Builtin::Assistant).unwrap();
-        assert_eq!(profile.name, selector);
+        assert_eq!(profile.name, name);
         assert_eq!(profile.instructions, instructions);
         assert_eq!(profile.tools, ["bash", "read_file", "read_skill"]);
         assert_eq!(profile.limits.max_model_requests, Some(30));
@@ -83,7 +89,9 @@ fn no_embedded_profile_names_a_program_of_a_particular_environment() {
 #[test]
 fn only_the_interactive_profile_discovers_project_instructions_by_default() {
     assert!(!Profile::load(None, Builtin::Unattended).unwrap().context.discover);
-    assert!(!Profile::load(None, Builtin::Troubleshoot).unwrap().context.discover);
+    let troubleshoot = Path::new(env!("CARGO_MANIFEST_DIR")).join("deploy/kubernetes/profiles/troubleshoot.toml");
+    let troubleshoot = Profile::load(Some(troubleshoot.to_str().unwrap()), Builtin::Assistant).unwrap();
+    assert!(!troubleshoot.context.discover);
     assert!(Profile::load(None, Builtin::Assistant).unwrap().context.discover);
 }
 
@@ -176,7 +184,7 @@ fn a_file_extends_an_embedded_baseline_and_resolves_its_instructions() {
         "extends = 'assistant'\nname = 'custom'\ninstructions = 'prompt.md'\ntools = []\n[rules]\ndeny = ['secret']",
     )
     .unwrap();
-    let profile = Profile::load(Some(path.to_str().unwrap()), Builtin::Troubleshoot).unwrap();
+    let profile = Profile::load(Some(path.to_str().unwrap()), Builtin::Unattended).unwrap();
     assert_eq!(profile.name, "custom");
     assert_eq!(profile.instructions, "自定义说明");
     assert!(profile.tools.is_empty());
@@ -324,22 +332,19 @@ fn invalid_container_settings_are_configuration_errors() {
 
 #[test]
 fn redaction_cannot_be_removed_by_a_profile() {
-    assert!(
-        load_file("[extensions]\nredaction = false")
-            .unwrap_err()
-            .to_string()
-            .contains("cannot be disabled")
-    );
+    // Redaction has no switch: a profile that tries to set one is refused.
+    let error = format!("{:#}", load_file("[extensions]\nredaction = false").unwrap_err());
+    assert!(error.contains("unknown field `redaction`"), "{error}");
 }
 
 #[test]
 fn summaries_are_full_unless_the_profile_asks_for_incremental_ones() {
     assert_eq!(
-        Profile::load(None, Builtin::Troubleshoot).unwrap().compaction.mode,
+        Profile::load(None, Builtin::Unattended).unwrap().compaction.mode,
         compaction::SummaryMode::Full
     );
     assert_eq!(
-        Profile::load(Some("assistant"), Builtin::Troubleshoot)
+        Profile::load(Some("assistant"), Builtin::Unattended)
             .unwrap()
             .compaction
             .mode,
@@ -423,7 +428,7 @@ fn special_files_are_refused_before_reading() {
 #[test]
 fn the_shipped_review_example_resolves_its_context_and_skill_files() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/profiles/review.toml");
-    let profile = Profile::load(Some(path.to_str().unwrap()), Builtin::Troubleshoot).unwrap();
+    let profile = Profile::load(Some(path.to_str().unwrap()), Builtin::Unattended).unwrap();
     assert_eq!(profile.tools, ["read_file", "read_skill"]);
     assert_eq!(profile.rules.deny_tools, ["bash"]);
     assert!(

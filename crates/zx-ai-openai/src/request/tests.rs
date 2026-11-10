@@ -1,5 +1,5 @@
 use zx_ai::provider::Provider;
-use zx_ai::{SectionChange, StopReason, SystemMessage, ToolDef, ToolResultMessage, Usage};
+use zx_ai::{SectionChange, StopReason, SystemMessage, ToolCall, ToolDef, ToolResultMessage, Usage};
 
 use super::*;
 use crate::OpenAiCompatible;
@@ -9,18 +9,18 @@ use crate::config::{ApiKey, RESERVED_FIELDS};
 fn body_pairs_tool_calls_with_results() {
     let assistant = AssistantMessage {
         content: vec![
-            ContentBlock::ToolCall {
+            ContentBlock::ToolCall(ToolCall {
                 id: "a".into(),
                 name: "bash".into(),
                 arguments: json!({}),
                 arguments_error: None,
-            },
-            ContentBlock::ToolCall {
+            }),
+            ContentBlock::ToolCall(ToolCall {
                 id: "b".into(),
                 name: "bash".into(),
                 arguments: json!({}),
                 arguments_error: None,
-            },
+            }),
         ],
         ..AssistantMessage::failure("p", "m", StopReason::ToolUse, "")
     };
@@ -69,12 +69,12 @@ fn body_pairs_tool_calls_with_results() {
 #[test]
 fn tool_result_details_stay_out_of_the_body() {
     let assistant = AssistantMessage {
-        content: vec![ContentBlock::ToolCall {
+        content: vec![ContentBlock::ToolCall(ToolCall {
             id: "a".into(),
             name: "bash".into(),
             arguments: json!({}),
             arguments_error: None,
-        }],
+        })],
         ..AssistantMessage::failure("p", "m", StopReason::ToolUse, "")
     };
     let request = Request {
@@ -304,13 +304,10 @@ fn leaves_missing_reasoning_alone_unless_asked() {
 }
 
 #[test]
-fn requests_recorded_by_version_one_replay_with_the_reasoning_filled() {
+fn replay_leaves_missing_reasoning_alone_unless_the_options_ask() {
     let request = partly_reasoned();
-    let version_one = json!({"format": "openai-chat-completions", "version": 1, "systemUpdates": "collapse"});
-    let body = replay_body(&request, "p", &version_one).unwrap();
-    assert_eq!(second_answer(&body)["reasoning_content"], "");
-    let version_two = json!({"format": "openai-chat-completions", "version": 2, "systemUpdates": "collapse"});
-    let body = replay_body(&request, "p", &version_two).unwrap();
+    let options = json!({"format": "openai-chat-completions", "version": 2, "systemUpdates": "collapse"});
+    let body = replay_body(&request, "p", &options).unwrap();
     assert!(second_answer(&body).get("reasoning_content").is_none(), "{body}");
 }
 
@@ -386,12 +383,12 @@ fn replay_rejects_unknown_conversion_options() {
     let request = replayable_request();
     for options in [
         Value::Null,
-        json!({"format": "other", "version": 1, "systemUpdates": "collapse"}),
+        json!({"format": "other", "version": 2, "systemUpdates": "collapse"}),
         json!({"format": "openai-chat-completions", "version": 3, "systemUpdates": "collapse"}),
-        json!({"format": "openai-chat-completions", "version": 1, "systemUpdates": "sideways"}),
-        json!({"format": "openai-chat-completions", "version": 1, "systemUpdates": "collapse", "extra": 1}),
-        // Version 1 always filled, so it cannot have recorded a choice.
-        json!({"format": "openai-chat-completions", "version": 1, "systemUpdates": "collapse", "fillMissingReasoning": false}),
+        // Version 1, from before filling missing reasoning was an option, is not replayed.
+        json!({"format": "openai-chat-completions", "version": 1, "systemUpdates": "collapse"}),
+        json!({"format": "openai-chat-completions", "version": 2, "systemUpdates": "sideways"}),
+        json!({"format": "openai-chat-completions", "version": 2, "systemUpdates": "collapse", "extra": 1}),
     ] {
         assert!(replay_body(&request, "p", &options).is_err(), "{options}");
     }
@@ -440,7 +437,7 @@ fn fields_the_provider_sets_cannot_be_added() {
         assert!(error.to_string().contains(field), "{error}");
         let options = json!({
             "format": "openai-chat-completions",
-            "version": 1,
+            "version": 2,
             "systemUpdates": "collapse",
             "extraFields": extra_fields,
         });

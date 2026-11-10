@@ -14,7 +14,7 @@ spec:
   jobTemplate:
     spec:
       backoffLimit: 0
-      # Above the run's own 15-minute limit (troubleshoot profile).
+      # Above the run's own 15-minute limit (troubleshoot profile, from unattended).
       activeDeadlineSeconds: 1200
       ttlSecondsAfterFinished: 86400
       template:
@@ -34,11 +34,17 @@ spec:
               image: zx-agent
               # zx-agent itself is PID 1: the only process holding the API key, and one that
               # commands cannot inspect (README.md, "安全模型").
-              # The troubleshoot profile gives the report its fixed sections; without it,
-              # run uses the neutral unattended profile.
+              # The troubleshoot profile (profiles/troubleshoot.toml, installed by the image)
+              # gives the report its fixed sections; without it, run uses the neutral built-in
+              # unattended profile.
               # $(POD_NAME) is expanded by Kubernetes, without a shell: a file per run.
               command:
-                ["zx-agent", "run", "--profile", "troubleshoot", "--session", "/data/sessions/$(POD_NAME).jsonl"]
+                - zx-agent
+                - run
+                - --profile
+                - /usr/local/share/zx-agent/profiles/troubleshoot.toml
+                - --session
+                - /data/sessions/$(POD_NAME).jsonl
               args:
                 - "检查所有命名空间中未就绪的 Pod 和最近一小时的 Warning 事件，列出问题和可能的原因。只读，不做任何修改。"
               env:

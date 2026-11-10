@@ -18,6 +18,7 @@ paths:
 | `run_prompt` / `run_attempt` | `tests/common/mod.rs` | `run_prompt`：在以给定消息开头的内存会话上，用默认参数（至多 10 次模型请求、不取消）跑一次 `Attempt`，返回结果和事件，并把会话投影写回传入的消息；`run_attempt`：在新的内存会话上按给定的预算、取消令牌和事件接收方跑一次，返回结果和会话投影 |
 | `RunnerSetup` | `tests/common/mod.rs` | 带测试默认值（不重试、默认上限、内存会话）的 runner 构造器，用结构体更新语法覆盖字段 |
 | `zx_agent` / `stdout` / `stderr` | `tests/common/mod.rs` | 编译出的程序，以及它写到两个输出的文本；驱动程序的测试都用这三个 |
+| `ProfileFile` | `tests/common/mod.rs` | 单独目录里的 profile 文件（`extends` 一个内置 profile 加上给出的 TOML），`path()` 交给 `--profile`；命令规则、上下文、摘要、模型元数据与容器执行没有命令行参数，驱动程序的测试经它设置 |
 | `fast_retry` / `header` / `read_lines` / `json_lines` | `tests/common/mod.rs` | 毫秒级退避的重试策略、会话头部、读取会话文件的每一行、把 JSON 行文本解析成值 |
 | `NotifyingProvider` | `tests/common/mod.rs` | 每个请求开始时通知（`started`）并记下取消令牌的脚本化 provider，测试"运行中"的行为时等它，不用 `sleep` |
 | `seeded_session` / `summary_json` / `replayed_requests` | `tests/common/mod.rs` | 一条值得摘要的旧消息加一条新输入的会话、模型回答摘要请求的 JSON、从会话文件的检查点还原的全部请求 |

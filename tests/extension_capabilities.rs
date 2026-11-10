@@ -9,6 +9,7 @@ use std::sync::atomic::Ordering;
 
 use async_trait::async_trait;
 use serde_json::json;
+use tokio_util::sync::CancellationToken;
 
 use common::{EchoTool, NotifyingProvider, RunnerSetup, config, header, summarize};
 use zx_agent::AgentSession;
@@ -83,7 +84,7 @@ async fn a_hook_sends_the_model_a_message_and_records_state_during_the_run() {
     config.hooks.push(Reminder);
     let (session, events) = session_in(&file, config);
 
-    let report = session.prompt("go").await.unwrap();
+    let report = session.prompt("go", &CancellationToken::new()).await.unwrap();
 
     assert_eq!(report.outcome, RunOutcome::Completed);
     // The next request sees the note as a user message after the tool result.
@@ -146,7 +147,7 @@ async fn state_recorded_during_the_last_events_is_kept_before_the_run_is_reporte
     config.hooks.push(AtEnd);
     let (session, events) = session_in(&file, config);
 
-    session.prompt("go").await.unwrap();
+    session.prompt("go", &CancellationToken::new()).await.unwrap();
 
     let kinds = kinds(&file);
     assert_eq!(kinds[kinds.len() - 1], "custom", "{kinds:?}");
@@ -172,7 +173,7 @@ async fn the_host_limits_the_tools_the_model_is_offered_and_the_audit_records_ea
     let (session, _) = session_in(&file, config);
 
     session.set_active_tools(&["echo"]).unwrap();
-    session.prompt("go").await.unwrap();
+    session.prompt("go", &CancellationToken::new()).await.unwrap();
 
     assert_eq!(tool_names(&provider, 0), ["echo"]);
     let context = summarize(&provider.requests()[1].messages);
@@ -182,7 +183,7 @@ async fn the_host_limits_the_tools_the_model_is_offered_and_the_audit_records_ea
     assert_eq!(session.active_tools().names(), Some(vec!["echo".to_string()]));
 
     session.active_tools().reset();
-    session.prompt("more").await.unwrap();
+    session.prompt("more", &CancellationToken::new()).await.unwrap();
 
     assert_eq!(tool_names(&provider, 2), ["echo", "note"]);
     let store = SessionStore::read(&file).unwrap();
@@ -231,7 +232,7 @@ async fn a_hook_changes_the_tools_of_the_next_request() {
     let (runner, _) = RunnerSetup::new(config).build();
     let session = AgentSession::from(runner);
 
-    session.prompt("go").await.unwrap();
+    session.prompt("go", &CancellationToken::new()).await.unwrap();
 
     assert_eq!(tool_names(&provider, 0), ["echo", "note"]);
     assert_eq!(tool_names(&provider, 1), ["echo"]);
@@ -297,7 +298,10 @@ async fn an_extension_command_runs_through_the_session_and_its_message_starts_a_
 
     let outcome = session.run_command("jira", "ABC-1").await.unwrap();
     assert_eq!(outcome.lines, ["fetched ABC-1"]);
-    let report = session.prompt_message(outcome.prompt.unwrap()).await.unwrap();
+    let report = session
+        .prompt(outcome.prompt.unwrap(), &CancellationToken::new())
+        .await
+        .unwrap();
 
     assert_eq!(report.final_text, "looking");
     assert_eq!(
@@ -374,7 +378,9 @@ async fn an_idle_session_records_entries_and_messages_at_once_and_a_running_one_
         Some(true)
     );
 
-    let mut running = Box::pin(session.prompt("go"));
+    let cancel = CancellationToken::new();
+
+    let mut running = Box::pin(session.prompt("go", &cancel));
     tokio::select! {
         () = provider.started.notified() => {}
         _ = &mut running => panic!("must be running"),
@@ -422,7 +428,7 @@ async fn run_with_mode(mode: QueueMode) -> Vec<Vec<String>> {
     config.queues.set_steering_mode(mode);
     let (runner, _) = RunnerSetup::new(config).build();
     let session = AgentSession::from(runner);
-    session.prompt("go").await.unwrap();
+    session.prompt("go", &CancellationToken::new()).await.unwrap();
     provider
         .requests()
         .iter()

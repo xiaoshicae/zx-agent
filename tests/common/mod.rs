@@ -27,13 +27,13 @@ use tokio::sync::Notify;
 use zx_agent::agent::ApprovalCache;
 use zx_agent::agent::QueuedMessage;
 use zx_agent::agent::{
-    AgentEvent, Attempt, AttemptResult, Event, EventSink, ExecutionMode, HookContext, LoopConfig, LoopSpec,
-    MessageQueues, Tool, ToolContext, ToolOutput, ToolPolicy,
+    AgentEvent, Attempt, AttemptResult, Event, EventSink, ExecutionMode, HookContext, LoopConfig, MessageQueues, Tool,
+    ToolContext, ToolOutput, ToolPolicy,
 };
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::{
-    AssistantMessage, ContentBlock, EventReceiver, Message, Provider, Request, StopReason, SystemPrompt, ToolDef,
+    AssistantMessage, ContentBlock, EventReceiver, Message, Provider, Request, StopReason, ToolCall, ToolDef,
 };
 use zx_agent::policy::PolicyHook;
 use zx_agent::runner::{Limits, Runner};
@@ -52,6 +52,31 @@ pub(crate) fn stdout(output: &std::process::Output) -> String {
 /// What a finished program wrote to stderr, decoded lossily.
 pub(crate) fn stderr(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// A profile file in a directory of its own, for `--profile`: settings the command line does
+/// not take, such as command rules, context files or container execution. Removed on drop.
+pub(crate) struct ProfileFile {
+    _dir: tempfile::TempDir,
+    path: String,
+}
+
+impl ProfileFile {
+    /// A profile that extends the built-in `extends` with `body`, the rest of its TOML.
+    pub(crate) fn new(extends: &str, body: &str) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profile.toml");
+        std::fs::write(&path, format!("extends = \"{extends}\"\n{body}")).unwrap();
+        Self {
+            path: path.to_str().unwrap().to_string(),
+            _dir: dir,
+        }
+    }
+
+    /// The file's path, as `--profile` takes it.
+    pub(crate) fn path(&self) -> &str {
+        &self.path
+    }
 }
 
 /// Every line of `text` parsed as JSON, as the JSON-lines outputs are read.
@@ -97,12 +122,12 @@ pub(crate) fn session_files(dir: &Path) -> Vec<PathBuf> {
 pub(crate) fn tool_call_answer(provider: &str, model: &str, tool: &str, arguments: Value) -> Message {
     let mut answer = AssistantMessage::failure(provider, model, StopReason::ToolUse, "");
     answer.error_message = None;
-    answer.content = vec![ContentBlock::ToolCall {
+    answer.content = vec![ContentBlock::ToolCall(ToolCall {
         id: "c1".into(),
         name: tool.into(),
         arguments,
         arguments_error: None,
-    }];
+    })];
     Message::Assistant(answer)
 }
 
@@ -301,17 +326,11 @@ impl Collect {
 }
 
 pub(crate) fn config(provider: Arc<dyn Provider>, tools: Vec<Arc<dyn Tool>>) -> LoopConfig {
-    LoopConfig::new(LoopSpec {
-        provider,
-        model: "test-model".to_string(),
-        // Empty, so runs add no system message; system prompt tests set their own.
-        system_prompt: SystemPrompt::default(),
+    // No system prompt, so runs add no system message; system prompt tests set their own.
+    LoopConfig {
         tools,
-        cwd: PathBuf::from("."),
-        max_tokens: None,
-        reasoning: None,
-        sequential_tools: false,
-    })
+        ..LoopConfig::new(provider, "test-model")
+    }
 }
 
 pub(crate) fn with_policy(mut config: LoopConfig, policy: Arc<dyn ToolPolicy>) -> LoopConfig {

@@ -934,7 +934,7 @@ async fn resumed_sessions_continue_the_conversation() {
 /// One run on `session` whose environment section says `started`.
 async fn run_with_environment(session: SessionStore, started: &str) {
     let mut config = config(provider([FauxStep::text("ok")]), vec![]);
-    config.spec.system_prompt = SystemPrompt::default()
+    config.system_prompt = SystemPrompt::default()
         .with_section(PREAMBLE, "Do it.")
         .with_section("environment", started);
     let (mut runner, _) = RunnerSetup {

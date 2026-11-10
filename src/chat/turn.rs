@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
+use tokio_util::sync::CancellationToken;
 
 use zx_agent::AgentSession;
 use zx_agent::agent::Approval;
@@ -128,12 +129,14 @@ pub(super) async fn drive_turn(session: &AgentSession, operation: Operation, io:
         pending: Pending::None,
         queued_prompt: None,
     };
+    // `settle` cancels the operation through the session; nothing cancels this token.
+    let cancel = CancellationToken::new();
     let running = async {
         match operation {
-            Operation::Prompt(text) => session.prompt(text).await.map(Report::Task),
-            Operation::Message(message) => session.prompt_message(message).await.map(Report::Task),
-            Operation::Continue => session.continue_run().await.map(Report::Task),
-            Operation::Compact => session.compact().await.map(Report::Compact),
+            Operation::Prompt(text) => session.prompt(text, &cancel).await.map(Report::Task),
+            Operation::Message(message) => session.prompt(message, &cancel).await.map(Report::Task),
+            Operation::Continue => session.continue_run(&cancel).await.map(Report::Task),
+            Operation::Compact => session.compact(&cancel).await.map(Report::Compact),
         }
     };
     tokio::pin!(running);

@@ -43,7 +43,7 @@ G1–G4 是验收目标。当前会话日志可重建对话与提示词；G3 所
 | D2 | 新依赖 | 已授权：tokio 的 `io-std` feature、`toml`、`rmcp`（MCP 官方 Rust SDK）、ACP 官方 Rust SDK、`rustyline`（可选）。在用到它们的阶段再引入。2026-11-02 追加 `opentelemetry`、`opentelemetry_sdk`、`opentelemetry-otlp`（P9 的 OpenTelemetry 追踪）。2026-11-04 追加 `chrono`（chat `--debug` 日志显示本地时间与时区；`default-features = false`，只开 `clock`）。2026-11-05 经用户确认追加 `jsonschema`（循环按工具声明的 JSON Schema 校验参数；`default-features = false`）。2026-11-09 经用户同意追加 `thiserror`（错误类型派生 `Display` 与 `Error`） | 2026-10-31 | 按阶段引入；`rmcp` 3.8.0 已于 P7 引入（PR #40）；三个 OpenTelemetry crate 0.33.1 已于 P9 引入（PR #49）；`chrono` 0.4.45 原为 `rmcp` 的间接依赖，2026-11-04 改为 `zx-agent` 的直接依赖；`jsonschema` 0.33.0 是 `zx-core` 的依赖，`Cargo.lock` 因此新增 35 个包，其 `rust-version` 为 1.71.1，未引入新的 rustls 加密后端；`agent-client-protocol` 5.0.0（连同 `-schema` 1.15.1 与 `-derive`）于 2026-11-05 按 D13 引入为 `zx-agent` 的依赖，只开 `stdio` feature，`Cargo.lock` 新增 54 个包，其 `rust-version` 为 1.88.0，未引入新的 rustls 加密后端；它给 serde_json 打开了 `preserve_order`，整个 workspace 的 JSON 对象从此按插入序而不是键序输出，两处比较 JSON 字符串的断言随之调整；`thiserror` 2.0.21 原为 opentelemetry、rmcp、tungstenite 的间接依赖，2026-11-09 改为 `zx-core`、`zx-im`、`zx-im-feishu` 的直接依赖，`Cargo.lock` 没有新增包，其 `rust-version` 为 1.77 |
 | D3 | profile 文件格式 | TOML | 2026-10-31 | P4 落实 |
 | D4 | 会话 API 形态 | 进程内方法调用；暂不实现提交队列 / 事件队列（SQ/EQ） | 2026-10-31 | 已实现：P2 进程内共享会话 API |
-| D5 | 无人值守的命令执行环境 | 默认仍在本机执行，`run` 行为不变；容器执行须在 profile 或 CLI 中显式开启。理由：在 Kubernetes Job 中运行时 Pod 内通常没有 Docker；无网络的容器做不了在线排障，而在线访问方案尚未评审。此前的候选方案（`troubleshoot` 默认容器、没有 Docker 时拒绝启动）不采用 | 2026-11-01 | 已确认：P6 执行环境部分按此实现 |
+| D5 | 无人值守的命令执行环境 | 默认仍在本机执行，`run` 行为不变；容器执行须在 profile 中显式开启（原有的 CLI 参数 `--execution`、`--container-image` 于 2026-11-09 移除，与 profile 重复）。理由：在 Kubernetes Job 中运行时 Pod 内通常没有 Docker；无网络的容器做不了在线排障，而在线访问方案尚未评审。此前的候选方案（`troubleshoot` 默认容器、没有 Docker 时拒绝启动）不采用 | 2026-11-01 | 已确认：P6 执行环境部分按此实现 |
 | D6 | 项目定位 | 改为“通用内核 + 场景配置” | 2026-10-31 | 已完成：README、`.claude/CLAUDE.md` 已更新 |
 | D7 | IM 长连接的 WebSocket 客户端 | 已授权：`tokio-tungstenite`（0.30，关掉默认 feature，只开 `connect` 与 `rustls-tls-webpki-roots`） | 2026-11-01 | 已引入（PR #29） |
 | D8 | MCP 的范围 | 本项目只做 MCP 客户端：只接工具，只支持 Streamable HTTP。MCP 服务器与领域工具（如 Kubernetes、Prometheus 查询）由外部服务实现 | 2026-11-01 | 已确认：P7 按此实现 |
@@ -53,6 +53,7 @@ G1–G4 是验收目标。当前会话日志可重建对话与提示词；G3 所
 | D12 | chat 的会话默认落盘 | 不给 `--session` 时，chat 把每次对话存成 `~/.zx-agent/sessions/--<工作目录>--/<UTC 时间>_<会话 ID>.jsonl`（目录名的写法与 pi 相同；新建的目录 0700、文件 0600），`--session-dir` 换目录，`--no-session` 只保存在内存。`run` 不变：只在给出 `--session` 时写文件。取代此前 chat 默认只保存在内存的行为。理由：列出会话、续接最近一次、fork 都需要一个已知的位置，与 pi 一致 | 2026-11-05 | 用户决定（另一选项是只在给出 `--session-dir` 时落盘）；P10 ⑥a 落实 |
 | D13 | 人机界面协议 | 只维护内核，界面交给别人：ACP 是内核对人的唯一界面协议，交互式 UI 由实现 ACP 的开源客户端（Zed 等编辑器、Wisp 等终端客户端）提供，zx-agent 只实现 agent 一侧（`acp` 子命令）。`chat` 冻结为最小入口（没装客户端时的应急使用与 `--output jsonl` 的脚本化调用），不再加功能；`serve` 冻结，只修平台 API 变化导致的故障，是否拆出或下线等 ACP 用过一段时间再定；`run` 保留并维护，无人值守场景 ACP 覆盖不了；SDK 不变。与 D10 的通用原则一致：协议是开放标准，zx-agent 不解析任何客户端的私有格式 | 2026-11-05 | 用户决定；P8 据此重启。编号 D13 是因为同日另一分支先用了 D12 |
 | D14 | 不做 rpc 模式 | 不为非 Rust 程序另做进程协议（pi 的 `rpc` 模式：stdin/stdout 的 JSON 行命令与事件流）。非 Rust 的宿主经 ACP（D13）接入；无人值守经 `run`（退出码与 `--output jsonl`），常驻服务经 `serve` 与 SDK；pi 的 rpc 本身也没有幂等键 | 2026-11-05 | 按用户授权采纳建议（用户要求按建议推进，不逐项确认）；P10 ⑫ 只做幂等键 |
+| D15 | 会话格式只保留当前版本 | 项目还没有使用者，也没有要保留的会话文件：只读写当前的会话格式（`SESSION_VERSION` = 6），头部是其他版本（更旧或更新）的会话一律拒绝打开，`SessionStore::create` 也不接受其他版本的头部。删除旧格式的升级记录（`format_upgrade`）与按版本区分的校验、“开始记录不可用”的恢复状态、请求转换参数版本 1 的还原。今后格式变化时提高版本号，此前的文件随之无法打开，不写升级代码。取代此前“修改持久化格式前先确认旧文件还能读取”的约定 | 2026-11-09 | 所有者决定；已实施（分支 `simplify-formats`） |
 
 D2 之外的新依赖、依赖升级，仍需先征得同意。
 
@@ -98,7 +99,7 @@ D2 之外的新依赖、依赖升级，仍需先征得同意。
 | FauxProvider 在增量之间响应取消、可脚本化带 `ProviderError` 的失败 | 暂缓 | 有测试需要时再做 |
 | provider 契约的兜底 | 暂缓 | 取消后给 provider 的宽限期；`Done` / `Error` 与 `stop_reason` 的一致性检查 |
 | `JsonlFile::create` 在加锁或写头部失败后留下文件 | 暂缓 | 这两种失败无法在测试中稳定构造 |
-| `run` 的内置 profile 是否默认开启自动摘要 | 待用户决定 | unattended 与 troubleshoot 默认关闭，长时间排查撞到上下文上限时以退出码 1 结束；开启后可从上下文过长中恢复，代价是摘要丢失信息 |
+| `run` 的内置 profile 是否默认开启自动摘要 | 待用户决定 | unattended（以及扩展它的部署 profile troubleshoot）默认关闭，长时间排查撞到上下文上限时以退出码 1 结束；开启后可从上下文过长中恢复，代价是摘要丢失信息 |
 | 定时巡检的会话文件不自动清理 | 已知局限 | 每次运行一个文件，在卷 `zx-agent-inspect-sessions` 上累积，需要部署方定期删除 |
 | 失败运行后排队输入的处置 | 待评估 | pi 的 `afterFailedRun`（`continue` / `withdraw`）；现在由宿主在运行结束后用 `take_queued` 自行处置 |
 | 工具触发的 `handoff` | 待评估 | pi 的 `control.handoff`；zx 没有 `reset` 条目，要先定会话格式 |

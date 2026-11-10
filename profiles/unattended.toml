@@ -10,7 +10,6 @@ maxModelRequests = 30
 timeoutSecs = 900
 
 [extensions]
-redaction = true
 continueOnLength = 1
 
 [context]

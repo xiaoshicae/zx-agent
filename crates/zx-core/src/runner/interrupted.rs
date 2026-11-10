@@ -15,7 +15,6 @@ impl RunHost<'_> {
         for call in self.session.interrupted_tool_calls() {
             let effects = self
                 .config
-                .spec
                 .tools
                 .iter()
                 .find(|tool| tool.name() == call.tool_name)
@@ -62,9 +61,8 @@ fn interruption(start: StartRecord, effects: Option<Effects>) -> Interruption {
     match (start, effects) {
         (StartRecord::Present, _) => Interruption::Started,
         (StartRecord::NeverRun, _) | (StartRecord::Absent, Some(Effects::SideEffects)) => Interruption::NotStarted,
-        (StartRecord::Absent | StartRecord::Unavailable, Some(Effects::ReadOnly)) => Interruption::ReadOnly,
-        (StartRecord::Unavailable, Some(Effects::SideEffects))
-        | (StartRecord::Absent | StartRecord::Unavailable, None) => Interruption::StartUnknown,
+        (StartRecord::Absent, Some(Effects::ReadOnly)) => Interruption::ReadOnly,
+        (StartRecord::Absent, None) => Interruption::StartUnknown,
     }
 }
 

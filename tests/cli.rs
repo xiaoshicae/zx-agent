@@ -11,7 +11,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use common::mock_server::{MockServer, Reply};
-use common::{json_lines, stderr, stdout, zx_agent};
+use common::{ProfileFile, json_lines, stderr, stdout, zx_agent};
 
 /// The variable the program reads the API key from, and the fake key it holds.
 const KEY_VAR: &str = "ZX_CLI_TEST_KEY";
@@ -50,20 +50,9 @@ fn sent_messages(server: &MockServer, index: usize) -> Vec<Value> {
 
 #[tokio::test]
 async fn streaming_resource_limits_reach_the_provider() {
-    let server = MockServer::start(vec![Reply::text(&"x".repeat(256))]).await;
-    let output = run(
-        &server.base_url,
-        &[
-            "--tools",
-            "",
-            "--max-response-bytes",
-            "64",
-            "--output",
-            "jsonl",
-            "check",
-        ],
-    )
-    .await;
+    // One event over the provider's default limit of 1 MiB per SSE event.
+    let server = MockServer::start(vec![Reply::text(&"x".repeat(1024 * 1024))]).await;
+    let output = run(&server.base_url, &["--tools", "", "--output", "jsonl", "check"]).await;
 
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     let events: Vec<Value> = json_lines(&stdout(&output));
@@ -72,15 +61,6 @@ async fn streaming_resource_limits_reach_the_provider() {
             .iter()
             .any(|event| event["message"]["providerError"]["kind"] == "resource_limit")
     );
-}
-
-#[tokio::test]
-async fn zero_stream_budgets_are_configuration_errors() {
-    for flag in ["--max-response-bytes", "--max-sse-event-bytes"] {
-        let output = run(NO_SERVER, &[flag, "0", "check"]).await;
-        assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
-        assert!(stderr(&output).contains("must be greater than zero"));
-    }
 }
 
 #[tokio::test]
@@ -204,7 +184,8 @@ async fn sigterm_exits_5() {
 async fn a_truncated_answer_is_printed_and_exits_6() {
     let server = MockServer::start(vec![Reply::truncated("Part")]).await;
 
-    let output = run(&server.base_url, &["--tools", "", "--continue-on-length", "0", "check"]).await;
+    let profile = ProfileFile::new("unattended", "[extensions]\ncontinueOnLength = 0");
+    let output = run(&server.base_url, &["--tools", "", "--profile", profile.path(), "check"]).await;
 
     assert_eq!(output.status.code(), Some(6), "{}", stderr(&output));
     assert_eq!(stdout(&output), "Part\n");
@@ -276,7 +257,12 @@ async fn bash_commands_cannot_read_the_api_key() {
 async fn the_system_prompt_states_the_environment_and_command_policy() {
     let server = MockServer::start(vec![Reply::text("ok")]).await;
 
-    run(&server.base_url, &["--tools", "bash", "--allow-cmd", "grep", "check"]).await;
+    let profile = ProfileFile::new("unattended", "[rules]\nallow = [\"grep\"]");
+    run(
+        &server.base_url,
+        &["--tools", "bash", "--profile", profile.path(), "check"],
+    )
+    .await;
 
     let system = sent_messages(&server, 0)[0]["content"].as_str().unwrap().to_string();
     assert!(system.contains("<environment>\nOS: "), "{system}");

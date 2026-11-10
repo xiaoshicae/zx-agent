@@ -7,7 +7,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use super::{
-    AgentEvent, Approval, ApprovalRequest, ApprovalResult, AssertUnwindSafe, Attempt, Effects, ExecutionMode,
+    AgentEvent, Approval, ApprovalRequest, ApprovalResult, AssertUnwindSafe, Attempt, Context, Effects, ExecutionMode,
     FutureExt, Halt, HookCall, HookFailure, HookPoint, Instant, MAX_DETAILS_BYTES, MAX_QUEUED_PROGRESS, Message,
     PolicyDecision, Tool, ToolCall, ToolContext, ToolOutput, ToolResultMessage, ToolVerdict, duration_ms, join_all,
     now_ms,
@@ -15,7 +15,7 @@ use super::{
 
 impl Attempt<'_> {
     fn find_tool(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        self.config.spec.tools.iter().find(|tool| tool.name() == name).cloned()
+        self.config.tools.iter().find(|tool| tool.name() == name).cloned()
     }
 
     /// Resolve `call` and check its arguments, then run the policy and ask for approval
@@ -180,11 +180,10 @@ impl Attempt<'_> {
     /// call is checked, approvals included, before any start is recorded, so that a crash
     /// while one call waits for approval leaves no start for calls that never ran.
     pub(super) async fn execute_tools(&mut self, calls: &[ToolCall]) -> Result<Batch, Halt> {
-        let sequential = self.config.spec.sequential_tools
-            || calls.iter().any(|call| {
-                self.find_tool(&call.name)
-                    .is_some_and(|tool| tool.execution_mode() == ExecutionMode::Sequential)
-            });
+        let sequential = calls.iter().any(|call| {
+            self.find_tool(&call.name)
+                .is_some_and(|tool| tool.execution_mode() == ExecutionMode::Sequential)
+        });
         if sequential {
             self.sequential(calls).await
         } else {
@@ -247,11 +246,15 @@ impl Attempt<'_> {
     /// Record the start of a call with side effects; an error means it must not run.
     /// Read-only calls are not recorded.
     async fn record_start(&mut self, runnable: &Runnable<'_>) -> Result<(), Halt> {
+        let call = &runnable.call;
         match runnable.tool.effects() {
             Effects::SideEffects => self
-                .session
-                .record_tool_call_started(&runnable.call)
+                .host
+                .session()
+                .append_tool_call_started(&call.id, &call.name)
                 .await
+                .map(|_| ())
+                .with_context(|| format!("cannot persist the start of tool call {:?}", call.id))
                 .map_err(Halt::Unrecorded),
             Effects::ReadOnly => Ok(()),
         }
@@ -434,7 +437,7 @@ async fn execute(engine: &Attempt<'_>, tool: &dyn Tool, call: &ToolCall) -> Call
     // stop work of its own does not stop the run.
     let (progress, mut updates) = tokio::sync::mpsc::channel(MAX_QUEUED_PROGRESS);
     let ctx = ToolContext {
-        cwd: engine.config.spec.cwd.clone(),
+        cwd: engine.config.cwd.clone(),
         cancel: cancel.child_token(),
         tool_call_id: Some(call.id.clone()),
         progress: Some(progress),

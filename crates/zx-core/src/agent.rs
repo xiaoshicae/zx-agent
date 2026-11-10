@@ -23,7 +23,8 @@ mod report;
 mod session_host;
 mod tool;
 
-pub use agent_loop::{Attempt, AttemptFailure, AttemptResult, LoopConfig, LoopSpec};
+pub(crate) use agent_loop::Halt;
+pub use agent_loop::{Attempt, AttemptFailure, AttemptResult, LoopConfig};
 pub use command::{CommandContext, CommandError, CommandOutcome, SlashCommand, check_command_name};
 pub(crate) use events::EventTarget;
 pub use events::{
@@ -35,10 +36,10 @@ pub use hooks::{
     HookPoint, HookResult, HookStage, Hooks, RequestPlan, RequestSettings, TurnDecision, TurnDisposition, TurnSummary,
 };
 pub use interaction::{Approval, ApprovalCache, ApprovalRequest, DEFAULT_APPROVAL_TIMEOUT, Interaction, NoHuman};
-pub use policy::{AllowAll, PolicyDecision, ToolPolicy};
+pub use policy::{PolicyDecision, ToolPolicy};
 pub use queue::{MessageQueues, PendingEntry, QueueMode, QueuedMessage};
 pub use report::{RunOutcome, RunReport};
-pub(crate) use session_host::{ContextPreparation, PERSIST_FAILED, Prepared, SessionHost, record_pending_entries};
+pub(crate) use session_host::{ContextPreparation, PERSIST_FAILED, SessionHost, record_pending_entries};
 pub use tool::{
     ActiveTools, Effects, ExecutionMode, MAX_DETAILS_BYTES, MAX_PROGRESS_BYTES, MAX_QUEUED_PROGRESS, Tool, ToolContext,
     ToolOutput,

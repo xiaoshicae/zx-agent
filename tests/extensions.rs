@@ -88,8 +88,7 @@ impl Extension for Bundle {
 /// host's own.
 fn base(provider: Arc<FauxProvider>) -> LoopConfig {
     let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
-    config.spec.system_prompt =
-        build_system_prompt("Do the task.", &[(ENVIRONMENT, "OS: test"), ("rules", "Be brief.")]);
+    config.system_prompt = build_system_prompt("Do the task.", &[(ENVIRONMENT, "OS: test"), ("rules", "Be brief.")]);
     config
 }
 
@@ -130,7 +129,7 @@ async fn an_extension_adds_its_tools_hooks_and_prompt_sections() {
 #[test]
 fn a_hook_outside_the_extension_stage_is_refused_and_nothing_is_registered() {
     let mut config = base(idle());
-    let prompt = config.spec.system_prompt.clone();
+    let prompt = config.system_prompt.clone();
     let early = Bundle {
         tools: vec![Arc::new(EchoTool::new("note"))],
         sections: vec![("notes", "Use note to keep notes.")],
@@ -139,8 +138,8 @@ fn a_hook_outside_the_extension_stage_is_refused_and_nothing_is_registered() {
     };
     let error = register(&mut config, &[Arc::new(early)]).unwrap_err();
     assert!(error.contains("declares the Policy stage"), "{error}");
-    assert_eq!(config.spec.tools.len(), 1);
-    assert_eq!(config.spec.system_prompt, prompt);
+    assert_eq!(config.tools.len(), 1);
+    assert_eq!(config.system_prompt, prompt);
 }
 
 #[test]
@@ -173,7 +172,7 @@ fn an_extension_tool_may_not_take_a_name_in_use() {
             .collect();
         let error = register(&mut config, &extensions).unwrap_err();
         assert!(error.contains("more than one tool is named"), "{error}");
-        assert_eq!(config.spec.tools.len(), 1, "only the host's tool is left");
+        assert_eq!(config.tools.len(), 1, "only the host's tool is left");
     }
 }
 
@@ -190,14 +189,14 @@ fn extension_sections_may_not_take_reserved_existing_or_malformed_names() {
         (vec![("my notes", "x")], "must be ASCII lowercase"),
     ] {
         let mut config = base(idle());
-        let prompt = config.spec.system_prompt.clone();
+        let prompt = config.system_prompt.clone();
         let bundle = Bundle {
             sections,
             ..Bundle::named("notes")
         };
         let error = register(&mut config, &[Arc::new(bundle)]).unwrap_err();
         assert!(error.contains(expected), "{error}");
-        assert_eq!(config.spec.system_prompt, prompt);
+        assert_eq!(config.system_prompt, prompt);
     }
 }
 

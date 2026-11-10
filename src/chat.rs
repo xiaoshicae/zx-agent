@@ -105,15 +105,13 @@ impl Chat {
             cwd: None,
             file,
             default_profile: Builtin::Assistant,
-            continue_on_length: None,
             shared: &settings.shared,
-            hidden_env: &[],
         })
         .await?;
         prepared.require_bash_approval("shell commands require interactive approval");
         prepared.config.interaction = interaction.clone();
         prepared.config.interaction_timeout = std::time::Duration::from_secs(settings.args.approval_timeout_secs);
-        let provider = prepared.config.spec.provider.clone();
+        let provider = prepared.config.provider.clone();
         let about = About::of(&mut prepared);
         let session = prepared.into_session(output.clone())?;
         if let Some(mode) = args.queue_mode {

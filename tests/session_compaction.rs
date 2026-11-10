@@ -1,18 +1,15 @@
-//! Append-only compaction format, branch projection and legacy compatibility.
+//! Append-only compaction format and branch projection.
 
 mod common;
-
-use std::path::Path;
 
 use serde_json::json;
 
 use zx_agent::ai::{Message, SystemMessage, SystemPrompt, Usage, now_ms};
 use zx_agent::session::{
-    CompactionPlan, CompactionSummary, Entry, SESSION_VERSION, SessionHeader, SessionStore, SummaryFact, SummaryMode,
-    SummaryRequest,
+    CompactionPlan, CompactionSummary, Entry, SESSION_VERSION, SessionStore, SummaryFact, SummaryMode, SummaryRequest,
 };
 
-use common::{header, read_lines, summarize};
+use common::{header, summarize};
 
 fn summary(id: &str) -> CompactionSummary {
     CompactionSummary {
@@ -53,38 +50,6 @@ async fn seeded(store: &mut SessionStore) -> (String, String) {
     let old = store.append_message(Message::user("old evidence")).await.unwrap();
     let kept = store.append_message(Message::user("latest input")).await.unwrap();
     (old, kept)
-}
-
-#[tokio::test]
-async fn new_sessions_use_the_current_version_and_legacy_upgrade_preserves_every_existing_byte() {
-    let dir = tempfile::tempdir().unwrap();
-    assert_eq!(header().version, SESSION_VERSION);
-    for version in [1, 2] {
-        let path = dir.path().join(format!("v{version}.jsonl"));
-        let mut legacy_header = SessionHeader::new(Path::new("."), "m");
-        legacy_header.version = version;
-        let mut store = SessionStore::create(&path, legacy_header).unwrap();
-        let (old, kept) = seeded(&mut store).await;
-        drop(store);
-        let before = std::fs::read(&path).unwrap();
-        let mut store = SessionStore::open(&path).unwrap();
-        let attempt = store.begin_compaction(plan(&store, &kept)).await.unwrap();
-        store
-            .append_compaction(&attempt, summary(&old), Usage::default())
-            .await
-            .unwrap();
-        assert_eq!(store.header().version, version);
-        assert_eq!(store.format_version(), 3);
-        assert!(std::fs::read(&path).unwrap().starts_with(&before));
-        let lines = read_lines(&path);
-        assert_eq!(lines[3]["type"], "format_upgrade");
-        assert_eq!(lines[4]["type"], "compaction_started");
-        assert_eq!(lines[5]["type"], "compaction");
-        assert_eq!(lines[5]["firstKeptEntryId"], kept);
-        let reopened = SessionStore::read(&path).unwrap();
-        assert_eq!(reopened.messages(), store.messages());
-        assert_eq!(reopened.format_version(), 3);
-    }
 }
 
 #[tokio::test]
@@ -257,20 +222,17 @@ async fn invalid_fact_references_or_empty_summaries_never_append_a_success_recor
 }
 
 #[tokio::test]
-async fn invalid_plan_does_not_even_append_an_upgrade() {
-    let mut legacy = header();
-    legacy.version = 2;
-    let mut store = SessionStore::in_memory(legacy);
+async fn an_invalid_plan_writes_nothing() {
+    let mut store = SessionStore::in_memory(header());
     let (_, kept) = seeded(&mut store).await;
     let mut invalid = plan(&store, &kept);
     invalid.source_entry_ids.push("invented".into());
     assert!(store.begin_compaction(invalid).await.is_err());
-    assert_eq!(store.format_version(), 2);
     assert_eq!(store.entries().len(), 2);
 }
 
 #[tokio::test]
-async fn duplicate_ids_and_future_upgrades_are_rejected_without_modifying_the_file() {
+async fn duplicate_ids_and_unknown_records_are_rejected_without_modifying_the_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session.jsonl");
     let mut store = SessionStore::create(&path, header()).unwrap();
@@ -278,8 +240,9 @@ async fn duplicate_ids_and_future_upgrades_are_rejected_without_modifying_the_fi
     drop(store);
     let prefix = std::fs::read_to_string(&path).unwrap();
     for bad in [
-        json!({"type":"format_upgrade","id":"future","parentId":id,"timestamp":0,"version":SESSION_VERSION + 1}),
-        json!({"type":"format_upgrade","id":id,"parentId":null,"timestamp":0,"version":3}),
+        json!({"type":"context_edit","id":id,"parentId":id,"timestamp":0,"targetId":id,"replacement":null}),
+        // The upgrade record of formats before the current one.
+        json!({"type":"format_upgrade","id":"upgrade","parentId":id,"timestamp":0,"version":SESSION_VERSION}),
     ] {
         let content = format!("{prefix}{bad}\n");
         std::fs::write(&path, &content).unwrap();
@@ -310,17 +273,17 @@ async fn serialized_summary_records_use_camel_case_fields_and_snake_case_tags() 
 
 #[tokio::test]
 async fn a_retained_boundary_never_splits_an_assistant_tool_result_exchange() {
-    use zx_agent::ai::{AssistantMessage, ContentBlock, StopReason, ToolResultMessage};
+    use zx_agent::ai::{AssistantMessage, ContentBlock, StopReason, ToolCall, ToolResultMessage};
     let mut store = SessionStore::in_memory(header());
     let old = store.append_message(Message::user("old evidence")).await.unwrap();
     let mut assistant = AssistantMessage::failure("faux", "m", StopReason::ToolUse, "");
     assistant.error_message = None;
-    assistant.content = vec![ContentBlock::ToolCall {
+    assistant.content = vec![ContentBlock::ToolCall(ToolCall {
         id: "c".into(),
         name: "read_file".into(),
         arguments: json!({"path":"x"}),
         arguments_error: None,
-    }];
+    })];
     let call = store.append_message(Message::Assistant(assistant)).await.unwrap();
     let result = store
         .append_message(Message::ToolResult(ToolResultMessage {

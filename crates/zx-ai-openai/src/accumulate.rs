@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use serde_json::{Value, json};
 use zx_ai::text::prefix_noted;
-use zx_ai::{AssistantMessage, ContentBlock, Delta, ProviderError, StopReason, Usage};
+use zx_ai::{AssistantMessage, ContentBlock, Delta, ProviderError, StopReason, ToolCall, Usage};
 
 /// Response fields that carry reasoning text: `reasoning_content` (DeepSeek, vLLM) or
 /// `reasoning` (OpenRouter, Ollama). The first one present wins; replay uses the same name.
@@ -221,12 +221,12 @@ impl Accumulator {
                 },
                 Block::Tool { id, name, args } => {
                     let (arguments, arguments_error) = parse_arguments(args);
-                    ContentBlock::ToolCall {
+                    ContentBlock::ToolCall(ToolCall {
                         id: id.clone(),
                         name: name.clone(),
                         arguments,
                         arguments_error,
-                    }
+                    })
                 }
             })
             .collect()

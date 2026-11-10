@@ -37,7 +37,7 @@ impl Default for RetryPolicy {
 
 impl RetryPolicy {
     /// The nominal delay before retry `attempt` (1-based): `base * 2^(attempt-1)`, capped.
-    pub fn delay(&self, attempt: u32) -> Duration {
+    fn delay(&self, attempt: u32) -> Duration {
         let factor = 2u32.saturating_pow(attempt.saturating_sub(1));
         self.base_delay.saturating_mul(factor).min(self.max_delay)
     }

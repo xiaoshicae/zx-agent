@@ -16,7 +16,7 @@ use tokio::process::Command;
 use common::mock_server::{MockServer, Reply};
 use common::{stderr, stdout, zx_agent};
 use zx_agent::ai::Message;
-use zx_agent::session::SessionStore;
+use zx_agent::session::{SESSION_VERSION, SessionStore};
 
 const KEY_VAR: &str = "ZX_SESSIONS_TEST_KEY";
 
@@ -111,7 +111,7 @@ fn sent(server: &MockServer, index: usize) -> Vec<String> {
 /// A session file with one prompt, last written at `at_ms`.
 fn seed(dir: &Path, id: &str, cwd: &Path, at_ms: u64, prompt: &str) -> PathBuf {
     std::fs::create_dir_all(dir).unwrap();
-    let header = json!({"type": "session", "version": 5, "id": id, "timestamp": at_ms - 1,
+    let header = json!({"type": "session", "version": SESSION_VERSION, "id": id, "timestamp": at_ms - 1,
         "cwd": cwd.display().to_string(), "model": "mock"});
     let message = json!({"type": "message", "id": format!("{id}-1"), "parentId": null, "timestamp": at_ms,
         "message": {"role": "user", "content": prompt, "timestamp": at_ms}});
@@ -440,7 +440,7 @@ async fn slash_fork_needs_a_session_file() {
 /// assistant `one`, `<id>-3` user `second`, `<id>-4` assistant `two`.
 fn seed_tree(dir: &Path, id: &str, cwd: &Path) -> PathBuf {
     std::fs::create_dir_all(dir).unwrap();
-    let header = json!({"type": "session", "version": 5, "id": id, "timestamp": 999,
+    let header = json!({"type": "session", "version": SESSION_VERSION, "id": id, "timestamp": 999,
         "cwd": cwd.display().to_string(), "model": "mock"});
     let mut lines = vec![header.to_string()];
     let mut parent = serde_json::Value::Null;

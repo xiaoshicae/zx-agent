@@ -10,9 +10,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 use zx_agent::AgentSession;
-use zx_agent::agent::{EventSink, HookOptions, Hooks, LoopConfig, LoopSpec, PolicyDecision, Tool};
+use zx_agent::agent::{EventSink, HookOptions, Hooks, LoopConfig, PolicyDecision, Tool};
 use zx_agent::ai::ModelMeta;
-use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig, SystemUpdates};
+use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::compaction;
 use zx_agent::continuation::ContinueOnLength;
@@ -30,9 +30,7 @@ use zx_agent::session::{SessionHeader, SessionStore};
 use zx_agent::tools::{self, BASH};
 
 use super::execution::{check_session_outside, executor};
-use super::{
-    BaseArgs, BudgetArgs, ExecutionArg, RequestArgs, Shared, SystemUpdatesArg, TransportArgs, env_value, resolve_cwd,
-};
+use super::{BaseArgs, BudgetArgs, RequestArgs, Shared, TransportArgs, env_value, resolve_cwd};
 use crate::sessions::{self, SessionFile};
 
 /// Register a built-in hook under a fixed name, which `hook_failed` events and `[hook]` lines
@@ -64,13 +62,7 @@ pub(crate) struct SessionOptions<'a> {
     pub(crate) cwd: Option<&'a Path>,
     pub(crate) file: SessionFile<'a>,
     pub(crate) default_profile: Builtin,
-    /// Times to continue an answer cut off by the output token limit; `None` keeps the
-    /// profile's value.
-    pub(crate) continue_on_length: Option<u32>,
     pub(crate) shared: &'a Shared,
-    /// Environment variables that hold credentials besides the API key, such as IM tokens:
-    /// commands do not inherit them, and their values are redacted like the key's.
-    pub(crate) hidden_env: &'a [String],
 }
 
 /// A configured session with the hooks every mode shares.
@@ -168,14 +160,13 @@ fn request_fields(values: &[String]) -> Result<serde_json::Map<String, serde_jso
 pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSession> {
     let (cwd, mut profile, models) = settle(&options)?;
     let context = profile.context_section(&cwd).context(
-        "cannot load project instructions; --no-context skips AGENTS.md discovery and profile context files",
+        "cannot load project instructions; a profile with discover = false under [context] skips AGENTS.md discovery",
     )?;
     // Before the session file: invalid provider settings are configuration errors too.
     let (provider, api_key) = provider(&options)?;
     let mut host = host_tools(&mut profile, &cwd)?;
     let (session, executor, environment) = open_session(&options, &profile, &cwd).await?;
-    let hidden_env = hidden_env(&options);
-    let tools = assemble_tools(&profile, &options, &hidden_env, &executor, &mut host)?;
+    let tools = assemble_tools(&profile, &options, &executor, &mut host)?;
     let policy = CommandPolicy::new(&profile.rules.allow).deny_also(&profile.rules.deny);
     let command_policy = command_policy_section(&policy, &tools);
     let system_prompt = build_system_prompt(
@@ -187,16 +178,14 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
             (prompt::AVAILABLE_SKILLS, &host.catalog),
         ],
     );
-    let mut config = LoopConfig::new(LoopSpec {
-        provider: Arc::new(provider),
-        model: options.model.to_string(),
+    let mut config = LoopConfig {
         system_prompt,
         tools,
         cwd,
         max_tokens: options.request.max_tokens,
         reasoning: options.request.reasoning,
-        sequential_tools: false,
-    });
+        ..LoopConfig::new(Arc::new(provider), options.model)
+    };
     push_built_in(&mut config, "command_policy", PolicyHook::new(Arc::new(policy)));
     // Each session's redaction owns its list: the hook reads the files again before every use.
     let redaction = RedactSecrets::new(api_key.into_iter().chain(hidden_values(&options)))
@@ -226,7 +215,7 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
 fn settle(options: &SessionOptions<'_>) -> Result<(PathBuf, Profile, HashMap<String, ModelMeta>)> {
     let cwd = resolve_cwd(options.cwd.or(options.base.cwd.as_deref()))?;
     let mut profile = load_profile(options)?;
-    let models = model_meta(&mut profile, options);
+    let models = model_meta(&mut profile, options.model);
     // Without prices every response costs nothing, and the budget would never stop a run.
     anyhow::ensure!(
         profile.limits.cost_budget.is_none() || models.get(options.model).is_some_and(|meta| meta.cost.is_some()),
@@ -248,17 +237,12 @@ fn settle(options: &SessionOptions<'_>) -> Result<(PathBuf, Profile, HashMap<Str
 fn assemble_tools(
     profile: &Profile,
     options: &SessionOptions<'_>,
-    hidden_env: &[String],
     executor: &Arc<dyn Executor>,
     host: &mut HostTools,
 ) -> Result<Vec<Arc<dyn Tool>>> {
     let built_in: Vec<String> = profile.tools.iter().filter(|name| !host_tool(name)).cloned().collect();
-    let mut tools = tools::builtin_tools_with(
-        &built_in,
-        Duration::from_secs(options.transport.tool_timeout_secs),
-        hidden_env,
-        executor,
-    )?;
+    let timeout = Duration::from_secs(options.transport.tool_timeout_secs);
+    let mut tools = tools::builtin_tools(&built_in, timeout, executor)?;
     tools.extend(std::mem::take(&mut host.tools));
     Ok(tools)
 }
@@ -273,8 +257,8 @@ fn command_policy_section(policy: &CommandPolicy, tools: &[Arc<dyn Tool>]) -> St
     }
 }
 
-/// The selected profile with the command line's settings over it, validated. Explicit values
-/// replace the profile's; denied commands and context files add to it.
+/// The selected profile with the command line's tools and budgets over it, validated: explicit
+/// values replace the profile's.
 fn load_profile(options: &SessionOptions<'_>) -> Result<Profile> {
     let mut profile = Profile::load(options.base.profile.as_deref(), options.default_profile)?;
     if let Some(tools) = &options.base.tools {
@@ -285,99 +269,34 @@ fn load_profile(options: &SessionOptions<'_>) -> Result<Profile> {
             .map(String::from)
             .collect();
     }
-    apply_budgets(&mut profile, options);
-    apply_rules(&mut profile, options.base);
-    apply_context(&mut profile, options);
-    apply_execution(&mut profile, options.base)?;
+    apply_budgets(&mut profile, options.budget);
     profile.validate()?;
     Ok(profile)
 }
 
-/// `--max-model-requests`, `--timeout-secs`, the token and cost budgets and
-/// `--continue-on-length`; a zero timeout or budget removes the profile's.
-fn apply_budgets(profile: &mut Profile, options: &SessionOptions<'_>) {
-    if let Some(turns) = options.budget.max_model_requests {
+/// `--max-model-requests`, `--timeout-secs` and the token and cost budgets; a zero timeout or
+/// budget removes the profile's.
+fn apply_budgets(profile: &mut Profile, budget: &BudgetArgs) {
+    if let Some(turns) = budget.max_model_requests {
         profile.limits.max_model_requests = Some(turns);
     }
-    if let Some(secs) = options.budget.timeout_secs {
+    if let Some(secs) = budget.timeout_secs {
         profile.limits.timeout = (secs > 0).then(|| Duration::from_secs(secs));
     }
-    if let Some(tokens) = options.budget.token_budget {
+    if let Some(tokens) = budget.token_budget {
         profile.limits.token_budget = (tokens > 0).then_some(tokens);
     }
-    if let Some(amount) = options.budget.cost_budget {
+    if let Some(amount) = budget.cost_budget {
         profile.limits.cost_budget = (amount > 0.0).then_some(amount);
     }
-    if let Some(count) = options.continue_on_length {
-        profile.continue_on_length = count;
-    }
 }
 
-/// The command rules: an allowlist or auto-approval list replaces the profile's, denials add.
-fn apply_rules(profile: &mut Profile, base: &BaseArgs) {
-    if !base.allow_cmd.is_empty() {
-        profile.rules.allow.clone_from(&base.allow_cmd);
-    }
-    profile.rules.deny.extend_from_slice(&base.deny_cmd);
-    if !base.auto_approve_cmd.is_empty() {
-        profile.rules.auto_approve.clone_from(&base.auto_approve_cmd);
-    }
-}
-
-/// What the model is told and kept: the instructions, the project context and the summary
-/// triggers.
-fn apply_context(profile: &mut Profile, options: &SessionOptions<'_>) {
-    let base = options.base;
-    if let Some(instructions) = &options.shared.instructions {
-        profile.instructions.clone_from(instructions);
-    }
-    if base.no_context {
-        profile.context.discover = false;
-        profile.context.files.clear();
-    }
-    profile.context.files.extend_from_slice(&base.context_files);
-    if let Some(bytes) = base.compact_threshold_bytes {
-        profile.compaction.trigger_bytes = (bytes > 0).then_some(bytes);
-    }
-    if base.no_auto_compact {
-        profile.compaction.trigger_bytes = None;
-        profile.compaction.trigger_tokens = None;
-    }
-}
-
-/// Where commands run. An image needs container execution, and container execution an image.
-fn apply_execution(profile: &mut Profile, base: &BaseArgs) -> Result<()> {
-    if let Some(execution) = base.execution {
-        profile.execution = match execution {
-            ExecutionArg::Local => Execution::Local,
-            ExecutionArg::Container => Execution::Container,
-        };
-    }
-    if let Some(image) = &base.container_image {
-        anyhow::ensure!(
-            profile.execution == Execution::Container,
-            "--container-image needs container execution: add --execution container, or set execution = \"container\" in the profile"
-        );
-        profile.container.image = Some(image.clone());
-    }
-    // The profile's own check says only what the file lacks; here the flag is the other way.
-    anyhow::ensure!(
-        profile.execution == Execution::Local || profile.container.image.is_some(),
-        "execution = \"container\" needs container.image: set it in the profile, or give --container-image"
-    );
-    Ok(())
-}
-
-/// What is known about the models: the profile's entries, and the window given for this
-/// model on the command line. With automatic summaries on, a known window adds a token
-/// trigger below it.
-fn model_meta(profile: &mut Profile, options: &SessionOptions<'_>) -> HashMap<String, ModelMeta> {
-    let mut models = std::mem::take(&mut profile.models);
-    if let Some(window) = options.base.context_window {
-        models.entry(options.model.to_string()).or_default().context_window = Some(window);
-    }
+/// What is known about the models: the profile's entries. With automatic summaries on, a
+/// known window of `model` adds a token trigger below it.
+fn model_meta(profile: &mut Profile, model: &str) -> HashMap<String, ModelMeta> {
+    let models = std::mem::take(&mut profile.models);
     if profile.compaction.trigger_bytes.is_some()
-        && let Some(window) = models.get(options.model).and_then(|meta| meta.context_window)
+        && let Some(window) = models.get(model).and_then(|meta| meta.context_window)
     {
         profile.compaction.derive_trigger_tokens(window);
     }
@@ -395,12 +314,7 @@ fn provider(options: &SessionOptions<'_>) -> Result<(OpenAiCompatible, Option<St
         // Provider authentication and output filtering each need an owned copy.
         api_key: api_key.clone().into(),
         idle_timeout: Duration::from_secs(options.transport.idle_timeout_secs),
-        max_response_bytes: options.request.max_response_bytes,
-        max_sse_event_bytes: options.request.max_sse_event_bytes,
-        system_updates: match options.base.system_updates {
-            SystemUpdatesArg::Collapse => SystemUpdates::Collapse,
-            SystemUpdatesArg::Inline => SystemUpdates::Inline,
-        },
+        system_updates: options.base.system_updates,
         extra_fields,
         fill_missing_reasoning: options.request.fill_missing_reasoning,
         reasoning_format: options.request.reasoning_format,
@@ -448,7 +362,8 @@ fn host_tools(profile: &mut Profile, cwd: &Path) -> Result<HostTools> {
     Ok(host)
 }
 
-/// The session, where commands run, and the prompt section describing that.
+/// The session, where commands run (on this machine without the variables of [`hidden_env`]),
+/// and the prompt section describing that.
 ///
 /// An existing session is opened first, for its ID; a new one is created only after the
 /// container, if any, has started, so that a failed start leaves no session file behind.
@@ -465,7 +380,7 @@ async fn open_session(
     let session_id = opened
         .as_ref()
         .map_or_else(|| header.id.clone(), |session| session.header().id.clone());
-    let (executor, environment) = executor(profile, cwd, &session_id).await?;
+    let (executor, environment) = executor(profile, cwd, &session_id, hidden_env(options)).await?;
     let session = match opened {
         Some(session) => session,
         None => sessions::create(options.file, header)?,
@@ -508,7 +423,7 @@ fn register_hooks(
         push_built_in(config, "spill_outputs", spill);
     }
     // The built-in tools skip repeated names; this guards tools registered here later.
-    config.spec.validate().map_err(anyhow::Error::msg)?;
+    config.validate().map_err(anyhow::Error::msg)?;
     Ok(auto_approve)
 }
 
@@ -517,7 +432,7 @@ fn register_hooks(
 /// the context.
 fn hidden_env(options: &SessionOptions<'_>) -> Vec<String> {
     std::iter::once(options.base.api_key_env.clone())
-        .chain(options.hidden_env.iter().cloned())
+        .chain(options.shared.hidden_env.iter().cloned())
         .chain(options.shared.mcp.token_env.iter().cloned())
         .chain(otel::HEADER_VARIABLES.iter().map(std::string::ToString::to_string))
         .collect()
@@ -527,6 +442,7 @@ fn hidden_env(options: &SessionOptions<'_>) -> Vec<String> {
 /// holds nothing.
 fn hidden_values<'a>(options: &'a SessionOptions<'_>) -> impl Iterator<Item = String> + 'a {
     options
+        .shared
         .hidden_env
         .iter()
         .chain(&options.shared.mcp.token_env)

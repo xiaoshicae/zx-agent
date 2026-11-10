@@ -19,10 +19,6 @@ use process::EXIT_USAGE;
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    #[cfg(target_os = "linux")]
-    if let Err(error) = deny_same_user_inspection() {
-        eprintln!("[security] cannot stop commands from reading this process's environment: {error}");
-    }
     let result = match Cli::parse().command {
         Command::Run(args) => run::run(args).await,
         Command::Chat(args) => chat::run(args).await,
@@ -36,26 +32,5 @@ async fn main() -> ExitCode {
             eprintln!("zx-agent: {e:#}");
             ExitCode::from(EXIT_USAGE)
         }
-    }
-}
-
-/// Mark this process non-dumpable before any command runs.
-///
-/// Commands run as the same user, and ptrace access mode checks then refuse them this
-/// process's `/proc/<pid>/environ`, which holds the API key, unless they have CAP_SYS_PTRACE
-/// (ptrace(2), proc_pid_environ(5)). The same attribute turns off core dumps of this process
-/// (PR_SET_DUMPABLE(2const)).
-#[cfg(target_os = "linux")]
-fn deny_same_user_inspection() -> std::io::Result<()> {
-    // prctl(2): int prctl(int op, ... /* unsigned long arg2, arg3, arg4, arg5 */).
-    const SUID_DUMP_DISABLE: libc::c_ulong = 0;
-    const UNUSED: libc::c_ulong = 0;
-    // SAFETY: PR_SET_DUMPABLE reads only its integer arguments, passed with the type the
-    // call expects; no pointer into this process is handed to the kernel.
-    let status = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, SUID_DUMP_DISABLE, UNUSED, UNUSED, UNUSED) };
-    if status == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
     }
 }

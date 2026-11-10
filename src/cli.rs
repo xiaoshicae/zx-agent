@@ -15,8 +15,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use zx_agent::agent::QueueMode;
 use zx_agent::ai::Reasoning;
-use zx_agent::ai::openai::{DEFAULT_MAX_RESPONSE_BYTES, ReasoningFormat};
-use zx_agent::ai::sse::DEFAULT_MAX_EVENT_BYTES;
+use zx_agent::ai::openai::{ReasoningFormat, SystemUpdates};
 
 pub(crate) use prepare::{PreparedSession, SessionOptions, prepare};
 pub(crate) use shared::{ModeSettings, Shared};
@@ -67,11 +66,6 @@ pub(crate) struct RunArgs {
 
     #[command(flatten)]
     pub(crate) transport: TransportArgs,
-
-    /// Times to ask the model to continue an answer cut off by the output token limit.
-    /// Each continuation counts against --max-model-requests. Defaults to the selected profile.
-    #[arg(long)]
-    pub(crate) continue_on_length: Option<u32>,
 
     #[command(flatten)]
     pub(crate) request: RequestArgs,
@@ -242,23 +236,12 @@ pub(crate) struct BaseArgs {
     #[arg(long, default_value = "OPENAI_API_KEY")]
     pub(crate) api_key_env: String,
 
-    /// Tokens the model's context holds, for the profile's [[models]] entry of --model or in
-    /// place of one. With automatic summaries on, a summary also runs when the estimated
-    /// context reaches the window minus compaction.reserveTokens.
-    #[arg(long, value_name = "TOKENS", value_parser = clap::value_parser!(u64).range(1..))]
-    pub(crate) context_window: Option<u64>,
-
     /// How system prompt changes reach the model when a session is resumed. collapse: fold
     /// every version into the leading system message; works with any server. inline: send
     /// each change where it happened, which keeps the prompt cache and shows the model when
     /// the prompt changed, but needs a server that accepts system messages mid-conversation.
-    #[arg(long, value_enum, default_value_t = SystemUpdatesArg::Collapse)]
-    pub(crate) system_updates: SystemUpdatesArg,
-
-    /// Replace the selected profile's instructions with the contents of this file. It is read
-    /// once at startup and may be a pipe; the generated sections are still appended.
-    #[arg(long)]
-    pub(crate) system_prompt_file: Option<PathBuf>,
+    #[arg(long, value_parser = parse_system_updates, default_value = "collapse")]
+    pub(crate) system_updates: SystemUpdates,
 
     /// Working directory for tools. Defaults to the current directory.
     #[arg(long)]
@@ -268,22 +251,6 @@ pub(crate) struct BaseArgs {
     #[arg(long, value_delimiter = ',')]
     pub(crate) tools: Option<Vec<String>>,
 
-    /// Allowlisted command prefix for bash, e.g. --allow-cmd "df". Repeatable.
-    /// When set, bash may only run '|' pipelines of allowlisted commands.
-    #[arg(long = "allow-cmd")]
-    pub(crate) allow_cmd: Vec<String>,
-
-    /// Extra substring to reject in bash commands. Repeatable.
-    #[arg(long = "deny-cmd")]
-    pub(crate) deny_cmd: Vec<String>,
-
-    /// Command prefix for bash that runs without asking where bash needs approval, as in
-    /// chat, e.g. --auto-approve-cmd "df". Repeatable; replaces the profile's list. Commands
-    /// with quotes, `$`, other shell syntax or a URL still ask, as do those the profile's
-    /// autoApproveExcept and autoApproveOptions exclude.
-    #[arg(long = "auto-approve-cmd")]
-    pub(crate) auto_approve_cmd: Vec<String>,
-
     /// File holding a secret to redact from tool output, such as a token mounted for the
     /// agent, or a directory of such files (names starting with a dot are skipped). Each path
     /// must exist at startup, and each file must be a regular file of at most 64 KiB. Read
@@ -292,43 +259,9 @@ pub(crate) struct BaseArgs {
     #[arg(long = "secret-file", value_delimiter = ',')]
     pub(crate) secret_files: Vec<PathBuf>,
 
-    /// Embedded profile name (unattended, troubleshoot, assistant) or path to a TOML file.
+    /// Embedded profile name (unattended, assistant) or path to a TOML file.
     #[arg(long)]
     pub(crate) profile: Option<String>,
-
-    /// Additional project instructions file. Repeatable; relative to the launch directory.
-    #[arg(long = "context-file", conflicts_with = "no_context")]
-    pub(crate) context_files: Vec<PathBuf>,
-
-    /// Disable automatic AGENTS.md discovery and profile context files.
-    #[arg(long)]
-    pub(crate) no_context: bool,
-
-    /// Serialized context bytes that trigger a summary request. 0 disables it.
-    /// This is a byte budget, not a model token-window guarantee.
-    #[arg(long, conflicts_with = "no_auto_compact")]
-    pub(crate) compact_threshold_bytes: Option<usize>,
-
-    /// Disable automatic summaries; /compact remains available in chat.
-    #[arg(long)]
-    pub(crate) no_auto_compact: bool,
-
-    /// Where bash and read_file run. local: this machine. container: a Docker container that
-    /// is the sandbox: by default the working directory and the container's files are
-    /// writable and it has network access; the profile's [container] section can make it
-    /// stricter. Defaults to the selected profile.
-    #[arg(long, value_enum)]
-    pub(crate) execution: Option<ExecutionArg>,
-
-    /// Image for --execution container. It must already be present locally (docker pull).
-    #[arg(long)]
-    pub(crate) container_image: Option<String>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub(crate) enum ExecutionArg {
-    Local,
-    Container,
 }
 
 #[derive(Args)]
@@ -405,14 +338,6 @@ pub(crate) struct RequestArgs {
     #[arg(long)]
     pub(crate) max_tokens: Option<u32>,
 
-    /// Maximum raw streaming response bytes per request, including SSE framing.
-    #[arg(long, default_value_t = DEFAULT_MAX_RESPONSE_BYTES)]
-    pub(crate) max_response_bytes: usize,
-
-    /// Maximum bytes in one SSE event, including framing.
-    #[arg(long, default_value_t = DEFAULT_MAX_EVENT_BYTES)]
-    pub(crate) max_sse_event_bytes: usize,
-
     /// A field to add to every request body, as KEY=JSON, for settings that some servers
     /// offer, such as thinking='{"type":"disabled"}' on DeepSeek. Repeatable. Fields that
     /// zx-agent sets itself, such as model and max_tokens, are refused. The session's request
@@ -450,12 +375,6 @@ pub(crate) struct RequestArgs {
     pub(crate) prompt_cache_key: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub(crate) enum SystemUpdatesArg {
-    Collapse,
-    Inline,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub(crate) enum OutputMode {
     Text,
@@ -467,6 +386,10 @@ fn parse_reasoning(text: &str) -> Result<Reasoning, String> {
 }
 
 fn parse_reasoning_format(text: &str) -> Result<ReasoningFormat, String> {
+    text.parse()
+}
+
+fn parse_system_updates(text: &str) -> Result<SystemUpdates, String> {
     text.parse()
 }
 
@@ -521,7 +444,6 @@ mod tests {
             Command::Run(args) => {
                 assert_eq!(args.budget.max_model_requests, None);
                 assert_eq!(args.budget.timeout_secs, None);
-                assert_eq!(args.continue_on_length, None);
                 assert_eq!(args.base.tools, None);
             }
             Command::Chat(_) | Command::Serve(_) | Command::Sessions(_) | Command::Acp(_) => panic!("run command"),

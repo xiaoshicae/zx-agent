@@ -17,13 +17,14 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::AgentSession;
-use zx_agent::agent::{AgentEvent, Effects, Interruption, Tool, ToolContext, ToolOutput};
+use zx_agent::agent::{AgentEvent, Effects, ExecutionMode, Interruption, Tool, ToolContext, ToolOutput};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{AssistantMessage, ContentBlock, Message, StopReason, ToolDef, ToolResultMessage};
+use zx_agent::ai::{AssistantMessage, ContentBlock, Message, StopReason, ToolCall, ToolDef, ToolResultMessage};
+use zx_agent::executor::{Executor, LocalExecutor};
 use zx_agent::output_store::{self, OutputStore, ReadOutputTool};
 use zx_agent::profile::skills::ReadSkillTool;
 use zx_agent::runner::RunOutcome;
-use zx_agent::session::{SessionHeader, SessionStore};
+use zx_agent::session::SessionStore;
 use zx_agent::tools::builtin_tools;
 
 use common::mock_server::{MockServer, Reply};
@@ -41,6 +42,7 @@ fn definition(name: &str) -> ToolDef {
 struct StartProbe {
     name: &'static str,
     effects: Effects,
+    mode: ExecutionMode,
     session: PathBuf,
 }
 
@@ -55,6 +57,9 @@ impl Tool for StartProbe {
     fn effects(&self) -> Effects {
         self.effects
     }
+    fn execution_mode(&self) -> ExecutionMode {
+        self.mode
+    }
     async fn execute(&self, _args: Value, _ctx: &ToolContext) -> Result<ToolOutput, String> {
         let text = std::fs::read_to_string(&self.session).map_err(|error| error.to_string())?;
         let starts = text
@@ -66,9 +71,15 @@ impl Tool for StartProbe {
 }
 
 fn probe(name: &'static str, effects: Effects, session: &Path) -> Arc<dyn Tool> {
+    probe_in(name, effects, ExecutionMode::Parallel, session)
+}
+
+/// A probe that runs in `mode`; a sequential one makes its whole batch run in sequence.
+fn probe_in(name: &'static str, effects: Effects, mode: ExecutionMode, session: &Path) -> Arc<dyn Tool> {
     Arc::new(StartProbe {
         name,
         effects,
+        mode,
         session: session.to_path_buf(),
     })
 }
@@ -145,11 +156,13 @@ fn answer(calls: &[(&str, &str)]) -> Message {
     answer.error_message = None;
     answer.content = calls
         .iter()
-        .map(|(id, name)| ContentBlock::ToolCall {
-            id: (*id).into(),
-            name: (*name).into(),
-            arguments: json!({}),
-            arguments_error: None,
+        .map(|(id, name)| {
+            ContentBlock::ToolCall(ToolCall {
+                id: (*id).into(),
+                name: (*name).into(),
+                arguments: json!({}),
+                arguments_error: None,
+            })
         })
         .collect();
     Message::Assistant(answer)
@@ -194,7 +207,8 @@ fn recovered(events: &[AgentEvent]) -> Vec<(String, Interruption)> {
 #[test]
 fn only_bash_among_the_built_in_tools_has_side_effects() {
     let dir = tempfile::tempdir().unwrap();
-    let mut tools = builtin_tools(&["bash".into(), "read_file".into()], Duration::from_secs(1), &[]).unwrap();
+    let local: Arc<dyn Executor> = Arc::new(LocalExecutor::default());
+    let mut tools = builtin_tools(&["bash".into(), "read_file".into()], Duration::from_secs(1), &local).unwrap();
     let store = OutputStore::new(dir.path(), output_store::Config::default()).unwrap();
     tools.push(Arc::new(ReadOutputTool::new(store)));
     tools.push(Arc::new(ReadSkillTool::new(Vec::new()).unwrap()));
@@ -223,14 +237,12 @@ async fn each_start_is_on_disk_before_its_call_runs_and_reads_are_not_recorded()
         FauxStep::text("done"),
     ]));
     let tools = vec![
-        probe("write", Effects::SideEffects, &path),
-        probe("read", Effects::ReadOnly, &path),
+        probe_in("write", Effects::SideEffects, ExecutionMode::Sequential, &path),
+        probe_in("read", Effects::ReadOnly, ExecutionMode::Sequential, &path),
     ];
-    let mut config = config(provider.clone(), tools);
-    config.spec.sequential_tools = true;
     let (mut runner, _) = RunnerSetup {
         session: SessionStore::create(&path, header()).unwrap(),
-        ..RunnerSetup::new(config)
+        ..RunnerSetup::new(config(provider.clone(), tools))
     }
     .build();
 
@@ -437,42 +449,6 @@ async fn the_recovery_event_follows_the_recorded_result() {
 }
 
 #[tokio::test]
-async fn sessions_from_before_start_records_report_an_unknown_start() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("v3.jsonl");
-    let mut legacy = SessionHeader::new(Path::new("."), "test-model");
-    legacy.version = 3;
-    let mut store = SessionStore::create(&path, legacy).unwrap();
-    store.append_message(Message::user("fix it")).await.unwrap();
-    store
-        .append_message(answer(&[("c1", "write"), ("c2", "read")]))
-        .await
-        .unwrap();
-    drop(store);
-    let write = Counted::new("write", Effects::SideEffects);
-    let read = Counted::new("read", Effects::ReadOnly);
-    let tools: Vec<Arc<dyn Tool>> = vec![write.clone(), read.clone()];
-    let provider = Arc::new(FauxProvider::new([FauxStep::text("checked")]));
-    let (mut runner, events) = RunnerSetup {
-        session: SessionStore::open(&path).unwrap(),
-        ..RunnerSetup::new(config(provider, tools))
-    }
-    .build();
-
-    let report = runner.run("continue", &CancellationToken::new()).await;
-
-    assert_eq!(report.outcome, RunOutcome::Completed);
-    assert_eq!(
-        recovered(&events.events()),
-        [
-            ("c1".into(), Interruption::StartUnknown),
-            ("c2".into(), Interruption::ReadOnly)
-        ]
-    );
-    assert_eq!(write.runs.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
 async fn a_dropped_run_is_recovered_by_the_next_prompt() {
     let hang = Hang::new(Effects::SideEffects);
     let tools: Vec<Arc<dyn Tool>> = vec![hang.clone()];
@@ -483,7 +459,8 @@ async fn a_dropped_run_is_recovered_by_the_next_prompt() {
     let (runner, _) = RunnerSetup::new(config(provider.clone(), tools)).build();
     let session = AgentSession::from(runner);
     {
-        let mut running = Box::pin(session.prompt("start"));
+        let cancel = CancellationToken::new();
+        let mut running = Box::pin(session.prompt("start", &cancel));
         tokio::select! {
             () = hang.started.notified() => {}
             _ = &mut running => panic!("the run ended before its tool started"),
@@ -491,7 +468,7 @@ async fn a_dropped_run_is_recovered_by_the_next_prompt() {
         // Dropping the run future stops it before the result is recorded.
     }
 
-    let report = session.prompt("again").await.unwrap();
+    let report = session.prompt("again", &CancellationToken::new()).await.unwrap();
 
     assert_eq!(report.outcome, RunOutcome::Completed);
     let results = results(&provider.requests()[1].messages);
@@ -514,7 +491,7 @@ async fn result_after_cancelling_a_running_call(effects: Effects) -> (String, bo
     let session = AgentSession::from(runner);
     let cancel = CancellationToken::new();
     {
-        let mut running = Box::pin(session.prompt_with_cancel("start", &cancel));
+        let mut running = Box::pin(session.prompt("start", &cancel));
         tokio::select! {
             () = hang.started.notified() => {}
             _ = &mut running => panic!("the run ended before its tool started"),
@@ -522,7 +499,7 @@ async fn result_after_cancelling_a_running_call(effects: Effects) -> (String, bo
         cancel.cancel();
         assert_eq!(running.await.unwrap().outcome, RunOutcome::Aborted);
     }
-    let report = session.prompt("again").await.unwrap();
+    let report = session.prompt("again", &CancellationToken::new()).await.unwrap();
     assert_eq!(report.outcome, RunOutcome::Completed);
     let results = results(&provider.requests()[1].messages);
     assert_eq!(results.len(), 1, "{results:?}");

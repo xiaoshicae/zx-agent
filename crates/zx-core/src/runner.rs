@@ -117,7 +117,7 @@ impl Runner {
             &self.compaction,
             &mut self.pause,
         );
-        host.summarize(Trigger::Manual, &child).await
+        host.summarize(Trigger::Manual, &child).await.report
     }
 
     /// The loop configuration, for example to reach `config().queues` during a run.
@@ -133,13 +133,13 @@ impl Runner {
         // Another model may produce a valid summary where the previous one failed.
         self.pause.clear();
         (
-            std::mem::replace(&mut self.config.spec.provider, provider),
-            std::mem::replace(&mut self.config.spec.model, model),
+            std::mem::replace(&mut self.config.provider, provider),
+            std::mem::replace(&mut self.config.model, model),
         )
     }
 
     pub(crate) fn replace_reasoning(&mut self, reasoning: Option<Reasoning>) -> Option<Reasoning> {
-        std::mem::replace(&mut self.config.spec.reasoning, reasoning)
+        std::mem::replace(&mut self.config.reasoning, reasoning)
     }
 
     /// Revoke exact-call approvals granted by this Runner's interaction host.
@@ -158,8 +158,9 @@ impl Runner {
         &mut self.session
     }
 
-    /// Run one prompt to completion. Never panics on provider or tool failures; the report
-    /// says how the run ended.
+    /// Run one prompt to completion: the person's text, or a message from an extension (pi:
+    /// `sendMessage` with `triggerTurn` while idle). Never panics on provider or tool
+    /// failures; the report says how the run ended.
     ///
     /// One runner owns one active conversation. Overlapping runs are rejected by borrowing:
     ///
@@ -173,15 +174,8 @@ impl Runner {
     ///     tokio::join!(first, second);
     /// }
     /// ```
-    pub async fn run(&mut self, prompt: impl Into<String>, cancel: &CancellationToken) -> RunReport {
-        self.run_message(QueuedMessage::User(prompt.into()), cancel).await
-    }
-
-    /// Run with any message as the input: the person's text, or a message from an
-    /// extension (pi: `sendMessage` with `triggerTurn` while idle). Otherwise like
-    /// [`Runner::run`].
-    pub async fn run_message(&mut self, message: QueuedMessage, cancel: &CancellationToken) -> RunReport {
-        self.start(Start::Message(message), cancel).await
+    pub async fn run(&mut self, message: impl Into<QueuedMessage>, cancel: &CancellationToken) -> RunReport {
+        self.start(Start::Message(message.into()), cancel).await
     }
 
     /// Continue the conversation without new input: the model answers
@@ -340,11 +334,11 @@ impl Run<'_> {
 
     /// Close the run: keep the state hooks asked to record, then report how the run ended
     /// and the answer it added after the first `run_start` entries.
-    async fn close(mut self, stop: RunStop, run_start: usize) -> RunReport {
+    async fn close(self, stop: RunStop, run_start: usize) -> RunReport {
         // State that hooks asked to record during the last events is kept before the run is
         // reported, so a host reading the session afterwards finds it.
         let (config, target) = (self.host.config, self.host.target);
-        let stop = match record_pending_entries(config, &mut self.host, target).await {
+        let stop = match record_pending_entries(config, self.host.session, target).await {
             Ok(()) => stop,
             Err(error) => RunStop::Failed(format!("{error:#}")),
         };
@@ -473,12 +467,12 @@ impl RunTimer {
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     use super::*;
-    use crate::agent::{LoopSpec, NullSink, Tool};
+    use crate::agent::{NullSink, Tool};
+    use crate::ai::Message;
     use crate::ai::faux::{FauxProvider, FauxStep};
-    use crate::ai::{Message, SystemPrompt};
     use crate::session::{FailingWriter, SessionHeader};
 
     #[test]
@@ -493,16 +487,10 @@ mod tests {
 
     /// A loop over `provider` and `tools` with no system prompt.
     fn config(provider: &Arc<FauxProvider>, tools: Vec<Arc<dyn Tool>>) -> LoopConfig {
-        LoopConfig::new(LoopSpec {
-            provider: provider.clone(),
-            model: "m".into(),
-            system_prompt: SystemPrompt::default(),
+        LoopConfig {
             tools,
-            cwd: PathBuf::from("."),
-            max_tokens: None,
-            reasoning: None,
-            sequential_tools: false,
-        })
+            ..LoopConfig::new(provider.clone(), "m")
+        }
     }
 
     /// A runner without retries or limits, whose events go nowhere.
@@ -535,15 +523,13 @@ mod tests {
     #[tokio::test]
     async fn compaction_write_failures_cancel_before_any_further_model_request() {
         for rejected in [
-            "format_upgrade",
             "compaction_started",
             "request_config",
             "request_started",
             "compaction",
             "compaction_failed",
         ] {
-            let mut header = SessionHeader::new(Path::new("."), "m");
-            header.version = 2;
+            let header = SessionHeader::new(Path::new("."), "m");
             let mut store = SessionStore::with_writer(header, Box::new(RejectEntry(rejected)));
             let old = store.append_message(Message::user("x".repeat(4096))).await.unwrap();
             store.append_message(Message::user("recent")).await.unwrap();
@@ -657,33 +643,24 @@ mod tests {
 
     #[tokio::test]
     async fn a_start_record_write_failure_prevents_the_call() {
-        // A v3 session must first record its upgrade to v4; either write can fail.
-        for (version, rejected) in [(4, "tool_call_started"), (3, "format_upgrade")] {
-            let tool = Arc::new(Counted(std::sync::atomic::AtomicUsize::new(0)));
-            let provider = Arc::new(FauxProvider::new([
-                FauxStep::tool_call("c1", "counted", serde_json::json!({})),
-                FauxStep::text("never sent"),
-            ]));
-            let mut header = SessionHeader::new(Path::new("."), "m");
-            header.version = version;
-            let session = SessionStore::with_writer(header, Box::new(RejectEntry(rejected)));
-            let mut runner = runner(config(&provider, vec![tool.clone()]), session);
+        let tool = Arc::new(Counted(std::sync::atomic::AtomicUsize::new(0)));
+        let provider = Arc::new(FauxProvider::new([
+            FauxStep::tool_call("c1", "counted", serde_json::json!({})),
+            FauxStep::text("never sent"),
+        ]));
+        let session = SessionStore::with_writer(
+            SessionHeader::new(Path::new("."), "m"),
+            Box::new(RejectEntry("tool_call_started")),
+        );
+        let mut runner = runner(config(&provider, vec![tool.clone()]), session);
 
-            let report = runner.run("go", &CancellationToken::new()).await;
+        let report = runner.run("go", &CancellationToken::new()).await;
 
-            assert_eq!(report.outcome, RunOutcome::Error, "{rejected}");
-            let error = report.error.unwrap_or_default();
-            assert!(
-                error.contains(&format!("disk full on {rejected}")),
-                "{rejected}: {error}"
-            );
-            assert_eq!(
-                tool.0.load(Ordering::SeqCst),
-                0,
-                "{rejected}: ran without a start record"
-            );
-            assert_eq!(provider.requests().len(), 1, "{rejected}");
-        }
+        assert_eq!(report.outcome, RunOutcome::Error);
+        let error = report.error.unwrap_or_default();
+        assert!(error.contains("disk full on tool_call_started"), "{error}");
+        assert_eq!(tool.0.load(Ordering::SeqCst), 0, "ran without a start record");
+        assert_eq!(provider.requests().len(), 1);
     }
 
     #[tokio::test]
@@ -696,12 +673,12 @@ mod tests {
         session.append_message(Message::user("go")).await.unwrap();
         let mut answer = crate::ai::AssistantMessage::failure("p", "m", crate::ai::StopReason::ToolUse, "");
         answer.error_message = None;
-        answer.content = vec![crate::ai::ContentBlock::ToolCall {
+        answer.content = vec![crate::ai::ContentBlock::ToolCall(crate::ai::ToolCall {
             id: "c1".into(),
             name: "counted".into(),
             arguments: serde_json::json!({}),
             arguments_error: None,
-        }];
+        })];
         session.append_message(Message::Assistant(answer)).await.unwrap();
         session.append_tool_call_started("c1", "counted").await.unwrap();
         let tool = Arc::new(Counted(std::sync::atomic::AtomicUsize::new(0)));

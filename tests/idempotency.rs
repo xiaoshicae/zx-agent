@@ -4,6 +4,8 @@ mod common;
 
 use std::sync::Arc;
 
+use tokio_util::sync::CancellationToken;
+
 use common::{RunnerSetup, config, header, read_lines, summarize};
 use zx_agent::AgentSession;
 use zx_agent::agent_session::{AgentSessionError, IDEMPOTENCY_KEY_TYPE};
@@ -27,16 +29,32 @@ async fn a_key_is_recorded_before_its_prompt_and_runs_only_once() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("one"), FauxStep::text("two")]));
     let session = session_in(&file, provider.clone());
 
-    let report = session.prompt_once("job-1", "first").await.unwrap();
+    let report = session
+        .prompt_once("job-1", "first", &CancellationToken::new())
+        .await
+        .unwrap();
     assert_eq!(report.outcome, RunOutcome::Completed);
     assert_eq!(
-        session.prompt_once("job-1", "first again").await.err(),
+        session
+            .prompt_once("job-1", "first again", &CancellationToken::new())
+            .await
+            .err(),
         Some(AgentSessionError::DuplicateKey)
     );
     assert_eq!(provider.requests().len(), 1, "the duplicate makes no request");
-    assert_eq!(session.prompt_once("job-2", "second").await.unwrap().final_text, "two");
     assert_eq!(
-        session.prompt_once("  ", "blank").await.err(),
+        session
+            .prompt_once("job-2", "second", &CancellationToken::new())
+            .await
+            .unwrap()
+            .final_text,
+        "two"
+    );
+    assert_eq!(
+        session
+            .prompt_once("  ", "blank", &CancellationToken::new())
+            .await
+            .err(),
         Some(AgentSessionError::InvalidKey)
     );
     drop(session);
@@ -65,7 +83,10 @@ async fn a_key_survives_reopening_the_session_file() {
     let file = dir.path().join("session.jsonl");
     let provider = Arc::new(FauxProvider::new([FauxStep::text("one")]));
     let session = session_in(&file, provider.clone());
-    session.prompt_once("job-1", "first").await.unwrap();
+    session
+        .prompt_once("job-1", "first", &CancellationToken::new())
+        .await
+        .unwrap();
     drop(session);
 
     let (runner, _) = RunnerSetup {
@@ -76,7 +97,10 @@ async fn a_key_survives_reopening_the_session_file() {
     let reopened = AgentSession::from(runner);
 
     assert_eq!(
-        reopened.prompt_once("job-1", "first").await.err(),
+        reopened
+            .prompt_once("job-1", "first", &CancellationToken::new())
+            .await
+            .err(),
         Some(AgentSessionError::DuplicateKey)
     );
     assert_eq!(provider.requests().len(), 1);
@@ -92,14 +116,20 @@ async fn an_interrupted_submission_keeps_its_key_and_is_continued_not_repeated()
     ]));
     let session = session_in(&file, provider.clone());
 
-    let report = session.prompt_once("job-1", "first").await.unwrap();
+    let report = session
+        .prompt_once("job-1", "first", &CancellationToken::new())
+        .await
+        .unwrap();
     assert_eq!(report.outcome, RunOutcome::Error);
     // The host retries the same submission: refused, so it continues the run instead.
     assert_eq!(
-        session.prompt_once("job-1", "first").await.err(),
+        session
+            .prompt_once("job-1", "first", &CancellationToken::new())
+            .await
+            .err(),
         Some(AgentSessionError::DuplicateKey)
     );
-    let report = session.continue_run().await.unwrap();
+    let report = session.continue_run(&CancellationToken::new()).await.unwrap();
     assert_eq!(
         (report.outcome, report.final_text.as_str()),
         (RunOutcome::Completed, "done")

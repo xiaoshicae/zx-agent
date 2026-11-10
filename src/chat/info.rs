@@ -39,13 +39,12 @@ impl About {
             profile: std::mem::take(&mut prepared.profile_name),
             tools: prepared
                 .config
-                .spec
                 .tools
                 .iter()
                 .map(|tool| tool.name().to_string())
                 .collect(),
             auto_approve: std::mem::take(&mut prepared.auto_approve_commands),
-            cwd: prepared.config.spec.cwd.clone(),
+            cwd: prepared.config.cwd.clone(),
             session: prepared.store.path().map(Path::to_path_buf),
             resumed: (!prepared.store.entries().is_empty()).then(|| Resumed {
                 messages: prepared

@@ -18,7 +18,8 @@ use zx_agent::agent::{
 };
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{
-    ContentBlock, EventReceiver, Message, PREAMBLE, Provider, Request, StopReason, SystemPrompt, ToolDef, Usage,
+    ContentBlock, EventReceiver, Message, PREAMBLE, Provider, Request, StopReason, SystemPrompt, ToolCall, ToolDef,
+    Usage,
 };
 
 fn provider(steps: impl IntoIterator<Item = FauxStep>) -> Arc<FauxProvider> {
@@ -254,12 +255,12 @@ async fn failures_become_error_results_and_the_loop_continues() {
 #[tokio::test]
 async fn length_stop_fails_tool_calls_without_running_them() {
     let cut_off = FauxStep::Respond {
-        blocks: vec![ContentBlock::ToolCall {
+        blocks: vec![ContentBlock::ToolCall(ToolCall {
             id: "t".into(),
             name: "echo".into(),
             arguments: json!({"text": "cut"}),
             arguments_error: None,
-        }],
+        })],
         stop: StopReason::Length,
     };
     let provider = provider([cut_off, FauxStep::text("retried")]);
@@ -328,7 +329,7 @@ async fn steering_enters_after_the_turn_and_follow_ups_after_the_answer() {
     let mut echo = EchoTool::new("echo");
     echo.queues = Some(config.queues.clone());
     let mut config = config;
-    config.spec.tools = vec![Arc::new(echo)];
+    config.tools = vec![Arc::new(echo)];
     let mut context = Vec::new();
 
     let (result, _) = run_prompt(&config, &mut context, "go").await;
@@ -359,7 +360,7 @@ async fn a_withdrawn_follow_up_is_never_taken() {
     let mut echo = EchoTool::new("echo");
     echo.queues = Some(config.queues.clone());
     let mut config = config;
-    config.spec.tools = vec![Arc::new(echo)];
+    config.tools = vec![Arc::new(echo)];
     config.queues.follow_up("then summarize");
     config.queues.follow_up("and then stop");
     let mut context = Vec::new();
@@ -392,7 +393,7 @@ async fn a_spent_budget_starts_no_new_turn_and_leaves_queued_input_queued() {
     let mut echo = EchoTool::new("echo");
     echo.queues = Some(config.queues.clone());
     let mut config = config;
-    config.spec.tools = vec![Arc::new(echo)];
+    config.tools = vec![Arc::new(echo)];
     let events = Collect::default();
 
     let (result, context) = run_attempt(
@@ -503,7 +504,7 @@ fn prompt(started: &str) -> SystemPrompt {
 /// Run `text` on `context` with `system_prompt`; the model answers `answer`.
 async fn run_with_prompt(context: &mut Vec<Message>, system_prompt: SystemPrompt, text: &str, answer: &str) {
     let mut config = config(provider([FauxStep::text(answer)]), vec![]);
-    config.spec.system_prompt = system_prompt;
+    config.system_prompt = system_prompt;
     run_prompt(&config, context, text).await;
 }
 

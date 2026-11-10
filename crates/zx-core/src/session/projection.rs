@@ -95,11 +95,13 @@ impl SessionStore {
             .collect()
     }
 
-    pub(super) fn compacted_projection(&self) -> Vec<ProjectedMessage> {
-        self.compacted_projection_at(self.leaf.as_deref())
+    /// The model-visible messages of the current branch, with their source entries.
+    pub fn projection(&self) -> Vec<ProjectedMessage> {
+        self.projection_at(self.leaf.as_deref())
     }
 
-    pub(super) fn compacted_projection_at(&self, leaf: Option<&str>) -> Vec<ProjectedMessage> {
+    /// The model-visible messages of the branch to `leaf`, with their source entries.
+    pub(super) fn projection_at(&self, leaf: Option<&str>) -> Vec<ProjectedMessage> {
         let path = self.branch_path_from(leaf);
         let raw = Self::raw_projection_from(&path);
         let Some(latest) = self.latest_compaction_on(&path) else {
@@ -135,12 +137,8 @@ impl SessionStore {
 
     /// Latest successful, still-valid summary on the active branch.
     pub fn latest_compaction(&self) -> Option<&CompactionEntry> {
-        self.latest_compaction_at(self.leaf.as_deref())
-    }
-
-    fn latest_compaction_at(&self, leaf: Option<&str>) -> Option<&CompactionEntry> {
-        let path = self.branch_path_from(leaf);
-        self.latest_compaction_on(&path).map(|latest| latest.compaction)
+        self.latest_compaction_on(&self.branch_path())
+            .map(|latest| latest.compaction)
     }
 
     /// The latest successful summary on `path` that still holds. Invalid or incomplete control

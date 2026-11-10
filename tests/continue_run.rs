@@ -173,7 +173,8 @@ async fn a_running_session_refuses_to_continue() {
     let provider = Arc::new(FauxProvider::new([FauxStep::Hang]));
     let (runner, events) = runner(&provider, SessionStore::in_memory(header()));
     let session = AgentSession::from(runner);
-    let mut running = Box::pin(session.prompt("first"));
+    let cancel = CancellationToken::new();
+    let mut running = Box::pin(session.prompt("first", &cancel));
     // Wait until the request is in flight.
     while !events
         .events()
@@ -186,7 +187,10 @@ async fn a_running_session_refuses_to_continue() {
         }
     }
 
-    assert_eq!(session.continue_run().await.err(), Some(AgentSessionError::Busy));
+    assert_eq!(
+        session.continue_run(&CancellationToken::new()).await.err(),
+        Some(AgentSessionError::Busy)
+    );
     session.abort();
     running.await.unwrap();
 }

@@ -24,7 +24,7 @@ impl Default for ReadFileTool {
     fn default() -> Self {
         Self {
             max_file_bytes: DEFAULT_MAX_FILE_BYTES,
-            executor: Arc::new(LocalExecutor),
+            executor: Arc::new(LocalExecutor::default()),
         }
     }
 }

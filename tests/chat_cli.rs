@@ -10,7 +10,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{ChildStdout, Command};
 
 use common::mock_server::{MockServer, Reply};
-use common::{json_lines, signal, stderr, stdout, tool_call_answer, zx_agent};
+use common::{ProfileFile, json_lines, signal, stderr, stdout, tool_call_answer, zx_agent};
 use zx_agent::ai::Message;
 use zx_agent::session::SessionStore;
 
@@ -97,53 +97,6 @@ async fn multiple_prompts_keep_history_and_stream_each_answer_once() {
         .to_string();
     assert!(system.contains("working with a human"));
     assert!(!system.contains("No one will answer"));
-}
-
-#[tokio::test]
-async fn new_conversations_keep_the_instructions_read_at_startup() {
-    let dir = tempfile::tempdir().unwrap();
-    let instructions = dir.path().join("instructions.md");
-    std::fs::write(&instructions, "Startup instructions MARKER-ONE").unwrap();
-    let release = std::sync::Arc::new(tokio::sync::Notify::new());
-    let chunks = vec![json!({"choices":[{"index":0,"delta":{"content":"first"},"finish_reason":null}]})];
-    let server = MockServer::start(vec![
-        Reply::Gate {
-            chunks,
-            release: release.clone(),
-        },
-        Reply::text("second"),
-    ])
-    .await;
-    let mut child = chat(
-        &server,
-        dir.path(),
-        &["--tools", "", "--system-prompt-file", instructions.to_str().unwrap()],
-    )
-    .spawn()
-    .unwrap();
-    let mut stdin = child.stdin.take().unwrap();
-    stdin.write_all(b"hello\n/new\nhello again\n/quit\n").await.unwrap();
-    stdin.shutdown().await.unwrap();
-    drop(stdin);
-    server.wait_for_requests(1).await;
-    // A pipe cannot be read twice; changing the file shows whether /new reads it again.
-    std::fs::write(&instructions, "Changed instructions MARKER-TWO").unwrap();
-    release.notify_one();
-    let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert!(stderr(&output).contains("new conversation"), "{}", stderr(&output));
-    let system = |index: usize| {
-        server.requests()[index].body["messages"][0]["content"]
-            .as_str()
-            .unwrap()
-            .to_string()
-    };
-    assert!(system(0).contains("MARKER-ONE"));
-    assert!(system(1).contains("MARKER-ONE"), "{}", system(1));
-    assert!(!system(1).contains("MARKER-TWO"));
 }
 
 #[tokio::test]
@@ -249,13 +202,13 @@ async fn chat_automatically_compacts_at_its_default_byte_budget() {
 }
 
 #[tokio::test]
-async fn explicit_cli_flags_disable_automatic_compaction() {
-    for disable in [vec!["--no-auto-compact"], vec!["--compact-threshold-bytes", "0"]] {
+async fn profile_settings_disable_automatic_compaction() {
+    for disable in ["triggerBytes = 0\ntriggerTokens = 0", "triggerBytes = 0"] {
         let dir = tempfile::tempdir().unwrap();
         seed_context(dir.path(), 300 * 1024).await;
         let server = MockServer::start(vec![Reply::text("answer")]).await;
-        let mut args = vec!["--tools", "", "--session", "chat.jsonl"];
-        args.extend(disable);
+        let profile = ProfileFile::new("assistant", &format!("[compaction]\n{disable}"));
+        let args = ["--tools", "", "--session", "chat.jsonl", "--profile", profile.path()];
         let output = run(&server, dir.path(), &args, "continue\n/quit\n").await;
         assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
         assert_eq!(server.requests().len(), 1);
@@ -571,11 +524,12 @@ async fn approving_once_allows_the_displayed_shell_call() {
 #[tokio::test]
 async fn an_auto_approved_command_is_shown_with_a_preview_of_its_result() {
     let dir = tempfile::tempdir().unwrap();
+    let profile = ProfileFile::new("assistant", "[rules]\nautoApprove = [\"seq\"]");
     let server = MockServer::start(vec![Reply::bash("c", "seq 1 5"), Reply::text("done")]).await;
     let output = run(
         &server,
         dir.path(),
-        &["--tools", "bash", "--auto-approve-cmd", "seq"],
+        &["--tools", "bash", "--profile", profile.path()],
         "go\n/quit\n",
     )
     .await;
@@ -688,11 +642,12 @@ async fn an_edit_approval_lists_each_edit_and_its_result_shows_the_patch() {
 #[tokio::test]
 async fn color_always_keeps_colors_when_stderr_is_not_a_terminal() {
     let dir = tempfile::tempdir().unwrap();
+    let profile = ProfileFile::new("assistant", "[rules]\nautoApprove = [\"seq\"]");
     let server = MockServer::start(vec![Reply::bash("c", "seq 1 2"), Reply::text("done")]).await;
     let output = run(
         &server,
         dir.path(),
-        &["--tools", "bash", "--auto-approve-cmd", "seq", "--color", "always"],
+        &["--tools", "bash", "--profile", profile.path(), "--color", "always"],
         "go\n/quit\n",
     )
     .await;
@@ -941,6 +896,7 @@ async fn denial_reaches_the_model_without_executing_the_call() {
 #[tokio::test]
 async fn a_policy_denial_cannot_be_overridden_by_an_approval_command() {
     let dir = tempfile::tempdir().unwrap();
+    let profile = ProfileFile::new("assistant", "[rules]\ndeny = [\"blocked\"]");
     let server = MockServer::start(vec![
         Reply::bash("c", "printf blocked > marker"),
         Reply::text("handled"),
@@ -949,7 +905,7 @@ async fn a_policy_denial_cannot_be_overridden_by_an_approval_command() {
     let output = run(
         &server,
         dir.path(),
-        &["--tools", "bash", "--deny-cmd", "blocked"],
+        &["--tools", "bash", "--profile", profile.path()],
         "go\n/quit\n",
     )
     .await;
@@ -1000,8 +956,9 @@ async fn listed_commands_still_ask_when_they_mention_secrets_or_redirect() {
 }
 
 #[tokio::test]
-async fn the_auto_approve_flag_replaces_the_profile_list() {
+async fn a_profile_auto_approve_list_replaces_the_one_it_extends() {
     let dir = tempfile::tempdir().unwrap();
+    let profile = ProfileFile::new("assistant", "[rules]\nautoApprove = [\"printf\"]");
     std::fs::write(dir.path().join("app.log"), "line\n").unwrap();
     let server = MockServer::start(vec![
         Reply::bash("c1", "printf flagged"),
@@ -1012,7 +969,7 @@ async fn the_auto_approve_flag_replaces_the_profile_list() {
     let output = run(
         &server,
         dir.path(),
-        &["--tools", "bash", "--auto-approve-cmd", "printf"],
+        &["--tools", "bash", "--profile", profile.path()],
         "go\n3\n/quit\n",
     )
     .await;
@@ -1990,6 +1947,7 @@ async fn a_known_context_window_adds_a_token_trigger_to_automatic_summaries() {
     let server = MockServer::start(vec![Reply::text(&summary_json(&id)), Reply::text("answer")]).await;
     // Some 120 KiB of context: about 30000 tokens by the estimate, below the 256 KiB byte
     // budget but above the 23616 tokens a 40000-token window leaves under the reserve.
+    let profile = window_profile(40000, "");
     let output = run(
         &server,
         dir.path(),
@@ -2000,8 +1958,8 @@ async fn a_known_context_window_adds_a_token_trigger_to_automatic_summaries() {
             "chat.jsonl",
             "--output",
             "jsonl",
-            "--context-window",
-            "40000",
+            "--profile",
+            profile.path(),
         ],
         "continue\n/quit\n",
     )
@@ -2016,19 +1974,36 @@ async fn a_known_context_window_adds_a_token_trigger_to_automatic_summaries() {
 
     // A window far above the context, a window too small to leave room for the recent
     // messages, and summaries switched off: no summary.
-    for args in [
-        vec!["--context-window", "1000000"],
-        vec!["--context-window", "17000"],
-        vec!["--context-window", "40000", "--no-auto-compact"],
+    for (window, compaction) in [
+        (1_000_000, ""),
+        (17000, ""),
+        (40000, "[compaction]\ntriggerBytes = 0\ntriggerTokens = 0"),
     ] {
         let dir = tempfile::tempdir().unwrap();
         seed_context(dir.path(), 120 * 1024).await;
         let server = MockServer::start(vec![Reply::text("answer")]).await;
-        let mut all = vec!["--tools", "", "--session", "chat.jsonl", "--output", "jsonl"];
-        all.extend(args.iter());
+        let profile = window_profile(window, compaction);
+        let all = [
+            "--tools",
+            "",
+            "--session",
+            "chat.jsonl",
+            "--output",
+            "jsonl",
+            "--profile",
+            profile.path(),
+        ];
         let output = run(&server, dir.path(), &all, "continue\n/quit\n").await;
         assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-        assert!(!stdout(&output).contains("compaction_start"), "{args:?}");
-        assert_eq!(server.requests().len(), 1, "{args:?}");
+        assert!(!stdout(&output).contains("compaction_start"), "{window} {compaction:?}");
+        assert_eq!(server.requests().len(), 1, "{window} {compaction:?}");
     }
+}
+
+/// The assistant profile with `window` as the context window of `mock-model`, and `extra`.
+fn window_profile(window: u64, extra: &str) -> ProfileFile {
+    ProfileFile::new(
+        "assistant",
+        &format!("[[models]]\nid = \"mock-model\"\ncontextWindow = {window}\n{extra}"),
+    )
 }

@@ -28,7 +28,7 @@ use crate::ai::ToolDef;
 use crate::ai::sync::lock;
 use crate::extensions::Extension;
 use crate::text::prefix_noted;
-use crate::tools::truncate::{MAX_BYTES, MAX_LINES, truncate_head};
+use crate::tools::truncate::truncate_head_noted;
 
 /// The longest tool name that OpenAI-compatible APIs accept: "a-z, A-Z, 0-9, or contain
 /// underscores and dashes, with a maximum length of 64" (openai-openapi, `FunctionObject`).
@@ -361,7 +361,7 @@ impl McpTool {
             "MCP server {}: {} failed: {}",
             self.server,
             self.remote,
-            bounded(&error.to_string(), "error")
+            truncate_head_noted(&error.to_string(), "error")
         )
     }
 
@@ -460,23 +460,10 @@ async fn give_up(peer: &Peer<RoleClient>, request_id: RequestId, reason: &str) {
         .await;
 }
 
-/// `text` within the bounds of a tool result, with a note naming `what` was cut.
-fn bounded(text: &str, what: &str) -> String {
-    let kept = truncate_head(text, MAX_LINES, MAX_BYTES);
-    let mut content = kept.text;
-    if kept.truncated {
-        content.push_str(&format!(
-            "\n[{what} truncated; showing {} of {} lines]",
-            kept.kept_lines, kept.total_lines
-        ));
-    }
-    content
-}
-
 /// The tool output of a result: its text, bounded, and whether the server reported an error.
 fn output_of(result: &CallToolResult) -> ToolOutput {
     ToolOutput {
-        content: bounded(&render(result), "result"),
+        content: truncate_head_noted(&render(result), "result"),
         // Absent means false.
         is_error: result.is_error == Some(true),
         ..ToolOutput::default()

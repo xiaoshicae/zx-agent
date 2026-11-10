@@ -18,7 +18,6 @@ maxModelRequests = "unlimited"
 timeoutSecs = 0
 
 [extensions]
-redaction = true
 continueOnLength = 0
 
 [context]

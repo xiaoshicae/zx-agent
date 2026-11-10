@@ -5,18 +5,17 @@
 //! `message_end`).
 
 use async_trait::async_trait;
-use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use super::Start;
 use super::accounting::RunAccounting;
 use crate::agent::{
-    AgentEvent, ContextPreparation, EventTarget, LoopConfig, Prepared, QueuedMessage, RunOutcome, SessionHost,
+    AgentEvent, ContextPreparation, EventTarget, Halt, LoopConfig, QueuedMessage, RunOutcome, SessionHost,
 };
 use crate::ai::retry::RetryPolicy;
-use crate::ai::{AssistantMessage, Message, Provider, Request, StopReason, ToolCall, duration_ms};
-use crate::compaction::{self, Summarizer, Trigger};
-use crate::session::{CustomMessage, SessionStore};
+use crate::ai::{AssistantMessage, Message, StopReason, duration_ms};
+use crate::compaction::{self, Summarized, Summarizer, Trigger};
+use crate::session::SessionStore;
 
 /// How a run ends when it stops before a finished answer.
 pub(super) enum RunStop {
@@ -99,10 +98,10 @@ impl<'a> RunHost<'a> {
     /// run cannot start, and the number of entries the session had: the run's answer is
     /// what it adds after them.
     pub(super) async fn open_run(&mut self, begin: Start) -> (Result<Vec<QueuedMessage>, String>, usize) {
-        let spec = &self.config.spec;
+        let config = self.config;
         self.emit(AgentEvent::RunStart {
-            model: spec.model.clone(),
-            provider: spec.provider.name().into(),
+            model: config.model.clone(),
+            provider: config.provider.name().into(),
         })
         .await;
         // Entry IDs remain stable even when hooks omit messages from earlier runs.
@@ -118,20 +117,17 @@ impl<'a> RunHost<'a> {
 
     /// Summarize the old prefix with `trigger`; the pause follows the outcome. When the
     /// report says `Completed`, the session's projection is the new context.
-    pub(super) async fn summarize(&mut self, trigger: Trigger, cancel: &CancellationToken) -> compaction::Report {
+    pub(super) async fn summarize(&mut self, trigger: Trigger, cancel: &CancellationToken) -> Summarized {
         let mut summarizer = Summarizer {
             session: &mut *self.session,
-            provider: self.config.spec.provider.as_ref(),
-            model: &self.config.spec.model,
-            config: self.compaction,
+            config: self.config,
+            compaction: self.compaction,
             target: self.target,
-            hooks: &self.config.hooks,
             attempt: self.attempt,
-            models: &self.config.models,
         };
-        let report = summarizer.run(trigger, cancel).await;
-        self.pause.note(&report);
-        report
+        let summarized = summarizer.run(trigger, cancel).await;
+        self.pause.note(&summarized.report);
+        summarized
     }
 
     /// The input a continuation starts with, after omitting a failed answer at the end; an
@@ -206,11 +202,11 @@ impl<'a> RunHost<'a> {
     ) -> Result<(), RunStop> {
         self.emit(AgentEvent::ContextOverflow { error: error.into() }).await;
         self.omit_failed_attempt(failed_entry).await.map_err(RunStop::Failed)?;
-        let report = self.summarize(Trigger::Overflow, cancel).await;
+        let Summarized { report, unrecorded } = self.summarize(Trigger::Overflow, cancel).await;
         accounting.model_requests = accounting.model_requests.saturating_add(report.requests);
         accounting.usage.add(&report.usage);
-        if let Some(error) = report.persistence_error {
-            return Err(RunStop::Failed(error));
+        if let Some(error) = unrecorded {
+            return Err(RunStop::Failed(format!("{error:#}")));
         }
         if report.outcome == compaction::Outcome::Completed {
             return Ok(());
@@ -253,32 +249,8 @@ impl<'a> RunHost<'a> {
 
 #[async_trait]
 impl SessionHost for RunHost<'_> {
-    fn messages(&self) -> Vec<Message> {
-        self.session.messages()
-    }
-
-    async fn append_message(&mut self, message: &Message) -> anyhow::Result<String> {
-        SessionHost::append_message(&mut *self.session, message).await
-    }
-
-    async fn append_custom_message(&mut self, message: &CustomMessage) -> anyhow::Result<(String, Message)> {
-        SessionHost::append_custom_message(&mut *self.session, message).await
-    }
-
-    async fn append_custom_entry(&mut self, custom_type: &str, data: Value) -> anyhow::Result<String> {
-        SessionHost::append_custom_entry(&mut *self.session, custom_type, data).await
-    }
-
-    async fn edit_context(&mut self, index: usize, replacement: Option<&str>) -> anyhow::Result<String> {
-        SessionHost::edit_context(&mut *self.session, index, replacement).await
-    }
-
-    async fn record_request(&mut self, request: &Request, provider: &dyn Provider) -> anyhow::Result<String> {
-        SessionHost::record_request(&mut *self.session, request, provider).await
-    }
-
-    async fn record_tool_call_started(&mut self, call: &ToolCall) -> anyhow::Result<()> {
-        SessionHost::record_tool_call_started(&mut *self.session, call).await
+    fn session(&mut self) -> &mut SessionStore {
+        self.session
     }
 
     /// Summarize first when automatic summaries are on and the context passes a trigger.
@@ -308,17 +280,15 @@ impl SessionHost for RunHost<'_> {
                  compact manually to retry, start a new session, or disable automatic compaction"
             ));
         }
-        let report = self.summarize(Trigger::Automatic, cancel).await;
-        let result = if let Some(error) = report.persistence_error {
-            Prepared::Unrecorded(anyhow::Error::msg(error))
-        } else if report.outcome == compaction::Outcome::Completed {
-            Prepared::Ready
-        } else {
-            Prepared::Failed(
+        let Summarized { report, unrecorded } = self.summarize(Trigger::Automatic, cancel).await;
+        let result = match unrecorded {
+            Some(error) => Err(Halt::Unrecorded(error)),
+            None if report.outcome == compaction::Outcome::Completed => Ok(()),
+            None => Err(Halt::Failed(
                 report
                     .error
                     .unwrap_or_else(|| "automatic compaction made no progress".into()),
-            )
+            )),
         };
         ContextPreparation {
             requests: report.requests,

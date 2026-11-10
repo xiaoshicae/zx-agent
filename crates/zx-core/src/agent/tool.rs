@@ -212,15 +212,16 @@ pub trait Tool: Send + Sync {
     fn effects(&self) -> Effects {
         Effects::SideEffects
     }
-    /// Rewrite the model's arguments before they are checked, for an older argument shape
-    /// or a mistake models commonly make. Return `None` to keep
-    /// them as they are, which the default does.
+    /// Rewrite the model's arguments before they are checked, to tolerate a mistake models
+    /// commonly make, such as a JSON string where an array belongs or a field at the wrong
+    /// level (pi: `prepareEditArguments`). Return `None` to keep them as they are, which the
+    /// default does.
     ///
     /// The rewritten arguments are what the schema check, `validate_arguments`, the
     /// `before_tool` and `after_tool` hooks (the policy among them), approval and `execute`
-    /// see; `tool_execution_start` still shows the model's. The session keeps the model's original call, so the
-    /// rewrite must depend on nothing but `args`: an audit then derives the arguments that
-    /// ran from the recorded ones. Direct SDK calls skip this step.
+    /// see; `tool_execution_start` still shows the model's. The session keeps the model's
+    /// original call, so the rewrite must depend on nothing but `args`: an audit then derives
+    /// the arguments that ran from the recorded ones. Direct SDK calls skip this step.
     fn prepare_arguments(&self, _args: &Value) -> Option<Value> {
         None
     }

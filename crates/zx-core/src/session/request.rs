@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::ai::{Message, Reasoning, Request, ToolDef, now_ms};
 
-use super::{COMPACTION_VERSION, CompactionStartedEntry, Entry, SessionStore, without_details};
+use super::{CompactionStartedEntry, Entry, SessionStore, without_details};
 
 /// Non-secret request fields. Authentication and transport credentials are not recorded.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -16,7 +16,7 @@ pub struct RequestConfig {
     pub model: String,
     pub tools: Vec<ToolDef>,
     pub max_tokens: Option<u32>,
-    /// Absent unless set, so sessions recorded before it existed read back unchanged.
+    /// The request's reasoning level, absent unless set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<Reasoning>,
     /// The request's prompt cache key, absent unless set.
@@ -88,7 +88,6 @@ impl SessionStore {
             cache_key: request.cache_key.clone(),
             provider_options,
         };
-        self.ensure_format(COMPACTION_VERSION).await?;
         let existing = self.branch_path().into_iter().rev().find_map(|entry| match entry {
             Entry::RequestConfig(entry) => Some(entry),
             _ => None,
@@ -144,10 +143,6 @@ impl SessionStore {
     }
 
     pub(super) fn validate_request_entry(&self, entry: &Entry) -> Result<()> {
-        ensure!(
-            self.format_version >= COMPACTION_VERSION,
-            "request audit requires format v{COMPACTION_VERSION}"
-        );
         match entry {
             Entry::RequestConfig(config) => {
                 ensure!(
@@ -188,7 +183,7 @@ impl SessionStore {
     fn request_messages(&self, source: &RequestSource, parent: Option<&str>) -> Result<Vec<Message>> {
         match source {
             RequestSource::Projection => Ok(self
-                .compacted_projection_at(parent)
+                .projection_at(parent)
                 .into_iter()
                 .map(|item| item.message)
                 .collect()),

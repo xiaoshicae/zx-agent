@@ -148,8 +148,8 @@ pub enum ApprovalResult {
 pub enum Interruption {
     /// The call started and may have changed state; its outcome is unknown.
     Started,
-    /// Whether the call started was not recorded: the session predates start records, or
-    /// the tool is no longer configured. Treated like `Started`.
+    /// Whether the call started is unknown: the tool is no longer configured, so whether it
+    /// has side effects, whose starts are recorded, is unknown too. Treated like `Started`.
     StartUnknown,
     /// A call with side effects that never started, so it had no effect.
     NotStarted,

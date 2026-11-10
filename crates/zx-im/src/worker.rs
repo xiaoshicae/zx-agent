@@ -315,7 +315,7 @@ impl Worker {
         let session = Arc::clone(&open.session);
         let stop = self.stop.clone();
         let text = texts.join("\n\n");
-        let task = tokio::spawn(async move { session.prompt_with_cancel(text, &stop).await });
+        let task = tokio::spawn(async move { session.prompt(text, &stop).await });
         self.phase = Phase::Running {
             task,
             slot,

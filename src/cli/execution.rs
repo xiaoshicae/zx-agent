@@ -18,7 +18,7 @@ pub(super) fn check_session_outside(file: &SessionFile<'_>, cwd: &Path) -> Resul
     if let Some(path) = file.location() {
         anyhow::ensure!(
             !resolve_location(path)?.starts_with(cwd),
-            "--execution container needs the session file outside the working directory, which the container can read: {}; choose a --session path (in chat also --session-dir) outside {}",
+            "container execution needs the session file outside the working directory, which the container can read: {}; choose a --session path (in chat also --session-dir) outside {}",
             path.display(),
             cwd.display()
         );
@@ -51,10 +51,17 @@ fn resolve_location(path: &Path) -> Result<PathBuf> {
 }
 
 /// Where commands run, started when it is a container, and the prompt section describing it.
-pub(super) async fn executor(profile: &Profile, cwd: &Path, label: &str) -> Result<(Arc<dyn Executor>, String)> {
+/// On this machine commands do not see the variables `hidden_env` names; in a container they
+/// see none of the agent's environment.
+pub(super) async fn executor(
+    profile: &Profile,
+    cwd: &Path,
+    label: &str,
+    hidden_env: Vec<String>,
+) -> Result<(Arc<dyn Executor>, String)> {
     match profile.execution {
         Execution::Local => {
-            let local: Arc<dyn Executor> = Arc::new(LocalExecutor);
+            let local: Arc<dyn Executor> = Arc::new(LocalExecutor { hidden_env });
             Ok((local, environment_section(cwd)))
         }
         Execution::Container => {
@@ -63,7 +70,7 @@ pub(super) async fn executor(profile: &Profile, cwd: &Path, label: &str) -> Resu
             let settings = config.clone();
             let container = ContainerExecutor::start(config)
                 .await
-                .context("cannot start the container for --execution container")?;
+                .context("cannot start the container for container execution")?;
             let environment = container_environment_section(&settings, container.platform());
             let container: Arc<dyn Executor> = Arc::new(container);
             Ok((container, environment))

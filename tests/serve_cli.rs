@@ -24,7 +24,7 @@ fn serve(dir: &Path, config: &Path, model: &str) -> Command {
     let mut command = zx_agent();
     command
         .args(["serve", "--config", config.to_str().unwrap(), "--model", "mock"])
-        .args(["--base-url", model, "--max-retries", "0", "--no-context"])
+        .args(["--base-url", model, "--max-retries", "0"])
         .current_dir(dir)
         .env("SLACK_APP_TOKEN", APP_TOKEN)
         .env("SLACK_BOT_TOKEN", BOT_TOKEN)

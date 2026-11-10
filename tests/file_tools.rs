@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use zx_agent::agent::{RunOutcome, Tool, ToolContext};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::executor::{CommandOutput, Executor, LocalExecutor, ShellCommand};
-use zx_agent::tools::{EditFileTool, FileMutationQueue, WriteFileTool, builtin_tools_with};
+use zx_agent::tools::{EditFileTool, FileMutationQueue, WriteFileTool, builtin_tools};
 
 use common::{config, run_prompt};
 
@@ -188,17 +188,17 @@ struct SlowReads;
 #[async_trait]
 impl Executor for SlowReads {
     async fn run(&self, command: &ShellCommand<'_>, cancel: &CancellationToken) -> Result<CommandOutput, String> {
-        LocalExecutor.run(command, cancel).await
+        LocalExecutor::default().run(command, cancel).await
     }
 
     async fn read_file(&self, path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {
-        let bytes = LocalExecutor.read_file(path, max_bytes).await;
+        let bytes = LocalExecutor::default().read_file(path, max_bytes).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
         bytes
     }
 
     async fn write_file(&self, path: &Path, contents: &[u8]) -> Result<(), String> {
-        LocalExecutor.write_file(path, contents).await
+        LocalExecutor::default().write_file(path, contents).await
     }
 }
 
@@ -208,9 +208,9 @@ fn file_tool_config(
     executor: &Arc<dyn Executor>,
 ) -> zx_agent::agent::LoopConfig {
     let names = ["edit_file", "write_file"].map(String::from);
-    let tools = builtin_tools_with(&names, Duration::from_secs(5), &[], executor).unwrap();
+    let tools = builtin_tools(&names, Duration::from_secs(5), executor).unwrap();
     let mut config = config(provider, tools);
-    config.spec.cwd = cwd;
+    config.cwd = cwd;
     config
 }
 
@@ -285,7 +285,7 @@ async fn old_argument_shapes_are_rewritten_before_the_checks() {
         ),
         FauxStep::text("done"),
     ]));
-    let executor: Arc<dyn Executor> = Arc::new(LocalExecutor);
+    let executor: Arc<dyn Executor> = Arc::new(LocalExecutor::default());
     let config = file_tool_config(provider, dir.path().to_path_buf(), &executor);
 
     let (result, _) = run_prompt(&config, &mut Vec::new(), "edit").await;

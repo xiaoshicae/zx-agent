@@ -1,0 +1,8 @@
+# Profile for unattended inspections: the scheduled one (cronjob.yaml) and single tasks run
+# in the resident Pod. The image installs it as
+# /usr/local/share/zx-agent/profiles/troubleshoot.toml; pass that path with --profile. It
+# keeps the built-in unattended profile's tools and limits, and replaces its instructions
+# with ones that ask for a report with fixed sections.
+name = "troubleshoot"
+extends = "unattended"
+instructions = "troubleshoot.md"

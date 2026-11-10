@@ -26,7 +26,7 @@ impl Attempt<'_> {
         let stop = response.stop_reason;
         let disposition = self.disposition(after_tools);
         let remaining = self.remaining_model_requests(result);
-        let messages = self.session.messages();
+        let messages = self.host.session().messages();
         let summary = TurnSummary {
             response: &response,
             messages: &messages,

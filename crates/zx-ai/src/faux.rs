@@ -7,7 +7,7 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use super::provider::{EventReceiver, EventSender, Provider, event_channel, send_event};
-use super::types::{AssistantMessage, ContentBlock, Delta, Request, StopReason, StreamEvent, Usage, now_ms};
+use super::types::{AssistantMessage, ContentBlock, Delta, Request, StopReason, StreamEvent, ToolCall, Usage, now_ms};
 use crate::sync::lock;
 
 /// One scripted response.
@@ -58,11 +58,13 @@ impl FauxStep {
         FauxStep::Respond {
             blocks: calls
                 .into_iter()
-                .map(|(id, name, arguments)| ContentBlock::ToolCall {
-                    id: id.to_string(),
-                    name: name.to_string(),
-                    arguments,
-                    arguments_error: None,
+                .map(|(id, name, arguments)| {
+                    ContentBlock::ToolCall(ToolCall {
+                        id: id.to_string(),
+                        name: name.to_string(),
+                        arguments,
+                        arguments_error: None,
+                    })
                 })
                 .collect(),
             stop: StopReason::ToolUse,
@@ -195,9 +197,9 @@ fn deltas_for(block: &ContentBlock) -> Vec<Delta> {
     match block {
         ContentBlock::Text { text } => vec![Delta::Text { text: text.clone() }],
         ContentBlock::Thinking { thinking, .. } => vec![Delta::Thinking { text: thinking.clone() }],
-        ContentBlock::ToolCall {
+        ContentBlock::ToolCall(ToolCall {
             id, name, arguments, ..
-        } => vec![
+        }) => vec![
             Delta::ToolCallStart {
                 id: id.clone(),
                 name: name.clone(),

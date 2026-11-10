@@ -1,5 +1,5 @@
-//! The executor seam: built-in tools run commands and read files only through their
-//! executor, so another executor can run the same tools elsewhere.
+//! The executor seam: built-in tools run commands and read and write files only through
+//! their executor, so another executor can run the same tools elsewhere.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -10,7 +10,7 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::agent::{ExecutionMode, Tool, ToolContext};
-use zx_agent::executor::{Captured, CommandEnd, CommandOutput, Executor, ShellCommand};
+use zx_agent::executor::{Captured, CommandEnd, CommandOutput, Executor, LocalExecutor, ShellCommand};
 use zx_agent::tools::{BashTool, EditFileTool, GrepTool, ReadFileTool, SearchSettings, WriteFileTool};
 
 /// What a tool asked its executor to do.
@@ -21,11 +21,14 @@ enum Request {
         command: String,
         cwd: PathBuf,
         timeout: Duration,
-        hidden_env: Vec<String>,
     },
     Read {
         path: PathBuf,
         max_bytes: u64,
+    },
+    Write {
+        path: PathBuf,
+        contents: String,
     },
 }
 
@@ -54,7 +57,6 @@ impl Executor for Recorder {
             command: command.command.into(),
             cwd: command.cwd.into(),
             timeout: command.timeout,
-            hidden_env: command.hidden_env.to_vec(),
         });
         Ok(CommandOutput {
             stdout: Captured {
@@ -73,6 +75,14 @@ impl Executor for Recorder {
         });
         Ok(self.file.as_bytes().to_vec())
     }
+
+    async fn write_file(&self, path: &Path, contents: &[u8]) -> Result<(), String> {
+        self.requests.lock().unwrap().push(Request::Write {
+            path: path.into(),
+            contents: String::from_utf8_lossy(contents).into_owned(),
+        });
+        Ok(())
+    }
 }
 
 fn ctx() -> ToolContext {
@@ -83,7 +93,6 @@ fn ctx() -> ToolContext {
 async fn bash_hands_the_whole_command_to_its_executor() {
     let executor = Recorder::new(|| CommandEnd::Exited(0));
     let tool = BashTool {
-        hidden_env: vec!["KEY".into()],
         executor: executor.clone(),
         ..BashTool::default()
     };
@@ -101,7 +110,6 @@ async fn bash_hands_the_whole_command_to_its_executor() {
             command: "ls -l".into(),
             cwd: "/work".into(),
             timeout: Duration::from_secs(7),
-            hidden_env: vec!["KEY".into()],
         }]
     );
 }
@@ -181,6 +189,10 @@ impl Executor for OneAtATime {
     async fn read_file(&self, _path: &Path, _max_bytes: u64) -> Result<Vec<u8>, String> {
         Err("not used".into())
     }
+
+    async fn write_file(&self, _path: &Path, _contents: &[u8]) -> Result<(), String> {
+        Err("not used".into())
+    }
 }
 
 #[test]
@@ -216,13 +228,11 @@ fn tools_declare_the_execution_mode_of_their_executor() {
 }
 
 #[tokio::test]
-async fn grep_hands_its_script_to_its_executor_without_the_hidden_variables() {
+async fn grep_hands_its_script_to_its_executor() {
     let recorder = Recorder::new(|| CommandEnd::Exited(0));
     let grep = GrepTool {
         settings: SearchSettings {
             executor: recorder.clone(),
-            hidden_env: vec!["SECRET_KEY".into()],
-            ..SearchSettings::default()
         },
     };
 
@@ -233,11 +243,7 @@ async fn grep_hands_its_script_to_its_executor_without_the_hidden_variables() {
     let requests = recorder.requests.lock().unwrap();
     let [
         Request::Run {
-            shell,
-            command,
-            cwd,
-            hidden_env,
-            ..
+            shell, command, cwd, ..
         },
     ] = requests.as_slice()
     else {
@@ -245,9 +251,66 @@ async fn grep_hands_its_script_to_its_executor_without_the_hidden_variables() {
     };
     assert_eq!(shell, "sh");
     assert_eq!(cwd, Path::new("/work"));
-    assert_eq!(hidden_env, &["SECRET_KEY".to_string()]);
     // The pattern and the path reach the shell single-quoted.
     assert!(command.contains(r"-- 'it'\''s' 'src'"), "{command}");
+}
+
+/// Cargo sets this variable for every test process, so commands inherit it unless hidden.
+#[cfg(unix)]
+const INHERITED: &str = "CARGO_MANIFEST_DIR";
+
+/// Runs each command on this machine and then prints whether the command's environment held
+/// [`INHERITED`], as `probe[visible]` or `probe[]`.
+#[cfg(unix)]
+struct Probe(LocalExecutor);
+
+#[cfg(unix)]
+#[async_trait]
+impl Executor for Probe {
+    async fn run(&self, command: &ShellCommand<'_>, cancel: &CancellationToken) -> Result<CommandOutput, String> {
+        let probed = format!("{}; echo \"probe[${{{INHERITED}+visible}}]\"", command.command);
+        let probed = ShellCommand {
+            command: &probed,
+            ..*command
+        };
+        self.0.run(&probed, cancel).await
+    }
+
+    async fn read_file(&self, path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {
+        self.0.read_file(path, max_bytes).await
+    }
+
+    async fn write_file(&self, path: &Path, contents: &[u8]) -> Result<(), String> {
+        self.0.write_file(path, contents).await
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn commands_on_this_machine_do_not_see_the_hidden_variables_whichever_tool_runs_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ToolContext::new(dir.path().to_path_buf(), CancellationToken::new());
+    let executor = |hidden_env: &[&str]| -> Arc<dyn Executor> {
+        Arc::new(Probe(LocalExecutor {
+            hidden_env: hidden_env.iter().map(ToString::to_string).collect(),
+        }))
+    };
+    for (hidden_env, probe) in [(&[][..], "probe[visible]"), (&[INHERITED][..], "probe[]")] {
+        let bash = BashTool {
+            executor: executor(hidden_env),
+            ..BashTool::default()
+        };
+        let grep = GrepTool {
+            settings: SearchSettings {
+                executor: executor(hidden_env),
+            },
+        };
+        let ran = bash.execute(json!({"command": "true"}), &ctx).await.unwrap();
+        let searched = grep.execute(json!({"pattern": "absent"}), &ctx).await.unwrap();
+        for output in [ran, searched] {
+            assert!(output.content.lines().any(|line| line == probe), "{}", output.content);
+        }
+    }
 }
 
 #[tokio::test]
@@ -262,24 +325,24 @@ async fn the_file_tools_read_and_write_through_their_executor() {
         ..EditFileTool::default()
     };
 
-    // The recorder reads but, like an executor written before writing existed, cannot write.
-    let error = edit
-        .execute(
-            json!({"path": "f.txt", "edits": [{"oldText": "a", "newText": "c"}]}),
-            &ctx(),
-        )
-        .await
-        .unwrap_err();
+    edit.execute(
+        json!({"path": "f.txt", "edits": [{"oldText": "a", "newText": "c"}]}),
+        &ctx(),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(
-        error,
-        "cannot write /work/f.txt: this executor does not support writing files"
-    );
-    assert_eq!(
         *recorder.requests.lock().unwrap(),
-        [Request::Read {
-            path: PathBuf::from("/work/f.txt"),
-            max_bytes: 10 * 1024 * 1024,
-        }]
+        [
+            Request::Read {
+                path: PathBuf::from("/work/f.txt"),
+                max_bytes: 10 * 1024 * 1024,
+            },
+            Request::Write {
+                path: PathBuf::from("/work/f.txt"),
+                contents: "c\nb\n".into(),
+            }
+        ]
     );
 }

@@ -145,7 +145,9 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
         let running = create_session_dirs(&dir)?;
 
         // Once for the process: every thread's session shares the connections.
-        let shared = cli::Shared::connect(&args.base, Builtin::Assistant, &args.transport).await?;
+        let shared = cli::Shared::connect(&args.base, Builtin::Assistant, &args.transport)
+            .await?
+            .with_hidden_env(hidden_env);
         let factory = Sessions {
             args,
             shared,
@@ -155,7 +157,6 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
                     .approval_timeout_secs
                     .unwrap_or(DEFAULT_APPROVAL_TIMEOUT_SECS),
             ),
-            hidden_env,
             events: telemetry.map_or_else(|| Arc::new(NullSink) as Arc<dyn EventSink>, Telemetry::sink),
         };
         // A wrong model, profile or tool setting would otherwise surface only at the first
@@ -353,13 +354,10 @@ fn entries(entries: &[String], platforms: &HashSet<&str>, field: &str) -> Result
 /// Opens each thread's session like chat does, with approvals in the thread.
 struct Sessions {
     args: ServeArgs,
-    /// The instructions and the MCP servers, shared by every thread's session.
+    /// The MCP servers, secret files and IM credentials, shared by every thread's session.
     shared: cli::Shared,
     dir: PathBuf,
     approval_timeout: Duration,
-    /// Variables holding IM credentials: commands do not inherit them, and their values are
-    /// redacted.
-    hidden_env: Vec<String>,
     /// Where each session's events go: the trace export, or nowhere.
     events: Arc<dyn EventSink>,
 }
@@ -375,9 +373,7 @@ impl Sessions {
             cwd: None,
             file,
             default_profile: Builtin::Assistant,
-            continue_on_length: None,
             shared: &self.shared,
-            hidden_env: &self.hidden_env,
         })
         .await?;
         prepared.require_bash_approval("shell commands require approval in the chat");

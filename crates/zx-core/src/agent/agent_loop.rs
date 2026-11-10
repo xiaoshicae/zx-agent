@@ -6,7 +6,7 @@
 //! host before acting on it and reads the session's projection whenever it needs the context,
 //! so what the model sees is always what the session holds.
 //!
-//! - `config`: what a loop runs with: [`LoopSpec`] and [`LoopConfig`]
+//! - `config`: what a loop runs with: [`LoopConfig`]
 //! - `context`: input, queued messages and context edits, recorded before the loop uses them
 //! - `model`: recording a task request and streaming its response
 //! - `tools`: checking, approving, running and recording the calls of a response
@@ -23,6 +23,7 @@ use std::ops::ControlFlow;
 use std::panic::AssertUnwindSafe;
 use std::time::Instant;
 
+use anyhow::{Context, anyhow};
 use futures::future::join_all;
 use futures::{FutureExt, StreamExt};
 use tokio_util::sync::CancellationToken;
@@ -37,7 +38,7 @@ use super::hooks::{
 use super::policy::PolicyDecision;
 use super::queue::{MessageQueues, Queue, QueueMode, QueuedMessage};
 use super::report::RunOutcome;
-use super::session_host::{Prepared, SessionHost, record_pending_entries};
+use super::session_host::{PERSIST_FAILED, SessionHost, record_pending_entries};
 use super::tool::{
     ActiveTools, Effects, ExecutionMode, MAX_DETAILS_BYTES, MAX_QUEUED_PROGRESS, Tool, ToolContext, ToolOutput,
 };
@@ -46,9 +47,9 @@ use crate::ai::{
     AssistantMessage, Message, ModelMeta, Provider, Reasoning, Request, StopReason, StreamEvent, SystemMessage,
     SystemPrompt, ToolCall, ToolResultMessage, Usage, UserMessageKind, duration_ms, now_ms,
 };
-use crate::session::SessionStore;
+use crate::session::{Entry, RequestSource, SessionStore};
 
-pub use config::{LoopConfig, LoopSpec};
+pub use config::LoopConfig;
 use turn::{AfterTools, PendingInput, TurnResponse};
 
 /// Why an attempt failed, with the response when the provider failed.
@@ -122,8 +123,9 @@ pub struct Attempt<'a> {
     /// 1 for the first attempt of a run, plus one for each retry.
     pub(crate) attempt_number: u32,
     config: &'a LoopConfig,
-    /// Records each step before the loop acts on it, and holds the context.
-    session: &'a mut dyn SessionHost,
+    /// Lends the session that records each step before the loop acts on it, and holds the
+    /// context.
+    host: &'a mut dyn SessionHost,
     approvals: &'a mut ApprovalCache,
     sink: &'a dyn EventSink,
     trace: Trace<'a>,
@@ -186,7 +188,7 @@ impl<'a> Attempt<'a> {
 
     fn with(
         config: &'a LoopConfig,
-        session: &'a mut dyn SessionHost,
+        host: &'a mut dyn SessionHost,
         approvals: &'a mut ApprovalCache,
         sink: &'a dyn EventSink,
         trace: Trace<'a>,
@@ -199,7 +201,7 @@ impl<'a> Attempt<'a> {
             prior_answer_continuations: 0,
             attempt_number: 1,
             config,
-            session,
+            host,
             approvals,
             sink,
             trace,
@@ -308,9 +310,9 @@ impl<'a> Attempt<'a> {
     /// Validate the specification and record the system prompt's changes and the input.
     async fn initialize(&mut self, prompts: Vec<QueuedMessage>, result: &mut AttemptResult) -> Result<(), Halt> {
         let config = self.config;
-        self.validators = config.spec.validators().map_err(Halt::Failed)?;
+        self.validators = config.validators().map_err(Halt::Failed)?;
         self.start_turn(result).await;
-        let changes = SystemPrompt::from_transcript(&self.session.messages()).diff(&config.spec.system_prompt);
+        let changes = SystemPrompt::from_transcript(&self.host.session().messages()).diff(&config.system_prompt);
         if !changes.is_empty() {
             self.append(Message::System(SystemMessage {
                 sections: changes,
@@ -358,7 +360,7 @@ impl<'a> Attempt<'a> {
             let edits = self
                 .config
                 .hooks
-                .transform_context(&self.session.messages(), self.trace.context())
+                .transform_context(&self.host.session().messages(), self.trace.context())
                 .await
                 .map_err(|error| Halt::Failed(self.report_hook_failure(error)))?;
             for edit in edits {
@@ -470,7 +472,7 @@ impl<'a> Attempt<'a> {
 }
 
 /// Why the loop stopped before the model finished.
-enum Halt {
+pub(crate) enum Halt {
     /// A hook or context preparation failed; if the run was cancelled, it was aborted.
     Failed(String),
     /// The session could not record a step, so the loop must not act on it.

@@ -97,18 +97,9 @@ async fn requests_of_the_copied_branch_replay_from_the_fork() {
 }
 
 #[tokio::test]
-async fn a_branch_is_copied_only_into_an_empty_session_of_the_same_format() {
-    let mut source = SessionStore::in_memory(SessionHeader { version: 3, ..header() });
+async fn a_branch_is_copied_only_into_an_empty_session() {
+    let mut source = SessionStore::in_memory(header());
     let leaf = source.append_message(Message::user("q")).await.unwrap();
-
-    let mut newer = SessionStore::in_memory(header());
-    let error = newer.copy_branch(&source, &leaf).await.unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains(&format!("format version {SESSION_VERSION} but its source 3")),
-        "{error}"
-    );
 
     let mut busy = SessionStore::in_memory(source.fork_header(std::path::Path::new("."), "m"));
     busy.append_message(Message::user("already here")).await.unwrap();
@@ -118,10 +109,10 @@ async fn a_branch_is_copied_only_into_an_empty_session_of_the_same_format() {
     let mut fresh = SessionStore::in_memory(source.fork_header(std::path::Path::new("."), "m"));
     let error = fresh.copy_branch(&source, "missing").await.unwrap_err();
     assert!(error.to_string().contains("entry missing not found"), "{error}");
-    assert!(fresh.entries().is_empty() && newer.entries().is_empty());
+    assert!(fresh.entries().is_empty());
     // An in-memory source has no file to name.
     assert_eq!(fresh.header().parent_session, None);
-    assert_eq!(fresh.header().version, 3);
+    assert_eq!(fresh.header().version, SESSION_VERSION);
 }
 
 #[test]
@@ -129,7 +120,7 @@ fn headers_without_a_parent_keep_their_format() {
     let plain = header();
     let json = serde_json::to_value(&plain).unwrap();
     assert!(json.get("parentSession").is_none(), "{json}");
-    // Files written before forks existed have no parentSession.
+    // A header without parentSession reads back without a parent.
     let old: SessionHeader = serde_json::from_value(json).unwrap();
     assert_eq!(old.parent_session, None);
     let forked = SessionHeader {

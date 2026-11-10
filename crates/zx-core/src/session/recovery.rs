@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ai::{Message, StopReason, ToolCall, now_ms};
 
-use super::{Entry, START_RECORDS_VERSION, SessionStore};
+use super::{Entry, SessionStore};
 
 /// A tool call with side effects that is about to run.
 ///
@@ -29,12 +29,9 @@ pub struct ToolCallStartedEntry {
 pub enum StartRecord {
     /// A `tool_call_started` entry exists: the call began and may have taken effect.
     Present,
-    /// No entry, although the session recorded starts when the call was issued (format v4
-    /// or later). A call with side effects therefore never began. Read-only calls are never
-    /// recorded, so for them this says nothing.
+    /// No entry: a call with side effects never began. Read-only calls are never recorded,
+    /// so for them this says nothing.
     Absent,
-    /// The call was issued before the session recorded starts (format before v4).
-    Unavailable,
     /// The answer that issued the call ended with `Error` or `Aborted`: the loop runs no
     /// call of such an answer, so this one never began.
     NeverRun,
@@ -51,23 +48,18 @@ pub struct InterruptedToolCall {
 }
 
 impl SessionStore {
-    /// Record that a call with side effects is about to run. Older sessions get a format
-    /// upgrade to v4 first. Fails without writing anything if the call is not on the current
-    /// branch, has another name, already has a result, or has already started.
+    /// Record that a call with side effects is about to run. Fails without writing anything
+    /// if the call is not on the current branch, has another name, already has a result, or
+    /// has already started.
     pub async fn append_tool_call_started(&mut self, tool_call_id: &str, tool_name: &str) -> Result<String> {
-        let mut entry = ToolCallStartedEntry {
-            id: String::new(),
+        self.append(Entry::ToolCallStarted(ToolCallStartedEntry {
+            id: self.new_id(),
             parent_id: self.leaf.clone(),
             timestamp: now_ms(),
             tool_call_id: tool_call_id.into(),
             tool_name: tool_name.into(),
-        };
-        // Validate the reference before even appending an upgrade.
-        self.validate_tool_call_start(&entry)?;
-        self.ensure_format(START_RECORDS_VERSION).await?;
-        entry.parent_id = self.leaf.clone();
-        entry.id = self.new_id();
-        self.append(Entry::ToolCallStarted(entry)).await
+        }))
+        .await
     }
 
     /// The calls of the branch's last assistant message that have no result, in call order.
@@ -109,8 +101,6 @@ impl SessionStore {
                 started.insert(start.tool_call_id.as_str());
             }
         }
-        // Upgrades after the answer count: a run upgrades just before its first start record.
-        let records_starts = format_version_on(&path, self.header.version) >= START_RECORDS_VERSION;
         answer
             .tool_calls()
             .into_iter()
@@ -120,10 +110,8 @@ impl SessionStore {
                     StartRecord::NeverRun
                 } else if started.contains(call.id.as_str()) {
                     StartRecord::Present
-                } else if records_starts {
-                    StartRecord::Absent
                 } else {
-                    StartRecord::Unavailable
+                    StartRecord::Absent
                 };
                 InterruptedToolCall {
                     tool_call_id: call.id,
@@ -179,31 +167,18 @@ fn issued_call(entry: &Entry, id: &str) -> Option<ToolCall> {
     }
 }
 
-/// The format in effect at the end of `path`: the header version raised by upgrades on it.
-fn format_version_on(path: &[&Entry], header_version: u32) -> u32 {
-    path.iter().fold(header_version, |version, entry| {
-        if let Entry::FormatUpgrade(upgrade) = entry {
-            version.max(upgrade.version)
-        } else {
-            version
-        }
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
-    use serde_json::{Value, json};
+    use serde_json::json;
 
     use super::*;
-    use crate::ai::{AssistantMessage, ContentBlock, ToolResultMessage};
+    use crate::ai::{AssistantMessage, ContentBlock, ToolCall, ToolResultMessage};
     use crate::session::SessionHeader;
 
-    fn store(version: u32) -> SessionStore {
-        let mut header = SessionHeader::new(Path::new("."), "m");
-        header.version = version;
-        SessionStore::in_memory(header)
+    fn store() -> SessionStore {
+        SessionStore::in_memory(SessionHeader::new(Path::new("."), "m"))
     }
 
     fn answer(stop_reason: StopReason, calls: &[(&str, &str)]) -> Message {
@@ -211,11 +186,13 @@ mod tests {
         answer.error_message = None;
         answer.content = calls
             .iter()
-            .map(|(id, name)| ContentBlock::ToolCall {
-                id: (*id).into(),
-                name: (*name).into(),
-                arguments: json!({}),
-                arguments_error: None,
+            .map(|(id, name)| {
+                ContentBlock::ToolCall(ToolCall {
+                    id: (*id).into(),
+                    name: (*name).into(),
+                    arguments: json!({}),
+                    arguments_error: None,
+                })
             })
             .collect();
         Message::Assistant(answer)
@@ -242,17 +219,9 @@ mod tests {
             .collect()
     }
 
-    fn kinds(store: &SessionStore) -> Vec<Value> {
-        store
-            .entries()
-            .iter()
-            .map(|entry| serde_json::to_value(entry).unwrap()["type"].clone())
-            .collect()
-    }
-
     #[tokio::test]
     async fn start_records_use_snake_case_tags_and_camel_case_fields() {
-        let mut store = store(4);
+        let mut store = store();
         let issuer = store
             .append_message(answer(StopReason::ToolUse, &[("c1", "bash")]))
             .await
@@ -268,7 +237,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_start_must_name_an_unfinished_call_issued_on_the_branch() {
-        let mut store = store(4);
+        let mut store = store();
         store
             .append_message(answer(StopReason::ToolUse, &[("c1", "bash"), ("c2", "bash")]))
             .await
@@ -285,7 +254,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_reused_call_id_refers_to_the_latest_answer() {
-        let mut store = store(4);
+        let mut store = store();
         store
             .append_message(answer(StopReason::ToolUse, &[("call_0", "bash")]))
             .await
@@ -301,48 +270,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn older_sessions_upgrade_to_v4_before_the_first_start_record() {
-        let mut store = store(3);
-        store
-            .append_message(answer(StopReason::ToolUse, &[("c1", "bash")]))
-            .await
-            .unwrap();
-        assert!(store.append_tool_call_started("c9", "bash").await.is_err());
-        assert_eq!(
-            store.format_version(),
-            3,
-            "a rejected start must not upgrade the session"
-        );
-        store.append_tool_call_started("c1", "bash").await.unwrap();
-        assert_eq!(kinds(&store), ["message", "format_upgrade", "tool_call_started"]);
-        assert_eq!(store.format_version(), 4);
-        assert_eq!(store.header().version, 3);
-    }
-
-    #[tokio::test]
-    async fn opening_a_start_record_requires_format_v4() {
-        let dir = tempfile::tempdir().unwrap();
-        for (version, opens) in [(3, false), (4, true)] {
-            let path = dir.path().join(format!("v{version}.jsonl"));
-            let mut header = SessionHeader::new(Path::new("."), "m");
-            header.version = version;
-            let mut store = SessionStore::create(&path, header).unwrap();
-            let issuer = store
-                .append_message(answer(StopReason::ToolUse, &[("c1", "bash")]))
-                .await
-                .unwrap();
-            drop(store);
-            let start = json!({"type":"tool_call_started","id":"s1","parentId":issuer,"timestamp":1,"toolCallId":"c1","toolName":"bash"});
-            let mut content = std::fs::read_to_string(&path).unwrap();
-            content.push_str(&format!("{start}\n"));
-            std::fs::write(&path, content).unwrap();
-            assert_eq!(SessionStore::open(&path).is_ok(), opens, "v{version}");
-        }
-    }
-
-    #[tokio::test]
     async fn interrupted_calls_are_the_unanswered_calls_of_the_last_answer_in_call_order() {
-        let mut store = store(4);
+        let mut store = store();
         store.append_message(Message::user("go")).await.unwrap();
         store
             .append_message(answer(
@@ -361,30 +290,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn starts_are_unavailable_until_the_session_records_them() {
-        let mut store = store(3);
-        store
-            .append_message(answer(StopReason::ToolUse, &[("c1", "bash"), ("c2", "bash")]))
-            .await
-            .unwrap();
-        assert_eq!(
-            starts(&store),
-            [
-                ("c1".into(), StartRecord::Unavailable),
-                ("c2".into(), StartRecord::Unavailable)
-            ]
-        );
-        // The upgrade comes after the answer, right before the run's first start record.
-        store.append_tool_call_started("c1", "bash").await.unwrap();
-        assert_eq!(
-            starts(&store),
-            [("c1".into(), StartRecord::Present), ("c2".into(), StartRecord::Absent)]
-        );
-    }
-
-    #[tokio::test]
     async fn calls_followed_by_other_messages_or_off_the_branch_are_not_interrupted() {
-        let mut store = store(4);
+        let mut store = store();
         let question = store.append_message(Message::user("go")).await.unwrap();
         store
             .append_message(answer(StopReason::ToolUse, &[("c1", "bash")]))
@@ -399,7 +306,7 @@ mod tests {
     #[tokio::test]
     async fn failed_and_cancelled_answers_never_ran_their_calls() {
         for stop_reason in [StopReason::Error, StopReason::Aborted] {
-            let mut store = store(4);
+            let mut store = store();
             store
                 .append_message(answer(stop_reason, &[("c1", "bash")]))
                 .await
@@ -418,7 +325,7 @@ mod tests {
 
     #[tokio::test]
     async fn context_edits_hide_answers_but_not_recorded_results() {
-        let mut omitted = store(4);
+        let mut omitted = store();
         let issuer = omitted
             .append_message(answer(StopReason::ToolUse, &[("c1", "bash")]))
             .await
@@ -426,7 +333,7 @@ mod tests {
         omitted.append_context_edit(&issuer, None).await.unwrap();
         assert!(omitted.interrupted_tool_calls().is_empty());
 
-        let mut hidden = store(4);
+        let mut hidden = store();
         hidden
             .append_message(answer(StopReason::ToolUse, &[("c1", "bash")]))
             .await
