@@ -13,7 +13,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 
 use common::mock_server::{MockServer, Reply};
-use common::{ProfileFile, session_dir, stderr, zx_agent};
+use common::{session_dir, stderr, write_agent, zx_agent};
 
 const KEY_VAR: &str = "ZX_ACP_TEST_KEY";
 
@@ -405,8 +405,13 @@ async fn a_file_write_shows_as_a_diff_and_an_auto_approved_command_asks_nobody()
         Reply::text("written"),
     ])
     .await;
-    let profile = ProfileFile::new("assistant", "[rules]\nautoApprove = [\"pwd\"]");
-    let mut acp = Acp::start(&server, dir.path(), &["--profile", profile.path()]).await;
+    let home = tempfile::tempdir().unwrap();
+    write_agent(
+        &home.path().join(".zx-agent"),
+        "assistant",
+        "[rules]\nautoApprove = [\"pwd\"]",
+    );
+    let mut acp = Acp::start_in(&server, dir.path(), &[], Some(home.path())).await;
     let session = acp.session(dir.path()).await;
     acp.write(json!({"jsonrpc": "2.0", "id": 3, "method": "session/prompt",
         "params": {"sessionId": session, "prompt": [{"type": "text", "text": "write"}]}}))

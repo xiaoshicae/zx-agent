@@ -16,7 +16,7 @@ const ACTIVITY_TIME_FORMAT: &str = "%Y-%m-%d %H:%M";
 
 /// What a conversation runs on, shown at startup and by `/status`.
 pub(super) struct About {
-    pub(super) profile: String,
+    pub(super) agent: String,
     pub(super) tools: Vec<String>,
     pub(super) auto_approve: Vec<String>,
     pub(super) cwd: PathBuf,
@@ -36,7 +36,7 @@ impl About {
     /// What `prepared` runs on, taken from it before it becomes a session.
     pub(super) fn of(prepared: &mut PreparedSession) -> Self {
         Self {
-            profile: std::mem::take(&mut prepared.profile_name),
+            agent: std::mem::take(&mut prepared.agent_name),
             tools: prepared
                 .config
                 .tools
@@ -66,12 +66,12 @@ fn session_text(about: &About) -> String {
         .map_or_else(|| "memory".to_string(), |path| path.display().to_string())
 }
 
-/// `model= · profile= · session= · cwd=` after `prefix`, for the banner and `/status`.
+/// `model= · agent= · session= · cwd=` after `prefix`, for the banner and `/status`.
 fn about_line(prefix: &str, model: &str, about: &About) -> String {
     format!(
-        "{prefix} model={} · profile={} · session={} · cwd={}",
+        "{prefix} model={} · agent={} · session={} · cwd={}",
         visible(model),
-        visible(&about.profile),
+        visible(&about.agent),
         visible(&session_text(about)),
         visible(&about.cwd.display().to_string())
     )

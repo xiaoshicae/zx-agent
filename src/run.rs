@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 use zx_agent::AgentSession;
 use zx_agent::agent::{AgentEvent, Event, EventSink};
 use zx_agent::ai::Message;
-use zx_agent::profile::Builtin;
+use zx_agent::config::Builtin;
 use zx_agent::runner::{RunOutcome, RunReport};
 
 use crate::cli::{self, OutputMode, RunArgs};
@@ -68,7 +68,7 @@ fn read_prompt(arg: &str) -> Result<String> {
     Ok(prompt)
 }
 
-/// Assemble an unattended session from the selected profile, `unattended` unless another is
+/// Assemble an unattended session from the selected agent, `unattended` unless another is
 /// given, without exposing interactive choices to the kernel.
 async fn build_session(args: &RunArgs) -> Result<AgentSession> {
     let shared = cli::Shared::connect(&args.base, &args.request, &args.transport, Builtin::Unattended).await?;
@@ -80,7 +80,7 @@ async fn build_session(args: &RunArgs) -> Result<AgentSession> {
         model: &shared.settings.model,
         cwd: None,
         file: SessionFile::from_path(args.request.session.as_deref()),
-        default_profile: Builtin::Unattended,
+        agent: Builtin::Unattended,
         shared: &shared,
     })
     .await?;

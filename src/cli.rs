@@ -254,7 +254,7 @@ pub(crate) struct BaseArgs {
     #[arg(long)]
     pub(crate) cwd: Option<PathBuf>,
 
-    /// Enabled tools, comma-separated. Defaults to the selected profile; explicit values replace it.
+    /// Enabled tools, comma-separated. Defaults to the agent's; explicit values replace them.
     #[arg(long, value_delimiter = ',')]
     pub(crate) tools: Option<Vec<String>>,
 
@@ -265,10 +265,6 @@ pub(crate) struct BaseArgs {
     /// comma-separated ZX_SECRET_FILES.
     #[arg(long = "secret-file", value_delimiter = ',')]
     pub(crate) secret_files: Vec<PathBuf>,
-
-    /// Embedded profile name (unattended, assistant) or path to a TOML file.
-    #[arg(long)]
-    pub(crate) profile: Option<String>,
 }
 
 #[derive(Args)]
@@ -303,29 +299,27 @@ fn parse_header(text: &str) -> Result<(String, String), String> {
     Ok((name.to_string(), value.trim().to_string()))
 }
 
-/// Limits per prompt; `None` keeps the selected profile's value. A run is one prompt.
+/// Limits per prompt; `None` keeps the agent's value. A run is one prompt.
 #[derive(Args)]
 pub(crate) struct BudgetArgs {
-    /// Maximum model requests per prompt, failed attempts included. Defaults to the selected
-    /// profile.
+    /// Maximum model requests per prompt, failed attempts included. Defaults to the agent's.
     #[arg(long)]
     pub(crate) max_model_requests: Option<u32>,
 
-    /// Wall-clock limit per prompt, in seconds. 0 disables it. Defaults to the selected
-    /// profile.
+    /// Wall-clock limit per prompt, in seconds. 0 disables it. Defaults to the agent's.
     #[arg(long)]
     pub(crate) timeout_secs: Option<u64>,
 
     /// Tokens per prompt: input plus output of its model requests, as the provider reports
     /// them. Checked before each request, so the last one may go over; a run then exits 7.
-    /// 0 disables it. Defaults to the selected profile.
+    /// 0 disables it. Defaults to the agent's.
     #[arg(long)]
     pub(crate) token_budget: Option<u64>,
 
-    /// Spending per prompt, in the unit of the prices in the profile's [[models]] (any
+    /// Spending per prompt, in the unit of the prices in [[models]] of config.toml (any
     /// currency, as long as every price uses it): the cost of its model requests by those
     /// prices. Checked before each request, so the last one may go over; a run then exits 8.
-    /// The model must have prices. 0 disables it. Defaults to the selected profile.
+    /// The model must have prices. 0 disables it. Defaults to the agent's.
     #[arg(long, value_parser = parse_cost_budget)]
     pub(crate) cost_budget: Option<f64>,
 }

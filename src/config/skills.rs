@@ -15,10 +15,10 @@ use crate::tools::truncate::{MAX_BYTES, MAX_LINES, truncate_head};
 
 use super::MAX_FILE_BYTES;
 
-/// Name exposed to the model when a profile enables skill loading.
+/// Name exposed to the model when an agent enables skill loading.
 pub const TOOL_NAME: &str = "read_skill";
 
-/// Metadata supplied by a profile. `path` is relative to that TOML file until resolved.
+/// Metadata supplied by an agent. `path` is relative to the agent file until resolved.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Skill {

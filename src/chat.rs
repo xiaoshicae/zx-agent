@@ -35,8 +35,8 @@ use zx_agent::AgentSession;
 use zx_agent::agent::{EventSink, QueueMode, QueuedMessage};
 use zx_agent::agent_session::{ModelRef, Subscription};
 use zx_agent::ai::{Provider, Reasoning};
+use zx_agent::config::Builtin;
 use zx_agent::otel::Telemetry;
-use zx_agent::profile::Builtin;
 
 use crate::cli::{self, ChatArgs, ModeSettings, SessionOptions};
 use crate::process::{EXIT_ABORTED, EXIT_COMPLETED, with_telemetry};
@@ -104,7 +104,7 @@ impl Chat {
             model,
             cwd: None,
             file,
-            default_profile: Builtin::Assistant,
+            agent: Builtin::Assistant,
             shared: &settings.shared,
         })
         .await?;

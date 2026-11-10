@@ -13,7 +13,7 @@ use tokio::process::Command;
 
 use common::http::{Request, read_request};
 use common::mock_server::{MockServer, Reply};
-use common::{ConfigHome, ProfileFile, json_lines, stderr, stdout, zx_agent};
+use common::{AgentHome, json_lines, stderr, stdout, zx_agent};
 
 /// An answer that would set the terminal title if a terminal ran it.
 const TITLE_ANSWER: &str = "before\u{1b}]0;CANARY\u{7}after";
@@ -502,7 +502,7 @@ async fn a_zero_timeout_is_rejected_before_any_request() {
     assert!(server.requests().is_empty());
 }
 
-/// A cut-off answer, which `run` asks the model to continue (the unattended profile's
+/// A cut-off answer, which `run` asks the model to continue (the unattended agent's
 /// `continueOnLength` is 1),
 /// then the rest. Each answer of the fake service reports 12 tokens: 10 in, 2 out.
 async fn two_answers() -> MockServer {
@@ -548,15 +548,13 @@ async fn the_last_request_may_take_a_run_over_its_token_budget() {
 }
 
 #[tokio::test]
-async fn a_profile_sets_the_token_budget_and_zero_on_the_command_line_disables_it() {
+async fn the_agent_sets_the_token_budget_and_zero_on_the_command_line_disables_it() {
     let dir = tempfile::tempdir().unwrap();
-    let profile = dir.path().join("budget.toml");
-    std::fs::write(&profile, "[limits]\ntokenBudget = 12\n").unwrap();
-    let profile = profile.to_str().unwrap();
+    let home = AgentHome::agent("unattended", "[limits]\ntokenBudget = 12\n");
 
     let limited = two_answers().await;
     let output = run(&limited, dir.path())
-        .args(["--profile", profile])
+        .env("ZX_AGENT_HOME", home.path())
         .output()
         .await
         .unwrap();
@@ -565,7 +563,8 @@ async fn a_profile_sets_the_token_budget_and_zero_on_the_command_line_disables_i
 
     let unlimited = two_answers().await;
     let output = run(&unlimited, dir.path())
-        .args(["--profile", profile, "--token-budget", "0"])
+        .args(["--token-budget", "0"])
+        .env("ZX_AGENT_HOME", home.path())
         .output()
         .await
         .unwrap();
@@ -575,8 +574,8 @@ async fn a_profile_sets_the_token_budget_and_zero_on_the_command_line_disables_i
 
 /// A config.toml whose model `mock` costs 0.01 per answer of the fake service (10 input
 /// tokens at 1000 per million; output free). The unit is whatever the prices use, such as CNY.
-fn priced_config() -> ConfigHome {
-    ConfigHome::new("[[models]]\nid = \"mock\"\ncost = { input = 1000.0, output = 0.0 }\n")
+fn priced_config() -> AgentHome {
+    AgentHome::new("[[models]]\nid = \"mock\"\ncost = { input = 1000.0, output = 0.0 }\n")
 }
 
 #[tokio::test]
@@ -635,11 +634,12 @@ async fn a_negative_cost_budget_is_rejected() {
 async fn run_with_a_denied_command(extra: &[&str]) -> std::process::Output {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::bash("c", "echo hi"), Reply::text("done")]).await;
-    let profile = ProfileFile::new("unattended", "[rules]\nallow = [\"ls\"]");
+    let home = AgentHome::agent("unattended", "[rules]\nallow = [\"ls\"]");
     zx_agent()
         .args(["run", "--model", "mock", "--base-url", &server.base_url])
         .args(["--max-retries", "0", "--api-key-env", "ZX_RUN_CLI_TEST_KEY"])
-        .args(["--tools", "bash", "--profile", profile.path()])
+        .args(["--tools", "bash"])
+        .env("ZX_AGENT_HOME", home.path())
         .args(extra)
         .arg("go")
         .current_dir(dir.path())

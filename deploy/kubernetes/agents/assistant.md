@@ -1,8 +1,10 @@
-# Profile for conversations in the resident Pod: chat (kubectl exec) and serve. The image
-# installs it as /usr/local/share/zx-agent/profiles/kubernetes.toml; pass that path with
-# --profile. It adds the read-only kubectl commands to the assistant's commands that run
-# without asking, and limits their options. zx-agent itself knows nothing about kubectl.
-name = "kubernetes"
++++
+# Agent for conversations in the resident Pod: chat (kubectl exec) and serve. The
+# kustomization puts it in the ConfigMap zx-agent-agents, mounted at /data/.zx-agent/agents,
+# where it replaces the built-in assistant. It adds the read-only kubectl commands to the
+# assistant's commands that run without asking, and limits their options. zx-agent itself
+# knows nothing about kubectl. The instructions are the assistant's: the body below the front
+# matter is empty.
 extends = "assistant"
 # The assistant's tools without edit_file and write_file: the Pod is for looking at
 # clusters, not for changing files.
@@ -89,3 +91,4 @@ long = [
 # -n, -o, -l, -L and -c take a value; -A, -p and -R stand alone.
 shortWithValue = ["n", "o", "l", "L", "c"]
 shortFlags = ["A", "p", "R"]
++++

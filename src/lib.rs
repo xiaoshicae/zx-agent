@@ -8,8 +8,8 @@
 //! - [`session`]: append-only JSONL session tree and its projection (pi: SessionManager)
 //! - [`agent_session`]: shared prompts, cancellation, subscriptions and model switching
 //! - [`runner`]: exclusive run ownership, retries, limits and persistence
-//! - [`config`]: `config.toml`, the environment: the model, its provider and where commands run
-//! - [`profile`]: scenarios as files: instructions, tools, rules and limits
+//! - [`config`]: `config.toml`, the environment: the model, its provider and where commands
+//!   run; and the agents, as files: instructions, tools, permissions and limits
 //! - [`prompt`]: system prompt assembly and the generated environment section
 //! - [`tools`]: built-in tools
 //! - [`executor`]: where built-in tools run commands and read or write files
@@ -55,4 +55,3 @@ pub mod im {
 
 pub mod config;
 pub mod otel;
-pub mod profile;

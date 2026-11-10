@@ -17,6 +17,7 @@ use zx_agent::AgentSession;
 use zx_agent::agent::Interaction;
 use zx_agent::agent::{EventSink, NullSink};
 use zx_agent::ai::now_ms;
+use zx_agent::config::Builtin;
 use zx_agent::im::feishu::{FeishuChannel, FeishuConfig};
 use zx_agent::im::slack::{SlackChannel, SlackConfig};
 use zx_agent::im::{
@@ -24,7 +25,6 @@ use zx_agent::im::{
     ServerSink, SessionFactory, SessionKey, StatusFiles, UserId,
 };
 use zx_agent::otel::Telemetry;
-use zx_agent::profile::Builtin;
 
 use crate::cli::{self, ServeArgs, SessionOptions, env_value};
 use crate::process::{EXIT_COMPLETED, EXIT_ERROR, EXIT_USAGE, spawn_signal_handler, with_telemetry, write_line};
@@ -159,7 +159,7 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
             ),
             events: telemetry.map_or_else(|| Arc::new(NullSink) as Arc<dyn EventSink>, Telemetry::sink),
         };
-        // A wrong model, profile or tool setting would otherwise surface only at the first
+        // A wrong model, agent or tool setting would otherwise surface only at the first
         // message, in the chat; check it once with a session that is never stored.
         factory
             .prepare(SessionFile::Memory)
@@ -372,7 +372,7 @@ impl Sessions {
             model: &self.shared.settings.model,
             cwd: None,
             file,
-            default_profile: Builtin::Assistant,
+            agent: Builtin::Assistant,
             shared: &self.shared,
         })
         .await?;

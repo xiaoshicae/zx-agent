@@ -11,7 +11,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use common::mock_server::{MockServer, Reply};
-use common::{ProfileFile, json_lines, stderr, stdout, zx_agent};
+use common::{AgentHome, json_lines, stderr, stdout, zx_agent};
 
 /// The variable the program reads the API key from, and the fake key it holds.
 const KEY_VAR: &str = "ZX_CLI_TEST_KEY";
@@ -184,8 +184,13 @@ async fn sigterm_exits_5() {
 async fn a_truncated_answer_is_printed_and_exits_6() {
     let server = MockServer::start(vec![Reply::truncated("Part")]).await;
 
-    let profile = ProfileFile::new("unattended", "[extensions]\ncontinueOnLength = 0");
-    let output = run(&server.base_url, &["--tools", "", "--profile", profile.path(), "check"]).await;
+    let home = AgentHome::agent("unattended", "continueOnLength = 0");
+    let dir = tempfile::tempdir().unwrap();
+    let output = run_against(&server.base_url, dir.path(), &["--tools", "", "check"])
+        .env("ZX_AGENT_HOME", home.path())
+        .output()
+        .await
+        .unwrap();
 
     assert_eq!(output.status.code(), Some(6), "{}", stderr(&output));
     assert_eq!(stdout(&output), "Part\n");
@@ -257,12 +262,13 @@ async fn bash_commands_cannot_read_the_api_key() {
 async fn the_system_prompt_states_the_environment_and_command_policy() {
     let server = MockServer::start(vec![Reply::text("ok")]).await;
 
-    let profile = ProfileFile::new("unattended", "[rules]\nallow = [\"grep\"]");
-    run(
-        &server.base_url,
-        &["--tools", "bash", "--profile", profile.path(), "check"],
-    )
-    .await;
+    let home = AgentHome::agent("unattended", "[rules]\nallow = [\"grep\"]");
+    let dir = tempfile::tempdir().unwrap();
+    run_against(&server.base_url, dir.path(), &["--tools", "bash", "check"])
+        .env("ZX_AGENT_HOME", home.path())
+        .output()
+        .await
+        .unwrap();
 
     let system = sent_messages(&server, 0)[0]["content"].as_str().unwrap().to_string();
     assert!(system.contains("<environment>\nOS: "), "{system}");

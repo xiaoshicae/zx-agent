@@ -5,6 +5,8 @@
 //! `ZX_BASE_URL`; clap reads both), then config.toml, then the built-in default. The two
 //! switches `--fill-missing-reasoning` and `--prompt-cache-key` only turn a setting on.
 
+use std::path::PathBuf;
+
 use anyhow::{Context, Result};
 
 use zx_agent::ai::Reasoning;
@@ -31,21 +33,24 @@ pub(crate) struct Settings {
     /// The rest of config.toml: where commands run, the MCP servers, the models and where
     /// long tool results go.
     pub(super) config: Config,
+    /// The zx-agent home directory, whose `agents/` holds the user's agents.
+    pub(super) home: Option<PathBuf>,
 }
 
 impl Settings {
     /// Read config.toml from the zx-agent home and lay the command line over it. A process
     /// without a model anywhere is a configuration error.
     pub(super) fn resolve(base: &BaseArgs, request: &RequestArgs) -> Result<Self> {
-        let config = match config::home()? {
+        let home = config::home()?;
+        let config = match &home {
             Some(home) => Config::load(&home.join("config.toml"))?,
             None => Config::default(),
         };
-        Self::over(base, request, config)
+        Self::over(base, request, config, home)
     }
 
-    /// The command line over `config`.
-    fn over(base: &BaseArgs, request: &RequestArgs, config: Config) -> Result<Self> {
+    /// The command line over `config`, read from `home`.
+    fn over(base: &BaseArgs, request: &RequestArgs, config: Config, home: Option<PathBuf>) -> Result<Self> {
         let model = base.model.clone().or_else(|| config.model.clone()).with_context(|| {
             let place = config
                 .path
@@ -76,14 +81,13 @@ impl Settings {
             fill_missing_reasoning: request.fill_missing_reasoning || provider.fill_missing_reasoning,
             prompt_cache_key: request.prompt_cache_key || provider.prompt_cache_key,
             config,
+            home,
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use clap::Parser;
     use zx_agent::config::ProviderSettings;
 
@@ -108,7 +112,7 @@ mod tests {
 
     fn settings(args: &[&str], config: Config) -> Result<Settings> {
         let run = run_args(args);
-        Settings::over(&run.base, &run.request, config)
+        Settings::over(&run.base, &run.request, config, None)
     }
 
     /// A config.toml that sets every key the command line also takes.

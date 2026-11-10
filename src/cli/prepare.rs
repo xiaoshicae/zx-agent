@@ -1,4 +1,4 @@
-//! The assembly of one session, shared by run, chat, serve and acp: the profile with the
+//! The assembly of one session, shared by run, chat, serve and acp: the agent with the
 //! command line over it, in the environment of the settings, the provider, the tools, the
 //! session file and the hooks every mode registers.
 
@@ -16,14 +16,14 @@ use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::compaction;
 use zx_agent::config::Execution;
+use zx_agent::config::skills::{ReadSkillTool, TOOL_NAME};
+use zx_agent::config::{AgentDefinition, Builtin};
 use zx_agent::continuation::ContinueOnLength;
 use zx_agent::executor::Executor;
 use zx_agent::extensions;
 use zx_agent::otel;
 use zx_agent::output_store::{self, OutputStore, ReadOutputTool, SpillOutputs};
 use zx_agent::policy::{AutoApprove, CommandPolicy, PolicyHook, Rule, RuleMatcher, RulePolicy};
-use zx_agent::profile::skills::{ReadSkillTool, TOOL_NAME};
-use zx_agent::profile::{Builtin, Profile};
 use zx_agent::prompt::{self, build_system_prompt};
 use zx_agent::redact::RedactSecrets;
 use zx_agent::runner::{Limits, Runner};
@@ -62,7 +62,8 @@ pub(crate) struct SessionOptions<'a> {
     /// command line's.
     pub(crate) cwd: Option<&'a Path>,
     pub(crate) file: SessionFile<'a>,
-    pub(crate) default_profile: Builtin,
+    /// The built-in agent the mode runs, or the user's file that replaces it.
+    pub(crate) agent: Builtin,
     pub(crate) shared: &'a Shared,
 }
 
@@ -74,21 +75,21 @@ pub(crate) struct PreparedSession {
     pub(crate) config: LoopConfig,
     retry: RetryPolicy,
     pub(crate) store: SessionStore,
-    /// The profile's auto-approved commands, for frontend policies that also ask for bash.
+    /// The agent's auto-approved commands, for frontend policies that also ask for bash.
     auto_approve: AutoApprove,
-    /// The profile's `rules.approveAll`: nothing waits for a person.
+    /// The agent's `rules.approveAll`: nothing waits for a person.
     approve_all: bool,
     limits: Limits,
     compaction: compaction::Config,
-    /// The selected profile's name, for a frontend to show.
-    pub(crate) profile_name: String,
-    /// The profile's auto-approved command prefixes, for a frontend to show.
+    /// The selected agent's name, for a frontend to show.
+    pub(crate) agent_name: String,
+    /// The agent's auto-approved command prefixes, for a frontend to show.
     pub(crate) auto_approve_commands: Vec<String>,
 }
 
 impl PreparedSession {
-    /// Ask a person before every bash command, except those the profile auto-approves, or
-    /// none when the profile approves every call; other tools follow the profile's rules.
+    /// Ask a person before every bash command, except those the agent auto-approves, or
+    /// none when the agent approves every call; other tools follow the agent's rules.
     /// Chat and serve both work this way.
     pub(crate) fn require_bash_approval(&mut self, reason: &str) {
         if self.approve_all {
@@ -159,19 +160,19 @@ fn request_fields(values: &[String]) -> Result<serde_json::Map<String, serde_jso
 /// Configuration errors and a container that cannot start are reported before a new session
 /// file is created.
 pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSession> {
-    let (cwd, mut profile, models) = settle(&options)?;
-    let context = profile.context_section(&cwd).context(
-        "cannot load project instructions; a profile with discover = false under [context] skips AGENTS.md discovery",
+    let (cwd, mut agent, models) = settle(&options)?;
+    let context = agent.context_section(&cwd).context(
+        "cannot load project instructions; an agent with discover = false under [context] skips AGENTS.md discovery",
     )?;
     // Before the session file: invalid provider settings are configuration errors too.
     let (provider, api_key) = provider(&options)?;
-    let mut host = host_tools(&mut profile, &options.shared.settings.config.tool_output, &cwd)?;
+    let mut host = host_tools(&mut agent, &options.shared.settings.config.tool_output, &cwd)?;
     let (session, executor, environment) = open_session(&options, &cwd).await?;
-    let tools = assemble_tools(&profile, &options, &executor, &mut host)?;
-    let policy = CommandPolicy::new(&profile.rules.allow).deny_also(&profile.rules.deny);
+    let tools = assemble_tools(&agent, &options, &executor, &mut host)?;
+    let policy = CommandPolicy::new(&agent.rules.allow).deny_also(&agent.rules.deny);
     let command_policy = command_policy_section(&policy, &tools);
     let system_prompt = build_system_prompt(
-        &profile.instructions,
+        &agent.instructions,
         &[
             (prompt::ENVIRONMENT, &environment),
             (prompt::COMMAND_POLICY, &command_policy),
@@ -191,7 +192,7 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     // Each session's redaction owns its list: the hook reads the files again before every use.
     let redaction = RedactSecrets::new(api_key.into_iter().chain(hidden_values(&options)))
         .with_secret_files(options.shared.secret_files.clone());
-    let auto_approve = register_hooks(&mut config, &mut profile, &options, redaction, host.spill.take())?;
+    let auto_approve = register_hooks(&mut config, &mut agent, &options, redaction, host.spill.take())?;
     config.models = models;
     config.cache_key = options
         .shared
@@ -206,24 +207,24 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
         },
         store: session,
         auto_approve,
-        approve_all: profile.rules.approve_all,
-        limits: profile.limits,
-        compaction: profile.compaction,
-        profile_name: profile.name,
-        auto_approve_commands: profile.rules.auto_approve,
+        approve_all: agent.rules.approve_all,
+        limits: agent.limits,
+        compaction: agent.compaction,
+        agent_name: agent.name,
+        auto_approve_commands: agent.rules.auto_approve,
     })
 }
 
-/// The working directory, the profile with the command line over it, and what is known about
+/// The working directory, the agent with the command line over it, and what is known about
 /// the models. A cost budget needs the model's prices; container execution uses the
 /// directory's real path.
-fn settle(options: &SessionOptions<'_>) -> Result<(PathBuf, Profile, HashMap<String, ModelMeta>)> {
+fn settle(options: &SessionOptions<'_>) -> Result<(PathBuf, AgentDefinition, HashMap<String, ModelMeta>)> {
     let cwd = resolve_cwd(options.cwd.or(options.base.cwd.as_deref()))?;
-    let mut profile = load_profile(options)?;
-    let models = model_meta(&mut profile, &options.shared.settings.config.models, options.model);
+    let mut agent = load_agent(options)?;
+    let models = model_meta(&mut agent, &options.shared.settings.config.models, options.model);
     // Without prices every response costs nothing, and the budget would never stop a run.
     anyhow::ensure!(
-        profile.limits.cost_budget.is_none() || models.get(options.model).is_some_and(|meta| meta.cost.is_some()),
+        agent.limits.cost_budget.is_none() || models.get(options.model).is_some_and(|meta| meta.cost.is_some()),
         "a cost budget needs the prices of the model {:?}: add them to [[models]] in config.toml",
         options.model
     );
@@ -234,18 +235,18 @@ fn settle(options: &SessionOptions<'_>) -> Result<(PathBuf, Profile, HashMap<Str
             .canonicalize()
             .with_context(|| format!("cannot resolve {}", cwd.display()))?,
     };
-    Ok((cwd, profile, models))
+    Ok((cwd, agent, models))
 }
 
-/// The built-in tools the profile enables, running on `executor`, and the tools of this
+/// The built-in tools the agent enables, running on `executor`, and the tools of this
 /// machine.
 fn assemble_tools(
-    profile: &Profile,
+    agent: &AgentDefinition,
     options: &SessionOptions<'_>,
     executor: &Arc<dyn Executor>,
     host: &mut HostTools,
 ) -> Result<Vec<Arc<dyn Tool>>> {
-    let built_in: Vec<String> = profile.tools.iter().filter(|name| !host_tool(name)).cloned().collect();
+    let built_in: Vec<String> = agent.tools.iter().filter(|name| !host_tool(name)).cloned().collect();
     let timeout = Duration::from_secs(options.transport.tool_timeout_secs);
     let mut tools = tools::builtin_tools(&built_in, timeout, executor)?;
     tools.extend(std::mem::take(&mut host.tools));
@@ -262,49 +263,53 @@ fn command_policy_section(policy: &CommandPolicy, tools: &[Arc<dyn Tool>]) -> St
     }
 }
 
-/// The selected profile with the command line's tools and budgets over it, validated: explicit
-/// values replace the profile's.
-fn load_profile(options: &SessionOptions<'_>) -> Result<Profile> {
+/// The selected agent with the command line's tools and budgets over it, validated: explicit
+/// values replace the agent's.
+fn load_agent(options: &SessionOptions<'_>) -> Result<AgentDefinition> {
     let config = &options.shared.settings.config;
-    let mut profile = Profile::load(options.base.profile.as_deref(), options.default_profile, config)?;
+    let mut agent = AgentDefinition::load(options.agent, options.shared.settings.home.as_deref(), config)?;
     if let Some(tools) = &options.base.tools {
-        profile.tools = tools
+        agent.tools = tools
             .iter()
             .map(|name| name.trim())
             .filter(|name| !name.is_empty())
             .map(String::from)
             .collect();
     }
-    apply_budgets(&mut profile, options.budget);
-    profile.validate(config)?;
-    Ok(profile)
+    apply_budgets(&mut agent, options.budget);
+    agent.validate(config)?;
+    Ok(agent)
 }
 
 /// `--max-model-requests`, `--timeout-secs` and the token and cost budgets; a zero timeout or
-/// budget removes the profile's.
-fn apply_budgets(profile: &mut Profile, budget: &BudgetArgs) {
+/// budget removes the agent's.
+fn apply_budgets(agent: &mut AgentDefinition, budget: &BudgetArgs) {
     if let Some(turns) = budget.max_model_requests {
-        profile.limits.max_model_requests = Some(turns);
+        agent.limits.max_model_requests = Some(turns);
     }
     if let Some(secs) = budget.timeout_secs {
-        profile.limits.timeout = (secs > 0).then(|| Duration::from_secs(secs));
+        agent.limits.timeout = (secs > 0).then(|| Duration::from_secs(secs));
     }
     if let Some(tokens) = budget.token_budget {
-        profile.limits.token_budget = (tokens > 0).then_some(tokens);
+        agent.limits.token_budget = (tokens > 0).then_some(tokens);
     }
     if let Some(amount) = budget.cost_budget {
-        profile.limits.cost_budget = (amount > 0.0).then_some(amount);
+        agent.limits.cost_budget = (amount > 0.0).then_some(amount);
     }
 }
 
 /// What is known about the models: the entries of config.toml. With automatic summaries on, a
 /// known window of `model` adds a token trigger below it.
-fn model_meta(profile: &mut Profile, known: &HashMap<String, ModelMeta>, model: &str) -> HashMap<String, ModelMeta> {
+fn model_meta(
+    agent: &mut AgentDefinition,
+    known: &HashMap<String, ModelMeta>,
+    model: &str,
+) -> HashMap<String, ModelMeta> {
     let models = known.clone();
-    if profile.compaction.trigger_bytes.is_some()
+    if agent.compaction.trigger_bytes.is_some()
         && let Some(window) = models.get(model).and_then(|meta| meta.context_window)
     {
-        profile.compaction.derive_trigger_tokens(window);
+        agent.compaction.derive_trigger_tokens(window);
     }
     models
 }
@@ -338,7 +343,7 @@ fn host_tool(name: &str) -> bool {
     name == TOOL_NAME || name == output_store::TOOL_NAME
 }
 
-/// The tools of this machine (see [`host_tool`]) that the profile enables, with the skill
+/// The tools of this machine (see [`host_tool`]) that the agent enables, with the skill
 /// catalog for the prompt and the hook that saves long results.
 struct HostTools {
     tools: Vec<Arc<dyn Tool>>,
@@ -346,18 +351,18 @@ struct HostTools {
     spill: Option<SpillOutputs>,
 }
 
-fn host_tools(profile: &mut Profile, tool_output: &output_store::Config, cwd: &Path) -> Result<HostTools> {
+fn host_tools(agent: &mut AgentDefinition, tool_output: &output_store::Config, cwd: &Path) -> Result<HostTools> {
     let mut host = HostTools {
         tools: Vec::new(),
         catalog: String::new(),
         spill: None,
     };
-    if profile.tools.iter().any(|name| name == TOOL_NAME) && !profile.skills.is_empty() {
-        let tool = ReadSkillTool::new(std::mem::take(&mut profile.skills))?;
+    if agent.tools.iter().any(|name| name == TOOL_NAME) && !agent.skills.is_empty() {
+        let tool = ReadSkillTool::new(std::mem::take(&mut agent.skills))?;
         host.catalog = tool.catalog();
         host.tools.push(Arc::new(tool));
     }
-    if profile.tools.iter().any(|name| name == output_store::TOOL_NAME) {
+    if agent.tools.iter().any(|name| name == output_store::TOOL_NAME) {
         let store = OutputStore::new(cwd, tool_output.clone())?;
         // The immutable path/config is used independently by the reading tool and writer hook.
         host.spill = Some(SpillOutputs::new(
@@ -399,28 +404,28 @@ async fn open_session(options: &SessionOptions<'_>, cwd: &Path) -> Result<(Sessi
 }
 
 /// Register the hooks every mode shares, after the command policy: the MCP servers, the
-/// profile's rules, continuation, `redaction` and `spill`; returns the auto-approved commands
+/// agent's rules, continuation, `redaction` and `spill`; returns the auto-approved commands
 /// for the frontend's own bash policy.
 ///
 /// Each hook declares its stage, so the policies run first and redaction runs before output
 /// is saved, whatever is registered later.
 fn register_hooks(
     config: &mut LoopConfig,
-    profile: &mut Profile,
+    agent: &mut AgentDefinition,
     options: &SessionOptions<'_>,
     redaction: RedactSecrets,
     spill: Option<SpillOutputs>,
 ) -> Result<AutoApprove> {
     extensions::register(config, &options.shared.mcp.servers).map_err(anyhow::Error::msg)?;
-    let auto_approve = profile.rules.auto_approval();
-    // The profile's rules and the frontend's bash policy each own the list (`rules_policy`).
-    if let Some(rules) = rules_policy(profile, &options.shared.mcp.ask, auto_approve.clone()) {
-        push_built_in(config, "profile_rules", PolicyHook::new(Arc::new(rules)));
+    let auto_approve = agent.rules.auto_approval();
+    // The agent's rules and the frontend's bash policy each own the list (`rules_policy`).
+    if let Some(rules) = rules_policy(agent, &options.shared.mcp.ask, auto_approve.clone()) {
+        push_built_in(config, "agent_rules", PolicyHook::new(Arc::new(rules)));
     }
     push_built_in(
         config,
         "continue_on_length",
-        ContinueOnLength::new(profile.continue_on_length),
+        ContinueOnLength::new(agent.continue_on_length),
     );
     push_built_in(config, "redact_secrets", redaction);
     if let Some(spill) = spill {
@@ -453,24 +458,22 @@ fn hidden_values<'a>(options: &'a SessionOptions<'_>) -> impl Iterator<Item = St
         .filter_map(|name| env_value(name))
 }
 
-/// The profile's tool rules and the MCP tools that ask, as one policy that allows the rest;
+/// The agent's tool rules and the MCP tools that ask, as one policy that allows the rest;
 /// none without rules.
 ///
 /// Every policy that asks for bash gets the auto-approved commands: the strictest verdict of
 /// all policies wins, so one that still asked would cancel the others' auto-approval.
-fn rules_policy(profile: &mut Profile, mcp_ask: &[String], auto_approve: AutoApprove) -> Option<RulePolicy> {
-    let denied = std::mem::take(&mut profile.rules.deny_tools)
+fn rules_policy(agent: &mut AgentDefinition, mcp_ask: &[String], auto_approve: AutoApprove) -> Option<RulePolicy> {
+    let denied = std::mem::take(&mut agent.rules.deny_tools)
         .into_iter()
         .map(|tool| Rule {
             matcher: RuleMatcher::Tool(tool),
-            decision: PolicyDecision::Deny("tool denied by profile".into()),
+            decision: PolicyDecision::Deny("tool denied by the agent".into()),
         });
-    let asked = std::mem::take(&mut profile.rules.ask_tools)
-        .into_iter()
-        .map(|tool| Rule {
-            matcher: RuleMatcher::Tool(tool),
-            decision: PolicyDecision::Ask("profile requires tool approval".into()),
-        });
+    let asked = std::mem::take(&mut agent.rules.ask_tools).into_iter().map(|tool| Rule {
+        matcher: RuleMatcher::Tool(tool),
+        decision: PolicyDecision::Ask("the agent requires tool approval".into()),
+    });
     // An MCP server's tools ask unless its allowTools lists them: annotations are hints.
     let mcp = mcp_ask.iter().map(|tool| Rule {
         matcher: RuleMatcher::Tool(tool.clone()),

@@ -14,7 +14,7 @@ spec:
   jobTemplate:
     spec:
       backoffLimit: 0
-      # Above the run's own 15-minute limit (troubleshoot profile, from unattended).
+      # Above the run's own 15-minute limit (the deployment's unattended agent, from the built-in).
       activeDeadlineSeconds: 1200
       ttlSecondsAfterFinished: 86400
       template:
@@ -34,15 +34,13 @@ spec:
               image: zx-agent
               # zx-agent itself is PID 1: the only process holding the API key, and one that
               # commands cannot inspect (README.md, "安全模型").
-              # The troubleshoot profile (profiles/troubleshoot.toml, installed by the image)
-              # gives the report its fixed sections; without it, run uses the neutral built-in
-              # unattended profile.
+              # This deployment's unattended agent (agents/unattended.md, mounted from the
+              # ConfigMap zx-agent-agents) gives the report its fixed sections; without it, run
+              # uses the neutral built-in unattended agent.
               # $(POD_NAME) is expanded by Kubernetes, without a shell: a file per run.
               command:
                 - zx-agent
                 - run
-                - --profile
-                - /usr/local/share/zx-agent/profiles/troubleshoot.toml
                 - --session
                 - /data/sessions/$(POD_NAME).jsonl
               args:
@@ -78,6 +76,9 @@ spec:
               volumeMounts:
                 - name: sessions
                   mountPath: /data
+                - name: agents
+                  mountPath: /data/.zx-agent/agents
+                  readOnly: true
                 - name: tmp
                   mountPath: /tmp
               resources:
@@ -90,5 +91,8 @@ spec:
             - name: sessions
               persistentVolumeClaim:
                 claimName: zx-agent-inspect-sessions
+            - name: agents
+              configMap:
+                name: zx-agent-agents
             - name: tmp
               emptyDir: {}

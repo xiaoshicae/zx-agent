@@ -9,7 +9,7 @@ use std::time::Duration;
 use tokio::process::Command;
 
 use common::mock_server::{MockServer, Reply};
-use common::{ConfigHome, stderr, write_config, zx_agent};
+use common::{AgentHome, stderr, write_config, zx_agent};
 
 /// `run` in `cwd` without a model or base URL on the command line; the caller adds the home.
 fn run(cwd: &Path, args: &[&str]) -> Command {
@@ -61,7 +61,7 @@ async fn zx_agent_home_replaces_dot_zx_agent_under_home() {
     let ignored = MockServer::start(vec![Reply::text("ignored")]).await;
     write_config(&home.path().join(".zx-agent"), &model_and_url("home-model", &ignored));
     let server = MockServer::start(vec![Reply::text("ok")]).await;
-    let elsewhere = ConfigHome::new(&model_and_url("elsewhere-model", &server));
+    let elsewhere = AgentHome::new(&model_and_url("elsewhere-model", &server));
     let mut command = run(home.path(), &[]);
     command.env("HOME", home.path()).env("ZX_AGENT_HOME", elsewhere.path());
     let output = output(command).await;
@@ -88,7 +88,7 @@ async fn a_relative_zx_agent_home_is_refused() {
 
 /// Which server and model a run used, with the file setting both and `env` and `flags` over it.
 async fn chosen(env: &[(&str, &str)], flags: &[&str], file: &MockServer) -> Output {
-    let home = ConfigHome::new(&model_and_url("file-model", file));
+    let home = AgentHome::new(&model_and_url("file-model", file));
     let dir = tempfile::tempdir().unwrap();
     let mut command = run(dir.path(), flags);
     command.env("ZX_AGENT_HOME", home.path()).envs(env.iter().copied());
@@ -124,7 +124,7 @@ async fn the_model_and_base_url_come_from_the_flag_then_the_variable_then_the_fi
 
 #[tokio::test]
 async fn without_a_model_anywhere_the_run_names_where_to_set_one() {
-    let home = ConfigHome::new("");
+    let home = AgentHome::new("");
     let dir = tempfile::tempdir().unwrap();
     let mut command = run(dir.path(), &[]);
     command.env("ZX_AGENT_HOME", home.path());
@@ -140,7 +140,7 @@ async fn without_a_model_anywhere_the_run_names_where_to_set_one() {
 #[tokio::test]
 async fn an_unknown_key_in_config_toml_stops_the_run() {
     let server = MockServer::start(vec![]).await;
-    let home = ConfigHome::new("modle = \"typo\"\n");
+    let home = AgentHome::new("modle = \"typo\"\n");
     let dir = tempfile::tempdir().unwrap();
     let mut command = run(dir.path(), &["--model", "m", "--base-url", &server.base_url]);
     command.env("ZX_AGENT_HOME", home.path());

@@ -8,15 +8,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 
+use super::read_text;
 use crate::ai::openai::{ReasoningFormat, SystemUpdates};
 use crate::ai::{ModelCost, ModelMeta, Reasoning};
 use crate::executor::{Access, check_network};
-use crate::files::read_text_file;
 use crate::mcp::{check_server_name, tool_name as mcp_tool_name};
 use crate::output_store;
-
-/// Maximum size of `config.toml`.
-const MAX_CONFIG_BYTES: u64 = 64 * 1024;
 
 /// Where bash and read_file run.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -170,8 +167,7 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let raw = match std::fs::symlink_metadata(path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => RawConfig::default(),
-            _ => toml::from_str(&read_text_file(path, MAX_CONFIG_BYTES)?)
-                .with_context(|| format!("invalid {}", path.display()))?,
+            _ => toml::from_str(&read_text(path)?).with_context(|| format!("invalid {}", path.display()))?,
         };
         // A file path always has a parent; the root stands in for one that has none.
         let parent = path.parent().unwrap_or_else(|| Path::new("/"));

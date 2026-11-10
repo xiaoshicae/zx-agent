@@ -9,9 +9,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 use zx_agent::agent::EventSink;
+use zx_agent::config::{AgentDefinition, Builtin};
 use zx_agent::extensions::Extension;
 use zx_agent::mcp::{Server, ServerConfig};
-use zx_agent::profile::{Builtin, Profile};
 use zx_agent::redact::{MIN_SECRET_CHARS, check_secret_files, short_secret_files};
 
 use super::{BaseArgs, RequestArgs, Settings, TransportArgs, env_value};
@@ -42,11 +42,11 @@ impl Shared {
         base: &BaseArgs,
         request: &RequestArgs,
         transport: &TransportArgs,
-        default: Builtin,
+        kind: Builtin,
     ) -> Result<Self> {
         let settings = Settings::resolve(base, request)?;
         Ok(Self {
-            mcp: connect_mcp(&settings, base, default, transport).await?,
+            mcp: connect_mcp(&settings, kind, transport).await?,
             secret_files: secret_files(base)?,
             hidden_env: Vec::new(),
             settings,
@@ -75,7 +75,7 @@ pub(crate) struct ModeSettings<A> {
 pub(super) struct McpTools {
     pub(super) servers: Vec<Arc<dyn Extension>>,
     /// Tools that need approval: those not in their server's `allowTools`, unless the
-    /// profile approves every call.
+    /// agent approves every call.
     pub(super) ask: Vec<String>,
     /// Variables holding the servers' tokens: hidden from commands, values redacted.
     pub(super) token_env: Vec<String>,
@@ -83,13 +83,8 @@ pub(super) struct McpTools {
 
 /// Connect the MCP servers of config.toml, printing one line per server on stderr, without
 /// the token or the URL's path.
-async fn connect_mcp(
-    settings: &Settings,
-    base: &BaseArgs,
-    default: Builtin,
-    transport: &TransportArgs,
-) -> Result<McpTools> {
-    let profile = Profile::load(base.profile.as_deref(), default, &settings.config)?;
+async fn connect_mcp(settings: &Settings, kind: Builtin, transport: &TransportArgs) -> Result<McpTools> {
+    let agent = AgentDefinition::load(kind, settings.home.as_deref(), &settings.config)?;
     let mcp = &settings.config.mcp;
     let mut configs = Vec::new();
     for server in mcp {
@@ -115,7 +110,7 @@ async fn connect_mcp(
         let mut names = Vec::new();
         for (remote, name) in server.tool_names() {
             // With approveAll nothing asks: the container is the sandbox.
-            if entry.allow_tools.contains(remote) || profile.rules.approve_all {
+            if entry.allow_tools.contains(remote) || agent.rules.approve_all {
                 names.push(name.clone());
             } else {
                 names.push(format!("{name} (asks)"));

@@ -1,14 +1,6 @@
-//! File-based scenario configuration, outside the agent loop. Loading is synchronous,
-//! bounded startup I/O; tool and frontend assembly remains the caller's responsibility.
-//!
-//! - `file`: the TOML layer of a profile, and how one layer goes over another
-//! - `context`: the project context: `AGENTS.md` files from the Git root down to the working
-//!   directory
-//! - `skills`: explicit skill catalogs, whose bodies a tool reads on demand
-
-mod context;
-mod file;
-pub mod skills;
+//! An agent: what it does and may do. Each mode runs a built-in agent (`run` the unattended
+//! one; `chat`, `serve` and `acp` the assistant), which a file of the same name in the
+//! `agents/` directory of the zx-agent home replaces.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -16,42 +8,32 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 
-use file::RawProfile;
-use file::read_text;
-use skills::Skill;
-
-use crate::config::{Config, Execution};
+use super::agent_file::AgentFile;
+use super::skills::{self, Skill};
+use super::{Config, Execution, context, read_text};
 use crate::policy::{AutoApprove, ProgramOptions};
 use crate::runner::Limits;
 use crate::tools::BUILTIN_TOOL_NAMES;
 use crate::{compaction, output_store};
 
-/// Maximum size of a profile, instructions, context file or skill body.
-const MAX_FILE_BYTES: u64 = 64 * 1024;
+/// Under the zx-agent home: the user's agents, which replace the built-in ones of their names.
+const AGENTS_DIR: &str = "agents";
 
-/// Embedded baseline; custom profiles may extend one of these, never arbitrary files.
+/// A built-in agent; an agent file may extend one of these, never another file.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Builtin {
     /// A neutral agent without a human operator, the default of `run`.
     Unattended,
-    /// A conversation with a person, the default of `chat` and `serve`.
+    /// A conversation with a person, the default of `chat`, `serve` and `acp`.
     Assistant,
 }
 
-/// An embedded profile's files.
-struct Source {
-    toml: &'static str,
-    /// What the TOML names as its instructions, which must be `instructions`.
-    instructions_file: &'static str,
-    instructions: &'static str,
-}
-
 impl Builtin {
-    /// Every embedded profile.
-    const ALL: [Builtin; 2] = [Self::Unattended, Self::Assistant];
+    /// Every built-in agent.
+    pub const ALL: [Builtin; 2] = [Self::Unattended, Self::Assistant];
 
-    /// The name `--profile` and `extends` select it by.
+    /// Its name, as `extends` and the user's file in `agents/` spell it.
     pub fn name(self) -> &'static str {
         match self {
             Self::Unattended => "unattended",
@@ -59,23 +41,16 @@ impl Builtin {
         }
     }
 
-    fn source(self) -> Source {
+    /// The agent file embedded in the program.
+    fn source(self) -> &'static str {
         match self {
-            Self::Unattended => Source {
-                toml: include_str!("../profiles/unattended.toml"),
-                instructions_file: "unattended.md",
-                instructions: include_str!("../profiles/unattended.md"),
-            },
-            Self::Assistant => Source {
-                toml: include_str!("../profiles/assistant.toml"),
-                instructions_file: "assistant.md",
-                instructions: include_str!("../profiles/assistant.md"),
-            },
+            Self::Unattended => include_str!("../../agents/unattended.md"),
+            Self::Assistant => include_str!("../../agents/assistant.md"),
         }
     }
 }
 
-/// Host-enforced command and tool rules. Denials are accumulated across layers.
+/// Host-enforced command and tool rules.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct Rules {
@@ -87,10 +62,10 @@ pub struct Rules {
     /// that still ask are listed on [`crate::policy::AutoApprove`].
     pub auto_approve: Vec<String>,
     /// Texts that keep a command asking although `auto_approve` covers it, compared without
-    /// case, such as `secret`. Accumulated across layers, like `deny`.
+    /// case, such as `secret`.
     pub auto_approve_except: Vec<String>,
     /// For a program, such as kubectl, the options that a covered command may pass; any other
-    /// option asks. Programs not listed may pass any option. A layer replaces the entry of a
+    /// option asks. Programs not listed may pass any option. A file replaces the entry of a
     /// program it lists.
     pub auto_approve_options: BTreeMap<String, ProgramOptions>,
     /// Registered tool names whose calls require a host approval.
@@ -118,15 +93,15 @@ impl Rules {
 pub struct ProjectContext {
     /// Discover root-to-cwd AGENTS.md files, bounded by the nearest Git root.
     pub discover: bool,
-    /// Extra instruction files, resolved relative to the profile file at load time.
+    /// Extra instruction files, resolved relative to the agent file at load time.
     pub files: Vec<PathBuf>,
 }
 
-/// Fully layered scenario configuration. CLI overrides are applied by the frontend;
-/// callers must keep deny rules additive and call `validate` before assembly.
+/// A resolved agent: its file over the built-in agent it extends. Command-line overrides
+/// are applied by the frontend, which calls `validate` again before assembly.
 #[derive(Debug)]
-pub struct Profile {
-    /// Human-readable scenario name.
+pub struct AgentDefinition {
+    /// The file stem, or the built-in agent's name.
     pub name: String,
     /// Effective preamble, before generated machine and project sections.
     pub instructions: String,
@@ -146,65 +121,82 @@ pub struct Profile {
     pub compaction: compaction::Config,
 }
 
-impl Profile {
-    /// Load an embedded name or a TOML file over the selected default, checked against the
-    /// environment `config`. Relative profile paths use the process working directory; paths
-    /// inside TOML use its parent. Unknown fields and invalid files are errors.
-    pub fn load(selector: Option<&str>, default: Builtin, config: &Config) -> Result<Self> {
-        let Some(selector) = selector else {
-            let profile = Self::builtin(default)?;
-            profile.validate(config)?;
-            return Ok(profile);
+impl AgentDefinition {
+    /// The agent `kind`, checked against `config`: the user's `agents/<name>.md` in the
+    /// zx-agent `home` when that file exists, else the built-in agent. No other file is read:
+    /// a file in `agents/` with another name is ignored.
+    pub fn load(kind: Builtin, home: Option<&Path>, config: &Config) -> Result<Self> {
+        let agent = match home.map(|home| home.join(AGENTS_DIR).join(format!("{}.md", kind.name()))) {
+            Some(path) if exists(&path)? => Self::from_file(&path)?,
+            _ => Self::builtin(kind)?,
         };
-        if let Some(builtin) = Builtin::ALL.into_iter().find(|builtin| builtin.name() == selector) {
-            let profile = Self::builtin(builtin)?;
-            profile.validate(config)?;
-            return Ok(profile);
-        }
-        ensure!(!selector.trim().is_empty(), "profile selector is empty");
-        let path = Path::new(selector)
-            .canonicalize()
-            .with_context(|| format!("cannot locate profile {selector:?}"))?;
-        let raw: RawProfile =
-            toml::from_str(&read_text(&path)?).with_context(|| format!("invalid profile {}", path.display()))?;
-        let mut profile = Self::builtin(raw.extends.unwrap_or(default))?;
-        // A canonical file path always has a parent, but keep this error actionable.
-        let parent = path.parent().context("profile has no parent directory")?;
-        raw.apply(&mut profile, parent)?;
-        profile.validate(config)?;
-        Ok(profile)
+        agent.validate(config)?;
+        Ok(agent)
     }
 
+    /// The agent of the file at `path`, over the built-in agent it extends, named after the
+    /// file.
+    fn from_file(path: &Path) -> Result<Self> {
+        let path = path
+            .canonicalize()
+            .with_context(|| format!("cannot locate agent {}", path.display()))?;
+        let name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .with_context(|| format!("agent {} has no name", path.display()))?
+            .to_string();
+        let file = AgentFile::parse(&read_text(&path)?).with_context(|| format!("invalid agent {}", path.display()))?;
+        let mut agent = match file.extends() {
+            Some(builtin) => Self::builtin(builtin)?,
+            None => {
+                ensure!(
+                    file.has_instructions(),
+                    "agent {} has no instructions: write them below the front matter or extend a built-in agent",
+                    path.display()
+                );
+                Self::empty()
+            }
+        };
+        // A canonical file path always has a parent, but keep this error actionable.
+        let parent = path.parent().context("the agent has no parent directory")?;
+        file.apply(&mut agent, parent)
+            .with_context(|| format!("invalid agent {}", path.display()))?;
+        agent.name = name;
+        Ok(agent)
+    }
+
+    /// The built-in agent `kind`, over the empty base.
     fn builtin(kind: Builtin) -> Result<Self> {
-        let source = kind.source();
-        let mut raw: RawProfile = toml::from_str(source.toml).context("invalid embedded profile")?;
-        ensure!(
-            raw.instructions.take().as_deref() == Some(Path::new(source.instructions_file)),
-            "embedded instructions path is inconsistent"
-        );
-        let mut profile = Self {
+        let file = AgentFile::parse(kind.source()).context("invalid built-in agent")?;
+        ensure!(file.extends().is_none(), "a built-in agent extends another");
+        let mut agent = Self::empty();
+        file.apply(&mut agent, Path::new("."))?;
+        agent.name = kind.name().to_string();
+        Ok(agent)
+    }
+
+    /// What an agent file without `extends` goes over: no tools, rules, skills or
+    /// instructions, the kernel's limits and summary settings, and no project context.
+    fn empty() -> Self {
+        Self {
             name: String::new(),
-            instructions: source.instructions.into(),
+            instructions: String::new(),
             tools: Vec::new(),
             rules: Rules::default(),
             limits: Limits::default(),
             continue_on_length: 0,
             context: ProjectContext {
-                discover: true,
+                discover: false,
                 files: Vec::new(),
             },
             skills: Vec::new(),
             compaction: compaction::Config::default(),
-        };
-        raw.apply(&mut profile, Path::new("."))?;
-        profile.validate(&Config::default())?;
-        Ok(profile)
+        }
     }
 
     /// Check names, rule patterns and skill registrations without reading skill bodies; tool
     /// rules may name the MCP tools of `config`, and approving every call needs its container.
     pub fn validate(&self, config: &Config) -> Result<()> {
-        ensure!(!self.name.trim().is_empty(), "profile name is empty");
         for name in &self.tools {
             ensure!(known_tool(name), "unknown tool {name:?}");
         }
@@ -245,6 +237,16 @@ impl Profile {
     /// Read root-to-cwd project guidance and explicit files, within a total byte budget.
     pub fn context_section(&self, cwd: &Path) -> Result<String> {
         context::load(cwd, &self.context)
+    }
+}
+
+/// Whether `path` exists, as a file, a link or anything else; an error other than its absence
+/// stops startup rather than silently leaving a user's agent out.
+fn exists(path: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("cannot inspect {}", path.display())),
     }
 }
 

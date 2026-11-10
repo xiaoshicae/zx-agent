@@ -5,12 +5,12 @@
 # The toolchain the release workflow uses (.github/workflows/release.yml).
 FROM rust:1.88-slim-bookworm AS build
 WORKDIR /src
-# Only what the build reads (the workspace crates, and profiles/, which is compiled in), so
+# Only what the build reads (the workspace crates, and agents/, which is compiled in), so
 # edits elsewhere keep it cached.
 COPY Cargo.toml Cargo.lock ./
 COPY src src
 COPY crates crates
-COPY profiles profiles
+COPY agents agents
 RUN cargo build --release --locked
 
 FROM debian:bookworm-slim
@@ -29,11 +29,9 @@ RUN curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERS
     | sha256sum --check \
  && chmod 0755 /usr/local/bin/kubectl
 COPY --from=build /src/target/release/zx-agent /usr/local/bin/zx-agent
-# This deployment's profiles (deploy/kubernetes/profiles), passed with --profile. Not under
-# /etc/zx-agent, where the multicluster overlay mounts the kubeconfig.
-COPY deploy/kubernetes/profiles /usr/local/share/zx-agent/profiles
 # A fixed non-root user; the manifests run the Pod with the same IDs. /data is its home and
-# the mount point of the session volume; it exists in the image so that Pods without the
+# the mount point of the session volume, and this deployment's agents (deploy/kubernetes/agents)
+# are mounted from a ConfigMap at /data/.zx-agent/agents, where zx-agent looks for them; it exists in the image so that Pods without the
 # volume, such as scheduled inspections with a read-only root filesystem, can start in it.
 RUN groupadd --gid 10001 zx \
  && useradd --uid 10001 --gid 10001 --home-dir /data --no-create-home --shell /bin/bash zx \

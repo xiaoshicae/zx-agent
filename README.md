@@ -841,7 +841,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 
 新增回归还覆盖：取消与 future 丢弃、特殊文件与读取上限、UTF-8 尾记录修复及损坏记录保留、交错工具参数 ID、有界队列背压、结构化错误与数值 `Retry-After`、响应预算和 CLI 参数接线。P0 回归覆盖内核不限轮次、无时限、不自动续写，以及零轮次、显式续写与预设取值。Rustdoc 的编译失败用例保护单一运行的借用约束。
 
-`tests/real_api.rs` 会产生费用。每个测试都标为 `#[ignore]`，而且没有设置 `ZX_E2E_AUTHORIZED=1` 时，在发出请求前就失败。服务地址、模型和 key 所在的变量名都从环境变量读取，运行方式见该文件开头的注释。摘要评测的用量远高于其余测试（16 次摘要合计读取约 0.6 MiB 的记录，在一个模型上实测约 27 万输入 token），未设置 `ZX_E2E_EVAL=1` 时只打印跳过；任一次摘要没有完成时测试失败。推理计入输出 token 的模型可用 `ZX_E2E_SUMMARY_TOKENS` 调高每次摘要的输出预算（默认 2048）。行为评测（`behaviour_evals_pair_two_profiles_against_the_real_api`）同样需要 `ZX_E2E_EVAL=1`：样例用例在控制与处理两个 profile 下各运行一次（`ZX_E2E_EVAL_RUNS` 可增加），每个 arm 是一次几百 token 的短运行；通过率低是数据，只有 arm 没有跑完才失败；产物留在打印出的临时目录里。
+`tests/real_api.rs` 会产生费用。每个测试都标为 `#[ignore]`，而且没有设置 `ZX_E2E_AUTHORIZED=1` 时，在发出请求前就失败。服务地址、模型和 key 所在的变量名都从环境变量读取，运行方式见该文件开头的注释。摘要评测的用量远高于其余测试（16 次摘要合计读取约 0.6 MiB 的记录，在一个模型上实测约 27 万输入 token），未设置 `ZX_E2E_EVAL=1` 时只打印跳过；任一次摘要没有完成时测试失败。推理计入输出 token 的模型可用 `ZX_E2E_SUMMARY_TOKENS` 调高每次摘要的输出预算（默认 2048）。行为评测（`behaviour_evals_pair_two_agents_against_the_real_api`）同样需要 `ZX_E2E_EVAL=1`：样例用例在控制与处理两个 profile 下各运行一次（`ZX_E2E_EVAL_RUNS` 可增加），每个 arm 是一次几百 token 的短运行；通过率低是数据，只有 arm 没有跑完才失败；产物留在打印出的临时目录里。
 
 ## CI 与发布
 

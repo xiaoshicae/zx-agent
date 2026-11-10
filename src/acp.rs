@@ -33,8 +33,8 @@ use tokio_util::sync::CancellationToken;
 use zx_agent::AgentSession;
 use zx_agent::agent::{EventSink, RunOutcome};
 use zx_agent::agent_session::Subscription;
+use zx_agent::config::Builtin;
 use zx_agent::otel::Telemetry;
-use zx_agent::profile::Builtin;
 use zx_agent::runner::RunReport;
 use zx_agent::session::SessionInfo as StoredSession;
 use zx_agent::sync::lock;
@@ -195,7 +195,7 @@ impl Host {
             model: &self.settings.shared.settings.model,
             cwd: Some(cwd),
             file,
-            default_profile: Builtin::Assistant,
+            agent: Builtin::Assistant,
             shared: &self.settings.shared,
         })
         .await?;

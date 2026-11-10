@@ -19,6 +19,14 @@ resources:
 # components:
 #   - multicluster
 #   - serve
+# This deployment's agents, which replace the built-in ones of their names: assistant.md for
+# chat and serve, unattended.md for run. The Pods mount them at /data/.zx-agent/agents, the
+# agents directory of the zx-agent home (~/.zx-agent; the home directory is /data).
+configMapGenerator:
+  - name: zx-agent-agents
+    files:
+      - agents/assistant.md
+      - agents/unattended.md
 images:
   # Replace with the image built from deploy/kubernetes/Dockerfile and pushed to a registry
   # the cluster can pull from.
