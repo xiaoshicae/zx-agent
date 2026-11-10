@@ -1,5 +1,5 @@
-//! Session files: where every mode opens or creates one, and where chat keeps, lists and
-//! forks them.
+//! Session files: where every mode opens or creates one, and where chat and acp keep and
+//! list them.
 //!
 //! As in pi (`getDefaultSessionDirPath`), each working directory has its own directory under
 //! the zx-agent home directory, which `ZX_AGENT_HOME` moves.
@@ -18,7 +18,7 @@ const SESSIONS_DIR: &str = "sessions";
 /// Characters of a first prompt shown in a listing.
 const PROMPT_PREVIEW_CHARS: usize = 60;
 /// Characters of a session ID shown in a listing; enough to tell sessions apart, and what
-/// `--resume` and `/resume` accept as a prefix.
+/// `--resume` accepts as a prefix.
 const SHORT_ID_CHARS: usize = 8;
 /// How a listing shows when a session was last active.
 const LISTING_TIME_FORMAT: &str = "%Y-%m-%d %H:%M";
@@ -106,7 +106,7 @@ fn create_dir(dir: &Path) -> Result<()> {
 }
 
 /// `<UTC time>_<session ID>.jsonl`, as pi names them: sorted by name they are in the order
-/// they were started, and the ID in the name is the one `/resume` takes.
+/// they were started, and the ID in the name is the one `--resume` takes.
 fn file_name(header: &SessionHeader) -> String {
     let time = i64::try_from(header.timestamp)
         .ok()
@@ -115,60 +115,6 @@ fn file_name(header: &SessionHeader) -> String {
         .map(|utc| utc.format("%Y-%m-%dT%H-%M-%S-%3fZ_").to_string())
         .unwrap_or_default();
     format!("{time}{}.jsonl", header.id)
-}
-
-/// A session copied by [`fork`].
-pub(crate) struct Forked {
-    pub(crate) path: PathBuf,
-    /// The source session's ID.
-    pub(crate) source_id: String,
-    /// Entries copied from the source.
-    pub(crate) entries: usize,
-}
-
-/// Which branch of the source [`fork`] copies.
-pub(crate) enum Branch<'a> {
-    /// The branch that ends at the source's last record: where the file was last written.
-    Last,
-    /// The branch that ends at this entry, or nothing for `None`: the position of a session
-    /// that is open in this process, which `/branch` moves without writing.
-    At(Option<&'a str>),
-}
-
-/// Copy a branch of the session file `source` into a new file in `dir`, started in `cwd`
-/// with `model` (pi: `createBranchedSession`).
-///
-/// The source is read as a snapshot, without its lock, so a session that is open elsewhere,
-/// or in this chat, can be forked; it is not changed. A copy that fails part way leaves the
-/// new file as far as it got, and the error names it.
-pub(crate) async fn fork(source: &Path, dir: &Path, cwd: &Path, model: &str, branch: Branch<'_>) -> Result<Forked> {
-    let source = source
-        .canonicalize()
-        .with_context(|| format!("cannot fork {}", source.display()))?;
-    let read = source.clone();
-    let source_store = tokio::task::spawn_blocking(move || SessionStore::read(&read))
-        .await
-        .with_context(|| format!("reading {} to fork it stopped", source.display()))??;
-    let header = source_store.fork_header(cwd, model);
-    create_dir(dir)?;
-    let path = dir.join(file_name(&header));
-    let mut forked = SessionStore::create(&path, header)?;
-    let leaf = match branch {
-        Branch::Last => source_store.leaf_id(),
-        Branch::At(leaf) => leaf,
-    };
-    let entries = match leaf {
-        Some(leaf) => forked
-            .copy_branch(&source_store, leaf)
-            .await
-            .with_context(|| format!("cannot copy {} into {}", source.display(), path.display()))?,
-        None => 0,
-    };
-    Ok(Forked {
-        path,
-        source_id: source_store.header().id.clone(),
-        entries,
-    })
 }
 
 /// List the sessions in `dir`, reading files on a blocking thread.
@@ -203,7 +149,7 @@ pub(crate) fn lines(list: &SessionList, cwd: &Path) -> Vec<String> {
 }
 
 /// The first [`SHORT_ID_CHARS`] of a session ID, as listings show it.
-pub(crate) fn short_id(id: &str) -> String {
+fn short_id(id: &str) -> String {
     id.chars().take(SHORT_ID_CHARS).collect()
 }
 

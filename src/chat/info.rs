@@ -78,7 +78,7 @@ fn about_line(prefix: &str, model: &str, about: &About) -> String {
 }
 
 /// How much of an earlier conversation the session file held, when it held one.
-pub(super) fn resumed_line(output: &Output, about: &About) {
+fn resumed_line(output: &Output, about: &About) {
     let Some(resumed) = &about.resumed else {
         return;
     };
@@ -145,12 +145,6 @@ pub(super) fn help(output: &Output, commands: &[(String, String)]) {
         "/compact              summarize old context while retaining raw history",
         "/continue             continue without new input, such as after a failed answer",
         "/status               show the model, session file and what this conversation has used",
-        "/sessions             list the sessions in the session directory, most recent first",
-        "/resume <ID>          switch to the session whose ID starts with <ID>",
-        "/fork                 continue in a copy of this session; the original stays as it is",
-        "/tree                 show the session tree: every message on every branch, the current one marked",
-        "/branch <ID>          continue after the entry with that ID, or before your own message with that ID",
-        "/queue [mode]         show or change how input typed during a task is taken: all, or one-at-a-time",
         "/quit                 exit chat; Ctrl+D while idle does the same",
         "Ctrl+C                cancel the current task or approval; keep the conversation",
         "                      twice within 2 seconds while idle: exit",

@@ -424,7 +424,7 @@ async fn run_with_mode(mode: QueueMode) -> Vec<Vec<String>> {
     ]));
     let mut config = config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]);
     config.hooks.push(TwoSteers);
-    config.queues.set_steering_mode(mode);
+    config.queues.set_mode(mode);
     let (runner, _) = RunnerSetup::new(config).build();
     let session = AgentSession::from(runner);
     session.prompt("go", &CancellationToken::new()).await.unwrap();

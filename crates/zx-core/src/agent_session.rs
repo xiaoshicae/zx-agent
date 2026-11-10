@@ -141,9 +141,9 @@ impl AgentSession {
     }
 
     /// The conversation's queues: to steer or follow up with the person's input (`steer`,
-    /// `follow_up`) or a message from an extension (`steer_message`, `follow_up_message`), to record extension state during a run
-    /// (`append_entry`), and to choose how many queued messages a request takes
-    /// (`set_steering_mode`, `set_follow_up_mode`).
+    /// `follow_up`) or a message from an extension (`steer_message`, `follow_up_message`), to
+    /// record extension state during a run (`append_entry`), and to choose how many queued
+    /// messages a request takes (`set_mode`).
     pub fn queues(&self) -> &MessageQueues {
         &self.queues
     }

@@ -4,7 +4,7 @@
 
 | 文件 | 内容 |
 |---|---|
-| `src/**` 与 `crates/*/src/**` 中的 `mod tests` 与 `tests.rs` | 各模块的单元测试，写在被测模块里或其 `tests.rs` 中（规则 09）；包括会话文件和事件流的 JSON 格式；`src/chat/tree.rs` 的树渲染（当前分支优先、离开的分支缩进、不列出的记录、预览）与 ID 解析；`src/chat/commands.rs` 的扩展命令解析；`agent::queue` 的队列模式与扩展消息，`agent::command` 的命令名检查；自动放行按 agent 给出的选项与例外判断，`deploy/kubernetes/agents/*.md` 由 `src/config` 的单元测试加载并检查。`#[cfg(test)]` 的辅助项（如 `SessionStore::with_writer`）只在所在 crate 的单元测试里可用 |
+| `src/**` 与 `crates/*/src/**` 中的 `mod tests` 与 `tests.rs` | 各模块的单元测试，写在被测模块里或其 `tests.rs` 中（规则 09）；包括会话文件和事件流的 JSON 格式；`src/chat/commands.rs` 的内置与扩展命令解析；`agent::queue` 的队列模式与扩展消息，`agent::command` 的命令名检查；自动放行按 agent 给出的选项与例外判断，`deploy/kubernetes/agents/*.md` 由 `src/config` 的单元测试加载并检查。`#[cfg(test)]` 的辅助项（如 `SessionStore::with_writer`）只在所在 crate 的单元测试里可用 |
 | `tests/agent_loop.rs` | 循环语义 |
 | `tests/runner.rs` | 运行层：重试（含预算用完不重试、省略失败回答的事件）、上限（含 token 预算：FauxProvider 每次回答报告 15 个 token）、截断续写、持久化（含自定义 `SessionLog`、工具结果的 `details` 与 `usage`）、工具花费按工具名报告且不计入 token 预算、成本预算（每次回答按单价 0.01）、被策略与审批拒绝的调用计数、恢复会话、排队输入只写一次 |
 | `tests/agent_session.rs` | 共享会话：Busy、取消与丢弃后复用、多订阅者、退订、回调重入与 panic、模型切换与审计、推理强度的切换与审计、取出未被消费的排队输入、写入停止的原因 |
@@ -20,8 +20,8 @@
 | `tests/custom_records.rs` | 扩展的会话记录：`custom_message` 投影为用户消息且可被 `context_edit` 省略、`custom` 不进投影、文件中的字段写法与重新打开、空类型不写入 |
 | `tests/session_branch.rs` | 会话内切换分支（P10 ⑥c）：`AgentSession::branch` 到更早的回答后继续且离开的分支仍在文件里、接在带未答调用的回答后把调用记为未执行且不再执行、回到根重新开始、运行中返回 Busy、未知条目被拒且位置不变、`inspect` 期间会话被占用 |
 | `tests/session_fork.rs` | 复制分支成新会话（P10 ⑥b）：只复制选中的分支、条目逐字节相同、头部的 `parentSession`、副本可重新打开并追加、源文件不变、复制来的请求能从副本还原；目标不为空、叶子不存在时不写入；没有 `parentSession` 的头部保持原格式 |
-| `tests/sessions_cli.rs` | 会话目录（P10 ⑥a、⑥b）：chat 默认的位置、文件名与权限，`--no-session`，`--resume` 取本工作目录最近的会话或按 ID 前缀，默认会话目录随 `ZX_AGENT_HOME` 移动，`zx-agent sessions` 的顺序与预览，chat 的 `/sessions`、`/resume` 与 `/new`；`--fork` 按 ID 或文件复制、找不到时不建文件，`/fork` 之后只写副本，`--no-session` 时没有可复制的文件；`/tree` 的分支与标记、`/branch` 接在条目之后或自己的消息之前、`/fork` 复制到移动后的位置、ID 不唯一或不存在时的提示（固定 ID 的种子会话 `seed_tree`）。每个测试有自己的 `HOME`；启动 chat 的其他测试构造器同样把 `HOME` 设到临时目录，新的构造器也要这样做，否则会写进真实的家目录 |
-| `tests/chat_cli.rs` | chat 的脚本 stdin、审批与过期（含 `y`、`n` 别名，默认 agent 下 write_file 先审批，文件内容与编辑逐项显示）、工具行与结果预览（含 edit_file 的补丁）、`[turn]` 行与 `/status`、`--color`、续接会话的提示、重试错误只报一次、无用量的 `[turn]`、`--show-thinking`、`/queue`、`[[models]]` 的单价与 `[turn]` / `/status` 的成本、`provider.headers` 与 `provider.promptCacheKey`、`[[models]]` 的 `contextWindow` 推导的 token 阈值、信号与超时（取消只报告一次，空闲时 Ctrl+C 两次退出）、取消后丢弃残留插话、钩子失败的提示、Unicode、模型与推理强度的切换、`/continue`、会话重置和 Unix PTY（插话、粘贴合并、等待时的状态行、回答前后的空行） |
+| `tests/sessions_cli.rs` | 会话目录（P10 ⑥a）：chat 默认的位置、文件名与权限，`--no-session`，`--resume` 取本工作目录最近的会话或按 ID 前缀，默认会话目录随 `ZX_AGENT_HOME` 移动，`zx-agent sessions` 的顺序与预览，chat 的 `/new`。每个测试有自己的 `HOME`；启动 chat 的其他测试构造器同样把 `HOME` 设到临时目录，新的构造器也要这样做，否则会写进真实的家目录 |
+| `tests/chat_cli.rs` | chat 的脚本 stdin、审批与过期（含 `y`、`n` 别名，默认 agent 下 write_file 先审批，文件内容与编辑逐项显示）、工具行与结果预览（含 edit_file 的补丁）、`[turn]` 行与 `/status`、`--color`、续接会话的提示、重试错误只报一次、无用量的 `[turn]`、`[[models]]` 的单价与 `[turn]` / `/status` 的成本、`provider.headers` 与 `provider.promptCacheKey`、`[[models]]` 的 `contextWindow` 推导的 token 阈值、信号与超时（取消只报告一次，空闲时 Ctrl+C 两次退出）、取消后丢弃残留插话、钩子失败的提示、Unicode、模型与推理强度的切换、`/continue`、会话重置和 Unix PTY（插话、粘贴合并、回答前后的空行） |
 | `tests/acp_cli.rs` | `acp`：手写的 JSON-RPC 客户端经子进程 stdio 驱动：初始化与建会话、流式回答、工具调用与权限请求（批准、拒绝）、取消、未知会话、`write_file` 的 diff 与自动放行；会话落盘与 `session/load`（第二个进程回放后继续、工具调用连同结果、活着的会话原地回放、`--no-session`、未知会话、`--session` 被拒；`session/list` 的顺序、标题、时间、按 cwd 过滤与 `cursor` 拒绝；`session/resume` 不回放）；每个进程有自己的 `HOME`；stdout 的每一行都必须是协议消息 |
 | `tests/agents_cli.rs` | 主目录的 agent 替换内置 agent、其他文件名不读取、agent/CLI 覆盖与 deny、`ask` 加 `allow` 在 run 中拒绝其余命令、项目上下文范围、默认值与越界链接、skill 懒加载、工具策略和审计 |
 | `tests/config_cli.rs` | `config.toml` 的位置（`~/.zx-agent`、`ZX_AGENT_HOME`，相对路径被拒绝）、模型与服务地址的优先级、没有模型时的错误、未知键、原命令行设置从文件读取、无效值的键名 |

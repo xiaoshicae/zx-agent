@@ -8,22 +8,10 @@ pub(super) enum Command {
     /// `/reasoning`: show; `/reasoning <level>`: change; `/reasoning default`: leave it to the
     /// server.
     Reasoning(Option<String>),
-    /// `/queue`: show how queued input is taken; `/queue <mode>`: change it.
-    Queue(Option<String>),
     Compact,
     /// Continue without new input.
     Continue,
     Status,
-    /// List the sessions in the session directory.
-    Sessions,
-    /// Switch to the session whose ID starts with this prefix.
-    Resume(String),
-    /// Continue in a copy of the current session.
-    Fork,
-    /// Show the session tree.
-    Tree,
-    /// Continue from the entry whose ID starts with this prefix.
-    Branch(String),
     /// A command an extension registered, with the text after its name.
     Extension {
         name: String,
@@ -63,38 +51,22 @@ pub(super) fn parse(line: String, extensions: &[(String, String)]) -> Command {
         "/compact" if rest.is_empty() => Command::Compact,
         "/continue" if rest.is_empty() => Command::Continue,
         "/status" if rest.is_empty() => Command::Status,
-        "/sessions" if rest.is_empty() => Command::Sessions,
-        "/resume" if rest.is_empty() => {
-            Command::Invalid("give a session ID: /resume <ID>; /sessions lists them".into())
-        }
-        "/resume" => Command::Resume(rest.to_string()),
-        "/fork" if rest.is_empty() => Command::Fork,
-        "/tree" if rest.is_empty() => Command::Tree,
-        "/branch" if rest.is_empty() => Command::Invalid("give an entry ID: /branch <ID>; /tree lists them".into()),
-        "/branch" => Command::Branch(rest.to_string()),
         "/model" => Command::Model((!rest.is_empty()).then(|| rest.to_string())),
         "/reasoning" => Command::Reasoning((!rest.is_empty()).then(|| rest.to_string())),
-        "/queue" => Command::Queue((!rest.is_empty()).then(|| rest.to_string())),
         _ => Command::Invalid(format!("unknown command or arguments: {name}; use /help")),
     }
 }
 
 /// The commands chat handles itself, which an extension's command cannot shadow.
-const BUILTIN: [&str; 14] = [
+const BUILTIN: [&str; 8] = [
     "/new",
     "/quit",
     "/help",
     "/compact",
     "/continue",
     "/status",
-    "/sessions",
-    "/resume",
-    "/fork",
-    "/tree",
-    "/branch",
     "/model",
     "/reasoning",
-    "/queue",
 ];
 
 fn is_builtin(name: &str) -> bool {
@@ -131,7 +103,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(clippy::cognitive_complexity, reason = "one assertion per command")]
     fn slash_commands_validate_arguments_instead_of_forwarding_them_to_the_model() {
         for invalid in [
             "/new extra",
@@ -139,24 +110,20 @@ mod tests {
             "/compact extra",
             "/continue extra",
             "/status extra",
-            "/sessions extra",
-            "/fork extra",
-            "/tree extra",
-            "/branch",
-            "/resume",
+            "/sessions",
+            "/resume 0b7c",
+            "/fork",
+            "/tree",
+            "/branch 1a2b",
+            "/queue all",
             "/unknown",
         ] {
             assert!(matches!(parse(invalid), Command::Invalid(_)), "{invalid}");
         }
-        assert!(matches!(parse("/tree"), Command::Tree));
-        assert!(matches!(parse("/branch 1a2b"), Command::Branch(id) if id == "1a2b"));
         assert!(matches!(parse("/model next"), Command::Model(Some(model)) if model == "next"));
         assert!(matches!(parse("/model"), Command::Model(None)));
         assert!(matches!(parse("/reasoning high"), Command::Reasoning(Some(level)) if level == "high"));
         assert!(matches!(parse("/reasoning"), Command::Reasoning(None)));
         assert!(matches!(parse("/status"), Command::Status));
-        assert!(matches!(parse("/resume 0b7c"), Command::Resume(id) if id == "0b7c"));
-        assert!(matches!(parse("/queue one-at-a-time"), Command::Queue(Some(mode)) if mode == "one-at-a-time"));
-        assert!(matches!(parse("/queue"), Command::Queue(None)));
     }
 }

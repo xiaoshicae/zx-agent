@@ -164,7 +164,7 @@ impl Attempt<'_> {
     /// Drain one queue in order, or only its oldest message in one-at-a-time mode; input
     /// removes each item only after it is recorded.
     pub(super) async fn drain_queue(&mut self, queue: Queue) -> Result<(), Halt> {
-        let mode = self.config.queues.mode(queue);
+        let mode = self.config.queues.mode();
         while let Some(message) = self.config.queues.front(queue) {
             self.queued_input(message, Some(queue)).await?;
             if mode == QueueMode::OneAtATime {
