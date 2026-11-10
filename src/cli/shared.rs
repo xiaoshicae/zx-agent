@@ -44,7 +44,7 @@ impl Shared {
     }
 
     /// Hide `names` from commands and redact their values: credentials besides the API key,
-    /// such as the IM platforms' tokens of serve.
+    /// such as the IM platforms' tokens of im.
     pub(crate) fn with_hidden_env(mut self, names: Vec<String>) -> Self {
         self.hidden_env = names;
         self
@@ -60,7 +60,7 @@ pub(crate) struct ModeSettings<A> {
 }
 
 /// The profile's MCP servers, connected once per process and shared by every session it
-/// opens, as serve does for each thread.
+/// opens, as im does for each thread.
 #[derive(Default)]
 pub(super) struct McpTools {
     pub(super) servers: Vec<Arc<dyn Extension>>,

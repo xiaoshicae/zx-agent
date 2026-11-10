@@ -42,7 +42,7 @@ use zx_agent::tools::{BASH, EDIT_FILE, FIND, GREP, LS, READ_FILE, WRITE_FILE};
 
 use crate::cli::{self, AcpArgs, ModeSettings, PreparedSession, SessionOptions};
 use crate::process::{EXIT_COMPLETED, with_telemetry};
-use crate::sessions::{self, SessionFile};
+use crate::session_files::{self, SessionFile};
 
 use permissions::Permissions;
 use updates::Updates;
@@ -90,7 +90,7 @@ impl Host {
         }
         match &args.session_dir {
             Some(dir) => Ok(Some(dir.clone())),
-            None => sessions::default_dir(&cli::resolve_cwd(Some(cwd))?).map(Some),
+            None => session_files::default_dir(&cli::resolve_cwd(Some(cwd))?).map(Some),
         }
     }
 
@@ -115,7 +115,7 @@ impl Host {
         let dir = self
             .session_dir(cwd)?
             .ok_or_else(|| unknown_session(id, "the agent keeps no session files (--no-session)"))?;
-        let list = sessions::list(&dir).await?;
+        let list = session_files::list(&dir).await?;
         match list.sessions.iter().find(|session| session.id == id) {
             Some(session) => Ok(Located::File(session.path.clone())),
             None => Err(unknown_session(id, &format!("no such session in {}", dir.display())).into()),
@@ -172,7 +172,7 @@ impl Host {
         let Some(dir) = self.session_dir(&cwd)? else {
             return Ok(Vec::new());
         };
-        let list = sessions::list(&dir).await?;
+        let list = session_files::list(&dir).await?;
         // With `--session-dir`, one directory holds every working directory's sessions.
         let cwd = cwd.display().to_string();
         Ok(list
@@ -417,7 +417,7 @@ fn session_info(session: &StoredSession) -> SessionInfo {
         .and_then(chrono::DateTime::from_timestamp_millis)
         .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
     SessionInfo::new(SessionId::new(session.id.as_str()), PathBuf::from(&session.cwd))
-        .title(session.first_prompt.as_deref().map(sessions::preview_text))
+        .title(session.first_prompt.as_deref().map(session_files::preview_text))
         .updated_at(updated_at)
 }
 

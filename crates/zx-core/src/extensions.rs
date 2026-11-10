@@ -9,7 +9,7 @@ use crate::ai::PREAMBLE;
 use crate::prompt::GENERATED_SECTIONS;
 
 /// Tools, hooks and system prompt sections registered together, such as a client for an
-/// external tool server. A host may register one extension into many loops, as serve does
+/// external tool server. A host may register one extension into many loops, as `zx-agent im` does
 /// for each chat thread: the tools are shared, and `hooks` is called once per registration.
 ///
 /// ```

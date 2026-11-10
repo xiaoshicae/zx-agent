@@ -11,7 +11,7 @@ use zx_agent::ai::{AssistantMessage, Message, StopReason, UserMessageKind};
 use zx_agent::session::{Entry, SessionStore};
 
 use crate::render::{local_time, visible};
-use crate::sessions::preview_text;
+use crate::session_files::preview_text;
 
 /// Spaces per level of a branch left behind.
 const INDENT: &str = "    ";

@@ -10,7 +10,7 @@ use zx_agent::executor::{ContainerConfig, ContainerExecutor, Executor, LocalExec
 use zx_agent::profile::{ContainerSettings, Execution, Profile};
 use zx_agent::prompt::environment_section;
 
-use crate::sessions::SessionFile;
+use crate::session_files::SessionFile;
 
 /// The container reads the whole working directory, so the session file must be outside it:
 /// masking one path would leave hard links to it and earlier session files beside it readable.

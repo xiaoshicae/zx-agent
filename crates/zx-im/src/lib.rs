@@ -182,7 +182,7 @@ pub enum Choice {
 }
 
 /// Texts of approval cards, for every platform. The defaults are English, like [`Replies`];
-/// a deployment sets its users' language, for example in the configuration of `serve`
+/// a deployment sets its users' language, for example in the configuration of `zx-agent im`
 /// (`[cardLabels]`, fields in camelCase, each optional).
 ///
 /// [`outcome`](Self::outcome) picks the label that says how an approval ended.

@@ -1,4 +1,4 @@
-//! The compiled program with MCP servers from a profile: run, chat and serve connect them at
+//! The compiled program with MCP servers from a profile: run, chat and im connect them at
 //! startup; a tool the server's allowTools lists runs, the others ask (and `run`, with no one
 //! to ask, refuses them); the token is hidden from commands and redacted; a server that
 //! cannot be used stops startup.
@@ -220,11 +220,11 @@ async fn startup_stops_when_an_mcp_server_cannot_be_used() {
 }
 
 #[tokio::test]
-async fn serve_connects_the_mcp_servers_before_it_serves() {
+async fn im_connects_the_mcp_servers_before_it_serves() {
     let dir = tempfile::tempdir().unwrap();
     let fake = prom().await;
     let model = MockServer::start(Vec::new()).await;
-    let config = dir.path().join("serve.toml");
+    let config = dir.path().join("im.toml");
     // Nothing listens on port 9, so the Slack connection keeps failing; this test stops first.
     std::fs::write(
         &config,
@@ -232,7 +232,7 @@ async fn serve_connects_the_mcp_servers_before_it_serves() {
          approvers = [\"slack:U2\"]\n[sessions]\ndir = \"sessions\"\n",
     )
     .unwrap();
-    let mut child = program("serve", &model, dir.path(), &profile(dir.path(), &fake.url, "[]"))
+    let mut child = program("im", &model, dir.path(), &profile(dir.path(), &fake.url, "[]"))
         .args(["--config", config.to_str().unwrap()])
         .env("SLACK_APP_TOKEN", "xapp-test")
         .env("SLACK_BOT_TOKEN", "xoxb-test")
@@ -245,7 +245,7 @@ async fn serve_connects_the_mcp_servers_before_it_serves() {
     let mut seen = Vec::new();
     tokio::time::timeout(WAIT, async {
         while let Some(line) = lines.next_line().await.unwrap() {
-            let serving = line.starts_with("[serve] platforms=");
+            let serving = line.starts_with("[im] platforms=");
             seen.push(line);
             if serving {
                 return;
@@ -253,7 +253,7 @@ async fn serve_connects_the_mcp_servers_before_it_serves() {
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("serve did not start: {seen:?}"));
+    .unwrap_or_else(|_| panic!("im did not start: {seen:?}"));
     child.kill().await.unwrap();
     let mcp = seen.iter().position(|line| line.starts_with("[mcp] prom: prom__query"));
     assert!(mcp.is_some_and(|index| index < seen.len() - 1), "{seen:?}");

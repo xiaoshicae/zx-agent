@@ -1,4 +1,4 @@
-//! The assembly of one session, shared by run, chat, serve and acp: the profile with the
+//! The assembly of one session, shared by run, chat, im and acp: the profile with the
 //! command line over it, the provider, the tools, the session file and the hooks every mode
 //! registers.
 
@@ -31,7 +31,7 @@ use zx_agent::tools::{self, BASH};
 
 use super::execution::{check_session_outside, executor};
 use super::{BaseArgs, BudgetArgs, RequestArgs, Shared, TransportArgs, env_value, resolve_cwd};
-use crate::sessions::{self, SessionFile};
+use crate::session_files::{self, SessionFile};
 
 /// Register a built-in hook under a fixed name, which `hook_failed` events and `[hook]` lines
 /// show.
@@ -88,7 +88,7 @@ pub(crate) struct PreparedSession {
 impl PreparedSession {
     /// Ask a person before every bash command, except those the profile auto-approves, or
     /// none when the profile approves every call; other tools follow the profile's rules.
-    /// Chat and serve both work this way.
+    /// Chat and im both work this way.
     pub(crate) fn require_bash_approval(&mut self, reason: &str) {
         if self.approve_all {
             return;
@@ -376,14 +376,14 @@ async fn open_session(
         check_session_outside(&options.file, cwd)?;
     }
     let header = SessionHeader::new(cwd, options.model);
-    let opened = sessions::open_existing(&options.file)?;
+    let opened = session_files::open_existing(&options.file)?;
     let session_id = opened
         .as_ref()
         .map_or_else(|| header.id.clone(), |session| session.header().id.clone());
     let (executor, environment) = executor(profile, cwd, &session_id, hidden_env(options)).await?;
     let session = match opened {
         Some(session) => session,
-        None => sessions::create(options.file, header)?,
+        None => session_files::create(options.file, header)?,
     };
     if session.recovered_tail_bytes() > 0 {
         eprintln!(
