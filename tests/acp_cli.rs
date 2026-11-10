@@ -74,6 +74,7 @@ impl Acp {
             .args(args)
             .current_dir(cwd)
             .env("HOME", &home)
+            .env_remove("ZX_AGENT_HOME")
             .env(KEY_VAR, "sk-acp-test-key")
             .env_remove("ZX_MODEL")
             .env_remove("ZX_BASE_URL")
@@ -671,6 +672,7 @@ async fn a_single_session_file_is_refused_before_the_connection() {
         .args(["acp", "--model", "m", "--session"])
         .arg(work.path().join("one.jsonl"))
         .env("HOME", work.path())
+        .env_remove("ZX_AGENT_HOME")
         .stdin(Stdio::null())
         .output()
         .await

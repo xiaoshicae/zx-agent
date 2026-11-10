@@ -158,7 +158,7 @@ pub(crate) async fn run(args: ChatArgs) -> Result<u8> {
 }
 
 async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> {
-    let shared = cli::Shared::connect(&args.base, Builtin::Assistant, &args.transport).await?;
+    let shared = cli::Shared::connect(&args.base, &args.request, &args.transport, Builtin::Assistant).await?;
     let mode = if std::io::stdin().is_terminal() {
         InputMode::Terminal
     } else {
@@ -178,7 +178,7 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
     };
     let args = &chat.settings.args;
     let output = &chat.output;
-    let model = args.base.model.clone();
+    let model = chat.settings.shared.settings.model.clone();
     let (storage, first) = opening(args, &model).await?;
     let file = match (&storage, first.path()) {
         (_, Some(path)) | (Storage::File(path), None) => SessionFile::Open(path),
@@ -203,7 +203,7 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
         storage,
         built,
         model,
-        reasoning: args.request.reasoning,
+        reasoning: chat.settings.shared.settings.reasoning,
     };
     loop {
         let line = match terminal.read(output).await? {

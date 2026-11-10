@@ -40,8 +40,48 @@ use zx_agent::runner::{Limits, Runner};
 use zx_agent::session::{Entry, SessionHeader, SessionStore};
 
 /// The compiled `zx-agent`, for the tests that drive the program.
+///
+/// It runs without the variables a developer may have set for zx-agent, and with a zx-agent
+/// home directory that holds nothing, so that no `config.toml` or agent of the real home
+/// reaches a test. A test that needs a home of its own sets `ZX_AGENT_HOME` again (see
+/// [`ConfigHome`]), or removes it and sets `HOME`.
 pub(crate) fn zx_agent() -> tokio::process::Command {
-    tokio::process::Command::new(env!("CARGO_BIN_EXE_zx-agent"))
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_zx-agent"));
+    command
+        .env("ZX_AGENT_HOME", EMPTY_HOME)
+        .env_remove("ZX_MODEL")
+        .env_remove("ZX_BASE_URL");
+    command
+}
+
+/// The zx-agent home of [`zx_agent`]: nothing creates it, so it holds no configuration.
+const EMPTY_HOME: &str = concat!(env!("CARGO_TARGET_TMPDIR"), "/zx-agent-empty-home");
+
+/// A zx-agent home directory of its own, for `ZX_AGENT_HOME`, with a `config.toml`. Removed on
+/// drop.
+pub(crate) struct ConfigHome {
+    dir: tempfile::TempDir,
+}
+
+impl ConfigHome {
+    /// A home whose `config.toml` holds `config`.
+    pub(crate) fn new(config: &str) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        write_config(dir.path(), config);
+        Self { dir }
+    }
+
+    /// The directory, as `ZX_AGENT_HOME` takes it.
+    pub(crate) fn path(&self) -> &Path {
+        self.dir.path()
+    }
+}
+
+/// Write `config` as the `config.toml` of the zx-agent home `home`, such as `<HOME>/.zx-agent`
+/// of a test that sets `HOME`.
+pub(crate) fn write_config(home: &Path, config: &str) {
+    std::fs::create_dir_all(home).unwrap();
+    std::fs::write(home.join("config.toml"), config).unwrap();
 }
 
 /// What a finished program wrote to stdout, decoded lossily.

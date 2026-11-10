@@ -10,7 +10,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use common::mock_server::{MockServer, Reply};
-use common::{json_lines, stderr, stdout, zx_agent};
+use common::{json_lines, stderr, stdout, write_config, zx_agent};
 use zx_agent::ai::Message;
 use zx_agent::session::SessionStore;
 
@@ -32,6 +32,7 @@ fn command(server: &MockServer, dir: &Path, mode: &str, args: &[&str]) -> Comman
         .current_dir(dir)
         // chat keeps sessions under the home directory by default; never the real one.
         .env("HOME", dir.join(".home"))
+        .env_remove("ZX_AGENT_HOME")
         .env("ZX_PROFILE_TEST_KEY", "sk-profile-key")
         .env_remove("ZX_MODEL")
         .env_remove("ZX_BASE_URL")
@@ -59,6 +60,13 @@ fn tool_result(server: &MockServer, index: usize) -> String {
 }
 fn profile(dir: &Path, text: &str) {
     std::fs::write(dir.join("profile.toml"), text).unwrap();
+}
+/// The zx-agent home of [`command`] run in `dir`: `.zx-agent` in its home directory.
+fn agent_home(dir: &Path) -> std::path::PathBuf {
+    dir.join(".home/.zx-agent")
+}
+fn config(dir: &Path, text: &str) {
+    write_config(&agent_home(dir), text);
 }
 fn skill_reply() -> Reply {
     Reply::Sse(vec![
@@ -184,12 +192,10 @@ async fn an_explicit_tool_set_without_read_output_keeps_large_results_inline() {
 }
 
 #[tokio::test]
-async fn a_profile_can_disable_spilling_without_removing_the_reading_tool() {
+async fn config_can_disable_spilling_without_removing_the_reading_tool() {
     let dir = tempfile::tempdir().unwrap();
-    profile(
-        dir.path(),
-        "tools = ['read_file', 'read_output']\n[toolOutput]\nthresholdBytes = 0",
-    );
+    profile(dir.path(), "tools = ['read_file', 'read_output']");
+    config(dir.path(), "[toolOutput]\nthresholdBytes = 0");
     std::fs::write(dir.path().join("source.txt"), "x".repeat(20_000)).unwrap();
     let server = MockServer::start(vec![read_file_reply(), Reply::text("done")]).await;
     let output = run(&server, dir.path(), &["--profile", "profile.toml", "go"]).await;
@@ -206,22 +212,17 @@ async fn a_profile_can_disable_spilling_without_removing_the_reading_tool() {
 }
 
 #[tokio::test]
-async fn a_configured_output_directory_is_relative_to_the_profile_file() {
+async fn a_configured_output_directory_is_relative_to_config_toml() {
     let dir = tempfile::tempdir().unwrap();
-    let config_dir = dir.path().join("config");
-    std::fs::create_dir(&config_dir).unwrap();
-    profile(
-        &config_dir,
-        "tools = ['read_file', 'read_output']\n[toolOutput]\ndirectory = 'results'\nthresholdBytes = 256",
-    );
+    config(dir.path(), "[toolOutput]\ndirectory = 'results'\nthresholdBytes = 256");
     std::fs::write(dir.path().join("source.txt"), "x".repeat(1000)).unwrap();
     let server = MockServer::start(vec![read_file_reply(), Reply::text("done")]).await;
-    let output = run(&server, dir.path(), &["--profile", "config/profile.toml", "go"]).await;
+    let output = run(&server, dir.path(), &["--tools", "read_file,read_output", "go"]).await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let reference: Value = serde_json::from_str(&tool_result(&server, 1)).unwrap();
     assert_eq!(
         Path::new(reference["path"].as_str().unwrap()).parent(),
-        Some(config_dir.join("results").canonicalize().unwrap().as_path())
+        Some(agent_home(dir.path()).join("results").as_path())
     );
 }
 
@@ -263,8 +264,6 @@ async fn invalid_context_budgets_fail_before_creating_a_session_or_calling_the_m
     for text in [
         "[compaction]\ntriggerBytes = 100\nkeepRecentBytes = 200",
         "[compaction]\nmaxSummaryTokens = 0",
-        "[toolOutput]\nthresholdBytes = 1",
-        "[toolOutput]\nmaxFileBytes = 1048577",
     ] {
         let dir = tempfile::tempdir().unwrap();
         profile(dir.path(), text);
@@ -406,7 +405,6 @@ async fn invalid_configuration_exits_2_without_a_model_request_or_session_file()
     for text in [
         "broken = true",
         "[limits]\nmaxModelRequests = -1",
-        "execution = 'container'",
         "[context]\nfiles = ['missing.md']",
     ] {
         let dir = tempfile::tempdir().unwrap();
@@ -419,6 +417,26 @@ async fn invalid_configuration_exits_2_without_a_model_request_or_session_file()
         )
         .await;
         assert_eq!(output.status.code(), Some(2), "{text}: {}", stderr(&output));
+        assert!(server.requests().is_empty());
+        assert!(!dir.path().join("audit.jsonl").exists());
+    }
+}
+
+#[tokio::test]
+async fn an_invalid_config_toml_exits_2_without_a_model_request_or_session_file() {
+    for text in [
+        "broken = true",
+        "execution = 'container'",
+        "[toolOutput]\nthresholdBytes = 1",
+        "[toolOutput]\nmaxFileBytes = 1048577",
+        "[[mcp]]\nname = 'prom'\nurl = 'https://prom.example/mcp'\ntools = []",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        config(dir.path(), text);
+        let server = MockServer::start(vec![]).await;
+        let output = run(&server, dir.path(), &["--session", "audit.jsonl", "go"]).await;
+        assert_eq!(output.status.code(), Some(2), "{text}: {}", stderr(&output));
+        assert!(stderr(&output).contains("config.toml"), "{text}: {}", stderr(&output));
         assert!(server.requests().is_empty());
         assert!(!dir.path().join("audit.jsonl").exists());
     }

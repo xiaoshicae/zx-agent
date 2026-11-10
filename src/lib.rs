@@ -8,6 +8,7 @@
 //! - [`session`]: append-only JSONL session tree and its projection (pi: SessionManager)
 //! - [`agent_session`]: shared prompts, cancellation, subscriptions and model switching
 //! - [`runner`]: exclusive run ownership, retries, limits and persistence
+//! - [`config`]: `config.toml`, the environment: the model, its provider and where commands run
 //! - [`profile`]: scenarios as files: instructions, tools, rules and limits
 //! - [`prompt`]: system prompt assembly and the generated environment section
 //! - [`tools`]: built-in tools
@@ -52,5 +53,6 @@ pub mod im {
     pub use zx_im_slack as slack;
 }
 
+pub mod config;
 pub mod otel;
 pub mod profile;

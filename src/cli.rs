@@ -1,11 +1,13 @@
 //! The command line: the subcommands, their arguments and the value parsers.
 //!
+//! - `settings`: config.toml with the command line and its variables over it
 //! - `shared`: what every session of a process shares, read or connected once
 //! - `prepare`: the assembly of one session, shared by run, chat, serve and acp
 //! - `execution`: where a session's commands run: this machine or a Docker container
 
 mod execution;
 mod prepare;
+mod settings;
 mod shared;
 
 use std::path::{Path, PathBuf};
@@ -18,6 +20,7 @@ use zx_agent::ai::Reasoning;
 use zx_agent::ai::openai::{ReasoningFormat, SystemUpdates};
 
 pub(crate) use prepare::{PreparedSession, SessionOptions, prepare};
+pub(crate) use settings::Settings;
 pub(crate) use shared::{ModeSettings, Shared};
 
 #[derive(Parser)]
@@ -121,7 +124,8 @@ pub(crate) struct ChatArgs {
     pub(crate) color: ColorArg,
 
     /// Directory for new session files and for --resume, /sessions and /resume. Defaults to
-    /// ~/.zx-agent/sessions/--<cwd with / as ->--, one directory per working directory.
+    /// sessions/--<cwd with / as ->-- in the zx-agent home (ZX_AGENT_HOME, else ~/.zx-agent),
+    /// one directory per working directory.
     #[arg(long, conflicts_with = "session")]
     pub(crate) session_dir: Option<PathBuf>,
 
@@ -172,8 +176,8 @@ pub(crate) struct AcpArgs {
     pub(crate) approval_timeout_secs: u64,
 
     /// Directory for session files, one per session, where `session/load` finds them again.
-    /// Defaults to ~/.zx-agent/sessions/--<cwd with / as ->--, one directory per working
-    /// directory, shared with chat.
+    /// Defaults to sessions/--<cwd with / as ->-- in the zx-agent home (ZX_AGENT_HOME, else
+    /// ~/.zx-agent), one directory per working directory, shared with chat.
     #[arg(long, conflicts_with = "session")]
     pub(crate) session_dir: Option<PathBuf>,
 
@@ -212,7 +216,7 @@ pub(crate) struct ServeArgs {
 #[derive(Args)]
 pub(crate) struct SessionsArgs {
     /// Directory of session files. Defaults to the one chat uses for --cwd:
-    /// ~/.zx-agent/sessions/--<cwd with / as ->--.
+    /// sessions/--<cwd with / as ->-- in the zx-agent home (ZX_AGENT_HOME, else ~/.zx-agent).
     #[arg(long)]
     pub(crate) session_dir: Option<PathBuf>,
 
@@ -223,25 +227,28 @@ pub(crate) struct SessionsArgs {
 
 #[derive(Args)]
 pub(crate) struct BaseArgs {
-    /// Model id passed to the provider.
+    /// Model id passed to the provider. Defaults to model in config.toml.
     #[arg(long, env = "ZX_MODEL")]
-    pub(crate) model: String,
+    pub(crate) model: Option<String>,
 
-    /// OpenAI-compatible base URL (without /chat/completions).
-    #[arg(long, env = "ZX_BASE_URL", default_value = "https://api.openai.com/v1")]
-    pub(crate) base_url: String,
+    /// OpenAI-compatible base URL (without /chat/completions). Defaults to provider.baseUrl
+    /// in config.toml, else https://api.openai.com/v1.
+    #[arg(long, env = "ZX_BASE_URL")]
+    pub(crate) base_url: Option<String>,
 
     /// Name of the environment variable holding the API key. The key itself is never
-    /// accepted as an argument, so it does not appear in process listings.
-    #[arg(long, default_value = "OPENAI_API_KEY")]
-    pub(crate) api_key_env: String,
+    /// accepted as an argument, so it does not appear in process listings. Defaults to
+    /// provider.apiKeyEnv in config.toml, else OPENAI_API_KEY.
+    #[arg(long)]
+    pub(crate) api_key_env: Option<String>,
 
     /// How system prompt changes reach the model when a session is resumed. collapse: fold
     /// every version into the leading system message; works with any server. inline: send
     /// each change where it happened, which keeps the prompt cache and shows the model when
     /// the prompt changed, but needs a server that accepts system messages mid-conversation.
-    #[arg(long, value_parser = parse_system_updates, default_value = "collapse")]
-    pub(crate) system_updates: SystemUpdates,
+    /// Defaults to provider.systemUpdates in config.toml, else collapse.
+    #[arg(long, value_parser = parse_system_updates)]
+    pub(crate) system_updates: Option<SystemUpdates>,
 
     /// Working directory for tools. Defaults to the current directory.
     #[arg(long)]
@@ -345,22 +352,25 @@ pub(crate) struct RequestArgs {
     #[arg(long = "request-field", value_name = "KEY=JSON")]
     pub(crate) request_fields: Vec<String>,
 
-    /// How hard a reasoning model thinks: off, minimal, low, medium, high or xhigh. Unset,
-    /// requests carry no reasoning setting and the server decides. chat can change it with
-    /// /reasoning. The session's request audit records it.
+    /// How hard a reasoning model thinks: off, minimal, low, medium, high or xhigh. Defaults
+    /// to reasoning in config.toml; unset there too, requests carry no reasoning setting and
+    /// the server decides. chat can change it with /reasoning. The session's request audit
+    /// records it.
     #[arg(long, value_parser = parse_reasoning)]
     pub(crate) reasoning: Option<Reasoning>,
 
     /// How --reasoning is written in the request: effort (reasoning_effort, the OpenAI field;
     /// off sends nothing), thinking (a thinking object, enabled or disabled, with
     /// reasoning_effort) or reasoning-object (reasoning.effort). Check which fields the server
-    /// documents. The session's request audit records it.
-    #[arg(long, value_parser = parse_reasoning_format, default_value = "effort")]
-    pub(crate) reasoning_format: ReasoningFormat,
+    /// documents. The session's request audit records it. Defaults to
+    /// provider.reasoningFormat in config.toml, else effort.
+    #[arg(long, value_parser = parse_reasoning_format)]
+    pub(crate) reasoning_format: Option<ReasoningFormat>,
 
     /// Once one earlier answer carries reasoning_content, send the others with an empty one,
     /// for thinking-mode servers that reject a history in which only some answers carry it.
-    /// The session's request audit records the choice.
+    /// The session's request audit records the choice. Also on with
+    /// provider.fillMissingReasoning in config.toml.
     #[arg(long)]
     pub(crate) fill_missing_reasoning: bool,
 
@@ -370,7 +380,8 @@ pub(crate) struct RequestArgs {
 
     /// Send the session ID as the request's prompt_cache_key, so that the requests of one
     /// conversation share the server's prompt cache (OpenAI takes the field; servers that
-    /// reject unknown fields must not get it). The request audit records the key.
+    /// reject unknown fields must not get it). The request audit records the key. Also on
+    /// with provider.promptCacheKey in config.toml.
     #[arg(long)]
     pub(crate) prompt_cache_key: bool,
 }

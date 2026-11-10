@@ -10,7 +10,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{ChildStdout, Command};
 
 use common::mock_server::{MockServer, Reply};
-use common::{ProfileFile, json_lines, signal, stderr, stdout, tool_call_answer, zx_agent};
+use common::{ProfileFile, json_lines, signal, stderr, stdout, tool_call_answer, write_config, zx_agent};
 use zx_agent::ai::Message;
 use zx_agent::session::SessionStore;
 
@@ -39,6 +39,7 @@ fn chat_retrying(server: &MockServer, cwd: &Path, args: &[&str], max_retries: &s
         .current_dir(cwd)
         // chat keeps sessions under the home directory by default; never the real one.
         .env("HOME", cwd.join(".home"))
+        .env_remove("ZX_AGENT_HOME")
         .env(KEY_VAR, KEY)
         .env_remove("ZX_MODEL")
         .env_remove("ZX_BASE_URL")
@@ -1848,18 +1849,17 @@ async fn the_queue_mode_is_set_at_startup_and_changed_with_a_command() {
 }
 
 #[tokio::test]
-async fn a_profile_prices_the_model_and_the_cost_shows_in_turn_and_status_lines() {
+async fn config_prices_the_model_and_the_cost_shows_in_turn_and_status_lines() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(
-        dir.path().join("profile.toml"),
-        "extends = \"assistant\"\n\n[[models]]\nid = \"mock-model\"\ncost = { input = 1000000.0, output = 2000000.0 }\n",
-    )
-    .unwrap();
+    config(
+        dir.path(),
+        "[[models]]\nid = \"mock-model\"\ncost = { input = 1000000.0, output = 2000000.0 }\n",
+    );
     let server = MockServer::start(vec![Reply::text("answer")]).await;
     let output = run(
         &server,
         dir.path(),
-        &["--profile", "profile.toml", "--tools", "", "--no-session"],
+        &["--tools", "", "--no-session"],
         "hi\n/status\n/quit\n",
     )
     .await;
@@ -1869,18 +1869,11 @@ async fn a_profile_prices_the_model_and_the_cost_shows_in_turn_and_status_lines(
     assert!(err.contains("· 10 in · 2 out · cost 14.0000 ·"), "{err}");
     assert!(err.contains("· 10 in · 2 out · 0 cached · cost 14.0000"), "{err}");
 
-    std::fs::write(
-        dir.path().join("bad.toml"),
-        "extends = \"assistant\"\n\n[[models]]\nid = \"mock-model\"\ncost = { input = -1.0, output = 0.0 }\n",
-    )
-    .unwrap();
-    let refused = run(
-        &server,
+    config(
         dir.path(),
-        &["--profile", "bad.toml", "--no-session"],
-        "/quit\n",
-    )
-    .await;
+        "[[models]]\nid = \"mock-model\"\ncost = { input = -1.0, output = 0.0 }\n",
+    );
+    let refused = run(&server, dir.path(), &["--no-session"], "/quit\n").await;
     assert_eq!(refused.status.code(), Some(2), "{}", stderr(&refused));
     assert!(
         stderr(&refused).contains("prices must be zero or more"),
@@ -1947,7 +1940,7 @@ async fn a_known_context_window_adds_a_token_trigger_to_automatic_summaries() {
     let server = MockServer::start(vec![Reply::text(&summary_json(&id)), Reply::text("answer")]).await;
     // Some 120 KiB of context: about 30000 tokens by the estimate, below the 256 KiB byte
     // budget but above the 23616 tokens a 40000-token window leaves under the reserve.
-    let profile = window_profile(40000, "");
+    let profile = window_profile(dir.path(), 40000, "");
     let output = run(
         &server,
         dir.path(),
@@ -1982,7 +1975,7 @@ async fn a_known_context_window_adds_a_token_trigger_to_automatic_summaries() {
         let dir = tempfile::tempdir().unwrap();
         seed_context(dir.path(), 120 * 1024).await;
         let server = MockServer::start(vec![Reply::text("answer")]).await;
-        let profile = window_profile(window, compaction);
+        let profile = window_profile(dir.path(), window, compaction);
         let all = [
             "--tools",
             "",
@@ -2000,10 +1993,17 @@ async fn a_known_context_window_adds_a_token_trigger_to_automatic_summaries() {
     }
 }
 
-/// The assistant profile with `window` as the context window of `mock-model`, and `extra`.
-fn window_profile(window: u64, extra: &str) -> ProfileFile {
-    ProfileFile::new(
-        "assistant",
-        &format!("[[models]]\nid = \"mock-model\"\ncontextWindow = {window}\n{extra}"),
-    )
+/// The assistant profile with `extra`, and a config.toml for chat in `dir` with `window` as
+/// the context window of `mock-model`.
+fn window_profile(dir: &Path, window: u64, extra: &str) -> ProfileFile {
+    config(
+        dir,
+        &format!("[[models]]\nid = \"mock-model\"\ncontextWindow = {window}\n"),
+    );
+    ProfileFile::new("assistant", extra)
+}
+
+/// Write `text` as the config.toml of chat in `dir`, whose home is `dir/.home`.
+fn config(dir: &Path, text: &str) {
+    write_config(&dir.join(".home/.zx-agent"), text);
 }

@@ -71,13 +71,13 @@ fn read_prompt(arg: &str) -> Result<String> {
 /// Assemble an unattended session from the selected profile, `unattended` unless another is
 /// given, without exposing interactive choices to the kernel.
 async fn build_session(args: &RunArgs) -> Result<AgentSession> {
-    let shared = cli::Shared::connect(&args.base, Builtin::Unattended, &args.transport).await?;
+    let shared = cli::Shared::connect(&args.base, &args.request, &args.transport, Builtin::Unattended).await?;
     let prepared = cli::prepare(cli::SessionOptions {
         base: &args.base,
         transport: &args.transport,
         request: &args.request,
         budget: &args.budget,
-        model: &args.base.model,
+        model: &shared.settings.model,
         cwd: None,
         file: SessionFile::from_path(args.request.session.as_deref()),
         default_profile: Builtin::Unattended,

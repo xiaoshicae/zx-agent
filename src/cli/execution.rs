@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
+use zx_agent::config::{Config, ContainerSettings, Execution};
 use zx_agent::executor::{ContainerConfig, ContainerExecutor, Executor, LocalExecutor, container_environment_section};
-use zx_agent::profile::{ContainerSettings, Execution, Profile};
 use zx_agent::prompt::environment_section;
 
 use crate::sessions::SessionFile;
@@ -54,21 +54,21 @@ fn resolve_location(path: &Path) -> Result<PathBuf> {
 /// On this machine commands do not see the variables `hidden_env` names; in a container they
 /// see none of the agent's environment.
 pub(super) async fn executor(
-    profile: &Profile,
+    config: &Config,
     cwd: &Path,
     label: &str,
     hidden_env: Vec<String>,
 ) -> Result<(Arc<dyn Executor>, String)> {
-    match profile.execution {
+    match config.execution {
         Execution::Local => {
             let local: Arc<dyn Executor> = Arc::new(LocalExecutor { hidden_env });
             Ok((local, environment_section(cwd)))
         }
         Execution::Container => {
-            let config = container_config(&profile.container, cwd, label)?;
+            let start = container_config(&config.container, cwd, label)?;
             // The description needs the settings, which starting the container consumes.
-            let settings = config.clone();
-            let container = ContainerExecutor::start(config)
+            let settings = start.clone();
+            let container = ContainerExecutor::start(start)
                 .await
                 .context("cannot start the container for container execution")?;
             let environment = container_environment_section(&settings, container.platform());
@@ -78,9 +78,9 @@ pub(super) async fn executor(
     }
 }
 
-/// Container settings from the profile; the session file must already be outside `cwd`.
+/// Container settings from config.toml; the session file must already be outside `cwd`.
 fn container_config(settings: &ContainerSettings, cwd: &Path, label: &str) -> Result<ContainerConfig> {
-    // `load_profile` has checked both fields; the contexts only name them.
+    // `Config::load` has checked both fields; the contexts only name them.
     let image = settings.image.clone().context("container.image")?;
     let mut config = ContainerConfig {
         label: label.into(),

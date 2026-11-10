@@ -13,7 +13,7 @@ use tokio::process::Command;
 
 use common::http::{Request, read_request};
 use common::mock_server::{MockServer, Reply};
-use common::{ProfileFile, json_lines, stderr, stdout, zx_agent};
+use common::{ConfigHome, ProfileFile, json_lines, stderr, stdout, zx_agent};
 
 /// An answer that would set the terminal title if a terminal ran it.
 const TITLE_ANSWER: &str = "before\u{1b}]0;CANARY\u{7}after";
@@ -573,26 +573,21 @@ async fn a_profile_sets_the_token_budget_and_zero_on_the_command_line_disables_i
     assert_eq!(unlimited.requests().len(), 2);
 }
 
-/// A profile whose model `mock` costs 0.01 per answer of the fake service (10 input tokens at
-/// 1000 per million; output free). The unit is whatever the prices use, such as CNY.
-fn priced_profile(dir: &std::path::Path) -> String {
-    let profile = dir.join("priced.toml");
-    std::fs::write(
-        &profile,
-        "[[models]]\nid = \"mock\"\ncost = { input = 1000.0, output = 0.0 }\n",
-    )
-    .unwrap();
-    profile.to_str().unwrap().to_string()
+/// A config.toml whose model `mock` costs 0.01 per answer of the fake service (10 input
+/// tokens at 1000 per million; output free). The unit is whatever the prices use, such as CNY.
+fn priced_config() -> ConfigHome {
+    ConfigHome::new("[[models]]\nid = \"mock\"\ncost = { input = 1000.0, output = 0.0 }\n")
 }
 
 #[tokio::test]
 async fn the_cost_budget_ends_a_run_with_exit_code_8_before_the_next_request() {
     let dir = tempfile::tempdir().unwrap();
     let server = two_answers().await;
-    let profile = priced_profile(dir.path());
+    let home = priced_config();
 
     let output = run(&server, dir.path())
-        .args(["--profile", &profile, "--cost-budget", "0.01"])
+        .args(["--cost-budget", "0.01"])
+        .env("ZX_AGENT_HOME", home.path())
         .output()
         .await
         .unwrap();

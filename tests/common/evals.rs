@@ -196,6 +196,7 @@ impl Harness {
             .arg(case.prompt)
             .current_dir(workspace)
             .env("HOME", home)
+            .env_remove("ZX_AGENT_HOME")
             .env_remove("ZX_MODEL")
             .env_remove("ZX_BASE_URL")
             .stdin(Stdio::null())

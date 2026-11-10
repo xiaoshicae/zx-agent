@@ -1,6 +1,6 @@
 //! The assembly of one session, shared by run, chat, serve and acp: the profile with the
-//! command line over it, the provider, the tools, the session file and the hooks every mode
-//! registers.
+//! command line over it, in the environment of the settings, the provider, the tools, the
+//! session file and the hooks every mode registers.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -15,6 +15,7 @@ use zx_agent::ai::ModelMeta;
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::compaction;
+use zx_agent::config::Execution;
 use zx_agent::continuation::ContinueOnLength;
 use zx_agent::executor::Executor;
 use zx_agent::extensions;
@@ -22,7 +23,7 @@ use zx_agent::otel;
 use zx_agent::output_store::{self, OutputStore, ReadOutputTool, SpillOutputs};
 use zx_agent::policy::{AutoApprove, CommandPolicy, PolicyHook, Rule, RuleMatcher, RulePolicy};
 use zx_agent::profile::skills::{ReadSkillTool, TOOL_NAME};
-use zx_agent::profile::{Builtin, Execution, Profile};
+use zx_agent::profile::{Builtin, Profile};
 use zx_agent::prompt::{self, build_system_prompt};
 use zx_agent::redact::RedactSecrets;
 use zx_agent::runner::{Limits, Runner};
@@ -30,7 +31,7 @@ use zx_agent::session::{SessionHeader, SessionStore};
 use zx_agent::tools::{self, BASH};
 
 use super::execution::{check_session_outside, executor};
-use super::{BaseArgs, BudgetArgs, RequestArgs, Shared, TransportArgs, env_value, resolve_cwd};
+use super::{BaseArgs, BudgetArgs, RequestArgs, Settings, Shared, TransportArgs, env_value, resolve_cwd};
 use crate::sessions::{self, SessionFile};
 
 /// Register a built-in hook under a fixed name, which `hook_failed` events and `[hook]` lines
@@ -116,11 +117,11 @@ impl PreparedSession {
     }
 }
 
-/// Refuse --request-field values that --reasoning would also set: which one the server
-/// gets would not be clear from the command.
-fn check_reasoning_fields(request: &RequestArgs, fields: &serde_json::Map<String, serde_json::Value>) -> Result<()> {
-    if request.reasoning.is_some()
-        && let Some(field) = request
+/// Refuse --request-field values that the reasoning level would also set: which one the
+/// server gets would not be clear from the command.
+fn check_reasoning_fields(settings: &Settings, fields: &serde_json::Map<String, serde_json::Value>) -> Result<()> {
+    if settings.reasoning.is_some()
+        && let Some(field) = settings
             .reasoning_format
             .fields()
             .iter()
@@ -128,7 +129,7 @@ fn check_reasoning_fields(request: &RequestArgs, fields: &serde_json::Map<String
     {
         anyhow::bail!(
             "--request-field {field} conflicts with --reasoning, which sets it with --reasoning-format {}; use one of them",
-            request.reasoning_format.as_str()
+            settings.reasoning_format.as_str()
         );
     }
     Ok(())
@@ -164,8 +165,8 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     )?;
     // Before the session file: invalid provider settings are configuration errors too.
     let (provider, api_key) = provider(&options)?;
-    let mut host = host_tools(&mut profile, &cwd)?;
-    let (session, executor, environment) = open_session(&options, &profile, &cwd).await?;
+    let mut host = host_tools(&mut profile, &options.shared.settings.config.tool_output, &cwd)?;
+    let (session, executor, environment) = open_session(&options, &cwd).await?;
     let tools = assemble_tools(&profile, &options, &executor, &mut host)?;
     let policy = CommandPolicy::new(&profile.rules.allow).deny_also(&profile.rules.deny);
     let command_policy = command_policy_section(&policy, &tools);
@@ -183,7 +184,7 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
         tools,
         cwd,
         max_tokens: options.request.max_tokens,
-        reasoning: options.request.reasoning,
+        reasoning: options.shared.settings.reasoning,
         ..LoopConfig::new(Arc::new(provider), options.model)
     };
     push_built_in(&mut config, "command_policy", PolicyHook::new(Arc::new(policy)));
@@ -192,7 +193,11 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
         .with_secret_files(options.shared.secret_files.clone());
     let auto_approve = register_hooks(&mut config, &mut profile, &options, redaction, host.spill.take())?;
     config.models = models;
-    config.cache_key = options.request.prompt_cache_key.then(|| session.header().id.clone());
+    config.cache_key = options
+        .shared
+        .settings
+        .prompt_cache_key
+        .then(|| session.header().id.clone());
     Ok(PreparedSession {
         config,
         retry: RetryPolicy {
@@ -215,15 +220,15 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
 fn settle(options: &SessionOptions<'_>) -> Result<(PathBuf, Profile, HashMap<String, ModelMeta>)> {
     let cwd = resolve_cwd(options.cwd.or(options.base.cwd.as_deref()))?;
     let mut profile = load_profile(options)?;
-    let models = model_meta(&mut profile, options.model);
+    let models = model_meta(&mut profile, &options.shared.settings.config.models, options.model);
     // Without prices every response costs nothing, and the budget would never stop a run.
     anyhow::ensure!(
         profile.limits.cost_budget.is_none() || models.get(options.model).is_some_and(|meta| meta.cost.is_some()),
-        "a cost budget needs the prices of the model {:?}: add them to the profile's [[models]]",
+        "a cost budget needs the prices of the model {:?}: add them to [[models]] in config.toml",
         options.model
     );
     // The container mounts the workspace at its real path, which tools must use as well.
-    let cwd = match profile.execution {
+    let cwd = match options.shared.settings.config.execution {
         Execution::Local => cwd,
         Execution::Container => cwd
             .canonicalize()
@@ -260,7 +265,8 @@ fn command_policy_section(policy: &CommandPolicy, tools: &[Arc<dyn Tool>]) -> St
 /// The selected profile with the command line's tools and budgets over it, validated: explicit
 /// values replace the profile's.
 fn load_profile(options: &SessionOptions<'_>) -> Result<Profile> {
-    let mut profile = Profile::load(options.base.profile.as_deref(), options.default_profile)?;
+    let config = &options.shared.settings.config;
+    let mut profile = Profile::load(options.base.profile.as_deref(), options.default_profile, config)?;
     if let Some(tools) = &options.base.tools {
         profile.tools = tools
             .iter()
@@ -270,7 +276,7 @@ fn load_profile(options: &SessionOptions<'_>) -> Result<Profile> {
             .collect();
     }
     apply_budgets(&mut profile, options.budget);
-    profile.validate()?;
+    profile.validate(config)?;
     Ok(profile)
 }
 
@@ -291,10 +297,10 @@ fn apply_budgets(profile: &mut Profile, budget: &BudgetArgs) {
     }
 }
 
-/// What is known about the models: the profile's entries. With automatic summaries on, a
+/// What is known about the models: the entries of config.toml. With automatic summaries on, a
 /// known window of `model` adds a token trigger below it.
-fn model_meta(profile: &mut Profile, model: &str) -> HashMap<String, ModelMeta> {
-    let models = std::mem::take(&mut profile.models);
+fn model_meta(profile: &mut Profile, known: &HashMap<String, ModelMeta>, model: &str) -> HashMap<String, ModelMeta> {
+    let models = known.clone();
     if profile.compaction.trigger_bytes.is_some()
         && let Some(window) = models.get(model).and_then(|meta| meta.context_window)
     {
@@ -303,23 +309,24 @@ fn model_meta(profile: &mut Profile, model: &str) -> HashMap<String, ModelMeta> 
     models
 }
 
-/// The provider of the command line's settings, and the API key it authenticates with.
+/// The provider of the settings, and the API key it authenticates with.
 fn provider(options: &SessionOptions<'_>) -> Result<(OpenAiCompatible, Option<String>)> {
+    let settings = &options.shared.settings;
     // Local servers (vLLM, Ollama, llama.cpp) often need no key, so a missing key is allowed.
-    let api_key = env_value(&options.base.api_key_env);
+    let api_key = env_value(&settings.api_key_env);
     let extra_fields = request_fields(&options.request.request_fields)?;
-    check_reasoning_fields(options.request, &extra_fields)?;
+    check_reasoning_fields(settings, &extra_fields)?;
     let provider = OpenAiCompatible::new(OpenAiConfig {
-        base_url: options.base.base_url.clone(),
+        base_url: settings.base_url.clone(),
         // Provider authentication and output filtering each need an owned copy.
         api_key: api_key.clone().into(),
         idle_timeout: Duration::from_secs(options.transport.idle_timeout_secs),
-        system_updates: options.base.system_updates,
+        system_updates: settings.system_updates,
         extra_fields,
-        fill_missing_reasoning: options.request.fill_missing_reasoning,
-        reasoning_format: options.request.reasoning_format,
+        fill_missing_reasoning: settings.fill_missing_reasoning,
+        reasoning_format: settings.reasoning_format,
         headers: options.transport.headers.clone(),
-        prompt_cache_key: options.request.prompt_cache_key,
+        prompt_cache_key: settings.prompt_cache_key,
         ..OpenAiConfig::default()
     })?;
     Ok((provider, api_key))
@@ -339,7 +346,7 @@ struct HostTools {
     spill: Option<SpillOutputs>,
 }
 
-fn host_tools(profile: &mut Profile, cwd: &Path) -> Result<HostTools> {
+fn host_tools(profile: &mut Profile, tool_output: &output_store::Config, cwd: &Path) -> Result<HostTools> {
     let mut host = HostTools {
         tools: Vec::new(),
         catalog: String::new(),
@@ -351,7 +358,7 @@ fn host_tools(profile: &mut Profile, cwd: &Path) -> Result<HostTools> {
         host.tools.push(Arc::new(tool));
     }
     if profile.tools.iter().any(|name| name == output_store::TOOL_NAME) {
-        let store = OutputStore::new(cwd, std::mem::take(&mut profile.tool_output))?;
+        let store = OutputStore::new(cwd, tool_output.clone())?;
         // The immutable path/config is used independently by the reading tool and writer hook.
         host.spill = Some(SpillOutputs::new(
             store.clone(),
@@ -367,12 +374,9 @@ fn host_tools(profile: &mut Profile, cwd: &Path) -> Result<HostTools> {
 ///
 /// An existing session is opened first, for its ID; a new one is created only after the
 /// container, if any, has started, so that a failed start leaves no session file behind.
-async fn open_session(
-    options: &SessionOptions<'_>,
-    profile: &Profile,
-    cwd: &Path,
-) -> Result<(SessionStore, Arc<dyn Executor>, String)> {
-    if profile.execution == Execution::Container {
+async fn open_session(options: &SessionOptions<'_>, cwd: &Path) -> Result<(SessionStore, Arc<dyn Executor>, String)> {
+    let config = &options.shared.settings.config;
+    if config.execution == Execution::Container {
         check_session_outside(&options.file, cwd)?;
     }
     let header = SessionHeader::new(cwd, options.model);
@@ -380,7 +384,7 @@ async fn open_session(
     let session_id = opened
         .as_ref()
         .map_or_else(|| header.id.clone(), |session| session.header().id.clone());
-    let (executor, environment) = executor(profile, cwd, &session_id, hidden_env(options)).await?;
+    let (executor, environment) = executor(config, cwd, &session_id, hidden_env(options)).await?;
     let session = match opened {
         Some(session) => session,
         None => sessions::create(options.file, header)?,
@@ -431,7 +435,7 @@ fn register_hooks(
 /// that authenticate to a trace collector. `env` would put them into the session file and
 /// the context.
 fn hidden_env(options: &SessionOptions<'_>) -> Vec<String> {
-    std::iter::once(options.base.api_key_env.clone())
+    std::iter::once(options.shared.settings.api_key_env.clone())
         .chain(options.shared.hidden_env.iter().cloned())
         .chain(options.shared.mcp.token_env.iter().cloned())
         .chain(otel::HEADER_VARIABLES.iter().map(std::string::ToString::to_string))

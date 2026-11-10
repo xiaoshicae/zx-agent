@@ -3,10 +3,26 @@ use std::time::Duration;
 use super::*;
 
 fn load_file(text: &str) -> Result<Profile> {
+    load_with(text, &Config::default())
+}
+
+fn load_with(text: &str, config: &Config) -> Result<Profile> {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("profile.toml");
     std::fs::write(&path, text).unwrap();
-    Profile::load(Some(path.to_str().unwrap()), Builtin::Unattended)
+    Profile::load(Some(path.to_str().unwrap()), Builtin::Unattended, config)
+}
+
+fn load(selector: Option<&str>, default: Builtin) -> Profile {
+    Profile::load(selector, default, &Config::default()).unwrap()
+}
+
+/// The configuration of a `config.toml` holding `text`.
+fn config(text: &str) -> Config {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, text).unwrap();
+    Config::load(&path).unwrap()
 }
 
 #[test]
@@ -15,8 +31,8 @@ fn builtin_names_are_spelt_as_extends_takes_them() {
         let parsed: Builtin = serde_json::from_value(serde_json::Value::String(builtin.name().into())).unwrap();
         assert_eq!(parsed, builtin);
         assert_eq!(
-            Profile::load(Some(builtin.name()), Builtin::Unattended).unwrap().name,
-            { Profile::load(None, builtin).unwrap().name }
+            load(Some(builtin.name()), Builtin::Unattended).name,
+            load(None, builtin).name
         );
     }
 }
@@ -33,7 +49,7 @@ fn embedded_profiles_preserve_the_existing_scenario_defaults() {
             include_str!("../../deploy/kubernetes/profiles/troubleshoot.md"),
         ),
     ] {
-        let profile = Profile::load(Some(selector), Builtin::Assistant).unwrap();
+        let profile = load(Some(selector), Builtin::Assistant);
         assert_eq!(profile.name, name);
         assert_eq!(profile.instructions, instructions);
         assert_eq!(profile.tools, ["bash", "read_file", "read_skill"]);
@@ -43,7 +59,7 @@ fn embedded_profiles_preserve_the_existing_scenario_defaults() {
         assert!(profile.rules.auto_approve.is_empty());
         assert_eq!(profile.compaction.trigger_bytes, None);
     }
-    let assistant = Profile::load(Some("assistant"), Builtin::Unattended).unwrap();
+    let assistant = load(Some("assistant"), Builtin::Unattended);
     assert_eq!(assistant.instructions, include_str!("../../profiles/assistant.md"));
     assert_eq!(assistant.limits.max_model_requests, None);
     assert_eq!(assistant.limits.timeout, None);
@@ -67,13 +83,12 @@ fn embedded_profiles_preserve_the_existing_scenario_defaults() {
     assert_eq!(assistant.rules.auto_approve_except, ["secret"]);
     assert_eq!(assistant.compaction.trigger_bytes, Some(256 * 1024));
     assert_eq!(assistant.compaction.keep_recent_bytes, 64 * 1024);
-    assert_eq!(assistant.tool_output.threshold_bytes, Some(8 * 1024));
 }
 
 #[test]
 fn no_embedded_profile_names_a_program_of_a_particular_environment() {
     for kind in Builtin::ALL {
-        let profile = Profile::load(None, kind).unwrap();
+        let profile = load(None, kind);
         assert!(profile.rules.auto_approve_options.is_empty(), "{kind:?}");
         assert!(
             !profile
@@ -88,11 +103,11 @@ fn no_embedded_profile_names_a_program_of_a_particular_environment() {
 
 #[test]
 fn only_the_interactive_profile_discovers_project_instructions_by_default() {
-    assert!(!Profile::load(None, Builtin::Unattended).unwrap().context.discover);
+    assert!(!load(None, Builtin::Unattended).context.discover);
     let troubleshoot = Path::new(env!("CARGO_MANIFEST_DIR")).join("deploy/kubernetes/profiles/troubleshoot.toml");
-    let troubleshoot = Profile::load(Some(troubleshoot.to_str().unwrap()), Builtin::Assistant).unwrap();
+    let troubleshoot = load(Some(troubleshoot.to_str().unwrap()), Builtin::Assistant);
     assert!(!troubleshoot.context.discover);
-    assert!(Profile::load(None, Builtin::Assistant).unwrap().context.discover);
+    assert!(load(None, Builtin::Assistant).context.discover);
 }
 
 #[test]
@@ -142,7 +157,7 @@ fn program_options_that_cannot_match_a_command_are_configuration_errors() {
 #[test]
 fn the_kubernetes_deployment_profile_keeps_kubectl_reads_and_asks_for_the_rest() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("deploy/kubernetes/profiles/kubernetes.toml");
-    let profile = Profile::load(Some(path.to_str().unwrap()), Builtin::Unattended).unwrap();
+    let profile = load(Some(path.to_str().unwrap()), Builtin::Unattended);
     assert_eq!(profile.rules.ask_tools, ["bash"]);
     assert_eq!(profile.tools, ["bash", "read_file", "read_skill", "read_output"]);
     let list = profile.rules.auto_approval();
@@ -184,7 +199,7 @@ fn a_file_extends_an_embedded_baseline_and_resolves_its_instructions() {
         "extends = 'assistant'\nname = 'custom'\ninstructions = 'prompt.md'\ntools = []\n[rules]\ndeny = ['secret']",
     )
     .unwrap();
-    let profile = Profile::load(Some(path.to_str().unwrap()), Builtin::Unattended).unwrap();
+    let profile = load(Some(path.to_str().unwrap()), Builtin::Unattended);
     assert_eq!(profile.name, "custom");
     assert_eq!(profile.instructions, "自定义说明");
     assert!(profile.tools.is_empty());
@@ -254,80 +269,45 @@ fn unknown_fields_and_invalid_budget_values_are_rejected() {
 }
 
 #[test]
-fn unsupported_execution_and_extensions_fail_instead_of_being_ignored() {
+fn environment_settings_and_unsupported_extensions_are_not_profile_fields() {
     for text in [
         "execution = 'kubernetes'",
         "[extensions]\nenabled = ['mcp']",
         "extends = 'other.toml'",
+        "[container]\nimage = 'x'",
+        "[toolOutput]\nthresholdBytes = 0",
+        "[[models]]\nid = 'm'",
     ] {
         assert!(load_file(text).is_err(), "{text}");
     }
 }
 
 #[test]
-fn container_execution_reads_its_settings_and_defaults_to_local() {
-    assert_eq!(load_file("").unwrap().execution, Execution::Local);
-    let profile = load_file(
-        "execution = 'container'\n[container]\nimage = 'debian:bookworm-slim'\nuser = '1000:1000'\nmemory = '512m'\npidsLimit = 64\n\
-         network = 'none'\nworkspace = 'readOnly'\nroot = 'readOnly'",
-    )
-    .unwrap();
-    assert_eq!(profile.execution, Execution::Container);
-    assert_eq!(
-        profile.container,
-        ContainerSettings {
-            image: Some("debian:bookworm-slim".into()),
-            user: Some("1000:1000".into()),
-            memory: Some("512m".into()),
-            pids_limit: Some(64),
-            network: Some("none".into()),
-            workspace: Some(Access::ReadOnly),
-            root: Some(Access::ReadOnly),
-        }
-    );
-    // Unset, the sandbox settings are left to the executor, whose defaults are open.
-    let open = load_file("execution = 'container'\n[container]\nimage = 'x'").unwrap();
-    assert_eq!(
-        (open.container.network, open.container.workspace, open.container.root),
-        (None, None, None)
-    );
-}
-
-#[test]
 fn approving_every_call_needs_the_container_and_no_tool_that_asks() {
-    let profile =
-        load_file("execution = 'container'\n[container]\nimage = 'x'\n[rules]\napproveAll = true\naskTools = []")
-            .unwrap();
+    let container = config("execution = 'container'\n[container]\nimage = 'x'");
+    let profile = load_with("[rules]\napproveAll = true\naskTools = []", &container).unwrap();
     assert!(profile.rules.approve_all);
     assert!(!load_file("").unwrap().rules.approve_all);
-    for (text, expected) in [
-        ("[rules]\napproveAll = true", "needs execution = \"container\""),
+    for (text, config, expected) in [
         (
-            "execution = 'container'\n[container]\nimage = 'x'\n[rules]\napproveAll = true\naskTools = ['bash']",
+            "[rules]\napproveAll = true",
+            &Config::default(),
+            "needs execution = \"container\"",
+        ),
+        (
+            "[rules]\napproveAll = true\naskTools = ['bash']",
+            &container,
             "rules.askTools must be empty",
         ),
     ] {
-        let error = format!("{:#}", load_file(text).unwrap_err());
+        let error = format!("{:#}", load_with(text, config).unwrap_err());
         assert!(error.contains(expected), "{text}: {error}");
     }
 }
 
 #[test]
-fn invalid_container_settings_are_configuration_errors() {
-    for text in [
-        "execution = 'container'",
-        "execution = 'container'\n[container]\nimage = ' '",
-        "[container]\nimage = 'x'\npidsLimit = 0",
-        "[container]\nimage = 'x'\nuser = ''",
-        "[container]\nimage = 'x'\nnetwork = 'host'",
-        "[container]\nimage = 'x'\nnetwork = 'container:other'",
-        "[container]\nimage = 'x'\nnetwork = ' '",
-        "[container]\nimage = 'x'\nworkspace = 'ro'",
-        "[container]\nimage = 'x'\nroot = 'writable'",
-        "[rules]\napproveAll = 'yes'",
-    ] {
-        assert!(load_file(text).is_err(), "{text}");
-    }
+fn approve_all_must_be_a_boolean() {
+    assert!(load_file("[rules]\napproveAll = 'yes'").is_err());
 }
 
 #[test]
@@ -340,14 +320,11 @@ fn redaction_cannot_be_removed_by_a_profile() {
 #[test]
 fn summaries_are_full_unless_the_profile_asks_for_incremental_ones() {
     assert_eq!(
-        Profile::load(None, Builtin::Unattended).unwrap().compaction.mode,
+        load(None, Builtin::Unattended).compaction.mode,
         compaction::SummaryMode::Full
     );
     assert_eq!(
-        Profile::load(Some("assistant"), Builtin::Unattended)
-            .unwrap()
-            .compaction
-            .mode,
+        load(Some("assistant"), Builtin::Unattended).compaction.mode,
         compaction::SummaryMode::Full
     );
     let incremental = load_file("extends = 'assistant'\n[compaction]\nmode = 'incremental'").unwrap();
@@ -359,17 +336,14 @@ fn summaries_are_full_unless_the_profile_asks_for_incremental_ones() {
 
 #[test]
 fn context_management_settings_overlay_individually_and_validate() {
-    let profile = load_file("extends = 'assistant'\n[compaction]\ntriggerBytes = 0\nmaxSummaryTokens = 1024\n[toolOutput]\nthresholdBytes = 0").unwrap();
+    let profile = load_file("extends = 'assistant'\n[compaction]\ntriggerBytes = 0\nmaxSummaryTokens = 1024").unwrap();
     assert_eq!(profile.compaction.trigger_bytes, None);
     assert_eq!(profile.compaction.keep_recent_bytes, 64 * 1024);
     assert_eq!(profile.compaction.max_summary_tokens, 1024);
-    assert_eq!(profile.tool_output.threshold_bytes, None);
     for text in [
         "[compaction]\nkeepRecentBytes = 0",
         "[compaction]\ntimeoutSecs = 0",
         "[compaction]\nunknown = 1",
-        "[toolOutput]\ndirectory = ''",
-        "[toolOutput]\nthreshold_bytes = 256",
     ] {
         assert!(load_file(text).is_err(), "{text}");
     }
@@ -428,7 +402,7 @@ fn special_files_are_refused_before_reading() {
 #[test]
 fn the_shipped_review_example_resolves_its_context_and_skill_files() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/profiles/review.toml");
-    let profile = Profile::load(Some(path.to_str().unwrap()), Builtin::Unattended).unwrap();
+    let profile = load(Some(path.to_str().unwrap()), Builtin::Unattended);
     assert_eq!(profile.tools, ["read_file", "read_skill"]);
     assert_eq!(profile.rules.deny_tools, ["bash"]);
     assert!(
@@ -441,69 +415,14 @@ fn the_shipped_review_example_resolves_its_context_and_skill_files() {
     assert!(read_text(&profile.skills[0].path).unwrap().contains("Rust review"));
 }
 
-const PROM: &str = "[[mcp]]\nname = 'prom'\nurl = 'https://prom.example/mcp'\ntokenEnv = 'PROM_TOKEN'\n\
-                    tools = ['query', 'range']\nallowTools = ['query']\ntimeoutSecs = 30\n\
-                    maxTimeoutSecs = 600\n";
-
-#[test]
-fn mcp_servers_are_read_from_the_profile() {
-    let profile = load_file(PROM).unwrap();
-    assert_eq!(
-        profile.mcp,
-        [McpServer {
-            name: "prom".into(),
-            url: "https://prom.example/mcp".into(),
-            token_env: Some("PROM_TOKEN".into()),
-            tools: vec!["query".into(), "range".into()],
-            allow_tools: vec!["query".into()],
-            timeout_secs: Some(30),
-            max_timeout_secs: Some(600),
-        }]
-    );
-    assert!(Profile::load(None, Builtin::Assistant).unwrap().mcp.is_empty());
-}
-
 #[test]
 fn rules_may_name_the_configured_mcp_tools_only() {
-    let profile = load_file(&format!("[rules]\ndenyTools = ['prom__range']\n{PROM}")).unwrap();
+    let prom = config("[[mcp]]\nname = 'prom'\nurl = 'https://prom.example/mcp'\ntools = ['query', 'range']");
+    let profile = load_with("[rules]\ndenyTools = ['prom__range']", &prom).unwrap();
     assert_eq!(profile.rules.deny_tools, ["prom__range"]);
-    let error = load_file(&format!("[rules]\naskTools = ['prom__admin']\n{PROM}"))
+    let error = load_with("[rules]\naskTools = ['prom__admin']", &prom)
         .unwrap_err()
         .to_string();
     assert!(error.contains("unknown tool in rule \"prom__admin\""), "{error}");
-}
-
-#[test]
-fn malformed_mcp_settings_are_refused() {
-    let server = |fields: &str| format!("[[mcp]]\nname = 'prom'\nurl = 'https://prom.example/mcp'\n{fields}\n");
-    for (text, expected) in [
-        (server("tools = []"), "tools lists no tool"),
-        (
-            server("tools = ['query']\nallowTools = ['range']"),
-            "which tools does not list",
-        ),
-        (
-            server("tools = ['query']\ntimeoutSecs = 0"),
-            "timeoutSecs must be greater than zero",
-        ),
-        (
-            server("tools = ['query']\nmaxTimeoutSecs = 0"),
-            "maxTimeoutSecs must be greater than zero",
-        ),
-        (server("tools = ['query']\ntokenEnv = ' '"), "tokenEnv is empty"),
-        (server("tools = ['a.b', 'a_b']"), "like another of its tools"),
-        (server(&format!("tools = ['{}']", "x".repeat(64))), "longer than 64"),
-        (
-            format!("{}{}", server("tools = ['query']"), server("tools = ['range']")),
-            "more than one MCP server",
-        ),
-        (
-            "[[mcp]]\nname = 'Prom'\nurl = 'https://prom.example/mcp'\ntools = ['query']\n".to_string(),
-            "must be ASCII lowercase",
-        ),
-        (server("tools = ['query']\nheaders = {}"), "unknown field"),
-    ] {
-        let error = format!("{:#}", load_file(&text).unwrap_err());
-        assert!(error.contains(expected), "{text}\n{error}");
-    }
+    assert!(load_file("[rules]\naskTools = ['prom__query']").is_err());
 }

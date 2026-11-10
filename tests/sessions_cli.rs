@@ -51,6 +51,7 @@ impl Dirs {
             .args(args)
             .current_dir(self.work.path())
             .env("HOME", self.home.path())
+            .env_remove("ZX_AGENT_HOME")
             .env(KEY_VAR, "sk-sessions-test")
             .env_remove("ZX_MODEL")
             .env_remove("ZX_BASE_URL")
@@ -151,6 +152,46 @@ async fn chat_keeps_each_conversation_in_its_own_file_under_the_home_directory()
         assert_eq!(mode(&dirs.home.path().join(".zx-agent")), 0o700);
         assert_eq!(mode(&files[0]), 0o600);
     }
+}
+
+#[tokio::test]
+async fn the_default_session_directory_follows_zx_agent_home() {
+    let dirs = Dirs::new();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let agent_home = elsewhere.path().join("agent-home");
+    let server = MockServer::start(vec![Reply::text("one")]).await;
+    let mut command = dirs.command(&["chat", "--model", "mock", "--base-url", &server.base_url]);
+    command
+        .args(["--api-key-env", KEY_VAR, "--max-retries", "0", "--tools", ""])
+        .env("ZX_AGENT_HOME", &agent_home);
+    let mut child = command.spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"hello\n/quit\n").await.unwrap();
+    drop(stdin);
+    let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let encoded = dirs
+        .cwd()
+        .display()
+        .to_string()
+        .trim_start_matches('/')
+        .replace('/', "-");
+    assert_eq!(
+        files(&agent_home.join("sessions").join(format!("--{encoded}--"))).len(),
+        1
+    );
+    assert!(!dirs.home.path().join(".zx-agent").exists());
+
+    let mut listing = dirs.command(&["sessions"]);
+    listing.env("ZX_AGENT_HOME", &agent_home);
+    let listing = tokio::time::timeout(Duration::from_secs(10), listing.output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(stdout(&listing).contains("hello"), "{}", stdout(&listing));
 }
 
 #[tokio::test]

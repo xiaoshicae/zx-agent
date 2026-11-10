@@ -8,12 +8,11 @@ use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 
 use super::skills::Skill;
-use super::{Builtin, ContainerSettings, Execution, MAX_FILE_BYTES, McpServer, Profile, Rules};
-use crate::ai::{ModelCost, ModelMeta};
+use super::{Builtin, MAX_FILE_BYTES, Profile, Rules};
+use crate::compaction;
 use crate::files::read_text_file;
 use crate::policy::ProgramOptions;
 use crate::runner::Limits;
-use crate::{compaction, output_store};
 
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
@@ -22,29 +21,12 @@ pub(super) struct RawProfile {
     pub(super) extends: Option<Builtin>,
     pub(super) instructions: Option<PathBuf>,
     tools: Option<Vec<String>>,
-    // Unknown backends fail to deserialize instead of being ignored.
-    execution: Option<Execution>,
-    container: ContainerSettings,
     rules: RawRules,
     limits: RawLimits,
     extensions: RawExtensions,
     context: RawContext,
     skills: Option<Vec<Skill>>,
     compaction: RawCompaction,
-    tool_output: RawToolOutput,
-    mcp: Option<Vec<McpServer>>,
-    models: Option<Vec<RawModel>>,
-}
-
-/// One `[[models]]` entry.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct RawModel {
-    id: String,
-    #[serde(default)]
-    context_window: Option<u64>,
-    #[serde(default)]
-    cost: Option<ModelCost>,
 }
 
 #[derive(Default, Deserialize)]
@@ -59,14 +41,6 @@ struct RawCompaction {
     timeout_secs: Option<u64>,
     /// `full` (the default) or `incremental`.
     mode: Option<compaction::SummaryMode>,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-struct RawToolOutput {
-    directory: Option<PathBuf>,
-    threshold_bytes: Option<usize>,
-    max_file_bytes: Option<usize>,
 }
 
 #[derive(Default, Deserialize)]
@@ -155,46 +129,6 @@ impl RawProfile {
                 .collect();
         }
         self.compaction.apply(&mut profile.compaction);
-        self.tool_output.apply(&mut profile.tool_output, parent)?;
-        if let Some(execution) = self.execution {
-            profile.execution = execution;
-        }
-        self.container.apply(&mut profile.container);
-        if let Some(servers) = self.mcp {
-            profile.mcp = servers;
-        }
-        for model in self.models.unwrap_or_default() {
-            model.apply(profile)?;
-        }
-        Ok(())
-    }
-}
-
-impl RawModel {
-    /// Check the entry and record it under its id.
-    fn apply(self, profile: &mut Profile) -> Result<()> {
-        ensure!(!self.id.trim().is_empty(), "models: an entry has no id");
-        ensure!(
-            self.context_window.is_none_or(|window| window > 0),
-            "models.{}: contextWindow must be greater than zero",
-            self.id
-        );
-        if let Some(cost) = &self.cost {
-            ensure!(
-                [cost.input, cost.output, cost.cache_read, cost.cache_write]
-                    .iter()
-                    .all(|price| price.is_finite() && *price >= 0.0),
-                "models.{}: prices must be zero or more, per million tokens",
-                self.id
-            );
-        }
-        profile.models.insert(
-            self.id,
-            ModelMeta {
-                context_window: self.context_window,
-                cost: self.cost,
-            },
-        );
         Ok(())
     }
 }
@@ -274,44 +208,6 @@ impl RawCompaction {
         if let Some(mode) = self.mode {
             config.mode = mode;
         }
-    }
-}
-
-impl RawToolOutput {
-    fn apply(self, config: &mut output_store::Config, parent: &Path) -> Result<()> {
-        if let Some(path) = self.directory {
-            ensure!(!path.as_os_str().is_empty(), "toolOutput.directory must not be empty");
-            config.directory = parent.join(path);
-        }
-        if let Some(bytes) = self.threshold_bytes {
-            config.threshold_bytes = (bytes > 0).then_some(bytes);
-        }
-        if let Some(bytes) = self.max_file_bytes {
-            config.max_file_bytes = bytes;
-        }
-        Ok(())
-    }
-}
-
-impl ContainerSettings {
-    /// Lay this layer over `settings`: each value set here replaces the one there.
-    fn apply(self, settings: &mut Self) {
-        let Self {
-            image,
-            user,
-            memory,
-            pids_limit,
-            network,
-            workspace,
-            root,
-        } = self;
-        settings.image = image.or(settings.image.take());
-        settings.user = user.or(settings.user.take());
-        settings.memory = memory.or(settings.memory.take());
-        settings.pids_limit = pids_limit.or(settings.pids_limit);
-        settings.network = network.or(settings.network.take());
-        settings.workspace = workspace.or(settings.workspace);
-        settings.root = root.or(settings.root);
     }
 }
 

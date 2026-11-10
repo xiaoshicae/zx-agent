@@ -1,7 +1,6 @@
 name = "assistant"
 instructions = "assistant.md"
 tools = ["bash", "read_file", "edit_file", "write_file", "grep", "find", "ls", "read_skill", "read_output"]
-execution = "local"
 
 [rules]
 askTools = ["bash", "edit_file", "write_file"]
@@ -28,7 +27,3 @@ triggerBytes = 262144
 keepRecentBytes = 65536
 maxSummaryTokens = 2048
 timeoutSecs = 120
-
-[toolOutput]
-thresholdBytes = 8192
-maxFileBytes = 1048576

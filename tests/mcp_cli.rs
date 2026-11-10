@@ -1,4 +1,4 @@
-//! The compiled program with MCP servers from a profile: run, chat and serve connect them at
+//! The compiled program with MCP servers from config.toml: run, chat and serve connect them at
 //! startup; a tool the server's allowTools lists runs, the others ask (and `run`, with no one
 //! to ask, refuses them); the token is hidden from commands and redacted; a server that
 //! cannot be used stops startup.
@@ -14,7 +14,7 @@ use tokio::process::Command;
 
 use common::fake_mcp::{Era, FakeMcp, Reply as McpReply, tool};
 use common::mock_server::{MockServer, Reply};
-use common::{stderr, stdout, zx_agent};
+use common::{stderr, stdout, write_config, zx_agent};
 
 const TOKEN_VAR: &str = "ZX_MCP_CLI_TEST_TOKEN";
 const TOKEN: &str = "mcp-cli-secret-5678";
@@ -30,14 +30,18 @@ async fn prom() -> FakeMcp {
     .await
 }
 
-/// A profile with one MCP server, where `query` runs without approval and `range` asks.
+/// A profile with `builtin_tools`, and a config.toml in the home of [`program`] with one MCP
+/// server, where `query` runs without approval and `range` asks.
 fn profile(dir: &Path, url: &str, builtin_tools: &str) -> PathBuf {
     let path = dir.join("mcp.toml");
-    let text = format!(
-        "tools = {builtin_tools}\n[context]\ndiscover = false\n[[mcp]]\nname = \"prom\"\nurl = \"{url}\"\ntokenEnv = \"{TOKEN_VAR}\"\n\
-         tools = [\"query\", \"range\"]\nallowTools = [\"query\"]\n"
+    std::fs::write(&path, format!("tools = {builtin_tools}\n[context]\ndiscover = false\n")).unwrap();
+    write_config(
+        &dir.join(".home/.zx-agent"),
+        &format!(
+            "[[mcp]]\nname = \"prom\"\nurl = \"{url}\"\ntokenEnv = \"{TOKEN_VAR}\"\n\
+             tools = [\"query\", \"range\"]\nallowTools = [\"query\"]\n"
+        ),
     );
-    std::fs::write(&path, text).unwrap();
     path
 }
 
@@ -51,6 +55,7 @@ fn program(mode: &str, model: &MockServer, dir: &Path, profile: &Path) -> Comman
         .current_dir(dir)
         // chat keeps sessions under the home directory by default; never the real one.
         .env("HOME", dir.join(".home"))
+        .env_remove("ZX_AGENT_HOME")
         .env(TOKEN_VAR, TOKEN)
         .env_remove(KEY_VAR)
         .env_remove("ZX_MODEL")
@@ -208,8 +213,13 @@ async fn startup_stops_when_an_mcp_server_cannot_be_used() {
     // The token variable is not set.
     let mut unset = run(&model, dir.path(), &profile(dir.path(), &fake.url, "[]"));
     unset.env_remove(TOKEN_VAR);
-    // Nothing listens on port 9.
-    let unreachable = run(&model, dir.path(), &profile(dir.path(), "http://127.0.0.1:9/mcp", "[]"));
+    // Nothing listens on port 9. Each has a home of its own, with its own config.toml.
+    let other = tempfile::tempdir().unwrap();
+    let unreachable = run(
+        &model,
+        other.path(),
+        &profile(other.path(), "http://127.0.0.1:9/mcp", "[]"),
+    );
     for (mut command, expected) in [(unset, "must hold its token"), (unreachable, "MCP server prom:")] {
         let output = command.output().await.unwrap();
         let stderr = stderr(&output);

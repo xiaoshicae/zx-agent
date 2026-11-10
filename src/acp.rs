@@ -192,7 +192,7 @@ impl Host {
             transport: &args.transport,
             request: &args.request,
             budget: &args.budget,
-            model: &args.base.model,
+            model: &self.settings.shared.settings.model,
             cwd: Some(cwd),
             file,
             default_profile: Builtin::Assistant,
@@ -317,7 +317,7 @@ async fn serve(args: AcpArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> 
         args.request.session.is_none(),
         "acp keeps one file per session: give --session-dir, not --session"
     );
-    let shared = cli::Shared::connect(&args.base, Builtin::Assistant, &args.transport).await?;
+    let shared = cli::Shared::connect(&args.base, &args.request, &args.transport, Builtin::Assistant).await?;
     let host = Arc::new(Host {
         settings: ModeSettings { args, shared, traces },
         sessions: Mutex::new(HashMap::new()),

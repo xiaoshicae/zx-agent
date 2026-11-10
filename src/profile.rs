@@ -10,7 +10,7 @@ mod context;
 mod file;
 pub mod skills;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -20,9 +20,7 @@ use file::RawProfile;
 use file::read_text;
 use skills::Skill;
 
-use crate::ai::ModelMeta;
-use crate::executor::{Access, check_network};
-use crate::mcp::{check_server_name, tool_name as mcp_tool_name};
+use crate::config::{Config, Execution};
 use crate::policy::{AutoApprove, ProgramOptions};
 use crate::runner::Limits;
 use crate::tools::BUILTIN_TOOL_NAMES;
@@ -115,35 +113,6 @@ impl Rules {
     }
 }
 
-/// An external MCP server whose listed tools the model may call. The frontends connect it at
-/// startup; whether a call runs is up to the rules.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct McpServer {
-    /// ASCII lowercase letters, digits and `-`. Its tools reach the model as `<name>__<tool>`.
-    pub name: String,
-    /// The server's MCP endpoint (Streamable HTTP).
-    pub url: String,
-    /// The variable holding the token sent as `Authorization: Bearer`; unset sends none.
-    /// Commands do not see the variable, and its value is redacted from tool output.
-    #[serde(default)]
-    pub token_env: Option<String>,
-    /// The server's tools to offer the model, by the names the server gives them.
-    pub tools: Vec<String>,
-    /// Tools among `tools` that run without approval. The others ask a person, and are
-    /// refused where no one can answer, as in `run`.
-    #[serde(default)]
-    pub allow_tools: Vec<String>,
-    /// Longest a call may go without an answer or a progress notification, in seconds;
-    /// unset uses `--tool-timeout-secs`.
-    #[serde(default)]
-    pub timeout_secs: Option<u64>,
-    /// Bound for a whole call, in seconds, however much progress the server reports; unset
-    /// leaves only `timeoutSecs`, the run's timeout and cancellation.
-    #[serde(default)]
-    pub max_timeout_secs: Option<u64>,
-}
-
 /// Which project instructions to read at startup. Explicit paths are absolute after load.
 #[derive(Debug)]
 pub struct ProjectContext {
@@ -151,38 +120,6 @@ pub struct ProjectContext {
     pub discover: bool,
     /// Extra instruction files, resolved relative to the profile file at load time.
     pub files: Vec<PathBuf>,
-}
-
-/// Where bash and read_file run.
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum Execution {
-    /// On this machine, as the agent's user.
-    #[default]
-    Local,
-    /// In an isolated Docker container; see [`ContainerSettings`].
-    Container,
-}
-
-/// Container settings for `Execution::Container`; unset values use the executor defaults.
-/// A profile's `[container]` section, whose values replace those of the profile it extends.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-pub struct ContainerSettings {
-    /// Required in container mode; the image must already be present locally.
-    pub image: Option<String>,
-    /// `uid:gid` that commands run as.
-    pub user: Option<String>,
-    /// Memory limit in Docker's syntax, such as `1g`.
-    pub memory: Option<String>,
-    /// Maximum number of processes in the container.
-    pub pids_limit: Option<u32>,
-    /// Docker network, such as `bridge` (the executor's default) or `none`.
-    pub network: Option<String>,
-    /// Whether commands may change the workspace; writable by default.
-    pub workspace: Option<Access>,
-    /// Whether commands may change the container's own files; writable by default.
-    pub root: Option<Access>,
 }
 
 /// Fully layered scenario configuration. CLI overrides are applied by the frontend;
@@ -207,29 +144,22 @@ pub struct Profile {
     pub skills: Vec<Skill>,
     /// Automatic trigger and bounded manual summarization settings.
     pub compaction: compaction::Config,
-    /// Already bounded tool results may be persisted when read_output is enabled.
-    pub tool_output: output_store::Config,
-    /// Where bash and read_file run.
-    pub execution: Execution,
-    /// Used when `execution` is `Container`.
-    pub container: ContainerSettings,
-    /// External MCP servers; a profile's `[[mcp]]` list replaces the one it extends.
-    pub mcp: Vec<McpServer>,
-    /// What is known about models, by ID (`[[models]]`): the context window and prices. A
-    /// profile's entries override those of the profile it extends, by ID.
-    pub models: HashMap<String, ModelMeta>,
 }
 
 impl Profile {
-    /// Load an embedded name or a TOML file over the selected default. Relative profile
-    /// paths use the process working directory; paths inside TOML use its parent.
-    /// Unknown fields, unsupported backends and invalid files are errors.
-    pub fn load(selector: Option<&str>, default: Builtin) -> Result<Self> {
+    /// Load an embedded name or a TOML file over the selected default, checked against the
+    /// environment `config`. Relative profile paths use the process working directory; paths
+    /// inside TOML use its parent. Unknown fields and invalid files are errors.
+    pub fn load(selector: Option<&str>, default: Builtin, config: &Config) -> Result<Self> {
         let Some(selector) = selector else {
-            return Self::builtin(default);
+            let profile = Self::builtin(default)?;
+            profile.validate(config)?;
+            return Ok(profile);
         };
         if let Some(builtin) = Builtin::ALL.into_iter().find(|builtin| builtin.name() == selector) {
-            return Self::builtin(builtin);
+            let profile = Self::builtin(builtin)?;
+            profile.validate(config)?;
+            return Ok(profile);
         }
         ensure!(!selector.trim().is_empty(), "profile selector is empty");
         let path = Path::new(selector)
@@ -241,7 +171,7 @@ impl Profile {
         // A canonical file path always has a parent, but keep this error actionable.
         let parent = path.parent().context("profile has no parent directory")?;
         raw.apply(&mut profile, parent)?;
-        profile.validate()?;
+        profile.validate(config)?;
         Ok(profile)
     }
 
@@ -265,60 +195,15 @@ impl Profile {
             },
             skills: Vec::new(),
             compaction: compaction::Config::default(),
-            models: HashMap::new(),
-            tool_output: output_store::Config::default(),
-            execution: Execution::Local,
-            container: ContainerSettings::default(),
-            mcp: Vec::new(),
         };
         raw.apply(&mut profile, Path::new("."))?;
-        profile.validate()?;
+        profile.validate(&Config::default())?;
         Ok(profile)
     }
 
-    /// The names the model calls the configured MCP tools by, checking the `[[mcp]]` entries.
-    fn mcp_tool_names(&self) -> Result<Vec<String>> {
-        let mut servers = HashSet::new();
-        let mut names = Vec::new();
-        for server in &self.mcp {
-            let name = server.name.as_str();
-            check_server_name(name).map_err(anyhow::Error::msg)?;
-            ensure!(servers.insert(name), "more than one MCP server is named {name:?}");
-            ensure!(!server.url.trim().is_empty(), "MCP server {name}: url is empty");
-            ensure!(!server.tools.is_empty(), "MCP server {name}: tools lists no tool");
-            ensure!(
-                server.token_env.as_deref().is_none_or(|env| !env.trim().is_empty()),
-                "MCP server {name}: tokenEnv is empty"
-            );
-            ensure!(
-                server.timeout_secs != Some(0),
-                "MCP server {name}: timeoutSecs must be greater than zero"
-            );
-            ensure!(
-                server.max_timeout_secs != Some(0),
-                "MCP server {name}: maxTimeoutSecs must be greater than zero"
-            );
-            for tool in &server.allow_tools {
-                ensure!(
-                    server.tools.contains(tool),
-                    "MCP server {name}: allowTools names {tool:?}, which tools does not list"
-                );
-            }
-            let first = names.len();
-            for tool in &server.tools {
-                let model_name = mcp_tool_name(name, tool).map_err(anyhow::Error::msg)?;
-                ensure!(
-                    !names[first..].contains(&model_name),
-                    "MCP server {name}: tool {tool:?} would be named {model_name:?}, like another of its tools"
-                );
-                names.push(model_name);
-            }
-        }
-        Ok(names)
-    }
-
-    /// Check names, rule patterns and skill registrations without reading skill bodies.
-    pub fn validate(&self) -> Result<()> {
+    /// Check names, rule patterns and skill registrations without reading skill bodies; tool
+    /// rules may name the MCP tools of `config`, and approving every call needs its container.
+    pub fn validate(&self, config: &Config) -> Result<()> {
         ensure!(!self.name.trim().is_empty(), "profile name is empty");
         for name in &self.tools {
             ensure!(known_tool(name), "unknown tool {name:?}");
@@ -336,7 +221,7 @@ impl Profile {
         for (program, options) in &self.rules.auto_approve_options {
             check_program_options(program, options)?;
         }
-        let mcp_tools = self.mcp_tool_names()?;
+        let mcp_tools = config.mcp_tool_names()?;
         for tool in self.rules.ask_tools.iter().chain(&self.rules.deny_tools) {
             ensure!(
                 known_tool(tool) || mcp_tools.contains(tool),
@@ -344,32 +229,9 @@ impl Profile {
             );
         }
         self.compaction.validate()?;
-        self.tool_output.validate().context("[toolOutput]")?;
-        for (key, value) in [
-            ("container.image", &self.container.image),
-            ("container.user", &self.container.user),
-            ("container.memory", &self.container.memory),
-            ("container.network", &self.container.network),
-        ] {
-            ensure!(
-                value.as_deref().is_none_or(|value| !value.trim().is_empty()),
-                "{key} must not be empty"
-            );
-        }
-        ensure!(
-            self.container.pids_limit != Some(0),
-            "container.pidsLimit must be greater than zero"
-        );
-        if let Some(network) = &self.container.network {
-            check_network(network).context("container.network")?;
-        }
-        ensure!(
-            self.execution == Execution::Local || self.container.image.is_some(),
-            "execution = \"container\" needs container.image"
-        );
         if self.rules.approve_all {
             ensure!(
-                self.execution == Execution::Container,
+                config.execution == Execution::Container,
                 "rules.approveAll needs execution = \"container\": without the container as a sandbox, every command would run on this machine unasked"
             );
             ensure!(

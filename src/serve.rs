@@ -145,7 +145,7 @@ pub(crate) async fn run(args: ServeArgs) -> Result<u8> {
         let running = create_session_dirs(&dir)?;
 
         // Once for the process: every thread's session shares the connections.
-        let shared = cli::Shared::connect(&args.base, Builtin::Assistant, &args.transport)
+        let shared = cli::Shared::connect(&args.base, &args.request, &args.transport, Builtin::Assistant)
             .await?
             .with_hidden_env(hidden_env);
         let factory = Sessions {
@@ -369,7 +369,7 @@ impl Sessions {
             transport: &self.args.transport,
             request: &self.args.request,
             budget: &self.args.budget,
-            model: &self.args.base.model,
+            model: &self.shared.settings.model,
             cwd: None,
             file,
             default_profile: Builtin::Assistant,
