@@ -1,11 +1,12 @@
-//! What arrives over the long connection, messages addressed to the bot and card clicks,
-//! and the text and cards the channel posts.
+//! What arrives over the long connection, people's messages and card clicks, and the text
+//! and cards the channel posts.
 
 use serde_json::{Value, json};
 use zx_ai::sync::lock;
 use zx_core::agent::ApprovalResult;
 use zx_im::{
-    ApprovalId, CardLabels, Choice, ConversationId, Destination, ImError, Inbound, MessageId, Seen, ThreadId, UserId,
+    Addressee, ApprovalId, CardLabels, ChatKind, Choice, ConversationId, Destination, ImError, Inbound, MessageId,
+    Seen, ThreadId, UserId,
 };
 
 use super::FeishuChannel;
@@ -23,13 +24,13 @@ impl FeishuChannel {
         };
         match value["header"]["event_type"].as_str() {
             Some("im.message.receive_v1") => match message(&value["event"]) {
-                Some(addressed) if seen.insert(&addressed.id) => {
-                    if addressed.direct {
-                        lock(&self.direct).insert(addressed.at.conversation.0.clone());
+                Some(said) if seen.insert(&said.id) => {
+                    if said.chat == ChatKind::Direct {
+                        lock(&self.direct).insert(said.at.conversation.0.clone());
                     }
-                    vec![addressed.into_inbound()]
+                    vec![said.into_inbound()]
                 }
-                // Not addressed to the bot, or delivered before.
+                // Not for the bot, or delivered before.
                 _ => Vec::new(),
             },
             Some("card.action.trigger") => decision(&value["event"]).into_iter().collect(),
@@ -39,29 +40,33 @@ impl FeishuChannel {
     }
 }
 
-/// A text message addressed to the bot: what [`Inbound::Message`] carries, and whether it
-/// came from a direct chat.
-struct Addressed {
+/// A text message from a person, as [`Inbound::Message`] carries it.
+struct Said {
     id: MessageId,
     at: Destination,
+    chat: ChatKind,
+    addressee: Addressee,
     sender: UserId,
     text: String,
-    direct: bool,
 }
 
-impl Addressed {
+impl Said {
     fn into_inbound(self) -> Inbound {
         Inbound::Message {
             id: self.id,
             at: self.at,
+            chat: self.chat,
+            addressee: self.addressee,
             sender: self.sender,
             text: self.text,
         }
     }
 }
 
-/// A text message from a person: in a direct chat, or in a group with a bot mentioned.
-fn message(event: &Value) -> Option<Addressed> {
+/// A text message from a person: in a direct chat, in a group with a bot mentioned, or a
+/// reply in a group's thread. Replies that do not mention the bot arrive only with the
+/// permission to read every group message (`im:message.group_msg`).
+fn message(event: &Value) -> Option<Said> {
     if event["sender"]["sender_type"] != "user" {
         return None;
     }
@@ -69,34 +74,43 @@ fn message(event: &Value) -> Option<Addressed> {
     if message["message_type"] != "text" {
         return None;
     }
-    let direct = match message["chat_type"].as_str()? {
-        "p2p" => true,
-        "group" => false,
+    let chat = match message["chat_type"].as_str()? {
+        "p2p" => ChatKind::Direct,
+        "group" => ChatKind::Group,
         _ => return None,
     };
     // No mentions at all is an empty list.
     let mentions = message["mentions"].as_array().map(Vec::as_slice).unwrap_or_default();
-    // With only the permission to read mentions of the bot, every group message delivered
-    // mentions it; the check also keeps other group messages out.
-    if !direct && !mentions.iter().any(|mention| mention["mentioned_type"] == "bot") {
+    // A reply names the root of its thread.
+    let thread = message["root_id"]
+        .as_str()
+        .filter(|root| !root.is_empty())
+        .map(|root| ThreadId(root.into()));
+    // A mention of any bot counts as one of this bot: the event does not say which bot is
+    // this app's.
+    let addressee = match chat {
+        ChatKind::Direct => Addressee::Bot,
+        ChatKind::Group if mentions.iter().any(|mention| mention["mentioned_type"] == "bot") => Addressee::Bot,
+        ChatKind::Group if mentions.is_empty() => Addressee::Nobody,
+        ChatKind::Group => Addressee::Others,
+    };
+    // Talk in the group itself is none of the bot's business unless it is mentioned.
+    if chat == ChatKind::Group && thread.is_none() && addressee != Addressee::Bot {
         return None;
     }
     // The content of a text message is a JSON object with `text`; anything else is not text
     // this channel reads.
     let content: Value = serde_json::from_str(message["content"].as_str()?).ok()?;
-    Some(Addressed {
+    Some(Said {
         id: MessageId(message["message_id"].as_str()?.into()),
         at: Destination {
             conversation: ConversationId(message["chat_id"].as_str()?.into()),
-            // A reply names the root of its thread.
-            thread: message["root_id"]
-                .as_str()
-                .filter(|root| !root.is_empty())
-                .map(|root| ThreadId(root.into())),
+            thread,
         },
+        chat,
+        addressee,
         sender: UserId(event["sender"]["sender_id"]["open_id"].as_str()?.into()),
         text: readable(content["text"].as_str()?, mentions),
-        direct,
     })
 }
 

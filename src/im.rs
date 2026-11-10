@@ -1,4 +1,4 @@
-//! `zx-agent im`: answers IM messages with one session per thread until stopped.
+//! `zx-agent im`: answers IM messages, one session per conversation, until stopped.
 //! The server itself is `zx_agent::im::Server`.
 
 use std::collections::HashSet;
@@ -20,7 +20,7 @@ use zx_agent::ai::now_ms;
 use zx_agent::im::feishu::{FeishuChannel, FeishuConfig};
 use zx_agent::im::slack::{SlackChannel, SlackConfig};
 use zx_agent::im::{
-    CardLabels, ConversationId, ErrorReport, ImChannel, ImError, Replies, Server, ServerConfig, ServerEvent,
+    CardLabels, ConversationId, ErrorReport, ImChannel, ImError, Opening, Replies, Server, ServerConfig, ServerEvent,
     ServerSink, SessionFactory, SessionKey, StatusFiles, UserId,
 };
 use zx_agent::otel::Telemetry;
@@ -134,7 +134,7 @@ struct SessionsSection {
 pub(crate) async fn run(args: ImArgs) -> Result<u8> {
     anyhow::ensure!(
         args.request.session.is_none(),
-        "--session does not apply to im: each thread has its own session file under [sessions] dir"
+        "--session does not apply to im: each conversation has its own session files under [sessions] dir"
     );
     let file = read_file(&args.config)?;
     let Platforms { channels, hidden_env } = platforms(&file, &args.config)?;
@@ -351,7 +351,7 @@ fn entries(entries: &[String], platforms: &HashSet<&str>, field: &str) -> Result
         .collect()
 }
 
-/// Opens each thread's session like chat does, with approvals in the thread.
+/// Opens each conversation's session like chat does, with approvals in the conversation.
 struct Sessions {
     args: ImArgs,
     /// The MCP servers, secret files and IM credentials, shared by every thread's session.
@@ -381,10 +381,18 @@ impl Sessions {
         Ok(prepared)
     }
 
-    async fn open_session(&self, key: &SessionKey, interaction: Arc<dyn Interaction>) -> Result<AgentSession> {
-        let path = key.file_in(&self.dir);
+    async fn open_session(
+        &self,
+        key: &SessionKey,
+        opening: Opening,
+        interaction: Arc<dyn Interaction>,
+    ) -> Result<AgentSession> {
+        // A short listing and directory creation before the session file, like prepare's own
+        // startup reads.
+        let path = key
+            .file_in(&self.dir, opening)
+            .with_context(|| format!("cannot list {}", key.dir_in(&self.dir).display()))?;
         if let Some(parent) = path.parent() {
-            // A short directory creation before the session file, like prepare's own startup reads.
             std::fs::create_dir_all(parent).with_context(|| format!("cannot create {}", parent.display()))?;
         }
         let mut prepared = self.prepare(SessionFile::Open(&path)).await?;
@@ -397,11 +405,26 @@ impl Sessions {
 
 #[async_trait]
 impl SessionFactory for Sessions {
-    async fn open(&self, key: &SessionKey, interaction: Arc<dyn Interaction>) -> Result<AgentSession, String> {
-        self.open_session(key, interaction)
+    async fn open(
+        &self,
+        key: &SessionKey,
+        opening: Opening,
+        interaction: Arc<dyn Interaction>,
+    ) -> Result<AgentSession, String> {
+        self.open_session(key, opening, interaction)
             .await
             .map_err(|error| format!("{error:#}"))
     }
+
+    /// A listing of the conversation's directory: a few names.
+    fn has_session(&self, key: &SessionKey) -> bool {
+        key.has_file_in(&self.dir)
+    }
+}
+
+/// The thread of `key` in a log line: `null` for a direct chat.
+fn thread(key: &SessionKey) -> Value {
+    json!(key.thread.as_ref().map(|thread| thread.0.as_str()))
 }
 
 /// Writes the server's events as JSON lines on stdout, for the operator's log collection.
@@ -414,7 +437,7 @@ impl ServerSink for Log {
                 "type": "approval",
                 "platform": record.key.platform,
                 "conversation": record.key.conversation.0,
-                "thread": record.key.thread.0,
+                "thread": thread(&record.key),
                 "toolCallId": record.tool_call_id,
                 "tool": record.tool,
                 "approval": record.approval.as_ref().map(|id| id.0.as_str()),
@@ -426,7 +449,7 @@ impl ServerSink for Log {
                 "type": "released",
                 "platform": key.platform,
                 "conversation": key.conversation.0,
-                "thread": key.thread.0,
+                "thread": thread(key),
                 "timeMs": now_ms(),
             }),
             ServerEvent::Failed { key, error } => {
@@ -434,7 +457,7 @@ impl ServerSink for Log {
                 if let (Some(key), Value::Object(fields)) = (key, &mut line) {
                     fields.insert("platform".into(), json!(key.platform));
                     fields.insert("conversation".into(), json!(key.conversation.0));
-                    fields.insert("thread".into(), json!(key.thread.0));
+                    fields.insert("thread".into(), thread(key));
                 }
                 line
             }

@@ -185,7 +185,7 @@ async fn im_answers_a_mention_with_an_approved_command_that_cannot_see_the_slack
     assert!(result.contains("[REDACTED]"), "{result}");
     assert!(!result.contains(APP_TOKEN) && !result.contains(BOT_TOKEN), "{result}");
 
-    let session = dir.path().join("sessions/slack/C1/1700000001%2E000100.jsonl");
+    let session = dir.path().join("sessions/slack/C1/1700000001%2E000100/1.jsonl");
     let recorded = std::fs::read_to_string(&session).unwrap();
     assert!(recorded.contains("run it"));
     assert!(!recorded.contains(BOT_TOKEN));

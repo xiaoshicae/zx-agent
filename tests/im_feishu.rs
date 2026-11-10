@@ -14,8 +14,8 @@ use common::im::run_channel;
 use zx_agent::agent::ApprovalResult;
 use zx_agent::im::feishu::{FeishuChannel, FeishuConfig};
 use zx_agent::im::{
-    ApprovalId, Choice, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId, MessageRef, Outbound,
-    ThreadId, UserId,
+    Addressee, ApprovalId, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId,
+    MessageRef, Outbound, ThreadId, UserId,
 };
 
 /// Only reached when an expected event never comes.
@@ -75,10 +75,22 @@ fn at(chat: &str, thread: Option<&str>) -> Destination {
     }
 }
 
+/// A message from ou_u1 in a group that mentions the bot.
 fn message(id: &str, at: Destination, text: &str) -> Inbound {
+    said(id, at, ChatKind::Group, Addressee::Bot, text)
+}
+
+/// A message from ou_u1 in the direct chat oc_d.
+fn direct(id: &str, text: &str) -> Inbound {
+    said(id, at("oc_d", None), ChatKind::Direct, Addressee::Bot, text)
+}
+
+fn said(id: &str, at: Destination, chat: ChatKind, addressee: Addressee, text: &str) -> Inbound {
     Inbound::Message {
         id: MessageId(id.into()),
         at,
+        chat,
+        addressee,
         sender: UserId("ou_u1".into()),
         text: text.into(),
     }
@@ -176,7 +188,37 @@ async fn only_text_from_people_addressed_to_the_bot_is_passed_on() {
             .await;
         socket.receive_data().await;
     }
-    assert_eq!(running.next().await, message("om_4", at("oc_d", None), "hi"));
+    assert_eq!(running.next().await, direct("om_4", "hi"));
+    running.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn replies_in_a_topic_are_passed_on_with_whom_they_mention() {
+    let mut fake = FakeFeishu::start(120).await;
+    let mut running = run_channel(channel(&fake), WAIT);
+    let mut socket = fake.socket().await;
+    let person = json!([{"key": "@_user_1", "mentioned_type": "user", "name": "Li", "id": {"open_id": "ou_li"}}]);
+    let root = Some("om_root");
+    let events = [
+        text_message("om_1", "oc_1", "group", None, "chatter in the group", &json!([])),
+        text_message("om_2", "oc_1", "group", root, "and then?", &json!([])),
+        text_message("om_3", "oc_1", "group", root, "@_user_1 over to you", &person),
+    ];
+    for (n, event) in events.into_iter().enumerate() {
+        socket
+            .send(&TestFrame::event(&format!("f{n}"), 1, 0, &received(&event)))
+            .await;
+        socket.receive_data().await;
+    }
+    let topic = || at("oc_1", root);
+    assert_eq!(
+        running.next().await,
+        said("om_2", topic(), ChatKind::Group, Addressee::Nobody, "and then?")
+    );
+    assert_eq!(
+        running.next().await,
+        said("om_3", topic(), ChatKind::Group, Addressee::Others, "@Li over to you")
+    );
     running.stop().await.unwrap();
 }
 
@@ -191,8 +233,8 @@ async fn a_redelivered_message_is_passed_on_once() {
         socket.send(&TestFrame::event(frame_id, 1, 0, &received(&event))).await;
         assert_eq!(socket.receive_data().await.header("message_id"), Some(frame_id));
     }
-    assert_eq!(running.next().await, message("om_1", at("oc_d", None), "once"));
-    assert_eq!(running.next().await, message("om_2", at("oc_d", None), "next"));
+    assert_eq!(running.next().await, direct("om_1", "once"));
+    assert_eq!(running.next().await, direct("om_2", "next"));
     running.stop().await.unwrap();
 }
 
@@ -207,7 +249,7 @@ async fn a_fragmented_event_is_joined_and_acknowledged_once() {
     socket.send(&TestFrame::event("f9", 2, 0, first)).await;
     let ack = socket.receive_data().await;
     assert_eq!((ack.header("message_id"), ack.header("seq")), (Some("f9"), Some("0")));
-    assert_eq!(running.next().await, message("om_1", at("oc_d", None), "joined"));
+    assert_eq!(running.next().await, direct("om_1", "joined"));
     // The next data frame is the acknowledgement of a later event: the first fragment had none.
     let later = text_message("om_2", "oc_d", "p2p", None, "later", &json!([]));
     socket.send(&TestFrame::event("f10", 1, 0, &received(&later))).await;
@@ -278,7 +320,7 @@ async fn a_dropped_connection_is_opened_again() {
     let mut second = fake.socket().await;
     let event = text_message("om_1", "oc_d", "p2p", None, "back", &json!([]));
     second.send(&TestFrame::event("f1", 1, 0, &received(&event))).await;
-    assert_eq!(running.next().await, message("om_1", at("oc_d", None), "back"));
+    assert_eq!(running.next().await, direct("om_1", "back"));
     assert_eq!(fake.calls("endpoint").len(), 2);
     running.stop().await.unwrap();
 }
@@ -465,7 +507,7 @@ async fn a_frame_that_cannot_be_decoded_is_reported_and_the_connection_goes_on()
     assert!(report.contains("malformed frame"), "{report}");
     let event = text_message("om_1", "oc_d", "p2p", None, "still here", &json!([]));
     socket.send(&TestFrame::event("f1", 1, 0, &received(&event))).await;
-    assert_eq!(running.next().await, message("om_1", at("oc_d", None), "still here"));
+    assert_eq!(running.next().await, direct("om_1", "still here"));
     running.stop().await.unwrap();
 }
 

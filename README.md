@@ -151,7 +151,7 @@ echo "exit code: $?"
 
 ### IM 服务
 
-`zx-agent im` 作为常驻进程接入 IM：在频道里 @ 机器人或私聊它，每个线程一个会话，写操作在 IM 里审批。目前支持 Slack（Socket Mode）与 ⚑ D:5/CHINA FLAG: 飞书（长连接），都只需出网，不需要公网入口。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：对话内容、命令输出与用户 ID 发往该平台] 该平台的使用 Subject to Legal/Export Compliance approval。部署到 Kubernetes 见 `deploy/kubernetes/README.md` 的“IM 服务”。
+`zx-agent im` 作为常驻进程接入 IM，像同事一样参与对话：私聊整段是一个会话，频道里一个线程一个会话；写操作在 IM 里审批。目前支持 Slack（Socket Mode）与 ⚑ D:5/CHINA FLAG: 飞书（长连接），都只需出网，不需要公网入口。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：对话内容、命令输出与用户 ID 发往该平台] 该平台的使用 Subject to Legal/Export Compliance approval。部署到 Kubernetes 见 `deploy/kubernetes/README.md` 的“IM 服务”。
 
 ```bash
 export SLACK_APP_TOKEN=xapp-...   # app-level token，用于 Socket Mode
@@ -182,7 +182,7 @@ approvalTimeoutSecs = 600   # 审批卡片的等待时长，默认 600，超时�
 idleSecs = 1800             # 会话空闲多久后释放其文件锁，默认 1800
 
 [sessions]
-dir = "/data/sessions"      # 会话文件位于 <dir>/slack/<频道>/<线程>.jsonl
+dir = "/data/sessions"      # 线程的会话在 <dir>/slack/<频道>/<线程>/，私聊的在 <dir>/slack/<私聊>/，文件为 1.jsonl、2.jsonl…（/new 新建下一个）
 
 # 可选：替换默认的英文文案，每项都可省略（字段名见 Replies 与 CardLabels）
 [replies]
@@ -193,13 +193,14 @@ allowed = "已批准"
 
 | 项 | 说明 |
 |---|---|
-| Slack 应用 | 打开 Socket Mode 与 Interactivity；订阅 bot 事件 `app_mention` 与 `message.im`。bot token 需要读取 @ 消息的权限（Slack 文档两处分别写作 `app_mentions:read` 与 `app_mentions.read`，以应用设置页显示的为准）、`im:history` 与 `chat:write`；app-level token 带 `connections:write`（Slack 的权限页把 `apps.connections.open` 列为它的适用方法） |
-| ⚑ D:5/CHINA FLAG: 飞书应用 | 企业自建应用；事件与回调的订阅方式都选长连接；订阅事件 `im.message.receive_v1` 与回调 `card.action.trigger`；开通发送消息的权限，群聊只开通读取 @ 机器人消息的权限（`im:message.group_at_msg:readonly`）。连接方式没有公开文档，按官方 Go SDK 实现 |
-| 使用 | Slack：频道中 @ 机器人，回答在这条消息的线程里；线程中追问时同样要 @ 机器人。⚑ D:5/CHINA FLAG: 飞书：群里 @ 机器人，回答以话题回复；在话题中追问时同样要 @。两个平台的私聊都直接发送。单独发送 `/cancel` 取消本线程的任务 |
+| Slack 应用 | 打开 Socket Mode 与 Interactivity；订阅 bot 事件 `app_mention` 与 `message.im`。bot token 需要读取 @ 消息的权限（Slack 文档两处分别写作 `app_mentions:read` 与 `app_mentions.read`，以应用设置页显示的为准）、`im:history` 与 `chat:write`；app-level token 带 `connections:write`（Slack 的权限页把 `apps.connections.open` 列为它的适用方法）。以下可选，各补上对话的一部分：订阅 `message.channels`、`message.groups`（权限 `channels:history`、`groups:history`）后，线程里不 @ 的回复也会送来，机器人也能读取它第一次被 @ 的线程（`conversations.replies`）；`users:read` 让模型看到发言人的名字；`reactions:write` 让插话得到 👀 回执。不开通时只认 @，名字显示为用户 ID。Slack 自 2025-05-29 起把 Marketplace 之外商业分发的应用读取线程的频率限为每分钟 1 次、每次 15 条，自建的内部应用不受影响 |
+| ⚑ D:5/CHINA FLAG: 飞书应用 | 企业自建应用；事件与回调的订阅方式都选长连接；订阅事件 `im.message.receive_v1` 与回调 `card.action.trigger`；开通发送消息的权限，群聊只开通读取 @ 机器人消息的权限（`im:message.group_at_msg:readonly`）。连接方式没有公开文档，按官方 Go SDK 实现。可选：开通敏感权限“获取群组中所有消息”（`im:message.group_msg`）后，话题里不 @ 的回复也会送来。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：读取群内全部消息] Subject to Legal/Export Compliance approval。读话题历史、名字与回执尚未实现（模型看到的是 open_id） |
+| 使用 | 私聊：直接发送，整段私聊是一个会话，发送 `/new` 开新会话。频道（⚑ D:5/CHINA FLAG: 飞书为群）：@ 机器人，回答在这条消息的线程（话题）里，这个线程就是一个会话；刚被机器人回答的人接着在线程里说，不必再 @；别人在线程里的讨论机器人只记下、不插话，被 @ 时一并参考。没 @ 机器人的频道消息、机器人没参与过的线程一概不理会。单独发送 `/cancel` 取消本会话的任务。机器人空闲释放会话（`idleSecs`）或重启之后，接话要再 @ 一次 |
+| 数据范围 | 会话文件里会有没 @ 机器人的人在线程中说的话：只限机器人参与过的线程与授权的聊天，其余消息在入口丢弃，不保存也不写日志。线程中任何人的话都会进入模型的上下文，写操作仍要审批 |
 | 审批 | 与 chat 相同，默认使用 assistant profile（可用 `--profile` 换成部署自己的，如 Kubernetes 的那份）：自动放行清单中的只读命令直接执行，其余 bash 命令发审批卡片，只有 `approvers` 中的用户点击才生效 |
 | 文案 | 状态、提示与审批卡片的文字默认英文，用配置文件的 `[replies]`、`[cardLabels]` 替换；`deploy/kubernetes/im/im.example.toml` 带一份中文 |
 | 凭据 | Slack 的两个 token 与 ⚑ D:5/CHINA FLAG: 飞书的 App Secret 只从环境变量读取。命令的环境中删除这些变量，命令输出中出现它们的值时脱敏 |
-| 日志 | stdout 每行一个 JSON：`approval`（审批记录：线程、工具调用、审批人、结果、时间）、`released`（释放空闲会话）、`failed`（未能发出的消息、连不上平台、停止时各线程没有处理的消息数等）。对话内容在会话文件中 |
+| 日志 | stdout 每行一个 JSON：`approval`（审批记录：聊天、线程（私聊为 `null`）、工具调用、审批人、结果、时间）、`released`（释放空闲会话）、`failed`（未能发出的消息、连不上平台、停止时各线程没有处理的消息数等）。对话内容在会话文件中 |
 | 退出 | 收到 SIGINT 或 SIGTERM 时取消进行中的任务，其状态改为 `stopped` 的文案（中文示例：“服务正在停止：本次任务已取消，请稍后重新发送。”）。还没处理的消息不再处理，包括排队中的、任务没取走的插话和停止期间才收到的，所在线程收到一句提示，请用户稍后重新发送。各线程发出结果后以 0 退出；配置错误与被拒的凭据为 2；平台连接意外结束为 1 |
 | 崩溃之后 | 进程崩溃（如被 SIGKILL、因内存不足被杀）时，上述消息会丢失，也没有提示，见 `docs/ROADMAP.md` 的已知缺口。正在运行的任务在 `<dir>/.running/` 下各有一个记录文件；下次启动时，im 把这些任务遗留的 `working` 状态改为 `interrupted` 的文案（中文示例：“服务重启过：这次任务没有完成，请重新发送。”），再删除记录 |
 
@@ -781,18 +782,21 @@ pub trait SessionLog: Send + Sync {
 
 ### IM 接入
 
-`im::Server` 在 IM 中回答问题：每个线程一个会话，写操作在 IM 中审批。命令行用法见上文[IM 服务](#im-服务)。接口与服务在 `zx-im`，平台是各自独立的 crate：Slack 的实现是 `zx-im-slack` 的 `SlackChannel`（经 `zx-agent` 为 `im::slack::SlackChannel`），用 `SlackConfig::new(app_token, bot_token)` 构造；⚑ D:5/CHINA FLAG: 飞书的实现是 `zx-im-feishu` 的 `FeishuChannel`（`im::feishu::FeishuChannel`），用 `FeishuConfig::new(app_id, app_secret)` 构造。两者的卡片文字都在 `CardLabels`，默认英文，可替换；`im` 的配置文件用 `[cardLabels]` 替换。
+`im::Server` 在 IM 中回答问题，按人和同事说话的直觉划分会话：私聊整段是一个会话，群聊一个线程一个会话；写操作在 IM 中审批。命令行用法见上文[IM 服务](#im-服务)。接口与服务在 `zx-im`，平台是各自独立的 crate：Slack 的实现是 `zx-im-slack` 的 `SlackChannel`（经 `zx-agent` 为 `im::slack::SlackChannel`），用 `SlackConfig::new(app_token, bot_token)` 构造；⚑ D:5/CHINA FLAG: 飞书的实现是 `zx-im-feishu` 的 `FeishuChannel`（`im::feishu::FeishuChannel`），用 `FeishuConfig::new(app_id, app_secret)` 构造。两者的卡片文字都在 `CardLabels`，默认英文，可替换；`im` 的配置文件用 `[cardLabels]` 替换。
 
-接入其他平台时，在自己的 crate 中实现 `ImChannel` 的四个方法：`platform`、`run`（接收直到取消）、`send`、`update`。实现负责：自行重连；收到平台投递后立即确认，再转交事件；按消息 ID 去重（可用 `zx_im::Seen`）；只转交发给机器人的消息（@ 与单聊），不转交机器人自己的消息；遵守平台限频；超长文本自行拆分（可用 `zx_im::split_text`）。`Destination.thread` 是线程根消息的 ID。
+接入其他平台时，在自己的 crate 中实现 `ImChannel` 的四个方法：`platform`、`run`（接收直到取消）、`send`、`update`。实现负责：自行重连；收到平台投递后立即确认，再转交事件；按消息 ID 去重（可用 `zx_im::Seen`）；转交私聊消息、群里 @ 机器人的消息和群里线程中的回复，每条注明会话种类（`ChatKind`：私聊或群聊）与对象（`Addressee`：机器人、别人或无人），不转交机器人自己的消息，也不转交群里没 @ 机器人的顶层消息；遵守平台限频；超长文本自行拆分（可用 `zx_im::split_text`）。`Destination.thread` 是线程根消息的 ID。另有三个带默认实现的方法，平台做得到才实现：`thread_history`（读线程已有的消息）、`display_name`（发言人的名字，默认用 ID）、`acknowledge`（插话被采纳时的回执，如表情）。
 
-宿主提供两样东西：`SessionFactory` 为一个线程打开会话，须把传入的 `interaction` 设为 `LoopConfig::interaction`；`ServerSink` 接收运维事件。`SessionKey::file_in(dir)` 给出 `<dir>/<平台>/<聊天>/<线程>.jsonl`，各段按字节编码，ID 不能指向其他目录。可选的 `ServerConfig::statuses`（`StatusStore`）记录运行中的状态；`StatusFiles` 把每条记录存为目录中的一个 JSON 文件。
+宿主提供两样东西：`SessionFactory` 为一个会话打开 `Opening` 指定的那份会话（`Latest` 为最近一份，第一次时新建；`/new` 之后为 `New`），须把传入的 `interaction` 设为 `LoopConfig::interaction`，`has_session` 告诉服务这个线程有没有会话（默认不知道，此时释放后的线程只认 @）；`ServerSink` 接收运维事件。`SessionKey::dir_in(dir)` 给出一个会话的目录：私聊为 `<dir>/<平台>/<聊天>`，线程为 `<dir>/<平台>/<聊天>/<线程>`，各段按字节编码，ID 不能指向其他目录；`SessionKey::file_in(dir, opening)` 给出其中的 `<序号>.jsonl`，`has_file_in` 判断有没有。可选的 `ServerConfig::statuses`（`StatusStore`）记录运行中的状态；`StatusFiles` 把每条记录存为目录中的一个 JSON 文件。
 
 | 行为 | 说明 |
 |---|---|
-| 线程即会话 | 聊天中的新消息以它为根开出线程；线程中的后续消息进入同一个会话 |
-| 访问控制 | 只在 `ServerConfig::conversations` 列出的聊天中回答；其他聊天只收到一句“未授权” |
-| 运行中的消息 | 作为插话（`steer`）；运行结束时才到的，由 `take_queued` 取出后另起一次运行 |
-| `/cancel` | 单独发在线程中，取消该线程的运行；排队时取消排队 |
+| 私聊 | 整段私聊是一个会话，回答直接发在私聊里；`/new` 开新会话，之前的会话文件保留 |
+| 群聊 | @ 机器人的顶层消息以它为根开出线程，一个线程一个会话；在别人发起的线程里第一次被 @ 时，先把线程已有的消息（至多 50 条，不含机器人的）记进会话 |
+| 回答谁 | 机器人参与过的线程里：@ 它的消息回答；刚被它回答的人接着说、没 @ 任何人、中间也没有别人发言，同样回答；其余消息只记进会话（`custom_message`，类型 `im_message`），下次回答时模型能看到，不触发回答。接话的判断只在会话未释放时有效 |
+| 发言人 | 群聊中交给模型的每条消息前加发言人的名字（`名字: 内容`），查不到名字时用 ID；私聊不加 |
+| 访问控制 | 只在 `ServerConfig::conversations` 列出的聊天中回答；其他聊天里 @ 机器人只收到一句“未授权”，没 @ 的消息不理会 |
+| 运行中的消息 | 要回答的作为插话（`steer`），并经 `acknowledge` 回执；运行结束时才到的，由 `take_queued` 取出后另起一次运行；只记录的等运行结束后写入会话 |
+| `/cancel` | 单独发送，取消该会话的运行；排队时取消排队 |
 | 运行上限 | 同时运行 `max_running` 个会话，其余按到达顺序排队，并收到一句排队提示 |
 | 回复 | 开始时发“处理中”（默认英文 `Working…`），结束时把它替换为回答；未完成、超时、取消与失败各有固定说明（`Replies`，默认英文，可替换；`im` 的配置文件用 `[replies]` 替换，`deploy/kubernetes/im/im.example.toml` 带一份中文） |
 | 审批 | 需要审批时发卡片；只有 `approvers` 中的用户点击才生效，其他人点击只收到提示。卡片按运行发出的 `approval_resolved` 改为结果，所以超时与取消也会显示 |

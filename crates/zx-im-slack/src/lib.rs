@@ -9,19 +9,19 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
-use reqwest::StatusCode;
 use reqwest::header::{HeaderMap, RETRY_AFTER};
+use reqwest::{StatusCode, Url};
 use serde_json::{Map, Value, json};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::{Bytes, Message};
 use tokio_util::sync::CancellationToken;
 use zx_im::{
     Backoff, CARD_CAPACITY, CardLabels, Cards, Destination, ErrorReport, ImChannel, ImError, Inbound, Keepalive,
-    MAX_TEXT_CHARS, MessageId, MessageRef, Outbound, Pacer, RATE_LIMIT_RETRIES, SEEN_CAPACITY, Seen,
+    MAX_TEXT_CHARS, MessageId, MessageRef, Outbound, Pacer, RATE_LIMIT_RETRIES, SEEN_CAPACITY, Said, Seen, UserId,
     card_update_refused,
 };
 
-use events::{button, card_request, decisions, escape, message, resolution, section, split};
+use events::{button, card_request, decisions, escape, history, message, resolution, section, split};
 
 /// Where the Web API lives.
 const DEFAULT_API_BASE: &str = "https://slack.com/api";
@@ -38,6 +38,8 @@ const ALLOW_ACTION: &str = "zx_allow_once";
 const DENY_ACTION: &str = "zx_deny";
 /// Characters of a section block's text (Block Kit section block).
 const MAX_SECTION_CHARS: usize = 3000;
+/// The reaction that acknowledges a message steered into a run: "seen".
+const ACK_REACTION: &str = "eyes";
 /// Method errors that retrying cannot fix: the token or the app's setup is wrong.
 const SETUP_ERRORS: [&str; 9] = [
     "invalid_auth",
@@ -92,6 +94,12 @@ impl SlackConfig {
 
 /// Slack through Socket Mode. Needs an app with Socket Mode and Interactivity on, the
 /// `app_mention` and `message.im` events, and the scopes to read them and `chat:write`.
+///
+/// Optional, each for one more part of the conversation: the `message.channels` and
+/// `message.groups` events (scopes `channels:history`, `groups:history`) bring replies in a
+/// thread that do not mention the bot, and let it read a thread it is first mentioned in;
+/// `users:read` gives senders' names; `reactions:write` acknowledges steering. Without them
+/// the bot answers mentions only and shows user IDs.
 pub struct SlackChannel {
     config: SlackConfig,
     http: reqwest::Client,
@@ -116,13 +124,25 @@ impl SlackChannel {
         })
     }
 
-    /// Call a Web API method with `token`. A rate limit is waited out and retried; a method
-    /// error that retrying cannot fix is a configuration error.
-    async fn call(&self, method: &str, token: &str, body: Option<&Value>) -> Result<Value, ImError> {
-        let url = format!("{}/{method}", self.config.api_base.trim_end_matches('/'));
+    /// Call a Web API method with `token`, its arguments in the query (`args`) or in a JSON
+    /// `body`. A rate limit is waited out and retried; a method error that retrying cannot
+    /// fix is a configuration error.
+    async fn call(
+        &self,
+        method: &str,
+        token: &str,
+        args: &[(&str, &str)],
+        body: Option<&Value>,
+    ) -> Result<Value, ImError> {
+        let base = self.config.api_base.trim_end_matches('/');
+        let mut url = Url::parse(&format!("{base}/{method}"))
+            .map_err(|error| ImError::Config(format!("slack {method}: invalid API base {base}: {error}")))?;
+        if !args.is_empty() {
+            url.query_pairs_mut().extend_pairs(args);
+        }
         let mut retries = 0;
         loop {
-            let request = self.http.post(&url).bearer_auth(token);
+            let request = self.http.post(url.clone()).bearer_auth(token);
             let request = match body {
                 Some(body) => request.json(body),
                 None => request,
@@ -163,7 +183,7 @@ impl SlackChannel {
         tokio::select! {
             biased;
             () = cancel.cancelled() => None,
-            answer = self.call(method, token, None) => Some(answer),
+            answer = self.call(method, token, &[], None) => Some(answer),
         }
     }
 
@@ -185,7 +205,12 @@ impl SlackChannel {
             body.insert("blocks".into(), blocks);
         }
         let answer = self
-            .call("chat.postMessage", &self.config.bot_token, Some(&Value::Object(body)))
+            .call(
+                "chat.postMessage",
+                &self.config.bot_token,
+                &[],
+                Some(&Value::Object(body)),
+            )
             .await?;
         let ts = answer["ts"]
             .as_str()
@@ -207,7 +232,7 @@ impl SlackChannel {
         if let Some(blocks) = blocks {
             body.insert("blocks".into(), blocks);
         }
-        self.call("chat.update", &self.config.bot_token, Some(&Value::Object(body)))
+        self.call("chat.update", &self.config.bot_token, &[], Some(&Value::Object(body)))
             .await
             .map(drop)
     }
@@ -483,6 +508,54 @@ impl ImChannel for SlackChannel {
                 blocks.push(section(&result));
                 self.edit(posted, &result, Some(Value::Array(blocks))).await
             }
+        }
+    }
+
+    /// `conversations.replies`, the first page: the thread's root and replies, oldest first
+    /// (needs `channels:history` or `groups:history`).
+    async fn thread_history(&self, at: &Destination, limit: usize) -> Result<Vec<Said>, ImError> {
+        let Some(thread) = &at.thread else {
+            return Ok(Vec::new());
+        };
+        let limit = limit.to_string();
+        let args = [
+            ("channel", at.conversation.0.as_str()),
+            ("ts", thread.0.as_str()),
+            ("limit", limit.as_str()),
+        ];
+        let answer = self
+            .call("conversations.replies", &self.config.bot_token, &args, None)
+            .await?;
+        Ok(history(&answer))
+    }
+
+    /// `users.info` (needs `users:read`): the display name, else the real name.
+    async fn display_name(&self, user: &UserId) -> Result<Option<String>, ImError> {
+        let answer = self
+            .call("users.info", &self.config.bot_token, &[("user", user.0.as_str())], None)
+            .await?;
+        let profile = &answer["user"]["profile"];
+        Ok([
+            &profile["display_name"],
+            &profile["real_name"],
+            &answer["user"]["real_name"],
+        ]
+        .into_iter()
+        .filter_map(Value::as_str)
+        .find(|name| !name.trim().is_empty())
+        .map(String::from))
+    }
+
+    /// `reactions.add` with the `eyes` reaction (needs `reactions:write`).
+    async fn acknowledge(&self, message: &MessageRef) -> Result<(), ImError> {
+        let body = json!({"channel": message.at.conversation.0, "timestamp": message.id.0, "name": ACK_REACTION});
+        match self
+            .call("reactions.add", &self.config.bot_token, &[], Some(&body))
+            .await
+        {
+            // Acknowledged before, as by a redelivery.
+            Err(ImError::Transport(error)) if error.ends_with("already_reacted") => Ok(()),
+            other => other.map(|_| ()),
         }
     }
 }
