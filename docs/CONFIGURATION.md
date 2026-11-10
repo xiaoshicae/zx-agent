@@ -209,7 +209,7 @@ shortFlags = ["A"]
 
 注意两种 `bash(...)` 的比较方式不同：`deny` 的文本在命令中**任何位置**出现都算，`allow` 的文本必须是命令的**开头**（按词比较）。
 
-只允许一部分命令时，写 `ask = ["bash"]` 加上 `allow = ["bash(kubectl get)", ...]`：`allow` 覆盖的命令直接执行，其余命令要审批，在 run 中因为没有人审批而被拒绝。没有命令白名单（原来的 `rules.allow`）：SDK 仍可以给 `CommandPolicy` 传白名单，命令行总是传空的。
+只允许一部分命令时，写 `ask = ["bash"]` 加上 `allow = ["bash(kubectl get)", ...]`：`allow` 覆盖的命令直接执行，其余命令要审批，在 run 中因为没有人审批而被拒绝。没有命令白名单（原来的 `rules.allow`，SDK 的 `CommandPolicy` 也不再接受白名单）。
 
 工具名不认识、条目为空、`bash()` 中没有文本、`bash(` 没有右括号时，以退出码 2 报错，错误信息带键名（如 `permissions.deny`）。
 

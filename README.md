@@ -405,7 +405,7 @@ CLI (main.rs + cli/ + chat/ + acp/)
 | 会话内切换分支 | `/tree` 列出会话树，`/branch <ID>` 移到某条目之后或自己某条消息之前；SDK 为 `AgentSession::branch` 与 `inspect`。位置只在内存中，与 pi 相同 | pi 的 `/tree` 是可选择的界面，切换时可让模型为离开的分支写一份摘要（`branch_summary` 条目）并给条目加标签（`label`）；这里是逐行 REPL，不做分支摘要与标签 |
 | 队列模式的默认值 | 两个队列默认 `all`，一次取完排队的消息 | pi 默认 `one-at-a-time`。这里沿用此前的行为，`/queue` 或 SDK 可改 |
 | 扩展的消息、状态、工具与命令 | 扩展经 `HookContext` 的 `queues` 与 `active_tools` 在运行中发消息（`custom_message` 记录，模型看到的是用户消息，只有文本）、记状态（`custom` 记录，运行中先排队、下一回合开始或运行结束时写入）、改下一次请求提供的工具；命令由 `Extension::commands` 注册，前端（chat）调度，运行中也立即执行 | pi 的 `sendMessage` 可带图片，`appendEntry` 随时直接写入；这里会话在运行期间归循环独占，所以延后到安全点写入。pi 用一条 system 消息向模型声明工具集的增减；这里请求只声明当前活跃的工具，请求审计记录每次请求声明了哪些 |
-| 环境信息 | 启动时由程序写入系统提示词，见下文 | pi 只写入工作目录；无人值守时没有人提供这些信息，白名单也可能禁止 `uname`、`date` 等命令 |
+| 环境信息 | 启动时由程序写入系统提示词，见下文 | pi 只写入工作目录；无人值守时没有人提供这些信息，权限也可能让 `uname`、`date` 等命令要审批而被拒绝 |
 | 参数校验 | 循环按工具声明的 JSON Schema 严格校验（`jsonschema`），不转换类型；兼容旧写法或常见错误要由工具在 `prepare_arguments` 中显式改写。工具执行时仍反序列化成自己的参数类型 | pi 校验前先去掉可选字段的 `null`、按 schema 转换类型（`packages/ai/src/utils/validation.ts`）。这里只在工具声明的地方改写参数，策略与审批看到的参数才有据可查 |
 | 缺少结果的工具调用 | 有副作用的调用执行前先记录开始；下一次运行开始时，为缺少结果的调用写入"结果未知""未执行"等错误结果，不重放。运行被取消时，执行中的有副作用调用的结果写明"可能已改变状态，先检查再重试"，尚未开始的调用写明"未执行" | 发送时补占位（沿用 pi 的 transform-messages.ts）区分不了调用是否执行过；崩溃后需要依据记录判断 |
 | 中断调用的重放 | 不重放：进程崩溃或被取消后，中断的调用一律写成错误结果，由模型决定是否重试 | pi 的工具可声明 `replay: "safe"`，durable 运行时重启后用记录的参数自动重跑，记录时与当前定义都声明 `safe` 才重跑，连续中断达到上限即停（`packages/durable/src/harness/tool.ts`）。这适用于两个前提：重启后无人介入、自动续跑；工具耗时长、内部有大量嵌套调用（如 codemode），从头重跑代价大。zx-agent 两者都没有：进程结束即运行结束，工具都是单次调用，被打断后由模型重试只多一次请求。将来要做自动续跑或长时间的复合工具时再评估；届时重放语义另设字段，不复用 `Effects`，因为只读不等于可以安全重放 |
@@ -426,7 +426,6 @@ CLI (main.rs + cli/ + chat/ + acp/)
 |---|---|---|
 | 说明 | agent 的说明（`run` 默认为中性的无人值守说明，`chat` 默认为通用对话说明） | 总是 |
 | `<environment>` | 操作系统与版本、CPU 架构、启动时间（UTC）与本地时区、工作目录；容器执行时描述容器、镜像与隔离方式 | 总是 |
-| `<command_policy>` | 允许的命令前缀、禁止的语法、引号内 `\|` 的写法提示 | 启用了 bash 且设置了命令白名单时；只有 SDK 能设置白名单（`CommandPolicy::new`），命令行不设，因此 CLI 的提示词没有这一段 |
 | `<project_context>` | 项目说明文件：自动发现的 AGENTS.md，以及 agent 列出的文件 | 有项目说明时 |
 | `<available_skills>` | 已注册 skill 的名称与描述；正文由 `read_skill` 按需读取 | 启用 `read_skill` 且注册了 skill 时 |
 
@@ -443,21 +442,12 @@ CLI (main.rs + cli/ + chat/ + acp/)
 
 - 所有命令都会匹配一组危险模式：`rm -rf /` 等多词模式在转小写、合并空白后按子串匹配；`shutdown`、`reboot`、`poweroff`、`halt`、`mkfs`（含 `mkfs.<类型>`）以及 `init 0`、`init 6` 按程序匹配，即出现在命令的词中（先去掉引号与反斜杠，按路径的文件名比较），但 `grep`、`last`、`journalctl`、`cat`、`echo` 等只读程序的参数不算，因此 `last reboot`、`grep -i shutdown` 可以执行。这组规则同样容易绕过，只起减速作用。
 - agent 的 `permissions.deny` 中的 `bash(<文本>)` 追加拒绝的模式：命令中**任何位置**出现该文本（不分大小写）即拒绝，与上面的多词模式一样按子串匹配。
-- SDK 可以给 `CommandPolicy` 传命令白名单：命令只能是由白名单程序组成的管道（`a | b`），并且拒绝 `;`、`&`、`` ` ``、`$(`、`>`、`<` 和换行。检查只识别这些符号：变量展开（如 `$VAR`）和通配符不会被拒绝，白名单程序自身的参数也不检查，例如允许 `find` 就等于允许 `find -exec`。CLI 不再设白名单（原来的 `rules.allow` 已去掉）：要只让部分命令运行，在 agent 中写 `ask = ["bash"]` 与 `allow = ["bash(<前缀>)", …]`，其余命令要审批，`run` 没有人审批而拒绝。
-
-SDK 白名单的示例（白名单为 `kubectl get`、`grep`）：
-
-| 命令 | 结果 |
-|---|---|
-| `kubectl get pods -A \| grep -v Running` | 允许 |
-| `kubectl delete pod x` | 拒绝：不在白名单 |
-| `kubectl get pods && rm x` | 拒绝：包含 `&` |
-| `grep x $(cat list)` | 拒绝：包含 `$(` |
+- 没有命令白名单：`CommandPolicy` 只拒绝上面两类，其余命令都放行。要只让部分命令运行，在 agent 中写 `ask = ["bash"]` 与 `allow = ["bash(<前缀>)", …]`，其余命令要审批，`run` 没有人审批而拒绝；SDK 的写法是 `RulePolicy` 加 `AutoApprove`（见 `examples/library.rs`）。
 
 自动放行（agent 的 `permissions.allow` 中的 `bash(<前缀>)`）只决定是否询问，不决定能运行什么。bash 需要审批时（如 chat，或 agent 的 `ask` 含 `bash`），满足以下条件的命令不经审批直接执行：
 
 - 是由清单中的前缀组成的管道；
-- 只由字母、数字、空白和 `- _ . / : = , @ + | ^ ~ !` 组成。引号、`\`、`$`、通配符、花括号、括号、`#` 以及白名单拒绝的语法都会改为询问：它们能让 shell 实际执行的内容与字面不同，例如 `kubectl get sec""rets` 去掉引号后就是 `secrets`；
+- 只由字母、数字、空白和 `- _ . / : = , @ + | ^ ~ !` 组成。引号、`\`、`$`、通配符、花括号、括号、`#` 以及 `;`、`&`、`` ` ``、`>`、`<` 都会改为询问：它们能让 shell 实际执行的内容与字面不同，例如 `kubectl get sec""rets` 去掉引号后就是 `secrets`；
 - 不含 URL（`://`），也不含 agent 的 `permissions.allowExcept` 列出的字词（不分大小写，作为子串比较；内置 assistant 为 `secret`）；
 - 程序在 agent 的 `permissions.allowOptions` 中列出了可带的选项时，只能带这些选项，其他选项一律询问；没有列出的程序不限选项。
 
@@ -469,7 +459,7 @@ SDK 白名单的示例（白名单为 `kubectl get`、`grep`）：
 
 `read_file` 只接受普通文件，默认单文件上限为 10 MiB，同时检查文件元数据与实际读取量。目录、FIFO 和设备文件会被拒绝，并且不会被打开：先查看路径类型再打开。取消会停止等待文件 I/O；底层已经启动的普通文件 I/O 仍可能由 Tokio 的阻塞线程继续完成。每次最多返回 2000 行或 50 KiB（51200 字节），按行翻页；单行超过这个字节上限时只显示前缀，并注明该行被截断及其字节数。
 
-`edit_file` 与 `write_file` 改变文件，按有副作用处理（崩溃后恢复为“结果未知”）。内置 assistant 启用它们并要求审批，`unattended` 与 Kubernetes 部署的 agent 不启用。它们不受命令白名单约束，可以写进程有权限写的任何普通文件，包括工作目录之外的；需要限制时，不启用它们，或使用容器执行。目录与特殊文件会被拒绝，写入不是原子的。`edit_file`（对应 pi 的 `edit`）：
+`edit_file` 与 `write_file` 改变文件，按有副作用处理（崩溃后恢复为“结果未知”）。内置 assistant 启用它们并要求审批，`unattended` 与 Kubernetes 部署的 agent 不启用。它们不经 bash 的命令检查，可以写进程有权限写的任何普通文件，包括工作目录之外的；需要限制时，不启用它们，或使用容器执行。目录与特殊文件会被拒绝，写入不是原子的。`edit_file`（对应 pi 的 `edit`）：
 
 - 每处 `oldText` 都与原文件比较，必须恰好出现一次，彼此不能重叠；有一处失败就不写文件。精确匹配不到时，会忽略行尾空白、把弯引号、各种破折号与特殊空格当作 ASCII 字符再匹配一次；此时只有被替换的行按这种形式写回，其余行保持原字节。pi 还做 Unicode NFKC 规范化，标准库没有，这里不做。
 - 文件开头的 BOM 与 CRLF 换行保留；只编辑不超过 10 MiB 的 UTF-8 文本，含 NUL 字节的文件按二进制拒绝。
@@ -477,7 +467,7 @@ SDK 白名单的示例（白名单为 `kubectl get`、`grep`）：
 - 模型常见的旧写法会先改写再校验：`edits` 写成 JSON 字符串或单个对象、`oldText` 与 `newText` 写在顶层（`prepare_arguments`）。
 - 同一批调用中改同一个文件（按解析符号链接后的路径）的 `edit_file` 与 `write_file` 逐个执行，改不同文件的仍可并行（对应 pi 的 file-mutation-queue）。
 
-`grep`、`find`、`ls`（对应 pi 的同名工具）只读，经执行器运行系统程序，容器执行时在容器内运行。内置 assistant 启用它们且不需要审批，`unattended` 与 Kubernetes 部署的 agent 不启用。与 `read_file` 一样，它们不受命令白名单约束，可以读取进程有权限读取的文件；需要限制时不启用它们。
+`grep`、`find`、`ls`（对应 pi 的同名工具）只读，经执行器运行系统程序，容器执行时在容器内运行。内置 assistant 启用它们且不需要审批，`unattended` 与 Kubernetes 部署的 agent 不启用。与 `read_file` 一样，它们不经 bash 的命令检查，可以读取进程有权限读取的文件；需要限制时不启用它们。
 
 - 安装了 ripgrep（`rg`）时用它搜索，遵守 `.gitignore`；没有时退到 POSIX `grep -rn`（扩展正则）与 `find`，只跳过 `.git`、`.hg`、`.svn`，结果后注明 ripgrep 未安装、没有应用 `.gitignore`，`details.engine` 写明用的是哪个程序。pi 在缺少 rg 时自动下载，这里不下载。两种程序的正则写法略有不同，`grep` 的 `glob` 在退回时只比较文件名。
 - 模型给的模式与路径都以单引号整体传给 shell，不会被解释；测试覆盖了 `$(…)`、反引号与引号注入。
@@ -530,7 +520,7 @@ ask = []                         # approveAll 时须为空
 **局限（必须了解）**：
 
 - 策略只是第一道防线，**不是安全边界**。生产环境请以最小权限账号运行，并放在容器或虚拟机中，必要时限制网络访问。
-- `read_file` 不受命令白名单约束，可以读取进程有权限读取的普通文件。需要限制时，使用 `--tools bash` 关闭它。
+- `read_file` 不经 bash 的命令检查，可以读取进程有权限读取的普通文件。需要限制时，使用 `--tools bash` 关闭它。
 - 项目上下文（`AGENTS.md` 与 agent 中的上下文文件）会进入系统提示词并发送给模型服务方，可能引导模型的行为。自动发现的 `AGENTS.md` 不能通过符号链接指向项目外；在不可信仓库中运行时，建议使用 `[context] discover = false` 的 agent。
 - `run` 和 `chat` 在 `after_tool` 中将认证 API key 的完整字面值替换为 `[REDACTED]`，处理后的结果才会写入会话、事件并回传模型。其他凭据文件用 `config.toml` 的 `secretFiles` 或环境变量 `ZX_SECRET_FILES` 登记，两者合并，例如 Kubernetes Pod 中 ServiceAccount 的 token（`deploy/kubernetes/` 的清单经 `ZX_SECRET_FILES` 登记 `/var/run/secrets/kubernetes.io/serviceaccount/token`）或其他集群的 token；程序本身不预设任何路径。登记目录时，表示其中名字不以点开头的文件，之后新增的文件也会过滤。这些文件在每次过滤前重新读取，文件中的当前值总是过滤；轮换下来的旧值在过期前仍然有效，因此还会保留最近 32 个继续过滤。过滤是对文件内容（去掉首尾空白）的精确替换；内容不是 UTF-8 时，按 bash 与 read_file 输出所用的有损解码匹配，与文件被完整打印时的样子一致。文件不存在或本进程无权读取时跳过。启动时，登记的路径必须存在，其中每个文件须为不超过 64 KiB 的普通文件：更大的文件不可能整段出现在一次工具输出中（至多 50 KiB），通常是结构化数据，应改为逐个登记其中的值。启动之后才出现超过上限、不是普通文件或其他读取错误时，过滤器失败。短于 8 个字符的值照常过滤，但输出中所有相同的文本都会被替换，包括与密钥无关的内容（例如 `admin`、`5432`）；启动时在 stderr 以 `[secret] <文件>: …` 指出这些文件，不显示值本身，每个进程只提示一次（参照 GitLab 对可遮蔽变量至少 8 个字符的要求）。SDK 可用 `RedactSecrets` 显式配置其他密钥，或用 `with_secret_files` 登记这类文件，并用 `check_secret_files` 与 `short_secret_files` 在启动时做同样的检查；过滤器失败时丢弃原始输出，返回错误结果。
 - 长工具结果的文件同样在脱敏后写入，Unix 新目录 / 文件权限为 0700 / 0600；结果目录默认 `.zx-agent/outputs`，不会自动删除，目录中写入忽略全部文件的 `.gitignore`。写入失败时结果保持内联。`run` 默认不落盘。保存的是工具已经截断的结果，详见[工具结果落盘](docs/CONFIGURATION.md#工具结果落盘)。
@@ -736,7 +726,7 @@ P1 的 SDK 接口调整：`LoopConfig` 持有模型、工具、钩子、交互�
 `AllowSession` 只缓存当前会话内完全相同的工具名和参数，仍须通过每次策略检查，可用 `AgentSession::clear_approvals` 或底层 `Runner::clear_approvals` 撤销；不会写入会话或跨进程恢复。
 异步回调必须让出执行权，合作式超时无法抢占阻塞线程。
 
-组装系统提示词（`ai::SystemPrompt`）可用 `prompt::build_system_prompt`、`prompt::environment_section` 和 `CommandPolicy::prompt_section`。如果 API key 来自环境变量，把该变量名放进工具所用的 `LocalExecutor` 的 `hidden_env`（`executor::LocalExecutor { hidden_env }`），本机执行的命令就看不到它。两者的用法见示例。
+组装系统提示词（`ai::SystemPrompt`）可用 `prompt::build_system_prompt` 和 `prompt::environment_section`。如果 API key 来自环境变量，把该变量名放进工具所用的 `LocalExecutor` 的 `hidden_env`（`executor::LocalExecutor { hidden_env }`），本机执行的命令就看不到它。两者的用法见示例。
 
 底层 `Runner::run(&mut self)` 仍可用于独占调用；共享前端使用 `AgentSession` 的方法。两种方式都保留会话，外层 `select!` 或 `timeout` 丢弃运行 future 时只取消本次子令牌。
 
@@ -763,7 +753,7 @@ P1 的 SDK 接口调整：`LoopConfig` 持有模型、工具、钩子、交互�
 
 - 工具加在已有工具之后，名字不能与任何工具重名。
 - 钩子以扩展的名称注册，`hook_failed` 中显示这个名称；它们只能声明 `Extension` 阶段，因此内置策略总在它们之前、脱敏与落盘总在它们之后：扩展放宽不了策略的结论，也恢复不了已脱敏的密钥。
-- 段落加在系统提示词的末尾。名称只能是小写 ASCII 字母、数字与 `_`，以字母开头；不能是 `preamble`、zx-agent 生成的段落（`prompt::GENERATED_SECTIONS`：`environment`、`command_policy`、`project_context`、`available_skills`，无论提示词中是否已有）或提示词中已有的段落，因为同名段落会被替换。
+- 段落加在系统提示词的末尾。名称只能是小写 ASCII 字母、数字与 `_`，以字母开头；不能是 `preamble`、zx-agent 生成的段落（`prompt::GENERATED_SECTIONS`：`environment`、`project_context`、`available_skills`，无论提示词中是否已有）或提示词中已有的段落，因为同名段落会被替换。
 - 先检查全部扩展再注册：扩展名为空或重复、钩子不在 `Extension` 阶段、工具重名或声明有误、段落名不合规时返回错误，`config` 保持原样。
 - 一个扩展可以注册进多个循环（例如 im 的每个线程），工具共用同一份；每次注册都会调用一次 `hooks()`。
 - 命令（`Extension::commands`，pi 的 `registerCommand`）：实现 `agent::SlashCommand`（名字、一行说明、`run(参数, &CommandContext)`），名字只能是 ASCII 字母、数字、`_` 与 `-`，以字母开头，不能与已注册的命令重名。前端把 `/名字 参数` 交给 `AgentSession::run_command`，内置命令优先；`CommandContext` 带工作目录、会话 ID、队列与工具集，命令返回要显示的行和要发给模型的消息（`CommandOutcome`）。

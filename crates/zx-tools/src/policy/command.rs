@@ -1,15 +1,15 @@
-//! The command policy of the `bash` tool: denied patterns and programs, and the allowlist of
-//! command prefixes.
+//! The command policy of the `bash` tool: denied patterns and programs.
 
 use async_trait::async_trait;
 use serde_json::Value;
 
-use super::{begins_with, command_of, normalize};
+use super::{command_of, normalize};
 use crate::agent::{PolicyDecision, ToolPolicy};
 use crate::tools::BASH;
 
 /// Patterns rejected for every `bash` command, compared as substrings after lowercasing and
-/// collapsing whitespace. Easy to bypass on purpose; the allowlist is the real control.
+/// collapsing whitespace. Easy to bypass on purpose: a denylist only stops the plain spelling,
+/// so commands that must not run need a rule that asks, or isolation.
 pub const DEFAULT_DENIED_PATTERNS: &[&str] = &[
     "rm -rf /",
     "rm -fr /",
@@ -111,32 +111,22 @@ fn is_assignment(word: &str) -> bool {
     })
 }
 
-/// Shell syntax rejected when an allowlist is set: anything that could chain or redirect
-/// beyond a plain pipeline of allowlisted programs.
-pub(super) const ALLOWLIST_FORBIDDEN: &[&str] = &[";", "&", "`", "$(", ">", "<", "\n", "\r"];
-
-/// Policy for the `bash` tool.
-///
-/// - Every command is checked against denied patterns and [`DENIED_PROGRAMS`].
-/// - With an empty allowlist, other commands are allowed.
-/// - With an allowlist, a command must be a pipeline (`a | b`) whose every segment starts
-///   with an allowlisted prefix, such as `kubectl get` or `journalctl`. Other shell
-///   control syntax is rejected, so the check fails closed on anything it cannot read.
+/// Policy for the `bash` tool: every command is checked against denied patterns and
+/// [`DENIED_PROGRAMS`]; other commands are allowed.
 pub struct CommandPolicy {
-    allow_prefixes: Vec<String>,
     denied_patterns: Vec<String>,
 }
 
+impl Default for CommandPolicy {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CommandPolicy {
-    /// Create a policy with the default denied patterns. An empty `allow_prefixes` allows
-    /// every command that does not match a denied pattern.
-    pub fn new(allow_prefixes: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
+    /// A policy with the default denied patterns.
+    pub fn new() -> Self {
         Self {
-            allow_prefixes: allow_prefixes
-                .into_iter()
-                .map(|prefix| normalize(prefix.as_ref()))
-                .filter(|prefix| !prefix.is_empty())
-                .collect(),
             denied_patterns: DEFAULT_DENIED_PATTERNS
                 .iter()
                 .map(|pattern| normalize(pattern))
@@ -164,58 +154,7 @@ impl CommandPolicy {
         if let Some(program) = denied_program(command) {
             return PolicyDecision::Deny(format!("command runs the denied program {program:?}"));
         }
-        if self.allow_prefixes.is_empty() {
-            return PolicyDecision::Allow;
-        }
-        // Check the raw command too: normalization turns newlines into spaces.
-        if let Some(token) = ALLOWLIST_FORBIDDEN.iter().find(|token| command.contains(*token)) {
-            return PolicyDecision::Deny(format!(
-                "{token:?} is not allowed; only plain commands and '|' pipelines of allowlisted programs may run"
-            ));
-        }
-        for segment in normalized.split('|') {
-            let segment = segment.trim();
-            if segment.is_empty() {
-                return PolicyDecision::Deny("empty pipeline segment (is '||' used?)".to_string());
-            }
-            let allowed = self.allow_prefixes.iter().any(|prefix| begins_with(segment, prefix));
-            if !allowed {
-                // An odd number of quotes means the split happened inside a quoted string.
-                let split_quote = segment.matches('"').count() % 2 == 1 || segment.matches('\'').count() % 2 == 1;
-                let hint = if split_quote {
-                    "; a '|' separates commands even inside quotes, so write grep -e A -e B instead of grep \"A|B\""
-                } else {
-                    ""
-                };
-                return PolicyDecision::Deny(format!(
-                    "{segment:?} is not in the command allowlist ({}){hint}",
-                    self.allow_prefixes.join(", ")
-                ));
-            }
-        }
         PolicyDecision::Allow
-    }
-
-    /// The rules for the system prompt, so the model knows them before its first command
-    /// instead of learning them from rejections. Built from the same data as `evaluate`.
-    /// `None` without an allowlist.
-    pub fn prompt_section(&self) -> Option<String> {
-        if self.allow_prefixes.is_empty() {
-            return None;
-        }
-        let symbols: Vec<&str> = ALLOWLIST_FORBIDDEN
-            .iter()
-            .copied()
-            .filter(|token| !token.trim().is_empty())
-            .collect();
-        Some(format!(
-            "bash commands are checked before they run; rejected commands return an error and do not run.\n\
-             Every command, and every segment of a '|' pipeline, must start with one of: {}.\n\
-             Rejected syntax: {} and line breaks.\n\
-             A '|' separates commands even inside quotes: write grep -e A -e B instead of grep \"A|B\".",
-            self.allow_prefixes.join(", "),
-            symbols.join(" "),
-        ))
     }
 }
 
@@ -241,67 +180,23 @@ mod tests {
     }
 
     #[test]
-    fn denied_patterns_apply_without_allowlist() {
-        let policy = CommandPolicy::new(Vec::<String>::new());
+    fn denied_patterns_apply_and_other_commands_run() {
+        let policy = CommandPolicy::new();
         assert_eq!(policy.evaluate("df -h"), PolicyDecision::Allow);
         assert!(denied(&policy.evaluate("sudo  RM -RF  /")));
         assert!(denied(&policy.evaluate("systemctl reboot")));
     }
 
     #[test]
-    fn allowlist_accepts_pipelines_of_allowed_programs() {
-        let policy = CommandPolicy::new(["kubectl get", "grep", "journalctl", "tail"]);
-        assert_eq!(
-            policy.evaluate("kubectl get pods -A | grep -v Running"),
-            PolicyDecision::Allow
-        );
-        assert_eq!(
-            policy.evaluate("journalctl -u nginx --since '1 hour ago' | tail -n 50"),
-            PolicyDecision::Allow
-        );
-        assert!(denied(&policy.evaluate("kubectl delete pod x")));
-        assert!(denied(&policy.evaluate("kubectl get pods; rm x")));
-        assert!(denied(&policy.evaluate("kubectl get pods && rm x")));
-        assert!(denied(&policy.evaluate("grep x $(cat list)")));
-        assert!(denied(&policy.evaluate("tail -n 5 log > out")));
-        assert!(denied(&policy.evaluate("grep a || rm b")));
-        assert!(denied(&policy.evaluate("grep a\nrm b")));
-        assert!(denied(&policy.evaluate("grepx a")));
-    }
-
-    #[test]
     fn extra_denied_patterns_apply_to_every_command() {
-        let policy = CommandPolicy::new(Vec::<String>::new()).deny_also(["kubectl delete"]);
+        let policy = CommandPolicy::new().deny_also(["kubectl delete"]);
         assert!(denied(&policy.evaluate("KUBECTL  delete pod x")));
         assert_eq!(policy.evaluate("kubectl get pods"), PolicyDecision::Allow);
     }
 
     #[test]
-    fn describes_the_allowlist_for_the_prompt() {
-        assert_eq!(CommandPolicy::new(Vec::<String>::new()).prompt_section(), None);
-        let section = CommandPolicy::new(["kubectl get", "grep"]).prompt_section().unwrap();
-        assert!(
-            section.contains("must start with one of: kubectl get, grep."),
-            "{section}"
-        );
-        assert!(
-            section.contains("Rejected syntax: ; & ` $( > < and line breaks."),
-            "{section}"
-        );
-    }
-
-    #[test]
-    fn denial_of_a_quoted_pipe_suggests_an_alternative() {
-        let policy = CommandPolicy::new(["grep"]);
-        let PolicyDecision::Deny(reason) = policy.evaluate("grep -n \"a|b\" file") else {
-            panic!("a quoted pipe must not pass the allowlist");
-        };
-        assert!(reason.contains("grep -e A -e B"), "{reason}");
-    }
-
-    #[test]
     fn power_programs_are_denied_wherever_a_command_starts() {
-        let policy = CommandPolicy::new(Vec::<String>::new());
+        let policy = CommandPolicy::new();
         for command in [
             "reboot",
             "sudo reboot",
@@ -332,7 +227,7 @@ mod tests {
 
     #[test]
     fn power_words_in_arguments_of_read_only_programs_are_allowed() {
-        let policy = CommandPolicy::new(Vec::<String>::new());
+        let policy = CommandPolicy::new();
         for command in [
             "kubectl get pods -n asphalt-prod",
             "last reboot",
@@ -350,7 +245,7 @@ mod tests {
 
     #[tokio::test]
     async fn only_bash_is_checked() {
-        let policy = CommandPolicy::new(["ls"]);
+        let policy = CommandPolicy::new();
         assert_eq!(
             policy
                 .check("read_file", &serde_json::json!({"path": "/etc/hosts"}))

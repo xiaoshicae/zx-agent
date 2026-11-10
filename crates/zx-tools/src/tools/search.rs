@@ -1,4 +1,4 @@
-//! `grep`, `find` and `ls` tools: read-only searches that need no command allowlist (pi:
+//! `grep`, `find` and `ls` tools: read-only searches that need no bash command (pi:
 //! coding-agent/src/core/tools/grep.ts, find.ts and ls.ts).
 //!
 //! They run system programs through the executor, so in a container they search the

@@ -8,7 +8,7 @@ use super::{begins_with, normalize, normalize_all};
 /// and whitespace. None of it lets the shell run or read anything but what the words spell;
 /// every other character asks, such as quotes and `\` (which hide words from these checks),
 /// `$` (expansion), `*`, `?` and `[` (file names), `{` (brace expansion), parentheses, `#`,
-/// and the syntax the allowlist rejects.
+/// and `;`, `&`, `` ` ``, `>`, `<` (chaining and redirection).
 const PLAIN_PUNCTUATION: &[char] = &['-', '_', '.', '/', ':', '=', ',', '@', '+', '|', '^', '~', '!'];
 
 /// The options that the commands of one program may pass and still run without asking, such
@@ -46,16 +46,16 @@ impl ProgramOptions {
 /// Bash commands that run without asking where a rule would otherwise ask for approval.
 ///
 /// A command is covered only when all of these hold:
-/// - it is a `|` pipeline whose every segment starts with a listed prefix, compared like
-///   the allowlist (whitespace collapsed, lowercased);
+/// - it is a `|` pipeline whose every segment starts with a listed prefix, compared with
+///   whitespace collapsed and lowercased;
 /// - it consists of letters, digits, whitespace and the punctuation `- _ . / : = , @ + | ^ ~ !`,
 ///   so no quoting, escaping, expansion or other shell syntax can change what runs;
 /// - it contains no URL (`://`) and none of the [`except`](Self::except) texts;
 /// - a segment that runs a program given [`options`](Self::options) passes only those options.
 ///
-/// Like the allowlist the check is lexical: it decides only whether to ask, and never turns
-/// a denial into an approval. It knows no particular program: which of a program's options
-/// are safe to pass without asking is configuration.
+/// The check is lexical: it decides only whether to ask, and never turns a denial into an
+/// approval. It knows no particular program: which of a program's options are safe to pass
+/// without asking is configuration.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AutoApprove {
     prefixes: Vec<String>,

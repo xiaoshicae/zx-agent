@@ -54,11 +54,12 @@ use tokio_util::sync::CancellationToken;
 
 use common::summary_eval::{Evaluation, ROUNDS, evaluate};
 use common::{RunnerSetup, config, fast_retry};
+use zx_agent::agent::PolicyDecision;
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig, SystemUpdates};
 use zx_agent::ai::{Message, Provider};
 use zx_agent::compaction::{Config, Outcome, SummaryMode};
 use zx_agent::executor::LocalExecutor;
-use zx_agent::policy::CommandPolicy;
+use zx_agent::policy::{AutoApprove, PolicyHook, Rule, RuleMatcher, RulePolicy};
 use zx_agent::prompt::{build_system_prompt, environment_section};
 use zx_agent::runner::{Limits, RunOutcome, RunReport};
 use zx_agent::session::SessionStore;
@@ -132,7 +133,8 @@ impl Endpoint {
         }
     }
 
-    /// `setup` with a bash tool limited to `allowed` programs. The key variable is hidden
+    /// `setup` with a bash tool that runs only commands starting with one of `allowed`; the
+    /// others ask, and with nobody to approve them are refused. The key variable is hidden
     /// from commands.
     fn setup_with_bash(&self, cwd: &Path, allowed: &[&str]) -> RunnerSetup {
         let mut setup = self.setup(self.api_key(), cwd);
@@ -143,10 +145,12 @@ impl Endpoint {
             ..BashTool::default()
         };
         setup.config.tools = vec![Arc::new(bash)];
-        setup
-            .config
-            .hooks
-            .push(zx_agent::policy::PolicyHook::new(Arc::new(CommandPolicy::new(allowed))));
+        let policy = RulePolicy::new(vec![Rule {
+            matcher: RuleMatcher::Tool("bash".into()),
+            decision: PolicyDecision::Ask("only the allowed programs run".into()),
+        }])
+        .auto_approve(AutoApprove::new(allowed));
+        setup.config.hooks.push(PolicyHook::new(Arc::new(policy)));
         setup
     }
 }
@@ -213,7 +217,7 @@ async fn a_policy_denial_reaches_the_model_and_the_run_completes() {
 
     assert_eq!(report.outcome, RunOutcome::Completed, "{:?}", report.error);
     let denied = runner.session().messages().into_iter().any(|message| {
-        matches!(message, Message::ToolResult(result) if result.is_error && result.content.starts_with("Blocked by policy"))
+        matches!(message, Message::ToolResult(result) if result.is_error && result.content.starts_with("Approval denied"))
     });
     assert!(denied, "the model saw a policy denial");
 }

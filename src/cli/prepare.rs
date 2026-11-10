@@ -149,14 +149,12 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     let mut host = host_tools(&mut agent, &options.shared.settings.config.tool_output, &cwd)?;
     let (session, executor, environment) = open_session(&options, &cwd).await?;
     let tools = assemble_tools(&agent, &options, &executor, &mut host)?;
-    // No allowlist: the commands an agent allows run without asking, the others ask.
-    let policy = CommandPolicy::new(Vec::<String>::new()).deny_also(agent.permissions.denied_commands());
-    let command_policy = command_policy_section(&policy, &tools);
+    // The commands an agent allows run without asking, the others ask.
+    let policy = CommandPolicy::new().deny_also(agent.permissions.denied_commands());
     let system_prompt = build_system_prompt(
         &agent.instructions,
         &[
             (prompt::ENVIRONMENT, &environment),
-            (prompt::COMMAND_POLICY, &command_policy),
             (prompt::PROJECT_CONTEXT, &context),
             (prompt::AVAILABLE_SKILLS, &host.catalog),
         ],
@@ -231,16 +229,6 @@ fn assemble_tools(
     let mut tools = tools::builtin_tools(&built_in, options.shared.settings.tool_timeout, executor)?;
     tools.extend(std::mem::take(&mut host.tools));
     Ok(tools)
-}
-
-/// The command policy's prompt section when bash is among `tools`: the policy only concerns
-/// bash.
-fn command_policy_section(policy: &CommandPolicy, tools: &[Arc<dyn Tool>]) -> String {
-    if tools.iter().any(|tool| tool.name() == BASH) {
-        policy.prompt_section().unwrap_or_default()
-    } else {
-        String::new()
-    }
 }
 
 /// The selected agent with the command line's tools and budgets over it, validated: explicit

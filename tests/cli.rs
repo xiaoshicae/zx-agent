@@ -278,7 +278,7 @@ async fn the_system_prompt_states_the_environment() {
 
     let system = sent_messages(&server, 0)[0]["content"].as_str().unwrap().to_string();
     assert!(system.contains("<environment>\nOS: "), "{system}");
-    // Without a command allowlist there is no command policy to state.
+    // The permissions are enforced, not stated: the prompt has no command policy section.
     assert!(!system.contains("<command_policy>"), "{system}");
 }
 

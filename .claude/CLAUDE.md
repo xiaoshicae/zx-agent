@@ -38,7 +38,7 @@
 |---|---|---|
 | CLI | `src/main.rs`、`src/cli/`、`src/run.rs`、`src/process.rs`、`src/render.rs`、`src/chat/`、`src/im.rs`、`src/session_files.rs`、`src/list_sessions.rs` | main 只分派子命令；cli 是子命令与共用参数（`cli.rs`）、`config.toml` 与命令行的合并（`cli/settings.rs`：`Settings`）、一个进程的所有会话共用的东西（`cli/shared.rs`：`Shared` 读一次设置、连一次 MCP、查一次密钥文件）与一个会话的组装（`cli/prepare.rs`：`prepare`；命令在本机还是容器中运行在 `cli/execution.rs`）；run 处理单次任务；process 是退出码、stdout 行、关机信号、JSON 行 sink 与追踪导出的包装（`with_telemetry`）；render 是终端与日志里调用与事件的文案，run、chat、acp 与 session_files 共用；session_files 是会话文件的打开与创建、chat 的会话目录（主目录下的 `sessions/--<工作目录>--/`）与列表行；list_sessions 是 `zx-agent sessions`；chat 管理单一输入所有者（终端里一次到达的多行合为一条消息）、审批、信号和 REPL（`chat.rs` 是 REPL，`chat/turn.rs` 驱动一次操作，`chat/storage.rs` 管会话的存放与切换，`chat/info.rs` 是横幅、`/status` 与 `/help`），终端渲染（颜色、状态行、行的归属）在 `src/chat/term.rs`；im 读取配置、为每个线程准备会话并隐藏 IM 凭据 |
 | 配置 | `src/config/`、`agents/` | 主目录与 `config.toml`（`environment.rs`：模型、provider、执行环境、`[[models]]`、`[[mcp]]`）；agent（`definition.rs`：内置 agent 与替换它们的用户文件，`agent_file.rs`：front matter、说明与合并规则，`permissions.rs`：`[permissions]` 到策略的映射）；项目上下文、显式 skill 目录及按需读取；不进入循环机制 |
-| 提示词 | `crates/zx-core/src/prompt.rs` | 生成系统提示词：说明 + `<environment>` + `<command_policy>` + `<project_context>` + `<available_skills>`（空段落不出现） |
+| 提示词 | `crates/zx-core/src/prompt.rs` | 生成系统提示词：说明 + `<environment>` + `<project_context>` + `<available_skills>`（空段落不出现） |
 | 共享会话 | `crates/zx-core/src/agent_session.rs`、`crates/zx-core/src/agent_session/subscribers.rs` | 共享调用与 Busy、RAII 归还运行权、取消、空闲时切换模型；订阅与退订、有界订阅在 `subscribers.rs` |
 | 运行层 | `crates/zx-core/src/runner.rs` | 持有可顺序复用的会话；以独占借用控制单次运行、重试、上限、审批缓存、持久化和报告 |
 | 会话 | `crates/zx-core/src/session.rs`、`crates/zx-core/src/session/` | 只追加的条目树与校验，投影出发给模型的消息；记录经 `SessionLog` 保存，默认是单写者的 JSONL 文件（`jsonl.rs`） |
@@ -63,7 +63,7 @@
 - **会话既是审计日志，也是模型上下文的唯一来源**：修正上下文靠追加 `context_edit`，提示词变化靠追加 system 消息，原始记录始终保留。可替换的只是最底层的记录保存（`SessionLog`）。`SessionStore` 负责先写后改内存、写失败后停写，以及每种记录的格式、追加与加载时同一套校验、投影和恢复所需的查询；摘要请求、补写中断调用的结果等执行在上层（`compaction`、`runner`）。一个功能因此横跨几个模块，功能到文件的对照见 `crates/zx-core/src/lib.rs` 的模块文档。持久化走 crate 内部的会话宿主并以 `Result` 返回错误，`EventSink` 只接收事件。
 - **摘要不替代证据**：用开始、成功或失败记录审计摘要；全量模式（默认）重新摘要读取原始投影，保留全部 system；可选的增量模式由宿主原样沿用上一份摘要的事实、只读新增记录，模型只能新增事实或标明取代旧事实。摘要引用只校验来源存在；原始事实被修正后，全量摘要整份失效，增量摘要只作废引用它的事实。预算与真实模型信息保真是不同的验收项。
 - **终端输入只有一个所有者**：chat 的专用线程通过有界通道提供逐行输入；REPL 协调提问、审批和信号，Interaction 不直接读 stdin。审批回复必须匹配主机生成的请求编号，取消后失效；TTY 运行中输入 steering，管道脚本逐轮消费。按 Tokio stdin 源码对交互终端的建议避免不可取消的 stdin 阻塞任务卡住运行时退出。
-- **事实由程序提供，不让模型去查**：操作系统、启动时间、命令白名单在启动时写进系统提示词。这样不浪费轮次，也不会被白名单拦住。
+- **事实由程序提供，不让模型去查**：操作系统、启动时间在启动时写进系统提示词。这样不浪费轮次，也不会被权限拦住。
 - **兼容性默认保守，能力按需打开**：提示词更新默认合并到开头（`collapse`，与 pi 对 OpenAI 兼容服务的默认一致），服务端支持时才按位置发送（`inline`）。
 - **安全靠部署隔离**：策略只是第一道防线（检查边界见 README 的"安全模型"）。认证 key 只从环境变量读取，该变量从 bash 子进程环境中删除；Unix 上新建会话文件的权限为 0600，打开已有文件不修改权限；真正的隔离要靠不同账号或容器。
 - **扩展点都是 trait**：`Provider`、`Tool`、`ToolPolicy`、`Hooks`、`Interaction`、`EventSink`、`Executor`、`SessionLog`、`ImChannel`、`StatusStore`、`Extension`。新能力优先以实现 trait 的方式加入，不改循环本身。
