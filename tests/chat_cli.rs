@@ -10,7 +10,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{ChildStdout, Command};
 
 use common::mock_server::{MockServer, Reply};
-use common::{ProfileFile, json_lines, signal, stderr, stdout, tool_call_answer, zx_agent};
+use common::{json_lines, signal, stderr, stdout, tool_call_answer, write_agent, write_config, zx_agent};
 use zx_agent::ai::Message;
 use zx_agent::session::SessionStore;
 
@@ -21,27 +21,23 @@ fn chat(server: &MockServer, cwd: &Path, args: &[&str]) -> Command {
     chat_retrying(server, cwd, args, "0")
 }
 
-/// Like `chat`, with the given number of retries for transient errors.
+/// Like `chat`, with the given number of retries for transient errors, unless the test wrote
+/// a config.toml of its own with [`configure`].
 fn chat_retrying(server: &MockServer, cwd: &Path, args: &[&str], max_retries: &str) -> Command {
+    if !agent_home(cwd).join("config.toml").exists() {
+        write_config(&agent_home(cwd), &base_config(max_retries, "", ""));
+    }
     let mut command = zx_agent();
     command
         .arg("chat")
-        .args(["--model", "mock-model", "--base-url", &server.base_url])
-        .args([
-            "--api-key-env",
-            KEY_VAR,
-            "--max-retries",
-            max_retries,
-            "--idle-timeout-secs",
-            "10",
-        ])
+        .args(["--model", "mock-model"])
         .args(args)
         .current_dir(cwd)
         // chat keeps sessions under the home directory by default; never the real one.
         .env("HOME", cwd.join(".home"))
+        .env_remove("ZX_AGENT_HOME")
+        .env("ZX_BASE_URL", &server.base_url)
         .env(KEY_VAR, KEY)
-        .env_remove("ZX_MODEL")
-        .env_remove("ZX_BASE_URL")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -134,21 +130,12 @@ async fn an_oversized_input_line_is_rejected_and_the_conversation_continues() {
 async fn manual_compact_persists_a_summary_and_the_next_prompt_uses_it() {
     let dir = tempfile::tempdir().unwrap();
     let id = seed_context(dir.path(), 10_000).await;
-    std::fs::write(dir.path().join("profile.toml"), "[compaction]\nkeepRecentBytes = 1\n").unwrap();
+    agent(dir.path(), "[compaction]\nkeepRecentBytes = 1");
     let server = MockServer::start(vec![Reply::text(&summary_json(&id)), Reply::text("answer")]).await;
     let output = run(
         &server,
         dir.path(),
-        &[
-            "--tools",
-            "",
-            "--profile",
-            "profile.toml",
-            "--session",
-            "chat.jsonl",
-            "--output",
-            "jsonl",
-        ],
+        &["--tools", "", "--session", "chat.jsonl", "--output", "jsonl"],
         "/compact\ncontinue\n/quit\n",
     )
     .await;
@@ -202,13 +189,13 @@ async fn chat_automatically_compacts_at_its_default_byte_budget() {
 }
 
 #[tokio::test]
-async fn profile_settings_disable_automatic_compaction() {
+async fn agent_settings_disable_automatic_compaction() {
     for disable in ["triggerBytes = 0\ntriggerTokens = 0", "triggerBytes = 0"] {
         let dir = tempfile::tempdir().unwrap();
         seed_context(dir.path(), 300 * 1024).await;
         let server = MockServer::start(vec![Reply::text("answer")]).await;
-        let profile = ProfileFile::new("assistant", &format!("[compaction]\n{disable}"));
-        let args = ["--tools", "", "--session", "chat.jsonl", "--profile", profile.path()];
+        agent(dir.path(), &format!("[compaction]\n{disable}"));
+        let args = ["--tools", "", "--session", "chat.jsonl"];
         let output = run(&server, dir.path(), &args, "continue\n/quit\n").await;
         assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
         assert_eq!(server.requests().len(), 1);
@@ -226,21 +213,12 @@ async fn profile_settings_disable_automatic_compaction() {
 async fn a_failed_manual_summary_is_reported_and_chat_can_accept_another_task() {
     let dir = tempfile::tempdir().unwrap();
     seed_context(dir.path(), 10_000).await;
-    std::fs::write(dir.path().join("profile.toml"), "[compaction]\nkeepRecentBytes = 1\n").unwrap();
+    agent(dir.path(), "[compaction]\nkeepRecentBytes = 1");
     let server = MockServer::start(vec![Reply::text("invalid summary"), Reply::text("recovered")]).await;
     let output = run(
         &server,
         dir.path(),
-        &[
-            "--tools",
-            "",
-            "--profile",
-            "profile.toml",
-            "--session",
-            "chat.jsonl",
-            "--output",
-            "jsonl",
-        ],
+        &["--tools", "", "--session", "chat.jsonl", "--output", "jsonl"],
         "/compact\ncontinue\n/quit\n",
     )
     .await;
@@ -269,21 +247,12 @@ async fn a_failed_manual_summary_is_reported_and_chat_can_accept_another_task() 
 async fn sigint_cancels_a_manual_summary_and_keeps_the_conversation_reusable() {
     let dir = tempfile::tempdir().unwrap();
     seed_context(dir.path(), 10_000).await;
-    std::fs::write(dir.path().join("profile.toml"), "[compaction]\nkeepRecentBytes = 1\n").unwrap();
+    agent(dir.path(), "[compaction]\nkeepRecentBytes = 1");
     let server = MockServer::start(vec![Reply::Stall(vec![]), Reply::text("reused")]).await;
     let mut child = chat(
         &server,
         dir.path(),
-        &[
-            "--tools",
-            "",
-            "--profile",
-            "profile.toml",
-            "--session",
-            "chat.jsonl",
-            "--output",
-            "jsonl",
-        ],
+        &["--tools", "", "--session", "chat.jsonl", "--output", "jsonl"],
     )
     .spawn()
     .unwrap();
@@ -321,7 +290,7 @@ async fn sigint_cancels_a_manual_summary_and_keeps_the_conversation_reusable() {
 async fn tty_compaction_rejects_overlaps_and_runs_one_queued_input_after_completion() {
     let dir = tempfile::tempdir().unwrap();
     let id = seed_context(dir.path(), 10_000).await;
-    std::fs::write(dir.path().join("profile.toml"), "[compaction]\nkeepRecentBytes = 1\n").unwrap();
+    agent(dir.path(), "[compaction]\nkeepRecentBytes = 1");
     let release = std::sync::Arc::new(tokio::sync::Notify::new());
     let chunks = vec![json!({"choices":[{"index":0,"delta":{"content":summary_json(&id)},"finish_reason":null}]})];
     let server = MockServer::start(vec![
@@ -336,16 +305,7 @@ async fn tty_compaction_rejects_overlaps_and_runs_one_queued_input_after_complet
     let mut child = chat(
         &server,
         dir.path(),
-        &[
-            "--tools",
-            "",
-            "--profile",
-            "profile.toml",
-            "--session",
-            "chat.jsonl",
-            "--output",
-            "jsonl",
-        ],
+        &["--tools", "", "--session", "chat.jsonl", "--output", "jsonl"],
     )
     .stdin(Stdio::from(slave))
     .spawn()
@@ -402,10 +362,11 @@ async fn model_command_changes_subsequent_requests_without_losing_history() {
 async fn reasoning_command_changes_subsequent_requests() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::text("one"), Reply::text("two"), Reply::text("three")]).await;
+    configure(dir.path(), "reasoning = 'low'", "");
     let output = run(
         &server,
         dir.path(),
-        &["--tools", "", "--reasoning", "low"],
+        &["--tools", ""],
         "first\n/reasoning high\nsecond\n/reasoning bogus\n/reasoning default\nthird\n/reasoning\n/quit\n",
     )
     .await;
@@ -509,7 +470,7 @@ async fn approving_once_allows_the_displayed_shell_call() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(std::fs::read_to_string(dir.path().join("marker")).unwrap(), "approved");
     assert!(stderr(&output).contains("[approval 1] bash: printf approved > marker"));
-    assert!(stderr(&output).contains("  profile requires tool approval"));
+    assert!(stderr(&output).contains("  the agent requires tool approval"));
     // The scope and the auto-approved commands are stated once, at startup.
     assert!(
         stderr(&output).contains(
@@ -524,15 +485,9 @@ async fn approving_once_allows_the_displayed_shell_call() {
 #[tokio::test]
 async fn an_auto_approved_command_is_shown_with_a_preview_of_its_result() {
     let dir = tempfile::tempdir().unwrap();
-    let profile = ProfileFile::new("assistant", "[rules]\nautoApprove = [\"seq\"]");
+    agent(dir.path(), "[permissions]\nallow = [\"bash(seq)\"]");
     let server = MockServer::start(vec![Reply::bash("c", "seq 1 5"), Reply::text("done")]).await;
-    let output = run(
-        &server,
-        dir.path(),
-        &["--tools", "bash", "--profile", profile.path()],
-        "go\n/quit\n",
-    )
-    .await;
+    let output = run(&server, dir.path(), &["--tools", "bash"], "go\n/quit\n").await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let log = stderr(&output);
     assert!(!log.contains("[approval"), "{log}");
@@ -576,7 +531,7 @@ async fn status_shows_the_session_and_what_the_conversation_used() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let log = stderr(&output);
     assert!(
-        log.contains("[status] model=mock-model · profile=assistant · session=chat.jsonl · cwd="),
+        log.contains("[status] model=mock-model · agent=assistant · session=chat.jsonl · cwd="),
         "{log}"
     );
     assert!(
@@ -642,12 +597,12 @@ async fn an_edit_approval_lists_each_edit_and_its_result_shows_the_patch() {
 #[tokio::test]
 async fn color_always_keeps_colors_when_stderr_is_not_a_terminal() {
     let dir = tempfile::tempdir().unwrap();
-    let profile = ProfileFile::new("assistant", "[rules]\nautoApprove = [\"seq\"]");
+    agent(dir.path(), "[permissions]\nallow = [\"bash(seq)\"]");
     let server = MockServer::start(vec![Reply::bash("c", "seq 1 2"), Reply::text("done")]).await;
     let output = run(
         &server,
         dir.path(),
-        &["--tools", "bash", "--profile", profile.path(), "--color", "always"],
+        &["--tools", "bash", "--color", "always"],
         "go\n/quit\n",
     )
     .await;
@@ -802,7 +757,7 @@ async fn a_file_write_waits_for_an_approval_by_default() {
         Reply::text("done"),
     ])
     .await;
-    // The default assistant profile enables write_file and asks before it runs.
+    // The default assistant agent enables write_file and asks before it runs.
     let mut child = chat(&server, dir.path(), &[]).spawn().unwrap();
     let mut stdin = child.stdin.take().unwrap();
     let mut errors = BufReader::new(child.stderr.take().unwrap()).lines();
@@ -896,19 +851,13 @@ async fn denial_reaches_the_model_without_executing_the_call() {
 #[tokio::test]
 async fn a_policy_denial_cannot_be_overridden_by_an_approval_command() {
     let dir = tempfile::tempdir().unwrap();
-    let profile = ProfileFile::new("assistant", "[rules]\ndeny = [\"blocked\"]");
+    agent(dir.path(), "[permissions]\ndeny = [\"bash(blocked)\"]");
     let server = MockServer::start(vec![
         Reply::bash("c", "printf blocked > marker"),
         Reply::text("handled"),
     ])
     .await;
-    let output = run(
-        &server,
-        dir.path(),
-        &["--tools", "bash", "--profile", profile.path()],
-        "go\n/quit\n",
-    )
-    .await;
+    let output = run(&server, dir.path(), &["--tools", "bash"], "go\n/quit\n").await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(!dir.path().join("marker").exists());
     assert!(!stderr(&output).contains("[approval 1]"));
@@ -956,9 +905,9 @@ async fn listed_commands_still_ask_when_they_mention_secrets_or_redirect() {
 }
 
 #[tokio::test]
-async fn a_profile_auto_approve_list_replaces_the_one_it_extends() {
+async fn an_agent_auto_approve_list_replaces_the_one_it_extends() {
     let dir = tempfile::tempdir().unwrap();
-    let profile = ProfileFile::new("assistant", "[rules]\nautoApprove = [\"printf\"]");
+    agent(dir.path(), "[permissions]\nallow = [\"bash(printf)\"]");
     std::fs::write(dir.path().join("app.log"), "line\n").unwrap();
     let server = MockServer::start(vec![
         Reply::bash("c1", "printf flagged"),
@@ -966,13 +915,7 @@ async fn a_profile_auto_approve_list_replaces_the_one_it_extends() {
         Reply::text("done"),
     ])
     .await;
-    let output = run(
-        &server,
-        dir.path(),
-        &["--tools", "bash", "--profile", profile.path()],
-        "go\n3\n/quit\n",
-    )
-    .await;
+    let output = run(&server, dir.path(), &["--tools", "bash"], "go\n3\n/quit\n").await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(server.requests()[1].body["messages"].to_string().contains("flagged"));
     // head is no longer listed, so it is the run's first approval request.
@@ -1621,13 +1564,10 @@ async fn an_expired_approval_frees_the_next_scripted_line() {
         Reply::text("second answer"),
     ])
     .await;
-    let mut child = chat(
-        &server,
-        dir.path(),
-        &["--tools", "bash", "--approval-timeout-secs", "1", "--output", "jsonl"],
-    )
-    .spawn()
-    .unwrap();
+    config(dir.path(), "[chat]\napprovalTimeoutSecs = 1");
+    let mut child = chat(&server, dir.path(), &["--tools", "bash", "--output", "jsonl"])
+        .spawn()
+        .unwrap();
     let mut stdin = child.stdin.take().unwrap();
     let mut events = BufReader::new(child.stdout.take().unwrap()).lines();
     let mut errors = BufReader::new(child.stderr.take().unwrap()).lines();
@@ -1794,13 +1734,12 @@ async fn a_hook_failure_is_reported_with_its_reason() {
     ])
     .await;
 
-    let output = run(
-        &server,
+    configure(
         dir.path(),
-        &["--tools", "bash", "--secret-file", token.to_str().unwrap()],
-        "go\n1\n/quit\n",
-    )
-    .await;
+        &format!("secretFiles = [{:?}]", token.to_str().unwrap()),
+        "",
+    );
+    let output = run(&server, dir.path(), &["--tools", "bash"], "go\n1\n/quit\n").await;
 
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let reported = format!(
@@ -1815,51 +1754,41 @@ async fn a_hook_failure_is_reported_with_its_reason() {
 }
 
 #[tokio::test]
-async fn the_queue_mode_is_set_at_startup_and_changed_with_a_command() {
+async fn the_queue_mode_is_all_at_startup_and_changed_with_a_command() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![]).await;
     let output = run(
         &server,
         dir.path(),
-        &["--tools", "", "--no-session", "--queue-mode", "one-at-a-time"],
-        "/queue\n/queue all\n/queue sometimes\n/quit\n",
+        &["--tools", "", "--no-session"],
+        "/queue\n/queue one-at-a-time\n/queue sometimes\n/quit\n",
     )
     .await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let err = stderr(&output);
+    assert!(err.contains("[chat] queue: steering=all follow-up=all"), "{err}");
     assert!(
         err.contains("[chat] queue: steering=one-at-a-time follow-up=one-at-a-time"),
         "{err}"
     );
-    assert!(err.contains("[chat] queue: steering=all follow-up=all"), "{err}");
     assert!(
         err.contains("[chat] unknown queue mode \"sometimes\"; use all or one-at-a-time"),
         "{err}"
     );
-
-    let rejected = run(
-        &server,
-        dir.path(),
-        &["--no-session", "--queue-mode", "some"],
-        "/quit\n",
-    )
-    .await;
-    assert_eq!(rejected.status.code(), Some(2), "{}", stderr(&rejected));
 }
 
 #[tokio::test]
-async fn a_profile_prices_the_model_and_the_cost_shows_in_turn_and_status_lines() {
+async fn config_prices_the_model_and_the_cost_shows_in_turn_and_status_lines() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(
-        dir.path().join("profile.toml"),
-        "extends = \"assistant\"\n\n[[models]]\nid = \"mock-model\"\ncost = { input = 1000000.0, output = 2000000.0 }\n",
-    )
-    .unwrap();
+    config(
+        dir.path(),
+        "[[models]]\nid = \"mock-model\"\ncost = { input = 1000000.0, output = 2000000.0 }\n",
+    );
     let server = MockServer::start(vec![Reply::text("answer")]).await;
     let output = run(
         &server,
         dir.path(),
-        &["--profile", "profile.toml", "--tools", "", "--no-session"],
+        &["--tools", "", "--no-session"],
         "hi\n/status\n/quit\n",
     )
     .await;
@@ -1869,18 +1798,11 @@ async fn a_profile_prices_the_model_and_the_cost_shows_in_turn_and_status_lines(
     assert!(err.contains("· 10 in · 2 out · cost 14.0000 ·"), "{err}");
     assert!(err.contains("· 10 in · 2 out · 0 cached · cost 14.0000"), "{err}");
 
-    std::fs::write(
-        dir.path().join("bad.toml"),
-        "extends = \"assistant\"\n\n[[models]]\nid = \"mock-model\"\ncost = { input = -1.0, output = 0.0 }\n",
-    )
-    .unwrap();
-    let refused = run(
-        &server,
+    config(
         dir.path(),
-        &["--profile", "bad.toml", "--no-session"],
-        "/quit\n",
-    )
-    .await;
+        "[[models]]\nid = \"mock-model\"\ncost = { input = -1.0, output = 0.0 }\n",
+    );
+    let refused = run(&server, dir.path(), &["--no-session"], "/quit\n").await;
     assert_eq!(refused.status.code(), Some(2), "{}", stderr(&refused));
     assert!(
         stderr(&refused).contains("prices must be zero or more"),
@@ -1893,20 +1815,14 @@ async fn a_profile_prices_the_model_and_the_cost_shows_in_turn_and_status_lines(
 async fn request_headers_and_the_prompt_cache_key_reach_the_server() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::text("answer")]).await;
+    config(
+        dir.path(),
+        "headers = { X-Route = 'blue', x-tenant = 'a' }\npromptCacheKey = true",
+    );
     let output = run(
         &server,
         dir.path(),
-        &[
-            "--tools",
-            "",
-            "--session",
-            "s.jsonl",
-            "--header",
-            "X-Route: blue",
-            "--header",
-            "x-tenant:a",
-            "--prompt-cache-key",
-        ],
+        &["--tools", "", "--session", "s.jsonl"],
         "hi\n/quit\n",
     )
     .await;
@@ -1921,23 +1837,22 @@ async fn request_headers_and_the_prompt_cache_key_reach_the_server() {
         .clone();
     assert_eq!(request.body["prompt_cache_key"], session_id);
 
-    let refused = run(
-        &server,
-        dir.path(),
-        &["--no-session", "--header", "Authorization: Bearer x"],
-        "/quit\n",
-    )
-    .await;
+    config(dir.path(), "headers = { Authorization = 'Bearer x' }");
+    let refused = run(&server, dir.path(), &["--no-session"], "/quit\n").await;
     assert_eq!(refused.status.code(), Some(2), "{}", stderr(&refused));
-    assert!(stderr(&refused).contains("Authorization"), "{}", stderr(&refused));
-    let malformed = run(
-        &server,
-        dir.path(),
-        &["--no-session", "--header", "no-colon"],
-        "/quit\n",
-    )
-    .await;
+    assert!(
+        stderr(&refused).contains("provider.headers: Authorization"),
+        "{}",
+        stderr(&refused)
+    );
+    config(dir.path(), "headers = { 'no colon' = 'x' }");
+    let malformed = run(&server, dir.path(), &["--no-session"], "/quit\n").await;
     assert_eq!(malformed.status.code(), Some(2), "{}", stderr(&malformed));
+    assert!(
+        stderr(&malformed).contains("invalid request header name"),
+        "{}",
+        stderr(&malformed)
+    );
 }
 
 #[tokio::test]
@@ -1947,20 +1862,11 @@ async fn a_known_context_window_adds_a_token_trigger_to_automatic_summaries() {
     let server = MockServer::start(vec![Reply::text(&summary_json(&id)), Reply::text("answer")]).await;
     // Some 120 KiB of context: about 30000 tokens by the estimate, below the 256 KiB byte
     // budget but above the 23616 tokens a 40000-token window leaves under the reserve.
-    let profile = window_profile(40000, "");
+    window_agent(dir.path(), 40000, "");
     let output = run(
         &server,
         dir.path(),
-        &[
-            "--tools",
-            "",
-            "--session",
-            "chat.jsonl",
-            "--output",
-            "jsonl",
-            "--profile",
-            profile.path(),
-        ],
+        &["--tools", "", "--session", "chat.jsonl", "--output", "jsonl"],
         "continue\n/quit\n",
     )
     .await;
@@ -1982,17 +1888,8 @@ async fn a_known_context_window_adds_a_token_trigger_to_automatic_summaries() {
         let dir = tempfile::tempdir().unwrap();
         seed_context(dir.path(), 120 * 1024).await;
         let server = MockServer::start(vec![Reply::text("answer")]).await;
-        let profile = window_profile(window, compaction);
-        let all = [
-            "--tools",
-            "",
-            "--session",
-            "chat.jsonl",
-            "--output",
-            "jsonl",
-            "--profile",
-            profile.path(),
-        ];
+        window_agent(dir.path(), window, compaction);
+        let all = ["--tools", "", "--session", "chat.jsonl", "--output", "jsonl"];
         let output = run(&server, dir.path(), &all, "continue\n/quit\n").await;
         assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
         assert!(!stdout(&output).contains("compaction_start"), "{window} {compaction:?}");
@@ -2000,10 +1897,39 @@ async fn a_known_context_window_adds_a_token_trigger_to_automatic_summaries() {
     }
 }
 
-/// The assistant profile with `window` as the context window of `mock-model`, and `extra`.
-fn window_profile(window: u64, extra: &str) -> ProfileFile {
-    ProfileFile::new(
-        "assistant",
-        &format!("[[models]]\nid = \"mock-model\"\ncontextWindow = {window}\n{extra}"),
-    )
+/// For chat in `dir`: the assistant agent with `extra`, and a config.toml with `window` as the
+/// context window of `mock-model`.
+fn window_agent(dir: &Path, window: u64, extra: &str) {
+    config(
+        dir,
+        &format!("[[models]]\nid = \"mock-model\"\ncontextWindow = {window}\n"),
+    );
+    agent(dir, extra);
+}
+
+/// For chat in `dir`, whose home is `dir/.home`: the assistant agent with `front` over it.
+fn agent(dir: &Path, front: &str) {
+    write_agent(&dir.join(".home/.zx-agent"), "assistant", front);
+}
+
+/// The zx-agent home of chat in `dir`, whose home directory is `dir/.home`.
+fn agent_home(dir: &Path) -> std::path::PathBuf {
+    dir.join(".home/.zx-agent")
+}
+
+/// The config.toml of these tests: the key in [`KEY_VAR`], `max_retries` retries, a 10-second
+/// idle timeout, `top` before the `[provider]` table and `rest` after its keys.
+fn base_config(max_retries: &str, top: &str, rest: &str) -> String {
+    format!("{top}\n[provider]\napiKeyEnv = \"{KEY_VAR}\"\nmaxRetries = {max_retries}\nidleTimeoutSecs = 10\n{rest}\n")
+}
+
+/// Write the config.toml of chat in `dir`, without retries, with `top` and `rest` as
+/// [`base_config`] places them.
+fn configure(dir: &Path, top: &str, rest: &str) {
+    write_config(&agent_home(dir), &base_config("0", top, rest));
+}
+
+/// Write the config.toml of chat in `dir` with `tables` after the provider's keys.
+fn config(dir: &Path, tables: &str) {
+    configure(dir, "", tables);
 }

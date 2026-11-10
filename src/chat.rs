@@ -35,8 +35,8 @@ use zx_agent::AgentSession;
 use zx_agent::agent::{EventSink, QueueMode, QueuedMessage};
 use zx_agent::agent_session::{ModelRef, Subscription};
 use zx_agent::ai::{Provider, Reasoning};
+use zx_agent::config::Builtin;
 use zx_agent::otel::Telemetry;
-use zx_agent::profile::Builtin;
 
 use crate::cli::{self, ChatArgs, ModeSettings, SessionOptions};
 use crate::process::{EXIT_ABORTED, EXIT_COMPLETED, with_telemetry};
@@ -98,26 +98,20 @@ impl Chat {
         let output = &self.output;
         let mut prepared = cli::prepare(SessionOptions {
             base: &args.base,
-            transport: &args.transport,
-            request: &args.request,
             budget: &args.budget,
             model,
             cwd: None,
             file,
-            default_profile: Builtin::Assistant,
+            agent: Builtin::Assistant,
             shared: &settings.shared,
         })
         .await?;
         prepared.require_bash_approval("shell commands require interactive approval");
         prepared.config.interaction = interaction.clone();
-        prepared.config.interaction_timeout = std::time::Duration::from_secs(settings.args.approval_timeout_secs);
+        prepared.config.interaction_timeout = settings.shared.settings.chat_approval_timeout;
         let provider = prepared.config.provider.clone();
         let about = About::of(&mut prepared);
         let session = prepared.into_session(output.clone())?;
-        if let Some(mode) = args.queue_mode {
-            session.queues().set_steering_mode(mode);
-            session.queues().set_follow_up_mode(mode);
-        }
         let commands = session
             .commands()
             .iter()
@@ -158,7 +152,7 @@ pub(crate) async fn run(args: ChatArgs) -> Result<u8> {
 }
 
 async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> {
-    let shared = cli::Shared::connect(&args.base, Builtin::Assistant, &args.transport).await?;
+    let shared = cli::Shared::connect(&args.base, Builtin::Assistant).await?;
     let mode = if std::io::stdin().is_terminal() {
         InputMode::Terminal
     } else {
@@ -178,7 +172,7 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
     };
     let args = &chat.settings.args;
     let output = &chat.output;
-    let model = args.base.model.clone();
+    let model = chat.settings.shared.settings.model.clone();
     let (storage, first) = opening(args, &model).await?;
     let file = match (&storage, first.path()) {
         (_, Some(path)) | (Storage::File(path), None) => SessionFile::Open(path),
@@ -203,7 +197,7 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
         storage,
         built,
         model,
-        reasoning: args.request.reasoning,
+        reasoning: chat.settings.shared.settings.reasoning,
     };
     loop {
         let line = match terminal.read(output).await? {

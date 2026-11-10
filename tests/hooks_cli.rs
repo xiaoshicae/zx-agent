@@ -2,11 +2,13 @@
 
 mod common;
 
+use std::path::Path;
+
 use serde_json::json;
 use tokio::process::Command;
 
 use common::mock_server::{MockServer, Reply};
-use common::{stderr, stdout, zx_agent};
+use common::{AgentHome, fake_model_config, stderr, stdout, write_config, zx_agent};
 
 #[tokio::test]
 async fn known_api_key_is_redacted_before_model_events_and_session() {
@@ -24,9 +26,9 @@ async fn known_api_key_is_redacted_before_model_events_and_session() {
     ])
     .await;
 
+    let home = AgentHome::new(&fake_model_config(KEY_VAR, "", ""));
     let output = zx_agent()
-        .args(["run", "--model", "mock", "--base-url", &server.base_url])
-        .args(["--tools", "read_file", "--api-key-env", KEY_VAR, "--max-retries", "0"])
+        .args(["run", "--model", "mock", "--tools", "read_file"])
         .args([
             "--output",
             "jsonl",
@@ -35,9 +37,9 @@ async fn known_api_key_is_redacted_before_model_events_and_session() {
             "read credentials.txt",
         ])
         .current_dir(dir.path())
+        .env("ZX_AGENT_HOME", home.path())
+        .env("ZX_BASE_URL", &server.base_url)
         .env(KEY_VAR, KEY)
-        .env_remove("ZX_MODEL")
-        .env_remove("ZX_BASE_URL")
         .kill_on_drop(true)
         .output()
         .await
@@ -53,14 +55,26 @@ async fn known_api_key_is_redacted_before_model_events_and_session() {
 }
 
 /// `zx-agent run` with bash against `server`, in `dir`.
-fn run_bash(server: &MockServer, dir: &std::path::Path) -> Command {
+fn run_bash(server: &MockServer, dir: &Path) -> Command {
+    run_bash_redacting(server, dir, &[])
+}
+
+/// `zx-agent run` with bash against `server`, in `dir`, with `secret_files` in the
+/// `secretFiles` of a config.toml in a zx-agent home of `dir`.
+fn run_bash_redacting(server: &MockServer, dir: &Path, secret_files: &[&Path]) -> Command {
+    let home = dir.join(".home");
+    let files: Vec<String> = secret_files
+        .iter()
+        .map(|path| format!("{:?}", path.display().to_string()))
+        .collect();
+    let top = format!("secretFiles = [{}]", files.join(", "));
+    write_config(&home, &fake_model_config("ZX_HOOKS_CLI_TEST_KEY", &top, ""));
     let mut command = zx_agent();
     command
-        .args(["run", "--model", "mock", "--base-url", &server.base_url])
-        .args(["--tools", "bash", "--max-retries", "0", "go"])
+        .args(["run", "--model", "mock", "--tools", "bash", "go"])
         .current_dir(dir)
-        .env_remove("ZX_MODEL")
-        .env_remove("ZX_BASE_URL")
+        .env("ZX_AGENT_HOME", &home)
+        .env("ZX_BASE_URL", &server.base_url)
         .env_remove("ZX_SECRET_FILES")
         .kill_on_drop(true);
     command
@@ -97,7 +111,7 @@ async fn secret_files_named_in_the_environment_are_redacted() {
 }
 
 #[tokio::test]
-async fn secret_files_from_the_flag_add_to_those_in_the_environment() {
+async fn secret_files_of_config_toml_add_to_those_in_the_environment() {
     let dir = tempfile::tempdir().unwrap();
     let from_env = dir.path().join("env-token");
     std::fs::write(&from_env, "token-from-env").unwrap();
@@ -105,9 +119,8 @@ async fn secret_files_from_the_flag_add_to_those_in_the_environment() {
     std::fs::write(&from_flag, "token-from-flag").unwrap();
     let server = MockServer::start(vec![Reply::bash("c", "cat env-token flag-token"), Reply::text("done")]).await;
 
-    let output = run_bash(&server, dir.path())
+    let output = run_bash_redacting(&server, dir.path(), &[&from_flag])
         .env("ZX_SECRET_FILES", &from_env)
-        .args(["--secret-file", from_flag.to_str().unwrap()])
         .output()
         .await
         .unwrap();
@@ -124,8 +137,7 @@ async fn a_missing_secret_file_is_a_configuration_error() {
     let server = MockServer::start(vec![Reply::text("never")]).await;
     let missing = dir.path().join("no-such-token");
 
-    let output = run_bash(&server, dir.path())
-        .args(["--secret-file", missing.to_str().unwrap()])
+    let output = run_bash_redacting(&server, dir.path(), &[&missing])
         .output()
         .await
         .unwrap();
@@ -146,8 +158,7 @@ async fn a_secret_file_too_large_to_match_is_a_configuration_error() {
     std::fs::write(secrets.join("bundle"), "x".repeat(64 * 1024 + 1)).unwrap();
     let server = MockServer::start(vec![Reply::text("never")]).await;
 
-    let output = run_bash(&server, dir.path())
-        .args(["--secret-file", secrets.to_str().unwrap()])
+    let output = run_bash_redacting(&server, dir.path(), &[&secrets])
         .output()
         .await
         .unwrap();
@@ -174,8 +185,7 @@ async fn a_failed_redaction_is_reported_in_text_output() {
     ])
     .await;
 
-    let output = run_bash(&server, dir.path())
-        .args(["--secret-file", token.to_str().unwrap()])
+    let output = run_bash_redacting(&server, dir.path(), &[&token])
         .output()
         .await
         .unwrap();
@@ -200,8 +210,8 @@ async fn hook_failures_name_the_built_in_hook_in_jsonl_events() {
     ])
     .await;
 
-    let output = run_bash(&server, dir.path())
-        .args(["--secret-file", token.to_str().unwrap(), "--output", "jsonl"])
+    let output = run_bash_redacting(&server, dir.path(), &[&token])
+        .args(["--output", "jsonl"])
         .output()
         .await
         .unwrap();
@@ -235,8 +245,7 @@ async fn a_short_secret_is_reported_at_startup_and_still_redacted() {
     ])
     .await;
 
-    let output = run_bash(&server, dir.path())
-        .args(["--secret-file", secrets.to_str().unwrap()])
+    let output = run_bash_redacting(&server, dir.path(), &[&secrets])
         .output()
         .await
         .unwrap();

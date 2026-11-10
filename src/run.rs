@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 use zx_agent::AgentSession;
 use zx_agent::agent::{AgentEvent, Event, EventSink};
 use zx_agent::ai::Message;
-use zx_agent::profile::Builtin;
+use zx_agent::config::Builtin;
 use zx_agent::runner::{RunOutcome, RunReport};
 
 use crate::cli::{self, OutputMode, RunArgs};
@@ -24,7 +24,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<u8> {
         Some(prompt) => Some(read_prompt(prompt)?),
         None => {
             // Checked before anything starts: continuing a new session has nothing to answer.
-            let session = args.request.session.as_deref().context("--continue needs --session")?;
+            let session = args.base.session.as_deref().context("--continue needs --session")?;
             anyhow::ensure!(
                 session.exists(),
                 "--continue needs an existing session file; {} does not exist",
@@ -68,19 +68,17 @@ fn read_prompt(arg: &str) -> Result<String> {
     Ok(prompt)
 }
 
-/// Assemble an unattended session from the selected profile, `unattended` unless another is
+/// Assemble an unattended session from the selected agent, `unattended` unless another is
 /// given, without exposing interactive choices to the kernel.
 async fn build_session(args: &RunArgs) -> Result<AgentSession> {
-    let shared = cli::Shared::connect(&args.base, Builtin::Unattended, &args.transport).await?;
+    let shared = cli::Shared::connect(&args.base, Builtin::Unattended).await?;
     let prepared = cli::prepare(cli::SessionOptions {
         base: &args.base,
-        transport: &args.transport,
-        request: &args.request,
         budget: &args.budget,
-        model: &args.base.model,
+        model: &shared.settings.model,
         cwd: None,
-        file: SessionFile::from_path(args.request.session.as_deref()),
-        default_profile: Builtin::Unattended,
+        file: SessionFile::from_path(args.base.session.as_deref()),
+        agent: Builtin::Unattended,
         shared: &shared,
     })
     .await?;

@@ -18,8 +18,6 @@ spec:
             - im
             - --config
             - /etc/zx-agent-im/im.toml
-            - --profile
-            - /usr/local/share/zx-agent/profiles/kubernetes.toml
           env:
             # Each platform reads only its own keys; the Secret holds the ones in use.
             - name: SLACK_APP_TOKEN

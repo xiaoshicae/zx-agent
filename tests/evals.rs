@@ -19,7 +19,7 @@ fn harness(root: PathBuf) -> Harness {
         root,
         model: "mock".to_string(),
         api_key_env: "ZX_EVALS_TEST_KEY".to_string(),
-        extra_args: Vec::new(),
+        extra_config: String::new(),
         timeout: Duration::from_secs(60),
     }
 }
@@ -234,11 +234,15 @@ async fn an_arm_that_cannot_start_blocks_its_pair_and_withholds_the_headline() {
         .into_iter()
         .filter(|case| case.id == "sign-off")
         .collect();
+    // An agent file without front matter: the program refuses it before any request.
+    let broken = dir.path().join("broken-agents");
+    std::fs::create_dir(&broken).unwrap();
+    std::fs::write(broken.join("unattended.md"), "no front matter\n").unwrap();
     let variants = Variants {
         control: sample_variants().control,
         treatment: Variant {
             name: "treatment",
-            profile: dir.path().join("missing.toml"),
+            agents: broken,
         },
     };
     let tasks = plan(&cases, &variants, 1);

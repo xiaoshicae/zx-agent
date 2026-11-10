@@ -9,7 +9,7 @@ paths:
 
 ## 尺寸
 
-- **函数一屏**：目标 60 行以内，一个函数做一件事；写不出一句话文档的函数在做两件事。拆出来的函数按步骤命名（`load_profile`、`open_session`、`register_hooks`），不叫 `helper`、`do_x`。
+- **函数一屏**：目标 60 行以内，一个函数做一件事；写不出一句话文档的函数在做两件事。拆出来的函数按步骤命名（`load_agent`、`open_session`、`register_hooks`），不叫 `helper`、`do_x`。
 - **可以带 `#[expect(clippy::too_many_lines, reason = "...")]` 的只有两种**：按变体展开、每个分支一两行的 match（`one arm per event variant`）；一张数据表（`one event of every variant`）。冻结的模块（chat）只做不改行为的整理，也用这条。
 - **文件一个主题**：一个文件讲几件事，就按职责拆成几个子模块（`session/summary.rs` 与 `session/summary/{records,source}.rs`），不论多长；不按类型拆（没有 `types.rs` 加 `impls.rs`）。入口文件只分派（`main.rs`）。
 - **600 行是检查线，不是上限**：产线代码（不含测试）超过 600 行时，确认它只讲一个主题。只讲一个主题的可以超过，拆开反而把一件事切成几处；讲了几件事的按上一条拆。

@@ -1,11 +1,14 @@
-//! The command line: the subcommands, their arguments and the value parsers.
+//! The command line: the subcommands and their arguments. Everything that describes the
+//! environment rather than one invocation is in config.toml (`zx_agent::config::Config`).
 //!
+//! - `settings`: config.toml with the command line and its variables over it
 //! - `shared`: what every session of a process shares, read or connected once
 //! - `prepare`: the assembly of one session, shared by run, chat, im and acp
 //! - `execution`: where a session's commands run: this machine or a Docker container
 
 mod execution;
 mod prepare;
+mod settings;
 mod shared;
 
 use std::path::{Path, PathBuf};
@@ -13,11 +16,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use zx_agent::agent::QueueMode;
-use zx_agent::ai::Reasoning;
-use zx_agent::ai::openai::{ReasoningFormat, SystemUpdates};
-
 pub(crate) use prepare::{PreparedSession, SessionOptions, prepare};
+pub(crate) use settings::Settings;
 pub(crate) use shared::{ModeSettings, Shared};
 
 #[derive(Parser)]
@@ -64,12 +64,6 @@ pub(crate) struct RunArgs {
     #[command(flatten)]
     pub(crate) budget: BudgetArgs,
 
-    #[command(flatten)]
-    pub(crate) transport: TransportArgs,
-
-    #[command(flatten)]
-    pub(crate) request: RequestArgs,
-
     /// text: progress on stderr, final answer on stdout. jsonl: one event per line on stdout.
     #[arg(long, value_enum, default_value_t = OutputMode::Text)]
     pub(crate) output: OutputMode,
@@ -87,17 +81,6 @@ pub(crate) struct ChatArgs {
 
     #[command(flatten)]
     pub(crate) budget: BudgetArgs,
-
-    /// How long an approval request waits for a menu choice, in seconds. An unanswered
-    /// request is denied, and the task goes on without the call.
-    #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..))]
-    pub(crate) approval_timeout_secs: u64,
-
-    #[command(flatten)]
-    pub(crate) transport: TransportArgs,
-
-    #[command(flatten)]
-    pub(crate) request: RequestArgs,
 
     /// text: stream replies on stdout. jsonl: emit events and per-prompt reports.
     #[arg(long, value_enum, default_value_t = OutputMode::Text)]
@@ -120,16 +103,12 @@ pub(crate) struct ChatArgs {
     #[arg(long, value_enum, default_value_t = ColorArg::Auto)]
     pub(crate) color: ColorArg,
 
-    /// Directory for new session files and for --resume, /sessions and /resume. Defaults to
-    /// ~/.zx-agent/sessions/--<cwd with / as ->--, one directory per working directory.
-    #[arg(long, conflicts_with = "session")]
-    pub(crate) session_dir: Option<PathBuf>,
-
     /// Keep the conversation in memory only: no session file is written.
-    #[arg(long, conflicts_with_all = ["session", "session_dir", "resume"])]
+    #[arg(long, conflicts_with_all = ["session", "resume"])]
     pub(crate) no_session: bool,
 
-    /// Resume a session from the session directory: the most recent one started in this
+    /// Resume a session from the session directory, sessions/--<cwd with / as ->-- in the
+    /// zx-agent home (ZX_AGENT_HOME, else ~/.zx-agent): the most recent one started in this
     /// working directory, or the one whose ID starts with the value (see `zx-agent sessions`).
     #[arg(long, value_name = "ID", num_args = 0..=1, conflicts_with = "session")]
     pub(crate) resume: Option<Option<String>>,
@@ -139,16 +118,6 @@ pub(crate) struct ChatArgs {
     /// directory; the original is not changed.
     #[arg(long, value_name = "ID|PATH", conflicts_with_all = ["session", "no_session", "resume"])]
     pub(crate) fork: Option<String>,
-
-    /// How input typed while a task runs is taken: `all` (default) sends every waiting
-    /// message before the next model request; `one-at-a-time` sends the oldest only, so
-    /// each gets an answer of its own. /queue changes it while chatting.
-    #[arg(long, value_name = "MODE", value_parser = parse_queue_mode)]
-    pub(crate) queue_mode: Option<QueueMode>,
-}
-
-fn parse_queue_mode(text: &str) -> Result<QueueMode, String> {
-    text.parse()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -166,33 +135,17 @@ pub(crate) struct AcpArgs {
     #[command(flatten)]
     pub(crate) budget: BudgetArgs,
 
-    /// How long a permission request waits for the client's answer, in seconds. An
-    /// unanswered request is denied, and the turn goes on without the call.
-    #[arg(long, default_value_t = 3600, value_parser = clap::value_parser!(u64).range(1..))]
-    pub(crate) approval_timeout_secs: u64,
-
-    /// Directory for session files, one per session, where `session/load` finds them again.
-    /// Defaults to ~/.zx-agent/sessions/--<cwd with / as ->--, one directory per working
-    /// directory, shared with chat.
-    #[arg(long, conflicts_with = "session")]
-    pub(crate) session_dir: Option<PathBuf>,
-
     /// Keep conversations in memory only: no session file is written, and `session/load` is
-    /// not offered.
-    #[arg(long, conflicts_with_all = ["session", "session_dir"])]
+    /// not offered. Otherwise each session has a file in sessions/--<cwd with / as ->-- of
+    /// the zx-agent home, the directory chat uses.
+    #[arg(long, conflicts_with = "session")]
     pub(crate) no_session: bool,
-
-    #[command(flatten)]
-    pub(crate) transport: TransportArgs,
-
-    #[command(flatten)]
-    pub(crate) request: RequestArgs,
 }
 
 #[derive(Args)]
 pub(crate) struct ImArgs {
     /// IM service configuration (TOML): platforms, who may use the bot, limits and the session
-    /// directory. See README, section "IM 服务".
+    /// directory. Not config.toml; see README, section "IM 服务".
     #[arg(long)]
     pub(crate) config: PathBuf,
 
@@ -201,124 +154,56 @@ pub(crate) struct ImArgs {
 
     #[command(flatten)]
     pub(crate) budget: BudgetArgs,
-
-    #[command(flatten)]
-    pub(crate) transport: TransportArgs,
-
-    #[command(flatten)]
-    pub(crate) request: RequestArgs,
 }
 
 #[derive(Args)]
 pub(crate) struct SessionsArgs {
-    /// Directory of session files. Defaults to the one chat uses for --cwd:
-    /// ~/.zx-agent/sessions/--<cwd with / as ->--.
-    #[arg(long)]
-    pub(crate) session_dir: Option<PathBuf>,
-
-    /// Working directory whose default session directory is listed.
+    /// Working directory whose session directory is listed: sessions/--<cwd with / as ->--
+    /// in the zx-agent home (ZX_AGENT_HOME, else ~/.zx-agent). Defaults to the current one.
     #[arg(long)]
     pub(crate) cwd: Option<PathBuf>,
 }
 
 #[derive(Args)]
 pub(crate) struct BaseArgs {
-    /// Model id passed to the provider.
+    /// Model id passed to the provider. Defaults to model in config.toml.
     #[arg(long, env = "ZX_MODEL")]
-    pub(crate) model: String,
-
-    /// OpenAI-compatible base URL (without /chat/completions).
-    #[arg(long, env = "ZX_BASE_URL", default_value = "https://api.openai.com/v1")]
-    pub(crate) base_url: String,
-
-    /// Name of the environment variable holding the API key. The key itself is never
-    /// accepted as an argument, so it does not appear in process listings.
-    #[arg(long, default_value = "OPENAI_API_KEY")]
-    pub(crate) api_key_env: String,
-
-    /// How system prompt changes reach the model when a session is resumed. collapse: fold
-    /// every version into the leading system message; works with any server. inline: send
-    /// each change where it happened, which keeps the prompt cache and shows the model when
-    /// the prompt changed, but needs a server that accepts system messages mid-conversation.
-    #[arg(long, value_parser = parse_system_updates, default_value = "collapse")]
-    pub(crate) system_updates: SystemUpdates,
+    pub(crate) model: Option<String>,
 
     /// Working directory for tools. Defaults to the current directory.
     #[arg(long)]
     pub(crate) cwd: Option<PathBuf>,
 
-    /// Enabled tools, comma-separated. Defaults to the selected profile; explicit values replace it.
+    /// Enabled tools, comma-separated. Defaults to the agent's; explicit values replace them.
     #[arg(long, value_delimiter = ',')]
     pub(crate) tools: Option<Vec<String>>,
 
-    /// File holding a secret to redact from tool output, such as a token mounted for the
-    /// agent, or a directory of such files (names starting with a dot are skipped). Each path
-    /// must exist at startup, and each file must be a regular file of at most 64 KiB. Read
-    /// again before every redaction. Repeatable, and added to the files in the
-    /// comma-separated ZX_SECRET_FILES.
-    #[arg(long = "secret-file", value_delimiter = ',')]
-    pub(crate) secret_files: Vec<PathBuf>,
-
-    /// Embedded profile name (unattended, assistant) or path to a TOML file.
+    /// Session file (JSONL). Created if missing; an existing one is continued.
     #[arg(long)]
-    pub(crate) profile: Option<String>,
+    pub(crate) session: Option<PathBuf>,
 }
 
-#[derive(Args)]
-pub(crate) struct TransportArgs {
-    /// Default bash command timeout, in seconds; at least 1.
-    #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..))]
-    pub(crate) tool_timeout_secs: u64,
-
-    /// Longest wait for response headers or the next stream chunk, in seconds; at least 1.
-    #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..))]
-    pub(crate) idle_timeout_secs: u64,
-
-    /// Retries for transient provider errors.
-    #[arg(long, default_value_t = 3)]
-    pub(crate) max_retries: u32,
-
-    /// A header to send with every model request, as NAME: VALUE, such as a gateway's routing
-    /// header. Repeatable. Authorization is refused: the key comes from --api-key-env. The
-    /// value is visible in process listings and is not recorded in the session.
-    #[arg(long = "header", value_name = "NAME: VALUE", value_parser = parse_header)]
-    pub(crate) headers: Vec<(String, String)>,
-}
-
-fn parse_header(text: &str) -> Result<(String, String), String> {
-    let (name, value) = text
-        .split_once(':')
-        .ok_or_else(|| format!("expected NAME: VALUE, got {text:?}"))?;
-    let name = name.trim();
-    if name.is_empty() {
-        return Err(format!("expected NAME: VALUE, got {text:?}"));
-    }
-    Ok((name.to_string(), value.trim().to_string()))
-}
-
-/// Limits per prompt; `None` keeps the selected profile's value. A run is one prompt.
+/// Limits per prompt; `None` keeps the agent's value. A run is one prompt.
 #[derive(Args)]
 pub(crate) struct BudgetArgs {
-    /// Maximum model requests per prompt, failed attempts included. Defaults to the selected
-    /// profile.
+    /// Maximum model requests per prompt, failed attempts included. Defaults to the agent's.
     #[arg(long)]
     pub(crate) max_model_requests: Option<u32>,
 
-    /// Wall-clock limit per prompt, in seconds. 0 disables it. Defaults to the selected
-    /// profile.
+    /// Wall-clock limit per prompt, in seconds. 0 disables it. Defaults to the agent's.
     #[arg(long)]
     pub(crate) timeout_secs: Option<u64>,
 
     /// Tokens per prompt: input plus output of its model requests, as the provider reports
     /// them. Checked before each request, so the last one may go over; a run then exits 7.
-    /// 0 disables it. Defaults to the selected profile.
+    /// 0 disables it. Defaults to the agent's.
     #[arg(long)]
     pub(crate) token_budget: Option<u64>,
 
-    /// Spending per prompt, in the unit of the prices in the profile's [[models]] (any
+    /// Spending per prompt, in the unit of the prices in [[models]] of config.toml (any
     /// currency, as long as every price uses it): the cost of its model requests by those
     /// prices. Checked before each request, so the last one may go over; a run then exits 8.
-    /// The model must have prices. 0 disables it. Defaults to the selected profile.
+    /// The model must have prices. 0 disables it. Defaults to the agent's.
     #[arg(long, value_parser = parse_cost_budget)]
     pub(crate) cost_budget: Option<f64>,
 }
@@ -331,66 +216,10 @@ fn parse_cost_budget(text: &str) -> Result<f64, String> {
     }
 }
 
-#[derive(Args)]
-pub(crate) struct RequestArgs {
-    /// Output token limit per response. Reasoning models count their reasoning against it,
-    /// so a small limit can leave the answer empty.
-    #[arg(long)]
-    pub(crate) max_tokens: Option<u32>,
-
-    /// A field to add to every request body, as KEY=JSON, for settings that some servers
-    /// offer, such as thinking='{"type":"disabled"}' on DeepSeek. Repeatable. Fields that
-    /// zx-agent sets itself, such as model and max_tokens, are refused. The session's request
-    /// audit records them.
-    #[arg(long = "request-field", value_name = "KEY=JSON")]
-    pub(crate) request_fields: Vec<String>,
-
-    /// How hard a reasoning model thinks: off, minimal, low, medium, high or xhigh. Unset,
-    /// requests carry no reasoning setting and the server decides. chat can change it with
-    /// /reasoning. The session's request audit records it.
-    #[arg(long, value_parser = parse_reasoning)]
-    pub(crate) reasoning: Option<Reasoning>,
-
-    /// How --reasoning is written in the request: effort (reasoning_effort, the OpenAI field;
-    /// off sends nothing), thinking (a thinking object, enabled or disabled, with
-    /// reasoning_effort) or reasoning-object (reasoning.effort). Check which fields the server
-    /// documents. The session's request audit records it.
-    #[arg(long, value_parser = parse_reasoning_format, default_value = "effort")]
-    pub(crate) reasoning_format: ReasoningFormat,
-
-    /// Once one earlier answer carries reasoning_content, send the others with an empty one,
-    /// for thinking-mode servers that reject a history in which only some answers carry it.
-    /// The session's request audit records the choice.
-    #[arg(long)]
-    pub(crate) fill_missing_reasoning: bool,
-
-    /// Session file (JSONL). Created if missing; an existing one is continued.
-    #[arg(long)]
-    pub(crate) session: Option<PathBuf>,
-
-    /// Send the session ID as the request's prompt_cache_key, so that the requests of one
-    /// conversation share the server's prompt cache (OpenAI takes the field; servers that
-    /// reject unknown fields must not get it). The request audit records the key.
-    #[arg(long)]
-    pub(crate) prompt_cache_key: bool,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub(crate) enum OutputMode {
     Text,
     Jsonl,
-}
-
-fn parse_reasoning(text: &str) -> Result<Reasoning, String> {
-    text.parse()
-}
-
-fn parse_reasoning_format(text: &str) -> Result<ReasoningFormat, String> {
-    text.parse()
-}
-
-fn parse_system_updates(text: &str) -> Result<SystemUpdates, String> {
-    text.parse()
 }
 
 /// The working directory as `prepare` resolves it, which is what session headers record.
@@ -437,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn omitted_budgets_and_tools_keep_the_profile_values() {
+    fn omitted_budgets_and_tools_keep_the_agent_values() {
         let cli = Cli::try_parse_from(["zx-agent", "run", "--model", "m", "go"]).unwrap();
         match cli.command {
             Command::Run(args) => {
@@ -465,7 +294,7 @@ mod tests {
             Command::Im(args) => {
                 assert_eq!(args.config, Path::new("im.toml"));
                 assert_eq!(args.budget.max_model_requests, None);
-                assert_eq!(args.request.session, None);
+                assert_eq!(args.base.session, None);
             }
             Command::Run(_) | Command::Chat(_) | Command::Sessions(_) | Command::Acp(_) => panic!("im command"),
         }
@@ -477,23 +306,18 @@ mod tests {
         let resume = |args: &[&str]| {
             let cli = Cli::try_parse_from(["zx-agent", "chat", "--model", "m"].iter().chain(args)).unwrap();
             match cli.command {
-                Command::Chat(args) => (args.resume, args.session_dir, args.no_session),
+                Command::Chat(args) => (args.resume, args.no_session),
                 Command::Run(_) | Command::Im(_) | Command::Sessions(_) | Command::Acp(_) => {
                     panic!("chat command")
                 }
             }
         };
-        assert_eq!(resume(&[]), (None, None, false));
-        assert_eq!(resume(&["--resume"]), (Some(None), None, false));
-        assert_eq!(
-            resume(&["--resume", "0b7c", "--session-dir", "d"]),
-            (Some(Some("0b7c".into())), Some(PathBuf::from("d")), false)
-        );
-        assert_eq!(resume(&["--no-session"]), (None, None, true));
+        assert_eq!(resume(&[]), (None, false));
+        assert_eq!(resume(&["--resume"]), (Some(None), false));
+        assert_eq!(resume(&["--resume", "0b7c"]), (Some(Some("0b7c".into())), false));
+        assert_eq!(resume(&["--no-session"]), (None, true));
         for conflict in [
             &["--session", "s.jsonl", "--resume"][..],
-            &["--session", "s.jsonl", "--session-dir", "d"],
-            &["--no-session", "--session-dir", "d"],
             &["--no-session", "--resume"],
             &["--no-session", "--session", "s.jsonl"],
         ] {
@@ -511,20 +335,38 @@ mod tests {
             let args = ["zx-agent", "chat", "--model", "m"].iter().chain(conflict);
             assert!(Cli::try_parse_from(args).is_err(), "{conflict:?}");
         }
-        let cli = Cli::try_parse_from([
-            "zx-agent",
-            "chat",
-            "--model",
-            "m",
-            "--fork",
-            "0b7c",
-            "--session-dir",
-            "d",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["zx-agent", "chat", "--model", "m", "--fork", "0b7c"]).unwrap();
         match cli.command {
             Command::Chat(args) => assert_eq!(args.fork.as_deref(), Some("0b7c")),
             Command::Run(_) | Command::Im(_) | Command::Sessions(_) | Command::Acp(_) => panic!("chat command"),
+        }
+    }
+
+    #[test]
+    fn settings_of_config_toml_are_not_command_line_options() {
+        for flag in [
+            "--base-url",
+            "--api-key-env",
+            "--system-updates",
+            "--reasoning",
+            "--reasoning-format",
+            "--fill-missing-reasoning",
+            "--prompt-cache-key",
+            "--request-field",
+            "--header",
+            "--idle-timeout-secs",
+            "--max-retries",
+            "--max-tokens",
+            "--tool-timeout-secs",
+            "--secret-file",
+            "--approval-timeout-secs",
+            "--session-dir",
+            "--queue-mode",
+            "--profile",
+            "--agent",
+        ] {
+            let args = ["zx-agent", "chat", "--model", "m", flag, "x"];
+            assert!(Cli::try_parse_from(args).is_err(), "{flag}");
         }
     }
 

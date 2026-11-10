@@ -16,7 +16,6 @@ mod updates;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{
@@ -33,8 +32,8 @@ use tokio_util::sync::CancellationToken;
 use zx_agent::AgentSession;
 use zx_agent::agent::{EventSink, RunOutcome};
 use zx_agent::agent_session::Subscription;
+use zx_agent::config::Builtin;
 use zx_agent::otel::Telemetry;
-use zx_agent::profile::Builtin;
 use zx_agent::runner::RunReport;
 use zx_agent::session::SessionInfo as StoredSession;
 use zx_agent::sync::lock;
@@ -81,17 +80,13 @@ impl Host {
         lock(&self.sessions).get(&*id.0).cloned()
     }
 
-    /// Where the sessions of `cwd` are kept: `--session-dir`, or chat's default directory
-    /// for that working directory; `None` with `--no-session`.
+    /// Where the sessions of `cwd` are kept: chat's directory for that working directory;
+    /// `None` with `--no-session`.
     fn session_dir(&self, cwd: &Path) -> Result<Option<PathBuf>> {
-        let args = &self.settings.args;
-        if args.no_session {
+        if self.settings.args.no_session {
             return Ok(None);
         }
-        match &args.session_dir {
-            Some(dir) => Ok(Some(dir.clone())),
-            None => session_files::default_dir(&cli::resolve_cwd(Some(cwd))?).map(Some),
-        }
+        session_files::default_dir(&cli::resolve_cwd(Some(cwd))?).map(Some)
     }
 
     /// Create a session for `cwd`, the client's project directory, which overrides `--cwd`.
@@ -173,7 +168,7 @@ impl Host {
             return Ok(Vec::new());
         };
         let list = session_files::list(&dir).await?;
-        // With `--session-dir`, one directory holds every working directory's sessions.
+        // Each session records its working directory; a listing for a cwd keeps its own.
         let cwd = cwd.display().to_string();
         Ok(list
             .sessions
@@ -189,13 +184,11 @@ impl Host {
         let args = &self.settings.args;
         let mut session = cli::prepare(SessionOptions {
             base: &args.base,
-            transport: &args.transport,
-            request: &args.request,
             budget: &args.budget,
-            model: &args.base.model,
+            model: &self.settings.shared.settings.model,
             cwd: Some(cwd),
             file,
-            default_profile: Builtin::Assistant,
+            agent: Builtin::Assistant,
             shared: &self.settings.shared,
         })
         .await?;
@@ -205,7 +198,7 @@ impl Host {
             cx: cx.clone(),
             session_id: id.clone(),
         });
-        session.config.interaction_timeout = Duration::from_secs(args.approval_timeout_secs);
+        session.config.interaction_timeout = self.settings.shared.settings.acp_approval_timeout;
         let cwd = session.config.cwd.clone();
         let updates = Arc::new(Updates::new(cx.clone(), id.clone(), cwd));
         Ok(Prepared { session, updates, id })
@@ -314,10 +307,10 @@ pub(crate) async fn run(args: AcpArgs) -> Result<u8> {
 
 async fn serve(args: AcpArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> {
     anyhow::ensure!(
-        args.request.session.is_none(),
-        "acp keeps one file per session: give --session-dir, not --session"
+        args.base.session.is_none(),
+        "acp keeps one file per session in the session directory of the zx-agent home; --session does not apply"
     );
-    let shared = cli::Shared::connect(&args.base, Builtin::Assistant, &args.transport).await?;
+    let shared = cli::Shared::connect(&args.base, Builtin::Assistant).await?;
     let host = Arc::new(Host {
         settings: ModeSettings { args, shared, traces },
         sessions: Mutex::new(HashMap::new()),

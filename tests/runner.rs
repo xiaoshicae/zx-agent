@@ -161,7 +161,7 @@ fn provider(steps: impl IntoIterator<Item = FauxStep>) -> Arc<FauxProvider> {
 }
 
 /// A runner with test defaults around `provider` and no tools: one automatic continuation of
-/// a truncated answer, as the unattended profiles register it.
+/// a truncated answer, as the unattended agents register it.
 fn setup(provider: &Arc<FauxProvider>) -> RunnerSetup {
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push_with(

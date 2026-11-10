@@ -12,10 +12,7 @@ use crate::session_files;
 /// read go to stderr.
 pub(crate) async fn run(args: SessionsArgs) -> Result<u8> {
     let cwd = resolve_cwd(args.cwd.as_deref())?;
-    let dir = match args.session_dir {
-        Some(dir) => dir,
-        None => session_files::default_dir(&cwd)?,
-    };
+    let dir = session_files::default_dir(&cwd)?;
     let list = session_files::list(&dir).await?;
     for line in session_files::lines(&list, &cwd) {
         print_line(&line);

@@ -31,8 +31,8 @@
 //!     cargo test --test real_api summaries_over_eight_rounds -- --ignored --nocapture
 //! ```
 //!
-//! The behaviour evals, `behaviour_evals_pair_two_profiles_against_the_real_api`, run the
-//! sample cases of `tests/common/evals.rs` through the compiled binary under two profiles
+//! The behaviour evals, `behaviour_evals_pair_two_agents_against_the_real_api`, run the
+//! sample cases of `tests/common/evals.rs` through the compiled binary under two agents
 //! (`tests/fixtures/evals/`), once per variant unless `ZX_E2E_EVAL_RUNS` says more, and pair
 //! the arms. They also need `ZX_E2E_EVAL=1`; each arm is one short run of a few hundred
 //! tokens. The artifacts (protocol, observations, report and every arm's session) stay in a
@@ -375,13 +375,13 @@ async fn summaries_over_eight_rounds_of_a_scripted_session() {
 }
 
 /// The behaviour evals of `tests/common/evals.rs` against the real API: the sample cases
-/// under the control and treatment profiles, `ZX_E2E_EVAL_RUNS` runs per variant (default
+/// under the control and treatment agents, `ZX_E2E_EVAL_RUNS` runs per variant (default
 /// 1), paired and compared. The artifacts, with every arm's session, stay in a temporary
 /// directory whose path is printed. A low pass rate is data; the test fails only when an arm
 /// did not finish, which blocks its pair.
 #[tokio::test]
 #[ignore = "calls a paid model API; needs ZX_E2E_AUTHORIZED=1 and the API owner's consent"]
-async fn behaviour_evals_pair_two_profiles_against_the_real_api() {
+async fn behaviour_evals_pair_two_agents_against_the_real_api() {
     use common::evals::{
         Artifacts, Harness, evaluate, format_report, plan, protocol, sample_cases, sample_variants, summarize,
     };
@@ -419,7 +419,7 @@ async fn behaviour_evals_pair_two_profiles_against_the_real_api() {
         root: artifacts.dir.clone(),
         model: endpoint.model.clone(),
         api_key_env: endpoint.api_key_env.clone(),
-        extra_args: vec!["--max-tokens".to_string(), "1024".to_string()],
+        extra_config: "maxTokens = 1024".to_string(),
         timeout: Duration::from_secs(300),
     };
 

@@ -13,7 +13,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 
 use common::mock_server::{MockServer, Reply};
-use common::{ProfileFile, session_dir, stderr, zx_agent};
+use common::{fake_model_config, session_dir, stderr, write_agent, write_config, zx_agent};
 
 const KEY_VAR: &str = "ZX_ACP_TEST_KEY";
 
@@ -60,23 +60,19 @@ impl Acp {
             None => Some(tempfile::tempdir().unwrap()),
         };
         let home = home.map_or_else(|| own.as_ref().unwrap().path().to_path_buf(), Path::to_path_buf);
+        write_config(
+            &home.join(".zx-agent"),
+            &fake_model_config(KEY_VAR, "", "idleTimeoutSecs = 10"),
+        );
         let mut child = zx_agent()
             .arg("acp")
-            .args(["--model", "mock-model", "--base-url", &server.base_url])
-            .args([
-                "--api-key-env",
-                KEY_VAR,
-                "--max-retries",
-                "0",
-                "--idle-timeout-secs",
-                "10",
-            ])
+            .args(["--model", "mock-model"])
             .args(args)
             .current_dir(cwd)
             .env("HOME", &home)
+            .env_remove("ZX_AGENT_HOME")
+            .env("ZX_BASE_URL", &server.base_url)
             .env(KEY_VAR, "sk-acp-test-key")
-            .env_remove("ZX_MODEL")
-            .env_remove("ZX_BASE_URL")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -404,8 +400,13 @@ async fn a_file_write_shows_as_a_diff_and_an_auto_approved_command_asks_nobody()
         Reply::text("written"),
     ])
     .await;
-    let profile = ProfileFile::new("assistant", "[rules]\nautoApprove = [\"pwd\"]");
-    let mut acp = Acp::start(&server, dir.path(), &["--profile", profile.path()]).await;
+    let home = tempfile::tempdir().unwrap();
+    write_agent(
+        &home.path().join(".zx-agent"),
+        "assistant",
+        "[permissions]\nallow = [\"bash(pwd)\"]",
+    );
+    let mut acp = Acp::start_in(&server, dir.path(), &[], Some(home.path())).await;
     let session = acp.session(dir.path()).await;
     acp.write(json!({"jsonrpc": "2.0", "id": 3, "method": "session/prompt",
         "params": {"sessionId": session, "prompt": [{"type": "text", "text": "write"}]}}))
@@ -588,7 +589,10 @@ async fn no_session_keeps_no_file_and_offers_no_loading() {
     let id = created["result"]["sessionId"].as_str().unwrap().to_string();
     let response = acp.prompt(&id, "hello").await;
     assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
-    assert!(!home.path().join(".zx-agent").exists(), "no session file is written");
+    assert!(
+        !home.path().join(".zx-agent/sessions").exists(),
+        "no session file is written"
+    );
     let loaded = acp.load("another", &cwd).await;
     assert_eq!(loaded["error"]["code"], -32602, "{loaded}");
     assert!(
@@ -601,16 +605,16 @@ async fn no_session_keeps_no_file_and_offers_no_loading() {
 }
 
 #[tokio::test]
-async fn session_dir_chooses_the_directory_and_a_live_session_is_replayed_in_place() {
-    let dir = tempfile::tempdir().unwrap();
+async fn a_live_session_is_replayed_in_place() {
+    let home = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     let cwd = work.path().canonicalize().unwrap();
     let server = MockServer::start(vec![Reply::text("two"), Reply::text("four")]).await;
-    let mut acp = Acp::start(&server, &cwd, &["--session-dir", dir.path().to_str().unwrap()]).await;
+    let mut acp = Acp::start_in(&server, &cwd, &[], Some(home.path())).await;
     let id = acp.session(&cwd).await;
     let response = acp.prompt(&id, "one").await;
     assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
-    let files = session_files(dir.path());
+    let files = session_files(&session_dir(home.path(), &cwd));
     assert!(
         files.len() == 1 && files[0].ends_with(&format!("_{id}.jsonl")),
         "{files:?}"
@@ -631,36 +635,6 @@ async fn session_dir_chooses_the_directory_and_a_live_session_is_replayed_in_pla
     let requests = server.requests();
     let texts = texts(&requests[1].body);
     assert!(texts.ends_with(&["one", "two", "three"]), "{texts:?}");
-    // One directory for every working directory: a listing with a cwd keeps that cwd's
-    // sessions, one without lists them all.
-    let other = tempfile::tempdir().unwrap();
-    let other_cwd = other.path().canonicalize().unwrap();
-    let created = acp
-        .request("session/new", json!({"cwd": other_cwd, "mcpServers": []}))
-        .await;
-    let other_id = created["result"]["sessionId"]
-        .as_str()
-        .unwrap_or_else(|| panic!("{created}"))
-        .to_string();
-    let listed = acp.list(json!({"cwd": cwd})).await;
-    let ids: Vec<&str> = listed["result"]["sessions"]
-        .as_array()
-        .unwrap_or_else(|| panic!("{listed}"))
-        .iter()
-        .map(|session| session["sessionId"].as_str().unwrap())
-        .collect();
-    assert_eq!(ids, [id.as_str()], "{listed}");
-    let all = acp.list(json!({})).await;
-    let mut all_ids: Vec<&str> = all["result"]["sessions"]
-        .as_array()
-        .unwrap_or_else(|| panic!("{all}"))
-        .iter()
-        .map(|session| session["sessionId"].as_str().unwrap())
-        .collect();
-    all_ids.sort_unstable();
-    let mut expected = [id.as_str(), other_id.as_str()];
-    expected.sort_unstable();
-    assert_eq!(all_ids, expected, "{all}");
     acp.finish().await;
 }
 
@@ -671,13 +645,14 @@ async fn a_single_session_file_is_refused_before_the_connection() {
         .args(["acp", "--model", "m", "--session"])
         .arg(work.path().join("one.jsonl"))
         .env("HOME", work.path())
+        .env_remove("ZX_AGENT_HOME")
         .stdin(Stdio::null())
         .output()
         .await
         .unwrap();
     let errors = stderr(&output);
     assert_eq!(output.status.code(), Some(2), "{errors}");
-    assert!(errors.contains("give --session-dir, not --session"), "{errors}");
+    assert!(errors.contains("--session does not apply"), "{errors}");
 }
 
 #[tokio::test]

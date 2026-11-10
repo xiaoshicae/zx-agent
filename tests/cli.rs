@@ -11,7 +11,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use common::mock_server::{MockServer, Reply};
-use common::{ProfileFile, json_lines, stderr, stdout, zx_agent};
+use common::{AgentHome, fake_model_config, json_lines, stderr, stdout, write_config, zx_agent};
 
 /// The variable the program reads the API key from, and the fake key it holds.
 const KEY_VAR: &str = "ZX_CLI_TEST_KEY";
@@ -21,17 +21,23 @@ const NO_SERVER: &str = "http://127.0.0.1:9/v1";
 
 /// `zx-agent run` against `base_url`, started in `dir`, with `args` after the common options.
 fn run_against(base_url: &str, dir: &Path, args: &[&str]) -> Command {
+    run_configured(base_url, dir, "", args)
+}
+
+/// Like [`run_against`], with `provider` added to the `[provider]` table of the config.toml in
+/// a zx-agent home of `dir`.
+fn run_configured(base_url: &str, dir: &Path, provider: &str, args: &[&str]) -> Command {
+    let home = dir.join(".home");
+    write_config(&home, &fake_model_config(KEY_VAR, "", provider));
     let mut command = zx_agent();
     command
         .arg("run")
-        .args(["--model", "mock-model", "--base-url", base_url])
-        .args(["--api-key-env", KEY_VAR, "--max-retries", "0"])
+        .args(["--model", "mock-model"])
         .args(args)
         .current_dir(dir)
+        .env("ZX_AGENT_HOME", &home)
+        .env("ZX_BASE_URL", base_url)
         .env(KEY_VAR, KEY)
-        // Settings from the developer's shell must not change the test.
-        .env_remove("ZX_MODEL")
-        .env_remove("ZX_BASE_URL")
         .stdin(Stdio::null())
         .kill_on_drop(true);
     command
@@ -184,8 +190,13 @@ async fn sigterm_exits_5() {
 async fn a_truncated_answer_is_printed_and_exits_6() {
     let server = MockServer::start(vec![Reply::truncated("Part")]).await;
 
-    let profile = ProfileFile::new("unattended", "[extensions]\ncontinueOnLength = 0");
-    let output = run(&server.base_url, &["--tools", "", "--profile", profile.path(), "check"]).await;
+    let home = AgentHome::agent("unattended", "continueOnLength = 0");
+    let dir = tempfile::tempdir().unwrap();
+    let output = run_against(&server.base_url, dir.path(), &["--tools", "", "check"])
+        .env("ZX_AGENT_HOME", home.path())
+        .output()
+        .await
+        .unwrap();
 
     assert_eq!(output.status.code(), Some(6), "{}", stderr(&output));
     assert_eq!(stdout(&output), "Part\n");
@@ -254,19 +265,21 @@ async fn bash_commands_cannot_read_the_api_key() {
 }
 
 #[tokio::test]
-async fn the_system_prompt_states_the_environment_and_command_policy() {
+async fn the_system_prompt_states_the_environment() {
     let server = MockServer::start(vec![Reply::text("ok")]).await;
 
-    let profile = ProfileFile::new("unattended", "[rules]\nallow = [\"grep\"]");
-    run(
-        &server.base_url,
-        &["--tools", "bash", "--profile", profile.path(), "check"],
-    )
-    .await;
+    let home = AgentHome::agent("unattended", "[permissions]\nallow = [\"bash(grep)\"]");
+    let dir = tempfile::tempdir().unwrap();
+    run_against(&server.base_url, dir.path(), &["--tools", "bash", "check"])
+        .env("ZX_AGENT_HOME", home.path())
+        .output()
+        .await
+        .unwrap();
 
     let system = sent_messages(&server, 0)[0]["content"].as_str().unwrap().to_string();
     assert!(system.contains("<environment>\nOS: "), "{system}");
-    assert!(system.contains("must start with one of: grep."), "{system}");
+    // Without a command allowlist there is no command policy to state.
+    assert!(!system.contains("<command_policy>"), "{system}");
 }
 
 #[tokio::test]
@@ -282,15 +295,16 @@ async fn inline_updates_are_sent_where_the_prompt_changed() {
         let args = [
             "--tools",
             "",
-            "--system-updates",
-            "inline",
             "--session",
             session,
             "--cwd",
             cwd.to_str().unwrap(),
             "check",
         ];
-        let output = run_against(&server.base_url, dir.path(), &args).output().await.unwrap();
+        let output = run_configured(&server.base_url, dir.path(), "systemUpdates = 'inline'", &args)
+            .output()
+            .await
+            .unwrap();
         assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     }
 

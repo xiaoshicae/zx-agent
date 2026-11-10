@@ -2,18 +2,19 @@
 //! forks them.
 //!
 //! As in pi (`getDefaultSessionDirPath`), each working directory has its own directory under
-//! the home directory; `--session-dir` replaces it.
+//! the zx-agent home directory, which `ZX_AGENT_HOME` moves.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use zx_agent::config;
 use zx_agent::session::{self, SessionHeader, SessionInfo, SessionList, SessionStore};
 
 use crate::render::{local_time, visible};
 
-/// Under the home directory: the sessions of every working directory.
-const SESSIONS_HOME: &str = ".zx-agent/sessions";
+/// Under the zx-agent home directory: the sessions of every working directory.
+const SESSIONS_DIR: &str = "sessions";
 /// Characters of a first prompt shown in a listing.
 const PROMPT_PREVIEW_CHARS: usize = 60;
 /// Characters of a session ID shown in a listing; enough to tell sessions apart, and what
@@ -71,11 +72,17 @@ pub(crate) fn create(file: SessionFile<'_>, header: SessionHeader) -> Result<Ses
     })
 }
 
-/// `~/.zx-agent/sessions/--<cwd>--`, with the separators of `cwd` turned into `-` as pi does,
-/// so one directory holds one working directory's sessions.
+/// `sessions/--<cwd>--` in the zx-agent home directory (`ZX_AGENT_HOME`, else `~/.zx-agent`).
 pub(crate) fn default_dir(cwd: &Path) -> Result<PathBuf> {
-    let home = std::env::home_dir()
-        .context("cannot find the home directory for session files; give --session-dir or --no-session")?;
+    let home = config::home()?.context(
+        "cannot find the home directory for session files; set ZX_AGENT_HOME, or give --session or --no-session",
+    )?;
+    Ok(dir_in(&home, cwd))
+}
+
+/// `sessions/--<cwd>--` in `home`, with the separators of `cwd` turned into `-` as pi does, so
+/// one directory holds one working directory's sessions.
+fn dir_in(home: &Path, cwd: &Path) -> PathBuf {
     let path = cwd.display().to_string();
     let encoded: String = path
         .strip_prefix(['/', '\\'])
@@ -83,7 +90,7 @@ pub(crate) fn default_dir(cwd: &Path) -> Result<PathBuf> {
         .chars()
         .map(|c| if matches!(c, '/' | '\\' | ':') { '-' } else { c })
         .collect();
-    Ok(home.join(SESSIONS_HOME).join(format!("--{encoded}--")))
+    home.join(SESSIONS_DIR).join(format!("--{encoded}--"))
 }
 
 /// Create `dir` and its missing parents, readable only by this user on Unix: session files
@@ -224,12 +231,8 @@ mod tests {
 
     #[test]
     fn the_default_directory_names_the_working_directory_as_pi_does() {
-        let dir = default_dir(Path::new("/Users/me/work:repo")).unwrap();
-        assert!(
-            dir.ends_with(".zx-agent/sessions/--Users-me-work-repo--"),
-            "{}",
-            dir.display()
-        );
+        let dir = dir_in(Path::new("/home/me/.zx-agent"), Path::new("/Users/me/work:repo"));
+        assert_eq!(dir, Path::new("/home/me/.zx-agent/sessions/--Users-me-work-repo--"));
     }
 
     #[test]

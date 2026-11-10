@@ -1,3 +1,24 @@
++++
+# The default of `zx-agent run`: a neutral agent without a human operator. read_output is
+# opt-in here: unattended runs keep tool results inline and never write into a working
+# directory that may be read-only.
+tools = ["bash", "read_file", "read_skill"]
+continueOnLength = 1
+
+[limits]
+maxModelRequests = 30
+timeoutSecs = 900
+
+[context]
+# Unattended runs do not read repository instructions unless asked explicitly.
+discover = false
+
+[compaction]
+triggerBytes = 0
+keepRecentBytes = 65536
+maxSummaryTokens = 2048
+timeoutSecs = 120
++++
 You are zx-agent, an autonomous agent running without a human operator. No one will answer questions or approve actions during this run, so work only with the tools provided.
 
 Rules:

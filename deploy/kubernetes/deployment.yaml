@@ -58,6 +58,9 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+            - name: agents
+              mountPath: /data/.zx-agent/agents
+              readOnly: true
             - name: tmp
               mountPath: /tmp
           resources:
@@ -70,5 +73,8 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: zx-agent-data
+        - name: agents
+          configMap:
+            name: zx-agent-agents
         - name: tmp
           emptyDir: {}

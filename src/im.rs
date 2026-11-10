@@ -17,6 +17,7 @@ use zx_agent::AgentSession;
 use zx_agent::agent::Interaction;
 use zx_agent::agent::{EventSink, NullSink};
 use zx_agent::ai::now_ms;
+use zx_agent::config::Builtin;
 use zx_agent::im::feishu::{FeishuChannel, FeishuConfig};
 use zx_agent::im::slack::{SlackChannel, SlackConfig};
 use zx_agent::im::{
@@ -24,7 +25,6 @@ use zx_agent::im::{
     ServerSink, SessionFactory, SessionKey, StatusFiles, UserId,
 };
 use zx_agent::otel::Telemetry;
-use zx_agent::profile::Builtin;
 
 use crate::cli::{self, ImArgs, SessionOptions, env_value};
 use crate::process::{EXIT_COMPLETED, EXIT_ERROR, EXIT_USAGE, spawn_signal_handler, with_telemetry, write_line};
@@ -133,7 +133,7 @@ struct SessionsSection {
 /// problem found before serving started.
 pub(crate) async fn run(args: ImArgs) -> Result<u8> {
     anyhow::ensure!(
-        args.request.session.is_none(),
+        args.base.session.is_none(),
         "--session does not apply to im: each conversation has its own session files under [sessions] dir"
     );
     let file = read_file(&args.config)?;
@@ -145,7 +145,7 @@ pub(crate) async fn run(args: ImArgs) -> Result<u8> {
         let running = create_session_dirs(&dir)?;
 
         // Once for the process: every thread's session shares the connections.
-        let shared = cli::Shared::connect(&args.base, Builtin::Assistant, &args.transport)
+        let shared = cli::Shared::connect(&args.base, Builtin::Assistant)
             .await?
             .with_hidden_env(hidden_env);
         let factory = Sessions {
@@ -159,7 +159,7 @@ pub(crate) async fn run(args: ImArgs) -> Result<u8> {
             ),
             events: telemetry.map_or_else(|| Arc::new(NullSink) as Arc<dyn EventSink>, Telemetry::sink),
         };
-        // A wrong model, profile or tool setting would otherwise surface only at the first
+        // A wrong model, agent or tool setting would otherwise surface only at the first
         // message, in the chat; check it once with a session that is never stored.
         factory
             .prepare(SessionFile::Memory)
@@ -366,13 +366,11 @@ impl Sessions {
     async fn prepare(&self, file: SessionFile<'_>) -> Result<cli::PreparedSession> {
         let mut prepared = cli::prepare(SessionOptions {
             base: &self.args.base,
-            transport: &self.args.transport,
-            request: &self.args.request,
             budget: &self.args.budget,
-            model: &self.args.base.model,
+            model: &self.shared.settings.model,
             cwd: None,
             file,
-            default_profile: Builtin::Assistant,
+            agent: Builtin::Assistant,
             shared: &self.shared,
         })
         .await?;

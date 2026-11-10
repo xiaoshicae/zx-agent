@@ -1,5 +1,5 @@
 //! A behaviour evaluation harness (pi: packages/evals): scenario cases run through the
-//! compiled `zx-agent run` under two profiles, repeated, paired and compared. A case seeds a
+//! compiled `zx-agent run` under two agents, repeated, paired and compared. A case seeds a
 //! workspace, gives the prompt and grades the outcome deterministically; the harness owns the
 //! plan, the isolation (a home, a workspace and a session file per run), the artifacts and the
 //! report. Synthetic runs script the model with `MockServer`; real models need the API owner's
@@ -26,10 +26,12 @@ pub(crate) struct Case {
     pub grade: fn(&Outcome) -> Grade,
 }
 
-/// How a run is configured: a profile file for `--profile`.
+/// How a run is configured: a directory of agent files, copied into the arm's zx-agent home
+/// as `agents/`, so that its `unattended.md` replaces the built-in agent `run` uses. Files
+/// the agent names, such as context files, go beside it.
 pub(crate) struct Variant {
     pub name: &'static str,
-    pub profile: PathBuf,
+    pub agents: PathBuf,
 }
 
 /// The two arms of a comparison. Lift is the treatment's pass rate over the control's.
@@ -158,8 +160,8 @@ pub(crate) struct Harness {
     pub root: PathBuf,
     pub model: String,
     pub api_key_env: String,
-    /// Added to every `run` command, such as `--max-retries 1`.
-    pub extra_args: Vec<String>,
+    /// Added at the top of every arm's config.toml, such as `maxTokens = 1024`.
+    pub extra_config: String,
     /// Longest an arm may take; a run still going is killed and recorded as errored.
     pub timeout: Duration,
 }
@@ -173,7 +175,7 @@ impl Harness {
     }
 
     /// The program for one arm, with its own `HOME` and workspace, so that nothing of the
-    /// user's environment is used.
+    /// user's environment is used; the variant's agents are copied into that home.
     fn command(
         &self,
         case: &Case,
@@ -183,21 +185,22 @@ impl Harness {
         home: &Path,
         session: &Path,
     ) -> Command {
+        install_agents(&variant.agents, &home.join(".zx-agent/agents"));
+        super::write_config(
+            &home.join(".zx-agent"),
+            &super::fake_model_config(&self.api_key_env, &self.extra_config, ""),
+        );
         let mut command = super::zx_agent();
         command
             .arg("run")
-            .args(["--model", &self.model, "--base-url", base_url])
-            .args(["--api-key-env", &self.api_key_env, "--max-retries", "0"])
-            .arg("--profile")
-            .arg(&variant.profile)
+            .args(["--model", &self.model])
             .arg("--session")
             .arg(session)
-            .args(&self.extra_args)
             .arg(case.prompt)
             .current_dir(workspace)
             .env("HOME", home)
-            .env_remove("ZX_MODEL")
-            .env_remove("ZX_BASE_URL")
+            .env_remove("ZX_AGENT_HOME")
+            .env("ZX_BASE_URL", base_url)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -604,7 +607,7 @@ impl Artifacts {
 
 /// What an evaluation was: the model, the variants, the cases and the plan's size.
 pub(crate) fn protocol(model: &str, variants: &Variants, cases: &[Case], runs_per_variant: u32) -> Value {
-    let variant = |variant: &Variant| json!({"name": variant.name, "profile": variant.profile.display().to_string()});
+    let variant = |variant: &Variant| json!({"name": variant.name, "agents": variant.agents.display().to_string()});
     json!({
         "model": model,
         "variants": {"control": variant(&variants.control), "treatment": variant(&variants.treatment)},
@@ -615,7 +618,7 @@ pub(crate) fn protocol(model: &str, variants: &Variants, cases: &[Case], runs_pe
 }
 
 /// The sample cases: an edit the model has to make, and an instruction the project notes
-/// give. The treatment profile adds the notes; the control is otherwise the same.
+/// give. The treatment agent adds the notes; the control is otherwise the same.
 pub(crate) fn sample_cases() -> Vec<Case> {
     vec![
         Case {
@@ -635,18 +638,27 @@ pub(crate) fn sample_cases() -> Vec<Case> {
     ]
 }
 
-/// The profiles under `tests/fixtures/evals/`.
+/// The agents under `tests/fixtures/evals/`, a directory for each arm.
 pub(crate) fn sample_variants() -> Variants {
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/evals");
     Variants {
         control: Variant {
             name: "control",
-            profile: fixtures.join("control.toml"),
+            agents: fixtures.join("control"),
         },
         treatment: Variant {
             name: "treatment",
-            profile: fixtures.join("treatment.toml"),
+            agents: fixtures.join("treatment"),
         },
+    }
+}
+
+/// Copy the files of `from` into `to`, the `agents/` directory of an arm's zx-agent home.
+fn install_agents(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let path = entry.unwrap().path();
+        std::fs::copy(&path, to.join(path.file_name().unwrap())).unwrap();
     }
 }
 

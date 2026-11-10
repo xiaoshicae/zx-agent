@@ -13,32 +13,37 @@ use tokio::process::Command;
 
 use common::http::{Request, read_request};
 use common::mock_server::{MockServer, Reply};
-use common::{ProfileFile, json_lines, stderr, stdout, zx_agent};
+use common::{AgentHome, fake_model_config, json_lines, stderr, stdout, write_config, zx_agent};
 
 /// An answer that would set the terminal title if a terminal ran it.
 const TITLE_ANSWER: &str = "before\u{1b}]0;CANARY\u{7}after";
 
 /// `zx-agent run` without tools against `server`.
 fn run(server: &MockServer, dir: &std::path::Path) -> Command {
+    run_with(server, dir, "", "")
+}
+
+/// `zx-agent run` without tools against `server`, with a config.toml in a zx-agent home of
+/// `dir` that has `top` before its `[provider]` table and `rest` after the test's provider
+/// keys.
+fn run_with(server: &MockServer, dir: &std::path::Path, top: &str, rest: &str) -> Command {
     let mut command = zx_agent();
     command
-        .args(["run", "--model", "mock", "--base-url", &server.base_url])
-        .args([
-            "--max-retries",
-            "0",
-            "--api-key-env",
-            "ZX_RUN_CLI_TEST_KEY",
-            "--tools",
-            "",
-            "go",
-        ])
+        .args(["run", "--model", "mock", "--tools", "", "go"])
         .current_dir(dir)
+        .env("ZX_AGENT_HOME", home(dir, top, rest))
+        .env("ZX_BASE_URL", &server.base_url)
         .env_remove("ZX_RUN_CLI_TEST_KEY")
-        .env_remove("ZX_MODEL")
-        .env_remove("ZX_BASE_URL")
         .stdin(Stdio::null())
         .kill_on_drop(true);
     command
+}
+
+/// A zx-agent home in `dir`: a config.toml for the fake model, with `top` and `rest`.
+fn home(dir: &std::path::Path, top: &str, rest: &str) -> std::path::PathBuf {
+    let home = dir.join(".home");
+    write_config(&home, &fake_model_config("ZX_RUN_CLI_TEST_KEY", top, rest));
+    home
 }
 
 #[tokio::test]
@@ -102,12 +107,11 @@ async fn progress_and_report_lines_escape_terminal_control_characters() {
     ])
     .await;
     let output = zx_agent()
-        .args(["run", "--model", "mock", "--base-url", &server.base_url])
-        .args(["--max-retries", "0", "--api-key-env", "ZX_RUN_CLI_TEST_KEY", "go"])
+        .args(["run", "--model", "mock", "go"])
         .current_dir(dir.path())
+        .env("ZX_AGENT_HOME", home(dir.path(), "", ""))
+        .env("ZX_BASE_URL", &server.base_url)
         .env_remove("ZX_RUN_CLI_TEST_KEY")
-        .env_remove("ZX_MODEL")
-        .env_remove("ZX_BASE_URL")
         .kill_on_drop(true)
         .output()
         .await
@@ -175,17 +179,10 @@ async fn commands_cannot_see_the_headers_for_a_trace_collector() {
                    metrics=[$OTEL_EXPORTER_OTLP_METRICS_HEADERS]\"";
     let server = MockServer::start(vec![Reply::bash("c", command), Reply::text("done")]).await;
     let output = zx_agent()
-        .args(["run", "--model", "mock", "--base-url", &server.base_url])
-        .args([
-            "--max-retries",
-            "0",
-            "--api-key-env",
-            "ZX_RUN_CLI_TEST_KEY",
-            "--tools",
-            "bash",
-            "go",
-        ])
+        .args(["run", "--model", "mock", "--tools", "bash", "go"])
         .current_dir(dir.path())
+        .env("ZX_AGENT_HOME", home(dir.path(), "", ""))
+        .env("ZX_BASE_URL", &server.base_url)
         .env("OTEL_EXPORTER_OTLP_HEADERS", TOKEN)
         .env("OTEL_EXPORTER_OTLP_TRACES_HEADERS", TOKEN)
         .env("OTEL_EXPORTER_OTLP_METRICS_HEADERS", TOKEN)
@@ -193,8 +190,6 @@ async fn commands_cannot_see_the_headers_for_a_trace_collector() {
         .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
         .env_remove("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
         .env_remove("ZX_RUN_CLI_TEST_KEY")
-        .env_remove("ZX_MODEL")
-        .env_remove("ZX_BASE_URL")
         .stdin(Stdio::null())
         .kill_on_drop(true)
         .output()
@@ -210,9 +205,8 @@ async fn commands_cannot_see_the_headers_for_a_trace_collector() {
 async fn request_fields_reach_the_model_and_the_audit() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::text("ok")]).await;
-    let output = run(&server, dir.path())
-        .args(["--request-field", r#"thinking={"type":"disabled"}"#])
-        .args(["--request-field", r#"reasoning_effort="low""#])
+    let fields = r#"requestFields = { thinking = { type = "disabled" }, reasoning_effort = "low" }"#;
+    let output = run_with(&server, dir.path(), "", fields)
         .args(["--session", "audit.jsonl"])
         .output()
         .await
@@ -222,10 +216,14 @@ async fn request_fields_reach_the_model_and_the_audit() {
     assert_eq!(body["thinking"], json!({"type": "disabled"}));
     assert_eq!(body["reasoning_effort"], json!("low"));
     let audit = std::fs::read_to_string(dir.path().join("audit.jsonl")).unwrap();
-    assert!(
-        // Fields keep the order they were given in: serde_json's `preserve_order` is on for
-        // the whole workspace since the ACP SDK enables it.
-        audit.contains(r#""extraFields":{"thinking":{"type":"disabled"},"reasoning_effort":"low"}"#),
+    let config = json_lines(&audit)
+        .into_iter()
+        .find(|record| record["type"] == "request_config")
+        .unwrap();
+    // Compared as maps: the order of a TOML table's keys is the toml crate's.
+    assert_eq!(
+        config["config"]["providerOptions"]["extraFields"],
+        json!({"thinking": {"type": "disabled"}, "reasoning_effort": "low"}),
         "{audit}"
     );
 }
@@ -234,31 +232,24 @@ async fn request_fields_reach_the_model_and_the_audit() {
 async fn bad_request_fields_exit_2_before_any_request() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::text("never sent")]).await;
-    for (field, expected) in [
-        (r#"model="other""#, r#"request field "model" cannot be added"#),
-        (r#"thinking={"type":"#, "the value is not JSON"),
-        ("no-equals-sign", "is not of the form KEY=JSON"),
+    for (fields, expected) in [
+        (
+            r#"requestFields = { model = "other" }"#,
+            r#"request field "model" cannot be added"#,
+        ),
+        ("requestFields = { seed = 1, seed = 2 }", "duplicate key"),
+        (r#"requestFields = "seed=1""#, "invalid type"),
     ] {
-        let output = run(&server, dir.path())
-            .args(["--request-field", field, "--session", "audit.jsonl"])
+        let output = run_with(&server, dir.path(), "", fields)
+            .args(["--session", "audit.jsonl"])
             .output()
             .await
             .unwrap();
         let stderr = stderr(&output);
-        assert_eq!(output.status.code(), Some(2), "{field}: {stderr}");
-        assert!(stderr.contains(expected), "{field}: {stderr}");
+        assert_eq!(output.status.code(), Some(2), "{fields}: {stderr}");
+        assert!(stderr.contains(expected), "{fields}: {stderr}");
+        assert!(stderr.contains("config.toml"), "{fields}: {stderr}");
     }
-    let output = run(&server, dir.path())
-        .args(["--request-field", "seed=1", "--request-field", "seed=2"])
-        .output()
-        .await
-        .unwrap();
-    let stderr = stderr(&output);
-    assert_eq!(output.status.code(), Some(2), "{stderr}");
-    assert!(
-        stderr.contains("--request-field seed is given more than once"),
-        "{stderr}"
-    );
     assert!(server.requests().is_empty());
     assert!(!dir.path().join("audit.jsonl").exists());
 }
@@ -267,22 +258,23 @@ async fn bad_request_fields_exit_2_before_any_request() {
 async fn the_reasoning_level_reaches_the_model_in_the_chosen_format_and_the_audit() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::text("ok"), Reply::text("ok"), Reply::text("ok")]).await;
-    let cases: [(&[&str], &str, Value); 3] = [
+    let cases: [(&str, &str, &str, Value); 3] = [
         (
-            &["--reasoning", "high"],
+            "reasoning = 'high'",
+            "",
             "effort.jsonl",
             json!({"reasoning_effort": "high"}),
         ),
         (
-            &["--reasoning", "off", "--reasoning-format", "thinking"],
+            "reasoning = 'off'",
+            "reasoningFormat = 'thinking'",
             "thinking.jsonl",
             json!({"thinking": {"type": "disabled"}}),
         ),
-        (&[], "unset.jsonl", json!({})),
+        ("", "", "unset.jsonl", json!({})),
     ];
-    for (index, (flags, session, expected)) in cases.into_iter().enumerate() {
-        let output = run(&server, dir.path())
-            .args(flags)
+    for (index, (top, provider, session, expected)) in cases.into_iter().enumerate() {
+        let output = run_with(&server, dir.path(), top, provider)
             .args(["--session", session])
             .output()
             .await
@@ -295,7 +287,7 @@ async fn the_reasoning_level_reaches_the_model_in_the_chosen_format_and_the_audi
                 sent.insert(field.into(), value.clone());
             }
         }
-        assert_eq!(Value::Object(sent), expected, "{flags:?}");
+        assert_eq!(Value::Object(sent), expected, "{top} {provider}");
     }
     let effort = std::fs::read_to_string(dir.path().join("effort.jsonl")).unwrap();
     assert!(effort.contains(r#""reasoning":"high""#), "{effort}");
@@ -310,19 +302,11 @@ async fn the_reasoning_level_reaches_the_model_in_the_chosen_format_and_the_audi
 fn run_continue(server: &MockServer, dir: &std::path::Path) -> Command {
     let mut command = zx_agent();
     command
-        .args(["run", "--continue", "--model", "mock", "--base-url", &server.base_url])
-        .args([
-            "--max-retries",
-            "0",
-            "--api-key-env",
-            "ZX_RUN_CLI_TEST_KEY",
-            "--tools",
-            "",
-        ])
+        .args(["run", "--continue", "--model", "mock", "--tools", ""])
         .current_dir(dir)
+        .env("ZX_AGENT_HOME", home(dir, "", ""))
+        .env("ZX_BASE_URL", &server.base_url)
         .env_remove("ZX_RUN_CLI_TEST_KEY")
-        .env_remove("ZX_MODEL")
-        .env_remove("ZX_BASE_URL")
         .stdin(Stdio::null())
         .kill_on_drop(true);
     command
@@ -395,37 +379,32 @@ async fn continue_needs_an_existing_session_and_no_prompt() {
 async fn bad_reasoning_settings_exit_2_before_any_request() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::text("never sent")]).await;
-    for (flags, expected) in [
-        (&["--reasoning", "max"][..], "unknown reasoning level"),
+    for (top, provider, expected) in [
+        ("reasoning = 'max'", "", "unknown reasoning level"),
         (
-            &["--reasoning", "low", "--reasoning-format", "guess"][..],
+            "reasoning = 'low'",
+            "reasoningFormat = 'guess'",
             "unknown reasoning format",
         ),
         (
-            &["--reasoning", "low", "--request-field", r#"reasoning_effort="high""#][..],
-            "--request-field reasoning_effort conflicts with --reasoning",
+            "reasoning = 'low'",
+            "requestFields = { reasoning_effort = 'high' }",
+            "provider.requestFields.reasoning_effort conflicts with reasoning",
         ),
         (
-            &[
-                "--reasoning",
-                "low",
-                "--reasoning-format",
-                "thinking",
-                "--request-field",
-                r#"thinking={"type":"enabled"}"#,
-            ][..],
-            "--request-field thinking conflicts with --reasoning",
+            "reasoning = 'low'",
+            "reasoningFormat = 'thinking'\nrequestFields = { thinking = { type = 'enabled' } }",
+            "provider.requestFields.thinking conflicts with reasoning",
         ),
     ] {
-        let output = run(&server, dir.path())
-            .args(flags)
+        let output = run_with(&server, dir.path(), top, provider)
             .args(["--session", "audit.jsonl"])
             .output()
             .await
             .unwrap();
         let stderr = stderr(&output);
-        assert_eq!(output.status.code(), Some(2), "{flags:?}: {stderr}");
-        assert!(stderr.contains(expected), "{flags:?}: {stderr}");
+        assert_eq!(output.status.code(), Some(2), "{top} {provider}: {stderr}");
+        assert!(stderr.contains(expected), "{top} {provider}: {stderr}");
     }
     assert!(server.requests().is_empty());
     assert!(!dir.path().join("audit.jsonl").exists());
@@ -435,12 +414,11 @@ async fn bad_reasoning_settings_exit_2_before_any_request() {
 async fn filling_missing_reasoning_is_off_unless_asked_and_the_audit_records_the_choice() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::text("ok"), Reply::text("ok")]).await;
-    for (flags, session, filled) in [
-        (&[][..], "off.jsonl", false),
-        (&["--fill-missing-reasoning"][..], "on.jsonl", true),
+    for (provider, session, filled) in [
+        ("", "off.jsonl", false),
+        ("fillMissingReasoning = true", "on.jsonl", true),
     ] {
-        let output = run(&server, dir.path())
-            .args(flags)
+        let output = run_with(&server, dir.path(), "", provider)
             .args(["--session", session])
             .output()
             .await
@@ -492,17 +470,20 @@ async fn a_zero_timeout_is_rejected_before_any_request() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::text("never sent")]).await;
 
-    for flag in ["--tool-timeout-secs", "--idle-timeout-secs"] {
-        let output = run(&server, dir.path()).args([flag, "0"]).output().await.unwrap();
+    for (top, provider, key) in [
+        ("toolTimeoutSecs = 0", "", "toolTimeoutSecs"),
+        ("", "idleTimeoutSecs = 0", "provider.idleTimeoutSecs"),
+    ] {
+        let output = run_with(&server, dir.path(), top, provider).output().await.unwrap();
 
-        assert_eq!(output.status.code(), Some(2), "{flag}");
+        assert_eq!(output.status.code(), Some(2), "{key}");
         let stderr = stderr(&output);
-        assert!(stderr.contains(flag), "{flag}: {stderr}");
+        assert!(stderr.contains(&format!("{key} must be at least 1")), "{key}: {stderr}");
     }
     assert!(server.requests().is_empty());
 }
 
-/// A cut-off answer, which `run` asks the model to continue (the unattended profile's
+/// A cut-off answer, which `run` asks the model to continue (the unattended agent's
 /// `continueOnLength` is 1),
 /// then the rest. Each answer of the fake service reports 12 tokens: 10 in, 2 out.
 async fn two_answers() -> MockServer {
@@ -548,15 +529,13 @@ async fn the_last_request_may_take_a_run_over_its_token_budget() {
 }
 
 #[tokio::test]
-async fn a_profile_sets_the_token_budget_and_zero_on_the_command_line_disables_it() {
+async fn the_agent_sets_the_token_budget_and_zero_on_the_command_line_disables_it() {
     let dir = tempfile::tempdir().unwrap();
-    let profile = dir.path().join("budget.toml");
-    std::fs::write(&profile, "[limits]\ntokenBudget = 12\n").unwrap();
-    let profile = profile.to_str().unwrap();
+    let home = AgentHome::agent("unattended", "[limits]\ntokenBudget = 12\n");
 
     let limited = two_answers().await;
     let output = run(&limited, dir.path())
-        .args(["--profile", profile])
+        .env("ZX_AGENT_HOME", home.path())
         .output()
         .await
         .unwrap();
@@ -565,7 +544,8 @@ async fn a_profile_sets_the_token_budget_and_zero_on_the_command_line_disables_i
 
     let unlimited = two_answers().await;
     let output = run(&unlimited, dir.path())
-        .args(["--profile", profile, "--token-budget", "0"])
+        .args(["--token-budget", "0"])
+        .env("ZX_AGENT_HOME", home.path())
         .output()
         .await
         .unwrap();
@@ -573,26 +553,21 @@ async fn a_profile_sets_the_token_budget_and_zero_on_the_command_line_disables_i
     assert_eq!(unlimited.requests().len(), 2);
 }
 
-/// A profile whose model `mock` costs 0.01 per answer of the fake service (10 input tokens at
-/// 1000 per million; output free). The unit is whatever the prices use, such as CNY.
-fn priced_profile(dir: &std::path::Path) -> String {
-    let profile = dir.join("priced.toml");
-    std::fs::write(
-        &profile,
-        "[[models]]\nid = \"mock\"\ncost = { input = 1000.0, output = 0.0 }\n",
-    )
-    .unwrap();
-    profile.to_str().unwrap().to_string()
+/// A config.toml whose model `mock` costs 0.01 per answer of the fake service (10 input
+/// tokens at 1000 per million; output free). The unit is whatever the prices use, such as CNY.
+fn priced_config() -> AgentHome {
+    AgentHome::new("[[models]]\nid = \"mock\"\ncost = { input = 1000.0, output = 0.0 }\n")
 }
 
 #[tokio::test]
 async fn the_cost_budget_ends_a_run_with_exit_code_8_before_the_next_request() {
     let dir = tempfile::tempdir().unwrap();
     let server = two_answers().await;
-    let profile = priced_profile(dir.path());
+    let home = priced_config();
 
     let output = run(&server, dir.path())
-        .args(["--profile", &profile, "--cost-budget", "0.01"])
+        .args(["--cost-budget", "0.01"])
+        .env("ZX_AGENT_HOME", home.path())
         .output()
         .await
         .unwrap();
@@ -636,21 +611,20 @@ async fn a_negative_cost_budget_is_rejected() {
     assert!(server.requests().is_empty());
 }
 
-/// `run` with bash allowed only for `ls`, against a model that runs `echo hi` and then answers.
+/// `run` with bash asking except for `ls`, against a model that runs `echo hi` and then
+/// answers: nobody can approve the command, so it is refused.
 async fn run_with_a_denied_command(extra: &[&str]) -> std::process::Output {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::bash("c", "echo hi"), Reply::text("done")]).await;
-    let profile = ProfileFile::new("unattended", "[rules]\nallow = [\"ls\"]");
+    let home = AgentHome::agent("unattended", "[permissions]\nask = [\"bash\"]\nallow = [\"bash(ls)\"]");
     zx_agent()
-        .args(["run", "--model", "mock", "--base-url", &server.base_url])
-        .args(["--max-retries", "0", "--api-key-env", "ZX_RUN_CLI_TEST_KEY"])
-        .args(["--tools", "bash", "--profile", profile.path()])
+        .args(["run", "--model", "mock", "--tools", "bash"])
+        .env("ZX_BASE_URL", &server.base_url)
+        .env("ZX_AGENT_HOME", home.path())
         .args(extra)
         .arg("go")
         .current_dir(dir.path())
         .env_remove("ZX_RUN_CLI_TEST_KEY")
-        .env_remove("ZX_MODEL")
-        .env_remove("ZX_BASE_URL")
         .stdin(Stdio::null())
         .kill_on_drop(true)
         .output()

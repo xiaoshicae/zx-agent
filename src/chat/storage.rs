@@ -76,10 +76,8 @@ impl First {
 pub(super) async fn opening(args: &ChatArgs, model: &str) -> Result<(Storage, First)> {
     let storage = if args.no_session {
         Storage::Memory
-    } else if let Some(path) = &args.request.session {
+    } else if let Some(path) = &args.base.session {
         Storage::File(path.clone())
-    } else if let Some(dir) = &args.session_dir {
-        Storage::Directory(dir.clone())
     } else {
         Storage::Directory(session_files::default_dir(&cli::resolve_cwd(
             args.base.cwd.as_deref(),

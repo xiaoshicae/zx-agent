@@ -1,34 +1,36 @@
-# Profile for conversations in the resident Pod: chat (kubectl exec) and im. The image
-# installs it as /usr/local/share/zx-agent/profiles/kubernetes.toml; pass that path with
-# --profile. It adds the read-only kubectl commands to the assistant's commands that run
-# without asking, and limits their options. zx-agent itself knows nothing about kubectl.
-name = "kubernetes"
++++
+# Agent for conversations in the resident Pod: chat (kubectl exec) and im. The
+# kustomization puts it in the ConfigMap zx-agent-agents, mounted at /data/.zx-agent/agents,
+# where it replaces the built-in assistant. It adds the read-only kubectl commands to the
+# assistant's commands that run without asking, and limits their options. zx-agent itself
+# knows nothing about kubectl. The instructions are the assistant's: the body below the front
+# matter is empty.
 extends = "assistant"
 # The assistant's tools without edit_file and write_file: the Pod is for looking at
 # clusters, not for changing files.
 tools = ["bash", "read_file", "read_skill", "read_output"]
 
-[rules]
-askTools = ["bash"]
+[permissions]
+ask = ["bash"]
 # Replaces the assistant's list, so its commands are repeated here.
-autoApprove = [
-  "kubectl get",
-  "kubectl describe",
-  "kubectl logs",
-  "kubectl top",
-  "kubectl events",
-  "kubectl explain",
-  "kubectl api-resources",
-  "kubectl version",
-  "kubectl config get-contexts",
-  "kubectl config current-context",
-  "grep",
-  "head",
-  "tail",
-  "wc",
-  "jq",
+allow = [
+  "bash(kubectl get)",
+  "bash(kubectl describe)",
+  "bash(kubectl logs)",
+  "bash(kubectl top)",
+  "bash(kubectl events)",
+  "bash(kubectl explain)",
+  "bash(kubectl api-resources)",
+  "bash(kubectl version)",
+  "bash(kubectl config get-contexts)",
+  "bash(kubectl config current-context)",
+  "bash(grep)",
+  "bash(head)",
+  "bash(tail)",
+  "bash(wc)",
+  "bash(jq)",
 ]
-# autoApproveExcept is inherited from the assistant: its "secret" makes any command that
+# allowExcept is inherited from the assistant: its "secret" makes any command that
 # names Secrets ask.
 
 # The kubectl options that a command run without asking may pass: they choose what to read
@@ -38,7 +40,7 @@ autoApprove = [
 # --cache-dir), read any API path (--raw) or read manifests (--filename). kubectl v1.36.1
 # sent the kubeconfig token to an HTTPS address given with --server. Checked against
 # kubectl v1.36.1.
-[rules.autoApproveOptions.kubectl]
+[permissions.allowOptions.kubectl]
 long = [
   "namespace",
   "context",
@@ -89,3 +91,4 @@ long = [
 # -n, -o, -l, -L and -c take a value; -A, -p and -R stand alone.
 shortWithValue = ["n", "o", "l", "L", "c"]
 shortFlags = ["A", "p", "R"]
++++
