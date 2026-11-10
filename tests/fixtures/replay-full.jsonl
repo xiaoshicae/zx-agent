@@ -1,4 +1,4 @@
-{"type":"session","version":7,"id":"3f39ed4f-84e0-42dd-97a1-5b43f6ea4f80","timestamp":1793538909332,"cwd":".","model":"test-model"}
+{"type":"session","version":8,"id":"3f39ed4f-84e0-42dd-97a1-5b43f6ea4f80","timestamp":1793538909332,"cwd":".","model":"test-model"}
 {"type":"message","id":"f87f5668","parentId":null,"timestamp":1793538909334,"message":{"role":"system","sections":[{"name":"preamble","content":"You are a test agent."},{"name":"environment","content":"OS: test"}],"timestamp":1793538909334}}
 {"type":"message","id":"b265ec77","parentId":"f87f5668","timestamp":1793538909334,"message":{"role":"user","content":"Which pods run?","timestamp":1793538909333}}
 {"type":"request_config","id":"748d8d1f","parentId":"b265ec77","timestamp":1793538909334,"config":{"provider":"fixture","model":"test-model","tools":[{"name":"echo","description":"Return the given text.","parameters":{"properties":{"text":{"type":"string"}},"required":["text"],"type":"object"}}],"maxTokens":512,"providerOptions":{"format":"openai-chat-completions","version":2,"systemUpdates":"collapse","fillMissingReasoning":true}}}

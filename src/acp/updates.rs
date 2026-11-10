@@ -53,13 +53,7 @@ impl Updates {
     }
 
     fn send(&self, update: SessionUpdate) {
-        if let Err(error) = self
-            .cx
-            .send_notification(SessionNotification::new(self.session_id.clone(), update))
-        {
-            // The connection is going away; the run still ends and the response says how.
-            eprintln!("[acp] cannot send a session update: {error}");
-        }
+        send(&self.cx, &self.session_id, update);
     }
 
     fn text_chunk(text: &str) -> ContentChunk {
@@ -281,6 +275,14 @@ impl Updates {
             CompactionId::new(run_id),
             status,
         )));
+    }
+}
+
+/// Send `update` about `session_id` to the client.
+pub(super) fn send(cx: &ConnectionTo<Client>, session_id: &SessionId, update: SessionUpdate) {
+    if let Err(error) = cx.send_notification(SessionNotification::new(session_id.clone(), update)) {
+        // The connection is going away; what was underway still ends, and its response says how.
+        eprintln!("[acp] cannot send a session update: {error}");
     }
 }
 

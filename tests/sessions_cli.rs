@@ -278,6 +278,33 @@ async fn sessions_lists_the_most_recent_first_and_reports_unreadable_files() {
 }
 
 #[tokio::test]
+async fn sessions_lists_a_named_session_by_its_latest_name() {
+    let dirs = Dirs::new();
+    let path = seed(&dirs.session_dir(), "aaaa0001", &dirs.cwd(), 1_000, "fix the build");
+    let names: Vec<String> = ["first name", "build fix"]
+        .iter()
+        .enumerate()
+        .map(|(n, name)| {
+            json!({"type": "session_info", "id": format!("aaaa0001-{}", n + 2),
+                "parentId": format!("aaaa0001-{}", n + 1), "timestamp": 1_001 + n, "name": name})
+            .to_string()
+        })
+        .collect();
+    let mut text = std::fs::read_to_string(&path).unwrap();
+    text.push_str(&format!("{}\n", names.join("\n")));
+    std::fs::write(&path, text).unwrap();
+
+    let output = dirs.sessions(&[]).await;
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let listed = stdout(&output);
+    assert!(
+        listed.starts_with("aaaa0001  ") && listed.ends_with("  1 message(s)  build fix\n"),
+        "{listed}"
+    );
+}
+
+#[tokio::test]
 async fn sessions_finds_none_where_no_session_was_kept() {
     let dirs = Dirs::new();
 

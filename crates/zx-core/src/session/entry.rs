@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     CompactionEntry, CompactionFailedEntry, CompactionStartedEntry, RequestConfigEntry, RequestStartedEntry,
-    SESSION_VERSION, ToolCallStartedEntry,
+    SESSION_VERSION, SessionInfoEntry, ToolCallStartedEntry,
 };
 use crate::ai::{Message, UserMessageKind, now_ms};
 
@@ -134,6 +134,7 @@ pub enum Entry {
     ToolCallStarted(ToolCallStartedEntry),
     Custom(CustomEntry),
     CustomMessage(CustomMessageEntry),
+    SessionInfo(SessionInfoEntry),
 }
 
 impl Entry {
@@ -150,6 +151,7 @@ impl Entry {
             Self::ToolCallStarted(entry) => &entry.id,
             Self::Custom(entry) => &entry.id,
             Self::CustomMessage(entry) => &entry.id,
+            Self::SessionInfo(entry) => &entry.id,
         }
     }
 
@@ -166,6 +168,7 @@ impl Entry {
             Self::ToolCallStarted(entry) => entry.parent_id.as_deref(),
             Self::Custom(entry) => entry.parent_id.as_deref(),
             Self::CustomMessage(entry) => entry.parent_id.as_deref(),
+            Self::SessionInfo(entry) => entry.parent_id.as_deref(),
         }
     }
 
@@ -182,6 +185,7 @@ impl Entry {
             Self::ToolCallStarted(_) => "tool_call_started",
             Self::Custom(_) => "custom",
             Self::CustomMessage(_) => "custom_message",
+            Self::SessionInfo(_) => "session_info",
         }
     }
 
@@ -199,7 +203,8 @@ impl Entry {
             | Self::RequestConfig(_)
             | Self::RequestStarted(_)
             | Self::ToolCallStarted(_)
-            | Self::Custom(_) => None,
+            | Self::Custom(_)
+            | Self::SessionInfo(_) => None,
         }
     }
 
@@ -216,6 +221,7 @@ impl Entry {
             Self::ToolCallStarted(entry) => entry.timestamp,
             Self::Custom(entry) => entry.timestamp,
             Self::CustomMessage(entry) => entry.timestamp,
+            Self::SessionInfo(entry) => entry.timestamp,
         }
     }
 }

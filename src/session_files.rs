@@ -126,7 +126,8 @@ pub(crate) async fn list(dir: &Path) -> Result<SessionList> {
 }
 
 /// One line per session: short ID, last activity in local time, message count and the
-/// first prompt; sessions started elsewhere name their working directory.
+/// session's name, else its first prompt; sessions started elsewhere name their working
+/// directory.
 pub(crate) fn lines(list: &SessionList, cwd: &Path) -> Vec<String> {
     let cwd = cwd.display().to_string();
     list.sessions
@@ -154,8 +155,8 @@ fn short_id(id: &str) -> String {
 }
 
 fn preview(session: &SessionInfo) -> String {
-    match session.first_prompt.as_deref() {
-        Some(prompt) => preview_text(prompt),
+    match session.title() {
+        Some(title) => preview_text(title),
         None => "(no prompt)".to_string(),
     }
 }
@@ -173,6 +174,8 @@ pub(crate) fn preview_text(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use zx_agent::session::SessionName;
+
     use super::*;
 
     #[test]
@@ -201,6 +204,7 @@ mod tests {
             last_activity_ms: 0,
             messages: 0,
             first_prompt: prompt.map(str::to_string),
+            name: None,
         };
         assert_eq!(preview(&session(Some("fix the build"))), "fix the build");
         assert_eq!(preview(&session(Some("\nfirst\nsecond"))), "first…");
@@ -209,5 +213,10 @@ mod tests {
             format!("{}…", "界".repeat(60))
         );
         assert_eq!(preview(&session(None)), "(no prompt)");
+        let named = SessionInfo {
+            name: SessionName::new(&"名".repeat(61)),
+            ..session(Some("fix the build"))
+        };
+        assert_eq!(preview(&named), format!("{}…", "名".repeat(60)));
     }
 }

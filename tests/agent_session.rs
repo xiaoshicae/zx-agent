@@ -22,7 +22,7 @@ use zx_agent::agent_session::{AgentSessionError, ModelRef, Subscription};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Reasoning, Request, ToolDef};
 use zx_agent::runner::RunOutcome;
-use zx_agent::session::{Entry, SessionStore};
+use zx_agent::session::{Entry, SessionName, SessionStore};
 
 fn setup(steps: impl IntoIterator<Item = FauxStep>) -> (AgentSession, Arc<NotifyingProvider>, Arc<Collect>) {
     let provider = NotifyingProvider::new(steps);
@@ -403,6 +403,30 @@ async fn a_running_session_rejects_a_reasoning_change() {
     running.await.unwrap();
     session.prompt("second", &CancellationToken::new()).await.unwrap();
     assert_eq!(provider.faux.requests()[1].reasoning, None);
+}
+
+#[tokio::test]
+async fn a_session_is_named_while_idle_and_never_during_a_run() {
+    let (session, provider, _) = setup([FauxStep::Hang, FauxStep::text("after")]);
+    let name = |text| SessionName::new(text).unwrap();
+    session.set_name(name("triage")).await.unwrap();
+    let cancel = CancellationToken::new();
+    let mut running = Box::pin(session.prompt("first", &cancel));
+    tokio::select! { () = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
+    assert_eq!(session.set_name(name("renamed")).await, Err(AgentSessionError::Busy));
+    session.abort();
+    running.await.unwrap();
+    let named = session
+        .inspect(|store| store.session_name().map(|name| name.as_str().to_string()))
+        .unwrap();
+    assert_eq!(named.as_deref(), Some("triage"));
+    // The name is the session's, not the conversation's: the model never sees it.
+    session.prompt("second", &CancellationToken::new()).await.unwrap();
+    assert!(
+        !summarize(&provider.faux.requests()[1].messages)
+            .iter()
+            .any(|text| text.contains("triage"))
+    );
 }
 
 #[tokio::test]

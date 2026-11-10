@@ -147,29 +147,62 @@ impl Acp {
     /// Initialize and create a session in `cwd`; the session ID.
     async fn session(&mut self, cwd: &Path) -> String {
         self.initialize().await;
-        let created = self.request("session/new", json!({"cwd": cwd, "mcpServers": []})).await;
-        created["result"]["sessionId"]
-            .as_str()
-            .unwrap_or_else(|| panic!("{created}"))
-            .to_string()
+        self.create(cwd).await
     }
 
-    /// Load `session_id` in `cwd`; the response. The replayed updates wait in the inbox.
+    /// Create a session in `cwd`; its ID. The agent then offers the session's commands.
+    async fn create(&mut self, cwd: &Path) -> String {
+        let created = self.request("session/new", json!({"cwd": cwd, "mcpServers": []})).await;
+        let id = created["result"]["sessionId"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{created}"))
+            .to_string();
+        self.expect_commands(&id).await;
+        id
+    }
+
+    /// Load `session_id` in `cwd`; the response. The replayed updates wait in the inbox; the
+    /// commands offered after a successful load do not.
     async fn load(&mut self, session_id: &str, cwd: &Path) -> Value {
-        self.request(
-            "session/load",
-            json!({"sessionId": session_id, "cwd": cwd, "mcpServers": []}),
-        )
-        .await
+        let loaded = self
+            .request(
+                "session/load",
+                json!({"sessionId": session_id, "cwd": cwd, "mcpServers": []}),
+            )
+            .await;
+        if loaded.get("error").is_none() {
+            self.expect_commands(session_id).await;
+        }
+        loaded
     }
 
     /// Resume `session_id` in `cwd`, without a replay; the response.
     async fn resume(&mut self, session_id: &str, cwd: &Path) -> Value {
-        self.request(
-            "session/resume",
-            json!({"sessionId": session_id, "cwd": cwd, "mcpServers": []}),
-        )
-        .await
+        let resumed = self
+            .request(
+                "session/resume",
+                json!({"sessionId": session_id, "cwd": cwd, "mcpServers": []}),
+            )
+            .await;
+        if resumed.get("error").is_none() {
+            self.expect_commands(session_id).await;
+        }
+        resumed
+    }
+
+    /// The message right after a response that opened `session_id`: the commands the agent
+    /// offers for it, which is `/name` alone.
+    async fn expect_commands(&mut self, session_id: &str) {
+        let message = self.read().await;
+        assert_eq!(message["method"], "session/update", "{message}");
+        assert_eq!(message["params"]["sessionId"], session_id, "{message}");
+        let update = &message["params"]["update"];
+        assert_eq!(update["sessionUpdate"], "available_commands_update", "{message}");
+        let commands = update["availableCommands"].as_array().unwrap();
+        assert_eq!(commands.len(), 1, "{message}");
+        assert_eq!(commands[0]["name"], "name", "{message}");
+        assert!(commands[0]["description"].is_string(), "{message}");
+        assert!(commands[0]["input"]["hint"].is_string(), "{message}");
     }
 
     /// List the sessions with `params`; the response.
@@ -581,8 +614,7 @@ async fn no_session_keeps_no_file_and_offers_no_loading() {
         capabilities.get("list").is_none_or(Value::is_null) && capabilities.get("resume").is_none_or(Value::is_null),
         "{initialized}"
     );
-    let created = acp.request("session/new", json!({"cwd": cwd, "mcpServers": []})).await;
-    let id = created["result"]["sessionId"].as_str().unwrap().to_string();
+    let id = acp.create(&cwd).await;
     let response = acp.prompt(&id, "hello").await;
     assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
     assert!(
@@ -667,8 +699,7 @@ async fn sessions_are_listed_most_recent_first_with_their_first_prompt() {
     for prompt in ["first question", "second question"] {
         // Listed by last activity, which has millisecond resolution.
         tokio::time::sleep(Duration::from_millis(5)).await;
-        let created = acp.request("session/new", json!({"cwd": cwd, "mcpServers": []})).await;
-        let id = created["result"]["sessionId"].as_str().unwrap().to_string();
+        let id = acp.create(&cwd).await;
         let response = acp.prompt(&id, prompt).await;
         assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
         ids.push(id);
@@ -729,4 +760,63 @@ async fn resume_continues_a_session_without_replaying_it() {
     let unknown = second.resume("no-such-session", &cwd).await;
     assert_eq!(unknown["error"]["code"], -32602, "{unknown}");
     second.finish().await;
+}
+
+#[tokio::test]
+async fn the_name_command_names_the_session_without_a_model_request() {
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let cwd = work.path().canonicalize().unwrap();
+    let server = MockServer::start(vec![Reply::text("hi there")]).await;
+    let mut first = Acp::start_in(&server, &cwd, &[], Some(home.path())).await;
+    let id = first.session(&cwd).await;
+    let response = first.prompt(&id, "hello").await;
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    first.discard_updates();
+
+    let response = first.prompt(&id, "/name  排查 nginx 502 ").await;
+
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    let update = first.next_update().await;
+    assert_eq!(
+        update,
+        json!({"sessionUpdate": "session_info_update", "title": "排查 nginx 502"})
+    );
+    assert!(first.inbox.is_empty(), "{:?}", first.inbox);
+    assert_eq!(server.requests().len(), 1, "the command is no prompt");
+    // Listed by its name instead of its first prompt, also by a later process: the name is
+    // in the session file.
+    let listed = first.list(json!({"cwd": cwd})).await;
+    assert_eq!(listed["result"]["sessions"][0]["title"], "排查 nginx 502", "{listed}");
+    first.finish().await;
+    let mut second = Acp::start_in(&server, &cwd, &[], Some(home.path())).await;
+    second.initialize().await;
+    let listed = second.list(json!({"cwd": cwd})).await;
+    assert_eq!(listed["result"]["sessions"][0]["title"], "排查 nginx 502", "{listed}");
+    second.finish().await;
+}
+
+#[tokio::test]
+async fn the_name_command_needs_a_name_and_other_slashes_reach_the_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::text("ok")]).await;
+    let mut acp = Acp::start(&server, dir.path(), &[]).await;
+    let session = acp.session(dir.path()).await;
+
+    for without in ["/name", "/name \t "] {
+        let response = acp.prompt(&session, without).await;
+        assert_eq!(response["error"]["code"], -32602, "{response}");
+        assert_eq!(
+            response["error"]["message"], "give the session a name: /name <name>",
+            "{response}"
+        );
+    }
+    assert!(acp.inbox.is_empty(), "no title changed: {:?}", acp.inbox);
+    let response = acp.prompt(&session, "/named things").await;
+
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(texts(&requests[0].body).last(), Some(&"/named things"));
+    acp.finish().await;
 }
