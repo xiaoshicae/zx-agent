@@ -58,16 +58,14 @@ pub struct ServerConfig {
     /// Bound for connecting and listing the tools.
     pub connect_timeout: Duration,
     /// Longest a call may go without an answer or a progress notification: each
-    /// notification starts it over (pi: the request timeout re-armed on progress).
+    /// notification starts it over (pi: the request timeout re-armed on progress). A call
+    /// that keeps reporting progress is bounded by the run's timeout and cancellation.
     pub call_timeout: Duration,
-    /// Bound for a whole call, however much progress the server reports; `None` leaves only
-    /// `call_timeout`, the run's own timeout and cancellation.
-    pub max_call_timeout: Option<Duration>,
 }
 
 impl ServerConfig {
     /// The settings for `tools` of the server `name` at `url`: no token, and the default
-    /// timeouts (30 s to connect, 120 s without news for a call, no bound on a whole call).
+    /// timeouts (30 s to connect, 120 s without news for a call).
     pub fn new(name: impl Into<String>, url: impl Into<String>, tools: Vec<String>) -> Self {
         Self {
             name: name.into(),
@@ -76,7 +74,6 @@ impl ServerConfig {
             tools,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             call_timeout: DEFAULT_CALL_TIMEOUT,
-            max_call_timeout: None,
         }
     }
 }
@@ -157,7 +154,6 @@ impl Server {
                 server: server.to_string(),
                 client: Arc::clone(client),
                 timeout: config.call_timeout,
-                max_timeout: config.max_call_timeout,
             }));
             names.push((remote.clone(), name));
         }
@@ -349,9 +345,6 @@ struct McpTool {
     client: Arc<Client>,
     /// Re-armed by every progress notification.
     timeout: Duration,
-    /// Bound on a whole call, however much progress comes; kept by the tool, not by rmcp,
-    /// whose timeout error does not say which of the two bounds passed.
-    max_timeout: Option<Duration>,
 }
 
 impl McpTool {
@@ -375,16 +368,6 @@ impl McpTool {
         )
     }
 
-    /// The error of a call that reported progress but did not finish within `bound`.
-    fn not_finished_within(&self, bound: Duration) -> String {
-        format!(
-            "MCP server {}: {} did not finish within {} s, whatever its progress",
-            self.server,
-            self.remote,
-            bound.as_secs()
-        )
-    }
-
     /// Send the call and wait for its result, as [`Tool::execute`] describes for this tool.
     async fn call(&self, arguments: Map<String, Value>, ctx: &ToolContext) -> Result<CallToolResult, String> {
         let request = ClientRequest::CallToolRequest(CallToolRequest::new(
@@ -400,39 +383,18 @@ impl McpTool {
         // rmcp gives every request a progress token; the server's notifications come back
         // with it, and the dispatcher hands them to this subscription.
         let mut updates = self.client.service().subscribe(handle.progress_token.clone());
-        let mut progressed = false;
         let answered = handle.await_response();
         tokio::pin!(answered);
-        // The bound on the whole call; one without it never fires.
-        let expiry = async {
-            match self.max_timeout {
-                Some(bound) => {
-                    tokio::time::sleep(bound).await;
-                    bound
-                }
-                None => std::future::pending::<Duration>().await,
-            }
-        };
-        tokio::pin!(expiry);
         let answer = loop {
             tokio::select! {
                 answer = &mut answered => break answer,
                 Some(update) = updates.receiver.recv() => {
-                    progressed = true;
                     // A full progress queue only loses this update.
                     ctx.report_progress(progress_text(&update));
                 }
                 () = ctx.cancel.cancelled() => {
                     give_up(peer, request_id, "cancelled by the agent").await;
                     return Err(format!("MCP server {}: the call to {} was cancelled", self.server, self.remote));
-                }
-                bound = &mut expiry => {
-                    give_up(peer, request_id, "maximum total timeout exceeded").await;
-                    return Err(if progressed {
-                        self.not_finished_within(bound)
-                    } else {
-                        self.no_answer_within(bound)
-                    });
                 }
             }
         };
@@ -493,9 +455,9 @@ impl Tool for McpTool {
     // interrupted is reported as possibly having changed state.
 
     /// Progress notifications of the call reach `ctx` as progress updates and re-arm the
-    /// timeout. Stops waiting on `ctx.cancel`, after `timeout` without an answer or progress,
-    /// or after `max_timeout` in all. Each of these ends the request on the server's side
-    /// with `notifications/cancelled`, which also closes the request's stream.
+    /// timeout. Stops waiting on `ctx.cancel` or after `timeout` without an answer or
+    /// progress; a cancelled call ends the request on the server's side with
+    /// `notifications/cancelled`, which also closes the request's stream.
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
         let Value::Object(arguments) = args else {
             return Err("the arguments must be a JSON object".to_string());

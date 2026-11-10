@@ -218,7 +218,6 @@ url = "https://prom-mcp.monitoring.svc/mcp"
 tokenEnv = "PROM_MCP_TOKEN"                 # 可选：以 Authorization: Bearer 发送
 tools = ["query", "query_range"]            # 交给模型的工具，其余不暴露
 timeoutSecs = 60                            # 可选：一次调用多久没有应答也没有进度通知就超时，默认同 toolTimeoutSecs
-maxTimeoutSecs = 600                        # 可选：一次调用的总上限，不管进度；省略则只受 timeoutSecs、本轮超时与取消约束
 ```
 
 | 配置 | 语义 |
@@ -227,7 +226,7 @@ maxTimeoutSecs = 600                        # 可选：一次调用的总上限�
 | `url` | MCP 端点，`http://` 或 `https://` |
 | `tokenEnv` | 存放 token 的环境变量；设置后必须有值。命令看不到这个变量，它的值在工具输出中替换为 `[REDACTED]` |
 | `tools` | 交给模型的工具，按服务器给出的名字，至少一个。服务器没有列出的工具时启动失败 |
-| `timeoutSecs` | 单次调用的上限，大于零 |
+| `timeoutSecs` | 一次调用多久没有应答也没有进度通知就超时，秒，大于零；每条进度通知重新计时。一直报告进度的调用只受本轮超时（`--timeout-secs`）与取消约束（与 pi 相同，没有不看进度的总上限；原来的 `maxTimeoutSecs` 已去掉，写了报未知字段） |
 
 - MCP 工具默认每次调用都要审批：chat 在终端询问，im 发审批卡片，run 没有人审批而拒绝。要直接执行，在 agent 的 `permissions.allow` 中写模型看到的工具名，如 `allow = ["prom__query"]`（原来 `[[mcp]]` 的 `allowTools` 已去掉，写了报未知字段）。
 - 每个进程启动时连接一次：run、chat 在组装会话前，im 在开始接收消息前，各线程共用连接。连不上、token 变量没有值、服务器缺少列出的工具时，以退出码 2 报错。

@@ -69,13 +69,10 @@ pub struct McpServer {
     /// The server's tools to offer the model, by the names the server gives them.
     pub tools: Vec<String>,
     /// Longest a call may go without an answer or a progress notification, in seconds;
-    /// unset uses `toolTimeoutSecs`.
+    /// unset uses `toolTimeoutSecs`. A call that keeps reporting progress is bounded by the
+    /// run's timeout and cancellation.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
-    /// Bound for a whole call, in seconds, however much progress the server reports; unset
-    /// leaves only `timeoutSecs`, the run's timeout and cancellation.
-    #[serde(default)]
-    pub max_timeout_secs: Option<u64>,
 }
 
 /// The `[provider]` table over the built-in defaults, the provider's own: how the model is
@@ -222,10 +219,6 @@ impl Config {
             ensure!(
                 server.timeout_secs != Some(0),
                 "MCP server {name}: timeoutSecs must be greater than zero"
-            );
-            ensure!(
-                server.max_timeout_secs != Some(0),
-                "MCP server {name}: maxTimeoutSecs must be greater than zero"
             );
             let first = names.len();
             for tool in &server.tools {
@@ -642,8 +635,7 @@ mod tests {
     }
 
     const PROM: &str = "[[mcp]]\nname = 'prom'\nurl = 'https://prom.example/mcp'\ntokenEnv = 'PROM_TOKEN'\n\
-                        tools = ['query', 'range']\ntimeoutSecs = 30\n\
-                        maxTimeoutSecs = 600\n";
+                        tools = ['query', 'range']\ntimeoutSecs = 30\n";
 
     #[test]
     fn mcp_servers_are_read_from_the_file() {
@@ -656,7 +648,6 @@ mod tests {
                 token_env: Some("PROM_TOKEN".into()),
                 tools: vec!["query".into(), "range".into()],
                 timeout_secs: Some(30),
-                max_timeout_secs: Some(600),
             }]
         );
         assert_eq!(config.mcp_tool_names().unwrap(), ["prom__query", "prom__range"]);
@@ -676,8 +667,8 @@ mod tests {
                 "timeoutSecs must be greater than zero",
             ),
             (
-                server("tools = ['query']\nmaxTimeoutSecs = 0"),
-                "maxTimeoutSecs must be greater than zero",
+                server("tools = ['query']\nmaxTimeoutSecs = 600"),
+                "unknown field `maxTimeoutSecs`",
             ),
             (server("tools = ['query']\ntokenEnv = ' '"), "tokenEnv is empty"),
             (server("tools = ['a.b', 'a_b']"), "like another of its tools"),

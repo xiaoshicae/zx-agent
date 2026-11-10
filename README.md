@@ -736,7 +736,7 @@ P1 的 SDK 接口调整：`LoopConfig` 持有模型、工具、钩子、交互�
 - 协议：先发 `server/discover`（2026-07-28）；服务器按旧版本应答时，改用 `initialize` 握手与会话（2025-11-25）。`Server::protocol_version()` 返回最终使用的版本。
 - 工具：只把 `ServerConfig.tools` 中列出的工具交给模型，名字为 `<名称>__<工具名>`。名称只能是小写 ASCII 字母、数字与 `-`；工具名中字母、数字、`_`、`-` 以外的字符换成 `_`，全名不超过 64 个字符（模型 API 的限制）。服务器缺少列出的工具、换名后重名或超长时，连接失败。工具描述超过 4 KiB 时截断。
 - 凭据：`token` 以 `Authorization: Bearer` 随每个请求发送，错误信息中不含它。
-- 上限：连接与列出工具不超过 `connect_timeout`（默认 30 秒）；一次调用多久没有应答也没有进度通知就超时（`call_timeout`，默认 120 秒），每条进度通知重新计时（对应 pi 的做法）；`max_call_timeout` 另设不看进度的总上限，默认没有。调用超时或被取消时发 `notifications/cancelled` 结束请求，连接随之关闭。
+- 上限：连接与列出工具不超过 `connect_timeout`（默认 30 秒）；一次调用多久没有应答也没有进度通知就超时（`call_timeout`，默认 120 秒），每条进度通知重新计时（对应 pi 的做法），没有不看进度的总上限：一直报告进度的调用由运行的超时与取消约束。调用超时或被取消时发 `notifications/cancelled` 结束请求，连接随之关闭。
 - 进度：服务器的 `notifications/progress` 按请求的进度令牌交给对应的调用，作为工具进度（`tool_execution_update` 事件，run 与 chat 各打一行 `[tool]`）转发：有 `message` 用它，否则写成 `progress <n>/<total>`；不写入会话、不发给模型。每个调用最多缓存 16 条，来不及读的丢弃。
 - 结果：文本原样拼接；图片、音频与二进制资源只写一行说明；没有其他内容时给出 `structuredContent` 的 JSON；`isError` 的结果作为错误结果交给模型；最多 2000 行或 50 KiB。协议错误、HTTP 失败、超时与取消作为工具错误返回。
 - 副作用：工具一律按有副作用处理（`effects()` 为 `SideEffects`）。服务器给出的 annotations 只是提示，不据此放行，也不据此判断中断的调用是否已执行。

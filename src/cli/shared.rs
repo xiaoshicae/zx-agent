@@ -104,7 +104,6 @@ async fn connect_mcp(settings: &Settings) -> Result<McpTools> {
         configs.push(ServerConfig {
             token,
             call_timeout: server.timeout_secs.map_or(settings.tool_timeout, Duration::from_secs),
-            max_call_timeout: server.max_timeout_secs.map(Duration::from_secs),
             ..ServerConfig::new(server.name.as_str(), server.url.as_str(), server.tools.clone())
         });
     }
