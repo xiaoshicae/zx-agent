@@ -24,20 +24,20 @@ zx-agent 的配置分两部分：
 文件可选，最多 64 KiB，必须是普通 UTF-8 文件；键用 camelCase，未知的键以退出码 2 报错，错误信息带文件路径。示例：
 
 ```toml
-model = "deepseek-chat"
+model = "my-model"
 reasoning = "high"                 # off、minimal、low、medium、high、xhigh；chat 的 /reasoning 可以改
 maxTokens = 4096
 toolTimeoutSecs = 120
 secretFiles = ["/var/run/secrets/kubernetes.io/serviceaccount/token"]
 
 [provider]
-baseUrl = "https://api.deepseek.com/v1"
-apiKeyEnv = "DEEPSEEK_API_KEY"     # 存放 API key 的环境变量名，不是 key 本身
+baseUrl = "https://llm-gateway.example.com/v1"
+apiKeyEnv = "LLM_API_KEY"          # 存放 API key 的环境变量名，不是 key 本身
 systemUpdates = "collapse"         # 或 inline
 reasoningFormat = "thinking"       # effort、thinking 或 reasoning-object
 fillMissingReasoning = true
 promptCacheKey = false
-requestFields = { thinking = { type = "disabled" } }
+requestFields = { temperature = 0.2 }   # 不能与 reasoning 写入的字段（此处为 thinking、reasoning_effort）重名
 headers = { X-Route = "eu" }
 idleTimeoutSecs = 120
 maxRetries = 3
@@ -55,7 +55,7 @@ image = "debian:bookworm-slim"
 thresholdBytes = 8192
 
 [[models]]
-id = "deepseek-chat"
+id = "my-model"
 contextWindow = 128000
 cost = { input = 0.27, output = 1.10, cacheRead = 0.07 }
 
