@@ -234,7 +234,8 @@ export PROM_MCP_TOKEN=...   # 与 config.toml 中的 tokenEnv 一致
 
 - 只有 `tools` 列出的工具交给模型；agent 的 `permissions.allow` 列出的（如 `prom__query`）直接执行，其余每次都要审批（run 中没有人审批，因此拒绝）。`permissions.deny` 可以拒绝其中任何一个。
 - token 只以 `Authorization: Bearer` 发给该服务器，命令看不到存放它的变量，工具输出中出现它的值时脱敏。
-- 连不上、token 变量没有值、服务器缺少列出的工具时，以退出码 2 报错；成功时 stderr 每个服务器一行 `[mcp] …`。
+- 每个进程启动时连接一次：run、chat 在组装会话前，im 在开始接收消息前，各会话共用连接。连不上、token 变量没有值、服务器缺少列出的工具时，以退出码 2 报错。
+- 连接成功时，stderr 每个服务器一行，例如 `[mcp] prom: prom__query, prom__query_range; protocol 2026-07-28; https://prom-mcp.monitoring.svc`。哪些工具要审批取决于每个会话的 agent，这一行不标出；地址只写协议、主机与端口；经 `http://` 发送 token 时另加 `the token is sent unencrypted`。
 
 ### DeepSeek
 
@@ -603,7 +604,9 @@ SDK 复制出来的会话（`fork_header`）在头部多一个 `parentSession`�
 
 如果进程在写入最后一行时崩溃，未换行且确实未完成的尾记录会在下次打开时截掉，包括截断在 UTF-8 字符中间的情况。写入失败（如磁盘已满）后不再写入，因此留下的残缺同样只在文件末尾，按同一规则修复。CLI 会在 stderr 报告修复；库调用方可读取 `SessionStore::recovered_tail_bytes()`。完整记录缺少末尾换行时会补换行；已换行的损坏记录、未知记录类型和完整记录的字段错误会报错并保留文件。截掉尾记录发生在其余记录全部通过校验之后，因此打开失败时文件保持原样。
 
-会话格式的版本是 7（`session::SESSION_VERSION`），只读写这一个版本：头部版本不是 7 的文件，无论更旧还是更新，打开、读取都报错（`session format version <N> is not supported; only version 7 can be read or written`），文件保持原样；`SessionStore::create` 也拒绝其他版本的头部。格式变化时提高版本号，此前的文件随之无法打开，不做升级或兼容读取。压缩时先追加 `compaction_started`，请求完成后追加 `compaction` 或 `compaction_failed`。未完成或失败记录不改变投影；成功记录保留全部 system、结构化摘要及 `firstKeptEntryId` 之后的原消息，原始历史仍可审计。摘要来源是应用过 `context_edit` 的原始投影，不输入旧摘要。
+会话格式的版本是 7（`session::SESSION_VERSION`），只读写这一个版本：头部版本不是 7 的文件，无论更旧还是更新，打开、读取都报错（`session format version <N> is not supported; only version 7 can be read or written`），文件保持原样；`SessionStore::create` 也拒绝其他版本的头部。格式变化时提高版本号，此前的文件随之无法打开，不做升级或兼容读取。压缩时先追加 `compaction_started`（源条目 ID、保留边界、摘要请求配置），用同一 provider 与模型请求摘要，完成后追加 `compaction`（摘要、用量与开始记录的引用）或 `compaction_failed`。未完成或失败记录不改变投影；成功记录保留全部 system、结构化摘要及 `firstKeptEntryId` 之后的原消息，原始历史仍可审计。保留边界按条目在分支上的先后计算：保留范围的第一条消息之后被 `context_edit` 省略时，摘要仍替代它之前的全部记录。摘要来源是应用过 `context_edit` 的原始投影，不输入旧摘要，各分支独立；摘要源去掉工具结果的 `details`，请求审计还原时同样去掉。
+
+摘要的字段为 `facts: [{text, sourceEntryIds}]`、`inferences: [string]`、`plans: [string]`。每条事实至少引用一个本次源条目；无效引用、无效 JSON、工具调用、输出截断或超限都拒绝提交。引用存在只证明出处可定位，不证明模型的陈述正确或摘要没有信息损失。钩子看到的合成摘要是 `kind` 为 `summary` 的 user 消息，编辑、省略或追加这类消息的变换计划在校验时整份拒绝，不写入任何条目。
 
 每次模型请求（任务请求与摘要请求）发出前，先追加 `request_started`；provider、模型、工具定义、`max_tokens` 或 provider 转换参数变化时，先追加一条 `request_config`。`request_started` 引用配置，并记录消息来源：会话投影（以该条目的父节点为准），或摘要尝试的源条目与请求时间戳。库调用方可用 `SessionStore::replay_request` 还原当时与 provider 无关的 `Request`，OpenAI 兼容服务可再用 `openai::replay_body` 重建请求体。会话文件不记录 API key、URL 和 HTTP 头；自定义 provider 通过 `Provider::request_options` 提供非机密的转换参数，默认为 `null`，此时只能还原到 `Request`。这些记录写入失败时不发请求，并中止运行。`request_started` 只表示准备发送，后面没有对应的回答，说明发送结果未知。
 
