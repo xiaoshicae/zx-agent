@@ -1,5 +1,5 @@
-//! The executor seam: built-in tools run commands and read files only through their
-//! executor, so another executor can run the same tools elsewhere.
+//! The executor seam: built-in tools run commands and read and write files only through
+//! their executor, so another executor can run the same tools elsewhere.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -25,6 +25,10 @@ enum Request {
     Read {
         path: PathBuf,
         max_bytes: u64,
+    },
+    Write {
+        path: PathBuf,
+        contents: String,
     },
 }
 
@@ -70,6 +74,14 @@ impl Executor for Recorder {
             max_bytes,
         });
         Ok(self.file.as_bytes().to_vec())
+    }
+
+    async fn write_file(&self, path: &Path, contents: &[u8]) -> Result<(), String> {
+        self.requests.lock().unwrap().push(Request::Write {
+            path: path.into(),
+            contents: String::from_utf8_lossy(contents).into_owned(),
+        });
+        Ok(())
     }
 }
 
@@ -177,6 +189,10 @@ impl Executor for OneAtATime {
     async fn read_file(&self, _path: &Path, _max_bytes: u64) -> Result<Vec<u8>, String> {
         Err("not used".into())
     }
+
+    async fn write_file(&self, _path: &Path, _contents: &[u8]) -> Result<(), String> {
+        Err("not used".into())
+    }
 }
 
 #[test]
@@ -263,6 +279,10 @@ impl Executor for Probe {
     async fn read_file(&self, path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {
         self.0.read_file(path, max_bytes).await
     }
+
+    async fn write_file(&self, path: &Path, contents: &[u8]) -> Result<(), String> {
+        self.0.write_file(path, contents).await
+    }
 }
 
 #[cfg(unix)]
@@ -305,24 +325,24 @@ async fn the_file_tools_read_and_write_through_their_executor() {
         ..EditFileTool::default()
     };
 
-    // The recorder reads but, like an executor written before writing existed, cannot write.
-    let error = edit
-        .execute(
-            json!({"path": "f.txt", "edits": [{"oldText": "a", "newText": "c"}]}),
-            &ctx(),
-        )
-        .await
-        .unwrap_err();
+    edit.execute(
+        json!({"path": "f.txt", "edits": [{"oldText": "a", "newText": "c"}]}),
+        &ctx(),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(
-        error,
-        "cannot write /work/f.txt: this executor does not support writing files"
-    );
-    assert_eq!(
         *recorder.requests.lock().unwrap(),
-        [Request::Read {
-            path: PathBuf::from("/work/f.txt"),
-            max_bytes: 10 * 1024 * 1024,
-        }]
+        [
+            Request::Read {
+                path: PathBuf::from("/work/f.txt"),
+                max_bytes: 10 * 1024 * 1024,
+            },
+            Request::Write {
+                path: PathBuf::from("/work/f.txt"),
+                contents: "c\nb\n".into(),
+            }
+        ]
     );
 }

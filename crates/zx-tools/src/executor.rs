@@ -98,15 +98,7 @@ pub trait Executor: Send + Sync {
     /// missing parent directories. Directories and special files are refused. The write is
     /// not atomic: a reader may see it half done, and dropping the future may leave it so.
     /// Callers that must respond to cancellation check their token before calling.
-    ///
-    /// Defaults to an error, for executors written before this method existed; both built-in
-    /// executors write.
-    async fn write_file(&self, path: &Path, _contents: &[u8]) -> Result<(), String> {
-        Err(format!(
-            "cannot write {}: this executor does not support writing files",
-            path.display()
-        ))
-    }
+    async fn write_file(&self, path: &Path, contents: &[u8]) -> Result<(), String>;
 }
 
 /// The error for `path` being a directory where a file was expected, with what the model

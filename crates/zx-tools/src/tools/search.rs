@@ -303,6 +303,10 @@ mod tests {
         async fn read_file(&self, _: &Path, _: u64) -> Result<Vec<u8>, String> {
             Err("not a file executor".into())
         }
+
+        async fn write_file(&self, _: &Path, _: &[u8]) -> Result<(), String> {
+            Err("not a file executor".into())
+        }
     }
 
     /// A grep whose search finds one line and prints `stderr` as given.

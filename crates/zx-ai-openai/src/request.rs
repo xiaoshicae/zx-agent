@@ -10,10 +10,11 @@ use crate::config::{OpenAiConfig, ReasoningFormat, SystemUpdates, check_extra_fi
 
 /// The name of this conversion in the recorded options.
 const FORMAT: &str = "openai-chat-completions";
+/// The version of this conversion in the recorded options, the only one replayed.
+const VERSION: u32 = 2;
 
 /// The conversion options recorded with each request: the policy that turns a transcript
-/// into a body, and nothing secret. Fields absent unless set stay out of the record, so that
-/// options recorded before they existed still match.
+/// into a body, and nothing secret. Fields absent unless set stay out of the record.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct Options {
@@ -34,9 +35,7 @@ struct Options {
 pub(crate) fn request_options(config: &OpenAiConfig) -> Value {
     let options = Options {
         format: FORMAT.to_string(),
-        // Version 1 filled missing reasoning in every request; version 2 only when the
-        // options say so (`replay_body` keeps both).
-        version: 2,
+        version: VERSION,
         system_updates: config.system_updates.as_str().to_string(),
         extra_fields: config.extra_fields.clone(),
         fill_missing_reasoning: config.fill_missing_reasoning.then_some(true),
@@ -48,17 +47,18 @@ pub(crate) fn request_options(config: &OpenAiConfig) -> Value {
 }
 
 /// Rebuild a Chat Completions JSON body from a persisted RequestConfig and Request.
-/// Credentials, URLs and HTTP headers are intentionally absent. Rejects unknown option
-/// formats/versions rather than silently applying a different conversion policy.
+/// Credentials, URLs and HTTP headers are intentionally absent. Rejects an unknown option
+/// format and any version but the current one, rather than silently applying a different
+/// conversion policy.
 pub fn replay_body(request: &Request, provider: &str, options: &Value) -> anyhow::Result<Value> {
     let options: Options = serde_json::from_value(options.clone())?;
     anyhow::ensure!(options.format == FORMAT, "unsupported request conversion format");
-    let fill_missing_reasoning = match (options.version, options.fill_missing_reasoning) {
-        // Requests recorded before the fill became an option always had it.
-        (1, None) => true,
-        (2, fill) => fill.unwrap_or(false),
-        _ => anyhow::bail!("unsupported request conversion version"),
-    };
+    anyhow::ensure!(
+        options.version == VERSION,
+        "request conversion version {} is not supported; only version {VERSION} can be replayed",
+        options.version
+    );
+    let fill_missing_reasoning = options.fill_missing_reasoning.unwrap_or(false);
     let system_updates: SystemUpdates = options.system_updates.parse().map_err(anyhow::Error::msg)?;
     let prompt_cache_key = options.prompt_cache_key.unwrap_or(false);
     check_extra_fields(&options.extra_fields, prompt_cache_key)?;
