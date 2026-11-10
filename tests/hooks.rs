@@ -109,8 +109,8 @@ impl Hooks for SwitchPolicy {
 }
 
 #[tokio::test]
-async fn session_grants_require_exact_arguments_can_be_cleared_and_never_override_deny() {
-    let steps = (0..5).flat_map(|index| {
+async fn session_grants_require_exact_arguments_and_never_override_deny() {
+    let steps = (0..4).flat_map(|index| {
         [
             FauxStep::tool_call(
                 &format!("c{index}"),
@@ -138,13 +138,10 @@ async fn session_grants_require_exact_arguments_can_be_cleared_and_never_overrid
         );
     }
     assert_eq!(host.calls.load(Ordering::SeqCst), 2, "different args must ask again");
-    runner.clear_approvals();
-    runner.run("go", &CancellationToken::new()).await;
-    assert_eq!(host.calls.load(Ordering::SeqCst), 3, "revoking grants must ask again");
     denied.store(true, Ordering::SeqCst);
     runner.run("go", &CancellationToken::new()).await;
-    assert_eq!(host.calls.load(Ordering::SeqCst), 3, "deny must bypass approvals");
-    assert_eq!(tool.calls.load(Ordering::SeqCst), 4);
+    assert_eq!(host.calls.load(Ordering::SeqCst), 2, "deny must bypass approvals");
+    assert_eq!(tool.calls.load(Ordering::SeqCst), 3);
 }
 
 enum HostFailure {

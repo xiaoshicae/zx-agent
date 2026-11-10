@@ -142,11 +142,6 @@ impl Runner {
         std::mem::replace(&mut self.config.reasoning, reasoning)
     }
 
-    /// Revoke exact-call approvals granted by this Runner's interaction host.
-    pub fn clear_approvals(&mut self) {
-        self.approvals.clear();
-    }
-
     /// The session the runner records in.
     pub fn session(&self) -> &SessionStore {
         &self.session

@@ -7,7 +7,7 @@
 | `src/**` 与 `crates/*/src/**` 中的 `mod tests` 与 `tests.rs` | 各模块的单元测试，写在被测模块里或其 `tests.rs` 中（规则 09）；包括会话文件和事件流的 JSON 格式；`src/chat/tree.rs` 的树渲染（当前分支优先、离开的分支缩进、不列出的记录、预览）与 ID 解析；`src/chat/commands.rs` 的扩展命令解析；`agent::queue` 的队列模式与扩展消息，`agent::command` 的命令名检查；自动放行按 agent 给出的选项与例外判断，`deploy/kubernetes/agents/*.md` 由 `src/config` 的单元测试加载并检查。`#[cfg(test)]` 的辅助项（如 `SessionStore::with_writer`）只在所在 crate 的单元测试里可用 |
 | `tests/agent_loop.rs` | 循环语义 |
 | `tests/runner.rs` | 运行层：重试（含预算用完不重试、省略失败回答的事件）、上限（含 token 预算：FauxProvider 每次回答报告 15 个 token）、截断续写、持久化（含自定义 `SessionLog`、工具结果的 `details` 与 `usage`）、工具花费按工具名报告且不计入 token 预算、成本预算（每次回答按单价 0.01）、被策略与审批拒绝的调用计数、恢复会话、排队输入只写一次 |
-| `tests/agent_session.rs` | 共享会话：Busy、取消与丢弃后复用、多订阅者、退订、回调重入与 panic、模型切换与审计、推理强度的切换与审计、取出未被消费的排队输入、会话释放后有界订阅结束 |
+| `tests/agent_session.rs` | 共享会话：Busy、取消与丢弃后复用、多订阅者、退订、回调重入与 panic、模型切换与审计、推理强度的切换与审计、取出未被消费的排队输入、写入停止的原因 |
 | `tests/openai_mock.rs` | 真实 HTTP 下的 provider：SSE、重试、空闲超时、中途取消、成功状态下的 JSON 正文、带上下文过长错误码的 400 之后摘要并继续、自定义请求头与每次请求取 key、key 来源失败不发请求不重试、`prompt_cache_key` 只在开启时发送并可从审计还原 |
 | `tests/prepare_request.rs` | 请求前替换设置（`Hooks::prepare_request`）：只对一次请求有效、钩子看到的计划、`request_start` 报告实际的模型、请求审计可还原、钩子按顺序接力、失败与空模型名在请求前结束且不重试、panic |
 | `tests/continue_run.rs` | 不加新输入的续跑：回答结尾的输入、崩溃后补写的结果（调用不再执行）、省略结尾失败的回答再答、完成的回答没有可续的（排队的后续消息除外）、空会话、请求可从会话文件还原、运行中返回 Busy |

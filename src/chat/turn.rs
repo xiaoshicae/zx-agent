@@ -314,7 +314,7 @@ async fn busy(session: &AgentSession, io: &TurnIo<'_>, state: &mut TurnState, co
             }
         }
         Command::Prompt(text) if !state.pending.waiting() => {
-            session.steer(text);
+            session.queues().steer(text);
             output.line(Tone::Dim, "[chat] steering input queued");
         }
         Command::Prompt(_) => unreachable!("pending approval input is handled above"),
@@ -400,7 +400,7 @@ fn answer_approval(session: &AgentSession, output: &Output, pending: &mut Pendin
                 output.line(Tone::Warn, "[approval] enter a message to discuss this call");
                 *pending = Pending::Discussing(ticket);
             } else {
-                session.steer(text);
+                session.queues().steer(text);
                 deny(output, ticket, "user wants to discuss this call");
             }
         }

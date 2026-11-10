@@ -1,12 +1,12 @@
-//! Shared conversation API around the exclusively owned Runner; the subscribers of its
-//! events are in `subscribers`.
+//! Shared conversation API around the exclusively owned Runner.
+//!
+//! - `subscribers`: the subscribers of its events and the handle that keeps one attached
 //!
 //! A prompt or compaction takes ownership of the Runner, without a lock across await.
 //! Its lease restores the Runner on completion, cancellation, panic or future drop.
 
 mod subscribers;
 
-use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -21,11 +21,11 @@ use crate::ai::retry::RetryPolicy;
 use crate::ai::{Provider, Reasoning};
 use crate::compaction;
 use crate::runner::{Limits, RunReport, Runner};
-use crate::session::{CustomMessage, Entry, SessionStore, WritesStopped};
+use crate::session::{CustomMessage, Entry, SessionStore};
 use crate::sync::lock;
 
 use subscribers::EventHub;
-pub use subscribers::{EventStream, Subscription};
+pub use subscribers::Subscription;
 
 /// Provider and model selected together, so a switch cannot expose a mixed pair.
 pub struct ModelRef {
@@ -39,7 +39,7 @@ pub struct ModelRef {
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum AgentSessionError {
     /// A prompt, compaction or model change overlaps an active operation; it is never queued.
-    #[error("session is running; use steer or follow_up to submit input")]
+    #[error("session is running; queue input with queues().steer or queues().follow_up")]
     Busy,
     /// Model IDs must contain at least one non-whitespace character.
     #[error("model ID must not be empty")]
@@ -47,10 +47,7 @@ pub enum AgentSessionError {
     /// The entry a branch switch names is not in the session.
     #[error("no entry with that ID in the session")]
     EntryNotFound,
-    /// A tool name that no configured tool has.
-    #[error("no configured tool has that name")]
-    UnknownTool,
-    /// The session could not record an entry; see [`AgentSession::writes_stopped`].
+    /// The session could not record an entry; see [`SessionStore::writes_stopped`].
     #[error("cannot write the session: {0}")]
     WriteFailed(String),
     /// A prompt with this idempotency key was already submitted to the session.
@@ -100,8 +97,6 @@ pub struct AgentSession {
     queues: Arc<MessageQueues>,
     active_tools: Arc<ActiveTools>,
     events: Arc<EventHub>,
-    /// The configured tools' names, which the loop fixes when the Runner is built.
-    tool_names: Vec<String>,
     commands: Vec<Arc<dyn SlashCommand>>,
     cwd: PathBuf,
     session_id: String,
@@ -191,43 +186,18 @@ impl AgentSession {
         Ok(active.runner().compact(&cancel).await)
     }
 
-    /// Queue input before the next model request, using the existing steering semantics.
-    pub fn steer(&self, text: impl Into<String>) {
-        self.queues.steer(text);
-    }
-
-    /// Queue input to be consumed when the current task would otherwise finish.
-    pub fn follow_up(&self, text: impl Into<String>) {
-        self.queues.follow_up(text);
-    }
-
-    /// The conversation's queues: to steer or follow up with a message from an extension
-    /// (`steer_message`, `follow_up_message`), to record extension state during a run
+    /// The conversation's queues: to steer or follow up with the person's input (`steer`,
+    /// `follow_up`) or a message from an extension (`steer_message`, `follow_up_message`), to record extension state during a run
     /// (`append_entry`), and to choose how many queued messages a request takes
     /// (`set_steering_mode`, `set_follow_up_mode`).
     pub fn queues(&self) -> &MessageQueues {
         &self.queues
     }
 
-    /// The tools the next request offers, shared with the running loop and the hooks. A
-    /// change applies to the next request, also during a run; `set_active_tools` checks the
-    /// names first.
+    /// The tools the next request offers, shared with the running loop and the hooks (pi:
+    /// `setActiveTools`). A change applies to the next request, also during a run.
     pub fn active_tools(&self) -> &ActiveTools {
         &self.active_tools
-    }
-
-    /// Offer the model only `names` from the next request on (pi: `setActiveTools`), also
-    /// during a run. A name that no configured tool has returns UnknownTool and changes
-    /// nothing. An empty list offers no tool.
-    pub fn set_active_tools(&self, names: &[&str]) -> Result<(), AgentSessionError> {
-        if names
-            .iter()
-            .any(|name| !self.tool_names.iter().any(|known| known == name))
-        {
-            return Err(AgentSessionError::UnknownTool);
-        }
-        self.active_tools.set(names.iter().copied());
-        Ok(())
     }
 
     /// The slash commands extensions registered, in registration order.
@@ -279,7 +249,7 @@ impl AgentSession {
             .map_err(|error| AgentSessionError::WriteFailed(format!("{error:#}")))
     }
 
-    /// Take the input that `steer` and `follow_up` queued and no run consumed: steering
+    /// Take the input that `queues().steer` and `follow_up` queued and no run consumed: steering
     /// messages first, then follow-ups, each oldest first. A run looks for input at the end
     /// of each turn, so input queued as it ends waits for the next run; a host that starts
     /// runs itself calls this when one ends and prompts with what it gets. Returns Busy
@@ -301,35 +271,10 @@ impl AgentSession {
     }
 
     /// Observe future events until the returned handle is dropped.
-    /// Callbacks must return promptly. A panic detaches only that subscriber, and is
-    /// observable through the handle and failed_subscribers; other subscribers continue.
+    /// Callbacks must return promptly. A panic detaches only that subscriber, the initial
+    /// sink included; other subscribers continue.
     pub fn subscribe(&self, sink: Arc<dyn EventSink>) -> Subscription {
         self.events.subscribe(sink)
-    }
-
-    /// Receive future events through a channel that holds at most `capacity` of them, for
-    /// exporters that must never slow a run down. While the channel is full, new events are
-    /// dropped and counted, which also leaves a gap in their `seq`. Dropping the stream
-    /// unsubscribes.
-    pub fn subscribe_bounded(&self, capacity: NonZeroUsize) -> EventStream {
-        self.events.subscribe_bounded(capacity)
-    }
-
-    /// Number of subscribers detached because their callback panicked, initial sink included.
-    pub fn failed_subscribers(&self) -> usize {
-        self.events.failures()
-    }
-
-    /// Why the session no longer writes, or `None` while it does; see [`WritesStopped`]. A
-    /// session that stopped writing fails every later prompt, so a host that keeps sessions
-    /// open checks this after a failed run. Busy during a prompt or compaction.
-    pub fn writes_stopped(&self) -> Result<Option<WritesStopped>, AgentSessionError> {
-        self.idle(|runner| runner.session().writes_stopped().cloned())
-    }
-
-    /// Revoke all session approvals while idle. A concurrent run returns Busy.
-    pub fn clear_approvals(&self) -> Result<(), AgentSessionError> {
-        self.idle(Runner::clear_approvals)
     }
 
     /// Switch provider and model while idle. Empty IDs return InvalidModel; a run returns
@@ -430,7 +375,6 @@ impl From<Runner> for AgentSession {
         let config = runner.config();
         let queues = config.queues.clone();
         let active_tools = config.active_tools.clone();
-        let tool_names = config.tools.iter().map(|tool| tool.name().to_string()).collect();
         let commands = config.commands.clone();
         let cwd = config.cwd.clone();
         let session_id = runner.session().header().id.clone();
@@ -443,7 +387,6 @@ impl From<Runner> for AgentSession {
             queues,
             active_tools,
             events,
-            tool_names,
             commands,
             cwd,
             session_id,
