@@ -28,12 +28,12 @@ use tokio::sync::mpsc;
 
 use zx_agent::AgentSession;
 use zx_agent::agent::{EventSink, QueuedMessage};
-use zx_agent::agent_session::{ModelRef, Subscription};
+use zx_agent::agent_session::ModelRef;
 use zx_agent::ai::{Provider, Reasoning};
 use zx_agent::config::Builtin;
 use zx_agent::otel::Telemetry;
 
-use crate::cli::{self, ChatArgs, ModeSettings, SessionOptions};
+use crate::cli::{self, ChatArgs};
 use crate::process::{EXIT_ABORTED, EXIT_COMPLETED, with_telemetry};
 use crate::render::visible;
 use crate::session_files::SessionFile;
@@ -71,51 +71,34 @@ struct Built {
     about: About,
     /// The commands extensions registered: name and description, for parsing and /help.
     commands: Vec<(String, String)>,
-    /// The trace export of this session, while it lasts.
-    _traced: Option<Subscription>,
 }
 
 /// What every conversation of this chat is built with.
 struct Chat {
-    settings: ModeSettings<ChatArgs>,
+    shared: cli::Shared,
     interaction: Arc<TerminalInteraction>,
     output: Arc<Output>,
 }
 
 impl Chat {
     async fn build(&self, model: &str, file: SessionFile<'_>) -> Result<Built> {
-        let settings = &self.settings;
-        let args = &settings.args;
-        let interaction = &self.interaction;
-        let output = &self.output;
-        let mut prepared = cli::prepare(SessionOptions {
-            base: &args.base,
-            budget: &args.budget,
-            model,
-            cwd: None,
-            file,
-            agent: Builtin::Assistant,
-            shared: &settings.shared,
-        })
-        .await?;
+        let mut prepared = cli::prepare(&self.shared, model, None, file).await?;
         prepared.require_bash_approval("shell commands require interactive approval");
-        prepared.config.interaction = interaction.clone();
-        prepared.config.interaction_timeout = settings.shared.settings.approval_timeout;
+        prepared.config.interaction = self.interaction.clone();
+        prepared.config.interaction_timeout = self.shared.settings.approval_timeout;
         let provider = prepared.config.provider.clone();
         let about = About::of(&mut prepared);
-        let session = prepared.into_session(output.clone())?;
+        let session = prepared.into_session(self.output.clone())?;
         let commands = session
             .commands()
             .iter()
             .map(|command| (command.name().to_string(), command.description().to_string()))
             .collect();
-        let traced = settings.traces.clone().map(|sink| session.subscribe(sink));
         Ok(Built {
             session,
             provider,
             about,
             commands,
-            _traced: traced,
         })
     }
 
@@ -144,7 +127,18 @@ pub(crate) async fn run(args: ChatArgs) -> Result<u8> {
 }
 
 async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> {
-    let shared = cli::Shared::connect(&args.base, Builtin::Assistant).await?;
+    let ChatArgs {
+        base,
+        budget,
+        output: output_mode,
+        deltas,
+        color,
+        no_session,
+        resume,
+    } = args;
+    let shared = cli::Shared::connect(base, budget, Builtin::Assistant)
+        .await?
+        .with_traces(traces);
     let mode = if std::io::stdin().is_terminal() {
         InputMode::Terminal
     } else {
@@ -152,14 +146,14 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
     };
     let (interaction, approvals) = TerminalInteraction::channel();
     let chat = Chat {
-        output: Arc::new(Output::new(args.output, args.deltas, args.color)),
+        output: Arc::new(Output::new(output_mode, deltas, color)),
         interaction: Arc::new(interaction),
-        settings: ModeSettings { args, shared, traces },
+        shared,
     };
-    let args = &chat.settings.args;
     let output = &chat.output;
-    let model = chat.settings.shared.settings.model.clone();
-    let (storage, first) = opening(args).await?;
+    let model = chat.shared.settings.model.clone();
+    let resume = resume.as_ref().map(Option::as_deref);
+    let (storage, first) = opening(no_session, resume, &chat.shared.base).await?;
     let file = match (&storage, first.path()) {
         (_, Some(path)) | (Storage::File(path), None) => SessionFile::Open(path),
         (Storage::Memory, None) => SessionFile::Memory,
@@ -183,7 +177,7 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
         storage,
         built,
         model,
-        reasoning: chat.settings.shared.settings.reasoning,
+        reasoning: chat.shared.settings.config.reasoning,
     };
     loop {
         let line = match terminal.read(output).await? {

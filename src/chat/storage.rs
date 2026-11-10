@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::cli::{self, ChatArgs};
+use crate::cli::{self, BaseArgs};
 use crate::render::visible;
 use crate::session_files;
 
@@ -47,19 +47,23 @@ impl First {
     }
 }
 
-/// Where the conversations are kept, and the session to open first.
-pub(super) async fn opening(args: &ChatArgs) -> Result<(Storage, First)> {
-    let storage = if args.no_session {
+/// Where the conversations are kept, and the session to open first: `--no-session`,
+/// `--resume` with its ID if it has one, and the command line's session file and working
+/// directory.
+pub(super) async fn opening(
+    no_session: bool,
+    resume: Option<Option<&str>>,
+    base: &BaseArgs,
+) -> Result<(Storage, First)> {
+    let storage = if no_session {
         Storage::Memory
-    } else if let Some(path) = &args.base.session {
+    } else if let Some(path) = &base.session {
         Storage::File(path.clone())
     } else {
-        Storage::Directory(session_files::default_dir(&cli::resolve_cwd(
-            args.base.cwd.as_deref(),
-        )?)?)
+        Storage::Directory(session_files::default_dir(&cli::resolve_cwd(base.cwd.as_deref())?)?)
     };
-    let first = match (&storage, &args.resume) {
-        (Storage::Directory(dir), Some(id)) => resume_target(dir, args.base.cwd.as_deref(), id.as_deref()).await?,
+    let first = match (&storage, resume) {
+        (Storage::Directory(dir), Some(id)) => resume_target(dir, base.cwd.as_deref(), id).await?,
         (Storage::Memory | Storage::File(_) | Storage::Directory(_), _) => First::Fresh,
     };
     Ok((storage, first))

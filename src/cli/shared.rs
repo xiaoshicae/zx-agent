@@ -1,6 +1,6 @@
-//! What every session of a process shares: the settings, read once, the MCP servers,
-//! connected once, the secret files to redact, checked once, and the variables commands must
-//! not see.
+//! What every session of a process shares: the settings, read once, the command line, the
+//! MCP servers, connected once, the secret files to redact, checked once, the variables
+//! commands must not see, and the trace export.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -9,42 +9,55 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 use zx_agent::agent::EventSink;
-use zx_agent::config::{AgentDefinition, Builtin};
+use zx_agent::config::Builtin;
 use zx_agent::extensions::Extension;
 use zx_agent::mcp::{Server, ServerConfig};
 use zx_agent::redact::{MIN_SECRET_CHARS, check_secret_files, short_secret_files};
 
-use super::{BaseArgs, Settings, env_value};
+use super::{BaseArgs, BudgetArgs, Settings, env_value};
 
 /// Comma-separated secret files to redact, added to `secretFiles` of config.toml; deployments
 /// set it, for example to the token that the platform mounts for the agent's own account.
 const SECRET_FILES_ENV: &str = "ZX_SECRET_FILES";
 
-/// What every session of a process shares: the settings, the MCP servers, the secret files and
-/// the hidden variables.
+/// What every session of a process shares: the settings, the command line, the MCP servers,
+/// the secret files, the hidden variables and the trace export.
 pub(crate) struct Shared {
     pub(crate) settings: Settings,
+    /// The command line's working directory and tools, over the agent's.
+    pub(crate) base: BaseArgs,
+    /// The command line's budgets, over the agent's.
+    pub(super) budget: BudgetArgs,
+    /// The built-in agent every session runs, or the user's file that replaces it.
+    pub(super) agent: Builtin,
     pub(super) mcp: McpTools,
     /// The files whose contents are redacted from tool output.
     pub(super) secret_files: Vec<PathBuf>,
     /// Variables that hold credentials besides the API key, such as IM tokens: commands do
     /// not inherit them, and their values are redacted like the key's.
     pub(super) hidden_env: Vec<String>,
+    /// Where every session's events also go: the trace export, when one is configured.
+    pub(super) traces: Option<Arc<dyn EventSink>>,
 }
 
 impl Shared {
-    /// Read the settings, connect the MCP servers of config.toml and check the secret files.
+    /// Read the settings with `base` and `budget` over them, connect the MCP servers of
+    /// config.toml and check the secret files, for sessions of `agent`.
     ///
     /// A missing model, a missing token, a server that cannot be reached in time, a tool it
     /// lacks or a secret file that cannot be used stops startup, like other configuration
     /// errors.
-    pub(crate) async fn connect(base: &BaseArgs, kind: Builtin) -> Result<Self> {
+    pub(crate) async fn connect(base: BaseArgs, budget: BudgetArgs, agent: Builtin) -> Result<Self> {
         let settings = Settings::resolve(base.model.as_deref())?;
         Ok(Self {
-            mcp: connect_mcp(&settings, kind).await?,
+            mcp: connect_mcp(&settings).await?,
             secret_files: secret_files(&settings.config.secret_files)?,
             hidden_env: Vec::new(),
+            traces: None,
             settings,
+            base,
+            budget,
+            agent,
         })
     }
 
@@ -54,14 +67,13 @@ impl Shared {
         self.hidden_env = names;
         self
     }
-}
 
-/// What a mode's sessions are built from: its arguments, what the process shares, and where
-/// traces go when an OTLP endpoint is configured.
-pub(crate) struct ModeSettings<A> {
-    pub(crate) args: A,
-    pub(crate) shared: Shared,
-    pub(crate) traces: Option<Arc<dyn EventSink>>,
+    /// Send every session's events to `traces` as well: the trace export, when one is
+    /// configured.
+    pub(crate) fn with_traces(mut self, traces: Option<Arc<dyn EventSink>>) -> Self {
+        self.traces = traces;
+        self
+    }
 }
 
 /// The MCP servers of config.toml, connected once per process and shared by every session it
@@ -69,19 +81,17 @@ pub(crate) struct ModeSettings<A> {
 #[derive(Default)]
 pub(super) struct McpTools {
     pub(super) servers: Vec<Arc<dyn Extension>>,
-    /// Tools that need approval: those not in the agent's `permissions.allow`, unless the
-    /// agent approves every call.
-    pub(super) ask: Vec<String>,
+    /// The names the model calls the servers' tools by; which of them ask depends on the
+    /// agent, so each session decides (`prepare`).
+    pub(super) names: Vec<String>,
     /// Variables holding the servers' tokens: hidden from commands, values redacted.
     pub(super) token_env: Vec<String>,
 }
 
 /// Connect the MCP servers of config.toml, printing one line per server on stderr, without
 /// the token or the URL's path.
-async fn connect_mcp(settings: &Settings, kind: Builtin) -> Result<McpTools> {
-    let agent = AgentDefinition::load(kind, settings.home.as_deref(), &settings.config)?;
+async fn connect_mcp(settings: &Settings) -> Result<McpTools> {
     let mcp = &settings.config.mcp;
-    let allowed = agent.permissions.allowed_tools();
     let mut configs = Vec::new();
     for server in mcp {
         let token = match &server.token_env {
@@ -103,16 +113,7 @@ async fn connect_mcp(settings: &Settings, kind: Builtin) -> Result<McpTools> {
     let mut tools = McpTools::default();
     for (entry, server) in mcp.iter().zip(connected) {
         let server = server.map_err(anyhow::Error::msg)?;
-        let mut names = Vec::new();
-        for (_, name) in server.tool_names() {
-            // With approveAll nothing asks: the container is the sandbox.
-            if allowed.contains(name) || agent.permissions.approve_all {
-                names.push(name.clone());
-            } else {
-                names.push(format!("{name} (asks)"));
-                tools.ask.push(name.clone());
-            }
-        }
+        let names: Vec<&str> = server.tool_names().iter().map(|(_, name)| name.as_str()).collect();
         // The origin only: a path or query may hold a credential. `Server::connect` has parsed
         // the URL already, so the empty fallback is never shown.
         let origin = reqwest::Url::parse(&entry.url)
@@ -129,6 +130,7 @@ async fn connect_mcp(settings: &Settings, kind: Builtin) -> Result<McpTools> {
             names.join(", "),
             server.protocol_version()
         );
+        tools.names.extend(names.into_iter().map(str::to_string));
         tools.token_env.extend(entry.token_env.iter().cloned());
         tools.servers.push(Arc::new(server));
     }

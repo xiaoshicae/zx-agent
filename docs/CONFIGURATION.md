@@ -231,7 +231,7 @@ maxTimeoutSecs = 600                        # 可选：一次调用的总上限�
 
 - MCP 工具默认每次调用都要审批：chat 在终端询问，im 发审批卡片，run 没有人审批而拒绝。要直接执行，在 agent 的 `permissions.allow` 中写模型看到的工具名，如 `allow = ["prom__query"]`（原来 `[[mcp]]` 的 `allowTools` 已去掉，写了报未知字段）。
 - 每个进程启动时连接一次：run、chat 在组装会话前，im 在开始接收消息前，各线程共用连接。连不上、token 变量没有值、服务器缺少列出的工具时，以退出码 2 报错。
-- 连接成功时，stderr 每个服务器一行，例如 `[mcp] prom: prom__query, prom__query_range (asks); protocol 2026-07-28; https://prom-mcp.monitoring.svc`。只写地址的协议、主机与端口；经 `http://` 发送 token 时另加 `the token is sent unencrypted`。
+- 连接成功时，stderr 每个服务器一行，例如 `[mcp] prom: prom__query, prom__query_range; protocol 2026-07-28; https://prom-mcp.monitoring.svc`。哪些工具要审批取决于每个会话的 agent（在组装会话时决定），这一行不标出；只写地址的协议、主机与端口；经 `http://` 发送 token 时另加 `the token is sent unencrypted`。
 - 服务器给出的工具注释（annotations）只是提示，不据此放行；工具一律按有副作用处理。
 
 

@@ -20,11 +20,20 @@ use crate::session_files::SessionFile;
 /// Run one task and return its exit code. An `Err` is a configuration problem found
 /// before the run started.
 pub(crate) async fn run(args: RunArgs) -> Result<u8> {
-    let prompt = match &args.prompt {
+    let RunArgs {
+        prompt,
+        fail_on_denied,
+        base,
+        budget,
+        output,
+        deltas,
+        ..
+    } = args;
+    let prompt = match &prompt {
         Some(prompt) => Some(read_prompt(prompt)?),
         None => {
             // Checked before anything starts: continuing a new session has nothing to answer.
-            let session = args.base.session.as_deref().context("--continue needs --session")?;
+            let session = base.session.as_deref().context("--continue needs --session")?;
             anyhow::ensure!(
                 session.exists(),
                 "--continue needs an existing session file; {} does not exist",
@@ -34,18 +43,19 @@ pub(crate) async fn run(args: RunArgs) -> Result<u8> {
         }
     };
     with_telemetry(async move |telemetry| {
-        let session = build_session(&args).await?;
-        // Kept until the run has ended: dropping it unsubscribes.
-        let _traced = telemetry.map(|telemetry| session.subscribe(run_sink(telemetry)));
+        let shared = cli::Shared::connect(base, budget, Builtin::Unattended)
+            .await?
+            .with_traces(telemetry.map(run_sink));
+        let session = build_session(&shared, output, deltas).await?;
         let cancel = CancellationToken::new();
         spawn_signal_handler(cancel.clone());
         let report = match prompt {
             Some(prompt) => session.prompt(prompt, &cancel).await?,
             None => session.continue_run(&cancel).await?,
         };
-        print_report(&report, args.output);
+        print_report(&report, output);
         Ok(match report.outcome {
-            RunOutcome::Completed if args.fail_on_denied && report.denied_calls > 0 => EXIT_DENIED,
+            RunOutcome::Completed if fail_on_denied && report.denied_calls > 0 => EXIT_DENIED,
             outcome => exit_code(outcome),
         })
     })
@@ -68,23 +78,14 @@ fn read_prompt(arg: &str) -> Result<String> {
     Ok(prompt)
 }
 
-/// Assemble an unattended session from the selected agent, `unattended` unless another is
-/// given, without exposing interactive choices to the kernel.
-async fn build_session(args: &RunArgs) -> Result<AgentSession> {
-    let shared = cli::Shared::connect(&args.base, Builtin::Unattended).await?;
-    let prepared = cli::prepare(cli::SessionOptions {
-        base: &args.base,
-        budget: &args.budget,
-        model: &shared.settings.model,
-        cwd: None,
-        file: SessionFile::from_path(args.base.session.as_deref()),
-        agent: Builtin::Unattended,
-        shared: &shared,
-    })
-    .await?;
-    let sink: Arc<dyn EventSink> = match args.output {
+/// Assemble an unattended session of the `unattended` agent, or the user's file that
+/// replaces it, without exposing interactive choices to the kernel.
+async fn build_session(shared: &cli::Shared, output: OutputMode, deltas: bool) -> Result<AgentSession> {
+    let file = SessionFile::from_path(shared.base.session.as_deref());
+    let prepared = cli::prepare(shared, &shared.settings.model, None, file).await?;
+    let sink: Arc<dyn EventSink> = match output {
         OutputMode::Text => Arc::new(TextProgress),
-        OutputMode::Jsonl => Arc::new(JsonlEvents { deltas: args.deltas }),
+        OutputMode::Jsonl => Arc::new(JsonlEvents { deltas }),
     };
     prepared.into_session(sink)
 }

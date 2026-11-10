@@ -1,6 +1,9 @@
 //! The assembly of one session, shared by run, chat, im and acp: the agent with the
 //! command line over it, in the environment of the settings, the provider, the tools, the
 //! session file and the hooks every mode registers.
+//!
+//! The agent is loaded here, once per session, and everything that depends on it is decided
+//! here too, such as which MCP tools ask.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -10,14 +13,13 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 use zx_agent::AgentSession;
-use zx_agent::agent::{EventSink, HookOptions, Hooks, LoopConfig, PolicyDecision, Tool};
+use zx_agent::agent::{Event, EventSink, HookOptions, Hooks, LoopConfig, PolicyDecision, Tool};
 use zx_agent::ai::ModelMeta;
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::compaction;
-use zx_agent::config::Execution;
 use zx_agent::config::skills::{ReadSkillTool, TOOL_NAME};
-use zx_agent::config::{AgentDefinition, Builtin};
+use zx_agent::config::{AgentDefinition, Config, Execution};
 use zx_agent::continuation::ContinueOnLength;
 use zx_agent::executor::Executor;
 use zx_agent::extensions;
@@ -31,7 +33,7 @@ use zx_agent::session::{SessionHeader, SessionStore};
 use zx_agent::tools::{self, BASH};
 
 use super::execution::{check_session_outside, executor};
-use super::{BaseArgs, BudgetArgs, Settings, Shared, env_value, resolve_cwd};
+use super::{BudgetArgs, Shared, env_value, resolve_cwd};
 use crate::session_files::{self, SessionFile};
 
 /// Register a built-in hook under a fixed name, which `hook_failed` events and `[hook]` lines
@@ -48,21 +50,6 @@ fn push_built_in(config: &mut LoopConfig, name: &str, hook: impl Hooks + 'static
             ..HookOptions::default()
         },
     );
-}
-
-/// What a mode gives [`prepare`]: the command line, the model, the session file and what the
-/// process shares.
-pub(crate) struct SessionOptions<'a> {
-    pub(crate) base: &'a BaseArgs,
-    pub(crate) budget: &'a BudgetArgs,
-    pub(crate) model: &'a str,
-    /// The working directory, over `--cwd`: a client's project directory. `None` keeps the
-    /// command line's.
-    pub(crate) cwd: Option<&'a Path>,
-    pub(crate) file: SessionFile<'a>,
-    /// The built-in agent the mode runs, or the user's file that replaces it.
-    pub(crate) agent: Builtin,
-    pub(crate) shared: &'a Shared,
 }
 
 /// A configured session with the hooks every mode shares.
@@ -83,6 +70,8 @@ pub(crate) struct PreparedSession {
     pub(crate) agent_name: String,
     /// The agent's auto-approved command prefixes, for a frontend to show.
     pub(crate) auto_approve_commands: Vec<String>,
+    /// Where the events also go: the trace export of the process, when one is configured.
+    traces: Option<Arc<dyn EventSink>>,
 }
 
 impl PreparedSession {
@@ -107,48 +96,70 @@ impl PreparedSession {
         push_built_in(&mut self.config, "bash_approval", PolicyHook::new(Arc::new(policy)));
     }
 
-    /// The conversation, sending events to `sink`: the one place where every mode turns a
-    /// prepared session into a running one.
+    /// The conversation, sending events to `sink` and to the trace export: the one place
+    /// where every mode turns a prepared session into a running one.
     pub(crate) fn into_session(self, sink: Arc<dyn EventSink>) -> Result<AgentSession> {
+        let sink = match self.traces {
+            Some(traces) => Arc::new(Both(sink, traces)),
+            None => sink,
+        };
         let runner =
             Runner::new(self.config, self.retry, self.limits, self.store, sink).with_compaction(self.compaction)?;
         Ok(AgentSession::from(runner))
     }
 }
 
+/// Events for a mode's own sink and the trace export; the export never blocks or panics
+/// (`SignalSink` only queues), so the mode's sink sees every event first.
+struct Both(Arc<dyn EventSink>, Arc<dyn EventSink>);
+
+impl EventSink for Both {
+    fn emit(&self, event: &Event) {
+        self.0.emit(event);
+        self.1.emit(event);
+    }
+}
+
 /// Refuse request fields that the reasoning level would also set: which one the server gets
 /// would not be clear from the configuration.
-fn check_reasoning_fields(settings: &Settings) -> Result<()> {
-    if settings.reasoning.is_some()
-        && let Some(field) = settings
+fn check_reasoning_fields(config: &Config) -> Result<()> {
+    let openai = &config.provider.openai;
+    if config.reasoning.is_some()
+        && let Some(field) = openai
             .reasoning_format
             .fields()
             .iter()
-            .find(|field| settings.request_fields.contains_key(**field))
+            .find(|field| openai.extra_fields.contains_key(**field))
     {
         anyhow::bail!(
             "provider.requestFields.{field} conflicts with reasoning, which sets it with provider.reasoningFormat {}; use one of them",
-            settings.reasoning_format.as_str()
+            openai.reasoning_format.as_str()
         );
     }
     Ok(())
 }
 
-/// Assemble a session: startup reads, short session appends and, in container mode, starting
-/// the container precede the run.
+/// Assemble a session of `model` on `file` from what the process shares, in `cwd` when a
+/// client names a project directory, else in `--cwd`'s: startup reads, short session appends
+/// and, in container mode, starting the container precede the run.
 ///
 /// Configuration errors and a container that cannot start are reported before a new session
 /// file is created.
-pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSession> {
-    let (cwd, mut agent, models) = settle(&options)?;
+pub(crate) async fn prepare(
+    shared: &Shared,
+    model: &str,
+    cwd: Option<&Path>,
+    file: SessionFile<'_>,
+) -> Result<PreparedSession> {
+    let (cwd, mut agent, models) = settle(shared, model, cwd)?;
     let context = agent.context_section(&cwd).context(
         "cannot load project instructions; an agent with discover = false under [context] skips AGENTS.md discovery",
     )?;
     // Before the session file: invalid provider settings are configuration errors too.
-    let (provider, api_key) = provider(&options)?;
-    let mut host = host_tools(&mut agent, &options.shared.settings.config.tool_output, &cwd)?;
-    let (session, executor, environment) = open_session(&options, &cwd).await?;
-    let tools = assemble_tools(&agent, &options, &executor, &mut host)?;
+    let (provider, api_key) = provider(&shared.settings.config)?;
+    let mut host = host_tools(&mut agent, &shared.settings.config.tool_output, &cwd)?;
+    let (session, executor, environment) = open_session(shared, model, file, &cwd).await?;
+    let tools = assemble_tools(&agent, shared, &executor, &mut host)?;
     // The commands an agent allows run without asking, the others ask.
     let policy = CommandPolicy::new().deny_also(agent.permissions.denied_commands());
     let system_prompt = build_system_prompt(
@@ -163,27 +174,26 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
         system_prompt,
         tools,
         cwd,
-        max_tokens: options.shared.settings.max_tokens,
-        reasoning: options.shared.settings.reasoning,
-        ..LoopConfig::new(Arc::new(provider), options.model)
+        max_tokens: shared.settings.config.max_tokens,
+        reasoning: shared.settings.config.reasoning,
+        ..LoopConfig::new(Arc::new(provider), model)
     };
     push_built_in(&mut config, "command_policy", PolicyHook::new(Arc::new(policy)));
     // Each session's redaction owns its list: the hook reads the files again before every use.
-    let redaction = RedactSecrets::new(api_key.into_iter().chain(hidden_values(&options)))
-        .with_secret_files(options.shared.secret_files.clone());
-    let auto_approve = register_hooks(&mut config, &mut agent, &options, redaction, host.spill.take())?;
+    let redaction = RedactSecrets::new(api_key.into_iter().chain(hidden_values(shared)))
+        .with_secret_files(shared.secret_files.clone());
+    let auto_approve = register_hooks(&mut config, &mut agent, shared, redaction, host.spill.take())?;
     config.models = models;
-    config.cache_key = options
-        .shared
+    config.cache_key = shared
         .settings
+        .config
+        .provider
+        .openai
         .prompt_cache_key
         .then(|| session.header().id.clone());
     Ok(PreparedSession {
         config,
-        retry: RetryPolicy {
-            max_retries: options.shared.settings.max_retries,
-            ..RetryPolicy::default()
-        },
+        retry: shared.settings.config.provider.retry.clone(),
         store: session,
         auto_approve,
         approve_all: agent.permissions.approve_all,
@@ -191,24 +201,28 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
         compaction: agent.compaction,
         agent_name: agent.name,
         auto_approve_commands: agent.permissions.allowed_commands(),
+        traces: shared.traces.clone(),
     })
 }
 
 /// The working directory, the agent with the command line over it, and what is known about
 /// the models. A cost budget needs the model's prices; container execution uses the
 /// directory's real path.
-fn settle(options: &SessionOptions<'_>) -> Result<(PathBuf, AgentDefinition, HashMap<String, ModelMeta>)> {
-    let cwd = resolve_cwd(options.cwd.or(options.base.cwd.as_deref()))?;
-    let mut agent = load_agent(options)?;
-    let models = model_meta(&mut agent, &options.shared.settings.config.models, options.model);
+fn settle(
+    shared: &Shared,
+    model: &str,
+    cwd: Option<&Path>,
+) -> Result<(PathBuf, AgentDefinition, HashMap<String, ModelMeta>)> {
+    let cwd = resolve_cwd(cwd.or(shared.base.cwd.as_deref()))?;
+    let mut agent = load_agent(shared)?;
+    let models = model_meta(&mut agent, &shared.settings.config.models, model);
     // Without prices every response costs nothing, and the budget would never stop a run.
     anyhow::ensure!(
-        agent.limits.cost_budget.is_none() || models.get(options.model).is_some_and(|meta| meta.cost.is_some()),
-        "a cost budget needs the prices of the model {:?}: add them to [[models]] in config.toml",
-        options.model
+        agent.limits.cost_budget.is_none() || models.get(model).is_some_and(|meta| meta.cost.is_some()),
+        "a cost budget needs the prices of the model {model:?}: add them to [[models]] in config.toml"
     );
     // The container mounts the workspace at its real path, which tools must use as well.
-    let cwd = match options.shared.settings.config.execution {
+    let cwd = match shared.settings.config.execution {
         Execution::Local => cwd,
         Execution::Container => cwd
             .canonicalize()
@@ -221,22 +235,22 @@ fn settle(options: &SessionOptions<'_>) -> Result<(PathBuf, AgentDefinition, Has
 /// machine.
 fn assemble_tools(
     agent: &AgentDefinition,
-    options: &SessionOptions<'_>,
+    shared: &Shared,
     executor: &Arc<dyn Executor>,
     host: &mut HostTools,
 ) -> Result<Vec<Arc<dyn Tool>>> {
     let built_in: Vec<String> = agent.tools.iter().filter(|name| !host_tool(name)).cloned().collect();
-    let mut tools = tools::builtin_tools(&built_in, options.shared.settings.tool_timeout, executor)?;
+    let mut tools = tools::builtin_tools(&built_in, shared.settings.tool_timeout, executor)?;
     tools.extend(std::mem::take(&mut host.tools));
     Ok(tools)
 }
 
 /// The selected agent with the command line's tools and budgets over it, validated: explicit
 /// values replace the agent's.
-fn load_agent(options: &SessionOptions<'_>) -> Result<AgentDefinition> {
-    let config = &options.shared.settings.config;
-    let mut agent = AgentDefinition::load(options.agent, options.shared.settings.home.as_deref(), config)?;
-    if let Some(tools) = &options.base.tools {
+fn load_agent(shared: &Shared) -> Result<AgentDefinition> {
+    let config = &shared.settings.config;
+    let mut agent = AgentDefinition::load(shared.agent, shared.settings.home.as_deref(), config)?;
+    if let Some(tools) = &shared.base.tools {
         agent.tools = tools
             .iter()
             .map(|name| name.trim())
@@ -244,7 +258,7 @@ fn load_agent(options: &SessionOptions<'_>) -> Result<AgentDefinition> {
             .map(String::from)
             .collect();
     }
-    apply_budgets(&mut agent, options.budget);
+    apply_budgets(&mut agent, &shared.budget);
     agent.validate(config)?;
     Ok(agent)
 }
@@ -282,24 +296,16 @@ fn model_meta(
     models
 }
 
-/// The provider of the settings, and the API key it authenticates with.
-fn provider(options: &SessionOptions<'_>) -> Result<(OpenAiCompatible, Option<String>)> {
-    let settings = &options.shared.settings;
+/// The provider of config.toml, and the API key it authenticates with.
+fn provider(config: &Config) -> Result<(OpenAiCompatible, Option<String>)> {
     // Local servers (vLLM, Ollama, llama.cpp) often need no key, so a missing key is allowed.
-    let api_key = env_value(&settings.api_key_env);
-    check_reasoning_fields(settings)?;
+    let api_key = env_value(&config.provider.api_key_env);
+    check_reasoning_fields(config)?;
+    // Each session owns its provider; provider authentication and output filtering each need
+    // an owned copy of the key.
     let provider = OpenAiCompatible::new(OpenAiConfig {
-        base_url: settings.base_url.clone(),
-        // Provider authentication and output filtering each need an owned copy.
         api_key: api_key.clone().into(),
-        idle_timeout: settings.idle_timeout,
-        system_updates: settings.system_updates,
-        extra_fields: settings.request_fields.clone(),
-        fill_missing_reasoning: settings.fill_missing_reasoning,
-        reasoning_format: settings.reasoning_format,
-        headers: settings.headers.clone(),
-        prompt_cache_key: settings.prompt_cache_key,
-        ..OpenAiConfig::default()
+        ..config.provider.openai.clone()
     })
     .context("invalid [provider] settings in config.toml")?;
     Ok((provider, api_key))
@@ -347,20 +353,25 @@ fn host_tools(agent: &mut AgentDefinition, tool_output: &output_store::Config, c
 ///
 /// An existing session is opened first, for its ID; a new one is created only after the
 /// container, if any, has started, so that a failed start leaves no session file behind.
-async fn open_session(options: &SessionOptions<'_>, cwd: &Path) -> Result<(SessionStore, Arc<dyn Executor>, String)> {
-    let config = &options.shared.settings.config;
+async fn open_session(
+    shared: &Shared,
+    model: &str,
+    file: SessionFile<'_>,
+    cwd: &Path,
+) -> Result<(SessionStore, Arc<dyn Executor>, String)> {
+    let config = &shared.settings.config;
     if config.execution == Execution::Container {
-        check_session_outside(&options.file, cwd)?;
+        check_session_outside(&file, cwd)?;
     }
-    let header = SessionHeader::new(cwd, options.model);
-    let opened = session_files::open_existing(&options.file)?;
+    let header = SessionHeader::new(cwd, model);
+    let opened = session_files::open_existing(&file)?;
     let session_id = opened
         .as_ref()
         .map_or_else(|| header.id.clone(), |session| session.header().id.clone());
-    let (executor, environment) = executor(config, cwd, &session_id, hidden_env(options)).await?;
+    let (executor, environment) = executor(config, cwd, &session_id, hidden_env(shared)).await?;
     let session = match opened {
         Some(session) => session,
-        None => session_files::create(options.file, header)?,
+        None => session_files::create(file, header)?,
     };
     if session.recovered_tail_bytes() > 0 {
         eprintln!(
@@ -372,22 +383,23 @@ async fn open_session(options: &SessionOptions<'_>, cwd: &Path) -> Result<(Sessi
 }
 
 /// Register the hooks every mode shares, after the command policy: the MCP servers, the
-/// agent's permissions, continuation, `redaction` and `spill`; returns the auto-approved commands
-/// for the frontend's own bash policy.
+/// agent's permissions with the MCP tools it does not allow, continuation, `redaction` and
+/// `spill`; returns the auto-approved commands for the frontend's own bash policy.
 ///
 /// Each hook declares its stage, so the policies run first and redaction runs before output
 /// is saved, whatever is registered later.
 fn register_hooks(
     config: &mut LoopConfig,
     agent: &mut AgentDefinition,
-    options: &SessionOptions<'_>,
+    shared: &Shared,
     redaction: RedactSecrets,
     spill: Option<SpillOutputs>,
 ) -> Result<AutoApprove> {
-    extensions::register(config, &options.shared.mcp.servers).map_err(anyhow::Error::msg)?;
+    extensions::register(config, &shared.mcp.servers).map_err(anyhow::Error::msg)?;
     let auto_approve = agent.permissions.auto_approval();
+    let mcp_ask = mcp_asking(agent, &shared.mcp.names);
     // The agent's permissions and the frontend's bash policy each own the list (`rules_policy`).
-    if let Some(rules) = rules_policy(agent, &options.shared.mcp.ask, auto_approve.clone()) {
+    if let Some(rules) = rules_policy(agent, &mcp_ask, auto_approve.clone()) {
         push_built_in(config, "agent_permissions", PolicyHook::new(Arc::new(rules)));
     }
     push_built_in(
@@ -407,23 +419,32 @@ fn register_hooks(
 /// Variables commands must not inherit: the API key, the other credentials and the headers
 /// that authenticate to a trace collector. `env` would put them into the session file and
 /// the context.
-fn hidden_env(options: &SessionOptions<'_>) -> Vec<String> {
-    std::iter::once(options.shared.settings.api_key_env.clone())
-        .chain(options.shared.hidden_env.iter().cloned())
-        .chain(options.shared.mcp.token_env.iter().cloned())
+fn hidden_env(shared: &Shared) -> Vec<String> {
+    std::iter::once(shared.settings.config.provider.api_key_env.clone())
+        .chain(shared.hidden_env.iter().cloned())
+        .chain(shared.mcp.token_env.iter().cloned())
         .chain(otel::HEADER_VARIABLES.iter().map(std::string::ToString::to_string))
         .collect()
 }
 
 /// The values to redact of the hidden variables besides the key; an unset or empty variable
 /// holds nothing.
-fn hidden_values<'a>(options: &'a SessionOptions<'_>) -> impl Iterator<Item = String> + 'a {
-    options
-        .shared
+fn hidden_values(shared: &Shared) -> impl Iterator<Item = String> + '_ {
+    shared
         .hidden_env
         .iter()
-        .chain(&options.shared.mcp.token_env)
+        .chain(&shared.mcp.token_env)
         .filter_map(|name| env_value(name))
+}
+
+/// The MCP tools, of `names`, that ask a person: those not in the agent's `permissions.allow`,
+/// and none when the agent approves every call, since the container is the sandbox.
+fn mcp_asking(agent: &AgentDefinition, names: &[String]) -> Vec<String> {
+    if agent.permissions.approve_all {
+        return Vec::new();
+    }
+    let allowed = agent.permissions.allowed_tools();
+    names.iter().filter(|name| !allowed.contains(name)).cloned().collect()
 }
 
 /// The agent's denied and asking tools and the MCP tools that ask, as one policy that allows

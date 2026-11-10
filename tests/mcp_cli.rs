@@ -110,7 +110,7 @@ async fn run_calls_an_mcp_tool_its_server_allows() {
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     assert_eq!(stdout(&output), "done\n");
     let startup = format!(
-        "[mcp] prom: prom__query, prom__range (asks); protocol 2026-07-28; {}; the token is sent unencrypted",
+        "[mcp] prom: prom__query, prom__range; protocol 2026-07-28; {}; the token is sent unencrypted",
         origin(&fake)
     );
     assert!(stderr.contains(&startup), "{stderr}");

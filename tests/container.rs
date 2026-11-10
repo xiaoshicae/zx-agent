@@ -1144,7 +1144,6 @@ async fn approving_every_call_also_runs_mcp_tools_the_agent_does_not_allow() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     // `run` has nobody to ask, so a tool that asked would be refused instead.
     assert_eq!(mcp.requests("tools/call").len(), 1);
-    assert!(!stderr(&output).contains("(asks)"), "{}", stderr(&output));
 }
 
 #[tokio::test]

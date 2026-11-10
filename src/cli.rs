@@ -16,9 +16,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-pub(crate) use prepare::{PreparedSession, SessionOptions, prepare};
+pub(crate) use prepare::{PreparedSession, prepare};
 pub(crate) use settings::Settings;
-pub(crate) use shared::{ModeSettings, Shared};
+pub(crate) use shared::Shared;
 
 #[derive(Parser)]
 #[command(name = "zx-agent", version, about = "Minimal general-purpose agent kernel")]

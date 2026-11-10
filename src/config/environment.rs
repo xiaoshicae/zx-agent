@@ -4,16 +4,21 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 
 use super::read_text;
-use crate::ai::openai::{ReasoningFormat, SystemUpdates};
+use crate::ai::openai::OpenAiConfig;
+use crate::ai::retry::RetryPolicy;
 use crate::ai::{ModelCost, ModelMeta, Reasoning};
 use crate::executor::{Access, check_network};
 use crate::mcp::{check_server_name, tool_name as mcp_tool_name};
 use crate::output_store;
+
+/// The variable holding the API key when config.toml names none.
+const DEFAULT_API_KEY_ENV: &str = "OPENAI_API_KEY";
 
 /// Where bash and read_file run.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -73,32 +78,27 @@ pub struct McpServer {
     pub max_timeout_secs: Option<u64>,
 }
 
-/// The `[provider]` table: how the model is reached. Unset values leave the choice to the
-/// command line or its default.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// The `[provider]` table over the built-in defaults, the provider's own: how the model is
+/// reached.
+#[derive(Clone, Debug)]
 pub struct ProviderSettings {
-    /// OpenAI-compatible base URL, without `/chat/completions`.
-    pub base_url: Option<String>,
+    /// Where requests go and how they are written; the key is left to the frontend, which
+    /// reads it from `api_key_env`.
+    pub openai: OpenAiConfig,
     /// Name of the variable holding the API key.
-    pub api_key_env: Option<String>,
-    /// How system prompt changes reach the model.
-    pub system_updates: Option<SystemUpdates>,
-    /// How a reasoning level is written into the request.
-    pub reasoning_format: Option<ReasoningFormat>,
-    /// Send an empty `reasoning_content` with answers that lack one.
-    pub fill_missing_reasoning: bool,
-    /// Send the session ID as the request's `prompt_cache_key`.
-    pub prompt_cache_key: bool,
-    /// Fields added to every request body, such as a server's switch for thinking; the
-    /// provider refuses fields it sets itself.
-    pub request_fields: serde_json::Map<String, serde_json::Value>,
-    /// Headers sent with every request, such as a gateway's routing header; never
-    /// `Authorization`, which comes from the API key.
-    pub headers: Vec<(String, String)>,
-    /// Longest wait for response headers or the next stream chunk, in seconds.
-    pub idle_timeout_secs: Option<u64>,
-    /// Retries for transient provider errors.
-    pub max_retries: Option<u32>,
+    pub api_key_env: String,
+    /// How transient provider errors are retried; the file sets only the count.
+    pub retry: RetryPolicy,
+}
+
+impl Default for ProviderSettings {
+    fn default() -> Self {
+        Self {
+            openai: OpenAiConfig::default(),
+            api_key_env: DEFAULT_API_KEY_ENV.to_string(),
+            retry: RetryPolicy::default(),
+        }
+    }
 }
 
 /// `config.toml`, checked: the environment every agent of this user runs in.
@@ -106,7 +106,7 @@ pub struct ProviderSettings {
 pub struct Config {
     /// Where the file is, or would be; `None` without a home directory.
     pub path: Option<PathBuf>,
-    /// The model ID, unless the command line names one.
+    /// The model ID, unless `--model` or `ZX_MODEL` names one.
     pub model: Option<String>,
     /// How hard a reasoning model thinks.
     pub reasoning: Option<Reasoning>,
@@ -296,19 +296,37 @@ impl RawConfig {
 }
 
 impl RawProvider {
+    /// The settings over the defaults, checked.
     fn into_settings(self) -> Result<ProviderSettings> {
-        Ok(ProviderSettings {
-            base_url: non_empty("provider.baseUrl", self.base_url)?,
-            api_key_env: non_empty("provider.apiKeyEnv", self.api_key_env)?,
-            system_updates: parsed("provider.systemUpdates", self.system_updates)?,
-            reasoning_format: parsed("provider.reasoningFormat", self.reasoning_format)?,
-            fill_missing_reasoning: self.fill_missing_reasoning,
-            prompt_cache_key: self.prompt_cache_key,
-            request_fields: request_fields(self.request_fields)?,
-            headers: headers(self.headers)?,
-            idle_timeout_secs: positive("provider.idleTimeoutSecs", self.idle_timeout_secs)?,
-            max_retries: self.max_retries,
-        })
+        let mut settings = ProviderSettings::default();
+        let ProviderSettings {
+            openai,
+            api_key_env,
+            retry,
+        } = &mut settings;
+        if let Some(url) = non_empty("provider.baseUrl", self.base_url)? {
+            openai.base_url = url;
+        }
+        if let Some(env) = non_empty("provider.apiKeyEnv", self.api_key_env)? {
+            *api_key_env = env;
+        }
+        if let Some(updates) = parsed("provider.systemUpdates", self.system_updates)? {
+            openai.system_updates = updates;
+        }
+        if let Some(format) = parsed("provider.reasoningFormat", self.reasoning_format)? {
+            openai.reasoning_format = format;
+        }
+        openai.fill_missing_reasoning = self.fill_missing_reasoning;
+        openai.prompt_cache_key = self.prompt_cache_key;
+        openai.extra_fields = request_fields(self.request_fields)?;
+        openai.headers = headers(self.headers)?;
+        if let Some(secs) = positive("provider.idleTimeoutSecs", self.idle_timeout_secs)? {
+            openai.idle_timeout = Duration::from_secs(secs);
+        }
+        if let Some(retries) = self.max_retries {
+            retry.max_retries = retries;
+        }
+        Ok(settings)
     }
 }
 
@@ -359,7 +377,7 @@ fn non_empty(key: &str, value: Option<String>) -> Result<Option<String>> {
     Ok(value)
 }
 
-/// `value` parsed as the command line parses the option of the same name.
+/// `value` parsed by its type, with `key` naming it in the error.
 fn parsed<T: std::str::FromStr<Err = String>>(key: &str, value: Option<String>) -> Result<Option<T>> {
     value
         .map(|text| text.parse().map_err(|error: String| anyhow::anyhow!("{key}: {error}")))
@@ -415,6 +433,8 @@ impl RawModel {
 
 #[cfg(test)]
 mod tests {
+    use crate::ai::openai::{ReasoningFormat, SystemUpdates};
+
     use super::*;
 
     fn load_text(text: &str) -> Result<Config> {
@@ -435,7 +455,9 @@ mod tests {
         let config = Config::load(&path).unwrap();
         assert_eq!(config.path.as_deref(), Some(path.as_path()));
         assert_eq!(config.model, None);
-        assert_eq!(config.provider, ProviderSettings::default());
+        assert_eq!(config.provider.openai.base_url, "https://api.openai.com/v1");
+        assert_eq!(config.provider.api_key_env, "OPENAI_API_KEY");
+        assert_eq!(config.provider.retry.max_retries, 3);
         assert_eq!(config.execution, Execution::Local);
         assert_eq!(config.tool_output.threshold_bytes, Some(8 * 1024));
         assert!(config.mcp.is_empty() && config.models.is_empty());
@@ -458,21 +480,17 @@ mod tests {
         let mut fields = serde_json::Map::new();
         fields.insert("thinking".into(), serde_json::json!({"type": "disabled"}));
         fields.insert("top_k".into(), serde_json::json!(5));
-        assert_eq!(
-            config.provider,
-            ProviderSettings {
-                base_url: Some("http://localhost:8000/v1".into()),
-                api_key_env: Some("LOCAL_KEY".into()),
-                system_updates: Some(SystemUpdates::Inline),
-                reasoning_format: Some(ReasoningFormat::Thinking),
-                fill_missing_reasoning: true,
-                prompt_cache_key: true,
-                request_fields: fields,
-                headers: vec![("X-Route".into(), "eu".into())],
-                idle_timeout_secs: Some(15),
-                max_retries: Some(0),
-            }
-        );
+        let provider = &config.provider;
+        let openai = &provider.openai;
+        assert_eq!(openai.base_url, "http://localhost:8000/v1");
+        assert_eq!(provider.api_key_env, "LOCAL_KEY");
+        assert_eq!(openai.system_updates, SystemUpdates::Inline);
+        assert_eq!(openai.reasoning_format, ReasoningFormat::Thinking);
+        assert!(openai.fill_missing_reasoning && openai.prompt_cache_key);
+        assert_eq!(openai.extra_fields, fields);
+        assert_eq!(openai.headers, [("X-Route".to_string(), "eu".to_string())]);
+        assert_eq!(openai.idle_timeout, Duration::from_secs(15));
+        assert_eq!(provider.retry.max_retries, 0);
         assert_eq!(config.approval_timeout_secs, Some(60));
     }
 

@@ -31,7 +31,6 @@ use tokio_util::sync::CancellationToken;
 
 use zx_agent::AgentSession;
 use zx_agent::agent::{EventSink, RunOutcome};
-use zx_agent::agent_session::Subscription;
 use zx_agent::config::Builtin;
 use zx_agent::otel::Telemetry;
 use zx_agent::runner::RunReport;
@@ -39,24 +38,18 @@ use zx_agent::session::SessionInfo as StoredSession;
 use zx_agent::sync::lock;
 use zx_agent::tools::{BASH, EDIT_FILE, FIND, GREP, LS, READ_FILE, WRITE_FILE};
 
-use crate::cli::{self, AcpArgs, ModeSettings, PreparedSession, SessionOptions};
+use crate::cli::{self, AcpArgs, PreparedSession};
 use crate::process::{EXIT_COMPLETED, with_telemetry};
 use crate::session_files::{self, SessionFile};
 
 use permissions::Permissions;
 use updates::Updates;
 
-/// One ACP session: a conversation the client created with `session/new`, loaded with
-/// `session/load` or resumed with `session/resume`.
-struct Live {
-    session: AgentSession,
-    /// The trace export of this session, while it lasts.
-    _traced: Option<Subscription>,
-}
-
 /// Where a session the client names is.
 enum Located {
-    Live(Arc<Live>),
+    /// A conversation this process holds: one the client created with `session/new`, loaded
+    /// with `session/load` or resumed with `session/resume`.
+    Live(Arc<AgentSession>),
     File(PathBuf),
 }
 
@@ -69,21 +62,23 @@ struct Prepared {
 }
 
 struct Host {
-    settings: ModeSettings<AcpArgs>,
+    shared: cli::Shared,
+    /// `--no-session`: conversations stay in memory.
+    no_session: bool,
     /// Sessions by ID. Handlers run one at a time on the dispatch loop but prompts run in
     /// spawned tasks, so the map is shared; locks are short and never held across an await.
-    sessions: Mutex<HashMap<String, Arc<Live>>>,
+    sessions: Mutex<HashMap<String, Arc<AgentSession>>>,
 }
 
 impl Host {
-    fn session(&self, id: &SessionId) -> Option<Arc<Live>> {
+    fn session(&self, id: &SessionId) -> Option<Arc<AgentSession>> {
         lock(&self.sessions).get(&*id.0).cloned()
     }
 
     /// Where the sessions of `cwd` are kept: chat's directory for that working directory;
     /// `None` with `--no-session`.
     fn session_dir(&self, cwd: &Path) -> Result<Option<PathBuf>> {
-        if self.settings.args.no_session {
+        if self.no_session {
             return Ok(None);
         }
         session_files::default_dir(&cli::resolve_cwd(Some(cwd))?).map(Some)
@@ -126,8 +121,7 @@ impl Host {
         match self.locate(&request.session_id, &request.cwd).await? {
             Located::Live(live) => {
                 let updates = Updates::new(cx.clone(), request.session_id.clone(), request.cwd.clone());
-                live.session
-                    .inspect(|store| updates.replay(store))
+                live.inspect(|store| updates.replay(store))
                     .with_context(|| format!("cannot replay session {}", request.session_id.0))?;
                 Ok(request.session_id.clone())
             }
@@ -162,7 +156,7 @@ impl Host {
             )
             .into());
         }
-        let cwd = request.cwd.as_deref().or(self.settings.args.base.cwd.as_deref());
+        let cwd = request.cwd.as_deref().or(self.shared.base.cwd.as_deref());
         let cwd = cli::resolve_cwd(cwd)?;
         let Some(dir) = self.session_dir(&cwd)? else {
             return Ok(Vec::new());
@@ -181,24 +175,14 @@ impl Host {
     /// Prepare a session on `file` for `cwd`, with the client as its approver and the
     /// receiver of its updates.
     async fn prepare_session(&self, cx: &ConnectionTo<Client>, cwd: &Path, file: SessionFile<'_>) -> Result<Prepared> {
-        let args = &self.settings.args;
-        let mut session = cli::prepare(SessionOptions {
-            base: &args.base,
-            budget: &args.budget,
-            model: &self.settings.shared.settings.model,
-            cwd: Some(cwd),
-            file,
-            agent: Builtin::Assistant,
-            shared: &self.settings.shared,
-        })
-        .await?;
+        let mut session = cli::prepare(&self.shared, &self.shared.settings.model, Some(cwd), file).await?;
         let id = SessionId::new(session.store.header().id.as_str());
         session.require_bash_approval("the client must approve shell commands");
         session.config.interaction = Arc::new(Permissions {
             cx: cx.clone(),
             session_id: id.clone(),
         });
-        session.config.interaction_timeout = self.settings.shared.settings.approval_timeout;
+        session.config.interaction_timeout = self.shared.settings.approval_timeout;
         let cwd = session.config.cwd.clone();
         let updates = Arc::new(Updates::new(cx.clone(), id.clone(), cwd));
         Ok(Prepared { session, updates, id })
@@ -208,14 +192,7 @@ impl Host {
     fn start(&self, prepared: Prepared) -> Result<SessionId> {
         let Prepared { session, updates, id } = prepared;
         let session = session.into_session(updates)?;
-        let traced = self.settings.traces.clone().map(|sink| session.subscribe(sink));
-        lock(&self.sessions).insert(
-            id.0.to_string(),
-            Arc::new(Live {
-                session,
-                _traced: traced,
-            }),
-        );
+        lock(&self.sessions).insert(id.0.to_string(), Arc::new(session));
         Ok(id)
     }
 
@@ -228,7 +205,7 @@ impl Host {
     ) -> Result<(), Error> {
         responder.respond(
             InitializeResponse::new(request.protocol_version)
-                .agent_capabilities(agent_capabilities(!self.settings.args.no_session))
+                .agent_capabilities(agent_capabilities(!self.no_session))
                 .agent_info(Implementation::new("zx-agent", env!("CARGO_PKG_VERSION"))),
         )
     }
@@ -296,7 +273,7 @@ impl Host {
     /// `session/cancel`: abort the session's turn, if it has one.
     fn cancel(&self, notification: &CancelNotification) {
         if let Some(live) = self.session(&notification.session_id) {
-            live.session.abort();
+            live.abort();
         }
     }
 }
@@ -310,9 +287,12 @@ async fn serve(args: AcpArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> 
         args.base.session.is_none(),
         "acp keeps one file per session in the session directory of the zx-agent home; --session does not apply"
     );
-    let shared = cli::Shared::connect(&args.base, Builtin::Assistant).await?;
+    let shared = cli::Shared::connect(args.base, args.budget, Builtin::Assistant)
+        .await?
+        .with_traces(traces);
     let host = Arc::new(Host {
-        settings: ModeSettings { args, shared, traces },
+        shared,
+        no_session: args.no_session,
         sessions: Mutex::new(HashMap::new()),
     });
     let on_initialize = Arc::clone(&host);
@@ -367,8 +347,8 @@ async fn serve(args: AcpArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> 
 }
 
 /// The response to `session/prompt` once the turn ended: its stop reason, or the run's error.
-async fn answer_prompt(live: &Live, text: String) -> Result<PromptResponse> {
-    let report = live.session.prompt(text, &CancellationToken::new()).await?;
+async fn answer_prompt(session: &AgentSession, text: String) -> Result<PromptResponse> {
+    let report = session.prompt(text, &CancellationToken::new()).await?;
     stop_reason(&report).map(PromptResponse::new)
 }
 
