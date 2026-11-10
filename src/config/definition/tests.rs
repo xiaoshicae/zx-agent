@@ -86,7 +86,7 @@ fn built_in_agents_preserve_the_existing_scenario_defaults() {
         assert_eq!(agent.limits.max_model_requests, Some(30));
         assert_eq!(agent.limits.timeout, Some(Duration::from_secs(900)));
         assert_eq!(agent.continue_on_length, 1);
-        assert!(agent.rules.auto_approve.is_empty());
+        assert!(agent.permissions.allowed_commands().is_empty());
         assert_eq!(agent.compaction.trigger_bytes, None);
     }
     let assistant = load(Builtin::Assistant);
@@ -116,9 +116,12 @@ fn built_in_agents_preserve_the_existing_scenario_defaults() {
             "read_output"
         ]
     );
-    assert_eq!(assistant.rules.ask_tools, ["bash", "edit_file", "write_file"]);
-    assert_eq!(assistant.rules.auto_approve, ["grep", "head", "tail", "wc", "jq"]);
-    assert_eq!(assistant.rules.auto_approve_except, ["secret"]);
+    assert_eq!(assistant.permissions.ask, ["bash", "edit_file", "write_file"]);
+    assert_eq!(
+        assistant.permissions.allowed_commands(),
+        ["grep", "head", "tail", "wc", "jq"]
+    );
+    assert_eq!(assistant.permissions.allow_except, ["secret"]);
     assert_eq!(assistant.compaction.trigger_bytes, Some(256 * 1024));
     assert_eq!(assistant.compaction.keep_recent_bytes, 64 * 1024);
 }
@@ -127,9 +130,13 @@ fn built_in_agents_preserve_the_existing_scenario_defaults() {
 fn no_built_in_agent_names_a_program_of_a_particular_environment() {
     for kind in Builtin::ALL {
         let agent = load(kind);
-        assert!(agent.rules.auto_approve_options.is_empty(), "{kind:?}");
+        assert!(agent.permissions.allow_options.is_empty(), "{kind:?}");
         assert!(
-            !agent.rules.auto_approve.iter().any(|prefix| prefix.contains("kubectl")),
+            !agent
+                .permissions
+                .allowed_commands()
+                .iter()
+                .any(|prefix| prefix.contains("kubectl")),
             "{kind:?}"
         );
     }
@@ -145,12 +152,12 @@ fn only_the_interactive_agent_discovers_project_instructions_by_default() {
 #[test]
 fn auto_approval_exceptions_replace_the_inherited_ones_and_program_options_limit_their_program() {
     let agent = load_file(
-        "extends = 'assistant'\n[rules]\nautoApprove = ['tool get', 'grep']\nautoApproveExcept = ['token']\n\
-         [rules.autoApproveOptions.tool]\nlong = ['namespace']\nshortWithValue = ['n']\nshortFlags = ['A']",
+        "extends = 'assistant'\n[permissions]\nallow = ['bash(tool get)', 'bash(grep)']\nallowExcept = ['token']\n\
+         [permissions.allowOptions.tool]\nlong = ['namespace']\nshortWithValue = ['n']\nshortFlags = ['A']",
     )
     .unwrap();
-    assert_eq!(agent.rules.auto_approve_except, ["token"]);
-    let list = agent.rules.auto_approval();
+    assert_eq!(agent.permissions.allow_except, ["token"]);
+    let list = agent.permissions.auto_approval();
     assert!(list.covers("tool get pods -n prod -A --namespace=x | grep web"));
     assert!(!list.covers("tool get pods --raw /api"));
     assert!(!list.covers("tool get pods -Ap"));
@@ -162,25 +169,25 @@ fn auto_approval_exceptions_replace_the_inherited_ones_and_program_options_limit
 #[test]
 fn program_options_that_cannot_match_a_command_are_configuration_errors() {
     for (table, message) in [
-        ("[rules.autoApproveOptions.Tool]\nlong = ['x']", "one lowercase word"),
+        ("[permissions.allowOptions.Tool]\nlong = ['x']", "one lowercase word"),
         (
-            "[rules.autoApproveOptions.tool]\nlong = ['--namespace']",
+            "[permissions.allowOptions.tool]\nlong = ['--namespace']",
             "without dashes",
         ),
         (
-            "[rules.autoApproveOptions.tool]\nlong = ['output=json']",
+            "[permissions.allowOptions.tool]\nlong = ['output=json']",
             "without dashes",
         ),
-        ("[rules.autoApproveOptions.tool]\nshortFlags = ['-']", "letter or digit"),
+        ("[permissions.allowOptions.tool]\nshortFlags = ['-']", "letter or digit"),
         (
-            "[rules.autoApproveOptions.tool]\nshortFlags = ['n']\nshortWithValue = ['n']",
+            "[permissions.allowOptions.tool]\nshortFlags = ['n']\nshortWithValue = ['n']",
             "both a flag and an option with a value",
         ),
         (
-            "[rules.autoApproveOptions.tool]\nlong = ['x']\nshort = ['y']",
+            "[permissions.allowOptions.tool]\nlong = ['x']\nshort = ['y']",
             "unknown field",
         ),
-        ("[rules]\nautoApproveExcept = [' ']", "empty command rule"),
+        ("[permissions]\nallowExcept = [' ']", "an entry is empty"),
     ] {
         let error = format!("{:#}", load_file(table).unwrap_err());
         assert!(error.contains(message), "{table}: {error}");
@@ -190,11 +197,11 @@ fn program_options_that_cannot_match_a_command_are_configuration_errors() {
 #[test]
 fn the_kubernetes_deployment_agent_keeps_kubectl_reads_and_asks_for_the_rest() {
     let agent = shipped("deploy/kubernetes/agents/assistant.md");
-    assert_eq!(agent.rules.ask_tools, ["bash"]);
+    assert_eq!(agent.permissions.ask, ["bash"]);
     assert_eq!(agent.tools, ["bash", "read_file", "read_skill", "read_output"]);
     // Its body is empty: the instructions are the assistant's.
     assert_eq!(agent.instructions, load(Builtin::Assistant).instructions);
-    let list = agent.rules.auto_approval();
+    let list = agent.permissions.auto_approval();
     for command in [
         "kubectl get pods -A -o wide | grep -v Running",
         "kubectl get pods -nkube-system -oyaml",
@@ -227,7 +234,7 @@ fn the_kubernetes_deployment_agent_keeps_kubectl_reads_and_asks_for_the_rest() {
 fn a_file_extends_a_built_in_agent_and_its_body_replaces_the_instructions() {
     let agent = load_agent(
         "custom.md",
-        "extends = 'assistant'\ntools = []\n[rules]\ndeny = ['secret']",
+        "extends = 'assistant'\ntools = []\n[permissions]\ndeny = ['bash(secret)']",
         "自定义说明\n",
         &Config::default(),
     )
@@ -235,8 +242,8 @@ fn a_file_extends_a_built_in_agent_and_its_body_replaces_the_instructions() {
     assert_eq!(agent.name, "custom");
     assert_eq!(agent.instructions, "自定义说明\n");
     assert!(agent.tools.is_empty());
-    assert_eq!(agent.rules.deny, ["secret"]);
-    assert_eq!(agent.rules.ask_tools, ["bash", "edit_file", "write_file"]);
+    assert_eq!(agent.permissions.denied_commands(), ["secret"]);
+    assert_eq!(agent.permissions.ask, ["bash", "edit_file", "write_file"]);
     assert_eq!(agent.limits.max_model_requests, None);
 }
 
@@ -254,7 +261,7 @@ fn an_agent_without_extends_starts_from_nothing_and_needs_instructions() {
     let agent = load_agent("bare.md", "", "Only this.\n", &Config::default()).unwrap();
     assert_eq!(agent.instructions, "Only this.\n");
     assert!(agent.tools.is_empty());
-    assert!(agent.rules.ask_tools.is_empty() && agent.rules.auto_approve.is_empty());
+    assert!(agent.permissions.ask.is_empty() && agent.permissions.allowed_commands().is_empty());
     assert_eq!(agent.limits.max_model_requests, Limits::default().max_model_requests);
     assert_eq!(agent.limits.timeout, Limits::default().timeout);
     assert_eq!(agent.continue_on_length, 0);
@@ -283,15 +290,15 @@ fn an_agent_without_extends_starts_from_nothing_and_needs_instructions() {
 
 #[test]
 fn a_list_the_file_sets_replaces_the_inherited_one_whole() {
-    let agent =
-        load_file("extends = 'assistant'\ntools = ['read_file']\n[rules]\nautoApprove = ['kubectl get']").unwrap();
+    let agent = load_file("extends = 'assistant'\ntools = ['read_file']\n[permissions]\nallow = ['bash(kubectl get)']")
+        .unwrap();
     assert_eq!(agent.tools, ["read_file"]);
-    assert_eq!(agent.rules.auto_approve, ["kubectl get"]);
+    assert_eq!(agent.permissions.allowed_commands(), ["kubectl get"]);
     // A table goes key by key: what the file leaves out is inherited.
-    assert_eq!(agent.rules.ask_tools, ["bash", "edit_file", "write_file"]);
-    assert_eq!(agent.rules.auto_approve_except, ["secret"]);
-    let agent = load_file("extends = 'assistant'\n[rules]\nautoApprove = []").unwrap();
-    assert!(agent.rules.auto_approve.is_empty());
+    assert_eq!(agent.permissions.ask, ["bash", "edit_file", "write_file"]);
+    assert_eq!(agent.permissions.allow_except, ["secret"]);
+    let agent = load_file("extends = 'assistant'\n[permissions]\nallow = []").unwrap();
+    assert!(agent.permissions.allowed_commands().is_empty());
 }
 
 #[test]
@@ -431,19 +438,19 @@ fn environment_settings_and_unsupported_extensions_are_not_agent_fields() {
 #[test]
 fn approving_every_call_needs_the_container_and_no_tool_that_asks() {
     let container = config("execution = 'container'\n[container]\nimage = 'x'");
-    let agent = load_with("[rules]\napproveAll = true\naskTools = []", &container).unwrap();
-    assert!(agent.rules.approve_all);
-    assert!(!load_file("").unwrap().rules.approve_all);
+    let agent = load_with("[permissions]\napproveAll = true\nask = []", &container).unwrap();
+    assert!(agent.permissions.approve_all);
+    assert!(!load_file("").unwrap().permissions.approve_all);
     for (text, config, expected) in [
         (
-            "[rules]\napproveAll = true",
+            "[permissions]\napproveAll = true",
             &Config::default(),
             "needs execution = \"container\"",
         ),
         (
-            "[rules]\napproveAll = true\naskTools = ['bash']",
+            "[permissions]\napproveAll = true\nask = ['bash']",
             &container,
-            "rules.askTools must be empty",
+            "permissions.ask must be empty",
         ),
     ] {
         let error = format!("{:#}", load_with(text, config).unwrap_err());
@@ -453,7 +460,7 @@ fn approving_every_call_needs_the_container_and_no_tool_that_asks() {
 
 #[test]
 fn approve_all_must_be_a_boolean() {
-    assert!(load_file("[rules]\napproveAll = 'yes'").is_err());
+    assert!(load_file("[permissions]\napproveAll = 'yes'").is_err());
 }
 
 #[test]
@@ -490,12 +497,12 @@ fn context_management_settings_overlay_individually_and_validate() {
 }
 
 #[test]
-fn invalid_tool_names_and_empty_rules_are_configuration_errors() {
+fn invalid_tool_names_and_empty_entries_are_configuration_errors() {
     for text in [
         "tools = ['missing']",
-        "[rules]\naskTools = ['missing']",
-        "[rules]\ndeny = ['  ']",
-        "[rules]\nautoApprove = ['']",
+        "[permissions]\nask = ['missing']",
+        "[permissions]\ndeny = ['bash(  )']",
+        "[permissions]\nallow = ['']",
     ] {
         assert!(load_file(text).is_err(), "{text}");
     }
@@ -537,7 +544,7 @@ fn the_shipped_review_example_resolves_its_context_and_skill_files() {
     let agent = from_path(&path, &Config::default()).unwrap();
     assert_eq!(agent.name, "review");
     assert_eq!(agent.tools, ["read_file", "read_skill"]);
-    assert_eq!(agent.rules.deny_tools, ["bash"]);
+    assert_eq!(agent.permissions.denied_tools(), ["bash"]);
     assert!(
         agent
             .instructions
@@ -554,13 +561,16 @@ fn the_shipped_review_example_resolves_its_context_and_skill_files() {
 }
 
 #[test]
-fn rules_may_name_the_configured_mcp_tools_only() {
+fn permissions_may_name_the_configured_mcp_tools_only() {
     let prom = config("[[mcp]]\nname = 'prom'\nurl = 'https://prom.example/mcp'\ntools = ['query', 'range']");
-    let agent = load_with("[rules]\ndenyTools = ['prom__range']", &prom).unwrap();
-    assert_eq!(agent.rules.deny_tools, ["prom__range"]);
-    let error = load_with("[rules]\naskTools = ['prom__admin']", &prom)
+    let agent = load_with("[permissions]\ndeny = ['prom__range']", &prom).unwrap();
+    assert_eq!(agent.permissions.denied_tools(), ["prom__range"]);
+    let error = load_with("[permissions]\nask = ['prom__admin']", &prom)
         .unwrap_err()
         .to_string();
-    assert!(error.contains("unknown tool in rule \"prom__admin\""), "{error}");
-    assert!(load_file("[rules]\naskTools = ['prom__query']").is_err());
+    assert!(
+        error.contains("permissions.ask: unknown tool \"prom__admin\""),
+        "{error}"
+    );
+    assert!(load_file("[permissions]\nask = ['prom__query']").is_err());
 }

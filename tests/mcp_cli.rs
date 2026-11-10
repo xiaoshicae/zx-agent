@@ -1,5 +1,5 @@
 //! The compiled program with MCP servers from config.toml: run, chat and serve connect them at
-//! startup; a tool the server's allowTools lists runs, the others ask (and `run`, with no one
+//! startup; a tool the agent's permissions.allow lists runs, the others ask (and `run`, with no one
 //! to ask, refuses them); the token is hidden from commands and redacted; a server that
 //! cannot be used stops startup.
 mod common;
@@ -38,14 +38,16 @@ fn agent_home(dir: &Path, url: &str, builtin_tools: &str) -> PathBuf {
         write_agent(
             &home,
             builtin,
-            &format!("tools = {builtin_tools}\n[context]\ndiscover = false\n"),
+            &format!(
+                "tools = {builtin_tools}\n[context]\ndiscover = false\n[permissions]\nallow = [\"prom__query\"]\n"
+            ),
         );
     }
     write_config(
         &home,
         &format!(
             "[[mcp]]\nname = \"prom\"\nurl = \"{url}\"\ntokenEnv = \"{TOKEN_VAR}\"\n\
-             tools = [\"query\", \"range\"]\nallowTools = [\"query\"]\n"
+             tools = [\"query\", \"range\"]\n"
         ),
     );
     home

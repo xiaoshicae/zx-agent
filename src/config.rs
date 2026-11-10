@@ -5,10 +5,12 @@
 //!
 //! - `environment`: `config.toml`: the model and its provider, where commands run, the MCP
 //!   servers, what is known about models, and where long tool results are saved
-//! - `definition`: an agent: its selection by name or path, the built-in agents, and the
+//! - `definition`: an agent: the built-in agents, the user's files that replace them, and the
 //!   checks of the result
 //! - `agent_file`: an agent file: TOML front matter and instructions, and how it goes over the
 //!   built-in agent it extends
+//! - `permissions`: an agent's `[permissions]`: the tools that ask, the calls allowed and
+//!   the ones denied, in the terms of the policies
 //! - `context`: the project context: `AGENTS.md` files from the Git root down to the working
 //!   directory
 //! - `skills`: explicit skill catalogs, whose bodies a tool reads on demand
@@ -17,14 +19,16 @@ mod agent_file;
 mod context;
 mod definition;
 mod environment;
+mod permissions;
 pub mod skills;
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, ensure};
 
-pub use definition::{AgentDefinition, Builtin, ProjectContext, Rules};
+pub use definition::{AgentDefinition, Builtin, ProjectContext};
 pub use environment::{Config, ContainerSettings, Execution, McpServer, ProviderSettings};
+pub use permissions::{Entry, Permissions};
 
 use crate::files::read_text_file;
 

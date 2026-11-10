@@ -5,8 +5,8 @@ extends = "assistant"
 tools = ["read_file", "read_skill"]
 continueOnLength = 0
 
-[rules]
-denyTools = ["bash"]
+[permissions]
+deny = ["bash"]
 
 [limits]
 maxModelRequests = 12

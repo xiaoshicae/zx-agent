@@ -48,7 +48,8 @@ pub struct ContainerSettings {
 }
 
 /// An external MCP server whose listed tools the model may call. The frontends connect it at
-/// startup; whether a call runs is up to the agent's rules.
+/// startup. Its tools ask a person, and are refused where no one can answer, as in `run`,
+/// unless the agent's `permissions.allow` lists them.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct McpServer {
@@ -62,10 +63,6 @@ pub struct McpServer {
     pub token_env: Option<String>,
     /// The server's tools to offer the model, by the names the server gives them.
     pub tools: Vec<String>,
-    /// Tools among `tools` that run without approval. The others ask a person, and are
-    /// refused where no one can answer, as in `run`.
-    #[serde(default)]
-    pub allow_tools: Vec<String>,
     /// Longest a call may go without an answer or a progress notification, in seconds;
     /// unset uses `--tool-timeout-secs`.
     #[serde(default)]
@@ -202,12 +199,6 @@ impl Config {
                 server.max_timeout_secs != Some(0),
                 "MCP server {name}: maxTimeoutSecs must be greater than zero"
             );
-            for tool in &server.allow_tools {
-                ensure!(
-                    server.tools.contains(tool),
-                    "MCP server {name}: allowTools names {tool:?}, which tools does not list"
-                );
-            }
             let first = names.len();
             for tool in &server.tools {
                 let model_name = mcp_tool_name(name, tool).map_err(anyhow::Error::msg)?;
@@ -502,7 +493,7 @@ mod tests {
     }
 
     const PROM: &str = "[[mcp]]\nname = 'prom'\nurl = 'https://prom.example/mcp'\ntokenEnv = 'PROM_TOKEN'\n\
-                        tools = ['query', 'range']\nallowTools = ['query']\ntimeoutSecs = 30\n\
+                        tools = ['query', 'range']\ntimeoutSecs = 30\n\
                         maxTimeoutSecs = 600\n";
 
     #[test]
@@ -515,7 +506,6 @@ mod tests {
                 url: "https://prom.example/mcp".into(),
                 token_env: Some("PROM_TOKEN".into()),
                 tools: vec!["query".into(), "range".into()],
-                allow_tools: vec!["query".into()],
                 timeout_secs: Some(30),
                 max_timeout_secs: Some(600),
             }]
@@ -529,8 +519,8 @@ mod tests {
         for (text, expected) in [
             (server("tools = []"), "tools lists no tool"),
             (
-                server("tools = ['query']\nallowTools = ['range']"),
-                "which tools does not list",
+                server("tools = ['query']\nallowTools = ['query']"),
+                "unknown field `allowTools`",
             ),
             (
                 server("tools = ['query']\ntimeoutSecs = 0"),

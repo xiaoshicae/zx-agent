@@ -2,16 +2,14 @@
 //! one; `chat`, `serve` and `acp` the assistant), which a file of the same name in the
 //! `agents/` directory of the zx-agent home replaces.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 
 use super::agent_file::AgentFile;
 use super::skills::{self, Skill};
-use super::{Config, Execution, context, read_text};
-use crate::policy::{AutoApprove, ProgramOptions};
+use super::{Config, Execution, Permissions, context, read_text};
 use crate::runner::Limits;
 use crate::tools::BUILTIN_TOOL_NAMES;
 use crate::{compaction, output_store};
@@ -50,44 +48,6 @@ impl Builtin {
     }
 }
 
-/// Host-enforced command and tool rules.
-#[derive(Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-pub struct Rules {
-    /// Bash command prefixes; an empty list leaves the original deny-only policy.
-    pub allow: Vec<String>,
-    /// Additional case-insensitive command substrings to deny.
-    pub deny: Vec<String>,
-    /// Bash command prefixes that run without asking where bash needs approval; the commands
-    /// that still ask are listed on [`crate::policy::AutoApprove`].
-    pub auto_approve: Vec<String>,
-    /// Texts that keep a command asking although `auto_approve` covers it, compared without
-    /// case, such as `secret`.
-    pub auto_approve_except: Vec<String>,
-    /// For a program, such as kubectl, the options that a covered command may pass; any other
-    /// option asks. Programs not listed may pass any option. A file replaces the entry of a
-    /// program it lists.
-    pub auto_approve_options: BTreeMap<String, ProgramOptions>,
-    /// Registered tool names whose calls require a host approval.
-    pub ask_tools: Vec<String>,
-    /// Tool names denied regardless of enabled tools or approval grants.
-    pub deny_tools: Vec<String>,
-    /// Ask nobody: calls that would wait for an approval run instead, while deny rules and
-    /// the command policy still apply. Only with container execution, where the container is
-    /// the sandbox, and not together with `ask_tools`.
-    pub approve_all: bool,
-}
-
-impl Rules {
-    /// The bash commands these rules let run without asking, for the approval rules.
-    pub fn auto_approval(&self) -> AutoApprove {
-        self.auto_approve_options.iter().fold(
-            AutoApprove::new(&self.auto_approve).except(&self.auto_approve_except),
-            |list, (program, options)| list.options(program, options.clone()),
-        )
-    }
-}
-
 /// Which project instructions to read at startup. Explicit paths are absolute after load.
 #[derive(Debug)]
 pub struct ProjectContext {
@@ -107,8 +67,8 @@ pub struct AgentDefinition {
     pub instructions: String,
     /// Requested built-in tools; read_skill is omitted when no catalog is registered.
     pub tools: Vec<String>,
-    /// Rules enforced by the host, independently of prompt text.
-    pub rules: Rules,
+    /// What the host lets the agent do, independently of prompt text.
+    pub permissions: Permissions,
     /// Per-prompt request and time budgets.
     pub limits: Limits,
     /// Number of length-truncated responses to continue automatically.
@@ -175,14 +135,14 @@ impl AgentDefinition {
         Ok(agent)
     }
 
-    /// What an agent file without `extends` goes over: no tools, rules, skills or
+    /// What an agent file without `extends` goes over: no tools, permissions, skills or
     /// instructions, the kernel's limits and summary settings, and no project context.
     fn empty() -> Self {
         Self {
             name: String::new(),
             instructions: String::new(),
             tools: Vec::new(),
-            rules: Rules::default(),
+            permissions: Permissions::default(),
             limits: Limits::default(),
             continue_on_length: 0,
             context: ProjectContext {
@@ -194,41 +154,23 @@ impl AgentDefinition {
         }
     }
 
-    /// Check names, rule patterns and skill registrations without reading skill bodies; tool
-    /// rules may name the MCP tools of `config`, and approving every call needs its container.
+    /// Check tool names, permissions and skill registrations without reading skill bodies;
+    /// permissions may name the MCP tools of `config`, and approving every call needs its
+    /// container.
     pub fn validate(&self, config: &Config) -> Result<()> {
         for name in &self.tools {
             ensure!(known_tool(name), "unknown tool {name:?}");
         }
-        for pattern in self
-            .rules
-            .allow
-            .iter()
-            .chain(&self.rules.deny)
-            .chain(&self.rules.auto_approve)
-            .chain(&self.rules.auto_approve_except)
-        {
-            ensure!(!pattern.trim().is_empty(), "empty command rule is not allowed");
-        }
-        for (program, options) in &self.rules.auto_approve_options {
-            check_program_options(program, options)?;
-        }
-        let mcp_tools = config.mcp_tool_names()?;
-        for tool in self.rules.ask_tools.iter().chain(&self.rules.deny_tools) {
-            ensure!(
-                known_tool(tool) || mcp_tools.contains(tool),
-                "unknown tool in rule {tool:?}"
-            );
-        }
+        self.permissions.validate(known_tool, &config.mcp_tool_names()?)?;
         self.compaction.validate()?;
-        if self.rules.approve_all {
+        if self.permissions.approve_all {
             ensure!(
                 config.execution == Execution::Container,
-                "rules.approveAll needs execution = \"container\": without the container as a sandbox, every command would run on this machine unasked"
+                "permissions.approveAll needs execution = \"container\" in config.toml: without the container as a sandbox, every command would run on this machine unasked"
             );
             ensure!(
-                self.rules.ask_tools.is_empty(),
-                "rules.approveAll asks for no approval, so rules.askTools must be empty"
+                self.permissions.ask.is_empty(),
+                "permissions.approveAll asks for no approval, so permissions.ask must be empty"
             );
         }
         skills::validate(&self.skills)
@@ -253,36 +195,6 @@ fn exists(path: &Path) -> Result<bool> {
 /// Whether `name` is a tool the host registers itself: a built-in, read_skill or read_output.
 fn known_tool(name: &str) -> bool {
     name == skills::TOOL_NAME || name == output_store::TOOL_NAME || BUILTIN_TOOL_NAMES.contains(&name)
-}
-
-/// A program name of `rules.autoApproveOptions` is one lowercase word, since commands are
-/// compared without case; options are written without their dashes, and a letter is either
-/// a flag or takes a value.
-fn check_program_options(program: &str, options: &ProgramOptions) -> Result<()> {
-    ensure!(
-        !program.is_empty() && !program.contains(char::is_whitespace) && program.to_lowercase() == program,
-        "autoApproveOptions: program {program:?} must be one lowercase word"
-    );
-    for name in &options.long {
-        ensure!(
-            !name.is_empty() && !name.starts_with('-') && !name.contains(|c: char| c.is_whitespace() || c == '='),
-            "autoApproveOptions.{program}: long option {name:?} must be a name without dashes, such as \"namespace\""
-        );
-    }
-    for letter in options.short_with_value.iter().chain(&options.short_flags) {
-        ensure!(
-            letter.is_ascii_alphanumeric(),
-            "autoApproveOptions.{program}: short option {letter:?} must be a letter or digit"
-        );
-    }
-    if let Some(letter) = options
-        .short_flags
-        .iter()
-        .find(|letter| options.short_with_value.contains(letter))
-    {
-        bail!("autoApproveOptions.{program}: {letter:?} cannot be both a flag and an option with a value");
-    }
-    Ok(())
 }
 
 #[cfg(test)]

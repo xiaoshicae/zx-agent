@@ -3,15 +3,15 @@
 tools = ["bash", "read_file", "edit_file", "write_file", "grep", "find", "ls", "read_skill", "read_output"]
 continueOnLength = 0
 
-[rules]
-askTools = ["bash", "edit_file", "write_file"]
+[permissions]
+ask = ["bash", "edit_file", "write_file"]
 # Read-only commands that run without asking: none of them can run another program or
 # write a file. awk, sed, sort, uniq, find, xargs, tee and curl are left out for that
 # reason. Commands with quotes, $, other shell syntax, a URL or a text listed in
-# autoApproveExcept still ask; see README, "安全模型". Programs of a particular environment,
-# such as kubectl, belong in that environment's agent, with the options they may pass.
-autoApprove = ["grep", "head", "tail", "wc", "jq"]
-autoApproveExcept = ["secret"]
+# allowExcept still ask; see README, "安全模型". Programs of a particular environment, such
+# as kubectl, belong in that environment's agent, with the options they may pass.
+allow = ["bash(grep)", "bash(head)", "bash(tail)", "bash(wc)", "bash(jq)"]
+allowExcept = ["secret"]
 
 [limits]
 maxModelRequests = "unlimited"

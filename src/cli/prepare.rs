@@ -77,7 +77,7 @@ pub(crate) struct PreparedSession {
     pub(crate) store: SessionStore,
     /// The agent's auto-approved commands, for frontend policies that also ask for bash.
     auto_approve: AutoApprove,
-    /// The agent's `rules.approveAll`: nothing waits for a person.
+    /// The agent's `permissions.approveAll`: nothing waits for a person.
     approve_all: bool,
     limits: Limits,
     compaction: compaction::Config,
@@ -89,7 +89,7 @@ pub(crate) struct PreparedSession {
 
 impl PreparedSession {
     /// Ask a person before every bash command, except those the agent auto-approves, or
-    /// none when the agent approves every call; other tools follow the agent's rules.
+    /// none when the agent approves every call; other tools follow the agent's permissions.
     /// Chat and serve both work this way.
     pub(crate) fn require_bash_approval(&mut self, reason: &str) {
         if self.approve_all {
@@ -169,7 +169,8 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
     let mut host = host_tools(&mut agent, &options.shared.settings.config.tool_output, &cwd)?;
     let (session, executor, environment) = open_session(&options, &cwd).await?;
     let tools = assemble_tools(&agent, &options, &executor, &mut host)?;
-    let policy = CommandPolicy::new(&agent.rules.allow).deny_also(&agent.rules.deny);
+    // No allowlist: the commands an agent allows run without asking, the others ask.
+    let policy = CommandPolicy::new(Vec::<String>::new()).deny_also(agent.permissions.denied_commands());
     let command_policy = command_policy_section(&policy, &tools);
     let system_prompt = build_system_prompt(
         &agent.instructions,
@@ -207,11 +208,11 @@ pub(crate) async fn prepare(options: SessionOptions<'_>) -> Result<PreparedSessi
         },
         store: session,
         auto_approve,
-        approve_all: agent.rules.approve_all,
+        approve_all: agent.permissions.approve_all,
         limits: agent.limits,
         compaction: agent.compaction,
         agent_name: agent.name,
-        auto_approve_commands: agent.rules.auto_approve,
+        auto_approve_commands: agent.permissions.allowed_commands(),
     })
 }
 
@@ -404,7 +405,7 @@ async fn open_session(options: &SessionOptions<'_>, cwd: &Path) -> Result<(Sessi
 }
 
 /// Register the hooks every mode shares, after the command policy: the MCP servers, the
-/// agent's rules, continuation, `redaction` and `spill`; returns the auto-approved commands
+/// agent's permissions, continuation, `redaction` and `spill`; returns the auto-approved commands
 /// for the frontend's own bash policy.
 ///
 /// Each hook declares its stage, so the policies run first and redaction runs before output
@@ -417,10 +418,10 @@ fn register_hooks(
     spill: Option<SpillOutputs>,
 ) -> Result<AutoApprove> {
     extensions::register(config, &options.shared.mcp.servers).map_err(anyhow::Error::msg)?;
-    let auto_approve = agent.rules.auto_approval();
-    // The agent's rules and the frontend's bash policy each own the list (`rules_policy`).
+    let auto_approve = agent.permissions.auto_approval();
+    // The agent's permissions and the frontend's bash policy each own the list (`rules_policy`).
     if let Some(rules) = rules_policy(agent, &options.shared.mcp.ask, auto_approve.clone()) {
-        push_built_in(config, "agent_rules", PolicyHook::new(Arc::new(rules)));
+        push_built_in(config, "agent_permissions", PolicyHook::new(Arc::new(rules)));
     }
     push_built_in(
         config,
@@ -458,26 +459,24 @@ fn hidden_values<'a>(options: &'a SessionOptions<'_>) -> impl Iterator<Item = St
         .filter_map(|name| env_value(name))
 }
 
-/// The agent's tool rules and the MCP tools that ask, as one policy that allows the rest;
-/// none without rules.
+/// The agent's denied and asking tools and the MCP tools that ask, as one policy that allows
+/// the rest; none without any of them.
 ///
 /// Every policy that asks for bash gets the auto-approved commands: the strictest verdict of
 /// all policies wins, so one that still asked would cancel the others' auto-approval.
 fn rules_policy(agent: &mut AgentDefinition, mcp_ask: &[String], auto_approve: AutoApprove) -> Option<RulePolicy> {
-    let denied = std::mem::take(&mut agent.rules.deny_tools)
-        .into_iter()
-        .map(|tool| Rule {
-            matcher: RuleMatcher::Tool(tool),
-            decision: PolicyDecision::Deny("tool denied by the agent".into()),
-        });
-    let asked = std::mem::take(&mut agent.rules.ask_tools).into_iter().map(|tool| Rule {
+    let denied = agent.permissions.denied_tools().into_iter().map(|tool| Rule {
+        matcher: RuleMatcher::Tool(tool),
+        decision: PolicyDecision::Deny("tool denied by the agent".into()),
+    });
+    let asked = std::mem::take(&mut agent.permissions.ask).into_iter().map(|tool| Rule {
         matcher: RuleMatcher::Tool(tool),
         decision: PolicyDecision::Ask("the agent requires tool approval".into()),
     });
-    // An MCP server's tools ask unless its allowTools lists them: annotations are hints.
+    // An MCP server's tools ask unless permissions.allow lists them: annotations are hints.
     let mcp = mcp_ask.iter().map(|tool| Rule {
         matcher: RuleMatcher::Tool(tool.clone()),
-        decision: PolicyDecision::Ask("MCP tool requires approval (not in the server's allowTools)".into()),
+        decision: PolicyDecision::Ask("MCP tool requires approval (not in permissions.allow)".into()),
     });
     let mut rules: Vec<Rule> = denied.chain(asked).chain(mcp).collect();
     if rules.is_empty() {

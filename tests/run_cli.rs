@@ -630,11 +630,12 @@ async fn a_negative_cost_budget_is_rejected() {
     assert!(server.requests().is_empty());
 }
 
-/// `run` with bash allowed only for `ls`, against a model that runs `echo hi` and then answers.
+/// `run` with bash asking except for `ls`, against a model that runs `echo hi` and then
+/// answers: nobody can approve the command, so it is refused.
 async fn run_with_a_denied_command(extra: &[&str]) -> std::process::Output {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start(vec![Reply::bash("c", "echo hi"), Reply::text("done")]).await;
-    let home = AgentHome::agent("unattended", "[rules]\nallow = [\"ls\"]");
+    let home = AgentHome::agent("unattended", "[permissions]\nask = [\"bash\"]\nallow = [\"bash(ls)\"]");
     zx_agent()
         .args(["run", "--model", "mock", "--base-url", &server.base_url])
         .args(["--max-retries", "0", "--api-key-env", "ZX_RUN_CLI_TEST_KEY"])

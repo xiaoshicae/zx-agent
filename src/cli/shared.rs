@@ -74,7 +74,7 @@ pub(crate) struct ModeSettings<A> {
 #[derive(Default)]
 pub(super) struct McpTools {
     pub(super) servers: Vec<Arc<dyn Extension>>,
-    /// Tools that need approval: those not in their server's `allowTools`, unless the
+    /// Tools that need approval: those not in the agent's `permissions.allow`, unless the
     /// agent approves every call.
     pub(super) ask: Vec<String>,
     /// Variables holding the servers' tokens: hidden from commands, values redacted.
@@ -86,6 +86,7 @@ pub(super) struct McpTools {
 async fn connect_mcp(settings: &Settings, kind: Builtin, transport: &TransportArgs) -> Result<McpTools> {
     let agent = AgentDefinition::load(kind, settings.home.as_deref(), &settings.config)?;
     let mcp = &settings.config.mcp;
+    let allowed = agent.permissions.allowed_tools();
     let mut configs = Vec::new();
     for server in mcp {
         let token = match &server.token_env {
@@ -108,9 +109,9 @@ async fn connect_mcp(settings: &Settings, kind: Builtin, transport: &TransportAr
     for (entry, server) in mcp.iter().zip(connected) {
         let server = server.map_err(anyhow::Error::msg)?;
         let mut names = Vec::new();
-        for (remote, name) in server.tool_names() {
+        for (_, name) in server.tool_names() {
             // With approveAll nothing asks: the container is the sandbox.
-            if entry.allow_tools.contains(remote) || agent.rules.approve_all {
+            if allowed.contains(name) || agent.permissions.approve_all {
                 names.push(name.clone());
             } else {
                 names.push(format!("{name} (asks)"));

@@ -1,19 +1,18 @@
 //! An agent file: TOML front matter between a first line `+++` and the next line `+++`, then
 //! the instructions. One rule lays a file over the agent it extends: every key the file sets
-//! replaces the inherited value whole, lists included, and the tables `rules`, `limits`,
+//! replaces the inherited value whole, lists included, and the tables `permissions`, `limits`,
 //! `context` and `compaction` go key by key.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 
+use super::permissions::RawPermissions;
 use super::skills::Skill;
-use super::{AgentDefinition, Builtin, Rules};
+use super::{AgentDefinition, Builtin};
 use crate::compaction;
-use crate::policy::ProgramOptions;
 use crate::runner::Limits;
 
 /// The line that opens and closes the front matter.
@@ -33,7 +32,7 @@ struct FrontMatter {
     extends: Option<Builtin>,
     tools: Option<Vec<String>>,
     continue_on_length: Option<u32>,
-    rules: RawRules,
+    permissions: RawPermissions,
     limits: RawLimits,
     context: RawContext,
     skills: Option<Vec<Skill>>,
@@ -52,19 +51,6 @@ struct RawCompaction {
     timeout_secs: Option<u64>,
     /// `full` (the default) or `incremental`.
     mode: Option<compaction::SummaryMode>,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-struct RawRules {
-    allow: Option<Vec<String>>,
-    deny: Option<Vec<String>>,
-    auto_approve: Option<Vec<String>>,
-    auto_approve_except: Option<Vec<String>>,
-    auto_approve_options: BTreeMap<String, ProgramOptions>,
-    ask_tools: Option<Vec<String>>,
-    deny_tools: Option<Vec<String>>,
-    approve_all: Option<bool>,
 }
 
 #[derive(Default, Deserialize)]
@@ -144,7 +130,7 @@ impl AgentFile {
         if let Some(count) = front.continue_on_length {
             agent.continue_on_length = count;
         }
-        front.rules.apply(&mut agent.rules);
+        front.permissions.apply(&mut agent.permissions)?;
         front.limits.apply(&mut agent.limits)?;
         if let Some(discover) = front.context.discover {
             agent.context.discover = discover;
@@ -163,33 +149,6 @@ impl AgentFile {
         }
         front.compaction.apply(&mut agent.compaction);
         Ok(())
-    }
-}
-
-impl RawRules {
-    fn apply(self, rules: &mut Rules) {
-        if let Some(allow) = self.allow {
-            rules.allow = allow;
-        }
-        if let Some(deny) = self.deny {
-            rules.deny = deny;
-        }
-        if let Some(prefixes) = self.auto_approve {
-            rules.auto_approve = prefixes;
-        }
-        if let Some(texts) = self.auto_approve_except {
-            rules.auto_approve_except = texts;
-        }
-        rules.auto_approve_options.extend(self.auto_approve_options);
-        if let Some(tools) = self.ask_tools {
-            rules.ask_tools = tools;
-        }
-        if let Some(tools) = self.deny_tools {
-            rules.deny_tools = tools;
-        }
-        if let Some(approve_all) = self.approve_all {
-            rules.approve_all = approve_all;
-        }
     }
 }
 

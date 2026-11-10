@@ -489,7 +489,7 @@ async fn approving_once_allows_the_displayed_shell_call() {
 #[tokio::test]
 async fn an_auto_approved_command_is_shown_with_a_preview_of_its_result() {
     let dir = tempfile::tempdir().unwrap();
-    agent(dir.path(), "[rules]\nautoApprove = [\"seq\"]");
+    agent(dir.path(), "[permissions]\nallow = [\"bash(seq)\"]");
     let server = MockServer::start(vec![Reply::bash("c", "seq 1 5"), Reply::text("done")]).await;
     let output = run(&server, dir.path(), &["--tools", "bash"], "go\n/quit\n").await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
@@ -601,7 +601,7 @@ async fn an_edit_approval_lists_each_edit_and_its_result_shows_the_patch() {
 #[tokio::test]
 async fn color_always_keeps_colors_when_stderr_is_not_a_terminal() {
     let dir = tempfile::tempdir().unwrap();
-    agent(dir.path(), "[rules]\nautoApprove = [\"seq\"]");
+    agent(dir.path(), "[permissions]\nallow = [\"bash(seq)\"]");
     let server = MockServer::start(vec![Reply::bash("c", "seq 1 2"), Reply::text("done")]).await;
     let output = run(
         &server,
@@ -855,7 +855,7 @@ async fn denial_reaches_the_model_without_executing_the_call() {
 #[tokio::test]
 async fn a_policy_denial_cannot_be_overridden_by_an_approval_command() {
     let dir = tempfile::tempdir().unwrap();
-    agent(dir.path(), "[rules]\ndeny = [\"blocked\"]");
+    agent(dir.path(), "[permissions]\ndeny = [\"bash(blocked)\"]");
     let server = MockServer::start(vec![
         Reply::bash("c", "printf blocked > marker"),
         Reply::text("handled"),
@@ -911,7 +911,7 @@ async fn listed_commands_still_ask_when_they_mention_secrets_or_redirect() {
 #[tokio::test]
 async fn an_agent_auto_approve_list_replaces_the_one_it_extends() {
     let dir = tempfile::tempdir().unwrap();
-    agent(dir.path(), "[rules]\nautoApprove = [\"printf\"]");
+    agent(dir.path(), "[permissions]\nallow = [\"bash(printf)\"]");
     std::fs::write(dir.path().join("app.log"), "line\n").unwrap();
     let server = MockServer::start(vec![
         Reply::bash("c1", "printf flagged"),

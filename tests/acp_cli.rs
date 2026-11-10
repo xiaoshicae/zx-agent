@@ -409,7 +409,7 @@ async fn a_file_write_shows_as_a_diff_and_an_auto_approved_command_asks_nobody()
     write_agent(
         &home.path().join(".zx-agent"),
         "assistant",
-        "[rules]\nautoApprove = [\"pwd\"]",
+        "[permissions]\nallow = [\"bash(pwd)\"]",
     );
     let mut acp = Acp::start_in(&server, dir.path(), &[], Some(home.path())).await;
     let session = acp.session(dir.path()).await;

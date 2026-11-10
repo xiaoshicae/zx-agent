@@ -259,10 +259,10 @@ async fn bash_commands_cannot_read_the_api_key() {
 }
 
 #[tokio::test]
-async fn the_system_prompt_states_the_environment_and_command_policy() {
+async fn the_system_prompt_states_the_environment() {
     let server = MockServer::start(vec![Reply::text("ok")]).await;
 
-    let home = AgentHome::agent("unattended", "[rules]\nallow = [\"grep\"]");
+    let home = AgentHome::agent("unattended", "[permissions]\nallow = [\"bash(grep)\"]");
     let dir = tempfile::tempdir().unwrap();
     run_against(&server.base_url, dir.path(), &["--tools", "bash", "check"])
         .env("ZX_AGENT_HOME", home.path())
@@ -272,7 +272,8 @@ async fn the_system_prompt_states_the_environment_and_command_policy() {
 
     let system = sent_messages(&server, 0)[0]["content"].as_str().unwrap().to_string();
     assert!(system.contains("<environment>\nOS: "), "{system}");
-    assert!(system.contains("must start with one of: grep."), "{system}");
+    // Without a command allowlist there is no command policy to state.
+    assert!(!system.contains("<command_policy>"), "{system}");
 }
 
 #[tokio::test]

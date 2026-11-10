@@ -1096,7 +1096,7 @@ async fn chat_in_a_container_that_approves_every_call_runs_bash_without_asking()
     let fake = FakeDocker::new();
     fake.answer("cmd.out", "from-container\n");
     let server = MockServer::start(vec![Reply::bash("c1", "rm -r build"), Reply::text("done")]).await;
-    let agent = "[rules]\napproveAll = true\naskTools = []\n";
+    let agent = "[permissions]\napproveAll = true\nask = []\n";
 
     let output = zx_chat_in_container(&fake, &server, agent, "go\n").await;
 
@@ -1124,13 +1124,13 @@ async fn approving_every_call_outside_a_container_is_a_configuration_error() {
     let server = MockServer::start(vec![]).await;
     // The sandbox's image, but with commands on this machine.
     let home = AgentHome::new("execution = 'local'\n[container]\nimage = 'fake:1'\n")
-        .with_agent("unattended", "[rules]\napproveAll = true\naskTools = []\n");
+        .with_agent("unattended", "[permissions]\napproveAll = true\nask = []\n");
 
     let output = zx_run(&server, &fake.workspace(), Some(fake.dir.path()), &home, &["go"]).await;
 
     assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
     assert!(
-        stderr(&output).contains("rules.approveAll needs execution"),
+        stderr(&output).contains("permissions.approveAll needs execution"),
         "{}",
         stderr(&output)
     );
@@ -1139,7 +1139,7 @@ async fn approving_every_call_outside_a_container_is_a_configuration_error() {
 }
 
 #[tokio::test]
-async fn approving_every_call_also_runs_mcp_tools_outside_allow_tools() {
+async fn approving_every_call_also_runs_mcp_tools_the_agent_does_not_allow() {
     let fake = FakeDocker::new();
     let mcp = FakeMcp::start(
         Era::Modern,
@@ -1155,11 +1155,11 @@ async fn approving_every_call_also_runs_mcp_tools_outside_allow_tools() {
     let home = container_config(
         "fake:1",
         &format!(
-            "[[mcp]]\nname = \"prom\"\nurl = \"{}\"\ntools = [\"query\", \"range\"]\nallowTools = [\"query\"]\n",
+            "[[mcp]]\nname = \"prom\"\nurl = \"{}\"\ntools = [\"query\", \"range\"]\n",
             mcp.url
         ),
     )
-    .with_agent("unattended", "tools = []\n[rules]\napproveAll = true\naskTools = []\n");
+    .with_agent("unattended", "tools = []\n[permissions]\napproveAll = true\nask = []\n");
     let session = outside.path().join("session.jsonl");
 
     let output = zx_run(
