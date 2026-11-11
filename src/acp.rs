@@ -7,7 +7,9 @@
 //! Sessions are kept as files, one per session in the directory chat uses for the same
 //! working directory, so that a client can list them and load one again in a later process:
 //! `session/load` replays the conversation to the client before it goes on, `session/resume`
-//! goes on without the replay.
+//! goes on without the replay. `session/close` forgets a session: its turn, if it has one, is
+//! cancelled, and the session is dropped once nothing uses it any more, which closes its file
+//! for another process to open. The file stays, to be loaded or resumed again.
 //!
 //! Stdout is the protocol channel: nothing else in this process may print there.
 
@@ -21,11 +23,11 @@ use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{
-    AgentCapabilities, CancelNotification, ContentBlock, Implementation, InitializeRequest, InitializeResponse,
-    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, NewSessionRequest,
-    NewSessionResponse, PromptRequest, PromptResponse, ResumeSessionRequest, ResumeSessionResponse,
-    SessionCapabilities, SessionId, SessionInfo, SessionListCapabilities, SessionResumeCapabilities, StopReason,
-    ToolKind,
+    AgentCapabilities, CancelNotification, CloseSessionRequest, CloseSessionResponse, ContentBlock, Implementation,
+    InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
+    LoadSessionResponse, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, ResumeSessionRequest,
+    ResumeSessionResponse, SessionCapabilities, SessionCloseCapabilities, SessionId, SessionInfo,
+    SessionListCapabilities, SessionResumeCapabilities, StopReason, ToolKind,
 };
 use agent_client_protocol::{Agent, Client, Error, ErrorCode, JsonRpcResponse, Responder, Stdio, V1};
 use anyhow::{Context, Result};
@@ -286,6 +288,22 @@ impl Host {
             live.abort();
         }
     }
+
+    /// `session/close`: abort the session's turn, if it has one, and forget the session. It is
+    /// dropped as soon as nothing uses it: at once when idle, else when the aborted turn has
+    /// ended. A session this process does not hold has nothing to free, so closing one
+    /// succeeds too.
+    fn close_session(
+        &self,
+        request: &CloseSessionRequest,
+        responder: Responder<CloseSessionResponse, V1>,
+    ) -> Result<(), Error> {
+        let closed = lock(&self.sessions).remove(&*request.session_id.0);
+        if let Some(live) = closed {
+            live.abort();
+        }
+        responder.respond(CloseSessionResponse::new())
+    }
 }
 
 pub(crate) async fn run(args: AcpArgs) -> Result<u8> {
@@ -308,6 +326,7 @@ async fn serve(args: AcpArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> 
     let on_list = Arc::clone(&host);
     let on_prompt = Arc::clone(&host);
     let on_cancel = Arc::clone(&host);
+    let on_close = Arc::clone(&host);
     Agent
         .v1()
         .name("zx-agent")
@@ -337,6 +356,10 @@ async fn serve(args: AcpArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> 
         )
         .on_receive_request(
             async move |request: PromptRequest, responder, cx| on_prompt.prompt(&request, responder, &cx),
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: CloseSessionRequest, responder, _cx| on_close.close_session(&request, responder),
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_notification(
@@ -391,17 +414,18 @@ fn unknown_session(id: &str, why: &str) -> Error {
     Error::new(ErrorCode::INVALID_PARAMS, format!("unknown session {id}: {why}"))
 }
 
-/// What the agent offers: loading, listing and resuming sessions when it keeps their files.
+/// What the agent offers: closing sessions, which frees them also in memory, and loading,
+/// listing and resuming sessions when it keeps their files.
 fn agent_capabilities(kept: bool) -> AgentCapabilities {
-    let capabilities = AgentCapabilities::new().load_session(kept);
-    if !kept {
-        return capabilities;
-    }
-    capabilities.session_capabilities(
-        SessionCapabilities::new()
+    let mut sessions = SessionCapabilities::new().close(SessionCloseCapabilities::new());
+    if kept {
+        sessions = sessions
             .list(SessionListCapabilities::new())
-            .resume(SessionResumeCapabilities::new()),
-    )
+            .resume(SessionResumeCapabilities::new());
+    }
+    AgentCapabilities::new()
+        .load_session(kept)
+        .session_capabilities(sessions)
 }
 
 /// A listed session as the client shows it: its name, else its first prompt, as the title,

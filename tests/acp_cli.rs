@@ -117,13 +117,28 @@ impl Acp {
         self.next_id += 1;
         self.write(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
             .await;
+        self.response(id).await
+    }
+
+    /// The response to request `id`, from the inbox if it arrived while waiting for something
+    /// else; everything read before it is kept for `next`.
+    async fn response(&mut self, id: u64) -> Value {
+        let answers = |message: &Value| message.get("method").is_none() && message["id"] == json!(id);
+        if let Some(at) = self.inbox.iter().position(answers) {
+            return self.inbox.remove(at).unwrap();
+        }
         loop {
             let message = self.read().await;
-            if message.get("method").is_none() && message["id"] == json!(id) {
+            if answers(&message) {
                 return message;
             }
             self.inbox.push_back(message);
         }
+    }
+
+    /// Close `session_id`; the response.
+    async fn close(&mut self, session_id: &str) -> Value {
+        self.request("session/close", json!({"sessionId": session_id})).await
     }
 
     async fn notify(&mut self, method: &str, params: Value) {
@@ -614,6 +629,8 @@ async fn no_session_keeps_no_file_and_offers_no_loading() {
         capabilities.get("list").is_none_or(Value::is_null) && capabilities.get("resume").is_none_or(Value::is_null),
         "{initialized}"
     );
+    // Closing is offered all the same: it frees a session in memory too.
+    assert_eq!(capabilities["close"], json!({}), "{initialized}");
     let id = acp.create(&cwd).await;
     let response = acp.prompt(&id, "hello").await;
     assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
@@ -819,4 +836,88 @@ async fn the_name_command_needs_a_name_and_other_slashes_reach_the_model() {
     assert_eq!(requests.len(), 1);
     assert_eq!(texts(&requests[0].body).last(), Some(&"/named things"));
     acp.finish().await;
+}
+
+#[tokio::test]
+async fn closing_a_session_frees_its_file_for_another_process() {
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let cwd = work.path().canonicalize().unwrap();
+    let server = MockServer::start(vec![Reply::text("hi there")]).await;
+    let mut first = Acp::start_in(&server, &cwd, &[], Some(home.path())).await;
+    let initialized = first.initialize().await;
+    assert_eq!(
+        initialized["result"]["agentCapabilities"]["sessionCapabilities"]["close"],
+        json!({}),
+        "{initialized}"
+    );
+    let id = first.create(&cwd).await;
+    let response = first.prompt(&id, "hello").await;
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    // While the first process holds the session, a second cannot open its file.
+    let mut second = Acp::start_in(&server, &cwd, &[], Some(home.path())).await;
+    second.initialize().await;
+    let refused = second.load(&id, &cwd).await;
+    let reason = refused["error"]["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{refused}"));
+    assert!(reason.contains("is in use"), "{reason}");
+
+    let closed = first.close(&id).await;
+
+    assert_eq!(closed["result"], json!({}), "{closed}");
+    let gone = first.prompt(&id, "still there?").await;
+    assert_eq!(gone["error"]["code"], -32602, "{gone}");
+    // The second process opens it now, with the conversation so far.
+    let loaded = second.load(&id, &cwd).await;
+    assert!(loaded.get("error").is_none(), "{loaded}");
+    let replay: Vec<String> = second
+        .replayed()
+        .iter()
+        .map(|update| text_of(update).to_string())
+        .collect();
+    assert_eq!(replay, ["hello", "hi there"]);
+    assert_eq!(server.requests().len(), 1, "closing makes no request");
+    first.finish().await;
+    second.finish().await;
+}
+
+#[tokio::test]
+async fn closing_a_session_cancels_its_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let partial = json!({"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]});
+    let server = MockServer::start(vec![Reply::Stall(vec![partial])]).await;
+    let mut acp = Acp::start(&server, dir.path(), &["--tools", ""]).await;
+    let session = acp.session(dir.path()).await;
+    acp.write(json!({"jsonrpc": "2.0", "id": 50, "method": "session/prompt",
+        "params": {"sessionId": session, "prompt": [{"type": "text", "text": "first"}]}}))
+        .await;
+    assert_eq!(text_of(&acp.next_update().await), "partial");
+
+    let closed = acp.close(&session).await;
+
+    assert_eq!(closed["result"], json!({}), "{closed}");
+    // The turn's own response may come before or after the close's.
+    let answer = acp.response(50).await;
+    assert_eq!(answer["result"]["stopReason"], "cancelled", "{answer}");
+    let gone = acp.prompt(&session, "again").await;
+    assert_eq!(gone["error"]["code"], -32602, "{gone}");
+    assert!(acp.finish().await.success());
+}
+
+#[tokio::test]
+async fn closing_a_session_the_agent_does_not_hold_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(Vec::new()).await;
+    let mut acp = Acp::start(&server, dir.path(), &[]).await;
+    let session = acp.session(dir.path()).await;
+    assert_eq!(acp.close(&session).await["result"], json!({}));
+
+    // Closed already, or never opened: there is nothing to free.
+    for id in [session.as_str(), "no-such-session"] {
+        let closed = acp.close(id).await;
+        assert_eq!(closed["result"], json!({}), "{closed}");
+    }
+    assert!(acp.inbox.is_empty(), "{:?}", acp.inbox);
+    assert!(acp.finish().await.success());
 }
