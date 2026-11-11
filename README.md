@@ -49,7 +49,7 @@ zx-agent sessions                      # 列出本工作目录的会话（可加
 zx-agent chat --session ./chat.jsonl   # 指定会话文件
 ```
 
-不给 `--session` 时，每次对话存为 `~/.zx-agent/sessions/--<工作目录>--/<UTC 时间>_<会话 ID>.jsonl`（目录名为去掉开头 `/`、其余 `/` 换成 `-` 的工作目录），新建的目录权限 0700、文件 0600；`--no-session` 只保存在内存。`--resume` 找不到会话时新建并提示，`--resume <ID 前缀>` 找不到或不唯一时以退出码 2 结束。`sessions` 每行一个会话：ID 前 8 个字符、最近活动时间、消息数、第一条提示词的首行。
+不给 `--session` 时，每次对话存为 `~/.zx-agent/sessions/--<工作目录>--/<UTC 时间>_<会话 ID>.jsonl`（目录名为去掉开头 `/`、其余 `/` 换成 `-` 的工作目录），新建的目录权限 0700、文件 0600；`--no-session` 只保存在内存。`--resume` 找不到会话时新建并提示，`--resume <ID 前缀>` 找不到或不唯一时以退出码 2 结束。`sessions` 每行一个会话：ID 前 8 个字符、最近活动时间、消息数、会话名称（没有名称时为第一条提示词的首行）。名称由 ACP 客户端的 `/name` 或 SDK 的 `AgentSession::set_name` 设置，chat 没有起名命令。
 
 输入与输出：
 
@@ -94,7 +94,8 @@ zx-agent acp
 
 `acp` 经 stdin 与 stdout 收发 [Agent Client Protocol](https://agentclientprotocol.com/) v1 的消息，由 ACP 客户端（Zed、JetBrains、Neovim、Emacs 的插件，或 Wisp 等终端客户端，见[客户端目录](https://agentclientprotocol.com/overview/clients)）启动：在客户端里把 agent 命令配置为上面这一行。参数与 `chat` 相同（`acp --help`），没有 `--session`、`--output` 与 `--color`；stdout 只走协议，诊断在 stderr。
 
-- 会话：`session/new` 建会话，`cwd` 由客户端给出；每个会话一个文件，放在 chat 为该工作目录使用的会话目录中（`--no-session` 时只在内存）。`session/load` 续接并把对话回放给客户端，`session/resume` 续接但不回放，`session/list` 列出会话。`session/fork` 未实现。客户端给的 `mcpServers` 被忽略，MCP 服务器只来自 `config.toml`。
+- 会话：`session/new` 建会话，`cwd` 由客户端给出；每个会话一个文件，放在 chat 为该工作目录使用的会话目录中（`--no-session` 时只在内存）。`session/load` 续接并把对话回放给客户端，`session/resume` 续接但不回放，`session/list` 列出会话（标题为会话名称，没有名称时为第一条提问）。`session/fork` 未实现。客户端给的 `mcpServers` 被忽略，MCP 服务器只来自 `config.toml`。
+- 命令：建会话、载入或续接成功后，应答之后以 `available_commands_update` 声明 `/name`。`/name <名称>` 给会话起名，不发给模型：以 `session_info_update` 通知新标题，回合以 `end_turn` 结束。名称只取一行（换行等控制字符换成空格、去掉首尾空白）；没有给名称时以 JSON-RPC 错误（`-32602`）应答，回合进行中也以错误应答。`/named` 等其他文本仍是普通提问。
 - 回合：`session/prompt` 的回答结束时应答 `stopReason`：完成为 `end_turn`，截断或 token 预算用尽为 `max_tokens`，请求次数上限为 `max_turn_requests`，取消为 `cancelled`；出错或超时以 JSON-RPC 错误应答。`session/cancel` 取消当前回合。
 - 更新：回答与推理流式发送，工具调用发 `tool_call` 及其状态，`write_file` 与 `edit_file` 附 diff。审批经 `session/request_permission`（允许一次、本会话允许相同调用、拒绝），等待时间同 chat。
 - 只用手写的 JSON-RPC 客户端与 SDK 的示例客户端验证过，没有在 Zed 或 Wisp 上验证。
@@ -293,6 +294,7 @@ zx-agent    src/             CLI（run、chat、im、acp）、config.toml 与 ag
 | 输出截断 | 按 agent 的 `continueOnLength` 自动续写，仍未完成以退出码 6 结束 |
 | 会话写入失败 | 立即中止运行，之后不再写入 |
 | 会话文件 | 启动时立即创建；chat 默认存入会话目录，`--resume` 续接；复制会话与切换分支只在 SDK |
+| 会话名称 | 只经 ACP 的 `/name` 与 SDK 的 `AgentSession::set_name` 设置，不能清除；chat 没有起名命令；客户端改标题的 `session/set_title` 在协议中仍不稳定，未实现 |
 | 队列取法 | 两个队列共用一种，默认 `All` |
 | 扩展的消息与状态 | 运行中排队，下一回合开始或运行结束时写入；消息只有文本；请求只声明当前活跃的工具 |
 | 环境信息 | 启动时写入系统提示词 |
@@ -389,7 +391,7 @@ run、chat 与 im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（完整地�
 第一行是头部，之后每行一个条目，条目之间通过 `parentId` 连成一棵树：
 
 ```json
-{"type":"session","version":7,"id":"…","timestamp":1761700000000,"cwd":"/srv","model":"…"}
+{"type":"session","version":8,"id":"…","timestamp":1761700000000,"cwd":"/srv","model":"…"}
 {"type":"message","id":"a1b2c3d4","parentId":"f0e1d2c3","timestamp":…,"message":{"role":"user","content":"…","timestamp":…}}
 {"type":"context_edit","id":"c3d4e5f6","parentId":"b2c3d4e5","timestamp":…,"targetId":"b2c3d4e5","replacement":null}
 ```
@@ -397,11 +399,12 @@ run、chat 与 im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（完整地�
 - 只追加：修正上下文靠追加 `context_edit`，原始记录保留；`context_edit` 不能指向 system 或摘要消息。
 - 同一文件同一时间只有一个写入者（`flock`）；被占用时 `run` 与 `chat` 以退出码 2 结束。Unix 以外的平台不加锁。
 - 崩溃留下的未写完的尾记录在下次打开时截掉，并在 stderr 报告；其他损坏报错，文件保持原样。写入失败后不再写入。
-- 只读写版本 7，其他版本的文件拒绝打开，不做升级。
+- 只读写版本 8，其他版本的文件拒绝打开，不做升级。
 - 每次模型请求前记录 `request_started`（配置变化时先记 `request_config`），可还原当时的请求；不记录 API key、URL 与 HTTP 头。
 - 有副作用的工具调用执行前记录 `tool_call_started`。崩溃或取消后，下一次运行为缺少结果的调用补写错误结果，不重放，并发出 `tool_call_recovered`：`started`（结果未知，先核对再重试）、`not_started`（未执行）、`read_only`（只读工具，可重新调用）、`start_unknown`（当前未配置该工具，按可能已改变状态处理）。
 - 摘要记录为 `compaction_started`、`compaction` 或 `compaction_failed`。摘要的事实必须引用来源条目；引用只证明出处可定位，不证明陈述正确或没有信息损失。
 - 扩展的记录：`custom`（状态，不进入模型上下文）与 `custom_message`（发给模型的消息，投影为一条用户消息）。
+- 会话名称：`session_info`（`name`），以文件中最后一条为准，与分支无关，不进入模型上下文；`name` 只有一行、没有首尾空白、不为空，否则文件打开时报错。复制分支时随分支原样复制；起名也会更新列表的“最近活动”。
 
 ## 作为库使用
 
@@ -416,7 +419,7 @@ let report = agent.prompt("任务描述", &CancellationToken::new()).await?;
 
 库默认不限轮次、时间与 token，没有钩子，不自动续写、摘要或落盘；说明、上限与策略都由嵌入方给出。完整的组装见 `examples/library.rs`。
 
-- 入口：`AgentSession`（共享会话：`prompt`、`continue_run`、`compact`、`abort`、`subscribe`、`set_model`、`branch`、`queues`、`active_tools`、`run_command`）、`runner::Runner`、`agent::Attempt`、`session::SessionStore`。
+- 入口：`AgentSession`（共享会话：`prompt`、`continue_run`、`compact`、`abort`、`subscribe`、`set_model`、`set_name`、`branch`、`queues`、`active_tools`、`run_command`）、`runner::Runner`、`agent::Attempt`、`session::SessionStore`。
 - 扩展点都是 trait：`ai::Provider`、`agent::Tool`、`agent::ToolPolicy`、`agent::Hooks`、`agent::Interaction`、`agent::EventSink`、`executor::Executor`、`session::SessionLog`、`im::ImChannel`、`im::StatusStore`、`extensions::Extension`。
 - 附带的实现：`ai::openai::OpenAiCompatible`、`mcp::Server`（一个 `Extension`）、`executor::ContainerExecutor`、`redact::RedactSecrets`、`otel::Telemetry`。
 

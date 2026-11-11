@@ -1,7 +1,8 @@
 //! The ACP agent: an editor or a terminal client drives sessions over stdio with the Agent
 //! Client Protocol (JSON-RPC, one message per line). The client renders everything, so this
 //! module only maps between the protocol and `AgentSession`: prompts become runs, run events
-//! become session updates (`updates`), approvals become permission requests (`permissions`).
+//! become session updates (`updates`), approvals become permission requests (`permissions`),
+//! and a prompt that starts with one of the agent's slash commands runs it (`commands`).
 //!
 //! Sessions are kept as files, one per session in the directory chat uses for the same
 //! working directory, so that a client can list them and load one again in a later process:
@@ -10,6 +11,7 @@
 //!
 //! Stdout is the protocol channel: nothing else in this process may print there.
 
+mod commands;
 mod permissions;
 mod updates;
 
@@ -25,7 +27,7 @@ use agent_client_protocol::v1::schema::{
     SessionCapabilities, SessionId, SessionInfo, SessionListCapabilities, SessionResumeCapabilities, StopReason,
     ToolKind,
 };
-use agent_client_protocol::{Agent, Client, Error, ErrorCode, Responder, Stdio, V1};
+use agent_client_protocol::{Agent, Client, Error, ErrorCode, JsonRpcResponse, Responder, Stdio, V1};
 use anyhow::{Context, Result};
 use tokio_util::sync::CancellationToken;
 
@@ -220,7 +222,7 @@ impl Host {
         // Session setup holds the dispatch loop, like any request handler; it is a few
         // startup reads and, with MCP servers, nothing new: they are connected once.
         let result = self.create(cx, &request.cwd).await;
-        responder.respond_with_result(result.map(NewSessionResponse::new).map_err(protocol_error))
+        opened(responder, cx, result, NewSessionResponse::new)
     }
 
     /// `session/load`: the replay is sent before the response, as the protocol has it.
@@ -231,7 +233,7 @@ impl Host {
         cx: &ConnectionTo<Client>,
     ) -> Result<(), Error> {
         let result = self.load(cx, request).await;
-        responder.respond_with_result(result.map(|_| LoadSessionResponse::new()).map_err(protocol_error))
+        opened(responder, cx, result, |_| LoadSessionResponse::new())
     }
 
     /// `session/resume`: the session goes on from its file, with nothing replayed.
@@ -242,7 +244,7 @@ impl Host {
         cx: &ConnectionTo<Client>,
     ) -> Result<(), Error> {
         let result = self.resume(cx, request).await;
-        responder.respond_with_result(result.map(|_| ResumeSessionResponse::new()).map_err(protocol_error))
+        opened(responder, cx, result, |_| ResumeSessionResponse::new())
     }
 
     /// `session/list`: the sessions kept for a working directory.
@@ -256,7 +258,8 @@ impl Host {
     }
 
     /// `session/prompt`: the turn runs outside the dispatch loop, so cancellations and
-    /// permission answers keep arriving; the response is sent when the turn ends.
+    /// permission answers keep arriving; the response is sent when the turn ends. A prompt
+    /// that is one of the agent's commands runs the command instead.
     fn prompt(
         &self,
         request: &PromptRequest,
@@ -267,6 +270,13 @@ impl Host {
             return responder.respond_with_error(unknown_session(&request.session_id.0, "no such session is open"));
         };
         let text = prompt_text(&request.prompt);
+        if let Some(command) = commands::parse(&text) {
+            let (connection, session_id) = (cx.clone(), request.session_id.clone());
+            return cx.spawn(async move {
+                let answer = commands::run(&live, command, &connection, &session_id).await;
+                responder.respond_with_result(answer.map_err(protocol_error))
+            });
+        }
         cx.spawn(async move { responder.respond_with_result(answer_prompt(&live, text).await.map_err(protocol_error)) })
     }
 
@@ -342,6 +352,24 @@ async fn serve(args: AcpArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> 
     Ok(EXIT_COMPLETED)
 }
 
+/// Answer a request that opened a session, then offer the session's commands: the client
+/// knows the session from the answer on.
+fn opened<T: JsonRpcResponse>(
+    responder: Responder<T, V1>,
+    cx: &ConnectionTo<Client>,
+    result: Result<SessionId>,
+    response: impl FnOnce(SessionId) -> T,
+) -> Result<(), Error> {
+    match result {
+        Ok(id) => {
+            responder.respond(response(id.clone()))?;
+            commands::offer(cx, &id);
+            Ok(())
+        }
+        Err(error) => responder.respond_with_error(protocol_error(error)),
+    }
+}
+
 /// The response to `session/prompt` once the turn ended: its stop reason, or the run's error.
 async fn answer_prompt(session: &AgentSession, text: String) -> Result<PromptResponse> {
     let report = session.prompt(text, &CancellationToken::new()).await?;
@@ -376,8 +404,8 @@ fn agent_capabilities(kept: bool) -> AgentCapabilities {
     )
 }
 
-/// A listed session as the client shows it: its first prompt as the title, its last
-/// activity as the time.
+/// A listed session as the client shows it: its name, else its first prompt, as the title,
+/// and its last activity as the time.
 fn session_info(session: &StoredSession) -> SessionInfo {
     // A time past the year 292 million is not one a session file records; the entry then
     // has no time rather than a wrong one.
@@ -386,7 +414,7 @@ fn session_info(session: &StoredSession) -> SessionInfo {
         .and_then(chrono::DateTime::from_timestamp_millis)
         .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
     SessionInfo::new(SessionId::new(session.id.as_str()), PathBuf::from(&session.cwd))
-        .title(session.first_prompt.as_deref().map(session_files::preview_text))
+        .title(session.title().map(session_files::preview_text))
         .updated_at(updated_at)
 }
 

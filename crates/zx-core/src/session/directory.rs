@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use super::SessionStore;
+use super::{SessionName, SessionStore};
 use crate::ai::{Message, UserMessageKind};
 
 /// One session file in a directory, as [`list_sessions`] read it.
@@ -24,6 +24,18 @@ pub struct SessionInfo {
     pub messages: usize,
     /// The first prompt typed into the session, as typed.
     pub first_prompt: Option<String>,
+    /// The session's name, if it was given one.
+    pub name: Option<SessionName>,
+}
+
+impl SessionInfo {
+    /// What a listing shows for the session: its name, else its first prompt.
+    pub fn title(&self) -> Option<&str> {
+        self.name
+            .as_ref()
+            .map(SessionName::as_str)
+            .or(self.first_prompt.as_deref())
+    }
 }
 
 /// A file that looked like a session but could not be read.
@@ -124,6 +136,7 @@ fn info(path: PathBuf, store: &SessionStore) -> SessionInfo {
             .filter(|message| matches!(message, Message::User { .. } | Message::Assistant(_)))
             .count(),
         first_prompt,
+        name: store.session_name().cloned(),
         path,
     }
 }
@@ -141,7 +154,18 @@ mod tests {
             last_activity_ms,
             messages: 0,
             first_prompt: None,
+            name: None,
         }
+    }
+
+    #[test]
+    fn a_title_is_the_name_else_the_first_prompt() {
+        let mut listed = session("abc1", "/w", 1);
+        assert_eq!(listed.title(), None);
+        listed.first_prompt = Some("fix the build".into());
+        assert_eq!(listed.title(), Some("fix the build"));
+        listed.name = SessionName::new("build fix");
+        assert_eq!(listed.title(), Some("build fix"));
     }
 
     #[test]

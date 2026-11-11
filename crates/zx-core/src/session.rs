@@ -15,6 +15,7 @@
 //! - `request`: request configuration changes and per-request checkpoints
 //! - `recovery`: start records of calls with side effects, and the calls an interrupted run
 //!   left without results
+//! - `name`: the session's name, kept in `session_info` records
 //! - `directory`: session files in one directory: listing them and finding one to resume
 //! - `test_support` and `tests`, compiled for tests only: what the session's unit tests
 //!   share, and the tests of the store
@@ -23,6 +24,7 @@ mod directory;
 mod entry;
 mod jsonl;
 mod log;
+mod name;
 mod projection;
 mod recovery;
 mod request;
@@ -37,6 +39,7 @@ pub use entry::{
     SessionHeader,
 };
 pub use log::{LoadedSession, LogRecord, SessionLog};
+pub use name::{SessionInfoEntry, SessionName};
 pub(crate) use projection::without_details;
 pub use recovery::{InterruptedToolCall, StartRecord, ToolCallStartedEntry};
 pub use request::{RequestConfig, RequestConfigEntry, RequestSource, RequestStartedEntry};
@@ -61,7 +64,7 @@ use jsonl::JsonlFile;
 /// The session format: written to every new header, and the only version a session may have
 /// to be created or loaded. A change to the format raises it, and sessions of any other
 /// version are refused.
-pub const SESSION_VERSION: u32 = 7;
+pub const SESSION_VERSION: u32 = 8;
 
 /// How long one append may wait for its log, such as a database that stopped answering.
 /// A file append finishes long before; a timed-out append stops writing, like a failed one.
@@ -334,7 +337,8 @@ impl SessionStore {
                 | Entry::RequestConfig(_)
                 | Entry::RequestStarted(_)
                 | Entry::ToolCallStarted(_)
-                | Entry::Custom(_),
+                | Entry::Custom(_)
+                | Entry::SessionInfo(_),
             ) => bail!("entry {target} is not a message"),
             None => bail!("entry {target} not found"),
         }
@@ -505,7 +509,8 @@ impl SessionStore {
             ensure!(self.index.contains_key(parent), "entry parent {parent:?} not found");
         }
         match entry {
-            Entry::Message(_) => {}
+            // A name is valid by its type, whether appended or loaded.
+            Entry::Message(_) | Entry::SessionInfo(_) => {}
             Entry::Custom(custom) => ensure_custom_type(&custom.custom_type)?,
             Entry::CustomMessage(custom) => ensure_custom_type(&custom.message.custom_type)?,
             Entry::ContextEdit(edit) => self.validate_context_edit(edit)?,

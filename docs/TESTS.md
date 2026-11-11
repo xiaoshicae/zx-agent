@@ -8,7 +8,7 @@
 |---|---|
 | `tests/agent_loop.rs` | 循环语义：工具往返与顺序、失败、截断、上限、队列 |
 | `tests/runner.rs` | 运行层：重试、上限与预算、续写、持久化、恢复会话 |
-| `tests/agent_session.rs` | 共享会话：Busy、取消、订阅、模型与推理强度切换 |
+| `tests/agent_session.rs` | 共享会话：Busy、取消、订阅、模型与推理强度切换、起名 |
 | `tests/openai_mock.rs` | 真实 HTTP 下的 provider：SSE、重试、超时、取消、错误正文 |
 | `tests/prepare_request.rs` | `Hooks::prepare_request` 对单次请求的替换 |
 | `tests/continue_run.rs` | 不加新输入的续跑 |
@@ -22,7 +22,7 @@
 | `tests/session_fork.rs` | 复制分支成新会话 |
 | `tests/sessions_cli.rs` | chat 的会话目录、`--resume` 与 `zx-agent sessions` |
 | `tests/chat_cli.rs` | chat：审批、输出行、信号、PTY |
-| `tests/acp_cli.rs` | `acp` 经 stdio 的协议、权限请求与会话加载 |
+| `tests/acp_cli.rs` | `acp` 经 stdio 的协议、权限请求、会话加载与 `/name` |
 | `tests/agents_cli.rs` | agent 文件、权限、上下文与 skill；配置错误以退出码 2 结束 |
 | `tests/config_cli.rs` | `config.toml` 的位置与优先级 |
 | `tests/session_compaction.rs` | 会话层的摘要记录、引用与校验 |

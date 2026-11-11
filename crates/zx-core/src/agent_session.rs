@@ -21,7 +21,7 @@ use crate::ai::retry::RetryPolicy;
 use crate::ai::{Provider, Reasoning};
 use crate::compaction;
 use crate::runner::{Limits, RunReport, Runner};
-use crate::session::{CustomMessage, SessionStore};
+use crate::session::{CustomMessage, SessionName, SessionStore};
 use crate::sync::lock;
 
 use subscribers::EventHub;
@@ -181,24 +181,35 @@ impl AgentSession {
     /// a run, hooks and commands use `queues().append_entry` instead. Returns the entry's
     /// ID. A run returns Busy; a write failure returns WriteFailed.
     pub async fn append_entry(&self, custom_type: &str, data: Value) -> Result<String, AgentSessionError> {
-        let mut active = self.acquire(CancellationToken::new())?;
-        active
-            .runner()
-            .session_mut()
-            .append_custom_entry(custom_type, data)
+        self.append_idle(async |store| store.append_custom_entry(custom_type, data).await)
             .await
-            .map_err(|error| AgentSessionError::WriteFailed(format!("{error:#}")))
     }
 
     /// Record a message from an extension while idle, without starting a run (pi:
     /// `sendMessage` while idle): the model sees it with the next prompt. Returns the
     /// entry's ID. A run returns Busy; a write failure returns WriteFailed.
     pub async fn append_custom_message(&self, message: CustomMessage) -> Result<String, AgentSessionError> {
+        self.append_idle(async |store| store.append_custom_message(message).await)
+            .await
+    }
+
+    /// Name the session while idle (pi: `setSessionName`): listings show the name instead of
+    /// the first prompt, and the model never sees it. The latest name counts, whichever branch
+    /// it was given on; `inspect` with [`SessionStore::session_name`] reads it. Returns the
+    /// entry's ID. A run returns Busy; a write failure returns WriteFailed.
+    pub async fn set_name(&self, name: SessionName) -> Result<String, AgentSessionError> {
+        self.append_idle(async |store| store.append_session_name(name).await)
+            .await
+    }
+
+    /// Write one record with `append` while idle, with the conversation leased as for a
+    /// prompt. A run returns Busy; a write failure returns WriteFailed.
+    async fn append_idle(
+        &self,
+        append: impl AsyncFnOnce(&mut SessionStore) -> anyhow::Result<String>,
+    ) -> Result<String, AgentSessionError> {
         let mut active = self.acquire(CancellationToken::new())?;
-        active
-            .runner()
-            .session_mut()
-            .append_custom_message(message)
+        append(active.runner().session_mut())
             .await
             .map_err(|error| AgentSessionError::WriteFailed(format!("{error:#}")))
     }

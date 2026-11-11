@@ -118,7 +118,8 @@ impl SessionStore {
                 | Entry::RequestStarted(_)
                 | Entry::ToolCallStarted(_)
                 | Entry::Custom(_)
-                | Entry::CustomMessage(_) => false,
+                | Entry::CustomMessage(_)
+                | Entry::SessionInfo(_) => false,
             }),
             "compaction attempt already finished"
         );

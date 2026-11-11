@@ -28,6 +28,7 @@
 //! | Interrupted tool calls | `session/recovery.rs` (start records, the calls left without results) | `agent/agent_loop/tools.rs` (records the start of a call with side effects), `runner/interrupted.rs` (records their results) |
 //! | Request audit | `session/request.rs` (request settings and per-request checkpoints) | `agent/agent_loop/model.rs` (task requests), `compaction/summarizer.rs` (summary requests) |
 //! | Context edits | `session.rs` (the rules of an edit), `session/projection.rs` (applying edits) | `agent/agent_loop/context.rs` (input and hook edits), `runner/run_host.rs` (omitting a failed answer) |
+//! | Session names | `session/name.rs` (the `session_info` record, the latest name), `session/directory.rs` (the name a listing shows) | `agent_session.rs` (naming a session while idle) |
 //! | Approval | none: approvals are not recorded | `agent/interaction.rs` (the host interface and the session's grants), `agent/agent_loop/tools.rs` (asking) |
 //! | Events | none | `agent/events.rs` (the events and their envelope), `agent_session/subscribers.rs` (fan-out to subscribers) |
 //!
