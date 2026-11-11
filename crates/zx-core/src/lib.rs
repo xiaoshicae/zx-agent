@@ -24,9 +24,9 @@
 //!
 //! | Feature | Records and rules, in `session` | What acts, above it |
 //! |---|---|---|
-//! | Summaries; the session file and the events say *compaction*, the code says both | `session/summary.rs` (types and limits), `summary/records.rs` (appending and checking the records), `summary/source.rs` (what a summary reads), `session/projection.rs` (the summary in the context) | `compaction.rs` (budgets and report), `compaction/summarizer.rs` (one summary), `compaction/answer.rs` (the model's answer), `runner/run_host.rs` (when to summarize) |
+//! | Compaction; the summary is the text it produces | `session/compaction.rs` (types and limits), `compaction/records.rs` (appending and checking the records), `compaction/source.rs` (what a compaction reads), `session/projection.rs` (the summary in the context) | `compaction.rs` (budgets and report), `compaction/compactor.rs` (one compaction), `compaction/answer.rs` (the model's answer), `runner/run_host.rs` (when to compact) |
 //! | Interrupted tool calls | `session/recovery.rs` (start records, the calls left without results) | `agent/agent_loop/tools.rs` (records the start of a call with side effects), `runner/interrupted.rs` (records their results) |
-//! | Request audit | `session/request.rs` (request settings and per-request checkpoints) | `agent/agent_loop/model.rs` (task requests), `compaction/summarizer.rs` (summary requests) |
+//! | Request audit | `session/request.rs` (request settings and per-request checkpoints) | `agent/agent_loop/model.rs` (task requests), `compaction/compactor.rs` (summary requests) |
 //! | Context edits | `session.rs` (the rules of an edit), `session/projection.rs` (applying edits) | `agent/agent_loop/context.rs` (input and hook edits), `runner/run_host.rs` (omitting a failed answer) |
 //! | Session names | `session/name.rs` (the `session_info` record, the latest name), `session/directory.rs` (the name a listing shows) | `agent_session.rs` (naming a session while idle) |
 //! | Approval | none: approvals are not recorded | `agent/interaction.rs` (the host interface and the session's grants), `agent/agent_loop/tools.rs` (asking) |

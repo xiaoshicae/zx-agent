@@ -156,12 +156,12 @@ async fn records_carry_the_serialized_type_of_every_entry_kind() {
         },
         input_bytes: 1,
     };
-    let attempt = store.begin_compaction(plan()).await.unwrap();
+    let started = store.begin_compaction(plan()).await.unwrap();
     store
-        .fail_compaction(&attempt, "invalid".into(), Usage::default(), None)
+        .fail_compaction(&started, "invalid".into(), Usage::default(), None)
         .await
         .unwrap();
-    let attempt = store.begin_compaction(plan()).await.unwrap();
+    let started = store.begin_compaction(plan()).await.unwrap();
     let summary = CompactionSummary {
         facts: vec![SummaryFact {
             text: "fact".into(),
@@ -171,7 +171,7 @@ async fn records_carry_the_serialized_type_of_every_entry_kind() {
         plans: vec![],
     };
     store
-        .append_compaction(&attempt, summary, Usage::default())
+        .append_compaction(&started, summary, Usage::default())
         .await
         .unwrap();
     let request = crate::ai::Request {

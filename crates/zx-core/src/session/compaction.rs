@@ -1,5 +1,5 @@
-//! Summaries in the session: what a summary holds and the limits it keeps, the records of
-//! its attempt, result and failure, and the rules a new fact follows.
+//! Compaction in the session: what a summary holds and the limits it keeps, the records
+//! of a compaction's start, result and failure, and the rules a new fact follows.
 //!
 //! - `records`: appending those records, and the checks each passes when it is appended
 //!   and when a session is loaded
@@ -122,7 +122,7 @@ impl CompactionSummary {
     }
 }
 
-/// Information needed to reconstruct a summarization request with its source IDs.
+/// Information needed to reconstruct a summary request with its source IDs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SummaryRequest {
@@ -132,9 +132,9 @@ pub struct SummaryRequest {
     pub max_tokens: u32,
 }
 
-/// A summary attempt: what it reads and keeps, and the request it makes.
+/// The start of a compaction: what it reads and keeps, and the request it makes.
 ///
-/// Written and flushed before the summary model is called. An unresolved attempt
+/// Written and flushed before the summary model is called. A compaction left unresolved
 /// after cancellation or process failure has no effect on model context.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -156,20 +156,20 @@ pub struct CompactionEntry {
     pub id: String,
     pub parent_id: Option<String>,
     pub timestamp: u64,
-    pub attempt_id: String,
+    pub compaction_id: String,
     pub first_kept_entry_id: String,
     pub summary: CompactionSummary,
     pub usage: Usage,
 }
 
-/// A failed or cancelled summary attempt, kept outside model context.
+/// A failed or cancelled compaction, kept outside model context.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompactionFailedEntry {
     pub id: String,
     pub parent_id: Option<String>,
     pub timestamp: u64,
-    pub attempt_id: String,
+    pub compaction_id: String,
     pub error: String,
     pub usage: Usage,
     #[serde(skip_serializing_if = "Option::is_none")]

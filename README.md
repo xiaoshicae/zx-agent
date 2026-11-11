@@ -391,7 +391,7 @@ run、chat 与 im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（完整地�
 第一行是头部，之后每行一个条目，条目之间通过 `parentId` 连成一棵树：
 
 ```json
-{"type":"session","version":8,"id":"…","timestamp":1761700000000,"cwd":"/srv","model":"…"}
+{"type":"session","version":9,"id":"…","timestamp":1761700000000,"cwd":"/srv","model":"…"}
 {"type":"message","id":"a1b2c3d4","parentId":"f0e1d2c3","timestamp":…,"message":{"role":"user","content":"…","timestamp":…}}
 {"type":"context_edit","id":"c3d4e5f6","parentId":"b2c3d4e5","timestamp":…,"targetId":"b2c3d4e5","replacement":null}
 ```

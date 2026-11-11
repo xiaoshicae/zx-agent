@@ -1,4 +1,4 @@
-//! The summarizer: one summary over a session, from choosing what to summarize to recording
+//! The compactor: one compaction over a session, from choosing what to summarize to recording
 //! the result or the failure.
 
 use anyhow::{Context, Result, bail, ensure};
@@ -6,7 +6,7 @@ use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use super::answer::{ResponseBytes, parse_answer};
-use super::{Config, MAX_SOURCE_BYTES, Outcome, Report, Summarized, Trigger, context_bytes, message_bytes};
+use super::{Compacted, Config, MAX_SOURCE_BYTES, Outcome, Report, Trigger, context_bytes, message_bytes};
 use crate::agent::{AgentEvent, EventTarget, LoopConfig, RequestKind};
 use crate::ai::{AssistantMessage, Message, Request, StreamEvent, duration_ms, now_ms};
 use crate::session::{
@@ -21,9 +21,9 @@ const SUMMARY_INSTRUCTIONS: &str = "Summarize the supplied original conversation
     Keep guesses separate from facts. \
     Preserve task goals, constraints, unresolved work, and artifact IDs/paths needed to continue. \
     Never summarize a previous summary. Be concise.";
-/// Runs one summary over a session: chooses what to summarize, records the attempt, asks
+/// Runs one compaction over a session: chooses what to summarize, records its start, asks
 /// the model, checks the answer and records the result or the failure.
-pub(crate) struct Summarizer<'a> {
+pub(crate) struct Compactor<'a> {
     pub session: &'a mut SessionStore,
     /// The loop's configuration: the model that summarizes, its prices, and the hooks that
     /// receive the events.
@@ -47,23 +47,23 @@ struct Candidate {
     prefix_system: usize,
 }
 
-/// A summary attempt recorded in the session, waiting for the model's answer.
-struct OpenSummary {
+/// A compaction whose start is recorded in the session, waiting for the model's answer.
+struct OpenCompaction {
     id: String,
     source_ids: Vec<String>,
     retained: Vec<Message>,
     prefix_system: usize,
 }
 
-/// A summary that did not complete, to record with the attempt.
+/// A compaction that did not complete, to record against its start.
 struct Failed {
-    attempt_id: String,
+    compaction_id: String,
     cause: Cause,
     /// The final response, when one arrived; stream failures are already in `cause`.
     response: Option<AssistantMessage>,
 }
 
-/// Why a summary did not complete.
+/// Why a compaction did not complete.
 enum Cause {
     /// The request failed, or its answer was not a valid summary.
     Rejected(anyhow::Error),
@@ -71,28 +71,28 @@ enum Cause {
     Unrecorded(anyhow::Error),
 }
 
-impl Summarizer<'_> {
+impl Compactor<'_> {
     async fn emit(&self, event: AgentEvent) {
         self.config.hooks.emit(event, self.target).await;
     }
 
-    /// Run one summary: choose what to summarize, record the attempt, ask the model, check
+    /// Run one compaction: choose what to summarize, record its start, ask the model, check
     /// the answer, then record the result or the failure. When the outcome is `Completed`,
     /// the session's projection is the new context.
-    pub(crate) async fn run(&mut self, trigger: Trigger, cancel: &CancellationToken) -> Summarized {
+    pub(crate) async fn run(&mut self, trigger: Trigger, cancel: &CancellationToken) -> Compacted {
         let mut report = Report::default();
         let candidate = match self.plan(trigger, &mut report) {
             Ok(Some(candidate)) => candidate,
-            Ok(None) => return Summarized::recorded(report),
-            Err(error) => return Summarized::recorded(report.failed(format!("{error:#}"))),
+            Ok(None) => return Compacted::recorded(report),
+            Err(error) => return Compacted::recorded(report.failed(format!("{error:#}"))),
         };
         if cancel.is_cancelled() {
-            return Summarized::recorded(report.aborted());
+            return Compacted::recorded(report.aborted());
         }
         let (open, request) = match self.begin(candidate, report.input_bytes, trigger).await {
             Ok(begun) => begun,
             Err(error) => {
-                return Summarized {
+                return Compacted {
                     report: report.failed(format!("{error:#}")),
                     unrecorded: Some(error),
                 };
@@ -117,10 +117,10 @@ impl Summarizer<'_> {
             Err(error) => Err(Cause::Rejected(error)),
         };
         match committed {
-            Ok((id, output_bytes)) => Summarized::recorded(self.complete(report, id, output_bytes, trigger).await),
+            Ok((id, output_bytes)) => Compacted::recorded(self.complete(report, id, output_bytes, trigger).await),
             Err(cause) => {
                 let failed = Failed {
-                    attempt_id: open.id,
+                    compaction_id: open.id,
                     cause,
                     response: response.ok(),
                 };
@@ -223,14 +223,14 @@ impl Summarizer<'_> {
         full_candidate(&raw, cut).map(Some)
     }
 
-    /// Record the attempt and its request in the session, then announce them. An error means
+    /// Record the start and its request in the session, then announce them. An error means
     /// the session could not record.
     async fn begin(
         &mut self,
         candidate: Candidate,
         input_bytes: usize,
         trigger: Trigger,
-    ) -> Result<(OpenSummary, Request)> {
+    ) -> Result<(OpenCompaction, Request)> {
         let Candidate {
             first_kept,
             source_ids,
@@ -240,7 +240,7 @@ impl Summarizer<'_> {
         } = candidate;
         let plan = CompactionPlan {
             first_kept_entry_id: first_kept,
-            // A copy: the attempt records the sources, and the answer is checked against them.
+            // A copy: the start records the sources, and the answer is checked against them.
             source_entry_ids: source_ids.clone(),
             request: SummaryRequest {
                 provider: self.config.provider.name().into(),
@@ -257,7 +257,7 @@ impl Summarizer<'_> {
             .context("cannot persist compaction request")?;
         let (request, request_entry) = self.record_request(&id, input).await?;
         self.announce(input_bytes, request_entry, trigger).await;
-        let open = OpenSummary {
+        let open = OpenCompaction {
             id,
             source_ids,
             retained,
@@ -266,7 +266,7 @@ impl Summarizer<'_> {
         Ok((open, request))
     }
 
-    /// Announce a recorded attempt and its request, in that order.
+    /// Announce a recorded start and its request, in that order.
     async fn announce(&self, input_bytes: usize, request_entry: String, trigger: Trigger) {
         self.emit(AgentEvent::CompactionStart {
             input_bytes,
@@ -282,10 +282,10 @@ impl Summarizer<'_> {
         .await;
     }
 
-    /// Record the summary request of `attempt_id` as it will be sent. Returns the request
+    /// Record the summary request of `compaction_id` as it will be sent. Returns the request
     /// and the ID of its `request_started` entry; an error means the session could not
     /// record.
-    async fn record_request(&mut self, attempt_id: &str, input: String) -> Result<(Request, String)> {
+    async fn record_request(&mut self, compaction_id: &str, input: String) -> Result<(Request, String)> {
         let system_timestamp = now_ms();
         let user_timestamp = now_ms();
         let request = Request {
@@ -297,7 +297,7 @@ impl Summarizer<'_> {
             cache_key: None,
         };
         let source = RequestSource::Summary {
-            attempt_id: attempt_id.into(),
+            compaction_id: compaction_id.into(),
             system_timestamp,
             user_timestamp,
         };
@@ -310,11 +310,11 @@ impl Summarizer<'_> {
         Ok((request, entry))
     }
 
-    /// Check the model's answer against the attempt: it cites only what it read, fits the
-    /// limits and shrinks the context. Returns the summary and the new context's size.
+    /// Check the model's answer against the start: it cites only what the compaction read,
+    /// fits the limits and shrinks the context. Returns the summary and the new context's size.
     fn validate(
         &self,
-        open: &OpenSummary,
+        open: &OpenCompaction,
         summary: CompactionSummary,
         report: &Report,
         trigger: Trigger,
@@ -369,7 +369,7 @@ impl Summarizer<'_> {
         failed: Failed,
         trigger: Trigger,
         cancel: &CancellationToken,
-    ) -> Summarized {
+    ) -> Compacted {
         report.outcome = if cancel.is_cancelled() {
             Outcome::Aborted
         } else {
@@ -381,7 +381,12 @@ impl Summarizer<'_> {
         };
         if let Err(write_error) = self
             .session
-            .fail_compaction(&failed.attempt_id, error.clone(), report.usage.clone(), failed.response)
+            .fail_compaction(
+                &failed.compaction_id,
+                error.clone(),
+                report.usage.clone(),
+                failed.response,
+            )
             .await
         {
             error = format!("cannot persist compaction failure: {write_error:#}; {error}");
@@ -393,7 +398,7 @@ impl Summarizer<'_> {
         })
         .await;
         report.error = Some(error);
-        Summarized { report, unrecorded }
+        Compacted { report, unrecorded }
     }
 
     /// Send the summary request and collect its response, bounded in size and time.

@@ -1,12 +1,12 @@
-//! Bounded, auditable summarization owned by the session host, not the agent loop (pi:
+//! Bounded, auditable compaction owned by the session host, not the agent loop (pi:
 //! coding-agent/src/core/compaction/compaction.ts).
 //!
-//! [`Config`] holds the budgets and [`Report`] says what one summary cost and produced; the
-//! `summarizer` runs one summary over a session, and `answer` bounds and parses the model's
+//! [`Config`] holds the budgets and [`Report`] says what one compaction cost and produced;
+//! the `compactor` runs one compaction over a session, and `answer` bounds and parses the model's
 //! answer.
 
 mod answer;
-mod summarizer;
+mod compactor;
 
 use std::time::Duration;
 
@@ -16,9 +16,9 @@ use serde::Serialize;
 use crate::ai::{Message, StopReason, Usage};
 use crate::session::without_details;
 
-pub(crate) use summarizer::Summarizer;
+pub(crate) use compactor::Compactor;
 
-/// The most bytes of original records one summary reads.
+/// The most bytes of original records one compaction reads.
 const MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 
 /// Automatic trigger and summary request budgets. Default SDK configuration has no
@@ -26,11 +26,11 @@ const MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 #[derive(Clone, Debug)]
 pub struct Config {
     /// Serialized transcript threshold; None disables the byte trigger of automatic
-    /// summaries.
+    /// compaction.
     pub trigger_bytes: Option<usize>,
-    /// Estimated context tokens above which an automatic summary runs, from the last
+    /// Estimated context tokens above which an automatic compaction runs, from the last
     /// response's reported usage and the bytes added since ([`context_tokens`]); None
-    /// disables the token trigger. Either trigger runs a summary.
+    /// disables the token trigger. Either trigger runs a compaction.
     pub trigger_tokens: Option<u64>,
     /// Tokens kept free below a model's context window when the token trigger is derived
     /// from the window ([`Config::derive_trigger_tokens`]); pi's `reserveTokens`.
@@ -60,7 +60,7 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Whether automatic summaries are on: a byte or a token trigger is set.
+    /// Whether automatic compaction is on: a byte or a token trigger is set.
     pub fn automatic(&self) -> bool {
         self.trigger_bytes.is_some() || self.trigger_tokens.is_some()
     }
@@ -152,16 +152,16 @@ impl Report {
     }
 }
 
-/// What one summary did, and whether the session recorded all of it.
-pub(crate) struct Summarized {
+/// What one compaction did, and whether the session recorded all of it.
+pub(crate) struct Compacted {
     pub report: Report,
-    /// The session could not record a step of the summary, so a run must stop (invariant 7).
+    /// The session could not record a step of the compaction, so a run must stop (invariant 7).
     /// The report's `error` states the same.
     pub unrecorded: Option<anyhow::Error>,
 }
 
-impl Summarized {
-    /// A summary whose every step the session recorded, or that recorded none.
+impl Compacted {
+    /// A compaction whose every step the session recorded, or that recorded none.
     fn recorded(report: Report) -> Self {
         Self {
             report,
@@ -170,19 +170,19 @@ impl Summarized {
     }
 }
 
-/// Why a summary runs.
+/// Why a compaction runs.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Trigger {
     Manual,
     /// The context exceeds `trigger_bytes` before a request.
     Automatic,
     /// The model rejected a request as too long for its context. Checked like an automatic
-    /// summary, whatever the context's size in bytes.
+    /// compaction, whatever the context's size in bytes.
     Overflow,
 }
 
 impl Trigger {
-    /// Whether the summary runs on the host's initiative rather than on request, as the
+    /// Whether the compaction runs on the host's initiative rather than on request, as the
     /// `automatic` field of its events says.
     fn is_automatic(self) -> bool {
         self != Self::Manual

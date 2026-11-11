@@ -16,7 +16,7 @@
 |---|---|
 | CLI | `src/main.rs`（只分派）、`src/cli/`（`settings.rs` 合并配置与命令行，`shared.rs` 的 `Shared` 是进程内共用的东西，`prepare.rs` 组装一个会话，`execution.rs` 本机或容器）、`src/run.rs`、`src/chat/`、`src/acp/`、`src/im.rs`、`src/process.rs`、`src/render.rs`、`src/session_files.rs`、`src/list_sessions.rs` |
 | 配置 | `src/config/`（`environment.rs`、`definition.rs`、`agent_file.rs`、`permissions.rs`）、`agents/` |
-| 内核 | `crates/zx-core/src/`：`agent_session.rs`（共享调用、Busy、订阅）、`runner.rs`（单次运行、重试、上限、审批缓存）、`session/`（只追加的条目树、投影、恢复、`SessionLog`、`jsonl.rs`）、`compaction/` 与 `session/summary/`（摘要）、`agent/`（循环、工具执行、Hooks、事件、队列）、`prompt.rs`、`extensions.rs` |
+| 内核 | `crates/zx-core/src/`：`agent_session.rs`（共享调用、Busy、订阅）、`runner.rs`（单次运行、重试、上限、审批缓存）、`session/`（只追加的条目树、投影、恢复、`SessionLog`、`jsonl.rs`）、`compaction/` 与 `session/compaction/`（摘要，统一叫 compaction，见 D22）、`agent/`（循环、工具执行、Hooks、事件、队列）、`prompt.rs`、`extensions.rs` |
 | 模型 | `crates/zx-ai/src/`、`crates/zx-ai-openai/src/` |
 | 工具与外层策略 | `crates/zx-tools/src/`：`tools/`、`executor/`（本机与容器）、`policy/`、`continuation.rs`、`redact.rs`、`output_store.rs`、`mcp.rs` |
 | IM | `crates/zx-im/src/`（`ImChannel`、`Server`、`platform.rs`）、`crates/zx-im-slack/`、`crates/zx-im-feishu/` |

@@ -147,7 +147,7 @@ async fn request_config_is_appended_only_when_the_configuration_changes() {
 }
 
 #[tokio::test]
-async fn summary_requests_are_rebuilt_from_the_compaction_attempt() {
+async fn summary_requests_are_rebuilt_from_their_compaction() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
     let mut store = SessionStore::create(&path, header()).unwrap();

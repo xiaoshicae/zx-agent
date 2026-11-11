@@ -42,9 +42,9 @@ pub struct RequestConfigEntry {
 pub enum RequestSource {
     /// The session projection at this request entry's parent, not at the current leaf.
     Projection,
-    /// Original records referenced by a compaction attempt, with request timestamps.
+    /// Original records referenced by a compaction, with request timestamps.
     Summary {
-        attempt_id: String,
+        compaction_id: String,
         system_timestamp: u64,
         user_timestamp: u64,
     },
@@ -156,8 +156,8 @@ impl SessionStore {
                 self.request_config(&started.config_id)?;
                 // Check only what can fail: a projection can always be built, and building
                 // one for every request record would make loading quadratic.
-                if let RequestSource::Summary { attempt_id, .. } = &started.source {
-                    self.summary_attempt(attempt_id, &path)?;
+                if let RequestSource::Summary { compaction_id, .. } = &started.source {
+                    self.requested_compaction(compaction_id, &path)?;
                 }
             }
             _ => bail!("not a request record"),
@@ -165,16 +165,14 @@ impl SessionStore {
         Ok(())
     }
 
-    /// The summary attempt that a summary request names, which must be on its branch.
-    fn summary_attempt(&self, attempt_id: &str, path: &[&Entry]) -> Result<&CompactionStartedEntry> {
+    /// The start record of the compaction a summary request names, which must be on its
+    /// branch.
+    fn requested_compaction(&self, compaction_id: &str, path: &[&Entry]) -> Result<&CompactionStartedEntry> {
         ensure!(
-            path.iter().any(|entry| entry.id() == attempt_id),
-            "summary attempt is not on this request branch"
+            path.iter().any(|entry| entry.id() == compaction_id),
+            "the compaction is not on this request branch"
         );
-        let Some(Entry::CompactionStarted(attempt)) = self.get(attempt_id) else {
-            bail!("summary attempt {attempt_id:?} not found");
-        };
-        Ok(attempt)
+        self.compaction_started(compaction_id)
     }
 
     fn request_messages(&self, source: &RequestSource, parent: Option<&str>) -> Result<Vec<Message>> {
@@ -185,14 +183,14 @@ impl SessionStore {
                 .map(|item| item.message)
                 .collect()),
             RequestSource::Summary {
-                attempt_id,
+                compaction_id,
                 system_timestamp,
                 user_timestamp,
             } => {
-                let attempt = self.summary_attempt(attempt_id, &self.branch_path_from(parent))?;
-                let raw = Self::raw_projection_from(&self.branch_path_from(attempt.parent_id.as_deref()));
-                let content = summary_input(Self::summarized_prefix(&raw, &attempt.first_kept_entry_id)?)?;
-                Ok(attempt.request.messages(content, *system_timestamp, *user_timestamp))
+                let started = self.requested_compaction(compaction_id, &self.branch_path_from(parent))?;
+                let raw = Self::raw_projection_from(&self.branch_path_from(started.parent_id.as_deref()));
+                let content = summary_input(Self::summarized_prefix(&raw, &started.first_kept_entry_id)?)?;
+                Ok(started.request.messages(content, *system_timestamp, *user_timestamp))
             }
         }
     }

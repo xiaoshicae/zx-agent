@@ -139,10 +139,10 @@ impl SessionStore {
                 None
             }
         })?;
-        let Some(Entry::CompactionStarted(attempt)) = self.get(&compaction.attempt_id) else {
+        let Some(Entry::CompactionStarted(started)) = self.get(&compaction.compaction_id) else {
             return None;
         };
-        if Self::corrected_source(&path[position + 1..], &attempt.source_entry_ids).is_some() {
+        if Self::corrected_source(&path[position + 1..], &started.source_entry_ids).is_some() {
             return None;
         }
         Some(compaction)
