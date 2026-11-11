@@ -1,4 +1,4 @@
-//! What a run lends the loop and the summarizer: the session it records in, the hooks and
+//! What a run lends the loop and the compactor: the session it records in, the hooks and
 //! sink it reports to, and the model it summarizes with. The Runner builds one per run and
 //! the loop reaches it as its [`SessionHost`]: recording goes to the session as it would
 //! without a run, and preparing the context may summarize it (pi: AgentSession writes on
@@ -14,7 +14,7 @@ use crate::agent::{
 };
 use crate::ai::retry::RetryPolicy;
 use crate::ai::{AssistantMessage, Message, StopReason, duration_ms};
-use crate::compaction::{self, Summarized, Summarizer, Trigger};
+use crate::compaction::{self, Compacted, Compactor, Trigger};
 use crate::session::SessionStore;
 
 /// How a run ends when it stops before a finished answer.
@@ -26,9 +26,9 @@ pub(super) enum RunStop {
     Failed(String),
 }
 
-/// Why automatic summaries are paused: a paid summary request failed, and repeating it on
-/// every prompt would keep paying for the same failure. A summary that succeeds, a manual
-/// one included, or a change of model resumes them. The Runner owns it, so the pause
+/// Why automatic compaction is paused: a paid summary request failed, and repeating it on
+/// every prompt would keep paying for the same failure. A compaction that succeeds, a manual
+/// one included, or a change of model resumes it. The Runner owns it, so the pause
 /// outlives one prompt and a run whose future is dropped.
 #[derive(Default)]
 pub(super) struct CompactionPause(Option<String>);
@@ -115,19 +115,19 @@ impl<'a> RunHost<'a> {
         (prompts, run_start)
     }
 
-    /// Summarize the old prefix with `trigger`; the pause follows the outcome. When the
+    /// Compact with `trigger`, summarizing the old prefix; the pause follows the outcome. When the
     /// report says `Completed`, the session's projection is the new context.
-    pub(super) async fn summarize(&mut self, trigger: Trigger, cancel: &CancellationToken) -> Summarized {
-        let mut summarizer = Summarizer {
+    pub(super) async fn compact(&mut self, trigger: Trigger, cancel: &CancellationToken) -> Compacted {
+        let mut compactor = Compactor {
             session: &mut *self.session,
             config: self.config,
             compaction: self.compaction,
             target: self.target,
             attempt: self.attempt,
         };
-        let summarized = summarizer.run(trigger, cancel).await;
-        self.pause.note(&summarized.report);
-        summarized
+        let compacted = compactor.run(trigger, cancel).await;
+        self.pause.note(&compacted.report);
+        compacted
     }
 
     /// The input a continuation starts with, after omitting a failed answer at the end; an
@@ -202,7 +202,7 @@ impl<'a> RunHost<'a> {
     ) -> Result<(), RunStop> {
         self.emit(AgentEvent::ContextOverflow { error: error.into() }).await;
         self.omit_failed_attempt(failed_entry).await.map_err(RunStop::Failed)?;
-        let Summarized { report, unrecorded } = self.summarize(Trigger::Overflow, cancel).await;
+        let Compacted { report, unrecorded } = self.compact(Trigger::Overflow, cancel).await;
         accounting.model_requests = accounting.model_requests.saturating_add(report.requests);
         accounting.usage.add(&report.usage);
         if let Some(error) = unrecorded {
@@ -253,7 +253,7 @@ impl SessionHost for RunHost<'_> {
         self.session
     }
 
-    /// Summarize first when automatic summaries are on and the context passes a trigger.
+    /// Compact first when automatic compaction is on and the context passes a trigger.
     async fn prepare_context(&mut self, cancel: &CancellationToken) -> ContextPreparation {
         if !self.compaction.automatic() {
             return ContextPreparation::ready();
@@ -280,7 +280,7 @@ impl SessionHost for RunHost<'_> {
                  compact manually to retry, start a new session, or disable automatic compaction"
             ));
         }
-        let Summarized { report, unrecorded } = self.summarize(Trigger::Automatic, cancel).await;
+        let Compacted { report, unrecorded } = self.compact(Trigger::Automatic, cancel).await;
         let result = match unrecorded {
             Some(error) => Err(Halt::Unrecorded(error)),
             None if report.outcome == compaction::Outcome::Completed => Ok(()),

@@ -20,6 +20,7 @@
 //! - `test_support` and `tests`, compiled for tests only: what the session's unit tests
 //!   share, and the tests of the store
 
+mod compaction;
 mod directory;
 mod entry;
 mod jsonl;
@@ -28,11 +29,15 @@ mod name;
 mod projection;
 mod recovery;
 mod request;
-mod summary;
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]
 mod tests;
+pub use compaction::{
+    CompactionEntry, CompactionFailedEntry, CompactionPlan, CompactionStartedEntry, CompactionSummary, SummaryFact,
+    SummaryRequest,
+};
+pub(crate) use compaction::{MAX_SUMMARY_BYTES, summary_input, summary_messages};
 pub use directory::{SessionInfo, SessionList, Unreadable, list_sessions};
 pub use entry::{
     ContextEditEntry, CustomEntry, CustomMessage, CustomMessageEntry, Entry, MessageEntry, ProjectedMessage,
@@ -43,11 +48,6 @@ pub use name::{SessionInfoEntry, SessionName};
 pub(crate) use projection::without_details;
 pub use recovery::{InterruptedToolCall, StartRecord, ToolCallStartedEntry};
 pub use request::{RequestConfig, RequestConfigEntry, RequestSource, RequestStartedEntry};
-pub use summary::{
-    CompactionEntry, CompactionFailedEntry, CompactionPlan, CompactionStartedEntry, CompactionSummary, SummaryFact,
-    SummaryRequest,
-};
-pub(crate) use summary::{MAX_SUMMARY_BYTES, summary_input, summary_messages};
 #[cfg(test)]
 pub(crate) use test_support::FailingWriter;
 
@@ -64,7 +64,7 @@ use jsonl::JsonlFile;
 /// The session format: written to every new header, and the only version a session may have
 /// to be created or loaded. A change to the format raises it, and sessions of any other
 /// version are refused.
-pub const SESSION_VERSION: u32 = 8;
+pub const SESSION_VERSION: u32 = 9;
 
 /// How long one append may wait for its log, such as a database that stopped answering.
 /// A file append finishes long before; a timed-out append stops writing, like a failed one.
@@ -517,7 +517,7 @@ impl SessionStore {
             Entry::CompactionStarted(started) => self.validate_compaction_start(started)?,
             Entry::Compaction(done) => self.validate_compaction(done, entry.parent_id())?,
             Entry::CompactionFailed(failed) => {
-                self.validate_attempt_completion(&failed.attempt_id, entry.parent_id())?;
+                self.validate_open_compaction(&failed.compaction_id, entry.parent_id())?;
             }
             Entry::RequestConfig(_) | Entry::RequestStarted(_) => self.validate_request_entry(entry)?,
             Entry::ToolCallStarted(start) => self.validate_tool_call_start(start)?,

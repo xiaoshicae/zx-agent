@@ -64,9 +64,9 @@ async fn summary_replaces_only_the_old_prefix_and_preserves_all_system_updates()
     store.append_message(second_system.clone()).await.unwrap();
     let kept = store.append_message(Message::user("latest input")).await.unwrap();
     let raw = store.raw_projection();
-    let attempt = store.begin_compaction(plan(&store, &kept)).await.unwrap();
+    let started = store.begin_compaction(plan(&store, &kept)).await.unwrap();
     let done = store
-        .append_compaction(&attempt, summary(&old), Usage::default())
+        .append_compaction(&started, summary(&old), Usage::default())
         .await
         .unwrap();
     let projection = store.projection();
@@ -91,16 +91,16 @@ async fn unfinished_and_failed_attempts_do_not_change_context() {
     let mut store = SessionStore::in_memory(header());
     let (_, kept) = seeded(&mut store).await;
     let before = store.messages();
-    let attempt = store.begin_compaction(plan(&store, &kept)).await.unwrap();
+    let started = store.begin_compaction(plan(&store, &kept)).await.unwrap();
     assert_eq!(store.messages(), before);
     store
-        .fail_compaction(&attempt, "cancelled".into(), Usage::default(), None)
+        .fail_compaction(&started, "cancelled".into(), Usage::default(), None)
         .await
         .unwrap();
     assert_eq!(store.messages(), before);
     assert!(
         store
-            .append_compaction(&attempt, summary("unknown"), Usage::default())
+            .append_compaction(&started, summary("unknown"), Usage::default())
             .await
             .unwrap_err()
             .to_string()
@@ -112,9 +112,9 @@ async fn unfinished_and_failed_attempts_do_not_change_context() {
 async fn summaries_are_branch_local_and_references_to_other_branches_are_rejected() {
     let mut store = SessionStore::in_memory(header());
     let (old, kept) = seeded(&mut store).await;
-    let attempt = store.begin_compaction(plan(&store, &kept)).await.unwrap();
+    let started = store.begin_compaction(plan(&store, &kept)).await.unwrap();
     let done = store
-        .append_compaction(&attempt, summary(&old), Usage::default())
+        .append_compaction(&started, summary(&old), Usage::default())
         .await
         .unwrap();
     let compacted = store.messages();
@@ -123,7 +123,7 @@ async fn summaries_are_branch_local_and_references_to_other_branches_are_rejecte
     assert_eq!(store.messages().len(), 2);
     assert!(
         store
-            .append_compaction(&attempt, summary(&old), Usage::default())
+            .append_compaction(&started, summary(&old), Usage::default())
             .await
             .unwrap_err()
             .to_string()
@@ -140,9 +140,9 @@ async fn summaries_are_branch_local_and_references_to_other_branches_are_rejecte
 async fn editing_summarized_evidence_falls_back_to_originals_with_the_edit_applied() {
     let mut store = SessionStore::in_memory(header());
     let (old, kept) = seeded(&mut store).await;
-    let attempt = store.begin_compaction(plan(&store, &kept)).await.unwrap();
+    let started = store.begin_compaction(plan(&store, &kept)).await.unwrap();
     store
-        .append_compaction(&attempt, summary(&old), Usage::default())
+        .append_compaction(&started, summary(&old), Usage::default())
         .await
         .unwrap();
     store
@@ -160,9 +160,9 @@ async fn editing_summarized_evidence_falls_back_to_originals_with_the_edit_appli
 async fn omitting_the_first_retained_message_keeps_the_summary_in_place_of_the_old_prefix() {
     let mut store = SessionStore::in_memory(header());
     let (old, kept) = seeded(&mut store).await;
-    let attempt = store.begin_compaction(plan(&store, &kept)).await.unwrap();
+    let started = store.begin_compaction(plan(&store, &kept)).await.unwrap();
     store
-        .append_compaction(&attempt, summary(&old), Usage::default())
+        .append_compaction(&started, summary(&old), Usage::default())
         .await
         .unwrap();
     store.append_message(Message::user("after")).await.unwrap();
@@ -179,14 +179,14 @@ async fn omitting_the_first_retained_message_keeps_the_summary_in_place_of_the_o
 async fn a_summary_cannot_commit_after_its_source_was_edited_during_the_attempt() {
     let mut store = SessionStore::in_memory(header());
     let (old, kept) = seeded(&mut store).await;
-    let attempt = store.begin_compaction(plan(&store, &kept)).await.unwrap();
+    let started = store.begin_compaction(plan(&store, &kept)).await.unwrap();
     store
         .append_context_edit(&old, Some("corrected observation".into()))
         .await
         .unwrap();
     assert!(
         store
-            .append_compaction(&attempt, summary(&old), Usage::default())
+            .append_compaction(&started, summary(&old), Usage::default())
             .await
             .is_err(),
         "a stale summary must not hide a corrected source"
@@ -197,7 +197,7 @@ async fn a_summary_cannot_commit_after_its_source_was_edited_during_the_attempt(
 async fn invalid_fact_references_or_empty_summaries_never_append_a_success_record() {
     let mut store = SessionStore::in_memory(header());
     let (_, kept) = seeded(&mut store).await;
-    let attempt = store.begin_compaction(plan(&store, &kept)).await.unwrap();
+    let started = store.begin_compaction(plan(&store, &kept)).await.unwrap();
     let count = store.entries().len();
     for invalid in [
         summary("unknown"),
@@ -209,7 +209,7 @@ async fn invalid_fact_references_or_empty_summaries_never_append_a_success_recor
     ] {
         assert!(
             store
-                .append_compaction(&attempt, invalid, Usage::default())
+                .append_compaction(&started, invalid, Usage::default())
                 .await
                 .is_err()
         );
@@ -251,9 +251,9 @@ async fn duplicate_ids_and_unknown_records_are_rejected_without_modifying_the_fi
 async fn serialized_summary_records_use_camel_case_fields_and_snake_case_tags() {
     let mut store = SessionStore::in_memory(header());
     let (old, kept) = seeded(&mut store).await;
-    let attempt = store.begin_compaction(plan(&store, &kept)).await.unwrap();
+    let started = store.begin_compaction(plan(&store, &kept)).await.unwrap();
     store
-        .append_compaction(&attempt, summary(&old), Usage::default())
+        .append_compaction(&started, summary(&old), Usage::default())
         .await
         .unwrap();
     let Entry::Compaction(entry) = store.entries().last().unwrap() else {
@@ -261,7 +261,7 @@ async fn serialized_summary_records_use_camel_case_fields_and_snake_case_tags() 
     };
     let json = serde_json::to_value(store.entries().last().unwrap()).unwrap();
     assert_eq!(json["type"], "compaction");
-    assert_eq!(json["attemptId"], attempt);
+    assert_eq!(json["compactionId"], started);
     assert_eq!(json["firstKeptEntryId"], kept);
     assert_eq!(json["summary"]["facts"][0]["sourceEntryIds"][0], old);
     assert_eq!(entry.summary.facts[0].text, "The old observation");
@@ -295,9 +295,9 @@ async fn a_retained_boundary_never_splits_an_assistant_tool_result_exchange() {
         .await
         .unwrap();
     assert!(store.begin_compaction(plan(&store, &result)).await.is_err());
-    let attempt = store.begin_compaction(plan(&store, &call)).await.unwrap();
+    let started = store.begin_compaction(plan(&store, &call)).await.unwrap();
     store
-        .append_compaction(&attempt, summary(&old), Usage::default())
+        .append_compaction(&started, summary(&old), Usage::default())
         .await
         .unwrap();
     let messages = store.messages();

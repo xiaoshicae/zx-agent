@@ -42,7 +42,7 @@ pub struct LoopConfig {
     /// Slash commands extensions registered, for a frontend to run.
     pub commands: Vec<Arc<dyn SlashCommand>>,
     /// What is known about models, by ID: the prices give each response a cost, the context
-    /// window can set the token trigger of automatic summaries. Empty by default: costs and
+    /// window can set the token trigger of automatic compaction. Empty by default: costs and
     /// windows stay unknown.
     pub models: HashMap<String, ModelMeta>,
     /// Sent with every task request as its cache key ([`crate::ai::Request::cache_key`]), such as the
