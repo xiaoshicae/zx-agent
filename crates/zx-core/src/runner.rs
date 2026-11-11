@@ -25,7 +25,7 @@ use run_host::{CompactionPause, RunHost, RunStop};
 
 use crate::agent::ApprovalCache;
 use crate::agent::{
-    AgentEvent, Attempt, AttemptFailure, AttemptResult, EventSink, EventTarget, LoopConfig, QueuedMessage,
+    AgentEvent, AgentLoop, EventSink, EventTarget, LoopConfig, LoopFailure, LoopResult, QueuedMessage,
     record_pending_entries,
 };
 pub use crate::agent::{RunOutcome, RunReport};
@@ -256,8 +256,8 @@ impl Run<'_> {
             }
             // Hook failures are distinct from failed provider responses and are not retried.
             let (message, entry_id) = match result.failure {
-                Some(AttemptFailure::Provider { message, entry_id }) => (message, entry_id),
-                Some(AttemptFailure::Halted(error)) => break RunStop::Failed(error),
+                Some(LoopFailure::Provider { message, entry_id }) => (message, entry_id),
+                Some(LoopFailure::Halted(error)) => break RunStop::Failed(error),
                 None => break RunStop::Failed(NO_DIAGNOSTIC.into()),
             };
             let failure = Failure {
@@ -271,19 +271,20 @@ impl Run<'_> {
         }
     }
 
-    /// Run one attempt with what is left of the run's budgets, and account for it.
-    async fn attempt(&mut self, prompts: Vec<QueuedMessage>) -> AttemptResult {
+    /// Make one attempt: run the loop with what is left of the run's budgets, and account
+    /// for it.
+    async fn attempt(&mut self, prompts: Vec<QueuedMessage>) -> LoopResult {
         let number = self.accounting.attempts + 1;
         self.host.attempt = number;
         let (config, target) = (self.host.config, self.host.target);
-        let mut attempt = Attempt::in_run(config, &mut self.host, &mut *self.approvals, target.sink, target.trace);
-        attempt.max_model_requests = self.accounting.remaining_model_requests(self.limits);
-        attempt.token_budget = self.accounting.remaining_tokens(self.limits);
-        attempt.cost_budget = self.accounting.remaining_cost(self.limits);
-        attempt.prior_task_turns = self.accounting.task_turns;
-        attempt.prior_answer_continuations = self.accounting.answer_continuations;
-        attempt.attempt_number = number;
-        let result = attempt.run(prompts).await;
+        let mut agent_loop = AgentLoop::new(config, &mut self.host, &mut *self.approvals, target.sink, target.trace);
+        agent_loop.max_model_requests = self.accounting.remaining_model_requests(self.limits);
+        agent_loop.token_budget = self.accounting.remaining_tokens(self.limits);
+        agent_loop.cost_budget = self.accounting.remaining_cost(self.limits);
+        agent_loop.prior_task_turns = self.accounting.task_turns;
+        agent_loop.prior_answer_continuations = self.accounting.answer_continuations;
+        agent_loop.attempt_number = number;
+        let result = agent_loop.run(prompts).await;
         self.accounting.record(&result);
         result
     }

@@ -1,7 +1,7 @@
 //! What the loop needs from the session it runs in: the session, where it records each step
 //! before acting on it and whose projection it sends the model, and a chance to prepare that
-//! context before a request. A [`SessionStore`] is a host on its own; the Runner's host adds
-//! summaries.
+//! context before a request. The Runner's host is the only one, and adds summaries; the trait
+//! keeps the loop from depending on the runner, the layer above it.
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -48,19 +48,6 @@ pub(crate) async fn record_pending_entries(
         config.hooks.emit(event, target).await;
     }
     Ok(())
-}
-
-/// A session on its own: every step is recorded in the store, and the context is never
-/// prepared, as no one summarizes it.
-#[async_trait]
-impl SessionHost for SessionStore {
-    fn session(&mut self) -> &mut SessionStore {
-        self
-    }
-
-    async fn prepare_context(&mut self, _cancel: &CancellationToken) -> ContextPreparation {
-        ContextPreparation::ready()
-    }
 }
 
 /// What preparing the context cost and how it ended. The loop knows neither agents nor

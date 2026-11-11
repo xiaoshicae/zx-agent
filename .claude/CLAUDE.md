@@ -22,7 +22,7 @@
 | IM | `crates/zx-im/src/`（`ImChannel`、`Server`、`platform.rs`）、`crates/zx-im-slack/`、`crates/zx-im-feishu/` |
 | 追踪导出 | `src/otel.rs`、`src/otel/` |
 
-一次运行：`main` 组装 `AgentSession` → `prompt` 独占取得 Runner → `Runner::run` 开始一次 `Run`，每次尝试是一个 `Attempt` → 先持久化提示词、输入和上下文改动，再执行可选摘要 → 请求模型，发出的上下文就是此刻的会话投影 → 执行工具、脱敏、可选落盘 → 每一步先写入会话宿主（crate 内部的 `agent::SessionHost`），再发出事件 → `Run` 处理重试并汇总 `RunReport`，`main` 映射退出码。
+一次运行：`main` 组装 `AgentSession` → `prompt` 独占取得 Runner → `Runner::run` 开始一次 `Run`，每次尝试运行一遍循环 `AgentLoop`（crate 内部） → 先持久化提示词、输入和上下文改动，再执行可选摘要 → 请求模型，发出的上下文就是此刻的会话投影 → 执行工具、脱敏、可选落盘 → 每一步先写入会话宿主（crate 内部的 `agent::SessionHost`），再发出事件 → `Run` 处理重试并汇总 `RunReport`，`main` 映射退出码。
 
 设计取舍（改动前先理解原因）：
 

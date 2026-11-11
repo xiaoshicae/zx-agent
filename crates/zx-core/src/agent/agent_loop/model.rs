@@ -1,16 +1,16 @@
 //! Model request recording and streaming.
 
 use super::{
-    AgentEvent, AssistantMessage, Attempt, AttemptResult, Context, Halt, Request, RequestKind, RequestSource,
+    AgentEvent, AgentLoop, AssistantMessage, Context, Halt, LoopResult, Request, RequestKind, RequestSource,
     StopReason, StreamEvent, StreamExt,
 };
 use crate::agent::RequestSettings;
 
-impl Attempt<'_> {
+impl AgentLoop<'_> {
     /// Record and send the task request of turn `turn`, then account for its response.
     pub(super) async fn request_model(
         &mut self,
-        result: &mut AttemptResult,
+        result: &mut LoopResult,
         turn: u32,
     ) -> Result<Option<AssistantMessage>, Halt> {
         let config = self.config;

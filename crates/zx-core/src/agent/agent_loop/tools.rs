@@ -7,13 +7,13 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use super::{
-    AgentEvent, Approval, ApprovalRequest, ApprovalResult, AssertUnwindSafe, Attempt, Context, Effects, ExecutionMode,
-    FutureExt, Halt, HookCall, HookFailure, HookPoint, Instant, MAX_DETAILS_BYTES, MAX_QUEUED_PROGRESS, Message,
-    PolicyDecision, Tool, ToolCall, ToolContext, ToolOutput, ToolResultMessage, ToolVerdict, duration_ms, join_all,
-    now_ms,
+    AgentEvent, AgentLoop, Approval, ApprovalRequest, ApprovalResult, AssertUnwindSafe, Context, Effects,
+    ExecutionMode, FutureExt, Halt, HookCall, HookFailure, HookPoint, Instant, MAX_DETAILS_BYTES, MAX_QUEUED_PROGRESS,
+    Message, PolicyDecision, Tool, ToolCall, ToolContext, ToolOutput, ToolResultMessage, ToolVerdict, duration_ms,
+    join_all, now_ms,
 };
 
-impl Attempt<'_> {
+impl AgentLoop<'_> {
     fn find_tool(&self, name: &str) -> Option<Arc<dyn Tool>> {
         self.config.tools.iter().find(|tool| tool.name() == name).cloned()
     }
@@ -428,7 +428,7 @@ fn interrupted(effects: Effects) -> &'static str {
     }
 }
 
-async fn execute(engine: &Attempt<'_>, tool: &dyn Tool, call: &ToolCall) -> CallOutput {
+async fn execute(engine: &AgentLoop<'_>, tool: &dyn Tool, call: &ToolCall) -> CallOutput {
     let cancel = engine.trace.cancel();
     if cancel.is_cancelled() {
         return CallOutput::blocked(NOT_STARTED);
@@ -477,7 +477,7 @@ async fn execute(engine: &Attempt<'_>, tool: &dyn Tool, call: &ToolCall) -> Call
     }
 }
 
-async fn emit_progress(engine: &Attempt<'_>, call: &ToolCall, text: String) {
+async fn emit_progress(engine: &AgentLoop<'_>, call: &ToolCall, text: String) {
     match engine
         .config
         .hooks

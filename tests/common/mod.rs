@@ -23,10 +23,8 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use tokio::sync::Notify;
-use zx_agent::agent::ApprovalCache;
-use zx_agent::agent::QueuedMessage;
 use zx_agent::agent::{
-    AgentEvent, Attempt, AttemptResult, Event, EventSink, ExecutionMode, HookContext, LoopConfig, MessageQueues, Tool,
+    AgentEvent, Event, EventSink, ExecutionMode, HookContext, LoopConfig, MessageQueues, QueuedMessage, Tool,
     ToolContext, ToolOutput,
 };
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
@@ -34,7 +32,7 @@ use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::{
     AssistantMessage, ContentBlock, EventReceiver, Message, Provider, Request, StopReason, ToolCall, ToolDef,
 };
-use zx_agent::runner::{Limits, Runner};
+use zx_agent::runner::{Limits, RunReport, Runner};
 use zx_agent::session::{Entry, SessionHeader, SessionStore};
 
 /// The compiled `zx-agent`, for the tests that drive the program.
@@ -395,6 +393,11 @@ impl Collect {
         self.events().iter().map(AgentEvent::kind).collect()
     }
 
+    /// Task turns started: the `turn_start` events.
+    pub(crate) fn turns(&self) -> usize {
+        self.kinds().iter().filter(|kind| **kind == "turn_start").count()
+    }
+
     /// Tool call ids of `tool_execution_end` events, in emission order.
     pub(crate) fn tool_end_order(&self) -> Vec<String> {
         self.events()
@@ -445,27 +448,43 @@ pub(crate) fn summarize(messages: &[Message]) -> Vec<String> {
         .collect()
 }
 
-/// Run one user `prompt` after the messages of `context` with a 10-request budget and no
-/// cancellation, the defaults most loop tests need. The attempt runs over an in-memory
-/// session that starts with `context`; afterwards `context` is that session's projection.
-/// Returns the result and the events.
+/// Run one user `prompt` after the messages of `context` with a 10-request budget, no
+/// retries and no cancellation, the defaults most loop tests need. The run goes over an
+/// in-memory session that starts with `context`; afterwards `context` is that session's
+/// projection. Returns the report and the events.
 pub(crate) async fn run_prompt(
-    config: &LoopConfig,
+    config: LoopConfig,
     context: &mut Vec<Message>,
     prompt: &str,
-) -> (AttemptResult, Collect) {
+) -> (RunReport, Arc<Collect>) {
+    run_prompt_with(config, context, prompt, 10, &CancellationToken::new()).await
+}
+
+/// `run_prompt` with at most `max_model_requests`, stopped by `cancel`.
+pub(crate) async fn run_prompt_with(
+    config: LoopConfig,
+    context: &mut Vec<Message>,
+    prompt: &str,
+    max_model_requests: u32,
+    cancel: &CancellationToken,
+) -> (RunReport, Arc<Collect>) {
     let mut session = SessionStore::in_memory(header());
     for message in context.iter() {
         session.append_message(message.clone()).await.unwrap();
     }
-    let sink = Collect::default();
-    let mut approvals = ApprovalCache::default();
-    let cancel = CancellationToken::new();
-    let mut attempt = Attempt::new(config, &mut session, &mut approvals, &cancel, &sink);
-    attempt.max_model_requests = Some(10);
-    let result = attempt.run(vec![QueuedMessage::User(prompt.to_string())]).await;
-    *context = session.messages();
-    (result, sink)
+    let limits = Limits {
+        max_model_requests: Some(max_model_requests),
+        ..Limits::default()
+    };
+    let (mut runner, sink) = RunnerSetup {
+        limits,
+        session,
+        ..RunnerSetup::new(config)
+    }
+    .build();
+    let report = runner.run(prompt, cancel).await;
+    *context = runner.session().messages();
+    (report, sink)
 }
 
 /// A hook context for calling a hook directly: a fresh run in the current directory.
