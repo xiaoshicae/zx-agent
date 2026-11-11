@@ -4,16 +4,16 @@
 use std::ops::ControlFlow;
 
 use super::{
-    AssistantMessage, Attempt, AttemptResult, Halt, Message, Queue, RunOutcome, StopReason, TurnDecision,
+    AgentLoop, AssistantMessage, Halt, LoopResult, Message, Queue, RunOutcome, StopReason, TurnDecision,
     TurnDisposition, TurnSummary, UserMessageKind,
 };
 
-impl Attempt<'_> {
+impl AgentLoop<'_> {
     /// Ask the finish hook and decide whether another turn is needed. Breaks with the
     /// outcome that ends the attempt.
     pub(super) async fn decide_next_turn(
         &mut self,
-        result: &mut AttemptResult,
+        result: &mut LoopResult,
         response: TurnResponse,
         pending: &mut PendingInput,
     ) -> Result<ControlFlow<RunOutcome>, Halt> {
@@ -77,7 +77,7 @@ impl Attempt<'_> {
     }
 
     /// Model requests the attempt may still make; `None` is unlimited.
-    fn remaining_model_requests(&self, result: &AttemptResult) -> Option<u32> {
+    fn remaining_model_requests(&self, result: &LoopResult) -> Option<u32> {
         self.max_model_requests
             .map(|limit| limit.saturating_sub(result.model_requests))
     }

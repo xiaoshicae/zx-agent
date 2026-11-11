@@ -355,7 +355,7 @@ async fn the_model_calls_a_server_tool_through_the_loop() {
     let mut config = config(provider.clone(), Vec::new());
     register(&mut config, &[server]).unwrap();
     let mut context = Vec::new();
-    run_prompt(&config, &mut context, "is it up?").await;
+    run_prompt(config, &mut context, "is it up?").await;
     let requests = provider.requests();
     assert_eq!(requests[0].tools[0].name, "prom__query");
     assert!(

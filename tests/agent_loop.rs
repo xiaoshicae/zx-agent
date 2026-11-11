@@ -11,10 +11,10 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use common::{Collect, EchoTool, NotifyingProvider, config, header, run_prompt, summarize};
+use common::{Collect, EchoTool, NotifyingProvider, config, run_prompt, run_prompt_with, summarize};
 use zx_agent::agent::{
-    AgentEvent, ApprovalCache, Attempt, AttemptResult, EventSink, ExecutionMode, LoopConfig, MAX_DETAILS_BYTES,
-    PolicyDecision, QueuedMessage, RunOutcome, Tool, ToolContext, ToolOutput, ToolPolicy,
+    AgentEvent, ExecutionMode, LoopConfig, MAX_DETAILS_BYTES, PolicyDecision, QueuedMessage, RunOutcome, Tool,
+    ToolContext, ToolOutput, ToolPolicy,
 };
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{
@@ -22,7 +22,6 @@ use zx_agent::ai::{
     Usage,
 };
 use zx_agent::policy::PolicyHook;
-use zx_agent::session::SessionStore;
 
 fn provider(steps: impl IntoIterator<Item = FauxStep>) -> Arc<FauxProvider> {
     Arc::new(FauxProvider::new(steps))
@@ -35,24 +34,6 @@ fn echo() -> Arc<EchoTool> {
 fn with_policy(mut config: LoopConfig, policy: Arc<dyn ToolPolicy>) -> LoopConfig {
     config.hooks.push(PolicyHook::new(policy));
     config
-}
-
-/// Run one attempt with `prompts` over a new in-memory session, with at most
-/// `max_model_requests`, stopped by `cancel` and reporting to `sink`. Returns the result and
-/// the session's projection.
-async fn run_attempt(
-    config: &LoopConfig,
-    prompts: Vec<QueuedMessage>,
-    max_model_requests: Option<u32>,
-    cancel: &CancellationToken,
-    sink: &dyn EventSink,
-) -> (AttemptResult, Vec<Message>) {
-    let mut session = SessionStore::in_memory(header());
-    let mut approvals = ApprovalCache::default();
-    let mut attempt = Attempt::new(config, &mut session, &mut approvals, cancel, sink);
-    attempt.max_model_requests = max_model_requests;
-    let result = attempt.run(prompts).await;
-    (result, session.messages())
 }
 
 // ---------------------------------------------------------------------------
@@ -68,9 +49,9 @@ async fn runs_tools_until_the_model_answers() {
     let config = config(provider.clone(), vec![echo()]);
     let mut context = Vec::new();
 
-    let (result, _) = run_prompt(&config, &mut context, "go").await;
+    let (result, sink) = run_prompt(config, &mut context, "go").await;
 
-    assert_eq!((result.outcome, result.task_turns), (RunOutcome::Completed, 2));
+    assert_eq!((result.outcome, sink.turns()), (RunOutcome::Completed, 2));
     assert_eq!(
         summarize(&context),
         ["user:go", "assistant:calls[c1]", "tool:c1=hi", "assistant:done"]
@@ -90,14 +71,14 @@ async fn events_bracket_the_run_its_turns_and_tool_calls() {
     ]);
     let config = config(provider, vec![echo()]);
 
-    let (_, sink) = run_prompt(&config, &mut Vec::new(), "go").await;
+    let (_, sink) = run_prompt(config, &mut Vec::new(), "go").await;
 
     let kinds = sink.kinds();
     assert_eq!(
-        kinds[..4],
-        ["agent_start", "turn_start", "message_start", "message_end"]
+        kinds[..5],
+        ["run_start", "agent_start", "turn_start", "message_start", "message_end"]
     );
-    assert_eq!(kinds.last(), Some(&"agent_end"));
+    assert_eq!(kinds[kinds.len() - 2..], ["agent_end", "run_end"]);
     let position = |kind: &str| kinds.iter().position(|k| *k == kind).unwrap();
     assert!(position("tool_execution_start") < position("tool_execution_end"));
     assert_eq!(kinds.iter().filter(|kind| **kind == "turn_start").count(), 2);
@@ -110,7 +91,7 @@ async fn appends_to_the_existing_context_without_changing_it() {
     let earlier = vec![Message::user("first"), Message::user("still first")];
     let mut context = earlier.clone();
 
-    run_prompt(&config, &mut context, "second").await;
+    run_prompt(config, &mut context, "second").await;
 
     assert_eq!(context[..2], earlier[..]);
     assert_eq!(summarize(&context[2..]), ["user:second", "assistant:second answer"]);
@@ -132,7 +113,7 @@ async fn parallel_calls_finish_in_any_order_but_results_keep_call_order() {
     let config = config(provider, vec![echo()]);
     let mut context = Vec::new();
 
-    let (_, sink) = run_prompt(&config, &mut context, "go").await;
+    let (_, sink) = run_prompt(config, &mut context, "go").await;
 
     // "fast" ends first although "slow" started first, so they ran concurrently.
     assert_eq!(sink.tool_end_order(), ["fast", "slow"]);
@@ -152,7 +133,7 @@ async fn one_sequential_tool_makes_the_batch_sequential() {
     seq.mode = ExecutionMode::Sequential;
     let config = config(provider, vec![echo(), Arc::new(seq)]);
 
-    let (_, sink) = run_prompt(&config, &mut Vec::new(), "go").await;
+    let (_, sink) = run_prompt(config, &mut Vec::new(), "go").await;
 
     assert_eq!(sink.tool_end_order(), ["slow", "fast"]);
 }
@@ -178,7 +159,7 @@ async fn a_panicking_policy_blocks_the_tool_and_the_model_can_continue() {
     let config = with_policy(config(provider.clone(), vec![tool.clone()]), Arc::new(PanickingPolicy));
     let mut context = Vec::new();
 
-    let (result, _) = run_prompt(&config, &mut context, "go").await;
+    let (result, _) = run_prompt(config, &mut context, "go").await;
 
     assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
@@ -210,14 +191,8 @@ async fn cancellation_interrupts_a_waiting_policy() {
         Arc::new(WaitingPolicy(entered.clone())),
     );
     let cancel = CancellationToken::new();
-    let sink = Collect::default();
-    let mut running = Box::pin(run_attempt(
-        &config,
-        vec![QueuedMessage::User("go".into())],
-        Some(10),
-        &cancel,
-        &sink,
-    ));
+    let mut context = Vec::new();
+    let mut running = Box::pin(run_prompt_with(config, &mut context, "go", 10, &cancel));
     tokio::select! {
         () = entered.notified() => {}
         _ = &mut running => panic!("policy must still be waiting"),
@@ -259,7 +234,7 @@ async fn failures_become_error_results_and_the_loop_continues() {
     let config = with_policy(config(provider, tools), Arc::new(DenyEcho));
     let mut context = Vec::new();
 
-    let (result, _) = run_prompt(&config, &mut context, "go").await;
+    let (result, _) = run_prompt(config, &mut context, "go").await;
 
     assert_eq!(result.outcome, RunOutcome::Completed);
     // One case per kind of failure: not found, invalid arguments, denied, error, panic.
@@ -293,7 +268,7 @@ async fn length_stop_fails_tool_calls_without_running_them() {
     let config = config(provider, vec![echo.clone()]);
     let mut context = Vec::new();
 
-    run_prompt(&config, &mut context, "go").await;
+    run_prompt(config, &mut context, "go").await;
 
     assert_eq!(echo.calls.load(Ordering::SeqCst), 0);
     assert!(summarize(&context)[2].contains("output token limit"));
@@ -303,18 +278,10 @@ async fn length_stop_fails_tool_calls_without_running_them() {
 async fn stops_at_the_turn_budget() {
     let provider = provider((0..5).map(|i| FauxStep::tool_call(&format!("c{i}"), "echo", json!({"text": "again"}))));
     let config = config(provider.clone(), vec![echo()]);
-    let prompts = vec![QueuedMessage::User("go".into())];
 
-    let (result, _) = run_attempt(
-        &config,
-        prompts,
-        Some(2),
-        &CancellationToken::new(),
-        &Collect::default(),
-    )
-    .await;
+    let (result, sink) = run_prompt_with(config, &mut Vec::new(), "go", 2, &CancellationToken::new()).await;
 
-    assert_eq!((result.outcome, result.task_turns), (RunOutcome::ModelRequestLimit, 2));
+    assert_eq!((result.outcome, sink.turns()), (RunOutcome::ModelRequestLimit, 2));
     assert_eq!(provider.requests().len(), 2);
 }
 
@@ -333,7 +300,7 @@ async fn terminate_ends_only_when_every_result_asks() {
     ]);
     let config = config(provider.clone(), vec![echo()]);
 
-    let (result, _) = run_prompt(&config, &mut Vec::new(), "go").await;
+    let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
 
     assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!((provider.requests().len(), provider.remaining()), (2, 1));
@@ -357,7 +324,7 @@ async fn steering_enters_after_the_turn_and_follow_ups_after_the_answer() {
     config.tools = vec![Arc::new(echo)];
     let mut context = Vec::new();
 
-    let (result, _) = run_prompt(&config, &mut context, "go").await;
+    let (result, _) = run_prompt(config, &mut context, "go").await;
 
     assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(
@@ -387,10 +354,11 @@ async fn a_withdrawn_follow_up_is_never_taken() {
     let mut config = config;
     config.tools = vec![Arc::new(echo)];
     config.queues.follow_up("then summarize");
-    config.queues.follow_up("and then stop");
+    let queues = config.queues.clone();
+    queues.follow_up("and then stop");
     let mut context = Vec::new();
 
-    let (result, _) = run_prompt(&config, &mut context, "go").await;
+    let (result, _) = run_prompt(config, &mut context, "go").await;
 
     assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(
@@ -404,7 +372,7 @@ async fn a_withdrawn_follow_up_is_never_taken() {
             "assistant:stopped",
         ]
     );
-    assert!(config.queues.drain_follow_up().is_empty());
+    assert!(queues.drain_follow_up().is_empty());
 }
 
 #[tokio::test]
@@ -419,26 +387,17 @@ async fn a_spent_budget_starts_no_new_turn_and_leaves_queued_input_queued() {
     echo.queues = Some(config.queues.clone());
     let mut config = config;
     config.tools = vec![Arc::new(echo)];
-    let events = Collect::default();
+    let queues = config.queues.clone();
+    let mut context = Vec::new();
 
-    let (result, context) = run_attempt(
-        &config,
-        vec![QueuedMessage::User("go".into())],
-        Some(1),
-        &CancellationToken::new(),
-        &events,
-    )
-    .await;
+    let (result, events) = run_prompt_with(config, &mut context, "go", 1, &CancellationToken::new()).await;
 
     assert_eq!(
-        (result.outcome, result.task_turns, result.model_requests),
+        (result.outcome, events.turns(), result.model_requests),
         (RunOutcome::ModelRequestLimit, 1, 1)
     );
     assert_eq!(summarize(&context), ["user:go", "assistant:calls[c1]", "tool:c1=ok"]);
-    assert_eq!(
-        config.queues.drain_steering(),
-        [QueuedMessage::User("also check disk".into())]
-    );
+    assert_eq!(queues.drain_steering(), [QueuedMessage::User("also check disk".into())]);
     let turns: Vec<_> = events
         .kinds()
         .into_iter()
@@ -455,14 +414,14 @@ async fn a_spent_budget_starts_no_new_turn_and_leaves_queued_input_queued() {
 async fn a_provider_error_ends_the_loop_after_a_start_end_pair() {
     let config = config(provider([FauxStep::Fail("HTTP 500: boom".into())]), vec![]);
 
-    let (result, sink) = run_prompt(&config, &mut Vec::new(), "go").await;
+    let (result, sink) = run_prompt(config, &mut Vec::new(), "go").await;
 
     assert_eq!(result.outcome, RunOutcome::Error);
     // A failure before streaming still produces a start/end pair for the assistant message.
     let kinds = sink.kinds();
     assert_eq!(
-        kinds[kinds.len() - 4..],
-        ["message_start", "message_end", "turn_end", "agent_end"]
+        kinds[kinds.len() - 5..],
+        ["message_start", "message_end", "turn_end", "agent_end", "run_end"]
     );
 }
 
@@ -477,9 +436,7 @@ async fn cancellation_ends_the_loop() {
         provider.started.notified().await;
         trigger.cancel();
     });
-    let prompts = vec![QueuedMessage::User("go".into())];
-
-    let (result, _) = run_attempt(&config, prompts, Some(10), &cancel, &Collect::default()).await;
+    let (result, _) = run_prompt_with(config, &mut Vec::new(), "go", 10, &cancel).await;
 
     assert_eq!(result.outcome, RunOutcome::Aborted);
 }
@@ -504,7 +461,7 @@ async fn a_stream_without_a_final_event_is_an_error() {
     let config = config(Arc::new(SilentProvider), vec![]);
     let mut context = Vec::new();
 
-    let (result, _) = run_prompt(&config, &mut context, "go").await;
+    let (result, _) = run_prompt(config, &mut context, "go").await;
 
     assert_eq!(result.outcome, RunOutcome::Error);
     let Some(Message::Assistant(answer)) = context.last() else {
@@ -530,7 +487,7 @@ fn prompt(started: &str) -> SystemPrompt {
 async fn run_with_prompt(context: &mut Vec<Message>, system_prompt: SystemPrompt, text: &str, answer: &str) {
     let mut config = config(provider([FauxStep::text(answer)]), vec![]);
     config.system_prompt = system_prompt;
-    run_prompt(&config, context, text).await;
+    run_prompt(config, context, text).await;
 }
 
 #[tokio::test]
@@ -631,7 +588,7 @@ async fn policy_and_tool_see_prepared_arguments_while_the_context_keeps_the_orig
     let config = with_policy(config(provider.clone(), vec![tool.clone()]), policy.clone());
     let mut context = Vec::new();
 
-    let (result, _) = run_prompt(&config, &mut context, "go").await;
+    let (result, _) = run_prompt(config, &mut context, "go").await;
 
     assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(*policy.0.lock().unwrap(), [json!({"text": "hi"})]);
@@ -652,7 +609,7 @@ async fn prepared_arguments_must_still_match_the_schema() {
     let tool = Arc::new(Renaming::default());
     let config = config(provider.clone(), vec![tool.clone()]);
 
-    run_prompt(&config, &mut Vec::new(), "go").await;
+    run_prompt(config, &mut Vec::new(), "go").await;
 
     assert!(tool.ran_with.lock().unwrap().is_empty());
     let requests = provider.requests();
@@ -674,7 +631,7 @@ async fn a_panicking_argument_preparation_blocks_only_that_call() {
     let tool = Arc::new(Renaming::default());
     let config = config(provider.clone(), vec![tool.clone()]);
 
-    let (result, _) = run_prompt(&config, &mut Vec::new(), "go").await;
+    let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
 
     assert_eq!(result.outcome, RunOutcome::Completed);
     assert!(tool.ran_with.lock().unwrap().is_empty());
@@ -692,7 +649,7 @@ async fn progress_reaches_observers_in_order_before_the_call_ends_but_not_the_mo
     ]);
     let config = config(provider.clone(), vec![echo()]);
 
-    let (_, sink) = run_prompt(&config, &mut Vec::new(), "go").await;
+    let (_, sink) = run_prompt(config, &mut Vec::new(), "go").await;
 
     let events = sink.events();
     let updates: Vec<(String, String)> = events
@@ -742,7 +699,7 @@ async fn the_tool_gets_the_call_id_and_progress_after_the_call_is_dropped() {
     let tool = Arc::new(KeepsContext::default());
     let config = config(provider, vec![tool.clone()]);
 
-    let (_, sink) = run_prompt(&config, &mut Vec::new(), "go").await;
+    let (_, sink) = run_prompt(config, &mut Vec::new(), "go").await;
 
     let ctx = tool.0.lock().unwrap().take().unwrap();
     assert_eq!(ctx.tool_call_id.as_deref(), Some("c7"));
@@ -770,7 +727,7 @@ async fn details_reach_the_end_event_and_the_result_message() {
     let config = config(provider, vec![echo()]);
     let mut context = Vec::new();
 
-    let (_, sink) = run_prompt(&config, &mut context, "go").await;
+    let (_, sink) = run_prompt(config, &mut context, "go").await;
 
     assert_eq!(end_details(&sink), [Some(details.clone())]);
     let result = tool_result(&context, 2);
@@ -801,7 +758,7 @@ async fn tool_usage_reaches_the_end_event_the_result_message_and_the_loop_result
     let config = config(provider, vec![echo()]);
     let mut context = Vec::new();
 
-    let (result, sink) = run_prompt(&config, &mut context, "go").await;
+    let (result, sink) = run_prompt(config, &mut context, "go").await;
 
     let reported: Usage = serde_json::from_value(usage).unwrap();
     let mut both = reported.clone();
@@ -823,7 +780,7 @@ async fn a_tool_without_usage_reports_none_and_the_loop_result_lists_no_tool() {
     let config = config(provider, vec![echo()]);
     let mut context = Vec::new();
 
-    let (result, sink) = run_prompt(&config, &mut context, "go").await;
+    let (result, sink) = run_prompt(config, &mut context, "go").await;
 
     assert!(result.tool_usage.is_empty());
     assert_eq!(end_usages(&sink), [None]);
@@ -844,7 +801,7 @@ async fn details_over_the_limit_are_dropped_from_the_event_and_the_result() {
     ]);
     let config = config(provider.clone(), vec![echo()]);
 
-    let (_, sink) = run_prompt(&config, &mut Vec::new(), "go").await;
+    let (_, sink) = run_prompt(config, &mut Vec::new(), "go").await;
 
     let details = end_details(&sink);
     assert_eq!(details.len(), 2);

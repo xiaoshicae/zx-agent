@@ -1,6 +1,7 @@
-//! The agent loop: one [`Attempt`] runs turns over a session until the model stops, a budget
-//! runs out or the run is cancelled. Extension behavior is supplied through bounded, ordered
-//! hooks.
+//! The agent loop: an [`AgentLoop`] runs turns over a session until the model stops, a budget
+//! runs out or the run is cancelled. A run runs it once per attempt: the first, and one more
+//! for each retry or recovery from a context overflow. Extension behavior is supplied through
+//! bounded, ordered hooks.
 //!
 //! The loop keeps no copy of the conversation. It records every step through its session
 //! host before acting on it and reads the session's projection whenever it needs the context,
@@ -32,8 +33,8 @@ use super::command::SlashCommand;
 use super::events::CustomMessageInfo;
 use super::events::{AgentEvent, ApprovalResult, EventSink, EventTarget, RequestKind, RunTrace, ToolVerdict};
 use super::hooks::{
-    ContextEdit, HookCall, HookChain, HookContext, HookError, HookFailure, HookPoint, TurnDecision, TurnDisposition,
-    TurnSummary, report_failure,
+    ContextEdit, HookCall, HookChain, HookError, HookFailure, HookPoint, TurnDecision, TurnDisposition, TurnSummary,
+    report_failure,
 };
 use super::policy::PolicyDecision;
 use super::queue::{MessageQueues, Queue, QueueMode, QueuedMessage};
@@ -47,16 +48,16 @@ use crate::ai::{
     AssistantMessage, Message, ModelMeta, Provider, Reasoning, Request, StopReason, StreamEvent, SystemMessage,
     SystemPrompt, ToolCall, ToolResultMessage, Usage, UserMessageKind, duration_ms, now_ms,
 };
-use crate::session::{Entry, RequestSource, SessionStore};
+use crate::session::{Entry, RequestSource};
 
 pub use config::LoopConfig;
 use turn::{AfterTools, PendingInput, TurnResponse};
 
-/// Why an attempt failed, with the response when the provider failed.
+/// Why the loop failed in an attempt, with the response when the provider failed.
 ///
 /// Accounting follows actual responses, so context edits cannot change usage or retries.
 #[derive(Debug)]
-pub enum AttemptFailure {
+pub(crate) enum LoopFailure {
     /// A failed or cancelled response. Boxed so a successful result does not reserve space
     /// for a full response.
     Provider {
@@ -68,26 +69,26 @@ pub enum AttemptFailure {
     Halted(String),
 }
 
-/// What one attempt did. Only provider failures qualify for provider retries.
+/// What the loop did in one attempt. Only provider failures qualify for provider retries.
 #[derive(Debug)]
-pub struct AttemptResult {
-    pub outcome: RunOutcome,
+pub(crate) struct LoopResult {
+    pub(crate) outcome: RunOutcome,
     /// Task turns started, numbered from the attempt's prior turns plus one.
-    pub task_turns: u32,
+    pub(crate) task_turns: u32,
     /// Model requests made, summary requests included: what the budget counts.
-    pub model_requests: u32,
+    pub(crate) model_requests: u32,
     /// Total answer continuations scheduled in this run, including prior attempts.
-    pub answer_continuations: u32,
-    pub usage: Usage,
+    pub(crate) answer_continuations: u32,
+    pub(crate) usage: Usage,
     /// What the tools spent on work of their own, by tool name: the `usage` of their
     /// results. Not part of `usage`, which the token budget counts.
-    pub tool_usage: BTreeMap<String, Usage>,
+    pub(crate) tool_usage: BTreeMap<String, Usage>,
     /// Tool calls that a policy or an approval denied in this attempt.
-    pub denied_calls: u32,
-    pub failure: Option<AttemptFailure>,
+    pub(crate) denied_calls: u32,
+    pub(crate) failure: Option<LoopFailure>,
 }
 
-impl AttemptResult {
+impl LoopResult {
     /// Count the usage the tools reported with `results`.
     fn count_tool_usage(&mut self, results: &[ToolResultMessage]) {
         for result in results {
@@ -98,24 +99,24 @@ impl AttemptResult {
     }
 }
 
-/// One attempt of the loop over a session: prompts in, turns until the model stops, a
-/// budget runs out or the attempt is cancelled. Each step is recorded in the session before
-/// the loop acts on it, and the model is sent the session's projection.
+/// The loop over a session in one attempt of a run: prompts in, turns until the model stops,
+/// a budget runs out or the run is cancelled. Each step is recorded in the session before the
+/// loop acts on it, and the model is sent the session's projection.
 ///
-/// Build one with [`Attempt::new`], set the budgets it needs, then [`Attempt::run`] it. The
-/// Runner builds its attempts the same way, adding retries, limits and summaries around them.
-pub struct Attempt<'a> {
+/// The Runner builds one per attempt with [`AgentLoop::new`], sets what is left of the run's
+/// budgets, then [`AgentLoop::run`]s it; retries, limits and summaries stay with the run.
+pub(crate) struct AgentLoop<'a> {
     /// Model requests this attempt may make, summary requests included; `None` is
     /// unlimited, `Some(0)` makes no request.
-    pub max_model_requests: Option<u32>,
+    pub(crate) max_model_requests: Option<u32>,
     /// Tokens this attempt may use, input plus output as the provider reports them, summary
     /// requests included. Checked before each request, so the last one may go over; `None`
     /// is unlimited.
-    pub token_budget: Option<u64>,
+    pub(crate) token_budget: Option<u64>,
     /// What this attempt may spend, in the unit of the configured prices of the models it
     /// asks, summary requests included. Checked before each request like `token_budget`; a
     /// response without a price counts as nothing. `None` is unlimited.
-    pub cost_budget: Option<f64>,
+    pub(crate) cost_budget: Option<f64>,
     /// Task turns of earlier attempts of the run, so that turn numbers continue.
     pub(crate) prior_task_turns: u32,
     /// Answer continuations scheduled in earlier attempts of the run.
@@ -128,7 +129,9 @@ pub struct Attempt<'a> {
     host: &'a mut dyn SessionHost,
     approvals: &'a mut ApprovalCache,
     sink: &'a dyn EventSink,
-    trace: Trace<'a>,
+    /// The run this attempt belongs to: it stamps the events, tells the hooks where they run,
+    /// and carries the cancellation.
+    trace: &'a RunTrace,
     /// The number of the turn in progress, between its `turn_start` and `turn_end`.
     turn: Option<u32>,
     validators: HashMap<String, jsonschema::Validator>,
@@ -136,62 +139,16 @@ pub struct Attempt<'a> {
     denied_calls: u32,
 }
 
-/// The run an attempt belongs to: the Runner's, or one of the attempt's own. It stamps the
-/// events, tells the hooks where they run, and carries the cancellation.
-enum Trace<'a> {
-    Run(&'a RunTrace),
-    Own(RunTrace),
-}
-
-impl Trace<'_> {
-    fn get(&self) -> &RunTrace {
-        match self {
-            Self::Run(trace) => trace,
-            Self::Own(trace) => trace,
-        }
-    }
-
-    fn context(&self) -> &HookContext {
-        self.get().context()
-    }
-
-    fn cancel(&self) -> &CancellationToken {
-        self.get().cancel()
-    }
-}
-
-impl<'a> Attempt<'a> {
-    /// An attempt of its own over `session`, cancelled by `cancel`, with no budget. Session
-    /// grants go to `approvals`; events go to `sink`.
-    pub fn new(
-        config: &'a LoopConfig,
-        session: &'a mut SessionStore,
-        approvals: &'a mut ApprovalCache,
-        cancel: &'a CancellationToken,
-        sink: &'a dyn EventSink,
-    ) -> Self {
-        let trace = config.trace(Some(session.header().id.clone()), cancel.clone());
-        Self::with(config, session, approvals, sink, Trace::Own(trace))
-    }
-
-    /// An attempt of the run `trace`, recording through `host`; the run's cancellation is
-    /// the trace's.
-    pub(crate) fn in_run(
+impl<'a> AgentLoop<'a> {
+    /// The loop for an attempt of the run `trace`, recording through `host`, with no budget;
+    /// the run's cancellation is the trace's. Session grants go to `approvals`; events go to
+    /// `sink`.
+    pub(crate) fn new(
         config: &'a LoopConfig,
         host: &'a mut dyn SessionHost,
         approvals: &'a mut ApprovalCache,
         sink: &'a dyn EventSink,
         trace: &'a RunTrace,
-    ) -> Self {
-        Self::with(config, host, approvals, sink, Trace::Run(trace))
-    }
-
-    fn with(
-        config: &'a LoopConfig,
-        host: &'a mut dyn SessionHost,
-        approvals: &'a mut ApprovalCache,
-        sink: &'a dyn EventSink,
-        trace: Trace<'a>,
     ) -> Self {
         Self {
             max_model_requests: None,
@@ -211,11 +168,11 @@ impl<'a> Attempt<'a> {
         }
     }
 
-    /// Record `prompts` and run turns until the model stops, a budget runs out or the
-    /// attempt is cancelled. Never panics on provider or tool failures; the result says how
-    /// the attempt ended.
-    pub async fn run(mut self, prompts: Vec<QueuedMessage>) -> AttemptResult {
-        let mut result = AttemptResult {
+    /// Record `prompts` and run turns until the model stops, a budget runs out or the run
+    /// is cancelled. Never panics on provider or tool failures; the result says how the
+    /// attempt ended.
+    pub(crate) async fn run(mut self, prompts: Vec<QueuedMessage>) -> LoopResult {
+        let mut result = LoopResult {
             outcome: RunOutcome::Completed,
             task_turns: 0,
             model_requests: 0,
@@ -233,7 +190,7 @@ impl<'a> Attempt<'a> {
             Err(halt) => {
                 let (outcome, error) = halt.into_outcome(self.trace.cancel());
                 result.outcome = outcome;
-                result.failure = Some(AttemptFailure::Halted(error));
+                result.failure = Some(LoopFailure::Halted(error));
             }
         }
 
@@ -249,7 +206,7 @@ impl<'a> Attempt<'a> {
 
     /// Record the prompts, then run turns: prepare, request, handle the response, decide
     /// whether another turn follows.
-    async fn run_turns(&mut self, prompts: Vec<QueuedMessage>, result: &mut AttemptResult) -> Result<RunOutcome, Halt> {
+    async fn run_turns(&mut self, prompts: Vec<QueuedMessage>, result: &mut LoopResult) -> Result<RunOutcome, Halt> {
         self.initialize(prompts, result).await?;
         let mut pending = PendingInput::default();
         loop {
@@ -274,7 +231,7 @@ impl<'a> Attempt<'a> {
     fn target(&self) -> EventTarget<'_> {
         EventTarget {
             sink: self.sink,
-            trace: self.trace.get(),
+            trace: self.trace,
         }
     }
 
@@ -289,7 +246,7 @@ impl<'a> Attempt<'a> {
 
     /// Start the next task turn unless one is in progress. Returns the number of the turn
     /// in progress.
-    async fn start_turn(&mut self, result: &mut AttemptResult) -> u32 {
+    async fn start_turn(&mut self, result: &mut LoopResult) -> u32 {
         if let Some(turn) = self.turn {
             return turn;
         }
@@ -308,7 +265,7 @@ impl<'a> Attempt<'a> {
     }
 
     /// Validate the specification and record the system prompt's changes and the input.
-    async fn initialize(&mut self, prompts: Vec<QueuedMessage>, result: &mut AttemptResult) -> Result<(), Halt> {
+    async fn initialize(&mut self, prompts: Vec<QueuedMessage>, result: &mut LoopResult) -> Result<(), Halt> {
         let config = self.config;
         self.validators = config.validators().map_err(Halt::Failed)?;
         self.start_turn(result).await;
@@ -333,7 +290,7 @@ impl<'a> Attempt<'a> {
     /// ready for its request, or the outcome that ends the attempt first.
     async fn prepare_turn(
         &mut self,
-        result: &mut AttemptResult,
+        result: &mut LoopResult,
         pending: &mut PendingInput,
     ) -> Result<ControlFlow<RunOutcome, u32>, Halt> {
         loop {
@@ -388,7 +345,7 @@ impl<'a> Attempt<'a> {
     /// attempt.
     async fn handle_response(
         &mut self,
-        result: &mut AttemptResult,
+        result: &mut LoopResult,
         turn: u32,
         message: AssistantMessage,
     ) -> Result<ControlFlow<RunOutcome, TurnResponse>, Halt> {
@@ -400,7 +357,7 @@ impl<'a> Attempt<'a> {
             .await?;
         if matches!(stop, StopReason::Error | StopReason::Aborted) {
             self.end_turn().await;
-            result.failure = Some(AttemptFailure::Provider {
+            result.failure = Some(LoopFailure::Provider {
                 message: Box::new(message),
                 entry_id,
             });
@@ -439,7 +396,7 @@ impl<'a> Attempt<'a> {
 
     /// The outcome that ends the attempt before the next request: cancellation, or a budget
     /// with no room for another request.
-    fn checkpoint(&self, result: &AttemptResult) -> Option<RunOutcome> {
+    fn checkpoint(&self, result: &LoopResult) -> Option<RunOutcome> {
         if self.trace.cancel().is_cancelled() {
             return Some(RunOutcome::Aborted);
         }
@@ -448,7 +405,7 @@ impl<'a> Attempt<'a> {
 
     /// The outcome when a budget leaves no room for another request: requests first, then
     /// tokens, then cost.
-    fn exhausted(&self, result: &AttemptResult) -> Option<RunOutcome> {
+    fn exhausted(&self, result: &LoopResult) -> Option<RunOutcome> {
         if self
             .max_model_requests
             .is_some_and(|limit| result.model_requests >= limit)

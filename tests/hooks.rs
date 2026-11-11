@@ -46,7 +46,7 @@ async fn a_later_allow_does_not_override_an_ask_without_a_human() {
         .hooks
         .push(Verdict(PolicyDecision::Ask("review required".into())));
     config.hooks.push(Verdict(PolicyDecision::Allow));
-    let (result, _) = run_prompt(&config, &mut Vec::new(), "go").await;
+    let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
     assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
     assert!(
@@ -89,7 +89,7 @@ async fn allow_once_and_session_approvals_have_different_scopes() {
         let mut config = config(provider, vec![tool.clone()]);
         config.hooks.push(Verdict(PolicyDecision::Ask("review".into())));
         config.interaction = host.clone();
-        let (result, _) = run_prompt(&config, &mut Vec::new(), "go").await;
+        let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
         assert_eq!(result.outcome, RunOutcome::Completed);
         assert_eq!(host.calls.load(Ordering::SeqCst), confirmations);
         assert_eq!(tool.calls.load(Ordering::SeqCst), executions);
@@ -176,7 +176,7 @@ async fn approval_errors_panics_and_timeouts_block_execution_and_preserve_the_lo
         config.hooks.push(Verdict(PolicyDecision::Ask("review".into())));
         config.interaction = Arc::new(host);
         config.interaction_timeout = Duration::ZERO;
-        let (result, _) = run_prompt(&config, &mut Vec::new(), "go").await;
+        let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
         assert_eq!(result.outcome, RunOutcome::Completed);
         assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
         assert!(
@@ -241,7 +241,7 @@ async fn invalid_tool_arguments_are_rejected_before_policy_and_approval() {
     let mut config = config(provider.clone(), vec![Arc::new(BashTool::default())]);
     config.hooks.push(CountBefore(checks.clone()));
     config.interaction = host.clone();
-    run_prompt(&config, &mut Vec::new(), "go").await;
+    run_prompt(config, &mut Vec::new(), "go").await;
     assert_eq!(checks.load(Ordering::SeqCst), 0);
     assert_eq!(host.calls.load(Ordering::SeqCst), 0);
     assert!(
@@ -873,11 +873,12 @@ impl Hooks for StopAndQueue {
 async fn stopping_from_a_hook_preserves_queued_user_input() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let mut config = config(provider, vec![]);
-    config.hooks.push(StopAndQueue(config.queues.clone()));
-    let (result, _) = run_prompt(&config, &mut Vec::new(), "go").await;
+    let queues = config.queues.clone();
+    config.hooks.push(StopAndQueue(queues.clone()));
+    let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
     assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(
-        config.queues.drain_steering(),
+        queues.drain_steering(),
         [QueuedMessage::User("pending user input".into())]
     );
 }
@@ -1027,7 +1028,7 @@ async fn the_policy_verdict_of_every_call_is_reported_with_its_reason() {
         let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
         config.hooks.push(Verdict(decision));
 
-        let (_, events) = run_prompt(&config, &mut Vec::new(), "go").await;
+        let (_, events) = run_prompt(config, &mut Vec::new(), "go").await;
 
         let decisions: Vec<_> = events
             .events()
@@ -1092,7 +1093,7 @@ async fn approvals_are_reported_when_asked_and_when_remembered() {
             calls: AtomicUsize::new(0),
         });
 
-        let (_, events) = run_prompt(&config, &mut Vec::new(), "go").await;
+        let (_, events) = run_prompt(config, &mut Vec::new(), "go").await;
 
         assert_eq!(approvals(&events), expected);
     }
@@ -1118,7 +1119,7 @@ async fn a_resolved_approval_reports_how_long_it_waited() {
     config.hooks.push(Verdict(PolicyDecision::Ask("review".into())));
     config.interaction = Arc::new(SlowApprover(Duration::from_millis(20)));
 
-    let (_, events) = run_prompt(&config, &mut Vec::new(), "go").await;
+    let (_, events) = run_prompt(config, &mut Vec::new(), "go").await;
 
     let waited: Vec<u64> = events
         .events()
@@ -1148,7 +1149,7 @@ async fn approvals_that_fail_or_time_out_report_how_they_ended() {
         config.interaction = Arc::new(host);
         config.interaction_timeout = Duration::ZERO;
 
-        let (_, events) = run_prompt(&config, &mut Vec::new(), "go").await;
+        let (_, events) = run_prompt(config, &mut Vec::new(), "go").await;
 
         let resolved: Vec<_> = events
             .events()
@@ -1216,7 +1217,7 @@ async fn observers_skip_streaming_deltas_unless_they_ask_for_them() {
         all: true,
     });
 
-    let (_, events) = run_prompt(&config, &mut Vec::new(), "go").await;
+    let (_, events) = run_prompt(config, &mut Vec::new(), "go").await;
 
     let kinds = events.kinds();
     assert!(kinds.contains(&"message_update"), "the provider streamed deltas");
@@ -1390,7 +1391,7 @@ async fn hooks_run_in_stage_order_whatever_the_registration_order() {
         });
     }
 
-    run_prompt(&config, &mut Vec::new(), "go").await;
+    run_prompt(config, &mut Vec::new(), "go").await;
 
     let order = order.lock().unwrap().clone();
     let expected: Vec<String> = ["policy", "extension-1", "extension-2", "redaction", "storage"]
@@ -1427,7 +1428,7 @@ async fn redaction_registered_first_still_runs_after_extensions() {
         .push(RedactSecrets::new(Some("sk-registered-early".into())));
     config.hooks.push(LeakSecret);
 
-    run_prompt(&config, &mut Vec::new(), "go").await;
+    run_prompt(config, &mut Vec::new(), "go").await;
 
     let sent = summarize(&provider.requests()[1].messages);
     assert_eq!(sent.last().unwrap(), "tool:c1=ok [REDACTED]");
@@ -1450,7 +1451,7 @@ async fn progress_passes_only_the_redaction_hooks() {
     // An extension that changes final output must not see transient progress.
     config.hooks.push(LeakSecret);
 
-    let (_, sink) = run_prompt(&config, &mut Vec::new(), "go").await;
+    let (_, sink) = run_prompt(config, &mut Vec::new(), "go").await;
 
     let updates: Vec<String> = sink
         .events()
@@ -1478,7 +1479,7 @@ async fn redaction_covers_the_strings_and_keys_of_details() {
         .hooks
         .push(RedactSecrets::new(Some("sk-registered-early".into())));
 
-    let (_, sink) = run_prompt(&config, &mut Vec::new(), "go").await;
+    let (_, sink) = run_prompt(config, &mut Vec::new(), "go").await;
 
     let details: Vec<_> = sink
         .events()
@@ -1499,10 +1500,10 @@ async fn tools_with_the_same_name_are_rejected_before_any_request() {
         vec![Arc::new(EchoTool::new("echo")), Arc::new(EchoTool::new("echo"))],
     );
 
-    let (result, _) = run_prompt(&config, &mut Vec::new(), "go").await;
+    let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
 
     assert_eq!(result.outcome, RunOutcome::Error);
-    let error = format!("{:?}", result.failure);
+    let error = format!("{:?}", result.error);
     assert!(error.contains("more than one tool is named \\\"echo\\\""), "{error}");
     assert!(provider.requests().is_empty());
 }
@@ -1529,10 +1530,10 @@ async fn a_hook_cannot_append_system_messages() {
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push(AppendSystem);
 
-    let (result, _) = run_prompt(&config, &mut Vec::new(), "go").await;
+    let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
 
     assert_eq!(result.outcome, RunOutcome::Error);
-    let error = format!("{:?}", result.failure);
+    let error = format!("{:?}", result.error);
     assert!(error.contains("system prompt comes from the configuration"), "{error}");
     assert!(provider.requests().is_empty());
 }
@@ -1551,7 +1552,7 @@ async fn a_panic_in_observes_is_reported_and_the_run_continues() {
     let mut config = config(provider, vec![]);
     config.hooks.push(PanickingObserver);
 
-    let (result, sink) = run_prompt(&config, &mut Vec::new(), "go").await;
+    let (result, sink) = run_prompt(config, &mut Vec::new(), "go").await;
 
     assert_eq!(result.outcome, RunOutcome::Completed);
     assert!(sink.kinds().contains(&"hook_failed"), "{:?}", sink.kinds());
@@ -1596,10 +1597,10 @@ async fn a_tool_declared_under_another_name_is_rejected_before_any_request() {
     };
     let config = config(provider.clone(), vec![Arc::new(tool)]);
 
-    let (result, _) = run_prompt(&config, &mut Vec::new(), "go").await;
+    let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
 
     assert_eq!(result.outcome, RunOutcome::Error);
-    let error = format!("{:?}", result.failure);
+    let error = format!("{:?}", result.error);
     assert!(error.contains("declares itself as \\\"other\\\""), "{error}");
     assert!(provider.requests().is_empty());
 }
@@ -1614,10 +1615,10 @@ async fn a_tool_whose_definition_panics_fails_the_run_before_any_request() {
     };
     let config = config(provider.clone(), vec![Arc::new(tool)]);
 
-    let (result, _) = run_prompt(&config, &mut Vec::new(), "go").await;
+    let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
 
     assert_eq!(result.outcome, RunOutcome::Error);
-    let error = format!("{:?}", result.failure);
+    let error = format!("{:?}", result.error);
     assert!(error.contains("panicked"), "{error}");
     assert!(provider.requests().is_empty());
 }
@@ -1656,7 +1657,7 @@ async fn a_tool_cancelling_its_token_stops_only_itself() {
     let config = config(provider, vec![Arc::new(CancelsItself)]);
     let mut context = Vec::new();
 
-    let (result, _) = run_prompt(&config, &mut context, "go").await;
+    let (result, _) = run_prompt(config, &mut context, "go").await;
 
     assert_eq!(result.outcome, RunOutcome::Completed);
     assert!(

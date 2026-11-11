@@ -13,9 +13,9 @@ paths:
 |---|---|---|
 | `FauxProvider` / `FauxStep` | `crates/zx-ai/src/faux.rs` | 按脚本返回文本、工具调用、截断、失败（`Fail`）、挂起直到取消（`Hang`），或按请求内容现场决定（`FauxStep::compute`，例如引用摘要请求给出的条目 ID），并记录每个请求 |
 | `EchoTool` | `tests/common/mod.rs` | 可设置延迟、失败、panic、terminate，执行时还能注入引导消息或后续消息、报告进度（`progress`）、返回 `details` |
-| `Collect` | `tests/common/mod.rs` | 收集事件；`envelopes()` 返回带信封（`seq`、`runId` 等）的事件，`events()` 返回事件本体，`kinds()` 返回事件类型序列，`tool_end_order()` 返回工具完成的顺序 |
+| `Collect` | `tests/common/mod.rs` | 收集事件；`envelopes()` 返回带信封（`seq`、`runId` 等）的事件，`events()` 返回事件本体，`kinds()` 返回事件类型序列，`turns()` 返回开始的任务轮数，`tool_end_order()` 返回工具完成的顺序 |
 | `summarize` | `tests/common/mod.rs` | 把消息列表压缩成 `"tool:c1=hi"` 这样的短字符串 |
-| `run_prompt` | `tests/common/mod.rs` | 在以给定消息开头的内存会话上，用默认参数（至多 10 次模型请求、不取消）跑一次 `Attempt`，返回结果和事件，并把会话投影写回传入的消息 |
+| `run_prompt` / `run_prompt_with` | `tests/common/mod.rs` | 在以给定消息开头的内存会话上，用 `Runner` 跑一次提问（不重试；`run_prompt` 至多 10 次模型请求、不取消，`run_prompt_with` 给出请求上限与取消令牌），返回 `RunReport` 和事件，并把会话投影写回传入的消息。循环是 crate 内部类型，测试都经运行驱动它 |
 | `RunnerSetup` | `tests/common/mod.rs` | 带测试默认值（不重试、默认上限、内存会话）的 runner 构造器，用结构体更新语法覆盖字段 |
 | `zx_agent` / `zx_agent_in` / `Home` / `stdout` / `stderr` | `tests/common/mod.rs` | 编译出的程序，以及它写到两个输出的文本；`zx_agent_in` 在给定的工作目录、以给定的主目录启动它（`Home::Agent` 设 `ZX_AGENT_HOME`，`Home::User` 设 `HOME` 并去掉 `ZX_AGENT_HOME`，chat 与 acp 的默认会话目录在其下），测试结束时杀掉；驱动程序的测试都用这几个 |
 | `AgentHome` / `write_config` / `write_agent` / `fake_model_config` | `tests/common/mod.rs` | 测试自己的 zx-agent 主目录：`AgentHome` 是交给 `ZX_AGENT_HOME` 的临时目录，带 `config.toml` 与替换内置 agent 的 `agents/<名字>.md`；`write_config`、`write_agent` 写进测试设了 `HOME` 时的 `<HOME>/.zx-agent`；`fake_model_config` 是对假模型的 `config.toml`（key 所在的变量、不重试，再加给出的键），服务地址经 `ZX_BASE_URL` 传入。权限、上下文、摘要、模型元数据、执行环境与 provider 设置没有命令行参数，驱动程序的测试经它们设置。`zx_agent()` 默认指向一个空的主目录，并去掉 `ZX_MODEL`、`ZX_BASE_URL`、`OPENAI_API_KEY`，开发者自己的配置不会进入测试 |

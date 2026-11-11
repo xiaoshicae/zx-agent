@@ -1,6 +1,7 @@
 //! Agent layer: the loop, tools, policy, and events (pi: packages/agent).
 //!
-//! - `agent_loop`: one attempt of the loop ([`Attempt`]) and what it runs with
+//! - `agent_loop`: the loop, which a run runs once per attempt, and what it runs with
+//!   ([`LoopConfig`])
 //! - `tool`: the tool interface, and the set of tools a run offers
 //! - `hooks`: the extension points around the loop, and the chain that runs them
 //! - `policy`: the decision on a tool call, and the policy interface
@@ -24,7 +25,8 @@ mod session_host;
 mod tool;
 
 pub(crate) use agent_loop::Halt;
-pub use agent_loop::{Attempt, AttemptFailure, AttemptResult, LoopConfig};
+pub use agent_loop::LoopConfig;
+pub(crate) use agent_loop::{AgentLoop, LoopFailure, LoopResult};
 pub use command::{CommandContext, CommandError, CommandOutcome, SlashCommand, check_command_name};
 pub(crate) use events::EventTarget;
 pub use events::{

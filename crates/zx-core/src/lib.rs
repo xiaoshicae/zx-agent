@@ -38,8 +38,8 @@
 //! which consumes the request budget without creating a separate task turn. Retries and
 //! summary requests both consume the run's model-request budget.
 //!
-//! Embedders normally start with [`AgentSession`] or [`runner::Runner`]. [`agent::Attempt`]
-//! exposes the lower-level single attempt of the loop over a session. [`session::SessionLog`], [`agent::Tool`],
+//! Embedders start with [`AgentSession`], or with [`runner::Runner`], its exclusive half, when
+//! one owner runs every prompt. [`session::SessionLog`], [`agent::Tool`],
 //! [`agent::Hooks`], and [`agent::Interaction`] are extension interfaces. The built-in
 //! tools, executors, policies and hooks live in the `zx-tools` crate, providers in crates
 //! such as `zx-ai-openai`.

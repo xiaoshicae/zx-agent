@@ -236,7 +236,7 @@ async fn two_edits_of_one_file_in_one_batch_both_take_effect() {
     let executor: Arc<dyn Executor> = Arc::new(SlowReads);
     let config = file_tool_config(provider, dir.path().to_path_buf(), &executor);
 
-    let (result, _) = run_prompt(&config, &mut Vec::new(), "edit").await;
+    let (result, _) = run_prompt(config, &mut Vec::new(), "edit").await;
 
     assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(std::fs::read_to_string(dir.path().join("f.txt")).unwrap(), "ONE\nTWO\n");
@@ -288,7 +288,7 @@ async fn old_argument_shapes_are_rewritten_before_the_checks() {
     let executor: Arc<dyn Executor> = Arc::new(LocalExecutor::default());
     let config = file_tool_config(provider, dir.path().to_path_buf(), &executor);
 
-    let (result, _) = run_prompt(&config, &mut Vec::new(), "edit").await;
+    let (result, _) = run_prompt(config, &mut Vec::new(), "edit").await;
 
     assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(std::fs::read_to_string(dir.path().join("f.txt")).unwrap(), "A\nB\n");

@@ -111,7 +111,7 @@ async fn an_extension_adds_its_tools_hooks_and_prompt_sections() {
     };
     register(&mut config, &[Arc::new(notes)]).unwrap();
     let mut context = Vec::new();
-    run_prompt(&config, &mut context, "go").await;
+    run_prompt(config, &mut context, "go").await;
     let requests = provider.requests();
     let tools: Vec<&str> = requests[0].tools.iter().map(|tool| tool.name.as_str()).collect();
     assert_eq!(tools, ["echo", "note"]);
@@ -226,7 +226,7 @@ async fn a_failing_extension_hook_is_reported_under_the_extension_name() {
     };
     register(&mut config, &[Arc::new(broken)]).unwrap();
     let mut context = Vec::new();
-    let (_, events) = run_prompt(&config, &mut context, "go").await;
+    let (_, events) = run_prompt(config, &mut context, "go").await;
     assert!(
         events.events().iter().any(|event| matches!(
             event,
