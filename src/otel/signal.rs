@@ -107,7 +107,7 @@ pub(super) enum What {
     },
     CompactionFailed,
     Retry {
-        attempt: u32,
+        retry: u32,
         delay_ms: u64,
     },
     Overflow,
@@ -204,8 +204,8 @@ impl Signal {
                 output_bytes: *output_bytes,
             },
             AgentEvent::CompactionFailed { .. } => What::CompactionFailed,
-            AgentEvent::RetryScheduled { attempt, delay_ms, .. } => What::Retry {
-                attempt: *attempt,
+            AgentEvent::RetryScheduled { retry, delay_ms, .. } => What::Retry {
+                retry: *retry,
                 delay_ms: *delay_ms,
             },
             // The error text may quote the request, so only the fact is exported.

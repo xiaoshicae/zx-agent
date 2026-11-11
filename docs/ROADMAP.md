@@ -33,7 +33,7 @@
 | D18 | 没有命令白名单、幂等键与增量摘要；摘要只用全量模式，摘要源上限 2 MiB，超过后要 `/new` 开新会话 |
 | D19 | CLI 精简：chat 没有执行时间线、状态行、fork 与会话树命令（会话树与复制在 SDK）；otel 只导出 span；审批等待只有 `config.toml` 的 `approvalTimeoutSecs`（默认 600 秒，chat、acp 与 im 共用）；`--session` 只属于 `run` 与 `chat`；`[[mcp]]` 没有不看进度的总超时 |
 | D20 | 会话可以起名（pi 的 `/name`）：追加 `session_info` 记录，不改头部与文件名；以文件中最后一条为准，与分支无关，不进入模型上下文，复制分支时随分支上的记录复制。名称只有一行（控制字符换成空格、去掉首尾空白），不能为空，也不能清除。`zx-agent sessions` 与 `session/list` 有名称时显示名称。起名只经 ACP 的 `/name <名称>`（`available_commands_update` 声明，`session_info_update` 通知标题，不请求模型）与 SDK 的 `AgentSession::set_name`；chat 按 D13 不加命令；协议中由客户端改标题的 `session/set_title` 仍不稳定，不实现 |
-| D21 | 对外入口只有 `AgentSession` 和它独占的一半 `Runner`（测试与只有一个所有者的嵌入方直接用）。循环 `AgentLoop` 是 crate 内部类型：一次运行每次尝试（首次，以及每次重试或上下文溢出恢复）运行一遍，不提供单独运行一次循环的接口，因为生产代码没有这种用法。attempt 只表示尝试的序号，如 `agent_start` 事件的 `attempt` |
+| D21 | 对外入口只有 `AgentSession` 和它独占的一半 `Runner`（测试与只有一个所有者的嵌入方直接用）。循环 `AgentLoop` 是 crate 内部类型：一次运行每次尝试（首次，以及每次重试或上下文溢出恢复）运行一遍，不提供单独运行一次循环的接口，因为生产代码没有这种用法。attempt 只表示尝试的序号（首次为 1，重试与上下文溢出恢复都会加一），如 `agent_start`、`request_start` 事件的 `attempt` 与追踪属性 `zx.attempt`；重试的序号叫 retry（首次重试为 1），如 `retry_scheduled` 事件的 `retry` 与追踪属性 `zx.retry`，与 `max_retries`、`RunReport.retries` 一致 |
 
 ## 4. 当前阶段
 

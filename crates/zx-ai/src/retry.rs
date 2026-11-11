@@ -36,15 +36,15 @@ impl Default for RetryPolicy {
 }
 
 impl RetryPolicy {
-    /// The nominal delay before retry `attempt` (1-based): `base * 2^(attempt-1)`, capped.
-    fn delay(&self, attempt: u32) -> Duration {
-        let factor = 2u32.saturating_pow(attempt.saturating_sub(1));
+    /// The nominal delay before the `retry`th retry (1-based): `base * 2^(retry-1)`, capped.
+    fn delay(&self, retry: u32) -> Duration {
+        let factor = 2u32.saturating_pow(retry.saturating_sub(1));
         self.base_delay.saturating_mul(factor).min(self.max_delay)
     }
 
-    /// The wait before retry `attempt`: the nominal delay with jitter taken off, or the
+    /// The wait before the `retry`th retry: the nominal delay with jitter taken off, or the
     /// server's `Retry-After` when that is longer; never above `max_delay`.
-    pub fn delay_for(&self, attempt: u32, message: &AssistantMessage) -> Duration {
+    pub fn delay_for(&self, retry: u32, message: &AssistantMessage) -> Duration {
         let hint = match &message.provider_error {
             Some(ProviderError::Http {
                 retry_after_ms: Some(ms),
@@ -52,7 +52,7 @@ impl RetryPolicy {
             }) => Duration::from_millis(*ms),
             _ => Duration::ZERO,
         };
-        self.jittered(self.delay(attempt)).max(hint).min(self.max_delay)
+        self.jittered(self.delay(retry)).max(hint).min(self.max_delay)
     }
 
     /// `delay` shortened by a random share of at most `jitter`.

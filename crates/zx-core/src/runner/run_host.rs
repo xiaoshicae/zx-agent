@@ -233,7 +233,7 @@ impl<'a> RunHost<'a> {
         accounting.retries += 1;
         let delay = retry.delay_for(accounting.retries, failed);
         self.emit(AgentEvent::RetryScheduled {
-            attempt: accounting.retries,
+            retry: accounting.retries,
             max_retries: retry.max_retries,
             delay_ms: duration_ms(delay),
             error: failed.failure_reason().to_string(),
