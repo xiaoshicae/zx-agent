@@ -2,6 +2,8 @@
 //!
 //! - `agent_loop`: the loop, which a run runs once per attempt, and what it runs with
 //!   ([`LoopConfig`])
+//! - `accounting`: what a run spends across its attempts, and its budgets; the loop of each
+//!   attempt counts into it
 //! - `tool`: the tool interface, and the set of tools a run offers
 //! - `hooks`: the extension points around the loop, and the chain that runs them
 //! - `policy`: the decision on a tool call, and the policy interface
@@ -13,6 +15,7 @@
 //! - `report`: what a run produced
 //! - `session_host`: what the loop needs from the session it records in
 
+mod accounting;
 mod agent_loop;
 mod command;
 mod events;
@@ -24,6 +27,7 @@ mod report;
 mod session_host;
 mod tool;
 
+pub(crate) use accounting::RunAccounting;
 pub(crate) use agent_loop::Halt;
 pub use agent_loop::LoopConfig;
 pub(crate) use agent_loop::{AgentLoop, LoopFailure, LoopResult};

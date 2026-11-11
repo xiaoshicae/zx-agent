@@ -1,18 +1,14 @@
 //! Model request recording and streaming.
 
 use super::{
-    AgentEvent, AgentLoop, AssistantMessage, Context, Halt, LoopResult, Request, RequestKind, RequestSource,
-    StopReason, StreamEvent, StreamExt,
+    AgentEvent, AgentLoop, AssistantMessage, Context, Halt, Request, RequestKind, RequestSource, StopReason,
+    StreamEvent, StreamExt,
 };
 use crate::agent::RequestSettings;
 
 impl AgentLoop<'_> {
     /// Record and send the task request of turn `turn`, then account for its response.
-    pub(super) async fn request_model(
-        &mut self,
-        result: &mut LoopResult,
-        turn: u32,
-    ) -> Result<Option<AssistantMessage>, Halt> {
+    pub(super) async fn request_model(&mut self, turn: u32) -> Result<Option<AssistantMessage>, Halt> {
         let config = self.config;
         let messages = self.host.session().messages();
         let configured = RequestSettings {
@@ -59,14 +55,14 @@ impl AgentLoop<'_> {
             kind: RequestKind::Task,
             entry_id: request_entry,
             model: request.model.clone(),
-            attempt: self.attempt_number,
+            attempt: self.accounting.attempts,
         })
         .await;
-        result.model_requests = result.model_requests.saturating_add(1);
+        self.accounting.model_requests = self.accounting.model_requests.saturating_add(1);
         let model = request.model.clone();
         let mut message = self.stream(request).await;
         message.usage.price(&config.models, &model);
-        result.usage.add(&message.usage);
+        self.accounting.usage.add(&message.usage);
         Ok(Some(message))
     }
 

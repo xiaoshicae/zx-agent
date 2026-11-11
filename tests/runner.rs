@@ -615,6 +615,40 @@ async fn a_retry_needs_request_budget_and_keeps_the_provider_error() {
 }
 
 #[tokio::test]
+async fn the_budget_and_the_turn_numbers_span_the_attempts_of_a_run() {
+    // The first request fails and is retried; the retry's answer is cut off, and continuing
+    // it would take a third request, which the run's limit of two does not leave.
+    let provider = provider([
+        FauxStep::Fail("HTTP 503: service unavailable".into()),
+        FauxStep::truncated("part one"),
+        FauxStep::text("never sent"),
+    ]);
+    let (mut runner, sink) = RunnerSetup {
+        retry: fast_retry(3),
+        limits: limits(2, None),
+        ..setup(&provider)
+    }
+    .build();
+
+    let report = runner.run("go", &CancellationToken::new()).await;
+
+    assert_eq!(
+        (report.outcome, report.retries, report.model_requests),
+        (RunOutcome::Truncated, 1, 2)
+    );
+    assert_eq!(provider.requests().len(), 2);
+    let turns: Vec<u32> = sink
+        .events()
+        .into_iter()
+        .filter_map(|event| match event {
+            AgentEvent::TurnStart { turn } => Some(turn),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(turns, [1, 2], "the retry's turn goes on from the failed one");
+}
+
+#[tokio::test]
 async fn queued_input_waits_when_no_request_budget_is_left() {
     let provider = provider([FauxStep::text("never sent")]);
     let setup = RunnerSetup {

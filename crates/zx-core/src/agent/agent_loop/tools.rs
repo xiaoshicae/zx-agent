@@ -77,7 +77,7 @@ impl AgentLoop<'_> {
             Err(error) => {
                 let reason = self.report_hook_failure(error);
                 self.decision(call, ToolVerdict::Deny, Some(reason.clone())).await;
-                self.denied_calls = self.denied_calls.saturating_add(1);
+                self.accounting.denied_calls = self.accounting.denied_calls.saturating_add(1);
                 return Err(blocked_by_policy(&reason));
             }
         };
@@ -85,7 +85,7 @@ impl AgentLoop<'_> {
             PolicyDecision::Allow => self.decision(call, ToolVerdict::Allow, None).await,
             PolicyDecision::Deny(reason) => {
                 self.decision(call, ToolVerdict::Deny, Some(reason.clone())).await;
-                self.denied_calls = self.denied_calls.saturating_add(1);
+                self.accounting.denied_calls = self.accounting.denied_calls.saturating_add(1);
                 return Err(blocked_by_policy(&reason));
             }
             PolicyDecision::Ask(reason) => {
@@ -93,7 +93,7 @@ impl AgentLoop<'_> {
                 if self.approvals.allows(call) {
                     self.approval_resolved(call, ApprovalResult::Remembered, None, 0).await;
                 } else if let Err(denied) = self.ask(call, reason).await {
-                    self.denied_calls = self.denied_calls.saturating_add(1);
+                    self.accounting.denied_calls = self.accounting.denied_calls.saturating_add(1);
                     return Err(format!("Approval denied: {denied}"));
                 }
             }

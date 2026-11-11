@@ -8,9 +8,9 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
 use super::Start;
-use super::accounting::RunAccounting;
 use crate::agent::{
-    AgentEvent, ContextPreparation, EventTarget, Halt, LoopConfig, QueuedMessage, RunOutcome, SessionHost,
+    AgentEvent, ContextPreparation, EventTarget, Halt, LoopConfig, QueuedMessage, RunAccounting, RunOutcome,
+    SessionHost,
 };
 use crate::ai::retry::RetryPolicy;
 use crate::ai::{AssistantMessage, Message, StopReason, duration_ms};
@@ -203,8 +203,7 @@ impl<'a> RunHost<'a> {
         self.emit(AgentEvent::ContextOverflow { error: error.into() }).await;
         self.omit_failed_attempt(failed_entry).await.map_err(RunStop::Failed)?;
         let Compacted { report, unrecorded } = self.compact(Trigger::Overflow, cancel).await;
-        accounting.model_requests = accounting.model_requests.saturating_add(report.requests);
-        accounting.usage.add(&report.usage);
+        accounting.count_requests(report.requests, &report.usage);
         if let Some(error) = unrecorded {
             return Err(RunStop::Failed(format!("{error:#}")));
         }

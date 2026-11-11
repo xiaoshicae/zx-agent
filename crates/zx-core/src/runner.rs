@@ -5,10 +5,11 @@
 //!
 //! - `run_host`: what a run lends the loop and the compactor, and how a run opens and closes
 //! - `interrupted`: results for the tool calls an interrupted run left unfinished
-//! - `accounting`: the costs of a run's attempts, and the budget that remains
 //! - `final_answer`: the answer, joined from the parts that continue a cut-off one
+//!
+//! What a run spends is counted in the agent layer's `RunAccounting`, which a run lends
+//! the loop of each attempt.
 
-mod accounting;
 mod final_answer;
 mod interrupted;
 mod run_host;
@@ -19,13 +20,12 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
-use accounting::RunAccounting;
 use final_answer::final_answer;
 use run_host::{CompactionPause, RunHost, RunStop};
 
 use crate::agent::ApprovalCache;
 use crate::agent::{
-    AgentEvent, AgentLoop, EventSink, EventTarget, LoopConfig, LoopFailure, LoopResult, QueuedMessage,
+    AgentEvent, AgentLoop, EventSink, EventTarget, LoopConfig, LoopFailure, LoopResult, QueuedMessage, RunAccounting,
     record_pending_entries,
 };
 pub use crate::agent::{RunOutcome, RunReport};
@@ -214,7 +214,7 @@ impl Runner {
             retry,
             limits,
             approvals,
-            accounting: RunAccounting::default(),
+            accounting: RunAccounting::new(limits.max_model_requests, limits.token_budget, limits.cost_budget),
             timer,
         };
         run.run(begin).await
@@ -250,6 +250,7 @@ impl Run<'_> {
     /// and the retry policy allow, until an attempt ends the run.
     async fn attempts(&mut self, mut prompts: Vec<QueuedMessage>) -> RunStop {
         loop {
+            let turns_before = self.accounting.task_turns;
             let result = self.attempt(std::mem::take(&mut prompts)).await;
             if result.outcome != RunOutcome::Error {
                 break RunStop::Ended(result.outcome);
@@ -263,7 +264,7 @@ impl Run<'_> {
             let failure = Failure {
                 message,
                 entry_id,
-                task_turns: result.task_turns,
+                task_turns: self.accounting.task_turns - turns_before,
             };
             if let Err(stop) = self.after_failure(&failure).await {
                 break stop;
@@ -271,22 +272,22 @@ impl Run<'_> {
         }
     }
 
-    /// Make one attempt: run the loop with what is left of the run's budgets, and account
-    /// for it.
+    /// Make one attempt: run the loop, which counts what it spends into the run's
+    /// accounting and checks the run's budgets.
     async fn attempt(&mut self, prompts: Vec<QueuedMessage>) -> LoopResult {
-        let number = self.accounting.attempts + 1;
-        self.host.attempt = number;
+        self.accounting.attempts = self.accounting.attempts.saturating_add(1);
+        self.host.attempt = self.accounting.attempts;
         let (config, target) = (self.host.config, self.host.target);
-        let mut agent_loop = AgentLoop::new(config, &mut self.host, &mut *self.approvals, target.sink, target.trace);
-        agent_loop.max_model_requests = self.accounting.remaining_model_requests(self.limits);
-        agent_loop.token_budget = self.accounting.remaining_tokens(self.limits);
-        agent_loop.cost_budget = self.accounting.remaining_cost(self.limits);
-        agent_loop.prior_task_turns = self.accounting.task_turns;
-        agent_loop.prior_answer_continuations = self.accounting.answer_continuations;
-        agent_loop.attempt_number = number;
-        let result = agent_loop.run(prompts).await;
-        self.accounting.record(&result);
-        result
+        AgentLoop::new(
+            config,
+            &mut self.host,
+            &mut *self.approvals,
+            &mut self.accounting,
+            target.sink,
+            target.trace,
+        )
+        .run(prompts)
+        .await
     }
 
     /// Recover from a context overflow by compacting once, or schedule a retry; an error
@@ -295,7 +296,7 @@ impl Run<'_> {
         let cancel = self.host.target.trace.cancel();
         let failed = &failure.message;
         let error = failed.failure_reason();
-        let out_of_budget = !self.accounting.has_budget(self.limits) || cancel.is_cancelled();
+        let out_of_budget = self.accounting.exhausted().is_some() || cancel.is_cancelled();
         if is_context_overflow(failed) && self.host.compaction.automatic() {
             // A context the model rejects as too long fails again however often it is sent:
             // compact once and continue. Not a retry, so it has its own limit: once per run,
