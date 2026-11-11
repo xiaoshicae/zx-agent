@@ -17,7 +17,7 @@ use crate::ai::{Delta, Message, Usage, now_ms};
 
 /// Version of the event JSON, envelope and event types together. Raised on incompatible
 /// changes; events without a version predate the envelope.
-pub const EVENT_SCHEMA_VERSION: u32 = 2;
+pub const EVENT_SCHEMA_VERSION: u32 = 3;
 
 /// One event, with what a trace needs to place it. In JSON the envelope fields and the
 /// event's own fields share one object, and `type` names the event.
@@ -291,9 +291,11 @@ pub enum AgentEvent {
     AgentEnd {
         outcome: RunOutcome,
     },
-    /// Emitted by the runner before waiting to retry a failed response.
+    /// Emitted by the runner before waiting to retry a failed response. `retry` is 1 for the
+    /// first retry, up to `max_retries`; the attempt the retry starts has its own number in
+    /// `agent_start`, which recoveries from context overflow raise too.
     RetryScheduled {
-        attempt: u32,
+        retry: u32,
         max_retries: u32,
         delay_ms: u64,
         error: String,
@@ -500,7 +502,7 @@ mod tests {
                 outcome: RunOutcome::Completed,
             },
             AgentEvent::RetryScheduled {
-                attempt: 1,
+                retry: 1,
                 max_retries: 3,
                 delay_ms: 10,
                 error: "e".into(),

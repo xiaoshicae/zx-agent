@@ -324,13 +324,13 @@ impl EventSink for Updates {
                 ..
             } => self.tool_ended(result),
             AgentEvent::RetryScheduled {
-                attempt,
+                retry,
                 max_retries,
                 delay_ms,
                 error,
             } => self.notice(
                 NoticeSeverity::Warning,
-                format!("Retrying the model request ({attempt}/{max_retries}) in {delay_ms}ms"),
+                format!("Retrying the model request ({retry}/{max_retries}) in {delay_ms}ms"),
                 error,
             ),
             AgentEvent::ContextOverflow { error } => self.notice(

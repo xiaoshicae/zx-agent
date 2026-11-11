@@ -135,7 +135,7 @@ impl Runs {
             } => run.compaction_start(automatic, input_bytes, parent),
             What::CompactionEnd { usage, output_bytes } => run.compaction_end(&usage, output_bytes),
             What::CompactionFailed => run.compaction_failed(),
-            What::Retry { attempt, delay_ms } => run.retry(attempt, delay_ms),
+            What::Retry { retry, delay_ms } => run.retry(retry, delay_ms),
             What::Overflow => run.overflow(),
             What::HookFailed { hook, phase } => run.hook_failed(hook, phase),
             What::Recovered { call, tool, state } => run.recovered(call, tool, state),
@@ -308,9 +308,9 @@ impl OpenRun<'_> {
         }
     }
 
-    fn retry(&self, attempt: u32, delay_ms: u64) {
+    fn retry(&self, retry: u32, delay_ms: u64) {
         let attributes = vec![
-            KeyValue::new("zx.attempt", i64::from(attempt)),
+            KeyValue::new("zx.retry", i64::from(retry)),
             KeyValue::new("zx.delay_ms", saturate(delay_ms)),
         ];
         event(self.spans.run.as_ref(), "retry_scheduled", self.at, attributes);

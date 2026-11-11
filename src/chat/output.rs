@@ -205,13 +205,13 @@ fn tool_result(state: &mut TextState, result: &ToolResultMessage) {
     }
 }
 
-/// Retry `attempt` of `max_retries` is scheduled: say so, unless the failed response just
+/// Retry `retry` of `max_retries` is scheduled: say so, unless the failed response just
 /// said it.
-fn retry_scheduled(state: &mut TextState, attempt: u32, max_retries: u32, delay_ms: u64, error: &str) {
+fn retry_scheduled(state: &mut TextState, retry: u32, max_retries: u32, delay_ms: u64, error: &str) {
     let line = if state.last_error.as_deref() == Some(error) {
-        format!("[retry] {attempt}/{max_retries} in {delay_ms}ms (same error)")
+        format!("[retry] {retry}/{max_retries} in {delay_ms}ms (same error)")
     } else {
-        format!("[retry] {attempt}/{max_retries} in {delay_ms}ms: {}", visible(error))
+        format!("[retry] {retry}/{max_retries} in {delay_ms}ms: {}", visible(error))
     };
     state.terminal.line(Tone::Warn, &line);
 }
@@ -265,11 +265,11 @@ impl EventSink for Output {
             // The result line that follows says how the call ended.
             AgentEvent::ToolExecutionStart { .. } | AgentEvent::ToolExecutionEnd { .. } => {}
             AgentEvent::RetryScheduled {
-                attempt,
+                retry,
                 max_retries,
                 delay_ms,
                 error,
-            } => retry_scheduled(&mut state, *attempt, *max_retries, *delay_ms, error),
+            } => retry_scheduled(&mut state, *retry, *max_retries, *delay_ms, error),
             // Everything else is printed as `run` prints it; `progress_line` covers every event.
             other => progress(&mut state, other),
         }

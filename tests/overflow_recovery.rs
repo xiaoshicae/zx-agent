@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use zx_agent::agent::{AgentEvent, Tool};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
+use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::{Message, StopReason};
 use zx_agent::compaction::Config;
 use zx_agent::runner::{Limits, RunOutcome, Runner};
@@ -31,12 +32,24 @@ fn compaction() -> Config {
     }
 }
 
-/// A runner over `session` that asks `provider`, with automatic compaction enabled.
+/// A runner over `session` that asks `provider`, with automatic compaction enabled and no
+/// retries.
 fn runner(provider: &Arc<FauxProvider>, session: SessionStore, limits: Limits) -> (Runner, Arc<Collect>) {
+    retrying_runner(provider, session, limits, fast_retry(0))
+}
+
+/// `runner` that retries failed responses as `retry` says.
+fn retrying_runner(
+    provider: &Arc<FauxProvider>,
+    session: SessionStore,
+    limits: Limits,
+    retry: RetryPolicy,
+) -> (Runner, Arc<Collect>) {
     let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(EchoTool::new("echo"))];
     let (runner, events) = RunnerSetup {
         session,
         limits,
+        retry,
         ..RunnerSetup::new(config(provider.clone(), tools))
     }
     .build();
@@ -126,6 +139,37 @@ async fn a_context_the_model_rejects_as_too_long_is_compacted_once_and_the_run_c
             .events()
             .contains(&AgentEvent::ContextOverflow { error: OVERFLOW.into() })
     );
+}
+
+#[tokio::test]
+async fn a_recovery_starts_an_attempt_but_is_not_a_retry() {
+    let (session, old) = seeded_session().await;
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::Fail(OVERFLOW.into()),
+        FauxStep::text(summary_json(&old)),
+        FauxStep::Fail("HTTP 503: busy".into()),
+        FauxStep::text("answer"),
+    ]));
+    let (mut runner, events) = retrying_runner(&provider, session, test_limits(), fast_retry(1));
+
+    let report = runner.run("continue", &CancellationToken::new()).await;
+
+    assert_eq!(
+        (report.outcome, report.retries),
+        (RunOutcome::Completed, 1),
+        "{report:?}"
+    );
+    let numbers: Vec<(&str, u32)> = events
+        .events()
+        .into_iter()
+        .filter_map(|event| match event {
+            AgentEvent::AgentStart { attempt } => Some(("attempt", attempt)),
+            AgentEvent::RetryScheduled { retry, .. } => Some(("retry", retry)),
+            _ => None,
+        })
+        .collect();
+    // The recovery starts attempt 2 without a retry, so the first retry starts attempt 3.
+    assert_eq!(numbers, [("attempt", 1), ("attempt", 2), ("retry", 1), ("attempt", 3)]);
 }
 
 #[tokio::test]

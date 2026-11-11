@@ -164,13 +164,13 @@ pub(crate) fn progress_line(event: &AgentEvent) -> Option<(Severity, String)> {
             )
         }
         AgentEvent::RetryScheduled {
-            attempt,
+            retry,
             max_retries,
             delay_ms,
             error,
         } => (
             Severity::Warn,
-            format!("[retry] {attempt}/{max_retries} in {delay_ms}ms: {}", visible(error)),
+            format!("[retry] {retry}/{max_retries} in {delay_ms}ms: {}", visible(error)),
         ),
         AgentEvent::ContextOverflow { error } => (
             Severity::Warn,
