@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use zx_agent::agent::{Approval, ApprovalRequest};
 use zx_agent::agent::{
-    ContextEdit, HookContext, PolicyDecision, RequestSettings, ToolOutput, TurnDecision, TurnDisposition, TurnSummary,
+    ContextEdit, FinishedTurn, HookContext, PolicyDecision, RequestSettings, ToolOutput, TurnDecision, TurnDisposition,
 };
 use zx_agent::ai::{AssistantMessage, Message, Reasoning, StopReason, ToolCall, Usage};
 
@@ -193,7 +193,7 @@ fn a_turn_summary_serializes_for_hook_processes() {
     let mut response = AssistantMessage::failure("p", "m", StopReason::Stop, "");
     response.error_message = None;
     let messages = vec![Message::user("go")];
-    let summary = TurnSummary {
+    let summary = FinishedTurn {
         response: &response,
         messages: &messages,
         turn: 2,

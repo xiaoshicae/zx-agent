@@ -35,20 +35,21 @@ impl RunHost<'_> {
                 details: None,
                 usage: None,
             });
-            self.emit(AgentEvent::MessageStart { role: "toolResult" }).await;
+            self.target.emit(AgentEvent::MessageStart { role: "toolResult" }).await;
             let entry_id = self
                 .session
                 .append_message(result.clone())
                 .await
                 .context(PERSIST_FAILED)?;
-            self.emit(AgentEvent::MessageEnd {
-                message: result,
-                entry_id,
-                custom: None,
-            })
-            .await;
+            self.target
+                .emit(AgentEvent::MessageEnd {
+                    message: result,
+                    entry_id,
+                    custom: None,
+                })
+                .await;
             // Reported once recorded, so the event never claims a result the session lacks.
-            self.emit(recovered).await;
+            self.target.emit(recovered).await;
         }
         Ok(())
     }

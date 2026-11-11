@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::ai::{Message, Reasoning, Request, ToolDef, now_ms};
 
-use super::{CompactionStartedEntry, Entry, SessionStore, summary_input};
+use super::{Entry, SessionStore, summary_input, summary_messages};
 
 /// Non-secret request fields. Authentication and transport credentials are not recorded.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -25,8 +25,8 @@ pub struct RequestConfig {
     pub provider_options: Value,
 }
 
-/// Append only when model, tools, token budget, reasoning level or provider conversion
-/// options change.
+/// The configuration requests use from here on. Recorded only when it differs from the
+/// latest one on the branch, in any field.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestConfigEntry {
@@ -85,7 +85,7 @@ impl SessionStore {
             cache_key: request.cache_key.clone(),
             provider_options,
         };
-        let existing = self.branch_path().into_iter().rev().find_map(|entry| match entry {
+        let existing = self.ancestors(self.leaf.as_deref()).find_map(|entry| match entry {
             Entry::RequestConfig(entry) => Some(entry),
             _ => None,
         });
@@ -139,40 +139,30 @@ impl SessionStore {
         }
     }
 
-    pub(super) fn validate_request_entry(&self, entry: &Entry) -> Result<()> {
-        match entry {
-            Entry::RequestConfig(config) => {
-                ensure!(
-                    !config.config.model.trim().is_empty() && !config.config.provider.trim().is_empty(),
-                    "empty request model or provider"
-                );
-            }
-            Entry::RequestStarted(started) => {
-                let path = self.branch_path_from(started.parent_id.as_deref());
-                ensure!(
-                    path.iter().any(|entry| entry.id() == started.config_id),
-                    "request config is not on this branch"
-                );
-                self.request_config(&started.config_id)?;
-                // Check only what can fail: a projection can always be built, and building
-                // one for every request record would make loading quadratic.
-                if let RequestSource::Summary { compaction_id, .. } = &started.source {
-                    self.requested_compaction(compaction_id, &path)?;
-                }
-            }
-            _ => bail!("not a request record"),
-        }
+    /// The rule a request configuration follows: it names a provider and a model.
+    pub(super) fn validate_request_config(entry: &RequestConfigEntry) -> Result<()> {
+        ensure!(
+            !entry.config.model.trim().is_empty() && !entry.config.provider.trim().is_empty(),
+            "empty request model or provider"
+        );
         Ok(())
     }
 
-    /// The start record of the compaction a summary request names, which must be on its
-    /// branch.
-    fn requested_compaction(&self, compaction_id: &str, path: &[&Entry]) -> Result<&CompactionStartedEntry> {
+    /// The rules a request checkpoint follows: its configuration is on its branch, and so is
+    /// the compaction whose summary it requests, if it requests one.
+    pub(super) fn validate_request_start(&self, started: &RequestStartedEntry) -> Result<()> {
+        let parent = started.parent_id.as_deref();
         ensure!(
-            path.iter().any(|entry| entry.id() == compaction_id),
-            "the compaction is not on this request branch"
+            self.ancestors(parent).any(|entry| entry.id() == started.config_id),
+            "request config is not on this branch"
         );
-        self.compaction_started(compaction_id)
+        self.request_config(&started.config_id)?;
+        // Check only what can fail: a projection can always be built, and building one for
+        // every request record would clone the branch's messages once per record.
+        if let RequestSource::Summary { compaction_id, .. } = &started.source {
+            Self::compaction_start_on(&self.branch_path_from(parent), compaction_id)?;
+        }
+        Ok(())
     }
 
     fn request_messages(&self, source: &RequestSource, parent: Option<&str>) -> Result<Vec<Message>> {
@@ -187,10 +177,14 @@ impl SessionStore {
                 system_timestamp,
                 user_timestamp,
             } => {
-                let started = self.requested_compaction(compaction_id, &self.branch_path_from(parent))?;
-                let raw = Self::raw_projection_from(&self.branch_path_from(started.parent_id.as_deref()));
-                let content = summary_input(Self::summarized_prefix(&raw, &started.first_kept_entry_id)?)?;
-                Ok(started.request.messages(content, *system_timestamp, *user_timestamp))
+                let (_, started) = Self::compaction_start_on(&self.branch_path_from(parent), compaction_id)?;
+                let source = self.compaction_source(started.parent_id.as_deref(), &started.first_kept_entry_id)?;
+                Ok(summary_messages(
+                    &started.request.instructions,
+                    summary_input(&source)?,
+                    *system_timestamp,
+                    *user_timestamp,
+                ))
             }
         }
     }

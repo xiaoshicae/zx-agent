@@ -2,16 +2,22 @@
 
 use std::borrow::Cow;
 use std::fmt::Display;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::time::Instant;
 
+use anyhow::Context;
+use futures::FutureExt;
+use futures::future::join_all;
 use serde_json::Value;
 
-use super::{
-    AgentEvent, AgentLoop, Approval, ApprovalRequest, ApprovalResult, AssertUnwindSafe, Context, Effects,
-    ExecutionMode, FutureExt, Halt, HookCall, HookFailure, HookPoint, Instant, MAX_DETAILS_BYTES, MAX_QUEUED_PROGRESS,
-    Message, PolicyDecision, Tool, ToolCall, ToolContext, ToolOutput, ToolResultMessage, ToolVerdict, duration_ms,
-    join_all, now_ms,
+use super::{AgentLoop, Halt};
+use crate::agent::hooks::HookCall;
+use crate::agent::{
+    AgentEvent, Approval, ApprovalRequest, ApprovalResult, Effects, ExecutionMode, HookFailure, HookPoint,
+    MAX_DETAILS_BYTES, MAX_QUEUED_PROGRESS, PolicyDecision, Tool, ToolContext, ToolOutput, ToolVerdict,
 };
+use crate::ai::{Message, ToolCall, ToolResultMessage, duration_ms, now_ms};
 
 impl AgentLoop<'_> {
     fn find_tool(&self, name: &str) -> Option<Arc<dyn Tool>> {
@@ -74,12 +80,8 @@ impl AgentLoop<'_> {
     async fn authorize(&mut self, call: &ToolCall) -> Result<(), String> {
         let verdict = match self.config.hooks.before_tool(call, self.trace.context()).await {
             Ok(verdict) => verdict,
-            Err(error) => {
-                let reason = self.report_hook_failure(error);
-                self.decision(call, ToolVerdict::Deny, Some(reason.clone())).await;
-                self.accounting.denied_calls = self.accounting.denied_calls.saturating_add(1);
-                return Err(blocked_by_policy(&reason));
-            }
+            // A policy hook that fails denies the call, for the reason it failed.
+            Err(error) => PolicyDecision::Deny(self.report_hook_failure(error)),
         };
         match verdict {
             PolicyDecision::Allow => self.decision(call, ToolVerdict::Allow, None).await,
@@ -209,8 +211,8 @@ impl AgentLoop<'_> {
     }
 
     async fn parallel(&mut self, calls: &[ToolCall]) -> Result<Batch, Halt> {
-        // Phase 1: all checks are ordered. Store verdicts, then borrow the static
-        // tools during execution after the mutable approval borrow ends.
+        // Phase 1: check every call in order. Approvals borrow the loop mutably, so all of
+        // them are settled here, before any call runs.
         let mut slots = Vec::new();
         for call in calls {
             self.tool_start(call).await;
@@ -227,12 +229,13 @@ impl AgentLoop<'_> {
                 self.record_start(runnable).await?;
             }
         }
-        // Phase 2: borrow the runtime; futures do not need spawn or shared mutable state.
-        let engine = &*self;
+        // Phase 2: the calls run concurrently on one shared borrow of the loop; the futures
+        // need neither spawn nor shared mutable state.
+        let this = &*self;
         let outcomes = join_all(
             slots
                 .into_iter()
-                .map(|(call, checked)| async move { (call, engine.execute_checked(call, checked).await) }),
+                .map(|(call, checked)| async move { (call, this.execute_checked(call, checked).await) }),
         )
         .await;
         // Phase 3: record results in model call order, regardless of completion order.
@@ -267,7 +270,7 @@ impl AgentLoop<'_> {
         let (ran, outcome) = match checked {
             Checked::Blocked(outcome) => (Cow::Borrowed(call), outcome),
             Checked::Ready(Runnable { tool, call: ran }) => {
-                let outcome = execute(self, tool.as_ref(), &ran).await;
+                let outcome = self.execute(tool.as_ref(), &ran).await;
                 (ran, outcome)
             }
         };
@@ -276,14 +279,86 @@ impl AgentLoop<'_> {
         outcome
     }
 
+    /// Run `tool` on `call` until it finishes or the run is cancelled, reporting its progress
+    /// on the way. A failure or a panic of the tool becomes an error result.
+    async fn execute(&self, tool: &dyn Tool, call: &ToolCall) -> CallOutput {
+        let cancel = self.trace.cancel();
+        if cancel.is_cancelled() {
+            return CallOutput::blocked(NOT_STARTED);
+        }
+        let (progress, mut updates) = tokio::sync::mpsc::channel(MAX_QUEUED_PROGRESS);
+        let ctx = ToolContext {
+            cwd: self.config.cwd.clone(),
+            // A token of the call's own: cancelled with the run, while a tool that cancels it
+            // to stop work of its own does not stop the run.
+            cancel: cancel.child_token(),
+            tool_call_id: Some(call.id.clone()),
+            progress: Some(progress),
+        };
+        let started = Instant::now();
+        let future = AssertUnwindSafe(tool.execute(call.arguments.clone(), &ctx)).catch_unwind();
+        tokio::pin!(future);
+        let result = loop {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => {
+                    return CallOutput {
+                        output: ToolOutput::error(interrupted(tool.effects())),
+                        duration_ms: Some(duration_ms(started.elapsed())),
+                    };
+                }
+                update = updates.recv() => {
+                    if let Some(update) = update {
+                        self.emit_progress(call, update).await;
+                    }
+                }
+                result = &mut future => break result,
+            }
+        };
+        updates.close();
+        while let Ok(update) = updates.try_recv() {
+            self.emit_progress(call, update).await;
+        }
+        let output = match result {
+            Ok(Ok(output)) => output,
+            Ok(Err(error)) => ToolOutput::error(error),
+            Err(_) => ToolOutput::error(format!("Tool {} panicked", tool.name())),
+        };
+        CallOutput {
+            output,
+            duration_ms: Some(duration_ms(started.elapsed())),
+        }
+    }
+
+    /// Pass one progress update of `call` through the redaction hooks, then report it.
+    async fn emit_progress(&self, call: &ToolCall, text: String) {
+        match self
+            .config
+            .hooks
+            .filter_tool_progress(call, ToolOutput::ok(text), self.trace.context())
+            .await
+        {
+            Ok(output) => {
+                self.emit(AgentEvent::ToolExecutionUpdate {
+                    tool_call_id: call.id.clone(),
+                    tool_name: call.name.clone(),
+                    content: output.content,
+                })
+                .await;
+            }
+            Err(error) => {
+                // The update is withheld; the failure is reported, not the update's text.
+                self.report_hook_failure(error);
+            }
+        }
+    }
+
     /// Record the result of `call`, then report it. Returns the result and whether the tool
     /// asked to end the attempt.
     async fn record_result(&mut self, call: &ToolCall, outcome: CallOutput) -> Result<(ToolResultMessage, bool), Halt> {
         let terminate = outcome.output.terminate;
         let result = to_result(call, outcome);
-        self.emit(AgentEvent::MessageStart { role: "toolResult" }).await;
-        self.record_finished_message(&Message::ToolResult(result.clone()))
-            .await?;
+        self.append(Message::ToolResult(result.clone())).await?;
         Ok((result, terminate))
     }
 
@@ -424,78 +499,6 @@ fn interrupted(effects: Effects) -> &'static str {
         }
         Effects::ReadOnly => {
             "Interrupted: the run was cancelled while this read-only call was running. It changed nothing; run it again if the result is still needed."
-        }
-    }
-}
-
-async fn execute(engine: &AgentLoop<'_>, tool: &dyn Tool, call: &ToolCall) -> CallOutput {
-    let cancel = engine.trace.cancel();
-    if cancel.is_cancelled() {
-        return CallOutput::blocked(NOT_STARTED);
-    }
-    // A token of the call's own: cancelled with the run, while a tool that cancels it to
-    // stop work of its own does not stop the run.
-    let (progress, mut updates) = tokio::sync::mpsc::channel(MAX_QUEUED_PROGRESS);
-    let ctx = ToolContext {
-        cwd: engine.config.cwd.clone(),
-        cancel: cancel.child_token(),
-        tool_call_id: Some(call.id.clone()),
-        progress: Some(progress),
-    };
-    let started = Instant::now();
-    let future = AssertUnwindSafe(tool.execute(call.arguments.clone(), &ctx)).catch_unwind();
-    tokio::pin!(future);
-    let result = loop {
-        tokio::select! {
-            biased;
-            () = cancel.cancelled() => {
-                return CallOutput {
-                    output: ToolOutput::error(interrupted(tool.effects())),
-                    duration_ms: Some(duration_ms(started.elapsed())),
-                };
-            }
-            update = updates.recv() => {
-                if let Some(update) = update {
-                    emit_progress(engine, call, update).await;
-                }
-            }
-            result = &mut future => break result,
-        }
-    };
-    updates.close();
-    while let Ok(update) = updates.try_recv() {
-        emit_progress(engine, call, update).await;
-    }
-    let output = match result {
-        Ok(Ok(output)) => output,
-        Ok(Err(error)) => ToolOutput::error(error),
-        Err(_) => ToolOutput::error(format!("Tool {} panicked", tool.name())),
-    };
-    CallOutput {
-        output,
-        duration_ms: Some(duration_ms(started.elapsed())),
-    }
-}
-
-async fn emit_progress(engine: &AgentLoop<'_>, call: &ToolCall, text: String) {
-    match engine
-        .config
-        .hooks
-        .filter_tool_progress(call, ToolOutput::ok(text), engine.trace.context())
-        .await
-    {
-        Ok(output) => {
-            engine
-                .emit(AgentEvent::ToolExecutionUpdate {
-                    tool_call_id: call.id.clone(),
-                    tool_name: call.name.clone(),
-                    content: output.content,
-                })
-                .await;
-        }
-        Err(error) => {
-            // The update is withheld; the failure is reported, not the update's text.
-            engine.report_hook_failure(error);
         }
     }
 }

@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
+use crate::ai::text::prefix_within;
 use crate::ai::{ToolDef, Usage};
 use crate::sync::lock;
 
@@ -97,22 +98,17 @@ impl ToolContext {
         }
     }
 
-    /// Queue a bounded progress update without blocking the tool. Text
-    /// longer than [`MAX_PROGRESS_BYTES`] is cut at a character boundary. The loop passes
-    /// updates through the redaction hooks, then emits them as `tool_execution_update`
-    /// events; they are not recorded in the session and the model never sees them. Returns
-    /// false when the queue ([`MAX_QUEUED_PROGRESS`] updates) is full, the call has finished,
-    /// or this is a direct call without an observer; the update is then dropped.
+    /// Queue a bounded progress update without blocking the tool. Text longer than
+    /// [`MAX_PROGRESS_BYTES`] is cut at a character boundary. The loop passes updates
+    /// through the redaction hooks, then emits them as `tool_execution_update` events; they
+    /// are not recorded in the session and the model never sees them. Returns false when the
+    /// queue ([`MAX_QUEUED_PROGRESS`] updates) is full, the call has finished, or this is a
+    /// direct call without an observer; the update is then dropped.
     pub fn report_progress(&self, text: impl Into<String>) -> bool {
         let Some(progress) = &self.progress else { return false };
         let mut text = text.into();
-        if text.len() > MAX_PROGRESS_BYTES {
-            let mut end = MAX_PROGRESS_BYTES;
-            while !text.is_char_boundary(end) {
-                end -= 1;
-            }
-            text.truncate(end);
-        }
+        let kept = prefix_within(&text, MAX_PROGRESS_BYTES).len();
+        text.truncate(kept);
         progress.try_send(text).is_ok()
     }
 }
@@ -196,6 +192,9 @@ impl ToolOutput {
 /// Arguments arrive as raw JSON; tools validate them by deserializing into their own
 /// argument type. `Err` becomes an error result that the model sees, and the loop
 /// continues.
+///
+/// `name`, `definition`, `execution_mode` and `effects` must not panic: the loop tries them
+/// before a run's first request and fails the run if one does.
 #[async_trait]
 pub trait Tool: Send + Sync {
     /// Name the model calls the tool by. Must match `definition().name`.
@@ -226,8 +225,8 @@ pub trait Tool: Send + Sync {
         None
     }
     /// Validate before policy and approval, after the declared JSON Schema has been checked.
-    /// Override for semantic checks;
-    /// execute must still validate direct SDK calls. The default adds no checks.
+    /// Override for semantic checks; `execute` must still validate direct SDK calls. The
+    /// default adds no checks.
     fn validate_arguments(&self, _args: &Value) -> Result<(), String> {
         Ok(())
     }
@@ -235,9 +234,7 @@ pub trait Tool: Send + Sync {
     ///
     /// When the run is cancelled, the loop stops waiting at once and drops this future, so
     /// cleanup that must happen, such as ending a process, belongs in `Drop`; the built-in
-    /// tools do so. `ctx.cancel` lets a tool stop early when it is called directly. The
-    /// `name`, `definition`, `execution_mode` and `effects` methods must not panic: the loop
-    /// tries them before a run's first request and fails the run if one does.
+    /// tools do so. `ctx.cancel` lets a tool stop early when it is called directly.
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String>;
 }
 

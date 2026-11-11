@@ -13,9 +13,8 @@ use tokio_util::sync::CancellationToken;
 use common::{EchoTool, RunnerSetup, config, fast_retry, header, read_lines, run_prompt, summarize};
 use zx_agent::agent::QueuedMessage;
 use zx_agent::agent::{
-    AgentEvent, ApprovalResult, CancelSignal, ContextEdit, Event, HookChain, HookContext, HookOptions, HookResult,
-    HookStage, Hooks, PolicyDecision, RunOutcome, Tool, ToolContext, ToolOutput, ToolVerdict, TurnDecision,
-    TurnSummary,
+    AgentEvent, ApprovalResult, CancelSignal, ContextEdit, Event, FinishedTurn, HookChain, HookContext, HookOptions,
+    HookResult, HookStage, Hooks, PolicyDecision, RunOutcome, Tool, ToolContext, ToolOutput, ToolVerdict, TurnDecision,
 };
 use zx_agent::agent::{Approval, ApprovalRequest, Interaction};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
@@ -565,7 +564,7 @@ async fn observer_failures_are_diagnostic_and_retry_events_are_observed_once() {
 struct CustomContinue;
 #[async_trait]
 impl Hooks for CustomContinue {
-    async fn finish_turn(&self, turn: &TurnSummary<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
+    async fn finish_turn(&self, turn: &FinishedTurn<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
         Ok(if turn.response.stop_reason == StopReason::Length {
             TurnDecision::ContinueAnswer("接着回答".into())
         } else {
@@ -832,7 +831,7 @@ async fn every_current_secret_is_redacted_however_many_files_there_are() {
 struct NextTurn(TurnDecision);
 #[async_trait]
 impl Hooks for NextTurn {
-    async fn finish_turn(&self, _turn: &TurnSummary<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
+    async fn finish_turn(&self, _turn: &FinishedTurn<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
         Ok(self.0.clone())
     }
 }
@@ -864,7 +863,7 @@ impl Hooks for StopAndQueue {
         }
         Ok(())
     }
-    async fn finish_turn(&self, _turn: &TurnSummary<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
+    async fn finish_turn(&self, _turn: &FinishedTurn<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
         Ok(TurnDecision::Stop)
     }
 }
@@ -886,7 +885,7 @@ async fn stopping_from_a_hook_preserves_queued_user_input() {
 struct FinishFailure;
 #[async_trait]
 impl Hooks for FinishFailure {
-    async fn finish_turn(&self, _turn: &TurnSummary<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
+    async fn finish_turn(&self, _turn: &FinishedTurn<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
         Err("HTTP 503 from extension".into())
     }
 }
@@ -908,6 +907,25 @@ async fn a_finish_hook_error_never_triggers_provider_retry() {
     );
     assert!(report.error.unwrap().contains("HTTP 503 from extension"));
     assert_eq!(provider.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn an_attempt_that_a_hook_failure_stops_reports_an_error() {
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("answer")]));
+    let mut config = config(provider, vec![]);
+    config.hooks.push(FinishFailure);
+
+    let (_, events) = run_prompt(config, &mut Vec::new(), "go").await;
+
+    let ended: Vec<RunOutcome> = events
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::AgentEnd { outcome } => Some(*outcome),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ended, [RunOutcome::Error]);
 }
 
 /// Holds input that starts with "hold" until the run is cancelled or dropped, unless released,
@@ -1263,7 +1281,7 @@ impl Hooks for ContextProbe {
         self.record("after_tool", ctx);
         Ok(output)
     }
-    async fn finish_turn(&self, _turn: &TurnSummary<'_>, ctx: &HookContext) -> HookResult<TurnDecision> {
+    async fn finish_turn(&self, _turn: &FinishedTurn<'_>, ctx: &HookContext) -> HookResult<TurnDecision> {
         self.record("finish_turn", ctx);
         Ok(TurnDecision::Default)
     }

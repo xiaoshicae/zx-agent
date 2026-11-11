@@ -365,6 +365,27 @@ async fn invalid_or_truncated_summaries_never_replace_context_or_retry_as_tasks(
 }
 
 #[tokio::test]
+async fn a_summary_citing_a_record_it_did_not_read_fails_as_an_invalid_answer() {
+    let (store, _) = seeded_session().await;
+    let provider = Arc::new(FauxProvider::new([FauxStep::text(summary_json("unknown"))]));
+    let (runner, _) = RunnerSetup {
+        session: store,
+        ..RunnerSetup::new(config(provider, vec![]))
+    }
+    .build();
+    let mut runner = runner.with_compaction(budget()).unwrap();
+
+    let report = runner.compact(&CancellationToken::new()).await;
+
+    assert_eq!(report.outcome, Outcome::Failed);
+    // The answer is at fault, so the error does not blame the session for refusing a record.
+    assert_eq!(
+        report.error.as_deref(),
+        Some("summary reference \"unknown\" is not in the source messages")
+    );
+}
+
+#[tokio::test]
 async fn a_failed_automatic_summary_is_not_paid_for_again_on_the_next_prompt() {
     let (store, _) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([

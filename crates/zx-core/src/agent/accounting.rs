@@ -39,8 +39,6 @@ pub(crate) struct RunAccounting {
     pub(crate) tool_usage: BTreeMap<String, Usage>,
     /// Tool calls that a policy or an approval denied.
     pub(crate) denied_calls: u32,
-    /// A context overflow was recovered from once already.
-    pub(crate) overflow_recovered: bool,
 }
 
 impl RunAccounting {

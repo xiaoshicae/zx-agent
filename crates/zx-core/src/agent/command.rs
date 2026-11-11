@@ -68,7 +68,7 @@ pub struct CommandOutcome {
     pub prompt: Option<QueuedMessage>,
 }
 
-/// Why [`crate::AgentSession::run_command`] ran no command.
+/// Why [`crate::AgentSession::run_command`] returned no outcome.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum CommandError {
     /// No extension registered a command with that name.

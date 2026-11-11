@@ -53,7 +53,7 @@ use super::SessionHeader;
 /// let loaded = LoadedSession {
 ///     header,
 ///     records: table.try_iter().collect(),
-///     repaired_bytes: 0,
+///     incomplete_tail_bytes: 0,
 /// };
 /// let (rows, _table) = mpsc::channel();
 /// let reopened = SessionStore::load(loaded, Box::new(Table(rows)))?;
@@ -97,5 +97,5 @@ pub struct LoadedSession {
     pub records: Vec<String>,
     /// Bytes of an incomplete final record that the backend left out, such as a line that a
     /// crash cut short; zero when there was none.
-    pub repaired_bytes: usize,
+    pub incomplete_tail_bytes: usize,
 }

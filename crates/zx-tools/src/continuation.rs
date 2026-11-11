@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 
-use crate::agent::{HookContext, HookResult, Hooks, TurnDecision, TurnDisposition, TurnSummary};
+use crate::agent::{FinishedTurn, HookContext, HookResult, Hooks, TurnDecision, TurnDisposition};
 use crate::ai::StopReason;
 
 /// The unattended continuation text; the runtime does not depend on this wording.
@@ -23,7 +23,7 @@ impl ContinueOnLength {
 
 #[async_trait]
 impl Hooks for ContinueOnLength {
-    async fn finish_turn(&self, turn: &TurnSummary<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
+    async fn finish_turn(&self, turn: &FinishedTurn<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
         if turn.disposition == TurnDisposition::Stop
             && turn.response.stop_reason == StopReason::Length
             && turn.remaining_model_requests != Some(0)

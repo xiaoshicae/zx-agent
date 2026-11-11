@@ -127,7 +127,7 @@ async fn a_log_receives_numbered_records_that_load_into_the_same_session() {
     let loaded = LoadedSession {
         header: store.header().clone(),
         records: received.into_iter().map(|(_, json)| json).collect(),
-        repaired_bytes: 0,
+        incomplete_tail_bytes: 0,
     };
     let (sender, _records) = mpsc::channel();
     let reloaded = SessionStore::load(loaded, Box::new(ChannelLog(sender))).unwrap();
@@ -216,6 +216,10 @@ async fn records_carry_the_serialized_type_of_every_entry_kind() {
         })
         .await
         .unwrap();
+    store
+        .append_session_name(SessionName::new("checks").unwrap())
+        .await
+        .unwrap();
 
     let mut kinds: Vec<&str> = store.entries().iter().map(Entry::kind).collect();
     for ((_, json), entry) in records.try_iter().zip(store.entries()) {
@@ -225,7 +229,7 @@ async fn records_carry_the_serialized_type_of_every_entry_kind() {
     }
     kinds.sort_unstable();
     kinds.dedup();
-    assert_eq!(kinds.len(), 10, "every entry kind was checked: {kinds:?}");
+    assert_eq!(kinds.len(), 11, "every entry kind was checked: {kinds:?}");
 }
 
 #[tokio::test]
@@ -360,7 +364,7 @@ async fn a_partial_write_stops_later_writes_and_leaves_a_repairable_tail() {
     drop(store);
 
     let reopened = SessionStore::open(&path).unwrap();
-    assert_eq!(reopened.recovered_tail_bytes(), 10);
+    assert_eq!(reopened.incomplete_tail_bytes(), 10);
     assert_eq!(texts(&reopened), ["kept"]);
 }
 
