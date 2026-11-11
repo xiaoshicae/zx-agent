@@ -22,7 +22,7 @@
 | `tests/session_fork.rs` | 复制分支成新会话 |
 | `tests/sessions_cli.rs` | chat 的会话目录、`--resume` 与 `zx-agent sessions` |
 | `tests/chat_cli.rs` | chat：审批、输出行、信号、PTY |
-| `tests/acp_cli.rs` | `acp` 经 stdio 的协议、权限请求、会话加载与 `/name` |
+| `tests/acp_cli.rs` | `acp` 经 stdio 的协议、权限请求、会话加载与关闭、`/name` |
 | `tests/agents_cli.rs` | agent 文件、权限、上下文与 skill；配置错误以退出码 2 结束 |
 | `tests/config_cli.rs` | `config.toml` 的位置与优先级 |
 | `tests/session_compaction.rs` | 会话层的摘要记录、引用与校验 |
