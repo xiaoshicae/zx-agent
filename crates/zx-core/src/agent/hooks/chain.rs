@@ -10,16 +10,18 @@ use futures::FutureExt;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    ContextEdit, DEFAULT_HOOK_TIMEOUT, HookContext, HookError, HookFailure, HookPoint, HookResult, HookStage, Hooks,
-    RequestPlan, RequestSettings, TurnDecision, TurnSummary,
+    ContextEdit, DEFAULT_HOOK_TIMEOUT, FinishedTurn, HookContext, HookError, HookFailure, HookPoint, HookResult,
+    HookStage, Hooks, RequestPlan, RequestSettings, TurnDecision,
 };
-use crate::agent::{AgentEvent, Event, EventTarget, PolicyDecision, ToolOutput};
+use crate::agent::{Event, PolicyDecision, ToolOutput};
 use crate::ai::{Message, ToolCall};
 
+/// One guarded call: of a registered hook, or of the interaction host for an approval. A
+/// failure names the call by `name` and `phase`.
 pub(crate) struct HookCall<'a> {
-    pub name: &'a str,
-    pub phase: HookPoint,
-    pub timeout: Duration,
+    pub(crate) name: &'a str,
+    pub(crate) phase: HookPoint,
+    pub(crate) timeout: Duration,
 }
 
 impl HookCall<'_> {
@@ -31,6 +33,8 @@ impl HookCall<'_> {
         }
     }
 
+    /// Wait for `future`, bounded by the timeout and by `cancel`; a rejection, a panic, a
+    /// timeout and a cancellation each become a failure of their own kind.
     pub(crate) async fn run<T>(
         &self,
         future: impl Future<Output = HookResult<T>>,
@@ -220,11 +224,11 @@ impl HookChain {
         Ok(settings)
     }
 
-    pub async fn before_tool(&self, tool: &ToolCall, ctx: &HookContext) -> Result<PolicyDecision, HookError> {
+    pub async fn before_tool(&self, call: &ToolCall, ctx: &HookContext) -> Result<PolicyDecision, HookError> {
         let mut verdict = PolicyDecision::Allow;
         for entry in &self.hooks {
             let decision = entry
-                .run(HookPoint::BeforeTool, entry.hook.before_tool(tool, ctx), ctx)
+                .run(HookPoint::BeforeTool, entry.hook.before_tool(call, ctx), ctx)
                 .await?;
             match decision {
                 PolicyDecision::Deny(_) => return Ok(decision),
@@ -237,22 +241,22 @@ impl HookChain {
 
     pub async fn after_tool(
         &self,
-        tool: &ToolCall,
+        call: &ToolCall,
         output: ToolOutput,
         ctx: &HookContext,
     ) -> Result<ToolOutput, HookError> {
-        self.after_tool_in(|_| true, tool, output, ctx).await
+        self.after_tool_in(|_| true, call, output, ctx).await
     }
 
     /// Filter transient progress through redaction hooks without invoking final-output hooks
     /// or spilling it to storage. A failed redactor withholds the update.
     pub(crate) async fn filter_tool_progress(
         &self,
-        tool: &ToolCall,
+        call: &ToolCall,
         output: ToolOutput,
         ctx: &HookContext,
     ) -> Result<ToolOutput, HookError> {
-        self.after_tool_in(|stage| stage == HookStage::Redaction, tool, output, ctx)
+        self.after_tool_in(|stage| stage == HookStage::Redaction, call, output, ctx)
             .await
     }
 
@@ -261,19 +265,19 @@ impl HookChain {
     async fn after_tool_in(
         &self,
         selected: impl Fn(HookStage) -> bool,
-        tool: &ToolCall,
+        call: &ToolCall,
         mut output: ToolOutput,
         ctx: &HookContext,
     ) -> Result<ToolOutput, HookError> {
         for entry in self.hooks.iter().filter(|entry| selected(entry.stage)) {
             output = entry
-                .run(HookPoint::AfterTool, entry.hook.after_tool(tool, output, ctx), ctx)
+                .run(HookPoint::AfterTool, entry.hook.after_tool(call, output, ctx), ctx)
                 .await?;
         }
         Ok(output)
     }
 
-    pub async fn finish_turn(&self, turn: &TurnSummary<'_>, ctx: &HookContext) -> Result<TurnDecision, HookError> {
+    pub async fn finish_turn(&self, turn: &FinishedTurn<'_>, ctx: &HookContext) -> Result<TurnDecision, HookError> {
         let mut decision = TurnDecision::Default;
         for entry in &self.hooks {
             let next = entry
@@ -317,26 +321,4 @@ impl HookChain {
         }
         errors
     }
-
-    /// Stamp `event`, hand it to the sink, then to the observing hooks.
-    pub(crate) async fn emit(&self, event: AgentEvent, target: EventTarget<'_>) {
-        // What the event reports is already recorded; the sink sees it before observers do.
-        let event = target.trace.stamp(event);
-        target.sink.emit(&event);
-        for error in self.on_event(&event, target.trace.context()).await {
-            report_failure(error, target);
-        }
-    }
-}
-
-/// Report a hook failure as a `hook_failed` event. Returns its description.
-pub(crate) fn report_failure(error: HookError, target: EventTarget<'_>) -> String {
-    let text = error.to_string();
-    // Diagnostics bypass hooks, preventing recursive observer failures.
-    target.emit_unobserved(AgentEvent::HookFailed {
-        hook: error.hook,
-        phase: error.phase.as_str(),
-        error: text.clone(),
-    });
-    text
 }

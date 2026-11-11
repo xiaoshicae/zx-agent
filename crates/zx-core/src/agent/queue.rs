@@ -44,9 +44,9 @@ pub enum QueueMode {
 
 /// A record an extension asked for during a run, kept until the loop can write it.
 #[derive(Clone, Debug, PartialEq)]
-pub struct PendingEntry {
-    pub custom_type: String,
-    pub data: Value,
+pub(crate) struct PendingEntry {
+    pub(crate) custom_type: String,
+    pub(crate) data: Value,
 }
 
 /// Messages injected into a running loop, and the custom entries extensions append while a

@@ -1,14 +1,16 @@
 //! Model request recording and streaming.
 
-use super::{
-    AgentEvent, AgentLoop, AssistantMessage, Context, Halt, Request, RequestKind, RequestSource, StopReason,
-    StreamEvent, StreamExt,
-};
-use crate::agent::RequestSettings;
+use anyhow::Context;
+use futures::StreamExt;
+
+use super::{AgentLoop, Halt};
+use crate::agent::{AgentEvent, RequestKind, RequestSettings};
+use crate::ai::{AssistantMessage, Request, StopReason, StreamEvent};
+use crate::session::RequestSource;
 
 impl AgentLoop<'_> {
     /// Record and send the task request of turn `turn`, then account for its response.
-    pub(super) async fn request_model(&mut self, turn: u32) -> Result<Option<AssistantMessage>, Halt> {
+    pub(super) async fn request_model(&mut self, turn: u32) -> Result<AssistantMessage, Halt> {
         let config = self.config;
         let messages = self.host.session().messages();
         let configured = RequestSettings {
@@ -48,9 +50,7 @@ impl AgentLoop<'_> {
             .await
             .context("cannot persist request checkpoint")
             .map_err(Halt::Unrecorded)?;
-        if self.trace.cancel().is_cancelled() {
-            return Ok(None);
-        }
+        self.ensure_not_cancelled()?;
         self.emit(AgentEvent::RequestStart {
             kind: RequestKind::Task,
             entry_id: request_entry,
@@ -63,7 +63,7 @@ impl AgentLoop<'_> {
         let mut message = self.stream(request).await;
         message.usage.price(&config.models, &model);
         self.accounting.usage.add(&message.usage);
-        Ok(Some(message))
+        Ok(message)
     }
 
     /// Stream one response, reporting its start and its deltas. The caller records the

@@ -115,7 +115,7 @@ pub fn list_sessions(dir: &Path) -> Result<SessionList> {
 fn info(path: PathBuf, store: &SessionStore) -> SessionInfo {
     let header = store.header();
     let first_prompt = store.entries().iter().find_map(|entry| {
-        let (_, message) = entry.projected()?;
+        let message = entry.projected()?;
         match &*message {
             Message::User {
                 content,

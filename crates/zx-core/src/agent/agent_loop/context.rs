@@ -1,10 +1,12 @@
 //! Context updates and their ordered session records.
 
-use super::{
-    AgentEvent, AgentLoop, Context, ContextEdit, CustomMessageInfo, Entry, EventTarget, Halt, HookFailure, Message,
-    PERSIST_FAILED, Queue, QueueMode, QueuedMessage, UserMessageKind, anyhow, record_pending_entries,
-};
-use crate::session::CustomMessage;
+use anyhow::{Context, anyhow};
+
+use super::{AgentLoop, Halt, PERSIST_FAILED, record_pending_entries};
+use crate::agent::queue::Queue;
+use crate::agent::{AgentEvent, ContextEdit, CustomMessageInfo, HookFailure, QueueMode, QueuedMessage};
+use crate::ai::{Message, UserMessageKind};
+use crate::session::{CustomMessage, Entry};
 
 impl AgentLoop<'_> {
     /// Record `message` in the session. Returns its entry ID.
@@ -30,6 +32,7 @@ impl AgentLoop<'_> {
         Ok(id)
     }
 
+    /// Append a message that arrives whole: report its start, record it, then report its end.
     pub(super) async fn append(&mut self, message: Message) -> Result<(), Halt> {
         self.append_from(message, None).await
     }
@@ -176,20 +179,9 @@ impl AgentLoop<'_> {
 
     /// Record the custom entries extensions asked for; see [`record_pending_entries`].
     pub(super) async fn record_pending_entries(&mut self) -> Result<(), Halt> {
-        let target = EventTarget {
-            sink: self.sink,
-            trace: self.trace,
-        };
-        record_pending_entries(self.config, self.host.session(), target)
+        let target = self.target();
+        record_pending_entries(&self.config.queues, self.host.session(), target)
             .await
             .map_err(Halt::Unrecorded)
-    }
-
-    /// Prepare the context and account for any summary requests, even on failure. Returns
-    /// how many requests preparing it made.
-    pub(super) async fn prepare_context(&mut self) -> Result<u32, Halt> {
-        let prepared = self.host.prepare_context(self.trace.cancel()).await;
-        self.accounting.count_requests(prepared.requests, &prepared.usage);
-        prepared.result.map(|()| prepared.requests)
     }
 }

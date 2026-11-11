@@ -66,8 +66,9 @@ impl Config {
     }
 
     /// Set the token trigger from a model's context window, `reserve_tokens` below it (pi:
-    /// `contextWindow - reserveTokens`), unless one is set already. A window no larger than
-    /// the reserve leaves the trigger unset.
+    /// `contextWindow - reserveTokens`), unless one is set already. The trigger stays unset
+    /// when the window is no larger than the reserve, or when the trigger would not lie above
+    /// the recent messages a summary keeps.
     pub fn derive_trigger_tokens(&mut self, context_window: u64) {
         let trigger = context_window.saturating_sub(self.reserve_tokens);
         if self.trigger_tokens.is_none() && trigger > 0 && Self::leaves_room(trigger, self.keep_recent_bytes) {
@@ -112,81 +113,122 @@ impl Config {
     }
 }
 
-/// Outcome of a standalone compact operation.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+/// How a compaction ended, as its [`Report`] states it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
+    /// The summary is recorded and stands in for the records it read.
     Completed,
-    #[default]
+    /// There was nothing old enough to summarize.
     Noop,
+    /// The compaction failed and left the context as it was; `error` says why.
     Failed,
+    /// The compaction was cancelled and left the context as it was.
     Aborted,
 }
 
-/// Costs and audit record for one compaction, including unsuccessful requests.
-#[derive(Clone, Debug, Default, Serialize)]
+/// What one compaction cost and how it ended, including a request that failed.
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Report {
     pub outcome: Outcome,
+    /// Model requests made: 0 or 1.
     pub requests: u32,
+    /// What the summary request used; zero when none got an answer.
     pub usage: Usage,
+    /// The context's size before the compaction.
     pub input_bytes: usize,
+    /// The context's size after it; `input_bytes` unless the compaction completed.
     pub output_bytes: usize,
+    /// The `compaction` record of a completed compaction.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entry_id: Option<String>,
+    /// Why a compaction that did not complete ended as it did.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
-impl Report {
-    fn failed(mut self, error: String) -> Self {
-        self.outcome = Outcome::Failed;
-        self.error = Some(error);
-        self
-    }
-
-    fn aborted(mut self) -> Self {
-        self.outcome = Outcome::Aborted;
-        self.error = Some("compaction cancelled".into());
-        self
+impl From<Compacted> for Report {
+    fn from(compacted: Compacted) -> Self {
+        let Compacted {
+            requests,
+            usage,
+            input_bytes,
+            end,
+        } = compacted;
+        let (outcome, output_bytes, entry_id, error) = match end {
+            End::Noop => (Outcome::Noop, input_bytes, None, None),
+            End::Completed { entry_id, output_bytes } => (Outcome::Completed, output_bytes, Some(entry_id), None),
+            End::Failed(error) => (Outcome::Failed, input_bytes, None, Some(error)),
+            End::Aborted(error) => (Outcome::Aborted, input_bytes, None, Some(error)),
+            End::Unrecorded(error) => (Outcome::Failed, input_bytes, None, Some(format!("{error:#}"))),
+        };
+        Self {
+            outcome,
+            requests,
+            usage,
+            input_bytes,
+            output_bytes,
+            entry_id,
+            error,
+        }
     }
 }
 
-/// What one compaction did, and whether the session recorded all of it.
+/// What one compaction cost and how it ended, for the kernel; [`Report`] is the same for a
+/// frontend.
 pub(crate) struct Compacted {
-    pub report: Report,
-    /// The session could not record a step of the compaction, so a run must stop (invariant 7).
-    /// The report's `error` states the same.
-    pub unrecorded: Option<anyhow::Error>,
+    /// Model requests made: 0 or 1.
+    pub(crate) requests: u32,
+    /// What the summary request used; zero when none got an answer.
+    pub(crate) usage: Usage,
+    /// The context's size before the compaction.
+    pub(crate) input_bytes: usize,
+    pub(crate) end: End,
 }
 
 impl Compacted {
-    /// A compaction whose every step the session recorded, or that recorded none.
-    fn recorded(report: Report) -> Self {
+    /// A compaction that ended before it made a request.
+    fn without_request(input_bytes: usize, end: End) -> Self {
         Self {
-            report,
-            unrecorded: None,
+            requests: 0,
+            usage: Usage::default(),
+            input_bytes,
+            end,
         }
     }
+}
+
+/// How a compaction ended.
+pub(crate) enum End {
+    /// There was nothing old enough to summarize while keeping the system messages and the
+    /// latest input.
+    Noop,
+    /// The summary is recorded: the session's projection is the new context.
+    Completed {
+        /// The `compaction` record.
+        entry_id: String,
+        /// The context's size with the summary in place.
+        output_bytes: usize,
+    },
+    /// The compaction failed, for this reason, and left the context as it was.
+    Failed(String),
+    /// The run was cancelled before the compaction completed; the text says where.
+    Aborted(String),
+    /// The session could not record a step of the compaction, so a run must stop
+    /// (invariant 7).
+    Unrecorded(anyhow::Error),
 }
 
 /// Why a compaction runs.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Trigger {
+    /// Someone asked for it.
     Manual,
-    /// The context exceeds `trigger_bytes` before a request.
+    /// The run started it: the context passed a trigger before a request, or the model
+    /// rejected a request as too long for its context. The result must then fit under the
+    /// byte trigger, and the events say `automatic`.
     Automatic,
-    /// The model rejected a request as too long for its context. Checked like an automatic
-    /// compaction, whatever the context's size in bytes.
-    Overflow,
-}
-
-impl Trigger {
-    /// Whether the compaction runs on the host's initiative rather than on request, as the
-    /// `automatic` field of its events says.
-    fn is_automatic(self) -> bool {
-        self != Self::Manual
-    }
 }
 
 /// Serialized transcript bytes as a model may see them (without tool result details), not a

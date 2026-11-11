@@ -71,14 +71,17 @@ impl SessionStore {
     /// result that a `context_edit` hides from the model still counts as recorded.
     pub fn interrupted_tool_calls(&self) -> Vec<InterruptedToolCall> {
         let path = self.branch_path();
-        let issuer = path.iter().enumerate().rev().find_map(|(index, entry)| match entry {
-            Entry::Message(entry) if !matches!(entry.message, Message::ToolResult(_)) => Some((index, Some(entry))),
-            // A custom message is a message to the model too: calls before it are answered
-            // or abandoned, not interrupted.
-            Entry::CustomMessage(_) => Some((index, None)),
-            _ => None,
+        // The last message that is not a tool result. A custom message is a message to the
+        // model too: calls before it are answered or abandoned, not interrupted.
+        let last_message = path.iter().rposition(|entry| match entry {
+            Entry::Message(entry) => !matches!(entry.message, Message::ToolResult(_)),
+            Entry::CustomMessage(_) => true,
+            _ => false,
         });
-        let Some((position, Some(issuer))) = issuer else {
+        let Some(position) = last_message else {
+            return Vec::new();
+        };
+        let Entry::Message(issuer) = path[position] else {
             return Vec::new();
         };
         let Message::Assistant(answer) = &issuer.message else {
@@ -175,7 +178,7 @@ mod tests {
 
     use super::*;
     use crate::ai::{AssistantMessage, ContentBlock, ToolCall, ToolResultMessage};
-    use crate::session::SessionHeader;
+    use crate::session::{CustomMessage, SessionHeader};
 
     fn store() -> SessionStore {
         SessionStore::in_memory(SessionHeader::new(Path::new("."), "m"))
@@ -341,5 +344,27 @@ mod tests {
         let recorded = hidden.append_message(result("c1", "bash")).await.unwrap();
         hidden.append_context_edit(&recorded, None).await.unwrap();
         assert!(hidden.interrupted_tool_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn calls_before_a_message_from_an_extension_are_not_interrupted() {
+        let mut store = store();
+        store
+            .append_message(answer(StopReason::ToolUse, &[("c1", "bash")]))
+            .await
+            .unwrap();
+        assert_eq!(starts(&store), [("c1".to_string(), StartRecord::Absent)]);
+
+        store
+            .append_custom_message(CustomMessage {
+                custom_type: "note".into(),
+                content: "status".into(),
+                display: false,
+                details: None,
+            })
+            .await
+            .unwrap();
+
+        assert!(store.interrupted_tool_calls().is_empty());
     }
 }

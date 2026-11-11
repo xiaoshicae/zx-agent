@@ -20,17 +20,44 @@
 //!
 //! The session owns what a feature records: the format, the checks a record passes both when
 //! it is appended and when a session is loaded, and the queries the projection and recovery
-//! need. The layers above act on it. A feature therefore spans several modules:
+//! need. The layers above act on it. A feature therefore spans several modules. For each
+//! feature below, "records" names where the session keeps its records and rules, and "acts"
+//! names the code above the session that acts on them:
 //!
-//! | Feature | Records and rules, in `session` | What acts, above it |
-//! |---|---|---|
-//! | Compaction; the summary is the text it produces | `session/compaction.rs` (types and limits), `compaction/records.rs` (appending and checking the records), `compaction/source.rs` (what a compaction reads), `session/projection.rs` (the summary in the context) | `compaction.rs` (budgets and report), `compaction/compactor.rs` (one compaction), `compaction/answer.rs` (the model's answer), `runner/run_host.rs` (when to compact) |
-//! | Interrupted tool calls | `session/recovery.rs` (start records, the calls left without results) | `agent/agent_loop/tools.rs` (records the start of a call with side effects), `runner/interrupted.rs` (records their results) |
-//! | Request audit | `session/request.rs` (request settings and per-request checkpoints) | `agent/agent_loop/model.rs` (task requests), `compaction/compactor.rs` (summary requests) |
-//! | Context edits | `session.rs` (the rules of an edit), `session/projection.rs` (applying edits) | `agent/agent_loop/context.rs` (input and hook edits), `runner/run_host.rs` (omitting a failed answer) |
-//! | Session names | `session/name.rs` (the `session_info` record, the latest name), `session/directory.rs` (the name a listing shows) | `agent_session.rs` (naming a session while idle) |
-//! | Approval | none: approvals are not recorded | `agent/interaction.rs` (the host interface and the session's grants), `agent/agent_loop/tools.rs` (asking) |
-//! | Events | none | `agent/events.rs` (the events and their envelope), `agent_session/subscribers.rs` (fan-out to subscribers) |
+//! - **Compaction** (the summary is the text it produces)
+//!   - records: `session/compaction.rs` (types and limits), `session/compaction/records.rs`
+//!     (appending and checking the records), `session/compaction/source.rs` (what a
+//!     compaction reads), `session/projection.rs` (the summary in the context)
+//!   - acts: `compaction.rs` (budgets and report), `compaction/compactor.rs` (one
+//!     compaction), `compaction/answer.rs` (the model's answer), `runner/run_host.rs` (when
+//!     to compact)
+//! - **Interrupted tool calls**
+//!   - records: `session/recovery.rs` (start records, the calls left without results)
+//!   - acts: `agent/agent_loop/tools.rs` (records the start of a call with side effects),
+//!     `runner/interrupted.rs` (records their results)
+//! - **Request audit**
+//!   - records: `session/request.rs` (request settings and per-request checkpoints)
+//!   - acts: `agent/agent_loop/model.rs` (task requests), `compaction/compactor.rs` (summary
+//!     requests)
+//! - **Context edits**
+//!   - records: `session.rs` (the rules of an edit), `session/projection.rs` (applying
+//!     edits)
+//!   - acts: `agent/hooks.rs` (checking a hook's plan of edits before any is recorded),
+//!     `agent/agent_loop/context.rs` (input and hook edits), `runner/run_host.rs` (omitting
+//!     a failed answer)
+//! - **Session names**
+//!   - records: `session/name.rs` (the `session_info` record, the latest name),
+//!     `session/directory.rs` (the name a listing shows)
+//!   - acts: `agent_session.rs` (naming a session while idle)
+//! - **Approval**
+//!   - records: none; approvals are not recorded
+//!   - acts: `agent/interaction.rs` (the host interface and the session's grants),
+//!     `agent/agent_loop/tools.rs` (asking)
+//! - **Events**
+//!   - records: none
+//!   - acts: `agent/events.rs` (the events and their envelope), `agent/trace.rs` (numbering
+//!     a run's events and delivering them to the sink and the observing hooks),
+//!     `agent_session/subscribers.rs` (fan-out to subscribers)
 //!
 //! A session holds a conversation across runs. Each [`runner::Runner::run`] processes one
 //! prompt and may retry a failed provider response as another loop attempt. A task turn is

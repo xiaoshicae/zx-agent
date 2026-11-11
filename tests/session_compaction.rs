@@ -109,6 +109,31 @@ async fn unfinished_and_failed_attempts_do_not_change_context() {
 }
 
 #[tokio::test]
+async fn a_completed_compaction_accepts_neither_a_second_result_nor_a_failure() {
+    let mut store = SessionStore::in_memory(header());
+    let (old, kept) = seeded(&mut store).await;
+    let started = store.begin_compaction(plan(&store, &kept)).await.unwrap();
+    store
+        .append_compaction(&started, summary(&old), Usage::default())
+        .await
+        .unwrap();
+    let recorded = store.entries().len();
+
+    let again = store
+        .append_compaction(&started, summary(&old), Usage::default())
+        .await
+        .unwrap_err();
+    let failed = store
+        .fail_compaction(&started, "late".into(), Usage::default(), None)
+        .await
+        .unwrap_err();
+
+    assert!(again.to_string().contains("already finished"), "{again:#}");
+    assert!(failed.to_string().contains("already finished"), "{failed:#}");
+    assert_eq!(store.entries().len(), recorded);
+}
+
+#[tokio::test]
 async fn summaries_are_branch_local_and_references_to_other_branches_are_rejected() {
     let mut store = SessionStore::in_memory(header());
     let (old, kept) = seeded(&mut store).await;

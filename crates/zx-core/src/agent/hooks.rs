@@ -17,8 +17,9 @@ use super::queue::MessageQueues;
 use super::tool::ActiveTools;
 use super::{AgentEvent, Event, PolicyDecision, ToolOutput};
 use crate::ai::{AssistantMessage, Message, Reasoning, ToolCall, UserMessageKind};
+use crate::session::context_edit_refusal;
 
-pub(crate) use chain::{HookCall, report_failure};
+pub(crate) use chain::HookCall;
 pub use chain::{HookChain, HookOptions};
 
 /// Default bound for each individual hook invocation.
@@ -113,9 +114,6 @@ impl CancelSignal {
     }
 }
 
-const SYSTEM_APPEND: &str =
-    "the system prompt comes from the configuration, so hooks cannot add system messages; add other context instead";
-
 /// Audit-friendly changes, applied in order against the current projection.
 ///
 /// Indexes refer to the projection after preceding edits. System messages cannot be
@@ -136,14 +134,16 @@ pub enum ContextEdit {
     Omit { index: usize },
 }
 
-const SUMMARY_EDIT: &str = "a context summary cannot be edited or omitted; edit its source messages instead";
-
 impl ContextEdit {
+    /// Apply the edit to `messages`, or say why it is refused. The chain applies a whole
+    /// plan to a copy of the context this way, before any of its edits is recorded.
     pub(crate) fn apply(&self, messages: &mut Vec<Message>) -> Result<(), String> {
         match self {
             Self::Append { message } => {
                 if matches!(message, Message::System(_)) {
-                    return Err(SYSTEM_APPEND.into());
+                    return Err("the system prompt comes from the configuration, so hooks cannot add \
+                                system messages; add other context instead"
+                        .into());
                 }
                 if is_summary(message) {
                     return Err("only the session creates context summaries".into());
@@ -151,36 +151,30 @@ impl ContextEdit {
                 messages.push(message.clone());
             }
             Self::ReplaceText { index, text } => {
-                let message = messages
-                    .get_mut(*index)
-                    .ok_or_else(|| format!("context index {index} is out of bounds"))?;
-                match message {
-                    Message::System(_) => return Err("append system prompt changes instead of editing them".into()),
-                    Message::User {
-                        kind: UserMessageKind::Summary,
-                        ..
-                    } => return Err(SUMMARY_EDIT.into()),
-                    Message::Assistant(assistant) if !assistant.tool_calls().is_empty() => {
-                        return Err("text replacement cannot erase assistant tool calls".into());
-                    }
-                    Message::User { .. } | Message::Assistant(_) | Message::ToolResult(_) => {}
-                }
+                let message = editable(messages, *index, true)?;
                 *message = message.with_replaced_text(text);
             }
             Self::Omit { index } => {
-                let message = messages
-                    .get(*index)
-                    .ok_or_else(|| format!("context index {index} is out of bounds"))?;
-                if matches!(message, Message::System(_)) {
-                    return Err("system prompt history cannot be omitted".into());
-                }
-                if is_summary(message) {
-                    return Err(SUMMARY_EDIT.into());
-                }
+                editable(messages, *index, false)?;
                 messages.remove(*index);
             }
         }
         Ok(())
+    }
+}
+
+/// The message at `index`, if an edit may change it: it exists, is not a summary, which only
+/// the session builds, and is one the session accepts an edit for ([`context_edit_refusal`]).
+fn editable(messages: &mut [Message], index: usize, replaces_text: bool) -> Result<&mut Message, String> {
+    let message = messages
+        .get_mut(index)
+        .ok_or_else(|| format!("context index {index} is out of bounds"))?;
+    if is_summary(message) {
+        return Err("a context summary cannot be edited or omitted; edit its source messages instead".into());
+    }
+    match context_edit_refusal(message, replaces_text) {
+        Some(reason) => Err(format!("context message {index} {reason}")),
+        None => Ok(message),
     }
 }
 
@@ -192,28 +186,6 @@ fn is_summary(message: &Message) -> bool {
             ..
         }
     )
-}
-
-/// Whether the normal loop already has work after this response.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TurnDisposition {
-    Continue,
-    Stop,
-    Terminated,
-}
-
-/// A successful model turn, after tool results have been processed.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TurnSummary<'a> {
-    pub response: &'a AssistantMessage,
-    pub messages: &'a [Message],
-    pub turn: u32,
-    /// Answer continuations already scheduled in this run.
-    pub answer_continuations: u32,
-    pub remaining_model_requests: Option<u32>,
-    pub disposition: TurnDisposition,
 }
 
 /// The settings of one task request that [`Hooks::prepare_request`] may change: the model,
@@ -237,15 +209,51 @@ pub struct RequestPlan<'a> {
     pub settings: &'a RequestSettings,
 }
 
-/// Stop dominates; otherwise the first non-default decision wins.
+/// What the loop does after a turn if no finish hook decides otherwise.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnDisposition {
+    /// Another turn follows: tool results await the model, or input is queued.
+    Continue,
+    /// The attempt ends: the response called no tool and no input is queued.
+    Stop,
+    /// The attempt ends because every call of the response asked to end it
+    /// ([`ToolOutput::terminate`]), and no input is queued.
+    Terminated,
+}
+
+/// A successful model turn, after its tool results have been processed, as
+/// [`Hooks::finish_turn`] sees it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FinishedTurn<'a> {
+    pub response: &'a AssistantMessage,
+    pub messages: &'a [Message],
+    pub turn: u32,
+    /// Answer continuations already scheduled in this run.
+    pub answer_continuations: u32,
+    pub remaining_model_requests: Option<u32>,
+    pub disposition: TurnDisposition,
+}
+
+/// What a finish hook asks for after a turn; [`Hooks::finish_turn`] says how the decisions
+/// of several hooks combine. Input queued while the hooks ran takes precedence over
+/// `ContinueAnswer` and `FollowUp`, and either of them ends the attempt instead when the
+/// request budget leaves no request for it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "decision", content = "text", rename_all = "snake_case")]
 pub enum TurnDecision {
+    /// Leave it to the loop, which does what the turn's [`TurnDisposition`] says.
     Default,
+    /// End the attempt now, even when tool results await the model. Queued input stays
+    /// queued for the next run.
     Stop,
-    /// Continue the same answer; the final report joins adjacent answer fragments.
+    /// Continue the same answer, with this text as the next input; the final report joins
+    /// adjacent answer fragments. Honoured only when the loop would stop
+    /// ([`TurnDisposition::Stop`]).
     ContinueAnswer(String),
-    /// Request a new answer without joining the preceding answer.
+    /// Request a new answer, with this text as the next input, without joining the preceding
+    /// answer. Honoured unless another turn follows anyway ([`TurnDisposition::Continue`]).
     FollowUp(String),
 }
 
@@ -316,7 +324,7 @@ pub trait Hooks: Send + Sync {
     /// Decide what follows a successful task response, after tool results and `TurnEnd`.
     /// Stop wins; otherwise the first non-default decision wins. A failure stops the attempt.
     /// There is no corresponding decision hook at turn start; observe `TurnStart` in `on_event`.
-    async fn finish_turn(&self, _turn: &TurnSummary<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
+    async fn finish_turn(&self, _turn: &FinishedTurn<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
         Ok(TurnDecision::Default)
     }
 
@@ -378,14 +386,18 @@ impl HookPoint {
     }
 }
 
+/// How one callback failed.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum HookFailure {
+    /// The callback returned this error.
     #[error("failed: {0}")]
     Rejected(String),
+    /// The callback did not finish within its timeout.
     #[error("timed out after {}ms", .0.as_millis())]
     TimedOut(Duration),
     #[error("panicked")]
     Panicked,
+    /// The run was cancelled while the callback ran.
     #[error("was cancelled")]
     Cancelled,
 }
@@ -529,7 +541,7 @@ mod tests {
     struct Finish(TurnDecision);
     #[async_trait]
     impl Hooks for Finish {
-        async fn finish_turn(&self, _turn: &TurnSummary<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
+        async fn finish_turn(&self, _turn: &FinishedTurn<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
             Ok(self.0.clone())
         }
     }
@@ -537,7 +549,7 @@ mod tests {
     #[tokio::test]
     async fn finish_stop_dominates_and_otherwise_first_request_wins() {
         let response = AssistantMessage::failure("p", "m", StopReason::Stop, "unused");
-        let turn = TurnSummary {
+        let turn = FinishedTurn {
             response: &response,
             messages: &[],
             turn: 1,

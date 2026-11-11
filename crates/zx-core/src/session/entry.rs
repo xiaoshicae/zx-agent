@@ -41,6 +41,8 @@ impl SessionHeader {
     }
 }
 
+/// The header as the first line of a session file: tagged `session`, like an entry is tagged
+/// with its type.
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(super) enum HeaderLine {
@@ -189,13 +191,13 @@ impl Entry {
         }
     }
 
-    /// The message the entry contributes to the model's context, with the entry's ID, before
-    /// context edits: a stored message as it is, an extension's message as a user message.
-    /// `None` for the records that are not messages.
-    pub(crate) fn projected(&self) -> Option<(&str, Cow<'_, Message>)> {
+    /// The message the entry contributes to the model's context, before context edits: a
+    /// stored message as it is, an extension's message as a user message. `None` for the
+    /// records that are not messages.
+    pub(crate) fn projected(&self) -> Option<Cow<'_, Message>> {
         match self {
-            Self::Message(entry) => Some((&entry.id, Cow::Borrowed(&entry.message))),
-            Self::CustomMessage(entry) => Some((&entry.id, Cow::Owned(entry.projected()))),
+            Self::Message(entry) => Some(Cow::Borrowed(&entry.message)),
+            Self::CustomMessage(entry) => Some(Cow::Owned(entry.projected())),
             Self::ContextEdit(_)
             | Self::CompactionStarted(_)
             | Self::Compaction(_)
@@ -224,12 +226,4 @@ impl Entry {
             Self::SessionInfo(entry) => entry.timestamp,
         }
     }
-}
-
-/// A model-visible message and the entry it came from.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectedMessage {
-    pub entry_id: String,
-    pub message: Message,
 }

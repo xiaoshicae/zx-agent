@@ -135,7 +135,7 @@ async fn a_session_in_a_custom_log_reloads_and_continues_the_same_conversation()
     let loaded = LoadedSession {
         header: runner.session().header().clone(),
         records: rows.iter().map(|row| row.json.clone()).collect(),
-        repaired_bytes: 0,
+        incomplete_tail_bytes: 0,
     };
     let (sender, more) = mpsc::channel();
     let reloaded = SessionStore::load(loaded, Box::new(TableLog(sender))).unwrap();
@@ -1108,6 +1108,28 @@ async fn attempts_and_requests_are_numbered_and_name_their_request_records() {
         })
         .collect();
     assert_eq!(turns, [1, 1, 2, 2], "turn numbers continue across attempts");
+}
+
+#[tokio::test]
+async fn each_attempt_reports_how_it_ended() {
+    let (mut runner, events) = retried_run();
+
+    let report = runner.run("go", &CancellationToken::new()).await;
+
+    assert_eq!(report.outcome, RunOutcome::Completed);
+    let ended: Vec<RunOutcome> = events
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::AgentEnd { outcome } => Some(*outcome),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ended,
+        [RunOutcome::Error, RunOutcome::Completed],
+        "the failed attempt, then its retry"
+    );
 }
 
 struct Uppercase;

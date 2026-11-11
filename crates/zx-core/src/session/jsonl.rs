@@ -220,7 +220,7 @@ fn parse(content: &[u8], path: &Path) -> Result<(LoadedSession, Option<usize>)> 
     let loaded = LoadedSession {
         header,
         records,
-        repaired_bytes: incomplete.map_or(0, |start| content.len() - start),
+        incomplete_tail_bytes: incomplete.map_or(0, |start| content.len() - start),
     };
     Ok((loaded, incomplete))
 }
@@ -405,7 +405,7 @@ mod tests {
         let mut snapshot = SessionStore::read(&path).unwrap();
 
         assert_eq!(texts(&snapshot), ["q"]);
-        assert_eq!(snapshot.recovered_tail_bytes(), "{\"type\":\"mess".len());
+        assert_eq!(snapshot.incomplete_tail_bytes(), "{\"type\":\"mess".len());
         let error = snapshot.append_message(Message::user("x")).await.unwrap_err();
         assert!(error.to_string().contains("read-only"), "{error}");
         assert_eq!(std::fs::read(&path).unwrap(), before);

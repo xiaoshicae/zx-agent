@@ -1,19 +1,11 @@
 //! Events emitted while the agent runs, the envelope that places each one in a trace, and the
 //! sink that receives them.
 
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use serde::Serialize;
 use serde_json::Value;
-use tokio_util::sync::CancellationToken;
 
-use super::hooks::HookContext;
-use super::queue::MessageQueues;
 use super::report::{RunOutcome, RunReport};
-use super::tool::ActiveTools;
-use crate::ai::{Delta, Message, Usage, now_ms};
+use crate::ai::{Delta, Message, Usage};
 
 /// Version of the event JSON, envelope and event types together. Raised on incompatible
 /// changes; events without a version predate the envelope.
@@ -39,67 +31,6 @@ pub struct Event {
     pub run_id: String,
     #[serde(flatten)]
     pub event: AgentEvent,
-}
-
-/// One run's context: what its hooks are told and what stamps its events, with the next
-/// sequence number.
-pub(crate) struct RunTrace {
-    context: HookContext,
-    seq: AtomicU64,
-}
-
-impl RunTrace {
-    /// A new run with a fresh ID, cancelled by `cancel`, whose hooks reach the loop's queues
-    /// and tool set.
-    pub(crate) fn new(
-        session_id: Option<String>,
-        cwd: PathBuf,
-        cancel: CancellationToken,
-        queues: Arc<MessageQueues>,
-        active_tools: Arc<ActiveTools>,
-    ) -> Self {
-        Self {
-            context: HookContext::new(session_id, cwd, cancel).with_shared(queues, active_tools),
-            seq: AtomicU64::new(0),
-        }
-    }
-
-    /// What every hook of this run is told.
-    pub(crate) fn context(&self) -> &HookContext {
-        &self.context
-    }
-
-    /// The run's cancellation.
-    pub(crate) fn cancel(&self) -> &CancellationToken {
-        self.context.cancel.token()
-    }
-
-    /// The event with the next sequence number. Events are stamped in the order they are
-    /// emitted, which is also the order their sink receives them.
-    pub(crate) fn stamp(&self, event: AgentEvent) -> Event {
-        Event {
-            schema_version: EVENT_SCHEMA_VERSION,
-            seq: self.seq.fetch_add(1, Ordering::Relaxed) + 1,
-            at_ms: now_ms(),
-            session_id: self.context.session_id.clone(),
-            run_id: self.context.run_id.clone(),
-            event,
-        }
-    }
-}
-
-/// Where the events of a run go: stamped by `trace`, then handed to `sink`.
-#[derive(Clone, Copy)]
-pub(crate) struct EventTarget<'a> {
-    pub(crate) sink: &'a dyn EventSink,
-    pub(crate) trace: &'a RunTrace,
-}
-
-impl EventTarget<'_> {
-    /// Stamp `event` and hand it to the sink only, so that no `on_event` hook observes it.
-    pub(crate) fn emit_unobserved(self, event: AgentEvent) {
-        self.sink.emit(&self.trace.stamp(event));
-    }
 }
 
 /// Which model request a `request_start` announces.
@@ -302,14 +233,16 @@ pub enum AgentEvent {
     },
     /// Emitted by the runner when the model rejected a request as too long for its context
     /// and automatic compaction is enabled. The failed answer is omitted from the context, a
-    /// summary follows (`compaction_start` with `automatic`), and a new attempt continues
+    /// compaction follows (`compaction_start` with `automatic`), and a new attempt continues
     /// from the compacted context. Once per run until an answer succeeds again.
     ContextOverflow {
         error: String,
     },
     /// A recorded change to an existing model-visible message.
     ContextEdited {
+        /// The message's position in the context before the change.
         index: usize,
+        /// The message's new text; `None` when the message was omitted from the context.
         replacement: Option<String>,
         /// The `context_edit` session entry.
         entry_id: String,
@@ -333,6 +266,11 @@ pub enum AgentEvent {
         usage: Usage,
         automatic: bool,
     },
+    /// A compaction failed; the preceding projection is retained.
+    CompactionFailed {
+        error: String,
+        automatic: bool,
+    },
     /// Before the next request, recovery recorded an error result, reported by the
     /// `message_end` just before this event, for a tool call that an interrupted run left
     /// without one or that a failed or cancelled answer never ran. The call is never
@@ -341,11 +279,6 @@ pub enum AgentEvent {
         tool_call_id: String,
         tool_name: String,
         state: Interruption,
-    },
-    /// A summary failed; the preceding projection is retained.
-    CompactionFailed {
-        error: String,
-        automatic: bool,
     },
 }
 
@@ -471,6 +404,11 @@ mod tests {
                 tool_name: "bash".into(),
                 args: json!({}),
             },
+            AgentEvent::ToolExecutionUpdate {
+                tool_call_id: "c".into(),
+                tool_name: "bash".into(),
+                content: "half done".into(),
+            },
             AgentEvent::ToolDecision {
                 tool_call_id: "c".into(),
                 tool_name: "bash".into(),
@@ -507,6 +445,9 @@ mod tests {
                 delay_ms: 10,
                 error: "e".into(),
             },
+            AgentEvent::ContextOverflow {
+                error: "too long".into(),
+            },
             AgentEvent::ContextEdited {
                 index: 0,
                 replacement: None,
@@ -538,9 +479,13 @@ mod tests {
                 state: Interruption::Started,
             },
         ];
-        for event in events {
-            assert_eq!(serde_json::to_value(&event).unwrap()["type"], event.kind());
+        for event in &events {
+            assert_eq!(serde_json::to_value(event).unwrap()["type"], event.kind());
         }
+        let mut kinds: Vec<&str> = events.iter().map(AgentEvent::kind).collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        assert_eq!(kinds.len(), 25, "every variant was checked: {kinds:?}");
     }
 
     #[test]
@@ -579,48 +524,5 @@ mod tests {
             serde_json::to_value(&event).unwrap(),
             json!({"type": "tool_execution_end", "toolCallId": "c", "toolName": "bash", "isError": true, "durationMs": 5})
         );
-    }
-
-    fn trace(session_id: Option<&str>) -> RunTrace {
-        RunTrace::new(
-            session_id.map(str::to_string),
-            PathBuf::from("."),
-            CancellationToken::new(),
-            Arc::default(),
-            Arc::default(),
-        )
-    }
-
-    #[test]
-    fn the_envelope_shares_one_object_with_the_event() {
-        let trace = trace(Some("session"));
-        let first = trace.stamp(AgentEvent::AgentStart { attempt: 1 });
-        let second = trace.stamp(AgentEvent::TurnStart { turn: 1 });
-
-        let value = serde_json::to_value(&second).unwrap();
-
-        assert_eq!(value["schemaVersion"], EVENT_SCHEMA_VERSION);
-        assert_eq!((first.seq, value["seq"].clone()), (1, json!(2)));
-        assert_eq!(value["sessionId"], "session");
-        assert_eq!(value["runId"], first.run_id.as_str());
-        assert_eq!(
-            (value["type"].clone(), value["turn"].clone()),
-            (json!("turn_start"), json!(1))
-        );
-        assert!(value["atMs"].as_u64().is_some_and(|ms| ms >= first.at_ms));
-        assert!(value.get("event").is_none(), "the event is not nested");
-    }
-
-    #[test]
-    fn each_run_has_its_own_id_and_numbering() {
-        let first = trace(None);
-        let second = trace(None);
-        first.stamp(AgentEvent::AgentStart { attempt: 1 });
-
-        let event = second.stamp(AgentEvent::AgentStart { attempt: 1 });
-
-        assert_eq!(event.seq, 1);
-        assert_ne!(event.run_id, first.stamp(AgentEvent::AgentStart { attempt: 1 }).run_id);
-        assert!(serde_json::to_value(&event).unwrap().get("sessionId").is_none());
     }
 }

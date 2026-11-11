@@ -5,19 +5,15 @@
 //! `message_end`).
 
 use async_trait::async_trait;
-use tokio_util::sync::CancellationToken;
 
 use super::Start;
-use crate::agent::{
-    AgentEvent, ContextPreparation, EventTarget, Halt, LoopConfig, QueuedMessage, RunAccounting, RunOutcome,
-    SessionHost,
-};
+use crate::agent::{AgentEvent, EventTarget, Halt, LoopConfig, QueuedMessage, RunAccounting, RunOutcome, SessionHost};
 use crate::ai::retry::RetryPolicy;
 use crate::ai::{AssistantMessage, Message, StopReason, duration_ms};
-use crate::compaction::{self, Compacted, Compactor, Trigger};
+use crate::compaction::{self, Compacted, Compactor, End, Trigger};
 use crate::session::SessionStore;
 
-/// How a run ends when it stops before a finished answer.
+/// How a run ends: with the outcome of its last attempt, or failed for a reason.
 pub(super) enum RunStop {
     /// The last attempt ended with this outcome, which explains itself; never
     /// [`RunOutcome::Error`], which `Failed` states with its reason.
@@ -42,19 +38,14 @@ impl CompactionPause {
         self.0 = None;
     }
 
-    /// Pause after a paid failure, resume after a success; other outcomes change nothing.
-    fn note(&mut self, report: &compaction::Report) {
-        match report.outcome {
-            compaction::Outcome::Completed => self.0 = None,
-            compaction::Outcome::Failed if report.requests > 0 => {
-                self.0 = Some(
-                    report
-                        .error
-                        .clone()
-                        .unwrap_or_else(|| "compaction made no progress".into()),
-                );
-            }
-            compaction::Outcome::Failed | compaction::Outcome::Noop | compaction::Outcome::Aborted => {}
+    /// Pause after a paid failure, resume after a success; other ends change nothing.
+    fn note(&mut self, compacted: &Compacted) {
+        let paid = compacted.requests > 0;
+        match &compacted.end {
+            End::Completed { .. } => self.0 = None,
+            End::Failed(error) if paid => self.0 = Some(error.clone()),
+            End::Unrecorded(error) if paid => self.0 = Some(format!("{error:#}")),
+            End::Failed(_) | End::Unrecorded(_) | End::Noop | End::Aborted(_) => {}
         }
     }
 }
@@ -62,71 +53,49 @@ impl CompactionPause {
 /// A run's borrow of the Runner: the session, the configuration with its hooks and model,
 /// and the event sink.
 pub(super) struct RunHost<'a> {
-    pub session: &'a mut SessionStore,
-    pub target: EventTarget<'a>,
-    pub config: &'a LoopConfig,
-    pub compaction: &'a compaction::Config,
-    pub pause: &'a mut CompactionPause,
-    /// The attempt the host serves, for the events of a summary.
-    pub attempt: u32,
+    pub(super) session: &'a mut SessionStore,
+    pub(super) target: EventTarget<'a>,
+    pub(super) config: &'a LoopConfig,
+    pub(super) compaction: &'a compaction::Config,
+    pub(super) pause: &'a mut CompactionPause,
 }
 
-impl<'a> RunHost<'a> {
-    pub(super) fn new(
-        session: &'a mut SessionStore,
-        target: EventTarget<'a>,
-        config: &'a LoopConfig,
-        compaction: &'a compaction::Config,
-        pause: &'a mut CompactionPause,
-    ) -> Self {
-        Self {
-            session,
-            target,
-            config,
-            compaction,
-            pause,
-            attempt: 1,
+impl RunHost<'_> {
+    /// Open the run: announce it, record a result for each call an interrupted run left
+    /// without one, and find the input the run starts with. An error says why the run cannot
+    /// start.
+    pub(super) async fn open_run(&mut self, begin: Start) -> Result<Vec<QueuedMessage>, String> {
+        let config = self.config;
+        self.target
+            .emit(AgentEvent::RunStart {
+                model: config.model.clone(),
+                provider: config.provider.name().into(),
+            })
+            .await;
+        // Before any system prompt change or input, so that results directly follow their calls.
+        self.recover_interrupted_calls()
+            .await
+            .map_err(|error| format!("{error:#}"))?;
+        match begin {
+            Start::Message(message) => Ok(vec![message]),
+            Start::Continue => self.continuation().await,
         }
     }
 
-    pub(super) async fn emit(&self, event: AgentEvent) {
-        self.config.hooks.emit(event, self.target).await;
-    }
-
-    /// Open the run: announce it, record a result for each call an interrupted run left
-    /// without one, and find the input the run starts with. Returns that input, or why the
-    /// run cannot start, and the number of entries the session had: the run's answer is
-    /// what it adds after them.
-    pub(super) async fn open_run(&mut self, begin: Start) -> (Result<Vec<QueuedMessage>, String>, usize) {
-        let config = self.config;
-        self.emit(AgentEvent::RunStart {
-            model: config.model.clone(),
-            provider: config.provider.name().into(),
-        })
-        .await;
-        // Entry IDs remain stable even when hooks omit messages from earlier runs.
-        let run_start = self.session.entries().len();
-        // Before any system prompt change or input, so that results directly follow their calls.
-        let prompts = match (self.recover_interrupted_calls().await, begin) {
-            (Err(error), _) => Err(format!("{error:#}")),
-            (Ok(()), Start::Message(message)) => Ok(vec![message]),
-            (Ok(()), Start::Continue) => self.continuation().await,
-        };
-        (prompts, run_start)
-    }
-
-    /// Compact with `trigger`, summarizing the old prefix; the pause follows the outcome. When the
-    /// report says `Completed`, the session's projection is the new context.
-    pub(super) async fn compact(&mut self, trigger: Trigger, cancel: &CancellationToken) -> Compacted {
-        let mut compactor = Compactor {
+    /// Compact with `trigger`, summarizing the old prefix; the pause follows how it ends. When
+    /// it ends `Completed`, the session's projection is the new context. `attempt` is the
+    /// attempt of the run that compacts, for the events of the summary; 1 outside a run.
+    pub(super) async fn compact(&mut self, trigger: Trigger, attempt: u32) -> Compacted {
+        let compactor = Compactor {
             session: &mut *self.session,
             config: self.config,
             compaction: self.compaction,
             target: self.target,
-            attempt: self.attempt,
+            trigger,
+            attempt,
         };
-        let compacted = compactor.run(trigger, cancel).await;
-        self.pause.note(&compacted.report);
+        let compacted = compactor.run().await;
+        self.pause.note(&compacted);
         compacted
     }
 
@@ -166,54 +135,57 @@ impl<'a> RunHost<'a> {
         }
     }
 
-    /// Keep a failed answer in the session but drop it from the model context, so that the
-    /// next attempt continues from the message before it without repeating the user message.
-    pub(super) async fn omit_failed_attempt(&mut self, target: &str) -> Result<(), String> {
+    /// Keep the failed answer `entry_id` in the session but drop it from the model context, so
+    /// that the next attempt continues from the message before it without repeating the user
+    /// message.
+    pub(super) async fn omit_failed_attempt(&mut self, entry_id: &str) -> Result<(), String> {
         let index = self
             .session
             .projection()
             .iter()
-            .position(|item| item.entry_id == target);
+            .position(|item| item.entry_id == entry_id);
         let edit = self
             .session
-            .append_context_edit(target, None)
+            .append_context_edit(entry_id, None)
             .await
             .map_err(|error| format!("cannot omit the failed attempt: {error:#}"))?;
         if let Some(index) = index {
-            self.emit(AgentEvent::ContextEdited {
-                index,
-                replacement: None,
-                entry_id: edit,
-            })
-            .await;
+            self.target
+                .emit(AgentEvent::ContextEdited {
+                    index,
+                    replacement: None,
+                    entry_id: edit,
+                })
+                .await;
         }
         Ok(())
     }
 
     /// Omit the failed answer and summarize the old prefix, so that a new attempt can continue
-    /// from the compacted context. The summary's cost is
-    /// added to `accounting` whether or not it succeeds.
+    /// from the compacted context. The summary's cost is added to `accounting` whether or not
+    /// it succeeds.
     pub(super) async fn recover_overflow(
         &mut self,
         error: &str,
         failed_entry: &str,
         accounting: &mut RunAccounting,
-        cancel: &CancellationToken,
     ) -> Result<(), RunStop> {
-        self.emit(AgentEvent::ContextOverflow { error: error.into() }).await;
+        self.target
+            .emit(AgentEvent::ContextOverflow { error: error.into() })
+            .await;
         self.omit_failed_attempt(failed_entry).await.map_err(RunStop::Failed)?;
-        let Compacted { report, unrecorded } = self.compact(Trigger::Overflow, cancel).await;
-        accounting.count_requests(report.requests, &report.usage);
-        if let Some(error) = unrecorded {
-            return Err(RunStop::Failed(format!("{error:#}")));
-        }
-        if report.outcome == compaction::Outcome::Completed {
-            return Ok(());
-        }
-        if report.outcome == compaction::Outcome::Aborted {
-            return Err(RunStop::Ended(RunOutcome::Aborted));
-        }
-        let reason = report.error.unwrap_or_else(|| "compaction made no progress".into());
+        let compacted = self.compact(Trigger::Automatic, accounting.attempts).await;
+        accounting.count_requests(compacted.requests, &compacted.usage);
+        let reason = match compacted.end {
+            End::Completed { .. } => return Ok(()),
+            End::Aborted(_) => return Err(RunStop::Ended(RunOutcome::Aborted)),
+            End::Unrecorded(error) => return Err(RunStop::Failed(format!("{error:#}"))),
+            End::Failed(reason) => reason,
+            End::Noop => "the model rejected the context as too long but cannot compact while preserving \
+                          system messages and the latest input; lower keepRecentBytes, use a model with a \
+                          larger context or start a new session"
+                .into(),
+        };
         Err(RunStop::Failed(format!(
             "{error}; compacting the context to recover failed: {reason}"
         )))
@@ -227,21 +199,21 @@ impl<'a> RunHost<'a> {
         accounting: &mut RunAccounting,
         failed: &AssistantMessage,
         failed_entry: &str,
-        cancel: &CancellationToken,
     ) -> Result<(), RunStop> {
         accounting.retries += 1;
         let delay = retry.delay_for(accounting.retries, failed);
-        self.emit(AgentEvent::RetryScheduled {
-            retry: accounting.retries,
-            max_retries: retry.max_retries,
-            delay_ms: duration_ms(delay),
-            error: failed.failure_reason().to_string(),
-        })
-        .await;
+        self.target
+            .emit(AgentEvent::RetryScheduled {
+                retry: accounting.retries,
+                max_retries: retry.max_retries,
+                delay_ms: duration_ms(delay),
+                error: failed.failure_reason().to_string(),
+            })
+            .await;
         self.omit_failed_attempt(failed_entry).await.map_err(RunStop::Failed)?;
         tokio::select! {
             () = tokio::time::sleep(delay) => Ok(()),
-            () = cancel.cancelled() => Err(RunStop::Ended(RunOutcome::Aborted)),
+            () = self.target.trace.cancel().cancelled() => Err(RunStop::Ended(RunOutcome::Aborted)),
         }
     }
 }
@@ -253,46 +225,43 @@ impl SessionHost for RunHost<'_> {
     }
 
     /// Compact first when automatic compaction is on and the context passes a trigger.
-    async fn prepare_context(&mut self, cancel: &CancellationToken) -> ContextPreparation {
+    async fn prepare_context(&mut self, accounting: &mut RunAccounting) -> Result<u32, Halt> {
         if !self.compaction.automatic() {
-            return ContextPreparation::ready();
+            return Ok(0);
         }
         // Either trigger runs a summary: the bytes of the context, or the tokens the last
         // response reported plus an estimate for what came after it.
         let messages = self.session.messages();
-        let measured = compaction::context_bytes(&messages).and_then(|bytes| {
-            let over_bytes = self.compaction.trigger_bytes.is_some_and(|limit| bytes > limit);
-            let over_tokens = match self.compaction.trigger_tokens {
-                Some(limit) => compaction::context_tokens(&messages)? > limit,
-                None => false,
-            };
-            Ok(over_bytes || over_tokens)
-        });
-        match measured {
-            Ok(false) => return ContextPreparation::ready(),
-            Ok(true) => {}
-            Err(error) => return ContextPreparation::failed(format!("cannot measure context: {error:#}")),
+        let over_trigger = compaction::context_bytes(&messages)
+            .and_then(|bytes| {
+                let over_bytes = self.compaction.trigger_bytes.is_some_and(|limit| bytes > limit);
+                let over_tokens = match self.compaction.trigger_tokens {
+                    Some(limit) => compaction::context_tokens(&messages)? > limit,
+                    None => false,
+                };
+                Ok(over_bytes || over_tokens)
+            })
+            .map_err(|error| Halt::Failed(format!("cannot measure context: {error:#}")))?;
+        if !over_trigger {
+            return Ok(0);
         }
         if let Some(reason) = self.pause.reason() {
-            return ContextPreparation::failed(format!(
+            return Err(Halt::Failed(format!(
                 "automatic compaction is paused because it failed earlier in this session ({reason}); \
                  compact manually to retry, start a new session, or disable automatic compaction"
-            ));
+            )));
         }
-        let Compacted { report, unrecorded } = self.compact(Trigger::Automatic, cancel).await;
-        let result = match unrecorded {
-            Some(error) => Err(Halt::Unrecorded(error)),
-            None if report.outcome == compaction::Outcome::Completed => Ok(()),
-            None => Err(Halt::Failed(
-                report
-                    .error
-                    .unwrap_or_else(|| "automatic compaction made no progress".into()),
+        let compacted = self.compact(Trigger::Automatic, accounting.attempts).await;
+        accounting.count_requests(compacted.requests, &compacted.usage);
+        match compacted.end {
+            End::Completed { .. } => Ok(compacted.requests),
+            End::Unrecorded(error) => Err(Halt::Unrecorded(error)),
+            End::Failed(error) | End::Aborted(error) => Err(Halt::Failed(error)),
+            End::Noop => Err(Halt::Failed(
+                "context exceeds its compaction trigger but cannot be compacted while preserving \
+                 system messages and the latest input; raise the trigger or start a new session"
+                    .into(),
             )),
-        };
-        ContextPreparation {
-            requests: report.requests,
-            usage: report.usage,
-            result,
         }
     }
 }

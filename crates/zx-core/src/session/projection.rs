@@ -4,11 +4,19 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
-use anyhow::Result;
+use serde::Serialize;
 
 use crate::ai::Message;
 
-use super::{CompactionEntry, Entry, ProjectedMessage, SessionStore};
+use super::{CompactionEntry, Entry, SessionStore};
+
+/// A model-visible message and the entry it came from.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectedMessage {
+    pub entry_id: String,
+    pub message: Message,
+}
 
 /// What carries a message: a message itself, or a projected one with its entry.
 pub(crate) trait HasMessage {
@@ -61,13 +69,37 @@ pub(crate) fn without_details<T: HasMessage + Clone>(items: &[T]) -> Cow<'_, [T]
 }
 
 impl SessionStore {
-    /// Original projected messages, applying context edits but ignoring every summary.
+    /// The model-visible messages of the current branch.
+    pub fn messages(&self) -> Vec<Message> {
+        self.projection()
+            .into_iter()
+            .map(|projected| projected.message)
+            .collect()
+    }
+
+    /// The projected messages whose entries were appended at position `from` or later, so
+    /// that a run reports only its own answer and not an earlier run's.
+    pub(crate) fn messages_since(&self, from: usize) -> Vec<Message> {
+        let added: HashSet<&str> = self.entries[from..]
+            .iter()
+            .filter(|entry| entry.projected().is_some())
+            .map(Entry::id)
+            .collect();
+        self.projection()
+            .into_iter()
+            .filter(|projected| added.contains(projected.entry_id.as_str()))
+            .map(|projected| projected.message)
+            .collect()
+    }
+
+    /// The projected messages of the current branch before any summary: context edits
+    /// applied, summaries ignored.
     pub fn raw_projection(&self) -> Vec<ProjectedMessage> {
         Self::raw_projection_from(&self.branch_path())
     }
 
-    /// The messages the branch to `leaf` projects before any summary: context edits applied,
-    /// summaries ignored.
+    /// The messages `path` projects before any summary: context edits applied, summaries
+    /// ignored.
     pub(super) fn raw_projection_from(path: &[&Entry]) -> Vec<ProjectedMessage> {
         // Later edits of the same target win.
         let mut edits: HashMap<&str, &Option<String>> = HashMap::new();
@@ -78,7 +110,8 @@ impl SessionStore {
         }
         path.iter()
             .filter_map(|entry| {
-                let (id, message) = entry.projected()?;
+                let id = entry.id();
+                let message = entry.projected()?;
                 let message = match edits.get(id) {
                     None => message.into_owned(),
                     Some(None) => return None,
@@ -101,12 +134,12 @@ impl SessionStore {
     pub(super) fn projection_at(&self, leaf: Option<&str>) -> Vec<ProjectedMessage> {
         let path = self.branch_path_from(leaf);
         let raw = Self::raw_projection_from(&path);
-        let Some(compaction) = self.latest_compaction_on(&path) else {
+        let Some(compaction) = Self::latest_compaction_on(&path) else {
             return raw;
         };
-        let Ok(cut) = Self::summarized_count(&path, &raw, &compaction.first_kept_entry_id) else {
-            // A summary's boundary is validated to be on its branch; without one, the
-            // originals are the only safe projection.
+        // A summary's boundary is validated to be on its branch; without one, the originals
+        // are the only safe projection.
+        let Some(cut) = Self::summarized_count(&path, &raw, &compaction.first_kept_entry_id) else {
             return raw;
         };
         let message = compaction.summary.message(compaction.timestamp);
@@ -125,13 +158,13 @@ impl SessionStore {
 
     /// Latest successful, still-valid summary on the active branch.
     pub fn latest_compaction(&self) -> Option<&CompactionEntry> {
-        self.latest_compaction_on(&self.branch_path())
+        Self::latest_compaction_on(&self.branch_path())
     }
 
     /// The latest successful summary on `path` that still holds. Invalid or incomplete control
     /// records never hide original evidence, and a correction of a summary's evidence
     /// invalidates it as a whole: the projection falls back to the originals.
-    fn latest_compaction_on<'s>(&'s self, path: &[&'s Entry]) -> Option<&'s CompactionEntry> {
+    fn latest_compaction_on<'s>(path: &[&'s Entry]) -> Option<&'s CompactionEntry> {
         let (position, compaction) = path.iter().enumerate().rev().find_map(|(index, entry)| {
             if let Entry::Compaction(entry) = entry {
                 Some((index, entry))
@@ -139,9 +172,8 @@ impl SessionStore {
                 None
             }
         })?;
-        let Some(Entry::CompactionStarted(started)) = self.get(&compaction.compaction_id) else {
-            return None;
-        };
+        // A result whose start is not before it on the branch is such an invalid record.
+        let (_, started) = Self::compaction_start_on(&path[..position], &compaction.compaction_id).ok()?;
         if Self::corrected_source(&path[position + 1..], &started.source_entry_ids).is_some() {
             return None;
         }
@@ -158,19 +190,18 @@ impl SessionStore {
     }
 
     /// How many leading messages of `raw` a summary that keeps `first_kept` replaces: those
-    /// recorded before it in branch order. Cutting by branch order, not by finding the kept
-    /// message in the projection, matters when a later context edit omits that message: the
-    /// summary must still replace everything recorded before it.
-    fn summarized_count(path: &[&Entry], raw: &[ProjectedMessage], first_kept: &str) -> Result<usize> {
-        let boundary = path
-            .iter()
-            .position(|entry| entry.id() == first_kept)
-            .ok_or_else(|| anyhow::anyhow!("summary boundary {first_kept:?} is not on this branch"))?;
+    /// recorded before it in branch order; `None` when `first_kept` is not on `path`. Cutting
+    /// by branch order, not by finding the kept message in the projection, matters when a
+    /// later context edit omits that message: the summary must still replace everything
+    /// recorded before it.
+    fn summarized_count(path: &[&Entry], raw: &[ProjectedMessage], first_kept: &str) -> Option<usize> {
+        let boundary = path.iter().position(|entry| entry.id() == first_kept)?;
         let summarized: HashSet<&str> = path[..boundary].iter().map(|entry| entry.id()).collect();
-        Ok(raw
-            .iter()
-            .take_while(|item| summarized.contains(item.entry_id.as_str()))
-            .count())
+        Some(
+            raw.iter()
+                .take_while(|item| summarized.contains(item.entry_id.as_str()))
+                .count(),
+        )
     }
 }
 

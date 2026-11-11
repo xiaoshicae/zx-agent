@@ -100,6 +100,8 @@ impl CompactionSummary {
         Ok(())
     }
 
+    /// The summary as the user message the model sees in place of the records it replaces.
+    /// The text depends only on the summary, so a projection rebuilds the same message.
     pub(crate) fn message(&self, timestamp: u64) -> Message {
         let mut text = String::from("<context_summary>\nEnvironment facts (source entry IDs):\n");
         for fact in &self.facts {
@@ -122,7 +124,8 @@ impl CompactionSummary {
     }
 }
 
-/// Information needed to reconstruct a summary request with its source IDs.
+/// What a summary request was sent with, besides the records it read: enough to rebuild the
+/// request from the session.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SummaryRequest {
@@ -149,7 +152,8 @@ pub struct CompactionStartedEntry {
     pub input_bytes: usize,
 }
 
-/// A successful summary and retained boundary; raw records are never removed.
+/// A successful summary and the boundary it keeps from; the records it replaces in the
+/// context stay in the session.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompactionEntry {

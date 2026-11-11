@@ -32,7 +32,7 @@ pub enum RunOutcome {
     CostBudget,
 }
 
-/// Summary of a finished run.
+/// What a finished run reports.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunReport {

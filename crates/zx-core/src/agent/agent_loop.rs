@@ -8,6 +8,7 @@
 //! so what the model sees is always what the session holds.
 //!
 //! - `config`: what a loop runs with: [`LoopConfig`]
+//! - `session_host`: what a loop needs from the session it runs in, which the run provides
 //! - `context`: input, queued messages and context edits, recorded before the loop uses them
 //! - `model`: recording a task request and streaming its response
 //! - `tools`: checking, approving, running and recording the calls of a response
@@ -16,66 +17,68 @@
 mod config;
 mod context;
 mod model;
+mod session_host;
 mod tools;
 mod turn;
 
 use std::collections::HashMap;
-use std::ops::ControlFlow;
-use std::panic::AssertUnwindSafe;
-use std::time::Instant;
 
-use anyhow::{Context, anyhow};
-use futures::future::join_all;
-use futures::{FutureExt, StreamExt};
 use tokio_util::sync::CancellationToken;
 
 use super::accounting::RunAccounting;
-use super::command::SlashCommand;
-use super::events::CustomMessageInfo;
-use super::events::{AgentEvent, ApprovalResult, EventSink, EventTarget, RequestKind, RunTrace, ToolVerdict};
-use super::hooks::{
-    ContextEdit, HookCall, HookChain, HookError, HookFailure, HookPoint, TurnDecision, TurnDisposition, TurnSummary,
-    report_failure,
-};
-use super::policy::PolicyDecision;
-use super::queue::{MessageQueues, Queue, QueueMode, QueuedMessage};
+use super::events::{AgentEvent, EventSink};
+use super::hooks::HookError;
+use super::interaction::ApprovalCache;
+use super::queue::{Queue, QueuedMessage};
 use super::report::RunOutcome;
-use super::session_host::{PERSIST_FAILED, SessionHost, record_pending_entries};
-use super::tool::{
-    ActiveTools, Effects, ExecutionMode, MAX_DETAILS_BYTES, MAX_QUEUED_PROGRESS, Tool, ToolContext, ToolOutput,
-};
-use crate::agent::{Approval, ApprovalCache, ApprovalRequest, DEFAULT_APPROVAL_TIMEOUT, Interaction, NoHuman};
-use crate::ai::{
-    AssistantMessage, Message, ModelMeta, Provider, Reasoning, Request, StopReason, StreamEvent, SystemMessage,
-    SystemPrompt, ToolCall, ToolResultMessage, UserMessageKind, duration_ms, now_ms,
-};
-use crate::session::{Entry, RequestSource};
+use super::trace::{EventTarget, RunTrace};
+use crate::ai::{AssistantMessage, Message, StopReason, SystemMessage, SystemPrompt, now_ms};
 
 pub use config::LoopConfig;
+pub(crate) use session_host::{PERSIST_FAILED, SessionHost, record_pending_entries};
 use turn::{AfterTools, PendingInput, TurnResponse};
 
-/// Why the loop failed in an attempt, with the response when the provider failed.
-///
-/// Accounting follows actual responses, so context edits cannot change usage or retries.
-#[derive(Debug)]
-pub(crate) enum LoopFailure {
-    /// A failed or cancelled response. Boxed so a successful result does not reserve space
+/// Why the loop stops. Every step of a turn returns it as its error, so `?` ends the attempt
+/// wherever a step stops it, and [`AgentLoop::run`] returns the one that did. What the
+/// attempt spent is in the run's accounting.
+pub(crate) enum Halt {
+    /// The attempt ends with this outcome: the model finished, a budget ran out, or the run
+    /// was cancelled. Never [`RunOutcome::Error`]: a failure is one of the other variants,
+    /// which say why.
+    Ended(RunOutcome),
+    /// The provider's response failed. Only this failure qualifies for a retry. The response
+    /// is carried as it arrived: accounting follows actual responses, so context edits
+    /// cannot change usage or retries. Boxed so that the other variants do not reserve space
     /// for a full response.
-    Provider {
+    ProviderFailed {
         message: Box<AssistantMessage>,
         /// The response's session entry.
         entry_id: String,
     },
-    /// A hook or context preparation failed, or the session could not record.
-    Halted(String),
+    /// A hook or context preparation failed. When the run was cancelled, the attempt was
+    /// aborted instead, and [`AgentLoop::run`] returns `Ended` with that outcome.
+    Failed(String),
+    /// The session could not record a step, so the loop must not act on it.
+    Unrecorded(anyhow::Error),
 }
 
-/// How the loop ended in one attempt; what it spent is in the run's accounting. Only
-/// provider failures qualify for provider retries.
-#[derive(Debug)]
-pub(crate) struct LoopResult {
-    pub(crate) outcome: RunOutcome,
-    pub(crate) failure: Option<LoopFailure>,
+impl Halt {
+    /// The halt as the attempt reports it: a failure after cancellation is an abort; a step
+    /// the session could not record is an error even then, as the audit trail is incomplete.
+    fn aborted_if_cancelled(self, cancel: &CancellationToken) -> Self {
+        match self {
+            Self::Failed(_) if cancel.is_cancelled() => Self::Ended(RunOutcome::Aborted),
+            Self::Ended(_) | Self::ProviderFailed { .. } | Self::Failed(_) | Self::Unrecorded(_) => self,
+        }
+    }
+
+    /// The outcome of the attempt, as its `agent_end` event reports it.
+    fn outcome(&self) -> RunOutcome {
+        match self {
+            Self::Ended(outcome) => *outcome,
+            Self::ProviderFailed { .. } | Self::Failed(_) | Self::Unrecorded(_) => RunOutcome::Error,
+        }
+    }
 }
 
 /// The loop over a session in one attempt of a run: prompts in, turns until the model stops,
@@ -103,96 +106,86 @@ pub(crate) struct AgentLoop<'a> {
 }
 
 impl<'a> AgentLoop<'a> {
-    /// The loop for the attempt in progress of the run `trace`, recording through `host` and
-    /// spending against `accounting`; the run's cancellation is the trace's. Session grants
-    /// go to `approvals`; events go to `sink`.
+    /// The loop for the attempt in progress of the run whose events go to `target`, recording
+    /// through `host` and spending against `accounting`; the run's cancellation is its
+    /// trace's. Session grants go to `approvals`.
     pub(crate) fn new(
         config: &'a LoopConfig,
         host: &'a mut dyn SessionHost,
         approvals: &'a mut ApprovalCache,
         accounting: &'a mut RunAccounting,
-        sink: &'a dyn EventSink,
-        trace: &'a RunTrace,
+        target: EventTarget<'a>,
     ) -> Self {
         Self {
             config,
             host,
             approvals,
             accounting,
-            sink,
-            trace,
+            sink: target.sink,
+            trace: target.trace,
             turn: None,
             validators: HashMap::new(),
         }
     }
 
     /// Record `prompts` and run turns until the model stops, a budget runs out or the run
-    /// is cancelled. Never panics on provider or tool failures; the result says how the
+    /// is cancelled. Never panics on provider or tool failures; the halt says how the
     /// attempt ended.
-    pub(crate) async fn run(mut self, prompts: Vec<QueuedMessage>) -> LoopResult {
-        let mut result = LoopResult {
-            outcome: RunOutcome::Completed,
-            failure: None,
-        };
+    pub(crate) async fn run(mut self, prompts: Vec<QueuedMessage>) -> Halt {
         let attempt = self.accounting.attempts;
         self.emit(AgentEvent::AgentStart { attempt }).await;
 
-        match self.run_turns(prompts, &mut result).await {
-            Ok(outcome) => result.outcome = outcome,
-            Err(halt) => {
-                let (outcome, error) = halt.into_outcome(self.trace.cancel());
-                result.outcome = outcome;
-                result.failure = Some(LoopFailure::Halted(error));
-            }
-        }
+        let halt = self.run_turns(prompts).await.aborted_if_cancelled(self.trace.cancel());
 
         // A turn that stopped before its request finished still ends, so turn events pair up.
         self.end_turn().await;
         self.emit(AgentEvent::AgentEnd {
-            outcome: result.outcome,
+            outcome: halt.outcome(),
         })
         .await;
-        result
+        halt
     }
 
-    /// Record the prompts, then run turns: prepare, request, handle the response, decide
-    /// whether another turn follows.
-    async fn run_turns(&mut self, prompts: Vec<QueuedMessage>, result: &mut LoopResult) -> Result<RunOutcome, Halt> {
-        self.initialize(prompts).await?;
+    /// Record the prompts, then run turns until a step stops the loop. Returns why it did.
+    async fn run_turns(&mut self, prompts: Vec<QueuedMessage>) -> Halt {
+        if let Err(halt) = self.initialize(prompts).await {
+            return halt;
+        }
         let mut pending = PendingInput::default();
         loop {
-            let turn = match self.prepare_turn(&mut pending).await? {
-                ControlFlow::Continue(turn) => turn,
-                ControlFlow::Break(outcome) => return Ok(outcome),
-            };
-            let Some(message) = self.request_model(turn).await? else {
-                return Ok(RunOutcome::Aborted);
-            };
-            let response = match self.handle_response(result, turn, message).await? {
-                ControlFlow::Continue(response) => response,
-                ControlFlow::Break(outcome) => return Ok(outcome),
-            };
-            if let ControlFlow::Break(outcome) = self.decide_next_turn(response, &mut pending).await? {
-                return Ok(outcome);
+            match self.run_turn(pending).await {
+                Ok(next) => pending = next,
+                Err(halt) => return halt,
             }
         }
     }
 
-    /// Where this attempt's events go.
-    fn target(&self) -> EventTarget<'_> {
+    /// One turn: prepare it with `pending`, request the model, handle the response, and
+    /// decide what the next turn starts with.
+    async fn run_turn(&mut self, pending: PendingInput) -> Result<PendingInput, Halt> {
+        let turn = self.prepare_turn(pending).await?;
+        let message = self.request_model(turn).await?;
+        let response = self.handle_response(turn, message).await?;
+        self.decide_next_turn(response).await
+    }
+
+    /// Where this attempt's events go. The target borrows the run, not the loop, so that the
+    /// loop can record through its host while it holds one.
+    fn target(&self) -> EventTarget<'a> {
         EventTarget {
             sink: self.sink,
             trace: self.trace,
+            hooks: &self.config.hooks,
         }
     }
 
     async fn emit(&self, event: AgentEvent) {
-        self.config.hooks.emit(event, self.target()).await;
+        self.target().emit(event).await;
     }
 
     /// Report a hook failure as a `hook_failed` event. Returns its description.
     fn report_hook_failure(&self, error: HookError) -> String {
-        report_failure(error, self.target())
+        self.target().report_failure(error)
     }
 
     /// Start the next task turn unless one is in progress. Returns the number of the turn
@@ -237,30 +230,26 @@ impl<'a> AgentLoop<'a> {
         Ok(())
     }
 
-    /// Gather input and prepare the context before a task request. Returns the turn that is
-    /// ready for its request, or the outcome that ends the attempt first.
-    async fn prepare_turn(&mut self, pending: &mut PendingInput) -> Result<ControlFlow<RunOutcome, u32>, Halt> {
+    /// Gather input, starting with `pending`, and prepare the context before a task request.
+    /// Returns the turn that is ready for its request.
+    async fn prepare_turn(&mut self, mut pending: PendingInput) -> Result<u32, Halt> {
         loop {
             // A turn exists to make a request: without budget, or once cancelled, none is
             // made, and queued input stays queued for the next run. Checked before taking
             // input as well, because a summary request can use the budget inside the turn.
-            if let Some(outcome) = self.checkpoint() {
-                return Ok(ControlFlow::Break(outcome));
-            }
+            self.ensure_can_request()?;
             let turn = self.start_turn().await;
             // State an extension asked to record is written before the input it may refer to.
             self.record_pending_entries().await?;
             // Queued input is taken one message at a time, so a rejected message or a stopped
             // run leaves the rest of the queue for the next run.
             self.drain_queue(Queue::Steering).await?;
-            match std::mem::take(pending) {
+            match std::mem::take(&mut pending) {
                 PendingInput::None => {}
                 PendingInput::FollowUps => self.drain_queue(Queue::FollowUp).await?,
                 PendingInput::Requested(message) => self.input(*message, None).await?,
             }
-            if let Some(outcome) = self.checkpoint() {
-                return Ok(ControlFlow::Break(outcome));
-            }
+            self.ensure_can_request()?;
             let edits = self
                 .config
                 .hooks
@@ -270,17 +259,13 @@ impl<'a> AgentLoop<'a> {
             for edit in edits {
                 self.edit(edit).await?;
             }
-            if let Some(outcome) = self.checkpoint() {
-                return Ok(ControlFlow::Break(outcome));
-            }
+            self.ensure_can_request()?;
             // Summary requests count against the budget but are reported as a compaction,
             // not as turns of their own.
-            let requests = self.prepare_context().await?;
-            if let Some(outcome) = self.checkpoint() {
-                return Ok(ControlFlow::Break(outcome));
-            }
+            let requests = self.host.prepare_context(self.accounting).await?;
+            self.ensure_can_request()?;
             if requests == 0 {
-                return Ok(ControlFlow::Continue(turn));
+                return Ok(turn);
             }
             // Preparation is a request boundary too: take newly arrived steering and run the
             // context hooks again before the task request.
@@ -288,14 +273,8 @@ impl<'a> AgentLoop<'a> {
     }
 
     /// Record the response of turn `turn`, execute its tool calls, and close the turn.
-    /// Returns the response for the decision that follows, or the outcome that ends the
-    /// attempt.
-    async fn handle_response(
-        &mut self,
-        result: &mut LoopResult,
-        turn: u32,
-        message: AssistantMessage,
-    ) -> Result<ControlFlow<RunOutcome, TurnResponse>, Halt> {
+    /// Returns the response for the decision that follows.
+    async fn handle_response(&mut self, turn: u32, message: AssistantMessage) -> Result<TurnResponse, Halt> {
         let stop = message.stop_reason;
         let calls = message.tool_calls();
         // The response is kept twice: in the session, and for the decision or the failure.
@@ -304,16 +283,14 @@ impl<'a> AgentLoop<'a> {
             .await?;
         if matches!(stop, StopReason::Error | StopReason::Aborted) {
             self.end_turn().await;
-            result.failure = Some(LoopFailure::Provider {
-                message: Box::new(message),
-                entry_id,
-            });
-            let outcome = if stop == StopReason::Aborted {
-                RunOutcome::Aborted
+            return Err(if stop == StopReason::Aborted {
+                Halt::Ended(RunOutcome::Aborted)
             } else {
-                RunOutcome::Error
-            };
-            return Ok(ControlFlow::Break(outcome));
+                Halt::ProviderFailed {
+                    message: Box::new(message),
+                    entry_id,
+                }
+            });
         }
 
         let mut after_tools = AfterTools::NoCalls;
@@ -331,42 +308,29 @@ impl<'a> AgentLoop<'a> {
             self.accounting.count_tool_usage(&batch.results);
         }
         self.end_turn().await;
-        if self.trace.cancel().is_cancelled() {
-            return Ok(ControlFlow::Break(RunOutcome::Aborted));
-        }
-        Ok(ControlFlow::Continue(TurnResponse {
+        self.ensure_not_cancelled()?;
+        Ok(TurnResponse {
             response: message,
             turn,
             after_tools,
-        }))
+        })
     }
 
-    /// The outcome that ends the attempt before the next request: cancellation, or a budget
-    /// with no room for another request.
-    fn checkpoint(&self) -> Option<RunOutcome> {
+    /// End the attempt unless another request may be made: the run is not cancelled and
+    /// every budget has room for one.
+    fn ensure_can_request(&self) -> Result<(), Halt> {
+        self.ensure_not_cancelled()?;
+        match self.accounting.exhausted() {
+            Some(outcome) => Err(Halt::Ended(outcome)),
+            None => Ok(()),
+        }
+    }
+
+    /// End the attempt if the run was cancelled.
+    fn ensure_not_cancelled(&self) -> Result<(), Halt> {
         if self.trace.cancel().is_cancelled() {
-            return Some(RunOutcome::Aborted);
+            return Err(Halt::Ended(RunOutcome::Aborted));
         }
-        self.accounting.exhausted()
-    }
-}
-
-/// Why the loop stopped before the model finished.
-pub(crate) enum Halt {
-    /// A hook or context preparation failed; if the run was cancelled, it was aborted.
-    Failed(String),
-    /// The session could not record a step, so the loop must not act on it.
-    Unrecorded(anyhow::Error),
-}
-
-impl Halt {
-    /// How the attempt ended, and why. A failure after cancellation is an abort; a step the
-    /// session could not record is an error even then, as the audit trail is incomplete.
-    fn into_outcome(self, cancel: &CancellationToken) -> (RunOutcome, String) {
-        match self {
-            Self::Failed(error) if cancel.is_cancelled() => (RunOutcome::Aborted, error),
-            Self::Failed(error) => (RunOutcome::Error, error),
-            Self::Unrecorded(error) => (RunOutcome::Error, format!("{error:#}")),
-        }
+        Ok(())
     }
 }

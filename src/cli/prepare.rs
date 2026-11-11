@@ -373,10 +373,10 @@ async fn open_session(
         Some(session) => session,
         None => session_files::create(file, header)?,
     };
-    if session.recovered_tail_bytes() > 0 {
+    if session.incomplete_tail_bytes() > 0 {
         eprintln!(
             "[session] recovered incomplete final record; removed {} bytes",
-            session.recovered_tail_bytes()
+            session.incomplete_tail_bytes()
         );
     }
     Ok((session, executor, environment))

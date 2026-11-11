@@ -3,7 +3,7 @@
 //! Every change appends an entry; stored entries are never rewritten. Entries link to their
 //! parent, so the session is a tree and the "leaf" pointer selects the current branch. The
 //! messages a model sees are a projection of that branch: context edits can omit or replace
-//! earlier messages without touching the raw history, which stays available for auditing.
+//! earlier messages without touching the stored history, which stays available for auditing.
 //!
 //! A [`SessionLog`] keeps the entries: the JSONL session file by default, or a backend of
 //! the host's choice. Only the current format, [`SESSION_VERSION`], is read and written.
@@ -11,7 +11,8 @@
 //! - `entry`: the header and the entries of the tree
 //! - `log` and `jsonl`: where the entries are kept, and the JSONL session file
 //! - `projection`: the messages a branch projects for the model
-//! - `summary`: the records of summaries and the rules they follow
+//! - `compaction`: what a summary holds, and the records of a compaction with the rules they
+//!   follow
 //! - `request`: request configuration changes and per-request checkpoints
 //! - `recovery`: start records of calls with side effects, and the calls an interrupted run
 //!   left without results
@@ -39,19 +40,17 @@ pub use compaction::{
 };
 pub(crate) use compaction::{MAX_SUMMARY_BYTES, summary_input, summary_messages};
 pub use directory::{SessionInfo, SessionList, Unreadable, list_sessions};
-pub use entry::{
-    ContextEditEntry, CustomEntry, CustomMessage, CustomMessageEntry, Entry, MessageEntry, ProjectedMessage,
-    SessionHeader,
-};
+pub use entry::{ContextEditEntry, CustomEntry, CustomMessage, CustomMessageEntry, Entry, MessageEntry, SessionHeader};
 pub use log::{LoadedSession, LogRecord, SessionLog};
 pub use name::{SessionInfoEntry, SessionName};
+pub use projection::ProjectedMessage;
 pub(crate) use projection::without_details;
 pub use recovery::{InterruptedToolCall, StartRecord, ToolCallStartedEntry};
 pub use request::{RequestConfig, RequestConfigEntry, RequestSource, RequestStartedEntry};
 #[cfg(test)]
 pub(crate) use test_support::FailingWriter;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -61,9 +60,9 @@ use crate::ai::{Message, now_ms};
 use entry::HeaderLine;
 use jsonl::JsonlFile;
 
-/// The session format: written to every new header, and the only version a session may have
-/// to be created or loaded. A change to the format raises it, and sessions of any other
-/// version are refused.
+/// The session format: written to every new header, and the only version a session file may
+/// have to be created, opened or read, or a stored session to be loaded. A change to the
+/// format raises it, and sessions of any other version are refused.
 pub const SESSION_VERSION: u32 = 9;
 
 /// How long one append may wait for its log, such as a database that stopped answering.
@@ -107,7 +106,7 @@ pub struct SessionStore {
     entries: Vec<Entry>,
     index: HashMap<String, usize>,
     leaf: Option<String>,
-    recovered_tail_bytes: usize,
+    incomplete_tail_bytes: usize,
 }
 
 impl SessionStore {
@@ -122,7 +121,7 @@ impl SessionStore {
             entries: Vec::new(),
             index: HashMap::new(),
             leaf: None,
-            recovered_tail_bytes: 0,
+            incomplete_tail_bytes: 0,
         }
     }
 
@@ -147,7 +146,7 @@ impl SessionStore {
         let LoadedSession {
             header,
             records,
-            repaired_bytes,
+            incomplete_tail_bytes,
         } = loaded;
         ensure_current_version(&header)?;
         let mut store = Self::in_memory(header);
@@ -158,7 +157,7 @@ impl SessionStore {
                 .map_err(|error| anyhow!("entry {position}: {error:#}"))?;
             store.insert(entry);
         }
-        store.recovered_tail_bytes = repaired_bytes;
+        store.incomplete_tail_bytes = incomplete_tail_bytes;
         Ok(store)
     }
 
@@ -227,26 +226,13 @@ impl SessionStore {
     /// Bytes of an incomplete final record left out when the session was loaded, which
     /// `open` also removes from the file; zero if there was none. Complete corrupt records
     /// are errors and are never silently removed.
-    pub fn recovered_tail_bytes(&self) -> usize {
-        self.recovered_tail_bytes
+    pub fn incomplete_tail_bytes(&self) -> usize {
+        self.incomplete_tail_bytes
     }
 
     /// Every entry in the order it was appended, on all branches.
     pub fn entries(&self) -> &[Entry] {
         &self.entries
-    }
-    /// The projected messages whose entries were appended at position `from` or later, so
-    /// that a run reports only its own answer and not an earlier run's.
-    pub(crate) fn messages_since(&self, from: usize) -> Vec<Message> {
-        let added: HashSet<&str> = self.entries[from..]
-            .iter()
-            .filter_map(|entry| entry.projected().map(|(id, _)| id))
-            .collect();
-        self.projection()
-            .into_iter()
-            .filter(|projected| added.contains(projected.entry_id.as_str()))
-            .map(|projected| projected.message)
-            .collect()
     }
 
     /// The entry with `id`, on any branch.
@@ -311,22 +297,43 @@ impl SessionStore {
         self.append(entry).await
     }
 
+    /// The rules every record follows, when it is appended and when a session is loaded.
+    fn validate_entry(&self, entry: &Entry) -> Result<()> {
+        ensure!(
+            !entry.id().is_empty() && !self.index.contains_key(entry.id()),
+            "duplicate or empty entry ID {:?}",
+            entry.id()
+        );
+        if let Some(parent) = entry.parent_id() {
+            ensure!(self.index.contains_key(parent), "entry parent {parent:?} not found");
+        }
+        match entry {
+            // A name is valid by its type, whether appended or loaded.
+            Entry::Message(_) | Entry::SessionInfo(_) => {}
+            Entry::Custom(custom) => ensure_custom_type(&custom.custom_type)?,
+            Entry::CustomMessage(custom) => ensure_custom_type(&custom.message.custom_type)?,
+            Entry::ContextEdit(edit) => self.validate_context_edit(edit)?,
+            Entry::CompactionStarted(started) => self.validate_compaction_start(started)?,
+            Entry::Compaction(done) => self.validate_compaction(done)?,
+            Entry::CompactionFailed(failed) => self.validate_compaction_failure(failed)?,
+            Entry::RequestConfig(config) => Self::validate_request_config(config)?,
+            Entry::RequestStarted(started) => self.validate_request_start(started)?,
+            Entry::ToolCallStarted(start) => self.validate_tool_call_start(start)?,
+        }
+        Ok(())
+    }
+
     /// The rules an edit follows, when it is appended and when a session is loaded: it
-    /// targets an earlier message on its own branch, not a system message (prompt changes
-    /// are new system messages), and a text replacement does not erase tool calls, whose
-    /// results would otherwise lose their call.
+    /// targets an earlier message on its own branch, one that an edit may change
+    /// ([`context_edit_refusal`]).
     fn validate_context_edit(&self, edit: &ContextEditEntry) -> Result<()> {
         let target = edit.target_id.as_str();
         match self.get(target) {
-            Some(Entry::Message(entry)) => match &entry.message {
-                Message::System(_) => {
-                    bail!("entry {target} is a system message; record prompt changes as new system messages")
+            Some(Entry::Message(entry)) => {
+                if let Some(reason) = context_edit_refusal(&entry.message, edit.replacement.is_some()) {
+                    bail!("entry {target} {reason}");
                 }
-                Message::Assistant(answer) if edit.replacement.is_some() && !answer.tool_calls().is_empty() => {
-                    bail!("entry {target} has tool calls, which a text replacement would erase")
-                }
-                Message::Assistant(_) | Message::User { .. } | Message::ToolResult(_) => {}
-            },
+            }
             // A custom message is a user message to the model, edited like one.
             Some(Entry::CustomMessage(_)) => {}
             Some(
@@ -342,14 +349,12 @@ impl SessionStore {
             ) => bail!("entry {target} is not a message"),
             None => bail!("entry {target} not found"),
         }
-        let mut ancestor = edit.parent_id.as_deref();
-        while let Some(id) = ancestor {
-            if id == target {
-                return Ok(());
-            }
-            ancestor = self.get(id).and_then(Entry::parent_id);
-        }
-        bail!("entry {target} is not on the edit's branch")
+        ensure!(
+            self.ancestors(edit.parent_id.as_deref())
+                .any(|entry| entry.id() == target),
+            "entry {target} is not on the edit's branch"
+        );
+        Ok(())
     }
 
     /// Move the leaf to an existing entry. The next append starts a new branch there.
@@ -402,23 +407,18 @@ impl SessionStore {
         self.branch_path_from(self.leaf.as_deref())
     }
 
+    /// The branch that ends at `leaf`, from the root to `leaf`.
     fn branch_path_from(&self, leaf: Option<&str>) -> Vec<&Entry> {
-        let mut path = Vec::new();
-        let mut current = leaf.and_then(|id| self.get(id));
-        while let Some(entry) = current {
-            path.push(entry);
-            current = entry.parent_id().and_then(|id| self.get(id));
-        }
+        let mut path: Vec<&Entry> = self.ancestors(leaf).collect();
         path.reverse();
         path
     }
 
-    /// The model-visible messages of the current branch.
-    pub fn messages(&self) -> Vec<Message> {
-        self.projection()
-            .into_iter()
-            .map(|projected| projected.message)
-            .collect()
+    /// The branch that ends at `leaf`, walked upward: `leaf` first, the root last.
+    fn ancestors(&self, leaf: Option<&str>) -> impl Iterator<Item = &Entry> {
+        std::iter::successors(leaf.and_then(|id| self.get(id)), |entry| {
+            entry.parent_id().and_then(|id| self.get(id))
+        })
     }
 
     async fn append(&mut self, entry: Entry) -> Result<String> {
@@ -489,39 +489,26 @@ fn ensure_current_version(header: &SessionHeader) -> Result<()> {
     Ok(())
 }
 
+/// Why a context edit may not change `message`, if it may not. A system message is never
+/// edited: prompt changes are new system messages. A text replacement (`replaces_text`) does
+/// not erase tool calls, whose results would otherwise lose their call.
+///
+/// The store applies this to every edit it records or loads, and the hook chain to a whole
+/// plan of edits before any of them is recorded, so both refuse the same edits.
+pub(crate) fn context_edit_refusal(message: &Message, replaces_text: bool) -> Option<&'static str> {
+    match message {
+        Message::System(_) => Some("is a system message; record prompt changes as new system messages"),
+        Message::Assistant(answer) if replaces_text && !answer.tool_calls().is_empty() => {
+            Some("has tool calls, which a text replacement would erase")
+        }
+        Message::Assistant(_) | Message::User { .. } | Message::ToolResult(_) => None,
+    }
+}
+
 /// A custom type names what an extension recorded; a blank one would name nothing.
 fn ensure_custom_type(custom_type: &str) -> Result<()> {
     if custom_type.trim().is_empty() {
         bail!("a custom record needs a customType");
     }
     Ok(())
-}
-
-impl SessionStore {
-    /// The rules every record follows, when it is appended and when a session is loaded.
-    fn validate_entry(&self, entry: &Entry) -> Result<()> {
-        ensure!(
-            !entry.id().is_empty() && !self.index.contains_key(entry.id()),
-            "duplicate or empty entry ID {:?}",
-            entry.id()
-        );
-        if let Some(parent) = entry.parent_id() {
-            ensure!(self.index.contains_key(parent), "entry parent {parent:?} not found");
-        }
-        match entry {
-            // A name is valid by its type, whether appended or loaded.
-            Entry::Message(_) | Entry::SessionInfo(_) => {}
-            Entry::Custom(custom) => ensure_custom_type(&custom.custom_type)?,
-            Entry::CustomMessage(custom) => ensure_custom_type(&custom.message.custom_type)?,
-            Entry::ContextEdit(edit) => self.validate_context_edit(edit)?,
-            Entry::CompactionStarted(started) => self.validate_compaction_start(started)?,
-            Entry::Compaction(done) => self.validate_compaction(done, entry.parent_id())?,
-            Entry::CompactionFailed(failed) => {
-                self.validate_open_compaction(&failed.compaction_id, entry.parent_id())?;
-            }
-            Entry::RequestConfig(_) | Entry::RequestStarted(_) => self.validate_request_entry(entry)?,
-            Entry::ToolCallStarted(start) => self.validate_tool_call_start(start)?,
-        }
-        Ok(())
-    }
 }

@@ -8,7 +8,8 @@ use serde_json::Value;
 
 use crate::ai::ToolCall;
 
-/// Default wait for one host confirmation; frontends can override it in LoopConfig.
+/// Default wait for one host confirmation; a frontend overrides it with
+/// `LoopConfig::interaction_timeout`.
 pub const DEFAULT_APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The exact tool call and the policy's reason for asking.
@@ -50,7 +51,7 @@ impl Interaction for NoHuman {
 
 /// In-memory approvals for one conversation; never persisted or shared implicitly.
 #[derive(Default)]
-pub struct ApprovalCache {
+pub(crate) struct ApprovalCache {
     calls: Vec<(String, Value)>,
 }
 

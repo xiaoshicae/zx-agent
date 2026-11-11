@@ -1,6 +1,8 @@
 //! The model's answer to a summary request: bounded as it streams and parsed into a
 //! summary.
 
+use anyhow::{Context, Result, bail, ensure};
+
 use crate::ai::{AssistantMessage, ContentBlock, Delta, StopReason, ToolCall};
 use crate::session::{CompactionSummary, MAX_SUMMARY_BYTES};
 
@@ -10,17 +12,15 @@ use crate::session::{CompactionSummary, MAX_SUMMARY_BYTES};
 const MAX_SUMMARY_REASONING_BYTES: usize = 1024 * 1024;
 
 /// The model's answer as a summary, or why it is not one.
-pub(super) fn parse_answer(response: &Result<AssistantMessage, String>) -> Result<CompactionSummary, String> {
-    let message = response.as_ref().map_err(Clone::clone)?;
+pub(super) fn parse_answer(message: &AssistantMessage) -> Result<CompactionSummary> {
     match message.stop_reason {
         StopReason::Stop if message.tool_calls().is_empty() => {
-            serde_json::from_str::<CompactionSummary>(&message.text())
-                .map_err(|error| format!("invalid summary JSON: {error}"))
+            serde_json::from_str::<CompactionSummary>(&message.text()).context("invalid summary JSON")
         }
-        StopReason::Stop => Err("summary contains a tool call; tools are not permitted".into()),
-        StopReason::Length => Err("summary reached the output token limit".into()),
-        StopReason::ToolUse => Err("summary requested a tool call; tools are not permitted".into()),
-        StopReason::Error | StopReason::Aborted => Err(message.failure_reason().to_string()),
+        StopReason::Stop => bail!("summary contains a tool call; tools are not permitted"),
+        StopReason::Length => bail!("summary reached the output token limit"),
+        StopReason::ToolUse => bail!("summary requested a tool call; tools are not permitted"),
+        StopReason::Error | StopReason::Aborted => bail!("{}", message.failure_reason()),
     }
 }
 
@@ -37,7 +37,7 @@ pub(super) struct ResponseBytes {
 
 impl ResponseBytes {
     /// Count a streamed delta; fails once a limit is exceeded.
-    pub(super) fn add(&mut self, delta: &Delta) -> Result<(), String> {
+    pub(super) fn add(&mut self, delta: &Delta) -> Result<()> {
         match delta {
             Delta::Text { text } | Delta::ToolCallArgs { text, .. } => {
                 self.answer = self.answer.saturating_add(text.len());
@@ -74,14 +74,16 @@ impl ResponseBytes {
         bytes
     }
 
-    /// Whether the counts are within their limits.
-    pub(super) fn validate(&self) -> Result<(), String> {
-        if self.answer > MAX_SUMMARY_BYTES {
-            return Err(format!("summary text exceeds {MAX_SUMMARY_BYTES} bytes"));
-        }
-        if self.reasoning > MAX_SUMMARY_REASONING_BYTES {
-            return Err(format!("summary reasoning exceeds {MAX_SUMMARY_REASONING_BYTES} bytes"));
-        }
+    /// Fails when a count is over its limit.
+    pub(super) fn validate(&self) -> Result<()> {
+        ensure!(
+            self.answer <= MAX_SUMMARY_BYTES,
+            "summary text exceeds {MAX_SUMMARY_BYTES} bytes"
+        );
+        ensure!(
+            self.reasoning <= MAX_SUMMARY_REASONING_BYTES,
+            "summary reasoning exceeds {MAX_SUMMARY_REASONING_BYTES} bytes"
+        );
         Ok(())
     }
 }

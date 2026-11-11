@@ -55,7 +55,8 @@ pub enum AgentSessionError {
 enum State {
     // A full Runner is only needed while idle, so keep the state enum small.
     Idle(Box<Runner>),
-    Running(CancellationToken),
+    /// An operation holds the Runner; the token cancels it.
+    Leased(CancellationToken),
 }
 
 /// One long-lived conversation, shared by its frontends through borrowed references or Arc.
@@ -117,8 +118,8 @@ impl AgentSession {
         // The conversion is host code: it runs before the conversation is leased.
         let message = message.into();
         let cancel = cancel.child_token();
-        let mut active = self.acquire(cancel.clone())?;
-        let report = active.runner().run(message, &cancel).await;
+        let mut lease = self.lease(cancel.clone())?;
+        let report = lease.runner().run(message, &cancel).await;
         Ok(report)
     }
 
@@ -126,18 +127,18 @@ impl AgentSession {
     /// answered. An overlap returns Busy; `cancel` works as for `prompt`.
     pub async fn continue_run(&self, cancel: &CancellationToken) -> Result<RunReport, AgentSessionError> {
         let cancel = cancel.child_token();
-        let mut active = self.acquire(cancel.clone())?;
-        Ok(active.runner().continue_run(&cancel).await)
+        let mut lease = self.lease(cancel.clone())?;
+        Ok(lease.runner().continue_run(&cancel).await)
     }
 
     /// Compact the retained conversation while holding the same exclusive lease as prompt.
     /// An overlap returns Busy; no eligible old prefix returns a no-op report. The summary
     /// uses a child of `cancel`: abort or future drop leaves `cancel` untouched, restores the
-    /// Runner, and keeps incomplete summary attempts out of context.
+    /// Runner, and keeps an incomplete compaction out of context.
     pub async fn compact(&self, cancel: &CancellationToken) -> Result<compaction::Report, AgentSessionError> {
         let cancel = cancel.child_token();
-        let mut active = self.acquire(cancel.clone())?;
-        Ok(active.runner().compact(&cancel).await)
+        let mut lease = self.lease(cancel.clone())?;
+        Ok(lease.runner().compact(&cancel).await)
     }
 
     /// The conversation's queues: to steer or follow up with the person's input (`steer`,
@@ -208,8 +209,8 @@ impl AgentSession {
         &self,
         append: impl AsyncFnOnce(&mut SessionStore) -> anyhow::Result<String>,
     ) -> Result<String, AgentSessionError> {
-        let mut active = self.acquire(CancellationToken::new())?;
-        append(active.runner().session_mut())
+        let mut lease = self.lease(CancellationToken::new())?;
+        append(lease.runner().session_mut())
             .await
             .map_err(|error| AgentSessionError::WriteFailed(format!("{error:#}")))
     }
@@ -224,11 +225,14 @@ impl AgentSession {
         self.idle(|_| self.queues.take_all())
     }
 
-    /// Cancel only the active prompt or compaction. Returns false when idle.
+    /// Cancel only the active prompt or compaction. Returns false when idle. The short
+    /// operations that read or write the session while idle (`inspect`, `append_entry`,
+    /// `append_custom_message`, `set_name`) hold the conversation as well: during one of
+    /// them this returns true, although they have nothing to cancel.
     pub fn abort(&self) -> bool {
         let cancel = match &*lock(&self.state) {
             State::Idle(_) => return false,
-            State::Running(cancel) => cancel.clone(),
+            State::Leased(cancel) => cancel.clone(),
         };
         // Waking a waiting future can call host-provided wakers; do it unlocked.
         cancel.cancel();
@@ -246,24 +250,14 @@ impl AgentSession {
     /// Busy. History, tools, hooks, limits and exact-call approval grants are retained.
     /// No request is made and the session header keeps its original starting model.
     pub fn set_model(&self, model: ModelRef) -> Result<(), AgentSessionError> {
-        let switched = self.idle(|runner| {
-            if model.model.trim().is_empty() {
-                return Err(model);
-            }
-            Ok(runner.replace_model(model.provider, model.model))
-        })?;
-        // A custom provider's destructor is host code too: the replaced provider, or the
-        // rejected one, is dropped here, without the state lock.
-        match switched {
-            Ok(previous) => {
-                drop(previous);
-                Ok(())
-            }
-            Err(rejected) => {
-                drop(rejected);
-                Err(AgentSessionError::InvalidModel)
-            }
+        if model.model.trim().is_empty() {
+            return Err(AgentSessionError::InvalidModel);
         }
+        let replaced = self.idle(|runner| runner.replace_model(model.provider, model.model))?;
+        // A custom provider's destructor is host code too: the replaced provider is dropped
+        // here, without the state lock, as the rejected one is above.
+        drop(replaced);
+        Ok(())
     }
 
     /// Change the reasoning level of later task requests while idle; `None` leaves the
@@ -301,8 +295,8 @@ impl AgentSession {
     /// position. `f` runs with the conversation leased, as a prompt does: other calls get
     /// Busy until it returns, and no lock is held while host code runs. A run returns Busy.
     pub fn inspect<T>(&self, f: impl FnOnce(&SessionStore) -> T) -> Result<T, AgentSessionError> {
-        let mut active = self.acquire(CancellationToken::new())?;
-        Ok(f(active.runner().session()))
+        let mut lease = self.lease(CancellationToken::new())?;
+        Ok(f(lease.runner().session()))
     }
 
     /// Run `f` on the Runner under the state lock while idle; a run returns Busy. For quick
@@ -319,15 +313,16 @@ impl AgentSession {
         Ok(f(runner))
     }
 
-    fn acquire(&self, cancel: CancellationToken) -> Result<ActiveRun<'_>, AgentSessionError> {
+    /// Take the Runner for one operation that `cancel` cancels; Busy while another holds it.
+    fn lease(&self, cancel: CancellationToken) -> Result<Lease<'_>, AgentSessionError> {
         let mut state = lock(&self.state);
-        match std::mem::replace(&mut *state, State::Running(cancel.clone())) {
-            State::Idle(runner) => Ok(ActiveRun {
+        match std::mem::replace(&mut *state, State::Leased(cancel.clone())) {
+            State::Idle(runner) => Ok(Lease {
                 state: &self.state,
                 runner: Some(runner),
                 cancel,
             }),
-            busy @ State::Running(_) => {
+            busy @ State::Leased(_) => {
                 *state = busy;
                 Err(AgentSessionError::Busy)
             }
@@ -363,13 +358,13 @@ impl From<Runner> for AgentSession {
 ///
 /// Run ownership is restored by Drop even when an awaiting caller disappears.
 /// Option permits moving the Runner back exactly once; it is Some until Drop.
-struct ActiveRun<'a> {
+struct Lease<'a> {
     state: &'a Mutex<State>,
     runner: Option<Box<Runner>>,
     cancel: CancellationToken,
 }
 
-impl ActiveRun<'_> {
+impl Lease<'_> {
     fn runner(&mut self) -> &mut Runner {
         self.runner
             .as_deref_mut()
@@ -377,7 +372,7 @@ impl ActiveRun<'_> {
     }
 }
 
-impl Drop for ActiveRun<'_> {
+impl Drop for Lease<'_> {
     fn drop(&mut self) {
         self.cancel.cancel();
         let runner = self

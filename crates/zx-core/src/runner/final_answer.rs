@@ -2,39 +2,31 @@
 
 use crate::ai::{Message, UserMessageKind};
 
-/// Join explicit continuation fragments, ignoring intervening system prompt updates.
+/// The last answer in `messages`, joined with the answers it continues: each is preceded by
+/// a request to continue the one before it. System prompt updates in between are ignored.
 pub(super) fn final_answer(messages: &[Message]) -> String {
+    // Walked backwards: the last answer first, then what precedes it.
+    let mut earlier = messages
+        .iter()
+        .rev()
+        .filter(|message| !matches!(message, Message::System(_)));
+    let mut answer = earlier.find_map(|message| match message {
+        Message::Assistant(answer) => Some(answer),
+        Message::System(_) | Message::User { .. } | Message::ToolResult(_) => None,
+    });
     let mut parts = Vec::new();
-    let mut end = messages.len();
-    while let Some((index, answer)) =
-        messages[..end]
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(index, message)| match message {
-                Message::Assistant(answer) => Some((index, answer)),
-                Message::System(_) | Message::User { .. } | Message::ToolResult(_) => None,
-            })
-    {
-        parts.push(answer.text());
-        let mut preceding = messages[..index]
-            .iter()
-            .enumerate()
-            .rev()
-            .filter(|(_, message)| !matches!(message, Message::System(_)));
-        match (preceding.next(), preceding.next()) {
+    while let Some(part) = answer {
+        parts.push(part.text());
+        answer = match (earlier.next(), earlier.next()) {
             (
-                Some((
-                    _,
-                    Message::User {
-                        kind: UserMessageKind::ContinueAnswer,
-                        ..
-                    },
-                )),
-                Some((previous, Message::Assistant(_))),
-            ) => end = previous + 1,
-            _ => break,
-        }
+                Some(Message::User {
+                    kind: UserMessageKind::ContinueAnswer,
+                    ..
+                }),
+                Some(Message::Assistant(previous)),
+            ) => Some(previous),
+            _ => None,
+        };
     }
     parts.reverse();
     let mut joined = String::new();

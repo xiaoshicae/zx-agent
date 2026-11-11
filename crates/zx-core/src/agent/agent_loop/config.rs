@@ -8,10 +8,11 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
-use super::{
-    ActiveTools, DEFAULT_APPROVAL_TIMEOUT, HookChain, Interaction, MessageQueues, ModelMeta, NoHuman, Provider,
-    Reasoning, RunTrace, SlashCommand, SystemPrompt, Tool,
+use crate::agent::trace::RunTrace;
+use crate::agent::{
+    ActiveTools, DEFAULT_APPROVAL_TIMEOUT, HookChain, Interaction, MessageQueues, NoHuman, SlashCommand, Tool,
 };
+use crate::ai::{ModelMeta, Provider, Reasoning, SystemPrompt};
 
 /// What a loop runs with: the model and tools, and the host's extensions around them. Queues
 /// and the active tool set have shared ownership because frontends and hooks change them while
