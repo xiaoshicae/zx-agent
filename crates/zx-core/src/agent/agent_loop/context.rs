@@ -1,8 +1,8 @@
 //! Context updates and their ordered session records.
 
 use super::{
-    AgentEvent, AgentLoop, Context, ContextEdit, CustomMessageInfo, Entry, EventTarget, Halt, HookFailure, LoopResult,
-    Message, PERSIST_FAILED, Queue, QueueMode, QueuedMessage, UserMessageKind, anyhow, record_pending_entries,
+    AgentEvent, AgentLoop, Context, ContextEdit, CustomMessageInfo, Entry, EventTarget, Halt, HookFailure, Message,
+    PERSIST_FAILED, Queue, QueueMode, QueuedMessage, UserMessageKind, anyhow, record_pending_entries,
 };
 use crate::session::CustomMessage;
 
@@ -187,10 +187,9 @@ impl AgentLoop<'_> {
 
     /// Prepare the context and account for any summary requests, even on failure. Returns
     /// how many requests preparing it made.
-    pub(super) async fn prepare_context(&mut self, result: &mut LoopResult) -> Result<u32, Halt> {
+    pub(super) async fn prepare_context(&mut self) -> Result<u32, Halt> {
         let prepared = self.host.prepare_context(self.trace.cancel()).await;
-        result.usage.add(&prepared.usage);
-        result.model_requests = result.model_requests.saturating_add(prepared.requests);
+        self.accounting.count_requests(prepared.requests, &prepared.usage);
         prepared.result.map(|()| prepared.requests)
     }
 }

@@ -4,8 +4,8 @@
 use std::ops::ControlFlow;
 
 use super::{
-    AgentLoop, AssistantMessage, Halt, LoopResult, Message, Queue, RunOutcome, StopReason, TurnDecision,
-    TurnDisposition, TurnSummary, UserMessageKind,
+    AgentLoop, AssistantMessage, Halt, Message, Queue, RunOutcome, StopReason, TurnDecision, TurnDisposition,
+    TurnSummary, UserMessageKind,
 };
 
 impl AgentLoop<'_> {
@@ -13,7 +13,6 @@ impl AgentLoop<'_> {
     /// outcome that ends the attempt.
     pub(super) async fn decide_next_turn(
         &mut self,
-        result: &mut LoopResult,
         response: TurnResponse,
         pending: &mut PendingInput,
     ) -> Result<ControlFlow<RunOutcome>, Halt> {
@@ -25,13 +24,13 @@ impl AgentLoop<'_> {
         let needs_more = after_tools == AfterTools::Ran;
         let stop = response.stop_reason;
         let disposition = self.disposition(after_tools);
-        let remaining = self.remaining_model_requests(result);
+        let remaining = self.accounting.remaining_model_requests();
         let messages = self.host.session().messages();
         let summary = TurnSummary {
             response: &response,
             messages: &messages,
             turn,
-            answer_continuations: result.answer_continuations,
+            answer_continuations: self.accounting.answer_continuations,
             remaining_model_requests: remaining,
             disposition,
         };
@@ -57,7 +56,7 @@ impl AgentLoop<'_> {
             Err(outcome) => return Ok(ControlFlow::Break(outcome)),
         };
         if requested.as_ref().is_some_and(continues_answer) {
-            result.answer_continuations = result.answer_continuations.saturating_add(1);
+            self.accounting.answer_continuations = self.accounting.answer_continuations.saturating_add(1);
         }
         *pending = match requested {
             Some(message) => PendingInput::Requested(Box::new(message)),
@@ -74,12 +73,6 @@ impl AgentLoop<'_> {
             .finish_turn(summary, self.trace.context())
             .await
             .map_err(|error| Halt::Failed(self.report_hook_failure(error)))
-    }
-
-    /// Model requests the attempt may still make; `None` is unlimited.
-    fn remaining_model_requests(&self, result: &LoopResult) -> Option<u32> {
-        self.max_model_requests
-            .map(|limit| limit.saturating_sub(result.model_requests))
     }
 
     /// What the normal loop would do after a response, before the finish hooks decide.
