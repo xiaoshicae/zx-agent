@@ -1,12 +1,13 @@
 //! What a branch projects for the model: the messages after context edits, with the latest
-//! summary that still holds standing in for the records it replaced.
+//! summary that still holds standing in for the records it replaced; and how much of that
+//! context an answer's reported usage still measures.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 
-use crate::ai::Message;
+use crate::ai::{AssistantMessage, Message, StopReason, Usage};
 
 use super::{CompactionEntry, Entry, SessionStore};
 
@@ -203,6 +204,75 @@ impl SessionStore {
                 .count(),
         )
     }
+
+    /// The context split at its last measurement: the usage reported by the last answer that
+    /// still measures the context up to it, and the messages after that answer. Without such
+    /// an answer, no usage and every message.
+    ///
+    /// An answer measures the context when it finished and reported usage, and nothing
+    /// recorded after it changed the messages up to it: no compaction, and no edit of a
+    /// message at or before it. The usage of an answer that a compaction kept, or that
+    /// precedes an edit of earlier messages, counts a context that is no longer sent (pi:
+    /// `estimateProjectedContextTokens`).
+    pub fn measured_context(&self) -> (Option<Usage>, Vec<Message>) {
+        let projection = self.projection();
+        let measured = self.measuring_answer().and_then(|(id, usage)| {
+            let index = projection.iter().position(|item| item.entry_id == id)?;
+            Some((index, usage.clone()))
+        });
+        let (usage, measured_messages) = match measured {
+            Some((index, usage)) => (Some(usage), index + 1),
+            None => (None, 0),
+        };
+        let rest = projection
+            .into_iter()
+            .skip(measured_messages)
+            .map(|projected| projected.message)
+            .collect();
+        (usage, rest)
+    }
+
+    /// The last answer on the branch whose reported usage still measures the context up to
+    /// it, as its entry ID and that usage.
+    fn measuring_answer(&self) -> Option<(&str, &Usage)> {
+        // Entries are stored in the order they were appended, so on one branch a smaller
+        // position is an earlier entry.
+        let position = |id: &str| self.index.get(id).copied();
+        // Walking back from the leaf: the earliest entry that an edit met so far targets. An
+        // answer at or after it was sent messages that an edit has changed since.
+        let mut edited_from = usize::MAX;
+        for entry in self.ancestors(self.leaf.as_deref()) {
+            match entry {
+                // Every earlier answer was sent what this compaction replaced.
+                Entry::Compaction(_) => return None,
+                // An edit's target is on its branch. A missing one counts as the first entry,
+                // so that no answer is trusted.
+                Entry::ContextEdit(edit) => edited_from = edited_from.min(position(&edit.target_id).unwrap_or(0)),
+                Entry::Message(recorded) => {
+                    if let Message::Assistant(answer) = &recorded.message
+                        && reports_usage(answer)
+                        && position(&recorded.id).is_some_and(|at| at < edited_from)
+                    {
+                        return Some((&recorded.id, &answer.usage));
+                    }
+                }
+                Entry::CompactionStarted(_)
+                | Entry::CompactionFailed(_)
+                | Entry::RequestConfig(_)
+                | Entry::RequestStarted(_)
+                | Entry::ToolCallStarted(_)
+                | Entry::Custom(_)
+                | Entry::CustomMessage(_)
+                | Entry::SessionInfo(_) => {}
+            }
+        }
+        None
+    }
+}
+
+/// Whether `answer` finished and reported the tokens of its request.
+fn reports_usage(answer: &AssistantMessage) -> bool {
+    answer.usage.total_tokens > 0 && !matches!(answer.stop_reason, StopReason::Error | StopReason::Aborted)
 }
 
 #[cfg(test)]

@@ -30,7 +30,7 @@ use zx_agent::agent::{
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::{
-    AssistantMessage, ContentBlock, EventReceiver, Message, Provider, Request, StopReason, ToolCall, ToolDef,
+    AssistantMessage, ContentBlock, EventReceiver, Message, Provider, Request, StopReason, ToolCall, ToolDef, Usage,
 };
 use zx_agent::runner::{Limits, RunReport, Runner};
 use zx_agent::session::{Entry, SessionHeader, SessionStore};
@@ -208,6 +208,21 @@ pub(crate) fn tool_call_answer(provider: &str, model: &str, tool: &str, argument
         arguments,
         arguments_error: None,
     })];
+    Message::Assistant(answer)
+}
+
+/// A finished answer that reported `input` prompt tokens and 10 output tokens, as the last
+/// answer of a long conversation does.
+pub(crate) fn answer_reporting(input: u64) -> Message {
+    let mut answer = AssistantMessage::failure("p", "m", StopReason::Stop, "");
+    answer.error_message = None;
+    answer.content = vec![ContentBlock::Text { text: "noted".into() }];
+    answer.usage = Usage {
+        input,
+        output: 10,
+        total_tokens: input + 10,
+        ..Usage::default()
+    };
     Message::Assistant(answer)
 }
 

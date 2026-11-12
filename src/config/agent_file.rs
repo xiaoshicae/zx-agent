@@ -12,7 +12,7 @@ use serde::Deserialize;
 use super::permissions::RawPermissions;
 use super::skills::Skill;
 use super::{AgentDefinition, Builtin};
-use crate::compaction;
+use crate::compaction::{self, TokenTrigger};
 use crate::runner::Limits;
 
 /// The line that opens and closes the front matter.
@@ -187,7 +187,10 @@ impl RawCompaction {
             config.trigger_bytes = (bytes > 0).then_some(bytes);
         }
         if let Some(tokens) = self.trigger_tokens {
-            config.trigger_tokens = (tokens > 0).then_some(tokens);
+            config.trigger_tokens = match tokens {
+                0 => TokenTrigger::Off,
+                tokens => TokenTrigger::Above(tokens),
+            };
         }
         if let Some(tokens) = self.reserve_tokens {
             config.reserve_tokens = tokens;

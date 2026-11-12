@@ -1645,6 +1645,23 @@ async fn a_known_context_window_adds_a_token_trigger_to_automatic_summaries() {
     }
 }
 
+#[tokio::test]
+async fn a_token_trigger_of_zero_is_not_replaced_by_one_from_the_context_window() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_context(dir.path(), 120 * 1024).await;
+    let server = MockServer::start(vec![Reply::text("answer")]).await;
+    // The byte trigger stays on, above this context; only the token trigger is switched off,
+    // for a window that would otherwise put one below the context.
+    window_agent(dir.path(), 40000, "[compaction]\ntriggerTokens = 0");
+    let args = ["--tools", "", "--session", "chat.jsonl", "--output", "jsonl"];
+
+    let output = run(&server, dir.path(), &args, "continue\n/quit\n").await;
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(!stdout(&output).contains("compaction_start"), "{}", stdout(&output));
+    assert_eq!(server.requests().len(), 1);
+}
+
 /// For chat in `dir`: the assistant agent with `extra`, and a config.toml with `window` as the
 /// context window of `mock-model`.
 fn window_agent(dir: &Path, window: u64, extra: &str) {

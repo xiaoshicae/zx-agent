@@ -9,7 +9,7 @@ use zx_agent::session::{
     CompactionPlan, CompactionSummary, Entry, SESSION_VERSION, SessionStore, SummaryFact, SummaryRequest,
 };
 
-use common::{header, summarize};
+use common::{answer_reporting, header, summarize};
 
 fn summary(id: &str) -> CompactionSummary {
     CompactionSummary {
@@ -131,6 +131,86 @@ async fn a_completed_compaction_accepts_neither_a_second_result_nor_a_failure() 
     assert!(again.to_string().contains("already finished"), "{again:#}");
     assert!(failed.to_string().contains("already finished"), "{failed:#}");
     assert_eq!(store.entries().len(), recorded);
+}
+
+#[tokio::test]
+async fn a_compaction_ends_the_measurement_by_the_answers_before_it() {
+    let mut store = SessionStore::in_memory(header());
+    let old = store.append_message(Message::user("old evidence")).await.unwrap();
+    let kept = store.append_message(answer_reporting(900)).await.unwrap();
+    let latest = Message::user("latest input");
+    store.append_message(latest.clone()).await.unwrap();
+    let (usage, rest) = store.measured_context();
+    assert_eq!(usage.map(|usage| usage.input), Some(900));
+    assert_eq!(rest, [latest]);
+
+    let started = store.begin_compaction(plan(&store, &kept)).await.unwrap();
+    store
+        .append_compaction(&started, summary(&old), Usage::default())
+        .await
+        .unwrap();
+
+    // The kept answer was sent the context from before the compaction.
+    let (usage, rest) = store.measured_context();
+    assert_eq!(usage, None);
+    assert_eq!(rest, store.messages());
+}
+
+#[tokio::test]
+async fn an_answer_recorded_after_a_compaction_measures_the_compacted_context() {
+    let mut store = SessionStore::in_memory(header());
+    let (old, kept) = seeded(&mut store).await;
+    let started = store.begin_compaction(plan(&store, &kept)).await.unwrap();
+    store
+        .append_compaction(&started, summary(&old), Usage::default())
+        .await
+        .unwrap();
+    store.append_message(answer_reporting(300)).await.unwrap();
+    let later = Message::user("next input");
+    store.append_message(later.clone()).await.unwrap();
+
+    let (usage, rest) = store.measured_context();
+
+    assert_eq!(usage.map(|usage| usage.input), Some(300));
+    assert_eq!(rest, [later]);
+}
+
+/// An old message, an answer that reported 900 prompt tokens, and a later input; returns the
+/// three entry IDs.
+async fn measured(store: &mut SessionStore) -> [String; 3] {
+    let earlier = store.append_message(Message::user("old evidence")).await.unwrap();
+    let answer = store.append_message(answer_reporting(900)).await.unwrap();
+    let later = store.append_message(Message::user("latest input")).await.unwrap();
+    [earlier, answer, later]
+}
+
+#[tokio::test]
+async fn an_edit_of_a_later_message_keeps_the_measurement_by_an_answer() {
+    let mut store = SessionStore::in_memory(header());
+    let [_, _, later] = measured(&mut store).await;
+
+    // What the answer was sent is as it was.
+    store
+        .append_context_edit(&later, Some("rewritten".into()))
+        .await
+        .unwrap();
+
+    assert_eq!(store.measured_context().0.map(|usage| usage.input), Some(900));
+}
+
+#[tokio::test]
+async fn an_edit_at_or_before_an_answer_ends_its_measurement() {
+    for edited in [0, 1] {
+        let mut store = SessionStore::in_memory(header());
+        let ids = measured(&mut store).await;
+
+        store
+            .append_context_edit(&ids[edited], Some("shorter".into()))
+            .await
+            .unwrap();
+
+        assert_eq!(store.measured_context().0, None, "edited entry {edited}");
+    }
 }
 
 #[tokio::test]

@@ -25,7 +25,7 @@
 | `tests/acp_cli.rs` | `acp` 经 stdio 的协议、权限请求、会话加载与关闭、`/name` |
 | `tests/agents_cli.rs` | agent 文件、权限、上下文与 skill；配置错误以退出码 2 结束 |
 | `tests/config_cli.rs` | `config.toml` 的位置与优先级 |
-| `tests/session_compaction.rs` | 会话层的摘要记录、引用与校验 |
+| `tests/session_compaction.rs` | 会话层的摘要记录、引用与校验；回答上报的用量在摘要或修改之后是否还度量上下文 |
 | `tests/compaction.rs` | 宿主的手动与自动摘要、计费、失败与上限 |
 | `tests/request_audit.rs` | 从会话文件还原请求（G3），含固定会话的逐字节比对 |
 | `tests/executor.rs` | 工具只经执行器运行命令与读写文件 |
