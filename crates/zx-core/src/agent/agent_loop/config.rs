@@ -113,9 +113,9 @@ impl LoopConfig {
         Ok(validators)
     }
 
-    /// The trace of a new run with a fresh ID, cancelled by `cancel`, whose hooks reach this
-    /// configuration's queues and tool set.
-    pub(crate) fn trace(&self, session_id: Option<String>, cancel: CancellationToken) -> RunTrace {
+    /// The trace of a new run of session `session_id` with a fresh ID, cancelled by `cancel`,
+    /// whose hooks reach this configuration's queues and tool set.
+    pub(crate) fn trace(&self, session_id: String, cancel: CancellationToken) -> RunTrace {
         RunTrace::new(
             session_id,
             self.cwd.clone(),

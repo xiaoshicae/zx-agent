@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use super::auto_approve::AutoApprove;
-use super::command_of;
-use crate::agent::{PolicyDecision, ToolPolicy};
+use super::{ToolPolicy, command_of};
+use crate::agent::PolicyDecision;
 use crate::tools::BASH;
 
 /// The calls a rule matches. Bash commands are told apart by [`AutoApprove`], not by rules.

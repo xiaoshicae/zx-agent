@@ -12,7 +12,7 @@
 
 // The modules name the model layer, the shared helpers and the kernel by these crate-root paths.
 use zx_ai::{self as ai, sync, text};
-use zx_core::{agent, extensions, prompt};
+use zx_core::{agent, extensions};
 
 pub mod continuation;
 pub mod executor;

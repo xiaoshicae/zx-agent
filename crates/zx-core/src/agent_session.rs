@@ -171,7 +171,7 @@ impl AgentSession {
             .ok_or(CommandError::Unknown)?;
         let ctx = CommandContext::new(
             self.cwd.clone(),
-            Some(self.session_id.clone()),
+            self.session_id.clone(),
             self.queues.clone(),
             self.active_tools.clone(),
         );

@@ -1028,7 +1028,7 @@ async fn every_event_of_a_run_carries_its_ids_and_the_next_sequence_number() {
     for event in &envelopes {
         assert_eq!(event.schema_version, EVENT_SCHEMA_VERSION);
         assert_eq!(event.run_id, envelopes[0].run_id);
-        assert_eq!(event.session_id.as_deref(), Some(session_id.as_str()));
+        assert_eq!(event.session_id, session_id);
     }
     let first = envelopes.len();
     runner.run("again", &CancellationToken::new()).await;

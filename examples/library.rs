@@ -13,9 +13,9 @@ use zx_agent::agent::{AgentEvent, Event, LoopConfig, PolicyDecision};
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::continuation::ContinueOnLength;
-use zx_agent::executor::LocalExecutor;
+use zx_agent::executor::{LocalExecutor, local_environment_section};
 use zx_agent::policy::{AutoApprove, CommandPolicy, PolicyHook, Rule, RuleMatcher, RulePolicy};
-use zx_agent::prompt::{build_system_prompt, environment_section};
+use zx_agent::prompt::build_system_prompt;
 use zx_agent::redact::RedactSecrets;
 use zx_agent::runner::Limits;
 use zx_agent::session::{SessionHeader, SessionStore};
@@ -47,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
         },
     ])
     .auto_approve(AutoApprove::new(["df", "free", "uptime", "head", "sort"]));
-    let system_prompt = build_system_prompt(INSTRUCTIONS, &[("environment", &environment_section(&cwd))]);
+    let system_prompt = build_system_prompt(INSTRUCTIONS, &[("environment", &local_environment_section(&cwd))]);
     // The key must not reach commands, where `env` would reveal it.
     let bash = BashTool {
         executor: Arc::new(LocalExecutor {

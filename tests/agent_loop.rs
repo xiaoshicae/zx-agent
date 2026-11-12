@@ -14,14 +14,14 @@ use tokio_util::sync::CancellationToken;
 use common::{Collect, EchoTool, NotifyingProvider, config, run_prompt, run_prompt_with, summarize};
 use zx_agent::agent::{
     AgentEvent, ExecutionMode, LoopConfig, MAX_DETAILS_BYTES, PolicyDecision, QueuedMessage, RunOutcome, Tool,
-    ToolContext, ToolOutput, ToolPolicy,
+    ToolContext, ToolOutput,
 };
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{
     ContentBlock, EventReceiver, Message, PREAMBLE, Provider, Request, StopReason, SystemPrompt, ToolCall, ToolDef,
     Usage,
 };
-use zx_agent::policy::PolicyHook;
+use zx_agent::policy::{PolicyHook, ToolPolicy};
 
 fn provider(steps: impl IntoIterator<Item = FauxStep>) -> Arc<FauxProvider> {
     Arc::new(FauxProvider::new(steps))

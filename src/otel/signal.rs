@@ -34,7 +34,7 @@ impl EventSink for SignalSink {
 /// What a span needs from one event: metadata only.
 pub(super) struct Signal {
     pub(super) run_id: String,
-    pub(super) session_id: Option<String>,
+    pub(super) session_id: String,
     pub(super) at: SystemTime,
     pub(super) what: What,
 }
@@ -212,7 +212,7 @@ impl Signal {
             AgentEvent::ContextOverflow { .. } => What::Overflow,
             AgentEvent::HookFailed { hook, phase, .. } => What::HookFailed {
                 hook: hook.clone(),
-                phase,
+                phase: phase.as_str(),
             },
             AgentEvent::ToolCallRecovered {
                 tool_call_id,
@@ -248,7 +248,7 @@ pub(super) fn event(at_ms: u64, event: AgentEvent) -> Event {
         schema_version: crate::agent::EVENT_SCHEMA_VERSION,
         seq: at_ms,
         at_ms,
-        session_id: Some("s1".into()),
+        session_id: "s1".into(),
         run_id: "6f1c2c4e-0000-4000-8000-000000000001".into(),
         event,
     }

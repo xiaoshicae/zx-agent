@@ -6,7 +6,7 @@
 //!   attempt counts into it
 //! - `tool`: the tool interface, and the set of tools a run offers
 //! - `hooks`: the extension points around the loop, and the chain that runs them
-//! - `policy`: the decision on a tool call, and the policy interface
+//! - `policy`: the verdict on a tool call
 //! - `interaction`: how a host approves a call the policy asks about, and the refusal when
 //!   nobody can
 //! - `queue`: messages injected into a running loop, and records extensions ask it to keep
@@ -33,16 +33,16 @@ pub use agent_loop::LoopConfig;
 pub(crate) use agent_loop::{AgentLoop, Halt, PERSIST_FAILED, SessionHost, record_pending_entries};
 pub use command::{CommandContext, CommandError, CommandOutcome, SlashCommand, check_command_name};
 pub use events::{
-    AgentEvent, ApprovalResult, CustomMessageInfo, EVENT_SCHEMA_VERSION, Event, EventSink, Interruption, NullSink,
-    RequestKind, ToolVerdict,
+    AgentEvent, ApprovalResult, CustomMessageInfo, EVENT_SCHEMA_VERSION, Event, EventSink, HookPoint, Interruption,
+    NullSink, RequestKind, ToolVerdict,
 };
 pub use hooks::{
     CancelSignal, ContextEdit, DEFAULT_HOOK_TIMEOUT, FinishedTurn, HookChain, HookContext, HookError, HookFailure,
-    HookOptions, HookPoint, HookResult, HookStage, Hooks, RequestPlan, RequestSettings, TurnDecision, TurnDisposition,
+    HookOptions, HookResult, HookStage, Hooks, RequestPlan, RequestSettings, TurnDecision, TurnDisposition,
 };
 pub(crate) use interaction::ApprovalCache;
 pub use interaction::{Approval, ApprovalRequest, DEFAULT_APPROVAL_TIMEOUT, Interaction, NoHuman};
-pub use policy::{PolicyDecision, ToolPolicy};
+pub use policy::PolicyDecision;
 pub use queue::{MessageQueues, QueueMode, QueuedMessage};
 pub use report::{RunOutcome, RunReport};
 pub use tool::{

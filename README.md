@@ -420,7 +420,7 @@ let report = agent.prompt("任务描述", &CancellationToken::new()).await?;
 库默认不限轮次、时间与 token，没有钩子，不自动续写、摘要或落盘；说明、上限与策略都由嵌入方给出。完整的组装见 `examples/library.rs`。
 
 - 入口：`AgentSession`（共享会话：`prompt`、`continue_run`、`compact`、`abort`、`subscribe`、`set_model`、`set_name`、`branch`、`queues`、`active_tools`、`run_command`）、`runner::Runner`（`AgentSession` 独占的一半，只有一个所有者时直接用）、`session::SessionStore`。
-- 扩展点都是 trait：`ai::Provider`、`agent::Tool`、`agent::ToolPolicy`、`agent::Hooks`、`agent::Interaction`、`agent::EventSink`、`executor::Executor`、`session::SessionLog`、`im::ImChannel`、`im::StatusStore`、`extensions::Extension`。
+- 扩展点都是 trait：`ai::Provider`、`agent::Tool`、`policy::ToolPolicy`、`agent::Hooks`、`agent::Interaction`、`agent::EventSink`、`executor::Executor`、`session::SessionLog`、`im::ImChannel`、`im::StatusStore`、`extensions::Extension`。
 - 附带的实现：`ai::openai::OpenAiCompatible`、`mcp::Server`（一个 `Extension`）、`executor::ContainerExecutor`、`redact::RedactSecrets`、`otel::Telemetry`。
 
 接口与契约见 rustdoc：`cargo doc --open`。

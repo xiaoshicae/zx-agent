@@ -15,7 +15,7 @@ use tokio_util::sync::{CancellationToken, WaitForCancellationFuture};
 
 use super::queue::MessageQueues;
 use super::tool::ActiveTools;
-use super::{AgentEvent, Event, PolicyDecision, ToolOutput};
+use super::{AgentEvent, Event, HookPoint, PolicyDecision, ToolOutput};
 use crate::ai::{AssistantMessage, Message, Reasoning, ToolCall, UserMessageKind};
 use crate::session::context_edit_refusal;
 
@@ -25,7 +25,7 @@ pub use chain::{HookChain, HookOptions};
 /// Default bound for each individual hook invocation.
 pub const DEFAULT_HOOK_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Callback errors are supplied as text; the host adds the hook, phase and failure kind.
+/// Callback errors are supplied as text; the chain adds the hook, phase and failure kind.
 pub type HookResult<T> = Result<T, String>;
 
 /// What every hook call knows about the run it belongs to. Fields are only ever added, so
@@ -36,14 +36,13 @@ pub type HookResult<T> = Result<T, String>;
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct HookContext {
-    /// The session's ID; absent only in a context built with [`HookContext::new`] without one.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
+    /// The ID of the session the run belongs to.
+    pub session_id: String,
     /// The run: one prompt or one manual compaction, as in the events' `runId`.
     pub run_id: String,
     /// The tools' working directory.
     pub cwd: PathBuf,
-    /// Set when the run is cancelled; the host then stops waiting for the hook.
+    /// Set when the run is cancelled; the chain then stops waiting for the hook.
     #[serde(skip)]
     pub cancel: CancelSignal,
     /// The run's queues: a hook sends the model a message with `steer_message` or
@@ -57,9 +56,9 @@ pub struct HookContext {
 }
 
 impl HookContext {
-    /// A context for a new run with a fresh ID, cancelled with `cancel`, with queues and a
-    /// tool set of its own.
-    pub fn new(session_id: Option<String>, cwd: PathBuf, cancel: CancellationToken) -> Self {
+    /// A context for a new run of session `session_id` with a fresh ID, cancelled with
+    /// `cancel`, with queues and a tool set of its own.
+    pub fn new(session_id: String, cwd: PathBuf, cancel: CancellationToken) -> Self {
         Self {
             session_id,
             run_id: uuid::Uuid::new_v4().to_string(),
@@ -108,7 +107,7 @@ impl CancelSignal {
         self.0.child_token()
     }
 
-    /// The run's own token, for the host that waits on hooks.
+    /// The run's own token, for the chain, which waits on hooks.
     pub(crate) fn token(&self) -> &CancellationToken {
         &self.0
     }
@@ -357,35 +356,6 @@ pub trait Hooks: Send + Sync {
     }
 }
 
-/// Which extension point of the loop a hook call is at: one per [`Hooks`] method, and the
-/// approval wait. [`HookStage`] is something else: the order of hooks at the same point.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HookPoint {
-    OnInput,
-    TransformContext,
-    PrepareRequest,
-    BeforeTool,
-    AfterTool,
-    FinishTurn,
-    OnEvent,
-    Approval,
-}
-
-impl HookPoint {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::OnInput => "on_input",
-            Self::TransformContext => "transform_context",
-            Self::PrepareRequest => "prepare_request",
-            Self::BeforeTool => "before_tool",
-            Self::AfterTool => "after_tool",
-            Self::FinishTurn => "finish_turn",
-            Self::OnEvent => "on_event",
-            Self::Approval => "approval",
-        }
-    }
-}
-
 /// How one callback failed.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum HookFailure {
@@ -402,9 +372,9 @@ pub enum HookFailure {
     Cancelled,
 }
 
-/// Structured host-side failure for one callback.
+/// The failure of one callback, as the chain reports it.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("{hook} {} {failure}", .phase.as_str())]
+#[error("{hook} {phase} {failure}")]
 pub struct HookError {
     pub hook: String,
     pub phase: HookPoint,
@@ -419,7 +389,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     fn context() -> HookContext {
-        HookContext::new(None, PathBuf::from("."), CancellationToken::new())
+        HookContext::new("session".into(), PathBuf::from("."), CancellationToken::new())
     }
 
     fn call() -> ToolCall {

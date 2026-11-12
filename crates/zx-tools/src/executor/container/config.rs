@@ -8,7 +8,7 @@ use std::str::FromStr;
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 
-use crate::prompt::{pretty_name, run_started};
+use crate::executor::environment::{pretty_name, run_started};
 
 /// The user commands run as when the agent itself runs as root, or off Unix: nobody.
 pub(super) const NOBODY: &str = "65534:65534";

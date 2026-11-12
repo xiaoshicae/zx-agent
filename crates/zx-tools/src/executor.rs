@@ -7,9 +7,11 @@
 //! - `local`: commands and files on this machine
 //! - `container`: commands and files in one Docker container
 //! - `capture`: the bounded capture of a child's output, which both use
+//! - `environment`: what a system prompt says about the machine commands run on
 
 mod capture;
 mod container;
+mod environment;
 mod local;
 
 use std::path::Path;
@@ -24,6 +26,7 @@ pub use container::{
     Access, ContainerConfig, ContainerExecutor, Network, Platform, check_network,
     environment_section as container_environment_section,
 };
+pub use environment::environment_section as local_environment_section;
 pub use local::LocalExecutor;
 
 /// One shell command: `<shell> -c <command>` in `cwd`.

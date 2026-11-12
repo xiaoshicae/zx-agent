@@ -21,10 +21,10 @@ pub(crate) struct RunTrace {
 }
 
 impl RunTrace {
-    /// A new run with a fresh ID, cancelled by `cancel`, whose hooks reach the loop's queues
-    /// and tool set.
+    /// A new run of session `session_id` with a fresh ID, cancelled by `cancel`, whose hooks
+    /// reach the loop's queues and tool set.
     pub(crate) fn new(
-        session_id: Option<String>,
+        session_id: String,
         cwd: PathBuf,
         cancel: CancellationToken,
         queues: Arc<MessageQueues>,
@@ -88,7 +88,7 @@ impl EventTarget<'_> {
         // fail again on the report of its failure.
         let event = self.trace.stamp(AgentEvent::HookFailed {
             hook: error.hook,
-            phase: error.phase.as_str(),
+            phase: error.phase,
             error: text.clone(),
         });
         self.sink.emit(&event);
@@ -102,9 +102,9 @@ mod tests {
 
     use super::*;
 
-    fn trace(session_id: Option<&str>) -> RunTrace {
+    fn trace() -> RunTrace {
         RunTrace::new(
-            session_id.map(str::to_string),
+            "session".into(),
             PathBuf::from("."),
             CancellationToken::new(),
             Arc::default(),
@@ -114,7 +114,7 @@ mod tests {
 
     #[test]
     fn the_envelope_shares_one_object_with_the_event() {
-        let trace = trace(Some("session"));
+        let trace = trace();
         let first = trace.stamp(AgentEvent::AgentStart { attempt: 1 });
         let second = trace.stamp(AgentEvent::TurnStart { turn: 1 });
 
@@ -134,14 +134,13 @@ mod tests {
 
     #[test]
     fn each_run_has_its_own_id_and_numbering() {
-        let first = trace(None);
-        let second = trace(None);
+        let first = trace();
+        let second = trace();
         first.stamp(AgentEvent::AgentStart { attempt: 1 });
 
         let event = second.stamp(AgentEvent::AgentStart { attempt: 1 });
 
         assert_eq!(event.seq, 1);
         assert_ne!(event.run_id, first.stamp(AgentEvent::AgentStart { attempt: 1 }).run_id);
-        assert!(serde_json::to_value(&event).unwrap().get("sessionId").is_none());
     }
 }

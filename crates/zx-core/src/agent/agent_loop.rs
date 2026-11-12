@@ -170,7 +170,7 @@ impl<'a> AgentLoop<'a> {
     }
 
     /// Where this attempt's events go. The target borrows the run, not the loop, so that the
-    /// loop can record through its host while it holds one.
+    /// loop can record through its session host while it holds one.
     fn target(&self) -> EventTarget<'a> {
         EventTarget {
             sink: self.sink,
