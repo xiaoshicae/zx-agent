@@ -315,7 +315,7 @@ async fn cancellation_skips_writes_and_reads() {
             .after_tool(
                 &call("bash"),
                 ToolOutput::ok("x".repeat(500)),
-                &HookContext::new(None, dir.path().into(), cancel.clone())
+                &HookContext::new("session".into(), dir.path().into(), cancel.clone())
             )
             .await
             .is_err()

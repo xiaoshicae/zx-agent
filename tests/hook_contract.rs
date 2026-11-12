@@ -181,7 +181,7 @@ fn a_tool_call_names_its_fields_as_in_messages() {
 
 #[test]
 fn the_hook_context_leaves_out_its_cancellation_token() {
-    let ctx = HookContext::new(Some("s1".into()), PathBuf::from("/srv"), CancellationToken::new());
+    let ctx = HookContext::new("s1".into(), PathBuf::from("/srv"), CancellationToken::new());
 
     let value = serde_json::to_value(&ctx).unwrap();
 

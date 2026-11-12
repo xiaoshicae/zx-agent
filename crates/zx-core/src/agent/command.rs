@@ -33,7 +33,7 @@ pub struct CommandContext {
     /// The tools' working directory.
     pub cwd: PathBuf,
     /// The session's ID.
-    pub session_id: Option<String>,
+    pub session_id: String,
     /// The conversation's queues: a command sends the model a message with `steer_message`
     /// or `follow_up_message`, and records state with `append_entry`.
     pub queues: Arc<MessageQueues>,
@@ -42,12 +42,7 @@ pub struct CommandContext {
 }
 
 impl CommandContext {
-    pub fn new(
-        cwd: PathBuf,
-        session_id: Option<String>,
-        queues: Arc<MessageQueues>,
-        active_tools: Arc<ActiveTools>,
-    ) -> Self {
+    pub fn new(cwd: PathBuf, session_id: String, queues: Arc<MessageQueues>, active_tools: Arc<ActiveTools>) -> Self {
         Self {
             cwd,
             session_id,

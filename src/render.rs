@@ -3,7 +3,7 @@
 //! nothing printed here can drive the terminal.
 
 use serde_json::Value;
-use zx_agent::agent::AgentEvent;
+use zx_agent::agent::{AgentEvent, Interruption};
 use zx_agent::ai::{AssistantMessage, StopReason};
 use zx_agent::text::clip;
 
@@ -202,7 +202,7 @@ pub(crate) fn progress_line(event: &AgentEvent) -> Option<(Severity, String)> {
                 "[recover] {} {}: {}",
                 visible(tool_name),
                 visible(tool_call_id),
-                state.describe()
+                describe_interruption(*state)
             ),
         ),
         // The error names the hook and the phase: "<hook> after_tool failed: <reason>".
@@ -226,6 +226,17 @@ pub(crate) fn progress_line(event: &AgentEvent) -> Option<(Severity, String)> {
         | AgentEvent::ContextEdited { .. } => return None,
     };
     Some(line)
+}
+
+/// What is known about a call that an interrupted run left without a result, for a
+/// progress line.
+fn describe_interruption(state: Interruption) -> &'static str {
+    match state {
+        Interruption::Started => "started, result unknown",
+        Interruption::StartUnknown => "start not recorded, result unknown",
+        Interruption::NotStarted => "not started",
+        Interruption::ReadOnly => "read-only, no result",
+    }
 }
 
 /// `ms` since the epoch in local time, written as `format` (chrono's strftime), or `None`

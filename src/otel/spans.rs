@@ -166,15 +166,13 @@ struct OpenRun<'a> {
 }
 
 impl OpenRun<'_> {
-    fn run_start(&mut self, session_id: Option<String>, model: String, provider: String, parent: Option<SpanContext>) {
-        let mut attributes = vec![
+    fn run_start(&mut self, session_id: String, model: String, provider: String, parent: Option<SpanContext>) {
+        let attributes = vec![
             KeyValue::new("zx.run.id", self.run_id.to_string()),
             KeyValue::new("zx.model", model),
             KeyValue::new("zx.provider", provider),
+            KeyValue::new("zx.session.id", session_id),
         ];
-        if let Some(session) = session_id {
-            attributes.push(KeyValue::new("zx.session.id", session));
-        }
         self.spans.run = Some(start(self.tracer, "run", self.at, attributes, parent.map(remote)));
     }
 

@@ -1,7 +1,7 @@
 //! What the loop needs from the session it runs in: the session, where it records each step
 //! before acting on it and whose projection it sends the model, and a chance to prepare that
-//! context before a request. The Runner's host is the only one, and adds summaries; the trait
-//! keeps the loop from depending on the runner, the layer above it.
+//! context before a request. The run's session host is the only one, and adds summaries; the
+//! trait keeps the loop from depending on the runner, the layer above it.
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -21,9 +21,9 @@ pub(crate) trait SessionHost: Send + Sync {
 
     /// Prepare the context before a task request, for example by summarizing it; what it
     /// records is in the projection afterwards. Returns how many model requests that took.
-    /// The loop knows neither agents nor compaction policy: the host counts those requests
-    /// and their usage into `accounting`, failed ones included, so that they count against
-    /// the run's budget whatever the result.
+    /// The loop knows neither agents nor compaction policy: the session host counts those
+    /// requests and their usage into `accounting`, failed ones included, so that they count
+    /// against the run's budget whatever the result.
     ///
     /// An error stops the loop: preparation failed and left the context unchanged
     /// ([`Halt::Failed`]), or the session could not record it ([`Halt::Unrecorded`]).

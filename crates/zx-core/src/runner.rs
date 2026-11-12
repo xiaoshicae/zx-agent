@@ -104,7 +104,7 @@ impl Runner {
     pub async fn compact(&mut self, cancel: &CancellationToken) -> compaction::Report {
         let child = cancel.child_token();
         let _cancel_on_drop = child.drop_guard_ref();
-        let trace = self.config.trace(Some(self.session.header().id.clone()), child.clone());
+        let trace = self.config.trace(self.session.header().id.clone(), child.clone());
         let target = EventTarget {
             sink: self.sink.as_ref(),
             trace: &trace,
@@ -204,7 +204,7 @@ impl Runner {
             compaction,
             pause,
         } = self;
-        let trace = config.trace(Some(session.header().id.clone()), run_cancel.clone());
+        let trace = config.trace(session.header().id.clone(), run_cancel.clone());
         let target = EventTarget {
             sink: sink.as_ref(),
             trace: &trace,
@@ -229,8 +229,8 @@ impl Runner {
     }
 }
 
-/// One run in progress: the host it records through, what it borrows from the Runner, and
-/// what its attempts have spent so far.
+/// One run in progress: the session host it records through, what it borrows from the
+/// Runner, and what its attempts have spent so far.
 struct Run<'a> {
     host: RunHost<'a>,
     retry: &'a RetryPolicy,

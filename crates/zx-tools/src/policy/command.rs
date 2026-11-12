@@ -3,8 +3,8 @@
 use async_trait::async_trait;
 use serde_json::Value;
 
-use super::{command_of, normalize};
-use crate::agent::{PolicyDecision, ToolPolicy};
+use super::{ToolPolicy, command_of, normalize};
+use crate::agent::PolicyDecision;
 use crate::tools::BASH;
 
 /// Patterns rejected for every `bash` command, compared as substrings after lowercasing and

@@ -104,7 +104,7 @@
 
 - **新 provider**：实现 `ai::Provider`，遵守不变量 1；解析逻辑写单元测试，端到端测试用 `tests/common/mock_server.rs`，参照 `tests/openai_mock.rs`。
 - **新工具**：实现 `agent::Tool`。参数是带 `#[serde(deny_unknown_fields)]` 的结构体；输出截断；支持取消；不改变任何状态的工具 `effects()` 返回 `Effects::ReadOnly`，其余保留 `SideEffects`（不变量 10）；容忍常见参数错误时覆盖 `prepare_arguments`，只依据参数本身改写。测试覆盖成功、参数错误、超时或取消。
-- **新策略**：实现 `agent::ToolPolicy`，经 `policy::PolicyHook` 注册（`Policy` 阶段），无法判断时返回 `PolicyDecision::Deny`；扩展的放行判断写在 `Hooks::before_tool`。
+- **新策略**：实现 `policy::ToolPolicy`，经 `policy::PolicyHook` 注册（`Policy` 阶段），无法判断时返回 `PolicyDecision::Deny`；扩展的放行判断写在 `Hooks::before_tool`。
 - **新扩展**：实现 `agent::Hooks`；回调的最后一个参数是 `&HookContext`，回调必须异步让出执行权；`transform_context` 不能追加 system 消息。阶段默认 `Extension`，用 `HookChain::push_with` 注册时给出名称。钩子 JSON 格式由 `tests/hook_contract.rs` 固定。
 - **打包的扩展**：实现 `extensions::Extension`，经 `extensions::register` 加入 `LoopConfig`；钩子只能是 `Extension` 阶段；段落名不能是 `preamble`、`prompt::GENERATED_SECTIONS` 中的名字或已有段落；命令名只用 ASCII 字母、数字、`_`、`-` 且不重名。运行中发消息、记状态或改工具集经 `HookContext` 的 `queues` 与 `active_tools`，不直接碰会话。
 - **上下文改动**：`on_input` 完成后才写入原始输入，改写或拒绝再追加 `context_edit`；`transform_context` 返回的 `ContextEdit` 计划整份先校验，逐项写入成功后再请求模型。

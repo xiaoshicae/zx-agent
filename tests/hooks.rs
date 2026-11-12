@@ -1245,7 +1245,7 @@ async fn observers_skip_streaming_deltas_unless_they_ask_for_them() {
 }
 
 /// What each hook method of a [`ContextProbe`] received: method, session, run and directory.
-type Seen = Arc<Mutex<Vec<(&'static str, Option<String>, String, PathBuf)>>>;
+type Seen = Arc<Mutex<Vec<(&'static str, String, String, PathBuf)>>>;
 
 /// Records the context each hook method receives, and keeps the run's cancel signal.
 #[derive(Clone, Default)]
@@ -1323,7 +1323,7 @@ async fn every_hook_method_knows_the_session_run_and_working_directory() {
         ]
     );
     for (method, session, run, cwd) in &seen {
-        assert_eq!(session.as_deref(), Some(session_id.as_str()), "{method}");
+        assert_eq!(session, &session_id, "{method}");
         assert_eq!(run, &run_id, "{method}: the run ID of the events");
         assert_eq!(cwd, Path::new("/srv/work"), "{method}");
     }

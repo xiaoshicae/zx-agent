@@ -45,9 +45,9 @@ use zx_agent::agent::PolicyDecision;
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig, SystemUpdates};
 use zx_agent::ai::{Message, Provider};
 use zx_agent::compaction::{Config, Outcome};
-use zx_agent::executor::LocalExecutor;
+use zx_agent::executor::{LocalExecutor, local_environment_section};
 use zx_agent::policy::{AutoApprove, PolicyHook, Rule, RuleMatcher, RulePolicy};
-use zx_agent::prompt::{build_system_prompt, environment_section};
+use zx_agent::prompt::build_system_prompt;
 use zx_agent::runner::{Limits, RunOutcome, RunReport};
 use zx_agent::session::SessionStore;
 use zx_agent::tools::BashTool;
@@ -108,7 +108,7 @@ impl Endpoint {
         config.max_tokens = Some(256);
         config.system_prompt = build_system_prompt(
             "You are a test assistant. Follow the user's instructions exactly and keep answers short.",
-            &[("environment", &environment_section(cwd))],
+            &[("environment", &local_environment_section(cwd))],
         );
         RunnerSetup {
             limits: Limits {

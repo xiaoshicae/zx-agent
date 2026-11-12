@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use common::{EchoTool, config, run_prompt, summarize};
-use zx_agent::agent::{AgentEvent, HookContext, HookResult, HookStage, Hooks, LoopConfig, Tool, ToolOutput};
+use zx_agent::agent::{AgentEvent, HookContext, HookPoint, HookResult, HookStage, Hooks, LoopConfig, Tool, ToolOutput};
 use zx_agent::ai::ToolCall;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::extensions::{Extension, register};
@@ -230,7 +230,7 @@ async fn a_failing_extension_hook_is_reported_under_the_extension_name() {
     assert!(
         events.events().iter().any(|event| matches!(
             event,
-            AgentEvent::HookFailed { hook, phase, .. } if hook == "broken" && *phase == "after_tool"
+            AgentEvent::HookFailed { hook, phase, .. } if hook == "broken" && *phase == HookPoint::AfterTool
         )),
         "{:?}",
         events.kinds()

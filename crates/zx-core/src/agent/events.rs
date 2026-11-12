@@ -24,9 +24,8 @@ pub struct Event {
     pub seq: u64,
     /// When the event was emitted, in milliseconds since the Unix epoch.
     pub at_ms: u64,
-    /// The session's ID; absent only for a hook context built without one.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
+    /// The ID of the session the run belongs to.
+    pub session_id: String,
     /// The run that emitted the event: one prompt, or one manual compaction.
     pub run_id: String,
     #[serde(flatten)]
@@ -88,15 +87,45 @@ pub enum Interruption {
     ReadOnly,
 }
 
-impl Interruption {
-    /// A short description for progress output.
-    pub fn describe(self) -> &'static str {
+/// Which extension point of the loop a hook call is at: one per [`Hooks`](super::Hooks)
+/// method, and the approval wait. [`HookStage`](super::HookStage) is something else: the
+/// order of hooks at the same point. In JSON, the name [`HookPoint::as_str`] gives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HookPoint {
+    OnInput,
+    TransformContext,
+    PrepareRequest,
+    BeforeTool,
+    AfterTool,
+    FinishTurn,
+    OnEvent,
+    Approval,
+}
+
+impl HookPoint {
+    pub fn as_str(self) -> &'static str {
         match self {
-            Self::Started => "started, result unknown",
-            Self::StartUnknown => "start not recorded, result unknown",
-            Self::NotStarted => "not started",
-            Self::ReadOnly => "read-only, no result",
+            Self::OnInput => "on_input",
+            Self::TransformContext => "transform_context",
+            Self::PrepareRequest => "prepare_request",
+            Self::BeforeTool => "before_tool",
+            Self::AfterTool => "after_tool",
+            Self::FinishTurn => "finish_turn",
+            Self::OnEvent => "on_event",
+            Self::Approval => "approval",
         }
+    }
+}
+
+impl std::fmt::Display for HookPoint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for HookPoint {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
     }
 }
 
@@ -250,10 +279,11 @@ pub enum AgentEvent {
     /// A hook failure. Observer failures produce diagnostics without stopping the run.
     HookFailed {
         hook: String,
-        phase: &'static str,
+        /// Where the hook was called.
+        phase: HookPoint,
         error: String,
     },
-    /// The host persisted a summary request before calling the model.
+    /// A compaction's start and its summary request are recorded; the model is asked next.
     CompactionStart {
         input_bytes: usize,
         automatic: bool,
@@ -455,7 +485,7 @@ mod tests {
             },
             AgentEvent::HookFailed {
                 hook: "test".into(),
-                phase: "on_event",
+                phase: HookPoint::OnEvent,
                 error: "failed".into(),
             },
             AgentEvent::CompactionStart {
@@ -507,6 +537,19 @@ mod tests {
                 json!({"type": "tool_call_recovered", "toolCallId": "c", "toolName": "bash", "state": name})
             );
         }
+    }
+
+    #[test]
+    fn a_hook_failure_names_the_hook_method_as_its_phase() {
+        let event = AgentEvent::HookFailed {
+            hook: "audit".into(),
+            phase: HookPoint::AfterTool,
+            error: "audit after_tool failed: full".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&event).unwrap(),
+            json!({"type": "hook_failed", "hook": "audit", "phase": "after_tool", "error": "audit after_tool failed: full"})
+        );
     }
 
     #[test]

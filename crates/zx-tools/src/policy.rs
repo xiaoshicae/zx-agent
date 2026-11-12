@@ -1,5 +1,6 @@
-//! The built-in tool-call policies: rules by tool, the command policy of the `bash` tool, and
-//! the auto-approval of plain commands; the loop sees them only through Hooks.
+//! Tool-call policies: the [`ToolPolicy`] interface and the hook that applies one, and the
+//! built-in policies: rules by tool, the command policy of the `bash` tool, and the
+//! auto-approval of plain commands. The loop sees a policy only through Hooks.
 //!
 //! - `rules`: rules by tool name
 //! - `command`: the command policy of `bash`: denied patterns and programs
@@ -18,8 +19,15 @@ pub use auto_approve::{AutoApprove, ProgramOptions};
 pub use command::{CommandPolicy, DEFAULT_DENIED_PATTERNS, DENIED_PROGRAMS};
 pub use rules::{Rule, RuleMatcher, RulePolicy};
 
-use crate::agent::{HookContext, HookResult, HookStage, Hooks, PolicyDecision, ToolPolicy};
+use crate::agent::{HookContext, HookResult, HookStage, Hooks, PolicyDecision};
 use crate::ai::ToolCall;
+
+/// Decides whether a tool call may run. A policy joins a loop through a [`PolicyHook`].
+#[async_trait]
+pub trait ToolPolicy: Send + Sync {
+    /// Called after the tool is found and its arguments parsed, before it runs.
+    async fn check(&self, tool_name: &str, args: &Value) -> PolicyDecision;
+}
 
 /// Adapts an existing asynchronous policy to the bounded before_tool hook.
 pub struct PolicyHook {

@@ -502,9 +502,10 @@ pub(crate) async fn run_prompt_with(
     (report, sink)
 }
 
-/// A hook context for calling a hook directly: a fresh run in the current directory.
+/// A hook context for calling a hook directly: a fresh run of a session called `session`, in
+/// the current directory.
 pub(crate) fn hook_context() -> HookContext {
-    HookContext::new(None, PathBuf::from("."), CancellationToken::new())
+    HookContext::new("session".into(), PathBuf::from("."), CancellationToken::new())
 }
 
 /// Retries with millisecond delays, so retry tests stay fast.
