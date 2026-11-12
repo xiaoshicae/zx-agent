@@ -10,7 +10,7 @@ use super::Start;
 use crate::agent::{AgentEvent, EventTarget, Halt, LoopConfig, QueuedMessage, RunAccounting, RunOutcome, SessionHost};
 use crate::ai::retry::RetryPolicy;
 use crate::ai::{AssistantMessage, Message, StopReason, duration_ms};
-use crate::compaction::{self, Compacted, Compactor, End, Trigger};
+use crate::compaction::{self, Compacted, Compactor, End, TokenTrigger, Trigger};
 use crate::session::SessionStore;
 
 /// How a run ends: with the outcome of its last attempt, or failed for a reason.
@@ -229,15 +229,14 @@ impl SessionHost for RunHost<'_> {
         if !self.compaction.automatic() {
             return Ok(0);
         }
-        // Either trigger runs a summary: the bytes of the context, or the tokens the last
-        // response reported plus an estimate for what came after it.
-        let messages = self.session.messages();
-        let over_trigger = compaction::context_bytes(&messages)
+        // Either trigger runs a summary: the bytes of the context, or the tokens it is
+        // estimated to hold.
+        let over_trigger = compaction::context_bytes(&self.session.messages())
             .and_then(|bytes| {
                 let over_bytes = self.compaction.trigger_bytes.is_some_and(|limit| bytes > limit);
                 let over_tokens = match self.compaction.trigger_tokens {
-                    Some(limit) => compaction::context_tokens(&messages)? > limit,
-                    None => false,
+                    TokenTrigger::Above(limit) => compaction::context_tokens(self.session)? > limit,
+                    TokenTrigger::Unset | TokenTrigger::Off => false,
                 };
                 Ok(over_bytes || over_tokens)
             })

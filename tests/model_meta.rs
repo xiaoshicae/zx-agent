@@ -5,17 +5,19 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use common::{EchoTool, RunnerSetup, config, header, read_lines, seeded_session, summary_json};
+use common::{EchoTool, RunnerSetup, answer_reporting, config, header, read_lines, seeded_session, summary_json};
+use zx_agent::agent::{ContextEdit, HookContext, HookResult, Hooks};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::provider::{EventReceiver, event_channel, send_event};
 use zx_agent::ai::{
     AssistantMessage, Message, ModelCost, ModelMeta, Provider, Request, StopReason, StreamEvent, Usage,
 };
-use zx_agent::compaction::{self, Config, DEFAULT_RESERVE_TOKENS};
+use zx_agent::compaction::{self, Config, DEFAULT_RESERVE_TOKENS, TokenTrigger};
 use zx_agent::runner::RunOutcome;
 use zx_agent::session::{Entry, SessionStore};
 
@@ -173,7 +175,7 @@ async fn run_with_token_trigger(trigger_tokens: u64) -> (RunOutcome, Vec<&'stati
     let mut runner = runner
         .with_compaction(Config {
             trigger_bytes: None,
-            trigger_tokens: Some(trigger_tokens),
+            trigger_tokens: TokenTrigger::Above(trigger_tokens),
             keep_recent_bytes: 1,
             timeout: Duration::from_secs(1),
             ..Config::default()
@@ -197,8 +199,106 @@ async fn the_token_trigger_runs_a_summary_when_the_estimate_passes_it() {
     assert_eq!(requests, 1);
 }
 
-#[test]
-fn the_context_estimate_starts_from_the_last_reported_usage() {
+/// A token trigger of 1000 that keeps about 1 KiB of recent messages.
+fn token_trigger() -> Config {
+    Config {
+        trigger_tokens: TokenTrigger::Above(1_000),
+        keep_recent_bytes: 1_024,
+        timeout: Duration::from_secs(1),
+        ..Config::default()
+    }
+}
+
+#[tokio::test]
+async fn a_summary_is_not_repeated_for_the_usage_an_answer_reported_before_it() {
+    // An old message worth summarizing, then an answer that reported a context above the
+    // trigger and is recent enough for the summary to keep.
+    let mut store = SessionStore::in_memory(header());
+    let old = store
+        .append_message(Message::user("observed ".repeat(600)))
+        .await
+        .unwrap();
+    store.append_message(answer_reporting(5_000)).await.unwrap();
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::text(summary_json(&old)),
+        FauxStep::text("answer"),
+    ]));
+    let (runner, events) = RunnerSetup {
+        session: store,
+        ..RunnerSetup::new(config(provider.clone(), vec![]))
+    }
+    .build();
+    let mut runner = runner.with_compaction(token_trigger()).unwrap();
+
+    let report = runner.run("continue", &CancellationToken::new()).await;
+
+    assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
+    let compactions = events.kinds().iter().filter(|kind| **kind == "compaction_end").count();
+    assert_eq!(compactions, 1, "{:?}", events.kinds());
+    assert_eq!(
+        provider.requests().len(),
+        2,
+        "the summary request, then the task request"
+    );
+}
+
+/// Replaces the first long input with a short text, as a hook that trims old output does.
+struct TrimLongInput;
+
+#[async_trait]
+impl Hooks for TrimLongInput {
+    async fn transform_context(&self, messages: &[Message], _ctx: &HookContext) -> HookResult<Vec<ContextEdit>> {
+        let long = messages
+            .iter()
+            .position(|message| matches!(message, Message::User { content, .. } if content.len() > 100));
+        Ok(long
+            .map(|index| ContextEdit::ReplaceText {
+                index,
+                text: "trimmed".into(),
+            })
+            .into_iter()
+            .collect())
+    }
+}
+
+#[tokio::test]
+async fn the_token_trigger_follows_an_edit_made_after_the_last_reported_usage() {
+    // The last answer reported a context above the trigger. A hook then trims the message
+    // that made it large, and what is left is too recent to compact.
+    let mut store = SessionStore::in_memory(header());
+    store
+        .append_message(Message::user("observed ".repeat(600)))
+        .await
+        .unwrap();
+    store.append_message(answer_reporting(5_000)).await.unwrap();
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("answer")]));
+    let mut config = config(provider.clone(), vec![]);
+    config.hooks.push(TrimLongInput);
+    let (runner, events) = RunnerSetup {
+        session: store,
+        ..RunnerSetup::new(config)
+    }
+    .build();
+    let mut runner = runner.with_compaction(token_trigger()).unwrap();
+
+    let report = runner.run("continue", &CancellationToken::new()).await;
+
+    assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
+    assert!(!events.kinds().contains(&"compaction_start"), "{:?}", events.kinds());
+    assert_eq!(provider.requests().len(), 1);
+}
+
+/// An in-memory session that holds `messages`.
+async fn session_of(messages: &[Message]) -> SessionStore {
+    let mut store = SessionStore::in_memory(header());
+    for message in messages {
+        store.append_message(message.clone()).await.unwrap();
+    }
+    store
+}
+
+#[tokio::test]
+async fn the_context_estimate_starts_from_the_last_reported_usage() {
     let mut counted = AssistantMessage::failure("p", "m", StopReason::Stop, "");
     counted.error_message = None;
     counted.usage = Usage {
@@ -214,7 +314,7 @@ fn the_context_estimate_starts_from_the_last_reported_usage() {
     ];
     let after = compaction::context_bytes(&messages[2..]).unwrap();
     assert_eq!(
-        compaction::context_tokens(&messages).unwrap(),
+        compaction::context_tokens(&session_of(&messages).await).unwrap(),
         120 + after.div_ceil(4) as u64
     );
     // A failed answer reports nothing usable: every byte is estimated.
@@ -222,19 +322,25 @@ fn the_context_estimate_starts_from_the_last_reported_usage() {
     failed.stop_reason = StopReason::Error;
     let messages = vec![Message::user("a".repeat(400)), Message::Assistant(failed)];
     let all = compaction::context_bytes(&messages).unwrap();
-    assert_eq!(compaction::context_tokens(&messages).unwrap(), all.div_ceil(4) as u64);
-    assert_eq!(compaction::context_tokens(&[]).unwrap(), 1);
+    assert_eq!(
+        compaction::context_tokens(&session_of(&messages).await).unwrap(),
+        all.div_ceil(4) as u64
+    );
+    assert_eq!(compaction::context_tokens(&session_of(&[]).await).unwrap(), 1);
 }
 
 #[test]
 fn the_token_trigger_is_derived_from_a_context_window_below_its_reserve() {
     let mut config = Config::default();
     config.derive_trigger_tokens(100_000);
-    assert_eq!(config.trigger_tokens, Some(100_000 - DEFAULT_RESERVE_TOKENS));
+    assert_eq!(
+        config.trigger_tokens,
+        TokenTrigger::Above(100_000 - DEFAULT_RESERVE_TOKENS)
+    );
     config.derive_trigger_tokens(50_000);
     assert_eq!(
         config.trigger_tokens,
-        Some(100_000 - DEFAULT_RESERVE_TOKENS),
+        TokenTrigger::Above(100_000 - DEFAULT_RESERVE_TOKENS),
         "an explicit value stays"
     );
     let mut small = Config {
@@ -242,17 +348,22 @@ fn the_token_trigger_is_derived_from_a_context_window_below_its_reserve() {
         ..Config::default()
     };
     small.derive_trigger_tokens(1000);
-    assert_eq!(small.trigger_tokens, None, "a window within the reserve sets nothing");
+    assert_eq!(
+        small.trigger_tokens,
+        TokenTrigger::Unset,
+        "a window within the reserve sets nothing"
+    );
     // 20000 - 16384 tokens would lie within the 64 KiB of recent messages a summary keeps.
     let mut tight = Config::default();
     tight.derive_trigger_tokens(20_000);
     assert_eq!(
-        tight.trigger_tokens, None,
+        tight.trigger_tokens,
+        TokenTrigger::Unset,
         "no trigger a summary could never bring the context under"
     );
     assert!(
         Config {
-            trigger_tokens: Some(100),
+            trigger_tokens: TokenTrigger::Above(100),
             ..Config::default()
         }
         .validate()
@@ -262,7 +373,7 @@ fn the_token_trigger_is_derived_from_a_context_window_below_its_reserve() {
     );
     assert!(
         Config {
-            trigger_tokens: Some(0),
+            trigger_tokens: TokenTrigger::Above(0),
             ..Config::default()
         }
         .validate()

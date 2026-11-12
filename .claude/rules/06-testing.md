@@ -22,7 +22,7 @@ paths:
 | `fast_retry` / `header` / `read_lines` / `json_lines` | `tests/common/mod.rs` | 毫秒级退避的重试策略、会话头部、读取会话文件的每一行、把 JSON 行文本解析成值 |
 | `NotifyingProvider` | `tests/common/mod.rs` | 每个请求开始时通知（`started`）并记下取消令牌的脚本化 provider，测试"运行中"的行为时等它，不用 `sleep` |
 | `seeded_session` / `summary_json` / `replayed_requests` | `tests/common/mod.rs` | 一条值得摘要的旧消息加一条新输入的会话、模型回答摘要请求的 JSON、从会话文件的检查点还原的全部请求 |
-| `tool_call_answer` / `session_dir` / `session_files` / `signal` | `tests/common/mod.rs` | 崩溃前已记录的工具调用回答、chat 与 acp 的默认会话目录及其中的文件、给子进程发信号（Unix） |
+| `tool_call_answer` / `answer_reporting` / `session_dir` / `session_files` / `signal` | `tests/common/mod.rs` | 崩溃前已记录的工具调用回答、上报了给定输入 token 数的已完成回答、chat 与 acp 的默认会话目录及其中的文件、给子进程发信号（Unix） |
 | `Captured::user_texts` / `system_text` / `tool_results` | `tests/common/mock_server.rs` | 假模型服务记录的请求里的用户消息、系统消息与工具结果 |
 | `run_channel` / `Running` | `tests/common/im.rs` | 在自己的任务里运行一个 `ImChannel`，`next` 等它转交的事件，`stop` 取消并取回结果，`ended` 等它自行结束 |
 | `pty` | `tests/common/mod.rs` | Unix 伪终端：主端给测试，从端给子进程当终端 |

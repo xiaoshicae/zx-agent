@@ -281,7 +281,8 @@ fn apply_budgets(agent: &mut AgentDefinition, budget: &BudgetArgs) {
 }
 
 /// What is known about the models: the entries of config.toml. With automatic summaries on, a
-/// known window of `model` adds a token trigger below it.
+/// known window of `model` adds a token trigger below it, unless the agent set one or switched
+/// it off.
 fn model_meta(
     agent: &mut AgentDefinition,
     known: &HashMap<String, ModelMeta>,

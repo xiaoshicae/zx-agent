@@ -27,10 +27,11 @@
 //! - **Compaction** (the summary is the text it produces)
 //!   - records: `session/compaction.rs` (types and limits), `session/compaction/records.rs`
 //!     (appending and checking the records), `session/compaction/source.rs` (what a
-//!     compaction reads), `session/projection.rs` (the summary in the context)
-//!   - acts: `compaction.rs` (budgets and report), `compaction/compactor.rs` (one
-//!     compaction), `compaction/answer.rs` (the model's answer), `runner/run_host.rs` (when
-//!     to compact)
+//!     compaction reads), `session/projection.rs` (the summary in the context, and which
+//!     answer's usage still measures it)
+//!   - acts: `compaction.rs` (budgets, the token estimate and report),
+//!     `compaction/compactor.rs` (one compaction), `compaction/answer.rs` (the model's
+//!     answer), `runner/run_host.rs` (when to compact)
 //! - **Interrupted tool calls**
 //!   - records: `session/recovery.rs` (start records, the calls left without results)
 //!   - acts: `agent/agent_loop/tools.rs` (records the start of a call with side effects),

@@ -13,8 +13,8 @@ use std::time::Duration;
 use anyhow::{Result, ensure};
 use serde::Serialize;
 
-use crate::ai::{Message, StopReason, Usage};
-use crate::session::without_details;
+use crate::ai::{Message, Usage};
+use crate::session::{SessionStore, without_details};
 
 pub(crate) use compactor::Compactor;
 
@@ -28,10 +28,9 @@ pub struct Config {
     /// Serialized transcript threshold; None disables the byte trigger of automatic
     /// compaction.
     pub trigger_bytes: Option<usize>,
-    /// Estimated context tokens above which an automatic compaction runs, from the last
-    /// response's reported usage and the bytes added since ([`context_tokens`]); None
-    /// disables the token trigger. Either trigger runs a compaction.
-    pub trigger_tokens: Option<u64>,
+    /// When the estimated tokens of the context ([`context_tokens`]) run an automatic
+    /// compaction. Either trigger runs one.
+    pub trigger_tokens: TokenTrigger,
     /// Tokens kept free below a model's context window when the token trigger is derived
     /// from the window ([`Config::derive_trigger_tokens`]); pi's `reserveTokens`.
     pub reserve_tokens: u64,
@@ -43,6 +42,18 @@ pub struct Config {
     pub timeout: Duration,
 }
 
+/// The token trigger of automatic compaction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TokenTrigger {
+    /// No token trigger is set. A host that knows the model's context window may set one
+    /// ([`Config::derive_trigger_tokens`]); until then there is none.
+    Unset,
+    /// No token trigger, whatever the context window.
+    Off,
+    /// Above this many estimated tokens.
+    Above(u64),
+}
+
 /// The default of [`Config::reserve_tokens`] (pi: the default `reserveTokens`).
 pub const DEFAULT_RESERVE_TOKENS: u64 = 16_384;
 
@@ -50,7 +61,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             trigger_bytes: None,
-            trigger_tokens: None,
+            trigger_tokens: TokenTrigger::Unset,
             reserve_tokens: DEFAULT_RESERVE_TOKENS,
             keep_recent_bytes: 64 * 1024,
             max_summary_tokens: 2048,
@@ -62,17 +73,20 @@ impl Default for Config {
 impl Config {
     /// Whether automatic compaction is on: a byte or a token trigger is set.
     pub fn automatic(&self) -> bool {
-        self.trigger_bytes.is_some() || self.trigger_tokens.is_some()
+        self.trigger_bytes.is_some() || matches!(self.trigger_tokens, TokenTrigger::Above(_))
     }
 
     /// Set the token trigger from a model's context window, `reserve_tokens` below it (pi:
-    /// `contextWindow - reserveTokens`), unless one is set already. The trigger stays unset
-    /// when the window is no larger than the reserve, or when the trigger would not lie above
-    /// the recent messages a summary keeps.
+    /// `contextWindow - reserveTokens`), unless one is set already or it is switched off. The
+    /// trigger stays unset when the window is no larger than the reserve, or when the trigger
+    /// would not lie above the recent messages a summary keeps.
     pub fn derive_trigger_tokens(&mut self, context_window: u64) {
         let trigger = context_window.saturating_sub(self.reserve_tokens);
-        if self.trigger_tokens.is_none() && trigger > 0 && Self::leaves_room(trigger, self.keep_recent_bytes) {
-            self.trigger_tokens = Some(trigger);
+        if self.trigger_tokens == TokenTrigger::Unset
+            && trigger > 0
+            && Self::leaves_room(trigger, self.keep_recent_bytes)
+        {
+            self.trigger_tokens = TokenTrigger::Above(trigger);
         }
     }
 
@@ -85,15 +99,16 @@ impl Config {
     /// Reject budgets that cannot make progress or cannot bound external waiting.
     pub fn validate(&self) -> Result<()> {
         ensure!(self.keep_recent_bytes > 0, "keepRecentBytes must be greater than zero");
-        ensure!(
-            self.trigger_tokens.is_none_or(|tokens| tokens > 0),
-            "triggerTokens must be greater than zero (or absent to disable the token trigger)"
-        );
-        ensure!(
-            self.trigger_tokens
-                .is_none_or(|tokens| Self::leaves_room(tokens, self.keep_recent_bytes)),
-            "triggerTokens must exceed a quarter of keepRecentBytes, the tokens the kept recent messages take"
-        );
+        if let TokenTrigger::Above(tokens) = self.trigger_tokens {
+            ensure!(
+                tokens > 0,
+                "triggerTokens must be greater than zero (`TokenTrigger::Off` disables the token trigger)"
+            );
+            ensure!(
+                Self::leaves_room(tokens, self.keep_recent_bytes),
+                "triggerTokens must exceed a quarter of keepRecentBytes, the tokens the kept recent messages take"
+            );
+        }
         ensure!(
             self.trigger_bytes.is_none_or(|bytes| bytes > self.keep_recent_bytes),
             "triggerBytes must exceed keepRecentBytes (or be zero to disable auto compaction)"
@@ -241,28 +256,16 @@ pub fn context_bytes(messages: &[Message]) -> Result<usize> {
 /// `estimateTokens`, `Math.ceil(chars / 4)`).
 const BYTES_PER_TOKEN: usize = 4;
 
-/// An estimate of the tokens the next request's context holds (pi: `estimateContextTokens`):
-/// the prompt and output tokens the last answer with reported usage counted, plus a quarter
-/// of the bytes of the messages after it; without such an answer, a quarter of all bytes.
-/// Only an estimate: the usage counts the request as it was sent, and bytes are not tokens.
-pub fn context_tokens(messages: &[Message]) -> Result<u64> {
-    let counted = messages.iter().rposition(|message| {
-        matches!(message, Message::Assistant(answer)
-            if answer.usage.total_tokens > 0 && !matches!(answer.stop_reason, StopReason::Error | StopReason::Aborted))
-    });
-    let (known, rest) = match counted {
-        Some(index) => {
-            let Message::Assistant(answer) = &messages[index] else {
-                unreachable!("rposition found an assistant message")
-            };
-            (
-                answer.usage.input.saturating_add(answer.usage.output),
-                &messages[index + 1..],
-            )
-        }
-        None => (0, messages),
-    };
-    let bytes = context_bytes(rest)?;
+/// An estimate of the tokens the next request's context holds (pi:
+/// `estimateProjectedContextTokens`): the prompt and output tokens counted by the last answer
+/// whose usage still measures the context ([`SessionStore::measured_context`]), plus a
+/// quarter of the bytes of the messages after it; without such an answer, a quarter of all
+/// bytes. Only an estimate: the usage counts the request as it was sent, and bytes are not
+/// tokens.
+pub fn context_tokens(session: &SessionStore) -> Result<u64> {
+    let (measured, rest) = session.measured_context();
+    let known = measured.map_or(0, |usage| usage.input.saturating_add(usage.output));
+    let bytes = context_bytes(&rest)?;
     Ok(known.saturating_add(bytes.div_ceil(BYTES_PER_TOKEN) as u64))
 }
 
