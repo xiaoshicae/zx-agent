@@ -6,11 +6,11 @@
 
 | 文件 | 内容 |
 |---|---|
-| `tests/agent_loop.rs` | 循环语义：工具往返与顺序、失败、截断、上限、队列 |
+| `tests/step_loop.rs` | 循环语义：工具往返与顺序、失败、截断、上限、队列 |
 | `tests/runner.rs` | 运行层：重试、上限与预算、续写、持久化、恢复会话 |
 | `tests/agent_session.rs` | 共享会话：Busy、取消、订阅、模型与推理强度切换、起名 |
 | `tests/openai_mock.rs` | 真实 HTTP 下的 provider：SSE、重试、超时、取消、错误正文 |
-| `tests/prepare_request.rs` | `Hooks::prepare_request` 对单次请求的替换 |
+| `tests/prepare_request.rs` | `Hook::prepare_request` 对单次请求的替换 |
 | `tests/continue_run.rs` | 不加新输入的续跑 |
 | `tests/overflow_recovery.rs` | 上下文过长后摘要并开始新的尝试 |
 | `tests/run_cli.rs` | `run`：退出码 0 到 9、jsonl 输出、追踪导出、请求设置 |

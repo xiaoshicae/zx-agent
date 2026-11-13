@@ -15,4 +15,4 @@ paths:
 - **单位写进名字**：`timeout_secs`、`delay_ms`、`max_bytes`。内部计算用 `Duration`，只在 CLI 和序列化边界用带单位的整数。有含义的数字定义成常量，注释写来源或理由；跨模块引用常量，不手抄（搜索工具的 `first_lines()` 由 `MAX_LINE_BYTES` 算出）。
 - **注释**：`pub` 项写文档注释，首段一句话说明做什么，契约只写出错条件与是否响应取消；普通注释只写代码表达不了的"为什么"，一条规则只在一处讲，别处引用它；历史、日期、路线图与决策编号写进 `docs/`，不进代码；沿用 pi 的地方只在模块文档注明出处（`//! … (pi: packages/agent/src/agent-loop.ts)`），行级只标对应的标识符（`(pi: \`ThinkingLevel\`)`）；`unsafe` 块前写 `// SAFETY:`；不留被注释掉的代码。
 - **搬代码连文档一起搬**：移动函数时带上它的文档注释，搬完跑 `cargo doc` 查断链（两处挂错函数的文档都是搬家留下的）。
-- **match**：按变体分别处理的 match（如 `StopReason`、`AgentEvent`、`Message`）写全所有变体，不用 `_ =>` 兜底，新增变体时编译器会指出所有要改的地方。
+- **match**：按变体分别处理的 match（如 `StopReason`、`EventKind`、`Message`）写全所有变体，不用 `_ =>` 兜底，新增变体时编译器会指出所有要改的地方。

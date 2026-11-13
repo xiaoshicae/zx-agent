@@ -7,16 +7,16 @@
 use async_trait::async_trait;
 
 use super::Start;
-use crate::agent::{AgentEvent, EventTarget, Halt, LoopConfig, QueuedMessage, RunAccounting, RunOutcome, SessionHost};
 use crate::ai::retry::RetryPolicy;
 use crate::ai::{AssistantMessage, Message, StopReason, duration_ms};
 use crate::compaction::{self, Compacted, Compactor, End, TokenTrigger, Trigger};
-use crate::session::SessionStore;
+use crate::transcript::Transcript;
+use crate::{EventKind, EventTarget, Halt, Input, LoopConfig, RunAccounting, RunOutcome, SessionHost};
 
 /// How a run ends: with the outcome of its last attempt, or failed for a reason.
 pub(super) enum RunStop {
     /// The last attempt ended with this outcome, which explains itself; never
-    /// [`RunOutcome::Error`], which `Failed` states with its reason.
+    /// [`RunOutcome::Failed`], which `Failed` states with its reason.
     Ended(RunOutcome),
     /// The run failed, for this reason.
     Failed(String),
@@ -45,7 +45,7 @@ impl CompactionPause {
             End::Completed { .. } => self.0 = None,
             End::Failed(error) if paid => self.0 = Some(error.clone()),
             End::Unrecorded(error) if paid => self.0 = Some(format!("{error:#}")),
-            End::Failed(_) | End::Unrecorded(_) | End::Noop | End::Aborted(_) => {}
+            End::Failed(_) | End::Unrecorded(_) | End::Noop | End::Cancelled(_) => {}
         }
     }
 }
@@ -53,7 +53,7 @@ impl CompactionPause {
 /// A run's borrow of the Runner: the session, the configuration with its hooks and model,
 /// and the event sink.
 pub(super) struct RunHost<'a> {
-    pub(super) session: &'a mut SessionStore,
+    pub(super) session: &'a mut Transcript,
     pub(super) target: EventTarget<'a>,
     pub(super) config: &'a LoopConfig,
     pub(super) compaction: &'a compaction::Config,
@@ -64,10 +64,10 @@ impl RunHost<'_> {
     /// Open the run: announce it, record a result for each call an interrupted run left
     /// without one, and find the input the run starts with. An error says why the run cannot
     /// start.
-    pub(super) async fn open_run(&mut self, begin: Start) -> Result<Vec<QueuedMessage>, String> {
+    pub(super) async fn open_run(&mut self, begin: Start) -> Result<Vec<Input>, String> {
         let config = self.config;
         self.target
-            .emit(AgentEvent::RunStart {
+            .emit(EventKind::RunStart {
                 model: config.model.clone(),
                 provider: config.provider.name().into(),
             })
@@ -101,7 +101,7 @@ impl RunHost<'_> {
 
     /// The input a continuation starts with, after omitting a failed answer at the end; an
     /// error when there is nothing for the model to answer.
-    async fn continuation(&mut self) -> Result<Vec<QueuedMessage>, String> {
+    async fn continuation(&mut self) -> Result<Vec<Input>, String> {
         let projection = self.session.projection();
         let Some(last) = projection
             .iter()
@@ -151,7 +151,7 @@ impl RunHost<'_> {
             .map_err(|error| format!("cannot omit the failed attempt: {error:#}"))?;
         if let Some(index) = index {
             self.target
-                .emit(AgentEvent::ContextEdited {
+                .emit(EventKind::ContextEdited {
                     index,
                     replacement: None,
                     entry_id: edit,
@@ -171,14 +171,14 @@ impl RunHost<'_> {
         accounting: &mut RunAccounting,
     ) -> Result<(), RunStop> {
         self.target
-            .emit(AgentEvent::ContextOverflow { error: error.into() })
+            .emit(EventKind::ContextOverflow { error: error.into() })
             .await;
         self.omit_failed_attempt(failed_entry).await.map_err(RunStop::Failed)?;
         let compacted = self.compact(Trigger::Automatic, accounting.attempts).await;
         accounting.count_requests(compacted.requests, &compacted.usage);
         let reason = match compacted.end {
             End::Completed { .. } => return Ok(()),
-            End::Aborted(_) => return Err(RunStop::Ended(RunOutcome::Aborted)),
+            End::Cancelled(_) => return Err(RunStop::Ended(RunOutcome::Cancelled)),
             End::Unrecorded(error) => return Err(RunStop::Failed(format!("{error:#}"))),
             End::Failed(reason) => reason,
             End::Noop => "the model rejected the context as too long but cannot compact while preserving \
@@ -203,7 +203,7 @@ impl RunHost<'_> {
         accounting.retries += 1;
         let delay = retry.delay_for(accounting.retries, failed);
         self.target
-            .emit(AgentEvent::RetryScheduled {
+            .emit(EventKind::RetryScheduled {
                 retry: accounting.retries,
                 max_retries: retry.max_retries,
                 delay_ms: duration_ms(delay),
@@ -213,14 +213,14 @@ impl RunHost<'_> {
         self.omit_failed_attempt(failed_entry).await.map_err(RunStop::Failed)?;
         tokio::select! {
             () = tokio::time::sleep(delay) => Ok(()),
-            () = self.target.trace.cancel().cancelled() => Err(RunStop::Ended(RunOutcome::Aborted)),
+            () = self.target.trace.cancel().cancelled() => Err(RunStop::Ended(RunOutcome::Cancelled)),
         }
     }
 }
 
 #[async_trait]
 impl SessionHost for RunHost<'_> {
-    fn session(&mut self) -> &mut SessionStore {
+    fn session(&mut self) -> &mut Transcript {
         self.session
     }
 
@@ -255,7 +255,7 @@ impl SessionHost for RunHost<'_> {
         match compacted.end {
             End::Completed { .. } => Ok(compacted.requests),
             End::Unrecorded(error) => Err(Halt::Unrecorded(error)),
-            End::Failed(error) | End::Aborted(error) => Err(Halt::Failed(error)),
+            End::Failed(error) | End::Cancelled(error) => Err(Halt::Failed(error)),
             End::Noop => Err(Halt::Failed(
                 "context exceeds its compaction trigger but cannot be compacted while preserving \
                  system messages and the latest input; raise the trigger or start a new session"

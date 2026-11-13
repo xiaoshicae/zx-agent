@@ -14,14 +14,14 @@ use agent_client_protocol::v1::schema::{
 };
 use serde_json::Value;
 
-use zx_agent::agent::{AgentEvent, ApprovalResult, Event, EventSink, ToolVerdict};
 use zx_agent::ai::{
     AssistantMessage, ContentBlock as MessageBlock, Delta, Message, ToolCall as MessageCall, ToolResultMessage,
     UserMessageKind,
 };
-use zx_agent::session::{Entry, ProjectedMessage, SessionStore};
 use zx_agent::sync::lock;
 use zx_agent::tools::{EDIT_FILE, WRITE_FILE};
+use zx_agent::transcript::{Entry, ProjectedMessage, Transcript};
+use zx_agent::{ApprovalResult, Event, EventKind, EventSink, ToolVerdict};
 
 use super::tool_kind;
 use crate::render::call_label;
@@ -66,7 +66,7 @@ impl Updates {
     /// The person's prompts, the answers with their thoughts, and the tool calls with their
     /// results; an extension's message when it asked to be shown. Summaries and the model's
     /// own continuations are the model's, not the person's.
-    pub(super) fn replay(&self, store: &SessionStore) {
+    pub(super) fn replay(&self, store: &Transcript) {
         let projection = store.projection();
         for (index, item) in projection.iter().enumerate() {
             match &item.message {
@@ -289,29 +289,29 @@ pub(super) fn send(cx: &ConnectionTo<Client>, session_id: &SessionId, update: Se
 impl EventSink for Updates {
     fn emit(&self, event: &Event) {
         match &event.event {
-            AgentEvent::MessageStart { role: "assistant" } => lock(&self.state).wrote_text = false,
-            AgentEvent::MessageUpdate {
+            EventKind::MessageStart { role: "assistant" } => lock(&self.state).wrote_text = false,
+            EventKind::MessageUpdate {
                 delta: Delta::Text { text },
             } => self.text_streamed(text),
-            AgentEvent::MessageUpdate {
+            EventKind::MessageUpdate {
                 delta: Delta::Thinking { text },
             } => self.send(SessionUpdate::AgentThoughtChunk(Self::text_chunk(text))),
-            AgentEvent::MessageEnd {
+            EventKind::MessageEnd {
                 message: Message::Assistant(message),
                 ..
             } => self.answer_ended(message),
-            AgentEvent::ToolExecutionStart {
+            EventKind::ToolExecutionStart {
                 tool_call_id,
                 tool_name,
                 args,
             } => self.tool_started(tool_call_id, tool_name, args),
             // A call the policy lets through, or one the client approved, is running now.
-            AgentEvent::ToolDecision {
+            EventKind::ToolDecision {
                 tool_call_id,
                 verdict: ToolVerdict::Allow,
                 ..
             }
-            | AgentEvent::ApprovalResolved {
+            | EventKind::ApprovalResolved {
                 tool_call_id,
                 approval: ApprovalResult::AllowOnce | ApprovalResult::AllowSession | ApprovalResult::Remembered,
                 ..
@@ -319,11 +319,11 @@ impl EventSink for Updates {
                 tool_call_id,
                 ToolCallUpdateFields::new().status(ToolCallStatus::InProgress),
             ),
-            AgentEvent::MessageEnd {
+            EventKind::MessageEnd {
                 message: Message::ToolResult(result),
                 ..
             } => self.tool_ended(result),
-            AgentEvent::RetryScheduled {
+            EventKind::RetryScheduled {
                 retry,
                 max_retries,
                 delay_ms,
@@ -333,38 +333,38 @@ impl EventSink for Updates {
                 format!("Retrying the model request ({retry}/{max_retries}) in {delay_ms}ms"),
                 error,
             ),
-            AgentEvent::ContextOverflow { error } => self.notice(
+            EventKind::ContextOverflow { error } => self.notice(
                 NoticeSeverity::Warning,
                 "The context is too long for the model; summarizing before another attempt",
                 error,
             ),
-            AgentEvent::HookFailed { hook, phase, error } => {
+            EventKind::HookFailed { hook, phase, error } => {
                 self.notice(NoticeSeverity::Error, format!("Hook {hook} failed in {phase}"), error);
             }
-            AgentEvent::CompactionStart { .. } => self.compaction_update(&event.run_id, CompactionStatus::InProgress),
-            AgentEvent::CompactionEnd { .. } => self.compaction_update(&event.run_id, CompactionStatus::Completed),
-            AgentEvent::CompactionFailed { error, .. } => self.send(SessionUpdate::CompactionUpdate(
+            EventKind::CompactionStart { .. } => self.compaction_update(&event.run_id, CompactionStatus::InProgress),
+            EventKind::CompactionEnd { .. } => self.compaction_update(&event.run_id, CompactionStatus::Completed),
+            EventKind::CompactionFailed { error, .. } => self.send(SessionUpdate::CompactionUpdate(
                 CompactionUpdate::new(CompactionId::new(event.run_id.as_str()), CompactionStatus::Failed)
                     .error(error.clone()),
             )),
-            AgentEvent::RunStart { .. }
-            | AgentEvent::RunEnd { .. }
-            | AgentEvent::AgentStart { .. }
-            | AgentEvent::TurnStart { .. }
-            | AgentEvent::RequestStart { .. }
-            | AgentEvent::MessageStart { .. }
-            | AgentEvent::MessageUpdate { .. }
-            | AgentEvent::MessageEnd { .. }
-            | AgentEvent::ToolExecutionUpdate { .. }
-            | AgentEvent::ToolDecision { .. }
-            | AgentEvent::ApprovalRequested { .. }
-            | AgentEvent::ApprovalResolved { .. }
-            | AgentEvent::ToolExecutionEnd { .. }
-            | AgentEvent::TurnEnd { .. }
-            | AgentEvent::AgentEnd { .. }
-            | AgentEvent::ContextEdited { .. }
-            | AgentEvent::CustomEntry { .. }
-            | AgentEvent::ToolCallRecovered { .. } => {}
+            EventKind::RunStart { .. }
+            | EventKind::RunEnd { .. }
+            | EventKind::AttemptStart { .. }
+            | EventKind::StepStart { .. }
+            | EventKind::RequestStart { .. }
+            | EventKind::MessageStart { .. }
+            | EventKind::MessageUpdate { .. }
+            | EventKind::MessageEnd { .. }
+            | EventKind::ToolExecutionUpdate { .. }
+            | EventKind::ToolDecision { .. }
+            | EventKind::ApprovalRequested { .. }
+            | EventKind::ApprovalResolved { .. }
+            | EventKind::ToolExecutionEnd { .. }
+            | EventKind::StepEnd { .. }
+            | EventKind::AttemptEnd { .. }
+            | EventKind::ContextEdited { .. }
+            | EventKind::CustomEntry { .. }
+            | EventKind::ToolCallRecovered { .. } => {}
         }
     }
 }

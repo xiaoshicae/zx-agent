@@ -16,7 +16,6 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
-use zx_agent::agent::{ExecutionMode, Tool};
 use zx_agent::ai::Message;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::executor::{
@@ -24,6 +23,7 @@ use zx_agent::executor::{
 };
 use zx_agent::runner::RunOutcome;
 use zx_agent::tools::{BashTool, ReadFileTool};
+use zx_agent::{ExecutionMode, Tool};
 
 use common::fake_mcp::{Era, FakeMcp, tool};
 use common::mock_server::{MockServer, Reply};
@@ -482,7 +482,7 @@ async fn a_call_queued_behind_a_running_command_is_recorded_as_not_executed_when
         cancel.cancel();
     };
     let (report, ()) = tokio::join!(runner.run("go", &cancel), cancelling);
-    assert_eq!(report.outcome, RunOutcome::Aborted);
+    assert_eq!(report.outcome, RunOutcome::Cancelled);
     // The next run gives the calls left without a result one, from what the session recorded.
     runner.run("again", &CancellationToken::new()).await;
 

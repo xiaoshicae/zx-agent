@@ -12,8 +12,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::signal::{Signal, What};
-use crate::agent::{ApprovalResult, Interruption, RequestKind, RunOutcome, ToolVerdict};
 use crate::ai::{StopReason, Usage};
+use crate::{ApprovalResult, Interruption, RequestKind, RunOutcome, ToolVerdict};
 
 /// Builds spans from signals, one task owning every open span.
 pub(super) async fn export(mut receiver: mpsc::Receiver<Signal>, mut runs: Runs, stop: CancellationToken) {
@@ -44,7 +44,7 @@ pub(super) struct Runs {
 struct Open {
     run: Option<Context>,
     attempt: Option<Context>,
-    turn: Option<Context>,
+    step: Option<Context>,
     request: Option<Context>,
     compaction: Option<Context>,
     /// By call ID.
@@ -54,7 +54,7 @@ struct Open {
 impl Open {
     /// The innermost span that a new span or event belongs to.
     fn current(&self) -> Option<&Context> {
-        self.turn.as_ref().or(self.attempt.as_ref()).or(self.run.as_ref())
+        self.step.as_ref().or(self.attempt.as_ref()).or(self.run.as_ref())
     }
 
     /// The span of a tool call, or the innermost open one when the call has none.
@@ -62,20 +62,20 @@ impl Open {
         self.tools.get(call).or(self.current())
     }
 
-    /// End what an attempt holds open: tools, the request, a summary and the turn.
+    /// End what an attempt holds open: tools, the request, a summary and the step.
     fn end_attempt_parts(&mut self, at: SystemTime) {
         for (_, tool) in self.tools.drain() {
             end(Some(tool), at);
         }
         end(self.request.take(), at);
         end(self.compaction.take(), at);
-        end(self.turn.take(), at);
+        end(self.step.take(), at);
     }
 
     fn is_empty(&self) -> bool {
         self.run.is_none()
             && self.attempt.is_none()
-            && self.turn.is_none()
+            && self.step.is_none()
             && self.request.is_none()
             && self.compaction.is_none()
             && self.tools.is_empty()
@@ -119,8 +119,8 @@ impl Runs {
             } => run.run_end(outcome, model_requests, retries, &usage),
             What::AttemptStart { attempt } => run.attempt_start(attempt),
             What::AttemptEnd { outcome } => run.attempt_end(outcome),
-            What::TurnStart { turn } => run.turn_start(turn),
-            What::TurnEnd => run.turn_end(),
+            What::StepStart { step } => run.step_start(step),
+            What::StepEnd => run.step_end(),
             What::RequestStart { kind, model, attempt } => run.request_start(kind, model, attempt),
             What::Response { usage, stop } => run.response(&usage, stop),
             What::ToolStart { call, tool } => run.tool_start(call, tool),
@@ -186,7 +186,7 @@ impl OpenRun<'_> {
                 KeyValue::new("zx.retries", i64::from(retries)),
             ];
             attributes.extend(usage_attributes(usage));
-            finish(&run, self.at, attributes, outcome == RunOutcome::Error);
+            finish(&run, self.at, attributes, outcome == RunOutcome::Failed);
         }
     }
 
@@ -202,19 +202,19 @@ impl OpenRun<'_> {
         self.spans.end_attempt_parts(self.at);
         if let Some(attempt) = self.spans.attempt.take() {
             let attributes = vec![KeyValue::new("zx.outcome", name(&outcome))];
-            finish(&attempt, self.at, attributes, outcome == RunOutcome::Error);
+            finish(&attempt, self.at, attributes, outcome == RunOutcome::Failed);
         }
     }
 
-    fn turn_start(&mut self, turn: u32) {
-        end(self.spans.turn.take(), self.at);
+    fn step_start(&mut self, step: u32) {
+        end(self.spans.step.take(), self.at);
         let parent = self.spans.attempt.as_ref().or(self.spans.run.as_ref()).cloned();
-        let attributes = vec![KeyValue::new("zx.turn", i64::from(turn))];
-        self.spans.turn = Some(start(self.tracer, "turn", self.at, attributes, parent));
+        let attributes = vec![KeyValue::new("zx.step", i64::from(step))];
+        self.spans.step = Some(start(self.tracer, "step", self.at, attributes, parent));
     }
 
-    fn turn_end(&mut self) {
-        end(self.spans.turn.take(), self.at);
+    fn step_end(&mut self) {
+        end(self.spans.step.take(), self.at);
     }
 
     fn request_start(&mut self, kind: RequestKind, model: String, attempt: u32) {

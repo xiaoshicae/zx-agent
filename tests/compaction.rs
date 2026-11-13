@@ -11,13 +11,13 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::AgentSession;
-use zx_agent::agent::{AgentEvent, ContextEdit, Event, HookContext, HookOptions, Hooks};
 use zx_agent::agent_session::{AgentSessionError, ModelRef};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{AssistantMessage, ContentBlock, Message, Request, StopReason, ToolCall, ToolResultMessage};
 use zx_agent::compaction::{Config, Outcome, Report};
-use zx_agent::runner::{Limits, RunOutcome};
-use zx_agent::session::{Entry, SessionStore};
+use zx_agent::runner::{RunLimits, RunOutcome};
+use zx_agent::transcript::{Entry, Transcript};
+use zx_agent::{ContextEdit, Event, EventKind, Hook, HookContext, HookOptions};
 
 use common::summary_eval::{PLANTED, Planted, ROUNDS, evaluate, round, text_of};
 use common::{RunnerSetup, config, fast_retry, header, seeded_session, summary_json};
@@ -85,9 +85,9 @@ async fn automatic_summary_counts_against_task_request_budget_and_usage() {
     ]));
     let (runner, events) = RunnerSetup {
         session: store,
-        limits: Limits {
+        limits: RunLimits {
             max_model_requests: Some(2),
-            ..Limits::default()
+            ..RunLimits::default()
         },
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
@@ -105,16 +105,16 @@ async fn automatic_summary_counts_against_task_request_budget_and_usage() {
     assert_eq!(provider.requests().len(), 2);
     let messages = runner.session().messages();
     assert_eq!(provider.requests()[1].messages, messages[..messages.len() - 1]);
-    // The summary request counts against the budget, but only the task request is a turn.
-    let turns: Vec<_> = events
+    // The summary request counts against the budget, but only the task request is a step.
+    let steps: Vec<_> = events
         .events()
         .iter()
         .filter_map(|event| match event {
-            AgentEvent::TurnStart { turn } | AgentEvent::TurnEnd { turn } => Some(*turn),
+            EventKind::StepStart { step } | EventKind::StepEnd { step } => Some(*step),
             _ => None,
         })
         .collect();
-    assert_eq!(turns, [1, 1]);
+    assert_eq!(steps, [1, 1]);
     let kinds = events.kinds();
     let summary = kinds.iter().position(|kind| *kind == "compaction_start").unwrap();
     assert_eq!(
@@ -125,11 +125,11 @@ async fn automatic_summary_counts_against_task_request_budget_and_usage() {
 
 #[tokio::test]
 async fn steering_received_during_a_summary_is_persisted_before_the_next_task_request() {
-    struct SteerAfterSummary(Arc<zx_agent::agent::MessageQueues>);
+    struct SteerAfterSummary(Arc<zx_agent::InputQueue>);
     #[async_trait]
-    impl Hooks for SteerAfterSummary {
+    impl Hook for SteerAfterSummary {
         async fn on_event(&self, event: &Event, _ctx: &HookContext) -> Result<(), String> {
-            if matches!(event.event, AgentEvent::CompactionEnd { .. }) {
+            if matches!(event.event, EventKind::CompactionEnd { .. }) {
                 self.0.steer("new correction");
             }
             Ok(())
@@ -170,9 +170,9 @@ async fn summary_cannot_spend_an_extra_task_request_after_request_limit() {
     ]));
     let (runner, _) = RunnerSetup {
         session: store,
-        limits: Limits {
+        limits: RunLimits {
             max_model_requests: Some(1),
-            ..Limits::default()
+            ..RunLimits::default()
         },
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
@@ -201,9 +201,9 @@ async fn a_summary_request_counts_against_the_token_budget() {
     ]));
     let (runner, _) = RunnerSetup {
         session: store,
-        limits: Limits {
+        limits: RunLimits {
             token_budget: Some(15),
-            ..Limits::default()
+            ..RunLimits::default()
         },
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
@@ -245,7 +245,7 @@ async fn sdk_defaults_do_not_make_summary_requests() {
 
 #[tokio::test]
 async fn summary_requests_and_context_sizes_leave_tool_result_details_out() {
-    let mut store = SessionStore::in_memory(header());
+    let mut store = Transcript::in_memory(header());
     let old = store
         .append_message(Message::user("observed ".repeat(600)))
         .await
@@ -350,7 +350,7 @@ async fn invalid_or_truncated_summaries_never_replace_context_or_retry_as_tasks(
             })
             .unwrap();
         let report = runner.run("continue", &CancellationToken::new()).await;
-        assert_eq!(report.outcome, RunOutcome::Error, "{report:?}");
+        assert_eq!(report.outcome, RunOutcome::Failed, "{report:?}");
         assert_eq!(report.model_requests, 1);
         assert_eq!(report.retries, 0);
         assert!(report.final_text.is_empty());
@@ -404,9 +404,9 @@ async fn a_failed_automatic_summary_is_not_paid_for_again_on_the_next_prompt() {
         })
         .unwrap();
     let first = runner.run("continue", &CancellationToken::new()).await;
-    assert_eq!(first.outcome, RunOutcome::Error, "{first:?}");
+    assert_eq!(first.outcome, RunOutcome::Failed, "{first:?}");
     let second = runner.run("try again", &CancellationToken::new()).await;
-    assert_eq!(second.outcome, RunOutcome::Error, "{second:?}");
+    assert_eq!(second.outcome, RunOutcome::Failed, "{second:?}");
     assert_eq!(second.model_requests, 0);
     assert!(
         second.error.as_deref().unwrap_or_default().contains("paused"),
@@ -420,7 +420,7 @@ async fn the_pause_survives_a_run_whose_future_is_dropped() {
     /// Holds the input "hold" forever, after telling the test it is waiting.
     struct Hold(Arc<tokio::sync::Notify>);
     #[async_trait]
-    impl Hooks for Hold {
+    impl Hook for Hold {
         async fn on_input(&self, text: String, _ctx: &HookContext) -> Result<String, String> {
             if text == "hold" {
                 self.0.notify_one();
@@ -455,7 +455,7 @@ async fn the_pause_survives_a_run_whose_future_is_dropped() {
         })
         .unwrap();
     let first = runner.run("continue", &CancellationToken::new()).await;
-    assert_eq!(first.outcome, RunOutcome::Error, "{first:?}");
+    assert_eq!(first.outcome, RunOutcome::Failed, "{first:?}");
     {
         // Dropped while its input waits in a hook, before it reaches the summary step.
         let cancel = CancellationToken::new();
@@ -467,7 +467,7 @@ async fn the_pause_survives_a_run_whose_future_is_dropped() {
         }
     }
     let third = runner.run("try again", &CancellationToken::new()).await;
-    assert_eq!(third.outcome, RunOutcome::Error, "{third:?}");
+    assert_eq!(third.outcome, RunOutcome::Failed, "{third:?}");
     assert!(
         third.error.as_deref().unwrap_or_default().contains("paused"),
         "{third:?}"
@@ -500,13 +500,13 @@ async fn a_successful_manual_summary_resumes_automatic_summaries() {
         })
         .unwrap();
     let cancel = CancellationToken::new();
-    assert_eq!(runner.run("continue", &cancel).await.outcome, RunOutcome::Error);
+    assert_eq!(runner.run("continue", &cancel).await.outcome, RunOutcome::Failed);
     let compact = runner.compact(&cancel).await;
     assert_eq!(compact.outcome, Outcome::Completed, "{compact:?}");
     let answered = runner.run("next", &cancel).await;
     assert_eq!(answered.outcome, RunOutcome::Completed, "{answered:?}");
     let resumed = runner.run("again", &cancel).await;
-    assert_eq!(resumed.outcome, RunOutcome::Error, "{resumed:?}");
+    assert_eq!(resumed.outcome, RunOutcome::Failed, "{resumed:?}");
     assert_eq!(provider.requests().len(), 4);
 }
 
@@ -522,7 +522,7 @@ async fn an_input_that_cannot_fit_is_not_silently_truncated_or_sent_to_the_task_
         .unwrap();
     let input = "界".repeat(1000);
     let report = runner.run(input.as_str(), &CancellationToken::new()).await;
-    assert_eq!(report.outcome, RunOutcome::Error);
+    assert_eq!(report.outcome, RunOutcome::Failed);
     assert_eq!(report.model_requests, 0);
     assert!(provider.requests().is_empty());
     assert!(matches!(&runner.session().messages()[0], Message::User{content,..} if content == &input));
@@ -532,7 +532,7 @@ async fn an_input_that_cannot_fit_is_not_silently_truncated_or_sent_to_the_task_
 async fn context_hooks_are_persisted_before_a_summary_sees_the_source() {
     struct Correct;
     #[async_trait]
-    impl Hooks for Correct {
+    impl Hook for Correct {
         async fn transform_context(
             &self,
             messages: &[Message],
@@ -584,7 +584,7 @@ async fn context_hooks_are_persisted_before_a_summary_sees_the_source() {
 async fn a_context_plan_that_edits_a_summary_is_rejected_before_any_edit_is_written() {
     struct EditInputThenSummary;
     #[async_trait]
-    impl Hooks for EditInputThenSummary {
+    impl Hook for EditInputThenSummary {
         async fn transform_context(
             &self,
             messages: &[Message],
@@ -630,7 +630,7 @@ async fn a_context_plan_that_edits_a_summary_is_rejected_before_any_edit_is_writ
         })
         .unwrap();
     let report = runner.run("go", &CancellationToken::new()).await;
-    assert_eq!(report.outcome, RunOutcome::Error);
+    assert_eq!(report.outcome, RunOutcome::Failed);
     // A hook rejection, decided while validating the plan, not a failed session write.
     let error = report.error.unwrap();
     assert!(error.contains("transform_context"), "{error}");
@@ -698,8 +698,8 @@ async fn aborting_summary_records_failure_and_the_session_is_immediately_reusabl
     let compact = session.compact(&cancel);
     tokio::pin!(compact);
     tokio::select! { biased; result = &mut compact => panic!("unexpected completion: {result:?}"), () = tokio::task::yield_now() => {} }
-    assert!(session.abort());
-    assert_eq!(compact.await.unwrap().outcome, Outcome::Aborted);
+    assert!(session.cancel());
+    assert_eq!(compact.await.unwrap().outcome, Outcome::Cancelled);
     assert_eq!(
         session
             .prompt("next", &CancellationToken::new())
@@ -906,9 +906,9 @@ async fn the_run_timeout_also_bounds_automatic_compaction() {
     let provider = Arc::new(FauxProvider::new([FauxStep::Hang]));
     let (runner, _) = RunnerSetup {
         session: store,
-        limits: Limits {
+        limits: RunLimits {
             timeout: Some(Duration::from_millis(10)),
-            ..Limits::default()
+            ..RunLimits::default()
         },
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
@@ -920,7 +920,7 @@ async fn the_run_timeout_also_bounds_automatic_compaction() {
         })
         .unwrap();
     let report = runner.run("continue", &CancellationToken::new()).await;
-    assert_eq!(report.outcome, RunOutcome::Timeout);
+    assert_eq!(report.outcome, RunOutcome::TimedOut);
     assert_eq!(report.model_requests, 1);
     assert_eq!(provider.requests().len(), 1);
     assert!(matches!(
@@ -931,7 +931,7 @@ async fn the_run_timeout_also_bounds_automatic_compaction() {
 
 #[tokio::test]
 async fn a_single_large_old_message_does_not_force_the_entire_history_to_be_retained() {
-    let mut store = SessionStore::in_memory(header());
+    let mut store = Transcript::in_memory(header());
     let old = store
         .append_message(Message::user("x".repeat(300 * 1024)))
         .await

@@ -12,7 +12,7 @@ use agent_client_protocol::{Error, ErrorCode};
 use anyhow::Result;
 
 use zx_agent::AgentSession;
-use zx_agent::session::SessionName;
+use zx_agent::transcript::SessionName;
 
 use super::updates;
 use crate::session_files::preview_text;

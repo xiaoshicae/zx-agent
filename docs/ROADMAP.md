@@ -33,8 +33,9 @@
 | D18 | 没有命令白名单、幂等键与增量摘要；摘要只用全量模式，摘要源上限 2 MiB，超过后要 `/new` 开新会话 |
 | D19 | CLI 精简：chat 没有执行时间线、状态行、fork 与会话树命令（会话树与复制在 SDK）；otel 只导出 span；审批等待只有 `config.toml` 的 `approvalTimeoutSecs`（默认 600 秒，chat、acp 与 im 共用）；`--session` 只属于 `run` 与 `chat`；`[[mcp]]` 没有不看进度的总超时 |
 | D20 | 会话可以起名（pi 的 `/name`）：追加 `session_info` 记录，不改头部与文件名；以文件中最后一条为准，与分支无关，不进入模型上下文，复制分支时随分支上的记录复制。名称只有一行（控制字符换成空格、去掉首尾空白），不能为空，也不能清除。`zx-agent sessions` 与 `session/list` 有名称时显示名称。起名只经 ACP 的 `/name <名称>`（`available_commands_update` 声明，`session_info_update` 通知标题，不请求模型）与 SDK 的 `AgentSession::set_name`；chat 按 D13 不加命令；协议中由客户端改标题的 `session/set_title` 仍不稳定，不实现 |
-| D21 | 对外入口只有 `AgentSession` 和它独占的一半 `Runner`（测试与只有一个所有者的嵌入方直接用）。循环 `AgentLoop` 是 crate 内部类型：一次运行每次尝试（首次，以及每次重试或上下文溢出恢复）运行一遍，不提供单独运行一次循环的接口，因为生产代码没有这种用法。预算与计数只有一份：运行持有 `RunAccounting`，借给每次尝试的循环，请求、用量、轮次、续写与被拒绝的调用都直接记在运行上，预算按运行的累计检查，不在每次尝试前后复制。attempt 只表示尝试的序号（首次为 1，重试与上下文溢出恢复都会加一），如 `agent_start`、`request_start` 事件的 `attempt` 与追踪属性 `zx.attempt`；重试的序号叫 retry（首次重试为 1），如 `retry_scheduled` 事件的 `retry` 与追踪属性 `zx.retry`，与 `max_retries`、`RunReport.retries` 一致 |
+| D21 | 对外入口只有 `AgentSession` 和它独占的一半 `Runner`（测试与只有一个所有者的嵌入方直接用）。循环 `StepLoop` 是 crate 内部类型：一次运行每次尝试（首次，以及每次重试或上下文溢出恢复）运行一遍，不提供单独运行一次循环的接口，因为生产代码没有这种用法。预算与计数只有一份：运行持有 `RunAccounting`，借给每次尝试的循环，请求、用量、步数、续写与被拒绝的调用都直接记在运行上，预算按运行的累计检查，不在每次尝试前后复制。attempt 只表示尝试的序号（首次为 1，重试与上下文溢出恢复都会加一），如 `attempt_start`、`request_start` 事件的 `attempt` 与追踪属性 `zx.attempt`；重试的序号叫 retry（首次重试为 1），如 `retry_scheduled` 事件的 `retry` 与追踪属性 `zx.retry`，与 `max_retries`、`RunReport.retries` 一致 |
 | D22 | 摘要功能统一叫 compaction：这次操作本身（触发、开始、结果、失败）及其记录、模块、类型、函数与 ID 都叫 compaction（`session::compaction`、`compaction::Compactor`，记录中指向 `compaction_started` 的字段叫 `compactionId`）；summary 只指 compaction 产出的文本、文本的限额，以及向模型要这段文本的请求（`request_start` 的 `kind: summary`、会话中的 `RequestSource::Summary`）；attempt 只用于运行的尝试（D21） |
+| D23 | 领域词只有 Session、Run、Step、ToolCall 四层：一次任务请求及其工具调用叫 step（事件 `step_start` / `step_end`、钩子 `finish_step`、追踪中的 `step` span），不再叫 turn；ACP 协议与 chat 界面里的 turn 指一次提问到回答，保持原样。attempt 仍只表示运行的尝试（D21），其事件叫 `attempt_start` / `attempt_end`。运行结果用过去分词：`completed`、`truncated`、`failed`、`cancelled`、`timed_out`；三个上限沿用配置里的名字 `model_request_limit`、`token_budget`、`cost_budget`，因为退出码、IM 回复与 ACP 的停止原因都要逐个区分它们，且结果在 JSON 中保持为一个字符串。会话的记录树叫 transcript（模块 `transcript`、类型 `Transcript`）。事件格式版本为 4 |
 
 ## 4. 当前阶段
 
@@ -45,6 +46,7 @@ P0–P5 与 P10–P14（P10 为与 pi 的能力对齐）已完成。进行中：
 - P8 `acp`：已实现，待在 Zed 或 Wisp 上实测。
 - P9 可选增强：剩更多 provider。
 - P15 IM 对话模型（D16）：Slack 实现了读线程、查名字与回执；⚑ D:5/CHINA FLAG: 飞书只做消息分类，这三项沿用默认（不读历史、用 open_id、不回执），待按需补上。待在真实 Slack 工作区验证线程回复事件带 `thread_ts`（官方事件页未写明）。
+- P16 入口与接口重整：目标是 `Agent`、`Session`、`Run` 三个入口对象，模型、工具、会话存储、权限策略、钩子、摘要各有接口并可替换，命令行从库中拆出。分六期，每期四条命令全部通过后再进入下一期：① 改名与模块重组（D23；内核的 `agent` 模块按对象拆成 `tools`、`policy`、`hooks`、`events`、`input`，循环移入 `runner`），已完成；② `ToolPolicy` 移入内核，钩子不再做放行判断；③ `SessionStore` 接口、`MemoryStore`，存储类型不含文件路径；④ `Agent`、`Session`、`Run`，去掉 `Interaction` 与 `EventSink`（届时更新 D21）；⑤ `Summarizer`、`Actor` 与会话标签；⑥ 拆出 `zx-cli`。
 
 ## 5. 待办与已知缺口
 
@@ -90,4 +92,4 @@ P0–P5 与 P10–P14（P10 为与 pi 的能力对齐）已完成。进行中：
 
 ---
 
-ROADMAP.md · v0.15 · 2026年11月
+ROADMAP.md · v0.16 · 2026年11月

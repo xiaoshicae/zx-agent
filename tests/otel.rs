@@ -1,5 +1,5 @@
 //! The OpenTelemetry export of real runs: one trace per run, with a span for each attempt,
-//! turn, model request and tool call, and a run that continues the caller's trace.
+//! step, model request and tool call, and a run that continues the caller's trace.
 mod common;
 
 use std::future::Future;
@@ -58,7 +58,7 @@ async fn a_run_exports_one_trace_with_a_span_per_request_and_tool_call() {
     names.sort_unstable();
     assert_eq!(
         names,
-        ["attempt", "request", "request", "run", "tool echo", "turn", "turn"]
+        ["attempt", "request", "request", "run", "step", "step", "tool echo"]
     );
     let run = spans.iter().find(|span| span.name == "run").unwrap();
     assert!(

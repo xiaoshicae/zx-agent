@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 
 use common::fake_slack::{Answer, FakeSlack};
 use common::im::run_channel;
-use zx_agent::agent::ApprovalResult;
+use zx_agent::ApprovalResult;
 use zx_agent::im::slack::{SlackChannel, SlackConfig};
 use zx_agent::im::{
     Addressee, ApprovalId, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId,

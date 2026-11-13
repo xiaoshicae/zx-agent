@@ -6,8 +6,8 @@ use serde_json::Value;
 
 use super::auto_approve::AutoApprove;
 use super::{ToolPolicy, command_of};
-use crate::agent::PolicyDecision;
 use crate::tools::BASH;
+use zx_core::PolicyDecision;
 
 /// The calls a rule matches. Bash commands are told apart by [`AutoApprove`], not by rules.
 #[derive(Clone, Debug, PartialEq, Eq)]

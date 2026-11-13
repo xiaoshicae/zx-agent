@@ -23,17 +23,17 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use tokio::sync::Notify;
-use zx_agent::agent::{
-    AgentEvent, Event, EventSink, ExecutionMode, HookContext, LoopConfig, MessageQueues, QueuedMessage, Tool,
-    ToolContext, ToolOutput,
-};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::{
     AssistantMessage, ContentBlock, EventReceiver, Message, Provider, Request, StopReason, ToolCall, ToolDef, Usage,
 };
-use zx_agent::runner::{Limits, RunReport, Runner};
-use zx_agent::session::{Entry, SessionHeader, SessionStore};
+use zx_agent::runner::{RunLimits, RunReport, Runner};
+use zx_agent::transcript::{Entry, SessionHeader, Transcript};
+use zx_agent::{
+    Event, EventKind, EventSink, ExecutionMode, HookContext, Input, InputQueue, LoopConfig, Tool, ToolContext,
+    ToolOutput,
+};
 
 /// The compiled `zx-agent`, for the tests that drive the program.
 ///
@@ -228,8 +228,8 @@ pub(crate) fn answer_reporting(input: u64) -> Message {
 
 /// A session with one old message worth summarizing and a recent input; returns the old
 /// message's entry ID.
-pub(crate) async fn seeded_session() -> (SessionStore, String) {
-    let mut store = SessionStore::in_memory(header());
+pub(crate) async fn seeded_session() -> (Transcript, String) {
+    let mut store = Transcript::in_memory(header());
     let old = store
         .append_message(Message::user("observed ".repeat(600)))
         .await
@@ -245,7 +245,7 @@ pub(crate) fn summary_json(id: &str) -> String {
 }
 
 /// Every request of the session, rebuilt from its checkpoints, in order.
-pub(crate) fn replayed_requests(store: &SessionStore) -> Vec<Request> {
+pub(crate) fn replayed_requests(store: &Transcript) -> Vec<Request> {
     store
         .entries()
         .iter()
@@ -296,8 +296,8 @@ impl Provider for NotifyingProvider {
 
 /// The bounds the runner tests use unless they set their own: 30 model requests and 15
 /// minutes, those of the unattended agent (the kernel's own defaults are unlimited).
-pub(crate) fn test_limits() -> Limits {
-    Limits {
+pub(crate) fn test_limits() -> RunLimits {
+    RunLimits {
         max_model_requests: Some(30),
         timeout: Some(Duration::from_secs(900)),
         token_budget: None,
@@ -312,7 +312,7 @@ pub(crate) struct EchoTool {
     pub name: &'static str,
     pub mode: ExecutionMode,
     pub calls: AtomicUsize,
-    pub queues: Option<Arc<MessageQueues>>,
+    pub queues: Option<Arc<InputQueue>>,
 }
 
 impl EchoTool {
@@ -359,10 +359,7 @@ impl Tool for EchoTool {
             queues.follow_up(text);
         }
         if let (Some(queues), Some(text)) = (&self.queues, args.get("withdraw").and_then(Value::as_str)) {
-            assert!(
-                queues.withdraw(&QueuedMessage::User(text.into())),
-                "{text:?} is not queued"
-            );
+            assert!(queues.withdraw(&Input::User(text.into())), "{text:?} is not queued");
         }
         if args.get("panic").is_some() {
             panic!("tool bug");
@@ -400,17 +397,17 @@ impl Collect {
     }
 
     /// The events without their envelopes.
-    pub(crate) fn events(&self) -> Vec<AgentEvent> {
+    pub(crate) fn events(&self) -> Vec<EventKind> {
         self.envelopes().into_iter().map(|event| event.event).collect()
     }
 
     pub(crate) fn kinds(&self) -> Vec<&'static str> {
-        self.events().iter().map(AgentEvent::kind).collect()
+        self.events().iter().map(EventKind::kind).collect()
     }
 
-    /// Task turns started: the `turn_start` events.
-    pub(crate) fn turns(&self) -> usize {
-        self.kinds().iter().filter(|kind| **kind == "turn_start").count()
+    /// Task steps started: the `step_start` events.
+    pub(crate) fn steps(&self) -> usize {
+        self.kinds().iter().filter(|kind| **kind == "step_start").count()
     }
 
     /// Tool call ids of `tool_execution_end` events, in emission order.
@@ -418,7 +415,7 @@ impl Collect {
         self.events()
             .into_iter()
             .filter_map(|event| match event {
-                AgentEvent::ToolExecutionEnd { tool_call_id, .. } => Some(tool_call_id),
+                EventKind::ToolExecutionEnd { tool_call_id, .. } => Some(tool_call_id),
                 _ => None,
             })
             .collect()
@@ -483,13 +480,13 @@ pub(crate) async fn run_prompt_with(
     max_model_requests: u32,
     cancel: &CancellationToken,
 ) -> (RunReport, Arc<Collect>) {
-    let mut session = SessionStore::in_memory(header());
+    let mut session = Transcript::in_memory(header());
     for message in context.iter() {
         session.append_message(message.clone()).await.unwrap();
     }
-    let limits = Limits {
+    let limits = RunLimits {
         max_model_requests: Some(max_model_requests),
-        ..Limits::default()
+        ..RunLimits::default()
     };
     let (mut runner, sink) = RunnerSetup {
         limits,
@@ -532,8 +529,8 @@ pub(crate) fn read_lines(path: &Path) -> Vec<Value> {
 pub(crate) struct RunnerSetup {
     pub config: LoopConfig,
     pub retry: RetryPolicy,
-    pub limits: Limits,
-    pub session: SessionStore,
+    pub limits: RunLimits,
+    pub session: Transcript,
 }
 
 impl RunnerSetup {
@@ -542,7 +539,7 @@ impl RunnerSetup {
             config,
             retry: fast_retry(0),
             limits: test_limits(),
-            session: SessionStore::in_memory(header()),
+            session: Transcript::in_memory(header()),
         }
     }
 

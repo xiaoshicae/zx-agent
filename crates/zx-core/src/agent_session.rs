@@ -13,16 +13,15 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::{
-    ActiveTools, CommandContext, CommandError, CommandOutcome, EventSink, LoopConfig, MessageQueues, QueuedMessage,
-    SlashCommand,
-};
 use crate::ai::retry::RetryPolicy;
 use crate::ai::{Provider, Reasoning};
 use crate::compaction;
-use crate::runner::{Limits, RunReport, Runner};
-use crate::session::{CustomMessage, SessionName, SessionStore};
+use crate::runner::{RunLimits, RunReport, Runner};
 use crate::sync::lock;
+use crate::transcript::{CustomMessage, SessionName, Transcript};
+use crate::{
+    ActiveTools, CommandContext, CommandError, CommandOutcome, EventSink, Input, InputQueue, LoopConfig, SlashCommand,
+};
 
 use subscribers::EventHub;
 pub use subscribers::Subscription;
@@ -47,7 +46,7 @@ pub enum AgentSessionError {
     /// The entry a branch switch names is not in the session.
     #[error("no entry with that ID in the session")]
     EntryNotFound,
-    /// The session could not record an entry; see [`SessionStore::writes_stopped`].
+    /// The session could not record an entry; see [`Transcript::writes_stopped`].
     #[error("cannot write the session: {0}")]
     WriteFailed(String),
 }
@@ -66,7 +65,7 @@ enum State {
 /// use std::sync::Arc;
 /// use tokio_util::sync::CancellationToken;
 /// use zx_core::AgentSession;
-/// use zx_core::agent::Event;
+/// use zx_core::Event;
 /// use zx_core::agent_session::AgentSessionError;
 /// use zx_core::runner::Runner;
 ///
@@ -85,7 +84,7 @@ pub struct AgentSession {
     state: Mutex<State>,
     // Queues, the tool set and events are genuinely shared with the Runner while a prompt
     // owns it.
-    queues: Arc<MessageQueues>,
+    queues: Arc<InputQueue>,
     active_tools: Arc<ActiveTools>,
     events: Arc<EventHub>,
     commands: Vec<Arc<dyn SlashCommand>>,
@@ -98,8 +97,8 @@ impl AgentSession {
     pub fn new(
         config: LoopConfig,
         retry: RetryPolicy,
-        limits: Limits,
-        session: SessionStore,
+        limits: RunLimits,
+        session: Transcript,
         sink: Arc<dyn EventSink>,
     ) -> Self {
         Self::from(Runner::new(config, retry, limits, session, sink))
@@ -112,7 +111,7 @@ impl AgentSession {
     /// the future cancels its work and immediately releases the conversation.
     pub async fn prompt(
         &self,
-        message: impl Into<QueuedMessage>,
+        message: impl Into<Input>,
         cancel: &CancellationToken,
     ) -> Result<RunReport, AgentSessionError> {
         // The conversion is host code: it runs before the conversation is leased.
@@ -145,7 +144,7 @@ impl AgentSession {
     /// `follow_up`) or a message from an extension (`steer_message`, `follow_up_message`), to
     /// record extension state during a run (`append_entry`), and to choose how many queued
     /// messages a request takes (`set_mode`).
-    pub fn queues(&self) -> &MessageQueues {
+    pub fn queues(&self) -> &InputQueue {
         &self.queues
     }
 
@@ -196,7 +195,7 @@ impl AgentSession {
 
     /// Name the session while idle (pi: `setSessionName`): listings show the name instead of
     /// the first prompt, and the model never sees it. The latest name counts, whichever branch
-    /// it was given on; `inspect` with [`SessionStore::session_name`] reads it. Returns the
+    /// it was given on; `inspect` with [`Transcript::session_name`] reads it. Returns the
     /// entry's ID. A run returns Busy; a write failure returns WriteFailed.
     pub async fn set_name(&self, name: SessionName) -> Result<String, AgentSessionError> {
         self.append_idle(async |store| store.append_session_name(name).await)
@@ -207,7 +206,7 @@ impl AgentSession {
     /// prompt. A run returns Busy; a write failure returns WriteFailed.
     async fn append_idle(
         &self,
-        append: impl AsyncFnOnce(&mut SessionStore) -> anyhow::Result<String>,
+        append: impl AsyncFnOnce(&mut Transcript) -> anyhow::Result<String>,
     ) -> Result<String, AgentSessionError> {
         let mut lease = self.lease(CancellationToken::new())?;
         append(lease.runner().session_mut())
@@ -217,10 +216,10 @@ impl AgentSession {
 
     /// Take the input that `queues().steer` and `follow_up` queued and no run consumed: steering
     /// messages first, then follow-ups, each oldest first. A run looks for input at the end
-    /// of each turn, so input queued as it ends waits for the next run; a host that starts
+    /// of each step, so input queued as it ends waits for the next run; a host that starts
     /// runs itself calls this when one ends and prompts with what it gets. Returns Busy
     /// during a prompt or compaction, whose loop may still take the input.
-    pub fn take_queued(&self) -> Result<Vec<QueuedMessage>, AgentSessionError> {
+    pub fn take_queued(&self) -> Result<Vec<Input>, AgentSessionError> {
         // Holding the state lock keeps a prompt from starting between the check and the take.
         self.idle(|_| self.queues.take_all())
     }
@@ -229,7 +228,7 @@ impl AgentSession {
     /// operations that read or write the session while idle (`inspect`, `append_entry`,
     /// `append_custom_message`, `set_name`) hold the conversation as well: during one of
     /// them this returns true, although they have nothing to cancel.
-    pub fn abort(&self) -> bool {
+    pub fn cancel(&self) -> bool {
         let cancel = match &*lock(&self.state) {
             State::Idle(_) => return false,
             State::Leased(cancel) => cancel.clone(),
@@ -294,7 +293,7 @@ impl AgentSession {
     /// Read the session while idle, for example to list its entries or find the current
     /// position. `f` runs with the conversation leased, as a prompt does: other calls get
     /// Busy until it returns, and no lock is held while host code runs. A run returns Busy.
-    pub fn inspect<T>(&self, f: impl FnOnce(&SessionStore) -> T) -> Result<T, AgentSessionError> {
+    pub fn with_transcript<T>(&self, f: impl FnOnce(&Transcript) -> T) -> Result<T, AgentSessionError> {
         let mut lease = self.lease(CancellationToken::new())?;
         Ok(f(lease.runner().session()))
     }

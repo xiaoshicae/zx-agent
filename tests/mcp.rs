@@ -11,11 +11,11 @@ use tokio_util::sync::CancellationToken;
 
 use common::fake_mcp::{Era, FakeMcp, Reply, SESSION, tool};
 use common::{config, run_prompt, summarize};
-use zx_agent::agent::{Tool, ToolContext, ToolOutput};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::extensions::{Extension, register};
 use zx_agent::mcp::{Server, ServerConfig};
 use zx_agent::tools::truncate::MAX_BYTES;
+use zx_agent::{Tool, ToolContext, ToolOutput};
 
 const TOKEN: &str = "mcp-token-1234";
 

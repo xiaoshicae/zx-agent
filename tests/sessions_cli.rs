@@ -15,7 +15,7 @@ use tokio::process::Command;
 use common::mock_server::{MockServer, Reply};
 use common::{Home, fake_model_config, stderr, stdout, write_config, zx_agent_in};
 use zx_agent::ai::Message;
-use zx_agent::session::{SESSION_VERSION, SessionStore};
+use zx_agent::transcript::{SESSION_VERSION, Transcript};
 
 const KEY_VAR: &str = "ZX_SESSIONS_TEST_KEY";
 
@@ -85,7 +85,7 @@ fn files(dir: &Path) -> Vec<PathBuf> {
 }
 
 fn prompts(path: &Path) -> Vec<String> {
-    SessionStore::read(path)
+    Transcript::read(path)
         .unwrap()
         .messages()
         .into_iter()
@@ -130,7 +130,7 @@ async fn chat_keeps_each_conversation_in_its_own_file_under_the_home_directory()
     assert_eq!(prompts, [["again"], ["hello"]]);
     for path in &files {
         // Named <UTC time>_<session ID>.jsonl.
-        let id = SessionStore::read(path).unwrap().header().id.clone();
+        let id = Transcript::read(path).unwrap().header().id.clone();
         let name = path.file_name().unwrap().to_str().unwrap();
         assert!(name.ends_with(&format!("_{id}.jsonl")), "{name}");
         assert!(name.starts_with("20") && name.contains('T'), "{name}");

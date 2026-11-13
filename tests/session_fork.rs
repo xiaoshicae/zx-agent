@@ -11,7 +11,7 @@ use common::{RunnerSetup, config, header, read_lines};
 use zx_agent::ai::Message;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::runner::RunOutcome;
-use zx_agent::session::{Entry, SESSION_VERSION, SessionHeader, SessionStore};
+use zx_agent::transcript::{Entry, SESSION_VERSION, SessionHeader, Transcript};
 
 fn ids(entries: &[&Entry]) -> Vec<String> {
     entries.iter().map(|entry| entry.id().to_string()).collect()
@@ -21,7 +21,7 @@ fn ids(entries: &[&Entry]) -> Vec<String> {
 async fn a_fork_copies_one_branch_unchanged_and_names_its_parent() {
     let dir = tempfile::tempdir().unwrap();
     let source_path = dir.path().join("source.jsonl");
-    let mut source = SessionStore::create(&source_path, header()).unwrap();
+    let mut source = Transcript::create(&source_path, header()).unwrap();
     source.append_message(Message::user("question")).await.unwrap();
     let answer = source.append_message(Message::user("first answer")).await.unwrap();
     source.append_message(Message::user("abandoned")).await.unwrap();
@@ -29,7 +29,7 @@ async fn a_fork_copies_one_branch_unchanged_and_names_its_parent() {
     let kept = source.append_message(Message::user("kept")).await.unwrap();
     let fork_path = dir.path().join("fork.jsonl");
 
-    let mut fork = SessionStore::create(&fork_path, source.fork_header(dir.path(), "other-model")).unwrap();
+    let mut fork = Transcript::create(&fork_path, source.fork_header(dir.path(), "other-model")).unwrap();
     let copied = fork.copy_branch(&source, &kept).await.unwrap();
 
     assert_eq!(copied, 3);
@@ -55,7 +55,7 @@ async fn a_fork_copies_one_branch_unchanged_and_names_its_parent() {
     assert_ne!(header["id"], source_lines[0]["id"]);
     // The fork is an ordinary session: it reopens and takes new entries.
     drop(fork);
-    let mut reopened = SessionStore::open(&fork_path).unwrap();
+    let mut reopened = Transcript::open(&fork_path).unwrap();
     reopened.append_message(Message::user("more")).await.unwrap();
     assert_eq!(reopened.messages().len(), 4);
     assert_eq!(
@@ -70,7 +70,7 @@ async fn requests_of_the_copied_branch_replay_from_the_fork() {
     let dir = tempfile::tempdir().unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("answer")]));
     let (mut runner, _) = RunnerSetup {
-        session: SessionStore::create(&dir.path().join("source.jsonl"), header()).unwrap(),
+        session: Transcript::create(&dir.path().join("source.jsonl"), header()).unwrap(),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build();
@@ -80,11 +80,11 @@ async fn requests_of_the_copied_branch_replay_from_the_fork() {
     let leaf = source.leaf_id().unwrap().to_string();
     let fork_path = dir.path().join("fork.jsonl");
 
-    let mut fork = SessionStore::create(&fork_path, source.fork_header(dir.path(), "m")).unwrap();
+    let mut fork = Transcript::create(&fork_path, source.fork_header(dir.path(), "m")).unwrap();
     fork.copy_branch(source, &leaf).await.unwrap();
     drop(fork);
 
-    let fork = SessionStore::open(&fork_path).unwrap();
+    let fork = Transcript::open(&fork_path).unwrap();
     let replayed: Vec<_> = fork
         .entries()
         .iter()
@@ -98,15 +98,15 @@ async fn requests_of_the_copied_branch_replay_from_the_fork() {
 
 #[tokio::test]
 async fn a_branch_is_copied_only_into_an_empty_session() {
-    let mut source = SessionStore::in_memory(header());
+    let mut source = Transcript::in_memory(header());
     let leaf = source.append_message(Message::user("q")).await.unwrap();
 
-    let mut busy = SessionStore::in_memory(source.fork_header(std::path::Path::new("."), "m"));
+    let mut busy = Transcript::in_memory(source.fork_header(std::path::Path::new("."), "m"));
     busy.append_message(Message::user("already here")).await.unwrap();
     let error = busy.copy_branch(&source, &leaf).await.unwrap_err();
     assert!(error.to_string().contains("empty session"), "{error}");
 
-    let mut fresh = SessionStore::in_memory(source.fork_header(std::path::Path::new("."), "m"));
+    let mut fresh = Transcript::in_memory(source.fork_header(std::path::Path::new("."), "m"));
     let error = fresh.copy_branch(&source, "missing").await.unwrap_err();
     assert!(error.to_string().contains("entry missing not found"), "{error}");
     assert!(fresh.entries().is_empty());

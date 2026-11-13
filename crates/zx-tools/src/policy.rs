@@ -1,6 +1,6 @@
 //! Tool-call policies: the [`ToolPolicy`] interface and the hook that applies one, and the
 //! built-in policies: rules by tool, the command policy of the `bash` tool, and the
-//! auto-approval of plain commands. The loop sees a policy only through Hooks.
+//! auto-approval of plain commands. The loop sees a policy only through Hook.
 //!
 //! - `rules`: rules by tool name
 //! - `command`: the command policy of `bash`: denied patterns and programs
@@ -19,8 +19,8 @@ pub use auto_approve::{AutoApprove, ProgramOptions};
 pub use command::{CommandPolicy, DEFAULT_DENIED_PATTERNS, DENIED_PROGRAMS};
 pub use rules::{Rule, RuleMatcher, RulePolicy};
 
-use crate::agent::{HookContext, HookResult, HookStage, Hooks, PolicyDecision};
 use crate::ai::ToolCall;
+use zx_core::{Hook, HookContext, HookResult, HookStage, PolicyDecision};
 
 /// Decides whether a tool call may run. A policy joins a loop through a [`PolicyHook`].
 #[async_trait]
@@ -42,7 +42,7 @@ impl PolicyHook {
 }
 
 #[async_trait]
-impl Hooks for PolicyHook {
+impl Hook for PolicyHook {
     /// Before any extension sees the call.
     fn stage(&self) -> HookStage {
         HookStage::Policy

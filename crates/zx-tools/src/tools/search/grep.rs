@@ -8,10 +8,10 @@ use super::{
     MAX_LINE_BYTES, SearchSettings, VCS_DIRECTORIES, Wording, choose_engine, finish, first_lines, positive, quote,
     ripgrep_excludes, search_path,
 };
-use crate::agent::{Tool, ToolContext, ToolOutput};
 use crate::ai::ToolDef;
 use crate::tools::parse_args;
 use crate::tools::truncate::{MAX_BYTES, MAX_LINES};
+use zx_core::{Tool, ToolContext, ToolOutput};
 
 /// Matches shown by default (pi: grep's `DEFAULT_LIMIT`).
 const GREP_LIMIT: usize = 100;

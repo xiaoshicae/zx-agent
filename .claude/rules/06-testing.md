@@ -13,7 +13,7 @@ paths:
 |---|---|---|
 | `FauxProvider` / `FauxStep` | `crates/zx-ai/src/faux.rs` | 按脚本返回文本、工具调用、截断、失败（`Fail`）、挂起直到取消（`Hang`），或按请求内容现场决定（`FauxStep::compute`，例如引用摘要请求给出的条目 ID），并记录每个请求 |
 | `EchoTool` | `tests/common/mod.rs` | 可设置延迟、失败、panic、terminate，执行时还能注入引导消息或后续消息、报告进度（`progress`）、返回 `details` |
-| `Collect` | `tests/common/mod.rs` | 收集事件；`envelopes()` 返回带信封（`seq`、`runId` 等）的事件，`events()` 返回事件本体，`kinds()` 返回事件类型序列，`turns()` 返回开始的任务轮数，`tool_end_order()` 返回工具完成的顺序 |
+| `Collect` | `tests/common/mod.rs` | 收集事件；`envelopes()` 返回带信封（`seq`、`runId` 等）的事件，`events()` 返回事件本体，`kinds()` 返回事件类型序列，`steps()` 返回开始的任务步数，`tool_end_order()` 返回工具完成的顺序 |
 | `summarize` | `tests/common/mod.rs` | 把消息列表压缩成 `"tool:c1=hi"` 这样的短字符串 |
 | `run_prompt` / `run_prompt_with` | `tests/common/mod.rs` | 在以给定消息开头的内存会话上，用 `Runner` 跑一次提问（不重试；`run_prompt` 至多 10 次模型请求、不取消，`run_prompt_with` 给出请求上限与取消令牌），返回 `RunReport` 和事件，并把会话投影写回传入的消息。循环是 crate 内部类型，测试都经运行驱动它 |
 | `RunnerSetup` | `tests/common/mod.rs` | 带测试默认值（不重试、默认上限、内存会话）的 runner 构造器，用结构体更新语法覆盖字段 |
@@ -32,11 +32,11 @@ paths:
 | `FakeMcp` / `Reply` | `tests/common/fake_mcp.rs` | 假 MCP 服务器（Streamable HTTP），按规范手写、不用 rmcp：可选 2026-07-28（`server/discover`）或 2025-11-25（`initialize` 与会话）；工具一页一个；按工具安排结果、JSON-RPC 错误、不应答（`Hang`）或以 SSE 流按间隔发进度通知再给结果（`Progress`，令牌取自请求的 `_meta.progressToken`），并记录每个请求的方法、参数与请求头、被客户端放弃的调用 |
 | `FakeSlack` / `Answer` | `tests/common/fake_slack.rs` | 假 Slack：Web API 记录每次调用，可按方法安排错误、429 或指定的 JSON 应答；Socket Mode 连接由测试逐帧发送、读取确认 |
 | `MockServer` / `Reply` | `tests/common/mock_server.rs` | 本地假 HTTP 服务：返回 SSE 流（`Reply::text`、`Reply::bash`、任意工具调用 `Reply::tool_call`）、HTTP 错误，发出部分数据后卡住（`Stall`），或等待测试通知后结束（`Gate`）；记录请求，`wait_for_requests` 等到请求到达 |
-| `FailingWriter` / `SessionStore::with_writer` | `crates/zx-core/src/session/test_support.rs` 与 `session.rs`（仅测试编译） | 让会话写入失败，测试不变量 5 和 7；`FailingWriter` 经 `crate::session::FailingWriter` 引用 |
-| `header` / `assistant` / `texts` / `result_with_details` | `crates/zx-core/src/session/test_support.rs`（仅测试编译） | session 各子模块的单元测试共用：会话头部、一条回答、会话投影的文本、带 details 的工具结果 |
-| `SessionStore::read` | `crates/zx-core/src/session.rs` | 读取写入者仍在运行的会话文件（快照，不加锁、不修改文件）；写入者已释放时也可用 `SessionStore::open` |
+| `FailingWriter` / `Transcript::with_writer` | `crates/zx-core/src/transcript/test_support.rs` 与 `transcript.rs`（仅测试编译） | 让会话写入失败，测试不变量 5 和 7；`FailingWriter` 经 `crate::transcript::FailingWriter` 引用 |
+| `header` / `assistant` / `texts` / `result_with_details` | `crates/zx-core/src/transcript/test_support.rs`（仅测试编译） | transcript 各子模块的单元测试共用：会话头部、一条回答、会话投影的文本、带 details 的工具结果 |
+| `Transcript::read` | `crates/zx-core/src/transcript.rs` | 读取写入者仍在运行的会话文件（快照，不加锁、不修改文件）；写入者已释放时也可用 `Transcript::open` |
 
-典型写法：循环测试参照 `tests/agent_loop.rs` 的 `runs_tools_until_the_model_answers`，用 `run_prompt` 跑完后断言 `result.outcome`，再用 `summarize(&context)` 断言消息序列；运行层测试参照 `tests/runner.rs`，写成 `RunnerSetup { retry: fast_retry(3), ..setup(&provider) }.build()`。
+典型写法：循环测试参照 `tests/step_loop.rs` 的 `runs_tools_until_the_model_answers`，用 `run_prompt` 跑完后断言 `result.outcome`，再用 `summarize(&context)` 断言消息序列；运行层测试参照 `tests/runner.rs`，写成 `RunnerSetup { retry: fast_retry(3), ..setup(&provider) }.build()`。
 
 ## 约定
 

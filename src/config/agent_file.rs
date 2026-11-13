@@ -13,7 +13,7 @@ use super::permissions::RawPermissions;
 use super::skills::Skill;
 use super::{AgentDefinition, Builtin};
 use crate::compaction::{self, TokenTrigger};
-use crate::runner::Limits;
+use crate::runner::RunLimits;
 
 /// The line that opens and closes the front matter.
 const DELIMITER: &str = "+++";
@@ -151,7 +151,7 @@ impl AgentFile {
 }
 
 impl RawLimits {
-    fn apply(self, limits: &mut Limits) -> Result<()> {
+    fn apply(self, limits: &mut RunLimits) -> Result<()> {
         if let Some(turns) = self.max_model_requests {
             limits.max_model_requests = match turns {
                 ModelRequestLimit::Count(count) => Some(count),

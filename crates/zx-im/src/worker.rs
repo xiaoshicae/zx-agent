@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 use crate::agent_session::AgentSessionError;
 use crate::ai::now_ms;
 use crate::runner::RunReport;
-use crate::session::CustomMessage;
+use crate::transcript::CustomMessage;
 
 use super::approval::{ApprovalUpdate, Decided};
 use super::outlet::{Opened, Outlet, said};
@@ -386,7 +386,7 @@ impl Worker {
         self.answering = None;
         self.heard.clear();
         if let Phase::Running { open, .. } = &self.phase {
-            open.session.abort();
+            open.session.cancel();
             return;
         }
         self.stop_waiting();
@@ -576,7 +576,7 @@ impl Worker {
     async fn cancel(&mut self) {
         if let Phase::Running { open, .. } = &self.phase {
             // The run ends as aborted, and its status message then says so.
-            open.session.abort();
+            open.session.cancel();
             return;
         }
         let text = match self.stop_waiting() {

@@ -12,7 +12,7 @@ use tokio::process::{ChildStdout, Command};
 use common::mock_server::{MockServer, Reply};
 use common::{Home, json_lines, signal, stderr, stdout, tool_call_answer, write_agent, write_config, zx_agent_in};
 use zx_agent::ai::Message;
-use zx_agent::session::SessionStore;
+use zx_agent::transcript::Transcript;
 
 const KEY_VAR: &str = "ZX_CHAT_TEST_KEY";
 const KEY: &str = "sk-chat-test-key";
@@ -59,7 +59,7 @@ fn users(server: &MockServer, index: usize) -> Vec<String> {
 
 async fn seed_context(dir: &Path, bytes: usize) -> String {
     let path = dir.join("chat.jsonl");
-    let mut store = SessionStore::create(&path, common::header()).unwrap();
+    let mut store = Transcript::create(&path, common::header()).unwrap();
     let id = store.append_message(Message::user("x".repeat(bytes))).await.unwrap();
     store.append_message(Message::user("recent input")).await.unwrap();
     id
@@ -156,7 +156,7 @@ async fn manual_compact_persists_a_summary_and_the_next_prompt_uses_it() {
     );
     assert_eq!(server.requests()[0].body["max_tokens"], 2048);
     assert!(server.requests()[0].body.get("tools").is_none());
-    let store = SessionStore::open(&dir.path().join("chat.jsonl")).unwrap();
+    let store = Transcript::open(&dir.path().join("chat.jsonl")).unwrap();
     assert!(store.latest_compaction().is_some());
     assert!(store.raw_projection().iter().any(|item| item.entry_id == id));
 }
@@ -197,7 +197,7 @@ async fn agent_settings_disable_automatic_compaction() {
         assert_eq!(server.requests().len(), 1);
         assert!(users(&server, 0)[0].len() > 256 * 1024);
         assert!(
-            SessionStore::open(&dir.path().join("chat.jsonl"))
+            Transcript::open(&dir.path().join("chat.jsonl"))
                 .unwrap()
                 .latest_compaction()
                 .is_none()
@@ -260,7 +260,7 @@ async fn sigint_cancels_a_manual_summary_and_keeps_the_conversation_reusable() {
         .unwrap();
     signal(&child, "-INT").await;
     let compact = read_event_until(&mut events, |event| event["type"] == "compaction_report").await;
-    assert_eq!(compact["report"]["outcome"], "aborted");
+    assert_eq!(compact["report"]["outcome"], "cancelled");
     stdin.write_all(b"continue\n/quit\n").await.unwrap();
     drop(stdin);
     let task = read_event_until(&mut events, |event| event["type"] == "run_end").await;
@@ -274,7 +274,7 @@ async fn sigint_cancels_a_manual_summary_and_keeps_the_conversation_reusable() {
         Some(0)
     );
     assert!(
-        SessionStore::open(&dir.path().join("chat.jsonl"))
+        Transcript::open(&dir.path().join("chat.jsonl"))
             .unwrap()
             .latest_compaction()
             .is_none()
@@ -426,7 +426,7 @@ async fn new_command_creates_a_separate_audit_file_and_preserves_the_old_one() {
     )
     .await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    let old = SessionStore::open(&dir.path().join("chat.jsonl")).unwrap();
+    let old = Transcript::open(&dir.path().join("chat.jsonl")).unwrap();
     let old_users: Vec<_> = old
         .messages()
         .into_iter()
@@ -446,7 +446,7 @@ async fn new_command_creates_a_separate_audit_file_and_preserves_the_old_one() {
         .iter()
         .find(|path| path.file_name().unwrap() != "chat.jsonl")
         .unwrap();
-    let next_users: Vec<_> = SessionStore::open(next)
+    let next_users: Vec<_> = Transcript::open(next)
         .unwrap()
         .messages()
         .into_iter()
@@ -1078,7 +1078,7 @@ async fn streamed_output_is_visible_before_cancel_and_the_conversation_can_conti
     assert!(child.try_wait().unwrap().is_none(), "stream must still be active");
     signal(&child, "-INT").await;
     let aborted = read_event_until(&mut events, |event| event["type"] == "run_end").await;
-    assert_eq!(aborted["report"]["outcome"], "aborted");
+    assert_eq!(aborted["report"]["outcome"], "cancelled");
     stdin.write_all(b"second\n/quit\n").await.unwrap();
     drop(stdin);
     let next = read_event_until(&mut events, |event| event["type"] == "run_end").await;
@@ -1212,7 +1212,7 @@ async fn cancelling_an_approval_drops_its_reply_and_allows_a_new_prompt() {
     read_error_until(&mut errors, "[approval] Choose 1, 2, 3 or 4:").await;
     signal(&child, "-INT").await;
     let report = read_event_until(&mut events, |event| event["type"] == "run_end").await;
-    assert_eq!(report["report"]["outcome"], "aborted");
+    assert_eq!(report["report"]["outcome"], "cancelled");
     stdin.write_all(b"/approve 1 once\nsecond\n/quit\n").await.unwrap();
     drop(stdin);
     let report = read_event_until(&mut events, |event| event["type"] == "run_end").await;
@@ -1337,7 +1337,7 @@ async fn input_steered_into_a_cancelled_task_is_discarded_not_sent_later() {
     read_error_until(&mut errors, "steering input queued").await;
     signal(&child, "-INT").await;
     let report = read_event_until(&mut events, |event| event["type"] == "run_end").await;
-    assert_eq!(report["report"]["outcome"], "aborted");
+    assert_eq!(report["report"]["outcome"], "cancelled");
     terminal.write_all(b"second\n").await.unwrap();
     terminal.flush().await.unwrap();
     let report = read_event_until(&mut events, |event| event["type"] == "run_end").await;
@@ -1414,7 +1414,7 @@ async fn new_while_a_tty_task_runs_cancels_it_and_starts_with_empty_history() {
     terminal.write_all(b"/new\n").await.unwrap();
     terminal.flush().await.unwrap();
     let report = read_event_until(&mut events, |event| event["type"] == "run_end").await;
-    assert_eq!(report["report"]["outcome"], "aborted");
+    assert_eq!(report["report"]["outcome"], "cancelled");
     read_error_until(&mut errors, "new conversation").await;
     terminal.write_all(b"second\n").await.unwrap();
     terminal.flush().await.unwrap();
@@ -1450,7 +1450,7 @@ async fn an_approval_cancelled_by_the_run_timeout_does_not_authorize_a_later_cal
     stdin.write_all(b"first\n").await.unwrap();
     read_error_until(&mut errors, "[approval] Choose 1, 2, 3 or 4:").await;
     let report = read_event_until(&mut events, |event| event["type"] == "run_end").await;
-    assert_eq!(report["report"]["outcome"], "timeout");
+    assert_eq!(report["report"]["outcome"], "timed_out");
     stdin.write_all(b"/approve 1 once\nsecond\n/quit\n").await.unwrap();
     drop(stdin);
     let report = read_event_until(&mut events, |event| event["type"] == "run_end").await;
@@ -1497,7 +1497,7 @@ async fn quit_during_a_tty_approval_cancels_the_task_and_exits() {
 #[tokio::test]
 async fn resuming_an_interrupted_session_reports_the_recovered_call_without_running_it() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = SessionStore::create(&dir.path().join("chat.jsonl"), common::header()).unwrap();
+    let mut store = Transcript::create(&dir.path().join("chat.jsonl"), common::header()).unwrap();
     store.append_message(Message::user("fix it")).await.unwrap();
     let call = tool_call_answer("mock", "mock-model", "bash", json!({"command": "touch ran-again"}));
     store.append_message(call).await.unwrap();
@@ -1595,7 +1595,7 @@ async fn request_headers_and_the_prompt_cache_key_reach_the_server() {
     let request = &server.requests()[0];
     assert!(request.headers.contains("x-route: blue"), "{}", request.headers);
     assert!(request.headers.contains("x-tenant: a"), "{}", request.headers);
-    let session_id = SessionStore::open(&dir.path().join("s.jsonl"))
+    let session_id = Transcript::open(&dir.path().join("s.jsonl"))
         .unwrap()
         .header()
         .id

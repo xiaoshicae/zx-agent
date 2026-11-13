@@ -8,8 +8,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use opentelemetry::trace::SpanContext;
 use tokio::sync::mpsc;
 
-use crate::agent::{AgentEvent, ApprovalResult, Event, EventSink, Interruption, RequestKind, RunOutcome, ToolVerdict};
 use crate::ai::{Message, StopReason, Usage};
+use crate::{ApprovalResult, Event, EventKind, EventSink, Interruption, RequestKind, RunOutcome, ToolVerdict};
 
 /// Passes the events that spans need to the exporter task.
 pub(super) struct SignalSink {
@@ -59,10 +59,10 @@ pub(super) enum What {
     AttemptEnd {
         outcome: RunOutcome,
     },
-    TurnStart {
-        turn: u32,
+    StepStart {
+        step: u32,
     },
-    TurnEnd,
+    StepEnd,
     RequestStart {
         kind: RequestKind,
         model: String,
@@ -126,36 +126,36 @@ impl Signal {
     #[expect(clippy::too_many_lines, reason = "one arm per event variant")]
     pub(super) fn of(event: &Event, parent: Option<&SpanContext>) -> Option<Self> {
         let what = match &event.event {
-            AgentEvent::RunStart { model, provider } => What::RunStart {
+            EventKind::RunStart { model, provider } => What::RunStart {
                 model: model.clone(),
                 provider: provider.clone(),
                 parent: parent.cloned(),
             },
-            AgentEvent::RunEnd { report } => What::RunEnd {
+            EventKind::RunEnd { report } => What::RunEnd {
                 outcome: report.outcome,
                 model_requests: report.model_requests,
                 retries: report.retries,
                 usage: report.usage.clone(),
             },
-            AgentEvent::AgentStart { attempt } => What::AttemptStart { attempt: *attempt },
-            AgentEvent::AgentEnd { outcome } => What::AttemptEnd { outcome: *outcome },
-            AgentEvent::TurnStart { turn } => What::TurnStart { turn: *turn },
-            AgentEvent::TurnEnd { .. } => What::TurnEnd,
-            AgentEvent::RequestStart {
+            EventKind::AttemptStart { attempt } => What::AttemptStart { attempt: *attempt },
+            EventKind::AttemptEnd { outcome } => What::AttemptEnd { outcome: *outcome },
+            EventKind::StepStart { step } => What::StepStart { step: *step },
+            EventKind::StepEnd { .. } => What::StepEnd,
+            EventKind::RequestStart {
                 kind, model, attempt, ..
             } => What::RequestStart {
                 kind: *kind,
                 model: model.clone(),
                 attempt: *attempt,
             },
-            AgentEvent::MessageEnd {
+            EventKind::MessageEnd {
                 message: Message::Assistant(message),
                 ..
             } => What::Response {
                 usage: message.usage.clone(),
                 stop: message.stop_reason,
             },
-            AgentEvent::ToolExecutionStart {
+            EventKind::ToolExecutionStart {
                 tool_call_id,
                 tool_name,
                 ..
@@ -163,16 +163,16 @@ impl Signal {
                 call: tool_call_id.clone(),
                 tool: tool_name.clone(),
             },
-            AgentEvent::ToolDecision {
+            EventKind::ToolDecision {
                 tool_call_id, verdict, ..
             } => What::Decision {
                 call: tool_call_id.clone(),
                 verdict: *verdict,
             },
-            AgentEvent::ApprovalRequested { tool_call_id, .. } => What::ApprovalRequested {
+            EventKind::ApprovalRequested { tool_call_id, .. } => What::ApprovalRequested {
                 call: tool_call_id.clone(),
             },
-            AgentEvent::ApprovalResolved {
+            EventKind::ApprovalResolved {
                 tool_call_id,
                 approval,
                 wait_ms,
@@ -182,7 +182,7 @@ impl Signal {
                 result: *approval,
                 wait_ms: *wait_ms,
             },
-            AgentEvent::ToolExecutionEnd {
+            EventKind::ToolExecutionEnd {
                 tool_call_id,
                 is_error,
                 usage,
@@ -192,29 +192,29 @@ impl Signal {
                 is_error: *is_error,
                 usage: usage.clone(),
             },
-            AgentEvent::CompactionStart { input_bytes, automatic } => What::CompactionStart {
+            EventKind::CompactionStart { input_bytes, automatic } => What::CompactionStart {
                 automatic: *automatic,
                 input_bytes: *input_bytes,
                 parent: parent.cloned(),
             },
-            AgentEvent::CompactionEnd {
+            EventKind::CompactionEnd {
                 usage, output_bytes, ..
             } => What::CompactionEnd {
                 usage: usage.clone(),
                 output_bytes: *output_bytes,
             },
-            AgentEvent::CompactionFailed { .. } => What::CompactionFailed,
-            AgentEvent::RetryScheduled { retry, delay_ms, .. } => What::Retry {
+            EventKind::CompactionFailed { .. } => What::CompactionFailed,
+            EventKind::RetryScheduled { retry, delay_ms, .. } => What::Retry {
                 retry: *retry,
                 delay_ms: *delay_ms,
             },
             // The error text may quote the request, so only the fact is exported.
-            AgentEvent::ContextOverflow { .. } => What::Overflow,
-            AgentEvent::HookFailed { hook, phase, .. } => What::HookFailed {
+            EventKind::ContextOverflow { .. } => What::Overflow,
+            EventKind::HookFailed { hook, phase, .. } => What::HookFailed {
                 hook: hook.clone(),
                 phase: phase.as_str(),
             },
-            AgentEvent::ToolCallRecovered {
+            EventKind::ToolCallRecovered {
                 tool_call_id,
                 tool_name,
                 state,
@@ -225,12 +225,12 @@ impl Signal {
             },
             // Streaming, the other messages, context edits and extension records are
             // content, not spans.
-            AgentEvent::MessageStart { .. }
-            | AgentEvent::MessageUpdate { .. }
-            | AgentEvent::MessageEnd { .. }
-            | AgentEvent::ToolExecutionUpdate { .. }
-            | AgentEvent::ContextEdited { .. }
-            | AgentEvent::CustomEntry { .. } => return None,
+            EventKind::MessageStart { .. }
+            | EventKind::MessageUpdate { .. }
+            | EventKind::MessageEnd { .. }
+            | EventKind::ToolExecutionUpdate { .. }
+            | EventKind::ContextEdited { .. }
+            | EventKind::CustomEntry { .. } => return None,
         };
         Some(Self {
             run_id: event.run_id.clone(),
@@ -243,9 +243,9 @@ impl Signal {
 
 /// An event of the run the tests use, at `at_ms`, in session `s1`.
 #[cfg(test)]
-pub(super) fn event(at_ms: u64, event: AgentEvent) -> Event {
+pub(super) fn event(at_ms: u64, event: EventKind) -> Event {
     Event {
-        schema_version: crate::agent::EVENT_SCHEMA_VERSION,
+        schema_version: crate::EVENT_SCHEMA_VERSION,
         seq: at_ms,
         at_ms,
         session_id: "s1".into(),
@@ -266,10 +266,10 @@ mod tests {
             dropped: Arc::new(AtomicU64::new(0)),
             parent: None,
         };
-        sink.emit(&event(1, AgentEvent::TurnStart { turn: 1 }));
-        sink.emit(&event(2, AgentEvent::TurnStart { turn: 2 }));
+        sink.emit(&event(1, EventKind::StepStart { step: 1 }));
+        sink.emit(&event(2, EventKind::StepStart { step: 2 }));
         // Not for spans: neither queued nor counted.
-        sink.emit(&event(3, AgentEvent::MessageStart { role: "assistant" }));
+        sink.emit(&event(3, EventKind::MessageStart { role: "assistant" }));
         assert_eq!(sink.dropped.load(Ordering::Relaxed), 1);
     }
 }

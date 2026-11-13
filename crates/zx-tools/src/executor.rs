@@ -20,7 +20,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::ExecutionMode;
+use zx_core::ExecutionMode;
 
 pub use container::{
     Access, ContainerConfig, ContainerExecutor, Network, Platform, check_network,
@@ -78,7 +78,7 @@ pub trait Executor: Send + Sync {
     /// not executed. Defaults to `Parallel`; [`ContainerExecutor`] is `Sequential`. Must not
     /// panic, like [`Tool::execution_mode`].
     ///
-    /// [`Tool::execution_mode`]: crate::agent::Tool::execution_mode
+    /// [`Tool::execution_mode`]: zx_core::Tool::execution_mode
     fn execution_mode(&self) -> ExecutionMode {
         ExecutionMode::Parallel
     }

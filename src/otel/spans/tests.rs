@@ -5,10 +5,10 @@ use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SpanData
 use serde_json::json;
 
 use super::*;
-use crate::agent::{AgentEvent, RunReport};
 use crate::ai::{AssistantMessage, ContentBlock, Message, ToolCall};
 use crate::otel::TraceParent;
 use crate::otel::signal::event;
+use crate::{EventKind, RunReport};
 
 const RUN: &str = "6f1c2c4e-0000-4000-8000-000000000001";
 const TRACEPARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
@@ -43,11 +43,11 @@ impl Harness {
     }
 }
 
-fn at(at_ms: u64, agent_event: AgentEvent) -> Signal {
+fn at(at_ms: u64, agent_event: EventKind) -> Signal {
     Signal::of(&event(at_ms, agent_event), None).expect("a span needs this event")
 }
 
-fn under(parent: &TraceParent, at_ms: u64, agent_event: AgentEvent) -> Signal {
+fn under(parent: &TraceParent, at_ms: u64, agent_event: EventKind) -> Signal {
     Signal::of(&event(at_ms, agent_event), Some(&parent.context)).expect("a span needs this event")
 }
 
@@ -61,8 +61,8 @@ fn usage(input: u64, output: u64) -> Usage {
     }
 }
 
-fn answer(usage: Usage, stop: StopReason, content: Vec<ContentBlock>) -> AgentEvent {
-    AgentEvent::MessageEnd {
+fn answer(usage: Usage, stop: StopReason, content: Vec<ContentBlock>) -> EventKind {
+    EventKind::MessageEnd {
         custom: None,
         message: Message::Assistant(AssistantMessage {
             content,
@@ -81,8 +81,8 @@ fn answer(usage: Usage, stop: StopReason, content: Vec<ContentBlock>) -> AgentEv
     }
 }
 
-fn run_end(outcome: RunOutcome, usage: Usage) -> AgentEvent {
-    AgentEvent::RunEnd {
+fn run_end(outcome: RunOutcome, usage: Usage) -> EventKind {
+    EventKind::RunEnd {
         report: Box::new(RunReport {
             outcome,
             final_text: "the secret answer".into(),
@@ -109,16 +109,16 @@ fn one_run() -> Vec<Signal> {
     vec![
         at(
             1000,
-            AgentEvent::RunStart {
+            EventKind::RunStart {
                 model: "m".into(),
                 provider: "p".into(),
             },
         ),
-        at(1001, AgentEvent::AgentStart { attempt: 1 }),
-        at(1002, AgentEvent::TurnStart { turn: 1 }),
+        at(1001, EventKind::AttemptStart { attempt: 1 }),
+        at(1002, EventKind::StepStart { step: 1 }),
         at(
             1003,
-            AgentEvent::RequestStart {
+            EventKind::RequestStart {
                 kind: RequestKind::Task,
                 entry_id: "r".into(),
                 model: "m".into(),
@@ -128,7 +128,7 @@ fn one_run() -> Vec<Signal> {
         at(1010, answer(usage(10, 5), StopReason::ToolUse, vec![call])),
         at(
             1011,
-            AgentEvent::ToolExecutionStart {
+            EventKind::ToolExecutionStart {
                 tool_call_id: "c1".into(),
                 tool_name: "bash".into(),
                 args: command,
@@ -136,7 +136,7 @@ fn one_run() -> Vec<Signal> {
         ),
         at(
             1012,
-            AgentEvent::ToolDecision {
+            EventKind::ToolDecision {
                 tool_call_id: "c1".into(),
                 tool_name: "bash".into(),
                 verdict: ToolVerdict::Allow,
@@ -145,7 +145,7 @@ fn one_run() -> Vec<Signal> {
         ),
         at(
             1020,
-            AgentEvent::ToolExecutionEnd {
+            EventKind::ToolExecutionEnd {
                 tool_call_id: "c1".into(),
                 tool_name: "bash".into(),
                 is_error: false,
@@ -154,10 +154,10 @@ fn one_run() -> Vec<Signal> {
                 usage: None,
             },
         ),
-        at(1021, AgentEvent::TurnEnd { turn: 1 }),
+        at(1021, EventKind::StepEnd { step: 1 }),
         at(
             1022,
-            AgentEvent::AgentEnd {
+            EventKind::AttemptEnd {
                 outcome: RunOutcome::Completed,
             },
         ),
@@ -192,11 +192,11 @@ fn a_run_is_one_trace_of_nested_spans_that_carry_metadata_only() {
     assert_eq!(spans.len(), 5, "{spans:?}");
     let run = span(&spans, "run");
     let attempt = span(&spans, "attempt");
-    let turn = span(&spans, "turn");
+    let step = span(&spans, "step");
     let request = span(&spans, "request");
     let tool = span(&spans, "tool bash");
     assert_eq!(run.parent_span_id, SpanId::INVALID);
-    for (child, parent) in [(attempt, run), (turn, attempt), (request, turn), (tool, turn)] {
+    for (child, parent) in [(attempt, run), (step, attempt), (request, step), (tool, step)] {
         assert_eq!(child.parent_span_id, parent.span_context.span_id(), "{}", child.name);
         assert_eq!(child.span_context.trace_id(), run.span_context.trace_id());
     }
@@ -225,7 +225,7 @@ fn tool_usage_is_set_on_the_tool_span() {
     spent.total_cost = Some(0.5);
     signals[7] = at(
         1020,
-        AgentEvent::ToolExecutionEnd {
+        EventKind::ToolExecutionEnd {
             tool_call_id: "c1".into(),
             tool_name: "bash".into(),
             is_error: false,
@@ -255,7 +255,7 @@ fn a_run_under_a_traceparent_continues_the_callers_trace() {
     signals[0] = under(
         &parent,
         1000,
-        AgentEvent::RunStart {
+        EventKind::RunStart {
             model: "m".into(),
             provider: "p".into(),
         },
@@ -277,8 +277,8 @@ fn a_run_under_a_traceparent_continues_the_callers_trace() {
         "{spans:?}"
     );
     // Spans within the run have their parents within the run.
-    let turn = span(&spans, "turn");
-    assert_eq!(turn.parent_span_id, span(&spans, "attempt").span_context.span_id());
+    let step = span(&spans, "step");
+    assert_eq!(step.parent_span_id, span(&spans, "attempt").span_context.span_id());
 }
 
 #[test]
@@ -287,29 +287,32 @@ fn spans_left_open_end_when_their_run_does() {
     harness.apply([
         at(
             1000,
-            AgentEvent::RunStart {
+            EventKind::RunStart {
                 model: "m".into(),
                 provider: "p".into(),
             },
         ),
-        at(1001, AgentEvent::AgentStart { attempt: 1 }),
-        at(1002, AgentEvent::TurnStart { turn: 1 }),
+        at(1001, EventKind::AttemptStart { attempt: 1 }),
+        at(1002, EventKind::StepStart { step: 1 }),
         at(
             1003,
-            AgentEvent::RequestStart {
+            EventKind::RequestStart {
                 kind: RequestKind::Task,
                 entry_id: "r".into(),
                 model: "m".into(),
                 attempt: 1,
             },
         ),
-        at(1050, run_end(RunOutcome::Aborted, usage(0, 0))),
+        at(1050, run_end(RunOutcome::Cancelled, usage(0, 0))),
     ]);
 
     let spans = harness.spans();
     assert_eq!(spans.len(), 4, "{spans:?}");
     assert!(spans.iter().all(|span| ms(span.end_time) == 1050), "{spans:?}");
-    assert_eq!(attribute(span(&spans, "run"), "zx.outcome").as_deref(), Some("aborted"));
+    assert_eq!(
+        attribute(span(&spans, "run"), "zx.outcome").as_deref(),
+        Some("cancelled")
+    );
     assert!(harness.runs.open.is_empty());
 }
 
@@ -319,14 +322,14 @@ fn a_manual_compaction_is_a_trace_of_its_own_and_is_forgotten_when_it_ends() {
     harness.apply([
         at(
             1000,
-            AgentEvent::CompactionStart {
+            EventKind::CompactionStart {
                 input_bytes: 100,
                 automatic: false,
             },
         ),
         at(
             1001,
-            AgentEvent::RequestStart {
+            EventKind::RequestStart {
                 kind: RequestKind::Summary,
                 entry_id: "r".into(),
                 model: "m".into(),
@@ -335,7 +338,7 @@ fn a_manual_compaction_is_a_trace_of_its_own_and_is_forgotten_when_it_ends() {
         ),
         at(
             1010,
-            AgentEvent::CompactionEnd {
+            EventKind::CompactionEnd {
                 entry_id: "e1".into(),
                 input_bytes: 100,
                 output_bytes: 20,

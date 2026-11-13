@@ -9,7 +9,6 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::AgentSession;
-use zx_agent::agent::{AgentEvent, Event, LoopConfig, PolicyDecision};
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::continuation::ContinueOnLength;
@@ -17,9 +16,10 @@ use zx_agent::executor::{LocalExecutor, local_environment_section};
 use zx_agent::policy::{AutoApprove, CommandPolicy, PolicyHook, Rule, RuleMatcher, RulePolicy};
 use zx_agent::prompt::build_system_prompt;
 use zx_agent::redact::RedactSecrets;
-use zx_agent::runner::Limits;
-use zx_agent::session::{SessionHeader, SessionStore};
+use zx_agent::runner::RunLimits;
 use zx_agent::tools::{BashTool, ReadFileTool};
+use zx_agent::transcript::{SessionHeader, Transcript};
+use zx_agent::{Event, EventKind, LoopConfig, PolicyDecision};
 
 /// This embedder's scenario: a bounded, read-only report about the machine it runs on.
 const INSTRUCTIONS: &str = "You are an agent running without a human operator. Use only the tools \
@@ -73,15 +73,15 @@ async fn main() -> anyhow::Result<()> {
     config.hooks.push(PolicyHook::new(Arc::new(CommandPolicy::new())));
     config.hooks.push(PolicyHook::new(Arc::new(rules)));
     config.hooks.push(RedactSecrets::new(api_key));
-    let session = SessionStore::in_memory(SessionHeader::new(&cwd, &model));
+    let session = Transcript::in_memory(SessionHeader::new(&cwd, &model));
     // Any `Fn(&Event)` is an event sink.
     let sink = Arc::new(|event: &Event| {
-        if let AgentEvent::ToolExecutionStart { tool_name, args, .. } = &event.event {
+        if let EventKind::ToolExecutionStart { tool_name, args, .. } = &event.event {
             eprintln!("[tool] {tool_name} {args}");
         }
     });
     // Nobody can stop an unattended run, so it gets bounds of its own.
-    let limits = Limits {
+    let limits = RunLimits {
         max_model_requests: Some(30),
         timeout: Some(Duration::from_secs(15 * 60)),
         token_budget: None,

@@ -11,7 +11,6 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use common::{EchoTool, RunnerSetup, answer_reporting, config, header, read_lines, seeded_session, summary_json};
-use zx_agent::agent::{ContextEdit, HookContext, HookResult, Hooks};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::provider::{EventReceiver, event_channel, send_event};
 use zx_agent::ai::{
@@ -19,7 +18,8 @@ use zx_agent::ai::{
 };
 use zx_agent::compaction::{self, Config, DEFAULT_RESERVE_TOKENS, TokenTrigger};
 use zx_agent::runner::RunOutcome;
-use zx_agent::session::{Entry, SessionStore};
+use zx_agent::transcript::{Entry, Transcript};
+use zx_agent::{ContextEdit, Hook, HookContext, HookResult};
 
 /// 1 per input token and 2 per output token, in any currency: the faux provider reports 10 in, 5 out.
 fn priced() -> ModelMeta {
@@ -45,7 +45,7 @@ async fn responses_are_priced_by_the_configured_model_and_summed_in_the_report()
     let mut config = config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]);
     config.models.insert("test-model".into(), priced());
     let (mut runner, _) = RunnerSetup {
-        session: SessionStore::create(&file, header()).unwrap(),
+        session: Transcript::create(&file, header()).unwrap(),
         ..RunnerSetup::new(config)
     }
     .build();
@@ -213,7 +213,7 @@ fn token_trigger() -> Config {
 async fn a_summary_is_not_repeated_for_the_usage_an_answer_reported_before_it() {
     // An old message worth summarizing, then an answer that reported a context above the
     // trigger and is recent enough for the summary to keep.
-    let mut store = SessionStore::in_memory(header());
+    let mut store = Transcript::in_memory(header());
     let old = store
         .append_message(Message::user("observed ".repeat(600)))
         .await
@@ -246,7 +246,7 @@ async fn a_summary_is_not_repeated_for_the_usage_an_answer_reported_before_it() 
 struct TrimLongInput;
 
 #[async_trait]
-impl Hooks for TrimLongInput {
+impl Hook for TrimLongInput {
     async fn transform_context(&self, messages: &[Message], _ctx: &HookContext) -> HookResult<Vec<ContextEdit>> {
         let long = messages
             .iter()
@@ -265,7 +265,7 @@ impl Hooks for TrimLongInput {
 async fn the_token_trigger_follows_an_edit_made_after_the_last_reported_usage() {
     // The last answer reported a context above the trigger. A hook then trims the message
     // that made it large, and what is left is too recent to compact.
-    let mut store = SessionStore::in_memory(header());
+    let mut store = Transcript::in_memory(header());
     store
         .append_message(Message::user("observed ".repeat(600)))
         .await
@@ -289,8 +289,8 @@ async fn the_token_trigger_follows_an_edit_made_after_the_last_reported_usage() 
 }
 
 /// An in-memory session that holds `messages`.
-async fn session_of(messages: &[Message]) -> SessionStore {
-    let mut store = SessionStore::in_memory(header());
+async fn session_of(messages: &[Message]) -> Transcript {
+    let mut store = Transcript::in_memory(header());
     for message in messages {
         store.append_message(message.clone()).await.unwrap();
     }
@@ -395,7 +395,7 @@ async fn the_cache_key_goes_to_the_provider_and_into_the_request_audit() {
     let mut config = config(provider.clone(), vec![]);
     config.cache_key = Some("session-7".into());
     let (mut runner, _) = RunnerSetup {
-        session: SessionStore::create(&file, header()).unwrap(),
+        session: Transcript::create(&file, header()).unwrap(),
         ..RunnerSetup::new(config)
     }
     .build();

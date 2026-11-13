@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use zx_agent::config;
-use zx_agent::session::{self, SessionHeader, SessionInfo, SessionList, SessionStore};
+use zx_agent::transcript::{self, SessionHeader, SessionInfo, SessionList, Transcript};
 
 use crate::render::{local_time, visible};
 
@@ -53,21 +53,21 @@ impl<'a> SessionFile<'a> {
 
 /// The session `file` names when it exists already; opened before anything else is started,
 /// for its ID.
-pub(crate) fn open_existing(file: &SessionFile<'_>) -> Result<Option<SessionStore>> {
+pub(crate) fn open_existing(file: &SessionFile<'_>) -> Result<Option<Transcript>> {
     Ok(match file {
-        SessionFile::Open(path) if path.exists() => Some(SessionStore::open(path)?),
+        SessionFile::Open(path) if path.exists() => Some(Transcript::open(path)?),
         SessionFile::Memory | SessionFile::Open(_) | SessionFile::Create(_) | SessionFile::NewIn(_) => None,
     })
 }
 
 /// A new session with `header`, kept where `file` says.
-pub(crate) fn create(file: SessionFile<'_>, header: SessionHeader) -> Result<SessionStore> {
+pub(crate) fn create(file: SessionFile<'_>, header: SessionHeader) -> Result<Transcript> {
     Ok(match file {
-        SessionFile::Memory => SessionStore::in_memory(header),
-        SessionFile::Open(path) | SessionFile::Create(path) => SessionStore::create(path, header)?,
+        SessionFile::Memory => Transcript::in_memory(header),
+        SessionFile::Open(path) | SessionFile::Create(path) => Transcript::create(path, header)?,
         SessionFile::NewIn(dir) => {
             create_dir(dir)?;
-            SessionStore::create(&dir.join(file_name(&header)), header)?
+            Transcript::create(&dir.join(file_name(&header)), header)?
         }
     })
 }
@@ -120,7 +120,7 @@ fn file_name(header: &SessionHeader) -> String {
 /// List the sessions in `dir`, reading files on a blocking thread.
 pub(crate) async fn list(dir: &Path) -> Result<SessionList> {
     let read = dir.to_path_buf();
-    tokio::task::spawn_blocking(move || session::list_sessions(&read))
+    tokio::task::spawn_blocking(move || transcript::list_sessions(&read))
         .await
         .with_context(|| format!("listing the sessions in {} stopped", dir.display()))?
 }
@@ -174,7 +174,7 @@ pub(crate) fn preview_text(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use zx_agent::session::SessionName;
+    use zx_agent::transcript::SessionName;
 
     use super::*;
 

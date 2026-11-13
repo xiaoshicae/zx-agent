@@ -16,7 +16,7 @@ use common::{
     Home, agent_text, fake_model_config, json_lines, stderr, stdout, write_agent_file, write_config, zx_agent_in,
 };
 use zx_agent::ai::Message;
-use zx_agent::session::SessionStore;
+use zx_agent::transcript::Transcript;
 
 const KEY_VAR: &str = "ZX_AGENTS_TEST_KEY";
 
@@ -241,7 +241,7 @@ async fn a_configured_output_directory_is_relative_to_config_toml() {
 async fn run_keeps_auto_compaction_disabled_unless_the_agent_enables_it() {
     for enable in [false, true] {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = SessionStore::create(&dir.path().join("audit.jsonl"), common::header()).unwrap();
+        let mut store = Transcript::create(&dir.path().join("audit.jsonl"), common::header()).unwrap();
         let id = store
             .append_message(Message::user("x".repeat(300 * 1024)))
             .await
@@ -264,7 +264,7 @@ async fn run_keeps_auto_compaction_disabled_unless_the_agent_enables_it() {
         let output = run(&server, dir.path(), &args).await;
         assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
         assert_eq!(server.requests().len(), if enable { 2 } else { 1 });
-        let store = SessionStore::open(&dir.path().join("audit.jsonl")).unwrap();
+        let store = Transcript::open(&dir.path().join("audit.jsonl")).unwrap();
         assert_eq!(store.latest_compaction().is_some(), enable);
     }
 }

@@ -11,23 +11,24 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use common::{EchoTool, RunnerSetup, config, fast_retry, header, read_lines, run_prompt, summarize};
-use zx_agent::agent::QueuedMessage;
-use zx_agent::agent::{
-    AgentEvent, ApprovalResult, CancelSignal, ContextEdit, Event, FinishedTurn, HookChain, HookContext, HookOptions,
-    HookResult, HookStage, Hooks, PolicyDecision, RunOutcome, Tool, ToolContext, ToolOutput, ToolVerdict, TurnDecision,
-};
-use zx_agent::agent::{Approval, ApprovalRequest, Interaction};
+use zx_agent::Input;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{EventReceiver, Message, Provider, Request, SectionChange, StopReason, SystemMessage, ToolCall};
 use zx_agent::continuation::ContinueOnLength;
 use zx_agent::redact::{RedactSecrets, check_secret_files, short_secret_files};
-use zx_agent::runner::Limits;
-use zx_agent::session::{Entry, SessionStore};
+use zx_agent::runner::RunLimits;
 use zx_agent::tools::BashTool;
+use zx_agent::transcript::{Entry, Transcript};
+use zx_agent::{Approval, ApprovalRequest, Interaction};
+use zx_agent::{
+    ApprovalResult, CancelSignal, ContextEdit, Event, EventKind, FinishedStep, Hook, HookChain, HookContext,
+    HookOptions, HookResult, HookStage, PolicyDecision, RunOutcome, StepDecision, Tool, ToolContext, ToolOutput,
+    ToolVerdict,
+};
 
 struct Verdict(PolicyDecision);
 #[async_trait]
-impl Hooks for Verdict {
+impl Hook for Verdict {
     async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<PolicyDecision> {
         Ok(self.0.clone())
     }
@@ -97,7 +98,7 @@ async fn allow_once_and_session_approvals_have_different_scopes() {
 
 struct SwitchPolicy(Arc<AtomicBool>);
 #[async_trait]
-impl Hooks for SwitchPolicy {
+impl Hook for SwitchPolicy {
     async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<PolicyDecision> {
         Ok(if self.0.load(Ordering::SeqCst) {
             PolicyDecision::Deny("revoked".into())
@@ -213,13 +214,13 @@ async fn cancellation_interrupts_a_pending_approval() {
     tokio::select! { () = entered.notified() => {}, _ = &mut running => panic!("must wait for approval") }
     cancel.cancel();
     let report = tokio::time::timeout(Duration::from_secs(1), running).await.unwrap();
-    assert_eq!(report.outcome, RunOutcome::Aborted);
+    assert_eq!(report.outcome, RunOutcome::Cancelled);
     assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
 }
 
 struct CountBefore(Arc<AtomicUsize>);
 #[async_trait]
-impl Hooks for CountBefore {
+impl Hook for CountBefore {
     async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<PolicyDecision> {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(PolicyDecision::Ask("review".into()))
@@ -250,7 +251,7 @@ async fn invalid_tool_arguments_are_rejected_before_policy_and_approval() {
 
 struct RewriteInput;
 #[async_trait]
-impl Hooks for RewriteInput {
+impl Hook for RewriteInput {
     async fn on_input(&self, text: String, _ctx: &HookContext) -> HookResult<String> {
         Ok(text.to_uppercase())
     }
@@ -258,7 +259,7 @@ impl Hooks for RewriteInput {
 
 struct Project;
 #[async_trait]
-impl Hooks for Project {
+impl Hook for Project {
     async fn transform_context(&self, messages: &[Message], _ctx: &HookContext) -> HookResult<Vec<ContextEdit>> {
         assert_eq!(summarize(messages), ["user:old", "user:GO"]);
         Ok(vec![
@@ -283,7 +284,7 @@ impl Provider for AuditProbe {
         "audit-probe"
     }
     fn stream(&self, request: Request, cancel: CancellationToken) -> EventReceiver {
-        let persisted = SessionStore::read(&self.path).unwrap();
+        let persisted = Transcript::read(&self.path).unwrap();
         assert_eq!(
             request.messages,
             persisted.messages(),
@@ -297,7 +298,7 @@ impl Provider for AuditProbe {
 async fn input_and_context_changes_are_persisted_before_the_model_request() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session.jsonl");
-    let mut session = SessionStore::create(&path, header()).unwrap();
+    let mut session = Transcript::create(&path, header()).unwrap();
     session.append_message(Message::user("old")).await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let probe = Arc::new(AuditProbe {
@@ -321,15 +322,12 @@ async fn input_and_context_changes_are_persisted_before_the_model_request() {
     let lines = read_lines(&path);
     assert_eq!(lines[2]["message"]["content"], "go", "original input remains intact");
     assert_eq!(lines.iter().filter(|line| line["type"] == "context_edit").count(), 3);
-    assert_eq!(
-        SessionStore::read(&path).unwrap().messages(),
-        runner.session().messages()
-    );
+    assert_eq!(Transcript::read(&path).unwrap().messages(), runner.session().messages());
 }
 
 struct InvalidPlan;
 #[async_trait]
-impl Hooks for InvalidPlan {
+impl Hook for InvalidPlan {
     async fn transform_context(&self, _messages: &[Message], _ctx: &HookContext) -> HookResult<Vec<ContextEdit>> {
         Ok(vec![
             ContextEdit::Omit { index: 0 },
@@ -348,7 +346,7 @@ async fn an_invalid_edit_plan_is_rejected_before_any_partial_edit_or_request() {
     config.hooks.push(InvalidPlan);
     let (mut runner, _) = RunnerSetup::new(config).build();
     let report = runner.run("go", &CancellationToken::new()).await;
-    assert_eq!(report.outcome, RunOutcome::Error);
+    assert_eq!(report.outcome, RunOutcome::Failed);
     assert!(report.error.unwrap().contains("out of bounds"));
     assert!(provider.requests().is_empty());
     assert_eq!(summarize(&runner.session().messages()), ["user:go"]);
@@ -363,7 +361,7 @@ async fn an_invalid_edit_plan_is_rejected_before_any_partial_edit_or_request() {
 
 struct RejectInput;
 #[async_trait]
-impl Hooks for RejectInput {
+impl Hook for RejectInput {
     async fn on_input(&self, _text: String, _ctx: &HookContext) -> HookResult<String> {
         Err("unsupported input".into())
     }
@@ -382,7 +380,7 @@ async fn rejected_input_is_logged_and_omitted_without_retrying_the_model() {
     let report = runner.run("go", &CancellationToken::new()).await;
     assert_eq!(
         (report.outcome, report.model_requests, report.retries),
-        (RunOutcome::Error, 0, 0)
+        (RunOutcome::Failed, 0, 0)
     );
     assert!(provider.requests().is_empty());
     assert_eq!(runner.session().entries().len(), 2);
@@ -393,7 +391,7 @@ async fn rejected_input_is_logged_and_omitted_without_retrying_the_model() {
 async fn steering_queued_after_a_rejected_message_stays_queued_for_the_next_run() {
     struct RejectMarked;
     #[async_trait]
-    impl Hooks for RejectMarked {
+    impl Hook for RejectMarked {
         async fn on_input(&self, text: String, _ctx: &HookContext) -> HookResult<String> {
             if text == "reject-me" {
                 Err("rejected".into())
@@ -409,7 +407,7 @@ async fn steering_queued_after_a_rejected_message_stays_queued_for_the_next_run(
     runner.config().queues.steer("reject-me");
     runner.config().queues.steer("keep-me");
     let first = runner.run("hello", &CancellationToken::new()).await;
-    assert_eq!(first.outcome, RunOutcome::Error, "{first:?}");
+    assert_eq!(first.outcome, RunOutcome::Failed, "{first:?}");
     let second = runner.run("again", &CancellationToken::new()).await;
     assert_eq!(second.outcome, RunOutcome::Completed, "{second:?}");
     assert_eq!(
@@ -420,7 +418,7 @@ async fn steering_queued_after_a_rejected_message_stays_queued_for_the_next_run(
 
 struct OmitEarlier;
 #[async_trait]
-impl Hooks for OmitEarlier {
+impl Hook for OmitEarlier {
     async fn transform_context(&self, messages: &[Message], _ctx: &HookContext) -> HookResult<Vec<ContextEdit>> {
         Ok((0..messages.len().saturating_sub(1))
             .map(|_| ContextEdit::Omit { index: 0 })
@@ -431,7 +429,7 @@ impl Hooks for OmitEarlier {
 #[tokio::test]
 async fn omitting_prior_runs_does_not_lose_the_current_answer_or_usage() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("current")]));
-    let mut session = SessionStore::in_memory(header());
+    let mut session = Transcript::in_memory(header());
     for _ in 0..5 {
         session.append_message(Message::user("old")).await.unwrap();
     }
@@ -454,7 +452,7 @@ enum BadOutput {
     Pending,
 }
 #[async_trait]
-impl Hooks for BadOutput {
+impl Hook for BadOutput {
     async fn after_tool(&self, _call: &ToolCall, _output: ToolOutput, _ctx: &HookContext) -> HookResult<ToolOutput> {
         match self {
             Self::Error => Err("filter rejected".into()),
@@ -468,7 +466,7 @@ impl Hooks for BadOutput {
 async fn failed_output_hooks_withhold_raw_results_from_events_and_persistence() {
     struct SecretTool;
     #[async_trait]
-    impl zx_agent::agent::Tool for SecretTool {
+    impl zx_agent::Tool for SecretTool {
         fn name(&self) -> &str {
             "echo"
         }
@@ -479,11 +477,7 @@ async fn failed_output_hooks_withhold_raw_results_from_events_and_persistence() 
                 parameters: json!({}),
             }
         }
-        async fn execute(
-            &self,
-            _args: serde_json::Value,
-            _ctx: &zx_agent::agent::ToolContext,
-        ) -> Result<ToolOutput, String> {
+        async fn execute(&self, _args: serde_json::Value, _ctx: &zx_agent::ToolContext) -> Result<ToolOutput, String> {
             Ok(ToolOutput::ok("raw-tool-secret"))
         }
     }
@@ -520,17 +514,17 @@ struct Observer {
     seen: Arc<Mutex<Vec<&'static str>>>,
 }
 #[async_trait]
-impl Hooks for Observer {
+impl Hook for Observer {
     async fn on_event(&self, event: &Event, _ctx: &HookContext) -> HookResult<()> {
         assert!(
-            !matches!(event.event, AgentEvent::HookFailed { .. }),
+            !matches!(event.event, EventKind::HookFailed { .. }),
             "diagnostics must not recurse"
         );
         self.seen.lock().unwrap().push(event.event.kind());
         Err("observer unavailable".into())
     }
 
-    fn observes(&self, _event: &AgentEvent) -> bool {
+    fn observes(&self, _event: &EventKind) -> bool {
         true
     }
 }
@@ -563,12 +557,12 @@ async fn observer_failures_are_diagnostic_and_retry_events_are_observed_once() {
 
 struct CustomContinue;
 #[async_trait]
-impl Hooks for CustomContinue {
-    async fn finish_turn(&self, turn: &FinishedTurn<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
-        Ok(if turn.response.stop_reason == StopReason::Length {
-            TurnDecision::ContinueAnswer("接着回答".into())
+impl Hook for CustomContinue {
+    async fn finish_step(&self, step: &FinishedStep<'_>, _ctx: &HookContext) -> HookResult<StepDecision> {
+        Ok(if step.response.stop_reason == StopReason::Length {
+            StepDecision::ContinueAnswer("接着回答".into())
         } else {
-            TurnDecision::Default
+            StepDecision::Default
         })
     }
 }
@@ -599,7 +593,7 @@ async fn continuation_budget_is_not_reset_after_a_provider_retry() {
     config.hooks.push(ContinueOnLength::new(1));
     let (mut runner, _) = RunnerSetup {
         retry: fast_retry(1),
-        limits: Limits::default(),
+        limits: RunLimits::default(),
         ..RunnerSetup::new(config)
     }
     .build();
@@ -828,23 +822,23 @@ async fn every_current_secret_is_redacted_however_many_files_there_are() {
     assert_eq!(output.content, vec!["[REDACTED]"; count].join(" "));
 }
 
-struct NextTurn(TurnDecision);
+struct NextTurn(StepDecision);
 #[async_trait]
-impl Hooks for NextTurn {
-    async fn finish_turn(&self, _turn: &FinishedTurn<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
+impl Hook for NextTurn {
+    async fn finish_step(&self, _step: &FinishedStep<'_>, _ctx: &HookContext) -> HookResult<StepDecision> {
         Ok(self.0.clone())
     }
 }
 
 #[tokio::test]
-async fn a_hook_follow_up_obeys_the_turn_budget() {
+async fn a_hook_follow_up_obeys_the_step_budget() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("first"), FauxStep::text("never")]));
     let mut config = config(provider.clone(), vec![]);
-    config.hooks.push(NextTurn(TurnDecision::FollowUp("next".into())));
+    config.hooks.push(NextTurn(StepDecision::FollowUp("next".into())));
     let (mut runner, _) = RunnerSetup {
-        limits: Limits {
+        limits: RunLimits {
             max_model_requests: Some(1),
-            ..Limits::default()
+            ..RunLimits::default()
         },
         ..RunnerSetup::new(config)
     }
@@ -854,17 +848,17 @@ async fn a_hook_follow_up_obeys_the_turn_budget() {
     assert_eq!(provider.requests().len(), 1);
 }
 
-struct StopAndQueue(Arc<zx_agent::agent::MessageQueues>);
+struct StopAndQueue(Arc<zx_agent::InputQueue>);
 #[async_trait]
-impl Hooks for StopAndQueue {
+impl Hook for StopAndQueue {
     async fn on_event(&self, event: &Event, _ctx: &HookContext) -> HookResult<()> {
-        if matches!(event.event, AgentEvent::TurnEnd { .. }) {
+        if matches!(event.event, EventKind::StepEnd { .. }) {
             self.0.steer("pending user input");
         }
         Ok(())
     }
-    async fn finish_turn(&self, _turn: &FinishedTurn<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
-        Ok(TurnDecision::Stop)
+    async fn finish_step(&self, _step: &FinishedStep<'_>, _ctx: &HookContext) -> HookResult<StepDecision> {
+        Ok(StepDecision::Stop)
     }
 }
 
@@ -876,16 +870,13 @@ async fn stopping_from_a_hook_preserves_queued_user_input() {
     config.hooks.push(StopAndQueue(queues.clone()));
     let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
     assert_eq!(result.outcome, RunOutcome::Completed);
-    assert_eq!(
-        queues.drain_steering(),
-        [QueuedMessage::User("pending user input".into())]
-    );
+    assert_eq!(queues.drain_steering(), [Input::User("pending user input".into())]);
 }
 
 struct FinishFailure;
 #[async_trait]
-impl Hooks for FinishFailure {
-    async fn finish_turn(&self, _turn: &FinishedTurn<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
+impl Hook for FinishFailure {
+    async fn finish_step(&self, _step: &FinishedStep<'_>, _ctx: &HookContext) -> HookResult<StepDecision> {
         Err("HTTP 503 from extension".into())
     }
 }
@@ -903,7 +894,7 @@ async fn a_finish_hook_error_never_triggers_provider_retry() {
     let report = runner.run("go", &CancellationToken::new()).await;
     assert_eq!(
         (report.outcome, report.model_requests, report.retries),
-        (RunOutcome::Error, 1, 0)
+        (RunOutcome::Failed, 1, 0)
     );
     assert!(report.error.unwrap().contains("HTTP 503 from extension"));
     assert_eq!(provider.requests().len(), 1);
@@ -921,11 +912,11 @@ async fn an_attempt_that_a_hook_failure_stops_reports_an_error() {
         .events()
         .iter()
         .filter_map(|event| match event {
-            AgentEvent::AgentEnd { outcome } => Some(*outcome),
+            EventKind::AttemptEnd { outcome } => Some(*outcome),
             _ => None,
         })
         .collect();
-    assert_eq!(ended, [RunOutcome::Error]);
+    assert_eq!(ended, [RunOutcome::Failed]);
 }
 
 /// Holds input that starts with "hold" until the run is cancelled or dropped, unless released,
@@ -935,7 +926,7 @@ struct HoldInput {
     released: Arc<AtomicBool>,
 }
 #[async_trait]
-impl Hooks for HoldInput {
+impl Hook for HoldInput {
     async fn on_input(&self, text: String, _ctx: &HookContext) -> HookResult<String> {
         if text.starts_with("hold") && !self.released.load(Ordering::SeqCst) {
             self.holding.notify_one();
@@ -975,7 +966,7 @@ async fn input_whose_hook_was_cancelled_is_not_recorded() {
         cancel.cancel();
     });
 
-    assert_eq!(report.outcome, RunOutcome::Aborted);
+    assert_eq!(report.outcome, RunOutcome::Cancelled);
     assert_eq!(mentions(&runner.session().messages(), "rotate the logs"), 0);
     let report = runner.run("next", &CancellationToken::new()).await;
     assert_eq!(report.outcome, RunOutcome::Completed);
@@ -1010,11 +1001,11 @@ fn approvals(events: &common::Collect) -> Vec<(String, String)> {
         .events()
         .into_iter()
         .filter_map(|event| match event {
-            AgentEvent::ToolDecision {
+            EventKind::ToolDecision {
                 tool_call_id, verdict, ..
             } => Some((tool_call_id, format!("{verdict:?}"))),
-            AgentEvent::ApprovalRequested { tool_call_id, .. } => Some((tool_call_id, "requested".into())),
-            AgentEvent::ApprovalResolved {
+            EventKind::ApprovalRequested { tool_call_id, .. } => Some((tool_call_id, "requested".into())),
+            EventKind::ApprovalResolved {
                 tool_call_id, approval, ..
             } => Some((tool_call_id, format!("{approval:?}"))),
             _ => None,
@@ -1052,7 +1043,7 @@ async fn the_policy_verdict_of_every_call_is_reported_with_its_reason() {
             .events()
             .into_iter()
             .filter_map(|event| match event {
-                AgentEvent::ToolDecision { verdict, reason, .. } => Some((verdict, reason)),
+                EventKind::ToolDecision { verdict, reason, .. } => Some((verdict, reason)),
                 _ => None,
             })
             .collect();
@@ -1143,7 +1134,7 @@ async fn a_resolved_approval_reports_how_long_it_waited() {
         .events()
         .into_iter()
         .filter_map(|event| match event {
-            AgentEvent::ApprovalResolved { wait_ms, .. } => Some(wait_ms),
+            EventKind::ApprovalResolved { wait_ms, .. } => Some(wait_ms),
             _ => None,
         })
         .collect();
@@ -1173,7 +1164,7 @@ async fn approvals_that_fail_or_time_out_report_how_they_ended() {
             .events()
             .into_iter()
             .filter_map(|event| match event {
-                AgentEvent::ApprovalResolved { approval, reason, .. } => Some((approval, reason.is_some())),
+                EventKind::ApprovalResolved { approval, reason, .. } => Some((approval, reason.is_some())),
                 _ => None,
             })
             .collect();
@@ -1196,7 +1187,7 @@ async fn an_approval_interrupted_by_cancellation_is_reported_as_cancelled() {
         cancel.cancel();
     });
 
-    assert_eq!(report.outcome, RunOutcome::Aborted);
+    assert_eq!(report.outcome, RunOutcome::Cancelled);
     assert_eq!(
         approvals(&events),
         pairs(&[("c", "Ask"), ("c", "requested"), ("c", "Cancelled")])
@@ -1209,14 +1200,14 @@ struct Kinds {
     all: bool,
 }
 #[async_trait]
-impl Hooks for Kinds {
+impl Hook for Kinds {
     async fn on_event(&self, event: &Event, _ctx: &HookContext) -> HookResult<()> {
         self.seen.lock().unwrap().push(event.event.kind());
         Ok(())
     }
 
-    fn observes(&self, event: &AgentEvent) -> bool {
-        self.all || !matches!(event, AgentEvent::MessageUpdate { .. })
+    fn observes(&self, event: &EventKind) -> bool {
+        self.all || !matches!(event, EventKind::MessageUpdate { .. })
     }
 }
 
@@ -1264,7 +1255,7 @@ impl ContextProbe {
     }
 }
 #[async_trait]
-impl Hooks for ContextProbe {
+impl Hook for ContextProbe {
     async fn on_input(&self, text: String, ctx: &HookContext) -> HookResult<String> {
         self.record("on_input", ctx);
         Ok(text)
@@ -1281,9 +1272,9 @@ impl Hooks for ContextProbe {
         self.record("after_tool", ctx);
         Ok(output)
     }
-    async fn finish_turn(&self, _turn: &FinishedTurn<'_>, ctx: &HookContext) -> HookResult<TurnDecision> {
-        self.record("finish_turn", ctx);
-        Ok(TurnDecision::Default)
+    async fn finish_step(&self, _step: &FinishedStep<'_>, ctx: &HookContext) -> HookResult<StepDecision> {
+        self.record("finish_step", ctx);
+        Ok(StepDecision::Default)
     }
     async fn on_event(&self, _event: &Event, ctx: &HookContext) -> HookResult<()> {
         self.record("on_event", ctx);
@@ -1316,7 +1307,7 @@ async fn every_hook_method_knows_the_session_run_and_working_directory() {
         [
             "after_tool",
             "before_tool",
-            "finish_turn",
+            "finish_step",
             "on_event",
             "on_input",
             "transform_context"
@@ -1333,7 +1324,7 @@ async fn every_hook_method_knows_the_session_run_and_working_directory() {
 
 struct FailingObserver;
 #[async_trait]
-impl Hooks for FailingObserver {
+impl Hook for FailingObserver {
     async fn on_event(&self, _event: &Event, _ctx: &HookContext) -> HookResult<()> {
         Err("exporter offline".into())
     }
@@ -1358,7 +1349,7 @@ async fn a_named_hook_is_reported_under_its_name() {
         .events()
         .into_iter()
         .filter_map(|event| match event {
-            AgentEvent::HookFailed { hook, .. } => Some(hook),
+            EventKind::HookFailed { hook, .. } => Some(hook),
             _ => None,
         })
         .collect();
@@ -1373,7 +1364,7 @@ struct Staged {
     order: Arc<Mutex<Vec<String>>>,
 }
 #[async_trait]
-impl Hooks for Staged {
+impl Hook for Staged {
     async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<PolicyDecision> {
         self.order.lock().unwrap().push(format!("before:{}", self.tag));
         Ok(PolicyDecision::Allow)
@@ -1427,7 +1418,7 @@ async fn hooks_run_in_stage_order_whatever_the_registration_order() {
 /// An extension that copies a secret into tool output.
 struct LeakSecret;
 #[async_trait]
-impl Hooks for LeakSecret {
+impl Hook for LeakSecret {
     async fn after_tool(&self, _call: &ToolCall, mut output: ToolOutput, _ctx: &HookContext) -> HookResult<ToolOutput> {
         output.content.push_str(" sk-registered-early");
         Ok(output)
@@ -1475,7 +1466,7 @@ async fn progress_passes_only_the_redaction_hooks() {
         .events()
         .into_iter()
         .filter_map(|event| match event {
-            AgentEvent::ToolExecutionUpdate { content, .. } => Some(content),
+            EventKind::ToolExecutionUpdate { content, .. } => Some(content),
             _ => None,
         })
         .collect();
@@ -1503,7 +1494,7 @@ async fn redaction_covers_the_strings_and_keys_of_details() {
         .events()
         .into_iter()
         .filter_map(|event| match event {
-            AgentEvent::ToolExecutionEnd { details, .. } => details,
+            EventKind::ToolExecutionEnd { details, .. } => details,
             _ => None,
         })
         .collect();
@@ -1520,7 +1511,7 @@ async fn tools_with_the_same_name_are_rejected_before_any_request() {
 
     let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
 
-    assert_eq!(result.outcome, RunOutcome::Error);
+    assert_eq!(result.outcome, RunOutcome::Failed);
     let error = format!("{:?}", result.error);
     assert!(error.contains("more than one tool is named \\\"echo\\\""), "{error}");
     assert!(provider.requests().is_empty());
@@ -1528,7 +1519,7 @@ async fn tools_with_the_same_name_are_rejected_before_any_request() {
 
 struct AppendSystem;
 #[async_trait]
-impl Hooks for AppendSystem {
+impl Hook for AppendSystem {
     async fn transform_context(&self, _messages: &[Message], _ctx: &HookContext) -> HookResult<Vec<ContextEdit>> {
         Ok(vec![ContextEdit::Append {
             message: Message::System(SystemMessage {
@@ -1550,7 +1541,7 @@ async fn a_hook_cannot_append_system_messages() {
 
     let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
 
-    assert_eq!(result.outcome, RunOutcome::Error);
+    assert_eq!(result.outcome, RunOutcome::Failed);
     let error = format!("{:?}", result.error);
     assert!(error.contains("system prompt comes from the configuration"), "{error}");
     assert!(provider.requests().is_empty());
@@ -1558,8 +1549,8 @@ async fn a_hook_cannot_append_system_messages() {
 
 struct PanickingObserver;
 #[async_trait]
-impl Hooks for PanickingObserver {
-    fn observes(&self, _event: &AgentEvent) -> bool {
+impl Hook for PanickingObserver {
+    fn observes(&self, _event: &EventKind) -> bool {
         panic!("observes is broken")
     }
 }
@@ -1584,7 +1575,7 @@ struct Declared {
 }
 
 #[async_trait]
-impl zx_agent::agent::Tool for Declared {
+impl zx_agent::Tool for Declared {
     fn name(&self) -> &str {
         self.name
     }
@@ -1596,11 +1587,7 @@ impl zx_agent::agent::Tool for Declared {
             parameters: json!({"type": "object"}),
         }
     }
-    async fn execute(
-        &self,
-        _args: serde_json::Value,
-        _ctx: &zx_agent::agent::ToolContext,
-    ) -> Result<ToolOutput, String> {
+    async fn execute(&self, _args: serde_json::Value, _ctx: &zx_agent::ToolContext) -> Result<ToolOutput, String> {
         Ok(ToolOutput::ok("ran"))
     }
 }
@@ -1617,7 +1604,7 @@ async fn a_tool_declared_under_another_name_is_rejected_before_any_request() {
 
     let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
 
-    assert_eq!(result.outcome, RunOutcome::Error);
+    assert_eq!(result.outcome, RunOutcome::Failed);
     let error = format!("{:?}", result.error);
     assert!(error.contains("declares itself as \\\"other\\\""), "{error}");
     assert!(provider.requests().is_empty());
@@ -1635,7 +1622,7 @@ async fn a_tool_whose_definition_panics_fails_the_run_before_any_request() {
 
     let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
 
-    assert_eq!(result.outcome, RunOutcome::Error);
+    assert_eq!(result.outcome, RunOutcome::Failed);
     let error = format!("{:?}", result.error);
     assert!(error.contains("panicked"), "{error}");
     assert!(provider.requests().is_empty());
@@ -1645,7 +1632,7 @@ async fn a_tool_whose_definition_panics_fails_the_run_before_any_request() {
 struct CancelsItself;
 
 #[async_trait]
-impl zx_agent::agent::Tool for CancelsItself {
+impl zx_agent::Tool for CancelsItself {
     fn name(&self) -> &str {
         "stop"
     }
@@ -1656,11 +1643,7 @@ impl zx_agent::agent::Tool for CancelsItself {
             parameters: json!({"type": "object"}),
         }
     }
-    async fn execute(
-        &self,
-        _args: serde_json::Value,
-        ctx: &zx_agent::agent::ToolContext,
-    ) -> Result<ToolOutput, String> {
+    async fn execute(&self, _args: serde_json::Value, ctx: &zx_agent::ToolContext) -> Result<ToolOutput, String> {
         ctx.cancel.cancel();
         Ok(ToolOutput::ok("stopped its own work"))
     }

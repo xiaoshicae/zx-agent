@@ -14,7 +14,7 @@ use anyhow::{Result, ensure};
 use serde::Serialize;
 
 use crate::ai::{Message, Usage};
-use crate::session::{SessionStore, without_details};
+use crate::transcript::{Transcript, without_details};
 
 pub(crate) use compactor::Compactor;
 
@@ -139,7 +139,7 @@ pub enum Outcome {
     /// The compaction failed and left the context as it was; `error` says why.
     Failed,
     /// The compaction was cancelled and left the context as it was.
-    Aborted,
+    Cancelled,
 }
 
 /// What one compaction cost and how it ended, including a request that failed.
@@ -175,7 +175,7 @@ impl From<Compacted> for Report {
             End::Noop => (Outcome::Noop, input_bytes, None, None),
             End::Completed { entry_id, output_bytes } => (Outcome::Completed, output_bytes, Some(entry_id), None),
             End::Failed(error) => (Outcome::Failed, input_bytes, None, Some(error)),
-            End::Aborted(error) => (Outcome::Aborted, input_bytes, None, Some(error)),
+            End::Cancelled(error) => (Outcome::Cancelled, input_bytes, None, Some(error)),
             End::Unrecorded(error) => (Outcome::Failed, input_bytes, None, Some(format!("{error:#}"))),
         };
         Self {
@@ -229,7 +229,7 @@ pub(crate) enum End {
     /// The compaction failed, for this reason, and left the context as it was.
     Failed(String),
     /// The run was cancelled before the compaction completed; the text says where.
-    Aborted(String),
+    Cancelled(String),
     /// The session could not record a step of the compaction, so a run must stop
     /// (invariant 7).
     Unrecorded(anyhow::Error),
@@ -258,11 +258,11 @@ const BYTES_PER_TOKEN: usize = 4;
 
 /// An estimate of the tokens the next request's context holds (pi:
 /// `estimateProjectedContextTokens`): the prompt and output tokens counted by the last answer
-/// whose usage still measures the context ([`SessionStore::measured_context`]), plus a
+/// whose usage still measures the context ([`Transcript::measured_context`]), plus a
 /// quarter of the bytes of the messages after it; without such an answer, a quarter of all
 /// bytes. Only an estimate: the usage counts the request as it was sent, and bytes are not
 /// tokens.
-pub fn context_tokens(session: &SessionStore) -> Result<u64> {
+pub fn context_tokens(session: &Transcript) -> Result<u64> {
     let (measured, rest) = session.measured_context();
     let known = measured.map_or(0, |usage| usage.input.saturating_add(usage.output));
     let bytes = context_bytes(&rest)?;

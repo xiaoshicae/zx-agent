@@ -8,9 +8,9 @@ use serde_json::{Value, json};
 
 use super::mutation::FileMutationQueue;
 use super::{check_path, parse_args, resolve, unless_cancelled};
-use crate::agent::{ExecutionMode, Tool, ToolContext, ToolOutput};
 use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
+use zx_core::{ExecutionMode, Tool, ToolContext, ToolOutput};
 
 /// Creates or overwrites files, creating missing parent directories.
 pub struct WriteFileTool {

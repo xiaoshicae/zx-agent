@@ -8,10 +8,10 @@ use tokio::sync::mpsc;
 use tokio::task::JoinError;
 
 use crate::AgentSession;
-use crate::agent::QueuedMessage;
 use crate::agent_session::{AgentSessionError, Subscription};
 use crate::runner::{RunOutcome, RunReport};
-use crate::session::CustomMessage;
+use crate::transcript::CustomMessage;
+use zx_core::Input;
 
 use super::approval::{ApprovalEvents, ApprovalUpdate, ImApproval};
 use super::server::Shared;
@@ -36,7 +36,7 @@ impl Opened {
     /// next run. A message an extension queued goes back to the queue, which that run takes
     /// before its first request.
     pub(crate) fn leftover_texts(&self) -> Result<Vec<String>, String> {
-        // The loop looks for input at the end of each turn, so a message steered after the
+        // The loop looks for input at the end of each step, so a message steered after the
         // last look waits in the queue.
         let queued = self
             .session
@@ -45,8 +45,8 @@ impl Opened {
         let mut texts = Vec::new();
         for message in queued {
             match message {
-                QueuedMessage::User(text) => texts.push(text),
-                custom @ QueuedMessage::Custom(_) => self.session.queues().steer_message(custom),
+                Input::User(text) => texts.push(text),
+                custom @ Input::Custom(_) => self.session.queues().steer_message(custom),
             }
         }
         Ok(texts)
@@ -115,7 +115,7 @@ impl Outlet {
         let answer = match ended {
             // The stop cancels runs through their token. A `/cancel` just before the stop ends
             // the same way and is told the same.
-            Ok(Ok(report)) if closing && matches!(report.outcome, RunOutcome::Aborted) => replies.stopped.clone(),
+            Ok(Ok(report)) if closing && matches!(report.outcome, RunOutcome::Cancelled) => replies.stopped.clone(),
             Ok(Ok(report)) => render(&report, replies),
             // Only this worker prompts the session, one run at a time, so Busy cannot occur.
             Ok(Err(error)) => format!("{}{error}", replies.failed),
@@ -168,7 +168,7 @@ impl Outlet {
         if thread.0 == trigger.id.0 {
             return;
         }
-        match opened.session.inspect(|store| store.entries().is_empty()) {
+        match opened.session.with_transcript(|store| store.entries().is_empty()) {
             Ok(true) => {}
             Ok(false) => return,
             Err(error) => {
@@ -231,9 +231,9 @@ fn render(report: &RunReport, replies: &Replies) -> String {
         RunOutcome::TokenBudget => noted(&replies.token_budget),
         RunOutcome::CostBudget => noted(&replies.cost_budget),
         // The last answer in the session may be an earlier run's, so it is not repeated.
-        RunOutcome::Timeout => replies.timed_out.clone(),
-        RunOutcome::Aborted => replies.cancelled.clone(),
-        RunOutcome::Error => match &report.error {
+        RunOutcome::TimedOut => replies.timed_out.clone(),
+        RunOutcome::Cancelled => replies.cancelled.clone(),
+        RunOutcome::Failed => match &report.error {
             Some(error) => format!("{}{error}", replies.failed),
             // The reply leads into the error; without one, drop the separator it ends with,
             // whatever the reply's language.
@@ -298,15 +298,15 @@ mod tests {
     fn a_run_that_did_not_finish_does_not_repeat_an_earlier_answer() {
         let replies = Replies::default();
         assert_eq!(
-            render(&report(RunOutcome::Timeout, "earlier", None), &replies),
+            render(&report(RunOutcome::TimedOut, "earlier", None), &replies),
             replies.timed_out
         );
         assert_eq!(
-            render(&report(RunOutcome::Aborted, "earlier", None), &replies),
+            render(&report(RunOutcome::Cancelled, "earlier", None), &replies),
             replies.cancelled
         );
         assert_eq!(
-            render(&report(RunOutcome::Error, "earlier", Some("HTTP 500")), &replies),
+            render(&report(RunOutcome::Failed, "earlier", Some("HTTP 500")), &replies),
             format!("{}HTTP 500", replies.failed)
         );
     }

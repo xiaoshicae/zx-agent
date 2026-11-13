@@ -6,12 +6,12 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use serde_json::Value;
-use zx_agent::agent::{AgentEvent, Event, EventSink};
 use zx_agent::ai::{AssistantMessage, ContentBlock, Delta, Message, StopReason, ToolCall, ToolResultMessage};
 use zx_agent::compaction::{self, Outcome};
 use zx_agent::runner::RunReport;
 use zx_agent::sync::lock;
 use zx_agent::text::clip;
+use zx_agent::{Event, EventKind, EventSink};
 
 use crate::cli::{ColorArg, OutputMode};
 use crate::process::{JsonlEvents, write_line};
@@ -145,7 +145,7 @@ impl Output {
                         report.requests, report.usage.total_tokens
                     ),
                 ),
-                Outcome::Failed | Outcome::Aborted => {
+                Outcome::Failed | Outcome::Cancelled => {
                     if let Some(error) = &report.error {
                         self.line(Tone::Error, &format!("[compact] {}", visible(error)));
                     }
@@ -217,7 +217,7 @@ fn retry_scheduled(state: &mut TextState, retry: u32, max_retries: u32, delay_ms
 }
 
 /// An event with no line of chat's own: print it as `run` does.
-fn progress(state: &mut TextState, event: &AgentEvent) {
+fn progress(state: &mut TextState, event: &EventKind) {
     if let Some((severity, line)) = progress_line(event) {
         state.terminal.line(tone(severity), &line);
     }
@@ -240,31 +240,31 @@ impl EventSink for Output {
         }
         let mut state = lock(&self.text);
         match &event.event {
-            AgentEvent::RunStart { .. } => state.last_error = None,
-            AgentEvent::MessageStart { role: "assistant" } => state.wrote_text = false,
-            AgentEvent::MessageUpdate {
+            EventKind::RunStart { .. } => state.last_error = None,
+            EventKind::MessageStart { role: "assistant" } => state.wrote_text = false,
+            EventKind::MessageUpdate {
                 delta: Delta::Text { text },
             } => {
                 state.terminal.answer_text(&visible(text));
                 state.wrote_text = true;
             }
-            AgentEvent::MessageEnd {
+            EventKind::MessageEnd {
                 message: Message::Assistant(message),
                 ..
             } => answer_ended(&mut state, message),
-            AgentEvent::MessageEnd {
+            EventKind::MessageEnd {
                 message: Message::ToolResult(result),
                 ..
             } => tool_result(&mut state, result),
             // A message an extension sent, shown when it asks for that (pi: `display`).
-            AgentEvent::MessageEnd {
+            EventKind::MessageEnd {
                 message: Message::User { content, .. },
                 custom: Some(info),
                 ..
             } if info.display => custom_message(&mut state, &info.custom_type, content),
             // The result line that follows says how the call ended.
-            AgentEvent::ToolExecutionStart { .. } | AgentEvent::ToolExecutionEnd { .. } => {}
-            AgentEvent::RetryScheduled {
+            EventKind::ToolExecutionStart { .. } | EventKind::ToolExecutionEnd { .. } => {}
+            EventKind::RetryScheduled {
                 retry,
                 max_retries,
                 delay_ms,
@@ -362,7 +362,7 @@ mod tests {
 
     #[test]
     fn the_turn_line_omits_tokens_the_provider_did_not_report() {
-        use zx_agent::agent::RunOutcome;
+        use zx_agent::RunOutcome;
         use zx_agent::ai::Usage;
         let mut report = RunReport {
             outcome: RunOutcome::Completed,

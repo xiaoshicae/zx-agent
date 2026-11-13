@@ -14,8 +14,8 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::AgentSession;
-use zx_agent::agent::Interaction;
-use zx_agent::agent::NullSink;
+use zx_agent::Interaction;
+use zx_agent::NullSink;
 use zx_agent::ai::now_ms;
 use zx_agent::config::Builtin;
 use zx_agent::im::feishu::{FeishuChannel, FeishuConfig};

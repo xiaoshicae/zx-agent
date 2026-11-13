@@ -262,8 +262,8 @@ fn an_agent_without_extends_starts_from_nothing_and_needs_instructions() {
     assert_eq!(agent.instructions, "Only this.\n");
     assert!(agent.tools.is_empty());
     assert!(agent.permissions.ask.is_empty() && agent.permissions.allowed_commands().is_empty());
-    assert_eq!(agent.limits.max_model_requests, Limits::default().max_model_requests);
-    assert_eq!(agent.limits.timeout, Limits::default().timeout);
+    assert_eq!(agent.limits.max_model_requests, RunLimits::default().max_model_requests);
+    assert_eq!(agent.limits.timeout, RunLimits::default().timeout);
     assert_eq!(agent.continue_on_length, 0);
     assert!(!agent.context.discover);
     assert!(agent.skills.is_empty());

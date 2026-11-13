@@ -174,7 +174,7 @@ pub(crate) struct BaseArgs {
     pub(crate) tools: Option<Vec<String>>,
 }
 
-/// Limits per prompt; `None` keeps the agent's value. A run is one prompt.
+/// RunLimits per prompt; `None` keeps the agent's value. A run is one prompt.
 #[derive(Args)]
 pub(crate) struct BudgetArgs {
     /// Maximum model requests per prompt, failed attempts included. Defaults to the agent's.

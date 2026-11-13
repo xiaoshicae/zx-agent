@@ -1,7 +1,7 @@
 //! OpenTelemetry traces of runs, exported with OTLP over HTTP (protobuf) when the standard
 //! variables name an endpoint.
 //!
-//! One run is one trace: a `run` span, an `attempt` span for each try, `turn` spans, and
+//! One run is one trace: a `run` span, an `attempt` span for each try, `step` spans, and
 //! spans for model requests, tool calls and summaries, timed by the events' `atMs`. A run
 //! continues the caller's trace when its sink was made with a [`TraceParent`]. Token usage
 //! and cost are attributes of the spans they belong to; a collector derives metrics from the
@@ -9,7 +9,7 @@
 //! User input, model output, tool arguments and results never do, nor do reasons and error
 //! texts, which may quote them.
 //!
-//! Events become signals (`signal`), which one task turns into spans (`spans`).
+//! Events become signals (`signal`), which one task steps into spans (`spans`).
 
 mod signal;
 mod spans;
@@ -30,11 +30,11 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::EventSink;
+use crate::EventSink;
 use signal::{Signal, SignalSink};
 use spans::{Runs, export};
 
-/// Either variable turns the trace export on. As the OTLP specification has it, the first is
+/// Either variable steps the trace export on. As the OTLP specification has it, the first is
 /// used as it is, and the second gets `/v1/traces` appended.
 const ENDPOINT_VARIABLES: [&str; 2] = ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_ENDPOINT"];
 /// Variables that may carry credentials for a collector, such as an authorization header.

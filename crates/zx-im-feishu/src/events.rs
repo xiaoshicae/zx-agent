@@ -3,7 +3,7 @@
 
 use serde_json::{Value, json};
 use zx_ai::sync::lock;
-use zx_core::agent::ApprovalResult;
+use zx_core::ApprovalResult;
 use zx_im::{
     Addressee, ApprovalId, CardLabels, ChatKind, Choice, ConversationId, Destination, ImError, Inbound, MessageId,
     Seen, ThreadId, UserId,

@@ -3,9 +3,9 @@
 use anyhow::{Context, Result};
 
 use super::run_host::RunHost;
-use crate::agent::{AgentEvent, Effects, Interruption, PERSIST_FAILED};
 use crate::ai::{Message, ToolResultMessage, now_ms};
-use crate::session::StartRecord;
+use crate::transcript::StartRecord;
+use crate::{Effects, EventKind, Interruption, PERSIST_FAILED};
 
 impl RunHost<'_> {
     /// Record an error result for each call that an interrupted run left without one, so
@@ -20,7 +20,7 @@ impl RunHost<'_> {
                 .find(|tool| tool.name() == call.tool_name)
                 .map(|tool| tool.effects());
             let state = interruption(call.start, effects);
-            let recovered = AgentEvent::ToolCallRecovered {
+            let recovered = EventKind::ToolCallRecovered {
                 tool_call_id: call.tool_call_id.clone(),
                 tool_name: call.tool_name.clone(),
                 state,
@@ -35,14 +35,14 @@ impl RunHost<'_> {
                 details: None,
                 usage: None,
             });
-            self.target.emit(AgentEvent::MessageStart { role: "toolResult" }).await;
+            self.target.emit(EventKind::MessageStart { role: "toolResult" }).await;
             let entry_id = self
                 .session
                 .append_message(result.clone())
                 .await
                 .context(PERSIST_FAILED)?;
             self.target
-                .emit(AgentEvent::MessageEnd {
+                .emit(EventKind::MessageEnd {
                     message: result,
                     entry_id,
                     custom: None,

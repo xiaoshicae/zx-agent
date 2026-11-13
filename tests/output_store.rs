@@ -8,14 +8,14 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use zx_agent::agent::{HookChain, HookContext, Hooks, Tool, ToolContext, ToolOutput};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, ToolCall};
 use zx_agent::output_store::{Config, OutputStore, ReadOutputTool, SpillOutputs, TOOL_NAME};
 use zx_agent::redact::RedactSecrets;
 use zx_agent::runner::RunOutcome;
-use zx_agent::session::SessionStore;
 use zx_agent::tools::ReadFileTool;
+use zx_agent::transcript::Transcript;
+use zx_agent::{Hook, HookChain, HookContext, Tool, ToolContext, ToolOutput};
 
 use common::{RunnerSetup, config, header};
 
@@ -376,7 +376,7 @@ async fn redaction_precedes_both_output_file_and_session_persistence() {
     config.hooks.push(SpillOutputs::new(store, vec![TOOL_NAME.into()]));
     let audit = dir.path().join("session.jsonl");
     let (mut runner, _) = RunnerSetup {
-        session: SessionStore::create(&audit, header()).unwrap(),
+        session: Transcript::create(&audit, header()).unwrap(),
         ..RunnerSetup::new(config)
     }
     .build();

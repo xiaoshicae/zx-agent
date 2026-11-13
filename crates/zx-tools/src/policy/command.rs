@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use super::{ToolPolicy, command_of, normalize};
-use crate::agent::PolicyDecision;
 use crate::tools::BASH;
+use zx_core::PolicyDecision;
 
 /// Patterns rejected for every `bash` command, compared as substrings after lowercasing and
 /// collapsing whitespace. Easy to bypass on purpose: a denylist only stops the plain spelling,

@@ -18,8 +18,8 @@ use tokio_util::sync::CancellationToken;
 use zx_ai::sync::lock;
 
 use crate::AgentSession;
-use crate::agent::ApprovalResult;
-use crate::agent::Interaction;
+use zx_core::ApprovalResult;
+use zx_core::Interaction;
 
 use super::router::Router;
 use super::status::{left_behind, replace_left_behind};
@@ -143,7 +143,7 @@ pub(crate) fn segment(id: &str) -> String {
 #[async_trait]
 pub trait SessionFactory: Send + Sync {
     /// Open the session of `key` that `opening` names. Set `interaction` as the loop's
-    /// [`interaction`](crate::agent::LoopConfig::interaction): it posts approval cards to the
+    /// [`interaction`](zx_core::LoopConfig::interaction): it posts approval cards to the
     /// conversation. Called again after an idle session was released. An error is posted to
     /// the conversation after [`Replies::cannot_open`]; the next message tries again.
     async fn open(

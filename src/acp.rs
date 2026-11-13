@@ -34,13 +34,13 @@ use anyhow::{Context, Result};
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::AgentSession;
-use zx_agent::agent::{EventSink, RunOutcome};
 use zx_agent::config::Builtin;
 use zx_agent::otel::Telemetry;
 use zx_agent::runner::RunReport;
-use zx_agent::session::SessionInfo as StoredSession;
 use zx_agent::sync::lock;
 use zx_agent::tools::{BASH, EDIT_FILE, FIND, GREP, LS, READ_FILE, WRITE_FILE};
+use zx_agent::transcript::SessionInfo as StoredSession;
+use zx_agent::{EventSink, RunOutcome};
 
 use crate::cli::{self, AcpArgs, PreparedSession};
 use crate::process::{EXIT_COMPLETED, with_telemetry};
@@ -125,7 +125,7 @@ impl Host {
         match self.locate(&request.session_id, &request.cwd).await? {
             Located::Live(live) => {
                 let updates = Updates::new(cx.clone(), request.session_id.clone(), request.cwd.clone());
-                live.inspect(|store| updates.replay(store))
+                live.with_transcript(|store| updates.replay(store))
                     .with_context(|| format!("cannot replay session {}", request.session_id.0))?;
                 Ok(request.session_id.clone())
             }
@@ -285,7 +285,7 @@ impl Host {
     /// `session/cancel`: abort the session's turn, if it has one.
     fn cancel(&self, notification: &CancelNotification) {
         if let Some(live) = self.session(&notification.session_id) {
-            live.abort();
+            live.cancel();
         }
     }
 
@@ -300,7 +300,7 @@ impl Host {
     ) -> Result<(), Error> {
         let closed = lock(&self.sessions).remove(&*request.session_id.0);
         if let Some(live) = closed {
-            live.abort();
+            live.cancel();
         }
         responder.respond(CloseSessionResponse::new())
     }
@@ -456,7 +456,7 @@ fn prompt_text(blocks: &[ContentBlock]) -> String {
         .join("\n")
 }
 
-/// How a finished run answers `session/prompt`. Limits that end a turn have a stop reason;
+/// How a finished run answers `session/prompt`. RunLimits that end a turn have a stop reason;
 /// a failed or timed-out run is a request error, with the run's message.
 fn stop_reason(report: &RunReport) -> Result<StopReason> {
     match report.outcome {
@@ -464,8 +464,8 @@ fn stop_reason(report: &RunReport) -> Result<StopReason> {
         // The protocol has no reason for a cost limit; tokens are what a cost is paid for.
         RunOutcome::Truncated | RunOutcome::TokenBudget | RunOutcome::CostBudget => Ok(StopReason::MaxTokens),
         RunOutcome::ModelRequestLimit => Ok(StopReason::MaxTurnRequests),
-        RunOutcome::Aborted => Ok(StopReason::Cancelled),
-        RunOutcome::Error | RunOutcome::Timeout => Err(anyhow::Error::msg(
+        RunOutcome::Cancelled => Ok(StopReason::Cancelled),
+        RunOutcome::Failed | RunOutcome::TimedOut => Err(anyhow::Error::msg(
             report
                 .error
                 .clone()
@@ -524,14 +524,14 @@ mod tests {
             answer(&report(RunOutcome::ModelRequestLimit, None)),
             Ok(StopReason::MaxTurnRequests)
         );
-        assert_eq!(answer(&report(RunOutcome::Aborted, None)), Ok(StopReason::Cancelled));
+        assert_eq!(answer(&report(RunOutcome::Cancelled, None)), Ok(StopReason::Cancelled));
         assert_eq!(
-            answer(&report(RunOutcome::Error, Some("boom"))),
+            answer(&report(RunOutcome::Failed, Some("boom"))),
             Err("boom".to_string())
         );
         assert_eq!(
-            answer(&report(RunOutcome::Timeout, None)),
-            Err("the run ended with Timeout".to_string())
+            answer(&report(RunOutcome::TimedOut, None)),
+            Err("the run ended with TimedOut".to_string())
         );
     }
 

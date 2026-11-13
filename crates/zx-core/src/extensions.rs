@@ -1,12 +1,18 @@
 //! Extensions: [`Extension`] bundles tools, hooks and system prompt sections, and
 //! [`register`] adds them to a loop.
+//!
+//! - `command`: the slash commands extensions register
+
+mod command;
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::agent::{HookStage, Hooks, LoopConfig, SlashCommand, Tool, check_command_name};
 use crate::ai::PREAMBLE;
 use crate::prompt::GENERATED_SECTIONS;
+use crate::{Hook, HookStage, LoopConfig, Tool};
+
+pub use command::{CommandContext, CommandError, CommandOutcome, SlashCommand, check_command_name};
 
 /// Tools, hooks and system prompt sections registered together, such as a client for an
 /// external tool server. A host may register one extension into many loops, as `zx-agent im` does
@@ -16,7 +22,7 @@ use crate::prompt::GENERATED_SECTIONS;
 /// use std::sync::Arc;
 ///
 /// use zx_ai::ToolCall;
-/// use zx_core::agent::{HookContext, HookResult, Hooks, LoopConfig, ToolOutput};
+/// use zx_core::{HookContext, HookResult, Hook, LoopConfig, ToolOutput};
 /// use zx_core::extensions::{Extension, register};
 ///
 /// /// Marks every tool result and tells the model so.
@@ -25,7 +31,7 @@ use crate::prompt::GENERATED_SECTIONS;
 /// struct Mark;
 ///
 /// #[async_trait::async_trait]
-/// impl Hooks for Mark {
+/// impl Hook for Mark {
 ///     async fn after_tool(&self, _call: &ToolCall, mut output: ToolOutput, _ctx: &HookContext) -> HookResult<ToolOutput> {
 ///         output.content.push_str("\n(checked)");
 ///         Ok(output)
@@ -41,7 +47,7 @@ use crate::prompt::GENERATED_SECTIONS;
 ///         vec![("checked".into(), "Tool results end with (checked).".into())]
 ///     }
 ///
-///     fn hooks(&self) -> Vec<Box<dyn Hooks>> {
+///     fn hooks(&self) -> Vec<Box<dyn Hook>> {
 ///         vec![Box::new(Mark)]
 ///     }
 /// }
@@ -67,10 +73,10 @@ pub trait Extension: Send + Sync {
         Vec::new()
     }
 
-    /// Hooks, each declaring [`HookStage::Extension`]: built-in policies decide before them
+    /// Hook, each declaring [`HookStage::Extension`]: built-in policies decide before them
     /// and redaction runs after them, so an extension can neither loosen a policy's verdict
     /// nor bring back a redacted secret.
-    fn hooks(&self) -> Vec<Box<dyn Hooks>> {
+    fn hooks(&self) -> Vec<Box<dyn Hook>> {
         Vec::new()
     }
 
@@ -87,7 +93,7 @@ pub trait Extension: Send + Sync {
 /// unchanged.
 ///
 /// Errors: a blank or repeated extension name, a hook outside [`HookStage::Extension`], a
-/// tool name already in use or a tool that fails [`LoopConfig::validate`](crate::agent::LoopConfig::validate),
+/// tool name already in use or a tool that fails [`LoopConfig::validate`](crate::LoopConfig::validate),
 /// a section name that is malformed, reserved, already in the prompt or repeated, and a
 /// command name that is malformed or already registered.
 pub fn register(config: &mut LoopConfig, extensions: &[Arc<dyn Extension>]) -> Result<(), String> {
@@ -130,7 +136,7 @@ pub fn register(config: &mut LoopConfig, extensions: &[Arc<dyn Extension>]) -> R
 struct Parts<'a> {
     name: &'a str,
     tools: Vec<Arc<dyn Tool>>,
-    hooks: Vec<Box<dyn Hooks>>,
+    hooks: Vec<Box<dyn Hook>>,
     sections: Vec<(String, String)>,
     commands: Vec<Arc<dyn SlashCommand>>,
 }
@@ -145,7 +151,7 @@ struct Claimed<'a> {
 
 /// Check one extension's name, hooks, sections and commands against `config` and what
 /// earlier extensions claimed, and collect what it adds. Its tools are checked with the
-/// others by [`LoopConfig::validate`](crate::agent::LoopConfig::validate).
+/// others by [`LoopConfig::validate`](crate::LoopConfig::validate).
 fn check_extension<'a>(
     config: &LoopConfig,
     extension: &'a dyn Extension,

@@ -12,7 +12,7 @@
 //! ```
 //!
 //! Optional: `ZX_E2E_SYSTEM_UPDATES=inline` for a server known to accept system messages
-//! mid-conversation (default `collapse`). Every test caps output tokens and turns, and prints
+//! mid-conversation (default `collapse`). Every test caps output tokens and steps, and prints
 //! its token usage; with a small model the tests other than the summary evaluation use a few
 //! thousand tokens together. The tests use only synthetic prompts and files in temporary
 //! directories.
@@ -41,16 +41,16 @@ use tokio_util::sync::CancellationToken;
 
 use common::summary_eval::evaluate;
 use common::{RunnerSetup, config, fast_retry};
-use zx_agent::agent::PolicyDecision;
+use zx_agent::PolicyDecision;
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig, SystemUpdates};
 use zx_agent::ai::{Message, Provider};
 use zx_agent::compaction::{Config, Outcome};
 use zx_agent::executor::{LocalExecutor, local_environment_section};
 use zx_agent::policy::{AutoApprove, PolicyHook, Rule, RuleMatcher, RulePolicy};
 use zx_agent::prompt::build_system_prompt;
-use zx_agent::runner::{Limits, RunOutcome, RunReport};
-use zx_agent::session::SessionStore;
+use zx_agent::runner::{RunLimits, RunOutcome, RunReport};
 use zx_agent::tools::BashTool;
+use zx_agent::transcript::Transcript;
 
 const PAID: &str = "calls a paid model API; needs ZX_E2E_AUTHORIZED=1 and the API owner's consent";
 
@@ -100,7 +100,7 @@ impl Endpoint {
     }
 
     /// A runner against this endpoint with small budgets, so a misbehaving model cannot run
-    /// up costs: 256 output tokens per response, 4 turns, 2 minutes, no retries.
+    /// up costs: 256 output tokens per response, 4 steps, 2 minutes, no retries.
     fn setup(&self, api_key: String, cwd: &Path) -> RunnerSetup {
         let mut config = config(Arc::new(self.provider(api_key)), vec![]);
         config.model = self.model.clone();
@@ -111,10 +111,10 @@ impl Endpoint {
             &[("environment", &local_environment_section(cwd))],
         );
         RunnerSetup {
-            limits: Limits {
+            limits: RunLimits {
                 max_model_requests: Some(4),
                 timeout: Some(Duration::from_secs(120)),
-                ..Limits::default()
+                ..RunLimits::default()
             },
             ..RunnerSetup::new(config)
         }
@@ -146,7 +146,7 @@ impl Endpoint {
 fn print_usage(test: &str, report: &RunReport) {
     let usage = &report.usage;
     eprintln!(
-        "[real_api] {test}: {} tokens (in {} / out {}), {} turns, outcome {:?}",
+        "[real_api] {test}: {} tokens (in {} / out {}), {} steps, outcome {:?}",
         usage.total_tokens, usage.input, usage.output, report.model_requests, report.outcome
     );
 }
@@ -237,7 +237,7 @@ async fn a_resumed_session_gives_the_model_the_new_environment() {
     let first_dir = dir.path().join("first-dir");
     std::fs::create_dir(&first_dir).unwrap();
     let (mut runner, _) = RunnerSetup {
-        session: SessionStore::create(&path, common::header()).unwrap(),
+        session: Transcript::create(&path, common::header()).unwrap(),
         ..endpoint.setup(endpoint.api_key(), &first_dir)
     }
     .build();
@@ -248,7 +248,7 @@ async fn a_resumed_session_gives_the_model_the_new_environment() {
     let second_dir = dir.path().join("second-dir");
     std::fs::create_dir(&second_dir).unwrap();
     let (mut runner, _) = RunnerSetup {
-        session: SessionStore::open(&path).unwrap(),
+        session: Transcript::open(&path).unwrap(),
         ..endpoint.setup(endpoint.api_key(), &second_dir)
     }
     .build();
@@ -274,7 +274,7 @@ async fn an_invalid_key_fails_without_retrying() {
     let report = runner.run("Reply with exactly: OK", &CancellationToken::new()).await;
     print_usage("invalid key", &report);
 
-    assert_eq!((report.outcome, report.retries), (RunOutcome::Error, 0));
+    assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
     let error = report.error.unwrap_or_default();
     assert!(error.starts_with("HTTP 4"), "{error}");
 }

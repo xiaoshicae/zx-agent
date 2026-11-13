@@ -4,8 +4,8 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, Weak};
 
-use crate::agent::{Event, EventSink};
 use crate::sync::lock;
+use crate::{Event, EventSink};
 
 /// Keeps an additional event subscriber attached. Dropping it unsubscribes; an already
 /// dispatched snapshot may still finish. The handle keeps neither the conversation nor the

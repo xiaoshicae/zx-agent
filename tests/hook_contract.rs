@@ -8,11 +8,11 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use zx_agent::agent::{Approval, ApprovalRequest};
-use zx_agent::agent::{
-    ContextEdit, FinishedTurn, HookContext, PolicyDecision, RequestSettings, ToolOutput, TurnDecision, TurnDisposition,
-};
 use zx_agent::ai::{AssistantMessage, Message, Reasoning, StopReason, ToolCall, Usage};
+use zx_agent::{Approval, ApprovalRequest};
+use zx_agent::{
+    ContextEdit, FinishedStep, HookContext, PolicyDecision, RequestSettings, StepDecision, StepDisposition, ToolOutput,
+};
 
 /// `value` serializes to `expected` and reads back unchanged.
 fn round_trip<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(value: &T, expected: Value) {
@@ -53,14 +53,14 @@ fn request_settings_name_the_model_and_omit_an_unset_reasoning_level() {
 
 #[test]
 fn turn_decisions_carry_the_text_of_a_continuation_or_follow_up() {
-    round_trip(&TurnDecision::Default, json!({"decision": "default"}));
-    round_trip(&TurnDecision::Stop, json!({"decision": "stop"}));
+    round_trip(&StepDecision::Default, json!({"decision": "default"}));
+    round_trip(&StepDecision::Stop, json!({"decision": "stop"}));
     round_trip(
-        &TurnDecision::ContinueAnswer("continue".into()),
+        &StepDecision::ContinueAnswer("continue".into()),
         json!({"decision": "continue_answer", "text": "continue"}),
     );
     round_trip(
-        &TurnDecision::FollowUp("now summarize".into()),
+        &StepDecision::FollowUp("now summarize".into()),
         json!({"decision": "follow_up", "text": "now summarize"}),
     );
 }
@@ -189,17 +189,17 @@ fn the_hook_context_leaves_out_its_cancellation_token() {
 }
 
 #[test]
-fn a_turn_summary_serializes_for_hook_processes() {
+fn a_step_summary_serializes_for_hook_processes() {
     let mut response = AssistantMessage::failure("p", "m", StopReason::Stop, "");
     response.error_message = None;
     let messages = vec![Message::user("go")];
-    let summary = FinishedTurn {
+    let summary = FinishedStep {
         response: &response,
         messages: &messages,
-        turn: 2,
+        step: 2,
         answer_continuations: 1,
         remaining_model_requests: Some(8),
-        disposition: TurnDisposition::Stop,
+        disposition: StepDisposition::Stop,
     };
 
     let value = serde_json::to_value(&summary).unwrap();
@@ -212,7 +212,7 @@ fn a_turn_summary_serializes_for_hook_processes() {
     assert!(value.get("remainingTurns").is_none());
     assert_eq!(
         (
-            &value["turn"],
+            &value["step"],
             &value["answerContinuations"],
             &value["remainingModelRequests"],
             &value["disposition"]

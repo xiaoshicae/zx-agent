@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use zx_agent::agent::EventSink;
+use zx_agent::EventSink;
 use zx_agent::config::Builtin;
 use zx_agent::extensions::Extension;
 use zx_agent::mcp::{Server, ServerConfig};

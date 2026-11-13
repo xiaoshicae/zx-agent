@@ -9,10 +9,10 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::agent::{HookContext, HookResult, HookStage, Hooks, ToolOutput};
 use crate::ai::ToolCall;
 use crate::files::read_regular_file;
 use crate::sync::lock;
+use zx_core::{Hook, HookContext, HookResult, HookStage, ToolOutput};
 
 /// The largest secret file read, such as a token: anything bigger is not a single secret, and
 /// it could never be matched whole in the bounded output of a built-in tool.
@@ -134,7 +134,7 @@ fn secret_files_at(path: &Path) -> Result<Vec<PathBuf>, String> {
 }
 
 #[async_trait]
-impl Hooks for RedactSecrets {
+impl Hook for RedactSecrets {
     /// After every extension has changed the output, so none can bring a secret back.
     fn stage(&self) -> HookStage {
         HookStage::Redaction

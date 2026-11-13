@@ -13,7 +13,6 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 use zx_agent::AgentSession;
-use zx_agent::agent::{Event, EventSink, HookOptions, Hooks, LoopConfig, PolicyDecision, Tool};
 use zx_agent::ai::ModelMeta;
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
@@ -28,9 +27,10 @@ use zx_agent::output_store::{self, OutputStore, ReadOutputTool, SpillOutputs};
 use zx_agent::policy::{AutoApprove, CommandPolicy, PolicyHook, Rule, RuleMatcher, RulePolicy};
 use zx_agent::prompt::{self, build_system_prompt};
 use zx_agent::redact::RedactSecrets;
-use zx_agent::runner::{Limits, Runner};
-use zx_agent::session::{SessionHeader, SessionStore};
+use zx_agent::runner::{RunLimits, Runner};
 use zx_agent::tools::{self, BASH};
+use zx_agent::transcript::{SessionHeader, Transcript};
+use zx_agent::{Event, EventSink, Hook, HookOptions, LoopConfig, PolicyDecision, Tool};
 
 use super::execution::{check_session_outside, executor};
 use super::{BudgetArgs, Shared, env_value, resolve_cwd};
@@ -42,7 +42,7 @@ use crate::session_files::{self, SessionFile};
 /// Without one the name is the hook's type name, whose form Rust does not guarantee across
 /// compiler versions, and the policy hooks would all share a name. MCP server names cannot
 /// contain `_`, so these never clash with an extension's.
-fn push_built_in(config: &mut LoopConfig, name: &str, hook: impl Hooks + 'static) {
+fn push_built_in(config: &mut LoopConfig, name: &str, hook: impl Hook + 'static) {
     config.hooks.push_with(
         hook,
         HookOptions {
@@ -59,12 +59,12 @@ fn push_built_in(config: &mut LoopConfig, name: &str, hook: impl Hooks + 'static
 pub(crate) struct PreparedSession {
     pub(crate) config: LoopConfig,
     retry: RetryPolicy,
-    pub(crate) store: SessionStore,
+    pub(crate) store: Transcript,
     /// The agent's auto-approved commands, for frontend policies that also ask for bash.
     auto_approve: AutoApprove,
     /// The agent's `permissions.approveAll`: nothing waits for a person.
     approve_all: bool,
-    limits: Limits,
+    limits: RunLimits,
     compaction: compaction::Config,
     /// The selected agent's name, for a frontend to show.
     pub(crate) agent_name: String,
@@ -359,7 +359,7 @@ async fn open_session(
     model: &str,
     file: SessionFile<'_>,
     cwd: &Path,
-) -> Result<(SessionStore, Arc<dyn Executor>, String)> {
+) -> Result<(Transcript, Arc<dyn Executor>, String)> {
     let config = &shared.settings.config;
     if config.execution == Execution::Container {
         check_session_outside(&file, cwd)?;

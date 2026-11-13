@@ -17,8 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use common::{EchoTool, RunnerSetup, config, header, summarize};
 use zx_agent::AgentSession;
-use zx_agent::agent::Interaction;
-use zx_agent::agent::{ApprovalResult, NullSink, PolicyDecision, Tool};
+use zx_agent::Interaction;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::im::{
     Addressee, ApprovalId, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId,
@@ -26,7 +25,8 @@ use zx_agent::im::{
     SessionKey, StatusStore, ThreadId, UserId,
 };
 use zx_agent::policy::{PolicyHook, Rule, RuleMatcher, RulePolicy};
-use zx_agent::session::SessionStore;
+use zx_agent::transcript::Transcript;
+use zx_agent::{ApprovalResult, NullSink, PolicyDecision, Tool};
 
 const PLATFORM: &str = "fake";
 const CHAT: &str = "C1";
@@ -261,10 +261,10 @@ impl SessionFactory for Factory {
             .file_in(self.dir.path(), opening)
             .map_err(|error| error.to_string())?;
         let store = if path.exists() {
-            SessionStore::open(&path)
+            Transcript::open(&path)
         } else {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            SessionStore::create(&path, header())
+            Transcript::create(&path, header())
         }
         .map_err(|error| format!("{error:#}"))?;
         let runner = RunnerSetup {

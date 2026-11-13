@@ -4,8 +4,10 @@
 //!
 //! Layering follows pi (<https://github.com/earendil-works/pi>):
 //! - [`ai`]: message types, the streaming event protocol, providers (pi: packages/ai)
-//! - [`agent`]: the agent loop, tool execution, and tool policy (pi: packages/agent)
-//! - [`session`]: append-only JSONL session tree and its projection (pi: SessionManager)
+//! - the kernel's interfaces and types at the root: [`Tool`], [`Hook`], [`Event`],
+//!   [`PolicyDecision`] and the rest (pi: packages/agent)
+//! - [`transcript`]: append-only JSONL record tree of a session and its projection (pi:
+//!   SessionManager)
 //! - [`agent_session`]: shared prompts, cancellation, subscriptions and model switching
 //! - [`runner`]: exclusive run ownership, retries, limits and persistence
 //! - [`config`]: `config.toml`, the environment: the model, its provider and where commands
@@ -23,7 +25,7 @@
 //!
 //! The modules live in the crates of this workspace and are re-exported here under the paths
 //! they always had: [`ai`] is `zx-ai`, with the provider of `zx-ai-openai` as `ai::openai`;
-//! the kernel ([`agent`], [`session`], [`runner`] and the rest) is `zx-core`; [`tools`],
+//! the kernel ([`transcript`], [`runner`] and the rest) is `zx-core`; [`tools`],
 //! [`executor`], [`output_store`], [`policy`], [`continuation`], [`redact`] and [`mcp`] are
 //! `zx-tools`; [`im`] is `zx-im`, with the platform crates `zx-im-slack` and `zx-im-feishu`
 //! as `im::slack` and `im::feishu`. An embedder that needs only part of it can depend on
@@ -40,7 +42,7 @@ pub mod ai {
 pub use zx_ai::sync;
 #[doc(hidden)]
 pub use zx_ai::text;
-pub use zx_core::{AgentSession, agent, agent_session, compaction, extensions, prompt, runner, session};
+pub use zx_core::*;
 #[doc(hidden)]
 pub use zx_tools::files;
 pub use zx_tools::{continuation, executor, mcp, output_store, policy, redact, tools};

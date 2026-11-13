@@ -17,15 +17,15 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::AgentSession;
-use zx_agent::agent::{AgentEvent, Effects, ExecutionMode, Interruption, Tool, ToolContext, ToolOutput};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{AssistantMessage, ContentBlock, Message, StopReason, ToolCall, ToolDef, ToolResultMessage};
 use zx_agent::config::skills::ReadSkillTool;
 use zx_agent::executor::{Executor, LocalExecutor};
 use zx_agent::output_store::{self, OutputStore, ReadOutputTool};
 use zx_agent::runner::RunOutcome;
-use zx_agent::session::SessionStore;
 use zx_agent::tools::builtin_tools;
+use zx_agent::transcript::Transcript;
+use zx_agent::{Effects, EventKind, ExecutionMode, Interruption, Tool, ToolContext, ToolOutput};
 
 use common::mock_server::{MockServer, Reply};
 use common::{
@@ -195,11 +195,11 @@ fn results(messages: &[Message]) -> Vec<(String, String, bool)> {
         .collect()
 }
 
-fn recovered(events: &[AgentEvent]) -> Vec<(String, Interruption)> {
+fn recovered(events: &[EventKind]) -> Vec<(String, Interruption)> {
     events
         .iter()
         .filter_map(|event| match event {
-            AgentEvent::ToolCallRecovered {
+            EventKind::ToolCallRecovered {
                 tool_call_id, state, ..
             } => Some((tool_call_id.clone(), *state)),
             _ => None,
@@ -244,7 +244,7 @@ async fn each_start_is_on_disk_before_its_call_runs_and_reads_are_not_recorded()
         probe_in("read", Effects::ReadOnly, ExecutionMode::Sequential, &path),
     ];
     let (mut runner, _) = RunnerSetup {
-        session: SessionStore::create(&path, header()).unwrap(),
+        session: Transcript::create(&path, header()).unwrap(),
         ..RunnerSetup::new(config(provider.clone(), tools))
     }
     .build();
@@ -283,7 +283,7 @@ async fn a_parallel_batch_records_every_start_before_any_call_runs() {
         probe("read", Effects::ReadOnly, &path),
     ];
     let (mut runner, _) = RunnerSetup {
-        session: SessionStore::create(&path, header()).unwrap(),
+        session: Transcript::create(&path, header()).unwrap(),
         ..RunnerSetup::new(config(provider.clone(), tools))
     }
     .build();
@@ -303,7 +303,7 @@ async fn an_interrupted_batch_gets_results_and_no_call_runs_again() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
     // What a crash leaves: c1 finished, c2 started, c3 and c4 never ran, c5's tool is gone.
-    let mut store = SessionStore::create(&path, header()).unwrap();
+    let mut store = Transcript::create(&path, header()).unwrap();
     store.append_message(Message::user("fix it")).await.unwrap();
     store
         .append_message(answer(&[
@@ -324,7 +324,7 @@ async fn an_interrupted_batch_gets_results_and_no_call_runs_again() {
     let tools: Vec<Arc<dyn Tool>> = vec![write.clone(), read.clone()];
     let provider = Arc::new(FauxProvider::new([FauxStep::text("checked")]));
     let (mut runner, events) = RunnerSetup {
-        session: SessionStore::open(&path).unwrap(),
+        session: Transcript::open(&path).unwrap(),
         ..RunnerSetup::new(config(provider.clone(), tools))
     }
     .build();
@@ -371,13 +371,13 @@ async fn an_interrupted_batch_gets_results_and_no_call_runs_again() {
         assert!(is_error, "{content}");
     }
     // Recorded in the file, so the next run has nothing to recover.
-    assert!(SessionStore::read(&path).unwrap().interrupted_tool_calls().is_empty());
+    assert!(Transcript::read(&path).unwrap().interrupted_tool_calls().is_empty());
 }
 
 #[tokio::test]
 async fn calls_of_a_failed_or_cancelled_answer_are_reported_as_not_executed() {
     for stop_reason in [StopReason::Error, StopReason::Aborted] {
-        let mut store = SessionStore::in_memory(header());
+        let mut store = Transcript::in_memory(header());
         store.append_message(Message::user("fix it")).await.unwrap();
         let Message::Assistant(mut failed) = answer(&[("c1", "write"), ("c2", "read")]) else {
             panic!("answer builds an assistant message");
@@ -418,7 +418,7 @@ async fn calls_of_a_failed_or_cancelled_answer_are_reported_as_not_executed() {
 
 #[tokio::test]
 async fn the_recovery_event_follows_the_recorded_result() {
-    let mut store = SessionStore::in_memory(header());
+    let mut store = Transcript::in_memory(header());
     store.append_message(Message::user("fix it")).await.unwrap();
     store.append_message(answer(&[("c1", "write")])).await.unwrap();
     let tools: Vec<Arc<dyn Tool>> = vec![Counted::new("write", Effects::SideEffects)];
@@ -437,7 +437,7 @@ async fn the_recovery_event_follows_the_recorded_result() {
         .position(|event| {
             matches!(
                 event,
-                AgentEvent::MessageEnd {
+                EventKind::MessageEnd {
                     message: Message::ToolResult(_),
                     ..
                 }
@@ -446,7 +446,7 @@ async fn the_recovery_event_follows_the_recorded_result() {
         .unwrap();
     let reported = events
         .iter()
-        .position(|event| matches!(event, AgentEvent::ToolCallRecovered { .. }))
+        .position(|event| matches!(event, EventKind::ToolCallRecovered { .. }))
         .unwrap();
     assert!(recorded < reported, "{events:?}");
 }
@@ -500,7 +500,7 @@ async fn result_after_cancelling_a_running_call(effects: Effects) -> (String, bo
             _ = &mut running => panic!("the run ended before its tool started"),
         }
         cancel.cancel();
-        assert_eq!(running.await.unwrap().outcome, RunOutcome::Aborted);
+        assert_eq!(running.await.unwrap().outcome, RunOutcome::Cancelled);
     }
     let report = session.prompt("again", &CancellationToken::new()).await.unwrap();
     assert_eq!(report.outcome, RunOutcome::Completed);
@@ -549,7 +549,7 @@ fn sent_tool_result(server: &MockServer, index: usize) -> Value {
 #[tokio::test]
 async fn run_reports_a_recovered_call_and_does_not_run_the_command_again() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = SessionStore::create(&dir.path().join("session.jsonl"), header()).unwrap();
+    let mut store = Transcript::create(&dir.path().join("session.jsonl"), header()).unwrap();
     store.append_message(Message::user("fix it")).await.unwrap();
     let call = tool_call_answer("mock", "mock", "bash", json!({"command": "touch ran-again"}));
     store.append_message(call).await.unwrap();

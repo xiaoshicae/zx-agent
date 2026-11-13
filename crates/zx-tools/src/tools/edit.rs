@@ -11,10 +11,10 @@ use super::edit_text::{
 };
 use super::mutation::FileMutationQueue;
 use super::{DEFAULT_MAX_FILE_BYTES, check_path, looks_binary, parse_args, resolve, unless_cancelled};
-use crate::agent::{ExecutionMode, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput};
 use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
 use crate::text::prefix_noted;
+use zx_core::{ExecutionMode, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput};
 
 /// The most bytes of the patch in a result's details: details over the loop's limit are
 /// dropped whole, so a long patch is cut to leave room for the other fields.

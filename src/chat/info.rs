@@ -3,8 +3,8 @@
 use std::path::{Path, PathBuf};
 
 use zx_agent::ai::Message;
-use zx_agent::session::Entry;
 use zx_agent::tools::BASH;
+use zx_agent::transcript::Entry;
 
 use super::output::{self, Output};
 use super::term::Tone;

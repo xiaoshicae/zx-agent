@@ -10,7 +10,7 @@ use serde::Deserialize;
 use super::agent_file::AgentFile;
 use super::skills::{self, Skill};
 use super::{Config, Execution, Permissions, context, read_text};
-use crate::runner::Limits;
+use crate::runner::RunLimits;
 use crate::tools::BUILTIN_TOOL_NAMES;
 use crate::{compaction, output_store};
 
@@ -70,7 +70,7 @@ pub struct AgentDefinition {
     /// What the host lets the agent do, independently of prompt text.
     pub permissions: Permissions,
     /// Per-prompt request and time budgets.
-    pub limits: Limits,
+    pub limits: RunLimits,
     /// Number of length-truncated responses to continue automatically.
     pub continue_on_length: u32,
     /// Project guidance discovery and explicit file paths.
@@ -143,7 +143,7 @@ impl AgentDefinition {
             instructions: String::new(),
             tools: Vec::new(),
             permissions: Permissions::default(),
-            limits: Limits::default(),
+            limits: RunLimits::default(),
             continue_on_length: 0,
             context: ProjectContext {
                 discover: false,

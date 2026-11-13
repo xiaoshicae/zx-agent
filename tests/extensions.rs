@@ -8,17 +8,17 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use common::{EchoTool, config, run_prompt, summarize};
-use zx_agent::agent::{AgentEvent, HookContext, HookPoint, HookResult, HookStage, Hooks, LoopConfig, Tool, ToolOutput};
 use zx_agent::ai::ToolCall;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::extensions::{Extension, register};
 use zx_agent::prompt::{ENVIRONMENT, build_system_prompt};
+use zx_agent::{EventKind, Hook, HookContext, HookPoint, HookResult, HookStage, LoopConfig, Tool, ToolOutput};
 
 /// Appends a mark to every tool result.
 struct Mark;
 
 #[async_trait]
-impl Hooks for Mark {
+impl Hook for Mark {
     async fn after_tool(&self, _call: &ToolCall, mut output: ToolOutput, _ctx: &HookContext) -> HookResult<ToolOutput> {
         output.content.push_str(" [marked]");
         Ok(output)
@@ -29,7 +29,7 @@ impl Hooks for Mark {
 struct Early;
 
 #[async_trait]
-impl Hooks for Early {
+impl Hook for Early {
     fn stage(&self) -> HookStage {
         HookStage::Policy
     }
@@ -39,7 +39,7 @@ impl Hooks for Early {
 struct Broken;
 
 #[async_trait]
-impl Hooks for Broken {
+impl Hook for Broken {
     async fn after_tool(&self, _call: &ToolCall, _output: ToolOutput, _ctx: &HookContext) -> HookResult<ToolOutput> {
         Err("broken".to_string())
     }
@@ -49,7 +49,7 @@ struct Bundle {
     name: &'static str,
     tools: Vec<Arc<dyn Tool>>,
     sections: Vec<(&'static str, &'static str)>,
-    hooks: fn() -> Vec<Box<dyn Hooks>>,
+    hooks: fn() -> Vec<Box<dyn Hook>>,
 }
 
 impl Bundle {
@@ -79,7 +79,7 @@ impl Extension for Bundle {
             .collect()
     }
 
-    fn hooks(&self) -> Vec<Box<dyn Hooks>> {
+    fn hooks(&self) -> Vec<Box<dyn Hook>> {
         (self.hooks)()
     }
 }
@@ -106,7 +106,7 @@ async fn an_extension_adds_its_tools_hooks_and_prompt_sections() {
     let notes = Bundle {
         tools: vec![Arc::new(EchoTool::new("note"))],
         sections: vec![("notes", "Use note to keep notes.")],
-        hooks: || vec![Box::new(Mark) as Box<dyn Hooks>],
+        hooks: || vec![Box::new(Mark) as Box<dyn Hook>],
         ..Bundle::named("notes")
     };
     register(&mut config, &[Arc::new(notes)]).unwrap();
@@ -133,7 +133,7 @@ fn a_hook_outside_the_extension_stage_is_refused_and_nothing_is_registered() {
     let early = Bundle {
         tools: vec![Arc::new(EchoTool::new("note"))],
         sections: vec![("notes", "Use note to keep notes.")],
-        hooks: || vec![Box::new(Early) as Box<dyn Hooks>],
+        hooks: || vec![Box::new(Early) as Box<dyn Hook>],
         ..Bundle::named("early")
     };
     let error = register(&mut config, &[Arc::new(early)]).unwrap_err();
@@ -221,7 +221,7 @@ async fn a_failing_extension_hook_is_reported_under_the_extension_name() {
     ]));
     let mut config = base(provider);
     let broken = Bundle {
-        hooks: || vec![Box::new(Broken) as Box<dyn Hooks>],
+        hooks: || vec![Box::new(Broken) as Box<dyn Hook>],
         ..Bundle::named("broken")
     };
     register(&mut config, &[Arc::new(broken)]).unwrap();
@@ -230,7 +230,7 @@ async fn a_failing_extension_hook_is_reported_under_the_extension_name() {
     assert!(
         events.events().iter().any(|event| matches!(
             event,
-            AgentEvent::HookFailed { hook, phase, .. } if hook == "broken" && *phase == HookPoint::AfterTool
+            EventKind::HookFailed { hook, phase, .. } if hook == "broken" && *phase == HookPoint::AfterTool
         )),
         "{:?}",
         events.kinds()

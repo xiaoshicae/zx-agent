@@ -323,7 +323,7 @@ impl UserMessageKind {
     }
 }
 
-/// A transcript message. Ordinary user records retain their pre-Hooks JSON shape.
+/// A transcript message. Ordinary user records retain their pre-Hook JSON shape.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "camelCase")]
 pub enum Message {

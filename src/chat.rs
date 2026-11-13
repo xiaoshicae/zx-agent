@@ -27,14 +27,14 @@ use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 
 use zx_agent::AgentSession;
-use zx_agent::agent::{EventSink, QueuedMessage};
 use zx_agent::agent_session::ModelRef;
 use zx_agent::ai::{Provider, Reasoning};
 use zx_agent::config::Builtin;
 use zx_agent::otel::Telemetry;
+use zx_agent::{EventSink, Input};
 
 use crate::cli::{self, ChatArgs};
-use crate::process::{EXIT_ABORTED, EXIT_COMPLETED, with_telemetry};
+use crate::process::{EXIT_CANCELLED, EXIT_COMPLETED, with_telemetry};
 use crate::render::visible;
 use crate::session_files::SessionFile;
 
@@ -252,7 +252,7 @@ impl Terminal {
                         Read::Again
                     }
                 }
-                Interrupt::Terminate => Read::Exit(EXIT_ABORTED),
+                Interrupt::Terminate => Read::Exit(EXIT_CANCELLED),
             }),
             line = self.input.recv() => match line {
                 Some(line) => {
@@ -404,12 +404,7 @@ impl Repl<'_> {
 }
 
 /// Run an extension's command and show what it says. Returns the message it sends, if any.
-async fn run_extension_command(
-    session: &AgentSession,
-    name: &str,
-    args: &str,
-    output: &Output,
-) -> Option<QueuedMessage> {
+async fn run_extension_command(session: &AgentSession, name: &str, args: &str, output: &Output) -> Option<Input> {
     match session.run_command(name, args).await {
         Ok(outcome) => {
             for line in outcome.lines {

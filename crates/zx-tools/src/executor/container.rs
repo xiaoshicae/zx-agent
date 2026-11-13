@@ -46,7 +46,7 @@ use super::capture::{Capture, await_end, collect};
 use super::{
     Captured, CommandEnd, CommandOutput, Executor, ShellCommand, check_read_within, directory_error, special_file_error,
 };
-use crate::agent::ExecutionMode;
+use zx_core::ExecutionMode;
 
 /// The shell every command runs with; the start-up probe checks that the image has it.
 const SHELL: &str = "bash";

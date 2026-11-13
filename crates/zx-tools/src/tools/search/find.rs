@@ -8,9 +8,9 @@ use super::{
     SearchSettings, VCS_DIRECTORIES, Wording, choose_engine, finish, first_lines, positive, quote, ripgrep_excludes,
     search_path,
 };
-use crate::agent::{Tool, ToolContext, ToolOutput};
 use crate::ai::ToolDef;
 use crate::tools::parse_args;
+use zx_core::{Tool, ToolContext, ToolOutput};
 
 /// Paths shown by default (pi: find's `DEFAULT_LIMIT`).
 const FIND_LIMIT: usize = 1000;

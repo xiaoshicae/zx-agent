@@ -10,8 +10,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::AgentSession;
-use zx_agent::agent::Approval;
-use zx_agent::agent::QueuedMessage;
+use zx_agent::Approval;
+use zx_agent::Input;
 use zx_agent::agent_session::AgentSessionError;
 use zx_agent::compaction;
 use zx_agent::runner::RunReport;
@@ -24,7 +24,7 @@ use super::output::Output;
 use super::signals::{Interrupt, Signals};
 use super::term::Tone;
 use super::{Flow, InputMode, rejected, run_extension_command};
-use crate::process::{EXIT_ABORTED, EXIT_COMPLETED};
+use crate::process::{EXIT_CANCELLED, EXIT_COMPLETED};
 use crate::render::{describe_arguments, describe_call, visible};
 
 const APPROVAL_MENU: &str = "  1/y allow once · 2 allow identical calls in this conversation · 3/n deny · 4 discuss";
@@ -43,7 +43,7 @@ pub(super) struct TurnIo<'a> {
 pub(super) enum Operation {
     Prompt(String),
     /// A message an extension's command sends, as a prompt.
-    Message(QueuedMessage),
+    Message(Input),
     Continue,
     Compact,
 }
@@ -196,7 +196,7 @@ async fn interrupted(
     }
     Ok(match interrupt {
         Interrupt::Cancel => Flow::Continue,
-        Interrupt::Terminate => Flow::Exit(EXIT_ABORTED),
+        Interrupt::Terminate => Flow::Exit(EXIT_CANCELLED),
     })
 }
 
@@ -217,8 +217,8 @@ fn finished(session: &AgentSession, report: &Report, io: &TurnIo<'_>, state: Tur
     let mut next: Vec<String> = state.queued_prompt.into_iter().collect();
     for message in late {
         match message {
-            QueuedMessage::User(text) => next.push(text),
-            custom @ QueuedMessage::Custom(_) => session.queues().steer_message(custom),
+            Input::User(text) => next.push(text),
+            custom @ Input::Custom(_) => session.queues().steer_message(custom),
         }
     }
     Ok(if next.is_empty() {
@@ -352,7 +352,7 @@ async fn settle(
     output: &Output,
     started: Instant,
 ) -> Result<()> {
-    session.abort();
+    session.cancel();
     running.await?.print(output, started.elapsed());
     Ok(())
 }
@@ -407,7 +407,7 @@ fn answer(output: &Output, ticket: Ticket, decision: Approval) {
 }
 
 /// Input that `steer` queued and no run read; a task only reads it between turns.
-fn unread_input(session: &AgentSession, output: &Output) -> Vec<QueuedMessage> {
+fn unread_input(session: &AgentSession, output: &Output) -> Vec<Input> {
     session.take_queued().unwrap_or_else(|error| {
         output.line(
             Tone::Error,
@@ -418,10 +418,10 @@ fn unread_input(session: &AgentSession, output: &Output) -> Vec<QueuedMessage> {
 }
 
 /// A queued message in one line, for notices.
-fn describe_queued(message: &QueuedMessage) -> String {
+fn describe_queued(message: &Input) -> String {
     match message {
-        QueuedMessage::User(text) => text.clone(),
-        QueuedMessage::Custom(custom) => format!("[{}] {}", custom.custom_type, custom.content),
+        Input::User(text) => text.clone(),
+        Input::Custom(custom) => format!("[{}] {}", custom.custom_type, custom.content),
     }
 }
 

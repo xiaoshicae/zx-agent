@@ -3,9 +3,9 @@
 //! nothing printed here can drive the terminal.
 
 use serde_json::Value;
-use zx_agent::agent::{AgentEvent, Interruption};
 use zx_agent::ai::{AssistantMessage, StopReason};
 use zx_agent::text::clip;
+use zx_agent::{EventKind, Interruption};
 
 /// Characters of an argument string shown inline in an approval; longer or multi-line ones
 /// become indented blocks.
@@ -136,9 +136,9 @@ pub(crate) fn answer_end_line(message: &AssistantMessage) -> Option<(Severity, S
 /// chat. Names, arguments and errors come from the model, servers or hooks, so they are
 /// escaped. Messages are left to each caller, which shows answers in its own way.
 #[expect(clippy::too_many_lines, reason = "one arm per event variant")]
-pub(crate) fn progress_line(event: &AgentEvent) -> Option<(Severity, String)> {
+pub(crate) fn progress_line(event: &EventKind) -> Option<(Severity, String)> {
     let line = match event {
-        AgentEvent::ToolExecutionStart { tool_name, args, .. } => (
+        EventKind::ToolExecutionStart { tool_name, args, .. } => (
             Severity::Info,
             format!(
                 "[tool] {} {}",
@@ -146,11 +146,11 @@ pub(crate) fn progress_line(event: &AgentEvent) -> Option<(Severity, String)> {
                 visible(&clip(&args.to_string(), PROGRESS_ARGS_CHARS))
             ),
         ),
-        AgentEvent::ToolExecutionUpdate { tool_name, content, .. } => (
+        EventKind::ToolExecutionUpdate { tool_name, content, .. } => (
             Severity::Info,
             format!("[tool] {}: {}", visible(tool_name), visible(content)),
         ),
-        AgentEvent::ToolExecutionEnd {
+        EventKind::ToolExecutionEnd {
             tool_name,
             is_error,
             duration_ms,
@@ -163,7 +163,7 @@ pub(crate) fn progress_line(event: &AgentEvent) -> Option<(Severity, String)> {
                 format!("[tool] {} -> {status}{duration}", visible(tool_name)),
             )
         }
-        AgentEvent::RetryScheduled {
+        EventKind::RetryScheduled {
             retry,
             max_retries,
             delay_ms,
@@ -172,18 +172,18 @@ pub(crate) fn progress_line(event: &AgentEvent) -> Option<(Severity, String)> {
             Severity::Warn,
             format!("[retry] {retry}/{max_retries} in {delay_ms}ms: {}", visible(error)),
         ),
-        AgentEvent::ContextOverflow { error } => (
+        EventKind::ContextOverflow { error } => (
             Severity::Warn,
             format!(
                 "[overflow] context too long; compacting before another attempt: {}",
                 visible(error)
             ),
         ),
-        AgentEvent::CompactionStart { input_bytes, .. } => (
+        EventKind::CompactionStart { input_bytes, .. } => (
             Severity::Info,
             format!("[compact] summarizing {input_bytes} context bytes"),
         ),
-        AgentEvent::CompactionEnd {
+        EventKind::CompactionEnd {
             input_bytes,
             output_bytes,
             ..
@@ -191,8 +191,8 @@ pub(crate) fn progress_line(event: &AgentEvent) -> Option<(Severity, String)> {
             Severity::Info,
             format!("[compact] {input_bytes} -> {output_bytes} context bytes"),
         ),
-        AgentEvent::CompactionFailed { error, .. } => (Severity::Error, format!("[compact] {}", visible(error))),
-        AgentEvent::ToolCallRecovered {
+        EventKind::CompactionFailed { error, .. } => (Severity::Error, format!("[compact] {}", visible(error))),
+        EventKind::ToolCallRecovered {
             tool_call_id,
             tool_name,
             state,
@@ -206,24 +206,24 @@ pub(crate) fn progress_line(event: &AgentEvent) -> Option<(Severity, String)> {
             ),
         ),
         // The error names the hook and the phase: "<hook> after_tool failed: <reason>".
-        AgentEvent::HookFailed { error, .. } => (Severity::Error, format!("[hook] {}", visible(error))),
-        AgentEvent::CustomEntry { custom_type, .. } => {
+        EventKind::HookFailed { error, .. } => (Severity::Error, format!("[hook] {}", visible(error))),
+        EventKind::CustomEntry { custom_type, .. } => {
             (Severity::Info, format!("[extension] recorded {}", visible(custom_type)))
         }
-        AgentEvent::RunStart { .. }
-        | AgentEvent::RunEnd { .. }
-        | AgentEvent::AgentStart { .. }
-        | AgentEvent::TurnStart { .. }
-        | AgentEvent::RequestStart { .. }
-        | AgentEvent::MessageStart { .. }
-        | AgentEvent::MessageUpdate { .. }
-        | AgentEvent::MessageEnd { .. }
-        | AgentEvent::ToolDecision { .. }
-        | AgentEvent::ApprovalRequested { .. }
-        | AgentEvent::ApprovalResolved { .. }
-        | AgentEvent::TurnEnd { .. }
-        | AgentEvent::AgentEnd { .. }
-        | AgentEvent::ContextEdited { .. } => return None,
+        EventKind::RunStart { .. }
+        | EventKind::RunEnd { .. }
+        | EventKind::AttemptStart { .. }
+        | EventKind::StepStart { .. }
+        | EventKind::RequestStart { .. }
+        | EventKind::MessageStart { .. }
+        | EventKind::MessageUpdate { .. }
+        | EventKind::MessageEnd { .. }
+        | EventKind::ToolDecision { .. }
+        | EventKind::ApprovalRequested { .. }
+        | EventKind::ApprovalResolved { .. }
+        | EventKind::StepEnd { .. }
+        | EventKind::AttemptEnd { .. }
+        | EventKind::ContextEdited { .. } => return None,
     };
     Some(line)
 }

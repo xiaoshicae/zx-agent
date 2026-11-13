@@ -102,11 +102,11 @@ async fn streaming_resource_limits_reach_the_provider() {
 async fn repaired_session_tails_are_reported_on_stderr() {
     use std::io::Write;
     use zx_agent::ai::Message;
-    use zx_agent::session::{SessionHeader, SessionStore};
+    use zx_agent::transcript::{SessionHeader, Transcript};
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session.jsonl");
-    let mut session = SessionStore::create(&path, SessionHeader::new(dir.path(), "mock-model")).unwrap();
+    let mut session = Transcript::create(&path, SessionHeader::new(dir.path(), "mock-model")).unwrap();
     session.append_message(Message::user("earlier")).await.unwrap();
     drop(session);
     std::fs::OpenOptions::new()
@@ -664,7 +664,7 @@ async fn jsonl_events_carry_the_envelope_of_their_run() {
     let lines: Vec<Value> = json_lines(&stdout(&output));
     for (index, line) in lines.iter().enumerate() {
         // 3 since `retry_scheduled` names the number of its retry `retry`.
-        assert_eq!(line["schemaVersion"], 3, "{line}");
+        assert_eq!(line["schemaVersion"], 4, "{line}");
         assert_eq!(line["seq"], index + 1, "{line}");
         assert_eq!(line["runId"], lines[0]["runId"], "{line}");
         assert!(line["sessionId"].is_string() && line["atMs"].is_u64(), "{line}");
@@ -673,7 +673,7 @@ async fn jsonl_events_carry_the_envelope_of_their_run() {
     // The run's first attempt follows it.
     assert_eq!(
         (lines[1]["type"].clone(), lines[1]["attempt"].clone()),
-        (json!("agent_start"), json!(1))
+        (json!("attempt_start"), json!(1))
     );
     let end = lines.last().unwrap();
     assert_eq!(

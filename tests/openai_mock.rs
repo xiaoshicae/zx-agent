@@ -11,14 +11,14 @@ use tokio_util::sync::CancellationToken;
 
 use common::mock_server::{MockServer, Reply};
 use common::{Collect, RunnerSetup, config, fast_retry};
-use zx_agent::agent::{AgentEvent, Event, EventSink};
 use zx_agent::ai::openai::{ApiKey, OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::{Message, PREAMBLE, ProviderError, StopReason, SystemPrompt};
 use zx_agent::compaction::Config;
 use zx_agent::runner::RunOutcome;
-use zx_agent::session::SessionStore;
 use zx_agent::tools::BashTool;
+use zx_agent::transcript::Transcript;
+use zx_agent::{Event, EventKind, EventSink};
 
 /// Cancels a token at the first streamed delta, to cancel a response mid-stream without
 /// depending on timing.
@@ -26,7 +26,7 @@ struct CancelOnFirstDelta(CancellationToken);
 
 impl EventSink for CancelOnFirstDelta {
     fn emit(&self, event: &Event) {
-        if matches!(event.event, AgentEvent::MessageUpdate { .. }) {
+        if matches!(event.event, EventKind::MessageUpdate { .. }) {
             self.0.cancel();
         }
     }
@@ -88,7 +88,7 @@ async fn response_budget_failure_is_not_retried() {
 
     let report = runner.run("check", &CancellationToken::new()).await;
 
-    assert_eq!((report.outcome, report.retries), (RunOutcome::Error, 0));
+    assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
     assert_eq!(provider_error(&runner), ProviderError::ResourceLimit);
     assert!(report.error.unwrap().contains("response exceeds the 64 byte limit"));
     assert_eq!(server.requests().len(), 1);
@@ -108,7 +108,7 @@ async fn sse_event_budget_is_enforced() {
 
     let report = runner.run("check", &CancellationToken::new()).await;
 
-    assert_eq!(report.outcome, RunOutcome::Error);
+    assert_eq!(report.outcome, RunOutcome::Failed);
     assert_eq!(provider_error(&runner), ProviderError::ResourceLimit);
     assert!(report.error.unwrap().contains("SSE event exceeds the 32 byte limit"));
 }
@@ -124,7 +124,7 @@ async fn http_status_prevents_retries_from_diagnostic_words() {
 
     let report = runner.run("check", &CancellationToken::new()).await;
 
-    assert_eq!((report.outcome, report.retries), (RunOutcome::Error, 0));
+    assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
     assert_eq!(
         provider_error(&runner),
         ProviderError::Http {
@@ -150,7 +150,7 @@ async fn quota_errors_are_not_retried() {
 
     let report = runner.run("check", &CancellationToken::new()).await;
 
-    assert_eq!((report.outcome, report.retries), (RunOutcome::Error, 0));
+    assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
     assert_eq!(
         provider_error(&runner),
         ProviderError::Http {
@@ -178,7 +178,7 @@ async fn numeric_retry_after_is_used_by_the_runner() {
         ..setup(&server, Duration::from_secs(10))
     }
     .build_with(Arc::new(move |event: &Event| {
-        if matches!(event.event, AgentEvent::RetryScheduled { .. }) {
+        if matches!(event.event, EventKind::RetryScheduled { .. }) {
             trigger.cancel();
         }
         captured.emit(event);
@@ -186,15 +186,15 @@ async fn numeric_retry_after_is_used_by_the_runner() {
 
     let report = runner.run("check", &cancel).await;
 
-    assert_eq!(report.outcome, RunOutcome::Aborted);
+    assert_eq!(report.outcome, RunOutcome::Cancelled);
     assert!(
         observed
             .events()
             .iter()
-            .any(|event| matches!(event, AgentEvent::RetryScheduled { delay_ms: 7000, .. }))
+            .any(|event| matches!(event, EventKind::RetryScheduled { delay_ms: 7000, .. }))
     );
     assert!(observed.events().iter().any(|event| matches!(
-        event, AgentEvent::MessageEnd { message: Message::Assistant(message), .. }
+        event, EventKind::MessageEnd { message: Message::Assistant(message), .. }
             if message.provider_error == Some(ProviderError::Http {
                 status: 429, code: Some("rate_limit_exceeded".into()), retry_after_ms: Some(7000),
             })
@@ -227,7 +227,7 @@ async fn invalid_stream_json_is_a_non_retryable_protocol_error() {
 
     let report = runner.run("check", &CancellationToken::new()).await;
 
-    assert_eq!((report.outcome, report.retries), (RunOutcome::Error, 0));
+    assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
     assert_eq!(report.final_text, "partial");
     assert_eq!(provider_error(&runner), ProviderError::Protocol);
 }
@@ -246,7 +246,7 @@ async fn an_unknown_finish_reason_is_a_provider_error_not_a_completed_answer() {
 
     let report = runner.run("check", &CancellationToken::new()).await;
 
-    assert_eq!((report.outcome, report.retries), (RunOutcome::Error, 0), "{report:?}");
+    assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0), "{report:?}");
     let error = report.error.unwrap_or_default();
     assert!(error.contains("server_interrupted"), "{error}");
     assert_eq!(
@@ -281,7 +281,7 @@ async fn an_error_object_under_a_success_status_is_reported() {
 
     let report = runner.run("check", &CancellationToken::new()).await;
 
-    assert_eq!((report.outcome, report.retries), (RunOutcome::Error, 0), "{report:?}");
+    assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0), "{report:?}");
     let error = report.error.unwrap_or_default();
     assert!(error.contains("The model `m` does not exist"), "{error}");
 }
@@ -302,7 +302,7 @@ async fn a_whole_answer_instead_of_a_stream_is_named_in_the_error() {
 
     let report = runner.run("check", &CancellationToken::new()).await;
 
-    assert_eq!((report.outcome, report.retries), (RunOutcome::Error, 0), "{report:?}");
+    assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0), "{report:?}");
     let error = report.error.unwrap_or_default();
     assert!(error.contains("instead of an event stream"), "{error}");
     assert!(error.contains("chat.completion"), "{error}");
@@ -374,7 +374,7 @@ async fn http_errors_are_retried_then_reported() {
 
     let report = runner.run("check", &CancellationToken::new()).await;
 
-    assert_eq!((report.outcome, report.retries), (RunOutcome::Error, 1));
+    assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 1));
     let error = report.error.unwrap_or_default();
     assert!(error.starts_with("HTTP 500:"), "{error}");
     assert_eq!(server.requests().len(), 2);
@@ -388,7 +388,7 @@ async fn a_stalled_stream_fails_after_the_idle_timeout() {
 
     let report = runner.run("check", &CancellationToken::new()).await;
 
-    assert_eq!(report.outcome, RunOutcome::Error);
+    assert_eq!(report.outcome, RunOutcome::Failed);
     let error = report.error.unwrap_or_default();
     assert!(error.starts_with("stream stalled"), "{error}");
 }
@@ -402,7 +402,7 @@ async fn cancelling_mid_stream_keeps_the_text_received_so_far() {
 
     let report = runner.run("check", &cancel).await;
 
-    assert_eq!(report.outcome, RunOutcome::Aborted);
+    assert_eq!(report.outcome, RunOutcome::Cancelled);
     let messages = runner.session().messages();
     let Some(Message::Assistant(answer)) = messages.last() else {
         panic!("the aborted answer is kept: {messages:?}");
@@ -441,7 +441,7 @@ async fn an_overflow_error_code_makes_the_runner_compact_and_continue() {
         Reply::text("answer"),
     ])
     .await;
-    let mut session = SessionStore::in_memory(common::header());
+    let mut session = Transcript::in_memory(common::header());
     session
         .append_message(Message::user("observed ".repeat(600)))
         .await
@@ -536,7 +536,7 @@ async fn a_failing_api_key_source_fails_the_request_without_sending_or_retrying(
 
     let report = runner.run("go", &CancellationToken::new()).await;
 
-    assert_eq!((report.outcome, report.retries), (RunOutcome::Error, 0));
+    assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
     assert_eq!(provider_error(&runner), ProviderError::ApiKey);
     assert!(
         report
@@ -570,7 +570,7 @@ async fn the_cache_key_is_sent_as_prompt_cache_key_only_when_the_provider_is_tol
         .entries()
         .iter()
         .find_map(|entry| match entry {
-            zx_agent::session::Entry::RequestStarted(started) => {
+            zx_agent::transcript::Entry::RequestStarted(started) => {
                 Some(runner.session().replay_request(&started.id).unwrap())
             }
             _ => None,

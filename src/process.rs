@@ -9,9 +9,9 @@ use anyhow::Result;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
 
-use zx_agent::agent::{AgentEvent, Event, EventSink};
 use zx_agent::otel::{Telemetry, TraceParent};
 use zx_agent::runner::RunOutcome;
+use zx_agent::{Event, EventKind, EventSink};
 
 /// Exit codes, so schedulers can react without parsing output.
 pub(crate) const EXIT_COMPLETED: u8 = 0;
@@ -19,7 +19,7 @@ pub(crate) const EXIT_ERROR: u8 = 1;
 pub(crate) const EXIT_USAGE: u8 = 2;
 const EXIT_MODEL_REQUEST_LIMIT: u8 = 3;
 const EXIT_TIMEOUT: u8 = 4;
-pub(crate) const EXIT_ABORTED: u8 = 5;
+pub(crate) const EXIT_CANCELLED: u8 = 5;
 const EXIT_TRUNCATED: u8 = 6;
 const EXIT_TOKEN_BUDGET: u8 = 7;
 const EXIT_COST_BUDGET: u8 = 8;
@@ -30,10 +30,10 @@ pub(crate) const EXIT_DENIED: u8 = 9;
 pub(crate) fn exit_code(outcome: RunOutcome) -> u8 {
     match outcome {
         RunOutcome::Completed => EXIT_COMPLETED,
-        RunOutcome::Error => EXIT_ERROR,
+        RunOutcome::Failed => EXIT_ERROR,
         RunOutcome::ModelRequestLimit => EXIT_MODEL_REQUEST_LIMIT,
-        RunOutcome::Timeout => EXIT_TIMEOUT,
-        RunOutcome::Aborted => EXIT_ABORTED,
+        RunOutcome::TimedOut => EXIT_TIMEOUT,
+        RunOutcome::Cancelled => EXIT_CANCELLED,
         RunOutcome::Truncated => EXIT_TRUNCATED,
         RunOutcome::TokenBudget => EXIT_TOKEN_BUDGET,
         RunOutcome::CostBudget => EXIT_COST_BUDGET,
@@ -107,7 +107,7 @@ pub(crate) struct JsonlEvents {
 
 impl EventSink for JsonlEvents {
     fn emit(&self, event: &Event) {
-        if !self.deltas && matches!(event.event, AgentEvent::MessageUpdate { .. }) {
+        if !self.deltas && matches!(event.event, EventKind::MessageUpdate { .. }) {
             return;
         }
         write_line(event);

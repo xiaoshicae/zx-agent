@@ -12,9 +12,9 @@ use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-use crate::agent::{AgentEvent, ApprovalResult, Event, EventSink};
-use crate::agent::{Approval, ApprovalRequest, Interaction};
 use crate::ai::ToolCall;
+use zx_core::{Approval, ApprovalRequest, Interaction};
+use zx_core::{ApprovalResult, Event, EventKind, EventSink};
 
 use super::server::timed;
 use super::{
@@ -104,7 +104,7 @@ pub(crate) struct ApprovalEvents {
 
 impl EventSink for ApprovalEvents {
     fn emit(&self, event: &Event) {
-        let AgentEvent::ApprovalResolved {
+        let EventKind::ApprovalResolved {
             tool_call_id,
             tool_name,
             approval,

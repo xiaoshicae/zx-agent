@@ -9,16 +9,16 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::AgentSession;
-use zx_agent::agent::{AgentEvent, Tool};
 use zx_agent::agent_session::AgentSessionError;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, StopReason};
 use zx_agent::runner::{RunOutcome, Runner};
-use zx_agent::session::{Entry, SessionStore};
+use zx_agent::transcript::{Entry, Transcript};
+use zx_agent::{EventKind, Tool};
 
 use common::{Collect, EchoTool, RunnerSetup, config, header, summarize, tool_call_answer};
 
-fn runner(provider: &Arc<FauxProvider>, session: SessionStore) -> (Runner, Arc<Collect>) {
+fn runner(provider: &Arc<FauxProvider>, session: Transcript) -> (Runner, Arc<Collect>) {
     let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(EchoTool::new("echo"))];
     RunnerSetup {
         session,
@@ -34,7 +34,7 @@ fn call_answer() -> Message {
 
 #[tokio::test]
 async fn continuing_answers_the_input_the_conversation_ends_with() {
-    let mut store = SessionStore::in_memory(header());
+    let mut store = Transcript::in_memory(header());
     store.append_message(Message::user("question")).await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("answer")]));
     let (mut runner, _) = runner(&provider, store);
@@ -52,7 +52,7 @@ async fn continuing_answers_the_input_the_conversation_ends_with() {
 
 #[tokio::test]
 async fn after_a_crash_the_recovered_results_are_answered_without_running_the_call_again() {
-    let mut store = SessionStore::in_memory(header());
+    let mut store = Transcript::in_memory(header());
     store.append_message(Message::user("echo hi")).await.unwrap();
     store.append_message(call_answer()).await.unwrap();
     store.append_tool_call_started("c1", "echo").await.unwrap();
@@ -80,9 +80,9 @@ async fn a_failed_answer_at_the_end_is_omitted_and_answered_again() {
         FauxStep::Fail("HTTP 400: bad request".into()),
         FauxStep::text("second try"),
     ]));
-    let (mut runner, events) = runner(&provider, SessionStore::in_memory(header()));
+    let (mut runner, events) = runner(&provider, Transcript::in_memory(header()));
     let failed = runner.run("question", &CancellationToken::new()).await;
-    assert_eq!(failed.outcome, RunOutcome::Error);
+    assert_eq!(failed.outcome, RunOutcome::Failed);
 
     let report = runner.continue_run(&CancellationToken::new()).await;
 
@@ -111,11 +111,11 @@ async fn a_finished_answer_leaves_nothing_to_continue_unless_input_is_queued() {
         FauxStep::text("done"),
         FauxStep::text("follow-up answer"),
     ]));
-    let (mut runner, _) = runner(&provider, SessionStore::in_memory(header()));
+    let (mut runner, _) = runner(&provider, Transcript::in_memory(header()));
     runner.run("question", &CancellationToken::new()).await;
 
     let nothing = runner.continue_run(&CancellationToken::new()).await;
-    assert_eq!(nothing.outcome, RunOutcome::Error);
+    assert_eq!(nothing.outcome, RunOutcome::Failed);
     let error = nothing.error.unwrap_or_default();
     assert!(error.contains("ends with a finished answer"), "{error}");
     assert_eq!(nothing.model_requests, 0);
@@ -133,11 +133,11 @@ async fn a_finished_answer_leaves_nothing_to_continue_unless_input_is_queued() {
 #[tokio::test]
 async fn an_empty_conversation_has_nothing_to_continue() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("must not be requested")]));
-    let (mut runner, events) = runner(&provider, SessionStore::in_memory(header()));
+    let (mut runner, events) = runner(&provider, Transcript::in_memory(header()));
 
     let report = runner.continue_run(&CancellationToken::new()).await;
 
-    assert_eq!(report.outcome, RunOutcome::Error);
+    assert_eq!(report.outcome, RunOutcome::Failed);
     assert!(report.error.unwrap_or_default().contains("conversation is empty"));
     assert!(provider.requests().is_empty());
     let kinds = events.kinds();
@@ -149,14 +149,14 @@ async fn an_empty_conversation_has_nothing_to_continue() {
 async fn continuing_requests_are_rebuilt_from_the_session_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
-    let mut store = SessionStore::create(&path, header()).unwrap();
+    let mut store = Transcript::create(&path, header()).unwrap();
     store.append_message(Message::user("question")).await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("answer")]));
     let (mut runner, _) = runner(&provider, store);
 
     runner.continue_run(&CancellationToken::new()).await;
 
-    let store = SessionStore::read(&path).unwrap();
+    let store = Transcript::read(&path).unwrap();
     let id = store
         .entries()
         .iter()
@@ -171,7 +171,7 @@ async fn continuing_requests_are_rebuilt_from_the_session_file() {
 #[tokio::test]
 async fn a_running_session_refuses_to_continue() {
     let provider = Arc::new(FauxProvider::new([FauxStep::Hang]));
-    let (runner, events) = runner(&provider, SessionStore::in_memory(header()));
+    let (runner, events) = runner(&provider, Transcript::in_memory(header()));
     let session = AgentSession::from(runner);
     let cancel = CancellationToken::new();
     let mut running = Box::pin(session.prompt("first", &cancel));
@@ -179,7 +179,7 @@ async fn a_running_session_refuses_to_continue() {
     while !events
         .events()
         .iter()
-        .any(|event| matches!(event, AgentEvent::RequestStart { .. }))
+        .any(|event| matches!(event, EventKind::RequestStart { .. }))
     {
         tokio::select! {
             () = tokio::task::yield_now() => {}
@@ -191,6 +191,6 @@ async fn a_running_session_refuses_to_continue() {
         session.continue_run(&CancellationToken::new()).await.err(),
         Some(AgentSessionError::Busy)
     );
-    session.abort();
+    session.cancel();
     running.await.unwrap();
 }
