@@ -33,7 +33,7 @@ pub use search::{FindTool, GrepTool, LsTool, SearchSettings};
 pub use write::WriteFileTool;
 
 use crate::executor::Executor;
-use zx_core::{Tool, ToolContext};
+use zx_core::tools::{Tool, ToolContext};
 
 /// Name of the built-in shell tool.
 pub const BASH: &str = "bash";

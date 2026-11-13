@@ -1,19 +1,25 @@
 //! Events emitted while the agent runs, the envelope that places each one in a trace, and the
-//! sink that receives them.
+//! sink that receives them. The run numbers and delivers them (`runner/trace.rs`); this
+//! module holds what they are.
 //!
 //! - `report`: what a run produced and how it ended, as `run_end` and `attempt_end` carry it
-//! - `trace`: one run's identity and event numbering, and where its events go: the sink, then
-//!   the hooks that observe them
 
-mod report;
-mod trace;
+pub(crate) mod report;
 
+use async_trait::async_trait;
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::ai::{Delta, Message, Usage};
-pub use report::{RunOutcome, RunReport};
-pub(crate) use trace::{EventTarget, RunTrace};
+use report::{RunOutcome, RunReport};
+
+/// Where the events of a run go, for the kernel's own objects below the run, such as the
+/// compactor: the run implements it, stamping each event, handing it to the sink and then
+/// to the hooks that observe it.
+#[async_trait]
+pub(crate) trait Emit: Send + Sync {
+    async fn emit(&self, event: EventKind);
+}
 
 /// Version of the event JSON, envelope and event types together. Raised on incompatible
 /// changes; events without a version predate the envelope.
@@ -95,15 +101,15 @@ pub enum Interruption {
     ReadOnly,
 }
 
-/// Which extension point of the loop a hook call is at: one per [`Hook`](super::Hook)
-/// method, the policy check and the approval wait. [`HookStage`](super::HookStage) is something else: the
-/// order of hooks at the same point. In JSON, the name [`HookPoint::as_str`] gives.
+/// Which extension point of the loop a hook call is at: one per
+/// [`Hook`](crate::hooks::Hook) method, and the approval wait.
+/// [`HookStage`](crate::hooks::HookStage) is something else: the order of hooks at the same
+/// point. In JSON, the name [`HookPoint::as_str`] gives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HookPoint {
     OnInput,
     TransformContext,
     PrepareRequest,
-    Policy,
     AfterTool,
     FinishStep,
     OnEvent,
@@ -116,7 +122,6 @@ impl HookPoint {
             Self::OnInput => "on_input",
             Self::TransformContext => "transform_context",
             Self::PrepareRequest => "prepare_request",
-            Self::Policy => "policy",
             Self::AfterTool => "after_tool",
             Self::FinishStep => "finish_step",
             Self::OnEvent => "on_event",
@@ -214,7 +219,8 @@ pub enum EventKind {
         tool_name: String,
         content: String,
     },
-    /// The tool policy's verdict on a call. A policy hook that fails denies the call.
+    /// The verdict of the tool policies on a call. A policy that panics, runs past its timeout
+    /// or is cut short by cancellation denies the call, and `reason` names it.
     ToolDecision {
         tool_call_id: String,
         tool_name: String,
@@ -392,7 +398,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::RunOutcome;
+    use crate::runner::RunOutcome;
 
     #[test]
     #[expect(clippy::too_many_lines, reason = "one event of every variant")]

@@ -17,9 +17,9 @@ use zx_agent::ai::{
     AssistantMessage, Message, ModelCost, ModelMeta, Provider, Request, StopReason, StreamEvent, Usage,
 };
 use zx_agent::compaction::{self, Config, DEFAULT_RESERVE_TOKENS, TokenTrigger};
+use zx_agent::hooks::{ContextEdit, Hook, HookContext, HookResult};
 use zx_agent::runner::RunOutcome;
 use zx_agent::transcript::{Entry, Transcript};
-use zx_agent::{ContextEdit, Hook, HookContext, HookResult};
 
 /// 1 per input token and 2 per output token, in any currency: the faux provider reports 10 in, 5 out.
 fn priced() -> ModelMeta {

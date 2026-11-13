@@ -1,24 +1,34 @@
 //! Kernel of zx-agent: the step loop, sessions and the runner, and the interfaces the kernel
-//! defines for everything scenario-specific (tools, hooks, policies, interaction, session
-//! storage). The `zx-agent` crate re-exports the public items under the same names.
+//! defines for everything scenario-specific (tools, policies, hooks, interaction, session
+//! storage). The `zx-agent` crate re-exports it whole, module by module.
 //!
-//! The modules, from the bottom layer up; each uses only the modules listed before it:
+//! One module per domain, from the bottom layer up. A module uses only modules listed before
+//! it, named in brackets where it uses any:
 //!
 //! - [`transcript`]: the append-only record tree of a session, every record's format and
 //!   rules, and the projection the model sees (pi: SessionManager)
-//! - `events`: what a run emits, the envelope of each event, and where a run's events go
-//! - `input`: the messages given to a run and the queues that hold them while it runs
-//! - `tools`: the tool interface, and the set of tools a run offers
-//! - `policy`: the verdict on a tool call, and how a host approves a call the policy asks
-//!   about
-//! - `hooks`: the extension points around the loop, and the chain that runs them
-//! - [`extensions`]: tools, hooks, prompt sections and slash commands registered together
+//! - [`events`]: what a run emits, and the envelope of each event
+//! - `guard`: a run's cancellation as host code sees it ([`CancelSignal`]), and the bound on
+//!   every call into host code
+//! - [`tools`]: the tool interface, and the set of tools a run offers
 //! - [`prompt`]: the system prompt assembled from its sections
-//! - [`compaction`]: running one bounded, auditable summary of the conversation
-//! - [`runner`]: one run at a time: the step loop of each attempt, and the retries, limits,
-//!   summaries and recovery around it (pi: packages/agent)
-//! - [`agent_session`]: a conversation shared by frontends: prompts, cancellation,
-//!   subscriptions and model switching
+//! - [`input`] (transcript): the messages given to a run and the queues that hold them while
+//!   it runs
+//! - [`policy`] (guard): the interface that decides whether a tool call may run, and how a
+//!   host approves a call a policy asks about
+//! - [`compaction`] (transcript, events): running one bounded, auditable summary of the
+//!   conversation
+//! - [`hooks`] (transcript, events, guard, tools, input): the extension points around the
+//!   loop, and the chain that runs them
+//! - [`extensions`] (tools, prompt, input, policy, hooks): tools, policies, hooks, prompt
+//!   sections and slash commands registered together
+//! - [`runner`] (all of the above): one run at a time: the step loop of each attempt, the
+//!   retries, limits, summaries and recovery around it, and the delivery of its events (pi:
+//!   packages/agent)
+//! - [`agent_session`] (all of the above): a conversation shared by frontends: prompts,
+//!   cancellation, subscriptions and model switching
+//!
+//! One reference points upward: [`extensions::register`] fills a [`runner::LoopConfig`].
 //!
 //! # Where each feature lives
 //!
@@ -55,13 +65,14 @@
 //!   - records: `transcript/name.rs` (the `session_info` record, the latest name),
 //!     `transcript/directory.rs` (the name a listing shows)
 //!   - acts: `agent_session.rs` (naming a session while idle)
-//! - **Approval**
-//!   - records: none; approvals are not recorded
-//!   - acts: `policy/interaction.rs` (the host interface and the session's grants),
-//!     `runner/step_loop/tools.rs` (asking)
+//! - **Tool policies and approval**
+//!   - records: none; verdicts and approvals are not recorded
+//!   - acts: `policy.rs` (the policy interface and its verdict), `policy/chain.rs` (asking
+//!     every policy, each bounded), `policy/interaction.rs` (the host interface and the
+//!     session's grants), `runner/step_loop/tools.rs` (checking a call and asking the host)
 //! - **Events**
 //!   - records: none
-//!   - acts: `events.rs` (the events and their envelope), `events/trace.rs` (numbering a
+//!   - acts: `events.rs` (the events and their envelope), `runner/trace.rs` (numbering a
 //!     run's events and delivering them to the sink and the observing hooks),
 //!     `agent_session/subscribers.rs` (fan-out to subscribers)
 //!
@@ -72,45 +83,27 @@
 //! summary requests both consume the run's model-request budget.
 //!
 //! Embedders start with [`AgentSession`], or with [`runner::Runner`], its exclusive half, when
-//! one owner runs every prompt. [`transcript::SessionLog`], [`Tool`], [`Hook`] and
-//! [`Interaction`] are extension interfaces. The built-in tools, executors, policies and hooks
-//! live in the `zx-tools` crate, providers in crates such as `zx-ai-openai`.
+//! one owner runs every prompt. The extension interfaces are [`tools::Tool`],
+//! [`policy::ToolPolicy`], [`policy::Interaction`], [`hooks::Hook`],
+//! [`extensions::Extension`], [`events::EventSink`] and [`transcript::SessionLog`]. The
+//! built-in tools, executors, policies and hooks live in the `zx-tools` crate, providers in
+//! crates such as `zx-ai-openai`.
 
 // The modules name the model layer and the shared helpers by these crate-root paths.
 use zx_ai::{self as ai, sync};
 
 pub mod agent_session;
 pub mod compaction;
-mod events;
+pub mod events;
 pub mod extensions;
-mod hooks;
-mod input;
-mod policy;
+mod guard;
+pub mod hooks;
+pub mod input;
+pub mod policy;
 pub mod prompt;
 pub mod runner;
-mod tools;
+pub mod tools;
 pub mod transcript;
 
 pub use agent_session::AgentSession;
-pub(crate) use events::EventTarget;
-pub use events::{
-    ApprovalResult, CustomMessageInfo, EVENT_SCHEMA_VERSION, Event, EventKind, EventSink, HookPoint, Interruption,
-    NullSink, RequestKind, ToolVerdict,
-};
-pub use extensions::{CommandContext, CommandError, CommandOutcome, SlashCommand, check_command_name};
-pub use hooks::{
-    CancelSignal, ContextEdit, DEFAULT_HOOK_TIMEOUT, FinishedStep, Hook, HookChain, HookContext, HookError,
-    HookFailure, HookOptions, HookResult, HookStage, RequestPlan, RequestSettings, StepDecision, StepDisposition,
-};
-pub use input::{Input, InputQueue, QueueMode};
-pub(crate) use policy::ApprovalCache;
-pub use policy::{
-    Approval, ApprovalRequest, DEFAULT_APPROVAL_TIMEOUT, Interaction, NoHuman, PolicyChain, PolicyContext,
-    PolicyDecision, ToolPolicy,
-};
-pub(crate) use runner::{Halt, PERSIST_FAILED, RunAccounting, SessionHost};
-pub use runner::{LoopConfig, RunOutcome, RunReport};
-pub use tools::{
-    ActiveTools, Effects, ExecutionMode, MAX_DETAILS_BYTES, MAX_PROGRESS_BYTES, MAX_QUEUED_PROGRESS, Tool, ToolContext,
-    ToolOutput,
-};
+pub use guard::CancelSignal;

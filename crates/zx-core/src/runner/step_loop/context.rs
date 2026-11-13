@@ -4,9 +4,10 @@ use anyhow::{Context, anyhow};
 
 use super::{Halt, PERSIST_FAILED, StepLoop, record_pending_entries};
 use crate::ai::{Message, UserMessageKind};
-use crate::input::Queue;
+use crate::events::{CustomMessageInfo, EventKind};
+use crate::hooks::{ContextEdit, HookFailure};
+use crate::input::{Input, Queue, QueueMode};
 use crate::transcript::{CustomMessage, Entry};
-use crate::{ContextEdit, CustomMessageInfo, EventKind, HookFailure, Input, QueueMode};
 
 impl StepLoop<'_> {
     /// Record `message` in the session. Returns its entry ID.

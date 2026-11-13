@@ -30,7 +30,7 @@ pub use definition::{AgentDefinition, Builtin, ProjectContext};
 pub use environment::{Config, ContainerSettings, Execution, McpServer, ProviderSettings};
 pub use permissions::{Entry, Permissions};
 
-use crate::files::read_text_file;
+use crate::builtin::files::read_text_file;
 
 /// The variable that names the zx-agent home directory instead of `~/.zx-agent`.
 pub const HOME_ENV: &str = "ZX_AGENT_HOME";

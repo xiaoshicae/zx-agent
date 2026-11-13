@@ -1,4 +1,4 @@
-//! The built-in tool-call policies, each a [`ToolPolicy`](zx_core::ToolPolicy): rules by
+//! The built-in tool-call policies, each a [`ToolPolicy`](zx_core::policy::ToolPolicy): rules by
 //! tool, the command policy of the `bash` tool, and the auto-approval of plain commands.
 //!
 //! - `rules`: rules by tool name

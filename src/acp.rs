@@ -34,13 +34,13 @@ use anyhow::{Context, Result};
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::AgentSession;
+use zx_agent::builtin::tools::{BASH, EDIT_FILE, FIND, GREP, LS, READ_FILE, WRITE_FILE};
 use zx_agent::config::Builtin;
+use zx_agent::events::EventSink;
 use zx_agent::otel::Telemetry;
-use zx_agent::runner::RunReport;
+use zx_agent::runner::{RunOutcome, RunReport};
 use zx_agent::sync::lock;
-use zx_agent::tools::{BASH, EDIT_FILE, FIND, GREP, LS, READ_FILE, WRITE_FILE};
 use zx_agent::transcript::SessionInfo as StoredSession;
-use zx_agent::{EventSink, RunOutcome};
 
 use crate::cli::{self, AcpArgs, PreparedSession};
 use crate::process::{EXIT_COMPLETED, with_telemetry};

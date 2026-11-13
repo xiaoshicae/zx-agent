@@ -8,7 +8,7 @@ use super::auto_approve::AutoApprove;
 use super::command_of;
 use crate::ai::ToolCall;
 use crate::tools::BASH;
-use zx_core::{PolicyContext, PolicyDecision, ToolPolicy};
+use zx_core::policy::{PolicyContext, PolicyDecision, ToolPolicy};
 
 /// The calls a rule matches. Bash commands are told apart by [`AutoApprove`], not by rules.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -17,16 +17,17 @@ use tokio_util::sync::CancellationToken;
 
 use common::{EchoTool, RunnerSetup, config, header, summarize};
 use zx_agent::AgentSession;
-use zx_agent::Interaction;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
+use zx_agent::builtin::policy::{Rule, RuleMatcher, RulePolicy};
+use zx_agent::events::{ApprovalResult, NullSink};
 use zx_agent::im::{
     Addressee, ApprovalId, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId,
     MessageRef, Opening, Outbound, Replies, Said, Server, ServerConfig, ServerEvent, ServerSink, SessionFactory,
     SessionKey, StatusStore, ThreadId, UserId,
 };
-use zx_agent::policy::{Rule, RuleMatcher, RulePolicy};
+use zx_agent::policy::{Interaction, PolicyDecision};
+use zx_agent::tools::Tool;
 use zx_agent::transcript::Transcript;
-use zx_agent::{ApprovalResult, NullSink, PolicyDecision, Tool};
 
 const PLATFORM: &str = "fake";
 const CHAT: &str = "C1";

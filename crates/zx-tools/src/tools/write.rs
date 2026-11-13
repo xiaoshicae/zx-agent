@@ -10,7 +10,7 @@ use super::mutation::FileMutationQueue;
 use super::{check_path, parse_args, resolve, unless_cancelled};
 use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
-use zx_core::{ExecutionMode, Tool, ToolContext, ToolOutput};
+use zx_core::tools::{ExecutionMode, Tool, ToolContext, ToolOutput};
 
 /// Creates or overwrites files, creating missing parent directories.
 pub struct WriteFileTool {

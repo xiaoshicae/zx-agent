@@ -10,10 +10,10 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::AgentSession;
-use zx_agent::Approval;
-use zx_agent::Input;
 use zx_agent::agent_session::AgentSessionError;
 use zx_agent::compaction;
+use zx_agent::input::Input;
+use zx_agent::policy::Approval;
 use zx_agent::runner::RunReport;
 
 use super::commands::{self, Command};

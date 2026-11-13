@@ -16,12 +16,13 @@ use tokio_util::sync::CancellationToken;
 use crate::ai::retry::RetryPolicy;
 use crate::ai::{Provider, Reasoning};
 use crate::compaction;
-use crate::runner::{RunLimits, RunReport, Runner};
+use crate::events::EventSink;
+use crate::extensions::{CommandContext, CommandError, CommandOutcome, SlashCommand};
+use crate::input::{Input, InputQueues};
+use crate::runner::{LoopConfig, RunLimits, RunReport, Runner};
 use crate::sync::lock;
+use crate::tools::ActiveTools;
 use crate::transcript::{CustomMessage, SessionName, Transcript};
-use crate::{
-    ActiveTools, CommandContext, CommandError, CommandOutcome, EventSink, Input, InputQueue, LoopConfig, SlashCommand,
-};
 
 use subscribers::EventHub;
 pub use subscribers::Subscription;
@@ -65,8 +66,8 @@ enum State {
 /// use std::sync::Arc;
 /// use tokio_util::sync::CancellationToken;
 /// use zx_core::AgentSession;
-/// use zx_core::Event;
 /// use zx_core::agent_session::AgentSessionError;
+/// use zx_core::events::Event;
 /// use zx_core::runner::Runner;
 ///
 /// # async fn example(runner: Runner) -> Result<(), AgentSessionError> {
@@ -84,7 +85,7 @@ pub struct AgentSession {
     state: Mutex<State>,
     // Queues, the tool set and events are genuinely shared with the Runner while a prompt
     // owns it.
-    queues: Arc<InputQueue>,
+    queues: Arc<InputQueues>,
     active_tools: Arc<ActiveTools>,
     events: Arc<EventHub>,
     commands: Vec<Arc<dyn SlashCommand>>,
@@ -144,7 +145,7 @@ impl AgentSession {
     /// `follow_up`) or a message from an extension (`steer_message`, `follow_up_message`), to
     /// record extension state during a run (`append_entry`), and to choose how many queued
     /// messages a request takes (`set_mode`).
-    pub fn queues(&self) -> &InputQueue {
+    pub fn queues(&self) -> &InputQueues {
         &self.queues
     }
 

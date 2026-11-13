@@ -15,9 +15,10 @@ use zx_agent::agent_session::{AgentSessionError, ModelRef};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{AssistantMessage, ContentBlock, Message, Request, StopReason, ToolCall, ToolResultMessage};
 use zx_agent::compaction::{Config, Outcome, Report};
+use zx_agent::events::{Event, EventKind};
+use zx_agent::hooks::{ContextEdit, Hook, HookContext, HookOptions};
 use zx_agent::runner::{RunLimits, RunOutcome};
 use zx_agent::transcript::{Entry, Transcript};
-use zx_agent::{ContextEdit, Event, EventKind, Hook, HookContext, HookOptions};
 
 use common::summary_eval::{PLANTED, Planted, ROUNDS, evaluate, round, text_of};
 use common::{RunnerSetup, config, fast_retry, header, seeded_session, summary_json};
@@ -125,7 +126,7 @@ async fn automatic_summary_counts_against_task_request_budget_and_usage() {
 
 #[tokio::test]
 async fn steering_received_during_a_summary_is_persisted_before_the_next_task_request() {
-    struct SteerAfterSummary(Arc<zx_agent::InputQueue>);
+    struct SteerAfterSummary(Arc<zx_agent::input::InputQueues>);
     #[async_trait]
     impl Hook for SteerAfterSummary {
         async fn on_event(&self, event: &Event, _ctx: &HookContext) -> Result<(), String> {

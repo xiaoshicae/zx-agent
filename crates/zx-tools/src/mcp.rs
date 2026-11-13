@@ -28,7 +28,7 @@ use crate::ai::sync::lock;
 use crate::extensions::Extension;
 use crate::text::prefix_noted;
 use crate::tools::truncate::truncate_head_noted;
-use zx_core::{Tool, ToolContext, ToolOutput};
+use zx_core::tools::{Tool, ToolContext, ToolOutput};
 
 /// The longest tool name that OpenAI-compatible APIs accept: "a-z, A-Z, 0-9, or contain
 /// underscores and dashes, with a maximum length of 64" (openai-openapi, `FunctionObject`).

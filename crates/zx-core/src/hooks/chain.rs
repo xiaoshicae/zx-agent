@@ -6,7 +6,6 @@ use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 
-use futures::FutureExt;
 use tokio_util::sync::CancellationToken;
 
 use super::{
@@ -14,7 +13,9 @@ use super::{
     HookStage, RequestPlan, RequestSettings, StepDecision,
 };
 use crate::ai::{Message, ToolCall};
-use crate::{Event, ToolOutput};
+use crate::events::Event;
+use crate::guard::{Priority, bounded};
+use crate::tools::ToolOutput;
 
 /// One guarded call: of a registered hook, or of the interaction host for an approval. A
 /// failure names the call by `name` and `phase`.
@@ -40,29 +41,17 @@ impl HookCall<'_> {
         future: impl Future<Output = HookResult<T>>,
         cancel: &CancellationToken,
     ) -> Result<T, HookError> {
-        let guarded = tokio::time::timeout(self.timeout, AssertUnwindSafe(future).catch_unwind());
-        tokio::pin!(guarded);
         // Ready observers still see the final event after cancellation. Pending
         // observers stop immediately; operational hooks give cancellation priority.
-        let result = if self.phase == HookPoint::OnEvent {
-            tokio::select! {
-                biased;
-                result = &mut guarded => Some(result),
-                () = cancel.cancelled() => None,
-            }
+        let priority = if self.phase == HookPoint::OnEvent {
+            Priority::Completion
         } else {
-            tokio::select! {
-                biased;
-                () = cancel.cancelled() => None,
-                result = &mut guarded => Some(result),
-            }
+            Priority::Cancellation
         };
-        match result {
-            Some(Ok(Ok(Ok(value)))) => Ok(value),
-            Some(Ok(Ok(Err(reason)))) => Err(self.error(HookFailure::Rejected(reason))),
-            Some(Ok(Err(_))) => Err(self.error(HookFailure::Panicked)),
-            Some(Err(_)) => Err(self.error(HookFailure::TimedOut(self.timeout))),
-            None => Err(self.error(HookFailure::Cancelled)),
+        match bounded(future, self.timeout, cancel, priority).await {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(reason)) => Err(self.error(HookFailure::Rejected(reason))),
+            Err(stopped) => Err(self.error(stopped.into())),
         }
     }
 }

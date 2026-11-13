@@ -10,12 +10,13 @@ use tokio_util::sync::CancellationToken;
 
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, ToolCall};
-use zx_agent::output_store::{Config, OutputStore, ReadOutputTool, SpillOutputs, TOOL_NAME};
-use zx_agent::redact::RedactSecrets;
+use zx_agent::builtin::output_store::{Config, OutputStore, ReadOutputTool, SpillOutputs, TOOL_NAME};
+use zx_agent::builtin::redact::RedactSecrets;
+use zx_agent::builtin::tools::ReadFileTool;
+use zx_agent::hooks::{Hook, HookChain, HookContext};
 use zx_agent::runner::RunOutcome;
-use zx_agent::tools::ReadFileTool;
+use zx_agent::tools::{Tool, ToolContext, ToolOutput};
 use zx_agent::transcript::Transcript;
-use zx_agent::{Hook, HookChain, HookContext, Tool, ToolContext, ToolOutput};
 
 use common::{RunnerSetup, config, header};
 

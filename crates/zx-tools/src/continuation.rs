@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 
 use crate::ai::StopReason;
-use zx_core::{FinishedStep, Hook, HookContext, HookResult, StepDecision, StepDisposition};
+use zx_core::hooks::{FinishedStep, Hook, HookContext, HookResult, StepDecision, StepDisposition};
 
 /// The unattended continuation text; the runtime does not depend on this wording.
 const CONTINUE_PROMPT: &str = "Your previous response was cut off at the output token limit. Continue exactly where it \

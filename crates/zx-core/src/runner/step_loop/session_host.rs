@@ -7,8 +7,10 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 
 use super::Halt;
+use crate::events::EventKind;
+use crate::input::InputQueues;
+use crate::runner::{EventTarget, RunAccounting};
 use crate::transcript::Transcript;
-use crate::{EventKind, EventTarget, InputQueue, RunAccounting};
 
 /// Lends the loop the session it records in, before it acts on each step, and whose
 /// projection is the context it sends. When the session cannot record, the loop stops at
@@ -36,7 +38,7 @@ pub(crate) const PERSIST_FAILED: &str = "cannot persist session entry";
 /// Record the custom entries extensions queued since the last step (pi: `appendEntry`), each
 /// announced as a `custom_entry` event. An error means the session could not record one.
 pub(crate) async fn record_pending_entries(
-    queues: &InputQueue,
+    queues: &InputQueues,
     session: &mut Transcript,
     target: EventTarget<'_>,
 ) -> Result<()> {

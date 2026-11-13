@@ -11,12 +11,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio_util::sync::{CancellationToken, WaitForCancellationFuture};
+use tokio_util::sync::CancellationToken;
 
-use super::{Event, EventKind, HookPoint, ToolOutput};
 use crate::ai::{AssistantMessage, Message, Reasoning, ToolCall, UserMessageKind};
-use crate::input::InputQueue;
-use crate::tools::ActiveTools;
+use crate::events::{Event, EventKind, HookPoint};
+use crate::guard::{CancelSignal, Stopped};
+use crate::input::InputQueues;
+use crate::tools::{ActiveTools, ToolOutput};
 use crate::transcript::context_edit_refusal;
 
 pub(crate) use chain::HookCall;
@@ -49,7 +50,7 @@ pub struct HookContext {
     /// `follow_up_message` (pi: `sendMessage`) and records state with `append_entry` (pi:
     /// `appendEntry`). In a context built with [`HookContext::new`] they belong to no loop.
     #[serde(skip)]
-    pub queues: Arc<InputQueue>,
+    pub queues: Arc<InputQueues>,
     /// The tools the next request offers (pi: `setActiveTools`), shared with the run.
     #[serde(skip)]
     pub active_tools: Arc<ActiveTools>,
@@ -63,57 +64,19 @@ impl HookContext {
             session_id,
             run_id: uuid::Uuid::new_v4().to_string(),
             cwd,
-            cancel: CancelSignal(cancel),
+            cancel: CancelSignal::new(cancel),
             queues: Arc::default(),
             active_tools: Arc::default(),
         }
     }
 
     /// The same context, sharing the loop's queues and tool set.
-    pub(crate) fn with_shared(self, queues: Arc<InputQueue>, active_tools: Arc<ActiveTools>) -> Self {
+    pub(crate) fn with_shared(self, queues: Arc<InputQueues>, active_tools: Arc<ActiveTools>) -> Self {
         Self {
             queues,
             active_tools,
             ..self
         }
-    }
-}
-
-/// A run's cancellation as a hook sees it: a hook can wait for it, check it, and derive a
-/// token for work of its own, but cannot cancel the run, which only its caller does.
-///
-/// ```compile_fail
-/// fn stop(ctx: &zx_core::HookContext) {
-///     ctx.cancel.cancel();
-/// }
-/// ```
-#[derive(Clone, Debug)]
-pub struct CancelSignal(CancellationToken);
-
-impl CancelSignal {
-    pub(crate) fn new(token: CancellationToken) -> Self {
-        Self(token)
-    }
-
-    /// Whether the run has been cancelled.
-    pub fn is_cancelled(&self) -> bool {
-        self.0.is_cancelled()
-    }
-
-    /// Completes once the run is cancelled.
-    pub fn cancelled(&self) -> WaitForCancellationFuture<'_> {
-        self.0.cancelled()
-    }
-
-    /// A token cancelled with the run, for work of the hook's own; cancelling it stops only
-    /// that work.
-    pub fn child_token(&self) -> CancellationToken {
-        self.0.child_token()
-    }
-
-    /// The run's own token, for the chain, which waits on hooks.
-    pub(crate) fn token(&self) -> &CancellationToken {
-        &self.0
     }
 }
 
@@ -365,6 +328,16 @@ pub enum HookFailure {
     /// The run was cancelled while the callback ran.
     #[error("was cancelled")]
     Cancelled,
+}
+
+impl From<Stopped> for HookFailure {
+    fn from(stopped: Stopped) -> Self {
+        match stopped {
+            Stopped::TimedOut(timeout) => Self::TimedOut(timeout),
+            Stopped::Panicked => Self::Panicked,
+            Stopped::Cancelled => Self::Cancelled,
+        }
+    }
 }
 
 /// The failure of one callback, as the chain reports it.

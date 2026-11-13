@@ -409,7 +409,7 @@ run、chat 与 im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（完整地�
 
 ## 作为库使用
 
-`zx-agent` 库再导出各 crate（`zx_agent::ai`、`zx_agent::agent`、`zx_agent::im` 等）。只需要内核时可以只依赖 `zx-core` 与 `zx-ai`，按需加上 `zx-ai-openai`。各 crate 都不发布到 crates.io。
+`zx-agent` 库再导出各 crate：内核 `zx-core` 按域模块原样导出（`zx_agent::runner`、`zx_agent::tools`、`zx_agent::policy`、`zx_agent::hooks`、`zx_agent::transcript` 等），模型层在 `zx_agent::ai`，`zx-tools` 附带的实现在 `zx_agent::builtin`，IM 在 `zx_agent::im`。只需要内核时可以只依赖 `zx-core` 与 `zx-ai`，按需加上 `zx-ai-openai`。各 crate 都不发布到 crates.io。
 
 ```rust
 let mut config = LoopConfig { system_prompt, tools, cwd, ..LoopConfig::new(provider, model) };
@@ -421,8 +421,8 @@ let report = agent.prompt("任务描述", &CancellationToken::new()).await?;
 库默认不限轮次、时间与 token，没有钩子，不自动续写、摘要或落盘；说明、上限与策略都由嵌入方给出。完整的组装见 `examples/library.rs`。
 
 - 入口：`AgentSession`（共享会话：`prompt`、`continue_run`、`compact`、`cancel`、`subscribe`、`set_model`、`set_name`、`branch`、`queues`、`active_tools`、`run_command`）、`runner::Runner`（`AgentSession` 独占的一半，只有一个所有者时直接用）、`transcript::Transcript`。
-- 扩展点都是 trait：`ai::Provider`、`agent::Tool`、`policy::ToolPolicy`、`agent::Hook`、`agent::Interaction`、`agent::EventSink`、`executor::Executor`、`session::SessionLog`、`im::ImChannel`、`im::StatusStore`、`extensions::Extension`。
-- 附带的实现：`ai::openai::OpenAiCompatible`、`mcp::Server`（一个 `Extension`）、`executor::ContainerExecutor`、`redact::RedactSecrets`、`otel::Telemetry`。
+- 扩展点都是 trait：`ai::Provider`、`tools::Tool`、`policy::ToolPolicy`、`policy::Interaction`、`hooks::Hook`、`extensions::Extension`、`events::EventSink`、`transcript::SessionLog`、`builtin::executor::Executor`、`im::ImChannel`、`im::StatusStore`。
+- 附带的实现：`ai::openai::OpenAiCompatible`、`builtin::mcp::Server`（一个 `Extension`）、`builtin::executor::ContainerExecutor`、`builtin::redact::RedactSecrets`、`otel::Telemetry`。
 
 接口与契约见 rustdoc：`cargo doc --open`。
 

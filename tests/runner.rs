@@ -68,13 +68,13 @@ use tokio_util::sync::CancellationToken;
 use common::{EchoTool, NotifyingProvider, RunnerSetup, config, fast_retry, header, read_lines, summarize};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, ModelCost, ModelMeta, PREAMBLE, StopReason, SystemPrompt, ToolCall, Usage};
-use zx_agent::continuation::ContinueOnLength;
+use zx_agent::builtin::continuation::ContinueOnLength;
+use zx_agent::events::{EVENT_SCHEMA_VERSION, EventKind, RequestKind};
+use zx_agent::hooks::{Hook, HookContext, HookOptions, HookResult};
+use zx_agent::input::Input;
+use zx_agent::policy::{PolicyContext, PolicyDecision, ToolPolicy};
 use zx_agent::runner::{RunLimits, RunOutcome};
 use zx_agent::transcript::{Entry, LoadedSession, LogRecord, SessionLog, Transcript};
-use zx_agent::{
-    EVENT_SCHEMA_VERSION, EventKind, Hook, HookContext, HookOptions, HookResult, Input, PolicyContext, PolicyDecision,
-    RequestKind, ToolPolicy,
-};
 
 /// A stored record, as a database row would hold it.
 #[derive(Debug)]
@@ -720,7 +720,7 @@ impl Hook for HoldInput {
         matches!(event, EventKind::MessageEnd { .. })
     }
 
-    async fn on_event(&self, event: &zx_agent::Event, _ctx: &HookContext) -> HookResult<()> {
+    async fn on_event(&self, event: &zx_agent::events::Event, _ctx: &HookContext) -> HookResult<()> {
         if let EventKind::MessageEnd {
             message: Message::User { content, .. },
             ..
@@ -746,7 +746,7 @@ async fn queued_input_is_recorded_once_when_a_run_is_dropped_while_observers_run
             held: std::sync::atomic::AtomicBool::new(false),
             reached: reached.clone(),
         },
-        zx_agent::HookOptions {
+        zx_agent::hooks::HookOptions {
             timeout: Duration::from_secs(3600),
             ..Default::default()
         },

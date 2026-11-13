@@ -5,8 +5,8 @@
 
 use std::collections::BTreeMap;
 
+use super::RunOutcome;
 use crate::ai::{ToolResultMessage, Usage};
-use crate::runner::RunOutcome;
 
 /// What a run has spent so far, over all its attempts, and its budgets.
 #[derive(Default)]

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::input::{Input, InputQueue};
+use crate::input::{Input, InputQueues};
 use crate::tools::ActiveTools;
 
 /// A command an extension adds to a frontend's slash commands. The frontend matches its own
@@ -36,13 +36,13 @@ pub struct CommandContext {
     pub session_id: String,
     /// The conversation's queues: a command sends the model a message with `steer_message`
     /// or `follow_up_message`, and records state with `append_entry`.
-    pub queues: Arc<InputQueue>,
+    pub queues: Arc<InputQueues>,
     /// The tools the next request offers.
     pub active_tools: Arc<ActiveTools>,
 }
 
 impl CommandContext {
-    pub fn new(cwd: PathBuf, session_id: String, queues: Arc<InputQueue>, active_tools: Arc<ActiveTools>) -> Self {
+    pub fn new(cwd: PathBuf, session_id: String, queues: Arc<InputQueues>, active_tools: Arc<ActiveTools>) -> Self {
         Self {
             cwd,
             session_id,

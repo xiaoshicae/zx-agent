@@ -16,7 +16,7 @@
 |---|---|
 | CLI | `src/main.rs`（只分派）、`src/cli/`（`settings.rs` 合并配置与命令行，`shared.rs` 的 `Shared` 是进程内共用的东西，`prepare.rs` 组装一个会话，`execution.rs` 本机或容器）、`src/run.rs`、`src/chat/`、`src/acp/`、`src/im.rs`、`src/process.rs`、`src/render.rs`、`src/session_files.rs`、`src/list_sessions.rs` |
 | 配置 | `src/config/`（`environment.rs`、`definition.rs`、`agent_file.rs`、`permissions.rs`）、`agents/` |
-| 内核 | `crates/zx-core/src/`：`agent_session.rs`（共享调用、Busy、订阅）、`runner.rs`（单次运行、重试、上限、审批缓存）、`runner/step_loop/`（每次尝试的循环与工具执行）、`transcript/`（只追加的条目树、投影、恢复、`SessionLog`、`jsonl.rs`）、`compaction/` 与 `transcript/compaction/`（摘要，统一叫 compaction，见 D22）、`tools.rs`、`policy/`、`hooks/`、`events/`、`input.rs`、`prompt.rs`、`extensions/` |
+| 内核 | `crates/zx-core/src/`：`agent_session.rs`（共享调用、Busy、订阅）、`runner.rs`（单次运行、重试、上限、审批缓存）、`runner/step_loop/`（每次尝试的循环与工具执行）、`runner/trace.rs`（事件的编号与发送）、`transcript/`（只追加的条目树、投影、恢复、`SessionLog`、`jsonl.rs`）、`compaction/` 与 `transcript/compaction/`（摘要，统一叫 compaction，见 D22）、`tools.rs`、`policy/`、`hooks/`、`events/`（只有数据）、`input.rs`、`prompt.rs`、`extensions/`、`guard.rs`（宿主代码看到的取消信号，调用宿主代码的时限）。公开路径按域模块（`zx_core::tools::Tool`），根部只导出 `AgentSession` 与 `CancelSignal`；模块间允许的引用见 `lib.rs` 的 `//!` |
 | 模型 | `crates/zx-ai/src/`、`crates/zx-ai-openai/src/` |
 | 工具与外层策略 | `crates/zx-tools/src/`：`tools/`、`executor/`（本机与容器）、`policy/`、`continuation.rs`、`redact.rs`、`output_store.rs`、`mcp.rs` |
 | IM | `crates/zx-im/src/`（`ImChannel`、`Server`、`platform.rs`）、`crates/zx-im-slack/`、`crates/zx-im-feishu/` |

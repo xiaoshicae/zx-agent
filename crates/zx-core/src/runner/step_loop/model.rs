@@ -5,8 +5,9 @@ use futures::StreamExt;
 
 use super::{Halt, StepLoop};
 use crate::ai::{AssistantMessage, Request, StopReason, StreamEvent};
+use crate::events::{EventKind, RequestKind};
+use crate::hooks::RequestSettings;
 use crate::transcript::RequestSource;
-use crate::{EventKind, RequestKind, RequestSettings};
 
 impl StepLoop<'_> {
     /// Record and send the task request of step `step`, then account for its response.

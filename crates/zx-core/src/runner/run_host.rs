@@ -6,12 +6,13 @@
 
 use async_trait::async_trait;
 
-use super::Start;
+use super::{EventTarget, Halt, LoopConfig, RunAccounting, RunOutcome, SessionHost, Start};
 use crate::ai::retry::RetryPolicy;
 use crate::ai::{AssistantMessage, Message, StopReason, duration_ms};
 use crate::compaction::{self, Compacted, Compactor, End, TokenTrigger, Trigger};
+use crate::events::EventKind;
+use crate::input::Input;
 use crate::transcript::Transcript;
-use crate::{EventKind, EventTarget, Halt, Input, LoopConfig, RunAccounting, RunOutcome, SessionHost};
 
 /// How a run ends: with the outcome of its last attempt, or failed for a reason.
 pub(super) enum RunStop {
@@ -88,9 +89,12 @@ impl RunHost<'_> {
     pub(super) async fn compact(&mut self, trigger: Trigger, attempt: u32) -> Compacted {
         let compactor = Compactor {
             session: &mut *self.session,
-            config: self.config,
+            provider: self.config.provider.as_ref(),
+            model: &self.config.model,
+            models: &self.config.models,
             compaction: self.compaction,
-            target: self.target,
+            events: &self.target,
+            cancel: self.target.trace.cancel(),
             trigger,
             attempt,
         };

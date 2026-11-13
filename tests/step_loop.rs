@@ -17,10 +17,11 @@ use zx_agent::ai::{
     ContentBlock, EventReceiver, Message, PREAMBLE, Provider, Request, StopReason, SystemPrompt, ToolCall, ToolDef,
     Usage,
 };
-use zx_agent::{
-    EventKind, ExecutionMode, Input, LoopConfig, MAX_DETAILS_BYTES, PolicyContext, PolicyDecision, RunOutcome, Tool,
-    ToolContext, ToolOutput, ToolPolicy,
-};
+use zx_agent::events::EventKind;
+use zx_agent::input::Input;
+use zx_agent::policy::{PolicyContext, PolicyDecision, ToolPolicy};
+use zx_agent::runner::{LoopConfig, RunOutcome};
+use zx_agent::tools::{ExecutionMode, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput};
 
 fn provider(steps: impl IntoIterator<Item = FauxStep>) -> Arc<FauxProvider> {
     Arc::new(FauxProvider::new(steps))

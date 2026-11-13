@@ -20,7 +20,7 @@ use super::path_text;
 use super::truncate::{MAX_BYTES, MAX_LINES, truncate_head, truncate_head_noted};
 use crate::executor::{CommandEnd, Executor, LocalExecutor, ShellCommand};
 use crate::text::{prefix_noted, prefix_within};
-use zx_core::{ToolContext, ToolOutput};
+use zx_core::tools::{ToolContext, ToolOutput};
 
 /// Longest wait for one search: a search that takes longer is better narrowed than waited for,
 /// and the error says so.
@@ -44,12 +44,12 @@ macro_rules! search_tool_basics {
             $name
         }
 
-        fn execution_mode(&self) -> ::zx_core::ExecutionMode {
+        fn execution_mode(&self) -> ::zx_core::tools::ExecutionMode {
             self.settings.executor.execution_mode()
         }
 
-        fn effects(&self) -> ::zx_core::Effects {
-            ::zx_core::Effects::ReadOnly
+        fn effects(&self) -> ::zx_core::tools::Effects {
+            ::zx_core::tools::Effects::ReadOnly
         }
     };
 }
@@ -276,7 +276,7 @@ mod tests {
 
     use super::*;
     use crate::executor::{Captured, CommandOutput};
-    use zx_core::Tool;
+    use zx_core::tools::Tool;
 
     /// An executor whose searches print `stdout` and `stderr` as given and exit with 0.
     struct Scripted {

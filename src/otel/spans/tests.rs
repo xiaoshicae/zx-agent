@@ -6,9 +6,10 @@ use serde_json::json;
 
 use super::*;
 use crate::ai::{AssistantMessage, ContentBlock, Message, ToolCall};
+use crate::events::EventKind;
 use crate::otel::TraceParent;
 use crate::otel::signal::event;
-use crate::{EventKind, RunReport};
+use crate::runner::RunReport;
 
 const RUN: &str = "6f1c2c4e-0000-4000-8000-000000000001";
 const TRACEPARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";

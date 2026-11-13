@@ -13,8 +13,8 @@ use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::ai::ToolCall;
-use zx_core::{Approval, ApprovalRequest, Interaction};
-use zx_core::{ApprovalResult, Event, EventKind, EventSink};
+use zx_core::events::{ApprovalResult, Event, EventKind, EventSink};
+use zx_core::policy::{Approval, ApprovalRequest, Interaction};
 
 use super::server::timed;
 use super::{

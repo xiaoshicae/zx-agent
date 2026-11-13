@@ -30,8 +30,9 @@ use zx_agent::AgentSession;
 use zx_agent::agent_session::ModelRef;
 use zx_agent::ai::{Provider, Reasoning};
 use zx_agent::config::Builtin;
+use zx_agent::events::EventSink;
+use zx_agent::input::Input;
 use zx_agent::otel::Telemetry;
-use zx_agent::{EventSink, Input};
 
 use crate::cli::{self, ChatArgs};
 use crate::process::{EXIT_CANCELLED, EXIT_COMPLETED, with_telemetry};

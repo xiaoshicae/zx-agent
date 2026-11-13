@@ -6,7 +6,7 @@ use serde_json::Value;
 use super::{command_of, normalize};
 use crate::ai::ToolCall;
 use crate::tools::BASH;
-use zx_core::{PolicyContext, PolicyDecision, ToolPolicy};
+use zx_core::policy::{PolicyContext, PolicyDecision, ToolPolicy};
 
 /// Patterns rejected for every `bash` command, compared as substrings after lowercasing and
 /// collapsing whitespace. Easy to bypass on purpose: a denylist only stops the plain spelling,

@@ -3,8 +3,9 @@
 
 use super::{Halt, StepLoop};
 use crate::ai::{AssistantMessage, Message, StopReason, UserMessageKind};
+use crate::hooks::{FinishedStep, StepDecision, StepDisposition};
 use crate::input::Queue;
-use crate::{FinishedStep, RunOutcome, StepDecision, StepDisposition};
+use crate::runner::RunOutcome;
 
 impl StepLoop<'_> {
     /// Ask the finish hooks and decide what the next step starts with. Ends the attempt when

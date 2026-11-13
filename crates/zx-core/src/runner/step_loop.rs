@@ -27,12 +27,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::ai::{AssistantMessage, Message, StopReason, SystemMessage, SystemPrompt, now_ms};
 use crate::events::{EventKind, EventSink};
-use crate::events::{EventTarget, RunTrace};
 use crate::hooks::HookError;
 use crate::input::{Input, Queue};
 use crate::policy::ApprovalCache;
-use crate::runner::RunAccounting;
-use crate::runner::RunOutcome;
+use crate::runner::{EventTarget, RunAccounting, RunOutcome, RunTrace};
 
 pub use config::LoopConfig;
 pub(crate) use session_host::{PERSIST_FAILED, SessionHost, record_pending_entries};

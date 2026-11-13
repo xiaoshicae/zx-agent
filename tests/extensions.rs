@@ -10,9 +10,12 @@ use serde_json::json;
 use common::{EchoTool, config, run_prompt, summarize};
 use zx_agent::ai::ToolCall;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
+use zx_agent::events::{EventKind, HookPoint};
 use zx_agent::extensions::{Extension, register};
+use zx_agent::hooks::{Hook, HookContext, HookResult, HookStage};
 use zx_agent::prompt::{ENVIRONMENT, build_system_prompt};
-use zx_agent::{EventKind, Hook, HookContext, HookPoint, HookResult, HookStage, LoopConfig, Tool, ToolOutput};
+use zx_agent::runner::LoopConfig;
+use zx_agent::tools::{Tool, ToolOutput};
 
 /// Appends a mark to every tool result.
 struct Mark;

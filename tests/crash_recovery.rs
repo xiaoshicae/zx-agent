@@ -19,13 +19,14 @@ use tokio_util::sync::CancellationToken;
 use zx_agent::AgentSession;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{AssistantMessage, ContentBlock, Message, StopReason, ToolCall, ToolDef, ToolResultMessage};
+use zx_agent::builtin::executor::{Executor, LocalExecutor};
+use zx_agent::builtin::output_store::{self, OutputStore, ReadOutputTool};
+use zx_agent::builtin::tools::builtin_tools;
 use zx_agent::config::skills::ReadSkillTool;
-use zx_agent::executor::{Executor, LocalExecutor};
-use zx_agent::output_store::{self, OutputStore, ReadOutputTool};
+use zx_agent::events::{EventKind, Interruption};
 use zx_agent::runner::RunOutcome;
-use zx_agent::tools::builtin_tools;
+use zx_agent::tools::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
 use zx_agent::transcript::Transcript;
-use zx_agent::{Effects, EventKind, ExecutionMode, Interruption, Tool, ToolContext, ToolOutput};
 
 use common::mock_server::{MockServer, Reply};
 use common::{

@@ -11,20 +11,21 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use common::{EchoTool, RunnerSetup, config, fast_retry, header, read_lines, run_prompt, summarize};
-use zx_agent::Input;
+use zx_agent::CancelSignal;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{EventReceiver, Message, Provider, Request, SectionChange, StopReason, SystemMessage, ToolCall};
-use zx_agent::continuation::ContinueOnLength;
-use zx_agent::redact::{RedactSecrets, check_secret_files, short_secret_files};
-use zx_agent::runner::RunLimits;
-use zx_agent::tools::BashTool;
-use zx_agent::transcript::{Entry, Transcript};
-use zx_agent::{Approval, ApprovalRequest, Interaction};
-use zx_agent::{
-    ApprovalResult, CancelSignal, ContextEdit, Event, EventKind, FinishedStep, Hook, HookChain, HookContext,
-    HookOptions, HookResult, HookStage, PolicyContext, PolicyDecision, RunOutcome, StepDecision, Tool, ToolContext,
-    ToolOutput, ToolPolicy, ToolVerdict,
+use zx_agent::builtin::continuation::ContinueOnLength;
+use zx_agent::builtin::redact::{RedactSecrets, check_secret_files, short_secret_files};
+use zx_agent::builtin::tools::BashTool;
+use zx_agent::events::{ApprovalResult, Event, EventKind, ToolVerdict};
+use zx_agent::hooks::{
+    ContextEdit, FinishedStep, Hook, HookChain, HookContext, HookOptions, HookResult, HookStage, StepDecision,
 };
+use zx_agent::input::Input;
+use zx_agent::policy::{Approval, ApprovalRequest, Interaction, PolicyContext, PolicyDecision, ToolPolicy};
+use zx_agent::runner::{RunLimits, RunOutcome};
+use zx_agent::tools::{Tool, ToolContext, ToolOutput};
+use zx_agent::transcript::{Entry, Transcript};
 
 struct Verdict(PolicyDecision);
 #[async_trait]
@@ -475,7 +476,7 @@ impl Hook for BadOutput {
 async fn failed_output_hooks_withhold_raw_results_from_events_and_persistence() {
     struct SecretTool;
     #[async_trait]
-    impl zx_agent::Tool for SecretTool {
+    impl zx_agent::tools::Tool for SecretTool {
         fn name(&self) -> &str {
             "echo"
         }
@@ -486,7 +487,11 @@ async fn failed_output_hooks_withhold_raw_results_from_events_and_persistence() 
                 parameters: json!({}),
             }
         }
-        async fn execute(&self, _args: serde_json::Value, _ctx: &zx_agent::ToolContext) -> Result<ToolOutput, String> {
+        async fn execute(
+            &self,
+            _args: serde_json::Value,
+            _ctx: &zx_agent::tools::ToolContext,
+        ) -> Result<ToolOutput, String> {
             Ok(ToolOutput::ok("raw-tool-secret"))
         }
     }
@@ -857,7 +862,7 @@ async fn a_hook_follow_up_obeys_the_step_budget() {
     assert_eq!(provider.requests().len(), 1);
 }
 
-struct StopAndQueue(Arc<zx_agent::InputQueue>);
+struct StopAndQueue(Arc<zx_agent::input::InputQueues>);
 #[async_trait]
 impl Hook for StopAndQueue {
     async fn on_event(&self, event: &Event, _ctx: &HookContext) -> HookResult<()> {
@@ -1571,7 +1576,7 @@ struct Declared {
 }
 
 #[async_trait]
-impl zx_agent::Tool for Declared {
+impl zx_agent::tools::Tool for Declared {
     fn name(&self) -> &str {
         self.name
     }
@@ -1583,7 +1588,11 @@ impl zx_agent::Tool for Declared {
             parameters: json!({"type": "object"}),
         }
     }
-    async fn execute(&self, _args: serde_json::Value, _ctx: &zx_agent::ToolContext) -> Result<ToolOutput, String> {
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+        _ctx: &zx_agent::tools::ToolContext,
+    ) -> Result<ToolOutput, String> {
         Ok(ToolOutput::ok("ran"))
     }
 }
@@ -1628,7 +1637,7 @@ async fn a_tool_whose_definition_panics_fails_the_run_before_any_request() {
 struct CancelsItself;
 
 #[async_trait]
-impl zx_agent::Tool for CancelsItself {
+impl zx_agent::tools::Tool for CancelsItself {
     fn name(&self) -> &str {
         "stop"
     }
@@ -1639,7 +1648,11 @@ impl zx_agent::Tool for CancelsItself {
             parameters: json!({"type": "object"}),
         }
     }
-    async fn execute(&self, _args: serde_json::Value, ctx: &zx_agent::ToolContext) -> Result<ToolOutput, String> {
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+        ctx: &zx_agent::tools::ToolContext,
+    ) -> Result<ToolOutput, String> {
         ctx.cancel.cancel();
         Ok(ToolOutput::ok("stopped its own work"))
     }

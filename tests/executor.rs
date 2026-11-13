@@ -9,9 +9,9 @@ use async_trait::async_trait;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use zx_agent::executor::{Captured, CommandEnd, CommandOutput, Executor, LocalExecutor, ShellCommand};
-use zx_agent::tools::{BashTool, EditFileTool, GrepTool, ReadFileTool, SearchSettings, WriteFileTool};
-use zx_agent::{ExecutionMode, Tool, ToolContext};
+use zx_agent::builtin::executor::{Captured, CommandEnd, CommandOutput, Executor, LocalExecutor, ShellCommand};
+use zx_agent::builtin::tools::{BashTool, EditFileTool, GrepTool, ReadFileTool, SearchSettings, WriteFileTool};
+use zx_agent::tools::{ExecutionMode, Tool, ToolContext};
 
 /// What a tool asked its executor to do.
 #[derive(Debug, PartialEq)]

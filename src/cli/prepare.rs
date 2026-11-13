@@ -16,21 +16,24 @@ use zx_agent::AgentSession;
 use zx_agent::ai::ModelMeta;
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
+use zx_agent::builtin::continuation::ContinueOnLength;
+use zx_agent::builtin::executor::Executor;
+use zx_agent::builtin::output_store::{self, OutputStore, ReadOutputTool, SpillOutputs};
+use zx_agent::builtin::policy::{AutoApprove, CommandPolicy, Rule, RuleMatcher, RulePolicy};
+use zx_agent::builtin::redact::RedactSecrets;
+use zx_agent::builtin::tools::{self, BASH};
 use zx_agent::compaction;
 use zx_agent::config::skills::{ReadSkillTool, TOOL_NAME};
 use zx_agent::config::{AgentDefinition, Config, Execution};
-use zx_agent::continuation::ContinueOnLength;
-use zx_agent::executor::Executor;
+use zx_agent::events::{Event, EventSink};
 use zx_agent::extensions;
+use zx_agent::hooks::{Hook, HookOptions};
 use zx_agent::otel;
-use zx_agent::output_store::{self, OutputStore, ReadOutputTool, SpillOutputs};
-use zx_agent::policy::{AutoApprove, CommandPolicy, Rule, RuleMatcher, RulePolicy};
+use zx_agent::policy::PolicyDecision;
 use zx_agent::prompt::{self, build_system_prompt};
-use zx_agent::redact::RedactSecrets;
-use zx_agent::runner::{RunLimits, Runner};
-use zx_agent::tools::{self, BASH};
+use zx_agent::runner::{LoopConfig, RunLimits, Runner};
+use zx_agent::tools::Tool;
 use zx_agent::transcript::{SessionHeader, Transcript};
-use zx_agent::{Event, EventSink, Hook, HookOptions, LoopConfig, PolicyDecision, Tool};
 
 use super::execution::{check_session_outside, executor};
 use super::{BudgetArgs, Shared, env_value, resolve_cwd};
@@ -40,8 +43,8 @@ use crate::session_files::{self, SessionFile};
 /// show.
 ///
 /// Without one the name is the hook's type name, whose form Rust does not guarantee across
-/// compiler versions, and the policy hooks would all share a name. MCP server names cannot
-/// contain `_`, so these never clash with an extension's.
+/// compiler versions. MCP server names cannot contain `_`, so these never clash with an
+/// extension's.
 fn push_built_in(config: &mut LoopConfig, name: &str, hook: impl Hook + 'static) {
     config.hooks.push_with(
         hook,
@@ -383,12 +386,13 @@ async fn open_session(
     Ok((session, executor, environment))
 }
 
-/// Register the hooks every mode shares, after the command policy: the MCP servers, the
-/// agent's permissions with the MCP tools it does not allow, continuation, `redaction` and
-/// `spill`; returns the auto-approved commands for the frontend's own bash policy.
+/// Register what every mode shares, after the command policy: the MCP servers, the policy of
+/// the agent's permissions with the MCP tools it does not allow, and the hooks: continuation,
+/// `redaction` and `spill`. Returns the auto-approved commands for the frontend's own bash
+/// policy.
 ///
-/// Each hook declares its stage, so the policies run first and redaction runs before output
-/// is saved, whatever is registered later.
+/// Each hook declares its stage, so redaction runs before output is saved, whatever is
+/// registered later.
 fn register_hooks(
     config: &mut LoopConfig,
     agent: &mut AgentDefinition,

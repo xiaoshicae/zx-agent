@@ -58,14 +58,14 @@ pub(crate) struct PendingEntry {
 /// - Both queues take all of their messages at once or one at a time ([`QueueMode`]).
 /// - Custom entries are recorded at the start of the next step, or when the run ends.
 #[derive(Debug, Default)]
-pub struct InputQueue {
+pub struct InputQueues {
     steering: Mutex<VecDeque<Input>>,
     follow_up: Mutex<VecDeque<Input>>,
     mode: Mutex<QueueMode>,
     entries: Mutex<Vec<PendingEntry>>,
 }
 
-impl InputQueue {
+impl InputQueues {
     /// Queue a user message for the next step of the current task.
     pub fn steer(&self, text: impl Into<String>) {
         self.steer_message(Input::User(text.into()));
@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn draining_takes_messages_oldest_first_and_empties_the_queue() {
-        let queues = InputQueue::default();
+        let queues = InputQueues::default();
         queues.steer("a");
         queues.steer("b");
         queues.follow_up("c");
@@ -208,7 +208,7 @@ mod tests {
 
     #[test]
     fn the_oldest_message_stays_queued_until_removed() {
-        let queues = InputQueue::default();
+        let queues = InputQueues::default();
         queues.steer("a");
         queues.steer("b");
 
@@ -221,7 +221,7 @@ mod tests {
 
     #[test]
     fn withdrawing_removes_the_oldest_equal_message_from_the_steering_queue_first() {
-        let queues = InputQueue::default();
+        let queues = InputQueues::default();
         queues.steer("a");
         queues.steer("b");
         queues.steer("a");
@@ -235,7 +235,7 @@ mod tests {
 
     #[test]
     fn withdrawing_a_message_that_is_not_queued_changes_nothing() {
-        let queues = InputQueue::default();
+        let queues = InputQueues::default();
         queues.follow_up("a");
 
         assert!(!queues.withdraw(&"b".into()));
@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn removing_after_a_drain_leaves_newer_input_queued() {
-        let queues = InputQueue::default();
+        let queues = InputQueues::default();
         queues.follow_up("a");
         // A frontend drains the queue and queues other input while the loop records "a".
         queues.drain_follow_up();
@@ -264,7 +264,7 @@ mod tests {
 
     #[test]
     fn custom_messages_and_entries_queue_beside_user_text() {
-        let queues = InputQueue::default();
+        let queues = InputQueues::default();
         let custom = CustomMessage {
             custom_type: "note".into(),
             content: "remember".into(),
@@ -288,7 +288,7 @@ mod tests {
 
     #[test]
     fn the_queue_mode_defaults_to_all_and_can_be_changed() {
-        let queues = InputQueue::default();
+        let queues = InputQueues::default();
         assert_eq!(queues.mode(), QueueMode::All);
         queues.set_mode(QueueMode::OneAtATime);
         assert_eq!(queues.mode(), QueueMode::OneAtATime);

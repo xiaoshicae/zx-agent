@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use zx_agent::ai::Message;
-use zx_agent::tools::BASH;
+use zx_agent::builtin::tools::BASH;
 use zx_agent::transcript::Entry;
 
 use super::output::{self, Output};

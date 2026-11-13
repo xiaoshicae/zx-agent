@@ -1,13 +1,15 @@
 //! The chain that asks the registered policies about a tool call: each bounded by its
-//! timeout and the run's cancellation, with panics turned into failures.
+//! timeout and the run's cancellation, and one that cannot answer denies the call.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use super::{PolicyContext, PolicyDecision, ToolPolicy};
 use crate::ai::ToolCall;
-use crate::hooks::HookCall;
-use crate::{DEFAULT_HOOK_TIMEOUT, HookError, HookPoint};
+use crate::guard::{Priority, bounded};
+
+/// The bound of one policy check unless the host gives another.
+pub const DEFAULT_POLICY_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct Registered {
     name: String,
@@ -28,10 +30,10 @@ impl PolicyChain {
         Self::default()
     }
 
-    /// Add `policy`, called `name` in `hook_failed` events and traces. Each of its checks is
-    /// bounded by [`DEFAULT_HOOK_TIMEOUT`].
+    /// Add `policy`, called `name` in the reason of a denial when it cannot answer. Each of
+    /// its checks is bounded by [`DEFAULT_POLICY_TIMEOUT`].
     pub fn push(&mut self, name: impl Into<String>, policy: Arc<dyn ToolPolicy>) {
-        self.push_with_timeout(name, policy, DEFAULT_HOOK_TIMEOUT);
+        self.push_with_timeout(name, policy, DEFAULT_POLICY_TIMEOUT);
     }
 
     /// Add `policy` as [`push`](Self::push) does, with `timeout` bounding each check.
@@ -49,26 +51,29 @@ impl PolicyChain {
     }
 
     /// The verdict on `call`: the first deny, else the first ask, else allow. A policy that
-    /// panics, runs past its timeout or is cut short by cancellation is an error, which the
-    /// caller treats as a denial.
-    pub(crate) async fn check(&self, call: &ToolCall, ctx: &PolicyContext) -> Result<PolicyDecision, HookError> {
+    /// panics, runs past its timeout or is cut short by cancellation denies the call, and the
+    /// reason names it.
+    pub(crate) async fn check(&self, call: &ToolCall, ctx: &PolicyContext) -> PolicyDecision {
         let mut verdict = PolicyDecision::Allow;
         for entry in &self.policies {
-            let guard = HookCall {
-                name: &entry.name,
-                phase: HookPoint::Policy,
-                timeout: entry.timeout,
+            let checked = bounded(
+                entry.policy.check(call, ctx),
+                entry.timeout,
+                ctx.cancel.token(),
+                Priority::Cancellation,
+            )
+            .await;
+            let decision = match checked {
+                Ok(decision) => decision,
+                Err(stopped) => PolicyDecision::Deny(format!("policy {} {stopped}", entry.name)),
             };
-            let decision = guard
-                .run(async { Ok(entry.policy.check(call, ctx).await) }, ctx.cancel.token())
-                .await?;
             match decision {
-                PolicyDecision::Deny(_) => return Ok(decision),
+                PolicyDecision::Deny(_) => return decision,
                 PolicyDecision::Ask(_) if matches!(verdict, PolicyDecision::Allow) => verdict = decision,
                 PolicyDecision::Ask(_) | PolicyDecision::Allow => {}
             }
         }
-        Ok(verdict)
+        verdict
     }
 }
 
@@ -82,7 +87,6 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use crate::HookFailure;
 
     fn context() -> PolicyContext {
         PolicyContext::new("session".into(), PathBuf::from("."), CancellationToken::new())
@@ -150,7 +154,7 @@ mod tests {
                     }),
                 );
             }
-            assert_eq!(chain.check(&call(), &context()).await.unwrap(), expected);
+            assert_eq!(chain.check(&call(), &context()).await, expected);
             assert_eq!(*seen.lock().unwrap(), visited);
         }
     }
@@ -159,7 +163,7 @@ mod tests {
     async fn no_policy_allows_every_call() {
         let chain = PolicyChain::new();
         assert!(chain.is_empty());
-        assert_eq!(chain.check(&call(), &context()).await.unwrap(), PolicyDecision::Allow);
+        assert_eq!(chain.check(&call(), &context()).await, PolicyDecision::Allow);
     }
 
     struct Never;
@@ -172,11 +176,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_policy_past_its_timeout_is_a_failure_that_names_it() {
+    async fn a_policy_past_its_timeout_denies_the_call_and_the_reason_names_it() {
         let mut chain = PolicyChain::new();
         chain.push_with_timeout("slow", Arc::new(Never), Duration::from_millis(1));
-        let error = chain.check(&call(), &context()).await.unwrap_err();
-        assert_eq!((error.hook.as_str(), error.phase), ("slow", HookPoint::Policy));
-        assert!(matches!(error.failure, HookFailure::TimedOut(_)), "{error:?}");
+        assert_eq!(
+            chain.check(&call(), &context()).await,
+            PolicyDecision::Deny("policy slow timed out after 1ms".into())
+        );
+    }
+
+    struct Panics;
+
+    #[async_trait]
+    impl ToolPolicy for Panics {
+        async fn check(&self, _call: &ToolCall, _ctx: &PolicyContext) -> PolicyDecision {
+            panic!("policy bug");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_panicking_policy_denies_the_call_whatever_the_others_allow() {
+        let mut chain = PolicyChain::new();
+        chain.push("broken", Arc::new(Panics));
+        assert_eq!(
+            chain.check(&call(), &context()).await,
+            PolicyDecision::Deny("policy broken panicked".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_run_denies_the_call_a_policy_is_still_checking() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let ctx = PolicyContext::new("session".into(), PathBuf::from("."), cancel);
+        let mut chain = PolicyChain::new();
+        chain.push("waiting", Arc::new(Never));
+        assert_eq!(
+            chain.check(&call(), &ctx).await,
+            PolicyDecision::Deny("policy waiting was cancelled".into())
+        );
     }
 }

@@ -9,8 +9,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::ai::PREAMBLE;
+use crate::hooks::{Hook, HookStage};
+use crate::policy::ToolPolicy;
 use crate::prompt::GENERATED_SECTIONS;
-use crate::{Hook, HookStage, LoopConfig, Tool, ToolPolicy};
+use crate::runner::LoopConfig;
+use crate::tools::Tool;
 
 pub use command::{CommandContext, CommandError, CommandOutcome, SlashCommand, check_command_name};
 
@@ -22,8 +25,10 @@ pub use command::{CommandContext, CommandError, CommandOutcome, SlashCommand, ch
 /// use std::sync::Arc;
 ///
 /// use zx_ai::ToolCall;
-/// use zx_core::{HookContext, HookResult, Hook, LoopConfig, ToolOutput};
 /// use zx_core::extensions::{Extension, register};
+/// use zx_core::hooks::{Hook, HookContext, HookResult};
+/// use zx_core::runner::LoopConfig;
+/// use zx_core::tools::ToolOutput;
 ///
 /// /// Marks every tool result and tells the model so.
 /// struct Checked;
@@ -99,7 +104,7 @@ pub trait Extension: Send + Sync {
 /// unchanged.
 ///
 /// Errors: a blank or repeated extension name, a hook outside [`HookStage::Extension`], a
-/// tool name already in use or a tool that fails [`LoopConfig::validate`](crate::LoopConfig::validate),
+/// tool name already in use or a tool that fails [`LoopConfig::validate`](crate::runner::LoopConfig::validate),
 /// a section name that is malformed, reserved, already in the prompt or repeated, and a
 /// command name that is malformed or already registered.
 pub fn register(config: &mut LoopConfig, extensions: &[Arc<dyn Extension>]) -> Result<(), String> {
@@ -161,7 +166,7 @@ struct Claimed<'a> {
 
 /// Check one extension's name, hooks, sections and commands against `config` and what
 /// earlier extensions claimed, and collect what it adds. Its tools are checked with the
-/// others by [`LoopConfig::validate`](crate::LoopConfig::validate).
+/// others by [`LoopConfig::validate`](crate::runner::LoopConfig::validate).
 fn check_extension<'a>(
     config: &LoopConfig,
     extension: &'a dyn Extension,

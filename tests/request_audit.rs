@@ -10,12 +10,12 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::AgentSession;
-use zx_agent::Tool;
 use zx_agent::agent_session::ModelRef;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, PREAMBLE, Request, SystemPrompt};
 use zx_agent::compaction::{Config, Outcome};
 use zx_agent::runner::RunOutcome;
+use zx_agent::tools::Tool;
 use zx_agent::transcript::{Entry, RequestSource, Transcript};
 
 use common::{EchoTool, RunnerSetup, config, header, read_lines, replayed_requests};

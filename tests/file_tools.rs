@@ -13,9 +13,10 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::executor::{CommandOutput, Executor, LocalExecutor, ShellCommand};
-use zx_agent::tools::{EditFileTool, FileMutationQueue, WriteFileTool, builtin_tools};
-use zx_agent::{RunOutcome, Tool, ToolContext};
+use zx_agent::builtin::executor::{CommandOutput, Executor, LocalExecutor, ShellCommand};
+use zx_agent::builtin::tools::{EditFileTool, FileMutationQueue, WriteFileTool, builtin_tools};
+use zx_agent::runner::RunOutcome;
+use zx_agent::tools::{Tool, ToolContext};
 
 use common::{config, run_prompt};
 
@@ -23,11 +24,11 @@ fn ctx(dir: &Path) -> ToolContext {
     ToolContext::new(dir.to_path_buf(), CancellationToken::new())
 }
 
-async fn write(dir: &Path, args: Value) -> Result<zx_agent::ToolOutput, String> {
+async fn write(dir: &Path, args: Value) -> Result<zx_agent::tools::ToolOutput, String> {
     WriteFileTool::default().execute(args, &ctx(dir)).await
 }
 
-async fn edit(dir: &Path, args: Value) -> Result<zx_agent::ToolOutput, String> {
+async fn edit(dir: &Path, args: Value) -> Result<zx_agent::tools::ToolOutput, String> {
     EditFileTool::default().execute(args, &ctx(dir)).await
 }
 
@@ -202,7 +203,11 @@ impl Executor for SlowReads {
     }
 }
 
-fn file_tool_config(provider: Arc<FauxProvider>, cwd: PathBuf, executor: &Arc<dyn Executor>) -> zx_agent::LoopConfig {
+fn file_tool_config(
+    provider: Arc<FauxProvider>,
+    cwd: PathBuf,
+    executor: &Arc<dyn Executor>,
+) -> zx_agent::runner::LoopConfig {
     let names = ["edit_file", "write_file"].map(String::from);
     let tools = builtin_tools(&names, Duration::from_secs(5), executor).unwrap();
     let mut config = config(provider, tools);

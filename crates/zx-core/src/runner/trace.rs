@@ -5,18 +5,22 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
 use crate::ai::now_ms;
-use crate::events::{EVENT_SCHEMA_VERSION, Event, EventKind, EventSink};
+use crate::events::{EVENT_SCHEMA_VERSION, Emit, Event, EventKind, EventSink};
+use crate::guard::CancelSignal;
 use crate::hooks::{HookChain, HookContext, HookError};
-use crate::input::InputQueue;
+use crate::input::InputQueues;
+use crate::policy::PolicyContext;
 use crate::tools::ActiveTools;
 
-/// One run's context: what its hooks are told and what stamps its events, with the next
-/// sequence number.
+/// One run's context: what its hooks and policies are told and what stamps its events, with
+/// the next sequence number.
 pub(crate) struct RunTrace {
     context: HookContext,
+    policy_context: PolicyContext,
     seq: AtomicU64,
 }
 
@@ -27,11 +31,19 @@ impl RunTrace {
         session_id: String,
         cwd: PathBuf,
         cancel: CancellationToken,
-        queues: Arc<InputQueue>,
+        queues: Arc<InputQueues>,
         active_tools: Arc<ActiveTools>,
     ) -> Self {
+        let context = HookContext::new(session_id, cwd, cancel).with_shared(queues, active_tools);
+        let policy_context = PolicyContext {
+            session_id: context.session_id.clone(),
+            run_id: context.run_id.clone(),
+            cwd: context.cwd.clone(),
+            cancel: CancelSignal::new(context.cancel.token().clone()),
+        };
         Self {
-            context: HookContext::new(session_id, cwd, cancel).with_shared(queues, active_tools),
+            context,
+            policy_context,
             seq: AtomicU64::new(0),
         }
     }
@@ -39,6 +51,11 @@ impl RunTrace {
     /// What every hook of this run is told.
     pub(crate) fn context(&self) -> &HookContext {
         &self.context
+    }
+
+    /// What every policy of this run is told: the same run as the hooks'.
+    pub(crate) fn policy_context(&self) -> &PolicyContext {
+        &self.policy_context
     }
 
     /// The run's cancellation.
@@ -93,6 +110,14 @@ impl EventTarget<'_> {
         });
         self.sink.emit(&event);
         text
+    }
+}
+
+#[async_trait]
+impl Emit for EventTarget<'_> {
+    async fn emit(&self, event: EventKind) {
+        // The inherent method, which takes the target by value.
+        EventTarget::emit(*self, event).await;
     }
 }
 

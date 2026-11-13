@@ -14,10 +14,9 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::AgentSession;
-use zx_agent::Interaction;
-use zx_agent::NullSink;
 use zx_agent::ai::now_ms;
 use zx_agent::config::Builtin;
+use zx_agent::events::NullSink;
 use zx_agent::im::feishu::{FeishuChannel, FeishuConfig};
 use zx_agent::im::slack::{SlackChannel, SlackConfig};
 use zx_agent::im::{
@@ -25,6 +24,7 @@ use zx_agent::im::{
     ServerSink, SessionFactory, SessionKey, StatusFiles, UserId,
 };
 use zx_agent::otel::Telemetry;
+use zx_agent::policy::Interaction;
 
 use crate::cli::{self, ImArgs, env_value};
 use crate::process::{EXIT_COMPLETED, EXIT_ERROR, EXIT_USAGE, spawn_signal_handler, with_telemetry, write_line};

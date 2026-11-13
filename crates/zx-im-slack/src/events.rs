@@ -2,7 +2,7 @@
 //! and the escaped text and blocks the channel posts.
 
 use serde_json::{Value, json};
-use zx_core::ApprovalResult;
+use zx_core::events::ApprovalResult;
 use zx_im::{
     Addressee, ApprovalId, CardLabels, ChatKind, Choice, ConversationId, Destination, Inbound, MessageId, Said,
     ThreadId, UserId, split_text,

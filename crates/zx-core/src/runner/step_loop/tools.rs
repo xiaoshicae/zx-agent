@@ -13,11 +13,10 @@ use serde_json::Value;
 
 use super::{Halt, StepLoop};
 use crate::ai::{Message, ToolCall, ToolResultMessage, duration_ms, now_ms};
-use crate::hooks::HookCall;
-use crate::{
-    Approval, ApprovalRequest, ApprovalResult, Effects, EventKind, ExecutionMode, HookFailure, HookPoint,
-    MAX_DETAILS_BYTES, MAX_QUEUED_PROGRESS, PolicyContext, PolicyDecision, Tool, ToolContext, ToolOutput, ToolVerdict,
-};
+use crate::events::{ApprovalResult, EventKind, HookPoint, ToolVerdict};
+use crate::hooks::{HookCall, HookFailure};
+use crate::policy::{Approval, ApprovalRequest, PolicyDecision};
+use crate::tools::{Effects, ExecutionMode, MAX_DETAILS_BYTES, MAX_QUEUED_PROGRESS, Tool, ToolContext, ToolOutput};
 
 impl StepLoop<'_> {
     fn find_tool(&self, name: &str) -> Option<Arc<dyn Tool>> {
@@ -78,12 +77,7 @@ impl StepLoop<'_> {
     /// Run the policy on `call`, then ask the interaction host when it says so. An error is
     /// the text of the result of a call that may not run.
     async fn authorize(&mut self, call: &ToolCall) -> Result<(), String> {
-        let context = PolicyContext::of(self.trace.context());
-        let verdict = match self.config.policies.check(call, &context).await {
-            Ok(verdict) => verdict,
-            // A policy that fails denies the call, for the reason it failed.
-            Err(error) => PolicyDecision::Deny(self.report_hook_failure(error)),
-        };
+        let verdict = self.config.policies.check(call, self.trace.policy_context()).await;
         match verdict {
             PolicyDecision::Allow => self.decision(call, ToolVerdict::Allow, None).await,
             PolicyDecision::Deny(reason) => {

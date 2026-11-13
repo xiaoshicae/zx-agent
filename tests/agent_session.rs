@@ -17,10 +17,12 @@ use zx_agent::AgentSession;
 use zx_agent::agent_session::{AgentSessionError, ModelRef, Subscription};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Reasoning, Request, ToolDef};
+use zx_agent::events::{Event, EventKind};
+use zx_agent::input::Input;
+use zx_agent::policy::{Approval, ApprovalRequest, Interaction, PolicyContext, PolicyDecision, ToolPolicy};
 use zx_agent::runner::RunOutcome;
+use zx_agent::tools::{Tool, ToolContext, ToolOutput};
 use zx_agent::transcript::{Entry, SessionName, Transcript};
-use zx_agent::{Approval, ApprovalRequest, Interaction};
-use zx_agent::{Event, EventKind, Input, PolicyContext, PolicyDecision, Tool, ToolContext, ToolOutput, ToolPolicy};
 
 fn setup(steps: impl IntoIterator<Item = FauxStep>) -> (AgentSession, Arc<NotifyingProvider>, Arc<Collect>) {
     let provider = NotifyingProvider::new(steps);

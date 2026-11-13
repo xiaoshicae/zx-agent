@@ -12,9 +12,11 @@ use tokio_util::sync::CancellationToken;
 use common::{EchoTool, RunnerSetup, config, fast_retry, header, replayed_requests};
 use zx_agent::ai::Reasoning;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
+use zx_agent::events::EventKind;
+use zx_agent::hooks::{Hook, HookContext, HookResult, RequestPlan, RequestSettings};
 use zx_agent::runner::RunOutcome;
+use zx_agent::tools::Tool;
 use zx_agent::transcript::Transcript;
-use zx_agent::{EventKind, Hook, HookContext, HookResult, RequestPlan, RequestSettings, Tool};
 
 /// Uses `model` with high reasoning on the first step only, and records what it saw.
 struct FirstTurnUpgrade {

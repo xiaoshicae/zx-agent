@@ -10,7 +10,7 @@ use super::{
 };
 use crate::ai::ToolDef;
 use crate::tools::parse_args;
-use zx_core::{Tool, ToolContext, ToolOutput};
+use zx_core::tools::{Tool, ToolContext, ToolOutput};
 
 /// Paths shown by default (pi: find's `DEFAULT_LIMIT`).
 const FIND_LIMIT: usize = 1000;

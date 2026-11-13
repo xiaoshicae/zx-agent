@@ -9,7 +9,7 @@ use agent_client_protocol::v1::schema::{
 };
 use async_trait::async_trait;
 
-use zx_agent::{Approval, ApprovalRequest, Interaction};
+use zx_agent::policy::{Approval, ApprovalRequest, Interaction};
 
 use super::tool_kind;
 use crate::render::call_label;

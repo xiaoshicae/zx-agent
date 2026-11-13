@@ -6,11 +6,11 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
-use zx_agent::config::{Config, ContainerSettings, Execution};
-use zx_agent::executor::{
+use zx_agent::builtin::executor::{
     ContainerConfig, ContainerExecutor, Executor, LocalExecutor, container_environment_section,
     local_environment_section,
 };
+use zx_agent::config::{Config, ContainerSettings, Execution};
 
 use crate::session_files::SessionFile;
 

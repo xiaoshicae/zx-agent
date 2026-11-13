@@ -11,7 +11,7 @@ use crate::AgentSession;
 use crate::agent_session::{AgentSessionError, Subscription};
 use crate::runner::{RunOutcome, RunReport};
 use crate::transcript::CustomMessage;
-use zx_core::Input;
+use zx_core::input::Input;
 
 use super::approval::{ApprovalEvents, ApprovalUpdate, ImApproval};
 use super::server::Shared;

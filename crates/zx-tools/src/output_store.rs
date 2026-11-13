@@ -16,7 +16,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::ai::{ToolCall, ToolDef};
 use crate::text::prefix_within;
 use crate::tools::{parse_args, unless_cancelled};
-use zx_core::{Effects, Hook, HookContext, HookResult, HookStage, Tool, ToolContext, ToolOutput};
+use zx_core::hooks::{Hook, HookContext, HookResult, HookStage};
+use zx_core::tools::{Effects, Tool, ToolContext, ToolOutput};
 
 /// Paging tool name; enabling spilling requires registering this tool too.
 pub const TOOL_NAME: &str = "read_output";

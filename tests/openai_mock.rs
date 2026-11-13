@@ -14,11 +14,11 @@ use common::{Collect, RunnerSetup, config, fast_retry};
 use zx_agent::ai::openai::{ApiKey, OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::{Message, PREAMBLE, ProviderError, StopReason, SystemPrompt};
+use zx_agent::builtin::tools::BashTool;
 use zx_agent::compaction::Config;
+use zx_agent::events::{Event, EventKind, EventSink};
 use zx_agent::runner::RunOutcome;
-use zx_agent::tools::BashTool;
 use zx_agent::transcript::Transcript;
-use zx_agent::{Event, EventKind, EventSink};
 
 /// Cancels a token at the first streamed delta, to cancel a response mid-stream without
 /// depending on timing.

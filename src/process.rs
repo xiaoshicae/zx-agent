@@ -9,9 +9,9 @@ use anyhow::Result;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
 
+use zx_agent::events::{Event, EventKind, EventSink};
 use zx_agent::otel::{Telemetry, TraceParent};
 use zx_agent::runner::RunOutcome;
-use zx_agent::{Event, EventKind, EventSink};
 
 /// Exit codes, so schedulers can react without parsing output.
 pub(crate) const EXIT_COMPLETED: u8 = 0;

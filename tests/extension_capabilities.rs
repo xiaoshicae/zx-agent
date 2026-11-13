@@ -16,13 +16,13 @@ use zx_agent::AgentSession;
 use zx_agent::agent_session::AgentSessionError;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, ToolCall, UserMessageKind};
-use zx_agent::extensions::{Extension, register};
-use zx_agent::runner::RunOutcome;
+use zx_agent::events::{Event, EventKind};
+use zx_agent::extensions::{CommandContext, CommandError, CommandOutcome, Extension, SlashCommand, register};
+use zx_agent::hooks::{Hook, HookContext, HookResult};
+use zx_agent::input::{Input, QueueMode};
+use zx_agent::runner::{LoopConfig, RunOutcome};
+use zx_agent::tools::ToolOutput;
 use zx_agent::transcript::{CustomMessage, Entry, Transcript};
-use zx_agent::{
-    CommandContext, CommandError, CommandOutcome, Event, EventKind, Hook, HookContext, HookResult, Input, LoopConfig,
-    QueueMode, SlashCommand, ToolOutput,
-};
 
 fn note(text: &str) -> CustomMessage {
     CustomMessage {

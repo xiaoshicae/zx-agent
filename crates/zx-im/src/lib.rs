@@ -29,7 +29,7 @@ use tokio_util::sync::CancellationToken;
 use zx_ai as ai;
 use zx_core::{AgentSession, agent_session, runner, transcript};
 
-use zx_core::ApprovalResult;
+use zx_core::events::ApprovalResult;
 
 pub use platform::{
     Backoff, CARD_CAPACITY, Cards, Keepalive, MAX_TEXT_CHARS, Pacer, RATE_LIMIT_RETRIES, SEEN_CAPACITY, Seen,

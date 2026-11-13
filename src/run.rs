@@ -10,8 +10,8 @@ use tokio_util::sync::CancellationToken;
 use zx_agent::AgentSession;
 use zx_agent::ai::Message;
 use zx_agent::config::Builtin;
+use zx_agent::events::{Event, EventKind, EventSink};
 use zx_agent::runner::{RunOutcome, RunReport};
-use zx_agent::{Event, EventKind, EventSink};
 
 use crate::cli::{self, OutputMode, RunArgs};
 use crate::process::{EXIT_DENIED, JsonlEvents, exit_code, print_line, run_sink, spawn_signal_handler, with_telemetry};

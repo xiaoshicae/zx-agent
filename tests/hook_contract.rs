@@ -9,10 +9,9 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::ai::{AssistantMessage, Message, Reasoning, StopReason, ToolCall, Usage};
-use zx_agent::{Approval, ApprovalRequest};
-use zx_agent::{
-    ContextEdit, FinishedStep, HookContext, PolicyDecision, RequestSettings, StepDecision, StepDisposition, ToolOutput,
-};
+use zx_agent::hooks::{ContextEdit, FinishedStep, HookContext, RequestSettings, StepDecision, StepDisposition};
+use zx_agent::policy::{Approval, ApprovalRequest, PolicyDecision};
+use zx_agent::tools::ToolOutput;
 
 /// `value` serializes to `expected` and reads back unchanged.
 fn round_trip<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(value: &T, expected: Value) {

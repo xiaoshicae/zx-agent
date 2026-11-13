@@ -12,9 +12,10 @@ use zx_agent::AgentSession;
 use zx_agent::agent_session::AgentSessionError;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, StopReason};
+use zx_agent::events::EventKind;
 use zx_agent::runner::{RunOutcome, Runner};
+use zx_agent::tools::Tool;
 use zx_agent::transcript::{Entry, Transcript};
-use zx_agent::{EventKind, Tool};
 
 use common::{Collect, EchoTool, RunnerSetup, config, header, summarize, tool_call_answer};
 

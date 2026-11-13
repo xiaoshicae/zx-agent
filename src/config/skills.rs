@@ -9,9 +9,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::ai::ToolDef;
-use crate::executor::{Executor, LocalExecutor};
-use crate::tools::truncate::{MAX_BYTES, MAX_LINES, truncate_head};
-use crate::{Effects, Tool, ToolContext, ToolOutput};
+use crate::builtin::executor::{Executor, LocalExecutor};
+use crate::builtin::tools::truncate::{MAX_BYTES, MAX_LINES, truncate_head};
+use crate::tools::{Effects, Tool, ToolContext, ToolOutput};
 
 use super::MAX_FILE_BYTES;
 

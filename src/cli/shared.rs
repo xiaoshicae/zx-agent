@@ -8,11 +8,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use zx_agent::EventSink;
+use zx_agent::builtin::mcp::{Server, ServerConfig};
+use zx_agent::builtin::redact::{MIN_SECRET_CHARS, check_secret_files, short_secret_files};
 use zx_agent::config::Builtin;
+use zx_agent::events::EventSink;
 use zx_agent::extensions::Extension;
-use zx_agent::mcp::{Server, ServerConfig};
-use zx_agent::redact::{MIN_SECRET_CHARS, check_secret_files, short_secret_files};
 
 use super::{BaseArgs, BudgetArgs, Settings, env_value};
 

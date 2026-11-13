@@ -11,11 +11,11 @@ use tokio_util::sync::CancellationToken;
 
 use common::{EchoTool, NotifyingProvider, RunnerSetup, config, header, summarize};
 use zx_agent::AgentSession;
-use zx_agent::Tool;
 use zx_agent::agent_session::AgentSessionError;
 use zx_agent::ai::Message;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::runner::RunOutcome;
+use zx_agent::tools::Tool;
 use zx_agent::transcript::{Entry, Transcript};
 
 fn file_session(file: &Path, provider: Arc<FauxProvider>, tools: Vec<Arc<dyn Tool>>) -> AgentSession {

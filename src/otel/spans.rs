@@ -13,7 +13,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::signal::{Signal, What};
 use crate::ai::{StopReason, Usage};
-use crate::{ApprovalResult, Interruption, RequestKind, RunOutcome, ToolVerdict};
+use crate::events::{ApprovalResult, Interruption, RequestKind, ToolVerdict};
+use crate::runner::RunOutcome;
 
 /// Builds spans from signals, one task owning every open span.
 pub(super) async fn export(mut receiver: mpsc::Receiver<Signal>, mut runs: Runs, stop: CancellationToken) {

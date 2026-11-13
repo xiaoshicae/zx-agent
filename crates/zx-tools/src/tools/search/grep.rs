@@ -11,7 +11,7 @@ use super::{
 use crate::ai::ToolDef;
 use crate::tools::parse_args;
 use crate::tools::truncate::{MAX_BYTES, MAX_LINES};
-use zx_core::{Tool, ToolContext, ToolOutput};
+use zx_core::tools::{Tool, ToolContext, ToolOutput};
 
 /// Matches shown by default (pi: grep's `DEFAULT_LIMIT`).
 const GREP_LIMIT: usize = 100;

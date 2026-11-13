@@ -8,10 +8,10 @@ use std::time::Duration;
 use serde_json::Value;
 use zx_agent::ai::{AssistantMessage, ContentBlock, Delta, Message, StopReason, ToolCall, ToolResultMessage};
 use zx_agent::compaction::{self, Outcome};
+use zx_agent::events::{Event, EventKind, EventSink};
 use zx_agent::runner::RunReport;
 use zx_agent::sync::lock;
 use zx_agent::text::clip;
-use zx_agent::{Event, EventKind, EventSink};
 
 use crate::cli::{ColorArg, OutputMode};
 use crate::process::{JsonlEvents, write_line};
@@ -362,8 +362,8 @@ mod tests {
 
     #[test]
     fn the_turn_line_omits_tokens_the_provider_did_not_report() {
-        use zx_agent::RunOutcome;
         use zx_agent::ai::Usage;
+        use zx_agent::runner::RunOutcome;
         let mut report = RunReport {
             outcome: RunOutcome::Completed,
             final_text: String::new(),

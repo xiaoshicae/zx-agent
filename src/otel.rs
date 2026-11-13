@@ -30,7 +30,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::EventSink;
+use crate::events::EventSink;
 use signal::{Signal, SignalSink};
 use spans::{Runs, export};
 

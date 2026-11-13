@@ -13,9 +13,10 @@ use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::{Message, StopReason};
 use zx_agent::compaction::Config;
+use zx_agent::events::EventKind;
 use zx_agent::runner::{RunLimits, RunOutcome, Runner};
+use zx_agent::tools::Tool;
 use zx_agent::transcript::{Entry, Transcript};
-use zx_agent::{EventKind, Tool};
 
 use common::{Collect, EchoTool, RunnerSetup, config, fast_retry, seeded_session, summary_json, test_limits};
 

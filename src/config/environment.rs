@@ -13,9 +13,9 @@ use super::read_text;
 use crate::ai::openai::OpenAiConfig;
 use crate::ai::retry::RetryPolicy;
 use crate::ai::{ModelCost, ModelMeta, Reasoning};
-use crate::executor::{Access, check_network};
-use crate::mcp::{check_server_name, tool_name as mcp_tool_name};
-use crate::output_store;
+use crate::builtin::executor::{Access, check_network};
+use crate::builtin::mcp::{check_server_name, tool_name as mcp_tool_name};
+use crate::builtin::output_store;
 
 /// The variable holding the API key when config.toml names none.
 const DEFAULT_API_KEY_ENV: &str = "OPENAI_API_KEY";

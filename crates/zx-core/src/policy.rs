@@ -7,10 +7,10 @@
 //! in a container or VM, for real isolation.
 //!
 //! Only policies decide; hooks observe and transform. The policies that ship with zx-agent
-//! live outside the kernel, in the zx-tools crate (`zx_agent::policy`):
+//! live outside the kernel, in the zx-tools crate (`zx_agent::builtin::policy`):
 //!
 //! ```compile_fail
-//! use zx_core::CommandPolicy;
+//! use zx_core::policy::CommandPolicy;
 //! ```
 //!
 //! - `chain`: the policies of a loop, and how their verdicts combine
@@ -27,9 +27,9 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::ai::ToolCall;
-use crate::{CancelSignal, HookContext};
+use crate::guard::CancelSignal;
 
-pub use chain::PolicyChain;
+pub use chain::{DEFAULT_POLICY_TIMEOUT, PolicyChain};
 pub(crate) use interaction::ApprovalCache;
 pub use interaction::{Approval, ApprovalRequest, DEFAULT_APPROVAL_TIMEOUT, Interaction, NoHuman};
 
@@ -38,7 +38,8 @@ pub use interaction::{Approval, ApprovalRequest, DEFAULT_APPROVAL_TIMEOUT, Inter
 ///
 /// `check` is called after the tool is found and its arguments are validated, before it
 /// runs; the call cannot be changed here. Return [`PolicyDecision::Deny`] when unsure. A
-/// check that panics, outlasts its timeout or is cut short by cancellation denies the call.
+/// check that panics, outlasts its timeout or is cut short by cancellation denies the call,
+/// with a reason that names the policy.
 #[async_trait]
 pub trait ToolPolicy: Send + Sync {
     async fn check(&self, call: &ToolCall, ctx: &PolicyContext) -> PolicyDecision;
@@ -61,16 +62,6 @@ pub struct PolicyContext {
 }
 
 impl PolicyContext {
-    /// The context of the run `ctx` belongs to.
-    pub(crate) fn of(ctx: &HookContext) -> Self {
-        Self {
-            session_id: ctx.session_id.clone(),
-            run_id: ctx.run_id.clone(),
-            cwd: ctx.cwd.clone(),
-            cancel: ctx.cancel.clone(),
-        }
-    }
-
     /// A context for a new run of session `session_id` with a fresh ID, cancelled with
     /// `cancel`.
     pub fn new(session_id: String, cwd: PathBuf, cancel: CancellationToken) -> Self {

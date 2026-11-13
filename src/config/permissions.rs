@@ -1,6 +1,6 @@
 //! An agent's `[permissions]`: which tools ask, which calls run without asking and which are
 //! denied. Only the syntax is here; the decisions are made by the policies of
-//! [`crate::policy`]: `CommandPolicy` for the commands denied, `RulePolicy` for the tools that
+//! [`crate::builtin::policy`]: `CommandPolicy` for the commands denied, `RulePolicy` for the tools that
 //! ask or are denied, and `AutoApprove` for the commands allowed.
 //!
 //! An entry is a tool name, built-in or MCP (`<server>__<tool>`), or `bash(<text>)`. A
@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use anyhow::{Result, bail, ensure};
 use serde::Deserialize;
 
-use crate::policy::{AutoApprove, ProgramOptions};
+use crate::builtin::policy::{AutoApprove, ProgramOptions};
 
 /// One entry of `allow` or `deny`.
 #[derive(Clone, Debug, PartialEq, Eq)]

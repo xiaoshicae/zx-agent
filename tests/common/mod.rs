@@ -28,12 +28,12 @@ use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::{
     AssistantMessage, ContentBlock, EventReceiver, Message, Provider, Request, StopReason, ToolCall, ToolDef, Usage,
 };
-use zx_agent::runner::{RunLimits, RunReport, Runner};
+use zx_agent::events::{Event, EventKind, EventSink};
+use zx_agent::hooks::HookContext;
+use zx_agent::input::{Input, InputQueues};
+use zx_agent::runner::{LoopConfig, RunLimits, RunReport, Runner};
+use zx_agent::tools::{ExecutionMode, Tool, ToolContext, ToolOutput};
 use zx_agent::transcript::{Entry, SessionHeader, Transcript};
-use zx_agent::{
-    Event, EventKind, EventSink, ExecutionMode, HookContext, Input, InputQueue, LoopConfig, Tool, ToolContext,
-    ToolOutput,
-};
 
 /// The compiled `zx-agent`, for the tests that drive the program.
 ///
@@ -312,7 +312,7 @@ pub(crate) struct EchoTool {
     pub name: &'static str,
     pub mode: ExecutionMode,
     pub calls: AtomicUsize,
-    pub queues: Option<Arc<InputQueue>>,
+    pub queues: Option<Arc<InputQueues>>,
 }
 
 impl EchoTool {

@@ -9,10 +9,12 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::ai::{ModelMeta, Provider, Reasoning, SystemPrompt};
-use crate::events::RunTrace;
-use crate::{
-    ActiveTools, DEFAULT_APPROVAL_TIMEOUT, HookChain, InputQueue, Interaction, NoHuman, PolicyChain, SlashCommand, Tool,
-};
+use crate::extensions::SlashCommand;
+use crate::hooks::HookChain;
+use crate::input::InputQueues;
+use crate::policy::{DEFAULT_APPROVAL_TIMEOUT, Interaction, NoHuman, PolicyChain};
+use crate::runner::RunTrace;
+use crate::tools::{ActiveTools, Tool};
 
 /// What a loop runs with: the model and tools, and the host's extensions around them. Queues
 /// and the active tool set have shared ownership because frontends and hooks change them while
@@ -40,7 +42,7 @@ pub struct LoopConfig {
     pub policies: PolicyChain,
     pub interaction: Arc<dyn Interaction>,
     pub interaction_timeout: Duration,
-    pub queues: Arc<InputQueue>,
+    pub queues: Arc<InputQueues>,
     /// Which of `tools` the requests offer; every one by default.
     pub active_tools: Arc<ActiveTools>,
     /// Slash commands extensions registered, for a frontend to run.
@@ -70,7 +72,7 @@ impl LoopConfig {
             policies: PolicyChain::new(),
             interaction: Arc::new(NoHuman),
             interaction_timeout: DEFAULT_APPROVAL_TIMEOUT,
-            queues: Arc::new(InputQueue::default()),
+            queues: Arc::new(InputQueues::default()),
             active_tools: Arc::new(ActiveTools::default()),
             commands: Vec::new(),
             models: HashMap::new(),

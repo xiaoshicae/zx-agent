@@ -7,6 +7,8 @@
 //!   and what it needs from the session it records in
 //! - `accounting`: what a run spends across its attempts, and its budgets; the loop of each
 //!   attempt counts into it
+//! - `trace`: one run's identity and event numbering, and where its events go: the sink, then
+//!   the hooks that observe them
 //! - `run_host`: what a run lends the loop and the compactor, and how a run opens and closes
 //! - `interrupted`: results for the tool calls an interrupted run left unfinished
 //! - `final_answer`: the answer, joined from the parts that continue a cut-off one
@@ -16,6 +18,7 @@ mod final_answer;
 mod interrupted;
 mod run_host;
 mod step_loop;
+mod trace;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,13 +32,16 @@ use run_host::{CompactionPause, RunHost, RunStop};
 use crate::ai::retry::{RetryPolicy, is_context_overflow, is_retryable};
 use crate::ai::{AssistantMessage, Provider, Reasoning};
 use crate::compaction::{self, Trigger};
-pub use crate::events::{RunOutcome, RunReport};
+pub use crate::events::report::{RunOutcome, RunReport};
+use crate::events::{EventKind, EventSink};
+use crate::input::Input;
+use crate::policy::ApprovalCache;
 use crate::sync::AbortOnDrop;
 use crate::transcript::Transcript;
-use crate::{ApprovalCache, EventKind, EventSink, EventTarget, Input};
 pub(crate) use accounting::RunAccounting;
 pub use step_loop::LoopConfig;
 pub(crate) use step_loop::{Halt, PERSIST_FAILED, SessionHost, StepLoop, record_pending_entries};
+pub(crate) use trace::{EventTarget, RunTrace};
 
 /// Bounds for one run. Defaults impose no request or time limit.
 /// Continuation is supplied by a finish_step hook.
@@ -52,7 +58,7 @@ pub struct RunLimits {
     pub token_budget: Option<u64>,
     /// What the run may spend, in the unit of the configured prices (any currency, as long as
     /// every price uses it): the cost of all its model requests by those prices
-    /// ([`LoopConfig::models`](crate::LoopConfig::models)), summary requests and
+    /// ([`LoopConfig::models`](crate::runner::LoopConfig::models)), summary requests and
     /// failed attempts included. Checked before each request, so the last one may go over.
     /// A response from a model without a price costs nothing here, so the host checks that
     /// its models have prices. Tool usage is not counted. `None` disables the budget.
@@ -474,8 +480,9 @@ mod tests {
     use super::*;
     use crate::ai::Message;
     use crate::ai::faux::{FauxProvider, FauxStep};
+    use crate::events::NullSink;
+    use crate::tools::Tool;
     use crate::transcript::{FailingWriter, SessionHeader};
-    use crate::{NullSink, Tool};
 
     #[test]
     fn default_step_budget_is_unbounded() {
@@ -669,10 +676,10 @@ mod tests {
         async fn execute(
             &self,
             _args: serde_json::Value,
-            _ctx: &crate::ToolContext,
-        ) -> Result<crate::ToolOutput, String> {
+            _ctx: &crate::tools::ToolContext,
+        ) -> Result<crate::tools::ToolOutput, String> {
             self.0.fetch_add(1, Ordering::SeqCst);
-            Ok(crate::ToolOutput::ok("ran"))
+            Ok(crate::tools::ToolOutput::ok("ran"))
         }
     }
 
@@ -733,8 +740,12 @@ mod tests {
     async fn a_context_edit_write_failure_prevents_the_request() {
         struct Rewrite;
         #[async_trait::async_trait]
-        impl crate::Hook for Rewrite {
-            async fn on_input(&self, _text: String, _ctx: &crate::HookContext) -> crate::HookResult<String> {
+        impl crate::hooks::Hook for Rewrite {
+            async fn on_input(
+                &self,
+                _text: String,
+                _ctx: &crate::hooks::HookContext,
+            ) -> crate::hooks::HookResult<String> {
                 Ok("rewritten".into())
             }
         }

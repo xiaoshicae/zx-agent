@@ -18,10 +18,10 @@ use zx_agent::ai::{
     AssistantMessage, ContentBlock as MessageBlock, Delta, Message, ToolCall as MessageCall, ToolResultMessage,
     UserMessageKind,
 };
+use zx_agent::builtin::tools::{EDIT_FILE, WRITE_FILE};
+use zx_agent::events::{ApprovalResult, Event, EventKind, EventSink, ToolVerdict};
 use zx_agent::sync::lock;
-use zx_agent::tools::{EDIT_FILE, WRITE_FILE};
 use zx_agent::transcript::{Entry, ProjectedMessage, Transcript};
-use zx_agent::{ApprovalResult, Event, EventKind, EventSink, ToolVerdict};
 
 use super::tool_kind;
 use crate::render::call_label;

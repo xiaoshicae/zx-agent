@@ -9,7 +9,8 @@ use opentelemetry::trace::SpanContext;
 use tokio::sync::mpsc;
 
 use crate::ai::{Message, StopReason, Usage};
-use crate::{ApprovalResult, Event, EventKind, EventSink, Interruption, RequestKind, RunOutcome, ToolVerdict};
+use crate::events::{ApprovalResult, Event, EventKind, EventSink, Interruption, RequestKind, ToolVerdict};
+use crate::runner::RunOutcome;
 
 /// Passes the events that spans need to the exporter task.
 pub(super) struct SignalSink {
@@ -245,7 +246,7 @@ impl Signal {
 #[cfg(test)]
 pub(super) fn event(at_ms: u64, event: EventKind) -> Event {
     Event {
-        schema_version: crate::EVENT_SCHEMA_VERSION,
+        schema_version: crate::events::EVENT_SCHEMA_VERSION,
         seq: at_ms,
         at_ms,
         session_id: "s1".into(),
