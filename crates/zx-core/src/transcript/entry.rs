@@ -2,6 +2,7 @@
 //! to the model's context.
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -12,7 +13,8 @@ use super::{
 };
 use crate::ai::{Message, UserMessageKind, now_ms};
 
-/// First line of a session file. Records where and with which model the session started.
+/// What a session starts with, and never changes: where and with which model it started,
+/// and what its host says about it. The first line of a session file.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionHeader {
@@ -22,13 +24,18 @@ pub struct SessionHeader {
     pub timestamp: u64,
     pub cwd: String,
     pub model: String,
-    /// The session file this one was forked from; absent otherwise.
+    /// The ID of the session this one was forked from; absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session: Option<String>,
+    /// What the host says about the session, such as its tenant or the chat it belongs to.
+    /// The kernel only keeps them: a listing can ask for the sessions with given labels
+    /// ([`SessionQuery`](super::SessionQuery)).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
 }
 
 impl SessionHeader {
-    /// A header for a new session with a fresh id.
+    /// A header for a new session with a fresh id and no labels.
     pub fn new(cwd: &Path, model: &str) -> Self {
         Self {
             version: SESSION_VERSION,
@@ -37,6 +44,7 @@ impl SessionHeader {
             cwd: cwd.display().to_string(),
             model: model.to_string(),
             parent_session: None,
+            labels: BTreeMap::new(),
         }
     }
 }

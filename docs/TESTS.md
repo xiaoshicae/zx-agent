@@ -20,6 +20,7 @@
 | `tests/custom_records.rs` | 扩展的 `custom` 与 `custom_message` 记录 |
 | `tests/session_branch.rs` | `AgentSession::branch` 切换分支 |
 | `tests/session_fork.rs` | 复制分支成新会话 |
+| `tests/session_storage.rs` | 宿主自己实现的 `SessionStorage`：运行写入、按标签列出、从存储续接，以及唯一键拦住第二个写入者 |
 | `tests/sessions_cli.rs` | chat 的会话目录、`--resume` 与 `zx-agent sessions` |
 | `tests/chat_cli.rs` | chat：审批、输出行、信号、PTY |
 | `tests/acp_cli.rs` | `acp` 经 stdio 的协议、权限请求、会话加载与关闭、`/name` |

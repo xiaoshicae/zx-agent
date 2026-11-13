@@ -367,7 +367,7 @@ impl Run<'_> {
             tool_usage: accounting.tool_usage.clone(),
             denied_calls: accounting.denied_calls,
             error,
-            session_file: session.path().map(|path| path.display().to_string()),
+            session_id: session.header().id.clone(),
         };
         target
             .emit(EventKind::RunEnd {

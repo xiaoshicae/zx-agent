@@ -5,24 +5,36 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use zx_agent::transcript::SessionQuery;
+
 use crate::cli;
 use crate::render::visible;
-use crate::session_files;
+use crate::session_files::SessionPlace;
 
 /// Where conversations are kept.
-pub(super) enum Storage {
-    /// `--no-session`.
-    Memory,
-    /// `--session`: the file named; /new creates one beside it.
-    File(PathBuf),
-    /// A session directory: every new conversation gets its own file there.
-    Directory(PathBuf),
+pub(super) struct Storage {
+    /// Where the first conversation is kept: memory with `--no-session`, the file `--session`
+    /// names, else the session files under the home directory.
+    pub(super) place: SessionPlace,
+    /// `--session`'s file: /new creates a file beside it for the next conversation.
+    original: Option<PathBuf>,
 }
 
-/// The session a conversation opens with: what `--resume` led to.
+impl Storage {
+    /// Where /new keeps the next conversation when that is not where the first one is: a new
+    /// file beside `--session`'s.
+    pub(super) fn beside(&self) -> Option<SessionPlace> {
+        self.original
+            .as_deref()
+            .map(|original| SessionPlace::file(&new_file(original)))
+    }
+}
+
+/// The session a conversation opens with.
 pub(super) enum First {
-    /// The session `--resume` named, or the latest one of this directory.
-    Resume(PathBuf),
+    /// A session to continue, by its ID: the one `--resume` named, the latest one of this
+    /// directory, or the one `--session`'s file holds already.
+    Resume(String),
     /// A new session.
     Fresh,
     /// A new session, because `--resume` found none of this directory; the line says so.
@@ -30,10 +42,10 @@ pub(super) enum First {
 }
 
 impl First {
-    /// The file to open, when an earlier session is continued.
-    pub(super) fn path(&self) -> Option<&PathBuf> {
+    /// The session to open, when an earlier one is continued.
+    pub(super) fn id(&self) -> Option<&str> {
         match self {
-            Self::Resume(path) => Some(path),
+            Self::Resume(id) => Some(id),
             Self::Fresh | Self::NothingToResume(_) => None,
         }
     }
@@ -56,43 +68,50 @@ pub(super) async fn opening(
     resume: Option<Option<&str>>,
     cwd: Option<&Path>,
 ) -> Result<(Storage, First)> {
-    let storage = match (no_session, session) {
-        (true, _) => Storage::Memory,
-        (false, Some(path)) => Storage::File(path),
-        (false, None) => Storage::Directory(session_files::default_dir(&cli::resolve_cwd(cwd)?)?),
+    let (place, original) = match (no_session, session) {
+        (true, _) => (SessionPlace::memory(), None),
+        (false, Some(path)) => (SessionPlace::file(&path), Some(path)),
+        (false, None) => (SessionPlace::home()?, None),
     };
-    let first = match (&storage, resume) {
-        (Storage::Directory(dir), Some(id)) => resume_target(dir, cwd, id).await?,
-        (Storage::Memory | Storage::File(_) | Storage::Directory(_), _) => First::Fresh,
+    let first = match (&place, resume) {
+        (SessionPlace::Directory(_), Some(id)) => resume_target(&place, cwd, id).await?,
+        // `--session` continues the session its file holds, or starts the file.
+        (SessionPlace::File(_), _) => place.only().await?.map_or(First::Fresh, First::Resume),
+        (SessionPlace::Memory(_) | SessionPlace::Directory(_), _) => First::Fresh,
     };
-    Ok((storage, first))
+    Ok((Storage { place, original }, first))
 }
 
-/// The session `--resume` opens, or why there is none to resume.
-async fn resume_target(dir: &Path, cwd: Option<&Path>, id: Option<&str>) -> Result<First> {
-    let list = session_files::list(dir).await?;
+/// The session `--resume` opens among those started in this working directory, or why there
+/// is none to resume.
+async fn resume_target(place: &SessionPlace, cwd: Option<&Path>, id: Option<&str>) -> Result<First> {
+    let cwd = cli::resolve_cwd(cwd)?;
+    let list = place
+        .list(&SessionQuery {
+            cwd: Some(cwd.clone()),
+            ..SessionQuery::default()
+        })
+        .await?;
+    let directory = place.location(&cwd).unwrap_or_default();
     match id {
         Some(id) => {
             let session = list
                 .find(id)
-                .with_context(|| format!("--resume: no single session to resume in {}", dir.display()))?;
-            Ok(First::Resume(session.path.clone()))
+                .with_context(|| format!("--resume: no single session to resume in {}", directory.display()))?;
+            Ok(First::Resume(session.id.clone()))
         }
-        None => {
-            let cwd = cli::resolve_cwd(cwd)?;
-            Ok(match list.latest_in(&cwd) {
-                Some(session) => First::Resume(session.path.clone()),
-                None => First::NothingToResume(format!(
-                    "[chat] no earlier session of this directory in {}; starting a new one",
-                    visible(&dir.display().to_string())
-                )),
-            })
-        }
+        None => Ok(match list.sessions.first() {
+            Some(session) => First::Resume(session.id.clone()),
+            None => First::NothingToResume(format!(
+                "[chat] no earlier session of this directory in {}; starting a new one",
+                visible(&directory.display().to_string())
+            )),
+        }),
     }
 }
 
 /// For /new with `--session`: a new file beside the original.
-pub(super) fn new_file(original: &Path) -> PathBuf {
+fn new_file(original: &Path) -> PathBuf {
     let mut name = original
         .file_stem()
         .unwrap_or_else(|| OsStr::new("session"))

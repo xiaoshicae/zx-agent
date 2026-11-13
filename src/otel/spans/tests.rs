@@ -93,7 +93,7 @@ fn run_end(outcome: RunOutcome, usage: Usage) -> EventKind {
             tool_usage: std::collections::BTreeMap::new(),
             denied_calls: 0,
             error: None,
-            session_file: None,
+            session_id: "session".into(),
         }),
     }
 }

@@ -37,7 +37,7 @@ use zx_agent::otel::Telemetry;
 use crate::cli::{self, ChatArgs};
 use crate::process::{EXIT_CANCELLED, EXIT_COMPLETED, with_telemetry};
 use crate::render::visible;
-use crate::session_files::SessionFile;
+use crate::session_files::{SessionChoice, SessionPlace};
 
 use commands::Command;
 use info::{About, banner, help, status};
@@ -45,7 +45,7 @@ use input::Line;
 use interaction::{TerminalInteraction, Ticket};
 use output::Output;
 use signals::{Interrupt, Signals};
-use storage::{Storage, new_file, opening};
+use storage::{Storage, opening};
 use term::Tone;
 use turn::{Operation, TurnIo, drive_turn};
 
@@ -82,8 +82,8 @@ struct Chat {
 }
 
 impl Chat {
-    async fn build(&self, model: &str, file: SessionFile<'_>) -> Result<Built> {
-        let mut prepared = cli::prepare(&self.shared, model, None, file).await?;
+    async fn build(&self, model: &str, place: &SessionPlace, choice: SessionChoice<'_>) -> Result<Built> {
+        let mut prepared = cli::prepare(&self.shared, model, None, place, choice).await?;
         prepared.require_bash_approval("shell commands require interactive approval");
         prepared.config.interaction = self.interaction.clone();
         prepared.config.interaction_timeout = self.shared.settings.approval_timeout;
@@ -103,10 +103,10 @@ impl Chat {
         })
     }
 
-    /// Replace the conversation with one on `file`; when that fails, the current one stays
-    /// and `what` says what could not be done.
-    async fn switch(&self, built: &mut Built, model: &str, file: SessionFile<'_>, what: &str) -> bool {
-        match self.build(model, file).await {
+    /// Replace the conversation with a new one kept in `place`; when that fails, the current
+    /// one stays and `what` says what could not be done.
+    async fn switch(&self, built: &mut Built, model: &str, place: &SessionPlace, what: &str) -> bool {
+        match self.build(model, place, SessionChoice::existing_or_new(None)).await {
             Ok(next) => {
                 *built = next;
                 self.output.reset_totals();
@@ -156,12 +156,8 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
     let model = chat.shared.settings.model.clone();
     let resume = resume.as_ref().map(Option::as_deref);
     let (storage, first) = opening(no_session, session, resume, chat.shared.base.cwd.as_deref()).await?;
-    let file = match (&storage, first.path()) {
-        (_, Some(path)) | (Storage::File(path), None) => SessionFile::Open(path),
-        (Storage::Memory, None) => SessionFile::Memory,
-        (Storage::Directory(dir), None) => SessionFile::NewIn(dir),
-    };
-    let built = chat.build(&model, file).await?;
+    let choice = SessionChoice::existing_or_new(first.id());
+    let built = chat.build(&model, &storage.place, choice).await?;
     let mut terminal = Terminal {
         signals: Signals::new().context("cannot register chat signal handlers")?,
         input: input::spawn(mode)?,
@@ -376,18 +372,11 @@ impl Repl<'_> {
 
     /// /new: a new conversation where conversations are kept.
     async fn new_conversation(&mut self) {
-        let sibling;
-        let file = match &self.storage {
-            Storage::Memory => SessionFile::Memory,
-            Storage::File(original) => {
-                sibling = new_file(original);
-                SessionFile::Create(&sibling)
-            }
-            Storage::Directory(dir) => SessionFile::NewIn(dir),
-        };
+        let beside = self.storage.beside();
+        let place = beside.as_ref().unwrap_or(&self.storage.place);
         if self
             .chat
-            .switch(&mut self.built, &self.model, file, "create new conversation")
+            .switch(&mut self.built, &self.model, place, "create new conversation")
             .await
         {
             let file = self

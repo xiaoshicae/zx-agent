@@ -260,7 +260,7 @@ mod tests {
             tool_usage: std::collections::BTreeMap::new(),
             denied_calls: 0,
             error: error.map(String::from),
-            session_file: None,
+            session_id: "session".into(),
         }
     }
 

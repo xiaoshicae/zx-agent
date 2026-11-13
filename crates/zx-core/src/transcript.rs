@@ -5,11 +5,15 @@
 //! messages a model sees are a projection of that branch: context edits can omit or replace
 //! earlier messages without touching the stored history, which stays available for auditing.
 //!
-//! A [`SessionLog`] keeps the entries: the JSONL session file by default, or a backend of
-//! the host's choice. Only the current format, [`SESSION_VERSION`], is read and written.
+//! A [`SessionStorage`] keeps the sessions, and the [`SessionLog`] it hands out keeps one
+//! session's entries: session files ([`JsonlStorage`]), memory ([`MemoryStorage`]), or a
+//! backend of the host's choice. Only the current format, [`SESSION_VERSION`], is read and
+//! written.
 //!
 //! - `entry`: the header and the entries of the tree
-//! - `log` and `jsonl`: where the entries are kept, and the JSONL session file
+//! - `storage` and `log`: the interfaces of where sessions are kept: a storage of sessions,
+//!   and the log of one session's entries
+//! - `jsonl` and `memory`: the storages that ship with the kernel: session files, and memory
 //! - `projection`: the messages a branch projects for the model
 //! - `compaction`: what a summary holds, and the records of a compaction with the rules they
 //!   follow
@@ -17,19 +21,19 @@
 //! - `recovery`: start records of calls with side effects, and the calls an interrupted run
 //!   left without results
 //! - `name`: the session's name, kept in `session_info` records
-//! - `directory`: session files in one directory: listing them and finding one to resume
 //! - `test_support` and `tests`, compiled for tests only: what the session's unit tests
 //!   share, and the tests of the store
 
 mod compaction;
-mod directory;
 mod entry;
 mod jsonl;
 mod log;
+mod memory;
 mod name;
 mod projection;
 mod recovery;
 mod request;
+mod storage;
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]
@@ -39,31 +43,31 @@ pub use compaction::{
     SummaryRequest,
 };
 pub(crate) use compaction::{MAX_SUMMARY_BYTES, summary_input, summary_messages};
-pub use directory::{SessionInfo, SessionList, Unreadable, list_sessions};
 pub use entry::{ContextEditEntry, CustomEntry, CustomMessage, CustomMessageEntry, Entry, MessageEntry, SessionHeader};
+pub use jsonl::JsonlStorage;
 pub use log::{LoadedSession, LogRecord, SessionLog};
+pub use memory::MemoryStorage;
 pub use name::{SessionInfoEntry, SessionName};
 pub use projection::ProjectedMessage;
 pub(crate) use projection::without_details;
 pub use recovery::{InterruptedToolCall, StartRecord, ToolCallStartedEntry};
 pub use request::{RequestConfig, RequestConfigEntry, RequestSource, RequestStartedEntry};
+pub use storage::{SessionInfo, SessionList, SessionQuery, SessionStorage, Unreadable};
 #[cfg(test)]
 pub(crate) use test_support::FailingWriter;
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail, ensure};
 
 use crate::ai::{Message, now_ms};
-use entry::HeaderLine;
-use jsonl::JsonlFile;
 
-/// The session format: written to every new header, and the only version a session file may
-/// have to be created, opened or read, or a stored session to be loaded. A change to the
-/// format raises it, and sessions of any other version are refused.
-pub const SESSION_VERSION: u32 = 9;
+/// The session format: written to every new header, and the only version a session may have
+/// to be created, loaded or read. A change to the format raises it, and sessions of any
+/// other version are refused.
+pub const SESSION_VERSION: u32 = 10;
 
 /// How long one append may wait for its log, such as a database that stopped answering.
 /// A file append finishes long before; a timed-out append stops writing, like a failed one.
@@ -83,7 +87,7 @@ pub enum WritesStopped {
     /// An append failed with this error. Remove the cause, then open the session again.
     #[error("an earlier write failed: {0}")]
     Failed(String),
-    /// The store is a snapshot from [`Transcript::read`], which never writes.
+    /// The store is a snapshot ([`Transcript::snapshot`]), which never writes.
     #[error("it was read as a snapshot, which is read-only")]
     ReadOnly,
 }
@@ -94,10 +98,10 @@ pub enum WritesStopped {
 /// then changes memory. After a failed write, every later append fails without writing; so
 /// does every append after one that timed out or whose future was dropped, because its
 /// outcome is unknown. A failed write can leave a partial record; stopping there keeps it the
-/// last one, which opening the session repairs. One store is the only writer of its session.
-/// Appending to a log waits with a Tokio timer, so it needs a Tokio runtime with time enabled.
+/// last one, which a session file repairs when the session is opened again. One store is the
+/// only writer of its session. Appending to a log waits with a Tokio timer, so it needs a
+/// Tokio runtime with time enabled.
 pub struct Transcript {
-    path: Option<PathBuf>,
     log: Option<Box<dyn SessionLog>>,
     /// Why this store no longer writes, if it does not.
     stopped: Option<WritesStopped>,
@@ -110,10 +114,10 @@ pub struct Transcript {
 }
 
 impl Transcript {
-    /// A session kept only in memory.
+    /// A session kept only in this store: nothing stores it, so nothing can list it or open
+    /// it again.
     pub fn in_memory(header: SessionHeader) -> Self {
         Self {
-            path: None,
             log: None,
             stopped: None,
             append_timeout: APPEND_TIMEOUT,
@@ -125,7 +129,8 @@ impl Transcript {
         }
     }
 
-    /// A new session whose entries go to `log`. The backend has already stored `header`.
+    /// A new session whose entries go to `log`: what [`SessionStorage::create`] returned
+    /// for `header`, which the storage has stored already.
     pub fn with_log(header: SessionHeader, log: Box<dyn SessionLog>) -> Self {
         Self {
             log: Some(log),
@@ -133,12 +138,25 @@ impl Transcript {
         }
     }
 
-    /// Rebuild a stored session from `loaded` and append to `log` from then on. Checks the
-    /// format version, which must be [`SESSION_VERSION`], and every record, as opening a
-    /// session file does. The leaf is the last entry.
+    /// Rebuild a stored session from `loaded` and append to `log` from then on: what
+    /// [`SessionStorage::open`] returned. Checks the format version, which must be
+    /// [`SESSION_VERSION`], and every record. The leaf is the last entry.
+    ///
+    /// A crash during the final write can leave an incomplete last record, which the storage
+    /// leaves out ([`Transcript::incomplete_tail_bytes`]); damage anywhere else is an error,
+    /// and the stored session is left unchanged.
     pub fn load(loaded: LoadedSession, log: Box<dyn SessionLog>) -> Result<Self> {
         let mut store = Self::replay(loaded)?;
         store.log = Some(log);
+        Ok(store)
+    }
+
+    /// A stored session to read, not to write: what [`SessionStorage::read`] returned, also
+    /// of a session that another store is writing. Checked like [`Transcript::load`]; every
+    /// append to the snapshot fails.
+    pub fn snapshot(loaded: LoadedSession) -> Result<Self> {
+        let mut store = Self::replay(loaded)?;
+        store.stopped = Some(WritesStopped::ReadOnly);
         Ok(store)
     }
 
@@ -161,45 +179,6 @@ impl Transcript {
         Ok(store)
     }
 
-    /// Create a new session file, with its header written at once. Fails if the file exists
-    /// or the header's version is not [`SESSION_VERSION`], which no session could load. On
-    /// Unix the file stays locked while the store exists; see [`Transcript::open`].
-    pub fn create(path: &Path, header: SessionHeader) -> Result<Self> {
-        ensure_current_version(&header)?;
-        let file = JsonlFile::create(path, &header)?;
-        Ok(Self {
-            path: Some(path.to_path_buf()),
-            ..Self::with_log(header, Box::new(file))
-        })
-    }
-
-    /// Open an existing session file for reading and appending. The leaf is the last entry.
-    ///
-    /// On Unix the file is locked with `flock(2)` while the store exists, so opening it again,
-    /// in this process or another, fails until this store is dropped. A crash during the final
-    /// write can leave an incomplete last line. Once every other record has been checked, that
-    /// line is cut off so later appends start on a clean line; damage anywhere else is an
-    /// error, and the file is left unchanged.
-    pub fn open(path: &Path) -> Result<Self> {
-        let (loaded, file) = JsonlFile::open(path)?;
-        let mut store = Self::replay(loaded).map_err(|error| anyhow!("{}: {error:#}", path.display()))?;
-        store.log = Some(Box::new(file.repair()?));
-        store.path = Some(path.to_path_buf());
-        Ok(store)
-    }
-
-    /// Read a session file without opening it for writing: a snapshot, also of a session
-    /// that another store is writing. It neither takes the lock nor changes the file; an
-    /// incomplete last line, such as a record still being written, is left out. Every append
-    /// to the snapshot fails.
-    pub fn read(path: &Path) -> Result<Self> {
-        let loaded = jsonl::read(path)?;
-        let mut store = Self::replay(loaded).map_err(|error| anyhow!("{}: {error:#}", path.display()))?;
-        store.path = Some(path.to_path_buf());
-        store.stopped = Some(WritesStopped::ReadOnly);
-        Ok(store)
-    }
-
     /// Why this store no longer writes, or `None` while it does. Every append fails from
     /// then on; [`WritesStopped`] says what to do before writing the session again.
     pub fn writes_stopped(&self) -> Option<&WritesStopped> {
@@ -210,7 +189,7 @@ impl Transcript {
     /// fail. The header is not written.
     #[cfg(test)]
     pub(crate) fn with_writer(header: SessionHeader, writer: Box<dyn std::io::Write + Send + Sync>) -> Self {
-        Self::with_log(header, Box::new(JsonlFile::with_writer(writer)))
+        Self::with_log(header, Box::new(jsonl::JsonlFile::with_writer(writer)))
     }
 
     /// The header the session was created with.
@@ -218,14 +197,9 @@ impl Transcript {
         &self.header
     }
 
-    /// The session file; `None` for a session in memory or in another kind of log.
-    pub fn path(&self) -> Option<&Path> {
-        self.path.as_deref()
-    }
-
-    /// Bytes of an incomplete final record left out when the session was loaded, which
-    /// `open` also removes from the file; zero if there was none. Complete corrupt records
-    /// are errors and are never silently removed.
+    /// Bytes of an incomplete final record that the storage left out when the session was
+    /// loaded; zero if there was none. A session file cuts them off before its next record.
+    /// Complete corrupt records are errors and are never silently removed.
     pub fn incomplete_tail_bytes(&self) -> usize {
         self.incomplete_tail_bytes
     }
@@ -375,10 +349,11 @@ impl Transcript {
 
     /// The header of a session that continues one of this session's branches, for
     /// [`Transcript::copy_branch`]: a fresh ID and start time, the given working directory
-    /// and model, and this session's file as `parent_session`.
+    /// and model, this session's labels, and this session as `parent_session`.
     pub fn fork_header(&self, cwd: &Path, model: &str) -> SessionHeader {
         SessionHeader {
-            parent_session: self.path.as_ref().map(|path| path.display().to_string()),
+            parent_session: Some(self.header.id.clone()),
+            labels: self.header.labels.clone(),
             ..SessionHeader::new(cwd, model)
         }
     }
@@ -480,7 +455,7 @@ impl Transcript {
 }
 
 /// Only the current format is read and written: a session of another version is refused.
-fn ensure_current_version(header: &SessionHeader) -> Result<()> {
+pub(super) fn ensure_current_version(header: &SessionHeader) -> Result<()> {
     ensure!(
         header.version == SESSION_VERSION,
         "session format version {} is not supported; only version {SESSION_VERSION} can be read or written",

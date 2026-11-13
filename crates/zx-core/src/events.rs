@@ -419,7 +419,7 @@ mod tests {
                     tool_usage: std::collections::BTreeMap::new(),
                     denied_calls: 0,
                     error: None,
-                    session_file: None,
+                    session_id: "session".into(),
                 }),
             },
             EventKind::AttemptStart { attempt: 1 },

@@ -1,12 +1,38 @@
 //! What the unit tests of the session modules share: a header, messages, the texts a store
-//! projects, and a writer that always fails. The rest of the crate's tests reach
-//! [`FailingWriter`] as `crate::transcript::FailingWriter`.
+//! projects, a session in one file, and a writer that always fails. The rest of the crate's
+//! tests reach [`FailingWriter`] as `crate::transcript::FailingWriter`.
 
 use std::path::Path;
 
+use anyhow::{Context, Result};
+
 use crate::ai::{AssistantMessage, ContentBlock, Message, StopReason};
 
-use super::{SessionHeader, Transcript};
+use super::{JsonlStorage, SessionHeader, SessionStorage, Transcript};
+
+/// A new session with `header` in the file `path`.
+pub(super) async fn create_file(path: &Path, header: SessionHeader) -> Result<Transcript> {
+    let log = JsonlStorage::file(path).create(&header).await?;
+    Ok(Transcript::with_log(header, log))
+}
+
+/// The session in the file `path`, loaded and open for appending.
+pub(super) async fn open_file(path: &Path) -> Result<Transcript> {
+    let (loaded, log) = JsonlStorage::file(path).open(&id_in(path)?).await?;
+    Transcript::load(loaded, log)
+}
+
+/// A snapshot of the session in the file `path`.
+pub(super) async fn read_file(path: &Path) -> Result<Transcript> {
+    Transcript::snapshot(JsonlStorage::file(path).read(&id_in(path)?).await?)
+}
+
+/// The session ID in the header of the file `path`, whatever else the file holds.
+fn id_in(path: &Path) -> Result<String> {
+    let text = std::fs::read_to_string(path)?;
+    let header: serde_json::Value = serde_json::from_str(text.lines().next().context("an empty file")?)?;
+    Ok(header["id"].as_str().context("a header without an ID")?.to_string())
+}
 
 /// A writer whose every write fails, like a full disk.
 pub(crate) struct FailingWriter;

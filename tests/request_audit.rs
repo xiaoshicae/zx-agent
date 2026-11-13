@@ -54,7 +54,7 @@ fn a_recorded_session_rebuilds_to_the_requests_it_sent() {
 /// byte as pretty-printed JSON, so that the order of fields counts too.
 fn assert_fixture_rebuilds(name: &str) {
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    let store = Transcript::read(&fixtures.join(format!("{name}.jsonl"))).unwrap();
+    let store = common::read_session_file(&fixtures.join(format!("{name}.jsonl"))).unwrap();
     let expected = std::fs::read_to_string(fixtures.join(format!("{name}.expected.json"))).unwrap();
 
     let rebuilt = format!("{}\n", serde_json::to_string_pretty(&replays(&store)).unwrap());
@@ -76,7 +76,7 @@ fn request_ids(store: &Transcript) -> Vec<String> {
 
 /// Every request rebuilt from a fresh snapshot of the file.
 fn replayed(path: &Path) -> Vec<Request> {
-    replayed_requests(&Transcript::read(path).unwrap())
+    replayed_requests(&common::read_session_file(path).unwrap())
 }
 
 fn types(path: &Path) -> Vec<String> {
@@ -99,7 +99,7 @@ async fn every_dispatched_request_is_rebuilt_exactly_from_the_session_file() {
     config.system_prompt = SystemPrompt::default().with_section(PREAMBLE, "Be brief.");
     config.max_tokens = Some(256);
     let (mut runner, _) = RunnerSetup {
-        session: Transcript::create(&path, header()).unwrap(),
+        session: common::create_session_file(&path, header()).await.unwrap(),
         ..RunnerSetup::new(config)
     }
     .build();
@@ -121,7 +121,7 @@ async fn request_config_is_appended_only_when_the_configuration_changes() {
     let first = Arc::new(FauxProvider::new([FauxStep::text("one"), FauxStep::text("two")]));
     let second = Arc::new(FauxProvider::new([FauxStep::text("three")]));
     let (runner, _) = RunnerSetup {
-        session: Transcript::create(&path, header()).unwrap(),
+        session: common::create_session_file(&path, header()).await.unwrap(),
         ..RunnerSetup::new(config(first.clone(), vec![]))
     }
     .build();
@@ -150,7 +150,7 @@ async fn request_config_is_appended_only_when_the_configuration_changes() {
 async fn summary_requests_are_rebuilt_from_their_compaction() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
-    let mut store = Transcript::create(&path, header()).unwrap();
+    let mut store = common::create_session_file(&path, header()).await.unwrap();
     let old = store
         .append_message(Message::user("observed ".repeat(600)))
         .await
@@ -177,7 +177,7 @@ async fn summary_requests_are_rebuilt_from_their_compaction() {
     let report = session.compact(&CancellationToken::new()).await.unwrap();
 
     assert_eq!(report.outcome, Outcome::Completed, "{report:?}");
-    let reopened = Transcript::read(&path).unwrap();
+    let reopened = common::read_session_file(&path).unwrap();
     let ids = request_ids(&reopened);
     assert_eq!(ids.len(), 1);
     let Some(Entry::RequestStarted(started)) = reopened.get(&ids[0]) else {
@@ -201,7 +201,7 @@ async fn only_request_checkpoints_can_be_replayed() {
 async fn requests_around_a_recovery_from_context_overflow_are_rebuilt_from_the_session_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
-    let mut session = Transcript::create(&path, header()).unwrap();
+    let mut session = common::create_session_file(&path, header()).await.unwrap();
     let old = session
         .append_message(Message::user("observed ".repeat(600)))
         .await

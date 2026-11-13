@@ -12,7 +12,6 @@ use tokio::process::{ChildStdout, Command};
 use common::mock_server::{MockServer, Reply};
 use common::{Home, json_lines, signal, stderr, stdout, tool_call_answer, write_agent, write_config, zx_agent_in};
 use zx_agent::ai::Message;
-use zx_agent::transcript::Transcript;
 
 const KEY_VAR: &str = "ZX_CHAT_TEST_KEY";
 const KEY: &str = "sk-chat-test-key";
@@ -59,7 +58,7 @@ fn users(server: &MockServer, index: usize) -> Vec<String> {
 
 async fn seed_context(dir: &Path, bytes: usize) -> String {
     let path = dir.join("chat.jsonl");
-    let mut store = Transcript::create(&path, common::header()).unwrap();
+    let mut store = common::create_session_file(&path, common::header()).await.unwrap();
     let id = store.append_message(Message::user("x".repeat(bytes))).await.unwrap();
     store.append_message(Message::user("recent input")).await.unwrap();
     id
@@ -156,7 +155,7 @@ async fn manual_compact_persists_a_summary_and_the_next_prompt_uses_it() {
     );
     assert_eq!(server.requests()[0].body["max_tokens"], 2048);
     assert!(server.requests()[0].body.get("tools").is_none());
-    let store = Transcript::open(&dir.path().join("chat.jsonl")).unwrap();
+    let store = common::open_session_file(&dir.path().join("chat.jsonl")).await.unwrap();
     assert!(store.latest_compaction().is_some());
     assert!(store.raw_projection().iter().any(|item| item.entry_id == id));
 }
@@ -197,7 +196,8 @@ async fn agent_settings_disable_automatic_compaction() {
         assert_eq!(server.requests().len(), 1);
         assert!(users(&server, 0)[0].len() > 256 * 1024);
         assert!(
-            Transcript::open(&dir.path().join("chat.jsonl"))
+            common::open_session_file(&dir.path().join("chat.jsonl"))
+                .await
                 .unwrap()
                 .latest_compaction()
                 .is_none()
@@ -274,7 +274,8 @@ async fn sigint_cancels_a_manual_summary_and_keeps_the_conversation_reusable() {
         Some(0)
     );
     assert!(
-        Transcript::open(&dir.path().join("chat.jsonl"))
+        common::open_session_file(&dir.path().join("chat.jsonl"))
+            .await
             .unwrap()
             .latest_compaction()
             .is_none()
@@ -426,7 +427,7 @@ async fn new_command_creates_a_separate_audit_file_and_preserves_the_old_one() {
     )
     .await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    let old = Transcript::open(&dir.path().join("chat.jsonl")).unwrap();
+    let old = common::open_session_file(&dir.path().join("chat.jsonl")).await.unwrap();
     let old_users: Vec<_> = old
         .messages()
         .into_iter()
@@ -446,7 +447,8 @@ async fn new_command_creates_a_separate_audit_file_and_preserves_the_old_one() {
         .iter()
         .find(|path| path.file_name().unwrap() != "chat.jsonl")
         .unwrap();
-    let next_users: Vec<_> = Transcript::open(next)
+    let next_users: Vec<_> = common::open_session_file(next)
+        .await
         .unwrap()
         .messages()
         .into_iter()
@@ -1497,7 +1499,9 @@ async fn quit_during_a_tty_approval_cancels_the_task_and_exits() {
 #[tokio::test]
 async fn resuming_an_interrupted_session_reports_the_recovered_call_without_running_it() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = Transcript::create(&dir.path().join("chat.jsonl"), common::header()).unwrap();
+    let mut store = common::create_session_file(&dir.path().join("chat.jsonl"), common::header())
+        .await
+        .unwrap();
     store.append_message(Message::user("fix it")).await.unwrap();
     let call = tool_call_answer("mock", "mock-model", "bash", json!({"command": "touch ran-again"}));
     store.append_message(call).await.unwrap();
@@ -1595,7 +1599,8 @@ async fn request_headers_and_the_prompt_cache_key_reach_the_server() {
     let request = &server.requests()[0];
     assert!(request.headers.contains("x-route: blue"), "{}", request.headers);
     assert!(request.headers.contains("x-tenant: a"), "{}", request.headers);
-    let session_id = Transcript::open(&dir.path().join("s.jsonl"))
+    let session_id = common::open_session_file(&dir.path().join("s.jsonl"))
+        .await
         .unwrap()
         .header()
         .id

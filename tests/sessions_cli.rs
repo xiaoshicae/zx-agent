@@ -15,7 +15,7 @@ use tokio::process::Command;
 use common::mock_server::{MockServer, Reply};
 use common::{Home, fake_model_config, stderr, stdout, write_config, zx_agent_in};
 use zx_agent::ai::Message;
-use zx_agent::transcript::{SESSION_VERSION, Transcript};
+use zx_agent::transcript::SESSION_VERSION;
 
 const KEY_VAR: &str = "ZX_SESSIONS_TEST_KEY";
 
@@ -85,7 +85,7 @@ fn files(dir: &Path) -> Vec<PathBuf> {
 }
 
 fn prompts(path: &Path) -> Vec<String> {
-    Transcript::read(path)
+    common::read_session_file(path)
         .unwrap()
         .messages()
         .into_iter()
@@ -130,7 +130,7 @@ async fn chat_keeps_each_conversation_in_its_own_file_under_the_home_directory()
     assert_eq!(prompts, [["again"], ["hello"]]);
     for path in &files {
         // Named <UTC time>_<session ID>.jsonl.
-        let id = Transcript::read(path).unwrap().header().id.clone();
+        let id = common::read_session_file(path).unwrap().header().id.clone();
         let name = path.file_name().unwrap().to_str().unwrap();
         assert!(name.ends_with(&format!("_{id}.jsonl")), "{name}");
         assert!(name.starts_with("20") && name.contains('T'), "{name}");
@@ -261,6 +261,7 @@ async fn sessions_lists_the_most_recent_first_and_reports_unreadable_files() {
     let dir = dirs.session_dir();
     seed(&dir, "aaaa0001-old", &dirs.cwd(), 1_000, "fix the build\nthen test");
     seed(&dir, "bbbb0002-new", &dirs.cwd(), 2_000, "deploy");
+    // Started in another directory, whose name leads to the same session directory.
     seed(&dir, "cccc0003-far", Path::new("/elsewhere"), 3_000, "elsewhere");
     std::fs::write(dir.join("broken.jsonl"), "not json\n").unwrap();
 
@@ -268,13 +269,12 @@ async fn sessions_lists_the_most_recent_first_and_reports_unreadable_files() {
 
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let lines: Vec<String> = stdout(&output).lines().map(str::to_string).collect();
-    assert_eq!(lines.len(), 3, "{lines:?}");
-    assert!(lines[0].starts_with("cccc0003  ") && lines[0].ends_with("elsewhere  (cwd /elsewhere)"));
-    assert!(lines[1].starts_with("bbbb0002  ") && lines[1].contains("  1 message(s)  deploy"));
-    assert!(lines[2].starts_with("aaaa0001  ") && lines[2].ends_with("fix the build…"));
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines[0].starts_with("bbbb0002  ") && lines[0].contains("  1 message(s)  deploy"));
+    assert!(lines[1].starts_with("aaaa0001  ") && lines[1].ends_with("fix the build…"));
     assert!(stderr(&output).contains("cannot read"));
     assert!(stderr(&output).contains("broken.jsonl"));
-    assert!(stderr(&output).contains(&format!("[sessions] 3 session(s) in {}", dir.display())));
+    assert!(stderr(&output).contains(&format!("[sessions] 2 session(s) in {}", dir.display())));
 }
 
 #[tokio::test]

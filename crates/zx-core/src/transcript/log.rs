@@ -1,22 +1,20 @@
-//! Where a session's records are kept. The store validates and orders them; a log only keeps
-//! them, in order, and gives them back when the session is opened again.
+//! Where one session's records are kept. The store validates and orders them; a log only
+//! keeps them, in order, and its storage gives them back when the session is opened again.
 
 use anyhow::Result;
 use async_trait::async_trait;
 
 use super::SessionHeader;
 
-/// Storage for one session: its records, appended in order after its header. The JSONL
-/// session file is one implementation; a database table is another.
+/// The records of one session, appended in order after its header: what a
+/// [`SessionStorage`](super::SessionStorage) hands out for a session it created or opened. A
+/// session file is one implementation; the rows of a database table are another.
 ///
 /// [`Transcript`](super::Transcript) checks each record before it reaches the log,
 /// waits for the log before changing memory, and stops writing after the first failure,
 /// including an append that timed out or whose future was dropped, because its outcome is
-/// unknown. A log only has to keep the records in order and return them when the session is
-/// opened again. A backend stores the header itself when it creates a session, then passes
-/// the log to [`Transcript::with_log`](super::Transcript::with_log); to continue a
-/// session, it reads the session back as a [`LoadedSession`] for
-/// [`Transcript::load`](super::Transcript::load).
+/// unknown. A log only has to keep the records in order, so that its storage can return them
+/// as a [`LoadedSession`] when the session is opened again.
 ///
 /// # Example
 ///
@@ -88,8 +86,9 @@ pub struct LogRecord<'a> {
     pub json: &'a str,
 }
 
-/// A stored session as a backend reads it back, for
-/// [`Transcript::load`](super::Transcript::load).
+/// A stored session as its storage reads it back, for
+/// [`Transcript::load`](super::Transcript::load) and
+/// [`Transcript::snapshot`](super::Transcript::snapshot).
 #[derive(Clone, Debug)]
 pub struct LoadedSession {
     pub header: SessionHeader,

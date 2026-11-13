@@ -1,6 +1,6 @@
 //! What a conversation runs on, shown at startup and by `/status`, and `/help`.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use zx_agent::ai::Message;
 use zx_agent::builtin::tools::BASH;
@@ -45,7 +45,7 @@ impl About {
                 .collect(),
             auto_approve: std::mem::take(&mut prepared.auto_approve_commands),
             cwd: prepared.config.cwd.clone(),
-            session: prepared.store.path().map(Path::to_path_buf),
+            session: prepared.session_path.take(),
             resumed: (!prepared.store.entries().is_empty()).then(|| Resumed {
                 messages: prepared
                     .store

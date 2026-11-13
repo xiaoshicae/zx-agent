@@ -1,585 +1,419 @@
-//! The JSONL session file: a header line, then one record per line.
+//! Sessions as JSONL files: one file per session, in a directory per working directory, or
+//! one named file (pi: `getDefaultSessionDirPath`, and the names of its session files).
+//!
+//! - `file`: one session file: its lock, reading it, repairing its end, and appending to it
 
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+mod file;
+#[cfg(test)]
+mod tests;
+
+use std::collections::HashMap;
+use std::fs::DirEntry;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
-use std::thread;
-#[cfg(unix)]
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result, anyhow, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use async_trait::async_trait;
-use serde::de::IgnoredAny;
-use tokio::sync::oneshot;
 
-use super::log::{LoadedSession, LogRecord, SessionLog};
-use super::{HeaderLine, SessionHeader};
+use super::{
+    LoadedSession, SessionHeader, SessionInfo, SessionList, SessionLog, SessionQuery, SessionStorage, Transcript,
+    Unreadable, ensure_current_version,
+};
+use crate::sync::lock;
+pub(super) use file::JsonlFile;
 
-/// A session file open for appending. On Unix it holds an exclusive `flock(2)` lock until it
-/// is dropped, so a second writer, in this process or another, cannot open the same file.
-pub(super) struct JsonlFile {
-    writer: Writer,
-    /// The `seq` the next record must have.
-    next_seq: u64,
+/// What session files end in.
+const EXTENSION: &str = "jsonl";
+
+/// Sessions kept as JSONL files: a header line, then one record per line.
+///
+/// On Unix a session's file holds an exclusive `flock(2)` lock while a log of the session
+/// exists, so opening the session again, in this process or another, fails until that log is
+/// dropped; other platforms do not detect a second writer. A new file is readable only by
+/// its owner. A crash during the final write can leave an incomplete last line: it is left
+/// out when the session is opened, and cut off before the next record is appended, once the
+/// session's other records have been checked.
+///
+/// The storage reads, creates and locks files on Tokio's blocking threads, so it needs a
+/// Tokio runtime.
+pub struct JsonlStorage {
+    /// Shared with the blocking threads that do the file work.
+    files: Arc<Files>,
 }
 
-/// Records reach the file on a thread of their own. A write to a volume that stopped
-/// answering blocks inside the kernel; on that thread it stalls neither the runtime nor the
-/// store's append timeout, and it does not keep the process from exiting.
-struct Writer {
-    lines: Option<mpsc::SyncSender<Line>>,
-    thread: Option<thread::JoinHandle<()>>,
-    /// Whether a line was sent and its result has not been received.
-    pending: bool,
+/// Where the session files are.
+enum Layout {
+    /// `<root>/--<cwd>--/<UTC time>_<session ID>.jsonl`: a directory per working directory.
+    Directory(PathBuf),
+    /// One file, which holds at most one session.
+    File(PathBuf),
 }
 
-/// One record's line and where the result of writing it goes.
-struct Line {
-    text: String,
-    written: oneshot::Sender<std::io::Result<()>>,
+struct Files {
+    layout: Layout,
+    /// The headers read so far, by file. A header never changes once it is written, so a
+    /// file is read for it once; which files exist is asked of the directory every time.
+    headers: Mutex<HashMap<PathBuf, SessionHeader>>,
 }
 
-impl Writer {
-    fn spawn(mut target: Box<dyn Write + Send>) -> Result<Self> {
-        // One line at a time: the store waits for each append before the next one.
-        let (lines, received) = mpsc::sync_channel::<Line>(1);
-        let thread = thread::Builder::new()
-            .name("zx-session-writer".into())
-            .spawn(move || {
-                for line in received {
-                    let result = target.write_all(line.text.as_bytes()).and_then(|()| target.flush());
-                    // The store may have stopped waiting for this write; then no one needs
-                    // its result.
-                    let _ = line.written.send(result);
-                }
-            })
-            .context("cannot start the session writer thread")?;
-        Ok(Self {
-            lines: Some(lines),
-            thread: Some(thread),
-            pending: false,
-        })
-    }
-
-    async fn write(&mut self, text: String) -> Result<()> {
-        let lines = self
-            .lines
-            .as_ref()
-            .ok_or_else(|| anyhow!("the session writer has stopped"))?;
-        let (written, result) = oneshot::channel();
-        lines
-            .try_send(Line { text, written })
-            .map_err(|_| anyhow!("an earlier write of the session file has not finished"))?;
-        self.pending = true;
-        let result = result
-            .await
-            .map_err(|_| anyhow!("the session writer stopped before the write finished"))?;
-        self.pending = false;
-        Ok(result?)
-    }
-}
-
-impl Drop for Writer {
-    fn drop(&mut self) {
-        // Without a sender, the thread ends once it has written what it was sent.
-        drop(self.lines.take());
-        // An idle thread ends at once, closing the file and releasing its lock before this
-        // returns. One stuck in a write is left to finish on its own.
-        if !self.pending
-            && let Some(thread) = self.thread.take()
-        {
-            // A panic on that thread already failed its write; nothing is left to report.
-            let _ = thread.join();
-        }
-    }
-}
-
-/// A locked session file that has been read but not yet changed. Its records are checked
-/// first; only [`Unrepaired::repair`] changes the file and allows appending.
-pub(super) struct Unrepaired {
-    path: PathBuf,
-    file: File,
-    repair: Repair,
-    next_seq: u64,
-}
-
-/// What the file needs before the first append.
-enum Repair {
-    /// The file ends with a complete record and its newline.
-    Nothing,
-    /// Cut off the incomplete final record, which starts at this offset.
-    Truncate(u64),
-    /// The last complete record lacks its newline; add it.
-    Terminate,
-}
-
-impl JsonlFile {
-    /// Create a new file holding only `header`. Fails if the file exists. Unlike pi, the
-    /// header is written immediately, so even a run that crashes before the first answer
-    /// leaves a record.
-    pub(super) fn create(path: &Path, header: &SessionHeader) -> Result<Self> {
-        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            std::fs::create_dir_all(parent).with_context(|| format!("cannot create {}", parent.display()))?;
-        }
-        let mut options = OpenOptions::new();
-        options.append(true).create_new(true);
-        // Tool output in the session can contain secrets, so only the owner may read the file.
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        let mut file = options
-            .open(path)
-            .with_context(|| format!("cannot create session file {}", path.display()))?;
-        lock(&file, path)?;
-        let line = serde_json::to_string(&HeaderLine::Session(header.clone()))?;
-        writeln!(file, "{line}")
-            .and_then(|()| file.flush())
-            .with_context(|| format!("cannot write the header of {}", path.display()))?;
-        Ok(Self {
-            writer: Writer::spawn(Box::new(file))?,
-            next_seq: 1,
-        })
-    }
-
-    /// Lock an existing file and read its header and records without changing it.
+impl JsonlStorage {
+    /// Sessions kept under `root`. Each working directory has a directory of its own there,
+    /// `--<cwd>--` with the separators of `cwd` turned into `-`, and each session a file in
+    /// it, `<UTC time>_<session ID>.jsonl`, so that the names sort in the order the sessions
+    /// were started. A session ID may hold ASCII letters, digits, `-` and `_`.
     ///
-    /// A crash during the final write can leave an incomplete last line. It is left out of the
-    /// records and removed by [`Unrepaired::repair`]; damage anywhere else is an error.
-    pub(super) fn open(path: &Path) -> Result<(LoadedSession, Unrepaired)> {
-        let mut file = OpenOptions::new()
-            .read(true)
-            .append(true)
-            .open(path)
-            .with_context(|| format!("cannot open session file {}", path.display()))?;
-        // Before reading: a concurrent writer's unfinished line must not look like a crash.
-        lock(&file, path)?;
-        let mut content = Vec::new();
-        file.read_to_end(&mut content)
-            .with_context(|| format!("cannot read session file {}", path.display()))?;
-        let (loaded, truncate_at) = parse(&content, path)?;
-        let repair = match truncate_at {
-            Some(at) => Repair::Truncate(u64::try_from(at)?),
-            None if !content.is_empty() && !content.ends_with(b"\n") => Repair::Terminate,
-            None => Repair::Nothing,
-        };
-        let unrepaired = Unrepaired {
-            path: path.to_path_buf(),
-            file,
-            repair,
-            next_seq: u64::try_from(loaded.records.len())? + 1,
-        };
-        Ok((loaded, unrepaired))
+    /// Directories are created with the first session that needs them, readable only by this
+    /// user on Unix. Files found there under other names are sessions too.
+    pub fn in_directory(root: impl Into<PathBuf>) -> Self {
+        Self::new(Layout::Directory(root.into()))
     }
 
-    /// Records go to `writer`, so tests can make writes fail. No header is written.
-    #[cfg(test)]
-    pub(super) fn with_writer(writer: Box<dyn Write + Send + Sync>) -> Self {
+    /// One session file, `path`: a storage that holds the session in that file, or none
+    /// while the file does not exist. Creating a second session fails.
+    pub fn file(path: impl Into<PathBuf>) -> Self {
+        Self::new(Layout::File(path.into()))
+    }
+
+    fn new(layout: Layout) -> Self {
         Self {
-            writer: Writer::spawn(writer).expect("tests can start a thread"),
-            next_seq: 1,
+            files: Arc::new(Files {
+                layout,
+                headers: Mutex::default(),
+            }),
         }
     }
-}
 
-/// Read a session file without locking or changing it. An incomplete last line, such as a
-/// record that a writer has not finished, is left out.
-pub(super) fn read(path: &Path) -> Result<LoadedSession> {
-    let content = std::fs::read(path).with_context(|| format!("cannot read session file {}", path.display()))?;
-    Ok(parse(&content, path)?.0)
-}
-
-/// The header and complete records of `content`, and where an incomplete last line starts.
-fn parse(content: &[u8], path: &Path) -> Result<(LoadedSession, Option<usize>)> {
-    // A short final write can end inside a UTF-8 character, so check one record at a
-    // time rather than rejecting the whole file during UTF-8 decoding.
-    let mut lines = Vec::new();
-    let mut offset = 0;
-    for raw in content.split_inclusive(|&byte| byte == b'\n') {
-        if !raw.iter().all(u8::is_ascii_whitespace) {
-            lines.push((offset, raw));
+    /// Where the sessions started in `cwd` are kept: their directory, or the storage's one
+    /// file.
+    pub fn location(&self, cwd: &Path) -> PathBuf {
+        match &self.files.layout {
+            Layout::Directory(root) => root.join(directory_name(&cwd.display().to_string())),
+            Layout::File(path) => path.clone(),
         }
-        offset += raw.len();
     }
-    let (_, first) = lines
-        .first()
-        .ok_or_else(|| anyhow!("session file {} is empty", path.display()))?;
-    let HeaderLine::Session(header) =
-        serde_json::from_slice(first).with_context(|| format!("{}: invalid session header", path.display()))?;
 
-    let mut records = Vec::new();
-    let mut incomplete = None;
-    for (position, &(line_offset, raw)) in lines.iter().enumerate().skip(1) {
-        if position + 1 == lines.len() && incomplete_tail(raw) {
-            incomplete = Some(line_offset);
-            break;
-        }
-        let record =
-            std::str::from_utf8(raw).map_err(|error| anyhow!("{}: entry {position}: {error}", path.display()))?;
-        records.push(record.trim_end().to_string());
+    /// The file that holds session `id`; `None` when the storage holds no such session.
+    pub async fn path_of(&self, id: &str) -> Result<Option<PathBuf>> {
+        let id = id.to_string();
+        self.blocking(move |files| files.find(&id)).await
     }
-    let loaded = LoadedSession {
-        header,
-        records,
-        incomplete_tail_bytes: incomplete.map_or(0, |start| content.len() - start),
-    };
-    Ok((loaded, incomplete))
-}
 
-impl Unrepaired {
-    /// Cut off an incomplete final record, or terminate a complete one that lacks its
-    /// newline, so that the next record starts on a line of its own.
-    pub(super) fn repair(self) -> Result<JsonlFile> {
-        let Self {
-            path,
-            file,
-            repair,
-            next_seq,
-        } = self;
-        match repair {
-            Repair::Truncate(length) => file
-                .set_len(length)
-                .with_context(|| format!("cannot repair session file {}", path.display()))?,
-            Repair::Terminate => (&file)
-                .write_all(b"\n")
-                .with_context(|| format!("cannot repair session file {}", path.display()))?,
-            Repair::Nothing => {}
-        }
-        Ok(JsonlFile {
-            writer: Writer::spawn(Box::new(file))?,
-            next_seq,
-        })
+    /// Run `work` on a blocking thread: it reads, creates or locks files.
+    async fn blocking<T: Send + 'static>(&self, work: impl FnOnce(&Files) -> Result<T> + Send + 'static) -> Result<T> {
+        let files = Arc::clone(&self.files);
+        tokio::task::spawn_blocking(move || work(&files))
+            .await
+            .context("reading or writing session files stopped")?
     }
 }
 
 #[async_trait]
-impl SessionLog for JsonlFile {
-    async fn append(&mut self, record: &LogRecord<'_>) -> Result<()> {
-        ensure!(
-            record.seq == self.next_seq,
-            "record {} is out of order: the session file expects record {}",
-            record.seq,
-            self.next_seq
-        );
-        // The line survives a crash of this process, not of the machine: there is no fsync.
-        let mut line = String::with_capacity(record.json.len() + 1);
-        line.push_str(record.json);
-        line.push('\n');
-        self.writer.write(line).await?;
-        self.next_seq += 1;
-        Ok(())
+impl SessionStorage for JsonlStorage {
+    async fn create(&self, header: &SessionHeader) -> Result<Box<dyn SessionLog>> {
+        let header = header.clone();
+        let file = self.blocking(move |files| files.create(&header)).await?;
+        Ok(Box::new(file))
+    }
+
+    async fn open(&self, id: &str) -> Result<(LoadedSession, Box<dyn SessionLog>)> {
+        let id = id.to_string();
+        let (loaded, file) = self.blocking(move |files| files.open(&id)).await?;
+        Ok((loaded, Box::new(file)))
+    }
+
+    async fn read(&self, id: &str) -> Result<LoadedSession> {
+        let id = id.to_string();
+        self.blocking(move |files| files.read(&id)).await
+    }
+
+    async fn list(&self, query: &SessionQuery) -> Result<SessionList> {
+        let query = query.clone();
+        self.blocking(move |files| files.list(&query)).await
     }
 }
 
-/// How long opening keeps trying a lock that another descriptor holds before reporting the file
-/// as in use. A program that this process is starting holds copies of its descriptors until it
-/// runs, so a store that was just dropped can keep its lock for a moment: under a millisecond
-/// when measured on macOS, longer on a busy machine.
-#[cfg(unix)]
-const LOCK_WAIT: Duration = Duration::from_millis(500);
-
-/// Longest pause between two attempts; the first pause is 1 ms and each one doubles.
-#[cfg(unix)]
-const LOCK_RETRY_MAX: Duration = Duration::from_millis(50);
-
-/// Take an exclusive lock on the whole file. It lasts until the file is closed, including when
-/// the process exits or is killed. A lock held elsewhere is retried for up to [`LOCK_WAIT`].
-#[cfg(unix)]
-fn lock(file: &File, path: &Path) -> Result<()> {
-    use std::os::fd::AsRawFd;
-
-    let started = Instant::now();
-    let mut pause = Duration::from_millis(1);
-    loop {
-        // SAFETY: flock(2) has no memory-safety preconditions; the descriptor stays open for
-        // the call because `file` is borrowed.
-        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if result == 0 {
-            return Ok(());
-        }
-        let error = std::io::Error::last_os_error();
-        match error.kind() {
-            // A signal interrupted the call: try again at once.
-            std::io::ErrorKind::Interrupted => {}
-            std::io::ErrorKind::WouldBlock if started.elapsed() < LOCK_WAIT => {
-                // A synchronous pause: opening happens once per session, and it waits only
-                // while another descriptor holds the lock.
-                std::thread::sleep(pause);
-                pause = (pause * 2).min(LOCK_RETRY_MAX);
+impl Files {
+    /// Create the file of a new session. In a directory, fails when a file there is named
+    /// after the same session ID; one placed there under another name is not noticed.
+    fn create(&self, header: &SessionHeader) -> Result<JsonlFile> {
+        ensure_current_version(header)?;
+        let path = match &self.layout {
+            Layout::File(path) => path.clone(),
+            Layout::Directory(root) => {
+                let name = file_name(header)?;
+                if let Some(existing) = named_after(root, &header.id)? {
+                    bail!("session {} exists already: {}", header.id, existing.display());
+                }
+                let dir = root.join(directory_name(&header.cwd));
+                create_private(&dir)?;
+                dir.join(name)
             }
-            std::io::ErrorKind::WouldBlock => anyhow::bail!(
-                "session file {} is in use: another process or session has it open for writing",
-                path.display()
-            ),
-            _ => return Err(error).with_context(|| format!("cannot lock session file {}", path.display())),
+        };
+        let file = JsonlFile::create(&path, header)?;
+        lock(&self.headers).insert(path, header.clone());
+        Ok(file)
+    }
+
+    fn open(&self, id: &str) -> Result<(LoadedSession, JsonlFile)> {
+        let path = self.existing(id)?;
+        let (loaded, file) = JsonlFile::open(&path)?;
+        holds(&path, &loaded.header, id)?;
+        Ok((loaded, file))
+    }
+
+    fn read(&self, id: &str) -> Result<LoadedSession> {
+        let path = self.existing(id)?;
+        let loaded = file::read(&path)?;
+        holds(&path, &loaded.header, id)?;
+        Ok(loaded)
+    }
+
+    fn list(&self, query: &SessionQuery) -> Result<SessionList> {
+        let mut sessions = Vec::new();
+        let mut unreadable = Vec::new();
+        for path in self.candidates(query)? {
+            match self.listed(&path, query) {
+                Ok(Some(session)) => sessions.push(session),
+                Ok(None) => {}
+                Err(error) => unreadable.push(Unreadable {
+                    location: path.display().to_string(),
+                    error: format!("{error:#}"),
+                }),
+            }
         }
+        unreadable.sort_by(|a, b| a.location.cmp(&b.location));
+        Ok(SessionList {
+            sessions: query.arrange(sessions),
+            unreadable,
+        })
+    }
+
+    /// The files in which `query` may find its sessions.
+    fn candidates(&self, query: &SessionQuery) -> Result<Vec<PathBuf>> {
+        match &self.layout {
+            Layout::File(path) => Ok(if path.is_file() { vec![path.clone()] } else { Vec::new() }),
+            Layout::Directory(root) => {
+                let directories = match &query.cwd {
+                    Some(cwd) => vec![root.join(directory_name(&cwd.display().to_string()))],
+                    None => directories_in(root)?,
+                };
+                let mut files = Vec::new();
+                for directory in directories {
+                    files.extend(session_files_in(&directory)?);
+                }
+                Ok(files)
+            }
+        }
+    }
+
+    /// What a listing shows of the session in `path`, if `query` asks for it. Only a
+    /// session it asks for is read whole.
+    fn listed(&self, path: &Path, query: &SessionQuery) -> Result<Option<SessionInfo>> {
+        if !query.matches(&self.header_of(path)?) {
+            return Ok(None);
+        }
+        let transcript =
+            Transcript::snapshot(file::read(path)?).map_err(|error| anyhow!("{}: {error:#}", path.display()))?;
+        Ok(Some(SessionInfo::of(&transcript)))
+    }
+
+    /// The header of the session file `path`, read once.
+    fn header_of(&self, path: &Path) -> Result<SessionHeader> {
+        if let Some(header) = lock(&self.headers).get(path) {
+            return Ok(header.clone());
+        }
+        let header = file::read_header(path)?;
+        lock(&self.headers).insert(path.to_path_buf(), header.clone());
+        Ok(header)
+    }
+
+    /// The file of session `id`, or an error that says where it was looked for.
+    fn existing(&self, id: &str) -> Result<PathBuf> {
+        self.find(id)?.ok_or_else(|| {
+            let (Layout::Directory(place) | Layout::File(place)) = &self.layout;
+            anyhow!("no session {id} in {}", place.display())
+        })
+    }
+
+    /// The file that holds session `id`, if there is one.
+    fn find(&self, id: &str) -> Result<Option<PathBuf>> {
+        let root = match &self.layout {
+            Layout::File(path) => {
+                // The one candidate: a file that cannot be read is an error, not an absence.
+                return Ok(if path.is_file() && self.header_of(path)?.id == id {
+                    Some(path.clone())
+                } else {
+                    None
+                });
+            }
+            Layout::Directory(root) => root,
+        };
+        let known = lock(&self.headers)
+            .iter()
+            .find(|(_, header)| header.id == id)
+            .map(|(path, _)| path.clone());
+        if let Some(path) = known.filter(|path| path.is_file()) {
+            return Ok(Some(path));
+        }
+        let mut files = Vec::new();
+        for directory in directories_in(root)? {
+            files.extend(session_files_in(&directory)?);
+        }
+        // A file named after the session first, so that finding it reads few headers.
+        files.sort_by_key(|path| !is_named_after(path, id));
+        // A file that cannot be read is not the session; a listing reports it.
+        Ok(files
+            .into_iter()
+            .find(|path| self.header_of(path).is_ok_and(|header| header.id == id)))
     }
 }
 
-/// Without `flock(2)`, two writers are not detected.
-#[cfg(not(unix))]
-fn lock(_file: &File, _path: &Path) -> Result<()> {
+/// An error unless the session in `path`, with `header`, is session `id`: the file changed
+/// since its header was read.
+fn holds(path: &Path, header: &SessionHeader, id: &str) -> Result<()> {
+    ensure!(
+        header.id == id,
+        "{} holds session {}, not {id}",
+        path.display(),
+        header.id
+    );
     Ok(())
 }
 
-/// Whether `raw`, the last line, is a record that a crash cut short: it lacks its newline and
-/// is a valid but unfinished JSON text. A complete record, even one that is not a known
-/// entry, is never treated as incomplete, so it is reported instead of silently removed.
-fn incomplete_tail(raw: &[u8]) -> bool {
-    if raw.ends_with(b"\n") {
-        return false;
-    }
-    match serde_json::from_slice::<IgnoredAny>(raw) {
-        Ok(_) => false,
-        Err(error) if error.is_eof() => true,
-        // Only a valid, unfinished JSON prefix may be repaired. An incomplete UTF-8 suffix
-        // must not hide an unrelated syntax error earlier in the record.
-        Err(_) => match std::str::from_utf8(raw) {
-            Err(utf8) if utf8.error_len().is_none() => {
-                serde_json::from_slice::<IgnoredAny>(&raw[..utf8.valid_up_to()]).is_err_and(|error| error.is_eof())
-            }
-            Ok(_) | Err(_) => false,
-        },
+/// The directories directly in `root`; none when `root` does not exist.
+fn directories_in(root: &Path) -> Result<Vec<PathBuf>> {
+    Ok(entries_in(root)?
+        .into_iter()
+        .filter(|entry| is_a(entry, Kind::Directory))
+        .map(|entry| entry.path())
+        .collect())
+}
+
+/// The session files directly in `directory`; none when it does not exist. A directory named
+/// like a session is not one; neither is a link that leads nowhere.
+fn session_files_in(directory: &Path) -> Result<Vec<PathBuf>> {
+    Ok(entries_in(directory)?
+        .into_iter()
+        .filter(|entry| {
+            Path::new(&entry.file_name())
+                .extension()
+                .is_some_and(|extension| extension == EXTENSION)
+        })
+        .filter(|entry| is_a(entry, Kind::File))
+        .map(|entry| entry.path())
+        .collect())
+}
+
+/// What `directory` holds; nothing when it does not exist.
+fn entries_in(directory: &Path) -> Result<Vec<DirEntry>> {
+    let cannot_list = || format!("cannot list sessions in {}", directory.display());
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).with_context(cannot_list),
+    };
+    entries.map(|entry| entry.with_context(cannot_list)).collect()
+}
+
+/// What an entry of a directory is asked to be.
+#[derive(Clone, Copy)]
+enum Kind {
+    File,
+    Directory,
+}
+
+/// Whether `entry` is of `kind`, or a link that leads to one. The directory says what its
+/// entries are, so only a link is looked up; an entry that cannot be asked is neither.
+fn is_a(entry: &DirEntry, kind: Kind) -> bool {
+    match (entry.file_type(), kind) {
+        (Ok(found), Kind::File) if found.is_symlink() => entry.path().is_file(),
+        (Ok(found), Kind::Directory) if found.is_symlink() => entry.path().is_dir(),
+        (Ok(found), Kind::File) => found.is_file(),
+        (Ok(found), Kind::Directory) => found.is_dir(),
+        (Err(_), _) => false,
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::fs::OpenOptions;
-    use std::io::Write;
-    use std::path::{Path, PathBuf};
-
-    use crate::ai::Message;
-    use crate::transcript::test_support::{assistant, header, texts};
-    use crate::transcript::{SESSION_VERSION, Transcript};
-
-    /// A session file with a header followed by `entries`, one per line, unterminated.
-    fn session_file(dir: &Path, entries: &[&str]) -> PathBuf {
-        let path = dir.join("s.jsonl");
-        let header =
-            format!(r#"{{"type":"session","version":{SESSION_VERSION},"id":"h","timestamp":1,"cwd":"/","model":"m"}}"#);
-        let lines: Vec<&str> = std::iter::once(header.as_str())
-            .chain(entries.iter().copied())
-            .collect();
-        std::fs::write(&path, lines.join("\n")).unwrap();
-        path
-    }
-
-    fn user_entry(id: &str, parent: Option<&str>) -> String {
-        let parent = parent.map_or("null".to_string(), |p| format!("\"{p}\""));
-        format!(
-            r#"{{"type":"message","id":"{id}","parentId":{parent},"timestamp":1,"message":{{"role":"user","content":"{id}","timestamp":1}}}}"#
-        )
-    }
-
-    #[tokio::test]
-    async fn a_session_file_has_one_writer_at_a_time() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("s.jsonl");
-        let store = Transcript::create(&path, header()).unwrap();
-
-        let error = Transcript::open(&path).err().unwrap().to_string();
-        assert!(error.contains("is in use"), "{error}");
-
-        drop(store);
-        let mut reopened = Transcript::open(&path).unwrap();
-        reopened.append_message(Message::user("q")).await.unwrap();
-        let error = Transcript::open(&path).err().unwrap().to_string();
-        assert!(error.contains("is in use"), "{error}");
-    }
-
-    #[tokio::test]
-    async fn a_snapshot_reads_a_session_in_use_without_changing_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("s.jsonl");
-        let mut writer = Transcript::create(&path, header()).unwrap();
-        writer.append_message(Message::user("q")).await.unwrap();
-        // A record the writer has not finished yet.
-        OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .unwrap()
-            .write_all(b"{\"type\":\"mess")
-            .unwrap();
-        let before = std::fs::read(&path).unwrap();
-
-        let mut snapshot = Transcript::read(&path).unwrap();
-
-        assert_eq!(texts(&snapshot), ["q"]);
-        assert_eq!(snapshot.incomplete_tail_bytes(), "{\"type\":\"mess".len());
-        let error = snapshot.append_message(Message::user("x")).await.unwrap_err();
-        assert!(error.to_string().contains("read-only"), "{error}");
-        assert_eq!(std::fs::read(&path).unwrap(), before);
-        assert!(Transcript::open(&path).is_err(), "the writer still holds the file");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_dropped_store_can_be_reopened_while_this_process_starts_programs() {
-        // A program being started holds copies of this process's descriptors until it runs,
-        // so the lock of a store that was just dropped can outlive the store for a moment.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("s.jsonl");
-        drop(Transcript::create(&path, header()).unwrap());
-        let starting = std::sync::atomic::AtomicBool::new(true);
-
-        let failures = std::thread::scope(|scope| {
-            scope.spawn(|| {
-                while starting.load(std::sync::atomic::Ordering::Relaxed) {
-                    std::process::Command::new("true").status().unwrap();
-                }
-            });
-            let failures: Vec<String> = (0..3000)
-                .filter_map(|_| Transcript::open(&path).err().map(|error| error.to_string()))
-                .collect();
-            starting.store(false, std::sync::atomic::Ordering::Relaxed);
-            failures
-        });
-
-        assert!(
-            failures.is_empty(),
-            "{} reopenings failed: {:?}",
-            failures.len(),
-            failures.first()
-        );
-    }
-
-    #[test]
-    fn a_newer_session_with_a_cut_short_tail_is_left_unchanged() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("future.jsonl");
-        std::fs::write(
-            &path,
-            "{\"type\":\"session\",\"version\":99,\"id\":\"h\",\"timestamp\":1,\"cwd\":\"/\",\"model\":\"m\"}\n{\"type\":\"mess",
-        )
-        .unwrap();
-        let original = std::fs::read(&path).unwrap();
-
-        assert!(Transcript::open(&path).is_err());
-
-        assert_eq!(std::fs::read(&path).unwrap(), original);
-    }
-
-    #[test]
-    fn damage_before_the_last_line_is_an_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = session_file(dir.path(), &["{broken", &user_entry("a", None)]);
-        assert!(Transcript::open(&path).is_err());
-    }
-
-    #[tokio::test]
-    async fn a_complete_last_line_without_newline_is_kept() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = session_file(dir.path(), &[&user_entry("a", None)]);
-        let mut store = Transcript::open(&path).unwrap();
-        store.append_message(Message::user("b")).await.unwrap();
-        drop(store);
-        assert_eq!(texts(&Transcript::open(&path).unwrap()), ["a", "b"]);
-    }
-
-    #[tokio::test]
-    async fn recovers_a_tail_cut_inside_a_utf8_character() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("utf8.jsonl");
-        let mut store = Transcript::create(&path, header()).unwrap();
-        store.append_message(Message::user("keep")).await.unwrap();
-        store.append_message(Message::user("中文")).await.unwrap();
-        drop(store);
-        let bytes = std::fs::read(&path).unwrap();
-        let cut = bytes.windows("中".len()).position(|w| w == "中".as_bytes()).unwrap() + 2;
-        OpenOptions::new()
-            .write(true)
-            .open(&path)
-            .unwrap()
-            .set_len(u64::try_from(cut).unwrap())
-            .unwrap();
-
-        let reopened = Transcript::open(&path);
-
-        assert!(reopened.is_ok(), "a partial UTF-8 tail was not repaired");
-        assert_eq!(texts(&reopened.unwrap()), ["keep"]);
-    }
-
-    #[test]
-    fn does_not_delete_a_corrupt_newline_terminated_record() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = session_file(dir.path(), &[&user_entry("a", None), "{broken}\n"]);
-        let original = std::fs::read(&path).unwrap();
-
-        let result = Transcript::open(&path);
-
-        assert!(result.is_err(), "a complete corrupt record was silently discarded");
-        assert_eq!(std::fs::read(&path).unwrap(), original);
-    }
-
-    #[test]
-    fn preserves_unknown_complete_records_even_without_a_newline() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = session_file(dir.path(), &[&user_entry("a", None), r#"{"type":"future_kind"}"#]);
-        let original = std::fs::read(&path).unwrap();
-
-        assert!(Transcript::open(&path).is_err());
-        assert_eq!(std::fs::read(&path).unwrap(), original);
-    }
-
-    #[tokio::test]
-    async fn an_incomplete_utf8_suffix_does_not_hide_an_earlier_syntax_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("invalid.jsonl");
-        let mut store = Transcript::create(&path, header()).unwrap();
-        store.append_message(Message::user("keep")).await.unwrap();
-        drop(store);
-        OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .unwrap()
-            .write_all(b"{broken}\xe4\xb8")
-            .unwrap();
-        let original = std::fs::read(&path).unwrap();
-
-        assert!(
-            Transcript::open(&path).is_err(),
-            "invalid JSON was mistaken for an interrupted UTF-8 write"
-        );
-        assert_eq!(std::fs::read(&path).unwrap(), original);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn new_session_files_are_private_to_the_owner() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("private.jsonl");
-        Transcript::create(&path, header()).unwrap();
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600);
-    }
-
-    #[tokio::test]
-    async fn file_round_trip_and_recovery_from_partial_last_line() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("s.jsonl");
+/// A session file under `root` that is named after session `id`, by its name alone.
+fn named_after(root: &Path, id: &str) -> Result<Option<PathBuf>> {
+    for directory in directories_in(root)? {
+        if let Some(path) = session_files_in(&directory)?
+            .into_iter()
+            .find(|path| is_named_after(path, id))
         {
-            let mut store = Transcript::create(&path, header()).unwrap();
-            store.append_message(Message::user("q")).await.unwrap();
-            store.append_message(assistant("a")).await.unwrap();
+            return Ok(Some(path));
         }
-        assert!(
-            Transcript::create(&path, header()).is_err(),
-            "never overwrites a session"
-        );
-
-        // Simulate a crash in the middle of writing a third entry.
-        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
-        file.write_all(b"{\"type\":\"message\",\"id\":\"x").unwrap();
-        drop(file);
-
-        let mut store = Transcript::open(&path).unwrap();
-        assert_eq!(texts(&store), ["q", "a"]);
-        store.append_message(Message::user("again")).await.unwrap();
-        drop(store);
-        let reopened = Transcript::open(&path).unwrap();
-        assert_eq!(texts(&reopened), ["q", "a", "again"]);
-        assert_eq!(reopened.header().model, "m");
     }
+    Ok(None)
+}
+
+/// Whether the file name of `path` names session `id`: `<id>.jsonl`, or what
+/// [`file_name`] gives a session, `<UTC time>_<id>.jsonl`.
+fn is_named_after(path: &Path, id: &str) -> bool {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem == id || stem.split_once('_').is_some_and(|(_, named)| named == id))
+}
+
+/// `--<cwd>--`, with the separators of `cwd` turned into `-` as pi does, so that one
+/// directory holds one working directory's sessions.
+fn directory_name(cwd: &str) -> String {
+    let encoded: String = cwd
+        .strip_prefix(['/', '\\'])
+        .unwrap_or(cwd)
+        .chars()
+        .map(|c| if matches!(c, '/' | '\\' | ':') { '-' } else { c })
+        .collect();
+    format!("--{encoded}--")
+}
+
+/// `<UTC time>_<session ID>.jsonl`, as pi names them: sorted by name they are in the order
+/// they were started. Fails for an ID that could name another file or directory.
+fn file_name(header: &SessionHeader) -> Result<String> {
+    let id = &header.id;
+    ensure!(
+        !id.is_empty()
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'),
+        "session ID {id:?} cannot name a session file: use ASCII letters, digits, `-` and `_`"
+    );
+    Ok(format!("{}_{id}.{EXTENSION}", utc_time(header.timestamp)))
+}
+
+/// `ms` since the Unix epoch as `2025-11-04T23-46-40-123Z`: UTC, with `-` where a file name
+/// cannot hold `:`.
+fn utc_time(ms: u64) -> String {
+    const MS_PER_DAY: u64 = 24 * 60 * 60 * 1000;
+    let (days, ms_of_day) = (ms / MS_PER_DAY, ms % MS_PER_DAY);
+    let (hour, minute) = (ms_of_day / 3_600_000, ms_of_day / 60_000 % 60);
+    let (second, milli) = (ms_of_day / 1000 % 60, ms_of_day % 1000);
+    // Days since the epoch to a date of the Gregorian calendar, counted in 400-year cycles
+    // of 146097 days that start on March 1, so that a leap day ends its year (Howard
+    // Hinnant, "chrono-Compatible Low-Level Date Algorithms", `civil_from_days`).
+    let shifted = days + 719_468;
+    let (cycle, day_of_cycle) = (shifted / 146_097, shifted % 146_097);
+    let year_of_cycle = (day_of_cycle - day_of_cycle / 1460 + day_of_cycle / 36_524 - day_of_cycle / 146_096) / 365;
+    let day_of_year = day_of_cycle - (365 * year_of_cycle + year_of_cycle / 4 - year_of_cycle / 100);
+    let month_from_march = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_from_march + 2) / 5 + 1;
+    let month = if month_from_march < 10 {
+        month_from_march + 3
+    } else {
+        month_from_march - 9
+    };
+    let year = year_of_cycle + cycle * 400 + u64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}-{minute:02}-{second:02}-{milli:03}Z")
+}
+
+/// Create `directory` and its missing parents, readable only by this user on Unix: session
+/// files hold the conversation and tool output. Existing directories keep their permissions.
+fn create_private(directory: &Path) -> Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder
+        .create(directory)
+        .with_context(|| format!("cannot create the session directory {}", directory.display()))
 }

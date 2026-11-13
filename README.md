@@ -163,7 +163,7 @@ maxRunning = 4              # 同时运行的会话数，默认 4，其余排队
 idleSecs = 1800             # 会话空闲多久后释放其文件锁，默认 1800
 
 [sessions]
-dir = "/data/sessions"      # 线程的会话在 <dir>/slack/<频道>/<线程>/，私聊的在 <dir>/slack/<私聊>/，文件为 1.jsonl、2.jsonl…
+dir = "/data/sessions"      # 会话文件在 <dir>/--<工作目录>--/ 下，头部的标签记录它属于哪个对话
 
 # 可选：替换默认的英文文案（字段名见 Replies 与 CardLabels）
 [replies]
@@ -181,6 +181,7 @@ allowed = "已批准"
 | 数据范围 | 只保存机器人参与过的线程与授权聊天中的消息，其余在入口丢弃。线程中任何人的话都会进入模型的上下文，写操作仍要审批 |
 | 审批 | 使用 assistant agent：自动放行的只读命令直接执行，其余发审批卡片，只有 `approvers` 中的用户点击才生效；超时（`approvalTimeoutSecs`）与取消也显示在卡片上 |
 | 凭据 | 两个平台的 token 与 secret 只从环境变量读取；命令的环境中删除这些变量，输出中出现其值时脱敏 |
+| 会话文件 | 每个对话（私聊，或群里的一个线程）的会话在头部带三个标签：`im.platform`、`im.conversation` 与 `im.thread`（私聊为空）。续接时取带这组标签、最近活动的会话，`/new` 用同样的标签再建一个，之前的保留 |
 | 日志 | stdout 每行一个 JSON：`approval`（聊天、线程、工具调用、审批人、结果、时间）、`released`、`failed`。对话内容在会话文件中 |
 | 退出 | SIGINT 或 SIGTERM 时取消进行中的任务，状态改为 `stopped` 的文案；未处理的消息不再处理，所在线程收到提示。退出码：正常为 0，配置错误与被拒的凭据为 2，平台连接意外结束为 1 |
 | 崩溃之后 | 未处理的消息丢失且没有提示。下次启动时，上个进程遗留的“处理中”改为 `interrupted` 的文案 |
@@ -374,7 +375,7 @@ zx-agent    src/             CLI（run、chat、im、acp）、config.toml 与 ag
 每行一个事件，带信封字段：`schemaVersion`（当前为 4）、`seq`（运行内从 1 递增）、`atMs`、`sessionId`、`runId` 与 `type`。一次运行以 `run_start` 开始，以 `run_end`（`report`）结束：
 
 ```json
-{"schemaVersion":4,"seq":12,"atMs":1761700000000,"sessionId":"…","runId":"…","type":"run_end","report":{"outcome":"completed","finalText":"## Summary ...","modelRequests":3,"retries":0,"usage":{"input":1200,"output":300,"cacheRead":0,"totalTokens":1500},"sessionFile":"/var/log/zx-agent/run.jsonl"}}
+{"schemaVersion":4,"seq":12,"atMs":1761700000000,"sessionId":"…","runId":"…","type":"run_end","report":{"outcome":"completed","finalText":"## Summary ...","modelRequests":3,"retries":0,"usage":{"input":1200,"output":300,"cacheRead":0,"totalTokens":1500},"sessionId":"…"}}
 ```
 
 其余事件：`attempt_start` / `attempt_end`（每次尝试）、`step_start` / `step_end`、`request_start`、`message_start` / `message_update`（需 `--deltas`）/ `message_end`、`tool_execution_start` / `tool_execution_update` / `tool_execution_end`、`tool_decision`、`approval_requested` / `approval_resolved`、`retry_scheduled`、`context_edited`、`context_overflow`、`compaction_start` / `compaction_end` / `compaction_failed`、`custom_entry`、`hook_failed`、`tool_call_recovered`。手动 `/compact` 发 `compaction_report`。`attempt_start` 与 `request_start` 的 `attempt` 是第几次尝试（首次为 1，重试与上下文溢出恢复都会再开一次尝试）；`retry_scheduled` 的 `retry` 是第几次重试（首次为 1，至多 `maxRetries`）。事件包含用户输入、工具参数、脱敏后的工具输出与模型输出。
@@ -392,15 +393,16 @@ run、chat 与 im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（完整地�
 第一行是头部，之后每行一个条目，条目之间通过 `parentId` 连成一棵树：
 
 ```json
-{"type":"session","version":9,"id":"…","timestamp":1761700000000,"cwd":"/srv","model":"…"}
+{"type":"session","version":10,"id":"…","timestamp":1761700000000,"cwd":"/srv","model":"…"}
 {"type":"message","id":"a1b2c3d4","parentId":"f0e1d2c3","timestamp":…,"message":{"role":"user","content":"…","timestamp":…}}
 {"type":"context_edit","id":"c3d4e5f6","parentId":"b2c3d4e5","timestamp":…,"targetId":"b2c3d4e5","replacement":null}
 ```
 
 - 只追加：修正上下文靠追加 `context_edit`，原始记录保留；`context_edit` 不能指向 system 或摘要消息。
 - 同一文件同一时间只有一个写入者（`flock`）；被占用时 `run` 与 `chat` 以退出码 2 结束。Unix 以外的平台不加锁。
-- 崩溃留下的未写完的尾记录在下次打开时截掉，并在 stderr 报告；其他损坏报错，文件保持原样。写入失败后不再写入。
-- 只读写版本 8，其他版本的文件拒绝打开，不做升级。
+- 崩溃留下的未写完的尾记录在下次打开时略过并在 stderr 报告，在追加下一条记录之前截掉；其他损坏报错，文件保持原样。写入失败后不再写入。
+- 只读写版本 10，其他版本的文件拒绝打开，不做升级。
+- 头部的可选字段：`labels`（宿主给会话的标签，如租户或所属的对话，创建后不变；列表可以按标签筛选）与 `parentSession`（复制分支得到的会话记录来源会话的 ID）。
 - 每次模型请求前记录 `request_started`（配置变化时先记 `request_config`），可还原当时的请求；不记录 API key、URL 与 HTTP 头。
 - 有副作用的工具调用执行前记录 `tool_call_started`。崩溃或取消后，下一次运行为缺少结果的调用补写错误结果，不重放，并发出 `tool_call_recovered`：`started`（结果未知，先核对再重试）、`not_started`（未执行）、`read_only`（只读工具，可重新调用）、`start_unknown`（当前未配置该工具，按可能已改变状态处理）。
 - 摘要记录为 `compaction_started`、`compaction` 或 `compaction_failed`。摘要的事实必须引用来源条目；引用只证明出处可定位，不证明陈述正确或没有信息损失。
@@ -421,8 +423,9 @@ let report = agent.prompt("任务描述", &CancellationToken::new()).await?;
 库默认不限轮次、时间与 token，没有钩子，不自动续写、摘要或落盘；说明、上限与策略都由嵌入方给出。完整的组装见 `examples/library.rs`。
 
 - 入口：`AgentSession`（共享会话：`prompt`、`continue_run`、`compact`、`cancel`、`subscribe`、`set_model`、`set_name`、`branch`、`queues`、`active_tools`、`run_command`）、`runner::Runner`（`AgentSession` 独占的一半，只有一个所有者时直接用）、`transcript::Transcript`。
-- 扩展点都是 trait：`ai::Provider`、`tools::Tool`、`policy::ToolPolicy`、`policy::Interaction`、`hooks::Hook`、`extensions::Extension`、`events::EventSink`、`transcript::SessionLog`、`builtin::executor::Executor`、`im::ImChannel`、`im::StatusStore`。
-- 附带的实现：`ai::openai::OpenAiCompatible`、`builtin::mcp::Server`（一个 `Extension`）、`builtin::executor::ContainerExecutor`、`builtin::redact::RedactSecrets`、`otel::Telemetry`。
+- 扩展点都是 trait：`ai::Provider`、`tools::Tool`、`policy::ToolPolicy`、`policy::Interaction`、`hooks::Hook`、`extensions::Extension`、`events::EventSink`、`transcript::SessionStorage`（会话存在哪里）及其 `transcript::SessionLog`（一个会话的记录）、`builtin::executor::Executor`、`im::ImChannel`、`im::StatusStore`。
+- 附带的实现：`ai::openai::OpenAiCompatible`、`transcript::JsonlStorage`（会话文件）与 `transcript::MemoryStorage`、`builtin::mcp::Server`（一个 `Extension`）、`builtin::executor::ContainerExecutor`、`builtin::redact::RedactSecrets`、`otel::Telemetry`。
+- 会话存储：`storage.create(&header)` 得到新会话的 `SessionLog`，交给 `Transcript::with_log`；`storage.open(id)` 读回会话并成为它的写入者，交给 `Transcript::load`；`storage.read(id)` 是只读快照，交给 `Transcript::snapshot`；`storage.list(&SessionQuery { cwd, labels, limit })` 按工作目录或标签列出，最近活动的在前。换一种存储（如数据库）只需实现这两个 trait。
 
 接口与契约见 rustdoc：`cargo doc --open`。
 

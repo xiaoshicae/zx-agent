@@ -25,10 +25,11 @@ use zx_agent::im::{
 };
 use zx_agent::otel::Telemetry;
 use zx_agent::policy::Interaction;
+use zx_agent::transcript::SessionQuery;
 
 use crate::cli::{self, ImArgs, env_value};
 use crate::process::{EXIT_COMPLETED, EXIT_ERROR, EXIT_USAGE, spawn_signal_handler, with_telemetry, write_line};
-use crate::session_files::SessionFile;
+use crate::session_files::{SessionChoice, SessionPlace};
 
 const DEFAULT_APP_TOKEN_ENV: &str = "SLACK_APP_TOKEN";
 const DEFAULT_BOT_TOKEN_ENV: &str = "SLACK_BOT_TOKEN";
@@ -142,11 +143,15 @@ pub(crate) async fn run(args: ImArgs) -> Result<u8> {
             .await?
             .with_hidden_env(hidden_env)
             .with_traces(telemetry.map(Telemetry::sink));
-        let factory = Sessions { shared, dir };
+        let factory = Sessions {
+            shared,
+            place: SessionPlace::directory(&dir),
+            dir,
+        };
         // A wrong model, agent or tool setting would otherwise surface only at the first
         // message, in the chat; check it once with a session that is never stored.
         factory
-            .prepare(SessionFile::Memory)
+            .prepare(&SessionPlace::memory(), SessionChoice::existing_or_new(None))
             .await
             .context("cannot prepare a session with these settings")?;
 
@@ -340,15 +345,30 @@ struct Sessions {
     /// The command line, MCP servers, secret files, IM credentials and trace export, shared
     /// by every thread's session.
     shared: cli::Shared,
+    /// The session files of every conversation, under `dir`. A conversation's sessions are
+    /// those that carry its labels.
+    place: SessionPlace,
     dir: PathBuf,
 }
 
 impl Sessions {
-    async fn prepare(&self, file: SessionFile<'_>) -> Result<cli::PreparedSession> {
-        let mut prepared = cli::prepare(&self.shared, &self.shared.settings.model, None, file).await?;
+    async fn prepare(&self, place: &SessionPlace, choice: SessionChoice<'_>) -> Result<cli::PreparedSession> {
+        let model = &self.shared.settings.model;
+        let mut prepared = cli::prepare(&self.shared, model, None, place, choice).await?;
         prepared.require_bash_approval("shell commands require approval in the chat");
         prepared.config.interaction_timeout = self.shared.settings.approval_timeout;
         Ok(prepared)
+    }
+
+    /// The conversation's most recently active session, if it has one.
+    async fn latest(&self, key: &SessionKey) -> Result<Option<String>> {
+        let query = SessionQuery {
+            labels: key.labels(),
+            limit: Some(1),
+            ..SessionQuery::default()
+        };
+        let list = self.place.list(&query).await?;
+        Ok(list.sessions.into_iter().next().map(|session| session.id))
     }
 
     async fn open_session(
@@ -357,15 +377,15 @@ impl Sessions {
         opening: Opening,
         interaction: Arc<dyn Interaction>,
     ) -> Result<AgentSession> {
-        // A short listing and directory creation before the session file, like prepare's own
-        // startup reads.
-        let path = key
-            .file_in(&self.dir, opening)
-            .with_context(|| format!("cannot list {}", key.dir_in(&self.dir).display()))?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).with_context(|| format!("cannot create {}", parent.display()))?;
-        }
-        let mut prepared = self.prepare(SessionFile::Open(&path)).await?;
+        let latest = match opening {
+            Opening::Latest => self.latest(key).await?,
+            Opening::New => None,
+        };
+        let choice = match &latest {
+            Some(id) => SessionChoice::Existing(id),
+            None => SessionChoice::New(key.labels()),
+        };
+        let mut prepared = self.prepare(&self.place, choice).await?;
         prepared.config.interaction = interaction;
         // The session file is the record of each conversation; the operator log holds
         // approvals and failures (Log), and traces, when exported, the timeline.
@@ -386,9 +406,11 @@ impl SessionFactory for Sessions {
             .map_err(|error| format!("{error:#}"))
     }
 
-    /// A listing of the conversation's directory: a few names.
-    fn has_session(&self, key: &SessionKey) -> bool {
-        key.has_file_in(&self.dir)
+    async fn has_session(&self, key: &SessionKey) -> Result<bool, String> {
+        match self.latest(key).await {
+            Ok(latest) => Ok(latest.is_some()),
+            Err(error) => Err(format!("{error:#}")),
+        }
     }
 }
 

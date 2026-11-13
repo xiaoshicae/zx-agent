@@ -102,11 +102,13 @@ async fn streaming_resource_limits_reach_the_provider() {
 async fn repaired_session_tails_are_reported_on_stderr() {
     use std::io::Write;
     use zx_agent::ai::Message;
-    use zx_agent::transcript::{SessionHeader, Transcript};
+    use zx_agent::transcript::SessionHeader;
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session.jsonl");
-    let mut session = Transcript::create(&path, SessionHeader::new(dir.path(), "mock-model")).unwrap();
+    let mut session = common::create_session_file(&path, SessionHeader::new(dir.path(), "mock-model"))
+        .await
+        .unwrap();
     session.append_message(Message::user("earlier")).await.unwrap();
     drop(session);
     std::fs::OpenOptions::new()

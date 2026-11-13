@@ -16,11 +16,11 @@ use zx_agent::ai::Message;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::runner::RunOutcome;
 use zx_agent::tools::Tool;
-use zx_agent::transcript::{Entry, Transcript};
+use zx_agent::transcript::Entry;
 
-fn file_session(file: &Path, provider: Arc<FauxProvider>, tools: Vec<Arc<dyn Tool>>) -> AgentSession {
+async fn file_session(file: &Path, provider: Arc<FauxProvider>, tools: Vec<Arc<dyn Tool>>) -> AgentSession {
     let (runner, _) = RunnerSetup {
-        session: Transcript::create(file, header()).unwrap(),
+        session: common::create_session_file(file, header()).await.unwrap(),
         ..RunnerSetup::new(config(provider, tools))
     }
     .build();
@@ -56,7 +56,7 @@ async fn branching_to_an_earlier_answer_continues_there_and_keeps_the_branch_lef
         FauxStep::text("two"),
         FauxStep::text("three"),
     ]));
-    let session = file_session(&file, provider.clone(), vec![]);
+    let session = file_session(&file, provider.clone(), vec![]).await;
     session.prompt("first", &CancellationToken::new()).await.unwrap();
     session.prompt("second", &CancellationToken::new()).await.unwrap();
     let one = answer_id(&session, "one");
@@ -84,7 +84,7 @@ async fn branching_to_an_earlier_answer_continues_there_and_keeps_the_branch_lef
     assert_eq!(parent.as_deref(), Some(one.as_str()));
     drop(session);
     // Reopened, the file continues where it ends: on the new branch; the old one is kept.
-    let reopened = Transcript::open(&file).unwrap();
+    let reopened = common::open_session_file(&file).await.unwrap();
     assert_eq!(
         summarize(&reopened.messages()),
         ["user:first", "assistant:one", "user:third", "assistant:three"]
@@ -107,7 +107,7 @@ async fn a_prompt_after_an_answer_with_unanswered_calls_records_them_as_not_exec
         FauxStep::text("done"),
         FauxStep::text("again"),
     ]));
-    let session = file_session(&file, provider.clone(), vec![echo.clone()]);
+    let session = file_session(&file, provider.clone(), vec![echo.clone()]).await;
     session.prompt("first", &CancellationToken::new()).await.unwrap();
     assert_eq!(echo.calls.load(Ordering::SeqCst), 1);
     let calling = entry_id(
@@ -135,7 +135,7 @@ async fn branching_to_the_root_starts_the_conversation_over_in_the_same_session(
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("session.jsonl");
     let provider = Arc::new(FauxProvider::new([FauxStep::text("one"), FauxStep::text("fresh")]));
-    let session = file_session(&file, provider.clone(), vec![]);
+    let session = file_session(&file, provider.clone(), vec![]).await;
     session.prompt("first", &CancellationToken::new()).await.unwrap();
 
     session.branch(None).unwrap();
@@ -143,7 +143,7 @@ async fn branching_to_the_root_starts_the_conversation_over_in_the_same_session(
 
     assert_eq!(summarize(&provider.requests()[1].messages), ["user:new"]);
     drop(session);
-    let reopened = Transcript::open(&file).unwrap();
+    let reopened = common::open_session_file(&file).await.unwrap();
     assert_eq!(summarize(&reopened.messages()), ["user:new", "assistant:fresh"]);
     let roots = reopened
         .entries()

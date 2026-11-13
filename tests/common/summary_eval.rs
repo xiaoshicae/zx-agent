@@ -836,13 +836,13 @@ impl Evaluation {
 /// cannot be written or does not load again at the end.
 pub(crate) async fn evaluate(provider: Arc<dyn Provider>, model: &str, budget: Config, dir: &Path) -> Evaluation {
     let path = dir.join("summaries.jsonl");
-    let mut store = Transcript::create(&path, header()).unwrap();
+    let mut store = super::create_session_file(&path, header()).await.unwrap();
     store.append_message(Message::user(TASK)).await.unwrap();
     drop(store);
     let mut rounds = Vec::new();
     let mut facts = Vec::new();
     for n in 1..=ROUNDS {
-        let mut store = Transcript::open(&path).unwrap();
+        let mut store = super::open_session_file(&path).await.unwrap();
         for message in round(n) {
             store.append_message(message).await.unwrap();
         }
@@ -892,7 +892,7 @@ pub(crate) async fn evaluate(provider: Arc<dyn Provider>, model: &str, budget: C
         });
     }
     // The session, the model's answers included, passes every check when loaded again.
-    Transcript::read(&path).unwrap();
+    super::read_session_file(&path).unwrap();
     Evaluation { rounds, facts }
 }
 

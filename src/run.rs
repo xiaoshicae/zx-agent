@@ -16,7 +16,7 @@ use zx_agent::runner::{RunOutcome, RunReport};
 use crate::cli::{self, OutputMode, RunArgs};
 use crate::process::{EXIT_DENIED, JsonlEvents, exit_code, print_line, run_sink, spawn_signal_handler, with_telemetry};
 use crate::render::{answer_end_line, progress_line, visible};
-use crate::session_files::SessionFile;
+use crate::session_files::{SessionChoice, SessionPlace};
 
 /// Run one task and return its exit code. An `Err` is a configuration problem found
 /// before the run started.
@@ -24,7 +24,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<u8> {
     let RunArgs {
         prompt,
         fail_on_denied,
-        session,
+        session: session_file,
         base,
         budget,
         output,
@@ -35,11 +35,11 @@ pub(crate) async fn run(args: RunArgs) -> Result<u8> {
         Some(prompt) => Some(read_prompt(prompt)?),
         None => {
             // Checked before anything starts: continuing a new session has nothing to answer.
-            let session = session.as_deref().context("--continue needs --session")?;
+            let file = session_file.as_deref().context("--continue needs --session")?;
             anyhow::ensure!(
-                session.exists(),
+                file.exists(),
                 "--continue needs an existing session file; {} does not exist",
-                session.display()
+                file.display()
             );
             None
         }
@@ -48,14 +48,14 @@ pub(crate) async fn run(args: RunArgs) -> Result<u8> {
         let shared = cli::Shared::connect(base, budget, Builtin::Unattended)
             .await?
             .with_traces(telemetry.map(run_sink));
-        let session = build_session(&shared, session.as_deref(), output, deltas).await?;
+        let session = build_session(&shared, session_file.as_deref(), output, deltas).await?;
         let cancel = CancellationToken::new();
         spawn_signal_handler(cancel.clone());
         let report = match prompt {
             Some(prompt) => session.prompt(prompt, &cancel).await?,
             None => session.continue_run(&cancel).await?,
         };
-        print_report(&report, output);
+        print_report(&report, output, session_file.as_deref());
         Ok(match report.outcome {
             RunOutcome::Completed if fail_on_denied && report.denied_calls > 0 => EXIT_DENIED,
             outcome => exit_code(outcome),
@@ -88,7 +88,11 @@ async fn build_session(
     output: OutputMode,
     deltas: bool,
 ) -> Result<AgentSession> {
-    let prepared = cli::prepare(shared, &shared.settings.model, None, SessionFile::from_path(session)).await?;
+    // `--session` continues the session its file holds, or starts the file.
+    let place = SessionPlace::file_or_memory(session);
+    let existing = place.only().await?;
+    let choice = SessionChoice::existing_or_new(existing.as_deref());
+    let prepared = cli::prepare(shared, &shared.settings.model, None, &place, choice).await?;
     let sink: Arc<dyn EventSink> = match output {
         OutputMode::Text => Arc::new(TextProgress),
         OutputMode::Jsonl => Arc::new(JsonlEvents { deltas }),
@@ -96,7 +100,9 @@ async fn build_session(
     prepared.into_session(sink)
 }
 
-fn print_report(report: &RunReport, output: OutputMode) {
+/// The answer on stdout and a summary line on stderr, which names `session`, the session
+/// file, when there is one.
+fn print_report(report: &RunReport, output: OutputMode, session: Option<&Path>) {
     match output {
         OutputMode::Text => {
             if !report.final_text.is_empty() {
@@ -121,10 +127,8 @@ fn print_report(report: &RunReport, output: OutputMode) {
                 .total_cost
                 .map(|cost| format!(" cost={cost:.4}"))
                 .unwrap_or_default();
-            let session = report
-                .session_file
-                .as_deref()
-                .map(|file| format!(" session={file}"))
+            let session = session
+                .map(|file| format!(" session={}", file.display()))
                 .unwrap_or_default();
             eprintln!(
                 "[zx-agent] outcome={:?} model_requests={} retries={} tokens={} (in {} / out {}){cost}{denied}{error}{session}",

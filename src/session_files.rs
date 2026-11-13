@@ -1,15 +1,17 @@
-//! Session files: where every mode opens or creates one, and where chat and acp keep and
-//! list them.
+//! Where every mode keeps its sessions, and how a listing shows them.
 //!
-//! As in pi (`getDefaultSessionDirPath`), each working directory has its own directory under
-//! the zx-agent home directory, which `ZX_AGENT_HOME` moves.
+//! As in pi (`getDefaultSessionDirPath`), each working directory has its own directory of
+//! session files under the zx-agent home directory, which `ZX_AGENT_HOME` moves.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 
 use zx_agent::config;
-use zx_agent::transcript::{self, SessionHeader, SessionInfo, SessionList, Transcript};
+use zx_agent::transcript::{
+    JsonlStorage, MemoryStorage, SessionHeader, SessionInfo, SessionList, SessionQuery, SessionStorage, Transcript,
+};
 
 use crate::render::{local_time, visible};
 
@@ -23,123 +25,133 @@ const SHORT_ID_CHARS: usize = 8;
 /// How a listing shows when a session was last active.
 const LISTING_TIME_FORMAT: &str = "%Y-%m-%d %H:%M";
 
-/// Where a mode keeps its session.
-#[derive(Clone, Copy)]
-pub(crate) enum SessionFile<'a> {
-    Memory,
-    Open(&'a Path),
-    Create(&'a Path),
-    /// A new file in this directory, named after the session ([`file_name`]); the directory
-    /// is created when missing.
-    NewIn(&'a Path),
+/// Where a mode keeps its sessions.
+pub(crate) enum SessionPlace {
+    /// `--no-session`: in memory, gone with the process.
+    Memory(MemoryStorage),
+    /// `--session`: one file, which holds one session.
+    File(JsonlStorage),
+    /// Session files under one directory, with a directory of its own for each working
+    /// directory.
+    Directory(JsonlStorage),
 }
 
-impl<'a> SessionFile<'a> {
-    pub(crate) fn from_path(path: Option<&'a Path>) -> Self {
-        match path {
-            Some(path) => Self::Open(path),
-            None => Self::Memory,
-        }
+/// Which session of a place a mode runs on.
+pub(crate) enum SessionChoice<'a> {
+    /// A new session, with these labels.
+    New(BTreeMap<String, String>),
+    /// The session with this ID.
+    Existing(&'a str),
+}
+
+impl<'a> SessionChoice<'a> {
+    /// The session `id`, or a new one without labels when there is none to continue.
+    pub(crate) fn existing_or_new(id: Option<&'a str>) -> Self {
+        id.map_or_else(|| Self::New(BTreeMap::new()), Self::Existing)
+    }
+}
+
+impl SessionPlace {
+    pub(crate) fn memory() -> Self {
+        Self::Memory(MemoryStorage::default())
     }
 
-    /// The session file, or for [`SessionFile::NewIn`] the directory it will be created in.
-    pub(crate) fn location(&self) -> Option<&'a Path> {
+    pub(crate) fn file(path: &Path) -> Self {
+        Self::File(JsonlStorage::file(path))
+    }
+
+    pub(crate) fn directory(root: &Path) -> Self {
+        Self::Directory(JsonlStorage::in_directory(root))
+    }
+
+    /// `--session`'s file, or memory without one.
+    pub(crate) fn file_or_memory(path: Option<&Path>) -> Self {
+        path.map_or_else(Self::memory, Self::file)
+    }
+
+    /// `sessions` in the zx-agent home directory (`ZX_AGENT_HOME`, else `~/.zx-agent`).
+    pub(crate) fn home() -> Result<Self> {
+        let home = config::home()?.context(
+            "cannot find the home directory for session files; set ZX_AGENT_HOME, or give --session or --no-session",
+        )?;
+        Ok(Self::directory(&home.join(SESSIONS_DIR)))
+    }
+
+    fn storage(&self) -> &dyn SessionStorage {
         match self {
-            Self::Memory => None,
-            Self::Open(path) | Self::Create(path) | Self::NewIn(path) => Some(path),
+            Self::Memory(storage) => storage,
+            Self::File(storage) | Self::Directory(storage) => storage,
         }
     }
-}
 
-/// The session `file` names when it exists already; opened before anything else is started,
-/// for its ID.
-pub(crate) fn open_existing(file: &SessionFile<'_>) -> Result<Option<Transcript>> {
-    Ok(match file {
-        SessionFile::Open(path) if path.exists() => Some(Transcript::open(path)?),
-        SessionFile::Memory | SessionFile::Open(_) | SessionFile::Create(_) | SessionFile::NewIn(_) => None,
-    })
-}
-
-/// A new session with `header`, kept where `file` says.
-pub(crate) fn create(file: SessionFile<'_>, header: SessionHeader) -> Result<Transcript> {
-    Ok(match file {
-        SessionFile::Memory => Transcript::in_memory(header),
-        SessionFile::Open(path) | SessionFile::Create(path) => Transcript::create(path, header)?,
-        SessionFile::NewIn(dir) => {
-            create_dir(dir)?;
-            Transcript::create(&dir.join(file_name(&header)), header)?
+    fn files(&self) -> Option<&JsonlStorage> {
+        match self {
+            Self::Memory(_) => None,
+            Self::File(storage) | Self::Directory(storage) => Some(storage),
         }
-    })
-}
+    }
 
-/// `sessions/--<cwd>--` in the zx-agent home directory (`ZX_AGENT_HOME`, else `~/.zx-agent`).
-pub(crate) fn default_dir(cwd: &Path) -> Result<PathBuf> {
-    let home = config::home()?.context(
-        "cannot find the home directory for session files; set ZX_AGENT_HOME, or give --session or --no-session",
-    )?;
-    Ok(dir_in(&home, cwd))
-}
+    /// Where the sessions started in `cwd` are kept: the session file, or the directory of
+    /// that working directory's files; `None` in memory.
+    pub(crate) fn location(&self, cwd: &Path) -> Option<PathBuf> {
+        self.files().map(|files| files.location(cwd))
+    }
 
-/// `sessions/--<cwd>--` in `home`, with the separators of `cwd` turned into `-` as pi does, so
-/// one directory holds one working directory's sessions.
-fn dir_in(home: &Path, cwd: &Path) -> PathBuf {
-    let path = cwd.display().to_string();
-    let encoded: String = path
-        .strip_prefix(['/', '\\'])
-        .unwrap_or(&path)
-        .chars()
-        .map(|c| if matches!(c, '/' | '\\' | ':') { '-' } else { c })
-        .collect();
-    home.join(SESSIONS_DIR).join(format!("--{encoded}--"))
-}
+    /// The file of session `id`; `None` in memory.
+    pub(crate) async fn path_of(&self, id: &str) -> Result<Option<PathBuf>> {
+        match self.files() {
+            Some(files) => files.path_of(id).await,
+            None => Ok(None),
+        }
+    }
 
-/// Create `dir` and its missing parents, readable only by this user on Unix: session files
-/// hold the conversation and tool output. Existing directories keep their permissions.
-fn create_dir(dir: &Path) -> Result<()> {
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    builder
-        .create(dir)
-        .with_context(|| format!("cannot create the session directory {}", dir.display()))
-}
+    /// The sessions `query` asks for, most recently active first.
+    pub(crate) async fn list(&self, query: &SessionQuery) -> Result<SessionList> {
+        self.storage().list(query).await
+    }
 
-/// `<UTC time>_<session ID>.jsonl`, as pi names them: sorted by name they are in the order
-/// they were started, and the ID in the name is the one `--resume` takes.
-fn file_name(header: &SessionHeader) -> String {
-    let time = i64::try_from(header.timestamp)
-        .ok()
-        .and_then(chrono::DateTime::from_timestamp_millis)
-        // A clock beyond the year 262143 cannot occur; the ID alone still names the file uniquely.
-        .map(|utc| utc.format("%Y-%m-%dT%H-%M-%S-%3fZ_").to_string())
-        .unwrap_or_default();
-    format!("{time}{}.jsonl", header.id)
-}
+    /// The session a single file holds already; `None` for a file that does not exist yet,
+    /// and for a place that keeps more than one session. A file that cannot be read as a
+    /// session is an error.
+    pub(crate) async fn only(&self) -> Result<Option<String>> {
+        let Self::File(storage) = self else {
+            return Ok(None);
+        };
+        let list = storage.list(&SessionQuery::default()).await?;
+        if let Some(unreadable) = list.unreadable.first() {
+            bail!("{}", unreadable.error);
+        }
+        Ok(list.sessions.into_iter().next().map(|session| session.id))
+    }
 
-/// List the sessions in `dir`, reading files on a blocking thread.
-pub(crate) async fn list(dir: &Path) -> Result<SessionList> {
-    let read = dir.to_path_buf();
-    tokio::task::spawn_blocking(move || transcript::list_sessions(&read))
-        .await
-        .with_context(|| format!("listing the sessions in {} stopped", dir.display()))?
+    /// A new session with `header`.
+    pub(crate) async fn create(&self, header: SessionHeader) -> Result<Transcript> {
+        let log = self.storage().create(&header).await?;
+        Ok(Transcript::with_log(header, log))
+    }
+
+    /// Session `id`, loaded and open for appending. A record that cannot be loaded names
+    /// the session's file.
+    pub(crate) async fn open(&self, id: &str) -> Result<Transcript> {
+        let (loaded, log) = self.storage().open(id).await?;
+        match Transcript::load(loaded, log) {
+            Ok(session) => Ok(session),
+            Err(error) => Err(match self.path_of(id).await? {
+                Some(path) => anyhow!("{}: {error:#}", path.display()),
+                None => error.context(format!("cannot load session {id}")),
+            }),
+        }
+    }
 }
 
 /// One line per session: short ID, last activity in local time, message count and the
-/// session's name, else its first prompt; sessions started elsewhere name their working
-/// directory.
-pub(crate) fn lines(list: &SessionList, cwd: &Path) -> Vec<String> {
-    let cwd = cwd.display().to_string();
+/// session's name, else its first prompt.
+pub(crate) fn lines(list: &SessionList) -> Vec<String> {
     list.sessions
         .iter()
         .map(|session| {
-            let elsewhere = if session.cwd == cwd {
-                String::new()
-            } else {
-                format!("  (cwd {})", visible(&session.cwd))
-            };
             format!(
-                "{}  {}  {:>3} message(s)  {}{elsewhere}",
+                "{}  {}  {:>3} message(s)  {}",
                 short_id(&session.id),
                 local_time(session.last_activity_ms, LISTING_TIME_FORMAT).unwrap_or_else(|| "-".to_string()),
                 session.messages,
@@ -174,30 +186,14 @@ pub(crate) fn preview_text(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use zx_agent::ai::Message;
     use zx_agent::transcript::SessionName;
 
     use super::*;
 
     #[test]
-    fn the_default_directory_names_the_working_directory_as_pi_does() {
-        let dir = dir_in(Path::new("/home/me/.zx-agent"), Path::new("/Users/me/work:repo"));
-        assert_eq!(dir, Path::new("/home/me/.zx-agent/sessions/--Users-me-work-repo--"));
-    }
-
-    #[test]
-    fn file_names_start_with_the_utc_time_and_end_with_the_session_id() {
-        let header = SessionHeader {
-            timestamp: 1_762_300_000_123,
-            id: "0b7c".into(),
-            ..SessionHeader::new(Path::new("/w"), "m")
-        };
-        assert_eq!(file_name(&header), "2025-11-04T23-46-40-123Z_0b7c.jsonl");
-    }
-
-    #[test]
     fn a_preview_shows_the_first_line_and_marks_what_it_leaves_out() {
         let session = |prompt: Option<&str>| SessionInfo {
-            path: PathBuf::new(),
             id: String::new(),
             cwd: String::new(),
             started_ms: 0,
@@ -205,6 +201,7 @@ mod tests {
             messages: 0,
             first_prompt: prompt.map(str::to_string),
             name: None,
+            labels: BTreeMap::new(),
         };
         assert_eq!(preview(&session(Some("fix the build"))), "fix the build");
         assert_eq!(preview(&session(Some("\nfirst\nsecond"))), "first…");
@@ -218,5 +215,65 @@ mod tests {
             ..session(Some("fix the build"))
         };
         assert_eq!(preview(&named), format!("{}…", "名".repeat(60)));
+    }
+
+    #[tokio::test]
+    async fn a_single_file_holds_its_session_once_it_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.jsonl");
+        let place = SessionPlace::file(&path);
+        assert_eq!(place.only().await.unwrap(), None);
+        assert_eq!(place.location(Path::new("/w")), Some(path.clone()));
+
+        let header = SessionHeader::new(Path::new("/w"), "m");
+        let mut session = place.create(header.clone()).await.unwrap();
+        session.append_message(Message::user("q")).await.unwrap();
+        drop(session);
+
+        assert_eq!(place.only().await.unwrap(), Some(header.id.clone()));
+        assert_eq!(place.path_of(&header.id).await.unwrap(), Some(path));
+        assert_eq!(place.open(&header.id).await.unwrap().messages().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_file_that_is_not_a_session_is_an_error_that_names_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.jsonl");
+        std::fs::write(&path, "not json\n").unwrap();
+
+        let error = SessionPlace::file(&path).only().await.unwrap_err();
+
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("invalid session header") && text.contains("run.jsonl"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_record_that_cannot_be_loaded_names_the_session_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.jsonl");
+        let place = SessionPlace::file(&path);
+        let header = SessionHeader::new(Path::new("/w"), "m");
+        drop(place.create(header.clone()).await.unwrap());
+        let orphan = r#"{"type":"message","id":"a","parentId":"missing","timestamp":1,"message":{"role":"user","content":"q","timestamp":1}}"#;
+        std::fs::write(&path, format!("{}{orphan}\n", std::fs::read_to_string(&path).unwrap())).unwrap();
+
+        let error = place.open(&header.id).await.err().unwrap().to_string();
+
+        assert!(error.starts_with(&format!("{}: entry 1: ", path.display())), "{error}");
+    }
+
+    #[tokio::test]
+    async fn memory_has_no_location() {
+        let place = SessionPlace::memory();
+        let header = SessionHeader::new(Path::new("/w"), "m");
+        drop(place.create(header.clone()).await.unwrap());
+
+        assert_eq!(place.location(Path::new("/w")), None);
+        assert_eq!(place.path_of(&header.id).await.unwrap(), None);
+        assert_eq!(place.only().await.unwrap(), None);
+        assert_eq!(place.list(&SessionQuery::default()).await.unwrap().sessions.len(), 1);
     }
 }

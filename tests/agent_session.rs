@@ -355,7 +355,7 @@ async fn the_reasoning_level_changes_between_prompts_and_is_recorded_for_the_aud
     let mut loop_config = config(provider.clone(), vec![]);
     loop_config.reasoning = Some(Reasoning::Low);
     let (runner, _) = RunnerSetup {
-        session: Transcript::create(&file, header()).unwrap(),
+        session: common::create_session_file(&file, header()).await.unwrap(),
         ..RunnerSetup::new(loop_config)
     }
     .build();
@@ -370,7 +370,7 @@ async fn the_reasoning_level_changes_between_prompts_and_is_recorded_for_the_aud
     let sent: Vec<Option<Reasoning>> = provider.requests().iter().map(|request| request.reasoning).collect();
     assert_eq!(sent, [Some(Reasoning::Low), Some(Reasoning::High), None]);
     // Each change is a new request configuration, and every request rebuilds as sent.
-    let store = Transcript::read(&file).unwrap();
+    let store = common::read_session_file(&file).unwrap();
     let ids: Vec<String> = store
         .entries()
         .iter()
@@ -630,7 +630,7 @@ async fn switching_models_keeps_the_session_header_and_append_only_history() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("session.jsonl");
     let provider = Arc::new(FauxProvider::new([FauxStep::text("one")]));
-    let store = Transcript::create(&file, header()).unwrap();
+    let store = common::create_session_file(&file, header()).await.unwrap();
     let (runner, _) = RunnerSetup {
         session: store,
         ..RunnerSetup::new(config(provider, vec![]))
@@ -653,7 +653,7 @@ async fn switching_models_keeps_the_session_header_and_append_only_history() {
     );
     session.prompt("second", &CancellationToken::new()).await.unwrap();
     assert!(std::fs::read(&file).unwrap().starts_with(&before));
-    let reopened = Transcript::read(&file).unwrap();
+    let reopened = common::read_session_file(&file).unwrap();
     assert_eq!(reopened.header().model, "test-model");
     assert!(
         matches!(reopened.messages().last(), Some(zx_agent::ai::Message::Assistant(message)) if message.model == "new-model")
@@ -664,7 +664,7 @@ async fn switching_models_keeps_the_session_header_and_append_only_history() {
 async fn subscriber_callbacks_see_messages_only_after_the_single_audit_write() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("session.jsonl");
-    let store = Transcript::create(&file, header()).unwrap();
+    let store = common::create_session_file(&file, header()).await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let (runner, _) = RunnerSetup {
         session: store,
@@ -679,7 +679,7 @@ async fn subscriber_callbacks_see_messages_only_after_the_single_audit_write() {
         let observed = observed.clone();
         subscriptions.push(session.subscribe(Arc::new(move |event: &Event| {
             if let EventKind::MessageEnd { message, .. } = &event.event {
-                let stored = Transcript::read(&file).unwrap();
+                let stored = common::read_session_file(&file).unwrap();
                 assert_eq!(stored.messages().last(), Some(message));
                 observed.fetch_add(1, Ordering::SeqCst);
             }
@@ -687,7 +687,7 @@ async fn subscriber_callbacks_see_messages_only_after_the_single_audit_write() {
     }
     session.prompt("go", &CancellationToken::new()).await.unwrap();
     assert_eq!(observed.load(Ordering::SeqCst), 4);
-    assert_eq!(Transcript::read(&file).unwrap().messages().len(), 2);
+    assert_eq!(common::read_session_file(&file).unwrap().messages().len(), 2);
 }
 
 /// Refuses every record, like a database that no longer accepts writes.

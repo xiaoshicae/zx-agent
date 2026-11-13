@@ -99,7 +99,7 @@ mod tests {
     use super::*;
     use crate::ai::Message;
     use crate::transcript::SESSION_VERSION;
-    use crate::transcript::test_support::{assistant, header, texts};
+    use crate::transcript::test_support::{assistant, create_file, header, open_file, texts};
 
     fn name(text: &str) -> SessionName {
         SessionName::new(text).unwrap()
@@ -137,7 +137,7 @@ mod tests {
     async fn a_name_is_written_as_a_session_info_record_and_reopens() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
-        let mut store = Transcript::create(&path, header()).unwrap();
+        let mut store = create_file(&path, header()).await.unwrap();
         let question = store.append_message(Message::user("q")).await.unwrap();
         let id = store.append_session_name(name("排查 nginx 502")).await.unwrap();
         drop(store);
@@ -152,12 +152,12 @@ mod tests {
                 r#"{{"type":"session_info","id":"{id}","parentId":"{question}","timestamp":{timestamp},"name":"排查 nginx 502"}}"#
             )
         );
-        let reopened = Transcript::open(&path).unwrap();
+        let reopened = open_file(&path).await.unwrap();
         assert_eq!(reopened.session_name().map(SessionName::as_str), Some("排查 nginx 502"));
     }
 
-    #[test]
-    fn opening_refuses_a_name_that_could_not_have_been_given() {
+    #[tokio::test]
+    async fn opening_refuses_a_name_that_could_not_have_been_given() {
         let dir = tempfile::tempdir().unwrap();
         for stored in [" padded", "two\nlines", ""] {
             let path = dir.path().join("s.jsonl");
@@ -167,7 +167,8 @@ mod tests {
                 "name": stored});
             std::fs::write(&path, format!("{header}\n{record}\n")).unwrap();
 
-            let error = Transcript::open(&path)
+            let error = open_file(&path)
+                .await
                 .err()
                 .unwrap_or_else(|| panic!("{stored:?} was accepted"));
             assert!(

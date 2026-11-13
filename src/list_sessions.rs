@@ -3,31 +3,39 @@
 
 use anyhow::Result;
 
+use zx_agent::transcript::SessionQuery;
+
 use crate::cli::{SessionsArgs, resolve_cwd};
 use crate::process::{EXIT_COMPLETED, print_line};
 use crate::render::visible;
-use crate::session_files;
+use crate::session_files::{self, SessionPlace};
 
-/// List the sessions on stdout, newest first; the directory and the files that could not be
-/// read go to stderr.
+/// List the sessions started in the working directory on stdout, newest first; their
+/// directory and the files in it that could not be read go to stderr.
 pub(crate) async fn run(args: SessionsArgs) -> Result<u8> {
     let cwd = resolve_cwd(args.cwd.as_deref())?;
-    let dir = session_files::default_dir(&cwd)?;
-    let list = session_files::list(&dir).await?;
-    for line in session_files::lines(&list, &cwd) {
+    let place = SessionPlace::home()?;
+    let list = place
+        .list(&SessionQuery {
+            cwd: Some(cwd.clone()),
+            ..SessionQuery::default()
+        })
+        .await?;
+    for line in session_files::lines(&list) {
         print_line(&line);
     }
     for unreadable in &list.unreadable {
         eprintln!(
             "[sessions] cannot read {}: {}",
-            visible(&unreadable.path.display().to_string()),
+            visible(&unreadable.location),
             visible(&unreadable.error)
         );
     }
+    let directory = place.location(&cwd).unwrap_or_default();
     eprintln!(
         "[sessions] {} session(s) in {}",
         list.sessions.len(),
-        visible(&dir.display().to_string())
+        visible(&directory.display().to_string())
     );
     Ok(EXIT_COMPLETED)
 }

@@ -44,7 +44,7 @@ async fn custom_messages_join_the_projection_as_user_messages_and_custom_entries
 async fn custom_records_are_written_with_camel_case_fields_and_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
-    let mut store = Transcript::create(&path, header()).unwrap();
+    let mut store = common::create_session_file(&path, header()).await.unwrap();
     store.append_message(Message::user("first")).await.unwrap();
     store.append_custom_entry("state", json!(1)).await.unwrap();
     store.append_custom_message(note("remember")).await.unwrap();
@@ -67,7 +67,7 @@ async fn custom_records_are_written_with_camel_case_fields_and_reopen() {
         (Some("note"), Some("remember"), Some(true), Some(1))
     );
     assert_eq!(lines[3]["parentId"], lines[2]["id"]);
-    let reopened = Transcript::open(&path).unwrap();
+    let reopened = common::open_session_file(&path).await.unwrap();
     assert_eq!(summarize(&reopened.messages()), ["user:first", "user:remember"]);
 }
 

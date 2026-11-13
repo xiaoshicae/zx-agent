@@ -36,6 +36,17 @@ fn im(dir: &Path, config: &Path, model: &str) -> Command {
     command
 }
 
+/// The text of the one session file kept under `sessions`.
+fn only_session(sessions: &Path) -> String {
+    let files: Vec<_> = std::fs::read_dir(sessions)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .flat_map(|directory| common::session_files(&directory))
+        .collect();
+    assert_eq!(files.len(), 1, "{files:?}");
+    std::fs::read_to_string(&files[0]).unwrap()
+}
+
 fn write_config(dir: &Path, text: &str) -> std::path::PathBuf {
     let path = dir.join("im.toml");
     std::fs::write(&path, text).unwrap();
@@ -191,8 +202,13 @@ async fn im_answers_a_mention_with_an_approved_command_that_cannot_see_the_slack
     assert!(result.contains("[REDACTED]"), "{result}");
     assert!(!result.contains(APP_TOKEN) && !result.contains(BOT_TOKEN), "{result}");
 
-    let session = dir.path().join("sessions/slack/C1/1700000001%2E000100/1.jsonl");
-    let recorded = std::fs::read_to_string(&session).unwrap();
+    // Whatever its file is called, the session's labels say which conversation it is.
+    let recorded = only_session(&dir.path().join("sessions"));
+    let header: Value = serde_json::from_str(recorded.lines().next().unwrap()).unwrap();
+    assert_eq!(
+        header["labels"],
+        json!({"im.conversation": "C1", "im.platform": "slack", "im.thread": "1700000001.000100"})
+    );
     assert!(recorded.contains("run it"));
     assert!(!recorded.contains(BOT_TOKEN));
 

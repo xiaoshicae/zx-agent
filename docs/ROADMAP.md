@@ -27,7 +27,7 @@
 | D12 | chat 不给 `--session` 时把会话存到主目录的 `sessions/--<工作目录>--/<UTC 时间>_<会话 ID>.jsonl`（新建的目录 0700、文件 0600），`--no-session` 只存在内存；`run` 只在给出 `--session` 时写文件 |
 | D13 | 界面交给 ACP 客户端：`acp` 只实现 agent 一侧；`chat` 冻结为应急与脚本化入口，不再加功能；`run` 保留并维护 |
 | D14 | 不做 rpc 模式：非 Rust 宿主经 ACP，无人值守经 `run`，常驻服务经 `im` 与 SDK |
-| D15 | 只读写当前会话格式（`SESSION_VERSION` 为 9），其他版本的会话一律拒绝打开；格式变化时提高版本号，不写升级代码 |
+| D15 | 只读写当前会话格式（`SESSION_VERSION` 为 10），其他版本的会话一律拒绝创建与加载；格式变化时提高版本号，不写升级代码 |
 | D16 | IM 按人的对话直觉：私聊整段一个会话，群聊一个线程一个会话；机器人参与过的线程里不 @ 它的消息只记作上下文，刚被它回答的人接着说不必 @；不读频道历史，不加开关。细节见 README 的“IM 服务” |
 | D17 | `config.toml` 是环境，agent 文件是角色，都在主目录（`~/.zx-agent`，`ZX_AGENT_HOME` 可改）；agent 的 front matter 用 TOML。没有项目级配置文件，项目内容不能改变环境或权限；主目录的 `agents/<名字>.md` 替换同名内置 agent，没有 `--agent`；权限用 ask / allow / deny。键与规则见 [CONFIGURATION.md](CONFIGURATION.md) |
 | D18 | 没有命令白名单、幂等键与增量摘要；摘要只用全量模式，摘要源上限 2 MiB，超过后要 `/new` 开新会话 |
@@ -46,7 +46,7 @@ P0–P5 与 P10–P14（P10 为与 pi 的能力对齐）已完成。进行中：
 - P8 `acp`：已实现，待在 Zed 或 Wisp 上实测。
 - P9 可选增强：剩更多 provider。
 - P15 IM 对话模型（D16）：Slack 实现了读线程、查名字与回执；⚑ D:5/CHINA FLAG: 飞书只做消息分类，这三项沿用默认（不读历史、用 open_id、不回执），待按需补上。待在真实 Slack 工作区验证线程回复事件带 `thread_ts`（官方事件页未写明）。
-- P16 入口与接口重整：目标是 `Agent`、`Session`、`Run` 三个入口对象；模型、工具、会话存储、权限策略、钩子各有接口并可替换，摘要可选替换；命令行从库中拆出。要点：`Run` 由调用方驱动（读它才推进，丢弃即取消），事件经有界通道，是事件的唯一出口；审批由内核的 `ApprovalGate` 等待 `Session::resolve_approval`，默认没有人回答；属于单个会话的工具、钩子与提示词段落由 `SessionSetup` 在创建或打开会话时装配；公开路径按域（`tools`、`policy`、`hooks`、`transcript` 等），crate 根部只留入口对象。分七期，每期四条命令全部通过后再进入下一期：① 改名与模块重组（D23），已完成；② `ToolPolicy` 移入内核，钩子不再做放行判断，已完成；③ 修正前两期：按域导出（内核根部只留 `AgentSession` 与 `CancelSignal`，`zx-tools` 在 `zx_agent::builtin`）、事件的发送移入 `runner`、新增 `guard`、`InputQueues`，已完成；④ `SessionStorage` 接口、`JsonlStorage` 与 `MemoryStorage`，存储类型不含文件路径，会话标签；⑤ 入口：`Run` 取代 `EventSink`，`ApprovalGate` 取代 `Interaction`，`Agent`、`AgentConfig`、`SessionSetup`（届时更新 D21）；⑥ 可选的 `Summarizer`，标签与 actor 交给策略与钩子；⑦ 拆出 `zx-cli`。
+- P16 入口与接口重整：目标是 `Agent`、`Session`、`Run` 三个入口对象；模型、工具、会话存储、权限策略、钩子各有接口并可替换，摘要可选替换；命令行从库中拆出。要点：`Run` 由调用方驱动（读它才推进，丢弃即取消），事件经有界通道，是事件的唯一出口；审批由内核的 `ApprovalGate` 等待 `Session::resolve_approval`，默认没有人回答；属于单个会话的工具、钩子与提示词段落由 `SessionSetup` 在创建或打开会话时装配；公开路径按域（`tools`、`policy`、`hooks`、`transcript` 等），crate 根部只留入口对象。分七期，每期四条命令全部通过后再进入下一期：① 改名与模块重组（D23），已完成；② `ToolPolicy` 移入内核，钩子不再做放行判断，已完成；③ 修正前两期：按域导出（内核根部只留 `AgentSession` 与 `CancelSignal`，`zx-tools` 在 `zx_agent::builtin`）、事件的发送移入 `runner`、新增 `guard`、`InputQueues`，已完成；④ `SessionStorage` 接口、`JsonlStorage` 与 `MemoryStorage`，存储类型不含文件路径，会话标签（会话格式版本 10；`sessions` 与 `--resume` 只列出在该工作目录开始的会话；IM 的会话按标签 `im.platform`、`im.conversation`、`im.thread` 查找，不再按目录；JSONL 文件的尾记录改在追加下一条记录之前截掉），已完成；⑤ 入口：`Run` 取代 `EventSink`，`ApprovalGate` 取代 `Interaction`，`Agent`、`AgentConfig`、`SessionSetup`（届时更新 D21）；⑥ 可选的 `Summarizer`，标签与 actor 交给策略与钩子；⑦ 拆出 `zx-cli`。
 
 ## 5. 待办与已知缺口
 
@@ -92,4 +92,4 @@ P0–P5 与 P10–P14（P10 为与 pi 的能力对齐）已完成。进行中：
 
 ---
 
-ROADMAP.md · v0.17 · 2026年11月
+ROADMAP.md · v0.18 · 2026年11月

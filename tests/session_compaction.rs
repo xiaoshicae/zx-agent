@@ -336,7 +336,7 @@ async fn an_invalid_plan_writes_nothing() {
 async fn duplicate_ids_and_unknown_records_are_rejected_without_modifying_the_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session.jsonl");
-    let mut store = Transcript::create(&path, header()).unwrap();
+    let mut store = common::create_session_file(&path, header()).await.unwrap();
     let (id, _) = seeded(&mut store).await;
     drop(store);
     let prefix = std::fs::read_to_string(&path).unwrap();
@@ -347,7 +347,7 @@ async fn duplicate_ids_and_unknown_records_are_rejected_without_modifying_the_fi
     ] {
         let content = format!("{prefix}{bad}\n");
         std::fs::write(&path, &content).unwrap();
-        assert!(Transcript::open(&path).is_err());
+        assert!(common::open_session_file(&path).await.is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
     }
 }

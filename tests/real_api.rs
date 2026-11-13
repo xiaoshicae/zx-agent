@@ -50,7 +50,6 @@ use zx_agent::compaction::{Config, Outcome};
 use zx_agent::policy::PolicyDecision;
 use zx_agent::prompt::build_system_prompt;
 use zx_agent::runner::{RunLimits, RunOutcome, RunReport};
-use zx_agent::transcript::Transcript;
 
 const PAID: &str = "calls a paid model API; needs ZX_E2E_AUTHORIZED=1 and the API owner's consent";
 
@@ -237,7 +236,7 @@ async fn a_resumed_session_gives_the_model_the_new_environment() {
     let first_dir = dir.path().join("first-dir");
     std::fs::create_dir(&first_dir).unwrap();
     let (mut runner, _) = RunnerSetup {
-        session: Transcript::create(&path, common::header()).unwrap(),
+        session: common::create_session_file(&path, common::header()).await.unwrap(),
         ..endpoint.setup(endpoint.api_key(), &first_dir)
     }
     .build();
@@ -248,7 +247,7 @@ async fn a_resumed_session_gives_the_model_the_new_environment() {
     let second_dir = dir.path().join("second-dir");
     std::fs::create_dir(&second_dir).unwrap();
     let (mut runner, _) = RunnerSetup {
-        session: Transcript::open(&path).unwrap(),
+        session: common::open_session_file(&path).await.unwrap(),
         ..endpoint.setup(endpoint.api_key(), &second_dir)
     }
     .build();

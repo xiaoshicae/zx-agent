@@ -6,7 +6,7 @@
 //! it, named in brackets where it uses any:
 //!
 //! - [`transcript`]: the append-only record tree of a session, every record's format and
-//!   rules, and the projection the model sees (pi: SessionManager)
+//!   rules, the projection the model sees, and where sessions are kept (pi: SessionManager)
 //! - [`events`]: what a run emits, and the envelope of each event
 //! - `guard`: a run's cancellation as host code sees it ([`CancelSignal`]), and the bound on
 //!   every call into host code
@@ -63,7 +63,7 @@
 //!     a failed answer)
 //! - **Session names**
 //!   - records: `transcript/name.rs` (the `session_info` record, the latest name),
-//!     `transcript/directory.rs` (the name a listing shows)
+//!     `transcript/storage.rs` (the name a listing shows)
 //!   - acts: `agent_session.rs` (naming a session while idle)
 //! - **Tool policies and approval**
 //!   - records: none; verdicts and approvals are not recorded
@@ -85,9 +85,10 @@
 //! Embedders start with [`AgentSession`], or with [`runner::Runner`], its exclusive half, when
 //! one owner runs every prompt. The extension interfaces are [`tools::Tool`],
 //! [`policy::ToolPolicy`], [`policy::Interaction`], [`hooks::Hook`],
-//! [`extensions::Extension`], [`events::EventSink`] and [`transcript::SessionLog`]. The
-//! built-in tools, executors, policies and hooks live in the `zx-tools` crate, providers in
-//! crates such as `zx-ai-openai`.
+//! [`extensions::Extension`], [`events::EventSink`], and [`transcript::SessionStorage`] with
+//! its [`transcript::SessionLog`]. The storages for session files and for memory ship with
+//! the kernel; the built-in tools, executors, policies and hooks live in the `zx-tools`
+//! crate, providers in crates such as `zx-ai-openai`.
 
 // The modules name the model layer and the shared helpers by these crate-root paths.
 use zx_ai::{self as ai, sync};

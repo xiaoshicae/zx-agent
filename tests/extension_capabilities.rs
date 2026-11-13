@@ -22,7 +22,7 @@ use zx_agent::hooks::{Hook, HookContext, HookResult};
 use zx_agent::input::{Input, QueueMode};
 use zx_agent::runner::{LoopConfig, RunOutcome};
 use zx_agent::tools::ToolOutput;
-use zx_agent::transcript::{CustomMessage, Entry, Transcript};
+use zx_agent::transcript::{CustomMessage, Entry};
 
 fn note(text: &str) -> CustomMessage {
     CustomMessage {
@@ -33,9 +33,9 @@ fn note(text: &str) -> CustomMessage {
     }
 }
 
-fn session_in(file: &Path, config: LoopConfig) -> (AgentSession, Arc<common::Collect>) {
+async fn session_in(file: &Path, config: LoopConfig) -> (AgentSession, Arc<common::Collect>) {
     let (runner, events) = RunnerSetup {
-        session: Transcript::create(file, header()).unwrap(),
+        session: common::create_session_file(file, header()).await.unwrap(),
         ..RunnerSetup::new(config)
     }
     .build();
@@ -43,7 +43,7 @@ fn session_in(file: &Path, config: LoopConfig) -> (AgentSession, Arc<common::Col
 }
 
 fn kinds(file: &Path) -> Vec<&'static str> {
-    Transcript::read(file)
+    common::read_session_file(file)
         .unwrap()
         .entries()
         .iter()
@@ -82,7 +82,7 @@ async fn a_hook_sends_the_model_a_message_and_records_state_during_the_run() {
     ]));
     let mut config = config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]);
     config.hooks.push(Reminder);
-    let (session, events) = session_in(&file, config);
+    let (session, events) = session_in(&file, config).await;
 
     let report = session.prompt("go", &CancellationToken::new()).await.unwrap();
 
@@ -96,7 +96,7 @@ async fn a_hook_sends_the_model_a_message_and_records_state_during_the_run() {
     let kinds = kinds(&file);
     let state = kinds.iter().position(|kind| *kind == "custom").unwrap();
     assert_eq!(kinds[state + 1], "custom_message", "{kinds:?}");
-    let reopened = Transcript::read(&file).unwrap();
+    let reopened = common::read_session_file(&file).unwrap();
     assert_eq!(
         summarize(&reopened.messages()),
         [
@@ -145,7 +145,7 @@ async fn state_recorded_during_the_last_events_is_kept_before_the_run_is_reporte
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let mut config = config(provider, vec![]);
     config.hooks.push(AtEnd);
-    let (session, events) = session_in(&file, config);
+    let (session, events) = session_in(&file, config).await;
 
     session.prompt("go", &CancellationToken::new()).await.unwrap();
 
@@ -170,7 +170,7 @@ async fn the_host_limits_the_tools_the_model_is_offered_and_the_audit_records_ea
         provider.clone(),
         vec![Arc::new(EchoTool::new("echo")), note_tool.clone()],
     );
-    let (session, _) = session_in(&file, config);
+    let (session, _) = session_in(&file, config).await;
 
     session.active_tools().set(["echo"]);
     session.prompt("go", &CancellationToken::new()).await.unwrap();
@@ -185,7 +185,7 @@ async fn the_host_limits_the_tools_the_model_is_offered_and_the_audit_records_ea
     session.prompt("more", &CancellationToken::new()).await.unwrap();
 
     assert_eq!(tool_names(&provider, 2), ["echo", "note"]);
-    let store = Transcript::read(&file).unwrap();
+    let store = common::read_session_file(&file).unwrap();
     let declared: Vec<Vec<String>> = store
         .entries()
         .iter()
@@ -291,7 +291,7 @@ async fn an_extension_command_runs_through_the_session_and_its_message_starts_a_
         })],
     )
     .unwrap();
-    let (session, _) = session_in(&file, config);
+    let (session, _) = session_in(&file, config).await;
     assert_eq!(session.commands().len(), 1);
     assert_eq!(session.commands()[0].description(), "Fetch an issue");
 
@@ -363,7 +363,7 @@ async fn an_idle_session_records_entries_and_messages_at_once_and_a_running_one_
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("session.jsonl");
     let provider = NotifyingProvider::new([FauxStep::Hang, FauxStep::text("ok")]);
-    let (session, _) = session_in(&file, config(provider.clone(), vec![]));
+    let (session, _) = session_in(&file, config(provider.clone(), vec![])).await;
 
     session.append_entry("state", json!({"n": 1})).await.unwrap();
     let id = session.append_custom_message(note("remember")).await.unwrap();
@@ -400,7 +400,7 @@ async fn an_idle_session_records_entries_and_messages_at_once_and_a_running_one_
         summarize(&provider.requests()[0].messages),
         ["user:remember", "user:go"]
     );
-    let store = Transcript::read(&file).unwrap();
+    let store = common::read_session_file(&file).unwrap();
     assert_eq!(store.projection()[0].entry_id, id);
 }
 

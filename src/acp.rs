@@ -40,11 +40,11 @@ use zx_agent::events::EventSink;
 use zx_agent::otel::Telemetry;
 use zx_agent::runner::{RunOutcome, RunReport};
 use zx_agent::sync::lock;
-use zx_agent::transcript::SessionInfo as StoredSession;
+use zx_agent::transcript::{SessionInfo as StoredSession, SessionQuery};
 
 use crate::cli::{self, AcpArgs, PreparedSession};
 use crate::process::{EXIT_COMPLETED, with_telemetry};
-use crate::session_files::{self, SessionFile};
+use crate::session_files::{self, SessionChoice, SessionPlace};
 
 use permissions::Permissions;
 use updates::Updates;
@@ -54,11 +54,12 @@ enum Located {
     /// A conversation this process holds: one the client created with `session/new`, loaded
     /// with `session/load` or resumed with `session/resume`.
     Live(Arc<AgentSession>),
-    File(PathBuf),
+    /// A session kept among the session files, which no session of this process has open.
+    Stored,
 }
 
-/// A session prepared on its file, with its updates, before it runs: `session/load` replays
-/// the file to the client in between.
+/// A session prepared, with its updates, before it runs: `session/load` replays the
+/// conversation to the client in between.
 struct Prepared {
     session: PreparedSession,
     updates: Arc<Updates>,
@@ -67,8 +68,9 @@ struct Prepared {
 
 struct Host {
     shared: cli::Shared,
-    /// `--no-session`: conversations stay in memory.
-    no_session: bool,
+    /// Where sessions are kept: the session files chat keeps too, or memory with
+    /// `--no-session`.
+    place: SessionPlace,
     /// Sessions by ID. Handlers run one at a time on the dispatch loop but prompts run in
     /// spawned tasks, so the map is shared; locks are short and never held across an await.
     sessions: Mutex<HashMap<String, Arc<AgentSession>>>,
@@ -79,40 +81,43 @@ impl Host {
         lock(&self.sessions).get(&*id.0).cloned()
     }
 
-    /// Where the sessions of `cwd` are kept: chat's directory for that working directory;
-    /// `None` with `--no-session`.
-    fn session_dir(&self, cwd: &Path) -> Result<Option<PathBuf>> {
-        if self.no_session {
+    /// The sessions started in `cwd` that are kept as files, with their directory; `None`
+    /// with `--no-session`, which keeps none.
+    async fn kept(&self, cwd: &Path) -> Result<Option<(Vec<StoredSession>, PathBuf)>> {
+        let Some(directory) = self.place.location(cwd) else {
             return Ok(None);
-        }
-        session_files::default_dir(&cli::resolve_cwd(Some(cwd))?).map(Some)
+        };
+        let query = SessionQuery {
+            cwd: Some(cwd.to_path_buf()),
+            ..SessionQuery::default()
+        };
+        Ok(Some((self.place.list(&query).await?.sessions, directory)))
     }
 
     /// Create a session for `cwd`, the client's project directory, which overrides `--cwd`.
-    /// Its file goes to the session directory, where `session/load` finds it again.
+    /// It is kept among the session files, where `session/load` finds it again.
     async fn create(&self, cx: &ConnectionTo<Client>, cwd: &Path) -> Result<SessionId> {
-        let dir = self.session_dir(cwd)?;
-        let file = match &dir {
-            Some(dir) => SessionFile::NewIn(dir),
-            None => SessionFile::Memory,
-        };
-        let prepared = self.prepare_session(cx, cwd, file).await?;
+        let prepared = self
+            .prepare_session(cx, cwd, SessionChoice::existing_or_new(None))
+            .await?;
         self.start(prepared)
     }
 
-    /// The session `id` for `cwd`: one this process holds, or the file it is kept in.
+    /// The session `id` for `cwd`: one this process holds, or one kept among the sessions
+    /// started in `cwd`.
     async fn locate(&self, id: &SessionId, cwd: &Path) -> Result<Located> {
         if let Some(live) = self.session(id) {
             return Ok(Located::Live(live));
         }
         let id = &*id.0;
-        let dir = self
-            .session_dir(cwd)?
+        let (sessions, directory) = self
+            .kept(&cli::resolve_cwd(Some(cwd))?)
+            .await?
             .ok_or_else(|| unknown_session(id, "the agent keeps no session files (--no-session)"))?;
-        let list = session_files::list(&dir).await?;
-        match list.sessions.iter().find(|session| session.id == id) {
-            Some(session) => Ok(Located::File(session.path.clone())),
-            None => Err(unknown_session(id, &format!("no such session in {}", dir.display())).into()),
+        if sessions.iter().any(|session| session.id == id) {
+            Ok(Located::Stored)
+        } else {
+            Err(unknown_session(id, &format!("no such session in {}", directory.display())).into())
         }
     }
 
@@ -129,8 +134,9 @@ impl Host {
                     .with_context(|| format!("cannot replay session {}", request.session_id.0))?;
                 Ok(request.session_id.clone())
             }
-            Located::File(path) => {
-                let prepared = self.prepare_session(cx, &request.cwd, SessionFile::Open(&path)).await?;
+            Located::Stored => {
+                let choice = SessionChoice::Existing(&request.session_id.0);
+                let prepared = self.prepare_session(cx, &request.cwd, choice).await?;
                 prepared.updates.replay(&prepared.session.store);
                 self.start(prepared)
             }
@@ -142,14 +148,15 @@ impl Host {
     async fn resume(&self, cx: &ConnectionTo<Client>, request: &ResumeSessionRequest) -> Result<SessionId> {
         match self.locate(&request.session_id, &request.cwd).await? {
             Located::Live(_) => Ok(request.session_id.clone()),
-            Located::File(path) => {
-                let prepared = self.prepare_session(cx, &request.cwd, SessionFile::Open(&path)).await?;
+            Located::Stored => {
+                let choice = SessionChoice::Existing(&request.session_id.0);
+                let prepared = self.prepare_session(cx, &request.cwd, choice).await?;
                 self.start(prepared)
             }
         }
     }
 
-    /// The sessions kept for `request.cwd`, or in the directory of the agent's own working
+    /// The sessions kept that were started in `request.cwd`, or in the agent's own working
     /// directory, most recently active first. A listing is one page, so a cursor is never
     /// one of ours.
     async fn list(&self, request: &ListSessionsRequest) -> Result<Vec<SessionInfo>> {
@@ -162,24 +169,24 @@ impl Host {
         }
         let cwd = request.cwd.as_deref().or(self.shared.base.cwd.as_deref());
         let cwd = cli::resolve_cwd(cwd)?;
-        let Some(dir) = self.session_dir(&cwd)? else {
-            return Ok(Vec::new());
-        };
-        let list = session_files::list(&dir).await?;
-        // Each session records its working directory; a listing for a cwd keeps its own.
-        let cwd = cwd.display().to_string();
-        Ok(list
-            .sessions
+        let kept = self.kept(&cwd).await?;
+        Ok(kept
             .iter()
-            .filter(|session| request.cwd.is_none() || session.cwd == cwd)
+            .flat_map(|(sessions, _)| sessions)
             .map(session_info)
             .collect())
     }
 
-    /// Prepare a session on `file` for `cwd`, with the client as its approver and the
-    /// receiver of its updates.
-    async fn prepare_session(&self, cx: &ConnectionTo<Client>, cwd: &Path, file: SessionFile<'_>) -> Result<Prepared> {
-        let mut session = cli::prepare(&self.shared, &self.shared.settings.model, Some(cwd), file).await?;
+    /// Prepare the session `choice` names for `cwd`, with the client as its approver and
+    /// the receiver of its updates.
+    async fn prepare_session(
+        &self,
+        cx: &ConnectionTo<Client>,
+        cwd: &Path,
+        choice: SessionChoice<'_>,
+    ) -> Result<Prepared> {
+        let model = &self.shared.settings.model;
+        let mut session = cli::prepare(&self.shared, model, Some(cwd), &self.place, choice).await?;
         let id = SessionId::new(session.store.header().id.as_str());
         session.require_bash_approval("the client must approve shell commands");
         session.config.interaction = Arc::new(Permissions {
@@ -209,7 +216,7 @@ impl Host {
     ) -> Result<(), Error> {
         responder.respond(
             InitializeResponse::new(request.protocol_version)
-                .agent_capabilities(agent_capabilities(!self.no_session))
+                .agent_capabilities(agent_capabilities(!matches!(self.place, SessionPlace::Memory(_))))
                 .agent_info(Implementation::new("zx-agent", env!("CARGO_PKG_VERSION"))),
         )
     }
@@ -314,9 +321,14 @@ async fn serve(args: AcpArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> 
     let shared = cli::Shared::connect(args.base, args.budget, Builtin::Assistant)
         .await?
         .with_traces(traces);
+    let place = if args.no_session {
+        SessionPlace::memory()
+    } else {
+        SessionPlace::home()?
+    };
     let host = Arc::new(Host {
         shared,
-        no_session: args.no_session,
+        place,
         sessions: Mutex::new(HashMap::new()),
     });
     let on_initialize = Arc::clone(&host);
@@ -503,7 +515,7 @@ mod tests {
             tool_usage: std::collections::BTreeMap::new(),
             denied_calls: 0,
             error: error.map(str::to_string),
-            session_file: None,
+            session_id: "session".into(),
         }
     }
 

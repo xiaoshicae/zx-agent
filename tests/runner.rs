@@ -120,7 +120,7 @@ async fn a_session_in_a_custom_log_reloads_and_continues_the_same_conversation()
     let report = runner.run("go", &CancellationToken::new()).await;
 
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
-    assert_eq!(report.session_file, None);
+    assert_eq!(report.session_id, runner.session().header().id);
     let rows: Vec<Row> = table.try_iter().collect();
     let seqs: Vec<u64> = rows.iter().map(|row| row.seq).collect();
     assert_eq!(seqs, (1..=u64::try_from(rows.len()).unwrap()).collect::<Vec<_>>());
@@ -458,7 +458,7 @@ async fn tool_result_details_are_recorded_and_survive_reopening_the_session() {
         FauxStep::text("done"),
     ]);
     let (mut runner, _) = RunnerSetup {
-        session: Transcript::create(&path, header()).unwrap(),
+        session: common::create_session_file(&path, header()).await.unwrap(),
         ..RunnerSetup::new(config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]))
     }
     .build();
@@ -472,7 +472,7 @@ async fn tool_result_details_are_recorded_and_survive_reopening_the_session() {
         .map(|line| line["message"]["details"].clone())
         .collect();
     assert_eq!(recorded, std::slice::from_ref(&details));
-    let reopened = Transcript::open(&path).unwrap();
+    let reopened = common::open_session_file(&path).await.unwrap();
     let kept = reopened.messages().into_iter().find_map(|message| match message {
         Message::ToolResult(result) => result.details,
         _ => None,
@@ -490,7 +490,7 @@ async fn tool_usage_is_reported_by_tool_recorded_in_the_file_and_left_out_of_the
         FauxStep::text("done"),
     ]);
     let (mut runner, _) = RunnerSetup {
-        session: Transcript::create(&path, header()).unwrap(),
+        session: common::create_session_file(&path, header()).await.unwrap(),
         // Two faux answers of 15 tokens fit; the tool's 150 would not, if they counted.
         limits: token_budget(16),
         ..RunnerSetup::new(config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]))
@@ -515,7 +515,7 @@ async fn tool_usage_is_reported_by_tool_recorded_in_the_file_and_left_out_of_the
         .map(|line| line["message"]["usage"].clone())
         .collect();
     assert_eq!(recorded, [usage]);
-    let reopened = Transcript::open(&path).unwrap();
+    let reopened = common::open_session_file(&path).await.unwrap();
     let kept = reopened.messages().into_iter().find_map(|message| match message {
         Message::ToolResult(result) => result.usage,
         _ => None,
@@ -533,7 +533,7 @@ async fn a_retried_failure_stays_in_the_file_but_leaves_the_context() {
     ]);
     let (mut runner, _) = RunnerSetup {
         retry: fast_retry(3),
-        session: Transcript::create(&path, header()).unwrap(),
+        session: common::create_session_file(&path, header()).await.unwrap(),
         ..setup(&provider)
     }
     .build();
@@ -906,7 +906,7 @@ async fn events_are_forwarded_after_persistence() {
     let path = dir.path().join("e.jsonl");
     let provider = provider([FauxStep::text("hi")]);
     let (mut runner, sink) = RunnerSetup {
-        session: Transcript::create(&path, header()).unwrap(),
+        session: common::create_session_file(&path, header()).await.unwrap(),
         ..setup(&provider)
     }
     .build();
@@ -948,7 +948,7 @@ async fn resumed_sessions_continue_the_conversation() {
     let path = dir.path().join("s.jsonl");
     let first = provider([FauxStep::text("nginx is down")]);
     let (mut runner, _) = RunnerSetup {
-        session: Transcript::create(&path, header()).unwrap(),
+        session: common::create_session_file(&path, header()).await.unwrap(),
         ..setup(&first)
     }
     .build();
@@ -957,7 +957,7 @@ async fn resumed_sessions_continue_the_conversation() {
 
     let second = provider([FauxStep::text("restart it")]);
     let (mut runner, _) = RunnerSetup {
-        session: Transcript::open(&path).unwrap(),
+        session: common::open_session_file(&path).await.unwrap(),
         ..setup(&second)
     }
     .build();
@@ -988,8 +988,8 @@ async fn run_with_environment(session: Transcript, started: &str) {
 async fn resumed_sessions_record_prompt_changes_in_the_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("p.jsonl");
-    run_with_environment(Transcript::create(&path, header()).unwrap(), "t1").await;
-    run_with_environment(Transcript::open(&path).unwrap(), "t2").await;
+    run_with_environment(common::create_session_file(&path, header()).await.unwrap(), "t1").await;
+    run_with_environment(common::open_session_file(&path).await.unwrap(), "t2").await;
 
     // Request checkpoints sit between messages; only message lines carry roles.
     let messages: Vec<Value> = read_lines(&path)

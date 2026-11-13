@@ -5,7 +5,8 @@ use std::sync::mpsc;
 use async_trait::async_trait;
 use futures::FutureExt;
 
-use super::test_support::{assistant, header, texts};
+use super::jsonl::JsonlFile;
+use super::test_support::{assistant, create_file, header, open_file, read_file, texts};
 use super::*;
 use crate::ai::{AssistantMessage, ContentBlock, StopReason, ToolCall, Usage};
 
@@ -57,7 +58,7 @@ async fn a_text_replacement_cannot_erase_tool_calls() {
 async fn opening_rejects_a_context_edit_of_a_system_message() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
-    let mut store = Transcript::create(&path, header()).unwrap();
+    let mut store = create_file(&path, header()).await.unwrap();
     let system = store
         .append_message(Message::System(crate::ai::SystemMessage {
             sections: vec![crate::ai::SectionChange {
@@ -83,7 +84,7 @@ async fn opening_rejects_a_context_edit_of_a_system_message() {
     writeln!(file, "{}", serde_json::to_string(&edit).unwrap()).unwrap();
     drop(file);
 
-    let error = Transcript::open(&path).err().expect("the edit must be refused");
+    let error = open_file(&path).await.err().expect("the edit must be refused");
 
     assert!(format!("{error:#}").contains("system message"), "{error:#}");
 }
@@ -271,9 +272,9 @@ async fn why_writes_stopped_can_be_told_apart() {
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
-    drop(Transcript::create(&path, header()).unwrap());
+    drop(create_file(&path, header()).await.unwrap());
     assert_eq!(
-        Transcript::read(&path).unwrap().writes_stopped(),
+        read_file(&path).await.unwrap().writes_stopped(),
         Some(&WritesStopped::ReadOnly)
     );
 }
@@ -346,7 +347,7 @@ impl Write for PartialWriteOnce {
 async fn a_partial_write_stops_later_writes_and_leaves_a_repairable_tail() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
-    let mut store = Transcript::create(&path, header()).unwrap();
+    let mut store = create_file(&path, header()).await.unwrap();
     store.append_message(Message::user("kept")).await.unwrap();
     drop(store);
     let file = OpenOptions::new().append(true).open(&path).unwrap();
@@ -363,7 +364,7 @@ async fn a_partial_write_stops_later_writes_and_leaves_a_repairable_tail() {
     assert!(later.is_err(), "an entry was written after a failed write");
     drop(store);
 
-    let reopened = Transcript::open(&path).unwrap();
+    let reopened = open_file(&path).await.unwrap();
     assert_eq!(reopened.incomplete_tail_bytes(), 10);
     assert_eq!(texts(&reopened), ["kept"]);
 }
@@ -373,8 +374,8 @@ fn unsupported(version: u32) -> String {
     format!("session format version {version} is not supported; only version {SESSION_VERSION} can be read or written")
 }
 
-#[test]
-fn sessions_of_an_older_or_newer_version_are_refused_and_left_unchanged() {
+#[tokio::test]
+async fn sessions_of_an_older_or_newer_version_are_refused_and_left_unchanged() {
     let dir = tempfile::tempdir().unwrap();
     for version in [1, SESSION_VERSION - 1, SESSION_VERSION + 1] {
         let path = dir.path().join(format!("v{version}.jsonl"));
@@ -385,18 +386,17 @@ fn sessions_of_an_older_or_newer_version_are_refused_and_left_unchanged() {
         let content = format!("{header}\n{message}\n");
         std::fs::write(&path, &content).unwrap();
 
-        let opened = Transcript::open(&path).err().unwrap().to_string();
-        let read = Transcript::read(&path).err().unwrap().to_string();
+        let opened = open_file(&path).await.err().unwrap().to_string();
+        let read = read_file(&path).await.err().unwrap().to_string();
 
-        let expected = format!("{}: {}", path.display(), unsupported(version));
-        assert_eq!(opened, expected);
-        assert_eq!(read, expected);
+        assert_eq!(opened, unsupported(version));
+        assert_eq!(read, unsupported(version));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
     }
 }
 
-#[test]
-fn a_session_of_another_version_is_not_created() {
+#[tokio::test]
+async fn a_session_of_another_version_is_not_created() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
     let older = SessionHeader {
@@ -404,7 +404,7 @@ fn a_session_of_another_version_is_not_created() {
         ..header()
     };
 
-    let error = Transcript::create(&path, older).err().unwrap().to_string();
+    let error = create_file(&path, older).await.err().unwrap().to_string();
 
     assert_eq!(error, unsupported(SESSION_VERSION - 1));
     assert!(!path.exists());

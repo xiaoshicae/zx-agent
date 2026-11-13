@@ -294,7 +294,7 @@ impl Provider for AuditProbe {
         "audit-probe"
     }
     fn stream(&self, request: Request, cancel: CancellationToken) -> EventReceiver {
-        let persisted = Transcript::read(&self.path).unwrap();
+        let persisted = common::read_session_file(&self.path).unwrap();
         assert_eq!(
             request.messages,
             persisted.messages(),
@@ -308,7 +308,7 @@ impl Provider for AuditProbe {
 async fn input_and_context_changes_are_persisted_before_the_model_request() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session.jsonl");
-    let mut session = Transcript::create(&path, header()).unwrap();
+    let mut session = common::create_session_file(&path, header()).await.unwrap();
     session.append_message(Message::user("old")).await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let probe = Arc::new(AuditProbe {
@@ -332,7 +332,10 @@ async fn input_and_context_changes_are_persisted_before_the_model_request() {
     let lines = read_lines(&path);
     assert_eq!(lines[2]["message"]["content"], "go", "original input remains intact");
     assert_eq!(lines.iter().filter(|line| line["type"] == "context_edit").count(), 3);
-    assert_eq!(Transcript::read(&path).unwrap().messages(), runner.session().messages());
+    assert_eq!(
+        common::read_session_file(&path).unwrap().messages(),
+        runner.session().messages()
+    );
 }
 
 struct InvalidPlan;

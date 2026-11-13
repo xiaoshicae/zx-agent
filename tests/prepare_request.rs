@@ -16,7 +16,6 @@ use zx_agent::events::EventKind;
 use zx_agent::hooks::{Hook, HookContext, HookResult, RequestPlan, RequestSettings};
 use zx_agent::runner::RunOutcome;
 use zx_agent::tools::Tool;
-use zx_agent::transcript::Transcript;
 
 /// Uses `model` with high reasoning on the first step only, and records what it saw.
 struct FirstTurnUpgrade {
@@ -67,7 +66,7 @@ async fn a_hook_changes_the_model_and_reasoning_of_one_request_and_the_audit_rec
         seen: seen.clone(),
     });
     let (mut runner, events) = RunnerSetup {
-        session: Transcript::create(&path, header()).unwrap(),
+        session: common::create_session_file(&path, header()).await.unwrap(),
         ..RunnerSetup::new(loop_config)
     }
     .build();
@@ -103,7 +102,7 @@ async fn a_hook_changes_the_model_and_reasoning_of_one_request_and_the_audit_rec
         .collect();
     assert_eq!(started, ["big-model", "test-model"]);
     // Every request rebuilds from the session file with the settings it used.
-    let replayed = replayed_requests(&Transcript::read(&path).unwrap());
+    let replayed = replayed_requests(&common::read_session_file(&path).unwrap());
     assert_eq!(replayed, provider.requests());
 }
 

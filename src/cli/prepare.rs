@@ -37,7 +37,7 @@ use zx_agent::transcript::{SessionHeader, Transcript};
 
 use super::execution::{check_session_outside, executor};
 use super::{BudgetArgs, Shared, env_value, resolve_cwd};
-use crate::session_files::{self, SessionFile};
+use crate::session_files::{SessionChoice, SessionPlace};
 
 /// Register a built-in hook under a fixed name, which `hook_failed` events and `[hook]` lines
 /// show.
@@ -63,6 +63,8 @@ pub(crate) struct PreparedSession {
     pub(crate) config: LoopConfig,
     retry: RetryPolicy,
     pub(crate) store: Transcript,
+    /// The session's file, for a frontend to show; `None` for a session in memory.
+    pub(crate) session_path: Option<PathBuf>,
     /// The agent's auto-approved commands, for frontend policies that also ask for bash.
     auto_approve: AutoApprove,
     /// The agent's `permissions.approveAll`: nothing waits for a person.
@@ -152,7 +154,8 @@ pub(crate) async fn prepare(
     shared: &Shared,
     model: &str,
     cwd: Option<&Path>,
-    file: SessionFile<'_>,
+    place: &SessionPlace,
+    choice: SessionChoice<'_>,
 ) -> Result<PreparedSession> {
     let (cwd, mut agent, models) = settle(shared, model, cwd)?;
     let context = agent.context_section(&cwd).context(
@@ -161,7 +164,8 @@ pub(crate) async fn prepare(
     // Before the session file: invalid provider settings are configuration errors too.
     let (provider, api_key) = provider(&shared.settings.config)?;
     let mut host = host_tools(&mut agent, &shared.settings.config.tool_output, &cwd)?;
-    let (session, executor, environment) = open_session(shared, model, file, &cwd).await?;
+    let (session, executor, environment) = open_session(shared, model, place, choice, &cwd).await?;
+    let session_path = place.path_of(&session.header().id).await?;
     let tools = assemble_tools(&agent, shared, &executor, &mut host)?;
     // The commands an agent allows run without asking, the others ask.
     let policy = CommandPolicy::new().deny_also(agent.permissions.denied_commands());
@@ -198,6 +202,7 @@ pub(crate) async fn prepare(
         config,
         retry: shared.settings.config.provider.retry.clone(),
         store: session,
+        session_path,
         auto_approve,
         approve_all: agent.permissions.approve_all,
         limits: agent.limits,
@@ -360,30 +365,43 @@ fn host_tools(agent: &mut AgentDefinition, tool_output: &output_store::Config, c
 async fn open_session(
     shared: &Shared,
     model: &str,
-    file: SessionFile<'_>,
+    place: &SessionPlace,
+    choice: SessionChoice<'_>,
     cwd: &Path,
 ) -> Result<(Transcript, Arc<dyn Executor>, String)> {
     let config = &shared.settings.config;
     if config.execution == Execution::Container {
-        check_session_outside(&file, cwd)?;
+        check_session_outside(place.location(cwd).as_deref(), cwd)?;
     }
-    let header = SessionHeader::new(cwd, model);
-    let opened = session_files::open_existing(&file)?;
-    let session_id = opened
-        .as_ref()
-        .map_or_else(|| header.id.clone(), |session| session.header().id.clone());
-    let (executor, environment) = executor(config, cwd, &session_id, hidden_env(shared)).await?;
-    let session = match opened {
-        Some(session) => session,
-        None => session_files::create(file, header)?,
+    let pending = match choice {
+        SessionChoice::Existing(id) => Pending::Opened(place.open(id).await?),
+        SessionChoice::New(labels) => Pending::New(SessionHeader {
+            labels,
+            ..SessionHeader::new(cwd, model)
+        }),
+    };
+    let session_id = match &pending {
+        Pending::Opened(session) => session.header().id.as_str(),
+        Pending::New(header) => header.id.as_str(),
+    };
+    let (executor, environment) = executor(config, cwd, session_id, hidden_env(shared)).await?;
+    let session = match pending {
+        Pending::Opened(session) => session,
+        Pending::New(header) => place.create(header).await?,
     };
     if session.incomplete_tail_bytes() > 0 {
         eprintln!(
-            "[session] recovered incomplete final record; removed {} bytes",
+            "[session] recovered incomplete final record; its {} bytes are cut off before the next record",
             session.incomplete_tail_bytes()
         );
     }
     Ok((session, executor, environment))
+}
+
+/// The session before its executor has started: opened already, or still to be created.
+enum Pending {
+    Opened(Transcript),
+    New(SessionHeader),
 }
 
 /// Register what every mode shares, after the command policy: the MCP servers, the policy of

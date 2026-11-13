@@ -27,7 +27,7 @@ use zx_agent::im::{
 };
 use zx_agent::policy::{Interaction, PolicyDecision};
 use zx_agent::tools::Tool;
-use zx_agent::transcript::Transcript;
+use zx_agent::transcript::{MemoryStorage, SessionHeader, SessionQuery, SessionStorage, Transcript};
 
 const PLATFORM: &str = "fake";
 const CHAT: &str = "C1";
@@ -217,21 +217,56 @@ impl StatusStore for Statuses {
     }
 }
 
-/// Sessions on a scripted model, stored in a temporary directory. The `echo` tool asks for
-/// approval; everything else is allowed.
+/// Sessions on a scripted model, kept in memory under the labels of their conversation. The
+/// `echo` tool asks for approval; everything else is allowed.
 struct Factory {
     provider: Arc<FauxProvider>,
     echo: Arc<EchoTool>,
-    dir: tempfile::TempDir,
+    storage: MemoryStorage,
     approval_timeout: Duration,
     opened: AtomicUsize,
     fail: Option<String>,
 }
 
+impl Factory {
+    /// The IDs of the conversation's sessions, most recently active first.
+    async fn sessions(&self, key: &SessionKey) -> Result<Vec<String>, String> {
+        let query = SessionQuery {
+            labels: key.labels(),
+            ..SessionQuery::default()
+        };
+        let list = self.storage.list(&query).await.map_err(|error| format!("{error:#}"))?;
+        Ok(list.sessions.into_iter().map(|session| session.id).collect())
+    }
+
+    /// The session of `key` that `opening` names: the latest one, or a new one with the
+    /// conversation's labels.
+    async fn session(&self, key: &SessionKey, opening: Opening) -> anyhow::Result<Transcript> {
+        let latest = match opening {
+            Opening::Latest => self.sessions(key).await.map_err(anyhow::Error::msg)?.into_iter().next(),
+            Opening::New => None,
+        };
+        match latest {
+            Some(id) => {
+                let (loaded, log) = self.storage.open(&id).await?;
+                Transcript::load(loaded, log)
+            }
+            None => {
+                let header = SessionHeader {
+                    labels: key.labels(),
+                    ..header()
+                };
+                let log = self.storage.create(&header).await?;
+                Ok(Transcript::with_log(header, log))
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl SessionFactory for Factory {
-    fn has_session(&self, key: &SessionKey) -> bool {
-        key.has_file_in(self.dir.path())
+    async fn has_session(&self, key: &SessionKey) -> Result<bool, String> {
+        Ok(!self.sessions(key).await?.is_empty())
     }
 
     async fn open(
@@ -261,16 +296,7 @@ impl SessionFactory for Factory {
                 },
             ])),
         );
-        let path = key
-            .file_in(self.dir.path(), opening)
-            .map_err(|error| error.to_string())?;
-        let store = if path.exists() {
-            Transcript::open(&path)
-        } else {
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            Transcript::create(&path, header())
-        }
-        .map_err(|error| format!("{error:#}"))?;
+        let store = self.session(key, opening).await.map_err(|error| format!("{error:#}"))?;
         let runner = RunnerSetup {
             session: store,
             ..RunnerSetup::new(config)
@@ -345,7 +371,7 @@ fn start(setup: Setup) -> Harness {
     let factory = Arc::new(Factory {
         provider: Arc::new(FauxProvider::new(setup.steps)),
         echo: Arc::new(EchoTool::new("echo")),
-        dir: tempfile::tempdir().unwrap(),
+        storage: MemoryStorage::default(),
         approval_timeout: setup.approval_timeout,
         opened: AtomicUsize::new(0),
         fail: setup.fail_open,
@@ -1275,12 +1301,7 @@ async fn new_starts_a_new_session_and_keeps_the_earlier_one() {
         conversation: ConversationId(DIRECT.into()),
         thread: None,
     };
-    let mut files: Vec<_> = std::fs::read_dir(key.dir_in(h.factory.dir.path()))
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-        .collect();
-    files.sort();
-    assert_eq!(files, ["1.jsonl", "2.jsonl"]);
+    assert_eq!(h.factory.sessions(&key).await.unwrap().len(), 2);
     h.stop().await.unwrap();
 }
 

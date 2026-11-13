@@ -58,8 +58,8 @@ pub struct RunReport {
     pub denied_calls: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_file: Option<String>,
+    /// The session the run belongs to.
+    pub session_id: String,
 }
 
 fn is_zero(count: &u32) -> bool {

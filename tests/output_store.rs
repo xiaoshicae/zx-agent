@@ -16,7 +16,6 @@ use zx_agent::builtin::tools::ReadFileTool;
 use zx_agent::hooks::{Hook, HookChain, HookContext};
 use zx_agent::runner::RunOutcome;
 use zx_agent::tools::{Tool, ToolContext, ToolOutput};
-use zx_agent::transcript::Transcript;
 
 use common::{RunnerSetup, config, header};
 
@@ -377,7 +376,7 @@ async fn redaction_precedes_both_output_file_and_session_persistence() {
     config.hooks.push(SpillOutputs::new(store, vec![TOOL_NAME.into()]));
     let audit = dir.path().join("session.jsonl");
     let (mut runner, _) = RunnerSetup {
-        session: Transcript::create(&audit, header()).unwrap(),
+        session: common::create_session_file(&audit, header()).await.unwrap(),
         ..RunnerSetup::new(config)
     }
     .build();

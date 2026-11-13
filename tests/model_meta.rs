@@ -45,7 +45,7 @@ async fn responses_are_priced_by_the_configured_model_and_summed_in_the_report()
     let mut config = config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]);
     config.models.insert("test-model".into(), priced());
     let (mut runner, _) = RunnerSetup {
-        session: Transcript::create(&file, header()).unwrap(),
+        session: common::create_session_file(&file, header()).await.unwrap(),
         ..RunnerSetup::new(config)
     }
     .build();
@@ -395,7 +395,7 @@ async fn the_cache_key_goes_to_the_provider_and_into_the_request_audit() {
     let mut config = config(provider.clone(), vec![]);
     config.cache_key = Some("session-7".into());
     let (mut runner, _) = RunnerSetup {
-        session: Transcript::create(&file, header()).unwrap(),
+        session: common::create_session_file(&file, header()).await.unwrap(),
         ..RunnerSetup::new(config)
     }
     .build();

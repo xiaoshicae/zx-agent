@@ -21,7 +21,7 @@ fn ids(entries: &[&Entry]) -> Vec<String> {
 async fn a_fork_copies_one_branch_unchanged_and_names_its_parent() {
     let dir = tempfile::tempdir().unwrap();
     let source_path = dir.path().join("source.jsonl");
-    let mut source = Transcript::create(&source_path, header()).unwrap();
+    let mut source = common::create_session_file(&source_path, header()).await.unwrap();
     source.append_message(Message::user("question")).await.unwrap();
     let answer = source.append_message(Message::user("first answer")).await.unwrap();
     source.append_message(Message::user("abandoned")).await.unwrap();
@@ -29,7 +29,9 @@ async fn a_fork_copies_one_branch_unchanged_and_names_its_parent() {
     let kept = source.append_message(Message::user("kept")).await.unwrap();
     let fork_path = dir.path().join("fork.jsonl");
 
-    let mut fork = Transcript::create(&fork_path, source.fork_header(dir.path(), "other-model")).unwrap();
+    let mut fork = common::create_session_file(&fork_path, source.fork_header(dir.path(), "other-model"))
+        .await
+        .unwrap();
     let copied = fork.copy_branch(&source, &kept).await.unwrap();
 
     assert_eq!(copied, 3);
@@ -50,12 +52,12 @@ async fn a_fork_copies_one_branch_unchanged_and_names_its_parent() {
     );
     assert!(!fork_lines.contains(abandoned));
     let header = &fork_lines[0];
-    assert_eq!(header["parentSession"], source_path.display().to_string());
+    assert_eq!(header["parentSession"], source_lines[0]["id"]);
     assert_eq!(header["model"], "other-model");
     assert_ne!(header["id"], source_lines[0]["id"]);
     // The fork is an ordinary session: it reopens and takes new entries.
     drop(fork);
-    let mut reopened = Transcript::open(&fork_path).unwrap();
+    let mut reopened = common::open_session_file(&fork_path).await.unwrap();
     reopened.append_message(Message::user("more")).await.unwrap();
     assert_eq!(reopened.messages().len(), 4);
     assert_eq!(
@@ -70,7 +72,9 @@ async fn requests_of_the_copied_branch_replay_from_the_fork() {
     let dir = tempfile::tempdir().unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("answer")]));
     let (mut runner, _) = RunnerSetup {
-        session: Transcript::create(&dir.path().join("source.jsonl"), header()).unwrap(),
+        session: common::create_session_file(&dir.path().join("source.jsonl"), header())
+            .await
+            .unwrap(),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build();
@@ -80,11 +84,13 @@ async fn requests_of_the_copied_branch_replay_from_the_fork() {
     let leaf = source.leaf_id().unwrap().to_string();
     let fork_path = dir.path().join("fork.jsonl");
 
-    let mut fork = Transcript::create(&fork_path, source.fork_header(dir.path(), "m")).unwrap();
+    let mut fork = common::create_session_file(&fork_path, source.fork_header(dir.path(), "m"))
+        .await
+        .unwrap();
     fork.copy_branch(source, &leaf).await.unwrap();
     drop(fork);
 
-    let fork = Transcript::open(&fork_path).unwrap();
+    let fork = common::open_session_file(&fork_path).await.unwrap();
     let replayed: Vec<_> = fork
         .entries()
         .iter()
@@ -110,9 +116,23 @@ async fn a_branch_is_copied_only_into_an_empty_session() {
     let error = fresh.copy_branch(&source, "missing").await.unwrap_err();
     assert!(error.to_string().contains("entry missing not found"), "{error}");
     assert!(fresh.entries().is_empty());
-    // An in-memory source has no file to name.
-    assert_eq!(fresh.header().parent_session, None);
+    // The parent is named by its ID, so a source that nothing stores has one too.
+    assert_eq!(fresh.header().parent_session, Some(source.header().id.clone()));
     assert_eq!(fresh.header().version, SESSION_VERSION);
+}
+
+#[test]
+fn a_fork_keeps_the_labels_of_its_source() {
+    let labels = std::collections::BTreeMap::from([("tenant".to_string(), "acme".to_string())]);
+    let source = Transcript::in_memory(SessionHeader {
+        labels: labels.clone(),
+        ..header()
+    });
+
+    let fork = source.fork_header(std::path::Path::new("/elsewhere"), "m");
+
+    assert_eq!(fork.labels, labels);
+    assert_ne!(fork.id, source.header().id);
 }
 
 #[test]
@@ -124,8 +144,8 @@ fn headers_without_a_parent_keep_their_format() {
     let old: SessionHeader = serde_json::from_value(json).unwrap();
     assert_eq!(old.parent_session, None);
     let forked = SessionHeader {
-        parent_session: Some("/s/a.jsonl".into()),
+        parent_session: Some("parent-id".into()),
         ..header()
     };
-    assert_eq!(serde_json::to_value(&forked).unwrap()["parentSession"], "/s/a.jsonl");
+    assert_eq!(serde_json::to_value(&forked).unwrap()["parentSession"], "parent-id");
 }

@@ -245,7 +245,7 @@ async fn each_start_is_on_disk_before_its_call_runs_and_reads_are_not_recorded()
         probe_in("read", Effects::ReadOnly, ExecutionMode::Sequential, &path),
     ];
     let (mut runner, _) = RunnerSetup {
-        session: Transcript::create(&path, header()).unwrap(),
+        session: common::create_session_file(&path, header()).await.unwrap(),
         ..RunnerSetup::new(config(provider.clone(), tools))
     }
     .build();
@@ -284,7 +284,7 @@ async fn a_parallel_batch_records_every_start_before_any_call_runs() {
         probe("read", Effects::ReadOnly, &path),
     ];
     let (mut runner, _) = RunnerSetup {
-        session: Transcript::create(&path, header()).unwrap(),
+        session: common::create_session_file(&path, header()).await.unwrap(),
         ..RunnerSetup::new(config(provider.clone(), tools))
     }
     .build();
@@ -304,7 +304,7 @@ async fn an_interrupted_batch_gets_results_and_no_call_runs_again() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
     // What a crash leaves: c1 finished, c2 started, c3 and c4 never ran, c5's tool is gone.
-    let mut store = Transcript::create(&path, header()).unwrap();
+    let mut store = common::create_session_file(&path, header()).await.unwrap();
     store.append_message(Message::user("fix it")).await.unwrap();
     store
         .append_message(answer(&[
@@ -325,7 +325,7 @@ async fn an_interrupted_batch_gets_results_and_no_call_runs_again() {
     let tools: Vec<Arc<dyn Tool>> = vec![write.clone(), read.clone()];
     let provider = Arc::new(FauxProvider::new([FauxStep::text("checked")]));
     let (mut runner, events) = RunnerSetup {
-        session: Transcript::open(&path).unwrap(),
+        session: common::open_session_file(&path).await.unwrap(),
         ..RunnerSetup::new(config(provider.clone(), tools))
     }
     .build();
@@ -372,7 +372,12 @@ async fn an_interrupted_batch_gets_results_and_no_call_runs_again() {
         assert!(is_error, "{content}");
     }
     // Recorded in the file, so the next run has nothing to recover.
-    assert!(Transcript::read(&path).unwrap().interrupted_tool_calls().is_empty());
+    assert!(
+        common::read_session_file(&path)
+            .unwrap()
+            .interrupted_tool_calls()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -550,7 +555,9 @@ fn sent_tool_result(server: &MockServer, index: usize) -> Value {
 #[tokio::test]
 async fn run_reports_a_recovered_call_and_does_not_run_the_command_again() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = Transcript::create(&dir.path().join("session.jsonl"), header()).unwrap();
+    let mut store = common::create_session_file(&dir.path().join("session.jsonl"), header())
+        .await
+        .unwrap();
     store.append_message(Message::user("fix it")).await.unwrap();
     let call = tool_call_answer("mock", "mock", "bash", json!({"command": "touch ran-again"}));
     store.append_message(call).await.unwrap();

@@ -33,7 +33,7 @@ use zx_agent::hooks::HookContext;
 use zx_agent::input::{Input, InputQueues};
 use zx_agent::runner::{LoopConfig, RunLimits, RunReport, Runner};
 use zx_agent::tools::{ExecutionMode, Tool, ToolContext, ToolOutput};
-use zx_agent::transcript::{Entry, SessionHeader, Transcript};
+use zx_agent::transcript::{Entry, JsonlStorage, LoadedSession, SessionHeader, SessionStorage, Transcript};
 
 /// The compiled `zx-agent`, for the tests that drive the program.
 ///
@@ -522,6 +522,32 @@ pub(crate) fn header() -> SessionHeader {
 /// Every line of a session file, parsed.
 pub(crate) fn read_lines(path: &Path) -> Vec<Value> {
     json_lines(&std::fs::read_to_string(path).unwrap())
+}
+
+/// A new session with `header` in the file `path`, through the storage of that one file.
+pub(crate) async fn create_session_file(path: &Path, header: SessionHeader) -> anyhow::Result<Transcript> {
+    let log = JsonlStorage::file(path).create(&header).await?;
+    Ok(Transcript::with_log(header, log))
+}
+
+/// The session in the file `path`, loaded and open for appending.
+pub(crate) async fn open_session_file(path: &Path) -> anyhow::Result<Transcript> {
+    let id = read_session_file(path)?.header().id.clone();
+    let (loaded, log) = JsonlStorage::file(path).open(&id).await?;
+    Transcript::load(loaded, log)
+}
+
+/// A snapshot of the session in the file `path`: its header and complete lines, read here
+/// and now, so that a callback, which cannot wait for a storage, can read it too.
+pub(crate) fn read_session_file(path: &Path) -> anyhow::Result<Transcript> {
+    let text = std::fs::read_to_string(path)?;
+    let mut lines = text.lines();
+    let header = serde_json::from_str(lines.next().unwrap_or_default())?;
+    Transcript::snapshot(LoadedSession {
+        header,
+        records: lines.map(str::to_string).collect(),
+        incomplete_tail_bytes: 0,
+    })
 }
 
 /// The parts of a runner, with test defaults: no retries, unattended preset limits,

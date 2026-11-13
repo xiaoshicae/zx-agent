@@ -2,12 +2,11 @@
 //! operator's [`ServerSink`], the reply texts, the configuration, and what every
 //! conversation shares. Routing is in `router.rs`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Display;
 use std::future::Future;
 use std::hash::Hash;
 use std::num::NonZeroUsize;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -49,40 +48,25 @@ pub enum Opening {
     New,
 }
 
+/// The labels of a conversation's sessions: its platform, its chat, and its thread, which is
+/// empty for a direct chat.
+const PLATFORM_LABEL: &str = "im.platform";
+const CONVERSATION_LABEL: &str = "im.conversation";
+const THREAD_LABEL: &str = "im.thread";
+
 impl SessionKey {
-    /// The directory of this conversation's sessions under `dir`:
-    /// `<dir>/<platform>/<conversation>` for a direct chat, and
-    /// `<dir>/<platform>/<conversation>/<thread>` for a thread. Each part is encoded so that
-    /// no ID can name another directory: bytes other than ASCII letters, digits, `-` and `_`
-    /// become `%XX`, and an empty part becomes `%`.
-    pub fn dir_in(&self, dir: &Path) -> PathBuf {
-        let mut path = dir.join(segment(&self.platform));
-        path.push(segment(&self.conversation.0));
-        if let Some(thread) = &self.thread {
-            path.push(segment(&thread.0));
-        }
-        path
-    }
-
-    /// The session file to open under `dir` for `opening`. Sessions are `<n>.jsonl` in
-    /// [`dir_in`](Self::dir_in), numbered from 1: the latest is the highest number, or 1 when
-    /// there is none yet, and a new one is one past the highest. Reads that directory, a few
-    /// names; an error when it exists but cannot be read.
-    pub fn file_in(&self, dir: &Path, opening: Opening) -> std::io::Result<PathBuf> {
-        let dir = self.dir_in(dir);
-        let highest = highest_number(&dir)?;
-        let number = match (opening, highest) {
-            (Opening::Latest, Some(highest)) => highest,
-            (Opening::Latest, None) => 1,
-            (Opening::New, highest) => highest.map_or(1, |highest| highest.saturating_add(1)),
-        };
-        Ok(dir.join(format!("{number}.{SESSION_EXTENSION}")))
-    }
-
-    /// Whether `dir` holds a session of this conversation. A directory that cannot be read
-    /// holds none.
-    pub fn has_file_in(&self, dir: &Path) -> bool {
-        matches!(highest_number(&self.dir_in(dir)), Ok(Some(_)))
+    /// The labels of this conversation's sessions, whatever storage the host keeps them in:
+    /// a host gives them to each session it creates for the conversation, and finds the
+    /// conversation's sessions again by asking for them
+    /// ([`SessionQuery`](zx_core::transcript::SessionQuery)). A direct chat has an empty
+    /// thread label, so that asking for its sessions never finds a thread's.
+    pub fn labels(&self) -> BTreeMap<String, String> {
+        let thread = self.thread.as_ref().map(|thread| thread.0.clone());
+        BTreeMap::from([
+            (PLATFORM_LABEL.to_string(), self.platform.clone()),
+            (CONVERSATION_LABEL.to_string(), self.conversation.0.clone()),
+            (THREAD_LABEL.to_string(), thread.unwrap_or_default()),
+        ])
     }
 
     /// Where the server posts for this conversation: the direct chat, or the thread.
@@ -94,52 +78,8 @@ impl SessionKey {
     }
 }
 
-/// Session files end in this, as chat's do.
-const SESSION_EXTENSION: &str = "jsonl";
-
-/// The highest `<n>` of the `<n>.jsonl` files in `dir`; `None` when there is none or `dir`
-/// does not exist.
-fn highest_number(dir: &Path) -> std::io::Result<Option<u64>> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    let mut highest = None;
-    for entry in entries {
-        let path = entry?.path();
-        if path.extension().and_then(|extension| extension.to_str()) != Some(SESSION_EXTENSION) {
-            continue;
-        }
-        if let Some(number) = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .and_then(|stem| stem.parse::<u64>().ok())
-        {
-            highest = highest.max(Some(number));
-        }
-    }
-    Ok(highest)
-}
-
-/// `id` as one part of a path, encoded as [`SessionKey::file_in`] says.
-pub(crate) fn segment(id: &str) -> String {
-    if id.is_empty() {
-        return "%".to_string();
-    }
-    let mut encoded = String::with_capacity(id.len());
-    for byte in id.bytes() {
-        if byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' {
-            encoded.push(char::from(byte));
-        } else {
-            encoded.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    encoded
-}
-
 /// Opens the session of a conversation. The host chooses the model, tools, policies, limits
-/// and where sessions are stored; [`SessionKey::file_in`] lays them out in a directory.
+/// and where sessions are stored; [`SessionKey::labels`] marks a conversation's sessions there.
 #[async_trait]
 pub trait SessionFactory: Send + Sync {
     /// Open the session of `key` that `opening` names. Set `interaction` as the loop's
@@ -154,11 +94,13 @@ pub trait SessionFactory: Send + Sync {
     ) -> Result<AgentSession, String>;
 
     /// Whether `key` has a session already: the bot took part in that thread, so a message
-    /// there that does not mention it is still part of the conversation. Called as messages
-    /// are routed; must return promptly. The default knows of none, so only mentions start
-    /// a conversation again after its session was released.
-    fn has_session(&self, _key: &SessionKey) -> bool {
-        false
+    /// there that does not mention it is still part of the conversation. Asked while
+    /// messages are routed, one at a time, within the outbound timeout: an error, or an
+    /// answer that takes longer, is reported to the operator and counts as none. The default
+    /// knows of none, so only mentions start a conversation again after its session was
+    /// released.
+    async fn has_session(&self, _key: &SessionKey) -> Result<bool, String> {
+        Ok(false)
     }
 }
 
@@ -527,58 +469,25 @@ mod tests {
     }
 
     #[test]
-    fn a_thread_has_a_directory_under_its_chat_and_a_direct_chat_has_the_chat_s() {
-        let dir = Path::new("/data/sessions");
+    fn a_thread_s_labels_are_not_its_chat_s() {
+        let labels = |key: SessionKey| -> Vec<(String, String)> { key.labels().into_iter().collect() };
+        let pair = |name: &str, value: &str| (name.to_string(), value.to_string());
+
         assert_eq!(
-            key("slack", "C0123", Some("1700000000_1")).dir_in(dir),
-            Path::new("/data/sessions/slack/C0123/1700000000_1")
+            labels(key("slack", "C1", Some("t1"))),
+            [
+                pair("im.conversation", "C1"),
+                pair("im.platform", "slack"),
+                pair("im.thread", "t1")
+            ]
         );
         assert_eq!(
-            key("slack", "D0123", None).dir_in(dir),
-            Path::new("/data/sessions/slack/D0123")
+            labels(key("slack", "D1", None)),
+            [
+                pair("im.conversation", "D1"),
+                pair("im.platform", "slack"),
+                pair("im.thread", "")
+            ]
         );
-    }
-
-    #[test]
-    fn ids_cannot_leave_the_session_directory() {
-        let path = key("..", "a/b", Some("1700000000.000100")).dir_in(Path::new("/s"));
-        assert_eq!(path, Path::new("/s/%2E%2E/a%2Fb/1700000000%2E000100"));
-    }
-
-    #[test]
-    fn multibyte_and_empty_ids_are_encoded() {
-        let path = key("", "群", Some("t")).dir_in(Path::new("/s"));
-        assert_eq!(path, Path::new("/s/%/%E7%BE%A4/t"));
-    }
-
-    #[test]
-    fn the_first_session_is_1_and_a_new_one_follows_the_highest() {
-        let dir = tempfile::tempdir().unwrap();
-        let key = key("slack", "D1", None);
-        assert!(!key.has_file_in(dir.path()));
-        let first = key.file_in(dir.path(), Opening::Latest).unwrap();
-        assert_eq!(first, key.dir_in(dir.path()).join("1.jsonl"));
-        assert_eq!(key.file_in(dir.path(), Opening::New).unwrap(), first);
-
-        std::fs::create_dir_all(key.dir_in(dir.path())).unwrap();
-        for name in ["1.jsonl", "9.jsonl", "10.jsonl", "notes.jsonl", "11.txt"] {
-            std::fs::write(key.dir_in(dir.path()).join(name), "").unwrap();
-        }
-        assert!(key.has_file_in(dir.path()));
-        let latest = key.file_in(dir.path(), Opening::Latest).unwrap();
-        assert_eq!(latest.file_name().unwrap(), "10.jsonl");
-        let new = key.file_in(dir.path(), Opening::New).unwrap();
-        assert_eq!(new.file_name().unwrap(), "11.jsonl");
-    }
-
-    #[test]
-    fn a_thread_s_sessions_are_not_its_chat_s() {
-        let dir = tempfile::tempdir().unwrap();
-        let thread = key("slack", "C1", Some("t1"));
-        std::fs::create_dir_all(thread.dir_in(dir.path())).unwrap();
-        std::fs::write(thread.file_in(dir.path(), Opening::Latest).unwrap(), "").unwrap();
-        assert!(thread.has_file_in(dir.path()));
-        assert!(!key("slack", "C1", Some("t2")).has_file_in(dir.path()));
-        assert!(!key("slack", "C1", None).has_file_in(dir.path()));
     }
 }

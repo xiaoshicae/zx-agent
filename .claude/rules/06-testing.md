@@ -20,6 +20,7 @@ paths:
 | `zx_agent` / `zx_agent_in` / `Home` / `stdout` / `stderr` | `tests/common/mod.rs` | 编译出的程序，以及它写到两个输出的文本；`zx_agent_in` 在给定的工作目录、以给定的主目录启动它（`Home::Agent` 设 `ZX_AGENT_HOME`，`Home::User` 设 `HOME` 并去掉 `ZX_AGENT_HOME`，chat 与 acp 的默认会话目录在其下），测试结束时杀掉；驱动程序的测试都用这几个 |
 | `AgentHome` / `write_config` / `write_agent` / `fake_model_config` | `tests/common/mod.rs` | 测试自己的 zx-agent 主目录：`AgentHome` 是交给 `ZX_AGENT_HOME` 的临时目录，带 `config.toml` 与替换内置 agent 的 `agents/<名字>.md`；`write_config`、`write_agent` 写进测试设了 `HOME` 时的 `<HOME>/.zx-agent`；`fake_model_config` 是对假模型的 `config.toml`（key 所在的变量、不重试，再加给出的键），服务地址经 `ZX_BASE_URL` 传入。权限、上下文、摘要、模型元数据、执行环境与 provider 设置没有命令行参数，驱动程序的测试经它们设置。`zx_agent()` 默认指向一个空的主目录，并去掉 `ZX_MODEL`、`ZX_BASE_URL`、`OPENAI_API_KEY`，开发者自己的配置不会进入测试 |
 | `fast_retry` / `header` / `read_lines` / `json_lines` | `tests/common/mod.rs` | 毫秒级退避的重试策略、会话头部、读取会话文件的每一行、把 JSON 行文本解析成值 |
+| `create_session_file` / `open_session_file` / `read_session_file` | `tests/common/mod.rs` | 在给定路径的会话文件上新建、续接（都经 `JsonlStorage::file`）与读取快照；`read_session_file` 是同步的，回调里也能用，写入者仍在运行时同样可读 |
 | `NotifyingProvider` | `tests/common/mod.rs` | 每个请求开始时通知（`started`）并记下取消令牌的脚本化 provider，测试"运行中"的行为时等它，不用 `sleep` |
 | `seeded_session` / `summary_json` / `replayed_requests` | `tests/common/mod.rs` | 一条值得摘要的旧消息加一条新输入的会话、模型回答摘要请求的 JSON、从会话文件的检查点还原的全部请求 |
 | `tool_call_answer` / `answer_reporting` / `session_dir` / `session_files` / `signal` | `tests/common/mod.rs` | 崩溃前已记录的工具调用回答、上报了给定输入 token 数的已完成回答、chat 与 acp 的默认会话目录及其中的文件、给子进程发信号（Unix） |
@@ -33,8 +34,9 @@ paths:
 | `FakeSlack` / `Answer` | `tests/common/fake_slack.rs` | 假 Slack：Web API 记录每次调用，可按方法安排错误、429 或指定的 JSON 应答；Socket Mode 连接由测试逐帧发送、读取确认 |
 | `MockServer` / `Reply` | `tests/common/mock_server.rs` | 本地假 HTTP 服务：返回 SSE 流（`Reply::text`、`Reply::bash`、任意工具调用 `Reply::tool_call`）、HTTP 错误，发出部分数据后卡住（`Stall`），或等待测试通知后结束（`Gate`）；记录请求，`wait_for_requests` 等到请求到达 |
 | `FailingWriter` / `Transcript::with_writer` | `crates/zx-core/src/transcript/test_support.rs` 与 `transcript.rs`（仅测试编译） | 让会话写入失败，测试不变量 5 和 7；`FailingWriter` 经 `crate::transcript::FailingWriter` 引用 |
+| `create_file` / `open_file` / `read_file` | `crates/zx-core/src/transcript/test_support.rs`（仅测试编译） | transcript 各子模块的单元测试在一个会话文件上新建、续接与读取快照，都经 `JsonlStorage::file` |
 | `header` / `assistant` / `texts` / `result_with_details` | `crates/zx-core/src/transcript/test_support.rs`（仅测试编译） | transcript 各子模块的单元测试共用：会话头部、一条回答、会话投影的文本、带 details 的工具结果 |
-| `Transcript::read` | `crates/zx-core/src/transcript.rs` | 读取写入者仍在运行的会话文件（快照，不加锁、不修改文件）；写入者已释放时也可用 `Transcript::open` |
+| `MemoryStorage` | `crates/zx-core/src/transcript/memory.rs` | 内存中的会话存储：需要“存储”而不需要文件的测试用它，如 `tests/im_server.rs` 的 `Factory` 按标签找回对话的会话 |
 
 典型写法：循环测试参照 `tests/step_loop.rs` 的 `runs_tools_until_the_model_answers`，用 `run_prompt` 跑完后断言 `result.outcome`，再用 `summarize(&context)` 断言消息序列；运行层测试参照 `tests/runner.rs`，写成 `RunnerSetup { retry: fast_retry(3), ..setup(&provider) }.build()`。
 

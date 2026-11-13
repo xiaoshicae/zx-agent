@@ -150,14 +150,14 @@ async fn an_empty_conversation_has_nothing_to_continue() {
 async fn continuing_requests_are_rebuilt_from_the_session_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
-    let mut store = Transcript::create(&path, header()).unwrap();
+    let mut store = common::create_session_file(&path, header()).await.unwrap();
     store.append_message(Message::user("question")).await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("answer")]));
     let (mut runner, _) = runner(&provider, store);
 
     runner.continue_run(&CancellationToken::new()).await;
 
-    let store = Transcript::read(&path).unwrap();
+    let store = common::read_session_file(&path).unwrap();
     let id = store
         .entries()
         .iter()
