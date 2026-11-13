@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::{CancellationToken, WaitForCancellationFuture};
 
-use super::{Event, EventKind, HookPoint, PolicyDecision, ToolOutput};
+use super::{Event, EventKind, HookPoint, ToolOutput};
 use crate::ai::{AssistantMessage, Message, Reasoning, ToolCall, UserMessageKind};
 use crate::input::InputQueue;
 use crate::tools::ActiveTools;
@@ -91,6 +91,10 @@ impl HookContext {
 pub struct CancelSignal(CancellationToken);
 
 impl CancelSignal {
+    pub(crate) fn new(token: CancellationToken) -> Self {
+        Self(token)
+    }
+
     /// Whether the run has been cancelled.
     pub fn is_cancelled(&self) -> bool {
         self.0.is_cancelled()
@@ -261,8 +265,6 @@ pub enum StepDecision {
 /// with [`Hook::stage`], so the guarantees below hold however a host registers it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum HookStage {
-    /// Built-in tool policies: they decide before any extension sees a call.
-    Policy,
     /// Extensions and other hooks; the default.
     Extension,
     /// Removes known secrets from tool output, after every extension has changed it.
@@ -274,7 +276,7 @@ pub enum HookStage {
 /// The callbacks an extension runs at the loop's extension points. Every method has a no-op
 /// default, so implementers override only what they use.
 ///
-/// Hook must yield while waiting: blocking work prevents cooperative timeouts. Hook run
+/// A hook must yield while waiting: blocking work prevents cooperative timeouts. Hooks run
 /// in stage order, then registration order. Operational callbacks are bounded by their
 /// configured timeout and cancellation; observer failures are reported as diagnostics.
 #[async_trait]
@@ -305,12 +307,6 @@ pub trait Hook: Send + Sync {
         _ctx: &HookContext,
     ) -> HookResult<Option<RequestSettings>> {
         Ok(None)
-    }
-
-    /// Decide whether a tool call may run; the call and its arguments cannot be changed here.
-    /// Deny wins immediately, otherwise Ask wins over Allow. Failure blocks the tool call.
-    async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<PolicyDecision> {
-        Ok(PolicyDecision::Allow)
     }
 
     /// Transform a tool's result before it is delivered and recorded. Results chain in hook
@@ -348,9 +344,8 @@ pub trait Hook: Send + Sync {
         !matches!(event, EventKind::MessageUpdate { .. })
     }
 
-    /// The stage this hook runs in. Only the built-in tool policy adapter, secret redaction
-    /// and output storage, which live in the zx-tools crate, declare a stage other than
-    /// [`HookStage::Extension`].
+    /// The stage this hook runs in. Only secret redaction and output storage, which live in
+    /// the zx-tools crate, declare a stage other than [`HookStage::Extension`].
     fn stage(&self) -> HookStage {
         HookStage::Extension
     }
@@ -386,7 +381,6 @@ mod tests {
     use super::*;
     use crate::ai::{SectionChange, StopReason};
     use serde_json::json;
-    use std::sync::{Arc, Mutex};
 
     fn context() -> HookContext {
         HookContext::new("session".into(), PathBuf::from("."), CancellationToken::new())
@@ -398,61 +392,6 @@ mod tests {
             name: "echo".into(),
             arguments: json!({}),
             arguments_error: None,
-        }
-    }
-
-    struct Verdict {
-        decision: PolicyDecision,
-        index: usize,
-        seen: Arc<Mutex<Vec<usize>>>,
-    }
-
-    #[async_trait]
-    impl Hook for Verdict {
-        async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<PolicyDecision> {
-            self.seen.lock().unwrap().push(self.index);
-            Ok(self.decision.clone())
-        }
-    }
-
-    #[tokio::test]
-    async fn before_tool_uses_the_strictest_verdict_in_registration_order() {
-        for (decisions, expected, visited) in [
-            (
-                vec![
-                    PolicyDecision::Allow,
-                    PolicyDecision::Ask("first".into()),
-                    PolicyDecision::Ask("second".into()),
-                ],
-                PolicyDecision::Ask("first".into()),
-                vec![0, 1, 2],
-            ),
-            (
-                vec![
-                    PolicyDecision::Ask("ask".into()),
-                    PolicyDecision::Allow,
-                    PolicyDecision::Deny("deny".into()),
-                ],
-                PolicyDecision::Deny("deny".into()),
-                vec![0, 1, 2],
-            ),
-            (
-                vec![PolicyDecision::Deny("first".into()), PolicyDecision::Allow],
-                PolicyDecision::Deny("first".into()),
-                vec![0],
-            ),
-        ] {
-            let seen = Arc::new(Mutex::new(Vec::new()));
-            let mut chain = HookChain::new();
-            for (index, decision) in decisions.into_iter().enumerate() {
-                chain.push(Verdict {
-                    decision,
-                    index,
-                    seen: seen.clone(),
-                });
-            }
-            assert_eq!(chain.before_tool(&call(), &context()).await.unwrap(), expected);
-            assert_eq!(*seen.lock().unwrap(), visited);
         }
     }
 
@@ -539,7 +478,7 @@ mod tests {
     fn guard() -> HookCall<'static> {
         HookCall {
             name: "test",
-            phase: HookPoint::BeforeTool,
+            phase: HookPoint::AfterTool,
             timeout: Duration::ZERO,
         }
     }
@@ -554,7 +493,7 @@ mod tests {
             error,
             HookError {
                 hook: "test".into(),
-                phase: HookPoint::BeforeTool,
+                phase: HookPoint::AfterTool,
                 failure: HookFailure::Rejected("rejected".into())
             }
         );

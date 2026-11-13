@@ -16,7 +16,7 @@ use crate::ai::{Message, ToolCall, ToolResultMessage, duration_ms, now_ms};
 use crate::hooks::HookCall;
 use crate::{
     Approval, ApprovalRequest, ApprovalResult, Effects, EventKind, ExecutionMode, HookFailure, HookPoint,
-    MAX_DETAILS_BYTES, MAX_QUEUED_PROGRESS, PolicyDecision, Tool, ToolContext, ToolOutput, ToolVerdict,
+    MAX_DETAILS_BYTES, MAX_QUEUED_PROGRESS, PolicyContext, PolicyDecision, Tool, ToolContext, ToolOutput, ToolVerdict,
 };
 
 impl StepLoop<'_> {
@@ -78,9 +78,10 @@ impl StepLoop<'_> {
     /// Run the policy on `call`, then ask the interaction host when it says so. An error is
     /// the text of the result of a call that may not run.
     async fn authorize(&mut self, call: &ToolCall) -> Result<(), String> {
-        let verdict = match self.config.hooks.before_tool(call, self.trace.context()).await {
+        let context = PolicyContext::of(self.trace.context());
+        let verdict = match self.config.policies.check(call, &context).await {
             Ok(verdict) => verdict,
-            // A policy hook that fails denies the call, for the reason it failed.
+            // A policy that fails denies the call, for the reason it failed.
             Err(error) => PolicyDecision::Deny(self.report_hook_failure(error)),
         };
         match verdict {

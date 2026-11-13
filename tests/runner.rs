@@ -72,7 +72,8 @@ use zx_agent::continuation::ContinueOnLength;
 use zx_agent::runner::{RunLimits, RunOutcome};
 use zx_agent::transcript::{Entry, LoadedSession, LogRecord, SessionLog, Transcript};
 use zx_agent::{
-    EVENT_SCHEMA_VERSION, EventKind, Hook, HookContext, HookOptions, HookResult, Input, PolicyDecision, RequestKind,
+    EVENT_SCHEMA_VERSION, EventKind, Hook, HookContext, HookOptions, HookResult, Input, PolicyContext, PolicyDecision,
+    RequestKind, ToolPolicy,
 };
 
 /// A stored record, as a database row would hold it.
@@ -368,13 +369,13 @@ async fn the_last_request_may_take_a_run_over_its_cost_budget() {
 struct DenyFirstAskSecond;
 
 #[async_trait]
-impl Hook for DenyFirstAskSecond {
-    async fn before_tool(&self, call: &ToolCall, _ctx: &HookContext) -> HookResult<PolicyDecision> {
-        Ok(match call.id.as_str() {
+impl ToolPolicy for DenyFirstAskSecond {
+    async fn check(&self, call: &ToolCall, _ctx: &PolicyContext) -> PolicyDecision {
+        match call.id.as_str() {
             "c1" => PolicyDecision::Deny("not here".into()),
             "c2" => PolicyDecision::Ask("check first".into()),
             _ => PolicyDecision::Allow,
-        })
+        }
     }
 }
 
@@ -389,7 +390,9 @@ async fn calls_a_policy_or_an_approval_denied_are_counted_in_the_report() {
         FauxStep::text("done anyway"),
     ]);
     let mut config = config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]);
-    config.hooks.push(DenyFirstAskSecond);
+    config
+        .policies
+        .push("deny_first_ask_second", Arc::new(DenyFirstAskSecond));
     let (mut runner, _) = RunnerSetup::new(config).build();
 
     let report = runner.run("go", &CancellationToken::new()).await;

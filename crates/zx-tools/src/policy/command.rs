@@ -3,9 +3,10 @@
 use async_trait::async_trait;
 use serde_json::Value;
 
-use super::{ToolPolicy, command_of, normalize};
+use super::{command_of, normalize};
+use crate::ai::ToolCall;
 use crate::tools::BASH;
-use zx_core::PolicyDecision;
+use zx_core::{PolicyContext, PolicyDecision, ToolPolicy};
 
 /// Patterns rejected for every `bash` command, compared as substrings after lowercasing and
 /// collapsing whitespace. Easy to bypass on purpose: a denylist only stops the plain spelling,
@@ -158,9 +159,10 @@ impl CommandPolicy {
     }
 }
 
-#[async_trait]
-impl ToolPolicy for CommandPolicy {
-    async fn check(&self, tool_name: &str, args: &Value) -> PolicyDecision {
+impl CommandPolicy {
+    /// The verdict on a call of `tool_name` with `args`: every tool but `bash` is allowed,
+    /// and a bash call without a command is denied.
+    pub fn verdict(&self, tool_name: &str, args: &Value) -> PolicyDecision {
         if tool_name != BASH {
             return PolicyDecision::Allow;
         }
@@ -168,6 +170,13 @@ impl ToolPolicy for CommandPolicy {
             Some(command) => self.evaluate(command),
             None => PolicyDecision::Deny("missing \"command\" argument".to_string()),
         }
+    }
+}
+
+#[async_trait]
+impl ToolPolicy for CommandPolicy {
+    async fn check(&self, call: &ToolCall, _ctx: &PolicyContext) -> PolicyDecision {
+        self.verdict(&call.name, &call.arguments)
     }
 }
 
@@ -243,15 +252,13 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn only_bash_is_checked() {
+    #[test]
+    fn only_bash_is_checked() {
         let policy = CommandPolicy::new();
         assert_eq!(
-            policy
-                .check("read_file", &serde_json::json!({"path": "/etc/hosts"}))
-                .await,
+            policy.verdict("read_file", &serde_json::json!({"path": "/etc/hosts"})),
             PolicyDecision::Allow
         );
-        assert!(denied(&policy.check("bash", &serde_json::json!({})).await));
+        assert!(denied(&policy.verdict("bash", &serde_json::json!({}))));
     }
 }

@@ -104,7 +104,10 @@ pub use hooks::{
 };
 pub use input::{Input, InputQueue, QueueMode};
 pub(crate) use policy::ApprovalCache;
-pub use policy::{Approval, ApprovalRequest, DEFAULT_APPROVAL_TIMEOUT, Interaction, NoHuman, PolicyDecision};
+pub use policy::{
+    Approval, ApprovalRequest, DEFAULT_APPROVAL_TIMEOUT, Interaction, NoHuman, PolicyChain, PolicyContext,
+    PolicyDecision, ToolPolicy,
+};
 pub(crate) use runner::{Halt, PERSIST_FAILED, RunAccounting, SessionHost};
 pub use runner::{LoopConfig, RunOutcome, RunReport};
 pub use tools::{

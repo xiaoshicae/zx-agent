@@ -24,7 +24,7 @@ use zx_agent::im::{
     MessageRef, Opening, Outbound, Replies, Said, Server, ServerConfig, ServerEvent, ServerSink, SessionFactory,
     SessionKey, StatusStore, ThreadId, UserId,
 };
-use zx_agent::policy::{PolicyHook, Rule, RuleMatcher, RulePolicy};
+use zx_agent::policy::{Rule, RuleMatcher, RulePolicy};
 use zx_agent::transcript::Transcript;
 use zx_agent::{ApprovalResult, NullSink, PolicyDecision, Tool};
 
@@ -247,16 +247,19 @@ impl SessionFactory for Factory {
         let mut config = config(self.provider.clone(), tools);
         config.interaction = interaction;
         config.interaction_timeout = self.approval_timeout;
-        config.hooks.push(PolicyHook::new(Arc::new(RulePolicy::new(vec![
-            Rule {
-                matcher: RuleMatcher::Tool("echo".into()),
-                decision: PolicyDecision::Ask("echo needs approval".into()),
-            },
-            Rule {
-                matcher: RuleMatcher::Any,
-                decision: PolicyDecision::Allow,
-            },
-        ]))));
+        config.policies.push(
+            "echo_approval",
+            Arc::new(RulePolicy::new(vec![
+                Rule {
+                    matcher: RuleMatcher::Tool("echo".into()),
+                    decision: PolicyDecision::Ask("echo needs approval".into()),
+                },
+                Rule {
+                    matcher: RuleMatcher::Any,
+                    decision: PolicyDecision::Allow,
+                },
+            ])),
+        );
         let path = key
             .file_in(self.dir.path(), opening)
             .map_err(|error| error.to_string())?;

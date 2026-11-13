@@ -46,7 +46,7 @@ use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig, SystemUpdates};
 use zx_agent::ai::{Message, Provider};
 use zx_agent::compaction::{Config, Outcome};
 use zx_agent::executor::{LocalExecutor, local_environment_section};
-use zx_agent::policy::{AutoApprove, PolicyHook, Rule, RuleMatcher, RulePolicy};
+use zx_agent::policy::{AutoApprove, Rule, RuleMatcher, RulePolicy};
 use zx_agent::prompt::build_system_prompt;
 use zx_agent::runner::{RunLimits, RunOutcome, RunReport};
 use zx_agent::tools::BashTool;
@@ -137,7 +137,7 @@ impl Endpoint {
             decision: PolicyDecision::Ask("only the allowed programs run".into()),
         }])
         .auto_approve(AutoApprove::new(allowed));
-        setup.config.hooks.push(PolicyHook::new(Arc::new(policy)));
+        setup.config.policies.push("policy", Arc::new(policy));
         setup
     }
 }

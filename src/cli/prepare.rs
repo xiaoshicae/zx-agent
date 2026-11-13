@@ -24,7 +24,7 @@ use zx_agent::executor::Executor;
 use zx_agent::extensions;
 use zx_agent::otel;
 use zx_agent::output_store::{self, OutputStore, ReadOutputTool, SpillOutputs};
-use zx_agent::policy::{AutoApprove, CommandPolicy, PolicyHook, Rule, RuleMatcher, RulePolicy};
+use zx_agent::policy::{AutoApprove, CommandPolicy, Rule, RuleMatcher, RulePolicy};
 use zx_agent::prompt::{self, build_system_prompt};
 use zx_agent::redact::RedactSecrets;
 use zx_agent::runner::{RunLimits, Runner};
@@ -93,7 +93,7 @@ impl PreparedSession {
             },
         ])
         .auto_approve(std::mem::take(&mut self.auto_approve));
-        push_built_in(&mut self.config, "bash_approval", PolicyHook::new(Arc::new(policy)));
+        self.config.policies.push("bash_approval", Arc::new(policy));
     }
 
     /// The conversation, sending events to `sink` and to the trace export: the one place
@@ -178,7 +178,7 @@ pub(crate) async fn prepare(
         reasoning: shared.settings.config.reasoning,
         ..LoopConfig::new(Arc::new(provider), model)
     };
-    push_built_in(&mut config, "command_policy", PolicyHook::new(Arc::new(policy)));
+    config.policies.push("command_policy", Arc::new(policy));
     // Each session's redaction owns its list: the hook reads the files again before every use.
     let redaction = RedactSecrets::new(api_key.into_iter().chain(hidden_values(shared)))
         .with_secret_files(shared.secret_files.clone());
@@ -401,7 +401,7 @@ fn register_hooks(
     let mcp_ask = mcp_asking(agent, &shared.mcp.names);
     // The agent's permissions and the frontend's bash policy each own the list (`rules_policy`).
     if let Some(rules) = rules_policy(agent, &mcp_ask, auto_approve.clone()) {
-        push_built_in(config, "agent_permissions", PolicyHook::new(Arc::new(rules)));
+        config.policies.push("agent_permissions", Arc::new(rules));
     }
     push_built_in(
         config,

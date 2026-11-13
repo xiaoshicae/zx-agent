@@ -14,7 +14,7 @@ use super::{
     HookStage, RequestPlan, RequestSettings, StepDecision,
 };
 use crate::ai::{Message, ToolCall};
-use crate::{Event, PolicyDecision, ToolOutput};
+use crate::{Event, ToolOutput};
 
 /// One guarded call: of a registered hook, or of the interaction host for an approval. A
 /// failure names the call by `name` and `phase`.
@@ -222,21 +222,6 @@ impl HookChain {
             }
         }
         Ok(settings)
-    }
-
-    pub async fn before_tool(&self, call: &ToolCall, ctx: &HookContext) -> Result<PolicyDecision, HookError> {
-        let mut verdict = PolicyDecision::Allow;
-        for entry in &self.hooks {
-            let decision = entry
-                .run(HookPoint::BeforeTool, entry.hook.before_tool(call, ctx), ctx)
-                .await?;
-            match decision {
-                PolicyDecision::Deny(_) => return Ok(decision),
-                PolicyDecision::Ask(_) if matches!(verdict, PolicyDecision::Allow) => verdict = decision,
-                PolicyDecision::Ask(_) | PolicyDecision::Allow => {}
-            }
-        }
-        Ok(verdict)
     }
 
     pub async fn after_tool(

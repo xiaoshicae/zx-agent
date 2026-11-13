@@ -96,14 +96,14 @@ pub enum Interruption {
 }
 
 /// Which extension point of the loop a hook call is at: one per [`Hook`](super::Hook)
-/// method, and the approval wait. [`HookStage`](super::HookStage) is something else: the
+/// method, the policy check and the approval wait. [`HookStage`](super::HookStage) is something else: the
 /// order of hooks at the same point. In JSON, the name [`HookPoint::as_str`] gives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HookPoint {
     OnInput,
     TransformContext,
     PrepareRequest,
-    BeforeTool,
+    Policy,
     AfterTool,
     FinishStep,
     OnEvent,
@@ -116,7 +116,7 @@ impl HookPoint {
             Self::OnInput => "on_input",
             Self::TransformContext => "transform_context",
             Self::PrepareRequest => "prepare_request",
-            Self::BeforeTool => "before_tool",
+            Self::Policy => "policy",
             Self::AfterTool => "after_tool",
             Self::FinishStep => "finish_step",
             Self::OnEvent => "on_event",

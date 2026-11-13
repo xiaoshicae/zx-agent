@@ -17,10 +17,9 @@ use zx_agent::ai::{
     ContentBlock, EventReceiver, Message, PREAMBLE, Provider, Request, StopReason, SystemPrompt, ToolCall, ToolDef,
     Usage,
 };
-use zx_agent::policy::{PolicyHook, ToolPolicy};
 use zx_agent::{
-    EventKind, ExecutionMode, Input, LoopConfig, MAX_DETAILS_BYTES, PolicyDecision, RunOutcome, Tool, ToolContext,
-    ToolOutput,
+    EventKind, ExecutionMode, Input, LoopConfig, MAX_DETAILS_BYTES, PolicyContext, PolicyDecision, RunOutcome, Tool,
+    ToolContext, ToolOutput, ToolPolicy,
 };
 
 fn provider(steps: impl IntoIterator<Item = FauxStep>) -> Arc<FauxProvider> {
@@ -32,7 +31,7 @@ fn echo() -> Arc<EchoTool> {
 }
 
 fn with_policy(mut config: LoopConfig, policy: Arc<dyn ToolPolicy>) -> LoopConfig {
-    config.hooks.push(PolicyHook::new(policy));
+    config.policies.push("policy", policy);
     config
 }
 
@@ -150,7 +149,7 @@ struct PanickingPolicy;
 
 #[async_trait]
 impl ToolPolicy for PanickingPolicy {
-    async fn check(&self, _tool_name: &str, _args: &Value) -> PolicyDecision {
+    async fn check(&self, _call: &ToolCall, _ctx: &PolicyContext) -> PolicyDecision {
         panic!("policy bug");
     }
 }
@@ -181,7 +180,7 @@ struct WaitingPolicy(Arc<tokio::sync::Notify>);
 
 #[async_trait]
 impl ToolPolicy for WaitingPolicy {
-    async fn check(&self, _tool_name: &str, _args: &Value) -> PolicyDecision {
+    async fn check(&self, _call: &ToolCall, _ctx: &PolicyContext) -> PolicyDecision {
         self.0.notify_one();
         std::future::pending().await
     }
@@ -214,8 +213,8 @@ async fn cancellation_interrupts_a_waiting_policy() {
 
 #[async_trait]
 impl ToolPolicy for DenyEcho {
-    async fn check(&self, tool_name: &str, _args: &Value) -> PolicyDecision {
-        if tool_name == "echo" {
+    async fn check(&self, call: &ToolCall, _ctx: &PolicyContext) -> PolicyDecision {
+        if call.name == "echo" {
             PolicyDecision::Deny("echo is disabled".into())
         } else {
             PolicyDecision::Allow
@@ -570,8 +569,8 @@ struct RecordingPolicy(Mutex<Vec<Value>>);
 
 #[async_trait]
 impl ToolPolicy for RecordingPolicy {
-    async fn check(&self, _tool_name: &str, args: &Value) -> PolicyDecision {
-        self.0.lock().unwrap().push(args.clone());
+    async fn check(&self, call: &ToolCall, _ctx: &PolicyContext) -> PolicyDecision {
+        self.0.lock().unwrap().push(call.arguments.clone());
         PolicyDecision::Allow
     }
 }

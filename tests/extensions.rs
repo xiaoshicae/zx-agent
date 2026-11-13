@@ -25,13 +25,13 @@ impl Hook for Mark {
     }
 }
 
-/// Declares the stage of the built-in policies, which extension hooks may not use.
+/// Declares the stage of the built-in redaction, which extension hooks may not use.
 struct Early;
 
 #[async_trait]
 impl Hook for Early {
     fn stage(&self) -> HookStage {
-        HookStage::Policy
+        HookStage::Redaction
     }
 }
 
@@ -137,7 +137,7 @@ fn a_hook_outside_the_extension_stage_is_refused_and_nothing_is_registered() {
         ..Bundle::named("early")
     };
     let error = register(&mut config, &[Arc::new(early)]).unwrap_err();
-    assert!(error.contains("declares the Policy stage"), "{error}");
+    assert!(error.contains("declares the Redaction stage"), "{error}");
     assert_eq!(config.tools.len(), 1);
     assert_eq!(config.system_prompt, prompt);
 }

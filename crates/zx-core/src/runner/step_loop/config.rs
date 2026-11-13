@@ -10,7 +10,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::ai::{ModelMeta, Provider, Reasoning, SystemPrompt};
 use crate::events::RunTrace;
-use crate::{ActiveTools, DEFAULT_APPROVAL_TIMEOUT, HookChain, InputQueue, Interaction, NoHuman, SlashCommand, Tool};
+use crate::{
+    ActiveTools, DEFAULT_APPROVAL_TIMEOUT, HookChain, InputQueue, Interaction, NoHuman, PolicyChain, SlashCommand, Tool,
+};
 
 /// What a loop runs with: the model and tools, and the host's extensions around them. Queues
 /// and the active tool set have shared ownership because frontends and hooks change them while
@@ -33,6 +35,9 @@ pub struct LoopConfig {
     /// send none.
     pub reasoning: Option<Reasoning>,
     pub hooks: HookChain,
+    /// The policies that decide whether a tool call may run; none by default, which allows
+    /// every call.
+    pub policies: PolicyChain,
     pub interaction: Arc<dyn Interaction>,
     pub interaction_timeout: Duration,
     pub queues: Arc<InputQueue>,
@@ -62,6 +67,7 @@ impl LoopConfig {
             max_tokens: None,
             reasoning: None,
             hooks: HookChain::new(),
+            policies: PolicyChain::new(),
             interaction: Arc::new(NoHuman),
             interaction_timeout: DEFAULT_APPROVAL_TIMEOUT,
             queues: Arc::new(InputQueue::default()),

@@ -216,11 +216,11 @@ pub trait Tool: Send + Sync {
     /// level (pi: `prepareEditArguments`). Return `None` to keep them as they are, which the
     /// default does.
     ///
-    /// The rewritten arguments are what the schema check, `validate_arguments`, the
-    /// `before_tool` and `after_tool` hooks (the policy among them), approval and `execute`
-    /// see; `tool_execution_start` still shows the model's. The session keeps the model's
-    /// original call, so the rewrite must depend on nothing but `args`: an audit then derives
-    /// the arguments that ran from the recorded ones. Direct SDK calls skip this step.
+    /// The rewritten arguments are what the schema check, `validate_arguments`, the policies,
+    /// approval, `execute` and the `after_tool` hooks see; `tool_execution_start` still shows
+    /// the model's. The session keeps the model's original call, so the rewrite must depend on
+    /// nothing but `args`: an audit then derives the arguments that ran from the recorded
+    /// ones. Direct SDK calls skip this step.
     fn prepare_arguments(&self, _args: &Value) -> Option<Value> {
         None
     }

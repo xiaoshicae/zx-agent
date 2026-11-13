@@ -46,7 +46,7 @@ P0–P5 与 P10–P14（P10 为与 pi 的能力对齐）已完成。进行中：
 - P8 `acp`：已实现，待在 Zed 或 Wisp 上实测。
 - P9 可选增强：剩更多 provider。
 - P15 IM 对话模型（D16）：Slack 实现了读线程、查名字与回执；⚑ D:5/CHINA FLAG: 飞书只做消息分类，这三项沿用默认（不读历史、用 open_id、不回执），待按需补上。待在真实 Slack 工作区验证线程回复事件带 `thread_ts`（官方事件页未写明）。
-- P16 入口与接口重整：目标是 `Agent`、`Session`、`Run` 三个入口对象，模型、工具、会话存储、权限策略、钩子、摘要各有接口并可替换，命令行从库中拆出。分六期，每期四条命令全部通过后再进入下一期：① 改名与模块重组（D23；内核的 `agent` 模块按对象拆成 `tools`、`policy`、`hooks`、`events`、`input`，循环移入 `runner`），已完成；② `ToolPolicy` 移入内核，钩子不再做放行判断；③ `SessionStore` 接口、`MemoryStore`，存储类型不含文件路径；④ `Agent`、`Session`、`Run`，去掉 `Interaction` 与 `EventSink`（届时更新 D21）；⑤ `Summarizer`、`Actor` 与会话标签；⑥ 拆出 `zx-cli`。
+- P16 入口与接口重整：目标是 `Agent`、`Session`、`Run` 三个入口对象，模型、工具、会话存储、权限策略、钩子、摘要各有接口并可替换，命令行从库中拆出。分六期，每期四条命令全部通过后再进入下一期：① 改名与模块重组（D23；内核的 `agent` 模块按对象拆成 `tools`、`policy`、`hooks`、`events`、`input`，循环移入 `runner`），已完成；② `ToolPolicy` 移入内核，钩子不再做放行判断，已完成；③ `SessionStore` 接口、`MemoryStore`，存储类型不含文件路径；④ `Agent`、`Session`、`Run`，去掉 `Interaction` 与 `EventSink`（届时更新 D21）；⑤ `Summarizer`、`Actor` 与会话标签；⑥ 拆出 `zx-cli`。
 
 ## 5. 待办与已知缺口
 

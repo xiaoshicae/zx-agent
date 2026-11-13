@@ -22,15 +22,15 @@ use zx_agent::transcript::{Entry, Transcript};
 use zx_agent::{Approval, ApprovalRequest, Interaction};
 use zx_agent::{
     ApprovalResult, CancelSignal, ContextEdit, Event, EventKind, FinishedStep, Hook, HookChain, HookContext,
-    HookOptions, HookResult, HookStage, PolicyDecision, RunOutcome, StepDecision, Tool, ToolContext, ToolOutput,
-    ToolVerdict,
+    HookOptions, HookResult, HookStage, PolicyContext, PolicyDecision, RunOutcome, StepDecision, Tool, ToolContext,
+    ToolOutput, ToolPolicy, ToolVerdict,
 };
 
 struct Verdict(PolicyDecision);
 #[async_trait]
-impl Hook for Verdict {
-    async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<PolicyDecision> {
-        Ok(self.0.clone())
+impl ToolPolicy for Verdict {
+    async fn check(&self, _call: &ToolCall, _ctx: &PolicyContext) -> PolicyDecision {
+        self.0.clone()
     }
 }
 
@@ -42,10 +42,13 @@ async fn a_later_allow_does_not_override_an_ask_without_a_human() {
     ]));
     let tool = Arc::new(EchoTool::new("echo"));
     let mut config = config(provider.clone(), vec![tool.clone()]);
+    config.policies.push(
+        "verdict",
+        Arc::new(Verdict(PolicyDecision::Ask("review required".into()))),
+    );
     config
-        .hooks
-        .push(Verdict(PolicyDecision::Ask("review required".into())));
-    config.hooks.push(Verdict(PolicyDecision::Allow));
+        .policies
+        .push("verdict", Arc::new(Verdict(PolicyDecision::Allow)));
     let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
     assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
@@ -87,7 +90,9 @@ async fn allow_once_and_session_approvals_have_different_scopes() {
             calls: AtomicUsize::new(0),
         });
         let mut config = config(provider, vec![tool.clone()]);
-        config.hooks.push(Verdict(PolicyDecision::Ask("review".into())));
+        config
+            .policies
+            .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
         config.interaction = host.clone();
         let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
         assert_eq!(result.outcome, RunOutcome::Completed);
@@ -98,13 +103,13 @@ async fn allow_once_and_session_approvals_have_different_scopes() {
 
 struct SwitchPolicy(Arc<AtomicBool>);
 #[async_trait]
-impl Hook for SwitchPolicy {
-    async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<PolicyDecision> {
-        Ok(if self.0.load(Ordering::SeqCst) {
+impl ToolPolicy for SwitchPolicy {
+    async fn check(&self, _call: &ToolCall, _ctx: &PolicyContext) -> PolicyDecision {
+        if self.0.load(Ordering::SeqCst) {
             PolicyDecision::Deny("revoked".into())
         } else {
             PolicyDecision::Ask("review".into())
-        })
+        }
     }
 }
 
@@ -129,7 +134,7 @@ async fn session_grants_require_exact_arguments_and_never_override_deny() {
     });
     let mut config = config(provider, vec![tool.clone()]);
     config.interaction = host.clone();
-    config.hooks.push(SwitchPolicy(denied.clone()));
+    config.policies.push("switch", Arc::new(SwitchPolicy(denied.clone())));
     let (mut runner, _) = RunnerSetup::new(config).build();
     for _ in 0..3 {
         assert_eq!(
@@ -173,7 +178,9 @@ async fn approval_errors_panics_and_timeouts_block_execution_and_preserve_the_lo
         ]));
         let tool = Arc::new(EchoTool::new("echo"));
         let mut config = config(provider.clone(), vec![tool.clone()]);
-        config.hooks.push(Verdict(PolicyDecision::Ask("review".into())));
+        config
+            .policies
+            .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
         config.interaction = Arc::new(host);
         config.interaction_timeout = Duration::ZERO;
         let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
@@ -206,7 +213,9 @@ async fn cancellation_interrupts_a_pending_approval() {
     let entered = Arc::new(tokio::sync::Notify::new());
     let tool = Arc::new(EchoTool::new("echo"));
     let mut config = config(provider, vec![tool.clone()]);
-    config.hooks.push(Verdict(PolicyDecision::Ask("review".into())));
+    config
+        .policies
+        .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
     config.interaction = Arc::new(WaitingHost(entered.clone()));
     let (mut runner, _) = RunnerSetup::new(config).build();
     let cancel = CancellationToken::new();
@@ -220,10 +229,10 @@ async fn cancellation_interrupts_a_pending_approval() {
 
 struct CountBefore(Arc<AtomicUsize>);
 #[async_trait]
-impl Hook for CountBefore {
-    async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<PolicyDecision> {
+impl ToolPolicy for CountBefore {
+    async fn check(&self, _call: &ToolCall, _ctx: &PolicyContext) -> PolicyDecision {
         self.0.fetch_add(1, Ordering::SeqCst);
-        Ok(PolicyDecision::Ask("review".into()))
+        PolicyDecision::Ask("review".into())
     }
 }
 
@@ -239,7 +248,7 @@ async fn invalid_tool_arguments_are_rejected_before_policy_and_approval() {
         calls: AtomicUsize::new(0),
     });
     let mut config = config(provider.clone(), vec![Arc::new(BashTool::default())]);
-    config.hooks.push(CountBefore(checks.clone()));
+    config.policies.push("count", Arc::new(CountBefore(checks.clone())));
     config.interaction = host.clone();
     run_prompt(config, &mut Vec::new(), "go").await;
     assert_eq!(checks.load(Ordering::SeqCst), 0);
@@ -1035,7 +1044,7 @@ async fn the_policy_verdict_of_every_call_is_reported_with_its_reason() {
             FauxStep::text("done"),
         ]));
         let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
-        config.hooks.push(Verdict(decision));
+        config.policies.push("verdict", Arc::new(Verdict(decision)));
 
         let (_, events) = run_prompt(config, &mut Vec::new(), "go").await;
 
@@ -1096,7 +1105,9 @@ async fn approvals_are_reported_when_asked_and_when_remembered() {
             FauxStep::text("done"),
         ]));
         let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
-        config.hooks.push(Verdict(PolicyDecision::Ask("review".into())));
+        config
+            .policies
+            .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
         config.interaction = Arc::new(Approver {
             approval,
             calls: AtomicUsize::new(0),
@@ -1125,7 +1136,9 @@ async fn a_resolved_approval_reports_how_long_it_waited() {
         FauxStep::text("done"),
     ]));
     let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
-    config.hooks.push(Verdict(PolicyDecision::Ask("review".into())));
+    config
+        .policies
+        .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
     config.interaction = Arc::new(SlowApprover(Duration::from_millis(20)));
 
     let (_, events) = run_prompt(config, &mut Vec::new(), "go").await;
@@ -1154,7 +1167,9 @@ async fn approvals_that_fail_or_time_out_report_how_they_ended() {
             FauxStep::text("handled"),
         ]));
         let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
-        config.hooks.push(Verdict(PolicyDecision::Ask("review".into())));
+        config
+            .policies
+            .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
         config.interaction = Arc::new(host);
         config.interaction_timeout = Duration::ZERO;
 
@@ -1177,7 +1192,9 @@ async fn an_approval_interrupted_by_cancellation_is_reported_as_cancelled() {
     let provider = Arc::new(FauxProvider::new([FauxStep::tool_call("c", "echo", json!({}))]));
     let entered = Arc::new(tokio::sync::Notify::new());
     let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
-    config.hooks.push(Verdict(PolicyDecision::Ask("review".into())));
+    config
+        .policies
+        .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
     config.interaction = Arc::new(WaitingHost(entered.clone()));
     let (mut runner, events) = RunnerSetup::new(config).build();
     let cancel = CancellationToken::new();
@@ -1264,10 +1281,6 @@ impl Hook for ContextProbe {
         self.record("transform_context", ctx);
         Ok(Vec::new())
     }
-    async fn before_tool(&self, _call: &ToolCall, ctx: &HookContext) -> HookResult<PolicyDecision> {
-        self.record("before_tool", ctx);
-        Ok(PolicyDecision::Allow)
-    }
     async fn after_tool(&self, _call: &ToolCall, output: ToolOutput, ctx: &HookContext) -> HookResult<ToolOutput> {
         self.record("after_tool", ctx);
         Ok(output)
@@ -1304,14 +1317,7 @@ async fn every_hook_method_knows_the_session_run_and_working_directory() {
     methods.dedup();
     assert_eq!(
         methods,
-        [
-            "after_tool",
-            "before_tool",
-            "finish_step",
-            "on_event",
-            "on_input",
-            "transform_context"
-        ]
+        ["after_tool", "finish_step", "on_event", "on_input", "transform_context"]
     );
     for (method, session, run, cwd) in &seen {
         assert_eq!(session, &session_id, "{method}");
@@ -1357,7 +1363,7 @@ async fn a_named_hook_is_reported_under_its_name() {
     assert!(hooks.iter().all(|hook| hook == "trace-exporter"), "{hooks:?}");
 }
 
-/// Records its tag in before_tool and after_tool; runs in the stage it declares.
+/// Records its tag in after_tool; runs in the stage it declares.
 struct Staged {
     stage: HookStage,
     tag: &'static str,
@@ -1365,10 +1371,6 @@ struct Staged {
 }
 #[async_trait]
 impl Hook for Staged {
-    async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<PolicyDecision> {
-        self.order.lock().unwrap().push(format!("before:{}", self.tag));
-        Ok(PolicyDecision::Allow)
-    }
     async fn after_tool(&self, _call: &ToolCall, output: ToolOutput, _ctx: &HookContext) -> HookResult<ToolOutput> {
         self.order.lock().unwrap().push(format!("after:{}", self.tag));
         Ok(output)
@@ -1390,7 +1392,6 @@ async fn hooks_run_in_stage_order_whatever_the_registration_order() {
         (HookStage::Storage, "storage"),
         (HookStage::Redaction, "redaction"),
         (HookStage::Extension, "extension-1"),
-        (HookStage::Policy, "policy"),
         (HookStage::Extension, "extension-2"),
     ] {
         config.hooks.push(Staged {
@@ -1403,14 +1404,9 @@ async fn hooks_run_in_stage_order_whatever_the_registration_order() {
     run_prompt(config, &mut Vec::new(), "go").await;
 
     let order = order.lock().unwrap().clone();
-    let expected: Vec<String> = ["policy", "extension-1", "extension-2", "redaction", "storage"]
+    let expected: Vec<String> = ["extension-1", "extension-2", "redaction", "storage"]
         .iter()
-        .map(|tag| format!("before:{tag}"))
-        .chain(
-            ["policy", "extension-1", "extension-2", "redaction", "storage"]
-                .iter()
-                .map(|tag| format!("after:{tag}")),
-        )
+        .map(|tag| format!("after:{tag}"))
         .collect();
     assert_eq!(order, expected);
 }

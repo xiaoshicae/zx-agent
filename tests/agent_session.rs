@@ -20,7 +20,7 @@ use zx_agent::ai::{Reasoning, Request, ToolDef};
 use zx_agent::runner::RunOutcome;
 use zx_agent::transcript::{Entry, SessionName, Transcript};
 use zx_agent::{Approval, ApprovalRequest, Interaction};
-use zx_agent::{Event, EventKind, Hook, HookContext, HookResult, Input, PolicyDecision, Tool, ToolContext, ToolOutput};
+use zx_agent::{Event, EventKind, Input, PolicyContext, PolicyDecision, Tool, ToolContext, ToolOutput, ToolPolicy};
 
 fn setup(steps: impl IntoIterator<Item = FauxStep>) -> (AgentSession, Arc<NotifyingProvider>, Arc<Collect>) {
     let provider = NotifyingProvider::new(steps);
@@ -582,9 +582,9 @@ async fn concurrent_callers_share_one_running_prompt() {
 
 struct Ask;
 #[async_trait]
-impl Hook for Ask {
-    async fn before_tool(&self, _call: &zx_agent::ai::ToolCall, _ctx: &HookContext) -> HookResult<PolicyDecision> {
-        Ok(PolicyDecision::Ask("review".into()))
+impl ToolPolicy for Ask {
+    async fn check(&self, _call: &zx_agent::ai::ToolCall, _ctx: &PolicyContext) -> PolicyDecision {
+        PolicyDecision::Ask("review".into())
     }
 }
 struct Approver(AtomicUsize);
@@ -608,7 +608,7 @@ async fn model_switching_retains_approval_grants() {
     let next = Arc::new(FauxProvider::new(steps()));
     let host = Arc::new(Approver(AtomicUsize::new(0)));
     let mut config = config(first, vec![Arc::new(common::EchoTool::new("echo"))]);
-    config.hooks.push(Ask);
+    config.policies.push("ask", Arc::new(Ask));
     config.interaction = host.clone();
     let (runner, _) = RunnerSetup::new(config).build();
     let session = AgentSession::from(runner);

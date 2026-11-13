@@ -1,26 +1,87 @@
-//! The verdict on a tool call (pi: `beforeToolCall`, wired to the extension `tool_call` event).
+//! Whether a tool call may run: the [`ToolPolicy`] interface, the verdict it gives, and how a
+//! host approves a call a policy asks about (pi: `beforeToolCall`, wired to the extension
+//! `tool_call` event).
 //!
-//! An unattended run has no one to ask, so whatever decides should deny when unsure. A
-//! verdict is a first line of defense, not a security boundary: run the agent as a
-//! least-privilege user, in a container or VM, for real isolation.
+//! An unattended run has no one to ask, so a policy should deny when unsure. A verdict is a
+//! first line of defense, not a security boundary: run the agent as a least-privilege user,
+//! in a container or VM, for real isolation.
 //!
-//! Hooks decide through [`Hook::before_tool`](crate::Hook::before_tool). The policies that
-//! ship with zx-agent, and the trait they implement, live outside the kernel, in the zx-tools
-//! crate (`zx_agent::policy`):
+//! Only policies decide; hooks observe and transform. The policies that ship with zx-agent
+//! live outside the kernel, in the zx-tools crate (`zx_agent::policy`):
 //!
 //! ```compile_fail
 //! use zx_core::CommandPolicy;
 //! ```
 //!
+//! - `chain`: the policies of a loop, and how their verdicts combine
 //! - `interaction`: how a host approves a call the policy asks about, and the refusal when
 //!   nobody can
 
+mod chain;
 mod interaction;
 
-use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
+
+use crate::ai::ToolCall;
+use crate::{CancelSignal, HookContext};
+
+pub use chain::PolicyChain;
 pub(crate) use interaction::ApprovalCache;
 pub use interaction::{Approval, ApprovalRequest, DEFAULT_APPROVAL_TIMEOUT, Interaction, NoHuman};
+
+/// Decides whether a tool call may run. Registered in a loop's [`PolicyChain`], where the
+/// strictest verdict of all policies stands.
+///
+/// `check` is called after the tool is found and its arguments are validated, before it
+/// runs; the call cannot be changed here. Return [`PolicyDecision::Deny`] when unsure. A
+/// check that panics, outlasts its timeout or is cut short by cancellation denies the call.
+#[async_trait]
+pub trait ToolPolicy: Send + Sync {
+    async fn check(&self, call: &ToolCall, ctx: &PolicyContext) -> PolicyDecision;
+}
+
+/// What a policy knows about the run a call belongs to. Fields are only ever added, so the
+/// struct is `#[non_exhaustive]`: read its fields, and outside the crate build one with
+/// [`PolicyContext::new`].
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct PolicyContext {
+    /// The ID of the session the run belongs to.
+    pub session_id: String,
+    /// The run, as in the events' `runId`.
+    pub run_id: String,
+    /// The tools' working directory.
+    pub cwd: PathBuf,
+    /// Set when the run is cancelled; the chain then stops waiting for the policy.
+    pub cancel: CancelSignal,
+}
+
+impl PolicyContext {
+    /// The context of the run `ctx` belongs to.
+    pub(crate) fn of(ctx: &HookContext) -> Self {
+        Self {
+            session_id: ctx.session_id.clone(),
+            run_id: ctx.run_id.clone(),
+            cwd: ctx.cwd.clone(),
+            cancel: ctx.cancel.clone(),
+        }
+    }
+
+    /// A context for a new run of session `session_id` with a fresh ID, cancelled with
+    /// `cancel`.
+    pub fn new(session_id: String, cwd: PathBuf, cancel: CancellationToken) -> Self {
+        Self {
+            session_id,
+            run_id: uuid::Uuid::new_v4().to_string(),
+            cwd,
+            cancel: CancelSignal::new(cancel),
+        }
+    }
+}
 
 /// The verdict on one tool call. In JSON: `{"decision":"allow"}`, or `deny` / `ask` with a
 /// `reason`.

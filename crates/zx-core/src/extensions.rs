@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crate::ai::PREAMBLE;
 use crate::prompt::GENERATED_SECTIONS;
-use crate::{Hook, HookStage, LoopConfig, Tool};
+use crate::{Hook, HookStage, LoopConfig, Tool, ToolPolicy};
 
 pub use command::{CommandContext, CommandError, CommandOutcome, SlashCommand, check_command_name};
 
@@ -73,9 +73,15 @@ pub trait Extension: Send + Sync {
         Vec::new()
     }
 
-    /// Hook, each declaring [`HookStage::Extension`]: built-in policies decide before them
-    /// and redaction runs after them, so an extension can neither loosen a policy's verdict
-    /// nor bring back a redacted secret.
+    /// Policies that decide whether a tool call may run, registered under the extension's
+    /// name. The strictest verdict of all policies stands, so an extension can tighten what
+    /// the host allows but never loosen it.
+    fn policies(&self) -> Vec<Arc<dyn ToolPolicy>> {
+        Vec::new()
+    }
+
+    /// Hooks, each declaring [`HookStage::Extension`]: redaction runs after them, so an
+    /// extension cannot bring back a redacted secret.
     fn hooks(&self) -> Vec<Box<dyn Hook>> {
         Vec::new()
     }
@@ -87,8 +93,8 @@ pub trait Extension: Send + Sync {
     }
 }
 
-/// Add `extensions` to `config`, in order: their tools after the existing ones, their hooks
-/// under each extension's name, their sections at the end of the system prompt, their
+/// Add `extensions` to `config`, in order: their tools after the existing ones, their policies
+/// and hooks under each extension's name, their sections at the end of the system prompt, their
 /// commands after the existing ones. Everything is checked first, so on error `config` is
 /// unchanged.
 ///
@@ -121,6 +127,9 @@ pub fn register(config: &mut LoopConfig, extensions: &[Arc<dyn Extension>]) -> R
         return Err(format!("extension tools: {error}"));
     }
     for part in parts {
+        for policy in part.policies {
+            config.policies.push(part.name, policy);
+        }
         for hook in part.hooks {
             config.hooks.push_extension_hook(part.name, hook);
         }
@@ -136,6 +145,7 @@ pub fn register(config: &mut LoopConfig, extensions: &[Arc<dyn Extension>]) -> R
 struct Parts<'a> {
     name: &'a str,
     tools: Vec<Arc<dyn Tool>>,
+    policies: Vec<Arc<dyn ToolPolicy>>,
     hooks: Vec<Box<dyn Hook>>,
     sections: Vec<(String, String)>,
     commands: Vec<Arc<dyn SlashCommand>>,
@@ -196,6 +206,7 @@ fn check_extension<'a>(
     Ok(Parts {
         name,
         tools: extension.tools(),
+        policies: extension.policies(),
         hooks,
         sections,
         commands,

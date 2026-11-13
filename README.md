@@ -291,6 +291,7 @@ zx-agent    src/             CLI（run、chat、im、acp）、config.toml 与 ag
 |---|---|
 | 上限 | 有轮次与时间上限 |
 | 工具确认 | 宿主审批；`run` 无人时拒绝 |
+| 工具放行 | 由独立的接口 `ToolPolicy` 判定（放行、拒绝、询问），所有策略取最严的结论；钩子只观察与改写，不拦截调用（pi 在 `beforeToolCall` 钩子里拦截） |
 | 输出截断 | 按 agent 的 `continueOnLength` 自动续写，仍未完成以退出码 6 结束 |
 | 会话写入失败 | 立即中止运行，之后不再写入 |
 | 会话文件 | 启动时立即创建；chat 默认存入会话目录，`--resume` 续接；复制会话与切换分支只在 SDK |
@@ -412,7 +413,7 @@ run、chat 与 im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（完整地�
 
 ```rust
 let mut config = LoopConfig { system_prompt, tools, cwd, ..LoopConfig::new(provider, model) };
-config.hooks.push(PolicyHook::new(policy));
+config.policies.push("permissions", policy);
 let agent = AgentSession::new(config, RetryPolicy::default(), RunLimits::default(), session, sink);
 let report = agent.prompt("任务描述", &CancellationToken::new()).await?;
 ```

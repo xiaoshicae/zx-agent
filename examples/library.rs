@@ -13,7 +13,7 @@ use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::continuation::ContinueOnLength;
 use zx_agent::executor::{LocalExecutor, local_environment_section};
-use zx_agent::policy::{AutoApprove, CommandPolicy, PolicyHook, Rule, RuleMatcher, RulePolicy};
+use zx_agent::policy::{AutoApprove, CommandPolicy, Rule, RuleMatcher, RulePolicy};
 use zx_agent::prompt::build_system_prompt;
 use zx_agent::redact::RedactSecrets;
 use zx_agent::runner::RunLimits;
@@ -70,8 +70,8 @@ async fn main() -> anyhow::Result<()> {
     };
     // Continue once if an answer stops at the output token limit.
     config.hooks.push(ContinueOnLength::new(1));
-    config.hooks.push(PolicyHook::new(Arc::new(CommandPolicy::new())));
-    config.hooks.push(PolicyHook::new(Arc::new(rules)));
+    config.policies.push("command_policy", Arc::new(CommandPolicy::new()));
+    config.policies.push("permissions", Arc::new(rules));
     config.hooks.push(RedactSecrets::new(api_key));
     let session = Transcript::in_memory(SessionHeader::new(&cwd, &model));
     // Any `Fn(&Event)` is an event sink.
