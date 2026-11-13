@@ -1,5 +1,5 @@
-//! What a run lends the loop and the compactor: the session it records in, the hooks and
-//! sink it reports to, and the model it summarizes with. The Runner builds one per run and
+//! What a run lends the loop and the compactor: the session it records in, where its events
+//! go, and the model it summarizes with. The Runner builds one per run and
 //! the loop reaches it as its [`SessionHost`]: recording goes to the session as it would
 //! without a run, and preparing the context may summarize it (pi: AgentSession writes on
 //! `message_end`).
@@ -52,7 +52,7 @@ impl CompactionPause {
 }
 
 /// A run's borrow of the Runner: the session, the configuration with its hooks and model,
-/// and the event sink.
+/// and where the run's events go.
 pub(super) struct RunHost<'a> {
     pub(super) session: &'a mut Transcript,
     pub(super) target: EventTarget<'a>,

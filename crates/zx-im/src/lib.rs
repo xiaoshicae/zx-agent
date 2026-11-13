@@ -1,5 +1,5 @@
 //! Chat platforms: the [`ImChannel`] extension point, and a [`Server`] that answers each
-//! conversation, a direct chat or a thread, with its own [`AgentSession`].
+//! conversation, a direct chat or a thread, with its own [`Session`].
 //!
 //! A channel only moves messages. The server owns routing, sessions, the run limit and
 //! approvals, so supporting another platform means implementing the four methods of
@@ -27,7 +27,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 // The modules name the model layer, the kernel and the shared helpers by these crate-root paths.
 use zx_ai as ai;
-use zx_core::{AgentSession, agent_session, runner, transcript};
+use zx_core::{Session, runner, session, transcript};
 
 use zx_core::events::ApprovalResult;
 
@@ -257,7 +257,6 @@ pub struct CardLabels {
     pub denied: String,
     pub timed_out: String,
     pub cancelled: String,
-    pub failed: String,
 }
 
 impl Default for CardLabels {
@@ -271,7 +270,6 @@ impl Default for CardLabels {
             denied: "Denied".into(),
             timed_out: "Nobody decided in time; not run".into(),
             cancelled: "Cancelled; not run".into(),
-            failed: "Approval failed; not run".into(),
         }
     }
 }
@@ -284,7 +282,6 @@ impl CardLabels {
             ApprovalResult::Denied => &self.denied,
             ApprovalResult::TimedOut => &self.timed_out,
             ApprovalResult::Cancelled => &self.cancelled,
-            ApprovalResult::Failed => &self.failed,
         }
     }
 }

@@ -63,7 +63,7 @@ pub struct CommandOutcome {
     pub prompt: Option<Input>,
 }
 
-/// Why [`crate::AgentSession::run_command`] returned no outcome.
+/// Why [`crate::Session::run_command`] returned no outcome.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum CommandError {
     /// No extension registered a command with that name.

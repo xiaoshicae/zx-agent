@@ -10,27 +10,15 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use common::mock_server::{MockServer, Reply};
-use common::{Collect, RunnerSetup, config, fast_retry};
+use common::{RunnerSetup, config, fast_retry};
 use zx_agent::ai::openai::{ApiKey, OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::{Message, PREAMBLE, ProviderError, StopReason, SystemPrompt};
 use zx_agent::builtin::tools::BashTool;
 use zx_agent::compaction::Config;
-use zx_agent::events::{Event, EventKind, EventSink};
+use zx_agent::events::{Event, EventKind};
 use zx_agent::runner::RunOutcome;
 use zx_agent::transcript::Transcript;
-
-/// Cancels a token at the first streamed delta, to cancel a response mid-stream without
-/// depending on timing.
-struct CancelOnFirstDelta(CancellationToken);
-
-impl EventSink for CancelOnFirstDelta {
-    fn emit(&self, event: &Event) {
-        if matches!(event.event, EventKind::MessageUpdate { .. }) {
-            self.0.cancel();
-        }
-    }
-}
 
 /// A runner whose provider talks to `server`, with a bash tool and a one-line system prompt.
 fn setup(server: &MockServer, idle_timeout: Duration) -> RunnerSetup {
@@ -64,7 +52,7 @@ fn raw_error(status: u16, headers: &str, body: &str) -> Reply {
     ))
 }
 
-fn provider_error(runner: &zx_agent::runner::Runner) -> ProviderError {
+fn provider_error(runner: &common::Runner) -> ProviderError {
     match runner.session().messages().last() {
         Some(Message::Assistant(message)) => message.provider_error.clone().expect("structured provider error"),
         other => panic!("expected a failed assistant message: {other:?}"),
@@ -170,19 +158,16 @@ async fn numeric_retry_after_is_used_by_the_runner() {
     )])
     .await;
     let cancel = CancellationToken::new();
-    let observed = Arc::new(Collect::default());
-    let captured = observed.clone();
     let trigger = cancel.clone();
-    let mut runner = RunnerSetup {
+    let (mut runner, observed) = RunnerSetup {
         retry: RetryPolicy::default(),
         ..setup(&server, Duration::from_secs(10))
     }
-    .build_with(Arc::new(move |event: &Event| {
+    .build_with(move |event: &Event| {
         if matches!(event.event, EventKind::RetryScheduled { .. }) {
             trigger.cancel();
         }
-        captured.emit(event);
-    }));
+    });
 
     let report = runner.run("check", &cancel).await;
 
@@ -397,8 +382,15 @@ async fn a_stalled_stream_fails_after_the_idle_timeout() {
 async fn cancelling_mid_stream_keeps_the_text_received_so_far() {
     let first_chunk = json!({"choices":[{"index":0,"delta":{"content":"partial"}}]});
     let server = MockServer::start(vec![Reply::Stall(vec![first_chunk])]).await;
+    // Cancelled at the first streamed delta, to cancel a response mid-stream without
+    // depending on timing.
     let cancel = CancellationToken::new();
-    let mut runner = setup(&server, Duration::from_secs(10)).build_with(Arc::new(CancelOnFirstDelta(cancel.clone())));
+    let trigger = cancel.clone();
+    let (mut runner, _) = setup(&server, Duration::from_secs(10)).build_with(move |event: &Event| {
+        if matches!(event.event, EventKind::MessageUpdate { .. }) {
+            trigger.cancel();
+        }
+    });
 
     let report = runner.run("check", &cancel).await;
 

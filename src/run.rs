@@ -2,19 +2,20 @@
 
 use std::io::{IsTerminal, Read};
 use std::path::Path;
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tokio_util::sync::CancellationToken;
 
-use zx_agent::AgentSession;
 use zx_agent::ai::Message;
 use zx_agent::config::Builtin;
-use zx_agent::events::{Event, EventKind, EventSink};
+use zx_agent::events::{Event, EventKind};
 use zx_agent::runner::{RunOutcome, RunReport};
+use zx_agent::{Run, Session};
 
 use crate::cli::{self, OutputMode, RunArgs};
-use crate::process::{EXIT_DENIED, JsonlEvents, exit_code, print_line, run_sink, spawn_signal_handler, with_telemetry};
+use crate::process::{
+    EXIT_DENIED, JsonlEvents, exit_code, print_line, run_traces, spawn_signal_handler, with_telemetry,
+};
 use crate::render::{answer_end_line, progress_line, visible};
 use crate::session_files::{SessionChoice, SessionPlace};
 
@@ -47,14 +48,15 @@ pub(crate) async fn run(args: RunArgs) -> Result<u8> {
     with_telemetry(async move |telemetry| {
         let shared = cli::Shared::connect(base, budget, Builtin::Unattended)
             .await?
-            .with_traces(telemetry.map(run_sink));
-        let session = build_session(&shared, session_file.as_deref(), output, deltas).await?;
+            .with_traces(telemetry.map(run_traces));
+        let session = build_session(&shared, session_file.as_deref()).await?;
         let cancel = CancellationToken::new();
         spawn_signal_handler(cancel.clone());
-        let report = match prompt {
-            Some(prompt) => session.prompt(prompt, &cancel).await?,
-            None => session.continue_run(&cancel).await?,
+        let run = match prompt {
+            Some(prompt) => session.send(prompt)?,
+            None => session.continue_run()?,
         };
+        let report = read_to_end(&session, run, &cancel, &Progress::of(output, deltas)).await;
         print_report(&report, output, session_file.as_deref());
         Ok(match report.outcome {
             RunOutcome::Completed if fail_on_denied && report.denied_calls > 0 => EXIT_DENIED,
@@ -82,22 +84,34 @@ fn read_prompt(arg: &str) -> Result<String> {
 
 /// Assemble an unattended session of the `unattended` agent, or the user's file that
 /// replaces it, without exposing interactive choices to the kernel.
-async fn build_session(
-    shared: &cli::Shared,
-    session: Option<&Path>,
-    output: OutputMode,
-    deltas: bool,
-) -> Result<AgentSession> {
+async fn build_session(shared: &cli::Shared, session: Option<&Path>) -> Result<Session> {
     // `--session` continues the session its file holds, or starts the file.
     let place = SessionPlace::file_or_memory(session);
     let existing = place.only().await?;
     let choice = SessionChoice::existing_or_new(existing.as_deref());
     let prepared = cli::prepare(shared, &shared.settings.model, None, &place, choice).await?;
-    let sink: Arc<dyn EventSink> = match output {
-        OutputMode::Text => Arc::new(TextProgress),
-        OutputMode::Jsonl => Arc::new(JsonlEvents { deltas }),
-    };
-    prepared.into_session(sink)
+    prepared.into_session()
+}
+
+/// Read `run` to its end, showing its events as `progress` does. A signal, which cancels
+/// `cancel`, cancels the run through `session`; the run is still read to its end, for its
+/// report. A signal that arrived before the run started cancels it at once.
+async fn read_to_end(session: &Session, mut run: Run, cancel: &CancellationToken, progress: &Progress) -> RunReport {
+    let mut signalled = false;
+    loop {
+        tokio::select! {
+            biased;
+            () = cancel.cancelled(), if !signalled => {
+                session.cancel();
+                signalled = true;
+            }
+            event = run.next() => match event {
+                Some(event) => progress.emit(&event),
+                None => break,
+            },
+        }
+    }
+    run.wait().await
 }
 
 /// The answer on stdout and a summary line on stderr, which names `session`, the session
@@ -140,21 +154,42 @@ fn print_report(report: &RunReport, output: OutputMode, session: Option<&Path>) 
     }
 }
 
-/// Short progress lines on stderr, printed like chat's; the answer is printed with the report.
-struct TextProgress;
+/// How a run shows its events while it runs.
+enum Progress {
+    /// Short progress lines on stderr, printed like chat's; the answer is printed with the
+    /// report.
+    Text,
+    /// Every event as one JSON line on stdout.
+    Jsonl(JsonlEvents),
+}
 
-impl EventSink for TextProgress {
+impl Progress {
+    fn of(output: OutputMode, deltas: bool) -> Self {
+        match output {
+            OutputMode::Text => Self::Text,
+            OutputMode::Jsonl => Self::Jsonl(JsonlEvents { deltas }),
+        }
+    }
+
     fn emit(&self, event: &Event) {
-        if let EventKind::MessageEnd {
-            message: Message::Assistant(message),
-            ..
-        } = &event.event
-        {
-            if let Some((_, line)) = answer_end_line(message) {
-                eprintln!("{line}");
-            }
-        } else if let Some((_, line)) = progress_line(&event.event) {
+        match self {
+            Self::Text => text_progress(event),
+            Self::Jsonl(events) => events.emit(event),
+        }
+    }
+}
+
+/// The line that `event` adds to the progress on stderr, if it adds one.
+fn text_progress(event: &Event) {
+    if let EventKind::MessageEnd {
+        message: Message::Assistant(message),
+        ..
+    } = &event.event
+    {
+        if let Some((_, line)) = answer_end_line(message) {
             eprintln!("{line}");
         }
+    } else if let Some((_, line)) = progress_line(&event.event) {
+        eprintln!("{line}");
     }
 }

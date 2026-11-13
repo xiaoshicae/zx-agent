@@ -13,9 +13,12 @@ pub(crate) mod im;
 pub(crate) mod mock_server;
 pub(crate) mod summary_eval;
 
+use std::future::Future;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -28,12 +31,16 @@ use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::{
     AssistantMessage, ContentBlock, EventReceiver, Message, Provider, Request, StopReason, ToolCall, ToolDef, Usage,
 };
-use zx_agent::events::{Event, EventKind, EventSink};
+use zx_agent::compaction;
+use zx_agent::events::{Event, EventKind};
 use zx_agent::hooks::HookContext;
 use zx_agent::input::{Input, InputQueues};
-use zx_agent::runner::{LoopConfig, RunLimits, RunReport, Runner};
+use zx_agent::policy::{ApprovalDecision, ApprovalMode, DEFAULT_APPROVAL_TIMEOUT};
+use zx_agent::runner::{LoopConfig, RunLimits, RunReport};
+use zx_agent::session::SessionError;
 use zx_agent::tools::{ExecutionMode, Tool, ToolContext, ToolOutput};
 use zx_agent::transcript::{Entry, JsonlStorage, LoadedSession, SessionHeader, SessionStorage, Transcript};
+use zx_agent::{Run, Session};
 
 /// The compiled `zx-agent`, for the tests that drive the program.
 ///
@@ -381,16 +388,15 @@ impl Tool for EchoTool {
     }
 }
 
+/// The events of the runs a test drove, in the order they were read.
 #[derive(Default)]
 pub(crate) struct Collect(pub Mutex<Vec<Event>>);
 
-impl EventSink for Collect {
+impl Collect {
     fn emit(&self, event: &Event) {
         self.0.lock().unwrap().push(event.clone());
     }
-}
 
-impl Collect {
     /// The events with their envelopes.
     pub(crate) fn envelopes(&self) -> Vec<Event> {
         self.0.lock().unwrap().clone()
@@ -499,6 +505,22 @@ pub(crate) async fn run_prompt_with(
     (report, sink)
 }
 
+/// Run one user `prompt` on a new in-memory session whose approval requests `approver`
+/// answers. Returns the report and the events.
+pub(crate) async fn run_approved(
+    config: LoopConfig,
+    approver: Arc<dyn Approver>,
+    prompt: &str,
+) -> (RunReport, Arc<Collect>) {
+    let (mut runner, events) = RunnerSetup {
+        approver: Some(approver),
+        ..RunnerSetup::new(config)
+    }
+    .build();
+    let report = runner.run(prompt, &CancellationToken::new()).await;
+    (report, events)
+}
+
 /// A hook context for calling a hook directly: a fresh run of a session called `session`, in
 /// the current directory.
 pub(crate) fn hook_context() -> HookContext {
@@ -550,13 +572,35 @@ pub(crate) fn read_session_file(path: &Path) -> anyhow::Result<Transcript> {
     })
 }
 
-/// The parts of a runner, with test defaults: no retries, unattended preset limits,
-/// an in-memory session. Override fields with struct update syntax, then `build`.
+/// A call that waits for approval, as the run announced it.
+pub(crate) struct Asked {
+    pub tool_call_id: String,
+    pub tool: String,
+    /// The arguments the call would run with.
+    pub args: Value,
+    /// Why the policy asks.
+    pub reason: String,
+}
+
+/// Answers the approval requests of a test's runs, as a person at a frontend would: while
+/// it decides, the run is read on, so the run's timeout and cancellation still take effect.
+#[async_trait]
+pub(crate) trait Approver: Send + Sync {
+    /// The answer to `request`; `None` leaves it unanswered.
+    async fn confirm(&self, request: &Asked) -> Option<ApprovalDecision>;
+}
+
+/// The parts of a session, with test defaults: no retries, unattended preset limits,
+/// an in-memory session, no compaction settings, nobody to answer approvals. Override
+/// fields with struct update syntax, then `build`.
 pub(crate) struct RunnerSetup {
     pub config: LoopConfig,
     pub retry: RetryPolicy,
     pub limits: RunLimits,
     pub session: Transcript,
+    /// Who answers the approval requests of the runs. With one, the session waits for
+    /// answers, two minutes unless `config.approvals` says how long.
+    pub approver: Option<Arc<dyn Approver>>,
 }
 
 impl RunnerSetup {
@@ -566,18 +610,260 @@ impl RunnerSetup {
             retry: fast_retry(0),
             limits: test_limits(),
             session: Transcript::in_memory(header()),
+            approver: None,
         }
     }
 
-    /// The runner and the sink that records its events.
+    /// The runner and the events of its runs.
     pub(crate) fn build(self) -> (Runner, Arc<Collect>) {
-        let sink = Arc::new(Collect::default());
-        (self.build_with(sink.clone()), sink)
+        let events = Arc::new(Collect::default());
+        let runner = Runner {
+            parts: Mutex::new(Some(Parts {
+                setup: self,
+                compaction: compaction::Config::default(),
+                watch: None,
+            })),
+            driven: OnceLock::new(),
+            events: events.clone(),
+        };
+        (runner, events)
     }
 
-    /// The runner, sending events to `sink`.
-    pub(crate) fn build_with(self, sink: Arc<dyn EventSink>) -> Runner {
-        Runner::new(self.config, self.retry, self.limits, self.session, sink)
+    /// The runner and the events of its runs, with `watch` called for each event as it is
+    /// read.
+    pub(crate) fn build_with(self, watch: impl Fn(&Event) + Send + Sync + 'static) -> (Runner, Arc<Collect>) {
+        let (runner, events) = self.build();
+        if let Some(parts) = runner.parts.lock().unwrap().as_mut() {
+            parts.watch = Some(Arc::new(watch));
+        }
+        (runner, events)
+    }
+}
+
+/// What a test does with each event of a run as it is read.
+type Watch = Arc<dyn Fn(&Event) + Send + Sync>;
+
+/// What a session is made of, until it is made.
+struct Parts {
+    setup: RunnerSetup,
+    compaction: compaction::Config,
+    watch: Option<Watch>,
+}
+
+/// A session driven the way the tests of runs want it: one run at a time, read to its end,
+/// with its events collected. The session is made when it is first needed, so that a test
+/// can still give it its compaction settings.
+pub(crate) struct Runner {
+    parts: Mutex<Option<Parts>>,
+    driven: OnceLock<Driven>,
+    events: Arc<Collect>,
+}
+
+impl Runner {
+    /// The session, made when it is first asked for.
+    fn driven(&self) -> &Driven {
+        self.driven.get_or_init(|| {
+            let parts = self.parts.lock().unwrap().take().expect("the session is made once");
+            let RunnerSetup {
+                mut config,
+                retry,
+                limits,
+                session,
+                approver,
+            } = parts.setup;
+            if approver.is_some() && config.approvals == ApprovalMode::Deny {
+                config.approvals = ApprovalMode::Wait(DEFAULT_APPROVAL_TIMEOUT);
+            }
+            let session = Session::new(config, retry, limits, parts.compaction, session)
+                .expect("with_compaction checked the budgets");
+            Driven {
+                session,
+                events: self.events.clone(),
+                watch: parts.watch,
+                approver,
+            }
+        })
+    }
+
+    /// Opt into automatic context preparation or tune manual summary budgets, before the
+    /// first run. Rejects budgets that cannot work.
+    pub(crate) fn with_compaction(self, config: compaction::Config) -> anyhow::Result<Self> {
+        config.validate()?;
+        self.parts
+            .lock()
+            .unwrap()
+            .as_mut()
+            .expect("compaction is set before the first run")
+            .compaction = config;
+        Ok(self)
+    }
+
+    /// Run `message` to the end; cancelling `cancel` cancels the run.
+    pub(crate) async fn run(&mut self, message: impl Into<Input>, cancel: &CancellationToken) -> RunReport {
+        let run = self.driven().prompt(message, cancel);
+        run.await.expect("one run at a time")
+    }
+
+    /// Continue the conversation without new input, to the end.
+    pub(crate) async fn continue_run(&mut self, cancel: &CancellationToken) -> RunReport {
+        let run = self.driven().continue_run(cancel);
+        run.await.expect("one run at a time")
+    }
+
+    /// Summarize the old prefix of the conversation.
+    pub(crate) async fn compact(&mut self, cancel: &CancellationToken) -> compaction::Report {
+        let run = self.driven().compact(cancel);
+        run.await.expect("one run at a time")
+    }
+
+    /// A copy of the session's transcript as it is now, to read.
+    pub(crate) fn session(&self) -> Transcript {
+        self.driven()
+            .with_transcript(copy_of)
+            .expect("the transcript is read between runs")
+    }
+
+    /// The session's queues.
+    pub(crate) fn queues(&self) -> &InputQueues {
+        self.driven().queues()
+    }
+
+    /// The session itself, for a test that shares it or calls what only a session has; its
+    /// runs still go to the same events.
+    pub(crate) fn into_session(self) -> Driven {
+        self.driven();
+        self.driven.into_inner().expect("made above")
+    }
+}
+
+/// A read-only copy of `transcript`: its records, and its position in the tree.
+fn copy_of(transcript: &Transcript) -> Transcript {
+    let loaded = LoadedSession {
+        header: transcript.header().clone(),
+        records: transcript
+            .entries()
+            .iter()
+            .map(|entry| serde_json::to_string(entry).unwrap())
+            .collect(),
+        incomplete_tail_bytes: transcript.incomplete_tail_bytes(),
+    };
+    let mut copy = Transcript::snapshot(loaded).expect("a session's own records load");
+    match transcript.leaf_id() {
+        Some(leaf) => copy.branch(leaf).expect("the leaf is one of the records"),
+        None => copy.reset_leaf(),
+    }
+    copy
+}
+
+/// A session whose runs a test starts with one call that reads them to their end,
+/// collecting their events. Everything else is the [`Session`]'s own, which it derefs to.
+#[derive(Clone)]
+pub(crate) struct Driven {
+    session: Session,
+    events: Arc<Collect>,
+    watch: Option<Watch>,
+    approver: Option<Arc<dyn Approver>>,
+}
+
+/// An approval request on its way to an answer: the request's ID, and the answer.
+type Answering = Pin<Box<dyn Future<Output = (String, Option<ApprovalDecision>)> + Send>>;
+
+impl Deref for Driven {
+    type Target = Session;
+
+    fn deref(&self) -> &Session {
+        &self.session
+    }
+}
+
+impl Driven {
+    /// Run `message` to the end; cancelling `cancel` cancels the run. Busy when the session
+    /// already runs.
+    pub(crate) async fn prompt(
+        &self,
+        message: impl Into<Input>,
+        cancel: &CancellationToken,
+    ) -> Result<RunReport, SessionError> {
+        Ok(self.read(self.session.send(message)?, cancel).await)
+    }
+
+    /// Continue the conversation without new input, to the end.
+    pub(crate) async fn continue_run(&self, cancel: &CancellationToken) -> Result<RunReport, SessionError> {
+        Ok(self.read(self.session.continue_run()?, cancel).await)
+    }
+
+    /// Summarize the old prefix of the conversation.
+    pub(crate) async fn compact(&self, cancel: &CancellationToken) -> Result<compaction::Report, SessionError> {
+        Ok(self.read(self.session.compact()?, cancel).await)
+    }
+
+    /// Read `run` to its end, collecting its events and answering its approval requests;
+    /// `cancel`, once cancelled, cancels the run, which is still read to its end.
+    async fn read<T>(&self, mut run: Run<T>, cancel: &CancellationToken) -> T {
+        let mut cancelled = false;
+        // The approver's answer under way; the run asks for one approval at a time.
+        let mut answering: Option<Answering> = None;
+        loop {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled(), if !cancelled => {
+                    self.session.cancel();
+                    cancelled = true;
+                }
+                (approval_id, decision) = answered(&mut answering) => {
+                    answering = None;
+                    if let Some(decision) = decision {
+                        // The run may have stopped waiting; then the answer changes nothing.
+                        drop(self.session.resolve_approval(&approval_id, decision));
+                    }
+                }
+                event = run.next() => match event {
+                    Some(event) => {
+                        self.events.emit(&event);
+                        if let Some(watch) = &self.watch {
+                            watch(&event);
+                        }
+                        if let Some(asked) = self.ask(&event) {
+                            answering = Some(asked);
+                        }
+                    }
+                    None => break,
+                },
+            }
+        }
+        run.wait().await
+    }
+
+    /// The approver's answer to the request that `event` announces, if it announces one
+    /// and somebody answers.
+    fn ask(&self, event: &Event) -> Option<Answering> {
+        let EventKind::ApprovalRequested {
+            approval_id,
+            tool_call_id,
+            tool_name,
+            args,
+            reason,
+        } = &event.event
+        else {
+            return None;
+        };
+        let approver = self.approver.clone()?;
+        let approval_id = approval_id.clone();
+        let asked = Asked {
+            tool_call_id: tool_call_id.clone(),
+            tool: tool_name.clone(),
+            args: args.clone(),
+            reason: reason.clone(),
+        };
+        Some(Box::pin(async move { (approval_id, approver.confirm(&asked).await) }))
+    }
+}
+
+/// The answer under way, once it is there; never without one.
+async fn answered(answering: &mut Option<Answering>) -> (String, Option<ApprovalDecision>) {
+    match answering {
+        Some(answer) => answer.await,
+        None => std::future::pending().await,
     }
 }
 

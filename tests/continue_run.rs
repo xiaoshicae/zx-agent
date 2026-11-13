@@ -8,16 +8,15 @@ use std::sync::Arc;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use zx_agent::AgentSession;
-use zx_agent::agent_session::AgentSessionError;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, StopReason};
 use zx_agent::events::EventKind;
-use zx_agent::runner::{RunOutcome, Runner};
+use zx_agent::runner::RunOutcome;
+use zx_agent::session::SessionError;
 use zx_agent::tools::Tool;
 use zx_agent::transcript::{Entry, Transcript};
 
-use common::{Collect, EchoTool, RunnerSetup, config, header, summarize, tool_call_answer};
+use common::{Collect, EchoTool, Runner, RunnerSetup, config, header, summarize, tool_call_answer};
 
 fn runner(provider: &Arc<FauxProvider>, session: Transcript) -> (Runner, Arc<Collect>) {
     let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(EchoTool::new("echo"))];
@@ -122,7 +121,7 @@ async fn a_finished_answer_leaves_nothing_to_continue_unless_input_is_queued() {
     assert_eq!(nothing.model_requests, 0);
     assert_eq!(provider.requests().len(), 1);
 
-    runner.config().queues.follow_up("and also this");
+    runner.queues().follow_up("and also this");
     let queued = runner.continue_run(&CancellationToken::new()).await;
     assert_eq!(queued.outcome, RunOutcome::Completed, "{queued:?}");
     assert_eq!(
@@ -173,7 +172,7 @@ async fn continuing_requests_are_rebuilt_from_the_session_file() {
 async fn a_running_session_refuses_to_continue() {
     let provider = Arc::new(FauxProvider::new([FauxStep::Hang]));
     let (runner, events) = runner(&provider, Transcript::in_memory(header()));
-    let session = AgentSession::from(runner);
+    let session = runner.into_session();
     let cancel = CancellationToken::new();
     let mut running = Box::pin(session.prompt("first", &cancel));
     // Wait until the request is in flight.
@@ -190,7 +189,7 @@ async fn a_running_session_refuses_to_continue() {
 
     assert_eq!(
         session.continue_run(&CancellationToken::new()).await.err(),
-        Some(AgentSessionError::Busy)
+        Some(SessionError::Busy)
     );
     session.cancel();
     running.await.unwrap();

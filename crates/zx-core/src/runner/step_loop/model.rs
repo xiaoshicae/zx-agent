@@ -18,11 +18,14 @@ impl StepLoop<'_> {
             model: config.model.clone(),
             reasoning: config.reasoning,
         };
-        let settings = config
+        let prepared = config
             .hooks
             .prepare_request(&messages, step, configured, self.trace.context())
-            .await
-            .map_err(|error| Halt::Failed(self.report_hook_failure(error)))?;
+            .await;
+        let settings = match prepared {
+            Ok(settings) => settings,
+            Err(error) => return Err(self.hook_failed(error).await),
+        };
         let request = Request {
             model: settings.model,
             messages,

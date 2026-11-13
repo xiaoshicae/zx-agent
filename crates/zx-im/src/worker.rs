@@ -12,17 +12,18 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{AcquireError, OwnedSemaphorePermit, TryAcquireError, mpsc, oneshot};
+use tokio::sync::{AcquireError, OwnedSemaphorePermit, TryAcquireError, mpsc};
 use tokio::task::{JoinError, JoinHandle};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::agent_session::AgentSessionError;
 use crate::ai::now_ms;
 use crate::runner::RunReport;
+use crate::session::SessionError;
 use crate::transcript::CustomMessage;
+use zx_core::policy::ApprovalDecision;
 
-use super::approval::{ApprovalUpdate, Decided};
+use super::approval::ApprovalUpdate;
 use super::outlet::{Opened, Outlet, said};
 use super::server::Shared;
 use super::{
@@ -162,7 +163,7 @@ enum Phase {
     /// A prompt runs in its own task and holds a run slot; `status` is the message that
     /// says so, replaced by the answer at the end.
     Running {
-        task: JoinHandle<Result<RunReport, AgentSessionError>>,
+        task: JoinHandle<Result<RunReport, SessionError>>,
         slot: OwnedSemaphorePermit,
         status: Option<MessageRef>,
         open: Opened,
@@ -181,7 +182,7 @@ impl Phase {
 
 enum Step {
     Slot(Result<OwnedSemaphorePermit, AcquireError>),
-    Ended(Result<Result<RunReport, AgentSessionError>, JoinError>),
+    Ended(Result<Result<RunReport, SessionError>, JoinError>),
     Idle,
 }
 
@@ -210,15 +211,14 @@ fn is_command(text: &str) -> bool {
 /// A card waiting for its result.
 struct Pending {
     id: ApprovalId,
-    tool_call_id: String,
     card: MessageRef,
     decision: Decision,
 }
 
 /// How far a card's decision has come.
 enum Decision {
-    /// Nobody has clicked yet; the first approver's click goes here.
-    Open(oneshot::Sender<Decided>),
+    /// Nobody has clicked yet; the first approver's click decides.
+    Open,
     /// Who decided.
     By(UserId),
     /// A click came after the run stopped waiting; the card closes without a decider.
@@ -353,7 +353,7 @@ impl Worker {
             }
         }
         let session = match &self.phase {
-            Phase::Waiting { open, .. } | Phase::Idle { open: Some(open), .. } => Arc::clone(&open.session),
+            Phase::Waiting { open, .. } | Phase::Idle { open: Some(open), .. } => open.session.clone(),
             // Opened above, and no run started since.
             Phase::Idle { open: None, .. } | Phase::Running { .. } => return,
         };
@@ -369,7 +369,7 @@ impl Worker {
     /// there before.
     async fn open(&mut self, trigger: Option<&MessageRef>) -> Result<Opened, String> {
         let opening = self.opening;
-        let opened = self.out.open(&self.updates, opening).await?;
+        let opened = self.out.open(opening).await?;
         self.opening = Opening::Latest;
         if opening == Opening::Latest
             && let Some(trigger) = trigger
@@ -436,10 +436,9 @@ impl Worker {
             // start replaces this status.
             self.out.shared.keep_status(&self.out.key, status).await;
         }
-        let session = Arc::clone(&open.session);
-        let stop = self.stop.clone();
         let text = texts.join("\n\n");
-        let task = tokio::spawn(async move { session.prompt(text, &stop).await });
+        let run = self.out.run(&open.session, text, &self.updates, self.stop.clone());
+        let task = tokio::spawn(run);
         self.phase = Phase::Running {
             task,
             slot,
@@ -475,7 +474,7 @@ impl Worker {
     /// Post the answer and record what was heard meanwhile, then run input that arrived as
     /// the run ended; while the server stops, that input is unanswered instead. After `/new`
     /// the session is released instead.
-    async fn ended(&mut self, ended: Result<Result<RunReport, AgentSessionError>, JoinError>, closing: bool) {
+    async fn ended(&mut self, ended: Result<Result<RunReport, SessionError>, JoinError>, closing: bool) {
         let (slot, status, open) = match self.take_phase() {
             Phase::Running { slot, status, open, .. } => (slot, status, open),
             // Only a running conversation ends a run.
@@ -595,31 +594,65 @@ impl Worker {
             self.out.post(self.out.replies().not_approver.clone()).await;
             return;
         }
-        let pending = &mut self.pending[index];
         // The first approver's click decides; later clicks on the card change nothing.
-        let Decision::Open(decide) = std::mem::replace(&mut pending.decision, Decision::Lapsed) else {
+        if !matches!(self.pending[index].decision, Decision::Open) {
             return;
+        }
+        let decision = match choice {
+            Choice::AllowOnce => ApprovalDecision::AllowOnce,
+            Choice::Deny => ApprovalDecision::Deny(format!("denied in the chat by {user}")),
         };
-        // Sending fails when confirm stopped waiting (timeout or cancellation); the run's
-        // approval_resolved event then closes the card without a decider.
-        let decided = Decided {
-            user: user.clone(),
-            choice,
+        // The run may have stopped waiting (timeout or cancellation); its approval_resolved
+        // event then closes the card without a decider.
+        self.pending[index].decision = match self.answer(&approval, decision) {
+            Ok(()) => Decision::By(user),
+            Err(_) => Decision::Lapsed,
         };
-        if decide.send(decided).is_ok() {
-            pending.decision = Decision::By(user);
+    }
+
+    /// Answer the approval request `id` of the run in progress.
+    fn answer(&self, id: &ApprovalId, decision: ApprovalDecision) -> Result<(), SessionError> {
+        match &self.phase {
+            Phase::Running { open, .. } => open.session.resolve_approval(&id.0, decision),
+            // Without a run, no request waits.
+            Phase::Idle { .. } | Phase::Waiting { .. } => Err(SessionError::UnknownApproval),
+        }
+    }
+
+    /// A call waits for approval: post its card. Without a card nobody can decide, so the
+    /// call is denied, and the model hears why.
+    async fn ask(&mut self, id: ApprovalId, card: Outbound) {
+        match self.out.ask(&card).await {
+            Ok(card) => self.pending.push(Pending {
+                id,
+                card,
+                decision: Decision::Open,
+            }),
+            Err(error) => {
+                // The request may have ended meanwhile; then there is nothing to deny.
+                drop(self.answer(&id, ApprovalDecision::Deny(error)));
+            }
         }
     }
 
     async fn approval(&mut self, update: ApprovalUpdate) {
         match update {
-            ApprovalUpdate::Posted(posted) => self.pending.push(Pending {
-                id: posted.id,
-                tool_call_id: posted.tool_call_id,
-                card: posted.card,
-                decision: Decision::Open(posted.decide),
-            }),
+            ApprovalUpdate::Requested {
+                id,
+                tool,
+                summary,
+                reason,
+            } => {
+                let card = Outbound::ApprovalRequest {
+                    id: id.clone(),
+                    tool,
+                    summary,
+                    reason,
+                };
+                self.ask(id, card).await;
+            }
             ApprovalUpdate::Resolved {
+                id,
                 tool_call_id,
                 tool,
                 result,
@@ -627,13 +660,13 @@ impl Worker {
                 let pending = self
                     .pending
                     .iter()
-                    .position(|pending| pending.tool_call_id == tool_call_id)
+                    .position(|pending| Some(&pending.id) == id.as_ref())
                     .map(|index| self.pending.swap_remove(index));
                 let (approval, user) = match pending {
                     Some(pending) => {
                         let user = match pending.decision {
                             Decision::By(user) => Some(user),
-                            Decision::Open(_) | Decision::Lapsed => None,
+                            Decision::Open | Decision::Lapsed => None,
                         };
                         let closed = Outbound::ApprovalResolved {
                             id: pending.id.clone(),
@@ -643,7 +676,7 @@ impl Worker {
                         self.out.replace(&pending.card, closed).await;
                         (Some(pending.id), user)
                     }
-                    // No card: posting it failed, so the approval ended without one.
+                    // No card: nobody was asked, or posting it failed.
                     None => (None, None),
                 };
                 self.out.shared.sink.emit(&ServerEvent::Approval(ApprovalRecord {

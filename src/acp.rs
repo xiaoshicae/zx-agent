@@ -1,6 +1,6 @@
 //! The ACP agent: an editor or a terminal client drives sessions over stdio with the Agent
 //! Client Protocol (JSON-RPC, one message per line). The client renders everything, so this
-//! module only maps between the protocol and `AgentSession`: prompts become runs, run events
+//! module only maps between the protocol and `Session`: prompts become runs, run events
 //! become session updates (`updates`), approvals become permission requests (`permissions`),
 //! and a prompt that starts with one of the agent's slash commands runs it (`commands`).
 //!
@@ -31,13 +31,13 @@ use agent_client_protocol::v1::schema::{
 };
 use agent_client_protocol::{Agent, Client, Error, ErrorCode, JsonRpcResponse, Responder, Stdio, V1};
 use anyhow::{Context, Result};
-use tokio_util::sync::CancellationToken;
 
-use zx_agent::AgentSession;
+use zx_agent::Session;
 use zx_agent::builtin::tools::{BASH, EDIT_FILE, FIND, GREP, LS, READ_FILE, WRITE_FILE};
 use zx_agent::config::Builtin;
-use zx_agent::events::EventSink;
-use zx_agent::otel::Telemetry;
+use zx_agent::events::EventKind;
+use zx_agent::otel::{Telemetry, TraceHook};
+use zx_agent::policy::ApprovalMode;
 use zx_agent::runner::{RunOutcome, RunReport};
 use zx_agent::sync::lock;
 use zx_agent::transcript::{SessionInfo as StoredSession, SessionQuery};
@@ -46,16 +46,24 @@ use crate::cli::{self, AcpArgs, PreparedSession};
 use crate::process::{EXIT_COMPLETED, with_telemetry};
 use crate::session_files::{self, SessionChoice, SessionPlace};
 
-use permissions::Permissions;
 use updates::Updates;
 
 /// Where a session the client names is.
 enum Located {
     /// A conversation this process holds: one the client created with `session/new`, loaded
     /// with `session/load` or resumed with `session/resume`.
-    Live(Arc<AgentSession>),
+    Live(Live),
     /// A session kept among the session files, which no session of this process has open.
     Stored,
+}
+
+/// A conversation this process holds, and the client it reports to and asks.
+#[derive(Clone)]
+struct Live {
+    session: Session,
+    updates: Arc<Updates>,
+    cx: ConnectionTo<Client>,
+    id: SessionId,
 }
 
 /// A session prepared, with its updates, before it runs: `session/load` replays the
@@ -64,6 +72,8 @@ struct Prepared {
     session: PreparedSession,
     updates: Arc<Updates>,
     id: SessionId,
+    /// The client, which the session's runs ask for approval.
+    cx: ConnectionTo<Client>,
 }
 
 struct Host {
@@ -73,11 +83,11 @@ struct Host {
     place: SessionPlace,
     /// Sessions by ID. Handlers run one at a time on the dispatch loop but prompts run in
     /// spawned tasks, so the map is shared; locks are short and never held across an await.
-    sessions: Mutex<HashMap<String, Arc<AgentSession>>>,
+    sessions: Mutex<HashMap<String, Live>>,
 }
 
 impl Host {
-    fn session(&self, id: &SessionId) -> Option<Arc<AgentSession>> {
+    fn session(&self, id: &SessionId) -> Option<Live> {
         lock(&self.sessions).get(&*id.0).cloned()
     }
 
@@ -130,7 +140,8 @@ impl Host {
         match self.locate(&request.session_id, &request.cwd).await? {
             Located::Live(live) => {
                 let updates = Updates::new(cx.clone(), request.session_id.clone(), request.cwd.clone());
-                live.with_transcript(|store| updates.replay(store))
+                live.session
+                    .with_transcript(|store| updates.replay(store))
                     .with_context(|| format!("cannot replay session {}", request.session_id.0))?;
                 Ok(request.session_id.clone())
             }
@@ -189,21 +200,33 @@ impl Host {
         let mut session = cli::prepare(&self.shared, model, Some(cwd), &self.place, choice).await?;
         let id = SessionId::new(session.store.header().id.as_str());
         session.require_bash_approval("the client must approve shell commands");
-        session.config.interaction = Arc::new(Permissions {
-            cx: cx.clone(),
-            session_id: id.clone(),
-        });
-        session.config.interaction_timeout = self.shared.settings.approval_timeout;
+        // The client answers: each request becomes a `session/request_permission`.
+        session.config.approvals = ApprovalMode::Wait(self.shared.settings.approval_timeout);
         let cwd = session.config.cwd.clone();
         let updates = Arc::new(Updates::new(cx.clone(), id.clone(), cwd));
-        Ok(Prepared { session, updates, id })
+        Ok(Prepared {
+            session,
+            updates,
+            id,
+            cx: cx.clone(),
+        })
     }
 
     /// Start the prepared session and keep it by its ID.
     fn start(&self, prepared: Prepared) -> Result<SessionId> {
-        let Prepared { session, updates, id } = prepared;
-        let session = session.into_session(updates)?;
-        lock(&self.sessions).insert(id.0.to_string(), Arc::new(session));
+        let Prepared {
+            session,
+            updates,
+            id,
+            cx,
+        } = prepared;
+        let live = Live {
+            session: session.into_session()?,
+            updates,
+            cx,
+            id: id.clone(),
+        };
+        lock(&self.sessions).insert(id.0.to_string(), live);
         Ok(id)
     }
 
@@ -282,17 +305,22 @@ impl Host {
         if let Some(command) = commands::parse(&text) {
             let (connection, session_id) = (cx.clone(), request.session_id.clone());
             return cx.spawn(async move {
-                let answer = commands::run(&live, command, &connection, &session_id).await;
+                let answer = commands::run(&live.session, command, &connection, &session_id).await;
                 responder.respond_with_result(answer.map_err(protocol_error))
             });
         }
         cx.spawn(async move { responder.respond_with_result(answer_prompt(&live, text).await.map_err(protocol_error)) })
     }
 
+    /// The session `id` that `session/cancel` or `session/close` names, when it is open.
+    fn open_session(&self, id: &SessionId) -> Option<Session> {
+        self.session(id).map(|live| live.session)
+    }
+
     /// `session/cancel`: abort the session's turn, if it has one.
     fn cancel(&self, notification: &CancelNotification) {
-        if let Some(live) = self.session(&notification.session_id) {
-            live.cancel();
+        if let Some(session) = self.open_session(&notification.session_id) {
+            session.cancel();
         }
     }
 
@@ -307,17 +335,17 @@ impl Host {
     ) -> Result<(), Error> {
         let closed = lock(&self.sessions).remove(&*request.session_id.0);
         if let Some(live) = closed {
-            live.cancel();
+            live.session.cancel();
         }
         responder.respond(CloseSessionResponse::new())
     }
 }
 
 pub(crate) async fn run(args: AcpArgs) -> Result<u8> {
-    with_telemetry(async move |telemetry| serve(args, telemetry.map(Telemetry::sink)).await).await
+    with_telemetry(async move |telemetry| serve(args, telemetry.map(Telemetry::hook)).await).await
 }
 
-async fn serve(args: AcpArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> {
+async fn serve(args: AcpArgs, traces: Option<TraceHook>) -> Result<u8> {
     let shared = cli::Shared::connect(args.base, args.budget, Builtin::Assistant)
         .await?
         .with_traces(traces);
@@ -406,9 +434,30 @@ fn opened<T: JsonRpcResponse>(
 }
 
 /// The response to `session/prompt` once the turn ended: its stop reason, or the run's error.
-async fn answer_prompt(session: &AgentSession, text: String) -> Result<PromptResponse> {
-    let report = session.prompt(text, &CancellationToken::new()).await?;
-    stop_reason(&report).map(PromptResponse::new)
+/// While the turn runs, its events go to the client as session updates, and a call that
+/// waits for approval becomes a permission request.
+async fn answer_prompt(live: &Live, text: String) -> Result<PromptResponse> {
+    let mut run = live.session.send(text)?;
+    while let Some(event) = run.next().await {
+        live.updates.emit(&event);
+        if let EventKind::ApprovalRequested {
+            approval_id,
+            tool_call_id,
+            tool_name,
+            args,
+            ..
+        } = event.event
+        {
+            let request = permissions::Request {
+                approval_id,
+                tool_call_id,
+                tool: tool_name,
+                arguments: args,
+            };
+            permissions::ask(&live.cx, &live.id, &live.session, request)?;
+        }
+    }
+    stop_reason(&run.wait().await).map(PromptResponse::new)
 }
 
 /// The error a failed request answers with. An error the protocol defines, such as an

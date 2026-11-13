@@ -1,6 +1,6 @@
-//! Events emitted while the agent runs, the envelope that places each one in a trace, and the
-//! sink that receives them. The run numbers and delivers them (`runner/trace.rs`); this
-//! module holds what they are.
+//! Events emitted while the agent runs, and the envelope that places each one in a trace.
+//! The run numbers and delivers them (`runner/trace.rs`), and its reader takes them from the
+//! [`Run`](crate::session::Run); this module holds what they are.
 //!
 //! - `report`: what a run produced and how it ended, as `run_end` and `attempt_end` carry it
 
@@ -14,8 +14,8 @@ use crate::ai::{Delta, Message, Usage};
 use report::{RunOutcome, RunReport};
 
 /// Where the events of a run go, for the kernel's own objects below the run, such as the
-/// compactor: the run implements it, stamping each event, handing it to the sink and then
-/// to the hooks that observe it.
+/// compactor: the run implements it, stamping each event, handing it to the run's reader and
+/// then to the hooks that observe it.
 #[async_trait]
 pub(crate) trait Emit: Send + Sync {
     async fn emit(&self, event: EventKind);
@@ -23,7 +23,7 @@ pub(crate) trait Emit: Send + Sync {
 
 /// Version of the event JSON, envelope and event types together. Raised on incompatible
 /// changes; events without a version predate the envelope.
-pub const EVENT_SCHEMA_VERSION: u32 = 4;
+pub const EVENT_SCHEMA_VERSION: u32 = 5;
 
 /// One event, with what a trace needs to place it. In JSON the envelope fields and the
 /// event's own fields share one object, and `type` names the event.
@@ -32,9 +32,9 @@ pub const EVENT_SCHEMA_VERSION: u32 = 4;
 pub struct Event {
     /// [`EVENT_SCHEMA_VERSION`] when the event was emitted.
     pub schema_version: u32,
-    /// Position within the run, from 1. A gap means that the subscriber did not receive some
-    /// events: ones a bounded subscription dropped, or ones it filtered out, such as the
-    /// streaming deltas that `--output jsonl` leaves out without `--deltas`.
+    /// Position within the run, from 1. A reader of the run sees no gap; a gap in what a
+    /// frontend passes on means that it left events out, such as the streaming deltas that
+    /// `--output jsonl` leaves out without `--deltas`.
     pub seq: u64,
     /// When the event was emitted, in milliseconds since the Unix epoch.
     pub at_ms: u64,
@@ -81,8 +81,6 @@ pub enum ApprovalResult {
     TimedOut,
     /// The run was cancelled while waiting; the call does not run.
     Cancelled,
-    /// The interaction host failed or panicked; the call does not run.
-    Failed,
 }
 
 /// What is known about a tool call that an interrupted run left without a result. The
@@ -102,7 +100,7 @@ pub enum Interruption {
 }
 
 /// Which extension point of the loop a hook call is at: one per
-/// [`Hook`](crate::hooks::Hook) method, and the approval wait.
+/// [`Hook`](crate::hooks::Hook) method.
 /// [`HookStage`](crate::hooks::HookStage) is something else: the order of hooks at the same
 /// point. In JSON, the name [`HookPoint::as_str`] gives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,7 +111,6 @@ pub enum HookPoint {
     AfterTool,
     FinishStep,
     OnEvent,
-    Approval,
 }
 
 impl HookPoint {
@@ -125,7 +122,6 @@ impl HookPoint {
             Self::AfterTool => "after_tool",
             Self::FinishStep => "finish_step",
             Self::OnEvent => "on_event",
-            Self::Approval => "approval",
         }
     }
 }
@@ -161,8 +157,7 @@ pub enum EventKind {
         model: String,
         provider: String,
     },
-    /// The last event of a run, with what [`Runner::run`](crate::runner::Runner::run)
-    /// returns.
+    /// The last event of a run, with the report that [`Run::wait`](crate::Run::wait) gives.
     RunEnd {
         report: Box<RunReport>,
     },
@@ -228,14 +223,23 @@ pub enum EventKind {
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
-    /// The interaction host is asked to approve a call.
+    /// A policy asked about a call, which now waits for the host's approval: the host
+    /// answers `approval_id` with [`Session::resolve_approval`](crate::Session::resolve_approval).
+    /// `args` are the arguments the call would run with. When nobody answers approvals
+    /// ([`ApprovalMode::Deny`](crate::policy::ApprovalMode::Deny)), the request is denied at
+    /// once.
     ApprovalRequested {
+        approval_id: String,
         tool_call_id: String,
         tool_name: String,
+        args: Value,
         reason: String,
     },
-    /// An approval ended. `remembered` follows no request: nobody was asked.
+    /// An approval ended. `remembered` follows no request, so it has no `approval_id`:
+    /// nobody was asked.
     ApprovalResolved {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        approval_id: Option<String>,
         tool_call_id: String,
         tool_name: String,
         approval: ApprovalResult,
@@ -370,29 +374,6 @@ pub struct CustomMessageInfo {
     pub details: Option<Value>,
 }
 
-/// Receives events. Called from the running loop, possibly from concurrent tool futures,
-/// so it must return promptly. Events report what happened; the session records it first.
-pub trait EventSink: Send + Sync {
-    /// Handle one event. A sink that keeps events clones what it keeps.
-    fn emit(&self, event: &Event);
-}
-
-impl<F> EventSink for F
-where
-    F: Fn(&Event) + Send + Sync,
-{
-    fn emit(&self, event: &Event) {
-        self(event);
-    }
-}
-
-/// Sink that discards every event.
-pub struct NullSink;
-
-impl EventSink for NullSink {
-    fn emit(&self, _event: &Event) {}
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -460,11 +441,14 @@ mod tests {
                 reason: Some("writes files".into()),
             },
             EventKind::ApprovalRequested {
+                approval_id: "a".into(),
                 tool_call_id: "c".into(),
                 tool_name: "bash".into(),
+                args: json!({"command": "touch x"}),
                 reason: "writes files".into(),
             },
             EventKind::ApprovalResolved {
+                approval_id: Some("a".into()),
                 tool_call_id: "c".into(),
                 tool_name: "bash".into(),
                 approval: ApprovalResult::AllowOnce,

@@ -15,17 +15,18 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use common::{EchoTool, RunnerSetup, config, header, summarize};
-use zx_agent::AgentSession;
+use common::{EchoTool, config, fast_retry, header, summarize, test_limits};
+use zx_agent::Session;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::builtin::policy::{Rule, RuleMatcher, RulePolicy};
-use zx_agent::events::{ApprovalResult, NullSink};
+use zx_agent::compaction::Config;
+use zx_agent::events::ApprovalResult;
 use zx_agent::im::{
     Addressee, ApprovalId, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId,
     MessageRef, Opening, Outbound, Replies, Said, Server, ServerConfig, ServerEvent, ServerSink, SessionFactory,
     SessionKey, StatusStore, ThreadId, UserId,
 };
-use zx_agent::policy::{Interaction, PolicyDecision};
+use zx_agent::policy::{ApprovalMode, PolicyDecision};
 use zx_agent::tools::Tool;
 use zx_agent::transcript::{MemoryStorage, SessionHeader, SessionQuery, SessionStorage, Transcript};
 
@@ -269,20 +270,14 @@ impl SessionFactory for Factory {
         Ok(!self.sessions(key).await?.is_empty())
     }
 
-    async fn open(
-        &self,
-        key: &SessionKey,
-        opening: Opening,
-        interaction: Arc<dyn Interaction>,
-    ) -> Result<AgentSession, String> {
+    async fn open(&self, key: &SessionKey, opening: Opening) -> Result<Session, String> {
         self.opened.fetch_add(1, Ordering::SeqCst);
         if let Some(error) = &self.fail {
             return Err(error.clone());
         }
         let tools: Vec<Arc<dyn Tool>> = vec![self.echo.clone()];
         let mut config = config(self.provider.clone(), tools);
-        config.interaction = interaction;
-        config.interaction_timeout = self.approval_timeout;
+        config.approvals = ApprovalMode::Wait(self.approval_timeout);
         config.policies.push(
             "echo_approval",
             Arc::new(RulePolicy::new(vec![
@@ -297,12 +292,8 @@ impl SessionFactory for Factory {
             ])),
         );
         let store = self.session(key, opening).await.map_err(|error| format!("{error:#}"))?;
-        let runner = RunnerSetup {
-            session: store,
-            ..RunnerSetup::new(config)
-        }
-        .build_with(Arc::new(NullSink));
-        Ok(AgentSession::from(runner))
+        Session::new(config, fast_retry(0), test_limits(), Config::default(), store)
+            .map_err(|error| format!("{error:#}"))
     }
 }
 

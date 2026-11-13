@@ -16,7 +16,6 @@ use tokio::process::Command;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-use zx_agent::AgentSession;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{AssistantMessage, ContentBlock, Message, StopReason, ToolCall, ToolDef, ToolResultMessage};
 use zx_agent::builtin::executor::{Executor, LocalExecutor};
@@ -466,7 +465,7 @@ async fn a_dropped_run_is_recovered_by_the_next_prompt() {
         FauxStep::text("checked"),
     ]));
     let (runner, _) = RunnerSetup::new(config(provider.clone(), tools)).build();
-    let session = AgentSession::from(runner);
+    let session = runner.into_session();
     {
         let cancel = CancellationToken::new();
         let mut running = Box::pin(session.prompt("start", &cancel));
@@ -497,7 +496,7 @@ async fn result_after_cancelling_a_running_call(effects: Effects) -> (String, bo
         FauxStep::text("checked"),
     ]));
     let (runner, _) = RunnerSetup::new(config(provider.clone(), tools)).build();
-    let session = AgentSession::from(runner);
+    let session = runner.into_session();
     let cancel = CancellationToken::new();
     {
         let mut running = Box::pin(session.prompt("start", &cancel));

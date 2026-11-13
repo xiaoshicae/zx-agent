@@ -1,5 +1,5 @@
-//! Whether a tool call may run: the [`ToolPolicy`] interface, the verdict it gives, and how a
-//! host approves a call a policy asks about (pi: `beforeToolCall`, wired to the extension
+//! Whether a tool call may run: the [`ToolPolicy`] interface, the verdict it gives, and the
+//! approval of a call a policy asks about (pi: `beforeToolCall`, wired to the extension
 //! `tool_call` event).
 //!
 //! An unattended run has no one to ask, so a policy should deny when unsure. A verdict is a
@@ -14,11 +14,11 @@
 //! ```
 //!
 //! - `chain`: the policies of a loop, and how their verdicts combine
-//! - `interaction`: how a host approves a call the policy asks about, and the refusal when
-//!   nobody can
+//! - `approval`: who answers when a policy asks, the answer, and the gate where the call
+//!   waits for it
 
+mod approval;
 mod chain;
-mod interaction;
 
 use std::path::PathBuf;
 
@@ -29,9 +29,9 @@ use tokio_util::sync::CancellationToken;
 use crate::ai::ToolCall;
 use crate::guard::CancelSignal;
 
+pub(crate) use approval::{Answer, ApprovalGate, NO_HUMAN};
+pub use approval::{ApprovalDecision, ApprovalMode, DEFAULT_APPROVAL_TIMEOUT};
 pub use chain::{DEFAULT_POLICY_TIMEOUT, PolicyChain};
-pub(crate) use interaction::ApprovalCache;
-pub use interaction::{Approval, ApprovalRequest, DEFAULT_APPROVAL_TIMEOUT, Interaction, NoHuman};
 
 /// Decides whether a tool call may run. Registered in a loop's [`PolicyChain`], where the
 /// strictest verdict of all policies stands.

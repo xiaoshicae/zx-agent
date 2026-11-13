@@ -1,9 +1,10 @@
-//! Shared conversation ownership, cancellation, subscriptions and model switching.
+//! Shared conversation ownership, cancellation, the run a prompt returns, and model
+//! switching.
 mod common;
 
 use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -12,22 +13,22 @@ use serde_json::{Value, json};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-use common::{Collect, NotifyingProvider, RunnerSetup, config, header, summarize};
-use zx_agent::AgentSession;
-use zx_agent::agent_session::{AgentSessionError, ModelRef, Subscription};
+use common::{Collect, Driven, NotifyingProvider, RunnerSetup, config, header, summarize};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Reasoning, Request, ToolDef};
-use zx_agent::events::{Event, EventKind};
+use zx_agent::events::EventKind;
 use zx_agent::input::Input;
-use zx_agent::policy::{Approval, ApprovalRequest, Interaction, PolicyContext, PolicyDecision, ToolPolicy};
+use zx_agent::policy::{ApprovalDecision, ApprovalMode, PolicyContext, PolicyDecision, ToolPolicy};
 use zx_agent::runner::RunOutcome;
+use zx_agent::session::{ModelRef, SessionError};
 use zx_agent::tools::{Tool, ToolContext, ToolOutput};
 use zx_agent::transcript::{Entry, SessionName, Transcript};
+use zx_agent::{Run, Session};
 
-fn setup(steps: impl IntoIterator<Item = FauxStep>) -> (AgentSession, Arc<NotifyingProvider>, Arc<Collect>) {
+fn setup(steps: impl IntoIterator<Item = FauxStep>) -> (Driven, Arc<NotifyingProvider>, Arc<Collect>) {
     let provider = NotifyingProvider::new(steps);
     let (runner, events) = RunnerSetup::new(config(provider.clone(), vec![])).build();
-    (AgentSession::from(runner), provider, events)
+    (runner.into_session(), provider, events)
 }
 
 #[tokio::test]
@@ -90,7 +91,7 @@ async fn take_queued_during_a_run_is_busy_and_leaves_the_input_queued() {
     let mut running = Box::pin(session.prompt("first", &cancel));
     tokio::select! { () = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
     session.queues().steer("queued");
-    assert_eq!(session.take_queued(), Err(AgentSessionError::Busy));
+    assert_eq!(session.take_queued(), Err(SessionError::Busy));
     assert!(session.cancel());
     assert_eq!(running.await.unwrap().outcome, RunOutcome::Cancelled);
     assert_eq!(session.take_queued().unwrap(), [Input::User("queued".into())]);
@@ -108,7 +109,7 @@ async fn a_running_prompt_rejects_another_prompt_without_queueing_it() {
     )
     .await
     .unwrap();
-    assert!(matches!(rejected, Err(AgentSessionError::Busy)));
+    assert!(matches!(rejected, Err(SessionError::Busy)));
     assert_eq!(provider.faux.requests().len(), 1);
     assert!(session.cancel());
     assert_eq!(running.await.unwrap().outcome, RunOutcome::Cancelled);
@@ -215,110 +216,92 @@ async fn provider_failures_remain_reports_and_do_not_make_the_session_busy() {
 }
 
 #[tokio::test]
-async fn every_subscriber_receives_the_same_events_as_the_initial_sink() {
-    let (session, _, initial) = setup([FauxStep::text("done")]);
-    let first = Arc::new(Collect::default());
-    let second = Arc::new(Collect::default());
-    let _first = session.subscribe(first.clone());
-    let _second = session.subscribe(second.clone());
-    session.prompt("go", &CancellationToken::new()).await.unwrap();
-    assert_eq!(first.events(), initial.events());
-    assert_eq!(second.events(), initial.events());
-    assert!(first.kinds().contains(&"message_update"));
+async fn a_run_gives_its_events_in_order_and_then_its_report() {
+    let (session, _, _) = setup([FauxStep::text("done")]);
+
+    let mut run = session.send("go").unwrap();
+    let id = run.id().to_string();
+    let mut events = Vec::new();
+    while let Some(event) = run.next().await {
+        events.push(event);
+    }
+    let report = run.wait().await;
+
+    let seqs: Vec<u64> = events.iter().map(|event| event.seq).collect();
+    assert_eq!(seqs, (1..=u64::try_from(events.len()).unwrap()).collect::<Vec<_>>());
+    assert!(
+        events
+            .iter()
+            .all(|event| event.run_id == id && event.session_id == session.id())
+    );
+    let kinds: Vec<&str> = events.iter().map(|event| event.event.kind()).collect();
+    assert_eq!((kinds[0], kinds[kinds.len() - 1]), ("run_start", "run_end"));
+    assert!(kinds.contains(&"message_update"));
+    let Some(EventKind::RunEnd { report: reported }) = events.last().map(|event| &event.event) else {
+        panic!("the last event reports the run");
+    };
+    assert_eq!(**reported, report);
 }
 
 #[tokio::test]
-async fn dropping_a_subscription_stops_future_notifications() {
-    let (session, _, initial) = setup([FauxStep::text("one"), FauxStep::text("two")]);
-    let observer = Arc::new(Collect::default());
-    let subscription = session.subscribe(observer.clone());
-    session.prompt("first", &CancellationToken::new()).await.unwrap();
-    let count = observer.events().len();
-    drop(subscription);
-    session.prompt("second", &CancellationToken::new()).await.unwrap();
-    assert_eq!(observer.events().len(), count);
-    assert!(initial.events().len() > count);
-}
+async fn a_run_makes_no_request_until_it_is_read_and_holds_the_session_meanwhile() {
+    let (session, provider, _) = setup([FauxStep::text("done")]);
 
-#[tokio::test]
-async fn subscriptions_added_during_a_run_receive_future_events_without_replay() {
-    let (session, provider, _) = setup([FauxStep::Hang]);
-    let cancel = CancellationToken::new();
-    let mut running = Box::pin(session.prompt("first", &cancel));
-    tokio::select! { () = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
-    let observer = Arc::new(Collect::default());
-    let _subscription = session.subscribe(observer.clone());
-    session.cancel();
-    running.await.unwrap();
-    assert!(!observer.kinds().contains(&"attempt_start"));
-    assert!(observer.kinds().contains(&"attempt_end"));
-}
-
-#[tokio::test]
-async fn a_callback_can_unsubscribe_itself_and_abort_without_deadlocking() {
-    let (session, provider, _) = setup([FauxStep::text("must not run")]);
-    let session = Arc::new(session);
-    let weak = Arc::downgrade(&session);
-    let handle: Arc<Mutex<Option<Subscription>>> = Arc::new(Mutex::new(None));
-    let handle_in_callback = handle.clone();
-    let calls = Arc::new(AtomicUsize::new(0));
-    let observed_calls = calls.clone();
-    let callback = Arc::new(move |_: &Event| {
-        observed_calls.fetch_add(1, Ordering::SeqCst);
-        let subscription = handle_in_callback.lock().unwrap().take();
-        drop(subscription);
-        assert!(weak.upgrade().unwrap().cancel());
-    });
-    *handle.lock().unwrap() = Some(session.subscribe(callback));
-    let report = tokio::time::timeout(Duration::from_secs(1), session.prompt("go", &CancellationToken::new()))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(report.outcome, RunOutcome::Cancelled);
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let run = session.send("go").unwrap();
+    tokio::task::yield_now().await;
     assert!(provider.faux.requests().is_empty());
+    assert!(matches!(session.send("second"), Err(SessionError::Busy)));
+    let report = run.wait().await;
+
+    assert_eq!(report.outcome, RunOutcome::Completed);
+    assert_eq!(provider.faux.requests().len(), 1);
+    assert!(!session.cancel(), "the session is free once its run has ended");
+}
+
+/// Read `run` until its events end.
+async fn read_all(run: &mut Run) {
+    while run.next().await.is_some() {}
 }
 
 #[tokio::test]
-async fn a_panicking_subscriber_is_detached_without_silencing_other_subscribers() {
-    let (session, _, initial) = setup([FauxStep::text("one"), FauxStep::text("two")]);
-    let calls = Arc::new(AtomicUsize::new(0));
-    let callback_calls = calls.clone();
-    let _failed = session.subscribe(Arc::new(move |_: &Event| {
-        callback_calls.fetch_add(1, Ordering::SeqCst);
-        panic!("subscriber bug");
-    }));
-    let observer = Arc::new(Collect::default());
-    let _observer = session.subscribe(observer.clone());
-    session.prompt("first", &CancellationToken::new()).await.unwrap();
-    session.prompt("second", &CancellationToken::new()).await.unwrap();
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert_eq!(observer.events(), initial.events());
-}
+async fn dropping_a_run_cancels_it_and_frees_the_session() {
+    let (session, provider, _) = setup([FauxStep::Hang, FauxStep::text("done")]);
+    let mut run = session.send("first").unwrap();
+    tokio::select! { () = provider.started.notified() => {}, () = read_all(&mut run) => panic!("must be running") }
 
-#[tokio::test]
-async fn a_panicking_initial_sink_is_also_isolated() {
-    let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
-    let runner =
-        RunnerSetup::new(config(provider, vec![])).build_with(Arc::new(|_: &Event| panic!("initial sink bug")));
-    let session = AgentSession::from(runner);
-    let observer = Arc::new(Collect::default());
-    let _observer = session.subscribe(observer.clone());
+    drop(run);
+
+    assert!(provider.token.lock().unwrap().as_ref().unwrap().is_cancelled());
+    assert!(!session.cancel(), "a dropped run releases the conversation at once");
     assert_eq!(
-        session.prompt("go", &CancellationToken::new()).await.unwrap().outcome,
+        session.send("next").unwrap().wait().await.outcome,
         RunOutcome::Completed
     );
-    assert!(observer.kinds().contains(&"attempt_end"));
 }
 
 #[tokio::test]
-async fn a_subscription_does_not_keep_the_conversation_alive() {
-    let (session, _, _) = setup([]);
-    let session = Arc::new(session);
-    let weak = Arc::downgrade(&session);
-    let _subscription = session.subscribe(Arc::new(Collect::default()));
+async fn one_handle_cancels_the_run_that_another_reads() {
+    let (session, provider, _) = setup([FauxStep::Hang]);
+    let other = Session::clone(&session);
+    let mut run = session.send("first").unwrap();
+    tokio::select! { () = provider.started.notified() => {}, () = read_all(&mut run) => panic!("must be running") }
+
+    assert!(matches!(other.send("second"), Err(SessionError::Busy)));
+    assert!(other.cancel());
+
+    assert_eq!(run.wait().await.outcome, RunOutcome::Cancelled);
+    assert_eq!(provider.faux.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn a_run_goes_on_without_the_handle_that_started_it() {
+    let (session, provider, _) = setup([FauxStep::text("done")]);
+    let run = session.send("go").unwrap();
+
     drop(session);
-    assert!(weak.upgrade().is_none());
+
+    assert_eq!(run.wait().await.outcome, RunOutcome::Completed);
+    assert_eq!(provider.faux.requests().len(), 1);
 }
 
 #[tokio::test]
@@ -359,7 +342,7 @@ async fn the_reasoning_level_changes_between_prompts_and_is_recorded_for_the_aud
         ..RunnerSetup::new(loop_config)
     }
     .build();
-    let session = AgentSession::from(runner);
+    let session = runner.into_session();
 
     session.prompt("first", &CancellationToken::new()).await.unwrap();
     session.set_reasoning(Some(Reasoning::High)).unwrap();
@@ -395,10 +378,7 @@ async fn a_running_session_rejects_a_reasoning_change() {
     let cancel = CancellationToken::new();
     let mut running = Box::pin(session.prompt("first", &cancel));
     tokio::select! { () = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
-    assert_eq!(
-        session.set_reasoning(Some(Reasoning::High)),
-        Err(AgentSessionError::Busy)
-    );
+    assert_eq!(session.set_reasoning(Some(Reasoning::High)), Err(SessionError::Busy));
     session.cancel();
     running.await.unwrap();
     session.prompt("second", &CancellationToken::new()).await.unwrap();
@@ -413,7 +393,7 @@ async fn a_session_is_named_while_idle_and_never_during_a_run() {
     let cancel = CancellationToken::new();
     let mut running = Box::pin(session.prompt("first", &cancel));
     tokio::select! { () = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
-    assert_eq!(session.set_name(name("renamed")).await, Err(AgentSessionError::Busy));
+    assert_eq!(session.set_name(name("renamed")).await, Err(SessionError::Busy));
     session.cancel();
     running.await.unwrap();
     let named = session
@@ -441,7 +421,7 @@ async fn a_running_session_rejects_model_changes_without_changing_the_provider()
             provider: next.clone(),
             model: "next".into()
         }),
-        Err(AgentSessionError::Busy)
+        Err(SessionError::Busy)
     );
     session.cancel();
     running.await.unwrap();
@@ -466,7 +446,7 @@ async fn an_invalid_model_does_not_replace_the_current_configuration() {
                 provider: next.clone(),
                 model: invalid.into()
             }),
-            Err(AgentSessionError::InvalidModel)
+            Err(SessionError::InvalidModel)
         );
     }
     session.prompt("go", &CancellationToken::new()).await.unwrap();
@@ -511,7 +491,7 @@ async fn steering_and_follow_ups_reach_the_model_at_their_defined_boundaries() {
         release: Notify::new(),
     });
     let (runner, _) = RunnerSetup::new(config(provider.clone(), vec![gate.clone()])).build();
-    let session = AgentSession::from(runner);
+    let session = runner.into_session();
     let cancel = CancellationToken::new();
     let mut running = Box::pin(session.prompt("go", &cancel));
     tokio::select! { () = gate.started.notified() => {}, _ = &mut running => panic!("tool must wait") }
@@ -551,8 +531,7 @@ async fn concurrent_callers_share_one_running_prompt() {
             let result = session
                 .prompt(format!("caller {index}"), &CancellationToken::new())
                 .await;
-            if matches!(&result, Err(AgentSessionError::Busy))
-                && rejected.fetch_add(1, Ordering::SeqCst) + 1 == CALLERS - 1
+            if matches!(&result, Err(SessionError::Busy)) && rejected.fetch_add(1, Ordering::SeqCst) + 1 == CALLERS - 1
             {
                 all_rejected.notify_one();
             }
@@ -575,7 +554,7 @@ async fn concurrent_callers_share_one_running_prompt() {
                 assert_eq!(report.outcome, RunOutcome::Cancelled);
                 completed += 1;
             }
-            Err(error) => assert_eq!(error, AgentSessionError::Busy),
+            Err(error) => assert_eq!(error, SessionError::Busy),
         }
     }
     assert_eq!(completed, 1);
@@ -591,10 +570,10 @@ impl ToolPolicy for Ask {
 }
 struct Approver(AtomicUsize);
 #[async_trait]
-impl Interaction for Approver {
-    async fn confirm(&self, _request: &ApprovalRequest) -> Result<Approval, String> {
+impl common::Approver for Approver {
+    async fn confirm(&self, _request: &common::Asked) -> Option<ApprovalDecision> {
         self.0.fetch_add(1, Ordering::SeqCst);
-        Ok(Approval::AllowSession)
+        Some(ApprovalDecision::AllowSession)
     }
 }
 
@@ -611,9 +590,12 @@ async fn model_switching_retains_approval_grants() {
     let host = Arc::new(Approver(AtomicUsize::new(0)));
     let mut config = config(first, vec![Arc::new(common::EchoTool::new("echo"))]);
     config.policies.push("ask", Arc::new(Ask));
-    config.interaction = host.clone();
-    let (runner, _) = RunnerSetup::new(config).build();
-    let session = AgentSession::from(runner);
+    let (runner, _) = RunnerSetup {
+        approver: Some(host.clone()),
+        ..RunnerSetup::new(config)
+    }
+    .build();
+    let session = runner.into_session();
     session.prompt("one", &CancellationToken::new()).await.unwrap();
     session
         .set_model(ModelRef {
@@ -623,6 +605,91 @@ async fn model_switching_retains_approval_grants() {
         .unwrap();
     session.prompt("two", &CancellationToken::new()).await.unwrap();
     assert_eq!(host.0.load(Ordering::SeqCst), 1);
+}
+
+/// A session whose every call of `echo` asks for approval and waits `timeout` for the
+/// answer, and that tool.
+fn asking_session(provider: Arc<FauxProvider>, timeout: Duration) -> (Driven, Arc<common::EchoTool>) {
+    let tool = Arc::new(common::EchoTool::new("echo"));
+    let mut config = config(provider, vec![tool.clone()]);
+    config.policies.push("ask", Arc::new(Ask));
+    config.approvals = ApprovalMode::Wait(timeout);
+    let (runner, _) = RunnerSetup::new(config).build();
+    (runner.into_session(), tool)
+}
+
+#[tokio::test]
+async fn an_approval_is_answered_through_the_session_with_the_id_its_event_gives() {
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::tool_call("c", "echo", json!({"text": "hi"})),
+        FauxStep::text("done"),
+    ]));
+    let (session, tool) = asking_session(provider, Duration::from_secs(60));
+
+    let mut run = session.send("go").unwrap();
+    let mut asked = Vec::new();
+    while let Some(event) = run.next().await {
+        if let EventKind::ApprovalRequested {
+            approval_id,
+            tool_call_id,
+            tool_name,
+            args,
+            reason,
+        } = event.event
+        {
+            assert_eq!(
+                session.resolve_approval("another", ApprovalDecision::AllowOnce),
+                Err(SessionError::UnknownApproval)
+            );
+            session
+                .resolve_approval(&approval_id, ApprovalDecision::AllowOnce)
+                .unwrap();
+            assert_eq!(
+                session.resolve_approval(&approval_id, ApprovalDecision::AllowOnce),
+                Err(SessionError::UnknownApproval),
+                "a request is answered once"
+            );
+            asked.push((tool_call_id, tool_name, args, reason));
+        }
+    }
+
+    assert_eq!(run.wait().await.outcome, RunOutcome::Completed);
+    assert_eq!(
+        asked,
+        [(
+            "c".to_string(),
+            "echo".to_string(),
+            json!({"text": "hi"}),
+            "review".to_string()
+        )]
+    );
+    assert_eq!(tool.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn an_answer_that_comes_after_the_request_timed_out_reaches_no_call() {
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::tool_call("c", "echo", json!({"text": "hi"})),
+        FauxStep::text("went on"),
+    ]));
+    let (session, tool) = asking_session(provider, Duration::ZERO);
+
+    let mut run = session.send("go").unwrap();
+    let mut requests = Vec::new();
+    while let Some(event) = run.next().await {
+        if let EventKind::ApprovalRequested { approval_id, .. } = event.event {
+            requests.push(approval_id);
+        }
+    }
+    let report = run.wait().await;
+
+    assert_eq!((report.outcome, report.denied_calls), (RunOutcome::Completed, 1));
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        session.resolve_approval(&requests[0], ApprovalDecision::AllowOnce),
+        Err(SessionError::UnknownApproval)
+    );
+    assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -636,7 +703,7 @@ async fn switching_models_keeps_the_session_header_and_append_only_history() {
         ..RunnerSetup::new(config(provider, vec![]))
     }
     .build();
-    let session = AgentSession::from(runner);
+    let session = runner.into_session();
     session.prompt("first", &CancellationToken::new()).await.unwrap();
     let before = std::fs::read(&file).unwrap();
     let next = Arc::new(FauxProvider::new([FauxStep::text("two")]));
@@ -661,7 +728,7 @@ async fn switching_models_keeps_the_session_header_and_append_only_history() {
 }
 
 #[tokio::test]
-async fn subscriber_callbacks_see_messages_only_after_the_single_audit_write() {
+async fn the_reader_gets_a_message_only_once_it_is_recorded() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("session.jsonl");
     let store = common::create_session_file(&file, header()).await.unwrap();
@@ -671,22 +738,19 @@ async fn subscriber_callbacks_see_messages_only_after_the_single_audit_write() {
         ..RunnerSetup::new(config(provider, vec![]))
     }
     .build();
-    let session = AgentSession::from(runner);
-    let observed = Arc::new(AtomicUsize::new(0));
-    let mut subscriptions = Vec::new();
-    for _ in 0..2 {
-        let file = file.clone();
-        let observed = observed.clone();
-        subscriptions.push(session.subscribe(Arc::new(move |event: &Event| {
-            if let EventKind::MessageEnd { message, .. } = &event.event {
-                let stored = common::read_session_file(&file).unwrap();
-                assert_eq!(stored.messages().last(), Some(message));
-                observed.fetch_add(1, Ordering::SeqCst);
-            }
-        })));
+    let session = runner.into_session();
+
+    let mut run = session.send("go").unwrap();
+    let mut observed = 0;
+    while let Some(event) = run.next().await {
+        if let EventKind::MessageEnd { message, .. } = &event.event {
+            let stored = common::read_session_file(&file).unwrap();
+            assert!(stored.messages().contains(message), "{message:?}");
+            observed += 1;
+        }
     }
-    session.prompt("go", &CancellationToken::new()).await.unwrap();
-    assert_eq!(observed.load(Ordering::SeqCst), 4);
+
+    assert_eq!(observed, 2);
     assert_eq!(common::read_session_file(&file).unwrap().messages().len(), 2);
 }
 
@@ -708,7 +772,7 @@ async fn a_session_reports_why_it_stopped_writing() {
         ..RunnerSetup::new(config(provider, vec![]))
     }
     .build();
-    let session = AgentSession::from(runner);
+    let session = runner.into_session();
     let writes_stopped = || {
         session
             .with_transcript(|store| store.writes_stopped().cloned())

@@ -11,7 +11,7 @@ use agent_client_protocol::v1::schema::{
 use agent_client_protocol::{Error, ErrorCode};
 use anyhow::Result;
 
-use zx_agent::AgentSession;
+use zx_agent::Session;
 use zx_agent::transcript::SessionName;
 
 use super::updates;
@@ -61,7 +61,7 @@ pub(super) fn offer(cx: &ConnectionTo<Client>, session_id: &SessionId) {
 
 /// Run `command` on `session`. The turn it answers ends at once, without a model request.
 pub(super) async fn run(
-    session: &AgentSession,
+    session: &Session,
     command: Command,
     cx: &ConnectionTo<Client>,
     session_id: &SessionId,

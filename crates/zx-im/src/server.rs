@@ -16,9 +16,8 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use zx_ai::sync::lock;
 
-use crate::AgentSession;
+use crate::Session;
 use zx_core::events::ApprovalResult;
-use zx_core::policy::Interaction;
 
 use super::router::Router;
 use super::status::{left_behind, replace_left_behind};
@@ -82,16 +81,12 @@ impl SessionKey {
 /// and where sessions are stored; [`SessionKey::labels`] marks a conversation's sessions there.
 #[async_trait]
 pub trait SessionFactory: Send + Sync {
-    /// Open the session of `key` that `opening` names. Set `interaction` as the loop's
-    /// [`interaction`](zx_core::runner::LoopConfig::interaction): it posts approval cards to the
-    /// conversation. Called again after an idle session was released. An error is posted to
-    /// the conversation after [`Replies::cannot_open`]; the next message tries again.
-    async fn open(
-        &self,
-        key: &SessionKey,
-        opening: Opening,
-        interaction: Arc<dyn Interaction>,
-    ) -> Result<AgentSession, String>;
+    /// Open the session of `key` that `opening` names. Its approvals wait for the host
+    /// ([`ApprovalMode::Wait`](zx_core::policy::ApprovalMode::Wait)): the server posts a card
+    /// for each request in the conversation and answers it when an approver clicks. Called
+    /// again after an idle session was released. An error is posted to the conversation
+    /// after [`Replies::cannot_open`]; the next message tries again.
+    async fn open(&self, key: &SessionKey, opening: Opening) -> Result<Session, String>;
 
     /// Whether `key` has a session already: the bot took part in that thread, so a message
     /// there that does not mention it is still part of the conversation. Asked while

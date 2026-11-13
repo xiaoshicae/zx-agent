@@ -20,7 +20,8 @@ use crate::input::InputQueues;
 use crate::tools::{ActiveTools, ToolOutput};
 use crate::transcript::context_edit_refusal;
 
-pub(crate) use chain::HookCall;
+#[cfg(test)]
+use chain::HookCall;
 pub use chain::{HookChain, HookOptions};
 
 /// Default bound for each individual hook invocation.
@@ -286,16 +287,17 @@ pub trait Hook: Send + Sync {
         Ok(StepDecision::Default)
     }
 
-    /// Read-only observation of the events this hook [`observes`](Hook::observes), after
-    /// persistence and event delivery. Diagnostic events reporting observer errors are not
-    /// sent back through this method.
+    /// Read-only observation of the events this hook [`observes`](Hook::observes), once
+    /// what they report is recorded and they are queued for the run's reader. A hook's
+    /// failure is itself an event, `hook_failed`, which the hooks observe too; a failure to
+    /// observe that one is not reported again.
     ///
     /// Each call is awaited before the run goes on, in stage and registration order. While
     /// tools run in parallel, their events arrive concurrently, so calls of one hook can
     /// overlap and finish out of `seq` order. Once the run is cancelled, a call that is
     /// still pending is stopped, so an observer can miss the remaining events, `run_end`
-    /// among them. An exporter that needs every event, in order, uses
-    /// [`AgentSession::subscribe`](crate::AgentSession::subscribe).
+    /// among them. An exporter that needs every event, in order, reads them from the
+    /// [`Run`](crate::session::Run).
     async fn on_event(&self, _event: &Event, _ctx: &HookContext) -> HookResult<()> {
         Ok(())
     }

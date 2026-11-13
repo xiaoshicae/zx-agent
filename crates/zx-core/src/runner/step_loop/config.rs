@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
@@ -12,7 +11,7 @@ use crate::ai::{ModelMeta, Provider, Reasoning, SystemPrompt};
 use crate::extensions::SlashCommand;
 use crate::hooks::HookChain;
 use crate::input::InputQueues;
-use crate::policy::{DEFAULT_APPROVAL_TIMEOUT, Interaction, NoHuman, PolicyChain};
+use crate::policy::{ApprovalMode, PolicyChain};
 use crate::runner::RunTrace;
 use crate::tools::{ActiveTools, Tool};
 
@@ -40,8 +39,8 @@ pub struct LoopConfig {
     /// The policies that decide whether a tool call may run; none by default, which allows
     /// every call.
     pub policies: PolicyChain,
-    pub interaction: Arc<dyn Interaction>,
-    pub interaction_timeout: Duration,
+    /// Who answers when a policy asks about a call; nobody by default, which denies it.
+    pub approvals: ApprovalMode,
     pub queues: Arc<InputQueues>,
     /// Which of `tools` the requests offer; every one by default.
     pub active_tools: Arc<ActiveTools>,
@@ -70,8 +69,7 @@ impl LoopConfig {
             reasoning: None,
             hooks: HookChain::new(),
             policies: PolicyChain::new(),
-            interaction: Arc::new(NoHuman),
-            interaction_timeout: DEFAULT_APPROVAL_TIMEOUT,
+            approvals: ApprovalMode::Deny,
             queues: Arc::new(InputQueues::default()),
             active_tools: Arc::new(ActiveTools::default()),
             commands: Vec::new(),
@@ -119,11 +117,11 @@ impl LoopConfig {
         Ok(validators)
     }
 
-    /// The trace of a new run of session `session_id` with a fresh ID, cancelled by `cancel`,
-    /// whose hooks reach this configuration's queues and tool set.
-    pub(crate) fn trace(&self, session_id: String, cancel: CancellationToken) -> RunTrace {
+    /// The trace of the run `run_id` of session `session_id`, cancelled by `cancel`, whose
+    /// hooks reach this configuration's queues and tool set.
+    pub(crate) fn trace(&self, session_id: String, run_id: String, cancel: CancellationToken) -> RunTrace {
         RunTrace::new(
-            session_id,
+            (session_id, run_id),
             self.cwd.clone(),
             cancel,
             self.queues.clone(),

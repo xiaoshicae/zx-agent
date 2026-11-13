@@ -255,7 +255,7 @@ fn token_budget(tokens: u64) -> RunLimits {
 }
 
 /// A runner with the echo tool; each faux answer reports 10 input and 5 output tokens.
-fn echo_runner(provider: &Arc<FauxProvider>, limits: RunLimits) -> zx_agent::runner::Runner {
+fn echo_runner(provider: &Arc<FauxProvider>, limits: RunLimits) -> common::Runner {
     RunnerSetup {
         limits,
         ..RunnerSetup::new(config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]))
@@ -300,7 +300,7 @@ async fn the_last_request_may_take_a_run_over_its_token_budget() {
 
 /// A runner with the echo tool whose model costs 0.01 per faux answer (10 input tokens at
 /// 1000 per million; the 5 output tokens are free), in whatever currency the prices use.
-fn priced_runner(provider: &Arc<FauxProvider>, cost_budget: f64) -> zx_agent::runner::Runner {
+fn priced_runner(provider: &Arc<FauxProvider>, cost_budget: f64) -> common::Runner {
     let mut config = config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]);
     let price = ModelCost {
         input: 1000.0,
@@ -1008,7 +1008,7 @@ async fn resumed_sessions_record_prompt_changes_in_the_file() {
 }
 
 /// A run that fails once with a retryable error, then answers.
-fn retried_run() -> (zx_agent::runner::Runner, Arc<common::Collect>) {
+fn retried_run() -> (common::Runner, Arc<common::Collect>) {
     let provider = Arc::new(FauxProvider::new([
         FauxStep::Fail("HTTP 503: retry".into()),
         FauxStep::text("done"),

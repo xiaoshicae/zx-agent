@@ -13,10 +13,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use zx_agent::AgentSession;
+use zx_agent::Session;
 use zx_agent::ai::now_ms;
 use zx_agent::config::Builtin;
-use zx_agent::events::NullSink;
 use zx_agent::im::feishu::{FeishuChannel, FeishuConfig};
 use zx_agent::im::slack::{SlackChannel, SlackConfig};
 use zx_agent::im::{
@@ -24,7 +23,7 @@ use zx_agent::im::{
     ServerSink, SessionFactory, SessionKey, StatusFiles, UserId,
 };
 use zx_agent::otel::Telemetry;
-use zx_agent::policy::Interaction;
+use zx_agent::policy::ApprovalMode;
 use zx_agent::transcript::SessionQuery;
 
 use crate::cli::{self, ImArgs, env_value};
@@ -142,7 +141,7 @@ pub(crate) async fn run(args: ImArgs) -> Result<u8> {
         let shared = cli::Shared::connect(args.base, args.budget, Builtin::Assistant)
             .await?
             .with_hidden_env(hidden_env)
-            .with_traces(telemetry.map(Telemetry::sink));
+            .with_traces(telemetry.map(Telemetry::hook));
         let factory = Sessions {
             shared,
             place: SessionPlace::directory(&dir),
@@ -356,7 +355,8 @@ impl Sessions {
         let model = &self.shared.settings.model;
         let mut prepared = cli::prepare(&self.shared, model, None, place, choice).await?;
         prepared.require_bash_approval("shell commands require approval in the chat");
-        prepared.config.interaction_timeout = self.shared.settings.approval_timeout;
+        // The server answers with an approver's click on the card it posts.
+        prepared.config.approvals = ApprovalMode::Wait(self.shared.settings.approval_timeout);
         Ok(prepared)
     }
 
@@ -371,12 +371,7 @@ impl Sessions {
         Ok(list.sessions.into_iter().next().map(|session| session.id))
     }
 
-    async fn open_session(
-        &self,
-        key: &SessionKey,
-        opening: Opening,
-        interaction: Arc<dyn Interaction>,
-    ) -> Result<AgentSession> {
+    async fn open_session(&self, key: &SessionKey, opening: Opening) -> Result<Session> {
         let latest = match opening {
             Opening::Latest => self.latest(key).await?,
             Opening::New => None,
@@ -385,23 +380,17 @@ impl Sessions {
             Some(id) => SessionChoice::Existing(id),
             None => SessionChoice::New(key.labels()),
         };
-        let mut prepared = self.prepare(&self.place, choice).await?;
-        prepared.config.interaction = interaction;
+        let prepared = self.prepare(&self.place, choice).await?;
         // The session file is the record of each conversation; the operator log holds
         // approvals and failures (Log), and traces, when exported, the timeline.
-        prepared.into_session(Arc::new(NullSink))
+        prepared.into_session()
     }
 }
 
 #[async_trait]
 impl SessionFactory for Sessions {
-    async fn open(
-        &self,
-        key: &SessionKey,
-        opening: Opening,
-        interaction: Arc<dyn Interaction>,
-    ) -> Result<AgentSession, String> {
-        self.open_session(key, opening, interaction)
+    async fn open(&self, key: &SessionKey, opening: Opening) -> Result<Session, String> {
+        self.open_session(key, opening)
             .await
             .map_err(|error| format!("{error:#}"))
     }

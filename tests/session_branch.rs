@@ -1,4 +1,4 @@
-//! Switching branches within a session: `AgentSession::branch` moves the
+//! Switching branches within a session: `Session::branch` moves the
 //! conversation to another point of its tree, `inspect` reads the tree while idle.
 mod common;
 
@@ -9,26 +9,25 @@ use std::sync::atomic::Ordering;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use common::{EchoTool, NotifyingProvider, RunnerSetup, config, header, summarize};
-use zx_agent::AgentSession;
-use zx_agent::agent_session::AgentSessionError;
+use common::{Driven, EchoTool, NotifyingProvider, RunnerSetup, config, header, summarize};
 use zx_agent::ai::Message;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::runner::RunOutcome;
+use zx_agent::session::SessionError;
 use zx_agent::tools::Tool;
 use zx_agent::transcript::Entry;
 
-async fn file_session(file: &Path, provider: Arc<FauxProvider>, tools: Vec<Arc<dyn Tool>>) -> AgentSession {
+async fn file_session(file: &Path, provider: Arc<FauxProvider>, tools: Vec<Arc<dyn Tool>>) -> Driven {
     let (runner, _) = RunnerSetup {
         session: common::create_session_file(file, header()).await.unwrap(),
         ..RunnerSetup::new(config(provider, tools))
     }
     .build();
-    AgentSession::from(runner)
+    runner.into_session()
 }
 
 /// The ID of the first message entry `matches` accepts.
-fn entry_id(session: &AgentSession, matches: impl Fn(&Message) -> bool) -> String {
+fn entry_id(session: &Driven, matches: impl Fn(&Message) -> bool) -> String {
     session
         .with_transcript(|store| {
             store.entries().iter().find_map(|entry| match entry {
@@ -40,7 +39,7 @@ fn entry_id(session: &AgentSession, matches: impl Fn(&Message) -> bool) -> Strin
         .expect("a matching entry")
 }
 
-fn answer_id(session: &AgentSession, text: &str) -> String {
+fn answer_id(session: &Driven, text: &str) -> String {
     entry_id(
         session,
         |message| matches!(message, Message::Assistant(answer) if answer.text() == text),
@@ -157,22 +156,22 @@ async fn branching_to_the_root_starts_the_conversation_over_in_the_same_session(
 async fn branching_and_inspecting_wait_for_the_run_and_reject_unknown_entries() {
     let provider = NotifyingProvider::new([FauxStep::Hang, FauxStep::text("later")]);
     let (runner, _) = RunnerSetup::new(config(provider.clone(), vec![])).build();
-    let session = AgentSession::from(runner);
+    let session = runner.into_session();
     let cancel = CancellationToken::new();
     let mut running = Box::pin(session.prompt("first", &cancel));
     tokio::select! {
         () = provider.started.notified() => {}
         _ = &mut running => panic!("must be running"),
     }
-    assert_eq!(session.branch(None), Err(AgentSessionError::Busy));
+    assert_eq!(session.branch(None), Err(SessionError::Busy));
     assert_eq!(
         session.with_transcript(|store| store.entries().len()).err(),
-        Some(AgentSessionError::Busy)
+        Some(SessionError::Busy)
     );
     assert!(session.cancel());
     assert_eq!(running.await.unwrap().outcome, RunOutcome::Cancelled);
 
-    assert_eq!(session.branch(Some("nowhere")), Err(AgentSessionError::EntryNotFound));
+    assert_eq!(session.branch(Some("nowhere")), Err(SessionError::EntryNotFound));
     // The position did not move: the next prompt continues after the aborted answer.
     session.prompt("second", &CancellationToken::new()).await.unwrap();
     let context = summarize(&provider.requests()[1].messages);
@@ -180,6 +179,6 @@ async fn branching_and_inspecting_wait_for_the_run_and_reject_unknown_entries() 
     assert_eq!(context[context.len() - 1], "user:second");
     // While `inspect` runs, the conversation is leased, as during a prompt.
     let during = session.with_transcript(|_| session.set_reasoning(None)).unwrap();
-    assert_eq!(during, Err(AgentSessionError::Busy));
+    assert_eq!(during, Err(SessionError::Busy));
     assert_eq!(session.set_reasoning(None), Ok(()));
 }

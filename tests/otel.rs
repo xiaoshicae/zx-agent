@@ -46,8 +46,9 @@ async fn a_run_exports_one_trace_with_a_span_per_request_and_tool_call() {
         FauxStep::tool_call("c1", "echo", json!({"text": "ok"})),
         FauxStep::text("done"),
     ]));
-    let mut runner =
-        RunnerSetup::new(config(provider, vec![Arc::new(EchoTool::new("echo"))])).build_with(telemetry.sink());
+    let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
+    config.hooks.push(telemetry.hook());
+    let (mut runner, _) = RunnerSetup::new(config).build();
 
     let report = runner.run("go", &CancellationToken::new()).await;
     assert_eq!(report.outcome, RunOutcome::Completed);
@@ -75,7 +76,7 @@ async fn a_run_exports_one_trace_with_a_span_per_request_and_tool_call() {
 }
 
 #[tokio::test]
-async fn a_run_continues_the_callers_trace_through_sink_under() {
+async fn a_run_continues_the_callers_trace_through_hook_under() {
     let exporter = Kept::default();
     let telemetry = Telemetry::with_provider(
         SdkTracerProvider::builder()
@@ -84,7 +85,9 @@ async fn a_run_continues_the_callers_trace_through_sink_under() {
     );
     let parent = TraceParent::parse("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", None).unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
-    let mut runner = RunnerSetup::new(config(provider, Vec::new())).build_with(telemetry.sink_under(&parent));
+    let mut config = config(provider, Vec::new());
+    config.hooks.push(telemetry.hook_under(&parent));
+    let (mut runner, _) = RunnerSetup::new(config).build();
 
     let report = runner.run("go", &CancellationToken::new()).await;
     assert_eq!(report.outcome, RunOutcome::Completed);

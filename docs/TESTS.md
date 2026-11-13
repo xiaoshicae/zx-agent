@@ -8,7 +8,7 @@
 |---|---|
 | `tests/step_loop.rs` | 循环语义：工具往返与顺序、失败、截断、上限、队列 |
 | `tests/runner.rs` | 运行层：重试、上限与预算、续写、持久化、恢复会话 |
-| `tests/agent_session.rs` | 共享会话：Busy、取消、订阅、模型与推理强度切换、起名 |
+| `tests/session.rs` | 共享会话：Busy、取消、`Run`（事件顺序、读才推进、丢弃即取消、多个句柄）、经会话回答审批（按事件给出的审批编号；超时后迟到的回答落空）、模型与推理强度切换、起名 |
 | `tests/openai_mock.rs` | 真实 HTTP 下的 provider：SSE、重试、超时、取消、错误正文 |
 | `tests/prepare_request.rs` | `Hook::prepare_request` 对单次请求的替换 |
 | `tests/continue_run.rs` | 不加新输入的续跑 |
@@ -18,7 +18,7 @@
 | `tests/model_meta.rs` | 模型单价、成本与 token 阈值 |
 | `tests/extension_capabilities.rs` | 扩展在运行中发消息、记状态、改工具集与命令 |
 | `tests/custom_records.rs` | 扩展的 `custom` 与 `custom_message` 记录 |
-| `tests/session_branch.rs` | `AgentSession::branch` 切换分支 |
+| `tests/session_branch.rs` | `Session::branch` 切换分支 |
 | `tests/session_fork.rs` | 复制分支成新会话 |
 | `tests/session_storage.rs` | 宿主自己实现的 `SessionStorage`：运行写入、按标签列出、从存储续接，以及唯一键拦住第二个写入者 |
 | `tests/sessions_cli.rs` | chat 的会话目录、`--resume` 与 `zx-agent sessions` |

@@ -19,7 +19,7 @@ use zx_agent::ai::{
     UserMessageKind,
 };
 use zx_agent::builtin::tools::{EDIT_FILE, WRITE_FILE};
-use zx_agent::events::{ApprovalResult, Event, EventKind, EventSink, ToolVerdict};
+use zx_agent::events::{ApprovalResult, Event, EventKind, ToolVerdict};
 use zx_agent::sync::lock;
 use zx_agent::transcript::{Entry, ProjectedMessage, Transcript};
 
@@ -286,8 +286,9 @@ pub(super) fn send(cx: &ConnectionTo<Client>, session_id: &SessionId, update: Se
     }
 }
 
-impl EventSink for Updates {
-    fn emit(&self, event: &Event) {
+impl Updates {
+    /// Send what `event` of a run means to the client.
+    pub(super) fn emit(&self, event: &Event) {
         match &event.event {
             EventKind::MessageStart { role: "assistant" } => lock(&self.state).wrote_text = false,
             EventKind::MessageUpdate {

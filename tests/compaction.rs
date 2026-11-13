@@ -10,14 +10,13 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use zx_agent::AgentSession;
-use zx_agent::agent_session::{AgentSessionError, ModelRef};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{AssistantMessage, ContentBlock, Message, Request, StopReason, ToolCall, ToolResultMessage};
 use zx_agent::compaction::{Config, Outcome, Report};
 use zx_agent::events::{Event, EventKind};
 use zx_agent::hooks::{ContextEdit, Hook, HookContext, HookOptions};
 use zx_agent::runner::{RunLimits, RunOutcome};
+use zx_agent::session::{ModelRef, SessionError};
 use zx_agent::transcript::{Entry, Transcript};
 
 use common::summary_eval::{PLANTED, Planted, ROUNDS, evaluate, round, text_of};
@@ -43,7 +42,7 @@ async fn manual_compaction_is_a_bounded_tool_free_request_and_survives_reuse() {
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build();
-    let session = AgentSession::from(runner.with_compaction(budget()).unwrap());
+    let session = runner.with_compaction(budget()).unwrap().into_session();
     let compact = session.compact(&CancellationToken::new()).await.unwrap();
     assert_eq!(compact.outcome, Outcome::Completed, "{compact:?}");
     assert_eq!(compact.requests, 1);
@@ -653,25 +652,25 @@ async fn pending_summary_shares_busy_cancel_and_drop_reuse_with_prompt() {
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build();
-    let session = AgentSession::from(runner.with_compaction(budget()).unwrap());
+    let session = runner.with_compaction(budget()).unwrap().into_session();
     let parent = CancellationToken::new();
     let mut compact = Box::pin(session.compact(&parent));
     tokio::select! { biased; result = &mut compact => panic!("unexpected completion: {result:?}"), () = tokio::task::yield_now() => {} }
     assert!(events.kinds().contains(&"compaction_start"));
     assert!(matches!(
         session.prompt("busy", &CancellationToken::new()).await,
-        Err(AgentSessionError::Busy)
+        Err(SessionError::Busy)
     ));
     assert!(matches!(
         session.compact(&CancellationToken::new()).await,
-        Err(AgentSessionError::Busy)
+        Err(SessionError::Busy)
     ));
     assert_eq!(
         session.set_model(ModelRef {
             provider: provider.clone(),
             model: "other".into()
         }),
-        Err(AgentSessionError::Busy)
+        Err(SessionError::Busy)
     );
     drop(compact);
     assert!(!parent.is_cancelled());
@@ -694,7 +693,7 @@ async fn aborting_summary_records_failure_and_the_session_is_immediately_reusabl
         ..RunnerSetup::new(config(provider, vec![]))
     }
     .build();
-    let session = AgentSession::from(runner.with_compaction(budget()).unwrap());
+    let session = runner.with_compaction(budget()).unwrap().into_session();
     let cancel = CancellationToken::new();
     let compact = session.compact(&cancel);
     tokio::pin!(compact);

@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use zx_agent::ai::{AssistantMessage, Message, Reasoning, StopReason, ToolCall, Usage};
 use zx_agent::hooks::{ContextEdit, FinishedStep, HookContext, RequestSettings, StepDecision, StepDisposition};
-use zx_agent::policy::{Approval, ApprovalRequest, PolicyDecision};
+use zx_agent::policy::{ApprovalDecision, PolicyDecision};
 use zx_agent::tools::ToolOutput;
 
 /// `value` serializes to `expected` and reads back unchanged.
@@ -84,10 +84,10 @@ fn context_edits_name_the_edit_and_its_fields() {
 
 #[test]
 fn approvals_name_their_scope_and_give_a_reason_to_deny() {
-    round_trip(&Approval::AllowOnce, json!({"approval": "allow_once"}));
-    round_trip(&Approval::AllowSession, json!({"approval": "allow_session"}));
+    round_trip(&ApprovalDecision::AllowOnce, json!({"approval": "allow_once"}));
+    round_trip(&ApprovalDecision::AllowSession, json!({"approval": "allow_session"}));
     round_trip(
-        &Approval::Deny("not now".into()),
+        &ApprovalDecision::Deny("not now".into()),
         json!({"approval": "deny", "reason": "not now"}),
     );
 }
@@ -143,26 +143,6 @@ fn tool_output_without_content_is_rejected() {
     let error = serde_json::from_value::<ToolOutput>(json!({"isError": true})).unwrap_err();
 
     assert!(error.to_string().contains("missing field `content`"), "{error}");
-}
-
-#[test]
-fn approval_requests_carry_the_exact_call() {
-    let call = ToolCall {
-        id: "c1".into(),
-        name: "bash".into(),
-        arguments: json!({"command": "ls"}),
-        arguments_error: None,
-    };
-    round_trip(
-        &ApprovalRequest {
-            call,
-            reason: "review".into(),
-        },
-        json!({
-            "call": {"id": "c1", "name": "bash", "arguments": {"command": "ls"}},
-            "reason": "review"
-        }),
-    );
 }
 
 #[test]

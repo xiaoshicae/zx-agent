@@ -4,7 +4,7 @@
 //!
 //! Layering follows pi (<https://github.com/earendil-works/pi>). The kernel, `zx-core`, is
 //! re-exported at the root, one module per domain:
-//! - [`AgentSession`], in [`agent_session`]: shared prompts, cancellation, subscriptions and
+//! - [`Session`], in [`session`]: shared prompts, cancellation, subscriptions and
 //!   model switching
 //! - [`runner`]: exclusive run ownership, retries, limits and persistence
 //! - [`tools`]: the tool interface and the set of tools a run offers

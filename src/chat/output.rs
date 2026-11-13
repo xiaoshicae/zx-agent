@@ -8,7 +8,7 @@ use std::time::Duration;
 use serde_json::Value;
 use zx_agent::ai::{AssistantMessage, ContentBlock, Delta, Message, StopReason, ToolCall, ToolResultMessage};
 use zx_agent::compaction::{self, Outcome};
-use zx_agent::events::{Event, EventKind, EventSink};
+use zx_agent::events::{Event, EventKind};
 use zx_agent::runner::RunReport;
 use zx_agent::sync::lock;
 use zx_agent::text::clip;
@@ -232,8 +232,9 @@ fn custom_message(state: &mut TextState, custom_type: &str, content: &str) {
     }
 }
 
-impl EventSink for Output {
-    fn emit(&self, event: &Event) {
+impl Output {
+    /// Show `event` of the run in progress.
+    pub(super) fn emit(&self, event: &Event) {
         if self.mode == OutputMode::Jsonl {
             self.json.emit(event);
             return;

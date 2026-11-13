@@ -3,13 +3,14 @@
 //!
 //! One run is one trace: a `run` span, an `attempt` span for each try, `step` spans, and
 //! spans for model requests, tool calls and summaries, timed by the events' `atMs`. A run
-//! continues the caller's trace when its sink was made with a [`TraceParent`]. Token usage
+//! continues the caller's trace when its hook was made with a [`TraceParent`]. Token usage
 //! and cost are attributes of the spans they belong to; a collector derives metrics from the
 //! spans. Only metadata goes out: IDs, names, counts, token usage, durations and outcomes.
 //! User input, model output, tool arguments and results never do, nor do reasons and error
 //! texts, which may quote them.
 //!
-//! Events become signals (`signal`), which one task steps into spans (`spans`).
+//! A hook observes the events of every run and turns them into signals (`signal`), which
+//! one task steps into spans (`spans`).
 
 mod signal;
 mod spans;
@@ -30,8 +31,8 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::events::EventSink;
-use signal::{Signal, SignalSink};
+use signal::Signal;
+pub use signal::TraceHook;
 use spans::{Runs, export};
 
 /// Either variable steps the trace export on. As the OTLP specification has it, the first is
@@ -57,8 +58,8 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const SERVICE_NAME: &str = "zx-agent";
 
 /// A W3C trace context received from the caller: the values of the `traceparent` and
-/// `tracestate` headers, or of `TRACEPARENT` and `TRACESTATE` in the environment. Runs emitted
-/// through [`Telemetry::sink_under`] continue that trace, under the caller's span.
+/// `tracestate` headers, or of `TRACEPARENT` and `TRACESTATE` in the environment. Runs observed
+/// through [`Telemetry::hook_under`] continue that trace, under the caller's span.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TraceParent {
     context: SpanContext,
@@ -107,8 +108,8 @@ impl TraceParent {
     }
 }
 
-/// Exports the events of runs as OpenTelemetry traces. Give [`sink`](Self::sink) to each
-/// session, and call [`shutdown`](Self::shutdown) before the process exits.
+/// Exports the events of runs as OpenTelemetry traces. Register [`hook`](Self::hook) with
+/// each session's hooks, and call [`shutdown`](Self::shutdown) before the process exits.
 pub struct Telemetry {
     tracer_provider: SdkTracerProvider,
     sender: mpsc::Sender<Signal>,
@@ -159,20 +160,20 @@ impl Telemetry {
         }
     }
 
-    /// The sink to give a session: it passes each event on without waiting. Every run starts
-    /// a trace of its own.
-    pub fn sink(&self) -> Arc<dyn EventSink> {
-        Arc::new(self.signal_sink(None))
+    /// The hook to register with a session: it observes the session's runs and passes each
+    /// event on without waiting. Every run starts a trace of its own.
+    pub fn hook(&self) -> TraceHook {
+        self.trace_hook(None)
     }
 
-    /// A sink whose runs continue the caller's trace: each `run` span, and each manual
+    /// A hook whose runs continue the caller's trace: each `run` span, and each manual
     /// compaction, is a child of the span that `parent` names.
-    pub fn sink_under(&self, parent: &TraceParent) -> Arc<dyn EventSink> {
-        Arc::new(self.signal_sink(Some(parent.context.clone())))
+    pub fn hook_under(&self, parent: &TraceParent) -> TraceHook {
+        self.trace_hook(Some(parent.context.clone()))
     }
 
-    fn signal_sink(&self, parent: Option<SpanContext>) -> SignalSink {
-        SignalSink {
+    fn trace_hook(&self, parent: Option<SpanContext>) -> TraceHook {
+        TraceHook {
             sender: self.sender.clone(),
             dropped: Arc::clone(&self.dropped),
             parent,

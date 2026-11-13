@@ -55,11 +55,10 @@ impl StepLoop<'_> {
 
     /// Ask the finish hooks what follows the step `summary` describes.
     async fn finish_step(&self, summary: &FinishedStep<'_>) -> Result<StepDecision, Halt> {
-        self.config
-            .hooks
-            .finish_step(summary, self.trace.context())
-            .await
-            .map_err(|error| Halt::Failed(self.report_hook_failure(error)))
+        match self.config.hooks.finish_step(summary, self.trace.context()).await {
+            Ok(decision) => Ok(decision),
+            Err(error) => Err(self.hook_failed(error).await),
+        }
     }
 
     /// What the normal loop would do after a response, before the finish hooks decide.

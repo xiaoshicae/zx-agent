@@ -6,9 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio_util::sync::CancellationToken;
-
-use zx_agent::AgentSession;
+use zx_agent::Session;
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::builtin::continuation::ContinueOnLength;
@@ -16,7 +14,8 @@ use zx_agent::builtin::executor::{LocalExecutor, local_environment_section};
 use zx_agent::builtin::policy::{AutoApprove, CommandPolicy, Rule, RuleMatcher, RulePolicy};
 use zx_agent::builtin::redact::RedactSecrets;
 use zx_agent::builtin::tools::{BashTool, ReadFileTool};
-use zx_agent::events::{Event, EventKind};
+use zx_agent::compaction;
+use zx_agent::events::EventKind;
 use zx_agent::policy::PolicyDecision;
 use zx_agent::prompt::build_system_prompt;
 use zx_agent::runner::{LoopConfig, RunLimits};
@@ -74,13 +73,7 @@ async fn main() -> anyhow::Result<()> {
     config.policies.push("command_policy", Arc::new(CommandPolicy::new()));
     config.policies.push("permissions", Arc::new(rules));
     config.hooks.push(RedactSecrets::new(api_key));
-    let session = Transcript::in_memory(SessionHeader::new(&cwd, &model));
-    // Any `Fn(&Event)` is an event sink.
-    let sink = Arc::new(|event: &Event| {
-        if let EventKind::ToolExecutionStart { tool_name, args, .. } = &event.event {
-            eprintln!("[tool] {tool_name} {args}");
-        }
-    });
+    let transcript = Transcript::in_memory(SessionHeader::new(&cwd, &model));
     // Nobody can stop an unattended run, so it gets bounds of its own.
     let limits = RunLimits {
         max_model_requests: Some(30),
@@ -88,9 +81,22 @@ async fn main() -> anyhow::Result<()> {
         token_budget: None,
         cost_budget: None,
     };
-    let agent = AgentSession::new(config, RetryPolicy::default(), limits, session, sink);
+    let session = Session::new(
+        config,
+        RetryPolicy::default(),
+        limits,
+        compaction::Config::default(),
+        transcript,
+    )?;
 
-    let report = agent.prompt(task, &CancellationToken::new()).await?;
+    // A run makes its requests as it is read: its events first, then its report.
+    let mut run = session.send(task)?;
+    while let Some(event) = run.next().await {
+        if let EventKind::ToolExecutionStart { tool_name, args, .. } = &event.event {
+            eprintln!("[tool] {tool_name} {args}");
+        }
+    }
+    let report = run.wait().await;
     println!("{}", report.final_text);
     eprintln!(
         "outcome: {:?}, model requests: {}, tokens: {}",

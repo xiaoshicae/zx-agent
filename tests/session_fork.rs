@@ -80,7 +80,7 @@ async fn requests_of_the_copied_branch_replay_from_the_fork() {
     .build();
     let report = runner.run("go", &CancellationToken::new()).await;
     assert_eq!(report.outcome, RunOutcome::Completed);
-    let source = runner.session();
+    let source = &runner.session();
     let leaf = source.leaf_id().unwrap().to_string();
     let fork_path = dir.path().join("fork.jsonl");
 

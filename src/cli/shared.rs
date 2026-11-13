@@ -11,8 +11,8 @@ use anyhow::{Context, Result};
 use zx_agent::builtin::mcp::{Server, ServerConfig};
 use zx_agent::builtin::redact::{MIN_SECRET_CHARS, check_secret_files, short_secret_files};
 use zx_agent::config::Builtin;
-use zx_agent::events::EventSink;
 use zx_agent::extensions::Extension;
+use zx_agent::otel::TraceHook;
 
 use super::{BaseArgs, BudgetArgs, Settings, env_value};
 
@@ -36,8 +36,8 @@ pub(crate) struct Shared {
     /// Variables that hold credentials besides the API key, such as IM tokens: commands do
     /// not inherit them, and their values are redacted like the key's.
     pub(super) hidden_env: Vec<String>,
-    /// Where every session's events also go: the trace export, when one is configured.
-    pub(super) traces: Option<Arc<dyn EventSink>>,
+    /// The hook that exports every session's runs as traces, when an export is configured.
+    pub(super) traces: Option<TraceHook>,
 }
 
 impl Shared {
@@ -68,9 +68,9 @@ impl Shared {
         self
     }
 
-    /// Send every session's events to `traces` as well: the trace export, when one is
-    /// configured.
-    pub(crate) fn with_traces(mut self, traces: Option<Arc<dyn EventSink>>) -> Self {
+    /// Export the runs of every session through `traces`, the hook of the trace export,
+    /// when one is configured.
+    pub(crate) fn with_traces(mut self, traces: Option<TraceHook>) -> Self {
         self.traces = traces;
         self
     }

@@ -10,7 +10,9 @@ use async_trait::async_trait;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use common::{EchoTool, RunnerSetup, config, fast_retry, header, read_lines, run_prompt, summarize};
+use common::{
+    Asked, EchoTool, RunnerSetup, config, fast_retry, header, read_lines, run_approved, run_prompt, summarize,
+};
 use zx_agent::CancelSignal;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{EventReceiver, Message, Provider, Request, SectionChange, StopReason, SystemMessage, ToolCall};
@@ -22,7 +24,9 @@ use zx_agent::hooks::{
     ContextEdit, FinishedStep, Hook, HookChain, HookContext, HookOptions, HookResult, HookStage, StepDecision,
 };
 use zx_agent::input::Input;
-use zx_agent::policy::{Approval, ApprovalRequest, Interaction, PolicyContext, PolicyDecision, ToolPolicy};
+use zx_agent::policy::{
+    ApprovalDecision, ApprovalMode, DEFAULT_APPROVAL_TIMEOUT, PolicyContext, PolicyDecision, ToolPolicy,
+};
 use zx_agent::runner::{RunLimits, RunOutcome};
 use zx_agent::tools::{Tool, ToolContext, ToolOutput};
 use zx_agent::transcript::{Entry, Transcript};
@@ -59,24 +63,24 @@ async fn a_later_allow_does_not_override_an_ask_without_a_human() {
 }
 
 struct Approver {
-    approval: Approval,
+    approval: ApprovalDecision,
     calls: AtomicUsize,
 }
 #[async_trait]
-impl Interaction for Approver {
-    async fn confirm(&self, request: &ApprovalRequest) -> Result<Approval, String> {
+impl common::Approver for Approver {
+    async fn confirm(&self, request: &Asked) -> Option<ApprovalDecision> {
         assert_eq!(request.reason, "review");
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(self.approval.clone())
+        Some(self.approval.clone())
     }
 }
 
 #[tokio::test]
 async fn allow_once_and_session_approvals_have_different_scopes() {
     for (approval, confirmations, executions) in [
-        (Approval::AllowOnce, 2, 2),
-        (Approval::AllowSession, 1, 2),
-        (Approval::Deny("declined".into()), 2, 0),
+        (ApprovalDecision::AllowOnce, 2, 2),
+        (ApprovalDecision::AllowSession, 1, 2),
+        (ApprovalDecision::Deny("declined".into()), 2, 0),
     ] {
         let provider = Arc::new(FauxProvider::new([
             FauxStep::tool_calls(vec![
@@ -94,8 +98,7 @@ async fn allow_once_and_session_approvals_have_different_scopes() {
         config
             .policies
             .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
-        config.interaction = host.clone();
-        let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
+        let (result, _) = run_approved(config, host.clone(), "go").await;
         assert_eq!(result.outcome, RunOutcome::Completed);
         assert_eq!(host.calls.load(Ordering::SeqCst), confirmations);
         assert_eq!(tool.calls.load(Ordering::SeqCst), executions);
@@ -130,13 +133,16 @@ async fn session_grants_require_exact_arguments_and_never_override_deny() {
     let tool = Arc::new(EchoTool::new("echo"));
     let denied = Arc::new(AtomicBool::new(false));
     let host = Arc::new(Approver {
-        approval: Approval::AllowSession,
+        approval: ApprovalDecision::AllowSession,
         calls: AtomicUsize::new(0),
     });
     let mut config = config(provider, vec![tool.clone()]);
-    config.interaction = host.clone();
     config.policies.push("switch", Arc::new(SwitchPolicy(denied.clone())));
-    let (mut runner, _) = RunnerSetup::new(config).build();
+    let (mut runner, _) = RunnerSetup {
+        approver: Some(host.clone()),
+        ..RunnerSetup::new(config)
+    }
+    .build();
     for _ in 0..3 {
         assert_eq!(
             runner.run("go", &CancellationToken::new()).await.outcome,
@@ -150,62 +156,42 @@ async fn session_grants_require_exact_arguments_and_never_override_deny() {
     assert_eq!(tool.calls.load(Ordering::SeqCst), 3);
 }
 
-enum HostFailure {
-    Error,
-    Panic,
-    Pending,
-}
+/// Is asked and never answers; says when it was asked.
+struct WaitingHost(Arc<tokio::sync::Notify>);
 #[async_trait]
-impl Interaction for HostFailure {
-    async fn confirm(&self, _request: &ApprovalRequest) -> Result<Approval, String> {
-        match self {
-            Self::Error => Err("host unavailable".into()),
-            Self::Panic => panic!("host bug"),
-            Self::Pending => std::future::pending().await,
-        }
+impl common::Approver for WaitingHost {
+    async fn confirm(&self, _request: &Asked) -> Option<ApprovalDecision> {
+        self.0.notify_one();
+        std::future::pending().await
     }
 }
 
 #[tokio::test]
-async fn approval_errors_panics_and_timeouts_block_execution_and_preserve_the_loop() {
-    for (host, expected) in [
-        (HostFailure::Error, "host unavailable"),
-        (HostFailure::Panic, "panicked"),
-        (HostFailure::Pending, "timed out"),
-    ] {
-        let provider = Arc::new(FauxProvider::new([
-            FauxStep::tool_call("c", "echo", json!({})),
-            FauxStep::text("handled"),
-        ]));
-        let tool = Arc::new(EchoTool::new("echo"));
-        let mut config = config(provider.clone(), vec![tool.clone()]);
-        config
-            .policies
-            .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
-        config.interaction = Arc::new(host);
-        config.interaction_timeout = Duration::ZERO;
-        let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
-        assert_eq!(result.outcome, RunOutcome::Completed);
-        assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
-        assert!(
-            matches!(&provider.requests()[1].messages[2], Message::ToolResult(output) if output.is_error && output.content.contains(expected))
-        );
-    }
+async fn an_approval_nobody_answers_in_time_blocks_the_call_and_the_loop_goes_on() {
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::tool_call("c", "echo", json!({})),
+        FauxStep::text("handled"),
+    ]));
+    let tool = Arc::new(EchoTool::new("echo"));
+    let mut config = config(provider.clone(), vec![tool.clone()]);
+    config
+        .policies
+        .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
+    config.approvals = ApprovalMode::Wait(Duration::ZERO);
+    let host = Arc::new(WaitingHost(Arc::default()));
+    let (result, _) = run_approved(config, host, "go").await;
+    assert_eq!(result.outcome, RunOutcome::Completed);
+    assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
+    assert!(
+        matches!(&provider.requests()[1].messages[2], Message::ToolResult(output) if output.is_error && output.content.contains("nobody answered the approval request"))
+    );
 }
 
 #[test]
-fn host_approvals_wait_two_minutes_by_default() {
+fn nobody_answers_approvals_unless_the_host_says_it_does() {
     let config = config(Arc::new(FauxProvider::new([])), vec![]);
-    assert_eq!(config.interaction_timeout, Duration::from_secs(120));
-}
-
-struct WaitingHost(Arc<tokio::sync::Notify>);
-#[async_trait]
-impl Interaction for WaitingHost {
-    async fn confirm(&self, _request: &ApprovalRequest) -> Result<Approval, String> {
-        self.0.notify_one();
-        std::future::pending().await
-    }
+    assert_eq!(config.approvals, ApprovalMode::Deny);
+    assert_eq!(DEFAULT_APPROVAL_TIMEOUT, Duration::from_secs(120));
 }
 
 #[tokio::test]
@@ -217,8 +203,11 @@ async fn cancellation_interrupts_a_pending_approval() {
     config
         .policies
         .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
-    config.interaction = Arc::new(WaitingHost(entered.clone()));
-    let (mut runner, _) = RunnerSetup::new(config).build();
+    let (mut runner, _) = RunnerSetup {
+        approver: Some(Arc::new(WaitingHost(entered.clone()))),
+        ..RunnerSetup::new(config)
+    }
+    .build();
     let cancel = CancellationToken::new();
     let mut running = Box::pin(runner.run("go", &cancel));
     tokio::select! { () = entered.notified() => {}, _ = &mut running => panic!("must wait for approval") }
@@ -245,13 +234,12 @@ async fn invalid_tool_arguments_are_rejected_before_policy_and_approval() {
     ]));
     let checks = Arc::new(AtomicUsize::new(0));
     let host = Arc::new(Approver {
-        approval: Approval::AllowOnce,
+        approval: ApprovalDecision::AllowOnce,
         calls: AtomicUsize::new(0),
     });
     let mut config = config(provider.clone(), vec![Arc::new(BashTool::default())]);
     config.policies.push("count", Arc::new(CountBefore(checks.clone())));
-    config.interaction = host.clone();
-    run_prompt(config, &mut Vec::new(), "go").await;
+    run_approved(config, host.clone(), "go").await;
     assert_eq!(checks.load(Ordering::SeqCst), 0);
     assert_eq!(host.calls.load(Ordering::SeqCst), 0);
     assert!(
@@ -417,8 +405,8 @@ async fn steering_queued_after_a_rejected_message_stays_queued_for_the_next_run(
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push(RejectMarked);
     let (mut runner, _) = RunnerSetup::new(config).build();
-    runner.config().queues.steer("reject-me");
-    runner.config().queues.steer("keep-me");
+    runner.queues().steer("reject-me");
+    runner.queues().steer("keep-me");
     let first = runner.run("hello", &CancellationToken::new()).await;
     assert_eq!(first.outcome, RunOutcome::Failed, "{first:?}");
     let second = runner.run("again", &CancellationToken::new()).await;
@@ -953,7 +941,7 @@ impl Hook for HoldInput {
     }
 }
 
-fn holding_runner(provider: Arc<FauxProvider>) -> (zx_agent::runner::Runner, HoldInput) {
+fn holding_runner(provider: Arc<FauxProvider>) -> (common::Runner, HoldInput) {
     let holding = Arc::new(tokio::sync::Notify::new());
     let released = Arc::new(AtomicBool::new(false));
     let mut config = config(provider, vec![]);
@@ -994,7 +982,7 @@ async fn input_whose_hook_was_cancelled_is_not_recorded() {
 async fn queued_input_whose_run_was_dropped_stays_queued_and_unrecorded() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let (mut runner, hold) = holding_runner(provider.clone());
-    runner.config().queues.steer("hold: check the disk");
+    runner.queues().steer("hold: check the disk");
     let cancel = CancellationToken::new();
 
     tokio::select! {
@@ -1073,7 +1061,7 @@ async fn the_policy_verdict_of_every_call_is_reported_with_its_reason() {
 async fn approvals_are_reported_when_asked_and_when_remembered() {
     for (approval, expected) in [
         (
-            Approval::AllowOnce,
+            ApprovalDecision::AllowOnce,
             pairs(&[
                 ("c1", "Ask"),
                 ("c1", "requested"),
@@ -1084,7 +1072,7 @@ async fn approvals_are_reported_when_asked_and_when_remembered() {
             ]),
         ),
         (
-            Approval::AllowSession,
+            ApprovalDecision::AllowSession,
             pairs(&[
                 ("c1", "Ask"),
                 ("c1", "requested"),
@@ -1094,7 +1082,7 @@ async fn approvals_are_reported_when_asked_and_when_remembered() {
             ]),
         ),
         (
-            Approval::Deny("declined".into()),
+            ApprovalDecision::Deny("declined".into()),
             pairs(&[
                 ("c1", "Ask"),
                 ("c1", "requested"),
@@ -1116,12 +1104,12 @@ async fn approvals_are_reported_when_asked_and_when_remembered() {
         config
             .policies
             .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
-        config.interaction = Arc::new(Approver {
+        let host = Arc::new(Approver {
             approval,
             calls: AtomicUsize::new(0),
         });
 
-        let (_, events) = run_prompt(config, &mut Vec::new(), "go").await;
+        let (_, events) = run_approved(config, host, "go").await;
 
         assert_eq!(approvals(&events), expected);
     }
@@ -1130,10 +1118,10 @@ async fn approvals_are_reported_when_asked_and_when_remembered() {
 /// Answers after `delay`, like a person who takes a moment.
 struct SlowApprover(Duration);
 #[async_trait]
-impl Interaction for SlowApprover {
-    async fn confirm(&self, _request: &ApprovalRequest) -> Result<Approval, String> {
+impl common::Approver for SlowApprover {
+    async fn confirm(&self, _request: &Asked) -> Option<ApprovalDecision> {
         tokio::time::sleep(self.0).await;
-        Ok(Approval::AllowOnce)
+        Some(ApprovalDecision::AllowOnce)
     }
 }
 
@@ -1147,9 +1135,9 @@ async fn a_resolved_approval_reports_how_long_it_waited() {
     config
         .policies
         .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
-    config.interaction = Arc::new(SlowApprover(Duration::from_millis(20)));
+    let host = Arc::new(SlowApprover(Duration::from_millis(20)));
 
-    let (_, events) = run_prompt(config, &mut Vec::new(), "go").await;
+    let (_, events) = run_approved(config, host, "go").await;
 
     let waited: Vec<u64> = events
         .events()
@@ -1164,11 +1152,10 @@ async fn a_resolved_approval_reports_how_long_it_waited() {
 }
 
 #[tokio::test]
-async fn approvals_that_fail_or_time_out_report_how_they_ended() {
-    for (host, ended) in [
-        (HostFailure::Error, ApprovalResult::Failed),
-        (HostFailure::Panic, ApprovalResult::Failed),
-        (HostFailure::Pending, ApprovalResult::TimedOut),
+async fn an_approval_ends_as_denied_without_anyone_to_ask_and_as_timed_out_without_an_answer() {
+    for (approvals, ended) in [
+        (ApprovalMode::Deny, ApprovalResult::Denied),
+        (ApprovalMode::Wait(Duration::ZERO), ApprovalResult::TimedOut),
     ] {
         let provider = Arc::new(FauxProvider::new([
             FauxStep::tool_call("c", "echo", json!({})),
@@ -1178,8 +1165,7 @@ async fn approvals_that_fail_or_time_out_report_how_they_ended() {
         config
             .policies
             .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
-        config.interaction = Arc::new(host);
-        config.interaction_timeout = Duration::ZERO;
+        config.approvals = approvals;
 
         let (_, events) = run_prompt(config, &mut Vec::new(), "go").await;
 
@@ -1187,11 +1173,16 @@ async fn approvals_that_fail_or_time_out_report_how_they_ended() {
             .events()
             .into_iter()
             .filter_map(|event| match event {
-                EventKind::ApprovalResolved { approval, reason, .. } => Some((approval, reason.is_some())),
+                EventKind::ApprovalResolved {
+                    approval_id,
+                    approval,
+                    reason,
+                    ..
+                } => Some((approval, approval_id.is_some(), reason.is_some())),
                 _ => None,
             })
             .collect();
-        assert_eq!(resolved, [(ended, true)]);
+        assert_eq!(resolved, [(ended, true, true)]);
     }
 }
 
@@ -1203,8 +1194,11 @@ async fn an_approval_interrupted_by_cancellation_is_reported_as_cancelled() {
     config
         .policies
         .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
-    config.interaction = Arc::new(WaitingHost(entered.clone()));
-    let (mut runner, events) = RunnerSetup::new(config).build();
+    let (mut runner, events) = RunnerSetup {
+        approver: Some(Arc::new(WaitingHost(entered.clone()))),
+        ..RunnerSetup::new(config)
+    }
+    .build();
     let cancel = CancellationToken::new();
 
     let (report, ()) = tokio::join!(runner.run("go", &cancel), async {

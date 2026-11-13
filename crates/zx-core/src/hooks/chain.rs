@@ -17,8 +17,7 @@ use crate::events::Event;
 use crate::guard::{Priority, bounded};
 use crate::tools::ToolOutput;
 
-/// One guarded call: of a registered hook, or of the interaction host for an approval. A
-/// failure names the call by `name` and `phase`.
+/// One guarded call of a registered hook. A failure names the call by `name` and `phase`.
 pub(crate) struct HookCall<'a> {
     pub(crate) name: &'a str,
     pub(crate) phase: HookPoint,
@@ -153,6 +152,11 @@ impl HookChain {
     pub fn with(mut self, hook: impl Hook + 'static) -> Self {
         self.push(hook);
         self
+    }
+
+    /// Whether no hook is registered: nothing then observes the events.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.hooks.is_empty()
     }
 
     pub async fn on_input(&self, mut text: String, ctx: &HookContext) -> Result<String, HookError> {

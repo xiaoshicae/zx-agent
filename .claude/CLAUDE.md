@@ -16,22 +16,23 @@
 |---|---|
 | CLI | `src/main.rs`（只分派）、`src/cli/`（`settings.rs` 合并配置与命令行，`shared.rs` 的 `Shared` 是进程内共用的东西，`prepare.rs` 组装一个会话，`execution.rs` 本机或容器）、`src/run.rs`、`src/chat/`、`src/acp/`、`src/im.rs`、`src/process.rs`、`src/render.rs`、`src/session_files.rs`、`src/list_sessions.rs` |
 | 配置 | `src/config/`（`environment.rs`、`definition.rs`、`agent_file.rs`、`permissions.rs`）、`agents/` |
-| 内核 | `crates/zx-core/src/`：`agent_session.rs`（共享调用、Busy、订阅）、`runner.rs`（单次运行、重试、上限、审批缓存）、`runner/step_loop/`（每次尝试的循环与工具执行）、`runner/trace.rs`（事件的编号与发送）、`transcript/`（只追加的条目树、投影、恢复；存储接口 `SessionStorage` 与 `SessionLog`，附带的两种存储 `jsonl.rs` 与 `memory.rs`）、`compaction/` 与 `transcript/compaction/`（摘要，统一叫 compaction，见 D22）、`tools.rs`、`policy/`、`hooks/`、`events/`（只有数据）、`input.rs`、`prompt.rs`、`extensions/`、`guard.rs`（宿主代码看到的取消信号，调用宿主代码的时限）。公开路径按域模块（`zx_core::tools::Tool`），根部只导出 `AgentSession` 与 `CancelSignal`；模块间允许的引用见 `lib.rs` 的 `//!` |
+| 内核 | `crates/zx-core/src/`：`session.rs`（会话句柄：共享调用、Busy）与 `session/run.rs`（`Run`：一次执行的事件流与结果）、`runner.rs`（单次运行、重试、上限）、`runner/step_loop/`（每次尝试的循环与工具执行）、`runner/trace.rs`（事件的编号与发送）、`transcript/`（只追加的条目树、投影、恢复；存储接口 `SessionStorage` 与 `SessionLog`，附带的两种存储 `jsonl.rs` 与 `memory.rs`）、`compaction/` 与 `transcript/compaction/`（摘要，统一叫 compaction，见 D22）、`tools.rs`、`policy/`（策略接口与链；`approval.rs` 是审批闸门 `ApprovalGate`：等待宿主回答，并记住本会话放行的调用）、`hooks/`、`events/`（只有数据）、`input.rs`、`prompt.rs`、`extensions/`、`guard.rs`（宿主代码看到的取消信号，调用宿主代码的时限）。公开路径按域模块（`zx_core::tools::Tool`），根部只导出 `AgentSession` 与 `CancelSignal`；模块间允许的引用见 `lib.rs` 的 `//!` |
 | 模型 | `crates/zx-ai/src/`、`crates/zx-ai-openai/src/` |
 | 工具与外层策略 | `crates/zx-tools/src/`：`tools/`、`executor/`（本机与容器）、`policy/`、`continuation.rs`、`redact.rs`、`output_store.rs`、`mcp.rs` |
 | IM | `crates/zx-im/src/`（`ImChannel`、`Server`、`platform.rs`）、`crates/zx-im-slack/`、`crates/zx-im-feishu/` |
 | 追踪导出 | `src/otel.rs`、`src/otel/` |
 
-一次运行：`main` 组装 `AgentSession` → `prompt` 独占取得 Runner → `Runner::run` 开始一次 `Run`，每次尝试运行一遍循环 `StepLoop`（crate 内部） → 先持久化提示词、输入和上下文改动，再执行可选摘要 → 请求模型，发出的上下文就是此刻的会话投影 → 执行工具、脱敏、可选落盘 → 每一步先写入会话宿主（crate 内部的 `SessionHost`），再发出事件 → `Run` 处理重试并汇总 `RunReport`，`main` 映射退出码。
+一次运行：`main` 组装 `Session` → `send` 独占取得 Runner（crate 内部）并返回 `Run`，调用方读它，运行才推进 → 每次尝试运行一遍循环 `StepLoop`（crate 内部） → 先持久化提示词、输入和上下文改动，再执行可选摘要 → 请求模型，发出的上下文就是此刻的会话投影 → 执行工具、脱敏、可选落盘 → 每一步先写入会话宿主（crate 内部的 `SessionHost`），再把事件放进这次运行的有界通道 → Runner 处理重试并汇总 `RunReport`，`main` 映射退出码。
 
 设计取舍（改动前先理解原因）：
 
 - **场景策略不进内核**：提示词、上限与续写默认值由 agent 文件提供；命令策略、续写、脱敏由外层注册，无人时拒绝 Ask。`run` 用退出码表达结果，调度器不必解析输出。
 - **配置与内容分工**：`config.toml` 决定环境，agent 决定角色，命令行只剩 `--model`、`--tools`、预算与会话参数。没有项目级配置文件：项目内容（含 AGENTS.md 与 skill 正文）不能改变环境、权限或控制策略；自动发现的 AGENTS.md 必须在项目根目录内。
-- **共享 API、独占执行**：AgentSession 的短锁只切换 Runner 所有权，不跨 await；重叠调用返回 Busy；取消、panic 或 future 丢弃后由 RAII 归还；panic 的 subscriber 被隔离并摘除，不持锁调用回调。
+- **共享 API、独占执行**：`Session` 是可克隆的句柄，短锁只切换 Runner 所有权，不跨 await；重叠调用返回 Busy。`send`、`continue_run`、`compact` 只取得会话并返回 `Run`：调用方读它才推进，事件经有界通道（读得慢运行就等，没有不设上限的缓冲），运行结束、取消、panic 或 `Run` 被丢弃后由 RAII 归还。事件只从 `Run` 读出；要观察所有运行的（如追踪导出）用 `Hook::on_event`。
 - **会话是审计日志，也是模型上下文的唯一来源**：修正上下文靠追加 `context_edit`，提示词变化靠追加 system 消息，原始记录始终保留；可替换的只是最底层的存储：`SessionStorage` 与它交出的 `SessionLog`，接口里没有文件路径。摘要每次读取原始投影，原始事实被修正后整份失效。
-- **终端输入只有一个所有者**：chat 的专用线程经有界通道提供输入，Interaction 不直接读 stdin；审批回复必须匹配主机生成的请求编号。
-- **扩展点都是 trait**：`Provider`、`Tool`、`ToolPolicy`、`Hook`、`Interaction`、`EventSink`、`Executor`、`SessionStorage` 与 `SessionLog`、`ImChannel`、`StatusStore`、`Extension`。新能力优先实现 trait，不改循环。
+- **终端输入只有一个所有者**：chat 的专用线程经有界通道提供输入；审批请求随事件到达读 `Run` 的那个循环，回答经 `Session::resolve_approval`，必须带内核为这次请求生成的审批编号。
+- **审批由内核等待，不是接口**：策略给出询问时，调用在 `ApprovalGate` 等待；`ApprovalMode::Deny`（默认）没有人回答，立即拒绝，`ApprovalMode::Wait` 等宿主回答，超时与取消按拒绝处理。审批编号由内核生成，迟到的回答落不到别的请求上；审批不写入会话。
+- **扩展点都是 trait**：`Provider`、`Tool`、`ToolPolicy`、`Hook`、`Executor`、`SessionStorage` 与 `SessionLog`、`ImChannel`、`StatusStore`、`Extension`。新能力优先实现 trait，不改循环。
 - **通用，不为场景定制**：某个环境、平台或厂商才有的知识写在 agent、部署清单或配置里，或由外部适配器实现；代码不解析某个系统的私有格式；provider 的协议方言处理显式开启（如 `provider.fillMissingReasoning`），不按厂商推断。
 - **界面交给 ACP 客户端**（D13）：`acp` 只做协议与会话的映射；`chat` 不再加功能。
 - **安全靠部署隔离**：策略只是第一道防线（见 README 的"安全模型"），真正的隔离靠不同账号或容器。

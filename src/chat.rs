@@ -1,8 +1,8 @@
-//! The line-oriented terminal frontend; model and tool work stays in AgentSession.
+//! The line-oriented terminal frontend; model and tool work stays in Session.
 //!
 //! - `input`: the single owner of the terminal's input
-//! - `turn`: one operation of a conversation driven to its end
-//! - `interaction`: approval requests, answered through the input owner
+//! - `turn`: one operation of a conversation driven to its end, with the approvals its
+//!   calls wait for
 //! - `signals`: signals that cancel a prompt and leave the REPL running
 //! - `output` and `term`: streaming output and colors
 //! - `commands`: slash commands, which never reach the model
@@ -12,7 +12,6 @@
 mod commands;
 mod info;
 mod input;
-mod interaction;
 mod output;
 mod signals;
 mod storage;
@@ -24,15 +23,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use tokio::sync::mpsc;
 
-use zx_agent::AgentSession;
-use zx_agent::agent_session::ModelRef;
+use zx_agent::Session;
 use zx_agent::ai::{Provider, Reasoning};
 use zx_agent::config::Builtin;
-use zx_agent::events::EventSink;
 use zx_agent::input::Input;
-use zx_agent::otel::Telemetry;
+use zx_agent::otel::{Telemetry, TraceHook};
+use zx_agent::policy::ApprovalMode;
+use zx_agent::session::ModelRef;
 
 use crate::cli::{self, ChatArgs};
 use crate::process::{EXIT_CANCELLED, EXIT_COMPLETED, with_telemetry};
@@ -42,7 +40,6 @@ use crate::session_files::{SessionChoice, SessionPlace};
 use commands::Command;
 use info::{About, banner, help, status};
 use input::Line;
-use interaction::{TerminalInteraction, Ticket};
 use output::Output;
 use signals::{Interrupt, Signals};
 use storage::{Storage, opening};
@@ -67,7 +64,7 @@ enum Flow {
 }
 
 struct Built {
-    session: AgentSession,
+    session: Session,
     provider: Arc<dyn Provider>,
     about: About,
     /// The commands extensions registered: name and description, for parsing and /help.
@@ -77,7 +74,6 @@ struct Built {
 /// What every conversation of this chat is built with.
 struct Chat {
     shared: cli::Shared,
-    interaction: Arc<TerminalInteraction>,
     output: Arc<Output>,
 }
 
@@ -85,11 +81,11 @@ impl Chat {
     async fn build(&self, model: &str, place: &SessionPlace, choice: SessionChoice<'_>) -> Result<Built> {
         let mut prepared = cli::prepare(&self.shared, model, None, place, choice).await?;
         prepared.require_bash_approval("shell commands require interactive approval");
-        prepared.config.interaction = self.interaction.clone();
-        prepared.config.interaction_timeout = self.shared.settings.approval_timeout;
+        // The person at the terminal answers; `drive_turn` passes the answer on.
+        prepared.config.approvals = ApprovalMode::Wait(self.shared.settings.approval_timeout);
         let provider = prepared.config.provider.clone();
         let about = About::of(&mut prepared);
-        let session = prepared.into_session(self.output.clone())?;
+        let session = prepared.into_session()?;
         let commands = session
             .commands()
             .iter()
@@ -124,10 +120,10 @@ impl Chat {
 }
 
 pub(crate) async fn run(args: ChatArgs) -> Result<u8> {
-    with_telemetry(async move |telemetry| converse(args, telemetry.map(Telemetry::sink)).await).await
+    with_telemetry(async move |telemetry| converse(args, telemetry.map(Telemetry::hook)).await).await
 }
 
-async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<u8> {
+async fn converse(args: ChatArgs, traces: Option<TraceHook>) -> Result<u8> {
     let ChatArgs {
         base,
         budget,
@@ -146,10 +142,8 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
     } else {
         InputMode::Script
     };
-    let (interaction, approvals) = TerminalInteraction::channel();
     let chat = Chat {
         output: Arc::new(Output::new(output_mode, deltas, color)),
-        interaction: Arc::new(interaction),
         shared,
     };
     let output = &chat.output;
@@ -161,7 +155,7 @@ async fn converse(args: ChatArgs, traces: Option<Arc<dyn EventSink>>) -> Result<
     let mut terminal = Terminal {
         signals: Signals::new().context("cannot register chat signal handlers")?,
         input: input::spawn(mode)?,
-        approvals,
+        next_approval: 1,
         mode,
         next_prompt: None,
         last_interrupt: None,
@@ -211,11 +205,12 @@ enum Read {
     Exit(u8),
 }
 
-/// The terminal side of the REPL: its input, approvals and signals, and what the next read
-/// starts from.
+/// The terminal side of the REPL: its input and signals, the number of the next approval
+/// request, and what the next read starts from.
 struct Terminal {
     input: input::Input,
-    approvals: mpsc::Receiver<Ticket>,
+    /// Approval requests are numbered through the chat, so that a number names one request.
+    next_approval: u64,
     signals: Signals,
     mode: InputMode,
     /// A prompt to send next without reading, such as input that arrived as a task ended.
@@ -268,7 +263,7 @@ impl Terminal {
     fn io<'a>(&'a mut self, output: &'a Output, commands: &'a [(String, String)]) -> TurnIo<'a> {
         TurnIo {
             input: &mut self.input,
-            approvals: &mut self.approvals,
+            next_approval: &mut self.next_approval,
             signals: &mut self.signals,
             mode: self.mode,
             output,
@@ -394,7 +389,7 @@ impl Repl<'_> {
 }
 
 /// Run an extension's command and show what it says. Returns the message it sends, if any.
-async fn run_extension_command(session: &AgentSession, name: &str, args: &str, output: &Output) -> Option<Input> {
+async fn run_extension_command(session: &Session, name: &str, args: &str, output: &Output) -> Option<Input> {
     match session.run_command(name, args).await {
         Ok(outcome) => {
             for line in outcome.lines {

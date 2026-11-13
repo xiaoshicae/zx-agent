@@ -6,15 +6,16 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 use tokio::task::JoinError;
+use tokio_util::sync::CancellationToken;
 
-use crate::AgentSession;
-use crate::agent_session::{AgentSessionError, Subscription};
+use crate::Session;
 use crate::runner::{RunOutcome, RunReport};
+use crate::session::SessionError;
 use crate::transcript::CustomMessage;
 use zx_core::input::Input;
 
-use super::approval::{ApprovalEvents, ApprovalUpdate, ImApproval};
-use super::server::Shared;
+use super::approval::{ApprovalEvents, ApprovalUpdate};
+use super::server::{Shared, timed};
 use super::{Destination, ImChannel, MessageRef, Opening, Outbound, Replies, SessionKey, UserId};
 
 /// Messages read from a thread the bot is first mentioned in: enough to follow a discussion,
@@ -25,10 +26,9 @@ const SAID_TYPE: &str = "im_message";
 
 /// The session while it is held. Dropping it releases the session file.
 pub(crate) struct Opened {
-    // Shared with the task that runs the current prompt, as AgentSession is meant to be:
-    // meanwhile the worker steers, aborts and takes queued input through it.
-    pub(crate) session: Arc<AgentSession>,
-    _approvals: Subscription,
+    // Shared with the task that reads the current run, as a Session is meant to be:
+    // meanwhile the worker steers, cancels and takes queued input through it.
+    pub(crate) session: Session,
 }
 
 impl Opened {
@@ -79,35 +79,57 @@ impl Outlet {
             .await;
     }
 
-    /// Open the session that `opening` names, with this conversation as the host of its
-    /// approvals.
-    pub(crate) async fn open(
+    /// Open the session that `opening` names.
+    pub(crate) async fn open(&self, opening: Opening) -> Result<Opened, String> {
+        let session = self.shared.factory.open(&self.key, opening).await?;
+        Ok(Opened { session })
+    }
+
+    /// Post the card of an approval request. An error says why nobody can decide.
+    pub(crate) async fn ask(&self, card: &Outbound) -> Result<MessageRef, String> {
+        let post = self.channel.send(&self.to, card);
+        timed(self.shared.outbound_timeout, "post the approval request", post).await
+    }
+
+    /// Run `text` as one prompt of `session` to its end, as the task of a run does. How its
+    /// approvals end goes to the worker through `updates`; `stop`, the server stopping,
+    /// cancels the run, which is still read to its end.
+    pub(crate) fn run(
         &self,
+        session: &Session,
+        text: String,
         updates: &mpsc::Sender<ApprovalUpdate>,
-        opening: Opening,
-    ) -> Result<Opened, String> {
-        let interaction = Arc::new(ImApproval {
-            channel: Arc::clone(&self.channel),
-            to: self.to.clone(),
-            updates: updates.clone(),
-            outbound_timeout: self.shared.outbound_timeout,
-        });
-        let session = self.shared.factory.open(&self.key, opening, interaction).await?;
-        let approvals = session.subscribe(Arc::new(ApprovalEvents {
+        stop: CancellationToken,
+    ) -> impl Future<Output = Result<RunReport, SessionError>> + Send + 'static {
+        let session = session.clone();
+        let approvals = ApprovalEvents {
             updates: updates.clone(),
             key: self.key.clone(),
             sink: Arc::clone(&self.shared.sink),
-        }));
-        Ok(Opened {
-            session: Arc::new(session),
-            _approvals: approvals,
-        })
+        };
+        async move {
+            let mut run = session.send(text)?;
+            let mut stopped = false;
+            loop {
+                tokio::select! {
+                    () = stop.cancelled(), if !stopped => {
+                        session.cancel();
+                        stopped = true;
+                    }
+                    event = run.next() => match event {
+                        Some(event) => approvals.forward(&event),
+                        None => break,
+                    },
+                }
+            }
+            Ok(run.wait().await)
+        }
     }
 
     /// Replace the status with how the run ended, or post that when no status was posted.
     pub(crate) async fn answer(
         &self,
-        ended: Result<Result<RunReport, AgentSessionError>, JoinError>,
+        ended: Result<Result<RunReport, SessionError>, JoinError>,
         status: Option<MessageRef>,
         closing: bool,
     ) {

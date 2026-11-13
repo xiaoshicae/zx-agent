@@ -1,25 +1,26 @@
 //! One operation of a conversation driven to its end: the prompt, continuation or summary
 //! runs while the terminal takes steering input, approvals and signals.
+//!
+//! The operation is a run that this loop reads: each event is shown as it arrives, and a
+//! call that waits for approval is announced by one. The person's answer goes back through
+//! the session, with the ID the run gave the request.
 
-use std::future::Future;
-use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
+use serde_json::Value;
 
-use zx_agent::AgentSession;
-use zx_agent::agent_session::AgentSessionError;
 use zx_agent::compaction;
+use zx_agent::events::{ApprovalResult, Event, EventKind};
 use zx_agent::input::Input;
-use zx_agent::policy::Approval;
+use zx_agent::policy::ApprovalDecision;
 use zx_agent::runner::RunReport;
+use zx_agent::session::SessionError;
+use zx_agent::{Run, Session};
 
 use super::commands::{self, Command};
 use super::info::help;
 use super::input::{self, Line};
-use super::interaction::Ticket;
 use super::output::Output;
 use super::signals::{Interrupt, Signals};
 use super::term::Tone;
@@ -32,7 +33,8 @@ const APPROVAL_PROMPT: &str = "[approval] Choose 1, 2, 3 or 4:";
 
 pub(super) struct TurnIo<'a> {
     pub(super) input: &'a mut input::Input,
-    pub(super) approvals: &'a mut mpsc::Receiver<Ticket>,
+    /// The number the next approval request is shown under; it counts through the chat.
+    pub(super) next_approval: &'a mut u64,
     pub(super) signals: &'a mut Signals,
     pub(super) mode: InputMode,
     pub(super) output: &'a Output,
@@ -47,6 +49,44 @@ pub(super) enum Operation {
     Continue,
     Compact,
 }
+
+/// The run of an operation: a task, or a summary.
+enum Running {
+    Task(Run),
+    Compact(Run<compaction::Report>),
+}
+
+impl Running {
+    /// Start `operation` on `session`.
+    fn start(session: &Session, operation: Operation) -> Result<Self, SessionError> {
+        Ok(match operation {
+            Operation::Prompt(text) => Self::Task(session.send(text)?),
+            Operation::Message(message) => Self::Task(session.send(message)?),
+            Operation::Continue => Self::Task(session.continue_run()?),
+            Operation::Compact => Self::Compact(session.compact()?),
+        })
+    }
+
+    /// The run's next event; `None` once it has ended.
+    async fn next(&mut self) -> Option<Event> {
+        match self {
+            Self::Task(run) => run.next().await,
+            Self::Compact(run) => run.next().await,
+        }
+    }
+
+    /// Read the run to its end, showing the events that remain, and return its report.
+    async fn report(mut self, output: &Output) -> Report {
+        while let Some(event) = self.next().await {
+            output.emit(&event);
+        }
+        match self {
+            Self::Task(run) => Report::Task(run.wait().await),
+            Self::Compact(run) => Report::Compact(run.wait().await),
+        }
+    }
+}
+
 enum Report {
     Task(RunReport),
     Compact(compaction::Report),
@@ -69,6 +109,17 @@ enum Choice {
     Discuss,
 }
 
+/// A call that waits for the person's approval.
+struct Ticket {
+    /// The number the request is shown under.
+    number: u64,
+    /// The request's ID in the run, which its answer names.
+    approval_id: String,
+    tool: String,
+    arguments: Value,
+    reason: String,
+}
+
 /// The approval a call waits for, while the person decides.
 enum Pending {
     None,
@@ -83,7 +134,7 @@ impl Pending {
         !matches!(self, Self::None)
     }
 
-    fn ticket_mut(&mut self) -> Option<&mut Ticket> {
+    fn ticket(&self) -> Option<&Ticket> {
         match self {
             Self::None => None,
             Self::Choosing(ticket) | Self::Discussing(ticket) => Some(ticket),
@@ -119,65 +170,89 @@ struct TurnState {
 
 /// Run `operation` on `session` while the terminal takes steering input, approvals and
 /// signals. Returns what the REPL does next.
-pub(super) async fn drive_turn(session: &AgentSession, operation: Operation, io: &mut TurnIo<'_>) -> Result<Flow> {
+pub(super) async fn drive_turn(session: &Session, operation: Operation, io: &mut TurnIo<'_>) -> Result<Flow> {
     let mut state = TurnState {
         compact: matches!(operation, Operation::Compact),
         started: Instant::now(),
         pending: Pending::None,
         queued_prompt: None,
     };
-    // `settle` cancels the operation through the session; nothing cancels this token.
-    let cancel = CancellationToken::new();
-    let running = async {
-        match operation {
-            Operation::Prompt(text) => session.prompt(text, &cancel).await.map(Report::Task),
-            Operation::Message(message) => session.prompt(message, &cancel).await.map(Report::Task),
-            Operation::Continue => session.continue_run(&cancel).await.map(Report::Task),
-            Operation::Compact => session.compact(&cancel).await.map(Report::Compact),
-        }
-    };
-    tokio::pin!(running);
+    let mut run = Running::start(session, operation)?;
     loop {
-        if state
-            .pending
-            .ticket_mut()
-            .is_some_and(|ticket| ticket.reply.is_closed())
-        {
-            state.pending = Pending::None;
-        }
         tokio::select! {
             biased;
-            interrupt = io.signals.next() => return interrupted(session, running.as_mut(), io, &mut state, interrupt).await,
-            report = &mut running => return finished(session, &report?, io, state),
-            () = expired(&mut state.pending), if state.pending.waiting() => {
-                if let Some(ticket) = state.pending.take() {
-                    io.output.line(Tone::Warn, &format!("[approval] request {} expired; the task goes on without the call", ticket.id));
-                }
-            }
-            request = io.approvals.recv() => {
-                let Some(ticket) = request else { anyhow::bail!("terminal approval channel closed"); };
-                asked(io.output, &mut state.pending, ticket);
-            }
+            interrupt = io.signals.next() => return interrupted(session, run, io, &mut state, interrupt).await,
+            event = run.next() => match event {
+                Some(event) => observed(io, &mut state.pending, &event),
+                None => return finished(session, &run.report(io.output).await, io, state),
+            },
             line = io.input.recv(), if io.mode == InputMode::Terminal || state.pending.waiting() => {
-                if let Some(flow) = typed(session, running.as_mut(), io, &mut state, line).await? {
-                    return Ok(flow);
+                if let Some(next) = typed(session, io, &mut state, line).await? {
+                    drop(state.pending.take());
+                    settle(session, run, io.output, state.started).await;
+                    return Ok(next);
                 }
             }
         }
     }
 }
 
+/// An event of the operation: show it, and follow the approval it announces or ends.
+fn observed(io: &mut TurnIo<'_>, pending: &mut Pending, event: &Event) {
+    io.output.emit(event);
+    match &event.event {
+        EventKind::ApprovalRequested {
+            approval_id,
+            tool_name,
+            args,
+            reason,
+            ..
+        } => {
+            let number = *io.next_approval;
+            *io.next_approval = number.saturating_add(1);
+            let ticket = Ticket {
+                number,
+                approval_id: approval_id.clone(),
+                tool: tool_name.clone(),
+                arguments: args.clone(),
+                reason: reason.clone(),
+            };
+            show_approval(io.output, &ticket);
+            *pending = Pending::Choosing(ticket);
+        }
+        EventKind::ApprovalResolved {
+            approval_id: Some(ended),
+            approval: ApprovalResult::TimedOut | ApprovalResult::Cancelled,
+            ..
+        } => {
+            // The run stopped waiting before the person answered.
+            if pending.ticket().is_some_and(|ticket| &ticket.approval_id == ended)
+                && let Some(ticket) = pending.take()
+            {
+                io.output.line(
+                    Tone::Warn,
+                    &format!(
+                        "[approval] request {} expired; the task goes on without the call",
+                        ticket.number
+                    ),
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Ctrl+C or SIGTERM during the operation: cancel it, report how far it got, and drop the
 /// input meant for it.
 async fn interrupted(
-    session: &AgentSession,
-    running: Pin<&mut impl Future<Output = Result<Report, AgentSessionError>>>,
+    session: &Session,
+    run: Running,
     io: &TurnIo<'_>,
     state: &mut TurnState,
     interrupt: Interrupt,
 ) -> Result<Flow> {
     drop(state.pending.take());
-    settle(session, running, io.output, state.started).await?;
+    settle(session, run, io.output, state.started).await;
     if state.queued_prompt.is_some() {
         io.output.line(Tone::Dim, "[chat] queued input cleared by cancellation");
     }
@@ -202,7 +277,7 @@ async fn interrupted(
 
 /// The operation ended: print its report, and turn the input that arrived too late for it
 /// into the next prompt.
-fn finished(session: &AgentSession, report: &Report, io: &TurnIo<'_>, state: TurnState) -> Result<Flow> {
+fn finished(session: &Session, report: &Report, io: &TurnIo<'_>, state: TurnState) -> Result<Flow> {
     report.print(io.output, state.started.elapsed());
     // Steering that arrived as the task ended was never read: ask it next.
     let late = unread_input(session, io.output);
@@ -228,24 +303,11 @@ fn finished(session: &AgentSession, report: &Report, io: &TurnIo<'_>, state: Tur
     })
 }
 
-/// A call asks for approval: show the menu, and deny a request still open.
-fn asked(output: &Output, pending: &mut Pending, ticket: Ticket) {
-    if ticket.reply.is_closed() {
-        return;
-    }
-    if let Some(previous) = pending.take() {
-        // Defensive fail-closed behavior; the core normally asks serially.
-        deny(output, previous, "superseded terminal approval");
-    }
-    show_approval(output, &ticket);
-    *pending = Pending::Choosing(ticket);
-}
-
 /// A line typed during the operation: an answer to the approval menu, steering, or a
-/// command. Returns what the REPL does next when the line ends the operation.
+/// command. Returns what the REPL does next when the line ends the operation, which the
+/// caller then cancels.
 async fn typed(
-    session: &AgentSession,
-    running: Pin<&mut impl Future<Output = Result<Report, AgentSessionError>>>,
+    session: &Session,
     io: &mut TurnIo<'_>,
     state: &mut TurnState,
     line: Option<std::io::Result<Line>>,
@@ -269,29 +331,24 @@ async fn typed(
         },
         None => {
             if let Some(ticket) = state.pending.take() {
-                deny(io.output, ticket, "terminal input closed");
+                deny(session, io.output, &ticket, "terminal input closed");
             }
-            settle(session, running, io.output, state.started).await?;
             return Ok(Some(Flow::Exit(EXIT_COMPLETED)));
         }
     };
-    if matches!(command, Command::Quit | Command::New) {
-        let next = if matches!(command, Command::New) {
-            Flow::New
-        } else {
-            Flow::Exit(EXIT_COMPLETED)
-        };
-        drop(state.pending.take());
-        settle(session, running, io.output, state.started).await?;
-        return Ok(Some(next));
+    match command {
+        Command::New => Ok(Some(Flow::New)),
+        Command::Quit => Ok(Some(Flow::Exit(EXIT_COMPLETED))),
+        command => {
+            busy(session, io, state, command).await;
+            Ok(None)
+        }
     }
-    busy(session, io, state, command).await;
-    Ok(None)
 }
 
 /// A command typed while the operation runs: steering and the commands that do not touch the
 /// session run now; the others wait for the operation to end.
-async fn busy(session: &AgentSession, io: &TurnIo<'_>, state: &mut TurnState, command: Command) {
+async fn busy(session: &Session, io: &TurnIo<'_>, state: &mut TurnState, command: Command) {
     let output = io.output;
     match command {
         Command::Prompt(text) if state.compact => {
@@ -345,30 +402,15 @@ async fn busy(session: &AgentSession, io: &TurnIo<'_>, state: &mut TurnState, co
     }
 }
 
-/// Cancel the operation and report how far it got.
-async fn settle(
-    session: &AgentSession,
-    running: Pin<&mut impl Future<Output = Result<Report, AgentSessionError>>>,
-    output: &Output,
-    started: Instant,
-) -> Result<()> {
+/// Cancel the operation, read it to its end and report how far it got.
+async fn settle(session: &Session, run: Running, output: &Output, started: Instant) {
     session.cancel();
-    running.await?.print(output, started.elapsed());
-    Ok(())
-}
-
-/// Completes once the core stops waiting for the pending approval: it timed out, or the
-/// task was cancelled. Never completes without one.
-async fn expired(pending: &mut Pending) {
-    match pending.ticket_mut() {
-        Some(ticket) => ticket.reply.closed().await,
-        None => std::future::pending().await,
-    }
+    run.report(output).await.print(output, started.elapsed());
 }
 
 /// A line typed while a call waits for approval: a menu choice, or the message that
 /// discusses the call instead of running it.
-fn answer_approval(session: &AgentSession, output: &Output, pending: &mut Pending, text: String) {
+fn answer_approval(session: &Session, output: &Output, pending: &mut Pending, text: String) {
     match std::mem::replace(pending, Pending::None) {
         Pending::None => {}
         Pending::Discussing(ticket) => {
@@ -377,13 +419,13 @@ fn answer_approval(session: &AgentSession, output: &Output, pending: &mut Pendin
                 *pending = Pending::Discussing(ticket);
             } else {
                 session.queues().steer(text);
-                deny(output, ticket, "user wants to discuss this call");
+                deny(session, output, &ticket, "user wants to discuss this call");
             }
         }
         Pending::Choosing(ticket) => match approval_choice(&text) {
-            Some(Choice::Once) => answer(output, ticket, Approval::AllowOnce),
-            Some(Choice::Session) => answer(output, ticket, Approval::AllowSession),
-            Some(Choice::Deny) => deny(output, ticket, "declined by the user"),
+            Some(Choice::Once) => answer(session, output, &ticket, ApprovalDecision::AllowOnce),
+            Some(Choice::Session) => answer(session, output, &ticket, ApprovalDecision::AllowSession),
+            Some(Choice::Deny) => deny(session, output, &ticket, "declined by the user"),
             Some(Choice::Discuss) => {
                 output.line(
                     Tone::Warn,
@@ -399,15 +441,20 @@ fn answer_approval(session: &AgentSession, output: &Output, pending: &mut Pendin
     }
 }
 
-/// Send the person's decision; the core may have stopped waiting for it.
-fn answer(output: &Output, ticket: Ticket, decision: Approval) {
-    if ticket.reply.send(decision).is_err() {
-        output.line(Tone::Warn, "[approval] request expired");
+/// Give the person's decision to the run; it may have stopped waiting for it.
+fn answer(session: &Session, output: &Output, ticket: &Ticket, decision: ApprovalDecision) {
+    if session.resolve_approval(&ticket.approval_id, decision).is_err() {
+        // No call was authorized: the request ended before the answer came.
+        output.line(Tone::Warn, &format!("[approval] request {} expired", ticket.number));
     }
 }
 
+fn deny(session: &Session, output: &Output, ticket: &Ticket, reason: &str) {
+    answer(session, output, ticket, ApprovalDecision::Deny(reason.into()));
+}
+
 /// Input that `steer` queued and no run read; a task only reads it between turns.
-fn unread_input(session: &AgentSession, output: &Output) -> Vec<Input> {
+fn unread_input(session: &Session, output: &Output) -> Vec<Input> {
     session.take_queued().unwrap_or_else(|error| {
         output.line(
             Tone::Error,
@@ -426,7 +473,6 @@ fn describe_queued(message: &Input) -> String {
 }
 
 fn show_approval(output: &Output, ticket: &Ticket) {
-    let call = &ticket.request.call;
     let style = output.style();
     // The label is colored, the call itself is bold in the default color: it is what a
     // person has to read.
@@ -434,21 +480,14 @@ fn show_approval(output: &Output, ticket: &Ticket) {
         Tone::Plain,
         &format!(
             "{} {}",
-            style.paint(Tone::Warn, &format!("[approval {}]", ticket.id)),
-            style.paint(Tone::Strong, &describe_call(&call.name, &call.arguments))
+            style.paint(Tone::Warn, &format!("[approval {}]", ticket.number)),
+            style.paint(Tone::Strong, &describe_call(&ticket.tool, &ticket.arguments))
         ),
     );
-    for line in describe_arguments(&call.arguments) {
+    for line in describe_arguments(&ticket.arguments) {
         output.line(Tone::Plain, &format!("  {line}"));
     }
-    output.line(Tone::Dim, &format!("  {}", visible(&ticket.request.reason)));
+    output.line(Tone::Dim, &format!("  {}", visible(&ticket.reason)));
     output.line(Tone::Dim, APPROVAL_MENU);
     output.line(Tone::Warn, APPROVAL_PROMPT);
-}
-
-fn deny(output: &Output, ticket: Ticket, reason: &str) {
-    if ticket.reply.send(Approval::Deny(reason.into())).is_err() {
-        // The runtime already stopped waiting; no call is authorized.
-        output.line(Tone::Warn, &format!("[approval] request {} expired", ticket.id));
-    }
 }

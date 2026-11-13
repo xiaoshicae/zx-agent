@@ -9,12 +9,11 @@ use std::time::Duration;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use zx_agent::AgentSession;
-use zx_agent::agent_session::ModelRef;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, PREAMBLE, Request, SystemPrompt};
 use zx_agent::compaction::{Config, Outcome};
 use zx_agent::runner::RunOutcome;
+use zx_agent::session::ModelRef;
 use zx_agent::tools::Tool;
 use zx_agent::transcript::{Entry, RequestSource, Transcript};
 
@@ -125,7 +124,7 @@ async fn request_config_is_appended_only_when_the_configuration_changes() {
         ..RunnerSetup::new(config(first.clone(), vec![]))
     }
     .build();
-    let session = AgentSession::from(runner);
+    let session = runner.into_session();
 
     session.prompt("a", &CancellationToken::new()).await.unwrap();
     session.prompt("b", &CancellationToken::new()).await.unwrap();
@@ -164,15 +163,14 @@ async fn summary_requests_are_rebuilt_from_their_compaction() {
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build();
-    let session = AgentSession::from(
-        runner
-            .with_compaction(Config {
-                keep_recent_bytes: 1,
-                timeout: Duration::from_secs(1),
-                ..Config::default()
-            })
-            .unwrap(),
-    );
+    let session = runner
+        .with_compaction(Config {
+            keep_recent_bytes: 1,
+            timeout: Duration::from_secs(1),
+            ..Config::default()
+        })
+        .unwrap()
+        .into_session();
 
     let report = session.compact(&CancellationToken::new()).await.unwrap();
 

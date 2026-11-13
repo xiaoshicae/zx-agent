@@ -1,27 +1,34 @@
 //! Events as signals: what the exporter task needs from each event, metadata only, handed
-//! over through a bounded queue that a run never waits for.
+//! over by a hook through a bounded queue that a run never waits for.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
 use opentelemetry::trace::SpanContext;
 use tokio::sync::mpsc;
 
 use crate::ai::{Message, StopReason, Usage};
-use crate::events::{ApprovalResult, Event, EventKind, EventSink, Interruption, RequestKind, ToolVerdict};
+use crate::events::{ApprovalResult, Event, EventKind, Interruption, RequestKind, ToolVerdict};
+use crate::hooks::{Hook, HookContext, HookResult};
 use crate::runner::RunOutcome;
 
-/// Passes the events that spans need to the exporter task.
-pub(super) struct SignalSink {
+/// Observes the runs of the sessions it is registered with, and passes the events that
+/// spans need to the exporter task. It never waits and never fails, so it sees every event
+/// in order, also those of a cancelled run. Made by
+/// [`Telemetry::hook`](super::Telemetry::hook); a copy for each session exports to the same
+/// place.
+#[derive(Clone)]
+pub struct TraceHook {
     pub(super) sender: mpsc::Sender<Signal>,
     pub(super) dropped: Arc<AtomicU64>,
     /// The caller's span, which the runs continue.
     pub(super) parent: Option<SpanContext>,
 }
 
-impl EventSink for SignalSink {
-    fn emit(&self, event: &Event) {
+impl TraceHook {
+    fn observe(&self, event: &Event) {
         let Some(signal) = Signal::of(event, self.parent.as_ref()) else {
             return;
         };
@@ -29,6 +36,14 @@ impl EventSink for SignalSink {
             // Full, or the export has stopped: a run never waits for telemetry.
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }
+    }
+}
+
+#[async_trait]
+impl Hook for TraceHook {
+    async fn on_event(&self, event: &Event, _ctx: &HookContext) -> HookResult<()> {
+        self.observe(event);
+        Ok(())
     }
 }
 
@@ -260,17 +275,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_sink_drops_events_beyond_its_queue_and_counts_them() {
+    fn the_hook_drops_events_beyond_its_queue_and_counts_them() {
         let (sender, _receiver) = mpsc::channel(1);
-        let sink = SignalSink {
+        let hook = TraceHook {
             sender,
             dropped: Arc::new(AtomicU64::new(0)),
             parent: None,
         };
-        sink.emit(&event(1, EventKind::StepStart { step: 1 }));
-        sink.emit(&event(2, EventKind::StepStart { step: 2 }));
+        hook.observe(&event(1, EventKind::StepStart { step: 1 }));
+        hook.observe(&event(2, EventKind::StepStart { step: 2 }));
         // Not for spans: neither queued nor counted.
-        sink.emit(&event(3, EventKind::MessageStart { role: "assistant" }));
-        assert_eq!(sink.dropped.load(Ordering::Relaxed), 1);
+        hook.observe(&event(3, EventKind::MessageStart { role: "assistant" }));
+        assert_eq!(hook.dropped.load(Ordering::Relaxed), 1);
     }
 }

@@ -12,8 +12,6 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use common::{EchoTool, NotifyingProvider, RunnerSetup, config, header, summarize};
-use zx_agent::AgentSession;
-use zx_agent::agent_session::AgentSessionError;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, ToolCall, UserMessageKind};
 use zx_agent::events::{Event, EventKind};
@@ -21,6 +19,7 @@ use zx_agent::extensions::{CommandContext, CommandError, CommandOutcome, Extensi
 use zx_agent::hooks::{Hook, HookContext, HookResult};
 use zx_agent::input::{Input, QueueMode};
 use zx_agent::runner::{LoopConfig, RunOutcome};
+use zx_agent::session::SessionError;
 use zx_agent::tools::ToolOutput;
 use zx_agent::transcript::{CustomMessage, Entry};
 
@@ -33,13 +32,13 @@ fn note(text: &str) -> CustomMessage {
     }
 }
 
-async fn session_in(file: &Path, config: LoopConfig) -> (AgentSession, Arc<common::Collect>) {
+async fn session_in(file: &Path, config: LoopConfig) -> (common::Driven, Arc<common::Collect>) {
     let (runner, events) = RunnerSetup {
         session: common::create_session_file(file, header()).await.unwrap(),
         ..RunnerSetup::new(config)
     }
     .build();
-    (AgentSession::from(runner), events)
+    (runner.into_session(), events)
 }
 
 fn kinds(file: &Path) -> Vec<&'static str> {
@@ -229,7 +228,7 @@ async fn a_hook_changes_the_tools_of_the_next_request() {
     );
     config.hooks.push(OnlyEcho);
     let (runner, _) = RunnerSetup::new(config).build();
-    let session = AgentSession::from(runner);
+    let session = runner.into_session();
 
     session.prompt("go", &CancellationToken::new()).await.unwrap();
 
@@ -384,13 +383,10 @@ async fn an_idle_session_records_entries_and_messages_at_once_and_a_running_one_
         () = provider.started.notified() => {}
         _ = &mut running => panic!("must be running"),
     }
-    assert_eq!(
-        session.append_entry("state", json!(2)).await,
-        Err(AgentSessionError::Busy)
-    );
+    assert_eq!(session.append_entry("state", json!(2)).await, Err(SessionError::Busy));
     assert_eq!(
         session.append_custom_message(note("later")).await,
-        Err(AgentSessionError::Busy)
+        Err(SessionError::Busy)
     );
     assert!(session.cancel());
     assert_eq!(running.await.unwrap().outcome, RunOutcome::Cancelled);
@@ -426,7 +422,7 @@ async fn run_with_mode(mode: QueueMode) -> Vec<Vec<String>> {
     config.hooks.push(TwoSteers);
     config.queues.set_mode(mode);
     let (runner, _) = RunnerSetup::new(config).build();
-    let session = AgentSession::from(runner);
+    let session = runner.into_session();
     session.prompt("go", &CancellationToken::new()).await.unwrap();
     provider
         .requests()

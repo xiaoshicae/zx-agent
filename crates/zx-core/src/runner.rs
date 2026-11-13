@@ -2,13 +2,14 @@
 //!
 //! The loop stops at the first provider error; this layer decides whether to retry, keeps
 //! the session as the source of model context, and enforces request, time and token limits.
+//! A [`Session`](crate::session::Session) owns the Runner and lends it to one run at a time.
 //!
 //! - `step_loop`: the loop a run runs once per attempt, what it runs with ([`LoopConfig`]),
 //!   and what it needs from the session it records in
 //! - `accounting`: what a run spends across its attempts, and its budgets; the loop of each
 //!   attempt counts into it
-//! - `trace`: one run's identity and event numbering, and where its events go: the sink, then
-//!   the hooks that observe them
+//! - `trace`: one run's identity and event numbering, and where its events go: the run's
+//!   reader, then the hooks that observe them
 //! - `run_host`: what a run lends the loop and the compactor, and how a run opens and closes
 //! - `interrupted`: results for the tool calls an interrupted run left unfinished
 //! - `final_answer`: the answer, joined from the parts that continue a cut-off one
@@ -24,6 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use final_answer::final_answer;
@@ -33,9 +35,9 @@ use crate::ai::retry::{RetryPolicy, is_context_overflow, is_retryable};
 use crate::ai::{AssistantMessage, Provider, Reasoning};
 use crate::compaction::{self, Trigger};
 pub use crate::events::report::{RunOutcome, RunReport};
-use crate::events::{EventKind, EventSink};
+use crate::events::{Event, EventKind};
 use crate::input::Input;
-use crate::policy::ApprovalCache;
+use crate::policy::ApprovalGate;
 use crate::sync::AbortOnDrop;
 use crate::transcript::Transcript;
 pub(crate) use accounting::RunAccounting;
@@ -65,35 +67,37 @@ pub struct RunLimits {
     pub cost_budget: Option<f64>,
 }
 
+/// What links a run to its reader: the run's ID, the token that cancels it, and where the
+/// reader takes its events from.
+pub(crate) struct RunLink {
+    pub(crate) id: String,
+    pub(crate) cancel: CancellationToken,
+    pub(crate) events: mpsc::Sender<Event>,
+}
+
 /// Runs prompts against one session, adding retries, limits, and persistence to the loop.
-pub struct Runner {
+/// One Runner owns one conversation, and `&mut self` keeps its runs from overlapping.
+pub(crate) struct Runner {
     config: LoopConfig,
     retry: RetryPolicy,
     limits: RunLimits,
     session: Transcript,
-    sink: Arc<dyn EventSink>,
-    approvals: ApprovalCache,
+    /// Shared with the session's handles, which answer the requests that wait there.
+    approvals: Arc<ApprovalGate>,
     compaction: compaction::Config,
     pause: CompactionPause,
 }
 
 impl Runner {
     /// Create a runner. Each step of a run is recorded in `session` before it takes effect;
-    /// events go to `sink` afterwards.
-    pub fn new(
-        config: LoopConfig,
-        retry: RetryPolicy,
-        limits: RunLimits,
-        session: Transcript,
-        sink: Arc<dyn EventSink>,
-    ) -> Self {
+    /// its events follow.
+    pub(crate) fn new(config: LoopConfig, retry: RetryPolicy, limits: RunLimits, session: Transcript) -> Self {
         Self {
             config,
             retry,
             limits,
             session,
-            sink,
-            approvals: ApprovalCache::default(),
+            approvals: Arc::default(),
             compaction: compaction::Config::default(),
             pause: CompactionPause::default(),
         }
@@ -101,21 +105,21 @@ impl Runner {
 
     /// Opt into automatic context preparation or tune manual summary budgets.
     /// Rejects invalid budgets without making requests or changing the session.
-    pub fn with_compaction(mut self, config: compaction::Config) -> anyhow::Result<Self> {
+    pub(crate) fn with_compaction(mut self, config: compaction::Config) -> anyhow::Result<Self> {
         config.validate()?;
         self.compaction = config;
         Ok(self)
     }
 
-    /// Summarize the old prefix without executing a task or tools. Uses the same exclusive
-    /// Runner borrow as run; cancellation and future drop cancel only this operation. Its
-    /// events carry a `runId` of their own.
-    pub async fn compact(&mut self, cancel: &CancellationToken) -> compaction::Report {
-        let child = cancel.child_token();
+    /// Summarize the old prefix without executing a task or tools, as the run `link` names.
+    /// Cancellation and future drop cancel only this operation.
+    pub(crate) async fn compact(&mut self, link: &RunLink) -> compaction::Report {
+        let child = link.cancel.child_token();
         let _cancel_on_drop = child.drop_guard_ref();
-        let trace = self.config.trace(self.session.header().id.clone(), child.clone());
+        let session_id = self.session.header().id.clone();
+        let trace = self.config.trace(session_id, link.id.clone(), child.clone());
         let target = EventTarget {
-            sink: self.sink.as_ref(),
+            events: &link.events,
             trace: &trace,
             hooks: &self.config.hooks,
         };
@@ -129,13 +133,14 @@ impl Runner {
         host.compact(Trigger::Manual, 1).await.into()
     }
 
-    /// The loop configuration, for example to reach `config().queues` during a run.
-    pub fn config(&self) -> &LoopConfig {
+    /// The loop configuration.
+    pub(crate) fn config(&self) -> &LoopConfig {
         &self.config
     }
 
-    pub(crate) fn replace_sink(&mut self, sink: Arc<dyn EventSink>) -> Arc<dyn EventSink> {
-        std::mem::replace(&mut self.sink, sink)
+    /// Where the calls of this conversation wait for approval.
+    pub(crate) fn approvals(&self) -> &Arc<ApprovalGate> {
+        &self.approvals
     }
 
     pub(crate) fn replace_model(&mut self, provider: Arc<dyn Provider>, model: String) -> (Arc<dyn Provider>, String) {
@@ -152,7 +157,7 @@ impl Runner {
     }
 
     /// The session the runner records in.
-    pub fn session(&self) -> &Transcript {
+    pub(crate) fn session(&self) -> &Transcript {
         &self.session
     }
 
@@ -162,45 +167,14 @@ impl Runner {
         &mut self.session
     }
 
-    /// Run one prompt to completion: the person's text, or a message from an extension (pi:
-    /// `sendMessage` with `triggerTurn` while idle). Never panics on provider or tool
-    /// failures; the report says how the run ended.
-    ///
-    /// One runner owns one active conversation. Overlapping runs are rejected by borrowing:
-    ///
-    /// ```compile_fail
-    /// use tokio_util::sync::CancellationToken;
-    /// use zx_core::runner::Runner;
-    ///
-    /// async fn overlapping(runner: &mut Runner, cancel: &CancellationToken) {
-    ///     let first = runner.run("first", cancel);
-    ///     let second = runner.run("second", cancel);
-    ///     tokio::join!(first, second);
-    /// }
-    /// ```
-    pub async fn run(&mut self, message: impl Into<Input>, cancel: &CancellationToken) -> RunReport {
-        self.start(Start::Message(message.into()), cancel).await
-    }
-
-    /// Continue the conversation without new input: the model answers
-    /// the session as it is. Runs like [`Runner::run`] otherwise, interrupted calls recovered
-    /// first. Whether there is something to answer is checked after that recovery:
-    ///
-    /// - the conversation ends with input or a tool result: the model answers it, for
-    ///   example after a crash left results to recover;
-    /// - it ends with an answer that failed or was cancelled, whose calls never ran: that
-    ///   answer is omitted with a `context_edit`, as a retry does, and the model answers again;
-    /// - it ends with a finished answer: queued steering, or else follow-up, input becomes the
-    ///   next input; with none queued the run ends with an error and makes no request, as it
-    ///   does for an empty conversation.
-    pub async fn continue_run(&mut self, cancel: &CancellationToken) -> RunReport {
-        self.start(Start::Continue, cancel).await
-    }
-
-    async fn start(&mut self, begin: Start, cancel: &CancellationToken) -> RunReport {
-        let run_cancel = cancel.child_token();
-        // Dropping this future must cancel background providers even when the caller
-        // keeps its parent token alive.
+    /// Run from `begin` to completion, as the run `link` names: a prompt, or the session as
+    /// it is ([`Session::continue_run`](crate::session::Session::continue_run) says what is
+    /// then answered). Never panics on provider or tool failures; the report says how the
+    /// run ended.
+    pub(crate) async fn run(&mut self, begin: Start, link: &RunLink) -> RunReport {
+        let run_cancel = link.cancel.child_token();
+        // Dropping this future must cancel background providers even when the session
+        // keeps the run's token alive.
         let _cancel_on_drop = run_cancel.drop_guard_ref();
         let timer = RunTimer::start(self.limits.timeout, &run_cancel);
         let Self {
@@ -208,18 +182,17 @@ impl Runner {
             retry,
             limits,
             session,
-            sink,
             approvals,
             compaction,
             pause,
         } = self;
-        let trace = config.trace(session.header().id.clone(), run_cancel.clone());
+        let trace = config.trace(session.header().id.clone(), link.id.clone(), run_cancel.clone());
         let target = EventTarget {
-            sink: sink.as_ref(),
+            events: &link.events,
             trace: &trace,
             hooks: &config.hooks,
         };
-        let run = Run {
+        let running = Running {
             host: RunHost {
                 session,
                 target,
@@ -234,24 +207,24 @@ impl Runner {
             overflow_recovered: false,
             timer,
         };
-        run.run(begin).await
+        running.run(begin).await
     }
 }
 
 /// One run in progress: the session host it records through, what it borrows from the
 /// Runner, and what its attempts have spent so far.
-struct Run<'a> {
+struct Running<'a> {
     host: RunHost<'a>,
     retry: &'a RetryPolicy,
     limits: &'a RunLimits,
-    approvals: &'a mut ApprovalCache,
+    approvals: &'a ApprovalGate,
     accounting: RunAccounting,
     /// A context overflow was recovered from once already.
     overflow_recovered: bool,
     timer: RunTimer,
 }
 
-impl Run<'_> {
+impl Running<'_> {
     /// Open the run from `begin`, run its attempts, and report how it ended.
     async fn run(mut self, begin: Start) -> RunReport {
         // The run's answer is what it adds after the entries the session has now. Counted in
@@ -289,15 +262,9 @@ impl Run<'_> {
     async fn attempt(&mut self, prompts: Vec<Input>) -> Halt {
         self.accounting.attempts = self.accounting.attempts.saturating_add(1);
         let (config, target) = (self.host.config, self.host.target);
-        StepLoop::new(
-            config,
-            &mut self.host,
-            &mut *self.approvals,
-            &mut self.accounting,
-            target,
-        )
-        .run(prompts)
-        .await
+        StepLoop::new(config, &mut self.host, self.approvals, &mut self.accounting, target)
+            .run(prompts)
+            .await
     }
 
     /// Recover from a context overflow by compacting once, or schedule a retry; an error
@@ -439,10 +406,10 @@ impl Run<'_> {
 }
 
 /// What a run starts from.
-enum Start {
+pub(crate) enum Start {
     /// The person's text, or a message from an extension.
     Message(Input),
-    /// The session as it is; see [`Runner::continue_run`].
+    /// The session as it is.
     Continue,
 }
 
@@ -480,7 +447,6 @@ mod tests {
     use super::*;
     use crate::ai::Message;
     use crate::ai::faux::{FauxProvider, FauxStep};
-    use crate::events::NullSink;
     use crate::tools::Tool;
     use crate::transcript::{FailingWriter, SessionHeader};
 
@@ -502,15 +468,28 @@ mod tests {
         }
     }
 
-    /// A runner without retries or limits, whose events go nowhere.
+    /// A runner without retries or limits.
     fn runner(config: LoopConfig, session: Transcript) -> Runner {
-        Runner::new(
-            config,
-            RetryPolicy::default(),
-            RunLimits::default(),
-            session,
-            Arc::new(NullSink),
-        )
+        Runner::new(config, RetryPolicy::default(), RunLimits::default(), session)
+    }
+
+    /// Run `prompt` on `runner` to its end, cancelled by `cancel`, with a reader that drops
+    /// the events.
+    async fn run(runner: &mut Runner, prompt: &str, cancel: &CancellationToken) -> RunReport {
+        let (events, mut reader) = mpsc::channel(1);
+        let link = RunLink {
+            id: "run".into(),
+            cancel: cancel.clone(),
+            events,
+        };
+        let running = runner.run(Start::Message(prompt.into()), &link);
+        tokio::pin!(running);
+        loop {
+            tokio::select! {
+                report = &mut running => return report,
+                Some(_) = reader.recv() => {}
+            }
+        }
     }
 
     /// Fails every write that contains `needle`, like a disk filling up at that record; the
@@ -578,7 +557,7 @@ mod tests {
                     ..compaction::Config::default()
                 })
                 .unwrap();
-            let report = runner.run("continue", &CancellationToken::new()).await;
+            let report = run(&mut runner, "continue", &CancellationToken::new()).await;
             assert_eq!(report.outcome, RunOutcome::Failed, "{rejected}: {report:?}");
             assert!(report.error.unwrap().contains(&format!("disk full on {rejected}")));
             assert_eq!(
@@ -612,7 +591,7 @@ mod tests {
             })
             .unwrap();
 
-        let report = runner.run("continue", &cancel).await;
+        let report = run(&mut runner, "continue", &cancel).await;
 
         assert_eq!(report.outcome, RunOutcome::Failed, "{report:?}");
         assert!(report.error.unwrap().contains("disk full on compaction_failed"));
@@ -624,7 +603,7 @@ mod tests {
         let session = Transcript::with_writer(SessionHeader::new(Path::new("."), "m"), Box::new(FailingWriter));
         let mut runner = runner(config(&provider, vec![]), session);
 
-        let report = runner.run("go", &CancellationToken::new()).await;
+        let report = run(&mut runner, "go", &CancellationToken::new()).await;
 
         assert_eq!(report.outcome, RunOutcome::Failed);
         let error = report.error.unwrap_or_default();
@@ -643,7 +622,7 @@ mod tests {
                 Transcript::with_writer(SessionHeader::new(Path::new("."), "m"), RejectWrites::entry(rejected));
             let mut runner = runner(config(&provider, vec![]), session);
 
-            let report = runner.run("go", &CancellationToken::new()).await;
+            let report = run(&mut runner, "go", &CancellationToken::new()).await;
 
             assert_eq!(report.outcome, RunOutcome::Failed, "{rejected}");
             let error = report.error.unwrap_or_default();
@@ -696,7 +675,7 @@ mod tests {
         );
         let mut runner = runner(config(&provider, vec![tool.clone()]), session);
 
-        let report = runner.run("go", &CancellationToken::new()).await;
+        let report = run(&mut runner, "go", &CancellationToken::new()).await;
 
         assert_eq!(report.outcome, RunOutcome::Failed);
         let error = report.error.unwrap_or_default();
@@ -727,7 +706,7 @@ mod tests {
         let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
         let mut runner = runner(config(&provider, vec![tool.clone()]), session);
 
-        let report = runner.run("continue", &CancellationToken::new()).await;
+        let report = run(&mut runner, "continue", &CancellationToken::new()).await;
 
         assert_eq!(report.outcome, RunOutcome::Failed);
         let error = report.error.unwrap_or_default();
@@ -757,7 +736,7 @@ mod tests {
             RejectWrites::containing("context_edit", "edit"),
         );
         let mut runner = runner(config, session);
-        let report = runner.run("original", &CancellationToken::new()).await;
+        let report = run(&mut runner, "original", &CancellationToken::new()).await;
         assert_eq!(report.outcome, RunOutcome::Failed);
         assert!(report.error.unwrap().contains("disk full on edit"));
         assert!(provider.requests().is_empty());

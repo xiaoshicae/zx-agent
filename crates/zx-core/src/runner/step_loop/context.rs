@@ -130,7 +130,7 @@ impl StepLoop<'_> {
         let text = content.clone();
         let transformed = match self.config.hooks.on_input(text.clone(), self.trace.context()).await {
             Err(error) if error.failure == HookFailure::Cancelled => {
-                return Err(Halt::Failed(self.report_hook_failure(error)));
+                return Err(self.hook_failed(error).await);
             }
             transformed => transformed,
         };
@@ -150,7 +150,7 @@ impl StepLoop<'_> {
             Err(error) => {
                 // A rejected input remains in the audit log but is omitted from requests.
                 self.edit(ContextEdit::Omit { index }).await?;
-                Err(Halt::Failed(self.report_hook_failure(error)))
+                Err(self.hook_failed(error).await)
             }
         }
     }

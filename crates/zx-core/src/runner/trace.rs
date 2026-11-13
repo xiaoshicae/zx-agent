@@ -1,15 +1,16 @@
 //! The trace of one run: what its hooks are told, the sequence that stamps its events, and
-//! where those events go.
+//! where those events go: to the run's reader, then to the hooks that observe them.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::ai::now_ms;
-use crate::events::{EVENT_SCHEMA_VERSION, Emit, Event, EventKind, EventSink};
+use crate::events::{EVENT_SCHEMA_VERSION, Emit, Event, EventKind};
 use crate::guard::CancelSignal;
 use crate::hooks::{HookChain, HookContext, HookError};
 use crate::input::InputQueues;
@@ -25,16 +26,19 @@ pub(crate) struct RunTrace {
 }
 
 impl RunTrace {
-    /// A new run of session `session_id` with a fresh ID, cancelled by `cancel`, whose hooks
-    /// reach the loop's queues and tool set.
+    /// The run `run_id` of session `session_id`, cancelled by `cancel`, whose hooks reach the
+    /// loop's queues and tool set.
     pub(crate) fn new(
-        session_id: String,
+        (session_id, run_id): (String, String),
         cwd: PathBuf,
         cancel: CancellationToken,
         queues: Arc<InputQueues>,
         active_tools: Arc<ActiveTools>,
     ) -> Self {
-        let context = HookContext::new(session_id, cwd, cancel).with_shared(queues, active_tools);
+        let context = HookContext {
+            run_id,
+            ..HookContext::new(session_id, cwd, cancel).with_shared(queues, active_tools)
+        };
         let policy_context = PolicyContext {
             session_id: context.session_id.clone(),
             run_id: context.run_id.clone(),
@@ -63,8 +67,9 @@ impl RunTrace {
         self.context.cancel.token()
     }
 
-    /// The event with the next sequence number. Events are stamped in the order they are
-    /// emitted, which is also the order their sink receives them.
+    /// The event with the next sequence number. An event is stamped once it has its place
+    /// among the events the reader takes, so the reader gets them in the order of their
+    /// numbers.
     pub(crate) fn stamp(&self, event: EventKind) -> Event {
         Event {
             schema_version: EVENT_SCHEMA_VERSION,
@@ -77,38 +82,60 @@ impl RunTrace {
     }
 }
 
-/// Where the events of a run go: stamped by `trace`, handed to `sink`, then to the `hooks`
-/// that observe them.
+/// Where the events of a run go: stamped by `trace`, queued for the run's reader in
+/// `events`, then handed to the `hooks` that observe them.
 #[derive(Clone, Copy)]
 pub(crate) struct EventTarget<'a> {
-    pub(crate) sink: &'a dyn EventSink,
+    pub(crate) events: &'a mpsc::Sender<Event>,
     pub(crate) trace: &'a RunTrace,
     pub(crate) hooks: &'a HookChain,
 }
 
 impl EventTarget<'_> {
-    /// Stamp `event`, hand it to the sink, then to the hooks that observe it. A hook that
-    /// fails to observe it is reported and does not stop the run.
+    /// Stamp `event`, queue it for the reader, then hand it to the hooks that observe it. A
+    /// hook that fails to observe it is reported and does not stop the run. Waits while the
+    /// reader is as far behind as the run may get ahead.
     pub(crate) async fn emit(self, event: EventKind) {
-        // What the event reports is already recorded; the sink sees it before observers do.
-        let event = self.trace.stamp(event);
-        self.sink.emit(&event);
+        // What the event reports is already recorded; it is queued for the reader before
+        // observers see it, so the report of an observer's failure follows it.
+        let Some(event) = self.queue(event).await else {
+            return;
+        };
         for error in self.hooks.on_event(&event, self.trace.context()).await {
-            self.report_failure(error);
+            self.report_failure(error).await;
         }
     }
 
-    /// Report a hook failure as a `hook_failed` event. Returns its description.
-    pub(crate) fn report_failure(self, error: HookError) -> String {
+    /// Stamp `event` and queue it for the reader. Returns a copy for the hooks, when there
+    /// are any to observe it.
+    async fn queue(self, event: EventKind) -> Option<Event> {
+        // The place first, then the number: tools that emit at the same time still reach
+        // the reader in the order of their numbers.
+        let place = self.events.reserve().await;
+        let event = self.trace.stamp(event);
+        let observed = (!self.hooks.is_empty()).then(|| event.clone());
+        // Without a place the reader is gone, and with it the run: nobody takes its events
+        // any more.
+        if let Ok(place) = place {
+            place.send(event);
+        }
+        observed
+    }
+
+    /// Report a hook failure as a `hook_failed` event, which the hooks observe like any
+    /// other. Returns its description.
+    pub(crate) async fn report_failure(self, error: HookError) -> String {
         let text = error.to_string();
-        // The diagnostic goes to the sink only: an observer that fails on it would otherwise
-        // fail again on the report of its failure.
-        let event = self.trace.stamp(EventKind::HookFailed {
+        let report = EventKind::HookFailed {
             hook: error.hook,
             phase: error.phase,
             error: text.clone(),
-        });
-        self.sink.emit(&event);
+        };
+        if let Some(report) = self.queue(report).await {
+            // A hook that fails to observe the report is not reported in turn: it would
+            // fail on that report as well, without end.
+            drop(self.hooks.on_event(&report, self.trace.context()).await);
+        }
         text
     }
 }
@@ -129,7 +156,7 @@ mod tests {
 
     fn trace() -> RunTrace {
         RunTrace::new(
-            "session".into(),
+            ("session".into(), uuid::Uuid::new_v4().to_string()),
             PathBuf::from("."),
             CancellationToken::new(),
             Arc::default(),

@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use zx_agent::AgentSession;
+use zx_agent::Session;
 use zx_agent::ai::ModelMeta;
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
@@ -25,13 +25,12 @@ use zx_agent::builtin::tools::{self, BASH};
 use zx_agent::compaction;
 use zx_agent::config::skills::{ReadSkillTool, TOOL_NAME};
 use zx_agent::config::{AgentDefinition, Config, Execution};
-use zx_agent::events::{Event, EventSink};
 use zx_agent::extensions;
 use zx_agent::hooks::{Hook, HookOptions};
 use zx_agent::otel;
 use zx_agent::policy::PolicyDecision;
 use zx_agent::prompt::{self, build_system_prompt};
-use zx_agent::runner::{LoopConfig, RunLimits, Runner};
+use zx_agent::runner::{LoopConfig, RunLimits};
 use zx_agent::tools::Tool;
 use zx_agent::transcript::{SessionHeader, Transcript};
 
@@ -57,8 +56,8 @@ fn push_built_in(config: &mut LoopConfig, name: &str, hook: impl Hook + 'static)
 
 /// A configured session with the hooks every mode shares.
 ///
-/// A mode adds only what is its own, such as chat's approval rule and interaction host, then
-/// calls `into_session`.
+/// A mode adds only what is its own, such as chat's approval rule and how long its approvals
+/// wait for an answer, then calls `into_session`.
 pub(crate) struct PreparedSession {
     pub(crate) config: LoopConfig,
     retry: RetryPolicy,
@@ -75,8 +74,6 @@ pub(crate) struct PreparedSession {
     pub(crate) agent_name: String,
     /// The agent's auto-approved command prefixes, for a frontend to show.
     pub(crate) auto_approve_commands: Vec<String>,
-    /// Where the events also go: the trace export of the process, when one is configured.
-    traces: Option<Arc<dyn EventSink>>,
 }
 
 impl PreparedSession {
@@ -101,27 +98,10 @@ impl PreparedSession {
         self.config.policies.push("bash_approval", Arc::new(policy));
     }
 
-    /// The conversation, sending events to `sink` and to the trace export: the one place
-    /// where every mode turns a prepared session into a running one.
-    pub(crate) fn into_session(self, sink: Arc<dyn EventSink>) -> Result<AgentSession> {
-        let sink = match self.traces {
-            Some(traces) => Arc::new(Both(sink, traces)),
-            None => sink,
-        };
-        let runner =
-            Runner::new(self.config, self.retry, self.limits, self.store, sink).with_compaction(self.compaction)?;
-        Ok(AgentSession::from(runner))
-    }
-}
-
-/// Events for a mode's own sink and the trace export; the export never blocks or panics
-/// (`SignalSink` only queues), so the mode's sink sees every event first.
-struct Both(Arc<dyn EventSink>, Arc<dyn EventSink>);
-
-impl EventSink for Both {
-    fn emit(&self, event: &Event) {
-        self.0.emit(event);
-        self.1.emit(event);
+    /// The conversation: the one place where every mode turns a prepared session into a
+    /// running one. The mode reads the events of each run it starts.
+    pub(crate) fn into_session(self) -> Result<Session> {
+        Session::new(self.config, self.retry, self.limits, self.compaction, self.store)
     }
 }
 
@@ -209,7 +189,6 @@ pub(crate) async fn prepare(
         compaction: agent.compaction,
         agent_name: agent.name,
         auto_approve_commands: agent.permissions.allowed_commands(),
-        traces: shared.traces.clone(),
     })
 }
 
@@ -406,8 +385,8 @@ enum Pending {
 
 /// Register what every mode shares, after the command policy: the MCP servers, the policy of
 /// the agent's permissions with the MCP tools it does not allow, and the hooks: continuation,
-/// `redaction` and `spill`. Returns the auto-approved commands for the frontend's own bash
-/// policy.
+/// `redaction`, `spill` and the trace export. Returns the auto-approved commands for the
+/// frontend's own bash policy.
 ///
 /// Each hook declares its stage, so redaction runs before output is saved, whatever is
 /// registered later.
@@ -433,6 +412,10 @@ fn register_hooks(
     push_built_in(config, "redact_secrets", redaction);
     if let Some(spill) = spill {
         push_built_in(config, "spill_outputs", spill);
+    }
+    // Observes every run of the session, whoever reads its events.
+    if let Some(traces) = &shared.traces {
+        push_built_in(config, "trace_export", traces.clone());
     }
     // The built-in tools skip repeated names; this guards tools registered here later.
     config.validate().map_err(anyhow::Error::msg)?;

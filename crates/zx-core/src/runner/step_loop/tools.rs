@@ -13,9 +13,8 @@ use serde_json::Value;
 
 use super::{Halt, StepLoop};
 use crate::ai::{Message, ToolCall, ToolResultMessage, duration_ms, now_ms};
-use crate::events::{ApprovalResult, EventKind, HookPoint, ToolVerdict};
-use crate::hooks::{HookCall, HookFailure};
-use crate::policy::{Approval, ApprovalRequest, PolicyDecision};
+use crate::events::{ApprovalResult, EventKind, ToolVerdict};
+use crate::policy::{Answer, ApprovalDecision, ApprovalMode, NO_HUMAN, PolicyDecision};
 use crate::tools::{Effects, ExecutionMode, MAX_DETAILS_BYTES, MAX_QUEUED_PROGRESS, Tool, ToolContext, ToolOutput};
 
 impl StepLoop<'_> {
@@ -74,8 +73,8 @@ impl StepLoop<'_> {
         }
     }
 
-    /// Run the policy on `call`, then ask the interaction host when it says so. An error is
-    /// the text of the result of a call that may not run.
+    /// Run the policy on `call`, then ask for the host's approval when it says so. An error
+    /// is the text of the result of a call that may not run.
     async fn authorize(&mut self, call: &ToolCall) -> Result<(), String> {
         let verdict = self.config.policies.check(call, self.trace.policy_context()).await;
         match verdict {
@@ -88,7 +87,13 @@ impl StepLoop<'_> {
             PolicyDecision::Ask(reason) => {
                 self.decision(call, ToolVerdict::Ask, Some(reason.clone())).await;
                 if self.approvals.allows(call) {
-                    self.approval_resolved(call, ApprovalResult::Remembered, None, 0).await;
+                    let remembered = Resolved {
+                        approval_id: None,
+                        approval: ApprovalResult::Remembered,
+                        reason: None,
+                        wait_ms: 0,
+                    };
+                    self.approval_resolved(call, remembered).await;
                 } else if let Err(denied) = self.ask(call, reason).await {
                     self.accounting.denied_calls = self.accounting.denied_calls.saturating_add(1);
                     return Err(format!("Approval denied: {denied}"));
@@ -98,56 +103,53 @@ impl StepLoop<'_> {
         Ok(())
     }
 
-    /// Ask the interaction host to approve `call`. Returns why the call may not run.
+    /// Ask for the host's approval of `call`: announce the request, then wait at the gate
+    /// for its answer. Returns why the call may not run.
     async fn ask(&mut self, call: &ToolCall, reason: String) -> Result<(), String> {
+        let mut request = self.approvals.open();
+        let approval_id = request.id().to_string();
         self.emit(EventKind::ApprovalRequested {
+            approval_id: approval_id.clone(),
             tool_call_id: call.id.clone(),
             tool_name: call.name.clone(),
-            reason: reason.clone(),
+            args: call.arguments.clone(),
+            reason,
         })
         .await;
-        let request = ApprovalRequest {
-            call: call.clone(),
-            reason,
-        };
-        let guard = HookCall {
-            name: "Interaction::confirm",
-            phase: HookPoint::Approval,
-            timeout: self.config.interaction_timeout,
-        };
         let asked = Instant::now();
-        let answer = guard
-            .run(self.config.interaction.confirm(&request), self.trace.cancel())
-            .await;
-        let waited = duration_ms(asked.elapsed());
-        match answer {
-            Ok(Approval::AllowOnce) => {
-                self.approval_resolved(call, ApprovalResult::AllowOnce, None, waited)
-                    .await;
-                Ok(())
-            }
-            Ok(Approval::AllowSession) => {
+        let answer = match self.config.approvals {
+            ApprovalMode::Deny => Answer::Decided(ApprovalDecision::Deny(NO_HUMAN.into())),
+            ApprovalMode::Wait(timeout) => request.answer(timeout, self.trace.cancel()).await,
+        };
+        // Withdrawn before it is reported: an answer that comes now finds no request.
+        drop(request);
+        let (approval, denial) = match answer {
+            Answer::Decided(ApprovalDecision::AllowOnce) => (ApprovalResult::AllowOnce, None),
+            Answer::Decided(ApprovalDecision::AllowSession) => {
                 self.approvals.remember(call);
-                self.approval_resolved(call, ApprovalResult::AllowSession, None, waited)
-                    .await;
-                Ok(())
+                (ApprovalResult::AllowSession, None)
             }
-            Ok(Approval::Deny(reason)) => {
-                self.approval_resolved(call, ApprovalResult::Denied, Some(reason.clone()), waited)
-                    .await;
-                Err(reason)
-            }
-            Err(error) => {
-                let result = match error.failure {
-                    HookFailure::TimedOut(_) => ApprovalResult::TimedOut,
-                    HookFailure::Cancelled => ApprovalResult::Cancelled,
-                    HookFailure::Rejected(_) | HookFailure::Panicked => ApprovalResult::Failed,
-                };
-                let reason = self.report_hook_failure(error);
-                self.approval_resolved(call, result, Some(reason.clone()), waited).await;
-                Err(reason)
-            }
-        }
+            Answer::Decided(ApprovalDecision::Deny(reason)) => (ApprovalResult::Denied, Some(reason)),
+            Answer::TimedOut(timeout) => (
+                ApprovalResult::TimedOut,
+                Some(format!(
+                    "nobody answered the approval request within {}s",
+                    timeout.as_secs()
+                )),
+            ),
+            Answer::Cancelled => (
+                ApprovalResult::Cancelled,
+                Some("the run was cancelled while the call waited for approval".to_string()),
+            ),
+        };
+        let resolved = Resolved {
+            approval_id: Some(approval_id),
+            approval,
+            reason: denial.clone(),
+            wait_ms: duration_ms(asked.elapsed()),
+        };
+        self.approval_resolved(call, resolved).await;
+        denial.map_or(Ok(()), Err)
     }
 
     async fn decision(&self, call: &ToolCall, verdict: ToolVerdict, reason: Option<String>) {
@@ -160,13 +162,14 @@ impl StepLoop<'_> {
         .await;
     }
 
-    async fn approval_resolved(&self, call: &ToolCall, approval: ApprovalResult, reason: Option<String>, wait_ms: u64) {
+    async fn approval_resolved(&self, call: &ToolCall, resolved: Resolved) {
         self.emit(EventKind::ApprovalResolved {
+            approval_id: resolved.approval_id,
             tool_call_id: call.id.clone(),
             tool_name: call.name.clone(),
-            approval,
-            reason,
-            wait_ms,
+            approval: resolved.approval,
+            reason: resolved.reason,
+            wait_ms: resolved.wait_ms,
         })
         .await;
     }
@@ -343,7 +346,7 @@ impl StepLoop<'_> {
             }
             Err(error) => {
                 // The update is withheld; the failure is reported, not the update's text.
-                self.report_hook_failure(error);
+                self.report_hook_failure(error).await;
             }
         }
     }
@@ -366,7 +369,10 @@ impl StepLoop<'_> {
         {
             Ok(output) => output,
             // Discard the raw output on every failure, including cancellation.
-            Err(error) => ToolOutput::error(format!("Tool output withheld: {}", self.report_hook_failure(error))),
+            Err(error) => {
+                let failure = self.report_hook_failure(error).await;
+                ToolOutput::error(format!("Tool output withheld: {failure}"))
+            }
         };
         // Bounded here, after every hook, so that the event and the record carry the same.
         output.details = output.details.filter(details_fit);
@@ -455,6 +461,17 @@ fn invalid_arguments(call: &ToolCall, reason: impl Display) -> String {
 /// The result text of a call the policy denied.
 fn blocked_by_policy(reason: &str) -> String {
     format!("Blocked by policy: {reason}")
+}
+
+/// How an approval ended, as its `approval_resolved` event reports it.
+struct Resolved {
+    /// The request that was answered; `None` when a session grant covered the call and
+    /// nobody was asked.
+    approval_id: Option<String>,
+    approval: ApprovalResult,
+    /// Why the call may not run, when it may not.
+    reason: Option<String>,
+    wait_ms: u64,
 }
 
 /// A call after its checks.

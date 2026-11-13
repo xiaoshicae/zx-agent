@@ -2,15 +2,14 @@
 //! signals and the telemetry export.
 
 use std::io::Write;
-use std::sync::Arc;
 
 use anyhow::Result;
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
 
-use zx_agent::events::{Event, EventKind, EventSink};
-use zx_agent::otel::{Telemetry, TraceParent};
+use zx_agent::events::{Event, EventKind};
+use zx_agent::otel::{Telemetry, TraceHook, TraceParent};
 use zx_agent::runner::RunOutcome;
 
 /// Exit codes, so schedulers can react without parsing output.
@@ -40,7 +39,7 @@ pub(crate) fn exit_code(outcome: RunOutcome) -> u8 {
     }
 }
 
-/// SIGINT and SIGTERM cancel the run; the report is still written.
+/// SIGINT and SIGTERM cancel `cancel`; what it cancels still reports how it ended.
 ///
 /// The listeners are registered before this returns, so a signal that arrives once the run
 /// has started always cancels it instead of killing the process. The waiting task is detached
@@ -105,8 +104,8 @@ pub(crate) struct JsonlEvents {
     pub(crate) deltas: bool,
 }
 
-impl EventSink for JsonlEvents {
-    fn emit(&self, event: &Event) {
+impl JsonlEvents {
+    pub(crate) fn emit(&self, event: &Event) {
         if !self.deltas && matches!(event.event, EventKind::MessageUpdate { .. }) {
             return;
         }
@@ -139,19 +138,19 @@ fn start_telemetry() -> Result<Option<Telemetry>> {
     Ok(telemetry)
 }
 
-/// The sink for an unattended run: the run continues the caller's trace when `TRACEPARENT`
-/// names one, as a scheduler or `otel-cli` sets it. A value that is not a traceparent is
-/// reported, and the run starts a trace of its own.
-pub(crate) fn run_sink(telemetry: &Telemetry) -> Arc<dyn EventSink> {
+/// The trace hook of an unattended run: the run continues the caller's trace when
+/// `TRACEPARENT` names one, as a scheduler or `otel-cli` sets it. A value that is not a
+/// traceparent is reported, and the run starts a trace of its own.
+pub(crate) fn run_traces(telemetry: &Telemetry) -> TraceHook {
     match TraceParent::from_env() {
         Ok(Some(parent)) => {
             eprintln!("[otel] continuing trace {}", parent.trace_id());
-            telemetry.sink_under(&parent)
+            telemetry.hook_under(&parent)
         }
-        Ok(None) => telemetry.sink(),
+        Ok(None) => telemetry.hook(),
         Err(error) => {
             eprintln!("[otel] {error:#}; the run starts a trace of its own");
-            telemetry.sink()
+            telemetry.hook()
         }
     }
 }

@@ -23,13 +23,14 @@ mod tools;
 
 use std::collections::HashMap;
 
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::ai::{AssistantMessage, Message, StopReason, SystemMessage, SystemPrompt, now_ms};
-use crate::events::{EventKind, EventSink};
+use crate::events::{Event, EventKind};
 use crate::hooks::HookError;
 use crate::input::{Input, Queue};
-use crate::policy::ApprovalCache;
+use crate::policy::ApprovalGate;
 use crate::runner::{EventTarget, RunAccounting, RunOutcome, RunTrace};
 
 pub use config::LoopConfig;
@@ -90,11 +91,13 @@ pub(crate) struct StepLoop<'a> {
     /// Lends the session that records each step before the loop acts on it, and holds the
     /// context.
     host: &'a mut dyn SessionHost,
-    approvals: &'a mut ApprovalCache,
+    /// Where a call waits for the host's approval, and what the session was granted.
+    approvals: &'a ApprovalGate,
     /// What the run has spent and may spend: the loop counts into it as it goes and checks
     /// its budgets before each request, so the totals span the run's attempts.
     accounting: &'a mut RunAccounting,
-    sink: &'a dyn EventSink,
+    /// Where the run's reader takes its events from.
+    events: &'a mpsc::Sender<Event>,
     /// The run this attempt belongs to: it stamps the events, tells the hooks where they run,
     /// and carries the cancellation.
     trace: &'a RunTrace,
@@ -106,11 +109,11 @@ pub(crate) struct StepLoop<'a> {
 impl<'a> StepLoop<'a> {
     /// The loop for the attempt in progress of the run whose events go to `target`, recording
     /// through `host` and spending against `accounting`; the run's cancellation is its
-    /// trace's. Session grants go to `approvals`.
+    /// trace's. Calls wait for approval at `approvals`, which keeps the session's grants.
     pub(crate) fn new(
         config: &'a LoopConfig,
         host: &'a mut dyn SessionHost,
-        approvals: &'a mut ApprovalCache,
+        approvals: &'a ApprovalGate,
         accounting: &'a mut RunAccounting,
         target: EventTarget<'a>,
     ) -> Self {
@@ -119,7 +122,7 @@ impl<'a> StepLoop<'a> {
             host,
             approvals,
             accounting,
-            sink: target.sink,
+            events: target.events,
             trace: target.trace,
             step: None,
             validators: HashMap::new(),
@@ -171,7 +174,7 @@ impl<'a> StepLoop<'a> {
     /// loop can record through its session host while it holds one.
     fn target(&self) -> EventTarget<'a> {
         EventTarget {
-            sink: self.sink,
+            events: self.events,
             trace: self.trace,
             hooks: &self.config.hooks,
         }
@@ -182,8 +185,13 @@ impl<'a> StepLoop<'a> {
     }
 
     /// Report a hook failure as a `hook_failed` event. Returns its description.
-    fn report_hook_failure(&self, error: HookError) -> String {
-        self.target().report_failure(error)
+    async fn report_hook_failure(&self, error: HookError) -> String {
+        self.target().report_failure(error).await
+    }
+
+    /// A hook failure that ends the attempt, reported as a `hook_failed` event.
+    async fn hook_failed(&self, error: HookError) -> Halt {
+        Halt::Failed(self.report_hook_failure(error).await)
     }
 
     /// Start the next task step unless one is in progress. Returns the number of the step
@@ -248,12 +256,15 @@ impl<'a> StepLoop<'a> {
                 PendingInput::Requested(message) => self.input(*message, None).await?,
             }
             self.ensure_can_request()?;
-            let edits = self
+            let planned = self
                 .config
                 .hooks
                 .transform_context(&self.host.session().messages(), self.trace.context())
-                .await
-                .map_err(|error| Halt::Failed(self.report_hook_failure(error)))?;
+                .await;
+            let edits = match planned {
+                Ok(edits) => edits,
+                Err(error) => return Err(self.hook_failed(error).await),
+            };
             for edit in edits {
                 self.edit(edit).await?;
             }

@@ -1,6 +1,5 @@
 //! Kernel of zx-agent: the step loop, sessions and the runner, and the interfaces the kernel
-//! defines for everything scenario-specific (tools, policies, hooks, interaction, session
-//! storage). The `zx-agent` crate re-exports it whole, module by module.
+//! defines for everything scenario-specific (tools, policies, hooks, session storage). The `zx-agent` crate re-exports it whole, module by module.
 //!
 //! One module per domain, from the bottom layer up. A module uses only modules listed before
 //! it, named in brackets where it uses any:
@@ -14,8 +13,8 @@
 //! - [`prompt`]: the system prompt assembled from its sections
 //! - [`input`] (transcript): the messages given to a run and the queues that hold them while
 //!   it runs
-//! - [`policy`] (guard): the interface that decides whether a tool call may run, and how a
-//!   host approves a call a policy asks about
+//! - [`policy`] (guard): the interface that decides whether a tool call may run, and the
+//!   approval of a call a policy asks about
 //! - [`compaction`] (transcript, events): running one bounded, auditable summary of the
 //!   conversation
 //! - [`hooks`] (transcript, events, guard, tools, input): the extension points around the
@@ -25,8 +24,8 @@
 //! - [`runner`] (all of the above): one run at a time: the step loop of each attempt, the
 //!   retries, limits, summaries and recovery around it, and the delivery of its events (pi:
 //!   packages/agent)
-//! - [`agent_session`] (all of the above): a conversation shared by frontends: prompts,
-//!   cancellation, subscriptions and model switching
+//! - [`session`] (all of the above): a conversation shared by frontends, and the run each
+//!   prompt, continuation or compaction returns: its events and its result
 //!
 //! One reference points upward: [`extensions::register`] fills a [`runner::LoopConfig`].
 //!
@@ -64,36 +63,36 @@
 //! - **Session names**
 //!   - records: `transcript/name.rs` (the `session_info` record, the latest name),
 //!     `transcript/storage.rs` (the name a listing shows)
-//!   - acts: `agent_session.rs` (naming a session while idle)
+//!   - acts: `session.rs` (naming a session while idle)
 //! - **Tool policies and approval**
 //!   - records: none; verdicts and approvals are not recorded
 //!   - acts: `policy.rs` (the policy interface and its verdict), `policy/chain.rs` (asking
-//!     every policy, each bounded), `policy/interaction.rs` (the host interface and the
-//!     session's grants), `runner/step_loop/tools.rs` (checking a call and asking the host)
+//!     every policy, each bounded), `policy/approval.rs` (the gate where a call waits for the
+//!     host's answer, and the session's grants), `runner/step_loop/tools.rs` (checking a
+//!     call and waiting at the gate), `session.rs` (the host's answer)
 //! - **Events**
 //!   - records: none
 //!   - acts: `events.rs` (the events and their envelope), `runner/trace.rs` (numbering a
-//!     run's events and delivering them to the sink and the observing hooks),
-//!     `agent_session/subscribers.rs` (fan-out to subscribers)
+//!     run's events and delivering them to the run's reader and the observing hooks),
+//!     `session/run.rs` (the reader's end: the stream of a run's events)
 //!
-//! A session holds a conversation across runs. Each [`runner::Runner::run`] processes one
-//! prompt and may retry a failed provider response as another loop attempt. A task step is
-//! one task response and its tool calls; a model request may also be a compaction summary,
-//! which consumes the request budget without creating a separate task step. Retries and
-//! summary requests both consume the run's model-request budget.
+//! A session holds a conversation across runs. Each [`Session::send`] starts a [`Run`],
+//! which processes one prompt and may retry a failed provider response as another loop
+//! attempt. A task step is one task response and its tool calls; a model request may also
+//! be a compaction summary, which consumes the request budget without creating a separate
+//! task step. Retries and summary requests both consume the run's model-request budget.
 //!
-//! Embedders start with [`AgentSession`], or with [`runner::Runner`], its exclusive half, when
-//! one owner runs every prompt. The extension interfaces are [`tools::Tool`],
-//! [`policy::ToolPolicy`], [`policy::Interaction`], [`hooks::Hook`],
-//! [`extensions::Extension`], [`events::EventSink`], and [`transcript::SessionStorage`] with
-//! its [`transcript::SessionLog`]. The storages for session files and for memory ship with
-//! the kernel; the built-in tools, executors, policies and hooks live in the `zx-tools`
-//! crate, providers in crates such as `zx-ai-openai`.
+//! Embedders start with a [`Session`] and read the [`Run`] each prompt returns. The
+//! extension interfaces are [`tools::Tool`], [`policy::ToolPolicy`], [`hooks::Hook`],
+//! [`extensions::Extension`], and [`transcript::SessionStorage`] with its
+//! [`transcript::SessionLog`]; approvals are answered through the session. The storages for
+//! session files and for memory ship with the kernel; the built-in tools, executors,
+//! policies and hooks live in the `zx-tools` crate, providers in crates such as
+//! `zx-ai-openai`.
 
 // The modules name the model layer and the shared helpers by these crate-root paths.
 use zx_ai::{self as ai, sync};
 
-pub mod agent_session;
 pub mod compaction;
 pub mod events;
 pub mod extensions;
@@ -103,8 +102,9 @@ pub mod input;
 pub mod policy;
 pub mod prompt;
 pub mod runner;
+pub mod session;
 pub mod tools;
 pub mod transcript;
 
-pub use agent_session::AgentSession;
 pub use guard::CancelSignal;
+pub use session::{Run, Session};
