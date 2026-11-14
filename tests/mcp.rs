@@ -10,12 +10,13 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use common::fake_mcp::{Era, FakeMcp, Reply, SESSION, tool};
-use common::{config, run_prompt, summarize};
-use zx_agent::agent::{Tool, ToolContext, ToolOutput};
+use common::{RunnerSetup, config, run_prompt, summarize};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::extensions::{Extension, register};
-use zx_agent::mcp::{Server, ServerConfig};
-use zx_agent::tools::truncate::MAX_BYTES;
+use zx_agent::builtin::mcp::{Server, ServerConfig};
+use zx_agent::builtin::tools::truncate::MAX_BYTES;
+use zx_agent::extensions::Extension;
+use zx_agent::runner::RunOutcome;
+use zx_agent::tools::{Tool, ToolContext, ToolOutput};
 
 const TOKEN: &str = "mcp-token-1234";
 
@@ -244,6 +245,42 @@ async fn cancelling_a_call_stops_waiting_and_abandons_the_request() {
 }
 
 #[tokio::test]
+async fn cancelling_a_run_gives_up_the_call_it_was_waiting_for() {
+    for era in [Era::Modern, Era::Legacy] {
+        let fake = FakeMcp::start(era, three_tools()).await;
+        fake.reply("query", vec![Reply::Hang]);
+        let server: Arc<dyn Extension> = Arc::new(connect(&fake, &["query"]).await);
+        let provider = Arc::new(FauxProvider::new([FauxStep::tool_call(
+            "c1",
+            "prom__query",
+            json!({"q": "up"}),
+        )]));
+        let mut config = config(provider, Vec::new());
+        config.extensions = vec![server];
+        let (runner, _) = RunnerSetup::new(config).build();
+
+        let report = {
+            let run = runner.run("is it up?");
+            tokio::pin!(run);
+            tokio::select! {
+                report = &mut run => panic!("{era:?}: the run ended before its call was sent: {report:?}"),
+                _ = fake.wait_for("tools/call", 1) => {}
+            }
+            // The loop stops waiting at once and drops the call, which never sees the token.
+            runner.cancel();
+            run.await
+        };
+
+        assert_eq!(report.outcome, RunOutcome::Cancelled, "{era:?}");
+        // As when a call times out: the request is closed, and an older server is also told.
+        fake.wait_abandoned(1).await;
+        if era == Era::Legacy {
+            fake.wait_for("notifications/cancelled", 1).await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn long_results_are_truncated() {
     let fake = FakeMcp::start(Era::Modern, three_tools()).await;
     let text: String = (0..3000).map(|i| format!("line {i}\n")).collect();
@@ -353,7 +390,7 @@ async fn the_model_calls_a_server_tool_through_the_loop() {
         FauxStep::text("done"),
     ]));
     let mut config = config(provider.clone(), Vec::new());
-    register(&mut config, &[server]).unwrap();
+    config.extensions = vec![server];
     let mut context = Vec::new();
     run_prompt(config, &mut context, "is it up?").await;
     let requests = provider.requests();
@@ -385,8 +422,8 @@ fn progress_steps() -> Vec<serde_json::Value> {
 async fn progress_notifications_reach_the_tool_context_and_re_arm_the_timeout() {
     for era in [Era::Modern, Era::Legacy] {
         let fake = FakeMcp::start(era, three_tools()).await;
-        // Three notifications 150 ms apart, then the answer: longer than the 250 ms a call
-        // may go without news, but no notification is further apart than that.
+        // Three notifications and then the answer, 150 ms apart: 600 ms in all, longer than
+        // the 450 ms a call may go without news, while each of them comes well within it.
         fake.reply(
             "query",
             vec![Reply::Progress {
@@ -396,7 +433,7 @@ async fn progress_notifications_reach_the_tool_context_and_re_arm_the_timeout() 
             }],
         );
         let server = Server::connect(ServerConfig {
-            call_timeout: Duration::from_millis(250),
+            call_timeout: Duration::from_millis(450),
             ..settings(&fake, &["query"])
         })
         .await

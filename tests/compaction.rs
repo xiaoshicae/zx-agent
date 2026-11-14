@@ -8,19 +8,20 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio_util::sync::CancellationToken;
 
-use zx_agent::AgentSession;
-use zx_agent::agent::{AgentEvent, ContextEdit, Event, HookContext, HookOptions, Hooks};
-use zx_agent::agent_session::{AgentSessionError, ModelRef};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{AssistantMessage, ContentBlock, Message, Request, StopReason, ToolCall, ToolResultMessage};
 use zx_agent::compaction::{Config, Outcome, Report};
-use zx_agent::runner::{Limits, RunOutcome};
-use zx_agent::session::{Entry, SessionStore};
+use zx_agent::events::{Event, EventKind};
+use zx_agent::hooks::{ContextEdit, Hook, HookContext, HookOptions};
+use zx_agent::runner::{RunLimits, RunOutcome};
+use zx_agent::session::{ModelRef, SessionError};
+use zx_agent::transcript::{Entry, Transcript};
 
 use common::summary_eval::{PLANTED, Planted, ROUNDS, evaluate, round, text_of};
-use common::{RunnerSetup, config, fast_retry, header, seeded_session, summary_json};
+use common::{
+    EchoTool, RunnerSetup, config, fast_retry, header, replayed_requests, seeded_session, summarize, summary_json,
+};
 
 fn budget() -> Config {
     Config {
@@ -37,19 +38,19 @@ async fn manual_compaction_is_a_bounded_tool_free_request_and_survives_reuse() {
         FauxStep::text(summary_json(&old)),
         FauxStep::text("finished"),
     ]));
-    let (runner, events) = RunnerSetup {
+    let (session, events) = RunnerSetup {
         session: store,
+        compaction: budget(),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build();
-    let session = AgentSession::from(runner.with_compaction(budget()).unwrap());
-    let compact = session.compact(&CancellationToken::new()).await.unwrap();
+    let compact = session.compact().await.unwrap();
     assert_eq!(compact.outcome, Outcome::Completed, "{compact:?}");
     assert_eq!(compact.requests, 1);
     assert_eq!(compact.usage.total_tokens, 15);
     assert!(compact.output_bytes < compact.input_bytes);
     assert_eq!(events.kinds(), ["compaction_start", "request_start", "compaction_end"]);
-    let report = session.prompt("continue now", &CancellationToken::new()).await.unwrap();
+    let report = session.prompt("continue now").await.unwrap();
     assert_eq!(report.outcome, RunOutcome::Completed);
     assert_eq!(report.model_requests, 1);
     assert_eq!(report.final_text, "finished");
@@ -85,36 +86,34 @@ async fn automatic_summary_counts_against_task_request_budget_and_usage() {
     ]));
     let (runner, events) = RunnerSetup {
         session: store,
-        limits: Limits {
+        limits: RunLimits {
             max_model_requests: Some(2),
-            ..Limits::default()
+            ..RunLimits::default()
+        },
+        compaction: Config {
+            trigger_bytes: Some(1024),
+            ..budget()
         },
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build();
-    let mut runner = runner
-        .with_compaction(Config {
-            trigger_bytes: Some(1024),
-            ..budget()
-        })
-        .unwrap();
-    let report = runner.run("continue", &CancellationToken::new()).await;
+    let report = runner.run("continue").await;
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
     assert_eq!(report.model_requests, 2);
     assert_eq!(report.usage.total_tokens, 30);
     assert_eq!(provider.requests().len(), 2);
     let messages = runner.session().messages();
     assert_eq!(provider.requests()[1].messages, messages[..messages.len() - 1]);
-    // The summary request counts against the budget, but only the task request is a turn.
-    let turns: Vec<_> = events
+    // The summary request counts against the budget, but only the task request is a step.
+    let steps: Vec<_> = events
         .events()
         .iter()
         .filter_map(|event| match event {
-            AgentEvent::TurnStart { turn } | AgentEvent::TurnEnd { turn } => Some(*turn),
+            EventKind::StepStart { step } | EventKind::StepEnd { step } => Some(*step),
             _ => None,
         })
         .collect();
-    assert_eq!(turns, [1, 1]);
+    assert_eq!(steps, [1, 1]);
     let kinds = events.kinds();
     let summary = kinds.iter().position(|kind| *kind == "compaction_start").unwrap();
     assert_eq!(
@@ -125,12 +124,12 @@ async fn automatic_summary_counts_against_task_request_budget_and_usage() {
 
 #[tokio::test]
 async fn steering_received_during_a_summary_is_persisted_before_the_next_task_request() {
-    struct SteerAfterSummary(Arc<zx_agent::agent::MessageQueues>);
+    struct SteerAfterSummary;
     #[async_trait]
-    impl Hooks for SteerAfterSummary {
-        async fn on_event(&self, event: &Event, _ctx: &HookContext) -> Result<(), String> {
-            if matches!(event.event, AgentEvent::CompactionEnd { .. }) {
-                self.0.steer("new correction");
+    impl Hook for SteerAfterSummary {
+        async fn on_event(&self, event: &Event, ctx: &HookContext) -> Result<(), String> {
+            if matches!(event.event, EventKind::CompactionEnd { .. }) {
+                ctx.queues.steer("new correction");
             }
             Ok(())
         }
@@ -141,19 +140,17 @@ async fn steering_received_during_a_summary_is_persisted_before_the_next_task_re
         FauxStep::text("answer"),
     ]));
     let mut config = config(provider.clone(), vec![]);
-    config.hooks.push(SteerAfterSummary(config.queues.clone()));
+    config.hooks.push(SteerAfterSummary);
     let (runner, _) = RunnerSetup {
         session: store,
+        compaction: Config {
+            trigger_bytes: Some(1024),
+            ..budget()
+        },
         ..RunnerSetup::new(config)
     }
     .build();
-    let mut runner = runner
-        .with_compaction(Config {
-            trigger_bytes: Some(1024),
-            ..budget()
-        })
-        .unwrap();
-    let report = runner.run("continue", &CancellationToken::new()).await;
+    let report = runner.run("continue").await;
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
     assert!(
         matches!(provider.requests()[1].messages.last(), Some(Message::User { content, .. }) if content == "new correction")
@@ -170,20 +167,18 @@ async fn summary_cannot_spend_an_extra_task_request_after_request_limit() {
     ]));
     let (runner, _) = RunnerSetup {
         session: store,
-        limits: Limits {
+        limits: RunLimits {
             max_model_requests: Some(1),
-            ..Limits::default()
+            ..RunLimits::default()
+        },
+        compaction: Config {
+            trigger_bytes: Some(1024),
+            ..budget()
         },
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build();
-    let mut runner = runner
-        .with_compaction(Config {
-            trigger_bytes: Some(1024),
-            ..budget()
-        })
-        .unwrap();
-    let report = runner.run("continue", &CancellationToken::new()).await;
+    let report = runner.run("continue").await;
     assert_eq!(report.outcome, RunOutcome::ModelRequestLimit);
     assert_eq!(report.model_requests, 1);
     assert_eq!(report.usage.total_tokens, 15);
@@ -201,20 +196,18 @@ async fn a_summary_request_counts_against_the_token_budget() {
     ]));
     let (runner, _) = RunnerSetup {
         session: store,
-        limits: Limits {
+        limits: RunLimits {
             token_budget: Some(15),
-            ..Limits::default()
+            ..RunLimits::default()
+        },
+        compaction: Config {
+            trigger_bytes: Some(1024),
+            ..budget()
         },
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build();
-    let mut runner = runner
-        .with_compaction(Config {
-            trigger_bytes: Some(1024),
-            ..budget()
-        })
-        .unwrap();
-    let report = runner.run("continue", &CancellationToken::new()).await;
+    let report = runner.run("continue").await;
     assert_eq!(report.outcome, RunOutcome::TokenBudget);
     assert_eq!(report.usage.input_and_output(), 15);
     assert!(report.final_text.is_empty(), "a summary is never a task answer");
@@ -226,15 +219,12 @@ async fn a_summary_request_counts_against_the_token_budget() {
 async fn sdk_defaults_do_not_make_summary_requests() {
     let (store, _) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([FauxStep::text("normal task answer")]));
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         session: store,
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build();
-    assert_eq!(
-        runner.run("go", &CancellationToken::new()).await.outcome,
-        RunOutcome::Completed
-    );
+    assert_eq!(runner.run("go").await.outcome, RunOutcome::Completed);
     assert_eq!(provider.requests().len(), 1);
     // Request checkpoints are always written; no compaction record may appear.
     assert!(runner.session().entries().iter().all(|entry| matches!(
@@ -245,7 +235,7 @@ async fn sdk_defaults_do_not_make_summary_requests() {
 
 #[tokio::test]
 async fn summary_requests_and_context_sizes_leave_tool_result_details_out() {
-    let mut store = SessionStore::in_memory(header());
+    let mut store = Transcript::in_memory(header());
     let old = store
         .append_message(Message::user("observed ".repeat(600)))
         .await
@@ -280,12 +270,12 @@ async fn summary_requests_and_context_sizes_leave_tool_result_details_out() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text(summary_json(&old))]));
     let (runner, _) = RunnerSetup {
         session: store,
+        compaction: budget(),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build();
-    let mut runner = runner.with_compaction(budget()).unwrap();
 
-    let report = runner.compact(&CancellationToken::new()).await;
+    let report = runner.compact().await.unwrap();
 
     assert_eq!(report.outcome, Outcome::Completed, "{report:?}");
     assert_eq!(report.input_bytes, without);
@@ -304,20 +294,14 @@ async fn repeated_compaction_uses_originals_instead_of_a_previous_summary() {
     ]));
     let (runner, _) = RunnerSetup {
         session: store,
+        compaction: budget(),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build();
-    let mut runner = runner.with_compaction(budget()).unwrap();
-    assert_eq!(
-        runner.compact(&CancellationToken::new()).await.outcome,
-        Outcome::Completed
-    );
-    assert_eq!(runner.compact(&CancellationToken::new()).await.outcome, Outcome::Noop);
-    runner.run("new task", &CancellationToken::new()).await;
-    assert_eq!(
-        runner.compact(&CancellationToken::new()).await.outcome,
-        Outcome::Completed
-    );
+    assert_eq!(runner.compact().await.unwrap().outcome, Outcome::Completed);
+    assert_eq!(runner.compact().await.unwrap().outcome, Outcome::Noop);
+    runner.run("new task").await;
+    assert_eq!(runner.compact().await.unwrap().outcome, Outcome::Completed);
     let requests = provider.requests();
     let source = serde_json::to_string(&requests[2].messages).unwrap();
     assert!(source.contains("observed observed"));
@@ -340,17 +324,15 @@ async fn invalid_or_truncated_summaries_never_replace_context_or_retry_as_tasks(
         let (runner, _) = RunnerSetup {
             session: store,
             retry: fast_retry(3),
+            compaction: Config {
+                trigger_bytes: Some(1024),
+                ..budget()
+            },
             ..RunnerSetup::new(config(provider.clone(), vec![]))
         }
         .build();
-        let mut runner = runner
-            .with_compaction(Config {
-                trigger_bytes: Some(1024),
-                ..budget()
-            })
-            .unwrap();
-        let report = runner.run("continue", &CancellationToken::new()).await;
-        assert_eq!(report.outcome, RunOutcome::Error, "{report:?}");
+        let report = runner.run("continue").await;
+        assert_eq!(report.outcome, RunOutcome::Failed, "{report:?}");
         assert_eq!(report.model_requests, 1);
         assert_eq!(report.retries, 0);
         assert!(report.final_text.is_empty());
@@ -370,12 +352,12 @@ async fn a_summary_citing_a_record_it_did_not_read_fails_as_an_invalid_answer() 
     let provider = Arc::new(FauxProvider::new([FauxStep::text(summary_json("unknown"))]));
     let (runner, _) = RunnerSetup {
         session: store,
+        compaction: budget(),
         ..RunnerSetup::new(config(provider, vec![]))
     }
     .build();
-    let mut runner = runner.with_compaction(budget()).unwrap();
 
-    let report = runner.compact(&CancellationToken::new()).await;
+    let report = runner.compact().await.unwrap();
 
     assert_eq!(report.outcome, Outcome::Failed);
     // The answer is at fault, so the error does not blame the session for refusing a record.
@@ -394,19 +376,17 @@ async fn a_failed_automatic_summary_is_not_paid_for_again_on_the_next_prompt() {
     ]));
     let (runner, _) = RunnerSetup {
         session: store,
+        compaction: Config {
+            trigger_bytes: Some(1024),
+            ..budget()
+        },
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build();
-    let mut runner = runner
-        .with_compaction(Config {
-            trigger_bytes: Some(1024),
-            ..budget()
-        })
-        .unwrap();
-    let first = runner.run("continue", &CancellationToken::new()).await;
-    assert_eq!(first.outcome, RunOutcome::Error, "{first:?}");
-    let second = runner.run("try again", &CancellationToken::new()).await;
-    assert_eq!(second.outcome, RunOutcome::Error, "{second:?}");
+    let first = runner.run("continue").await;
+    assert_eq!(first.outcome, RunOutcome::Failed, "{first:?}");
+    let second = runner.run("try again").await;
+    assert_eq!(second.outcome, RunOutcome::Failed, "{second:?}");
     assert_eq!(second.model_requests, 0);
     assert!(
         second.error.as_deref().unwrap_or_default().contains("paused"),
@@ -420,7 +400,7 @@ async fn the_pause_survives_a_run_whose_future_is_dropped() {
     /// Holds the input "hold" forever, after telling the test it is waiting.
     struct Hold(Arc<tokio::sync::Notify>);
     #[async_trait]
-    impl Hooks for Hold {
+    impl Hook for Hold {
         async fn on_input(&self, text: String, _ctx: &HookContext) -> Result<String, String> {
             if text == "hold" {
                 self.0.notify_one();
@@ -445,29 +425,26 @@ async fn the_pause_survives_a_run_whose_future_is_dropped() {
     );
     let (runner, _) = RunnerSetup {
         session: store,
+        compaction: Config {
+            trigger_bytes: Some(1024),
+            ..budget()
+        },
         ..RunnerSetup::new(config)
     }
     .build();
-    let mut runner = runner
-        .with_compaction(Config {
-            trigger_bytes: Some(1024),
-            ..budget()
-        })
-        .unwrap();
-    let first = runner.run("continue", &CancellationToken::new()).await;
-    assert_eq!(first.outcome, RunOutcome::Error, "{first:?}");
+    let first = runner.run("continue").await;
+    assert_eq!(first.outcome, RunOutcome::Failed, "{first:?}");
     {
         // Dropped while its input waits in a hook, before it reaches the summary step.
-        let cancel = CancellationToken::new();
-        let held = runner.run("hold", &cancel);
+        let held = runner.run("hold");
         tokio::pin!(held);
         tokio::select! {
             _ = &mut held => panic!("the held run must not finish"),
             () = waiting.notified() => {}
         }
     }
-    let third = runner.run("try again", &CancellationToken::new()).await;
-    assert_eq!(third.outcome, RunOutcome::Error, "{third:?}");
+    let third = runner.run("try again").await;
+    assert_eq!(third.outcome, RunOutcome::Failed, "{third:?}");
     assert!(
         third.error.as_deref().unwrap_or_default().contains("paused"),
         "{third:?}"
@@ -490,39 +467,37 @@ async fn a_successful_manual_summary_resumes_automatic_summaries() {
     ]));
     let (runner, _) = RunnerSetup {
         session: store,
+        compaction: Config {
+            trigger_bytes: Some(1024),
+            ..budget()
+        },
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build();
-    let mut runner = runner
-        .with_compaction(Config {
-            trigger_bytes: Some(1024),
-            ..budget()
-        })
-        .unwrap();
-    let cancel = CancellationToken::new();
-    assert_eq!(runner.run("continue", &cancel).await.outcome, RunOutcome::Error);
-    let compact = runner.compact(&cancel).await;
+    assert_eq!(runner.run("continue").await.outcome, RunOutcome::Failed);
+    let compact = runner.compact().await.unwrap();
     assert_eq!(compact.outcome, Outcome::Completed, "{compact:?}");
-    let answered = runner.run("next", &cancel).await;
+    let answered = runner.run("next").await;
     assert_eq!(answered.outcome, RunOutcome::Completed, "{answered:?}");
-    let resumed = runner.run("again", &cancel).await;
-    assert_eq!(resumed.outcome, RunOutcome::Error, "{resumed:?}");
+    let resumed = runner.run("again").await;
+    assert_eq!(resumed.outcome, RunOutcome::Failed, "{resumed:?}");
     assert_eq!(provider.requests().len(), 4);
 }
 
 #[tokio::test]
 async fn an_input_that_cannot_fit_is_not_silently_truncated_or_sent_to_the_task_model() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("must not execute")]));
-    let (runner, _) = RunnerSetup::new(config(provider.clone(), vec![])).build();
-    let mut runner = runner
-        .with_compaction(Config {
+    let (runner, _) = RunnerSetup {
+        compaction: Config {
             trigger_bytes: Some(1024),
             ..budget()
-        })
-        .unwrap();
+        },
+        ..RunnerSetup::new(config(provider.clone(), vec![]))
+    }
+    .build();
     let input = "界".repeat(1000);
-    let report = runner.run(input.as_str(), &CancellationToken::new()).await;
-    assert_eq!(report.outcome, RunOutcome::Error);
+    let report = runner.run(input.as_str()).await;
+    assert_eq!(report.outcome, RunOutcome::Failed);
     assert_eq!(report.model_requests, 0);
     assert!(provider.requests().is_empty());
     assert!(matches!(&runner.session().messages()[0], Message::User{content,..} if content == &input));
@@ -532,7 +507,7 @@ async fn an_input_that_cannot_fit_is_not_silently_truncated_or_sent_to_the_task_
 async fn context_hooks_are_persisted_before_a_summary_sees_the_source() {
     struct Correct;
     #[async_trait]
-    impl Hooks for Correct {
+    impl Hook for Correct {
         async fn transform_context(
             &self,
             messages: &[Message],
@@ -559,19 +534,14 @@ async fn context_hooks_are_persisted_before_a_summary_sees_the_source() {
     config.hooks.push(Correct);
     let (runner, _) = RunnerSetup {
         session: store,
+        compaction: Config {
+            trigger_bytes: Some(1024),
+            ..budget()
+        },
         ..RunnerSetup::new(config)
     }
     .build();
-    let mut runner = runner
-        .with_compaction(Config {
-            trigger_bytes: Some(1024),
-            ..budget()
-        })
-        .unwrap();
-    assert_eq!(
-        runner.run("go", &CancellationToken::new()).await.outcome,
-        RunOutcome::Completed
-    );
+    assert_eq!(runner.run("go").await.outcome, RunOutcome::Completed);
     let source = serde_json::to_string(&provider.requests()[0].messages).unwrap();
     assert!(source.contains("corrected corrected"));
     assert!(!source.contains("observed observed"));
@@ -584,7 +554,7 @@ async fn context_hooks_are_persisted_before_a_summary_sees_the_source() {
 async fn a_context_plan_that_edits_a_summary_is_rejected_before_any_edit_is_written() {
     struct EditInputThenSummary;
     #[async_trait]
-    impl Hooks for EditInputThenSummary {
+    impl Hook for EditInputThenSummary {
         async fn transform_context(
             &self,
             messages: &[Message],
@@ -620,17 +590,15 @@ async fn a_context_plan_that_edits_a_summary_is_rejected_before_any_edit_is_writ
     config.hooks.push(EditInputThenSummary);
     let (runner, _) = RunnerSetup {
         session: store,
+        compaction: Config {
+            trigger_bytes: Some(1024),
+            ..budget()
+        },
         ..RunnerSetup::new(config)
     }
     .build();
-    let mut runner = runner
-        .with_compaction(Config {
-            trigger_bytes: Some(1024),
-            ..budget()
-        })
-        .unwrap();
-    let report = runner.run("go", &CancellationToken::new()).await;
-    assert_eq!(report.outcome, RunOutcome::Error);
+    let report = runner.run("go").await;
+    assert_eq!(report.outcome, RunOutcome::Failed);
     // A hook rejection, decided while validating the plan, not a failed session write.
     let error = report.error.unwrap();
     assert!(error.contains("transform_context"), "{error}");
@@ -647,67 +615,44 @@ async fn a_context_plan_that_edits_a_summary_is_rejected_before_any_edit_is_writ
 async fn pending_summary_shares_busy_cancel_and_drop_reuse_with_prompt() {
     let (store, _) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([FauxStep::Hang, FauxStep::text("reused")]));
-    let (runner, events) = RunnerSetup {
+    let (session, events) = RunnerSetup {
         session: store,
+        compaction: budget(),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build();
-    let session = AgentSession::from(runner.with_compaction(budget()).unwrap());
-    let parent = CancellationToken::new();
-    let mut compact = Box::pin(session.compact(&parent));
+    let mut compact = Box::pin(session.compact());
     tokio::select! { biased; result = &mut compact => panic!("unexpected completion: {result:?}"), () = tokio::task::yield_now() => {} }
     assert!(events.kinds().contains(&"compaction_start"));
-    assert!(matches!(
-        session.prompt("busy", &CancellationToken::new()).await,
-        Err(AgentSessionError::Busy)
-    ));
-    assert!(matches!(
-        session.compact(&CancellationToken::new()).await,
-        Err(AgentSessionError::Busy)
-    ));
+    assert!(matches!(session.prompt("busy").await, Err(SessionError::Busy)));
+    assert!(matches!(session.compact().await, Err(SessionError::Busy)));
     assert_eq!(
         session.set_model(ModelRef {
             provider: provider.clone(),
             model: "other".into()
         }),
-        Err(AgentSessionError::Busy)
+        Err(SessionError::Busy)
     );
     drop(compact);
-    assert!(!parent.is_cancelled());
-    assert_eq!(
-        session
-            .prompt("after drop", &CancellationToken::new())
-            .await
-            .unwrap()
-            .final_text,
-        "reused"
-    );
+    assert_eq!(session.prompt("after drop").await.unwrap().final_text, "reused");
 }
 
 #[tokio::test]
 async fn aborting_summary_records_failure_and_the_session_is_immediately_reusable() {
     let (store, _) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([FauxStep::Hang, FauxStep::text("reused")]));
-    let (runner, _) = RunnerSetup {
+    let (session, _) = RunnerSetup {
         session: store,
+        compaction: budget(),
         ..RunnerSetup::new(config(provider, vec![]))
     }
     .build();
-    let session = AgentSession::from(runner.with_compaction(budget()).unwrap());
-    let cancel = CancellationToken::new();
-    let compact = session.compact(&cancel);
+    let compact = session.compact();
     tokio::pin!(compact);
     tokio::select! { biased; result = &mut compact => panic!("unexpected completion: {result:?}"), () = tokio::task::yield_now() => {} }
-    assert!(session.abort());
-    assert_eq!(compact.await.unwrap().outcome, Outcome::Aborted);
-    assert_eq!(
-        session
-            .prompt("next", &CancellationToken::new())
-            .await
-            .unwrap()
-            .final_text,
-        "reused"
-    );
+    assert!(session.cancel());
+    assert_eq!(compact.await.unwrap().outcome, Outcome::Cancelled);
+    assert_eq!(session.prompt("next").await.unwrap().final_text, "reused");
 }
 
 #[tokio::test]
@@ -717,16 +662,14 @@ async fn summary_timeout_is_bounded_and_keeps_original_context() {
     let provider = Arc::new(FauxProvider::new([FauxStep::Hang]));
     let (runner, _) = RunnerSetup {
         session: store,
+        compaction: Config {
+            timeout: Duration::from_millis(10),
+            ..budget()
+        },
         ..RunnerSetup::new(config(provider, vec![]))
     }
     .build();
-    let mut runner = runner
-        .with_compaction(Config {
-            timeout: Duration::from_millis(10),
-            ..budget()
-        })
-        .unwrap();
-    let report = runner.compact(&CancellationToken::new()).await;
+    let report = runner.compact().await.unwrap();
     assert_eq!(report.outcome, Outcome::Failed);
     assert!(report.error.unwrap().contains("timed out"));
     assert_eq!(runner.session().messages(), before);
@@ -747,11 +690,11 @@ async fn source_and_summary_byte_limits_stop_unbounded_requests_and_responses() 
     let provider = Arc::new(FauxProvider::new([FauxStep::text("should not be sent")]));
     let (runner, _) = RunnerSetup {
         session: store,
+        compaction: budget(),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build();
-    let mut runner = runner.with_compaction(budget()).unwrap();
-    let report = runner.compact(&CancellationToken::new()).await;
+    let report = runner.compact().await.unwrap();
     assert_eq!(report.outcome, Outcome::Failed);
     assert!(report.error.unwrap().contains("source exceeds"));
     assert!(provider.requests().is_empty());
@@ -760,11 +703,11 @@ async fn source_and_summary_byte_limits_stop_unbounded_requests_and_responses() 
     let provider = Arc::new(FauxProvider::new([FauxStep::text("x".repeat(65 * 1024))]));
     let (runner, _) = RunnerSetup {
         session: store,
+        compaction: budget(),
         ..RunnerSetup::new(config(provider, vec![]))
     }
     .build();
-    let mut runner = runner.with_compaction(budget()).unwrap();
-    let report = runner.compact(&CancellationToken::new()).await;
+    let report = runner.compact().await.unwrap();
     assert_eq!(report.outcome, Outcome::Failed);
     assert!(report.error.unwrap().contains("exceeds 65536"));
     assert!(runner.session().latest_compaction().is_none());
@@ -780,11 +723,11 @@ async fn compact_answering(answer: impl FnOnce(&str) -> Vec<ContentBlock>) -> (R
     }]));
     let (runner, _) = RunnerSetup {
         session: store,
+        compaction: budget(),
         ..RunnerSetup::new(config(provider, vec![]))
     }
     .build();
-    let mut runner = runner.with_compaction(budget()).unwrap();
-    let report = runner.compact(&CancellationToken::new()).await;
+    let report = runner.compact().await.unwrap();
     let summarized = runner.session().latest_compaction().is_some();
     (report, summarized)
 }
@@ -906,21 +849,19 @@ async fn the_run_timeout_also_bounds_automatic_compaction() {
     let provider = Arc::new(FauxProvider::new([FauxStep::Hang]));
     let (runner, _) = RunnerSetup {
         session: store,
-        limits: Limits {
+        limits: RunLimits {
             timeout: Some(Duration::from_millis(10)),
-            ..Limits::default()
+            ..RunLimits::default()
+        },
+        compaction: Config {
+            trigger_bytes: Some(1024),
+            ..budget()
         },
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build();
-    let mut runner = runner
-        .with_compaction(Config {
-            trigger_bytes: Some(1024),
-            ..budget()
-        })
-        .unwrap();
-    let report = runner.run("continue", &CancellationToken::new()).await;
-    assert_eq!(report.outcome, RunOutcome::Timeout);
+    let report = runner.run("continue").await;
+    assert_eq!(report.outcome, RunOutcome::TimedOut);
     assert_eq!(report.model_requests, 1);
     assert_eq!(provider.requests().len(), 1);
     assert!(matches!(
@@ -929,9 +870,56 @@ async fn the_run_timeout_also_bounds_automatic_compaction() {
     ));
 }
 
+/// A summary of what a summary request read, citing the first record it read.
+fn summary_of_the_source(request: &Request) -> FauxStep {
+    let Some(Message::User { content, .. }) = request.messages.last() else {
+        panic!("a summary request ends with its input");
+    };
+    let records: Vec<Value> = serde_json::from_str(content).unwrap();
+    FauxStep::text(summary_json(records[0]["entryId"].as_str().unwrap()))
+}
+
+#[tokio::test]
+async fn one_prompt_whose_tool_calls_pass_the_trigger_is_compacted_within_its_turn_and_goes_on() {
+    let text = "x".repeat(300);
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::tool_call("c1", "echo", json!({"text": text})),
+        FauxStep::tool_call("c2", "echo", json!({"text": text})),
+        // The second result takes the context over the trigger: the summary comes first.
+        FauxStep::compute(summary_of_the_source),
+        FauxStep::text("done"),
+    ]));
+    let (runner, events) = RunnerSetup {
+        compaction: Config {
+            trigger_bytes: Some(1800),
+            ..budget()
+        },
+        ..RunnerSetup::new(config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]))
+    }
+    .build();
+
+    let report = runner.run("go").await;
+
+    assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
+    assert_eq!(report.final_text, "done");
+    assert!(events.kinds().contains(&"compaction_end"), "{:?}", events.kinds());
+    let requests = provider.requests();
+    assert!(requests[2].tools.is_empty(), "the third request is the summary's");
+    // What the model is asked after it: the prompt as it was sent, the summary of what the
+    // turn did before, and the latest exchange.
+    let context = summarize(&requests[3].messages);
+    assert_eq!(context.len(), 4, "{context:?}");
+    assert_eq!(context[0], "user:go");
+    assert!(context[1].starts_with("user:<context_summary>"), "{}", context[1]);
+    assert_eq!(context[2], "assistant:calls[c2]");
+    assert!(context[3].starts_with("tool:c2=xxx"), "{}", context[3]);
+    // The session alone rebuilds every request, the summary's and the one after it included.
+    assert_eq!(replayed_requests(&runner.session()), requests);
+}
+
 #[tokio::test]
 async fn a_single_large_old_message_does_not_force_the_entire_history_to_be_retained() {
-    let mut store = SessionStore::in_memory(header());
+    let mut store = Transcript::in_memory(header());
     let old = store
         .append_message(Message::user("x".repeat(300 * 1024)))
         .await
@@ -943,16 +931,14 @@ async fn a_single_large_old_message_does_not_force_the_entire_history_to_be_reta
     ]));
     let (runner, _) = RunnerSetup {
         session: store,
+        compaction: Config {
+            trigger_bytes: Some(256 * 1024),
+            ..Config::default()
+        },
         ..RunnerSetup::new(config(provider, vec![]))
     }
     .build();
-    let mut runner = runner
-        .with_compaction(Config {
-            trigger_bytes: Some(256 * 1024),
-            ..Config::default()
-        })
-        .unwrap();
-    let report = runner.run("continue", &CancellationToken::new()).await;
+    let report = runner.run("continue").await;
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
     assert_eq!(report.model_requests, 2);
 }

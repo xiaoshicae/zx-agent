@@ -1,4 +1,4 @@
-//! Switching branches within a session: `AgentSession::branch` moves the
+//! Switching branches within a session: `Session::branch` moves the
 //! conversation to another point of its tree, `inspect` reads the tree while idle.
 mod common;
 
@@ -7,30 +7,28 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use serde_json::json;
-use tokio_util::sync::CancellationToken;
 
-use common::{EchoTool, NotifyingProvider, RunnerSetup, config, header, summarize};
-use zx_agent::AgentSession;
-use zx_agent::agent::Tool;
-use zx_agent::agent_session::AgentSessionError;
+use common::{Driven, EchoTool, NotifyingProvider, RunnerSetup, config, header, summarize};
 use zx_agent::ai::Message;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::runner::RunOutcome;
-use zx_agent::session::{Entry, SessionStore};
+use zx_agent::session::SessionError;
+use zx_agent::tools::Tool;
+use zx_agent::transcript::Entry;
 
-fn file_session(file: &Path, provider: Arc<FauxProvider>, tools: Vec<Arc<dyn Tool>>) -> AgentSession {
+async fn file_session(file: &Path, provider: Arc<FauxProvider>, tools: Vec<Arc<dyn Tool>>) -> Driven {
     let (runner, _) = RunnerSetup {
-        session: SessionStore::create(file, header()).unwrap(),
+        session: common::create_session_file(file, header()).await.unwrap(),
         ..RunnerSetup::new(config(provider, tools))
     }
     .build();
-    AgentSession::from(runner)
+    runner
 }
 
 /// The ID of the first message entry `matches` accepts.
-fn entry_id(session: &AgentSession, matches: impl Fn(&Message) -> bool) -> String {
+fn entry_id(session: &Driven, matches: impl Fn(&Message) -> bool) -> String {
     session
-        .inspect(|store| {
+        .with_transcript(|store| {
             store.entries().iter().find_map(|entry| match entry {
                 Entry::Message(entry) if matches(&entry.message) => Some(entry.id.clone()),
                 _ => None,
@@ -40,7 +38,7 @@ fn entry_id(session: &AgentSession, matches: impl Fn(&Message) -> bool) -> Strin
         .expect("a matching entry")
 }
 
-fn answer_id(session: &AgentSession, text: &str) -> String {
+fn answer_id(session: &Driven, text: &str) -> String {
     entry_id(
         session,
         |message| matches!(message, Message::Assistant(answer) if answer.text() == text),
@@ -56,13 +54,13 @@ async fn branching_to_an_earlier_answer_continues_there_and_keeps_the_branch_lef
         FauxStep::text("two"),
         FauxStep::text("three"),
     ]));
-    let session = file_session(&file, provider.clone(), vec![]);
-    session.prompt("first", &CancellationToken::new()).await.unwrap();
-    session.prompt("second", &CancellationToken::new()).await.unwrap();
+    let session = file_session(&file, provider.clone(), vec![]).await;
+    session.prompt("first").await.unwrap();
+    session.prompt("second").await.unwrap();
     let one = answer_id(&session, "one");
 
     session.branch(Some(&one)).unwrap();
-    let report = session.prompt("third", &CancellationToken::new()).await.unwrap();
+    let report = session.prompt("third").await.unwrap();
 
     assert_eq!(report.final_text, "three");
     assert_eq!(
@@ -75,7 +73,7 @@ async fn branching_to_an_earlier_answer_continues_there_and_keeps_the_branch_lef
         |message| matches!(message, Message::User { content, .. } if content == "third"),
     );
     let parent = session
-        .inspect(|store| {
+        .with_transcript(|store| {
             store
                 .get(&third)
                 .and_then(|entry| entry.parent_id().map(str::to_string))
@@ -84,7 +82,7 @@ async fn branching_to_an_earlier_answer_continues_there_and_keeps_the_branch_lef
     assert_eq!(parent.as_deref(), Some(one.as_str()));
     drop(session);
     // Reopened, the file continues where it ends: on the new branch; the old one is kept.
-    let reopened = SessionStore::open(&file).unwrap();
+    let reopened = common::open_session_file(&file).await.unwrap();
     assert_eq!(
         summarize(&reopened.messages()),
         ["user:first", "assistant:one", "user:third", "assistant:three"]
@@ -98,7 +96,7 @@ async fn branching_to_an_earlier_answer_continues_there_and_keeps_the_branch_lef
 }
 
 #[tokio::test]
-async fn a_prompt_after_an_answer_with_unanswered_calls_records_them_as_not_executed() {
+async fn a_prompt_after_going_back_to_an_answer_tells_the_model_that_its_calls_started() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("session.jsonl");
     let echo = Arc::new(EchoTool::new("echo"));
@@ -107,8 +105,8 @@ async fn a_prompt_after_an_answer_with_unanswered_calls_records_them_as_not_exec
         FauxStep::text("done"),
         FauxStep::text("again"),
     ]));
-    let session = file_session(&file, provider.clone(), vec![echo.clone()]);
-    session.prompt("first", &CancellationToken::new()).await.unwrap();
+    let session = file_session(&file, provider.clone(), vec![echo.clone()]).await;
+    session.prompt("first").await.unwrap();
     assert_eq!(echo.calls.load(Ordering::SeqCst), 1);
     let calling = entry_id(
         &session,
@@ -116,14 +114,15 @@ async fn a_prompt_after_an_answer_with_unanswered_calls_records_them_as_not_exec
     );
 
     session.branch(Some(&calling)).unwrap();
-    let report = session.prompt("second", &CancellationToken::new()).await.unwrap();
+    let report = session.prompt("second").await.unwrap();
 
     assert_eq!(report.outcome, RunOutcome::Completed);
     assert_eq!(echo.calls.load(Ordering::SeqCst), 1, "the call is not run again");
     let context = summarize(&provider.requests()[2].messages);
     assert_eq!(&context[..2], ["user:first", "assistant:calls[c1]"]);
+    // The call ran on the branch that was left: going back did not undo it.
     assert!(
-        context[2].starts_with("tool:c1=Not executed:") && context[2].ends_with('!'),
+        context[2].starts_with("tool:c1=Result unknown: this call started") && context[2].ends_with('!'),
         "{}",
         context[2]
     );
@@ -135,15 +134,15 @@ async fn branching_to_the_root_starts_the_conversation_over_in_the_same_session(
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("session.jsonl");
     let provider = Arc::new(FauxProvider::new([FauxStep::text("one"), FauxStep::text("fresh")]));
-    let session = file_session(&file, provider.clone(), vec![]);
-    session.prompt("first", &CancellationToken::new()).await.unwrap();
+    let session = file_session(&file, provider.clone(), vec![]).await;
+    session.prompt("first").await.unwrap();
 
     session.branch(None).unwrap();
-    session.prompt("new", &CancellationToken::new()).await.unwrap();
+    session.prompt("new").await.unwrap();
 
     assert_eq!(summarize(&provider.requests()[1].messages), ["user:new"]);
     drop(session);
-    let reopened = SessionStore::open(&file).unwrap();
+    let reopened = common::open_session_file(&file).await.unwrap();
     assert_eq!(summarize(&reopened.messages()), ["user:new", "assistant:fresh"]);
     let roots = reopened
         .entries()
@@ -156,30 +155,28 @@ async fn branching_to_the_root_starts_the_conversation_over_in_the_same_session(
 #[tokio::test]
 async fn branching_and_inspecting_wait_for_the_run_and_reject_unknown_entries() {
     let provider = NotifyingProvider::new([FauxStep::Hang, FauxStep::text("later")]);
-    let (runner, _) = RunnerSetup::new(config(provider.clone(), vec![])).build();
-    let session = AgentSession::from(runner);
-    let cancel = CancellationToken::new();
-    let mut running = Box::pin(session.prompt("first", &cancel));
+    let (session, _) = RunnerSetup::new(config(provider.clone(), vec![])).build();
+    let mut running = Box::pin(session.prompt("first"));
     tokio::select! {
         () = provider.started.notified() => {}
         _ = &mut running => panic!("must be running"),
     }
-    assert_eq!(session.branch(None), Err(AgentSessionError::Busy));
+    assert_eq!(session.branch(None), Err(SessionError::Busy));
     assert_eq!(
-        session.inspect(|store| store.entries().len()).err(),
-        Some(AgentSessionError::Busy)
+        session.with_transcript(|store| store.entries().len()).err(),
+        Some(SessionError::Busy)
     );
-    assert!(session.abort());
-    assert_eq!(running.await.unwrap().outcome, RunOutcome::Aborted);
+    assert!(session.cancel());
+    assert_eq!(running.await.unwrap().outcome, RunOutcome::Cancelled);
 
-    assert_eq!(session.branch(Some("nowhere")), Err(AgentSessionError::EntryNotFound));
+    assert_eq!(session.branch(Some("nowhere")), Err(SessionError::EntryNotFound));
     // The position did not move: the next prompt continues after the aborted answer.
-    session.prompt("second", &CancellationToken::new()).await.unwrap();
+    session.prompt("second").await.unwrap();
     let context = summarize(&provider.requests()[1].messages);
     assert_eq!(context[0], "user:first");
     assert_eq!(context[context.len() - 1], "user:second");
     // While `inspect` runs, the conversation is leased, as during a prompt.
-    let during = session.inspect(|_| session.set_reasoning(None)).unwrap();
-    assert_eq!(during, Err(AgentSessionError::Busy));
+    let during = session.with_transcript(|_| session.set_reasoning(None)).unwrap();
+    assert_eq!(during, Err(SessionError::Busy));
     assert_eq!(session.set_reasoning(None), Ok(()));
 }

@@ -1,6 +1,7 @@
 //! Helpers for the duties every platform has: splitting long text, dropping redeliveries,
-//! pacing posts to a chat, keeping what an open approval card shows, waiting between
-//! attempts to reach the platform, and telling a dead connection from a quiet one.
+//! pacing posts to a chat, waiting out a rate limit, keeping what an open approval card
+//! shows, waiting between attempts to reach the platform, and telling a dead connection from
+//! a quiet one.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hash;
@@ -11,7 +12,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use zx_ai::sync::lock;
 
-use super::{ImError, MessageId};
+use super::MessageId;
 
 /// Characters per posted message, beyond which a channel splits text with [`split_text`].
 /// Slack recommends keeping message text within 4,000 characters (chat.postMessage,
@@ -32,6 +33,10 @@ pub const CARD_CAPACITY: usize = 256;
 /// entity, for example) but never splits what it writes. A part ends at its last line break
 /// when that keeps at least half of it. For a channel that must split text longer than one
 /// platform message.
+///
+/// A channel posts the parts itself: the first to the destination, the rest to the thread
+/// of the first. Those few lines are in each platform; sharing them would take a callback
+/// with a boxed future, which is harder to read than they are.
 pub fn split_text(text: &str, max: usize, push: fn(&mut String, char)) -> (String, Vec<String>) {
     let mut first = None;
     let mut rest = Vec::new();
@@ -73,12 +78,12 @@ pub fn split_text(text: &str, max: usize, push: fn(&mut String, char)) -> (Strin
     }
 }
 
-/// The error of [`ImChannel::update`](super::ImChannel::update) with an
-/// [`Outbound::ApprovalRequest`](super::Outbound::ApprovalRequest): a card is only posted,
-/// never written over a message, and the server never asks for it. A configuration error,
-/// since no later call would succeed.
-pub fn card_update_refused() -> ImError {
-    ImError::Config("an approval request is posted, not written over a message".into())
+/// How long a rate-limited call waits before it is tried again: `seconds`, the value of the
+/// header in which the platform says so, but at most `longest`; one second when the header
+/// is missing or not a number of seconds.
+pub fn rate_limit_wait(seconds: Option<&str>, longest: Duration) -> Duration {
+    let secs = seconds.and_then(|value| value.trim().parse().ok()).unwrap_or(1);
+    Duration::from_secs(secs).min(longest)
 }
 
 /// Messages a channel has passed on recently, to drop redeliveries; the oldest are
@@ -308,6 +313,15 @@ mod tests {
             split_text("abcdefghij", 4, String::push),
             ("abcd".to_string(), vec!["efgh".to_string(), "ij".to_string()])
         );
+    }
+
+    #[test]
+    fn a_rate_limit_wait_is_capped_and_defaults_to_one_second() {
+        let longest = Duration::from_secs(60);
+        assert_eq!(rate_limit_wait(None, longest), Duration::from_secs(1));
+        assert_eq!(rate_limit_wait(Some("soon"), longest), Duration::from_secs(1));
+        assert_eq!(rate_limit_wait(Some(" 5 "), longest), Duration::from_secs(5));
+        assert_eq!(rate_limit_wait(Some("100000"), longest), longest);
     }
 
     #[test]

@@ -11,10 +11,10 @@ use super::edit_text::{
 };
 use super::mutation::FileMutationQueue;
 use super::{DEFAULT_MAX_FILE_BYTES, check_path, looks_binary, parse_args, resolve, unless_cancelled};
-use crate::agent::{ExecutionMode, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput};
 use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
 use crate::text::prefix_noted;
+use zx_core::tools::{ExecutionMode, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput};
 
 /// The most bytes of the patch in a result's details: details over the loop's limit are
 /// dropped whole, so a long patch is cut to leave room for the other fields.
@@ -165,7 +165,8 @@ impl Tool for EditFileTool {
         let original = normalize_to_lf(text);
         let changed = apply_edits(&original, &args.edits, shown)?;
         let contents = format!("{bom}{}", restore_line_endings(&changed, ending));
-        // Checked last before writing: a write is not interrupted once it has started.
+        // Checked last before writing: the executor finishes a write it has begun, also when
+        // this call is dropped meanwhile, so that no file is left empty or cut short.
         if ctx.cancel.is_cancelled() {
             return Err(cancelled());
         }

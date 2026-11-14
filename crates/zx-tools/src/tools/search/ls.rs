@@ -5,9 +5,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{SearchSettings, Wording, finish, first_lines, positive, quote, search_path};
-use crate::agent::{Tool, ToolContext, ToolOutput};
 use crate::ai::ToolDef;
 use crate::tools::parse_args;
+use zx_core::tools::{Tool, ToolContext, ToolOutput};
 
 /// Entries shown by default (pi: ls's `DEFAULT_LIMIT`).
 const LS_LIMIT: usize = 500;

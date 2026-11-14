@@ -5,9 +5,10 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use super::auto_approve::AutoApprove;
-use super::{ToolPolicy, command_of};
-use crate::agent::PolicyDecision;
+use super::command_of;
+use crate::ai::ToolCall;
 use crate::tools::BASH;
+use zx_core::policy::{PolicyContext, PolicyDecision, ToolPolicy};
 
 /// The calls a rule matches. Bash commands are told apart by [`AutoApprove`], not by rules.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,15 +76,23 @@ impl RulePolicy {
     }
 }
 
-#[async_trait]
-impl ToolPolicy for RulePolicy {
-    async fn check(&self, tool_name: &str, args: &Value) -> PolicyDecision {
+impl RulePolicy {
+    /// The verdict on a call of `tool_name` with `args`: the strictest matching rule, with
+    /// an ask on an auto-approved bash command turned into an allow.
+    pub fn verdict(&self, tool_name: &str, args: &Value) -> PolicyDecision {
         let verdict = self.rule_verdict(tool_name);
         let covered = tool_name == BASH && command_of(args).is_some_and(|command| self.auto_approve.covers(command));
         if covered && matches!(verdict, PolicyDecision::Ask(_)) {
             return PolicyDecision::Allow;
         }
         verdict
+    }
+}
+
+#[async_trait]
+impl ToolPolicy for RulePolicy {
+    async fn check(&self, call: &ToolCall, _ctx: &PolicyContext) -> PolicyDecision {
+        self.verdict(&call.name, &call.arguments)
     }
 }
 
@@ -96,8 +105,8 @@ mod tests {
         matches!(decision, PolicyDecision::Deny(_))
     }
 
-    #[tokio::test]
-    async fn rule_priority_is_deny_then_ask_then_allow_regardless_of_registration() {
+    #[test]
+    fn rule_priority_is_deny_then_ask_then_allow_regardless_of_registration() {
         let policy = RulePolicy::new(vec![
             Rule {
                 matcher: RuleMatcher::Any,
@@ -121,11 +130,11 @@ mod tests {
             },
         ]);
         assert_eq!(
-            policy.check("bash", &serde_json::json!({"command": "rm x"})).await,
+            policy.verdict("bash", &serde_json::json!({"command": "rm x"})),
             PolicyDecision::Deny("first deny".into())
         );
         assert_eq!(
-            policy.check("read_file", &serde_json::json!({})).await,
+            policy.verdict("read_file", &serde_json::json!({})),
             PolicyDecision::Ask("second ask".into())
         );
         let policy = RulePolicy::new(vec![
@@ -143,28 +152,26 @@ mod tests {
             },
         ]);
         assert_eq!(
-            policy.check("bash", &serde_json::json!({})).await,
+            policy.verdict("bash", &serde_json::json!({})),
             PolicyDecision::Ask("first".into())
         );
     }
 
-    #[tokio::test]
-    async fn unmatched_calls_fail_closed() {
+    #[test]
+    fn unmatched_calls_fail_closed() {
         let policy = RulePolicy::new(vec![Rule {
             matcher: RuleMatcher::Tool("read_file".into()),
             decision: PolicyDecision::Allow,
         }]);
-        assert!(denied(
-            &policy.check("bash", &serde_json::json!({"command": "ls"})).await
-        ));
+        assert!(denied(&policy.verdict("bash", &serde_json::json!({"command": "ls"}))));
         assert_eq!(
-            policy.check("read_file", &serde_json::json!({})).await,
+            policy.verdict("read_file", &serde_json::json!({})),
             PolicyDecision::Allow
         );
     }
 
-    #[tokio::test]
-    async fn auto_approval_turns_only_a_bash_ask_into_allow() {
+    #[test]
+    fn auto_approval_turns_only_a_bash_ask_into_allow() {
         let policy = RulePolicy::new(vec![
             Rule {
                 matcher: RuleMatcher::Tool("bash".into()),
@@ -177,25 +184,25 @@ mod tests {
         ])
         .auto_approve(AutoApprove::new(["ls"]));
         assert_eq!(
-            policy.check("bash", &serde_json::json!({"command": "ls -a"})).await,
+            policy.verdict("bash", &serde_json::json!({"command": "ls -a"})),
             PolicyDecision::Allow
         );
         assert_eq!(
-            policy.check("bash", &serde_json::json!({"command": "rm x"})).await,
+            policy.verdict("bash", &serde_json::json!({"command": "rm x"})),
             PolicyDecision::Ask("approve bash".into())
         );
         assert_eq!(
-            policy.check("bash", &serde_json::json!({})).await,
+            policy.verdict("bash", &serde_json::json!({})),
             PolicyDecision::Ask("approve bash".into())
         );
         assert_eq!(
-            policy.check("read_file", &serde_json::json!({"command": "ls"})).await,
+            policy.verdict("read_file", &serde_json::json!({"command": "ls"})),
             PolicyDecision::Ask("approve any".into())
         );
     }
 
-    #[tokio::test]
-    async fn auto_approval_never_overrides_a_denial() {
+    #[test]
+    fn auto_approval_never_overrides_a_denial() {
         let list = AutoApprove::new(["ls"]);
         let ls = serde_json::json!({"command": "ls -a"});
         let denied_by_rule = RulePolicy::new(vec![Rule {
@@ -204,10 +211,10 @@ mod tests {
         }])
         .auto_approve(list.clone());
         assert_eq!(
-            denied_by_rule.check("bash", &ls).await,
+            denied_by_rule.verdict("bash", &ls),
             PolicyDecision::Deny("denied".into())
         );
         let unmatched = RulePolicy::new(Vec::new()).auto_approve(list);
-        assert!(denied(&unmatched.check("bash", &ls).await));
+        assert!(denied(&unmatched.verdict("bash", &ls)));
     }
 }

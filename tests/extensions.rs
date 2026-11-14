@@ -1,37 +1,41 @@
-//! Extensions through the public SDK: what `extensions::register` adds to a loop, and what it
-//! refuses without registering anything.
+//! Extensions through the public SDK: what an agent's extensions add to its sessions, and
+//! which extensions refuse the agent.
 mod common;
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::json;
 
-use common::{EchoTool, config, run_prompt, summarize};
-use zx_agent::agent::{AgentEvent, HookContext, HookPoint, HookResult, HookStage, Hooks, LoopConfig, Tool, ToolOutput};
+use common::{EchoTool, config, refusal, run_prompt, summarize};
 use zx_agent::ai::ToolCall;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::extensions::{Extension, register};
+use zx_agent::events::{EventKind, HookPoint};
+use zx_agent::extensions::Extension;
+use zx_agent::hooks::{Hook, HookContext, HookResult, HookStage};
 use zx_agent::prompt::{ENVIRONMENT, build_system_prompt};
+use zx_agent::tools::{Tool, ToolOutput};
+use zx_agent::{Agent, AgentConfig, SessionOptions};
 
 /// Appends a mark to every tool result.
 struct Mark;
 
 #[async_trait]
-impl Hooks for Mark {
+impl Hook for Mark {
     async fn after_tool(&self, _call: &ToolCall, mut output: ToolOutput, _ctx: &HookContext) -> HookResult<ToolOutput> {
         output.content.push_str(" [marked]");
         Ok(output)
     }
 }
 
-/// Declares the stage of the built-in policies, which extension hooks may not use.
+/// Declares the stage of the built-in redaction, which extension hooks may not use.
 struct Early;
 
 #[async_trait]
-impl Hooks for Early {
+impl Hook for Early {
     fn stage(&self) -> HookStage {
-        HookStage::Policy
+        HookStage::Redaction
     }
 }
 
@@ -39,7 +43,7 @@ impl Hooks for Early {
 struct Broken;
 
 #[async_trait]
-impl Hooks for Broken {
+impl Hook for Broken {
     async fn after_tool(&self, _call: &ToolCall, _output: ToolOutput, _ctx: &HookContext) -> HookResult<ToolOutput> {
         Err("broken".to_string())
     }
@@ -49,7 +53,7 @@ struct Bundle {
     name: &'static str,
     tools: Vec<Arc<dyn Tool>>,
     sections: Vec<(&'static str, &'static str)>,
-    hooks: fn() -> Vec<Box<dyn Hooks>>,
+    hooks: fn() -> Vec<Box<dyn Hook>>,
 }
 
 impl Bundle {
@@ -79,14 +83,14 @@ impl Extension for Bundle {
             .collect()
     }
 
-    fn hooks(&self) -> Vec<Box<dyn Hooks>> {
+    fn hooks(&self) -> Vec<Box<dyn Hook>> {
         (self.hooks)()
     }
 }
 
-/// A loop with the host's `echo` tool, and a prompt with a generated section and one of the
-/// host's own.
-fn base(provider: Arc<FauxProvider>) -> LoopConfig {
+/// An agent with the host's `echo` tool, and a prompt with a generated section and one of
+/// the host's own.
+fn base(provider: Arc<FauxProvider>) -> AgentConfig {
     let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
     config.system_prompt = build_system_prompt("Do the task.", &[(ENVIRONMENT, "OS: test"), ("rules", "Be brief.")]);
     config
@@ -106,10 +110,10 @@ async fn an_extension_adds_its_tools_hooks_and_prompt_sections() {
     let notes = Bundle {
         tools: vec![Arc::new(EchoTool::new("note"))],
         sections: vec![("notes", "Use note to keep notes.")],
-        hooks: || vec![Box::new(Mark) as Box<dyn Hooks>],
+        hooks: || vec![Box::new(Mark) as Box<dyn Hook>],
         ..Bundle::named("notes")
     };
-    register(&mut config, &[Arc::new(notes)]).unwrap();
+    config.extensions = vec![Arc::new(notes)];
     let mut context = Vec::new();
     run_prompt(config, &mut context, "go").await;
     let requests = provider.requests();
@@ -127,19 +131,17 @@ async fn an_extension_adds_its_tools_hooks_and_prompt_sections() {
 }
 
 #[test]
-fn a_hook_outside_the_extension_stage_is_refused_and_nothing_is_registered() {
+fn an_extension_hook_outside_the_extension_stage_refuses_the_agent() {
     let mut config = base(idle());
-    let prompt = config.system_prompt.clone();
     let early = Bundle {
         tools: vec![Arc::new(EchoTool::new("note"))],
         sections: vec![("notes", "Use note to keep notes.")],
-        hooks: || vec![Box::new(Early) as Box<dyn Hooks>],
+        hooks: || vec![Box::new(Early) as Box<dyn Hook>],
         ..Bundle::named("early")
     };
-    let error = register(&mut config, &[Arc::new(early)]).unwrap_err();
-    assert!(error.contains("declares the Policy stage"), "{error}");
-    assert_eq!(config.tools.len(), 1);
-    assert_eq!(config.system_prompt, prompt);
+    config.extensions = vec![Arc::new(early)];
+    let error = refusal(config);
+    assert!(error.contains("declares the Redaction stage"), "{error}");
 }
 
 #[test]
@@ -166,13 +168,12 @@ fn an_extension_tool_may_not_take_a_name_in_use() {
     ];
     for bundles in cases {
         let mut config = base(idle());
-        let extensions: Vec<Arc<dyn Extension>> = bundles
+        config.extensions = bundles
             .into_iter()
             .map(|bundle| Arc::new(bundle) as Arc<dyn Extension>)
             .collect();
-        let error = register(&mut config, &extensions).unwrap_err();
+        let error = refusal(config);
         assert!(error.contains("more than one tool is named"), "{error}");
-        assert_eq!(config.tools.len(), 1, "only the host's tool is left");
     }
 }
 
@@ -189,28 +190,74 @@ fn extension_sections_may_not_take_reserved_existing_or_malformed_names() {
         (vec![("my notes", "x")], "must be ASCII lowercase"),
     ] {
         let mut config = base(idle());
-        let prompt = config.system_prompt.clone();
         let bundle = Bundle {
             sections,
             ..Bundle::named("notes")
         };
-        let error = register(&mut config, &[Arc::new(bundle)]).unwrap_err();
+        config.extensions = vec![Arc::new(bundle)];
+        let error = refusal(config);
         assert!(error.contains(expected), "{error}");
-        assert_eq!(config.system_prompt, prompt);
     }
 }
 
 #[test]
 fn extension_names_must_be_given_and_unique() {
-    let mut config = base(idle());
-    let error = register(&mut config, &[Arc::new(Bundle::named(" "))]).unwrap_err();
+    let mut blank = base(idle());
+    blank.extensions = vec![Arc::new(Bundle::named(" "))];
+    let error = refusal(blank);
     assert!(error.contains("blank name"), "{error}");
-    let error = register(
-        &mut config,
-        &[Arc::new(Bundle::named("notes")), Arc::new(Bundle::named("notes"))],
-    )
-    .unwrap_err();
+    let mut twice = base(idle());
+    twice.extensions = vec![Arc::new(Bundle::named("notes")), Arc::new(Bundle::named("notes"))];
+    let error = refusal(twice);
     assert!(error.contains("more than one extension is named \"notes\""), "{error}");
+}
+
+/// Counts how often it is asked for its hooks, and gives one that remembers the sessions
+/// whose input it saw.
+#[derive(Default)]
+struct Asked {
+    asked: AtomicUsize,
+    seen: Arc<Mutex<Vec<String>>>,
+}
+
+struct Remember(Arc<Mutex<Vec<String>>>);
+
+#[async_trait]
+impl Hook for Remember {
+    async fn on_input(&self, text: String, ctx: &HookContext) -> HookResult<String> {
+        self.0.lock().unwrap().push(ctx.session_id.clone());
+        Ok(text)
+    }
+}
+
+impl Extension for Asked {
+    fn name(&self) -> &str {
+        "asked"
+    }
+
+    fn hooks(&self) -> Vec<Box<dyn Hook>> {
+        self.asked.fetch_add(1, Ordering::SeqCst);
+        vec![Box::new(Remember(self.seen.clone()))]
+    }
+}
+
+#[tokio::test]
+async fn an_extension_is_asked_once_and_its_hooks_serve_every_session() {
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("one"), FauxStep::text("two")]));
+    let extension = Arc::new(Asked::default());
+    let mut config = base(provider);
+    config.extensions = vec![extension.clone()];
+    let agent = Agent::new(config).unwrap();
+
+    let mut sessions = Vec::new();
+    for _ in 0..2 {
+        let session = agent.create_session(SessionOptions::new(".")).await.unwrap();
+        session.send("go").unwrap().wait().await;
+        sessions.push(session.id().to_string());
+    }
+
+    assert_eq!(extension.asked.load(Ordering::SeqCst), 1);
+    assert_eq!(*extension.seen.lock().unwrap(), sessions);
 }
 
 #[tokio::test]
@@ -221,16 +268,16 @@ async fn a_failing_extension_hook_is_reported_under_the_extension_name() {
     ]));
     let mut config = base(provider);
     let broken = Bundle {
-        hooks: || vec![Box::new(Broken) as Box<dyn Hooks>],
+        hooks: || vec![Box::new(Broken) as Box<dyn Hook>],
         ..Bundle::named("broken")
     };
-    register(&mut config, &[Arc::new(broken)]).unwrap();
+    config.extensions = vec![Arc::new(broken)];
     let mut context = Vec::new();
     let (_, events) = run_prompt(config, &mut context, "go").await;
     assert!(
         events.events().iter().any(|event| matches!(
             event,
-            AgentEvent::HookFailed { hook, phase, .. } if hook == "broken" && *phase == HookPoint::AfterTool
+            EventKind::HookFailed { hook, phase, .. } if hook == "broken" && *phase == HookPoint::AfterTool
         )),
         "{:?}",
         events.kinds()

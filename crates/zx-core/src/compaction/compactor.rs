@@ -1,17 +1,23 @@
 //! The compactor: one compaction over a session, from choosing what to summarize to recording
 //! the result or the failure.
 
+use std::collections::HashMap;
+
 use anyhow::{Context, Result, bail, ensure};
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use super::answer::{ResponseBytes, parse_answer};
-use super::{Compacted, Config, End, MAX_SOURCE_BYTES, Trigger, context_bytes, message_bytes};
-use crate::agent::{AgentEvent, EventTarget, LoopConfig, RequestKind};
-use crate::ai::{AssistantMessage, Message, Request, StreamEvent, Usage, duration_ms, now_ms};
-use crate::session::{
-    CompactionPlan, CompactionSummary, ProjectedMessage, RequestSource, SessionStore, SummaryRequest, summary_input,
-    summary_messages,
+use super::{
+    Compacted, Config, End, MAX_SOURCE_BYTES, Summarized, Summarizer, SummarySource, Trigger, context_bytes,
+    message_bytes,
+};
+use crate::ai::{AssistantMessage, Message, ModelMeta, Provider, Request, StreamEvent, Usage, duration_ms, now_ms};
+use crate::events::{Emit, EventKind, RequestKind};
+use crate::guard::{CancelSignal, Priority, Stopped, bounded};
+use crate::transcript::{
+    CompactionPlan, CompactionSummary, ProjectedMessage, RequestSource, SummarizedBy, SummaryRequest, Transcript,
+    summary_input, summary_messages, without_details,
 };
 
 const SUMMARY_INSTRUCTIONS: &str = "Summarize the supplied original conversation records. \
@@ -26,47 +32,55 @@ const SUMMARY_INSTRUCTIONS: &str = "Summarize the supplied original conversation
 const CANCELLED: &str = "compaction cancelled";
 
 /// Runs one compaction over a session: chooses what to summarize, records its start, asks
-/// the model, checks the answer and records the result or the failure.
+/// for the summary, checks it and records the result or the failure.
 pub(crate) struct Compactor<'a> {
-    pub(crate) session: &'a mut SessionStore,
-    /// The loop's configuration: the model that summarizes and its prices.
-    pub(crate) config: &'a LoopConfig,
+    pub(crate) session: &'a mut Transcript,
+    /// The model that summarizes when no summarizer does: the one the run asks.
+    pub(crate) provider: &'a dyn Provider,
+    pub(crate) model: &'a str,
+    /// What is known about models, for the price of the summary.
+    pub(crate) models: &'a HashMap<String, ModelMeta>,
+    /// The host's summarizer, which makes the summary in place of a request to the model.
+    pub(crate) summarizer: Option<&'a dyn Summarizer>,
     pub(crate) compaction: &'a Config,
-    /// Where the compaction's events go; its trace carries the cancellation.
-    pub(crate) target: EventTarget<'a>,
+    /// Where the compaction's events go.
+    pub(crate) events: &'a dyn Emit,
+    /// The run's cancellation, which is the compaction's.
+    pub(crate) cancel: &'a CancellationToken,
     pub(crate) trigger: Trigger,
     /// The attempt of the run that compacts; 1 for a manual compaction.
     pub(crate) attempt: u32,
 }
 
-/// The context after a summary, except the summary itself: the system messages before the
-/// boundary, then the messages the summary keeps.
+/// The context after a summary, except the summary itself: what stays of the records before
+/// the boundary, then the messages the summary keeps.
 struct Retained {
     messages: Vec<Message>,
-    /// How many of `messages` are the system messages before the boundary.
-    system_prefix: usize,
+    /// How many of `messages` are from before the boundary: the system messages there, and
+    /// the input the compaction keeps when its boundary is inside the latest turn.
+    before_boundary: usize,
 }
 
 impl Retained {
-    /// What a summary that keeps `raw[cut..]` leaves in the context.
-    fn of(raw: &[ProjectedMessage], cut: usize) -> Self {
-        let system_before = raw[..cut]
+    /// What a summary that keeps `raw[cut..]`, and the input `raw[kept_input]` before it,
+    /// leaves in the context.
+    fn of(raw: &[ProjectedMessage], cut: usize, kept_input: Option<usize>) -> Self {
+        let before = raw[..cut]
             .iter()
-            .filter(|item| matches!(item.message, Message::System(_)));
+            .enumerate()
+            .filter(|(index, item)| matches!(item.message, Message::System(_)) || Some(*index) == kept_input)
+            .map(|(_, item)| item);
         Self {
-            system_prefix: system_before.clone().count(),
-            messages: system_before
-                .chain(&raw[cut..])
-                .map(|item| item.message.clone())
-                .collect(),
+            before_boundary: before.clone().count(),
+            messages: before.chain(&raw[cut..]).map(|item| item.message.clone()).collect(),
         }
     }
 
-    /// The context with `summary` in its place: after the system messages that precede the
+    /// The context with `summary` in its place: after what stays of the records before the
     /// boundary, before the kept messages. The session's projection orders them the same way.
     fn with_summary(&self, summary: Message) -> Vec<Message> {
-        let (system, kept) = self.messages.split_at(self.system_prefix);
-        system
+        let (before, kept) = self.messages.split_at(self.before_boundary);
+        before
             .iter()
             .cloned()
             .chain([summary])
@@ -78,18 +92,45 @@ impl Retained {
 /// What a summary would read and keep, chosen from the current projection.
 struct Candidate {
     first_kept: String,
+    /// The latest input, when the boundary is after it: it stays in the context as it is.
+    kept_input: Option<String>,
     /// The records the summary reads, which its facts may cite.
     source_ids: Vec<String>,
-    /// The request content: the records.
-    input: String,
+    source: Source,
     retained: Retained,
 }
 
-/// A compaction whose start is recorded in the session, waiting for the model's answer.
+/// The records a summary reads, as whoever makes it takes them.
+enum Source {
+    /// For the kernel's request to the model: its content, the records as JSON.
+    Text(String),
+    /// For the host's summarizer.
+    Records(Vec<ProjectedMessage>),
+}
+
+/// A compaction whose start is recorded in the session, waiting for its summary.
 struct OpenCompaction {
     id: String,
     source_ids: Vec<String>,
     retained: Retained,
+}
+
+/// What an open compaction got back.
+enum Made {
+    /// The model's answer to the kernel's request.
+    Answer(AssistantMessage),
+    /// What the host's summarizer made.
+    Summary(Summarized),
+}
+
+impl Made {
+    /// What making it used.
+    fn usage(&self) -> &Usage {
+        match self {
+            Self::Answer(message) => &message.usage,
+            Self::Summary(summarized) => &summarized.usage,
+        }
+    }
 }
 
 /// Why an open compaction did not complete.
@@ -101,8 +142,8 @@ enum Cause {
 }
 
 impl Compactor<'_> {
-    /// Run one compaction: choose what to summarize, record its start, ask the model, check
-    /// the answer, then record the result or the failure. When it ends `Completed`, the
+    /// Run one compaction: choose what to summarize, record its start, ask for the summary,
+    /// check it, then record the result or the failure. When it ends `Completed`, the
     /// session's projection is the new context.
     pub(crate) async fn run(mut self) -> Compacted {
         let input_bytes = match context_bytes(&self.session.messages()) {
@@ -114,30 +155,24 @@ impl Compactor<'_> {
             Ok(None) => return Compacted::without_request(input_bytes, End::Noop),
             Err(error) => return Compacted::without_request(input_bytes, End::Failed(format!("{error:#}"))),
         };
-        if self.cancel().is_cancelled() {
-            return Compacted::without_request(input_bytes, End::Aborted(CANCELLED.into()));
+        if self.cancel.is_cancelled() {
+            return Compacted::without_request(input_bytes, End::Cancelled(CANCELLED.into()));
         }
-        let (open, request) = match self.begin(candidate, input_bytes).await {
+        let (open, made) = match self.begin(candidate, input_bytes).await {
             Ok(begun) => begun,
             Err(error) => return Compacted::without_request(input_bytes, End::Unrecorded(error)),
         };
-        let response = self.request_summary(request).await;
-        let usage = match &response {
-            Ok(message) => message.usage.clone(),
+        let usage = match &made {
+            Ok(made) => made.usage().clone(),
             Err(_) => Usage::default(),
         };
-        let end = self.finish(&open, response, input_bytes, &usage).await;
+        let end = self.finish(&open, made, input_bytes, &usage).await;
         Compacted {
             requests: 1,
             usage,
             input_bytes,
             end,
         }
-    }
-
-    /// The run's cancellation, which is the compaction's.
-    fn cancel(&self) -> &CancellationToken {
-        self.target.trace.cancel()
     }
 
     /// Whether the compaction runs on the run's initiative, as the `automatic` field of its
@@ -147,8 +182,9 @@ impl Compactor<'_> {
     }
 
     /// Where the retained tail starts: the most recent messages within the recent-bytes
-    /// budget, never after the last input, and never between a call and its result.
-    fn cut(&self, raw: &[ProjectedMessage], last_user: usize) -> Result<usize> {
+    /// budget, and never between a call and its result. It may be after the latest input:
+    /// a turn of many tool calls is summarized up to its recent ones.
+    fn cut(&self, raw: &[ProjectedMessage]) -> Result<usize> {
         let mut bytes = 0usize;
         let mut cut = raw.len();
         for (index, item) in raw.iter().enumerate().rev() {
@@ -167,7 +203,6 @@ impl Compactor<'_> {
                 break;
             }
         }
-        cut = cut.min(last_user);
         while cut > 0 && matches!(raw[cut].message, Message::ToolResult(_) | Message::System(_)) {
             cut -= 1;
         }
@@ -186,10 +221,16 @@ impl Compactor<'_> {
         else {
             return Ok(None);
         };
-        // The cut is at or before the last input, so `raw[cut]` exists.
-        let cut = self.cut(&raw, last_user)?;
+        // There is an input, so the tail keeps at least one message and `raw[cut]` exists.
+        let cut = self.cut(&raw)?;
+        // The input of a turn that is summarized in its middle stays as it was sent.
+        let kept_input = (cut > last_user).then_some(last_user);
         let source = &raw[..cut];
-        if !source.iter().any(|item| !matches!(item.message, Message::System(_))) {
+        // Nothing to summarize when all that is before the boundary stays in the context.
+        let summarized = |(index, item): (usize, &ProjectedMessage)| {
+            !matches!(item.message, Message::System(_)) && Some(index) != kept_input
+        };
+        if !source.iter().enumerate().any(summarized) {
             return Ok(None);
         }
         if let Some(previous) = store.latest_compaction()
@@ -200,16 +241,22 @@ impl Compactor<'_> {
         {
             return Ok(None);
         }
-        let candidate = Candidate {
-            first_kept: raw[cut].entry_id.clone(),
-            source_ids: source.iter().map(|item| item.entry_id.clone()).collect(),
-            input: summary_input(source)?,
-            retained: Retained::of(&raw, cut),
-        };
+        // The bound is on the records as a request would send them, whoever summarizes.
+        let input = summary_input(source)?;
         ensure!(
-            candidate.input.len() <= MAX_SOURCE_BYTES,
+            input.len() <= MAX_SOURCE_BYTES,
             "original summary source exceeds {MAX_SOURCE_BYTES} bytes; start a new session"
         );
+        let candidate = Candidate {
+            first_kept: raw[cut].entry_id.clone(),
+            kept_input: kept_input.map(|index| raw[index].entry_id.clone()),
+            source_ids: source.iter().map(|item| item.entry_id.clone()).collect(),
+            source: match self.summarizer {
+                Some(_) => Source::Records(without_details(source).into_owned()),
+                None => Source::Text(input),
+            },
+            retained: Retained::of(&raw, cut, kept_input),
+        };
         if self.automatic()
             && let Some(limit) = self.compaction.trigger_bytes
         {
@@ -221,19 +268,29 @@ impl Compactor<'_> {
         Ok(Some(candidate))
     }
 
-    /// Record the start and its request in the session, then announce them. An error means
-    /// the session could not record.
-    async fn begin(&mut self, candidate: Candidate, input_bytes: usize) -> Result<(OpenCompaction, Request)> {
-        let plan = CompactionPlan {
-            first_kept_entry_id: candidate.first_kept,
-            // A copy: the start records the sources, and the answer is checked against them.
-            source_entry_ids: candidate.source_ids.clone(),
-            request: SummaryRequest {
-                provider: self.config.provider.name().into(),
-                model: self.config.model.clone(),
+    /// Who makes the summary, as the start records it.
+    fn summarized_by(&self) -> SummarizedBy {
+        match self.summarizer {
+            Some(summarizer) => SummarizedBy::Summarizer(summarizer.name().to_string()),
+            None => SummarizedBy::Request(SummaryRequest {
+                provider: self.provider.name().into(),
+                model: self.model.to_string(),
                 instructions: SUMMARY_INSTRUCTIONS.into(),
                 max_tokens: self.compaction.max_summary_tokens,
-            },
+            }),
+        }
+    }
+
+    /// Record the start in the session, announce it, and ask for the summary: the host's
+    /// summarizer when there is one, else the model, whose request is recorded and announced
+    /// first. An error means the session could not record.
+    async fn begin(&mut self, candidate: Candidate, input_bytes: usize) -> Result<(OpenCompaction, Result<Made>)> {
+        let plan = CompactionPlan {
+            first_kept_entry_id: candidate.first_kept,
+            kept_input_entry_id: candidate.kept_input,
+            // A copy: the start records the sources, and the summary is checked against them.
+            source_entry_ids: candidate.source_ids.clone(),
+            by: self.summarized_by(),
             input_bytes,
         };
         let id = self
@@ -241,32 +298,69 @@ impl Compactor<'_> {
             .begin_compaction(plan)
             .await
             .context("cannot persist compaction request")?;
-        let (request, request_entry) = self.record_request(&id, candidate.input).await?;
-        self.announce(input_bytes, request_entry).await;
+        let made = match candidate.source {
+            Source::Text(input) => {
+                let (request, request_entry) = self.record_request(&id, input).await?;
+                self.announce(input_bytes, Some(request_entry)).await;
+                self.request_summary(request).await.map(Made::Answer)
+            }
+            Source::Records(records) => {
+                self.announce(input_bytes, None).await;
+                self.ask_summarizer(&records).await.map(Made::Summary)
+            }
+        };
         let open = OpenCompaction {
             id,
             source_ids: candidate.source_ids,
             retained: candidate.retained,
         };
-        Ok((open, request))
+        Ok((open, made))
     }
 
-    /// Announce a recorded start and its request, in that order.
-    async fn announce(&self, input_bytes: usize, request_entry: String) {
-        self.target
-            .emit(AgentEvent::CompactionStart {
+    /// Announce a recorded start, then its request when the kernel makes one.
+    async fn announce(&self, input_bytes: usize, request_entry: Option<String>) {
+        self.events
+            .emit(EventKind::CompactionStart {
                 input_bytes,
                 automatic: self.automatic(),
             })
             .await;
-        self.target
-            .emit(AgentEvent::RequestStart {
-                kind: RequestKind::Summary,
-                entry_id: request_entry,
-                model: self.config.model.clone(),
-                attempt: self.attempt,
-            })
-            .await;
+        if let Some(entry_id) = request_entry {
+            self.events
+                .emit(EventKind::RequestStart {
+                    kind: RequestKind::Summary,
+                    entry_id,
+                    model: self.model.to_string(),
+                    attempt: self.attempt,
+                })
+                .await;
+        }
+    }
+
+    /// Ask the host's summarizer for the summary of `records`, bounded as a summary request
+    /// is: by the compaction's timeout and the run's cancellation, and a panic is a failure.
+    async fn ask_summarizer(&self, records: &[ProjectedMessage]) -> Result<Summarized> {
+        let Some(summarizer) = self.summarizer else {
+            bail!("no summarizer is configured");
+        };
+        // A token of the call's own, so that work the summarizer started hears that a
+        // summary that timed out is no longer wanted, without cancelling the run.
+        let child = self.cancel.child_token();
+        let _cancel_on_drop = child.drop_guard_ref();
+        let source = SummarySource {
+            records,
+            max_summary_tokens: self.compaction.max_summary_tokens,
+            cancel: CancelSignal::new(child.clone()),
+        };
+        let asked = summarizer.summarize(&source);
+        match bounded(asked, self.compaction.timeout, self.cancel, Priority::Cancellation).await {
+            Ok(Ok(summarized)) => Ok(summarized),
+            Ok(Err(reason)) => bail!("summarizer {} failed: {reason}", summarizer.name()),
+            Err(Stopped::Cancelled) => bail!(CANCELLED),
+            Err(stopped @ (Stopped::TimedOut(_) | Stopped::Panicked)) => {
+                bail!("summarizer {} {stopped}", summarizer.name())
+            }
+        }
     }
 
     /// Record the summary request of `compaction_id` as it will be sent. Returns the request
@@ -276,7 +370,7 @@ impl Compactor<'_> {
         let system_timestamp = now_ms();
         let user_timestamp = now_ms();
         let request = Request {
-            model: self.config.model.clone(),
+            model: self.model.to_string(),
             messages: summary_messages(SUMMARY_INSTRUCTIONS, input, system_timestamp, user_timestamp),
             tools: Vec::new(),
             max_tokens: Some(self.compaction.max_summary_tokens),
@@ -288,10 +382,10 @@ impl Compactor<'_> {
             system_timestamp,
             user_timestamp,
         };
-        let options = self.config.provider.request_options();
+        let options = self.provider.request_options();
         let entry = self
             .session
-            .record_request(&request, self.config.provider.name(), options, source)
+            .record_request(&request, self.provider.name(), options, source)
             .await
             .context("cannot persist summary request checkpoint")?;
         Ok((request, entry))
@@ -301,9 +395,9 @@ impl Compactor<'_> {
     async fn request_summary(&self, request: Request) -> Result<AssistantMessage> {
         // A token of the request's own, so that a summary that times out stops its stream
         // without cancelling the run.
-        let child = self.cancel().child_token();
+        let child = self.cancel.child_token();
         let _cancel_on_drop = child.drop_guard_ref();
-        let mut stream = self.config.provider.stream(request, child.clone());
+        let mut stream = self.provider.stream(request, child.clone());
         let wait = async {
             let mut streamed = ResponseBytes::default();
             loop {
@@ -318,7 +412,7 @@ impl Compactor<'_> {
                     Some(StreamEvent::Done(mut message) | StreamEvent::Error(mut message)) => {
                         // Also bounds a provider that delivers its content without deltas.
                         ResponseBytes::of(&message).validate()?;
-                        message.usage.price(&self.config.models, &self.config.model);
+                        message.usage.price(self.models, self.model);
                         return Ok(message);
                     }
                     None => bail!("summary stream ended without a final event"),
@@ -331,18 +425,17 @@ impl Compactor<'_> {
         }
     }
 
-    /// Check the answer to the open compaction and record the summary, or the failure.
+    /// Check what the open compaction got back and record the summary, or the failure.
     /// Returns how the compaction ends.
-    async fn finish(
-        &mut self,
-        open: &OpenCompaction,
-        response: Result<AssistantMessage>,
-        input_bytes: usize,
-        usage: &Usage,
-    ) -> End {
-        // The final response is recorded with a failure, when one arrived.
-        let (checked, response) = match response {
-            Ok(message) => (self.check_answer(open, &message, input_bytes), Some(message)),
+    async fn finish(&mut self, open: &OpenCompaction, made: Result<Made>, input_bytes: usize, usage: &Usage) -> End {
+        // The model's final response is recorded with a failure, when one arrived.
+        let (checked, response) = match made {
+            Ok(Made::Answer(message)) => {
+                let parsed = parse_answer(&message);
+                let checked = parsed.and_then(|summary| self.check(open, summary, input_bytes));
+                (checked, Some(message))
+            }
+            Ok(Made::Summary(summarized)) => (self.check(open, summarized.summary, input_bytes), None),
             Err(error) => (Err(error), None),
         };
         let (summary, output_bytes) = match checked {
@@ -358,8 +451,8 @@ impl Compactor<'_> {
             Ok(entry_id) => entry_id,
             Err(error) => return self.fail(open, Cause::Unrecorded(error), response, usage).await,
         };
-        self.target
-            .emit(AgentEvent::CompactionEnd {
+        self.events
+            .emit(EventKind::CompactionEnd {
                 entry_id: entry_id.clone(),
                 input_bytes,
                 output_bytes,
@@ -370,15 +463,15 @@ impl Compactor<'_> {
         End::Completed { entry_id, output_bytes }
     }
 
-    /// The summary in `message`, checked against the start: it cites only what the compaction
-    /// read, fits the limits and shrinks the context. Returns it with the new context's size.
-    fn check_answer(
+    /// `summary` checked against the start, whoever made it: it cites only what the
+    /// compaction read, fits the limits and shrinks the context. Returns it with the new
+    /// context's size.
+    fn check(
         &self,
         open: &OpenCompaction,
-        message: &AssistantMessage,
+        summary: CompactionSummary,
         input_bytes: usize,
     ) -> Result<(CompactionSummary, usize)> {
-        let summary = parse_answer(message)?;
         summary.validate(&open.source_ids)?;
         let output_bytes = context_bytes(&open.retained.with_summary(summary.message(now_ms())))?;
         ensure!(
@@ -389,7 +482,7 @@ impl Compactor<'_> {
             !self.automatic() || self.compaction.trigger_bytes.is_none_or(|limit| output_bytes <= limit),
             "retained context still exceeds triggerBytes; reduce retained input or raise the budget"
         );
-        if self.cancel().is_cancelled() {
+        if self.cancel.is_cancelled() {
             bail!(CANCELLED);
         }
         Ok((summary, output_bytes))
@@ -405,7 +498,7 @@ impl Compactor<'_> {
         response: Option<AssistantMessage>,
         usage: &Usage,
     ) -> End {
-        let cancelled = self.cancel().is_cancelled();
+        let cancelled = self.cancel.is_cancelled();
         let (mut error, mut unrecorded) = match cause {
             Cause::Rejected(error) => (format!("{error:#}"), None),
             Cause::Unrecorded(error) => (format!("{error:#}"), Some(error)),
@@ -418,15 +511,15 @@ impl Compactor<'_> {
             error = format!("cannot persist compaction failure: {write_error:#}; {error}");
             unrecorded = Some(anyhow::Error::msg(error.clone()));
         }
-        self.target
-            .emit(AgentEvent::CompactionFailed {
+        self.events
+            .emit(EventKind::CompactionFailed {
                 error: error.clone(),
                 automatic: self.automatic(),
             })
             .await;
         match unrecorded {
             Some(unrecorded) => End::Unrecorded(unrecorded),
-            None if cancelled => End::Aborted(error),
+            None if cancelled => End::Cancelled(error),
             None => End::Failed(error),
         }
     }

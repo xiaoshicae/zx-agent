@@ -40,7 +40,7 @@ kubectl -n zx-agent logs job/inspect-now
 ```
 
 - 会话文件在卷上，用同一路径可以接着聊。一个文件同一时间只能被一个 chat 或 run 打开，否则报告 `is in use` 并以退出码 2 结束。锁依赖 `flock`，文件系统不支持时打开会话直接失败。
-- 巡检的任务与时间在 `cronjob.yaml` 的 `args` 与 `schedule` 中修改；退出码见仓库 README 的“run 退出码”。
+- 巡检的任务与时间在 `cronjob.yaml` 的 `args` 与 `schedule` 中修改；退出码见仓库 `docs/REFERENCE.md` 的“run 退出码”。
 - 巡检的会话文件写在卷 `zx-agent-inspect-sessions` 的 `sessions/<Pod 名>.jsonl`，中断后可据此 `run --continue`；文件不自动清理，读取要在巡检不运行时用挂载这块卷的临时 Pod。
 - 无人值守时审批一律拒绝，退出码仍可能是 0；在 `command` 中加 `--fail-on-denied` 后，有命令被拒时以退出码 9 结束（默认不加：模型常试探 `allow` 之外的命令）。
 
@@ -84,7 +84,7 @@ kubeconfig 用 `tokenFile` 引用 Secret 中各集群的 token，本身不含密
 
 ## IM 服务
 
-启用 `im` 组件后，主进程是 `zx-agent im`，在 IM 中 @ 机器人排障、审批写操作（用法见仓库 README 的“IM 服务”）。Pod 共享进程命名空间，PID 1 是 pause，回收命令留下的进程。
+启用 `im` 组件后，主进程是 `zx-agent im`，在 IM 中 @ 机器人排障、审批写操作（用法见仓库 README 的“IM 服务”）。Pod 共享进程命名空间，PID 1 是 pause，回收命令留下的进程。assistant agent 不限请求数与时间，所以 `im/deployment-patch.yaml` 的命令行给每次运行加了上限：`--max-model-requests 100` 与 `--timeout-secs 3600`（等待审批的时间也算在内）；要改上限就改这两个参数。
 
 1. 创建 Secret `zx-agent-im`，只写用到的平台（⚑ D:5/CHINA FLAG: 飞书用 `feishu-app-id` 与 `feishu-app-secret` 两个键，Subject to Legal/Export Compliance approval）：`kubectl -n zx-agent create secret generic zx-agent-im --from-literal=slack-app-token=xapp-... --from-literal=slack-bot-token=xoxb-...`。
 2. 由 `im/im.example.toml` 复制出 `im.toml`，填好聊天与审批人：`kubectl -n zx-agent create configmap zx-agent-im-config --from-file=im.toml`。
@@ -125,4 +125,4 @@ kubectl delete namespace zx-agent
 
 ---
 
-`deploy/kubernetes/README.md` · v0.3 · 2026年11月
+`deploy/kubernetes/README.md` · v0.4 · 2026年11月

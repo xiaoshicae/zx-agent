@@ -3,7 +3,8 @@
 //! whether a call may run is for the host's policies to decide, not for the server: its tool
 //! annotations are only hints.
 //!
-//! A [`Server`] is an [`Extension`]: register it with [`crate::extensions::register`].
+//! A [`Server`] is an [`Extension`]: an agent takes it in
+//! [`AgentConfig::extensions`](zx_core::AgentConfig::extensions).
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -23,12 +24,12 @@ use rmcp::{ClientHandler, ClientLifecycleMode, RoleClient, serve_client_with_lif
 use serde_json::{Map, Value};
 use tokio::sync::mpsc;
 
-use crate::agent::{Tool, ToolContext, ToolOutput};
 use crate::ai::ToolDef;
 use crate::ai::sync::lock;
 use crate::extensions::Extension;
 use crate::text::prefix_noted;
 use crate::tools::truncate::truncate_head_noted;
+use zx_core::tools::{Tool, ToolContext, ToolOutput};
 
 /// The longest tool name that OpenAI-compatible APIs accept: "a-z, A-Z, 0-9, or contain
 /// underscores and dashes, with a maximum length of 64" (openai-openapi, `FunctionObject`).
@@ -314,12 +315,13 @@ impl ClientHandler for Handler {
         _context: NotificationContext<RoleClient>,
     ) -> impl Future<Output = ()> + Send + '_ {
         let sender = lock(&self.progress).get(&params.progress_token).cloned();
-        async move {
-            if let Some(sender) = sender {
-                // A notification for a call that ended, or one too many, is dropped.
-                sender.send(params).await.ok();
-            }
+        if let Some(sender) = sender {
+            // A notification for a call that ended, or one more than the call's queue holds,
+            // is dropped. Each is handled by a task of its own, and tasks waiting for room
+            // would pile up as fast as a server sends.
+            sender.try_send(params).ok();
         }
+        std::future::ready(())
     }
 }
 
@@ -379,7 +381,10 @@ impl McpTool {
             .send_cancellable_request(request, options)
             .await
             .map_err(|error| self.failed(&error))?;
-        let request_id = handle.id.clone();
+        let unanswered = Unanswered {
+            peer,
+            request_id: Some(handle.id.clone()),
+        };
         // rmcp gives every request a progress token; the server's notifications come back
         // with it, and the dispatcher hands them to this subscription.
         let mut updates = self.client.service().subscribe(handle.progress_token.clone());
@@ -393,11 +398,13 @@ impl McpTool {
                     ctx.report_progress(progress_text(&update));
                 }
                 () = ctx.cancel.cancelled() => {
-                    give_up(peer, request_id, "cancelled by the agent").await;
+                    // Dropping `unanswered` tells the server.
                     return Err(format!("MCP server {}: the call to {} was cancelled", self.server, self.remote));
                 }
             }
         };
+        // Answered, or given up by rmcp, which tells the server itself when a call times out.
+        unanswered.settle();
         match answer {
             Ok(ServerResult::CallToolResult(result)) => Ok(result),
             Ok(_) => Err(format!(
@@ -407,6 +414,35 @@ impl McpTool {
             Err(ServiceError::Timeout { timeout }) => Err(self.no_answer_within(timeout)),
             Err(error) => Err(self.failed(&error)),
         }
+    }
+}
+
+/// A request that was sent and has no answer yet. Dropped like that, it tells the server
+/// that the request is given up: when a call sees its token cancelled, and when its future is
+/// dropped, as the loop drops the calls of a cancelled run without their noticing.
+struct Unanswered<'a> {
+    peer: &'a Peer<RoleClient>,
+    /// `None` once the request needs no giving up.
+    request_id: Option<RequestId>,
+}
+
+impl Unanswered<'_> {
+    /// The request ended by itself: there is nothing to give up.
+    fn settle(mut self) {
+        self.request_id = None;
+    }
+}
+
+impl Drop for Unanswered<'_> {
+    fn drop(&mut self) {
+        // Spawning a Tokio task needs a runtime; without one nothing can be sent anyway.
+        let (Some(request_id), Ok(_)) = (self.request_id.take(), tokio::runtime::Handle::try_current()) else {
+            return;
+        };
+        let peer = self.peer.clone();
+        // Not awaited: the call that would wait for it is gone. The task ends when the
+        // notification is sent or the connection turns out to be closed.
+        tokio::spawn(async move { give_up(&peer, request_id, "cancelled by the agent").await });
     }
 }
 
@@ -456,7 +492,8 @@ impl Tool for McpTool {
 
     /// Progress notifications of the call reach `ctx` as progress updates and re-arm the
     /// timeout. Stops waiting on `ctx.cancel` or after `timeout` without an answer or
-    /// progress; a cancelled call ends the request on the server's side with
+    /// progress. A call that is cancelled, or dropped before its answer as the loop drops
+    /// the calls of a cancelled run, ends the request on the server's side with
     /// `notifications/cancelled`, which also closes the request's stream.
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
         let Value::Object(arguments) = args else {

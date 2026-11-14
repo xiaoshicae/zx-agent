@@ -6,7 +6,7 @@ use serde_json::json;
 
 use common::{header, read_lines, summarize};
 use zx_agent::ai::{Message, UserMessageKind};
-use zx_agent::session::{CustomMessage, SessionStore};
+use zx_agent::transcript::{CustomMessage, Transcript};
 
 fn note(text: &str) -> CustomMessage {
     CustomMessage {
@@ -19,7 +19,7 @@ fn note(text: &str) -> CustomMessage {
 
 #[tokio::test]
 async fn custom_messages_join_the_projection_as_user_messages_and_custom_entries_stay_out() {
-    let mut store = SessionStore::in_memory(header());
+    let mut store = Transcript::in_memory(header());
     store.append_message(Message::user("first")).await.unwrap();
     store.append_custom_entry("state", json!({"n": 1})).await.unwrap();
     let id = store.append_custom_message(note("remember")).await.unwrap();
@@ -44,7 +44,7 @@ async fn custom_messages_join_the_projection_as_user_messages_and_custom_entries
 async fn custom_records_are_written_with_camel_case_fields_and_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
-    let mut store = SessionStore::create(&path, header()).unwrap();
+    let mut store = common::create_session_file(&path, header()).await.unwrap();
     store.append_message(Message::user("first")).await.unwrap();
     store.append_custom_entry("state", json!(1)).await.unwrap();
     store.append_custom_message(note("remember")).await.unwrap();
@@ -67,13 +67,13 @@ async fn custom_records_are_written_with_camel_case_fields_and_reopen() {
         (Some("note"), Some("remember"), Some(true), Some(1))
     );
     assert_eq!(lines[3]["parentId"], lines[2]["id"]);
-    let reopened = SessionStore::open(&path).unwrap();
+    let reopened = common::open_session_file(&path).await.unwrap();
     assert_eq!(summarize(&reopened.messages()), ["user:first", "user:remember"]);
 }
 
 #[tokio::test]
 async fn a_custom_record_needs_a_type_and_writes_nothing_without_one() {
-    let mut store = SessionStore::in_memory(header());
+    let mut store = Transcript::in_memory(header());
     assert!(store.append_custom_entry(" ", json!(null)).await.is_err());
     assert!(
         store

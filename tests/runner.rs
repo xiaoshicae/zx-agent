@@ -40,19 +40,16 @@ async fn dropping_a_run_cancels_its_provider() {
         token: std::sync::Mutex::new(None),
         started: tokio::sync::Notify::new(),
     });
-    let (mut runner, _) = RunnerSetup::new(config(probe.clone(), vec![])).build();
-    let cancel = CancellationToken::new();
-    let mut running = Box::pin(runner.run("go", &cancel));
+    let (runner, _) = RunnerSetup::new(config(probe.clone(), vec![])).build();
+    let mut running = Box::pin(runner.run("go"));
     tokio::select! {
         () = probe.started.notified() => {}
         _ = &mut running => panic!("the provider must still be running"),
     }
 
     drop(running);
-    let cancelled = probe.token.lock().unwrap().as_ref().unwrap().is_cancelled();
-    // Clean up the probe even before the production fix, so a failing test leaks no task.
-    cancel.cancel();
 
+    let cancelled = probe.token.lock().unwrap().as_ref().unwrap().is_cancelled();
     assert!(cancelled, "dropping the run left its provider active");
 }
 
@@ -66,15 +63,15 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use common::{EchoTool, NotifyingProvider, RunnerSetup, config, fast_retry, header, read_lines, summarize};
-use zx_agent::agent::{
-    AgentEvent, EVENT_SCHEMA_VERSION, HookContext, HookOptions, HookResult, Hooks, PolicyDecision, QueuedMessage,
-    RequestKind,
-};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, ModelCost, ModelMeta, PREAMBLE, StopReason, SystemPrompt, ToolCall, Usage};
-use zx_agent::continuation::ContinueOnLength;
-use zx_agent::runner::{Limits, RunOutcome};
-use zx_agent::session::{Entry, LoadedSession, LogRecord, SessionLog, SessionStore};
+use zx_agent::builtin::continuation::ContinueOnLength;
+use zx_agent::events::{EVENT_SCHEMA_VERSION, EventKind, RequestKind};
+use zx_agent::hooks::{Hook, HookContext, HookOptions, HookResult};
+use zx_agent::input::Input;
+use zx_agent::policy::{PolicyContext, PolicyDecision, ToolPolicy};
+use zx_agent::runner::{RunLimits, RunOutcome};
+use zx_agent::transcript::{Entry, LoadedSession, LogRecord, SessionLog, Transcript};
 
 /// A stored record, as a database row would hold it.
 #[derive(Debug)]
@@ -111,16 +108,16 @@ async fn a_session_in_a_custom_log_reloads_and_continues_the_same_conversation()
         FauxStep::text("done"),
     ]));
     let tool = Arc::new(EchoTool::new("echo"));
-    let (mut runner, _) = RunnerSetup {
-        session: SessionStore::with_log(header(), Box::new(TableLog(sender))),
+    let (runner, _) = RunnerSetup {
+        session: Transcript::with_log(header(), Box::new(TableLog(sender))),
         ..RunnerSetup::new(config(provider, vec![tool.clone()]))
     }
     .build();
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
 
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
-    assert_eq!(report.session_file, None);
+    assert_eq!(report.session_id, runner.session().header().id);
     let rows: Vec<Row> = table.try_iter().collect();
     let seqs: Vec<u64> = rows.iter().map(|row| row.seq).collect();
     assert_eq!(seqs, (1..=u64::try_from(rows.len()).unwrap()).collect::<Vec<_>>());
@@ -138,16 +135,16 @@ async fn a_session_in_a_custom_log_reloads_and_continues_the_same_conversation()
         incomplete_tail_bytes: 0,
     };
     let (sender, more) = mpsc::channel();
-    let reloaded = SessionStore::load(loaded, Box::new(TableLog(sender))).unwrap();
+    let reloaded = Transcript::load(loaded, Box::new(TableLog(sender))).unwrap();
     assert_eq!(reloaded.entries(), runner.session().entries());
     let history = runner.session().messages();
     let next = Arc::new(FauxProvider::new([FauxStep::text("again")]));
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         session: reloaded,
         ..RunnerSetup::new(config(next.clone(), vec![tool]))
     }
     .build();
-    let report = runner.run("next", &CancellationToken::new()).await;
+    let report = runner.run("next").await;
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
     let mut expected = history;
     expected.push(Message::user("next"));
@@ -174,11 +171,11 @@ fn setup(provider: &Arc<FauxProvider>) -> RunnerSetup {
     RunnerSetup::new(config)
 }
 
-fn limits(max_model_requests: u32, timeout: Option<Duration>) -> Limits {
-    Limits {
+fn limits(max_model_requests: u32, timeout: Option<Duration>) -> RunLimits {
+    RunLimits {
         max_model_requests: Some(max_model_requests),
         timeout,
-        ..Limits::default()
+        ..RunLimits::default()
     }
 }
 
@@ -188,7 +185,7 @@ fn limits(max_model_requests: u32, timeout: Option<Duration>) -> Limits {
 
 #[test]
 fn default_limits_have_no_deadline() {
-    assert!(Limits::default().timeout.is_none());
+    assert!(RunLimits::default().timeout.is_none());
 }
 
 #[tokio::test]
@@ -197,13 +194,13 @@ async fn default_limits_allow_more_than_thirty_requests() {
         .map(|index| FauxStep::tool_call(&format!("c{index}"), "echo", json!({"text": "ok"})))
         .chain([FauxStep::text("done")]);
     let provider = provider(steps);
-    let (mut runner, _) = RunnerSetup {
-        limits: Limits::default(),
+    let (runner, _) = RunnerSetup {
+        limits: RunLimits::default(),
         ..RunnerSetup::new(config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]))
     }
     .build();
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
 
     assert_eq!(report.outcome, RunOutcome::Completed);
     assert_eq!((report.model_requests, report.final_text.as_str()), (32, "done"));
@@ -213,13 +210,13 @@ async fn default_limits_allow_more_than_thirty_requests() {
 #[tokio::test]
 async fn default_limits_leave_truncated_answers_for_the_caller() {
     let provider = provider([FauxStep::truncated("part one"), FauxStep::text("part two")]);
-    let (mut runner, _) = RunnerSetup {
-        limits: Limits::default(),
+    let (runner, _) = RunnerSetup {
+        limits: RunLimits::default(),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build();
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
 
     assert_eq!(report.outcome, RunOutcome::Truncated);
     assert_eq!((report.model_requests, report.final_text.as_str()), (1, "part one"));
@@ -227,15 +224,15 @@ async fn default_limits_leave_truncated_answers_for_the_caller() {
 }
 
 #[tokio::test]
-async fn zero_turn_limit_does_not_call_the_provider() {
+async fn zero_step_limit_does_not_call_the_provider() {
     let provider = provider([FauxStep::text("must not be requested")]);
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         limits: limits(0, None),
         ..setup(&provider)
     }
     .build();
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
 
     assert_eq!(report.outcome, RunOutcome::ModelRequestLimit);
     assert_eq!(report.model_requests, 0);
@@ -247,15 +244,15 @@ async fn zero_turn_limit_does_not_call_the_provider() {
     );
 }
 
-fn token_budget(tokens: u64) -> Limits {
-    Limits {
+fn token_budget(tokens: u64) -> RunLimits {
+    RunLimits {
         token_budget: Some(tokens),
-        ..Limits::default()
+        ..RunLimits::default()
     }
 }
 
 /// A runner with the echo tool; each faux answer reports 10 input and 5 output tokens.
-fn echo_runner(provider: &Arc<FauxProvider>, limits: Limits) -> zx_agent::runner::Runner {
+fn echo_runner(provider: &Arc<FauxProvider>, limits: RunLimits) -> common::Driven {
     RunnerSetup {
         limits,
         ..RunnerSetup::new(config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]))
@@ -270,9 +267,9 @@ async fn the_token_budget_stops_a_run_before_the_request_it_cannot_pay_for() {
         FauxStep::tool_call("c1", "echo", json!({"text": "ok"})),
         FauxStep::text("must not be requested"),
     ]);
-    let mut runner = echo_runner(&provider, token_budget(15));
+    let runner = echo_runner(&provider, token_budget(15));
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
 
     assert_eq!(report.outcome, RunOutcome::TokenBudget);
     assert_eq!(provider.requests().len(), 1);
@@ -289,9 +286,9 @@ async fn the_last_request_may_take_a_run_over_its_token_budget() {
         FauxStep::tool_call("c1", "echo", json!({"text": "ok"})),
         FauxStep::text("done"),
     ]);
-    let mut runner = echo_runner(&provider, token_budget(16));
+    let runner = echo_runner(&provider, token_budget(16));
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
 
     assert_eq!(report.outcome, RunOutcome::Completed);
     assert_eq!(report.final_text, "done");
@@ -300,7 +297,7 @@ async fn the_last_request_may_take_a_run_over_its_token_budget() {
 
 /// A runner with the echo tool whose model costs 0.01 per faux answer (10 input tokens at
 /// 1000 per million; the 5 output tokens are free), in whatever currency the prices use.
-fn priced_runner(provider: &Arc<FauxProvider>, cost_budget: f64) -> zx_agent::runner::Runner {
+fn priced_runner(provider: &Arc<FauxProvider>, cost_budget: f64) -> common::Driven {
     let mut config = config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]);
     let price = ModelCost {
         input: 1000.0,
@@ -316,9 +313,9 @@ fn priced_runner(provider: &Arc<FauxProvider>, cost_budget: f64) -> zx_agent::ru
         },
     );
     RunnerSetup {
-        limits: Limits {
+        limits: RunLimits {
             cost_budget: Some(cost_budget),
-            ..Limits::default()
+            ..RunLimits::default()
         },
         ..RunnerSetup::new(config)
     }
@@ -332,9 +329,9 @@ async fn the_cost_budget_stops_a_run_before_the_request_it_cannot_pay_for() {
         FauxStep::tool_call("c1", "echo", json!({"text": "ok"})),
         FauxStep::text("must not be requested"),
     ]);
-    let mut runner = priced_runner(&provider, 0.01);
+    let runner = priced_runner(&provider, 0.01);
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
 
     assert_eq!(report.outcome, RunOutcome::CostBudget);
     assert_eq!(provider.requests().len(), 1);
@@ -350,9 +347,9 @@ async fn the_last_request_may_take_a_run_over_its_cost_budget() {
         FauxStep::tool_call("c1", "echo", json!({"text": "ok"})),
         FauxStep::text("done"),
     ]);
-    let mut runner = priced_runner(&provider, 0.015);
+    let runner = priced_runner(&provider, 0.015);
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
 
     assert_eq!(
         (report.outcome, report.final_text.as_str()),
@@ -369,13 +366,13 @@ async fn the_last_request_may_take_a_run_over_its_cost_budget() {
 struct DenyFirstAskSecond;
 
 #[async_trait]
-impl Hooks for DenyFirstAskSecond {
-    async fn before_tool(&self, call: &ToolCall, _ctx: &HookContext) -> HookResult<PolicyDecision> {
-        Ok(match call.id.as_str() {
+impl ToolPolicy for DenyFirstAskSecond {
+    async fn check(&self, call: &ToolCall, _ctx: &PolicyContext) -> PolicyDecision {
+        match call.id.as_str() {
             "c1" => PolicyDecision::Deny("not here".into()),
             "c2" => PolicyDecision::Ask("check first".into()),
             _ => PolicyDecision::Allow,
-        })
+        }
     }
 }
 
@@ -390,10 +387,12 @@ async fn calls_a_policy_or_an_approval_denied_are_counted_in_the_report() {
         FauxStep::text("done anyway"),
     ]);
     let mut config = config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]);
-    config.hooks.push(DenyFirstAskSecond);
-    let (mut runner, _) = RunnerSetup::new(config).build();
+    config
+        .policies
+        .push("deny_first_ask_second", Arc::new(DenyFirstAskSecond));
+    let (runner, _) = RunnerSetup::new(config).build();
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
 
     assert_eq!(report.outcome, RunOutcome::Completed);
     assert_eq!(report.denied_calls, 2);
@@ -402,13 +401,13 @@ async fn calls_a_policy_or_an_approval_denied_are_counted_in_the_report() {
 #[tokio::test]
 async fn an_unlimited_budget_can_explicitly_enable_continuation() {
     let provider = provider([FauxStep::truncated("part one, "), FauxStep::text("part two")]);
-    let (mut runner, _) = RunnerSetup {
-        limits: Limits::default(),
+    let (runner, _) = RunnerSetup {
+        limits: RunLimits::default(),
         ..setup(&provider)
     }
     .build();
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
 
     assert_eq!(report.outcome, RunOutcome::Completed);
     assert_eq!(
@@ -427,14 +426,14 @@ async fn retries_transient_errors_without_repeating_the_prompt() {
         FauxStep::Fail("HTTP 503: service unavailable".into()),
         FauxStep::text("ok"),
     ]);
-    let (mut runner, sink) = RunnerSetup {
+    let (runner, sink) = RunnerSetup {
         retry: fast_retry(3),
-        limits: Limits::default(),
+        limits: RunLimits::default(),
         ..setup(&provider)
     }
     .build();
 
-    let report = runner.run("diagnose", &CancellationToken::new()).await;
+    let report = runner.run("diagnose").await;
 
     assert_eq!(report.outcome, RunOutcome::Completed);
     assert_eq!(
@@ -455,13 +454,13 @@ async fn tool_result_details_are_recorded_and_survive_reopening_the_session() {
         FauxStep::tool_call("c1", "echo", json!({"text": "hi", "details": details})),
         FauxStep::text("done"),
     ]);
-    let (mut runner, _) = RunnerSetup {
-        session: SessionStore::create(&path, header()).unwrap(),
+    let (runner, _) = RunnerSetup {
+        session: common::create_session_file(&path, header()).await.unwrap(),
         ..RunnerSetup::new(config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]))
     }
     .build();
 
-    runner.run("go", &CancellationToken::new()).await;
+    runner.run("go").await;
     drop(runner);
 
     let recorded: Vec<Value> = read_lines(&path)
@@ -470,7 +469,7 @@ async fn tool_result_details_are_recorded_and_survive_reopening_the_session() {
         .map(|line| line["message"]["details"].clone())
         .collect();
     assert_eq!(recorded, std::slice::from_ref(&details));
-    let reopened = SessionStore::open(&path).unwrap();
+    let reopened = common::open_session_file(&path).await.unwrap();
     let kept = reopened.messages().into_iter().find_map(|message| match message {
         Message::ToolResult(result) => result.details,
         _ => None,
@@ -487,15 +486,15 @@ async fn tool_usage_is_reported_by_tool_recorded_in_the_file_and_left_out_of_the
         FauxStep::tool_call("c1", "echo", json!({"text": "hi", "usage": usage})),
         FauxStep::text("done"),
     ]);
-    let (mut runner, _) = RunnerSetup {
-        session: SessionStore::create(&path, header()).unwrap(),
+    let (runner, _) = RunnerSetup {
+        session: common::create_session_file(&path, header()).await.unwrap(),
         // Two faux answers of 15 tokens fit; the tool's 150 would not, if they counted.
         limits: token_budget(16),
         ..RunnerSetup::new(config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]))
     }
     .build();
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
     drop(runner);
 
     assert_eq!(
@@ -513,7 +512,7 @@ async fn tool_usage_is_reported_by_tool_recorded_in_the_file_and_left_out_of_the
         .map(|line| line["message"]["usage"].clone())
         .collect();
     assert_eq!(recorded, [usage]);
-    let reopened = SessionStore::open(&path).unwrap();
+    let reopened = common::open_session_file(&path).await.unwrap();
     let kept = reopened.messages().into_iter().find_map(|message| match message {
         Message::ToolResult(result) => result.usage,
         _ => None,
@@ -529,14 +528,14 @@ async fn a_retried_failure_stays_in_the_file_but_leaves_the_context() {
         FauxStep::Fail("HTTP 503: service unavailable".into()),
         FauxStep::text("ok"),
     ]);
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         retry: fast_retry(3),
-        session: SessionStore::create(&path, header()).unwrap(),
+        session: common::create_session_file(&path, header()).await.unwrap(),
         ..setup(&provider)
     }
     .build();
 
-    runner.run("diagnose", &CancellationToken::new()).await;
+    runner.run("diagnose").await;
 
     let lines = read_lines(&path);
     let types: Vec<&str> = lines.iter().map(|line| line["type"].as_str().unwrap()).collect();
@@ -566,30 +565,30 @@ async fn a_retried_failure_stays_in_the_file_but_leaves_the_context() {
 #[tokio::test]
 async fn permanent_errors_are_not_retried() {
     let provider = provider([FauxStep::Fail("HTTP 401: invalid api key".into())]);
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         retry: fast_retry(3),
         ..setup(&provider)
     }
     .build();
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
 
-    assert_eq!((report.outcome, report.retries), (RunOutcome::Error, 0));
+    assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
     assert!(report.error.unwrap_or_default().contains("401"));
 }
 
 #[tokio::test]
 async fn retrying_stops_after_max_retries() {
     let provider = provider((0..5).map(|_| FauxStep::Fail("HTTP 502: bad gateway".into())));
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         retry: fast_retry(2),
         ..setup(&provider)
     }
     .build();
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
 
-    assert_eq!((report.outcome, report.retries), (RunOutcome::Error, 2));
+    assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 2));
     assert_eq!(provider.requests().len(), 3);
 }
 
@@ -599,23 +598,23 @@ async fn a_retry_needs_request_budget_and_keeps_the_provider_error() {
         FauxStep::Fail("HTTP 503: service unavailable".into()),
         FauxStep::text("never sent"),
     ]);
-    let (mut runner, sink) = RunnerSetup {
+    let (runner, sink) = RunnerSetup {
         retry: fast_retry(3),
         limits: limits(1, None),
         ..setup(&provider)
     }
     .build();
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
 
-    assert_eq!((report.outcome, report.retries), (RunOutcome::Error, 0));
+    assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
     assert!(report.error.unwrap_or_default().contains("503"));
     assert_eq!(provider.requests().len(), 1);
     assert!(!sink.kinds().contains(&"retry_scheduled"));
 }
 
 #[tokio::test]
-async fn the_budget_and_the_turn_numbers_span_the_attempts_of_a_run() {
+async fn the_budget_and_the_step_numbers_span_the_attempts_of_a_run() {
     // The first request fails and is retried; the retry's answer is cut off, and continuing
     // it would take a third request, which the run's limit of two does not leave.
     let provider = provider([
@@ -623,47 +622,46 @@ async fn the_budget_and_the_turn_numbers_span_the_attempts_of_a_run() {
         FauxStep::truncated("part one"),
         FauxStep::text("never sent"),
     ]);
-    let (mut runner, sink) = RunnerSetup {
+    let (runner, sink) = RunnerSetup {
         retry: fast_retry(3),
         limits: limits(2, None),
         ..setup(&provider)
     }
     .build();
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
 
     assert_eq!(
         (report.outcome, report.retries, report.model_requests),
         (RunOutcome::Truncated, 1, 2)
     );
     assert_eq!(provider.requests().len(), 2);
-    let turns: Vec<u32> = sink
+    let steps: Vec<u32> = sink
         .events()
         .into_iter()
         .filter_map(|event| match event {
-            AgentEvent::TurnStart { turn } => Some(turn),
+            EventKind::StepStart { step } => Some(step),
             _ => None,
         })
         .collect();
-    assert_eq!(turns, [1, 2], "the retry's turn goes on from the failed one");
+    assert_eq!(steps, [1, 2], "the retry's step goes on from the failed one");
 }
 
 #[tokio::test]
 async fn queued_input_waits_when_no_request_budget_is_left() {
     let provider = provider([FauxStep::text("never sent")]);
-    let setup = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         limits: limits(0, None),
         ..setup(&provider)
-    };
-    let queues = setup.config.queues.clone();
-    queues.steer("later");
-    let (mut runner, _) = setup.build();
+    }
+    .build();
+    runner.queues().steer("later");
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
 
     assert_eq!(report.outcome, RunOutcome::ModelRequestLimit);
     assert_eq!(summarize(&runner.session().messages()), ["user:go"]);
-    assert_eq!(queues.drain_steering(), [QueuedMessage::User("later".into())]);
+    assert_eq!(runner.queues().drain_steering(), [Input::from("later")]);
 }
 
 #[tokio::test]
@@ -672,13 +670,13 @@ async fn a_retried_failure_is_reported_as_a_context_edit() {
         FauxStep::Fail("HTTP 503: service unavailable".into()),
         FauxStep::text("ok"),
     ]);
-    let (mut runner, sink) = RunnerSetup {
+    let (runner, sink) = RunnerSetup {
         retry: fast_retry(3),
         ..setup(&provider)
     }
     .build();
 
-    runner.run("diagnose", &CancellationToken::new()).await;
+    runner.run("diagnose").await;
 
     let edit = runner
         .session()
@@ -694,14 +692,14 @@ async fn a_retried_failure_is_reported_as_a_context_edit() {
         .events()
         .into_iter()
         .filter_map(|event| match event {
-            AgentEvent::ContextEdited { entry_id, .. } => Some(entry_id),
+            EventKind::ContextEdited { entry_id, .. } => Some(entry_id),
             _ => None,
         })
         .collect();
     assert_eq!(reported, [edit]);
     let scheduled = kinds.iter().position(|kind| *kind == "retry_scheduled").unwrap();
     let edited = kinds.iter().position(|kind| *kind == "context_edited").unwrap();
-    let second_attempt = kinds.iter().rposition(|kind| *kind == "agent_start").unwrap();
+    let second_attempt = kinds.iter().rposition(|kind| *kind == "attempt_start").unwrap();
     assert!(scheduled < edited && edited < second_attempt, "{kinds:?}");
 }
 
@@ -713,13 +711,13 @@ struct HoldInput {
 }
 
 #[async_trait]
-impl Hooks for HoldInput {
-    fn observes(&self, event: &AgentEvent) -> bool {
-        matches!(event, AgentEvent::MessageEnd { .. })
+impl Hook for HoldInput {
+    fn observes(&self, event: &EventKind) -> bool {
+        matches!(event, EventKind::MessageEnd { .. })
     }
 
-    async fn on_event(&self, event: &zx_agent::agent::Event, _ctx: &HookContext) -> HookResult<()> {
-        if let AgentEvent::MessageEnd {
+    async fn on_event(&self, event: &zx_agent::events::Event, _ctx: &HookContext) -> HookResult<()> {
+        if let EventKind::MessageEnd {
             message: Message::User { content, .. },
             ..
         } = &event.event
@@ -744,21 +742,20 @@ async fn queued_input_is_recorded_once_when_a_run_is_dropped_while_observers_run
             held: std::sync::atomic::AtomicBool::new(false),
             reached: reached.clone(),
         },
-        zx_agent::agent::HookOptions {
+        zx_agent::hooks::HookOptions {
             timeout: Duration::from_secs(3600),
             ..Default::default()
         },
     );
-    setup.config.queues.steer("queued");
-    let (mut runner, _) = setup.build();
-    let cancel = CancellationToken::new();
+    let (runner, _) = setup.build();
+    runner.queues().steer("queued");
 
     // The first run records the queued input, then is dropped while an observer holds it.
     tokio::select! {
-        _ = runner.run("first", &cancel) => panic!("the observer holds the first run"),
+        _ = runner.run("first") => panic!("the observer holds the first run"),
         () = reached.notified() => {}
     }
-    let report = runner.run("second", &cancel).await;
+    let report = runner.run("second").await;
 
     assert_eq!(report.outcome, RunOutcome::Completed);
     let inputs: Vec<String> = summarize(&runner.session().messages())
@@ -769,19 +766,19 @@ async fn queued_input_is_recorded_once_when_a_run_is_dropped_while_observers_run
 }
 
 // ---------------------------------------------------------------------------
-// Limits and cancellation
+// RunLimits and cancellation
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn a_run_stops_at_the_turn_limit() {
+async fn a_run_stops_at_the_step_limit() {
     let provider = provider((0..10).map(|i| FauxStep::tool_call(&format!("c{i}"), "echo", json!({"text": "loop"}))));
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         limits: limits(3, None),
         ..RunnerSetup::new(config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]))
     }
     .build();
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
 
     assert_eq!(
         (report.outcome, report.model_requests),
@@ -792,36 +789,32 @@ async fn a_run_stops_at_the_turn_limit() {
 #[tokio::test]
 async fn a_run_stops_at_the_time_limit() {
     let provider = provider([FauxStep::Hang]);
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         limits: limits(10, Some(Duration::from_millis(150))),
         ..setup(&provider)
     }
     .build();
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
 
-    assert_eq!(report.outcome, RunOutcome::Timeout);
+    assert_eq!(report.outcome, RunOutcome::TimedOut);
 }
 
 #[tokio::test]
 async fn the_caller_can_cancel_a_waiting_run() {
     let provider = NotifyingProvider::new([FauxStep::Hang]);
-    let (mut runner, _) = RunnerSetup {
-        limits: Limits::default(),
+    let (runner, _) = RunnerSetup {
+        limits: RunLimits::default(),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build();
-    let cancel = CancellationToken::new();
-    let trigger = cancel.clone();
     // Cancelled once the request has started.
-    tokio::spawn(async move {
+    let (report, ()) = tokio::join!(runner.run("go"), async {
         provider.started.notified().await;
-        trigger.cancel();
+        runner.cancel();
     });
 
-    let report = runner.run("go", &cancel).await;
-
-    assert_eq!(report.outcome, RunOutcome::Aborted);
+    assert_eq!(report.outcome, RunOutcome::Cancelled);
 }
 
 // ---------------------------------------------------------------------------
@@ -831,9 +824,9 @@ async fn the_caller_can_cancel_a_waiting_run() {
 #[tokio::test]
 async fn continues_a_truncated_answer_and_joins_the_parts() {
     let provider = provider([FauxStep::truncated("Part one, "), FauxStep::text("part two.")]);
-    let (mut runner, _) = setup(&provider).build();
+    let (runner, _) = setup(&provider).build();
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
 
     assert_eq!(report.outcome, RunOutcome::Completed);
     assert_eq!(
@@ -854,9 +847,9 @@ async fn a_continuation_that_repeats_the_cut_line_is_joined_once() {
         FauxStep::truncated("Steps:\n1. Check logs\n2. Add a pre-deploy"),
         FauxStep::text("2. Add a pre-deploy check."),
     ]);
-    let (mut runner, _) = setup(&provider).build();
+    let (runner, _) = setup(&provider).build();
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
 
     assert_eq!(report.final_text, "Steps:\n1. Check logs\n2. Add a pre-deploy check.");
 }
@@ -864,13 +857,13 @@ async fn a_continuation_that_repeats_the_cut_line_is_joined_once() {
 #[tokio::test]
 async fn reports_truncated_when_no_continuation_is_allowed() {
     let provider = provider([FauxStep::truncated("Part one")]);
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         limits: limits(30, None),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build();
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
 
     assert_eq!(
         (report.outcome, report.final_text.as_str()),
@@ -880,15 +873,15 @@ async fn reports_truncated_when_no_continuation_is_allowed() {
 }
 
 #[tokio::test]
-async fn continuations_count_against_the_turn_limit() {
+async fn continuations_count_against_the_step_limit() {
     let provider = provider([FauxStep::truncated("a"), FauxStep::text("b")]);
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         limits: limits(1, None),
         ..setup(&provider)
     }
     .build();
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
 
     assert_eq!(report.outcome, RunOutcome::Truncated);
     assert_eq!(provider.requests().len(), 1);
@@ -903,18 +896,18 @@ async fn events_are_forwarded_after_persistence() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("e.jsonl");
     let provider = provider([FauxStep::text("hi")]);
-    let (mut runner, sink) = RunnerSetup {
-        session: SessionStore::create(&path, header()).unwrap(),
+    let (runner, sink) = RunnerSetup {
+        session: common::create_session_file(&path, header()).await.unwrap(),
         ..setup(&provider)
     }
     .build();
 
-    runner.run("hello", &CancellationToken::new()).await;
+    runner.run("hello").await;
 
     let ends = sink
         .events()
         .into_iter()
-        .filter(|event| matches!(event, AgentEvent::MessageEnd { .. }))
+        .filter(|event| matches!(event, EventKind::MessageEnd { .. }))
         .count();
     // One message line per finished message; request checkpoints are separate entries.
     let messages = read_lines(&path)
@@ -927,14 +920,18 @@ async fn events_are_forwarded_after_persistence() {
 #[tokio::test]
 async fn final_text_ignores_answers_from_earlier_runs() {
     let provider = provider([FauxStep::text("old answer")]);
-    let (mut runner, _) = setup(&provider).build();
-    runner.run("first", &CancellationToken::new()).await;
+    let (runner, _) = setup(&provider).build();
+    runner.run("first").await;
 
-    let cancelled = CancellationToken::new();
-    cancelled.cancel();
-    let report = runner.run("second", &cancelled).await;
+    // Cancelled before it is read, so before it asks anything.
+    let run = runner.send("second").unwrap();
+    runner.cancel();
+    let report = run.wait().await;
 
-    assert_eq!((report.outcome, report.final_text.as_str()), (RunOutcome::Aborted, ""));
+    assert_eq!(
+        (report.outcome, report.final_text.as_str()),
+        (RunOutcome::Cancelled, "")
+    );
 }
 
 #[tokio::test]
@@ -942,21 +939,21 @@ async fn resumed_sessions_continue_the_conversation() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
     let first = provider([FauxStep::text("nginx is down")]);
-    let (mut runner, _) = RunnerSetup {
-        session: SessionStore::create(&path, header()).unwrap(),
+    let (runner, _) = RunnerSetup {
+        session: common::create_session_file(&path, header()).await.unwrap(),
         ..setup(&first)
     }
     .build();
-    runner.run("check nginx", &CancellationToken::new()).await;
+    runner.run("check nginx").await;
     drop(runner);
 
     let second = provider([FauxStep::text("restart it")]);
-    let (mut runner, _) = RunnerSetup {
-        session: SessionStore::open(&path).unwrap(),
+    let (runner, _) = RunnerSetup {
+        session: common::open_session_file(&path).await.unwrap(),
         ..setup(&second)
     }
     .build();
-    let report = runner.run("what now?", &CancellationToken::new()).await;
+    let report = runner.run("what now?").await;
 
     assert_eq!(report.final_text, "restart it");
     assert_eq!(
@@ -966,25 +963,25 @@ async fn resumed_sessions_continue_the_conversation() {
 }
 
 /// One run on `session` whose environment section says `started`.
-async fn run_with_environment(session: SessionStore, started: &str) {
+async fn run_with_environment(session: Transcript, started: &str) {
     let mut config = config(provider([FauxStep::text("ok")]), vec![]);
     config.system_prompt = SystemPrompt::default()
         .with_section(PREAMBLE, "Do it.")
         .with_section("environment", started);
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         session,
         ..RunnerSetup::new(config)
     }
     .build();
-    runner.run("go", &CancellationToken::new()).await;
+    runner.run("go").await;
 }
 
 #[tokio::test]
 async fn resumed_sessions_record_prompt_changes_in_the_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("p.jsonl");
-    run_with_environment(SessionStore::create(&path, header()).unwrap(), "t1").await;
-    run_with_environment(SessionStore::open(&path).unwrap(), "t2").await;
+    run_with_environment(common::create_session_file(&path, header()).await.unwrap(), "t1").await;
+    run_with_environment(common::open_session_file(&path).await.unwrap(), "t2").await;
 
     // Request checkpoints sit between messages; only message lines carry roles.
     let messages: Vec<Value> = read_lines(&path)
@@ -1003,7 +1000,7 @@ async fn resumed_sessions_record_prompt_changes_in_the_file() {
 }
 
 /// A run that fails once with a retryable error, then answers.
-fn retried_run() -> (zx_agent::runner::Runner, Arc<common::Collect>) {
+fn retried_run() -> (common::Driven, Arc<common::Collect>) {
     let provider = Arc::new(FauxProvider::new([
         FauxStep::Fail("HTTP 503: retry".into()),
         FauxStep::text("done"),
@@ -1017,9 +1014,9 @@ fn retried_run() -> (zx_agent::runner::Runner, Arc<common::Collect>) {
 
 #[tokio::test]
 async fn every_event_of_a_run_carries_its_ids_and_the_next_sequence_number() {
-    let (mut runner, events) = retried_run();
+    let (runner, events) = retried_run();
 
-    runner.run("go", &CancellationToken::new()).await;
+    runner.run("go").await;
 
     let envelopes = events.envelopes();
     let seqs: Vec<u64> = envelopes.iter().map(|event| event.seq).collect();
@@ -1031,7 +1028,7 @@ async fn every_event_of_a_run_carries_its_ids_and_the_next_sequence_number() {
         assert_eq!(event.session_id, session_id);
     }
     let first = envelopes.len();
-    runner.run("again", &CancellationToken::new()).await;
+    runner.run("again").await;
     let next = &events.envelopes()[first..];
     assert_ne!(next[0].run_id, envelopes[0].run_id, "each run has its own ID");
     assert_eq!(next[0].seq, 1);
@@ -1039,19 +1036,19 @@ async fn every_event_of_a_run_carries_its_ids_and_the_next_sequence_number() {
 
 #[tokio::test]
 async fn a_run_starts_with_run_start_and_ends_with_its_report() {
-    let (mut runner, events) = retried_run();
+    let (runner, events) = retried_run();
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
 
     let all = events.events();
-    assert!(matches!(&all[0], AgentEvent::RunStart { model, .. } if model == "test-model"));
+    assert!(matches!(&all[0], EventKind::RunStart { model, .. } if model == "test-model"));
     match all.last() {
-        Some(AgentEvent::RunEnd { report: ended }) => assert_eq!(**ended, report),
+        Some(EventKind::RunEnd { report: ended }) => assert_eq!(**ended, report),
         other => panic!("the last event is not run_end: {other:?}"),
     }
     assert_eq!(
         all.iter()
-            .filter(|event| matches!(event, AgentEvent::RunEnd { .. }))
+            .filter(|event| matches!(event, EventKind::RunEnd { .. }))
             .count(),
         1
     );
@@ -1059,15 +1056,15 @@ async fn a_run_starts_with_run_start_and_ends_with_its_report() {
 
 #[tokio::test]
 async fn attempts_and_requests_are_numbered_and_name_their_request_records() {
-    let (mut runner, events) = retried_run();
+    let (runner, events) = retried_run();
 
-    runner.run("go", &CancellationToken::new()).await;
+    runner.run("go").await;
 
     let all = events.events();
     let attempts: Vec<u32> = all
         .iter()
         .filter_map(|event| match event {
-            AgentEvent::AgentStart { attempt } => Some(*attempt),
+            EventKind::AttemptStart { attempt } => Some(*attempt),
             _ => None,
         })
         .collect();
@@ -1075,7 +1072,7 @@ async fn attempts_and_requests_are_numbered_and_name_their_request_records() {
     let requests: Vec<(RequestKind, u32, String)> = all
         .iter()
         .filter_map(|event| match event {
-            AgentEvent::RequestStart {
+            EventKind::RequestStart {
                 kind,
                 attempt,
                 entry_id,
@@ -1100,41 +1097,41 @@ async fn attempts_and_requests_are_numbered_and_name_their_request_records() {
             (RequestKind::Task, 2, recorded[1].clone())
         ]
     );
-    let turns: Vec<u32> = all
+    let steps: Vec<u32> = all
         .iter()
         .filter_map(|event| match event {
-            AgentEvent::TurnStart { turn } | AgentEvent::TurnEnd { turn } => Some(*turn),
+            EventKind::StepStart { step } | EventKind::StepEnd { step } => Some(*step),
             _ => None,
         })
         .collect();
-    assert_eq!(turns, [1, 1, 2, 2], "turn numbers continue across attempts");
+    assert_eq!(steps, [1, 1, 2, 2], "step numbers continue across attempts");
 }
 
 #[tokio::test]
 async fn each_attempt_reports_how_it_ended() {
-    let (mut runner, events) = retried_run();
+    let (runner, events) = retried_run();
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
 
     assert_eq!(report.outcome, RunOutcome::Completed);
     let ended: Vec<RunOutcome> = events
         .events()
         .iter()
         .filter_map(|event| match event {
-            AgentEvent::AgentEnd { outcome } => Some(*outcome),
+            EventKind::AttemptEnd { outcome } => Some(*outcome),
             _ => None,
         })
         .collect();
     assert_eq!(
         ended,
-        [RunOutcome::Error, RunOutcome::Completed],
+        [RunOutcome::Failed, RunOutcome::Completed],
         "the failed attempt, then its retry"
     );
 }
 
 struct Uppercase;
 #[async_trait]
-impl Hooks for Uppercase {
+impl Hook for Uppercase {
     async fn on_input(&self, text: String, _ctx: &HookContext) -> HookResult<String> {
         Ok(text.to_uppercase())
     }
@@ -1145,16 +1142,16 @@ async fn messages_and_context_edits_name_their_session_entries() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let mut config = config(provider, vec![]);
     config.hooks.push(Uppercase);
-    let (mut runner, events) = RunnerSetup::new(config).build();
+    let (runner, events) = RunnerSetup::new(config).build();
 
-    runner.run("go", &CancellationToken::new()).await;
+    runner.run("go").await;
 
     let reported: Vec<(&'static str, String)> = events
         .events()
         .into_iter()
         .filter_map(|event| match event {
-            AgentEvent::MessageEnd { entry_id, .. } => Some(("message", entry_id)),
-            AgentEvent::ContextEdited { entry_id, .. } => Some(("context_edit", entry_id)),
+            EventKind::MessageEnd { entry_id, .. } => Some(("message", entry_id)),
+            EventKind::ContextEdited { entry_id, .. } => Some(("context_edit", entry_id)),
             _ => None,
         })
         .collect();

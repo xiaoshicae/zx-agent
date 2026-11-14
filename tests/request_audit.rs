@@ -7,22 +7,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
-use tokio_util::sync::CancellationToken;
 
-use zx_agent::AgentSession;
-use zx_agent::agent::Tool;
-use zx_agent::agent_session::ModelRef;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, PREAMBLE, Request, SystemPrompt};
 use zx_agent::compaction::{Config, Outcome};
 use zx_agent::runner::RunOutcome;
-use zx_agent::session::{Entry, RequestSource, SessionStore};
+use zx_agent::session::ModelRef;
+use zx_agent::tools::Tool;
+use zx_agent::transcript::{Entry, RequestSource, Transcript};
 
 use common::{EchoTool, RunnerSetup, config, header, read_lines, replayed_requests};
 
 /// Every recorded request of `store`, rebuilt: the provider-neutral request and its
 /// OpenAI-compatible body in both system update modes.
-fn replays(store: &SessionStore) -> serde_json::Value {
+fn replays(store: &Transcript) -> serde_json::Value {
     let mut out = Vec::new();
     for id in request_ids(store) {
         let (config, request) = store.replay_request(&id).unwrap();
@@ -54,7 +52,7 @@ fn a_recorded_session_rebuilds_to_the_requests_it_sent() {
 /// byte as pretty-printed JSON, so that the order of fields counts too.
 fn assert_fixture_rebuilds(name: &str) {
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    let store = SessionStore::read(&fixtures.join(format!("{name}.jsonl"))).unwrap();
+    let store = common::read_session_file(&fixtures.join(format!("{name}.jsonl"))).unwrap();
     let expected = std::fs::read_to_string(fixtures.join(format!("{name}.expected.json"))).unwrap();
 
     let rebuilt = format!("{}\n", serde_json::to_string_pretty(&replays(&store)).unwrap());
@@ -63,7 +61,7 @@ fn assert_fixture_rebuilds(name: &str) {
 }
 
 /// Request checkpoint IDs on the session's entry list, in file order.
-fn request_ids(store: &SessionStore) -> Vec<String> {
+fn request_ids(store: &Transcript) -> Vec<String> {
     store
         .entries()
         .iter()
@@ -76,7 +74,7 @@ fn request_ids(store: &SessionStore) -> Vec<String> {
 
 /// Every request rebuilt from a fresh snapshot of the file.
 fn replayed(path: &Path) -> Vec<Request> {
-    replayed_requests(&SessionStore::read(path).unwrap())
+    replayed_requests(&common::read_session_file(path).unwrap())
 }
 
 fn types(path: &Path) -> Vec<String> {
@@ -98,13 +96,13 @@ async fn every_dispatched_request_is_rebuilt_exactly_from_the_session_file() {
     let mut config = config(provider.clone(), vec![tool]);
     config.system_prompt = SystemPrompt::default().with_section(PREAMBLE, "Be brief.");
     config.max_tokens = Some(256);
-    let (mut runner, _) = RunnerSetup {
-        session: SessionStore::create(&path, header()).unwrap(),
+    let (runner, _) = RunnerSetup {
+        session: common::create_session_file(&path, header()).await.unwrap(),
         ..RunnerSetup::new(config)
     }
     .build();
 
-    let report = runner.run("inspect", &CancellationToken::new()).await;
+    let report = runner.run("inspect").await;
 
     assert_eq!(report.outcome, RunOutcome::Completed);
     let sent = provider.requests();
@@ -120,22 +118,21 @@ async fn request_config_is_appended_only_when_the_configuration_changes() {
     let path = dir.path().join("s.jsonl");
     let first = Arc::new(FauxProvider::new([FauxStep::text("one"), FauxStep::text("two")]));
     let second = Arc::new(FauxProvider::new([FauxStep::text("three")]));
-    let (runner, _) = RunnerSetup {
-        session: SessionStore::create(&path, header()).unwrap(),
+    let (session, _) = RunnerSetup {
+        session: common::create_session_file(&path, header()).await.unwrap(),
         ..RunnerSetup::new(config(first.clone(), vec![]))
     }
     .build();
-    let session = AgentSession::from(runner);
 
-    session.prompt("a", &CancellationToken::new()).await.unwrap();
-    session.prompt("b", &CancellationToken::new()).await.unwrap();
+    session.prompt("a").await.unwrap();
+    session.prompt("b").await.unwrap();
     session
         .set_model(ModelRef {
             provider: second.clone(),
             model: "other-model".into(),
         })
         .unwrap();
-    session.prompt("c", &CancellationToken::new()).await.unwrap();
+    session.prompt("c").await.unwrap();
 
     let configs = types(&path).iter().filter(|kind| *kind == "request_config").count();
     assert_eq!(configs, 2, "{:?}", types(&path));
@@ -150,7 +147,7 @@ async fn request_config_is_appended_only_when_the_configuration_changes() {
 async fn summary_requests_are_rebuilt_from_their_compaction() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
-    let mut store = SessionStore::create(&path, header()).unwrap();
+    let mut store = common::create_session_file(&path, header()).await.unwrap();
     let old = store
         .append_message(Message::user("observed ".repeat(600)))
         .await
@@ -159,25 +156,21 @@ async fn summary_requests_are_rebuilt_from_their_compaction() {
     let summary =
         json!({"facts":[{"text":"Old observation","sourceEntryIds":[old]}],"inferences":[],"plans":[]}).to_string();
     let provider = Arc::new(FauxProvider::new([FauxStep::text(summary)]));
-    let (runner, _) = RunnerSetup {
+    let (session, _) = RunnerSetup {
         session: store,
+        compaction: Config {
+            keep_recent_bytes: 1,
+            timeout: Duration::from_secs(1),
+            ..Config::default()
+        },
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build();
-    let session = AgentSession::from(
-        runner
-            .with_compaction(Config {
-                keep_recent_bytes: 1,
-                timeout: Duration::from_secs(1),
-                ..Config::default()
-            })
-            .unwrap(),
-    );
 
-    let report = session.compact(&CancellationToken::new()).await.unwrap();
+    let report = session.compact().await.unwrap();
 
     assert_eq!(report.outcome, Outcome::Completed, "{report:?}");
-    let reopened = SessionStore::read(&path).unwrap();
+    let reopened = common::read_session_file(&path).unwrap();
     let ids = request_ids(&reopened);
     assert_eq!(ids.len(), 1);
     let Some(Entry::RequestStarted(started)) = reopened.get(&ids[0]) else {
@@ -191,7 +184,7 @@ async fn summary_requests_are_rebuilt_from_their_compaction() {
 
 #[tokio::test]
 async fn only_request_checkpoints_can_be_replayed() {
-    let mut store = SessionStore::in_memory(header());
+    let mut store = Transcript::in_memory(header());
     let message = store.append_message(Message::user("not a request")).await.unwrap();
     assert!(store.replay_request(&message).is_err());
     assert!(store.replay_request("missing").is_err());
@@ -201,7 +194,7 @@ async fn only_request_checkpoints_can_be_replayed() {
 async fn requests_around_a_recovery_from_context_overflow_are_rebuilt_from_the_session_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
-    let mut session = SessionStore::create(&path, header()).unwrap();
+    let mut session = common::create_session_file(&path, header()).await.unwrap();
     let old = session
         .append_message(Message::user("observed ".repeat(600)))
         .await
@@ -213,19 +206,19 @@ async fn requests_around_a_recovery_from_context_overflow_are_rebuilt_from_the_s
         FauxStep::text(summary.to_string()),
         FauxStep::text("answer"),
     ]));
-    let (runner, _) = RunnerSetup {
-        session,
-        ..RunnerSetup::new(config(provider.clone(), vec![]))
-    }
-    .build();
     let compaction = Config {
         trigger_bytes: Some(100_000),
         keep_recent_bytes: 1,
         ..Config::default()
     };
-    let mut runner = runner.with_compaction(compaction).unwrap();
+    let (runner, _) = RunnerSetup {
+        session,
+        compaction,
+        ..RunnerSetup::new(config(provider.clone(), vec![]))
+    }
+    .build();
 
-    let report = runner.run("continue", &CancellationToken::new()).await;
+    let report = runner.run("continue").await;
 
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
     // The failed task request, the summary and the task request after it.

@@ -2,87 +2,70 @@
 //! request, and the body rebuilt from them for the request audit (pi: transform-messages.ts).
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use zx_ai::{AssistantMessage, ContentBlock, Message, Reasoning, Request, SystemPrompt};
 
 use crate::accumulate::REASONING_FIELDS;
-use crate::config::{OpenAiConfig, ReasoningFormat, SystemUpdates, check_extra_fields};
+use crate::config::{BodyOptions, ReasoningFormat, SystemUpdates};
 
 /// The name of this conversion in the recorded options.
 const FORMAT: &str = "openai-chat-completions";
 /// The version of this conversion in the recorded options, the only one replayed.
 const VERSION: u32 = 2;
 
-/// The conversion options recorded with each request: the policy that turns a transcript
-/// into a body, and nothing secret. Fields absent unless set stay out of the record.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct Options {
-    format: String,
+/// What is recorded with each request: which conversion turned the transcript into a body,
+/// then its options, side by side in one object.
+#[derive(Serialize)]
+struct Record<'a> {
+    format: &'a str,
     version: u32,
-    system_updates: String,
-    #[serde(default, skip_serializing_if = "Map::is_empty")]
-    extra_fields: Map<String, Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    fill_missing_reasoning: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning_format: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    prompt_cache_key: Option<bool>,
+    #[serde(flatten)]
+    options: &'a BodyOptions,
 }
 
-/// The conversion options of `config`, as recorded with each request.
-pub(crate) fn request_options(config: &OpenAiConfig) -> Value {
-    let options = Options {
-        format: FORMAT.to_string(),
+/// The conversion a record names. Read apart from the options, which refuse a field they do
+/// not know: serde cannot do that for a flattened value.
+#[derive(Deserialize)]
+struct Conversion {
+    format: String,
+    version: u32,
+}
+
+/// `options` as recorded with each request.
+pub(crate) fn request_options(options: &BodyOptions) -> Value {
+    let record = Record {
+        format: FORMAT,
         version: VERSION,
-        system_updates: config.system_updates.as_str().to_string(),
-        extra_fields: config.extra_fields.clone(),
-        fill_missing_reasoning: config.fill_missing_reasoning.then_some(true),
-        reasoning_format: (config.reasoning_format != ReasoningFormat::default())
-            .then(|| config.reasoning_format.as_str().to_string()),
-        prompt_cache_key: config.prompt_cache_key.then_some(true),
+        options,
     };
-    serde_json::to_value(options).expect("strings, numbers, booleans and a JSON map serialize")
+    serde_json::to_value(record).expect("strings, numbers, booleans and a JSON map serialize")
 }
 
 /// Rebuild a Chat Completions JSON body from a persisted RequestConfig and Request.
 /// Credentials, URLs and HTTP headers are intentionally absent. Rejects an unknown option
-/// format and any version but the current one, rather than silently applying a different
-/// conversion policy.
+/// format, any version but the current one and an option it does not know, rather than
+/// silently applying a different conversion policy.
 pub fn replay_body(request: &Request, provider: &str, options: &Value) -> anyhow::Result<Value> {
-    let options: Options = serde_json::from_value(options.clone())?;
-    anyhow::ensure!(options.format == FORMAT, "unsupported request conversion format");
+    let Conversion { format, version } = Conversion::deserialize(options)?;
+    anyhow::ensure!(format == FORMAT, "unsupported request conversion format");
     anyhow::ensure!(
-        options.version == VERSION,
-        "request conversion version {} is not supported; only version {VERSION} can be replayed",
-        options.version
+        version == VERSION,
+        "request conversion version {version} is not supported; only version {VERSION} can be replayed"
     );
-    let fill_missing_reasoning = options.fill_missing_reasoning.unwrap_or(false);
-    let system_updates: SystemUpdates = options.system_updates.parse().map_err(anyhow::Error::msg)?;
-    let prompt_cache_key = options.prompt_cache_key.unwrap_or(false);
-    check_extra_fields(&options.extra_fields, prompt_cache_key)?;
-    let reasoning_format = match options.reasoning_format.as_deref() {
-        None => ReasoningFormat::Effort,
-        Some(name) => name.parse().map_err(anyhow::Error::msg)?,
-    };
-    Ok(build_body(
-        request,
-        &OpenAiConfig {
-            provider_name: provider.into(),
-            system_updates,
-            extra_fields: options.extra_fields,
-            fill_missing_reasoning,
-            reasoning_format,
-            prompt_cache_key,
-            ..OpenAiConfig::default()
-        },
-    ))
+    let mut options = options.clone();
+    if let Some(recorded) = options.as_object_mut() {
+        recorded.remove("format");
+        recorded.remove("version");
+    }
+    let options: BodyOptions = serde_json::from_value(options)?;
+    options.check()?;
+    Ok(build_body(request, &options, provider))
 }
 
-/// The JSON body of a streaming Chat Completions request.
-pub(crate) fn build_body(request: &Request, config: &OpenAiConfig) -> Value {
-    let messages = convert_messages(&request.messages, config, &request.model);
+/// The JSON body of a streaming Chat Completions request to `provider`, the name its
+/// answers are recorded under.
+pub(crate) fn build_body(request: &Request, options: &BodyOptions, provider: &str) -> Value {
+    let messages = convert_messages(&request.messages, options, provider, &request.model);
 
     let mut body = json!({
         "model": request.model,
@@ -109,20 +92,20 @@ pub(crate) fn build_body(request: &Request, config: &OpenAiConfig) -> Value {
         );
     }
     if let Some(max_tokens) = request.max_tokens {
-        body["max_tokens"] = json!(max_tokens);
+        body[options.max_tokens_field.to_string().as_str()] = json!(max_tokens);
     }
-    if config.prompt_cache_key
+    if options.prompt_cache_key
         && let Some(key) = &request.cache_key
     {
         body["prompt_cache_key"] = json!(key);
     }
     // Checked when the provider is built: none replaces a field set above.
-    for (field, value) in &config.extra_fields {
+    for (field, value) in &options.extra_fields {
         body[field.as_str()] = value.clone();
     }
     // After the extra fields: a level chosen for this request wins over a fixed one.
     if let Some(reasoning) = request.reasoning {
-        apply_reasoning(&mut body, reasoning, config.reasoning_format);
+        apply_reasoning(&mut body, reasoning, options.reasoning_format);
     }
     body
 }
@@ -149,13 +132,12 @@ fn apply_reasoning(body: &mut Value, reasoning: Reasoning, format: ReasoningForm
 /// cancelled between them leaves such gaps, so missing results get a placeholder and
 /// unmatched results are dropped.
 ///
-/// Reasoning is sent back only to the provider (`config.provider_name`) and model that
-/// produced it. System messages follow `config.system_updates`.
-fn convert_messages(messages: &[Message], config: &OpenAiConfig, model: &str) -> Vec<Value> {
-    let provider = config.provider_name.as_str();
+/// Reasoning is sent back only to the `provider` and `model` that produced it. System
+/// messages follow `options.system_updates`.
+fn convert_messages(messages: &[Message], options: &BodyOptions, provider: &str, model: &str) -> Vec<Value> {
     let mut out = Vec::new();
     let mut pending: Vec<String> = Vec::new();
-    let inline = config.system_updates == SystemUpdates::Inline;
+    let inline = options.system_updates == SystemUpdates::Inline;
     if !inline {
         let prompt = SystemPrompt::from_transcript(messages);
         if !prompt.is_empty() {
@@ -202,7 +184,7 @@ fn convert_messages(messages: &[Message], config: &OpenAiConfig, model: &str) ->
         }
     }
     flush_missing_results(&mut out, &mut pending);
-    if config.fill_missing_reasoning {
+    if options.fill_missing_reasoning {
         fill_missing_reasoning(&mut out);
     }
     out

@@ -1,14 +1,15 @@
 //! Chat platforms: the [`ImChannel`] extension point, and a [`Server`] that answers each
-//! conversation, a direct chat or a thread, with its own [`AgentSession`].
+//! conversation, a direct chat or a thread, with its own [`Session`].
 //!
 //! A channel only moves messages. The server owns routing, sessions, the run limit and
 //! approvals, so supporting another platform means implementing the four methods of
-//! [`ImChannel`], in a crate of its own; [`split_text`], [`Seen`], [`Pacer`], [`Cards`],
-//! [`Backoff`] and [`Keepalive`] help with the duties every platform has. The platforms of
-//! this workspace are such crates: `zx-im-slack` and `zx-im-feishu`.
+//! [`ImChannel`], in a crate of its own; [`split_text`], [`Seen`], [`Pacer`],
+//! [`rate_limit_wait`], [`Cards`], [`Backoff`] and [`Keepalive`] help with the duties every
+//! platform has. The platforms of this workspace are such crates: `zx-im-slack` and
+//! `zx-im-feishu`.
 //!
-//! The `zx-agent` crate re-exports this crate as `zx_agent::im`, with those platforms as
-//! `zx_agent::im::slack` and `zx_agent::im::feishu`.
+//! A server is one way to bring an agent to people, built on the kernel beside the command
+//! line: the `im` subcommand of `zx-cli` runs one with those platforms.
 
 mod approval;
 mod outlet;
@@ -27,18 +28,17 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 // The modules name the model layer, the kernel and the shared helpers by these crate-root paths.
 use zx_ai as ai;
-use zx_core::{AgentSession, agent, agent_session, runner, session};
-
-use crate::agent::ApprovalResult;
+use zx_core::{Agent, Session, runner, session, transcript};
 
 pub use platform::{
-    Backoff, CARD_CAPACITY, Cards, Keepalive, MAX_TEXT_CHARS, Pacer, RATE_LIMIT_RETRIES, SEEN_CAPACITY, Seen,
-    card_update_refused, pause, split_text,
+    Backoff, CARD_CAPACITY, Cards, Keepalive, MAX_TEXT_CHARS, Pacer, RATE_LIMIT_RETRIES, SEEN_CAPACITY, Seen, pause,
+    rate_limit_wait, split_text,
 };
-pub use server::{
-    ApprovalRecord, Opening, Replies, Server, ServerConfig, ServerEvent, ServerSink, SessionFactory, SessionKey,
-};
+pub use server::{ApprovalRecord, Replies, Server, ServerConfig, ServerEvent, ServerSink, SessionKey};
 pub use status::{StatusFiles, StatusStore};
+// What a closed card shows ([`Replacement::ApprovalResolved`]): a platform names it without
+// depending on the kernel.
+pub use zx_core::events::ApprovalResult;
 
 /// One chat platform, such as Slack.
 ///
@@ -69,13 +69,12 @@ pub trait ImChannel: Send + Sync {
 
     /// Post `message` to `to`, as a reply in `to.thread` when it is set. Text longer than one
     /// platform message is split into several; the returned reference is the first.
-    async fn send(&self, to: &Destination, message: &Outbound) -> Result<MessageRef, ImError>;
+    async fn send(&self, to: &Destination, message: &Post) -> Result<MessageRef, ImError>;
 
-    /// Replace a posted message, such as an approval card once decided. Text longer than one
-    /// platform message replaces it with the first part and posts the rest as replies. An
-    /// [`Outbound::ApprovalRequest`] is refused with [`card_update_refused`]: a card is only
-    /// posted, and the server never asks for this.
-    async fn update(&self, posted: &MessageRef, message: &Outbound) -> Result<(), ImError>;
+    /// Put `replacement` in the place of the message `posted`, such as the result of an
+    /// approval in the place of its card. Text longer than one platform message replaces it
+    /// with the first part and posts the rest as replies.
+    async fn update(&self, posted: &MessageRef, replacement: &Replacement) -> Result<(), ImError>;
 
     /// What people said in the thread `at` so far, oldest first: at most the `limit` latest
     /// messages, without those of bots. Read when the bot is first mentioned in a thread
@@ -207,9 +206,9 @@ pub enum Inbound {
     },
 }
 
-/// What the server posts.
+/// What the server posts ([`ImChannel::send`]).
 #[derive(Clone, Debug, PartialEq)]
-pub enum Outbound {
+pub enum Post {
     /// Plain text; may contain code blocks.
     Text(String),
     /// A card with an "allow once" and a "deny" button, whose clicks come back as
@@ -222,8 +221,15 @@ pub enum Outbound {
         /// Why the policy asks.
         reason: String,
     },
-    /// Replaces the card once the approval ended; `user` is who clicked, `None` when nobody
-    /// decided (timeout, cancellation, failure).
+}
+
+/// What the server puts in the place of a message it posted ([`ImChannel::update`]).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Replacement {
+    /// Plain text; may contain code blocks. The answer of a run, in the place of its status.
+    Text(String),
+    /// How an approval ended, in the place of its card; `user` is who clicked, `None` when
+    /// nobody decided (timeout, cancellation, failure).
     ApprovalResolved {
         id: ApprovalId,
         user: Option<UserId>,
@@ -257,7 +263,6 @@ pub struct CardLabels {
     pub denied: String,
     pub timed_out: String,
     pub cancelled: String,
-    pub failed: String,
 }
 
 impl Default for CardLabels {
@@ -271,7 +276,6 @@ impl Default for CardLabels {
             denied: "Denied".into(),
             timed_out: "Nobody decided in time; not run".into(),
             cancelled: "Cancelled; not run".into(),
-            failed: "Approval failed; not run".into(),
         }
     }
 }
@@ -284,12 +288,12 @@ impl CardLabels {
             ApprovalResult::Denied => &self.denied,
             ApprovalResult::TimedOut => &self.timed_out,
             ApprovalResult::Cancelled => &self.cancelled,
-            ApprovalResult::Failed => &self.failed,
         }
     }
 }
 
-/// A callback that a channel calls with each failed attempt to reach its platform.
+/// A callback that a channel calls with what it goes on after, for an operator to see: each
+/// failed attempt to reach its platform, and what it gave up on without failing a call.
 pub type ErrorReport = Arc<dyn Fn(&ImError) + Send + Sync>;
 
 /// Why a channel call failed.

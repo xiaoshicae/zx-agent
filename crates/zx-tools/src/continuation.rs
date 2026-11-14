@@ -2,8 +2,8 @@
 
 use async_trait::async_trait;
 
-use crate::agent::{FinishedTurn, HookContext, HookResult, Hooks, TurnDecision, TurnDisposition};
 use crate::ai::StopReason;
+use zx_core::hooks::{FinishedStep, Hook, HookContext, HookResult, StepDecision, StepDisposition};
 
 /// The unattended continuation text; the runtime does not depend on this wording.
 const CONTINUE_PROMPT: &str = "Your previous response was cut off at the output token limit. Continue exactly where it \
@@ -22,16 +22,16 @@ impl ContinueOnLength {
 }
 
 #[async_trait]
-impl Hooks for ContinueOnLength {
-    async fn finish_turn(&self, turn: &FinishedTurn<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
-        if turn.disposition == TurnDisposition::Stop
-            && turn.response.stop_reason == StopReason::Length
-            && turn.remaining_model_requests != Some(0)
-            && turn.answer_continuations < self.max_continuations
+impl Hook for ContinueOnLength {
+    async fn finish_step(&self, step: &FinishedStep<'_>, _ctx: &HookContext) -> HookResult<StepDecision> {
+        if step.disposition == StepDisposition::Stop
+            && step.response.stop_reason == StopReason::Length
+            && step.remaining_model_requests != Some(0)
+            && step.answer_continuations < self.max_continuations
         {
-            Ok(TurnDecision::ContinueAnswer(CONTINUE_PROMPT.to_string()))
+            Ok(StepDecision::ContinueAnswer(CONTINUE_PROMPT.to_string()))
         } else {
-            Ok(TurnDecision::Default)
+            Ok(StepDecision::Default)
         }
     }
 }

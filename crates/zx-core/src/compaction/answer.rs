@@ -4,7 +4,7 @@
 use anyhow::{Context, Result, bail, ensure};
 
 use crate::ai::{AssistantMessage, ContentBlock, Delta, StopReason, ToolCall};
-use crate::session::{CompactionSummary, MAX_SUMMARY_BYTES};
+use crate::transcript::{CompactionSummary, MAX_SUMMARY_BYTES};
 
 /// Reasoning a summary response may carry before its answer. Reasoning is not part of the
 /// summary, so it does not count toward `MAX_SUMMARY_BYTES`; this separate, larger bound only

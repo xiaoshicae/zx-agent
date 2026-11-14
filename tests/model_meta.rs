@@ -11,15 +11,15 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use common::{EchoTool, RunnerSetup, answer_reporting, config, header, read_lines, seeded_session, summary_json};
-use zx_agent::agent::{ContextEdit, HookContext, HookResult, Hooks};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::provider::{EventReceiver, event_channel, send_event};
 use zx_agent::ai::{
     AssistantMessage, Message, ModelCost, ModelMeta, Provider, Request, StopReason, StreamEvent, Usage,
 };
 use zx_agent::compaction::{self, Config, DEFAULT_RESERVE_TOKENS, TokenTrigger};
+use zx_agent::hooks::{ContextEdit, Hook, HookContext, HookResult};
 use zx_agent::runner::RunOutcome;
-use zx_agent::session::{Entry, SessionStore};
+use zx_agent::transcript::{Entry, SessionHeader, Transcript};
 
 /// 1 per input token and 2 per output token, in any currency: the faux provider reports 10 in, 5 out.
 fn priced() -> ModelMeta {
@@ -44,13 +44,13 @@ async fn responses_are_priced_by_the_configured_model_and_summed_in_the_report()
     ]));
     let mut config = config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]);
     config.models.insert("test-model".into(), priced());
-    let (mut runner, _) = RunnerSetup {
-        session: SessionStore::create(&file, header()).unwrap(),
+    let (runner, _) = RunnerSetup {
+        session: common::create_session_file(&file, header()).await.unwrap(),
         ..RunnerSetup::new(config)
     }
     .build();
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
 
     assert_eq!(report.outcome, RunOutcome::Completed);
     assert_eq!(report.usage.total_cost, Some(40.0), "two answers at 20 each");
@@ -78,8 +78,8 @@ async fn a_model_without_prices_has_no_cost() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let mut config = config(provider, vec![]);
     config.models.insert("another-model".into(), priced());
-    let (mut runner, _) = RunnerSetup::new(config).build();
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let (runner, _) = RunnerSetup::new(config).build();
+    let report = runner.run("go").await;
     assert_eq!(report.usage.total_cost, None);
     assert!(
         serde_json::to_value(&report.usage).unwrap().get("totalCost").is_none(),
@@ -136,18 +136,16 @@ async fn costs_follow_the_requested_model_when_the_server_names_another() {
     config.models.insert("test-model".into(), priced());
     let (runner, _) = RunnerSetup {
         session: store,
+        compaction: Config {
+            keep_recent_bytes: 1,
+            ..Config::default()
+        },
         ..RunnerSetup::new(config)
     }
     .build();
-    let mut runner = runner
-        .with_compaction(Config {
-            keep_recent_bytes: 1,
-            ..Config::default()
-        })
-        .unwrap();
 
-    let compacted = runner.compact(&CancellationToken::new()).await;
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let compacted = runner.compact().await.unwrap();
+    let report = runner.run("go").await;
 
     assert_eq!(compacted.outcome, compaction::Outcome::Completed, "{compacted:?}");
     assert_eq!(
@@ -169,19 +167,17 @@ async fn run_with_token_trigger(trigger_tokens: u64) -> (RunOutcome, Vec<&'stati
     ]));
     let (runner, events) = RunnerSetup {
         session: store,
-        ..RunnerSetup::new(config(provider.clone(), vec![]))
-    }
-    .build();
-    let mut runner = runner
-        .with_compaction(Config {
+        compaction: Config {
             trigger_bytes: None,
             trigger_tokens: TokenTrigger::Above(trigger_tokens),
             keep_recent_bytes: 1,
             timeout: Duration::from_secs(1),
             ..Config::default()
-        })
-        .unwrap();
-    let report = runner.run("continue", &CancellationToken::new()).await;
+        },
+        ..RunnerSetup::new(config(provider.clone(), vec![]))
+    }
+    .build();
+    let report = runner.run("continue").await;
     (report.outcome, events.kinds(), provider.requests().len())
 }
 
@@ -213,7 +209,7 @@ fn token_trigger() -> Config {
 async fn a_summary_is_not_repeated_for_the_usage_an_answer_reported_before_it() {
     // An old message worth summarizing, then an answer that reported a context above the
     // trigger and is recent enough for the summary to keep.
-    let mut store = SessionStore::in_memory(header());
+    let mut store = Transcript::in_memory(header());
     let old = store
         .append_message(Message::user("observed ".repeat(600)))
         .await
@@ -225,12 +221,12 @@ async fn a_summary_is_not_repeated_for_the_usage_an_answer_reported_before_it() 
     ]));
     let (runner, events) = RunnerSetup {
         session: store,
+        compaction: token_trigger(),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build();
-    let mut runner = runner.with_compaction(token_trigger()).unwrap();
 
-    let report = runner.run("continue", &CancellationToken::new()).await;
+    let report = runner.run("continue").await;
 
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
     let compactions = events.kinds().iter().filter(|kind| **kind == "compaction_end").count();
@@ -246,7 +242,7 @@ async fn a_summary_is_not_repeated_for_the_usage_an_answer_reported_before_it() 
 struct TrimLongInput;
 
 #[async_trait]
-impl Hooks for TrimLongInput {
+impl Hook for TrimLongInput {
     async fn transform_context(&self, messages: &[Message], _ctx: &HookContext) -> HookResult<Vec<ContextEdit>> {
         let long = messages
             .iter()
@@ -265,7 +261,7 @@ impl Hooks for TrimLongInput {
 async fn the_token_trigger_follows_an_edit_made_after_the_last_reported_usage() {
     // The last answer reported a context above the trigger. A hook then trims the message
     // that made it large, and what is left is too recent to compact.
-    let mut store = SessionStore::in_memory(header());
+    let mut store = Transcript::in_memory(header());
     store
         .append_message(Message::user("observed ".repeat(600)))
         .await
@@ -276,12 +272,12 @@ async fn the_token_trigger_follows_an_edit_made_after_the_last_reported_usage() 
     config.hooks.push(TrimLongInput);
     let (runner, events) = RunnerSetup {
         session: store,
+        compaction: token_trigger(),
         ..RunnerSetup::new(config)
     }
     .build();
-    let mut runner = runner.with_compaction(token_trigger()).unwrap();
 
-    let report = runner.run("continue", &CancellationToken::new()).await;
+    let report = runner.run("continue").await;
 
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
     assert!(!events.kinds().contains(&"compaction_start"), "{:?}", events.kinds());
@@ -289,8 +285,8 @@ async fn the_token_trigger_follows_an_edit_made_after_the_last_reported_usage() 
 }
 
 /// An in-memory session that holds `messages`.
-async fn session_of(messages: &[Message]) -> SessionStore {
-    let mut store = SessionStore::in_memory(header());
+async fn session_of(messages: &[Message]) -> Transcript {
+    let mut store = Transcript::in_memory(header());
     for message in messages {
         store.append_message(message.clone()).await.unwrap();
     }
@@ -393,13 +389,17 @@ async fn the_cache_key_goes_to_the_provider_and_into_the_request_audit() {
     let file = dir.path().join("session.jsonl");
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let mut config = config(provider.clone(), vec![]);
-    config.cache_key = Some("session-7".into());
-    let (mut runner, _) = RunnerSetup {
-        session: SessionStore::create(&file, header()).unwrap(),
+    config.session_cache_key = true;
+    let header = SessionHeader {
+        id: "session-7".into(),
+        ..header()
+    };
+    let (runner, _) = RunnerSetup {
+        session: common::create_session_file(&file, header).await.unwrap(),
         ..RunnerSetup::new(config)
     }
     .build();
-    runner.run("go", &CancellationToken::new()).await;
+    runner.run("go").await;
     assert_eq!(provider.requests()[0].cache_key.as_deref(), Some("session-7"));
     let replayed = runner
         .session()

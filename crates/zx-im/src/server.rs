@@ -1,25 +1,23 @@
-//! The server and its contracts: the session key, the host's [`SessionFactory`], the
-//! operator's [`ServerSink`], the reply texts, the configuration, and what every
-//! conversation shares. Routing is in `router.rs`.
+//! The server and its contracts: the session key, the operator's [`ServerSink`], the reply
+//! texts, the configuration, and what every conversation shares. Routing is in `router.rs`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Display;
 use std::future::Future;
 use std::hash::Hash;
 use std::num::NonZeroUsize;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use serde::Deserialize;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use zx_ai::sync::lock;
 
-use crate::AgentSession;
-use crate::agent::ApprovalResult;
-use crate::agent::Interaction;
+use crate::Agent;
+use crate::transcript::SessionQuery;
+use zx_core::events::ApprovalResult;
 
 use super::router::Router;
 use super::status::{left_behind, replace_left_behind};
@@ -40,49 +38,24 @@ pub struct SessionKey {
     pub thread: Option<ThreadId>,
 }
 
-/// Which session of a conversation [`SessionFactory::open`] opens.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Opening {
-    /// The conversation's latest session, created on first use.
-    Latest,
-    /// A new session, after `/new`; the earlier ones are kept.
-    New,
-}
+/// The labels of a conversation's sessions: its platform, its chat, and its thread, which is
+/// empty for a direct chat.
+const PLATFORM_LABEL: &str = "im.platform";
+const CONVERSATION_LABEL: &str = "im.conversation";
+const THREAD_LABEL: &str = "im.thread";
 
 impl SessionKey {
-    /// The directory of this conversation's sessions under `dir`:
-    /// `<dir>/<platform>/<conversation>` for a direct chat, and
-    /// `<dir>/<platform>/<conversation>/<thread>` for a thread. Each part is encoded so that
-    /// no ID can name another directory: bytes other than ASCII letters, digits, `-` and `_`
-    /// become `%XX`, and an empty part becomes `%`.
-    pub fn dir_in(&self, dir: &Path) -> PathBuf {
-        let mut path = dir.join(segment(&self.platform));
-        path.push(segment(&self.conversation.0));
-        if let Some(thread) = &self.thread {
-            path.push(segment(&thread.0));
-        }
-        path
-    }
-
-    /// The session file to open under `dir` for `opening`. Sessions are `<n>.jsonl` in
-    /// [`dir_in`](Self::dir_in), numbered from 1: the latest is the highest number, or 1 when
-    /// there is none yet, and a new one is one past the highest. Reads that directory, a few
-    /// names; an error when it exists but cannot be read.
-    pub fn file_in(&self, dir: &Path, opening: Opening) -> std::io::Result<PathBuf> {
-        let dir = self.dir_in(dir);
-        let highest = highest_number(&dir)?;
-        let number = match (opening, highest) {
-            (Opening::Latest, Some(highest)) => highest,
-            (Opening::Latest, None) => 1,
-            (Opening::New, highest) => highest.map_or(1, |highest| highest.saturating_add(1)),
-        };
-        Ok(dir.join(format!("{number}.{SESSION_EXTENSION}")))
-    }
-
-    /// Whether `dir` holds a session of this conversation. A directory that cannot be read
-    /// holds none.
-    pub fn has_file_in(&self, dir: &Path) -> bool {
-        matches!(highest_number(&self.dir_in(dir)), Ok(Some(_)))
+    /// The labels of this conversation's sessions, whatever storage the agent keeps them in:
+    /// the server gives them to each session it creates for the conversation, and finds the
+    /// conversation's sessions again by asking for them ([`SessionQuery`]). A direct chat has
+    /// an empty thread label, so that asking for its sessions never finds a thread's.
+    pub fn labels(&self) -> BTreeMap<String, String> {
+        let thread = self.thread.as_ref().map(|thread| thread.0.clone());
+        BTreeMap::from([
+            (PLATFORM_LABEL.to_string(), self.platform.clone()),
+            (CONVERSATION_LABEL.to_string(), self.conversation.0.clone()),
+            (THREAD_LABEL.to_string(), thread.unwrap_or_default()),
+        ])
     }
 
     /// Where the server posts for this conversation: the direct chat, or the thread.
@@ -91,74 +64,6 @@ impl SessionKey {
             conversation: self.conversation.clone(),
             thread: self.thread.clone(),
         }
-    }
-}
-
-/// Session files end in this, as chat's do.
-const SESSION_EXTENSION: &str = "jsonl";
-
-/// The highest `<n>` of the `<n>.jsonl` files in `dir`; `None` when there is none or `dir`
-/// does not exist.
-fn highest_number(dir: &Path) -> std::io::Result<Option<u64>> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    let mut highest = None;
-    for entry in entries {
-        let path = entry?.path();
-        if path.extension().and_then(|extension| extension.to_str()) != Some(SESSION_EXTENSION) {
-            continue;
-        }
-        if let Some(number) = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .and_then(|stem| stem.parse::<u64>().ok())
-        {
-            highest = highest.max(Some(number));
-        }
-    }
-    Ok(highest)
-}
-
-/// `id` as one part of a path, encoded as [`SessionKey::file_in`] says.
-pub(crate) fn segment(id: &str) -> String {
-    if id.is_empty() {
-        return "%".to_string();
-    }
-    let mut encoded = String::with_capacity(id.len());
-    for byte in id.bytes() {
-        if byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' {
-            encoded.push(char::from(byte));
-        } else {
-            encoded.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    encoded
-}
-
-/// Opens the session of a conversation. The host chooses the model, tools, policies, limits
-/// and where sessions are stored; [`SessionKey::file_in`] lays them out in a directory.
-#[async_trait]
-pub trait SessionFactory: Send + Sync {
-    /// Open the session of `key` that `opening` names. Set `interaction` as the loop's
-    /// [`interaction`](crate::agent::LoopConfig::interaction): it posts approval cards to the
-    /// conversation. Called again after an idle session was released. An error is posted to
-    /// the conversation after [`Replies::cannot_open`]; the next message tries again.
-    async fn open(
-        &self,
-        key: &SessionKey,
-        opening: Opening,
-        interaction: Arc<dyn Interaction>,
-    ) -> Result<AgentSession, String>;
-
-    /// Whether `key` has a session already: the bot took part in that thread, so a message
-    /// there that does not mention it is still part of the conversation. Called as messages
-    /// are routed; must return promptly. The default knows of none, so only mentions start
-    /// a conversation again after its session was released.
-    fn has_session(&self, _key: &SessionKey) -> bool {
-        false
     }
 }
 
@@ -212,7 +117,7 @@ pub struct Replies {
     pub cancelled: String,
     /// The answer to `/cancel` when nothing runs.
     pub nothing_to_cancel: String,
-    /// The answer to `/new`: the next message starts a new session.
+    /// The answer to `/new`: the conversation goes on in a new session.
     pub new_session: String,
     /// A run that completed without text.
     pub no_answer: String,
@@ -266,8 +171,11 @@ impl Default for Replies {
     }
 }
 
-/// Who may use the server and how much it runs at once.
+/// Who may use the server, where its sessions work and how much it runs at once.
 pub struct ServerConfig {
+    /// Where the session of a new conversation works, and goes on working when it is
+    /// opened again; the current directory by default.
+    pub cwd: PathBuf,
     /// Chats the server answers in, per platform. A message from another chat gets
     /// [`Replies::unauthorized`] and nothing else.
     pub conversations: Vec<(String, ConversationId)>,
@@ -293,6 +201,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
+            cwd: PathBuf::from("."),
             conversations: Vec::new(),
             approvers: Vec::new(),
             max_running: DEFAULT_MAX_RUNNING,
@@ -306,10 +215,20 @@ impl Default for ServerConfig {
 
 /// Answers chat messages, one session per conversation, as a person in the chat would.
 ///
-/// - A direct chat is one conversation; `/new` starts a new session for it.
+/// The sessions are the agent's: it chooses the model, tools, policies and limits, and keeps
+/// the sessions in its storage, where [`SessionKey::labels`] marks those of a conversation.
+/// Their approvals must wait for the host
+/// ([`ApprovalMode::Wait`](zx_core::policy::ApprovalMode::Wait)): the server posts a card for
+/// each request in the conversation and answers it when an approver clicks. A session that
+/// cannot be opened is reported to the conversation after [`Replies::cannot_open`]; the next
+/// message tries again.
+///
+/// - A direct chat is one conversation. `/new` alone starts a new session for the
+///   conversation at once, and the earlier ones are kept: a run in progress is cancelled
+///   first, and what is asked before that run has ended is answered in the new session.
 /// - In a group, a message that mentions the bot starts a thread under it, and each thread
 ///   is a conversation. The first mention in a thread someone else started reads what was
-///   said there before ([`ImChannel::thread_history`]).
+///   said there before ([`ImChannel::thread_history`]), unless `/new` came first.
 /// - In a thread the bot takes part in, a message is answered when it mentions the bot, or
 ///   when it comes from the person the bot just answered, mentions no one, and nobody else
 ///   spoke in between. Other messages there are only recorded, for the next answer.
@@ -322,14 +241,15 @@ impl Default for ServerConfig {
 ///   result however the approval ended.
 pub struct Server {
     config: ServerConfig,
-    factory: Arc<dyn SessionFactory>,
+    agent: Agent,
     sink: Arc<dyn ServerSink>,
 }
 
 impl Server {
-    /// A server for `config` that opens sessions with `factory` and reports to `sink`.
-    pub fn new(config: ServerConfig, factory: Arc<dyn SessionFactory>, sink: Arc<dyn ServerSink>) -> Self {
-        Self { config, factory, sink }
+    /// A server for `config` whose conversations are sessions of `agent`, and which reports
+    /// to `sink`.
+    pub fn new(config: ServerConfig, agent: Agent, sink: Arc<dyn ServerSink>) -> Self {
+        Self { config, agent, sink }
     }
 
     /// Serve `channels` until `cancel` is triggered or a channel fails.
@@ -348,12 +268,12 @@ impl Server {
         distinct_platforms(&channels)?;
         let Server {
             mut config,
-            factory,
+            agent,
             sink,
         } = self;
         // The chats served are the router's; the rest of the configuration is shared.
         let allowed = group(std::mem::take(&mut config.conversations));
-        let shared = Arc::new(Shared::new(config, factory, sink));
+        let shared = Arc::new(Shared::new(config, agent, sink));
         // Read before any run can start, so that no status of this process is among them.
         let left = left_behind(&shared).await;
         let stop = cancel.child_token();
@@ -383,7 +303,11 @@ fn distinct_platforms(channels: &[Arc<dyn ImChannel>]) -> Result<(), ImError> {
 
 /// Settings and resources every conversation reads.
 pub(crate) struct Shared {
-    pub(crate) factory: Arc<dyn SessionFactory>,
+    /// Makes the session of each conversation, and keeps it open while the conversation
+    /// holds it.
+    pub(crate) agent: Agent,
+    /// Where new sessions work.
+    pub(crate) cwd: PathBuf,
     pub(crate) sink: Arc<dyn ServerSink>,
     approvers: HashMap<String, HashSet<UserId>>,
     pub(crate) replies: Replies,
@@ -400,8 +324,9 @@ pub(crate) struct Shared {
 
 impl Shared {
     /// What the conversations share, from everything in `config` but the chats served.
-    pub(crate) fn new(config: ServerConfig, factory: Arc<dyn SessionFactory>, sink: Arc<dyn ServerSink>) -> Self {
+    pub(crate) fn new(config: ServerConfig, agent: Agent, sink: Arc<dyn ServerSink>) -> Self {
         let ServerConfig {
+            cwd,
             // Taken by the router before.
             conversations: _,
             approvers,
@@ -412,7 +337,8 @@ impl Shared {
             statuses,
         } = config;
         Self {
-            factory,
+            agent,
+            cwd,
             sink,
             approvers: group(approvers),
             replies,
@@ -440,6 +366,19 @@ impl Shared {
             .unwrap_or_else(|| user.0.clone());
         lock(&self.names).insert(known, name.clone());
         name
+    }
+
+    /// The ID of the conversation's most recently active session, if it has one.
+    pub(crate) async fn latest_session(&self, key: &SessionKey) -> Result<Option<String>, String> {
+        let query = SessionQuery {
+            labels: key.labels(),
+            limit: Some(1),
+            ..SessionQuery::default()
+        };
+        match self.agent.list_sessions(&query).await {
+            Ok(list) => Ok(list.sessions.into_iter().next().map(|session| session.id)),
+            Err(error) => Err(format!("{error:#}")),
+        }
     }
 
     pub(crate) fn is_approver(&self, platform: &str, user: &UserId) -> bool {
@@ -527,58 +466,25 @@ mod tests {
     }
 
     #[test]
-    fn a_thread_has_a_directory_under_its_chat_and_a_direct_chat_has_the_chat_s() {
-        let dir = Path::new("/data/sessions");
+    fn a_thread_s_labels_are_not_its_chat_s() {
+        let labels = |key: SessionKey| -> Vec<(String, String)> { key.labels().into_iter().collect() };
+        let pair = |name: &str, value: &str| (name.to_string(), value.to_string());
+
         assert_eq!(
-            key("slack", "C0123", Some("1700000000_1")).dir_in(dir),
-            Path::new("/data/sessions/slack/C0123/1700000000_1")
+            labels(key("slack", "C1", Some("t1"))),
+            [
+                pair("im.conversation", "C1"),
+                pair("im.platform", "slack"),
+                pair("im.thread", "t1")
+            ]
         );
         assert_eq!(
-            key("slack", "D0123", None).dir_in(dir),
-            Path::new("/data/sessions/slack/D0123")
+            labels(key("slack", "D1", None)),
+            [
+                pair("im.conversation", "D1"),
+                pair("im.platform", "slack"),
+                pair("im.thread", "")
+            ]
         );
-    }
-
-    #[test]
-    fn ids_cannot_leave_the_session_directory() {
-        let path = key("..", "a/b", Some("1700000000.000100")).dir_in(Path::new("/s"));
-        assert_eq!(path, Path::new("/s/%2E%2E/a%2Fb/1700000000%2E000100"));
-    }
-
-    #[test]
-    fn multibyte_and_empty_ids_are_encoded() {
-        let path = key("", "群", Some("t")).dir_in(Path::new("/s"));
-        assert_eq!(path, Path::new("/s/%/%E7%BE%A4/t"));
-    }
-
-    #[test]
-    fn the_first_session_is_1_and_a_new_one_follows_the_highest() {
-        let dir = tempfile::tempdir().unwrap();
-        let key = key("slack", "D1", None);
-        assert!(!key.has_file_in(dir.path()));
-        let first = key.file_in(dir.path(), Opening::Latest).unwrap();
-        assert_eq!(first, key.dir_in(dir.path()).join("1.jsonl"));
-        assert_eq!(key.file_in(dir.path(), Opening::New).unwrap(), first);
-
-        std::fs::create_dir_all(key.dir_in(dir.path())).unwrap();
-        for name in ["1.jsonl", "9.jsonl", "10.jsonl", "notes.jsonl", "11.txt"] {
-            std::fs::write(key.dir_in(dir.path()).join(name), "").unwrap();
-        }
-        assert!(key.has_file_in(dir.path()));
-        let latest = key.file_in(dir.path(), Opening::Latest).unwrap();
-        assert_eq!(latest.file_name().unwrap(), "10.jsonl");
-        let new = key.file_in(dir.path(), Opening::New).unwrap();
-        assert_eq!(new.file_name().unwrap(), "11.jsonl");
-    }
-
-    #[test]
-    fn a_thread_s_sessions_are_not_its_chat_s() {
-        let dir = tempfile::tempdir().unwrap();
-        let thread = key("slack", "C1", Some("t1"));
-        std::fs::create_dir_all(thread.dir_in(dir.path())).unwrap();
-        std::fs::write(thread.file_in(dir.path(), Opening::Latest).unwrap(), "").unwrap();
-        assert!(thread.has_file_in(dir.path()));
-        assert!(!key("slack", "C1", Some("t2")).has_file_in(dir.path()));
-        assert!(!key("slack", "C1", None).has_file_in(dir.path()));
     }
 }

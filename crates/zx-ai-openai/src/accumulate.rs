@@ -106,8 +106,8 @@ impl Accumulator {
                 deltas.push(Delta::Text { text: text.to_string() });
             }
             if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
-                for (position, call) in calls.iter().enumerate() {
-                    self.apply_tool_call(position, call, &mut deltas);
+                for call in calls {
+                    self.apply_tool_call(call, &mut deltas);
                 }
             }
         }
@@ -127,15 +127,35 @@ impl Accumulator {
         }
     }
 
-    fn apply_tool_call(&mut self, position: usize, call: &Value, deltas: &mut Vec<Delta>) {
-        let index = call.get("index").and_then(Value::as_u64).unwrap_or(position as u64);
+    /// The position in `blocks` of the call that a tool-call chunk continues, if it
+    /// continues one: the call of its `index`. Some servers send no index; then it is the
+    /// call with the chunk's `id`, and for a chunk without an id the latest call, since a
+    /// chunk that names no call can only go on with the one under way. The chunk's place in
+    /// its array says nothing: two chunks at the same place can belong to different calls.
+    fn tool_slot(&self, index: Option<u64>, id: Option<&str>) -> Option<usize> {
+        match (index, id) {
+            (Some(index), _) => self.tool_slots.get(&index).copied(),
+            (None, Some(id)) => self
+                .blocks
+                .iter()
+                .position(|block| matches!(block, Block::Tool { id: existing, .. } if existing == id)),
+            (None, None) => self
+                .blocks
+                .iter()
+                .rposition(|block| matches!(block, Block::Tool { .. })),
+        }
+    }
+
+    fn apply_tool_call(&mut self, call: &Value, deltas: &mut Vec<Delta>) {
+        let index = call.get("index").and_then(Value::as_u64);
+        let id = call.get("id").and_then(Value::as_str).filter(|id| !id.is_empty());
         let function = call.get("function");
         let name = function
             .and_then(|function| function.get("name"))
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let slot = match self.tool_slots.get(&index) {
-            Some(&slot) => {
+        let slot = match self.tool_slot(index, id) {
+            Some(slot) => {
                 if let Block::Tool { name: existing, .. } = &mut self.blocks[slot]
                     && existing.is_empty()
                     && !name.is_empty()
@@ -145,18 +165,18 @@ impl Accumulator {
                 slot
             }
             None => {
-                let id = call
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .filter(|id| !id.is_empty())
-                    .map_or_else(|| format!("call_{index}"), str::to_string);
+                // Without an id the call is named by its index. A call with neither is the
+                // answer's first: a later chunk like it continues the call before it.
+                let id = id.map_or_else(|| format!("call_{}", index.unwrap_or(0)), str::to_string);
                 self.blocks.push(Block::Tool {
                     id: id.clone(),
                     name: name.to_string(),
                     args: String::new(),
                 });
                 let slot = self.blocks.len() - 1;
-                self.tool_slots.insert(index, slot);
+                if let Some(index) = index {
+                    self.tool_slots.insert(index, slot);
+                }
                 deltas.push(Delta::ToolCallStart {
                     id,
                     name: name.to_string(),
@@ -480,6 +500,63 @@ mod tests {
             ],
         );
         assert_eq!(acc.finish().unwrap().tool_calls()[0].id, "call_2");
+    }
+
+    /// The calls of the answer that `chunks` stream, as `(id, name, arguments)`.
+    fn streamed_calls(chunks: &[Value]) -> Vec<(String, String, Value)> {
+        let mut acc = Accumulator::new("p", "m", 1);
+        apply_all(&mut acc, chunks);
+        acc.apply(&json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]}));
+        let calls = acc.finish().unwrap().tool_calls();
+        assert!(calls.iter().all(|call| call.arguments_error.is_none()), "{calls:?}");
+        calls
+            .into_iter()
+            .map(|call| (call.id, call.name, call.arguments))
+            .collect()
+    }
+
+    #[test]
+    fn calls_without_an_index_are_told_apart_by_their_ids() {
+        let calls = streamed_calls(&[
+            json!({"choices":[{"delta":{"tool_calls":[{"id":"a","function":{"name":"bash","arguments":"{\"command\":\"ls\"}"}}]}}]}),
+            json!({"choices":[{"delta":{"tool_calls":[{"id":"b","function":{"name":"read_file","arguments":"{\"path\":\"x\"}"}}]}}]}),
+        ]);
+        assert_eq!(
+            calls,
+            [
+                ("a".to_string(), "bash".to_string(), json!({"command": "ls"})),
+                ("b".to_string(), "read_file".to_string(), json!({"path": "x"})),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_fragment_without_an_index_joins_the_call_with_its_id() {
+        let calls = streamed_calls(&[
+            json!({"choices":[{"delta":{"tool_calls":[{"id":"a","function":{"name":"bash","arguments":"{\"command\":"}}]}}]}),
+            json!({"choices":[{"delta":{"tool_calls":[{"id":"b","function":{"name":"read_file","arguments":"{\"path\":\"x\"}"}}]}}]}),
+            json!({"choices":[{"delta":{"tool_calls":[{"id":"a","function":{"arguments":"\"ls\"}"}}]}}]}),
+        ]);
+        assert_eq!(
+            calls,
+            [
+                ("a".to_string(), "bash".to_string(), json!({"command": "ls"})),
+                ("b".to_string(), "read_file".to_string(), json!({"path": "x"})),
+            ]
+        );
+    }
+
+    #[test]
+    fn fragments_without_an_index_or_an_id_continue_the_latest_call() {
+        let calls = streamed_calls(&[
+            json!({"choices":[{"delta":{"tool_calls":[{"function":{"name":"bash","arguments":"{\"comm"}}]}}]}),
+            json!({"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"and\":\"ls\"}"}}]}}]}),
+        ]);
+        // Named like a call that gave its index but no id.
+        assert_eq!(
+            calls,
+            [("call_0".to_string(), "bash".to_string(), json!({"command": "ls"}))]
+        );
     }
 
     #[test]

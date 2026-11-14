@@ -2,42 +2,56 @@
 //!
 //! The loop stops at the first provider error; this layer decides whether to retry, keeps
 //! the session as the source of model context, and enforces request, time and token limits.
+//! A [`Session`](crate::session::Session) owns the Runner and lends it to one run at a time.
 //!
-//! - `run_host`: what a run lends the loop and the compactor, and how a run opens and closes
+//! - `step_loop`: the loop a run runs once per attempt, and what it runs with (`LoopConfig`,
+//!   which the agent assembles for each session)
+//! - `accounting`: what a run spends across its attempts, and its budgets; the loop of each
+//!   attempt counts into it
+//! - `trace`: one run's identity and event numbering, and where its events go: the run's
+//!   reader, then the hooks that observe them
+//! - `run_host`: what a run lends the loop and the compactor, how a run opens, and when its
+//!   context is summarized
+//! - `recovery`: what follows a provider failure: a retry, or one recovery from a context
+//!   the model rejected as too long
 //! - `interrupted`: results for the tool calls an interrupted run left unfinished
 //! - `final_answer`: the answer, joined from the parts that continue a cut-off one
-//!
-//! What a run spends is counted in the agent layer's `RunAccounting`, which a run lends
-//! the loop of each attempt.
 
+mod accounting;
 mod final_answer;
 mod interrupted;
+mod recovery;
 mod run_host;
+mod step_loop;
+mod trace;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use final_answer::final_answer;
 use run_host::{CompactionPause, RunHost, RunStop};
 
-use crate::agent::{
-    AgentEvent, AgentLoop, ApprovalCache, EventSink, EventTarget, Halt, LoopConfig, QueuedMessage, RunAccounting,
-    record_pending_entries,
-};
-pub use crate::agent::{RunOutcome, RunReport};
-use crate::ai::retry::{RetryPolicy, is_context_overflow, is_retryable};
-use crate::ai::{AssistantMessage, Provider, Reasoning};
+use crate::ai::retry::RetryPolicy;
+use crate::ai::{Provider, Reasoning};
 use crate::compaction::{self, Trigger};
-use crate::session::SessionStore;
+pub use crate::events::report::{RunOutcome, RunReport};
+use crate::events::{Event, EventKind};
+use crate::input::Input;
+use crate::policy::ApprovalGate;
 use crate::sync::AbortOnDrop;
+use crate::transcript::Transcript;
+pub(crate) use accounting::RunAccounting;
+pub(crate) use step_loop::{FirstInput, Halt, LoopConfig, PERSIST_FAILED, StepLoop, record_pending_entries};
+pub(crate) use trace::{EventTarget, RunTrace};
 
 /// Bounds for one run. Defaults impose no request or time limit.
-/// Continuation is supplied by a finish_turn hook.
+/// Continuation is supplied by a finish_step hook.
 #[derive(Clone, Debug, Default)]
-pub struct Limits {
+pub struct RunLimits {
     /// Model requests per run, failed attempts included. `None` disables the limit;
     /// `Some(0)` prevents any model request.
     pub max_model_requests: Option<u32>,
@@ -49,42 +63,44 @@ pub struct Limits {
     pub token_budget: Option<u64>,
     /// What the run may spend, in the unit of the configured prices (any currency, as long as
     /// every price uses it): the cost of all its model requests by those prices
-    /// ([`LoopConfig::models`](crate::agent::LoopConfig::models)), summary requests and
+    /// ([`AgentConfig::models`](crate::AgentConfig::models)), summary requests and
     /// failed attempts included. Checked before each request, so the last one may go over.
     /// A response from a model without a price costs nothing here, so the host checks that
     /// its models have prices. Tool usage is not counted. `None` disables the budget.
     pub cost_budget: Option<f64>,
 }
 
+/// What links a run to its reader: the run's ID, the token that cancels it, and where the
+/// reader takes its events from.
+pub(crate) struct RunLink {
+    pub(crate) id: String,
+    pub(crate) cancel: CancellationToken,
+    pub(crate) events: mpsc::Sender<Event>,
+}
+
 /// Runs prompts against one session, adding retries, limits, and persistence to the loop.
-pub struct Runner {
+/// One Runner owns one conversation, and `&mut self` keeps its runs from overlapping.
+pub(crate) struct Runner {
     config: LoopConfig,
     retry: RetryPolicy,
-    limits: Limits,
-    session: SessionStore,
-    sink: Arc<dyn EventSink>,
-    approvals: ApprovalCache,
+    limits: RunLimits,
+    session: Transcript,
+    /// Shared with the session's handles, which answer the requests that wait there.
+    approvals: Arc<ApprovalGate>,
     compaction: compaction::Config,
     pause: CompactionPause,
 }
 
 impl Runner {
     /// Create a runner. Each step of a run is recorded in `session` before it takes effect;
-    /// events go to `sink` afterwards.
-    pub fn new(
-        config: LoopConfig,
-        retry: RetryPolicy,
-        limits: Limits,
-        session: SessionStore,
-        sink: Arc<dyn EventSink>,
-    ) -> Self {
+    /// its events follow.
+    pub(crate) fn new(config: LoopConfig, retry: RetryPolicy, limits: RunLimits, session: Transcript) -> Self {
         Self {
             config,
             retry,
             limits,
             session,
-            sink,
-            approvals: ApprovalCache::default(),
+            approvals: Arc::default(),
             compaction: compaction::Config::default(),
             pause: CompactionPause::default(),
         }
@@ -92,21 +108,20 @@ impl Runner {
 
     /// Opt into automatic context preparation or tune manual summary budgets.
     /// Rejects invalid budgets without making requests or changing the session.
-    pub fn with_compaction(mut self, config: compaction::Config) -> anyhow::Result<Self> {
+    pub(crate) fn with_compaction(mut self, config: compaction::Config) -> anyhow::Result<Self> {
         config.validate()?;
         self.compaction = config;
         Ok(self)
     }
 
-    /// Summarize the old prefix without executing a task or tools. Uses the same exclusive
-    /// Runner borrow as run; cancellation and future drop cancel only this operation. Its
-    /// events carry a `runId` of their own.
-    pub async fn compact(&mut self, cancel: &CancellationToken) -> compaction::Report {
-        let child = cancel.child_token();
+    /// Summarize the old prefix without executing a task or tools, as the run `link` names.
+    /// Cancellation and future drop cancel only this operation.
+    pub(crate) async fn compact(&mut self, link: &RunLink) -> compaction::Report {
+        let child = link.cancel.child_token();
         let _cancel_on_drop = child.drop_guard_ref();
-        let trace = self.config.trace(self.session.header().id.clone(), child.clone());
+        let trace = self.config.trace(&self.session, link.id.clone(), child.clone());
         let target = EventTarget {
-            sink: self.sink.as_ref(),
+            events: &link.events,
             trace: &trace,
             hooks: &self.config.hooks,
         };
@@ -120,13 +135,14 @@ impl Runner {
         host.compact(Trigger::Manual, 1).await.into()
     }
 
-    /// The loop configuration, for example to reach `config().queues` during a run.
-    pub fn config(&self) -> &LoopConfig {
+    /// The loop configuration.
+    pub(crate) fn config(&self) -> &LoopConfig {
         &self.config
     }
 
-    pub(crate) fn replace_sink(&mut self, sink: Arc<dyn EventSink>) -> Arc<dyn EventSink> {
-        std::mem::replace(&mut self.sink, sink)
+    /// Where the calls of this conversation wait for approval.
+    pub(crate) fn approvals(&self) -> &Arc<ApprovalGate> {
+        &self.approvals
     }
 
     pub(crate) fn replace_model(&mut self, provider: Arc<dyn Provider>, model: String) -> (Arc<dyn Provider>, String) {
@@ -143,55 +159,24 @@ impl Runner {
     }
 
     /// The session the runner records in.
-    pub fn session(&self) -> &SessionStore {
+    pub(crate) fn session(&self) -> &Transcript {
         &self.session
     }
 
     /// The session, for what a host does to it between runs: a branch switch, or a record
     /// of its own, such as an extension's state.
-    pub(crate) fn session_mut(&mut self) -> &mut SessionStore {
+    pub(crate) fn session_mut(&mut self) -> &mut Transcript {
         &mut self.session
     }
 
-    /// Run one prompt to completion: the person's text, or a message from an extension (pi:
-    /// `sendMessage` with `triggerTurn` while idle). Never panics on provider or tool
-    /// failures; the report says how the run ended.
-    ///
-    /// One runner owns one active conversation. Overlapping runs are rejected by borrowing:
-    ///
-    /// ```compile_fail
-    /// use tokio_util::sync::CancellationToken;
-    /// use zx_core::runner::Runner;
-    ///
-    /// async fn overlapping(runner: &mut Runner, cancel: &CancellationToken) {
-    ///     let first = runner.run("first", cancel);
-    ///     let second = runner.run("second", cancel);
-    ///     tokio::join!(first, second);
-    /// }
-    /// ```
-    pub async fn run(&mut self, message: impl Into<QueuedMessage>, cancel: &CancellationToken) -> RunReport {
-        self.start(Start::Message(message.into()), cancel).await
-    }
-
-    /// Continue the conversation without new input: the model answers
-    /// the session as it is. Runs like [`Runner::run`] otherwise, interrupted calls recovered
-    /// first. Whether there is something to answer is checked after that recovery:
-    ///
-    /// - the conversation ends with input or a tool result: the model answers it, for
-    ///   example after a crash left results to recover;
-    /// - it ends with an answer that failed or was cancelled, whose calls never ran: that
-    ///   answer is omitted with a `context_edit`, as a retry does, and the model answers again;
-    /// - it ends with a finished answer: queued steering, or else follow-up, input becomes the
-    ///   next input; with none queued the run ends with an error and makes no request, as it
-    ///   does for an empty conversation.
-    pub async fn continue_run(&mut self, cancel: &CancellationToken) -> RunReport {
-        self.start(Start::Continue, cancel).await
-    }
-
-    async fn start(&mut self, begin: Start, cancel: &CancellationToken) -> RunReport {
-        let run_cancel = cancel.child_token();
-        // Dropping this future must cancel background providers even when the caller
-        // keeps its parent token alive.
+    /// Run from `begin` to completion, as the run `link` names: a prompt, or the session as
+    /// it is ([`Session::continue_run`](crate::session::Session::continue_run) says what is
+    /// then answered). Never panics on provider or tool failures; the report says how the
+    /// run ended.
+    pub(crate) async fn run(&mut self, begin: Start, link: &RunLink) -> RunReport {
+        let run_cancel = link.cancel.child_token();
+        // Dropping this future must cancel background providers even when the session
+        // keeps the run's token alive.
         let _cancel_on_drop = run_cancel.drop_guard_ref();
         let timer = RunTimer::start(self.limits.timeout, &run_cancel);
         let Self {
@@ -199,18 +184,17 @@ impl Runner {
             retry,
             limits,
             session,
-            sink,
             approvals,
             compaction,
             pause,
         } = self;
-        let trace = config.trace(session.header().id.clone(), run_cancel.clone());
+        let trace = config.trace(session, link.id.clone(), run_cancel.clone());
         let target = EventTarget {
-            sink: sink.as_ref(),
+            events: &link.events,
             trace: &trace,
             hooks: &config.hooks,
         };
-        let run = Run {
+        let running = Running {
             host: RunHost {
                 session,
                 target,
@@ -225,51 +209,52 @@ impl Runner {
             overflow_recovered: false,
             timer,
         };
-        run.run(begin).await
+        running.run(begin).await
     }
 }
 
-/// One run in progress: the session host it records through, what it borrows from the
+/// One run in progress: the host it records through, what it borrows from the
 /// Runner, and what its attempts have spent so far.
-struct Run<'a> {
+struct Running<'a> {
     host: RunHost<'a>,
     retry: &'a RetryPolicy,
-    limits: &'a Limits,
-    approvals: &'a mut ApprovalCache,
+    limits: &'a RunLimits,
+    approvals: &'a ApprovalGate,
     accounting: RunAccounting,
     /// A context overflow was recovered from once already.
     overflow_recovered: bool,
     timer: RunTimer,
 }
 
-impl Run<'_> {
+impl Running<'_> {
     /// Open the run from `begin`, run its attempts, and report how it ended.
     async fn run(mut self, begin: Start) -> RunReport {
         // The run's answer is what it adds after the entries the session has now. Counted in
         // entries, whose IDs remain stable even when hooks omit messages from earlier runs.
         let run_start = self.host.session.entries().len();
         let stop = match self.host.open_run(begin).await {
-            Ok(prompts) => self.attempts(prompts).await,
+            Ok(first) => self.attempts(first).await,
             Err(error) => RunStop::Failed(error),
         };
         self.close(stop, run_start).await
     }
 
-    /// Run `prompts`, then retry or recover from a context overflow as long as the budget
-    /// and the retry policy allow, until an attempt ends the run.
-    async fn attempts(&mut self, mut prompts: Vec<QueuedMessage>) -> RunStop {
+    /// Make an attempt that starts with `first`, then retry or recover from a context
+    /// overflow as long as the budget and the retry policy allow, until an attempt ends the
+    /// run. An attempt after the first starts with the conversation as it is.
+    async fn attempts(&mut self, mut first: FirstInput) -> RunStop {
         loop {
-            let turns_before = self.accounting.task_turns;
-            let (failed, entry_id) = match self.attempt(std::mem::take(&mut prompts)).await {
-                Halt::Ended(outcome) => break RunStop::Ended(outcome),
+            let steps_before = self.accounting.task_steps;
+            let (failed, entry_id) = match self.attempt(std::mem::take(&mut first)).await {
+                Halt::Ended(ending) => break RunStop::Ended(ending),
                 // Hook and recording failures are distinct from failed provider responses and
                 // are not retried.
                 Halt::Failed(error) => break RunStop::Failed(error),
                 Halt::Unrecorded(error) => break RunStop::Failed(format!("{error:#}")),
                 Halt::ProviderFailed { message, entry_id } => (message, entry_id),
             };
-            let task_turns = self.accounting.task_turns - turns_before;
-            if let Err(stop) = self.after_failure(&failed, &entry_id, task_turns).await {
+            let task_steps = self.accounting.task_steps - steps_before;
+            if let Err(stop) = self.after_failure(&failed, &entry_id, task_steps).await {
                 break stop;
             }
         }
@@ -277,62 +262,14 @@ impl Run<'_> {
 
     /// Make one attempt: run the loop, which counts what it spends into the run's
     /// accounting and checks the run's budgets. Returns why the loop stopped.
-    async fn attempt(&mut self, prompts: Vec<QueuedMessage>) -> Halt {
+    async fn attempt(&mut self, first: FirstInput) -> Halt {
         self.accounting.attempts = self.accounting.attempts.saturating_add(1);
         let (config, target) = (self.host.config, self.host.target);
-        AgentLoop::new(
-            config,
-            &mut self.host,
-            &mut *self.approvals,
-            &mut self.accounting,
-            target,
-        )
-        .run(prompts)
-        .await
-    }
-
-    /// Recover from a context overflow by compacting once, or schedule a retry; an error
-    /// says why the run ends instead. Both are requests, so both need budget. `failed` is
-    /// the response that failed, in the session as `entry_id`; `task_turns` counts the turns
-    /// of its attempt.
-    async fn after_failure(
-        &mut self,
-        failed: &AssistantMessage,
-        entry_id: &str,
-        task_turns: u32,
-    ) -> Result<(), RunStop> {
-        let error = failed.failure_reason();
-        let cancelled = self.host.target.trace.cancel().is_cancelled();
-        let out_of_budget = self.accounting.exhausted().is_some() || cancelled;
-        if is_context_overflow(failed) && self.host.compaction.automatic() {
-            // A context the model rejects as too long fails again however often it is sent:
-            // compact once and continue. Not a retry, so it has its own limit: once per run,
-            // until an answer succeeds again (more than one turn in the attempt).
-            let refusal = if self.overflow_recovered && task_turns <= 1 {
-                Some("the context still overflowed after compacting it once".to_string())
-            } else {
-                self.host.pause.reason().map(|reason| {
-                    format!("automatic compaction is paused because it failed earlier in this session ({reason})")
-                })
-            };
-            if let Some(refusal) = refusal {
-                return Err(RunStop::Failed(format!("{error}; {refusal}")));
-            }
-            if out_of_budget {
-                return Err(RunStop::Failed(error.to_string()));
-            }
-            self.host
-                .recover_overflow(error, entry_id, &mut self.accounting)
-                .await?;
-            self.overflow_recovered = true;
-            return Ok(());
-        }
-        // Without budget, the provider error is the reason the run ends.
-        if !is_retryable(failed) || self.accounting.retries >= self.retry.max_retries || out_of_budget {
-            return Err(RunStop::Failed(error.to_string()));
-        }
-        self.host
-            .schedule_retry(self.retry, &mut self.accounting, failed, entry_id)
+        // Borrowed again for this attempt alone, so that the loop's borrow of the host and
+        // the host's borrow of the Runner end together.
+        let mut host = self.host.reborrow();
+        StepLoop::new(config, &mut host, self.approvals, &mut self.accounting, target)
+            .run(first)
             .await
     }
 
@@ -358,10 +295,10 @@ impl Run<'_> {
             tool_usage: accounting.tool_usage.clone(),
             denied_calls: accounting.denied_calls,
             error,
-            session_file: session.path().map(|path| path.display().to_string()),
+            session_id: session.header().id.clone(),
         };
         target
-            .emit(AgentEvent::RunEnd {
+            .emit(EventKind::RunEnd {
                 report: Box::new(report.clone()),
             })
             .await;
@@ -371,19 +308,17 @@ impl Run<'_> {
     /// How the run ended, as the report states it.
     fn conclude(&self, stop: RunStop) -> (RunOutcome, Option<String>) {
         let (limits, accounting, timed_out) = (self.limits, &self.accounting, self.timer.timed_out());
-        let outcome = match stop {
-            RunStop::Failed(error) => return (RunOutcome::Error, Some(error)),
-            RunStop::Ended(outcome) => outcome,
+        let ending = match stop {
+            RunStop::Failed(error) => return (RunOutcome::Failed, Some(error)),
+            RunStop::Ended(ending) => ending,
         };
-        match outcome {
-            RunOutcome::Completed => (RunOutcome::Completed, None),
-            RunOutcome::Truncated => (
+        match ending {
+            Ending::Completed => (RunOutcome::Completed, None),
+            Ending::Truncated => (
                 RunOutcome::Truncated,
                 Some("the answer was cut off at the output token limit".to_string()),
             ),
-            // A failed attempt ends the run as `Failed`, with its reason, never as `Ended`.
-            RunOutcome::Error => (RunOutcome::Error, Some("loop failed without a diagnostic".to_string())),
-            RunOutcome::ModelRequestLimit => (
+            Ending::ModelRequestLimit => (
                 RunOutcome::ModelRequestLimit,
                 Some(format!(
                     "model request limit reached (max_model_requests = {})",
@@ -392,7 +327,7 @@ impl Run<'_> {
                         .expect("ModelRequestLimit requires a configured request limit")
                 )),
             ),
-            RunOutcome::TokenBudget => (
+            Ending::TokenBudget => (
                 RunOutcome::TokenBudget,
                 Some(format!(
                     "token budget reached ({} tokens used, token_budget = {})",
@@ -402,7 +337,7 @@ impl Run<'_> {
                         .expect("TokenBudget requires a configured token budget")
                 )),
             ),
-            RunOutcome::CostBudget => (
+            Ending::CostBudget => (
                 RunOutcome::CostBudget,
                 Some(format!(
                     "cost budget reached ({:.4} spent, cost_budget = {})",
@@ -412,26 +347,54 @@ impl Run<'_> {
                         .expect("CostBudget requires a configured cost budget")
                 )),
             ),
-            // An attempt never ends with `Timeout`: the timer cancels it, and only `timed_out`
-            // tells that cancellation from the caller's.
-            RunOutcome::Aborted | RunOutcome::Timeout if timed_out => {
+            // The time limit cancels the attempt, and only `timed_out` tells that
+            // cancellation from the caller's.
+            Ending::Cancelled if timed_out => {
                 // Only the timer of a configured limit sets `timed_out`.
                 let limit = limits.timeout.expect("Timeout requires a configured time limit");
                 (
-                    RunOutcome::Timeout,
+                    RunOutcome::TimedOut,
                     Some(format!("run exceeded the {}s time limit", limit.as_secs())),
                 )
             }
-            RunOutcome::Aborted | RunOutcome::Timeout => (RunOutcome::Aborted, Some("run was cancelled".to_string())),
+            Ending::Cancelled => (RunOutcome::Cancelled, Some("run was cancelled".to_string())),
+        }
+    }
+}
+
+/// How an attempt, and with it the run, ends when nothing failed. A failure is not among
+/// these: it comes with its reason ([`Halt::Failed`], [`RunStop::Failed`]). Nor is the time
+/// limit: it cancels the run, and the run's timer tells that from the caller's cancellation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Ending {
+    Completed,
+    /// The answer was cut off at the output token limit.
+    Truncated,
+    ModelRequestLimit,
+    TokenBudget,
+    CostBudget,
+    Cancelled,
+}
+
+impl Ending {
+    /// The outcome as events and reports name it.
+    pub(crate) fn outcome(self) -> RunOutcome {
+        match self {
+            Self::Completed => RunOutcome::Completed,
+            Self::Truncated => RunOutcome::Truncated,
+            Self::ModelRequestLimit => RunOutcome::ModelRequestLimit,
+            Self::TokenBudget => RunOutcome::TokenBudget,
+            Self::CostBudget => RunOutcome::CostBudget,
+            Self::Cancelled => RunOutcome::Cancelled,
         }
     }
 }
 
 /// What a run starts from.
-enum Start {
+pub(crate) enum Start {
     /// The person's text, or a message from an extension.
-    Message(QueuedMessage),
-    /// The session as it is; see [`Runner::continue_run`].
+    Message(Input),
+    /// The session as it is.
     Continue,
 }
 
@@ -467,38 +430,51 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::agent::{NullSink, Tool};
     use crate::ai::Message;
     use crate::ai::faux::{FauxProvider, FauxStep};
-    use crate::session::{FailingWriter, SessionHeader};
+    use crate::tools::{Tool, Toolbox};
+    use crate::transcript::{FailingWriter, SessionHeader};
 
     #[test]
-    fn default_turn_budget_is_unbounded() {
-        assert_eq!(Limits::default().max_model_requests, None);
+    fn default_step_budget_is_unbounded() {
+        assert_eq!(RunLimits::default().max_model_requests, None);
     }
 
     #[test]
     fn default_token_budget_is_unbounded() {
-        assert_eq!(Limits::default().token_budget, None);
+        assert_eq!(RunLimits::default().token_budget, None);
     }
 
     /// A loop over `provider` and `tools` with no system prompt.
     fn config(provider: &Arc<FauxProvider>, tools: Vec<Arc<dyn Tool>>) -> LoopConfig {
         LoopConfig {
-            tools,
+            tools: Toolbox::new(tools).unwrap(),
             ..LoopConfig::new(provider.clone(), "m")
         }
     }
 
-    /// A runner without retries or limits, whose events go nowhere.
-    fn runner(config: LoopConfig, session: SessionStore) -> Runner {
-        Runner::new(
-            config,
-            RetryPolicy::default(),
-            Limits::default(),
-            session,
-            Arc::new(NullSink),
-        )
+    /// A runner without retries or limits.
+    fn runner(config: LoopConfig, session: Transcript) -> Runner {
+        Runner::new(config, RetryPolicy::default(), RunLimits::default(), session)
+    }
+
+    /// Run `prompt` on `runner` to its end, cancelled by `cancel`, with a reader that drops
+    /// the events.
+    async fn run(runner: &mut Runner, prompt: &str, cancel: &CancellationToken) -> RunReport {
+        let (events, mut reader) = mpsc::channel(1);
+        let link = RunLink {
+            id: "run".into(),
+            cancel: cancel.clone(),
+            events,
+        };
+        let running = runner.run(Start::Message(prompt.into()), &link);
+        tokio::pin!(running);
+        loop {
+            tokio::select! {
+                report = &mut running => return report,
+                Some(_) = reader.recv() => {}
+            }
+        }
     }
 
     /// Fails every write that contains `needle`, like a disk filling up at that record; the
@@ -547,7 +523,7 @@ mod tests {
             "compaction_failed",
         ] {
             let header = SessionHeader::new(Path::new("."), "m");
-            let mut store = SessionStore::with_writer(header, RejectWrites::entry(rejected));
+            let mut store = Transcript::with_writer(header, RejectWrites::entry(rejected));
             let old = store.append_message(Message::user("x".repeat(4096))).await.unwrap();
             store.append_message(Message::user("recent")).await.unwrap();
             let summary = if rejected == "compaction_failed" {
@@ -566,8 +542,8 @@ mod tests {
                     ..compaction::Config::default()
                 })
                 .unwrap();
-            let report = runner.run("continue", &CancellationToken::new()).await;
-            assert_eq!(report.outcome, RunOutcome::Error, "{rejected}: {report:?}");
+            let report = run(&mut runner, "continue", &CancellationToken::new()).await;
+            assert_eq!(report.outcome, RunOutcome::Failed, "{rejected}: {report:?}");
             assert!(report.error.unwrap().contains(&format!("disk full on {rejected}")));
             assert_eq!(
                 provider.requests().len(),
@@ -581,7 +557,7 @@ mod tests {
     #[tokio::test]
     async fn a_cancelled_summary_whose_failure_cannot_be_recorded_ends_the_run_as_an_error() {
         let header = SessionHeader::new(Path::new("."), "m");
-        let mut store = SessionStore::with_writer(header, RejectWrites::entry("compaction_failed"));
+        let mut store = Transcript::with_writer(header, RejectWrites::entry("compaction_failed"));
         store.append_message(Message::user("x".repeat(4096))).await.unwrap();
         store.append_message(Message::user("recent")).await.unwrap();
         let cancel = CancellationToken::new();
@@ -600,21 +576,21 @@ mod tests {
             })
             .unwrap();
 
-        let report = runner.run("continue", &cancel).await;
+        let report = run(&mut runner, "continue", &cancel).await;
 
-        assert_eq!(report.outcome, RunOutcome::Error, "{report:?}");
+        assert_eq!(report.outcome, RunOutcome::Failed, "{report:?}");
         assert!(report.error.unwrap().contains("disk full on compaction_failed"));
     }
 
     #[tokio::test]
     async fn a_session_write_failure_cancels_the_run() {
         let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
-        let session = SessionStore::with_writer(SessionHeader::new(Path::new("."), "m"), Box::new(FailingWriter));
+        let session = Transcript::with_writer(SessionHeader::new(Path::new("."), "m"), Box::new(FailingWriter));
         let mut runner = runner(config(&provider, vec![]), session);
 
-        let report = runner.run("go", &CancellationToken::new()).await;
+        let report = run(&mut runner, "go", &CancellationToken::new()).await;
 
-        assert_eq!(report.outcome, RunOutcome::Error);
+        assert_eq!(report.outcome, RunOutcome::Failed);
         let error = report.error.unwrap_or_default();
         assert!(error.starts_with("cannot persist session entry"), "{error}");
         assert!(
@@ -628,12 +604,12 @@ mod tests {
         for rejected in ["request_config", "request_started"] {
             let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
             let session =
-                SessionStore::with_writer(SessionHeader::new(Path::new("."), "m"), RejectWrites::entry(rejected));
+                Transcript::with_writer(SessionHeader::new(Path::new("."), "m"), RejectWrites::entry(rejected));
             let mut runner = runner(config(&provider, vec![]), session);
 
-            let report = runner.run("go", &CancellationToken::new()).await;
+            let report = run(&mut runner, "go", &CancellationToken::new()).await;
 
-            assert_eq!(report.outcome, RunOutcome::Error, "{rejected}");
+            assert_eq!(report.outcome, RunOutcome::Failed, "{rejected}");
             let error = report.error.unwrap_or_default();
             assert!(
                 error.contains(&format!("disk full on {rejected}")),
@@ -664,10 +640,10 @@ mod tests {
         async fn execute(
             &self,
             _args: serde_json::Value,
-            _ctx: &crate::agent::ToolContext,
-        ) -> Result<crate::agent::ToolOutput, String> {
+            _ctx: &crate::tools::ToolContext,
+        ) -> Result<crate::tools::ToolOutput, String> {
             self.0.fetch_add(1, Ordering::SeqCst);
-            Ok(crate::agent::ToolOutput::ok("ran"))
+            Ok(crate::tools::ToolOutput::ok("ran"))
         }
     }
 
@@ -678,15 +654,15 @@ mod tests {
             FauxStep::tool_call("c1", "counted", serde_json::json!({})),
             FauxStep::text("never sent"),
         ]));
-        let session = SessionStore::with_writer(
+        let session = Transcript::with_writer(
             SessionHeader::new(Path::new("."), "m"),
             RejectWrites::entry("tool_call_started"),
         );
         let mut runner = runner(config(&provider, vec![tool.clone()]), session);
 
-        let report = runner.run("go", &CancellationToken::new()).await;
+        let report = run(&mut runner, "go", &CancellationToken::new()).await;
 
-        assert_eq!(report.outcome, RunOutcome::Error);
+        assert_eq!(report.outcome, RunOutcome::Failed);
         let error = report.error.unwrap_or_default();
         assert!(error.contains("disk full on tool_call_started"), "{error}");
         assert_eq!(tool.0.load(Ordering::SeqCst), 0, "ran without a start record");
@@ -696,7 +672,7 @@ mod tests {
     #[tokio::test]
     async fn a_recovery_write_failure_cancels_the_run_before_any_request() {
         // Recovery writes tool results; reject them, and only them.
-        let mut session = SessionStore::with_writer(
+        let mut session = Transcript::with_writer(
             SessionHeader::new(Path::new("."), "m"),
             RejectWrites::containing("\"role\":\"toolResult\"", "a tool result"),
         );
@@ -715,9 +691,9 @@ mod tests {
         let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
         let mut runner = runner(config(&provider, vec![tool.clone()]), session);
 
-        let report = runner.run("continue", &CancellationToken::new()).await;
+        let report = run(&mut runner, "continue", &CancellationToken::new()).await;
 
-        assert_eq!(report.outcome, RunOutcome::Error);
+        assert_eq!(report.outcome, RunOutcome::Failed);
         let error = report.error.unwrap_or_default();
         assert!(error.contains("disk full on a tool result"), "{error}");
         assert!(provider.requests().is_empty(), "requested without a recorded result");
@@ -728,25 +704,25 @@ mod tests {
     async fn a_context_edit_write_failure_prevents_the_request() {
         struct Rewrite;
         #[async_trait::async_trait]
-        impl crate::agent::Hooks for Rewrite {
+        impl crate::hooks::Hook for Rewrite {
             async fn on_input(
                 &self,
                 _text: String,
-                _ctx: &crate::agent::HookContext,
-            ) -> crate::agent::HookResult<String> {
+                _ctx: &crate::hooks::HookContext,
+            ) -> crate::hooks::HookResult<String> {
                 Ok("rewritten".into())
             }
         }
         let provider = Arc::new(FauxProvider::new([FauxStep::text("never")]));
         let mut config = config(&provider, vec![]);
         config.hooks.push(Rewrite);
-        let session = SessionStore::with_writer(
+        let session = Transcript::with_writer(
             SessionHeader::new(Path::new("."), "m"),
             RejectWrites::containing("context_edit", "edit"),
         );
         let mut runner = runner(config, session);
-        let report = runner.run("original", &CancellationToken::new()).await;
-        assert_eq!(report.outcome, RunOutcome::Error);
+        let report = run(&mut runner, "original", &CancellationToken::new()).await;
+        assert_eq!(report.outcome, RunOutcome::Failed);
         assert!(report.error.unwrap().contains("disk full on edit"));
         assert!(provider.requests().is_empty());
         assert_eq!(runner.session().messages().len(), 1);

@@ -1,9 +1,9 @@
-//! Bounded, auditable compaction owned by the session host, not the agent loop (pi:
+//! Bounded, auditable compaction owned by the run, not the agent loop (pi:
 //! coding-agent/src/core/compaction/compaction.ts).
 //!
 //! [`Config`] holds the budgets and [`Report`] says what one compaction cost and produced;
 //! the `compactor` runs one compaction over a session, and `answer` bounds and parses the model's
-//! answer.
+//! answer. A host that makes the summaries itself gives the agent a [`Summarizer`].
 
 mod answer;
 mod compactor;
@@ -11,10 +11,12 @@ mod compactor;
 use std::time::Duration;
 
 use anyhow::{Result, ensure};
+use async_trait::async_trait;
 use serde::Serialize;
 
 use crate::ai::{Message, Usage};
-use crate::session::{SessionStore, without_details};
+use crate::guard::CancelSignal;
+use crate::transcript::{CompactionSummary, ProjectedMessage, Transcript, without_details};
 
 pub(crate) use compactor::Compactor;
 
@@ -128,6 +130,51 @@ impl Config {
     }
 }
 
+/// Makes the summary of a compaction in place of the kernel's own request to the model. An
+/// agent takes one in [`AgentConfig::summarizer`](crate::AgentConfig::summarizer); without
+/// one the kernel asks the model, and the request can be rebuilt from the session.
+///
+/// The kernel stays in charge either way: when a compaction runs, which records it reads (at
+/// most 2 MiB of them), the records of its start and of its result or failure, the check that
+/// every fact cites a record the compaction read, and the bounds of time and cancellation.
+/// With a summarizer the start records its name instead of a request: how the summary was
+/// made is not in the session.
+#[async_trait]
+pub trait Summarizer: Send + Sync {
+    /// Names the summarizer in the start record of every compaction it serves. Not blank.
+    fn name(&self) -> &str;
+
+    /// The summary of `source`. Every fact cites the `entry_id` of at least one record of
+    /// `source`; a summary holds at most 64 KiB and 128 statements of each kind, and must
+    /// make the context smaller. An error is why the compaction fails, which its failure
+    /// record keeps. The kernel waits at most [`Config::timeout`] and stops waiting when the
+    /// run is cancelled; a panic fails the compaction.
+    async fn summarize(&self, source: &SummarySource<'_>) -> Result<Summarized, String>;
+}
+
+/// What a summarizer reads. Fields are only ever added, so the struct is `#[non_exhaustive]`.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct SummarySource<'a> {
+    /// The records to summarize, oldest first, as a model may see them: without the details
+    /// and usage of tool results.
+    pub records: &'a [ProjectedMessage],
+    /// The output tokens a summary may take ([`Config::max_summary_tokens`]), for a
+    /// summarizer that asks a model.
+    pub max_summary_tokens: u32,
+    /// Cancelled when the run is, and when the kernel stopped waiting for the summary.
+    pub cancel: CancelSignal,
+}
+
+/// What a summarizer made.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Summarized {
+    pub summary: CompactionSummary,
+    /// What making the summary used. It is added to the run's usage, so it counts toward the
+    /// token and cost budgets; zero for a summarizer that asks no model.
+    pub usage: Usage,
+}
+
 /// How a compaction ended, as its [`Report`] states it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -139,7 +186,7 @@ pub enum Outcome {
     /// The compaction failed and left the context as it was; `error` says why.
     Failed,
     /// The compaction was cancelled and left the context as it was.
-    Aborted,
+    Cancelled,
 }
 
 /// What one compaction cost and how it ended, including a request that failed.
@@ -147,9 +194,10 @@ pub enum Outcome {
 #[serde(rename_all = "camelCase")]
 pub struct Report {
     pub outcome: Outcome,
-    /// Model requests made: 0 or 1.
+    /// Summaries asked for: 0 or 1. Each counts as one model request of the run, whether the
+    /// kernel asked the model or the host's summarizer made the summary.
     pub requests: u32,
-    /// What the summary request used; zero when none got an answer.
+    /// What making the summary used; zero when none was made.
     pub usage: Usage,
     /// The context's size before the compaction.
     pub input_bytes: usize,
@@ -175,7 +223,7 @@ impl From<Compacted> for Report {
             End::Noop => (Outcome::Noop, input_bytes, None, None),
             End::Completed { entry_id, output_bytes } => (Outcome::Completed, output_bytes, Some(entry_id), None),
             End::Failed(error) => (Outcome::Failed, input_bytes, None, Some(error)),
-            End::Aborted(error) => (Outcome::Aborted, input_bytes, None, Some(error)),
+            End::Cancelled(error) => (Outcome::Cancelled, input_bytes, None, Some(error)),
             End::Unrecorded(error) => (Outcome::Failed, input_bytes, None, Some(format!("{error:#}"))),
         };
         Self {
@@ -193,9 +241,9 @@ impl From<Compacted> for Report {
 /// What one compaction cost and how it ended, for the kernel; [`Report`] is the same for a
 /// frontend.
 pub(crate) struct Compacted {
-    /// Model requests made: 0 or 1.
+    /// Summaries asked for: 0 or 1.
     pub(crate) requests: u32,
-    /// What the summary request used; zero when none got an answer.
+    /// What making the summary used; zero when none was made.
     pub(crate) usage: Usage,
     /// The context's size before the compaction.
     pub(crate) input_bytes: usize,
@@ -229,7 +277,7 @@ pub(crate) enum End {
     /// The compaction failed, for this reason, and left the context as it was.
     Failed(String),
     /// The run was cancelled before the compaction completed; the text says where.
-    Aborted(String),
+    Cancelled(String),
     /// The session could not record a step of the compaction, so a run must stop
     /// (invariant 7).
     Unrecorded(anyhow::Error),
@@ -249,7 +297,27 @@ pub(crate) enum Trigger {
 /// Serialized transcript bytes as a model may see them (without tool result details), not a
 /// tokenizer or a model context-window guarantee.
 pub fn context_bytes(messages: &[Message]) -> Result<usize> {
-    Ok(serde_json::to_vec(&without_details(messages))?.len())
+    serialized_bytes(&without_details(messages))
+}
+
+/// How many bytes `value` serializes to, counted without keeping them.
+fn serialized_bytes(value: &impl serde::Serialize) -> Result<usize> {
+    struct Count(usize);
+
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut count = Count(0);
+    serde_json::to_writer(&mut count, value)?;
+    Ok(count.0)
 }
 
 /// Bytes of serialized context that count as one token in an estimate (pi:
@@ -258,11 +326,11 @@ const BYTES_PER_TOKEN: usize = 4;
 
 /// An estimate of the tokens the next request's context holds (pi:
 /// `estimateProjectedContextTokens`): the prompt and output tokens counted by the last answer
-/// whose usage still measures the context ([`SessionStore::measured_context`]), plus a
+/// whose usage still measures the context ([`Transcript::measured_context`]), plus a
 /// quarter of the bytes of the messages after it; without such an answer, a quarter of all
 /// bytes. Only an estimate: the usage counts the request as it was sent, and bytes are not
 /// tokens.
-pub fn context_tokens(session: &SessionStore) -> Result<u64> {
+pub fn context_tokens(session: &Transcript) -> Result<u64> {
     let (measured, rest) = session.measured_context();
     let known = measured.map_or(0, |usage| usage.input.saturating_add(usage.output));
     let bytes = context_bytes(&rest)?;
@@ -271,5 +339,5 @@ pub fn context_tokens(session: &SessionStore) -> Result<u64> {
 
 /// Bytes of one message as a model may see it.
 fn message_bytes(message: &Message) -> Result<usize> {
-    Ok(serde_json::to_vec(&without_details(std::slice::from_ref(message))[0])?.len())
+    serialized_bytes(&without_details(std::slice::from_ref(message))[0])
 }

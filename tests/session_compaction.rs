@@ -4,9 +4,10 @@ mod common;
 
 use serde_json::json;
 
-use zx_agent::ai::{Message, SystemMessage, SystemPrompt, Usage, now_ms};
-use zx_agent::session::{
-    CompactionPlan, CompactionSummary, Entry, SESSION_VERSION, SessionStore, SummaryFact, SummaryRequest,
+use zx_agent::ai::{Message, Request, SystemMessage, SystemPrompt, Usage, now_ms};
+use zx_agent::transcript::{
+    CompactionPlan, CompactionSummary, Entry, RequestSource, SESSION_VERSION, SummarizedBy, SummaryFact,
+    SummaryRequest, Transcript,
 };
 
 use common::{answer_reporting, header, summarize};
@@ -22,7 +23,7 @@ fn summary(id: &str) -> CompactionSummary {
     }
 }
 
-fn plan(store: &SessionStore, first_kept: &str) -> CompactionPlan {
+fn plan(store: &Transcript, first_kept: &str) -> CompactionPlan {
     let source_entry_ids = store
         .raw_projection()
         .into_iter()
@@ -31,18 +32,19 @@ fn plan(store: &SessionStore, first_kept: &str) -> CompactionPlan {
         .collect();
     CompactionPlan {
         first_kept_entry_id: first_kept.into(),
+        kept_input_entry_id: None,
         source_entry_ids,
-        request: SummaryRequest {
+        by: SummarizedBy::Request(SummaryRequest {
             provider: "faux".into(),
             model: "m".into(),
             instructions: "Summarize".into(),
             max_tokens: 100,
-        },
+        }),
         input_bytes: 1000,
     }
 }
 
-async fn seeded(store: &mut SessionStore) -> (String, String) {
+async fn seeded(store: &mut Transcript) -> (String, String) {
     let old = store.append_message(Message::user("old evidence")).await.unwrap();
     let kept = store.append_message(Message::user("latest input")).await.unwrap();
     (old, kept)
@@ -50,7 +52,7 @@ async fn seeded(store: &mut SessionStore) -> (String, String) {
 
 #[tokio::test]
 async fn summary_replaces_only_the_old_prefix_and_preserves_all_system_updates() {
-    let mut store = SessionStore::in_memory(header());
+    let mut store = Transcript::in_memory(header());
     let first_system = Message::System(SystemMessage {
         sections: SystemPrompt::default().diff(&SystemPrompt::default().with_section("preamble", "first")),
         timestamp: now_ms(),
@@ -88,7 +90,7 @@ async fn summary_replaces_only_the_old_prefix_and_preserves_all_system_updates()
 
 #[tokio::test]
 async fn unfinished_and_failed_attempts_do_not_change_context() {
-    let mut store = SessionStore::in_memory(header());
+    let mut store = Transcript::in_memory(header());
     let (_, kept) = seeded(&mut store).await;
     let before = store.messages();
     let started = store.begin_compaction(plan(&store, &kept)).await.unwrap();
@@ -110,7 +112,7 @@ async fn unfinished_and_failed_attempts_do_not_change_context() {
 
 #[tokio::test]
 async fn a_completed_compaction_accepts_neither_a_second_result_nor_a_failure() {
-    let mut store = SessionStore::in_memory(header());
+    let mut store = Transcript::in_memory(header());
     let (old, kept) = seeded(&mut store).await;
     let started = store.begin_compaction(plan(&store, &kept)).await.unwrap();
     store
@@ -135,7 +137,7 @@ async fn a_completed_compaction_accepts_neither_a_second_result_nor_a_failure() 
 
 #[tokio::test]
 async fn a_compaction_ends_the_measurement_by_the_answers_before_it() {
-    let mut store = SessionStore::in_memory(header());
+    let mut store = Transcript::in_memory(header());
     let old = store.append_message(Message::user("old evidence")).await.unwrap();
     let kept = store.append_message(answer_reporting(900)).await.unwrap();
     let latest = Message::user("latest input");
@@ -158,7 +160,7 @@ async fn a_compaction_ends_the_measurement_by_the_answers_before_it() {
 
 #[tokio::test]
 async fn an_answer_recorded_after_a_compaction_measures_the_compacted_context() {
-    let mut store = SessionStore::in_memory(header());
+    let mut store = Transcript::in_memory(header());
     let (old, kept) = seeded(&mut store).await;
     let started = store.begin_compaction(plan(&store, &kept)).await.unwrap();
     store
@@ -177,7 +179,7 @@ async fn an_answer_recorded_after_a_compaction_measures_the_compacted_context() 
 
 /// An old message, an answer that reported 900 prompt tokens, and a later input; returns the
 /// three entry IDs.
-async fn measured(store: &mut SessionStore) -> [String; 3] {
+async fn measured(store: &mut Transcript) -> [String; 3] {
     let earlier = store.append_message(Message::user("old evidence")).await.unwrap();
     let answer = store.append_message(answer_reporting(900)).await.unwrap();
     let later = store.append_message(Message::user("latest input")).await.unwrap();
@@ -186,7 +188,7 @@ async fn measured(store: &mut SessionStore) -> [String; 3] {
 
 #[tokio::test]
 async fn an_edit_of_a_later_message_keeps_the_measurement_by_an_answer() {
-    let mut store = SessionStore::in_memory(header());
+    let mut store = Transcript::in_memory(header());
     let [_, _, later] = measured(&mut store).await;
 
     // What the answer was sent is as it was.
@@ -201,7 +203,7 @@ async fn an_edit_of_a_later_message_keeps_the_measurement_by_an_answer() {
 #[tokio::test]
 async fn an_edit_at_or_before_an_answer_ends_its_measurement() {
     for edited in [0, 1] {
-        let mut store = SessionStore::in_memory(header());
+        let mut store = Transcript::in_memory(header());
         let ids = measured(&mut store).await;
 
         store
@@ -215,7 +217,7 @@ async fn an_edit_at_or_before_an_answer_ends_its_measurement() {
 
 #[tokio::test]
 async fn summaries_are_branch_local_and_references_to_other_branches_are_rejected() {
-    let mut store = SessionStore::in_memory(header());
+    let mut store = Transcript::in_memory(header());
     let (old, kept) = seeded(&mut store).await;
     let started = store.begin_compaction(plan(&store, &kept)).await.unwrap();
     let done = store
@@ -243,7 +245,7 @@ async fn summaries_are_branch_local_and_references_to_other_branches_are_rejecte
 
 #[tokio::test]
 async fn editing_summarized_evidence_falls_back_to_originals_with_the_edit_applied() {
-    let mut store = SessionStore::in_memory(header());
+    let mut store = Transcript::in_memory(header());
     let (old, kept) = seeded(&mut store).await;
     let started = store.begin_compaction(plan(&store, &kept)).await.unwrap();
     store
@@ -263,7 +265,7 @@ async fn editing_summarized_evidence_falls_back_to_originals_with_the_edit_appli
 
 #[tokio::test]
 async fn omitting_the_first_retained_message_keeps_the_summary_in_place_of_the_old_prefix() {
-    let mut store = SessionStore::in_memory(header());
+    let mut store = Transcript::in_memory(header());
     let (old, kept) = seeded(&mut store).await;
     let started = store.begin_compaction(plan(&store, &kept)).await.unwrap();
     store
@@ -282,7 +284,7 @@ async fn omitting_the_first_retained_message_keeps_the_summary_in_place_of_the_o
 
 #[tokio::test]
 async fn a_summary_cannot_commit_after_its_source_was_edited_during_the_attempt() {
-    let mut store = SessionStore::in_memory(header());
+    let mut store = Transcript::in_memory(header());
     let (old, kept) = seeded(&mut store).await;
     let started = store.begin_compaction(plan(&store, &kept)).await.unwrap();
     store
@@ -300,7 +302,7 @@ async fn a_summary_cannot_commit_after_its_source_was_edited_during_the_attempt(
 
 #[tokio::test]
 async fn invalid_fact_references_or_empty_summaries_never_append_a_success_record() {
-    let mut store = SessionStore::in_memory(header());
+    let mut store = Transcript::in_memory(header());
     let (_, kept) = seeded(&mut store).await;
     let started = store.begin_compaction(plan(&store, &kept)).await.unwrap();
     let count = store.entries().len();
@@ -324,7 +326,7 @@ async fn invalid_fact_references_or_empty_summaries_never_append_a_success_recor
 
 #[tokio::test]
 async fn an_invalid_plan_writes_nothing() {
-    let mut store = SessionStore::in_memory(header());
+    let mut store = Transcript::in_memory(header());
     let (_, kept) = seeded(&mut store).await;
     let mut invalid = plan(&store, &kept);
     invalid.source_entry_ids.push("invented".into());
@@ -336,7 +338,7 @@ async fn an_invalid_plan_writes_nothing() {
 async fn duplicate_ids_and_unknown_records_are_rejected_without_modifying_the_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session.jsonl");
-    let mut store = SessionStore::create(&path, header()).unwrap();
+    let mut store = common::create_session_file(&path, header()).await.unwrap();
     let (id, _) = seeded(&mut store).await;
     drop(store);
     let prefix = std::fs::read_to_string(&path).unwrap();
@@ -347,14 +349,14 @@ async fn duplicate_ids_and_unknown_records_are_rejected_without_modifying_the_fi
     ] {
         let content = format!("{prefix}{bad}\n");
         std::fs::write(&path, &content).unwrap();
-        assert!(SessionStore::open(&path).is_err());
+        assert!(common::open_session_file(&path).await.is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
     }
 }
 
 #[tokio::test]
 async fn serialized_summary_records_use_camel_case_fields_and_snake_case_tags() {
-    let mut store = SessionStore::in_memory(header());
+    let mut store = Transcript::in_memory(header());
     let (old, kept) = seeded(&mut store).await;
     let started = store.begin_compaction(plan(&store, &kept)).await.unwrap();
     store
@@ -373,9 +375,175 @@ async fn serialized_summary_records_use_camel_case_fields_and_snake_case_tags() 
 }
 
 #[tokio::test]
+async fn a_start_records_either_the_request_or_the_name_of_the_summarizer() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    let mut store = common::create_session_file(&path, header()).await.unwrap();
+    let (old, kept) = seeded(&mut store).await;
+    let asked = store.begin_compaction(plan(&store, &kept)).await.unwrap();
+    store
+        .fail_compaction(&asked, "invalid".into(), Usage::default(), None)
+        .await
+        .unwrap();
+    let by_summarizer = CompactionPlan {
+        by: SummarizedBy::Summarizer("notes".into()),
+        ..plan(&store, &kept)
+    };
+    let made = store.begin_compaction(by_summarizer).await.unwrap();
+    store
+        .append_compaction(&made, summary(&old), Usage::default())
+        .await
+        .unwrap();
+    drop(store);
+
+    let lines = common::read_lines(&path);
+    let starts: Vec<_> = lines
+        .iter()
+        .filter(|line| line["type"] == "compaction_started")
+        .collect();
+    assert_eq!(starts[0]["request"]["maxTokens"], 100);
+    assert!(starts[0].get("summarizer").is_none());
+    assert_eq!(starts[1]["summarizer"], "notes");
+    assert!(starts[1].get("request").is_none());
+    // Both load again, each as it was written.
+    let reopened = common::open_session_file(&path).await.unwrap();
+    let recorded: Vec<&SummarizedBy> = reopened
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::CompactionStarted(started) => Some(&started.by),
+            _ => None,
+        })
+        .collect();
+    assert!(matches!(recorded[0], SummarizedBy::Request(request) if request.max_tokens == 100));
+    assert_eq!(recorded[1], &SummarizedBy::Summarizer("notes".into()));
+    assert_eq!(reopened.messages().len(), 2, "the summary and the latest input");
+}
+
+#[tokio::test]
+async fn a_summarizer_needs_a_name_and_has_no_request_in_the_session() {
+    let mut store = Transcript::in_memory(header());
+    let (_, kept) = seeded(&mut store).await;
+    let nameless = CompactionPlan {
+        by: SummarizedBy::Summarizer(" ".into()),
+        ..plan(&store, &kept)
+    };
+    let error = store.begin_compaction(nameless).await.unwrap_err();
+    assert!(format!("{error:#}").contains("the summarizer has no name"), "{error:#}");
+
+    let named = CompactionPlan {
+        by: SummarizedBy::Summarizer("notes".into()),
+        ..plan(&store, &kept)
+    };
+    let started = store.begin_compaction(named).await.unwrap();
+    let request = Request {
+        model: "m".into(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+        max_tokens: Some(100),
+        reasoning: None,
+        cache_key: None,
+    };
+    let source = RequestSource::Summary {
+        compaction_id: started,
+        system_timestamp: now_ms(),
+        user_timestamp: now_ms(),
+    };
+    let error = store
+        .record_request(&request, "faux", json!({}), source)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("is summarized by \"notes\", not by a request"),
+        "{error:#}"
+    );
+}
+
+/// An answer that calls `read_file` as `id`, and that call's result.
+fn exchange(id: &str) -> [Message; 2] {
+    use zx_agent::ai::{AssistantMessage, ContentBlock, StopReason, ToolCall, ToolResultMessage};
+    let mut assistant = AssistantMessage::failure("faux", "m", StopReason::ToolUse, "");
+    assistant.error_message = None;
+    assistant.content = vec![ContentBlock::ToolCall(ToolCall {
+        id: id.into(),
+        name: "read_file".into(),
+        arguments: json!({"path": "x"}),
+        arguments_error: None,
+    })];
+    let result = ToolResultMessage {
+        tool_call_id: id.into(),
+        tool_name: "read_file".into(),
+        content: format!("value of {id}"),
+        is_error: false,
+        timestamp: 0,
+        duration_ms: None,
+        details: None,
+        usage: None,
+    };
+    [Message::Assistant(assistant), Message::ToolResult(result)]
+}
+
+#[tokio::test]
+async fn a_compaction_inside_a_turn_keeps_the_input_of_that_turn_before_its_summary() {
+    let mut store = Transcript::in_memory(header());
+    let earlier = store
+        .append_message(Message::user("an earlier question"))
+        .await
+        .unwrap();
+    store.append_message(Message::user("the task")).await.unwrap();
+    let task = store.leaf_id().unwrap().to_string();
+    let [call, result] = exchange("c1");
+    let first_call = store.append_message(call).await.unwrap();
+    store.append_message(result).await.unwrap();
+    let [call, result] = exchange("c2");
+    let kept = store.append_message(call).await.unwrap();
+    store.append_message(result).await.unwrap();
+
+    // Only the latest input before the boundary can be kept.
+    let wrong = CompactionPlan {
+        kept_input_entry_id: Some(earlier.clone()),
+        ..plan(&store, &kept)
+    };
+    let error = store.begin_compaction(wrong).await.unwrap_err();
+    assert!(
+        format!("{error:#}").contains("is not the latest input before its boundary"),
+        "{error:#}"
+    );
+
+    let inside = CompactionPlan {
+        kept_input_entry_id: Some(task.clone()),
+        ..plan(&store, &kept)
+    };
+    let started = store.begin_compaction(inside).await.unwrap();
+    store
+        .append_compaction(&started, summary(&first_call), Usage::default())
+        .await
+        .unwrap();
+
+    let texts: Vec<String> = store
+        .messages()
+        .iter()
+        .map(|message| match message {
+            Message::User { content, .. } => content.lines().next().unwrap_or_default().to_string(),
+            Message::Assistant(answer) => format!("calls {}", answer.tool_calls()[0].id),
+            Message::ToolResult(result) => result.content.clone(),
+            Message::System(_) => "system".to_string(),
+        })
+        .collect();
+    assert_eq!(texts, ["the task", "<context_summary>", "calls c2", "value of c2"]);
+    let lines: Vec<serde_json::Value> = store
+        .entries()
+        .iter()
+        .map(|entry| serde_json::to_value(entry).unwrap())
+        .collect();
+    let recorded = lines.iter().find(|line| line["type"] == "compaction_started").unwrap();
+    assert_eq!(recorded["keptInputEntryId"], task);
+}
+
+#[tokio::test]
 async fn a_retained_boundary_never_splits_an_assistant_tool_result_exchange() {
     use zx_agent::ai::{AssistantMessage, ContentBlock, StopReason, ToolCall, ToolResultMessage};
-    let mut store = SessionStore::in_memory(header());
+    let mut store = Transcript::in_memory(header());
     let old = store.append_message(Message::user("old evidence")).await.unwrap();
     let mut assistant = AssistantMessage::failure("faux", "m", StopReason::ToolUse, "");
     assistant.error_message = None;

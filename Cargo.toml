@@ -7,6 +7,7 @@ members = [
   "crates/zx-im",
   "crates/zx-im-slack",
   "crates/zx-im-feishu",
+  "crates/zx-cli",
 ]
 # Commands run at the root (build, test, clippy, doc) cover every crate, not only zx-agent.
 default-members = [
@@ -18,6 +19,7 @@ default-members = [
   "crates/zx-im",
   "crates/zx-im-slack",
   "crates/zx-im-feishu",
+  "crates/zx-cli",
 ]
 
 [workspace.package]
@@ -28,6 +30,8 @@ license = "MIT"
 publish = false
 
 [workspace.dependencies]
+# The library of this package, as the crates built on it name it.
+zx-agent = { path = "." }
 zx-ai = { path = "crates/zx-ai" }
 zx-ai-openai = { path = "crates/zx-ai-openai" }
 zx-core = { path = "crates/zx-core" }
@@ -92,9 +96,11 @@ manual_let_else = "warn"
 needless_continue = "warn"
 ignored_unit_patterns = "warn"
 # Layout: one module file style, the one the Rust Reference encourages. The exception is
-# `tests/common/mod.rs`, which Cargo needs under that name.
+# `tests/common/mod.rs`, here and in crates/zx-cli, which Cargo needs under that name.
 mod_module_files = "warn"
 
+# The library: the kernel and what ships with it, under one name. The program `zx-agent` is
+# the package crates/zx-cli.
 [package]
 name = "zx-agent"
 description = "Minimal general-purpose agent kernel for interactive, unattended, and embedded use, modeled on pi"
@@ -111,41 +117,27 @@ workspace = true
 name = "zx_agent"
 path = "src/lib.rs"
 
-[[bin]]
-name = "zx-agent"
-path = "src/main.rs"
-
 [dependencies]
 zx-ai.workspace = true
 zx-ai-openai.workspace = true
 zx-core.workspace = true
+zx-tools.workspace = true
+
+# For tests/, the integration tests of the workspace's libraries, and for examples/.
+[dev-dependencies]
+# The chat platforms are not part of the library; their tests are with the others.
 zx-im.workspace = true
 zx-im-feishu.workspace = true
 zx-im-slack.workspace = true
-zx-tools.workspace = true
 
-agent-client-protocol.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
-chrono.workspace = true
-clap.workspace = true
 futures.workspace = true
-opentelemetry.workspace = true
-opentelemetry-otlp.workspace = true
-opentelemetry_sdk.workspace = true
-reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
-tokio-util.workspace = true
-toml.workspace = true
-uuid.workspace = true
-
-[dev-dependencies]
-opentelemetry_sdk = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
+tokio.workspace = true
 # The fake chat platforms of the integration tests (tests/common/) speak WebSocket.
 tokio-tungstenite.workspace = true
-
-[target."cfg(unix)".dependencies]
-libc.workspace = true
+tokio-util.workspace = true
+uuid.workspace = true

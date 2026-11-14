@@ -17,8 +17,8 @@ use tokio_tungstenite::tungstenite::{Bytes, Message};
 use tokio_util::sync::CancellationToken;
 use zx_im::{
     Backoff, CARD_CAPACITY, CardLabels, Cards, Destination, ErrorReport, ImChannel, ImError, Inbound, Keepalive,
-    MAX_TEXT_CHARS, MessageId, MessageRef, Outbound, Pacer, RATE_LIMIT_RETRIES, SEEN_CAPACITY, Said, Seen, UserId,
-    card_update_refused,
+    MAX_TEXT_CHARS, MessageId, MessageRef, Pacer, Post, RATE_LIMIT_RETRIES, Replacement, SEEN_CAPACITY, Said, Seen,
+    ThreadId, UserId, rate_limit_wait,
 };
 
 use events::{button, card_request, decisions, escape, history, message, resolution, section, split};
@@ -40,6 +40,13 @@ const DENY_ACTION: &str = "zx_deny";
 const MAX_SECTION_CHARS: usize = 3000;
 /// The reaction that acknowledges a message steered into a run: "seen".
 const ACK_REACTION: &str = "eyes";
+/// Messages asked for in one `conversations.replies` call: the most Slack recommends
+/// (conversations.replies, "Pagination": "We recommend no more than 200 results at a time").
+const HISTORY_PAGE_MESSAGES: usize = 200;
+/// Pages read of one thread at most, from its start: as many messages as Slack returns of a
+/// thread without pagination (conversations.replies, "Pagination by time": "up to 1000
+/// messages").
+const MAX_HISTORY_PAGES: usize = 5;
 /// Method errors that retrying cannot fix: the token or the app's setup is wrong.
 const SETUP_ERRORS: [&str; 9] = [
     "invalid_auth",
@@ -71,8 +78,9 @@ pub struct SlackConfig {
     /// Ten seconds by default.
     pub ping_interval: Duration,
     pub labels: CardLabels,
-    /// Called with each failed attempt to connect, before the channel waits and tries
-    /// again, so that an operator can see a platform that cannot be reached.
+    /// Called with what the channel goes on after, so that an operator can see it: each
+    /// failed attempt to connect, before the channel waits and tries again, a frame it
+    /// cannot read, and a thread it could not read to its end.
     pub on_error: Option<ErrorReport>,
 }
 
@@ -134,6 +142,19 @@ impl SlackChannel {
         args: &[(&str, &str)],
         body: Option<&Value>,
     ) -> Result<Value, ImError> {
+        self.call_retrying(method, token, args, body, RATE_LIMIT_RETRIES).await
+    }
+
+    /// [`Self::call`], waiting out a rate limit at most `rate_limit_retries` times: after
+    /// those, or with none, the limit is the call's error.
+    async fn call_retrying(
+        &self,
+        method: &str,
+        token: &str,
+        args: &[(&str, &str)],
+        body: Option<&Value>,
+        rate_limit_retries: u32,
+    ) -> Result<Value, ImError> {
         let base = self.config.api_base.trim_end_matches('/');
         let mut url = Url::parse(&format!("{base}/{method}"))
             .map_err(|error| ImError::Config(format!("slack {method}: invalid API base {base}: {error}")))?;
@@ -152,7 +173,7 @@ impl SlackChannel {
                 .await
                 .map_err(|error| ImError::Transport(format!("slack {method}: {error}")))?;
             let status = response.status();
-            if status == StatusCode::TOO_MANY_REQUESTS && retries < RATE_LIMIT_RETRIES {
+            if status == StatusCode::TOO_MANY_REQUESTS && retries < rate_limit_retries {
                 retries += 1;
                 tokio::time::sleep(retry_after(response.headers())).await;
                 continue;
@@ -187,10 +208,34 @@ impl SlackChannel {
         }
     }
 
+    /// Tell the operator about `error`, which the channel goes on after.
     fn report(&self, error: &ImError) {
         if let Some(callback) = &self.config.on_error {
             callback(error);
         }
+    }
+
+    /// One page of the thread `thread` of `at`'s chat: the one `cursor` names, or the first
+    /// when it is empty. A rate limit is waited out at most `rate_limit_retries` times.
+    async fn replies_page(
+        &self,
+        at: &Destination,
+        thread: &ThreadId,
+        cursor: &str,
+        rate_limit_retries: u32,
+    ) -> Result<Value, ImError> {
+        let page_size = HISTORY_PAGE_MESSAGES.to_string();
+        let mut args = vec![
+            ("channel", at.conversation.0.as_str()),
+            ("ts", thread.0.as_str()),
+            ("limit", page_size.as_str()),
+        ];
+        if !cursor.is_empty() {
+            args.push(("cursor", cursor));
+        }
+        let token = &self.config.bot_token;
+        self.call_retrying("conversations.replies", token, &args, None, rate_limit_retries)
+            .await
     }
 
     async fn post(&self, to: &Destination, text: &str, blocks: Option<Value>) -> Result<MessageRef, ImError> {
@@ -439,9 +484,9 @@ impl ImChannel for SlackChannel {
         }
     }
 
-    async fn send(&self, to: &Destination, message: &Outbound) -> Result<MessageRef, ImError> {
+    async fn send(&self, to: &Destination, message: &Post) -> Result<MessageRef, ImError> {
         match message {
-            Outbound::Text(text) => {
+            Post::Text(text) => {
                 let (first, rest) = split(text, MAX_TEXT_CHARS);
                 let posted = self.post(to, &first, None).await?;
                 // The rest go to the same thread, which a first post in the chat itself starts.
@@ -451,7 +496,7 @@ impl ImChannel for SlackChannel {
                 }
                 Ok(posted)
             }
-            Outbound::ApprovalRequest {
+            Post::ApprovalRequest {
                 id,
                 tool,
                 summary,
@@ -480,16 +525,12 @@ impl ImChannel for SlackChannel {
                 self.cards.remember(&posted.id, request);
                 Ok(posted)
             }
-            Outbound::ApprovalResolved { user, result, .. } => {
-                let text = resolution(&self.config.labels, user.as_ref(), *result);
-                self.post(to, &text, None).await
-            }
         }
     }
 
-    async fn update(&self, posted: &MessageRef, message: &Outbound) -> Result<(), ImError> {
-        match message {
-            Outbound::Text(text) => {
+    async fn update(&self, posted: &MessageRef, replacement: &Replacement) -> Result<(), ImError> {
+        match replacement {
+            Replacement::Text(text) => {
                 let (first, rest) = split(text, MAX_TEXT_CHARS);
                 self.edit(posted, &first, None).await?;
                 let thread = posted.thread();
@@ -498,8 +539,7 @@ impl ImChannel for SlackChannel {
                 }
                 Ok(())
             }
-            Outbound::ApprovalRequest { .. } => Err(card_update_refused()),
-            Outbound::ApprovalResolved { user, result, .. } => {
+            Replacement::ApprovalResolved { user, result, .. } => {
                 let result = resolution(&self.config.labels, user.as_ref(), *result);
                 let mut blocks = Vec::new();
                 if let Some(request) = self.cards.forget(&posted.id) {
@@ -511,22 +551,44 @@ impl ImChannel for SlackChannel {
         }
     }
 
-    /// `conversations.replies`, the first page: the thread's root and replies, oldest first
-    /// (needs `channels:history` or `groups:history`).
+    /// `conversations.replies`, page by page to the thread's end (needs `channels:history` or
+    /// `groups:history`): Slack returns a thread's root and replies oldest first ("The
+    /// earliest messages in the time range are returned first"), so the latest are on the
+    /// last page.
+    ///
+    /// Only the first page fails the call. A later page that cannot be read, or a thread of
+    /// more than `MAX_HISTORY_PAGES` pages, ends the reading with the latest of the messages
+    /// read so far, and is reported.
     async fn thread_history(&self, at: &Destination, limit: usize) -> Result<Vec<Said>, ImError> {
         let Some(thread) = &at.thread else {
             return Ok(Vec::new());
         };
-        let limit = limit.to_string();
-        let args = [
-            ("channel", at.conversation.0.as_str()),
-            ("ts", thread.0.as_str()),
-            ("limit", limit.as_str()),
-        ];
-        let answer = self
-            .call("conversations.replies", &self.config.bot_token, &args, None)
-            .await?;
-        Ok(history(&answer))
+        let mut latest = Vec::new();
+        let mut cursor = String::new();
+        for page in 0..MAX_HISTORY_PAGES {
+            // A later page is given up at once: waiting out its rate limit could outlast the
+            // caller, and the pages read would be lost with it.
+            let retries = if page == 0 { RATE_LIMIT_RETRIES } else { 0 };
+            let answer = match self.replies_page(at, thread, &cursor, retries).await {
+                Ok(answer) => answer,
+                Err(error) if page == 0 => return Err(error),
+                Err(error) => {
+                    self.report(&read_in_part(at, thread, &error.to_string()));
+                    return Ok(latest);
+                }
+            };
+            latest.extend(history(&answer));
+            // Only the latest are asked for: the older ones go as the pages come.
+            let older = latest.len().saturating_sub(limit);
+            latest.drain(..older);
+            match next_cursor(&answer) {
+                Some(next) => cursor = next.to_string(),
+                None => return Ok(latest),
+            }
+        }
+        let longer = format!("it has more than {MAX_HISTORY_PAGES} pages of {HISTORY_PAGE_MESSAGES} messages");
+        self.report(&read_in_part(at, thread, &longer));
+        Ok(latest)
     }
 
     /// `users.info` (needs `users:read`): the display name, else the real name.
@@ -560,15 +622,28 @@ impl ImChannel for SlackChannel {
     }
 }
 
-/// The wait a 429 asks for in `headers`: one second when `Retry-After` is missing or
-/// unreadable, at most [`MAX_RETRY_AFTER`].
+/// The cursor of the page after the `conversations.replies` answer `answer`; `None` on the
+/// thread's last page, whose cursor is empty or missing.
+fn next_cursor(answer: &Value) -> Option<&str> {
+    answer["response_metadata"]["next_cursor"]
+        .as_str()
+        .filter(|cursor| !cursor.is_empty())
+}
+
+/// What the operator is told when the thread `thread` of `at`'s chat was not read to its
+/// end, and `why`: the messages used are then the latest of those read, not of the thread.
+fn read_in_part(at: &Destination, thread: &ThreadId, why: &str) -> ImError {
+    ImError::Transport(format!(
+        "slack conversations.replies: thread {thread} in {} was not read to its end, so its latest messages may be missing: {why}",
+        at.conversation
+    ))
+}
+
+/// The wait a 429 asks for in the `Retry-After` of `headers`, at most [`MAX_RETRY_AFTER`]; a
+/// header that is not text counts as missing, which is one second ([`rate_limit_wait`]).
 fn retry_after(headers: &HeaderMap) -> Duration {
-    let secs = headers
-        .get(RETRY_AFTER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse().ok())
-        .unwrap_or(1);
-    Duration::from_secs(secs).min(MAX_RETRY_AFTER)
+    let seconds = headers.get(RETRY_AFTER).and_then(|value| value.to_str().ok());
+    rate_limit_wait(seconds, MAX_RETRY_AFTER)
 }
 
 #[cfg(test)]

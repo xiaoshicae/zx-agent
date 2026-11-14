@@ -10,12 +10,29 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use super::server::{Shared, segment};
-use super::{ConversationId, Destination, ImChannel, MessageId, MessageRef, Outbound, SessionKey, ThreadId};
+use super::server::Shared;
+use super::{ConversationId, Destination, ImChannel, MessageId, MessageRef, Replacement, SessionKey, ThreadId};
 
 /// The extension of a record file; a record is written under another name first.
 const RECORD: &str = "json";
 const PARTIAL: &str = "partial";
+
+/// `id` as one part of a file name, encoded so that no ID can name another file: bytes other
+/// than ASCII letters, digits, `-` and `_` become `%XX`, and an empty part becomes `%`.
+fn segment(id: &str) -> String {
+    if id.is_empty() {
+        return "%".to_string();
+    }
+    let mut encoded = String::with_capacity(id.len());
+    for byte in id.bytes() {
+        if byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
 
 /// Keeps the status message of each run while it runs: the one that says
 /// [`Replies::working`](super::Replies::working).
@@ -50,8 +67,8 @@ impl StatusFiles {
         Self { dir: dir.into() }
     }
 
-    /// `<platform>.<conversation>.<message>.json`, each part encoded like the parts of a
-    /// session directory ([`SessionKey::dir_in`]), which never contain a `.`.
+    /// `<platform>.<conversation>.<message>.json`, each part encoded ([`segment`]) so that it
+    /// never contains a `.`.
     fn path(&self, key: &SessionKey, status: &MessageRef) -> PathBuf {
         self.dir.join(format!(
             "{}.{}.{}.{RECORD}",
@@ -197,7 +214,7 @@ pub(crate) async fn replace_left_behind(
     shared: Arc<Shared>,
     stop: CancellationToken,
 ) {
-    let text = Outbound::Text(shared.replies.interrupted.clone());
+    let text = Replacement::Text(shared.replies.interrupted.clone());
     for (key, status) in left {
         match channels.iter().find(|channel| channel.platform() == key.platform) {
             Some(channel) => {
@@ -223,6 +240,20 @@ pub(crate) async fn replace_left_behind(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_part_of_a_file_name_cannot_name_another_file() {
+        for (id, encoded) in [
+            ("C0123", "C0123"),
+            ("..", "%2E%2E"),
+            ("a/b", "a%2Fb"),
+            ("1700000000.000100", "1700000000%2E000100"),
+            ("群", "%E7%BE%A4"),
+            ("", "%"),
+        ] {
+            assert_eq!(segment(id), encoded, "{id:?}");
+        }
+    }
 
     fn key(platform: &str, conversation: &str, thread: &str) -> SessionKey {
         SessionKey {

@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::Stdio;
 
 use async_trait::async_trait;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
@@ -129,14 +129,20 @@ impl Executor for LocalExecutor {
             }
             Err(error) => return Err(format!("cannot write {display}: {error}")),
         }
-        let mut file = tokio::fs::File::create(path)
-            .await
-            .map_err(|e| format!("cannot write {display}: {e}"))?;
-        file.write_all(contents)
-            .await
-            .map_err(|e| format!("cannot write {display}: {e}"))?;
-        // tokio hands writes to a blocking thread; flushing waits for the last of them.
-        file.flush().await.map_err(|e| format!("cannot write {display}: {e}"))
+        let (target, bytes) = (path.to_path_buf(), contents.to_vec());
+        // Truncating and writing are one step on a blocking thread, which nothing interrupts:
+        // once it has begun it runs to its end, whether this future is dropped, as a
+        // cancelled run drops its calls, or the runtime shuts down. Done step by step from
+        // here, a drop between the steps would leave the file empty or cut short. It is
+        // still written in place, so the file keeps its inode, mode and links.
+        let written = tokio::task::spawn_blocking(move || std::fs::write(target, bytes)).await;
+        match written {
+            Ok(result) => result.map_err(|e| format!("cannot write {display}: {e}")),
+            // The thread never ran the write, or panicked in it.
+            Err(error) => Err(format!(
+                "cannot write {display}: the write did not run to its end: {error}"
+            )),
+        }
     }
 }
 

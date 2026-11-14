@@ -6,20 +6,17 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio_util::sync::CancellationToken;
-
-use zx_agent::AgentSession;
-use zx_agent::agent::{AgentEvent, Event, LoopConfig, PolicyDecision};
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
-use zx_agent::ai::retry::RetryPolicy;
-use zx_agent::continuation::ContinueOnLength;
-use zx_agent::executor::{LocalExecutor, local_environment_section};
-use zx_agent::policy::{AutoApprove, CommandPolicy, PolicyHook, Rule, RuleMatcher, RulePolicy};
+use zx_agent::builtin::continuation::ContinueOnLength;
+use zx_agent::builtin::executor::{LocalExecutor, local_environment_section};
+use zx_agent::builtin::policy::{AutoApprove, CommandPolicy, Rule, RuleMatcher, RulePolicy};
+use zx_agent::builtin::redact::RedactSecrets;
+use zx_agent::builtin::tools::{BashTool, ReadFileTool};
+use zx_agent::events::EventKind;
+use zx_agent::policy::PolicyDecision;
 use zx_agent::prompt::build_system_prompt;
-use zx_agent::redact::RedactSecrets;
-use zx_agent::runner::Limits;
-use zx_agent::session::{SessionHeader, SessionStore};
-use zx_agent::tools::{BashTool, ReadFileTool};
+use zx_agent::runner::RunLimits;
+use zx_agent::{Agent, AgentConfig, SessionOptions};
 
 /// This embedder's scenario: a bounded, read-only report about the machine it runs on.
 const INSTRUCTIONS: &str = "You are an agent running without a human operator. Use only the tools \
@@ -62,34 +59,36 @@ async fn main() -> anyhow::Result<()> {
         api_key: api_key.clone().into(),
         ..OpenAiConfig::default()
     })?;
-    let mut config = LoopConfig {
+    let mut config = AgentConfig {
         system_prompt,
         tools: vec![Arc::new(bash), Arc::new(ReadFileTool::default())],
-        cwd: cwd.clone(),
-        ..LoopConfig::new(Arc::new(provider), model.clone())
+        // Nobody can stop an unattended run, so it gets bounds of its own.
+        limits: RunLimits {
+            max_model_requests: Some(30),
+            timeout: Some(Duration::from_secs(15 * 60)),
+            token_budget: None,
+            cost_budget: None,
+        },
+        ..AgentConfig::new(Arc::new(provider), model)
     };
     // Continue once if an answer stops at the output token limit.
     config.hooks.push(ContinueOnLength::new(1));
-    config.hooks.push(PolicyHook::new(Arc::new(CommandPolicy::new())));
-    config.hooks.push(PolicyHook::new(Arc::new(rules)));
+    config.policies.push("command_policy", Arc::new(CommandPolicy::new()));
+    config.policies.push("permissions", Arc::new(rules));
     config.hooks.push(RedactSecrets::new(api_key));
-    let session = SessionStore::in_memory(SessionHeader::new(&cwd, &model));
-    // Any `Fn(&Event)` is an event sink.
-    let sink = Arc::new(|event: &Event| {
-        if let AgentEvent::ToolExecutionStart { tool_name, args, .. } = &event.event {
+    // The agent keeps its sessions in memory unless it is given a storage; this one works
+    // in the current directory.
+    let agent = Agent::new(config)?;
+    let session = agent.create_session(SessionOptions::new(cwd)).await?;
+
+    // A run makes its requests as it is read: its events first, then its report.
+    let mut run = session.send(task)?;
+    while let Some(event) = run.next().await {
+        if let EventKind::ToolExecutionStart { tool_name, args, .. } = &event.event {
             eprintln!("[tool] {tool_name} {args}");
         }
-    });
-    // Nobody can stop an unattended run, so it gets bounds of its own.
-    let limits = Limits {
-        max_model_requests: Some(30),
-        timeout: Some(Duration::from_secs(15 * 60)),
-        token_budget: None,
-        cost_budget: None,
-    };
-    let agent = AgentSession::new(config, RetryPolicy::default(), limits, session, sink);
-
-    let report = agent.prompt(task, &CancellationToken::new()).await?;
+    }
+    let report = run.wait().await;
     println!("{}", report.final_text);
     eprintln!(
         "outcome: {:?}, model requests: {}, tokens: {}",

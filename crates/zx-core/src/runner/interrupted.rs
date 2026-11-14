@@ -2,10 +2,12 @@
 
 use anyhow::{Context, Result};
 
+use super::PERSIST_FAILED;
 use super::run_host::RunHost;
-use crate::agent::{AgentEvent, Effects, Interruption, PERSIST_FAILED};
 use crate::ai::{Message, ToolResultMessage, now_ms};
-use crate::session::StartRecord;
+use crate::events::{EventKind, Interruption};
+use crate::tools::Effects;
+use crate::transcript::StartRecord;
 
 impl RunHost<'_> {
     /// Record an error result for each call that an interrupted run left without one, so
@@ -13,14 +15,9 @@ impl RunHost<'_> {
     /// again. Stops at the first result the session cannot record.
     pub(super) async fn recover_interrupted_calls(&mut self) -> Result<()> {
         for call in self.session.interrupted_tool_calls() {
-            let effects = self
-                .config
-                .tools
-                .iter()
-                .find(|tool| tool.name() == call.tool_name)
-                .map(|tool| tool.effects());
+            let effects = self.config.tools.find(&call.tool_name).map(|tool| tool.effects());
             let state = interruption(call.start, effects);
-            let recovered = AgentEvent::ToolCallRecovered {
+            let recovered = EventKind::ToolCallRecovered {
                 tool_call_id: call.tool_call_id.clone(),
                 tool_name: call.tool_name.clone(),
                 state,
@@ -35,14 +32,14 @@ impl RunHost<'_> {
                 details: None,
                 usage: None,
             });
-            self.target.emit(AgentEvent::MessageStart { role: "toolResult" }).await;
+            self.target.emit(EventKind::MessageStart { role: "toolResult" }).await;
             let entry_id = self
                 .session
                 .append_message(result.clone())
                 .await
                 .context(PERSIST_FAILED)?;
             self.target
-                .emit(AgentEvent::MessageEnd {
+                .emit(EventKind::MessageEnd {
                     message: result,
                     entry_id,
                     custom: None,
@@ -71,7 +68,7 @@ fn interruption(start: StartRecord, effects: Option<Effects>) -> Interruption {
 fn recovered_result(state: Interruption) -> &'static str {
     match state {
         Interruption::Started => {
-            "Result unknown: this call started, but the agent stopped before its result was recorded. It may have changed state; check the current state before running it again."
+            "Result unknown: this call started, but its result is not recorded here: the agent stopped before recording it, or the conversation went back to before it. It may have changed state; check the current state before running it again."
         }
         Interruption::StartUnknown => {
             "Result unknown: the agent stopped before this call's result was recorded, and whether the call started was not recorded. It may have changed state; check the current state before running it again."

@@ -10,12 +10,12 @@ use tokio::sync::mpsc;
 
 use common::fake_slack::{Answer, FakeSlack};
 use common::im::run_channel;
-use zx_agent::agent::ApprovalResult;
-use zx_agent::im::slack::{SlackChannel, SlackConfig};
-use zx_agent::im::{
+use zx_agent::events::ApprovalResult;
+use zx_im::{
     Addressee, ApprovalId, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId,
-    MessageRef, Outbound, Said, ThreadId, UserId,
+    MessageRef, Post, Replacement, Said, ThreadId, UserId,
 };
+use zx_im_slack::{SlackChannel, SlackConfig};
 
 const APP_TOKEN: &str = "xapp-test";
 const BOT_TOKEN: &str = "xoxb-test";
@@ -322,10 +322,7 @@ async fn text_is_posted_in_the_thread_with_entities_escaped() {
     let slack = FakeSlack::start().await;
     let channel = channel(&slack);
     let to = in_thread("C1", Some("6.1"));
-    let posted = channel
-        .send(&to, &Outbound::Text("a < b & c > d".into()))
-        .await
-        .unwrap();
+    let posted = channel.send(&to, &Post::Text("a < b & c > d".into())).await.unwrap();
     let call = &slack.calls("chat.postMessage")[0];
     assert_eq!(call.authorization, format!("Bearer {BOT_TOKEN}"));
     assert_eq!(
@@ -341,10 +338,7 @@ async fn long_text_continues_in_the_thread_of_its_first_part() {
     let slack = FakeSlack::start().await;
     let channel = channel(&slack);
     let text = "x".repeat(4000 * 2 + 10);
-    let posted = channel
-        .send(&in_thread("C1", None), &Outbound::Text(text))
-        .await
-        .unwrap();
+    let posted = channel.send(&in_thread("C1", None), &Post::Text(text)).await.unwrap();
     let calls = slack.calls("chat.postMessage");
     let lengths: Vec<usize> = calls
         .iter()
@@ -361,7 +355,7 @@ async fn long_text_continues_in_the_thread_of_its_first_part() {
 async fn an_approval_card_has_two_buttons_that_carry_the_approval_id() {
     let slack = FakeSlack::start().await;
     let channel = channel(&slack);
-    let card = Outbound::ApprovalRequest {
+    let card = Post::ApprovalRequest {
         id: ApprovalId("A1".into()),
         tool: "bash".into(),
         summary: "kubectl delete pod x".into(),
@@ -388,7 +382,7 @@ async fn an_approval_card_has_two_buttons_that_carry_the_approval_id() {
 async fn a_closed_card_keeps_its_request_and_shows_who_decided() {
     let slack = FakeSlack::start().await;
     let channel = channel(&slack);
-    let card = Outbound::ApprovalRequest {
+    let card = Post::ApprovalRequest {
         id: ApprovalId("A1".into()),
         tool: "bash".into(),
         summary: "kubectl delete pod x".into(),
@@ -396,7 +390,7 @@ async fn a_closed_card_keeps_its_request_and_shows_who_decided() {
     };
     let posted = channel.send(&in_thread("C1", Some("8.1")), &card).await.unwrap();
     let request = slack.calls("chat.postMessage")[0].body["blocks"][0].clone();
-    let closed = Outbound::ApprovalResolved {
+    let closed = Replacement::ApprovalResolved {
         id: ApprovalId("A1".into()),
         user: Some(UserId("U2".into())),
         result: ApprovalResult::AllowOnce,
@@ -415,10 +409,13 @@ async fn a_status_update_replaces_the_text_and_leaves_out_blocks() {
     let slack = FakeSlack::start().await;
     let channel = channel(&slack);
     let posted = channel
-        .send(&in_thread("C1", Some("9.1")), &Outbound::Text("working".into()))
+        .send(&in_thread("C1", Some("9.1")), &Post::Text("working".into()))
         .await
         .unwrap();
-    channel.update(&posted, &Outbound::Text("done".into())).await.unwrap();
+    channel
+        .update(&posted, &Replacement::Text("done".into()))
+        .await
+        .unwrap();
     assert_eq!(
         slack.calls("chat.update")[0].body,
         json!({"channel": "C1", "ts": posted.id.0, "text": "done"})
@@ -431,7 +428,7 @@ async fn a_rate_limited_post_waits_and_is_retried() {
     slack.script("chat.postMessage", vec![Answer::RateLimited { retry_after_secs: 0 }]);
     let channel = channel(&slack);
     channel
-        .send(&in_thread("C1", Some("10.1")), &Outbound::Text("hello".into()))
+        .send(&in_thread("C1", Some("10.1")), &Post::Text("hello".into()))
         .await
         .unwrap();
     assert_eq!(slack.calls("chat.postMessage").len(), 2);
@@ -444,8 +441,8 @@ async fn posts_to_one_chat_are_spaced_out() {
     let channel = channel_with(&slack, interval);
     let to = in_thread("C1", Some("11.1"));
     let started = tokio::time::Instant::now();
-    channel.send(&to, &Outbound::Text("one".into())).await.unwrap();
-    channel.send(&to, &Outbound::Text("two".into())).await.unwrap();
+    channel.send(&to, &Post::Text("one".into())).await.unwrap();
+    channel.send(&to, &Post::Text("two".into())).await.unwrap();
     assert!(started.elapsed() >= interval, "{:?}", started.elapsed());
 }
 
@@ -637,12 +634,99 @@ async fn a_thread_is_read_without_the_messages_of_bots_or_edits() {
         read,
         [earlier("8.0", "U1", "root & all"), earlier("8.3", "U2", "me too")]
     );
-    let call = &slack.calls("conversations.replies")[0];
+    let calls = slack.calls("conversations.replies");
+    assert_eq!(calls.len(), 1, "an answer without a cursor is the thread's last page");
+    // A page holds as many messages as Slack recommends asking for, however few are kept.
     assert_eq!(
-        (call.arg("channel"), call.arg("ts"), call.arg("limit")),
-        (Some("C1"), Some("8.0"), Some("50"))
+        (calls[0].arg("channel"), calls[0].arg("ts"), calls[0].arg("limit")),
+        (Some("C1"), Some("8.0"), Some("200"))
     );
-    assert_eq!(call.authorization, format!("Bearer {BOT_TOKEN}"));
+    assert_eq!(calls[0].arg("cursor"), None);
+    assert_eq!(calls[0].authorization, format!("Bearer {BOT_TOKEN}"));
+}
+
+/// One page of `conversations.replies`: messages of U1 with these timestamps, oldest first
+/// as Slack returns them, and the cursor of the next page, empty on the last one.
+fn replies_page(timestamps: &[&str], next_cursor: &str) -> Answer {
+    let messages: Vec<Value> = timestamps
+        .iter()
+        .map(|ts| json!({"type": "message", "user": "U1", "text": format!("said at {ts}"), "ts": ts}))
+        .collect();
+    Answer::Json(json!({
+        "ok": true,
+        "messages": messages,
+        "has_more": !next_cursor.is_empty(),
+        "response_metadata": {"next_cursor": next_cursor},
+    }))
+}
+
+/// The timestamps of the messages read, in order.
+fn timestamps(read: &[Said]) -> Vec<&str> {
+    read.iter().map(|said| said.id.0.as_str()).collect()
+}
+
+#[tokio::test]
+async fn a_thread_of_several_pages_is_read_to_its_end_for_its_latest_messages() {
+    let slack = FakeSlack::start().await;
+    slack.script(
+        "conversations.replies",
+        vec![
+            replies_page(&["8.0", "8.1", "8.2"], "page-2"),
+            replies_page(&["8.3", "8.4"], ""),
+        ],
+    );
+    let read = channel(&slack)
+        .thread_history(&in_thread("C1", Some("8.0")), 3)
+        .await
+        .unwrap();
+    assert_eq!(timestamps(&read), ["8.2", "8.3", "8.4"]);
+    let calls = slack.calls("conversations.replies");
+    let cursors: Vec<Option<&str>> = calls.iter().map(|call| call.arg("cursor")).collect();
+    assert_eq!(cursors, [None, Some("page-2")]);
+    assert_eq!((calls[1].arg("channel"), calls[1].arg("ts")), (Some("C1"), Some("8.0")));
+}
+
+#[tokio::test]
+async fn a_later_page_that_cannot_be_read_leaves_the_messages_read_so_far() {
+    let slack = FakeSlack::start().await;
+    slack.script(
+        "conversations.replies",
+        vec![
+            replies_page(&["8.0", "8.1"], "page-2"),
+            // Waiting this out would never end: a later page is given up at once instead.
+            Answer::RateLimited {
+                retry_after_secs: 100_000,
+            },
+        ],
+    );
+    let (channel, mut reports) = reporting(config(&slack));
+    let read = tokio::time::timeout(WAIT, channel.thread_history(&in_thread("C1", Some("8.0")), 50))
+        .await
+        .expect("the rate limit of a later page was waited out")
+        .unwrap();
+    assert_eq!(timestamps(&read), ["8.0", "8.1"]);
+    let report = reports.try_recv().unwrap();
+    assert!(
+        report.contains("conversations.replies") && report.contains("8.0") && report.contains("C1"),
+        "{report}"
+    );
+}
+
+#[tokio::test]
+async fn a_thread_of_too_many_pages_gives_the_latest_messages_of_those_read() {
+    let slack = FakeSlack::start().await;
+    // One page more than the channel reads of a thread.
+    let pages = ["8.0", "8.1", "8.2", "8.3", "8.4", "8.5"]
+        .iter()
+        .map(|ts| replies_page(&[ts], "more"))
+        .collect();
+    slack.script("conversations.replies", pages);
+    let (channel, mut reports) = reporting(config(&slack));
+    let read = channel.thread_history(&in_thread("C1", Some("8.0")), 2).await.unwrap();
+    assert_eq!(timestamps(&read), ["8.3", "8.4"]);
+    assert_eq!(slack.calls("conversations.replies").len(), 5);
+    let report = reports.try_recv().unwrap();
+    assert!(report.contains("5 pages"), "{report}");
 }
 
 #[tokio::test]

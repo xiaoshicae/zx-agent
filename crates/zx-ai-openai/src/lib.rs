@@ -26,7 +26,10 @@ use zx_ai::provider::{EventReceiver, EventSender, Provider, event_channel, send_
 use zx_ai::{ProviderError, Request, StopReason, StreamEvent, duration_ms, now_ms};
 
 use accumulate::Accumulator;
-pub use config::{ApiKey, ApiKeySource, DEFAULT_MAX_RESPONSE_BYTES, OpenAiConfig, ReasoningFormat, SystemUpdates};
+pub use config::{
+    ApiKey, ApiKeySource, BodyOptions, DEFAULT_MAX_RESPONSE_BYTES, MaxTokensField, OpenAiConfig, ReasoningFormat,
+    SystemUpdates,
+};
 use failure::{
     Failure, answers_json, error_object, http_failure, json_body_failure, provider_failure, transport_failure,
 };
@@ -68,7 +71,7 @@ impl Provider for OpenAiCompatible {
     }
 
     fn request_options(&self) -> Value {
-        request::request_options(&self.config)
+        request::request_options(&self.config.body)
     }
 
     fn stream(&self, request: Request, cancel: CancellationToken) -> EventReceiver {
@@ -97,7 +100,7 @@ async fn run(
         client: &client,
         config: &config,
         url: format!("{}/chat/completions", config.base_url.trim_end_matches('/')),
-        body: request::build_body(&request, &config),
+        body: request::build_body(&request, &config.body, &config.provider_name),
     };
 
     let outcome = tokio::select! {

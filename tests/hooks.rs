@@ -10,26 +10,32 @@ use async_trait::async_trait;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use common::{EchoTool, RunnerSetup, config, fast_retry, header, read_lines, run_prompt, summarize};
-use zx_agent::agent::QueuedMessage;
-use zx_agent::agent::{
-    AgentEvent, ApprovalResult, CancelSignal, ContextEdit, Event, FinishedTurn, HookChain, HookContext, HookOptions,
-    HookResult, HookStage, Hooks, PolicyDecision, RunOutcome, Tool, ToolContext, ToolOutput, ToolVerdict, TurnDecision,
+use common::{
+    Asked, EchoTool, RunnerSetup, config, fast_retry, header, read_lines, refusal, run_approved, run_prompt, summarize,
 };
-use zx_agent::agent::{Approval, ApprovalRequest, Interaction};
+use zx_agent::CancelSignal;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{EventReceiver, Message, Provider, Request, SectionChange, StopReason, SystemMessage, ToolCall};
-use zx_agent::continuation::ContinueOnLength;
-use zx_agent::redact::{RedactSecrets, check_secret_files, short_secret_files};
-use zx_agent::runner::Limits;
-use zx_agent::session::{Entry, SessionStore};
-use zx_agent::tools::BashTool;
+use zx_agent::builtin::continuation::ContinueOnLength;
+use zx_agent::builtin::redact::{RedactSecrets, check_secret_files, short_secret_files};
+use zx_agent::builtin::tools::BashTool;
+use zx_agent::events::{ApprovalResult, Event, EventKind, ToolVerdict};
+use zx_agent::hooks::{
+    ContextEdit, FinishedStep, Hook, HookChain, HookContext, HookOptions, HookResult, HookStage, StepDecision,
+};
+use zx_agent::input::Input;
+use zx_agent::policy::{
+    ApprovalDecision, ApprovalMode, DEFAULT_APPROVAL_TIMEOUT, PolicyContext, PolicyDecision, ToolPolicy,
+};
+use zx_agent::runner::{RunLimits, RunOutcome};
+use zx_agent::tools::{Tool, ToolContext, ToolOutput};
+use zx_agent::transcript::{Entry, SessionHeader, Transcript};
 
 struct Verdict(PolicyDecision);
 #[async_trait]
-impl Hooks for Verdict {
-    async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<PolicyDecision> {
-        Ok(self.0.clone())
+impl ToolPolicy for Verdict {
+    async fn check(&self, _call: &ToolCall, _ctx: &PolicyContext) -> PolicyDecision {
+        self.0.clone()
     }
 }
 
@@ -41,10 +47,13 @@ async fn a_later_allow_does_not_override_an_ask_without_a_human() {
     ]));
     let tool = Arc::new(EchoTool::new("echo"));
     let mut config = config(provider.clone(), vec![tool.clone()]);
+    config.policies.push(
+        "verdict",
+        Arc::new(Verdict(PolicyDecision::Ask("review required".into()))),
+    );
     config
-        .hooks
-        .push(Verdict(PolicyDecision::Ask("review required".into())));
-    config.hooks.push(Verdict(PolicyDecision::Allow));
+        .policies
+        .push("verdict", Arc::new(Verdict(PolicyDecision::Allow)));
     let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
     assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
@@ -54,24 +63,24 @@ async fn a_later_allow_does_not_override_an_ask_without_a_human() {
 }
 
 struct Approver {
-    approval: Approval,
+    approval: ApprovalDecision,
     calls: AtomicUsize,
 }
 #[async_trait]
-impl Interaction for Approver {
-    async fn confirm(&self, request: &ApprovalRequest) -> Result<Approval, String> {
+impl common::Approver for Approver {
+    async fn confirm(&self, request: &Asked) -> Option<ApprovalDecision> {
         assert_eq!(request.reason, "review");
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(self.approval.clone())
+        Some(self.approval.clone())
     }
 }
 
 #[tokio::test]
 async fn allow_once_and_session_approvals_have_different_scopes() {
     for (approval, confirmations, executions) in [
-        (Approval::AllowOnce, 2, 2),
-        (Approval::AllowSession, 1, 2),
-        (Approval::Deny("declined".into()), 2, 0),
+        (ApprovalDecision::AllowOnce, 2, 2),
+        (ApprovalDecision::AllowSession, 1, 2),
+        (ApprovalDecision::Deny("declined".into()), 2, 0),
     ] {
         let provider = Arc::new(FauxProvider::new([
             FauxStep::tool_calls(vec![
@@ -86,9 +95,10 @@ async fn allow_once_and_session_approvals_have_different_scopes() {
             calls: AtomicUsize::new(0),
         });
         let mut config = config(provider, vec![tool.clone()]);
-        config.hooks.push(Verdict(PolicyDecision::Ask("review".into())));
-        config.interaction = host.clone();
-        let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
+        config
+            .policies
+            .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
+        let (result, _) = run_approved(config, host.clone(), "go").await;
         assert_eq!(result.outcome, RunOutcome::Completed);
         assert_eq!(host.calls.load(Ordering::SeqCst), confirmations);
         assert_eq!(tool.calls.load(Ordering::SeqCst), executions);
@@ -97,13 +107,13 @@ async fn allow_once_and_session_approvals_have_different_scopes() {
 
 struct SwitchPolicy(Arc<AtomicBool>);
 #[async_trait]
-impl Hooks for SwitchPolicy {
-    async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<PolicyDecision> {
-        Ok(if self.0.load(Ordering::SeqCst) {
+impl ToolPolicy for SwitchPolicy {
+    async fn check(&self, _call: &ToolCall, _ctx: &PolicyContext) -> PolicyDecision {
+        if self.0.load(Ordering::SeqCst) {
             PolicyDecision::Deny("revoked".into())
         } else {
             PolicyDecision::Ask("review".into())
-        })
+        }
     }
 }
 
@@ -123,80 +133,62 @@ async fn session_grants_require_exact_arguments_and_never_override_deny() {
     let tool = Arc::new(EchoTool::new("echo"));
     let denied = Arc::new(AtomicBool::new(false));
     let host = Arc::new(Approver {
-        approval: Approval::AllowSession,
+        approval: ApprovalDecision::AllowSession,
         calls: AtomicUsize::new(0),
     });
     let mut config = config(provider, vec![tool.clone()]);
-    config.interaction = host.clone();
-    config.hooks.push(SwitchPolicy(denied.clone()));
-    let (mut runner, _) = RunnerSetup::new(config).build();
+    config.policies.push("switch", Arc::new(SwitchPolicy(denied.clone())));
+    let (runner, _) = RunnerSetup {
+        approver: Some(host.clone()),
+        ..RunnerSetup::new(config)
+    }
+    .build();
     for _ in 0..3 {
-        assert_eq!(
-            runner.run("go", &CancellationToken::new()).await.outcome,
-            RunOutcome::Completed
-        );
+        assert_eq!(runner.run("go").await.outcome, RunOutcome::Completed);
     }
     assert_eq!(host.calls.load(Ordering::SeqCst), 2, "different args must ask again");
     denied.store(true, Ordering::SeqCst);
-    runner.run("go", &CancellationToken::new()).await;
+    runner.run("go").await;
     assert_eq!(host.calls.load(Ordering::SeqCst), 2, "deny must bypass approvals");
     assert_eq!(tool.calls.load(Ordering::SeqCst), 3);
 }
 
-enum HostFailure {
-    Error,
-    Panic,
-    Pending,
-}
+/// Is asked and never answers; says when it was asked.
+struct WaitingHost(Arc<tokio::sync::Notify>);
 #[async_trait]
-impl Interaction for HostFailure {
-    async fn confirm(&self, _request: &ApprovalRequest) -> Result<Approval, String> {
-        match self {
-            Self::Error => Err("host unavailable".into()),
-            Self::Panic => panic!("host bug"),
-            Self::Pending => std::future::pending().await,
-        }
+impl common::Approver for WaitingHost {
+    async fn confirm(&self, _request: &Asked) -> Option<ApprovalDecision> {
+        self.0.notify_one();
+        std::future::pending().await
     }
 }
 
 #[tokio::test]
-async fn approval_errors_panics_and_timeouts_block_execution_and_preserve_the_loop() {
-    for (host, expected) in [
-        (HostFailure::Error, "host unavailable"),
-        (HostFailure::Panic, "panicked"),
-        (HostFailure::Pending, "timed out"),
-    ] {
-        let provider = Arc::new(FauxProvider::new([
-            FauxStep::tool_call("c", "echo", json!({})),
-            FauxStep::text("handled"),
-        ]));
-        let tool = Arc::new(EchoTool::new("echo"));
-        let mut config = config(provider.clone(), vec![tool.clone()]);
-        config.hooks.push(Verdict(PolicyDecision::Ask("review".into())));
-        config.interaction = Arc::new(host);
-        config.interaction_timeout = Duration::ZERO;
-        let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
-        assert_eq!(result.outcome, RunOutcome::Completed);
-        assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
-        assert!(
-            matches!(&provider.requests()[1].messages[2], Message::ToolResult(output) if output.is_error && output.content.contains(expected))
-        );
-    }
+async fn an_approval_nobody_answers_in_time_blocks_the_call_and_the_loop_goes_on() {
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::tool_call("c", "echo", json!({})),
+        FauxStep::text("handled"),
+    ]));
+    let tool = Arc::new(EchoTool::new("echo"));
+    let mut config = config(provider.clone(), vec![tool.clone()]);
+    config
+        .policies
+        .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
+    config.approvals = ApprovalMode::Wait(Duration::ZERO);
+    let host = Arc::new(WaitingHost(Arc::default()));
+    let (result, _) = run_approved(config, host, "go").await;
+    assert_eq!(result.outcome, RunOutcome::Completed);
+    assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
+    assert!(
+        matches!(&provider.requests()[1].messages[2], Message::ToolResult(output) if output.is_error && output.content.contains("nobody answered the approval request"))
+    );
 }
 
 #[test]
-fn host_approvals_wait_two_minutes_by_default() {
+fn nobody_answers_approvals_unless_the_host_says_it_does() {
     let config = config(Arc::new(FauxProvider::new([])), vec![]);
-    assert_eq!(config.interaction_timeout, Duration::from_secs(120));
-}
-
-struct WaitingHost(Arc<tokio::sync::Notify>);
-#[async_trait]
-impl Interaction for WaitingHost {
-    async fn confirm(&self, _request: &ApprovalRequest) -> Result<Approval, String> {
-        self.0.notify_one();
-        std::future::pending().await
-    }
+    assert_eq!(config.approvals, ApprovalMode::Deny);
+    assert_eq!(DEFAULT_APPROVAL_TIMEOUT, Duration::from_secs(120));
 }
 
 #[tokio::test]
@@ -205,24 +197,28 @@ async fn cancellation_interrupts_a_pending_approval() {
     let entered = Arc::new(tokio::sync::Notify::new());
     let tool = Arc::new(EchoTool::new("echo"));
     let mut config = config(provider, vec![tool.clone()]);
-    config.hooks.push(Verdict(PolicyDecision::Ask("review".into())));
-    config.interaction = Arc::new(WaitingHost(entered.clone()));
-    let (mut runner, _) = RunnerSetup::new(config).build();
-    let cancel = CancellationToken::new();
-    let mut running = Box::pin(runner.run("go", &cancel));
+    config
+        .policies
+        .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
+    let (runner, _) = RunnerSetup {
+        approver: Some(Arc::new(WaitingHost(entered.clone()))),
+        ..RunnerSetup::new(config)
+    }
+    .build();
+    let mut running = Box::pin(runner.run("go"));
     tokio::select! { () = entered.notified() => {}, _ = &mut running => panic!("must wait for approval") }
-    cancel.cancel();
+    runner.cancel();
     let report = tokio::time::timeout(Duration::from_secs(1), running).await.unwrap();
-    assert_eq!(report.outcome, RunOutcome::Aborted);
+    assert_eq!(report.outcome, RunOutcome::Cancelled);
     assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
 }
 
 struct CountBefore(Arc<AtomicUsize>);
 #[async_trait]
-impl Hooks for CountBefore {
-    async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<PolicyDecision> {
+impl ToolPolicy for CountBefore {
+    async fn check(&self, _call: &ToolCall, _ctx: &PolicyContext) -> PolicyDecision {
         self.0.fetch_add(1, Ordering::SeqCst);
-        Ok(PolicyDecision::Ask("review".into()))
+        PolicyDecision::Ask("review".into())
     }
 }
 
@@ -234,13 +230,12 @@ async fn invalid_tool_arguments_are_rejected_before_policy_and_approval() {
     ]));
     let checks = Arc::new(AtomicUsize::new(0));
     let host = Arc::new(Approver {
-        approval: Approval::AllowOnce,
+        approval: ApprovalDecision::AllowOnce,
         calls: AtomicUsize::new(0),
     });
     let mut config = config(provider.clone(), vec![Arc::new(BashTool::default())]);
-    config.hooks.push(CountBefore(checks.clone()));
-    config.interaction = host.clone();
-    run_prompt(config, &mut Vec::new(), "go").await;
+    config.policies.push("count", Arc::new(CountBefore(checks.clone())));
+    run_approved(config, host.clone(), "go").await;
     assert_eq!(checks.load(Ordering::SeqCst), 0);
     assert_eq!(host.calls.load(Ordering::SeqCst), 0);
     assert!(
@@ -250,7 +245,7 @@ async fn invalid_tool_arguments_are_rejected_before_policy_and_approval() {
 
 struct RewriteInput;
 #[async_trait]
-impl Hooks for RewriteInput {
+impl Hook for RewriteInput {
     async fn on_input(&self, text: String, _ctx: &HookContext) -> HookResult<String> {
         Ok(text.to_uppercase())
     }
@@ -258,7 +253,7 @@ impl Hooks for RewriteInput {
 
 struct Project;
 #[async_trait]
-impl Hooks for Project {
+impl Hook for Project {
     async fn transform_context(&self, messages: &[Message], _ctx: &HookContext) -> HookResult<Vec<ContextEdit>> {
         assert_eq!(summarize(messages), ["user:old", "user:GO"]);
         Ok(vec![
@@ -283,7 +278,7 @@ impl Provider for AuditProbe {
         "audit-probe"
     }
     fn stream(&self, request: Request, cancel: CancellationToken) -> EventReceiver {
-        let persisted = SessionStore::read(&self.path).unwrap();
+        let persisted = common::read_session_file(&self.path).unwrap();
         assert_eq!(
             request.messages,
             persisted.messages(),
@@ -297,7 +292,7 @@ impl Provider for AuditProbe {
 async fn input_and_context_changes_are_persisted_before_the_model_request() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session.jsonl");
-    let mut session = SessionStore::create(&path, header()).unwrap();
+    let mut session = common::create_session_file(&path, header()).await.unwrap();
     session.append_message(Message::user("old")).await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let probe = Arc::new(AuditProbe {
@@ -306,12 +301,12 @@ async fn input_and_context_changes_are_persisted_before_the_model_request() {
     });
     let mut config = config(probe, vec![]);
     config.hooks = HookChain::new().with(RewriteInput).with(Project);
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         session,
         ..RunnerSetup::new(config)
     }
     .build();
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
     assert_eq!(report.outcome, RunOutcome::Completed);
     assert_eq!(report.final_text, "done");
     assert_eq!(
@@ -322,14 +317,14 @@ async fn input_and_context_changes_are_persisted_before_the_model_request() {
     assert_eq!(lines[2]["message"]["content"], "go", "original input remains intact");
     assert_eq!(lines.iter().filter(|line| line["type"] == "context_edit").count(), 3);
     assert_eq!(
-        SessionStore::read(&path).unwrap().messages(),
+        common::read_session_file(&path).unwrap().messages(),
         runner.session().messages()
     );
 }
 
 struct InvalidPlan;
 #[async_trait]
-impl Hooks for InvalidPlan {
+impl Hook for InvalidPlan {
     async fn transform_context(&self, _messages: &[Message], _ctx: &HookContext) -> HookResult<Vec<ContextEdit>> {
         Ok(vec![
             ContextEdit::Omit { index: 0 },
@@ -346,9 +341,9 @@ async fn an_invalid_edit_plan_is_rejected_before_any_partial_edit_or_request() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("never")]));
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push(InvalidPlan);
-    let (mut runner, _) = RunnerSetup::new(config).build();
-    let report = runner.run("go", &CancellationToken::new()).await;
-    assert_eq!(report.outcome, RunOutcome::Error);
+    let (runner, _) = RunnerSetup::new(config).build();
+    let report = runner.run("go").await;
+    assert_eq!(report.outcome, RunOutcome::Failed);
     assert!(report.error.unwrap().contains("out of bounds"));
     assert!(provider.requests().is_empty());
     assert_eq!(summarize(&runner.session().messages()), ["user:go"]);
@@ -363,7 +358,7 @@ async fn an_invalid_edit_plan_is_rejected_before_any_partial_edit_or_request() {
 
 struct RejectInput;
 #[async_trait]
-impl Hooks for RejectInput {
+impl Hook for RejectInput {
     async fn on_input(&self, _text: String, _ctx: &HookContext) -> HookResult<String> {
         Err("unsupported input".into())
     }
@@ -374,15 +369,15 @@ async fn rejected_input_is_logged_and_omitted_without_retrying_the_model() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("never")]));
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push(RejectInput);
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         retry: fast_retry(3),
         ..RunnerSetup::new(config)
     }
     .build();
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
     assert_eq!(
         (report.outcome, report.model_requests, report.retries),
-        (RunOutcome::Error, 0, 0)
+        (RunOutcome::Failed, 0, 0)
     );
     assert!(provider.requests().is_empty());
     assert_eq!(runner.session().entries().len(), 2);
@@ -393,7 +388,7 @@ async fn rejected_input_is_logged_and_omitted_without_retrying_the_model() {
 async fn steering_queued_after_a_rejected_message_stays_queued_for_the_next_run() {
     struct RejectMarked;
     #[async_trait]
-    impl Hooks for RejectMarked {
+    impl Hook for RejectMarked {
         async fn on_input(&self, text: String, _ctx: &HookContext) -> HookResult<String> {
             if text == "reject-me" {
                 Err("rejected".into())
@@ -405,12 +400,12 @@ async fn steering_queued_after_a_rejected_message_stays_queued_for_the_next_run(
     let provider = Arc::new(FauxProvider::new([FauxStep::text("answer")]));
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push(RejectMarked);
-    let (mut runner, _) = RunnerSetup::new(config).build();
-    runner.config().queues.steer("reject-me");
-    runner.config().queues.steer("keep-me");
-    let first = runner.run("hello", &CancellationToken::new()).await;
-    assert_eq!(first.outcome, RunOutcome::Error, "{first:?}");
-    let second = runner.run("again", &CancellationToken::new()).await;
+    let (runner, _) = RunnerSetup::new(config).build();
+    runner.queues().steer("reject-me");
+    runner.queues().steer("keep-me");
+    let first = runner.run("hello").await;
+    assert_eq!(first.outcome, RunOutcome::Failed, "{first:?}");
+    let second = runner.run("again").await;
     assert_eq!(second.outcome, RunOutcome::Completed, "{second:?}");
     assert_eq!(
         summarize(&provider.requests()[0].messages),
@@ -420,7 +415,7 @@ async fn steering_queued_after_a_rejected_message_stays_queued_for_the_next_run(
 
 struct OmitEarlier;
 #[async_trait]
-impl Hooks for OmitEarlier {
+impl Hook for OmitEarlier {
     async fn transform_context(&self, messages: &[Message], _ctx: &HookContext) -> HookResult<Vec<ContextEdit>> {
         Ok((0..messages.len().saturating_sub(1))
             .map(|_| ContextEdit::Omit { index: 0 })
@@ -431,18 +426,18 @@ impl Hooks for OmitEarlier {
 #[tokio::test]
 async fn omitting_prior_runs_does_not_lose_the_current_answer_or_usage() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("current")]));
-    let mut session = SessionStore::in_memory(header());
+    let mut session = Transcript::in_memory(header());
     for _ in 0..5 {
         session.append_message(Message::user("old")).await.unwrap();
     }
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push(OmitEarlier);
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         session,
         ..RunnerSetup::new(config)
     }
     .build();
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
     assert_eq!(report.final_text, "current");
     assert_eq!(report.usage.total_tokens, 15);
     assert_eq!(summarize(&provider.requests()[0].messages), ["user:go"]);
@@ -454,7 +449,7 @@ enum BadOutput {
     Pending,
 }
 #[async_trait]
-impl Hooks for BadOutput {
+impl Hook for BadOutput {
     async fn after_tool(&self, _call: &ToolCall, _output: ToolOutput, _ctx: &HookContext) -> HookResult<ToolOutput> {
         match self {
             Self::Error => Err("filter rejected".into()),
@@ -468,7 +463,7 @@ impl Hooks for BadOutput {
 async fn failed_output_hooks_withhold_raw_results_from_events_and_persistence() {
     struct SecretTool;
     #[async_trait]
-    impl zx_agent::agent::Tool for SecretTool {
+    impl zx_agent::tools::Tool for SecretTool {
         fn name(&self) -> &str {
             "echo"
         }
@@ -482,7 +477,7 @@ async fn failed_output_hooks_withhold_raw_results_from_events_and_persistence() 
         async fn execute(
             &self,
             _args: serde_json::Value,
-            _ctx: &zx_agent::agent::ToolContext,
+            _ctx: &zx_agent::tools::ToolContext,
         ) -> Result<ToolOutput, String> {
             Ok(ToolOutput::ok("raw-tool-secret"))
         }
@@ -500,8 +495,8 @@ async fn failed_output_hooks_withhold_raw_results_from_events_and_persistence() 
                 ..HookOptions::default()
             },
         );
-        let (mut runner, events) = RunnerSetup::new(config).build();
-        let report = runner.run("go", &CancellationToken::new()).await;
+        let (runner, events) = RunnerSetup::new(config).build();
+        let report = runner.run("go").await;
         assert_eq!(report.outcome, RunOutcome::Completed);
         let serialized = serde_json::to_string(runner.session().entries()).unwrap();
         assert!(!serialized.contains("raw-tool-secret"));
@@ -520,17 +515,17 @@ struct Observer {
     seen: Arc<Mutex<Vec<&'static str>>>,
 }
 #[async_trait]
-impl Hooks for Observer {
+impl Hook for Observer {
     async fn on_event(&self, event: &Event, _ctx: &HookContext) -> HookResult<()> {
         assert!(
-            !matches!(event.event, AgentEvent::HookFailed { .. }),
+            !matches!(event.event, EventKind::HookFailed { .. }),
             "diagnostics must not recurse"
         );
         self.seen.lock().unwrap().push(event.event.kind());
         Err("observer unavailable".into())
     }
 
-    fn observes(&self, _event: &AgentEvent) -> bool {
+    fn observes(&self, _event: &EventKind) -> bool {
         true
     }
 }
@@ -544,12 +539,12 @@ async fn observer_failures_are_diagnostic_and_retry_events_are_observed_once() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let mut config = config(provider, vec![]);
     config.hooks.push(Observer { seen: seen.clone() });
-    let (mut runner, events) = RunnerSetup {
+    let (runner, events) = RunnerSetup {
         retry: fast_retry(1),
         ..RunnerSetup::new(config)
     }
     .build();
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
     assert_eq!(report.outcome, RunOutcome::Completed);
     let kinds = events.kinds();
     let regular: Vec<_> = kinds.iter().copied().filter(|kind| *kind != "hook_failed").collect();
@@ -563,12 +558,12 @@ async fn observer_failures_are_diagnostic_and_retry_events_are_observed_once() {
 
 struct CustomContinue;
 #[async_trait]
-impl Hooks for CustomContinue {
-    async fn finish_turn(&self, turn: &FinishedTurn<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
-        Ok(if turn.response.stop_reason == StopReason::Length {
-            TurnDecision::ContinueAnswer("接着回答".into())
+impl Hook for CustomContinue {
+    async fn finish_step(&self, step: &FinishedStep<'_>, _ctx: &HookContext) -> HookResult<StepDecision> {
+        Ok(if step.response.stop_reason == StopReason::Length {
+            StepDecision::ContinueAnswer("接着回答".into())
         } else {
-            TurnDecision::Default
+            StepDecision::Default
         })
     }
 }
@@ -581,8 +576,8 @@ async fn custom_continuation_wording_still_joins_answer_parts() {
     ]));
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push(CustomContinue);
-    let (mut runner, _) = RunnerSetup::new(config).build();
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let (runner, _) = RunnerSetup::new(config).build();
+    let report = runner.run("go").await;
     assert_eq!(report.final_text, "第一部分，第二部分。");
     assert!(matches!(&provider.requests()[1].messages[2], Message::User { content, .. } if content == "接着回答"));
 }
@@ -597,13 +592,13 @@ async fn continuation_budget_is_not_reset_after_a_provider_retry() {
     ]));
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push(ContinueOnLength::new(1));
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         retry: fast_retry(1),
-        limits: Limits::default(),
+        limits: RunLimits::default(),
         ..RunnerSetup::new(config)
     }
     .build();
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
     assert_eq!(
         (report.outcome, report.model_requests, report.retries),
         (RunOutcome::Truncated, 3, 1)
@@ -828,43 +823,43 @@ async fn every_current_secret_is_redacted_however_many_files_there_are() {
     assert_eq!(output.content, vec!["[REDACTED]"; count].join(" "));
 }
 
-struct NextTurn(TurnDecision);
+struct NextTurn(StepDecision);
 #[async_trait]
-impl Hooks for NextTurn {
-    async fn finish_turn(&self, _turn: &FinishedTurn<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
+impl Hook for NextTurn {
+    async fn finish_step(&self, _step: &FinishedStep<'_>, _ctx: &HookContext) -> HookResult<StepDecision> {
         Ok(self.0.clone())
     }
 }
 
 #[tokio::test]
-async fn a_hook_follow_up_obeys_the_turn_budget() {
+async fn a_hook_follow_up_obeys_the_step_budget() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("first"), FauxStep::text("never")]));
     let mut config = config(provider.clone(), vec![]);
-    config.hooks.push(NextTurn(TurnDecision::FollowUp("next".into())));
-    let (mut runner, _) = RunnerSetup {
-        limits: Limits {
+    config.hooks.push(NextTurn(StepDecision::FollowUp("next".into())));
+    let (runner, _) = RunnerSetup {
+        limits: RunLimits {
             max_model_requests: Some(1),
-            ..Limits::default()
+            ..RunLimits::default()
         },
         ..RunnerSetup::new(config)
     }
     .build();
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
     assert_eq!(report.outcome, RunOutcome::ModelRequestLimit);
     assert_eq!(provider.requests().len(), 1);
 }
 
-struct StopAndQueue(Arc<zx_agent::agent::MessageQueues>);
+struct StopAndQueue;
 #[async_trait]
-impl Hooks for StopAndQueue {
-    async fn on_event(&self, event: &Event, _ctx: &HookContext) -> HookResult<()> {
-        if matches!(event.event, AgentEvent::TurnEnd { .. }) {
-            self.0.steer("pending user input");
+impl Hook for StopAndQueue {
+    async fn on_event(&self, event: &Event, ctx: &HookContext) -> HookResult<()> {
+        if matches!(event.event, EventKind::StepEnd { .. }) {
+            ctx.queues.steer("pending user input");
         }
         Ok(())
     }
-    async fn finish_turn(&self, _turn: &FinishedTurn<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
-        Ok(TurnDecision::Stop)
+    async fn finish_step(&self, _step: &FinishedStep<'_>, _ctx: &HookContext) -> HookResult<StepDecision> {
+        Ok(StepDecision::Stop)
     }
 }
 
@@ -872,20 +867,17 @@ impl Hooks for StopAndQueue {
 async fn stopping_from_a_hook_preserves_queued_user_input() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let mut config = config(provider, vec![]);
-    let queues = config.queues.clone();
-    config.hooks.push(StopAndQueue(queues.clone()));
-    let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
+    config.hooks.push(StopAndQueue);
+    let (runner, _) = RunnerSetup::new(config).build();
+    let result = runner.run("go").await;
     assert_eq!(result.outcome, RunOutcome::Completed);
-    assert_eq!(
-        queues.drain_steering(),
-        [QueuedMessage::User("pending user input".into())]
-    );
+    assert_eq!(runner.queues().drain_steering(), [Input::from("pending user input")]);
 }
 
 struct FinishFailure;
 #[async_trait]
-impl Hooks for FinishFailure {
-    async fn finish_turn(&self, _turn: &FinishedTurn<'_>, _ctx: &HookContext) -> HookResult<TurnDecision> {
+impl Hook for FinishFailure {
+    async fn finish_step(&self, _step: &FinishedStep<'_>, _ctx: &HookContext) -> HookResult<StepDecision> {
         Err("HTTP 503 from extension".into())
     }
 }
@@ -895,15 +887,15 @@ async fn a_finish_hook_error_never_triggers_provider_retry() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("answer"), FauxStep::text("never")]));
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push(FinishFailure);
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         retry: fast_retry(3),
         ..RunnerSetup::new(config)
     }
     .build();
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
     assert_eq!(
         (report.outcome, report.model_requests, report.retries),
-        (RunOutcome::Error, 1, 0)
+        (RunOutcome::Failed, 1, 0)
     );
     assert!(report.error.unwrap().contains("HTTP 503 from extension"));
     assert_eq!(provider.requests().len(), 1);
@@ -921,11 +913,11 @@ async fn an_attempt_that_a_hook_failure_stops_reports_an_error() {
         .events()
         .iter()
         .filter_map(|event| match event {
-            AgentEvent::AgentEnd { outcome } => Some(*outcome),
+            EventKind::AttemptEnd { outcome } => Some(*outcome),
             _ => None,
         })
         .collect();
-    assert_eq!(ended, [RunOutcome::Error]);
+    assert_eq!(ended, [RunOutcome::Failed]);
 }
 
 /// Holds input that starts with "hold" until the run is cancelled or dropped, unless released,
@@ -935,7 +927,7 @@ struct HoldInput {
     released: Arc<AtomicBool>,
 }
 #[async_trait]
-impl Hooks for HoldInput {
+impl Hook for HoldInput {
     async fn on_input(&self, text: String, _ctx: &HookContext) -> HookResult<String> {
         if text.starts_with("hold") && !self.released.load(Ordering::SeqCst) {
             self.holding.notify_one();
@@ -945,7 +937,7 @@ impl Hooks for HoldInput {
     }
 }
 
-fn holding_runner(provider: Arc<FauxProvider>) -> (zx_agent::runner::Runner, HoldInput) {
+fn holding_runner(provider: Arc<FauxProvider>) -> (common::Driven, HoldInput) {
     let holding = Arc::new(tokio::sync::Notify::new());
     let released = Arc::new(AtomicBool::new(false));
     let mut config = config(provider, vec![]);
@@ -967,17 +959,16 @@ fn mentions(messages: &[Message], text: &str) -> usize {
 #[tokio::test]
 async fn input_whose_hook_was_cancelled_is_not_recorded() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
-    let (mut runner, hold) = holding_runner(provider.clone());
-    let cancel = CancellationToken::new();
+    let (runner, hold) = holding_runner(provider.clone());
 
-    let (report, ()) = tokio::join!(runner.run("hold: rotate the logs", &cancel), async {
+    let (report, ()) = tokio::join!(runner.run("hold: rotate the logs"), async {
         hold.holding.notified().await;
-        cancel.cancel();
+        runner.cancel();
     });
 
-    assert_eq!(report.outcome, RunOutcome::Aborted);
+    assert_eq!(report.outcome, RunOutcome::Cancelled);
     assert_eq!(mentions(&runner.session().messages(), "rotate the logs"), 0);
-    let report = runner.run("next", &CancellationToken::new()).await;
+    let report = runner.run("next").await;
     assert_eq!(report.outcome, RunOutcome::Completed);
     assert_eq!(summarize(&provider.requests()[0].messages), ["user:next"]);
 }
@@ -985,18 +976,17 @@ async fn input_whose_hook_was_cancelled_is_not_recorded() {
 #[tokio::test]
 async fn queued_input_whose_run_was_dropped_stays_queued_and_unrecorded() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
-    let (mut runner, hold) = holding_runner(provider.clone());
-    runner.config().queues.steer("hold: check the disk");
-    let cancel = CancellationToken::new();
+    let (runner, hold) = holding_runner(provider.clone());
+    runner.queues().steer("hold: check the disk");
 
     tokio::select! {
-        _ = runner.run("go", &cancel) => panic!("the input hook should still hold the input"),
+        _ = runner.run("go") => panic!("the input hook should still hold the input"),
         () = hold.holding.notified() => {}
     }
 
     assert_eq!(mentions(&runner.session().messages(), "check the disk"), 0);
     hold.released.store(true, Ordering::SeqCst);
-    let report = runner.run("next", &CancellationToken::new()).await;
+    let report = runner.run("next").await;
     assert_eq!(report.outcome, RunOutcome::Completed);
     assert_eq!(
         summarize(&provider.requests()[0].messages),
@@ -1010,11 +1000,11 @@ fn approvals(events: &common::Collect) -> Vec<(String, String)> {
         .events()
         .into_iter()
         .filter_map(|event| match event {
-            AgentEvent::ToolDecision {
+            EventKind::ToolDecision {
                 tool_call_id, verdict, ..
             } => Some((tool_call_id, format!("{verdict:?}"))),
-            AgentEvent::ApprovalRequested { tool_call_id, .. } => Some((tool_call_id, "requested".into())),
-            AgentEvent::ApprovalResolved {
+            EventKind::ApprovalRequested { tool_call_id, .. } => Some((tool_call_id, "requested".into())),
+            EventKind::ApprovalResolved {
                 tool_call_id, approval, ..
             } => Some((tool_call_id, format!("{approval:?}"))),
             _ => None,
@@ -1044,7 +1034,7 @@ async fn the_policy_verdict_of_every_call_is_reported_with_its_reason() {
             FauxStep::text("done"),
         ]));
         let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
-        config.hooks.push(Verdict(decision));
+        config.policies.push("verdict", Arc::new(Verdict(decision)));
 
         let (_, events) = run_prompt(config, &mut Vec::new(), "go").await;
 
@@ -1052,7 +1042,7 @@ async fn the_policy_verdict_of_every_call_is_reported_with_its_reason() {
             .events()
             .into_iter()
             .filter_map(|event| match event {
-                AgentEvent::ToolDecision { verdict, reason, .. } => Some((verdict, reason)),
+                EventKind::ToolDecision { verdict, reason, .. } => Some((verdict, reason)),
                 _ => None,
             })
             .collect();
@@ -1065,7 +1055,7 @@ async fn the_policy_verdict_of_every_call_is_reported_with_its_reason() {
 async fn approvals_are_reported_when_asked_and_when_remembered() {
     for (approval, expected) in [
         (
-            Approval::AllowOnce,
+            ApprovalDecision::AllowOnce,
             pairs(&[
                 ("c1", "Ask"),
                 ("c1", "requested"),
@@ -1076,7 +1066,7 @@ async fn approvals_are_reported_when_asked_and_when_remembered() {
             ]),
         ),
         (
-            Approval::AllowSession,
+            ApprovalDecision::AllowSession,
             pairs(&[
                 ("c1", "Ask"),
                 ("c1", "requested"),
@@ -1086,7 +1076,7 @@ async fn approvals_are_reported_when_asked_and_when_remembered() {
             ]),
         ),
         (
-            Approval::Deny("declined".into()),
+            ApprovalDecision::Deny("declined".into()),
             pairs(&[
                 ("c1", "Ask"),
                 ("c1", "requested"),
@@ -1105,13 +1095,15 @@ async fn approvals_are_reported_when_asked_and_when_remembered() {
             FauxStep::text("done"),
         ]));
         let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
-        config.hooks.push(Verdict(PolicyDecision::Ask("review".into())));
-        config.interaction = Arc::new(Approver {
+        config
+            .policies
+            .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
+        let host = Arc::new(Approver {
             approval,
             calls: AtomicUsize::new(0),
         });
 
-        let (_, events) = run_prompt(config, &mut Vec::new(), "go").await;
+        let (_, events) = run_approved(config, host, "go").await;
 
         assert_eq!(approvals(&events), expected);
     }
@@ -1120,10 +1112,10 @@ async fn approvals_are_reported_when_asked_and_when_remembered() {
 /// Answers after `delay`, like a person who takes a moment.
 struct SlowApprover(Duration);
 #[async_trait]
-impl Interaction for SlowApprover {
-    async fn confirm(&self, _request: &ApprovalRequest) -> Result<Approval, String> {
+impl common::Approver for SlowApprover {
+    async fn confirm(&self, _request: &Asked) -> Option<ApprovalDecision> {
         tokio::time::sleep(self.0).await;
-        Ok(Approval::AllowOnce)
+        Some(ApprovalDecision::AllowOnce)
     }
 }
 
@@ -1134,16 +1126,18 @@ async fn a_resolved_approval_reports_how_long_it_waited() {
         FauxStep::text("done"),
     ]));
     let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
-    config.hooks.push(Verdict(PolicyDecision::Ask("review".into())));
-    config.interaction = Arc::new(SlowApprover(Duration::from_millis(20)));
+    config
+        .policies
+        .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
+    let host = Arc::new(SlowApprover(Duration::from_millis(20)));
 
-    let (_, events) = run_prompt(config, &mut Vec::new(), "go").await;
+    let (_, events) = run_approved(config, host, "go").await;
 
     let waited: Vec<u64> = events
         .events()
         .into_iter()
         .filter_map(|event| match event {
-            AgentEvent::ApprovalResolved { wait_ms, .. } => Some(wait_ms),
+            EventKind::ApprovalResolved { wait_ms, .. } => Some(wait_ms),
             _ => None,
         })
         .collect();
@@ -1152,20 +1146,20 @@ async fn a_resolved_approval_reports_how_long_it_waited() {
 }
 
 #[tokio::test]
-async fn approvals_that_fail_or_time_out_report_how_they_ended() {
-    for (host, ended) in [
-        (HostFailure::Error, ApprovalResult::Failed),
-        (HostFailure::Panic, ApprovalResult::Failed),
-        (HostFailure::Pending, ApprovalResult::TimedOut),
+async fn an_approval_ends_as_denied_without_anyone_to_ask_and_as_timed_out_without_an_answer() {
+    for (approvals, ended) in [
+        (ApprovalMode::Deny, ApprovalResult::Denied),
+        (ApprovalMode::Wait(Duration::ZERO), ApprovalResult::TimedOut),
     ] {
         let provider = Arc::new(FauxProvider::new([
             FauxStep::tool_call("c", "echo", json!({})),
             FauxStep::text("handled"),
         ]));
         let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
-        config.hooks.push(Verdict(PolicyDecision::Ask("review".into())));
-        config.interaction = Arc::new(host);
-        config.interaction_timeout = Duration::ZERO;
+        config
+            .policies
+            .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
+        config.approvals = approvals;
 
         let (_, events) = run_prompt(config, &mut Vec::new(), "go").await;
 
@@ -1173,11 +1167,16 @@ async fn approvals_that_fail_or_time_out_report_how_they_ended() {
             .events()
             .into_iter()
             .filter_map(|event| match event {
-                AgentEvent::ApprovalResolved { approval, reason, .. } => Some((approval, reason.is_some())),
+                EventKind::ApprovalResolved {
+                    approval_id,
+                    approval,
+                    reason,
+                    ..
+                } => Some((approval, approval_id.is_some(), reason.is_some())),
                 _ => None,
             })
             .collect();
-        assert_eq!(resolved, [(ended, true)]);
+        assert_eq!(resolved, [(ended, true, true)]);
     }
 }
 
@@ -1186,17 +1185,21 @@ async fn an_approval_interrupted_by_cancellation_is_reported_as_cancelled() {
     let provider = Arc::new(FauxProvider::new([FauxStep::tool_call("c", "echo", json!({}))]));
     let entered = Arc::new(tokio::sync::Notify::new());
     let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
-    config.hooks.push(Verdict(PolicyDecision::Ask("review".into())));
-    config.interaction = Arc::new(WaitingHost(entered.clone()));
-    let (mut runner, events) = RunnerSetup::new(config).build();
-    let cancel = CancellationToken::new();
+    config
+        .policies
+        .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
+    let (runner, events) = RunnerSetup {
+        approver: Some(Arc::new(WaitingHost(entered.clone()))),
+        ..RunnerSetup::new(config)
+    }
+    .build();
 
-    let (report, ()) = tokio::join!(runner.run("go", &cancel), async {
+    let (report, ()) = tokio::join!(runner.run("go"), async {
         entered.notified().await;
-        cancel.cancel();
+        runner.cancel();
     });
 
-    assert_eq!(report.outcome, RunOutcome::Aborted);
+    assert_eq!(report.outcome, RunOutcome::Cancelled);
     assert_eq!(
         approvals(&events),
         pairs(&[("c", "Ask"), ("c", "requested"), ("c", "Cancelled")])
@@ -1209,14 +1212,14 @@ struct Kinds {
     all: bool,
 }
 #[async_trait]
-impl Hooks for Kinds {
+impl Hook for Kinds {
     async fn on_event(&self, event: &Event, _ctx: &HookContext) -> HookResult<()> {
         self.seen.lock().unwrap().push(event.event.kind());
         Ok(())
     }
 
-    fn observes(&self, event: &AgentEvent) -> bool {
-        self.all || !matches!(event, AgentEvent::MessageUpdate { .. })
+    fn observes(&self, event: &EventKind) -> bool {
+        self.all || !matches!(event, EventKind::MessageUpdate { .. })
     }
 }
 
@@ -1264,7 +1267,7 @@ impl ContextProbe {
     }
 }
 #[async_trait]
-impl Hooks for ContextProbe {
+impl Hook for ContextProbe {
     async fn on_input(&self, text: String, ctx: &HookContext) -> HookResult<String> {
         self.record("on_input", ctx);
         Ok(text)
@@ -1273,17 +1276,13 @@ impl Hooks for ContextProbe {
         self.record("transform_context", ctx);
         Ok(Vec::new())
     }
-    async fn before_tool(&self, _call: &ToolCall, ctx: &HookContext) -> HookResult<PolicyDecision> {
-        self.record("before_tool", ctx);
-        Ok(PolicyDecision::Allow)
-    }
     async fn after_tool(&self, _call: &ToolCall, output: ToolOutput, ctx: &HookContext) -> HookResult<ToolOutput> {
         self.record("after_tool", ctx);
         Ok(output)
     }
-    async fn finish_turn(&self, _turn: &FinishedTurn<'_>, ctx: &HookContext) -> HookResult<TurnDecision> {
-        self.record("finish_turn", ctx);
-        Ok(TurnDecision::Default)
+    async fn finish_step(&self, _step: &FinishedStep<'_>, ctx: &HookContext) -> HookResult<StepDecision> {
+        self.record("finish_step", ctx);
+        Ok(StepDecision::Default)
     }
     async fn on_event(&self, _event: &Event, ctx: &HookContext) -> HookResult<()> {
         self.record("on_event", ctx);
@@ -1299,11 +1298,14 @@ async fn every_hook_method_knows_the_session_run_and_working_directory() {
     ]));
     let probe = ContextProbe::default();
     let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
-    config.cwd = PathBuf::from("/srv/work");
     config.hooks.push(probe.clone());
-    let (mut runner, events) = RunnerSetup::new(config).build();
+    let (runner, events) = RunnerSetup {
+        session: Transcript::in_memory(SessionHeader::new(Path::new("/srv/work"), "test-model")),
+        ..RunnerSetup::new(config)
+    }
+    .build();
 
-    runner.run("go", &CancellationToken::new()).await;
+    runner.run("go").await;
 
     let session_id = runner.session().header().id.clone();
     let run_id = events.envelopes()[0].run_id.clone();
@@ -1313,14 +1315,7 @@ async fn every_hook_method_knows_the_session_run_and_working_directory() {
     methods.dedup();
     assert_eq!(
         methods,
-        [
-            "after_tool",
-            "before_tool",
-            "finish_turn",
-            "on_event",
-            "on_input",
-            "transform_context"
-        ]
+        ["after_tool", "finish_step", "on_event", "on_input", "transform_context"]
     );
     for (method, session, run, cwd) in &seen {
         assert_eq!(session, &session_id, "{method}");
@@ -1333,7 +1328,7 @@ async fn every_hook_method_knows_the_session_run_and_working_directory() {
 
 struct FailingObserver;
 #[async_trait]
-impl Hooks for FailingObserver {
+impl Hook for FailingObserver {
     async fn on_event(&self, _event: &Event, _ctx: &HookContext) -> HookResult<()> {
         Err("exporter offline".into())
     }
@@ -1350,15 +1345,15 @@ async fn a_named_hook_is_reported_under_its_name() {
             ..HookOptions::default()
         },
     );
-    let (mut runner, events) = RunnerSetup::new(config).build();
+    let (runner, events) = RunnerSetup::new(config).build();
 
-    runner.run("go", &CancellationToken::new()).await;
+    runner.run("go").await;
 
     let hooks: Vec<String> = events
         .events()
         .into_iter()
         .filter_map(|event| match event {
-            AgentEvent::HookFailed { hook, .. } => Some(hook),
+            EventKind::HookFailed { hook, .. } => Some(hook),
             _ => None,
         })
         .collect();
@@ -1366,18 +1361,14 @@ async fn a_named_hook_is_reported_under_its_name() {
     assert!(hooks.iter().all(|hook| hook == "trace-exporter"), "{hooks:?}");
 }
 
-/// Records its tag in before_tool and after_tool; runs in the stage it declares.
+/// Records its tag in after_tool; runs in the stage it declares.
 struct Staged {
     stage: HookStage,
     tag: &'static str,
     order: Arc<Mutex<Vec<String>>>,
 }
 #[async_trait]
-impl Hooks for Staged {
-    async fn before_tool(&self, _call: &ToolCall, _ctx: &HookContext) -> HookResult<PolicyDecision> {
-        self.order.lock().unwrap().push(format!("before:{}", self.tag));
-        Ok(PolicyDecision::Allow)
-    }
+impl Hook for Staged {
     async fn after_tool(&self, _call: &ToolCall, output: ToolOutput, _ctx: &HookContext) -> HookResult<ToolOutput> {
         self.order.lock().unwrap().push(format!("after:{}", self.tag));
         Ok(output)
@@ -1399,7 +1390,6 @@ async fn hooks_run_in_stage_order_whatever_the_registration_order() {
         (HookStage::Storage, "storage"),
         (HookStage::Redaction, "redaction"),
         (HookStage::Extension, "extension-1"),
-        (HookStage::Policy, "policy"),
         (HookStage::Extension, "extension-2"),
     ] {
         config.hooks.push(Staged {
@@ -1412,14 +1402,9 @@ async fn hooks_run_in_stage_order_whatever_the_registration_order() {
     run_prompt(config, &mut Vec::new(), "go").await;
 
     let order = order.lock().unwrap().clone();
-    let expected: Vec<String> = ["policy", "extension-1", "extension-2", "redaction", "storage"]
+    let expected: Vec<String> = ["extension-1", "extension-2", "redaction", "storage"]
         .iter()
-        .map(|tag| format!("before:{tag}"))
-        .chain(
-            ["policy", "extension-1", "extension-2", "redaction", "storage"]
-                .iter()
-                .map(|tag| format!("after:{tag}")),
-        )
+        .map(|tag| format!("after:{tag}"))
         .collect();
     assert_eq!(order, expected);
 }
@@ -1427,7 +1412,7 @@ async fn hooks_run_in_stage_order_whatever_the_registration_order() {
 /// An extension that copies a secret into tool output.
 struct LeakSecret;
 #[async_trait]
-impl Hooks for LeakSecret {
+impl Hook for LeakSecret {
     async fn after_tool(&self, _call: &ToolCall, mut output: ToolOutput, _ctx: &HookContext) -> HookResult<ToolOutput> {
         output.content.push_str(" sk-registered-early");
         Ok(output)
@@ -1475,7 +1460,7 @@ async fn progress_passes_only_the_redaction_hooks() {
         .events()
         .into_iter()
         .filter_map(|event| match event {
-            AgentEvent::ToolExecutionUpdate { content, .. } => Some(content),
+            EventKind::ToolExecutionUpdate { content, .. } => Some(content),
             _ => None,
         })
         .collect();
@@ -1503,32 +1488,27 @@ async fn redaction_covers_the_strings_and_keys_of_details() {
         .events()
         .into_iter()
         .filter_map(|event| match event {
-            AgentEvent::ToolExecutionEnd { details, .. } => details,
+            EventKind::ToolExecutionEnd { details, .. } => details,
             _ => None,
         })
         .collect();
     assert_eq!(details, [json!({"[REDACTED]": ["token [REDACTED]", 7, null]})]);
 }
 
-#[tokio::test]
-async fn tools_with_the_same_name_are_rejected_before_any_request() {
+#[test]
+fn tools_with_the_same_name_refuse_the_agent() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
     let config = config(
-        provider.clone(),
+        provider,
         vec![Arc::new(EchoTool::new("echo")), Arc::new(EchoTool::new("echo"))],
     );
 
-    let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
-
-    assert_eq!(result.outcome, RunOutcome::Error);
-    let error = format!("{:?}", result.error);
-    assert!(error.contains("more than one tool is named \\\"echo\\\""), "{error}");
-    assert!(provider.requests().is_empty());
+    assert_eq!(refusal(config), "more than one tool is named \"echo\"");
 }
 
 struct AppendSystem;
 #[async_trait]
-impl Hooks for AppendSystem {
+impl Hook for AppendSystem {
     async fn transform_context(&self, _messages: &[Message], _ctx: &HookContext) -> HookResult<Vec<ContextEdit>> {
         Ok(vec![ContextEdit::Append {
             message: Message::System(SystemMessage {
@@ -1550,7 +1530,7 @@ async fn a_hook_cannot_append_system_messages() {
 
     let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
 
-    assert_eq!(result.outcome, RunOutcome::Error);
+    assert_eq!(result.outcome, RunOutcome::Failed);
     let error = format!("{:?}", result.error);
     assert!(error.contains("system prompt comes from the configuration"), "{error}");
     assert!(provider.requests().is_empty());
@@ -1558,8 +1538,8 @@ async fn a_hook_cannot_append_system_messages() {
 
 struct PanickingObserver;
 #[async_trait]
-impl Hooks for PanickingObserver {
-    fn observes(&self, _event: &AgentEvent) -> bool {
+impl Hook for PanickingObserver {
+    fn observes(&self, _event: &EventKind) -> bool {
         panic!("observes is broken")
     }
 }
@@ -1584,7 +1564,7 @@ struct Declared {
 }
 
 #[async_trait]
-impl zx_agent::agent::Tool for Declared {
+impl zx_agent::tools::Tool for Declared {
     fn name(&self) -> &str {
         self.name
     }
@@ -1599,53 +1579,45 @@ impl zx_agent::agent::Tool for Declared {
     async fn execute(
         &self,
         _args: serde_json::Value,
-        _ctx: &zx_agent::agent::ToolContext,
+        _ctx: &zx_agent::tools::ToolContext,
     ) -> Result<ToolOutput, String> {
         Ok(ToolOutput::ok("ran"))
     }
 }
 
-#[tokio::test]
-async fn a_tool_declared_under_another_name_is_rejected_before_any_request() {
+#[test]
+fn a_tool_declared_under_another_name_refuses_the_agent() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
     let tool = Declared {
         name: "echo",
         declared: "other",
         panics: false,
     };
-    let config = config(provider.clone(), vec![Arc::new(tool)]);
 
-    let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
+    let error = refusal(config(provider, vec![Arc::new(tool)]));
 
-    assert_eq!(result.outcome, RunOutcome::Error);
-    let error = format!("{:?}", result.error);
-    assert!(error.contains("declares itself as \\\"other\\\""), "{error}");
-    assert!(provider.requests().is_empty());
+    assert!(error.contains("declares itself as \"other\""), "{error}");
 }
 
-#[tokio::test]
-async fn a_tool_whose_definition_panics_fails_the_run_before_any_request() {
+#[test]
+fn a_tool_whose_definition_panics_refuses_the_agent() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
     let tool = Declared {
         name: "echo",
         declared: "echo",
         panics: true,
     };
-    let config = config(provider.clone(), vec![Arc::new(tool)]);
 
-    let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
+    let error = refusal(config(provider, vec![Arc::new(tool)]));
 
-    assert_eq!(result.outcome, RunOutcome::Error);
-    let error = format!("{:?}", result.error);
-    assert!(error.contains("panicked"), "{error}");
-    assert!(provider.requests().is_empty());
+    assert_eq!(error, "tool 0 panicked while describing itself");
 }
 
 /// Cancels the token it is given, as a tool might to stop work of its own.
 struct CancelsItself;
 
 #[async_trait]
-impl zx_agent::agent::Tool for CancelsItself {
+impl zx_agent::tools::Tool for CancelsItself {
     fn name(&self) -> &str {
         "stop"
     }
@@ -1659,7 +1631,7 @@ impl zx_agent::agent::Tool for CancelsItself {
     async fn execute(
         &self,
         _args: serde_json::Value,
-        ctx: &zx_agent::agent::ToolContext,
+        ctx: &zx_agent::tools::ToolContext,
     ) -> Result<ToolOutput, String> {
         ctx.cancel.cancel();
         Ok(ToolOutput::ok("stopped its own work"))

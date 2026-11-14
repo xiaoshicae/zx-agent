@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use super::server::Shared;
 use super::worker::{self, Incoming, Retire, WorkerInput, WorkerSetup};
 use super::{
-    Addressee, ChatKind, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId, MessageRef, Outbound,
+    Addressee, ChatKind, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId, MessageRef, Post,
     SessionKey, ThreadId,
 };
 
@@ -136,7 +136,7 @@ impl Router {
         loop {
             tokio::select! {
                 () = self.stop.cancelled() => return Ok(()),
-                Some((index, event)) = self.inbound.recv() => self.route(index, event),
+                Some((index, event)) = self.inbound.recv() => self.route(index, event).await,
                 Some(retire) = self.retired.recv() => self.retire(&retire),
                 Some(ended) = self.channel_tasks.join_next() => self.channel_ended(ended)?,
                 Some(ended) = self.tasks.join_next_with_id() => self.note_ended("conversation", ended),
@@ -172,7 +172,7 @@ impl Router {
         }
     }
 
-    fn route(&mut self, index: usize, event: Inbound) {
+    async fn route(&mut self, index: usize, event: Inbound) {
         let channel = Arc::clone(&self.channels[index]);
         let platform = channel.platform().to_string();
         match event {
@@ -198,7 +198,7 @@ impl Router {
                         addressee,
                         text,
                     };
-                    self.message(channel, key, incoming);
+                    self.message(channel, key, incoming).await;
                 } else if addressee == Addressee::Bot {
                     // Only a message meant for the bot hears why it gets no answer; the
                     // rest of a group's talk is none of its business.
@@ -225,8 +225,12 @@ impl Router {
 
     /// Pass a message to the conversation's worker, starting one when there is none: for a
     /// message meant for the bot, or one in a thread the bot took part in before.
-    fn message(&mut self, channel: Arc<dyn ImChannel>, key: SessionKey, incoming: Incoming) {
+    async fn message(&mut self, channel: Arc<dyn ImChannel>, key: SessionKey, incoming: Incoming) {
         let mentioned = incoming.addressee == Addressee::Bot;
+        // Talk in a thread the bot never joined is not a conversation with it.
+        if !mentioned && !self.workers.contains_key(&key) && !self.joined(&key).await {
+            return;
+        }
         let input = WorkerInput::Message(incoming);
         let input = match self.workers.get_mut(&key) {
             Some(worker) => match worker.inbox.try_send(input) {
@@ -238,8 +242,6 @@ impl Router {
                 // The worker has ended, after a panic: a new one takes over.
                 Err(mpsc::error::TrySendError::Closed(input)) => Some(input),
             },
-            // Talk in a thread the bot never joined is not a conversation with it.
-            None if !mentioned && !self.shared.factory.has_session(&key) => return,
             None => Some(input),
         };
         let Some(input) = input else {
@@ -267,6 +269,18 @@ impl Router {
 
     /// Pass a click to the conversation's worker. Without a worker nothing is pending:
     /// approvals end with their run, and the router ends only idle conversations.
+    /// Whether the bot took part in the conversation `key` before: it has a session, so a
+    /// message there that does not mention the bot is still part of the conversation.
+    async fn joined(&self, key: &SessionKey) -> bool {
+        let asked = self.shared.latest_session(key);
+        // A lookup that failed was reported; the conversation then counts as not joined,
+        // and a mention still starts it.
+        self.shared
+            .bounded(Some(key), "look up the conversation's sessions", asked)
+            .await
+            .is_some_and(|latest| latest.is_some())
+    }
+
     fn decision(&mut self, key: &SessionKey, input: WorkerInput) {
         let full = match self.workers.get_mut(key) {
             Some(worker) => match worker.inbox.try_send(input) {
@@ -296,7 +310,7 @@ impl Router {
     fn refuse(&mut self, channel: Arc<dyn ImChannel>, to: Destination) {
         let shared = Arc::clone(&self.shared);
         self.refusals.spawn(async move {
-            let text = Outbound::Text(shared.replies.unauthorized.clone());
+            let text = Post::Text(shared.replies.unauthorized.clone());
             let act = format!("answer in {}", to.conversation);
             shared.bounded(None, &act, channel.send(&to, &text)).await;
         });
@@ -325,7 +339,7 @@ impl Router {
         // the senders, which ends this loop; reading on means no channel waits on a full
         // buffer meanwhile.
         while let Some((index, event)) = self.inbound.recv().await {
-            self.route(index, event);
+            self.route(index, event).await;
         }
         // Without their inboxes, workers end once their runs have stopped and they have
         // posted.

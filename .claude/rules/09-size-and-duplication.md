@@ -9,20 +9,18 @@ paths:
 
 ## 尺寸
 
-- **函数一屏**：目标 60 行以内，一个函数做一件事；写不出一句话文档的函数在做两件事。拆出来的函数按步骤命名（`load_agent`、`open_session`、`register_hooks`），不叫 `helper`、`do_x`。
+- **函数一屏**：目标 60 行以内，一个函数做一件事；写不出一句话文档的函数在做两件事。拆出来的函数按步骤命名（`load_agent`、`open_session`、`set_up`），不叫 `helper`、`do_x`。
 - **可以带 `#[expect(clippy::too_many_lines, reason = "...")]` 的只有两种**：按变体展开、每个分支一两行的 match（`one arm per event variant`）；一张数据表（`one event of every variant`）。冻结的模块（chat）只做不改行为的整理，也用这条。
-- **文件一个主题**：一个文件讲几件事，就按职责拆成几个子模块（`session/compaction.rs` 与 `session/compaction/{records,source}.rs`），不论多长；不按类型拆（没有 `types.rs` 加 `impls.rs`）。入口文件只分派（`main.rs`）。
-- **600 行是检查线，不是上限**：产线代码（不含测试）超过 600 行时，确认它只讲一个主题。只讲一个主题的可以超过，拆开反而把一件事切成几处；讲了几件事的按上一条拆。
-- **父模块的文档是地图**：有子模块的入口文件，在 `//!` 里每个子模块写一行，说它管什么（参照 `session.rs`、`agent.rs`）。新增、改名或删除子模块时同步改这几行。
-- **测试跟着被测的代码走**：单元测试写在它所测代码的模块里，不集中在父模块（JSONL 文件的测试在 `session/jsonl.rs`，去掉 details 的测试在 `session/projection.rs`）。一个模块的测试超过约 300 行时，移到 `foo/tests.rs`，`foo.rs` 里只留 `#[cfg(test)] mod tests;`；不超过的留在文件里，免得多出只装一个 `tests.rs` 的目录。几个子模块的测试共用的辅助放进父模块的 `test_support.rs`（`#[cfg(test)] mod test_support;`），不复制。
-- **模块文件不用 `mod.rs`**：有子模块的模块写成 `foo.rs` 加 `foo/` 目录（Rust Reference 鼓励的写法，clippy 的 `mod_module_files` 会报 `mod.rs`）。唯一的例外是 `tests/common/mod.rs`：Cargo 靠这个名字不把它当成一个测试文件。
-- **状态用枚举**：两个 `Option`、`Option` 加 `bool`、`Result<Result<_>>` 表示的状态换成一个枚举（`Pending`、`Decision`、`Connection`），见规则 05。
+- **文件一个主题**：一个文件讲几件事，就按职责拆成几个子模块（`transcript/compaction.rs` 与 `transcript/compaction/{records,source}.rs`），不论多长；不按类型拆（没有 `types.rs` 加 `impls.rs`）。入口文件只分派。产线代码（不含测试）超过 600 行时，确认它只讲一个主题：只讲一个主题的可以超过。
+- **父模块的文档是地图**：有子模块的入口文件，在 `//!` 里每个子模块写一行，说它管什么（参照 `transcript.rs`、`runner.rs`）。新增、改名或删除子模块时同步改这几行。
+- **测试跟着被测的代码走**：单元测试写在它所测代码的模块里，不集中在父模块。一个模块的测试超过约 300 行时，移到 `foo/tests.rs`，`foo.rs` 里只留 `#[cfg(test)] mod tests;`。几个子模块的测试共用的辅助放进父模块的 `test_support.rs`，不复制。
+- **模块文件不用 `mod.rs`**：有子模块的模块写成 `foo.rs` 加 `foo/` 目录（clippy 的 `mod_module_files` 会报 `mod.rs`）。唯一的例外是两个测试公共模块 `tests/common/mod.rs` 与 `crates/zx-cli/tests/common/mod.rs`：Cargo 靠这个名字不把它当成一个测试文件。
 
 ## 重复
 
-- **同样的 5 行以上出现第二次就提取**，第三次必须提取。提取出来的放在它所属那一层的入口文件：工具共用的在 `tools.rs`（`parse_args`、`resolve`、`unless_cancelled`），平台共用的在 `zx_im::platform`（`Pacer`、`Cards`），测试共用的在 `tests/common`（`zx_agent()`、`stdout`）。
+- **同样的 5 行以上出现第二次就提取**，第三次必须提取，前提是提取出来的比重复的更好懂：为此要引入回调、装箱的 future 或每处一层转调时，保留重复并在一处注明。提取出来的放在它所属那一层的入口文件：工具共用的在 `tools.rs`（`parse_args`、`resolve`、`unless_cancelled`），平台共用的在 `zx_im::platform`（`Pacer`、`Cards`、`rate_limit_wait`），测试共用的在 `tests/common`，只有驱动程序的测试才用的在 `crates/zx-cli/tests/common`。
 - **一处定义，别处引用**：常量、错误前缀（`fault`）、超时加上报（`Shared::bounded`）、结束事件（`StreamEvent::ending`）都只写一份。
-- **不横向引用**：同一层的模块互不依赖（run、acp、sessions 不引用 chat，两个 IM 平台互不引用）；要共用就下沉到共同的下层。需要引用上层时，说明分层或接口该改了（CLAUDE.md 的"分层由 crate 边界保证"）。
+- **不横向引用**：同一层的模块互不依赖（run、acp、sessions 不引用 chat，两个 IM 平台互不引用）；要共用就下沉到共同的下层。需要引用上层时，说明分层或接口该改了。
 
 ## 提交前自查
 

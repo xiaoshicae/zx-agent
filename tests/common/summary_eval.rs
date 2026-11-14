@@ -12,13 +12,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::json;
-use tokio_util::sync::CancellationToken;
 
 use zx_agent::ai::{
     AssistantMessage, ContentBlock, Message, Provider, StopReason, ToolCall, ToolResultMessage, Usage, now_ms,
 };
 use zx_agent::compaction::{Config, Outcome};
-use zx_agent::session::{Entry, RequestSource, SessionStore};
+use zx_agent::transcript::{Entry, RequestSource, Transcript};
 
 use super::{RunnerSetup, config, header};
 
@@ -594,7 +593,7 @@ const DESCRIBE: &str = concat!(
     "      Finished:     Sun, 02 Nov 2026 08:23:02 +0000\n",
     "    Ready:          False\n",
     "    Restart Count:  37\n",
-    "    Limits:\n",
+    "    RunLimits:\n",
     "      cpu:     1\n",
     "      memory:  512Mi\n",
     "    Requests:\n",
@@ -836,13 +835,13 @@ impl Evaluation {
 /// cannot be written or does not load again at the end.
 pub(crate) async fn evaluate(provider: Arc<dyn Provider>, model: &str, budget: Config, dir: &Path) -> Evaluation {
     let path = dir.join("summaries.jsonl");
-    let mut store = SessionStore::create(&path, header()).unwrap();
+    let mut store = super::create_session_file(&path, header()).await.unwrap();
     store.append_message(Message::user(TASK)).await.unwrap();
     drop(store);
     let mut rounds = Vec::new();
     let mut facts = Vec::new();
     for n in 1..=ROUNDS {
-        let mut store = SessionStore::open(&path).unwrap();
+        let mut store = super::open_session_file(&path).await.unwrap();
         for message in round(n) {
             store.append_message(message).await.unwrap();
         }
@@ -851,20 +850,18 @@ pub(crate) async fn evaluate(provider: Arc<dyn Provider>, model: &str, budget: C
         loop_config.model = model.into();
         let (runner, _) = RunnerSetup {
             session: store,
-            ..RunnerSetup::new(loop_config)
-        }
-        .build();
-        let mut runner = runner
-            .with_compaction(Config {
+            compaction: Config {
                 // Only the user's next request stays as it is; the summary covers the rest.
                 keep_recent_bytes: 1,
                 ..budget
-            })
-            .unwrap();
+            },
+            ..RunnerSetup::new(loop_config)
+        }
+        .build();
 
-        let report = runner.compact(&CancellationToken::new()).await;
+        let report = runner.compact().await.unwrap();
 
-        let store = runner.session();
+        let store = &runner.session();
         let request_bytes = match summary_requests(store).get(sent_before) {
             Some(id) => input_bytes(store, id),
             None => 0,
@@ -892,12 +889,12 @@ pub(crate) async fn evaluate(provider: Arc<dyn Provider>, model: &str, budget: C
         });
     }
     // The session, the model's answers included, passes every check when loaded again.
-    SessionStore::read(&path).unwrap();
+    super::read_session_file(&path).unwrap();
     Evaluation { rounds, facts }
 }
 
 /// IDs of the summary requests recorded in `store`, oldest first.
-fn summary_requests(store: &SessionStore) -> Vec<&str> {
+fn summary_requests(store: &Transcript) -> Vec<&str> {
     store
         .entries()
         .iter()
@@ -911,7 +908,7 @@ fn summary_requests(store: &SessionStore) -> Vec<&str> {
 }
 
 /// Bytes of a summary request's input, rebuilt from the session as an audit would.
-fn input_bytes(store: &SessionStore, request_id: &str) -> usize {
+fn input_bytes(store: &Transcript, request_id: &str) -> usize {
     let (_, request) = store.replay_request(request_id).unwrap();
     match &request.messages[..] {
         [Message::System(_), Message::User { content, .. }] => content.len(),

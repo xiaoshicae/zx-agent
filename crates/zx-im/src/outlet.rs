@@ -2,20 +2,23 @@
 //! model reads what people said there, and the text that replaces the status message when a
 //! run ends.
 
+use std::fmt::Display;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
 use tokio::task::JoinError;
+use tokio_util::sync::CancellationToken;
 
-use crate::AgentSession;
-use crate::agent::QueuedMessage;
-use crate::agent_session::{AgentSessionError, Subscription};
 use crate::runner::{RunOutcome, RunReport};
-use crate::session::CustomMessage;
+use crate::session::SessionError;
+use crate::transcript::CustomMessage;
+use crate::{Agent, Session};
+use zx_core::SessionOptions;
+use zx_core::input::Input;
 
-use super::approval::{ApprovalEvents, ApprovalUpdate, ImApproval};
-use super::server::Shared;
-use super::{Destination, ImChannel, MessageRef, Opening, Outbound, Replies, SessionKey, UserId};
+use super::approval::{ApprovalEvents, ApprovalUpdate};
+use super::server::{Shared, timed};
+use super::{Destination, ImChannel, MessageRef, Post, Replacement, Replies, SessionKey, UserId};
 
 /// Messages read from a thread the bot is first mentioned in: enough to follow a discussion,
 /// few enough not to crowd the context.
@@ -23,33 +26,75 @@ const HISTORY_MESSAGES: usize = 50;
 /// The kind of the custom messages that record what people said without the bot answering.
 const SAID_TYPE: &str = "im_message";
 
-/// The session while it is held. Dropping it releases the session file.
+/// The session while the conversation holds it. Dropping it closes the session, which frees
+/// its place in the storage and everything set up for it.
 pub(crate) struct Opened {
-    // Shared with the task that runs the current prompt, as AgentSession is meant to be:
-    // meanwhile the worker steers, aborts and takes queued input through it.
-    pub(crate) session: Arc<AgentSession>,
-    _approvals: Subscription,
+    // Shared with the task that reads the current run, as a Session is meant to be:
+    // meanwhile the worker steers, cancels and takes queued input through it.
+    pub(crate) session: Session,
+    /// Keeps the session open until it is closed there.
+    agent: Agent,
+}
+
+impl Drop for Opened {
+    fn drop(&mut self) {
+        self.agent.close_session(self.session.id());
+    }
 }
 
 impl Opened {
-    /// The person's texts queued after the run's last look at the queue, which start the
-    /// next run. A message an extension queued goes back to the queue, which that run takes
-    /// before its first request.
-    pub(crate) fn leftover_texts(&self) -> Result<Vec<String>, String> {
-        // The loop looks for input at the end of each turn, so a message steered after the
+    /// Whether the session is still open: not once it was closed while the conversation held
+    /// it, as a session closes itself when it can no longer write its records.
+    pub(crate) fn still_open(&self) -> bool {
+        self.agent.session(self.session.id()).is_some()
+    }
+
+    /// What people asked after the run's last look at the queue, which starts the next run.
+    /// A message an extension queued goes back to the queue, which that run takes before its
+    /// first request. [`SessionError::Closed`] for a session that was closed while the
+    /// conversation held it.
+    pub(crate) fn leftover(&self) -> Result<Vec<Asked>, SessionError> {
+        // The loop looks for input at the end of each step, so a message steered after the
         // last look waits in the queue.
-        let queued = self
-            .session
-            .take_queued()
-            .map_err(|error| format!("cannot take the queued input: {error}"))?;
-        let mut texts = Vec::new();
+        let queued = self.session.take_queued()?;
+        let mut asked = Vec::new();
         for message in queued {
             match message {
-                QueuedMessage::User(text) => texts.push(text),
-                custom @ QueuedMessage::Custom(_) => self.session.queues().steer_message(custom),
+                Input::User { text, actor } => asked.push(Asked { text, actor }),
+                custom @ Input::Custom(_) => self.session.queues().steer_message(custom),
             }
         }
-        Ok(texts)
+        Ok(asked)
+    }
+}
+
+/// What a person asked the bot: the text as the model reads it, and who sent it.
+pub(crate) struct Asked {
+    pub(crate) text: String,
+    /// The sender's ID on the platform, which the session records with the message and
+    /// tells its hooks and policies. `None` for text that names no sender, such as text an
+    /// extension queued as a person's.
+    pub(crate) actor: Option<String>,
+}
+
+impl Asked {
+    /// The message as the session takes it.
+    pub(crate) fn into_input(self) -> Input {
+        Input::User {
+            text: self.text,
+            actor: self.actor,
+        }
+    }
+
+    /// Several messages as one prompt: their texts in order, and the sender of the last
+    /// one, whom the answer is for.
+    pub(crate) fn joined(asked: Vec<Self>) -> Input {
+        let actor = asked.last().and_then(|last| last.actor.clone());
+        let texts: Vec<String> = asked.into_iter().map(|asked| asked.text).collect();
+        Input::User {
+            text: texts.join("\n\n"),
+            actor,
+        }
     }
 }
 
@@ -65,49 +110,109 @@ pub(crate) struct Outlet {
 impl Outlet {
     /// Post text in the conversation. A failure is reported to the operator and returns `None`.
     pub(crate) async fn post(&self, text: String) -> Option<MessageRef> {
-        let message = Outbound::Text(text);
+        let message = Post::Text(text);
         self.shared
             .bounded(Some(&self.key), "post", self.channel.send(&self.to, &message))
             .await
     }
 
     /// Replace a posted message. A failure is reported to the operator.
-    pub(crate) async fn replace(&self, posted: &MessageRef, message: Outbound) {
+    pub(crate) async fn replace(&self, posted: &MessageRef, replacement: Replacement) {
         let act = format!("update message {}", posted.id);
         self.shared
-            .bounded(Some(&self.key), &act, self.channel.update(posted, &message))
+            .bounded(Some(&self.key), &act, self.channel.update(posted, &replacement))
             .await;
     }
 
-    /// Open the session that `opening` names, with this conversation as the host of its
-    /// approvals.
-    pub(crate) async fn open(
+    /// Open the conversation's latest session, or create its first one. Only that first
+    /// session, created for `trigger`, a mention of the bot in a thread someone else started,
+    /// records what was said there before: a session the conversation has already, such as
+    /// one `/new` started, is opened as it is, however little it holds.
+    pub(crate) async fn open(&self, trigger: Option<&MessageRef>) -> Result<Opened, String> {
+        let shared = &self.shared;
+        if let Some(id) = shared.latest_session(&self.key).await? {
+            return self.held(shared.agent.open_session(&id).await);
+        }
+        let opened = self.create().await?;
+        if let Some(trigger) = trigger {
+            self.read_thread(&opened, trigger).await;
+        }
+        Ok(opened)
+    }
+
+    /// Create a session with the conversation's labels, which is its latest one from now
+    /// on; the earlier ones are kept.
+    pub(crate) async fn create(&self) -> Result<Opened, String> {
+        let options = SessionOptions {
+            labels: self.key.labels(),
+            ..SessionOptions::new(&self.shared.cwd)
+        };
+        self.held(self.shared.agent.create_session(options).await)
+    }
+
+    /// `session`, as the conversation holds it, or why the agent could not give one: the
+    /// whole chain of causes.
+    fn held<E: Display>(&self, session: Result<Session, E>) -> Result<Opened, String> {
+        match session {
+            Ok(session) => Ok(Opened {
+                session,
+                agent: self.shared.agent.clone(),
+            }),
+            Err(error) => Err(format!("{error:#}")),
+        }
+    }
+
+    /// Tell the conversation, and the operator, that its session could not be opened.
+    pub(crate) async fn cannot_open(&self, error: &str) {
+        self.post(format!("{}{error}", self.replies().cannot_open)).await;
+        self.failed(format!("cannot open the session: {error}"));
+    }
+
+    /// Post the card of an approval request. An error says why nobody can decide.
+    pub(crate) async fn ask(&self, card: &Post) -> Result<MessageRef, String> {
+        let post = self.channel.send(&self.to, card);
+        timed(self.shared.outbound_timeout, "post the approval request", post).await
+    }
+
+    /// Run `prompt` in `session` to its end, as the task of a run does. How its approvals
+    /// end goes to the worker through `updates`; `stop`, the server stopping, cancels the
+    /// run, which is still read to its end.
+    pub(crate) fn run(
         &self,
+        session: &Session,
+        prompt: Input,
         updates: &mpsc::Sender<ApprovalUpdate>,
-        opening: Opening,
-    ) -> Result<Opened, String> {
-        let interaction = Arc::new(ImApproval {
-            channel: Arc::clone(&self.channel),
-            to: self.to.clone(),
-            updates: updates.clone(),
-            outbound_timeout: self.shared.outbound_timeout,
-        });
-        let session = self.shared.factory.open(&self.key, opening, interaction).await?;
-        let approvals = session.subscribe(Arc::new(ApprovalEvents {
+        stop: CancellationToken,
+    ) -> impl Future<Output = Result<RunReport, SessionError>> + Send + 'static {
+        let session = session.clone();
+        let approvals = ApprovalEvents {
             updates: updates.clone(),
             key: self.key.clone(),
             sink: Arc::clone(&self.shared.sink),
-        }));
-        Ok(Opened {
-            session: Arc::new(session),
-            _approvals: approvals,
-        })
+        };
+        async move {
+            let mut run = session.send(prompt)?;
+            let mut stopped = false;
+            loop {
+                tokio::select! {
+                    () = stop.cancelled(), if !stopped => {
+                        session.cancel();
+                        stopped = true;
+                    }
+                    event = run.next() => match event {
+                        Some(event) => approvals.forward(&event),
+                        None => break,
+                    },
+                }
+            }
+            Ok(run.wait().await)
+        }
     }
 
     /// Replace the status with how the run ended, or post that when no status was posted.
     pub(crate) async fn answer(
         &self,
-        ended: Result<Result<RunReport, AgentSessionError>, JoinError>,
+        ended: Result<Result<RunReport, SessionError>, JoinError>,
         status: Option<MessageRef>,
         closing: bool,
     ) {
@@ -115,7 +220,7 @@ impl Outlet {
         let answer = match ended {
             // The stop cancels runs through their token. A `/cancel` just before the stop ends
             // the same way and is told the same.
-            Ok(Ok(report)) if closing && matches!(report.outcome, RunOutcome::Aborted) => replies.stopped.clone(),
+            Ok(Ok(report)) if closing && matches!(report.outcome, RunOutcome::Cancelled) => replies.stopped.clone(),
             Ok(Ok(report)) => render(&report, replies),
             // Only this worker prompts the session, one run at a time, so Busy cannot occur.
             Ok(Err(error)) => format!("{}{error}", replies.failed),
@@ -127,7 +232,7 @@ impl Outlet {
                 // says the work goes on, as it did before statuses were kept; the other order
                 // could have the next start replace this answer.
                 self.shared.forget_status(&self.key, &posted).await;
-                self.replace(&posted, Outbound::Text(answer)).await;
+                self.replace(&posted, Replacement::Text(answer)).await;
             }
             None => {
                 self.post(answer).await;
@@ -159,22 +264,14 @@ impl Outlet {
     }
 
     /// Record what was said in the thread before the bot was mentioned there by `trigger`, in
-    /// a session that has nothing yet: the first answer then knows the talk it joins. Nothing
-    /// is read when `trigger` started the thread.
-    pub(crate) async fn read_thread(&self, opened: &Opened, trigger: &MessageRef) {
+    /// the conversation's first session, which has nothing yet: the first answer then knows
+    /// the talk it joins. Nothing is read when `trigger` started the thread.
+    async fn read_thread(&self, opened: &Opened, trigger: &MessageRef) {
         let Some(thread) = &self.key.thread else {
             return;
         };
         if thread.0 == trigger.id.0 {
             return;
-        }
-        match opened.session.inspect(|store| store.entries().is_empty()) {
-            Ok(true) => {}
-            Ok(false) => return,
-            Err(error) => {
-                self.failed(format!("cannot read the session: {error}"));
-                return;
-            }
         }
         let history = self
             .shared
@@ -231,9 +328,9 @@ fn render(report: &RunReport, replies: &Replies) -> String {
         RunOutcome::TokenBudget => noted(&replies.token_budget),
         RunOutcome::CostBudget => noted(&replies.cost_budget),
         // The last answer in the session may be an earlier run's, so it is not repeated.
-        RunOutcome::Timeout => replies.timed_out.clone(),
-        RunOutcome::Aborted => replies.cancelled.clone(),
-        RunOutcome::Error => match &report.error {
+        RunOutcome::TimedOut => replies.timed_out.clone(),
+        RunOutcome::Cancelled => replies.cancelled.clone(),
+        RunOutcome::Failed => match &report.error {
             Some(error) => format!("{}{error}", replies.failed),
             // The reply leads into the error; without one, drop the separator it ends with,
             // whatever the reply's language.
@@ -260,7 +357,7 @@ mod tests {
             tool_usage: std::collections::BTreeMap::new(),
             denied_calls: 0,
             error: error.map(String::from),
-            session_file: None,
+            session_id: "session".into(),
         }
     }
 
@@ -298,15 +395,15 @@ mod tests {
     fn a_run_that_did_not_finish_does_not_repeat_an_earlier_answer() {
         let replies = Replies::default();
         assert_eq!(
-            render(&report(RunOutcome::Timeout, "earlier", None), &replies),
+            render(&report(RunOutcome::TimedOut, "earlier", None), &replies),
             replies.timed_out
         );
         assert_eq!(
-            render(&report(RunOutcome::Aborted, "earlier", None), &replies),
+            render(&report(RunOutcome::Cancelled, "earlier", None), &replies),
             replies.cancelled
         );
         assert_eq!(
-            render(&report(RunOutcome::Error, "earlier", Some("HTTP 500")), &replies),
+            render(&report(RunOutcome::Failed, "earlier", Some("HTTP 500")), &replies),
             format!("{}HTTP 500", replies.failed)
         );
     }

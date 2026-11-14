@@ -27,7 +27,7 @@ use tokio_util::sync::CancellationToken;
 use zx_ai::sync::lock;
 use zx_im::{
     Backoff, CARD_CAPACITY, CardLabels, Cards, Destination, ErrorReport, ImChannel, ImError, Inbound, MAX_TEXT_CHARS,
-    MessageId, MessageRef, Outbound, Pacer, SEEN_CAPACITY, Seen, card_update_refused, pause, split_text,
+    MessageId, MessageRef, Pacer, Post, Replacement, SEEN_CAPACITY, Seen, pause, split_text,
 };
 
 use api::CallError;
@@ -113,6 +113,7 @@ impl FeishuChannel {
         })
     }
 
+    /// Tell the operator about `error`, which the channel goes on after.
     fn report(&self, error: &ImError) {
         if let Some(callback) = &self.config.on_error {
             callback(error);
@@ -186,9 +187,9 @@ impl ImChannel for FeishuChannel {
         }
     }
 
-    async fn send(&self, to: &Destination, message: &Outbound) -> Result<MessageRef, ImError> {
+    async fn send(&self, to: &Destination, message: &Post) -> Result<MessageRef, ImError> {
         match message {
-            Outbound::Text(text) => {
+            Post::Text(text) => {
                 let (first, rest) = split(text);
                 let posted = self.post_text(to, &first).await?;
                 // The rest go to the same thread, which a first post in the chat itself starts.
@@ -198,7 +199,7 @@ impl ImChannel for FeishuChannel {
                 }
                 Ok(posted)
             }
-            Outbound::ApprovalRequest {
+            Post::ApprovalRequest {
                 id,
                 tool,
                 summary,
@@ -227,16 +228,12 @@ impl ImChannel for FeishuChannel {
                 self.cards.remember(&posted.id, request);
                 Ok(posted)
             }
-            Outbound::ApprovalResolved { user, result, .. } => {
-                let text = resolution(&self.config.labels, user.as_ref(), *result);
-                self.post_text(to, &text).await
-            }
         }
     }
 
-    async fn update(&self, posted: &MessageRef, message: &Outbound) -> Result<(), ImError> {
-        match message {
-            Outbound::Text(text) => {
+    async fn update(&self, posted: &MessageRef, replacement: &Replacement) -> Result<(), ImError> {
+        match replacement {
+            Replacement::Text(text) => {
                 let (first, rest) = split(text);
                 let thread = posted.thread();
                 let path = format!("/open-apis/im/v1/messages/{}", posted.id.0);
@@ -255,8 +252,7 @@ impl ImChannel for FeishuChannel {
                 }
                 Ok(())
             }
-            Outbound::ApprovalRequest { .. } => Err(card_update_refused()),
-            Outbound::ApprovalResolved { user, result, .. } => {
+            Replacement::ApprovalResolved { user, result, .. } => {
                 let mut elements = Vec::new();
                 if let Some(request) = self.cards.forget(&posted.id) {
                     elements.push(markdown(&request));

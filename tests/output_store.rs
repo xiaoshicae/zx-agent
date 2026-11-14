@@ -5,19 +5,20 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use serde_json::{Value, json};
+use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use zx_agent::agent::{HookChain, HookContext, Hooks, Tool, ToolContext, ToolOutput};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, ToolCall};
-use zx_agent::output_store::{Config, OutputStore, ReadOutputTool, SpillOutputs, TOOL_NAME};
-use zx_agent::redact::RedactSecrets;
+use zx_agent::builtin::output_store::{Config, OutputStore, ReadOutputTool, SpillOutputs, TOOL_NAME};
+use zx_agent::builtin::redact::RedactSecrets;
+use zx_agent::builtin::tools::ReadFileTool;
+use zx_agent::hooks::{Hook, HookChain, HookContext};
 use zx_agent::runner::RunOutcome;
-use zx_agent::session::SessionStore;
-use zx_agent::tools::ReadFileTool;
+use zx_agent::tools::{Tool, ToolContext, ToolOutput};
+use zx_agent::transcript::Transcript;
 
-use common::{RunnerSetup, config, header};
+use common::{RunnerSetup, config, header_in};
 
 fn settings() -> Config {
     Config {
@@ -36,19 +37,39 @@ fn call(name: &str) -> ToolCall {
 fn ctx(cwd: &Path) -> ToolContext {
     ToolContext::new(cwd.into(), CancellationToken::new())
 }
+/// The tools the command line exempts from storing: each pages its own output.
+const PAGING_TOOLS: [&str; 3] = [TOOL_NAME, "read_skill", "read_file"];
+
 fn parts(dir: &Path) -> (SpillOutputs, ReadOutputTool) {
     let store = OutputStore::new(dir, settings()).unwrap();
     (
-        SpillOutputs::new(store.clone(), vec![TOOL_NAME.into(), "read_skill".into()]),
+        SpillOutputs::new(store.clone(), PAGING_TOOLS.map(String::from).to_vec()),
         ReadOutputTool::new(store),
     )
 }
-async fn spill(hook: &SpillOutputs, text: &str) -> Value {
+
+/// The output ID that the footer of a stored result's page names.
+fn output_id(page: &str) -> String {
+    let (_, footer) = page
+        .rsplit_once("\n[Use read_output with id=\"")
+        .unwrap_or_else(|| panic!("no footer of a stored result in {page:?}"));
+    footer.split('"').next().unwrap().to_string()
+}
+
+/// The file in which the store of `parts(dir)` keeps the result `id`.
+fn stored_file(dir: &Path, id: &str) -> PathBuf {
+    dir.join(".zx-agent/outputs").join(format!("{id}.txt"))
+}
+
+/// Pass `text` through `hook` as the result of a bash call. Returns what the hook leaves in
+/// its place, and the ID of the stored result.
+async fn spill(hook: &SpillOutputs, text: &str) -> (String, String) {
     let result = hook
-        .after_tool(&call("read_file"), ToolOutput::ok(text), &common::hook_context())
+        .after_tool(&call("bash"), ToolOutput::ok(text), &common::hook_context())
         .await
         .unwrap();
-    serde_json::from_str(&result.content).unwrap()
+    let id = output_id(&result.content);
+    (result.content, id)
 }
 
 #[tokio::test]
@@ -58,12 +79,9 @@ async fn files_are_lazy_persistent_and_contain_the_exact_bounded_tool_result() {
     let root = dir.path().join(".zx-agent/outputs");
     assert!(!root.exists());
     let text = "already bounded output, including its truncation notice\n".repeat(100);
-    let reference = spill(&hook, &text).await;
-    let id = reference["outputId"].as_str().unwrap();
-    assert!(uuid::Uuid::parse_str(id).is_ok());
-    let path = PathBuf::from(reference["path"].as_str().unwrap());
-    assert_eq!(path.parent(), Some(root.as_path()));
-    assert_eq!(reference["bytes"], text.len());
+    let (_, id) = spill(&hook, &text).await;
+    assert!(uuid::Uuid::parse_str(&id).is_ok());
+    let path = stored_file(dir.path(), &id);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
     drop(hook);
     assert!(
@@ -104,11 +122,30 @@ async fn exact_threshold_is_inline_and_error_and_terminate_flags_survive_spillin
         .await
         .unwrap();
     assert!(spilled.is_error && spilled.terminate);
-    let reference: Value = serde_json::from_str(&spilled.content).unwrap();
+    let stored = stored_file(dir.path(), &output_id(&spilled.content));
+    assert_eq!(std::fs::read_to_string(stored).unwrap(), output.content);
+}
+
+#[tokio::test]
+async fn a_stored_result_leaves_its_first_page_as_read_output_returns_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (hook, reader) = parts(dir.path());
+    let text: String = (0..200).map(|line| format!("line {line}\n")).collect();
+
+    let (left, id) = spill(&hook, &text).await;
+
+    let (start, footer) = left.rsplit_once('\n').unwrap();
+    assert!(!start.is_empty() && text.starts_with(start), "{left}");
     assert_eq!(
-        std::fs::read_to_string(reference["path"].as_str().unwrap()).unwrap(),
-        output.content
+        footer,
+        format!(
+            "[Use read_output with id=\"{id}\", offset={} to continue.]",
+            start.len()
+        )
     );
+    assert!(left.len() <= 256, "{} bytes", left.len());
+    let first_page = reader.execute(json!({"id": id}), &ctx(dir.path())).await.unwrap();
+    assert_eq!(left, first_page.content);
 }
 
 #[tokio::test]
@@ -116,34 +153,34 @@ async fn unicode_and_single_long_lines_are_paged_without_loss_or_oversized_pages
     let dir = tempfile::tempdir().unwrap();
     let (hook, reader) = parts(dir.path());
     let text = format!("{}\nend", "界🙂".repeat(1000));
-    let reference = spill(&hook, &text).await;
-    let id = reference["outputId"].as_str().unwrap();
+    // The first page is the one the hook leaves; the tool reads the others.
+    let (mut page, id) = spill(&hook, &text).await;
     let mut offset = 0;
     let mut joined = String::new();
     loop {
-        let output = reader
+        assert!(page.len() <= 256);
+        let Some((body, footer)) = page.split_once("\n[Use read_output") else {
+            joined.push_str(&page);
+            break;
+        };
+        joined.push_str(body);
+        let next: usize = footer
+            .split("offset=")
+            .nth(1)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(next, offset + body.len());
+        assert!(next > offset);
+        offset = next;
+        page = reader
             .execute(json!({"id":id,"offset":offset}), &ctx(dir.path()))
             .await
-            .unwrap();
-        assert!(output.content.len() <= 256);
-        if let Some((body, footer)) = output.content.split_once("\n[Use read_output") {
-            joined.push_str(body);
-            let next: usize = footer
-                .split("offset=")
-                .nth(1)
-                .unwrap()
-                .split_whitespace()
-                .next()
-                .unwrap()
-                .parse()
-                .unwrap();
-            assert_eq!(next, offset + body.len());
-            assert!(next > offset);
-            offset = next;
-        } else {
-            joined.push_str(&output.content);
-            break;
-        }
+            .unwrap()
+            .content;
     }
     assert_eq!(joined, text);
     assert!(
@@ -187,6 +224,139 @@ async fn output_ids_cannot_address_arbitrary_paths_and_schema_is_strict() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn a_link_named_like_an_output_is_not_followed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, reader) = parts(dir.path());
+    // What a command that can write the output directory could plant: a link, named like an
+    // output, to a file elsewhere.
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("secret.txt");
+    std::fs::write(&target, "kept outside the output directory").unwrap();
+    let outputs = dir.path().join(".zx-agent/outputs");
+    std::fs::create_dir_all(&outputs).unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    std::os::unix::fs::symlink(&target, outputs.join(format!("{id}.txt"))).unwrap();
+
+    let error = reader.execute(json!({"id": id}), &ctx(dir.path())).await.unwrap_err();
+
+    assert!(error.contains("cannot read tool output"), "{error}");
+    assert!(!error.contains("kept outside"), "{error}");
+}
+
+/// Store one result with `hook`, which creates the output directory of `dir`, then put a
+/// link to another directory in its place, as a command that can write the working directory
+/// could. Returns the other directory and the ID of the one output it holds.
+#[cfg(unix)]
+async fn swap_outputs_for_a_link(hook: &SpillOutputs, dir: &Path) -> (tempfile::TempDir, String) {
+    hook.after_tool(&call("bash"), ToolOutput::ok("x".repeat(500)), &common::hook_context())
+        .await
+        .unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    std::fs::write(elsewhere.path().join(format!("{id}.txt")), "from another directory").unwrap();
+    let outputs = dir.join(".zx-agent/outputs");
+    std::fs::rename(&outputs, dir.join(".zx-agent/moved")).unwrap();
+    std::os::unix::fs::symlink(elsewhere.path(), &outputs).unwrap();
+    (elsewhere, id)
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_output_directory_swapped_for_a_link_is_not_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let (hook, reader) = parts(dir.path());
+    let (_elsewhere, id) = swap_outputs_for_a_link(&hook, dir.path()).await;
+
+    let error = reader.execute(json!({"id": id}), &ctx(dir.path())).await.unwrap_err();
+
+    assert!(error.contains("output directory"), "{error}");
+    assert!(!error.contains("from another directory"), "{error}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn nothing_is_stored_through_an_output_directory_swapped_for_a_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let (hook, _) = parts(dir.path());
+    let (elsewhere, _) = swap_outputs_for_a_link(&hook, dir.path()).await;
+
+    let kept = hook
+        .after_tool(&call("bash"), ToolOutput::ok("y".repeat(500)), &common::hook_context())
+        .await
+        .unwrap();
+
+    assert!(kept.content.starts_with(&"y".repeat(500)), "{}", kept.content);
+    assert!(kept.content.contains("[not stored: "), "{}", kept.content);
+    // Only the file the test put there.
+    assert_eq!(std::fs::read_dir(elsewhere.path()).unwrap().count(), 1);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn nothing_is_stored_through_a_link_planted_before_the_first_result() {
+    // In place of the output directory, and of the directory above it.
+    for linked in [".zx-agent/outputs", ".zx-agent"] {
+        let dir = tempfile::tempdir().unwrap();
+        let (hook, _) = parts(dir.path());
+        let elsewhere = tempfile::tempdir().unwrap();
+        let link = dir.path().join(linked);
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), &link).unwrap();
+
+        let kept = hook
+            .after_tool(&call("bash"), ToolOutput::ok("y".repeat(500)), &common::hook_context())
+            .await
+            .unwrap();
+
+        assert!(kept.content.contains("[not stored: "), "{linked}: {}", kept.content);
+        assert_eq!(std::fs::read_dir(elsewhere.path()).unwrap().count(), 0, "{linked}");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_output_is_not_read_through_a_link_planted_before_the_first_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, reader) = parts(dir.path());
+    let elsewhere = tempfile::tempdir().unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    std::fs::write(elsewhere.path().join(format!("{id}.txt")), "from another directory").unwrap();
+    std::fs::create_dir_all(dir.path().join(".zx-agent")).unwrap();
+    std::os::unix::fs::symlink(elsewhere.path(), dir.path().join(".zx-agent/outputs")).unwrap();
+
+    let error = reader.execute(json!({"id": id}), &ctx(dir.path())).await.unwrap_err();
+
+    assert!(error.contains("symbolic link"), "{error}");
+    assert!(!error.contains("from another directory"), "{error}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_output_directory_outside_the_working_directory_may_be_reached_through_a_link() {
+    let dir = tempfile::tempdir().unwrap();
+    // The user's own arrangement: commands that write the working directory cannot change it.
+    let elsewhere = tempfile::tempdir().unwrap();
+    let real = elsewhere.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let link = elsewhere.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let config = Config {
+        directory: link.join("outputs"),
+        ..settings()
+    };
+    let store = OutputStore::new(dir.path(), config).unwrap();
+    let hook = SpillOutputs::new(store.clone(), Vec::new());
+    let reader = ReadOutputTool::new(store);
+
+    let (left, id) = spill(&hook, &"z".repeat(500)).await;
+
+    assert!(real.join("outputs").join(format!("{id}.txt")).is_file());
+    let page = reader.execute(json!({"id": id}), &ctx(dir.path())).await.unwrap();
+    assert_eq!(page.content, left);
+}
+
 #[tokio::test]
 async fn file_caps_bound_both_writes_and_reads_and_invalid_utf8_is_refused() {
     let dir = tempfile::tempdir().unwrap();
@@ -209,11 +379,11 @@ async fn file_caps_bound_both_writes_and_reads_and_invalid_utf8_is_refused() {
         kept.content
     );
     assert!(!dir.path().join(".zx-agent").exists());
-    let reference = spill(&hook, &"x".repeat(512)).await;
-    let args = json!({"id":reference["outputId"]});
+    let (_, id) = spill(&hook, &"x".repeat(512)).await;
+    let args = json!({"id": id});
     assert!(reader.execute(args.clone(), &ctx(dir.path())).await.is_ok());
-    let path = reference["path"].as_str().unwrap();
-    std::fs::write(path, "x".repeat(513)).unwrap();
+    let path = stored_file(dir.path(), &id);
+    std::fs::write(&path, "x".repeat(513)).unwrap();
     assert!(
         reader
             .execute(args.clone(), &ctx(dir.path()))
@@ -273,7 +443,7 @@ async fn paging_tools_are_exempt_and_disabled_spilling_is_a_noop() {
     let dir = tempfile::tempdir().unwrap();
     let (hook, _) = parts(dir.path());
     let large = ToolOutput::ok("x".repeat(500));
-    for name in [TOOL_NAME, "read_skill"] {
+    for name in PAGING_TOOLS {
         assert_eq!(
             hook.after_tool(&call(name), large.clone(), &common::hook_context())
                 .await
@@ -337,8 +507,8 @@ async fn new_directories_and_files_are_private() {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let (hook, _) = parts(dir.path());
-    let reference = spill(&hook, &"private ".repeat(100)).await;
-    let path = PathBuf::from(reference["path"].as_str().unwrap());
+    let (_, id) = spill(&hook, &"private ".repeat(100)).await;
+    let path = stored_file(dir.path(), &id);
     assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
     assert_eq!(
         std::fs::metadata(path.parent().unwrap()).unwrap().permissions().mode() & 0o777,
@@ -371,27 +541,25 @@ async fn redaction_precedes_both_output_file_and_session_persistence() {
             Arc::new(ReadOutputTool::new(store.clone())),
         ],
     );
-    config.cwd = dir.path().into();
     config.hooks.push(RedactSecrets::new([secret.into()]));
     config.hooks.push(SpillOutputs::new(store, vec![TOOL_NAME.into()]));
     let audit = dir.path().join("session.jsonl");
-    let (mut runner, _) = RunnerSetup {
-        session: SessionStore::create(&audit, header()).unwrap(),
+    let (runner, _) = RunnerSetup {
+        session: common::create_session_file(&audit, header_in(dir.path()))
+            .await
+            .unwrap(),
         ..RunnerSetup::new(config)
     }
     .build();
-    assert_eq!(
-        runner.run("read it", &CancellationToken::new()).await.outcome,
-        RunOutcome::Completed
-    );
+    assert_eq!(runner.run("read it").await.outcome, RunOutcome::Completed);
     let requests = provider.requests();
     let Message::ToolResult(result) = &requests[1].messages[2] else {
         panic!("tool result");
     };
-    let reference: Value = serde_json::from_str(&result.content).unwrap();
-    let stored = std::fs::read_to_string(reference["path"].as_str().unwrap()).unwrap();
+    let stored = std::fs::read_to_string(stored_file(dir.path(), &output_id(&result.content))).unwrap();
     assert!(!stored.contains(secret));
     assert!(stored.contains("[REDACTED]"));
+    assert!(!result.content.contains(secret), "{}", result.content);
     assert!(!std::fs::read_to_string(&audit).unwrap().contains(secret));
     assert!(result.content.len() < stored.len());
 }
@@ -429,10 +597,13 @@ async fn a_storage_error_keeps_the_redacted_result_inline_and_the_run_continues(
             Arc::new(ReadOutputTool::new(store.clone())),
         ],
     );
-    config.cwd = dir.path().into();
     config.hooks.push(SpillOutputs::new(store, vec![]));
-    let (mut runner, _) = RunnerSetup::new(config).build();
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let (runner, _) = RunnerSetup {
+        session: Transcript::in_memory(header_in(dir.path())),
+        ..RunnerSetup::new(config)
+    }
+    .build();
+    let report = runner.run("go").await;
     // Storing is an optimisation: the hook runs after redaction, so a storage failure
     // keeps the already redacted, bounded result inline instead of hiding it.
     assert_eq!(report.outcome, RunOutcome::Completed);

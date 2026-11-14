@@ -4,30 +4,34 @@
 
 mod common;
 
-use std::path::{Path, PathBuf};
+use std::future::Future;
+use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::task::Poll;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use zx_agent::agent::{RunOutcome, Tool, ToolContext};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::executor::{CommandOutput, Executor, LocalExecutor, ShellCommand};
-use zx_agent::tools::{EditFileTool, FileMutationQueue, WriteFileTool, builtin_tools};
+use zx_agent::builtin::executor::{CommandOutput, Executor, LocalExecutor, ShellCommand};
+use zx_agent::builtin::tools::{EditFileTool, FileMutationQueue, WriteFileTool, builtin_tools};
+use zx_agent::runner::{RunOutcome, RunReport};
+use zx_agent::tools::{Tool, ToolContext, ToolOutput};
+use zx_agent::transcript::Transcript;
 
-use common::{config, run_prompt};
+use common::{RunnerSetup, config, header_in};
 
 fn ctx(dir: &Path) -> ToolContext {
     ToolContext::new(dir.to_path_buf(), CancellationToken::new())
 }
 
-async fn write(dir: &Path, args: Value) -> Result<zx_agent::agent::ToolOutput, String> {
+async fn write(dir: &Path, args: Value) -> Result<ToolOutput, String> {
     WriteFileTool::default().execute(args, &ctx(dir)).await
 }
 
-async fn edit(dir: &Path, args: Value) -> Result<zx_agent::agent::ToolOutput, String> {
+async fn edit(dir: &Path, args: Value) -> Result<ToolOutput, String> {
     EditFileTool::default().execute(args, &ctx(dir)).await
 }
 
@@ -181,6 +185,97 @@ async fn cancelled_file_changes_change_nothing() {
     assert!(!dir.path().join("g.txt").exists());
 }
 
+/// More than a file write hands to a blocking thread in one piece (tokio: 2 MiB), so that a
+/// write driven by the calling future would take several steps.
+const LARGE_BYTES: usize = 5 * 1024 * 1024;
+
+/// Poll `call`, which changes `file`, until the file is no longer `untouched_bytes` long, the
+/// sign that its write has begun; then drop the call, as the loop drops the calls of a
+/// cancelled run.
+async fn drop_once_the_write_has_begun(
+    call: impl Future<Output = Result<ToolOutput, String>>,
+    file: &Path,
+    untouched_bytes: usize,
+) {
+    let mut call = std::pin::pin!(call);
+    loop {
+        if let Poll::Ready(result) = futures::poll!(call.as_mut()) {
+            // The call ended before it could be dropped; what it wrote is checked all the same.
+            result.unwrap();
+            return;
+        }
+        if file_len(file) != Some(untouched_bytes) {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
+/// The length of `file`, when it can be told.
+fn file_len(file: &Path) -> Option<usize> {
+    let meta = std::fs::metadata(file).ok()?;
+    usize::try_from(meta.len()).ok()
+}
+
+/// Whether `file` comes to hold `expected` within ten seconds. Nothing announces the end of a
+/// write whose call was dropped, so the file is looked at until it is complete.
+async fn comes_to_hold(file: &Path, expected: &str) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if file_len(file) == Some(expected.len()) && std::fs::read_to_string(file).is_ok_and(|text| text == expected) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
+#[tokio::test]
+async fn a_write_whose_call_is_dropped_half_way_still_writes_the_whole_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("f.txt");
+    std::fs::write(&file, "old\n").unwrap();
+    let content = "a line of the new content\n".repeat(LARGE_BYTES / 26);
+    let tool = WriteFileTool::default();
+    let ctx = ctx(dir.path());
+
+    let call = tool.execute(json!({"path": "f.txt", "content": content}), &ctx);
+    drop_once_the_write_has_begun(call, &file, "old\n".len()).await;
+
+    assert!(
+        comes_to_hold(&file, &content).await,
+        "the file was left with {:?} of {} bytes",
+        file_len(&file),
+        content.len()
+    );
+}
+
+#[tokio::test]
+async fn an_edit_whose_call_is_dropped_half_way_still_writes_the_whole_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("f.txt");
+    let original = format!("{}MARK\n", "a line of the file\n".repeat(LARGE_BYTES / 19));
+    std::fs::write(&file, &original).unwrap();
+    let changed = original.replace("MARK", "CHANGED");
+    let tool = EditFileTool::default();
+    let ctx = ctx(dir.path());
+
+    let call = tool.execute(
+        json!({"path": "f.txt", "edits": [{"oldText": "MARK", "newText": "CHANGED"}]}),
+        &ctx,
+    );
+    drop_once_the_write_has_begun(call, &file, original.len()).await;
+
+    assert!(
+        comes_to_hold(&file, &changed).await,
+        "the file was left with {:?} of {} bytes",
+        file_len(&file),
+        changed.len()
+    );
+}
+
 /// This machine's file system, with each read slowed down: two calls that both read before
 /// either writes would lose one change.
 struct SlowReads;
@@ -202,16 +297,17 @@ impl Executor for SlowReads {
     }
 }
 
-fn file_tool_config(
-    provider: Arc<FauxProvider>,
-    cwd: PathBuf,
-    executor: &Arc<dyn Executor>,
-) -> zx_agent::agent::LoopConfig {
+/// Run the prompt "edit" in a session that works in `cwd`, with the file tools on
+/// `executor`.
+async fn edit_in(cwd: &Path, provider: Arc<FauxProvider>, executor: &Arc<dyn Executor>) -> RunReport {
     let names = ["edit_file", "write_file"].map(String::from);
     let tools = builtin_tools(&names, Duration::from_secs(5), executor).unwrap();
-    let mut config = config(provider, tools);
-    config.cwd = cwd;
-    config
+    let (runner, _) = RunnerSetup {
+        session: Transcript::in_memory(header_in(cwd)),
+        ..RunnerSetup::new(config(provider, tools))
+    }
+    .build();
+    runner.run("edit").await
 }
 
 #[tokio::test]
@@ -234,9 +330,8 @@ async fn two_edits_of_one_file_in_one_batch_both_take_effect() {
         FauxStep::text("done"),
     ]));
     let executor: Arc<dyn Executor> = Arc::new(SlowReads);
-    let config = file_tool_config(provider, dir.path().to_path_buf(), &executor);
 
-    let (result, _) = run_prompt(config, &mut Vec::new(), "edit").await;
+    let result = edit_in(dir.path(), provider, &executor).await;
 
     assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(std::fs::read_to_string(dir.path().join("f.txt")).unwrap(), "ONE\nTWO\n");
@@ -286,9 +381,8 @@ async fn old_argument_shapes_are_rewritten_before_the_checks() {
         FauxStep::text("done"),
     ]));
     let executor: Arc<dyn Executor> = Arc::new(LocalExecutor::default());
-    let config = file_tool_config(provider, dir.path().to_path_buf(), &executor);
 
-    let (result, _) = run_prompt(config, &mut Vec::new(), "edit").await;
+    let result = edit_in(dir.path(), provider, &executor).await;
 
     assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(std::fs::read_to_string(dir.path().join("f.txt")).unwrap(), "A\nB\n");

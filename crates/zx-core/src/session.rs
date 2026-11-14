@@ -1,514 +1,523 @@
-//! Append-only session tree and its projection (pi: coding-agent SessionManager).
+//! A conversation, shared by its frontends, and its runs. An [`Agent`](crate::Agent) makes
+//! the sessions.
 //!
-//! Every change appends an entry; stored entries are never rewritten. Entries link to their
-//! parent, so the session is a tree and the "leaf" pointer selects the current branch. The
-//! messages a model sees are a projection of that branch: context edits can omit or replace
-//! earlier messages without touching the stored history, which stays available for auditing.
+//! - `run`: [`Run`], one prompt, continuation or compaction in progress: its events and its
+//!   result
 //!
-//! A [`SessionLog`] keeps the entries: the JSONL session file by default, or a backend of
-//! the host's choice. Only the current format, [`SESSION_VERSION`], is read and written.
-//!
-//! - `entry`: the header and the entries of the tree
-//! - `log` and `jsonl`: where the entries are kept, and the JSONL session file
-//! - `projection`: the messages a branch projects for the model
-//! - `compaction`: what a summary holds, and the records of a compaction with the rules they
-//!   follow
-//! - `request`: request configuration changes and per-request checkpoints
-//! - `recovery`: start records of calls with side effects, and the calls an interrupted run
-//!   left without results
-//! - `name`: the session's name, kept in `session_info` records
-//! - `directory`: session files in one directory: listing them and finding one to resume
-//! - `test_support` and `tests`, compiled for tests only: what the session's unit tests
-//!   share, and the tests of the store
+//! A run takes ownership of the Runner, without a lock across await. Its lease restores the
+//! Runner when the run ends or is dropped, also by a panic.
 
-mod compaction;
-mod directory;
-mod entry;
-mod jsonl;
-mod log;
-mod name;
-mod projection;
-mod recovery;
-mod request;
-#[cfg(test)]
-mod test_support;
-#[cfg(test)]
-mod tests;
-pub use compaction::{
-    CompactionEntry, CompactionFailedEntry, CompactionPlan, CompactionStartedEntry, CompactionSummary, SummaryFact,
-    SummaryRequest,
-};
-pub(crate) use compaction::{MAX_SUMMARY_BYTES, summary_input, summary_messages};
-pub use directory::{SessionInfo, SessionList, Unreadable, list_sessions};
-pub use entry::{ContextEditEntry, CustomEntry, CustomMessage, CustomMessageEntry, Entry, MessageEntry, SessionHeader};
-pub use log::{LoadedSession, LogRecord, SessionLog};
-pub use name::{SessionInfoEntry, SessionName};
-pub use projection::ProjectedMessage;
-pub(crate) use projection::without_details;
-pub use recovery::{InterruptedToolCall, StartRecord, ToolCallStartedEntry};
-pub use request::{RequestConfig, RequestConfigEntry, RequestSource, RequestStartedEntry};
-#[cfg(test)]
-pub(crate) use test_support::FailingWriter;
+mod run;
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
 
-use anyhow::{Result, anyhow, bail, ensure};
+use serde_json::Value;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
-use crate::ai::{Message, now_ms};
-use entry::HeaderLine;
-use jsonl::JsonlFile;
+use crate::ai::retry::RetryPolicy;
+use crate::ai::{Provider, Reasoning};
+use crate::compaction;
+use crate::events::Event;
+use crate::extensions::{CommandContext, CommandError, CommandOutcome, SlashCommand};
+use crate::input::{Input, InputQueues};
+use crate::policy::{ApprovalDecision, ApprovalGate};
+use crate::runner::{LoopConfig, RunLimits, RunLink, Runner, Start};
+use crate::sync::lock;
+use crate::tools::ActiveTools;
+use crate::transcript::{CustomMessage, SessionName, Transcript};
 
-/// The session format: written to every new header, and the only version a session file may
-/// have to be created, opened or read, or a stored session to be loaded. A change to the
-/// format raises it, and sessions of any other version are refused.
-pub const SESSION_VERSION: u32 = 9;
+use run::EVENT_BUFFER;
+pub use run::Run;
 
-/// How long one append may wait for its log, such as a database that stopped answering.
-/// A file append finishes long before; a timed-out append stops writing, like a failed one.
-const APPEND_TIMEOUT: Duration = Duration::from_secs(30);
+/// What a new session starts with.
+#[derive(Clone, Debug)]
+pub struct SessionOptions {
+    /// Where the session's tools and hooks work, now and whenever it is opened again: the
+    /// session's header records it, and a listing can ask for the sessions of a directory.
+    pub cwd: PathBuf,
+    /// What the host says about the session, such as its tenant or the chat it belongs to.
+    /// The header keeps them, and a listing can ask for the sessions with given labels.
+    pub labels: BTreeMap<String, String>,
+}
 
-/// Why a store no longer writes. Each case asks for something different before a session can
-/// be written again, so hosts such as a server that keeps sessions open can match on it.
+impl SessionOptions {
+    /// A session that works in `cwd`, without labels.
+    pub fn new(cwd: impl Into<PathBuf>) -> Self {
+        Self {
+            cwd: cwd.into(),
+            labels: BTreeMap::new(),
+        }
+    }
+}
+
+/// Provider and model selected together, so a switch cannot expose a mixed pair.
+pub struct ModelRef {
+    /// Already configured by the host, including authentication and transport limits.
+    pub provider: Arc<dyn Provider>,
+    /// Non-empty model ID passed to that provider on subsequent prompts.
+    pub model: String,
+}
+
+/// Session API errors. Operational failures remain in the run or compaction report.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum WritesStopped {
-    /// An append was dropped while it waited for its log, so the log may or may not hold the
-    /// record. Open the session again from its storage before writing.
-    #[error("an earlier append was interrupted before its log answered, so its outcome is unknown")]
-    Interrupted,
-    /// An append did not finish within this time; its outcome is unknown, as above.
-    #[error("an earlier append did not finish within {0:?}, so its outcome is unknown")]
-    TimedOut(Duration),
-    /// An append failed with this error. Remove the cause, then open the session again.
-    #[error("an earlier write failed: {0}")]
-    Failed(String),
-    /// The store is a snapshot from [`SessionStore::read`], which never writes.
-    #[error("it was read as a snapshot, which is read-only")]
-    ReadOnly,
+pub enum SessionError {
+    /// A run, compaction or model change overlaps an active operation; it is never queued.
+    #[error("session is running; queue input with queues().steer or queues().follow_up")]
+    Busy,
+    /// Model IDs must contain at least one non-whitespace character.
+    #[error("model ID must not be empty")]
+    InvalidModel,
+    /// The entry a branch switch names is not in the session.
+    #[error("no entry with that ID in the session")]
+    EntryNotFound,
+    /// The session could not record an entry; see [`Transcript::writes_stopped`].
+    #[error("cannot write the session: {0}")]
+    WriteFailed(String),
+    /// No approval request with that ID waits for an answer: it was answered already, nobody
+    /// answered it in time, or its run was cancelled.
+    #[error("no approval request with that ID is waiting")]
+    UnknownApproval,
+    /// The session is closed: the agent closed it
+    /// ([`Agent::close_session`](crate::Agent::close_session)), or it closed itself because
+    /// its record could no longer be written. Its record stays in the storage, where the
+    /// agent opens it again ([`Agent::open_session`](crate::Agent::open_session)).
+    #[error("session is closed; the agent opens it again from its storage")]
+    Closed,
 }
 
-/// A session tree, kept in memory and optionally stored by a [`SessionLog`].
+enum State {
+    // A full Runner is only needed while idle, so keep the state enum small.
+    Idle(Box<Runner>),
+    /// An operation holds the Runner; the token cancels it.
+    Leased(CancellationToken),
+    /// Closed while an operation held the Runner: the operation was cancelled, and its lease
+    /// drops the Runner instead of returning it.
+    Closing,
+    /// The Runner is gone, and with it the transcript, the tools and the hooks.
+    Closed,
+}
+
+impl State {
+    /// Why an operation cannot take the Runner in this state, which is not `Idle`.
+    fn refusal(&self) -> SessionError {
+        match self {
+            Self::Idle(_) | Self::Leased(_) => SessionError::Busy,
+            Self::Closing | Self::Closed => SessionError::Closed,
+        }
+    }
+}
+
+/// One long-lived conversation, made by an [`Agent`](crate::Agent). A handle: its clones
+/// are the same conversation, so that a frontend can read a run in one task and cancel or
+/// steer it from another. State locks cover ownership transfers only; host code and
+/// asynchronous work run unlocked. Once the session is closed, every operation that needs the
+/// conversation returns [`SessionError::Closed`].
 ///
-/// Methods that write are `async`: each waits until its log has stored the entry, and only
-/// then changes memory. After a failed write, every later append fails without writing; so
-/// does every append after one that timed out or whose future was dropped, because its
-/// outcome is unknown. A failed write can leave a partial record; stopping there keeps it the
-/// last one, which opening the session repairs. One store is the only writer of its session.
-/// Appending to a log waits with a Tokio timer, so it needs a Tokio runtime with time enabled.
-pub struct SessionStore {
-    path: Option<PathBuf>,
-    log: Option<Box<dyn SessionLog>>,
-    /// Why this store no longer writes, if it does not.
-    stopped: Option<WritesStopped>,
-    append_timeout: Duration,
-    header: SessionHeader,
-    entries: Vec<Entry>,
-    index: HashMap<String, usize>,
-    leaf: Option<String>,
-    incomplete_tail_bytes: usize,
+/// A session whose record can no longer be written closes itself when the operation that
+/// met it ends: a write failed or timed out, or its caller dropped the run while a record
+/// was on its way, so that nobody knows whether the storage has it. The storage holds what
+/// was recorded, and the agent opens the session again from there.
+///
+/// ```no_run
+/// use zx_core::session::{Session, SessionError};
+///
+/// # async fn example(session: Session) -> Result<(), SessionError> {
+/// let first = session.send("Inspect the logs.")?.wait().await;
+/// let second = session.send("Summarize the findings.")?.wait().await;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone)]
+pub struct Session {
+    shared: Arc<Shared>,
 }
 
-impl SessionStore {
-    /// A session kept only in memory.
-    pub fn in_memory(header: SessionHeader) -> Self {
-        Self {
-            path: None,
-            log: None,
-            stopped: None,
-            append_timeout: APPEND_TIMEOUT,
-            header,
-            entries: Vec::new(),
-            index: HashMap::new(),
-            leaf: None,
-            incomplete_tail_bytes: 0,
-        }
-    }
+struct Shared {
+    state: Mutex<State>,
+    // The queues and the tool set are genuinely shared with the Runner while a run owns it.
+    queues: Arc<InputQueues>,
+    active_tools: Arc<ActiveTools>,
+    approvals: Arc<ApprovalGate>,
+    commands: Vec<Arc<dyn SlashCommand>>,
+    tool_names: Vec<String>,
+    cwd: PathBuf,
+    id: String,
+}
 
-    /// A new session whose entries go to `log`. The backend has already stored `header`.
-    pub fn with_log(header: SessionHeader, log: Box<dyn SessionLog>) -> Self {
-        Self {
-            log: Some(log),
-            ..Self::in_memory(header)
-        }
-    }
-
-    /// Rebuild a stored session from `loaded` and append to `log` from then on. Checks the
-    /// format version, which must be [`SESSION_VERSION`], and every record, as opening a
-    /// session file does. The leaf is the last entry.
-    pub fn load(loaded: LoadedSession, log: Box<dyn SessionLog>) -> Result<Self> {
-        let mut store = Self::replay(loaded)?;
-        store.log = Some(log);
-        Ok(store)
-    }
-
-    fn replay(loaded: LoadedSession) -> Result<Self> {
-        let LoadedSession {
-            header,
-            records,
-            incomplete_tail_bytes,
-        } = loaded;
-        ensure_current_version(&header)?;
-        let mut store = Self::in_memory(header);
-        for (position, record) in (1..).zip(&records) {
-            let entry: Entry = serde_json::from_str(record).map_err(|error| anyhow!("entry {position}: {error}"))?;
-            store
-                .validate_entry(&entry)
-                .map_err(|error| anyhow!("entry {position}: {error:#}"))?;
-            store.insert(entry);
-        }
-        store.incomplete_tail_bytes = incomplete_tail_bytes;
-        Ok(store)
-    }
-
-    /// Create a new session file, with its header written at once. Fails if the file exists
-    /// or the header's version is not [`SESSION_VERSION`], which no session could load. On
-    /// Unix the file stays locked while the store exists; see [`SessionStore::open`].
-    pub fn create(path: &Path, header: SessionHeader) -> Result<Self> {
-        ensure_current_version(&header)?;
-        let file = JsonlFile::create(path, &header)?;
+impl Session {
+    /// A conversation recorded in `transcript`, running with `config`. Fails for compaction
+    /// budgets that cannot work, without making a request or changing the session.
+    pub(crate) fn new(
+        config: LoopConfig,
+        retry: RetryPolicy,
+        limits: RunLimits,
+        compaction: compaction::Config,
+        transcript: Transcript,
+    ) -> anyhow::Result<Self> {
+        let runner = Runner::new(config, retry, limits, transcript).with_compaction(compaction)?;
+        let config = runner.config();
         Ok(Self {
-            path: Some(path.to_path_buf()),
-            ..Self::with_log(header, Box::new(file))
+            shared: Arc::new(Shared {
+                queues: config.queues.clone(),
+                active_tools: config.active_tools.clone(),
+                approvals: runner.approvals().clone(),
+                commands: config.commands.clone(),
+                tool_names: config.tools.names().map(str::to_string).collect(),
+                cwd: config.cwd.clone(),
+                id: runner.session().header().id.clone(),
+                state: Mutex::new(State::Idle(Box::new(runner))),
+            }),
         })
     }
 
-    /// Open an existing session file for reading and appending. The leaf is the last entry.
+    /// The session's ID, as its header records it.
+    pub fn id(&self) -> &str {
+        &self.shared.id
+    }
+
+    /// The directory the session's tools and hooks work in: the one it was created in.
+    pub fn cwd(&self) -> &Path {
+        &self.shared.cwd
+    }
+
+    /// Start a run with `input`: the person's text, or a message from an extension (pi:
+    /// `sendMessage` with `triggerTurn` while idle). This only takes the conversation; the
+    /// returned [`Run`] makes the requests as it is read. An overlap returns Busy.
+    pub fn send(&self, input: impl Into<Input>) -> Result<Run, SessionError> {
+        // The conversion is host code: it runs before the conversation is leased.
+        self.start(Start::Message(input.into()))
+    }
+
+    /// Start a run without new input: the model answers the conversation as it is. Whether
+    /// there is something to answer is decided once interrupted calls are recovered:
     ///
-    /// On Unix the file is locked with `flock(2)` while the store exists, so opening it again,
-    /// in this process or another, fails until this store is dropped. A crash during the final
-    /// write can leave an incomplete last line. Once every other record has been checked, that
-    /// line is cut off so later appends start on a clean line; damage anywhere else is an
-    /// error, and the file is left unchanged.
-    pub fn open(path: &Path) -> Result<Self> {
-        let (loaded, file) = JsonlFile::open(path)?;
-        let mut store = Self::replay(loaded).map_err(|error| anyhow!("{}: {error:#}", path.display()))?;
-        store.log = Some(Box::new(file.repair()?));
-        store.path = Some(path.to_path_buf());
-        Ok(store)
+    /// - the conversation ends with input or a tool result: the model answers it, for
+    ///   example after a crash left results to recover;
+    /// - it ends with an answer that failed or was cancelled, whose calls never ran: that
+    ///   answer is omitted with a `context_edit`, as a retry does, and the model answers again;
+    /// - it ends with a finished answer: queued steering, or else follow-up, input becomes the
+    ///   next input; with none queued the run ends with an error and makes no request, as it
+    ///   does for an empty conversation.
+    ///
+    /// An overlap returns Busy.
+    pub fn continue_run(&self) -> Result<Run, SessionError> {
+        self.start(Start::Continue)
     }
 
-    /// Read a session file without opening it for writing: a snapshot, also of a session
-    /// that another store is writing. It neither takes the lock nor changes the file; an
-    /// incomplete last line, such as a record still being written, is left out. Every append
-    /// to the snapshot fails.
-    pub fn read(path: &Path) -> Result<Self> {
-        let loaded = jsonl::read(path)?;
-        let mut store = Self::replay(loaded).map_err(|error| anyhow!("{}: {error:#}", path.display()))?;
-        store.path = Some(path.to_path_buf());
-        store.stopped = Some(WritesStopped::ReadOnly);
-        Ok(store)
+    fn start(&self, begin: Start) -> Result<Run, SessionError> {
+        let (mut lease, link, events) = self.begin()?;
+        let id = link.id.clone();
+        Ok(Run::new(
+            id,
+            events,
+            async move { lease.runner().run(begin, &link).await },
+        ))
     }
 
-    /// Why this store no longer writes, or `None` while it does. Every append fails from
-    /// then on; [`WritesStopped`] says what to do before writing the session again.
-    pub fn writes_stopped(&self) -> Option<&WritesStopped> {
-        self.stopped.as_ref()
+    /// Summarize the old prefix of the conversation without executing a task or tools, as a
+    /// run of its own, with the same exclusive hold on the conversation as a prompt. An
+    /// overlap returns Busy; no eligible old prefix gives a no-op report. A cancelled or
+    /// dropped run keeps an incomplete compaction out of the context.
+    pub fn compact(&self) -> Result<Run<compaction::Report>, SessionError> {
+        let (mut lease, link, events) = self.begin()?;
+        let id = link.id.clone();
+        Ok(Run::new(id, events, async move { lease.runner().compact(&link).await }))
     }
 
-    /// A session that writes entries to `writer` instead of a file, so tests can make writes
-    /// fail. The header is not written.
-    #[cfg(test)]
-    pub(crate) fn with_writer(header: SessionHeader, writer: Box<dyn std::io::Write + Send + Sync>) -> Self {
-        Self::with_log(header, Box::new(JsonlFile::with_writer(writer)))
+    /// Take the conversation for a run: its lease, what links the run to its reader, and
+    /// the reader's end of its events.
+    fn begin(&self) -> Result<(Lease, RunLink, mpsc::Receiver<Event>), SessionError> {
+        let cancel = CancellationToken::new();
+        let lease = self.lease(cancel.clone())?;
+        let (events, reader) = mpsc::channel(EVENT_BUFFER);
+        let link = RunLink {
+            id: uuid::Uuid::new_v4().to_string(),
+            cancel,
+            events,
+        };
+        Ok((lease, link, reader))
     }
 
-    /// The header the session was created with.
-    pub fn header(&self) -> &SessionHeader {
-        &self.header
+    /// The conversation's queues: to steer or follow up with the person's input (`steer`,
+    /// `follow_up`) or a message from an extension (`steer_message`, `follow_up_message`), to
+    /// record extension state during a run (`append_entry`), and to choose how many queued
+    /// messages a request takes (`set_mode`). A clone is a handle to the same queues, for a
+    /// part of a frontend that only feeds them.
+    pub fn queues(&self) -> &Arc<InputQueues> {
+        &self.shared.queues
     }
 
-    /// The session file; `None` for a session in memory or in another kind of log.
-    pub fn path(&self) -> Option<&Path> {
-        self.path.as_deref()
+    /// The names of the session's tools, in the order requests declare them;
+    /// [`active_tools`](Self::active_tools) chooses which of them a request offers.
+    pub fn tool_names(&self) -> &[String] {
+        &self.shared.tool_names
     }
 
-    /// Bytes of an incomplete final record left out when the session was loaded, which
-    /// `open` also removes from the file; zero if there was none. Complete corrupt records
-    /// are errors and are never silently removed.
-    pub fn incomplete_tail_bytes(&self) -> usize {
-        self.incomplete_tail_bytes
+    /// The tools the next request offers, shared with the running loop and the hooks (pi:
+    /// `setActiveTools`). A change applies to the next request, also during a run.
+    pub fn active_tools(&self) -> &ActiveTools {
+        &self.shared.active_tools
     }
 
-    /// Every entry in the order it was appended, on all branches.
-    pub fn entries(&self) -> &[Entry] {
-        &self.entries
+    /// The slash commands extensions registered, in registration order.
+    pub fn commands(&self) -> &[Arc<dyn SlashCommand>] {
+        &self.shared.commands
     }
 
-    /// The entry with `id`, on any branch.
-    pub fn get(&self, id: &str) -> Option<&Entry> {
-        self.index.get(id).map(|&i| &self.entries[i])
-    }
-
-    /// The current position in the tree; `None` before the first entry.
-    pub fn leaf_id(&self) -> Option<&str> {
-        self.leaf.as_deref()
-    }
-
-    /// Append a message as a child of the leaf and make it the leaf. Returns its id.
-    pub async fn append_message(&mut self, message: Message) -> Result<String> {
-        let entry = Entry::Message(MessageEntry {
-            id: self.new_id(),
-            parent_id: self.leaf.clone(),
-            timestamp: now_ms(),
-            message,
-        });
-        self.append(entry).await
-    }
-
-    /// Omit (`None`) or replace the text of a message on the current branch, for future
-    /// model context only. The target keeps its original content in the log.
-    /// System and synthetic summary messages cannot be edited directly. Editing a record that
-    /// a summary read corrects its evidence: the summary is then invalid as a whole and the
-    /// originals are projected again.
-    pub async fn append_context_edit(&mut self, target_id: &str, replacement: Option<String>) -> Result<String> {
-        let entry = Entry::ContextEdit(ContextEditEntry {
-            id: self.new_id(),
-            parent_id: self.leaf.clone(),
-            timestamp: now_ms(),
-            target_id: target_id.to_string(),
-            replacement,
-        });
-        self.append(entry).await
-    }
-
-    /// Record state of an extension, which never reaches the model (pi: `appendEntry`).
-    /// `custom_type` must not be blank.
-    pub async fn append_custom_entry(&mut self, custom_type: &str, data: serde_json::Value) -> Result<String> {
-        let entry = Entry::Custom(CustomEntry {
-            id: self.new_id(),
-            parent_id: self.leaf.clone(),
-            timestamp: now_ms(),
-            custom_type: custom_type.to_string(),
-            data,
-        });
-        self.append(entry).await
-    }
-
-    /// Record a message from an extension, which the model sees as a user message from now
-    /// on (pi: `sendMessage`). The message's `custom_type` must not be blank.
-    pub async fn append_custom_message(&mut self, message: CustomMessage) -> Result<String> {
-        let entry = Entry::CustomMessage(CustomMessageEntry {
-            id: self.new_id(),
-            parent_id: self.leaf.clone(),
-            timestamp: now_ms(),
-            message,
-        });
-        self.append(entry).await
-    }
-
-    /// The rules every record follows, when it is appended and when a session is loaded.
-    fn validate_entry(&self, entry: &Entry) -> Result<()> {
-        ensure!(
-            !entry.id().is_empty() && !self.index.contains_key(entry.id()),
-            "duplicate or empty entry ID {:?}",
-            entry.id()
+    /// Run the registered command called `name` with `args`, also while a run is in
+    /// progress (pi: extension commands run at once). The caller shows the outcome's lines
+    /// and sends its `prompt`, if any, as it would the person's input.
+    pub async fn run_command(&self, name: &str, args: &str) -> Result<CommandOutcome, CommandError> {
+        let shared = &self.shared;
+        let command = shared
+            .commands
+            .iter()
+            .find(|command| command.name() == name)
+            .ok_or(CommandError::Unknown)?;
+        let ctx = CommandContext::new(
+            shared.cwd.clone(),
+            shared.id.clone(),
+            shared.queues.clone(),
+            shared.active_tools.clone(),
         );
-        if let Some(parent) = entry.parent_id() {
-            ensure!(self.index.contains_key(parent), "entry parent {parent:?} not found");
+        command.run(args, &ctx).await.map_err(CommandError::Failed)
+    }
+
+    /// Record state of an extension in the session while idle (pi: `appendEntry`); during
+    /// a run, hooks and commands use `queues().append_entry` instead. Returns the entry's
+    /// ID. A run returns Busy; a write failure returns WriteFailed.
+    pub async fn append_entry(&self, custom_type: &str, data: Value) -> Result<String, SessionError> {
+        self.append_idle(async |store| store.append_custom_entry(custom_type, data).await)
+            .await
+    }
+
+    /// Record a message from an extension while idle, without starting a run (pi:
+    /// `sendMessage` while idle): the model sees it with the next prompt. Returns the
+    /// entry's ID. A run returns Busy; a write failure returns WriteFailed.
+    pub async fn append_custom_message(&self, message: CustomMessage) -> Result<String, SessionError> {
+        self.append_idle(async |store| store.append_custom_message(message).await)
+            .await
+    }
+
+    /// Name the session while idle (pi: `setSessionName`): listings show the name instead of
+    /// the first prompt, and the model never sees it. The latest name counts, whichever branch
+    /// it was given on; `with_transcript` with [`Transcript::session_name`] reads it. Returns
+    /// the entry's ID. A run returns Busy; a write failure returns WriteFailed.
+    pub async fn set_name(&self, name: SessionName) -> Result<String, SessionError> {
+        self.append_idle(async |store| store.append_session_name(name).await)
+            .await
+    }
+
+    /// Write one record with `append` while idle, with the conversation leased as for a
+    /// run. A run returns Busy; a write failure returns WriteFailed.
+    async fn append_idle(
+        &self,
+        append: impl AsyncFnOnce(&mut Transcript) -> anyhow::Result<String>,
+    ) -> Result<String, SessionError> {
+        let mut lease = self.lease(CancellationToken::new())?;
+        append(lease.runner().session_mut())
+            .await
+            .map_err(|error| SessionError::WriteFailed(format!("{error:#}")))
+    }
+
+    /// Take the input that `queues().steer` and `follow_up` queued and no run consumed: steering
+    /// messages first, then follow-ups, each oldest first. A run looks for input at the end
+    /// of each step, so input queued as it ends waits for the next run; a host that starts
+    /// runs itself calls this when one ends and sends what it gets. Returns Busy during a
+    /// run or compaction, whose loop may still take the input.
+    pub fn take_queued(&self) -> Result<Vec<Input>, SessionError> {
+        // Holding the state lock keeps a run from starting between the check and the take.
+        self.idle(|_| self.shared.queues.take_all())
+    }
+
+    /// Cancel the run or compaction in progress; its [`Run`] then ends with a cancelled
+    /// result. Returns false when idle or closed. The short operations that read or write the
+    /// session while idle (`with_transcript`, `append_entry`, `append_custom_message`,
+    /// `set_name`) hold the conversation as well: during one of them this returns true,
+    /// although they have nothing to cancel.
+    pub fn cancel(&self) -> bool {
+        let cancel = match &*lock(&self.shared.state) {
+            State::Idle(_) | State::Closing | State::Closed => return false,
+            State::Leased(cancel) => cancel.clone(),
+        };
+        // Waking a waiting future can call host-provided wakers; do it unlocked.
+        cancel.cancel();
+        true
+    }
+
+    /// Whether the session is closed, or closes as soon as its cancelled operation ends.
+    pub(crate) fn is_closed(&self) -> bool {
+        matches!(&*lock(&self.shared.state), State::Closing | State::Closed)
+    }
+
+    /// Close the conversation: cancel the operation in progress, if there is one, and let go
+    /// of the transcript, the tools and the hooks, at once when idle, else when the cancelled
+    /// operation has ended. Returns false when it was closed already.
+    pub(crate) fn close(&self) -> bool {
+        let previous = {
+            let mut state = lock(&self.shared.state);
+            let next = match &*state {
+                State::Idle(_) => State::Closed,
+                State::Leased(_) => State::Closing,
+                State::Closing | State::Closed => return false,
+            };
+            std::mem::replace(&mut *state, next)
+        };
+        match previous {
+            State::Leased(cancel) => cancel.cancel(),
+            // The Runner is dropped here, without the state lock: closing a storage and
+            // dropping the tools and hooks is host code.
+            State::Idle(_) | State::Closing | State::Closed => {}
         }
-        match entry {
-            // A name is valid by its type, whether appended or loaded.
-            Entry::Message(_) | Entry::SessionInfo(_) => {}
-            Entry::Custom(custom) => ensure_custom_type(&custom.custom_type)?,
-            Entry::CustomMessage(custom) => ensure_custom_type(&custom.message.custom_type)?,
-            Entry::ContextEdit(edit) => self.validate_context_edit(edit)?,
-            Entry::CompactionStarted(started) => self.validate_compaction_start(started)?,
-            Entry::Compaction(done) => self.validate_compaction(done)?,
-            Entry::CompactionFailed(failed) => self.validate_compaction_failure(failed)?,
-            Entry::RequestConfig(config) => Self::validate_request_config(config)?,
-            Entry::RequestStarted(started) => self.validate_request_start(started)?,
-            Entry::ToolCallStarted(start) => self.validate_tool_call_start(start)?,
+        true
+    }
+
+    /// Answer the approval request `approval_id`, which an `approval_requested` event of the
+    /// run in progress announced: allow the call once, allow identical calls for the rest
+    /// of the session, or deny it with a reason the model hears. The run goes on at once.
+    /// UnknownApproval when no such request waits any more, so a late answer never reaches
+    /// another call.
+    pub fn resolve_approval(&self, approval_id: &str, decision: ApprovalDecision) -> Result<(), SessionError> {
+        if self.shared.approvals.resolve(approval_id, decision) {
+            Ok(())
+        } else {
+            Err(SessionError::UnknownApproval)
         }
+    }
+
+    /// Switch provider and model while idle. Empty IDs return InvalidModel; a run returns
+    /// Busy. History, tools, hooks, limits and exact-call approval grants are retained.
+    /// No request is made and the session header keeps its original starting model.
+    pub fn set_model(&self, model: ModelRef) -> Result<(), SessionError> {
+        if model.model.trim().is_empty() {
+            return Err(SessionError::InvalidModel);
+        }
+        let replaced = self.idle(|runner| runner.replace_model(model.provider, model.model))?;
+        // A custom provider's destructor is host code too: the replaced provider is dropped
+        // here, without the state lock, as the rejected one is above.
+        drop(replaced);
         Ok(())
     }
 
-    /// The rules an edit follows, when it is appended and when a session is loaded: it
-    /// targets an earlier message on its own branch, one that an edit may change
-    /// ([`context_edit_refusal`]).
-    fn validate_context_edit(&self, edit: &ContextEditEntry) -> Result<()> {
-        let target = edit.target_id.as_str();
-        match self.get(target) {
-            Some(Entry::Message(entry)) => {
-                if let Some(reason) = context_edit_refusal(&entry.message, edit.replacement.is_some()) {
-                    bail!("entry {target} {reason}");
-                }
-            }
-            // A custom message is a user message to the model, edited like one.
-            Some(Entry::CustomMessage(_)) => {}
-            Some(
-                Entry::ContextEdit(_)
-                | Entry::CompactionStarted(_)
-                | Entry::Compaction(_)
-                | Entry::CompactionFailed(_)
-                | Entry::RequestConfig(_)
-                | Entry::RequestStarted(_)
-                | Entry::ToolCallStarted(_)
-                | Entry::Custom(_)
-                | Entry::SessionInfo(_),
-            ) => bail!("entry {target} is not a message"),
-            None => bail!("entry {target} not found"),
-        }
-        ensure!(
-            self.ancestors(edit.parent_id.as_deref())
-                .any(|entry| entry.id() == target),
-            "entry {target} is not on the edit's branch"
-        );
-        Ok(())
-    }
-
-    /// Move the leaf to an existing entry. The next append starts a new branch there.
-    /// Only the pointer moves; nothing is written until the next append.
-    pub fn branch(&mut self, id: &str) -> Result<()> {
-        if !self.index.contains_key(id) {
-            bail!("entry {id} not found");
-        }
-        self.leaf = Some(id.to_string());
-        Ok(())
-    }
-
-    /// Move the leaf before the first entry (pi: `resetLeaf`): the projection is empty and
-    /// the next append is a new root. As with [`SessionStore::branch`], nothing is written.
-    pub fn reset_leaf(&mut self) {
-        self.leaf = None;
-    }
-
-    /// The header of a session that continues one of this session's branches, for
-    /// [`SessionStore::copy_branch`]: a fresh ID and start time, the given working directory
-    /// and model, and this session's file as `parent_session`.
-    pub fn fork_header(&self, cwd: &Path, model: &str) -> SessionHeader {
-        SessionHeader {
-            parent_session: self.path.as_ref().map(|path| path.display().to_string()),
-            ..SessionHeader::new(cwd, model)
-        }
-    }
-
-    /// Append the entries of `source` from its root to `leaf`, unchanged: the same IDs,
-    /// parents, timestamps and content, so the projection, compactions and request audit of
-    /// that branch carry over. Returns how many entries were copied. Fails without writing
-    /// when this session already has entries or `leaf` is not in `source`. A failed append
-    /// stops writing, as any append does.
-    pub async fn copy_branch(&mut self, source: &Self, leaf: &str) -> Result<usize> {
-        if !self.entries.is_empty() {
-            bail!("a branch can only be copied into an empty session");
-        }
-        if source.get(leaf).is_none() {
-            bail!("entry {leaf} not found");
-        }
-        let path = source.branch_path_from(Some(leaf));
-        for entry in &path {
-            self.append((*entry).clone()).await?;
-        }
-        Ok(path.len())
-    }
-
-    /// Entries from the root to the leaf.
-    pub fn branch_path(&self) -> Vec<&Entry> {
-        self.branch_path_from(self.leaf.as_deref())
-    }
-
-    /// The branch that ends at `leaf`, from the root to `leaf`.
-    fn branch_path_from(&self, leaf: Option<&str>) -> Vec<&Entry> {
-        let mut path: Vec<&Entry> = self.ancestors(leaf).collect();
-        path.reverse();
-        path
-    }
-
-    /// The branch that ends at `leaf`, walked upward: `leaf` first, the root last.
-    fn ancestors(&self, leaf: Option<&str>) -> impl Iterator<Item = &Entry> {
-        std::iter::successors(leaf.and_then(|id| self.get(id)), |entry| {
-            entry.parent_id().and_then(|id| self.get(id))
+    /// Change the reasoning level of later task requests while idle; `None` leaves the
+    /// server's default. A run returns Busy. The change is recorded with the next request
+    /// (`request_config`); no request is made now.
+    pub fn set_reasoning(&self, reasoning: Option<Reasoning>) -> Result<(), SessionError> {
+        self.idle(|runner| {
+            runner.replace_reasoning(reasoning);
         })
     }
 
-    async fn append(&mut self, entry: Entry) -> Result<String> {
-        self.validate_entry(&entry)?;
-        if let Some(reason) = &self.stopped {
-            // Appending after a partial record would glue the next entry to it, turning a
-            // repairable tail into a corrupt record in the middle of the session.
-            bail!("the session is no longer written: {reason}");
-        }
-        if let Some(log) = &mut self.log {
-            // Store before updating memory: an entry missing from the log must never become
-            // the parent of later entries.
-            let json = serde_json::to_string(&entry)?;
-            let record = LogRecord {
-                seq: u64::try_from(self.entries.len())? + 1,
-                id: entry.id(),
-                parent_id: entry.parent_id(),
-                kind: entry.kind(),
-                timestamp: entry.timestamp(),
-                json: &json,
-            };
-            // Until the log answers, the outcome is unknown. If this future is dropped while
-            // waiting, the reason stays and nothing more is written.
-            self.stopped = Some(WritesStopped::Interrupted);
-            match tokio::time::timeout(self.append_timeout, log.append(&record)).await {
-                Ok(Ok(())) => self.stopped = None,
-                Ok(Err(error)) => {
-                    self.stopped = Some(WritesStopped::Failed(format!("{error:#}")));
-                    return Err(error.context("cannot write session entry"));
-                }
-                Err(_) => {
-                    let timeout = self.append_timeout;
-                    self.stopped = Some(WritesStopped::TimedOut(timeout));
-                    bail!("cannot write session entry: the log did not answer within {timeout:?}");
-                }
+    /// Move the conversation to another point of its session tree while idle (pi:
+    /// `navigateTree`): the next run continues after `entry`, or before the first entry
+    /// for `None`, on a new branch there. The entries of the branch left behind stay in the
+    /// session, and a run after an answer whose tool calls have their results on that
+    /// branch records those calls as interrupted, as after a crash: one that started there
+    /// is reported as started with an unknown result, since going back undoes nothing it
+    /// did, and the others as not executed. Nothing is written
+    /// until the next append, so a session opened again from its storage continues where
+    /// its records end. A run returns Busy; an ID that is not in the session returns
+    /// EntryNotFound, and the position does not change.
+    pub fn branch(&self, entry: Option<&str>) -> Result<(), SessionError> {
+        self.idle(|runner| match entry {
+            // The store's only error is an unknown ID, which the variant names.
+            Some(id) => runner.session_mut().branch(id).map_err(|_| SessionError::EntryNotFound),
+            None => {
+                runner.session_mut().reset_leaf();
+                Ok(())
             }
-        }
-        let id = entry.id().to_string();
-        self.insert(entry);
-        Ok(id)
+        })?
     }
 
-    fn insert(&mut self, entry: Entry) {
-        let id = entry.id().to_string();
-        self.index.insert(id.clone(), self.entries.len());
-        self.entries.push(entry);
-        self.leaf = Some(id);
+    /// Read the session while idle, for example to list its entries or find the current
+    /// position. `f` runs with the conversation leased, as a run does: other calls get
+    /// Busy until it returns, and no lock is held while host code runs. A run returns Busy.
+    pub fn with_transcript<T>(&self, f: impl FnOnce(&Transcript) -> T) -> Result<T, SessionError> {
+        let mut lease = self.lease(CancellationToken::new())?;
+        Ok(f(lease.runner().session()))
     }
 
-    /// Short id like pi's: 8 hex characters, collision-checked.
-    fn new_id(&self) -> String {
-        loop {
-            let id = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
-            if !self.index.contains_key(&id) {
-                return id;
+    /// Run `f` on the Runner under the state lock while idle; a run returns Busy, a closed
+    /// session Closed. For quick changes of the kernel's own state only: `f` must not call
+    /// host code, and what it returns is dropped after the lock is released, so it can hand
+    /// back a host object, such as a replaced provider, to drop there. When refused, `f` is
+    /// dropped unlocked too.
+    fn idle<T>(&self, f: impl FnOnce(&mut Runner) -> T) -> Result<T, SessionError> {
+        let mut state = lock(&self.shared.state);
+        let State::Idle(runner) = &mut *state else {
+            let refusal = state.refusal();
+            drop(state);
+            drop(f);
+            return Err(refusal);
+        };
+        Ok(f(runner))
+    }
+
+    /// Take the Runner for one operation that `cancel` cancels; Busy while another holds it,
+    /// Closed once the session is closed.
+    fn lease(&self, cancel: CancellationToken) -> Result<Lease, SessionError> {
+        let mut state = lock(&self.shared.state);
+        match std::mem::replace(&mut *state, State::Leased(cancel.clone())) {
+            State::Idle(runner) => Ok(Lease {
+                shared: Arc::clone(&self.shared),
+                runner: Some(runner),
+                cancel,
+            }),
+            other @ (State::Leased(_) | State::Closing | State::Closed) => {
+                let refusal = other.refusal();
+                *state = other;
+                Err(refusal)
             }
         }
     }
 }
 
-/// Only the current format is read and written: a session of another version is refused.
-fn ensure_current_version(header: &SessionHeader) -> Result<()> {
-    ensure!(
-        header.version == SESSION_VERSION,
-        "session format version {} is not supported; only version {SESSION_VERSION} can be read or written",
-        header.version
-    );
-    Ok(())
-}
-
-/// Why a context edit may not change `message`, if it may not. A system message is never
-/// edited: prompt changes are new system messages. A text replacement (`replaces_text`) does
-/// not erase tool calls, whose results would otherwise lose their call.
+/// The lease of the Runner for one operation. It owns a share of the conversation, so a run
+/// can outlive the handle that started it.
 ///
-/// The store applies this to every edit it records or loads, and the hook chain to a whole
-/// plan of edits before any of them is recorded, so both refuse the same edits.
-pub(crate) fn context_edit_refusal(message: &Message, replaces_text: bool) -> Option<&'static str> {
-    match message {
-        Message::System(_) => Some("is a system message; record prompt changes as new system messages"),
-        Message::Assistant(answer) if replaces_text && !answer.tool_calls().is_empty() => {
-            Some("has tool calls, which a text replacement would erase")
-        }
-        Message::Assistant(_) | Message::User { .. } | Message::ToolResult(_) => None,
+/// Run ownership is restored by Drop even when the operation's caller disappears.
+/// Option permits moving the Runner back exactly once; it is Some until Drop.
+struct Lease {
+    shared: Arc<Shared>,
+    runner: Option<Box<Runner>>,
+    cancel: CancellationToken,
+}
+
+impl Lease {
+    fn runner(&mut self) -> &mut Runner {
+        self.runner
+            .as_deref_mut()
+            .expect("an active lease owns its Runner until Drop")
     }
 }
 
-/// A custom type names what an extension recorded; a blank one would name nothing.
-fn ensure_custom_type(custom_type: &str) -> Result<()> {
-    if custom_type.trim().is_empty() {
-        bail!("a custom record needs a customType");
+impl Drop for Lease {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        let runner = self
+            .runner
+            .take()
+            .expect("an active lease returns its Runner exactly once");
+        // A session that no longer agrees with its log cannot record another entry. Closing
+        // it lets the agent open it again from the storage, which holds what was recorded.
+        let unwritable = runner.session().lost_its_log();
+        let mut state = lock(&self.shared.state);
+        let released = match &*state {
+            State::Leased(_) | State::Idle(_) if !unwritable => {
+                *state = State::Idle(runner);
+                None
+            }
+            // Unwritable, or closed meanwhile: the Runner goes instead of coming back.
+            State::Leased(_) | State::Idle(_) | State::Closing | State::Closed => {
+                *state = State::Closed;
+                Some(runner)
+            }
+        };
+        drop(state);
+        // Without the state lock: closing a storage and dropping tools and hooks is host code.
+        drop(released);
     }
-    Ok(())
 }

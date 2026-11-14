@@ -8,9 +8,9 @@ use serde_json::{Value, json};
 
 use super::truncate::{MAX_BYTES, MAX_LINES, truncate_head};
 use super::{DEFAULT_MAX_FILE_BYTES, check_path, looks_binary, parse_args, resolve, unless_cancelled};
-use crate::agent::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
 use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
+use zx_core::tools::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
 
 /// Reads text files in pages of bounded size.
 pub struct ReadFileTool {
