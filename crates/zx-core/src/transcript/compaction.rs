@@ -135,10 +135,22 @@ pub struct SummaryRequest {
     pub max_tokens: u32,
 }
 
-/// The start of a compaction: what it reads and keeps, and the request it makes.
+/// Who makes the summary of a compaction, as its start records it: in JSON either a
+/// `request` object or a `summarizer` name.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SummarizedBy {
+    /// The kernel asks the model: what the request was sent with, enough to rebuild it from
+    /// the session.
+    Request(SummaryRequest),
+    /// The host's summarizer, by its name. How it made the summary is not in the session.
+    Summarizer(String),
+}
+
+/// The start of a compaction: what it reads and keeps, and who makes its summary.
 ///
-/// Written and flushed before the summary model is called. A compaction left unresolved
-/// after cancellation or process failure has no effect on model context.
+/// Written and flushed before the summary is asked for. A compaction left unresolved after
+/// cancellation or process failure has no effect on model context.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompactionStartedEntry {
@@ -148,7 +160,8 @@ pub struct CompactionStartedEntry {
     pub first_kept_entry_id: String,
     /// The records the summary reads, in branch order.
     pub source_entry_ids: Vec<String>,
-    pub request: SummaryRequest,
+    #[serde(flatten)]
+    pub by: SummarizedBy,
     pub input_bytes: usize,
 }
 
@@ -180,10 +193,10 @@ pub struct CompactionFailedEntry {
     pub response: Option<AssistantMessage>,
 }
 
-/// Inputs recorded before starting a summary request.
+/// What the start of a compaction records, before its summary is asked for.
 pub struct CompactionPlan {
     pub first_kept_entry_id: String,
     pub source_entry_ids: Vec<String>,
-    pub request: SummaryRequest,
+    pub by: SummarizedBy,
     pub input_bytes: usize,
 }

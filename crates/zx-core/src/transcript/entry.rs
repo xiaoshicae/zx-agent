@@ -65,6 +65,10 @@ pub struct MessageEntry {
     pub parent_id: Option<String>,
     pub timestamp: u64,
     pub message: Message,
+    /// Who sent the message, when it is a person's input and the host named the person
+    /// ([`Input::User`](crate::input::Input::User)); absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
 }
 
 /// Changes what one earlier message contributes to model context, on this branch only.

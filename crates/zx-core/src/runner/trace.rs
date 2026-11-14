@@ -1,9 +1,8 @@
 //! The trace of one run: what its hooks are told, the sequence that stamps its events, and
 //! where those events go: to the run's reader, then to the hooks that observe them.
 
-use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
@@ -13,58 +12,86 @@ use crate::ai::now_ms;
 use crate::events::{EVENT_SCHEMA_VERSION, Emit, Event, EventKind};
 use crate::guard::CancelSignal;
 use crate::hooks::{HookChain, HookContext, HookError};
-use crate::input::InputQueues;
 use crate::policy::PolicyContext;
-use crate::tools::ActiveTools;
+use crate::sync::lock;
 
 /// One run's context: what its hooks and policies are told and what stamps its events, with
 /// the next sequence number.
 pub(crate) struct RunTrace {
-    context: HookContext,
-    policy_context: PolicyContext,
+    session_id: String,
+    run_id: String,
+    cancel: CancellationToken,
+    /// Replaced, not changed, when the run takes the input of another person: a call that is
+    /// under way keeps what it was told.
+    told: Mutex<Told>,
     seq: AtomicU64,
 }
 
-impl RunTrace {
-    /// The run `run_id` of session `session_id`, cancelled by `cancel`, whose hooks reach the
-    /// loop's queues and tool set.
-    pub(crate) fn new(
-        (session_id, run_id): (String, String),
-        cwd: PathBuf,
-        cancel: CancellationToken,
-        queues: Arc<InputQueues>,
-        active_tools: Arc<ActiveTools>,
-    ) -> Self {
-        let context = HookContext {
-            run_id,
-            ..HookContext::new(session_id, cwd, cancel).with_shared(queues, active_tools)
-        };
-        let policy_context = PolicyContext {
-            session_id: context.session_id.clone(),
-            run_id: context.run_id.clone(),
-            cwd: context.cwd.clone(),
-            cancel: CancelSignal::new(context.cancel.token().clone()),
+/// What the hooks and the policies of a run are told: the same run, as each kind sees it.
+struct Told {
+    hooks: Arc<HookContext>,
+    policies: Arc<PolicyContext>,
+}
+
+impl Told {
+    /// What `hooks` tells the hooks, and the same for the policies.
+    fn of(hooks: HookContext) -> Self {
+        let policies = PolicyContext {
+            session_id: hooks.session_id.clone(),
+            run_id: hooks.run_id.clone(),
+            cwd: hooks.cwd.clone(),
+            labels: hooks.labels.clone(),
+            actor: hooks.actor.clone(),
+            cancel: CancelSignal::new(hooks.cancel.token().clone()),
         };
         Self {
-            context,
-            policy_context,
+            hooks: Arc::new(hooks),
+            policies: Arc::new(policies),
+        }
+    }
+}
+
+impl RunTrace {
+    /// The run that `context` describes to its hooks: its session and its ID, the directory
+    /// and the labels, whose input it answers at its start, and the loop's queues and tool
+    /// set.
+    pub(crate) fn new(context: HookContext) -> Self {
+        Self {
+            session_id: context.session_id.clone(),
+            run_id: context.run_id.clone(),
+            cancel: context.cancel.token().clone(),
+            told: Mutex::new(Told::of(context)),
             seq: AtomicU64::new(0),
         }
     }
 
-    /// What every hook of this run is told.
-    pub(crate) fn context(&self) -> &HookContext {
-        &self.context
+    /// What every hook of this run is told, as of now.
+    pub(crate) fn context(&self) -> Arc<HookContext> {
+        Arc::clone(&lock(&self.told).hooks)
     }
 
     /// What every policy of this run is told: the same run as the hooks'.
-    pub(crate) fn policy_context(&self) -> &PolicyContext {
-        &self.policy_context
+    pub(crate) fn policy_context(&self) -> Arc<PolicyContext> {
+        Arc::clone(&lock(&self.told).policies)
+    }
+
+    /// The run takes an input that `actor` sent: its hooks and policies are told so from here
+    /// on.
+    pub(crate) fn answer(&self, actor: Option<&str>) {
+        let mut told = lock(&self.told);
+        if told.hooks.actor.as_deref() == actor {
+            return;
+        }
+        let hooks = HookContext {
+            actor: actor.map(String::from),
+            ..HookContext::clone(&told.hooks)
+        };
+        *told = Told::of(hooks);
     }
 
     /// The run's cancellation.
     pub(crate) fn cancel(&self) -> &CancellationToken {
-        self.context.cancel.token()
+        &self.cancel
     }
 
     /// The event with the next sequence number. An event is stamped once it has its place
@@ -75,8 +102,8 @@ impl RunTrace {
             schema_version: EVENT_SCHEMA_VERSION,
             seq: self.seq.fetch_add(1, Ordering::Relaxed) + 1,
             at_ms: now_ms(),
-            session_id: self.context.session_id.clone(),
-            run_id: self.context.run_id.clone(),
+            session_id: self.session_id.clone(),
+            run_id: self.run_id.clone(),
             event,
         }
     }
@@ -101,7 +128,7 @@ impl EventTarget<'_> {
         let Some(event) = self.queue(event).await else {
             return;
         };
-        for error in self.hooks.on_event(&event, self.trace.context()).await {
+        for error in self.hooks.on_event(&event, &self.trace.context()).await {
             self.report_failure(error).await;
         }
     }
@@ -134,7 +161,7 @@ impl EventTarget<'_> {
         if let Some(report) = self.queue(report).await {
             // A hook that fails to observe the report is not reported in turn: it would
             // fail on that report as well, without end.
-            drop(self.hooks.on_event(&report, self.trace.context()).await);
+            drop(self.hooks.on_event(&report, &self.trace.context()).await);
         }
         text
     }
@@ -150,18 +177,43 @@ impl Emit for EventTarget<'_> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use serde_json::json;
 
     use super::*;
 
     fn trace() -> RunTrace {
-        RunTrace::new(
-            ("session".into(), uuid::Uuid::new_v4().to_string()),
+        RunTrace::new(HookContext::new(
+            "session".into(),
             PathBuf::from("."),
             CancellationToken::new(),
-            Arc::default(),
-            Arc::default(),
-        )
+        ))
+    }
+
+    #[test]
+    fn hooks_and_policies_are_told_whose_input_the_run_answers_from_then_on() {
+        let trace = trace();
+        let before = trace.context();
+        assert_eq!(
+            (before.actor.as_deref(), trace.policy_context().actor.as_deref()),
+            (None, None)
+        );
+
+        trace.answer(Some("alice"));
+
+        assert_eq!(before.actor, None, "a call under way keeps what it was told");
+        let (hooks, policies) = (trace.context(), trace.policy_context());
+        assert_eq!(
+            (hooks.actor.as_deref(), policies.actor.as_deref()),
+            (Some("alice"), Some("alice"))
+        );
+        assert_eq!(
+            (hooks.run_id.as_str(), policies.run_id.as_str()),
+            (before.run_id.as_str(), before.run_id.as_str())
+        );
+        trace.answer(None);
+        assert_eq!(trace.context().actor, None);
     }
 
     #[test]

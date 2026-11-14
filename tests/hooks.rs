@@ -875,10 +875,7 @@ async fn stopping_from_a_hook_preserves_queued_user_input() {
     let (mut runner, _) = RunnerSetup::new(config).build();
     let result = runner.run("go", &CancellationToken::new()).await;
     assert_eq!(result.outcome, RunOutcome::Completed);
-    assert_eq!(
-        runner.queues().drain_steering(),
-        [Input::User("pending user input".into())]
-    );
+    assert_eq!(runner.queues().drain_steering(), [Input::from("pending user input")]);
 }
 
 struct FinishFailure;

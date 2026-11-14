@@ -10,12 +10,13 @@ use crate::input::{Input, Queue, QueueMode};
 use crate::transcript::{CustomMessage, Entry};
 
 impl StepLoop<'_> {
-    /// Record `message` in the session. Returns its entry ID.
-    async fn append_message(&mut self, message: &Message) -> Result<String, Halt> {
+    /// Record `message` in the session, with `actor` when a person the host names sent it.
+    /// Returns its entry ID.
+    async fn append_message(&mut self, message: &Message, actor: Option<String>) -> Result<String, Halt> {
         // The event that reports the message owns it, so the session stores a copy.
         self.host
             .session()
-            .append_message(message.clone())
+            .append_message_from(message.clone(), actor)
             .await
             .context(PERSIST_FAILED)
             .map_err(Halt::Unrecorded)
@@ -23,7 +24,7 @@ impl StepLoop<'_> {
 
     /// Record a finished message, then report it. Returns its entry ID.
     pub(super) async fn record_finished_message(&mut self, message: &Message) -> Result<String, Halt> {
-        let id = self.append_message(message).await?;
+        let id = self.append_message(message, None).await?;
         self.emit(EventKind::MessageEnd {
             message: message.clone(),
             entry_id: id.clone(),
@@ -35,15 +36,21 @@ impl StepLoop<'_> {
 
     /// Append a message that arrives whole: report its start, record it, then report its end.
     pub(super) async fn append(&mut self, message: Message) -> Result<(), Halt> {
-        self.append_from(message, None).await
+        self.append_from(message, None, None).await
     }
 
-    /// Append `message`, which is the message at the front of a queue if `queued` names one.
-    /// It leaves the queue as soon as it is recorded, before observers see it: a run dropped
-    /// while they run cannot take the same input again.
-    async fn append_from(&mut self, message: Message, queued: Option<(Queue, &Input)>) -> Result<(), Halt> {
+    /// Append `message`, which `actor` sent when it is a person's input, and which is the
+    /// message at the front of a queue if `queued` names one. It leaves the queue as soon as
+    /// it is recorded, before observers see it: a run dropped while they run cannot take the
+    /// same input again.
+    async fn append_from(
+        &mut self,
+        message: Message,
+        actor: Option<String>,
+        queued: Option<(Queue, &Input)>,
+    ) -> Result<(), Halt> {
         self.emit(EventKind::MessageStart { role: message.role() }).await;
-        let id = self.append_message(&message).await?;
+        let id = self.append_message(&message, actor).await?;
         if let Some((queue, original)) = queued {
             self.config.queues.remove_front(queue, original);
         }
@@ -114,11 +121,19 @@ impl StepLoop<'_> {
         Ok(())
     }
 
-    /// Pass user input through the input hooks, then record it. The original text is kept
-    /// for auditing: a rewrite or a rejection is recorded as an edit after it. A cancelled
-    /// hook decided nothing, so nothing is recorded. Input from `queue` leaves the queue
-    /// only once recorded, so a cancelled or dropped run leaves it for the next run.
-    pub(super) async fn input(&mut self, message: Message, queue: Option<Queue>) -> Result<(), Halt> {
+    /// Pass user input through the input hooks, then record it, with `actor` when a person
+    /// the host names sent it. The original text is kept for auditing: a rewrite or a
+    /// rejection is recorded as an edit after it. A cancelled hook decided nothing, so
+    /// nothing is recorded. Input from `queue` leaves the queue only once recorded, so a
+    /// cancelled or dropped run leaves it for the next run.
+    ///
+    /// From a prompt on, the hooks and the policies are told that the run answers `actor`.
+    pub(super) async fn input(
+        &mut self,
+        message: Message,
+        actor: Option<String>,
+        queue: Option<Queue>,
+    ) -> Result<(), Halt> {
         let Message::User {
             content,
             kind: UserMessageKind::Prompt,
@@ -127,15 +142,20 @@ impl StepLoop<'_> {
         else {
             return self.append(message).await;
         };
+        self.trace.answer(actor.as_deref());
         let text = content.clone();
-        let transformed = match self.config.hooks.on_input(text.clone(), self.trace.context()).await {
+        let transformed = match self.config.hooks.on_input(text.clone(), &self.trace.context()).await {
             Err(error) if error.failure == HookFailure::Cancelled => {
                 return Err(self.hook_failed(error).await);
             }
             transformed => transformed,
         };
-        let queued = Input::User(text.clone());
-        self.append_from(message, queue.map(|queue| (queue, &queued))).await?;
+        let queued = Input::User {
+            text: text.clone(),
+            actor: actor.clone(),
+        };
+        self.append_from(message, actor, queue.map(|queue| (queue, &queued)))
+            .await?;
         // The input is the last message of the projection now.
         let index = self.host.session().messages().len() - 1;
         match transformed {
@@ -158,7 +178,7 @@ impl StepLoop<'_> {
     /// Record a queued message of either kind; see [`StepLoop::input`] and the custom case.
     pub(super) async fn queued_input(&mut self, message: Input, queue: Option<Queue>) -> Result<(), Halt> {
         match message {
-            Input::User(text) => self.input(Message::user(text), queue).await,
+            Input::User { text, actor } => self.input(Message::user(text), actor, queue).await,
             Input::Custom(message) => self.custom_message(message, queue).await,
         }
     }

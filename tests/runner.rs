@@ -664,7 +664,7 @@ async fn queued_input_waits_when_no_request_budget_is_left() {
 
     assert_eq!(report.outcome, RunOutcome::ModelRequestLimit);
     assert_eq!(summarize(&runner.session().messages()), ["user:go"]);
-    assert_eq!(runner.queues().drain_steering(), [Input::User("later".into())]);
+    assert_eq!(runner.queues().drain_steering(), [Input::from("later")]);
 }
 
 #[tokio::test]

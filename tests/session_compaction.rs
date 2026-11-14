@@ -4,9 +4,10 @@ mod common;
 
 use serde_json::json;
 
-use zx_agent::ai::{Message, SystemMessage, SystemPrompt, Usage, now_ms};
+use zx_agent::ai::{Message, Request, SystemMessage, SystemPrompt, Usage, now_ms};
 use zx_agent::transcript::{
-    CompactionPlan, CompactionSummary, Entry, SESSION_VERSION, SummaryFact, SummaryRequest, Transcript,
+    CompactionPlan, CompactionSummary, Entry, RequestSource, SESSION_VERSION, SummarizedBy, SummaryFact,
+    SummaryRequest, Transcript,
 };
 
 use common::{answer_reporting, header, summarize};
@@ -32,12 +33,12 @@ fn plan(store: &Transcript, first_kept: &str) -> CompactionPlan {
     CompactionPlan {
         first_kept_entry_id: first_kept.into(),
         source_entry_ids,
-        request: SummaryRequest {
+        by: SummarizedBy::Request(SummaryRequest {
             provider: "faux".into(),
             model: "m".into(),
             instructions: "Summarize".into(),
             max_tokens: 100,
-        },
+        }),
         input_bytes: 1000,
     }
 }
@@ -370,6 +371,91 @@ async fn serialized_summary_records_use_camel_case_fields_and_snake_case_tags() 
     assert_eq!(json["firstKeptEntryId"], kept);
     assert_eq!(json["summary"]["facts"][0]["sourceEntryIds"][0], old);
     assert_eq!(entry.summary.facts[0].text, "The old observation");
+}
+
+#[tokio::test]
+async fn a_start_records_either_the_request_or_the_name_of_the_summarizer() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    let mut store = common::create_session_file(&path, header()).await.unwrap();
+    let (old, kept) = seeded(&mut store).await;
+    let asked = store.begin_compaction(plan(&store, &kept)).await.unwrap();
+    store
+        .fail_compaction(&asked, "invalid".into(), Usage::default(), None)
+        .await
+        .unwrap();
+    let by_summarizer = CompactionPlan {
+        by: SummarizedBy::Summarizer("notes".into()),
+        ..plan(&store, &kept)
+    };
+    let made = store.begin_compaction(by_summarizer).await.unwrap();
+    store
+        .append_compaction(&made, summary(&old), Usage::default())
+        .await
+        .unwrap();
+    drop(store);
+
+    let lines = common::read_lines(&path);
+    let starts: Vec<_> = lines
+        .iter()
+        .filter(|line| line["type"] == "compaction_started")
+        .collect();
+    assert_eq!(starts[0]["request"]["maxTokens"], 100);
+    assert!(starts[0].get("summarizer").is_none());
+    assert_eq!(starts[1]["summarizer"], "notes");
+    assert!(starts[1].get("request").is_none());
+    // Both load again, each as it was written.
+    let reopened = common::open_session_file(&path).await.unwrap();
+    let recorded: Vec<&SummarizedBy> = reopened
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::CompactionStarted(started) => Some(&started.by),
+            _ => None,
+        })
+        .collect();
+    assert!(matches!(recorded[0], SummarizedBy::Request(request) if request.max_tokens == 100));
+    assert_eq!(recorded[1], &SummarizedBy::Summarizer("notes".into()));
+    assert_eq!(reopened.messages().len(), 2, "the summary and the latest input");
+}
+
+#[tokio::test]
+async fn a_summarizer_needs_a_name_and_has_no_request_in_the_session() {
+    let mut store = Transcript::in_memory(header());
+    let (_, kept) = seeded(&mut store).await;
+    let nameless = CompactionPlan {
+        by: SummarizedBy::Summarizer(" ".into()),
+        ..plan(&store, &kept)
+    };
+    let error = store.begin_compaction(nameless).await.unwrap_err();
+    assert!(format!("{error:#}").contains("the summarizer has no name"), "{error:#}");
+
+    let named = CompactionPlan {
+        by: SummarizedBy::Summarizer("notes".into()),
+        ..plan(&store, &kept)
+    };
+    let started = store.begin_compaction(named).await.unwrap();
+    let request = Request {
+        model: "m".into(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+        max_tokens: Some(100),
+        reasoning: None,
+        cache_key: None,
+    };
+    let source = RequestSource::Summary {
+        compaction_id: started,
+        system_timestamp: now_ms(),
+        user_timestamp: now_ms(),
+    };
+    let error = store
+        .record_request(&request, "faux", json!({}), source)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("is summarized by \"notes\", not by a request"),
+        "{error:#}"
+    );
 }
 
 #[tokio::test]

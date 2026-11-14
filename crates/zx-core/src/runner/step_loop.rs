@@ -248,13 +248,14 @@ impl<'a> StepLoop<'a> {
             match std::mem::take(&mut pending) {
                 PendingInput::None => {}
                 PendingInput::FollowUps => self.drain_queue(Queue::FollowUp).await?,
-                PendingInput::Requested(message) => self.input(*message, None).await?,
+                // A hook asked for it: nobody sent it.
+                PendingInput::Requested(message) => self.input(*message, None, None).await?,
             }
             self.ensure_can_request()?;
             let planned = self
                 .config
                 .hooks
-                .transform_context(&self.host.session().messages(), self.trace.context())
+                .transform_context(&self.host.session().messages(), &self.trace.context())
                 .await;
             let edits = match planned {
                 Ok(edits) => edits,

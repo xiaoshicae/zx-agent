@@ -11,9 +11,18 @@ use crate::transcript::CustomMessage;
 /// A message a frontend or an extension queues for a run (pi: `AgentMessage`).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Input {
-    /// Text the person typed. It passes through the `on_input` hooks and is recorded as a
-    /// user message.
-    User(String),
+    /// Text a person sent. It passes through the `on_input` hooks and is recorded as a user
+    /// message. A string converts into one without an actor.
+    User {
+        text: String,
+        /// Who sent it, as the host names the people it serves, such as a user ID of a chat
+        /// where several people talk to one session; `None` when the host does not say. The
+        /// kernel records it with the message and tells the hooks and the policies
+        /// ([`HookContext::actor`](crate::hooks::HookContext::actor),
+        /// [`PolicyContext::actor`](crate::policy::PolicyContext::actor)); it decides
+        /// nothing by it, and the model does not see it.
+        actor: Option<String>,
+    },
     /// A message from an extension (pi: `sendMessage`). It is recorded as a `custom_message`
     /// entry, without input hooks, and the model sees it as a user message.
     Custom(CustomMessage),
@@ -21,13 +30,13 @@ pub enum Input {
 
 impl From<String> for Input {
     fn from(text: String) -> Self {
-        Self::User(text)
+        Self::User { text, actor: None }
     }
 }
 
 impl From<&str> for Input {
     fn from(text: &str) -> Self {
-        Self::User(text.to_string())
+        Self::from(text.to_string())
     }
 }
 
@@ -68,12 +77,12 @@ pub struct InputQueues {
 impl InputQueues {
     /// Queue a user message for the next step of the current task.
     pub fn steer(&self, text: impl Into<String>) {
-        self.steer_message(Input::User(text.into()));
+        self.steer_message(Input::from(text.into()));
     }
 
     /// Queue a user message for after the current task finishes.
     pub fn follow_up(&self, text: impl Into<String>) {
-        self.follow_up_message(Input::User(text.into()));
+        self.follow_up_message(Input::from(text.into()));
     }
 
     /// Queue any message for the next step of the current task.
@@ -188,8 +197,8 @@ mod tests {
         messages
             .into_iter()
             .map(|message| match message {
-                Input::User(content) => content,
-                other => panic!("expected user messages, got {other:?}"),
+                Input::User { text, .. } => text,
+                other @ Input::Custom(_) => panic!("expected user messages, got {other:?}"),
             })
             .collect()
     }
@@ -275,7 +284,7 @@ mod tests {
         queues.steer_message(Input::Custom(custom.clone()));
         queues.append_entry("state", serde_json::json!({"n": 1}));
 
-        assert_eq!(queues.take_all(), [Input::User("a".into()), Input::Custom(custom)]);
+        assert_eq!(queues.take_all(), [Input::from("a"), Input::Custom(custom)]);
         assert_eq!(
             queues.take_entries(),
             [PendingEntry {

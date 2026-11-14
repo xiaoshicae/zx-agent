@@ -70,11 +70,7 @@ async fn take_queued_returns_input_no_run_consumed_steering_first() {
     session.queues().steer("also now");
     assert_eq!(
         session.take_queued().unwrap(),
-        [
-            Input::User("now".into()),
-            Input::User("also now".into()),
-            Input::User("later".into())
-        ]
+        [Input::from("now"), Input::from("also now"), Input::from("later")]
     );
     assert!(session.take_queued().unwrap().is_empty());
     session.prompt("second", &CancellationToken::new()).await.unwrap();
@@ -94,7 +90,7 @@ async fn take_queued_during_a_run_is_busy_and_leaves_the_input_queued() {
     assert_eq!(session.take_queued(), Err(SessionError::Busy));
     assert!(session.cancel());
     assert_eq!(running.await.unwrap().outcome, RunOutcome::Cancelled);
-    assert_eq!(session.take_queued().unwrap(), [Input::User("queued".into())]);
+    assert_eq!(session.take_queued().unwrap(), [Input::from("queued")]);
 }
 
 #[tokio::test]

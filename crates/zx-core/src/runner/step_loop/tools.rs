@@ -74,7 +74,7 @@ impl StepLoop<'_> {
     /// Run the policy on `call`, then ask for the host's approval when it says so. An error
     /// is the text of the result of a call that may not run.
     async fn authorize(&mut self, call: &ToolCall) -> Result<(), String> {
-        let verdict = self.config.policies.check(call, self.trace.policy_context()).await;
+        let verdict = self.config.policies.check(call, &self.trace.policy_context()).await;
         match verdict {
             PolicyDecision::Allow => self.decision(call, ToolVerdict::Allow, None).await,
             PolicyDecision::Deny(reason) => {
@@ -331,7 +331,7 @@ impl StepLoop<'_> {
         match self
             .config
             .hooks
-            .filter_tool_progress(call, ToolOutput::ok(text), self.trace.context())
+            .filter_tool_progress(call, ToolOutput::ok(text), &self.trace.context())
             .await
         {
             Ok(output) => {
@@ -362,7 +362,7 @@ impl StepLoop<'_> {
         let mut output = match self
             .config
             .hooks
-            .after_tool(call, outcome.output, self.trace.context())
+            .after_tool(call, outcome.output, &self.trace.context())
             .await
         {
             Ok(output) => output,

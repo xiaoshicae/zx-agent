@@ -33,7 +33,8 @@
 - **会话是审计日志，也是模型上下文的唯一来源**：修正上下文靠追加 `context_edit`，提示词变化靠追加 system 消息，原始记录始终保留；可替换的只是最底层的存储：`SessionStorage` 与它交出的 `SessionLog`，接口里没有文件路径。摘要每次读取原始投影，原始事实被修正后整份失效。
 - **终端输入只有一个所有者**：chat 的专用线程经有界通道提供输入；审批请求随事件到达读 `Run` 的那个循环，回答经 `Session::resolve_approval`，必须带内核为这次请求生成的审批编号。
 - **审批由内核等待，不是接口**：策略给出询问时，调用在 `ApprovalGate` 等待；`ApprovalMode::Deny`（默认）没有人回答，立即拒绝，`ApprovalMode::Wait` 等宿主回答，超时与取消按拒绝处理。审批编号由内核生成，迟到的回答落不到别的请求上；审批不写入会话。
-- **扩展点都是 trait**：`Provider`、`Tool`、`ToolPolicy`、`Hook`、`Executor`、`SessionStorage` 与 `SessionLog`、`SessionSetup`、`ImChannel`、`StatusStore`、`Extension`。新能力优先实现 trait，不改循环。
+- **扩展点都是 trait**：`Provider`、`Tool`、`ToolPolicy`、`Hook`、`Executor`、`SessionStorage` 与 `SessionLog`、`SessionSetup`、`Summarizer`、`ImChannel`、`StatusStore`、`Extension`。新能力优先实现 trait，不改循环。
+- **调用者身份只传递，不判断**：会话的标签（头部的 `labels`）与输入的 actor（`Input::User` 的 `actor`，记在该条用户消息的记录里）经 `PolicyContext` 与 `HookContext` 交给策略与钩子；上下文里的 actor 是会话最近一条提问的发送者，运行中换人说话时随之更新，扩展的消息不改变它。内核不据此做任何判断。
 - **通用，不为场景定制**：某个环境、平台或厂商才有的知识写在 agent、部署清单或配置里，或由外部适配器实现；代码不解析某个系统的私有格式；provider 的协议方言处理显式开启（如 `provider.fillMissingReasoning`），不按厂商推断。
 - **界面交给 ACP 客户端**（D13）：`acp` 只做协议与会话的映射；`chat` 不再加功能。
 - **安全靠部署隔离**：策略只是第一道防线（见 README 的"安全模型"），真正的隔离靠不同账号或容器。
@@ -111,5 +112,6 @@
 - **打包的扩展**：实现 `extensions::Extension`，放进 `AgentConfig::extensions`：`Agent` 装配每个会话时注册它，工具由各会话共用，`hooks` 每个会话调用一次（创建 `Agent` 时为校验多调用一次）；钩子只能是 `Extension` 阶段；段落名不能是 `preamble`、`prompt::GENERATED_SECTIONS` 中的名字或已有段落；命令名只用 ASCII 字母、数字、`_`、`-` 且不重名。运行中发消息、记状态或改工具集经 `HookContext` 的 `queues` 与 `active_tools`，不直接碰会话。
 - **上下文改动**：`on_input` 完成后才写入原始输入，改写或拒绝再追加 `context_edit`；`transform_context` 返回的 `ContextEdit` 计划整份先校验，逐项写入成功后再请求模型。
 - **新的会话存储**：实现 `transcript::SessionStorage`（`create`、`open`、`read`、`list`）与它交出的 `SessionLog`。`append` 在记录保存后才返回，同一 `seq` 已有记录时报错；一个会话同一时间只有一个写入者；`create` 拒绝已存在的会话 ID。`list` 按 `SessionQuery` 筛选与排序，可复用 `SessionQuery::matches`、`arrange` 与 `SessionInfo::of`。接口里不出现文件路径。存储交给 `AgentConfig::storage`：`Agent` 用 `create` 建新会话，用 `open` 续接；宿主只读一个会话时把 `read` 的结果交给 `Transcript::snapshot`。参照 `crates/zx-core/src/transcript/memory.rs` 的 `MemoryStorage`；只换记录的写入方式时参照 `tests/runner.rs` 的 `TableLog`。
+- **自己做摘要**：实现 `compaction::Summarizer`（`name`、`summarize(source)`），放进 `AgentConfig::summarizer`。它只产出摘要与用量；何时摘要、读哪一段、开始与结果记录、引用校验、超时与取消仍在 `compaction/compactor.rs`。开始记录写它的名字而不是请求。参照 `tests/summarizer.rs`。
 - **属于单个会话的部分**：实现 `agent::SessionSetup`（`setup(header)`），返回 `SessionParts`（工具、钩子、提示词段落）；会话的目录是 `header.cwd`。失败时新会话不会留在存储里。参照 `src/cli/setup.rs`；不需要按会话区分的宿主不用实现它。
 - **新 IM 平台**：在独立 crate 中实现 `zx_im::ImChannel`（参照 `crates/zx-im-slack`）：立即确认投递、按消息 ID 去重（`zx_im::Seen`）、只转交发给机器人的消息、遵守限频、拆分超长文本（`zx_im::split_text`）、文案用 `CardLabels`。与 `Server` 的配合参照 `tests/im_server.rs` 的 `FakeChannel`。

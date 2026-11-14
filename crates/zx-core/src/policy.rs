@@ -20,6 +20,7 @@
 mod approval;
 mod chain;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
@@ -57,18 +58,28 @@ pub struct PolicyContext {
     pub run_id: String,
     /// The tools' working directory.
     pub cwd: PathBuf,
+    /// The session's labels: what its host said about it when it was created, such as its
+    /// tenant or the chat it belongs to.
+    pub labels: BTreeMap<String, String>,
+    /// Who sent the input the run is answering: the actor of the latest prompt of the
+    /// session ([`Input::User`](crate::input::Input::User)), `None` when the host named
+    /// nobody. Other people may have spoken earlier in the run: a policy that must hold for
+    /// each of them keeps track of them itself, with a hook's `on_input`.
+    pub actor: Option<String>,
     /// Set when the run is cancelled; the chain then stops waiting for the policy.
     pub cancel: CancelSignal,
 }
 
 impl PolicyContext {
     /// A context for a new run of session `session_id` with a fresh ID, cancelled with
-    /// `cancel`.
+    /// `cancel`, without labels or an actor.
     pub fn new(session_id: String, cwd: PathBuf, cancel: CancellationToken) -> Self {
         Self {
             session_id,
             run_id: uuid::Uuid::new_v4().to_string(),
             cwd,
+            labels: BTreeMap::new(),
+            actor: None,
             cancel: CancelSignal::new(cancel),
         }
     }

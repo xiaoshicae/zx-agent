@@ -292,7 +292,7 @@ fn finished(session: &Session, report: &Report, io: &TurnIo<'_>, state: TurnStat
     let mut next: Vec<String> = state.queued_prompt.into_iter().collect();
     for message in late {
         match message {
-            Input::User(text) => next.push(text),
+            Input::User { text, .. } => next.push(text),
             custom @ Input::Custom(_) => session.queues().steer_message(custom),
         }
     }
@@ -467,7 +467,7 @@ fn unread_input(session: &Session, output: &Output) -> Vec<Input> {
 /// A queued message in one line, for notices.
 fn describe_queued(message: &Input) -> String {
     match message {
-        Input::User(text) => text.clone(),
+        Input::User { text, .. } => text.clone(),
         Input::Custom(custom) => format!("[{}] {}", custom.custom_type, custom.content),
     }
 }

@@ -168,6 +168,26 @@ fn the_hook_context_leaves_out_its_cancellation_token() {
 }
 
 #[test]
+fn the_hook_context_names_the_labels_and_the_actor_when_it_has_them() {
+    let mut ctx = HookContext::new("s1".into(), PathBuf::from("/srv"), CancellationToken::new());
+    ctx.labels.insert("tenant".into(), "acme".into());
+    ctx.actor = Some("alice".into());
+
+    let value = serde_json::to_value(&ctx).unwrap();
+
+    assert_eq!(
+        value,
+        json!({
+            "sessionId": "s1",
+            "runId": ctx.run_id,
+            "cwd": "/srv",
+            "labels": {"tenant": "acme"},
+            "actor": "alice",
+        })
+    );
+}
+
+#[test]
 fn a_step_summary_serializes_for_hook_processes() {
     let mut response = AssistantMessage::failure("p", "m", StopReason::Stop, "");
     response.error_message = None;

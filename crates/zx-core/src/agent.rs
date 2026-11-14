@@ -14,7 +14,7 @@ use tokio::sync::OnceCell;
 
 use crate::ai::retry::RetryPolicy;
 use crate::ai::{ModelMeta, Provider, Reasoning, SystemPrompt};
-use crate::compaction;
+use crate::compaction::{self, Summarizer};
 use crate::extensions::{self, Extension};
 use crate::hooks::HookChain;
 use crate::policy::{ApprovalMode, PolicyChain};
@@ -64,6 +64,9 @@ pub struct AgentConfig {
     pub retry: RetryPolicy,
     /// When and how the old part of a conversation is summarized.
     pub compaction: compaction::Config,
+    /// Makes the summaries. None by default: the kernel asks the model, and the request can
+    /// be rebuilt from the session.
+    pub summarizer: Option<Arc<dyn Summarizer>>,
     /// Where sessions are kept; in memory by default, which forgets them with the process.
     pub storage: Arc<dyn SessionStorage>,
     /// Makes what belongs to one session. None by default: every session then has what the
@@ -91,6 +94,7 @@ impl AgentConfig {
             limits: RunLimits::default(),
             retry: RetryPolicy::default(),
             compaction: compaction::Config::default(),
+            summarizer: None,
             storage: Arc::new(MemoryStorage::default()),
             session_setup: None,
         }
@@ -194,9 +198,13 @@ impl Drop for ForgetUnopened<'_> {
 impl Agent {
     /// An agent that plays the role `config` describes. Fails for what no session could run
     /// with: tools that share a name, declare another name or an invalid parameter schema,
-    /// extensions that [`Extension`] refuses, and compaction budgets that cannot work.
+    /// extensions that [`Extension`] refuses, compaction budgets that cannot work, and a
+    /// summarizer without a name.
     pub fn new(config: AgentConfig) -> Result<Self> {
         config.compaction.validate()?;
+        if let Some(summarizer) = &config.summarizer {
+            anyhow::ensure!(!summarizer.name().trim().is_empty(), "the summarizer has no name");
+        }
         let agent = Self {
             shared: Arc::new(Shared {
                 config,
@@ -323,6 +331,7 @@ impl Agent {
             approvals: config.approvals,
             models: config.models.clone(),
             cache_key: config.session_cache_key.then(|| header.id.clone()),
+            summarizer: config.summarizer.clone(),
             ..LoopConfig::new(config.provider.clone(), config.model.clone())
         };
         extensions::register(&mut assembled, &config.extensions).map_err(anyhow::Error::msg)?;

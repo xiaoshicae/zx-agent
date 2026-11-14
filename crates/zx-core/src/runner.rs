@@ -116,8 +116,7 @@ impl Runner {
     pub(crate) async fn compact(&mut self, link: &RunLink) -> compaction::Report {
         let child = link.cancel.child_token();
         let _cancel_on_drop = child.drop_guard_ref();
-        let session_id = self.session.header().id.clone();
-        let trace = self.config.trace(session_id, link.id.clone(), child.clone());
+        let trace = self.config.trace(&self.session, link.id.clone(), child.clone());
         let target = EventTarget {
             events: &link.events,
             trace: &trace,
@@ -186,7 +185,7 @@ impl Runner {
             compaction,
             pause,
         } = self;
-        let trace = config.trace(session.header().id.clone(), link.id.clone(), run_cancel.clone());
+        let trace = config.trace(session, link.id.clone(), run_cancel.clone());
         let target = EventTarget {
             events: &link.events,
             trace: &trace,

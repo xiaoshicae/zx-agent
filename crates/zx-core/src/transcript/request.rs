@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::ai::{Message, Reasoning, Request, ToolDef, now_ms};
 
-use super::{Entry, Transcript, summary_input, summary_messages};
+use super::{CompactionStartedEntry, Entry, SummarizedBy, Transcript, summary_input, summary_messages};
 
 /// Non-secret request fields. Authentication and transport credentials are not recorded.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -149,7 +149,8 @@ impl Transcript {
     }
 
     /// The rules a request checkpoint follows: its configuration is on its branch, and so is
-    /// the compaction whose summary it requests, if it requests one.
+    /// the compaction whose summary it requests, if it requests one, which the kernel's own
+    /// request makes.
     pub(super) fn validate_request_start(&self, started: &RequestStartedEntry) -> Result<()> {
         let parent = started.parent_id.as_deref();
         ensure!(
@@ -160,9 +161,22 @@ impl Transcript {
         // Check only what can fail: a projection can always be built, and building one for
         // every request record would clone the branch's messages once per record.
         if let RequestSource::Summary { compaction_id, .. } = &started.source {
-            Self::compaction_start_on(&self.branch_path_from(parent), compaction_id)?;
+            let (_, compaction) = Self::compaction_start_on(&self.branch_path_from(parent), compaction_id)?;
+            Self::summary_instructions(compaction)?;
         }
         Ok(())
+    }
+
+    /// The instructions of the request that makes the summary of `compaction`. An error when
+    /// a summarizer of the host makes it: the session then holds no request for it.
+    fn summary_instructions(compaction: &CompactionStartedEntry) -> Result<&str> {
+        match &compaction.by {
+            SummarizedBy::Request(request) => Ok(&request.instructions),
+            SummarizedBy::Summarizer(name) => bail!(
+                "compaction {} is summarized by {name:?}, not by a request",
+                compaction.id
+            ),
+        }
     }
 
     fn request_messages(&self, source: &RequestSource, parent: Option<&str>) -> Result<Vec<Message>> {
@@ -180,7 +194,7 @@ impl Transcript {
                 let (_, started) = Self::compaction_start_on(&self.branch_path_from(parent), compaction_id)?;
                 let source = self.compaction_source(started.parent_id.as_deref(), &started.first_kept_entry_id)?;
                 Ok(summary_messages(
-                    &started.request.instructions,
+                    Self::summary_instructions(started)?,
                     summary_input(&source)?,
                     *system_timestamp,
                     *user_timestamp,

@@ -4,13 +4,15 @@
 
 use anyhow::{Result, anyhow, bail, ensure};
 
-use super::{CompactionEntry, CompactionFailedEntry, CompactionPlan, CompactionStartedEntry, CompactionSummary};
+use super::{
+    CompactionEntry, CompactionFailedEntry, CompactionPlan, CompactionStartedEntry, CompactionSummary, SummarizedBy,
+};
 use crate::ai::{AssistantMessage, Message, Usage, now_ms};
 use crate::transcript::{Entry, Transcript};
 
 impl Transcript {
-    /// Persist the start and its request metadata before contacting a model. Fails
-    /// without writing anything if the plan does not match the branch.
+    /// Persist the start, with who makes the summary, before the summary is asked for.
+    /// Fails without writing anything if the plan does not match the branch.
     pub async fn begin_compaction(&mut self, plan: CompactionPlan) -> Result<String> {
         self.append(Entry::CompactionStarted(CompactionStartedEntry {
             id: self.new_id(),
@@ -18,7 +20,7 @@ impl Transcript {
             timestamp: now_ms(),
             first_kept_entry_id: plan.first_kept_entry_id,
             source_entry_ids: plan.source_entry_ids,
-            request: plan.request,
+            by: plan.by,
             input_bytes: plan.input_bytes,
         }))
         .await
@@ -104,19 +106,28 @@ impl Transcript {
         Ok(found)
     }
 
-    /// The rules the start of a compaction follows when it is recorded: its plan matches the
-    /// branch.
+    /// The rules the start of a compaction follows when it is recorded: it says who makes
+    /// the summary, and its plan matches the branch.
     pub(in crate::transcript) fn validate_compaction_start(&self, entry: &CompactionStartedEntry) -> Result<()> {
-        ensure!(
-            entry.request.max_tokens > 0,
-            "compaction {}: maxTokens must be greater than zero",
-            entry.id
-        );
-        ensure!(
-            !entry.request.model.trim().is_empty(),
-            "compaction {}: the model is empty",
-            entry.id
-        );
+        match &entry.by {
+            SummarizedBy::Request(request) => {
+                ensure!(
+                    request.max_tokens > 0,
+                    "compaction {}: maxTokens must be greater than zero",
+                    entry.id
+                );
+                ensure!(
+                    !request.model.trim().is_empty(),
+                    "compaction {}: the model is empty",
+                    entry.id
+                );
+            }
+            SummarizedBy::Summarizer(name) => ensure!(
+                !name.trim().is_empty(),
+                "compaction {}: the summarizer has no name",
+                entry.id
+            ),
+        }
         let source = self.compaction_source(entry.parent_id.as_deref(), &entry.first_kept_entry_id)?;
         ensure!(
             source.iter().any(|item| !matches!(item.message, Message::System(_))),

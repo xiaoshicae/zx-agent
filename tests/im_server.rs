@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 use common::{EchoTool, config, fast_retry, summarize, test_limits};
 use zx_agent::Agent;
 use zx_agent::agent::{SessionParts, SessionSetup};
+use zx_agent::ai::Message;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::builtin::policy::{Rule, RuleMatcher, RulePolicy};
 use zx_agent::events::ApprovalResult;
@@ -28,7 +29,7 @@ use zx_agent::im::{
 };
 use zx_agent::policy::{ApprovalMode, PolicyDecision};
 use zx_agent::tools::Tool;
-use zx_agent::transcript::{MemoryStorage, SessionHeader, SessionQuery, SessionStorage};
+use zx_agent::transcript::{Entry, MemoryStorage, SessionHeader, SessionQuery, SessionStorage, Transcript};
 
 const PLATFORM: &str = "fake";
 const CHAT: &str = "C1";
@@ -1254,6 +1255,39 @@ async fn a_direct_chat_is_one_conversation_answered_in_the_chat() {
     // One person: no names before their words.
     assert_eq!(h.requests()[1], ["user:first", "assistant:one", "user:second"]);
     assert_eq!(h.sessions.opened.load(Ordering::SeqCst), 1);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_session_records_the_sender_of_each_message_it_answers_as_its_actor() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("one"), FauxStep::text("two")],
+        ..Setup::default()
+    });
+    let working = text(&h.replies.working.clone());
+    h.say("m1", None, "first").await;
+    let status = h.posted(&thread("m1"), working.clone()).await;
+    h.updated(&status, text("one")).await;
+    h.say_as(OTHER, "m2", "m1", Addressee::Bot, "second").await;
+    let status = h.posted(&thread("m1"), working).await;
+    h.updated(&status, text("two")).await;
+
+    let key = SessionKey {
+        platform: PLATFORM.into(),
+        conversation: ConversationId(CHAT.into()),
+        thread: Some(ThreadId("m1".into())),
+    };
+    let id = h.sessions.of(&key).await.unwrap().remove(0);
+    let stored = Transcript::snapshot(h.sessions.storage.read(&id).await.unwrap()).unwrap();
+    let actors: Vec<Option<&str>> = stored
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::Message(entry) if matches!(entry.message, Message::User { .. }) => Some(entry.actor.as_deref()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(actors, [Some(ASKER), Some(OTHER)]);
     h.stop().await.unwrap();
 }
 

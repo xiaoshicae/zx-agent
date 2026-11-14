@@ -20,7 +20,7 @@ impl StepLoop<'_> {
         };
         let prepared = config
             .hooks
-            .prepare_request(&messages, step, configured, self.trace.context())
+            .prepare_request(&messages, step, configured, &self.trace.context())
             .await;
         let settings = match prepared {
             Ok(settings) => settings,

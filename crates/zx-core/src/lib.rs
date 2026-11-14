@@ -17,8 +17,8 @@
 //!   it runs
 //! - [`policy`] (guard): the interface that decides whether a tool call may run, and the
 //!   approval of a call a policy asks about
-//! - [`compaction`] (transcript, events): running one bounded, auditable summary of the
-//!   conversation
+//! - [`compaction`] (transcript, events, guard): running one bounded, auditable summary of
+//!   the conversation, which the kernel asks the model for or the host's summarizer makes
 //! - [`hooks`] (transcript, events, guard, tools, input): the extension points around the
 //!   loop, and the chain that runs them
 //! - [`extensions`] (tools, prompt, input, policy, hooks): tools, policies, hooks, prompt

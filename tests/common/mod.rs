@@ -375,7 +375,7 @@ impl Tool for EchoTool {
             queues.follow_up(text);
         }
         if let (Some(queues), Some(text)) = (self.queues.get(), args.get("withdraw").and_then(Value::as_str)) {
-            assert!(queues.withdraw(&Input::User(text.into())), "{text:?} is not queued");
+            assert!(queues.withdraw(&Input::from(text)), "{text:?} is not queued");
         }
         if args.get("panic").is_some() {
             panic!("tool bug");

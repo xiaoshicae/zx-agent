@@ -5,6 +5,7 @@
 
 mod chain;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,6 +45,16 @@ pub struct HookContext {
     pub run_id: String,
     /// The tools' working directory.
     pub cwd: PathBuf,
+    /// The session's labels: what its host said about it when it was created, such as its
+    /// tenant or the chat it belongs to. Left out of the JSON when there are none.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    /// Who sent the input the run is answering: the actor of the latest prompt of the
+    /// session ([`Input::User`](crate::input::Input::User)), `None` when the host named
+    /// nobody. In `on_input` it is the sender of that input. Left out of the JSON when there
+    /// is none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
     /// Set when the run is cancelled; the chain then stops waiting for the hook.
     #[serde(skip)]
     pub cancel: CancelSignal,
@@ -59,12 +70,14 @@ pub struct HookContext {
 
 impl HookContext {
     /// A context for a new run of session `session_id` with a fresh ID, cancelled with
-    /// `cancel`, with queues and a tool set of its own.
+    /// `cancel`, with queues and a tool set of its own, no labels and no actor.
     pub fn new(session_id: String, cwd: PathBuf, cancel: CancellationToken) -> Self {
         Self {
             session_id,
             run_id: uuid::Uuid::new_v4().to_string(),
             cwd,
+            labels: BTreeMap::new(),
+            actor: None,
             cancel: CancelSignal::new(cancel),
             queues: Arc::default(),
             active_tools: Arc::default(),

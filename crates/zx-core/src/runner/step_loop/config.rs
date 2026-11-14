@@ -7,12 +7,14 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::ai::{ModelMeta, Provider, Reasoning, SystemPrompt};
+use crate::compaction::Summarizer;
 use crate::extensions::SlashCommand;
-use crate::hooks::HookChain;
+use crate::hooks::{HookChain, HookContext};
 use crate::input::InputQueues;
 use crate::policy::{ApprovalMode, PolicyChain};
 use crate::runner::RunTrace;
 use crate::tools::{ActiveTools, Toolbox};
+use crate::transcript::Transcript;
 
 /// What the loops of one session run with: the model and tools, and the host's extensions
 /// around them, as the agent assembled them for the session. Queues and the active tool set
@@ -45,6 +47,8 @@ pub(crate) struct LoopConfig {
     /// Sent with every task request as its cache key ([`crate::ai::Request::cache_key`]);
     /// `None` sends none.
     pub(crate) cache_key: Option<String>,
+    /// Makes the summaries of compactions; without one the kernel asks the model.
+    pub(crate) summarizer: Option<Arc<dyn Summarizer>>,
 }
 
 impl LoopConfig {
@@ -67,18 +71,21 @@ impl LoopConfig {
             commands: Vec::new(),
             models: HashMap::new(),
             cache_key: None,
+            summarizer: None,
         }
     }
 
-    /// The trace of the run `run_id` of session `session_id`, cancelled by `cancel`, whose
-    /// hooks reach this configuration's queues and tool set.
-    pub(crate) fn trace(&self, session_id: String, run_id: String, cancel: CancellationToken) -> RunTrace {
-        RunTrace::new(
-            (session_id, run_id),
-            self.cwd.clone(),
-            cancel,
-            self.queues.clone(),
-            self.active_tools.clone(),
-        )
+    /// The trace of the run `run_id` of `session`, cancelled by `cancel`: its hooks and
+    /// policies are told the session's labels and who sent its latest input, and its hooks
+    /// reach this configuration's queues and tool set.
+    pub(crate) fn trace(&self, session: &Transcript, run_id: String, cancel: CancellationToken) -> RunTrace {
+        let header = session.header();
+        let fresh = HookContext::new(header.id.clone(), self.cwd.clone(), cancel);
+        RunTrace::new(HookContext {
+            run_id,
+            labels: header.labels.clone(),
+            actor: session.latest_actor().map(String::from),
+            ..fresh.with_shared(self.queues.clone(), self.active_tools.clone())
+        })
     }
 }

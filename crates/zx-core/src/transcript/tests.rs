@@ -149,12 +149,12 @@ async fn records_carry_the_serialized_type_of_every_entry_kind() {
     let plan = || CompactionPlan {
         first_kept_entry_id: kept.clone(),
         source_entry_ids: ids[..2].to_vec(),
-        request: SummaryRequest {
+        by: SummarizedBy::Request(SummaryRequest {
             provider: "p".into(),
             model: "m".into(),
             instructions: "summarize".into(),
             max_tokens: 10,
-        },
+        }),
         input_bytes: 1,
     };
     let started = store.begin_compaction(plan()).await.unwrap();
@@ -408,6 +408,62 @@ async fn a_session_of_another_version_is_not_created() {
 
     assert_eq!(error, unsupported(SESSION_VERSION - 1));
     assert!(!path.exists());
+}
+
+#[tokio::test]
+async fn an_actor_is_recorded_with_a_prompt_and_with_no_other_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    let mut store = create_file(&path, header()).await.unwrap();
+    store
+        .append_message_from(Message::user("first"), Some("alice".into()))
+        .await
+        .unwrap();
+    store.append_message(Message::user("second")).await.unwrap();
+    let recorded = store.entries().len();
+
+    let error = store
+        .append_message_from(assistant("answer"), Some("alice".into()))
+        .await
+        .unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("only a person's input names an actor"),
+        "{error:#}"
+    );
+    assert_eq!(store.entries().len(), recorded, "nothing is written");
+    drop(store);
+    let text = std::fs::read_to_string(&path).unwrap();
+    let lines: Vec<serde_json::Value> = text
+        .lines()
+        .skip(1)
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines[0]["actor"], "alice");
+    assert!(lines[1].get("actor").is_none(), "{}", lines[1]);
+    let reopened = read_file(&path).await.unwrap();
+    assert_eq!(reopened.latest_actor(), None, "the last prompt names nobody");
+}
+
+#[tokio::test]
+async fn the_latest_actor_is_that_of_the_last_prompt_of_the_branch() {
+    let mut store = Transcript::in_memory(header());
+    assert_eq!(store.latest_actor(), None);
+    let first = store
+        .append_message_from(Message::user("one"), Some("alice".into()))
+        .await
+        .unwrap();
+    store.append_message(assistant("answer")).await.unwrap();
+    assert_eq!(store.latest_actor(), Some("alice"), "an answer is not an input");
+
+    store
+        .append_message_from(Message::user("two"), Some("bob".into()))
+        .await
+        .unwrap();
+    assert_eq!(store.latest_actor(), Some("bob"));
+
+    store.branch(&first).unwrap();
+    assert_eq!(store.latest_actor(), Some("alice"), "Bob spoke on another branch");
 }
 
 #[tokio::test]

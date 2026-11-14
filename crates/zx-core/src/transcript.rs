@@ -39,8 +39,8 @@ mod test_support;
 #[cfg(test)]
 mod tests;
 pub use compaction::{
-    CompactionEntry, CompactionFailedEntry, CompactionPlan, CompactionStartedEntry, CompactionSummary, SummaryFact,
-    SummaryRequest,
+    CompactionEntry, CompactionFailedEntry, CompactionPlan, CompactionStartedEntry, CompactionSummary, SummarizedBy,
+    SummaryFact, SummaryRequest,
 };
 pub(crate) use compaction::{MAX_SUMMARY_BYTES, summary_input, summary_messages};
 pub use entry::{ContextEditEntry, CustomEntry, CustomMessage, CustomMessageEntry, Entry, MessageEntry, SessionHeader};
@@ -62,12 +62,12 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail, ensure};
 
-use crate::ai::{Message, now_ms};
+use crate::ai::{Message, UserMessageKind, now_ms};
 
 /// The session format: written to every new header, and the only version a session may have
 /// to be created, loaded or read. A change to the format raises it, and sessions of any
 /// other version are refused.
-pub const SESSION_VERSION: u32 = 10;
+pub const SESSION_VERSION: u32 = 11;
 
 /// How long one append may wait for its log, such as a database that stopped answering.
 /// A file append finishes long before; a timed-out append stops writing, like a failed one.
@@ -90,6 +90,18 @@ pub enum WritesStopped {
     /// The store is a snapshot ([`Transcript::snapshot`]), which never writes.
     #[error("it was read as a snapshot, which is read-only")]
     ReadOnly,
+}
+
+/// Whether `message` is a prompt: what a person sent, or what a hook asked for in a
+/// person's place.
+fn is_prompt(message: &Message) -> bool {
+    matches!(
+        message,
+        Message::User {
+            kind: UserMessageKind::Prompt,
+            ..
+        }
+    )
 }
 
 /// A session tree, kept in memory and optionally stored by a [`SessionLog`].
@@ -221,13 +233,31 @@ impl Transcript {
 
     /// Append a message as a child of the leaf and make it the leaf. Returns its id.
     pub async fn append_message(&mut self, message: Message) -> Result<String> {
+        self.append_message_from(message, None).await
+    }
+
+    /// Append `message` as [`Self::append_message`] does, with `actor`, the person who sent
+    /// it as the host names its people. Only a person's input has one: an actor with any
+    /// other message is an error, and nothing is written.
+    pub async fn append_message_from(&mut self, message: Message, actor: Option<String>) -> Result<String> {
         let entry = Entry::Message(MessageEntry {
             id: self.new_id(),
             parent_id: self.leaf.clone(),
             timestamp: now_ms(),
             message,
+            actor,
         });
         self.append(entry).await
+    }
+
+    /// Who sent the latest input of the current branch: the actor recorded with its last
+    /// prompt, the message a person sent or a hook asked for. `None` when that message names
+    /// nobody, and when the branch has no prompt.
+    pub fn latest_actor(&self) -> Option<&str> {
+        self.ancestors(self.leaf.as_deref()).find_map(|entry| match entry {
+            Entry::Message(entry) if is_prompt(&entry.message) => Some(entry.actor.as_deref()),
+            _ => None,
+        })?
     }
 
     /// Omit (`None`) or replace the text of a message on the current branch, for future
@@ -282,8 +312,13 @@ impl Transcript {
             ensure!(self.index.contains_key(parent), "entry parent {parent:?} not found");
         }
         match entry {
+            Entry::Message(message) => ensure!(
+                message.actor.is_none() || is_prompt(&message.message),
+                "entry {}: only a person's input names an actor",
+                message.id
+            ),
             // A name is valid by its type, whether appended or loaded.
-            Entry::Message(_) | Entry::SessionInfo(_) => {}
+            Entry::SessionInfo(_) => {}
             Entry::Custom(custom) => ensure_custom_type(&custom.custom_type)?,
             Entry::CustomMessage(custom) => ensure_custom_type(&custom.message.custom_type)?,
             Entry::ContextEdit(edit) => self.validate_context_edit(edit)?,

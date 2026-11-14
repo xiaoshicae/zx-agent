@@ -42,24 +42,54 @@ impl Drop for Opened {
 }
 
 impl Opened {
-    /// The person's texts queued after the run's last look at the queue, which start the
-    /// next run. A message an extension queued goes back to the queue, which that run takes
-    /// before its first request.
-    pub(crate) fn leftover_texts(&self) -> Result<Vec<String>, String> {
+    /// What people asked after the run's last look at the queue, which starts the next run.
+    /// A message an extension queued goes back to the queue, which that run takes before its
+    /// first request.
+    pub(crate) fn leftover(&self) -> Result<Vec<Asked>, String> {
         // The loop looks for input at the end of each step, so a message steered after the
         // last look waits in the queue.
         let queued = self
             .session
             .take_queued()
             .map_err(|error| format!("cannot take the queued input: {error}"))?;
-        let mut texts = Vec::new();
+        let mut asked = Vec::new();
         for message in queued {
             match message {
-                Input::User(text) => texts.push(text),
+                Input::User { text, actor } => asked.push(Asked { text, actor }),
                 custom @ Input::Custom(_) => self.session.queues().steer_message(custom),
             }
         }
-        Ok(texts)
+        Ok(asked)
+    }
+}
+
+/// What a person asked the bot: the text as the model reads it, and who sent it.
+pub(crate) struct Asked {
+    pub(crate) text: String,
+    /// The sender's ID on the platform, which the session records with the message and
+    /// tells its hooks and policies. `None` for text that names no sender, such as text an
+    /// extension queued as a person's.
+    pub(crate) actor: Option<String>,
+}
+
+impl Asked {
+    /// The message as the session takes it.
+    pub(crate) fn into_input(self) -> Input {
+        Input::User {
+            text: self.text,
+            actor: self.actor,
+        }
+    }
+
+    /// Several messages as one prompt: their texts in order, and the sender of the last
+    /// one, whom the answer is for.
+    pub(crate) fn joined(asked: Vec<Self>) -> Input {
+        let actor = asked.last().and_then(|last| last.actor.clone());
+        let texts: Vec<String> = asked.into_iter().map(|asked| asked.text).collect();
+        Input::User {
+            text: texts.join("\n\n"),
+            actor,
+        }
     }
 }
 
@@ -122,13 +152,13 @@ impl Outlet {
         timed(self.shared.outbound_timeout, "post the approval request", post).await
     }
 
-    /// Run `text` as one prompt of `session` to its end, as the task of a run does. How its
-    /// approvals end goes to the worker through `updates`; `stop`, the server stopping,
-    /// cancels the run, which is still read to its end.
+    /// Run `prompt` in `session` to its end, as the task of a run does. How its approvals
+    /// end goes to the worker through `updates`; `stop`, the server stopping, cancels the
+    /// run, which is still read to its end.
     pub(crate) fn run(
         &self,
         session: &Session,
-        text: String,
+        prompt: Input,
         updates: &mpsc::Sender<ApprovalUpdate>,
         stop: CancellationToken,
     ) -> impl Future<Output = Result<RunReport, SessionError>> + Send + 'static {
@@ -139,7 +169,7 @@ impl Outlet {
             sink: Arc::clone(&self.shared.sink),
         };
         async move {
-            let mut run = session.send(text)?;
+            let mut run = session.send(prompt)?;
             let mut stopped = false;
             loop {
                 tokio::select! {

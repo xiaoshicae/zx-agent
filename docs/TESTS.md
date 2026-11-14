@@ -28,6 +28,8 @@
 | `tests/config_cli.rs` | `config.toml` 的位置与优先级 |
 | `tests/session_compaction.rs` | 会话层的摘要记录、引用与校验；回答上报的用量在摘要或修改之后是否还度量上下文 |
 | `tests/compaction.rs` | 宿主的手动与自动摘要、计费、失败与上限 |
+| `tests/summarizer.rs` | 宿主自己的 `Summarizer`：产出摘要而不请求模型、开始记录写它的名字、失败、引用校验、超时、取消与 panic |
+| `tests/actors.rs` | 会话标签与输入的 actor：策略与钩子看到什么、换人说话、不带输入的续跑、记入会话 |
 | `tests/request_audit.rs` | 从会话文件还原请求（G3），含固定会话的逐字节比对 |
 | `tests/executor.rs` | 工具只经执行器运行命令与读写文件 |
 | `tests/search_tools.rs` | grep、find、ls |

@@ -92,6 +92,7 @@ impl RunHost<'_> {
             provider: self.config.provider.as_ref(),
             model: &self.config.model,
             models: &self.config.models,
+            summarizer: self.config.summarizer.as_deref(),
             compaction: self.compaction,
             events: &self.target,
             cancel: self.target.trace.cancel(),

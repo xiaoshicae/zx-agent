@@ -24,7 +24,7 @@ use crate::transcript::CustomMessage;
 use zx_core::policy::ApprovalDecision;
 
 use super::approval::ApprovalUpdate;
-use super::outlet::{Opened, Outlet, said};
+use super::outlet::{Asked, Opened, Outlet, said};
 use super::server::{Opening, Shared};
 use super::{
     Addressee, ApprovalId, ApprovalRecord, Choice, ImChannel, MessageRef, Outbound, ServerEvent, SessionKey, UserId,
@@ -156,7 +156,7 @@ enum Phase {
     /// Input waits for a run slot. The future keeps its place in the queue.
     Waiting {
         slot: Slot,
-        texts: Vec<String>,
+        asked: Vec<Asked>,
         open: Opened,
     },
     /// A prompt runs in its own task and holds a run slot; `status` is the message that
@@ -311,19 +311,24 @@ impl Worker {
             NEW_COMMAND => return self.renew().await,
             _ => {}
         }
-        let text = self.out.attributed(&incoming.sender, &incoming.text).await;
+        // The model reads who said it in the text; the session is told the sender as well,
+        // for its record and for the hooks and policies.
+        let asked = Asked {
+            text: self.out.attributed(&incoming.sender, &incoming.text).await,
+            actor: Some(incoming.sender.0.clone()),
+        };
         let steered = match &mut self.phase {
             Phase::Running { open, .. } => {
-                open.session.queues().steer(text);
+                open.session.queues().steer_message(asked.into_input());
                 true
             }
-            Phase::Waiting { texts, .. } => {
-                texts.push(text);
+            Phase::Waiting { asked: waiting, .. } => {
+                waiting.push(asked);
                 false
             }
             Phase::Idle { open, .. } => {
                 let open = open.take();
-                self.begin(open, text, &incoming.message).await;
+                self.begin(open, asked, &incoming.message).await;
                 false
             }
         };
@@ -393,9 +398,9 @@ impl Worker {
         self.out.post(self.out.replies().new_session.clone()).await;
     }
 
-    /// Open the session unless `open` holds it, then run `text` or wait for a slot. `trigger`
-    /// is the message that asked.
-    async fn begin(&mut self, open: Option<Opened>, text: String, trigger: &MessageRef) {
+    /// Open the session unless `open` holds it, then run what was `asked` or wait for a slot.
+    /// `trigger` is the message that asked.
+    async fn begin(&mut self, open: Option<Opened>, asked: Asked, trigger: &MessageRef) {
         let open = match open {
             Some(open) => open,
             None => match self.open(Some(trigger)).await {
@@ -410,11 +415,11 @@ impl Worker {
             },
         };
         match Arc::clone(&self.out.shared.permits).try_acquire_owned() {
-            Ok(slot) => self.start(open, vec![text], slot).await,
+            Ok(slot) => self.start(open, vec![asked], slot).await,
             Err(TryAcquireError::NoPermits) => {
                 self.phase = Phase::Waiting {
                     slot: Box::pin(Arc::clone(&self.out.shared.permits).acquire_owned()),
-                    texts: vec![text],
+                    asked: vec![asked],
                     open,
                 };
                 self.out.post(self.out.replies().queued.clone()).await;
@@ -427,16 +432,16 @@ impl Worker {
         }
     }
 
-    /// Post that the work started, and run the input as one prompt.
-    async fn start(&mut self, open: Opened, texts: Vec<String>, slot: OwnedSemaphorePermit) {
+    /// Post that the work started, and run what was asked as one prompt.
+    async fn start(&mut self, open: Opened, asked: Vec<Asked>, slot: OwnedSemaphorePermit) {
         let status = self.out.post(self.out.replies().working.clone()).await;
         if let Some(status) = &status {
             // Kept before the run starts: should the process end from here on, the next
             // start replaces this status.
             self.out.shared.keep_status(&self.out.key, status).await;
         }
-        let text = texts.join("\n\n");
-        let run = self.out.run(&open.session, text, &self.updates, self.stop.clone());
+        let prompt = Asked::joined(asked);
+        let run = self.out.run(&open.session, prompt, &self.updates, self.stop.clone());
         let task = tokio::spawn(run);
         self.phase = Phase::Running {
             task,
@@ -452,8 +457,8 @@ impl Worker {
     }
 
     async fn slot(&mut self, slot: Result<OwnedSemaphorePermit, AcquireError>) {
-        let (texts, open) = match self.take_phase() {
-            Phase::Waiting { texts, open, .. } => (texts, open),
+        let (asked, open) = match self.take_phase() {
+            Phase::Waiting { asked, open, .. } => (asked, open),
             // Only a waiting conversation gets a slot.
             other => {
                 self.phase = other;
@@ -461,7 +466,7 @@ impl Worker {
             }
         };
         match slot {
-            Ok(slot) => self.start(open, texts, slot).await,
+            Ok(slot) => self.start(open, asked, slot).await,
             // The server never closes its semaphore.
             Err(_) => {
                 self.phase = Phase::idle(Some(open));
@@ -489,8 +494,8 @@ impl Worker {
             self.out.post(self.out.replies().new_session.clone()).await;
             return;
         }
-        let leftover = match open.leftover_texts() {
-            Ok(texts) => texts,
+        let leftover = match open.leftover() {
+            Ok(asked) => asked,
             Err(error) => {
                 self.out.failed(error);
                 Vec::new()
@@ -508,13 +513,13 @@ impl Worker {
         }
     }
 
-    /// Leave Waiting for Idle, keeping the session: the texts that waited, or `None` when
-    /// the conversation was not waiting.
-    fn stop_waiting(&mut self) -> Option<Vec<String>> {
+    /// Leave Waiting for Idle, keeping the session: what was asked and waited, or `None`
+    /// when the conversation was not waiting.
+    fn stop_waiting(&mut self) -> Option<Vec<Asked>> {
         match self.take_phase() {
-            Phase::Waiting { texts, open, .. } => {
+            Phase::Waiting { asked, open, .. } => {
                 self.phase = Phase::idle(Some(open));
-                Some(texts)
+                Some(asked)
             }
             other => {
                 self.phase = other;
@@ -526,8 +531,8 @@ impl Worker {
     /// The server is stopping: input waiting for a slot will not run. A run stops through
     /// its token and ends as usual.
     fn stopping(&mut self) {
-        if let Some(texts) = self.stop_waiting() {
-            self.unanswered += texts.len();
+        if let Some(asked) = self.stop_waiting() {
+            self.unanswered += asked.len();
         }
     }
 

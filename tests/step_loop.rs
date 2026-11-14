@@ -409,10 +409,7 @@ async fn a_spent_budget_starts_no_new_step_and_leaves_queued_input_queued() {
         summarize(&runner.session().messages()),
         ["user:go", "assistant:calls[c1]", "tool:c1=ok"]
     );
-    assert_eq!(
-        runner.queues().drain_steering(),
-        [Input::User("also check disk".into())]
-    );
+    assert_eq!(runner.queues().drain_steering(), [Input::from("also check disk")]);
     let steps: Vec<_> = events
         .kinds()
         .into_iter()
