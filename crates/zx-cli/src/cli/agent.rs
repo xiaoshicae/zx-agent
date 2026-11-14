@@ -13,6 +13,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
+use crate::config::skills::{ReadSkillTool, TOOL_NAME};
+use crate::config::{AgentDefinition, Config, Execution};
+use crate::otel;
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::{ModelMeta, Provider};
 use zx_agent::builtin::continuation::ContinueOnLength;
@@ -25,9 +28,6 @@ use zx_agent::prompt::build_system_prompt;
 use zx_agent::tools::Tool;
 use zx_agent::transcript::Transcript;
 use zx_agent::{Agent, AgentConfig, Session, SessionOptions};
-use zx_cli::config::skills::{ReadSkillTool, TOOL_NAME};
-use zx_cli::config::{AgentDefinition, Config, Execution};
-use zx_cli::otel;
 
 use super::setup::PerSession;
 use super::{BudgetArgs, Shared, env_value, push_built_in, resolve_cwd};

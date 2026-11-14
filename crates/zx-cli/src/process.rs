@@ -8,9 +8,9 @@ use anyhow::Result;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
 
+use crate::otel::{Telemetry, TraceHook, TraceParent};
 use zx_agent::events::{Event, EventKind};
 use zx_agent::runner::RunOutcome;
-use zx_cli::otel::{Telemetry, TraceHook, TraceParent};
 
 /// Exit codes, so schedulers can react without parsing output.
 pub(crate) const EXIT_COMPLETED: u8 = 0;
@@ -128,7 +128,7 @@ where
     result
 }
 
-/// Export traces when an OTLP endpoint is configured (`zx_cli::otel`), and say so on
+/// Export traces when an OTLP endpoint is configured (`crate::otel`), and say so on
 /// stderr.
 fn start_telemetry() -> Result<Option<Telemetry>> {
     let telemetry = Telemetry::from_env()?;

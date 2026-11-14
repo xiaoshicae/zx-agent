@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 
+use crate::config;
 use zx_agent::transcript::{JsonlStorage, MemoryStorage, SessionInfo, SessionList, SessionQuery, SessionStorage};
-use zx_cli::config;
 
 use crate::render::{local_time, visible};
 

@@ -12,9 +12,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
+use crate::config::Builtin;
+use crate::otel::Telemetry;
 use zx_agent::ai::now_ms;
-use zx_cli::config::Builtin;
-use zx_cli::otel::Telemetry;
 use zx_im::{
     CardLabels, ConversationId, ErrorReport, ImChannel, ImError, Replies, Server, ServerConfig, ServerEvent,
     ServerSink, SessionKey, StatusFiles, UserId,

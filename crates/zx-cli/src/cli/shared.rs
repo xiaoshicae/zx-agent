@@ -8,11 +8,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
+use crate::config::Builtin;
+use crate::otel::TraceHook;
 use zx_agent::builtin::mcp::{Server, ServerConfig};
 use zx_agent::builtin::redact::{MIN_SECRET_CHARS, check_secret_files, short_secret_files};
 use zx_agent::extensions::Extension;
-use zx_cli::config::Builtin;
-use zx_cli::otel::TraceHook;
 
 use super::{BaseArgs, BudgetArgs, Settings, env_value};
 

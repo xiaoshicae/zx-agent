@@ -6,11 +6,11 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
+use crate::config::{ContainerSettings, Execution};
 use zx_agent::builtin::executor::{
     ContainerConfig, ContainerExecutor, Executor, LocalExecutor, container_environment_section,
     local_environment_section,
 };
-use zx_cli::config::{ContainerSettings, Execution};
 
 /// The container reads the whole working directory, so the session file must be outside it:
 /// masking one path would leave hard links to it and earlier session files beside it readable.

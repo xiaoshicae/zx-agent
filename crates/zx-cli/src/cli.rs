@@ -1,5 +1,5 @@
 //! The command line: the subcommands and their arguments. Everything that describes the
-//! environment rather than one invocation is in config.toml (`zx_cli::config::Config`).
+//! environment rather than one invocation is in config.toml (`crate::config::Config`).
 //!
 //! - `settings`: config.toml with the command line and its variables over it
 //! - `shared`: what every session of a process shares, read or connected once

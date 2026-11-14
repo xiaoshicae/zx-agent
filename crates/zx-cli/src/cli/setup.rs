@@ -9,6 +9,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 
+use crate::config::skills::TOOL_NAME;
+use crate::config::{ContainerSettings, Execution, ProjectContext};
 use zx_agent::agent::{SessionParts, SessionSetup};
 use zx_agent::builtin::output_store::{self, OutputStore, ReadOutputTool, SpillOutputs};
 use zx_agent::builtin::tools;
@@ -16,8 +18,6 @@ use zx_agent::hooks::HookChain;
 use zx_agent::prompt;
 use zx_agent::tools::Tool;
 use zx_agent::transcript::SessionHeader;
-use zx_cli::config::skills::TOOL_NAME;
-use zx_cli::config::{ContainerSettings, Execution, ProjectContext};
 
 use super::execution::{check_session_outside, executor};
 use super::push_built_in;

@@ -38,11 +38,6 @@ pub mod ai {
     pub use zx_ai::*;
     pub use zx_ai_openai as openai;
 }
-/// The lock helper of every crate; not part of the API.
-#[doc(hidden)]
-pub use zx_ai::sync;
-#[doc(hidden)]
-pub use zx_ai::text;
 pub use zx_core::*;
 /// The implementations that ship with zx-agent: the `zx-tools` crate.
 pub use zx_tools as builtin;

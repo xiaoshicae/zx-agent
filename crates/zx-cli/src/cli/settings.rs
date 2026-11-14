@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use zx_cli::config::{self, Config};
+use crate::config::{self, Config};
 
 use super::env_value;
 

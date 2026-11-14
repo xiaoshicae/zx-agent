@@ -14,13 +14,13 @@ use agent_client_protocol::v1::schema::{
 };
 use serde_json::Value;
 
+use zx_agent::ai::sync::lock;
 use zx_agent::ai::{
     AssistantMessage, ContentBlock as MessageBlock, Delta, Message, ToolCall as MessageCall, ToolResultMessage,
     UserMessageKind,
 };
 use zx_agent::builtin::tools::{EDIT_FILE, WRITE_FILE};
 use zx_agent::events::{ApprovalResult, Event, EventKind, ToolVerdict};
-use zx_agent::sync::lock;
 use zx_agent::transcript::{Entry, ProjectedMessage, Transcript};
 
 use super::tool_kind;

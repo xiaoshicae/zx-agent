@@ -37,13 +37,13 @@ use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::config::Builtin;
+use crate::otel::{Telemetry, TraceHook};
 use zx_agent::builtin::tools::{BASH, EDIT_FILE, FIND, GREP, LS, READ_FILE, WRITE_FILE};
 use zx_agent::events::EventKind;
 use zx_agent::runner::{RunOutcome, RunReport};
 use zx_agent::transcript::SessionInfo as StoredSession;
 use zx_agent::{Run, Session};
-use zx_cli::config::Builtin;
-use zx_cli::otel::{Telemetry, TraceHook};
 
 use crate::cli::{self, AcpArgs, Approvals, ModeAgent};
 use crate::process::{EXIT_COMPLETED, spawn_signal_handler, with_telemetry};

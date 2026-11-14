@@ -6,11 +6,11 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use tokio_util::sync::CancellationToken;
 
+use crate::config::Builtin;
 use zx_agent::ai::Message;
 use zx_agent::events::{Event, EventKind};
 use zx_agent::runner::{RunOutcome, RunReport};
 use zx_agent::{Run, Session};
-use zx_cli::config::Builtin;
 
 use crate::cli::{self, OutputMode, RunArgs};
 use crate::process::{

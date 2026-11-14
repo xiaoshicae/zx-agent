@@ -24,12 +24,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
+use crate::config::Builtin;
+use crate::otel::{Telemetry, TraceHook};
 use zx_agent::Session;
 use zx_agent::ai::{Provider, Reasoning};
 use zx_agent::input::Input;
 use zx_agent::session::ModelRef;
-use zx_cli::config::Builtin;
-use zx_cli::otel::{Telemetry, TraceHook};
 
 use crate::cli::{self, Approvals, ChatArgs, ModeAgent};
 use crate::process::{EXIT_CANCELLED, EXIT_COMPLETED, with_telemetry};
