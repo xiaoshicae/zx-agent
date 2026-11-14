@@ -18,7 +18,7 @@
 
 | 编号 | 现行规则 |
 |---|---|
-| D2 | 已授权的依赖：tokio 的 `io-std`、`toml`、`rmcp`、ACP 官方 Rust SDK（`agent-client-protocol`，只开 `stdio`）、`rustyline`（可选）、`opentelemetry` / `opentelemetry_sdk` / `opentelemetry-otlp`、`chrono`（只开 `clock`）、`jsonschema`、`thiserror`、`tokio-tungstenite`。reqwest 0.13，rustls 只用 aws-lc-rs 一个加密后端，根证书用系统信任库。ACP SDK 打开了 serde_json 的 `preserve_order`。其他新依赖与升级先征得同意 |
+| D2 | 已授权的依赖：`toml`、`rmcp`、ACP 官方 Rust SDK（`agent-client-protocol`，只开 `stdio`）、`opentelemetry` / `opentelemetry_sdk` / `opentelemetry-otlp`、`chrono`（只开 `clock`）、`jsonschema`（`zx-core` 默认开启的 feature `json-schema`）、`thiserror`、`tokio-tungstenite`。reqwest 0.13，rustls 只用 aws-lc-rs 一个加密后端，根证书用系统信任库。ACP SDK 打开了 serde_json 的 `preserve_order`。其他新依赖与升级先征得同意 |
 | D4 | 会话 API 是进程内方法调用，不做提交队列 / 事件队列（SQ/EQ） |
 | D5 | 命令默认在本机执行；容器执行在 `config.toml` 中显式开启。理由：Kubernetes Job 的 Pod 内通常没有 Docker |
 | D8 | 只做 MCP 客户端：只接工具，只用 Streamable HTTP；MCP 服务器与领域工具由外部实现 |
@@ -28,7 +28,7 @@
 | D13 | 界面交给 ACP 客户端：`acp` 只实现 agent 一侧；`chat` 冻结为应急与脚本化入口，不再加功能；`run` 保留并维护 |
 | D14 | 不做 rpc 模式：非 Rust 宿主经 ACP，无人值守经 `run`，常驻服务经 `im` 与 SDK |
 | D15 | 只读写当前会话格式（`SESSION_VERSION` 为 11），其他版本的会话一律拒绝创建与加载；格式变化时提高版本号，不写升级代码 |
-| D16 | IM 按人的对话直觉：私聊整段一个会话，群聊一个线程一个会话；机器人参与过的线程里不 @ 它的消息只记作上下文，刚被它回答的人接着说不必 @；不读频道历史，不加开关。细节见 README 的“IM 服务” |
+| D16 | IM 按人的对话直觉：私聊整段一个会话，群聊一个线程一个会话；机器人参与过的线程里不 @ 它的消息只记作上下文，刚被它回答的人接着说不必 @；不读频道历史，不加开关。细节见 `docs/REFERENCE.md` 的“IM 服务” |
 | D17 | `config.toml` 是环境，agent 文件是角色，都在主目录（`~/.zx-agent`，`ZX_AGENT_HOME` 可改）；agent 的 front matter 用 TOML。没有项目级配置文件，项目内容不能改变环境或权限；主目录的 `agents/<名字>.md` 替换同名内置 agent，没有 `--agent`；权限用 ask / allow / deny。键与规则见 [CONFIGURATION.md](CONFIGURATION.md) |
 | D18 | 没有命令白名单、幂等键与增量摘要；摘要只用全量模式，摘要源上限 2 MiB，超过后要 `/new` 开新会话 |
 | D19 | CLI 精简：chat 没有执行时间线、状态行、fork 与会话树命令（会话树与复制在 SDK）；otel 只导出 span；审批等待只有 `config.toml` 的 `approvalTimeoutSecs`（默认 600 秒，chat、acp 与 im 共用）；`--session` 只属于 `run` 与 `chat`；`[[mcp]]` 没有不看进度的总超时 |
@@ -37,6 +37,7 @@
 | D22 | 摘要功能统一叫 compaction：这次操作本身（触发、开始、结果、失败）及其记录、模块、类型、函数与 ID 都叫 compaction（`transcript::compaction`、`compaction::Compactor`，记录中指向 `compaction_started` 的字段叫 `compactionId`）；summary 只指 compaction 产出的文本、文本的限额，以及向模型要这段文本的请求（`request_start` 的 `kind: summary`、会话中的 `RequestSource::Summary`）；attempt 只用于运行的尝试（D21） |
 | D23 | 领域词只有 Session、Run、Step、ToolCall 四层：一次任务请求及其工具调用叫 step（事件 `step_start` / `step_end`、钩子 `finish_step`、追踪中的 `step` span），不再叫 turn；ACP 协议与 chat 界面里的 turn 指一次提问到回答，保持原样。attempt 仍只表示运行的尝试（D21），其事件叫 `attempt_start` / `attempt_end`。运行结果用过去分词：`completed`、`truncated`、`failed`、`cancelled`、`timed_out`；三个上限沿用配置里的名字 `model_request_limit`、`token_budget`、`cost_budget`，因为退出码、IM 回复与 ACP 的停止原因都要逐个区分它们，且结果在 JSON 中保持为一个字符串。会话的记录树叫 transcript（模块 `transcript`、类型 `Transcript`）。事件格式版本当时为 4，P16 第五期提高到 5 |
 | D24 | 库与接入方式分开：根包 `zx-agent` 是 SDK，只把 `zx-core`、`zx-ai`、`zx-ai-openai` 与 `zx-tools` 再导出成一个库，不依赖命令行解析、ACP、追踪导出与 IM。命令行是 `zx-cli`（可执行文件仍叫 `zx-agent`，带 `config.toml`、agent 文件与追踪导出），IM 服务是 `zx-im`；新的接入方式（如 Web 服务）是建在库上的独立 crate，不进库。集成测试按是否需要编译出的程序分两处：只用库的在根目录 `tests/`，驱动程序的在 `crates/zx-cli/tests/`，不按 crate 再分 |
+| D25 | 评审之后的修正（P17）。内核：会话的记录写不进去时（写入失败、超时，或 `Run` 在写入途中被丢弃）自行关闭，由 `Agent` 从存储重新打开；摘要的边界可以落在最近一轮之内，那一轮的提问原样留在摘要之前（`compaction_started` 的 `keptInputEntryId`；会话格式版本仍是 11，它还没有随任何版本发布）；扩展在建 `Agent` 时展开并校验一次，所有会话共用；按 JSON Schema 校验工具参数是 `zx-core` 默认开启的 feature，关掉后内核只依赖 40 个 crate；`MemoryStorage::forgetting()` 在会话关闭后不再保留它。工具：`read_output` 不经符号链接读写；文件写入一旦开始就写完，调用被丢弃也一样；自动放行的前缀区分大小写；落盘的结果在原处留下第一页，`read_file` 不落盘；`provider.maxTokensField` 选择输出上限的字段名。接入：IM 的 `/new` 立即建会话；IM 的运行上限写在部署清单与示例里（100 次模型请求、3600 秒），内置 agent 不变；`acp` 处理 SIGINT 与 SIGTERM，`--no-session` 关闭的会话不留在内存；`zx-cli` 的代码都在库里。为省几行重复而引入回调或装箱 future 的共用函数不做（规则 05、09） |
 
 ## 4. 当前阶段
 
@@ -47,7 +48,8 @@ P0–P5 与 P10–P14（P10 为与 pi 的能力对齐）已完成。进行中：
 - P8 `acp`：已实现，待在 Zed 或 Wisp 上实测。
 - P9 可选增强：剩更多 provider。
 - P15 IM 对话模型（D16）：Slack 实现了读线程、查名字与回执；⚑ D:5/CHINA FLAG: 飞书只做消息分类，这三项沿用默认（不读历史、用 open_id、不回执），待按需补上。待在真实 Slack 工作区验证线程回复事件带 `thread_ts`（官方事件页未写明）。
-- P16 入口与接口重整：七期均已实现，待评审与合并。目标是 `Agent`、`Session`、`Run` 三个入口对象；模型、工具、会话存储、权限策略、钩子各有接口并可替换，摘要可选替换；命令行从库中拆出。要点：`Run` 由调用方驱动（读它才推进，丢弃即取消），事件经有界通道，是事件的唯一出口；审批由内核的 `ApprovalGate` 等待 `Session::resolve_approval`，默认没有人回答；属于单个会话的工具、钩子与提示词段落由 `SessionSetup` 在创建或打开会话时装配；公开路径按域（`tools`、`policy`、`hooks`、`transcript` 等），crate 根部只留入口对象。分七期，每期四条命令全部通过后再进入下一期：① 改名与模块重组（D23），已完成；② `ToolPolicy` 移入内核，钩子不再做放行判断，已完成；③ 修正前两期：按域导出（内核根部只留 `AgentSession` 与 `CancelSignal`，`zx-tools` 在 `zx_agent::builtin`）、事件的发送移入 `runner`、新增 `guard`、`InputQueues`，已完成；④ `SessionStorage` 接口、`JsonlStorage` 与 `MemoryStorage`，存储类型不含文件路径，会话标签（会话格式版本 10；`sessions` 与 `--resume` 只列出在该工作目录开始的会话；IM 的会话按标签 `im.platform`、`im.conversation`、`im.thread` 查找，不再按目录；JSONL 文件的尾记录改在追加下一条记录之前截掉），已完成；⑤ 入口，分三步：`Run` 取代 `EventSink`（已完成：`AgentSession` 改名 `Session`，`Runner` 收为内部类型，追踪导出改为观察钩子 `Telemetry::hook`，钩子也能观察 `hook_failed`），`ApprovalGate` 取代 `Interaction`（已完成：`ApprovalMode`、`ApprovalDecision`、`Session::resolve_approval`，`approval_requested` 带审批编号与参数，事件格式版本 5），`Agent`、`AgentConfig`、`SessionSetup`（已完成：`LoopConfig` 与 `extensions::register` 收为内部，抽出 `Toolbox`，工具声明在建会话时取定；会话可关闭，之后句柄返回 Closed；会话在它创建时的目录工作，`open_session` 不带目录，续接时 `--cwd` 与会话目录不同或原目录已不存在都以退出码 2 结束；`Agent::adopt_session` 接收宿主自己建的 `Transcript`；`zx-im` 的 `SessionFactory` 由 `Agent` 取代；命令行每种运行方式构造一个 `Agent`，agent 文件随之读一次，chat 每个对话仍各读一次）；⑥ 可选的 `Summarizer`，标签与 actor 交给策略与钩子，已完成（`AgentConfig::summarizer`：摘要器产出摘要与用量，开始记录写它的名字而不写请求，一次摘要计为一次模型请求；`Input::User` 带 `actor`，记在该条用户消息的记录里；`PolicyContext` 与 `HookContext` 增加 `labels` 与 `actor`，后者是会话最近一条提问的发送者；`zx-im` 把发送者的用户 ID 作为 actor；会话格式版本 11）；⑦ 拆出 `zx-cli`，已完成（根包 `zx-agent` 只留库：再导出 `zx-core`、`zx-ai`、`zx-ai-openai` 与 `zx-tools`，不再依赖命令行解析、ACP、追踪导出与 IM；命令行、`config.toml` 与 agent 文件、追踪导出移到 `crates/zx-cli`，可执行文件仍叫 `zx-agent`，内置 agent 在 `crates/zx-cli/agents/`；驱动程序的 12 个测试随之移到 `crates/zx-cli/tests/`，只用库的 30 个留在根目录 `tests/`，没有按 crate 再分；`zx_agent::im` 不再导出，IM 直接用 `zx-im`）。
+- P16 入口与接口重整：`Agent`、`Session`、`Run` 三个入口对象，模型、工具、会话存储、策略、钩子与摘要各有接口并可替换，命令行从库中拆出。七期均已实现，待合并；决策见 D21–D24。
+- P17 评审之后的修正：对 P16 的四路评审列出的缺陷、简化与优化，已实现，待合并；决策见 D25，留下的缺口在第 5 节。
 
 ## 5. 待办与已知缺口
 
@@ -65,7 +67,11 @@ P0–P5 与 P10–P14（P10 为与 pi 的能力对齐）已完成。进行中：
 - 待用户决定：`run` 的内置 agent（及部署的 `unattended.md`）是否默认开启自动摘要；现在关闭，撞到上下文上限时以退出码 1 结束，开启的代价是摘要丢失信息。
 - 定时巡检的会话文件不自动清理，需要部署方定期删除。
 - 对照 pi durable 的较大项（待评审）：排队消息落盘（同时解决 IM 丢消息）、部分结果落盘、后台摘要（宿主已可用 `Summarizer` 自己产出摘要，钩子仍不提供摘要）、按会话的扩展（按会话的工具、钩子、提示词段落与工作目录已由 `SessionSetup` 给出）、扩展的可读状态、延迟加载的工具与 `tool_search`、持久化的睡眠与定时、宿主侧的环境接口、附带的数据库存储（接口 `SessionStorage` 已有，实现由宿主给出）。
-- `config.toml`、agent 文件与追踪导出在 `zx-cli` 里：嵌入方要复用它们得依赖整个命令行的 crate；有这样的使用者时再各自拆成独立 crate。
+- `config.toml`、agent 文件、追踪导出与按配置装配 agent 的那一层（`crates/zx-cli/src/cli/`）都在 `zx-cli` 里：嵌入方或新的接入方式（如 Web 服务）要复用它们得依赖整个命令行的 crate；有这样的使用者时再拆成独立 crate。
+- 测试适配层经隐藏的 `Agent::adopt_session` 把测试给的 `Transcript` 变成会话。要删掉它，得让测试经存储建会话：约 80 处建会话的写法与 160 处 `build()` 要改成异步，收益只是少一个隐藏的方法，未做。
+- 容器里的文件写入在调用被丢弃后仍写完，只用假 docker 验证过；`real_` 测试要真实 Docker，这一轮没有运行。
+- 落盘目录的符号链接检查与随后的打开之间有竞态：同时在跑的命令可以在两者之间换掉目录。要消除得从工作目录起按目录描述符逐级打开，未做。
+- 会话自行关闭之后，ACP 的 `session/prompt` 以“会话未打开”应答，客户端要先 `session/load` 或 `session/resume`；要让它自动重开，得记下客户端认为打开着的会话编号，未做。
 
 ## 6. 验证记录
 
@@ -77,7 +83,7 @@ P0–P5 与 P10–P14（P10 为与 pi 的能力对齐）已完成。进行中：
 | 2026-11-02 | `run` 经 `https://api.deepseek.com` 调用 ⚑ D:5/CHINA FLAG: `deepseek-flash`，附加请求字段取默认、关闭思考、`reasoning_effort="low"` | 均以 0 退出；关闭思考时输入 token 不同，字段生效 |
 | 2026-11-02 | 摘要评测，两个模型各三次 | ⚑ D:5/CHINA FLAG: `deepseek-chat` 三次通过；⚑ D:5/CHINA FLAG: `deepseek-flash` 因推理用满默认 2048 token 的输出预算而失败，调高预算后尚未运行 |
 | — | `provider.systemUpdates = "inline"` | 只在一个服务上验证过 |
-| — | 真实 Docker（`ZX_DOCKER_TEST_IMAGE`，`tests/container.rs`） | macOS 的 Docker Desktop 上用 `debian:bookworm-slim` 与一个 Ubuntu 系镜像跑过；原生 Linux 只由 CI 覆盖；没有在 rootless Docker 或 Podman 上验证 |
+| — | 真实 Docker（`ZX_DOCKER_TEST_IMAGE`，`crates/zx-cli/tests/container.rs`） | macOS 的 Docker Desktop 上用 `debian:bookworm-slim` 与一个 Ubuntu 系镜像跑过；原生 Linux 只由 CI 覆盖；没有在 rootless Docker 或 Podman 上验证 |
 | 2026-11-01 | `deploy/kubernetes/` 在本机 Docker Desktop 的 Kubernetes v1.36.1（2 个 arm64 节点，local-path ext4），假模型 | 镜像、只读账号、run、chat 审批、`operator.yaml` 的每项写操作、定时巡检、脱敏、会话文件锁与清理均符合预期；多集群由同一集群扮演远端，新增集群约 1 分钟后生效。读 agent 自身 `/proc/<pid>/environ` 被拒一项在 agent 不再设为不可 dump 后不成立，未重测 |
 | — | IM 组件（当时名为 `serve`，改名为 `im` 后未重测），Slack 指向不可达地址 | 启动、`/proc/1/environ` 中没有 API key、重试日志不含凭据、SIGTERM 后退出码 0、孤儿进程被回收、与 `multicluster` 组件共存 |
 | — | 定时巡检的会话卷与 `--fail-on-denied` 的说明 | 只经 `kubectl kustomize` 本地渲染检查，没有在集群上运行 |
@@ -94,4 +100,4 @@ P0–P5 与 P10–P14（P10 为与 pi 的能力对齐）已完成。进行中：
 
 ---
 
-ROADMAP.md · v0.22 · 2026年11月
+ROADMAP.md · v0.23 · 2026年11月

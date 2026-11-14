@@ -33,6 +33,10 @@ pub const CARD_CAPACITY: usize = 256;
 /// entity, for example) but never splits what it writes. A part ends at its last line break
 /// when that keeps at least half of it. For a channel that must split text longer than one
 /// platform message.
+///
+/// A channel posts the parts itself: the first to the destination, the rest to the thread
+/// of the first. Those few lines are in each platform; sharing them would take a callback
+/// with a boxed future, which is harder to read than they are.
 pub fn split_text(text: &str, max: usize, push: fn(&mut String, char)) -> (String, Vec<String>) {
     let mut first = None;
     let mut rest = Vec::new();

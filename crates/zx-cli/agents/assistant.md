@@ -8,7 +8,7 @@ ask = ["bash", "edit_file", "write_file"]
 # Read-only commands that run without asking: none of them can run another program or
 # write a file. awk, sed, sort, uniq, find, xargs, tee and curl are left out for that
 # reason. Commands with quotes, $, other shell syntax, a URL or a text listed in
-# allowExcept still ask; see README, "安全模型". Programs of a particular environment, such
+# allowExcept still ask; see docs/SECURITY.md. Programs of a particular environment, such
 # as kubectl, belong in that environment's agent, with the options they may pass.
 allow = ["bash(grep)", "bash(head)", "bash(tail)", "bash(wc)", "bash(jq)"]
 allowExcept = ["secret"]

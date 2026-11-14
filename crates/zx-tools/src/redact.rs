@@ -1,6 +1,6 @@
 //! The hook that redacts known secrets from tool output before it is recorded. It matches
 //! exact values only; it does not discover unknown credentials or filter inputs (the
-//! boundaries are in the README's security model).
+//! boundaries are in docs/SECURITY.md).
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};

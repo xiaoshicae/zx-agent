@@ -40,7 +40,7 @@ kubectl -n zx-agent logs job/inspect-now
 ```
 
 - 会话文件在卷上，用同一路径可以接着聊。一个文件同一时间只能被一个 chat 或 run 打开，否则报告 `is in use` 并以退出码 2 结束。锁依赖 `flock`，文件系统不支持时打开会话直接失败。
-- 巡检的任务与时间在 `cronjob.yaml` 的 `args` 与 `schedule` 中修改；退出码见仓库 README 的“run 退出码”。
+- 巡检的任务与时间在 `cronjob.yaml` 的 `args` 与 `schedule` 中修改；退出码见仓库 `docs/REFERENCE.md` 的“run 退出码”。
 - 巡检的会话文件写在卷 `zx-agent-inspect-sessions` 的 `sessions/<Pod 名>.jsonl`，中断后可据此 `run --continue`；文件不自动清理，读取要在巡检不运行时用挂载这块卷的临时 Pod。
 - 无人值守时审批一律拒绝，退出码仍可能是 0；在 `command` 中加 `--fail-on-denied` 后，有命令被拒时以退出码 9 结束（默认不加：模型常试探 `allow` 之外的命令）。
 
@@ -125,4 +125,4 @@ kubectl delete namespace zx-agent
 
 ---
 
-`deploy/kubernetes/README.md` · v0.3 · 2026年11月
+`deploy/kubernetes/README.md` · v0.4 · 2026年11月
