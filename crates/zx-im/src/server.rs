@@ -1,22 +1,22 @@
-//! The server and its contracts: the session key, the host's [`SessionFactory`], the
-//! operator's [`ServerSink`], the reply texts, the configuration, and what every
-//! conversation shares. Routing is in `router.rs`.
+//! The server and its contracts: the session key, the operator's [`ServerSink`], the reply
+//! texts, the configuration, and what every conversation shares. Routing is in `router.rs`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Display;
 use std::future::Future;
 use std::hash::Hash;
 use std::num::NonZeroUsize;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use serde::Deserialize;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use zx_ai::sync::lock;
 
-use crate::Session;
+use crate::Agent;
+use crate::transcript::SessionQuery;
 use zx_core::events::ApprovalResult;
 
 use super::router::Router;
@@ -38,9 +38,9 @@ pub struct SessionKey {
     pub thread: Option<ThreadId>,
 }
 
-/// Which session of a conversation [`SessionFactory::open`] opens.
+/// Which session of a conversation its worker opens next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Opening {
+pub(crate) enum Opening {
     /// The conversation's latest session, created on first use.
     Latest,
     /// A new session, after `/new`; the earlier ones are kept.
@@ -54,11 +54,10 @@ const CONVERSATION_LABEL: &str = "im.conversation";
 const THREAD_LABEL: &str = "im.thread";
 
 impl SessionKey {
-    /// The labels of this conversation's sessions, whatever storage the host keeps them in:
-    /// a host gives them to each session it creates for the conversation, and finds the
-    /// conversation's sessions again by asking for them
-    /// ([`SessionQuery`](zx_core::transcript::SessionQuery)). A direct chat has an empty
-    /// thread label, so that asking for its sessions never finds a thread's.
+    /// The labels of this conversation's sessions, whatever storage the agent keeps them in:
+    /// the server gives them to each session it creates for the conversation, and finds the
+    /// conversation's sessions again by asking for them ([`SessionQuery`]). A direct chat has
+    /// an empty thread label, so that asking for its sessions never finds a thread's.
     pub fn labels(&self) -> BTreeMap<String, String> {
         let thread = self.thread.as_ref().map(|thread| thread.0.clone());
         BTreeMap::from([
@@ -74,28 +73,6 @@ impl SessionKey {
             conversation: self.conversation.clone(),
             thread: self.thread.clone(),
         }
-    }
-}
-
-/// Opens the session of a conversation. The host chooses the model, tools, policies, limits
-/// and where sessions are stored; [`SessionKey::labels`] marks a conversation's sessions there.
-#[async_trait]
-pub trait SessionFactory: Send + Sync {
-    /// Open the session of `key` that `opening` names. Its approvals wait for the host
-    /// ([`ApprovalMode::Wait`](zx_core::policy::ApprovalMode::Wait)): the server posts a card
-    /// for each request in the conversation and answers it when an approver clicks. Called
-    /// again after an idle session was released. An error is posted to the conversation
-    /// after [`Replies::cannot_open`]; the next message tries again.
-    async fn open(&self, key: &SessionKey, opening: Opening) -> Result<Session, String>;
-
-    /// Whether `key` has a session already: the bot took part in that thread, so a message
-    /// there that does not mention it is still part of the conversation. Asked while
-    /// messages are routed, one at a time, within the outbound timeout: an error, or an
-    /// answer that takes longer, is reported to the operator and counts as none. The default
-    /// knows of none, so only mentions start a conversation again after its session was
-    /// released.
-    async fn has_session(&self, _key: &SessionKey) -> Result<bool, String> {
-        Ok(false)
     }
 }
 
@@ -203,8 +180,11 @@ impl Default for Replies {
     }
 }
 
-/// Who may use the server and how much it runs at once.
+/// Who may use the server, where its sessions work and how much it runs at once.
 pub struct ServerConfig {
+    /// Where the session of a new conversation works, and goes on working when it is
+    /// opened again; the current directory by default.
+    pub cwd: PathBuf,
     /// Chats the server answers in, per platform. A message from another chat gets
     /// [`Replies::unauthorized`] and nothing else.
     pub conversations: Vec<(String, ConversationId)>,
@@ -230,6 +210,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
+            cwd: PathBuf::from("."),
             conversations: Vec::new(),
             approvers: Vec::new(),
             max_running: DEFAULT_MAX_RUNNING,
@@ -242,6 +223,14 @@ impl Default for ServerConfig {
 }
 
 /// Answers chat messages, one session per conversation, as a person in the chat would.
+///
+/// The sessions are the agent's: it chooses the model, tools, policies and limits, and keeps
+/// the sessions in its storage, where [`SessionKey::labels`] marks those of a conversation.
+/// Their approvals must wait for the host
+/// ([`ApprovalMode::Wait`](zx_core::policy::ApprovalMode::Wait)): the server posts a card for
+/// each request in the conversation and answers it when an approver clicks. A session that
+/// cannot be opened is reported to the conversation after [`Replies::cannot_open`]; the next
+/// message tries again.
 ///
 /// - A direct chat is one conversation; `/new` starts a new session for it.
 /// - In a group, a message that mentions the bot starts a thread under it, and each thread
@@ -259,14 +248,15 @@ impl Default for ServerConfig {
 ///   result however the approval ended.
 pub struct Server {
     config: ServerConfig,
-    factory: Arc<dyn SessionFactory>,
+    agent: Agent,
     sink: Arc<dyn ServerSink>,
 }
 
 impl Server {
-    /// A server for `config` that opens sessions with `factory` and reports to `sink`.
-    pub fn new(config: ServerConfig, factory: Arc<dyn SessionFactory>, sink: Arc<dyn ServerSink>) -> Self {
-        Self { config, factory, sink }
+    /// A server for `config` whose conversations are sessions of `agent`, and which reports
+    /// to `sink`.
+    pub fn new(config: ServerConfig, agent: Agent, sink: Arc<dyn ServerSink>) -> Self {
+        Self { config, agent, sink }
     }
 
     /// Serve `channels` until `cancel` is triggered or a channel fails.
@@ -285,12 +275,12 @@ impl Server {
         distinct_platforms(&channels)?;
         let Server {
             mut config,
-            factory,
+            agent,
             sink,
         } = self;
         // The chats served are the router's; the rest of the configuration is shared.
         let allowed = group(std::mem::take(&mut config.conversations));
-        let shared = Arc::new(Shared::new(config, factory, sink));
+        let shared = Arc::new(Shared::new(config, agent, sink));
         // Read before any run can start, so that no status of this process is among them.
         let left = left_behind(&shared).await;
         let stop = cancel.child_token();
@@ -320,7 +310,11 @@ fn distinct_platforms(channels: &[Arc<dyn ImChannel>]) -> Result<(), ImError> {
 
 /// Settings and resources every conversation reads.
 pub(crate) struct Shared {
-    pub(crate) factory: Arc<dyn SessionFactory>,
+    /// Makes the session of each conversation, and keeps it open while the conversation
+    /// holds it.
+    pub(crate) agent: Agent,
+    /// Where new sessions work.
+    pub(crate) cwd: PathBuf,
     pub(crate) sink: Arc<dyn ServerSink>,
     approvers: HashMap<String, HashSet<UserId>>,
     pub(crate) replies: Replies,
@@ -337,8 +331,9 @@ pub(crate) struct Shared {
 
 impl Shared {
     /// What the conversations share, from everything in `config` but the chats served.
-    pub(crate) fn new(config: ServerConfig, factory: Arc<dyn SessionFactory>, sink: Arc<dyn ServerSink>) -> Self {
+    pub(crate) fn new(config: ServerConfig, agent: Agent, sink: Arc<dyn ServerSink>) -> Self {
         let ServerConfig {
+            cwd,
             // Taken by the router before.
             conversations: _,
             approvers,
@@ -349,7 +344,8 @@ impl Shared {
             statuses,
         } = config;
         Self {
-            factory,
+            agent,
+            cwd,
             sink,
             approvers: group(approvers),
             replies,
@@ -377,6 +373,19 @@ impl Shared {
             .unwrap_or_else(|| user.0.clone());
         lock(&self.names).insert(known, name.clone());
         name
+    }
+
+    /// The ID of the conversation's most recently active session, if it has one.
+    pub(crate) async fn latest_session(&self, key: &SessionKey) -> Result<Option<String>, String> {
+        let query = SessionQuery {
+            labels: key.labels(),
+            limit: Some(1),
+            ..SessionQuery::default()
+        };
+        match self.agent.list_sessions(&query).await {
+            Ok(list) => Ok(list.sessions.into_iter().next().map(|session| session.id)),
+            Err(error) => Err(format!("{error:#}")),
+        }
     }
 
     pub(crate) fn is_approver(&self, platform: &str, user: &UserId) -> bool {

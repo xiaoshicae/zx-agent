@@ -15,12 +15,7 @@ impl RunHost<'_> {
     /// again. Stops at the first result the session cannot record.
     pub(super) async fn recover_interrupted_calls(&mut self) -> Result<()> {
         for call in self.session.interrupted_tool_calls() {
-            let effects = self
-                .config
-                .tools
-                .iter()
-                .find(|tool| tool.name() == call.tool_name)
-                .map(|tool| tool.effects());
+            let effects = self.config.tools.find(&call.tool_name).map(|tool| tool.effects());
             let state = interruption(call.start, effects);
             let recovered = EventKind::ToolCallRecovered {
                 tool_call_id: call.tool_call_id.clone(),

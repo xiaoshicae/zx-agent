@@ -21,8 +21,6 @@ mod session_host;
 mod step;
 mod tools;
 
-use std::collections::HashMap;
-
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -33,7 +31,7 @@ use crate::input::{Input, Queue};
 use crate::policy::ApprovalGate;
 use crate::runner::{EventTarget, RunAccounting, RunOutcome, RunTrace};
 
-pub use config::LoopConfig;
+pub(crate) use config::LoopConfig;
 pub(crate) use session_host::{PERSIST_FAILED, SessionHost, record_pending_entries};
 use step::{AfterTools, PendingInput, StepResponse};
 
@@ -103,7 +101,6 @@ pub(crate) struct StepLoop<'a> {
     trace: &'a RunTrace,
     /// The number of the step in progress, between its `step_start` and `step_end`.
     step: Option<u32>,
-    validators: HashMap<String, jsonschema::Validator>,
 }
 
 impl<'a> StepLoop<'a> {
@@ -125,7 +122,6 @@ impl<'a> StepLoop<'a> {
             events: target.events,
             trace: target.trace,
             step: None,
-            validators: HashMap::new(),
         }
     }
 
@@ -214,10 +210,9 @@ impl<'a> StepLoop<'a> {
         }
     }
 
-    /// Validate the specification and record the system prompt's changes and the input.
+    /// Record the system prompt's changes and the input.
     async fn initialize(&mut self, prompts: Vec<Input>) -> Result<(), Halt> {
         let config = self.config;
-        self.validators = config.validators().map_err(Halt::Failed)?;
         self.start_step().await;
         let changes = SystemPrompt::from_transcript(&self.host.session().messages()).diff(&config.system_prompt);
         if !changes.is_empty() {

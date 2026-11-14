@@ -50,6 +50,7 @@ use zx_agent::compaction::{Config, Outcome};
 use zx_agent::policy::PolicyDecision;
 use zx_agent::prompt::build_system_prompt;
 use zx_agent::runner::{RunLimits, RunOutcome, RunReport};
+use zx_agent::transcript::Transcript;
 
 const PAID: &str = "calls a paid model API; needs ZX_E2E_AUTHORIZED=1 and the API owner's consent";
 
@@ -98,12 +99,12 @@ impl Endpoint {
         .unwrap()
     }
 
-    /// A runner against this endpoint with small budgets, so a misbehaving model cannot run
-    /// up costs: 256 output tokens per response, 4 steps, 2 minutes, no retries.
+    /// A runner against this endpoint, in a session in memory that works in `cwd`, with
+    /// small budgets, so a misbehaving model cannot run up costs: 256 output tokens per
+    /// response, 4 steps, 2 minutes, no retries.
     fn setup(&self, api_key: String, cwd: &Path) -> RunnerSetup {
         let mut config = config(Arc::new(self.provider(api_key)), vec![]);
         config.model = self.model.clone();
-        config.cwd = cwd.to_path_buf();
         config.max_tokens = Some(256);
         config.system_prompt = build_system_prompt(
             "You are a test assistant. Follow the user's instructions exactly and keep answers short.",
@@ -115,6 +116,7 @@ impl Endpoint {
                 timeout: Some(Duration::from_secs(120)),
                 ..RunLimits::default()
             },
+            session: Transcript::in_memory(common::header_in(cwd)),
             ..RunnerSetup::new(config)
         }
     }

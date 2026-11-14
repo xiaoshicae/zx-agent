@@ -4,6 +4,7 @@
 use std::borrow::Cow;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
@@ -73,10 +74,13 @@ impl Default for HookOptions {
     }
 }
 
+#[derive(Clone)]
 struct RegisteredHook {
     name: String,
     stage: HookStage,
-    hook: Box<dyn Hook>,
+    // Shared, not owned: the hooks of an agent serve every session it opens, and the
+    // sessions run at the same time.
+    hook: Arc<dyn Hook>,
     timeout: Duration,
 }
 
@@ -106,8 +110,10 @@ impl RegisteredHook {
     }
 }
 
-/// A chain owns its hooks, kept in stage order, and is borrowed by concurrent tool futures.
-#[derive(Default)]
+/// A chain of hooks, kept in stage order, and borrowed by concurrent tool futures. A clone
+/// is a chain of the same hooks: an agent's chain is cloned for each of its sessions, whose
+/// own hooks are then added to the clone.
+#[derive(Clone, Default)]
 pub struct HookChain {
     hooks: Vec<RegisteredHook>,
 }
@@ -126,27 +132,36 @@ impl HookChain {
     /// registered in that stage.
     pub fn push_with<H: Hook + 'static>(&mut self, hook: H, options: HookOptions) {
         let name = options.name.unwrap_or_else(|| std::any::type_name::<H>().to_string());
-        self.insert(name, Box::new(hook), options.timeout);
+        self.insert(RegisteredHook {
+            name,
+            stage: hook.stage(),
+            hook: Arc::new(hook),
+            timeout: options.timeout,
+        });
     }
 
     /// Register a hook an extension supplies, under the extension's name and with the default
     /// timeout. `extensions::register` has checked its stage.
     pub(crate) fn push_extension_hook(&mut self, name: &str, hook: Box<dyn Hook>) {
-        self.insert(name.to_string(), hook, HookOptions::default().timeout);
+        self.insert(RegisteredHook {
+            name: name.to_string(),
+            stage: hook.stage(),
+            hook: Arc::from(hook),
+            timeout: HookOptions::default().timeout,
+        });
     }
 
-    fn insert(&mut self, name: String, hook: Box<dyn Hook>, timeout: Duration) {
-        let stage = hook.stage();
-        let position = self.hooks.partition_point(|entry| entry.stage <= stage);
-        self.hooks.insert(
-            position,
-            RegisteredHook {
-                name,
-                stage,
-                hook,
-                timeout,
-            },
-        );
+    /// Register the hooks of `other`, each after the hooks this chain already has in its
+    /// stage, with the name and the timeout it was registered with.
+    pub(crate) fn extend(&mut self, other: HookChain) {
+        for entry in other.hooks {
+            self.insert(entry);
+        }
+    }
+
+    fn insert(&mut self, entry: RegisteredHook) {
+        let position = self.hooks.partition_point(|existing| existing.stage <= entry.stage);
+        self.hooks.insert(position, entry);
     }
 
     pub fn with(mut self, hook: impl Hook + 'static) -> Self {

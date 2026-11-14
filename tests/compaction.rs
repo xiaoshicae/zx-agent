@@ -125,12 +125,12 @@ async fn automatic_summary_counts_against_task_request_budget_and_usage() {
 
 #[tokio::test]
 async fn steering_received_during_a_summary_is_persisted_before_the_next_task_request() {
-    struct SteerAfterSummary(Arc<zx_agent::input::InputQueues>);
+    struct SteerAfterSummary;
     #[async_trait]
     impl Hook for SteerAfterSummary {
-        async fn on_event(&self, event: &Event, _ctx: &HookContext) -> Result<(), String> {
+        async fn on_event(&self, event: &Event, ctx: &HookContext) -> Result<(), String> {
             if matches!(event.event, EventKind::CompactionEnd { .. }) {
-                self.0.steer("new correction");
+                ctx.queues.steer("new correction");
             }
             Ok(())
         }
@@ -141,7 +141,7 @@ async fn steering_received_during_a_summary_is_persisted_before_the_next_task_re
         FauxStep::text("answer"),
     ]));
     let mut config = config(provider.clone(), vec![]);
-    config.hooks.push(SteerAfterSummary(config.queues.clone()));
+    config.hooks.push(SteerAfterSummary);
     let (runner, _) = RunnerSetup {
         session: store,
         ..RunnerSetup::new(config)

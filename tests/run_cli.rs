@@ -16,7 +16,10 @@ use tokio::process::Command;
 
 use common::http::{Request, read_request};
 use common::mock_server::{MockServer, Reply};
-use common::{AgentHome, Home, fake_model_config, json_lines, stderr, stdout, write_config, zx_agent_in};
+use common::{
+    AgentHome, Home, agent_text, fake_model_config, json_lines, stderr, stdout, write_agent_file, write_config,
+    zx_agent_in,
+};
 
 /// The variable the program reads the API key from, and the fake key it holds.
 const KEY_VAR: &str = "ZX_RUN_CLI_TEST_KEY";
@@ -306,20 +309,11 @@ async fn inline_updates_are_sent_where_the_prompt_changed() {
     let server = MockServer::start(vec![Reply::text("one"), Reply::text("two")]).await;
     let dir = tempfile::tempdir().unwrap();
     let session = dir.path().join("s.jsonl");
-    let session = session.to_str().unwrap();
-    // Changing the working directory changes the <environment> section.
-    for name in ["first", "second"] {
-        let cwd = dir.path().join(name);
-        std::fs::create_dir(&cwd).unwrap();
-        let args = [
-            "--tools",
-            "",
-            "--session",
-            session,
-            "--cwd",
-            cwd.to_str().unwrap(),
-            "check",
-        ];
+    let args = ["--tools", "", "--session", session.to_str().unwrap(), "check"];
+    // Changing the agent's instructions changes the preamble.
+    for instructions in ["Answer briefly.", "Answer at length."] {
+        let agent = agent_text("extends = \"unattended\"", instructions);
+        write_agent_file(&dir.path().join(".home"), "unattended", &agent);
         let output = run_configured(&server, dir.path(), "systemUpdates = 'inline'", &args)
             .output()
             .await
@@ -335,9 +329,98 @@ async fn inline_updates_are_sent_where_the_prompt_changed() {
     assert_eq!(roles, ["system", "user", "assistant", "system", "user"]);
     let update = messages[3]["content"].as_str().unwrap();
     assert!(
-        update.starts_with("Updated system prompt section \"environment\""),
+        update.starts_with("Updated system prompt section \"preamble\":\n\nAnswer at length."),
         "{update}"
     );
+}
+
+/// `first` and `second` in `dir`, created, as the system resolves them.
+fn two_directories(dir: &Path) -> (PathBuf, PathBuf) {
+    let made = ["first", "second"].map(|name| {
+        let path = dir.join(name);
+        std::fs::create_dir(&path).unwrap();
+        path.canonicalize().unwrap()
+    });
+    made.into()
+}
+
+#[tokio::test]
+async fn a_continued_session_works_in_the_directory_it_started_in() {
+    let server = MockServer::start(vec![Reply::text("one"), Reply::text("two")]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (first, second) = two_directories(dir.path());
+    let session = dir.path().join("s.jsonl");
+    let args = ["--tools", "", "--session", session.to_str().unwrap(), "check"];
+    // Started by a process in `first`, continued by one in `second`.
+    for cwd in [&first, &second] {
+        let output = run_against(&server, cwd, &args).output().await.unwrap();
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    }
+
+    let prompts: Vec<String> = sent_messages(&server, 1)
+        .iter()
+        .filter(|message| message["role"] == "system")
+        .map(|message| message["content"].as_str().unwrap().to_string())
+        .collect();
+    let stated = format!("Working directory: {}", first.display());
+    assert!(prompts[0].contains(&stated), "{prompts:?}");
+    assert!(prompts.iter().all(|prompt| !prompt.contains("second")), "{prompts:?}");
+}
+
+#[tokio::test]
+async fn continuing_a_session_with_another_cwd_is_refused_before_any_request() {
+    let server = MockServer::start(vec![Reply::text("one"), Reply::text("never sent")]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (first, second) = two_directories(dir.path());
+    let session = dir.path().join("s.jsonl");
+    let run_in = |cwd: &Path| {
+        let args = [
+            "--tools",
+            "",
+            "--session",
+            session.to_str().unwrap(),
+            "--cwd",
+            cwd.to_str().unwrap(),
+            "check",
+        ];
+        run_against(&server, dir.path(), &args)
+    };
+    let started = run_in(&first).output().await.unwrap();
+    assert_eq!(started.status.code(), Some(0), "{}", stderr(&started));
+
+    let elsewhere = run_in(&second).output().await.unwrap();
+
+    assert_eq!(elsewhere.status.code(), Some(2), "{}", stderr(&elsewhere));
+    let error = stderr(&elsewhere);
+    assert!(error.contains("is not where the session works"), "{error}");
+    assert!(error.contains(&first.display().to_string()), "{error}");
+    assert_eq!(server.requests().len(), 1);
+    // The same directory, given again, continues the session.
+    let again = run_in(&first).output().await.unwrap();
+    assert_eq!(again.status.code(), Some(0), "{}", stderr(&again));
+}
+
+#[tokio::test]
+async fn a_session_whose_directory_is_gone_is_not_continued() {
+    let server = MockServer::start(vec![Reply::text("one"), Reply::text("never sent")]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (first, _) = two_directories(dir.path());
+    let session = dir.path().join("s.jsonl");
+    let args = ["--tools", "", "--session", session.to_str().unwrap(), "check"];
+    let started = run_against(&server, &first, &args).output().await.unwrap();
+    assert_eq!(started.status.code(), Some(0), "{}", stderr(&started));
+    std::fs::remove_dir_all(&first).unwrap();
+
+    let continued = run_against(&server, dir.path(), &args).output().await.unwrap();
+
+    assert_eq!(continued.status.code(), Some(2), "{}", stderr(&continued));
+    let error = stderr(&continued);
+    assert!(
+        error.contains("the session's working directory no longer exists"),
+        "{error}"
+    );
+    assert!(error.contains(&first.display().to_string()), "{error}");
+    assert_eq!(server.requests().len(), 1);
 }
 
 // ---------------------------------------------------------------------------

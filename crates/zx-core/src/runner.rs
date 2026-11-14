@@ -4,8 +4,9 @@
 //! the session as the source of model context, and enforces request, time and token limits.
 //! A [`Session`](crate::session::Session) owns the Runner and lends it to one run at a time.
 //!
-//! - `step_loop`: the loop a run runs once per attempt, what it runs with ([`LoopConfig`]),
-//!   and what it needs from the session it records in
+//! - `step_loop`: the loop a run runs once per attempt, what it runs with (`LoopConfig`,
+//!   which the agent assembles for each session), and what it needs from the session it
+//!   records in
 //! - `accounting`: what a run spends across its attempts, and its budgets; the loop of each
 //!   attempt counts into it
 //! - `trace`: one run's identity and event numbering, and where its events go: the run's
@@ -41,8 +42,7 @@ use crate::policy::ApprovalGate;
 use crate::sync::AbortOnDrop;
 use crate::transcript::Transcript;
 pub(crate) use accounting::RunAccounting;
-pub use step_loop::LoopConfig;
-pub(crate) use step_loop::{Halt, PERSIST_FAILED, SessionHost, StepLoop, record_pending_entries};
+pub(crate) use step_loop::{Halt, LoopConfig, PERSIST_FAILED, SessionHost, StepLoop, record_pending_entries};
 pub(crate) use trace::{EventTarget, RunTrace};
 
 /// Bounds for one run. Defaults impose no request or time limit.
@@ -60,7 +60,7 @@ pub struct RunLimits {
     pub token_budget: Option<u64>,
     /// What the run may spend, in the unit of the configured prices (any currency, as long as
     /// every price uses it): the cost of all its model requests by those prices
-    /// ([`LoopConfig::models`](crate::runner::LoopConfig::models)), summary requests and
+    /// ([`AgentConfig::models`](crate::AgentConfig::models)), summary requests and
     /// failed attempts included. Checked before each request, so the last one may go over.
     /// A response from a model without a price costs nothing here, so the host checks that
     /// its models have prices. Tool usage is not counted. `None` disables the budget.
@@ -447,7 +447,7 @@ mod tests {
     use super::*;
     use crate::ai::Message;
     use crate::ai::faux::{FauxProvider, FauxStep};
-    use crate::tools::Tool;
+    use crate::tools::{Tool, Toolbox};
     use crate::transcript::{FailingWriter, SessionHeader};
 
     #[test]
@@ -463,7 +463,7 @@ mod tests {
     /// A loop over `provider` and `tools` with no system prompt.
     fn config(provider: &Arc<FauxProvider>, tools: Vec<Arc<dyn Tool>>) -> LoopConfig {
         LoopConfig {
-            tools,
+            tools: Toolbox::new(tools).unwrap(),
             ..LoopConfig::new(provider.clone(), "m")
         }
     }

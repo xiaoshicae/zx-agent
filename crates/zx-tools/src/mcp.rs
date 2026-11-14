@@ -3,7 +3,8 @@
 //! whether a call may run is for the host's policies to decide, not for the server: its tool
 //! annotations are only hints.
 //!
-//! A [`Server`] is an [`Extension`]: register it with [`crate::extensions::register`].
+//! A [`Server`] is an [`Extension`]: an agent takes it in
+//! [`AgentConfig::extensions`](zx_core::AgentConfig::extensions).
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;

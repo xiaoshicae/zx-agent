@@ -8,25 +8,21 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use zx_agent::Session;
 use zx_agent::ai::now_ms;
 use zx_agent::config::Builtin;
 use zx_agent::im::feishu::{FeishuChannel, FeishuConfig};
 use zx_agent::im::slack::{SlackChannel, SlackConfig};
 use zx_agent::im::{
-    CardLabels, ConversationId, ErrorReport, ImChannel, ImError, Opening, Replies, Server, ServerConfig, ServerEvent,
-    ServerSink, SessionFactory, SessionKey, StatusFiles, UserId,
+    CardLabels, ConversationId, ErrorReport, ImChannel, ImError, Replies, Server, ServerConfig, ServerEvent,
+    ServerSink, SessionKey, StatusFiles, UserId,
 };
 use zx_agent::otel::Telemetry;
-use zx_agent::policy::ApprovalMode;
-use zx_agent::transcript::SessionQuery;
 
-use crate::cli::{self, ImArgs, env_value};
+use crate::cli::{self, Approvals, ImArgs, ModeAgent, env_value};
 use crate::process::{EXIT_COMPLETED, EXIT_ERROR, EXIT_USAGE, spawn_signal_handler, with_telemetry, write_line};
 use crate::session_files::{SessionChoice, SessionPlace};
 
@@ -142,19 +138,19 @@ pub(crate) async fn run(args: ImArgs) -> Result<u8> {
             .await?
             .with_hidden_env(hidden_env)
             .with_traces(telemetry.map(Telemetry::hook));
-        let factory = Sessions {
-            shared,
-            place: SessionPlace::directory(&dir),
-            dir,
-        };
         // A wrong model, agent or tool setting would otherwise surface only at the first
         // message, in the chat; check it once with a session that is never stored.
-        factory
-            .prepare(&SessionPlace::memory(), SessionChoice::existing_or_new(None))
+        agent(&shared, &SessionPlace::memory())?
+            .open(None, SessionChoice::existing_or_new(None))
             .await
             .context("cannot prepare a session with these settings")?;
-
-        let config = server_config(&file.limits, file.replies, running, conversations, approvers);
+        // The sessions of every conversation are kept under `dir`; a conversation's sessions
+        // are those that carry its labels.
+        let mode = agent(&shared, &SessionPlace::directory(&dir))?;
+        let config = ServerConfig {
+            cwd: mode.new_session_cwd(None)?,
+            ..server_config(&file.limits, file.replies, running, conversations, approvers)
+        };
         eprintln!(
             "[im] platforms={}; sessions in {}",
             channels
@@ -162,16 +158,26 @@ pub(crate) async fn run(args: ImArgs) -> Result<u8> {
                 .map(|channel| channel.platform())
                 .collect::<Vec<_>>()
                 .join(","),
-            factory.dir.display()
+            dir.display()
         );
         let cancel = CancellationToken::new();
         spawn_signal_handler(cancel.clone());
-        let served = Server::new(config, Arc::new(factory), Arc::new(Log))
+        // The session file is the record of each conversation; the operator log holds
+        // approvals and failures (Log), and traces, when exported, the timeline.
+        let served = Server::new(config, mode.agent, Arc::new(Log))
             .run(channels, &cancel)
             .await;
         Ok(serve_exit_code(served))
     })
     .await
+}
+
+/// The agent of every conversation, whose sessions are kept in `place`, as chat's are, with
+/// approvals in the conversation: the server answers each request with an approver's click
+/// on the card it posts.
+fn agent(shared: &cli::Shared, place: &SessionPlace) -> Result<ModeAgent> {
+    let approvals = Approvals::Person("shell commands require approval in the chat");
+    ModeAgent::build(shared, &shared.settings.model, place, approvals)
 }
 
 /// The configured IM platforms: a channel for each, and the environment variables that hold
@@ -337,70 +343,6 @@ fn entries(entries: &[String], platforms: &HashSet<&str>, field: &str) -> Result
             Ok((platform.to_string(), id.to_string()))
         })
         .collect()
-}
-
-/// Opens each conversation's session like chat does, with approvals in the conversation.
-struct Sessions {
-    /// The command line, MCP servers, secret files, IM credentials and trace export, shared
-    /// by every thread's session.
-    shared: cli::Shared,
-    /// The session files of every conversation, under `dir`. A conversation's sessions are
-    /// those that carry its labels.
-    place: SessionPlace,
-    dir: PathBuf,
-}
-
-impl Sessions {
-    async fn prepare(&self, place: &SessionPlace, choice: SessionChoice<'_>) -> Result<cli::PreparedSession> {
-        let model = &self.shared.settings.model;
-        let mut prepared = cli::prepare(&self.shared, model, None, place, choice).await?;
-        prepared.require_bash_approval("shell commands require approval in the chat");
-        // The server answers with an approver's click on the card it posts.
-        prepared.config.approvals = ApprovalMode::Wait(self.shared.settings.approval_timeout);
-        Ok(prepared)
-    }
-
-    /// The conversation's most recently active session, if it has one.
-    async fn latest(&self, key: &SessionKey) -> Result<Option<String>> {
-        let query = SessionQuery {
-            labels: key.labels(),
-            limit: Some(1),
-            ..SessionQuery::default()
-        };
-        let list = self.place.list(&query).await?;
-        Ok(list.sessions.into_iter().next().map(|session| session.id))
-    }
-
-    async fn open_session(&self, key: &SessionKey, opening: Opening) -> Result<Session> {
-        let latest = match opening {
-            Opening::Latest => self.latest(key).await?,
-            Opening::New => None,
-        };
-        let choice = match &latest {
-            Some(id) => SessionChoice::Existing(id),
-            None => SessionChoice::New(key.labels()),
-        };
-        let prepared = self.prepare(&self.place, choice).await?;
-        // The session file is the record of each conversation; the operator log holds
-        // approvals and failures (Log), and traces, when exported, the timeline.
-        prepared.into_session()
-    }
-}
-
-#[async_trait]
-impl SessionFactory for Sessions {
-    async fn open(&self, key: &SessionKey, opening: Opening) -> Result<Session, String> {
-        self.open_session(key, opening)
-            .await
-            .map_err(|error| format!("{error:#}"))
-    }
-
-    async fn has_session(&self, key: &SessionKey) -> Result<bool, String> {
-        match self.latest(key).await {
-            Ok(latest) => Ok(latest.is_some()),
-            Err(error) => Err(format!("{error:#}")),
-        }
-    }
 }
 
 /// The thread of `key` in a log line: `null` for a direct chat.

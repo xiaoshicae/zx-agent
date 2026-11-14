@@ -653,19 +653,18 @@ async fn the_budget_and_the_step_numbers_span_the_attempts_of_a_run() {
 #[tokio::test]
 async fn queued_input_waits_when_no_request_budget_is_left() {
     let provider = provider([FauxStep::text("never sent")]);
-    let setup = RunnerSetup {
+    let (mut runner, _) = RunnerSetup {
         limits: limits(0, None),
         ..setup(&provider)
-    };
-    let queues = setup.config.queues.clone();
-    queues.steer("later");
-    let (mut runner, _) = setup.build();
+    }
+    .build();
+    runner.queues().steer("later");
 
     let report = runner.run("go", &CancellationToken::new()).await;
 
     assert_eq!(report.outcome, RunOutcome::ModelRequestLimit);
     assert_eq!(summarize(&runner.session().messages()), ["user:go"]);
-    assert_eq!(queues.drain_steering(), [Input::User("later".into())]);
+    assert_eq!(runner.queues().drain_steering(), [Input::User("later".into())]);
 }
 
 #[tokio::test]
@@ -751,8 +750,8 @@ async fn queued_input_is_recorded_once_when_a_run_is_dropped_while_observers_run
             ..Default::default()
         },
     );
-    setup.config.queues.steer("queued");
     let (mut runner, _) = setup.build();
+    runner.queues().steer("queued");
     let cancel = CancellationToken::new();
 
     // The first run records the queued input, then is dropped while an observer holds it.

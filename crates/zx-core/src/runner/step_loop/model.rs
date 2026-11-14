@@ -31,12 +31,7 @@ impl StepLoop<'_> {
             messages,
             // The active set may have changed since the last request; the audit records
             // what each request declared.
-            tools: config
-                .tools
-                .iter()
-                .filter(|tool| config.active_tools.is_active(tool.name()))
-                .map(|tool| tool.definition())
-                .collect(),
+            tools: config.tools.definitions(&config.active_tools),
             max_tokens: config.max_tokens,
             reasoning: settings.reasoning,
             cache_key: config.cache_key.clone(),

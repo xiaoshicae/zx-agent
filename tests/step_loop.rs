@@ -11,7 +11,10 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use common::{Collect, EchoTool, NotifyingProvider, config, run_prompt, run_prompt_with, summarize};
+use common::{
+    Collect, EchoTool, NotifyingProvider, Runner, RunnerSetup, config, run_prompt, run_prompt_with, summarize,
+};
+use zx_agent::AgentConfig;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{
     ContentBlock, EventReceiver, Message, PREAMBLE, Provider, Request, StopReason, SystemPrompt, ToolCall, ToolDef,
@@ -20,7 +23,7 @@ use zx_agent::ai::{
 use zx_agent::events::EventKind;
 use zx_agent::input::Input;
 use zx_agent::policy::{PolicyContext, PolicyDecision, ToolPolicy};
-use zx_agent::runner::{LoopConfig, RunOutcome};
+use zx_agent::runner::{RunLimits, RunOutcome};
 use zx_agent::tools::{ExecutionMode, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput};
 
 fn provider(steps: impl IntoIterator<Item = FauxStep>) -> Arc<FauxProvider> {
@@ -31,9 +34,26 @@ fn echo() -> Arc<EchoTool> {
     Arc::new(EchoTool::new("echo"))
 }
 
-fn with_policy(mut config: LoopConfig, policy: Arc<dyn ToolPolicy>) -> LoopConfig {
+fn with_policy(mut config: AgentConfig, policy: Arc<dyn ToolPolicy>) -> AgentConfig {
     config.policies.push("policy", policy);
     config
+}
+
+/// A session of `provider`, limited to `max_model_requests` requests, whose `echo` tool
+/// feeds the session's own queues when a call asks it to.
+fn fed(provider: Arc<FauxProvider>, max_model_requests: u32) -> (Runner, Arc<Collect>) {
+    let echo = echo();
+    let limits = RunLimits {
+        max_model_requests: Some(max_model_requests),
+        ..RunLimits::default()
+    };
+    let (runner, events) = RunnerSetup {
+        limits,
+        ..RunnerSetup::new(config(provider, vec![echo.clone()]))
+    }
+    .build();
+    echo.feeds(runner.queues());
+    (runner, events)
 }
 
 // ---------------------------------------------------------------------------
@@ -323,18 +343,13 @@ async fn steering_enters_after_the_step_and_follow_ups_after_the_answer() {
         FauxStep::text("disk fine"),
         FauxStep::text("summary"),
     ]);
-    let config = config(provider, vec![]);
-    let mut echo = EchoTool::new("echo");
-    echo.queues = Some(config.queues.clone());
-    let mut config = config;
-    config.tools = vec![Arc::new(echo)];
-    let mut context = Vec::new();
+    let (mut runner, _) = fed(provider, 10);
 
-    let (result, _) = run_prompt(config, &mut context, "go").await;
+    let result = runner.run("go", &CancellationToken::new()).await;
 
     assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(
-        summarize(&context),
+        summarize(&runner.session().messages()),
         [
             "user:go",
             "assistant:calls[c1]",
@@ -354,21 +369,15 @@ async fn a_withdrawn_follow_up_is_never_taken() {
         FauxStep::text("done"),
         FauxStep::text("stopped"),
     ]);
-    let config = config(provider.clone(), vec![]);
-    let mut echo = EchoTool::new("echo");
-    echo.queues = Some(config.queues.clone());
-    let mut config = config;
-    config.tools = vec![Arc::new(echo)];
-    config.queues.follow_up("then summarize");
-    let queues = config.queues.clone();
-    queues.follow_up("and then stop");
-    let mut context = Vec::new();
+    let (mut runner, _) = fed(provider, 10);
+    runner.queues().follow_up("then summarize");
+    runner.queues().follow_up("and then stop");
 
-    let (result, _) = run_prompt(config, &mut context, "go").await;
+    let result = runner.run("go", &CancellationToken::new()).await;
 
     assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(
-        summarize(&context),
+        summarize(&runner.session().messages()),
         [
             "user:go",
             "assistant:calls[c1]",
@@ -378,7 +387,7 @@ async fn a_withdrawn_follow_up_is_never_taken() {
             "assistant:stopped",
         ]
     );
-    assert!(queues.drain_follow_up().is_empty());
+    assert!(runner.queues().drain_follow_up().is_empty());
 }
 
 #[tokio::test]
@@ -388,22 +397,22 @@ async fn a_spent_budget_starts_no_new_step_and_leaves_queued_input_queued() {
         "echo",
         json!({"text": "ok", "steer": "also check disk"}),
     )]);
-    let config = config(provider.clone(), vec![]);
-    let mut echo = EchoTool::new("echo");
-    echo.queues = Some(config.queues.clone());
-    let mut config = config;
-    config.tools = vec![Arc::new(echo)];
-    let queues = config.queues.clone();
-    let mut context = Vec::new();
+    let (mut runner, events) = fed(provider, 1);
 
-    let (result, events) = run_prompt_with(config, &mut context, "go", 1, &CancellationToken::new()).await;
+    let result = runner.run("go", &CancellationToken::new()).await;
 
     assert_eq!(
         (result.outcome, events.steps(), result.model_requests),
         (RunOutcome::ModelRequestLimit, 1, 1)
     );
-    assert_eq!(summarize(&context), ["user:go", "assistant:calls[c1]", "tool:c1=ok"]);
-    assert_eq!(queues.drain_steering(), [Input::User("also check disk".into())]);
+    assert_eq!(
+        summarize(&runner.session().messages()),
+        ["user:go", "assistant:calls[c1]", "tool:c1=ok"]
+    );
+    assert_eq!(
+        runner.queues().drain_steering(),
+        [Input::User("also check disk".into())]
+    );
     let steps: Vec<_> = events
         .kinds()
         .into_iter()

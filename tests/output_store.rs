@@ -16,8 +16,9 @@ use zx_agent::builtin::tools::ReadFileTool;
 use zx_agent::hooks::{Hook, HookChain, HookContext};
 use zx_agent::runner::RunOutcome;
 use zx_agent::tools::{Tool, ToolContext, ToolOutput};
+use zx_agent::transcript::Transcript;
 
-use common::{RunnerSetup, config, header};
+use common::{RunnerSetup, config, header_in};
 
 fn settings() -> Config {
     Config {
@@ -371,12 +372,13 @@ async fn redaction_precedes_both_output_file_and_session_persistence() {
             Arc::new(ReadOutputTool::new(store.clone())),
         ],
     );
-    config.cwd = dir.path().into();
     config.hooks.push(RedactSecrets::new([secret.into()]));
     config.hooks.push(SpillOutputs::new(store, vec![TOOL_NAME.into()]));
     let audit = dir.path().join("session.jsonl");
     let (mut runner, _) = RunnerSetup {
-        session: common::create_session_file(&audit, header()).await.unwrap(),
+        session: common::create_session_file(&audit, header_in(dir.path()))
+            .await
+            .unwrap(),
         ..RunnerSetup::new(config)
     }
     .build();
@@ -429,9 +431,12 @@ async fn a_storage_error_keeps_the_redacted_result_inline_and_the_run_continues(
             Arc::new(ReadOutputTool::new(store.clone())),
         ],
     );
-    config.cwd = dir.path().into();
     config.hooks.push(SpillOutputs::new(store, vec![]));
-    let (mut runner, _) = RunnerSetup::new(config).build();
+    let (mut runner, _) = RunnerSetup {
+        session: Transcript::in_memory(header_in(dir.path())),
+        ..RunnerSetup::new(config)
+    }
+    .build();
     let report = runner.run("go", &CancellationToken::new()).await;
     // Storing is an optimisation: the hook runs after redaction, so a storage failure
     // keeps the already redacted, bounded result inline instead of hiding it.

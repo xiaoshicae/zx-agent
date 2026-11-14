@@ -19,7 +19,7 @@ use zx_agent::ai::{
 use zx_agent::compaction::{self, Config, DEFAULT_RESERVE_TOKENS, TokenTrigger};
 use zx_agent::hooks::{ContextEdit, Hook, HookContext, HookResult};
 use zx_agent::runner::RunOutcome;
-use zx_agent::transcript::{Entry, Transcript};
+use zx_agent::transcript::{Entry, SessionHeader, Transcript};
 
 /// 1 per input token and 2 per output token, in any currency: the faux provider reports 10 in, 5 out.
 fn priced() -> ModelMeta {
@@ -393,9 +393,13 @@ async fn the_cache_key_goes_to_the_provider_and_into_the_request_audit() {
     let file = dir.path().join("session.jsonl");
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let mut config = config(provider.clone(), vec![]);
-    config.cache_key = Some("session-7".into());
+    config.session_cache_key = true;
+    let header = SessionHeader {
+        id: "session-7".into(),
+        ..header()
+    };
     let (mut runner, _) = RunnerSetup {
-        session: common::create_session_file(&file, header()).await.unwrap(),
+        session: common::create_session_file(&file, header).await.unwrap(),
         ..RunnerSetup::new(config)
     }
     .build();

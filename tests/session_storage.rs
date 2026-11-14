@@ -1,6 +1,6 @@
 //! A session storage of the host's own, through the public SDK: what a storage backed by a
-//! database implements, and that a run records in it, is listed from it and continues from
-//! it.
+//! database implements, and that an agent creates its sessions in it, lists them from it and
+//! continues them from it.
 mod common;
 
 use std::collections::BTreeMap;
@@ -8,9 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
-use tokio_util::sync::CancellationToken;
 
-use common::{RunnerSetup, config, header, summarize};
+use common::{config, header, summarize};
 use zx_agent::ai::Message;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::runner::RunOutcome;
@@ -18,6 +17,7 @@ use zx_agent::transcript::{
     LoadedSession, LogRecord, SessionHeader, SessionInfo, SessionList, SessionLog, SessionQuery, SessionStorage,
     Transcript, WritesStopped,
 };
+use zx_agent::{Agent, AgentConfig, SessionOptions};
 
 /// Two tables, as a database would hold them: the sessions by ID, and their records under
 /// the unique key of session ID and `seq`.
@@ -107,60 +107,66 @@ impl SessionStorage for TableStorage {
     }
 }
 
-fn labelled(tenant: &str) -> SessionHeader {
-    SessionHeader {
-        labels: BTreeMap::from([("tenant".to_string(), tenant.to_string())]),
-        ..header()
-    }
+fn labels(tenant: &str) -> BTreeMap<String, String> {
+    BTreeMap::from([("tenant".to_string(), tenant.to_string())])
 }
 
 fn of_tenant(tenant: &str) -> SessionQuery {
     SessionQuery {
-        labels: BTreeMap::from([("tenant".to_string(), tenant.to_string())]),
+        labels: labels(tenant),
         ..SessionQuery::default()
     }
 }
 
-#[tokio::test]
-async fn a_run_records_in_a_custom_storage_and_a_later_run_continues_from_it() {
-    let storage = TableStorage::default();
-    let provider = Arc::new(FauxProvider::new([FauxStep::text("one"), FauxStep::text("two")]));
-    let header = labelled("acme");
-    let session = Transcript::with_log(header.clone(), storage.create(&header).await.unwrap());
-    let (mut runner, _) = RunnerSetup {
-        session,
-        ..RunnerSetup::new(config(provider.clone(), vec![]))
+/// A new session of `tenant` in the current directory.
+fn for_tenant(tenant: &str) -> SessionOptions {
+    SessionOptions {
+        labels: labels(tenant),
+        ..SessionOptions::new(".")
     }
-    .build();
-    let report = runner.run("first", &CancellationToken::new()).await;
+}
+
+/// An agent of `provider` that keeps its sessions in `storage`.
+fn agent(provider: &Arc<FauxProvider>, storage: &Arc<TableStorage>) -> Agent {
+    Agent::new(AgentConfig {
+        storage: storage.clone(),
+        ..config(provider.clone(), vec![])
+    })
+    .unwrap()
+}
+
+#[tokio::test]
+async fn an_agent_keeps_its_sessions_in_a_custom_storage_and_a_later_agent_continues_them() {
+    let storage = Arc::new(TableStorage::default());
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("one"), FauxStep::text("two")]));
+    let first = agent(&provider, &storage);
+    let session = first.create_session(for_tenant("acme")).await.unwrap();
+    let report = session.send("first").unwrap().wait().await;
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
-    assert_eq!(report.session_id, header.id);
-    drop(runner);
-    drop(storage.create(&labelled("other")).await.unwrap());
+    assert_eq!(report.session_id, session.id());
+    let id = session.id().to_string();
+    first.create_session(for_tenant("other")).await.unwrap();
+    drop((first, session));
 
     // Another process, as far as the kernel can tell: all it has is the storage.
-    let listed = storage.list(&of_tenant("acme")).await.unwrap();
+    let second = agent(&provider, &storage);
+    let listed = second.list_sessions(&of_tenant("acme")).await.unwrap();
     assert_eq!(listed.sessions.len(), 1, "{listed:?}");
     let found = &listed.sessions[0];
     assert_eq!(
         (found.id.as_str(), found.messages, found.first_prompt.as_deref()),
-        (header.id.as_str(), 2, Some("first"))
+        (id.as_str(), 2, Some("first"))
     );
-    assert_eq!(found.labels, header.labels);
-    let (loaded, log) = storage.open(&found.id).await.unwrap();
-    let (mut runner, _) = RunnerSetup {
-        session: Transcript::load(loaded, log).unwrap(),
-        ..RunnerSetup::new(config(provider.clone(), vec![]))
-    }
-    .build();
-    let report = runner.run("second", &CancellationToken::new()).await;
+    assert_eq!(found.labels, labels("acme"));
+    let session = second.open_session(&found.id).await.unwrap();
+    let report = session.send("second").unwrap().wait().await;
 
     assert_eq!(report.final_text, "two");
     assert_eq!(
         summarize(&provider.requests()[1].messages),
         ["user:first", "assistant:one", "user:second"]
     );
-    let snapshot = Transcript::snapshot(storage.read(&header.id).await.unwrap()).unwrap();
+    let snapshot = Transcript::snapshot(storage.read(&id).await.unwrap()).unwrap();
     assert_eq!(snapshot.messages().len(), 4);
     assert_eq!(snapshot.writes_stopped(), Some(&WritesStopped::ReadOnly));
 }

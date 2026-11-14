@@ -1,8 +1,9 @@
-//! The tool interface, and the set of tools a run declares.
+//! The tool interface, the tools of a session, and which of them a run declares.
 
 use std::collections::HashSet;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -12,6 +13,100 @@ use tokio_util::sync::CancellationToken;
 use crate::ai::text::prefix_within;
 use crate::ai::{ToolDef, Usage};
 use crate::sync::lock;
+
+/// The tools of a session, found by the name the model calls them by. Each tool declares
+/// itself once, when the toolbox is made: what requests declare and what arguments are
+/// checked against is that one declaration.
+#[derive(Default)]
+pub(crate) struct Toolbox {
+    /// In the order requests declare them.
+    tools: Vec<Declared>,
+}
+
+/// A tool, and what it declared when the toolbox was made.
+struct Declared {
+    tool: Arc<dyn Tool>,
+    definition: ToolDef,
+    /// The declared parameter schema, compiled.
+    schema: jsonschema::Validator,
+}
+
+impl Toolbox {
+    /// Check what a loop relies on: the model calls tools by the names they declare, so each
+    /// tool must declare the name it is called by and no two may share one, and each declared
+    /// parameter schema must be a JSON Schema. A tool's `name`, `definition`, `execution_mode`
+    /// and `effects` must not panic; they are tried here, so that a panic refuses the tool
+    /// instead of escaping a run.
+    pub(crate) fn new(tools: Vec<Arc<dyn Tool>>) -> Result<Self, String> {
+        let mut declared: Vec<Declared> = Vec::with_capacity(tools.len());
+        for (index, tool) in tools.into_iter().enumerate() {
+            let described = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                (
+                    tool.name().to_string(),
+                    tool.definition(),
+                    tool.execution_mode(),
+                    tool.effects(),
+                )
+            }));
+            let Ok((name, definition, _, _)) = described else {
+                return Err(format!("tool {index} panicked while describing itself"));
+            };
+            if definition.name != name {
+                return Err(format!(
+                    "tool {name:?} declares itself as {:?}; the model calls a tool by the name it declares",
+                    definition.name
+                ));
+            }
+            if declared.iter().any(|other| other.definition.name == name) {
+                return Err(format!("more than one tool is named {name:?}"));
+            }
+            let schema = jsonschema::validator_for(&definition.parameters)
+                .map_err(|error| format!("tool {name:?} has an invalid parameter schema: {error}"))?;
+            declared.push(Declared {
+                tool,
+                definition,
+                schema,
+            });
+        }
+        Ok(Self { tools: declared })
+    }
+
+    /// The tools, in the order requests declare them.
+    pub(crate) fn tools(&self) -> impl Iterator<Item = &Arc<dyn Tool>> {
+        self.tools.iter().map(|declared| &declared.tool)
+    }
+
+    /// The names the model calls the tools by, in the order requests declare them.
+    pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
+        self.tools.iter().map(|declared| declared.definition.name.as_str())
+    }
+
+    fn declared(&self, name: &str) -> Option<&Declared> {
+        self.tools.iter().find(|declared| declared.definition.name == name)
+    }
+
+    /// The tool the model calls `name`.
+    pub(crate) fn find(&self, name: &str) -> Option<&Arc<dyn Tool>> {
+        self.declared(name).map(|declared| &declared.tool)
+    }
+
+    /// The declarations of the tools that `active` offers, for a request.
+    pub(crate) fn definitions(&self, active: &ActiveTools) -> Vec<ToolDef> {
+        self.tools
+            .iter()
+            .map(|declared| &declared.definition)
+            .filter(|definition| active.is_active(&definition.name))
+            .cloned()
+            .collect()
+    }
+
+    /// Why `arguments` do not fit the parameter schema that the tool called `name` declares,
+    /// when they do not.
+    pub(crate) fn schema_mismatch(&self, name: &str, arguments: &Value) -> Option<String> {
+        let schema = &self.declared(name)?.schema;
+        schema.validate(arguments).err().map(|error| error.to_string())
+    }
+}
 
 /// Which of the configured tools the model is offered (pi: `setActiveTools`). Shared by the
 /// loop, the host and the hooks: a change applies to the next request, also in the middle
@@ -193,13 +288,16 @@ impl ToolOutput {
 /// argument type. `Err` becomes an error result that the model sees, and the loop
 /// continues.
 ///
-/// `name`, `definition`, `execution_mode` and `effects` must not panic: the loop tries them
-/// before a run's first request and fails the run if one does.
+/// `name`, `definition`, `execution_mode` and `effects` must not panic: they are tried when
+/// an agent is made and when it makes a session, and a panic refuses the agent or the
+/// session.
 #[async_trait]
 pub trait Tool: Send + Sync {
     /// Name the model calls the tool by. Must match `definition().name`.
     fn name(&self) -> &str;
-    /// Declaration sent to the model with every request.
+    /// Declaration sent to the model with every request, and whose parameter schema the
+    /// arguments of a call are checked against. A session asks for it when it is made and
+    /// keeps the answer.
     fn definition(&self) -> ToolDef;
     /// Defaults to `Parallel`.
     fn execution_mode(&self) -> ExecutionMode {
@@ -240,7 +338,63 @@ pub trait Tool: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use serde_json::json;
+
     use super::*;
+
+    /// Declares another required argument each time it is asked: `v0`, then `v1`, and so on.
+    struct Shifting(AtomicUsize);
+
+    #[async_trait]
+    impl Tool for Shifting {
+        fn name(&self) -> &str {
+            "shift"
+        }
+
+        fn definition(&self) -> ToolDef {
+            let asked = self.0.fetch_add(1, Ordering::SeqCst);
+            ToolDef {
+                name: "shift".to_string(),
+                description: "Shifts".to_string(),
+                parameters: json!({"type": "object", "required": [format!("v{asked}")]}),
+            }
+        }
+
+        async fn execute(&self, _args: Value, _ctx: &ToolContext) -> Result<ToolOutput, String> {
+            Ok(ToolOutput::ok("shifted"))
+        }
+    }
+
+    #[test]
+    fn a_toolbox_declares_and_checks_what_each_tool_declared_when_it_was_made() {
+        let toolbox = Toolbox::new(vec![Arc::new(Shifting(AtomicUsize::new(0)))]).unwrap();
+        let active = ActiveTools::default();
+
+        let declared = toolbox.definitions(&active);
+
+        assert_eq!(declared[0].parameters["required"], json!(["v0"]));
+        assert_eq!(toolbox.definitions(&active), declared, "asked again, the same");
+        assert_eq!(toolbox.schema_mismatch("shift", &json!({"v0": 1})), None);
+        assert!(toolbox.schema_mismatch("shift", &json!({"v1": 1})).is_some());
+        assert_eq!(toolbox.names().collect::<Vec<_>>(), ["shift"]);
+    }
+
+    #[test]
+    fn a_toolbox_offers_only_the_active_tools_and_finds_every_tool() {
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(Shifting(AtomicUsize::new(0)))];
+        let toolbox = Toolbox::new(tools).unwrap();
+        let active = ActiveTools::default();
+        active.set(["another"]);
+
+        assert!(toolbox.definitions(&active).is_empty());
+        assert!(
+            toolbox.find("shift").is_some(),
+            "an inactive tool is still the session's"
+        );
+        assert!(toolbox.find("another").is_none());
+    }
 
     fn observed(capacity: usize) -> (ToolContext, tokio::sync::mpsc::Receiver<String>) {
         let (progress, updates) = tokio::sync::mpsc::channel(capacity);

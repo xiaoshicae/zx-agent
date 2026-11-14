@@ -25,10 +25,9 @@ use zx_core::policy::ApprovalDecision;
 
 use super::approval::ApprovalUpdate;
 use super::outlet::{Opened, Outlet, said};
-use super::server::Shared;
+use super::server::{Opening, Shared};
 use super::{
-    Addressee, ApprovalId, ApprovalRecord, Choice, ImChannel, MessageRef, Opening, Outbound, ServerEvent, SessionKey,
-    UserId,
+    Addressee, ApprovalId, ApprovalRecord, Choice, ImChannel, MessageRef, Outbound, ServerEvent, SessionKey, UserId,
 };
 
 /// Sent alone, cancels the conversation's run.

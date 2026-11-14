@@ -13,14 +13,14 @@
 | `tests/prepare_request.rs` | `Hook::prepare_request` 对单次请求的替换 |
 | `tests/continue_run.rs` | 不加新输入的续跑 |
 | `tests/overflow_recovery.rs` | 上下文过长后摘要并开始新的尝试 |
-| `tests/run_cli.rs` | `run`：退出码 0 到 9、jsonl 输出、追踪导出、请求设置 |
+| `tests/run_cli.rs` | `run`：退出码 0 到 9、jsonl 输出、追踪导出、请求设置、续接的会话在原目录工作 |
 | `tests/otel.rs` | OpenTelemetry 的 span 层级、属性与 traceparent |
 | `tests/model_meta.rs` | 模型单价、成本与 token 阈值 |
 | `tests/extension_capabilities.rs` | 扩展在运行中发消息、记状态、改工具集与命令 |
 | `tests/custom_records.rs` | 扩展的 `custom` 与 `custom_message` 记录 |
 | `tests/session_branch.rs` | `Session::branch` 切换分支 |
 | `tests/session_fork.rs` | 复制分支成新会话 |
-| `tests/session_storage.rs` | 宿主自己实现的 `SessionStorage`：运行写入、按标签列出、从存储续接，以及唯一键拦住第二个写入者 |
+| `tests/session_storage.rs` | 宿主自己实现的 `SessionStorage`：`Agent` 在其中创建会话、按标签列出、由另一个 `Agent` 续接，以及唯一键拦住第二个写入者 |
 | `tests/sessions_cli.rs` | chat 的会话目录、`--resume` 与 `zx-agent sessions` |
 | `tests/chat_cli.rs` | chat：审批、输出行、信号、PTY |
 | `tests/acp_cli.rs` | `acp` 经 stdio 的协议、权限请求、会话加载与关闭、`/name` |
@@ -38,7 +38,7 @@
 | `tests/hooks.rs` | 钩子、审批、策略事件与脱敏 |
 | `tests/hooks_cli.rs` | 程序中的密钥脱敏与钩子失败输出 |
 | `tests/hook_contract.rs` | 钩子输入输出的 JSON 契约 |
-| `tests/extensions.rs` | `extensions::register` 的注册与拒绝 |
+| `tests/extensions.rs` | `AgentConfig::extensions`：扩展给会话加了什么，哪些扩展让 `Agent::new` 拒绝 |
 | `tests/mcp.rs` | MCP 客户端对假服务器 |
 | `tests/mcp_cli.rs` | `[[mcp]]` 接入 run、chat 与 im |
 | `tests/im_feishu.rs` | ⚑ D:5/CHINA FLAG: 飞书 channel 对假开放平台 |

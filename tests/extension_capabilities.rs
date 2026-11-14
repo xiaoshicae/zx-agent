@@ -11,14 +11,15 @@ use async_trait::async_trait;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use common::{EchoTool, NotifyingProvider, RunnerSetup, config, header, summarize};
+use common::{EchoTool, NotifyingProvider, RunnerSetup, config, header, refusal, summarize};
+use zx_agent::AgentConfig;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, ToolCall, UserMessageKind};
 use zx_agent::events::{Event, EventKind};
-use zx_agent::extensions::{CommandContext, CommandError, CommandOutcome, Extension, SlashCommand, register};
+use zx_agent::extensions::{CommandContext, CommandError, CommandOutcome, Extension, SlashCommand};
 use zx_agent::hooks::{Hook, HookContext, HookResult};
 use zx_agent::input::{Input, QueueMode};
-use zx_agent::runner::{LoopConfig, RunOutcome};
+use zx_agent::runner::RunOutcome;
 use zx_agent::session::SessionError;
 use zx_agent::tools::ToolOutput;
 use zx_agent::transcript::{CustomMessage, Entry};
@@ -32,7 +33,7 @@ fn note(text: &str) -> CustomMessage {
     }
 }
 
-async fn session_in(file: &Path, config: LoopConfig) -> (common::Driven, Arc<common::Collect>) {
+async fn session_in(file: &Path, config: AgentConfig) -> (common::Driven, Arc<common::Collect>) {
     let (runner, events) = RunnerSetup {
         session: common::create_session_file(file, header()).await.unwrap(),
         ..RunnerSetup::new(config)
@@ -282,14 +283,10 @@ async fn an_extension_command_runs_through_the_session_and_its_message_starts_a_
     let file = dir.path().join("session.jsonl");
     let provider = Arc::new(FauxProvider::new([FauxStep::text("looking")]));
     let mut config = config(provider.clone(), vec![]);
-    register(
-        &mut config,
-        &[Arc::new(Commands {
-            name: "tracker",
-            commands: vec![Arc::new(Jira)],
-        })],
-    )
-    .unwrap();
+    config.extensions = vec![Arc::new(Commands {
+        name: "tracker",
+        commands: vec![Arc::new(Jira)],
+    })];
     let (session, _) = session_in(&file, config).await;
     assert_eq!(session.commands().len(), 1);
     assert_eq!(session.commands()[0].description(), "Fetch an issue");
@@ -341,7 +338,7 @@ fn command_names_must_be_well_formed_and_unique() {
     ];
     for (names, expected) in cases {
         let mut config = config(Arc::new(FauxProvider::new(Vec::new())), vec![]);
-        let extensions: Vec<Arc<dyn Extension>> = names
+        config.extensions = names
             .iter()
             .enumerate()
             .map(|(index, name)| {
@@ -351,9 +348,8 @@ fn command_names_must_be_well_formed_and_unique() {
                 }) as Arc<dyn Extension>
             })
             .collect();
-        let error = register(&mut config, &extensions).unwrap_err();
+        let error = refusal(config);
         assert!(error.contains(expected), "{error}");
-        assert!(config.commands.is_empty(), "nothing is registered");
     }
 }
 
@@ -420,9 +416,9 @@ async fn run_with_mode(mode: QueueMode) -> Vec<Vec<String>> {
     ]));
     let mut config = config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]);
     config.hooks.push(TwoSteers);
-    config.queues.set_mode(mode);
     let (runner, _) = RunnerSetup::new(config).build();
     let session = runner.into_session();
+    session.queues().set_mode(mode);
     session.prompt("go", &CancellationToken::new()).await.unwrap();
     provider
         .requests()

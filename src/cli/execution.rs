@@ -10,7 +10,7 @@ use zx_agent::builtin::executor::{
     ContainerConfig, ContainerExecutor, Executor, LocalExecutor, container_environment_section,
     local_environment_section,
 };
-use zx_agent::config::{Config, ContainerSettings, Execution};
+use zx_agent::config::{ContainerSettings, Execution};
 
 /// The container reads the whole working directory, so the session file must be outside it:
 /// masking one path would leave hard links to it and earlier session files beside it readable.
@@ -51,22 +51,24 @@ fn resolve_location(path: &Path) -> Result<PathBuf> {
     Ok(resolved)
 }
 
-/// Where commands run, started when it is a container, and the prompt section describing it.
-/// On this machine commands do not see the variables `hidden_env` names; in a container they
-/// see none of the agent's environment.
+/// Where commands run in `cwd`, started when it is a container, which is labelled `label`
+/// and takes its settings from `container`; and the prompt section describing it. On this
+/// machine commands do not see the variables `hidden_env` names; in a container they see
+/// none of the agent's environment.
 pub(super) async fn executor(
-    config: &Config,
+    execution: Execution,
+    container: &ContainerSettings,
     cwd: &Path,
     label: &str,
     hidden_env: Vec<String>,
 ) -> Result<(Arc<dyn Executor>, String)> {
-    match config.execution {
+    match execution {
         Execution::Local => {
             let local: Arc<dyn Executor> = Arc::new(LocalExecutor { hidden_env });
             Ok((local, local_environment_section(cwd)))
         }
         Execution::Container => {
-            let start = container_config(&config.container, cwd, label)?;
+            let start = container_config(container, cwd, label)?;
             // The description needs the settings, which starting the container consumes.
             let settings = start.clone();
             let container = ContainerExecutor::start(start)

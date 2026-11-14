@@ -2,13 +2,15 @@
 
 use std::path::PathBuf;
 
+use anyhow::Result;
+
 use zx_agent::ai::Message;
 use zx_agent::builtin::tools::BASH;
-use zx_agent::transcript::Entry;
+use zx_agent::transcript::{Entry, Transcript};
 
 use super::output::{self, Output};
 use super::term::Tone;
-use crate::cli::PreparedSession;
+use crate::cli::{ModeAgent, Opened};
 use crate::render::{local_time, visible};
 
 /// How the last activity of a resumed session is shown.
@@ -33,30 +35,30 @@ pub(super) struct Resumed {
 }
 
 impl About {
-    /// What `prepared` runs on, taken from it before it becomes a session.
-    pub(super) fn of(prepared: &mut PreparedSession) -> Self {
-        Self {
-            agent: std::mem::take(&mut prepared.agent_name),
-            tools: prepared
-                .config
-                .tools
-                .iter()
-                .map(|tool| tool.name().to_string())
-                .collect(),
-            auto_approve: std::mem::take(&mut prepared.auto_approve_commands),
-            cwd: prepared.config.cwd.clone(),
-            session: prepared.session_path.take(),
-            resumed: (!prepared.store.entries().is_empty()).then(|| Resumed {
-                messages: prepared
-                    .store
-                    .messages()
-                    .iter()
-                    .filter(|message| matches!(message, Message::User { .. } | Message::Assistant(_)))
-                    .count(),
-                last_activity_ms: prepared.store.entries().last().map(Entry::timestamp),
-            }),
-        }
+    /// What the session `opened` of `agent` runs on, read before its first run.
+    pub(super) fn of(agent: &ModeAgent, opened: &Opened) -> Result<Self> {
+        let session = &opened.session;
+        Ok(Self {
+            agent: agent.name.clone(),
+            tools: session.tool_names().to_vec(),
+            auto_approve: agent.auto_approve_commands.clone(),
+            cwd: session.cwd().to_path_buf(),
+            session: opened.path.clone(),
+            resumed: session.with_transcript(resumed)?,
+        })
     }
+}
+
+/// How much of an earlier conversation `store` holds, when it holds one.
+fn resumed(store: &Transcript) -> Option<Resumed> {
+    (!store.entries().is_empty()).then(|| Resumed {
+        messages: store
+            .messages()
+            .iter()
+            .filter(|message| matches!(message, Message::User { .. } | Message::Assistant(_)))
+            .count(),
+        last_activity_ms: store.entries().last().map(Entry::timestamp),
+    })
 }
 
 fn session_text(about: &About) -> String {

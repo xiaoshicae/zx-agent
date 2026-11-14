@@ -14,7 +14,7 @@ use common::{config, run_prompt, summarize};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::builtin::mcp::{Server, ServerConfig};
 use zx_agent::builtin::tools::truncate::MAX_BYTES;
-use zx_agent::extensions::{Extension, register};
+use zx_agent::extensions::Extension;
 use zx_agent::tools::{Tool, ToolContext, ToolOutput};
 
 const TOKEN: &str = "mcp-token-1234";
@@ -353,7 +353,7 @@ async fn the_model_calls_a_server_tool_through_the_loop() {
         FauxStep::text("done"),
     ]));
     let mut config = config(provider.clone(), Vec::new());
-    register(&mut config, &[server]).unwrap();
+    config.extensions = vec![server];
     let mut context = Vec::new();
     run_prompt(config, &mut context, "is it up?").await;
     let requests = provider.requests();

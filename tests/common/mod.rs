@@ -26,6 +26,7 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use tokio::sync::Notify;
+use zx_agent::agent::SessionParts;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::{
@@ -36,11 +37,11 @@ use zx_agent::events::{Event, EventKind};
 use zx_agent::hooks::HookContext;
 use zx_agent::input::{Input, InputQueues};
 use zx_agent::policy::{ApprovalDecision, ApprovalMode, DEFAULT_APPROVAL_TIMEOUT};
-use zx_agent::runner::{LoopConfig, RunLimits, RunReport};
+use zx_agent::runner::{RunLimits, RunReport};
 use zx_agent::session::SessionError;
 use zx_agent::tools::{ExecutionMode, Tool, ToolContext, ToolOutput};
 use zx_agent::transcript::{Entry, JsonlStorage, LoadedSession, SessionHeader, SessionStorage, Transcript};
-use zx_agent::{Run, Session};
+use zx_agent::{Agent, AgentConfig, Run, Session};
 
 /// The compiled `zx-agent`, for the tests that drive the program.
 ///
@@ -319,7 +320,8 @@ pub(crate) struct EchoTool {
     pub name: &'static str,
     pub mode: ExecutionMode,
     pub calls: AtomicUsize,
-    pub queues: Option<Arc<InputQueues>>,
+    /// The queues of the session the tool runs in, once a test has told it (`feeds`).
+    queues: OnceLock<Arc<InputQueues>>,
 }
 
 impl EchoTool {
@@ -328,8 +330,15 @@ impl EchoTool {
             name,
             mode: ExecutionMode::Parallel,
             calls: AtomicUsize::new(0),
-            queues: None,
+            queues: OnceLock::new(),
         }
+    }
+
+    /// Let the calls that ask for it (`steer`, `follow_up`, `withdraw`) change `queues`,
+    /// those of the session the tool runs in. A session makes its own queues, so a test
+    /// says this once the session exists.
+    pub(crate) fn feeds(&self, queues: &Arc<InputQueues>) {
+        assert!(self.queues.set(queues.clone()).is_ok(), "a tool feeds one session");
     }
 }
 
@@ -359,13 +368,13 @@ impl Tool for EchoTool {
         if let Some(ms) = args.get("ms").and_then(Value::as_u64) {
             tokio::time::sleep(Duration::from_millis(ms)).await;
         }
-        if let (Some(queues), Some(text)) = (&self.queues, args.get("steer").and_then(Value::as_str)) {
+        if let (Some(queues), Some(text)) = (self.queues.get(), args.get("steer").and_then(Value::as_str)) {
             queues.steer(text);
         }
-        if let (Some(queues), Some(text)) = (&self.queues, args.get("follow_up").and_then(Value::as_str)) {
+        if let (Some(queues), Some(text)) = (self.queues.get(), args.get("follow_up").and_then(Value::as_str)) {
             queues.follow_up(text);
         }
-        if let (Some(queues), Some(text)) = (&self.queues, args.get("withdraw").and_then(Value::as_str)) {
+        if let (Some(queues), Some(text)) = (self.queues.get(), args.get("withdraw").and_then(Value::as_str)) {
             assert!(queues.withdraw(&Input::User(text.into())), "{text:?} is not queued");
         }
         if args.get("panic").is_some() {
@@ -428,11 +437,19 @@ impl Collect {
     }
 }
 
-pub(crate) fn config(provider: Arc<dyn Provider>, tools: Vec<Arc<dyn Tool>>) -> LoopConfig {
+pub(crate) fn config(provider: Arc<dyn Provider>, tools: Vec<Arc<dyn Tool>>) -> AgentConfig {
     // No system prompt, so runs add no system message; system prompt tests set their own.
-    LoopConfig {
+    AgentConfig {
         tools,
-        ..LoopConfig::new(provider, "test-model")
+        ..AgentConfig::new(provider, "test-model")
+    }
+}
+
+/// Why no agent can be made from `config`.
+pub(crate) fn refusal(config: AgentConfig) -> String {
+    match Agent::new(config) {
+        Ok(_) => panic!("an agent was made from the configuration"),
+        Err(error) => format!("{error:#}"),
     }
 }
 
@@ -471,7 +488,7 @@ pub(crate) fn summarize(messages: &[Message]) -> Vec<String> {
 /// in-memory session that starts with `context`; afterwards `context` is that session's
 /// projection. Returns the report and the events.
 pub(crate) async fn run_prompt(
-    config: LoopConfig,
+    config: AgentConfig,
     context: &mut Vec<Message>,
     prompt: &str,
 ) -> (RunReport, Arc<Collect>) {
@@ -480,7 +497,7 @@ pub(crate) async fn run_prompt(
 
 /// `run_prompt` with at most `max_model_requests`, stopped by `cancel`.
 pub(crate) async fn run_prompt_with(
-    config: LoopConfig,
+    config: AgentConfig,
     context: &mut Vec<Message>,
     prompt: &str,
     max_model_requests: u32,
@@ -508,7 +525,7 @@ pub(crate) async fn run_prompt_with(
 /// Run one user `prompt` on a new in-memory session whose approval requests `approver`
 /// answers. Returns the report and the events.
 pub(crate) async fn run_approved(
-    config: LoopConfig,
+    config: AgentConfig,
     approver: Arc<dyn Approver>,
     prompt: &str,
 ) -> (RunReport, Arc<Collect>) {
@@ -537,8 +554,14 @@ pub(crate) fn fast_retry(max_retries: u32) -> RetryPolicy {
     }
 }
 
+/// The header of a new session that works in the current directory.
 pub(crate) fn header() -> SessionHeader {
-    SessionHeader::new(Path::new("."), "test-model")
+    header_in(Path::new("."))
+}
+
+/// The header of a new session that works in `cwd`.
+pub(crate) fn header_in(cwd: &Path) -> SessionHeader {
+    SessionHeader::new(cwd, "test-model")
 }
 
 /// Every line of a session file, parsed.
@@ -590,11 +613,14 @@ pub(crate) trait Approver: Send + Sync {
     async fn confirm(&self, request: &Asked) -> Option<ApprovalDecision>;
 }
 
-/// The parts of a session, with test defaults: no retries, unattended preset limits,
-/// an in-memory session, no compaction settings, nobody to answer approvals. Override
-/// fields with struct update syntax, then `build`.
+/// What a test's session is made of, with test defaults: no retries, unattended preset
+/// limits, an in-memory transcript, no compaction settings, nobody to answer approvals.
+/// Override fields with struct update syntax, then `build`. The session works in the
+/// directory its transcript's header names.
 pub(crate) struct RunnerSetup {
-    pub config: LoopConfig,
+    /// The agent's role. Its `retry`, `limits` and `compaction` are not used: the fields
+    /// below and `Runner::with_compaction` say them, so that a test sets each in one place.
+    pub config: AgentConfig,
     pub retry: RetryPolicy,
     pub limits: RunLimits,
     pub session: Transcript,
@@ -604,7 +630,7 @@ pub(crate) struct RunnerSetup {
 }
 
 impl RunnerSetup {
-    pub(crate) fn new(config: LoopConfig) -> Self {
+    pub(crate) fn new(config: AgentConfig) -> Self {
         Self {
             config,
             retry: fast_retry(0),
@@ -674,8 +700,13 @@ impl Runner {
             if approver.is_some() && config.approvals == ApprovalMode::Deny {
                 config.approvals = ApprovalMode::Wait(DEFAULT_APPROVAL_TIMEOUT);
             }
-            let session = Session::new(config, retry, limits, parts.compaction, session)
-                .expect("with_compaction checked the budgets");
+            config.retry = retry;
+            config.limits = limits;
+            config.compaction = parts.compaction;
+            // The agent goes once the session is made: a session needs it no longer.
+            let session = Agent::new(config)
+                .and_then(|agent| agent.adopt_session(session, SessionParts::default()))
+                .unwrap_or_else(|error| panic!("the test's session cannot be made: {error:#}"));
             Driven {
                 session,
                 events: self.events.clone(),
@@ -724,7 +755,7 @@ impl Runner {
     }
 
     /// The session's queues.
-    pub(crate) fn queues(&self) -> &InputQueues {
+    pub(crate) fn queues(&self) -> &Arc<InputQueues> {
         self.driven().queues()
     }
 

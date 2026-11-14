@@ -14,25 +14,26 @@
 
 | 层 | 位置 |
 |---|---|
-| CLI | `src/main.rs`（只分派）、`src/cli/`（`settings.rs` 合并配置与命令行，`shared.rs` 的 `Shared` 是进程内共用的东西，`prepare.rs` 组装一个会话，`execution.rs` 本机或容器）、`src/run.rs`、`src/chat/`、`src/acp/`、`src/im.rs`、`src/process.rs`、`src/render.rs`、`src/session_files.rs`、`src/list_sessions.rs` |
+| CLI | `src/main.rs`（只分派）、`src/cli/`（`settings.rs` 合并配置与命令行，`shared.rs` 的 `Shared` 是进程内共用的东西，`agent.rs` 构造一种运行方式的 `Agent` 并经它创建或打开会话，`setup.rs` 是每个会话各自的部分（命令行的 `SessionSetup`），`execution.rs` 本机或容器）、`src/run.rs`、`src/chat/`、`src/acp/`、`src/im.rs`、`src/process.rs`、`src/render.rs`、`src/session_files.rs`、`src/list_sessions.rs` |
 | 配置 | `src/config/`（`environment.rs`、`definition.rs`、`agent_file.rs`、`permissions.rs`）、`agents/` |
-| 内核 | `crates/zx-core/src/`：`session.rs`（会话句柄：共享调用、Busy）与 `session/run.rs`（`Run`：一次执行的事件流与结果）、`runner.rs`（单次运行、重试、上限）、`runner/step_loop/`（每次尝试的循环与工具执行）、`runner/trace.rs`（事件的编号与发送）、`transcript/`（只追加的条目树、投影、恢复；存储接口 `SessionStorage` 与 `SessionLog`，附带的两种存储 `jsonl.rs` 与 `memory.rs`）、`compaction/` 与 `transcript/compaction/`（摘要，统一叫 compaction，见 D22）、`tools.rs`、`policy/`（策略接口与链；`approval.rs` 是审批闸门 `ApprovalGate`：等待宿主回答，并记住本会话放行的调用）、`hooks/`、`events/`（只有数据）、`input.rs`、`prompt.rs`、`extensions/`、`guard.rs`（宿主代码看到的取消信号，调用宿主代码的时限）。公开路径按域模块（`zx_core::tools::Tool`），根部只导出 `AgentSession` 与 `CancelSignal`；模块间允许的引用见 `lib.rs` 的 `//!` |
+| 内核 | `crates/zx-core/src/`：`agent.rs`（入口 `Agent`：所有会话共用的角色 `AgentConfig`、宿主为单个会话装配的接口 `SessionSetup`、打开着的会话表）、`session.rs`（会话句柄：共享调用、Busy、Closed）与 `session/run.rs`（`Run`：一次执行的事件流与结果）、`runner.rs`（单次运行、重试、上限）、`runner/step_loop/`（每次尝试的循环与工具执行）、`runner/trace.rs`（事件的编号与发送）、`transcript/`（只追加的条目树、投影、恢复；存储接口 `SessionStorage` 与 `SessionLog`，附带的两种存储 `jsonl.rs` 与 `memory.rs`）、`compaction/` 与 `transcript/compaction/`（摘要，统一叫 compaction，见 D22）、`tools.rs`（工具接口，与一个会话的工具集合 `Toolbox`）、`policy/`（策略接口与链；`approval.rs` 是审批闸门 `ApprovalGate`：等待宿主回答，并记住本会话放行的调用）、`hooks/`、`events/`（只有数据）、`input.rs`、`prompt.rs`、`extensions/`、`guard.rs`（宿主代码看到的取消信号，调用宿主代码的时限）。公开路径按域模块（`zx_core::tools::Tool`），根部只导出入口对象 `Agent`、`AgentConfig`、`Session`、`SessionOptions`、`Run` 与 `CancelSignal`；模块间允许的引用见 `lib.rs` 的 `//!` |
 | 模型 | `crates/zx-ai/src/`、`crates/zx-ai-openai/src/` |
 | 工具与外层策略 | `crates/zx-tools/src/`：`tools/`、`executor/`（本机与容器）、`policy/`、`continuation.rs`、`redact.rs`、`output_store.rs`、`mcp.rs` |
 | IM | `crates/zx-im/src/`（`ImChannel`、`Server`、`platform.rs`）、`crates/zx-im-slack/`、`crates/zx-im-feishu/` |
 | 追踪导出 | `src/otel.rs`、`src/otel/` |
 
-一次运行：`main` 组装 `Session` → `send` 独占取得 Runner（crate 内部）并返回 `Run`，调用方读它，运行才推进 → 每次尝试运行一遍循环 `StepLoop`（crate 内部） → 先持久化提示词、输入和上下文改动，再执行可选摘要 → 请求模型，发出的上下文就是此刻的会话投影 → 执行工具、脱敏、可选落盘 → 每一步先写入会话宿主（crate 内部的 `SessionHost`），再把事件放进这次运行的有界通道 → Runner 处理重试并汇总 `RunReport`，`main` 映射退出码。
+一次运行：`main` 构造 `Agent`，`Agent` 创建或打开 `Session`（先由 `SessionSetup` 给出属于该会话的部分，再把角色、会话的部分与扩展合成这个会话的循环配置） → `send` 独占取得 Runner（crate 内部）并返回 `Run`，调用方读它，运行才推进 → 每次尝试运行一遍循环 `StepLoop`（crate 内部） → 先持久化提示词、输入和上下文改动，再执行可选摘要 → 请求模型，发出的上下文就是此刻的会话投影 → 执行工具、脱敏、可选落盘 → 每一步先写入会话宿主（crate 内部的 `SessionHost`），再把事件放进这次运行的有界通道 → Runner 处理重试并汇总 `RunReport`，`main` 映射退出码。
 
 设计取舍（改动前先理解原因）：
 
 - **场景策略不进内核**：提示词、上限与续写默认值由 agent 文件提供；命令策略、续写、脱敏由外层注册，无人时拒绝 Ask。`run` 用退出码表达结果，调度器不必解析输出。
 - **配置与内容分工**：`config.toml` 决定环境，agent 决定角色，命令行只剩 `--model`、`--tools`、预算与会话参数。没有项目级配置文件：项目内容（含 AGENTS.md 与 skill 正文）不能改变环境、权限或控制策略；自动发现的 AGENTS.md 必须在项目根目录内。
+- **`Agent` 是唯一入口**：`AgentConfig` 是所有会话共用的角色（模型、工具、策略、钩子、扩展、上限、存储）；属于单个会话的工具、钩子与提示词段落由宿主的 `SessionSetup` 在创建或打开会话时给出，随会话释放。会话在它创建时的目录工作（头部的 `cwd`），续接时不另给目录。打开着的会话记在 `Agent` 的表里：同一个会话同时被打开两次得到同一个 `Session`，`close_session` 取消进行中的运行并释放它，之后旧句柄返回 Closed。循环的配置 `LoopConfig` 与工具集合 `Toolbox` 是内核内部类型；工具的名称与参数声明在创建 `Agent` 与会话时校验；声明在建会话时取定，请求与参数校验都用它。
 - **共享 API、独占执行**：`Session` 是可克隆的句柄，短锁只切换 Runner 所有权，不跨 await；重叠调用返回 Busy。`send`、`continue_run`、`compact` 只取得会话并返回 `Run`：调用方读它才推进，事件经有界通道（读得慢运行就等，没有不设上限的缓冲），运行结束、取消、panic 或 `Run` 被丢弃后由 RAII 归还。事件只从 `Run` 读出；要观察所有运行的（如追踪导出）用 `Hook::on_event`。
 - **会话是审计日志，也是模型上下文的唯一来源**：修正上下文靠追加 `context_edit`，提示词变化靠追加 system 消息，原始记录始终保留；可替换的只是最底层的存储：`SessionStorage` 与它交出的 `SessionLog`，接口里没有文件路径。摘要每次读取原始投影，原始事实被修正后整份失效。
 - **终端输入只有一个所有者**：chat 的专用线程经有界通道提供输入；审批请求随事件到达读 `Run` 的那个循环，回答经 `Session::resolve_approval`，必须带内核为这次请求生成的审批编号。
 - **审批由内核等待，不是接口**：策略给出询问时，调用在 `ApprovalGate` 等待；`ApprovalMode::Deny`（默认）没有人回答，立即拒绝，`ApprovalMode::Wait` 等宿主回答，超时与取消按拒绝处理。审批编号由内核生成，迟到的回答落不到别的请求上；审批不写入会话。
-- **扩展点都是 trait**：`Provider`、`Tool`、`ToolPolicy`、`Hook`、`Executor`、`SessionStorage` 与 `SessionLog`、`ImChannel`、`StatusStore`、`Extension`。新能力优先实现 trait，不改循环。
+- **扩展点都是 trait**：`Provider`、`Tool`、`ToolPolicy`、`Hook`、`Executor`、`SessionStorage` 与 `SessionLog`、`SessionSetup`、`ImChannel`、`StatusStore`、`Extension`。新能力优先实现 trait，不改循环。
 - **通用，不为场景定制**：某个环境、平台或厂商才有的知识写在 agent、部署清单或配置里，或由外部适配器实现；代码不解析某个系统的私有格式；provider 的协议方言处理显式开启（如 `provider.fillMissingReasoning`），不按厂商推断。
 - **界面交给 ACP 客户端**（D13）：`acp` 只做协议与会话的映射；`chat` 不再加功能。
 - **安全靠部署隔离**：策略只是第一道防线（见 README 的"安全模型"），真正的隔离靠不同账号或容器。
@@ -104,10 +105,11 @@
 ## 新增功能放在哪里
 
 - **新 provider**：实现 `ai::Provider`，遵守不变量 1；解析逻辑写单元测试，端到端测试用 `tests/common/mock_server.rs`，参照 `tests/openai_mock.rs`。
-- **新工具**：实现 `Tool`。参数是带 `#[serde(deny_unknown_fields)]` 的结构体；输出截断；支持取消；不改变任何状态的工具 `effects()` 返回 `Effects::ReadOnly`，其余保留 `SideEffects`（不变量 10）；容忍常见参数错误时覆盖 `prepare_arguments`，只依据参数本身改写。测试覆盖成功、参数错误、超时或取消。
-- **新策略**：实现内核的 `ToolPolicy`（`check(call, ctx)`），加入 `LoopConfig::policies`（`PolicyChain::push`，给出名称），无法判断时返回 `PolicyDecision::Deny`；所有策略取最严的结论，策略超时、panic 或被取消按拒绝处理。扩展经 `Extension::policies` 提供策略；钩子不做放行判断。
-- **新扩展**：实现 `Hook`；回调的最后一个参数是 `&HookContext`，回调必须异步让出执行权；`transform_context` 不能追加 system 消息。阶段默认 `Extension`，用 `HookChain::push_with` 注册时给出名称。钩子 JSON 格式由 `tests/hook_contract.rs` 固定。
-- **打包的扩展**：实现 `extensions::Extension`，经 `extensions::register` 加入 `LoopConfig`；钩子只能是 `Extension` 阶段；段落名不能是 `preamble`、`prompt::GENERATED_SECTIONS` 中的名字或已有段落；命令名只用 ASCII 字母、数字、`_`、`-` 且不重名。运行中发消息、记状态或改工具集经 `HookContext` 的 `queues` 与 `active_tools`，不直接碰会话。
+- **新工具**：实现 `Tool`。参数是带 `#[serde(deny_unknown_fields)]` 的结构体；输出截断；支持取消；不改变任何状态的工具 `effects()` 返回 `Effects::ReadOnly`，其余保留 `SideEffects`（不变量 10）；容忍常见参数错误时覆盖 `prepare_arguments`，只依据参数本身改写。所有会话共用的放进 `AgentConfig::tools`，绑定会话的目录或执行环境的由 `SessionSetup` 给出。测试覆盖成功、参数错误、超时或取消。
+- **新策略**：实现内核的 `ToolPolicy`（`check(call, ctx)`），加入 `AgentConfig::policies`（`PolicyChain::push`，给出名称），无法判断时返回 `PolicyDecision::Deny`；所有策略取最严的结论，策略超时、panic 或被取消按拒绝处理。扩展经 `Extension::policies` 提供策略；钩子不做放行判断。
+- **新扩展**：实现 `Hook`；回调的最后一个参数是 `&HookContext`，回调必须异步让出执行权；`transform_context` 不能追加 system 消息。阶段默认 `Extension`，用 `HookChain::push_with` 注册时给出名称：所有会话共用的进 `AgentConfig::hooks`，属于单个会话的进 `SessionParts::hooks`。钩子 JSON 格式由 `tests/hook_contract.rs` 固定。
+- **打包的扩展**：实现 `extensions::Extension`，放进 `AgentConfig::extensions`：`Agent` 装配每个会话时注册它，工具由各会话共用，`hooks` 每个会话调用一次（创建 `Agent` 时为校验多调用一次）；钩子只能是 `Extension` 阶段；段落名不能是 `preamble`、`prompt::GENERATED_SECTIONS` 中的名字或已有段落；命令名只用 ASCII 字母、数字、`_`、`-` 且不重名。运行中发消息、记状态或改工具集经 `HookContext` 的 `queues` 与 `active_tools`，不直接碰会话。
 - **上下文改动**：`on_input` 完成后才写入原始输入，改写或拒绝再追加 `context_edit`；`transform_context` 返回的 `ContextEdit` 计划整份先校验，逐项写入成功后再请求模型。
-- **新的会话存储**：实现 `transcript::SessionStorage`（`create`、`open`、`read`、`list`）与它交出的 `SessionLog`。`append` 在记录保存后才返回，同一 `seq` 已有记录时报错；一个会话同一时间只有一个写入者；`create` 拒绝已存在的会话 ID。`list` 按 `SessionQuery` 筛选与排序，可复用 `SessionQuery::matches`、`arrange` 与 `SessionInfo::of`。接口里不出现文件路径。新会话的日志交给 `Transcript::with_log`，`open` 的结果交给 `Transcript::load`，`read` 的结果交给 `Transcript::snapshot`。参照 `crates/zx-core/src/transcript/memory.rs` 的 `MemoryStorage`；只换记录的写入方式时参照 `tests/runner.rs` 的 `TableLog`。
+- **新的会话存储**：实现 `transcript::SessionStorage`（`create`、`open`、`read`、`list`）与它交出的 `SessionLog`。`append` 在记录保存后才返回，同一 `seq` 已有记录时报错；一个会话同一时间只有一个写入者；`create` 拒绝已存在的会话 ID。`list` 按 `SessionQuery` 筛选与排序，可复用 `SessionQuery::matches`、`arrange` 与 `SessionInfo::of`。接口里不出现文件路径。存储交给 `AgentConfig::storage`：`Agent` 用 `create` 建新会话，用 `open` 续接；宿主只读一个会话时把 `read` 的结果交给 `Transcript::snapshot`。参照 `crates/zx-core/src/transcript/memory.rs` 的 `MemoryStorage`；只换记录的写入方式时参照 `tests/runner.rs` 的 `TableLog`。
+- **属于单个会话的部分**：实现 `agent::SessionSetup`（`setup(header)`），返回 `SessionParts`（工具、钩子、提示词段落）；会话的目录是 `header.cwd`。失败时新会话不会留在存储里。参照 `src/cli/setup.rs`；不需要按会话区分的宿主不用实现它。
 - **新 IM 平台**：在独立 crate 中实现 `zx_im::ImChannel`（参照 `crates/zx-im-slack`）：立即确认投递、按消息 ID 去重（`zx_im::Seen`）、只转交发给机器人的消息、遵守限频、拆分超长文本（`zx_im::split_text`）、文案用 `CardLabels`。与 `Server` 的配合参照 `tests/im_server.rs` 的 `FakeChannel`。

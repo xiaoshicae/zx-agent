@@ -1,5 +1,7 @@
-//! Kernel of zx-agent: the step loop, sessions and the runner, and the interfaces the kernel
-//! defines for everything scenario-specific (tools, policies, hooks, session storage). The `zx-agent` crate re-exports it whole, module by module.
+//! Kernel of zx-agent: the agent and its sessions, the runner and the step loop, and the
+//! interfaces the kernel defines for everything scenario-specific (tools, policies, hooks,
+//! session storage, session setup). The `zx-agent` crate re-exports it whole, module by
+//! module.
 //!
 //! One module per domain, from the bottom layer up. A module uses only modules listed before
 //! it, named in brackets where it uses any:
@@ -9,7 +11,7 @@
 //! - [`events`]: what a run emits, and the envelope of each event
 //! - `guard`: a run's cancellation as host code sees it ([`CancelSignal`]), and the bound on
 //!   every call into host code
-//! - [`tools`]: the tool interface, and the set of tools a run offers
+//! - [`tools`]: the tool interface, the tools of a session, and which of them a run offers
 //! - [`prompt`]: the system prompt assembled from its sections
 //! - [`input`] (transcript): the messages given to a run and the queues that hold them while
 //!   it runs
@@ -26,8 +28,11 @@
 //!   packages/agent)
 //! - [`session`] (all of the above): a conversation shared by frontends, and the run each
 //!   prompt, continuation or compaction returns: its events and its result
+//! - [`agent`] (all of the above): the role every session plays, the host's setup of what
+//!   belongs to one session, and the sessions that are open
 //!
-//! One reference points upward: [`extensions::register`] fills a [`runner::LoopConfig`].
+//! One reference points upward: registering the extensions fills the configuration of a
+//! session's loops, which is the runner's.
 //!
 //! # Where each feature lives
 //!
@@ -76,15 +81,16 @@
 //!     run's events and delivering them to the run's reader and the observing hooks),
 //!     `session/run.rs` (the reader's end: the stream of a run's events)
 //!
-//! A session holds a conversation across runs. Each [`Session::send`] starts a [`Run`],
-//! which processes one prompt and may retry a failed provider response as another loop
-//! attempt. A task step is one task response and its tool calls; a model request may also
+//! An [`Agent`] creates and opens sessions. A session holds a conversation across runs. Each
+//! [`Session::send`] starts a [`Run`], which processes one prompt and may retry a failed
+//! provider response as another loop attempt. A task step is one task response and its tool calls; a model request may also
 //! be a compaction summary, which consumes the request budget without creating a separate
 //! task step. Retries and summary requests both consume the run's model-request budget.
 //!
-//! Embedders start with a [`Session`] and read the [`Run`] each prompt returns. The
-//! extension interfaces are [`tools::Tool`], [`policy::ToolPolicy`], [`hooks::Hook`],
-//! [`extensions::Extension`], and [`transcript::SessionStorage`] with its
+//! Embedders make an [`Agent`] from an [`AgentConfig`], ask it for a [`Session`], and read
+//! the [`Run`] each prompt returns. The extension interfaces are [`tools::Tool`],
+//! [`policy::ToolPolicy`], [`hooks::Hook`], [`extensions::Extension`],
+//! [`agent::SessionSetup`], and [`transcript::SessionStorage`] with its
 //! [`transcript::SessionLog`]; approvals are answered through the session. The storages for
 //! session files and for memory ship with the kernel; the built-in tools, executors,
 //! policies and hooks live in the `zx-tools` crate, providers in crates such as
@@ -93,6 +99,7 @@
 // The modules name the model layer and the shared helpers by these crate-root paths.
 use zx_ai::{self as ai, sync};
 
+pub mod agent;
 pub mod compaction;
 pub mod events;
 pub mod extensions;
@@ -106,5 +113,6 @@ pub mod session;
 pub mod tools;
 pub mod transcript;
 
+pub use agent::{Agent, AgentConfig};
 pub use guard::CancelSignal;
-pub use session::{Run, Session};
+pub use session::{Run, Session, SessionOptions};

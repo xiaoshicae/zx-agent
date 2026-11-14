@@ -29,10 +29,9 @@ use zx_agent::ai::{Provider, Reasoning};
 use zx_agent::config::Builtin;
 use zx_agent::input::Input;
 use zx_agent::otel::{Telemetry, TraceHook};
-use zx_agent::policy::ApprovalMode;
 use zx_agent::session::ModelRef;
 
-use crate::cli::{self, ChatArgs};
+use crate::cli::{self, Approvals, ChatArgs, ModeAgent};
 use crate::process::{EXIT_CANCELLED, EXIT_COMPLETED, with_telemetry};
 use crate::render::visible;
 use crate::session_files::{SessionChoice, SessionPlace};
@@ -78,14 +77,15 @@ struct Chat {
 }
 
 impl Chat {
+    /// A conversation of `model` kept in `place`: the agent is built for it, with the agent
+    /// file read again, and the conversation is its one session.
     async fn build(&self, model: &str, place: &SessionPlace, choice: SessionChoice<'_>) -> Result<Built> {
-        let mut prepared = cli::prepare(&self.shared, model, None, place, choice).await?;
-        prepared.require_bash_approval("shell commands require interactive approval");
         // The person at the terminal answers; `drive_turn` passes the answer on.
-        prepared.config.approvals = ApprovalMode::Wait(self.shared.settings.approval_timeout);
-        let provider = prepared.config.provider.clone();
-        let about = About::of(&mut prepared);
-        let session = prepared.into_session()?;
+        let approvals = Approvals::Person("shell commands require interactive approval");
+        let agent = ModeAgent::build(&self.shared, model, place, approvals)?;
+        let opened = agent.open(None, choice).await?;
+        let about = About::of(&agent, &opened)?;
+        let session = opened.session;
         let commands = session
             .commands()
             .iter()
@@ -93,7 +93,7 @@ impl Chat {
             .collect();
         Ok(Built {
             session,
-            provider,
+            provider: agent.provider,
             about,
             commands,
         })

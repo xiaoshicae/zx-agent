@@ -1,5 +1,5 @@
-//! Extensions through the public SDK: what `extensions::register` adds to a loop, and what it
-//! refuses without registering anything.
+//! Extensions through the public SDK: what an agent's extensions add to its sessions, and
+//! which extensions refuse the agent.
 mod common;
 
 use std::sync::Arc;
@@ -7,14 +7,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::json;
 
-use common::{EchoTool, config, run_prompt, summarize};
+use common::{EchoTool, config, refusal, run_prompt, summarize};
+use zx_agent::AgentConfig;
 use zx_agent::ai::ToolCall;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::events::{EventKind, HookPoint};
-use zx_agent::extensions::{Extension, register};
+use zx_agent::extensions::Extension;
 use zx_agent::hooks::{Hook, HookContext, HookResult, HookStage};
 use zx_agent::prompt::{ENVIRONMENT, build_system_prompt};
-use zx_agent::runner::LoopConfig;
 use zx_agent::tools::{Tool, ToolOutput};
 
 /// Appends a mark to every tool result.
@@ -87,9 +87,9 @@ impl Extension for Bundle {
     }
 }
 
-/// A loop with the host's `echo` tool, and a prompt with a generated section and one of the
-/// host's own.
-fn base(provider: Arc<FauxProvider>) -> LoopConfig {
+/// An agent with the host's `echo` tool, and a prompt with a generated section and one of
+/// the host's own.
+fn base(provider: Arc<FauxProvider>) -> AgentConfig {
     let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
     config.system_prompt = build_system_prompt("Do the task.", &[(ENVIRONMENT, "OS: test"), ("rules", "Be brief.")]);
     config
@@ -112,7 +112,7 @@ async fn an_extension_adds_its_tools_hooks_and_prompt_sections() {
         hooks: || vec![Box::new(Mark) as Box<dyn Hook>],
         ..Bundle::named("notes")
     };
-    register(&mut config, &[Arc::new(notes)]).unwrap();
+    config.extensions = vec![Arc::new(notes)];
     let mut context = Vec::new();
     run_prompt(config, &mut context, "go").await;
     let requests = provider.requests();
@@ -130,19 +130,17 @@ async fn an_extension_adds_its_tools_hooks_and_prompt_sections() {
 }
 
 #[test]
-fn a_hook_outside_the_extension_stage_is_refused_and_nothing_is_registered() {
+fn an_extension_hook_outside_the_extension_stage_refuses_the_agent() {
     let mut config = base(idle());
-    let prompt = config.system_prompt.clone();
     let early = Bundle {
         tools: vec![Arc::new(EchoTool::new("note"))],
         sections: vec![("notes", "Use note to keep notes.")],
         hooks: || vec![Box::new(Early) as Box<dyn Hook>],
         ..Bundle::named("early")
     };
-    let error = register(&mut config, &[Arc::new(early)]).unwrap_err();
+    config.extensions = vec![Arc::new(early)];
+    let error = refusal(config);
     assert!(error.contains("declares the Redaction stage"), "{error}");
-    assert_eq!(config.tools.len(), 1);
-    assert_eq!(config.system_prompt, prompt);
 }
 
 #[test]
@@ -169,13 +167,12 @@ fn an_extension_tool_may_not_take_a_name_in_use() {
     ];
     for bundles in cases {
         let mut config = base(idle());
-        let extensions: Vec<Arc<dyn Extension>> = bundles
+        config.extensions = bundles
             .into_iter()
             .map(|bundle| Arc::new(bundle) as Arc<dyn Extension>)
             .collect();
-        let error = register(&mut config, &extensions).unwrap_err();
+        let error = refusal(config);
         assert!(error.contains("more than one tool is named"), "{error}");
-        assert_eq!(config.tools.len(), 1, "only the host's tool is left");
     }
 }
 
@@ -192,27 +189,25 @@ fn extension_sections_may_not_take_reserved_existing_or_malformed_names() {
         (vec![("my notes", "x")], "must be ASCII lowercase"),
     ] {
         let mut config = base(idle());
-        let prompt = config.system_prompt.clone();
         let bundle = Bundle {
             sections,
             ..Bundle::named("notes")
         };
-        let error = register(&mut config, &[Arc::new(bundle)]).unwrap_err();
+        config.extensions = vec![Arc::new(bundle)];
+        let error = refusal(config);
         assert!(error.contains(expected), "{error}");
-        assert_eq!(config.system_prompt, prompt);
     }
 }
 
 #[test]
 fn extension_names_must_be_given_and_unique() {
-    let mut config = base(idle());
-    let error = register(&mut config, &[Arc::new(Bundle::named(" "))]).unwrap_err();
+    let mut blank = base(idle());
+    blank.extensions = vec![Arc::new(Bundle::named(" "))];
+    let error = refusal(blank);
     assert!(error.contains("blank name"), "{error}");
-    let error = register(
-        &mut config,
-        &[Arc::new(Bundle::named("notes")), Arc::new(Bundle::named("notes"))],
-    )
-    .unwrap_err();
+    let mut twice = base(idle());
+    twice.extensions = vec![Arc::new(Bundle::named("notes")), Arc::new(Bundle::named("notes"))];
+    let error = refusal(twice);
     assert!(error.contains("more than one extension is named \"notes\""), "{error}");
 }
 
@@ -227,7 +222,7 @@ async fn a_failing_extension_hook_is_reported_under_the_extension_name() {
         hooks: || vec![Box::new(Broken) as Box<dyn Hook>],
         ..Bundle::named("broken")
     };
-    register(&mut config, &[Arc::new(broken)]).unwrap();
+    config.extensions = vec![Arc::new(broken)];
     let mut context = Vec::new();
     let (_, events) = run_prompt(config, &mut context, "go").await;
     assert!(

@@ -11,16 +11,17 @@ use crate::guard::{Priority, bounded};
 /// The bound of one policy check unless the host gives another.
 pub const DEFAULT_POLICY_TIMEOUT: Duration = Duration::from_secs(5);
 
+#[derive(Clone)]
 struct Registered {
     name: String,
     policy: Arc<dyn ToolPolicy>,
     timeout: Duration,
 }
 
-/// The policies of a loop, asked in the order they were registered. The strictest verdict
+/// The policies of an agent, asked in the order they were registered. The strictest verdict
 /// stands, so the order never loosens one: a deny ends the check, and an ask outweighs an
-/// allow.
-#[derive(Default)]
+/// allow. A clone is a chain of the same policies: each session of the agent asks one.
+#[derive(Clone, Default)]
 pub struct PolicyChain {
     policies: Vec<Registered>,
 }

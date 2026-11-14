@@ -5,13 +5,12 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 
 use zx_agent::config;
-use zx_agent::transcript::{
-    JsonlStorage, MemoryStorage, SessionHeader, SessionInfo, SessionList, SessionQuery, SessionStorage, Transcript,
-};
+use zx_agent::transcript::{JsonlStorage, MemoryStorage, SessionInfo, SessionList, SessionQuery, SessionStorage};
 
 use crate::render::{local_time, visible};
 
@@ -25,15 +24,17 @@ const SHORT_ID_CHARS: usize = 8;
 /// How a listing shows when a session was last active.
 const LISTING_TIME_FORMAT: &str = "%Y-%m-%d %H:%M";
 
-/// Where a mode keeps its sessions.
+/// Where a mode keeps its sessions. A clone is the same place: the mode's agent keeps its
+/// sessions there, and the mode lists them and shows their files.
+#[derive(Clone)]
 pub(crate) enum SessionPlace {
     /// `--no-session`: in memory, gone with the process.
-    Memory(MemoryStorage),
+    Memory(Arc<MemoryStorage>),
     /// `--session`: one file, which holds one session.
-    File(JsonlStorage),
+    File(Arc<JsonlStorage>),
     /// Session files under one directory, with a directory of its own for each working
     /// directory.
-    Directory(JsonlStorage),
+    Directory(Arc<JsonlStorage>),
 }
 
 /// Which session of a place a mode runs on.
@@ -53,15 +54,15 @@ impl<'a> SessionChoice<'a> {
 
 impl SessionPlace {
     pub(crate) fn memory() -> Self {
-        Self::Memory(MemoryStorage::default())
+        Self::Memory(Arc::default())
     }
 
     pub(crate) fn file(path: &Path) -> Self {
-        Self::File(JsonlStorage::file(path))
+        Self::File(Arc::new(JsonlStorage::file(path)))
     }
 
     pub(crate) fn directory(root: &Path) -> Self {
-        Self::Directory(JsonlStorage::in_directory(root))
+        Self::Directory(Arc::new(JsonlStorage::in_directory(root)))
     }
 
     /// `--session`'s file, or memory without one.
@@ -77,10 +78,11 @@ impl SessionPlace {
         Ok(Self::directory(&home.join(SESSIONS_DIR)))
     }
 
-    fn storage(&self) -> &dyn SessionStorage {
+    /// The storage of this place, for the agent whose sessions are kept here.
+    pub(crate) fn storage(&self) -> Arc<dyn SessionStorage> {
         match self {
-            Self::Memory(storage) => storage,
-            Self::File(storage) | Self::Directory(storage) => storage,
+            Self::Memory(storage) => storage.clone(),
+            Self::File(storage) | Self::Directory(storage) => storage.clone(),
         }
     }
 
@@ -113,7 +115,7 @@ impl SessionPlace {
     /// The session a single file holds already; `None` for a file that does not exist yet,
     /// and for a place that keeps more than one session. A file that cannot be read as a
     /// session is an error.
-    pub(crate) async fn only(&self) -> Result<Option<String>> {
+    pub(crate) async fn only(&self) -> Result<Option<SessionInfo>> {
         let Self::File(storage) = self else {
             return Ok(None);
         };
@@ -121,25 +123,15 @@ impl SessionPlace {
         if let Some(unreadable) = list.unreadable.first() {
             bail!("{}", unreadable.error);
         }
-        Ok(list.sessions.into_iter().next().map(|session| session.id))
+        Ok(list.sessions.into_iter().next())
     }
 
-    /// A new session with `header`.
-    pub(crate) async fn create(&self, header: SessionHeader) -> Result<Transcript> {
-        let log = self.storage().create(&header).await?;
-        Ok(Transcript::with_log(header, log))
-    }
-
-    /// Session `id`, loaded and open for appending. A record that cannot be loaded names
-    /// the session's file.
-    pub(crate) async fn open(&self, id: &str) -> Result<Transcript> {
-        let (loaded, log) = self.storage().open(id).await?;
-        match Transcript::load(loaded, log) {
-            Ok(session) => Ok(session),
-            Err(error) => Err(match self.path_of(id).await? {
-                Some(path) => anyhow!("{}: {error:#}", path.display()),
-                None => error.context(format!("cannot load session {id}")),
-            }),
+    /// `error`, which opening session `id` gave, naming the session's file when it has one.
+    pub(crate) async fn naming_file(&self, id: &str, error: anyhow::Error) -> anyhow::Error {
+        // A path that cannot be found now adds nothing to the error at hand.
+        match self.path_of(id).await.ok().flatten() {
+            Some(path) => error.context(format!("cannot open the session in {}", path.display())),
+            None => error,
         }
     }
 }
@@ -187,9 +179,14 @@ pub(crate) fn preview_text(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use zx_agent::ai::Message;
-    use zx_agent::transcript::SessionName;
+    use zx_agent::transcript::{SessionHeader, SessionName, Transcript};
 
     use super::*;
+
+    /// A new session with `header` in `place`, open for appending.
+    async fn create(place: &SessionPlace, header: &SessionHeader) -> Transcript {
+        Transcript::with_log(header.clone(), place.storage().create(header).await.unwrap())
+    }
 
     #[test]
     fn a_preview_shows_the_first_line_and_marks_what_it_leaves_out() {
@@ -226,13 +223,16 @@ mod tests {
         assert_eq!(place.location(Path::new("/w")), Some(path.clone()));
 
         let header = SessionHeader::new(Path::new("/w"), "m");
-        let mut session = place.create(header.clone()).await.unwrap();
+        let mut session = create(&place, &header).await;
         session.append_message(Message::user("q")).await.unwrap();
         drop(session);
 
-        assert_eq!(place.only().await.unwrap(), Some(header.id.clone()));
+        let held = place.only().await.unwrap().unwrap();
+        assert_eq!(
+            (held.id.as_str(), held.cwd.as_str(), held.messages),
+            (header.id.as_str(), "/w", 1)
+        );
         assert_eq!(place.path_of(&header.id).await.unwrap(), Some(path));
-        assert_eq!(place.open(&header.id).await.unwrap().messages().len(), 1);
     }
 
     #[tokio::test]
@@ -251,25 +251,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_record_that_cannot_be_loaded_names_the_session_file() {
+    async fn an_error_of_opening_a_session_names_the_file_the_session_has() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("run.jsonl");
         let place = SessionPlace::file(&path);
         let header = SessionHeader::new(Path::new("/w"), "m");
-        drop(place.create(header.clone()).await.unwrap());
-        let orphan = r#"{"type":"message","id":"a","parentId":"missing","timestamp":1,"message":{"role":"user","content":"q","timestamp":1}}"#;
-        std::fs::write(&path, format!("{}{orphan}\n", std::fs::read_to_string(&path).unwrap())).unwrap();
+        drop(create(&place, &header).await);
 
-        let error = place.open(&header.id).await.err().unwrap().to_string();
+        let error = place
+            .naming_file(&header.id, anyhow::anyhow!("entry 1: no parent"))
+            .await;
+        assert_eq!(
+            format!("{error:#}"),
+            format!("cannot open the session in {}: entry 1: no parent", path.display())
+        );
 
-        assert!(error.starts_with(&format!("{}: entry 1: ", path.display())), "{error}");
+        let kept_in_memory = SessionPlace::memory()
+            .naming_file(&header.id, anyhow::anyhow!("no such session"))
+            .await;
+        assert_eq!(format!("{kept_in_memory:#}"), "no such session");
     }
 
     #[tokio::test]
     async fn memory_has_no_location() {
         let place = SessionPlace::memory();
         let header = SessionHeader::new(Path::new("/w"), "m");
-        drop(place.create(header.clone()).await.unwrap());
+        drop(create(&place, &header).await);
 
         assert_eq!(place.location(Path::new("/w")), None);
         assert_eq!(place.path_of(&header.id).await.unwrap(), None);

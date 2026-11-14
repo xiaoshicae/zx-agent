@@ -19,7 +19,7 @@ use crate::tools::{Effects, ExecutionMode, MAX_DETAILS_BYTES, MAX_QUEUED_PROGRES
 
 impl StepLoop<'_> {
     fn find_tool(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        self.config.tools.iter().find(|tool| tool.name() == name).cloned()
+        self.config.tools.find(name).cloned()
     }
 
     /// Resolve `call` and check its arguments, then run the policy and ask for approval
@@ -61,10 +61,8 @@ impl StepLoop<'_> {
         if !call.arguments.is_object() {
             return Err(invalid_arguments(call, "expected a JSON object"));
         }
-        if let Some(validator) = self.validators.get(&call.name)
-            && let Err(error) = validator.validate(&call.arguments)
-        {
-            return Err(invalid_arguments(call, error));
+        if let Some(mismatch) = self.config.tools.schema_mismatch(&call.name, &call.arguments) {
+            return Err(invalid_arguments(call, mismatch));
         }
         match std::panic::catch_unwind(AssertUnwindSafe(|| tool.validate_arguments(&call.arguments))) {
             Ok(Ok(())) => Ok(()),

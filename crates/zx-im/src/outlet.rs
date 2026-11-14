@@ -8,15 +8,16 @@ use tokio::sync::mpsc;
 use tokio::task::JoinError;
 use tokio_util::sync::CancellationToken;
 
-use crate::Session;
 use crate::runner::{RunOutcome, RunReport};
 use crate::session::SessionError;
 use crate::transcript::CustomMessage;
+use crate::{Agent, Session};
+use zx_core::SessionOptions;
 use zx_core::input::Input;
 
 use super::approval::{ApprovalEvents, ApprovalUpdate};
-use super::server::{Shared, timed};
-use super::{Destination, ImChannel, MessageRef, Opening, Outbound, Replies, SessionKey, UserId};
+use super::server::{Opening, Shared, timed};
+use super::{Destination, ImChannel, MessageRef, Outbound, Replies, SessionKey, UserId};
 
 /// Messages read from a thread the bot is first mentioned in: enough to follow a discussion,
 /// few enough not to crowd the context.
@@ -24,11 +25,20 @@ const HISTORY_MESSAGES: usize = 50;
 /// The kind of the custom messages that record what people said without the bot answering.
 const SAID_TYPE: &str = "im_message";
 
-/// The session while it is held. Dropping it releases the session file.
+/// The session while the conversation holds it. Dropping it closes the session, which frees
+/// its place in the storage and everything set up for it.
 pub(crate) struct Opened {
     // Shared with the task that reads the current run, as a Session is meant to be:
     // meanwhile the worker steers, cancels and takes queued input through it.
     pub(crate) session: Session,
+    /// Keeps the session open until it is closed there.
+    agent: Agent,
+}
+
+impl Drop for Opened {
+    fn drop(&mut self) {
+        self.agent.close_session(self.session.id());
+    }
 }
 
 impl Opened {
@@ -79,10 +89,31 @@ impl Outlet {
             .await;
     }
 
-    /// Open the session that `opening` names.
+    /// Open the session that `opening` names: the conversation's latest one, or a new one
+    /// with the conversation's labels when it has none or `/new` asked for one.
     pub(crate) async fn open(&self, opening: Opening) -> Result<Opened, String> {
-        let session = self.shared.factory.open(&self.key, opening).await?;
-        Ok(Opened { session })
+        let shared = &self.shared;
+        let latest = match opening {
+            Opening::Latest => shared.latest_session(&self.key).await?,
+            Opening::New => None,
+        };
+        let session = match latest {
+            Some(id) => shared.agent.open_session(&id).await,
+            None => {
+                let options = SessionOptions {
+                    labels: self.key.labels(),
+                    ..SessionOptions::new(&shared.cwd)
+                };
+                shared.agent.create_session(options).await
+            }
+        };
+        match session {
+            Ok(session) => Ok(Opened {
+                session,
+                agent: shared.agent.clone(),
+            }),
+            Err(error) => Err(format!("{error:#}")),
+        }
     }
 
     /// Post the card of an approval request. An error says why nobody can decide.

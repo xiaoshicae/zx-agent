@@ -7,9 +7,10 @@
 //! Sessions are kept as files, one per session in the directory chat uses for the same
 //! working directory, so that a client can list them and load one again in a later process:
 //! `session/load` replays the conversation to the client before it goes on, `session/resume`
-//! goes on without the replay. `session/close` forgets a session: its turn, if it has one, is
-//! cancelled, and the session is dropped once nothing uses it any more, which closes its file
-//! for another process to open. The file stays, to be loaded or resumed again.
+//! goes on without the replay. A session works in the directory it was created for, also
+//! after it was loaded again. `session/close` closes a session: its turn, if it has one, is
+//! cancelled, and its file is closed for another process to open, at once when it is idle,
+//! else when the cancelled turn has ended. The file stays, to be loaded or resumed again.
 //!
 //! Stdout is the protocol channel: nothing else in this process may print there.
 
@@ -17,9 +18,8 @@ mod commands;
 mod permissions;
 mod updates;
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{
@@ -37,12 +37,10 @@ use zx_agent::builtin::tools::{BASH, EDIT_FILE, FIND, GREP, LS, READ_FILE, WRITE
 use zx_agent::config::Builtin;
 use zx_agent::events::EventKind;
 use zx_agent::otel::{Telemetry, TraceHook};
-use zx_agent::policy::ApprovalMode;
 use zx_agent::runner::{RunOutcome, RunReport};
-use zx_agent::sync::lock;
 use zx_agent::transcript::{SessionInfo as StoredSession, SessionQuery};
 
-use crate::cli::{self, AcpArgs, PreparedSession};
+use crate::cli::{self, AcpArgs, Approvals, ModeAgent};
 use crate::process::{EXIT_COMPLETED, with_telemetry};
 use crate::session_files::{self, SessionChoice, SessionPlace};
 
@@ -50,45 +48,28 @@ use updates::Updates;
 
 /// Where a session the client names is.
 enum Located {
-    /// A conversation this process holds: one the client created with `session/new`, loaded
-    /// with `session/load` or resumed with `session/resume`.
-    Live(Live),
-    /// A session kept among the session files, which no session of this process has open.
+    /// A conversation this process has open: one the client created with `session/new`,
+    /// loaded with `session/load` or resumed with `session/resume`.
+    Open(Session),
+    /// A session kept among the session files, which this process does not have open.
     Stored,
 }
 
-/// A conversation this process holds, and the client it reports to and asks.
-#[derive(Clone)]
-struct Live {
-    session: Session,
-    updates: Arc<Updates>,
-    cx: ConnectionTo<Client>,
-    id: SessionId,
-}
-
-/// A session prepared, with its updates, before it runs: `session/load` replays the
-/// conversation to the client in between.
-struct Prepared {
-    session: PreparedSession,
-    updates: Arc<Updates>,
-    id: SessionId,
-    /// The client, which the session's runs ask for approval.
-    cx: ConnectionTo<Client>,
-}
-
 struct Host {
-    shared: cli::Shared,
+    /// `--cwd`, for a listing that names no directory.
+    cwd: Option<PathBuf>,
     /// Where sessions are kept: the session files chat keeps too, or memory with
     /// `--no-session`.
     place: SessionPlace,
-    /// Sessions by ID. Handlers run one at a time on the dispatch loop but prompts run in
-    /// spawned tasks, so the map is shared; locks are short and never held across an await.
-    sessions: Mutex<HashMap<String, Live>>,
+    /// The agent of every session, which also holds the sessions the client has open: the
+    /// client's approval is asked for its calls.
+    mode: ModeAgent,
 }
 
 impl Host {
-    fn session(&self, id: &SessionId) -> Option<Live> {
-        lock(&self.sessions).get(&*id.0).cloned()
+    /// The session `id` when the client has it open.
+    fn session(&self, id: &SessionId) -> Option<Session> {
+        self.mode.agent.session(&id.0)
     }
 
     /// The sessions started in `cwd` that are kept as files, with their directory; `None`
@@ -106,18 +87,23 @@ impl Host {
 
     /// Create a session for `cwd`, the client's project directory, which overrides `--cwd`.
     /// It is kept among the session files, where `session/load` finds it again.
-    async fn create(&self, cx: &ConnectionTo<Client>, cwd: &Path) -> Result<SessionId> {
-        let prepared = self
-            .prepare_session(cx, cwd, SessionChoice::existing_or_new(None))
-            .await?;
-        self.start(prepared)
+    async fn create(&self, cwd: &Path) -> Result<SessionId> {
+        let choice = SessionChoice::existing_or_new(None);
+        let opened = self.mode.open(Some(cwd), choice).await?;
+        Ok(SessionId::new(opened.session.id()))
     }
 
-    /// The session `id` for `cwd`: one this process holds, or one kept among the sessions
+    /// Open the stored session `id`, which goes on in the directory it started in.
+    async fn open(&self, id: &SessionId) -> Result<Session> {
+        let opened = self.mode.open(None, SessionChoice::Existing(&id.0)).await?;
+        Ok(opened.session)
+    }
+
+    /// The session `id` for `cwd`: one this process has open, or one kept among the sessions
     /// started in `cwd`.
     async fn locate(&self, id: &SessionId, cwd: &Path) -> Result<Located> {
-        if let Some(live) = self.session(id) {
-            return Ok(Located::Live(live));
+        if let Some(session) = self.session(id) {
+            return Ok(Located::Open(session));
         }
         let id = &*id.0;
         let (sessions, directory) = self
@@ -134,37 +120,28 @@ impl Host {
     /// Load the session `request` names from the session directory of its `cwd`, replaying
     /// the conversation to the client first.
     ///
-    /// A session this process holds already is replayed as it is, without opening its file
-    /// again.
+    /// A session this process has open already is replayed as it is, without opening its
+    /// file again.
     async fn load(&self, cx: &ConnectionTo<Client>, request: &LoadSessionRequest) -> Result<SessionId> {
-        match self.locate(&request.session_id, &request.cwd).await? {
-            Located::Live(live) => {
-                let updates = Updates::new(cx.clone(), request.session_id.clone(), request.cwd.clone());
-                live.session
-                    .with_transcript(|store| updates.replay(store))
-                    .with_context(|| format!("cannot replay session {}", request.session_id.0))?;
-                Ok(request.session_id.clone())
-            }
-            Located::Stored => {
-                let choice = SessionChoice::Existing(&request.session_id.0);
-                let prepared = self.prepare_session(cx, &request.cwd, choice).await?;
-                prepared.updates.replay(&prepared.session.store);
-                self.start(prepared)
-            }
-        }
+        let id = &request.session_id;
+        let session = match self.locate(id, &request.cwd).await? {
+            Located::Open(session) => session,
+            Located::Stored => self.open(id).await?,
+        };
+        let updates = Updates::new(cx.clone(), id.clone(), session.cwd().to_path_buf());
+        session
+            .with_transcript(|store| updates.replay(store))
+            .with_context(|| format!("cannot replay session {}", id.0))?;
+        Ok(id.clone())
     }
 
     /// Continue the session `request` names without replaying it (`session/resume`): the
     /// client keeps what it shows, and the conversation goes on from the file.
-    async fn resume(&self, cx: &ConnectionTo<Client>, request: &ResumeSessionRequest) -> Result<SessionId> {
-        match self.locate(&request.session_id, &request.cwd).await? {
-            Located::Live(_) => Ok(request.session_id.clone()),
-            Located::Stored => {
-                let choice = SessionChoice::Existing(&request.session_id.0);
-                let prepared = self.prepare_session(cx, &request.cwd, choice).await?;
-                self.start(prepared)
-            }
+    async fn resume(&self, request: &ResumeSessionRequest) -> Result<SessionId> {
+        if let Located::Stored = self.locate(&request.session_id, &request.cwd).await? {
+            self.open(&request.session_id).await?;
         }
+        Ok(request.session_id.clone())
     }
 
     /// The sessions kept that were started in `request.cwd`, or in the agent's own working
@@ -178,7 +155,7 @@ impl Host {
             )
             .into());
         }
-        let cwd = request.cwd.as_deref().or(self.shared.base.cwd.as_deref());
+        let cwd = request.cwd.as_deref().or(self.cwd.as_deref());
         let cwd = cli::resolve_cwd(cwd)?;
         let kept = self.kept(&cwd).await?;
         Ok(kept
@@ -186,48 +163,6 @@ impl Host {
             .flat_map(|(sessions, _)| sessions)
             .map(session_info)
             .collect())
-    }
-
-    /// Prepare the session `choice` names for `cwd`, with the client as its approver and
-    /// the receiver of its updates.
-    async fn prepare_session(
-        &self,
-        cx: &ConnectionTo<Client>,
-        cwd: &Path,
-        choice: SessionChoice<'_>,
-    ) -> Result<Prepared> {
-        let model = &self.shared.settings.model;
-        let mut session = cli::prepare(&self.shared, model, Some(cwd), &self.place, choice).await?;
-        let id = SessionId::new(session.store.header().id.as_str());
-        session.require_bash_approval("the client must approve shell commands");
-        // The client answers: each request becomes a `session/request_permission`.
-        session.config.approvals = ApprovalMode::Wait(self.shared.settings.approval_timeout);
-        let cwd = session.config.cwd.clone();
-        let updates = Arc::new(Updates::new(cx.clone(), id.clone(), cwd));
-        Ok(Prepared {
-            session,
-            updates,
-            id,
-            cx: cx.clone(),
-        })
-    }
-
-    /// Start the prepared session and keep it by its ID.
-    fn start(&self, prepared: Prepared) -> Result<SessionId> {
-        let Prepared {
-            session,
-            updates,
-            id,
-            cx,
-        } = prepared;
-        let live = Live {
-            session: session.into_session()?,
-            updates,
-            cx,
-            id: id.clone(),
-        };
-        lock(&self.sessions).insert(id.0.to_string(), live);
-        Ok(id)
     }
 
     /// `initialize`: what the agent can do; sessions can be loaded, listed and resumed when
@@ -253,7 +188,7 @@ impl Host {
     ) -> Result<(), Error> {
         // Session setup holds the dispatch loop, like any request handler; it is a few
         // startup reads and, with MCP servers, nothing new: they are connected once.
-        let result = self.create(cx, &request.cwd).await;
+        let result = self.create(&request.cwd).await;
         opened(responder, cx, result, NewSessionResponse::new)
     }
 
@@ -275,7 +210,7 @@ impl Host {
         responder: Responder<ResumeSessionResponse, V1>,
         cx: &ConnectionTo<Client>,
     ) -> Result<(), Error> {
-        let result = self.resume(cx, request).await;
+        let result = self.resume(request).await;
         opened(responder, cx, result, |_| ResumeSessionResponse::new())
     }
 
@@ -298,47 +233,54 @@ impl Host {
         responder: Responder<PromptResponse, V1>,
         cx: &ConnectionTo<Client>,
     ) -> Result<(), Error> {
-        let Some(live) = self.session(&request.session_id) else {
+        let Some(session) = self.session(&request.session_id) else {
             return responder.respond_with_error(unknown_session(&request.session_id.0, "no such session is open"));
         };
         let text = prompt_text(&request.prompt);
+        let (connection, session_id) = (cx.clone(), request.session_id.clone());
         if let Some(command) = commands::parse(&text) {
-            let (connection, session_id) = (cx.clone(), request.session_id.clone());
             return cx.spawn(async move {
-                let answer = commands::run(&live.session, command, &connection, &session_id).await;
+                let answer = commands::run(&session, command, &connection, &session_id).await;
                 responder.respond_with_result(answer.map_err(protocol_error))
             });
         }
-        cx.spawn(async move { responder.respond_with_result(answer_prompt(&live, text).await.map_err(protocol_error)) })
-    }
-
-    /// The session `id` that `session/cancel` or `session/close` names, when it is open.
-    fn open_session(&self, id: &SessionId) -> Option<Session> {
-        self.session(id).map(|live| live.session)
+        cx.spawn(async move {
+            let turn = Turn {
+                updates: Updates::new(connection.clone(), session_id.clone(), session.cwd().to_path_buf()),
+                session,
+                cx: connection,
+                id: session_id,
+            };
+            responder.respond_with_result(turn.answer(text).await.map_err(protocol_error))
+        })
     }
 
     /// `session/cancel`: abort the session's turn, if it has one.
     fn cancel(&self, notification: &CancelNotification) {
-        if let Some(session) = self.open_session(&notification.session_id) {
+        if let Some(session) = self.session(&notification.session_id) {
             session.cancel();
         }
     }
 
-    /// `session/close`: abort the session's turn, if it has one, and forget the session. It is
-    /// dropped as soon as nothing uses it: at once when idle, else when the aborted turn has
-    /// ended. A session this process does not hold has nothing to free, so closing one
-    /// succeeds too.
+    /// `session/close`: abort the session's turn, if it has one, and close the session: its
+    /// file is free at once when it is idle, else when the aborted turn has ended. A session
+    /// this process does not have open has nothing to free, so closing one succeeds too.
     fn close_session(
         &self,
         request: &CloseSessionRequest,
         responder: Responder<CloseSessionResponse, V1>,
     ) -> Result<(), Error> {
-        let closed = lock(&self.sessions).remove(&*request.session_id.0);
-        if let Some(live) = closed {
-            live.session.cancel();
-        }
+        self.mode.agent.close_session(&request.session_id.0);
         responder.respond(CloseSessionResponse::new())
     }
+}
+
+/// One turn of a session: the conversation, and the client it reports to and asks.
+struct Turn {
+    session: Session,
+    updates: Updates,
+    cx: ConnectionTo<Client>,
+    id: SessionId,
 }
 
 pub(crate) async fn run(args: AcpArgs) -> Result<u8> {
@@ -354,10 +296,13 @@ async fn serve(args: AcpArgs, traces: Option<TraceHook>) -> Result<u8> {
     } else {
         SessionPlace::home()?
     };
+    // The client answers: each approval request becomes a `session/request_permission`.
+    let approvals = Approvals::Person("the client must approve shell commands");
+    let mode = ModeAgent::build(&shared, &shared.settings.model, &place, approvals)?;
     let host = Arc::new(Host {
-        shared,
+        cwd: shared.base.cwd,
         place,
-        sessions: Mutex::new(HashMap::new()),
+        mode,
     });
     let on_initialize = Arc::clone(&host);
     let on_new = Arc::clone(&host);
@@ -433,31 +378,33 @@ fn opened<T: JsonRpcResponse>(
     }
 }
 
-/// The response to `session/prompt` once the turn ended: its stop reason, or the run's error.
-/// While the turn runs, its events go to the client as session updates, and a call that
-/// waits for approval becomes a permission request.
-async fn answer_prompt(live: &Live, text: String) -> Result<PromptResponse> {
-    let mut run = live.session.send(text)?;
-    while let Some(event) = run.next().await {
-        live.updates.emit(&event);
-        if let EventKind::ApprovalRequested {
-            approval_id,
-            tool_call_id,
-            tool_name,
-            args,
-            ..
-        } = event.event
-        {
-            let request = permissions::Request {
+impl Turn {
+    /// The response to `session/prompt` once the turn that `text` starts has ended: its stop
+    /// reason, or the run's error. While the turn runs, its events go to the client as
+    /// session updates, and a call that waits for approval becomes a permission request.
+    async fn answer(&self, text: String) -> Result<PromptResponse> {
+        let mut run = self.session.send(text)?;
+        while let Some(event) = run.next().await {
+            self.updates.emit(&event);
+            if let EventKind::ApprovalRequested {
                 approval_id,
                 tool_call_id,
-                tool: tool_name,
-                arguments: args,
-            };
-            permissions::ask(&live.cx, &live.id, &live.session, request)?;
+                tool_name,
+                args,
+                ..
+            } = event.event
+            {
+                let request = permissions::Request {
+                    approval_id,
+                    tool_call_id,
+                    tool: tool_name,
+                    arguments: args,
+                };
+                permissions::ask(&self.cx, &self.id, &self.session, request)?;
+            }
         }
+        stop_reason(&run.wait().await).map(PromptResponse::new)
     }
-    stop_reason(&run.wait().await).map(PromptResponse::new)
 }
 
 /// The error a failed request answers with. An error the protocol defines, such as an

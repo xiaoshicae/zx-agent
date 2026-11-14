@@ -269,15 +269,16 @@ impl Router {
 
     /// Pass a click to the conversation's worker. Without a worker nothing is pending:
     /// approvals end with their run, and the router ends only idle conversations.
-    /// Whether the bot took part in the conversation `key` before: it has a session.
+    /// Whether the bot took part in the conversation `key` before: it has a session, so a
+    /// message there that does not mention the bot is still part of the conversation.
     async fn joined(&self, key: &SessionKey) -> bool {
-        let asked = self.shared.factory.has_session(key);
+        let asked = self.shared.latest_session(key);
         // A lookup that failed was reported; the conversation then counts as not joined,
         // and a mention still starts it.
         self.shared
             .bounded(Some(key), "look up the conversation's sessions", asked)
             .await
-            .unwrap_or(false)
+            .is_some_and(|latest| latest.is_some())
     }
 
     fn decision(&mut self, key: &SessionKey, input: WorkerInput) {

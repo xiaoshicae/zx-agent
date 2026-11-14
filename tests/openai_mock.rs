@@ -18,7 +18,7 @@ use zx_agent::builtin::tools::BashTool;
 use zx_agent::compaction::Config;
 use zx_agent::events::{Event, EventKind};
 use zx_agent::runner::RunOutcome;
-use zx_agent::transcript::Transcript;
+use zx_agent::transcript::{SessionHeader, Transcript};
 
 /// A runner whose provider talks to `server`, with a bash tool and a one-line system prompt.
 fn setup(server: &MockServer, idle_timeout: Duration) -> RunnerSetup {
@@ -552,7 +552,8 @@ async fn the_cache_key_is_sent_as_prompt_cache_key_only_when_the_provider_is_tol
             ..OpenAiConfig::default()
         },
     );
-    setup.config.cache_key = Some("session-42".into());
+    setup.config.session_cache_key = true;
+    setup.session = session_42();
     let (mut runner, _) = setup.build();
     runner.run("go", &CancellationToken::new()).await;
     assert_eq!(server.requests()[0].body["prompt_cache_key"], "session-42");
@@ -572,8 +573,17 @@ async fn the_cache_key_is_sent_as_prompt_cache_key_only_when_the_provider_is_tol
     assert_eq!(replayed.1.cache_key.as_deref(), Some("session-42"));
 
     let mut plain = setup_with_provider(&server, OpenAiConfig::default());
-    plain.config.cache_key = Some("session-42".into());
+    plain.config.session_cache_key = true;
+    plain.session = session_42();
     let (mut runner, _) = plain.build();
     runner.run("go", &CancellationToken::new()).await;
     assert!(server.requests()[1].body.get("prompt_cache_key").is_none());
+}
+
+/// A new session in memory whose ID is `session-42`.
+fn session_42() -> Transcript {
+    Transcript::in_memory(SessionHeader {
+        id: "session-42".into(),
+        ..common::header()
+    })
 }

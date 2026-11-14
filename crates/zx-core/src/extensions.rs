@@ -1,5 +1,5 @@
-//! Extensions: [`Extension`] bundles tools, hooks and system prompt sections, and
-//! [`register`] adds them to a loop.
+//! Extensions: [`Extension`] bundles tools, policies, hooks, system prompt sections and slash
+//! commands, which an agent adds to each session it opens.
 //!
 //! - `command`: the slash commands extensions register
 
@@ -13,22 +13,24 @@ use crate::hooks::{Hook, HookStage};
 use crate::policy::ToolPolicy;
 use crate::prompt::GENERATED_SECTIONS;
 use crate::runner::LoopConfig;
-use crate::tools::Tool;
+use crate::tools::{Tool, Toolbox};
 
 pub use command::{CommandContext, CommandError, CommandOutcome, SlashCommand, check_command_name};
 
 /// Tools, hooks and system prompt sections registered together, such as a client for an
-/// external tool server. A host may register one extension into many loops, as `zx-agent im` does
-/// for each chat thread: the tools are shared, and `hooks` is called once per registration.
+/// external tool server. An agent takes its extensions in
+/// [`AgentConfig::extensions`](crate::AgentConfig::extensions) and registers them with each
+/// session it opens: the tools are shared by the sessions, and `hooks` is called once for
+/// each session, and once more when the agent is made, which checks the extension.
 ///
 /// ```
 /// use std::sync::Arc;
 ///
-/// use zx_ai::ToolCall;
-/// use zx_core::extensions::{Extension, register};
+/// use zx_ai::{Provider, ToolCall};
+/// use zx_core::extensions::Extension;
 /// use zx_core::hooks::{Hook, HookContext, HookResult};
-/// use zx_core::runner::LoopConfig;
 /// use zx_core::tools::ToolOutput;
+/// use zx_core::{Agent, AgentConfig};
 ///
 /// /// Marks every tool result and tells the model so.
 /// struct Checked;
@@ -57,8 +59,11 @@ pub use command::{CommandContext, CommandError, CommandOutcome, SlashCommand, ch
 ///     }
 /// }
 ///
-/// fn add(config: &mut LoopConfig) -> Result<(), String> {
-///     register(config, &[Arc::new(Checked)])
+/// fn agent(provider: Arc<dyn Provider>) -> anyhow::Result<Agent> {
+///     Agent::new(AgentConfig {
+///         extensions: vec![Arc::new(Checked)],
+///         ..AgentConfig::new(provider, "model-id")
+///     })
 /// }
 /// ```
 pub trait Extension: Send + Sync {
@@ -104,10 +109,13 @@ pub trait Extension: Send + Sync {
 /// unchanged.
 ///
 /// Errors: a blank or repeated extension name, a hook outside [`HookStage::Extension`], a
-/// tool name already in use or a tool that fails [`LoopConfig::validate`](crate::runner::LoopConfig::validate),
-/// a section name that is malformed, reserved, already in the prompt or repeated, and a
-/// command name that is malformed or already registered.
-pub fn register(config: &mut LoopConfig, extensions: &[Arc<dyn Extension>]) -> Result<(), String> {
+/// tool name already in use or a tool that the session's tool set refuses, a section name
+/// that is malformed, reserved, already in the prompt or repeated, and a command name that is
+/// malformed or already registered.
+pub(crate) fn register(config: &mut LoopConfig, extensions: &[Arc<dyn Extension>]) -> Result<(), String> {
+    if extensions.is_empty() {
+        return Ok(());
+    }
     let mut claimed = Claimed {
         names: HashSet::new(),
         sections: HashSet::new(),
@@ -121,16 +129,12 @@ pub fn register(config: &mut LoopConfig, extensions: &[Arc<dyn Extension>]) -> R
     for extension in extensions {
         parts.push(check_extension(config, extension.as_ref(), &mut claimed)?);
     }
-    // The loop's own check covers names, declarations and panics; on failure the tools are
-    // taken out again, so nothing is registered.
-    let existing = config.tools.len();
+    // The tool set's own check covers names, declarations and panics.
+    let mut tools: Vec<Arc<dyn Tool>> = config.tools.tools().cloned().collect();
     for part in &mut parts {
-        config.tools.append(&mut part.tools);
+        tools.append(&mut part.tools);
     }
-    if let Err(error) = config.validate() {
-        config.tools.truncate(existing);
-        return Err(format!("extension tools: {error}"));
-    }
+    config.tools = Toolbox::new(tools).map_err(|error| format!("extension tools: {error}"))?;
     for part in parts {
         for policy in part.policies {
             config.policies.push(part.name, policy);
@@ -166,7 +170,7 @@ struct Claimed<'a> {
 
 /// Check one extension's name, hooks, sections and commands against `config` and what
 /// earlier extensions claimed, and collect what it adds. Its tools are checked with the
-/// others by [`LoopConfig::validate`](crate::runner::LoopConfig::validate).
+/// others when the session's tool set is made.
 fn check_extension<'a>(
     config: &LoopConfig,
     extension: &'a dyn Extension,

@@ -27,7 +27,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 // The modules name the model layer, the kernel and the shared helpers by these crate-root paths.
 use zx_ai as ai;
-use zx_core::{Session, runner, session, transcript};
+use zx_core::{Agent, Session, runner, session, transcript};
 
 use zx_core::events::ApprovalResult;
 
@@ -35,9 +35,7 @@ pub use platform::{
     Backoff, CARD_CAPACITY, Cards, Keepalive, MAX_TEXT_CHARS, Pacer, RATE_LIMIT_RETRIES, SEEN_CAPACITY, Seen,
     card_update_refused, pause, split_text,
 };
-pub use server::{
-    ApprovalRecord, Opening, Replies, Server, ServerConfig, ServerEvent, ServerSink, SessionFactory, SessionKey,
-};
+pub use server::{ApprovalRecord, Replies, Server, ServerConfig, ServerEvent, ServerSink, SessionKey};
 pub use status::{StatusFiles, StatusStore};
 
 /// One chat platform, such as Slack.

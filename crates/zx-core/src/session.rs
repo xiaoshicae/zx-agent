@@ -1,4 +1,5 @@
-//! A conversation, shared by its frontends, and its runs.
+//! A conversation, shared by its frontends, and its runs. An [`Agent`](crate::Agent) makes
+//! the sessions.
 //!
 //! - `run`: [`Run`], one prompt, continuation or compaction in progress: its events and its
 //!   result
@@ -8,7 +9,8 @@
 
 mod run;
 
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
@@ -29,6 +31,27 @@ use crate::transcript::{CustomMessage, SessionName, Transcript};
 
 use run::EVENT_BUFFER;
 pub use run::Run;
+
+/// What a new session starts with.
+#[derive(Clone, Debug)]
+pub struct SessionOptions {
+    /// Where the session's tools and hooks work, now and whenever it is opened again: the
+    /// session's header records it, and a listing can ask for the sessions of a directory.
+    pub cwd: PathBuf,
+    /// What the host says about the session, such as its tenant or the chat it belongs to.
+    /// The header keeps them, and a listing can ask for the sessions with given labels.
+    pub labels: BTreeMap<String, String>,
+}
+
+impl SessionOptions {
+    /// A session that works in `cwd`, without labels.
+    pub fn new(cwd: impl Into<PathBuf>) -> Self {
+        Self {
+            cwd: cwd.into(),
+            labels: BTreeMap::new(),
+        }
+    }
+}
 
 /// Provider and model selected together, so a switch cannot expose a mixed pair.
 pub struct ModelRef {
@@ -57,6 +80,10 @@ pub enum SessionError {
     /// answered it in time, or its run was cancelled.
     #[error("no approval request with that ID is waiting")]
     UnknownApproval,
+    /// The agent closed the session ([`Agent::close_session`](crate::Agent::close_session)).
+    /// Its record stays in the storage, where the agent opens it again.
+    #[error("session is closed")]
+    Closed,
 }
 
 enum State {
@@ -64,11 +91,28 @@ enum State {
     Idle(Box<Runner>),
     /// An operation holds the Runner; the token cancels it.
     Leased(CancellationToken),
+    /// Closed while an operation held the Runner: the operation was cancelled, and its lease
+    /// drops the Runner instead of returning it.
+    Closing,
+    /// The Runner is gone, and with it the transcript, the tools and the hooks.
+    Closed,
 }
 
-/// One long-lived conversation. A handle: its clones are the same conversation, so that a
-/// frontend can read a run in one task and cancel or steer it from another. State locks
-/// cover ownership transfers only; host code and asynchronous work run unlocked.
+impl State {
+    /// Why an operation cannot take the Runner in this state, which is not `Idle`.
+    fn refusal(&self) -> SessionError {
+        match self {
+            Self::Idle(_) | Self::Leased(_) => SessionError::Busy,
+            Self::Closing | Self::Closed => SessionError::Closed,
+        }
+    }
+}
+
+/// One long-lived conversation, made by an [`Agent`](crate::Agent). A handle: its clones
+/// are the same conversation, so that a frontend can read a run in one task and cancel or
+/// steer it from another. State locks cover ownership transfers only; host code and
+/// asynchronous work run unlocked. Once the agent closed the session, every operation that
+/// needs the conversation returns [`SessionError::Closed`].
 ///
 /// ```no_run
 /// use zx_core::session::{Session, SessionError};
@@ -91,14 +135,15 @@ struct Shared {
     active_tools: Arc<ActiveTools>,
     approvals: Arc<ApprovalGate>,
     commands: Vec<Arc<dyn SlashCommand>>,
+    tool_names: Vec<String>,
     cwd: PathBuf,
     id: String,
 }
 
 impl Session {
-    /// A conversation recorded in `transcript`. Fails for compaction budgets that cannot
-    /// work, without making a request or changing the session.
-    pub fn new(
+    /// A conversation recorded in `transcript`, running with `config`. Fails for compaction
+    /// budgets that cannot work, without making a request or changing the session.
+    pub(crate) fn new(
         config: LoopConfig,
         retry: RetryPolicy,
         limits: RunLimits,
@@ -113,6 +158,7 @@ impl Session {
                 active_tools: config.active_tools.clone(),
                 approvals: runner.approvals().clone(),
                 commands: config.commands.clone(),
+                tool_names: config.tools.names().map(str::to_string).collect(),
                 cwd: config.cwd.clone(),
                 id: runner.session().header().id.clone(),
                 state: Mutex::new(State::Idle(Box::new(runner))),
@@ -123,6 +169,11 @@ impl Session {
     /// The session's ID, as its header records it.
     pub fn id(&self) -> &str {
         &self.shared.id
+    }
+
+    /// The directory the session's tools and hooks work in: the one it was created in.
+    pub fn cwd(&self) -> &Path {
+        &self.shared.cwd
     }
 
     /// Start a run with `input`: the person's text, or a message from an extension (pi:
@@ -186,9 +237,16 @@ impl Session {
     /// The conversation's queues: to steer or follow up with the person's input (`steer`,
     /// `follow_up`) or a message from an extension (`steer_message`, `follow_up_message`), to
     /// record extension state during a run (`append_entry`), and to choose how many queued
-    /// messages a request takes (`set_mode`).
-    pub fn queues(&self) -> &InputQueues {
+    /// messages a request takes (`set_mode`). A clone is a handle to the same queues, for a
+    /// part of a frontend that only feeds them.
+    pub fn queues(&self) -> &Arc<InputQueues> {
         &self.shared.queues
+    }
+
+    /// The names of the session's tools, in the order requests declare them;
+    /// [`active_tools`](Self::active_tools) chooses which of them a request offers.
+    pub fn tool_names(&self) -> &[String] {
+        &self.shared.tool_names
     }
 
     /// The tools the next request offers, shared with the running loop and the hooks (pi:
@@ -269,17 +327,39 @@ impl Session {
     }
 
     /// Cancel the run or compaction in progress; its [`Run`] then ends with a cancelled
-    /// result. Returns false when idle. The short operations that read or write the session
-    /// while idle (`with_transcript`, `append_entry`, `append_custom_message`, `set_name`)
-    /// hold the conversation as well: during one of them this returns true, although they
-    /// have nothing to cancel.
+    /// result. Returns false when idle or closed. The short operations that read or write the
+    /// session while idle (`with_transcript`, `append_entry`, `append_custom_message`,
+    /// `set_name`) hold the conversation as well: during one of them this returns true,
+    /// although they have nothing to cancel.
     pub fn cancel(&self) -> bool {
         let cancel = match &*lock(&self.shared.state) {
-            State::Idle(_) => return false,
+            State::Idle(_) | State::Closing | State::Closed => return false,
             State::Leased(cancel) => cancel.clone(),
         };
         // Waking a waiting future can call host-provided wakers; do it unlocked.
         cancel.cancel();
+        true
+    }
+
+    /// Close the conversation: cancel the operation in progress, if there is one, and let go
+    /// of the transcript, the tools and the hooks, at once when idle, else when the cancelled
+    /// operation has ended. Returns false when it was closed already.
+    pub(crate) fn close(&self) -> bool {
+        let previous = {
+            let mut state = lock(&self.shared.state);
+            let next = match &*state {
+                State::Idle(_) => State::Closed,
+                State::Leased(_) => State::Closing,
+                State::Closing | State::Closed => return false,
+            };
+            std::mem::replace(&mut *state, next)
+        };
+        match previous {
+            State::Leased(cancel) => cancel.cancel(),
+            // The Runner is dropped here, without the state lock: closing a storage and
+            // dropping the tools and hooks is host code.
+            State::Idle(_) | State::Closing | State::Closed => {}
+        }
         true
     }
 
@@ -346,21 +426,24 @@ impl Session {
         Ok(f(lease.runner().session()))
     }
 
-    /// Run `f` on the Runner under the state lock while idle; a run returns Busy. For quick
-    /// changes of the kernel's own state only: `f` must not call host code, and what it
-    /// returns is dropped after the lock is released, so it can hand back a host object,
-    /// such as a replaced provider, to drop there. When busy, `f` is dropped unlocked too.
+    /// Run `f` on the Runner under the state lock while idle; a run returns Busy, a closed
+    /// session Closed. For quick changes of the kernel's own state only: `f` must not call
+    /// host code, and what it returns is dropped after the lock is released, so it can hand
+    /// back a host object, such as a replaced provider, to drop there. When refused, `f` is
+    /// dropped unlocked too.
     fn idle<T>(&self, f: impl FnOnce(&mut Runner) -> T) -> Result<T, SessionError> {
         let mut state = lock(&self.shared.state);
         let State::Idle(runner) = &mut *state else {
+            let refusal = state.refusal();
             drop(state);
             drop(f);
-            return Err(SessionError::Busy);
+            return Err(refusal);
         };
         Ok(f(runner))
     }
 
-    /// Take the Runner for one operation that `cancel` cancels; Busy while another holds it.
+    /// Take the Runner for one operation that `cancel` cancels; Busy while another holds it,
+    /// Closed once the session is closed.
     fn lease(&self, cancel: CancellationToken) -> Result<Lease, SessionError> {
         let mut state = lock(&self.shared.state);
         match std::mem::replace(&mut *state, State::Leased(cancel.clone())) {
@@ -369,9 +452,10 @@ impl Session {
                 runner: Some(runner),
                 cancel,
             }),
-            busy @ State::Leased(_) => {
-                *state = busy;
-                Err(SessionError::Busy)
+            other @ (State::Leased(_) | State::Closing | State::Closed) => {
+                let refusal = other.refusal();
+                *state = other;
+                Err(refusal)
             }
         }
     }
@@ -403,6 +487,20 @@ impl Drop for Lease {
             .runner
             .take()
             .expect("an active lease returns its Runner exactly once");
-        *lock(&self.shared.state) = State::Idle(runner);
+        let mut state = lock(&self.shared.state);
+        let released = match &*state {
+            State::Leased(_) | State::Idle(_) => {
+                *state = State::Idle(runner);
+                None
+            }
+            // The session was closed meanwhile: the Runner goes instead of coming back.
+            State::Closing | State::Closed => {
+                *state = State::Closed;
+                Some(runner)
+            }
+        };
+        drop(state);
+        // Without the state lock: closing a storage and dropping tools and hooks is host code.
+        drop(released);
     }
 }

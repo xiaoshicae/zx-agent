@@ -4,7 +4,7 @@
 
 mod common;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,10 +15,11 @@ use tokio_util::sync::CancellationToken;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::builtin::executor::{CommandOutput, Executor, LocalExecutor, ShellCommand};
 use zx_agent::builtin::tools::{EditFileTool, FileMutationQueue, WriteFileTool, builtin_tools};
-use zx_agent::runner::RunOutcome;
+use zx_agent::runner::{RunOutcome, RunReport};
 use zx_agent::tools::{Tool, ToolContext};
+use zx_agent::transcript::Transcript;
 
-use common::{config, run_prompt};
+use common::{RunnerSetup, config, header_in};
 
 fn ctx(dir: &Path) -> ToolContext {
     ToolContext::new(dir.to_path_buf(), CancellationToken::new())
@@ -203,16 +204,17 @@ impl Executor for SlowReads {
     }
 }
 
-fn file_tool_config(
-    provider: Arc<FauxProvider>,
-    cwd: PathBuf,
-    executor: &Arc<dyn Executor>,
-) -> zx_agent::runner::LoopConfig {
+/// Run the prompt "edit" in a session that works in `cwd`, with the file tools on
+/// `executor`.
+async fn edit_in(cwd: &Path, provider: Arc<FauxProvider>, executor: &Arc<dyn Executor>) -> RunReport {
     let names = ["edit_file", "write_file"].map(String::from);
     let tools = builtin_tools(&names, Duration::from_secs(5), executor).unwrap();
-    let mut config = config(provider, tools);
-    config.cwd = cwd;
-    config
+    let (mut runner, _) = RunnerSetup {
+        session: Transcript::in_memory(header_in(cwd)),
+        ..RunnerSetup::new(config(provider, tools))
+    }
+    .build();
+    runner.run("edit", &CancellationToken::new()).await
 }
 
 #[tokio::test]
@@ -235,9 +237,8 @@ async fn two_edits_of_one_file_in_one_batch_both_take_effect() {
         FauxStep::text("done"),
     ]));
     let executor: Arc<dyn Executor> = Arc::new(SlowReads);
-    let config = file_tool_config(provider, dir.path().to_path_buf(), &executor);
 
-    let (result, _) = run_prompt(config, &mut Vec::new(), "edit").await;
+    let result = edit_in(dir.path(), provider, &executor).await;
 
     assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(std::fs::read_to_string(dir.path().join("f.txt")).unwrap(), "ONE\nTWO\n");
@@ -287,9 +288,8 @@ async fn old_argument_shapes_are_rewritten_before_the_checks() {
         FauxStep::text("done"),
     ]));
     let executor: Arc<dyn Executor> = Arc::new(LocalExecutor::default());
-    let config = file_tool_config(provider, dir.path().to_path_buf(), &executor);
 
-    let (result, _) = run_prompt(config, &mut Vec::new(), "edit").await;
+    let result = edit_in(dir.path(), provider, &executor).await;
 
     assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(std::fs::read_to_string(dir.path().join("f.txt")).unwrap(), "A\nB\n");

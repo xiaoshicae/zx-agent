@@ -82,15 +82,18 @@ fn read_prompt(arg: &str) -> Result<String> {
     Ok(prompt)
 }
 
-/// Assemble an unattended session of the `unattended` agent, or the user's file that
-/// replaces it, without exposing interactive choices to the kernel.
+/// A session of the `unattended` agent, or of the user's file that replaces it, in which
+/// nobody answers approvals: `--session` continues the session its file holds, or starts
+/// the file.
 async fn build_session(shared: &cli::Shared, session: Option<&Path>) -> Result<Session> {
-    // `--session` continues the session its file holds, or starts the file.
     let place = SessionPlace::file_or_memory(session);
     let existing = place.only().await?;
-    let choice = SessionChoice::existing_or_new(existing.as_deref());
-    let prepared = cli::prepare(shared, &shared.settings.model, None, &place, choice).await?;
-    prepared.into_session()
+    if let Some(existing) = &existing {
+        cli::check_session_cwd(shared.base.cwd.as_deref(), &existing.cwd)?;
+    }
+    let choice = SessionChoice::existing_or_new(existing.as_ref().map(|session| session.id.as_str()));
+    let agent = cli::ModeAgent::build(shared, &shared.settings.model, &place, cli::Approvals::Nobody)?;
+    Ok(agent.open(None, choice).await?.session)
 }
 
 /// Read `run` to its end, showing its events as `progress` does. A signal, which cancels

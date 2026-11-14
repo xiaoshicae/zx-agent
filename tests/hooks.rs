@@ -11,7 +11,7 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use common::{
-    Asked, EchoTool, RunnerSetup, config, fast_retry, header, read_lines, run_approved, run_prompt, summarize,
+    Asked, EchoTool, RunnerSetup, config, fast_retry, header, read_lines, refusal, run_approved, run_prompt, summarize,
 };
 use zx_agent::CancelSignal;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
@@ -29,7 +29,7 @@ use zx_agent::policy::{
 };
 use zx_agent::runner::{RunLimits, RunOutcome};
 use zx_agent::tools::{Tool, ToolContext, ToolOutput};
-use zx_agent::transcript::{Entry, Transcript};
+use zx_agent::transcript::{Entry, SessionHeader, Transcript};
 
 struct Verdict(PolicyDecision);
 #[async_trait]
@@ -853,12 +853,12 @@ async fn a_hook_follow_up_obeys_the_step_budget() {
     assert_eq!(provider.requests().len(), 1);
 }
 
-struct StopAndQueue(Arc<zx_agent::input::InputQueues>);
+struct StopAndQueue;
 #[async_trait]
 impl Hook for StopAndQueue {
-    async fn on_event(&self, event: &Event, _ctx: &HookContext) -> HookResult<()> {
+    async fn on_event(&self, event: &Event, ctx: &HookContext) -> HookResult<()> {
         if matches!(event.event, EventKind::StepEnd { .. }) {
-            self.0.steer("pending user input");
+            ctx.queues.steer("pending user input");
         }
         Ok(())
     }
@@ -871,11 +871,14 @@ impl Hook for StopAndQueue {
 async fn stopping_from_a_hook_preserves_queued_user_input() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let mut config = config(provider, vec![]);
-    let queues = config.queues.clone();
-    config.hooks.push(StopAndQueue(queues.clone()));
-    let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
+    config.hooks.push(StopAndQueue);
+    let (mut runner, _) = RunnerSetup::new(config).build();
+    let result = runner.run("go", &CancellationToken::new()).await;
     assert_eq!(result.outcome, RunOutcome::Completed);
-    assert_eq!(queues.drain_steering(), [Input::User("pending user input".into())]);
+    assert_eq!(
+        runner.queues().drain_steering(),
+        [Input::User("pending user input".into())]
+    );
 }
 
 struct FinishFailure;
@@ -1305,9 +1308,12 @@ async fn every_hook_method_knows_the_session_run_and_working_directory() {
     ]));
     let probe = ContextProbe::default();
     let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
-    config.cwd = PathBuf::from("/srv/work");
     config.hooks.push(probe.clone());
-    let (mut runner, events) = RunnerSetup::new(config).build();
+    let (mut runner, events) = RunnerSetup {
+        session: Transcript::in_memory(SessionHeader::new(Path::new("/srv/work"), "test-model")),
+        ..RunnerSetup::new(config)
+    }
+    .build();
 
     runner.run("go", &CancellationToken::new()).await;
 
@@ -1499,20 +1505,15 @@ async fn redaction_covers_the_strings_and_keys_of_details() {
     assert_eq!(details, [json!({"[REDACTED]": ["token [REDACTED]", 7, null]})]);
 }
 
-#[tokio::test]
-async fn tools_with_the_same_name_are_rejected_before_any_request() {
+#[test]
+fn tools_with_the_same_name_refuse_the_agent() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
     let config = config(
-        provider.clone(),
+        provider,
         vec![Arc::new(EchoTool::new("echo")), Arc::new(EchoTool::new("echo"))],
     );
 
-    let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
-
-    assert_eq!(result.outcome, RunOutcome::Failed);
-    let error = format!("{:?}", result.error);
-    assert!(error.contains("more than one tool is named \\\"echo\\\""), "{error}");
-    assert!(provider.requests().is_empty());
+    assert_eq!(refusal(config), "more than one tool is named \"echo\"");
 }
 
 struct AppendSystem;
@@ -1594,40 +1595,32 @@ impl zx_agent::tools::Tool for Declared {
     }
 }
 
-#[tokio::test]
-async fn a_tool_declared_under_another_name_is_rejected_before_any_request() {
+#[test]
+fn a_tool_declared_under_another_name_refuses_the_agent() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
     let tool = Declared {
         name: "echo",
         declared: "other",
         panics: false,
     };
-    let config = config(provider.clone(), vec![Arc::new(tool)]);
 
-    let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
+    let error = refusal(config(provider, vec![Arc::new(tool)]));
 
-    assert_eq!(result.outcome, RunOutcome::Failed);
-    let error = format!("{:?}", result.error);
-    assert!(error.contains("declares itself as \\\"other\\\""), "{error}");
-    assert!(provider.requests().is_empty());
+    assert!(error.contains("declares itself as \"other\""), "{error}");
 }
 
-#[tokio::test]
-async fn a_tool_whose_definition_panics_fails_the_run_before_any_request() {
+#[test]
+fn a_tool_whose_definition_panics_refuses_the_agent() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
     let tool = Declared {
         name: "echo",
         declared: "echo",
         panics: true,
     };
-    let config = config(provider.clone(), vec![Arc::new(tool)]);
 
-    let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
+    let error = refusal(config(provider, vec![Arc::new(tool)]));
 
-    assert_eq!(result.outcome, RunOutcome::Failed);
-    let error = format!("{:?}", result.error);
-    assert!(error.contains("panicked"), "{error}");
-    assert!(provider.requests().is_empty());
+    assert_eq!(error, "tool 0 panicked while describing itself");
 }
 
 /// Cancels the token it is given, as a tool might to stop work of its own.

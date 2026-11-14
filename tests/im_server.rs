@@ -15,20 +15,20 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use common::{EchoTool, config, fast_retry, header, summarize, test_limits};
-use zx_agent::Session;
+use common::{EchoTool, config, fast_retry, summarize, test_limits};
+use zx_agent::Agent;
+use zx_agent::agent::{SessionParts, SessionSetup};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::builtin::policy::{Rule, RuleMatcher, RulePolicy};
-use zx_agent::compaction::Config;
 use zx_agent::events::ApprovalResult;
 use zx_agent::im::{
     Addressee, ApprovalId, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId,
-    MessageRef, Opening, Outbound, Replies, Said, Server, ServerConfig, ServerEvent, ServerSink, SessionFactory,
-    SessionKey, StatusStore, ThreadId, UserId,
+    MessageRef, Outbound, Replies, Said, Server, ServerConfig, ServerEvent, ServerSink, SessionKey, StatusStore,
+    ThreadId, UserId,
 };
 use zx_agent::policy::{ApprovalMode, PolicyDecision};
 use zx_agent::tools::Tool;
-use zx_agent::transcript::{MemoryStorage, SessionHeader, SessionQuery, SessionStorage, Transcript};
+use zx_agent::transcript::{MemoryStorage, SessionHeader, SessionQuery, SessionStorage};
 
 const PLATFORM: &str = "fake";
 const CHAT: &str = "C1";
@@ -218,20 +218,20 @@ impl StatusStore for Statuses {
     }
 }
 
-/// Sessions on a scripted model, kept in memory under the labels of their conversation. The
-/// `echo` tool asks for approval; everything else is allowed.
-struct Factory {
+/// What the tests know of the sessions the server opens: the scripted model, the `echo`
+/// tool, the storage that keeps them in memory, and how often a session was set up. It is
+/// the agent's session setup, which refuses every session when it has a reason to.
+struct Sessions {
     provider: Arc<FauxProvider>,
     echo: Arc<EchoTool>,
-    storage: MemoryStorage,
-    approval_timeout: Duration,
+    storage: Arc<MemoryStorage>,
     opened: AtomicUsize,
     fail: Option<String>,
 }
 
-impl Factory {
+impl Sessions {
     /// The IDs of the conversation's sessions, most recently active first.
-    async fn sessions(&self, key: &SessionKey) -> Result<Vec<String>, String> {
+    async fn of(&self, key: &SessionKey) -> Result<Vec<String>, String> {
         let query = SessionQuery {
             labels: key.labels(),
             ..SessionQuery::default()
@@ -240,44 +240,12 @@ impl Factory {
         Ok(list.sessions.into_iter().map(|session| session.id).collect())
     }
 
-    /// The session of `key` that `opening` names: the latest one, or a new one with the
-    /// conversation's labels.
-    async fn session(&self, key: &SessionKey, opening: Opening) -> anyhow::Result<Transcript> {
-        let latest = match opening {
-            Opening::Latest => self.sessions(key).await.map_err(anyhow::Error::msg)?.into_iter().next(),
-            Opening::New => None,
-        };
-        match latest {
-            Some(id) => {
-                let (loaded, log) = self.storage.open(&id).await?;
-                Transcript::load(loaded, log)
-            }
-            None => {
-                let header = SessionHeader {
-                    labels: key.labels(),
-                    ..header()
-                };
-                let log = self.storage.create(&header).await?;
-                Ok(Transcript::with_log(header, log))
-            }
-        }
-    }
-}
-
-#[async_trait]
-impl SessionFactory for Factory {
-    async fn has_session(&self, key: &SessionKey) -> Result<bool, String> {
-        Ok(!self.sessions(key).await?.is_empty())
-    }
-
-    async fn open(&self, key: &SessionKey, opening: Opening) -> Result<Session, String> {
-        self.opened.fetch_add(1, Ordering::SeqCst);
-        if let Some(error) = &self.fail {
-            return Err(error.clone());
-        }
+    /// The agent of every conversation: its `echo` tool asks for approval, which waits
+    /// `approval_timeout`; everything else is allowed.
+    fn agent(self: &Arc<Self>, approval_timeout: Duration) -> Agent {
         let tools: Vec<Arc<dyn Tool>> = vec![self.echo.clone()];
         let mut config = config(self.provider.clone(), tools);
-        config.approvals = ApprovalMode::Wait(self.approval_timeout);
+        config.approvals = ApprovalMode::Wait(approval_timeout);
         config.policies.push(
             "echo_approval",
             Arc::new(RulePolicy::new(vec![
@@ -291,9 +259,22 @@ impl SessionFactory for Factory {
                 },
             ])),
         );
-        let store = self.session(key, opening).await.map_err(|error| format!("{error:#}"))?;
-        Session::new(config, fast_retry(0), test_limits(), Config::default(), store)
-            .map_err(|error| format!("{error:#}"))
+        config.retry = fast_retry(0);
+        config.limits = test_limits();
+        config.storage = self.storage.clone();
+        config.session_setup = Some(self.clone());
+        Agent::new(config).unwrap()
+    }
+}
+
+#[async_trait]
+impl SessionSetup for Sessions {
+    async fn setup(&self, _header: &SessionHeader) -> anyhow::Result<SessionParts> {
+        self.opened.fetch_add(1, Ordering::SeqCst);
+        match &self.fail {
+            Some(reason) => Err(anyhow::anyhow!("{reason}")),
+            None => Ok(SessionParts::default()),
+        }
     }
 }
 
@@ -353,20 +334,21 @@ struct Harness {
     events: mpsc::UnboundedReceiver<ServerEvent>,
     cancel: CancellationToken,
     server: JoinHandle<Result<(), ImError>>,
-    factory: Arc<Factory>,
+    sessions: Arc<Sessions>,
+    agent: Agent,
     replies: Replies,
     statuses: Option<Arc<Statuses>>,
 }
 
 fn start(setup: Setup) -> Harness {
-    let factory = Arc::new(Factory {
+    let sessions = Arc::new(Sessions {
         provider: Arc::new(FauxProvider::new(setup.steps)),
         echo: Arc::new(EchoTool::new("echo")),
-        storage: MemoryStorage::default(),
-        approval_timeout: setup.approval_timeout,
+        storage: Arc::default(),
         opened: AtomicUsize::new(0),
         fail: setup.fail_open,
     });
+    let agent = sessions.agent(setup.approval_timeout);
     let (inject, events_in) = mpsc::channel(16);
     let (sent_to, sent) = mpsc::unbounded_channel();
     let statuses = setup.statuses.map(|left| {
@@ -394,7 +376,7 @@ fn start(setup: Setup) -> Harness {
         config.statuses = Some(store);
     }
     let replies = config.replies.clone();
-    let server = Server::new(config, factory.clone(), Arc::new(Events(events_to)));
+    let server = Server::new(config, agent.clone(), Arc::new(Events(events_to)));
     let cancel = CancellationToken::new();
     let stop = cancel.clone();
     let server = tokio::spawn(async move { server.run(vec![channel], &stop).await });
@@ -404,7 +386,8 @@ fn start(setup: Setup) -> Harness {
         events,
         cancel,
         server,
-        factory,
+        sessions,
+        agent,
         replies,
         statuses,
     }
@@ -572,7 +555,7 @@ impl Harness {
     }
 
     fn requests(&self) -> Vec<Vec<String>> {
-        self.factory
+        self.sessions
             .provider
             .requests()
             .iter()
@@ -646,7 +629,7 @@ async fn a_reply_in_the_thread_continues_its_session() {
         h.requests()[1],
         ["user:U-asker: first", "assistant:one", "user:U-asker: second"]
     );
-    assert_eq!(h.factory.opened.load(Ordering::SeqCst), 1);
+    assert_eq!(h.sessions.opened.load(Ordering::SeqCst), 1);
     h.stop().await.unwrap();
 }
 
@@ -664,7 +647,7 @@ async fn each_thread_has_a_session_of_its_own() {
     let status = h.posted(&thread("m2"), working).await;
     h.updated(&status, text("two")).await;
     assert_eq!(h.requests()[1], ["user:U-asker: unrelated"]);
-    assert_eq!(h.factory.opened.load(Ordering::SeqCst), 2);
+    assert_eq!(h.sessions.opened.load(Ordering::SeqCst), 2);
     h.stop().await.unwrap();
 }
 
@@ -677,7 +660,7 @@ async fn a_chat_that_is_not_served_gets_a_refusal_and_nothing_else() {
         thread: Some(ThreadId("m1".into())),
     };
     h.posted(&refused, text(&h.replies.unauthorized.clone())).await;
-    assert_eq!(h.factory.opened.load(Ordering::SeqCst), 0);
+    assert_eq!(h.sessions.opened.load(Ordering::SeqCst), 0);
     assert!(h.requests().is_empty());
     h.stop().await.unwrap();
 }
@@ -702,7 +685,7 @@ async fn an_approver_allows_a_call_and_the_card_shows_the_decision() {
     )
     .await;
     h.updated(&status, text("finished")).await;
-    assert_eq!(h.factory.echo.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(h.sessions.echo.calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         h.requests()[1],
         ["user:U-asker: run echo", "assistant:calls[c1]", "tool:c1=done"]
@@ -754,7 +737,7 @@ async fn a_click_by_someone_who_is_not_an_approver_decides_nothing() {
     )
     .await;
     h.updated(&status, text("not run")).await;
-    assert_eq!(h.factory.echo.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(h.sessions.echo.calls.load(Ordering::SeqCst), 0);
     h.stop().await.unwrap();
 }
 
@@ -778,7 +761,7 @@ async fn an_unanswered_approval_times_out_and_its_card_says_so() {
     )
     .await;
     h.updated(&status, text("gave up")).await;
-    assert_eq!(h.factory.echo.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(h.sessions.echo.calls.load(Ordering::SeqCst), 0);
     h.stop().await.unwrap();
 }
 
@@ -802,7 +785,7 @@ async fn cancel_in_the_thread_stops_the_run_and_closes_its_card() {
     )
     .await;
     h.updated(&status, text(&h.replies.cancelled.clone())).await;
-    assert_eq!(h.factory.echo.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(h.sessions.echo.calls.load(Ordering::SeqCst), 0);
     assert_eq!(h.requests().len(), 1);
     h.stop().await.unwrap();
 }
@@ -813,7 +796,7 @@ async fn cancel_with_nothing_running_says_so() {
     h.say("m1", None, "/cancel").await;
     h.posted(&thread("m1"), text(&h.replies.nothing_to_cancel.clone()))
         .await;
-    assert_eq!(h.factory.opened.load(Ordering::SeqCst), 0);
+    assert_eq!(h.sessions.opened.load(Ordering::SeqCst), 0);
     h.stop().await.unwrap();
 }
 
@@ -903,7 +886,7 @@ async fn an_idle_conversation_releases_its_session_and_reopens_it() {
     h.say("m2", Some("m1"), "second").await;
     let status = h.posted(&thread("m1"), working).await;
     h.updated(&status, text("two")).await;
-    assert_eq!(h.factory.opened.load(Ordering::SeqCst), 2);
+    assert_eq!(h.sessions.opened.load(Ordering::SeqCst), 2);
     assert_eq!(
         h.requests()[1],
         ["user:U-asker: first", "assistant:one", "user:U-asker: second"]
@@ -1009,7 +992,7 @@ async fn a_message_received_as_the_server_stops_is_answered_without_running() {
         ..Setup::default()
     });
     let replies = h.replies.clone();
-    let factory = Arc::clone(&h.factory);
+    let sessions = Arc::clone(&h.sessions);
     let (sent, events) = h.stop_and_take().await;
     match sent.as_slice() {
         [Sent::Post { to, message, .. }] => assert_eq!((to, message), (&thread("m1"), &text(&replies.stopping))),
@@ -1017,7 +1000,7 @@ async fn a_message_received_as_the_server_stops_is_answered_without_running() {
     }
     assert_eq!(events, [unanswered("m1", 1)]);
     assert_eq!(
-        factory.opened.load(Ordering::SeqCst),
+        sessions.opened.load(Ordering::SeqCst),
         0,
         "no session is opened to refuse"
     );
@@ -1207,7 +1190,10 @@ async fn a_session_that_cannot_be_opened_is_reported_and_tried_again() {
         fail_open: Some("disk full".into()),
         ..Setup::default()
     });
-    let refused = text(&format!("{}disk full", h.replies.cannot_open));
+    let refused = text(&format!(
+        "{}cannot set up the session: disk full",
+        h.replies.cannot_open
+    ));
     h.say("m1", None, "hello").await;
     h.posted(&thread("m1"), refused.clone()).await;
     match h.event().await {
@@ -1219,7 +1205,7 @@ async fn a_session_that_cannot_be_opened_is_reported_and_tried_again() {
     }
     h.say("m2", Some("m1"), "again").await;
     h.posted(&thread("m1"), refused).await;
-    assert_eq!(h.factory.opened.load(Ordering::SeqCst), 2);
+    assert_eq!(h.sessions.opened.load(Ordering::SeqCst), 2);
     h.stop().await.unwrap();
 }
 
@@ -1240,7 +1226,7 @@ async fn two_channels_with_one_name_are_a_configuration_error() {
         })
     };
     let h = start(Setup::default());
-    let server = Server::new(ServerConfig::default(), h.factory.clone(), Arc::new(NullServerSink));
+    let server = Server::new(ServerConfig::default(), h.agent.clone(), Arc::new(NullServerSink));
     let result = server.run(vec![channel(), channel()], &CancellationToken::new()).await;
     assert!(matches!(result, Err(ImError::Config(error)) if error.contains("fake")));
     h.stop().await.unwrap();
@@ -1267,7 +1253,7 @@ async fn a_direct_chat_is_one_conversation_answered_in_the_chat() {
     h.updated(&status, text("two")).await;
     // One person: no names before their words.
     assert_eq!(h.requests()[1], ["user:first", "assistant:one", "user:second"]);
-    assert_eq!(h.factory.opened.load(Ordering::SeqCst), 1);
+    assert_eq!(h.sessions.opened.load(Ordering::SeqCst), 1);
     h.stop().await.unwrap();
 }
 
@@ -1292,7 +1278,7 @@ async fn new_starts_a_new_session_and_keeps_the_earlier_one() {
         conversation: ConversationId(DIRECT.into()),
         thread: None,
     };
-    assert_eq!(h.factory.sessions(&key).await.unwrap().len(), 2);
+    assert_eq!(h.sessions.of(&key).await.unwrap().len(), 2);
     h.stop().await.unwrap();
 }
 
@@ -1389,7 +1375,7 @@ async fn talk_where_the_bot_never_took_part_is_left_alone() {
     // The first thing the server does is answer the mention: no refusal, no run before it.
     let status = h.posted(&thread("m3"), text(&h.replies.working.clone())).await;
     h.updated(&status, text("one")).await;
-    assert_eq!(h.factory.opened.load(Ordering::SeqCst), 1);
+    assert_eq!(h.sessions.opened.load(Ordering::SeqCst), 1);
     h.stop().await.unwrap();
 }
 
