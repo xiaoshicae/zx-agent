@@ -3,8 +3,8 @@ use std::path::Path;
 
 use super::*;
 use crate::ai::Message;
-use crate::transcript::SESSION_VERSION;
 use crate::transcript::test_support::{header, texts};
+use crate::transcript::{Entry, LogRecord, MessageEntry, SESSION_VERSION};
 
 /// A header for a session started in `cwd` at `timestamp`, with `id`.
 fn header_of(id: &str, cwd: &str, timestamp: u64) -> SessionHeader {
@@ -15,10 +15,29 @@ fn header_of(id: &str, cwd: &str, timestamp: u64) -> SessionHeader {
     }
 }
 
-/// Create the session of `header` in `storage` with one prompt, and release it.
+/// Create the session of `header` in `storage` with one prompt, and release it. The prompt
+/// goes to the log as a transcript writes it, but dated a millisecond after the session
+/// started instead of now: a listing orders sessions by that time, and two prompts written
+/// now can share a millisecond.
 async fn seed(storage: &JsonlStorage, header: &SessionHeader, prompt: &str) {
-    let mut session = Transcript::with_log(header.clone(), storage.create(header).await.unwrap());
-    session.append_message(Message::user(prompt)).await.unwrap();
+    let entry = Entry::Message(MessageEntry {
+        id: "e1".into(),
+        parent_id: None,
+        timestamp: header.timestamp + 1,
+        message: Message::user(prompt),
+        actor: None,
+    });
+    let json = serde_json::to_string(&entry).unwrap();
+    let mut log = storage.create(header).await.unwrap();
+    let record = LogRecord {
+        seq: 1,
+        id: entry.id(),
+        parent_id: entry.parent_id(),
+        kind: entry.kind(),
+        timestamp: entry.timestamp(),
+        json: &json,
+    };
+    log.append(&record).await.unwrap();
 }
 
 async fn ids(storage: &JsonlStorage, query: &SessionQuery) -> Vec<String> {

@@ -5,12 +5,12 @@
 # The toolchain the release workflow uses (.github/workflows/release.yml).
 FROM rust:1.88-slim-bookworm AS build
 WORKDIR /src
-# Only what the build reads (the workspace crates, and agents/, which is compiled in), so
-# edits elsewhere keep it cached.
+# Only what the build reads, so edits elsewhere keep it cached: the library of the root
+# package (src) and the workspace crates. The program is crates/zx-cli, with the built-in
+# agents it compiles in.
 COPY Cargo.toml Cargo.lock ./
 COPY src src
 COPY crates crates
-COPY agents agents
 RUN cargo build --release --locked
 
 FROM debian:bookworm-slim

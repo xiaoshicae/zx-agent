@@ -3276,24 +3276,15 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 name = "zx-agent"
 version = "0.1.0"
 dependencies = [
- "agent-client-protocol",
  "anyhow",
  "async-trait",
- "chrono",
- "clap",
  "futures",
- "libc",
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
- "reqwest",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
- "toml",
  "uuid",
  "zx-ai",
  "zx-ai-openai",
@@ -3330,6 +3321,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "zx-cli"
+version = "0.1.0"
+dependencies = [
+ "agent-client-protocol",
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "clap",
+ "futures",
+ "libc",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "toml",
+ "uuid",
+ "zx-agent",
+ "zx-im",
+ "zx-im-feishu",
+ "zx-im-slack",
+]
+
+[[package]]
 name = "zx-core"
 version = "0.1.0"
 dependencies = [
@@ -3359,7 +3379,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
- "uuid",
  "zx-ai",
  "zx-core",
 ]

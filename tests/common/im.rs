@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use zx_agent::im::{ImChannel, ImError, Inbound};
+use zx_im::{ImChannel, ImError, Inbound};
 
 /// A running channel: what it passes on, and how to stop it.
 pub(crate) struct Running {

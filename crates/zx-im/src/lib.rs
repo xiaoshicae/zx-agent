@@ -7,8 +7,8 @@
 //! [`Backoff`] and [`Keepalive`] help with the duties every platform has. The platforms of
 //! this workspace are such crates: `zx-im-slack` and `zx-im-feishu`.
 //!
-//! The `zx-agent` crate re-exports this crate as `zx_agent::im`, with those platforms as
-//! `zx_agent::im::slack` and `zx_agent::im::feishu`.
+//! A server is one way to bring an agent to people, built on the kernel beside the command
+//! line: the `im` subcommand of `zx-cli` runs one with those platforms.
 
 mod approval;
 mod outlet;

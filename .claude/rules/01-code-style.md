@@ -7,7 +7,7 @@ paths:
 
 格式由 rustfmt 决定；能用 lint 查的条款在 `Cargo.toml` 的 `[workspace.lints]`，阈值在 `clippy.toml`。这里只列工具查不出的约定。
 
-- **`#[allow]` 的唯一例外**：`tests/common/mod.rs` 的 `#![allow(dead_code, reason = "...")]`。这个模块被多个测试二进制共享，各自只用一部分；`expect` 会在用全了的二进制里报"预期落空"。其他地方要例外就用 `#[expect(lint, reason = "...")]`，理由写成能核对的一句话（`one arm per event variant`）。
+- **`#[allow]` 的唯一例外**：两个测试公共模块 `tests/common/mod.rs` 与 `crates/zx-cli/tests/common/mod.rs` 的 `#![allow(dead_code, reason = "...")]`。这样的模块被多个测试二进制共享，各自只用一部分；`expect` 会在用全了的二进制里报"预期落空"。其他地方要例外就用 `#[expect(lint, reason = "...")]`，理由写成能核对的一句话（`one arm per event variant`）。
 - **导入分三组**，组之间空一行：标准库、外部 crate、本 crate（`crate::`、`super::`）。
 - **可见性最小化**：默认私有，crate 内共享用 `pub(crate)`，只有库的使用者需要的才 `pub`。workspace 内另一个 crate 要用、但不属于 API 的项，见 CLAUDE.md 的"分层由 crate 边界保证"。
 - **函数**：参数超过 5 个就打包成结构体；不用 bool 参数切换行为，改用枚举或拆成两个函数。长度见规则 09。

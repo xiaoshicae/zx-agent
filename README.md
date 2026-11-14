@@ -257,21 +257,22 @@ apiKeyEnv = "DEEPSEEK_API_KEY"
 
 ## 架构
 
-一个 Cargo workspace，8 个 crate，依赖只能自上而下，由编译器保证：
+一个 Cargo workspace，9 个 crate，依赖只能自上而下，由编译器保证：
 
 ```
-zx-agent    src/             CLI（run、chat、im、acp）、config.toml 与 agent、OpenTelemetry 导出；
-                             库以原有路径再导出下面各 crate
+zx-cli      crates/zx-cli    命令行程序 zx-agent（run、chat、acp、im、sessions）、config.toml 与 agent、
+                             OpenTelemetry 导出
   ├─ zx-im-slack   crates/zx-im-slack   Slack 平台
   ├─ zx-im-feishu  crates/zx-im-feishu  ⚑ D:5/CHINA FLAG: 飞书平台
-  │    └─ zx-im    crates/zx-im         IM 平台接口与按会话分派的服务
-  ├─ zx-tools  crates/zx-tools  内置工具、执行环境、长结果落盘、命令与规则策略、续写与脱敏、MCP 客户端
-  ├─ zx-core   crates/zx-core   循环、会话、运行层、共享会话、摘要、提示词、扩展接口
-  │    └─ zx-ai  crates/zx-ai   消息类型、流式事件协议、provider 契约
-  └─ zx-ai-openai  crates/zx-ai-openai  OpenAI 兼容 provider（只依赖 zx-ai）
+  │    └─ zx-im    crates/zx-im         IM 平台接口与按会话分派的服务（依赖 zx-core）
+  └─ zx-agent  src/lib.rs    SDK：把下面四个 crate 再导出成一个库，没有自己的代码
+       ├─ zx-tools  crates/zx-tools  内置工具、执行环境、长结果落盘、命令与规则策略、续写与脱敏、MCP 客户端
+       ├─ zx-core   crates/zx-core   循环、会话、运行层、共享会话、摘要、提示词、扩展接口
+       │    └─ zx-ai  crates/zx-ai   消息类型、流式事件协议、provider 契约
+       └─ zx-ai-openai  crates/zx-ai-openai  OpenAI 兼容 provider（只依赖 zx-ai）
 ```
 
-只嵌入内核的程序不编译 HTTP 客户端。代码中没有场景、环境或平台文案语言的规则：场景是 agent 文件，Kubernetes 的规则在 `deploy/kubernetes/`。
+命令行与 IM 是建在库之上的两种接入方式，不在库里：引入 `zx-agent` 不编译命令行解析、ACP、追踪导出与 IM 平台。只嵌入内核的程序不编译 HTTP 客户端。代码中没有场景、环境或平台文案语言的规则：场景是 agent 文件，Kubernetes 的规则在 `deploy/kubernetes/`。
 
 一次运行：`Session::send` 取得会话并返回一个 `Run`，调用方读它，运行才推进；每一步先写入会话再发出事件；发给模型的上下文就是会话的投影；工具调用先逐个检查，再并发执行，按调用顺序写结果；失败的请求按策略重试，最后汇总为 `RunReport`。
 
@@ -413,7 +414,7 @@ run、chat 与 im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（完整地�
 
 ## 作为库使用
 
-`zx-agent` 库再导出各 crate：内核 `zx-core` 按域模块原样导出（`zx_agent::runner`、`zx_agent::tools`、`zx_agent::policy`、`zx_agent::hooks`、`zx_agent::transcript` 等），模型层在 `zx_agent::ai`，`zx-tools` 附带的实现在 `zx_agent::builtin`，IM 在 `zx_agent::im`。只需要内核时可以只依赖 `zx-core` 与 `zx-ai`，按需加上 `zx-ai-openai`。各 crate 都不发布到 crates.io。
+`zx-agent` 库再导出各 crate：内核 `zx-core` 按域模块原样导出（`zx_agent::runner`、`zx_agent::tools`、`zx_agent::policy`、`zx_agent::hooks`、`zx_agent::transcript` 等），模型层在 `zx_agent::ai`，`zx-tools` 附带的实现在 `zx_agent::builtin`。库里没有接入方式：IM 服务在 `zx-im`（平台在 `zx-im-slack` 与 `zx-im-feishu`），`config.toml`、agent 文件与 OpenTelemetry 导出在命令行的 crate `zx-cli`（`zx_cli::config`、`zx_cli::otel`）。只需要内核时可以只依赖 `zx-core` 与 `zx-ai`，按需加上 `zx-ai-openai`。各 crate 都不发布到 crates.io。
 
 ```rust
 let mut config = AgentConfig { system_prompt, tools, ..AgentConfig::new(provider, model) };
@@ -435,8 +436,8 @@ let report = run.wait().await;                // 只要结果时直接 session.s
 - 调用者身份：会话的标签（`SessionOptions::labels`，如租户或所属对话）与输入的 actor（`Input::User { text, actor }`，这条输入是谁发的）经 `PolicyContext` 与 `HookContext` 的 `labels`、`actor` 交给策略与钩子。`actor` 是会话最近一条提问的发送者，没有给出时为 `None`；扩展发的消息不改变它。内核只记录与传递，不据此做任何判断。
 - 审批不是接口而是会话的一个操作：`AgentConfig::approvals` 默认 `ApprovalMode::Deny`（没有人回答，策略询问的调用立即被拒绝）；设为 `ApprovalMode::Wait(时长)` 后，运行发出带审批编号、工具名与参数的 `approval_requested` 事件并等待 `Session::resolve_approval(编号, 决定)`，超时或取消都按拒绝处理。读事件的循环里不要等人回答，否则超时与取消要到下一次读取才生效。
 - 事件只从 `Run` 读出。要观察所有运行的（如追踪导出）实现 `hooks::Hook::on_event`：不等待、不失败的钩子按顺序看到每个事件，被取消的运行也一样。
-- 扩展点都是 trait：`ai::Provider`、`tools::Tool`、`policy::ToolPolicy`、`hooks::Hook`、`extensions::Extension`、`agent::SessionSetup`、`compaction::Summarizer`（可选：自己产出摘要）、`transcript::SessionStorage`（会话存在哪里）及其 `transcript::SessionLog`（一个会话的记录）、`builtin::executor::Executor`、`im::ImChannel`、`im::StatusStore`。
-- 附带的实现：`ai::openai::OpenAiCompatible`、`transcript::JsonlStorage`（会话文件）与 `transcript::MemoryStorage`、`builtin::mcp::Server`（一个 `Extension`）、`builtin::executor::ContainerExecutor`、`builtin::redact::RedactSecrets`、`otel::Telemetry`（它的 `hook()` 注册为 agent 的钩子）。
+- 扩展点都是 trait：`ai::Provider`、`tools::Tool`、`policy::ToolPolicy`、`hooks::Hook`、`extensions::Extension`、`agent::SessionSetup`、`compaction::Summarizer`（可选：自己产出摘要）、`transcript::SessionStorage`（会话存在哪里）及其 `transcript::SessionLog`（一个会话的记录）、`builtin::executor::Executor`；IM 另有 `zx_im::ImChannel` 与 `zx_im::StatusStore`。
+- 附带的实现：`ai::openai::OpenAiCompatible`、`transcript::JsonlStorage`（会话文件）与 `transcript::MemoryStorage`、`builtin::mcp::Server`（一个 `Extension`）、`builtin::executor::ContainerExecutor`、`builtin::redact::RedactSecrets`；追踪导出 `zx_cli::otel::Telemetry` 在命令行的 crate 里（它的 `hook()` 注册为 agent 的钩子）。
 - 会话存储：放进 `AgentConfig::storage`，默认是 `MemoryStorage`。`Agent` 用 `storage.create(&header)` 建新会话，用 `storage.open(id)` 读回会话并成为它的写入者；`storage.read(id)` 是只读快照，宿主交给 `Transcript::snapshot` 来读；`storage.list(&SessionQuery { cwd, labels, limit })` 按工作目录或标签列出，最近活动的在前（`Agent::list_sessions` 即它）。换一种存储（如数据库）只需实现这两个 trait。
 - 摘要：默认由内核请求模型，请求可从会话还原。给 `AgentConfig::summarizer` 一个 `compaction::Summarizer` 后由它产出摘要与用量：何时摘要、读哪一段（至多 2 MiB）、写开始与结果记录、校验每条事实引用的记录、超时与取消仍由内核负责；一次摘要计为运行的一次模型请求，它报告的用量计入运行的预算。
 
@@ -451,7 +452,7 @@ cargo fmt --check
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 ```
 
-在仓库根目录运行时覆盖全部 8 个 crate；加 `-p <crate>` 只处理一个。集成测试在根目录的 `tests/`，每个文件覆盖什么见 [docs/TESTS.md](docs/TESTS.md)。
+在仓库根目录运行时覆盖全部 9 个 crate；加 `-p <crate>` 只处理一个。集成测试分两处：只用库的在根目录的 `tests/`，驱动程序的在 `crates/zx-cli/tests/`，每个文件覆盖什么见 [docs/TESTS.md](docs/TESTS.md)。
 
 `tests/real_api.rs` 会产生费用：每个测试都标为 `#[ignore]`，没有设置 `ZX_E2E_AUTHORIZED=1` 时在发出请求前失败，运行方式见该文件开头的注释。
 

@@ -22,14 +22,14 @@ use zx_agent::ai::Message;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::builtin::policy::{Rule, RuleMatcher, RulePolicy};
 use zx_agent::events::ApprovalResult;
-use zx_agent::im::{
+use zx_agent::policy::{ApprovalMode, PolicyDecision};
+use zx_agent::tools::Tool;
+use zx_agent::transcript::{Entry, MemoryStorage, SessionHeader, SessionQuery, SessionStorage, Transcript};
+use zx_im::{
     Addressee, ApprovalId, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId,
     MessageRef, Outbound, Replies, Said, Server, ServerConfig, ServerEvent, ServerSink, SessionKey, StatusStore,
     ThreadId, UserId,
 };
-use zx_agent::policy::{ApprovalMode, PolicyDecision};
-use zx_agent::tools::Tool;
-use zx_agent::transcript::{Entry, MemoryStorage, SessionHeader, SessionQuery, SessionStorage, Transcript};
 
 const PLATFORM: &str = "fake";
 const CHAT: &str = "C1";

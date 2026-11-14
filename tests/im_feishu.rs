@@ -12,11 +12,11 @@ use tokio::sync::mpsc;
 use common::fake_feishu::{Answer, FakeFeishu, TestFrame};
 use common::im::run_channel;
 use zx_agent::events::ApprovalResult;
-use zx_agent::im::feishu::{FeishuChannel, FeishuConfig};
-use zx_agent::im::{
+use zx_im::{
     Addressee, ApprovalId, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId,
     MessageRef, Outbound, ThreadId, UserId,
 };
+use zx_im_feishu::{FeishuChannel, FeishuConfig};
 
 /// Only reached when an expected event never comes.
 const WAIT: Duration = Duration::from_secs(10);

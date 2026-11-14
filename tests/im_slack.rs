@@ -11,11 +11,11 @@ use tokio::sync::mpsc;
 use common::fake_slack::{Answer, FakeSlack};
 use common::im::run_channel;
 use zx_agent::events::ApprovalResult;
-use zx_agent::im::slack::{SlackChannel, SlackConfig};
-use zx_agent::im::{
+use zx_im::{
     Addressee, ApprovalId, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId,
     MessageRef, Outbound, Said, ThreadId, UserId,
 };
+use zx_im_slack::{SlackChannel, SlackConfig};
 
 const APP_TOKEN: &str = "xapp-test";
 const BOT_TOKEN: &str = "xoxb-test";

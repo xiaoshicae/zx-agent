@@ -36,6 +36,7 @@
 | D21 | 对外入口是 `Agent`（所有会话共用的角色 `AgentConfig`；创建、打开、查找、关闭会话）、`Session`（可克隆的会话句柄）与它返回的 `Run`（一次执行：事件流与结果，由调用方驱动）；循环的配置 `LoopConfig`、工具集合 `Toolbox`、`Runner` 与循环 `StepLoop` 是 crate 内部类型：一次运行每次尝试（首次，以及每次重试或上下文溢出恢复）运行一遍，不提供单独运行一次循环的接口，因为生产代码没有这种用法。预算与计数只有一份：运行持有 `RunAccounting`，借给每次尝试的循环，请求、用量、步数、续写与被拒绝的调用都直接记在运行上，预算按运行的累计检查，不在每次尝试前后复制。attempt 只表示尝试的序号（首次为 1，重试与上下文溢出恢复都会加一），如 `attempt_start`、`request_start` 事件的 `attempt` 与追踪属性 `zx.attempt`；重试的序号叫 retry（首次重试为 1），如 `retry_scheduled` 事件的 `retry` 与追踪属性 `zx.retry`，与 `max_retries`、`RunReport.retries` 一致 |
 | D22 | 摘要功能统一叫 compaction：这次操作本身（触发、开始、结果、失败）及其记录、模块、类型、函数与 ID 都叫 compaction（`transcript::compaction`、`compaction::Compactor`，记录中指向 `compaction_started` 的字段叫 `compactionId`）；summary 只指 compaction 产出的文本、文本的限额，以及向模型要这段文本的请求（`request_start` 的 `kind: summary`、会话中的 `RequestSource::Summary`）；attempt 只用于运行的尝试（D21） |
 | D23 | 领域词只有 Session、Run、Step、ToolCall 四层：一次任务请求及其工具调用叫 step（事件 `step_start` / `step_end`、钩子 `finish_step`、追踪中的 `step` span），不再叫 turn；ACP 协议与 chat 界面里的 turn 指一次提问到回答，保持原样。attempt 仍只表示运行的尝试（D21），其事件叫 `attempt_start` / `attempt_end`。运行结果用过去分词：`completed`、`truncated`、`failed`、`cancelled`、`timed_out`；三个上限沿用配置里的名字 `model_request_limit`、`token_budget`、`cost_budget`，因为退出码、IM 回复与 ACP 的停止原因都要逐个区分它们，且结果在 JSON 中保持为一个字符串。会话的记录树叫 transcript（模块 `transcript`、类型 `Transcript`）。事件格式版本当时为 4，P16 第五期提高到 5 |
+| D24 | 库与接入方式分开：根包 `zx-agent` 是 SDK，只把 `zx-core`、`zx-ai`、`zx-ai-openai` 与 `zx-tools` 再导出成一个库，不依赖命令行解析、ACP、追踪导出与 IM。命令行是 `zx-cli`（可执行文件仍叫 `zx-agent`，带 `config.toml`、agent 文件与追踪导出），IM 服务是 `zx-im`；新的接入方式（如 Web 服务）是建在库上的独立 crate，不进库。集成测试按是否需要编译出的程序分两处：只用库的在根目录 `tests/`，驱动程序的在 `crates/zx-cli/tests/`，不按 crate 再分 |
 
 ## 4. 当前阶段
 
@@ -46,7 +47,7 @@ P0–P5 与 P10–P14（P10 为与 pi 的能力对齐）已完成。进行中：
 - P8 `acp`：已实现，待在 Zed 或 Wisp 上实测。
 - P9 可选增强：剩更多 provider。
 - P15 IM 对话模型（D16）：Slack 实现了读线程、查名字与回执；⚑ D:5/CHINA FLAG: 飞书只做消息分类，这三项沿用默认（不读历史、用 open_id、不回执），待按需补上。待在真实 Slack 工作区验证线程回复事件带 `thread_ts`（官方事件页未写明）。
-- P16 入口与接口重整：目标是 `Agent`、`Session`、`Run` 三个入口对象；模型、工具、会话存储、权限策略、钩子各有接口并可替换，摘要可选替换；命令行从库中拆出。要点：`Run` 由调用方驱动（读它才推进，丢弃即取消），事件经有界通道，是事件的唯一出口；审批由内核的 `ApprovalGate` 等待 `Session::resolve_approval`，默认没有人回答；属于单个会话的工具、钩子与提示词段落由 `SessionSetup` 在创建或打开会话时装配；公开路径按域（`tools`、`policy`、`hooks`、`transcript` 等），crate 根部只留入口对象。分七期，每期四条命令全部通过后再进入下一期：① 改名与模块重组（D23），已完成；② `ToolPolicy` 移入内核，钩子不再做放行判断，已完成；③ 修正前两期：按域导出（内核根部只留 `AgentSession` 与 `CancelSignal`，`zx-tools` 在 `zx_agent::builtin`）、事件的发送移入 `runner`、新增 `guard`、`InputQueues`，已完成；④ `SessionStorage` 接口、`JsonlStorage` 与 `MemoryStorage`，存储类型不含文件路径，会话标签（会话格式版本 10；`sessions` 与 `--resume` 只列出在该工作目录开始的会话；IM 的会话按标签 `im.platform`、`im.conversation`、`im.thread` 查找，不再按目录；JSONL 文件的尾记录改在追加下一条记录之前截掉），已完成；⑤ 入口，分三步：`Run` 取代 `EventSink`（已完成：`AgentSession` 改名 `Session`，`Runner` 收为内部类型，追踪导出改为观察钩子 `Telemetry::hook`，钩子也能观察 `hook_failed`），`ApprovalGate` 取代 `Interaction`（已完成：`ApprovalMode`、`ApprovalDecision`、`Session::resolve_approval`，`approval_requested` 带审批编号与参数，事件格式版本 5），`Agent`、`AgentConfig`、`SessionSetup`（已完成：`LoopConfig` 与 `extensions::register` 收为内部，抽出 `Toolbox`，工具声明在建会话时取定；会话可关闭，之后句柄返回 Closed；会话在它创建时的目录工作，`open_session` 不带目录，续接时 `--cwd` 与会话目录不同或原目录已不存在都以退出码 2 结束；`Agent::adopt_session` 接收宿主自己建的 `Transcript`；`zx-im` 的 `SessionFactory` 由 `Agent` 取代；命令行每种运行方式构造一个 `Agent`，agent 文件随之读一次，chat 每个对话仍各读一次）；⑥ 可选的 `Summarizer`，标签与 actor 交给策略与钩子，已完成（`AgentConfig::summarizer`：摘要器产出摘要与用量，开始记录写它的名字而不写请求，一次摘要计为一次模型请求；`Input::User` 带 `actor`，记在该条用户消息的记录里；`PolicyContext` 与 `HookContext` 增加 `labels` 与 `actor`，后者是会话最近一条提问的发送者；`zx-im` 把发送者的用户 ID 作为 actor；会话格式版本 11）；⑦ 拆出 `zx-cli`。
+- P16 入口与接口重整：七期均已实现，待评审与合并。目标是 `Agent`、`Session`、`Run` 三个入口对象；模型、工具、会话存储、权限策略、钩子各有接口并可替换，摘要可选替换；命令行从库中拆出。要点：`Run` 由调用方驱动（读它才推进，丢弃即取消），事件经有界通道，是事件的唯一出口；审批由内核的 `ApprovalGate` 等待 `Session::resolve_approval`，默认没有人回答；属于单个会话的工具、钩子与提示词段落由 `SessionSetup` 在创建或打开会话时装配；公开路径按域（`tools`、`policy`、`hooks`、`transcript` 等），crate 根部只留入口对象。分七期，每期四条命令全部通过后再进入下一期：① 改名与模块重组（D23），已完成；② `ToolPolicy` 移入内核，钩子不再做放行判断，已完成；③ 修正前两期：按域导出（内核根部只留 `AgentSession` 与 `CancelSignal`，`zx-tools` 在 `zx_agent::builtin`）、事件的发送移入 `runner`、新增 `guard`、`InputQueues`，已完成；④ `SessionStorage` 接口、`JsonlStorage` 与 `MemoryStorage`，存储类型不含文件路径，会话标签（会话格式版本 10；`sessions` 与 `--resume` 只列出在该工作目录开始的会话；IM 的会话按标签 `im.platform`、`im.conversation`、`im.thread` 查找，不再按目录；JSONL 文件的尾记录改在追加下一条记录之前截掉），已完成；⑤ 入口，分三步：`Run` 取代 `EventSink`（已完成：`AgentSession` 改名 `Session`，`Runner` 收为内部类型，追踪导出改为观察钩子 `Telemetry::hook`，钩子也能观察 `hook_failed`），`ApprovalGate` 取代 `Interaction`（已完成：`ApprovalMode`、`ApprovalDecision`、`Session::resolve_approval`，`approval_requested` 带审批编号与参数，事件格式版本 5），`Agent`、`AgentConfig`、`SessionSetup`（已完成：`LoopConfig` 与 `extensions::register` 收为内部，抽出 `Toolbox`，工具声明在建会话时取定；会话可关闭，之后句柄返回 Closed；会话在它创建时的目录工作，`open_session` 不带目录，续接时 `--cwd` 与会话目录不同或原目录已不存在都以退出码 2 结束；`Agent::adopt_session` 接收宿主自己建的 `Transcript`；`zx-im` 的 `SessionFactory` 由 `Agent` 取代；命令行每种运行方式构造一个 `Agent`，agent 文件随之读一次，chat 每个对话仍各读一次）；⑥ 可选的 `Summarizer`，标签与 actor 交给策略与钩子，已完成（`AgentConfig::summarizer`：摘要器产出摘要与用量，开始记录写它的名字而不写请求，一次摘要计为一次模型请求；`Input::User` 带 `actor`，记在该条用户消息的记录里；`PolicyContext` 与 `HookContext` 增加 `labels` 与 `actor`，后者是会话最近一条提问的发送者；`zx-im` 把发送者的用户 ID 作为 actor；会话格式版本 11）；⑦ 拆出 `zx-cli`，已完成（根包 `zx-agent` 只留库：再导出 `zx-core`、`zx-ai`、`zx-ai-openai` 与 `zx-tools`，不再依赖命令行解析、ACP、追踪导出与 IM；命令行、`config.toml` 与 agent 文件、追踪导出移到 `crates/zx-cli`，可执行文件仍叫 `zx-agent`，内置 agent 在 `crates/zx-cli/agents/`；驱动程序的 12 个测试随之移到 `crates/zx-cli/tests/`，只用库的 30 个留在根目录 `tests/`，没有按 crate 再分；`zx_agent::im` 不再导出，IM 直接用 `zx-im`）。
 
 ## 5. 待办与已知缺口
 
@@ -60,10 +61,11 @@ P0–P5 与 P10–P14（P10 为与 pi 的能力对齐）已完成。进行中：
 - 会话写入只 `flush`、不 `fsync`，断电时已写入的记录可能没有落盘。
 - 打开大会话的耗时高于线性：每条请求记录都要构建一次分支路径（暂缓）。
 - 待评估：保留近期用户消息原文、摘要前把较早的长工具结果换成引用（可推迟碰到 2 MiB 上限）；失败运行后排队输入的处置（pi 的 `afterFailedRun`，现由宿主用 `take_queued` 处置）；工具触发的 `handoff`（pi 的 `control.handoff`，要先定会话格式）。
-- 暂缓：审计中写明自动放行命中的前缀（要改 `PolicyDecision` 的 JSON 契约）；`cli::prepare` 拆成三层；FauxProvider 响应增量之间的取消、可脚本化 `ProviderError`；provider 取消后的宽限期与 `stop_reason` 一致性检查；`JsonlFile::create` 失败后留下文件。
+- 暂缓：审计中写明自动放行命中的前缀（要改 `PolicyDecision` 的 JSON 契约）；FauxProvider 响应增量之间的取消、可脚本化 `ProviderError`；provider 取消后的宽限期与 `stop_reason` 一致性检查；`JsonlFile::create` 失败后留下文件。
 - 待用户决定：`run` 的内置 agent（及部署的 `unattended.md`）是否默认开启自动摘要；现在关闭，撞到上下文上限时以退出码 1 结束，开启的代价是摘要丢失信息。
 - 定时巡检的会话文件不自动清理，需要部署方定期删除。
-- 对照 pi durable 的较大项（待评审）：排队消息落盘（同时解决 IM 丢消息）、部分结果落盘、后台摘要与摘要钩子、按会话的扩展与工作目录、扩展的可读状态、延迟加载的工具与 `tool_search`、持久化的睡眠与定时、宿主侧的环境接口、SQLite 等存储。
+- 对照 pi durable 的较大项（待评审）：排队消息落盘（同时解决 IM 丢消息）、部分结果落盘、后台摘要（宿主已可用 `Summarizer` 自己产出摘要，钩子仍不提供摘要）、按会话的扩展（按会话的工具、钩子、提示词段落与工作目录已由 `SessionSetup` 给出）、扩展的可读状态、延迟加载的工具与 `tool_search`、持久化的睡眠与定时、宿主侧的环境接口、附带的数据库存储（接口 `SessionStorage` 已有，实现由宿主给出）。
+- `config.toml`、agent 文件与追踪导出在 `zx-cli` 里：嵌入方要复用它们得依赖整个命令行的 crate；有这样的使用者时再各自拆成独立 crate。
 
 ## 6. 验证记录
 
@@ -92,4 +94,4 @@ P0–P5 与 P10–P14（P10 为与 pi 的能力对齐）已完成。进行中：
 
 ---
 
-ROADMAP.md · v0.21 · 2026年11月
+ROADMAP.md · v0.22 · 2026年11月

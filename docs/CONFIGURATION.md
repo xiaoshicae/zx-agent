@@ -74,7 +74,7 @@ cost = { input = 0.27, output = 1.10, cacheRead = 0.07 }   # 每百万 token 的
 
 ## agent
 
-`run` 使用内置的 `unattended`，`chat`、`im` 与 `acp` 使用内置的 `assistant`，即仓库的 [`agents/unattended.md`](../agents/unattended.md) 与 [`agents/assistant.md`](../agents/assistant.md)，构建时嵌入程序。主目录下的同名文件替换它们；其他文件名不会被读取，也没有选择 agent 的命令行参数。Kubernetes 用的 agent 在 `deploy/kubernetes/agents/`。
+`run` 使用内置的 `unattended`，`chat`、`im` 与 `acp` 使用内置的 `assistant`，即仓库的 [`crates/zx-cli/agents/unattended.md`](../crates/zx-cli/agents/unattended.md) 与 [`crates/zx-cli/agents/assistant.md`](../crates/zx-cli/agents/assistant.md)，构建时嵌入程序。主目录下的同名文件替换它们；其他文件名不会被读取，也没有选择 agent 的命令行参数。Kubernetes 用的 agent 在 `deploy/kubernetes/agents/`。
 
 文件最多 64 KiB：第一行 `+++` 到下一行 `+++` 之间是 TOML front matter，之后是说明（系统提示词的开头）。格式错误或有未知的键时以退出码 2 报错。完整示例在 [`examples/agents/`](../examples/agents/)。
 
