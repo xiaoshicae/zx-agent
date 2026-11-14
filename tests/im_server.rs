@@ -27,8 +27,8 @@ use zx_agent::tools::Tool;
 use zx_agent::transcript::{Entry, MemoryStorage, SessionHeader, SessionQuery, SessionStorage, Transcript};
 use zx_im::{
     Addressee, ApprovalId, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId,
-    MessageRef, Outbound, Replies, Said, Server, ServerConfig, ServerEvent, ServerSink, SessionKey, StatusStore,
-    ThreadId, UserId,
+    MessageRef, Post, Replacement, Replies, Said, Server, ServerConfig, ServerEvent, ServerSink, SessionKey,
+    StatusStore, ThreadId, UserId,
 };
 
 const PLATFORM: &str = "fake";
@@ -46,12 +46,12 @@ const WAIT: Duration = Duration::from_secs(10);
 enum Sent {
     Post {
         to: Destination,
-        message: Outbound,
+        message: Post,
         posted: MessageRef,
     },
     Update {
         posted: MessageRef,
-        message: Outbound,
+        message: Replacement,
     },
     /// A status kept in [`Statuses`].
     Kept(MessageRef),
@@ -62,13 +62,15 @@ enum Sent {
 }
 
 /// How the platform answers an update; it records the update either way.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 enum Updates {
     #[default]
     Done,
     Refused,
     /// Never answers.
     Hang,
+    /// Answers once the test cancels the token, and at once from then on.
+    Held(CancellationToken),
 }
 
 /// A platform in memory: the test injects inbound events and reads what the server sent.
@@ -132,7 +134,7 @@ impl ImChannel for FakeChannel {
         }
     }
 
-    async fn send(&self, to: &Destination, message: &Outbound) -> Result<MessageRef, ImError> {
+    async fn send(&self, to: &Destination, message: &Post) -> Result<MessageRef, ImError> {
         let number = self.next.fetch_add(1, Ordering::SeqCst);
         let posted = MessageRef {
             at: to.clone(),
@@ -148,17 +150,21 @@ impl ImChannel for FakeChannel {
         Ok(posted)
     }
 
-    async fn update(&self, posted: &MessageRef, message: &Outbound) -> Result<(), ImError> {
+    async fn update(&self, posted: &MessageRef, message: &Replacement) -> Result<(), ImError> {
         self.sent
             .send(Sent::Update {
                 posted: posted.clone(),
                 message: message.clone(),
             })
             .unwrap();
-        match self.updates {
+        match &self.updates {
             Updates::Done => Ok(()),
             Updates::Refused => Err(ImError::Transport("update refused".into())),
             Updates::Hang => std::future::pending().await,
+            Updates::Held(release) => {
+                release.cancelled().await;
+                Ok(())
+            }
         }
     }
 }
@@ -401,8 +407,26 @@ fn thread(root: &str) -> Destination {
     }
 }
 
-fn text(text: &str) -> Outbound {
-    Outbound::Text(text.into())
+/// What the server sends that can be plain text: a post, or what replaces one.
+trait Plain {
+    fn plain(text: String) -> Self;
+}
+
+impl Plain for Post {
+    fn plain(text: String) -> Self {
+        Self::Text(text)
+    }
+}
+
+impl Plain for Replacement {
+    fn plain(text: String) -> Self {
+        Self::Text(text)
+    }
+}
+
+/// Plain text, as a post or as what replaces one: whichever the place it is used in takes.
+fn text<T: Plain>(text: &str) -> T {
+    T::plain(text.into())
 }
 
 /// The direct chat with the asker.
@@ -487,7 +511,7 @@ impl Harness {
     }
 
     /// Expect `message` posted to `to`, and return where it was posted.
-    async fn posted(&mut self, to: &Destination, message: Outbound) -> MessageRef {
+    async fn posted(&mut self, to: &Destination, message: Post) -> MessageRef {
         match self.next().await {
             Sent::Post {
                 to: actual,
@@ -513,7 +537,7 @@ impl Harness {
         }
     }
 
-    async fn updated(&mut self, posted: &MessageRef, message: Outbound) {
+    async fn updated(&mut self, posted: &MessageRef, message: Replacement) {
         match self.next().await {
             Sent::Update {
                 posted: actual,
@@ -529,7 +553,7 @@ impl Harness {
             Sent::Post {
                 to: actual,
                 message:
-                    Outbound::ApprovalRequest {
+                    Post::ApprovalRequest {
                         id,
                         tool,
                         summary,
@@ -588,6 +612,15 @@ fn key(root: &str) -> SessionKey {
     }
 }
 
+/// The conversation that is the direct chat with the asker.
+fn direct_key() -> SessionKey {
+    SessionKey {
+        platform: PLATFORM.into(),
+        conversation: ConversationId(DIRECT.into()),
+        thread: None,
+    }
+}
+
 /// The operator's record of a thread's messages that will not run.
 fn unanswered(root: &str, count: usize) -> ServerEvent {
     ServerEvent::Failed {
@@ -619,7 +652,7 @@ async fn a_reply_in_the_thread_continues_its_session() {
         steps: vec![FauxStep::text("one"), FauxStep::text("two")],
         ..Setup::default()
     });
-    let working = text(&h.replies.working.clone());
+    let working: Post = text(&h.replies.working.clone());
     h.say("m1", None, "first").await;
     let status = h.posted(&thread("m1"), working.clone()).await;
     h.updated(&status, text("one")).await;
@@ -640,7 +673,7 @@ async fn each_thread_has_a_session_of_its_own() {
         steps: vec![FauxStep::text("one"), FauxStep::text("two")],
         ..Setup::default()
     });
-    let working = text(&h.replies.working.clone());
+    let working: Post = text(&h.replies.working.clone());
     h.say("m1", None, "first").await;
     let status = h.posted(&thread("m1"), working.clone()).await;
     h.updated(&status, text("one")).await;
@@ -678,7 +711,7 @@ async fn an_approver_allows_a_call_and_the_card_shows_the_decision() {
     h.click("m1", APPROVER, &id, Choice::AllowOnce).await;
     h.updated(
         &card,
-        Outbound::ApprovalResolved {
+        Replacement::ApprovalResolved {
             id: id.clone(),
             user: Some(UserId(APPROVER.into())),
             result: ApprovalResult::AllowOnce,
@@ -730,7 +763,7 @@ async fn a_click_by_someone_who_is_not_an_approver_decides_nothing() {
     h.click("m1", APPROVER, &id, Choice::Deny).await;
     h.updated(
         &card,
-        Outbound::ApprovalResolved {
+        Replacement::ApprovalResolved {
             id,
             user: Some(UserId(APPROVER.into())),
             result: ApprovalResult::Denied,
@@ -754,7 +787,7 @@ async fn an_unanswered_approval_times_out_and_its_card_says_so() {
     let (id, card) = h.card(&thread("m1")).await;
     h.updated(
         &card,
-        Outbound::ApprovalResolved {
+        Replacement::ApprovalResolved {
             id,
             user: None,
             result: ApprovalResult::TimedOut,
@@ -778,7 +811,7 @@ async fn cancel_in_the_thread_stops_the_run_and_closes_its_card() {
     h.say("m2", Some("m1"), " /cancel ").await;
     h.updated(
         &card,
-        Outbound::ApprovalResolved {
+        Replacement::ApprovalResolved {
             id,
             user: None,
             result: ApprovalResult::Cancelled,
@@ -811,7 +844,7 @@ async fn the_run_limit_makes_other_threads_wait_their_turn() {
         },
         ..Setup::default()
     });
-    let working = text(&h.replies.working.clone());
+    let working: Post = text(&h.replies.working.clone());
     h.say("a", None, "task a").await;
     let status_a = h.posted(&thread("a"), working.clone()).await;
     // Thread a now waits for an approval while holding the only run slot.
@@ -821,7 +854,7 @@ async fn the_run_limit_makes_other_threads_wait_their_turn() {
     h.click("a", APPROVER, &id, Choice::AllowOnce).await;
     h.updated(
         &card,
-        Outbound::ApprovalResolved {
+        Replacement::ApprovalResolved {
             id,
             user: Some(UserId(APPROVER.into())),
             result: ApprovalResult::AllowOnce,
@@ -849,7 +882,7 @@ async fn a_message_during_a_run_is_steered_into_it() {
     h.click("m1", APPROVER, &id, Choice::AllowOnce).await;
     h.updated(
         &card,
-        Outbound::ApprovalResolved {
+        Replacement::ApprovalResolved {
             id,
             user: Some(UserId(APPROVER.into())),
             result: ApprovalResult::AllowOnce,
@@ -879,7 +912,7 @@ async fn an_idle_conversation_releases_its_session_and_reopens_it() {
         },
         ..Setup::default()
     });
-    let working = text(&h.replies.working.clone());
+    let working: Post = text(&h.replies.working.clone());
     h.say("m1", None, "first").await;
     let status = h.posted(&thread("m1"), working.clone()).await;
     h.updated(&status, text("one")).await;
@@ -955,7 +988,7 @@ async fn stopping_tells_a_thread_about_steering_its_run_did_not_take_in() {
     h.click("m1", OTHER, &id, Choice::AllowOnce).await;
     h.posted(&thread("m1"), text(&replies.not_approver)).await;
     let (sent, events) = h.stop_and_take().await;
-    let closed = Outbound::ApprovalResolved {
+    let closed = Replacement::ApprovalResolved {
         id,
         user: None,
         result: ApprovalResult::Cancelled,
@@ -1191,7 +1224,7 @@ async fn a_session_that_cannot_be_opened_is_reported_and_tried_again() {
         fail_open: Some("disk full".into()),
         ..Setup::default()
     });
-    let refused = text(&format!(
+    let refused: Post = text(&format!(
         "{}cannot set up the session: disk full",
         h.replies.cannot_open
     ));
@@ -1245,7 +1278,7 @@ async fn a_direct_chat_is_one_conversation_answered_in_the_chat() {
         steps: vec![FauxStep::text("one"), FauxStep::text("two")],
         ..Setup::default()
     });
-    let working = text(&h.replies.working.clone());
+    let working: Post = text(&h.replies.working.clone());
     h.say_directly("d1", "first").await;
     let status = h.posted(&direct(), working.clone()).await;
     h.updated(&status, text("one")).await;
@@ -1264,7 +1297,7 @@ async fn the_session_records_the_sender_of_each_message_it_answers_as_its_actor(
         steps: vec![FauxStep::text("one"), FauxStep::text("two")],
         ..Setup::default()
     });
-    let working = text(&h.replies.working.clone());
+    let working: Post = text(&h.replies.working.clone());
     h.say("m1", None, "first").await;
     let status = h.posted(&thread("m1"), working.clone()).await;
     h.updated(&status, text("one")).await;
@@ -1297,7 +1330,7 @@ async fn new_starts_a_new_session_and_keeps_the_earlier_one() {
         steps: vec![FauxStep::text("one"), FauxStep::text("two")],
         ..Setup::default()
     });
-    let working = text(&h.replies.working.clone());
+    let working: Post = text(&h.replies.working.clone());
     h.say_directly("d1", "first").await;
     let status = h.posted(&direct(), working.clone()).await;
     h.updated(&status, text("one")).await;
@@ -1307,12 +1340,58 @@ async fn new_starts_a_new_session_and_keeps_the_earlier_one() {
     let status = h.posted(&direct(), working).await;
     h.updated(&status, text("two")).await;
     assert_eq!(h.requests()[1], ["user:second"]);
-    let key = SessionKey {
-        platform: PLATFORM.into(),
-        conversation: ConversationId(DIRECT.into()),
-        thread: None,
-    };
-    assert_eq!(h.sessions.of(&key).await.unwrap().len(), 2);
+    assert_eq!(h.sessions.of(&direct_key()).await.unwrap().len(), 2);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_conversation_released_after_new_goes_on_in_the_new_session() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("one"), FauxStep::text("two")],
+        config: ServerConfig {
+            idle: Duration::from_millis(20),
+            ..Setup::default().config
+        },
+        ..Setup::default()
+    });
+    let working: Post = text(&h.replies.working.clone());
+    let released = ServerEvent::Released { key: direct_key() };
+    h.say_directly("d1", "first").await;
+    let status = h.posted(&direct(), working.clone()).await;
+    h.updated(&status, text("one")).await;
+    // The idle time passes before `/new`, so the new session is later than the first one's
+    // last record by more than the clock's resolution.
+    assert_eq!(h.event().await, released);
+    h.say_directly("d2", "/new").await;
+    h.posted(&direct(), text(&h.replies.new_session.clone())).await;
+    // Released again, the conversation remembers nothing: only the new session, which it
+    // held until now, says that `/new` was asked for.
+    assert_eq!(h.event().await, released);
+    h.say_directly("d3", "second").await;
+    let status = h.posted(&direct(), working).await;
+    h.updated(&status, text("two")).await;
+    assert_eq!(h.requests()[1], ["user:second"]);
+    assert_eq!(h.sessions.of(&direct_key()).await.unwrap().len(), 2);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn new_reports_a_session_it_cannot_create() {
+    let mut h = start(Setup {
+        fail_open: Some("disk full".into()),
+        ..Setup::default()
+    });
+    h.say_directly("d1", "/new").await;
+    let refused = format!("{}cannot set up the session: disk full", h.replies.cannot_open);
+    h.posted(&direct(), text(&refused)).await;
+    match h.event().await {
+        ServerEvent::Failed { key: Some(key), error } => {
+            assert_eq!(key, direct_key());
+            assert!(error.contains("disk full"), "{error}");
+        }
+        other => panic!("expected a failure, got {other:?}"),
+    }
+    assert!(h.sessions.of(&direct_key()).await.unwrap().is_empty());
     h.stop().await.unwrap();
 }
 
@@ -1327,7 +1406,7 @@ async fn new_during_a_run_cancels_it_and_then_starts_over() {
     // The card shows that the run is waiting, its request answered.
     let (id, card) = h.card(&direct()).await;
     h.say_directly("d2", "/new").await;
-    let closed = Outbound::ApprovalResolved {
+    let closed = Replacement::ApprovalResolved {
         id,
         user: None,
         result: ApprovalResult::Cancelled,
@@ -1343,12 +1422,139 @@ async fn new_during_a_run_cancels_it_and_then_starts_over() {
 }
 
 #[tokio::test]
+async fn a_message_that_arrives_while_new_cancels_a_run_is_answered_in_the_new_session() {
+    let release = CancellationToken::new();
+    let mut h = start(Setup {
+        steps: vec![echo_call(), FauxStep::text("fresh")],
+        updates: Updates::Held(release.clone()),
+        ..Setup::default()
+    });
+    let replies = h.replies.clone();
+    h.say_directly("d1", "run echo").await;
+    let status = h.posted(&direct(), text(&replies.working)).await;
+    let (id, card) = h.card(&direct()).await;
+    h.say_directly("d2", "/new").await;
+    // The cancelled run closes its card, and the platform holds that update back: the
+    // conversation is busy with it, its run not yet seen to have ended.
+    let closed = Replacement::ApprovalResolved {
+        id,
+        user: None,
+        result: ApprovalResult::Cancelled,
+    };
+    h.updated(&card, closed).await;
+    h.say_directly("d3", "again").await;
+    // The router passes messages on in the order it got them: once it has refused this one,
+    // the one before it waits in the conversation's inbox.
+    h.say_in("C2", "m1", None, "hello").await;
+    let elsewhere = Destination {
+        conversation: ConversationId("C2".into()),
+        thread: Some(ThreadId("m1".into())),
+    };
+    h.posted(&elsewhere, text(&replies.unauthorized)).await;
+    release.cancel();
+    h.acknowledged(&direct(), "d3").await;
+    h.updated(&status, text(&replies.cancelled)).await;
+    h.posted(&direct(), text(&replies.new_session)).await;
+    let status = h.posted(&direct(), text(&replies.working)).await;
+    h.updated(&status, text("fresh")).await;
+    assert_eq!(h.requests()[1], ["user:again"]);
+    assert_eq!(h.sessions.of(&direct_key()).await.unwrap().len(), 2);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_session_closed_under_its_conversation_is_opened_again_for_the_next_message() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("one"), FauxStep::text("two")],
+        ..Setup::default()
+    });
+    let working: Post = text(&h.replies.working.clone());
+    h.say_directly("d1", "first").await;
+    let status = h.posted(&direct(), working.clone()).await;
+    h.updated(&status, text("one")).await;
+    // Closed by someone other than the conversation, which still holds it: a session also
+    // closes itself this way when it can no longer write its records.
+    let id = h.sessions.of(&direct_key()).await.unwrap().remove(0);
+    assert!(h.agent.close_session(&id));
+    h.say_directly("d2", "second").await;
+    let status = h.posted(&direct(), working).await;
+    h.updated(&status, text("two")).await;
+    // The message that found the session closed is answered in the session opened again.
+    assert_eq!(h.requests()[1], ["user:first", "assistant:one", "user:second"]);
+    assert_eq!(h.sessions.opened.load(Ordering::SeqCst), 2);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_session_closed_during_its_run_is_let_go_and_opened_again_for_the_next_message() {
+    let mut h = start(Setup {
+        steps: vec![echo_call(), FauxStep::text("two")],
+        ..Setup::default()
+    });
+    let replies = h.replies.clone();
+    h.say_directly("d1", "run echo").await;
+    let status = h.posted(&direct(), text(&replies.working)).await;
+    // The run waits for an approval, so it is in progress when its session is closed.
+    let (id, card) = h.card(&direct()).await;
+    let session = h.sessions.of(&direct_key()).await.unwrap().remove(0);
+    assert!(h.agent.close_session(&session));
+    let closed = Replacement::ApprovalResolved {
+        id,
+        user: None,
+        result: ApprovalResult::Cancelled,
+    };
+    h.updated(&card, closed).await;
+    h.updated(&status, text(&replies.cancelled)).await;
+    // The approval that the closing cancelled is reported before the release.
+    while h.event().await != (ServerEvent::Released { key: direct_key() }) {}
+    h.say_directly("d2", "again").await;
+    let status = h.posted(&direct(), text(&replies.working)).await;
+    h.updated(&status, text("two")).await;
+    assert_eq!(h.requests()[1].last().map(String::as_str), Some("user:again"));
+    assert_eq!(h.sessions.opened.load(Ordering::SeqCst), 2);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn new_starts_its_session_also_when_the_one_it_leaves_was_closed_meanwhile() {
+    let release = CancellationToken::new();
+    let mut h = start(Setup {
+        steps: vec![echo_call(), FauxStep::text("fresh")],
+        updates: Updates::Held(release.clone()),
+        ..Setup::default()
+    });
+    let replies = h.replies.clone();
+    h.say_directly("d1", "run echo").await;
+    let status = h.posted(&direct(), text(&replies.working)).await;
+    let (id, card) = h.card(&direct()).await;
+    h.say_directly("d2", "/new").await;
+    let closed = Replacement::ApprovalResolved {
+        id,
+        user: None,
+        result: ApprovalResult::Cancelled,
+    };
+    h.updated(&card, closed).await;
+    // Closed under the conversation while its cancelled run ends, as a session closes itself
+    // when it can no longer write its records.
+    let left = h.sessions.of(&direct_key()).await.unwrap().remove(0);
+    assert!(h.agent.close_session(&left));
+    release.cancel();
+    h.updated(&status, text(&replies.cancelled)).await;
+    h.posted(&direct(), text(&replies.new_session)).await;
+    h.say_directly("d3", "again").await;
+    let status = h.posted(&direct(), text(&replies.working)).await;
+    h.updated(&status, text("fresh")).await;
+    assert_eq!(h.requests()[1], ["user:again"]);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn the_person_just_answered_goes_on_without_a_mention() {
     let mut h = start(Setup {
         steps: vec![FauxStep::text("one"), FauxStep::text("two")],
         ..Setup::default()
     });
-    let working = text(&h.replies.working.clone());
+    let working: Post = text(&h.replies.working.clone());
     h.say("m1", None, "first").await;
     let status = h.posted(&thread("m1"), working.clone()).await;
     h.updated(&status, text("one")).await;
@@ -1369,7 +1575,7 @@ async fn talk_between_people_in_the_thread_is_recorded_but_not_answered() {
         names: HashMap::from([(OTHER.to_string(), "Li".to_string())]),
         ..Setup::default()
     });
-    let working = text(&h.replies.working.clone());
+    let working: Post = text(&h.replies.working.clone());
     h.say("m1", None, "why is checkout slow?").await;
     let status = h.posted(&thread("m1"), working.clone()).await;
     h.updated(&status, text("one")).await;
@@ -1413,13 +1619,17 @@ async fn talk_where_the_bot_never_took_part_is_left_alone() {
     h.stop().await.unwrap();
 }
 
-#[tokio::test]
-async fn the_first_mention_in_a_thread_reads_what_was_said_there() {
-    let earlier = |id: &str, sender: &str, text: &str| Said {
+/// A message that `sender` posted in a thread before the bot was mentioned there.
+fn earlier(id: &str, sender: &str, text: &str) -> Said {
+    Said {
         id: MessageId(id.into()),
         sender: UserId(sender.into()),
         text: text.into(),
-    };
+    }
+}
+
+#[tokio::test]
+async fn the_first_mention_in_a_thread_reads_what_was_said_there() {
     let mut h = start(Setup {
         steps: vec![FauxStep::text("one")],
         history: vec![earlier("t1", OTHER, "the deploy failed"), earlier("m2", ASKER, "why?")],
@@ -1435,6 +1645,28 @@ async fn the_first_mention_in_a_thread_reads_what_was_said_there() {
 }
 
 #[tokio::test]
+async fn a_session_started_by_new_does_not_read_what_was_said_in_the_thread() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("one")],
+        config: ServerConfig {
+            idle: Duration::from_millis(20),
+            ..Setup::default().config
+        },
+        history: vec![earlier("t1", OTHER, "the deploy failed")],
+        ..Setup::default()
+    });
+    h.say("m2", Some("t1"), "/new").await;
+    h.posted(&thread("t1"), text(&h.replies.new_session.clone())).await;
+    // Released, the conversation opens the session as it would any other of its own.
+    assert_eq!(h.event().await, ServerEvent::Released { key: key("t1") });
+    h.say("m3", Some("t1"), "why?").await;
+    let status = h.posted(&thread("t1"), text(&h.replies.working.clone())).await;
+    h.updated(&status, text("one")).await;
+    assert_eq!(h.requests()[0], ["user:U-asker: why?"]);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn talk_in_a_thread_after_its_session_was_released_is_still_recorded() {
     let mut h = start(Setup {
         steps: vec![FauxStep::text("one"), FauxStep::text("two")],
@@ -1444,7 +1676,7 @@ async fn talk_in_a_thread_after_its_session_was_released_is_still_recorded() {
         },
         ..Setup::default()
     });
-    let working = text(&h.replies.working.clone());
+    let working: Post = text(&h.replies.working.clone());
     h.say("m1", None, "first").await;
     let status = h.posted(&thread("m1"), working.clone()).await;
     h.updated(&status, text("one")).await;

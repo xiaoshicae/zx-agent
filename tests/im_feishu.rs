@@ -14,7 +14,7 @@ use common::im::run_channel;
 use zx_agent::events::ApprovalResult;
 use zx_im::{
     Addressee, ApprovalId, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId,
-    MessageRef, Outbound, ThreadId, UserId,
+    MessageRef, Post, Replacement, ThreadId, UserId,
 };
 use zx_im_feishu::{FeishuChannel, FeishuConfig};
 
@@ -330,7 +330,7 @@ async fn text_in_a_thread_is_a_reply_in_its_topic() {
     let fake = FakeFeishu::start(120).await;
     let channel = channel(&fake);
     let to = at("oc_1", Some("om_root"));
-    let posted = channel.send(&to, &Outbound::Text("hi".into())).await.unwrap();
+    let posted = channel.send(&to, &Post::Text("hi".into())).await.unwrap();
     let call = &fake.calls("reply")[0];
     assert_eq!(call.path, "/open-apis/im/v1/messages/om_root/reply");
     assert_eq!(call.authorization, "Bearer t-1");
@@ -352,10 +352,7 @@ async fn text_without_a_thread_starts_a_message_and_the_token_is_reused() {
     let fake = FakeFeishu::start(120).await;
     let channel = channel(&fake);
     for text in ["one", "two"] {
-        channel
-            .send(&at("oc_1", None), &Outbound::Text(text.into()))
-            .await
-            .unwrap();
+        channel.send(&at("oc_1", None), &Post::Text(text.into())).await.unwrap();
     }
     let creates = fake.calls("create");
     assert_eq!(creates.len(), 2);
@@ -382,7 +379,7 @@ async fn replies_in_a_direct_chat_stay_out_of_topics() {
     socket.send(&TestFrame::event("f1", 1, 0, &received(&event))).await;
     running.next().await;
     channel
-        .send(&at("oc_d", Some("om_d1")), &Outbound::Text("answer".into()))
+        .send(&at("oc_d", Some("om_d1")), &Post::Text("answer".into()))
         .await
         .unwrap();
     assert_eq!(fake.calls("reply")[0].body["reply_in_thread"], json!(false));
@@ -393,9 +390,7 @@ async fn replies_in_a_direct_chat_stay_out_of_topics() {
 async fn a_refused_secret_is_a_configuration_error() {
     let fake = FakeFeishu::start(120).await;
     fake.script("token", vec![Answer::Status(400, 20002)]);
-    let result = channel(&fake)
-        .send(&at("oc_1", None), &Outbound::Text("hi".into()))
-        .await;
+    let result = channel(&fake).send(&at("oc_1", None), &Post::Text("hi".into())).await;
     assert!(matches!(result, Err(ImError::Config(error)) if error.contains("20002")));
 }
 
@@ -404,10 +399,13 @@ async fn a_status_update_edits_the_message() {
     let fake = FakeFeishu::start(120).await;
     let channel = channel(&fake);
     let posted = channel
-        .send(&at("oc_1", Some("om_root")), &Outbound::Text("working".into()))
+        .send(&at("oc_1", Some("om_root")), &Post::Text("working".into()))
         .await
         .unwrap();
-    channel.update(&posted, &Outbound::Text("done".into())).await.unwrap();
+    channel
+        .update(&posted, &Replacement::Text("done".into()))
+        .await
+        .unwrap();
     let edit = &fake.calls("edit")[0];
     assert_eq!(edit.path, "/open-apis/im/v1/messages/om_out1");
     assert_eq!(edit.body, json!({"msg_type": "text", "content": "{\"text\":\"done\"}"}));
@@ -419,10 +417,13 @@ async fn a_refused_edit_posts_the_text_instead() {
     fake.script("edit", vec![Answer::Code(230_075)]);
     let channel = channel(&fake);
     let posted = channel
-        .send(&at("oc_1", Some("om_root")), &Outbound::Text("working".into()))
+        .send(&at("oc_1", Some("om_root")), &Post::Text("working".into()))
         .await
         .unwrap();
-    channel.update(&posted, &Outbound::Text("done".into())).await.unwrap();
+    channel
+        .update(&posted, &Replacement::Text("done".into()))
+        .await
+        .unwrap();
     let replies = fake.calls("reply");
     assert_eq!(replies.len(), 2);
     assert_eq!(replies[1].path, "/open-apis/im/v1/messages/om_root/reply");
@@ -433,7 +434,7 @@ async fn a_refused_edit_posts_the_text_instead() {
 async fn a_card_carries_its_click_value_and_closing_it_keeps_the_request() {
     let fake = FakeFeishu::start(120).await;
     let channel = channel(&fake);
-    let card = Outbound::ApprovalRequest {
+    let card = Post::ApprovalRequest {
         id: ApprovalId("A1".into()),
         tool: "bash".into(),
         summary: "kubectl delete pod x".into(),
@@ -456,7 +457,7 @@ async fn a_card_carries_its_click_value_and_closing_it_keeps_the_request() {
     );
     assert_eq!(elements[2]["behaviors"][0]["value"]["zx"], json!("deny"));
 
-    let closed = Outbound::ApprovalResolved {
+    let closed = Replacement::ApprovalResolved {
         id: ApprovalId("A1".into()),
         user: Some(UserId("ou_u2".into())),
         result: ApprovalResult::AllowOnce,
@@ -476,7 +477,7 @@ async fn a_rate_limited_call_waits_and_is_retried() {
     let fake = FakeFeishu::start(120).await;
     fake.script("create", vec![Answer::RateLimited { reset_secs: 0 }]);
     channel(&fake)
-        .send(&at("oc_1", None), &Outbound::Text("hi".into()))
+        .send(&at("oc_1", None), &Post::Text("hi".into()))
         .await
         .unwrap();
     assert_eq!(fake.calls("create").len(), 2);

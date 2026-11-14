@@ -38,15 +38,6 @@ pub struct SessionKey {
     pub thread: Option<ThreadId>,
 }
 
-/// Which session of a conversation its worker opens next.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Opening {
-    /// The conversation's latest session, created on first use.
-    Latest,
-    /// A new session, after `/new`; the earlier ones are kept.
-    New,
-}
-
 /// The labels of a conversation's sessions: its platform, its chat, and its thread, which is
 /// empty for a direct chat.
 const PLATFORM_LABEL: &str = "im.platform";
@@ -126,7 +117,7 @@ pub struct Replies {
     pub cancelled: String,
     /// The answer to `/cancel` when nothing runs.
     pub nothing_to_cancel: String,
-    /// The answer to `/new`: the next message starts a new session.
+    /// The answer to `/new`: the conversation goes on in a new session.
     pub new_session: String,
     /// A run that completed without text.
     pub no_answer: String,
@@ -232,10 +223,12 @@ impl Default for ServerConfig {
 /// cannot be opened is reported to the conversation after [`Replies::cannot_open`]; the next
 /// message tries again.
 ///
-/// - A direct chat is one conversation; `/new` starts a new session for it.
+/// - A direct chat is one conversation. `/new` alone starts a new session for the
+///   conversation at once, and the earlier ones are kept: a run in progress is cancelled
+///   first, and what is asked before that run has ended is answered in the new session.
 /// - In a group, a message that mentions the bot starts a thread under it, and each thread
 ///   is a conversation. The first mention in a thread someone else started reads what was
-///   said there before ([`ImChannel::thread_history`]).
+///   said there before ([`ImChannel::thread_history`]), unless `/new` came first.
 /// - In a thread the bot takes part in, a message is answered when it mentions the bot, or
 ///   when it comes from the person the bot just answered, mentions no one, and nobody else
 ///   spoke in between. Other messages there are only recorded, for the next answer.

@@ -34,7 +34,7 @@ use zx_cli::otel::{Telemetry, TraceHook};
 use crate::cli::{self, Approvals, ChatArgs, ModeAgent};
 use crate::process::{EXIT_CANCELLED, EXIT_COMPLETED, with_telemetry};
 use crate::render::visible;
-use crate::session_files::{SessionChoice, SessionPlace};
+use crate::session_files::SessionPlace;
 
 use commands::Command;
 use info::{About, banner, help, status};
@@ -78,14 +78,17 @@ struct Chat {
 
 impl Chat {
     /// A conversation of `model` kept in `place`: the agent is built for it, with the agent
-    /// file read again, and the conversation is its one session.
-    async fn build(&self, model: &str, place: &SessionPlace, choice: SessionChoice<'_>) -> Result<Built> {
+    /// file read again, and the conversation is its one session, the session `resume` names
+    /// or a new one.
+    async fn build(&self, model: &str, place: &SessionPlace, resume: Option<&str>) -> Result<Built> {
         // The person at the terminal answers; `drive_turn` passes the answer on.
         let approvals = Approvals::Person("shell commands require interactive approval");
         let agent = ModeAgent::build(&self.shared, model, place, approvals)?;
-        let opened = agent.open(None, choice).await?;
-        let about = About::of(&agent, &opened)?;
-        let session = opened.session;
+        let session = match resume {
+            Some(id) => agent.resume(id).await?,
+            None => agent.create(None).await?,
+        };
+        let about = About::of(&agent, &session, place.path_of(session.id()).await?)?;
         let commands = session
             .commands()
             .iter()
@@ -102,7 +105,7 @@ impl Chat {
     /// Replace the conversation with a new one kept in `place`; when that fails, the current
     /// one stays and `what` says what could not be done.
     async fn switch(&self, built: &mut Built, model: &str, place: &SessionPlace, what: &str) -> bool {
-        match self.build(model, place, SessionChoice::existing_or_new(None)).await {
+        match self.build(model, place, None).await {
             Ok(next) => {
                 *built = next;
                 self.output.reset_totals();
@@ -150,8 +153,7 @@ async fn converse(args: ChatArgs, traces: Option<TraceHook>) -> Result<u8> {
     let model = chat.shared.settings.model.clone();
     let resume = resume.as_ref().map(Option::as_deref);
     let (storage, first) = opening(no_session, session, resume, chat.shared.base.cwd.as_deref()).await?;
-    let choice = SessionChoice::existing_or_new(first.id());
-    let built = chat.build(&model, &storage.place, choice).await?;
+    let built = chat.build(&model, &storage.place, first.id()).await?;
     let mut terminal = Terminal {
         signals: Signals::new().context("cannot register chat signal handlers")?,
         input: input::spawn(mode)?,

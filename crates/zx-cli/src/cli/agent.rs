@@ -31,7 +31,7 @@ use zx_cli::otel;
 
 use super::setup::PerSession;
 use super::{BudgetArgs, Shared, env_value, push_built_in, resolve_cwd};
-use crate::session_files::{SessionChoice, SessionPlace};
+use crate::session_files::SessionPlace;
 
 /// Who answers when a tool call of a mode's sessions needs approval.
 #[derive(Clone, Copy)]
@@ -54,18 +54,11 @@ pub(crate) struct ModeAgent {
     pub(crate) name: String,
     /// The agent's auto-approved command prefixes, for a frontend to show.
     pub(crate) auto_approve_commands: Vec<String>,
-    /// Where the agent keeps its sessions.
-    place: SessionPlace,
+    /// Where the agent keeps its sessions, for a mode that lists them or shows their files.
+    pub(crate) place: SessionPlace,
     /// `--cwd`: where new sessions work unless a client names a directory.
-    cwd: Option<PathBuf>,
+    pub(crate) cwd: Option<PathBuf>,
     execution: Execution,
-}
-
-/// A session that a mode created or opened.
-pub(crate) struct Opened {
-    pub(crate) session: Session,
-    /// The session's file, for a frontend to show; `None` for a session in memory.
-    pub(crate) path: Option<PathBuf>,
 }
 
 impl ModeAgent {
@@ -100,12 +93,13 @@ impl ModeAgent {
             extensions: shared.mcp.servers.clone(),
             models,
             session_cache_key: config.provider.openai.body.prompt_cache_key,
-            limits: agent.limits.clone(),
+            limits: agent.limits,
             retry: config.provider.retry.clone(),
-            compaction: agent.compaction.clone(),
+            compaction: agent.compaction,
             storage: place.storage(),
             session_setup: Some(Arc::new(PerSession {
-                agent,
+                tools: agent.tools,
+                context: agent.context,
                 skills,
                 execution: config.execution,
                 container: config.container.clone(),
@@ -140,24 +134,23 @@ impl ModeAgent {
         }
     }
 
-    /// The session `choice` names: an existing one, which works in the directory it started
-    /// in, or a new one, which works in `cwd` or `--cwd`'s ([`Self::new_session_cwd`]).
+    /// A new session, which works in `cwd` when a client names its project directory, else
+    /// in `--cwd`'s ([`Self::new_session_cwd`]).
+    ///
+    /// Startup reads and, in container mode, starting the container. A container that cannot
+    /// start is reported before the session's file is created.
+    pub(crate) async fn create(&self, cwd: Option<&Path>) -> Result<Session> {
+        let options = SessionOptions::new(self.new_session_cwd(cwd)?);
+        self.agent.create_session(options).await
+    }
+
+    /// The session `id` of the mode's place, which goes on in the directory it started in.
     ///
     /// Startup reads, short session appends and, in container mode, starting the container.
-    /// A container that cannot start is reported before a new session file is created.
-    pub(crate) async fn open(&self, cwd: Option<&Path>, choice: SessionChoice<'_>) -> Result<Opened> {
-        let session = match choice {
-            SessionChoice::Existing(id) => match self.agent.open_session(id).await {
-                Ok(session) => session,
-                Err(error) => return Err(self.place.naming_file(id, error).await),
-            },
-            SessionChoice::New(labels) => {
-                let options = SessionOptions {
-                    cwd: self.new_session_cwd(cwd)?,
-                    labels,
-                };
-                self.agent.create_session(options).await?
-            }
+    pub(crate) async fn resume(&self, id: &str) -> Result<Session> {
+        let session = match self.agent.open_session(id).await {
+            Ok(session) => session,
+            Err(error) => return Err(self.place.naming_file(id, error).await),
         };
         let cut_off = session.with_transcript(Transcript::incomplete_tail_bytes)?;
         if cut_off > 0 {
@@ -165,8 +158,7 @@ impl ModeAgent {
                 "[session] recovered incomplete final record; its {cut_off} bytes are cut off before the next record"
             );
         }
-        let path = self.place.path_of(session.id()).await?;
-        Ok(Opened { session, path })
+        Ok(session)
     }
 }
 

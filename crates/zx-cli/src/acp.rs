@@ -12,6 +12,9 @@
 //! cancelled, and its file is closed for another process to open, at once when it is idle,
 //! else when the cancelled turn has ended. The file stays, to be loaded or resumed again.
 //!
+//! SIGINT and SIGTERM stop the agent: the turns in progress are cancelled and read to their
+//! end, and the sessions close as the process leaves.
+//!
 //! Stdout is the protocol channel: nothing else in this process may print there.
 
 mod commands;
@@ -31,39 +34,35 @@ use agent_client_protocol::v1::schema::{
 };
 use agent_client_protocol::{Agent, Client, Error, ErrorCode, JsonRpcResponse, Responder, Stdio, V1};
 use anyhow::{Context, Result};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
-use zx_agent::Session;
 use zx_agent::builtin::tools::{BASH, EDIT_FILE, FIND, GREP, LS, READ_FILE, WRITE_FILE};
 use zx_agent::events::EventKind;
 use zx_agent::runner::{RunOutcome, RunReport};
-use zx_agent::transcript::{SessionInfo as StoredSession, SessionQuery};
+use zx_agent::transcript::SessionInfo as StoredSession;
+use zx_agent::{Run, Session};
 use zx_cli::config::Builtin;
 use zx_cli::otel::{Telemetry, TraceHook};
 
 use crate::cli::{self, AcpArgs, Approvals, ModeAgent};
-use crate::process::{EXIT_COMPLETED, with_telemetry};
-use crate::session_files::{self, SessionChoice, SessionPlace};
+use crate::process::{EXIT_COMPLETED, spawn_signal_handler, with_telemetry};
+use crate::session_files::{self, SessionPlace};
 
 use updates::Updates;
 
-/// Where a session the client names is.
-enum Located {
-    /// A conversation this process has open: one the client created with `session/new`,
-    /// loaded with `session/load` or resumed with `session/resume`.
-    Open(Session),
-    /// A session kept among the session files, which this process does not have open.
-    Stored,
-}
-
 struct Host {
-    /// `--cwd`, for a listing that names no directory.
-    cwd: Option<PathBuf>,
-    /// Where sessions are kept: the session files chat keeps too, or memory with
-    /// `--no-session`.
-    place: SessionPlace,
     /// The agent of every session, which also holds the sessions the client has open: the
-    /// client's approval is asked for its calls.
+    /// client's approval is asked for its calls. With it, where the sessions are kept, which
+    /// is the session files chat keeps too, or memory with `--no-session`, and `--cwd`, for
+    /// a listing that names no directory.
     mode: ModeAgent,
+    /// Cancelled when the process is told to stop: every turn then cancels its run.
+    stop: CancellationToken,
+    /// Each turn holds a sender of this channel while it runs, and nothing is ever sent:
+    /// the stop drops the one sender that outlives the turns, and has waited for them once
+    /// the channel is closed.
+    turns: mpsc::WeakSender<()>,
 }
 
 impl Host {
@@ -72,49 +71,45 @@ impl Host {
         self.mode.agent.session(&id.0)
     }
 
-    /// The sessions started in `cwd` that are kept as files, with their directory; `None`
-    /// with `--no-session`, which keeps none.
-    async fn kept(&self, cwd: &Path) -> Result<Option<(Vec<StoredSession>, PathBuf)>> {
-        let Some(directory) = self.place.location(cwd) else {
-            return Ok(None);
-        };
-        let query = SessionQuery {
-            cwd: Some(cwd.to_path_buf()),
-            ..SessionQuery::default()
-        };
-        Ok(Some((self.place.list(&query).await?.sessions, directory)))
+    /// Whether sessions are kept as files, where a later request or process finds them
+    /// again: not with `--no-session`.
+    fn keeps_files(&self) -> bool {
+        !matches!(self.mode.place, SessionPlace::Memory(_))
     }
 
-    /// Create a session for `cwd`, the client's project directory, which overrides `--cwd`.
+    /// Create a session for `cwd`, the client's project directory, whatever `--cwd` says.
     /// It is kept among the session files, where `session/load` finds it again.
     async fn create(&self, cwd: &Path) -> Result<SessionId> {
-        let choice = SessionChoice::existing_or_new(None);
-        let opened = self.mode.open(Some(cwd), choice).await?;
-        Ok(SessionId::new(opened.session.id()))
+        let session = self.mode.create(Some(cwd)).await?;
+        Ok(SessionId::new(session.id()))
     }
 
-    /// Open the stored session `id`, which goes on in the directory it started in.
-    async fn open(&self, id: &SessionId) -> Result<Session> {
-        let opened = self.mode.open(None, SessionChoice::Existing(&id.0)).await?;
-        Ok(opened.session)
-    }
-
-    /// The session `id` for `cwd`: one this process has open, or one kept among the sessions
-    /// started in `cwd`.
-    async fn locate(&self, id: &SessionId, cwd: &Path) -> Result<Located> {
+    /// The session `id` for `cwd`: the one this process has open, or the one kept among the
+    /// session files, opened, when it was started in `cwd`.
+    ///
+    /// A kept session is asked for by its ID and then checked against `cwd`, which reads
+    /// that one session: a listing of the directory would read every session in it.
+    async fn locate(&self, id: &SessionId, cwd: &Path) -> Result<Session> {
         if let Some(session) = self.session(id) {
-            return Ok(Located::Open(session));
+            return Ok(session);
         }
-        let id = &*id.0;
-        let (sessions, directory) = self
-            .kept(&cli::resolve_cwd(Some(cwd))?)
-            .await?
+        let (id, place) = (&*id.0, &self.mode.place);
+        let cwd = cli::resolve_cwd(Some(cwd))?;
+        let directory = place
+            .location(&cwd)
             .ok_or_else(|| unknown_session(id, "the agent keeps no session files (--no-session)"))?;
-        if sessions.iter().any(|session| session.id == id) {
-            Ok(Located::Stored)
-        } else {
-            Err(unknown_session(id, &format!("no such session in {}", directory.display())).into())
+        let unknown = || unknown_session(id, &format!("no such session in {}", directory.display()));
+        if place.path_of(id).await?.is_none() {
+            return Err(unknown().into());
         }
+        let session = self.mode.resume(id).await?;
+        if session.cwd() != cwd {
+            // Started in another directory: not a session of this one, and not left open,
+            // where the next request would find it whatever directory it names.
+            self.mode.agent.close_session(id);
+            return Err(unknown().into());
+        }
+        Ok(session)
     }
 
     /// Load the session `request` names from the session directory of its `cwd`, replaying
@@ -124,10 +119,7 @@ impl Host {
     /// file again.
     async fn load(&self, cx: &ConnectionTo<Client>, request: &LoadSessionRequest) -> Result<SessionId> {
         let id = &request.session_id;
-        let session = match self.locate(id, &request.cwd).await? {
-            Located::Open(session) => session,
-            Located::Stored => self.open(id).await?,
-        };
+        let session = self.locate(id, &request.cwd).await?;
         let updates = Updates::new(cx.clone(), id.clone(), session.cwd().to_path_buf());
         session
             .with_transcript(|store| updates.replay(store))
@@ -138,15 +130,13 @@ impl Host {
     /// Continue the session `request` names without replaying it (`session/resume`): the
     /// client keeps what it shows, and the conversation goes on from the file.
     async fn resume(&self, request: &ResumeSessionRequest) -> Result<SessionId> {
-        if let Located::Stored = self.locate(&request.session_id, &request.cwd).await? {
-            self.open(&request.session_id).await?;
-        }
+        self.locate(&request.session_id, &request.cwd).await?;
         Ok(request.session_id.clone())
     }
 
-    /// The sessions kept that were started in `request.cwd`, or in the agent's own working
-    /// directory, most recently active first. A listing is one page, so a cursor is never
-    /// one of ours.
+    /// The sessions kept that were started in `request.cwd`, or in `--cwd`'s directory when
+    /// the request names none, most recently active first; none with `--no-session`, which
+    /// keeps none. A listing is one page, so a cursor is never one of ours.
     async fn list(&self, request: &ListSessionsRequest) -> Result<Vec<SessionInfo>> {
         if let Some(cursor) = &request.cursor {
             return Err(Error::new(
@@ -155,14 +145,13 @@ impl Host {
             )
             .into());
         }
-        let cwd = request.cwd.as_deref().or(self.cwd.as_deref());
+        let cwd = request.cwd.as_deref().or(self.mode.cwd.as_deref());
         let cwd = cli::resolve_cwd(cwd)?;
-        let kept = self.kept(&cwd).await?;
-        Ok(kept
-            .iter()
-            .flat_map(|(sessions, _)| sessions)
-            .map(session_info)
-            .collect())
+        if !self.keeps_files() {
+            return Ok(Vec::new());
+        }
+        let kept = self.mode.place.started_in(&cwd).await?;
+        Ok(kept.sessions.iter().map(session_info).collect())
     }
 
     /// `initialize`: what the agent can do; sessions can be loaded, listed and resumed when
@@ -174,7 +163,7 @@ impl Host {
     ) -> Result<(), Error> {
         responder.respond(
             InitializeResponse::new(request.protocol_version)
-                .agent_capabilities(agent_capabilities(!matches!(self.place, SessionPlace::Memory(_))))
+                .agent_capabilities(agent_capabilities(self.keeps_files()))
                 .agent_info(Implementation::new("zx-agent", env!("CARGO_PKG_VERSION"))),
         )
     }
@@ -227,6 +216,10 @@ impl Host {
     /// `session/prompt`: the turn runs outside the dispatch loop, so cancellations and
     /// permission answers keep arriving; the response is sent when the turn ends. A prompt
     /// that is one of the agent's commands runs the command instead.
+    ///
+    /// The session is taken for the turn here, in the dispatch loop: a `session/cancel` that
+    /// follows the prompt at once then finds the turn, though it has not run yet. A session
+    /// that is busy or closed answers the prompt at once.
     fn prompt(
         &self,
         request: &PromptRequest,
@@ -234,7 +227,14 @@ impl Host {
         cx: &ConnectionTo<Client>,
     ) -> Result<(), Error> {
         let Some(session) = self.session(&request.session_id) else {
-            return responder.respond_with_error(unknown_session(&request.session_id.0, "no such session is open"));
+            // Never opened, closed by the client, or closed by itself when its record could
+            // no longer be written.
+            let why = if self.keeps_files() {
+                "it is not open; session/load or session/resume opens it"
+            } else {
+                "it is not open, and nothing is kept of a closed session (--no-session)"
+            };
+            return responder.respond_with_error(unknown_session(&request.session_id.0, why));
         };
         let text = prompt_text(&request.prompt);
         let (connection, session_id) = (cx.clone(), request.session_id.clone());
@@ -244,14 +244,24 @@ impl Host {
                 responder.respond_with_result(answer.map_err(protocol_error))
             });
         }
+        let run = match session.send(text) {
+            Ok(run) => run,
+            Err(error) => return responder.respond_with_error(protocol_error(error.into())),
+        };
+        let turn = Turn {
+            updates: Updates::new(connection.clone(), session_id.clone(), session.cwd().to_path_buf()),
+            session,
+            cx: connection,
+            id: session_id,
+            stop: self.stop.clone(),
+        };
+        // None once the stop has waited for the turns: this one then ends with the process.
+        let in_progress = self.turns.upgrade();
         cx.spawn(async move {
-            let turn = Turn {
-                updates: Updates::new(connection.clone(), session_id.clone(), session.cwd().to_path_buf()),
-                session,
-                cx: connection,
-                id: session_id,
-            };
-            responder.respond_with_result(turn.answer(text).await.map_err(protocol_error))
+            let answer = turn.answer(run).await;
+            let answered = responder.respond_with_result(answer.map_err(protocol_error));
+            drop(in_progress);
+            answered
         })
     }
 
@@ -281,12 +291,20 @@ struct Turn {
     updates: Updates,
     cx: ConnectionTo<Client>,
     id: SessionId,
+    /// Cancelled when the process is told to stop.
+    stop: CancellationToken,
 }
 
 pub(crate) async fn run(args: AcpArgs) -> Result<u8> {
     with_telemetry(async move |telemetry| serve(args, telemetry.map(Telemetry::hook)).await).await
 }
 
+/// Serve the client on stdio until it closes the connection, or until SIGINT or SIGTERM.
+///
+/// A signal cancels the turns in progress, and the connection is served until they have
+/// ended, so that each session records how its turn ended; whether the client still reads
+/// the answers is not waited for. The sessions close as the connection and the agent are
+/// dropped on the way out, before the caller exports what remains of the traces.
 async fn serve(args: AcpArgs, traces: Option<TraceHook>) -> Result<u8> {
     let shared = cli::Shared::connect(args.base, args.budget, Builtin::Assistant)
         .await?
@@ -299,11 +317,33 @@ async fn serve(args: AcpArgs, traces: Option<TraceHook>) -> Result<u8> {
     // The client answers: each approval request becomes a `session/request_permission`.
     let approvals = Approvals::Person("the client must approve shell commands");
     let mode = ModeAgent::build(&shared, &shared.settings.model, &place, approvals)?;
-    let host = Arc::new(Host {
-        cwd: shared.base.cwd,
-        place,
+    let stop = CancellationToken::new();
+    spawn_signal_handler(stop.clone());
+    let (turns, mut turns_ended) = mpsc::channel::<()>(1);
+    let connection = connect(Arc::new(Host {
         mode,
-    });
+        stop: stop.clone(),
+        turns: turns.downgrade(),
+    }));
+    tokio::pin!(connection);
+    tokio::select! {
+        served = &mut connection => served.context("the ACP connection failed")?,
+        () = stop.cancelled() => {
+            // Every turn cancels its run now (`Turn::answer`). Without this sender, the
+            // channel closes when the last of them has ended.
+            drop(turns);
+            tokio::select! {
+                served = &mut connection => served.context("the ACP connection failed")?,
+                _ = turns_ended.recv() => {}
+            }
+        }
+    }
+    Ok(EXIT_COMPLETED)
+}
+
+/// The connection to the client on stdio, each request and notification handled by `host`,
+/// until the client closes it.
+async fn connect(host: Arc<Host>) -> Result<(), Error> {
     let on_initialize = Arc::clone(&host);
     let on_new = Arc::clone(&host);
     let on_load = Arc::clone(&host);
@@ -356,8 +396,6 @@ async fn serve(args: AcpArgs, traces: Option<TraceHook>) -> Result<u8> {
         )
         .connect_to(Stdio::new())
         .await
-        .context("the ACP connection failed")?;
-    Ok(EXIT_COMPLETED)
 }
 
 /// Answer a request that opened a session, then offer the session's commands: the client
@@ -379,12 +417,24 @@ fn opened<T: JsonRpcResponse>(
 }
 
 impl Turn {
-    /// The response to `session/prompt` once the turn that `text` starts has ended: its stop
-    /// reason, or the run's error. While the turn runs, its events go to the client as
-    /// session updates, and a call that waits for approval becomes a permission request.
-    async fn answer(&self, text: String) -> Result<PromptResponse> {
-        let mut run = self.session.send(text)?;
-        while let Some(event) = run.next().await {
+    /// The response to `session/prompt` once `run`, the turn, has ended: its stop reason, or
+    /// the run's error. While the turn runs, its events go to the client as session updates,
+    /// and a call that waits for approval becomes a permission request. A process that is
+    /// told to stop cancels the turn, which is still read to its end.
+    async fn answer(&self, mut run: Run) -> Result<PromptResponse> {
+        let mut stopping = false;
+        loop {
+            let event = tokio::select! {
+                () = self.stop.cancelled(), if !stopping => {
+                    self.session.cancel();
+                    stopping = true;
+                    continue;
+                }
+                event = run.next() => event,
+            };
+            let Some(event) = event else {
+                break;
+            };
             self.updates.emit(&event);
             if let EventKind::ApprovalRequested {
                 approval_id,

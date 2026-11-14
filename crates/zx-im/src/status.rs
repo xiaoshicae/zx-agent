@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use super::server::Shared;
-use super::{ConversationId, Destination, ImChannel, MessageId, MessageRef, Outbound, SessionKey, ThreadId};
+use super::{ConversationId, Destination, ImChannel, MessageId, MessageRef, Replacement, SessionKey, ThreadId};
 
 /// The extension of a record file; a record is written under another name first.
 const RECORD: &str = "json";
@@ -214,7 +214,7 @@ pub(crate) async fn replace_left_behind(
     shared: Arc<Shared>,
     stop: CancellationToken,
 ) {
-    let text = Outbound::Text(shared.replies.interrupted.clone());
+    let text = Replacement::Text(shared.replies.interrupted.clone());
     for (key, status) in left {
         match channels.iter().find(|channel| channel.platform() == key.platform) {
             Some(channel) => {

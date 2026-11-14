@@ -13,9 +13,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use common::mock_server::{MockServer, Reply};
-use common::{Home, fake_model_config, stderr, stdout, write_config, zx_agent_in};
+use common::{Home, fake_model_config, seed_session, stderr, stdout, write_config, zx_agent_in};
 use zx_agent::ai::Message;
-use zx_agent::transcript::SESSION_VERSION;
 
 const KEY_VAR: &str = "ZX_SESSIONS_TEST_KEY";
 
@@ -99,18 +98,6 @@ fn prompts(path: &Path) -> Vec<String> {
 /// The user messages the model received in request `index`.
 fn sent(server: &MockServer, index: usize) -> Vec<String> {
     server.requests()[index].user_texts()
-}
-
-/// A session file with one prompt, last written at `at_ms`.
-fn seed(dir: &Path, id: &str, cwd: &Path, at_ms: u64, prompt: &str) -> PathBuf {
-    std::fs::create_dir_all(dir).unwrap();
-    let header = json!({"type": "session", "version": SESSION_VERSION, "id": id, "timestamp": at_ms - 1,
-        "cwd": cwd.display().to_string(), "model": "mock"});
-    let message = json!({"type": "message", "id": format!("{id}-1"), "parentId": null, "timestamp": at_ms,
-        "message": {"role": "user", "content": prompt, "timestamp": at_ms}});
-    let path = dir.join(format!("{id}.jsonl"));
-    std::fs::write(&path, format!("{header}\n{message}\n")).unwrap();
-    path
 }
 
 #[tokio::test]
@@ -202,10 +189,10 @@ async fn no_session_keeps_the_conversation_in_memory() {
 async fn resume_continues_the_most_recent_session_of_this_working_directory() {
     let dirs = Dirs::new();
     let dir = dirs.session_dir();
-    seed(&dir, "aaaa0001", &dirs.cwd(), 1_000, "older");
-    let newer = seed(&dir, "bbbb0002", &dirs.cwd(), 2_000, "newer");
+    seed_session(&dir, "aaaa0001", &dirs.cwd(), 1_000, "older");
+    let newer = seed_session(&dir, "bbbb0002", &dirs.cwd(), 2_000, "newer");
     // Most recent of all, but started in another directory.
-    seed(&dir, "cccc0003", Path::new("/elsewhere"), 3_000, "elsewhere");
+    seed_session(&dir, "cccc0003", Path::new("/elsewhere"), 3_000, "elsewhere");
     let server = MockServer::start(vec![Reply::text("ok")]).await;
 
     let output = dirs.chat(&server, &["--resume"], "next\n/quit\n").await;
@@ -221,8 +208,8 @@ async fn resume_continues_the_most_recent_session_of_this_working_directory() {
 async fn resume_takes_a_session_id_prefix_that_names_one_session() {
     let dirs = Dirs::new();
     let dir = dirs.session_dir();
-    let older = seed(&dir, "aaaa0001", &dirs.cwd(), 1_000, "older");
-    seed(&dir, "aaab0002", &dirs.cwd(), 2_000, "newer");
+    let older = seed_session(&dir, "aaaa0001", &dirs.cwd(), 1_000, "older");
+    seed_session(&dir, "aaab0002", &dirs.cwd(), 2_000, "newer");
     let server = MockServer::start(vec![Reply::text("ok")]).await;
 
     let output = dirs.chat(&server, &["--resume", "aaaa"], "next\n/quit\n").await;
@@ -259,10 +246,10 @@ async fn resume_without_an_earlier_session_starts_a_new_one() {
 async fn sessions_lists_the_most_recent_first_and_reports_unreadable_files() {
     let dirs = Dirs::new();
     let dir = dirs.session_dir();
-    seed(&dir, "aaaa0001-old", &dirs.cwd(), 1_000, "fix the build\nthen test");
-    seed(&dir, "bbbb0002-new", &dirs.cwd(), 2_000, "deploy");
+    seed_session(&dir, "aaaa0001-old", &dirs.cwd(), 1_000, "fix the build\nthen test");
+    seed_session(&dir, "bbbb0002-new", &dirs.cwd(), 2_000, "deploy");
     // Started in another directory, whose name leads to the same session directory.
-    seed(&dir, "cccc0003-far", Path::new("/elsewhere"), 3_000, "elsewhere");
+    seed_session(&dir, "cccc0003-far", Path::new("/elsewhere"), 3_000, "elsewhere");
     std::fs::write(dir.join("broken.jsonl"), "not json\n").unwrap();
 
     let output = dirs.sessions(&[]).await;
@@ -280,7 +267,7 @@ async fn sessions_lists_the_most_recent_first_and_reports_unreadable_files() {
 #[tokio::test]
 async fn sessions_lists_a_named_session_by_its_latest_name() {
     let dirs = Dirs::new();
-    let path = seed(&dirs.session_dir(), "aaaa0001", &dirs.cwd(), 1_000, "fix the build");
+    let path = seed_session(&dirs.session_dir(), "aaaa0001", &dirs.cwd(), 1_000, "fix the build");
     let names: Vec<String> = ["first name", "build fix"]
         .iter()
         .enumerate()

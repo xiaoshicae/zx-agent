@@ -17,7 +17,7 @@ use crate::process::{
     EXIT_DENIED, JsonlEvents, exit_code, print_line, run_traces, spawn_signal_handler, with_telemetry,
 };
 use crate::render::{answer_end_line, progress_line, visible};
-use crate::session_files::{SessionChoice, SessionPlace};
+use crate::session_files::SessionPlace;
 
 /// Run one task and return its exit code. An `Err` is a configuration problem found
 /// before the run started.
@@ -91,9 +91,11 @@ async fn build_session(shared: &cli::Shared, session: Option<&Path>) -> Result<S
     if let Some(existing) = &existing {
         cli::check_session_cwd(shared.base.cwd.as_deref(), &existing.cwd)?;
     }
-    let choice = SessionChoice::existing_or_new(existing.as_ref().map(|session| session.id.as_str()));
     let agent = cli::ModeAgent::build(shared, &shared.settings.model, &place, cli::Approvals::Nobody)?;
-    Ok(agent.open(None, choice).await?.session)
+    match existing {
+        Some(existing) => agent.resume(&existing.id).await,
+        None => agent.create(None).await,
+    }
 }
 
 /// Read `run` to its end, showing its events as `progress` does. A signal, which cancels

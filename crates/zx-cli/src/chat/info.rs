@@ -4,13 +4,14 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
+use zx_agent::Session;
 use zx_agent::ai::Message;
 use zx_agent::builtin::tools::BASH;
 use zx_agent::transcript::{Entry, Transcript};
 
 use super::output::{self, Output};
 use super::term::Tone;
-use crate::cli::{ModeAgent, Opened};
+use crate::cli::ModeAgent;
 use crate::render::{local_time, visible};
 
 /// How the last activity of a resumed session is shown.
@@ -35,15 +36,15 @@ pub(super) struct Resumed {
 }
 
 impl About {
-    /// What the session `opened` of `agent` runs on, read before its first run.
-    pub(super) fn of(agent: &ModeAgent, opened: &Opened) -> Result<Self> {
-        let session = &opened.session;
+    /// What `session` of `agent` runs on, read before its first run; `file` is the session's
+    /// file, `None` for a session in memory.
+    pub(super) fn of(agent: &ModeAgent, session: &Session, file: Option<PathBuf>) -> Result<Self> {
         Ok(Self {
             agent: agent.name.clone(),
             tools: session.tool_names().to_vec(),
             auto_approve: agent.auto_approve_commands.clone(),
             cwd: session.cwd().to_path_buf(),
-            session: opened.path.clone(),
+            session: file,
             resumed: session.with_transcript(resumed)?,
         })
     }

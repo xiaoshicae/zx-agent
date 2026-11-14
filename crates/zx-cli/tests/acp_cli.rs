@@ -13,7 +13,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 
 use common::mock_server::{MockServer, Reply};
-use common::{Home, fake_model_config, session_dir, stderr, write_agent, write_config, zx_agent_in};
+use common::{Home, fake_model_config, seed_session, session_dir, stderr, write_agent, write_config, zx_agent_in};
 
 const KEY_VAR: &str = "ZX_ACP_TEST_KEY";
 
@@ -399,8 +399,7 @@ async fn a_rejected_call_never_runs_and_the_model_hears_why() {
 #[tokio::test]
 async fn cancel_ends_the_turn_as_cancelled_and_the_session_goes_on() {
     let dir = tempfile::tempdir().unwrap();
-    let partial = json!({"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]});
-    let server = MockServer::start(vec![Reply::Stall(vec![partial]), Reply::text("again")]).await;
+    let server = MockServer::start(vec![stalled_answer(), Reply::text("again")]).await;
     let mut acp = Acp::start(&server, dir.path(), &["--tools", ""]).await;
     let session = acp.session(dir.path()).await;
     acp.write(json!({"jsonrpc": "2.0", "id": 5, "method": "session/prompt",
@@ -417,6 +416,91 @@ async fn cancel_ends_the_turn_as_cancelled_and_the_session_goes_on() {
     assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
     assert_eq!(text_of(&acp.next_update().await), "again");
     assert!(acp.finish().await.success());
+}
+
+/// A model answer that begins and then never ends: a turn that is not cancelled does not end.
+fn stalled_answer() -> Reply {
+    Reply::Stall(vec![
+        json!({"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}),
+    ])
+}
+
+/// The request that starts a turn of `session` with `text`, as request `id`.
+fn prompt_request(id: u64, session: &str, text: &str) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "method": "session/prompt",
+        "params": {"sessionId": session, "prompt": [{"type": "text", "text": text}]}})
+}
+
+#[tokio::test]
+async fn a_cancel_right_behind_its_prompt_ends_the_turn_as_cancelled() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![stalled_answer()]).await;
+    let mut acp = Acp::start(&server, dir.path(), &["--tools", ""]).await;
+    let session = acp.session(dir.path()).await;
+    let prompt = prompt_request(5, &session, "first");
+    let cancel = json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": session}});
+    // One write, so that the agent reads the cancellation right behind the prompt, before
+    // the turn has made any progress.
+    acp.stdin
+        .write_all(format!("{prompt}\n{cancel}\n").as_bytes())
+        .await
+        .unwrap();
+
+    let response = acp.response(5).await;
+
+    assert_eq!(response["result"]["stopReason"], "cancelled", "{response}");
+    assert!(acp.finish().await.success());
+}
+
+/// How the agent exited once it was sent SIGTERM.
+#[cfg(unix)]
+async fn terminated(acp: &mut Acp) -> ExitStatus {
+    common::signal(&acp.child, "-TERM").await;
+    tokio::time::timeout(Duration::from_secs(5), acp.child.wait())
+        .await
+        .expect("the agent did not exit after SIGTERM")
+        .unwrap()
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn sigterm_ends_an_idle_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(Vec::new()).await;
+    let mut acp = Acp::start(&server, dir.path(), &["--tools", ""]).await;
+    acp.session(dir.path()).await;
+
+    let status = terminated(&mut acp).await;
+
+    // An exit code, not a death by the signal: the agent stopped by itself.
+    assert_eq!(status.code(), Some(0), "{status:?}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn sigterm_cancels_the_turn_in_progress_before_the_agent_exits() {
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let cwd = work.path().canonicalize().unwrap();
+    let server = MockServer::start(vec![stalled_answer()]).await;
+    let mut acp = Acp::start_in(&server, &cwd, &["--tools", ""], Some(home.path())).await;
+    let session = acp.session(&cwd).await;
+    acp.write(prompt_request(5, &session, "first")).await;
+    assert_eq!(text_of(&acp.next_update().await), "partial");
+
+    let status = terminated(&mut acp).await;
+
+    assert_eq!(status.code(), Some(0), "{status:?}");
+    // Cancelled rather than dropped: the session holds the answer as far as it got, marked
+    // as aborted, which only a run that is read to its end records.
+    let files = common::session_files(&session_dir(home.path(), &cwd));
+    assert_eq!(files.len(), 1, "{files:?}");
+    let aborted: Vec<Value> = common::read_lines(&files[0])
+        .into_iter()
+        .filter(|line| line["message"]["stopReason"] == "aborted")
+        .collect();
+    assert_eq!(aborted.len(), 1, "{:?}", common::read_lines(&files[0]));
+    assert!(aborted[0]["message"].to_string().contains("partial"), "{aborted:?}");
 }
 
 #[tokio::test]
@@ -613,6 +697,48 @@ async fn loading_an_unknown_session_is_a_request_error() {
 }
 
 #[tokio::test]
+async fn a_session_started_in_another_directory_is_neither_loaded_nor_resumed() {
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let cwd = work.path().canonicalize().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let elsewhere = other.path().canonicalize().unwrap();
+    let server = MockServer::start(vec![Reply::text("hi there")]).await;
+    let mut first = Acp::start_in(&server, &cwd, &[], Some(home.path())).await;
+    let id = first.session(&cwd).await;
+    let response = first.prompt(&id, "hello").await;
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    first.finish().await;
+
+    let server = MockServer::start(Vec::new()).await;
+    let mut second = Acp::start_in(&server, &cwd, &[], Some(home.path())).await;
+    second.initialize().await;
+    let unknown = format!(
+        "unknown session {id}: no such session in {}",
+        session_dir(home.path(), &elsewhere).display()
+    );
+    // Asked twice: a refused session is not left open, where the next request would find it
+    // whatever directory it names.
+    for _ in 0..2 {
+        for refused in [second.load(&id, &elsewhere).await, second.resume(&id, &elsewhere).await] {
+            assert_eq!(refused["error"]["code"], -32602, "{refused}");
+            assert_eq!(refused["error"]["message"], unknown.as_str(), "{refused}");
+        }
+    }
+    assert!(second.replayed().is_empty(), "nothing of it is replayed");
+    // In the directory it started in, it is loaded: the refusals left its file free.
+    let loaded = second.load(&id, &cwd).await;
+    assert!(loaded.get("error").is_none(), "{loaded}");
+    let replay: Vec<String> = second
+        .replayed()
+        .iter()
+        .map(|update| text_of(update).to_string())
+        .collect();
+    assert_eq!(replay, ["hello", "hi there"]);
+    second.finish().await;
+}
+
+#[tokio::test]
 async fn no_session_keeps_no_file_and_offers_no_loading() {
     let home = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
@@ -700,11 +826,17 @@ async fn a_single_session_file_is_refused_before_the_connection() {
 
 #[tokio::test]
 async fn sessions_are_listed_most_recent_first_with_their_first_prompt() {
+    let home = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     let cwd = work.path().canonicalize().unwrap();
     let elsewhere = tempfile::tempdir().unwrap();
-    let server = MockServer::start(vec![Reply::text("one"), Reply::text("two")]).await;
-    let mut acp = Acp::start(&server, &cwd, &[]).await;
+    // Session files that say when they were last written: the order of the listing does not
+    // depend on when the test runs. By their IDs alone the order would be the other one.
+    let dir = session_dir(home.path(), &cwd);
+    seed_session(&dir, "aaaa0001", &cwd, 1_000, "first question");
+    seed_session(&dir, "bbbb0002", &cwd, 2_000, "second question");
+    let server = MockServer::start(Vec::new()).await;
+    let mut acp = Acp::start_in(&server, &cwd, &[], Some(home.path())).await;
     let initialized = acp.initialize().await;
     let capabilities = &initialized["result"]["agentCapabilities"]["sessionCapabilities"];
     assert_eq!(
@@ -712,15 +844,6 @@ async fn sessions_are_listed_most_recent_first_with_their_first_prompt() {
         (json!({}), json!({})),
         "{initialized}"
     );
-    let mut ids = Vec::new();
-    for prompt in ["first question", "second question"] {
-        // Listed by last activity, which has millisecond resolution.
-        tokio::time::sleep(Duration::from_millis(5)).await;
-        let id = acp.create(&cwd).await;
-        let response = acp.prompt(&id, prompt).await;
-        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
-        ids.push(id);
-    }
 
     let listed = acp.list(json!({"cwd": cwd})).await;
     let sessions = listed["result"]["sessions"]
@@ -730,12 +853,11 @@ async fn sessions_are_listed_most_recent_first_with_their_first_prompt() {
         .iter()
         .map(|session| session["sessionId"].as_str().unwrap())
         .collect();
-    assert_eq!(listed_ids, [ids[1].as_str(), ids[0].as_str()], "{listed}");
+    assert_eq!(listed_ids, ["bbbb0002", "aaaa0001"], "{listed}");
     assert_eq!(sessions[0]["title"], "second question");
     assert_eq!(sessions[1]["title"], "first question");
     assert_eq!(sessions[0]["cwd"], cwd.display().to_string());
-    let updated = sessions[0]["updatedAt"].as_str().unwrap_or_else(|| panic!("{listed}"));
-    assert!(updated.contains('T') && updated.ends_with('Z'), "{updated}");
+    assert_eq!(sessions[0]["updatedAt"], "1970-01-01T00:00:02.000Z", "{listed}");
     assert!(listed["result"]["nextCursor"].is_null(), "{listed}");
     // Without a directory the agent's own is listed; another directory has none.
     let all = acp.list(json!({})).await;
@@ -885,8 +1007,7 @@ async fn closing_a_session_frees_its_file_for_another_process() {
 #[tokio::test]
 async fn closing_a_session_cancels_its_turn() {
     let dir = tempfile::tempdir().unwrap();
-    let partial = json!({"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]});
-    let server = MockServer::start(vec![Reply::Stall(vec![partial])]).await;
+    let server = MockServer::start(vec![stalled_answer()]).await;
     let mut acp = Acp::start(&server, dir.path(), &["--tools", ""]).await;
     let session = acp.session(dir.path()).await;
     acp.write(json!({"jsonrpc": "2.0", "id": 50, "method": "session/prompt",

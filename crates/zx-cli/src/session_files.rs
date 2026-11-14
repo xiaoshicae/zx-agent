@@ -3,7 +3,6 @@
 //! As in pi (`getDefaultSessionDirPath`), each working directory has its own directory of
 //! session files under the zx-agent home directory, which `ZX_AGENT_HOME` moves.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -28,7 +27,9 @@ const LISTING_TIME_FORMAT: &str = "%Y-%m-%d %H:%M";
 /// sessions there, and the mode lists them and shows their files.
 #[derive(Clone)]
 pub(crate) enum SessionPlace {
-    /// `--no-session`: in memory, gone with the process.
+    /// `--no-session`: in memory. A session is kept while it is open and forgotten once it
+    /// is closed, so that a process that runs for long keeps nothing of the conversations it
+    /// has had.
     Memory(Arc<MemoryStorage>),
     /// `--session`: one file, which holds one session.
     File(Arc<JsonlStorage>),
@@ -37,24 +38,9 @@ pub(crate) enum SessionPlace {
     Directory(Arc<JsonlStorage>),
 }
 
-/// Which session of a place a mode runs on.
-pub(crate) enum SessionChoice<'a> {
-    /// A new session, with these labels.
-    New(BTreeMap<String, String>),
-    /// The session with this ID.
-    Existing(&'a str),
-}
-
-impl<'a> SessionChoice<'a> {
-    /// The session `id`, or a new one without labels when there is none to continue.
-    pub(crate) fn existing_or_new(id: Option<&'a str>) -> Self {
-        id.map_or_else(|| Self::New(BTreeMap::new()), Self::Existing)
-    }
-}
-
 impl SessionPlace {
     pub(crate) fn memory() -> Self {
-        Self::Memory(Arc::default())
+        Self::Memory(Arc::new(MemoryStorage::forgetting()))
     }
 
     pub(crate) fn file(path: &Path) -> Self {
@@ -107,9 +93,14 @@ impl SessionPlace {
         }
     }
 
-    /// The sessions `query` asks for, most recently active first.
-    pub(crate) async fn list(&self, query: &SessionQuery) -> Result<SessionList> {
-        self.storage().list(query).await
+    /// The sessions kept here that were started in `cwd`, most recently active first, and
+    /// what was found among them and could not be read.
+    pub(crate) async fn started_in(&self, cwd: &Path) -> Result<SessionList> {
+        let query = SessionQuery {
+            cwd: Some(cwd.to_path_buf()),
+            ..SessionQuery::default()
+        };
+        self.storage().list(&query).await
     }
 
     /// The session a single file holds already; `None` for a file that does not exist yet,
@@ -178,6 +169,8 @@ pub(crate) fn preview_text(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use zx_agent::ai::Message;
     use zx_agent::transcript::{SessionHeader, SessionName, Transcript};
 
@@ -276,11 +269,44 @@ mod tests {
     async fn memory_has_no_location() {
         let place = SessionPlace::memory();
         let header = SessionHeader::new(Path::new("/w"), "m");
-        drop(create(&place, &header).await);
+        let _open = create(&place, &header).await;
 
         assert_eq!(place.location(Path::new("/w")), None);
         assert_eq!(place.path_of(&header.id).await.unwrap(), None);
         assert_eq!(place.only().await.unwrap(), None);
-        assert_eq!(place.list(&SessionQuery::default()).await.unwrap().sessions.len(), 1);
+        assert_eq!(place.started_in(Path::new("/w")).await.unwrap().sessions.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn memory_keeps_nothing_of_a_session_that_was_closed() {
+        // What `acp --no-session` relies on: it runs for long, and its client closes sessions.
+        let place = SessionPlace::memory();
+        let header = SessionHeader::new(Path::new("/w"), "m");
+        let mut open = create(&place, &header).await;
+        open.append_message(Message::user("q")).await.unwrap();
+
+        drop(open);
+
+        assert!(place.started_in(Path::new("/w")).await.unwrap().sessions.is_empty());
+        assert!(place.storage().open(&header.id).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn the_sessions_started_in_a_directory_are_those_whose_header_names_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let place = SessionPlace::directory(dir.path());
+        let here = SessionHeader::new(Path::new("/w"), "m");
+        let elsewhere = SessionHeader::new(Path::new("/w/nested"), "m");
+        drop(create(&place, &here).await);
+        drop(create(&place, &elsewhere).await);
+
+        let started = |cwd: &'static str| async {
+            let list = place.started_in(Path::new(cwd)).await.unwrap();
+            list.sessions.into_iter().map(|session| session.id).collect::<Vec<_>>()
+        };
+
+        assert_eq!(started("/w").await, [here.id.as_str()]);
+        assert_eq!(started("/w/nested").await, [elsewhere.id.as_str()]);
+        assert!(started("/other").await.is_empty());
     }
 }

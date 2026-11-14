@@ -3,10 +3,9 @@
 
 use serde_json::{Value, json};
 use zx_ai::sync::lock;
-use zx_core::events::ApprovalResult;
 use zx_im::{
-    Addressee, ApprovalId, CardLabels, ChatKind, Choice, ConversationId, Destination, ImError, Inbound, MessageId,
-    Seen, ThreadId, UserId,
+    Addressee, ApprovalId, ApprovalResult, CardLabels, ChatKind, Choice, ConversationId, Destination, ImError, Inbound,
+    MessageId, Seen, ThreadId, UserId,
 };
 
 use super::FeishuChannel;

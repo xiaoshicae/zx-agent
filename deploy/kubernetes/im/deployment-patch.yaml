@@ -18,6 +18,13 @@ spec:
             - im
             - --config
             - /etc/zx-agent-im/im.toml
+            # The assistant agent bounds neither requests nor time. Without these, a run that
+            # does not converge holds one of the run slots (limits.maxRunning) for good. The
+            # time a call waits for approval counts towards the time limit.
+            - --max-model-requests
+            - "100"
+            - --timeout-secs
+            - "3600"
           env:
             # Each platform reads only its own keys; the Secret holds the ones in use.
             - name: SLACK_APP_TOKEN

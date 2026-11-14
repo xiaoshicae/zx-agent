@@ -95,12 +95,16 @@ impl SessionQuery {
     }
 
     /// `sessions`, each of which matches, as a listing returns them: most recently active
-    /// first, and no more of them than the limit.
+    /// first, of those last active at the same moment the one started later first, and no
+    /// more of them than the limit.
     pub fn arrange(&self, mut sessions: Vec<SessionInfo>) -> Vec<SessionInfo> {
-        // Newest first; the ID breaks ties, so the order does not depend on the storage's.
+        // Newest first: a session started in the millisecond another was last written to is
+        // the newer one. The ID breaks the ties left, so the order does not depend on the
+        // storage's.
         sessions.sort_by(|a, b| {
             b.last_activity_ms
                 .cmp(&a.last_activity_ms)
+                .then_with(|| b.started_ms.cmp(&a.started_ms))
                 .then_with(|| a.id.cmp(&b.id))
         });
         if let Some(limit) = self.limit {
@@ -306,5 +310,23 @@ mod tests {
             ..SessionQuery::default()
         };
         assert_eq!(ids(limited), ["c", "d"]);
+    }
+
+    #[test]
+    fn of_sessions_last_active_at_the_same_moment_the_one_started_later_comes_first() {
+        // A session started in the millisecond another was last written to is the newer one.
+        let older = SessionInfo {
+            started_ms: 1,
+            ..session("a", 5)
+        };
+        let newer = SessionInfo {
+            started_ms: 5,
+            ..session("z", 5)
+        };
+
+        let arranged = SessionQuery::default().arrange(vec![older, newer]);
+
+        let ids: Vec<&str> = arranged.iter().map(|session| session.id.as_str()).collect();
+        assert_eq!(ids, ["z", "a"]);
     }
 }

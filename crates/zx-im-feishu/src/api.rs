@@ -132,14 +132,13 @@ impl FeishuChannel {
     }
 }
 
-/// The wait a frequency limit asks for; one second when the header is missing or
-/// unreadable, at most [`MAX_INTERVAL`].
+/// The wait a frequency limit asks for in the reset header of `response`, at most
+/// [`MAX_INTERVAL`]; a header that is not text counts as missing, which is one second
+/// ([`zx_im::rate_limit_wait`]).
 fn rate_limit_wait(response: &reqwest::Response) -> Duration {
-    let secs = response
+    let seconds = response
         .headers()
         .get(RATE_LIMIT_RESET)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse().ok())
-        .unwrap_or(1);
-    Duration::from_secs(secs).min(MAX_INTERVAL)
+        .and_then(|value| value.to_str().ok());
+    zx_im::rate_limit_wait(seconds, MAX_INTERVAL)
 }

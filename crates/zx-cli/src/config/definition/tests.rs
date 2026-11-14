@@ -548,7 +548,8 @@ fn the_shipped_review_example_resolves_its_context_and_skill_files() {
     );
     assert!(
         agent
-            .context_section(path.parent().unwrap())
+            .context
+            .section(path.parent().unwrap())
             .unwrap()
             .contains("This example agent")
     );

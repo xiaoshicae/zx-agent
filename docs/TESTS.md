@@ -40,7 +40,7 @@
 | `tests/mcp.rs` | MCP 客户端对假服务器；运行被取消时通知服务器放弃调用 |
 | `tests/im_feishu.rs` | ⚑ D:5/CHINA FLAG: 飞书 channel 对假开放平台 |
 | `tests/im_slack.rs` | Slack channel 对假 Slack |
-| `tests/im_server.rs` | IM 服务的会话划分、接话、审批与停止 |
+| `tests/im_server.rs` | IM 服务的会话划分、接话、`/new`、审批与停止 |
 | `tests/real_api.rs` | 付费的真实模型 API，默认跳过（红线 9） |
 
 ## 驱动程序：`crates/zx-cli/tests/`
@@ -52,7 +52,7 @@
 | `crates/zx-cli/tests/run_cli.rs` | `run`：退出码 0 到 9、jsonl 输出、追踪导出、请求设置、续接的会话在原目录工作 |
 | `crates/zx-cli/tests/chat_cli.rs` | chat：审批、输出行、信号、PTY |
 | `crates/zx-cli/tests/sessions_cli.rs` | chat 的会话目录、`--resume` 与 `zx-agent sessions` |
-| `crates/zx-cli/tests/acp_cli.rs` | `acp` 经 stdio 的协议、权限请求、会话加载与关闭、`/name` |
+| `crates/zx-cli/tests/acp_cli.rs` | `acp` 经 stdio 的协议、权限请求、取消、会话加载与关闭、`/name`、终止信号 |
 | `crates/zx-cli/tests/agents_cli.rs` | agent 文件、权限、上下文与 skill；配置错误以退出码 2 结束 |
 | `crates/zx-cli/tests/config_cli.rs` | `config.toml` 的位置与优先级 |
 | `crates/zx-cli/tests/hooks_cli.rs` | 程序中的密钥脱敏与钩子失败输出 |

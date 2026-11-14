@@ -24,7 +24,7 @@ use zx_im_slack::{SlackChannel, SlackConfig};
 
 use crate::cli::{self, Approvals, ImArgs, ModeAgent, env_value};
 use crate::process::{EXIT_COMPLETED, EXIT_ERROR, EXIT_USAGE, spawn_signal_handler, with_telemetry, write_line};
-use crate::session_files::{SessionChoice, SessionPlace};
+use crate::session_files::SessionPlace;
 
 const DEFAULT_APP_TOKEN_ENV: &str = "SLACK_APP_TOKEN";
 const DEFAULT_BOT_TOKEN_ENV: &str = "SLACK_BOT_TOKEN";
@@ -141,7 +141,7 @@ pub(crate) async fn run(args: ImArgs) -> Result<u8> {
         // A wrong model, agent or tool setting would otherwise surface only at the first
         // message, in the chat; check it once with a session that is never stored.
         agent(&shared, &SessionPlace::memory())?
-            .open(None, SessionChoice::existing_or_new(None))
+            .create(None)
             .await
             .context("cannot prepare a session with these settings")?;
         // The sessions of every conversation are kept under `dir`; a conversation's sessions

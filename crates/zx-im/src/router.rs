@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use super::server::Shared;
 use super::worker::{self, Incoming, Retire, WorkerInput, WorkerSetup};
 use super::{
-    Addressee, ChatKind, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId, MessageRef, Outbound,
+    Addressee, ChatKind, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId, MessageRef, Post,
     SessionKey, ThreadId,
 };
 
@@ -310,7 +310,7 @@ impl Router {
     fn refuse(&mut self, channel: Arc<dyn ImChannel>, to: Destination) {
         let shared = Arc::clone(&self.shared);
         self.refusals.spawn(async move {
-            let text = Outbound::Text(shared.replies.unauthorized.clone());
+            let text = Post::Text(shared.replies.unauthorized.clone());
             let act = format!("answer in {}", to.conversation);
             shared.bounded(None, &act, channel.send(&to, &text)).await;
         });

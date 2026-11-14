@@ -136,6 +136,20 @@ pub(crate) fn session_dir(home: &Path, cwd: &Path) -> PathBuf {
     home.join(".zx-agent/sessions").join(format!("--{encoded}--"))
 }
 
+/// Write a session file in `dir`: the session `id`, started in `cwd`, with one prompt, last
+/// written at `at_ms`. A test gets a session of a known age this way, whatever the clock
+/// says, and the program reads it as one of its own.
+pub(crate) fn seed_session(dir: &Path, id: &str, cwd: &Path, at_ms: u64, prompt: &str) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    let header = serde_json::json!({"type": "session", "version": zx_agent::transcript::SESSION_VERSION, "id": id,
+        "timestamp": at_ms - 1, "cwd": cwd.display().to_string(), "model": "mock"});
+    let message = serde_json::json!({"type": "message", "id": format!("{id}-1"), "parentId": null,
+        "timestamp": at_ms, "message": {"role": "user", "content": prompt, "timestamp": at_ms}});
+    let path = dir.join(format!("{id}.jsonl"));
+    std::fs::write(&path, format!("{header}\n{message}\n")).unwrap();
+    path
+}
+
 /// The session files in `dir`, by name; none when the directory does not exist.
 pub(crate) fn session_files(dir: &Path) -> Vec<PathBuf> {
     let Ok(read_dir) = std::fs::read_dir(dir) else {

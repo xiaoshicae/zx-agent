@@ -5,8 +5,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use zx_agent::transcript::SessionQuery;
-
 use crate::cli;
 use crate::render::visible;
 use crate::session_files::SessionPlace;
@@ -92,12 +90,7 @@ pub(super) async fn opening(
 /// is none to resume.
 async fn resume_target(place: &SessionPlace, cwd: Option<&Path>, id: Option<&str>) -> Result<First> {
     let cwd = cli::resolve_cwd(cwd)?;
-    let list = place
-        .list(&SessionQuery {
-            cwd: Some(cwd.clone()),
-            ..SessionQuery::default()
-        })
-        .await?;
+    let list = place.started_in(&cwd).await?;
     let directory = place.location(&cwd).unwrap_or_default();
     match id {
         Some(id) => {

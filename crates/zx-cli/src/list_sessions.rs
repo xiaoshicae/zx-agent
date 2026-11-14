@@ -3,8 +3,6 @@
 
 use anyhow::Result;
 
-use zx_agent::transcript::SessionQuery;
-
 use crate::cli::{SessionsArgs, resolve_cwd};
 use crate::process::{EXIT_COMPLETED, print_line};
 use crate::render::visible;
@@ -15,12 +13,7 @@ use crate::session_files::{self, SessionPlace};
 pub(crate) async fn run(args: SessionsArgs) -> Result<u8> {
     let cwd = resolve_cwd(args.cwd.as_deref())?;
     let place = SessionPlace::home()?;
-    let list = place
-        .list(&SessionQuery {
-            cwd: Some(cwd.clone()),
-            ..SessionQuery::default()
-        })
-        .await?;
+    let list = place.started_in(&cwd).await?;
     for line in session_files::lines(&list) {
         print_line(&line);
     }

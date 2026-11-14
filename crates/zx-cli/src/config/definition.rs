@@ -58,6 +58,13 @@ pub struct ProjectContext {
     pub files: Vec<PathBuf>,
 }
 
+impl ProjectContext {
+    /// Read root-to-cwd project guidance and explicit files, within a total byte budget.
+    pub fn section(&self, cwd: &Path) -> Result<String> {
+        context::load(cwd, self)
+    }
+}
+
 /// A resolved agent: its file over the built-in agent it extends. Command-line overrides
 /// are applied by the frontend, which calls `validate` again before assembly.
 #[derive(Debug)]
@@ -175,11 +182,6 @@ impl AgentDefinition {
             );
         }
         skills::validate(&self.skills)
-    }
-
-    /// Read root-to-cwd project guidance and explicit files, within a total byte budget.
-    pub fn context_section(&self, cwd: &Path) -> Result<String> {
-        context::load(cwd, &self.context)
     }
 }
 

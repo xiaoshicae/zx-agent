@@ -22,7 +22,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use zx_agent::hooks::{Hook, HookChain, HookOptions};
 
-pub(crate) use agent::{Approvals, ModeAgent, Opened};
+pub(crate) use agent::{Approvals, ModeAgent};
 pub(crate) use settings::Settings;
 pub(crate) use shared::Shared;
 
@@ -128,7 +128,13 @@ pub(crate) enum ColorArg {
     Never,
 }
 
+/// What `--cwd` means to `acp`, where the client names the directory of every session it
+/// creates.
+const ACP_CWD_HELP: &str = "Directory whose sessions session/list shows when the client names none. Defaults to \
+                            the current directory. A session works in the directory its client creates it for";
+
 #[derive(Args)]
+#[command(mut_arg("cwd", |arg| arg.help(ACP_CWD_HELP)))]
 pub(crate) struct AcpArgs {
     #[command(flatten)]
     pub(crate) base: BaseArgs,
@@ -336,6 +342,24 @@ mod tests {
         // Each conversation of im, and each session of acp, has a file of its own.
         assert!(Cli::try_parse_from(["zx-agent", "im", "--config", "im.toml", "--session", "s.jsonl"]).is_err());
         assert!(Cli::try_parse_from(["zx-agent", "acp", "--session", "s.jsonl"]).is_err());
+    }
+
+    #[test]
+    fn acp_describes_cwd_as_the_directory_of_a_listing_not_of_tools() {
+        let cwd_help = |mode: &str| {
+            let command = <Cli as clap::CommandFactory>::command();
+            let mode = command.find_subcommand(mode).unwrap();
+            let cwd = mode.get_arguments().find(|arg| arg.get_id() == "cwd").unwrap();
+            cwd.get_help().unwrap().to_string()
+        };
+        // The client names the directory of each session it creates.
+        assert!(cwd_help("acp").contains("session/list"), "{}", cwd_help("acp"));
+        for mode in ["run", "chat", "im"] {
+            assert_eq!(
+                cwd_help(mode),
+                "Working directory for tools. Defaults to the current directory"
+            );
+        }
     }
 
     #[test]

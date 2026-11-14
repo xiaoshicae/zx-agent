@@ -2,10 +2,9 @@
 //! and the escaped text and blocks the channel posts.
 
 use serde_json::{Value, json};
-use zx_core::events::ApprovalResult;
 use zx_im::{
-    Addressee, ApprovalId, CardLabels, ChatKind, Choice, ConversationId, Destination, Inbound, MessageId, Said,
-    ThreadId, UserId, split_text,
+    Addressee, ApprovalId, ApprovalResult, CardLabels, ChatKind, Choice, ConversationId, Destination, Inbound,
+    MessageId, Said, ThreadId, UserId, split_text,
 };
 
 use super::{ALLOW_ACTION, DENY_ACTION, MAX_SECTION_CHARS};
@@ -161,6 +160,7 @@ pub(crate) fn escape(text: &str) -> String {
     escaped
 }
 
+/// Write `c` as message text: `&`, `<` and `>` as entities.
 fn push_escaped(out: &mut String, c: char) {
     match c {
         '&' => out.push_str("&amp;"),

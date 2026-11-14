@@ -15,7 +15,7 @@
 
 ## 快速开始
 
-需要 Rust 1.88 及以上与 C 编译器（aws-lc 在构建时编译）。HTTPS 使用系统的根证书：Linux 上没有安装 CA 证书（如 Debian 的 `ca-certificates`）时启动即报错 `No CA certificates were loaded from the system`，只连 `http://` 时也一样。
+需要 Rust 1.88 及以上与 C 编译器（aws-lc 在构建时编译）。HTTPS 使用系统的根证书：Linux 上没有安装 CA 证书（如 Debian 的 `ca-certificates`）时启动即报错 `No CA certificates were loaded from the system`，只连 `http://` 时也一样。例外是 IM 平台（Slack 与 ⚑ D:5/CHINA FLAG: 飞书）的 WebSocket 长连接：它只信任编译进程序的根证书（`tokio-tungstenite` 的 `rustls-tls-webpki-roots`），不读系统信任库；在使用私有 CA 的出口代理后面，REST 调用能通而长连接的握手可能失败。
 
 ```bash
 cargo build --release
@@ -92,12 +92,13 @@ zx-agent chat --session ./chat.jsonl   # 指定会话文件
 zx-agent acp
 ```
 
-`acp` 经 stdin 与 stdout 收发 [Agent Client Protocol](https://agentclientprotocol.com/) v1 的消息，由 ACP 客户端（Zed、JetBrains、Neovim、Emacs 的插件，或 Wisp 等终端客户端，见[客户端目录](https://agentclientprotocol.com/overview/clients)）启动：在客户端里把 agent 命令配置为上面这一行。参数与 `chat` 相同（`acp --help`），没有 `--session`、`--output` 与 `--color`；stdout 只走协议，诊断在 stderr。
+`acp` 经 stdin 与 stdout 收发 [Agent Client Protocol](https://agentclientprotocol.com/) v1 的消息，由 ACP 客户端（Zed、JetBrains、Neovim、Emacs 的插件，或 Wisp 等终端客户端，见[客户端目录](https://agentclientprotocol.com/overview/clients)）启动：在客户端里把 agent 命令配置为上面这一行。参数与 `chat` 相同（`acp --help`），没有 `--session`、`--output` 与 `--color`；会话的工作目录由客户端给出，`--cwd` 在这里只是 `session/list` 没有带 `cwd` 时所列的目录。stdout 只走协议，诊断在 stderr。
 
-- 会话：`session/new` 建会话，`cwd` 由客户端给出，会话此后一直在这个目录工作，续接后也一样；每个会话一个文件，放在 chat 为该工作目录使用的会话目录中（`--no-session` 时只在内存）。`session/load` 续接并把对话回放给客户端，`session/resume` 续接但不回放，`session/list` 列出会话（标题为会话名称，没有名称时为第一条提问）。`session/close` 取消会话正在进行的回合，并把会话移出内存：会话文件随之关闭（有回合在跑时，等它结束），别的进程就能打开它；文件保留，可以再 `session/load` 或 `session/resume`。关闭本进程没有持有的会话也算成功。`initialize` 总会声明 `sessionCapabilities.close`（`--no-session` 时也是，关闭同样释放内存）。客户端不发 `session/close` 时，会话留在内存中、文件保持锁定，直到进程退出。`session/fork` 未实现。客户端给的 `mcpServers` 被忽略，MCP 服务器只来自 `config.toml`。
+- 会话：`session/new` 建会话，`cwd` 由客户端给出，会话此后一直在这个目录工作，续接后也一样；每个会话一个文件，放在 chat 为该工作目录使用的会话目录中（`--no-session` 时只在内存）。`session/load` 续接并把对话回放给客户端，`session/resume` 续接但不回放，两者只认在所给 `cwd` 开始的会话；`session/list` 列出会话（标题为会话名称，没有名称时为第一条提问）。`session/close` 取消会话正在进行的回合，并把会话移出内存：会话文件随之关闭（有回合在跑时，等它结束），别的进程就能打开它；文件保留，可以再 `session/load` 或 `session/resume`。关闭本进程没有持有的会话也算成功。`initialize` 总会声明 `sessionCapabilities.close`（`--no-session` 时也是，关闭同样释放内存）。客户端不发 `session/close` 时，会话留在内存中、文件保持锁定，直到进程退出。`session/fork` 未实现。客户端给的 `mcpServers` 被忽略，MCP 服务器只来自 `config.toml`。
 - 命令：建会话、载入或续接成功后，应答之后以 `available_commands_update` 声明 `/name`。`/name <名称>` 给会话起名，不发给模型：以 `session_info_update` 通知新标题，回合以 `end_turn` 结束。名称只取一行（换行等控制字符换成空格、去掉首尾空白）；没有给名称时以 JSON-RPC 错误（`-32602`）应答，回合进行中也以错误应答。`/named` 等其他文本仍是普通提问。
-- 回合：`session/prompt` 的回答结束时应答 `stopReason`：完成为 `end_turn`，截断或 token 预算用尽为 `max_tokens`，请求次数上限为 `max_turn_requests`，取消为 `cancelled`；出错或超时以 JSON-RPC 错误应答。`session/cancel` 取消当前回合。
+- 回合：`session/prompt` 的回答结束时应答 `stopReason`：完成为 `end_turn`，截断或 token 预算用尽为 `max_tokens`，请求次数上限为 `max_turn_requests`，取消为 `cancelled`；出错或超时以 JSON-RPC 错误应答。`session/cancel` 取消当前回合，紧跟在 `session/prompt` 之后发出的也生效。
 - 更新：回答与推理流式发送，工具调用发 `tool_call` 及其状态，`write_file` 与 `edit_file` 附 diff。审批经 `session/request_permission`（允许一次、本会话允许相同调用、拒绝），等待时间同 chat。
+- 退出：客户端关闭 stdin 时退出；收到 SIGINT 或 SIGTERM 时先取消进行中的回合，等它们结束（被中止的回答记入会话）再退出，这时回合的应答不保证送达客户端。两种情况退出码都是 0。
 - 只用手写的 JSON-RPC 客户端与 SDK 的示例客户端验证过，没有在 Zed 或 Wisp 上验证。
 
 ### 配置与 agent
@@ -139,8 +140,10 @@ echo "exit code: $?"
 export SLACK_APP_TOKEN=xapp-...   # app-level token，用于 Socket Mode
 export SLACK_BOT_TOKEN=xoxb-...   # bot token，用于发消息
 # 使用 ⚑ D:5/CHINA FLAG: 飞书时改为 FEISHU_APP_ID 与 FEISHU_APP_SECRET（企业自建应用的凭据）
-zx-agent im --config im.toml --model <model>
+zx-agent im --config im.toml --model <model> --max-model-requests 100 --timeout-secs 3600
 ```
+
+内置的 assistant 不限模型请求数与时间，所以示例在命令行给每次运行加了上限：不加时，一次不收敛的运行会一直占着运行名额（`maxRunning`）。等待审批的时间也算在时间上限里。
 
 `im.toml`（未知的键视为错误）：
 
@@ -174,14 +177,14 @@ allowed = "已批准"
 
 | 项 | 说明 |
 |---|---|
-| Slack 应用 | 打开 Socket Mode 与 Interactivity；订阅 bot 事件 `app_mention` 与 `message.im`。bot token 需要读取 @ 消息的权限（`app_mentions:read`，以应用设置页显示的为准）、`im:history` 与 `chat:write`；app-level token 带 `connections:write`。可选：订阅 `message.channels`、`message.groups`（权限 `channels:history`、`groups:history`）后线程里不 @ 的回复也会送来，机器人也能读取它第一次被 @ 的线程；`users:read` 让模型看到发言人的名字；`reactions:write` 让插话得到 👀 回执。Marketplace 之外商业分发的应用读取线程受 Slack 的限频（每分钟 1 次、每次 15 条），自建的内部应用不受影响 |
+| Slack 应用 | 打开 Socket Mode 与 Interactivity；订阅 bot 事件 `app_mention` 与 `message.im`。bot token 需要读取 @ 消息的权限（`app_mentions:read`，以应用设置页显示的为准）、`im:history` 与 `chat:write`；app-level token 带 `connections:write`。可选：订阅 `message.channels`、`message.groups`（权限 `channels:history`、`groups:history`）后线程里不 @ 的回复也会送来，机器人也能读取它第一次被 @ 的线程（Slack 从最早的消息起分页返回，所以逐页读到末尾再取最近的：每页 200 条、至多 5 页；线程更长或后面的页读不到时，取已读到的部分里最近的，并记一条 `failed` 日志）；`users:read` 让模型看到发言人的名字；`reactions:write` 让插话得到 👀 回执。Marketplace 之外商业分发的应用读取线程受 Slack 的限频（每分钟 1 次、每次 15 条），自建的内部应用不受影响 |
 | ⚑ D:5/CHINA FLAG: 飞书应用 | 企业自建应用；事件与回调都选长连接；订阅事件 `im.message.receive_v1` 与回调 `card.action.trigger`；开通发送消息与读取 @ 机器人消息（`im:message.group_at_msg:readonly`）的权限。可选：开通“获取群组中所有消息”（`im:message.group_msg`）后，话题里不 @ 的回复也会送来。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：读取群内全部消息] Subject to Legal/Export Compliance approval。读话题历史、名字与回执未实现（模型看到的是 open_id） |
-| 会话 | 私聊直接发送，`/new` 开新会话。频道（⚑ D:5/CHINA FLAG: 飞书为群）里 @ 机器人，回答在这条消息的线程里；刚被回答的人接着说不必再 @；别人在线程里的话只记进会话，被 @ 时一并参考。在别人发起的线程里第一次被 @ 时，先读入线程已有的消息（至多 50 条）。群聊中交给模型的每条消息前加发言人的名字；机器人回答的消息，其发送者在平台上的用户 ID 作为这条输入的 actor 记入会话，并交给策略与钩子（排队等待运行期间收到的几条合成一条输入，取最后一条的发送者）。没 @ 机器人的频道消息、机器人没参与过的线程一概不理会；会话释放（`idleSecs`）或重启之后，接话要再 @ 一次 |
-| 运行中 | 要回答的消息作为插话进入运行；单独发送 `/cancel` 取消本会话的任务。开始时发“处理中”，结束时替换为回答 |
+| 会话 | 私聊直接发送。单独发送 `/new` 立即开新会话，之前的保留；此后会话被释放或进程重启，接上的也是这个新会话，它不再读入线程里已有的消息。频道（⚑ D:5/CHINA FLAG: 飞书为群）里 @ 机器人，回答在这条消息的线程里；刚被回答的人接着说不必再 @；别人在线程里的话只记进会话，被 @ 时一并参考。在别人发起的线程里第一次被 @ 时，先读入线程已有的消息（最近的至多 50 条）。群聊中交给模型的每条消息前加发言人的名字；机器人回答的消息，其发送者在平台上的用户 ID 作为这条输入的 actor 记入会话，并交给策略与钩子（排队等待运行期间收到的几条合成一条输入，取最后一条的发送者）。没 @ 机器人的频道消息、机器人没参与过的线程一概不理会；会话释放（`idleSecs`）或重启之后，接话要再 @ 一次 |
+| 运行中 | 要回答的消息作为插话进入运行；单独发送 `/cancel` 取消本会话的任务，`/new` 先取消任务再开新会话，取消完成前收到的消息在新会话里回答。开始时发“处理中”，结束时替换为回答 |
 | 数据范围 | 只保存机器人参与过的线程与授权聊天中的消息，其余在入口丢弃。线程中任何人的话都会进入模型的上下文，写操作仍要审批 |
 | 审批 | 使用 assistant agent：自动放行的只读命令直接执行，其余发审批卡片，只有 `approvers` 中的用户点击才生效；超时（`approvalTimeoutSecs`）与取消也显示在卡片上 |
 | 凭据 | 两个平台的 token 与 secret 只从环境变量读取；命令的环境中删除这些变量，输出中出现其值时脱敏 |
-| 会话文件 | 每个对话（私聊，或群里的一个线程）的会话在头部带三个标签：`im.platform`、`im.conversation` 与 `im.thread`（私聊为空）。续接时取带这组标签、最近活动的会话，`/new` 用同样的标签再建一个，之前的保留 |
+| 会话文件 | 每个对话（私聊，或群里的一个线程）的会话在头部带三个标签：`im.platform`、`im.conversation` 与 `im.thread`（私聊为空）。续接时取带这组标签、最近活动的会话，`/new` 用同样的标签立即再建一个，之前的保留 |
 | 日志 | stdout 每行一个 JSON：`approval`（聊天、线程、工具调用、审批人、结果、时间）、`released`、`failed`。对话内容在会话文件中 |
 | 退出 | SIGINT 或 SIGTERM 时取消进行中的任务，状态改为 `stopped` 的文案；未处理的消息不再处理，所在线程收到提示。退出码：正常为 0，配置错误与被拒的凭据为 2，平台连接意外结束为 1 |
 | 崩溃之后 | 未处理的消息丢失且没有提示。下次启动时，上个进程遗留的“处理中”改为 `interrupted` 的文案 |
@@ -239,7 +242,7 @@ apiKeyEnv = "DEEPSEEK_API_KEY"
 |---|---|---|
 | `--model` | `ZX_MODEL`，再取 `config.toml` 的 `model` | 模型 ID；都没有时以退出码 2 结束 |
 | `--tools` | agent：`run` 为 `bash,read_file`，`chat` 为 `bash,read_file,edit_file,write_file,grep,find,ls,read_output`；有 skill 目录时加入 `read_skill` | 替换工具集合 |
-| `--cwd` | 当前目录 | 新会话的工作目录，也是 `sessions` 与 `--resume` 列出会话时所看的目录。续接的会话在它开始时的目录工作：续接时显式给出另一个目录，或原目录已不存在，都以退出码 2 结束 |
+| `--cwd` | 当前目录 | 新会话的工作目录，也是 `sessions` 与 `--resume` 列出会话时所看的目录。续接的会话在它开始时的目录工作：续接时显式给出另一个目录，或原目录已不存在，都以退出码 2 结束。`acp` 中会话的目录由客户端给出，`--cwd` 只是 `session/list` 没有带 `cwd` 时所列的目录 |
 | `--max-model-requests` | agent：`run` 为 30，`chat` 不限 | 模型请求次数上限，失败的尝试也计入 |
 | `--timeout-secs` | agent：`run` 为 900，`chat` 为 0 | 时间上限，0 不限 |
 | `--token-budget` | 不设 | 输入加输出 token 上限，`run` 用完时以 7 结束 |

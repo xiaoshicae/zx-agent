@@ -17,7 +17,7 @@ use zx_agent::prompt;
 use zx_agent::tools::Tool;
 use zx_agent::transcript::SessionHeader;
 use zx_cli::config::skills::TOOL_NAME;
-use zx_cli::config::{AgentDefinition, ContainerSettings, Execution};
+use zx_cli::config::{ContainerSettings, Execution, ProjectContext};
 
 use super::execution::{check_session_outside, executor};
 use super::push_built_in;
@@ -26,9 +26,11 @@ use crate::session_files::SessionPlace;
 /// What each session of a mode gets for itself, made when the session is created or opened
 /// and kept until it is closed: a container, when commands run in one, is the session's.
 pub(super) struct PerSession {
-    /// The agent, for what depends on a session's working directory: the built-in tools it
-    /// enables, and the project instructions it reads.
-    pub(super) agent: AgentDefinition,
+    /// The tools the agent enables, by name: those of the executor are made for each
+    /// session's working directory.
+    pub(super) tools: Vec<String>,
+    /// Which project instructions the agent reads from a session's working directory.
+    pub(super) context: ProjectContext,
     /// read_skill and the catalog of its skills for the prompt, when the agent enables it.
     /// The sessions share the tool; it is listed with each session's own, which keeps its
     /// place among them.
@@ -63,7 +65,7 @@ impl SessionSetup for PerSession {
             "the session's working directory no longer exists: {}; a session goes on in the directory it started in",
             cwd.display()
         );
-        let context = self.agent.context_section(cwd).context(
+        let context = self.context.section(cwd).context(
             "cannot load project instructions; an agent with discover = false under [context] skips AGENTS.md discovery",
         )?;
         let mut hooks = HookChain::new();
@@ -73,7 +75,7 @@ impl SessionSetup for PerSession {
             host.push(tool.clone());
             catalog = skills;
         }
-        if self.agent.tools.iter().any(|name| name == output_store::TOOL_NAME) {
+        if self.tools.iter().any(|name| name == output_store::TOOL_NAME) {
             let store = OutputStore::new(cwd, self.tool_output.clone())?;
             // The reading tool and the writer hook each get a copy of the store. The tools that
             // page their own output are exempt: a page of theirs is not stored again.
@@ -93,13 +95,7 @@ impl SessionSetup for PerSession {
             self.hidden_env.clone(),
         )
         .await?;
-        let built_in: Vec<String> = self
-            .agent
-            .tools
-            .iter()
-            .filter(|name| !host_tool(name))
-            .cloned()
-            .collect();
+        let built_in: Vec<String> = self.tools.iter().filter(|name| !host_tool(name)).cloned().collect();
         let mut tools = tools::builtin_tools(&built_in, self.tool_timeout, &executor)?;
         tools.extend(host);
         Ok(SessionParts {
