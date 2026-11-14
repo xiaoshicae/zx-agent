@@ -22,6 +22,11 @@ pub(crate) const EVENT_BUFFER: usize = 64;
 /// it cancels the run and releases the session at once; a host that wants the run to go on
 /// after its caller has left moves it into a task of its own.
 ///
+/// A run that is dropped while it records an entry leaves the session closed, because
+/// whether the storage got that entry is unknown: [`Session`](super::Session) says how it is
+/// opened again. A host that cancels with [`Session::cancel`](super::Session::cancel) and
+/// reads the run to its end never meets this.
+///
 /// ```no_run
 /// use zx_core::session::{Session, SessionError};
 ///

@@ -97,7 +97,7 @@ async fn branching_to_an_earlier_answer_continues_there_and_keeps_the_branch_lef
 }
 
 #[tokio::test]
-async fn a_prompt_after_an_answer_with_unanswered_calls_records_them_as_not_executed() {
+async fn a_prompt_after_going_back_to_an_answer_tells_the_model_that_its_calls_started() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("session.jsonl");
     let echo = Arc::new(EchoTool::new("echo"));
@@ -121,8 +121,9 @@ async fn a_prompt_after_an_answer_with_unanswered_calls_records_them_as_not_exec
     assert_eq!(echo.calls.load(Ordering::SeqCst), 1, "the call is not run again");
     let context = summarize(&provider.requests()[2].messages);
     assert_eq!(&context[..2], ["user:first", "assistant:calls[c1]"]);
+    // The call ran on the branch that was left: going back did not undo it.
     assert!(
-        context[2].starts_with("tool:c1=Not executed:") && context[2].ends_with('!'),
+        context[2].starts_with("tool:c1=Result unknown: this call started") && context[2].ends_with('!'),
         "{}",
         context[2]
     );

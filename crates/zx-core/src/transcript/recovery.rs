@@ -37,9 +37,10 @@ pub enum StartRecord {
     NeverRun,
 }
 
-/// A tool call at the end of the current branch that has no recorded result: the run that
-/// issued it stopped, through a crash, an exit or a dropped run future, before recording one,
-/// or the answer that issued it failed or was cancelled, so it never ran.
+/// A tool call at the end of the current branch that has no recorded result there: the run
+/// that issued it stopped, through a crash, an exit or a dropped run future, before recording
+/// one; the answer that issued it failed or was cancelled, so it never ran; or the
+/// conversation went back to that answer, which leaves the call's records on another branch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InterruptedToolCall {
     pub tool_call_id: String,
@@ -68,7 +69,9 @@ impl Transcript {
     /// messages, and is still in the model projection. The calls of a message that ended
     /// with `Error` or `Aborted` are all [`StartRecord::NeverRun`]: the loop never runs
     /// tools from such a response, and the model must not take them for calls that ran. A
-    /// result that a `context_edit` hides from the model still counts as recorded.
+    /// result that a `context_edit` hides from the model still counts as recorded. A call
+    /// that started on a branch the conversation left since is [`StartRecord::Present`]:
+    /// going back does not undo what it did.
     pub fn interrupted_tool_calls(&self) -> Vec<InterruptedToolCall> {
         let path = self.branch_path();
         // The last message that is not a tool result. A custom message is a message to the
@@ -111,7 +114,7 @@ impl Transcript {
             .map(|call| {
                 let start = if never_ran {
                     StartRecord::NeverRun
-                } else if started.contains(call.id.as_str()) {
+                } else if started.contains(call.id.as_str()) || self.started_off_branch(&issuer.id, &call.id) {
                     StartRecord::Present
                 } else {
                     StartRecord::Absent
@@ -123,6 +126,21 @@ impl Transcript {
                 }
             })
             .collect()
+    }
+
+    /// Whether a start of the call `call_id` of the answer `issuer` is recorded anywhere in
+    /// the session, also on a branch the conversation left. A call ID that a later answer
+    /// used again belongs to that answer, as it does for a start record.
+    fn started_off_branch(&self, issuer: &str, call_id: &str) -> bool {
+        self.entries.iter().any(|entry| match entry {
+            Entry::ToolCallStarted(start) if start.tool_call_id == call_id => self
+                .branch_path_from(start.parent_id.as_deref())
+                .into_iter()
+                .rev()
+                .find(|entry| issued_call(entry, call_id).is_some())
+                .is_some_and(|entry| entry.id() == issuer),
+            _ => false,
+        })
     }
 
     /// The call must have been issued on this branch and have neither a result nor an
@@ -304,6 +322,47 @@ mod tests {
         assert!(store.interrupted_tool_calls().is_empty());
         store.branch(&question).unwrap();
         assert!(store.interrupted_tool_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_call_that_started_on_a_branch_left_behind_still_counts_as_started() {
+        let mut store = store();
+        store.append_message(Message::user("go")).await.unwrap();
+        let issuer = store
+            .append_message(answer(StopReason::ToolUse, &[("c1", "bash"), ("c2", "read_file")]))
+            .await
+            .unwrap();
+        store.append_tool_call_started("c1", "bash").await.unwrap();
+        store.append_message(result("c1", "bash")).await.unwrap();
+        store.append_message(result("c2", "read_file")).await.unwrap();
+
+        // Back to the answer: its calls have no results on the branch that starts here.
+        store.branch(&issuer).unwrap();
+
+        assert_eq!(
+            starts(&store),
+            [("c1".into(), StartRecord::Present), ("c2".into(), StartRecord::Absent)]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_start_of_a_reused_call_id_belongs_to_the_answer_that_issued_it_last() {
+        let mut store = store();
+        let first = store
+            .append_message(answer(StopReason::ToolUse, &[("call_0", "bash")]))
+            .await
+            .unwrap();
+        store.append_message(result("call_0", "bash")).await.unwrap();
+        store
+            .append_message(answer(StopReason::ToolUse, &[("call_0", "bash")]))
+            .await
+            .unwrap();
+        store.append_tool_call_started("call_0", "bash").await.unwrap();
+
+        // The start is the later answer's: the first answer's call has none.
+        store.branch(&first).unwrap();
+
+        assert_eq!(starts(&store), [("call_0".into(), StartRecord::Absent)]);
     }
 
     #[tokio::test]

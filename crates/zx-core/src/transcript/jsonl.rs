@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::fs::DirEntry;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use async_trait::async_trait;
@@ -54,6 +55,28 @@ struct Files {
     /// The headers read so far, by file. A header never changes once it is written, so a
     /// file is read for it once; which files exist is asked of the directory every time.
     headers: Mutex<HashMap<PathBuf, SessionHeader>>,
+    /// What a listing shows of each session read so far, by file, with what the file looked
+    /// like then. A session file only grows, so one that looks the same is not read again.
+    listed: Mutex<HashMap<PathBuf, (Stamp, SessionInfo)>>,
+}
+
+/// What tells whether a session file changed since it was read: its length, which every
+/// record adds to, and when it was last written.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    bytes: u64,
+    modified: Option<SystemTime>,
+}
+
+impl Stamp {
+    fn of(path: &Path) -> Result<Self> {
+        let metadata = std::fs::metadata(path).with_context(|| format!("cannot inspect {}", path.display()))?;
+        Ok(Self {
+            bytes: metadata.len(),
+            // Not every platform tells; the length alone still shows every append.
+            modified: metadata.modified().ok(),
+        })
+    }
 }
 
 impl JsonlStorage {
@@ -79,6 +102,7 @@ impl JsonlStorage {
             files: Arc::new(Files {
                 layout,
                 headers: Mutex::default(),
+                listed: Mutex::default(),
             }),
         }
     }
@@ -207,14 +231,25 @@ impl Files {
     }
 
     /// What a listing shows of the session in `path`, if `query` asks for it. Only a
-    /// session it asks for is read whole.
+    /// session it asks for is read whole, and only when its file changed since it was last
+    /// read for a listing.
     fn listed(&self, path: &Path, query: &SessionQuery) -> Result<Option<SessionInfo>> {
         if !query.matches(&self.header_of(path)?) {
             return Ok(None);
         }
+        // Looked at before the file is read: a record written meanwhile changes how the
+        // file looks next time, and it is read again then.
+        let stamp = Stamp::of(path)?;
+        if let Some((seen, info)) = lock(&self.listed).get(path)
+            && *seen == stamp
+        {
+            return Ok(Some(info.clone()));
+        }
         let transcript =
             Transcript::snapshot(file::read(path)?).map_err(|error| anyhow!("{}: {error:#}", path.display()))?;
-        Ok(Some(SessionInfo::of(&transcript)))
+        let info = SessionInfo::of(&transcript);
+        lock(&self.listed).insert(path.to_path_buf(), (stamp, info.clone()));
+        Ok(Some(info))
     }
 
     /// The header of the session file `path`, read once.

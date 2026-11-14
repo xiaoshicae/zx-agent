@@ -14,11 +14,24 @@ use crate::sync::lock;
 
 /// Sessions kept in memory, gone with the storage: what a host uses when it stores nothing,
 /// such as `zx-agent chat --no-session`. Within the process a session can still be listed,
-/// read, and opened again once its writer is dropped.
+/// read, and opened again once its writer is dropped; a storage made with
+/// [`MemoryStorage::forgetting`] drops the session then instead.
 #[derive(Default)]
 pub struct MemoryStorage {
     /// Shared with the logs of the sessions, which outlive any borrow of the storage.
     sessions: Arc<Mutex<HashMap<String, Stored>>>,
+    /// What becomes of a session whose writer lets go.
+    closed: Closed,
+}
+
+/// What a memory storage does with a session once its writer is dropped.
+#[derive(Clone, Copy, Default)]
+enum Closed {
+    /// It stays, to be listed, read and opened again.
+    #[default]
+    Kept,
+    /// It is gone, with its records.
+    Forgotten,
 }
 
 struct Stored {
@@ -39,17 +52,30 @@ impl Stored {
     }
 }
 
-/// The writer of one session; dropping it lets the session be opened again.
+/// The writer of one session; dropping it lets the session be opened again, or forgets it.
 struct MemoryLog {
     sessions: Arc<Mutex<HashMap<String, Stored>>>,
     id: String,
+    closed: Closed,
 }
 
 impl MemoryStorage {
+    /// A storage that keeps a session only while it is open: once its writer lets go, as when
+    /// the agent closes the session, its records are dropped, and it is neither listed nor
+    /// opened again. For a host that never opens a session a second time and runs for long,
+    /// so that it does not keep every conversation it ever had.
+    pub fn forgetting() -> Self {
+        Self {
+            sessions: Arc::default(),
+            closed: Closed::Forgotten,
+        }
+    }
+
     fn log(&self, id: &str) -> Box<dyn SessionLog> {
         Box::new(MemoryLog {
             sessions: Arc::clone(&self.sessions),
             id: id.to_string(),
+            closed: self.closed,
         })
     }
 }
@@ -140,8 +166,16 @@ impl SessionLog for MemoryLog {
 
 impl Drop for MemoryLog {
     fn drop(&mut self) {
-        if let Some(stored) = lock(&self.sessions).get_mut(&self.id) {
-            stored.writing = false;
+        let mut sessions = lock(&self.sessions);
+        match self.closed {
+            Closed::Kept => {
+                if let Some(stored) = sessions.get_mut(&self.id) {
+                    stored.writing = false;
+                }
+            }
+            Closed::Forgotten => {
+                sessions.remove(&self.id);
+            }
         }
     }
 }
@@ -167,6 +201,31 @@ mod tests {
         assert_eq!(texts(&reopened), ["q", "again"]);
         let snapshot = Transcript::snapshot(storage.read(&header.id).await.unwrap()).unwrap();
         assert_eq!(texts(&snapshot), ["q", "again"]);
+    }
+
+    #[tokio::test]
+    async fn a_forgetting_storage_drops_a_session_when_its_writer_lets_go() {
+        let storage = MemoryStorage::forgetting();
+        let header = header();
+        let mut session = Transcript::with_log(header.clone(), storage.create(&header).await.unwrap());
+        session.append_message(Message::user("q")).await.unwrap();
+        let listed = storage.list(&SessionQuery::default()).await.unwrap();
+        assert_eq!(listed.sessions.len(), 1, "an open session is listed");
+
+        drop(session);
+
+        assert!(
+            storage
+                .list(&SessionQuery::default())
+                .await
+                .unwrap()
+                .sessions
+                .is_empty()
+        );
+        let error = storage.open(&header.id).await.err().unwrap().to_string();
+        assert!(error.contains("no session"), "{error}");
+        // Its ID is free again, as that of a session that never was.
+        drop(storage.create(&header).await.unwrap());
     }
 
     #[tokio::test]

@@ -2,13 +2,13 @@
 //! which extensions refuse the agent.
 mod common;
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::json;
 
 use common::{EchoTool, config, refusal, run_prompt, summarize};
-use zx_agent::AgentConfig;
 use zx_agent::ai::ToolCall;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::events::{EventKind, HookPoint};
@@ -16,6 +16,7 @@ use zx_agent::extensions::Extension;
 use zx_agent::hooks::{Hook, HookContext, HookResult, HookStage};
 use zx_agent::prompt::{ENVIRONMENT, build_system_prompt};
 use zx_agent::tools::{Tool, ToolOutput};
+use zx_agent::{Agent, AgentConfig, SessionOptions};
 
 /// Appends a mark to every tool result.
 struct Mark;
@@ -209,6 +210,54 @@ fn extension_names_must_be_given_and_unique() {
     twice.extensions = vec![Arc::new(Bundle::named("notes")), Arc::new(Bundle::named("notes"))];
     let error = refusal(twice);
     assert!(error.contains("more than one extension is named \"notes\""), "{error}");
+}
+
+/// Counts how often it is asked for its hooks, and gives one that remembers the sessions
+/// whose input it saw.
+#[derive(Default)]
+struct Asked {
+    asked: AtomicUsize,
+    seen: Arc<Mutex<Vec<String>>>,
+}
+
+struct Remember(Arc<Mutex<Vec<String>>>);
+
+#[async_trait]
+impl Hook for Remember {
+    async fn on_input(&self, text: String, ctx: &HookContext) -> HookResult<String> {
+        self.0.lock().unwrap().push(ctx.session_id.clone());
+        Ok(text)
+    }
+}
+
+impl Extension for Asked {
+    fn name(&self) -> &str {
+        "asked"
+    }
+
+    fn hooks(&self) -> Vec<Box<dyn Hook>> {
+        self.asked.fetch_add(1, Ordering::SeqCst);
+        vec![Box::new(Remember(self.seen.clone()))]
+    }
+}
+
+#[tokio::test]
+async fn an_extension_is_asked_once_and_its_hooks_serve_every_session() {
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("one"), FauxStep::text("two")]));
+    let extension = Arc::new(Asked::default());
+    let mut config = base(provider);
+    config.extensions = vec![extension.clone()];
+    let agent = Agent::new(config).unwrap();
+
+    let mut sessions = Vec::new();
+    for _ in 0..2 {
+        let session = agent.create_session(SessionOptions::new(".")).await.unwrap();
+        session.send("go").unwrap().wait().await;
+        sessions.push(session.id().to_string());
+    }
+
+    assert_eq!(extension.asked.load(Ordering::SeqCst), 1);
+    assert_eq!(*extension.seen.lock().unwrap(), sessions);
 }
 
 #[tokio::test]

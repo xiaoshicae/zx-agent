@@ -15,7 +15,7 @@ use tokio::sync::OnceCell;
 use crate::ai::retry::RetryPolicy;
 use crate::ai::{ModelMeta, Provider, Reasoning, SystemPrompt};
 use crate::compaction::{self, Summarizer};
-use crate::extensions::{self, Extension};
+use crate::extensions::{Expanded, Extension};
 use crate::hooks::HookChain;
 use crate::policy::{ApprovalMode, PolicyChain};
 use crate::runner::{LoopConfig, RunLimits};
@@ -48,7 +48,8 @@ pub struct AgentConfig {
     pub policies: PolicyChain,
     /// Who answers when a policy asks about a call; nobody by default, which denies it.
     pub approvals: ApprovalMode,
-    /// Registered with every session, after the session's own parts.
+    /// What they add is taken from them once, when the agent is made; every session has
+    /// it, after the session's own parts.
     pub extensions: Vec<Arc<dyn Extension>>,
     /// What is known about models, by ID: the prices give each response a cost, the context
     /// window can set the token trigger of automatic compaction. Empty by default: costs and
@@ -162,6 +163,8 @@ pub struct Agent {
 
 struct Shared {
     config: AgentConfig,
+    /// What the extensions add to every session.
+    extensions: Expanded,
     /// The sessions that are open, by ID. A cell is empty while its session is being opened,
     /// so that calls that open the same session at the same time get the same one.
     sessions: Mutex<HashMap<String, Opening>>,
@@ -169,6 +172,14 @@ struct Shared {
 
 /// The place of a session in the table: empty until the session is open.
 type Opening = Arc<OnceCell<Session>>;
+
+/// Take the place of the session `id` out of the table when that session is closed, as one
+/// is that closed itself because its record could no longer be written. What comes back is
+/// dropped by the caller without the table's lock: it holds host objects.
+fn forget_closed(sessions: &mut HashMap<String, Opening>, id: &str) -> Option<Opening> {
+    let closed = sessions.get(id)?.get().is_some_and(Session::is_closed);
+    if closed { sessions.remove(id) } else { None }
+}
 
 /// Takes a session's place out of the table again when the call that asked for it ends
 /// while the place is empty and no other call waits for it. A call that still waits tries to
@@ -205,9 +216,11 @@ impl Agent {
         if let Some(summarizer) = &config.summarizer {
             anyhow::ensure!(!summarizer.name().trim().is_empty(), "the summarizer has no name");
         }
+        let extensions = Expanded::of(&config.extensions).map_err(anyhow::Error::msg)?;
         let agent = Self {
             shared: Arc::new(Shared {
                 config,
+                extensions,
                 sessions: Mutex::default(),
             }),
         };
@@ -237,10 +250,15 @@ impl Agent {
     }
 
     /// The session `id`: the open one when it is open, else the one in the storage, opened
-    /// and set up again. Fails when the storage has no such session or another writer holds
-    /// it, and when its setup fails.
+    /// and set up again; a session that closed itself counts as not open. Fails when the
+    /// storage has no such session or another writer holds it, and when its setup fails.
     pub async fn open_session(&self, id: &str) -> Result<Session> {
-        let opening = lock(&self.shared.sessions).entry(id.to_string()).or_default().clone();
+        let (opening, closed) = {
+            let mut sessions = lock(&self.shared.sessions);
+            let closed = forget_closed(&mut sessions, id);
+            (sessions.entry(id.to_string()).or_default().clone(), closed)
+        };
+        drop(closed);
         // Whether opening fails or this call is dropped while it waits.
         let _forget = ForgetUnopened {
             sessions: &self.shared.sessions,
@@ -250,11 +268,14 @@ impl Agent {
         opening.get_or_try_init(|| self.open(id)).await.cloned()
     }
 
-    /// A session over `transcript`, which the host made itself, for example in memory with
-    /// the messages a conversation starts from. `parts` are its own; the agent's
-    /// [`SessionSetup`] is not asked, and the agent's storage does not keep the session.
-    /// Fails when a session with the transcript's ID is open or being opened, and for parts
-    /// that the agent's tools or extensions clash with.
+    /// A session over `transcript`, which its caller made itself. `parts` are its own; the
+    /// agent's [`SessionSetup`] is not asked, and the agent's storage does not keep the
+    /// session. Fails when a session with the transcript's ID is open or being opened, and
+    /// for parts that the agent's tools or extensions clash with.
+    ///
+    /// Not part of the API: the workspace's tests enter here with a transcript they made. A
+    /// host puts its sessions into the agent's storage and opens them from there.
+    #[doc(hidden)]
     pub fn adopt_session(&self, transcript: Transcript, parts: SessionParts) -> Result<Session> {
         let assembled = self.assemble(transcript.header(), parts)?;
         self.register(self.start(assembled, transcript)?)
@@ -263,7 +284,9 @@ impl Agent {
     /// The session `id` when it is open. Reads nothing: a session that is only in the
     /// storage is not found.
     pub fn session(&self, id: &str) -> Option<Session> {
-        lock(&self.shared.sessions).get(id)?.get().cloned()
+        let session = lock(&self.shared.sessions).get(id)?.get().cloned()?;
+        // One that closed itself is in the table until it is asked for again.
+        (!session.is_closed()).then_some(session)
     }
 
     /// Close the session `id`: cancel its run, if it has one, and let go of its place in the
@@ -309,33 +332,43 @@ impl Agent {
     /// What the loops of the session with `header` run with, in the directory the header
     /// names: the agent's role, then the session's own `parts`, then the extensions.
     fn assemble(&self, header: &SessionHeader, parts: SessionParts) -> Result<LoopConfig> {
-        let config = &self.shared.config;
-        let mut tools = config.tools.clone();
-        tools.extend(parts.tools);
+        let (config, extensions) = (&self.shared.config, &self.shared.extensions);
+        let tools: Vec<Arc<dyn Tool>> = config
+            .tools
+            .iter()
+            .cloned()
+            .chain(parts.tools)
+            .chain(extensions.tools.iter().cloned())
+            .collect();
         let mut hooks = config.hooks.clone();
         hooks.extend(parts.hooks);
-        let system_prompt = parts
+        hooks.extend(extensions.hooks.clone());
+        let mut policies = config.policies.clone();
+        for (extension, policy) in &extensions.policies {
+            policies.push(extension.clone(), policy.clone());
+        }
+        let own = parts
             .prompt_sections
             .iter()
             .fold(config.system_prompt.clone(), |prompt, (name, content)| {
                 prompt.with_section(name, content)
             });
-        let mut assembled = LoopConfig {
-            system_prompt,
+        Ok(LoopConfig {
+            system_prompt: extensions.sections_after(own).map_err(anyhow::Error::msg)?,
+            // The tool set's own check covers names, declarations and panics.
             tools: Toolbox::new(tools).map_err(anyhow::Error::msg)?,
             cwd: PathBuf::from(&header.cwd),
             max_tokens: config.max_tokens,
             reasoning: config.reasoning,
             hooks,
-            policies: config.policies.clone(),
+            policies,
             approvals: config.approvals,
+            commands: extensions.commands.clone(),
             models: config.models.clone(),
             cache_key: config.session_cache_key.then(|| header.id.clone()),
             summarizer: config.summarizer.clone(),
             ..LoopConfig::new(config.provider.clone(), config.model.clone())
-        };
-        extensions::register(&mut assembled, &config.extensions).map_err(anyhow::Error::msg)?;
-        Ok(assembled)
+        })
     }
 
     /// The session that records in `transcript` and runs with `assembled`.
@@ -353,14 +386,19 @@ impl Agent {
     /// Put `session`, which this call made, into the table of open sessions. Fails when the
     /// table has a session with its ID, open or being opened; `session` is then dropped.
     fn register(&self, session: Session) -> Result<Session> {
-        let mut sessions = lock(&self.shared.sessions);
-        anyhow::ensure!(
-            !sessions.contains_key(session.id()),
-            "session {} is already open",
-            session.id()
-        );
-        let opening = Arc::new(OnceCell::new_with(Some(session.clone())));
-        sessions.insert(session.id().to_string(), opening);
+        let closed;
+        {
+            let mut sessions = lock(&self.shared.sessions);
+            closed = forget_closed(&mut sessions, session.id());
+            anyhow::ensure!(
+                !sessions.contains_key(session.id()),
+                "session {} is already open",
+                session.id()
+            );
+            let opening = Arc::new(OnceCell::new_with(Some(session.clone())));
+            sessions.insert(session.id().to_string(), opening);
+        }
+        drop(closed);
         Ok(session)
     }
 }

@@ -7,13 +7,21 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+default = ["json-schema"]
+# Check the arguments of every tool call against the JSON Schema the tool declares, and the
+# declaration itself when a session is made. Without it the kernel only checks that the
+# arguments are a JSON object, and each tool checks its own; the validator is most of what
+# the kernel would otherwise depend on.
+json-schema = ["dep:jsonschema"]
+
 [dependencies]
 zx-ai.workspace = true
 
 anyhow.workspace = true
 async-trait.workspace = true
 futures.workspace = true
-jsonschema.workspace = true
+jsonschema = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

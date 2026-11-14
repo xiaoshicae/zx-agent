@@ -61,6 +61,36 @@ fn fed(provider: Arc<FauxProvider>, max_model_requests: u32) -> (Runner, Arc<Col
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+async fn a_call_that_repeats_the_id_of_an_earlier_call_of_the_answer_is_answered_with_an_error() {
+    let provider = provider([
+        FauxStep::tool_calls(vec![
+            ("c1", "echo", json!({"text": "first"})),
+            ("c1", "echo", json!({"text": "second"})),
+        ]),
+        FauxStep::text("done"),
+    ]);
+    let tool = echo();
+    let config = config(provider.clone(), vec![tool.clone()]);
+    let mut context = Vec::new();
+
+    let (result, _) = run_prompt(config, &mut context, "go").await;
+
+    // The model decides what to do about it: the run goes on.
+    assert_eq!(result.outcome, RunOutcome::Completed, "{result:?}");
+    assert_eq!(tool.calls.load(Ordering::SeqCst), 1, "only the first call runs");
+    let results: Vec<&Message> = context
+        .iter()
+        .filter(|message| matches!(message, Message::ToolResult(_)))
+        .collect();
+    let [Message::ToolResult(first), Message::ToolResult(second)] = results[..] else {
+        panic!("each call gets a result: {:?}", summarize(&context));
+    };
+    assert_eq!((first.content.as_str(), first.is_error), ("first", false));
+    assert!(second.is_error, "{second:?}");
+    assert!(second.content.contains("same ID"), "{}", second.content);
+}
+
+#[tokio::test]
 async fn runs_tools_until_the_model_answers() {
     let provider = provider([
         FauxStep::tool_call("c1", "echo", json!({"text": "hi"})),
@@ -127,31 +157,65 @@ async fn appends_to_the_existing_context_without_changing_it() {
     );
 }
 
+/// A tool whose call "waits" does not return before its call "arrives" has run: both
+/// return only when they run at the same time.
+#[derive(Default)]
+struct Rendezvous {
+    arrived: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl Tool for Rendezvous {
+    fn name(&self) -> &str {
+        "meet"
+    }
+
+    fn definition(&self) -> ToolDef {
+        ToolDef {
+            name: "meet".into(),
+            description: "Waits for its other call".into(),
+            parameters: json!({"type": "object"}),
+        }
+    }
+
+    async fn execute(&self, args: Value, _ctx: &ToolContext) -> Result<ToolOutput, String> {
+        let role = args.get("role").and_then(Value::as_str).unwrap_or_default();
+        if role == "waits" {
+            self.arrived.notified().await;
+        } else {
+            self.arrived.notify_one();
+        }
+        Ok(ToolOutput::ok(role))
+    }
+}
+
 #[tokio::test]
-async fn parallel_calls_finish_in_any_order_but_results_keep_call_order() {
+async fn parallel_calls_run_at_the_same_time_and_their_results_keep_call_order() {
     let provider = provider([
         FauxStep::tool_calls(vec![
-            ("slow", "echo", json!({"text": "slow", "ms": 300})),
-            ("fast", "echo", json!({"text": "fast", "ms": 10})),
+            ("c1", "meet", json!({"role": "waits"})),
+            ("c2", "meet", json!({"role": "arrives"})),
         ]),
         FauxStep::text("done"),
     ]);
-    let config = config(provider, vec![echo()]);
+    let config = config(provider, vec![Arc::new(Rendezvous::default())]);
     let mut context = Vec::new();
 
-    let (_, sink) = run_prompt(config, &mut context, "go").await;
+    // Run one after the other, the first call would wait for the second forever.
+    let (result, _) = tokio::time::timeout(Duration::from_secs(10), run_prompt(config, &mut context, "go"))
+        .await
+        .expect("the calls run at the same time");
 
-    // "fast" ends first although "slow" started first, so they ran concurrently.
-    assert_eq!(sink.tool_end_order(), ["fast", "slow"]);
-    assert_eq!(summarize(&context)[2..4], ["tool:slow=slow", "tool:fast=fast"]);
+    assert_eq!(result.outcome, RunOutcome::Completed, "{result:?}");
+    assert_eq!(summarize(&context)[2..4], ["tool:c1=waits", "tool:c2=arrives"]);
 }
 
 #[tokio::test]
 async fn one_sequential_tool_makes_the_batch_sequential() {
     let provider = provider([
         FauxStep::tool_calls(vec![
-            ("slow", "echo", json!({"text": "slow", "ms": 200})),
-            ("fast", "seq", json!({"text": "fast", "ms": 10})),
+            ("first", "echo", json!({"text": "first"})),
+            ("second", "seq", json!({"text": "second"})),
         ]),
         FauxStep::text("done"),
     ]);
@@ -161,7 +225,21 @@ async fn one_sequential_tool_makes_the_batch_sequential() {
 
     let (_, sink) = run_prompt(config, &mut Vec::new(), "go").await;
 
-    assert_eq!(sink.tool_end_order(), ["slow", "fast"]);
+    // Each call ends before the next one starts.
+    let order: Vec<&str> = sink
+        .kinds()
+        .into_iter()
+        .filter(|kind| kind.starts_with("tool_execution_"))
+        .collect();
+    assert_eq!(
+        order,
+        [
+            "tool_execution_start",
+            "tool_execution_end",
+            "tool_execution_start",
+            "tool_execution_end"
+        ]
+    );
 }
 
 struct DenyEcho;

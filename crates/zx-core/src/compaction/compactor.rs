@@ -52,34 +52,35 @@ pub(crate) struct Compactor<'a> {
     pub(crate) attempt: u32,
 }
 
-/// The context after a summary, except the summary itself: the system messages before the
-/// boundary, then the messages the summary keeps.
+/// The context after a summary, except the summary itself: what stays of the records before
+/// the boundary, then the messages the summary keeps.
 struct Retained {
     messages: Vec<Message>,
-    /// How many of `messages` are the system messages before the boundary.
-    system_prefix: usize,
+    /// How many of `messages` are from before the boundary: the system messages there, and
+    /// the input the compaction keeps when its boundary is inside the latest turn.
+    before_boundary: usize,
 }
 
 impl Retained {
-    /// What a summary that keeps `raw[cut..]` leaves in the context.
-    fn of(raw: &[ProjectedMessage], cut: usize) -> Self {
-        let system_before = raw[..cut]
+    /// What a summary that keeps `raw[cut..]`, and the input `raw[kept_input]` before it,
+    /// leaves in the context.
+    fn of(raw: &[ProjectedMessage], cut: usize, kept_input: Option<usize>) -> Self {
+        let before = raw[..cut]
             .iter()
-            .filter(|item| matches!(item.message, Message::System(_)));
+            .enumerate()
+            .filter(|(index, item)| matches!(item.message, Message::System(_)) || Some(*index) == kept_input)
+            .map(|(_, item)| item);
         Self {
-            system_prefix: system_before.clone().count(),
-            messages: system_before
-                .chain(&raw[cut..])
-                .map(|item| item.message.clone())
-                .collect(),
+            before_boundary: before.clone().count(),
+            messages: before.chain(&raw[cut..]).map(|item| item.message.clone()).collect(),
         }
     }
 
-    /// The context with `summary` in its place: after the system messages that precede the
+    /// The context with `summary` in its place: after what stays of the records before the
     /// boundary, before the kept messages. The session's projection orders them the same way.
     fn with_summary(&self, summary: Message) -> Vec<Message> {
-        let (system, kept) = self.messages.split_at(self.system_prefix);
-        system
+        let (before, kept) = self.messages.split_at(self.before_boundary);
+        before
             .iter()
             .cloned()
             .chain([summary])
@@ -91,6 +92,8 @@ impl Retained {
 /// What a summary would read and keep, chosen from the current projection.
 struct Candidate {
     first_kept: String,
+    /// The latest input, when the boundary is after it: it stays in the context as it is.
+    kept_input: Option<String>,
     /// The records the summary reads, which its facts may cite.
     source_ids: Vec<String>,
     source: Source,
@@ -179,8 +182,9 @@ impl Compactor<'_> {
     }
 
     /// Where the retained tail starts: the most recent messages within the recent-bytes
-    /// budget, never after the last input, and never between a call and its result.
-    fn cut(&self, raw: &[ProjectedMessage], last_user: usize) -> Result<usize> {
+    /// budget, and never between a call and its result. It may be after the latest input:
+    /// a turn of many tool calls is summarized up to its recent ones.
+    fn cut(&self, raw: &[ProjectedMessage]) -> Result<usize> {
         let mut bytes = 0usize;
         let mut cut = raw.len();
         for (index, item) in raw.iter().enumerate().rev() {
@@ -199,7 +203,6 @@ impl Compactor<'_> {
                 break;
             }
         }
-        cut = cut.min(last_user);
         while cut > 0 && matches!(raw[cut].message, Message::ToolResult(_) | Message::System(_)) {
             cut -= 1;
         }
@@ -218,10 +221,16 @@ impl Compactor<'_> {
         else {
             return Ok(None);
         };
-        // The cut is at or before the last input, so `raw[cut]` exists.
-        let cut = self.cut(&raw, last_user)?;
+        // There is an input, so the tail keeps at least one message and `raw[cut]` exists.
+        let cut = self.cut(&raw)?;
+        // The input of a turn that is summarized in its middle stays as it was sent.
+        let kept_input = (cut > last_user).then_some(last_user);
         let source = &raw[..cut];
-        if !source.iter().any(|item| !matches!(item.message, Message::System(_))) {
+        // Nothing to summarize when all that is before the boundary stays in the context.
+        let summarized = |(index, item): (usize, &ProjectedMessage)| {
+            !matches!(item.message, Message::System(_)) && Some(index) != kept_input
+        };
+        if !source.iter().enumerate().any(summarized) {
             return Ok(None);
         }
         if let Some(previous) = store.latest_compaction()
@@ -240,12 +249,13 @@ impl Compactor<'_> {
         );
         let candidate = Candidate {
             first_kept: raw[cut].entry_id.clone(),
+            kept_input: kept_input.map(|index| raw[index].entry_id.clone()),
             source_ids: source.iter().map(|item| item.entry_id.clone()).collect(),
             source: match self.summarizer {
                 Some(_) => Source::Records(without_details(source).into_owned()),
                 None => Source::Text(input),
             },
-            retained: Retained::of(&raw, cut),
+            retained: Retained::of(&raw, cut, kept_input),
         };
         if self.automatic()
             && let Some(limit) = self.compaction.trigger_bytes
@@ -277,6 +287,7 @@ impl Compactor<'_> {
     async fn begin(&mut self, candidate: Candidate, input_bytes: usize) -> Result<(OpenCompaction, Result<Made>)> {
         let plan = CompactionPlan {
             first_kept_entry_id: candidate.first_kept,
+            kept_input_entry_id: candidate.kept_input,
             // A copy: the start records the sources, and the summary is checked against them.
             source_entry_ids: candidate.source_ids.clone(),
             by: self.summarized_by(),

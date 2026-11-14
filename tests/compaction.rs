@@ -20,7 +20,9 @@ use zx_agent::session::{ModelRef, SessionError};
 use zx_agent::transcript::{Entry, Transcript};
 
 use common::summary_eval::{PLANTED, Planted, ROUNDS, evaluate, round, text_of};
-use common::{RunnerSetup, config, fast_retry, header, seeded_session, summary_json};
+use common::{
+    EchoTool, RunnerSetup, config, fast_retry, header, replayed_requests, seeded_session, summarize, summary_json,
+};
 
 fn budget() -> Config {
     Config {
@@ -927,6 +929,52 @@ async fn the_run_timeout_also_bounds_automatic_compaction() {
         runner.session().entries().last(),
         Some(Entry::CompactionFailed(_))
     ));
+}
+
+/// A summary of what a summary request read, citing the first record it read.
+fn summary_of_the_source(request: &Request) -> FauxStep {
+    let Some(Message::User { content, .. }) = request.messages.last() else {
+        panic!("a summary request ends with its input");
+    };
+    let records: Vec<Value> = serde_json::from_str(content).unwrap();
+    FauxStep::text(summary_json(records[0]["entryId"].as_str().unwrap()))
+}
+
+#[tokio::test]
+async fn one_prompt_whose_tool_calls_pass_the_trigger_is_compacted_within_its_turn_and_goes_on() {
+    let text = "x".repeat(300);
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::tool_call("c1", "echo", json!({"text": text})),
+        FauxStep::tool_call("c2", "echo", json!({"text": text})),
+        // The second result takes the context over the trigger: the summary comes first.
+        FauxStep::compute(summary_of_the_source),
+        FauxStep::text("done"),
+    ]));
+    let (runner, events) = RunnerSetup::new(config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))])).build();
+    let mut runner = runner
+        .with_compaction(Config {
+            trigger_bytes: Some(1800),
+            ..budget()
+        })
+        .unwrap();
+
+    let report = runner.run("go", &CancellationToken::new()).await;
+
+    assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
+    assert_eq!(report.final_text, "done");
+    assert!(events.kinds().contains(&"compaction_end"), "{:?}", events.kinds());
+    let requests = provider.requests();
+    assert!(requests[2].tools.is_empty(), "the third request is the summary's");
+    // What the model is asked after it: the prompt as it was sent, the summary of what the
+    // turn did before, and the latest exchange.
+    let context = summarize(&requests[3].messages);
+    assert_eq!(context.len(), 4, "{context:?}");
+    assert_eq!(context[0], "user:go");
+    assert!(context[1].starts_with("user:<context_summary>"), "{}", context[1]);
+    assert_eq!(context[2], "assistant:calls[c2]");
+    assert!(context[3].starts_with("tool:c2=xxx"), "{}", context[3]);
+    // The session alone rebuilds every request, the summary's and the one after it included.
+    assert_eq!(replayed_requests(&runner.session()), requests);
 }
 
 #[tokio::test]

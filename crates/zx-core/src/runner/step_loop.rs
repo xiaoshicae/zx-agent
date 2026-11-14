@@ -3,12 +3,11 @@
 //! for each retry or recovery from a context overflow. Extension behavior is supplied through
 //! bounded, ordered hooks.
 //!
-//! The loop keeps no copy of the conversation. It records every step through its session
-//! host before acting on it and reads the session's projection whenever it needs the context,
-//! so what the model sees is always what the session holds.
+//! The loop keeps no copy of the conversation. It records every step in the session its
+//! run lends it before acting on it, and reads the session's projection whenever it needs
+//! the context, so what the model sees is always what the session holds.
 //!
 //! - `config`: what a loop runs with: [`LoopConfig`]
-//! - `session_host`: what a loop needs from the session it runs in, which the run provides
 //! - `context`: input, queued messages and context edits, recorded before the loop uses them
 //! - `model`: recording a task request and streaming its response
 //! - `tools`: checking, approving, running and recording the calls of a response
@@ -17,7 +16,6 @@
 mod config;
 mod context;
 mod model;
-mod session_host;
 mod step;
 mod tools;
 
@@ -29,20 +27,20 @@ use crate::events::{Event, EventKind};
 use crate::hooks::HookError;
 use crate::input::{Input, Queue};
 use crate::policy::ApprovalGate;
-use crate::runner::{EventTarget, RunAccounting, RunOutcome, RunTrace};
+use crate::runner::run_host::RunHost;
+use crate::runner::{Ending, EventTarget, RunAccounting, RunOutcome, RunTrace};
 
 pub(crate) use config::LoopConfig;
-pub(crate) use session_host::{PERSIST_FAILED, SessionHost, record_pending_entries};
+pub(crate) use context::{PERSIST_FAILED, record_pending_entries};
 use step::{AfterTools, PendingInput, StepResponse};
 
-/// Why the loop stops. Every step of a step returns it as its error, so `?` ends the attempt
+/// Why the loop stops. Every part of a step returns it as its error, so `?` ends the attempt
 /// wherever a step stops it, and [`StepLoop::run`] returns the one that did. What the
 /// attempt spent is in the run's accounting.
 pub(crate) enum Halt {
-    /// The attempt ends with this outcome: the model finished, a budget ran out, or the run
-    /// was cancelled. Never [`RunOutcome::Failed`]: a failure is one of the other variants,
-    /// which say why.
-    Ended(RunOutcome),
+    /// The attempt ends without a failure: the model finished, a budget ran out, or the run
+    /// was cancelled.
+    Ended(Ending),
     /// The provider's response failed. Only this failure qualifies for a retry. The response
     /// is carried as it arrived: accounting follows actual responses, so context edits
     /// cannot change usage or retries. Boxed so that the other variants do not reserve space
@@ -64,7 +62,7 @@ impl Halt {
     /// the session could not record is an error even then, as the audit trail is incomplete.
     fn aborted_if_cancelled(self, cancel: &CancellationToken) -> Self {
         match self {
-            Self::Failed(_) if cancel.is_cancelled() => Self::Ended(RunOutcome::Cancelled),
+            Self::Failed(_) if cancel.is_cancelled() => Self::Ended(Ending::Cancelled),
             Self::Ended(_) | Self::ProviderFailed { .. } | Self::Failed(_) | Self::Unrecorded(_) => self,
         }
     }
@@ -72,7 +70,7 @@ impl Halt {
     /// The outcome of the attempt, as its `attempt_end` event reports it.
     fn outcome(&self) -> RunOutcome {
         match self {
-            Self::Ended(outcome) => *outcome,
+            Self::Ended(ending) => ending.outcome(),
             Self::ProviderFailed { .. } | Self::Failed(_) | Self::Unrecorded(_) => RunOutcome::Failed,
         }
     }
@@ -86,9 +84,9 @@ impl Halt {
 /// retries, the time limit and recovery stay with the run.
 pub(crate) struct StepLoop<'a> {
     config: &'a LoopConfig,
-    /// Lends the session that records each step before the loop acts on it, and holds the
-    /// context.
-    host: &'a mut dyn SessionHost,
+    /// The run's borrow of its Runner: the session that records each step before the loop
+    /// acts on it and holds the context, and what prepares that context before a request.
+    host: &'a mut RunHost<'a>,
     /// Where a call waits for the host's approval, and what the session was granted.
     approvals: &'a ApprovalGate,
     /// What the run has spent and may spend: the loop counts into it as it goes and checks
@@ -103,13 +101,30 @@ pub(crate) struct StepLoop<'a> {
     step: Option<u32>,
 }
 
+/// What an attempt starts with.
+pub(crate) enum FirstInput {
+    /// Messages to record before the first request: the prompt of a run, or none when the
+    /// attempt answers the conversation as it is, as a retry does.
+    Messages(Vec<Input>),
+    /// The follow-ups that wait in the queue, taken as they are between steps: as many at
+    /// a time as the queue says, and each only once the session has recorded it.
+    QueuedFollowUps,
+}
+
+impl Default for FirstInput {
+    /// Nothing but the conversation as it is.
+    fn default() -> Self {
+        Self::Messages(Vec::new())
+    }
+}
+
 impl<'a> StepLoop<'a> {
     /// The loop for the attempt in progress of the run whose events go to `target`, recording
     /// through `host` and spending against `accounting`; the run's cancellation is its
     /// trace's. Calls wait for approval at `approvals`, which keeps the session's grants.
-    pub(crate) fn new(
+    pub(super) fn new(
         config: &'a LoopConfig,
-        host: &'a mut dyn SessionHost,
+        host: &'a mut RunHost<'a>,
         approvals: &'a ApprovalGate,
         accounting: &'a mut RunAccounting,
         target: EventTarget<'a>,
@@ -125,14 +140,14 @@ impl<'a> StepLoop<'a> {
         }
     }
 
-    /// Record `prompts` and run steps until the model stops, a budget runs out or the run
-    /// is cancelled. Never panics on provider or tool failures; the halt says how the
-    /// attempt ended.
-    pub(crate) async fn run(mut self, prompts: Vec<Input>) -> Halt {
+    /// Take what the attempt starts with and run steps until the model stops, a budget runs
+    /// out or the run is cancelled. Never panics on provider or tool failures; the halt says
+    /// how the attempt ended.
+    pub(crate) async fn run(mut self, first: FirstInput) -> Halt {
         let attempt = self.accounting.attempts;
         self.emit(EventKind::AttemptStart { attempt }).await;
 
-        let halt = self.run_steps(prompts).await.aborted_if_cancelled(self.trace.cancel());
+        let halt = self.run_steps(first).await.aborted_if_cancelled(self.trace.cancel());
 
         // A step that stopped before its request finished still ends, so step events pair up.
         self.end_step().await;
@@ -143,12 +158,16 @@ impl<'a> StepLoop<'a> {
         halt
     }
 
-    /// Record the prompts, then run steps until a step stops the loop. Returns why it did.
-    async fn run_steps(&mut self, prompts: Vec<Input>) -> Halt {
+    /// Record what the attempt starts with, then run steps until a step stops the loop.
+    /// Returns why it did.
+    async fn run_steps(&mut self, first: FirstInput) -> Halt {
+        let (prompts, mut pending) = match first {
+            FirstInput::Messages(prompts) => (prompts, PendingInput::None),
+            FirstInput::QueuedFollowUps => (Vec::new(), PendingInput::FollowUps),
+        };
         if let Err(halt) = self.initialize(prompts).await {
             return halt;
         }
-        let mut pending = PendingInput::default();
         loop {
             match self.run_step(pending).await {
                 Ok(next) => pending = next,
@@ -167,7 +186,7 @@ impl<'a> StepLoop<'a> {
     }
 
     /// Where this attempt's events go. The target borrows the run, not the loop, so that the
-    /// loop can record through its session host while it holds one.
+    /// loop can record in its run's session while it holds one.
     fn target(&self) -> EventTarget<'a> {
         EventTarget {
             events: self.events,
@@ -289,7 +308,7 @@ impl<'a> StepLoop<'a> {
         if matches!(stop, StopReason::Error | StopReason::Aborted) {
             self.end_step().await;
             return Err(if stop == StopReason::Aborted {
-                Halt::Ended(RunOutcome::Cancelled)
+                Halt::Ended(Ending::Cancelled)
             } else {
                 Halt::ProviderFailed {
                     message: Box::new(message),
@@ -326,7 +345,7 @@ impl<'a> StepLoop<'a> {
     fn ensure_can_request(&self) -> Result<(), Halt> {
         self.ensure_not_cancelled()?;
         match self.accounting.exhausted() {
-            Some(outcome) => Err(Halt::Ended(outcome)),
+            Some(ending) => Err(Halt::Ended(ending)),
             None => Ok(()),
         }
     }
@@ -334,7 +353,7 @@ impl<'a> StepLoop<'a> {
     /// End the attempt if the run was cancelled.
     fn ensure_not_cancelled(&self) -> Result<(), Halt> {
         if self.trace.cancel().is_cancelled() {
-            return Err(Halt::Ended(RunOutcome::Cancelled));
+            return Err(Halt::Ended(Ending::Cancelled));
         }
         Ok(())
     }

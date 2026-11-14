@@ -80,9 +80,11 @@ pub enum SessionError {
     /// answered it in time, or its run was cancelled.
     #[error("no approval request with that ID is waiting")]
     UnknownApproval,
-    /// The agent closed the session ([`Agent::close_session`](crate::Agent::close_session)).
-    /// Its record stays in the storage, where the agent opens it again.
-    #[error("session is closed")]
+    /// The session is closed: the agent closed it
+    /// ([`Agent::close_session`](crate::Agent::close_session)), or it closed itself because
+    /// its record could no longer be written. Its record stays in the storage, where the
+    /// agent opens it again ([`Agent::open_session`](crate::Agent::open_session)).
+    #[error("session is closed; the agent opens it again from its storage")]
     Closed,
 }
 
@@ -111,8 +113,13 @@ impl State {
 /// One long-lived conversation, made by an [`Agent`](crate::Agent). A handle: its clones
 /// are the same conversation, so that a frontend can read a run in one task and cancel or
 /// steer it from another. State locks cover ownership transfers only; host code and
-/// asynchronous work run unlocked. Once the agent closed the session, every operation that
-/// needs the conversation returns [`SessionError::Closed`].
+/// asynchronous work run unlocked. Once the session is closed, every operation that needs the
+/// conversation returns [`SessionError::Closed`].
+///
+/// A session whose record can no longer be written closes itself when the operation that
+/// met it ends: a write failed or timed out, or its caller dropped the run while a record
+/// was on its way, so that nobody knows whether the storage has it. The storage holds what
+/// was recorded, and the agent opens the session again from there.
 ///
 /// ```no_run
 /// use zx_core::session::{Session, SessionError};
@@ -341,6 +348,11 @@ impl Session {
         true
     }
 
+    /// Whether the session is closed, or closes as soon as its cancelled operation ends.
+    pub(crate) fn is_closed(&self) -> bool {
+        matches!(&*lock(&self.shared.state), State::Closing | State::Closed)
+    }
+
     /// Close the conversation: cancel the operation in progress, if there is one, and let go
     /// of the transcript, the tools and the hooks, at once when idle, else when the cancelled
     /// operation has ended. Returns false when it was closed already.
@@ -403,7 +415,9 @@ impl Session {
     /// `navigateTree`): the next run continues after `entry`, or before the first entry
     /// for `None`, on a new branch there. The entries of the branch left behind stay in the
     /// session, and a run after an answer whose tool calls have their results on that
-    /// branch records those calls as not executed, as after a crash. Nothing is written
+    /// branch records those calls as interrupted, as after a crash: one that started there
+    /// is reported as started with an unknown result, since going back undoes nothing it
+    /// did, and the others as not executed. Nothing is written
     /// until the next append, so a session opened again from its storage continues where
     /// its records end. A run returns Busy; an ID that is not in the session returns
     /// EntryNotFound, and the position does not change.
@@ -487,14 +501,17 @@ impl Drop for Lease {
             .runner
             .take()
             .expect("an active lease returns its Runner exactly once");
+        // A session that no longer agrees with its log cannot record another entry. Closing
+        // it lets the agent open it again from the storage, which holds what was recorded.
+        let unwritable = runner.session().lost_its_log();
         let mut state = lock(&self.shared.state);
         let released = match &*state {
-            State::Leased(_) | State::Idle(_) => {
+            State::Leased(_) | State::Idle(_) if !unwritable => {
                 *state = State::Idle(runner);
                 None
             }
-            // The session was closed meanwhile: the Runner goes instead of coming back.
-            State::Closing | State::Closed => {
+            // Unwritable, or closed meanwhile: the Runner goes instead of coming back.
+            State::Leased(_) | State::Idle(_) | State::Closing | State::Closed => {
                 *state = State::Closed;
                 Some(runner)
             }

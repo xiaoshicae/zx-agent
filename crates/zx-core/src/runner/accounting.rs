@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use super::RunOutcome;
+use super::Ending;
 use crate::ai::{ToolResultMessage, Usage};
 
 /// What a run has spent so far, over all its attempts, and its budgets.
@@ -73,27 +73,27 @@ impl RunAccounting {
             .map(|limit| limit.saturating_sub(self.model_requests))
     }
 
-    /// The outcome when a budget leaves no room for another request: requests first, then
-    /// tokens, then cost. Checked before each request, so the last one may go over the
+    /// How the run ends when a budget leaves no room for another request: requests first,
+    /// then tokens, then cost. Checked before each request, so the last one may go over the
     /// token or the cost budget.
-    pub(crate) fn exhausted(&self) -> Option<RunOutcome> {
+    pub(crate) fn exhausted(&self) -> Option<Ending> {
         if self
             .max_model_requests
             .is_some_and(|limit| self.model_requests >= limit)
         {
-            return Some(RunOutcome::ModelRequestLimit);
+            return Some(Ending::ModelRequestLimit);
         }
         if self
             .token_budget
             .is_some_and(|budget| self.usage.input_and_output() >= budget)
         {
-            return Some(RunOutcome::TokenBudget);
+            return Some(Ending::TokenBudget);
         }
         if self
             .cost_budget
             .is_some_and(|budget| self.usage.total_cost.unwrap_or(0.0) >= budget)
         {
-            return Some(RunOutcome::CostBudget);
+            return Some(Ending::CostBudget);
         }
         None
     }

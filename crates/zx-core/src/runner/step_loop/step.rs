@@ -5,7 +5,7 @@ use super::{Halt, StepLoop};
 use crate::ai::{AssistantMessage, Message, StopReason, UserMessageKind};
 use crate::hooks::{FinishedStep, StepDecision, StepDisposition};
 use crate::input::Queue;
-use crate::runner::RunOutcome;
+use crate::runner::Ending;
 
 impl StepLoop<'_> {
     /// Ask the finish hooks and decide what the next step starts with. Ends the attempt when
@@ -90,16 +90,16 @@ fn requested_input(
         StepDecision::ContinueAnswer(text) if disposition == StepDisposition::Stop => {
             if remaining_model_requests == Some(0) {
                 return Err(Halt::Ended(if stop == StopReason::Length {
-                    RunOutcome::Truncated
+                    Ending::Truncated
                 } else {
-                    RunOutcome::ModelRequestLimit
+                    Ending::ModelRequestLimit
                 }));
             }
             Ok(Some(Message::continuation(text)))
         }
         StepDecision::FollowUp(text) if disposition != StepDisposition::Continue => {
             if remaining_model_requests == Some(0) {
-                return Err(Halt::Ended(RunOutcome::ModelRequestLimit));
+                return Err(Halt::Ended(Ending::ModelRequestLimit));
             }
             Ok(Some(Message::user(text)))
         }
@@ -120,11 +120,11 @@ fn continues_answer(message: &Message) -> bool {
     )
 }
 
-fn completed(stop: StopReason) -> RunOutcome {
+fn completed(stop: StopReason) -> Ending {
     if stop == StopReason::Length {
-        RunOutcome::Truncated
+        Ending::Truncated
     } else {
-        RunOutcome::Completed
+        Ending::Completed
     }
 }
 

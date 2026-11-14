@@ -148,6 +148,7 @@ async fn records_carry_the_serialized_type_of_every_entry_kind() {
     let ids: Vec<String> = store.projection().into_iter().map(|item| item.entry_id).collect();
     let plan = || CompactionPlan {
         first_kept_entry_id: kept.clone(),
+        kept_input_entry_id: None,
         source_entry_ids: ids[..2].to_vec(),
         by: SummarizedBy::Request(SummaryRequest {
             provider: "p".into(),

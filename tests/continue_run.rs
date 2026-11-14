@@ -5,12 +5,15 @@ mod common;
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, StopReason};
 use zx_agent::events::EventKind;
+use zx_agent::hooks::{Hook, HookContext, HookResult};
+use zx_agent::input::{Input, QueueMode};
 use zx_agent::runner::RunOutcome;
 use zx_agent::session::SessionError;
 use zx_agent::tools::Tool;
@@ -128,6 +131,63 @@ async fn a_finished_answer_leaves_nothing_to_continue_unless_input_is_queued() {
         summarize(&provider.requests()[1].messages),
         ["user:question", "assistant:done", "user:and also this"]
     );
+}
+
+/// Refuses the input "refused" and lets every other pass.
+struct RefuseMarked;
+
+#[async_trait]
+impl Hook for RefuseMarked {
+    async fn on_input(&self, text: String, _ctx: &HookContext) -> HookResult<String> {
+        if text == "refused" {
+            Err("not this one".into())
+        } else {
+            Ok(text)
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_continuation_that_stops_at_a_queued_message_leaves_the_rest_in_the_queue() {
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
+    let mut config = config(provider.clone(), vec![]);
+    config.hooks.push(RefuseMarked);
+    let (mut runner, _) = RunnerSetup::new(config).build();
+    runner.run("question", &CancellationToken::new()).await;
+    runner.queues().follow_up("refused");
+    runner.queues().follow_up("kept");
+
+    let report = runner.continue_run(&CancellationToken::new()).await;
+
+    assert_eq!(report.outcome, RunOutcome::Failed, "{report:?}");
+    assert_eq!(provider.requests().len(), 1, "the refused input is not sent");
+    // The run took the first message and stopped there: the second is still the host's.
+    let queued = runner.into_session().take_queued().unwrap();
+    assert_eq!(queued, [Input::from("kept")]);
+}
+
+#[tokio::test]
+async fn a_continuation_takes_queued_follow_ups_one_at_a_time_when_the_queue_says_so() {
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::text("done"),
+        FauxStep::text("first answered"),
+        FauxStep::text("second answered"),
+    ]));
+    let (mut runner, _) = runner(&provider, Transcript::in_memory(header()));
+    runner.run("question", &CancellationToken::new()).await;
+    runner.queues().set_mode(QueueMode::OneAtATime);
+    runner.queues().follow_up("first");
+    runner.queues().follow_up("second");
+
+    let report = runner.continue_run(&CancellationToken::new()).await;
+
+    assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
+    // Each follow-up gets a request of its own, as it does between the steps of a run.
+    assert_eq!(
+        summarize(&provider.requests()[1].messages),
+        ["user:question", "assistant:done", "user:first"]
+    );
+    assert_eq!(provider.requests().len(), 3);
 }
 
 #[tokio::test]

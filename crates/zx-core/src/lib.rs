@@ -31,9 +31,6 @@
 //! - [`agent`] (all of the above): the role every session plays, the host's setup of what
 //!   belongs to one session, and the sessions that are open
 //!
-//! One reference points upward: registering the extensions fills the configuration of a
-//! session's loops, which is the runner's.
-//!
 //! # Where each feature lives
 //!
 //! The transcript owns what a feature records: the format, the checks a record passes both

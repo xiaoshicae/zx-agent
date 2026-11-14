@@ -1,6 +1,7 @@
 //! Tool validation, approval, execution and result recording.
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::fmt::Display;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -53,6 +54,19 @@ impl StepLoop<'_> {
             return Checked::blocked(NOT_STARTED);
         }
         Checked::Ready(Runnable { tool, call: ran })
+    }
+
+    /// Check `call` as the next call of an answer whose calls so far have the IDs `seen`.
+    /// One that repeats an ID is blocked without being checked: its start record and its
+    /// result could not be told from the first call's.
+    async fn check_next<'c>(&mut self, call: &'c ToolCall, seen: &mut HashSet<&'c str>) -> Checked<'c> {
+        if seen.insert(&call.id) {
+            return self.check(call).await;
+        }
+        Checked::blocked(format!(
+            "Tool call {:?} was not executed: an earlier call of this answer has the same ID {:?}. Give every call an ID of its own.",
+            call.name, call.id
+        ))
     }
 
     /// Check the arguments `call` runs with: a JSON object that fits the tool's declared
@@ -191,9 +205,10 @@ impl StepLoop<'_> {
 
     async fn sequential(&mut self, calls: &[ToolCall]) -> Result<Batch, Halt> {
         let mut batch = Batch::default();
+        let mut seen = HashSet::new();
         for call in calls {
             self.tool_start(call).await;
-            let checked = self.check(call).await;
+            let checked = self.check_next(call, &mut seen).await;
             if let Checked::Ready(runnable) = &checked {
                 self.record_start(runnable).await?;
             }
@@ -210,9 +225,10 @@ impl StepLoop<'_> {
         // Phase 1: check every call in order. Approvals borrow the loop mutably, so all of
         // them are settled here, before any call runs.
         let mut slots = Vec::new();
+        let mut seen = HashSet::new();
         for call in calls {
             self.tool_start(call).await;
-            let checked = self.check(call).await;
+            let checked = self.check_next(call, &mut seen).await;
             slots.push((call, checked));
             if self.trace.cancel().is_cancelled() {
                 break;

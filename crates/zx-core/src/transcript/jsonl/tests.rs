@@ -169,6 +169,28 @@ async fn a_listing_asks_by_working_directory_and_label_and_reports_what_it_canno
 }
 
 #[tokio::test]
+async fn a_listing_shows_what_a_session_recorded_since_it_was_last_listed() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = JsonlStorage::in_directory(dir.path());
+    let header = header_of("grows", "/w", 1);
+    let mut session = Transcript::with_log(header.clone(), storage.create(&header).await.unwrap());
+    session.append_message(Message::user("first")).await.unwrap();
+    let listed = storage.list(&in_cwd("/w")).await.unwrap().sessions;
+    assert_eq!(
+        (listed[0].messages, listed[0].first_prompt.as_deref()),
+        (1, Some("first"))
+    );
+    // Listed again unchanged, it reads the same.
+    assert_eq!(storage.list(&in_cwd("/w")).await.unwrap().sessions, listed);
+
+    session.append_message(Message::user("second")).await.unwrap();
+
+    let again = storage.list(&in_cwd("/w")).await.unwrap().sessions;
+    assert_eq!(again[0].messages, 2);
+    assert!(again[0].last_activity_ms >= listed[0].last_activity_ms);
+}
+
+#[tokio::test]
 async fn sessions_another_storage_created_are_found_and_deleted_ones_are_not_listed() {
     let dir = tempfile::tempdir().unwrap();
     let storage = JsonlStorage::in_directory(dir.path());

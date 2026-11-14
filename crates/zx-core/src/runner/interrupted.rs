@@ -68,7 +68,7 @@ fn interruption(start: StartRecord, effects: Option<Effects>) -> Interruption {
 fn recovered_result(state: Interruption) -> &'static str {
     match state {
         Interruption::Started => {
-            "Result unknown: this call started, but the agent stopped before its result was recorded. It may have changed state; check the current state before running it again."
+            "Result unknown: this call started, but its result is not recorded here: the agent stopped before recording it, or the conversation went back to before it. It may have changed state; check the current state before running it again."
         }
         Interruption::StartUnknown => {
             "Result unknown: the agent stopped before this call's result was recorded, and whether the call started was not recorded. It may have changed state; check the current state before running it again."

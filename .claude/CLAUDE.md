@@ -23,15 +23,15 @@
 | IM | `crates/zx-im/src/`（`ImChannel`、`Server`、`platform.rs`）、`crates/zx-im-slack/`、`crates/zx-im-feishu/` |
 | 追踪导出 | `crates/zx-cli/src/otel.rs`、`crates/zx-cli/src/otel/` |
 
-一次运行：`main` 构造 `Agent`，`Agent` 创建或打开 `Session`（先由 `SessionSetup` 给出属于该会话的部分，再把角色、会话的部分与扩展合成这个会话的循环配置） → `send` 独占取得 Runner（crate 内部）并返回 `Run`，调用方读它，运行才推进 → 每次尝试运行一遍循环 `StepLoop`（crate 内部） → 先持久化提示词、输入和上下文改动，再执行可选摘要 → 请求模型，发出的上下文就是此刻的会话投影 → 执行工具、脱敏、可选落盘 → 每一步先写入会话宿主（crate 内部的 `SessionHost`），再把事件放进这次运行的有界通道 → Runner 处理重试并汇总 `RunReport`，`main` 映射退出码。
+一次运行：`main` 构造 `Agent`，`Agent` 创建或打开 `Session`（先由 `SessionSetup` 给出属于该会话的部分，再把角色、会话的部分与扩展合成这个会话的循环配置） → `send` 独占取得 Runner（crate 内部）并返回 `Run`，调用方读它，运行才推进 → 每次尝试运行一遍循环 `StepLoop`（crate 内部） → 先持久化提示词、输入和上下文改动，再执行可选摘要 → 请求模型，发出的上下文就是此刻的会话投影 → 执行工具、脱敏、可选落盘 → 每一步先写入会话（经这次运行的 `RunHost`，crate 内部），再把事件放进这次运行的有界通道 → Runner 处理重试并汇总 `RunReport`，`main` 映射退出码。
 
 设计取舍（改动前先理解原因）：
 
 - **场景策略不进内核**：提示词、上限与续写默认值由 agent 文件提供；命令策略、续写、脱敏由外层注册，无人时拒绝 Ask。`run` 用退出码表达结果，调度器不必解析输出。
 - **配置与内容分工**：`config.toml` 决定环境，agent 决定角色，命令行只剩 `--model`、`--tools`、预算与会话参数。没有项目级配置文件：项目内容（含 AGENTS.md 与 skill 正文）不能改变环境、权限或控制策略；自动发现的 AGENTS.md 必须在项目根目录内。
-- **`Agent` 是唯一入口**：`AgentConfig` 是所有会话共用的角色（模型、工具、策略、钩子、扩展、上限、存储）；属于单个会话的工具、钩子与提示词段落由宿主的 `SessionSetup` 在创建或打开会话时给出，随会话释放。会话在它创建时的目录工作（头部的 `cwd`），续接时不另给目录。打开着的会话记在 `Agent` 的表里：同一个会话同时被打开两次得到同一个 `Session`，`close_session` 取消进行中的运行并释放它，之后旧句柄返回 Closed。循环的配置 `LoopConfig` 与工具集合 `Toolbox` 是内核内部类型；工具的名称与参数声明在创建 `Agent` 与会话时校验；声明在建会话时取定，请求与参数校验都用它。
+- **`Agent` 是唯一入口**：`AgentConfig` 是所有会话共用的角色（模型、工具、策略、钩子、扩展、上限、存储）；属于单个会话的工具、钩子与提示词段落由宿主的 `SessionSetup` 在创建或打开会话时给出，随会话释放。会话在它创建时的目录工作（头部的 `cwd`），续接时不另给目录。打开着的会话记在 `Agent` 的表里：同一个会话同时被打开两次得到同一个 `Session`，`close_session` 取消进行中的运行并释放它，之后旧句柄返回 Closed；记录写不进去的会话在那次操作结束时自行关闭，由 `open_session` 从存储重新打开。循环的配置 `LoopConfig` 与工具集合 `Toolbox` 是内核内部类型；工具的名称与参数声明在创建 `Agent` 与会话时校验；声明在建会话时取定，请求与参数校验都用它。
 - **共享 API、独占执行**：`Session` 是可克隆的句柄，短锁只切换 Runner 所有权，不跨 await；重叠调用返回 Busy。`send`、`continue_run`、`compact` 只取得会话并返回 `Run`：调用方读它才推进，事件经有界通道（读得慢运行就等，没有不设上限的缓冲），运行结束、取消、panic 或 `Run` 被丢弃后由 RAII 归还。事件只从 `Run` 读出；要观察所有运行的（如追踪导出）用 `Hook::on_event`。
-- **会话是审计日志，也是模型上下文的唯一来源**：修正上下文靠追加 `context_edit`，提示词变化靠追加 system 消息，原始记录始终保留；可替换的只是最底层的存储：`SessionStorage` 与它交出的 `SessionLog`，接口里没有文件路径。摘要每次读取原始投影，原始事实被修正后整份失效。
+- **会话是审计日志，也是模型上下文的唯一来源**：修正上下文靠追加 `context_edit`，提示词变化靠追加 system 消息，原始记录始终保留；可替换的只是最底层的存储：`SessionStorage` 与它交出的 `SessionLog`，接口里没有文件路径。摘要每次读取原始投影，原始事实被修正后整份失效；边界可以落在最近一轮之内，那一轮的提问原样留在摘要之前（`keptInputEntryId`）。
 - **终端输入只有一个所有者**：chat 的专用线程经有界通道提供输入；审批请求随事件到达读 `Run` 的那个循环，回答经 `Session::resolve_approval`，必须带内核为这次请求生成的审批编号。
 - **审批由内核等待，不是接口**：策略给出询问时，调用在 `ApprovalGate` 等待；`ApprovalMode::Deny`（默认）没有人回答，立即拒绝，`ApprovalMode::Wait` 等宿主回答，超时与取消按拒绝处理。审批编号由内核生成，迟到的回答落不到别的请求上；审批不写入会话。
 - **扩展点都是 trait**：`Provider`、`Tool`、`ToolPolicy`、`Hook`、`Executor`、`SessionStorage` 与 `SessionLog`、`SessionSetup`、`Summarizer`、`ImChannel`、`StatusStore`、`Extension`。新能力优先实现 trait，不改循环。
@@ -45,7 +45,7 @@
 
 - 以下命令都在仓库根目录运行，覆盖全部 9 个 crate（test、clippy 与 doc 经 `Cargo.toml` 的 `default-members`）。在 `crates/*` 的目录里运行或加 `-p <crate>` 时只处理那一个 crate；集成测试分两处：只用库的在根目录的 `tests/`（属于 `zx-agent`），驱动程序的在 `crates/zx-cli/tests/`（属于 `zx-cli`）
 - 格式：`cargo fmt`（`rustfmt.toml`：`max_width = 120`）
-- lint：`cargo clippy --all-targets -- -D warnings`，要求零警告。范围是 clippy 的默认项加 `Cargo.toml` 的 `[workspace.lints]`（阈值在 `clippy.toml`）；有意保留的写法用 `#[expect(lint, reason = "...")]`，见规则 09
+- lint：`cargo clippy --all-targets -- -D warnings`，要求零警告；改动内核的工具校验时另跑 `cargo clippy -p zx-core --no-default-features --all-targets -- -D warnings`（按 JSON Schema 校验参数是 `zx-core` 默认开启的 feature `json-schema`）。范围是 clippy 的默认项加 `Cargo.toml` 的 `[workspace.lints]`（阈值在 `clippy.toml`）；有意保留的写法用 `#[expect(lint, reason = "...")]`，见规则 09
 - 测试：`cargo test`，不需要网络和 API key。只跑一个集成测试文件：`cargo test --test step_loop`；按名字过滤：`cargo test retries_transient`。付费的 `tests/real_api.rs` 默认跳过，见红线 9
 - 文档：`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`，要求零警告；断掉的文档链接也算（引号必须有，否则 shell 把 `warnings` 当命令）
 - MSRV：`cargo +1.88.0 check --all-targets`，用到新语法或新标准库 API 时运行（本机已安装 1.88.0 工具链）
@@ -94,15 +94,15 @@
 修改相关模块时必须保持以下不变量。每一条都有测试覆盖，测试失败说明不变量被破坏了：
 
 1. **provider 不报错。** `Provider::stream` 立即返回；所有失败都编码成最终的 `StreamEvent::Error`，其 `stop_reason` 为 `Error` 或 `Aborted`；接收端存续时，每个流恰好以一个 `Done` 或 `Error` 结束。通过有界事件通道发送，临时性失败优先使用 `ProviderError` 判断（`crates/zx-ai/src/provider.rs`、`crates/zx-ai/src/retry.rs`）。
-2. **由模型决定何时停止。** 工具失败（找不到、参数无效、被策略拒绝、执行报错、panic）都变成 `is_error` 的工具结果，循环继续（`crates/zx-core/src/runner/step_loop.rs`）。
+2. **由模型决定何时停止。** 工具失败（找不到、参数无效、被策略拒绝、执行报错、panic、同一回答里重复的调用编号）都变成 `is_error` 的工具结果，循环继续（`crates/zx-core/src/runner/step_loop.rs`）。
 3. **并行执行工具分三个阶段：** 逐个检查 → 并发执行 → 按调用顺序写结果。只要有一个工具是 `Sequential`，整批改为串行。
 4. **回复因 `Length` 截断时，不执行其中的工具调用。**
-5. **会话只追加。** 不改写、不删除已写入的记录；`SessionLog::append` 成功后才更新内存（`crates/zx-core/src/transcript.rs`）。唯一的例外是 JSONL 文件在打开之后、追加下一条记录之前，截掉崩溃或写入失败留下的未完成尾记录（其余记录在加载时已校验通过），打开时报告其字节数；一次写入失败、超时或被中断（结果未知）后不再写入，保证残缺只出现在末尾。一个会话同一时间只有一个写入者：JSONL 文件用 `flock`（`crates/zx-core/src/transcript/jsonl/file.rs`），内存存储记录写入者是否存在。只读写当前格式（`SESSION_VERSION`）：头部是其他版本的会话一律拒绝创建与加载，不升级、不兼容读取；格式变化时提高版本号。
+5. **会话只追加。** 不改写、不删除已写入的记录；`SessionLog::append` 成功后才更新内存（`crates/zx-core/src/transcript.rs`）。唯一的例外是 JSONL 文件在打开之后、追加下一条记录之前，截掉崩溃或写入失败留下的未完成尾记录（其余记录在加载时已校验通过），打开时报告其字节数；一次写入失败、超时或被中断（结果未知）后不再写入，保证残缺只出现在末尾；会话在那次操作结束时自行关闭（`crates/zx-core/src/session.rs` 的 `Lease`），由 `Agent` 从存储重新打开。一个会话同一时间只有一个写入者：JSONL 文件用 `flock`（`crates/zx-core/src/transcript/jsonl/file.rs`），内存存储记录写入者是否存在。只读写当前格式（`SESSION_VERSION`）：头部是其他版本的会话一律拒绝创建与加载，不升级、不兼容读取；格式变化时提高版本号。
 6. **发给模型的上下文就是会话投影，系统提示词也在其中。** 系统提示词以 system 消息记录，变化时只追加变化的段落，不改写之前的版本（`crates/zx-ai/src/system_prompt.rs`）。重试时用 `context_edit` 省略失败的回答再续跑，不重复用户消息（`crates/zx-core/src/runner.rs`）。
-7. **会话写入失败时立即停止运行**（审计要求）：会话宿主返回错误，循环不再执行后续步骤，运行以 `Failed` 结束，即使同时被取消。
+7. **会话写入失败时立即停止运行**（审计要求）：记录失败时循环不再执行后续步骤，运行以 `Failed` 结束，即使同时被取消。
 8. **工具输出必须截断**（`crates/zx-tools/src/tools/truncate.rs`）；耗时的工具必须响应 `ToolContext::cancel`。
 9. **认证用的 API key 只从环境变量读取**，不主动写入会话文件、事件或日志；其环境变量从本机执行的 bash 与搜索子进程中删除（`LocalExecutor::hidden_env`）。CLI 的 `RedactSecrets` 在工具输出持久化前过滤认证 key 的完整字面值；不识别未知或变形的密钥，也不覆盖输入、模型输出与参数，边界见 README 的"安全模型"。
-10. **有副作用的工具调用先记录开始再执行，恢复时不重放。** `Tool::effects()` 为 `SideEffects` 的调用通过检查与审批后，先追加 `tool_call_started`，写入失败则不执行（`crates/zx-core/src/runner/step_loop.rs`）。Runner 每次运行开始时，为分支末尾缺少结果的调用补写错误结果，按开始记录区分结果未知与未执行；以 `Error` 或 `Aborted` 结束的回答中的调用从不执行，一律记为未执行（`crates/zx-core/src/transcript/recovery.rs`、`crates/zx-core/src/runner.rs`）。
+10. **有副作用的工具调用先记录开始再执行，恢复时不重放。** `Tool::effects()` 为 `SideEffects` 的调用通过检查与审批后，先追加 `tool_call_started`，写入失败则不执行（`crates/zx-core/src/runner/step_loop.rs`）。Runner 每次运行开始时，为分支末尾缺少结果的调用补写错误结果，按开始记录区分结果未知与未执行（开始记录在已离开的分支上也算）；以 `Error` 或 `Aborted` 结束的回答中的调用从不执行，一律记为未执行（`crates/zx-core/src/transcript/recovery.rs`、`crates/zx-core/src/runner.rs`）。
 
 ## 新增功能放在哪里
 
@@ -110,7 +110,7 @@
 - **新工具**：实现 `Tool`。参数是带 `#[serde(deny_unknown_fields)]` 的结构体；输出截断；支持取消；不改变任何状态的工具 `effects()` 返回 `Effects::ReadOnly`，其余保留 `SideEffects`（不变量 10）；容忍常见参数错误时覆盖 `prepare_arguments`，只依据参数本身改写。所有会话共用的放进 `AgentConfig::tools`，绑定会话的目录或执行环境的由 `SessionSetup` 给出。测试覆盖成功、参数错误、超时或取消。
 - **新策略**：实现内核的 `ToolPolicy`（`check(call, ctx)`），加入 `AgentConfig::policies`（`PolicyChain::push`，给出名称），无法判断时返回 `PolicyDecision::Deny`；所有策略取最严的结论，策略超时、panic 或被取消按拒绝处理。扩展经 `Extension::policies` 提供策略；钩子不做放行判断。
 - **新扩展**：实现 `Hook`；回调的最后一个参数是 `&HookContext`，回调必须异步让出执行权；`transform_context` 不能追加 system 消息。阶段默认 `Extension`，用 `HookChain::push_with` 注册时给出名称：所有会话共用的进 `AgentConfig::hooks`，属于单个会话的进 `SessionParts::hooks`。钩子 JSON 格式由 `tests/hook_contract.rs` 固定。
-- **打包的扩展**：实现 `extensions::Extension`，放进 `AgentConfig::extensions`：`Agent` 装配每个会话时注册它，工具由各会话共用，`hooks` 每个会话调用一次（创建 `Agent` 时为校验多调用一次）；钩子只能是 `Extension` 阶段；段落名不能是 `preamble`、`prompt::GENERATED_SECTIONS` 中的名字或已有段落；命令名只用 ASCII 字母、数字、`_`、`-` 且不重名。运行中发消息、记状态或改工具集经 `HookContext` 的 `queues` 与 `active_tools`，不直接碰会话。
+- **打包的扩展**：实现 `extensions::Extension`，放进 `AgentConfig::extensions`：创建 `Agent` 时向它要一次工具、策略、钩子、命令与段落并校验，所有会话共用；钩子只能是 `Extension` 阶段；段落名不能是 `preamble`、`prompt::GENERATED_SECTIONS` 中的名字或已有段落；命令名只用 ASCII 字母、数字、`_`、`-` 且不重名。运行中发消息、记状态或改工具集经 `HookContext` 的 `queues` 与 `active_tools`，不直接碰会话。
 - **上下文改动**：`on_input` 完成后才写入原始输入，改写或拒绝再追加 `context_edit`；`transform_context` 返回的 `ContextEdit` 计划整份先校验，逐项写入成功后再请求模型。
 - **新的会话存储**：实现 `transcript::SessionStorage`（`create`、`open`、`read`、`list`）与它交出的 `SessionLog`。`append` 在记录保存后才返回，同一 `seq` 已有记录时报错；一个会话同一时间只有一个写入者；`create` 拒绝已存在的会话 ID。`list` 按 `SessionQuery` 筛选与排序，可复用 `SessionQuery::matches`、`arrange` 与 `SessionInfo::of`。接口里不出现文件路径。存储交给 `AgentConfig::storage`：`Agent` 用 `create` 建新会话，用 `open` 续接；宿主只读一个会话时把 `read` 的结果交给 `Transcript::snapshot`。参照 `crates/zx-core/src/transcript/memory.rs` 的 `MemoryStorage`；只换记录的写入方式时参照 `tests/runner.rs` 的 `TableLog`。
 - **自己做摘要**：实现 `compaction::Summarizer`（`name`、`summarize(source)`），放进 `AgentConfig::summarizer`。它只产出摘要与用量；何时摘要、读哪一段、开始与结果记录、引用校验、超时与取消仍在 `compaction/compactor.rs`。开始记录写它的名字而不是请求。参照 `tests/summarizer.rs`。

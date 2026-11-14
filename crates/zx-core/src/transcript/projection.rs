@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use crate::ai::{AssistantMessage, Message, StopReason, Usage};
 
-use super::{CompactionEntry, Entry, Transcript};
+use super::{CompactionEntry, CompactionStartedEntry, Entry, Transcript};
 
 /// A model-visible message and the entry it came from.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -135,7 +135,7 @@ impl Transcript {
     pub(super) fn projection_at(&self, leaf: Option<&str>) -> Vec<ProjectedMessage> {
         let path = self.branch_path_from(leaf);
         let raw = Self::raw_projection_from(&path);
-        let Some(compaction) = Self::latest_compaction_on(&path) else {
+        let Some((compaction, started)) = Self::compaction_in_effect_on(&path) else {
             return raw;
         };
         // A summary's boundary is validated to be on its branch; without one, the originals
@@ -144,9 +144,12 @@ impl Transcript {
             return raw;
         };
         let message = compaction.summary.message(compaction.timestamp);
+        // What stays of the records before the boundary: the system messages, and the
+        // input of the turn the boundary is in.
+        let kept_input = started.kept_input_entry_id.as_deref();
         let mut projected: Vec<_> = raw[..cut]
             .iter()
-            .filter(|item| matches!(item.message, Message::System(_)))
+            .filter(|item| matches!(item.message, Message::System(_)) || Some(item.entry_id.as_str()) == kept_input)
             .cloned()
             .collect();
         projected.push(ProjectedMessage {
@@ -162,10 +165,16 @@ impl Transcript {
         Self::latest_compaction_on(&self.branch_path())
     }
 
-    /// The latest successful summary on `path` that still holds. Invalid or incomplete control
-    /// records never hide original evidence, and a correction of a summary's evidence
-    /// invalidates it as a whole: the projection falls back to the originals.
+    /// The latest successful summary on `path` that still holds.
     fn latest_compaction_on<'s>(path: &[&'s Entry]) -> Option<&'s CompactionEntry> {
+        Self::compaction_in_effect_on(path).map(|(compaction, _)| compaction)
+    }
+
+    /// The latest successful summary on `path` that still holds, with the record of its
+    /// start. Invalid or incomplete control records never hide original evidence, and a
+    /// correction of a summary's evidence invalidates it as a whole: the projection falls
+    /// back to the originals.
+    fn compaction_in_effect_on<'s>(path: &[&'s Entry]) -> Option<(&'s CompactionEntry, &'s CompactionStartedEntry)> {
         let (position, compaction) = path.iter().enumerate().rev().find_map(|(index, entry)| {
             if let Entry::Compaction(entry) = entry {
                 Some((index, entry))
@@ -178,7 +187,7 @@ impl Transcript {
         if Self::corrected_source(&path[position + 1..], &started.source_entry_ids).is_some() {
             return None;
         }
-        Some(compaction)
+        Some((compaction, started))
     }
 
     /// The first of `sources` that a context edit on `path` targets, in edit order: a summary

@@ -1,4 +1,4 @@
-//! Bounded, auditable compaction owned by the session host, not the agent loop (pi:
+//! Bounded, auditable compaction owned by the run, not the agent loop (pi:
 //! coding-agent/src/core/compaction/compaction.ts).
 //!
 //! [`Config`] holds the budgets and [`Report`] says what one compaction cost and produced;
@@ -297,7 +297,27 @@ pub(crate) enum Trigger {
 /// Serialized transcript bytes as a model may see them (without tool result details), not a
 /// tokenizer or a model context-window guarantee.
 pub fn context_bytes(messages: &[Message]) -> Result<usize> {
-    Ok(serde_json::to_vec(&without_details(messages))?.len())
+    serialized_bytes(&without_details(messages))
+}
+
+/// How many bytes `value` serializes to, counted without keeping them.
+fn serialized_bytes(value: &impl serde::Serialize) -> Result<usize> {
+    struct Count(usize);
+
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut count = Count(0);
+    serde_json::to_writer(&mut count, value)?;
+    Ok(count.0)
 }
 
 /// Bytes of serialized context that count as one token in an estimate (pi:
@@ -319,5 +339,5 @@ pub fn context_tokens(session: &Transcript) -> Result<u64> {
 
 /// Bytes of one message as a model may see it.
 fn message_bytes(message: &Message) -> Result<usize> {
-    Ok(serde_json::to_vec(&without_details(std::slice::from_ref(message))[0])?.len())
+    serialized_bytes(&without_details(std::slice::from_ref(message))[0])
 }

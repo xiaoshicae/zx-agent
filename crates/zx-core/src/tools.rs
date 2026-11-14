@@ -28,15 +28,16 @@ struct Declared {
     tool: Arc<dyn Tool>,
     definition: ToolDef,
     /// The declared parameter schema, compiled.
+    #[cfg(feature = "json-schema")]
     schema: jsonschema::Validator,
 }
 
 impl Toolbox {
     /// Check what a loop relies on: the model calls tools by the names they declare, so each
-    /// tool must declare the name it is called by and no two may share one, and each declared
-    /// parameter schema must be a JSON Schema. A tool's `name`, `definition`, `execution_mode`
-    /// and `effects` must not panic; they are tried here, so that a panic refuses the tool
-    /// instead of escaping a run.
+    /// tool must declare the name it is called by and no two may share one, and, with the
+    /// `json-schema` feature, each declared parameter schema must be a JSON Schema. A tool's
+    /// `name`, `definition`, `execution_mode` and `effects` must not panic; they are tried
+    /// here, so that a panic refuses the tool instead of escaping a run.
     pub(crate) fn new(tools: Vec<Arc<dyn Tool>>) -> Result<Self, String> {
         let mut declared: Vec<Declared> = Vec::with_capacity(tools.len());
         for (index, tool) in tools.into_iter().enumerate() {
@@ -60,20 +61,17 @@ impl Toolbox {
             if declared.iter().any(|other| other.definition.name == name) {
                 return Err(format!("more than one tool is named {name:?}"));
             }
+            #[cfg(feature = "json-schema")]
             let schema = jsonschema::validator_for(&definition.parameters)
                 .map_err(|error| format!("tool {name:?} has an invalid parameter schema: {error}"))?;
             declared.push(Declared {
                 tool,
                 definition,
+                #[cfg(feature = "json-schema")]
                 schema,
             });
         }
         Ok(Self { tools: declared })
-    }
-
-    /// The tools, in the order requests declare them.
-    pub(crate) fn tools(&self) -> impl Iterator<Item = &Arc<dyn Tool>> {
-        self.tools.iter().map(|declared| &declared.tool)
     }
 
     /// The names the model calls the tools by, in the order requests declare them.
@@ -102,9 +100,21 @@ impl Toolbox {
 
     /// Why `arguments` do not fit the parameter schema that the tool called `name` declares,
     /// when they do not.
+    #[cfg(feature = "json-schema")]
     pub(crate) fn schema_mismatch(&self, name: &str, arguments: &Value) -> Option<String> {
         let schema = &self.declared(name)?.schema;
         schema.validate(arguments).err().map(|error| error.to_string())
+    }
+
+    /// Without the `json-schema` feature nothing is compared with the declared schema: each
+    /// tool checks its own arguments.
+    #[cfg(not(feature = "json-schema"))]
+    #[expect(
+        clippy::unused_self,
+        reason = "the same signature as with the feature, so that callers need no cfg"
+    )]
+    pub(crate) fn schema_mismatch(&self, _name: &str, _arguments: &Value) -> Option<String> {
+        None
     }
 }
 
@@ -368,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn a_toolbox_declares_and_checks_what_each_tool_declared_when_it_was_made() {
+    fn a_toolbox_declares_what_each_tool_declared_when_it_was_made() {
         let toolbox = Toolbox::new(vec![Arc::new(Shifting(AtomicUsize::new(0)))]).unwrap();
         let active = ActiveTools::default();
 
@@ -376,9 +386,24 @@ mod tests {
 
         assert_eq!(declared[0].parameters["required"], json!(["v0"]));
         assert_eq!(toolbox.definitions(&active), declared, "asked again, the same");
+        assert_eq!(toolbox.names().collect::<Vec<_>>(), ["shift"]);
+    }
+
+    #[cfg(feature = "json-schema")]
+    #[test]
+    fn arguments_are_checked_against_the_schema_a_tool_declared_when_the_toolbox_was_made() {
+        let toolbox = Toolbox::new(vec![Arc::new(Shifting(AtomicUsize::new(0)))]).unwrap();
+
         assert_eq!(toolbox.schema_mismatch("shift", &json!({"v0": 1})), None);
         assert!(toolbox.schema_mismatch("shift", &json!({"v1": 1})).is_some());
-        assert_eq!(toolbox.names().collect::<Vec<_>>(), ["shift"]);
+    }
+
+    #[cfg(not(feature = "json-schema"))]
+    #[test]
+    fn without_the_schema_feature_arguments_are_left_to_the_tool() {
+        let toolbox = Toolbox::new(vec![Arc::new(Shifting(AtomicUsize::new(0)))]).unwrap();
+
+        assert_eq!(toolbox.schema_mismatch("shift", &json!({"v1": 1})), None);
     }
 
     #[test]

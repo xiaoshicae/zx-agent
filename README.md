@@ -295,7 +295,7 @@ zx-cli      crates/zx-cli    命令行程序 zx-agent（run、chat、acp、im、
 | 工具确认 | 宿主审批；`run` 无人时拒绝 |
 | 工具放行 | 由独立的接口 `ToolPolicy` 判定（放行、拒绝、询问），所有策略取最严的结论；钩子只观察与改写，不拦截调用（pi 在 `beforeToolCall` 钩子里拦截） |
 | 输出截断 | 按 agent 的 `continueOnLength` 自动续写，仍未完成以退出码 6 结束 |
-| 会话写入失败 | 立即中止运行，之后不再写入 |
+| 会话写入失败 | 立即中止运行，之后不再写入；会话随即关闭，再次打开时从存储读回 |
 | 会话文件 | 启动时立即创建；chat 默认存入会话目录，`--resume` 续接；复制会话与切换分支只在 SDK |
 | 会话名称 | 只经 ACP 的 `/name` 与 SDK 的 `Session::set_name` 设置，不能清除；chat 没有起名命令；客户端改标题的 `session/set_title` 在协议中仍不稳定，未实现 |
 | 队列取法 | 两个队列共用一种，默认 `All` |
@@ -402,19 +402,19 @@ run、chat 与 im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（完整地�
 
 - 只追加：修正上下文靠追加 `context_edit`，原始记录保留；`context_edit` 不能指向 system 或摘要消息。
 - 同一文件同一时间只有一个写入者（`flock`）；被占用时 `run` 与 `chat` 以退出码 2 结束。Unix 以外的平台不加锁。
-- 崩溃留下的未写完的尾记录在下次打开时略过并在 stderr 报告，在追加下一条记录之前截掉；其他损坏报错，文件保持原样。写入失败后不再写入。
+- 崩溃留下的未写完的尾记录在下次打开时略过并在 stderr 报告，在追加下一条记录之前截掉；其他损坏报错，文件保持原样。一次写入失败、超时或被中断后不再写入，会话随即关闭；再次打开时读回已写入的记录。
 - 只读写版本 11，其他版本的文件拒绝打开，不做升级。
 - 用户消息的记录可以带 `actor`：这条输入是谁发的，由接入方给出（如 IM 的用户 ID）；没有给出时不写这个字段，其他消息不能带。它不发给模型。
 - 头部的可选字段：`labels`（宿主给会话的标签，如租户或所属的对话，创建后不变；列表可以按标签筛选）与 `parentSession`（复制分支得到的会话记录来源会话的 ID）。
 - 每次模型请求前记录 `request_started`（配置变化时先记 `request_config`），可还原当时的请求；不记录 API key、URL 与 HTTP 头。
-- 有副作用的工具调用执行前记录 `tool_call_started`。崩溃或取消后，下一次运行为缺少结果的调用补写错误结果，不重放，并发出 `tool_call_recovered`：`started`（结果未知，先核对再重试）、`not_started`（未执行）、`read_only`（只读工具，可重新调用）、`start_unknown`（当前未配置该工具，按可能已改变状态处理）。
-- 摘要记录为 `compaction_started`、`compaction` 或 `compaction_failed`。`compaction_started` 写明摘要由谁产出：内核自己请求模型时是 `request`（可据此还原请求），宿主的摘要器产出时是 `summarizer`（它的名字；它怎样得到摘要不在会话里，也没有对应的 `request_started`）。摘要的事实必须引用来源条目；引用只证明出处可定位，不证明陈述正确或没有信息损失。
+- 有副作用的工具调用执行前记录 `tool_call_started`。崩溃或取消后，下一次运行为缺少结果的调用补写错误结果，不重放，并发出 `tool_call_recovered`：`started`（结果未知，先核对再重试）、`not_started`（未执行）、`read_only`（只读工具，可重新调用）、`start_unknown`（当前未配置该工具，按可能已改变状态处理）。回到会话树上较早的位置后，结果留在另一分支上的调用同样补写：在那个分支上已经开始的记为 `started`。
+- 摘要记录为 `compaction_started`、`compaction` 或 `compaction_failed`。`firstKeptEntryId` 是保留部分的第一条记录；边界落在最近一轮之内时（一次提问里的工具调用就超过了阈值）`compaction_started` 另有 `keptInputEntryId`，即那一轮的提问：摘要读取它，它也原样留在上下文里，排在摘要之前。`compaction_started` 写明摘要由谁产出：内核自己请求模型时是 `request`（可据此还原请求），宿主的摘要器产出时是 `summarizer`（它的名字；它怎样得到摘要不在会话里，也没有对应的 `request_started`）。摘要的事实必须引用来源条目；引用只证明出处可定位，不证明陈述正确或没有信息损失。
 - 扩展的记录：`custom`（状态，不进入模型上下文）与 `custom_message`（发给模型的消息，投影为一条用户消息）。
 - 会话名称：`session_info`（`name`），以文件中最后一条为准，与分支无关，不进入模型上下文；`name` 只有一行、没有首尾空白、不为空，否则文件打开时报错。复制分支时随分支原样复制；起名也会更新列表的“最近活动”。
 
 ## 作为库使用
 
-`zx-agent` 库再导出各 crate：内核 `zx-core` 按域模块原样导出（`zx_agent::runner`、`zx_agent::tools`、`zx_agent::policy`、`zx_agent::hooks`、`zx_agent::transcript` 等），模型层在 `zx_agent::ai`，`zx-tools` 附带的实现在 `zx_agent::builtin`。库里没有接入方式：IM 服务在 `zx-im`（平台在 `zx-im-slack` 与 `zx-im-feishu`），`config.toml`、agent 文件与 OpenTelemetry 导出在命令行的 crate `zx-cli`（`zx_cli::config`、`zx_cli::otel`）。只需要内核时可以只依赖 `zx-core` 与 `zx-ai`，按需加上 `zx-ai-openai`。各 crate 都不发布到 crates.io。
+`zx-agent` 库再导出各 crate：内核 `zx-core` 按域模块原样导出（`zx_agent::runner`、`zx_agent::tools`、`zx_agent::policy`、`zx_agent::hooks`、`zx_agent::transcript` 等），模型层在 `zx_agent::ai`，`zx-tools` 附带的实现在 `zx_agent::builtin`。库里没有接入方式：IM 服务在 `zx-im`（平台在 `zx-im-slack` 与 `zx-im-feishu`），`config.toml`、agent 文件与 OpenTelemetry 导出在命令行的 crate `zx-cli`（`zx_cli::config`、`zx_cli::otel`）。只需要内核时可以只依赖 `zx-core` 与 `zx-ai`，按需加上 `zx-ai-openai`。`zx-core` 按 JSON Schema 校验工具参数的部分是默认开启的 feature `json-schema`；写 `default-features = false` 时参数只由工具自己解析，内核的依赖从 103 个 crate 减到 40 个（含它自己）。各 crate 都不发布到 crates.io。
 
 ```rust
 let mut config = AgentConfig { system_prompt, tools, ..AgentConfig::new(provider, model) };
@@ -431,7 +431,7 @@ let report = run.wait().await;                // 只要结果时直接 session.s
 库默认不限轮次、时间与 token，没有钩子，不自动续写、摘要或落盘，会话只存在内存里；说明、上限、策略与存储都由嵌入方给出。完整的组装见 `examples/library.rs`。
 
 - 入口：`Agent`（所有会话共用的角色 `AgentConfig`：模型、工具、策略、钩子、扩展、上限、重试、摘要与存储；`create_session`、`open_session(id)`、`session(id)`、`close_session(id)`、`list_sessions`）、`Session`（一个会话的句柄，克隆出来的是同一个会话：`send`、`continue_run`、`compact` 各返回一个 `Run`；另有 `cancel`、`set_model`、`set_name`、`branch`、`queues`、`active_tools`、`tool_names`、`cwd`、`run_command`）、`Run`（一次执行：事件流与结果。读它才推进，事件经有界通道，读得慢运行就等；丢弃即取消并归还会话）、`transcript::Transcript`。
-- 会话在创建时给定的目录工作（`SessionOptions::cwd`，记在头部），再次打开时仍是那个目录。打开着的会话由 `Agent` 记着：再打开同一个会话得到同一个 `Session`；`close_session` 取消它正在进行的运行并释放它占用的东西，之后旧句柄的调用返回 `SessionError::Closed`，会话仍在存储里，可以再打开。宿主自己建好的 `Transcript`（如带着初始消息的内存会话）用 `Agent::adopt_session` 交给 agent。
+- 会话在创建时给定的目录工作（`SessionOptions::cwd`，记在头部），再次打开时仍是那个目录。打开着的会话由 `Agent` 记着：再打开同一个会话得到同一个 `Session`；`close_session` 取消它正在进行的运行并释放它占用的东西，之后旧句柄的调用返回 `SessionError::Closed`，会话仍在存储里，可以再打开。记录写不进去的会话（写入失败、超时，或调用方在写入途中丢弃了 `Run`）在那次操作结束时自行关闭，句柄同样返回 `SessionError::Closed`，`open_session` 从存储重新打开它。
 - 属于单个会话的东西（绑定会话目录或为它启动的容器的工具、相应的钩子与提示词段落）由宿主实现的 `agent::SessionSetup` 在创建或打开会话时给出，随会话释放；它失败时新会话不会留在存储里。不需要按会话区分时不用实现，工具直接放进 `AgentConfig::tools`。
 - 调用者身份：会话的标签（`SessionOptions::labels`，如租户或所属对话）与输入的 actor（`Input::User { text, actor }`，这条输入是谁发的）经 `PolicyContext` 与 `HookContext` 的 `labels`、`actor` 交给策略与钩子。`actor` 是会话最近一条提问的发送者，没有给出时为 `None`；扩展发的消息不改变它。内核只记录与传递，不据此做任何判断。
 - 审批不是接口而是会话的一个操作：`AgentConfig::approvals` 默认 `ApprovalMode::Deny`（没有人回答，策略询问的调用立即被拒绝）；设为 `ApprovalMode::Wait(时长)` 后，运行发出带审批编号、工具名与参数的 `approval_requested` 事件并等待 `Session::resolve_approval(编号, 决定)`，超时或取消都按拒绝处理。读事件的循环里不要等人回答，否则超时与取消要到下一次读取才生效。
@@ -448,6 +448,7 @@ let report = run.wait().await;                // 只要结果时直接 session.s
 ```bash
 cargo test                                   # 不需要网络和 API key；付费的真实 API 测试默认跳过
 cargo clippy --all-targets -- -D warnings
+cargo clippy -p zx-core --no-default-features --all-targets -- -D warnings   # 不带 json-schema 的内核
 cargo fmt --check
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 ```

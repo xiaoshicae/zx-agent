@@ -158,6 +158,13 @@ pub struct CompactionStartedEntry {
     pub parent_id: Option<String>,
     pub timestamp: u64,
     pub first_kept_entry_id: String,
+    /// The latest input before the boundary, when the boundary is inside the turn that
+    /// input started. The summary reads it like every record before the boundary, and it
+    /// also stays in the context as it was sent, before the summary: a turn that is
+    /// summarized in its middle keeps the request it answers. Absent when the boundary is
+    /// at or before the latest input, which is then kept anyway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept_input_entry_id: Option<String>,
     /// The records the summary reads, in branch order.
     pub source_entry_ids: Vec<String>,
     #[serde(flatten)]
@@ -196,6 +203,8 @@ pub struct CompactionFailedEntry {
 /// What the start of a compaction records, before its summary is asked for.
 pub struct CompactionPlan {
     pub first_kept_entry_id: String,
+    /// See [`CompactionStartedEntry::kept_input_entry_id`].
+    pub kept_input_entry_id: Option<String>,
     pub source_entry_ids: Vec<String>,
     pub by: SummarizedBy,
     pub input_bytes: usize,

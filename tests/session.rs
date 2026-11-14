@@ -761,30 +761,28 @@ impl zx_agent::transcript::SessionLog for RefusingLog {
 }
 
 #[tokio::test]
-async fn a_session_reports_why_it_stopped_writing() {
+async fn a_session_whose_record_cannot_be_written_says_why_and_closes() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
     let (runner, _) = RunnerSetup {
         session: Transcript::with_log(header(), Box::new(RefusingLog)),
-        ..RunnerSetup::new(config(provider, vec![]))
+        ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build();
     let session = runner.into_session();
-    let writes_stopped = || {
-        session
-            .with_transcript(|store| store.writes_stopped().cloned())
-            .unwrap()
-    };
-    assert_eq!(writes_stopped(), None);
+    let writes_stopped = session
+        .with_transcript(|store| store.writes_stopped().cloned())
+        .unwrap();
+    assert_eq!(writes_stopped, None);
 
     let report = session.prompt("go", &CancellationToken::new()).await.unwrap();
 
     assert_eq!(report.outcome, RunOutcome::Failed);
+    let error = report.error.as_deref().unwrap_or_default();
+    assert!(error.contains("the database is read-only"), "{error}");
     assert!(
-        matches!(
-            writes_stopped(),
-            Some(zx_agent::transcript::WritesStopped::Failed(error)) if error.contains("the database is read-only")
-        ),
-        "{:?}",
-        writes_stopped()
+        provider.requests().is_empty(),
+        "nothing is asked without a record of it"
     );
+    // What it holds is released, and the agent opens it again from its storage.
+    assert!(matches!(session.send("again"), Err(SessionError::Closed)));
 }

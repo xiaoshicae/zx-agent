@@ -32,6 +32,7 @@ fn plan(store: &Transcript, first_kept: &str) -> CompactionPlan {
         .collect();
     CompactionPlan {
         first_kept_entry_id: first_kept.into(),
+        kept_input_entry_id: None,
         source_entry_ids,
         by: SummarizedBy::Request(SummaryRequest {
             provider: "faux".into(),
@@ -456,6 +457,87 @@ async fn a_summarizer_needs_a_name_and_has_no_request_in_the_session() {
         format!("{error:#}").contains("is summarized by \"notes\", not by a request"),
         "{error:#}"
     );
+}
+
+/// An answer that calls `read_file` as `id`, and that call's result.
+fn exchange(id: &str) -> [Message; 2] {
+    use zx_agent::ai::{AssistantMessage, ContentBlock, StopReason, ToolCall, ToolResultMessage};
+    let mut assistant = AssistantMessage::failure("faux", "m", StopReason::ToolUse, "");
+    assistant.error_message = None;
+    assistant.content = vec![ContentBlock::ToolCall(ToolCall {
+        id: id.into(),
+        name: "read_file".into(),
+        arguments: json!({"path": "x"}),
+        arguments_error: None,
+    })];
+    let result = ToolResultMessage {
+        tool_call_id: id.into(),
+        tool_name: "read_file".into(),
+        content: format!("value of {id}"),
+        is_error: false,
+        timestamp: 0,
+        duration_ms: None,
+        details: None,
+        usage: None,
+    };
+    [Message::Assistant(assistant), Message::ToolResult(result)]
+}
+
+#[tokio::test]
+async fn a_compaction_inside_a_turn_keeps_the_input_of_that_turn_before_its_summary() {
+    let mut store = Transcript::in_memory(header());
+    let earlier = store
+        .append_message(Message::user("an earlier question"))
+        .await
+        .unwrap();
+    store.append_message(Message::user("the task")).await.unwrap();
+    let task = store.leaf_id().unwrap().to_string();
+    let [call, result] = exchange("c1");
+    let first_call = store.append_message(call).await.unwrap();
+    store.append_message(result).await.unwrap();
+    let [call, result] = exchange("c2");
+    let kept = store.append_message(call).await.unwrap();
+    store.append_message(result).await.unwrap();
+
+    // Only the latest input before the boundary can be kept.
+    let wrong = CompactionPlan {
+        kept_input_entry_id: Some(earlier.clone()),
+        ..plan(&store, &kept)
+    };
+    let error = store.begin_compaction(wrong).await.unwrap_err();
+    assert!(
+        format!("{error:#}").contains("is not the latest input before its boundary"),
+        "{error:#}"
+    );
+
+    let inside = CompactionPlan {
+        kept_input_entry_id: Some(task.clone()),
+        ..plan(&store, &kept)
+    };
+    let started = store.begin_compaction(inside).await.unwrap();
+    store
+        .append_compaction(&started, summary(&first_call), Usage::default())
+        .await
+        .unwrap();
+
+    let texts: Vec<String> = store
+        .messages()
+        .iter()
+        .map(|message| match message {
+            Message::User { content, .. } => content.lines().next().unwrap_or_default().to_string(),
+            Message::Assistant(answer) => format!("calls {}", answer.tool_calls()[0].id),
+            Message::ToolResult(result) => result.content.clone(),
+            Message::System(_) => "system".to_string(),
+        })
+        .collect();
+    assert_eq!(texts, ["the task", "<context_summary>", "calls c2", "value of c2"]);
+    let lines: Vec<serde_json::Value> = store
+        .entries()
+        .iter()
+        .map(|entry| serde_json::to_value(entry).unwrap())
+        .collect();
+    let recorded = lines.iter().find(|line| line["type"] == "compaction_started").unwrap();
+    assert_eq!(recorded["keptInputEntryId"], task);
 }
 
 #[tokio::test]

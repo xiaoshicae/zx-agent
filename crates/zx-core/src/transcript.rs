@@ -197,6 +197,16 @@ impl Transcript {
         self.stopped.as_ref()
     }
 
+    /// Whether an append failed, timed out or was interrupted, so that this store, which
+    /// wrote until then, no longer agrees with its log. A snapshot never wrote and does not
+    /// count.
+    pub(crate) fn lost_its_log(&self) -> bool {
+        match self.stopped {
+            Some(WritesStopped::Interrupted | WritesStopped::TimedOut(_) | WritesStopped::Failed(_)) => true,
+            Some(WritesStopped::ReadOnly) | None => false,
+        }
+    }
+
     /// A session that writes entries to `writer` instead of a file, so tests can make writes
     /// fail. The header is not written.
     #[cfg(test)]

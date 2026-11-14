@@ -19,6 +19,7 @@ impl Transcript {
             parent_id: self.leaf.clone(),
             timestamp: now_ms(),
             first_kept_entry_id: plan.first_kept_entry_id,
+            kept_input_entry_id: plan.kept_input_entry_id,
             source_entry_ids: plan.source_entry_ids,
             by: plan.by,
             input_bytes: plan.input_bytes,
@@ -137,6 +138,17 @@ impl Transcript {
             source.iter().map(|item| &item.entry_id).eq(&entry.source_entry_ids),
             "compaction sources must be the original prefix"
         );
+        if let Some(kept) = &entry.kept_input_entry_id {
+            let latest = source
+                .iter()
+                .rev()
+                .find(|item| matches!(item.message, Message::User { .. }));
+            ensure!(
+                latest.is_some_and(|item| item.entry_id == *kept),
+                "compaction {}: the input it keeps, {kept}, is not the latest input before its boundary",
+                entry.id
+            );
+        }
         Ok(())
     }
 

@@ -4,20 +4,23 @@
 //! the session as the source of model context, and enforces request, time and token limits.
 //! A [`Session`](crate::session::Session) owns the Runner and lends it to one run at a time.
 //!
-//! - `step_loop`: the loop a run runs once per attempt, what it runs with (`LoopConfig`,
-//!   which the agent assembles for each session), and what it needs from the session it
-//!   records in
+//! - `step_loop`: the loop a run runs once per attempt, and what it runs with (`LoopConfig`,
+//!   which the agent assembles for each session)
 //! - `accounting`: what a run spends across its attempts, and its budgets; the loop of each
 //!   attempt counts into it
 //! - `trace`: one run's identity and event numbering, and where its events go: the run's
 //!   reader, then the hooks that observe them
-//! - `run_host`: what a run lends the loop and the compactor, and how a run opens and closes
+//! - `run_host`: what a run lends the loop and the compactor, how a run opens, and when its
+//!   context is summarized
+//! - `recovery`: what follows a provider failure: a retry, or one recovery from a context
+//!   the model rejected as too long
 //! - `interrupted`: results for the tool calls an interrupted run left unfinished
 //! - `final_answer`: the answer, joined from the parts that continue a cut-off one
 
 mod accounting;
 mod final_answer;
 mod interrupted;
+mod recovery;
 mod run_host;
 mod step_loop;
 mod trace;
@@ -32,8 +35,8 @@ use tokio_util::sync::CancellationToken;
 use final_answer::final_answer;
 use run_host::{CompactionPause, RunHost, RunStop};
 
-use crate::ai::retry::{RetryPolicy, is_context_overflow, is_retryable};
-use crate::ai::{AssistantMessage, Provider, Reasoning};
+use crate::ai::retry::RetryPolicy;
+use crate::ai::{Provider, Reasoning};
 use crate::compaction::{self, Trigger};
 pub use crate::events::report::{RunOutcome, RunReport};
 use crate::events::{Event, EventKind};
@@ -42,7 +45,7 @@ use crate::policy::ApprovalGate;
 use crate::sync::AbortOnDrop;
 use crate::transcript::Transcript;
 pub(crate) use accounting::RunAccounting;
-pub(crate) use step_loop::{Halt, LoopConfig, PERSIST_FAILED, SessionHost, StepLoop, record_pending_entries};
+pub(crate) use step_loop::{FirstInput, Halt, LoopConfig, PERSIST_FAILED, StepLoop, record_pending_entries};
 pub(crate) use trace::{EventTarget, RunTrace};
 
 /// Bounds for one run. Defaults impose no request or time limit.
@@ -210,7 +213,7 @@ impl Runner {
     }
 }
 
-/// One run in progress: the session host it records through, what it borrows from the
+/// One run in progress: the host it records through, what it borrows from the
 /// Runner, and what its attempts have spent so far.
 struct Running<'a> {
     host: RunHost<'a>,
@@ -230,19 +233,20 @@ impl Running<'_> {
         // entries, whose IDs remain stable even when hooks omit messages from earlier runs.
         let run_start = self.host.session.entries().len();
         let stop = match self.host.open_run(begin).await {
-            Ok(prompts) => self.attempts(prompts).await,
+            Ok(first) => self.attempts(first).await,
             Err(error) => RunStop::Failed(error),
         };
         self.close(stop, run_start).await
     }
 
-    /// Run `prompts`, then retry or recover from a context overflow as long as the budget
-    /// and the retry policy allow, until an attempt ends the run.
-    async fn attempts(&mut self, mut prompts: Vec<Input>) -> RunStop {
+    /// Make an attempt that starts with `first`, then retry or recover from a context
+    /// overflow as long as the budget and the retry policy allow, until an attempt ends the
+    /// run. An attempt after the first starts with the conversation as it is.
+    async fn attempts(&mut self, mut first: FirstInput) -> RunStop {
         loop {
             let steps_before = self.accounting.task_steps;
-            let (failed, entry_id) = match self.attempt(std::mem::take(&mut prompts)).await {
-                Halt::Ended(outcome) => break RunStop::Ended(outcome),
+            let (failed, entry_id) = match self.attempt(std::mem::take(&mut first)).await {
+                Halt::Ended(ending) => break RunStop::Ended(ending),
                 // Hook and recording failures are distinct from failed provider responses and
                 // are not retried.
                 Halt::Failed(error) => break RunStop::Failed(error),
@@ -258,56 +262,14 @@ impl Running<'_> {
 
     /// Make one attempt: run the loop, which counts what it spends into the run's
     /// accounting and checks the run's budgets. Returns why the loop stopped.
-    async fn attempt(&mut self, prompts: Vec<Input>) -> Halt {
+    async fn attempt(&mut self, first: FirstInput) -> Halt {
         self.accounting.attempts = self.accounting.attempts.saturating_add(1);
         let (config, target) = (self.host.config, self.host.target);
-        StepLoop::new(config, &mut self.host, self.approvals, &mut self.accounting, target)
-            .run(prompts)
-            .await
-    }
-
-    /// Recover from a context overflow by compacting once, or schedule a retry; an error
-    /// says why the run ends instead. Both are requests, so both need budget. `failed` is
-    /// the response that failed, in the session as `entry_id`; `task_steps` counts the steps
-    /// of its attempt.
-    async fn after_failure(
-        &mut self,
-        failed: &AssistantMessage,
-        entry_id: &str,
-        task_steps: u32,
-    ) -> Result<(), RunStop> {
-        let error = failed.failure_reason();
-        let cancelled = self.host.target.trace.cancel().is_cancelled();
-        let out_of_budget = self.accounting.exhausted().is_some() || cancelled;
-        if is_context_overflow(failed) && self.host.compaction.automatic() {
-            // A context the model rejects as too long fails again however often it is sent:
-            // compact once and continue. Not a retry, so it has its own limit: once per run,
-            // until an answer succeeds again (more than one step in the attempt).
-            let refusal = if self.overflow_recovered && task_steps <= 1 {
-                Some("the context still overflowed after compacting it once".to_string())
-            } else {
-                self.host.pause.reason().map(|reason| {
-                    format!("automatic compaction is paused because it failed earlier in this session ({reason})")
-                })
-            };
-            if let Some(refusal) = refusal {
-                return Err(RunStop::Failed(format!("{error}; {refusal}")));
-            }
-            if out_of_budget {
-                return Err(RunStop::Failed(error.to_string()));
-            }
-            self.host
-                .recover_overflow(error, entry_id, &mut self.accounting)
-                .await?;
-            self.overflow_recovered = true;
-            return Ok(());
-        }
-        // Without budget, the provider error is the reason the run ends.
-        if !is_retryable(failed) || self.accounting.retries >= self.retry.max_retries || out_of_budget {
-            return Err(RunStop::Failed(error.to_string()));
-        }
-        self.host
-            .schedule_retry(self.retry, &mut self.accounting, failed, entry_id)
+        // Borrowed again for this attempt alone, so that the loop's borrow of the host and
+        // the host's borrow of the Runner end together.
+        let mut host = self.host.reborrow();
+        StepLoop::new(config, &mut host, self.approvals, &mut self.accounting, target)
+            .run(first)
             .await
     }
 
@@ -346,19 +308,17 @@ impl Running<'_> {
     /// How the run ended, as the report states it.
     fn conclude(&self, stop: RunStop) -> (RunOutcome, Option<String>) {
         let (limits, accounting, timed_out) = (self.limits, &self.accounting, self.timer.timed_out());
-        let outcome = match stop {
+        let ending = match stop {
             RunStop::Failed(error) => return (RunOutcome::Failed, Some(error)),
-            RunStop::Ended(outcome) => outcome,
+            RunStop::Ended(ending) => ending,
         };
-        match outcome {
-            RunOutcome::Completed => (RunOutcome::Completed, None),
-            RunOutcome::Truncated => (
+        match ending {
+            Ending::Completed => (RunOutcome::Completed, None),
+            Ending::Truncated => (
                 RunOutcome::Truncated,
                 Some("the answer was cut off at the output token limit".to_string()),
             ),
-            // A failed attempt ends the run as `Failed`, with its reason, never as `Ended`.
-            RunOutcome::Failed => (RunOutcome::Failed, Some("loop failed without a diagnostic".to_string())),
-            RunOutcome::ModelRequestLimit => (
+            Ending::ModelRequestLimit => (
                 RunOutcome::ModelRequestLimit,
                 Some(format!(
                     "model request limit reached (max_model_requests = {})",
@@ -367,7 +327,7 @@ impl Running<'_> {
                         .expect("ModelRequestLimit requires a configured request limit")
                 )),
             ),
-            RunOutcome::TokenBudget => (
+            Ending::TokenBudget => (
                 RunOutcome::TokenBudget,
                 Some(format!(
                     "token budget reached ({} tokens used, token_budget = {})",
@@ -377,7 +337,7 @@ impl Running<'_> {
                         .expect("TokenBudget requires a configured token budget")
                 )),
             ),
-            RunOutcome::CostBudget => (
+            Ending::CostBudget => (
                 RunOutcome::CostBudget,
                 Some(format!(
                     "cost budget reached ({:.4} spent, cost_budget = {})",
@@ -387,9 +347,9 @@ impl Running<'_> {
                         .expect("CostBudget requires a configured cost budget")
                 )),
             ),
-            // An attempt never ends with `Timeout`: the timer cancels it, and only `timed_out`
-            // tells that cancellation from the caller's.
-            RunOutcome::Cancelled | RunOutcome::TimedOut if timed_out => {
+            // The time limit cancels the attempt, and only `timed_out` tells that
+            // cancellation from the caller's.
+            Ending::Cancelled if timed_out => {
                 // Only the timer of a configured limit sets `timed_out`.
                 let limit = limits.timeout.expect("Timeout requires a configured time limit");
                 (
@@ -397,9 +357,35 @@ impl Running<'_> {
                     Some(format!("run exceeded the {}s time limit", limit.as_secs())),
                 )
             }
-            RunOutcome::Cancelled | RunOutcome::TimedOut => {
-                (RunOutcome::Cancelled, Some("run was cancelled".to_string()))
-            }
+            Ending::Cancelled => (RunOutcome::Cancelled, Some("run was cancelled".to_string())),
+        }
+    }
+}
+
+/// How an attempt, and with it the run, ends when nothing failed. A failure is not among
+/// these: it comes with its reason ([`Halt::Failed`], [`RunStop::Failed`]). Nor is the time
+/// limit: it cancels the run, and the run's timer tells that from the caller's cancellation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Ending {
+    Completed,
+    /// The answer was cut off at the output token limit.
+    Truncated,
+    ModelRequestLimit,
+    TokenBudget,
+    CostBudget,
+    Cancelled,
+}
+
+impl Ending {
+    /// The outcome as events and reports name it.
+    pub(crate) fn outcome(self) -> RunOutcome {
+        match self {
+            Self::Completed => RunOutcome::Completed,
+            Self::Truncated => RunOutcome::Truncated,
+            Self::ModelRequestLimit => RunOutcome::ModelRequestLimit,
+            Self::TokenBudget => RunOutcome::TokenBudget,
+            Self::CostBudget => RunOutcome::CostBudget,
+            Self::Cancelled => RunOutcome::Cancelled,
         }
     }
 }

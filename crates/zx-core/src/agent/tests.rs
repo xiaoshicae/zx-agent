@@ -9,6 +9,7 @@ use crate::ai::{Message, ToolDef};
 use crate::runner::RunOutcome;
 use crate::session::SessionError;
 use crate::tools::{ToolContext, ToolOutput};
+use crate::transcript::{LoadedSession, LogRecord, SessionList, SessionLog};
 
 fn cwd() -> &'static Path {
     Path::new(".")
@@ -162,6 +163,78 @@ async fn a_closed_session_refuses_its_handles_and_opens_again_from_the_storage()
         .with_transcript(|transcript| transcript.messages().len())
         .unwrap();
     assert_eq!(messages, 4);
+}
+
+/// Keeps sessions in memory, but the log of a session it creates never answers: what a
+/// caller meets who drops a run while a record is on its way to the storage. A session
+/// opened again gets a log that works.
+#[derive(Default)]
+struct Stalling {
+    kept: MemoryStorage,
+    /// Notified when a record is handed to a log that will not answer.
+    writing: Arc<Notify>,
+}
+
+struct StallingLog(Arc<Notify>);
+
+#[async_trait]
+impl SessionLog for StallingLog {
+    async fn append(&mut self, _record: &LogRecord<'_>) -> Result<()> {
+        self.0.notify_one();
+        std::future::pending().await
+    }
+}
+
+#[async_trait]
+impl SessionStorage for Stalling {
+    async fn create(&self, header: &SessionHeader) -> Result<Box<dyn SessionLog>> {
+        // The session is kept, without a writer of its own, so that it can be opened again.
+        drop(self.kept.create(header).await?);
+        Ok(Box::new(StallingLog(self.writing.clone())))
+    }
+
+    async fn open(&self, id: &str) -> Result<(LoadedSession, Box<dyn SessionLog>)> {
+        self.kept.open(id).await
+    }
+
+    async fn read(&self, id: &str) -> Result<LoadedSession> {
+        self.kept.read(id).await
+    }
+
+    async fn list(&self, query: &SessionQuery) -> Result<SessionList> {
+        self.kept.list(query).await
+    }
+}
+
+#[tokio::test]
+async fn a_run_dropped_while_a_record_is_written_closes_the_session_which_opens_again() {
+    let storage = Arc::new(Stalling::default());
+    let agent = Agent::new(AgentConfig {
+        storage: storage.clone(),
+        ..AgentConfig::new(Arc::new(FauxProvider::new([FauxStep::text("answer")])), "m")
+    })
+    .unwrap();
+    let session = agent.create_session(SessionOptions::new(cwd())).await.unwrap();
+    let id = session.id().to_string();
+    let mut run = session.send("first").unwrap();
+    let writing = storage.writing.notified();
+    tokio::pin!(writing);
+    loop {
+        tokio::select! {
+            () = &mut writing => break,
+            event = run.next() => assert!(event.is_some(), "the run ended before it recorded anything"),
+        }
+    }
+
+    // Whether the storage got the record is unknown from here on.
+    drop(run);
+
+    assert_eq!(session.send("again").err(), Some(SessionError::Closed));
+    assert!(agent.session(&id).is_none());
+    let reopened = agent.open_session(&id).await.unwrap();
+    let report = reopened.send("again").unwrap().wait().await;
+    assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
+    assert_eq!(report.final_text, "answer");
 }
 
 #[tokio::test]
