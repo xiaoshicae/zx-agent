@@ -165,7 +165,8 @@ impl Tool for EditFileTool {
         let original = normalize_to_lf(text);
         let changed = apply_edits(&original, &args.edits, shown)?;
         let contents = format!("{bom}{}", restore_line_endings(&changed, ending));
-        // Checked last before writing: a write is not interrupted once it has started.
+        // Checked last before writing: the executor finishes a write it has begun, also when
+        // this call is dropped meanwhile, so that no file is left empty or cut short.
         if ctx.cancel.is_cancelled() {
             return Err(cancelled());
         }

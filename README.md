@@ -330,15 +330,15 @@ zx-cli      crates/zx-cli    命令行程序 zx-agent（run、chat、acp、im、
 
 命令策略（`CommandPolicy`）只检查 bash：
 
-- 拒绝一组危险模式：`rm -rf /` 等多词模式按子串匹配（转小写、合并空白）；`shutdown`、`reboot`、`poweroff`、`halt`、`mkfs`（含 `mkfs.<类型>`）、`init 0`、`init 6` 作为程序出现时拒绝，作为 `grep`、`last`、`journalctl`、`cat`、`echo` 等只读程序的参数时不算。这些规则容易绕过，只起减速作用。
+- 拒绝一组危险模式：`--no-preserve-root`、`dd if=` 等多词模式按子串匹配（转小写、合并空白）；`rm -rf /` 与 `rm -fr /` 只在 `/` 就是整个路径时拒绝，即其后是命令结尾、空白、`*`、引号或 `;`、`&`、`|`、`)`、`` ` ``，`rm -rf /tmp/build` 可以运行；`shutdown`、`reboot`、`poweroff`、`halt`、`mkfs`（含 `mkfs.<类型>`）、`init 0`、`init 6` 作为程序出现时拒绝，作为 `grep`、`last`、`journalctl`、`cat`、`echo` 等只读程序的参数时不算。有选项能运行别的程序的不算只读程序：`rg`（`--pre`）、`man`（`-P`）、`sort`（`--compress-program`）。这些规则容易绕过，只起减速作用。
 - agent 的 `permissions.deny` 中的 `bash(<文本>)` 拒绝任何位置含该文本的命令。
 - 没有命令白名单，其余命令都放行；要只让部分命令运行，用 `ask = ["bash"]` 加 `allow`。
 
 自动放行（`permissions.allow` 的 `bash(<前缀>)`）只决定是否询问。满足以下全部条件的命令不经审批：
 
-- 是由清单中的前缀组成的管道；
+- 是由清单中的前缀组成的管道；前缀按词比较，只合并空白，区分大小写：在区分大小写的文件系统上 `HEAD` 与 `head` 是两个程序，前缀 `head` 不放行 `HEAD`；
 - 只由字母、数字、空白和 `- _ . / : = , @ + | ^ ~ !` 组成：引号、`\`、`$`、通配符、括号、`#`、`;`、`&`、`` ` ``、`>`、`<` 都改为询问，因为它们能让 shell 执行的内容与字面不同；
-- 不含 URL（`://`），也不含 `permissions.allowExcept` 的字词（内置 assistant 为 `secret`）；
+- 不含 URL（`://`），也不含 `permissions.allowExcept` 的字词（不分大小写；内置 assistant 为 `secret`）；
 - 程序在 `permissions.allowOptions` 中列出了选项时，只带这些选项。
 
 检查不含任何具体程序的知识。把 kubectl 之类的程序加进 `allow` 时，要同时列出它可带的选项，否则任何选项都不会触发询问；`deploy/kubernetes/agents/assistant.md` 只放行 kubectl 的只读选项，`--server`、`--kubeconfig`、`--token`、`--raw`、`--user`、`--cluster`、`--profile-output`、`-f`、`-w`、`-v` 等都要询问。自动放行的命令能读到什么取决于账号与凭据，读到的内容会进入模型上下文。
@@ -348,6 +348,7 @@ zx-cli      crates/zx-cli    命令行程序 zx-agent（run、chat、acp、im、
 - bash 命令结束、超时或被取消时，终止其进程组；用 `setsid` 等方式脱离进程组的进程可能继续运行，需要保证时用容器执行。
 - `read_file`、`grep`、`find`、`ls` 不经命令检查，可以读进程能读的任何文件；`edit_file`、`write_file` 可以写进程能写的任何普通文件，包括工作目录之外的。需要限制时不启用它们，或用容器执行。内置的 `unattended` 与 Kubernetes 的 agent 不启用写文件与搜索工具。
 - 输出都有界：`read_file` 单文件至多 10 MiB，每次至多 2000 行或 50 KiB；搜索工具有条数与 60 秒超时上限。
+- `read_output` 只读落盘目录中以输出 ID 命名的普通文件，不跟随符号链接；落盘目录在工作目录之下时，从工作目录到它的每一级都不能是符号链接，否则既不读也不写。落盘目录默认在工作目录下，容器中的命令也能写它，而 `read_output` 在本机读取。
 - MCP 服务器与工具都由使用者显式列出；工具描述与结果来自外部服务，可能含注入内容。工具一律按有副作用处理，响应体没有大小上限（SSE 每个事件至多 16 MiB），交给模型的结果至多 2000 行或 50 KiB。
 
 密钥：

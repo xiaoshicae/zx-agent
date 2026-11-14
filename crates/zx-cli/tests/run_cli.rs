@@ -642,6 +642,36 @@ async fn the_reasoning_level_reaches_the_model_in_the_chosen_format_and_the_audi
     assert!(!unset.contains("reasoning"), "{unset}");
 }
 
+#[tokio::test]
+async fn the_output_limit_reaches_the_model_in_the_chosen_field_and_the_audit() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start(vec![Reply::text("ok"), Reply::text("ok")]).await;
+    let cases = [
+        ("", "default.jsonl", "max_tokens", "max_completion_tokens"),
+        (
+            "maxTokensField = 'max_completion_tokens'",
+            "newer.jsonl",
+            "max_completion_tokens",
+            "max_tokens",
+        ),
+    ];
+    for (index, (provider, session, sent, unsent)) in cases.into_iter().enumerate() {
+        let output = run_with(&server, dir.path(), "maxTokens = 77", provider)
+            .args(["--session", session])
+            .output()
+            .await
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        let body = &server.requests()[index].body;
+        assert_eq!(body[sent], 77, "{provider}: {body}");
+        assert!(body.get(unsent).is_none(), "{provider}: {body}");
+    }
+    let default = std::fs::read_to_string(dir.path().join("default.jsonl")).unwrap();
+    assert!(!default.contains("maxTokensField"), "{default}");
+    let newer = std::fs::read_to_string(dir.path().join("newer.jsonl")).unwrap();
+    assert!(newer.contains(r#""maxTokensField":"max_completion_tokens""#), "{newer}");
+}
+
 /// `zx-agent run --continue` against `server`, without a prompt.
 fn run_continue(server: &MockServer, dir: &Path) -> Command {
     let mut command = program(server, dir, &home(dir, "", ""));

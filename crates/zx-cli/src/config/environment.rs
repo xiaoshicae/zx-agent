@@ -156,6 +156,7 @@ struct RawProvider {
     api_key_env: Option<String>,
     system_updates: Option<String>,
     reasoning_format: Option<String>,
+    max_tokens_field: Option<String>,
     fill_missing_reasoning: bool,
     prompt_cache_key: bool,
     request_fields: serde_json::Map<String, serde_json::Value>,
@@ -304,14 +305,17 @@ impl RawProvider {
             *api_key_env = env;
         }
         if let Some(updates) = parsed("provider.systemUpdates", self.system_updates)? {
-            openai.system_updates = updates;
+            openai.body.system_updates = updates;
         }
         if let Some(format) = parsed("provider.reasoningFormat", self.reasoning_format)? {
-            openai.reasoning_format = format;
+            openai.body.reasoning_format = format;
         }
-        openai.fill_missing_reasoning = self.fill_missing_reasoning;
-        openai.prompt_cache_key = self.prompt_cache_key;
-        openai.extra_fields = request_fields(self.request_fields)?;
+        if let Some(field) = parsed("provider.maxTokensField", self.max_tokens_field)? {
+            openai.body.max_tokens_field = field;
+        }
+        openai.body.fill_missing_reasoning = self.fill_missing_reasoning;
+        openai.body.prompt_cache_key = self.prompt_cache_key;
+        openai.body.extra_fields = request_fields(self.request_fields)?;
         openai.headers = headers(self.headers)?;
         if let Some(secs) = positive("provider.idleTimeoutSecs", self.idle_timeout_secs)? {
             openai.idle_timeout = Duration::from_secs(secs);
@@ -426,7 +430,7 @@ impl RawModel {
 
 #[cfg(test)]
 mod tests {
-    use zx_agent::ai::openai::{ReasoningFormat, SystemUpdates};
+    use zx_agent::ai::openai::{MaxTokensField, ReasoningFormat, SystemUpdates};
 
     use super::*;
 
@@ -462,6 +466,7 @@ mod tests {
             "model = 'm1'\nreasoning = 'high'\nmaxTokens = 512\ntoolTimeoutSecs = 30\napprovalTimeoutSecs = 60\n\
              [provider]\nbaseUrl = 'http://localhost:8000/v1'\n\
              apiKeyEnv = 'LOCAL_KEY'\nsystemUpdates = 'inline'\nreasoningFormat = 'thinking'\n\
+             maxTokensField = 'max_completion_tokens'\n\
              fillMissingReasoning = true\npromptCacheKey = true\nidleTimeoutSecs = 15\nmaxRetries = 0\n\
              requestFields = { thinking = { type = 'disabled' }, top_k = 5 }\n\
              headers = { X-Route = 'eu' }",
@@ -477,10 +482,11 @@ mod tests {
         let openai = &provider.openai;
         assert_eq!(openai.base_url, "http://localhost:8000/v1");
         assert_eq!(provider.api_key_env, "LOCAL_KEY");
-        assert_eq!(openai.system_updates, SystemUpdates::Inline);
-        assert_eq!(openai.reasoning_format, ReasoningFormat::Thinking);
-        assert!(openai.fill_missing_reasoning && openai.prompt_cache_key);
-        assert_eq!(openai.extra_fields, fields);
+        assert_eq!(openai.body.system_updates, SystemUpdates::Inline);
+        assert_eq!(openai.body.reasoning_format, ReasoningFormat::Thinking);
+        assert_eq!(openai.body.max_tokens_field, MaxTokensField::MaxCompletionTokens);
+        assert!(openai.body.fill_missing_reasoning && openai.body.prompt_cache_key);
+        assert_eq!(openai.body.extra_fields, fields);
         assert_eq!(openai.headers, [("X-Route".to_string(), "eu".to_string())]);
         assert_eq!(openai.idle_timeout, Duration::from_secs(15));
         assert_eq!(provider.retry.max_retries, 0);
@@ -543,6 +549,10 @@ mod tests {
             ("reasoning = 'hard'", "unknown reasoning level"),
             ("[provider]\nsystemUpdates = 'merge'", "provider.systemUpdates"),
             ("[provider]\nreasoningFormat = 'x'", "provider.reasoningFormat"),
+            (
+                "[provider]\nmaxTokensField = 'max_output_tokens'",
+                "provider.maxTokensField",
+            ),
             ("[provider]\nbaseUrl = ''", "provider.baseUrl must not be empty"),
             ("execution = 'kubernetes'", "unknown variant"),
         ] {

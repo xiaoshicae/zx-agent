@@ -4,8 +4,8 @@
 //! ask or are denied, and `AutoApprove` for the commands allowed.
 //!
 //! An entry is a tool name, built-in or MCP (`<server>__<tool>`), or `bash(<text>)`. A
-//! `bash(...)` entry in `allow` matches a command that starts with the text; one in `deny`
-//! matches a command that contains it anywhere, without regard to case.
+//! `bash(...)` entry in `allow` matches a command that starts with the text, in the same
+//! case; one in `deny` matches a command that contains it anywhere, without regard to case.
 
 use std::collections::BTreeMap;
 
@@ -193,9 +193,9 @@ fn tool_names(entries: &[Entry]) -> Vec<String> {
         .collect()
 }
 
-/// A program name of `permissions.allowOptions` is one lowercase word, since commands are
-/// compared without case; options are written without their dashes, and a letter is either
-/// a flag or takes a value.
+/// A program name of `permissions.allowOptions` is one lowercase word, since a command's
+/// program is looked up there without regard to case; options are written without their
+/// dashes, and a letter is either a flag or takes a value.
 fn check_program_options(program: &str, options: &ProgramOptions) -> Result<()> {
     ensure!(
         !program.is_empty() && !program.contains(char::is_whitespace) && program.to_lowercase() == program,

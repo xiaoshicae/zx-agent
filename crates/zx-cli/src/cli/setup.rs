@@ -75,8 +75,10 @@ impl SessionSetup for PerSession {
         }
         if self.agent.tools.iter().any(|name| name == output_store::TOOL_NAME) {
             let store = OutputStore::new(cwd, self.tool_output.clone())?;
-            // The immutable path/config is used independently by the reading tool and writer hook.
-            let spill = SpillOutputs::new(store.clone(), vec![output_store::TOOL_NAME.into(), TOOL_NAME.into()]);
+            // The reading tool and the writer hook each get a copy of the store. The tools that
+            // page their own output are exempt: a page of theirs is not stored again.
+            let paging = [output_store::TOOL_NAME, TOOL_NAME, tools::READ_FILE];
+            let spill = SpillOutputs::new(store.clone(), paging.map(String::from).to_vec());
             push_built_in(&mut hooks, "spill_outputs", spill);
             host.push(Arc::new(ReadOutputTool::new(store)));
         }

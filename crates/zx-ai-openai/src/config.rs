@@ -5,6 +5,9 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde::de::IntoDeserializer;
+use serde::de::value::{Error as NameError, StrDeserializer};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::sse::DEFAULT_MAX_EVENT_BYTES;
@@ -13,8 +16,17 @@ use crate::sse::DEFAULT_MAX_EVENT_BYTES;
 pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Request body fields that the provider sets itself, so that
-/// [`OpenAiConfig::extra_fields`] cannot replace them.
-pub(crate) const RESERVED_FIELDS: [&str; 6] = ["model", "messages", "stream", "stream_options", "tools", "max_tokens"];
+/// [`BodyOptions::extra_fields`] cannot replace them. The output token limit is the
+/// provider's under both of its names ([`MaxTokensField`]): a request carries one of them.
+pub(crate) const RESERVED_FIELDS: [&str; 7] = [
+    "model",
+    "messages",
+    "stream",
+    "stream_options",
+    "tools",
+    "max_tokens",
+    "max_completion_tokens",
+];
 
 /// Connection settings for an OpenAI-compatible server. Debug output redacts the API key.
 #[derive(Clone)]
@@ -28,38 +40,19 @@ pub struct OpenAiConfig {
     /// is refused: the key goes through `api_key`. Neither the names nor the values are
     /// recorded in the session.
     pub headers: Vec<(String, String)>,
-    /// Send the request's [`Request::cache_key`](zx_ai::Request::cache_key) as
-    /// `prompt_cache_key`, for servers that take one (OpenAI does). Off by default: other
-    /// servers reject unknown fields. Part of
-    /// [`Provider::request_options`](zx_ai::Provider::request_options).
-    pub prompt_cache_key: bool,
     /// Name recorded on assistant messages.
     pub provider_name: String,
     /// Longest wait for response headers and between two stream chunks.
     pub idle_timeout: Duration,
     /// Honor HTTP(S)_PROXY environment variables.
     pub use_system_proxy: bool,
-    /// How system prompt changes after the first one reach the model.
-    pub system_updates: SystemUpdates,
     /// Maximum raw streaming response bytes per request.
     pub max_response_bytes: usize,
     /// Maximum bytes in a single SSE event, including framing.
     pub max_sse_event_bytes: usize,
-    /// Fields added as they are to every request body, for settings that some servers offer,
-    /// such as `thinking` or `reasoning_effort`. The fields the provider sets itself are
-    /// refused when the provider is built. They are part of
-    /// [`Provider::request_options`](zx_ai::Provider::request_options), so the session's
-    /// request audit records them.
-    pub extra_fields: Map<String, Value>,
-    /// Once one assistant message of a request carries `reasoning_content`, give the others
-    /// an empty one, for servers that reject a history in which only some answers carry
-    /// reasoning. Off unless set: other servers have no use for the field. Part of
-    /// [`Provider::request_options`](zx_ai::Provider::request_options).
-    pub fill_missing_reasoning: bool,
-    /// How a request's [`Reasoning`](zx_ai::Reasoning) level is written in the body. Part of
-    /// [`Provider::request_options`](zx_ai::Provider::request_options) when it is not the
-    /// default.
-    pub reasoning_format: ReasoningFormat,
+    /// How request bodies are written: the one part of these settings that the session
+    /// records with every request.
+    pub body: BodyOptions,
 }
 
 impl Default for OpenAiConfig {
@@ -68,16 +61,12 @@ impl Default for OpenAiConfig {
             base_url: "https://api.openai.com/v1".to_string(),
             api_key: ApiKey::None,
             headers: Vec::new(),
-            prompt_cache_key: false,
             provider_name: "openai-compatible".to_string(),
             idle_timeout: Duration::from_secs(120),
             use_system_proxy: true,
-            system_updates: SystemUpdates::default(),
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             max_sse_event_bytes: DEFAULT_MAX_EVENT_BYTES,
-            extra_fields: Map::new(),
-            fill_missing_reasoning: false,
-            reasoning_format: ReasoningFormat::default(),
+            body: BodyOptions::default(),
         }
     }
 }
@@ -96,7 +85,7 @@ impl OpenAiConfig {
         );
         // Zero would time out every request at once rather than disable the limit.
         anyhow::ensure!(!self.idle_timeout.is_zero(), "idle_timeout must be greater than zero");
-        check_extra_fields(&self.extra_fields, self.prompt_cache_key)?;
+        self.body.check()?;
         check_headers(&self.headers)
     }
 }
@@ -111,18 +100,69 @@ impl fmt::Debug for OpenAiConfig {
                 "headers",
                 &self.headers.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(),
             )
-            .field("prompt_cache_key", &self.prompt_cache_key)
             .field("provider_name", &self.provider_name)
             .field("idle_timeout", &self.idle_timeout)
             .field("use_system_proxy", &self.use_system_proxy)
-            .field("system_updates", &self.system_updates)
             .field("max_response_bytes", &self.max_response_bytes)
             .field("max_sse_event_bytes", &self.max_sse_event_bytes)
-            .field("extra_fields", &self.extra_fields.keys().collect::<Vec<_>>())
-            .field("fill_missing_reasoning", &self.fill_missing_reasoning)
-            .field("reasoning_format", &self.reasoning_format)
+            .field("body", &self.body)
             .finish()
     }
+}
+
+/// How the body of a request is written: every setting that changes it, and nothing secret.
+///
+/// This one value is what [`Provider::request_options`](zx_ai::Provider::request_options)
+/// gives the session to record with each request and what [`replay_body`](crate::replay_body)
+/// rebuilds a body from, so a setting added here is recorded and replayed with the others.
+/// The record leaves out a setting at its default, except `system_updates`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct BodyOptions {
+    /// How system prompt changes after the first one reach the model.
+    pub system_updates: SystemUpdates,
+    /// Fields added as they are to every request body, for settings that some servers offer,
+    /// such as `thinking` or `reasoning_effort`. The fields the provider sets itself are
+    /// refused when the provider is built.
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
+    pub extra_fields: Map<String, Value>,
+    /// Once one assistant message of a request carries `reasoning_content`, give the others
+    /// an empty one, for servers that reject a history in which only some answers carry
+    /// reasoning. Off unless set: other servers have no use for the field.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub fill_missing_reasoning: bool,
+    /// How a request's [`Reasoning`](zx_ai::Reasoning) level is written.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub reasoning_format: ReasoningFormat,
+    /// Send the request's [`Request::cache_key`](zx_ai::Request::cache_key) as
+    /// `prompt_cache_key`, for servers that take one (OpenAI does). Off by default: other
+    /// servers reject unknown fields.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub prompt_cache_key: bool,
+    /// The field that carries a request's output token limit.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub max_tokens_field: MaxTokensField,
+}
+
+impl BodyOptions {
+    /// Refuse extra fields that would replace what the provider sets itself.
+    pub(crate) fn check(&self) -> anyhow::Result<()> {
+        let fields = &self.extra_fields;
+        if let Some(field) = fields.keys().find(|field| RESERVED_FIELDS.contains(&field.as_str())) {
+            anyhow::bail!("request field {field:?} cannot be added: the provider sets it itself");
+        }
+        if self.prompt_cache_key && fields.contains_key("prompt_cache_key") {
+            anyhow::bail!(
+                "request field \"prompt_cache_key\" cannot be added: the provider sets it from the cache key"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Whether `value` is its type's default, which the record of a request leaves out.
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
 }
 
 /// Where the bearer token of a request comes from.
@@ -197,7 +237,8 @@ impl From<&str> for ApiKey {
 /// Servers differ, and the provider does not guess from a server's name: the formats are
 /// named after the field they write, not after a service. Nothing is sent for a request
 /// without a level.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum ReasoningFormat {
     /// `reasoning_effort: "<level>"`, the OpenAI field. `off` sends nothing, since the field
     /// has no such value.
@@ -212,15 +253,6 @@ pub enum ReasoningFormat {
 }
 
 impl ReasoningFormat {
-    /// The name used in request options and on the command line.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ReasoningFormat::Effort => "effort",
-            ReasoningFormat::Thinking => "thinking",
-            ReasoningFormat::ReasoningObject => "reasoning-object",
-        }
-    }
-
     /// The request body fields this format writes, which extra fields must not also set.
     pub fn fields(self) -> &'static [&'static str] {
         match self {
@@ -231,23 +263,9 @@ impl ReasoningFormat {
     }
 }
 
-impl std::str::FromStr for ReasoningFormat {
-    type Err = String;
-
-    fn from_str(text: &str) -> Result<Self, Self::Err> {
-        [
-            ReasoningFormat::Effort,
-            ReasoningFormat::Thinking,
-            ReasoningFormat::ReasoningObject,
-        ]
-        .into_iter()
-        .find(|format| format.as_str() == text.trim().to_ascii_lowercase())
-        .ok_or_else(|| format!("unknown reasoning format {text:?}; use effort, thinking or reasoning-object"))
-    }
-}
-
 /// How system prompt changes after the first one are sent.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum SystemUpdates {
     /// Fold versions into one leading system message, for servers that reject mid-conversation
     /// system messages. Prompt changes can reduce reuse of the previous request prefix.
@@ -258,37 +276,46 @@ pub enum SystemUpdates {
     Inline,
 }
 
-impl SystemUpdates {
-    /// The name used in request options.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            SystemUpdates::Collapse => "collapse",
-            SystemUpdates::Inline => "inline",
+/// The request body field that carries a request's output token limit.
+///
+/// The provider does not guess the field from a server's name. The OpenAI API deprecated
+/// `max_tokens` for `max_completion_tokens`, and its o-series models do not take the older
+/// field; which of the two another server takes is in its documentation. The values are
+/// named after the field they write.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaxTokensField {
+    /// `max_tokens`, the original name of the limit.
+    #[default]
+    MaxTokens,
+    /// `max_completion_tokens`, the name that replaced it in the OpenAI API.
+    MaxCompletionTokens,
+}
+
+/// `Display` and `FromStr` for settings whose values have names: the names serde gives the
+/// variants, so that configuration, the record of a request and messages spell a value one
+/// way. Parsing ignores case and surrounding whitespace; its error lists the names.
+macro_rules! named_values {
+    ($($setting:ty),+) => {$(
+        impl fmt::Display for $setting {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.serialize(f)
+            }
         }
-    }
+
+        impl std::str::FromStr for $setting {
+            type Err = String;
+
+            fn from_str(text: &str) -> Result<Self, Self::Err> {
+                let name = text.trim().to_ascii_lowercase();
+                let name: StrDeserializer<'_, NameError> = name.as_str().into_deserializer();
+                Self::deserialize(name).map_err(|error| error.to_string())
+            }
+        }
+    )+};
 }
 
-impl std::str::FromStr for SystemUpdates {
-    type Err = String;
-
-    fn from_str(text: &str) -> Result<Self, Self::Err> {
-        [SystemUpdates::Collapse, SystemUpdates::Inline]
-            .into_iter()
-            .find(|mode| mode.as_str() == text)
-            .ok_or_else(|| format!("unknown system update mode {text:?}; use collapse or inline"))
-    }
-}
-
-/// Refuse extra fields that would replace what the provider sets itself.
-pub(crate) fn check_extra_fields(fields: &Map<String, Value>, prompt_cache_key: bool) -> anyhow::Result<()> {
-    if let Some(field) = fields.keys().find(|field| RESERVED_FIELDS.contains(&field.as_str())) {
-        anyhow::bail!("request field {field:?} cannot be added: the provider sets it itself");
-    }
-    if prompt_cache_key && fields.contains_key("prompt_cache_key") {
-        anyhow::bail!("request field \"prompt_cache_key\" cannot be added: the provider sets it from the cache key");
-    }
-    Ok(())
-}
+named_values!(ReasoningFormat, SystemUpdates, MaxTokensField);
 
 /// Refuse headers the client cannot send: malformed ones, and `Authorization`, which the
 /// key sets.
@@ -380,20 +407,53 @@ mod tests {
         assert_eq!(serde_json::to_value(Reasoning::Xhigh).unwrap(), "xhigh");
     }
 
-    #[test]
-    fn system_update_modes_parse_by_their_recorded_name() {
-        for mode in [SystemUpdates::Collapse, SystemUpdates::Inline] {
-            assert_eq!(mode.as_str().parse::<SystemUpdates>(), Ok(mode));
+    /// Check that each of `values` displays the name its record holds and parses from it.
+    fn assert_named<T>(values: &[T])
+    where
+        T: Copy + PartialEq + fmt::Debug + fmt::Display + Serialize + std::str::FromStr<Err = String>,
+    {
+        for value in values {
+            let name = value.to_string();
+            assert_eq!(serde_json::to_value(value).unwrap(), json!(name));
+            assert_eq!(name.parse::<T>().as_ref(), Ok(value));
         }
-        assert!("sideways".parse::<SystemUpdates>().is_err());
+    }
+
+    #[test]
+    fn a_named_setting_parses_from_the_name_it_displays_and_records() {
+        assert_named(&[SystemUpdates::Collapse, SystemUpdates::Inline]);
+        assert_named(&[
+            ReasoningFormat::Effort,
+            ReasoningFormat::Thinking,
+            ReasoningFormat::ReasoningObject,
+        ]);
+        assert_named(&[MaxTokensField::MaxTokens, MaxTokensField::MaxCompletionTokens]);
+        assert_eq!(SystemUpdates::Inline.to_string(), "inline");
+        assert_eq!(ReasoningFormat::ReasoningObject.to_string(), "reasoning-object");
+        assert_eq!(MaxTokensField::MaxCompletionTokens.to_string(), "max_completion_tokens");
+    }
+
+    #[test]
+    fn an_unknown_name_is_refused_with_the_names_there_are() {
+        let error = "sideways".parse::<SystemUpdates>().unwrap_err();
+        assert!(error.contains("`collapse`") && error.contains("`inline`"), "{error}");
+        let error = "max_output_tokens".parse::<MaxTokensField>().unwrap_err();
+        assert!(
+            error.contains("`max_tokens`") && error.contains("`max_completion_tokens`"),
+            "{error}"
+        );
     }
 
     #[test]
     fn fields_the_provider_sets_itself_cannot_be_added() {
         for field in RESERVED_FIELDS {
-            let mut fields = Map::new();
-            fields.insert(field.into(), json!("other"));
-            let error = check_extra_fields(&fields, false).unwrap_err().to_string();
+            let mut extra_fields = Map::new();
+            extra_fields.insert(field.into(), json!("other"));
+            let options = BodyOptions {
+                extra_fields,
+                ..BodyOptions::default()
+            };
+            let error = options.check().unwrap_err().to_string();
             assert!(
                 error.contains(&format!("request field {field:?} cannot be added")),
                 "{error}"
@@ -431,11 +491,14 @@ mod tests {
                 .unwrap_err()
                 .contains("invalid value")
         );
-        let mut fields = Map::new();
-        fields.insert("prompt_cache_key".into(), json!("mine"));
+        let mut extra_fields = Map::new();
+        extra_fields.insert("prompt_cache_key".into(), json!("mine"));
         let error = OpenAiCompatible::new(OpenAiConfig {
-            prompt_cache_key: true,
-            extra_fields: fields,
+            body: BodyOptions {
+                prompt_cache_key: true,
+                extra_fields,
+                ..BodyOptions::default()
+            },
             ..OpenAiConfig::default()
         })
         .map(|_| ())

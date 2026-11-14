@@ -323,7 +323,8 @@ impl UserMessageKind {
     }
 }
 
-/// A transcript message. Ordinary user records retain their pre-Hook JSON shape.
+/// A transcript message. A user message of the default kind, a prompt, is written without
+/// its `kind`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "camelCase")]
 pub enum Message {
@@ -471,8 +472,9 @@ impl std::str::FromStr for Reasoning {
     }
 }
 
-/// Incremental output while a response streams.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// Incremental output while a response streams. Events carry it as JSON for their readers;
+/// nothing here reads one back.
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Delta {
     Text {
@@ -486,8 +488,7 @@ pub enum Delta {
         name: String,
     },
     ToolCallArgs {
-        /// Matches ToolCallStart::id. Empty only when decoding older uncorrelated events.
-        #[serde(default)]
+        /// The `id` of the `ToolCallStart` these arguments belong to.
         id: String,
         text: String,
     },

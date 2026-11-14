@@ -90,27 +90,44 @@ fn register_skill(dir: &Path, extra: &str) {
     );
 }
 
-fn read_file_reply() -> Reply {
-    Reply::Sse(vec![
-        json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"read","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"source.txt\"}"}}]},"finish_reason":"tool_calls"}]}),
-    ])
+/// A call that prints `source.txt` with bash. A long result of bash is stored; one of
+/// read_file never is, since that tool pages its own output.
+fn cat_reply() -> Reply {
+    Reply::bash("cat", "cat source.txt")
+}
+
+/// What bash returns for `cat` of a file holding `text`, which does not end with a newline.
+fn cat_result(text: &str) -> String {
+    format!("{text}\n[exit code: 0]")
+}
+
+/// The ID of the stored result and the offset of the next page, from the footer of `page`.
+fn footer(page: &str) -> (String, usize) {
+    let (_, footer) = page
+        .rsplit_once("\n[Use read_output with id=\"")
+        .unwrap_or_else(|| panic!("no footer of a stored result in {page:?}"));
+    let (id, rest) = footer.split_once("\", offset=").unwrap();
+    let offset = rest.split(' ').next().unwrap().parse().unwrap();
+    (id.to_string(), offset)
+}
+
+/// The content of the last tool result in the request `body`.
+fn last_tool_result(body: &Value) -> &str {
+    body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|message| message["role"] == "tool")
+        .unwrap()["content"]
+        .as_str()
+        .unwrap()
 }
 
 fn read_output_reply(body: &Value) -> Vec<Value> {
-    let reference: Value = serde_json::from_str(
-        body["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .rev()
-            .find(|message| message["role"] == "tool")
-            .unwrap()["content"]
-            .as_str()
-            .unwrap(),
-    )
-    .unwrap();
+    let (id, offset) = footer(last_tool_result(body));
     vec![
-        json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"output","type":"function","function":{"name":"read_output","arguments":json!({"id":reference["outputId"]}).to_string()}}]},"finish_reason":"tool_calls"}]}),
+        json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"output","type":"function","function":{"name":"read_output","arguments":json!({"id":id,"offset":offset}).to_string()}}]},"finish_reason":"tool_calls"}]}),
     ]
 }
 
@@ -119,7 +136,7 @@ async fn cli_spills_large_redacted_results_and_pages_them_without_recursive_file
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("source.txt"), "value=sk-agents-key\n".repeat(1000)).unwrap();
     let server = MockServer::start(vec![
-        read_file_reply(),
+        cat_reply(),
         Reply::Dynamic(read_output_reply),
         Reply::text("done"),
     ])
@@ -128,26 +145,25 @@ async fn cli_spills_large_redacted_results_and_pages_them_without_recursive_file
     let output = run(
         &server,
         dir.path(),
-        &["--tools", "read_file,read_output", "--session", "audit.jsonl", "go"],
+        &["--tools", "bash,read_output", "--session", "audit.jsonl", "go"],
     )
     .await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    let reference: Value = serde_json::from_str(&tool_result(&server, 1)).unwrap();
-    let content = std::fs::read_to_string(reference["path"].as_str().unwrap()).unwrap();
+    // In place of the long result the model gets its first page, which names the stored one.
+    let first = tool_result(&server, 1);
+    assert!(first.starts_with("value=[REDACTED]\n"), "{first}");
+    assert!(first.len() <= 8192);
+    let (id, offset) = footer(&first);
+    let stored = dir.path().join(".zx-agent/outputs").join(format!("{id}.txt"));
+    let content = std::fs::read_to_string(stored).unwrap();
     assert!(content.contains("[REDACTED]"));
     assert!(!content.contains("sk-agents-key"));
     let requests = server.requests();
-    let page = requests[2].body["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .rev()
-        .find(|message| message["role"] == "tool")
-        .unwrap()["content"]
-        .as_str()
-        .unwrap();
+    let page = last_tool_result(&requests[2].body);
     assert!(page.contains("value=[REDACTED]"));
     assert!(page.len() <= 8192);
+    // The page the model asked for goes on where the first one ended.
+    assert_eq!(footer(page).1, offset + page.rsplit_once('\n').unwrap().0.len());
     // Paging must not store the page again: exactly one stored result next to the ignore file.
     let stored = std::fs::read_dir(dir.path().join(".zx-agent/outputs"))
         .unwrap()
@@ -165,10 +181,10 @@ async fn cli_spills_large_redacted_results_and_pages_them_without_recursive_file
 async fn unattended_runs_keep_large_tool_results_inline_by_default() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("source.txt"), "x".repeat(20_000)).unwrap();
-    let server = MockServer::start(vec![read_file_reply(), Reply::text("done")]).await;
+    let server = MockServer::start(vec![cat_reply(), Reply::text("done")]).await;
     let output = run(&server, dir.path(), &["go"]).await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert_eq!(tool_result(&server, 1), "x".repeat(20_000));
+    assert_eq!(tool_result(&server, 1), cat_result(&"x".repeat(20_000)));
     assert!(!dir.path().join(".zx-agent").exists());
 }
 
@@ -191,26 +207,39 @@ async fn unattended_runs_offer_the_tool_set_they_had_before_output_spilling() {
 async fn an_explicit_tool_set_without_read_output_keeps_large_results_inline() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("source.txt"), "x".repeat(20_000)).unwrap();
-    let server = MockServer::start(vec![read_file_reply(), Reply::text("done")]).await;
-    let output = run(&server, dir.path(), &["--tools", "read_file", "go"]).await;
+    let server = MockServer::start(vec![cat_reply(), Reply::text("done")]).await;
+    let output = run(&server, dir.path(), &["--tools", "bash", "go"]).await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert_eq!(tool_result(&server, 1), "x".repeat(20_000));
+    assert_eq!(tool_result(&server, 1), cat_result(&"x".repeat(20_000)));
     let tools = server.requests()[0].body["tools"].as_array().unwrap().clone();
     assert_eq!(tools.len(), 1);
-    assert_eq!(tools[0]["function"]["name"], "read_file");
+    assert_eq!(tools[0]["function"]["name"], "bash");
+    assert!(!dir.path().join(".zx-agent").exists());
+}
+
+#[tokio::test]
+async fn read_file_results_stay_inline_where_other_long_results_are_stored() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("source.txt"), "x".repeat(20_000)).unwrap();
+    let read = Reply::tool_call("read", "read_file", &json!({"path": "source.txt"}));
+    let server = MockServer::start(vec![read, Reply::text("done")]).await;
+    let output = run(&server, dir.path(), &["--tools", "read_file,read_output", "go"]).await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    // read_file pages its own output, so a page of it is not stored for read_output.
+    assert_eq!(tool_result(&server, 1), "x".repeat(20_000));
     assert!(!dir.path().join(".zx-agent").exists());
 }
 
 #[tokio::test]
 async fn config_can_disable_spilling_without_removing_the_reading_tool() {
     let dir = tempfile::tempdir().unwrap();
-    agent(dir.path(), "tools = ['read_file', 'read_output']");
+    agent(dir.path(), "tools = ['bash', 'read_output']");
     config(dir.path(), "[toolOutput]\nthresholdBytes = 0");
     std::fs::write(dir.path().join("source.txt"), "x".repeat(20_000)).unwrap();
-    let server = MockServer::start(vec![read_file_reply(), Reply::text("done")]).await;
+    let server = MockServer::start(vec![cat_reply(), Reply::text("done")]).await;
     let output = run(&server, dir.path(), &["go"]).await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert_eq!(tool_result(&server, 1), "x".repeat(20_000));
+    assert_eq!(tool_result(&server, 1), cat_result(&"x".repeat(20_000)));
     assert!(
         server.requests()[0].body["tools"]
             .as_array()
@@ -226,14 +255,12 @@ async fn a_configured_output_directory_is_relative_to_config_toml() {
     let dir = tempfile::tempdir().unwrap();
     config(dir.path(), "[toolOutput]\ndirectory = 'results'\nthresholdBytes = 256");
     std::fs::write(dir.path().join("source.txt"), "x".repeat(1000)).unwrap();
-    let server = MockServer::start(vec![read_file_reply(), Reply::text("done")]).await;
-    let output = run(&server, dir.path(), &["--tools", "read_file,read_output", "go"]).await;
+    let server = MockServer::start(vec![cat_reply(), Reply::text("done")]).await;
+    let output = run(&server, dir.path(), &["--tools", "bash,read_output", "go"]).await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    let reference: Value = serde_json::from_str(&tool_result(&server, 1)).unwrap();
-    assert_eq!(
-        Path::new(reference["path"].as_str().unwrap()).parent(),
-        Some(agent_home(dir.path()).join("results").as_path())
-    );
+    let (id, _) = footer(&tool_result(&server, 1));
+    let stored = agent_home(dir.path()).join("results").join(format!("{id}.txt"));
+    assert_eq!(std::fs::read_to_string(stored).unwrap(), cat_result(&"x".repeat(1000)));
 }
 
 #[tokio::test]

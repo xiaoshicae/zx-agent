@@ -117,9 +117,10 @@ impl Target {
 pub struct ContainerExecutor {
     target: Target,
     platform: Platform,
-    /// Taken by one command or file read at a time, because a sweep stops every process of
-    /// the command user. Shared (`Arc`) with the cleanup task of a dropped run, which outlives
-    /// the run and must wait for its turn like any other call.
+    /// Taken by one command, file read or file write at a time, because a sweep stops every
+    /// process of the command user. Shared (`Arc`) with the tasks that outlive the call that
+    /// started them and must wait for their turn like any other call: the cleanup of a
+    /// dropped run, and a file write, which is finished once it has begun.
     turn: Arc<tokio::sync::Mutex<()>>,
     /// The attached `docker run` client: its open stdin keeps the container running, and
     /// killing it on drop removes the container.
@@ -214,42 +215,77 @@ const WRITING: FileOperation = FileOperation {
     timeout: Duration::from_secs(30),
 };
 
-impl ContainerExecutor {
-    /// Run the file script `command` for `path` on this executor's turn, within the time
-    /// `operation` allows. `transfer` takes the pipes it needs from the started script and moves
-    /// the file's bytes through them; then the script's exit status and error output are
-    /// collected. Returns the status, what `transfer` returned and the error output.
-    async fn file_script<T, F>(
-        &self,
-        mut command: Command,
-        operation: &FileOperation,
-        path: &Path,
-        transfer: impl FnOnce(&mut Child) -> F,
-    ) -> Result<(ExitStatus, T, Vec<u8>), String>
-    where
-        F: Future<Output = Result<T, String>>,
-    {
-        // A sweep for a command would also stop this script, so wait for any command to finish.
-        let _turn = self.turn.lock().await;
-        command.stderr(Stdio::piped());
-        let script = async {
-            let mut child = command.spawn().map_err(|e| format!("cannot run docker exec: {e}"))?;
-            let stderr = Capture::spawn(child.stderr.take());
-            let moved = transfer(&mut child).await?;
-            let status = child
-                .wait()
-                .await
-                .map_err(|e| format!("cannot {} {}: {e}", operation.verb, path.display()))?;
-            Ok((status, moved, stderr.finish().await.bytes))
-        };
-        tokio::time::timeout(operation.timeout, script).await.map_err(|_| {
-            format!(
-                "{} {} in the container took longer than {}s",
-                operation.doing,
-                path.display(),
-                operation.timeout.as_secs()
-            )
-        })?
+/// Run the file script `command` for `path`, within the time `operation` allows. `transfer`
+/// takes the pipes it needs from the started script and moves the file's bytes through them;
+/// then the script's exit status and error output are collected. Returns the status, what
+/// `transfer` returned and the error output.
+///
+/// The caller holds the executor's turn meanwhile: a sweep for a command would also stop
+/// this script.
+async fn file_script<T, F>(
+    mut command: Command,
+    operation: &FileOperation,
+    path: &Path,
+    transfer: impl FnOnce(&mut Child) -> F,
+) -> Result<(ExitStatus, T, Vec<u8>), String>
+where
+    F: Future<Output = Result<T, String>>,
+{
+    command.stderr(Stdio::piped());
+    let script = async {
+        let mut child = command.spawn().map_err(|e| format!("cannot run docker exec: {e}"))?;
+        let stderr = Capture::spawn(child.stderr.take());
+        let moved = transfer(&mut child).await?;
+        let status = child
+            .wait()
+            .await
+            .map_err(|e| format!("cannot {} {}: {e}", operation.verb, path.display()))?;
+        Ok((status, moved, stderr.finish().await.bytes))
+    };
+    tokio::time::timeout(operation.timeout, script).await.map_err(|_| {
+        format!(
+            "{} {} in the container took longer than {}s",
+            operation.doing,
+            path.display(),
+            operation.timeout.as_secs()
+        )
+    })?
+}
+
+/// Write `contents` to `path` with the write script `command`, as
+/// [`Executor::write_file`] describes for this executor. The caller holds the executor's
+/// turn meanwhile.
+async fn write_script(command: Command, path: &Path, contents: &[u8]) -> Result<(), String> {
+    let write = |child: &mut Child| {
+        let stdin = child.stdin.take();
+        async move {
+            if let Some(mut stdin) = stdin {
+                // A script that refused the path exits without reading; its status explains why.
+                if let Err(error) = stdin.write_all(contents).await
+                    && error.kind() != std::io::ErrorKind::BrokenPipe
+                {
+                    return Err(format!("cannot write {}: {error}", path.display()));
+                }
+                // Dropping stdin closes it, which ends `cat`.
+            }
+            Ok(())
+        }
+    };
+    let (status, (), stderr) = file_script(command, &WRITING, path, write).await?;
+    match status.code() {
+        Some(0) => Ok(()),
+        Some(EXIT_DIRECTORY) => Err(format!("{} is a directory", path.display())),
+        Some(EXIT_SPECIAL) => Err(special_file_error(path)),
+        Some(EXIT_NO_DIRECTORY) => Err(format!(
+            "cannot create the directory of {} in the container: {}",
+            path.display(),
+            text(&stderr)
+        )),
+        _ => Err(format!(
+            "cannot write {} in the container: {}",
+            path.display(),
+            text(&stderr)
+        )),
     }
 }
 
@@ -330,7 +366,10 @@ impl Executor for ContainerExecutor {
                 Ok(bytes)
             }
         };
-        let (status, bytes, stderr) = self.file_script(command, &READING, path, read).await?;
+        let (status, bytes, stderr) = {
+            let _turn = self.turn.lock().await;
+            file_script(command, &READING, path, read).await?
+        };
         match status.code() {
             Some(0) => {
                 check_read_within(path, &bytes, max_bytes)?;
@@ -356,35 +395,22 @@ impl Executor for ContainerExecutor {
             .target
             .exec(None, Input::Piped, WRITE, "zx-agent-write", [path.as_os_str()]);
         command.stdout(Stdio::null());
-        let write = |child: &mut Child| {
-            let stdin = child.stdin.take();
-            async move {
-                if let Some(mut stdin) = stdin {
-                    // A script that refused the path exits without reading; its status explains why.
-                    if let Err(error) = stdin.write_all(contents).await
-                        && error.kind() != std::io::ErrorKind::BrokenPipe
-                    {
-                        return Err(format!("cannot write {}: {error}", path.display()));
-                    }
-                    // Dropping stdin closes it, which ends `cat`.
-                }
-                Ok(())
-            }
-        };
-        let (status, (), stderr) = self.file_script(command, &WRITING, path, write).await?;
-        match status.code() {
-            Some(0) => Ok(()),
-            Some(EXIT_DIRECTORY) => Err(format!("{} is a directory", path.display())),
-            Some(EXIT_SPECIAL) => Err(special_file_error(path)),
-            Some(EXIT_NO_DIRECTORY) => Err(format!(
-                "cannot create the directory of {} in the container: {}",
-                path.display(),
-                text(&stderr)
-            )),
-            _ => Err(format!(
-                "cannot write {} in the container: {}",
-                path.display(),
-                text(&stderr)
+        let turn = Arc::clone(&self.turn);
+        let (target, bytes) = (path.to_path_buf(), contents.to_vec());
+        // Awaited here, but not aborted when this future is dropped, as a cancelled run
+        // drops its calls: the script truncates the file before it writes, and stopping it
+        // in between would leave the file empty or cut short. So the write runs to its end
+        // on its own, on the executor's turn like any call, within the time a write may take.
+        let writing = tokio::spawn(async move {
+            let _turn = turn.lock_owned().await;
+            write_script(command, &target, &bytes).await
+        });
+        match writing.await {
+            Ok(written) => written,
+            // The task panicked, or the runtime shut down before it ended.
+            Err(error) => Err(format!(
+                "cannot write {} in the container: the write did not run to its end: {error}",
+                path.display()
             )),
         }
     }

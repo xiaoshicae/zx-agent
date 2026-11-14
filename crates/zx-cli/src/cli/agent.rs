@@ -99,7 +99,7 @@ impl ModeAgent {
             approvals,
             extensions: shared.mcp.servers.clone(),
             models,
-            session_cache_key: config.provider.openai.prompt_cache_key,
+            session_cache_key: config.provider.openai.body.prompt_cache_key,
             limits: agent.limits.clone(),
             retry: config.provider.retry.clone(),
             compaction: agent.compaction.clone(),
@@ -173,17 +173,17 @@ impl ModeAgent {
 /// Refuse request fields that the reasoning level would also set: which one the server gets
 /// would not be clear from the configuration.
 fn check_reasoning_fields(config: &Config) -> Result<()> {
-    let openai = &config.provider.openai;
+    let body = &config.provider.openai.body;
     if config.reasoning.is_some()
-        && let Some(field) = openai
+        && let Some(field) = body
             .reasoning_format
             .fields()
             .iter()
-            .find(|field| openai.extra_fields.contains_key(**field))
+            .find(|field| body.extra_fields.contains_key(**field))
     {
         anyhow::bail!(
             "provider.requestFields.{field} conflicts with reasoning, which sets it with provider.reasoningFormat {}; use one of them",
-            openai.reasoning_format.as_str()
+            body.reasoning_format
         );
     }
     Ok(())

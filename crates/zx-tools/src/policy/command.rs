@@ -10,16 +10,21 @@ use zx_core::policy::{PolicyContext, PolicyDecision, ToolPolicy};
 
 /// Patterns rejected for every `bash` command, compared as substrings after lowercasing and
 /// collapsing whitespace. Easy to bypass on purpose: a denylist only stops the plain spelling,
-/// so commands that must not run need a rule that asks, or isolation.
-pub const DEFAULT_DENIED_PATTERNS: &[&str] = &[
-    "rm -rf /",
-    "rm -fr /",
-    "--no-preserve-root",
-    "dd if=",
-    ":(){",
-    "> /dev/sd",
-    "> /dev/nvme",
-];
+/// so commands that must not run need a rule that asks, or isolation. `rm -rf /` and
+/// `rm -fr /` are rejected too, by a rule of their own: only where the `/` is the whole path.
+pub const DEFAULT_DENIED_PATTERNS: &[&str] = &["--no-preserve-root", "dd if=", ":(){", "> /dev/sd", "> /dev/nvme"];
+
+/// The spellings of a forced, recursive removal of the root directory, rejected for every
+/// `bash` command where the `/` is the whole path (see [`AFTER_ROOT`]). They are not among
+/// [`DEFAULT_DENIED_PATTERNS`]: as substrings they would also reject the removal of any
+/// absolute path, such as `rm -rf /tmp/build`.
+const ROOT_REMOVALS: &[&str] = &["rm -rf /", "rm -fr /"];
+
+/// What may follow the `/` of a root removal, besides the end of the command, for the `/` to
+/// be the whole path: whitespace, `*` (everything in the root), and the characters that end
+/// a word or a command, as in `bash -c "rm -rf /"` and `rm -rf /; true`. Anything else goes
+/// on with a path below the root.
+const AFTER_ROOT: &[char] = &[' ', '*', '"', '\'', ';', '&', '|', ')', '`'];
 
 /// Programs rejected for every `bash` command, as is `init` or `telinit` followed by `0` or
 /// `6`; `mkfs` also covers `mkfs.<type>`. A name counts as a word of a command, compared by
@@ -30,13 +35,14 @@ pub const DEFAULT_DENIED_PATTERNS: &[&str] = &[
 pub const DENIED_PROGRAMS: &[&str] = &["shutdown", "reboot", "poweroff", "halt", "mkfs"];
 
 /// Programs that cannot run another program: what follows them on the command line is data,
-/// such as a pattern or a file name, never a command.
+/// such as a pattern or a file name, never a command. A program with an option that names a
+/// program to run is not one of them, however much it otherwise only reads: `rg` (`--pre`),
+/// `man` (`-P`) and `sort` (`--compress-program`).
 const READ_ONLY_PROGRAMS: &[&str] = &[
     "grep",
     "egrep",
     "fgrep",
     "zgrep",
-    "rg",
     "last",
     "lastb",
     "journalctl",
@@ -47,7 +53,6 @@ const READ_ONLY_PROGRAMS: &[&str] = &[
     "head",
     "tail",
     "wc",
-    "sort",
     "uniq",
     "cut",
     "tr",
@@ -55,7 +60,6 @@ const READ_ONLY_PROGRAMS: &[&str] = &[
     "ls",
     "stat",
     "file",
-    "man",
     "which",
     "whereis",
 ];
@@ -112,8 +116,20 @@ fn is_assignment(word: &str) -> bool {
     })
 }
 
-/// Policy for the `bash` tool: every command is checked against denied patterns and
-/// [`DENIED_PROGRAMS`]; other commands are allowed.
+/// The spelling of [`ROOT_REMOVALS`] that `normalized`, a command lowercased and with its
+/// whitespace collapsed, contains with nothing of a path after its `/`.
+fn root_removal(normalized: &str) -> Option<&'static str> {
+    ROOT_REMOVALS.iter().copied().find(|spelling| {
+        // Every piece after the first starts right behind one occurrence of the spelling.
+        normalized
+            .split(spelling)
+            .skip(1)
+            .any(|rest| rest.chars().next().is_none_or(|next| AFTER_ROOT.contains(&next)))
+    })
+}
+
+/// Policy for the `bash` tool: every command is checked against denied patterns, the
+/// removal of the root directory and [`DENIED_PROGRAMS`]; other commands are allowed.
 pub struct CommandPolicy {
     denied_patterns: Vec<String>,
 }
@@ -151,6 +167,9 @@ impl CommandPolicy {
             .find(|pattern| normalized.contains(pattern.as_str()))
         {
             return PolicyDecision::Deny(format!("command matches the denied pattern {pattern:?}"));
+        }
+        if let Some(spelling) = root_removal(&normalized) {
+            return PolicyDecision::Deny(format!("command matches the denied pattern {spelling:?}"));
         }
         if let Some(program) = denied_program(command) {
             return PolicyDecision::Deny(format!("command runs the denied program {program:?}"));
@@ -194,6 +213,50 @@ mod tests {
         assert_eq!(policy.evaluate("df -h"), PolicyDecision::Allow);
         assert!(denied(&policy.evaluate("sudo  RM -RF  /")));
         assert!(denied(&policy.evaluate("systemctl reboot")));
+    }
+
+    #[test]
+    fn removing_the_root_is_denied_wherever_its_slash_ends_the_path() {
+        let policy = CommandPolicy::new();
+        for command in [
+            "rm -rf /",
+            "rm -rf /*",
+            "rm -rf / ",
+            "rm -fr /",
+            "rm -rf / /tmp/build",
+            "rm -rf /tmp/build && rm -rf /",
+            "rm -rf /; echo done",
+            "bash -c \"rm -rf /\"",
+            "ssh host 'rm -fr /'",
+            "(cd /srv && rm -rf /)",
+        ] {
+            assert!(denied(&policy.evaluate(command)), "{command}");
+        }
+    }
+
+    #[test]
+    fn removing_a_path_below_the_root_is_allowed() {
+        let policy = CommandPolicy::new();
+        for command in [
+            "rm -rf /tmp/build",
+            "rm -fr /var/cache/app",
+            "rm -rf /tmp/build /tmp/out",
+            "cd /srv/app && rm -rf /srv/app/target",
+        ] {
+            assert_eq!(policy.evaluate(command), PolicyDecision::Allow, "{command}");
+        }
+    }
+
+    #[test]
+    fn programs_that_can_run_another_are_not_taken_to_only_read() {
+        let policy = CommandPolicy::new();
+        for command in [
+            "rg --pre reboot pattern",
+            "man -P reboot ls",
+            "sort --compress-program reboot big.log",
+        ] {
+            assert!(denied(&policy.evaluate(command)), "{command}");
+        }
     }
 
     #[test]

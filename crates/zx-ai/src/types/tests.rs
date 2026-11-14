@@ -4,24 +4,12 @@ use super::*;
 use crate::{SectionChange, SystemMessage};
 
 #[test]
-fn reads_older_uncorrelated_deltas() {
-    let delta: Delta = serde_json::from_value(json!({"kind": "tool_call_args", "text": "{}"})).unwrap();
-    assert_eq!(
-        delta,
-        Delta::ToolCallArgs {
-            id: String::new(),
-            text: "{}".into()
-        }
-    );
-}
-
-#[test]
 fn provider_error_metadata_is_optional_and_round_trips() {
     let mut message = AssistantMessage::failure("p", "m", StopReason::Error, "rate limited");
-    let legacy = serde_json::to_value(&message).unwrap();
-    assert!(legacy.get("providerError").is_none());
+    let without = serde_json::to_value(&message).unwrap();
+    assert!(without.get("providerError").is_none());
     assert_eq!(
-        serde_json::from_value::<AssistantMessage>(legacy)
+        serde_json::from_value::<AssistantMessage>(without)
             .unwrap()
             .provider_error,
         None
@@ -217,9 +205,10 @@ fn continuation_kind_round_trips_and_survives_text_edits() {
     assert!(
         matches!(message.with_replaced_text("接着说"), Message::User { kind: UserMessageKind::ContinueAnswer, content, .. } if content == "接着说")
     );
-    let legacy: Message = serde_json::from_value(json!({"role": "user", "content": "old", "timestamp": 1})).unwrap();
+    // A prompt is written without a kind, so a record without one is a prompt.
+    let prompt: Message = serde_json::from_value(json!({"role": "user", "content": "go", "timestamp": 1})).unwrap();
     assert!(matches!(
-        legacy,
+        prompt,
         Message::User {
             kind: UserMessageKind::Prompt,
             ..

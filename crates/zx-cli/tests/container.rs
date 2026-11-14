@@ -599,6 +599,30 @@ async fn file_writes_map_each_refusal_to_an_actionable_error() {
 }
 
 #[tokio::test]
+async fn a_file_write_dropped_half_way_still_writes_the_whole_file() {
+    let fake = FakeDocker::new();
+    let executor = ContainerExecutor::start(fake.config()).await.unwrap();
+    // More than a pipe holds, so that the write cannot end the first time it is polled.
+    let contents = vec![b'x'; 4 * 1024 * 1024];
+    let received = fake.dir.path().join("write.in");
+
+    // Polled once and dropped, as the loop drops the calls of a cancelled run.
+    let write = executor.write_file(Path::new("/srv/app.conf"), &contents);
+    assert!(tokio::time::timeout(Duration::ZERO, write).await.is_err());
+
+    let complete = eventually(Duration::from_secs(10), || {
+        std::fs::metadata(&received).is_ok_and(|meta| usize::try_from(meta.len()).ok() == Some(contents.len()))
+    })
+    .await;
+    assert!(
+        complete,
+        "the script received {:?} of {} bytes",
+        std::fs::metadata(&received).map(|meta| meta.len()).ok(),
+        contents.len()
+    );
+}
+
+#[tokio::test]
 async fn dropping_the_executor_ends_the_docker_run_client() {
     let fake = FakeDocker::new();
     let executor = ContainerExecutor::start(fake.config()).await.unwrap();

@@ -2,7 +2,7 @@
 
 use serde::Deserialize;
 
-use super::{begins_with, normalize, normalize_all};
+use super::{begins_with, collapse_whitespace, non_empty, normalize};
 
 /// Punctuation that a command approved without asking may contain, besides letters, digits
 /// and whitespace. None of it lets the shell run or read anything but what the words spell;
@@ -47,7 +47,8 @@ impl ProgramOptions {
 ///
 /// A command is covered only when all of these hold:
 /// - it is a `|` pipeline whose every segment starts with a listed prefix, compared with
-///   whitespace collapsed and lowercased;
+///   whitespace collapsed and in the case it is written: where file names keep their case,
+///   `HEAD` is another program than `head`;
 /// - it consists of letters, digits, whitespace and the punctuation `- _ . / : = , @ + | ^ ~ !`,
 ///   so no quoting, escaping, expansion or other shell syntax can change what runs;
 /// - it contains no URL (`://`) and none of the [`except`](Self::except) texts;
@@ -58,6 +59,7 @@ impl ProgramOptions {
 /// without asking is configuration.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AutoApprove {
+    /// The prefixes with their whitespace collapsed, in the case they were given.
     prefixes: Vec<String>,
     /// Normalized texts that keep a command asking.
     except: Vec<String>,
@@ -66,20 +68,21 @@ pub struct AutoApprove {
 }
 
 impl AutoApprove {
-    /// Commands starting with one of `prefixes`, such as `grep`. An empty list covers no
-    /// command.
+    /// Commands starting with one of `prefixes`, such as `grep`, in the same case. An empty
+    /// list covers no command.
     pub fn new(prefixes: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
         Self {
-            prefixes: normalize_all(prefixes),
+            prefixes: non_empty(prefixes, collapse_whitespace),
             except: Vec::new(),
             options: Vec::new(),
         }
     }
 
-    /// Texts that keep a command asking wherever they appear in it, compared like the
-    /// prefixes, such as `secret` (which also matches `secrets`).
+    /// Texts that keep a command asking wherever they appear in it, compared with whitespace
+    /// collapsed and without regard to case, such as `secret` (which also matches `secrets`
+    /// and `SECRET`).
     pub fn except(mut self, texts: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
-        self.except.extend(normalize_all(texts));
+        self.except.extend(non_empty(texts, normalize));
         self
     }
 
@@ -107,23 +110,23 @@ impl AutoApprove {
         }
         // Without quotes in the command, every `|` separates two segments.
         command.split('|').all(|raw| {
-            let segment = normalize(raw);
-            self.prefixes.iter().any(|prefix| begins_with(&segment, prefix))
-                && self.passes_listed_options(&segment, raw)
+            let segment = collapse_whitespace(raw);
+            self.prefixes.iter().any(|prefix| begins_with(&segment, prefix)) && self.passes_listed_options(&segment)
         })
     }
 
-    /// Whether a pipeline segment passes only the options its program may pass. `segment` is
-    /// normalized; the options are read from `raw`, which keeps their case.
-    fn passes_listed_options(&self, segment: &str, raw: &str) -> bool {
-        let Some(program) = segment.split(' ').next() else {
+    /// Whether a pipeline segment, its whitespace collapsed, passes only the options its
+    /// program may pass. The program is looked up without regard to case, unlike the
+    /// prefixes: that only puts more segments under a list of options.
+    fn passes_listed_options(&self, segment: &str) -> bool {
+        let mut words = segment.split(' ');
+        let Some(program) = words.next().map(str::to_lowercase) else {
             return true;
         };
-        let Some((_, options)) = self.options.iter().find(|(name, _)| name == program) else {
+        let Some((_, options)) = self.options.iter().find(|(name, _)| *name == program) else {
             return true;
         };
-        raw.split_whitespace()
-            .skip(1)
+        words
             .filter(|word| word.starts_with('-'))
             .all(|option| options.allows(option))
     }
@@ -138,12 +141,31 @@ mod tests {
         let list = AutoApprove::new(["kubectl get", "grep", "jq"]);
         for command in [
             "kubectl get pods -A | grep -v Running",
-            "KUBECTL  get\tpods -n prod",
+            "kubectl  get\tpods -n prod",
             "kubectl get pods -o json | jq -s .",
             "grep -s error app.log",
         ] {
             assert!(list.covers(command), "{command}");
         }
+    }
+
+    #[test]
+    fn auto_approval_tells_programs_apart_by_case() {
+        // Where file names keep their case, `HEAD` and `head` are two programs.
+        let list = AutoApprove::new(["head", "kubectl get"]);
+        for command in [
+            "HEAD x",
+            "Head -n 1 app.log",
+            "KUBECTL  get\tpods -n prod",
+            "kubectl GET pods",
+            "kubectl get pods | HEAD",
+        ] {
+            assert!(!list.covers(command), "{command}");
+        }
+        assert!(list.covers("head -n 1 app.log"));
+        let upper = AutoApprove::new(["HEAD"]);
+        assert!(upper.covers("HEAD x"));
+        assert!(!upper.covers("head x"));
     }
 
     #[test]
@@ -234,6 +256,14 @@ mod tests {
         );
         assert!(list.covers("kubectl get --raw /api"));
         assert!(!list.covers("kubectl get pods -n prod"));
+    }
+
+    #[test]
+    fn a_programs_options_limit_it_however_its_name_is_cased() {
+        // The prefix lets `Kubectl` run; the options it may pass are those listed for kubectl.
+        let list = AutoApprove::new(["Kubectl get"]).options("kubectl", kubectl_read_only());
+        assert!(list.covers("Kubectl get pods -n prod"));
+        assert!(!list.covers("Kubectl get pods --raw /api"));
     }
 
     #[test]

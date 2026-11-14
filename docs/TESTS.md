@@ -32,12 +32,12 @@
 | `tests/request_audit.rs` | 从会话文件还原请求（G3），含固定会话的逐字节比对 |
 | `tests/executor.rs` | 工具只经执行器运行命令与读写文件 |
 | `tests/search_tools.rs` | grep、find、ls |
-| `tests/file_tools.rs` | edit_file 与 write_file |
-| `tests/output_store.rs` | 长结果落盘与分页 |
+| `tests/file_tools.rs` | edit_file 与 write_file；调用被丢弃时文件仍写完整 |
+| `tests/output_store.rs` | 长结果落盘（留下第一页）与分页；不经符号链接读写 |
 | `tests/hooks.rs` | 钩子、审批、策略事件与脱敏 |
 | `tests/hook_contract.rs` | 钩子输入输出的 JSON 契约 |
 | `tests/extensions.rs` | `AgentConfig::extensions`：扩展给会话加了什么，哪些扩展让 `Agent::new` 拒绝 |
-| `tests/mcp.rs` | MCP 客户端对假服务器 |
+| `tests/mcp.rs` | MCP 客户端对假服务器；运行被取消时通知服务器放弃调用 |
 | `tests/im_feishu.rs` | ⚑ D:5/CHINA FLAG: 飞书 channel 对假开放平台 |
 | `tests/im_slack.rs` | Slack channel 对假 Slack |
 | `tests/im_server.rs` | IM 服务的会话划分、接话、审批与停止 |

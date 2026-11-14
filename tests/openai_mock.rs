@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use common::mock_server::{MockServer, Reply};
 use common::{RunnerSetup, config, fast_retry};
-use zx_agent::ai::openai::{ApiKey, OpenAiCompatible, OpenAiConfig};
+use zx_agent::ai::openai::{ApiKey, BodyOptions, MaxTokensField, OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::{Message, PREAMBLE, ProviderError, StopReason, SystemPrompt};
 use zx_agent::builtin::tools::BashTool;
@@ -548,7 +548,10 @@ async fn the_cache_key_is_sent_as_prompt_cache_key_only_when_the_provider_is_tol
     let mut setup = setup_with_provider(
         &server,
         OpenAiConfig {
-            prompt_cache_key: true,
+            body: BodyOptions {
+                prompt_cache_key: true,
+                ..BodyOptions::default()
+            },
             ..OpenAiConfig::default()
         },
     );
@@ -578,6 +581,29 @@ async fn the_cache_key_is_sent_as_prompt_cache_key_only_when_the_provider_is_tol
     let (mut runner, _) = plain.build();
     runner.run("go", &CancellationToken::new()).await;
     assert!(server.requests()[1].body.get("prompt_cache_key").is_none());
+}
+
+#[tokio::test]
+async fn the_output_limit_is_sent_in_the_field_the_provider_is_told_to_use() {
+    let server = MockServer::start(vec![Reply::text("ok")]).await;
+    let setup = setup_with_provider(
+        &server,
+        OpenAiConfig {
+            body: BodyOptions {
+                max_tokens_field: MaxTokensField::MaxCompletionTokens,
+                ..BodyOptions::default()
+            },
+            ..OpenAiConfig::default()
+        },
+    );
+    let (mut runner, _) = setup.build();
+
+    let report = runner.run("go", &CancellationToken::new()).await;
+
+    assert_eq!(report.outcome, RunOutcome::Completed, "{:?}", report.error);
+    let body = &server.requests()[0].body;
+    assert_eq!(body["max_completion_tokens"], 256);
+    assert!(body.get("max_tokens").is_none(), "{body}");
 }
 
 /// A new session in memory whose ID is `session-42`.

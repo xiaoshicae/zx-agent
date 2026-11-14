@@ -78,7 +78,8 @@ impl Tool for WriteFileTool {
         let _turn = unless_cancelled(ctx, self.queue.turn(&path))
             .await
             .ok_or_else(cancelled)?;
-        // Checked last before writing: a write is not interrupted once it has started.
+        // Checked last before writing: the executor finishes a write it has begun, also when
+        // this call is dropped meanwhile, so that no file is left empty or cut short.
         if ctx.cancel.is_cancelled() {
             return Err(cancelled());
         }

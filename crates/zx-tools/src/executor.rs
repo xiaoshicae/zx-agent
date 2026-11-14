@@ -99,8 +99,13 @@ pub trait Executor: Send + Sync {
 
     /// Replace the contents of the file at `path` with `contents`, creating the file and its
     /// missing parent directories. Directories and special files are refused. The write is
-    /// not atomic: a reader may see it half done, and dropping the future may leave it so.
-    /// Callers that must respond to cancellation check their token before calling.
+    /// not atomic: a reader may see it half done.
+    ///
+    /// Once the write has begun it must run to its end, also when the future is dropped, as
+    /// the loop drops the calls of a cancelled run: a write stopped half way would leave the
+    /// file empty or cut short. [`LocalExecutor`] and [`ContainerExecutor`] finish it on a
+    /// thread or task of its own. So callers that must respond to cancellation check their
+    /// token before calling, and a caller that is dropped cannot tell when the write ends.
     async fn write_file(&self, path: &Path, contents: &[u8]) -> Result<(), String>;
 }
 

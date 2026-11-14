@@ -41,7 +41,7 @@ use tokio_util::sync::CancellationToken;
 
 use common::summary_eval::evaluate;
 use common::{RunnerSetup, config, fast_retry};
-use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig, SystemUpdates};
+use zx_agent::ai::openai::{BodyOptions, OpenAiCompatible, OpenAiConfig, SystemUpdates};
 use zx_agent::ai::{Message, Provider};
 use zx_agent::builtin::executor::{LocalExecutor, local_environment_section};
 use zx_agent::builtin::policy::{AutoApprove, Rule, RuleMatcher, RulePolicy};
@@ -93,7 +93,10 @@ impl Endpoint {
         OpenAiCompatible::new(OpenAiConfig {
             base_url: self.base_url.clone(),
             api_key: api_key.into(),
-            system_updates: self.system_updates,
+            body: BodyOptions {
+                system_updates: self.system_updates,
+                ..BodyOptions::default()
+            },
             ..OpenAiConfig::default()
         })
         .unwrap()

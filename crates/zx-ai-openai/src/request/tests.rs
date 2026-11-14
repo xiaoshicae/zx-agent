@@ -1,9 +1,37 @@
+use serde_json::Map;
 use zx_ai::provider::Provider;
 use zx_ai::{SectionChange, StopReason, SystemMessage, ToolCall, ToolDef, ToolResultMessage, Usage};
 
 use super::*;
 use crate::OpenAiCompatible;
-use crate::config::{ApiKey, RESERVED_FIELDS};
+use crate::config::{ApiKey, MaxTokensField, OpenAiConfig, RESERVED_FIELDS};
+
+/// The options of a provider that sends system prompt changes as `system_updates` says and
+/// leaves every other setting at its default.
+fn options(system_updates: SystemUpdates) -> BodyOptions {
+    BodyOptions {
+        system_updates,
+        ..BodyOptions::default()
+    }
+}
+
+/// The body of `request` to the provider `p`, written as `options` say.
+fn body_of(request: &Request, options: &BodyOptions) -> Value {
+    build_body(request, options, "p")
+}
+
+/// A provider named `p` that writes bodies as `body` says. Its address and key are not part
+/// of what a request records.
+fn provider(body: BodyOptions) -> OpenAiCompatible {
+    OpenAiCompatible::new(OpenAiConfig {
+        base_url: "https://example.invalid/v1".into(),
+        api_key: ApiKey::fixed("sk-not-recorded"),
+        provider_name: "p".into(),
+        body,
+        ..OpenAiConfig::default()
+    })
+    .unwrap()
+}
 
 #[test]
 fn body_pairs_tool_calls_with_results() {
@@ -52,7 +80,7 @@ fn body_pairs_tool_calls_with_results() {
         reasoning: None,
         cache_key: None,
     };
-    let body = build_body(&request, &p_config(SystemUpdates::default()));
+    let body = body_of(&request, &options(SystemUpdates::default()));
     let roles: Vec<&str> = body["messages"]
         .as_array()
         .unwrap()
@@ -106,20 +134,12 @@ fn tool_result_details_stay_out_of_the_body() {
         reasoning: None,
         cache_key: None,
     };
-    let body = build_body(&request, &p_config(SystemUpdates::default()));
+    let body = body_of(&request, &options(SystemUpdates::default()));
     assert_eq!(
         body["messages"][2],
         json!({"role": "tool", "tool_call_id": "a", "content": "ok"})
     );
     assert!(!body.to_string().contains("onlyForObservers"));
-}
-
-fn p_config(system_updates: SystemUpdates) -> OpenAiConfig {
-    OpenAiConfig {
-        provider_name: "p".into(),
-        system_updates,
-        ..OpenAiConfig::default()
-    }
 }
 
 fn system(changes: &[(&str, Option<&str>)]) -> Message {
@@ -145,7 +165,7 @@ fn sent(messages: Vec<Message>, system_updates: SystemUpdates) -> Vec<(String, S
         reasoning: None,
         cache_key: None,
     };
-    let body = build_body(&request, &p_config(system_updates));
+    let body = body_of(&request, &options(system_updates));
     body["messages"]
         .as_array()
         .unwrap()
@@ -230,7 +250,7 @@ fn assistant_entries(messages: Vec<Message>) -> Vec<Value> {
         reasoning: None,
         cache_key: None,
     };
-    let body = build_body(&request, &p_config(SystemUpdates::default()));
+    let body = body_of(&request, &options(SystemUpdates::default()));
     body["messages"]
         .as_array()
         .unwrap()
@@ -289,17 +309,17 @@ fn second_answer(body: &Value) -> &Value {
 fn fills_empty_reasoning_once_the_history_carries_some_when_asked() {
     // A thinking-mode server rejects a history in which a response without reasoning
     // lacks the field.
-    let config = OpenAiConfig {
+    let filling = BodyOptions {
         fill_missing_reasoning: true,
-        ..p_config(SystemUpdates::default())
+        ..BodyOptions::default()
     };
-    let body = build_body(&partly_reasoned(), &config);
+    let body = body_of(&partly_reasoned(), &filling);
     assert_eq!(second_answer(&body)["reasoning_content"], "");
 }
 
 #[test]
 fn leaves_missing_reasoning_alone_unless_asked() {
-    let body = build_body(&partly_reasoned(), &p_config(SystemUpdates::default()));
+    let body = body_of(&partly_reasoned(), &BodyOptions::default());
     assert!(second_answer(&body).get("reasoning_content").is_none(), "{body}");
 }
 
@@ -335,47 +355,62 @@ fn replayable_request() -> Request {
 fn replayed_bodies_match_the_live_body_in_both_system_update_modes() {
     let request = replayable_request();
     for system_updates in [SystemUpdates::Collapse, SystemUpdates::Inline] {
-        let live = OpenAiConfig {
-            base_url: "https://example.invalid/v1".into(),
-            api_key: ApiKey::fixed("sk-not-recorded"),
-            ..p_config(system_updates)
-        };
-        let provider = OpenAiCompatible::new(live.clone()).unwrap();
+        let live = options(system_updates);
+        let provider = provider(live.clone());
         let replayed = replay_body(&request, provider.name(), &provider.request_options()).unwrap();
-        assert_eq!(replayed, build_body(&request, &live), "{system_updates:?}");
+        assert_eq!(replayed, body_of(&request, &live), "{system_updates:?}");
     }
 }
 
 #[test]
 fn request_options_hold_only_the_conversion_policy() {
-    let provider = OpenAiCompatible::new(OpenAiConfig {
-        base_url: "https://example.invalid/v1".into(),
-        api_key: ApiKey::fixed("sk-not-recorded"),
-        ..p_config(SystemUpdates::Inline)
-    })
-    .unwrap();
     assert_eq!(
-        provider.request_options(),
+        provider(options(SystemUpdates::Inline)).request_options(),
         json!({"format": "openai-chat-completions", "version": 2, "systemUpdates": "inline"})
     );
-    let filling = OpenAiCompatible::new(OpenAiConfig {
+    let filling = BodyOptions {
         fill_missing_reasoning: true,
-        ..p_config(SystemUpdates::Collapse)
-    })
-    .unwrap();
-    let options = filling.request_options();
-    assert_eq!(options["fillMissingReasoning"], json!(true));
+        ..BodyOptions::default()
+    };
+    let recorded = provider(filling.clone()).request_options();
+    assert_eq!(recorded["fillMissingReasoning"], json!(true));
     let request = partly_reasoned();
     assert_eq!(
-        replay_body(&request, "p", &options).unwrap(),
-        build_body(
-            &request,
-            &OpenAiConfig {
-                fill_missing_reasoning: true,
-                ..p_config(SystemUpdates::Collapse)
-            }
-        )
+        replay_body(&request, "p", &recorded).unwrap(),
+        body_of(&request, &filling)
     );
+}
+
+#[test]
+fn every_option_is_recorded_under_its_name_and_replays() {
+    let all = BodyOptions {
+        system_updates: SystemUpdates::Inline,
+        extra_fields: fields(&[("seed", json!(7))]),
+        fill_missing_reasoning: true,
+        reasoning_format: ReasoningFormat::ReasoningObject,
+        prompt_cache_key: true,
+        max_tokens_field: MaxTokensField::MaxCompletionTokens,
+    };
+    let recorded = provider(all.clone()).request_options();
+    assert_eq!(
+        recorded,
+        json!({
+            "format": "openai-chat-completions",
+            "version": 2,
+            "systemUpdates": "inline",
+            "extraFields": {"seed": 7},
+            "fillMissingReasoning": true,
+            "reasoningFormat": "reasoning-object",
+            "promptCacheKey": true,
+            "maxTokensField": "max_completion_tokens",
+        })
+    );
+    let request = Request {
+        reasoning: Some(Reasoning::Low),
+        cache_key: Some("session-1".into()),
+        ..replayable_request()
+    };
+    assert_eq!(replay_body(&request, "p", &recorded).unwrap(), body_of(&request, &all));
 }
 
 #[test]
@@ -389,6 +424,8 @@ fn replay_rejects_unknown_conversion_options() {
         json!({"format": "openai-chat-completions", "version": 1, "systemUpdates": "collapse"}),
         json!({"format": "openai-chat-completions", "version": 2, "systemUpdates": "sideways"}),
         json!({"format": "openai-chat-completions", "version": 2, "systemUpdates": "collapse", "extra": 1}),
+        json!({"format": "openai-chat-completions", "version": 2}),
+        json!({"format": "openai-chat-completions", "version": 2, "systemUpdates": "collapse", "maxTokensField": "max_output_tokens"}),
     ] {
         assert!(replay_body(&request, "p", &options).is_err(), "{options}");
     }
@@ -403,25 +440,24 @@ fn fields(pairs: &[(&str, Value)]) -> Map<String, Value> {
 
 #[test]
 fn extra_fields_go_into_the_body_and_the_recorded_options() {
-    let config = OpenAiConfig {
+    let with_fields = BodyOptions {
         extra_fields: fields(&[
             ("thinking", json!({"type": "disabled"})),
             ("reasoning_effort", json!("low")),
         ]),
-        ..p_config(SystemUpdates::Collapse)
+        ..BodyOptions::default()
     };
     let request = replayable_request();
-    let body = build_body(&request, &config);
+    let body = body_of(&request, &with_fields);
     assert_eq!(body["thinking"], json!({"type": "disabled"}));
     assert_eq!(body["reasoning_effort"], json!("low"));
-    let provider = OpenAiCompatible::new(config).unwrap();
-    let options = provider.request_options();
+    let recorded = provider(with_fields).request_options();
     assert_eq!(
-        options["extraFields"],
+        recorded["extraFields"],
         json!({"thinking": {"type": "disabled"}, "reasoning_effort": "low"})
     );
     // The audit rebuilds the body that was sent.
-    assert_eq!(replay_body(&request, "p", &options).unwrap(), body);
+    assert_eq!(replay_body(&request, "p", &recorded).unwrap(), body);
 }
 
 #[test]
@@ -429,8 +465,11 @@ fn fields_the_provider_sets_cannot_be_added() {
     for field in RESERVED_FIELDS {
         let extra_fields = fields(&[(field, json!(false))]);
         let error = OpenAiCompatible::new(OpenAiConfig {
-            extra_fields: extra_fields.clone(),
-            ..p_config(SystemUpdates::Collapse)
+            body: BodyOptions {
+                extra_fields: extra_fields.clone(),
+                ..BodyOptions::default()
+            },
+            ..OpenAiConfig::default()
         })
         .err()
         .unwrap();
@@ -450,11 +489,11 @@ fn reasoned(reasoning: Option<Reasoning>, format: ReasoningFormat) -> Value {
         reasoning,
         ..replayable_request()
     };
-    let config = OpenAiConfig {
+    let options = BodyOptions {
         reasoning_format: format,
-        ..p_config(SystemUpdates::Collapse)
+        ..BodyOptions::default()
     };
-    build_body(&request, &config)
+    body_of(&request, &options)
 }
 
 /// The body's reasoning fields, so that assertions do not depend on the rest.
@@ -517,35 +556,35 @@ fn each_reasoning_format_writes_its_own_fields() {
 
 #[test]
 fn a_requests_reasoning_level_wins_over_a_fixed_extra_field() {
-    let config = OpenAiConfig {
+    let fixed = BodyOptions {
         extra_fields: fields(&[("reasoning_effort", json!("low"))]),
-        ..p_config(SystemUpdates::Collapse)
+        ..BodyOptions::default()
     };
     let request = Request {
         reasoning: Some(Reasoning::High),
         ..replayable_request()
     };
-    assert_eq!(build_body(&request, &config)["reasoning_effort"], "high");
-    assert_eq!(build_body(&replayable_request(), &config)["reasoning_effort"], "low");
+    assert_eq!(body_of(&request, &fixed)["reasoning_effort"], "high");
+    assert_eq!(body_of(&replayable_request(), &fixed)["reasoning_effort"], "low");
 }
 
 #[test]
 fn the_reasoning_format_is_recorded_unless_it_is_the_default_and_replays() {
-    let default = OpenAiCompatible::new(p_config(SystemUpdates::Collapse)).unwrap();
+    let default = provider(BodyOptions::default());
     assert!(default.request_options().get("reasoningFormat").is_none());
-    let config = OpenAiConfig {
+    let thinking = BodyOptions {
         reasoning_format: ReasoningFormat::Thinking,
-        ..p_config(SystemUpdates::Collapse)
+        ..BodyOptions::default()
     };
     let request = Request {
         reasoning: Some(Reasoning::Medium),
         ..replayable_request()
     };
-    let body = build_body(&request, &config);
-    let options = OpenAiCompatible::new(config).unwrap().request_options();
-    assert_eq!(options["reasoningFormat"], "thinking");
-    assert_eq!(replay_body(&request, "p", &options).unwrap(), body);
-    let mut unknown = options.clone();
+    let body = body_of(&request, &thinking);
+    let recorded = provider(thinking).request_options();
+    assert_eq!(recorded["reasoningFormat"], "thinking");
+    assert_eq!(replay_body(&request, "p", &recorded).unwrap(), body);
+    let mut unknown = recorded.clone();
     unknown["reasoningFormat"] = json!("guess");
     assert!(replay_body(&request, "p", &unknown).is_err());
 }
@@ -556,31 +595,57 @@ fn the_cache_key_is_sent_only_when_enabled_and_replays() {
         cache_key: Some("session-1".into()),
         ..replayable_request()
     };
-    let off = build_body(&request, &OpenAiConfig::default());
+    let off = body_of(&request, &BodyOptions::default());
     assert!(off.get("prompt_cache_key").is_none());
-    let config = OpenAiConfig {
+    let keyed = BodyOptions {
         prompt_cache_key: true,
-        ..OpenAiConfig::default()
+        ..BodyOptions::default()
     };
-    let on = build_body(&request, &config);
+    let on = body_of(&request, &keyed);
     assert_eq!(on["prompt_cache_key"], "session-1");
-    let provider = OpenAiCompatible::new(OpenAiConfig {
-        base_url: "https://example.invalid/v1".into(),
-        ..config
-    })
-    .unwrap();
+    let provider = provider(keyed.clone());
     assert_eq!(provider.request_options()["promptCacheKey"], true);
     assert_eq!(
         replay_body(&request, provider.name(), &provider.request_options()).unwrap(),
         on
     );
     // Without a key there is nothing to send, whatever the setting.
-    let keyless = build_body(
-        &replayable_request(),
-        &OpenAiConfig {
-            prompt_cache_key: true,
-            ..OpenAiConfig::default()
-        },
-    );
+    let keyless = body_of(&replayable_request(), &keyed);
     assert!(keyless.get("prompt_cache_key").is_none());
+}
+
+#[test]
+fn the_output_limit_is_written_in_the_chosen_field_and_replays() {
+    let request = replayable_request();
+    let default = body_of(&request, &BodyOptions::default());
+    assert_eq!(default["max_tokens"], 64);
+    assert!(default.get("max_completion_tokens").is_none(), "{default}");
+    assert!(
+        provider(BodyOptions::default())
+            .request_options()
+            .get("maxTokensField")
+            .is_none()
+    );
+
+    let newer = BodyOptions {
+        max_tokens_field: MaxTokensField::MaxCompletionTokens,
+        ..BodyOptions::default()
+    };
+    let body = body_of(&request, &newer);
+    assert_eq!(body["max_completion_tokens"], 64);
+    assert!(body.get("max_tokens").is_none(), "{body}");
+    let recorded = provider(newer.clone()).request_options();
+    assert_eq!(recorded["maxTokensField"], "max_completion_tokens");
+    assert_eq!(replay_body(&request, "p", &recorded).unwrap(), body);
+
+    // Without a limit neither field is sent, whichever is chosen.
+    let unlimited = Request {
+        max_tokens: None,
+        ..replayable_request()
+    };
+    let body = body_of(&unlimited, &newer);
+    assert!(
+        body.get("max_tokens").is_none() && body.get("max_completion_tokens").is_none(),
+        "{body}"
+    );
 }

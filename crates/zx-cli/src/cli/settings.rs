@@ -97,10 +97,10 @@ mod tests {
         let provider = &mut config.provider;
         provider.openai.base_url = "http://file/v1".into();
         provider.api_key_env = "FILE_KEY".into();
-        provider.openai.system_updates = SystemUpdates::Inline;
-        provider.openai.reasoning_format = ReasoningFormat::Thinking;
-        provider.openai.fill_missing_reasoning = true;
-        provider.openai.prompt_cache_key = true;
+        provider.openai.body.system_updates = SystemUpdates::Inline;
+        provider.openai.body.reasoning_format = ReasoningFormat::Thinking;
+        provider.openai.body.fill_missing_reasoning = true;
+        provider.openai.body.prompt_cache_key = true;
         provider.openai.idle_timeout = Duration::from_secs(15);
         provider.retry.max_retries = 0;
         config
@@ -120,10 +120,10 @@ mod tests {
         let provider = &settings.config.provider;
         assert_eq!(provider.openai.base_url, "http://file/v1");
         assert_eq!(provider.api_key_env, "FILE_KEY");
-        assert_eq!(provider.openai.system_updates, SystemUpdates::Inline);
+        assert_eq!(provider.openai.body.system_updates, SystemUpdates::Inline);
         assert_eq!(settings.config.reasoning, Some(Reasoning::Low));
-        assert_eq!(provider.openai.reasoning_format, ReasoningFormat::Thinking);
-        assert!(provider.openai.fill_missing_reasoning && provider.openai.prompt_cache_key);
+        assert_eq!(provider.openai.body.reasoning_format, ReasoningFormat::Thinking);
+        assert!(provider.openai.body.fill_missing_reasoning && provider.openai.body.prompt_cache_key);
         assert_eq!(settings.config.max_tokens, Some(512));
         assert_eq!(settings.tool_timeout, Duration::from_secs(30));
         assert_eq!(provider.openai.idle_timeout, Duration::from_secs(15));
@@ -137,10 +137,10 @@ mod tests {
         let provider = &settings.config.provider;
         assert_eq!(provider.openai.base_url, "https://api.openai.com/v1");
         assert_eq!(provider.api_key_env, "OPENAI_API_KEY");
-        assert_eq!(provider.openai.system_updates, SystemUpdates::Collapse);
+        assert_eq!(provider.openai.body.system_updates, SystemUpdates::Collapse);
         assert_eq!(settings.config.reasoning, None);
-        assert_eq!(provider.openai.reasoning_format, ReasoningFormat::Effort);
-        assert!(!provider.openai.fill_missing_reasoning && !provider.openai.prompt_cache_key);
+        assert_eq!(provider.openai.body.reasoning_format, ReasoningFormat::Effort);
+        assert!(!provider.openai.body.fill_missing_reasoning && !provider.openai.body.prompt_cache_key);
         assert_eq!(settings.config.max_tokens, None);
         assert_eq!(settings.tool_timeout, Duration::from_secs(120));
         assert_eq!(provider.openai.idle_timeout, Duration::from_secs(120));
