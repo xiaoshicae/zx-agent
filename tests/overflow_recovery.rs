@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
-use tokio_util::sync::CancellationToken;
 
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::retry::RetryPolicy;
@@ -18,7 +17,7 @@ use zx_agent::runner::{RunLimits, RunOutcome};
 use zx_agent::tools::Tool;
 use zx_agent::transcript::{Entry, Transcript};
 
-use common::{Collect, EchoTool, Runner, RunnerSetup, config, fast_retry, seeded_session, summary_json, test_limits};
+use common::{Collect, Driven, EchoTool, RunnerSetup, config, fast_retry, seeded_session, summary_json, test_limits};
 
 const OVERFLOW: &str = "HTTP 400: This model's maximum context length is 65536 tokens";
 
@@ -35,7 +34,7 @@ fn compaction() -> Config {
 
 /// A runner over `session` that asks `provider`, with automatic compaction enabled and no
 /// retries.
-fn runner(provider: &Arc<FauxProvider>, session: Transcript, limits: RunLimits) -> (Runner, Arc<Collect>) {
+fn runner(provider: &Arc<FauxProvider>, session: Transcript, limits: RunLimits) -> (Driven, Arc<Collect>) {
     retrying_runner(provider, session, limits, fast_retry(0))
 }
 
@@ -45,16 +44,16 @@ fn retrying_runner(
     session: Transcript,
     limits: RunLimits,
     retry: RetryPolicy,
-) -> (Runner, Arc<Collect>) {
+) -> (Driven, Arc<Collect>) {
     let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(EchoTool::new("echo"))];
-    let (runner, events) = RunnerSetup {
+    RunnerSetup {
         session,
         limits,
         retry,
+        compaction: compaction(),
         ..RunnerSetup::new(config(provider.clone(), tools))
     }
-    .build();
-    (runner.with_compaction(compaction()).unwrap(), events)
+    .build()
 }
 
 fn count(events: &Collect, kind: &str) -> usize {
@@ -76,9 +75,9 @@ async fn a_context_the_model_rejects_as_too_long_is_compacted_once_and_the_run_c
         FauxStep::text(summary_json(&old)),
         FauxStep::text("answer"),
     ]));
-    let (mut runner, events) = runner(&provider, session, test_limits());
+    let (runner, events) = runner(&provider, session, test_limits());
 
-    let report = runner.run("continue", &CancellationToken::new()).await;
+    let report = runner.run("continue").await;
 
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
     assert_eq!(report.final_text, "answer");
@@ -151,9 +150,9 @@ async fn a_recovery_starts_an_attempt_but_is_not_a_retry() {
         FauxStep::Fail("HTTP 503: busy".into()),
         FauxStep::text("answer"),
     ]));
-    let (mut runner, events) = retrying_runner(&provider, session, test_limits(), fast_retry(1));
+    let (runner, events) = retrying_runner(&provider, session, test_limits(), fast_retry(1));
 
-    let report = runner.run("continue", &CancellationToken::new()).await;
+    let report = runner.run("continue").await;
 
     assert_eq!(
         (report.outcome, report.retries),
@@ -177,14 +176,14 @@ async fn a_recovery_starts_an_attempt_but_is_not_a_retry() {
 async fn without_automatic_compaction_an_overflow_ends_the_run_as_before() {
     let (session, _) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([FauxStep::Fail(OVERFLOW.into())]));
-    let (mut runner, events) = RunnerSetup {
+    let (runner, events) = RunnerSetup {
         session,
         retry: fast_retry(3),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build();
 
-    let report = runner.run("continue", &CancellationToken::new()).await;
+    let report = runner.run("continue").await;
 
     assert_eq!(report.outcome, RunOutcome::Failed);
     assert_eq!(report.error.as_deref(), Some(OVERFLOW));
@@ -201,9 +200,9 @@ async fn an_overflow_right_after_a_recovery_ends_the_run() {
         FauxStep::Fail(OVERFLOW.into()),
         FauxStep::text("must not be requested"),
     ]));
-    let (mut runner, events) = runner(&provider, session, test_limits());
+    let (runner, events) = runner(&provider, session, test_limits());
 
-    let report = runner.run("continue", &CancellationToken::new()).await;
+    let report = runner.run("continue").await;
 
     assert_eq!(report.outcome, RunOutcome::Failed);
     let error = report.error.unwrap_or_default();
@@ -223,9 +222,9 @@ async fn an_answer_after_a_recovery_allows_another_recovery() {
         FauxStep::tool_call("c1", "echo", json!({"text": "hi"})),
         FauxStep::Fail(OVERFLOW.into()),
     ]));
-    let (mut runner, events) = runner(&provider, session, test_limits());
+    let (runner, events) = runner(&provider, session, test_limits());
 
-    let report = runner.run("continue", &CancellationToken::new()).await;
+    let report = runner.run("continue").await;
 
     // The answer with the tool call succeeded, so the second overflow is recovered from
     // again; there is nothing new before the latest input to summarize, so that fails.
@@ -245,9 +244,9 @@ async fn a_failed_recovery_summary_pauses_automatic_compaction() {
         FauxStep::Fail(OVERFLOW.into()),
         FauxStep::text("must not be requested"),
     ]));
-    let (mut runner, _) = runner(&provider, session, test_limits());
+    let (runner, _) = runner(&provider, session, test_limits());
 
-    let first = runner.run("continue", &CancellationToken::new()).await;
+    let first = runner.run("continue").await;
     assert_eq!(first.outcome, RunOutcome::Failed);
     let error = first.error.unwrap_or_default();
     assert!(error.starts_with(OVERFLOW), "{error}");
@@ -258,7 +257,7 @@ async fn a_failed_recovery_summary_pauses_automatic_compaction() {
         Some(Entry::CompactionFailed(_))
     ));
 
-    let second = runner.run("try again", &CancellationToken::new()).await;
+    let second = runner.run("try again").await;
     assert_eq!(second.outcome, RunOutcome::Failed);
     assert!(second.error.unwrap_or_default().contains("paused"));
     assert_eq!(provider.requests().len(), 3, "the failed summary is not paid for again");
@@ -275,9 +274,9 @@ async fn an_overflow_without_request_budget_left_ends_the_run() {
         max_model_requests: Some(1),
         ..test_limits()
     };
-    let (mut runner, events) = runner(&provider, session, limits);
+    let (runner, events) = runner(&provider, session, limits);
 
-    let report = runner.run("continue", &CancellationToken::new()).await;
+    let report = runner.run("continue").await;
 
     assert_eq!(report.outcome, RunOutcome::Failed);
     assert_eq!(report.error.as_deref(), Some(OVERFLOW));
@@ -293,9 +292,9 @@ async fn the_run_timeout_also_bounds_the_recovery_summary() {
         timeout: Some(Duration::from_millis(200)),
         ..test_limits()
     };
-    let (mut runner, _) = runner(&provider, session, limits);
+    let (runner, _) = runner(&provider, session, limits);
 
-    let report = runner.run("continue", &CancellationToken::new()).await;
+    let report = runner.run("continue").await;
 
     assert_eq!(report.outcome, RunOutcome::TimedOut, "{report:?}");
     assert_eq!(report.model_requests, 2);

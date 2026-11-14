@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
-use tokio_util::sync::CancellationToken;
 
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, PREAMBLE, Request, SystemPrompt};
@@ -97,13 +96,13 @@ async fn every_dispatched_request_is_rebuilt_exactly_from_the_session_file() {
     let mut config = config(provider.clone(), vec![tool]);
     config.system_prompt = SystemPrompt::default().with_section(PREAMBLE, "Be brief.");
     config.max_tokens = Some(256);
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         session: common::create_session_file(&path, header()).await.unwrap(),
         ..RunnerSetup::new(config)
     }
     .build();
 
-    let report = runner.run("inspect", &CancellationToken::new()).await;
+    let report = runner.run("inspect").await;
 
     assert_eq!(report.outcome, RunOutcome::Completed);
     let sent = provider.requests();
@@ -119,22 +118,21 @@ async fn request_config_is_appended_only_when_the_configuration_changes() {
     let path = dir.path().join("s.jsonl");
     let first = Arc::new(FauxProvider::new([FauxStep::text("one"), FauxStep::text("two")]));
     let second = Arc::new(FauxProvider::new([FauxStep::text("three")]));
-    let (runner, _) = RunnerSetup {
+    let (session, _) = RunnerSetup {
         session: common::create_session_file(&path, header()).await.unwrap(),
         ..RunnerSetup::new(config(first.clone(), vec![]))
     }
     .build();
-    let session = runner.into_session();
 
-    session.prompt("a", &CancellationToken::new()).await.unwrap();
-    session.prompt("b", &CancellationToken::new()).await.unwrap();
+    session.prompt("a").await.unwrap();
+    session.prompt("b").await.unwrap();
     session
         .set_model(ModelRef {
             provider: second.clone(),
             model: "other-model".into(),
         })
         .unwrap();
-    session.prompt("c", &CancellationToken::new()).await.unwrap();
+    session.prompt("c").await.unwrap();
 
     let configs = types(&path).iter().filter(|kind| *kind == "request_config").count();
     assert_eq!(configs, 2, "{:?}", types(&path));
@@ -158,21 +156,18 @@ async fn summary_requests_are_rebuilt_from_their_compaction() {
     let summary =
         json!({"facts":[{"text":"Old observation","sourceEntryIds":[old]}],"inferences":[],"plans":[]}).to_string();
     let provider = Arc::new(FauxProvider::new([FauxStep::text(summary)]));
-    let (runner, _) = RunnerSetup {
+    let (session, _) = RunnerSetup {
         session: store,
-        ..RunnerSetup::new(config(provider.clone(), vec![]))
-    }
-    .build();
-    let session = runner
-        .with_compaction(Config {
+        compaction: Config {
             keep_recent_bytes: 1,
             timeout: Duration::from_secs(1),
             ..Config::default()
-        })
-        .unwrap()
-        .into_session();
+        },
+        ..RunnerSetup::new(config(provider.clone(), vec![]))
+    }
+    .build();
 
-    let report = session.compact(&CancellationToken::new()).await.unwrap();
+    let report = session.compact().await.unwrap();
 
     assert_eq!(report.outcome, Outcome::Completed, "{report:?}");
     let reopened = common::read_session_file(&path).unwrap();
@@ -211,19 +206,19 @@ async fn requests_around_a_recovery_from_context_overflow_are_rebuilt_from_the_s
         FauxStep::text(summary.to_string()),
         FauxStep::text("answer"),
     ]));
-    let (runner, _) = RunnerSetup {
-        session,
-        ..RunnerSetup::new(config(provider.clone(), vec![]))
-    }
-    .build();
     let compaction = Config {
         trigger_bytes: Some(100_000),
         keep_recent_bytes: 1,
         ..Config::default()
     };
-    let mut runner = runner.with_compaction(compaction).unwrap();
+    let (runner, _) = RunnerSetup {
+        session,
+        compaction,
+        ..RunnerSetup::new(config(provider.clone(), vec![]))
+    }
+    .build();
 
-    let report = runner.run("continue", &CancellationToken::new()).await;
+    let report = runner.run("continue").await;
 
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
     // The failed task request, the summary and the task request after it.

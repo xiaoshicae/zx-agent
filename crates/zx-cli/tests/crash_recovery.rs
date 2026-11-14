@@ -14,7 +14,6 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::process::Command;
 use tokio::sync::Notify;
-use tokio_util::sync::CancellationToken;
 
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{AssistantMessage, ContentBlock, Message, StopReason, ToolCall, ToolDef, ToolResultMessage};
@@ -243,13 +242,13 @@ async fn each_start_is_on_disk_before_its_call_runs_and_reads_are_not_recorded()
         probe_in("write", Effects::SideEffects, ExecutionMode::Sequential, &path),
         probe_in("read", Effects::ReadOnly, ExecutionMode::Sequential, &path),
     ];
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         session: common::create_session_file(&path, header()).await.unwrap(),
         ..RunnerSetup::new(config(provider.clone(), tools))
     }
     .build();
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
 
     assert_eq!(report.outcome, RunOutcome::Completed);
     // Each call saw the starts recorded so far: its own when it has side effects.
@@ -282,13 +281,13 @@ async fn a_parallel_batch_records_every_start_before_any_call_runs() {
         probe("write", Effects::SideEffects, &path),
         probe("read", Effects::ReadOnly, &path),
     ];
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         session: common::create_session_file(&path, header()).await.unwrap(),
         ..RunnerSetup::new(config(provider.clone(), tools))
     }
     .build();
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
 
     assert_eq!(report.outcome, RunOutcome::Completed);
     let seen: Vec<String> = results(&provider.requests()[1].messages)
@@ -323,13 +322,13 @@ async fn an_interrupted_batch_gets_results_and_no_call_runs_again() {
     let read = Counted::new("read", Effects::ReadOnly);
     let tools: Vec<Arc<dyn Tool>> = vec![write.clone(), read.clone()];
     let provider = Arc::new(FauxProvider::new([FauxStep::text("checked")]));
-    let (mut runner, events) = RunnerSetup {
+    let (runner, events) = RunnerSetup {
         session: common::open_session_file(&path).await.unwrap(),
         ..RunnerSetup::new(config(provider.clone(), tools))
     }
     .build();
 
-    let report = runner.run("continue", &CancellationToken::new()).await;
+    let report = runner.run("continue").await;
 
     assert_eq!(report.outcome, RunOutcome::Completed);
     assert_eq!(write.runs.load(Ordering::SeqCst) + read.runs.load(Ordering::SeqCst), 0);
@@ -393,13 +392,13 @@ async fn calls_of_a_failed_or_cancelled_answer_are_reported_as_not_executed() {
         let read = Counted::new("read", Effects::ReadOnly);
         let tools: Vec<Arc<dyn Tool>> = vec![write.clone(), read.clone()];
         let provider = Arc::new(FauxProvider::new([FauxStep::text("checked")]));
-        let (mut runner, events) = RunnerSetup {
+        let (runner, events) = RunnerSetup {
             session: store,
             ..RunnerSetup::new(config(provider.clone(), tools))
         }
         .build();
 
-        let report = runner.run("continue", &CancellationToken::new()).await;
+        let report = runner.run("continue").await;
 
         assert_eq!(report.outcome, RunOutcome::Completed, "{stop_reason:?}");
         assert_eq!(write.runs.load(Ordering::SeqCst) + read.runs.load(Ordering::SeqCst), 0);
@@ -428,13 +427,13 @@ async fn the_recovery_event_follows_the_recorded_result() {
     store.append_message(answer(&[("c1", "write")])).await.unwrap();
     let tools: Vec<Arc<dyn Tool>> = vec![Counted::new("write", Effects::SideEffects)];
     let provider = Arc::new(FauxProvider::new([FauxStep::text("checked")]));
-    let (mut runner, events) = RunnerSetup {
+    let (runner, events) = RunnerSetup {
         session: store,
         ..RunnerSetup::new(config(provider, tools))
     }
     .build();
 
-    runner.run("continue", &CancellationToken::new()).await;
+    runner.run("continue").await;
 
     let events = events.events();
     let recorded = events
@@ -464,11 +463,9 @@ async fn a_dropped_run_is_recovered_by_the_next_prompt() {
         FauxStep::tool_call("c1", "hang", json!({})),
         FauxStep::text("checked"),
     ]));
-    let (runner, _) = RunnerSetup::new(config(provider.clone(), tools)).build();
-    let session = runner.into_session();
+    let (session, _) = RunnerSetup::new(config(provider.clone(), tools)).build();
     {
-        let cancel = CancellationToken::new();
-        let mut running = Box::pin(session.prompt("start", &cancel));
+        let mut running = Box::pin(session.prompt("start"));
         tokio::select! {
             () = hang.started.notified() => {}
             _ = &mut running => panic!("the run ended before its tool started"),
@@ -476,7 +473,7 @@ async fn a_dropped_run_is_recovered_by_the_next_prompt() {
         // Dropping the run future stops it before the result is recorded.
     }
 
-    let report = session.prompt("again", &CancellationToken::new()).await.unwrap();
+    let report = session.prompt("again").await.unwrap();
 
     assert_eq!(report.outcome, RunOutcome::Completed);
     let results = results(&provider.requests()[1].messages);
@@ -495,19 +492,17 @@ async fn result_after_cancelling_a_running_call(effects: Effects) -> (String, bo
         FauxStep::tool_call("c1", "hang", json!({})),
         FauxStep::text("checked"),
     ]));
-    let (runner, _) = RunnerSetup::new(config(provider.clone(), tools)).build();
-    let session = runner.into_session();
-    let cancel = CancellationToken::new();
+    let (session, _) = RunnerSetup::new(config(provider.clone(), tools)).build();
     {
-        let mut running = Box::pin(session.prompt("start", &cancel));
+        let mut running = Box::pin(session.prompt("start"));
         tokio::select! {
             () = hang.started.notified() => {}
             _ = &mut running => panic!("the run ended before its tool started"),
         }
-        cancel.cancel();
+        session.cancel();
         assert_eq!(running.await.unwrap().outcome, RunOutcome::Cancelled);
     }
-    let report = session.prompt("again", &CancellationToken::new()).await.unwrap();
+    let report = session.prompt("again").await.unwrap();
     assert_eq!(report.outcome, RunOutcome::Completed);
     let results = results(&provider.requests()[1].messages);
     assert_eq!(results.len(), 1, "{results:?}");

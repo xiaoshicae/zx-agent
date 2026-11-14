@@ -544,17 +544,14 @@ async fn redaction_precedes_both_output_file_and_session_persistence() {
     config.hooks.push(RedactSecrets::new([secret.into()]));
     config.hooks.push(SpillOutputs::new(store, vec![TOOL_NAME.into()]));
     let audit = dir.path().join("session.jsonl");
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         session: common::create_session_file(&audit, header_in(dir.path()))
             .await
             .unwrap(),
         ..RunnerSetup::new(config)
     }
     .build();
-    assert_eq!(
-        runner.run("read it", &CancellationToken::new()).await.outcome,
-        RunOutcome::Completed
-    );
+    assert_eq!(runner.run("read it").await.outcome, RunOutcome::Completed);
     let requests = provider.requests();
     let Message::ToolResult(result) = &requests[1].messages[2] else {
         panic!("tool result");
@@ -601,12 +598,12 @@ async fn a_storage_error_keeps_the_redacted_result_inline_and_the_run_continues(
         ],
     );
     config.hooks.push(SpillOutputs::new(store, vec![]));
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         session: Transcript::in_memory(header_in(dir.path())),
         ..RunnerSetup::new(config)
     }
     .build();
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
     // Storing is an optimisation: the hook runs after redaction, so a storage failure
     // keeps the already redacted, bounded result inline instead of hiding it.
     assert_eq!(report.outcome, RunOutcome::Completed);

@@ -44,13 +44,13 @@ async fn responses_are_priced_by_the_configured_model_and_summed_in_the_report()
     ]));
     let mut config = config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]);
     config.models.insert("test-model".into(), priced());
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         session: common::create_session_file(&file, header()).await.unwrap(),
         ..RunnerSetup::new(config)
     }
     .build();
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
 
     assert_eq!(report.outcome, RunOutcome::Completed);
     assert_eq!(report.usage.total_cost, Some(40.0), "two answers at 20 each");
@@ -78,8 +78,8 @@ async fn a_model_without_prices_has_no_cost() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let mut config = config(provider, vec![]);
     config.models.insert("another-model".into(), priced());
-    let (mut runner, _) = RunnerSetup::new(config).build();
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let (runner, _) = RunnerSetup::new(config).build();
+    let report = runner.run("go").await;
     assert_eq!(report.usage.total_cost, None);
     assert!(
         serde_json::to_value(&report.usage).unwrap().get("totalCost").is_none(),
@@ -136,18 +136,16 @@ async fn costs_follow_the_requested_model_when_the_server_names_another() {
     config.models.insert("test-model".into(), priced());
     let (runner, _) = RunnerSetup {
         session: store,
+        compaction: Config {
+            keep_recent_bytes: 1,
+            ..Config::default()
+        },
         ..RunnerSetup::new(config)
     }
     .build();
-    let mut runner = runner
-        .with_compaction(Config {
-            keep_recent_bytes: 1,
-            ..Config::default()
-        })
-        .unwrap();
 
-    let compacted = runner.compact(&CancellationToken::new()).await;
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let compacted = runner.compact().await.unwrap();
+    let report = runner.run("go").await;
 
     assert_eq!(compacted.outcome, compaction::Outcome::Completed, "{compacted:?}");
     assert_eq!(
@@ -169,19 +167,17 @@ async fn run_with_token_trigger(trigger_tokens: u64) -> (RunOutcome, Vec<&'stati
     ]));
     let (runner, events) = RunnerSetup {
         session: store,
-        ..RunnerSetup::new(config(provider.clone(), vec![]))
-    }
-    .build();
-    let mut runner = runner
-        .with_compaction(Config {
+        compaction: Config {
             trigger_bytes: None,
             trigger_tokens: TokenTrigger::Above(trigger_tokens),
             keep_recent_bytes: 1,
             timeout: Duration::from_secs(1),
             ..Config::default()
-        })
-        .unwrap();
-    let report = runner.run("continue", &CancellationToken::new()).await;
+        },
+        ..RunnerSetup::new(config(provider.clone(), vec![]))
+    }
+    .build();
+    let report = runner.run("continue").await;
     (report.outcome, events.kinds(), provider.requests().len())
 }
 
@@ -225,12 +221,12 @@ async fn a_summary_is_not_repeated_for_the_usage_an_answer_reported_before_it() 
     ]));
     let (runner, events) = RunnerSetup {
         session: store,
+        compaction: token_trigger(),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build();
-    let mut runner = runner.with_compaction(token_trigger()).unwrap();
 
-    let report = runner.run("continue", &CancellationToken::new()).await;
+    let report = runner.run("continue").await;
 
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
     let compactions = events.kinds().iter().filter(|kind| **kind == "compaction_end").count();
@@ -276,12 +272,12 @@ async fn the_token_trigger_follows_an_edit_made_after_the_last_reported_usage() 
     config.hooks.push(TrimLongInput);
     let (runner, events) = RunnerSetup {
         session: store,
+        compaction: token_trigger(),
         ..RunnerSetup::new(config)
     }
     .build();
-    let mut runner = runner.with_compaction(token_trigger()).unwrap();
 
-    let report = runner.run("continue", &CancellationToken::new()).await;
+    let report = runner.run("continue").await;
 
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
     assert!(!events.kinds().contains(&"compaction_start"), "{:?}", events.kinds());
@@ -398,12 +394,12 @@ async fn the_cache_key_goes_to_the_provider_and_into_the_request_audit() {
         id: "session-7".into(),
         ..header()
     };
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         session: common::create_session_file(&file, header).await.unwrap(),
         ..RunnerSetup::new(config)
     }
     .build();
-    runner.run("go", &CancellationToken::new()).await;
+    runner.run("go").await;
     assert_eq!(provider.requests()[0].cache_key.as_deref(), Some("session-7"));
     let replayed = runner
         .session()

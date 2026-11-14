@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use common::{
-    Collect, EchoTool, NotifyingProvider, Runner, RunnerSetup, config, run_prompt, run_prompt_with, summarize,
+    Collect, Driven, EchoTool, NotifyingProvider, RunnerSetup, config, run_prompt, run_prompt_with, summarize,
 };
 use zx_agent::AgentConfig;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
@@ -41,7 +41,7 @@ fn with_policy(mut config: AgentConfig, policy: Arc<dyn ToolPolicy>) -> AgentCon
 
 /// A session of `provider`, limited to `max_model_requests` requests, whose `echo` tool
 /// feeds the session's own queues when a call asks it to.
-fn fed(provider: Arc<FauxProvider>, max_model_requests: u32) -> (Runner, Arc<Collect>) {
+fn fed(provider: Arc<FauxProvider>, max_model_requests: u32) -> (Driven, Arc<Collect>) {
     let echo = echo();
     let limits = RunLimits {
         max_model_requests: Some(max_model_requests),
@@ -294,16 +294,15 @@ async fn cancellation_interrupts_a_waiting_policy() {
         config(provider, vec![tool.clone()]),
         Arc::new(WaitingPolicy(entered.clone())),
     );
-    let cancel = CancellationToken::new();
-    let mut context = Vec::new();
-    let mut running = Box::pin(run_prompt_with(config, &mut context, "go", 10, &cancel));
+    let (runner, _) = RunnerSetup::new(config).build();
+    let mut running = Box::pin(runner.run("go"));
     tokio::select! {
         () = entered.notified() => {}
         _ = &mut running => panic!("policy must still be waiting"),
     }
-    cancel.cancel();
+    runner.cancel();
 
-    let (result, _) = tokio::time::timeout(Duration::from_secs(1), running)
+    let result = tokio::time::timeout(Duration::from_secs(1), running)
         .await
         .expect("cancellation must interrupt the policy");
     assert_eq!(result.outcome, RunOutcome::Cancelled);
@@ -383,7 +382,7 @@ async fn stops_at_the_step_budget() {
     let provider = provider((0..5).map(|i| FauxStep::tool_call(&format!("c{i}"), "echo", json!({"text": "again"}))));
     let config = config(provider.clone(), vec![echo()]);
 
-    let (result, sink) = run_prompt_with(config, &mut Vec::new(), "go", 2, &CancellationToken::new()).await;
+    let (result, sink) = run_prompt_with(config, &mut Vec::new(), "go", 2).await;
 
     assert_eq!((result.outcome, sink.steps()), (RunOutcome::ModelRequestLimit, 2));
     assert_eq!(provider.requests().len(), 2);
@@ -421,9 +420,9 @@ async fn steering_enters_after_the_step_and_follow_ups_after_the_answer() {
         FauxStep::text("disk fine"),
         FauxStep::text("summary"),
     ]);
-    let (mut runner, _) = fed(provider, 10);
+    let (runner, _) = fed(provider, 10);
 
-    let result = runner.run("go", &CancellationToken::new()).await;
+    let result = runner.run("go").await;
 
     assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(
@@ -447,11 +446,11 @@ async fn a_withdrawn_follow_up_is_never_taken() {
         FauxStep::text("done"),
         FauxStep::text("stopped"),
     ]);
-    let (mut runner, _) = fed(provider, 10);
+    let (runner, _) = fed(provider, 10);
     runner.queues().follow_up("then summarize");
     runner.queues().follow_up("and then stop");
 
-    let result = runner.run("go", &CancellationToken::new()).await;
+    let result = runner.run("go").await;
 
     assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(
@@ -475,9 +474,9 @@ async fn a_spent_budget_starts_no_new_step_and_leaves_queued_input_queued() {
         "echo",
         json!({"text": "ok", "steer": "also check disk"}),
     )]);
-    let (mut runner, events) = fed(provider, 1);
+    let (runner, events) = fed(provider, 1);
 
-    let result = runner.run("go", &CancellationToken::new()).await;
+    let result = runner.run("go").await;
 
     assert_eq!(
         (result.outcome, events.steps(), result.model_requests),
@@ -518,15 +517,12 @@ async fn a_provider_error_ends_the_loop_after_a_start_end_pair() {
 #[tokio::test]
 async fn cancellation_ends_the_loop() {
     let provider = NotifyingProvider::new([FauxStep::Hang]);
-    let config = config(provider.clone(), vec![]);
-    let cancel = CancellationToken::new();
-    let trigger = cancel.clone();
+    let (runner, _) = RunnerSetup::new(config(provider.clone(), vec![])).build();
     // Cancelled once the request has started.
-    tokio::spawn(async move {
+    let (result, ()) = tokio::join!(runner.run("go"), async {
         provider.started.notified().await;
-        trigger.cancel();
+        runner.cancel();
     });
-    let (result, _) = run_prompt_with(config, &mut Vec::new(), "go", 10, &cancel).await;
 
     assert_eq!(result.outcome, RunOutcome::Cancelled);
 }

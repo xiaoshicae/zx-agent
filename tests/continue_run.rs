@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::json;
-use tokio_util::sync::CancellationToken;
 
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, StopReason};
@@ -19,9 +18,9 @@ use zx_agent::session::SessionError;
 use zx_agent::tools::Tool;
 use zx_agent::transcript::{Entry, Transcript};
 
-use common::{Collect, EchoTool, Runner, RunnerSetup, config, header, summarize, tool_call_answer};
+use common::{Collect, Driven, EchoTool, RunnerSetup, config, header, summarize, tool_call_answer};
 
-fn runner(provider: &Arc<FauxProvider>, session: Transcript) -> (Runner, Arc<Collect>) {
+fn runner(provider: &Arc<FauxProvider>, session: Transcript) -> (Driven, Arc<Collect>) {
     let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(EchoTool::new("echo"))];
     RunnerSetup {
         session,
@@ -40,9 +39,9 @@ async fn continuing_answers_the_input_the_conversation_ends_with() {
     let mut store = Transcript::in_memory(header());
     store.append_message(Message::user("question")).await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("answer")]));
-    let (mut runner, _) = runner(&provider, store);
+    let (runner, _) = runner(&provider, store);
 
-    let report = runner.continue_run(&CancellationToken::new()).await;
+    let report = runner.continue_run().await.unwrap();
 
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
     assert_eq!(report.final_text, "answer");
@@ -61,13 +60,13 @@ async fn after_a_crash_the_recovered_results_are_answered_without_running_the_ca
     store.append_tool_call_started("c1", "echo").await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("checked")]));
     let tool = Arc::new(EchoTool::new("echo"));
-    let (mut runner, events) = RunnerSetup {
+    let (runner, events) = RunnerSetup {
         session: store,
         ..RunnerSetup::new(config(provider.clone(), vec![tool.clone()]))
     }
     .build();
 
-    let report = runner.continue_run(&CancellationToken::new()).await;
+    let report = runner.continue_run().await.unwrap();
 
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
     assert_eq!(tool.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -83,11 +82,11 @@ async fn a_failed_answer_at_the_end_is_omitted_and_answered_again() {
         FauxStep::Fail("HTTP 400: bad request".into()),
         FauxStep::text("second try"),
     ]));
-    let (mut runner, events) = runner(&provider, Transcript::in_memory(header()));
-    let failed = runner.run("question", &CancellationToken::new()).await;
+    let (runner, events) = runner(&provider, Transcript::in_memory(header()));
+    let failed = runner.run("question").await;
     assert_eq!(failed.outcome, RunOutcome::Failed);
 
-    let report = runner.continue_run(&CancellationToken::new()).await;
+    let report = runner.continue_run().await.unwrap();
 
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
     assert_eq!(report.final_text, "second try");
@@ -114,10 +113,10 @@ async fn a_finished_answer_leaves_nothing_to_continue_unless_input_is_queued() {
         FauxStep::text("done"),
         FauxStep::text("follow-up answer"),
     ]));
-    let (mut runner, _) = runner(&provider, Transcript::in_memory(header()));
-    runner.run("question", &CancellationToken::new()).await;
+    let (runner, _) = runner(&provider, Transcript::in_memory(header()));
+    runner.run("question").await;
 
-    let nothing = runner.continue_run(&CancellationToken::new()).await;
+    let nothing = runner.continue_run().await.unwrap();
     assert_eq!(nothing.outcome, RunOutcome::Failed);
     let error = nothing.error.unwrap_or_default();
     assert!(error.contains("ends with a finished answer"), "{error}");
@@ -125,7 +124,7 @@ async fn a_finished_answer_leaves_nothing_to_continue_unless_input_is_queued() {
     assert_eq!(provider.requests().len(), 1);
 
     runner.queues().follow_up("and also this");
-    let queued = runner.continue_run(&CancellationToken::new()).await;
+    let queued = runner.continue_run().await.unwrap();
     assert_eq!(queued.outcome, RunOutcome::Completed, "{queued:?}");
     assert_eq!(
         summarize(&provider.requests()[1].messages),
@@ -152,17 +151,17 @@ async fn a_continuation_that_stops_at_a_queued_message_leaves_the_rest_in_the_qu
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push(RefuseMarked);
-    let (mut runner, _) = RunnerSetup::new(config).build();
-    runner.run("question", &CancellationToken::new()).await;
+    let (runner, _) = RunnerSetup::new(config).build();
+    runner.run("question").await;
     runner.queues().follow_up("refused");
     runner.queues().follow_up("kept");
 
-    let report = runner.continue_run(&CancellationToken::new()).await;
+    let report = runner.continue_run().await.unwrap();
 
     assert_eq!(report.outcome, RunOutcome::Failed, "{report:?}");
     assert_eq!(provider.requests().len(), 1, "the refused input is not sent");
     // The run took the first message and stopped there: the second is still the host's.
-    let queued = runner.into_session().take_queued().unwrap();
+    let queued = runner.take_queued().unwrap();
     assert_eq!(queued, [Input::from("kept")]);
 }
 
@@ -173,13 +172,13 @@ async fn a_continuation_takes_queued_follow_ups_one_at_a_time_when_the_queue_say
         FauxStep::text("first answered"),
         FauxStep::text("second answered"),
     ]));
-    let (mut runner, _) = runner(&provider, Transcript::in_memory(header()));
-    runner.run("question", &CancellationToken::new()).await;
+    let (runner, _) = runner(&provider, Transcript::in_memory(header()));
+    runner.run("question").await;
     runner.queues().set_mode(QueueMode::OneAtATime);
     runner.queues().follow_up("first");
     runner.queues().follow_up("second");
 
-    let report = runner.continue_run(&CancellationToken::new()).await;
+    let report = runner.continue_run().await.unwrap();
 
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
     // Each follow-up gets a request of its own, as it does between the steps of a run.
@@ -193,9 +192,9 @@ async fn a_continuation_takes_queued_follow_ups_one_at_a_time_when_the_queue_say
 #[tokio::test]
 async fn an_empty_conversation_has_nothing_to_continue() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("must not be requested")]));
-    let (mut runner, events) = runner(&provider, Transcript::in_memory(header()));
+    let (runner, events) = runner(&provider, Transcript::in_memory(header()));
 
-    let report = runner.continue_run(&CancellationToken::new()).await;
+    let report = runner.continue_run().await.unwrap();
 
     assert_eq!(report.outcome, RunOutcome::Failed);
     assert!(report.error.unwrap_or_default().contains("conversation is empty"));
@@ -212,9 +211,9 @@ async fn continuing_requests_are_rebuilt_from_the_session_file() {
     let mut store = common::create_session_file(&path, header()).await.unwrap();
     store.append_message(Message::user("question")).await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("answer")]));
-    let (mut runner, _) = runner(&provider, store);
+    let (runner, _) = runner(&provider, store);
 
-    runner.continue_run(&CancellationToken::new()).await;
+    runner.continue_run().await.unwrap();
 
     let store = common::read_session_file(&path).unwrap();
     let id = store
@@ -231,10 +230,8 @@ async fn continuing_requests_are_rebuilt_from_the_session_file() {
 #[tokio::test]
 async fn a_running_session_refuses_to_continue() {
     let provider = Arc::new(FauxProvider::new([FauxStep::Hang]));
-    let (runner, events) = runner(&provider, Transcript::in_memory(header()));
-    let session = runner.into_session();
-    let cancel = CancellationToken::new();
-    let mut running = Box::pin(session.prompt("first", &cancel));
+    let (session, events) = runner(&provider, Transcript::in_memory(header()));
+    let mut running = Box::pin(session.prompt("first"));
     // Wait until the request is in flight.
     while !events
         .events()
@@ -247,10 +244,7 @@ async fn a_running_session_refuses_to_continue() {
         }
     }
 
-    assert_eq!(
-        session.continue_run(&CancellationToken::new()).await.err(),
-        Some(SessionError::Busy)
-    );
+    assert_eq!(session.continue_run().await.err(), Some(SessionError::Busy));
     session.cancel();
     running.await.unwrap();
 }

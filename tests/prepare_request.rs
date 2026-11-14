@@ -7,7 +7,6 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::json;
-use tokio_util::sync::CancellationToken;
 
 use common::{EchoTool, RunnerSetup, config, fast_retry, header, replayed_requests};
 use zx_agent::ai::Reasoning;
@@ -65,13 +64,13 @@ async fn a_hook_changes_the_model_and_reasoning_of_one_request_and_the_audit_rec
         model: "big-model",
         seen: seen.clone(),
     });
-    let (mut runner, events) = RunnerSetup {
+    let (runner, events) = RunnerSetup {
         session: common::create_session_file(&path, header()).await.unwrap(),
         ..RunnerSetup::new(loop_config)
     }
     .build();
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
 
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
     let sent: Vec<(String, Option<Reasoning>)> = provider
@@ -115,9 +114,9 @@ async fn hooks_chain_their_changes_in_order() {
         seen: Arc::default(),
     });
     loop_config.hooks.push(Lower);
-    let (mut runner, _) = RunnerSetup::new(loop_config).build();
+    let (runner, _) = RunnerSetup::new(loop_config).build();
 
-    runner.run("go", &CancellationToken::new()).await;
+    runner.run("go").await;
 
     let request = &provider.requests()[0];
     assert_eq!(
@@ -158,13 +157,13 @@ async fn a_failing_hook_or_an_empty_model_ends_the_run_before_the_request_withou
         let provider = Arc::new(FauxProvider::new([FauxStep::text("must not be requested")]));
         let mut loop_config = config(provider.clone(), vec![]);
         loop_config.hooks.push(hook);
-        let (mut runner, _) = RunnerSetup {
+        let (runner, _) = RunnerSetup {
             retry: fast_retry(3),
             ..RunnerSetup::new(loop_config)
         }
         .build();
 
-        let report = runner.run("go", &CancellationToken::new()).await;
+        let report = runner.run("go").await;
 
         assert_eq!(report.outcome, RunOutcome::Failed);
         assert_eq!(report.retries, 0);
@@ -192,9 +191,9 @@ async fn a_panicking_hook_stops_the_attempt_without_crashing_the_run() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("must not be requested")]));
     let mut loop_config = config(provider.clone(), vec![]);
     loop_config.hooks.push(Panics);
-    let (mut runner, _) = RunnerSetup::new(loop_config).build();
+    let (runner, _) = RunnerSetup::new(loop_config).build();
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
 
     assert_eq!(report.outcome, RunOutcome::Failed);
     assert!(report.error.unwrap_or_default().contains("prepare_request panicked"));

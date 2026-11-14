@@ -8,7 +8,6 @@ use std::sync::{Arc, Mutex};
 use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::trace::{SdkTracerProvider, SpanData, SpanExporter};
 use serde_json::json;
-use tokio_util::sync::CancellationToken;
 
 use common::{EchoTool, RunnerSetup, config};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
@@ -48,9 +47,9 @@ async fn a_run_exports_one_trace_with_a_span_per_request_and_tool_call() {
     ]));
     let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
     config.hooks.push(telemetry.hook());
-    let (mut runner, _) = RunnerSetup::new(config).build();
+    let (runner, _) = RunnerSetup::new(config).build();
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
     assert_eq!(report.outcome, RunOutcome::Completed);
     telemetry.shutdown().await.unwrap();
 
@@ -87,9 +86,9 @@ async fn a_run_continues_the_callers_trace_through_hook_under() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let mut config = config(provider, Vec::new());
     config.hooks.push(telemetry.hook_under(&parent));
-    let (mut runner, _) = RunnerSetup::new(config).build();
+    let (runner, _) = RunnerSetup::new(config).build();
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
     assert_eq!(report.outcome, RunOutcome::Completed);
     telemetry.shutdown().await.unwrap();
 

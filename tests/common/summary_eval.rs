@@ -12,7 +12,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::json;
-use tokio_util::sync::CancellationToken;
 
 use zx_agent::ai::{
     AssistantMessage, ContentBlock, Message, Provider, StopReason, ToolCall, ToolResultMessage, Usage, now_ms,
@@ -851,18 +850,16 @@ pub(crate) async fn evaluate(provider: Arc<dyn Provider>, model: &str, budget: C
         loop_config.model = model.into();
         let (runner, _) = RunnerSetup {
             session: store,
-            ..RunnerSetup::new(loop_config)
-        }
-        .build();
-        let mut runner = runner
-            .with_compaction(Config {
+            compaction: Config {
                 // Only the user's next request stays as it is; the summary covers the rest.
                 keep_recent_bytes: 1,
                 ..budget
-            })
-            .unwrap();
+            },
+            ..RunnerSetup::new(loop_config)
+        }
+        .build();
 
-        let report = runner.compact(&CancellationToken::new()).await;
+        let report = runner.compact().await.unwrap();
 
         let store = &runner.session();
         let request_bytes = match summary_requests(store).get(sent_before) {

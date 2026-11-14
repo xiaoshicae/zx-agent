@@ -5,8 +5,6 @@ mod common;
 
 use std::sync::Arc;
 
-use tokio_util::sync::CancellationToken;
-
 use common::{RunnerSetup, config, header, read_lines};
 use zx_agent::ai::Message;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
@@ -71,14 +69,14 @@ async fn a_fork_copies_one_branch_unchanged_and_names_its_parent() {
 async fn requests_of_the_copied_branch_replay_from_the_fork() {
     let dir = tempfile::tempdir().unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("answer")]));
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         session: common::create_session_file(&dir.path().join("source.jsonl"), header())
             .await
             .unwrap(),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build();
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
     assert_eq!(report.outcome, RunOutcome::Completed);
     let source = &runner.session();
     let leaf = source.leaf_id().unwrap().to_string();

@@ -138,20 +138,17 @@ async fn session_grants_require_exact_arguments_and_never_override_deny() {
     });
     let mut config = config(provider, vec![tool.clone()]);
     config.policies.push("switch", Arc::new(SwitchPolicy(denied.clone())));
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         approver: Some(host.clone()),
         ..RunnerSetup::new(config)
     }
     .build();
     for _ in 0..3 {
-        assert_eq!(
-            runner.run("go", &CancellationToken::new()).await.outcome,
-            RunOutcome::Completed
-        );
+        assert_eq!(runner.run("go").await.outcome, RunOutcome::Completed);
     }
     assert_eq!(host.calls.load(Ordering::SeqCst), 2, "different args must ask again");
     denied.store(true, Ordering::SeqCst);
-    runner.run("go", &CancellationToken::new()).await;
+    runner.run("go").await;
     assert_eq!(host.calls.load(Ordering::SeqCst), 2, "deny must bypass approvals");
     assert_eq!(tool.calls.load(Ordering::SeqCst), 3);
 }
@@ -203,15 +200,14 @@ async fn cancellation_interrupts_a_pending_approval() {
     config
         .policies
         .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         approver: Some(Arc::new(WaitingHost(entered.clone()))),
         ..RunnerSetup::new(config)
     }
     .build();
-    let cancel = CancellationToken::new();
-    let mut running = Box::pin(runner.run("go", &cancel));
+    let mut running = Box::pin(runner.run("go"));
     tokio::select! { () = entered.notified() => {}, _ = &mut running => panic!("must wait for approval") }
-    cancel.cancel();
+    runner.cancel();
     let report = tokio::time::timeout(Duration::from_secs(1), running).await.unwrap();
     assert_eq!(report.outcome, RunOutcome::Cancelled);
     assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
@@ -305,12 +301,12 @@ async fn input_and_context_changes_are_persisted_before_the_model_request() {
     });
     let mut config = config(probe, vec![]);
     config.hooks = HookChain::new().with(RewriteInput).with(Project);
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         session,
         ..RunnerSetup::new(config)
     }
     .build();
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
     assert_eq!(report.outcome, RunOutcome::Completed);
     assert_eq!(report.final_text, "done");
     assert_eq!(
@@ -345,8 +341,8 @@ async fn an_invalid_edit_plan_is_rejected_before_any_partial_edit_or_request() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("never")]));
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push(InvalidPlan);
-    let (mut runner, _) = RunnerSetup::new(config).build();
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let (runner, _) = RunnerSetup::new(config).build();
+    let report = runner.run("go").await;
     assert_eq!(report.outcome, RunOutcome::Failed);
     assert!(report.error.unwrap().contains("out of bounds"));
     assert!(provider.requests().is_empty());
@@ -373,12 +369,12 @@ async fn rejected_input_is_logged_and_omitted_without_retrying_the_model() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("never")]));
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push(RejectInput);
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         retry: fast_retry(3),
         ..RunnerSetup::new(config)
     }
     .build();
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
     assert_eq!(
         (report.outcome, report.model_requests, report.retries),
         (RunOutcome::Failed, 0, 0)
@@ -404,12 +400,12 @@ async fn steering_queued_after_a_rejected_message_stays_queued_for_the_next_run(
     let provider = Arc::new(FauxProvider::new([FauxStep::text("answer")]));
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push(RejectMarked);
-    let (mut runner, _) = RunnerSetup::new(config).build();
+    let (runner, _) = RunnerSetup::new(config).build();
     runner.queues().steer("reject-me");
     runner.queues().steer("keep-me");
-    let first = runner.run("hello", &CancellationToken::new()).await;
+    let first = runner.run("hello").await;
     assert_eq!(first.outcome, RunOutcome::Failed, "{first:?}");
-    let second = runner.run("again", &CancellationToken::new()).await;
+    let second = runner.run("again").await;
     assert_eq!(second.outcome, RunOutcome::Completed, "{second:?}");
     assert_eq!(
         summarize(&provider.requests()[0].messages),
@@ -436,12 +432,12 @@ async fn omitting_prior_runs_does_not_lose_the_current_answer_or_usage() {
     }
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push(OmitEarlier);
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         session,
         ..RunnerSetup::new(config)
     }
     .build();
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
     assert_eq!(report.final_text, "current");
     assert_eq!(report.usage.total_tokens, 15);
     assert_eq!(summarize(&provider.requests()[0].messages), ["user:go"]);
@@ -499,8 +495,8 @@ async fn failed_output_hooks_withhold_raw_results_from_events_and_persistence() 
                 ..HookOptions::default()
             },
         );
-        let (mut runner, events) = RunnerSetup::new(config).build();
-        let report = runner.run("go", &CancellationToken::new()).await;
+        let (runner, events) = RunnerSetup::new(config).build();
+        let report = runner.run("go").await;
         assert_eq!(report.outcome, RunOutcome::Completed);
         let serialized = serde_json::to_string(runner.session().entries()).unwrap();
         assert!(!serialized.contains("raw-tool-secret"));
@@ -543,12 +539,12 @@ async fn observer_failures_are_diagnostic_and_retry_events_are_observed_once() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let mut config = config(provider, vec![]);
     config.hooks.push(Observer { seen: seen.clone() });
-    let (mut runner, events) = RunnerSetup {
+    let (runner, events) = RunnerSetup {
         retry: fast_retry(1),
         ..RunnerSetup::new(config)
     }
     .build();
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
     assert_eq!(report.outcome, RunOutcome::Completed);
     let kinds = events.kinds();
     let regular: Vec<_> = kinds.iter().copied().filter(|kind| *kind != "hook_failed").collect();
@@ -580,8 +576,8 @@ async fn custom_continuation_wording_still_joins_answer_parts() {
     ]));
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push(CustomContinue);
-    let (mut runner, _) = RunnerSetup::new(config).build();
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let (runner, _) = RunnerSetup::new(config).build();
+    let report = runner.run("go").await;
     assert_eq!(report.final_text, "第一部分，第二部分。");
     assert!(matches!(&provider.requests()[1].messages[2], Message::User { content, .. } if content == "接着回答"));
 }
@@ -596,13 +592,13 @@ async fn continuation_budget_is_not_reset_after_a_provider_retry() {
     ]));
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push(ContinueOnLength::new(1));
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         retry: fast_retry(1),
         limits: RunLimits::default(),
         ..RunnerSetup::new(config)
     }
     .build();
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
     assert_eq!(
         (report.outcome, report.model_requests, report.retries),
         (RunOutcome::Truncated, 3, 1)
@@ -840,7 +836,7 @@ async fn a_hook_follow_up_obeys_the_step_budget() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("first"), FauxStep::text("never")]));
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push(NextTurn(StepDecision::FollowUp("next".into())));
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         limits: RunLimits {
             max_model_requests: Some(1),
             ..RunLimits::default()
@@ -848,7 +844,7 @@ async fn a_hook_follow_up_obeys_the_step_budget() {
         ..RunnerSetup::new(config)
     }
     .build();
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
     assert_eq!(report.outcome, RunOutcome::ModelRequestLimit);
     assert_eq!(provider.requests().len(), 1);
 }
@@ -872,8 +868,8 @@ async fn stopping_from_a_hook_preserves_queued_user_input() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let mut config = config(provider, vec![]);
     config.hooks.push(StopAndQueue);
-    let (mut runner, _) = RunnerSetup::new(config).build();
-    let result = runner.run("go", &CancellationToken::new()).await;
+    let (runner, _) = RunnerSetup::new(config).build();
+    let result = runner.run("go").await;
     assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(runner.queues().drain_steering(), [Input::from("pending user input")]);
 }
@@ -891,12 +887,12 @@ async fn a_finish_hook_error_never_triggers_provider_retry() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("answer"), FauxStep::text("never")]));
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push(FinishFailure);
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         retry: fast_retry(3),
         ..RunnerSetup::new(config)
     }
     .build();
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
     assert_eq!(
         (report.outcome, report.model_requests, report.retries),
         (RunOutcome::Failed, 1, 0)
@@ -941,7 +937,7 @@ impl Hook for HoldInput {
     }
 }
 
-fn holding_runner(provider: Arc<FauxProvider>) -> (common::Runner, HoldInput) {
+fn holding_runner(provider: Arc<FauxProvider>) -> (common::Driven, HoldInput) {
     let holding = Arc::new(tokio::sync::Notify::new());
     let released = Arc::new(AtomicBool::new(false));
     let mut config = config(provider, vec![]);
@@ -963,17 +959,16 @@ fn mentions(messages: &[Message], text: &str) -> usize {
 #[tokio::test]
 async fn input_whose_hook_was_cancelled_is_not_recorded() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
-    let (mut runner, hold) = holding_runner(provider.clone());
-    let cancel = CancellationToken::new();
+    let (runner, hold) = holding_runner(provider.clone());
 
-    let (report, ()) = tokio::join!(runner.run("hold: rotate the logs", &cancel), async {
+    let (report, ()) = tokio::join!(runner.run("hold: rotate the logs"), async {
         hold.holding.notified().await;
-        cancel.cancel();
+        runner.cancel();
     });
 
     assert_eq!(report.outcome, RunOutcome::Cancelled);
     assert_eq!(mentions(&runner.session().messages(), "rotate the logs"), 0);
-    let report = runner.run("next", &CancellationToken::new()).await;
+    let report = runner.run("next").await;
     assert_eq!(report.outcome, RunOutcome::Completed);
     assert_eq!(summarize(&provider.requests()[0].messages), ["user:next"]);
 }
@@ -981,18 +976,17 @@ async fn input_whose_hook_was_cancelled_is_not_recorded() {
 #[tokio::test]
 async fn queued_input_whose_run_was_dropped_stays_queued_and_unrecorded() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
-    let (mut runner, hold) = holding_runner(provider.clone());
+    let (runner, hold) = holding_runner(provider.clone());
     runner.queues().steer("hold: check the disk");
-    let cancel = CancellationToken::new();
 
     tokio::select! {
-        _ = runner.run("go", &cancel) => panic!("the input hook should still hold the input"),
+        _ = runner.run("go") => panic!("the input hook should still hold the input"),
         () = hold.holding.notified() => {}
     }
 
     assert_eq!(mentions(&runner.session().messages(), "check the disk"), 0);
     hold.released.store(true, Ordering::SeqCst);
-    let report = runner.run("next", &CancellationToken::new()).await;
+    let report = runner.run("next").await;
     assert_eq!(report.outcome, RunOutcome::Completed);
     assert_eq!(
         summarize(&provider.requests()[0].messages),
@@ -1194,16 +1188,15 @@ async fn an_approval_interrupted_by_cancellation_is_reported_as_cancelled() {
     config
         .policies
         .push("verdict", Arc::new(Verdict(PolicyDecision::Ask("review".into()))));
-    let (mut runner, events) = RunnerSetup {
+    let (runner, events) = RunnerSetup {
         approver: Some(Arc::new(WaitingHost(entered.clone()))),
         ..RunnerSetup::new(config)
     }
     .build();
-    let cancel = CancellationToken::new();
 
-    let (report, ()) = tokio::join!(runner.run("go", &cancel), async {
+    let (report, ()) = tokio::join!(runner.run("go"), async {
         entered.notified().await;
-        cancel.cancel();
+        runner.cancel();
     });
 
     assert_eq!(report.outcome, RunOutcome::Cancelled);
@@ -1306,13 +1299,13 @@ async fn every_hook_method_knows_the_session_run_and_working_directory() {
     let probe = ContextProbe::default();
     let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
     config.hooks.push(probe.clone());
-    let (mut runner, events) = RunnerSetup {
+    let (runner, events) = RunnerSetup {
         session: Transcript::in_memory(SessionHeader::new(Path::new("/srv/work"), "test-model")),
         ..RunnerSetup::new(config)
     }
     .build();
 
-    runner.run("go", &CancellationToken::new()).await;
+    runner.run("go").await;
 
     let session_id = runner.session().header().id.clone();
     let run_id = events.envelopes()[0].run_id.clone();
@@ -1352,9 +1345,9 @@ async fn a_named_hook_is_reported_under_its_name() {
             ..HookOptions::default()
         },
     );
-    let (mut runner, events) = RunnerSetup::new(config).build();
+    let (runner, events) = RunnerSetup::new(config).build();
 
-    runner.run("go", &CancellationToken::new()).await;
+    runner.run("go").await;
 
     let hooks: Vec<String> = events
         .events()

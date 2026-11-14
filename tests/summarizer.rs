@@ -8,7 +8,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::Notify;
-use tokio_util::sync::CancellationToken;
 
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, Usage};
@@ -115,16 +114,16 @@ async fn summarized_by(
     let provider = Arc::new(FauxProvider::new(steps));
     let mut config = config(provider.clone(), vec![]);
     config.summarizer = Some(summarizer);
-    let (runner, events) = RunnerSetup {
+    let (session, events) = RunnerSetup {
         session: store,
         limits: RunLimits {
             max_model_requests: Some(2),
             ..RunLimits::default()
         },
+        compaction,
         ..RunnerSetup::new(config)
     }
     .build();
-    let session = runner.with_compaction(compaction).unwrap().into_session();
     (session, events, provider, old)
 }
 
@@ -149,7 +148,7 @@ async fn a_summarizer_makes_the_summary_and_the_model_is_not_asked() {
     let steps = vec![FauxStep::text("finished")];
     let (session, events, provider, old) = summarized_by(summarizer.clone(), budget(), steps).await;
 
-    let compact = session.compact(&CancellationToken::new()).await.unwrap();
+    let compact = session.compact().await.unwrap();
 
     assert_eq!(compact.outcome, Outcome::Completed, "{compact:?}");
     assert_eq!((compact.requests, compact.usage.total_tokens), (1, 10));
@@ -162,7 +161,7 @@ async fn a_summarizer_makes_the_summary_and_the_model_is_not_asked() {
     assert_eq!(starts, [SummarizedBy::Summarizer("notes".into())]);
     assert_eq!(requests, 0);
     // The model then sees the summary in place of what it summarizes.
-    let report = session.prompt("continue now", &CancellationToken::new()).await.unwrap();
+    let report = session.prompt("continue now").await.unwrap();
     assert_eq!(report.final_text, "finished");
     let seen = &provider.requests()[0].messages;
     assert!(
@@ -186,7 +185,7 @@ async fn an_automatic_summary_by_a_summarizer_counts_as_a_request_and_its_usage_
     let steps = vec![FauxStep::text("answer")];
     let (session, events, provider, _) = summarized_by(summarizer, compaction, steps).await;
 
-    let report = session.prompt("continue", &CancellationToken::new()).await.unwrap();
+    let report = session.prompt("continue").await.unwrap();
 
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
     // The summary and the task request: the limit of two is reached, not passed.
@@ -204,7 +203,7 @@ async fn a_summarizer_that_fails_fails_the_compaction_and_the_session_records_wh
     let (session, events, _, _) = summarized_by(summarizer, budget(), Vec::new()).await;
     let before = session.with_transcript(Transcript::messages).unwrap();
 
-    let compact = session.compact(&CancellationToken::new()).await.unwrap();
+    let compact = session.compact().await.unwrap();
 
     assert_eq!(compact.outcome, Outcome::Failed);
     assert_eq!(compact.error.as_deref(), Some("summarizer notes failed: no capacity"));
@@ -228,7 +227,7 @@ async fn a_summary_that_cites_a_record_the_compaction_did_not_read_is_refused() 
     let summarizer = Arc::new(Scripted::answering(|_| Ok(citing("invented"))));
     let (session, _, _, _) = summarized_by(summarizer, budget(), Vec::new()).await;
 
-    let compact = session.compact(&CancellationToken::new()).await.unwrap();
+    let compact = session.compact().await.unwrap();
 
     assert_eq!(compact.outcome, Outcome::Failed);
     let error = compact.error.unwrap();
@@ -245,7 +244,7 @@ async fn a_summarizer_that_does_not_answer_is_given_up_after_the_compaction_time
     };
     let (session, _, _, _) = summarized_by(Arc::new(Scripted::hanging()), compaction, Vec::new()).await;
 
-    let compact = session.compact(&CancellationToken::new()).await.unwrap();
+    let compact = session.compact().await.unwrap();
 
     assert_eq!(compact.outcome, Outcome::Failed);
     assert_eq!(compact.error.as_deref(), Some("summarizer notes timed out after 20ms"));
@@ -255,13 +254,12 @@ async fn a_summarizer_that_does_not_answer_is_given_up_after_the_compaction_time
 async fn cancelling_the_run_stops_waiting_for_the_summarizer() {
     let summarizer = Arc::new(Scripted::hanging());
     let (session, _, _, _) = summarized_by(summarizer.clone(), budget(), Vec::new()).await;
-    let cancel = CancellationToken::new();
 
     let cancel_once_asked = async {
         summarizer.began.notified().await;
-        cancel.cancel();
+        session.cancel();
     };
-    let (compact, ()) = tokio::join!(session.compact(&cancel), cancel_once_asked);
+    let (compact, ()) = tokio::join!(session.compact(), cancel_once_asked);
 
     let compact = compact.unwrap();
     assert_eq!(compact.outcome, Outcome::Cancelled);
@@ -273,7 +271,7 @@ async fn a_summarizer_that_panics_fails_the_compaction_and_not_the_process() {
     let summarizer = Arc::new(Scripted::answering(|_| panic!("summarizer bug")));
     let (session, _, _, _) = summarized_by(summarizer, budget(), Vec::new()).await;
 
-    let compact = session.compact(&CancellationToken::new()).await.unwrap();
+    let compact = session.compact().await.unwrap();
 
     assert_eq!(compact.outcome, Outcome::Failed);
     assert_eq!(compact.error.as_deref(), Some("summarizer notes panicked"));

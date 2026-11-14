@@ -257,18 +257,17 @@ async fn cancelling_a_run_gives_up_the_call_it_was_waiting_for() {
         )]));
         let mut config = config(provider, Vec::new());
         config.extensions = vec![server];
-        let (mut runner, _) = RunnerSetup::new(config).build();
-        let cancel = CancellationToken::new();
+        let (runner, _) = RunnerSetup::new(config).build();
 
         let report = {
-            let run = runner.run("is it up?", &cancel);
+            let run = runner.run("is it up?");
             tokio::pin!(run);
             tokio::select! {
                 report = &mut run => panic!("{era:?}: the run ended before its call was sent: {report:?}"),
                 _ = fake.wait_for("tools/call", 1) => {}
             }
             // The loop stops waiting at once and drops the call, which never sees the token.
-            cancel.cancel();
+            runner.cancel();
             run.await
         };
 

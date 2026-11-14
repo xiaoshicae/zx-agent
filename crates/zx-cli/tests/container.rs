@@ -474,17 +474,16 @@ async fn a_call_queued_behind_a_running_command_is_recorded_as_not_executed_when
         ]),
         FauxStep::text("done"),
     ]));
-    let (mut runner, _events) = RunnerSetup::new(config(provider, vec![Arc::new(bash)])).build();
-    let cancel = CancellationToken::new();
+    let (runner, _events) = RunnerSetup::new(config(provider, vec![Arc::new(bash)])).build();
 
     let cancelling = async {
         assert!(eventually(Duration::from_secs(5), || fake.execs("zx-agent-run").len() == 1).await);
-        cancel.cancel();
+        runner.cancel();
     };
-    let (report, ()) = tokio::join!(runner.run("go", &cancel), cancelling);
+    let (report, ()) = tokio::join!(runner.run("go"), cancelling);
     assert_eq!(report.outcome, RunOutcome::Cancelled);
     // The next run gives the calls left without a result one, from what the session recorded.
-    runner.run("again", &CancellationToken::new()).await;
+    runner.run("again").await;
 
     let results: Vec<(String, String)> = runner
         .session()

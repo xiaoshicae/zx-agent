@@ -7,10 +7,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
-use tokio_util::sync::CancellationToken;
 
 use common::mock_server::{MockServer, Reply};
 use common::{RunnerSetup, config, fast_retry};
+use zx_agent::Session;
 use zx_agent::ai::openai::{ApiKey, BodyOptions, MaxTokensField, OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::{Message, PREAMBLE, ProviderError, StopReason, SystemPrompt};
@@ -52,7 +52,7 @@ fn raw_error(status: u16, headers: &str, body: &str) -> Reply {
     ))
 }
 
-fn provider_error(runner: &common::Runner) -> ProviderError {
+fn provider_error(runner: &common::Driven) -> ProviderError {
     match runner.session().messages().last() {
         Some(Message::Assistant(message)) => message.provider_error.clone().expect("structured provider error"),
         other => panic!("expected a failed assistant message: {other:?}"),
@@ -62,7 +62,7 @@ fn provider_error(runner: &common::Runner) -> ProviderError {
 #[tokio::test]
 async fn response_budget_failure_is_not_retried() {
     let server = MockServer::start(vec![Reply::text(&"x".repeat(256))]).await;
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         retry: fast_retry(3),
         ..setup_with_provider(
             &server,
@@ -74,7 +74,7 @@ async fn response_budget_failure_is_not_retried() {
     }
     .build();
 
-    let report = runner.run("check", &CancellationToken::new()).await;
+    let report = runner.run("check").await;
 
     assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
     assert_eq!(provider_error(&runner), ProviderError::ResourceLimit);
@@ -85,7 +85,7 @@ async fn response_budget_failure_is_not_retried() {
 #[tokio::test]
 async fn sse_event_budget_is_enforced() {
     let server = MockServer::start(vec![Reply::text("small text in an oversized event")]).await;
-    let (mut runner, _) = setup_with_provider(
+    let (runner, _) = setup_with_provider(
         &server,
         OpenAiConfig {
             max_sse_event_bytes: 32,
@@ -94,7 +94,7 @@ async fn sse_event_budget_is_enforced() {
     )
     .build();
 
-    let report = runner.run("check", &CancellationToken::new()).await;
+    let report = runner.run("check").await;
 
     assert_eq!(report.outcome, RunOutcome::Failed);
     assert_eq!(provider_error(&runner), ProviderError::ResourceLimit);
@@ -104,13 +104,13 @@ async fn sse_event_budget_is_enforced() {
 #[tokio::test]
 async fn http_status_prevents_retries_from_diagnostic_words() {
     let server = MockServer::start(vec![Reply::Status(400, r#"{"error":{"message":"connection id 503"}}"#)]).await;
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         retry: fast_retry(3),
         ..setup(&server, Duration::from_secs(10))
     }
     .build();
 
-    let report = runner.run("check", &CancellationToken::new()).await;
+    let report = runner.run("check").await;
 
     assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
     assert_eq!(
@@ -130,13 +130,13 @@ async fn quota_errors_are_not_retried() {
         r#"{"error":{"message":"rate limit","code":"insufficient_quota"}}"#,
     )])
     .await;
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         retry: fast_retry(3),
         ..setup(&server, Duration::from_secs(10))
     }
     .build();
 
-    let report = runner.run("check", &CancellationToken::new()).await;
+    let report = runner.run("check").await;
 
     assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
     assert_eq!(
@@ -157,19 +157,17 @@ async fn numeric_retry_after_is_used_by_the_runner() {
         r#"{"error":{"code":"rate_limit_exceeded","message":"slow down"}}"#,
     )])
     .await;
-    let cancel = CancellationToken::new();
-    let trigger = cancel.clone();
-    let (mut runner, observed) = RunnerSetup {
+    let (runner, observed) = RunnerSetup {
         retry: RetryPolicy::default(),
         ..setup(&server, Duration::from_secs(10))
     }
-    .build_with(move |event: &Event| {
+    .build_with(|event: &Event, session: &Session| {
         if matches!(event.event, EventKind::RetryScheduled { .. }) {
-            trigger.cancel();
+            session.cancel();
         }
     });
 
-    let report = runner.run("check", &cancel).await;
+    let report = runner.run("check").await;
 
     assert_eq!(report.outcome, RunOutcome::Cancelled);
     assert!(
@@ -190,9 +188,9 @@ async fn numeric_retry_after_is_used_by_the_runner() {
 #[tokio::test]
 async fn large_http_errors_keep_bounded_diagnostics() {
     let server = MockServer::start(vec![raw_error(400, "", &"x".repeat(128 * 1024))]).await;
-    let (mut runner, _) = setup(&server, Duration::from_secs(10)).build();
+    let (runner, _) = setup(&server, Duration::from_secs(10)).build();
 
-    let report = runner.run("check", &CancellationToken::new()).await;
+    let report = runner.run("check").await;
 
     let error = report.error.unwrap();
     assert!(error.starts_with("HTTP 400: "));
@@ -204,13 +202,13 @@ async fn invalid_stream_json_is_a_non_retryable_protocol_error() {
     let response = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n\
         data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\ndata: {broken}\n\n";
     let server = MockServer::start(vec![Reply::Raw(response.into())]).await;
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         retry: fast_retry(3),
         ..setup(&server, Duration::from_secs(10))
     }
     .build();
 
-    let report = runner.run("check", &CancellationToken::new()).await;
+    let report = runner.run("check").await;
 
     assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
     assert_eq!(report.final_text, "partial");
@@ -223,13 +221,13 @@ async fn an_unknown_finish_reason_is_a_provider_error_not_a_completed_answer() {
         "index": 0, "delta": {"content": "partial"}, "finish_reason": "server_interrupted"
     }]})])])
     .await;
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         retry: fast_retry(3),
         ..setup(&server, Duration::from_secs(10))
     }
     .build();
 
-    let report = runner.run("check", &CancellationToken::new()).await;
+    let report = runner.run("check").await;
 
     assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0), "{report:?}");
     let error = report.error.unwrap_or_default();
@@ -258,13 +256,13 @@ async fn an_error_object_under_a_success_status_is_reported() {
         "error": {"message": "The model `m` does not exist", "code": "model_not_found"}
     }))])
     .await;
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         retry: fast_retry(3),
         ..setup(&server, Duration::from_secs(10))
     }
     .build();
 
-    let report = runner.run("check", &CancellationToken::new()).await;
+    let report = runner.run("check").await;
 
     assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0), "{report:?}");
     let error = report.error.unwrap_or_default();
@@ -279,13 +277,13 @@ async fn a_whole_answer_instead_of_a_stream_is_named_in_the_error() {
         "choices": [{"index": 0, "message": {"role": "assistant", "content": "hello"}, "finish_reason": "stop"}]
     }))])
     .await;
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         retry: fast_retry(3),
         ..setup(&server, Duration::from_secs(10))
     }
     .build();
 
-    let report = runner.run("check", &CancellationToken::new()).await;
+    let report = runner.run("check").await;
 
     assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0), "{report:?}");
     let error = report.error.unwrap_or_default();
@@ -310,9 +308,9 @@ async fn tool_call_round_trip_over_http() {
         ]),
     ])
     .await;
-    let (mut runner, _) = setup(&server, Duration::from_secs(10)).build();
+    let (runner, _) = setup(&server, Duration::from_secs(10)).build();
 
-    let report = runner.run("check", &CancellationToken::new()).await;
+    let report = runner.run("check").await;
 
     assert_eq!(report.outcome, RunOutcome::Completed, "{:?}", report.error);
     assert_eq!(report.final_text, "All good.");
@@ -351,13 +349,13 @@ async fn http_errors_are_retried_then_reported() {
         Reply::Status(500, "{\"error\":{\"message\":\"internal\"}}"),
     ])
     .await;
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         retry: fast_retry(1),
         ..setup(&server, Duration::from_secs(10))
     }
     .build();
 
-    let report = runner.run("check", &CancellationToken::new()).await;
+    let report = runner.run("check").await;
 
     assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 1));
     let error = report.error.unwrap_or_default();
@@ -369,9 +367,9 @@ async fn http_errors_are_retried_then_reported() {
 async fn a_stalled_stream_fails_after_the_idle_timeout() {
     let first_chunk = json!({"choices":[{"index":0,"delta":{"content":"Start"}}]});
     let server = MockServer::start(vec![Reply::Stall(vec![first_chunk])]).await;
-    let (mut runner, _) = setup(&server, Duration::from_secs(1)).build();
+    let (runner, _) = setup(&server, Duration::from_secs(1)).build();
 
-    let report = runner.run("check", &CancellationToken::new()).await;
+    let report = runner.run("check").await;
 
     assert_eq!(report.outcome, RunOutcome::Failed);
     let error = report.error.unwrap_or_default();
@@ -384,15 +382,13 @@ async fn cancelling_mid_stream_keeps_the_text_received_so_far() {
     let server = MockServer::start(vec![Reply::Stall(vec![first_chunk])]).await;
     // Cancelled at the first streamed delta, to cancel a response mid-stream without
     // depending on timing.
-    let cancel = CancellationToken::new();
-    let trigger = cancel.clone();
-    let (mut runner, _) = setup(&server, Duration::from_secs(10)).build_with(move |event: &Event| {
+    let (runner, _) = setup(&server, Duration::from_secs(10)).build_with(|event: &Event, session: &Session| {
         if matches!(event.event, EventKind::MessageUpdate { .. }) {
-            trigger.cancel();
+            session.cancel();
         }
     });
 
-    let report = runner.run("check", &cancel).await;
+    let report = runner.run("check").await;
 
     assert_eq!(report.outcome, RunOutcome::Cancelled);
     let messages = runner.session().messages();
@@ -442,19 +438,19 @@ async fn an_overflow_error_code_makes_the_runner_compact_and_continue() {
         .append_message(Message::user("most recent input"))
         .await
         .unwrap();
-    let (runner, _) = RunnerSetup {
-        session,
-        ..setup(&server, Duration::from_secs(10))
-    }
-    .build();
     let compaction = Config {
         trigger_bytes: Some(100_000),
         keep_recent_bytes: 1,
         ..Config::default()
     };
-    let mut runner = runner.with_compaction(compaction).unwrap();
+    let (runner, _) = RunnerSetup {
+        session,
+        compaction,
+        ..setup(&server, Duration::from_secs(10))
+    }
+    .build();
 
-    let report = runner.run("check", &CancellationToken::new()).await;
+    let report = runner.run("check").await;
 
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
     assert_eq!(report.final_text, "answer");
@@ -480,7 +476,7 @@ impl zx_agent::ai::openai::ApiKeySource for RotatingKeys {
 #[tokio::test]
 async fn custom_headers_and_a_dynamic_api_key_reach_every_request() {
     let server = MockServer::start(vec![Reply::text("one"), Reply::text("two")]).await;
-    let (mut runner, _) = setup_with_provider(
+    let (runner, _) = setup_with_provider(
         &server,
         OpenAiConfig {
             headers: vec![("X-Route".into(), "blue".into())],
@@ -493,8 +489,8 @@ async fn custom_headers_and_a_dynamic_api_key_reach_every_request() {
     )
     .build();
 
-    runner.run("first", &CancellationToken::new()).await;
-    runner.run("second", &CancellationToken::new()).await;
+    runner.run("first").await;
+    runner.run("second").await;
 
     let requests = server.requests();
     assert_eq!(requests.len(), 2);
@@ -511,7 +507,7 @@ async fn custom_headers_and_a_dynamic_api_key_reach_every_request() {
 #[tokio::test]
 async fn a_failing_api_key_source_fails_the_request_without_sending_or_retrying() {
     let server = MockServer::start(vec![Reply::text("never")]).await;
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         retry: fast_retry(3),
         ..setup_with_provider(
             &server,
@@ -526,7 +522,7 @@ async fn a_failing_api_key_source_fails_the_request_without_sending_or_retrying(
     }
     .build();
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
 
     assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
     assert_eq!(provider_error(&runner), ProviderError::ApiKey);
@@ -557,8 +553,8 @@ async fn the_cache_key_is_sent_as_prompt_cache_key_only_when_the_provider_is_tol
     );
     setup.config.session_cache_key = true;
     setup.session = session_42();
-    let (mut runner, _) = setup.build();
-    runner.run("go", &CancellationToken::new()).await;
+    let (runner, _) = setup.build();
+    runner.run("go").await;
     assert_eq!(server.requests()[0].body["prompt_cache_key"], "session-42");
     // The audit replays the request with its key.
     let replayed = runner
@@ -578,8 +574,8 @@ async fn the_cache_key_is_sent_as_prompt_cache_key_only_when_the_provider_is_tol
     let mut plain = setup_with_provider(&server, OpenAiConfig::default());
     plain.config.session_cache_key = true;
     plain.session = session_42();
-    let (mut runner, _) = plain.build();
-    runner.run("go", &CancellationToken::new()).await;
+    let (runner, _) = plain.build();
+    runner.run("go").await;
     assert!(server.requests()[1].body.get("prompt_cache_key").is_none());
 }
 
@@ -596,9 +592,9 @@ async fn the_output_limit_is_sent_in_the_field_the_provider_is_told_to_use() {
             ..OpenAiConfig::default()
         },
     );
-    let (mut runner, _) = setup.build();
+    let (runner, _) = setup.build();
 
-    let report = runner.run("go", &CancellationToken::new()).await;
+    let report = runner.run("go").await;
 
     assert_eq!(report.outcome, RunOutcome::Completed, "{:?}", report.error);
     let body = &server.requests()[0].body;

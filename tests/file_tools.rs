@@ -302,12 +302,12 @@ impl Executor for SlowReads {
 async fn edit_in(cwd: &Path, provider: Arc<FauxProvider>, executor: &Arc<dyn Executor>) -> RunReport {
     let names = ["edit_file", "write_file"].map(String::from);
     let tools = builtin_tools(&names, Duration::from_secs(5), executor).unwrap();
-    let (mut runner, _) = RunnerSetup {
+    let (runner, _) = RunnerSetup {
         session: Transcript::in_memory(header_in(cwd)),
         ..RunnerSetup::new(config(provider, tools))
     }
     .build();
-    runner.run("edit", &CancellationToken::new()).await
+    runner.run("edit").await
 }
 
 #[tokio::test]

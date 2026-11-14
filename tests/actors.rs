@@ -7,7 +7,6 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::json;
-use tokio_util::sync::CancellationToken;
 
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, ToolCall};
@@ -84,7 +83,7 @@ fn observed(transcript: Transcript, runs: usize) -> (Driven, Arc<RecordingPolicy
         ..RunnerSetup::new(config)
     }
     .build();
-    (runner.into_session(), policy, hook)
+    (runner, policy, hook)
 }
 
 /// The actor recorded with each message of `transcript` that a person or a hook sent.
@@ -108,10 +107,7 @@ async fn a_policy_is_told_the_labels_of_the_session_and_who_sent_the_input() {
     });
     let (session, policy, _) = observed(transcript, 1);
 
-    let report = session
-        .prompt(sent_by("alice", "go"), &CancellationToken::new())
-        .await
-        .unwrap();
+    let report = session.prompt(sent_by("alice", "go")).await.unwrap();
 
     assert_eq!(report.outcome, RunOutcome::Completed);
     assert_eq!(*policy.0.lock().unwrap(), [(labels, Some("alice".to_string()))]);
@@ -131,10 +127,7 @@ async fn hooks_and_policies_are_told_the_sender_of_the_latest_input_a_person_sen
         details: None,
     }));
 
-    session
-        .prompt(sent_by("alice", "go"), &CancellationToken::new())
-        .await
-        .unwrap();
+    session.prompt(sent_by("alice", "go")).await.unwrap();
 
     let bob = Some("bob".to_string());
     assert_eq!(
@@ -156,10 +149,9 @@ async fn hooks_and_policies_are_told_the_sender_of_the_latest_input_a_person_sen
 #[tokio::test]
 async fn an_input_that_names_nobody_is_answered_for_nobody() {
     let (session, policy, _) = observed(Transcript::in_memory(header()), 2);
-    let cancel = CancellationToken::new();
-    session.prompt(sent_by("alice", "go"), &cancel).await.unwrap();
+    session.prompt(sent_by("alice", "go")).await.unwrap();
 
-    session.prompt("and again", &cancel).await.unwrap();
+    session.prompt("and again").await.unwrap();
 
     let alice = Some("alice".to_string());
     let told: Vec<Option<String>> = policy
@@ -182,7 +174,7 @@ async fn a_run_without_new_input_answers_whoever_sent_the_last_one() {
         .unwrap();
     let (session, policy, hook) = observed(transcript, 1);
 
-    let report = session.continue_run(&CancellationToken::new()).await.unwrap();
+    let report = session.continue_run().await.unwrap();
 
     assert_eq!(report.outcome, RunOutcome::Completed);
     assert_eq!(policy.0.lock().unwrap()[0].1.as_deref(), Some("alice"));

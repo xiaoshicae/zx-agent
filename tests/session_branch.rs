@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use serde_json::json;
-use tokio_util::sync::CancellationToken;
 
 use common::{Driven, EchoTool, NotifyingProvider, RunnerSetup, config, header, summarize};
 use zx_agent::ai::Message;
@@ -23,7 +22,7 @@ async fn file_session(file: &Path, provider: Arc<FauxProvider>, tools: Vec<Arc<d
         ..RunnerSetup::new(config(provider, tools))
     }
     .build();
-    runner.into_session()
+    runner
 }
 
 /// The ID of the first message entry `matches` accepts.
@@ -56,12 +55,12 @@ async fn branching_to_an_earlier_answer_continues_there_and_keeps_the_branch_lef
         FauxStep::text("three"),
     ]));
     let session = file_session(&file, provider.clone(), vec![]).await;
-    session.prompt("first", &CancellationToken::new()).await.unwrap();
-    session.prompt("second", &CancellationToken::new()).await.unwrap();
+    session.prompt("first").await.unwrap();
+    session.prompt("second").await.unwrap();
     let one = answer_id(&session, "one");
 
     session.branch(Some(&one)).unwrap();
-    let report = session.prompt("third", &CancellationToken::new()).await.unwrap();
+    let report = session.prompt("third").await.unwrap();
 
     assert_eq!(report.final_text, "three");
     assert_eq!(
@@ -107,7 +106,7 @@ async fn a_prompt_after_going_back_to_an_answer_tells_the_model_that_its_calls_s
         FauxStep::text("again"),
     ]));
     let session = file_session(&file, provider.clone(), vec![echo.clone()]).await;
-    session.prompt("first", &CancellationToken::new()).await.unwrap();
+    session.prompt("first").await.unwrap();
     assert_eq!(echo.calls.load(Ordering::SeqCst), 1);
     let calling = entry_id(
         &session,
@@ -115,7 +114,7 @@ async fn a_prompt_after_going_back_to_an_answer_tells_the_model_that_its_calls_s
     );
 
     session.branch(Some(&calling)).unwrap();
-    let report = session.prompt("second", &CancellationToken::new()).await.unwrap();
+    let report = session.prompt("second").await.unwrap();
 
     assert_eq!(report.outcome, RunOutcome::Completed);
     assert_eq!(echo.calls.load(Ordering::SeqCst), 1, "the call is not run again");
@@ -136,10 +135,10 @@ async fn branching_to_the_root_starts_the_conversation_over_in_the_same_session(
     let file = dir.path().join("session.jsonl");
     let provider = Arc::new(FauxProvider::new([FauxStep::text("one"), FauxStep::text("fresh")]));
     let session = file_session(&file, provider.clone(), vec![]).await;
-    session.prompt("first", &CancellationToken::new()).await.unwrap();
+    session.prompt("first").await.unwrap();
 
     session.branch(None).unwrap();
-    session.prompt("new", &CancellationToken::new()).await.unwrap();
+    session.prompt("new").await.unwrap();
 
     assert_eq!(summarize(&provider.requests()[1].messages), ["user:new"]);
     drop(session);
@@ -156,10 +155,8 @@ async fn branching_to_the_root_starts_the_conversation_over_in_the_same_session(
 #[tokio::test]
 async fn branching_and_inspecting_wait_for_the_run_and_reject_unknown_entries() {
     let provider = NotifyingProvider::new([FauxStep::Hang, FauxStep::text("later")]);
-    let (runner, _) = RunnerSetup::new(config(provider.clone(), vec![])).build();
-    let session = runner.into_session();
-    let cancel = CancellationToken::new();
-    let mut running = Box::pin(session.prompt("first", &cancel));
+    let (session, _) = RunnerSetup::new(config(provider.clone(), vec![])).build();
+    let mut running = Box::pin(session.prompt("first"));
     tokio::select! {
         () = provider.started.notified() => {}
         _ = &mut running => panic!("must be running"),
@@ -174,7 +171,7 @@ async fn branching_and_inspecting_wait_for_the_run_and_reject_unknown_entries() 
 
     assert_eq!(session.branch(Some("nowhere")), Err(SessionError::EntryNotFound));
     // The position did not move: the next prompt continues after the aborted answer.
-    session.prompt("second", &CancellationToken::new()).await.unwrap();
+    session.prompt("second").await.unwrap();
     let context = summarize(&provider.requests()[1].messages);
     assert_eq!(context[0], "user:first");
     assert_eq!(context[context.len() - 1], "user:second");
