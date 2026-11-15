@@ -34,8 +34,8 @@ pub struct CommandContext {
     pub cwd: PathBuf,
     /// The session's ID.
     pub session_id: String,
-    /// The conversation's queues: a command sends the model a message with `steer_message`
-    /// or `follow_up_message`, and records state with `append_entry`.
+    /// The conversation's queues: a command sends the model a message with `steer` or
+    /// `follow_up`, and records state with `append_entry`.
     pub queues: Arc<InputQueues>,
     /// The tools the next request offers.
     pub active_tools: Arc<ActiveTools>,
@@ -72,6 +72,10 @@ pub enum CommandError {
     /// The command ran and failed with this message.
     #[error("command failed: {0}")]
     Failed(String),
+    /// The session is closed, as [`SessionError::Closed`](crate::session::SessionError::Closed)
+    /// says.
+    #[error("session is closed; the agent opens it again from its storage")]
+    Closed,
 }
 
 /// The rule a command name follows: ASCII letters, digits, `_` and `-`, starting with a

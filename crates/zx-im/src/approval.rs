@@ -11,9 +11,11 @@ use tokio::sync::mpsc;
 
 use zx_core::events::{ApprovalResult, Event, EventKind};
 
+use crate::ai::text::clip;
+
 use super::{ApprovalId, ServerEvent, ServerSink, SessionKey};
 
-/// Longest command or argument text shown on a card; longer text ends with "…". A card is
+/// Longest command or argument text shown on a card; longer text ends with "...". A card is
 /// for deciding at a glance; the full call is in the session file.
 const MAX_SUMMARY_CHARS: usize = 1500;
 
@@ -99,14 +101,9 @@ impl ApprovalEvents {
 fn summarize(arguments: &Value) -> String {
     // `command` is the argument of the bash tool (`zx-tools`), which this crate cannot see:
     // the one coupling to a tool here, so that a shell command reads as one on the card.
-    let text = match arguments.get("command").and_then(Value::as_str) {
-        Some(command) => command.to_string(),
-        None => arguments.to_string(),
-    };
-    match text.char_indices().nth(MAX_SUMMARY_CHARS) {
-        // char_indices yields character boundaries, so the slice cannot split a character.
-        Some((cut, _)) => format!("{}…", &text[..cut]),
-        None => text,
+    match arguments.get("command").and_then(Value::as_str) {
+        Some(command) => clip(command, MAX_SUMMARY_CHARS),
+        None => clip(&arguments.to_string(), MAX_SUMMARY_CHARS),
     }
 }
 
@@ -130,8 +127,8 @@ mod tests {
     fn a_long_command_is_cut_at_a_character_boundary() {
         let command = "界".repeat(MAX_SUMMARY_CHARS + 5);
         let summary = summarize(&json!({ "command": command }));
-        assert_eq!(summary.chars().count(), MAX_SUMMARY_CHARS + 1);
-        assert!(summary.ends_with("界…"));
+        assert_eq!(summary.chars().count(), MAX_SUMMARY_CHARS + "...".len());
+        assert!(summary.ends_with("界..."));
     }
 
     #[test]

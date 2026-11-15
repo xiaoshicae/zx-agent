@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 
+use super::check_session_cwd;
 use crate::config;
 use zx_agent::transcript::{JsonlStorage, MemoryStorage, SessionInfo, SessionList, SessionQuery, SessionStorage};
 
@@ -49,9 +50,7 @@ impl SessionPlace {
 
     /// `sessions` in the zx-agent home directory (`ZX_AGENT_HOME`, else `~/.zx-agent`).
     pub(crate) fn home() -> Result<Self> {
-        let home = config::home()?.context(
-            "cannot find the home directory for session files; set ZX_AGENT_HOME, or give --session or --no-session",
-        )?;
+        let home = config::home()?.context("cannot find the home directory for session files; set ZX_AGENT_HOME")?;
         Ok(Self::directory(&home.join(SESSIONS_DIR)))
     }
 
@@ -94,10 +93,22 @@ impl SessionPlace {
         self.storage().list(&query).await
     }
 
+    /// The ID of the session `--session`'s file holds already, which then continues; `None`
+    /// for a file that does not exist yet, and for a place that keeps more than one session.
+    /// Fails for a file that cannot be read as a session, and when `cwd`, the command line's
+    /// `--cwd`, names another directory than the one the session works in.
+    pub(crate) async fn held(&self, cwd: Option<&Path>) -> Result<Option<String>> {
+        let Some(held) = self.only().await? else {
+            return Ok(None);
+        };
+        check_session_cwd(cwd, &held.cwd)?;
+        Ok(Some(held.id))
+    }
+
     /// The session a single file holds already; `None` for a file that does not exist yet,
     /// and for a place that keeps more than one session. A file that cannot be read as a
     /// session is an error.
-    pub(crate) async fn only(&self) -> Result<Option<SessionInfo>> {
+    async fn only(&self) -> Result<Option<SessionInfo>> {
         let Self::File(storage) = self else {
             return Ok(None);
         };

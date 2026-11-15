@@ -24,7 +24,10 @@ use zx_agent::builtin::policy::{Rule, RuleMatcher, RulePolicy};
 use zx_agent::events::ApprovalResult;
 use zx_agent::policy::{ApprovalMode, PolicyDecision};
 use zx_agent::tools::Tool;
-use zx_agent::transcript::{Entry, MemoryStorage, SessionHeader, SessionQuery, SessionStorage, Transcript};
+use zx_agent::transcript::{
+    Entry, LoadedSession, MemoryStorage, SessionHeader, SessionList, SessionLog, SessionQuery, SessionStorage,
+    Transcript,
+};
 use zx_im::{
     Addressee, ApprovalId, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId,
     MessageRef, Post, Replacement, Replies, Said, Server, ServerConfig, ServerEvent, ServerSink, SessionKey,
@@ -226,13 +229,15 @@ impl StatusStore for Statuses {
 }
 
 /// What the tests know of the sessions the server opens: the scripted model, the `echo`
-/// tool, the storage that keeps them in memory, and how often a session was set up. It is
-/// the agent's session setup, which refuses every session when it has a reason to.
+/// tool, the storage that keeps them in memory, how often a session was set up, and how
+/// often the server listed sessions. It is the agent's session setup, which refuses every
+/// session when it has a reason to, and its storage, which counts the listings.
 struct Sessions {
     provider: Arc<FauxProvider>,
     echo: Arc<EchoTool>,
     storage: Arc<MemoryStorage>,
     opened: AtomicUsize,
+    listed: AtomicUsize,
     fail: Option<String>,
 }
 
@@ -268,7 +273,7 @@ impl Sessions {
         );
         config.retry = fast_retry(0);
         config.limits = test_limits();
-        config.storage = self.storage.clone();
+        config.storage = self.clone();
         config.session_setup = Some(self.clone());
         Agent::new(config).unwrap()
     }
@@ -282,6 +287,26 @@ impl SessionSetup for Sessions {
             Some(reason) => Err(anyhow::anyhow!("{reason}")),
             None => Ok(SessionParts::default()),
         }
+    }
+}
+
+#[async_trait]
+impl SessionStorage for Sessions {
+    async fn create(&self, header: &SessionHeader) -> anyhow::Result<Box<dyn SessionLog>> {
+        self.storage.create(header).await
+    }
+
+    async fn open(&self, id: &str) -> anyhow::Result<(LoadedSession, Box<dyn SessionLog>)> {
+        self.storage.open(id).await
+    }
+
+    async fn read(&self, id: &str) -> anyhow::Result<LoadedSession> {
+        self.storage.read(id).await
+    }
+
+    async fn list(&self, query: &SessionQuery) -> anyhow::Result<SessionList> {
+        self.listed.fetch_add(1, Ordering::SeqCst);
+        self.storage.list(query).await
     }
 }
 
@@ -353,6 +378,7 @@ fn start(setup: Setup) -> Harness {
         echo: Arc::new(EchoTool::new("echo")),
         storage: Arc::default(),
         opened: AtomicUsize::new(0),
+        listed: AtomicUsize::new(0),
         fail: setup.fail_open,
     });
     let agent = sessions.agent(setup.approval_timeout);
@@ -1511,6 +1537,90 @@ async fn a_session_closed_during_its_run_is_let_go_and_opened_again_for_the_next
     let status = h.posted(&direct(), text(&replies.working)).await;
     h.updated(&status, text("two")).await;
     assert_eq!(h.requests()[1].last().map(String::as_str), Some("user:again"));
+    assert_eq!(h.sessions.opened.load(Ordering::SeqCst), 2);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_storage_is_asked_once_about_a_thread_the_bot_never_joined() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("hi")],
+        ..Setup::default()
+    });
+    for id in ["m2", "m3", "m4"] {
+        h.say_as(OTHER, id, "m1", Addressee::Nobody, "talk among people").await;
+    }
+    // A mention in the direct chat, answered once the router has passed the talk by: it
+    // routes what arrives in order.
+    h.say_directly("d1", "hello").await;
+    let status = h.posted(&direct(), text(&h.replies.working.clone())).await;
+    h.updated(&status, text("hi")).await;
+
+    // Once for the thread, and once as the direct chat's conversation opens its session.
+    assert_eq!(h.sessions.listed.load(Ordering::SeqCst), 2);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_thread_the_bot_joins_after_talk_it_passed_by_is_followed_from_then_on() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("one"), FauxStep::text("two")],
+        config: ServerConfig {
+            idle: Duration::from_millis(20),
+            ..Setup::default().config
+        },
+        ..Setup::default()
+    });
+    h.say_as(OTHER, "m2", "m1", Addressee::Nobody, "before the bot").await;
+    h.say_as(ASKER, "m3", "m1", Addressee::Bot, "first").await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    h.updated(&status, text("one")).await;
+    while h.event().await != (ServerEvent::Released { key: key("m1") }) {}
+
+    // The bot took part now: talk there that does not mention it reaches the conversation,
+    // as context its next answer reads, whether the router still has the thread's worker or
+    // looks the thread up again.
+    h.say_as(OTHER, "m4", "m1", Addressee::Nobody, "the cache was flushed")
+        .await;
+    h.say_as(ASKER, "m5", "m1", Addressee::Bot, "second").await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    h.updated(&status, text("two")).await;
+    let request = &h.requests()[1];
+    assert!(
+        request.iter().any(|message| message.contains("the cache was flushed")),
+        "{request:?}"
+    );
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn what_was_asked_during_a_run_whose_session_closed_is_answered_in_the_session_opened_again() {
+    let mut h = start(Setup {
+        steps: vec![echo_call(), FauxStep::text("two")],
+        ..Setup::default()
+    });
+    let replies = h.replies.clone();
+    h.say_directly("d1", "run echo").await;
+    let status = h.posted(&direct(), text(&replies.working)).await;
+    let (id, card) = h.card(&direct()).await;
+    // Asked while the run waits for its approval: acknowledged, and queued for the run.
+    h.say_directly("d2", "meanwhile").await;
+    h.acknowledged(&direct(), "d2").await;
+    // Closed under the conversation, as a session closes itself when it can no longer write
+    // its records: the run ends without taking what was queued.
+    let session = h.sessions.of(&direct_key()).await.unwrap().remove(0);
+    assert!(h.agent.close_session(&session));
+    let closed = Replacement::ApprovalResolved {
+        id,
+        user: None,
+        result: ApprovalResult::Cancelled,
+    };
+    h.updated(&card, closed).await;
+    h.updated(&status, text(&replies.cancelled)).await;
+
+    let status = h.posted(&direct(), text(&replies.working)).await;
+    h.updated(&status, text("two")).await;
+    assert_eq!(h.requests()[1].last().map(String::as_str), Some("user:meanwhile"));
     assert_eq!(h.sessions.opened.load(Ordering::SeqCst), 2);
     h.stop().await.unwrap();
 }

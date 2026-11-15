@@ -89,7 +89,7 @@
 3. **并行执行工具分三个阶段：** 逐个检查 → 并发执行 → 按调用顺序写结果。只要有一个工具是 `Sequential`，整批改为串行。
 4. **回复因 `Length` 截断时，不执行其中的工具调用。**
 5. **会话只追加。** 不改写、不删除已写入的记录；`SessionLog::append` 成功后才更新内存（`crates/zx-core/src/transcript.rs`）。唯一的例外是 JSONL 文件在打开之后、追加下一条记录之前，截掉崩溃或写入失败留下的未完成尾记录。一次写入失败、超时或被中断后不再写入，会话在那次操作结束时自行关闭。一个会话同一时间只有一个写入者（JSONL 用 `flock`）。只读写当前格式（`SESSION_VERSION`）：其他版本一律拒绝，不升级、不兼容读取；格式变化时提高版本号。
-6. **发给模型的上下文就是会话投影，系统提示词也在其中。** 系统提示词以 system 消息记录，变化时只追加变化的段落（`crates/zx-ai/src/system_prompt.rs`）。重试时用 `context_edit` 省略失败的回答再续跑，不重复用户消息（`crates/zx-core/src/runner/recovery.rs`）。
+6. **发给模型的上下文就是会话投影，系统提示词也在其中。** 系统提示词以 system 消息记录，变化时只追加变化的段落（`crates/zx-ai/src/system_prompt.rs`）。重试时用 `context_edit` 省略失败的回答再续跑，不重复用户消息（`crates/zx-core/src/runner/failure.rs`）。
 7. **会话写入失败时立即停止运行**（审计要求）：循环不再执行后续步骤，运行以 `Failed` 结束，即使同时被取消。
 8. **工具输出必须截断**（`crates/zx-tools/src/tools/truncate.rs`）；耗时的工具必须响应 `ToolContext::cancel`；文件写入一旦开始就写完，调用被丢弃也一样（`Executor::write_file`）。
 9. **认证用的 API key 只从环境变量读取**，不主动写入会话文件、事件或日志；其环境变量从本机执行的 bash 与搜索子进程中删除（`LocalExecutor::hidden_env`）。`RedactSecrets` 在工具输出持久化前过滤 key 的完整字面值；边界见 `docs/SECURITY.md`。
@@ -104,9 +104,9 @@
 | provider | 实现 `ai::Provider`，遵守不变量 1；解析逻辑写单元测试 | `tests/openai_mock.rs` |
 | 工具 | 实现 `tools::Tool`：参数是带 `#[serde(deny_unknown_fields)]` 的结构体，输出截断，响应取消，不改状态的 `effects()` 返回 `Effects::ReadOnly`。共用的进 `AgentConfig::tools`，绑定会话目录或执行环境的由 `SessionSetup` 给出 | `crates/zx-tools/src/tools/` |
 | 策略 | 实现 `policy::ToolPolicy`，经 `PolicyChain::push` 进 `AgentConfig::policies`；无法判断时返回 `Deny`，所有策略取最严的结论。钩子不做放行判断 | `crates/zx-tools/src/policy/` |
-| 钩子 | 实现 `hooks::Hook`：回调必须异步让出执行权，`transform_context` 不能追加 system 消息。共用的进 `AgentConfig::hooks`，单个会话的进 `SessionParts::hooks` | `tests/hook_contract.rs` |
+| 钩子 | 实现 `hooks::Hook`：回调必须异步让出执行权，`transform_context` 不能追加 system 消息。经 `HookChain::push(名字, Arc)` 注册，名字出现在 `hook_failed` 事件与追踪里；共用的进 `AgentConfig::hooks`，单个会话的进 `SessionParts::hooks` | `tests/hook_contract.rs` |
 | 打包的扩展 | 实现 `extensions::Extension`，进 `AgentConfig::extensions`：建 `Agent` 时向它要一次并校验，所有会话共用。运行中发消息、记状态或改工具集经 `HookContext` 的 `queues` 与 `active_tools` | `crates/zx-tools/src/mcp.rs` |
-| 会话存储 | 实现 `transcript::SessionStorage` 与 `SessionLog`，进 `AgentConfig::storage`：`append` 存好才返回，一个会话一个写入者，接口里不出现文件路径 | `transcript/memory.rs`；只换写入方式时 `tests/runner.rs` 的 `TableLog` |
+| 会话存储 | 实现 `transcript::SessionStorage` 与 `SessionLog`，进 `AgentConfig::storage`：`append` 存好才返回，一个会话一个写入者，接口里不出现文件路径，列出时用 `SessionList::new` 排序与截断 | `transcript/memory.rs`；只换写入方式时 `tests/runner.rs` 的 `TableLog` |
 | 摘要器 | 实现 `compaction::Summarizer`，进 `AgentConfig::summarizer`；何时摘要、读哪一段、记录与校验仍由内核做 | `tests/summarizer.rs` |
 | 单个会话的部分 | 实现 `agent::SessionSetup`，返回 `SessionParts`（工具、钩子、提示词段落） | `crates/zx-cli/src/assembly/setup.rs` |
 | 接入方式（如 Web 服务） | 独立的 crate，依赖 `zx-agent`（只要内核时依赖 `zx-core`），构造 `Agent`，为每个对话创建或打开 `Session`，读它返回的 `Run`；不放进库 `zx-agent` | `crates/zx-cli`、`crates/zx-im` |

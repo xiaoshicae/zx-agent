@@ -14,20 +14,16 @@ use common::{
     Asked, EchoTool, RunnerSetup, config, fast_retry, header, read_lines, refusal, run_approved, run_prompt, summarize,
 };
 use zx_agent::CancelSignal;
+use zx_agent::agent::RunLimits;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{EventReceiver, Message, Provider, Request, SectionChange, StopReason, SystemMessage, ToolCall};
 use zx_agent::builtin::continuation::ContinueOnLength;
 use zx_agent::builtin::redact::{RedactSecrets, check_secret_files, short_secret_files};
 use zx_agent::builtin::tools::BashTool;
-use zx_agent::events::{ApprovalResult, Event, EventKind, ToolVerdict};
-use zx_agent::hooks::{
-    ContextEdit, FinishedStep, Hook, HookChain, HookContext, HookOptions, HookResult, HookStage, StepDecision,
-};
+use zx_agent::events::{ApprovalResult, Budget, Event, EventKind, RunOutcome, ToolVerdict};
+use zx_agent::hooks::{ContextEdit, FinishedStep, Hook, HookContext, HookResult, HookStage, StepDecision};
 use zx_agent::input::Input;
-use zx_agent::policy::{
-    ApprovalDecision, ApprovalMode, DEFAULT_APPROVAL_TIMEOUT, PolicyContext, PolicyDecision, ToolPolicy,
-};
-use zx_agent::runner::{RunLimits, RunOutcome};
+use zx_agent::policy::{ApprovalDecision, ApprovalMode, PolicyContext, PolicyDecision, ToolPolicy};
 use zx_agent::tools::{Tool, ToolContext, ToolOutput};
 use zx_agent::transcript::{Entry, SessionHeader, Transcript};
 
@@ -188,7 +184,6 @@ async fn an_approval_nobody_answers_in_time_blocks_the_call_and_the_loop_goes_on
 fn nobody_answers_approvals_unless_the_host_says_it_does() {
     let config = config(Arc::new(FauxProvider::new([])), vec![]);
     assert_eq!(config.approvals, ApprovalMode::Deny);
-    assert_eq!(DEFAULT_APPROVAL_TIMEOUT, Duration::from_secs(120));
 }
 
 #[tokio::test]
@@ -300,7 +295,8 @@ async fn input_and_context_changes_are_persisted_before_the_model_request() {
         path: path.clone(),
     });
     let mut config = config(probe, vec![]);
-    config.hooks = HookChain::new().with(RewriteInput).with(Project);
+    config.hooks.push("rewrite_input", Arc::new(RewriteInput));
+    config.hooks.push("project", Arc::new(Project));
     let (runner, _) = RunnerSetup {
         session,
         ..RunnerSetup::new(config)
@@ -340,7 +336,7 @@ impl Hook for InvalidPlan {
 async fn an_invalid_edit_plan_is_rejected_before_any_partial_edit_or_request() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("never")]));
     let mut config = config(provider.clone(), vec![]);
-    config.hooks.push(InvalidPlan);
+    config.hooks.push("invalid_plan", Arc::new(InvalidPlan));
     let (runner, _) = RunnerSetup::new(config).build();
     let report = runner.run("go").await;
     assert_eq!(report.outcome, RunOutcome::Failed);
@@ -368,7 +364,7 @@ impl Hook for RejectInput {
 async fn rejected_input_is_logged_and_omitted_without_retrying_the_model() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("never")]));
     let mut config = config(provider.clone(), vec![]);
-    config.hooks.push(RejectInput);
+    config.hooks.push("reject_input", Arc::new(RejectInput));
     let (runner, _) = RunnerSetup {
         retry: fast_retry(3),
         ..RunnerSetup::new(config)
@@ -399,7 +395,7 @@ async fn steering_queued_after_a_rejected_message_stays_queued_for_the_next_run(
     }
     let provider = Arc::new(FauxProvider::new([FauxStep::text("answer")]));
     let mut config = config(provider.clone(), vec![]);
-    config.hooks.push(RejectMarked);
+    config.hooks.push("reject_marked", Arc::new(RejectMarked));
     let (runner, _) = RunnerSetup::new(config).build();
     runner.queues().steer("reject-me");
     runner.queues().steer("keep-me");
@@ -431,7 +427,7 @@ async fn omitting_prior_runs_does_not_lose_the_current_answer_or_usage() {
         session.append_message(Message::user("old")).await.unwrap();
     }
     let mut config = config(provider.clone(), vec![]);
-    config.hooks.push(OmitEarlier);
+    config.hooks.push("omit_earlier", Arc::new(OmitEarlier));
     let (runner, _) = RunnerSetup {
         session,
         ..RunnerSetup::new(config)
@@ -488,13 +484,9 @@ async fn failed_output_hooks_withhold_raw_results_from_events_and_persistence() 
             FauxStep::text("handled"),
         ]));
         let mut config = config(provider.clone(), vec![Arc::new(SecretTool)]);
-        config.hooks.push_with(
-            hook,
-            HookOptions {
-                timeout: Duration::ZERO,
-                ..HookOptions::default()
-            },
-        );
+        config
+            .hooks
+            .push_with_timeout("bad_output", Arc::new(hook), Duration::ZERO);
         let (runner, events) = RunnerSetup::new(config).build();
         let report = runner.run("go").await;
         assert_eq!(report.outcome, RunOutcome::Completed);
@@ -538,7 +530,7 @@ async fn observer_failures_are_diagnostic_and_retry_events_are_observed_once() {
     ]));
     let seen = Arc::new(Mutex::new(Vec::new()));
     let mut config = config(provider, vec![]);
-    config.hooks.push(Observer { seen: seen.clone() });
+    config.hooks.push("observer", Arc::new(Observer { seen: seen.clone() }));
     let (runner, events) = RunnerSetup {
         retry: fast_retry(1),
         ..RunnerSetup::new(config)
@@ -575,7 +567,7 @@ async fn custom_continuation_wording_still_joins_answer_parts() {
         FauxStep::text("第二部分。"),
     ]));
     let mut config = config(provider.clone(), vec![]);
-    config.hooks.push(CustomContinue);
+    config.hooks.push("custom_continue", Arc::new(CustomContinue));
     let (runner, _) = RunnerSetup::new(config).build();
     let report = runner.run("go").await;
     assert_eq!(report.final_text, "第一部分，第二部分。");
@@ -591,7 +583,9 @@ async fn continuation_budget_is_not_reset_after_a_provider_retry() {
         FauxStep::text("never"),
     ]));
     let mut config = config(provider.clone(), vec![]);
-    config.hooks.push(ContinueOnLength::new(1));
+    config
+        .hooks
+        .push("continue_on_length", Arc::new(ContinueOnLength::new(1)));
     let (runner, _) = RunnerSetup {
         retry: fast_retry(1),
         limits: RunLimits::default(),
@@ -835,7 +829,9 @@ impl Hook for NextTurn {
 async fn a_hook_follow_up_obeys_the_step_budget() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("first"), FauxStep::text("never")]));
     let mut config = config(provider.clone(), vec![]);
-    config.hooks.push(NextTurn(StepDecision::FollowUp("next".into())));
+    config
+        .hooks
+        .push("next_turn", Arc::new(NextTurn(StepDecision::FollowUp("next".into()))));
     let (runner, _) = RunnerSetup {
         limits: RunLimits {
             max_model_requests: Some(1),
@@ -845,7 +841,13 @@ async fn a_hook_follow_up_obeys_the_step_budget() {
     }
     .build();
     let report = runner.run("go").await;
-    assert_eq!(report.outcome, RunOutcome::ModelRequestLimit);
+    assert_eq!(
+        report.outcome,
+        RunOutcome::BudgetExhausted {
+            budget: Budget::ModelRequests,
+            truncated: false
+        }
+    );
     assert_eq!(provider.requests().len(), 1);
 }
 
@@ -867,7 +869,7 @@ impl Hook for StopAndQueue {
 async fn stopping_from_a_hook_preserves_queued_user_input() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let mut config = config(provider, vec![]);
-    config.hooks.push(StopAndQueue);
+    config.hooks.push("stop_and_queue", Arc::new(StopAndQueue));
     let (runner, _) = RunnerSetup::new(config).build();
     let result = runner.run("go").await;
     assert_eq!(result.outcome, RunOutcome::Completed);
@@ -886,7 +888,7 @@ impl Hook for FinishFailure {
 async fn a_finish_hook_error_never_triggers_provider_retry() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("answer"), FauxStep::text("never")]));
     let mut config = config(provider.clone(), vec![]);
-    config.hooks.push(FinishFailure);
+    config.hooks.push("finish_failure", Arc::new(FinishFailure));
     let (runner, _) = RunnerSetup {
         retry: fast_retry(3),
         ..RunnerSetup::new(config)
@@ -905,7 +907,7 @@ async fn a_finish_hook_error_never_triggers_provider_retry() {
 async fn an_attempt_that_a_hook_failure_stops_reports_an_error() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("answer")]));
     let mut config = config(provider, vec![]);
-    config.hooks.push(FinishFailure);
+    config.hooks.push("finish_failure", Arc::new(FinishFailure));
 
     let (_, events) = run_prompt(config, &mut Vec::new(), "go").await;
 
@@ -941,10 +943,13 @@ fn holding_runner(provider: Arc<FauxProvider>) -> (common::Driven, HoldInput) {
     let holding = Arc::new(tokio::sync::Notify::new());
     let released = Arc::new(AtomicBool::new(false));
     let mut config = config(provider, vec![]);
-    config.hooks.push(HoldInput {
-        holding: holding.clone(),
-        released: released.clone(),
-    });
+    config.hooks.push(
+        "hold_input",
+        Arc::new(HoldInput {
+            holding: holding.clone(),
+            released: released.clone(),
+        }),
+    );
     let (runner, _) = RunnerSetup::new(config).build();
     (runner, HoldInput { holding, released })
 }
@@ -1229,14 +1234,20 @@ async fn observers_skip_streaming_deltas_unless_they_ask_for_them() {
     let mut config = config(provider, vec![]);
     let default = Arc::new(Mutex::new(Vec::new()));
     let all = Arc::new(Mutex::new(Vec::new()));
-    config.hooks.push(Kinds {
-        seen: default.clone(),
-        all: false,
-    });
-    config.hooks.push(Kinds {
-        seen: all.clone(),
-        all: true,
-    });
+    config.hooks.push(
+        "kinds",
+        Arc::new(Kinds {
+            seen: default.clone(),
+            all: false,
+        }),
+    );
+    config.hooks.push(
+        "kinds",
+        Arc::new(Kinds {
+            seen: all.clone(),
+            all: true,
+        }),
+    );
 
     let (_, events) = run_prompt(config, &mut Vec::new(), "go").await;
 
@@ -1298,7 +1309,7 @@ async fn every_hook_method_knows_the_session_run_and_working_directory() {
     ]));
     let probe = ContextProbe::default();
     let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
-    config.hooks.push(probe.clone());
+    config.hooks.push("probe", Arc::new(probe.clone()));
     let (runner, events) = RunnerSetup {
         session: Transcript::in_memory(SessionHeader::new(Path::new("/srv/work"), "test-model")),
         ..RunnerSetup::new(config)
@@ -1338,13 +1349,7 @@ impl Hook for FailingObserver {
 async fn a_named_hook_is_reported_under_its_name() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let mut config = config(provider, vec![]);
-    config.hooks.push_with(
-        FailingObserver,
-        HookOptions {
-            name: Some("trace-exporter".into()),
-            ..HookOptions::default()
-        },
-    );
+    config.hooks.push("trace-exporter", Arc::new(FailingObserver));
     let (runner, events) = RunnerSetup::new(config).build();
 
     runner.run("go").await;
@@ -1392,11 +1397,14 @@ async fn hooks_run_in_stage_order_whatever_the_registration_order() {
         (HookStage::Extension, "extension-1"),
         (HookStage::Extension, "extension-2"),
     ] {
-        config.hooks.push(Staged {
-            stage,
-            tag,
-            order: order.clone(),
-        });
+        config.hooks.push(
+            "staged",
+            Arc::new(Staged {
+                stage,
+                tag,
+                order: order.clone(),
+            }),
+        );
     }
 
     run_prompt(config, &mut Vec::new(), "go").await;
@@ -1426,10 +1434,11 @@ async fn redaction_registered_first_still_runs_after_extensions() {
         FauxStep::text("done"),
     ]));
     let mut config = config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]);
-    config
-        .hooks
-        .push(RedactSecrets::new(Some("sk-registered-early".into())));
-    config.hooks.push(LeakSecret);
+    config.hooks.push(
+        "redact_secrets",
+        Arc::new(RedactSecrets::new(Some("sk-registered-early".into()))),
+    );
+    config.hooks.push("leak_secret", Arc::new(LeakSecret));
 
     run_prompt(config, &mut Vec::new(), "go").await;
 
@@ -1448,11 +1457,12 @@ async fn progress_passes_only_the_redaction_hooks() {
         FauxStep::text("done"),
     ]));
     let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
-    config
-        .hooks
-        .push(RedactSecrets::new(Some("sk-registered-early".into())));
+    config.hooks.push(
+        "redact_secrets",
+        Arc::new(RedactSecrets::new(Some("sk-registered-early".into()))),
+    );
     // An extension that changes final output must not see transient progress.
-    config.hooks.push(LeakSecret);
+    config.hooks.push("leak_secret", Arc::new(LeakSecret));
 
     let (_, sink) = run_prompt(config, &mut Vec::new(), "go").await;
 
@@ -1478,9 +1488,10 @@ async fn redaction_covers_the_strings_and_keys_of_details() {
         FauxStep::text("done"),
     ]));
     let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
-    config
-        .hooks
-        .push(RedactSecrets::new(Some("sk-registered-early".into())));
+    config.hooks.push(
+        "redact_secrets",
+        Arc::new(RedactSecrets::new(Some("sk-registered-early".into()))),
+    );
 
     let (_, sink) = run_prompt(config, &mut Vec::new(), "go").await;
 
@@ -1526,7 +1537,7 @@ impl Hook for AppendSystem {
 async fn a_hook_cannot_append_system_messages() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
     let mut config = config(provider.clone(), vec![]);
-    config.hooks.push(AppendSystem);
+    config.hooks.push("append_system", Arc::new(AppendSystem));
 
     let (result, _) = run_prompt(config, &mut Vec::new(), "go").await;
 
@@ -1548,7 +1559,7 @@ impl Hook for PanickingObserver {
 async fn a_panic_in_observes_is_reported_and_the_run_continues() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let mut config = config(provider, vec![]);
-    config.hooks.push(PanickingObserver);
+    config.hooks.push("panicking_observer", Arc::new(PanickingObserver));
 
     let (result, sink) = run_prompt(config, &mut Vec::new(), "go").await;
 

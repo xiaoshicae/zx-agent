@@ -6,6 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use zx_agent::agent::RunLimits;
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::builtin::continuation::ContinueOnLength;
 use zx_agent::builtin::executor::{LocalExecutor, local_environment_section};
@@ -15,7 +16,6 @@ use zx_agent::builtin::tools::{BashTool, ReadFileTool};
 use zx_agent::events::EventKind;
 use zx_agent::policy::PolicyDecision;
 use zx_agent::prompt::build_system_prompt;
-use zx_agent::runner::RunLimits;
 use zx_agent::{Agent, AgentConfig, SessionOptions};
 
 /// This embedder's scenario: a bounded, read-only report about the machine it runs on.
@@ -72,10 +72,14 @@ async fn main() -> anyhow::Result<()> {
         ..AgentConfig::new(Arc::new(provider), model)
     };
     // Continue once if an answer stops at the output token limit.
-    config.hooks.push(ContinueOnLength::new(1));
+    config
+        .hooks
+        .push("continue_on_length", Arc::new(ContinueOnLength::new(1)));
     config.policies.push("command_policy", Arc::new(CommandPolicy::new()));
     config.policies.push("permissions", Arc::new(rules));
-    config.hooks.push(RedactSecrets::new(api_key));
+    config
+        .hooks
+        .push("redact_secrets", Arc::new(RedactSecrets::new(api_key)));
     // The agent keeps its sessions in memory unless it is given a storage; this one works
     // in the current directory.
     let agent = Agent::new(config)?;

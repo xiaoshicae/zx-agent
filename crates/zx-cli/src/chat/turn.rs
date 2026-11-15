@@ -1,4 +1,4 @@
-//! One operation of a conversation driven to its end: the prompt, continuation or summary
+//! One operation of a conversation driven to its end: the prompt, continuation or compaction
 //! runs while the terminal takes steering input, approvals and signals.
 //!
 //! The operation is a run that this loop reads: each event is shown as it arrives, and a
@@ -11,10 +11,9 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use zx_agent::compaction;
-use zx_agent::events::{ApprovalResult, Event, EventKind};
+use zx_agent::events::{ApprovalResult, Event, EventKind, RunReport};
 use zx_agent::input::Input;
 use zx_agent::policy::ApprovalDecision;
-use zx_agent::runner::RunReport;
 use zx_agent::session::SessionError;
 use zx_agent::{Run, Session};
 
@@ -22,10 +21,10 @@ use super::commands::{self, Command};
 use super::info::help;
 use super::input::{self, Line};
 use super::output::Output;
-use super::signals::{Interrupt, Signals};
 use super::term::Tone;
 use super::{Flow, InputMode, rejected, run_extension_command};
 use crate::process::{EXIT_CANCELLED, EXIT_COMPLETED};
+use crate::process::{Interrupt, Signals};
 use crate::render::{describe_arguments, describe_call, visible};
 
 const APPROVAL_MENU: &str = "  1/y allow once · 2 allow identical calls in this conversation · 3/n deny · 4 discuss";
@@ -50,7 +49,7 @@ pub(super) enum Operation {
     Compact,
 }
 
-/// The run of an operation: a task, or a summary.
+/// The run of an operation: a task, or a compaction.
 enum Running {
     Task(Run),
     Compact(Run<compaction::Report>),
@@ -293,7 +292,7 @@ fn finished(session: &Session, report: &Report, io: &TurnIo<'_>, state: TurnStat
     for message in late {
         match message {
             Input::User { text, .. } => next.push(text),
-            custom @ Input::Custom(_) => session.queues().steer_message(custom),
+            custom @ Input::Custom(_) => session.queues().steer(custom),
         }
     }
     Ok(if next.is_empty() {
@@ -389,7 +388,7 @@ async fn busy(session: &Session, io: &TurnIo<'_>, state: &mut TurnState, command
         // request as steering input.
         Command::Extension { name, args } => {
             if let Some(message) = run_extension_command(session, &name, &args, output).await {
-                session.queues().steer_message(message);
+                session.queues().steer(message);
                 output.line(Tone::Dim, "[chat] the command's message is queued as steering input");
             }
         }

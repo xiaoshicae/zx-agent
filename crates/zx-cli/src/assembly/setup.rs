@@ -19,8 +19,8 @@ use zx_agent::prompt;
 use zx_agent::tools::Tool;
 use zx_agent::transcript::SessionHeader;
 
+use super::SessionPlace;
 use super::execution::{check_session_outside, executor};
-use super::{SessionPlace, push_built_in};
 
 /// What each session of a mode gets for itself, made when the session is created or opened
 /// and kept until it is closed: a container, when commands run in one, is the session's.
@@ -80,7 +80,8 @@ impl SessionSetup for PerSession {
             // page their own output are exempt: a page of theirs is not stored again.
             let paging = [output_store::TOOL_NAME, TOOL_NAME, tools::READ_FILE];
             let spill = SpillOutputs::new(store.clone(), paging.map(String::from).to_vec());
-            push_built_in(&mut hooks, "spill_outputs", spill);
+            // Named like the hooks every session shares (`cli::agent::hooks`).
+            hooks.push("spill_outputs", Arc::new(spill));
             host.push(Arc::new(ReadOutputTool::new(store)));
         }
         if self.execution == Execution::Container {

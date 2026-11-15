@@ -79,66 +79,89 @@ impl StatusFiles {
     }
 }
 
-// Small writes, renames and reads of a few files, like a session file's appended line
-// (crates/zx-core/src/session.rs); `list` runs once, before the server receives anything.
 #[async_trait]
 impl StatusStore for StatusFiles {
     async fn insert(&self, key: &SessionKey, status: &MessageRef) -> Result<(), String> {
         let path = self.path(key, status);
         let text = serde_json::to_string(&Record::new(key, status))
             .map_err(|error| format!("cannot encode the record of {}: {error}", path.display()))?;
-        let partial = path.with_extension(PARTIAL);
-        let mut options = OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        // Which chats and threads the server answers in is not for other users to read.
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        options
-            .open(&partial)
-            .and_then(|mut file| file.write_all(text.as_bytes()))
-            .map_err(|error| format!("cannot write {}: {error}", partial.display()))?;
-        if let Err(error) = std::fs::rename(&partial, &path) {
-            // The record failed either way. Should the removal fail too, the file stays, and
-            // `list` passes over it.
-            std::fs::remove_file(&partial).ok();
-            return Err(format!(
-                "cannot rename {} to {}: {error}",
-                partial.display(),
-                path.display()
-            ));
-        }
-        Ok(())
+        blocking(move || write_record(&path, &text)).await
     }
 
     async fn remove(&self, key: &SessionKey, status: &MessageRef) -> Result<(), String> {
         let path = self.path(key, status);
-        match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(format!("cannot remove {}: {error}", path.display())),
-        }
+        blocking(move || remove_record(&path)).await
     }
 
     async fn list(&self) -> Result<Vec<(SessionKey, MessageRef)>, String> {
-        let unreadable = |path: &Path, error: io::Error| format!("cannot read {}: {error}", path.display());
-        let mut paths = Vec::new();
-        for entry in std::fs::read_dir(&self.dir).map_err(|error| unreadable(&self.dir, error))? {
-            let path = entry.map_err(|error| unreadable(&self.dir, error))?.path();
-            // Anything else is a write that a crash cut short before its rename.
-            if path.extension().is_some_and(|extension| extension == RECORD) {
-                paths.push(path);
-            }
-        }
-        paths.sort();
-        let mut kept = Vec::with_capacity(paths.len());
-        for path in paths {
-            let text = std::fs::read_to_string(&path).map_err(|error| unreadable(&path, error))?;
-            let record: Record = serde_json::from_str(&text)
-                .map_err(|error| format!("{} is not a status record: {error}", path.display()))?;
-            kept.push(record.into_parts());
-        }
-        Ok(kept)
+        let dir = self.dir.clone();
+        blocking(move || read_records(&dir)).await
     }
+}
+
+/// Run `work`, which reads or writes status files, off the runtime: a volume that stopped
+/// answering then stalls neither the runtime nor the server's timeout of the call.
+async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| format!("reading or writing status files stopped: {error}"))?
+}
+
+/// Write `text` to `path` under a temporary name first, then rename it, so that a crash never
+/// leaves part of a record.
+fn write_record(path: &Path, text: &str) -> Result<(), String> {
+    let partial = path.with_extension(PARTIAL);
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    // Which chats and threads the server answers in is not for other users to read.
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options
+        .open(&partial)
+        .and_then(|mut file| file.write_all(text.as_bytes()))
+        .map_err(|error| format!("cannot write {}: {error}", partial.display()))?;
+    if let Err(error) = std::fs::rename(&partial, path) {
+        // The record failed either way. Should the removal fail too, the file stays, and
+        // `list` passes over it.
+        std::fs::remove_file(&partial).ok();
+        return Err(format!(
+            "cannot rename {} to {}: {error}",
+            partial.display(),
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Remove the record in `path`; one that is not there is removed already.
+fn remove_record(path: &Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("cannot remove {}: {error}", path.display())),
+    }
+}
+
+/// The records in `dir`, in the order of their names.
+fn read_records(dir: &Path) -> Result<Vec<(SessionKey, MessageRef)>, String> {
+    let unreadable = |path: &Path, error: io::Error| format!("cannot read {}: {error}", path.display());
+    let mut paths = Vec::new();
+    for entry in std::fs::read_dir(dir).map_err(|error| unreadable(dir, error))? {
+        let path = entry.map_err(|error| unreadable(dir, error))?.path();
+        // Anything else is a write that a crash cut short before its rename.
+        if path.extension().is_some_and(|extension| extension == RECORD) {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    let mut kept = Vec::with_capacity(paths.len());
+    for path in paths {
+        let text = std::fs::read_to_string(&path).map_err(|error| unreadable(&path, error))?;
+        let record: Record = serde_json::from_str(&text)
+            .map_err(|error| format!("{} is not a status record: {error}", path.display()))?;
+        kept.push(record.into_parts());
+    }
+    Ok(kept)
 }
 
 /// One kept status, as stored.

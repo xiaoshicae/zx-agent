@@ -9,13 +9,13 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use zx_agent::agent::RunLimits;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{AssistantMessage, ContentBlock, Message, Request, StopReason, ToolCall, ToolResultMessage};
 use zx_agent::compaction::{Config, Outcome, Report};
-use zx_agent::events::{Event, EventKind};
-use zx_agent::hooks::{ContextEdit, Hook, HookContext, HookOptions};
-use zx_agent::runner::{RunLimits, RunOutcome};
-use zx_agent::session::{ModelRef, SessionError};
+use zx_agent::events::{Budget, Event, EventKind, RunOutcome};
+use zx_agent::hooks::{ContextEdit, Hook, HookContext};
+use zx_agent::session::SessionError;
 use zx_agent::transcript::{Entry, Transcript};
 
 use common::summary_eval::{PLANTED, Planted, ROUNDS, evaluate, round, text_of};
@@ -140,7 +140,7 @@ async fn steering_received_during_a_summary_is_persisted_before_the_next_task_re
         FauxStep::text("answer"),
     ]));
     let mut config = config(provider.clone(), vec![]);
-    config.hooks.push(SteerAfterSummary);
+    config.hooks.push("steer_after_summary", Arc::new(SteerAfterSummary));
     let (runner, _) = RunnerSetup {
         session: store,
         compaction: Config {
@@ -179,7 +179,13 @@ async fn summary_cannot_spend_an_extra_task_request_after_request_limit() {
     }
     .build();
     let report = runner.run("continue").await;
-    assert_eq!(report.outcome, RunOutcome::ModelRequestLimit);
+    assert_eq!(
+        report.outcome,
+        RunOutcome::BudgetExhausted {
+            budget: Budget::ModelRequests,
+            truncated: false
+        }
+    );
     assert_eq!(report.model_requests, 1);
     assert_eq!(report.usage.total_tokens, 15);
     assert!(report.final_text.is_empty(), "a summary is never a task answer");
@@ -208,7 +214,13 @@ async fn a_summary_request_counts_against_the_token_budget() {
     }
     .build();
     let report = runner.run("continue").await;
-    assert_eq!(report.outcome, RunOutcome::TokenBudget);
+    assert_eq!(
+        report.outcome,
+        RunOutcome::BudgetExhausted {
+            budget: Budget::Tokens,
+            truncated: false
+        }
+    );
     assert_eq!(report.usage.input_and_output(), 15);
     assert!(report.final_text.is_empty(), "a summary is never a task answer");
     assert_eq!(provider.requests().len(), 1);
@@ -416,13 +428,9 @@ async fn the_pause_survives_a_run_whose_future_is_dropped() {
     ]));
     let waiting = Arc::new(tokio::sync::Notify::new());
     let mut config = config(provider.clone(), vec![]);
-    config.hooks.push_with(
-        Hold(waiting.clone()),
-        HookOptions {
-            timeout: Duration::from_secs(3600),
-            ..HookOptions::default()
-        },
-    );
+    config
+        .hooks
+        .push_with_timeout("hold", Arc::new(Hold(waiting.clone())), Duration::from_secs(3600));
     let (runner, _) = RunnerSetup {
         session: store,
         compaction: Config {
@@ -531,7 +539,7 @@ async fn context_hooks_are_persisted_before_a_summary_sees_the_source() {
         FauxStep::text("answer"),
     ]));
     let mut config = config(provider.clone(), vec![]);
-    config.hooks.push(Correct);
+    config.hooks.push("correct", Arc::new(Correct));
     let (runner, _) = RunnerSetup {
         session: store,
         compaction: Config {
@@ -587,7 +595,9 @@ async fn a_context_plan_that_edits_a_summary_is_rejected_before_any_edit_is_writ
         FauxStep::text("answer"),
     ]));
     let mut config = config(provider.clone(), vec![]);
-    config.hooks.push(EditInputThenSummary);
+    config
+        .hooks
+        .push("edit_input_then_summary", Arc::new(EditInputThenSummary));
     let (runner, _) = RunnerSetup {
         session: store,
         compaction: Config {
@@ -626,13 +636,7 @@ async fn pending_summary_shares_busy_cancel_and_drop_reuse_with_prompt() {
     assert!(events.kinds().contains(&"compaction_start"));
     assert!(matches!(session.prompt("busy").await, Err(SessionError::Busy)));
     assert!(matches!(session.compact().await, Err(SessionError::Busy)));
-    assert_eq!(
-        session.set_model(ModelRef {
-            provider: provider.clone(),
-            model: "other".into()
-        }),
-        Err(SessionError::Busy)
-    );
+    assert_eq!(session.set_model(provider.clone(), "other"), Err(SessionError::Busy));
     drop(compact);
     assert_eq!(session.prompt("after drop").await.unwrap().final_text, "reused");
 }

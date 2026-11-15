@@ -63,14 +63,14 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use common::{EchoTool, NotifyingProvider, RunnerSetup, config, fast_retry, header, read_lines, summarize};
+use zx_agent::agent::RunLimits;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, ModelCost, ModelMeta, PREAMBLE, StopReason, SystemPrompt, ToolCall, Usage};
 use zx_agent::builtin::continuation::ContinueOnLength;
-use zx_agent::events::{EVENT_SCHEMA_VERSION, EventKind, RequestKind};
-use zx_agent::hooks::{Hook, HookContext, HookOptions, HookResult};
+use zx_agent::events::{Budget, EVENT_SCHEMA_VERSION, EventKind, RequestKind, RunOutcome};
+use zx_agent::hooks::{Hook, HookContext, HookResult};
 use zx_agent::input::Input;
 use zx_agent::policy::{PolicyContext, PolicyDecision, ToolPolicy};
-use zx_agent::runner::{RunLimits, RunOutcome};
 use zx_agent::transcript::{Entry, LoadedSession, LogRecord, SessionLog, Transcript};
 
 /// A stored record, as a database row would hold it.
@@ -161,13 +161,9 @@ fn provider(steps: impl IntoIterator<Item = FauxStep>) -> Arc<FauxProvider> {
 /// a truncated answer, as the unattended agents register it.
 fn setup(provider: &Arc<FauxProvider>) -> RunnerSetup {
     let mut config = config(provider.clone(), vec![]);
-    config.hooks.push_with(
-        ContinueOnLength::new(1),
-        HookOptions {
-            name: Some("continue_on_length".to_string()),
-            ..HookOptions::default()
-        },
-    );
+    config
+        .hooks
+        .push("continue_on_length", Arc::new(ContinueOnLength::new(1)));
     RunnerSetup::new(config)
 }
 
@@ -234,7 +230,13 @@ async fn zero_step_limit_does_not_call_the_provider() {
 
     let report = runner.run("go").await;
 
-    assert_eq!(report.outcome, RunOutcome::ModelRequestLimit);
+    assert_eq!(
+        report.outcome,
+        RunOutcome::BudgetExhausted {
+            budget: Budget::ModelRequests,
+            truncated: false
+        }
+    );
     assert_eq!(report.model_requests, 0);
     assert!(report.final_text.is_empty());
     assert!(provider.requests().is_empty());
@@ -271,7 +273,13 @@ async fn the_token_budget_stops_a_run_before_the_request_it_cannot_pay_for() {
 
     let report = runner.run("go").await;
 
-    assert_eq!(report.outcome, RunOutcome::TokenBudget);
+    assert_eq!(
+        report.outcome,
+        RunOutcome::BudgetExhausted {
+            budget: Budget::Tokens,
+            truncated: false
+        }
+    );
     assert_eq!(provider.requests().len(), 1);
     assert_eq!(report.usage.input_and_output(), 15);
     assert_eq!(
@@ -333,7 +341,13 @@ async fn the_cost_budget_stops_a_run_before_the_request_it_cannot_pay_for() {
 
     let report = runner.run("go").await;
 
-    assert_eq!(report.outcome, RunOutcome::CostBudget);
+    assert_eq!(
+        report.outcome,
+        RunOutcome::BudgetExhausted {
+            budget: Budget::Cost,
+            truncated: false
+        }
+    );
     assert_eq!(provider.requests().len(), 1);
     assert_eq!(
         report.error.as_deref(),
@@ -443,6 +457,39 @@ async fn retries_transient_errors_without_repeating_the_prompt() {
     // The retry request has the prompt once and not the failed attempt.
     assert_eq!(summarize(&provider.requests()[1].messages), ["user:diagnose"]);
     assert!(sink.kinds().contains(&"retry_scheduled"));
+}
+
+/// Keeps nothing and refuses context edits, like a table whose constraint rejects them.
+struct RefusingContextEdits;
+
+#[async_trait]
+impl SessionLog for RefusingContextEdits {
+    async fn append(&mut self, record: &LogRecord<'_>) -> anyhow::Result<()> {
+        anyhow::ensure!(record.kind != "context_edit", "context edits are refused");
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_retry_whose_edit_cannot_be_recorded_is_neither_counted_nor_announced() {
+    let provider = provider([
+        FauxStep::Fail("HTTP 503: service unavailable".into()),
+        FauxStep::text("must not be requested"),
+    ]);
+    let (runner, sink) = RunnerSetup {
+        session: Transcript::with_log(header(), Box::new(RefusingContextEdits)),
+        retry: fast_retry(3),
+        limits: RunLimits::default(),
+        ..setup(&provider)
+    }
+    .build();
+
+    let report = runner.run("diagnose").await;
+
+    assert_eq!(report.outcome, RunOutcome::Failed, "{report:?}");
+    assert_eq!(report.retries, 0);
+    assert!(!sink.kinds().contains(&"retry_scheduled"), "{:?}", sink.kinds());
+    assert_eq!(provider.requests().len(), 1);
 }
 
 #[tokio::test]
@@ -631,10 +678,11 @@ async fn the_budget_and_the_step_numbers_span_the_attempts_of_a_run() {
 
     let report = runner.run("go").await;
 
-    assert_eq!(
-        (report.outcome, report.retries, report.model_requests),
-        (RunOutcome::Truncated, 1, 2)
-    );
+    let cut_off = RunOutcome::BudgetExhausted {
+        budget: Budget::ModelRequests,
+        truncated: true,
+    };
+    assert_eq!((report.outcome, report.retries, report.model_requests), (cut_off, 1, 2));
     assert_eq!(provider.requests().len(), 2);
     let steps: Vec<u32> = sink
         .events()
@@ -659,7 +707,13 @@ async fn queued_input_waits_when_no_request_budget_is_left() {
 
     let report = runner.run("go").await;
 
-    assert_eq!(report.outcome, RunOutcome::ModelRequestLimit);
+    assert_eq!(
+        report.outcome,
+        RunOutcome::BudgetExhausted {
+            budget: Budget::ModelRequests,
+            truncated: false
+        }
+    );
     assert_eq!(summarize(&runner.session().messages()), ["user:go"]);
     assert_eq!(runner.queues().drain_steering(), [Input::from("later")]);
 }
@@ -697,10 +751,12 @@ async fn a_retried_failure_is_reported_as_a_context_edit() {
         })
         .collect();
     assert_eq!(reported, [edit]);
+    // The edit is recorded before the retry is announced, so a retry that cannot be recorded
+    // is never announced.
     let scheduled = kinds.iter().position(|kind| *kind == "retry_scheduled").unwrap();
     let edited = kinds.iter().position(|kind| *kind == "context_edited").unwrap();
     let second_attempt = kinds.iter().rposition(|kind| *kind == "attempt_start").unwrap();
-    assert!(scheduled < edited && edited < second_attempt, "{kinds:?}");
+    assert!(edited < scheduled && scheduled < second_attempt, "{kinds:?}");
 }
 
 /// Holds the first `message_end` of the user input `text` until the run is dropped.
@@ -736,16 +792,14 @@ async fn queued_input_is_recorded_once_when_a_run_is_dropped_while_observers_run
     let provider = provider([FauxStep::text("answered")]);
     let mut setup = setup(&provider);
     let reached = Arc::new(tokio::sync::Notify::new());
-    setup.config.hooks.push_with(
-        HoldInput {
+    setup.config.hooks.push_with_timeout(
+        "hold_input",
+        Arc::new(HoldInput {
             text: "queued",
             held: std::sync::atomic::AtomicBool::new(false),
             reached: reached.clone(),
-        },
-        zx_agent::hooks::HookOptions {
-            timeout: Duration::from_secs(3600),
-            ..Default::default()
-        },
+        }),
+        Duration::from_secs(3600),
     );
     let (runner, _) = setup.build();
     runner.queues().steer("queued");
@@ -782,7 +836,13 @@ async fn a_run_stops_at_the_step_limit() {
 
     assert_eq!(
         (report.outcome, report.model_requests),
-        (RunOutcome::ModelRequestLimit, 3)
+        (
+            RunOutcome::BudgetExhausted {
+                budget: Budget::ModelRequests,
+                truncated: false
+            },
+            3
+        )
     );
 }
 
@@ -883,8 +943,44 @@ async fn continuations_count_against_the_step_limit() {
 
     let report = runner.run("go").await;
 
-    assert_eq!(report.outcome, RunOutcome::Truncated);
+    // Out of requests, with the answer cut off: the continuation needed one more.
+    assert_eq!(
+        report.outcome,
+        RunOutcome::BudgetExhausted {
+            budget: Budget::ModelRequests,
+            truncated: true
+        }
+    );
+    assert_eq!(report.final_text, "a");
     assert_eq!(provider.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn a_cut_off_answer_that_the_token_budget_leaves_no_continuation_for_says_both() {
+    // Each faux answer reports 15 tokens, all the budget leaves.
+    let provider = provider([FauxStep::truncated("part one"), FauxStep::text("never sent")]);
+    let (runner, _) = RunnerSetup {
+        limits: token_budget(15),
+        ..setup(&provider)
+    }
+    .build();
+
+    let report = runner.run("go").await;
+
+    assert_eq!(
+        report.outcome,
+        RunOutcome::BudgetExhausted {
+            budget: Budget::Tokens,
+            truncated: true
+        }
+    );
+    assert_eq!(report.final_text, "part one");
+    assert_eq!(provider.requests().len(), 1);
+    let error = report.error.unwrap_or_default();
+    assert!(
+        error.contains("token budget reached") && error.contains("cut off"),
+        "{error}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1141,7 +1237,7 @@ impl Hook for Uppercase {
 async fn messages_and_context_edits_name_their_session_entries() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let mut config = config(provider, vec![]);
-    config.hooks.push(Uppercase);
+    config.hooks.push("uppercase", Arc::new(Uppercase));
     let (runner, events) = RunnerSetup::new(config).build();
 
     runner.run("go").await;

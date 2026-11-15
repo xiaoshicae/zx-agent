@@ -9,8 +9,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::answer::{ResponseBytes, parse_answer};
 use super::{
-    Compacted, Config, End, MAX_SOURCE_BYTES, Summarized, Summarizer, SummarySource, Trigger, context_bytes,
-    message_bytes,
+    Compacted, Config, End, MAX_SOURCE_BYTES, Summarized, Summarizer, SummarySource, TokenTrigger, Trigger,
+    context_bytes, estimated_tokens, message_bytes,
 };
 use crate::ai::{AssistantMessage, Message, ModelMeta, Provider, Request, StreamEvent, Usage, duration_ms, now_ms};
 use crate::events::{Emit, EventKind, RequestKind};
@@ -57,7 +57,7 @@ pub(crate) struct Compactor<'a> {
 struct Retained {
     messages: Vec<Message>,
     /// How many of `messages` are from before the boundary: the system messages there, and
-    /// the input the compaction keeps when its boundary is inside the latest turn.
+    /// the input the compaction keeps when its boundary falls after the latest input.
     before_boundary: usize,
 }
 
@@ -183,7 +183,7 @@ impl Compactor<'_> {
 
     /// Where the retained tail starts: the most recent messages within the recent-bytes
     /// budget, and never between a call and its result. It may be after the latest input:
-    /// a turn of many tool calls is summarized up to its recent ones.
+    /// work of many tool calls since the latest input is summarized up to its recent ones.
     fn cut(&self, raw: &[ProjectedMessage]) -> Result<usize> {
         let mut bytes = 0usize;
         let mut cut = raw.len();
@@ -223,7 +223,7 @@ impl Compactor<'_> {
         };
         // There is an input, so the tail keeps at least one message and `raw[cut]` exists.
         let cut = self.cut(&raw)?;
-        // The input of a turn that is summarized in its middle stays as it was sent.
+        // The input of work summarized in its middle stays as it was sent.
         let kept_input = (cut > last_user).then_some(last_user);
         let source = &raw[..cut];
         // Nothing to summarize when all that is before the boundary stays in the context.
@@ -257,15 +257,36 @@ impl Compactor<'_> {
             },
             retained: Retained::of(&raw, cut, kept_input),
         };
-        if self.automatic()
-            && let Some(limit) = self.compaction.trigger_bytes
-        {
+        if self.automatic() {
+            // What a summary keeps is already over a trigger: no summary could help, so none
+            // is asked for.
+            let retained = context_bytes(&candidate.retained.messages)?;
             ensure!(
-                context_bytes(&candidate.retained.messages)? < limit,
+                self.compaction.trigger_bytes.is_none_or(|limit| retained < limit),
                 "retained system messages and latest input already exceed triggerBytes; raise the budget or start a new session"
+            );
+            ensure!(
+                self.below_token_trigger(estimated_tokens(retained)),
+                "retained system messages and latest input already exceed triggerTokens; raise the budget or start a new session"
             );
         }
         Ok(Some(candidate))
+    }
+
+    /// Whether `tokens` lie below the token trigger, or no token trigger is set.
+    fn below_token_trigger(&self, tokens: u64) -> bool {
+        match self.compaction.trigger_tokens {
+            TokenTrigger::Above(limit) => tokens < limit,
+            TokenTrigger::Unset | TokenTrigger::Off => true,
+        }
+    }
+
+    /// Whether `tokens` pass the token trigger, as a request's trigger check counts it.
+    fn above_token_trigger(&self, tokens: u64) -> bool {
+        match self.compaction.trigger_tokens {
+            TokenTrigger::Above(limit) => tokens > limit,
+            TokenTrigger::Unset | TokenTrigger::Off => false,
+        }
     }
 
     /// Who makes the summary, as the start records it.
@@ -481,6 +502,12 @@ impl Compactor<'_> {
         ensure!(
             !self.automatic() || self.compaction.trigger_bytes.is_none_or(|limit| output_bytes <= limit),
             "retained context still exceeds triggerBytes; reduce retained input or raise the budget"
+        );
+        // With no answer to measure it yet, the new context's tokens are estimated from its
+        // bytes, as the next request's trigger check estimates them.
+        ensure!(
+            !self.automatic() || !self.above_token_trigger(estimated_tokens(output_bytes)),
+            "retained context still exceeds triggerTokens; reduce retained input or raise the budget"
         );
         if self.cancel.is_cancelled() {
             bail!(CANCELLED);

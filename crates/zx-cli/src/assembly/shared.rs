@@ -80,7 +80,7 @@ impl Shared {
 pub(super) struct McpTools {
     pub(super) servers: Vec<Arc<dyn Extension>>,
     /// The names the model calls the servers' tools by; which of them ask depends on the
-    /// agent, so each session decides (`prepare`).
+    /// agent, so each mode's agent decides when it is built.
     pub(super) names: Vec<String>,
     /// Variables holding the servers' tokens: hidden from commands, values redacted.
     pub(super) token_env: Vec<String>,

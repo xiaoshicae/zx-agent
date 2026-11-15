@@ -13,8 +13,8 @@ use zx_agent::ai::{Message, ToolCall};
 use zx_agent::builtin::output_store::{Config, OutputStore, ReadOutputTool, SpillOutputs, TOOL_NAME};
 use zx_agent::builtin::redact::RedactSecrets;
 use zx_agent::builtin::tools::ReadFileTool;
+use zx_agent::events::RunOutcome;
 use zx_agent::hooks::{Hook, HookChain, HookContext};
-use zx_agent::runner::RunOutcome;
 use zx_agent::tools::{Tool, ToolContext, ToolOutput};
 use zx_agent::transcript::Transcript;
 
@@ -477,7 +477,7 @@ async fn cancellation_skips_writes_and_reads() {
     let dir = tempfile::tempdir().unwrap();
     let (hook, reader) = parts(dir.path());
     let mut chain = HookChain::new();
-    chain.push(hook);
+    chain.push("hook", Arc::new(hook));
     let cancel = CancellationToken::new();
     cancel.cancel();
     assert!(
@@ -541,8 +541,13 @@ async fn redaction_precedes_both_output_file_and_session_persistence() {
             Arc::new(ReadOutputTool::new(store.clone())),
         ],
     );
-    config.hooks.push(RedactSecrets::new([secret.into()]));
-    config.hooks.push(SpillOutputs::new(store, vec![TOOL_NAME.into()]));
+    config
+        .hooks
+        .push("redact_secrets", Arc::new(RedactSecrets::new([secret.into()])));
+    config.hooks.push(
+        "spill_outputs",
+        Arc::new(SpillOutputs::new(store, vec![TOOL_NAME.into()])),
+    );
     let audit = dir.path().join("session.jsonl");
     let (runner, _) = RunnerSetup {
         session: common::create_session_file(&audit, header_in(dir.path()))
@@ -597,7 +602,9 @@ async fn a_storage_error_keeps_the_redacted_result_inline_and_the_run_continues(
             Arc::new(ReadOutputTool::new(store.clone())),
         ],
     );
-    config.hooks.push(SpillOutputs::new(store, vec![]));
+    config
+        .hooks
+        .push("spill_outputs", Arc::new(SpillOutputs::new(store, vec![])));
     let (runner, _) = RunnerSetup {
         session: Transcript::in_memory(header_in(dir.path())),
         ..RunnerSetup::new(config)

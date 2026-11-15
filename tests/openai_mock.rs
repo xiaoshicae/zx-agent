@@ -16,8 +16,7 @@ use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::{Message, PREAMBLE, ProviderError, StopReason, SystemPrompt};
 use zx_agent::builtin::tools::BashTool;
 use zx_agent::compaction::Config;
-use zx_agent::events::{Event, EventKind};
-use zx_agent::runner::RunOutcome;
+use zx_agent::events::{Event, EventKind, RunOutcome};
 use zx_agent::transcript::{SessionHeader, Transcript};
 
 /// A runner whose provider talks to `server`, with a bash tool and a one-line system prompt.

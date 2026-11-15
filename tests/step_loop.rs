@@ -15,16 +15,16 @@ use common::{
     Collect, Driven, EchoTool, NotifyingProvider, RunnerSetup, config, run_prompt, run_prompt_with, summarize,
 };
 use zx_agent::AgentConfig;
+use zx_agent::agent::RunLimits;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{
     ContentBlock, EventReceiver, Message, PREAMBLE, Provider, Request, StopReason, SystemPrompt, ToolCall, ToolDef,
     Usage,
 };
-use zx_agent::events::EventKind;
+use zx_agent::events::{Budget, EventKind, RunOutcome};
 use zx_agent::input::Input;
 use zx_agent::policy::{PolicyContext, PolicyDecision, ToolPolicy};
-use zx_agent::runner::{RunLimits, RunOutcome};
-use zx_agent::tools::{ExecutionMode, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput};
+use zx_agent::tools::{Effects, ExecutionMode, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput};
 
 fn provider(steps: impl IntoIterator<Item = FauxStep>) -> Arc<FauxProvider> {
     Arc::new(FauxProvider::new(steps))
@@ -59,6 +59,62 @@ fn fed(provider: Arc<FauxProvider>, max_model_requests: u32) -> (Driven, Arc<Col
 // ---------------------------------------------------------------------------
 // Steps and tool execution
 // ---------------------------------------------------------------------------
+
+/// Counts how often it is asked how it runs and what it changes.
+struct Described(std::sync::atomic::AtomicUsize);
+
+#[async_trait]
+impl Tool for Described {
+    fn name(&self) -> &str {
+        "inspect"
+    }
+
+    fn definition(&self) -> ToolDef {
+        ToolDef {
+            name: "inspect".into(),
+            description: "Inspects".into(),
+            parameters: json!({"type": "object"}),
+        }
+    }
+
+    fn execution_mode(&self) -> ExecutionMode {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        ExecutionMode::Parallel
+    }
+
+    fn effects(&self) -> Effects {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Effects::SideEffects
+    }
+
+    async fn execute(&self, _args: Value, _ctx: &ToolContext) -> Result<ToolOutput, String> {
+        Ok(ToolOutput::ok("inspected"))
+    }
+}
+
+#[tokio::test]
+async fn a_run_goes_by_what_its_tools_declared_when_the_session_was_made() {
+    let provider = provider([FauxStep::tool_call("c1", "inspect", json!({})), FauxStep::text("done")]);
+    let tool = Arc::new(Described(std::sync::atomic::AtomicUsize::new(0)));
+    let (runner, _) = RunnerSetup::new(config(provider, vec![tool.clone()])).build();
+    let declared = tool.0.load(Ordering::SeqCst);
+
+    let report = runner.run("go").await;
+
+    assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
+    assert_eq!(
+        tool.0.load(Ordering::SeqCst),
+        declared,
+        "the run asks the tool nothing more"
+    );
+    let started = runner
+        .session()
+        .entries()
+        .iter()
+        .filter(|entry| entry.kind() == "tool_call_started")
+        .count();
+    assert_eq!(started, 1, "declared with side effects, the call's start is recorded");
+}
 
 #[tokio::test]
 async fn a_call_that_repeats_the_id_of_an_earlier_call_of_the_answer_is_answered_with_an_error() {
@@ -384,7 +440,16 @@ async fn stops_at_the_step_budget() {
 
     let (result, sink) = run_prompt_with(config, &mut Vec::new(), "go", 2).await;
 
-    assert_eq!((result.outcome, sink.steps()), (RunOutcome::ModelRequestLimit, 2));
+    assert_eq!(
+        (result.outcome, sink.steps()),
+        (
+            RunOutcome::BudgetExhausted {
+                budget: Budget::ModelRequests,
+                truncated: false
+            },
+            2
+        )
+    );
     assert_eq!(provider.requests().len(), 2);
 }
 
@@ -480,7 +545,14 @@ async fn a_spent_budget_starts_no_new_step_and_leaves_queued_input_queued() {
 
     assert_eq!(
         (result.outcome, events.steps(), result.model_requests),
-        (RunOutcome::ModelRequestLimit, 1, 1)
+        (
+            RunOutcome::BudgetExhausted {
+                budget: Budget::ModelRequests,
+                truncated: false
+            },
+            1,
+            1
+        )
     );
     assert_eq!(
         summarize(&runner.session().messages()),

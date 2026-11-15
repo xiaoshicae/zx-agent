@@ -168,9 +168,7 @@ impl Files {
                 if let Some(existing) = named_after(root, &header.id)? {
                     bail!("session {} exists already: {}", header.id, existing.display());
                 }
-                let dir = root.join(directory_name(&header.cwd));
-                create_private(&dir)?;
-                dir.join(name)
+                root.join(directory_name(&header.cwd)).join(name)
             }
         };
         let file = JsonlFile::create(&path, header)?;
@@ -194,8 +192,8 @@ impl Files {
 
     fn list(&self, query: &SessionQuery) -> Result<SessionList> {
         let mut sessions = Vec::new();
-        let mut unreadable = Vec::new();
-        for path in self.candidates(query)? {
+        let (candidates, mut unreadable) = self.candidates(query)?;
+        for path in candidates {
             match self.listed(&path, query) {
                 Ok(Some(session)) => sessions.push(session),
                 Ok(None) => {}
@@ -205,27 +203,20 @@ impl Files {
                 }),
             }
         }
-        unreadable.sort_by(|a, b| a.location.cmp(&b.location));
-        Ok(SessionList {
-            sessions: query.arrange(sessions),
-            unreadable,
-        })
+        Ok(SessionList::new(query, sessions, unreadable))
     }
 
-    /// The files in which `query` may find its sessions.
-    fn candidates(&self, query: &SessionQuery) -> Result<Vec<PathBuf>> {
+    /// The files in which `query` may find its sessions, and the directories it would look in
+    /// that cannot be read.
+    fn candidates(&self, query: &SessionQuery) -> Result<(Vec<PathBuf>, Vec<Unreadable>)> {
         match &self.layout {
-            Layout::File(path) => Ok(if path.is_file() { vec![path.clone()] } else { Vec::new() }),
+            Layout::File(path) => Ok((if path.is_file() { vec![path.clone()] } else { Vec::new() }, Vec::new())),
             Layout::Directory(root) => {
                 let directories = match &query.cwd {
                     Some(cwd) => vec![root.join(directory_name(&cwd.display().to_string()))],
                     None => directories_in(root)?,
                 };
-                let mut files = Vec::new();
-                for directory in directories {
-                    files.extend(session_files_in(&directory)?);
-                }
-                Ok(files)
+                Ok(session_files_of(directories))
             }
         }
     }
@@ -290,10 +281,9 @@ impl Files {
         if let Some(path) = known.filter(|path| path.is_file()) {
             return Ok(Some(path));
         }
-        let mut files = Vec::new();
-        for directory in directories_in(root)? {
-            files.extend(session_files_in(&directory)?);
-        }
+        // A directory that cannot be read holds no session this storage can open; a listing
+        // reports it.
+        let (mut files, _) = session_files_of(directories_in(root)?);
         // A file named after the session first, so that finding it reads few headers.
         files.sort_by_key(|path| !is_named_after(path, id));
         // A file that cannot be read is not the session; a listing reports it.
@@ -339,6 +329,22 @@ fn session_files_in(directory: &Path) -> Result<Vec<PathBuf>> {
         .collect())
 }
 
+/// The session files in `directories`, and the directories that cannot be read.
+fn session_files_of(directories: Vec<PathBuf>) -> (Vec<PathBuf>, Vec<Unreadable>) {
+    let mut files = Vec::new();
+    let mut unreadable = Vec::new();
+    for directory in directories {
+        match session_files_in(&directory) {
+            Ok(found) => files.extend(found),
+            Err(error) => unreadable.push(Unreadable {
+                location: directory.display().to_string(),
+                error: format!("{error:#}"),
+            }),
+        }
+    }
+    (files, unreadable)
+}
+
 /// What `directory` holds; nothing when it does not exist.
 fn entries_in(directory: &Path) -> Result<Vec<DirEntry>> {
     let cannot_list = || format!("cannot list sessions in {}", directory.display());
@@ -369,17 +375,11 @@ fn is_a(entry: &DirEntry, kind: Kind) -> bool {
     }
 }
 
-/// A session file under `root` that is named after session `id`, by its name alone.
+/// A session file under `root` that is named after session `id`, by its name alone. A
+/// directory that cannot be read is passed over, as finding a session passes it over.
 fn named_after(root: &Path, id: &str) -> Result<Option<PathBuf>> {
-    for directory in directories_in(root)? {
-        if let Some(path) = session_files_in(&directory)?
-            .into_iter()
-            .find(|path| is_named_after(path, id))
-        {
-            return Ok(Some(path));
-        }
-    }
-    Ok(None)
+    let (files, _) = session_files_of(directories_in(root)?);
+    Ok(files.into_iter().find(|path| is_named_after(path, id)))
 }
 
 /// Whether the file name of `path` names session `id`: `<id>.jsonl`, or what

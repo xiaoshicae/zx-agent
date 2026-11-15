@@ -65,8 +65,8 @@ pub trait SessionStorage: Send + Sync {
     /// open: a snapshot, for [`Transcript::snapshot`]. Fails when there is no such session.
     async fn read(&self, id: &str) -> Result<LoadedSession>;
 
-    /// The sessions `query` asks for, most recently active first. A session being written
-    /// is listed as of now.
+    /// The sessions `query` asks for, most recently active first and no more than its limit,
+    /// as [`SessionList::new`] arranges them. A session being written is listed as of now.
     async fn list(&self, query: &SessionQuery) -> Result<SessionList>;
 }
 
@@ -94,10 +94,8 @@ impl SessionQuery {
                 .all(|(name, value)| header.labels.get(name) == Some(value))
     }
 
-    /// `sessions`, each of which matches, as a listing returns them: most recently active
-    /// first, of those last active at the same moment the one started later first, and no
-    /// more of them than the limit.
-    pub fn arrange(&self, mut sessions: Vec<SessionInfo>) -> Vec<SessionInfo> {
+    /// `sessions`, each of which matches, in the order and number [`SessionList::new`] gives.
+    fn arrange(&self, mut sessions: Vec<SessionInfo>) -> Vec<SessionInfo> {
         // Newest first: a session started in the millisecond another was last written to is
         // the newer one. The ID breaks the ties left, so the order does not depend on the
         // storage's.
@@ -196,6 +194,18 @@ pub struct SessionList {
 }
 
 impl SessionList {
+    /// The listing `query` asks for, of `sessions` that each match it: most recently active
+    /// first, of those last active at the same moment the one started later first, and no
+    /// more of them than the limit; `unreadable` in the order of their locations, so that a
+    /// listing does not depend on the order in which the storage found what it holds.
+    pub fn new(query: &SessionQuery, sessions: Vec<SessionInfo>, mut unreadable: Vec<Unreadable>) -> Self {
+        unreadable.sort_by(|a, b| a.location.cmp(&b.location));
+        Self {
+            sessions: query.arrange(sessions),
+            unreadable,
+        }
+    }
+
     /// The one session whose ID starts with `prefix`. Fails when none or several match, or
     /// when `prefix` is empty.
     pub fn find(&self, prefix: &str) -> Result<&SessionInfo> {

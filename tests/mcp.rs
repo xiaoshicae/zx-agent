@@ -14,8 +14,8 @@ use common::{RunnerSetup, config, run_prompt, summarize};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::builtin::mcp::{Server, ServerConfig};
 use zx_agent::builtin::tools::truncate::MAX_BYTES;
+use zx_agent::events::RunOutcome;
 use zx_agent::extensions::Extension;
-use zx_agent::runner::RunOutcome;
 use zx_agent::tools::{Tool, ToolContext, ToolOutput};
 
 const TOKEN: &str = "mcp-token-1234";

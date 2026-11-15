@@ -15,8 +15,8 @@ use crate::ai::{ToolDef, Usage};
 use crate::sync::lock;
 
 /// The tools of a session, found by the name the model calls them by. Each tool declares
-/// itself once, when the toolbox is made: what requests declare and what arguments are
-/// checked against is that one declaration.
+/// itself once, when the toolbox is made: what requests declare, what arguments are checked
+/// against, and how a call runs and is recorded is that one declaration.
 #[derive(Default)]
 pub(crate) struct Toolbox {
     /// In the order requests declare them.
@@ -27,6 +27,8 @@ pub(crate) struct Toolbox {
 struct Declared {
     tool: Arc<dyn Tool>,
     definition: ToolDef,
+    execution_mode: ExecutionMode,
+    effects: Effects,
     /// The declared parameter schema, compiled.
     #[cfg(feature = "json-schema")]
     schema: jsonschema::Validator,
@@ -49,7 +51,7 @@ impl Toolbox {
                     tool.effects(),
                 )
             }));
-            let Ok((name, definition, _, _)) = described else {
+            let Ok((name, definition, execution_mode, effects)) = described else {
                 return Err(format!("tool {index} panicked while describing itself"));
             };
             if definition.name != name {
@@ -67,6 +69,8 @@ impl Toolbox {
             declared.push(Declared {
                 tool,
                 definition,
+                execution_mode,
+                effects,
                 #[cfg(feature = "json-schema")]
                 schema,
             });
@@ -86,6 +90,16 @@ impl Toolbox {
     /// The tool the model calls `name`.
     pub(crate) fn find(&self, name: &str) -> Option<&Arc<dyn Tool>> {
         self.declared(name).map(|declared| &declared.tool)
+    }
+
+    /// How the tool the model calls `name` runs beside other calls, as it declared.
+    pub(crate) fn execution_mode(&self, name: &str) -> Option<ExecutionMode> {
+        self.declared(name).map(|declared| declared.execution_mode)
+    }
+
+    /// What the tool the model calls `name` changes, as it declared.
+    pub(crate) fn effects(&self, name: &str) -> Option<Effects> {
+        self.declared(name).map(|declared| declared.effects)
     }
 
     /// The declarations of the tools that `active` offers, for a request.

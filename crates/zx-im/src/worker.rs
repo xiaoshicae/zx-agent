@@ -18,9 +18,9 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::ai::now_ms;
-use crate::runner::RunReport;
 use crate::session::SessionError;
 use crate::transcript::CustomMessage;
+use zx_core::events::RunReport;
 use zx_core::policy::ApprovalDecision;
 
 use super::approval::ApprovalUpdate;
@@ -327,7 +327,7 @@ impl Worker {
         };
         let steered = match &mut self.phase {
             Phase::Running { open, .. } => {
-                open.session.queues().steer_message(asked.into_input());
+                open.session.queues().steer(asked.into_input());
                 true
             }
             Phase::Waiting { asked: waiting, .. } => {
@@ -503,22 +503,39 @@ impl Worker {
             }
         };
         self.out.answer(ended, status, closing).await;
-        let leftover = open.leftover();
+        let leftover = match open.leftover() {
+            Ok(asked) => Ok(asked),
+            // Closed while the conversation held it, such as by a record that could not be
+            // written; a run it refused for that ends here too. What was asked meanwhile was
+            // acknowledged, so it is taken back and answered below.
+            Err(SessionError::Closed) => Err(open.taken_back()),
+            Err(error) => {
+                self.out.failed(format!("cannot take the queued input: {error}"));
+                Ok(Vec::new())
+            }
+        };
         self.phase = Phase::idle(Some(open));
         let leftover = match leftover {
             Ok(asked) => asked,
-            // Closed while the conversation held it, such as by a record that could not be
-            // written; a run it refused for that ends here too. After `/new` the new session
-            // takes its place below. Else let go of it: the next message opens it again from
-            // the storage.
-            Err(SessionError::Closed) if after == AfterRun::Renew && !closing => Vec::new(),
-            Err(SessionError::Closed) => {
+            // After `/new` the new session takes its place below.
+            Err(taken_back) if after == AfterRun::Renew && !closing => taken_back,
+            // Else let go of it, and open it again from the storage for what was asked
+            // meanwhile; with nothing asked, the next message opens it.
+            Err(taken_back) => {
                 self.release();
-                return;
-            }
-            Err(error) => {
-                self.out.failed(format!("cannot take the queued input: {error}"));
-                Vec::new()
+                if closing || taken_back.is_empty() {
+                    self.unanswered += taken_back.len();
+                    return;
+                }
+                match self.out.open(None).await {
+                    Ok(opened) => self.phase = Phase::idle(Some(opened)),
+                    Err(error) => {
+                        self.unanswered += taken_back.len();
+                        self.out.cannot_open(&error).await;
+                        return;
+                    }
+                }
+                taken_back
             }
         };
         // A stopping server starts no session: nothing was said to have started one.

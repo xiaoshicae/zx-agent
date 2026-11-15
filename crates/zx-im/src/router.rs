@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 use tokio::task::{Id, JoinError, JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
+use super::platform::Seen;
 use super::server::Shared;
 use super::worker::{self, Incoming, Retire, WorkerInput, WorkerSetup};
 use super::{
@@ -22,6 +23,9 @@ const INBOUND_CAPACITY: usize = 64;
 const INBOX_CAPACITY: usize = 32;
 /// Idle notices of conversations, which the router handles at once.
 const RETIRE_CAPACITY: usize = 16;
+/// Threads remembered as ones the bot never joined. The talk of the busiest threads at a
+/// time fits; one forgotten is looked up again.
+const NOT_JOINED_CAPACITY: usize = 4096;
 
 /// The conversation a message belongs to: the direct chat, or the thread in a group. A
 /// mention posted in a group itself starts a thread under it; anything else posted there
@@ -72,6 +76,31 @@ struct WorkerHandle {
     forwarded: u64,
 }
 
+impl WorkerHandle {
+    /// Pass `input` to the worker, counting what it takes, as the retire handshake needs
+    /// every input counted.
+    fn forward(&mut self, input: WorkerInput) -> Forward {
+        match self.inbox.try_send(input) {
+            Ok(()) => {
+                self.forwarded += 1;
+                Forward::Sent
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => Forward::Full,
+            Err(mpsc::error::TrySendError::Closed(input)) => Forward::Ended(input),
+        }
+    }
+}
+
+/// What became of input passed to a worker.
+enum Forward {
+    /// The worker has it.
+    Sent,
+    /// Its inbox is full, so the input is dropped.
+    Full,
+    /// The worker has ended, after a panic: the input comes back.
+    Ended(WorkerInput),
+}
+
 /// Passes what the channels receive to the conversations' workers, and ends them.
 pub(crate) struct Router {
     channels: Vec<Arc<dyn ImChannel>>,
@@ -84,6 +113,11 @@ pub(crate) struct Router {
     retire: mpsc::Sender<Retire>,
     retired: mpsc::Receiver<Retire>,
     workers: HashMap<SessionKey, WorkerHandle>,
+    /// Conversations a lookup found without a session: talk there that does not mention the
+    /// bot is passed by without asking the storage again, which a lookup would list whole.
+    /// Only a worker the router starts makes a session for a conversation, in this process,
+    /// so starting one forgets the conversation here.
+    not_joined: Seen<SessionKey>,
     tasks: JoinSet<()>,
     /// The conversation of each task in `tasks`, for the report should it fail.
     conversations: HashMap<Id, SessionKey>,
@@ -118,6 +152,7 @@ impl Router {
             retire,
             retired,
             workers: HashMap::new(),
+            not_joined: Seen::new(NOT_JOINED_CAPACITY),
             tasks: JoinSet::new(),
             conversations: HashMap::new(),
             refusals: JoinSet::new(),
@@ -233,14 +268,11 @@ impl Router {
         }
         let input = WorkerInput::Message(incoming);
         let input = match self.workers.get_mut(&key) {
-            Some(worker) => match worker.inbox.try_send(input) {
-                Ok(()) => {
-                    worker.forwarded += 1;
-                    return;
-                }
-                Err(mpsc::error::TrySendError::Full(_)) => None,
-                // The worker has ended, after a panic: a new one takes over.
-                Err(mpsc::error::TrySendError::Closed(input)) => Some(input),
+            Some(worker) => match worker.forward(input) {
+                Forward::Sent => return,
+                Forward::Full => None,
+                // A new worker takes over.
+                Forward::Ended(input) => Some(input),
             },
             None => Some(input),
         };
@@ -248,6 +280,7 @@ impl Router {
             self.dropped(&key);
             return;
         };
+        self.not_joined.remove(&key);
         let (inbox, receiver) = mpsc::channel(INBOX_CAPACITY);
         let task = self.tasks.spawn(worker::run(WorkerSetup {
             key: key.clone(),
@@ -260,37 +293,43 @@ impl Router {
         self.conversations.insert(task.id(), key.clone());
         let mut worker = WorkerHandle { inbox, forwarded: 0 };
         // A new inbox has room for one message.
-        match worker.inbox.try_send(input) {
-            Ok(()) => worker.forwarded += 1,
-            Err(_) => self.dropped(&key),
+        if !matches!(worker.forward(input), Forward::Sent) {
+            self.dropped(&key);
         }
         self.workers.insert(key, worker);
     }
 
-    /// Pass a click to the conversation's worker. Without a worker nothing is pending:
-    /// approvals end with their run, and the router ends only idle conversations.
     /// Whether the bot took part in the conversation `key` before: it has a session, so a
     /// message there that does not mention the bot is still part of the conversation.
-    async fn joined(&self, key: &SessionKey) -> bool {
+    async fn joined(&mut self, key: &SessionKey) -> bool {
+        if self.not_joined.contains(key) {
+            return false;
+        }
         let asked = self.shared.latest_session(key);
-        // A lookup that failed was reported; the conversation then counts as not joined,
-        // and a mention still starts it.
-        self.shared
+        match self
+            .shared
             .bounded(Some(key), "look up the conversation's sessions", asked)
             .await
-            .is_some_and(|latest| latest.is_some())
+        {
+            Some(Some(_)) => true,
+            Some(None) => {
+                self.not_joined.insert(key);
+                false
+            }
+            // A lookup that failed was reported, and is tried again next time; the
+            // conversation counts as not joined, and a mention still starts it.
+            None => false,
+        }
     }
 
+    /// Pass a click to the conversation's worker. Without a worker nothing is pending:
+    /// approvals end with their run, and the router ends only idle conversations.
     fn decision(&mut self, key: &SessionKey, input: WorkerInput) {
         let full = match self.workers.get_mut(key) {
-            Some(worker) => match worker.inbox.try_send(input) {
-                Ok(()) => {
-                    worker.forwarded += 1;
-                    false
-                }
-                Err(mpsc::error::TrySendError::Full(_)) => true,
-                // The worker has ended, and its approvals with it.
-                Err(mpsc::error::TrySendError::Closed(_)) => false,
+            Some(worker) => match worker.forward(input) {
+                Forward::Full => true,
+                // A worker that has ended took its approvals with it.
+                Forward::Sent | Forward::Ended(_) => false,
             },
             None => false,
         };

@@ -10,15 +10,13 @@ use opentelemetry::trace::SpanContext;
 use tokio::sync::mpsc;
 
 use zx_agent::ai::{Message, StopReason, Usage};
-use zx_agent::events::{ApprovalResult, Event, EventKind, Interruption, RequestKind, ToolVerdict};
+use zx_agent::events::{ApprovalResult, Event, EventKind, Interruption, RequestKind, RunOutcome, ToolVerdict};
 use zx_agent::hooks::{Hook, HookContext, HookResult};
-use zx_agent::runner::RunOutcome;
 
-/// Observes the runs of the sessions it is registered with, and passes the events that
-/// spans need to the exporter task. It never waits and never fails, so it sees every event
-/// in order, also those of a cancelled run. Made by
-/// [`Telemetry::hook`](super::Telemetry::hook); a copy for each session exports to the same
-/// place.
+/// Observes the runs of the agent it is registered with, and passes the events that spans
+/// need to the exporter task. It never waits and never fails, so it sees every event in
+/// order, also those of a cancelled run. Made by [`Telemetry::hook`](super::Telemetry::hook);
+/// its copies export to the same place.
 #[derive(Clone)]
 pub struct TraceHook {
     pub(super) sender: mpsc::Sender<Signal>,

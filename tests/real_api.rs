@@ -39,15 +39,16 @@ use std::time::Duration;
 
 use common::summary_eval::evaluate;
 use common::{RunnerSetup, config, fast_retry};
+use zx_agent::agent::RunLimits;
 use zx_agent::ai::openai::{BodyOptions, OpenAiCompatible, OpenAiConfig, SystemUpdates};
 use zx_agent::ai::{Message, Provider};
 use zx_agent::builtin::executor::{LocalExecutor, local_environment_section};
 use zx_agent::builtin::policy::{AutoApprove, Rule, RuleMatcher, RulePolicy};
 use zx_agent::builtin::tools::BashTool;
 use zx_agent::compaction::{Config, Outcome};
+use zx_agent::events::{RunOutcome, RunReport};
 use zx_agent::policy::PolicyDecision;
 use zx_agent::prompt::build_system_prompt;
-use zx_agent::runner::{RunLimits, RunOutcome, RunReport};
 use zx_agent::transcript::Transcript;
 
 const PAID: &str = "calls a paid model API; needs ZX_E2E_AUTHORIZED=1 and the API owner's consent";

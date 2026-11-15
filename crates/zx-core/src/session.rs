@@ -37,6 +37,8 @@ pub use run::Run;
 pub struct SessionOptions {
     /// Where the session's tools and hooks work, now and whenever it is opened again: the
     /// session's header records it, and a listing can ask for the sessions of a directory.
+    /// A relative path is taken from the process's current directory when the session is
+    /// created.
     pub cwd: PathBuf,
     /// What the host says about the session, such as its tenant or the chat it belongs to.
     /// The header keeps them, and a listing can ask for the sessions with given labels.
@@ -53,14 +55,6 @@ impl SessionOptions {
     }
 }
 
-/// Provider and model selected together, so a switch cannot expose a mixed pair.
-pub struct ModelRef {
-    /// Already configured by the host, including authentication and transport limits.
-    pub provider: Arc<dyn Provider>,
-    /// Non-empty model ID passed to that provider on subsequent prompts.
-    pub model: String,
-}
-
 /// Session API errors. Operational failures remain in the run or compaction report.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum SessionError {
@@ -73,7 +67,8 @@ pub enum SessionError {
     /// The entry a branch switch names is not in the session.
     #[error("no entry with that ID in the session")]
     EntryNotFound,
-    /// The session could not record an entry; see [`Transcript::writes_stopped`].
+    /// The session could not record an entry. It closes itself once this operation ends,
+    /// and the agent opens it again from its storage.
     #[error("cannot write the session: {0}")]
     WriteFailed(String),
     /// No approval request with that ID waits for an answer: it was answered already, nobody
@@ -241,9 +236,9 @@ impl Session {
         Ok((lease, link, reader))
     }
 
-    /// The conversation's queues: to steer or follow up with the person's input (`steer`,
-    /// `follow_up`) or a message from an extension (`steer_message`, `follow_up_message`), to
-    /// record extension state during a run (`append_entry`), and to choose how many queued
+    /// The conversation's queues: to steer or follow up with the person's input or a message
+    /// from an extension (`steer`, `follow_up`), to record extension state during a run
+    /// (`append_entry`), and to choose how many queued
     /// messages a request takes (`set_mode`). A clone is a handle to the same queues, for a
     /// part of a frontend that only feeds them.
     pub fn queues(&self) -> &Arc<InputQueues> {
@@ -271,6 +266,9 @@ impl Session {
     /// progress (pi: extension commands run at once). The caller shows the outcome's lines
     /// and sends its `prompt`, if any, as it would the person's input.
     pub async fn run_command(&self, name: &str, args: &str) -> Result<CommandOutcome, CommandError> {
+        if self.is_closed() {
+            return Err(CommandError::Closed);
+        }
         let shared = &self.shared;
         let command = shared
             .commands
@@ -348,8 +346,11 @@ impl Session {
         true
     }
 
-    /// Whether the session is closed, or closes as soon as its cancelled operation ends.
-    pub(crate) fn is_closed(&self) -> bool {
+    /// Whether this session is closed, or closes as soon as its cancelled operation ends: the
+    /// agent closed it, or it closed itself because its record could no longer be written.
+    /// A closed handle stays closed; [`Agent::open_session`](crate::Agent::open_session)
+    /// gives the session again.
+    pub fn is_closed(&self) -> bool {
         matches!(&*lock(&self.shared.state), State::Closing | State::Closed)
     }
 
@@ -388,14 +389,17 @@ impl Session {
         }
     }
 
-    /// Switch provider and model while idle. Empty IDs return InvalidModel; a run returns
-    /// Busy. History, tools, hooks, limits and exact-call approval grants are retained.
-    /// No request is made and the session header keeps its original starting model.
-    pub fn set_model(&self, model: ModelRef) -> Result<(), SessionError> {
-        if model.model.trim().is_empty() {
+    /// Switch provider and model together while idle, so that no request sees a mixed pair:
+    /// `provider` as the host configured it, authentication and transport limits included,
+    /// and `model`, the ID later prompts pass to it. An empty ID returns InvalidModel; a run
+    /// returns Busy. History, tools, hooks, limits and exact-call approval grants are
+    /// retained. No request is made and the session header keeps its original starting model.
+    pub fn set_model(&self, provider: Arc<dyn Provider>, model: impl Into<String>) -> Result<(), SessionError> {
+        let model = model.into();
+        if model.trim().is_empty() {
             return Err(SessionError::InvalidModel);
         }
-        let replaced = self.idle(|runner| runner.replace_model(model.provider, model.model))?;
+        let replaced = self.idle(|runner| runner.replace_model(provider, model))?;
         // A custom provider's destructor is host code too: the replaced provider is dropped
         // here, without the state lock, as the rejected one is above.
         drop(replaced);
@@ -423,7 +427,7 @@ impl Session {
     /// EntryNotFound, and the position does not change.
     pub fn branch(&self, entry: Option<&str>) -> Result<(), SessionError> {
         self.idle(|runner| match entry {
-            // The store's only error is an unknown ID, which the variant names.
+            // The transcript's only error is an unknown ID, which the variant names.
             Some(id) => runner.session_mut().branch(id).map_err(|_| SessionError::EntryNotFound),
             None => {
                 runner.session_mut().reset_leaf();

@@ -1,6 +1,19 @@
-//! Assemble the final answer from recorded continuation fragments.
+//! Assemble the final answer from recorded continuation fragments, and tell whether it was
+//! cut off.
 
-use crate::ai::{Message, UserMessageKind};
+use crate::ai::{Message, StopReason, UserMessageKind};
+
+/// Whether the last answer in `messages` was cut off at the output token limit.
+pub(super) fn cut_off(messages: &[Message]) -> bool {
+    messages
+        .iter()
+        .rev()
+        .find_map(|message| match message {
+            Message::Assistant(answer) => Some(answer),
+            Message::System(_) | Message::User { .. } | Message::ToolResult(_) => None,
+        })
+        .is_some_and(|answer| answer.stop_reason == StopReason::Length)
+}
 
 /// The last answer in `messages`, joined with the answers it continues: each is preceded by
 /// a request to continue the one before it. System prompt updates in between are ignored.

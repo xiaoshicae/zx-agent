@@ -12,15 +12,15 @@
 //!   reader, then the hooks that observe them
 //! - `run_host`: what a run lends the loop and the compactor, how a run opens, and when its
 //!   context is summarized
-//! - `recovery`: what follows a provider failure: a retry, or one recovery from a context
+//! - `failure`: what follows a provider failure: a retry, or one recovery from a context
 //!   the model rejected as too long
 //! - `interrupted`: results for the tool calls an interrupted run left unfinished
 //! - `final_answer`: the answer, joined from the parts that continue a cut-off one
 
 mod accounting;
+mod failure;
 mod final_answer;
 mod interrupted;
-mod recovery;
 mod run_host;
 mod step_loop;
 mod trace;
@@ -32,14 +32,13 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use final_answer::final_answer;
+use final_answer::{cut_off, final_answer};
 use run_host::{CompactionPause, RunHost, RunStop};
 
 use crate::ai::retry::RetryPolicy;
 use crate::ai::{Provider, Reasoning};
 use crate::compaction::{self, Trigger};
-pub use crate::events::report::{RunOutcome, RunReport};
-use crate::events::{Event, EventKind};
+use crate::events::{Budget, Event, EventKind, RunOutcome, RunReport};
 use crate::input::Input;
 use crate::policy::ApprovalGate;
 use crate::sync::AbortOnDrop;
@@ -125,8 +124,10 @@ impl Runner {
             trace: &trace,
             hooks: &self.config.hooks,
         };
+        let run_start = self.session.entries().len();
         let mut host = RunHost {
             session: &mut self.session,
+            run_start,
             target,
             config: &self.config,
             compaction: &self.compaction,
@@ -194,9 +195,13 @@ impl Runner {
             trace: &trace,
             hooks: &config.hooks,
         };
+        // The run's answer is what it adds after the entries the session has now. Counted in
+        // entries, whose IDs remain stable even when hooks omit messages from earlier runs.
+        let run_start = session.entries().len();
         let running = Running {
             host: RunHost {
                 session,
+                run_start,
                 target,
                 config,
                 compaction,
@@ -229,14 +234,11 @@ struct Running<'a> {
 impl Running<'_> {
     /// Open the run from `begin`, run its attempts, and report how it ended.
     async fn run(mut self, begin: Start) -> RunReport {
-        // The run's answer is what it adds after the entries the session has now. Counted in
-        // entries, whose IDs remain stable even when hooks omit messages from earlier runs.
-        let run_start = self.host.session.entries().len();
         let stop = match self.host.open_run(begin).await {
             Ok(first) => self.attempts(first).await,
             Err(error) => RunStop::Failed(error),
         };
-        self.close(stop, run_start).await
+        self.close(stop).await
     }
 
     /// Make an attempt that starts with `first`, then retry or recover from a context
@@ -245,7 +247,10 @@ impl Running<'_> {
     async fn attempts(&mut self, mut first: FirstInput) -> RunStop {
         loop {
             let steps_before = self.accounting.task_steps;
-            let (failed, entry_id) = match self.attempt(std::mem::take(&mut first)).await {
+            let (failed, entry_id) = match self
+                .attempt(std::mem::replace(&mut first, FirstInput::Conversation))
+                .await
+            {
                 Halt::Ended(ending) => break RunStop::Ended(ending),
                 // Hook and recording failures are distinct from failed provider responses and
                 // are not retried.
@@ -264,18 +269,16 @@ impl Running<'_> {
     /// accounting and checks the run's budgets. Returns why the loop stopped.
     async fn attempt(&mut self, first: FirstInput) -> Halt {
         self.accounting.attempts = self.accounting.attempts.saturating_add(1);
-        let (config, target) = (self.host.config, self.host.target);
-        // Borrowed again for this attempt alone, so that the loop's borrow of the host and
-        // the host's borrow of the Runner end together.
-        let mut host = self.host.reborrow();
-        StepLoop::new(config, &mut host, self.approvals, &mut self.accounting, target)
+        // The host borrowed again for this attempt alone, so that the loop's borrow of the
+        // host and the host's borrow of the Runner end together.
+        StepLoop::new(self.host.reborrow(), self.approvals, &mut self.accounting)
             .run(first)
             .await
     }
 
     /// Close the run: keep the state hooks asked to record, then report how the run ended
-    /// and the answer it added after the first `run_start` entries.
-    async fn close(self, stop: RunStop, run_start: usize) -> RunReport {
+    /// and the answer it added.
+    async fn close(self, stop: RunStop) -> RunReport {
         // State that hooks asked to record during the last events is kept before the run is
         // reported, so a host reading the session afterwards finds it.
         let (config, target) = (self.host.config, self.host.target);
@@ -283,12 +286,13 @@ impl Running<'_> {
             Ok(()) => stop,
             Err(error) => RunStop::Failed(format!("{error:#}")),
         };
-        let (outcome, error) = self.conclude(stop);
-        let accounting = &self.accounting;
         let session = &self.host.session;
+        let added = session.messages_since(self.host.run_start);
+        let (outcome, error) = self.conclude(stop, cut_off(&added));
+        let accounting = &self.accounting;
         let report = RunReport {
             outcome,
-            final_text: final_answer(&session.messages_since(run_start)),
+            final_text: final_answer(&added),
             model_requests: accounting.model_requests,
             retries: accounting.retries,
             usage: accounting.usage.clone(),
@@ -305,8 +309,9 @@ impl Running<'_> {
         report
     }
 
-    /// How the run ended, as the report states it.
-    fn conclude(&self, stop: RunStop) -> (RunOutcome, Option<String>) {
+    /// How the run ended, as the report states it; `cut_off` says whether its last answer
+    /// was cut off at the output token limit.
+    fn conclude(&self, stop: RunStop, cut_off: bool) -> (RunOutcome, Option<String>) {
         let (limits, accounting, timed_out) = (self.limits, &self.accounting, self.timer.timed_out());
         let ending = match stop {
             RunStop::Failed(error) => return (RunOutcome::Failed, Some(error)),
@@ -318,35 +323,36 @@ impl Running<'_> {
                 RunOutcome::Truncated,
                 Some("the answer was cut off at the output token limit".to_string()),
             ),
-            Ending::ModelRequestLimit => (
-                RunOutcome::ModelRequestLimit,
-                Some(format!(
-                    "model request limit reached (max_model_requests = {})",
-                    limits
-                        .max_model_requests
-                        .expect("ModelRequestLimit requires a configured request limit")
-                )),
-            ),
-            Ending::TokenBudget => (
-                RunOutcome::TokenBudget,
-                Some(format!(
-                    "token budget reached ({} tokens used, token_budget = {})",
-                    accounting.usage.input_and_output(),
-                    limits
-                        .token_budget
-                        .expect("TokenBudget requires a configured token budget")
-                )),
-            ),
-            Ending::CostBudget => (
-                RunOutcome::CostBudget,
-                Some(format!(
-                    "cost budget reached ({:.4} spent, cost_budget = {})",
-                    accounting.usage.total_cost.unwrap_or(0.0),
-                    limits
-                        .cost_budget
-                        .expect("CostBudget requires a configured cost budget")
-                )),
-            ),
+            Ending::BudgetExhausted(budget) => {
+                let reached = match budget {
+                    Budget::ModelRequests => format!(
+                        "model request limit reached (max_model_requests = {})",
+                        limits
+                            .max_model_requests
+                            .expect("a request budget ends a run only when one is configured")
+                    ),
+                    Budget::Tokens => format!(
+                        "token budget reached ({} tokens used, token_budget = {})",
+                        accounting.usage.input_and_output(),
+                        limits
+                            .token_budget
+                            .expect("a token budget ends a run only when one is configured")
+                    ),
+                    Budget::Cost => format!(
+                        "cost budget reached ({:.4} spent, cost_budget = {})",
+                        accounting.usage.total_cost.unwrap_or(0.0),
+                        limits
+                            .cost_budget
+                            .expect("a cost budget ends a run only when one is configured")
+                    ),
+                };
+                let error = if cut_off {
+                    format!("{reached}; the answer was cut off at the output token limit")
+                } else {
+                    reached
+                };
+                (ending.outcome(cut_off), Some(error))
+            }
             // The time limit cancels the attempt, and only `timed_out` tells that
             // cancellation from the caller's.
             Ending::Cancelled if timed_out => {
@@ -370,21 +376,22 @@ pub(crate) enum Ending {
     Completed,
     /// The answer was cut off at the output token limit.
     Truncated,
-    ModelRequestLimit,
-    TokenBudget,
-    CostBudget,
+    /// The budget left no room for another request.
+    BudgetExhausted(Budget),
     Cancelled,
 }
 
 impl Ending {
-    /// The outcome as events and reports name it.
-    pub(crate) fn outcome(self) -> RunOutcome {
+    /// The outcome as events and reports name it; `cut_off` says whether the run's last
+    /// answer was cut off at the output token limit.
+    pub(crate) fn outcome(self, cut_off: bool) -> RunOutcome {
         match self {
             Self::Completed => RunOutcome::Completed,
             Self::Truncated => RunOutcome::Truncated,
-            Self::ModelRequestLimit => RunOutcome::ModelRequestLimit,
-            Self::TokenBudget => RunOutcome::TokenBudget,
-            Self::CostBudget => RunOutcome::CostBudget,
+            Self::BudgetExhausted(budget) => RunOutcome::BudgetExhausted {
+                budget,
+                truncated: cut_off,
+            },
             Self::Cancelled => RunOutcome::Cancelled,
         }
     }
@@ -715,7 +722,7 @@ mod tests {
         }
         let provider = Arc::new(FauxProvider::new([FauxStep::text("never")]));
         let mut config = config(&provider, vec![]);
-        config.hooks.push(Rewrite);
+        config.hooks.push("rewrite", Arc::new(Rewrite));
         let session = Transcript::with_writer(
             SessionHeader::new(Path::new("."), "m"),
             RejectWrites::containing("context_edit", "edit"),

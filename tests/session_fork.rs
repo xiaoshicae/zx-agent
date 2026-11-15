@@ -8,7 +8,7 @@ use std::sync::Arc;
 use common::{RunnerSetup, config, header, read_lines};
 use zx_agent::ai::Message;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::runner::RunOutcome;
+use zx_agent::events::RunOutcome;
 use zx_agent::transcript::{Entry, SESSION_VERSION, SessionHeader, Transcript};
 
 fn ids(entries: &[&Entry]) -> Vec<String> {

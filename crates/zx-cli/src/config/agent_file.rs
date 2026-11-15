@@ -12,8 +12,8 @@ use serde::Deserialize;
 use super::permissions::RawPermissions;
 use super::skills::Skill;
 use super::{AgentDefinition, Builtin};
+use zx_agent::agent::RunLimits;
 use zx_agent::compaction::{self, TokenTrigger};
-use zx_agent::runner::RunLimits;
 
 /// The line that opens and closes the front matter.
 const DELIMITER: &str = "+++";

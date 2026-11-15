@@ -9,10 +9,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::Notify;
 
+use zx_agent::agent::RunLimits;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, Usage};
 use zx_agent::compaction::{Config, Outcome, Summarized, Summarizer, SummarySource};
-use zx_agent::runner::{RunLimits, RunOutcome};
+use zx_agent::events::RunOutcome;
 use zx_agent::transcript::{CompactionSummary, Entry, SummarizedBy, SummaryFact, Transcript};
 
 use common::{Collect, Driven, RunnerSetup, config, refusal, seeded_session};

@@ -8,15 +8,14 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::Builtin;
 use zx_agent::ai::Message;
-use zx_agent::events::{Event, EventKind};
-use zx_agent::runner::{RunOutcome, RunReport};
+use zx_agent::events::{Event, EventKind, RunOutcome, RunReport};
 use zx_agent::{Run, Session};
 
 use crate::assembly;
 use crate::assembly::SessionPlace;
 use crate::cli::{self, OutputMode, RunArgs};
 use crate::process::{
-    EXIT_DENIED, JsonlEvents, exit_code, print_line, run_traces, spawn_signal_handler, with_telemetry,
+    EXIT_DENIED, JsonlEvents, exit_code, next_event, print_line, run_traces, spawn_signal_handler, with_telemetry,
 };
 use crate::render::{answer_end_line, progress_line, visible};
 
@@ -88,13 +87,10 @@ fn read_prompt(arg: &str) -> Result<String> {
 /// the file.
 async fn build_session(shared: &assembly::Shared, session: Option<&Path>) -> Result<Session> {
     let place = SessionPlace::file_or_memory(session);
-    let existing = place.only().await?;
-    if let Some(existing) = &existing {
-        assembly::check_session_cwd(shared.overrides.cwd.as_deref(), &existing.cwd)?;
-    }
+    let held = place.held(shared.overrides.cwd.as_deref()).await?;
     let agent = assembly::ModeAgent::build(shared, &shared.settings.model, &place, assembly::Approvals::Nobody)?;
-    match existing {
-        Some(existing) => agent.resume(&existing.id).await,
+    match held {
+        Some(id) => agent.resume(&id).await,
         None => agent.create(None).await,
     }
 }
@@ -103,19 +99,8 @@ async fn build_session(shared: &assembly::Shared, session: Option<&Path>) -> Res
 /// `cancel`, cancels the run through `session`; the run is still read to its end, for its
 /// report. A signal that arrived before the run started cancels it at once.
 async fn read_to_end(session: &Session, mut run: Run, cancel: &CancellationToken, progress: &Progress) -> RunReport {
-    let mut signalled = false;
-    loop {
-        tokio::select! {
-            biased;
-            () = cancel.cancelled(), if !signalled => {
-                session.cancel();
-                signalled = true;
-            }
-            event = run.next() => match event {
-                Some(event) => progress.emit(&event),
-                None => break,
-            },
-        }
+    while let Some(event) = next_event(&mut run, session, cancel).await {
+        progress.emit(&event);
     }
     run.wait().await
 }
@@ -150,9 +135,16 @@ fn print_report(report: &RunReport, output: OutputMode, session: Option<&Path>) 
             let session = session
                 .map(|file| format!(" session={}", file.display()))
                 .unwrap_or_default();
+            // Named as the `run_end` event names them.
+            let outcome = match report.outcome {
+                RunOutcome::BudgetExhausted { budget, truncated } => {
+                    format!("budget_exhausted budget={} truncated={truncated}", budget.name())
+                }
+                other => other.name().to_string(),
+            };
             eprintln!(
-                "[zx-agent] outcome={:?} model_requests={} retries={} tokens={} (in {} / out {}){cost}{denied}{error}{session}",
-                report.outcome, report.model_requests, report.retries, usage.total_tokens, usage.input, usage.output,
+                "[zx-agent] outcome={outcome} model_requests={} retries={} tokens={} (in {} / out {}){cost}{denied}{error}{session}",
+                report.model_requests, report.retries, usage.total_tokens, usage.input, usage.output,
             );
         }
         // The `run_end` event, already written, carries the report.

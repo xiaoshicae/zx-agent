@@ -14,14 +14,13 @@ use common::{EchoTool, NotifyingProvider, RunnerSetup, config, header, refusal, 
 use zx_agent::AgentConfig;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, ToolCall, UserMessageKind};
-use zx_agent::events::{Event, EventKind};
+use zx_agent::events::{Event, EventKind, RunOutcome};
 use zx_agent::extensions::{CommandContext, CommandError, CommandOutcome, Extension, SlashCommand};
 use zx_agent::hooks::{Hook, HookContext, HookResult};
 use zx_agent::input::{Input, QueueMode};
-use zx_agent::runner::RunOutcome;
 use zx_agent::session::SessionError;
 use zx_agent::tools::ToolOutput;
-use zx_agent::transcript::{CustomMessage, Entry};
+use zx_agent::transcript::{CustomMessage, Entry, Transcript};
 
 fn note(text: &str) -> CustomMessage {
     CustomMessage {
@@ -64,8 +63,7 @@ struct Reminder;
 #[async_trait]
 impl Hook for Reminder {
     async fn after_tool(&self, call: &ToolCall, output: ToolOutput, ctx: &HookContext) -> HookResult<ToolOutput> {
-        ctx.queues
-            .steer_message(Input::Custom(note(&format!("{} ran", call.name))));
+        ctx.queues.steer(Input::Custom(note(&format!("{} ran", call.name))));
         ctx.queues.append_entry("calls", json!({"id": call.id}));
         Ok(output)
     }
@@ -80,7 +78,7 @@ async fn a_hook_sends_the_model_a_message_and_records_state_during_the_run() {
         FauxStep::text("done"),
     ]));
     let mut config = config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]);
-    config.hooks.push(Reminder);
+    config.hooks.push("reminder", Arc::new(Reminder));
     let (session, events) = session_in(&file, config).await;
 
     let report = session.prompt("go").await.unwrap();
@@ -143,7 +141,7 @@ async fn state_recorded_during_the_last_events_is_kept_before_the_run_is_reporte
     let file = dir.path().join("session.jsonl");
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let mut config = config(provider, vec![]);
-    config.hooks.push(AtEnd);
+    config.hooks.push("at_end", Arc::new(AtEnd));
     let (session, events) = session_in(&file, config).await;
 
     session.prompt("go").await.unwrap();
@@ -226,7 +224,7 @@ async fn a_hook_changes_the_tools_of_the_next_request() {
         provider.clone(),
         vec![Arc::new(EchoTool::new("echo")), Arc::new(EchoTool::new("note"))],
     );
-    config.hooks.push(OnlyEcho);
+    config.hooks.push("only_echo", Arc::new(OnlyEcho));
     let (session, _) = RunnerSetup::new(config).build();
 
     session.prompt("go").await.unwrap();
@@ -305,6 +303,26 @@ async fn an_extension_command_runs_through_the_session_and_its_message_starts_a_
         session.run_command("jira", "").await,
         Err(CommandError::Failed("give an issue key".into()))
     );
+}
+
+#[tokio::test]
+async fn a_session_that_closed_itself_runs_no_more_commands() {
+    let mut config = config(Arc::new(FauxProvider::new([])), vec![]);
+    config.extensions = vec![Arc::new(Commands {
+        name: "tracker",
+        commands: vec![Arc::new(Jira)],
+    })];
+    let (session, _) = RunnerSetup {
+        session: Transcript::with_log(header(), Box::new(common::RefusingLog)),
+        ..RunnerSetup::new(config)
+    }
+    .build();
+    assert!(!session.is_closed());
+    // The prompt cannot be recorded, so the session closes once the run ends.
+    session.prompt("go").await.unwrap();
+
+    assert!(session.is_closed());
+    assert_eq!(session.run_command("jira", "ABC-1").await, Err(CommandError::Closed));
 }
 
 struct Named(&'static str);
@@ -408,7 +426,7 @@ async fn run_with_mode(mode: QueueMode) -> Vec<Vec<String>> {
         FauxStep::text("two"),
     ]));
     let mut config = config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]);
-    config.hooks.push(TwoSteers);
+    config.hooks.push("two_steers", Arc::new(TwoSteers));
     let (session, _) = RunnerSetup::new(config).build();
     session.queues().set_mode(mode);
     session.prompt("go").await.unwrap();

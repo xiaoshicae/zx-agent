@@ -31,7 +31,7 @@ use crate::ai::ToolCall;
 use crate::guard::CancelSignal;
 
 pub(crate) use approval::{Answer, ApprovalGate, NO_HUMAN};
-pub use approval::{ApprovalDecision, ApprovalMode, DEFAULT_APPROVAL_TIMEOUT};
+pub use approval::{ApprovalDecision, ApprovalMode};
 pub use chain::{DEFAULT_POLICY_TIMEOUT, PolicyChain};
 
 /// Decides whether a tool call may run. Registered in a loop's [`PolicyChain`], where the

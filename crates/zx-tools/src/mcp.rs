@@ -41,6 +41,10 @@ const MAX_DESCRIPTION_BYTES: usize = 4 * 1024;
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default bound for one tool call.
 const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(120);
+/// Longest wait for a server to take the notice that a request is given up. The notice is a
+/// courtesy that lets the transport close the request's stream; the call that needed the
+/// answer is gone already.
+const GIVE_UP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// One MCP server and the tools to take from it.
 ///
@@ -441,21 +445,21 @@ impl Drop for Unanswered<'_> {
         };
         let peer = self.peer.clone();
         // Not awaited: the call that would wait for it is gone. The task ends when the
-        // notification is sent or the connection turns out to be closed.
+        // notification is sent, the connection turns out to be closed, or the wait times out.
         tokio::spawn(async move { give_up(&peer, request_id, "cancelled by the agent").await });
     }
 }
 
-/// Tell the server that the request `request_id` is given up, for `reason`. The notification
-/// is what makes the transport close the request's stream; one that cannot be sent leaves
-/// nothing more to do.
+/// Tell the server that the request `request_id` is given up, for `reason`, waiting at most
+/// [`GIVE_UP_TIMEOUT`]. The notification is what makes the transport close the request's
+/// stream; one that cannot be sent in time leaves nothing more to do, so its result is not
+/// needed.
 async fn give_up(peer: &Peer<RoleClient>, request_id: RequestId, reason: &str) {
-    let _ = peer
-        .notify_cancelled(CancelledNotificationParam::new(
-            Some(request_id),
-            Some(reason.to_string()),
-        ))
-        .await;
+    let notice = peer.notify_cancelled(CancelledNotificationParam::new(
+        Some(request_id),
+        Some(reason.to_string()),
+    ));
+    let _ = tokio::time::timeout(GIVE_UP_TIMEOUT, notice).await;
 }
 
 /// The tool output of a result: its text, bounded, and whether the server reported an error.

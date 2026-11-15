@@ -54,6 +54,8 @@ impl CompactionPause {
 /// and where the run's events go.
 pub(super) struct RunHost<'a> {
     pub(super) session: &'a mut Transcript,
+    /// How many entries the session had when the run started: what follows is the run's.
+    pub(super) run_start: usize,
     pub(super) target: EventTarget<'a>,
     pub(super) config: &'a LoopConfig,
     pub(super) compaction: &'a compaction::Config,
@@ -65,6 +67,7 @@ impl RunHost<'_> {
     pub(super) fn reborrow(&mut self) -> RunHost<'_> {
         RunHost {
             session: &mut *self.session,
+            run_start: self.run_start,
             target: self.target,
             config: self.config,
             compaction: self.compaction,
@@ -88,7 +91,7 @@ impl RunHost<'_> {
             .await
             .map_err(|error| format!("{error:#}"))?;
         match begin {
-            Start::Message(message) => Ok(FirstInput::Messages(vec![message])),
+            Start::Message(message) => Ok(FirstInput::Prompt(message)),
             Start::Continue => self.continuation().await,
         }
     }
@@ -128,17 +131,17 @@ impl RunHost<'_> {
             return Err("nothing to continue: the conversation is empty; send a prompt instead".into());
         };
         match &last.message {
-            Message::User { .. } | Message::ToolResult(_) => Ok(FirstInput::default()),
+            Message::User { .. } | Message::ToolResult(_) => Ok(FirstInput::Conversation),
             Message::Assistant(answer) if matches!(answer.stop_reason, StopReason::Error | StopReason::Aborted) => {
                 let failed = last.entry_id.clone();
                 self.omit_failed_attempt(&failed).await?;
-                Ok(FirstInput::default())
+                Ok(FirstInput::Conversation)
             }
             Message::Assistant(_) => {
                 let queues = &self.config.queues;
                 if queues.has(Queue::Steering) {
                     // Every step takes steering first.
-                    Ok(FirstInput::default())
+                    Ok(FirstInput::Conversation)
                 } else if queues.has(Queue::FollowUp) {
                     Ok(FirstInput::QueuedFollowUps)
                 } else {
@@ -164,13 +167,6 @@ impl RunHost<'_> {
             TokenTrigger::Above(limit) => Ok(compaction::context_tokens(self.session)? > limit),
             TokenTrigger::Unset | TokenTrigger::Off => Ok(false),
         }
-    }
-
-    /// The session the loop records in before it acts on a step, and whose projection is
-    /// the context it sends. When the session cannot record, the loop stops at once
-    /// ([`Halt::Unrecorded`]): an unattended run must not keep acting without an audit trail.
-    pub(super) fn session(&mut self) -> &mut Transcript {
-        self.session
     }
 
     /// Prepare the context before a task request: compact first when automatic compaction

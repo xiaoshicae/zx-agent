@@ -11,7 +11,7 @@ use serde_json::json;
 use common::{Driven, EchoTool, NotifyingProvider, RunnerSetup, config, header, summarize};
 use zx_agent::ai::Message;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::runner::RunOutcome;
+use zx_agent::events::RunOutcome;
 use zx_agent::session::SessionError;
 use zx_agent::tools::Tool;
 use zx_agent::transcript::Entry;

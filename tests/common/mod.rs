@@ -26,18 +26,17 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use tokio::sync::Notify;
-use zx_agent::agent::SessionParts;
+use zx_agent::agent::{RunLimits, SessionParts};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::{
     AssistantMessage, ContentBlock, EventReceiver, Message, Provider, Request, StopReason, ToolCall, ToolDef, Usage,
 };
 use zx_agent::compaction;
-use zx_agent::events::{Event, EventKind};
+use zx_agent::events::{Event, EventKind, RunReport};
 use zx_agent::hooks::HookContext;
 use zx_agent::input::{Input, InputQueues};
-use zx_agent::policy::{ApprovalDecision, ApprovalMode, DEFAULT_APPROVAL_TIMEOUT};
-use zx_agent::runner::{RunLimits, RunReport};
+use zx_agent::policy::{ApprovalDecision, ApprovalMode};
 use zx_agent::session::SessionError;
 use zx_agent::tools::{ExecutionMode, Tool, ToolContext, ToolOutput};
 use zx_agent::transcript::{Entry, JsonlStorage, LoadedSession, SessionHeader, SessionStorage, Transcript};
@@ -429,6 +428,17 @@ pub(crate) async fn create_session_file(path: &Path, header: SessionHeader) -> a
     Ok(Transcript::with_log(header, log))
 }
 
+/// A session log that refuses every record, like a database that no longer accepts writes:
+/// a session on it closes itself once the operation that tried to write ends.
+pub(crate) struct RefusingLog;
+
+#[async_trait]
+impl zx_agent::transcript::SessionLog for RefusingLog {
+    async fn append(&mut self, _record: &zx_agent::transcript::LogRecord<'_>) -> anyhow::Result<()> {
+        anyhow::bail!("the database is read-only")
+    }
+}
+
 /// The session in the file `path`, loaded and open for appending.
 pub(crate) async fn open_session_file(path: &Path) -> anyhow::Result<Transcript> {
     let id = read_session_file(path)?.header().id.clone();
@@ -466,6 +476,10 @@ pub(crate) trait Approver: Send + Sync {
     /// The answer to `request`; `None` leaves it unanswered.
     async fn confirm(&self, request: &Asked) -> Option<ApprovalDecision>;
 }
+
+/// How long a test's runs wait for its [`Approver`]: long enough that it always answers
+/// first, so that a test that expects no answer leaves the approver out instead.
+const APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// What a test's session is made of, with test defaults: no retries, unattended preset
 /// limits, an in-memory transcript, no compaction settings, nobody to answer approvals.
@@ -519,7 +533,7 @@ impl RunnerSetup {
             approver,
         } = self;
         if approver.is_some() && config.approvals == ApprovalMode::Deny {
-            config.approvals = ApprovalMode::Wait(DEFAULT_APPROVAL_TIMEOUT);
+            config.approvals = ApprovalMode::Wait(APPROVAL_TIMEOUT);
         }
         config.retry = retry;
         config.limits = limits;

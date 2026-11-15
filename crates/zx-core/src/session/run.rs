@@ -7,8 +7,7 @@ use std::task::{Context, Poll};
 use futures::Stream;
 use tokio::sync::mpsc;
 
-use crate::events::Event;
-use crate::runner::RunReport;
+use crate::events::{Event, RunReport};
 
 /// How many events a run may emit ahead of its reader. A run that is further ahead waits,
 /// so a slow reader slows the run down instead of filling memory.

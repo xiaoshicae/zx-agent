@@ -17,8 +17,8 @@ use zx_agent::ai::{
     AssistantMessage, Message, ModelCost, ModelMeta, Provider, Request, StopReason, StreamEvent, Usage,
 };
 use zx_agent::compaction::{self, Config, DEFAULT_RESERVE_TOKENS, TokenTrigger};
+use zx_agent::events::RunOutcome;
 use zx_agent::hooks::{ContextEdit, Hook, HookContext, HookResult};
-use zx_agent::runner::RunOutcome;
 use zx_agent::transcript::{Entry, SessionHeader, Transcript};
 
 /// 1 per input token and 2 per output token, in any currency: the faux provider reports 10 in, 5 out.
@@ -195,6 +195,71 @@ async fn the_token_trigger_runs_a_summary_when_the_estimate_passes_it() {
     assert_eq!(requests, 1);
 }
 
+#[tokio::test]
+async fn no_summary_is_paid_for_when_the_latest_input_alone_passes_the_token_trigger() {
+    let mut store = Transcript::in_memory(header());
+    let old = store
+        .append_message(Message::user("observed ".repeat(600)))
+        .await
+        .unwrap();
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::text(summary_json(&old)),
+        FauxStep::text("answer"),
+    ]));
+    let (runner, _) = RunnerSetup {
+        session: store,
+        compaction: Config {
+            trigger_bytes: None,
+            trigger_tokens: TokenTrigger::Above(100),
+            keep_recent_bytes: 1,
+            timeout: Duration::from_secs(1),
+            ..Config::default()
+        },
+        ..RunnerSetup::new(config(provider.clone(), vec![]))
+    }
+    .build();
+
+    // Some 1.4 KiB, which estimate to about 350 tokens: a summary keeps the latest input
+    // whole, so none can bring the context under the trigger.
+    let report = runner.run("latest ".repeat(200)).await;
+
+    assert_eq!(report.outcome, RunOutcome::Failed, "{report:?}");
+    let error = report.error.as_deref().unwrap_or_default();
+    assert!(error.contains("triggerTokens"), "{error}");
+    assert!(provider.requests().is_empty(), "no summary is asked for");
+}
+
+#[tokio::test]
+async fn a_summary_that_leaves_the_context_above_the_token_trigger_fails() {
+    let (store, old) = seeded_session().await;
+    // About 600 bytes of summary, which alone estimate to some 150 tokens.
+    let long_summary =
+        json!({"facts":[{"text":"observed ".repeat(66),"sourceEntryIds":[old]}],"inferences":[],"plans":[]});
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::text(long_summary.to_string()),
+        FauxStep::text("answer"),
+    ]));
+    let (runner, _) = RunnerSetup {
+        session: store,
+        compaction: Config {
+            trigger_bytes: None,
+            trigger_tokens: TokenTrigger::Above(100),
+            keep_recent_bytes: 1,
+            timeout: Duration::from_secs(1),
+            ..Config::default()
+        },
+        ..RunnerSetup::new(config(provider.clone(), vec![]))
+    }
+    .build();
+
+    let report = runner.run("continue").await;
+
+    assert_eq!(report.outcome, RunOutcome::Failed, "{report:?}");
+    let error = report.error.as_deref().unwrap_or_default();
+    assert!(error.contains("still exceeds triggerTokens"), "{error}");
+    assert_eq!(provider.requests().len(), 1, "the summary request, and no task request");
+}
+
 /// A token trigger of 1000 that keeps about 1 KiB of recent messages.
 fn token_trigger() -> Config {
     Config {
@@ -269,7 +334,7 @@ async fn the_token_trigger_follows_an_edit_made_after_the_last_reported_usage() 
     store.append_message(answer_reporting(5_000)).await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("answer")]));
     let mut config = config(provider.clone(), vec![]);
-    config.hooks.push(TrimLongInput);
+    config.hooks.push("trim_long_input", Arc::new(TrimLongInput));
     let (runner, events) = RunnerSetup {
         session: store,
         compaction: token_trigger(),

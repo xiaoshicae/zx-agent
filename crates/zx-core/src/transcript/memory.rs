@@ -133,11 +133,7 @@ impl SessionStorage for MemoryStorage {
                 }),
             }
         }
-        unreadable.sort_by(|a, b| a.location.cmp(&b.location));
-        Ok(SessionList {
-            sessions: query.arrange(sessions),
-            unreadable,
-        })
+        Ok(SessionList::new(query, sessions, unreadable))
     }
 }
 

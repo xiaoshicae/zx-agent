@@ -75,24 +75,16 @@ pub struct InputQueues {
 }
 
 impl InputQueues {
-    /// Queue a user message for the next step of the current task.
-    pub fn steer(&self, text: impl Into<String>) {
-        self.steer_message(Input::from(text.into()));
+    /// Queue a message for the next step of the current task: the person's text, or any
+    /// [`Input`].
+    pub fn steer(&self, message: impl Into<Input>) {
+        lock(&self.steering).push_back(message.into());
     }
 
-    /// Queue a user message for after the current task finishes.
-    pub fn follow_up(&self, text: impl Into<String>) {
-        self.follow_up_message(Input::from(text.into()));
-    }
-
-    /// Queue any message for the next step of the current task.
-    pub fn steer_message(&self, message: Input) {
-        lock(&self.steering).push_back(message);
-    }
-
-    /// Queue any message for after the current task finishes.
-    pub fn follow_up_message(&self, message: Input) {
-        lock(&self.follow_up).push_back(message);
+    /// Queue a message for after the current task finishes: the person's text, or any
+    /// [`Input`].
+    pub fn follow_up(&self, message: impl Into<Input>) {
+        lock(&self.follow_up).push_back(message.into());
     }
 
     /// Ask the loop to record state of an extension (pi: `appendEntry`) at the start of its
@@ -281,7 +273,7 @@ mod tests {
             details: None,
         };
         queues.steer("a");
-        queues.steer_message(Input::Custom(custom.clone()));
+        queues.steer(Input::Custom(custom.clone()));
         queues.append_entry("state", serde_json::json!({"n": 1}));
 
         assert_eq!(queues.take_all(), [Input::from("a"), Input::Custom(custom)]);

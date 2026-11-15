@@ -9,11 +9,11 @@ use tokio::sync::mpsc;
 use tokio::task::JoinError;
 use tokio_util::sync::CancellationToken;
 
-use crate::runner::{RunOutcome, RunReport};
 use crate::session::SessionError;
 use crate::transcript::CustomMessage;
 use crate::{Agent, Session};
 use zx_core::SessionOptions;
+use zx_core::events::{Budget, RunOutcome, RunReport};
 use zx_core::input::Input;
 
 use super::approval::{ApprovalEvents, ApprovalUpdate};
@@ -44,9 +44,10 @@ impl Drop for Opened {
 
 impl Opened {
     /// Whether the session is still open: not once it was closed while the conversation held
-    /// it, as a session closes itself when it can no longer write its records.
+    /// it, as a session closes itself when it can no longer write its records. Asks this
+    /// handle, not the agent's table, which may hold the session opened again elsewhere.
     pub(crate) fn still_open(&self) -> bool {
-        self.agent.session(self.session.id()).is_some()
+        !self.session.is_closed()
     }
 
     /// What people asked after the run's last look at the queue, which starts the next run.
@@ -61,10 +62,26 @@ impl Opened {
         for message in queued {
             match message {
                 Input::User { text, actor } => asked.push(Asked { text, actor }),
-                custom @ Input::Custom(_) => self.session.queues().steer_message(custom),
+                custom @ Input::Custom(_) => self.session.queues().steer(custom),
             }
         }
         Ok(asked)
+    }
+
+    /// What people asked after the run's last look at the queue, from a session that closed
+    /// meanwhile: it takes no more input, and its queues outlive it. A message an extension
+    /// queued for that session goes with it.
+    pub(crate) fn taken_back(&self) -> Vec<Asked> {
+        let queues = self.session.queues();
+        let mut queued = queues.drain_steering();
+        queued.extend(queues.drain_follow_up());
+        queued
+            .into_iter()
+            .filter_map(|message| match message {
+                Input::User { text, actor } => Some(Asked { text, actor }),
+                Input::Custom(_) => None,
+            })
+            .collect()
     }
 }
 
@@ -324,9 +341,18 @@ fn render(report: &RunReport, replies: &Replies) -> String {
         RunOutcome::Completed if answer.is_empty() => replies.no_answer.clone(),
         RunOutcome::Completed => answer.to_string(),
         RunOutcome::Truncated => noted(&replies.truncated),
-        RunOutcome::ModelRequestLimit => noted(&replies.model_request_limit),
-        RunOutcome::TokenBudget => noted(&replies.token_budget),
-        RunOutcome::CostBudget => noted(&replies.cost_budget),
+        RunOutcome::BudgetExhausted { budget, truncated } => {
+            let reached = match budget {
+                Budget::ModelRequests => &replies.model_request_limit,
+                Budget::Tokens => &replies.token_budget,
+                Budget::Cost => &replies.cost_budget,
+            };
+            if truncated {
+                noted(&format!("{}\n{reached}", replies.truncated))
+            } else {
+                noted(reached)
+            }
+        }
         // The last answer in the session may be an earlier run's, so it is not repeated.
         RunOutcome::TimedOut => replies.timed_out.clone(),
         RunOutcome::Cancelled => replies.cancelled.clone(),
@@ -381,13 +407,19 @@ mod tests {
             render(&report(RunOutcome::Truncated, "part", None), &replies),
             format!("part\n\n{}", replies.truncated)
         );
+        let exhausted = |budget, truncated| RunOutcome::BudgetExhausted { budget, truncated };
         assert_eq!(
-            render(&report(RunOutcome::ModelRequestLimit, "", None), &replies),
+            render(&report(exhausted(Budget::ModelRequests, false), "", None), &replies),
             replies.model_request_limit
         );
         assert_eq!(
-            render(&report(RunOutcome::TokenBudget, "part", None), &replies),
+            render(&report(exhausted(Budget::Tokens, false), "part", None), &replies),
             format!("part\n\n{}", replies.token_budget)
+        );
+        // Cut off as well: both are said.
+        assert_eq!(
+            render(&report(exhausted(Budget::Cost, true), "part", None), &replies),
+            format!("part\n\n{}\n{}", replies.truncated, replies.cost_budget)
         );
     }
 

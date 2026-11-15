@@ -23,7 +23,7 @@
 //!   loop, and the chain that runs them
 //! - [`extensions`] (tools, prompt, input, policy, hooks): tools, policies, hooks, prompt
 //!   sections and slash commands registered together
-//! - [`runner`] (all of the above): one run at a time: the step loop of each attempt, the
+//! - `runner` (all of the above): one run at a time: the step loop of each attempt, the
 //!   retries, limits, summaries and recovery around it, and the delivery of its events (pi:
 //!   packages/agent)
 //! - [`session`] (all of the above): a conversation shared by frontends, and the run each
@@ -105,7 +105,7 @@ pub mod hooks;
 pub mod input;
 pub mod policy;
 pub mod prompt;
-pub mod runner;
+mod runner;
 pub mod session;
 pub mod tools;
 pub mod transcript;

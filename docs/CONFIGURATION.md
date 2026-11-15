@@ -102,7 +102,7 @@ You review code without changing files.
 |---|---|
 | `extends` | `unattended` 或 `assistant`，只能是内置 agent。省略时从空的基线开始：没有工具、权限、上限、上下文、skills、自动摘要与说明，此时必须写说明 |
 | `tools` | 替换启用列表：`bash`、`read_file`、`edit_file`、`write_file`、`grep`、`find`、`ls`、`read_skill`、`read_output`；`[]` 禁用全部 |
-| `continueOnLength` | 输出达到 token 上限后的续写次数，每次消耗一次请求预算 |
+| `continueOnLength` | 输出达到 token 上限后的续写次数，每次消耗一次请求预算；续写所需的请求超出任一预算时，运行以该预算的退出码结束，报告的 `truncated` 为 true |
 | `[permissions]` | 见下文“权限” |
 | `limits.maxModelRequests` | 每轮模型请求数，失败的尝试也计入；`"unlimited"` 不限，`0` 不请求模型 |
 | `limits.timeoutSecs` | 每轮总时间上限，`0` 关闭 |
@@ -202,4 +202,4 @@ skills 只来自 agent 的 `[[skills]]`，不扫描全局目录，不解析 SKIL
 
 ---
 
-CONFIGURATION.md · v0.13 · 2026年11月
+CONFIGURATION.md · v0.14 · 2026年11月

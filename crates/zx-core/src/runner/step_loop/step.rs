@@ -3,6 +3,7 @@
 
 use super::{Halt, StepLoop};
 use crate::ai::{AssistantMessage, Message, StopReason, UserMessageKind};
+use crate::events::Budget;
 use crate::hooks::{FinishedStep, StepDecision, StepDisposition};
 use crate::input::Queue;
 use crate::runner::Ending;
@@ -20,7 +21,7 @@ impl StepLoop<'_> {
         let stop = response.stop_reason;
         let disposition = self.disposition(after_tools);
         let remaining = self.accounting.remaining_model_requests();
-        let messages = self.host.session().messages();
+        let messages = self.host.session.messages();
         let summary = FinishedStep {
             response: &response,
             messages: &messages,
@@ -35,14 +36,14 @@ impl StepLoop<'_> {
         }
         // Inspect again: input may have arrived while the hook ran. Steering is taken at the
         // top of every step; follow-ups only when the model has nothing left to do.
-        let queues = &self.config.queues;
+        let queues = &self.host.config.queues;
         if queues.has(Queue::Steering) {
             return Ok(PendingInput::None);
         }
         if !needs_more && queues.has(Queue::FollowUp) {
             return Ok(PendingInput::FollowUps);
         }
-        let requested = requested_input(decision, disposition, remaining, stop)?;
+        let requested = requested_input(decision, disposition, self.accounting.exhausted())?;
         if requested.as_ref().is_some_and(continues_answer) {
             self.accounting.answer_continuations = self.accounting.answer_continuations.saturating_add(1);
         }
@@ -55,7 +56,13 @@ impl StepLoop<'_> {
 
     /// Ask the finish hooks what follows the step `summary` describes.
     async fn finish_step(&self, summary: &FinishedStep<'_>) -> Result<StepDecision, Halt> {
-        match self.config.hooks.finish_step(summary, &self.trace.context()).await {
+        match self
+            .host
+            .config
+            .hooks
+            .finish_step(summary, &self.host.target.trace.context())
+            .await
+        {
             Ok(decision) => Ok(decision),
             Err(error) => Err(self.hook_failed(error).await),
         }
@@ -66,7 +73,7 @@ impl StepLoop<'_> {
         let needs_more = after_tools == AfterTools::Ran;
         // Inspect queues without consuming them: stopping or failing in a hook must
         // leave accepted user input available to the next run.
-        let queues = &self.config.queues;
+        let queues = &self.host.config.queues;
         let queued = queues.has(Queue::Steering) || (!needs_more && queues.has(Queue::FollowUp));
         if needs_more || queued {
             StepDisposition::Continue
@@ -79,33 +86,23 @@ impl StepLoop<'_> {
 }
 
 /// The input a finish decision asks the next step to start with, once no queued input takes
-/// precedence. Ends the attempt when the decision needs a request the budget does not leave.
+/// precedence. Ends the attempt when the decision needs a request that the `exhausted`
+/// budget does not leave; the run's outcome then says whether the answer was cut off.
 fn requested_input(
     decision: StepDecision,
     disposition: StepDisposition,
-    remaining_model_requests: Option<u32>,
-    stop: StopReason,
+    exhausted: Option<Budget>,
 ) -> Result<Option<Message>, Halt> {
-    match decision {
-        StepDecision::ContinueAnswer(text) if disposition == StepDisposition::Stop => {
-            if remaining_model_requests == Some(0) {
-                return Err(Halt::Ended(if stop == StopReason::Length {
-                    Ending::Truncated
-                } else {
-                    Ending::ModelRequestLimit
-                }));
-            }
-            Ok(Some(Message::continuation(text)))
-        }
-        StepDecision::FollowUp(text) if disposition != StepDisposition::Continue => {
-            if remaining_model_requests == Some(0) {
-                return Err(Halt::Ended(Ending::ModelRequestLimit));
-            }
-            Ok(Some(Message::user(text)))
-        }
+    let message = match decision {
+        StepDecision::ContinueAnswer(text) if disposition == StepDisposition::Stop => Message::continuation(text),
+        StepDecision::FollowUp(text) if disposition != StepDisposition::Continue => Message::user(text),
         StepDecision::Stop | StepDecision::Default | StepDecision::ContinueAnswer(_) | StepDecision::FollowUp(_) => {
-            Ok(None)
+            return Ok(None);
         }
+    };
+    match exhausted {
+        Some(budget) => Err(Halt::Ended(Ending::BudgetExhausted(budget))),
+        None => Ok(Some(message)),
     }
 }
 

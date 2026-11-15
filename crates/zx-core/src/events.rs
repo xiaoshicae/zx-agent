@@ -11,7 +11,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::ai::{Delta, Message, Usage};
-use report::{RunOutcome, RunReport};
+pub use report::{Budget, RunOutcome, RunReport};
 
 /// Where the events of a run go, for the kernel's own objects below the run, such as the
 /// compactor: the run implements it, stamping each event, handing it to the run's reader and
@@ -140,8 +140,9 @@ impl Serialize for HookPoint {
 
 /// Events emitted while the agent runs.
 ///
-/// A run is one prompt: `run_start`, then one attempt per try (`attempt_start` to `attempt_end`;
-/// a retry or a recovery from context overflow starts another), then `run_end`. A step is one
+/// A run of a prompt, or of a continuation, is `run_start`, then one attempt per try
+/// (`attempt_start` to `attempt_end`; a retry or a recovery from context overflow starts
+/// another), then `run_end`; a compaction's run has only the events of its compaction. A step is one
 /// task request plus its tool calls. Summary requests of an automatic compaction belong to
 /// the step they precede but are not steps themselves, although they count against the same
 /// request budget; those of an overflow recovery come between two attempts.
@@ -267,6 +268,7 @@ pub enum EventKind {
     },
     /// End of one attempt. The runner may still retry afterwards.
     AttemptEnd {
+        #[serde(flatten)]
         outcome: RunOutcome,
     },
     /// Emitted by the runner before waiting to retry a failed response. `retry` is 1 for the
@@ -379,7 +381,6 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::runner::RunOutcome;
 
     #[test]
     #[expect(clippy::too_many_lines, reason = "one event of every variant")]

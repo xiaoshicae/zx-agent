@@ -370,6 +370,31 @@ async fn a_partial_write_stops_later_writes_and_leaves_a_repairable_tail() {
     assert_eq!(texts(&reopened), ["kept"]);
 }
 
+#[tokio::test]
+async fn opening_leaves_an_incomplete_tail_and_the_next_record_replaces_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s.jsonl");
+    let mut store = create_file(&path, header()).await.unwrap();
+    store.append_message(Message::user("kept")).await.unwrap();
+    drop(store);
+    let tail = b"{\"type\":\"mess";
+    OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(tail)
+        .unwrap();
+
+    let mut reopened = open_file(&path).await.unwrap();
+    assert!(std::fs::read(&path).unwrap().ends_with(tail), "opening changes nothing");
+    reopened.append_message(Message::user("next")).await.unwrap();
+    drop(reopened);
+
+    let read = read_file(&path).await.unwrap();
+    assert_eq!(read.incomplete_tail_bytes(), 0);
+    assert_eq!(texts(&read), ["kept", "next"]);
+}
+
 /// The message for a session of `version`, which is not the current one.
 fn unsupported(version: u32) -> String {
     format!("session format version {version} is not supported; only version {SESSION_VERSION} can be read or written")

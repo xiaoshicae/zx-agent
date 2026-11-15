@@ -1,4 +1,5 @@
-//! Ordered, bounded extension points. Hook failures never grant tool access.
+//! Ordered, bounded extension points around the loop. Hooks observe and transform; only
+//! policies decide whether a tool call runs, so no hook, failing or not, lets one run.
 //!
 //! - `chain`: [`HookChain`], which runs the registered hooks in stage order, each call
 //!   bounded by its timeout and the run's cancellation
@@ -23,7 +24,7 @@ use crate::transcript::context_edit_refusal;
 
 #[cfg(test)]
 use chain::HookCall;
-pub use chain::{HookChain, HookOptions};
+pub use chain::HookChain;
 
 /// Default bound for each individual hook invocation.
 pub const DEFAULT_HOOK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -58,8 +59,8 @@ pub struct HookContext {
     /// Set when the run is cancelled; the chain then stops waiting for the hook.
     #[serde(skip)]
     pub cancel: CancelSignal,
-    /// The run's queues: a hook sends the model a message with `steer_message` or
-    /// `follow_up_message` (pi: `sendMessage`) and records state with `append_entry` (pi:
+    /// The run's queues: a hook sends the model a message with `steer` or `follow_up` (pi:
+    /// `sendMessage`) and records state with `append_entry` (pi:
     /// `appendEntry`). In a context built with [`HookContext::new`] they belong to no loop.
     #[serde(skip)]
     pub queues: Arc<InputQueues>,
@@ -212,6 +213,8 @@ pub struct FinishedStep<'a> {
     pub step: u32,
     /// Answer continuations already scheduled in this run.
     pub answer_continuations: u32,
+    /// Model requests the run may still make; `None` is unlimited. A decision that needs a
+    /// request no budget leaves ends the run as out of that budget.
     pub remaining_model_requests: Option<u32>,
     pub disposition: StepDisposition,
 }
@@ -409,22 +412,31 @@ mod tests {
         }
     }
 
+    /// A chain of `hooks`, registered in order, each named after its position.
+    fn chain_of(hooks: Vec<Arc<dyn Hook>>) -> HookChain {
+        let mut chain = HookChain::new();
+        for (index, hook) in hooks.into_iter().enumerate() {
+            chain.push(format!("hook{index}"), hook);
+        }
+        chain
+    }
+
     #[tokio::test]
     async fn input_hooks_compose_in_registration_order_including_empty_unicode_input() {
-        let chain = HookChain::new().with(Suffix("甲")).with(Suffix("乙"));
+        let chain = chain_of(vec![Arc::new(Suffix("甲")), Arc::new(Suffix("乙"))]);
         assert_eq!(chain.on_input(String::new(), &context()).await.unwrap(), "甲乙");
     }
 
     #[tokio::test]
     async fn output_hooks_receive_the_preceding_hooks_result() {
-        let chain = HookChain::new().with(Suffix("甲")).with(Suffix("乙"));
+        let chain = chain_of(vec![Arc::new(Suffix("甲")), Arc::new(Suffix("乙"))]);
         let output = chain.after_tool(&call(), ToolOutput::ok(""), &context()).await.unwrap();
         assert_eq!(output.content, "甲乙");
     }
 
     #[tokio::test]
     async fn context_hooks_see_the_projection_after_preceding_edits() {
-        let chain = HookChain::new().with(Suffix("甲")).with(Suffix("乙"));
+        let chain = chain_of(vec![Arc::new(Suffix("甲")), Arc::new(Suffix("乙"))]);
         let original = vec![Message::user("")];
         let edits = chain.transform_context(&original, &context()).await.unwrap();
         let mut projected = original.clone();
@@ -455,11 +467,12 @@ mod tests {
             disposition: StepDisposition::Stop,
         };
         let first = StepDecision::ContinueAnswer("first".into());
-        let chain = HookChain::new()
-            .with(Finish(first.clone()))
-            .with(Finish(StepDecision::FollowUp("second".into())));
+        let mut chain = chain_of(vec![
+            Arc::new(Finish(first.clone())),
+            Arc::new(Finish(StepDecision::FollowUp("second".into()))),
+        ]);
         assert_eq!(chain.finish_step(&step, &context()).await.unwrap(), first);
-        let chain = chain.with(Finish(StepDecision::Stop));
+        chain.push("stop", Arc::new(Finish(StepDecision::Stop)));
         assert_eq!(chain.finish_step(&step, &context()).await.unwrap(), StepDecision::Stop);
     }
 

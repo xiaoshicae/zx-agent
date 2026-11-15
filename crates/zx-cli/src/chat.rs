@@ -3,7 +3,6 @@
 //! - `input`: the single owner of the terminal's input
 //! - `turn`: one operation of a conversation driven to its end, with the approvals its
 //!   calls wait for
-//! - `signals`: signals that cancel a prompt and leave the REPL running
 //! - `output` and `term`: streaming output and colors
 //! - `commands`: slash commands, which never reach the model
 //! - `storage`: where conversations are kept, and which one opens first
@@ -13,7 +12,6 @@ mod commands;
 mod info;
 mod input;
 mod output;
-mod signals;
 mod storage;
 mod term;
 mod turn;
@@ -29,19 +27,18 @@ use crate::otel::{Telemetry, TraceHook};
 use zx_agent::Session;
 use zx_agent::ai::{Provider, Reasoning};
 use zx_agent::input::Input;
-use zx_agent::session::ModelRef;
+use zx_agent::session::SessionError;
 
 use crate::assembly::SessionPlace;
 use crate::assembly::{self, Approvals, ModeAgent};
 use crate::cli::{self, ChatArgs};
-use crate::process::{EXIT_CANCELLED, EXIT_COMPLETED, with_telemetry};
+use crate::process::{EXIT_CANCELLED, EXIT_COMPLETED, EXIT_ERROR, Interrupt, Signals, with_telemetry};
 use crate::render::visible;
 
 use commands::Command;
 use info::{About, banner, help, status};
 use input::Line;
 use output::Output;
-use signals::{Interrupt, Signals};
 use storage::{Storage, opening};
 use term::Tone;
 use turn::{Operation, TurnIo, drive_turn};
@@ -65,6 +62,8 @@ enum Flow {
 
 struct Built {
     session: Session,
+    /// Where the session is kept, to open it again from there.
+    place: SessionPlace,
     provider: Arc<dyn Provider>,
     about: About,
     /// The commands extensions registered: name and description, for parsing and /help.
@@ -97,6 +96,7 @@ impl Chat {
             .collect();
         Ok(Built {
             session,
+            place: place.clone(),
             provider: agent.provider,
             about,
             commands,
@@ -191,7 +191,11 @@ async fn converse(args: ChatArgs, traces: Option<TraceHook>) -> Result<u8> {
             }
         };
         let command = commands::parse(text, &repl.built.commands);
-        let flow = repl.command(command, &mut terminal).await?;
+        let flow = match repl.command(command, &mut terminal).await {
+            Ok(flow) => flow,
+            Err(error) if closed(&error) => repl.reopen(&error).await,
+            Err(error) => return Err(error),
+        };
         if let Some(code) = repl.follow(flow, &mut terminal).await {
             output.finish();
             return Ok(code);
@@ -334,10 +338,9 @@ impl Repl<'_> {
 
     /// /model with a model ID: the next prompts use it, with the same provider.
     fn set_model(&mut self, next: String) -> Result<Flow> {
-        self.built.session.set_model(ModelRef {
-            provider: self.built.provider.clone(),
-            model: next.clone(),
-        })?;
+        self.built
+            .session
+            .set_model(self.built.provider.clone(), next.clone())?;
         self.model = next;
         Ok(self.say(Tone::Dim, &format!("[chat] model={}", visible(&self.model))))
     }
@@ -377,6 +380,7 @@ impl Repl<'_> {
             .switch(&mut self.built, &self.model, place, "create new conversation")
             .await
         {
+            self.keep_reasoning();
             let file = self
                 .built
                 .about
@@ -389,6 +393,59 @@ impl Repl<'_> {
                 .line(Tone::Dim, &format!("[chat] new conversation{file}"));
         }
     }
+
+    /// The conversation's session closed itself, as it does once its record can no longer be
+    /// written: say why, and open it again from where it is kept. A session kept in memory
+    /// is forgotten once closed, so the chat ends then, and when opening it again fails.
+    async fn reopen(&mut self, error: &anyhow::Error) -> Flow {
+        let output = &*self.chat.output;
+        output.line(Tone::Error, &format!("[chat] {}", visible(&format!("{error:#}"))));
+        if matches!(self.built.place, SessionPlace::Memory(_)) {
+            return Flow::Exit(EXIT_ERROR);
+        }
+        let id = self.built.session.id().to_string();
+        let place = self.built.place.clone();
+        match self.chat.build(&self.model, &place, Some(&id)).await {
+            Ok(next) => {
+                self.built = next;
+                self.keep_reasoning();
+                output.line(Tone::Dim, "[chat] session opened again from where it is kept");
+                Flow::Continue
+            }
+            Err(reopen) => {
+                output.line(
+                    Tone::Error,
+                    &format!(
+                        "[chat] cannot open the session again: {}",
+                        visible(&format!("{reopen:#}"))
+                    ),
+                );
+                Flow::Exit(EXIT_ERROR)
+            }
+        }
+    }
+
+    /// Give a new or reopened session the reasoning level /reasoning chose; it starts with
+    /// the configured one.
+    fn keep_reasoning(&self) {
+        if self.reasoning == self.chat.shared.settings.config.reasoning {
+            return;
+        }
+        if let Err(error) = self.built.session.set_reasoning(self.reasoning) {
+            self.chat.output.line(
+                Tone::Error,
+                &format!(
+                    "[chat] cannot keep reasoning={}: {error}",
+                    reasoning_name(self.reasoning)
+                ),
+            );
+        }
+    }
+}
+
+/// Whether `error` says the conversation's session is closed.
+fn closed(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<SessionError>() == Some(&SessionError::Closed)
 }
 
 /// Run an extension's command and show what it says. Returns the message it sends, if any.
@@ -425,4 +482,19 @@ fn parse_level(text: &str) -> Result<Option<Reasoning>, String> {
 
 fn reasoning_name(reasoning: Option<Reasoning>) -> &'static str {
     reasoning.map_or("default", Reasoning::as_str)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_closed_session_is_told_from_other_errors_however_it_is_carried() {
+        assert!(closed(&anyhow::Error::from(SessionError::Closed)));
+        assert!(closed(
+            &anyhow::Error::from(SessionError::Closed).context("cannot start the prompt")
+        ));
+        assert!(!closed(&anyhow::Error::from(SessionError::Busy)));
+        assert!(!closed(&anyhow::anyhow!("session is closed")));
+    }
 }

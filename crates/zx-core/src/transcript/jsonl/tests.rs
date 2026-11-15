@@ -67,6 +67,38 @@ fn a_time_is_written_as_utc_without_colons() {
     }
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn a_directory_that_cannot_be_read_is_reported_and_keeps_no_other_session_from_its_storage() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let storage = JsonlStorage::in_directory(dir.path());
+    seed(&storage, &header_of("kept", "/w", 1), "kept").await;
+    // The directory of another working directory, which this user cannot read.
+    let locked = storage.location(Path::new("/locked"));
+    std::fs::create_dir_all(&locked).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read_dir(&locked).is_ok() {
+        // Root reads every directory, so there is nothing to show.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        return;
+    }
+
+    let created = storage.create(&header_of("new", "/w", 2)).await.map(drop);
+    let opened = storage.open("kept").await.map(drop);
+    let listed = storage.list(&SessionQuery::default()).await;
+    let in_locked = storage.list(&in_cwd("/locked")).await;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert!(created.is_ok(), "{created:?}");
+    assert!(opened.is_ok(), "{opened:?}");
+    for listed in [listed.unwrap(), in_locked.unwrap()] {
+        assert_eq!(listed.unreadable.len(), 1, "{:?}", listed.unreadable);
+        assert_eq!(listed.unreadable[0].location, locked.display().to_string());
+    }
+}
+
 #[tokio::test]
 async fn a_session_is_kept_in_the_directory_of_its_working_directory() {
     let dir = tempfile::tempdir().unwrap();
