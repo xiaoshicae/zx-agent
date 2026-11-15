@@ -31,10 +31,11 @@ use zx_agent::ai::{Provider, Reasoning};
 use zx_agent::input::Input;
 use zx_agent::session::ModelRef;
 
-use crate::cli::{self, Approvals, ChatArgs, ModeAgent};
+use crate::assembly::SessionPlace;
+use crate::assembly::{self, Approvals, ModeAgent};
+use crate::cli::{self, ChatArgs};
 use crate::process::{EXIT_CANCELLED, EXIT_COMPLETED, with_telemetry};
 use crate::render::visible;
-use crate::session_files::SessionPlace;
 
 use commands::Command;
 use info::{About, banner, help, status};
@@ -72,7 +73,7 @@ struct Built {
 
 /// What every conversation of this chat is built with.
 struct Chat {
-    shared: cli::Shared,
+    shared: assembly::Shared,
     output: Arc<Output>,
 }
 
@@ -137,7 +138,7 @@ async fn converse(args: ChatArgs, traces: Option<TraceHook>) -> Result<u8> {
         no_session,
         resume,
     } = args;
-    let shared = cli::Shared::connect(base, budget, Builtin::Assistant)
+    let shared = assembly::Shared::connect(cli::overrides(base, &budget), Builtin::Assistant)
         .await?
         .with_traces(traces);
     let mode = if std::io::stdin().is_terminal() {
@@ -152,7 +153,7 @@ async fn converse(args: ChatArgs, traces: Option<TraceHook>) -> Result<u8> {
     let output = &chat.output;
     let model = chat.shared.settings.model.clone();
     let resume = resume.as_ref().map(Option::as_deref);
-    let (storage, first) = opening(no_session, session, resume, chat.shared.base.cwd.as_deref()).await?;
+    let (storage, first) = opening(no_session, session, resume, chat.shared.overrides.cwd.as_deref()).await?;
     let built = chat.build(&model, &storage.place, first.id()).await?;
     let mut terminal = Terminal {
         signals: Signals::new().context("cannot register chat signal handlers")?,

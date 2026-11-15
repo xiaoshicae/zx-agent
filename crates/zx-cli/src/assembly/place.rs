@@ -1,4 +1,4 @@
-//! Where every mode keeps its sessions, and how a listing shows them.
+//! Where a mode keeps its sessions.
 //!
 //! As in pi (`getDefaultSessionDirPath`), each working directory has its own directory of
 //! session files under the zx-agent home directory, which `ZX_AGENT_HOME` moves.
@@ -11,17 +11,8 @@ use anyhow::{Context, Result, bail};
 use crate::config;
 use zx_agent::transcript::{JsonlStorage, MemoryStorage, SessionInfo, SessionList, SessionQuery, SessionStorage};
 
-use crate::render::{local_time, visible};
-
 /// Under the zx-agent home directory: the sessions of every working directory.
 const SESSIONS_DIR: &str = "sessions";
-/// Characters of a first prompt shown in a listing.
-const PROMPT_PREVIEW_CHARS: usize = 60;
-/// Characters of a session ID shown in a listing; enough to tell sessions apart, and what
-/// `--resume` accepts as a prefix.
-const SHORT_ID_CHARS: usize = 8;
-/// How a listing shows when a session was last active.
-const LISTING_TIME_FORMAT: &str = "%Y-%m-%d %H:%M";
 
 /// Where a mode keeps its sessions. A clone is the same place: the mode's agent keeps its
 /// sessions there, and the mode lists them and shows their files.
@@ -127,84 +118,16 @@ impl SessionPlace {
     }
 }
 
-/// One line per session: short ID, last activity in local time, message count and the
-/// session's name, else its first prompt.
-pub(crate) fn lines(list: &SessionList) -> Vec<String> {
-    list.sessions
-        .iter()
-        .map(|session| {
-            format!(
-                "{}  {}  {:>3} message(s)  {}",
-                short_id(&session.id),
-                local_time(session.last_activity_ms, LISTING_TIME_FORMAT).unwrap_or_else(|| "-".to_string()),
-                session.messages,
-                preview(session)
-            )
-        })
-        .collect()
-}
-
-/// The first [`SHORT_ID_CHARS`] of a session ID, as listings show it.
-fn short_id(id: &str) -> String {
-    id.chars().take(SHORT_ID_CHARS).collect()
-}
-
-fn preview(session: &SessionInfo) -> String {
-    match session.title() {
-        Some(title) => preview_text(title),
-        None => "(no prompt)".to_string(),
-    }
-}
-
-/// The first non-empty line of `text`, at most [`PROMPT_PREVIEW_CHARS`] characters, with an
-/// ellipsis for what is left out and control characters made visible.
-pub(crate) fn preview_text(text: &str) -> String {
-    let line = text.lines().find(|line| !line.trim().is_empty()).unwrap_or("").trim();
-    let mut shown: String = line.chars().take(PROMPT_PREVIEW_CHARS).collect();
-    if line.chars().count() > PROMPT_PREVIEW_CHARS || text.trim().lines().count() > 1 {
-        shown.push('…');
-    }
-    visible(&shown)
-}
-
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use zx_agent::ai::Message;
-    use zx_agent::transcript::{SessionHeader, SessionName, Transcript};
+    use zx_agent::transcript::{SessionHeader, Transcript};
 
     use super::*;
 
     /// A new session with `header` in `place`, open for appending.
     async fn create(place: &SessionPlace, header: &SessionHeader) -> Transcript {
         Transcript::with_log(header.clone(), place.storage().create(header).await.unwrap())
-    }
-
-    #[test]
-    fn a_preview_shows_the_first_line_and_marks_what_it_leaves_out() {
-        let session = |prompt: Option<&str>| SessionInfo {
-            id: String::new(),
-            cwd: String::new(),
-            started_ms: 0,
-            last_activity_ms: 0,
-            messages: 0,
-            first_prompt: prompt.map(str::to_string),
-            name: None,
-            labels: BTreeMap::new(),
-        };
-        assert_eq!(preview(&session(Some("fix the build"))), "fix the build");
-        assert_eq!(preview(&session(Some("\nfirst\nsecond"))), "first…");
-        assert_eq!(
-            preview(&session(Some(&"界".repeat(61)))),
-            format!("{}…", "界".repeat(60))
-        );
-        assert_eq!(preview(&session(None)), "(no prompt)");
-        let named = SessionInfo {
-            name: SessionName::new(&"名".repeat(61)),
-            ..session(Some("fix the build"))
-        };
-        assert_eq!(preview(&named), format!("{}…", "名".repeat(60)));
     }
 
     #[tokio::test]

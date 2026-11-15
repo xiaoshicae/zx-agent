@@ -45,9 +45,11 @@ use zx_agent::runner::{RunOutcome, RunReport};
 use zx_agent::transcript::SessionInfo as StoredSession;
 use zx_agent::{Run, Session};
 
-use crate::cli::{self, AcpArgs, Approvals, ModeAgent};
+use crate::assembly::SessionPlace;
+use crate::assembly::{self, Approvals, ModeAgent};
+use crate::cli::{self, AcpArgs};
+use crate::listing;
 use crate::process::{EXIT_COMPLETED, spawn_signal_handler, with_telemetry};
-use crate::session_files::{self, SessionPlace};
 
 use updates::Updates;
 
@@ -94,7 +96,7 @@ impl Host {
             return Ok(session);
         }
         let (id, place) = (&*id.0, &self.mode.place);
-        let cwd = cli::resolve_cwd(Some(cwd))?;
+        let cwd = assembly::resolve_cwd(Some(cwd))?;
         let directory = place
             .location(&cwd)
             .ok_or_else(|| unknown_session(id, "the agent keeps no session files (--no-session)"))?;
@@ -146,7 +148,7 @@ impl Host {
             .into());
         }
         let cwd = request.cwd.as_deref().or(self.mode.cwd.as_deref());
-        let cwd = cli::resolve_cwd(cwd)?;
+        let cwd = assembly::resolve_cwd(cwd)?;
         if !self.keeps_files() {
             return Ok(Vec::new());
         }
@@ -306,7 +308,7 @@ pub(crate) async fn run(args: AcpArgs) -> Result<u8> {
 /// the answers is not waited for. The sessions close as the connection and the agent are
 /// dropped on the way out, before the caller exports what remains of the traces.
 async fn serve(args: AcpArgs, traces: Option<TraceHook>) -> Result<u8> {
-    let shared = cli::Shared::connect(args.base, args.budget, Builtin::Assistant)
+    let shared = assembly::Shared::connect(cli::overrides(args.base, &args.budget), Builtin::Assistant)
         .await?
         .with_traces(traces);
     let place = if args.no_session {
@@ -496,7 +498,7 @@ fn session_info(session: &StoredSession) -> SessionInfo {
         .and_then(chrono::DateTime::from_timestamp_millis)
         .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
     SessionInfo::new(SessionId::new(session.id.as_str()), PathBuf::from(&session.cwd))
-        .title(session.title().map(session_files::preview_text))
+        .title(session.title().map(listing::preview_text))
         .updated_at(updated_at)
 }
 

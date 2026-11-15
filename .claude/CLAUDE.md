@@ -20,7 +20,7 @@
 | `zx-tools` | `crates/zx-tools` | 内置工具、执行环境（本机与容器）、命令与规则策略、续写、脱敏、落盘、MCP |
 | `zx-im`、`zx-im-slack`、`zx-im-feishu` | `crates/zx-im*` | IM 服务与两个平台；与 `zx-tools` 互不依赖 |
 | `zx-agent` | `src/lib.rs` | SDK：把 `zx-core`、`zx-ai`、`zx-ai-openai`、`zx-tools` 再导出成一个库，没有自己的代码 |
-| `zx-cli` | `crates/zx-cli` | 命令行（都在库里，`main.rs` 只调用它；可执行文件仍叫 `zx-agent`）、`config.toml` 与 agent 文件、追踪导出 |
+| `zx-cli` | `crates/zx-cli` | 命令行（都在库里，`main.rs` 只调用它；可执行文件仍叫 `zx-agent`）。`config`（`config.toml` 与 agent 文件）、`otel`（追踪导出）与 `assembly`（按配置装配 agent，不含命令行参数）是各接入方式共用的；`run`、`chat`、`acp`、`im` 互不引用 |
 
 一次运行：`main` 构造 `Agent`，`Agent` 创建或打开 `Session`（先由 `SessionSetup` 给出属于该会话的部分，再把角色、会话的部分与扩展合成循环配置） → `send` 独占取得 Runner（crate 内部）并返回 `Run`，调用方读它，运行才推进 → 每次尝试运行一遍循环 `StepLoop` → 先持久化提示词、输入和上下文改动，再执行可选摘要 → 请求模型，发出的上下文就是此刻的会话投影 → 执行工具、脱敏、可选落盘 → 每一步先写入会话，再把事件放进这次运行的有界通道 → Runner 处理重试并汇总 `RunReport`，`main` 映射退出码。
 
@@ -108,6 +108,6 @@
 | 打包的扩展 | 实现 `extensions::Extension`，进 `AgentConfig::extensions`：建 `Agent` 时向它要一次并校验，所有会话共用。运行中发消息、记状态或改工具集经 `HookContext` 的 `queues` 与 `active_tools` | `crates/zx-tools/src/mcp.rs` |
 | 会话存储 | 实现 `transcript::SessionStorage` 与 `SessionLog`，进 `AgentConfig::storage`：`append` 存好才返回，一个会话一个写入者，接口里不出现文件路径 | `transcript/memory.rs`；只换写入方式时 `tests/runner.rs` 的 `TableLog` |
 | 摘要器 | 实现 `compaction::Summarizer`，进 `AgentConfig::summarizer`；何时摘要、读哪一段、记录与校验仍由内核做 | `tests/summarizer.rs` |
-| 单个会话的部分 | 实现 `agent::SessionSetup`，返回 `SessionParts`（工具、钩子、提示词段落） | `crates/zx-cli/src/cli/setup.rs` |
+| 单个会话的部分 | 实现 `agent::SessionSetup`，返回 `SessionParts`（工具、钩子、提示词段落） | `crates/zx-cli/src/assembly/setup.rs` |
 | 接入方式（如 Web 服务） | 独立的 crate，依赖 `zx-agent`（只要内核时依赖 `zx-core`），构造 `Agent`，为每个对话创建或打开 `Session`，读它返回的 `Run`；不放进库 `zx-agent` | `crates/zx-cli`、`crates/zx-im` |
 | IM 平台 | 独立的 crate 实现 `zx_im::ImChannel`：立即确认投递、按消息 ID 去重（`Seen`）、只转交发给机器人的消息、遵守限频（`Pacer`、`rate_limit_wait`）、拆分超长文本（`split_text`）、文案用 `CardLabels` | `crates/zx-im-slack`；`tests/im_server.rs` 的 `FakeChannel` |

@@ -20,8 +20,7 @@ use zx_agent::tools::Tool;
 use zx_agent::transcript::SessionHeader;
 
 use super::execution::{check_session_outside, executor};
-use super::push_built_in;
-use crate::session_files::SessionPlace;
+use super::{SessionPlace, push_built_in};
 
 /// What each session of a mode gets for itself, made when the session is created or opened
 /// and kept until it is closed: a container, when commands run in one, is the session's.
