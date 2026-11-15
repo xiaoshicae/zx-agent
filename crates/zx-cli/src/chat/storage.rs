@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::cli;
+use crate::assembly;
+use crate::assembly::SessionPlace;
 use crate::render::visible;
-use crate::session_files::SessionPlace;
 
 /// Where conversations are kept.
 pub(super) struct Storage {
@@ -76,7 +76,7 @@ pub(super) async fn opening(
         // `--session` continues the session its file holds, or starts the file.
         (SessionPlace::File(_), _) => match place.only().await? {
             Some(held) => {
-                cli::check_session_cwd(cwd, &held.cwd)?;
+                assembly::check_session_cwd(cwd, &held.cwd)?;
                 First::Resume(held.id)
             }
             None => First::Fresh,
@@ -89,7 +89,7 @@ pub(super) async fn opening(
 /// The session `--resume` opens among those started in this working directory, or why there
 /// is none to resume.
 async fn resume_target(place: &SessionPlace, cwd: Option<&Path>, id: Option<&str>) -> Result<First> {
-    let cwd = cli::resolve_cwd(cwd)?;
+    let cwd = assembly::resolve_cwd(cwd)?;
     let list = place.started_in(&cwd).await?;
     let directory = place.location(&cwd).unwrap_or_default();
     match id {

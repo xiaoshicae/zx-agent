@@ -9,12 +9,17 @@
 //!   run; and the agents, as files: instructions, tools, permissions and limits
 //! - [`otel`]: OpenTelemetry traces of runs, exported when an OTLP endpoint is configured
 //!
-//! The rest is the program:
+//! Every way in builds its agent in one place, which knows neither a command line nor a
+//! terminal:
 //!
-//! - `cli`: the arguments, and what the subcommands share: the settings, the agent of a
-//!   mode and what each of its sessions gets
+//! - `assembly`: an agent made from config.toml, the agent file and what one start says
+//!   over them; what each session gets for itself; where a mode keeps its sessions
+//!
+//! The ways in do not refer to each other; each depends on the three above:
+//!
 //! - `run`, `chat`, `acp`, `im`, `list_sessions`: the subcommands
-//! - `session_files`: where every mode keeps its sessions, and how a listing shows them
+//! - `cli`: the arguments of the subcommands
+//! - `listing`: how a listing shows sessions
 //! - `process`: exit codes, signals, and what every subcommand writes to its outputs
 //! - `render`: how calls, results and times are shown
 
@@ -22,14 +27,15 @@ pub mod config;
 pub mod otel;
 
 mod acp;
+mod assembly;
 mod chat;
 mod cli;
 mod im;
 mod list_sessions;
+mod listing;
 mod process;
 mod render;
 mod run;
-mod session_files;
 
 use std::process::ExitCode;
 

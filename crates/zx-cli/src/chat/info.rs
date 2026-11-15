@@ -11,7 +11,7 @@ use zx_agent::transcript::{Entry, Transcript};
 
 use super::output::{self, Output};
 use super::term::Tone;
-use crate::cli::ModeAgent;
+use crate::assembly::ModeAgent;
 use crate::render::{local_time, visible};
 
 /// How the last activity of a resumed session is shown.

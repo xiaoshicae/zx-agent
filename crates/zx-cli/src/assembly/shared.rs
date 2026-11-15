@@ -1,4 +1,4 @@
-//! What every session of a process shares: the settings, read once, the command line, the
+//! What every session of a process shares: the settings, read once, what this start says over them, the
 //! MCP servers, connected once, the secret files to redact, checked once, the variables
 //! commands must not see, and the trace export.
 
@@ -14,20 +14,19 @@ use zx_agent::builtin::mcp::{Server, ServerConfig};
 use zx_agent::builtin::redact::{MIN_SECRET_CHARS, check_secret_files, short_secret_files};
 use zx_agent::extensions::Extension;
 
-use super::{BaseArgs, BudgetArgs, Settings, env_value};
+use super::{Overrides, Settings, env_value};
 
 /// Comma-separated secret files to redact, added to `secretFiles` of config.toml; deployments
 /// set it, for example to the token that the platform mounts for the agent's own account.
 const SECRET_FILES_ENV: &str = "ZX_SECRET_FILES";
 
-/// What every session of a process shares: the settings, the command line, the MCP servers,
+/// What every session of a process shares: the settings, the overrides, the MCP servers,
 /// the secret files, the hidden variables and the trace export.
 pub(crate) struct Shared {
     pub(crate) settings: Settings,
-    /// The command line's working directory and tools, over the agent's.
-    pub(crate) base: BaseArgs,
-    /// The command line's budgets, over the agent's.
-    pub(super) budget: BudgetArgs,
+    /// What this start of the program says over the agent: the working directory, the
+    /// tools and the budgets.
+    pub(crate) overrides: Overrides,
     /// The built-in agent every session runs, or the user's file that replaces it.
     pub(super) agent: Builtin,
     pub(super) mcp: McpTools,
@@ -41,22 +40,21 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    /// Read the settings with `base` and `budget` over them, connect the MCP servers of
-    /// config.toml and check the secret files, for sessions of `agent`.
+    /// Read the settings with `overrides` over them, connect the MCP servers of config.toml
+    /// and check the secret files, for sessions of `agent`.
     ///
     /// A missing model, a missing token, a server that cannot be reached in time, a tool it
     /// lacks or a secret file that cannot be used stops startup, like other configuration
     /// errors.
-    pub(crate) async fn connect(base: BaseArgs, budget: BudgetArgs, agent: Builtin) -> Result<Self> {
-        let settings = Settings::resolve(base.model.as_deref())?;
+    pub(crate) async fn connect(overrides: Overrides, agent: Builtin) -> Result<Self> {
+        let settings = Settings::resolve(overrides.model.as_deref())?;
         Ok(Self {
             mcp: connect_mcp(&settings).await?,
             secret_files: secret_files(&settings.config.secret_files)?,
             hidden_env: Vec::new(),
             traces: None,
             settings,
-            base,
-            budget,
+            overrides,
             agent,
         })
     }

@@ -12,12 +12,13 @@ use zx_agent::events::{Event, EventKind};
 use zx_agent::runner::{RunOutcome, RunReport};
 use zx_agent::{Run, Session};
 
+use crate::assembly;
+use crate::assembly::SessionPlace;
 use crate::cli::{self, OutputMode, RunArgs};
 use crate::process::{
     EXIT_DENIED, JsonlEvents, exit_code, print_line, run_traces, spawn_signal_handler, with_telemetry,
 };
 use crate::render::{answer_end_line, progress_line, visible};
-use crate::session_files::SessionPlace;
 
 /// Run one task and return its exit code. An `Err` is a configuration problem found
 /// before the run started.
@@ -46,7 +47,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<u8> {
         }
     };
     with_telemetry(async move |telemetry| {
-        let shared = cli::Shared::connect(base, budget, Builtin::Unattended)
+        let shared = assembly::Shared::connect(cli::overrides(base, &budget), Builtin::Unattended)
             .await?
             .with_traces(telemetry.map(run_traces));
         let session = build_session(&shared, session_file.as_deref()).await?;
@@ -85,13 +86,13 @@ fn read_prompt(arg: &str) -> Result<String> {
 /// A session of the `unattended` agent, or of the user's file that replaces it, in which
 /// nobody answers approvals: `--session` continues the session its file holds, or starts
 /// the file.
-async fn build_session(shared: &cli::Shared, session: Option<&Path>) -> Result<Session> {
+async fn build_session(shared: &assembly::Shared, session: Option<&Path>) -> Result<Session> {
     let place = SessionPlace::file_or_memory(session);
     let existing = place.only().await?;
     if let Some(existing) = &existing {
-        cli::check_session_cwd(shared.base.cwd.as_deref(), &existing.cwd)?;
+        assembly::check_session_cwd(shared.overrides.cwd.as_deref(), &existing.cwd)?;
     }
-    let agent = cli::ModeAgent::build(shared, &shared.settings.model, &place, cli::Approvals::Nobody)?;
+    let agent = assembly::ModeAgent::build(shared, &shared.settings.model, &place, assembly::Approvals::Nobody)?;
     match existing {
         Some(existing) => agent.resume(&existing.id).await,
         None => agent.create(None).await,

@@ -1,7 +1,7 @@
 //! The environment a process runs in: config.toml, with the model of the command line and
 //! two variables over it.
 //!
-//! The model comes from `--model`, else `ZX_MODEL` (clap reads both), else config.toml; the
+//! The model comes from the caller (the command line gives `--model`, else `ZX_MODEL`), else config.toml; the
 //! provider's address from `ZX_BASE_URL`, else config.toml, else the provider's default
 //! (`OpenAiConfig::default()`). Every other setting comes from config.toml or its built-in
 //! default.

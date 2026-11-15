@@ -22,9 +22,10 @@ use zx_im::{
 use zx_im_feishu::{FeishuChannel, FeishuConfig};
 use zx_im_slack::{SlackChannel, SlackConfig};
 
-use crate::cli::{self, Approvals, ImArgs, ModeAgent, env_value};
+use crate::assembly::SessionPlace;
+use crate::assembly::{self, Approvals, ModeAgent, env_value};
+use crate::cli::{self, ImArgs};
 use crate::process::{EXIT_COMPLETED, EXIT_ERROR, EXIT_USAGE, spawn_signal_handler, with_telemetry, write_line};
-use crate::session_files::SessionPlace;
 
 const DEFAULT_APP_TOKEN_ENV: &str = "SLACK_APP_TOKEN";
 const DEFAULT_BOT_TOKEN_ENV: &str = "SLACK_BOT_TOKEN";
@@ -134,7 +135,7 @@ pub(crate) async fn run(args: ImArgs) -> Result<u8> {
         let running = create_session_dirs(&dir)?;
 
         // Once for the process: every thread's session shares the connections.
-        let shared = cli::Shared::connect(args.base, args.budget, Builtin::Assistant)
+        let shared = assembly::Shared::connect(cli::overrides(args.base, &args.budget), Builtin::Assistant)
             .await?
             .with_hidden_env(hidden_env)
             .with_traces(telemetry.map(Telemetry::hook));
@@ -175,7 +176,7 @@ pub(crate) async fn run(args: ImArgs) -> Result<u8> {
 /// The agent of every conversation, whose sessions are kept in `place`, as chat's are, with
 /// approvals in the conversation: the server answers each request with an approver's click
 /// on the card it posts.
-fn agent(shared: &cli::Shared, place: &SessionPlace) -> Result<ModeAgent> {
+fn agent(shared: &assembly::Shared, place: &SessionPlace) -> Result<ModeAgent> {
     let approvals = Approvals::Person("shell commands require approval in the chat");
     ModeAgent::build(shared, &shared.settings.model, place, approvals)
 }

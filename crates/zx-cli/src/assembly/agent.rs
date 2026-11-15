@@ -30,8 +30,7 @@ use zx_agent::transcript::Transcript;
 use zx_agent::{Agent, AgentConfig, Session, SessionOptions};
 
 use super::setup::PerSession;
-use super::{BudgetArgs, Shared, env_value, push_built_in, resolve_cwd};
-use crate::session_files::SessionPlace;
+use super::{Overrides, SessionPlace, Shared, env_value, push_built_in, resolve_cwd};
 
 /// Who answers when a tool call of a mode's sessions needs approval.
 #[derive(Clone, Copy)]
@@ -116,7 +115,7 @@ impl ModeAgent {
             name,
             auto_approve_commands,
             place: place.clone(),
-            cwd: shared.base.cwd.clone(),
+            cwd: shared.overrides.cwd.clone(),
             execution: config.execution,
         })
     }
@@ -186,7 +185,7 @@ fn check_reasoning_fields(config: &Config) -> Result<()> {
 fn load_agent(shared: &Shared) -> Result<AgentDefinition> {
     let config = &shared.settings.config;
     let mut agent = AgentDefinition::load(shared.agent, shared.settings.home.as_deref(), config)?;
-    if let Some(tools) = &shared.base.tools {
+    if let Some(tools) = &shared.overrides.tools {
         agent.tools = tools
             .iter()
             .map(|name| name.trim())
@@ -194,14 +193,14 @@ fn load_agent(shared: &Shared) -> Result<AgentDefinition> {
             .map(String::from)
             .collect();
     }
-    apply_budgets(&mut agent, &shared.budget);
+    apply_budgets(&mut agent, &shared.overrides);
     agent.validate(config)?;
     Ok(agent)
 }
 
-/// `--max-model-requests`, `--timeout-secs` and the token and cost budgets; a zero timeout or
-/// budget removes the agent's.
-fn apply_budgets(agent: &mut AgentDefinition, budget: &BudgetArgs) {
+/// The request limit, the time limit and the token and cost budgets of `budget` over the
+/// agent's; a zero timeout or budget removes the agent's.
+fn apply_budgets(agent: &mut AgentDefinition, budget: &Overrides) {
     if let Some(turns) = budget.max_model_requests {
         agent.limits.max_model_requests = Some(turns);
     }
