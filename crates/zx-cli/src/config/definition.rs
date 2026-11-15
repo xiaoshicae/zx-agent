@@ -10,10 +10,10 @@ use serde::Deserialize;
 use super::agent_file::AgentFile;
 use super::skills::{self, Skill};
 use super::{Config, Execution, Permissions, context, read_text};
+use zx_agent::agent::RunLimits;
 use zx_agent::builtin::output_store;
 use zx_agent::builtin::tools::BUILTIN_TOOL_NAMES;
 use zx_agent::compaction;
-use zx_agent::runner::RunLimits;
 
 /// Under the zx-agent home: the user's agents, which replace the built-in ones of their names.
 const AGENTS_DIR: &str = "agents";

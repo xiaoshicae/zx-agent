@@ -111,8 +111,9 @@ impl RunHost<'_> {
         )))
     }
 
-    /// Announce a retry, omit the failed answer from the context and wait out the backoff.
-    /// Ends the run when the session cannot record the edit or the wait is cancelled.
+    /// Omit the failed answer from the context, then count and announce the retry and wait
+    /// out the backoff: as every step, a retry is recorded before it is announced. Ends the
+    /// run when the session cannot record the edit or the wait is cancelled.
     pub(super) async fn schedule_retry(
         &mut self,
         retry: &RetryPolicy,
@@ -120,6 +121,7 @@ impl RunHost<'_> {
         failed: &AssistantMessage,
         failed_entry: &str,
     ) -> Result<(), RunStop> {
+        self.omit_failed_attempt(failed_entry).await.map_err(RunStop::Failed)?;
         accounting.retries += 1;
         let delay = retry.delay_for(accounting.retries, failed);
         self.target
@@ -130,7 +132,6 @@ impl RunHost<'_> {
                 error: failed.failure_reason().to_string(),
             })
             .await;
-        self.omit_failed_attempt(failed_entry).await.map_err(RunStop::Failed)?;
         tokio::select! {
             () = tokio::time::sleep(delay) => Ok(()),
             () = self.target.trace.cancel().cancelled() => Err(RunStop::Ended(Ending::Cancelled)),

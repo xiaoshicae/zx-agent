@@ -1,4 +1,4 @@
-//! The agent loop: an [`StepLoop`] runs steps over a session until the model stops, a budget
+//! The agent loop: a [`StepLoop`] runs steps over a session until the model stops, a budget
 //! runs out or the run is cancelled. A run runs it once per attempt: the first, and one more
 //! for each retry or recovery from a context overflow. Extension behavior is supplied through
 //! bounded, ordered hooks.
@@ -19,16 +19,16 @@ mod model;
 mod step;
 mod tools;
 
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::ai::{AssistantMessage, Message, StopReason, SystemMessage, SystemPrompt, now_ms};
-use crate::events::{Event, EventKind};
+use crate::events::EventKind;
 use crate::hooks::HookError;
 use crate::input::{Input, Queue};
 use crate::policy::ApprovalGate;
+use crate::runner::final_answer::cut_off;
 use crate::runner::run_host::RunHost;
-use crate::runner::{Ending, EventTarget, RunAccounting, RunOutcome, RunTrace};
+use crate::runner::{Ending, EventTarget, RunAccounting, RunOutcome};
 
 pub(crate) use config::LoopConfig;
 pub(crate) use context::{PERSIST_FAILED, record_pending_entries};
@@ -67,10 +67,11 @@ impl Halt {
         }
     }
 
-    /// The outcome of the attempt, as its `attempt_end` event reports it.
-    fn outcome(&self) -> RunOutcome {
+    /// The outcome of the attempt, as its `attempt_end` event reports it; `cut_off` says
+    /// whether the run's last answer was cut off at the output token limit.
+    fn outcome(&self, cut_off: bool) -> RunOutcome {
         match self {
-            Self::Ended(ending) => ending.outcome(),
+            Self::Ended(ending) => ending.outcome(cut_off),
             Self::ProviderFailed { .. } | Self::Failed(_) | Self::Unrecorded(_) => RunOutcome::Failed,
         }
     }
@@ -83,59 +84,39 @@ impl Halt {
 /// The Runner builds one per attempt with [`StepLoop::new`] and [`StepLoop::run`]s it;
 /// retries, the time limit and recovery stay with the run.
 pub(crate) struct StepLoop<'a> {
-    config: &'a LoopConfig,
-    /// The run's borrow of its Runner: the session that records each step before the loop
-    /// acts on it and holds the context, and what prepares that context before a request.
-    host: &'a mut RunHost<'a>,
+    /// The run's borrow of its Runner, for this attempt: the session that records each step
+    /// before the loop acts on it and holds the context, the configuration, where the run's
+    /// events go and the run's trace, which carries the cancellation.
+    host: RunHost<'a>,
     /// Where a call waits for the host's approval, and what the session was granted.
     approvals: &'a ApprovalGate,
     /// What the run has spent and may spend: the loop counts into it as it goes and checks
     /// its budgets before each request, so the totals span the run's attempts.
     accounting: &'a mut RunAccounting,
-    /// Where the run's reader takes its events from.
-    events: &'a mpsc::Sender<Event>,
-    /// The run this attempt belongs to: it stamps the events, tells the hooks where they run,
-    /// and carries the cancellation.
-    trace: &'a RunTrace,
     /// The number of the step in progress, between its `step_start` and `step_end`.
     step: Option<u32>,
 }
 
 /// What an attempt starts with.
 pub(crate) enum FirstInput {
-    /// Messages to record before the first request: the prompt of a run, or none when the
-    /// attempt answers the conversation as it is, as a retry does.
-    Messages(Vec<Input>),
+    /// The prompt of a run, recorded before the first request.
+    Prompt(Input),
+    /// Nothing new: the attempt answers the conversation as it is, as a retry does.
+    Conversation,
     /// The follow-ups that wait in the queue, taken as they are between steps: as many at
     /// a time as the queue says, and each only once the session has recorded it.
     QueuedFollowUps,
 }
 
-impl Default for FirstInput {
-    /// Nothing but the conversation as it is.
-    fn default() -> Self {
-        Self::Messages(Vec::new())
-    }
-}
-
 impl<'a> StepLoop<'a> {
-    /// The loop for the attempt in progress of the run whose events go to `target`, recording
-    /// through `host` and spending against `accounting`; the run's cancellation is its
-    /// trace's. Calls wait for approval at `approvals`, which keeps the session's grants.
-    pub(super) fn new(
-        config: &'a LoopConfig,
-        host: &'a mut RunHost<'a>,
-        approvals: &'a ApprovalGate,
-        accounting: &'a mut RunAccounting,
-        target: EventTarget<'a>,
-    ) -> Self {
+    /// The loop for the attempt in progress of the run that lends it `host`, spending against
+    /// `accounting`; the run's cancellation is its trace's. Calls wait for approval at
+    /// `approvals`, which keeps the session's grants.
+    pub(super) fn new(host: RunHost<'a>, approvals: &'a ApprovalGate, accounting: &'a mut RunAccounting) -> Self {
         Self {
-            config,
             host,
             approvals,
             accounting,
-            events: target.events,
-            trace: target.trace,
             step: None,
         }
     }
@@ -147,12 +128,16 @@ impl<'a> StepLoop<'a> {
         let attempt = self.accounting.attempts;
         self.emit(EventKind::AttemptStart { attempt }).await;
 
-        let halt = self.run_steps(first).await.aborted_if_cancelled(self.trace.cancel());
+        let halt = self
+            .run_steps(first)
+            .await
+            .aborted_if_cancelled(self.host.target.trace.cancel());
 
         // A step that stopped before its request finished still ends, so step events pair up.
         self.end_step().await;
+        let cut_off = cut_off(&self.host.session.messages_since(self.host.run_start));
         self.emit(EventKind::AttemptEnd {
-            outcome: halt.outcome(),
+            outcome: halt.outcome(cut_off),
         })
         .await;
         halt
@@ -161,11 +146,12 @@ impl<'a> StepLoop<'a> {
     /// Record what the attempt starts with, then run steps until a step stops the loop.
     /// Returns why it did.
     async fn run_steps(&mut self, first: FirstInput) -> Halt {
-        let (prompts, mut pending) = match first {
-            FirstInput::Messages(prompts) => (prompts, PendingInput::None),
-            FirstInput::QueuedFollowUps => (Vec::new(), PendingInput::FollowUps),
+        let (prompt, mut pending) = match first {
+            FirstInput::Prompt(prompt) => (Some(prompt), PendingInput::None),
+            FirstInput::Conversation => (None, PendingInput::None),
+            FirstInput::QueuedFollowUps => (None, PendingInput::FollowUps),
         };
-        if let Err(halt) = self.initialize(prompts).await {
+        if let Err(halt) = self.initialize(prompt).await {
             return halt;
         }
         loop {
@@ -188,11 +174,7 @@ impl<'a> StepLoop<'a> {
     /// Where this attempt's events go. The target borrows the run, not the loop, so that the
     /// loop can record in its run's session while it holds one.
     fn target(&self) -> EventTarget<'a> {
-        EventTarget {
-            events: self.events,
-            trace: self.trace,
-            hooks: &self.config.hooks,
-        }
+        self.host.target
     }
 
     async fn emit(&self, event: EventKind) {
@@ -229,11 +211,11 @@ impl<'a> StepLoop<'a> {
         }
     }
 
-    /// Record the system prompt's changes and the input.
-    async fn initialize(&mut self, prompts: Vec<Input>) -> Result<(), Halt> {
-        let config = self.config;
+    /// Record the system prompt's changes and the prompt, if there is one.
+    async fn initialize(&mut self, prompt: Option<Input>) -> Result<(), Halt> {
+        let config = self.host.config;
         self.start_step().await;
-        let changes = SystemPrompt::from_transcript(&self.host.session().messages()).diff(&config.system_prompt);
+        let changes = SystemPrompt::from_transcript(&self.host.session.messages()).diff(&config.system_prompt);
         if !changes.is_empty() {
             self.append(Message::System(SystemMessage {
                 sections: changes,
@@ -244,7 +226,7 @@ impl<'a> StepLoop<'a> {
         // State an extension recorded before the run, such as from a command, precedes the
         // input it may refer to.
         self.record_pending_entries().await?;
-        for message in prompts {
+        if let Some(message) = prompt {
             self.queued_input(message, None).await?;
         }
         Ok(())
@@ -272,9 +254,10 @@ impl<'a> StepLoop<'a> {
             }
             self.ensure_can_request()?;
             let planned = self
+                .host
                 .config
                 .hooks
-                .transform_context(&self.host.session().messages(), &self.trace.context())
+                .transform_context(&self.host.session.messages(), &self.host.target.trace.context())
                 .await;
             let edits = match planned {
                 Ok(edits) => edits,
@@ -324,12 +307,11 @@ impl<'a> StepLoop<'a> {
             } else {
                 self.execute_tools(&calls).await?
             };
-            after_tools = if batch.terminate {
+            after_tools = if batch.terminates() {
                 AfterTools::Terminated
             } else {
                 AfterTools::Ran
             };
-            self.accounting.count_tool_usage(&batch.results);
         }
         self.end_step().await;
         self.ensure_not_cancelled()?;
@@ -345,14 +327,14 @@ impl<'a> StepLoop<'a> {
     fn ensure_can_request(&self) -> Result<(), Halt> {
         self.ensure_not_cancelled()?;
         match self.accounting.exhausted() {
-            Some(ending) => Err(Halt::Ended(ending)),
+            Some(budget) => Err(Halt::Ended(Ending::BudgetExhausted(budget))),
             None => Ok(()),
         }
     }
 
     /// End the attempt if the run was cancelled.
     fn ensure_not_cancelled(&self) -> Result<(), Halt> {
-        if self.trace.cancel().is_cancelled() {
+        if self.host.target.trace.cancel().is_cancelled() {
             return Err(Halt::Ended(Ending::Cancelled));
         }
         Ok(())

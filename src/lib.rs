@@ -17,7 +17,8 @@
 //!   - [`compaction`]: the bounded summary of a conversation, and who makes it
 //!   - [`agent`]: what a host sets up for one session
 //!
-//!   and what a run takes and gives is in [`input`], [`events`], [`session`] and [`runner`];
+//!   and what a run takes and gives is in [`input`], [`events`] and [`session`], its limits in
+//!   [`agent::RunLimits`];
 //!   [`prompt`] assembles the system prompt.
 //! - [`ai`]: message types, the streaming event protocol and the provider contract of
 //!   `zx-ai` (pi: packages/ai), with the provider of `zx-ai-openai` as `ai::openai`

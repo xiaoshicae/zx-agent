@@ -10,10 +10,10 @@ use serde_json::json;
 
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, ToolCall};
+use zx_agent::events::RunOutcome;
 use zx_agent::hooks::{Hook, HookContext, HookResult};
 use zx_agent::input::Input;
 use zx_agent::policy::{PolicyContext, PolicyDecision, ToolPolicy};
-use zx_agent::runner::RunOutcome;
 use zx_agent::tools::ToolOutput;
 use zx_agent::transcript::{CustomMessage, Entry, SessionHeader, Transcript};
 
@@ -77,7 +77,7 @@ fn observed(transcript: Transcript, runs: usize) -> (Driven, Arc<RecordingPolicy
     let hook = RecordingHook::default();
     let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
     config.policies.push("recording", policy.clone());
-    config.hooks.push(hook.clone());
+    config.hooks.push("hook", Arc::new(hook.clone()));
     let (runner, _) = RunnerSetup {
         session: transcript,
         ..RunnerSetup::new(config)
@@ -119,8 +119,8 @@ async fn a_policy_is_told_the_labels_of_the_session_and_who_sent_the_input() {
 async fn hooks_and_policies_are_told_the_sender_of_the_latest_input_a_person_sent() {
     let (session, policy, hook) = observed(Transcript::in_memory(header()), 1);
     // Taken before the first request: Bob's words, then a note from an extension.
-    session.queues().steer_message(sent_by("bob", "and this"));
-    session.queues().steer_message(Input::Custom(CustomMessage {
+    session.queues().steer(sent_by("bob", "and this"));
+    session.queues().steer(Input::Custom(CustomMessage {
         custom_type: "note".into(),
         content: "a reminder".into(),
         display: false,

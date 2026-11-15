@@ -40,8 +40,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::Builtin;
 use crate::otel::{Telemetry, TraceHook};
 use zx_agent::builtin::tools::{BASH, EDIT_FILE, FIND, GREP, LS, READ_FILE, WRITE_FILE};
-use zx_agent::events::EventKind;
-use zx_agent::runner::{RunOutcome, RunReport};
+use zx_agent::events::{Budget, EventKind, RunOutcome, RunReport};
 use zx_agent::transcript::SessionInfo as StoredSession;
 use zx_agent::{Run, Session};
 
@@ -49,7 +48,7 @@ use crate::assembly::SessionPlace;
 use crate::assembly::{self, Approvals, ModeAgent};
 use crate::cli::{self, AcpArgs};
 use crate::listing;
-use crate::process::{EXIT_COMPLETED, spawn_signal_handler, with_telemetry};
+use crate::process::{EXIT_COMPLETED, next_event, spawn_signal_handler, with_telemetry};
 
 use updates::Updates;
 
@@ -423,20 +422,8 @@ impl Turn {
     /// the run's error. While the turn runs, its events go to the client as session updates,
     /// and a call that waits for approval becomes a permission request. A process that is
     /// told to stop cancels the turn, which is still read to its end.
-    async fn answer(&self, mut run: Run) -> Result<PromptResponse> {
-        let mut stopping = false;
-        loop {
-            let event = tokio::select! {
-                () = self.stop.cancelled(), if !stopping => {
-                    self.session.cancel();
-                    stopping = true;
-                    continue;
-                }
-                event = run.next() => event,
-            };
-            let Some(event) = event else {
-                break;
-            };
+    async fn answer(mut self, mut run: Run) -> Result<PromptResponse> {
+        while let Some(event) = next_event(&mut run, &self.session, &self.stop).await {
             self.updates.emit(&event);
             if let EventKind::ApprovalRequested {
                 approval_id,
@@ -516,14 +503,21 @@ fn prompt_text(blocks: &[ContentBlock]) -> String {
         .join("\n")
 }
 
-/// How a finished run answers `session/prompt`. RunLimits that end a turn have a stop reason;
+/// How a finished run answers `session/prompt`. Limits that end a turn have a stop reason;
 /// a failed or timed-out run is a request error, with the run's message.
 fn stop_reason(report: &RunReport) -> Result<StopReason> {
     match report.outcome {
         RunOutcome::Completed => Ok(StopReason::EndTurn),
         // The protocol has no reason for a cost limit; tokens are what a cost is paid for.
-        RunOutcome::Truncated | RunOutcome::TokenBudget | RunOutcome::CostBudget => Ok(StopReason::MaxTokens),
-        RunOutcome::ModelRequestLimit => Ok(StopReason::MaxTurnRequests),
+        RunOutcome::Truncated
+        | RunOutcome::BudgetExhausted {
+            budget: Budget::Tokens | Budget::Cost,
+            ..
+        } => Ok(StopReason::MaxTokens),
+        RunOutcome::BudgetExhausted {
+            budget: Budget::ModelRequests,
+            ..
+        } => Ok(StopReason::MaxTurnRequests),
         RunOutcome::Cancelled => Ok(StopReason::Cancelled),
         RunOutcome::Failed | RunOutcome::TimedOut => Err(anyhow::Error::msg(
             report
@@ -576,12 +570,14 @@ mod tests {
     fn outcomes_map_to_stop_reasons_and_failures_to_request_errors() {
         assert_eq!(answer(&report(RunOutcome::Completed, None)), Ok(StopReason::EndTurn));
         assert_eq!(answer(&report(RunOutcome::Truncated, None)), Ok(StopReason::MaxTokens));
+        let exhausted = |budget, truncated| RunOutcome::BudgetExhausted { budget, truncated };
         assert_eq!(
-            answer(&report(RunOutcome::TokenBudget, None)),
+            answer(&report(exhausted(Budget::Tokens, false), None)),
             Ok(StopReason::MaxTokens)
         );
+        // Which budget stopped the turn decides, not whether its last answer was cut off.
         assert_eq!(
-            answer(&report(RunOutcome::ModelRequestLimit, None)),
+            answer(&report(exhausted(Budget::ModelRequests, true), None)),
             Ok(StopReason::MaxTurnRequests)
         );
         assert_eq!(answer(&report(RunOutcome::Cancelled, None)), Ok(StopReason::Cancelled));

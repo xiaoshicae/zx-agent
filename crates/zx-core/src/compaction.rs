@@ -289,8 +289,9 @@ pub(crate) enum Trigger {
     /// Someone asked for it.
     Manual,
     /// The run started it: the context passed a trigger before a request, or the model
-    /// rejected a request as too long for its context. The result must then fit under the
-    /// byte trigger, and the events say `automatic`.
+    /// rejected a request as too long for its context. The result must then fit under each
+    /// trigger that is set, so that the next request does not pass one again, and the events
+    /// say `automatic`.
     Automatic,
 }
 
@@ -333,8 +334,13 @@ const BYTES_PER_TOKEN: usize = 4;
 pub fn context_tokens(session: &Transcript) -> Result<u64> {
     let (measured, rest) = session.measured_context();
     let known = measured.map_or(0, |usage| usage.input.saturating_add(usage.output));
-    let bytes = context_bytes(&rest)?;
-    Ok(known.saturating_add(bytes.div_ceil(BYTES_PER_TOKEN) as u64))
+    Ok(known.saturating_add(estimated_tokens(context_bytes(&rest)?)))
+}
+
+/// The tokens `bytes` of serialized context are estimated to hold when no answer measures
+/// them, such as right after a compaction ([`context_tokens`]).
+fn estimated_tokens(bytes: usize) -> u64 {
+    bytes.div_ceil(BYTES_PER_TOKEN) as u64
 }
 
 /// Bytes of one message as a model may see it.

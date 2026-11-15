@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use common::{config, header, summarize};
 use zx_agent::ai::Message;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::runner::RunOutcome;
+use zx_agent::events::RunOutcome;
 use zx_agent::transcript::{
     LoadedSession, LogRecord, SessionHeader, SessionInfo, SessionList, SessionLog, SessionQuery, SessionStorage,
     Transcript, WritesStopped,
@@ -100,10 +100,7 @@ impl SessionStorage for TableStorage {
         for id in matching {
             sessions.push(SessionInfo::of(&Transcript::snapshot(self.read(&id).await?)?));
         }
-        Ok(SessionList {
-            sessions: query.arrange(sessions),
-            unreadable: Vec::new(),
-        })
+        Ok(SessionList::new(query, sessions, Vec::new()))
     }
 }
 

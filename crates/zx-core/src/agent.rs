@@ -18,7 +18,8 @@ use crate::compaction::{self, Summarizer};
 use crate::extensions::{Expanded, Extension};
 use crate::hooks::HookChain;
 use crate::policy::{ApprovalMode, PolicyChain};
-use crate::runner::{LoopConfig, RunLimits};
+use crate::runner::LoopConfig;
+pub use crate::runner::RunLimits;
 use crate::session::{Session, SessionOptions};
 use crate::sync::lock;
 use crate::tools::{Tool, Toolbox};
@@ -232,12 +233,17 @@ impl Agent {
     }
 
     /// Create a session and open it. The setup comes first, so a session whose setup fails
-    /// leaves nothing in the storage.
+    /// leaves nothing in the storage. Fails when the working directory is empty, or relative
+    /// and the process's current directory cannot be read.
     pub async fn create_session(&self, options: SessionOptions) -> Result<Session> {
         let config = &self.shared.config;
+        // Recorded absolute: the session works there whenever it is opened again, from
+        // whatever directory.
+        let cwd = std::path::absolute(&options.cwd)
+            .with_context(|| format!("cannot make the working directory {} absolute", options.cwd.display()))?;
         let header = SessionHeader {
             labels: options.labels,
-            ..SessionHeader::new(&options.cwd, &config.model)
+            ..SessionHeader::new(&cwd, &config.model)
         };
         let parts = self.set_up(&header).await?;
         let assembled = self.assemble(&header, parts)?;
@@ -344,9 +350,7 @@ impl Agent {
         hooks.extend(parts.hooks);
         hooks.extend(extensions.hooks.clone());
         let mut policies = config.policies.clone();
-        for (extension, policy) in &extensions.policies {
-            policies.push(extension.clone(), policy.clone());
-        }
+        policies.extend(extensions.policies.clone());
         let own = parts
             .prompt_sections
             .iter()

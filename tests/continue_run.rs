@@ -10,10 +10,9 @@ use serde_json::json;
 
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, StopReason};
-use zx_agent::events::EventKind;
+use zx_agent::events::{EventKind, RunOutcome};
 use zx_agent::hooks::{Hook, HookContext, HookResult};
 use zx_agent::input::{Input, QueueMode};
-use zx_agent::runner::RunOutcome;
 use zx_agent::session::SessionError;
 use zx_agent::tools::Tool;
 use zx_agent::transcript::{Entry, Transcript};
@@ -150,7 +149,7 @@ impl Hook for RefuseMarked {
 async fn a_continuation_that_stops_at_a_queued_message_leaves_the_rest_in_the_queue() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let mut config = config(provider.clone(), vec![]);
-    config.hooks.push(RefuseMarked);
+    config.hooks.push("refuse_marked", Arc::new(RefuseMarked));
     let (runner, _) = RunnerSetup::new(config).build();
     runner.run("question").await;
     runner.queues().follow_up("refused");

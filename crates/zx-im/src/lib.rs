@@ -28,7 +28,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 // The modules name the model layer, the kernel and the shared helpers by these crate-root paths.
 use zx_ai as ai;
-use zx_core::{Agent, Session, runner, session, transcript};
+use zx_core::{Agent, Session, session, transcript};
 
 pub use platform::{
     Backoff, CARD_CAPACITY, Cards, Keepalive, MAX_TEXT_CHARS, Pacer, RATE_LIMIT_RETRIES, SEEN_CAPACITY, Seen, pause,

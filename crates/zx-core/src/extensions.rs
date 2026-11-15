@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crate::ai::{PREAMBLE, SystemPrompt};
 use crate::hooks::{Hook, HookChain, HookStage};
-use crate::policy::ToolPolicy;
+use crate::policy::{PolicyChain, ToolPolicy};
 use crate::prompt::GENERATED_SECTIONS;
 use crate::tools::Tool;
 
@@ -54,8 +54,8 @@ pub use command::{CommandContext, CommandError, CommandOutcome, SlashCommand, ch
 ///         vec![("checked".into(), "Tool results end with (checked).".into())]
 ///     }
 ///
-///     fn hooks(&self) -> Vec<Box<dyn Hook>> {
-///         vec![Box::new(Mark)]
+///     fn hooks(&self) -> Vec<Arc<dyn Hook>> {
+///         vec![Arc::new(Mark)]
 ///     }
 /// }
 ///
@@ -92,7 +92,7 @@ pub trait Extension: Send + Sync {
 
     /// Hooks, each declaring [`HookStage::Extension`]: redaction runs after them, so an
     /// extension cannot bring back a redacted secret.
-    fn hooks(&self) -> Vec<Box<dyn Hook>> {
+    fn hooks(&self) -> Vec<Arc<dyn Hook>> {
         Vec::new()
     }
 
@@ -107,8 +107,8 @@ pub trait Extension: Send + Sync {
 /// agent is made.
 pub(crate) struct Expanded {
     pub(crate) tools: Vec<Arc<dyn Tool>>,
-    /// Each with the name of the extension that gave it.
-    pub(crate) policies: Vec<(String, Arc<dyn ToolPolicy>)>,
+    /// Each under the name of the extension that gave it.
+    pub(crate) policies: PolicyChain,
     /// Each under the name of the extension that gave it.
     pub(crate) hooks: HookChain,
     pub(crate) commands: Vec<Arc<dyn SlashCommand>>,
@@ -133,7 +133,7 @@ impl Expanded {
     pub(crate) fn of(extensions: &[Arc<dyn Extension>]) -> Result<Self, String> {
         let mut expanded = Self {
             tools: Vec::new(),
-            policies: Vec::new(),
+            policies: PolicyChain::new(),
             hooks: HookChain::new(),
             commands: Vec::new(),
             sections: Vec::new(),
@@ -183,11 +183,11 @@ impl Expanded {
             }
         }
         self.tools.extend(extension.tools());
-        let policies = extension.policies();
-        self.policies
-            .extend(policies.into_iter().map(|policy| (name.to_string(), policy)));
+        for policy in extension.policies() {
+            self.policies.push(name, policy);
+        }
         for hook in hooks {
-            self.hooks.push_extension_hook(name, hook);
+            self.hooks.push(name, hook);
         }
         self.sections
             .extend(sections.into_iter().map(|(section, content)| Section {

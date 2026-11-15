@@ -6,7 +6,7 @@ use tokio::sync::Notify;
 use super::*;
 use crate::ai::faux::{FauxProvider, FauxStep};
 use crate::ai::{Message, ToolDef};
-use crate::runner::RunOutcome;
+use crate::events::RunOutcome;
 use crate::session::SessionError;
 use crate::tools::{ToolContext, ToolOutput};
 use crate::transcript::{LoadedSession, LogRecord, SessionList, SessionLog};
@@ -124,6 +124,20 @@ async fn a_created_session_runs_and_is_kept_in_the_storage_with_its_labels() {
         (session.id(), "/work", 2)
     );
     assert_eq!(stored.labels.get("tenant").map(String::as_str), Some("a"));
+}
+
+#[tokio::test]
+async fn a_relative_working_directory_is_recorded_as_the_absolute_one() {
+    let (agent, storage, _) = agent([]);
+
+    let session = agent.create_session(SessionOptions::new(".")).await.unwrap();
+
+    // Taken from the process's current directory when the session is created, so that the
+    // session works there whenever it is opened again.
+    let current = std::env::current_dir().unwrap();
+    assert_eq!(session.cwd(), current);
+    let list = storage.list(&SessionQuery::default()).await.unwrap();
+    assert_eq!(list.sessions[0].cwd, current.display().to_string());
 }
 
 #[tokio::test]

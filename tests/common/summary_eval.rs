@@ -593,7 +593,7 @@ const DESCRIBE: &str = concat!(
     "      Finished:     Sun, 02 Nov 2026 08:23:02 +0000\n",
     "    Ready:          False\n",
     "    Restart Count:  37\n",
-    "    RunLimits:\n",
+    "    Limits:\n",
     "      cpu:     1\n",
     "      memory:  512Mi\n",
     "    Requests:\n",

@@ -1,4 +1,4 @@
-//! Where one session's records are kept. The store validates and orders them; a log only
+//! Where one session's records are kept. The transcript validates and orders them; a log only
 //! keeps them, in order, and its storage gives them back when the session is opened again.
 
 use anyhow::Result;
@@ -44,8 +44,8 @@ use super::SessionHeader;
 /// # async fn main() -> anyhow::Result<()> {
 /// let header = SessionHeader::new(Path::new("."), "model");
 /// let (rows, table) = mpsc::channel();
-/// let mut store = Transcript::with_log(header.clone(), Box::new(Table(rows)));
-/// store.append_message(Message::user("check the disk")).await?;
+/// let mut transcript = Transcript::with_log(header.clone(), Box::new(Table(rows)));
+/// transcript.append_message(Message::user("check the disk")).await?;
 ///
 /// // Later, possibly in another process: read the rows back and continue the session.
 /// let loaded = LoadedSession {
@@ -55,7 +55,7 @@ use super::SessionHeader;
 /// };
 /// let (rows, _table) = mpsc::channel();
 /// let reopened = Transcript::load(loaded, Box::new(Table(rows)))?;
-/// assert_eq!(reopened.messages(), store.messages());
+/// assert_eq!(reopened.messages(), transcript.messages());
 /// # Ok(())
 /// # }
 /// ```
@@ -68,7 +68,7 @@ pub trait SessionLog: Send + Sync {
     async fn append(&mut self, record: &LogRecord<'_>) -> Result<()>;
 }
 
-/// One record of a session, as the store hands it to the log.
+/// One record of a session, as the transcript hands it to the log.
 #[derive(Clone, Copy, Debug)]
 pub struct LogRecord<'a> {
     /// Position after the header, starting at 1.

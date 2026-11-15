@@ -11,7 +11,7 @@ use serde_json::json;
 
 use common::{EchoTool, RunnerSetup, config};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::runner::RunOutcome;
+use zx_agent::events::RunOutcome;
 use zx_cli::otel::{Telemetry, TraceParent};
 
 /// Keeps every exported span, also after shutdown, which the SDK's in-memory exporter clears.
@@ -46,7 +46,7 @@ async fn a_run_exports_one_trace_with_a_span_per_request_and_tool_call() {
         FauxStep::text("done"),
     ]));
     let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
-    config.hooks.push(telemetry.hook());
+    config.hooks.push("telemetry", Arc::new(telemetry.hook()));
     let (runner, _) = RunnerSetup::new(config).build();
 
     let report = runner.run("go").await;
@@ -85,7 +85,7 @@ async fn a_run_continues_the_callers_trace_through_hook_under() {
     let parent = TraceParent::parse("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", None).unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let mut config = config(provider, Vec::new());
-    config.hooks.push(telemetry.hook_under(&parent));
+    config.hooks.push("telemetry", Arc::new(telemetry.hook_under(&parent)));
     let (runner, _) = RunnerSetup::new(config).build();
 
     let report = runner.run("go").await;

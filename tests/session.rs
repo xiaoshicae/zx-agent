@@ -15,11 +15,10 @@ use tokio::sync::Notify;
 use common::{Collect, Driven, NotifyingProvider, RunnerSetup, config, header, summarize};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Reasoning, Request, ToolDef};
-use zx_agent::events::EventKind;
+use zx_agent::events::{EventKind, RunOutcome};
 use zx_agent::input::Input;
 use zx_agent::policy::{ApprovalDecision, ApprovalMode, PolicyContext, PolicyDecision, ToolPolicy};
-use zx_agent::runner::RunOutcome;
-use zx_agent::session::{ModelRef, SessionError};
+use zx_agent::session::SessionError;
 use zx_agent::tools::{Tool, ToolContext, ToolOutput};
 use zx_agent::transcript::{Entry, SessionName, Transcript};
 use zx_agent::{Run, Session};
@@ -262,12 +261,7 @@ async fn switching_models_preserves_history_and_uses_the_new_provider() {
     let (session, first, _) = setup([FauxStep::text("one")]);
     session.prompt("first").await.unwrap();
     let next = Arc::new(FauxProvider::new([FauxStep::text("two")]));
-    session
-        .set_model(ModelRef {
-            provider: next.clone(),
-            model: "next-model".into(),
-        })
-        .unwrap();
+    session.set_model(next.clone(), "next-model").unwrap();
     let report = session.prompt("second").await.unwrap();
     assert_eq!(report.final_text, "two");
     assert_eq!(first.faux.requests().len(), 1);
@@ -365,13 +359,7 @@ async fn a_running_session_rejects_model_changes_without_changing_the_provider()
     let mut running = Box::pin(session.prompt("first"));
     tokio::select! { () = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
     let next = Arc::new(FauxProvider::new([FauxStep::text("must not run")]));
-    assert_eq!(
-        session.set_model(ModelRef {
-            provider: next.clone(),
-            model: "next".into()
-        }),
-        Err(SessionError::Busy)
-    );
+    assert_eq!(session.set_model(next.clone(), "next"), Err(SessionError::Busy));
     session.cancel();
     running.await.unwrap();
     assert_eq!(session.prompt("second").await.unwrap().final_text, "old provider");
@@ -384,10 +372,7 @@ async fn an_invalid_model_does_not_replace_the_current_configuration() {
     let next = Arc::new(FauxProvider::new([]));
     for invalid in ["", " \t　"] {
         assert_eq!(
-            session.set_model(ModelRef {
-                provider: next.clone(),
-                model: invalid.into()
-            }),
+            session.set_model(next.clone(), invalid),
             Err(SessionError::InvalidModel)
         );
     }
@@ -534,12 +519,7 @@ async fn model_switching_retains_approval_grants() {
     }
     .build();
     session.prompt("one").await.unwrap();
-    session
-        .set_model(ModelRef {
-            provider: next,
-            model: "next".into(),
-        })
-        .unwrap();
+    session.set_model(next, "next").unwrap();
     session.prompt("two").await.unwrap();
     assert_eq!(host.0.load(Ordering::SeqCst), 1);
 }
@@ -643,12 +623,7 @@ async fn switching_models_keeps_the_session_header_and_append_only_history() {
     session.prompt("first").await.unwrap();
     let before = std::fs::read(&file).unwrap();
     let next = Arc::new(FauxProvider::new([FauxStep::text("two")]));
-    session
-        .set_model(ModelRef {
-            provider: next,
-            model: "new-model".into(),
-        })
-        .unwrap();
+    session.set_model(next, "new-model").unwrap();
     assert_eq!(
         std::fs::read(&file).unwrap(),
         before,
@@ -689,21 +664,11 @@ async fn the_reader_gets_a_message_only_once_it_is_recorded() {
     assert_eq!(common::read_session_file(&file).unwrap().messages().len(), 2);
 }
 
-/// Refuses every record, like a database that no longer accepts writes.
-struct RefusingLog;
-
-#[async_trait]
-impl zx_agent::transcript::SessionLog for RefusingLog {
-    async fn append(&mut self, _record: &zx_agent::transcript::LogRecord<'_>) -> anyhow::Result<()> {
-        anyhow::bail!("the database is read-only")
-    }
-}
-
 #[tokio::test]
 async fn a_session_whose_record_cannot_be_written_says_why_and_closes() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
     let (session, _) = RunnerSetup {
-        session: Transcript::with_log(header(), Box::new(RefusingLog)),
+        session: Transcript::with_log(header(), Box::new(common::RefusingLog)),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
     .build();

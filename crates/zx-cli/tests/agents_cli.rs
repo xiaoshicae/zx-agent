@@ -582,11 +582,9 @@ async fn chat_uses_the_agent_turn_budget() {
         .unwrap();
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let reports: Vec<Value> = json_lines(&stdout(&output));
-    assert!(
-        reports
-            .iter()
-            .any(|value| value["type"] == "run_end" && value["report"]["outcome"] == "model_request_limit")
-    );
+    assert!(reports.iter().any(|value| value["type"] == "run_end"
+        && value["report"]["outcome"] == "budget_exhausted"
+        && value["report"]["budget"] == "model_request_limit"));
     assert!(server.requests().is_empty());
 }
 

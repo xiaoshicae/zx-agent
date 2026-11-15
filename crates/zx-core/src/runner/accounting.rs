@@ -5,8 +5,8 @@
 
 use std::collections::BTreeMap;
 
-use super::Ending;
-use crate::ai::{ToolResultMessage, Usage};
+use crate::ai::Usage;
+use crate::events::Budget;
 
 /// What a run has spent so far, over all its attempts, and its budgets.
 #[derive(Default)]
@@ -58,13 +58,9 @@ impl RunAccounting {
         self.usage.add(usage);
     }
 
-    /// Count the usage the tools reported with `results`.
-    pub(crate) fn count_tool_usage(&mut self, results: &[ToolResultMessage]) {
-        for result in results {
-            if let Some(usage) = &result.usage {
-                self.tool_usage.entry(result.tool_name.clone()).or_default().add(usage);
-            }
-        }
+    /// Count `usage`, which the tool called `tool` reported with a result.
+    pub(crate) fn count_tool_usage(&mut self, tool: &str, usage: &Usage) {
+        self.tool_usage.entry(tool.to_string()).or_default().add(usage);
     }
 
     /// Model requests the run may still make; `None` is unlimited.
@@ -73,27 +69,27 @@ impl RunAccounting {
             .map(|limit| limit.saturating_sub(self.model_requests))
     }
 
-    /// How the run ends when a budget leaves no room for another request: requests first,
-    /// then tokens, then cost. Checked before each request, so the last one may go over the
-    /// token or the cost budget.
-    pub(crate) fn exhausted(&self) -> Option<Ending> {
+    /// The budget that leaves no room for another request, if one does: requests first, then
+    /// tokens, then cost. Checked before each request, so the last one may go over the token
+    /// or the cost budget.
+    pub(crate) fn exhausted(&self) -> Option<Budget> {
         if self
             .max_model_requests
             .is_some_and(|limit| self.model_requests >= limit)
         {
-            return Some(Ending::ModelRequestLimit);
+            return Some(Budget::ModelRequests);
         }
         if self
             .token_budget
             .is_some_and(|budget| self.usage.input_and_output() >= budget)
         {
-            return Some(Ending::TokenBudget);
+            return Some(Budget::Tokens);
         }
         if self
             .cost_budget
             .is_some_and(|budget| self.usage.total_cost.unwrap_or(0.0) >= budget)
         {
-            return Some(Ending::CostBudget);
+            return Some(Budget::Cost);
         }
         None
     }

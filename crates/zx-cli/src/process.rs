@@ -1,16 +1,16 @@
 //! What every subcommand shares of the process: exit codes, lines on stdout, the shutdown
 //! signals and the telemetry export.
 
-use std::io::Write;
+use std::io::{self, Write};
 
 use anyhow::Result;
 #[cfg(unix)]
-use tokio::signal::unix::{SignalKind, signal};
+use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio_util::sync::CancellationToken;
 
 use crate::otel::{Telemetry, TraceHook, TraceParent};
-use zx_agent::events::{Event, EventKind};
-use zx_agent::runner::RunOutcome;
+use zx_agent::events::{Budget, Event, EventKind, RunOutcome};
+use zx_agent::{Run, Session};
 
 /// Exit codes, so schedulers can react without parsing output.
 pub(crate) const EXIT_COMPLETED: u8 = 0;
@@ -30,12 +30,14 @@ pub(crate) fn exit_code(outcome: RunOutcome) -> u8 {
     match outcome {
         RunOutcome::Completed => EXIT_COMPLETED,
         RunOutcome::Failed => EXIT_ERROR,
-        RunOutcome::ModelRequestLimit => EXIT_MODEL_REQUEST_LIMIT,
+        RunOutcome::BudgetExhausted { budget, .. } => match budget {
+            Budget::ModelRequests => EXIT_MODEL_REQUEST_LIMIT,
+            Budget::Tokens => EXIT_TOKEN_BUDGET,
+            Budget::Cost => EXIT_COST_BUDGET,
+        },
         RunOutcome::TimedOut => EXIT_TIMEOUT,
         RunOutcome::Cancelled => EXIT_CANCELLED,
         RunOutcome::Truncated => EXIT_TRUNCATED,
-        RunOutcome::TokenBudget => EXIT_TOKEN_BUDGET,
-        RunOutcome::CostBudget => EXIT_COST_BUDGET,
     }
 }
 
@@ -45,10 +47,10 @@ pub(crate) fn exit_code(outcome: RunOutcome) -> u8 {
 /// has started always cancels it instead of killing the process. The waiting task is detached
 /// on purpose: it lives until a signal arrives or the process exits.
 pub(crate) fn spawn_signal_handler(cancel: CancellationToken) {
-    match shutdown_signal() {
-        Ok(signal) => {
+    match Signals::new() {
+        Ok(mut signals) => {
             tokio::spawn(async move {
-                signal.await;
+                signals.next().await;
                 cancel.cancel();
             });
         }
@@ -57,28 +59,74 @@ pub(crate) fn spawn_signal_handler(cancel: CancellationToken) {
     }
 }
 
-/// Register SIGINT and SIGTERM listeners; the future completes at the first signal.
-#[cfg(unix)]
-fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()>> {
-    let mut interrupt = signal(SignalKind::interrupt())?;
-    let mut terminate = signal(SignalKind::terminate())?;
-    Ok(async move {
-        // `recv` yields `None` only when the runtime shuts down, which ends the process anyway.
-        tokio::select! {
-            _ = interrupt.recv() => {}
-            _ = terminate.recv() => {}
+/// The next event of `run`, a run of `session`. Once `stop` is cancelled, as a signal
+/// cancels it, so is the run, which is still read to its end for its report; cancelling a
+/// cancelled run again changes nothing.
+pub(crate) async fn next_event(run: &mut Run, session: &Session, stop: &CancellationToken) -> Option<Event> {
+    tokio::select! {
+        biased;
+        () = stop.cancelled() => {
+            session.cancel();
+            run.next().await
         }
-    })
+        event = run.next() => event,
+    }
 }
 
-/// Register a Ctrl+C listener; the future completes at the first Ctrl+C.
-#[cfg(not(unix))]
-fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()>> {
-    let mut ctrl_c = tokio::signal::windows::ctrl_c()?;
-    Ok(async move {
-        // `recv` yields `None` only when the runtime shuts down, which ends the process anyway.
-        ctrl_c.recv().await;
-    })
+/// Which signal arrived.
+pub(crate) enum Interrupt {
+    /// SIGINT, or Ctrl+C.
+    Cancel,
+    /// SIGTERM.
+    Terminate,
+}
+
+/// SIGINT and SIGTERM listeners, registered for as long as this lives: a frontend that
+/// cancels one prompt on a signal keeps listening for the next.
+pub(crate) struct Signals {
+    #[cfg(unix)]
+    interrupt: Signal,
+    #[cfg(unix)]
+    terminate: Signal,
+    #[cfg(not(unix))]
+    interrupt: tokio::signal::windows::CtrlC,
+}
+
+impl Signals {
+    pub(crate) fn new() -> io::Result<Self> {
+        #[cfg(unix)]
+        {
+            Ok(Self {
+                interrupt: signal(SignalKind::interrupt())?,
+                terminate: signal(SignalKind::terminate())?,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(Self {
+                interrupt: tokio::signal::windows::ctrl_c()?,
+            })
+        }
+    }
+
+    /// The next signal. `recv` yields `None` only when the runtime shuts down, which ends the
+    /// process anyway.
+    pub(crate) async fn next(&mut self) -> Interrupt {
+        #[cfg(unix)]
+        {
+            tokio::select! {
+                _ = self.interrupt.recv() => Interrupt::Cancel,
+                _ = self.terminate.recv() => Interrupt::Terminate,
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            match self.interrupt.recv().await {
+                Some(()) => Interrupt::Cancel,
+                None => Interrupt::Terminate,
+            }
+        }
+    }
 }
 
 /// Print one JSON line on stdout.

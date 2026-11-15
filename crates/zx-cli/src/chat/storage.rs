@@ -74,11 +74,8 @@ pub(super) async fn opening(
     let first = match (&place, resume) {
         (SessionPlace::Directory(_), Some(id)) => resume_target(&place, cwd, id).await?,
         // `--session` continues the session its file holds, or starts the file.
-        (SessionPlace::File(_), _) => match place.only().await? {
-            Some(held) => {
-                assembly::check_session_cwd(cwd, &held.cwd)?;
-                First::Resume(held.id)
-            }
+        (SessionPlace::File(_), _) => match place.held(cwd).await? {
+            Some(id) => First::Resume(id),
             None => First::Fresh,
         },
         (SessionPlace::Memory(_) | SessionPlace::Directory(_), _) => First::Fresh,

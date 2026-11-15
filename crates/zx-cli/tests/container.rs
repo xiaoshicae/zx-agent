@@ -22,7 +22,7 @@ use zx_agent::builtin::executor::{
     Access, CommandEnd, CommandOutput, ContainerConfig, ContainerExecutor, Executor, Network, ShellCommand,
 };
 use zx_agent::builtin::tools::{BashTool, ReadFileTool};
-use zx_agent::runner::RunOutcome;
+use zx_agent::events::RunOutcome;
 use zx_agent::tools::{ExecutionMode, Tool};
 
 use common::fake_mcp::{Era, FakeMcp, tool};

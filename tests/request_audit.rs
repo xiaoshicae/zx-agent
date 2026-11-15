@@ -11,8 +11,7 @@ use serde_json::json;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, PREAMBLE, Request, SystemPrompt};
 use zx_agent::compaction::{Config, Outcome};
-use zx_agent::runner::RunOutcome;
-use zx_agent::session::ModelRef;
+use zx_agent::events::RunOutcome;
 use zx_agent::tools::Tool;
 use zx_agent::transcript::{Entry, RequestSource, Transcript};
 
@@ -126,12 +125,7 @@ async fn request_config_is_appended_only_when_the_configuration_changes() {
 
     session.prompt("a").await.unwrap();
     session.prompt("b").await.unwrap();
-    session
-        .set_model(ModelRef {
-            provider: second.clone(),
-            model: "other-model".into(),
-        })
-        .unwrap();
+    session.set_model(second.clone(), "other-model").unwrap();
     session.prompt("c").await.unwrap();
 
     let configs = types(&path).iter().filter(|kind| *kind == "request_config").count();

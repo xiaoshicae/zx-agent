@@ -968,7 +968,11 @@ async fn zero_turn_budget_reports_the_limit_and_keeps_the_repl_available() {
         .filter(|event: &Value| event["type"] == "run_end")
         .collect();
     assert_eq!(reports.len(), 1);
-    assert_eq!(reports[0]["report"]["outcome"], "model_request_limit");
+    let report = &reports[0]["report"];
+    assert_eq!(
+        (&report["outcome"], &report["budget"], &report["truncated"]),
+        (&json!("budget_exhausted"), &json!("model_request_limit"), &json!(false))
+    );
     assert!(server.requests().is_empty());
 }
 

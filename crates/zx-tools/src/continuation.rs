@@ -24,9 +24,10 @@ impl ContinueOnLength {
 #[async_trait]
 impl Hook for ContinueOnLength {
     async fn finish_step(&self, step: &FinishedStep<'_>, _ctx: &HookContext) -> HookResult<StepDecision> {
+        // Whether a budget leaves room for the continuation is the run's to decide: one that
+        // does not ends the run as out of budget, saying that the answer was cut off.
         if step.disposition == StepDisposition::Stop
             && step.response.stop_reason == StopReason::Length
-            && step.remaining_model_requests != Some(0)
             && step.answer_continuations < self.max_continuations
         {
             Ok(StepDecision::ContinueAnswer(CONTINUE_PROMPT.to_string()))

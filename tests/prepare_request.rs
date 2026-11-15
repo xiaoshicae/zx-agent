@@ -11,9 +11,8 @@ use serde_json::json;
 use common::{EchoTool, RunnerSetup, config, fast_retry, header, replayed_requests};
 use zx_agent::ai::Reasoning;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::events::EventKind;
+use zx_agent::events::{EventKind, RunOutcome};
 use zx_agent::hooks::{Hook, HookContext, HookResult, RequestPlan, RequestSettings};
-use zx_agent::runner::RunOutcome;
 use zx_agent::tools::Tool;
 
 /// Uses `model` with high reasoning on the first step only, and records what it saw.
@@ -60,10 +59,13 @@ async fn a_hook_changes_the_model_and_reasoning_of_one_request_and_the_audit_rec
     let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(EchoTool::new("echo"))];
     let mut loop_config = config(provider.clone(), tools);
     let seen = Arc::new(Mutex::new(Vec::new()));
-    loop_config.hooks.push(FirstTurnUpgrade {
-        model: "big-model",
-        seen: seen.clone(),
-    });
+    loop_config.hooks.push(
+        "first_turn_upgrade",
+        Arc::new(FirstTurnUpgrade {
+            model: "big-model",
+            seen: seen.clone(),
+        }),
+    );
     let (runner, events) = RunnerSetup {
         session: common::create_session_file(&path, header()).await.unwrap(),
         ..RunnerSetup::new(loop_config)
@@ -109,11 +111,14 @@ async fn a_hook_changes_the_model_and_reasoning_of_one_request_and_the_audit_rec
 async fn hooks_chain_their_changes_in_order() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let mut loop_config = config(provider.clone(), vec![]);
-    loop_config.hooks.push(FirstTurnUpgrade {
-        model: "big-model",
-        seen: Arc::default(),
-    });
-    loop_config.hooks.push(Lower);
+    loop_config.hooks.push(
+        "first_turn_upgrade",
+        Arc::new(FirstTurnUpgrade {
+            model: "big-model",
+            seen: Arc::default(),
+        }),
+    );
+    loop_config.hooks.push("lower", Arc::new(Lower));
     let (runner, _) = RunnerSetup::new(loop_config).build();
 
     runner.run("go").await;
@@ -156,7 +161,7 @@ async fn a_failing_hook_or_an_empty_model_ends_the_run_before_the_request_withou
     ] {
         let provider = Arc::new(FauxProvider::new([FauxStep::text("must not be requested")]));
         let mut loop_config = config(provider.clone(), vec![]);
-        loop_config.hooks.push(hook);
+        loop_config.hooks.push("hook", Arc::new(hook));
         let (runner, _) = RunnerSetup {
             retry: fast_retry(3),
             ..RunnerSetup::new(loop_config)
@@ -190,7 +195,7 @@ impl Hook for Panics {
 async fn a_panicking_hook_stops_the_attempt_without_crashing_the_run() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("must not be requested")]));
     let mut loop_config = config(provider.clone(), vec![]);
-    loop_config.hooks.push(Panics);
+    loop_config.hooks.push("panics", Arc::new(Panics));
     let (runner, _) = RunnerSetup::new(loop_config).build();
 
     let report = runner.run("go").await;

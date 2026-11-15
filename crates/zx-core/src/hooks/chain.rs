@@ -56,24 +56,6 @@ impl HookCall<'_> {
     }
 }
 
-/// How a hook is registered. Build it from `Default` with struct update syntax.
-#[derive(Clone, Debug)]
-pub struct HookOptions {
-    /// The hook's name in `hook_failed` events and traces; `None` uses its type name.
-    pub name: Option<String>,
-    /// Bound for each call of the hook.
-    pub timeout: Duration,
-}
-
-impl Default for HookOptions {
-    fn default() -> Self {
-        Self {
-            name: None,
-            timeout: DEFAULT_HOOK_TIMEOUT,
-        }
-    }
-}
-
 #[derive(Clone)]
 struct RegisteredHook {
     name: String,
@@ -123,31 +105,20 @@ impl HookChain {
         Self::default()
     }
 
-    /// Register an owned hook under its type name, with the default per-call timeout.
-    pub fn push(&mut self, hook: impl Hook + 'static) {
-        self.push_with(hook, HookOptions::default());
+    /// Register `hook` as `name`, which `hook_failed` events and traces show, each of its
+    /// calls bounded by [`DEFAULT_HOOK_TIMEOUT`]. It runs in the stage it declares, after the
+    /// hooks already registered in that stage.
+    pub fn push(&mut self, name: impl Into<String>, hook: Arc<dyn Hook>) {
+        self.push_with_timeout(name, hook, DEFAULT_HOOK_TIMEOUT);
     }
 
-    /// Register an owned hook. It runs in the stage it declares, after the hooks already
-    /// registered in that stage.
-    pub fn push_with<H: Hook + 'static>(&mut self, hook: H, options: HookOptions) {
-        let name = options.name.unwrap_or_else(|| std::any::type_name::<H>().to_string());
+    /// Register `hook` as [`push`](Self::push) does, with `timeout` bounding each call.
+    pub fn push_with_timeout(&mut self, name: impl Into<String>, hook: Arc<dyn Hook>, timeout: Duration) {
         self.insert(RegisteredHook {
-            name,
+            name: name.into(),
             stage: hook.stage(),
-            hook: Arc::new(hook),
-            timeout: options.timeout,
-        });
-    }
-
-    /// Register a hook an extension supplies, under the extension's name and with the default
-    /// timeout. `extensions::register` has checked its stage.
-    pub(crate) fn push_extension_hook(&mut self, name: &str, hook: Box<dyn Hook>) {
-        self.insert(RegisteredHook {
-            name: name.to_string(),
-            stage: hook.stage(),
-            hook: Arc::from(hook),
-            timeout: HookOptions::default().timeout,
+            hook,
+            timeout,
         });
     }
 
@@ -164,16 +135,12 @@ impl HookChain {
         self.hooks.insert(position, entry);
     }
 
-    pub fn with(mut self, hook: impl Hook + 'static) -> Self {
-        self.push(hook);
-        self
-    }
-
     /// Whether no hook is registered: nothing then observes the events.
     pub(crate) fn is_empty(&self) -> bool {
         self.hooks.is_empty()
     }
 
+    /// Run `on_input` of every hook, each seeing the text the previous ones returned.
     pub async fn on_input(&self, mut text: String, ctx: &HookContext) -> Result<String, HookError> {
         for entry in &self.hooks {
             text = entry
@@ -183,6 +150,8 @@ impl HookChain {
         Ok(text)
     }
 
+    /// The context edits of every hook, each hook seeing the projection after the edits of
+    /// the ones before it. An edit that does not apply fails the hook that planned it.
     pub async fn transform_context(
         &self,
         messages: &[Message],
@@ -232,6 +201,7 @@ impl HookChain {
         Ok(settings)
     }
 
+    /// Run `after_tool` of every hook, each seeing the output the previous ones returned.
     pub async fn after_tool(
         &self,
         call: &ToolCall,
@@ -270,6 +240,8 @@ impl HookChain {
         Ok(output)
     }
 
+    /// What follows a step: the first hook that stops ends the chain; otherwise the first
+    /// that asks to continue the answer or to follow up decides.
     pub async fn finish_step(&self, step: &FinishedStep<'_>, ctx: &HookContext) -> Result<StepDecision, HookError> {
         let mut decision = StepDecision::Default;
         for entry in &self.hooks {

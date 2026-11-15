@@ -33,12 +33,12 @@ README 给出概览与示例；这里是各子命令的参数、行为、语义�
 | 0 | 完成：模型给出了最终回答 |
 | 1 | 失败：模型请求出错且重试无效，或会话文件写入失败 |
 | 2 | 参数或配置错误 |
-| 3 | 达到 `--max-model-requests` 上限 |
+| 3 | 达到 `--max-model-requests` 上限：模型还要请求（包括续写被截断的回答），次数已用完 |
 | 4 | 达到 `--timeout-secs` 时间上限 |
 | 5 | 被 SIGINT 或 SIGTERM 中止 |
-| 6 | 截断：最终回答达到输出 token 上限，自动续写（agent 的 `continueOnLength`）后仍未完成；已生成的部分照常输出 |
-| 7 | 达到 `--token-budget` 预算：用量已达预算，模型还要继续 |
-| 8 | 达到 `--cost-budget` 预算：花费已达预算，模型还要继续 |
+| 6 | 截断：最终回答达到输出 token 上限，自动续写（agent 的 `continueOnLength`）的次数用完后仍未完成；续写所需的请求超出预算时按该预算的退出码（3、7、8）结束。已生成的部分照常输出 |
+| 7 | 达到 `--token-budget` 预算：用量已达预算，模型还要继续（包括续写被截断的回答） |
+| 8 | 达到 `--cost-budget` 预算：花费已达预算，模型还要继续（包括续写被截断的回答） |
 | 9 | 只在给出 `--fail-on-denied` 时出现：模型给出了最终回答，但至少一次工具调用被策略或审批拒绝。不加这个参数时这种情况仍是 0，被拒的次数在报告的 `deniedCalls` 与文本模式最后一行的 `denied_calls=` 中 |
 
 ## chat
@@ -82,7 +82,7 @@ README 给出概览与示例；这里是各子命令的参数、行为、语义�
 
 - 会话：`session/new` 建会话，`cwd` 由客户端给出，会话此后一直在这个目录工作，续接后也一样；每个会话一个文件，放在 chat 为该工作目录使用的会话目录中（`--no-session` 时只在内存）。`session/load` 续接并把对话回放给客户端，`session/resume` 续接但不回放，两者只认在所给 `cwd` 开始的会话；`session/list` 列出会话（标题为会话名称，没有名称时为第一条提问）。`session/close` 取消会话正在进行的回合，并把会话移出内存：会话文件随之关闭（有回合在跑时，等它结束），别的进程就能打开它；文件保留，可以再 `session/load` 或 `session/resume`。关闭本进程没有持有的会话也算成功。`initialize` 总会声明 `sessionCapabilities.close`（`--no-session` 时也是，关闭同样释放内存）。客户端不发 `session/close` 时，会话留在内存中、文件保持锁定，直到进程退出。`session/fork` 未实现。客户端给的 `mcpServers` 被忽略，MCP 服务器只来自 `config.toml`。
 - 命令：建会话、载入或续接成功后，应答之后以 `available_commands_update` 声明 `/name`。`/name <名称>` 给会话起名，不发给模型：以 `session_info_update` 通知新标题，回合以 `end_turn` 结束。名称只取一行（换行等控制字符换成空格、去掉首尾空白）；没有给名称时以 JSON-RPC 错误（`-32602`）应答，回合进行中也以错误应答。`/named` 等其他文本仍是普通提问。
-- 回合：`session/prompt` 的回答结束时应答 `stopReason`：完成为 `end_turn`，截断或 token 预算用尽为 `max_tokens`，请求次数上限为 `max_turn_requests`，取消为 `cancelled`；出错或超时以 JSON-RPC 错误应答。`session/cancel` 取消当前回合，紧跟在 `session/prompt` 之后发出的也生效。
+- 回合：`session/prompt` 的回答结束时应答 `stopReason`：完成为 `end_turn`，截断与 token、成本预算用尽为 `max_tokens`，请求次数用尽为 `max_turn_requests`（回答被截断时也是），取消为 `cancelled`；出错或超时以 JSON-RPC 错误应答。`session/cancel` 取消当前回合，紧跟在 `session/prompt` 之后发出的也生效。
 - 更新：回答与推理流式发送，工具调用发 `tool_call` 及其状态，`write_file` 与 `edit_file` 附 diff。审批经 `session/request_permission`（允许一次、本会话允许相同调用、拒绝），等待时间同 chat。
 - 退出：客户端关闭 stdin 时退出；收到 SIGINT 或 SIGTERM 时先取消进行中的回合，等它们结束（被中止的回答记入会话）再退出，这时回合的应答不保证送达客户端。两种情况退出码都是 0。
 - 只用手写的 JSON-RPC 客户端与 SDK 的示例客户端验证过，没有在 Zed 或 Wisp 上验证。
@@ -127,7 +127,7 @@ README 给出概览与示例；这里是各子命令的参数、行为、语义�
 | 上限 | 有轮次与时间上限 |
 | 工具确认 | 宿主审批；`run` 无人时拒绝 |
 | 工具放行 | 由独立的接口 `ToolPolicy` 判定（放行、拒绝、询问），所有策略取最严的结论；钩子只观察与改写，不拦截调用（pi 在 `beforeToolCall` 钩子里拦截） |
-| 输出截断 | 按 agent 的 `continueOnLength` 自动续写，仍未完成以退出码 6 结束 |
+| 输出截断 | 按 agent 的 `continueOnLength` 自动续写，仍未完成以退出码 6 结束；续写所需的请求超出预算时以该预算的退出码结束，报告的 `truncated` 为 true |
 | 会话写入失败 | 立即中止运行，之后不再写入；会话随即关闭，再次打开时从存储读回 |
 | 会话文件 | 启动时立即创建；chat 默认存入会话目录，`--resume` 续接；复制会话与切换分支只在 SDK |
 | 会话名称 | 只经 ACP 的 `/name` 与 SDK 的 `Session::set_name` 设置，不能清除；chat 没有起名命令；客户端改标题的 `session/set_title` 在协议中仍不稳定，未实现 |
@@ -167,6 +167,8 @@ README 给出概览与示例；这里是各子命令的参数、行为、语义�
 {"schemaVersion":5,"seq":12,"atMs":1761700000000,"sessionId":"…","runId":"…","type":"run_end","report":{"outcome":"completed","finalText":"## Summary ...","modelRequests":3,"retries":0,"usage":{"input":1200,"output":300,"cacheRead":0,"totalTokens":1500},"sessionId":"…"}}
 ```
 
+预算用完时，`report` 的 `outcome` 为 `budget_exhausted`，另带 `budget`（`model_request_limit`、`token_budget` 或 `cost_budget`）与 `truncated`（这次运行最后的回答是否在输出 token 上限处被截断）；`attempt_end` 的 `outcome` 也是这样。文本模式的最后一行写作 `outcome=budget_exhausted budget=token_budget truncated=true`。
+
 其余事件：`attempt_start` / `attempt_end`（每次尝试）、`step_start` / `step_end`、`request_start`、`message_start` / `message_update`（需 `--deltas`）/ `message_end`、`tool_execution_start` / `tool_execution_update` / `tool_execution_end`、`tool_decision`、`approval_requested` / `approval_resolved`、`retry_scheduled`、`context_edited`、`context_overflow`、`compaction_start` / `compaction_end` / `compaction_failed`、`custom_entry`、`hook_failed`、`tool_call_recovered`。手动 `/compact` 发 `compaction_report`。`attempt_start` 与 `request_start` 的 `attempt` 是第几次尝试（首次为 1，重试与上下文溢出恢复都会再开一次尝试）；`retry_scheduled` 的 `retry` 是第几次重试（首次为 1，至多 `maxRetries`）。事件包含用户输入、工具参数、脱敏后的工具输出与模型输出。
 
 `report.modelRequests` 含摘要请求；`report.usage` 只含模型的用量，失败的尝试也计入，被取消的请求记为 0；配置了单价时有 `totalCost`。工具报告的花费在 `report.toolUsage`，被拒的调用数在 `report.deniedCalls`。
@@ -175,7 +177,7 @@ README 给出概览与示例；这里是各子命令的参数、行为、语义�
 
 run、chat 与 im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（完整地址）或 `OTEL_EXPORTER_OTLP_ENDPOINT`（后接 `/v1/traces`）时，用 OTLP/HTTP 导出追踪；都没设时不建立任何连接。其余标准变量由 OpenTelemetry SDK 读取，服务名默认 `zx-agent`。只导出 span，不导出指标，需要时由收集端从 span 推导。
 
-一次运行是一条 trace：`run` 之下有 `attempt`、`step`、`request`、`tool <工具名>` 与 `compaction`，属性带运行 ID（`zx.run.id`）、模型、结果、用量与成本。只含元数据，不含输入、输出、参数与错误文本。`run` 在 `TRACEPARENT`（及 `TRACESTATE`）为合法值时接续调用方的 trace。导出经有界队列，满时丢弃，退出时最多等待 5 秒。命令看不到可能带认证头的 `OTEL_EXPORTER_OTLP_HEADERS`、`OTEL_EXPORTER_OTLP_TRACES_HEADERS` 与 `OTEL_EXPORTER_OTLP_METRICS_HEADERS`。
+一次运行是一条 trace：`run` 之下有 `attempt`、`step`、`request`、`tool <工具名>` 与 `compaction`，属性带运行 ID（`zx.run.id`）、模型、结果（预算用完时另有 `zx.budget` 与 `zx.truncated`）、用量与成本。只含元数据，不含输入、输出、参数与错误文本。`run` 在 `TRACEPARENT`（及 `TRACESTATE`）为合法值时接续调用方的 trace。导出经有界队列，满时丢弃，退出时最多等待 5 秒。命令看不到可能带认证头的 `OTEL_EXPORTER_OTLP_HEADERS`、`OTEL_EXPORTER_OTLP_TRACES_HEADERS` 与 `OTEL_EXPORTER_OTLP_METRICS_HEADERS`。
 
 ### 会话文件（`--session`）
 
@@ -201,4 +203,4 @@ run、chat 与 im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（完整地�
 
 ---
 
-REFERENCE.md · v0.1 · 2026年11月
+REFERENCE.md · v0.2 · 2026年11月

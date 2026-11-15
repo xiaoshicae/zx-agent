@@ -32,22 +32,23 @@ enum Target {
     /// The file as it was found: read and locked, not yet changed.
     Unrepaired(Unrepaired),
     Writer(Writer),
-    /// The repair failed, so the file is left as it was found and takes no records.
+    /// The writer's thread could not be started, so the file takes no records.
     Unusable,
 }
 
 impl Target {
-    /// The writer of the file. Before the first record, the file's end is repaired: by then
-    /// the session has been loaded, which checked every other record.
+    /// The writer of the file, started at the first record. Before that record its thread
+    /// repairs the file's end: by then the session has been loaded, which checked every other
+    /// record, and the thread, not the runtime, waits for the file.
     fn writer(&mut self) -> Result<&mut Writer> {
         *self = match std::mem::replace(self, Self::Unusable) {
-            Self::Unrepaired(unrepaired) => Self::Writer(unrepaired.repair()?),
+            Self::Unrepaired(unrepaired) => Self::Writer(Writer::spawn(move || unrepaired.repair())?),
             ready @ (Self::Writer(_) | Self::Unusable) => ready,
         };
         match self {
             Self::Writer(writer) => Ok(writer),
             Self::Unrepaired(_) | Self::Unusable => {
-                bail!("the end of the session file could not be repaired, so it takes no more records")
+                bail!("the session writer could not be started, so the file takes no more records")
             }
         }
     }
@@ -55,7 +56,7 @@ impl Target {
 
 /// Records reach the file on a thread of their own. A write to a volume that stopped
 /// answering blocks inside the kernel; on that thread it stalls neither the runtime nor the
-/// store's append timeout, and it does not keep the process from exiting.
+/// transcript's append timeout, and it does not keep the process from exiting.
 struct Writer {
     lines: Option<mpsc::SyncSender<Line>>,
     thread: Option<thread::JoinHandle<()>>,
@@ -66,21 +67,35 @@ struct Writer {
 /// One record's line and where the result of writing it goes.
 struct Line {
     text: String,
-    written: oneshot::Sender<std::io::Result<()>>,
+    written: oneshot::Sender<Result<()>>,
 }
 
 impl Writer {
-    fn spawn(mut target: Box<dyn Write + Send>) -> Result<Self> {
-        // One line at a time: the store waits for each append before the next one.
+    /// Start the thread that writes the lines. When the first line comes, the thread gets its
+    /// target from `open`, such as the file once its end is repaired; when that fails, the
+    /// first line reports why and nothing is written. A writer sent no line never calls it.
+    fn spawn(open: impl FnOnce() -> Result<Box<dyn Write + Send>> + Send + 'static) -> Result<Self> {
+        // One line at a time: the transcript waits for each append before the next one.
         let (lines, received) = mpsc::sync_channel::<Line>(1);
         let thread = thread::Builder::new()
             .name("zx-session-writer".into())
             .spawn(move || {
-                for line in received {
+                let Ok(first) = received.recv() else {
+                    return;
+                };
+                let mut target = match open() {
+                    Ok(target) => target,
+                    Err(error) => {
+                        // The transcript may have stopped waiting for this write; then no one
+                        // needs its result.
+                        let _ = first.written.send(Err(error));
+                        return;
+                    }
+                };
+                for line in std::iter::once(first).chain(received) {
                     let result = target.write_all(line.text.as_bytes()).and_then(|()| target.flush());
-                    // The store may have stopped waiting for this write; then no one needs
-                    // its result.
-                    let _ = line.written.send(result);
+                    // As above: the transcript may have stopped waiting.
+                    let _ = line.written.send(result.map_err(anyhow::Error::from));
                 }
             })
             .context("cannot start the session writer thread")?;
@@ -97,15 +112,16 @@ impl Writer {
             .as_ref()
             .ok_or_else(|| anyhow!("the session writer has stopped"))?;
         let (written, result) = oneshot::channel();
-        lines
-            .try_send(Line { text, written })
-            .map_err(|_| anyhow!("an earlier write of the session file has not finished"))?;
+        lines.try_send(Line { text, written }).map_err(|error| match error {
+            mpsc::TrySendError::Full(_) => anyhow!("an earlier write of the session file has not finished"),
+            mpsc::TrySendError::Disconnected(_) => anyhow!("the session writer has stopped"),
+        })?;
         self.pending = true;
         let result = result
             .await
             .map_err(|_| anyhow!("the session writer stopped before the write finished"))?;
         self.pending = false;
-        Ok(result?)
+        result
     }
 }
 
@@ -125,7 +141,7 @@ impl Drop for Writer {
 }
 
 /// A locked session file that has been read but not yet changed. Its records are checked
-/// first; only [`Unrepaired::repair`] changes the file and allows appending.
+/// first; only [`Unrepaired::repair`], on the writer's thread, changes the file.
 struct Unrepaired {
     path: PathBuf,
     file: File,
@@ -149,7 +165,7 @@ impl JsonlFile {
     pub(super) fn create(path: &Path, header: &SessionHeader) -> Result<Self> {
         // A header-only line and one small directory: quick, like any append.
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            std::fs::create_dir_all(parent).with_context(|| format!("cannot create {}", parent.display()))?;
+            super::create_private(parent)?;
         }
         let mut options = OpenOptions::new();
         options.append(true).create_new(true);
@@ -165,7 +181,7 @@ impl JsonlFile {
             .and_then(|()| file.flush())
             .with_context(|| format!("cannot write the header of {}", path.display()))?;
         Ok(Self {
-            target: Target::Writer(Writer::spawn(Box::new(file))?),
+            target: Target::Writer(Writer::spawn(move || Ok(Box::new(file)))?),
             next_seq: 1,
         })
     }
@@ -207,7 +223,7 @@ impl JsonlFile {
     #[cfg(test)]
     pub(in crate::transcript) fn with_writer(writer: Box<dyn Write + Send + Sync>) -> Self {
         Self {
-            target: Target::Writer(Writer::spawn(writer).expect("tests can start a thread")),
+            target: Target::Writer(Writer::spawn(move || Ok(writer)).expect("tests can start a thread")),
             next_seq: 1,
         }
     }
@@ -277,8 +293,8 @@ fn parse(content: &[u8], path: &Path) -> Result<(LoadedSession, Option<usize>)> 
 
 impl Unrepaired {
     /// Cut off an incomplete final record, or terminate a complete one that lacks its
-    /// newline, so that the next record starts on a line of its own.
-    fn repair(self) -> Result<Writer> {
+    /// newline, so that the next record starts on a line of its own. Returns the file.
+    fn repair(self) -> Result<Box<dyn Write + Send>> {
         let Self { path, file, repair } = self;
         match repair {
             Repair::Truncate(length) => file
@@ -289,7 +305,7 @@ impl Unrepaired {
                 .with_context(|| format!("cannot repair session file {}", path.display()))?,
             Repair::Nothing => {}
         }
-        Writer::spawn(Box::new(file))
+        Ok(Box::new(file))
     }
 }
 
@@ -314,7 +330,7 @@ impl SessionLog for JsonlFile {
 
 /// How long opening keeps trying a lock that another descriptor holds before reporting the file
 /// as in use. A program that this process is starting holds copies of its descriptors until it
-/// runs, so a store that was just dropped can keep its lock for a moment: under a millisecond
+/// runs, so a transcript that was just dropped can keep its lock for a moment: under a millisecond
 /// when measured on macOS, longer on a busy machine.
 #[cfg(unix)]
 const LOCK_WAIT: Duration = Duration::from_millis(500);
@@ -477,7 +493,7 @@ mod tests {
     #[test]
     fn a_dropped_store_can_be_reopened_while_this_process_starts_programs() {
         // A program being started holds copies of this process's descriptors until it runs,
-        // so the lock of a store that was just dropped can outlive the store for a moment.
+        // so the lock of a transcript that was just dropped can outlive the transcript for a moment.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
         drop(create(&path).unwrap());

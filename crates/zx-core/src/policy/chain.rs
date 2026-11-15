@@ -46,6 +46,12 @@ impl PolicyChain {
         });
     }
 
+    /// Add the policies of `other` after this chain's, each with the name and the timeout it
+    /// was registered with.
+    pub(crate) fn extend(&mut self, other: PolicyChain) {
+        self.policies.extend(other.policies);
+    }
+
     /// Whether no policy is registered: every call is then allowed.
     pub fn is_empty(&self) -> bool {
         self.policies.is_empty()

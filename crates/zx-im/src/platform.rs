@@ -86,8 +86,8 @@ pub fn rate_limit_wait(seconds: Option<&str>, longest: Duration) -> Duration {
     Duration::from_secs(secs).min(longest)
 }
 
-/// Messages a channel has passed on recently, to drop redeliveries; the oldest are
-/// forgotten first.
+/// Keys seen recently, such as the messages a channel has passed on, to drop redeliveries;
+/// the oldest are forgotten first.
 pub struct Seen<K> {
     order: VecDeque<K>,
     keys: HashSet<K>,
@@ -116,6 +116,18 @@ impl<K: Clone + Eq + Hash> Seen<K> {
             self.keys.remove(&oldest);
         }
         true
+    }
+
+    /// Whether `key` is remembered.
+    pub fn contains(&self, key: &K) -> bool {
+        self.keys.contains(key)
+    }
+
+    /// Forget `key`, so that it is new to the next [`insert`](Self::insert).
+    pub fn remove(&mut self, key: &K) {
+        if self.keys.remove(key) {
+            self.order.retain(|kept| kept != key);
+        }
     }
 }
 
@@ -305,6 +317,20 @@ impl Keepalive {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_key_forgotten_on_purpose_is_new_again_and_kept_for_its_own_turn() {
+        let mut seen = Seen::new(2);
+        assert!(seen.insert(&"a"));
+        assert!(seen.insert(&"b"));
+        seen.remove(&"a");
+        assert!(!seen.contains(&"a"));
+        assert!(seen.insert(&"a"), "forgotten, it is new");
+        // The order follows the inserts that count: "b" is now the oldest, and goes first.
+        assert!(seen.insert(&"c"));
+        assert!(!seen.contains(&"b"));
+        assert!(seen.contains(&"a") && seen.contains(&"c"));
+    }
 
     #[test]
     fn the_first_part_is_there_even_for_empty_text() {

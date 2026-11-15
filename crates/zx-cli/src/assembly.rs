@@ -21,8 +21,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use zx_agent::hooks::{Hook, HookChain, HookOptions};
-
 pub(crate) use agent::{Approvals, ModeAgent};
 pub(crate) use place::SessionPlace;
 pub(crate) use settings::Settings;
@@ -48,22 +46,6 @@ pub(crate) struct Overrides {
     pub(crate) cost_budget: Option<f64>,
 }
 
-/// Register a built-in hook under a fixed name, which `hook_failed` events and `[hook]` lines
-/// show.
-///
-/// Without one the name is the hook's type name, whose form Rust does not guarantee across
-/// compiler versions. MCP server names cannot contain `_`, so these never clash with an
-/// extension's.
-fn push_built_in(hooks: &mut HookChain, name: &str, hook: impl Hook + 'static) {
-    hooks.push_with(
-        hook,
-        HookOptions {
-            name: Some(name.to_string()),
-            ..HookOptions::default()
-        },
-    );
-}
-
 /// The working directory of a new session, which is what its header records: `cwd` made
 /// absolute, or the current directory.
 pub(crate) fn resolve_cwd(cwd: Option<&Path>) -> Result<PathBuf> {
@@ -80,7 +62,7 @@ pub(crate) fn resolve_cwd(cwd: Option<&Path>) -> Result<PathBuf> {
 /// Refuse `--cwd` when it names another directory than `session_cwd`, where the session to
 /// continue works: a session goes on in the directory it started in, and `--cwd` is where
 /// new ones work. Without `--cwd` nothing is asked.
-pub(crate) fn check_session_cwd(explicit: Option<&Path>, session_cwd: &str) -> Result<()> {
+fn check_session_cwd(explicit: Option<&Path>, session_cwd: &str) -> Result<()> {
     let Some(explicit) = explicit else {
         return Ok(());
     };

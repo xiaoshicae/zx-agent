@@ -22,7 +22,7 @@
 //!   left without results
 //! - `name`: the session's name, kept in `session_info` records
 //! - `test_support` and `tests`, compiled for tests only: what the session's unit tests
-//!   share, and the tests of the store
+//!   share, and the tests of the transcript
 
 mod compaction;
 mod entry;
@@ -73,7 +73,7 @@ pub const SESSION_VERSION: u32 = 11;
 /// A file append finishes long before; a timed-out append stops writing, like a failed one.
 const APPEND_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Why a store no longer writes. Each case asks for something different before a session can
+/// Why a transcript no longer writes. Each case asks for something different before a session can
 /// be written again, so hosts such as a server that keeps sessions open can match on it.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum WritesStopped {
@@ -87,7 +87,7 @@ pub enum WritesStopped {
     /// An append failed with this error. Remove the cause, then open the session again.
     #[error("an earlier write failed: {0}")]
     Failed(String),
-    /// The store is a snapshot ([`Transcript::snapshot`]), which never writes.
+    /// The transcript is a snapshot ([`Transcript::snapshot`]), which never writes.
     #[error("it was read as a snapshot, which is read-only")]
     ReadOnly,
 }
@@ -110,12 +110,12 @@ fn is_prompt(message: &Message) -> bool {
 /// then changes memory. After a failed write, every later append fails without writing; so
 /// does every append after one that timed out or whose future was dropped, because its
 /// outcome is unknown. A failed write can leave a partial record; stopping there keeps it the
-/// last one, which a session file repairs when the session is opened again. One store is the
+/// last one, which a session file repairs when the session is opened again. One transcript is the
 /// only writer of its session. Appending to a log waits with a Tokio timer, so it needs a
 /// Tokio runtime with time enabled.
 pub struct Transcript {
     log: Option<Box<dyn SessionLog>>,
-    /// Why this store no longer writes, if it does not.
+    /// Why this transcript no longer writes, if it does not.
     stopped: Option<WritesStopped>,
     append_timeout: Duration,
     header: SessionHeader,
@@ -126,7 +126,7 @@ pub struct Transcript {
 }
 
 impl Transcript {
-    /// A session kept only in this store: nothing stores it, so nothing can list it or open
+    /// A session kept only in this transcript: nothing stores it, so nothing can list it or open
     /// it again.
     pub fn in_memory(header: SessionHeader) -> Self {
         Self {
@@ -164,7 +164,7 @@ impl Transcript {
     }
 
     /// A stored session to read, not to write: what [`SessionStorage::read`] returned, also
-    /// of a session that another store is writing. Checked like [`Transcript::load`]; every
+    /// of a session that another transcript is writing. Checked like [`Transcript::load`]; every
     /// append to the snapshot fails.
     pub fn snapshot(loaded: LoadedSession) -> Result<Self> {
         let mut store = Self::replay(loaded)?;
@@ -191,13 +191,13 @@ impl Transcript {
         Ok(store)
     }
 
-    /// Why this store no longer writes, or `None` while it does. Every append fails from
+    /// Why this transcript no longer writes, or `None` while it does. Every append fails from
     /// then on; [`WritesStopped`] says what to do before writing the session again.
     pub fn writes_stopped(&self) -> Option<&WritesStopped> {
         self.stopped.as_ref()
     }
 
-    /// Whether an append failed, timed out or was interrupted, so that this store, which
+    /// Whether an append failed, timed out or was interrupted, so that this transcript, which
     /// wrote until then, no longer agrees with its log. A snapshot never wrote and does not
     /// count.
     pub(crate) fn lost_its_log(&self) -> bool {
@@ -513,7 +513,7 @@ pub(super) fn ensure_current_version(header: &SessionHeader) -> Result<()> {
 /// edited: prompt changes are new system messages. A text replacement (`replaces_text`) does
 /// not erase tool calls, whose results would otherwise lose their call.
 ///
-/// The store applies this to every edit it records or loads, and the hook chain to a whole
+/// The transcript applies this to every edit it records or loads, and the hook chain to a whole
 /// plan of edits before any of them is recorded, so both refuse the same edits.
 pub(crate) fn context_edit_refusal(message: &Message, replaces_text: bool) -> Option<&'static str> {
     match message {

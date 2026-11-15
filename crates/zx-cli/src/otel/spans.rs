@@ -13,8 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::signal::{Signal, What};
 use zx_agent::ai::{StopReason, Usage};
-use zx_agent::events::{ApprovalResult, Interruption, RequestKind, ToolVerdict};
-use zx_agent::runner::RunOutcome;
+use zx_agent::events::{ApprovalResult, Interruption, RequestKind, RunOutcome, ToolVerdict};
 
 /// Builds spans from signals, one task owning every open span.
 pub(super) async fn export(mut receiver: mpsc::Receiver<Signal>, mut runs: Runs, stop: CancellationToken) {
@@ -63,7 +62,7 @@ impl Open {
         self.tools.get(call).or(self.current())
     }
 
-    /// End what an attempt holds open: tools, the request, a summary and the step.
+    /// End what an attempt holds open: tools, the request, a compaction and the step.
     fn end_attempt_parts(&mut self, at: SystemTime) {
         for (_, tool) in self.tools.drain() {
             end(Some(tool), at);
@@ -181,11 +180,11 @@ impl OpenRun<'_> {
         self.spans.end_attempt_parts(self.at);
         end(self.spans.attempt.take(), self.at);
         if let Some(run) = self.spans.run.take() {
-            let mut attributes = vec![
-                KeyValue::new("zx.outcome", name(&outcome)),
+            let mut attributes = outcome_attributes(outcome);
+            attributes.extend([
                 KeyValue::new("zx.model_requests", i64::from(model_requests)),
                 KeyValue::new("zx.retries", i64::from(retries)),
-            ];
+            ]);
             attributes.extend(usage_attributes(usage));
             finish(&run, self.at, attributes, outcome == RunOutcome::Failed);
         }
@@ -202,8 +201,12 @@ impl OpenRun<'_> {
     fn attempt_end(&mut self, outcome: RunOutcome) {
         self.spans.end_attempt_parts(self.at);
         if let Some(attempt) = self.spans.attempt.take() {
-            let attributes = vec![KeyValue::new("zx.outcome", name(&outcome))];
-            finish(&attempt, self.at, attributes, outcome == RunOutcome::Failed);
+            finish(
+                &attempt,
+                self.at,
+                outcome_attributes(outcome),
+                outcome == RunOutcome::Failed,
+            );
         }
     }
 
@@ -401,7 +404,18 @@ fn usage_attributes(usage: &Usage) -> Vec<KeyValue> {
     attributes
 }
 
-/// The name a value has in events and reports, such as `model_request_limit`.
+/// How a run or an attempt ended: its outcome, and for a budget that ran out, which one and
+/// whether the last answer was cut off.
+fn outcome_attributes(outcome: RunOutcome) -> Vec<KeyValue> {
+    let mut attributes = vec![KeyValue::new("zx.outcome", outcome.name())];
+    if let RunOutcome::BudgetExhausted { budget, truncated } = outcome {
+        attributes.push(KeyValue::new("zx.budget", budget.name()));
+        attributes.push(KeyValue::new("zx.truncated", truncated));
+    }
+    attributes
+}
+
+/// The name a value has in events and reports, such as `summary`.
 fn name(value: &impl Serialize) -> String {
     match serde_json::to_value(value) {
         Ok(serde_json::Value::String(name)) => name,

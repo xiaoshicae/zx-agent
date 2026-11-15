@@ -10,7 +10,7 @@
 //! texts, which may quote them.
 //!
 //! A hook observes the events of every run and turns them into signals (`signal`), which
-//! one task steps into spans (`spans`).
+//! one task turns into spans (`spans`).
 
 mod signal;
 mod spans;
@@ -35,7 +35,7 @@ use signal::Signal;
 pub use signal::TraceHook;
 use spans::{Runs, export};
 
-/// Either variable steps the trace export on. As the OTLP specification has it, the first is
+/// Either variable turns the trace export on. As the OTLP specification has it, the first is
 /// used as it is, and the second gets `/v1/traces` appended.
 const ENDPOINT_VARIABLES: [&str; 2] = ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_ENDPOINT"];
 /// Variables that may carry credentials for a collector, such as an authorization header.
@@ -108,8 +108,9 @@ impl TraceParent {
     }
 }
 
-/// Exports the events of runs as OpenTelemetry traces. Register [`hook`](Self::hook) with
-/// each session's hooks, and call [`shutdown`](Self::shutdown) before the process exits.
+/// Exports the events of runs as OpenTelemetry traces. Register [`hook`](Self::hook) with an
+/// agent's hooks, which observe every session of it, and call [`shutdown`](Self::shutdown)
+/// before the process exits.
 pub struct Telemetry {
     tracer_provider: SdkTracerProvider,
     sender: mpsc::Sender<Signal>,
@@ -160,8 +161,8 @@ impl Telemetry {
         }
     }
 
-    /// The hook to register with a session: it observes the session's runs and passes each
-    /// event on without waiting. Every run starts a trace of its own.
+    /// The hook to register with an agent: it observes the runs of the agent's sessions and
+    /// passes each event on without waiting. Every run starts a trace of its own.
     pub fn hook(&self) -> TraceHook {
         self.trace_hook(None)
     }

@@ -53,7 +53,7 @@ struct Bundle {
     name: &'static str,
     tools: Vec<Arc<dyn Tool>>,
     sections: Vec<(&'static str, &'static str)>,
-    hooks: fn() -> Vec<Box<dyn Hook>>,
+    hooks: fn() -> Vec<Arc<dyn Hook>>,
 }
 
 impl Bundle {
@@ -83,7 +83,7 @@ impl Extension for Bundle {
             .collect()
     }
 
-    fn hooks(&self) -> Vec<Box<dyn Hook>> {
+    fn hooks(&self) -> Vec<Arc<dyn Hook>> {
         (self.hooks)()
     }
 }
@@ -110,7 +110,7 @@ async fn an_extension_adds_its_tools_hooks_and_prompt_sections() {
     let notes = Bundle {
         tools: vec![Arc::new(EchoTool::new("note"))],
         sections: vec![("notes", "Use note to keep notes.")],
-        hooks: || vec![Box::new(Mark) as Box<dyn Hook>],
+        hooks: || vec![Arc::new(Mark) as Arc<dyn Hook>],
         ..Bundle::named("notes")
     };
     config.extensions = vec![Arc::new(notes)];
@@ -136,7 +136,7 @@ fn an_extension_hook_outside_the_extension_stage_refuses_the_agent() {
     let early = Bundle {
         tools: vec![Arc::new(EchoTool::new("note"))],
         sections: vec![("notes", "Use note to keep notes.")],
-        hooks: || vec![Box::new(Early) as Box<dyn Hook>],
+        hooks: || vec![Arc::new(Early) as Arc<dyn Hook>],
         ..Bundle::named("early")
     };
     config.extensions = vec![Arc::new(early)];
@@ -235,9 +235,9 @@ impl Extension for Asked {
         "asked"
     }
 
-    fn hooks(&self) -> Vec<Box<dyn Hook>> {
+    fn hooks(&self) -> Vec<Arc<dyn Hook>> {
         self.asked.fetch_add(1, Ordering::SeqCst);
-        vec![Box::new(Remember(self.seen.clone()))]
+        vec![Arc::new(Remember(self.seen.clone()))]
     }
 }
 
@@ -268,7 +268,7 @@ async fn a_failing_extension_hook_is_reported_under_the_extension_name() {
     ]));
     let mut config = base(provider);
     let broken = Bundle {
-        hooks: || vec![Box::new(Broken) as Box<dyn Hook>],
+        hooks: || vec![Arc::new(Broken) as Arc<dyn Hook>],
         ..Bundle::named("broken")
     };
     config.extensions = vec![Arc::new(broken)];

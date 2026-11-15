@@ -13,10 +13,6 @@ use tokio_util::sync::CancellationToken;
 use crate::ai::ToolCall;
 use crate::sync::lock;
 
-/// How long a host is usually given to answer one approval request; a frontend passes its
-/// own to [`ApprovalMode::Wait`].
-pub const DEFAULT_APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
-
 /// Why a call is denied when nobody answers approvals ([`ApprovalMode::Deny`]).
 pub(crate) const NO_HUMAN: &str = "no human is available to approve this call";
 

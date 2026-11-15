@@ -10,8 +10,7 @@ use zx_agent::ai::sync::lock;
 use zx_agent::ai::text::clip;
 use zx_agent::ai::{AssistantMessage, ContentBlock, Delta, Message, StopReason, ToolCall, ToolResultMessage};
 use zx_agent::compaction::{self, Outcome};
-use zx_agent::events::{Event, EventKind};
-use zx_agent::runner::RunReport;
+use zx_agent::events::{Event, EventKind, RunReport};
 
 use crate::cli::{ColorArg, OutputMode};
 use crate::process::{JsonlEvents, write_line};
@@ -364,7 +363,7 @@ mod tests {
     #[test]
     fn the_turn_line_omits_tokens_the_provider_did_not_report() {
         use zx_agent::ai::Usage;
-        use zx_agent::runner::RunOutcome;
+        use zx_agent::events::RunOutcome;
         let mut report = RunReport {
             outcome: RunOutcome::Completed,
             final_text: String::new(),

@@ -30,7 +30,7 @@ use zx_agent::transcript::Transcript;
 use zx_agent::{Agent, AgentConfig, Session, SessionOptions};
 
 use super::setup::PerSession;
-use super::{Overrides, SessionPlace, Shared, env_value, push_built_in, resolve_cwd};
+use super::{Overrides, SessionPlace, Shared, env_value, resolve_cwd};
 
 /// Who answers when a tool call of a mode's sessions needs approval.
 #[derive(Clone, Copy)]
@@ -215,7 +215,7 @@ fn apply_budgets(agent: &mut AgentDefinition, budget: &Overrides) {
     }
 }
 
-/// What is known about the models: the entries of config.toml. With automatic summaries on, a
+/// What is known about the models: the entries of config.toml. With automatic compaction on, a
 /// known window of `model` adds a token trigger below it, unless the agent set one or switched
 /// it off.
 fn model_meta(
@@ -298,21 +298,22 @@ fn policies(shared: &Shared, agent: &mut AgentDefinition, approvals: Approvals<'
 /// and the other credentials, and the trace export.
 ///
 /// Each hook declares its stage, so redaction runs before a session's output is saved,
-/// whatever is registered later.
+/// whatever is registered later. A built-in hook's name, which `hook_failed` events and
+/// `[hook]` lines show, contains `_`, which MCP server names cannot, so it never clashes with
+/// an extension's.
 fn hooks(shared: &Shared, agent: &AgentDefinition, api_key: Option<String>) -> HookChain {
     let mut hooks = HookChain::new();
-    push_built_in(
-        &mut hooks,
+    hooks.push(
         "continue_on_length",
-        ContinueOnLength::new(agent.continue_on_length),
+        Arc::new(ContinueOnLength::new(agent.continue_on_length)),
     );
     // The hook reads the secret files again before every use.
     let redaction = RedactSecrets::new(api_key.into_iter().chain(hidden_values(shared)))
         .with_secret_files(shared.secret_files.clone());
-    push_built_in(&mut hooks, "redact_secrets", redaction);
+    hooks.push("redact_secrets", Arc::new(redaction));
     // Observes every run of every session, whoever reads its events.
     if let Some(traces) = &shared.traces {
-        push_built_in(&mut hooks, "trace_export", traces.clone());
+        hooks.push("trace_export", Arc::new(traces.clone()));
     }
     hooks
 }

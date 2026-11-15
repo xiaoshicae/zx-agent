@@ -817,9 +817,13 @@ async fn the_token_budget_ends_a_run_with_exit_code_7_before_the_next_request() 
 
     let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(7), "{stderr}");
-    assert!(stderr.contains("outcome=TokenBudget"), "{stderr}");
+    // The answer was cut off, and continuing it needed a request the budget did not leave.
     assert!(
-        stderr.contains("token budget reached (12 tokens used, token_budget = 12)"),
+        stderr.contains("outcome=budget_exhausted budget=token_budget truncated=true"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("token budget reached (12 tokens used, token_budget = 12); the answer was cut off"),
         "{stderr}"
     );
     assert_eq!(server.requests().len(), 1);
@@ -888,7 +892,10 @@ async fn the_cost_budget_ends_a_run_with_exit_code_8_before_the_next_request() {
 
     let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(8), "{stderr}");
-    assert!(stderr.contains("outcome=CostBudget"), "{stderr}");
+    assert!(
+        stderr.contains("outcome=budget_exhausted budget=cost_budget truncated=true"),
+        "{stderr}"
+    );
     assert!(stderr.contains("cost=0.0100"), "{stderr}");
     assert_eq!(server.requests().len(), 1);
 }
@@ -955,7 +962,7 @@ async fn fail_on_denied_exits_9_when_a_completed_run_had_a_denied_call() {
 
     let stderr = stderr(&output);
     assert_eq!(output.status.code(), Some(9), "{stderr}");
-    assert!(stderr.contains("outcome=Completed"), "{stderr}");
+    assert!(stderr.contains("outcome=completed"), "{stderr}");
 }
 
 #[tokio::test]

@@ -35,21 +35,21 @@
 | D20 | 会话可以起名（pi 的 `/name`）：追加 `session_info` 记录，不改头部与文件名；以文件中最后一条为准，与分支无关，不进入模型上下文，复制分支时随分支上的记录复制。名称只有一行（控制字符换成空格、去掉首尾空白），不能为空，也不能清除。`zx-agent sessions` 与 `session/list` 有名称时显示名称。起名只经 ACP 的 `/name <名称>`（`available_commands_update` 声明，`session_info_update` 通知标题，不请求模型）与 SDK 的 `Session::set_name`；chat 按 D13 不加命令；协议中由客户端改标题的 `session/set_title` 仍不稳定，不实现 |
 | D21 | 对外入口是 `Agent`（所有会话共用的角色 `AgentConfig`；创建、打开、查找、关闭会话）、`Session`（可克隆的会话句柄）与它返回的 `Run`（一次执行：事件流与结果，由调用方驱动）；循环的配置 `LoopConfig`、工具集合 `Toolbox`、`Runner` 与循环 `StepLoop` 是 crate 内部类型：一次运行每次尝试（首次，以及每次重试或上下文溢出恢复）运行一遍，不提供单独运行一次循环的接口，因为生产代码没有这种用法。预算与计数只有一份：运行持有 `RunAccounting`，借给每次尝试的循环，请求、用量、步数、续写与被拒绝的调用都直接记在运行上，预算按运行的累计检查，不在每次尝试前后复制。attempt 只表示尝试的序号（首次为 1，重试与上下文溢出恢复都会加一），如 `attempt_start`、`request_start` 事件的 `attempt` 与追踪属性 `zx.attempt`；重试的序号叫 retry（首次重试为 1），如 `retry_scheduled` 事件的 `retry` 与追踪属性 `zx.retry`，与 `max_retries`、`RunReport.retries` 一致 |
 | D22 | 摘要功能统一叫 compaction：这次操作本身（触发、开始、结果、失败）及其记录、模块、类型、函数与 ID 都叫 compaction（`transcript::compaction`、`compaction::Compactor`，记录中指向 `compaction_started` 的字段叫 `compactionId`）；summary 只指 compaction 产出的文本、文本的限额，以及向模型要这段文本的请求（`request_start` 的 `kind: summary`、会话中的 `RequestSource::Summary`）；attempt 只用于运行的尝试（D21） |
-| D23 | 领域词只有 Session、Run、Step、ToolCall 四层：一次任务请求及其工具调用叫 step（事件 `step_start` / `step_end`、钩子 `finish_step`、追踪中的 `step` span），不再叫 turn；ACP 协议与 chat 界面里的 turn 指一次提问到回答，保持原样。attempt 仍只表示运行的尝试（D21），其事件叫 `attempt_start` / `attempt_end`。运行结果用过去分词：`completed`、`truncated`、`failed`、`cancelled`、`timed_out`；三个上限沿用配置里的名字 `model_request_limit`、`token_budget`、`cost_budget`，因为退出码、IM 回复与 ACP 的停止原因都要逐个区分它们，且结果在 JSON 中保持为一个字符串。会话的记录树叫 transcript（模块 `transcript`、类型 `Transcript`）。事件格式版本当时为 4，P16 第五期提高到 5 |
+| D23 | 领域词只有 Session、Run、Step、ToolCall 四层：一次任务请求及其工具调用叫 step（事件 `step_start` / `step_end`、钩子 `finish_step`、追踪中的 `step` span），不再叫 turn；ACP 协议与 chat 界面里的 turn 指一次提问到回答，保持原样。attempt 仍只表示运行的尝试（D21），其事件叫 `attempt_start` / `attempt_end`。运行结果用过去分词：`completed`、`truncated`、`failed`、`cancelled`、`timed_out`；预算用完是 `budget_exhausted`，另带 `budget` 与 `truncated`（D26），`budget` 沿用配置里的名字 `model_request_limit`、`token_budget`、`cost_budget`，因为退出码、IM 回复与 ACP 的停止原因都要逐个区分它们；`outcome` 在 JSON 中仍是一个字符串。会话的记录树叫 transcript（模块 `transcript`、类型 `Transcript`）。事件格式版本当时为 4，P16 第五期提高到 5 |
 | D24 | 库与接入方式分开：根包 `zx-agent` 是 SDK，只把 `zx-core`、`zx-ai`、`zx-ai-openai` 与 `zx-tools` 再导出成一个库，不依赖命令行解析、ACP、追踪导出与 IM。命令行是 `zx-cli`（可执行文件仍叫 `zx-agent`，带 `config.toml`、agent 文件与追踪导出），IM 服务是 `zx-im`；新的接入方式（如 Web 服务）是建在库上的独立 crate，不进库。集成测试按是否需要编译出的程序分两处：只用库的在根目录 `tests/`，驱动程序的在 `crates/zx-cli/tests/`，不按 crate 再分 |
 | D25 | 评审之后的修正（P17）。内核：会话的记录写不进去时（写入失败、超时，或 `Run` 在写入途中被丢弃）自行关闭，由 `Agent` 从存储重新打开；摘要的边界可以落在最近一轮之内，那一轮的提问原样留在摘要之前（`compaction_started` 的 `keptInputEntryId`；会话格式版本仍是 11，它还没有随任何版本发布）；扩展在建 `Agent` 时展开并校验一次，所有会话共用；按 JSON Schema 校验工具参数是 `zx-core` 默认开启的 feature，关掉后内核只依赖 40 个 crate；`MemoryStorage::forgetting()` 在会话关闭后不再保留它。工具：`read_output` 不经符号链接读写；文件写入一旦开始就写完，调用被丢弃也一样；自动放行的前缀区分大小写；落盘的结果在原处留下第一页，`read_file` 不落盘；`provider.maxTokensField` 选择输出上限的字段名。接入：IM 的 `/new` 立即建会话；IM 的运行上限写在部署清单与示例里（100 次模型请求、3600 秒），内置 agent 不变；`acp` 处理 SIGINT 与 SIGTERM，`--no-session` 关闭的会话不留在内存；`zx-cli` 的代码都在库里。为省几行重复而引入回调或装箱 future 的共用函数不做（规则 05、09） |
+| D26 | 第二轮评审之后的修正（P18）。结果：预算用完是 `RunOutcome::BudgetExhausted { budget, truncated }`，`truncated` 指这次运行最后的回答停在输出 token 上限；续写有没有预算由内核判断，续写钩子不再看请求上限，所以请求上限挡住续写时退出码是 3（原为 6），与 token、成本预算一致；`run` 文本模式最后一行用 JSON 里的名字（`outcome=completed`，预算用完另有 `budget=`、`truncated=`），追踪另有 `zx.budget`、`zx.truncated`；事件格式版本仍是 5，它还没有随任何版本发布。接口：钩子与策略都经 `push(名字, Arc)` 与 `push_with_timeout` 注册，`Extension::hooks` 返回 `Arc`；`runner` 模块不再公开，`RunOutcome`、`RunReport`、`Budget` 从 `events` 导出，`RunLimits` 从 `agent` 导出；`Session::set_model(provider, model)`（去掉 `ModelRef`），`InputQueues::steer` 与 `follow_up` 接受 `impl Into<Input>`，去掉内核的 `DEFAULT_APPROVAL_TIMEOUT`，`Session::is_closed` 公开，已关闭的会话 `run_command` 返回 `CommandError::Closed`，`SessionList::new` 排序与截断列表。会话：相对的工作目录在创建时转为绝对路径；JSONL 目录布局里读不了的子目录被跳过，列表把它记进 `unreadable`；尾记录修复在写线程上做；会话目录只以 0700 创建。运行：自动摘要也要让上下文落到 token 触发器之下（预检与结果检查都有）；重试先写 `context_edit`，再计数与发 `retry_scheduled`；工具的执行方式与副作用取建工具集时的声明。接入：chat 在会话自行关闭后报告并从原处重开（内存会话以退出码 1 结束），`/new` 与重开沿用 `/reasoning`；run 与 acp 共用停止时读运行的循环；信号注册只在 `process`；`--session` 续接的规则只在 `SessionPlace::held`。IM：会话自行关闭时取回已回执的插话，在重开的会话里回答；路由器记住机器人没参与的线程，不再每条消息都列出全部会话；审批卡片用 `clip` 截短（省略号为 `...`）；状态文件在阻塞线程上读写。MCP 放弃请求的通知最多等 10 秒。`WritesStopped` 保持公开：直接使用 `Transcript` 的宿主（快照、复制分支）仍要据它判断 |
 
 ## 4. 当前阶段
 
-P0–P5 与 P10–P14（P10 为与 pi 的能力对齐）已完成。进行中：
+P0–P5、P10–P14（P10 为与 pi 的能力对齐）、P16 与 P17 已完成（P16、P17 经 PR #105 合并）。进行中：
 
 - P6 执行环境：已实现，待真实集群与真实 IM 平台验收（第 5 节）。
 - P7 扩展与 MCP：已实现，待真实 MCP 服务器验收。
 - P8 `acp`：已实现，待在 Zed 或 Wisp 上实测。
 - P9 可选增强：剩更多 provider。
 - P15 IM 对话模型（D16）：Slack 实现了读线程、查名字与回执；⚑ D:5/CHINA FLAG: 飞书只做消息分类，这三项沿用默认（不读历史、用 open_id、不回执），待按需补上。待在真实 Slack 工作区验证线程回复事件带 `thread_ts`（官方事件页未写明）。
-- P16 入口与接口重整：`Agent`、`Session`、`Run` 三个入口对象，模型、工具、会话存储、策略、钩子与摘要各有接口并可替换，命令行从库中拆出。七期均已实现，待合并；决策见 D21–D24。
-- P17 评审之后的修正：对 P16 的四路评审列出的缺陷、简化与优化，已实现，待合并；决策见 D25，留下的缺口在第 5 节。
+- P18 第二轮评审之后的修正：对 PR #105 合并后代码的五路评审中核实过的缺陷、简化与文档残留，已实现，待合并；决策见 D26，留下的缺口在第 5 节。
 
 ## 5. 待办与已知缺口
 
@@ -71,6 +71,9 @@ P0–P5 与 P10–P14（P10 为与 pi 的能力对齐）已完成。进行中：
 - 测试适配层经隐藏的 `Agent::adopt_session` 把测试给的 `Transcript` 变成会话。要删掉它，得让测试经存储建会话：约 80 处建会话的写法与 160 处 `build()` 要改成异步，收益只是少一个隐藏的方法，未做。
 - 容器里的文件写入在调用被丢弃后仍写完，只用假 docker 验证过；`real_` 测试要真实 Docker，这一轮没有运行。
 - 落盘目录的符号链接检查与随后的打开之间有竞态：同时在跑的命令可以在两者之间换掉目录。要消除得从工作目录起按目录描述符逐级打开，未做。
+- chat 在会话自行关闭后重开：没有端到端测试，子进程中途写入失败无法确定性地构造，只测了从错误链认出会话已关闭。
+- 尾记录修复改在写线程上做之后，卷无响应时运行时不被阻塞这一点无法确定性地测试，只测了修复本身；MCP 放弃通知的 10 秒超时没有测试。
+- IM 路由器记住机器人没参与的线程，前提是只有本进程为这些对话建会话；多副本部署时要改为共享或去掉这项记忆。
 - 会话自行关闭之后，ACP 的 `session/prompt` 以“会话未打开”应答，客户端要先 `session/load` 或 `session/resume`；要让它自动重开，得记下客户端认为打开着的会话编号，未做。
 
 ## 6. 验证记录
@@ -100,4 +103,4 @@ P0–P5 与 P10–P14（P10 为与 pi 的能力对齐）已完成。进行中：
 
 ---
 
-ROADMAP.md · v0.24 · 2026年11月
+ROADMAP.md · v0.25 · 2026年11月

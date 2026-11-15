@@ -8,8 +8,7 @@ use super::*;
 use crate::otel::TraceParent;
 use crate::otel::signal::event;
 use zx_agent::ai::{AssistantMessage, ContentBlock, Message, ToolCall};
-use zx_agent::events::EventKind;
-use zx_agent::runner::RunReport;
+use zx_agent::events::{EventKind, RunReport};
 
 const RUN: &str = "6f1c2c4e-0000-4000-8000-000000000001";
 const TRACEPARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";

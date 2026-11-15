@@ -145,7 +145,7 @@ impl Transcript {
         };
         let message = compaction.summary.message(compaction.timestamp);
         // What stays of the records before the boundary: the system messages, and the
-        // input of the turn the boundary is in.
+        // input that what the boundary falls among followed.
         let kept_input = started.kept_input_entry_id.as_deref();
         let mut projected: Vec<_> = raw[..cut]
             .iter()

@@ -3,7 +3,6 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use agent_client_protocol::Client;
 use agent_client_protocol::v1::ConnectionTo;
@@ -14,7 +13,6 @@ use agent_client_protocol::v1::schema::{
 };
 use serde_json::Value;
 
-use zx_agent::ai::sync::lock;
 use zx_agent::ai::{
     AssistantMessage, ContentBlock as MessageBlock, Delta, Message, ToolCall as MessageCall, ToolResultMessage,
     UserMessageKind,
@@ -26,12 +24,12 @@ use zx_agent::transcript::{Entry, ProjectedMessage, Transcript};
 use super::tool_kind;
 use crate::render::call_label;
 
-/// Run events as `session/update` notifications.
+/// Run events as `session/update` notifications. A turn owns the updates of its run.
 pub(super) struct Updates {
     cx: ConnectionTo<Client>,
     session_id: SessionId,
     cwd: PathBuf,
-    state: Mutex<UpdateState>,
+    state: UpdateState,
 }
 
 #[derive(Default)]
@@ -48,7 +46,7 @@ impl Updates {
             cx,
             session_id,
             cwd,
-            state: Mutex::new(UpdateState::default()),
+            state: UpdateState::default(),
         }
     }
 
@@ -218,17 +216,17 @@ impl Updates {
     }
 
     /// Streamed answer text, which the answer's end then need not repeat.
-    fn text_streamed(&self, text: &str) {
-        lock(&self.state).wrote_text = true;
+    fn text_streamed(&mut self, text: &str) {
+        self.state.wrote_text = true;
         self.send(SessionUpdate::AgentMessageChunk(Self::text_chunk(text)));
     }
 
     /// The answer ended: its text when none was streamed, and the arguments of its calls
     /// kept for their results.
-    fn answer_ended(&self, message: &AssistantMessage) {
+    fn answer_ended(&mut self, message: &AssistantMessage) {
         let text = message.text();
         let wrote_text = {
-            let mut state = lock(&self.state);
+            let state = &mut self.state;
             for block in &message.content {
                 if let MessageBlock::ToolCall(MessageCall { id, arguments, .. }) = block {
                     state.calls.insert(id.clone(), arguments.clone());
@@ -242,16 +240,16 @@ impl Updates {
     }
 
     /// A call starts: the client lists it as pending.
-    fn tool_started(&self, tool_call_id: &str, tool_name: &str, args: &Value) {
-        lock(&self.state).calls.insert(tool_call_id.to_string(), args.clone());
+    fn tool_started(&mut self, tool_call_id: &str, tool_name: &str, args: &Value) {
+        self.state.calls.insert(tool_call_id.to_string(), args.clone());
         self.send(SessionUpdate::ToolCall(
             self.call(tool_call_id, tool_name, args).status(ToolCallStatus::Pending),
         ));
     }
 
     /// A call ended: its status, what it shows and the raw output.
-    fn tool_ended(&self, result: &ToolResultMessage) {
-        let args = lock(&self.state).calls.remove(&result.tool_call_id);
+    fn tool_ended(&mut self, result: &ToolResultMessage) {
+        let args = self.state.calls.remove(&result.tool_call_id);
         let (status, content, raw_output) = self.result_fields(&result.tool_name, args.as_ref(), result);
         self.tool_update(
             &result.tool_call_id,
@@ -269,7 +267,7 @@ impl Updates {
         ));
     }
 
-    /// The state of the summary that runs as `run_id`.
+    /// The state of the compaction that runs as `run_id`.
     fn compaction_update(&self, run_id: &str, status: CompactionStatus) {
         self.send(SessionUpdate::CompactionUpdate(CompactionUpdate::new(
             CompactionId::new(run_id),
@@ -288,9 +286,9 @@ pub(super) fn send(cx: &ConnectionTo<Client>, session_id: &SessionId, update: Se
 
 impl Updates {
     /// Send what `event` of a run means to the client.
-    pub(super) fn emit(&self, event: &Event) {
+    pub(super) fn emit(&mut self, event: &Event) {
         match &event.event {
-            EventKind::MessageStart { role: "assistant" } => lock(&self.state).wrote_text = false,
+            EventKind::MessageStart { role: "assistant" } => self.state.wrote_text = false,
             EventKind::MessageUpdate {
                 delta: Delta::Text { text },
             } => self.text_streamed(text),
