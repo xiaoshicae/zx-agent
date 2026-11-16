@@ -3,7 +3,7 @@
 //! restart.
 mod common;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -274,7 +274,8 @@ impl Gate {
 /// tool, the storage that keeps them in memory, how often a session was set up, and how
 /// often the server read the storage's headers or listed sessions. It is the agent's session
 /// setup, which refuses every session when it has a reason to and can be held at a gate, and
-/// its storage, which counts what it is asked.
+/// its storage, which counts what it is asked and no longer has the sessions it was told to
+/// forget, as when their files are removed.
 struct Sessions {
     provider: Arc<FauxProvider>,
     echo: Arc<EchoTool>,
@@ -284,9 +285,19 @@ struct Sessions {
     listed: AtomicUsize,
     fail: Option<String>,
     setup_gate: Option<Arc<Gate>>,
+    forgotten: Mutex<HashSet<String>>,
 }
 
 impl Sessions {
+    /// Lose the session `id` from the storage.
+    fn forget(&self, id: &str) {
+        self.forgotten.lock().unwrap().insert(id.to_string());
+    }
+
+    fn is_forgotten(&self, id: &str) -> bool {
+        self.forgotten.lock().unwrap().contains(id)
+    }
+
     /// The IDs of the conversation's sessions, most recently active first.
     async fn of(&self, key: &SessionKey) -> Result<Vec<String>, String> {
         let query = SessionQuery {
@@ -347,6 +358,7 @@ impl SessionStorage for Sessions {
     }
 
     async fn open(&self, id: &str) -> anyhow::Result<(LoadedSession, Box<dyn SessionLog>)> {
+        anyhow::ensure!(!self.is_forgotten(id), "no session {id}");
         self.storage.open(id).await
     }
 
@@ -356,7 +368,9 @@ impl SessionStorage for Sessions {
 
     async fn headers(&self, query: &SessionQuery) -> anyhow::Result<Vec<SessionHeader>> {
         self.indexed.fetch_add(1, Ordering::SeqCst);
-        self.storage.headers(query).await
+        let mut headers = self.storage.headers(query).await?;
+        headers.retain(|header| !self.is_forgotten(&header.id));
+        Ok(headers)
     }
 
     async fn list(&self, query: &SessionQuery) -> anyhow::Result<SessionList> {
@@ -445,6 +459,7 @@ fn start(setup: Setup) -> Harness {
         listed: AtomicUsize::new(0),
         fail: setup.fail_open,
         setup_gate: setup.setup_gate,
+        forgotten: Mutex::default(),
     });
     let agent = sessions.agent(setup.approval_timeout);
     let (inject, events_in) = mpsc::channel(16);
@@ -1315,6 +1330,36 @@ async fn a_failing_channel_stops_the_server_with_its_error() {
         Err(ImError::Config(error)) => assert_eq!(error, "token rejected"),
         other => panic!("expected the channel's error, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn a_conversation_whose_session_is_gone_goes_on_in_a_new_one() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("one"), FauxStep::text("two")],
+        config: ServerConfig {
+            idle: Duration::from_millis(20),
+            ..Setup::default().config
+        },
+        ..Setup::default()
+    });
+    let working: Post = text(&h.replies.working.clone());
+    h.say_directly("d1", "hello").await;
+    let status = h.posted(&direct(), working.clone()).await;
+    h.updated(&status, text("one")).await;
+    assert_eq!(h.event().await, ServerEvent::Released { key: direct_key() });
+    let gone = h.sessions.of(&direct_key()).await.unwrap().remove(0);
+    h.sessions.forget(&gone);
+
+    h.say_directly("d2", "again").await;
+
+    match h.event().await {
+        ServerEvent::Failed { error, .. } => assert!(error.contains(&gone), "{error}"),
+        other => panic!("expected the lost session to be reported, got {other:?}"),
+    }
+    let status = h.posted(&direct(), working).await;
+    h.updated(&status, text("two")).await;
+    assert_eq!(h.requests()[1], ["user:again"]);
+    h.stop().await.unwrap();
 }
 
 #[tokio::test]

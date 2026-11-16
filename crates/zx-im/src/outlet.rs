@@ -10,7 +10,7 @@ use tokio::task::JoinError;
 use tokio_util::sync::CancellationToken;
 
 use crate::session::SessionError;
-use crate::transcript::CustomMessage;
+use crate::transcript::{CustomMessage, SessionQuery};
 use crate::{Agent, Session};
 use zx_core::SessionOptions;
 use zx_core::events::{Budget, RunOutcome, RunReport};
@@ -137,10 +137,20 @@ impl Outlet {
     /// what was said there before, which is read before the session is made: a session either
     /// starts with the thread or is not made. A session the conversation has already, such as
     /// one `/new` started, is opened as it is, however little it holds.
+    ///
+    /// A session the storage no longer has, such as one whose file was removed, is reported
+    /// and replaced as if the conversation were new; any other failure is the caller's to
+    /// report, and the next message tries again.
     pub(crate) async fn open(&self, trigger: Option<&MessageRef>) -> Result<Opened, String> {
         let shared = &self.shared;
         if let Some(id) = shared.session_of(&self.key) {
-            return self.held(shared.agent.open_session(&id).await);
+            match shared.agent.open_session(&id).await {
+                Ok(session) => return self.held(Ok::<_, String>(session)),
+                Err(error) if !self.still_kept(&id).await => {
+                    self.failed(format!("session {id} is gone ({error:#}); a new one is made"));
+                }
+                Err(error) => return Err(format!("{error:#}")),
+            }
         }
         let earlier = match trigger {
             Some(trigger) => self.said_before(trigger).await,
@@ -154,6 +164,19 @@ impl Outlet {
             }
         }
         Ok(opened)
+    }
+
+    /// Whether the storage still has the conversation's session `id`. A storage that cannot
+    /// tell counts as having it, so that a passing failure never starts a new session.
+    async fn still_kept(&self, id: &str) -> bool {
+        let query = SessionQuery {
+            labels: self.key.labels(),
+            ..SessionQuery::default()
+        };
+        match self.shared.agent.session_headers(&query).await {
+            Ok(headers) => headers.iter().any(|header| header.id == id),
+            Err(_) => true,
+        }
     }
 
     /// Create a session with the conversation's labels, which is its latest one from now
