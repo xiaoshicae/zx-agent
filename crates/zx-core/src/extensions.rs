@@ -11,7 +11,6 @@ use std::sync::Arc;
 use crate::ai::{PREAMBLE, SystemPrompt};
 use crate::hooks::{Hook, HookChain, HookStage};
 use crate::policy::{PolicyChain, ToolPolicy};
-use crate::prompt::GENERATED_SECTIONS;
 use crate::tools::Tool;
 
 pub use command::{CommandContext, CommandError, CommandOutcome, SlashCommand, check_command_name};
@@ -78,7 +77,9 @@ pub trait Extension: Send + Sync {
 
     /// `(name, content)` sections placed after the prompt's existing ones. A name is ASCII
     /// lowercase letters, digits and `_`, starting with a letter; it may not be the preamble's,
-    /// one of [`GENERATED_SECTIONS`] or one the prompt already has. Blank content is left out.
+    /// one the host's session setup gives
+    /// ([`SessionSetup::section_names`](crate::agent::SessionSetup::section_names)), or one the
+    /// prompt already has. Blank content is left out.
     fn prompt_sections(&self) -> Vec<(String, String)> {
         Vec::new()
     }
@@ -128,9 +129,9 @@ impl Expanded {
     /// against the prompt they are added to ([`Self::sections_after`]).
     ///
     /// Errors: a blank or repeated extension name, a hook outside [`HookStage::Extension`],
-    /// a section name that is malformed, reserved or repeated, and a command name that is
-    /// malformed or repeated.
-    pub(crate) fn of(extensions: &[Arc<dyn Extension>]) -> Result<Self, String> {
+    /// a section name that is malformed, repeated, the preamble's or one of `reserved`, and a
+    /// command name that is malformed or repeated.
+    pub(crate) fn of(extensions: &[Arc<dyn Extension>], reserved: &[String]) -> Result<Self, String> {
         let mut expanded = Self {
             tools: Vec::new(),
             policies: PolicyChain::new(),
@@ -140,14 +141,19 @@ impl Expanded {
         };
         let mut claimed = Claimed::default();
         for extension in extensions {
-            expanded.take(extension.as_ref(), &mut claimed)?;
+            expanded.take(extension.as_ref(), &mut claimed, reserved)?;
         }
         Ok(expanded)
     }
 
     /// Check one extension's name, hooks, sections and commands against what the earlier
     /// ones claimed, and add what it gives.
-    fn take<'a>(&mut self, extension: &'a dyn Extension, claimed: &mut Claimed<'a>) -> Result<(), String> {
+    fn take<'a>(
+        &mut self,
+        extension: &'a dyn Extension,
+        claimed: &mut Claimed<'a>,
+        reserved: &[String],
+    ) -> Result<(), String> {
         let name = extension.name();
         if name.trim().is_empty() {
             return Err("an extension has a blank name".to_string());
@@ -167,7 +173,7 @@ impl Expanded {
         }
         let sections = extension.prompt_sections();
         for (section, _) in &sections {
-            check_section_name(section).map_err(|reason| format!("extension {name:?}: {reason}"))?;
+            check_section_name(section, reserved).map_err(|reason| format!("extension {name:?}: {reason}"))?;
             if !claimed.sections.insert(section.clone()) {
                 return Err(taken_section(name, section));
             }
@@ -223,9 +229,10 @@ struct Claimed<'a> {
     commands: HashSet<String>,
 }
 
-/// A section name renders as a tag (`<name>`), and the ones zx-agent generates hold facts the
-/// program provides, so an extension's section may not take or imitate them.
-fn check_section_name(name: &str) -> Result<(), String> {
+/// A section name renders as a tag (`<name>`). The preamble, and the sections the host's
+/// session setup gives (`reserved`), hold what the host provides, so an extension's section
+/// may not take or imitate them.
+fn check_section_name(name: &str, reserved: &[String]) -> Result<(), String> {
     let mut chars = name.chars();
     let well_formed = chars.next().is_some_and(|first| first.is_ascii_lowercase())
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
@@ -234,8 +241,8 @@ fn check_section_name(name: &str) -> Result<(), String> {
             "section name {name:?} must be ASCII lowercase letters, digits and _, starting with a letter"
         ));
     }
-    if name == PREAMBLE || GENERATED_SECTIONS.contains(&name) {
-        return Err(format!("section name {name:?} is reserved for zx-agent's own sections"));
+    if name == PREAMBLE || reserved.iter().any(|taken| taken == name) {
+        return Err(format!("section name {name:?} is reserved for the host's own sections"));
     }
     Ok(())
 }

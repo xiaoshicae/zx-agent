@@ -9,13 +9,14 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use common::{EchoTool, config, refusal, run_prompt, summarize};
-use zx_agent::ai::ToolCall;
+use zx_agent::agent::{SessionParts, SessionSetup};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
+use zx_agent::ai::{SystemPrompt, ToolCall};
 use zx_agent::events::{EventKind, HookPoint};
 use zx_agent::extensions::Extension;
 use zx_agent::hooks::{Hook, HookContext, HookResult, HookStage};
-use zx_agent::prompt::{ENVIRONMENT, build_system_prompt};
 use zx_agent::tools::{Tool, ToolOutput};
+use zx_agent::transcript::SessionHeader;
 use zx_agent::{Agent, AgentConfig, SessionOptions};
 
 /// Appends a mark to every tool result.
@@ -92,7 +93,9 @@ impl Extension for Bundle {
 /// the host's own.
 fn base(provider: Arc<FauxProvider>) -> AgentConfig {
     let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
-    config.system_prompt = build_system_prompt("Do the task.", &[(ENVIRONMENT, "OS: test"), ("rules", "Be brief.")]);
+    config.system_prompt = SystemPrompt::new("Do the task.")
+        .with_section("environment", "OS: test")
+        .with_section("rules", "Be brief.");
     config
 }
 
@@ -177,6 +180,20 @@ fn an_extension_tool_may_not_take_a_name_in_use() {
     }
 }
 
+/// A session setup that gives the prompt sections `0`, each blank in every session.
+struct Gives(&'static [&'static str]);
+
+#[async_trait]
+impl SessionSetup for Gives {
+    async fn setup(&self, _header: &SessionHeader) -> anyhow::Result<SessionParts> {
+        Ok(SessionParts::default())
+    }
+
+    fn section_names(&self) -> Vec<String> {
+        self.0.iter().map(|name| (*name).to_string()).collect()
+    }
+}
+
 #[test]
 fn extension_sections_may_not_take_reserved_existing_or_malformed_names() {
     for (sections, expected) in [
@@ -190,6 +207,7 @@ fn extension_sections_may_not_take_reserved_existing_or_malformed_names() {
         (vec![("my notes", "x")], "must be ASCII lowercase"),
     ] {
         let mut config = base(idle());
+        config.session_setup = Some(Arc::new(Gives(&["environment", "available_skills"])));
         let bundle = Bundle {
             sections,
             ..Bundle::named("notes")

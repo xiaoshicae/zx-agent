@@ -117,6 +117,13 @@ pub trait SessionSetup: Send + Sync {
     /// storage. The agent waits as long as this takes; dropping the call that creates or
     /// opens the session drops this one.
     async fn setup(&self, header: &SessionHeader) -> Result<SessionParts>;
+
+    /// The names of the prompt sections that [`setup`](Self::setup) gives, which no extension
+    /// may take: a session leaves a blank section out, and an extension that took its name
+    /// there would clash with it where it is not blank. None by default.
+    fn section_names(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// What belongs to one session, added to what the agent gives every session.
@@ -217,7 +224,12 @@ impl Agent {
         if let Some(summarizer) = &config.summarizer {
             anyhow::ensure!(!summarizer.name().trim().is_empty(), "the summarizer has no name");
         }
-        let extensions = Expanded::of(&config.extensions).map_err(anyhow::Error::msg)?;
+        let reserved = config
+            .session_setup
+            .as_ref()
+            .map(|setup| setup.section_names())
+            .unwrap_or_default();
+        let extensions = Expanded::of(&config.extensions, &reserved).map_err(anyhow::Error::msg)?;
         let agent = Self {
             shared: Arc::new(Shared {
                 config,
