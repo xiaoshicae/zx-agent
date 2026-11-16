@@ -85,10 +85,15 @@ impl Transcript {
             cache_key: request.cache_key.clone(),
             provider_options,
         };
-        let existing = self.ancestors(self.leaf.as_deref()).find_map(|entry| match entry {
-            Entry::RequestConfig(entry) => Some(entry),
-            _ => None,
-        });
+        let existing = self
+            .leaf
+            .as_deref()
+            .and_then(|id| self.index.get(id))
+            .and_then(|index| self.tree.request_config(*index))
+            .and_then(|index| match &self.entries[index] {
+                Entry::RequestConfig(entry) => Some(entry),
+                _ => None,
+            });
         let unchanged = existing
             .filter(|entry| entry.config == config)
             .map(|entry| entry.id.clone());
@@ -154,7 +159,10 @@ impl Transcript {
     pub(super) fn validate_request_start(&self, started: &RequestStartedEntry) -> Result<()> {
         let parent = started.parent_id.as_deref();
         ensure!(
-            self.ancestors(parent).any(|entry| entry.id() == started.config_id),
+            parent
+                .and_then(|id| self.index.get(id))
+                .zip(self.index.get(&started.config_id))
+                .is_some_and(|(leaf, config)| self.tree.contains(*config, *leaf)),
             "request config is not on this branch"
         );
         self.request_config(&started.config_id)?;

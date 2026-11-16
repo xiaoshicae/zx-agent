@@ -6,7 +6,7 @@ use super::run_host::{RunHost, RunStop};
 use super::{Ending, RunAccounting, Running};
 use crate::ai::retry::{RetryPolicy, is_context_overflow, is_retryable};
 use crate::ai::{AssistantMessage, duration_ms};
-use crate::compaction::{End, Trigger};
+use crate::compaction::End;
 use crate::events::EventKind;
 
 impl Running<'_> {
@@ -94,8 +94,7 @@ impl RunHost<'_> {
             .emit(EventKind::ContextOverflow { error: error.into() })
             .await;
         self.omit_failed_attempt(failed_entry).await.map_err(RunStop::Failed)?;
-        let compacted = self.compact(Trigger::Automatic, accounting.attempts).await;
-        accounting.count_requests(compacted.requests, &compacted.usage);
+        let compacted = self.compact_for_run(accounting).await.map_err(RunStop::Failed)?;
         let reason = match compacted.end {
             End::Completed { .. } => return Ok(()),
             End::Cancelled(_) => return Err(RunStop::Ended(Ending::Cancelled)),

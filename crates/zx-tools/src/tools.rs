@@ -60,7 +60,8 @@ const DEFAULT_MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 /// Build built-in tools by name, in the given order, without duplicates, running commands and
 /// reading and writing files through `executor`, which also decides what commands must not
 /// see (see [`LocalExecutor::hidden_env`]). edit_file and write_file share one
-/// [`FileMutationQueue`]. Errors: a name that is not in [`BUILTIN_TOOL_NAMES`].
+/// [`FileMutationQueue`] with other default file tools in this process, including other
+/// sessions. Errors: a name that is not in [`BUILTIN_TOOL_NAMES`].
 ///
 /// [`LocalExecutor::hidden_env`]: crate::executor::LocalExecutor::hidden_env
 pub fn builtin_tools(
@@ -69,7 +70,7 @@ pub fn builtin_tools(
     executor: &Arc<dyn Executor>,
 ) -> Result<Vec<Arc<dyn Tool>>> {
     let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
-    let queue = Arc::new(FileMutationQueue::default());
+    let queue = FileMutationQueue::shared();
     let search = SearchSettings {
         executor: Arc::clone(executor),
     };

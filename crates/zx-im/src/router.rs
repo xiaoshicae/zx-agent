@@ -26,6 +26,8 @@ const RETIRE_CAPACITY: usize = 16;
 /// Threads remembered as ones the bot never joined. The talk of the busiest threads at a
 /// time fits; one forgotten is looked up again.
 const NOT_JOINED_CAPACITY: usize = 4096;
+/// Short control messages remain usable even with a tiny configured text budget.
+const MAX_CONTROL_BYTES: usize = 64;
 
 /// The conversation a message belongs to: the direct chat, or the thread in a group. A
 /// mention posted in a group itself starts a thread under it; anything else posted there
@@ -171,7 +173,7 @@ impl Router {
         loop {
             tokio::select! {
                 () = self.stop.cancelled() => return Ok(()),
-                Some((index, event)) = self.inbound.recv() => self.route(index, event).await,
+                Some((index, event)) = self.inbound.recv() => self.route(index, event),
                 Some(retire) = self.retired.recv() => self.retire(&retire),
                 Some(ended) = self.channel_tasks.join_next() => self.channel_ended(ended)?,
                 Some(ended) = self.tasks.join_next_with_id() => self.note_ended("conversation", ended),
@@ -201,13 +203,20 @@ impl Router {
             Err(error) => (error.id(), Some(error)),
         };
         let key = self.conversations.remove(&id);
+        // A failed worker closes its inbox without the retire handshake. Do not retain
+        // its handle, or remove a replacement worker whose inbox is still open.
+        if let Some(key) = &key
+            && self.workers.get(key).is_some_and(|worker| worker.inbox.is_closed())
+        {
+            self.workers.remove(key);
+        }
         if let Some(error) = failure {
             self.shared
                 .failed(key.as_ref(), format!("a {what} task failed: {error}"));
         }
     }
 
-    async fn route(&mut self, index: usize, event: Inbound) {
+    fn route(&mut self, index: usize, event: Inbound) {
         let channel = Arc::clone(&self.channels[index]);
         let platform = channel.platform().to_string();
         match event {
@@ -233,7 +242,7 @@ impl Router {
                         addressee,
                         text,
                     };
-                    self.message(channel, key, incoming).await;
+                    self.message(channel, key, incoming);
                 } else if addressee == Addressee::Bot {
                     // Only a message meant for the bot hears why it gets no answer; the
                     // rest of a group's talk is none of its business.
@@ -260,10 +269,15 @@ impl Router {
 
     /// Pass a message to the conversation's worker, starting one when there is none: for a
     /// message meant for the bot, or one in a thread the bot took part in before.
-    async fn message(&mut self, channel: Arc<dyn ImChannel>, key: SessionKey, incoming: Incoming) {
+    fn message(&mut self, channel: Arc<dyn ImChannel>, key: SessionKey, incoming: Incoming) {
         let mentioned = incoming.addressee == Addressee::Bot;
         // Talk in a thread the bot never joined is not a conversation with it.
-        if !mentioned && !self.workers.contains_key(&key) && !self.joined(&key).await {
+        if !mentioned && !self.workers.contains_key(&key) && self.not_joined.contains(&key) {
+            return;
+        }
+        let control = incoming.text.len() <= MAX_CONTROL_BYTES && worker::is_command(&incoming.text);
+        if incoming.text.len() > self.shared.max_pending_bytes && !control {
+            self.overloaded(channel, &key);
             return;
         }
         let input = WorkerInput::Message(incoming);
@@ -280,6 +294,10 @@ impl Router {
             self.dropped(&key);
             return;
         };
+        if self.tasks.len() >= self.shared.max_conversations {
+            self.overloaded(channel, &key);
+            return;
+        }
         self.not_joined.remove(&key);
         let (inbox, receiver) = mpsc::channel(INBOX_CAPACITY);
         let task = self.tasks.spawn(worker::run(WorkerSetup {
@@ -297,29 +315,6 @@ impl Router {
             self.dropped(&key);
         }
         self.workers.insert(key, worker);
-    }
-
-    /// Whether the bot took part in the conversation `key` before: it has a session, so a
-    /// message there that does not mention the bot is still part of the conversation.
-    async fn joined(&mut self, key: &SessionKey) -> bool {
-        if self.not_joined.contains(key) {
-            return false;
-        }
-        let asked = self.shared.latest_session(key);
-        match self
-            .shared
-            .bounded(Some(key), "look up the conversation's sessions", asked)
-            .await
-        {
-            Some(Some(_)) => true,
-            Some(None) => {
-                self.not_joined.insert(key);
-                false
-            }
-            // A lookup that failed was reported, and is tried again next time; the
-            // conversation counts as not joined, and a mention still starts it.
-            None => false,
-        }
     }
 
     /// Pass a click to the conversation's worker. Without a worker nothing is pending:
@@ -347,9 +342,25 @@ impl Router {
 
     /// Answer a chat the server does not serve, without holding up the router.
     fn refuse(&mut self, channel: Arc<dyn ImChannel>, to: Destination) {
+        self.reply(channel, to, self.shared.replies.unauthorized.clone());
+    }
+
+    fn overloaded(&mut self, channel: Arc<dyn ImChannel>, key: &SessionKey) {
+        self.shared.failed(
+            Some(key),
+            "conversation capacity exceeded; message was not accepted".into(),
+        );
+        self.reply(channel, key.destination(), self.shared.replies.overloaded.clone());
+    }
+
+    fn reply(&mut self, channel: Arc<dyn ImChannel>, to: Destination, text: String) {
+        // Even rejection replies have a bound, so a busy platform cannot accumulate tasks.
+        if self.refusals.len() >= self.shared.max_conversations {
+            return;
+        }
         let shared = Arc::clone(&self.shared);
         self.refusals.spawn(async move {
-            let text = Post::Text(shared.replies.unauthorized.clone());
+            let text = Post::Text(text);
             let act = format!("answer in {}", to.conversation);
             shared.bounded(None, &act, channel.send(&to, &text)).await;
         });
@@ -364,6 +375,9 @@ impl Router {
             .is_some_and(|worker| worker.forwarded == retire.received)
         {
             self.workers.remove(&retire.key);
+            if retire.not_joined {
+                self.not_joined.insert(&retire.key);
+            }
         }
     }
 
@@ -378,7 +392,7 @@ impl Router {
         // the senders, which ends this loop; reading on means no channel waits on a full
         // buffer meanwhile.
         while let Some((index, event)) = self.inbound.recv().await {
-            self.route(index, event).await;
+            self.route(index, event);
         }
         // Without their inboxes, workers end once their runs have stopped and they have
         // posted.

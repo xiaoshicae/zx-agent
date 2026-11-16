@@ -232,6 +232,11 @@ impl StatusStore for Statuses {
 /// tool, the storage that keeps them in memory, how often a session was set up, and how
 /// often the server listed sessions. It is the agent's session setup, which refuses every
 /// session when it has a reason to, and its storage, which counts the listings.
+struct ListGate {
+    entered: tokio::sync::Notify,
+    release: CancellationToken,
+}
+
 struct Sessions {
     provider: Arc<FauxProvider>,
     echo: Arc<EchoTool>,
@@ -239,6 +244,7 @@ struct Sessions {
     opened: AtomicUsize,
     listed: AtomicUsize,
     fail: Option<String>,
+    list_gate: Option<Arc<ListGate>>,
 }
 
 impl Sessions {
@@ -306,6 +312,12 @@ impl SessionStorage for Sessions {
 
     async fn list(&self, query: &SessionQuery) -> anyhow::Result<SessionList> {
         self.listed.fetch_add(1, Ordering::SeqCst);
+        if query.labels.values().any(|value| value == "slow-thread")
+            && let Some(gate) = &self.list_gate
+        {
+            gate.entered.notify_one();
+            gate.release.cancelled().await;
+        }
         self.storage.list(query).await
     }
 }
@@ -324,6 +336,7 @@ struct Setup {
     config: ServerConfig,
     approval_timeout: Duration,
     fail_open: Option<String>,
+    list_gate: Option<Arc<ListGate>>,
     fail_channel: Option<String>,
     /// Events the channel passes on as the server stops.
     late: Vec<Inbound>,
@@ -349,6 +362,7 @@ impl Default for Setup {
             },
             approval_timeout: WAIT,
             fail_open: None,
+            list_gate: None,
             fail_channel: None,
             late: Vec::new(),
             statuses: None,
@@ -380,6 +394,7 @@ fn start(setup: Setup) -> Harness {
         opened: AtomicUsize::new(0),
         listed: AtomicUsize::new(0),
         fail: setup.fail_open,
+        list_gate: setup.list_gate,
     });
     let agent = sessions.agent(setup.approval_timeout);
     let (inject, events_in) = mpsc::channel(16);
@@ -1804,5 +1819,127 @@ async fn talk_in_a_thread_after_its_session_was_released_is_still_recorded() {
             "user:U-asker: confirm?"
         ]
     );
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_slow_thread_lookup_does_not_block_another_conversations_messages() {
+    let gate = Arc::new(ListGate {
+        entered: tokio::sync::Notify::new(),
+        release: CancellationToken::new(),
+    });
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("hi")],
+        list_gate: Some(gate.clone()),
+        ..Setup::default()
+    });
+    h.say_as(OTHER, "m2", "slow-thread", Addressee::Nobody, "among people")
+        .await;
+    gate.entered.notified().await;
+    h.say_directly("d1", "hello").await;
+    // The direct chat responds while the storage lookup is still held. Only WAIT, the
+    // harness's failure bound, limits this wait; no scheduler-speed assumption is needed.
+    let status = h.posted(&direct(), text(&h.replies.working.clone())).await;
+    gate.release.cancel();
+    h.updated(&status, text("hi")).await;
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_conversation_waiting_for_a_run_slot_does_not_set_up_a_session() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::Hang],
+        config: ServerConfig {
+            max_running: NonZeroUsize::new(1).unwrap(),
+            ..Setup::default().config
+        },
+        ..Setup::default()
+    });
+    h.say("m1", None, "run").await;
+    h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    h.say_directly("d1", "wait").await;
+    h.posted(&direct(), text(&h.replies.queued.clone())).await;
+    let opened = h.sessions.opened.load(Ordering::SeqCst);
+    h.stop().await.unwrap();
+    assert_eq!(
+        opened, 1,
+        "a queued conversation must not start a container or hold a session"
+    );
+}
+
+#[tokio::test]
+async fn the_conversation_limit_refuses_new_workers_before_session_setup() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::Hang],
+        config: ServerConfig {
+            max_conversations: NonZeroUsize::new(1).unwrap(),
+            ..Setup::default().config
+        },
+        ..Setup::default()
+    });
+    h.say("m1", None, "run").await;
+    h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    h.say_directly("d1", "another conversation").await;
+    h.posted(&direct(), text(&h.replies.overloaded.clone())).await;
+    assert_eq!(h.sessions.opened.load(Ordering::SeqCst), 1);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_waiting_conversation_bounds_its_messages_and_still_accepts_cancel() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::Hang],
+        config: ServerConfig {
+            max_running: NonZeroUsize::new(1).unwrap(),
+            max_pending_messages: NonZeroUsize::new(1).unwrap(),
+            ..Setup::default().config
+        },
+        ..Setup::default()
+    });
+    h.say("m1", None, "run").await;
+    h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    h.say_directly("d1", "wait").await;
+    h.posted(&direct(), text(&h.replies.queued.clone())).await;
+    h.say_directly("d2", "too much").await;
+    h.posted(&direct(), text(&h.replies.overloaded.clone())).await;
+    h.say_directly("d3", "/cancel").await;
+    h.posted(&direct(), text(&h.replies.cancelled.clone())).await;
+    assert_eq!(h.sessions.opened.load(Ordering::SeqCst), 1);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn steering_is_bounded_by_utf8_bytes_without_acknowledging_rejected_messages() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::Hang],
+        config: ServerConfig {
+            max_pending_bytes: NonZeroUsize::new(6).unwrap(),
+            ..Setup::default().config
+        },
+        ..Setup::default()
+    });
+    h.say_directly("d1", "run").await;
+    let status = h.posted(&direct(), text(&h.replies.working.clone())).await;
+    h.say_directly("d2", "中文").await;
+    h.acknowledged(&direct(), "d2").await;
+    h.say_directly("d3", "x").await;
+    h.posted(&direct(), text(&h.replies.overloaded.clone())).await;
+    h.say_directly("d4", "/cancel").await;
+    h.updated(&status, text(&h.replies.cancelled.clone())).await;
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_oversized_message_is_refused_without_opening_a_session() {
+    let mut h = start(Setup {
+        config: ServerConfig {
+            max_pending_bytes: NonZeroUsize::new(5).unwrap(),
+            ..Setup::default().config
+        },
+        ..Setup::default()
+    });
+    h.say_directly("d1", "中文").await;
+    h.posted(&direct(), text(&h.replies.overloaded.clone())).await;
+    assert_eq!(h.sessions.opened.load(Ordering::SeqCst), 0);
     h.stop().await.unwrap();
 }

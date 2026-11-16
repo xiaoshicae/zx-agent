@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::mutation::FileMutationQueue;
+use super::mutation::{FileMutationQueue, write_locked};
 use super::{check_path, parse_args, resolve, unless_cancelled};
 use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
@@ -24,7 +24,7 @@ impl Default for WriteFileTool {
     fn default() -> Self {
         Self {
             executor: Arc::new(LocalExecutor::default()),
-            queue: Arc::default(),
+            queue: FileMutationQueue::shared(),
         }
     }
 }
@@ -75,7 +75,7 @@ impl Tool for WriteFileTool {
         let args: Args = parse_args(&args)?;
         let path = resolve(&ctx.cwd, &args.path)?;
         let cancelled = || "write cancelled before it started".to_string();
-        let _turn = unless_cancelled(ctx, self.queue.turn(&path))
+        let turn = unless_cancelled(ctx, self.queue.turn(&path))
             .await
             .ok_or_else(cancelled)?;
         // Checked last before writing: the executor finishes a write it has begun, also when
@@ -83,8 +83,8 @@ impl Tool for WriteFileTool {
         if ctx.cancel.is_cancelled() {
             return Err(cancelled());
         }
-        self.executor.write_file(&path, args.content.as_bytes()).await?;
         let bytes = args.content.len();
+        write_locked(self.executor.clone(), path.clone(), args.content.into_bytes(), turn).await?;
         Ok(ToolOutput::ok(format!("Wrote {bytes} bytes to {}.", args.path.trim()))
             .with_details(json!({ "path": path.display().to_string(), "bytes": bytes })))
     }

@@ -69,6 +69,29 @@ pub(crate) fn without_details<T: HasMessage + Clone>(items: &[T]) -> Cow<'_, [T]
     Cow::Owned(copy)
 }
 
+/// Later edits of a target win, including edits of messages kept beside a summary.
+fn edits_on<'a>(path: &[&'a Entry]) -> HashMap<&'a str, &'a Option<String>> {
+    path.iter()
+        .filter_map(|entry| match entry {
+            Entry::ContextEdit(edit) => Some((edit.target_id.as_str(), &edit.replacement)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn project(entry: &Entry, edits: &HashMap<&str, &Option<String>>) -> Option<ProjectedMessage> {
+    let id = entry.id();
+    let message = match edits.get(id) {
+        Some(None) => return None,
+        Some(Some(text)) => entry.projected()?.with_replaced_text(text),
+        None => entry.projected()?.into_owned(),
+    };
+    Some(ProjectedMessage {
+        entry_id: id.to_string(),
+        message,
+    })
+}
+
 impl Transcript {
     /// The model-visible messages of the current branch.
     pub fn messages(&self) -> Vec<Message> {
@@ -102,28 +125,8 @@ impl Transcript {
     /// The messages `path` projects before any summary: context edits applied, summaries
     /// ignored.
     pub(super) fn raw_projection_from(path: &[&Entry]) -> Vec<ProjectedMessage> {
-        // Later edits of the same target win.
-        let mut edits: HashMap<&str, &Option<String>> = HashMap::new();
-        for entry in path {
-            if let Entry::ContextEdit(edit) = entry {
-                edits.insert(edit.target_id.as_str(), &edit.replacement);
-            }
-        }
-        path.iter()
-            .filter_map(|entry| {
-                let id = entry.id();
-                let message = entry.projected()?;
-                let message = match edits.get(id) {
-                    None => message.into_owned(),
-                    Some(None) => return None,
-                    Some(Some(text)) => message.with_replaced_text(text),
-                };
-                Some(ProjectedMessage {
-                    entry_id: id.to_string(),
-                    message,
-                })
-            })
-            .collect()
+        let edits = edits_on(path);
+        path.iter().filter_map(|entry| project(entry, &edits)).collect()
     }
 
     /// The model-visible messages of the current branch, with their source entries.
@@ -134,29 +137,32 @@ impl Transcript {
     /// The model-visible messages of the branch to `leaf`, with their source entries.
     pub(super) fn projection_at(&self, leaf: Option<&str>) -> Vec<ProjectedMessage> {
         let path = self.branch_path_from(leaf);
-        let raw = Self::raw_projection_from(&path);
         let Some((compaction, started)) = Self::compaction_in_effect_on(&path) else {
-            return raw;
+            return Self::raw_projection_from(&path);
         };
-        // A summary's boundary is validated to be on its branch; without one, the originals
-        // are the only safe projection.
-        let Some(cut) = Self::summarized_count(&path, &raw, &compaction.first_kept_entry_id) else {
-            return raw;
-        };
-        let message = compaction.summary.message(compaction.timestamp);
-        // What stays of the records before the boundary: the system messages, and the
-        // input that what the boundary falls among followed.
-        let kept_input = started.kept_input_entry_id.as_deref();
-        let mut projected: Vec<_> = raw[..cut]
+        // The boundary is in record order even when a later edit omits that message.
+        let Some(cut) = path
             .iter()
-            .filter(|item| matches!(item.message, Message::System(_)) || Some(item.entry_id.as_str()) == kept_input)
-            .cloned()
+            .position(|entry| entry.id() == compaction.first_kept_entry_id)
+        else {
+            return Self::raw_projection_from(&path);
+        };
+        let edits = edits_on(&path);
+        let kept_input = started.kept_input_entry_id.as_deref();
+        // Inspect entry types before projecting: summarized tool bodies are never cloned.
+        let mut projected: Vec<_> = path[..cut]
+            .iter()
+            .filter(|entry| {
+                Some(entry.id()) == kept_input
+                    || matches!(entry, Entry::Message(message) if matches!(message.message, Message::System(_)))
+            })
+            .filter_map(|entry| project(entry, &edits))
             .collect();
         projected.push(ProjectedMessage {
             entry_id: compaction.id.clone(),
-            message,
+            message: compaction.summary.message(compaction.timestamp),
         });
-        projected.extend(raw.into_iter().skip(cut));
+        projected.extend(path[cut..].iter().filter_map(|entry| project(entry, &edits)));
         projected
     }
 
@@ -197,21 +203,6 @@ impl Transcript {
             Entry::ContextEdit(edit) if sources.contains(&edit.target_id) => Some(edit.target_id.as_str()),
             _ => None,
         })
-    }
-
-    /// How many leading messages of `raw` a summary that keeps `first_kept` replaces: those
-    /// recorded before it in branch order; `None` when `first_kept` is not on `path`. Cutting
-    /// by branch order, not by finding the kept message in the projection, matters when a
-    /// later context edit omits that message: the summary must still replace everything
-    /// recorded before it.
-    fn summarized_count(path: &[&Entry], raw: &[ProjectedMessage], first_kept: &str) -> Option<usize> {
-        let boundary = path.iter().position(|entry| entry.id() == first_kept)?;
-        let summarized: HashSet<&str> = path[..boundary].iter().map(|entry| entry.id()).collect();
-        Some(
-            raw.iter()
-                .take_while(|item| summarized.contains(item.entry_id.as_str()))
-                .count(),
-        )
     }
 
     /// The context split at its last measurement: the usage reported by the last answer that

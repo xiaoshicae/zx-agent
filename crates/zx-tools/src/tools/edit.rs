@@ -9,7 +9,7 @@ use serde_json::{Map, Value, json};
 use super::edit_text::{
     Edit, apply_edits, line_ending, normalize_to_lf, restore_line_endings, split_bom, unified_patch,
 };
-use super::mutation::FileMutationQueue;
+use super::mutation::{FileMutationQueue, write_locked};
 use super::{DEFAULT_MAX_FILE_BYTES, check_path, looks_binary, parse_args, resolve, unless_cancelled};
 use crate::ai::ToolDef;
 use crate::executor::{Executor, LocalExecutor};
@@ -32,7 +32,7 @@ impl Default for EditFileTool {
     fn default() -> Self {
         Self {
             executor: Arc::new(LocalExecutor::default()),
-            queue: Arc::default(),
+            queue: FileMutationQueue::shared(),
         }
     }
 }
@@ -143,7 +143,7 @@ impl Tool for EditFileTool {
         let shown = args.path.trim();
         let path = resolve(&ctx.cwd, &args.path)?;
         let cancelled = || "edit cancelled before the file was changed".to_string();
-        let _turn = unless_cancelled(ctx, self.queue.turn(&path))
+        let turn = unless_cancelled(ctx, self.queue.turn(&path))
             .await
             .ok_or_else(cancelled)?;
         let read = unless_cancelled(ctx, self.executor.read_file(&path, DEFAULT_MAX_FILE_BYTES)).await;
@@ -170,7 +170,7 @@ impl Tool for EditFileTool {
         if ctx.cancel.is_cancelled() {
             return Err(cancelled());
         }
-        self.executor.write_file(&path, contents.as_bytes()).await?;
+        write_locked(self.executor.clone(), path.clone(), contents.into_bytes(), turn).await?;
 
         let mut details = Map::new();
         details.insert("path".into(), json!(path.display().to_string()));

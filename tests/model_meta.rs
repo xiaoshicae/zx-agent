@@ -483,3 +483,149 @@ async fn the_cache_key_goes_to_the_provider_and_into_the_request_audit() {
         .unwrap();
     assert_eq!(config_line["config"]["cacheKey"], "session-7");
 }
+
+#[tokio::test]
+async fn a_cost_budget_refuses_an_unpriced_model_after_switching() {
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("must not request")]));
+    let mut config = config(provider.clone(), vec![]);
+    config.models.insert("test-model".into(), priced());
+    let (runner, _) = RunnerSetup {
+        limits: zx_agent::agent::RunLimits {
+            cost_budget: Some(1.0),
+            ..common::test_limits()
+        },
+        ..RunnerSetup::new(config)
+    }
+    .build();
+    runner.set_model(provider.clone(), "unpriced").unwrap();
+    let report = runner.run("go").await;
+    assert_eq!(report.outcome, RunOutcome::Failed);
+    assert!(report.error.as_deref().unwrap().contains("unpriced"));
+    assert!(
+        provider.requests().is_empty(),
+        "no unmetered request may leave the process"
+    );
+}
+
+struct SelectModel(&'static str);
+
+#[async_trait]
+impl Hook for SelectModel {
+    async fn prepare_request(
+        &self,
+        plan: &zx_agent::hooks::RequestPlan<'_>,
+        _ctx: &HookContext,
+    ) -> HookResult<Option<zx_agent::hooks::RequestSettings>> {
+        Ok(Some(zx_agent::hooks::RequestSettings {
+            model: self.0.into(),
+            ..plan.settings.clone()
+        }))
+    }
+}
+
+#[tokio::test]
+async fn a_cost_budget_checks_the_model_selected_by_a_request_hook() {
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("must not request")]));
+    let mut config = config(provider.clone(), vec![]);
+    config.models.insert("test-model".into(), priced());
+    config.hooks.push("select_unpriced", Arc::new(SelectModel("unpriced")));
+    let (runner, _) = RunnerSetup {
+        limits: zx_agent::agent::RunLimits {
+            cost_budget: Some(1.0),
+            ..common::test_limits()
+        },
+        ..RunnerSetup::new(config)
+    }
+    .build();
+    let report = runner.run("go").await;
+    assert_eq!(report.outcome, RunOutcome::Failed);
+    assert!(report.error.unwrap().contains("unpriced"));
+    assert!(provider.requests().is_empty());
+}
+
+#[tokio::test]
+async fn a_cost_budget_refuses_an_unpriced_automatic_summary() {
+    let (session, _) = seeded_session().await;
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("must not request")]));
+    let (runner, _) = RunnerSetup {
+        session,
+        limits: zx_agent::agent::RunLimits {
+            cost_budget: Some(1.0),
+            ..common::test_limits()
+        },
+        compaction: Config {
+            trigger_bytes: Some(1024),
+            keep_recent_bytes: 1,
+            ..Config::default()
+        },
+        ..RunnerSetup::new(config(provider.clone(), vec![]))
+    }
+    .build();
+    let report = runner.run("go").await;
+    assert_eq!(report.outcome, RunOutcome::Failed);
+    assert!(report.error.unwrap().contains("prices"));
+    assert!(provider.requests().is_empty());
+}
+
+#[tokio::test]
+async fn overflow_recovery_checks_the_summary_models_prices() {
+    let (session, _) = seeded_session().await;
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::Fail("maximum context length exceeded".into()),
+        FauxStep::text("must not request"),
+    ]));
+    let mut config = config(provider.clone(), vec![]);
+    config.models.insert("priced".into(), priced());
+    config.hooks.push("priced_task", Arc::new(SelectModel("priced")));
+    let (runner, _) = RunnerSetup {
+        session,
+        limits: zx_agent::agent::RunLimits {
+            cost_budget: Some(1.0),
+            ..common::test_limits()
+        },
+        compaction: Config {
+            trigger_bytes: Some(1_000_000),
+            keep_recent_bytes: 1,
+            ..Config::default()
+        },
+        ..RunnerSetup::new(config)
+    }
+    .build();
+    let report = runner.run("go").await;
+    assert_eq!(
+        provider.requests().len(),
+        1,
+        "only the priced task request may leave the process"
+    );
+    assert_eq!(report.outcome, RunOutcome::Failed);
+    assert!(report.error.unwrap().contains("prices"));
+}
+
+#[tokio::test]
+async fn a_cost_budget_refuses_an_unpriced_manual_summary_after_switching() {
+    let (session, _) = seeded_session().await;
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("must not request")]));
+    let mut config = config(provider.clone(), vec![]);
+    config.models.insert("test-model".into(), priced());
+    let (runner, _) = RunnerSetup {
+        session,
+        limits: zx_agent::agent::RunLimits {
+            cost_budget: Some(1.0),
+            ..common::test_limits()
+        },
+        compaction: Config {
+            keep_recent_bytes: 1,
+            ..Config::default()
+        },
+        ..RunnerSetup::new(config)
+    }
+    .build();
+    runner.set_model(provider.clone(), "unpriced").unwrap();
+    let report = runner.compact().await.unwrap();
+    assert!(
+        provider.requests().is_empty(),
+        "manual summaries must not dispatch an unpriced model"
+    );
+    assert_eq!(report.outcome, compaction::Outcome::Failed);
+    assert!(report.error.unwrap().contains("unpriced"));
+}

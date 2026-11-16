@@ -220,3 +220,67 @@ async fn requests_around_a_recovery_from_context_overflow_are_rebuilt_from_the_s
     assert_eq!(sent.len(), 3);
     assert_eq!(replayed(&path), sent);
 }
+
+#[tokio::test]
+async fn request_configuration_indexes_keep_branches_separate_when_replaying() {
+    let mut store = Transcript::in_memory(header());
+    let request = Request {
+        model: "first".into(),
+        messages: vec![],
+        tools: vec![],
+        max_tokens: None,
+        reasoning: None,
+        cache_key: None,
+    };
+    let first = store
+        .record_request(&request, "p", json!({}), RequestSource::Projection)
+        .await
+        .unwrap();
+    let mut other = request.clone();
+    other.model = "other".into();
+    store
+        .record_request(&other, "p", json!({}), RequestSource::Projection)
+        .await
+        .unwrap();
+    let foreign = store
+        .entries()
+        .iter()
+        .rev()
+        .find_map(|entry| match entry {
+            Entry::RequestConfig(entry) => Some(entry.id.clone()),
+            _ => None,
+        })
+        .unwrap();
+    store.branch(&first).unwrap();
+    let last = store
+        .record_request(&request, "p", json!({}), RequestSource::Projection)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .entries()
+            .iter()
+            .filter(|entry| matches!(entry, Entry::RequestConfig(_)))
+            .count(),
+        2
+    );
+    let mut records = store
+        .entries()
+        .iter()
+        .map(|entry| serde_json::to_string(entry).unwrap())
+        .collect::<Vec<_>>();
+    records.push(
+        json!({"type":"request_started", "id":"invalid", "parentId":last,
+        "timestamp":0, "configId":foreign, "source":{"kind":"projection"}})
+        .to_string(),
+    );
+    let loaded = zx_agent::transcript::LoadedSession {
+        header: store.header().clone(),
+        records,
+        incomplete_tail_bytes: 0,
+    };
+    let error = Transcript::snapshot(loaded)
+        .err()
+        .expect("the foreign configuration must be rejected");
+    assert!(format!("{error:#}").contains("request config is not on this branch"));
+}

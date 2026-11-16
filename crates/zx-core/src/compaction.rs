@@ -252,7 +252,7 @@ pub(crate) struct Compacted {
 
 impl Compacted {
     /// A compaction that ended before it made a request.
-    fn without_request(input_bytes: usize, end: End) -> Self {
+    pub(crate) fn without_request(input_bytes: usize, end: End) -> Self {
         Self {
             requests: 0,
             usage: Usage::default(),

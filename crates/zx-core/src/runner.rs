@@ -64,8 +64,8 @@ pub struct RunLimits {
     /// every price uses it): the cost of all its model requests by those prices
     /// ([`AgentConfig::models`](crate::AgentConfig::models)), summary requests and
     /// failed attempts included. Checked before each request, so the last one may go over.
-    /// A response from a model without a price costs nothing here, so the host checks that
-    /// its models have prices. Tool usage is not counted. `None` disables the budget.
+    /// With a budget, every request's final model must have prices; a missing price fails
+    /// the run before dispatch. Tool usage is not counted. `None` disables the budget.
     pub cost_budget: Option<f64>,
 }
 
@@ -116,6 +116,12 @@ impl Runner {
     /// Summarize the old prefix without executing a task or tools, as the run `link` names.
     /// Cancellation and future drop cancel only this operation.
     pub(crate) async fn compact(&mut self, link: &RunLink) -> compaction::Report {
+        let accounting = RunAccounting::new(None, None, self.limits.cost_budget);
+        if self.config.summarizer.is_none()
+            && let Err(error) = accounting.check_model(&self.config.models, &self.config.model)
+        {
+            return compaction::Compacted::without_request(0, compaction::End::Failed(error)).into();
+        }
         let child = link.cancel.child_token();
         let _cancel_on_drop = child.drop_guard_ref();
         let trace = self.config.trace(&self.session, link.id.clone(), child.clone());

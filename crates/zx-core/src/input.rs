@@ -97,6 +97,24 @@ impl InputQueues {
         });
     }
 
+    /// Count pending steering and follow-up messages and their UTF-8 text bytes. Hosts can
+    /// bound admission without cloning the queued messages; custom entry records are excluded.
+    /// Each queue is counted separately; concurrent producers can change the result.
+    pub fn pending_size(&self) -> (usize, usize) {
+        let mut size = (0usize, 0usize);
+        for queue in [&self.steering, &self.follow_up] {
+            for input in lock(queue).iter() {
+                let text = match input {
+                    Input::User { text, .. } => text,
+                    Input::Custom(message) => &message.content,
+                };
+                size.0 = size.0.saturating_add(1);
+                size.1 = size.1.saturating_add(text.len());
+            }
+        }
+        size
+    }
+
     /// How queued messages are taken.
     pub fn mode(&self) -> QueueMode {
         *lock(&self.mode)
