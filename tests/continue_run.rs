@@ -15,7 +15,7 @@ use zx_agent::hooks::{Hook, HookContext, HookResult};
 use zx_agent::input::{Input, QueueMode};
 use zx_agent::session::SessionError;
 use zx_agent::tools::Tool;
-use zx_agent::transcript::{Entry, Transcript};
+use zx_agent::transcript::{CustomMessage, Entry, Transcript};
 
 use common::{Collect, Driven, EchoTool, RunnerSetup, config, header, summarize, take_queued_inputs, tool_call_answer};
 
@@ -73,6 +73,29 @@ async fn after_a_crash_the_recovered_results_are_answered_without_running_the_ca
     assert_eq!(sent.len(), 3, "{sent:?}");
     assert!(sent[2].starts_with("tool:c1="), "{sent:?}");
     assert!(events.kinds().contains(&"tool_call_recovered"));
+}
+
+#[tokio::test]
+async fn a_message_recorded_while_idle_after_a_crash_follows_the_recovered_results() {
+    let mut store = Transcript::in_memory(header());
+    store.append_message(Message::user("echo hi")).await.unwrap();
+    store.append_message(call_answer()).await.unwrap();
+    store.append_tool_call_started("c1", "echo").await.unwrap();
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("checked")]));
+    let (runner, _) = runner(&provider, store);
+    let heard = CustomMessage {
+        custom_type: "heard".into(),
+        content: "someone spoke".into(),
+        display: true,
+        details: None,
+    };
+    runner.append_custom_message(heard).await.unwrap();
+
+    let report = runner.run("what happened?").await;
+
+    assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
+    let sent = summarize(&provider.requests()[0].messages);
+    assert!(sent[2].starts_with("tool:c1=Result unknown"), "{sent:?}");
 }
 
 #[tokio::test]

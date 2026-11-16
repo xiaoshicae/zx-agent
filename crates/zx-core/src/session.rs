@@ -288,16 +288,21 @@ impl Session {
     /// a run, hooks and commands use `queues().append_entry` instead. Returns the entry's
     /// ID. A run returns Busy; a write failure returns WriteFailed.
     pub async fn append_entry(&self, custom_type: &str, data: Value) -> Result<String, SessionError> {
-        self.append_idle(async |store| store.append_custom_entry(custom_type, data).await)
+        self.append_idle(async |runner| runner.session_mut().append_custom_entry(custom_type, data).await)
             .await
     }
 
     /// Record a message from an extension while idle, without starting a run (pi:
-    /// `sendMessage` while idle): the model sees it with the next prompt. Returns the
+    /// `sendMessage` while idle): the model sees it with the next prompt. Calls that an
+    /// interrupted run left without a result get theirs first, as a run's start gives them,
+    /// so that the message does not come between the calls and their results. Returns the
     /// entry's ID. A run returns Busy; a write failure returns WriteFailed.
     pub async fn append_custom_message(&self, message: CustomMessage) -> Result<String, SessionError> {
-        self.append_idle(async |store| store.append_custom_message(message).await)
-            .await
+        self.append_idle(async |runner| {
+            runner.recover_interrupted_calls().await?;
+            runner.session_mut().append_custom_message(message).await
+        })
+        .await
     }
 
     /// Name the session while idle (pi: `setSessionName`): listings show the name instead of
@@ -305,18 +310,19 @@ impl Session {
     /// it was given on; `with_transcript` with [`Transcript::session_name`] reads it. Returns
     /// the entry's ID. A run returns Busy; a write failure returns WriteFailed.
     pub async fn set_name(&self, name: SessionName) -> Result<String, SessionError> {
-        self.append_idle(async |store| store.append_session_name(name).await)
+        self.append_idle(async |runner| runner.session_mut().append_session_name(name).await)
             .await
     }
 
-    /// Write one record with `append` while idle, with the conversation leased as for a
-    /// run. A run returns Busy; a write failure returns WriteFailed.
+    /// Write with `append` while idle, with the conversation leased as for a run; returns
+    /// the ID of the record it writes. A run returns Busy; a write failure returns
+    /// WriteFailed.
     async fn append_idle(
         &self,
-        append: impl AsyncFnOnce(&mut Transcript) -> anyhow::Result<String>,
+        append: impl AsyncFnOnce(&mut Runner) -> anyhow::Result<String>,
     ) -> Result<String, SessionError> {
         let mut lease = self.lease(CancellationToken::new())?;
-        append(lease.runner().session_mut())
+        append(lease.runner())
             .await
             .map_err(|error| SessionError::WriteFailed(format!("{error:#}")))
     }
