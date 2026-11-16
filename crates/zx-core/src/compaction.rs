@@ -354,8 +354,8 @@ const BYTES_PER_TOKEN: usize = 4;
 /// quarter of the bytes of the messages after it; without such an answer, a quarter of all
 /// bytes. Only an estimate: the usage counts the request as it was sent, and bytes are not
 /// tokens.
-pub fn context_tokens(session: &Transcript) -> Result<u64> {
-    let (measured, rest) = session.measured_context();
+pub fn context_tokens(transcript: &Transcript) -> Result<u64> {
+    let (measured, rest) = transcript.measured_context();
     let known = measured.map_or(0, |usage| usage.input.saturating_add(usage.output));
     Ok(known.saturating_add(estimated_tokens(context_bytes(&rest)?)))
 }

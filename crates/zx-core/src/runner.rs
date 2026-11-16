@@ -83,7 +83,7 @@ pub(crate) struct Runner {
     config: LoopConfig,
     retry: RetryPolicy,
     limits: RunLimits,
-    session: Transcript,
+    transcript: Transcript,
     /// Shared with the session's handles, which answer the requests that wait there.
     approvals: Arc<ApprovalGate>,
     compaction: compaction::Config,
@@ -93,12 +93,12 @@ pub(crate) struct Runner {
 impl Runner {
     /// Create a runner. Each step of a run is recorded in `session` before it takes effect;
     /// its events follow.
-    pub(crate) fn new(config: LoopConfig, retry: RetryPolicy, limits: RunLimits, session: Transcript) -> Self {
+    pub(crate) fn new(config: LoopConfig, retry: RetryPolicy, limits: RunLimits, transcript: Transcript) -> Self {
         Self {
             config,
             retry,
             limits,
-            session,
+            transcript,
             approvals: Arc::default(),
             compaction: compaction::Config::default(),
             pause: CompactionPause::default(),
@@ -118,15 +118,15 @@ impl Runner {
     pub(crate) async fn compact(&mut self, link: &RunLink) -> compaction::Report {
         let child = link.cancel.child_token();
         let _cancel_on_drop = child.drop_guard_ref();
-        let trace = self.config.trace(&self.session, link.id.clone(), child.clone());
+        let trace = self.config.trace(&self.transcript, link.id.clone(), child.clone());
         let target = EventTarget {
             events: &link.events,
             trace: &trace,
             hooks: &self.config.hooks,
         };
-        let run_start = self.session.entries().len();
+        let run_start = self.transcript.entries().len();
         let mut host = RunHost {
-            session: &mut self.session,
+            transcript: &mut self.transcript,
             run_start,
             target,
             config: &self.config,
@@ -161,14 +161,14 @@ impl Runner {
     }
 
     /// The session the runner records in.
-    pub(crate) fn session(&self) -> &Transcript {
-        &self.session
+    pub(crate) fn transcript(&self) -> &Transcript {
+        &self.transcript
     }
 
     /// The session, for what a host does to it between runs: a branch switch, or a record
     /// of its own, such as an extension's state.
-    pub(crate) fn session_mut(&mut self) -> &mut Transcript {
-        &mut self.session
+    pub(crate) fn transcript_mut(&mut self) -> &mut Transcript {
+        &mut self.transcript
     }
 
     /// Run from `begin` to completion, as the run `link` names: a prompt, or the session as
@@ -185,12 +185,12 @@ impl Runner {
             config,
             retry,
             limits,
-            session,
+            transcript,
             approvals,
             compaction,
             pause,
         } = self;
-        let trace = config.trace(session, link.id.clone(), run_cancel.clone());
+        let trace = config.trace(transcript, link.id.clone(), run_cancel.clone());
         let target = EventTarget {
             events: &link.events,
             trace: &trace,
@@ -198,10 +198,10 @@ impl Runner {
         };
         // The run's answer is what it adds after the entries the session has now. Counted in
         // entries, whose IDs remain stable even when hooks omit messages from earlier runs.
-        let run_start = session.entries().len();
+        let run_start = transcript.entries().len();
         let running = Running {
             host: RunHost {
-                session,
+                transcript,
                 run_start,
                 target,
                 config,
@@ -284,12 +284,12 @@ impl Running<'_> {
         // State that hooks asked to record during the last events is kept before the run is
         // reported, so a host reading the session afterwards finds it.
         let (config, target) = (self.host.config, self.host.target);
-        let stop = match record_pending_entries(&config.queues, self.host.session, target).await {
+        let stop = match record_pending_entries(&config.queues, self.host.transcript, target).await {
             Ok(()) => stop,
             Err(error) => RunStop::Failed(format!("{error:#}")),
         };
-        let session = &self.host.session;
-        let added = session.messages_since(self.host.run_start);
+        let transcript = &self.host.transcript;
+        let added = transcript.messages_since(self.host.run_start);
         let (outcome, error) = self.conclude(stop, cut_off(&added));
         let accounting = &self.accounting;
         let report = RunReport {
@@ -301,7 +301,7 @@ impl Running<'_> {
             tool_usage: accounting.tool_usage.clone(),
             denied_calls: accounting.denied_calls,
             error,
-            session_id: session.header().id.clone(),
+            session_id: transcript.header().id.clone(),
         };
         target
             .emit(EventKind::RunEnd {
@@ -463,8 +463,8 @@ mod tests {
     }
 
     /// A runner without retries or limits.
-    fn runner(config: LoopConfig, session: Transcript) -> Runner {
-        Runner::new(config, RetryPolicy::default(), RunLimits::default(), session)
+    fn runner(config: LoopConfig, transcript: Transcript) -> Runner {
+        Runner::new(config, RetryPolicy::default(), RunLimits::default(), transcript)
     }
 
     /// Run `prompt` on `runner` to its end, cancelled by `cancel`, with a reader that drops
@@ -558,7 +558,7 @@ mod tests {
                 provider.requests().len(),
                 usize::from(matches!(rejected, "compaction" | "compaction_failed"))
             );
-            assert!(runner.session().latest_compaction().is_none());
+            assert!(runner.transcript().latest_compaction().is_none());
             assert_eq!(report.retries, 0);
         }
     }
@@ -594,8 +594,8 @@ mod tests {
     #[tokio::test]
     async fn a_session_write_failure_cancels_the_run() {
         let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
-        let session = Transcript::with_writer(SessionHeader::new(Path::new("."), "m"), Box::new(FailingWriter));
-        let mut runner = runner(config(&provider, vec![]), session);
+        let transcript = Transcript::with_writer(SessionHeader::new(Path::new("."), "m"), Box::new(FailingWriter));
+        let mut runner = runner(config(&provider, vec![]), transcript);
 
         let report = run(&mut runner, "go", &CancellationToken::new()).await;
 
@@ -612,9 +612,9 @@ mod tests {
     async fn a_request_checkpoint_write_failure_prevents_the_request() {
         for rejected in ["request_config", "request_started"] {
             let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
-            let session =
+            let transcript =
                 Transcript::with_writer(SessionHeader::new(Path::new("."), "m"), RejectWrites::entry(rejected));
-            let mut runner = runner(config(&provider, vec![]), session);
+            let mut runner = runner(config(&provider, vec![]), transcript);
 
             let report = run(&mut runner, "go", &CancellationToken::new()).await;
 
@@ -663,11 +663,11 @@ mod tests {
             FauxStep::tool_call("c1", "counted", serde_json::json!({})),
             FauxStep::text("never sent"),
         ]));
-        let session = Transcript::with_writer(
+        let transcript = Transcript::with_writer(
             SessionHeader::new(Path::new("."), "m"),
             RejectWrites::entry("tool_call_started"),
         );
-        let mut runner = runner(config(&provider, vec![tool.clone()]), session);
+        let mut runner = runner(config(&provider, vec![tool.clone()]), transcript);
 
         let report = run(&mut runner, "go", &CancellationToken::new()).await;
 
@@ -681,11 +681,11 @@ mod tests {
     #[tokio::test]
     async fn a_recovery_write_failure_cancels_the_run_before_any_request() {
         // Recovery writes tool results; reject them, and only them.
-        let mut session = Transcript::with_writer(
+        let mut transcript = Transcript::with_writer(
             SessionHeader::new(Path::new("."), "m"),
             RejectWrites::containing("\"role\":\"toolResult\"", "a tool result"),
         );
-        session.append_message(Message::user("go")).await.unwrap();
+        transcript.append_message(Message::user("go")).await.unwrap();
         let mut answer = crate::ai::AssistantMessage::failure("p", "m", crate::ai::StopReason::ToolUse, "");
         answer.error_message = None;
         answer.content = vec![crate::ai::ContentBlock::ToolCall(crate::ai::ToolCall {
@@ -694,11 +694,11 @@ mod tests {
             arguments: serde_json::json!({}),
             arguments_error: None,
         })];
-        session.append_message(Message::Assistant(answer)).await.unwrap();
-        session.append_tool_call_started("c1", "counted").await.unwrap();
+        transcript.append_message(Message::Assistant(answer)).await.unwrap();
+        transcript.append_tool_call_started("c1", "counted").await.unwrap();
         let tool = Arc::new(Counted(std::sync::atomic::AtomicUsize::new(0)));
         let provider = Arc::new(FauxProvider::new([FauxStep::text("never sent")]));
-        let mut runner = runner(config(&provider, vec![tool.clone()]), session);
+        let mut runner = runner(config(&provider, vec![tool.clone()]), transcript);
 
         let report = run(&mut runner, "continue", &CancellationToken::new()).await;
 
@@ -725,16 +725,16 @@ mod tests {
         let provider = Arc::new(FauxProvider::new([FauxStep::text("never")]));
         let mut config = config(&provider, vec![]);
         config.hooks.push("rewrite", Arc::new(Rewrite));
-        let session = Transcript::with_writer(
+        let transcript = Transcript::with_writer(
             SessionHeader::new(Path::new("."), "m"),
             RejectWrites::containing("context_edit", "edit"),
         );
-        let mut runner = runner(config, session);
+        let mut runner = runner(config, transcript);
         let report = run(&mut runner, "original", &CancellationToken::new()).await;
         assert_eq!(report.outcome, RunOutcome::Failed);
         assert!(report.error.unwrap().contains("disk full on edit"));
         assert!(provider.requests().is_empty());
-        assert_eq!(runner.session().messages().len(), 1);
-        assert!(matches!(&runner.session().messages()[0], Message::User { content, .. } if content == "original"));
+        assert_eq!(runner.transcript().messages().len(), 1);
+        assert!(matches!(&runner.transcript().messages()[0], Message::User { content, .. } if content == "original"));
     }
 }

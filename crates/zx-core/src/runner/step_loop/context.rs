@@ -17,11 +17,11 @@ pub(crate) const PERSIST_FAILED: &str = "cannot persist session entry";
 /// announced as a `custom_entry` event. An error means the session could not record one.
 pub(crate) async fn record_pending_entries(
     queues: &InputQueues,
-    session: &mut Transcript,
+    transcript: &mut Transcript,
     target: EventTarget<'_>,
 ) -> Result<()> {
     for entry in queues.take_entries() {
-        let entry_id = session
+        let entry_id = transcript
             .append_custom_entry(&entry.custom_type, entry.data)
             .await
             .context(PERSIST_FAILED)?;
@@ -41,7 +41,7 @@ impl StepLoop<'_> {
     async fn append_message(&mut self, message: &Message, actor: Option<String>) -> Result<String, Halt> {
         // The event that reports the message owns it, so the session stores a copy.
         self.host
-            .session
+            .transcript
             .append_message_from(message.clone(), actor)
             .await
             .context(PERSIST_FAILED)
@@ -93,13 +93,13 @@ impl StepLoop<'_> {
     /// `custom_message` entry, without input hooks, and seen by the model as a user message.
     async fn custom_message(&mut self, message: CustomMessage, queue: Option<Queue>) -> Result<(), Halt> {
         self.emit(EventKind::MessageStart { role: "user" }).await;
-        let session = &mut *self.host.session;
-        let id = session
+        let transcript = &mut *self.host.transcript;
+        let id = transcript
             .append_custom_message(message.clone())
             .await
             .context(PERSIST_FAILED)
             .map_err(Halt::Unrecorded)?;
-        let projected = match session.get(&id) {
+        let projected = match transcript.get(&id) {
             Some(Entry::CustomMessage(entry)) => entry.projected(),
             _ => return Err(Halt::Unrecorded(anyhow!("custom message {id} was not recorded"))),
         };
@@ -154,7 +154,7 @@ impl StepLoop<'_> {
     async fn edit_entry(&mut self, target: String, index: usize, replacement: Option<String>) -> Result<(), Halt> {
         let entry_id = self
             .host
-            .session
+            .transcript
             .append_context_edit(&target, replacement.clone())
             .await
             .context("cannot persist context edit")
@@ -211,7 +211,7 @@ impl StepLoop<'_> {
             .append_from(message, actor, queue.map(|queue| (queue, &queued)))
             .await?;
         // The input is the last message of the projection now.
-        let index = self.host.session.messages().len() - 1;
+        let index = self.host.transcript.messages().len() - 1;
         match transformed {
             Ok(replacement) if replacement != text => self.edit_entry(id, index, Some(replacement)).await,
             Ok(_) => Ok(()),
@@ -247,7 +247,7 @@ impl StepLoop<'_> {
     /// Record the custom entries extensions asked for; see [`record_pending_entries`].
     pub(super) async fn record_pending_entries(&mut self) -> Result<(), Halt> {
         let target = self.target();
-        record_pending_entries(&self.host.config.queues, self.host.session, target)
+        record_pending_entries(&self.host.config.queues, self.host.transcript, target)
             .await
             .map_err(Halt::Unrecorded)
     }

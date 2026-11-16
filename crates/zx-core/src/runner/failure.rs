@@ -60,12 +60,12 @@ impl RunHost<'_> {
     /// message.
     pub(super) async fn omit_failed_attempt(&mut self, entry_id: &str) -> Result<(), String> {
         let index = self
-            .session
+            .transcript
             .projection()
             .iter()
             .position(|item| item.entry_id == entry_id);
         let edit = self
-            .session
+            .transcript
             .append_context_edit(entry_id, None)
             .await
             .map_err(|error| format!("cannot omit the failed attempt: {error:#}"))?;

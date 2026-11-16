@@ -56,7 +56,7 @@ impl CompactionPause {
 /// A run's borrow of the Runner: the session, the configuration with its hooks and model,
 /// and where the run's events go.
 pub(super) struct RunHost<'a> {
-    pub(super) session: &'a mut Transcript,
+    pub(super) transcript: &'a mut Transcript,
     /// How many entries the session had when the run started: what follows is the run's.
     pub(super) run_start: usize,
     pub(super) target: EventTarget<'a>,
@@ -71,7 +71,7 @@ impl RunHost<'_> {
     /// The same host, borrowed for a shorter time.
     pub(super) fn reborrow(&mut self) -> RunHost<'_> {
         RunHost {
-            session: &mut *self.session,
+            transcript: &mut *self.transcript,
             run_start: self.run_start,
             target: self.target,
             config: self.config,
@@ -120,7 +120,7 @@ impl RunHost<'_> {
             return Compacted::without_request(0, End::Failed(error));
         }
         let compactor = Compactor {
-            session: &mut *self.session,
+            transcript: &mut *self.transcript,
             provider: self.config.provider.as_ref(),
             model: &self.config.model,
             models: &self.config.models,
@@ -140,7 +140,7 @@ impl RunHost<'_> {
     /// as a retry does: the model answers again.
     async fn omit_failed_answer(&mut self) -> Result<(), String> {
         let failed = self
-            .session
+            .transcript
             .projection()
             .iter()
             .rev()
@@ -162,7 +162,7 @@ impl RunHost<'_> {
     /// the loop takes it as it does between steps, so that a message is taken only once it
     /// is recorded, and what a stopped run did not take is still queued.
     async fn continuation(&mut self) -> Result<FirstInput, String> {
-        let projection = self.session.projection();
+        let projection = self.transcript.projection();
         let Some(last) = projection
             .iter()
             .rev()
@@ -199,12 +199,12 @@ impl RunHost<'_> {
     /// it is estimated to hold. Each is measured only when its trigger is set.
     fn over_trigger(&self) -> anyhow::Result<bool> {
         if let Some(limit) = self.compaction.trigger_bytes
-            && compaction::context_bytes(&self.session.messages())? > limit
+            && compaction::context_bytes(&self.transcript.messages())? > limit
         {
             return Ok(true);
         }
         match self.compaction.trigger_tokens {
-            TokenTrigger::Above(limit) => Ok(compaction::context_tokens(self.session)? > limit),
+            TokenTrigger::Above(limit) => Ok(compaction::context_tokens(self.transcript)? > limit),
             TokenTrigger::Unset | TokenTrigger::Off => Ok(false),
         }
     }

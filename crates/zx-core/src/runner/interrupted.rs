@@ -14,10 +14,10 @@ impl RunHost<'_> {
     /// the next request cannot suggest that such a call did nothing. Calls are never run
     /// again. Stops at the first result the session cannot record.
     pub(super) async fn recover_interrupted_calls(&mut self) -> Result<()> {
-        for (result, recovered) in recovered_results(self.session, &self.config.tools) {
+        for (result, recovered) in recovered_results(self.transcript, &self.config.tools) {
             self.target.emit(EventKind::MessageStart { role: "toolResult" }).await;
             let entry_id = self
-                .session
+                .transcript
                 .append_message(result.clone())
                 .await
                 .context(PERSIST_FAILED)?;
@@ -40,8 +40,8 @@ impl Runner {
     /// reads them: before a record the model reads, which would otherwise come between the
     /// calls and their results and leave the calls unanswered for good.
     pub(crate) async fn recover_interrupted_calls(&mut self) -> Result<()> {
-        for (result, _) in recovered_results(&self.session, &self.config.tools) {
-            self.session.append_message(result).await.context(PERSIST_FAILED)?;
+        for (result, _) in recovered_results(&self.transcript, &self.config.tools) {
+            self.transcript.append_message(result).await.context(PERSIST_FAILED)?;
         }
         Ok(())
     }
@@ -49,8 +49,8 @@ impl Runner {
 
 /// The result to record for each call that an interrupted run left without one, in call
 /// order, with the event that reports it.
-fn recovered_results(session: &Transcript, tools: &Toolbox) -> Vec<(Message, EventKind)> {
-    session
+fn recovered_results(transcript: &Transcript, tools: &Toolbox) -> Vec<(Message, EventKind)> {
+    transcript
         .interrupted_tool_calls()
         .into_iter()
         .map(|call| {

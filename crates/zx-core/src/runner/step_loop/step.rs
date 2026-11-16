@@ -21,7 +21,7 @@ impl StepLoop<'_> {
         let stop = response.stop_reason;
         let disposition = self.disposition(after_tools);
         let remaining = self.accounting.remaining_model_requests();
-        let messages = self.host.session.messages();
+        let messages = self.host.transcript.messages();
         let summary = FinishedStep {
             response: &response,
             messages: &messages,

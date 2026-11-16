@@ -78,13 +78,13 @@ impl LoopConfig {
     /// The trace of the run `run_id` of `session`, cancelled by `cancel`: its hooks and
     /// policies are told the session's labels and who sent its latest input, and its hooks
     /// reach this configuration's queues and tool set.
-    pub(crate) fn trace(&self, session: &Transcript, run_id: String, cancel: CancellationToken) -> RunTrace {
-        let header = session.header();
+    pub(crate) fn trace(&self, transcript: &Transcript, run_id: String, cancel: CancellationToken) -> RunTrace {
+        let header = transcript.header();
         let fresh = HookContext::new(header.id.clone(), self.cwd.clone(), cancel);
         RunTrace::new(HookContext {
             run_id,
             labels: header.labels.clone(),
-            actor: session.latest_actor().map(String::from),
+            actor: transcript.latest_actor().map(String::from),
             ..fresh.with_shared(self.queues.clone(), self.active_tools.clone())
         })
     }

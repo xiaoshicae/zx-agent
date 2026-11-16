@@ -162,7 +162,7 @@ impl Session {
                 commands: config.commands.clone(),
                 tool_names: config.tools.names().map(str::to_string).collect(),
                 cwd: config.cwd.clone(),
-                id: runner.session().header().id.clone(),
+                id: runner.transcript().header().id.clone(),
                 state: Mutex::new(State::Idle(Box::new(runner))),
             }),
         })
@@ -288,7 +288,7 @@ impl Session {
     /// a run, hooks and commands use `queues().append_entry` instead. Returns the entry's
     /// ID. A run returns Busy; a write failure returns WriteFailed.
     pub async fn append_entry(&self, custom_type: &str, data: Value) -> Result<String, SessionError> {
-        self.append_idle(async |runner| runner.session_mut().append_custom_entry(custom_type, data).await)
+        self.append_idle(async |runner| runner.transcript_mut().append_custom_entry(custom_type, data).await)
             .await
     }
 
@@ -300,7 +300,7 @@ impl Session {
     pub async fn append_custom_message(&self, message: CustomMessage) -> Result<String, SessionError> {
         self.append_idle(async |runner| {
             runner.recover_interrupted_calls().await?;
-            runner.session_mut().append_custom_message(message).await
+            runner.transcript_mut().append_custom_message(message).await
         })
         .await
     }
@@ -310,7 +310,7 @@ impl Session {
     /// it was given on; `with_transcript` with [`Transcript::session_name`] reads it. Returns
     /// the entry's ID. A run returns Busy; a write failure returns WriteFailed.
     pub async fn set_name(&self, name: SessionName) -> Result<String, SessionError> {
-        self.append_idle(async |runner| runner.session_mut().append_session_name(name).await)
+        self.append_idle(async |runner| runner.transcript_mut().append_session_name(name).await)
             .await
     }
 
@@ -436,9 +436,12 @@ impl Session {
     pub fn branch(&self, entry: Option<&str>) -> Result<(), SessionError> {
         self.idle(|runner| match entry {
             // The transcript's only error is an unknown ID, which the variant names.
-            Some(id) => runner.session_mut().branch(id).map_err(|_| SessionError::EntryNotFound),
+            Some(id) => runner
+                .transcript_mut()
+                .branch(id)
+                .map_err(|_| SessionError::EntryNotFound),
             None => {
-                runner.session_mut().reset_leaf();
+                runner.transcript_mut().reset_leaf();
                 Ok(())
             }
         })?
@@ -449,7 +452,7 @@ impl Session {
     /// Busy until it returns, and no lock is held while host code runs. A run returns Busy.
     pub fn with_transcript<T>(&self, f: impl FnOnce(&Transcript) -> T) -> Result<T, SessionError> {
         let mut lease = self.lease(CancellationToken::new())?;
-        Ok(f(lease.runner().session()))
+        Ok(f(lease.runner().transcript()))
     }
 
     /// Run `f` on the Runner under the state lock while idle; a run returns Busy, a closed
@@ -515,7 +518,7 @@ impl Drop for Lease {
             .expect("an active lease returns its Runner exactly once");
         // A session that no longer agrees with its log cannot record another entry. Closing
         // it lets the agent open it again from the storage, which holds what was recorded.
-        let unwritable = runner.session().lost_its_log();
+        let unwritable = runner.transcript().lost_its_log();
         let mut state = lock(&self.shared.state);
         let released = match &*state {
             State::Leased(_) | State::Idle(_) if !unwritable => {
