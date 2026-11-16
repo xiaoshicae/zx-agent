@@ -9,10 +9,12 @@ use tokio_util::sync::CancellationToken;
 
 use super::answer::{ResponseBytes, parse_answer};
 use super::{
-    Compacted, Config, End, MAX_SOURCE_BYTES, Summarized, Summarizer, SummarySource, TokenTrigger, Trigger,
-    context_bytes, estimated_tokens, message_bytes,
+    Compacted, Config, End, MAX_SOURCE_BYTES, Summarized, Summarizer, SummaryReply, SummarySource, TokenTrigger,
+    Trigger, context_bytes, estimated_tokens, message_bytes,
 };
-use crate::ai::{AssistantMessage, Message, ModelMeta, Provider, Request, StreamEvent, Usage, duration_ms, now_ms};
+use crate::ai::{
+    AssistantMessage, Message, ModelMeta, Provider, Request, StopReason, StreamEvent, Usage, duration_ms, now_ms,
+};
 use crate::events::{Emit, EventKind, RequestKind};
 use crate::guard::{CancelSignal, Priority, Stopped, bounded};
 use crate::transcript::{
@@ -131,6 +133,15 @@ impl Made {
             Self::Summary(summarized) => &summarized.usage,
         }
     }
+
+    /// Whether the request was answered: a response that ended with an error or was
+    /// aborted is no answer.
+    fn is_answer(&self) -> bool {
+        match self {
+            Self::Answer(message) => !matches!(message.stop_reason, StopReason::Error | StopReason::Aborted),
+            Self::Summary(_) => true,
+        }
+    }
 }
 
 /// Why an open compaction did not complete.
@@ -166,9 +177,13 @@ impl Compactor<'_> {
             Ok(made) => made.usage().clone(),
             Err(_) => Usage::default(),
         };
+        let reply = match &made {
+            Ok(made) if made.is_answer() => SummaryReply::Answered,
+            Ok(_) | Err(_) => SummaryReply::Missing,
+        };
         let end = self.finish(&open, made, input_bytes, &usage).await;
         Compacted {
-            requests: 1,
+            reply,
             usage,
             input_bytes,
             end,

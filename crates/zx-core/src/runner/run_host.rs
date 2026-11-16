@@ -6,7 +6,7 @@
 use super::accounting::check_priced;
 use super::{Ending, EventTarget, FirstInput, Halt, LoopConfig, RunAccounting, Start};
 use crate::ai::{Message, StopReason};
-use crate::compaction::{self, Compacted, Compactor, End, TokenTrigger, Trigger};
+use crate::compaction::{self, Compacted, Compactor, End, SummaryReply, TokenTrigger, Trigger};
 use crate::events::EventKind;
 use crate::input::Queue;
 use crate::transcript::Transcript;
@@ -39,13 +39,15 @@ impl CompactionPause {
         self.0 = None;
     }
 
-    /// Pause after a paid failure, resume after a success; other ends change nothing.
+    /// Pause after a failure the summary request was answered for, which asking again would
+    /// pay for again; resume after a success. Other ends change nothing: a request that got
+    /// no answer may succeed the next time.
     fn note(&mut self, compacted: &Compacted) {
-        let paid = compacted.requests > 0;
+        let answered = compacted.reply == SummaryReply::Answered;
         match &compacted.end {
             End::Completed { .. } => self.0 = None,
-            End::Failed(error) if paid => self.0 = Some(error.clone()),
-            End::Unrecorded(error) if paid => self.0 = Some(format!("{error:#}")),
+            End::Failed(error) if answered => self.0 = Some(error.clone()),
+            End::Unrecorded(error) if answered => self.0 = Some(format!("{error:#}")),
             End::Failed(_) | End::Unrecorded(_) | End::Noop | End::Cancelled(_) => {}
         }
     }
@@ -206,7 +208,7 @@ impl RunHost<'_> {
         }
         let compacted = self.compact_for_run(accounting).await;
         match compacted.end {
-            End::Completed { .. } => Ok(compacted.requests),
+            End::Completed { .. } => Ok(compacted.reply.requests()),
             End::Unrecorded(error) => Err(Halt::Unrecorded(error)),
             End::Failed(error) | End::Cancelled(error) => Err(Halt::Failed(error)),
             End::Noop => Err(Halt::Failed(
@@ -221,7 +223,7 @@ impl RunHost<'_> {
     /// overflow, counting the summary's requests and usage into `accounting`.
     pub(super) async fn compact_for_run(&mut self, accounting: &mut RunAccounting) -> Compacted {
         let compacted = self.compact(Trigger::Automatic, accounting.attempts).await;
-        accounting.count_requests(compacted.requests, &compacted.usage);
+        accounting.count_requests(compacted.reply.requests(), &compacted.usage);
         compacted
     }
 }

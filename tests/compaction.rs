@@ -380,6 +380,32 @@ async fn a_summary_citing_a_record_it_did_not_read_fails_as_an_invalid_answer() 
 }
 
 #[tokio::test]
+async fn an_automatic_summary_that_got_no_answer_is_tried_again_on_the_next_prompt() {
+    let (store, old) = seeded_session().await;
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::Fail("HTTP 503: overloaded".into()),
+        FauxStep::text(summary_json(&old)),
+        FauxStep::text("answered"),
+    ]));
+    let (runner, _) = RunnerSetup {
+        session: store,
+        compaction: Config {
+            trigger_bytes: Some(1024),
+            ..budget()
+        },
+        ..RunnerSetup::new(config(provider.clone(), vec![]))
+    }
+    .build();
+    let first = runner.run("continue").await;
+    assert_eq!(first.outcome, RunOutcome::Failed, "{first:?}");
+
+    let second = runner.run("try again").await;
+
+    assert_eq!(second.outcome, RunOutcome::Completed, "{second:?}");
+    assert_eq!(second.final_text, "answered");
+}
+
+#[tokio::test]
 async fn a_failed_automatic_summary_is_not_paid_for_again_on_the_next_prompt() {
     let (store, _) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([
