@@ -2,15 +2,21 @@
 
 mod common;
 
+use std::sync::Arc;
+
+use async_trait::async_trait;
 use serde_json::json;
 
+use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, Request, SystemMessage, SystemPrompt, Usage, now_ms};
+use zx_agent::events::RunOutcome;
+use zx_agent::hooks::{ContextEdit, Hook, HookContext, HookResult};
 use zx_agent::transcript::{
     CompactionPlan, CompactionSummary, Entry, RequestSource, SESSION_VERSION, SummarizedBy, SummaryFact,
     SummaryRequest, Transcript,
 };
 
-use common::{answer_reporting, header, summarize};
+use common::{RunnerSetup, answer_reporting, config, header, summarize};
 
 fn summary(id: &str) -> CompactionSummary {
     CompactionSummary {
@@ -483,21 +489,27 @@ fn exchange(id: &str) -> [Message; 2] {
     [Message::Assistant(assistant), Message::ToolResult(result)]
 }
 
-#[tokio::test]
-async fn a_compaction_inside_a_turn_keeps_the_input_of_that_turn_before_its_summary() {
+/// A session whose latest turn, "the task", ran two calls, c1 and c2, after an earlier
+/// question: the IDs of the earlier question, of the task, and of the two calls.
+async fn a_turn_with_two_calls() -> (Transcript, [String; 4]) {
     let mut store = Transcript::in_memory(header());
     let earlier = store
         .append_message(Message::user("an earlier question"))
         .await
         .unwrap();
-    store.append_message(Message::user("the task")).await.unwrap();
-    let task = store.leaf_id().unwrap().to_string();
+    let task = store.append_message(Message::user("the task")).await.unwrap();
     let [call, result] = exchange("c1");
     let first_call = store.append_message(call).await.unwrap();
     store.append_message(result).await.unwrap();
     let [call, result] = exchange("c2");
-    let kept = store.append_message(call).await.unwrap();
+    let second_call = store.append_message(call).await.unwrap();
     store.append_message(result).await.unwrap();
+    (store, [earlier, task, first_call, second_call])
+}
+
+#[tokio::test]
+async fn a_compaction_inside_a_turn_keeps_the_input_of_that_turn_before_its_summary() {
+    let (mut store, [earlier, task, first_call, kept]) = a_turn_with_two_calls().await;
 
     // Only the latest input before the boundary can be kept.
     let wrong = CompactionPlan {
@@ -538,6 +550,61 @@ async fn a_compaction_inside_a_turn_keeps_the_input_of_that_turn_before_its_summ
         .collect();
     let recorded = lines.iter().find(|line| line["type"] == "compaction_started").unwrap();
     assert_eq!(recorded["keptInputEntryId"], task);
+}
+
+#[tokio::test]
+async fn a_context_plan_that_ends_a_summary_still_edits_the_messages_it_named() {
+    /// Revises the kept input, which ends the summary that read it, and trims c2's result.
+    struct ReviseTheTaskAndTrimC2;
+    #[async_trait]
+    impl Hook for ReviseTheTaskAndTrimC2 {
+        async fn transform_context(&self, messages: &[Message], _ctx: &HookContext) -> HookResult<Vec<ContextEdit>> {
+            let task = messages
+                .iter()
+                .position(|message| matches!(message, Message::User { content, .. } if content == "the task"));
+            let c2 = messages
+                .iter()
+                .position(|message| matches!(message, Message::ToolResult(result) if result.content == "value of c2"));
+            Ok(match (task, c2) {
+                (Some(task), Some(c2)) => vec![
+                    ContextEdit::ReplaceText {
+                        index: task,
+                        text: "the task, revised".into(),
+                    },
+                    ContextEdit::ReplaceText {
+                        index: c2,
+                        text: "trimmed".into(),
+                    },
+                ],
+                _ => Vec::new(),
+            })
+        }
+    }
+    let (mut store, [_, task, first_call, second_call]) = a_turn_with_two_calls().await;
+    let inside = CompactionPlan {
+        kept_input_entry_id: Some(task),
+        ..plan(&store, &second_call)
+    };
+    let started = store.begin_compaction(inside).await.unwrap();
+    store
+        .append_compaction(&started, summary(&first_call), Usage::default())
+        .await
+        .unwrap();
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
+    let mut config = config(provider.clone(), vec![]);
+    config.hooks.push("revise", Arc::new(ReviseTheTaskAndTrimC2));
+    let (runner, _) = RunnerSetup {
+        session: store,
+        ..RunnerSetup::new(config)
+    }
+    .build();
+
+    let report = runner.continue_run().await.unwrap();
+
+    assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
+    let sent = summarize(&provider.requests()[0].messages);
+    assert!(sent.iter().any(|message| message == "tool:c2=trimmed"), "{sent:?}");
+    assert!(sent.iter().any(|message| message == "tool:c1=value of c1"), "{sent:?}");
 }
 
 #[tokio::test]

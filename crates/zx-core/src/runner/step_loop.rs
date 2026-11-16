@@ -253,19 +253,24 @@ impl<'a> StepLoop<'a> {
                 NextInput::Requested(message) => self.input(*message, None, None).await?,
             }
             self.ensure_can_request()?;
+            let (targets, messages): (Vec<String>, Vec<Message>) = self
+                .host
+                .session
+                .projection()
+                .into_iter()
+                .map(|projected| (projected.entry_id, projected.message))
+                .unzip();
             let planned = self
                 .host
                 .config
                 .hooks
-                .transform_context(&self.host.session.messages(), &self.host.target.trace.context())
+                .transform_context(&messages, &self.host.target.trace.context())
                 .await;
             let edits = match planned {
                 Ok(edits) => edits,
                 Err(error) => return Err(self.hook_failed(error).await),
             };
-            for edit in edits {
-                self.edit(edit).await?;
-            }
+            self.record_plan(targets, edits).await?;
             self.ensure_can_request()?;
             // Summary requests count against the budget but are reported as a compaction,
             // not as steps of their own.

@@ -61,7 +61,7 @@ impl StepLoop<'_> {
     }
 
     /// Append a message that arrives whole: report its start, record it, then report its end.
-    pub(super) async fn append(&mut self, message: Message) -> Result<(), Halt> {
+    pub(super) async fn append(&mut self, message: Message) -> Result<String, Halt> {
         self.append_from(message, None, None).await
     }
 
@@ -74,7 +74,7 @@ impl StepLoop<'_> {
         message: Message,
         actor: Option<String>,
         queued: Option<(Queue, &Input)>,
-    ) -> Result<(), Halt> {
+    ) -> Result<String, Halt> {
         self.emit(EventKind::MessageStart { role: message.role() }).await;
         let id = self.append_message(&message, actor).await?;
         if let Some((queue, original)) = queued {
@@ -82,11 +82,11 @@ impl StepLoop<'_> {
         }
         self.emit(EventKind::MessageEnd {
             message,
-            entry_id: id,
+            entry_id: id.clone(),
             custom: None,
         })
         .await;
-        Ok(())
+        Ok(id)
     }
 
     /// Append a message from an extension (pi: a `custom` message): recorded as a
@@ -122,21 +122,39 @@ impl StepLoop<'_> {
         Ok(())
     }
 
-    /// Record `edit`. Its index refers to the context as earlier edits of the same plan left
-    /// it, which is the session's projection by then.
-    pub(super) async fn edit(&mut self, edit: ContextEdit) -> Result<(), Halt> {
-        let (index, replacement) = match edit {
-            ContextEdit::Append { message } => return self.append(message).await,
-            ContextEdit::ReplaceText { index, text } => (index, Some(text)),
-            ContextEdit::Omit { index } => (index, None),
-        };
-        let session = &mut *self.host.session;
-        let target = session
-            .projection()
-            .get(index)
-            .map(|target| target.entry_id.clone())
-            .ok_or_else(|| Halt::Unrecorded(anyhow!("context index {index} is out of bounds")))?;
-        let entry_id = session
+    /// Record `edits`, the plan of the context hooks, made over a context whose messages are
+    /// the entries `targets`. An index names a message of that context as the plan's earlier
+    /// edits left it, which the session's projection may no longer show once an edit ends a
+    /// summary: so the targets follow the plan, and a message it appends joins them once
+    /// recorded. The chain applied the plan to a copy of the same context, so every index is
+    /// in bounds.
+    pub(super) async fn record_plan(&mut self, mut targets: Vec<String>, edits: Vec<ContextEdit>) -> Result<(), Halt> {
+        let out_of_bounds = |index: usize| Halt::Failed(format!("context index {index} is out of bounds"));
+        for edit in edits {
+            match edit {
+                ContextEdit::Append { message } => targets.push(self.append(message).await?),
+                ContextEdit::ReplaceText { index, text } => {
+                    let target = targets.get(index).cloned().ok_or_else(|| out_of_bounds(index))?;
+                    self.edit_entry(target, index, Some(text)).await?;
+                }
+                ContextEdit::Omit { index } => {
+                    if index >= targets.len() {
+                        return Err(out_of_bounds(index));
+                    }
+                    let target = targets.remove(index);
+                    self.edit_entry(target, index, None).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Record an edit of the entry `target`, at `index` of the context the edit was planned
+    /// over: its text replaced by `replacement`, or, with `None`, the message omitted.
+    async fn edit_entry(&mut self, target: String, index: usize, replacement: Option<String>) -> Result<(), Halt> {
+        let entry_id = self
+            .host
+            .session
             .append_context_edit(&target, replacement.clone())
             .await
             .context("cannot persist context edit")
@@ -169,7 +187,7 @@ impl StepLoop<'_> {
             ..
         } = &message
         else {
-            return self.append(message).await;
+            return self.append(message).await.map(drop);
         };
         self.host.target.trace.answer(actor.as_deref());
         let text = content.clone();
@@ -189,22 +207,17 @@ impl StepLoop<'_> {
             text: text.clone(),
             actor: actor.clone(),
         };
-        self.append_from(message, actor, queue.map(|queue| (queue, &queued)))
+        let id = self
+            .append_from(message, actor, queue.map(|queue| (queue, &queued)))
             .await?;
         // The input is the last message of the projection now.
         let index = self.host.session.messages().len() - 1;
         match transformed {
-            Ok(replacement) if replacement != text => {
-                self.edit(ContextEdit::ReplaceText {
-                    index,
-                    text: replacement,
-                })
-                .await
-            }
+            Ok(replacement) if replacement != text => self.edit_entry(id, index, Some(replacement)).await,
             Ok(_) => Ok(()),
             Err(error) => {
                 // A rejected input remains in the audit log but is omitted from requests.
-                self.edit(ContextEdit::Omit { index }).await?;
+                self.edit_entry(id, index, None).await?;
                 Err(self.hook_failed(error).await)
             }
         }
