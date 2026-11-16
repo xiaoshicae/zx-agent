@@ -228,6 +228,25 @@ async fn ls_lists_entries_with_directories_marked() {
 }
 
 #[tokio::test]
+async fn ls_says_how_many_entries_it_shows_when_the_output_is_cut() {
+    let dir = tempfile::tempdir().unwrap();
+    // More than a result holds, in fewer entries than the limit.
+    for n in 0..1000 {
+        std::fs::write(dir.path().join(format!("{n:04}-{}", "x".repeat(60))), "").unwrap();
+    }
+
+    let output = ls(dir.path(), json!({"limit": 2000})).await.unwrap();
+
+    let shown = lines(&output).len();
+    assert!(shown < 1000, "{shown}");
+    assert!(
+        output.content.contains(&format!("showing the first {shown}")),
+        "{}",
+        output.content.lines().last().unwrap_or_default()
+    );
+}
+
+#[tokio::test]
 async fn long_matching_lines_are_cut() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("min.js"), format!("needle{}\n", "x".repeat(5000))).unwrap();

@@ -146,10 +146,9 @@ impl Tool for GrepTool {
             shown,
             Wording {
                 empty: "No matches found.",
-                more: format!(
-                    "more matches exist; showing about {limit}. Narrow the pattern, path or glob, or raise limit"
-                ),
-                cut: Some("long lines or output were cut"),
+                more: "more matches exist",
+                advice: "Narrow the pattern, path or glob, or raise limit",
+                long_lines: "long lines were cut",
             },
         )
     }

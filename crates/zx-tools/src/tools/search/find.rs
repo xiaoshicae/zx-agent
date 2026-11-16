@@ -112,10 +112,9 @@ impl Tool for FindTool {
             limit,
             Wording {
                 empty: "No files found.",
-                more: format!(
-                    "more files match; showing the first {limit}. Narrow the pattern or path, or raise limit"
-                ),
-                cut: Some("long paths or output were cut"),
+                more: "more files match",
+                advice: "Narrow the pattern or path, or raise limit",
+                long_lines: "long paths were cut",
             },
         )
     }
