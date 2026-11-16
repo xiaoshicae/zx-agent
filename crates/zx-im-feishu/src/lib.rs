@@ -32,7 +32,7 @@ use zx_im::{
 
 use api::CallError;
 use connection::{ClientConfig, Connection, Ended};
-use events::{button, card, markdown, resolution, text_content};
+use events::{button, card, markdown, resolution, text_content, without_fences, without_mentions};
 
 /// Where the open API lives.
 const DEFAULT_API_BASE: &str = "https://open.feishu.cn";
@@ -95,11 +95,16 @@ pub struct FeishuChannel {
     direct: Mutex<HashSet<String>>,
 }
 
-/// What a card shows of the request `card`, open and once closed.
+/// What a card shows of the request `card`, open and once closed. What the request says
+/// mentions nobody, and its summary stays in the code block.
 fn shown(labels: &CardLabels, card: &ApprovalCard) -> String {
     format!(
         "**{}**: `{}`\n```\n{}\n```\n{}: {}",
-        labels.title, card.tool, card.summary, labels.reason, card.reason
+        labels.title,
+        without_mentions(&card.tool),
+        without_fences(&without_mentions(&card.summary)),
+        labels.reason,
+        without_mentions(&card.reason)
     )
 }
 
