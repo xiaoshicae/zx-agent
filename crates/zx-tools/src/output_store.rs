@@ -16,9 +16,10 @@ use anyhow::{Result, ensure};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 
 use crate::ai::{ToolCall, ToolDef};
+use crate::files::{Links, open_without_blocking, read_bounded};
 use crate::text::prefix_within;
 use crate::tools::{parse_args, unless_cancelled};
 use zx_core::hooks::{Hook, HookContext, HookResult, HookStage};
@@ -210,18 +211,11 @@ impl OutputStore {
     async fn read(&self, path: &Path) -> Result<String, String> {
         let unreadable = |error: &dyn std::fmt::Display| format!("cannot read tool output {}: {error}", path.display());
         self.check_directory().await.map_err(|error| unreadable(&error))?;
-        let mut options = tokio::fs::OpenOptions::new();
-        options.read(true);
         // A link named like an output would lead to any file this process can read, and
-        // whoever can write the directory can put one there: links are not followed. Without
-        // blocking, so that a FIFO put there is refused below instead of waited for.
-        #[cfg(unix)]
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-        let file = options.open(path).await.map_err(|error| unreadable(&error))?;
-        let meta = file
-            .metadata()
+        // whoever can write the directory can put one there: links are not followed.
+        let (file, meta) = open_without_blocking(path, Links::Refuse)
             .await
-            .map_err(|error| format!("cannot inspect tool output {}: {error}", path.display()))?;
+            .map_err(|error| unreadable(&error))?;
         if !meta.is_file() {
             return Err(format!("tool output {} is not a regular file", path.display()));
         }
@@ -230,11 +224,7 @@ impl OutputStore {
         if meta.len() > max {
             return Err(format!("tool output exceeds the {max} byte file limit"));
         }
-        let mut bytes = Vec::new();
-        file.take(max + 1)
-            .read_to_end(&mut bytes)
-            .await
-            .map_err(|error| format!("cannot read tool output {}: {error}", path.display()))?;
+        let bytes = read_bounded(file, max).await.map_err(|error| unreadable(&error))?;
         if bytes.len() > self.config.max_file_bytes {
             return Err(format!("tool output grew over the {max} byte file limit"));
         }
