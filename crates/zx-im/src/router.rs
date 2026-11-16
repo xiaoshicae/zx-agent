@@ -9,7 +9,6 @@ use tokio::task::{Id, JoinError, JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use super::admission::InputBudget;
-use super::platform::Seen;
 use super::server::Shared;
 use super::worker::{self, Incoming, Retire, WorkerInput, WorkerSetup};
 use super::{
@@ -24,9 +23,6 @@ const INBOUND_CAPACITY: usize = 64;
 const INBOX_CAPACITY: usize = 32;
 /// Idle notices of conversations, which the router handles at once.
 const RETIRE_CAPACITY: usize = 16;
-/// Threads remembered as ones the bot never joined. The talk of the busiest threads at a
-/// time fits; one forgotten is looked up again.
-const NOT_JOINED_CAPACITY: usize = 4096;
 /// Short control messages remain usable even with a tiny configured text budget.
 const MAX_CONTROL_BYTES: usize = 64;
 
@@ -128,11 +124,6 @@ pub(crate) struct Router {
     retire: mpsc::Sender<Retire>,
     retired: mpsc::Receiver<Retire>,
     workers: HashMap<SessionKey, WorkerHandle>,
-    /// Conversations a lookup found without a session: talk there that does not mention the
-    /// bot is passed by without asking the storage again, which a lookup would list whole.
-    /// Only a worker the router starts makes a session for a conversation, in this process,
-    /// so starting one forgets the conversation here.
-    not_joined: Seen<SessionKey>,
     tasks: JoinSet<()>,
     /// The conversation of each task in `tasks`, for the report should it fail.
     conversations: HashMap<Id, SessionKey>,
@@ -167,7 +158,6 @@ impl Router {
             retire,
             retired,
             workers: HashMap::new(),
-            not_joined: Seen::new(NOT_JOINED_CAPACITY),
             tasks: JoinSet::new(),
             conversations: HashMap::new(),
             refusals: JoinSet::new(),
@@ -282,16 +272,17 @@ impl Router {
     }
 
     /// Pass a message to the conversation's worker, starting one when there is none: for a
-    /// message meant for the bot, or one in a thread the bot took part in before.
+    /// message meant for the bot, or one in a conversation the bot took part in, which has a
+    /// session.
     fn message(&mut self, channel: Arc<dyn ImChannel>, key: SessionKey, incoming: Incoming) {
-        let mentioned = incoming.addressee == Addressee::Bot;
+        let addressee = incoming.addressee;
         // Talk in a thread the bot never joined is not a conversation with it.
-        if !mentioned && !self.workers.contains_key(&key) && self.not_joined.contains(&key) {
+        if addressee != Addressee::Bot && !self.workers.contains_key(&key) && self.shared.session_of(&key).is_none() {
             return;
         }
         let control = incoming.text.len() <= MAX_CONTROL_BYTES && worker::is_command(&incoming.text);
         if incoming.text.len() > self.shared.max_pending_bytes.get() && !control {
-            self.overloaded(channel, &key);
+            self.over_capacity(channel, &key, addressee);
             return;
         }
         let input = WorkerInput::Message(incoming);
@@ -299,7 +290,7 @@ impl Router {
             Some(worker) => match worker.forward(input) {
                 Forward::Sent => return,
                 Forward::Full => {
-                    self.overloaded(channel, &key);
+                    self.over_capacity(channel, &key, addressee);
                     return;
                 }
                 // A new worker takes over.
@@ -308,10 +299,9 @@ impl Router {
             None => input,
         };
         if self.tasks.len() >= self.shared.max_conversations {
-            self.overloaded(channel, &key);
+            self.over_capacity(channel, &key, addressee);
             return;
         }
-        self.not_joined.remove(&key);
         let (inbox, receiver) = mpsc::channel(INBOX_CAPACITY);
         let budget = Arc::new(InputBudget::new(
             self.shared.max_pending_messages,
@@ -367,12 +357,17 @@ impl Router {
         self.reply(channel, to, self.shared.replies.unauthorized.clone());
     }
 
-    fn overloaded(&mut self, channel: Arc<dyn ImChannel>, key: &SessionKey) {
+    /// Refuse a message for want of capacity. The operator hears of every one; the
+    /// conversation only of one meant for the bot, so that the bot never speaks up in talk
+    /// among people.
+    fn over_capacity(&mut self, channel: Arc<dyn ImChannel>, key: &SessionKey, addressee: Addressee) {
         self.shared.failed(
             Some(key),
             "conversation capacity exceeded; message was not accepted".into(),
         );
-        self.reply(channel, key.destination(), self.shared.replies.overloaded.clone());
+        if addressee == Addressee::Bot {
+            self.reply(channel, key.destination(), self.shared.replies.overloaded.clone());
+        }
     }
 
     fn reply(&mut self, channel: Arc<dyn ImChannel>, to: Destination, text: String) {
@@ -397,9 +392,6 @@ impl Router {
             .is_some_and(|worker| worker.forwarded == retire.received)
         {
             self.workers.remove(&retire.key);
-            if retire.not_joined {
-                self.not_joined.insert(&retire.key);
-            }
         }
     }
 

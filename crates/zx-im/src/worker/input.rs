@@ -1,37 +1,14 @@
-//! Thread membership, input admission and context recorded without starting a run.
+//! Input admission, and context recorded without starting a run.
 
 use zx_core::input::Input;
 
-use super::{CANCEL_COMMAND, Incoming, Membership, NEW_COMMAND, Phase, Worker, WorkerInput};
+use super::{CANCEL_COMMAND, Incoming, NEW_COMMAND, Phase, Worker, WorkerInput};
 use crate::{
     Addressee, Session,
     outlet::{Asked, said},
 };
 
 impl Worker {
-    /// Unknown threads are looked up here, never on the server's routing loop.
-    async fn joined(&mut self, addressee: Addressee) -> bool {
-        if addressee == Addressee::Bot {
-            self.membership = Membership::Joined;
-        } else if self.membership == Membership::Unknown {
-            let lookup = self.out.shared.bounded(
-                Some(&self.out.key),
-                "look up the conversation's sessions",
-                self.out.shared.latest_session(&self.out.key),
-            );
-            let found = tokio::select! {
-                () = self.stop.cancelled() => None,
-                found = lookup => found,
-            };
-            self.membership = match found {
-                Some(Some(_)) => Membership::Joined,
-                Some(None) => Membership::Absent,
-                None => Membership::Unknown,
-            };
-        }
-        self.membership == Membership::Joined
-    }
-
     pub(super) async fn input(&mut self, input: WorkerInput) {
         match input {
             WorkerInput::Message(incoming) => self.message(incoming).await,
@@ -50,9 +27,6 @@ impl Worker {
     }
 
     async fn message(&mut self, incoming: Incoming) {
-        if !self.joined(incoming.addressee).await {
-            return;
-        }
         let answer = self.answers(&incoming);
         if answer {
             match incoming.text.trim() {
@@ -75,9 +49,12 @@ impl Worker {
             None => self.budget.try_admit(input),
         };
         let Some(pending) = admitted else {
-            self.out.post(self.out.replies().overloaded.clone()).await;
             self.out
                 .failed("pending input capacity exceeded; message was not accepted".into());
+            // Talk the bot only records is refused without a word in the conversation.
+            if answer {
+                self.out.post(self.out.replies().overloaded.clone()).await;
+            }
             return;
         };
         if !answer {

@@ -7,7 +7,7 @@
 //! The worker decides which messages it answers ([`Server`](super::Server) lists the rules);
 //! the others it records in the session as context for the next answer.
 //!
-//! - `input`: thread membership, bounded message admission and recording heard context
+//! - `input`: bounded message admission and recording heard context
 
 mod input;
 
@@ -68,8 +68,6 @@ pub(crate) struct Retire {
     pub(crate) key: SessionKey,
     /// Input the worker has taken; the router ends it only if it has sent no more.
     pub(crate) received: u64,
-    /// The worker found no session for an unmentioned thread; cache that absence.
-    pub(crate) not_joined: bool,
 }
 
 pub(crate) struct WorkerSetup {
@@ -113,9 +111,6 @@ pub(crate) async fn run(setup: WorkerSetup) {
                         worker.refuse(input);
                     } else {
                         worker.input(input).await;
-                        if worker.membership != Membership::Joined {
-                            lifecycle = worker.retire().await;
-                        }
                     }
                 }
                 // The router ended this conversation, or the server is stopping.
@@ -249,13 +244,6 @@ enum Decision {
     Lapsed,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Membership {
-    Unknown,
-    Joined,
-    Absent,
-}
-
 struct Worker {
     out: Outlet,
     inbox: mpsc::Receiver<WorkerInput>,
@@ -267,7 +255,6 @@ struct Worker {
     updates: mpsc::Sender<ApprovalUpdate>,
     updated: mpsc::Receiver<ApprovalUpdate>,
     phase: Phase,
-    membership: Membership,
     pending: Vec<Pending>,
     /// Messages that will not run because the server is stopping.
     unanswered: usize,
@@ -305,7 +292,6 @@ impl Worker {
             updates,
             updated,
             phase: Phase::idle(None),
-            membership: Membership::Unknown,
             pending: Vec::new(),
             unanswered: 0,
             answering: None,
@@ -555,7 +541,6 @@ impl Worker {
         let retire = Retire {
             key: self.out.key.clone(),
             received: self.received,
-            not_joined: self.membership == Membership::Absent,
         };
         match self.retire_to.send(retire).await {
             Ok(()) => Lifecycle::Retiring,

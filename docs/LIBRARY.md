@@ -24,14 +24,14 @@ let report = run.wait().await;                // 只要结果时直接 session.s
 - 事件只从 `Run` 读出。要观察所有运行的（如追踪导出）实现 `hooks::Hook::on_event`：不等待、不失败的钩子按顺序看到每个事件，被取消的运行也一样。
 - 扩展点都是 trait：`ai::Provider`、`tools::Tool`、`policy::ToolPolicy`、`hooks::Hook`、`extensions::Extension`、`agent::SessionSetup`、`compaction::Summarizer`（可选：自己产出摘要）、`transcript::SessionStorage`（会话存在哪里）及其 `transcript::SessionLog`（一个会话的记录）、`builtin::executor::Executor`；IM 另有 `zx_im::ImChannel` 与 `zx_im::StatusStore`。
 - 附带的实现：`ai::openai::OpenAiCompatible`、`transcript::JsonlStorage`（会话文件）与 `transcript::MemoryStorage`、`builtin::mcp::Server`（一个 `Extension`）、`builtin::executor::ContainerExecutor`、`builtin::redact::RedactSecrets`；追踪导出 `zx_cli::otel::Telemetry` 在命令行的 crate 里（它的 `hook()` 注册为 agent 的钩子）。
-- 会话存储：放进 `AgentConfig::storage`，默认是 `MemoryStorage`。`Agent` 用 `storage.create(&header)` 建新会话，用 `storage.open(id)` 读回会话并成为它的写入者；`storage.read(id)` 是只读快照，宿主交给 `Transcript::snapshot` 来读；`storage.list(&SessionQuery { cwd, labels, limit })` 按工作目录或标签列出，最近活动的在前（`Agent::list_sessions` 即它）。换一种存储（如数据库）只需实现这两个 trait，列出时用 `SessionList::new` 按查询排序与截断。
+- 会话存储：放进 `AgentConfig::storage`，默认是 `MemoryStorage`。`Agent` 用 `storage.create(&header)` 建新会话，用 `storage.open(id)` 读回会话并成为它的写入者；`storage.read(id)` 是只读快照，宿主交给 `Transcript::snapshot` 来读；`storage.list(&SessionQuery { cwd, labels, limit })` 按工作目录或标签列出，最近活动的在前（`Agent::list_sessions` 即它）。`storage.headers(&query)` 只读会话头部，按开始时间从新到旧（`Agent::session_headers` 即它；默认实现经 `list` 与 `read`，能只读头部的存储应覆盖它）。换一种存储（如数据库）只需实现这两个 trait，列出时用 `SessionList::new`、读头部时用 `SessionQuery::arrange_headers` 按查询排序与截断。
 - 摘要：默认由内核请求模型，请求可从会话还原。给 `AgentConfig::summarizer` 一个 `compaction::Summarizer` 后由它产出摘要与用量：何时摘要、读哪一段（至多 2 MiB）、写开始与结果记录、校验每条事实引用的记录、超时与取消仍由内核负责；一次摘要计为运行的一次模型请求，它报告的用量计入运行的预算。
 
 ## 有界输入与轻量查询
 
 内核的输入队列不限量，也不计配额。宿主要限制待处理的输入时，自己计量，再把计量凭证随输入放进队列：`PendingInput::held(输入, 凭证)` 交给 `queues().steer` 或 `follow_up`。凭证可以是任何 `Send` 的值，内核不读取它；输入被会话记录、被 `withdraw` 撤回、被不带凭证地取出（`PendingInput::into_input`、`drain_steering`、`drain_follow_up`）或随队列丢弃时，凭证随之丢弃，丢弃发生在队列的锁之外。`Session::take_queued` 与 `InputQueues::take_all` 连同凭证一起取出，宿主把输入转到自己的队列时，凭证继续有效。IM 服务按这种方式限制每个对话待处理消息的数量与文本字节（`crates/zx-im/src/admission.rs`）。
 
-只要最近会话 ID 时，用 `Agent::latest_session`（对应存储的 `latest`，自定义存储默认经 `list` 实现）。JSONL 实现按头部过滤、按最后完整记录的时间选择候选；活动时间相同时按创建时间、ID 排序，`limit = 0` 返回空。它不校验内部历史，打开时仍由 `Transcript::load` 完整校验；要完整列表和损坏诊断，用 `list_sessions`。头部/活动时间缓存各至多 1024 条，完整列表缓存至多 128 条；索引可丢弃重建，不写新的会话格式，文件发现仍扫描目录。
+宿主要建自己的会话索引时，用 `Agent::session_headers`：它只读头部、不读记录，打开会话时仍由 `Transcript::load` 完整校验；读不出头部或格式版本不符的会话不在其中，`list_sessions` 会把它们列为读不出。JSONL 存储不缓存：每次 `session_headers` 读取查询范围内每个会话文件的第一行，每次 `list_sessions` 回放匹配的会话。IM 服务在启动时用它建立对话到会话的索引。
 
 ## 复用配置装配
 

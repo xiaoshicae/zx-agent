@@ -52,58 +52,35 @@ fn in_cwd(cwd: &str) -> SessionQuery {
     }
 }
 
+fn ids_of(headers: Vec<SessionHeader>) -> Vec<String> {
+    headers.into_iter().map(|header| header.id).collect()
+}
+
 #[tokio::test]
-async fn latest_uses_the_same_order_and_filters_and_observes_appends_and_deletions() {
+async fn headers_name_the_sessions_a_query_asks_for_the_most_recently_started_first() {
     let dir = tempfile::tempdir().unwrap();
     let storage = JsonlStorage::in_directory(dir.path());
-    for id in ["b", "a"] {
-        seed(&storage, &header_of(id, "/w", 1), id).await;
+    for (id, started) in [("b", 1), ("a", 1), ("c", 2)] {
+        seed(&storage, &header_of(id, "/w", started), id).await;
     }
     seed(&storage, &header_of("elsewhere", "/x", 3), "x").await;
-    let query = in_cwd("/w");
-    assert_eq!(storage.latest(&query).await.unwrap().as_deref(), Some("a"));
-    assert_eq!(
-        storage.latest(&query).await.unwrap(),
-        ids(&storage, &query).await.into_iter().next()
-    );
-    let (loaded, log) = storage.open("b").await.unwrap();
-    let mut transcript = Transcript::load(loaded, log).unwrap();
-    transcript.append_message(Message::user("new activity")).await.unwrap();
-    assert_eq!(storage.latest(&query).await.unwrap().as_deref(), Some("b"));
-    let path = storage.path_of("b").await.unwrap().unwrap();
-    drop(transcript);
-    std::fs::remove_file(path).unwrap();
-    assert_eq!(storage.latest(&query).await.unwrap().as_deref(), Some("a"));
-    let none = SessionQuery {
-        limit: Some(0),
-        ..query
+
+    assert_eq!(ids_of(storage.headers(&in_cwd("/w")).await.unwrap()), ["c", "a", "b"]);
+    let first = SessionQuery {
+        limit: Some(1),
+        ..in_cwd("/w")
     };
-    assert_eq!(storage.latest(&none).await.unwrap(), None);
+    assert_eq!(ids_of(storage.headers(&first).await.unwrap()), ["c"]);
+    assert_eq!(
+        ids_of(storage.headers(&SessionQuery::default()).await.unwrap()),
+        ["elsewhere", "c", "a", "b"]
+    );
+    std::fs::remove_file(storage.path_of("c").await.unwrap().unwrap()).unwrap();
+    assert_eq!(ids_of(storage.headers(&in_cwd("/w")).await.unwrap()), ["a", "b"]);
 }
 
 #[tokio::test]
-async fn latest_reads_a_large_tail_and_ignores_only_an_unterminated_incomplete_record() {
-    let dir = tempfile::tempdir().unwrap();
-    let storage = JsonlStorage::in_directory(dir.path());
-    seed(&storage, &header_of("a", "/w", 1), &"中文".repeat(8192)).await;
-    let path = storage.path_of("a").await.unwrap().unwrap();
-    let complete = std::fs::read(&path).unwrap();
-    let mut cut_off = complete.clone();
-    cut_off.extend_from_slice(b"{\"type\":\"message\",\"content\":\"");
-    cut_off.extend_from_slice(&[0xe4, 0xb8]);
-    std::fs::write(&path, &cut_off).unwrap();
-    assert_eq!(storage.latest(&in_cwd("/w")).await.unwrap().as_deref(), Some("a"));
-    assert_eq!(std::fs::read(&path).unwrap(), cut_off);
-    // A newline makes this a malformed complete record; neither path hides it as a crash.
-    let mut malformed = complete;
-    malformed.extend_from_slice(b"{\"type\":\"message\"\n");
-    std::fs::write(&path, malformed).unwrap();
-    assert_eq!(storage.latest(&in_cwd("/w")).await.unwrap(), None);
-    assert_eq!(storage.list(&in_cwd("/w")).await.unwrap().unreadable.len(), 1);
-}
-
-#[tokio::test]
-async fn latest_selects_candidates_while_listing_keeps_full_corruption_diagnostics() {
+async fn headers_read_no_records_and_leave_out_what_cannot_be_opened() {
     let dir = tempfile::tempdir().unwrap();
     let storage = JsonlStorage::in_directory(dir.path());
     seed(&storage, &header_of("a", "/w", 1), "q").await;
@@ -111,12 +88,22 @@ async fn latest_selects_candidates_while_listing_keeps_full_corruption_diagnosti
     let bytes = std::fs::read_to_string(&path).unwrap();
     let (header, last) = bytes.split_once('\n').unwrap();
     std::fs::write(&path, format!("{header}\ninvalid interior record\n{last}")).unwrap();
-    assert_eq!(storage.latest(&in_cwd("/w")).await.unwrap().as_deref(), Some("a"));
+    std::fs::write(path.with_file_name("garbage.jsonl"), "not a header\n").unwrap();
+    let older = header
+        .replace(&format!("\"version\":{SESSION_VERSION}"), "\"version\":1")
+        .replace("\"id\":\"a\"", "\"id\":\"older\"");
+    std::fs::write(path.with_file_name("older.jsonl"), older + "\n").unwrap();
+
+    let headers = storage.headers(&in_cwd("/w")).await.unwrap();
+
+    assert_eq!(
+        ids_of(headers),
+        ["a"],
+        "damage past the header shows when the session is opened"
+    );
     let list = storage.list(&in_cwd("/w")).await.unwrap();
     assert!(list.sessions.is_empty());
-    assert_eq!(list.unreadable.len(), 1);
-    let (loaded, log) = storage.open("a").await.unwrap();
-    assert!(Transcript::load(loaded, log).is_err());
+    assert_eq!(list.unreadable.len(), 3, "{:?}", list.unreadable);
 }
 
 #[test]

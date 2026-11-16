@@ -65,21 +65,26 @@ pub trait SessionStorage: Send + Sync {
     /// open: a snapshot, for [`Transcript::snapshot`]. Fails when there is no such session.
     async fn read(&self, id: &str) -> Result<LoadedSession>;
 
-    /// The most recently active candidate matching `query`, or none (also when its limit
-    /// is zero). Backends may use a metadata index without validating interior records;
-    /// opening the candidate always validates the full transcript. The default uses `list`.
-    async fn latest(&self, query: &SessionQuery) -> Result<Option<String>> {
-        let query = SessionQuery {
-            limit: Some(usize::from(query.limit != Some(0))),
-            ..query.clone()
-        };
-        Ok(self
-            .list(&query)
-            .await?
-            .sessions
-            .into_iter()
-            .next()
-            .map(|session| session.id))
+    /// The headers of the sessions `query` asks for, the most recently started first and no
+    /// more than its limit, as [`SessionQuery::arrange_headers`] arranges them: what a host
+    /// that keeps an index of its sessions reads, without their records. A session whose
+    /// header cannot be read is left out; [`list`](Self::list) reports it. The default reads
+    /// every session `list` names; a storage that can read headers alone does so instead.
+    async fn headers(&self, query: &SessionQuery) -> Result<Vec<SessionHeader>> {
+        let listed = self
+            .list(&SessionQuery {
+                limit: None,
+                ..query.clone()
+            })
+            .await?;
+        let mut headers = Vec::with_capacity(listed.sessions.len());
+        for session in listed.sessions {
+            // A session gone since the listing has no header to give.
+            if let Ok(loaded) = self.read(&session.id).await {
+                headers.push(loaded.header);
+            }
+        }
+        Ok(query.arrange_headers(headers))
     }
 
     /// The sessions `query` asks for, most recently active first and no more than its limit,
@@ -109,6 +114,17 @@ impl SessionQuery {
                 .labels
                 .iter()
                 .all(|(name, value)| header.labels.get(name) == Some(value))
+    }
+
+    /// The `headers` that match, the most recently started first, then by ID, and no more
+    /// than the limit: what [`SessionStorage::headers`] returns.
+    pub fn arrange_headers(&self, mut headers: Vec<SessionHeader>) -> Vec<SessionHeader> {
+        headers.retain(|header| self.matches(header));
+        headers.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.id.cmp(&b.id)));
+        if let Some(limit) = self.limit {
+            headers.truncate(limit);
+        }
+        headers
     }
 
     /// `sessions`, each of which matches, in the order and number [`SessionList::new`] gives.

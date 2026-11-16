@@ -138,7 +138,7 @@ impl Outlet {
     /// one `/new` started, is opened as it is, however little it holds.
     pub(crate) async fn open(&self, trigger: Option<&MessageRef>) -> Result<Opened, String> {
         let shared = &self.shared;
-        if let Some(id) = shared.latest_session(&self.key).await? {
+        if let Some(id) = shared.session_of(&self.key) {
             return self.held(shared.agent.open_session(&id).await);
         }
         let opened = self.create().await?;
@@ -155,7 +155,9 @@ impl Outlet {
             labels: self.key.labels(),
             ..SessionOptions::new(&self.shared.cwd)
         };
-        self.held(self.shared.agent.create_session(options).await)
+        let opened = self.held(self.shared.agent.create_session(options).await)?;
+        self.shared.go_on_in(&self.key, opened.session.id());
+        Ok(opened)
     }
 
     /// `session`, as the conversation holds it, or why the agent could not give one: the

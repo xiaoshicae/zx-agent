@@ -41,7 +41,7 @@
 | `tests/mcp.rs` | MCP 客户端对假服务器；运行被取消时通知服务器放弃调用 |
 | `tests/im_feishu.rs` | ⚑ D:5/CHINA FLAG: 飞书 channel 对假开放平台 |
 | `tests/im_slack.rs` | Slack channel 对假 Slack |
-| `tests/im_server.rs` | IM 服务的会话划分、接话、`/new`、审批与停止；慢查询隔离、运行名额与待处理消息容量 |
+| `tests/im_server.rs` | IM 服务的会话划分、接话、`/new`、审批与停止；启动时的会话索引、慢的会话准备不挡其他对话、运行名额与待处理消息容量（因容量被拒的闲聊不回复） |
 | `tests/real_api.rs` | 付费的真实模型 API，默认跳过（红线 9） |
 
 ## 驱动程序：`crates/zx-cli/tests/`

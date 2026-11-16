@@ -55,13 +55,14 @@ async fn an_explicit_host_builds_and_reopens_sessions_without_the_command_line()
         .set_name(SessionName::new("host session").unwrap())
         .await
         .unwrap();
+    let headers = configured
+        .agent()
+        .session_headers(&SessionQuery::default())
+        .await
+        .unwrap();
     assert_eq!(
-        configured
-            .agent()
-            .latest_session(&SessionQuery::default())
-            .await
-            .unwrap(),
-        Some(id.clone())
+        headers.iter().map(|header| header.id.as_str()).collect::<Vec<_>>(),
+        [id.as_str()]
     );
     assert!(configured.agent().close_session(&id));
     assert!(session.is_closed());

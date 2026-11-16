@@ -106,7 +106,7 @@
 | 策略 | 实现 `policy::ToolPolicy`，经 `PolicyChain::push` 进 `AgentConfig::policies`；无法判断时返回 `Deny`，所有策略取最严的结论。钩子不做放行判断 | `crates/zx-tools/src/policy/` |
 | 钩子 | 实现 `hooks::Hook`：回调必须异步让出执行权，`transform_context` 不能追加 system 消息。经 `HookChain::push(名字, Arc)` 注册，名字出现在 `hook_failed` 事件与追踪里；共用的进 `AgentConfig::hooks`，单个会话的进 `SessionParts::hooks` | `tests/hook_contract.rs` |
 | 打包的扩展 | 实现 `extensions::Extension`，进 `AgentConfig::extensions`：建 `Agent` 时向它要一次并校验，所有会话共用。运行中发消息、记状态或改工具集经 `HookContext` 的 `queues` 与 `active_tools` | `crates/zx-tools/src/mcp.rs` |
-| 会话存储 | 实现 `transcript::SessionStorage` 与 `SessionLog`，进 `AgentConfig::storage`：`append` 存好才返回，一个会话一个写入者，接口里不出现文件路径，列出时用 `SessionList::new` 排序与截断 | `transcript/memory.rs`；只换写入方式时 `tests/runner.rs` 的 `TableLog` |
+| 会话存储 | 实现 `transcript::SessionStorage` 与 `SessionLog`，进 `AgentConfig::storage`：`append` 存好才返回，一个会话一个写入者，接口里不出现文件路径，列出时用 `SessionList::new`、读头部时用 `SessionQuery::arrange_headers` 排序与截断 | `transcript/memory.rs`；只换写入方式时 `tests/runner.rs` 的 `TableLog` |
 | 摘要器 | 实现 `compaction::Summarizer`，进 `AgentConfig::summarizer`；何时摘要、读哪一段、记录与校验仍由内核做 | `tests/summarizer.rs` |
 | 单个会话的部分 | 实现 `agent::SessionSetup`，返回 `SessionParts`（工具、钩子、提示词段落） | `crates/zx-cli/src/assembly/setup.rs` |
 | 接入方式（如 Web 服务） | 独立的 crate，依赖 `zx-agent`（只要内核时依赖 `zx-core`），构造 `Agent`，为每个对话创建或打开 `Session`，读它返回的 `Run`；不放进库 `zx-agent` | `crates/zx-cli`、`crates/zx-im` |

@@ -228,23 +228,35 @@ impl StatusStore for Statuses {
     }
 }
 
-/// What the tests know of the sessions the server opens: the scripted model, the `echo`
-/// tool, the storage that keeps them in memory, how often a session was set up, and how
-/// often the server listed sessions. It is the agent's session setup, which refuses every
-/// session when it has a reason to, and its storage, which counts the listings.
-struct ListGate {
+/// Holds the setup of the sessions of the thread `slow-thread` until it is released.
+struct Gate {
     entered: tokio::sync::Notify,
     release: CancellationToken,
 }
 
+impl Gate {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            entered: tokio::sync::Notify::new(),
+            release: CancellationToken::new(),
+        })
+    }
+}
+
+/// What the tests know of the sessions the server opens: the scripted model, the `echo`
+/// tool, the storage that keeps them in memory, how often a session was set up, and how
+/// often the server read the storage's headers or listed sessions. It is the agent's session
+/// setup, which refuses every session when it has a reason to and can be held at a gate, and
+/// its storage, which counts what it is asked.
 struct Sessions {
     provider: Arc<FauxProvider>,
     echo: Arc<EchoTool>,
     storage: Arc<MemoryStorage>,
     opened: AtomicUsize,
+    indexed: AtomicUsize,
     listed: AtomicUsize,
     fail: Option<String>,
-    list_gate: Option<Arc<ListGate>>,
+    setup_gate: Option<Arc<Gate>>,
 }
 
 impl Sessions {
@@ -287,8 +299,14 @@ impl Sessions {
 
 #[async_trait]
 impl SessionSetup for Sessions {
-    async fn setup(&self, _header: &SessionHeader) -> anyhow::Result<SessionParts> {
+    async fn setup(&self, header: &SessionHeader) -> anyhow::Result<SessionParts> {
         self.opened.fetch_add(1, Ordering::SeqCst);
+        if header.labels.values().any(|value| value == "slow-thread")
+            && let Some(gate) = &self.setup_gate
+        {
+            gate.entered.notify_one();
+            gate.release.cancelled().await;
+        }
         match &self.fail {
             Some(reason) => Err(anyhow::anyhow!("{reason}")),
             None => Ok(SessionParts::default()),
@@ -310,14 +328,13 @@ impl SessionStorage for Sessions {
         self.storage.read(id).await
     }
 
+    async fn headers(&self, query: &SessionQuery) -> anyhow::Result<Vec<SessionHeader>> {
+        self.indexed.fetch_add(1, Ordering::SeqCst);
+        self.storage.headers(query).await
+    }
+
     async fn list(&self, query: &SessionQuery) -> anyhow::Result<SessionList> {
         self.listed.fetch_add(1, Ordering::SeqCst);
-        if query.labels.values().any(|value| value == "slow-thread")
-            && let Some(gate) = &self.list_gate
-        {
-            gate.entered.notify_one();
-            gate.release.cancelled().await;
-        }
         self.storage.list(query).await
     }
 }
@@ -336,7 +353,10 @@ struct Setup {
     config: ServerConfig,
     approval_timeout: Duration,
     fail_open: Option<String>,
-    list_gate: Option<Arc<ListGate>>,
+    setup_gate: Option<Arc<Gate>>,
+    /// Where the sessions are kept: a new storage without one, the one an earlier server
+    /// left with one.
+    storage: Option<Arc<MemoryStorage>>,
     fail_channel: Option<String>,
     /// Events the channel passes on as the server stops.
     late: Vec<Inbound>,
@@ -362,7 +382,8 @@ impl Default for Setup {
             },
             approval_timeout: WAIT,
             fail_open: None,
-            list_gate: None,
+            setup_gate: None,
+            storage: None,
             fail_channel: None,
             late: Vec::new(),
             statuses: None,
@@ -390,11 +411,12 @@ fn start(setup: Setup) -> Harness {
     let sessions = Arc::new(Sessions {
         provider: Arc::new(FauxProvider::new(setup.steps)),
         echo: Arc::new(EchoTool::new("echo")),
-        storage: Arc::default(),
+        storage: setup.storage.unwrap_or_default(),
         opened: AtomicUsize::new(0),
+        indexed: AtomicUsize::new(0),
         listed: AtomicUsize::new(0),
         fail: setup.fail_open,
-        list_gate: setup.list_gate,
+        setup_gate: setup.setup_gate,
     });
     let agent = sessions.agent(setup.approval_timeout);
     let (inject, events_in) = mpsc::channel(16);
@@ -1557,7 +1579,7 @@ async fn a_session_closed_during_its_run_is_let_go_and_opened_again_for_the_next
 }
 
 #[tokio::test]
-async fn the_storage_is_asked_once_about_a_thread_the_bot_never_joined() {
+async fn talk_in_a_thread_the_bot_never_joined_reaches_neither_a_worker_nor_the_storage() {
     let mut h = start(Setup {
         steps: vec![FauxStep::text("hi")],
         ..Setup::default()
@@ -1571,8 +1593,42 @@ async fn the_storage_is_asked_once_about_a_thread_the_bot_never_joined() {
     let status = h.posted(&direct(), text(&h.replies.working.clone())).await;
     h.updated(&status, text("hi")).await;
 
-    // Once for the thread, and once as the direct chat's conversation opens its session.
-    assert_eq!(h.sessions.listed.load(Ordering::SeqCst), 2);
+    assert_eq!(h.sessions.indexed.load(Ordering::SeqCst), 1, "read once, at the start");
+    assert_eq!(h.sessions.listed.load(Ordering::SeqCst), 0);
+    assert_eq!(h.sessions.opened.load(Ordering::SeqCst), 1, "the direct chat's session");
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_conversation_of_an_earlier_process_is_followed_without_a_mention() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("first")],
+        ..Setup::default()
+    });
+    h.say_as(ASKER, "m2", "m1", Addressee::Bot, "first").await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    h.updated(&status, text("first")).await;
+    let storage = Arc::clone(&h.sessions.storage);
+    h.stop().await.unwrap();
+
+    // A new server over the same storage, as after a restart.
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("second")],
+        storage: Some(storage),
+        ..Setup::default()
+    });
+    h.say_as(OTHER, "m3", "m1", Addressee::Nobody, "said while the bot was away")
+        .await;
+    h.say_as(ASKER, "m4", "m1", Addressee::Bot, "again").await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    h.updated(&status, text("second")).await;
+    let request = &h.requests()[0];
+    assert!(
+        request
+            .iter()
+            .any(|message| message.contains("said while the bot was away")),
+        "{request:?}"
+    );
     h.stop().await.unwrap();
 }
 
@@ -1823,25 +1879,21 @@ async fn talk_in_a_thread_after_its_session_was_released_is_still_recorded() {
 }
 
 #[tokio::test]
-async fn a_slow_thread_lookup_does_not_block_another_conversations_messages() {
-    let gate = Arc::new(ListGate {
-        entered: tokio::sync::Notify::new(),
-        release: CancellationToken::new(),
-    });
+async fn a_slow_session_setup_does_not_block_another_conversations_messages() {
+    let gate = Gate::new();
     let mut h = start(Setup {
         steps: vec![FauxStep::text("hi")],
-        list_gate: Some(gate.clone()),
+        setup_gate: Some(gate.clone()),
         ..Setup::default()
     });
-    h.say_as(OTHER, "m2", "slow-thread", Addressee::Nobody, "among people")
-        .await;
-    gate.entered.notified().await;
+    h.say_as(ASKER, "m2", "slow-thread", Addressee::Bot, "please").await;
+    tokio::time::timeout(WAIT, gate.entered.notified()).await.unwrap();
     h.say_directly("d1", "hello").await;
-    // The direct chat responds while the storage lookup is still held. Only WAIT, the
+    // The direct chat is answered while the thread's setup is still held. Only WAIT, the
     // harness's failure bound, limits this wait; no scheduler-speed assumption is needed.
     let status = h.posted(&direct(), text(&h.replies.working.clone())).await;
-    gate.release.cancel();
     h.updated(&status, text("hi")).await;
+    gate.release.cancel();
     h.stop().await.unwrap();
 }
 
@@ -1911,28 +1963,39 @@ async fn a_waiting_conversation_bounds_its_messages_and_still_accepts_cancel() {
 }
 
 #[tokio::test]
-async fn the_inbox_and_a_blocked_worker_share_one_message_budget() {
-    let gate = Arc::new(ListGate {
-        entered: tokio::sync::Notify::new(),
-        release: CancellationToken::new(),
-    });
+async fn talk_refused_for_capacity_gets_no_reply_and_a_request_does() {
+    let gate = Gate::new();
     let mut h = start(Setup {
         config: ServerConfig {
             max_pending_messages: NonZeroUsize::new(1).unwrap(),
             ..Setup::default().config
         },
-        list_gate: Some(Arc::clone(&gate)),
+        setup_gate: Some(gate.clone()),
         ..Setup::default()
     });
-    h.say_as(OTHER, "m1", "slow-thread", Addressee::Nobody, "first").await;
-    // The first message still owns its reservation during membership lookup.
+    let overloaded: Post = text(&h.replies.overloaded);
+    h.say_as(ASKER, "m1", "slow-thread", Addressee::Bot, "first").await;
+    // The first message keeps its share of the budget while its session is set up.
     tokio::time::timeout(WAIT, gate.entered.notified()).await.unwrap();
-    h.say_as(OTHER, "m2", "slow-thread", Addressee::Nobody, "second").await;
-    h.posted(&thread("slow-thread"), text(&h.replies.overloaded.clone()))
+    h.say_as(OTHER, "m2", "slow-thread", Addressee::Nobody, "among people")
         .await;
-    assert_eq!(h.sessions.opened.load(Ordering::SeqCst), 0);
+    h.say_as(ASKER, "m3", "slow-thread", Addressee::Bot, "second").await;
+    // The first reply is the one to the request: the talk before it got none.
+    h.posted(&thread("slow-thread"), overloaded.clone()).await;
     gate.release.cancel();
-    h.stop().await.unwrap();
+    let (sent, events) = h.stop_and_take().await;
+
+    assert!(
+        !sent
+            .iter()
+            .any(|sent| matches!(sent, Sent::Post { message, .. } if *message == overloaded)),
+        "{sent:?}"
+    );
+    let refused = events
+        .iter()
+        .filter(|event| matches!(event, ServerEvent::Failed { error, .. } if error.contains("capacity exceeded")))
+        .count();
+    assert_eq!(refused, 2, "the operator hears of both: {events:?}");
 }
 
 #[tokio::test]

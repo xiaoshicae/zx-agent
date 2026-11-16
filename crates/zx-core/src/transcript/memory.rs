@@ -115,6 +115,14 @@ impl SessionStorage for MemoryStorage {
         Ok(sessions.get(id).ok_or_else(|| missing(id))?.loaded())
     }
 
+    async fn headers(&self, query: &SessionQuery) -> Result<Vec<SessionHeader>> {
+        let headers = lock(&self.sessions)
+            .values()
+            .map(|stored| stored.header.clone())
+            .collect();
+        Ok(query.arrange_headers(headers))
+    }
+
     async fn list(&self, query: &SessionQuery) -> Result<SessionList> {
         // Copied out under the lock, summarized without it.
         let matching: Vec<LoadedSession> = lock(&self.sessions)
