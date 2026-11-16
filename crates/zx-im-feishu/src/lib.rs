@@ -24,7 +24,7 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use zx_ai::sync::lock;
+use zx_im::sync::lock;
 use zx_im::{
     ApprovalCard, Backoff, CardLabels, Destination, ErrorReport, ImChannel, ImError, Inbound, MAX_TEXT_CHARS,
     MessageId, MessageRef, Pacer, Post, Replacement, SEEN_CAPACITY, Seen, pause, split_text,

@@ -2,7 +2,7 @@
 //! and cards the channel posts.
 
 use serde_json::{Value, json};
-use zx_ai::sync::lock;
+use zx_im::sync::lock;
 use zx_im::{
     Addressee, ApprovalId, ApprovalResult, CardLabels, ChatKind, Choice, ConversationId, Destination, ImError, Inbound,
     MessageId, Seen, ThreadId, UserId,
