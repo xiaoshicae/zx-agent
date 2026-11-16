@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::assembly;
-use crate::assembly::SessionPlace;
+use crate::assembly::{PlaceKind, SessionPlace};
 use crate::render::visible;
 
 /// Where conversations are kept.
@@ -71,14 +71,14 @@ pub(super) async fn opening(
         (false, Some(path)) => (SessionPlace::file(&path), Some(path)),
         (false, None) => (SessionPlace::home()?, None),
     };
-    let first = match (&place, resume) {
-        (SessionPlace::Directory(_), Some(id)) => resume_target(&place, cwd, id).await?,
+    let first = match (place.kind(), resume) {
+        (PlaceKind::Directory, Some(id)) => resume_target(&place, cwd, id).await?,
         // `--session` continues the session its file holds, or starts the file.
-        (SessionPlace::File(_), _) => match place.held(cwd).await? {
+        (PlaceKind::File, _) => match place.held(cwd).await? {
             Some(id) => First::Resume(id),
             None => First::Fresh,
         },
-        (SessionPlace::Memory(_) | SessionPlace::Directory(_), _) => First::Fresh,
+        (PlaceKind::Memory | PlaceKind::Directory, _) => First::Fresh,
     };
     Ok((Storage { place, original }, first))
 }

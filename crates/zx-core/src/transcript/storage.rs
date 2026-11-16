@@ -65,6 +65,23 @@ pub trait SessionStorage: Send + Sync {
     /// open: a snapshot, for [`Transcript::snapshot`]. Fails when there is no such session.
     async fn read(&self, id: &str) -> Result<LoadedSession>;
 
+    /// The most recently active candidate matching `query`, or none (also when its limit
+    /// is zero). Backends may use a metadata index without validating interior records;
+    /// opening the candidate always validates the full transcript. The default uses `list`.
+    async fn latest(&self, query: &SessionQuery) -> Result<Option<String>> {
+        let query = SessionQuery {
+            limit: Some(usize::from(query.limit != Some(0))),
+            ..query.clone()
+        };
+        Ok(self
+            .list(&query)
+            .await?
+            .sessions
+            .into_iter()
+            .next()
+            .map(|session| session.id))
+    }
+
     /// The sessions `query` asks for, most recently active first and no more than its limit,
     /// as [`SessionList::new`] arranges them. A session being written is listed as of now.
     async fn list(&self, query: &SessionQuery) -> Result<SessionList>;

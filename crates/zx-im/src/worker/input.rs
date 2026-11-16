@@ -1,5 +1,7 @@
 //! Thread membership, input admission and context recorded without starting a run.
 
+use zx_core::input::Input;
+
 use super::{CANCEL_COMMAND, Incoming, Membership, NEW_COMMAND, Phase, Worker, WorkerInput};
 use crate::{
     Addressee, Session,
@@ -28,20 +30,6 @@ impl Worker {
             };
         }
         self.membership == Membership::Joined
-    }
-
-    fn has_capacity(&self, bytes: usize) -> bool {
-        let (mut count, mut total) = match &self.phase {
-            Phase::Waiting { asked, .. } => (asked.len(), asked.iter().map(|asked| asked.text.len()).sum::<usize>()),
-            Phase::Running { open, .. } => open.session.queues().pending_size(),
-            Phase::Idle { .. } => (0, 0),
-        };
-        count = count.saturating_add(self.heard.len());
-        total = self
-            .heard
-            .iter()
-            .fold(total, |total, message| total.saturating_add(message.content.len()));
-        count < self.out.shared.max_pending_messages && bytes <= self.out.shared.max_pending_bytes.saturating_sub(total)
     }
 
     pub(super) async fn input(&mut self, input: WorkerInput) {
@@ -74,26 +62,35 @@ impl Worker {
             }
         }
         let content = self.out.attributed(&incoming.sender, &incoming.text).await;
-        if !self.has_capacity(content.len()) {
+        let input = if answer {
+            Input::User {
+                text: content,
+                actor: Some(incoming.sender.0.clone()),
+            }
+        } else {
+            Input::Custom(said(content))
+        };
+        let admitted = match incoming.permit {
+            Some(permit) => permit.attach(input),
+            None => self.budget.try_admit(input),
+        };
+        let Ok(pending) = admitted else {
             self.out.post(self.out.replies().overloaded.clone()).await;
             self.out
                 .failed("pending input capacity exceeded; message was not accepted".into());
             return;
-        }
+        };
         if !answer {
             self.answering = None;
-            self.heard.push(said(content));
+            self.heard.push(pending);
             self.record_heard().await;
             return;
         }
         self.answering = Some(incoming.sender.clone());
-        let asked = Asked {
-            text: content,
-            actor: Some(incoming.sender.0.clone()),
-        };
+        let asked = Asked(pending);
         let steered = match &mut self.phase {
             Phase::Running { open, .. } => {
-                open.session.queues().steer(asked.into_input());
+                open.session.queues().steer_pending(asked.0);
                 true
             }
             Phase::Waiting { asked: waiting, .. } => {
@@ -139,8 +136,10 @@ impl Worker {
     }
 
     pub(super) async fn record_in(&mut self, session: &Session) {
-        for message in std::mem::take(&mut self.heard) {
-            if let Err(error) = session.append_custom_message(message).await {
+        for pending in std::mem::take(&mut self.heard) {
+            if let Input::Custom(message) = pending.input()
+                && let Err(error) = session.append_custom_message(message.clone()).await
+            {
                 self.out.failed(format!("cannot record a message: {error}"));
             }
         }

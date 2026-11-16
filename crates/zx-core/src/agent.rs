@@ -313,6 +313,12 @@ impl Agent {
         closed.as_deref().and_then(OnceCell::get).is_some_and(Session::close)
     }
 
+    /// The most recently active candidate matching `query`. It is not opened; a backend
+    /// may inspect metadata only. [`Self::open_session`] validates its full record history.
+    pub async fn latest_session(&self, query: &SessionQuery) -> Result<Option<String>> {
+        self.shared.config.storage.latest(query).await
+    }
+
     /// The sessions in the storage that `query` asks for, most recently active first.
     pub async fn list_sessions(&self, query: &SessionQuery) -> Result<SessionList> {
         self.shared.config.storage.list(query).await

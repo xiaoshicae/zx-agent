@@ -382,7 +382,7 @@ fn lock(_file: &File, _path: &Path) -> Result<()> {
 /// Whether `raw`, the last line, is a record that a crash cut short: it lacks its newline and
 /// is a valid but unfinished JSON text. A complete record, even one that is not a known
 /// entry, is never treated as incomplete, so it is reported instead of silently removed.
-fn incomplete_tail(raw: &[u8]) -> bool {
+pub(super) fn incomplete_tail(raw: &[u8]) -> bool {
     if raw.ends_with(b"\n") {
         return false;
     }

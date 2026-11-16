@@ -75,7 +75,7 @@ impl Host {
     /// Whether sessions are kept as files, where a later request or process finds them
     /// again: not with `--no-session`.
     fn keeps_files(&self) -> bool {
-        !matches!(self.mode.place, SessionPlace::Memory(_))
+        self.mode.place.is_persistent()
     }
 
     /// Create a session for `cwd`, the client's project directory, whatever `--cwd` says.

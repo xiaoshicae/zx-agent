@@ -50,7 +50,12 @@ impl Settings {
     }
 
     /// `model` and `base_url` over `config`, read from `home`.
-    fn over(model: Option<&str>, base_url: Option<String>, mut config: Config, home: Option<PathBuf>) -> Result<Self> {
+    pub(crate) fn over(
+        model: Option<&str>,
+        base_url: Option<String>,
+        mut config: Config,
+        home: Option<PathBuf>,
+    ) -> Result<Self> {
         let model = model
             .map(str::to_string)
             .or_else(|| config.model.clone())

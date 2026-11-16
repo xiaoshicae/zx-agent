@@ -22,7 +22,7 @@ use crate::ai::{Provider, Reasoning};
 use crate::compaction;
 use crate::events::Event;
 use crate::extensions::{CommandContext, CommandError, CommandOutcome, SlashCommand};
-use crate::input::{Input, InputQueues};
+use crate::input::{Input, InputQueues, PendingInput};
 use crate::policy::{ApprovalDecision, ApprovalGate};
 use crate::runner::{LoopConfig, RunLimits, RunLink, Runner, Start};
 use crate::sync::lock;
@@ -329,6 +329,12 @@ impl Session {
     pub fn take_queued(&self) -> Result<Vec<Input>, SessionError> {
         // Holding the state lock keeps a run from starting between the check and the take.
         self.idle(|_| self.shared.queues.take_all())
+    }
+
+    /// Take queued input while retaining its admission permits for another host queue.
+    /// Like [`Self::take_queued`], returns Busy while a run or compaction owns the session.
+    pub fn take_pending(&self) -> Result<Vec<PendingInput>, SessionError> {
+        self.idle(|_| self.shared.queues.drain_pending())
     }
 
     /// Cancel the run or compaction in progress; its [`Run`] then ends with a cancelled

@@ -1,6 +1,6 @@
 # 作为库使用
 
-`zx-agent` 库再导出各 crate：内核 `zx-core` 按域模块原样导出（`zx_agent::agent`、`zx_agent::tools`、`zx_agent::policy`、`zx_agent::hooks`、`zx_agent::transcript` 等），模型层在 `zx_agent::ai`，`zx-tools` 附带的实现在 `zx_agent::builtin`。库里没有接入方式：IM 服务在 `zx-im`（平台在 `zx-im-slack` 与 `zx-im-feishu`），`config.toml`、agent 文件与 OpenTelemetry 导出在命令行的 crate `zx-cli`（`zx_cli::config`、`zx_cli::otel`）。只需要内核时可以只依赖 `zx-core` 与 `zx-ai`，按需加上 `zx-ai-openai`。`zx-core` 按 JSON Schema 校验工具参数的部分是默认开启的 feature `json-schema`；写 `default-features = false` 时参数只由工具自己解析，内核的依赖从 103 个 crate 减到 40 个（含它自己）。各 crate 都不发布到 crates.io。
+`zx-agent` 库再导出各 crate：内核 `zx-core` 按域模块原样导出（`zx_agent::agent`、`zx_agent::tools`、`zx_agent::policy`、`zx_agent::hooks`、`zx_agent::transcript` 等），模型层在 `zx_agent::ai`，`zx-tools` 附带的实现在 `zx_agent::builtin`。库里没有接入方式：IM 服务在 `zx-im`（平台在 `zx-im-slack` 与 `zx-im-feishu`），`config.toml`、agent 文件与 OpenTelemetry 导出在命令行的 crate `zx-cli`（`zx_cli::application`、`zx_cli::config`、`zx_cli::otel`）。只需要内核时可以只依赖 `zx-core` 与 `zx-ai`，按需加上 `zx-ai-openai`。`zx-core` 按 JSON Schema 校验工具参数的部分是默认开启的 feature `json-schema`；写 `default-features = false` 时参数只由工具自己解析，可以关闭这部分校验依赖。各 crate 都不发布到 crates.io。
 
 ```rust
 let mut config = AgentConfig { system_prompt, tools, ..AgentConfig::new(provider, model) };
@@ -27,8 +27,37 @@ let report = run.wait().await;                // 只要结果时直接 session.s
 - 会话存储：放进 `AgentConfig::storage`，默认是 `MemoryStorage`。`Agent` 用 `storage.create(&header)` 建新会话，用 `storage.open(id)` 读回会话并成为它的写入者；`storage.read(id)` 是只读快照，宿主交给 `Transcript::snapshot` 来读；`storage.list(&SessionQuery { cwd, labels, limit })` 按工作目录或标签列出，最近活动的在前（`Agent::list_sessions` 即它）。换一种存储（如数据库）只需实现这两个 trait，列出时用 `SessionList::new` 按查询排序与截断。
 - 摘要：默认由内核请求模型，请求可从会话还原。给 `AgentConfig::summarizer` 一个 `compaction::Summarizer` 后由它产出摘要与用量：何时摘要、读哪一段（至多 2 MiB）、写开始与结果记录、校验每条事实引用的记录、超时与取消仍由内核负责；一次摘要计为运行的一次模型请求，它报告的用量计入运行的预算。
 
+## 有界输入与轻量查询
+
+SDK 默认入队保持无配额语义。宿主要限制待处理输入时，创建共享 `Arc<InputBudget>`，在收件时 `try_reserve`，文本归属信息补齐后用 `InputPermit::attach` 得到 `PendingInput`，或直接用 `try_admit(Input)`。消息数量与 UTF-8 文本字节原子检查；`try_reserve` 满时返回 `None`，`try_admit` / `attach` 拒绝时用 `InputRejected::into_input` 取回原输入。actor、details 和 custom entry 不计入文本预算。
+
+`InputQueues::steer_pending` / `follow_up_pending` 接收这份输入并持有配额，直到记录或移除；`Session::take_pending` 与 `InputQueues::drain_pending` 在转移到宿主队列时保留配额。`take_queued`、普通 drain 和 `PendingInput::into_input` 返回裸输入并归还配额，适用于开始运行或停止保留。直接调用 `steer` / `follow_up` 仍是无配额入队，不会自动使用宿主创建的预算。
+
+只要最近会话 ID 时，用 `Agent::latest_session`（对应存储的 `latest`，自定义存储默认经 `list` 实现）。JSONL 实现按头部过滤、按最后完整记录的时间选择候选；活动时间相同时按创建时间、ID 排序，`limit = 0` 返回空。它不校验内部历史，打开时仍由 `Transcript::load` 完整校验；要完整列表和损坏诊断，用 `list_sessions`。头部/活动时间缓存各至多 1024 条，完整列表缓存至多 128 条；索引可丢弃重建，不写新的会话格式，文件发现仍扫描目录。
+
+## 复用配置装配
+
+`zx_cli::application::Application` 是提前开放的宿主入口，复用 CLI 已有装配实现：
+
+```text
+CLI 的 run / chat / acp / im ─┐
+Application（其他 Rust 宿主） ├→ assembly → Agent → Session / Run
+显式配置或进程配置 ──────────┘               └→ SessionSetup → 会话执行器
+```
+
+| 入口或资源 | 契约 |
+|---|---|
+| `Application::from_config(config, home, overrides, role)` | 配置显式传入；`home` 只用于读取 agent 文件，不发现 config.toml，不读取 `ZX_MODEL`、`ZX_BASE_URL`、`ZX_SECRET_FILES` 覆盖；配置中命名的 API/MCP 凭据仍从环境变量读取 |
+| `Application::from_environment(overrides, role)` | 显式选择 CLI 的主目录配置发现，以及 `ZX_BASE_URL`、`ZX_SECRET_FILES`；`ZX_MODEL` 由宿主选择是否放入 `overrides.model` |
+| `build(place, approvals)` | 生成 `ConfiguredAgent`，还不创建会话；MCP 连接由 Application 内的装配资源共享 |
+| `SessionPlace` | 宿主显式选择 memory、file 或 directory；memory 中关闭的会话会被遗忘 |
+| `ConfiguredAgent::create` / `open` / `agent` | 创建、续接会话，或取得底层 `Agent`；宿主驱动 `Run` 并负责关闭会话 |
+| `notices` / `with_traces` | 启动提示由宿主输出；导出器初始化与关闭也归宿主，Application 不安装全局 telemetry |
+
+公开入口的无命令行使用示例与验收见 `crates/zx-cli/tests/application.rs`，覆盖显式配置、覆盖项、存储与会话续接、缺少模型/单价、不可用密钥文件和不含密钥值的启动提示。暂留在现有 crate；第二个独立宿主出现时再连同配置和追踪导出抽出，内核的 SDK 边界保持 D24。
+
 接口与契约见 rustdoc：`cargo doc --open`。
 
 ---
 
-LIBRARY.md · v0.2 · 2026年11月
+LIBRARY.md · v0.3 · 2026年11月

@@ -27,6 +27,7 @@ pub(crate) struct Shared {
     /// What this start of the program says over the agent: the working directory, the
     /// tools and the budgets.
     pub(crate) overrides: Overrides,
+    pub(crate) notices: Vec<String>,
     /// The built-in agent every session runs, or the user's file that replaces it.
     pub(super) agent: Builtin,
     pub(super) mcp: McpTools,
@@ -47,10 +48,37 @@ impl Shared {
     /// lacks or a secret file that cannot be used stops startup, like other configuration
     /// errors.
     pub(crate) async fn connect(overrides: Overrides, agent: Builtin) -> Result<Self> {
+        let shared = Self::from_environment(overrides, agent).await?;
+        for notice in &shared.notices {
+            eprintln!("{notice}");
+        }
+        Ok(shared)
+    }
+
+    pub(crate) async fn from_environment(overrides: Overrides, agent: Builtin) -> Result<Self> {
         let settings = Settings::resolve(overrides.model.as_deref())?;
+        let files = secret_files(&settings.config.secret_files)?;
+        Self::configured(settings, overrides, agent, files).await
+    }
+
+    pub(crate) async fn configured(
+        settings: Settings,
+        overrides: Overrides,
+        agent: Builtin,
+        secret_files: Vec<PathBuf>,
+    ) -> Result<Self> {
+        let mut mcp = connect_mcp(&settings).await?;
+        let mut notices = std::mem::take(&mut mcp.notices);
+        for file in short_secret_files(&secret_files) {
+            notices.push(format!(
+                "[secret] {}: the value is shorter than {MIN_SECRET_CHARS} characters; it is still redacted, and so is every other occurrence of the same text in tool output",
+                file.display()
+            ));
+        }
         Ok(Self {
-            mcp: connect_mcp(&settings).await?,
-            secret_files: secret_files(&settings.config.secret_files)?,
+            mcp,
+            secret_files,
+            notices,
             hidden_env: Vec::new(),
             traces: None,
             settings,
@@ -79,6 +107,7 @@ impl Shared {
 #[derive(Default)]
 pub(super) struct McpTools {
     pub(super) servers: Vec<Arc<dyn Extension>>,
+    notices: Vec<String>,
     /// The names the model calls the servers' tools by; which of them ask depends on the
     /// agent, so each mode's agent decides when it is built.
     pub(super) names: Vec<String>,
@@ -121,12 +150,12 @@ async fn connect_mcp(settings: &Settings) -> Result<McpTools> {
         } else {
             ""
         };
-        eprintln!(
+        tools.notices.push(format!(
             "[mcp] {}: {}; protocol {}; {origin}{plain}",
             entry.name,
             names.join(", "),
             server.protocol_version()
-        );
+        ));
         tools.names.extend(names.into_iter().map(str::to_string));
         tools.token_env.extend(entry.token_env.iter().cloned());
         tools.servers.push(Arc::new(server));
@@ -158,6 +187,11 @@ fn secret_files(configured: &[PathBuf]) -> Result<Vec<PathBuf>> {
         .chain(configured.iter().cloned())
         .filter(|path| !path.as_os_str().is_empty())
         .collect();
+    checked_secret_files(secret_files)
+}
+
+/// Validate explicit secret files without reading process overrides or printing notices.
+pub(crate) fn checked_secret_files(secret_files: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
     for path in &secret_files {
         std::fs::metadata(path).with_context(|| {
             format!(
@@ -168,12 +202,5 @@ fn secret_files(configured: &[PathBuf]) -> Result<Vec<PathBuf>> {
     }
     check_secret_files(&secret_files)
         .map_err(|error| anyhow::anyhow!("{error} (secretFiles in config.toml or ZX_SECRET_FILES)"))?;
-    // Never the value itself: the notice goes to a terminal or a log.
-    for file in short_secret_files(&secret_files) {
-        eprintln!(
-            "[secret] {}: the value is shorter than {MIN_SECRET_CHARS} characters; it is still redacted, and so is every other occurrence of the same text in tool output",
-            file.display()
-        );
-    }
     Ok(secret_files)
 }

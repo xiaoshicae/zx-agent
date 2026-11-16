@@ -20,7 +20,7 @@
 | `zx-tools` | `crates/zx-tools` | 内置工具、执行环境（本机与容器）、命令与规则策略、续写、脱敏、落盘、MCP |
 | `zx-im`、`zx-im-slack`、`zx-im-feishu` | `crates/zx-im*` | IM 服务与两个平台；与 `zx-tools` 互不依赖 |
 | `zx-agent` | `src/lib.rs` | SDK：把 `zx-core`、`zx-ai`、`zx-ai-openai`、`zx-tools` 再导出成一个库，没有自己的代码 |
-| `zx-cli` | `crates/zx-cli` | 命令行（都在库里，`main.rs` 只调用它；可执行文件仍叫 `zx-agent`）。`config`（`config.toml` 与 agent 文件）、`otel`（追踪导出）与 `assembly`（按配置装配 agent，不含命令行参数）是各接入方式共用的；`run`、`chat`、`acp`、`im` 互不引用 |
+| `zx-cli` | `crates/zx-cli` | 命令行（都在库里，`main.rs` 只调用它；可执行文件仍叫 `zx-agent`）。`application` 提供复用配置装配的宿主入口，内部 `assembly` 与命令行参数分开；`config`（`config.toml` 与 agent 文件）、`otel`（追踪导出）供这一层共用；`run`、`chat`、`acp`、`im` 互不引用 |
 
 一次运行：`main` 构造 `Agent`，`Agent` 创建或打开 `Session`（先由 `SessionSetup` 给出属于该会话的部分，再把角色、会话的部分与扩展合成循环配置） → `send` 独占取得 Runner（crate 内部）并返回 `Run`，调用方读它，运行才推进 → 每次尝试运行一遍循环 `StepLoop` → 先持久化提示词、输入和上下文改动，再执行可选摘要 → 请求模型，发出的上下文就是此刻的会话投影 → 执行工具、脱敏、可选落盘 → 每一步先写入会话，再把事件放进这次运行的有界通道 → Runner 处理重试并汇总 `RunReport`，`main` 映射退出码。
 

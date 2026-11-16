@@ -15,10 +15,13 @@ use zx_agent::transcript::{JsonlStorage, MemoryStorage, SessionInfo, SessionList
 /// Under the zx-agent home directory: the sessions of every working directory.
 const SESSIONS_DIR: &str = "sessions";
 
-/// Where a mode keeps its sessions. A clone is the same place: the mode's agent keeps its
-/// sessions there, and the mode lists them and shows their files.
+/// Where a configured agent keeps its sessions. Clones share the same storage; constructors
+/// keep its layout private so a single-file store cannot be confused with a directory.
 #[derive(Clone)]
-pub(crate) enum SessionPlace {
+pub struct SessionPlace(Place);
+
+#[derive(Clone)]
+enum Place {
     /// `--no-session`: in memory. A session is kept while it is open and forgotten once it
     /// is closed, so that a process that runs for long keeps nothing of the conversations it
     /// has had.
@@ -30,17 +33,41 @@ pub(crate) enum SessionPlace {
     Directory(Arc<JsonlStorage>),
 }
 
+/// The distinction the command line needs when deciding whether to resume a session.
+#[derive(Clone, Copy)]
+pub(crate) enum PlaceKind {
+    Memory,
+    File,
+    Directory,
+}
+
 impl SessionPlace {
-    pub(crate) fn memory() -> Self {
-        Self::Memory(Arc::new(MemoryStorage::forgetting()))
+    /// Keep open sessions in memory and forget them when closed.
+    pub fn memory() -> Self {
+        Self(Place::Memory(Arc::new(MemoryStorage::forgetting())))
     }
 
-    pub(crate) fn file(path: &Path) -> Self {
-        Self::File(Arc::new(JsonlStorage::file(path)))
+    /// Keep at most one session in this JSONL file.
+    pub fn file(path: &Path) -> Self {
+        Self(Place::File(Arc::new(JsonlStorage::file(path))))
     }
 
-    pub(crate) fn directory(root: &Path) -> Self {
-        Self::Directory(Arc::new(JsonlStorage::in_directory(root)))
+    /// Keep session files under this explicit root, grouped by working directory.
+    pub fn directory(root: &Path) -> Self {
+        Self(Place::Directory(Arc::new(JsonlStorage::in_directory(root))))
+    }
+
+    /// Whether closed sessions remain in files and can be opened later.
+    pub fn is_persistent(&self) -> bool {
+        !matches!(self.0, Place::Memory(_))
+    }
+
+    pub(crate) fn kind(&self) -> PlaceKind {
+        match self.0 {
+            Place::Memory(_) => PlaceKind::Memory,
+            Place::File(_) => PlaceKind::File,
+            Place::Directory(_) => PlaceKind::Directory,
+        }
     }
 
     /// `--session`'s file, or memory without one.
@@ -55,28 +82,28 @@ impl SessionPlace {
     }
 
     /// The storage of this place, for the agent whose sessions are kept here.
-    pub(crate) fn storage(&self) -> Arc<dyn SessionStorage> {
-        match self {
-            Self::Memory(storage) => storage.clone(),
-            Self::File(storage) | Self::Directory(storage) => storage.clone(),
+    pub fn storage(&self) -> Arc<dyn SessionStorage> {
+        match &self.0 {
+            Place::Memory(storage) => storage.clone(),
+            Place::File(storage) | Place::Directory(storage) => storage.clone(),
         }
     }
 
     fn files(&self) -> Option<&JsonlStorage> {
-        match self {
-            Self::Memory(_) => None,
-            Self::File(storage) | Self::Directory(storage) => Some(storage),
+        match &self.0 {
+            Place::Memory(_) => None,
+            Place::File(storage) | Place::Directory(storage) => Some(storage),
         }
     }
 
     /// Where the sessions started in `cwd` are kept: the session file, or the directory of
     /// that working directory's files; `None` in memory.
-    pub(crate) fn location(&self, cwd: &Path) -> Option<PathBuf> {
+    pub fn location(&self, cwd: &Path) -> Option<PathBuf> {
         self.files().map(|files| files.location(cwd))
     }
 
     /// The file of session `id`; `None` in memory.
-    pub(crate) async fn path_of(&self, id: &str) -> Result<Option<PathBuf>> {
+    pub async fn path_of(&self, id: &str) -> Result<Option<PathBuf>> {
         match self.files() {
             Some(files) => files.path_of(id).await,
             None => Ok(None),
@@ -109,7 +136,7 @@ impl SessionPlace {
     /// and for a place that keeps more than one session. A file that cannot be read as a
     /// session is an error.
     async fn only(&self) -> Result<Option<SessionInfo>> {
-        let Self::File(storage) = self else {
+        let Place::File(storage) = &self.0 else {
             return Ok(None);
         };
         let list = storage.list(&SessionQuery::default()).await?;

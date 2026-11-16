@@ -1,13 +1,14 @@
 //! Sessions as JSONL files: one file per session, in a directory per working directory, or
 //! one named file (pi: `getDefaultSessionDirPath`, and the names of its session files).
 //!
+//! - `catalog`: bounded, rebuildable metadata and activity lookup without transcript replay
 //! - `file`: one session file: its lock, reading it, repairing its end, and appending to it
 
+mod catalog;
 mod file;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
 use std::fs::DirEntry;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -21,10 +22,14 @@ use super::{
     Unreadable, ensure_current_version,
 };
 use crate::sync::lock;
+use catalog::Cache;
 pub(super) use file::JsonlFile;
 
 /// What session files end in.
 const EXTENSION: &str = "jsonl";
+/// Metadata is cheap enough to retain more entries than first prompts and listing summaries.
+const METADATA_CACHE_ENTRIES: usize = 1024;
+const LISTING_CACHE_ENTRIES: usize = 128;
 
 /// Sessions kept as JSONL files: a header line, then one record per line.
 ///
@@ -52,12 +57,13 @@ enum Layout {
 
 struct Files {
     layout: Layout,
-    /// The headers read so far, by file. A header never changes once it is written, so a
-    /// file is read for it once; which files exist is asked of the directory every time.
-    headers: Mutex<HashMap<PathBuf, SessionHeader>>,
+    /// Headers by file stamp, bounded independently of the number of historical sessions.
+    /// Directory discovery stays fresh, including files created by another process.
+    headers: Mutex<Cache<(Stamp, SessionHeader)>>,
     /// What a listing shows of each session read so far, by file, with what the file looked
     /// like then. A session file only grows, so one that looks the same is not read again.
-    listed: Mutex<HashMap<PathBuf, (Stamp, SessionInfo)>>,
+    listed: Mutex<Cache<(Stamp, SessionInfo)>>,
+    activity: Mutex<Cache<(Stamp, u64)>>,
 }
 
 /// What tells whether a session file changed since it was read: its length, which every
@@ -101,8 +107,9 @@ impl JsonlStorage {
         Self {
             files: Arc::new(Files {
                 layout,
-                headers: Mutex::default(),
-                listed: Mutex::default(),
+                headers: Mutex::new(Cache::new(METADATA_CACHE_ENTRIES)),
+                listed: Mutex::new(Cache::new(LISTING_CACHE_ENTRIES)),
+                activity: Mutex::new(Cache::new(METADATA_CACHE_ENTRIES)),
             }),
         }
     }
@@ -150,6 +157,11 @@ impl SessionStorage for JsonlStorage {
         self.blocking(move |files| files.read(&id)).await
     }
 
+    async fn latest(&self, query: &SessionQuery) -> Result<Option<String>> {
+        let query = query.clone();
+        self.blocking(move |files| files.latest(&query)).await
+    }
+
     async fn list(&self, query: &SessionQuery) -> Result<SessionList> {
         let query = query.clone();
         self.blocking(move |files| files.list(&query)).await
@@ -172,7 +184,6 @@ impl Files {
             }
         };
         let file = JsonlFile::create(&path, header)?;
-        lock(&self.headers).insert(path, header.clone());
         Ok(file)
     }
 
@@ -206,6 +217,45 @@ impl Files {
         Ok(SessionList::new(query, sessions, unreadable))
     }
 
+    /// Select by header and last complete record. Interior records are checked on open.
+    fn latest(&self, query: &SessionQuery) -> Result<Option<String>> {
+        if query.limit == Some(0) {
+            return Ok(None);
+        }
+        let (paths, _) = self.candidates(query)?;
+        let mut latest: Option<(u64, SessionHeader)> = None;
+        for path in paths {
+            let Ok(header) = self.header_of(&path) else { continue };
+            if !query.matches(&header) || ensure_current_version(&header).is_err() {
+                continue;
+            }
+            let Ok(activity) = self.activity_of(&path, &header) else {
+                continue;
+            };
+            let newer = latest.as_ref().is_none_or(|(previous, kept)| {
+                activity > *previous
+                    || (activity == *previous && header.timestamp > kept.timestamp)
+                    || (activity == *previous && header.timestamp == kept.timestamp && header.id < kept.id)
+            });
+            if newer {
+                latest = Some((activity, header));
+            }
+        }
+        Ok(latest.map(|(_, header)| header.id))
+    }
+
+    fn activity_of(&self, path: &Path, header: &SessionHeader) -> Result<u64> {
+        let stamp = Stamp::of(path)?;
+        if let Some((seen, activity)) = lock(&self.activity).get(path)
+            && seen == stamp
+        {
+            return Ok(activity);
+        }
+        let activity = catalog::last_activity(path, header)?;
+        lock(&self.activity).insert(path.to_path_buf(), (stamp, activity));
+        Ok(activity)
+    }
+
     /// The files in which `query` may find its sessions, and the directories it would look in
     /// that cannot be read.
     fn candidates(&self, query: &SessionQuery) -> Result<(Vec<PathBuf>, Vec<Unreadable>)> {
@@ -232,9 +282,9 @@ impl Files {
         // file looks next time, and it is read again then.
         let stamp = Stamp::of(path)?;
         if let Some((seen, info)) = lock(&self.listed).get(path)
-            && *seen == stamp
+            && seen == stamp
         {
-            return Ok(Some(info.clone()));
+            return Ok(Some(info));
         }
         let transcript =
             Transcript::snapshot(file::read(path)?).map_err(|error| anyhow!("{}: {error:#}", path.display()))?;
@@ -243,13 +293,16 @@ impl Files {
         Ok(Some(info))
     }
 
-    /// The header of the session file `path`, read once.
+    /// The header of the session file `path`, refreshed when its file stamp changes.
     fn header_of(&self, path: &Path) -> Result<SessionHeader> {
-        if let Some(header) = lock(&self.headers).get(path) {
-            return Ok(header.clone());
+        let stamp = Stamp::of(path)?;
+        if let Some((seen, header)) = lock(&self.headers).get(path)
+            && seen == stamp
+        {
+            return Ok(header);
         }
         let header = file::read_header(path)?;
-        lock(&self.headers).insert(path.to_path_buf(), header.clone());
+        lock(&self.headers).insert(path.to_path_buf(), (stamp, header.clone()));
         Ok(header)
     }
 
@@ -276,7 +329,7 @@ impl Files {
         };
         let known = lock(&self.headers)
             .iter()
-            .find(|(_, header)| header.id == id)
+            .find(|(_, (_, header))| header.id == id)
             .map(|(path, _)| path.clone());
         if let Some(path) = known.filter(|path| path.is_file()) {
             return Ok(Some(path));
