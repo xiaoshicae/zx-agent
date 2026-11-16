@@ -203,7 +203,7 @@ zx-cli      crates/zx-cli    命令行程序 zx-agent（run、chat、acp、im、
 
 ## 作为库使用
 
-`zx-agent` 库再导出各 crate：内核 `zx-core` 按域模块原样导出（`zx_agent::agent`、`zx_agent::tools`、`zx_agent::policy`、`zx_agent::hooks`、`zx_agent::transcript` 等），模型层在 `zx_agent::ai`，`zx-tools` 附带的实现在 `zx_agent::builtin`。库里没有接入方式：IM 服务在 `zx-im`（平台在 `zx-im-slack` 与 `zx-im-feishu`），`config.toml`、agent 文件与 OpenTelemetry 导出在命令行的 crate `zx-cli`（`zx_cli::config`、`zx_cli::otel`）。只需要内核时可以只依赖 `zx-core` 与 `zx-ai`，按需加上 `zx-ai-openai`。`zx-core` 按 JSON Schema 校验工具参数的部分是默认开启的 feature `json-schema`；写 `default-features = false` 时参数只由工具自己解析，内核的依赖从 103 个 crate 减到 40 个（含它自己）。各 crate 都不发布到 crates.io。
+`zx-agent` 库再导出各 crate：内核 `zx-core` 按域模块原样导出（`zx_agent::agent`、`zx_agent::tools`、`zx_agent::policy`、`zx_agent::hooks`、`zx_agent::transcript` 等），模型层在 `zx_agent::ai`，`zx-tools` 附带的实现在 `zx_agent::builtin`。库里没有接入方式：IM 服务在 `zx-im`（平台在 `zx-im-slack` 与 `zx-im-feishu`），`config.toml`、agent 文件与 OpenTelemetry 导出在命令行的 crate `zx-cli`（`zx_cli::config`、`zx_cli::otel`）。只需要内核时可以只依赖 `zx-core` 与 `zx-ai`，按需加上 `zx-ai-openai`。`zx-core` 按 JSON Schema 校验工具参数的部分是默认开启的 feature `json-schema`；写 `default-features = false` 时参数只由工具自己解析，内核的依赖从 103 个 crate 减到 40 个（含它自己）；`zx-tools` 的 MCP 客户端是默认开启的 feature `mcp`，关掉时不编译 HTTP 客户端与 MCP SDK。各 crate 都不发布到 crates.io。
 
 ```rust
 let mut config = AgentConfig { system_prompt, tools, ..AgentConfig::new(provider, model) };
@@ -239,6 +239,7 @@ let report = run.wait().await;                // 只要结果时直接 session.s
 cargo test                                   # 不需要网络和 API key；付费的真实 API 测试默认跳过
 cargo clippy --all-targets -- -D warnings
 cargo clippy -p zx-core --no-default-features --all-targets -- -D warnings   # 不带 json-schema 的内核
+cargo clippy -p zx-tools --no-default-features --all-targets -- -D warnings  # 不带 MCP 客户端的 zx-tools
 cargo fmt --check
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 ```

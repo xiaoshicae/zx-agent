@@ -25,8 +25,8 @@ use serde_json::{Map, Value};
 use tokio::sync::mpsc;
 
 use crate::ai::ToolDef;
-use crate::ai::sync::lock;
 use crate::extensions::Extension;
+use crate::sync::lock;
 use crate::text::prefix_noted;
 use crate::tools::truncate::truncate_head_noted;
 use zx_core::tools::{Tool, ToolContext, ToolOutput};

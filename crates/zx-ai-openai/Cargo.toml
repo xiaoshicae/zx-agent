@@ -11,6 +11,7 @@ publish.workspace = true
 zx-ai.workspace = true
 
 anyhow.workspace = true
+async-trait.workspace = true
 futures.workspace = true
 reqwest.workspace = true
 serde.workspace = true

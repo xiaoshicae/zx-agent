@@ -104,6 +104,7 @@ impl ModeAgent {
                 tool_timeout: settings.tool_timeout,
                 tool_output: config.tool_output.clone(),
                 place: place.clone(),
+                files: Arc::clone(&shared.files),
             })),
             ..AgentConfig::new(provider.clone(), model)
         };

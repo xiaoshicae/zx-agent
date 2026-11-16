@@ -44,7 +44,7 @@
 都在仓库根目录运行，覆盖全部 9 个 crate（经 `Cargo.toml` 的 `default-members`）；在 `crates/*` 里运行或加 `-p <crate>` 只处理那一个。
 
 - 格式：`cargo fmt`（`rustfmt.toml`：`max_width = 120`）
-- lint：`cargo clippy --all-targets -- -D warnings`，零警告；改动内核的工具校验时另跑 `cargo clippy -p zx-core --no-default-features --all-targets -- -D warnings`（按 JSON Schema 校验参数是 `zx-core` 默认开启的 feature `json-schema`）。有意保留的写法用 `#[expect(lint, reason = "...")]`
+- lint：`cargo clippy --all-targets -- -D warnings`，零警告；改动内核的工具校验时另跑 `cargo clippy -p zx-core --no-default-features --all-targets -- -D warnings`（按 JSON Schema 校验参数是 `zx-core` 默认开启的 feature `json-schema`），改动 `zx-tools` 时另跑 `cargo clippy -p zx-tools --no-default-features --all-targets -- -D warnings`（MCP 客户端是它默认开启的 feature `mcp`）。有意保留的写法用 `#[expect(lint, reason = "...")]`
 - 测试：`cargo test`，不需要网络和 API key。只跑一个文件：`cargo test --test step_loop`；按名字过滤：`cargo test retries_transient`
 - 文档：`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`，零警告，断掉的文档链接也算（引号必须有）
 - MSRV：`cargo +1.88.0 check --all-targets`，用到新语法或新标准库 API 时运行

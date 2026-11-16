@@ -156,9 +156,17 @@ async fn send_request(post: &Post<'_>) -> Result<reqwest::Response, Failure> {
         request = request.header(name.as_str(), value.as_str());
     }
     // Asked for on every request, so a token that expired since the last one is replaced.
-    let key = config
-        .api_key
-        .resolve()
+    let key = tokio::time::timeout(config.idle_timeout, config.api_key.resolve())
+        .await
+        .map_err(|_| {
+            Failure::error(
+                ProviderError::ApiKey,
+                format!(
+                    "the API key source did not answer within {}s",
+                    config.idle_timeout.as_secs()
+                ),
+            )
+        })?
         .map_err(|error| Failure::error(ProviderError::ApiKey, format!("cannot get an API key: {error}")))?;
     if let Some(key) = key {
         request = request.bearer_auth(key);

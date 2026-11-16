@@ -13,7 +13,7 @@ use crate::config::skills::TOOL_NAME;
 use crate::config::{ContainerSettings, Execution, ProjectContext};
 use zx_agent::agent::{SessionParts, SessionSetup};
 use zx_agent::builtin::output_store::{self, OutputStore, ReadOutputTool, SpillOutputs};
-use zx_agent::builtin::tools;
+use zx_agent::builtin::tools::{self, FileMutationQueue};
 use zx_agent::hooks::HookChain;
 use zx_agent::prompt;
 use zx_agent::tools::Tool;
@@ -43,6 +43,8 @@ pub(super) struct PerSession {
     pub(super) tool_output: output_store::Config,
     /// Where the sessions are kept, which a container must not be able to read.
     pub(super) place: SessionPlace,
+    /// The turns at each file to change, shared by every session of the process.
+    pub(super) files: Arc<FileMutationQueue>,
 }
 
 /// Whether `name` is a tool of this machine rather than of the executor: read_skill and
@@ -96,7 +98,7 @@ impl SessionSetup for PerSession {
         )
         .await?;
         let built_in: Vec<String> = self.tools.iter().filter(|name| !host_tool(name)).cloned().collect();
-        let mut tools = tools::builtin_tools(&built_in, self.tool_timeout, &executor)?;
+        let mut tools = tools::builtin_tools(&built_in, self.tool_timeout, &executor, &self.files)?;
         tools.extend(host);
         Ok(SessionParts {
             tools,

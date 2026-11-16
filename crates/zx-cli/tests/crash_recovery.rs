@@ -209,7 +209,13 @@ fn recovered(events: &[EventKind]) -> Vec<(String, Interruption)> {
 fn only_bash_among_the_built_in_tools_has_side_effects() {
     let dir = tempfile::tempdir().unwrap();
     let local: Arc<dyn Executor> = Arc::new(LocalExecutor::default());
-    let mut tools = builtin_tools(&["bash".into(), "read_file".into()], Duration::from_secs(1), &local).unwrap();
+    let mut tools = builtin_tools(
+        &["bash".into(), "read_file".into()],
+        Duration::from_secs(1),
+        &local,
+        &Arc::default(),
+    )
+    .unwrap();
     let store = OutputStore::new(dir.path(), output_store::Config::default()).unwrap();
     tools.push(Arc::new(ReadOutputTool::new(store)));
     tools.push(Arc::new(ReadSkillTool::new(Vec::new()).unwrap()));

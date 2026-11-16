@@ -12,6 +12,7 @@ use crate::config::Builtin;
 use crate::otel::TraceHook;
 use zx_agent::builtin::mcp::{Server, ServerConfig};
 use zx_agent::builtin::redact::{MIN_SECRET_CHARS, check_secret_files, short_secret_files};
+use zx_agent::builtin::tools::FileMutationQueue;
 use zx_agent::extensions::Extension;
 
 use super::{Overrides, Settings, env_value};
@@ -38,6 +39,9 @@ pub(crate) struct Shared {
     pub(super) hidden_env: Vec<String>,
     /// The hook that exports every session's runs as traces, when an export is configured.
     pub(super) traces: Option<TraceHook>,
+    /// The turns at each file to change, which the file tools of every session take, so that
+    /// two sessions never overwrite each other's edit.
+    pub(super) files: Arc<FileMutationQueue>,
 }
 
 impl Shared {
@@ -74,6 +78,7 @@ impl Shared {
             notices,
             hidden_env: Vec::new(),
             traces: None,
+            files: Arc::default(),
             settings,
             overrides,
             agent,

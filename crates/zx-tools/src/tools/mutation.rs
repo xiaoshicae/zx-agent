@@ -3,15 +3,16 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, Weak};
 
 use tokio::sync::OwnedMutexGuard;
 
-use crate::ai::sync::lock;
 use crate::executor::Executor;
+use crate::sync::lock;
 
-/// Serializes the changes to each file among the tools that share it. Changes to different
-/// files run at the same time.
+/// Serializes the changes to each file among the tools that share it, such as every session of
+/// a process: its host hands one queue to all of them. Changes to different files run at the
+/// same time.
 #[derive(Default)]
 pub struct FileMutationQueue {
     /// One lock per file being changed. Shared (`Arc`) by the calls that wait for it; the map
@@ -20,13 +21,6 @@ pub struct FileMutationQueue {
 }
 
 impl FileMutationQueue {
-    /// Default tools coordinate across sessions as well as within one batch. The weak
-    /// per-path entries keep this process-wide coordinator from retaining old file locks.
-    pub(crate) fn shared() -> Arc<Self> {
-        static SHARED: OnceLock<Arc<FileMutationQueue>> = OnceLock::new();
-        Arc::clone(SHARED.get_or_init(Arc::default))
-    }
-
     /// Wait for the turn to change `path`. Paths that name the same file through symbolic
     /// links or `..` share a turn; for a file that does not exist yet, its directory is
     /// resolved instead. The turn lasts as long as the returned guard.
