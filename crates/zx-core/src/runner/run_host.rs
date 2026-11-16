@@ -92,6 +92,11 @@ impl RunHost<'_> {
                 provider: config.provider.name().into(),
             })
             .await;
+        // A failed answer that a continuation drops goes before recovery would answer its
+        // calls, which never ran.
+        if matches!(begin, Start::Continue) {
+            self.omit_failed_answer().await?;
+        }
         // Before any system prompt change or input, so that results directly follow their calls.
         self.recover_interrupted_calls()
             .await
@@ -129,6 +134,27 @@ impl RunHost<'_> {
         let compacted = compactor.run().await;
         self.pause.note(&compacted);
         compacted
+    }
+
+    /// Omit a failed or cancelled answer at the end of the conversation with a context edit,
+    /// as a retry does: the model answers again.
+    async fn omit_failed_answer(&mut self) -> Result<(), String> {
+        let failed = self
+            .session
+            .projection()
+            .iter()
+            .rev()
+            .find(|item| !matches!(item.message, Message::System(_)))
+            .and_then(|last| match &last.message {
+                Message::Assistant(answer) if matches!(answer.stop_reason, StopReason::Error | StopReason::Aborted) => {
+                    Some(last.entry_id.clone())
+                }
+                _ => None,
+            });
+        match failed {
+            Some(failed) => self.omit_failed_attempt(&failed).await,
+            None => Ok(()),
+        }
     }
 
     /// The input a continuation starts with, after omitting a failed answer at the end; an

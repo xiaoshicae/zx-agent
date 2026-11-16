@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
-use zx_agent::ai::{Message, StopReason};
+use zx_agent::ai::{AssistantMessage, ContentBlock, Message, StopReason, ToolCall};
 use zx_agent::events::{EventKind, RunOutcome};
 use zx_agent::hooks::{Hook, HookContext, HookResult};
 use zx_agent::input::{Input, QueueMode};
@@ -96,6 +96,27 @@ async fn a_message_recorded_while_idle_after_a_crash_follows_the_recovered_resul
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
     let sent = summarize(&provider.requests()[0].messages);
     assert!(sent[2].starts_with("tool:c1=Result unknown"), "{sent:?}");
+}
+
+#[tokio::test]
+async fn a_failed_answer_with_calls_at_the_end_is_omitted_and_answered_again() {
+    let mut store = Transcript::in_memory(header());
+    store.append_message(Message::user("echo hi")).await.unwrap();
+    let mut failed = AssistantMessage::failure("faux", "test-model", StopReason::Error, "the stream broke");
+    failed.content = vec![ContentBlock::ToolCall(ToolCall {
+        id: "c1".into(),
+        name: "echo".into(),
+        arguments: json!({"text": "h"}),
+        arguments_error: None,
+    })];
+    store.append_message(Message::Assistant(failed)).await.unwrap();
+    let provider = Arc::new(FauxProvider::new([FauxStep::text("second try")]));
+    let (runner, _) = runner(&provider, store);
+
+    let report = runner.continue_run().await.unwrap();
+
+    assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
+    assert_eq!(summarize(&provider.requests()[0].messages), ["user:echo hi"]);
 }
 
 #[tokio::test]
