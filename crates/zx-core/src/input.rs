@@ -1,4 +1,9 @@
 //! Messages injected into a running loop, and records an extension asks the loop to keep.
+//!
+//! - `admission`: transferable count and byte reservations for a host's pending input
+
+mod admission;
+pub use admission::{InputBudget, InputPermit, InputRejected, PendingInput};
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -26,6 +31,15 @@ pub enum Input {
     /// A message from an extension (pi: `sendMessage`). It is recorded as a `custom_message`
     /// entry, without input hooks, and the model sees it as a user message.
     Custom(CustomMessage),
+}
+
+impl Input {
+    fn text_bytes(&self) -> usize {
+        match self {
+            Self::User { text, .. } => text.len(),
+            Self::Custom(message) => message.content.len(),
+        }
+    }
 }
 
 impl From<String> for Input {
@@ -68,8 +82,8 @@ pub(crate) struct PendingEntry {
 /// - Custom entries are recorded at the start of the next step, or when the run ends.
 #[derive(Debug, Default)]
 pub struct InputQueues {
-    steering: Mutex<VecDeque<Input>>,
-    follow_up: Mutex<VecDeque<Input>>,
+    steering: Mutex<VecDeque<PendingInput>>,
+    follow_up: Mutex<VecDeque<PendingInput>>,
     mode: Mutex<QueueMode>,
     entries: Mutex<Vec<PendingEntry>>,
 }
@@ -78,13 +92,31 @@ impl InputQueues {
     /// Queue a message for the next step of the current task: the person's text, or any
     /// [`Input`].
     pub fn steer(&self, message: impl Into<Input>) {
-        lock(&self.steering).push_back(message.into());
+        self.steer_pending(PendingInput::unbudgeted(message.into()));
     }
 
     /// Queue a message for after the current task finishes: the person's text, or any
     /// [`Input`].
     pub fn follow_up(&self, message: impl Into<Input>) {
-        lock(&self.follow_up).push_back(message.into());
+        self.follow_up_pending(PendingInput::unbudgeted(message.into()));
+    }
+
+    /// Queue input while retaining its admission permit until it is recorded or removed.
+    pub fn steer_pending(&self, input: PendingInput) {
+        lock(&self.steering).push_back(input);
+    }
+
+    /// Queue a follow-up while retaining its admission permit.
+    pub fn follow_up_pending(&self, input: PendingInput) {
+        lock(&self.follow_up).push_back(input);
+    }
+
+    /// Take both lanes without releasing their admission permits. A host moving leftovers
+    /// into another waiting queue uses this instead of draining into bare inputs.
+    pub fn drain_pending(&self) -> Vec<PendingInput> {
+        let mut messages: Vec<_> = lock(&self.steering).drain(..).collect();
+        messages.extend(lock(&self.follow_up).drain(..));
+        messages
     }
 
     /// Ask the loop to record state of an extension (pi: `appendEntry`) at the start of its
@@ -97,14 +129,14 @@ impl InputQueues {
         });
     }
 
-    /// Count pending steering and follow-up messages and their UTF-8 text bytes. Hosts can
-    /// bound admission without cloning the queued messages; custom entry records are excluded.
-    /// Each queue is counted separately; concurrent producers can change the result.
+    /// Observe pending steering and follow-up messages and their UTF-8 text bytes, excluding
+    /// custom entries. Each lane is counted separately; concurrent producers can change the
+    /// result. Strict admission uses [`InputBudget`] and [`Self::steer_pending`] instead.
     pub fn pending_size(&self) -> (usize, usize) {
         let mut size = (0usize, 0usize);
         for queue in [&self.steering, &self.follow_up] {
             for input in lock(queue).iter() {
-                let text = match input {
+                let text = match &input.input {
                     Input::User { text, .. } => text,
                     Input::Custom(message) => &message.content,
                 };
@@ -132,7 +164,7 @@ impl InputQueues {
     pub fn withdraw(&self, message: &Input) -> bool {
         [Queue::Steering, Queue::FollowUp].into_iter().any(|queue| {
             let mut messages = lock(self.lane(queue));
-            match messages.iter().position(|queued| queued == message) {
+            match messages.iter().position(|queued| &queued.input == message) {
                 Some(index) => {
                     messages.remove(index);
                     true
@@ -144,12 +176,12 @@ impl InputQueues {
 
     /// Take every queued steering message, oldest first, whatever the mode.
     pub fn drain_steering(&self) -> Vec<Input> {
-        lock(&self.steering).drain(..).collect()
+        lock(&self.steering).drain(..).map(PendingInput::into_input).collect()
     }
 
     /// Take every queued follow-up message, oldest first, whatever the mode.
     pub fn drain_follow_up(&self) -> Vec<Input> {
-        lock(&self.follow_up).drain(..).collect()
+        lock(&self.follow_up).drain(..).map(PendingInput::into_input).collect()
     }
 
     /// Take every queued message: steering first, then follow-ups, each oldest first.
@@ -168,14 +200,14 @@ impl InputQueues {
     /// session has recorded it, so input that a cancelled or dropped run never recorded is
     /// still queued for the next run.
     pub(crate) fn front(&self, queue: Queue) -> Option<Input> {
-        lock(self.lane(queue)).front().cloned()
+        lock(self.lane(queue)).front().map(|pending| pending.input.clone())
     }
 
     /// Remove the oldest message of `queue` after the session recorded it, unless a frontend
     /// drained the queue in the meantime and it now starts with another message.
     pub(crate) fn remove_front(&self, queue: Queue, message: &Input) {
         let mut messages = lock(self.lane(queue));
-        if messages.front() == Some(message) {
+        if messages.front().is_some_and(|pending| &pending.input == message) {
             messages.pop_front();
         }
     }
@@ -184,7 +216,7 @@ impl InputQueues {
         !lock(self.lane(queue)).is_empty()
     }
 
-    fn lane(&self, queue: Queue) -> &Mutex<VecDeque<Input>> {
+    fn lane(&self, queue: Queue) -> &Mutex<VecDeque<PendingInput>> {
         match queue {
             Queue::Steering => &self.steering,
             Queue::FollowUp => &self.follow_up,

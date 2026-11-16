@@ -1904,7 +1904,34 @@ async fn a_waiting_conversation_bounds_its_messages_and_still_accepts_cancel() {
     h.posted(&direct(), text(&h.replies.overloaded.clone())).await;
     h.say_directly("d3", "/cancel").await;
     h.posted(&direct(), text(&h.replies.cancelled.clone())).await;
+    h.say_directly("d4", "wait again").await;
+    h.posted(&direct(), text(&h.replies.queued.clone())).await;
     assert_eq!(h.sessions.opened.load(Ordering::SeqCst), 1);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_inbox_and_a_blocked_worker_share_one_message_budget() {
+    let gate = Arc::new(ListGate {
+        entered: tokio::sync::Notify::new(),
+        release: CancellationToken::new(),
+    });
+    let mut h = start(Setup {
+        config: ServerConfig {
+            max_pending_messages: NonZeroUsize::new(1).unwrap(),
+            ..Setup::default().config
+        },
+        list_gate: Some(Arc::clone(&gate)),
+        ..Setup::default()
+    });
+    h.say_as(OTHER, "m1", "slow-thread", Addressee::Nobody, "first").await;
+    // The first message still owns its reservation during membership lookup.
+    tokio::time::timeout(WAIT, gate.entered.notified()).await.unwrap();
+    h.say_as(OTHER, "m2", "slow-thread", Addressee::Nobody, "second").await;
+    h.posted(&thread("slow-thread"), text(&h.replies.overloaded.clone()))
+        .await;
+    assert_eq!(h.sessions.opened.load(Ordering::SeqCst), 0);
+    gate.release.cancel();
     h.stop().await.unwrap();
 }
 

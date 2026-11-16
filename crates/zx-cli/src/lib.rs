@@ -5,6 +5,7 @@
 //! What does not depend on one invocation is public, for the program's tests and for
 //! another way in that is configured the same:
 //!
+//! - [`application`]: configured agents for hosts that share the command line's settings
 //! - [`config`]: `config.toml`, the environment: the model, its provider and where commands
 //!   run; and the agents, as files: instructions, tools, permissions and limits
 //! - [`otel`]: OpenTelemetry traces of runs, exported when an OTLP endpoint is configured
@@ -23,6 +24,7 @@
 //! - `process`: exit codes, signals, and what every subcommand writes to its outputs
 //! - `render`: how calls, results and times are shown
 
+pub mod application;
 pub mod config;
 pub mod otel;
 

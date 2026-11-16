@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::ai::now_ms;
 use crate::session::SessionError;
-use crate::transcript::CustomMessage;
+use zx_core::input::{InputBudget, InputPermit, PendingInput};
 
 use zx_core::events::RunReport;
 use zx_core::policy::ApprovalDecision;
@@ -50,6 +50,7 @@ pub(crate) struct Incoming {
     pub(crate) sender: UserId,
     pub(crate) addressee: Addressee,
     pub(crate) text: String,
+    pub(crate) permit: Option<InputPermit>,
 }
 
 pub(crate) enum WorkerInput {
@@ -75,6 +76,7 @@ pub(crate) struct WorkerSetup {
     pub(crate) channel: Arc<dyn ImChannel>,
     pub(crate) shared: Arc<Shared>,
     pub(crate) inbox: mpsc::Receiver<WorkerInput>,
+    pub(crate) budget: Arc<InputBudget>,
     pub(crate) retire: mpsc::Sender<Retire>,
     pub(crate) stop: CancellationToken,
 }
@@ -256,6 +258,7 @@ enum Membership {
 struct Worker {
     out: Outlet,
     inbox: mpsc::Receiver<WorkerInput>,
+    budget: Arc<InputBudget>,
     /// Input taken from the inbox, for [`Retire::received`].
     received: u64,
     retire_to: mpsc::Sender<Retire>,
@@ -271,7 +274,7 @@ struct Worker {
     /// next message is meant for the bot even without a mention.
     answering: Option<UserId>,
     /// Messages not answered and not yet in the session, which a run holds meanwhile.
-    heard: Vec<CustomMessage>,
+    heard: Vec<PendingInput>,
 }
 
 impl Worker {
@@ -281,6 +284,7 @@ impl Worker {
             channel,
             shared,
             inbox,
+            budget,
             retire,
             stop,
         } = setup;
@@ -293,6 +297,7 @@ impl Worker {
                 shared,
             },
             inbox,
+            budget,
             received: 0,
             retire_to: retire,
             stop,

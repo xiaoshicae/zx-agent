@@ -400,7 +400,7 @@ impl Repl<'_> {
     async fn reopen(&mut self, error: &anyhow::Error) -> Flow {
         let output = &*self.chat.output;
         output.line(Tone::Error, &format!("[chat] {}", visible(&format!("{error:#}"))));
-        if matches!(self.built.place, SessionPlace::Memory(_)) {
+        if !self.built.place.is_persistent() {
             return Flow::Exit(EXIT_ERROR);
         }
         let id = self.built.session.id().to_string();

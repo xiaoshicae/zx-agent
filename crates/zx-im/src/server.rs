@@ -192,9 +192,9 @@ pub struct ServerConfig {
     pub max_running: NonZeroUsize,
     /// Workers held at once, running, queued and idle included; default 128.
     pub max_conversations: NonZeroUsize,
-    /// Messages waiting within one conversation, including steering and heard context; default 32.
+    /// Pending messages from router admission through inbox, waiting, heard and steering; default 32.
     pub max_pending_messages: NonZeroUsize,
-    /// UTF-8 text bytes waiting in one conversation, and the largest inbound message; default 256 KiB.
+    /// UTF-8 text bytes sharing that admission budget, and the largest inbound message; default 256 KiB.
     pub max_pending_bytes: NonZeroUsize,
     /// How long a conversation may go without input before its session is released.
     pub idle: Duration,
@@ -399,8 +399,8 @@ impl Shared {
             limit: Some(1),
             ..SessionQuery::default()
         };
-        match self.agent.list_sessions(&query).await {
-            Ok(list) => Ok(list.sessions.into_iter().next().map(|session| session.id)),
+        match self.agent.latest_session(&query).await {
+            Ok(id) => Ok(id),
             Err(error) => Err(format!("{error:#}")),
         }
     }

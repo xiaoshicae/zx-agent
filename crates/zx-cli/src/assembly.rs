@@ -21,29 +21,30 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-pub(crate) use agent::{Approvals, ModeAgent};
-pub(crate) use place::SessionPlace;
+pub use agent::{Approvals, ModeAgent};
+pub(crate) use place::PlaceKind;
+pub use place::SessionPlace;
 pub(crate) use settings::Settings;
-pub(crate) use shared::Shared;
+pub(crate) use shared::{Shared, checked_secret_files};
 
 /// What one start of the program says over config.toml and the agent: `None` keeps their
 /// value. A command line fills it from its arguments; another way in fills it its own way.
 #[derive(Default)]
-pub(crate) struct Overrides {
+pub struct Overrides {
     /// The model ID, over `model` of config.toml.
-    pub(crate) model: Option<String>,
+    pub model: Option<String>,
     /// Where new sessions work; the current directory without it.
-    pub(crate) cwd: Option<PathBuf>,
+    pub cwd: Option<PathBuf>,
     /// The enabled tools, in place of the agent's.
-    pub(crate) tools: Option<Vec<String>>,
+    pub tools: Option<Vec<String>>,
     /// Model requests per run, failed attempts included.
-    pub(crate) max_model_requests: Option<u32>,
+    pub max_model_requests: Option<u32>,
     /// Wall-clock limit per run, in seconds; 0 removes the agent's.
-    pub(crate) timeout_secs: Option<u64>,
+    pub timeout_secs: Option<u64>,
     /// Tokens per run; 0 removes the agent's.
-    pub(crate) token_budget: Option<u64>,
+    pub token_budget: Option<u64>,
     /// Spending per run, in the unit of the configured prices; 0 removes the agent's.
-    pub(crate) cost_budget: Option<f64>,
+    pub cost_budget: Option<f64>,
 }
 
 /// The working directory of a new session, which is what its header records: `cwd` made

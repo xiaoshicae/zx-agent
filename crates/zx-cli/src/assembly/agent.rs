@@ -34,7 +34,7 @@ use super::{Overrides, SessionPlace, Shared, env_value, resolve_cwd};
 
 /// Who answers when a tool call of a mode's sessions needs approval.
 #[derive(Clone, Copy)]
-pub(crate) enum Approvals<'a> {
+pub enum Approvals<'a> {
     /// Nobody, as in `run`: a call that a policy asks about is denied.
     Nobody,
     /// A person, within the approval timeout of config.toml. Every bash command asks first,
@@ -45,7 +45,7 @@ pub(crate) enum Approvals<'a> {
 }
 
 /// The agent of a mode, and what the mode shows about it.
-pub(crate) struct ModeAgent {
+pub struct ModeAgent {
     pub(crate) agent: Agent,
     /// The provider, for a mode that switches the model.
     pub(crate) provider: Arc<dyn Provider>,
@@ -120,6 +120,24 @@ impl ModeAgent {
         })
     }
 
+    /// The assembled kernel agent, for sending input, listing and closing sessions.
+    pub fn agent(&self) -> &Agent {
+        &self.agent
+    }
+
+    /// The configured role's name, for a host to display.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Open a stored session without writing diagnostics to the process's outputs.
+    pub async fn open(&self, id: &str) -> Result<Session> {
+        match self.agent.open_session(id).await {
+            Ok(session) => Ok(session),
+            Err(error) => Err(self.place.naming_file(id, error).await),
+        }
+    }
+
     /// Where a new session works: `cwd` when a client names a project directory, else
     /// `--cwd`'s, else the current directory. Container execution uses the directory's real
     /// path: the container mounts the workspace there, and tools must use the same path.
@@ -133,12 +151,12 @@ impl ModeAgent {
         }
     }
 
-    /// A new session, which works in `cwd` when a client names its project directory, else
-    /// in `--cwd`'s ([`Self::new_session_cwd`]).
+    /// Create a session in `cwd`, otherwise in the configured override directory or the
+    /// process's current directory.
     ///
     /// Startup reads and, in container mode, starting the container. A container that cannot
     /// start is reported before the session's file is created.
-    pub(crate) async fn create(&self, cwd: Option<&Path>) -> Result<Session> {
+    pub async fn create(&self, cwd: Option<&Path>) -> Result<Session> {
         let options = SessionOptions::new(self.new_session_cwd(cwd)?);
         self.agent.create_session(options).await
     }
@@ -147,10 +165,7 @@ impl ModeAgent {
     ///
     /// Startup reads, short session appends and, in container mode, starting the container.
     pub(crate) async fn resume(&self, id: &str) -> Result<Session> {
-        let session = match self.agent.open_session(id).await {
-            Ok(session) => session,
-            Err(error) => return Err(self.place.naming_file(id, error).await),
-        };
+        let session = self.open(id).await?;
         let cut_off = session.with_transcript(Transcript::incomplete_tail_bytes)?;
         if cut_off > 0 {
             eprintln!(

@@ -14,7 +14,7 @@ use crate::transcript::CustomMessage;
 use crate::{Agent, Session};
 use zx_core::SessionOptions;
 use zx_core::events::{Budget, RunOutcome, RunReport};
-use zx_core::input::Input;
+use zx_core::input::{Input, PendingInput};
 
 use super::approval::{ApprovalEvents, ApprovalUpdate};
 use super::server::{Shared, timed};
@@ -57,12 +57,12 @@ impl Opened {
     pub(crate) fn leftover(&self) -> Result<Vec<Asked>, SessionError> {
         // The loop looks for input at the end of each step, so a message steered after the
         // last look waits in the queue.
-        let queued = self.session.take_queued()?;
+        let queued = self.session.take_pending()?;
         let mut asked = Vec::new();
         for message in queued {
-            match message {
-                Input::User { text, actor } => asked.push(Asked { text, actor }),
-                custom @ Input::Custom(_) => self.session.queues().steer(custom),
+            match message.input() {
+                Input::User { .. } => asked.push(Asked(message)),
+                Input::Custom(_) => self.session.queues().steer_pending(message),
             }
         }
         Ok(asked)
@@ -73,12 +73,11 @@ impl Opened {
     /// queued for that session goes with it.
     pub(crate) fn taken_back(&self) -> Vec<Asked> {
         let queues = self.session.queues();
-        let mut queued = queues.drain_steering();
-        queued.extend(queues.drain_follow_up());
+        let queued = queues.drain_pending();
         queued
             .into_iter()
-            .filter_map(|message| match message {
-                Input::User { text, actor } => Some(Asked { text, actor }),
+            .filter_map(|message| match message.input() {
+                Input::User { .. } => Some(Asked(message)),
                 Input::Custom(_) => None,
             })
             .collect()
@@ -86,28 +85,20 @@ impl Opened {
 }
 
 /// What a person asked the bot: the text as the model reads it, and who sent it.
-pub(crate) struct Asked {
-    pub(crate) text: String,
-    /// The sender's ID on the platform, which the session records with the message and
-    /// tells its hooks and policies. `None` for text that names no sender, such as text an
-    /// extension queued as a person's.
-    pub(crate) actor: Option<String>,
-}
+pub(crate) struct Asked(pub(crate) PendingInput);
 
 impl Asked {
-    /// The message as the session takes it.
-    pub(crate) fn into_input(self) -> Input {
-        Input::User {
-            text: self.text,
-            actor: self.actor,
-        }
-    }
-
-    /// Several messages as one prompt: their texts in order, and the sender of the last
-    /// one, whom the answer is for.
+    /// Several messages as one running prompt. Their reservations are released as they
+    /// leave pending queues; the sender of the last message is whom the answer is for.
     pub(crate) fn joined(asked: Vec<Self>) -> Input {
-        let actor = asked.last().and_then(|last| last.actor.clone());
-        let texts: Vec<String> = asked.into_iter().map(|asked| asked.text).collect();
+        let mut texts = Vec::with_capacity(asked.len());
+        let mut actor = None;
+        for Asked(pending) in asked {
+            if let Input::User { text, actor: sender } = pending.into_input() {
+                texts.push(text);
+                actor = sender;
+            }
+        }
         Input::User {
             text: texts.join("\n\n"),
             actor,

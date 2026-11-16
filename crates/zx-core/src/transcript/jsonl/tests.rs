@@ -52,6 +52,73 @@ fn in_cwd(cwd: &str) -> SessionQuery {
     }
 }
 
+#[tokio::test]
+async fn latest_uses_the_same_order_and_filters_and_observes_appends_and_deletions() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = JsonlStorage::in_directory(dir.path());
+    for id in ["b", "a"] {
+        seed(&storage, &header_of(id, "/w", 1), id).await;
+    }
+    seed(&storage, &header_of("elsewhere", "/x", 3), "x").await;
+    let query = in_cwd("/w");
+    assert_eq!(storage.latest(&query).await.unwrap().as_deref(), Some("a"));
+    assert_eq!(
+        storage.latest(&query).await.unwrap(),
+        ids(&storage, &query).await.into_iter().next()
+    );
+    let (loaded, log) = storage.open("b").await.unwrap();
+    let mut transcript = Transcript::load(loaded, log).unwrap();
+    transcript.append_message(Message::user("new activity")).await.unwrap();
+    assert_eq!(storage.latest(&query).await.unwrap().as_deref(), Some("b"));
+    let path = storage.path_of("b").await.unwrap().unwrap();
+    drop(transcript);
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(storage.latest(&query).await.unwrap().as_deref(), Some("a"));
+    let none = SessionQuery {
+        limit: Some(0),
+        ..query
+    };
+    assert_eq!(storage.latest(&none).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn latest_reads_a_large_tail_and_ignores_only_an_unterminated_incomplete_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = JsonlStorage::in_directory(dir.path());
+    seed(&storage, &header_of("a", "/w", 1), &"中文".repeat(8192)).await;
+    let path = storage.path_of("a").await.unwrap().unwrap();
+    let complete = std::fs::read(&path).unwrap();
+    let mut cut_off = complete.clone();
+    cut_off.extend_from_slice(b"{\"type\":\"message\",\"content\":\"");
+    cut_off.extend_from_slice(&[0xe4, 0xb8]);
+    std::fs::write(&path, &cut_off).unwrap();
+    assert_eq!(storage.latest(&in_cwd("/w")).await.unwrap().as_deref(), Some("a"));
+    assert_eq!(std::fs::read(&path).unwrap(), cut_off);
+    // A newline makes this a malformed complete record; neither path hides it as a crash.
+    let mut malformed = complete;
+    malformed.extend_from_slice(b"{\"type\":\"message\"\n");
+    std::fs::write(&path, malformed).unwrap();
+    assert_eq!(storage.latest(&in_cwd("/w")).await.unwrap(), None);
+    assert_eq!(storage.list(&in_cwd("/w")).await.unwrap().unreadable.len(), 1);
+}
+
+#[tokio::test]
+async fn latest_selects_candidates_while_listing_keeps_full_corruption_diagnostics() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = JsonlStorage::in_directory(dir.path());
+    seed(&storage, &header_of("a", "/w", 1), "q").await;
+    let path = storage.path_of("a").await.unwrap().unwrap();
+    let bytes = std::fs::read_to_string(&path).unwrap();
+    let (header, last) = bytes.split_once('\n').unwrap();
+    std::fs::write(&path, format!("{header}\ninvalid interior record\n{last}")).unwrap();
+    assert_eq!(storage.latest(&in_cwd("/w")).await.unwrap().as_deref(), Some("a"));
+    let list = storage.list(&in_cwd("/w")).await.unwrap();
+    assert!(list.sessions.is_empty());
+    assert_eq!(list.unreadable.len(), 1);
+    let (loaded, log) = storage.open("a").await.unwrap();
+    assert!(Transcript::load(loaded, log).is_err());
+}
+
 #[test]
 fn a_time_is_written_as_utc_without_colons() {
     for (ms, expected) in [

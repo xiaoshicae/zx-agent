@@ -8,6 +8,8 @@ use tokio::sync::mpsc;
 use tokio::task::{Id, JoinError, JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
+use zx_core::input::InputBudget;
+
 use super::platform::Seen;
 use super::server::Shared;
 use super::worker::{self, Incoming, Retire, WorkerInput, WorkerSetup};
@@ -74,6 +76,7 @@ async fn receive(
 
 struct WorkerHandle {
     inbox: mpsc::Sender<WorkerInput>,
+    budget: Arc<InputBudget>,
     /// Input passed to the worker so far, compared with [`Retire::received`].
     forwarded: u64,
 }
@@ -81,7 +84,18 @@ struct WorkerHandle {
 impl WorkerHandle {
     /// Pass `input` to the worker, counting what it takes, as the retire handshake needs
     /// every input counted.
-    fn forward(&mut self, input: WorkerInput) -> Forward {
+    fn forward(&mut self, mut input: WorkerInput) -> Forward {
+        if let WorkerInput::Message(incoming) = &mut input {
+            // A closed worker's input may be handed to a new worker with a new budget.
+            incoming.permit = None;
+            let control = incoming.text.len() <= MAX_CONTROL_BYTES && worker::is_command(&incoming.text);
+            if !control {
+                incoming.permit = self.budget.try_reserve(incoming.text.len());
+                if incoming.permit.is_none() {
+                    return Forward::Full;
+                }
+            }
+        }
         match self.inbox.try_send(input) {
             Ok(()) => {
                 self.forwarded += 1;
@@ -241,6 +255,7 @@ impl Router {
                         sender,
                         addressee,
                         text,
+                        permit: None,
                     };
                     self.message(channel, key, incoming);
                 } else if addressee == Addressee::Bot {
@@ -284,15 +299,14 @@ impl Router {
         let input = match self.workers.get_mut(&key) {
             Some(worker) => match worker.forward(input) {
                 Forward::Sent => return,
-                Forward::Full => None,
+                Forward::Full => {
+                    self.overloaded(channel, &key);
+                    return;
+                }
                 // A new worker takes over.
-                Forward::Ended(input) => Some(input),
+                Forward::Ended(input) => input,
             },
-            None => Some(input),
-        };
-        let Some(input) = input else {
-            self.dropped(&key);
-            return;
+            None => input,
         };
         if self.tasks.len() >= self.shared.max_conversations {
             self.overloaded(channel, &key);
@@ -300,16 +314,31 @@ impl Router {
         }
         self.not_joined.remove(&key);
         let (inbox, receiver) = mpsc::channel(INBOX_CAPACITY);
+        let budget = Arc::new(InputBudget::new(
+            self.shared
+                .max_pending_messages
+                .try_into()
+                .expect("positive configured message limit"),
+            self.shared
+                .max_pending_bytes
+                .try_into()
+                .expect("positive configured byte limit"),
+        ));
         let task = self.tasks.spawn(worker::run(WorkerSetup {
             key: key.clone(),
             channel,
             shared: Arc::clone(&self.shared),
             inbox: receiver,
+            budget: Arc::clone(&budget),
             retire: self.retire.clone(),
             stop: self.stop.clone(),
         }));
         self.conversations.insert(task.id(), key.clone());
-        let mut worker = WorkerHandle { inbox, forwarded: 0 };
+        let mut worker = WorkerHandle {
+            inbox,
+            budget,
+            forwarded: 0,
+        };
         // A new inbox has room for one message.
         if !matches!(worker.forward(input), Forward::Sent) {
             self.dropped(&key);
