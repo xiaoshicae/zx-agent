@@ -10,6 +10,8 @@
 //! - [`policy`]: the built-in command and rule policies
 //! - [`continuation`]: the hook that continues an answer cut off at the output token limit
 //! - [`redact`]: the hook that redacts known secrets from tool output
+//! - `calendar`: dates of the Gregorian calendar, for the times that file names and prompts
+//!   show
 //! - [`mcp`]: the tools of external MCP servers, as an extension; the feature `mcp`, on by
 //!   default
 
@@ -18,6 +20,7 @@ use zx_ai::{self as ai, sync, text};
 #[cfg(feature = "mcp")]
 use zx_core::extensions;
 
+mod calendar;
 pub mod continuation;
 pub mod executor;
 #[doc(hidden)]

@@ -23,6 +23,7 @@ use zx_core::transcript::{
     Unreadable,
 };
 
+use crate::calendar::civil_from_days;
 use file::JsonlFile;
 
 /// What session files end in.
@@ -385,21 +386,7 @@ fn utc_time(ms: u64) -> String {
     let (days, ms_of_day) = (ms / MS_PER_DAY, ms % MS_PER_DAY);
     let (hour, minute) = (ms_of_day / 3_600_000, ms_of_day / 60_000 % 60);
     let (second, milli) = (ms_of_day / 1000 % 60, ms_of_day % 1000);
-    // Days since the epoch to a date of the Gregorian calendar, counted in 400-year cycles
-    // of 146097 days that start on March 1, so that a leap day ends its year (Howard
-    // Hinnant, "chrono-Compatible Low-Level Date Algorithms", `civil_from_days`).
-    let shifted = days + 719_468;
-    let (cycle, day_of_cycle) = (shifted / 146_097, shifted % 146_097);
-    let year_of_cycle = (day_of_cycle - day_of_cycle / 1460 + day_of_cycle / 36_524 - day_of_cycle / 146_096) / 365;
-    let day_of_year = day_of_cycle - (365 * year_of_cycle + year_of_cycle / 4 - year_of_cycle / 100);
-    let month_from_march = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_from_march + 2) / 5 + 1;
-    let month = if month_from_march < 10 {
-        month_from_march + 3
-    } else {
-        month_from_march - 9
-    };
-    let year = year_of_cycle + cycle * 400 + u64::from(month <= 2);
+    let (year, month, day) = civil_from_days(days);
     format!("{year:04}-{month:02}-{day:02}T{hour:02}-{minute:02}-{second:02}-{milli:03}Z")
 }
 
