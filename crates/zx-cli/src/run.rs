@@ -46,7 +46,7 @@ pub(crate) async fn run(args: RunArgs) -> Result<u8> {
         }
     };
     with_telemetry(async move |telemetry| {
-        let shared = assembly::Shared::connect(cli::overrides(base, &budget), Builtin::Unattended)
+        let shared = crate::process::connect(cli::overrides(base, &budget), Builtin::Unattended)
             .await?
             .with_traces(telemetry.map(run_traces));
         let session = build_session(&shared, session_file.as_deref()).await?;
@@ -90,7 +90,7 @@ async fn build_session(shared: &assembly::Shared, session: Option<&Path>) -> Res
     let held = place.held(shared.overrides.cwd.as_deref()).await?;
     let agent = assembly::ModeAgent::build(shared, &shared.settings.model, &place, assembly::Approvals::Nobody)?;
     match held {
-        Some(id) => agent.resume(&id).await,
+        Some(id) => crate::process::resume(&agent, &id).await,
         None => agent.create(None).await,
     }
 }

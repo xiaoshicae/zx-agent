@@ -1,37 +1,62 @@
 //! What the unit tests of the session modules share: a header, messages, the texts a store
-//! projects, a session in one file, and a writer that always fails. The rest of the crate's
-//! tests reach [`FailingWriter`] as `crate::transcript::FailingWriter`.
+//! projects, a log that writes to a writer, and a writer that always fails. The rest of the
+//! crate's tests reach [`FailingWriter`] and [`WriterLog`] as `crate::transcript::...`.
 
+use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 
 use crate::ai::{AssistantMessage, ContentBlock, Message, StopReason};
 
-use super::{JsonlStorage, SessionHeader, SessionStorage, Transcript};
+use super::{LoadedSession, LogRecord, SessionHeader, SessionLog, Transcript};
 
-/// A new session with `header` in the file `path`.
-pub(super) async fn create_file(path: &Path, header: SessionHeader) -> Result<Transcript> {
-    let log = JsonlStorage::file(path).create(&header).await?;
-    Ok(Transcript::with_log(header, log))
+/// A log that writes each record and its newline to a writer, on a blocking thread as a file
+/// would be written: a writer that fails or blocks makes the append fail or time out. An
+/// append whose future is dropped keeps the writer, so later appends fail.
+pub(crate) struct WriterLog {
+    writer: Option<Box<dyn Write + Send + Sync>>,
 }
 
-/// The session in the file `path`, loaded and open for appending.
-pub(super) async fn open_file(path: &Path) -> Result<Transcript> {
-    let (loaded, log) = JsonlStorage::file(path).open(&id_in(path)?).await?;
-    Transcript::load(loaded, log)
+impl WriterLog {
+    pub(crate) fn new(writer: Box<dyn Write + Send + Sync>) -> Self {
+        Self { writer: Some(writer) }
+    }
 }
 
-/// A snapshot of the session in the file `path`.
-pub(super) async fn read_file(path: &Path) -> Result<Transcript> {
-    Transcript::snapshot(JsonlStorage::file(path).read(&id_in(path)?).await?)
+#[async_trait]
+impl SessionLog for WriterLog {
+    async fn append(&mut self, record: &LogRecord<'_>) -> Result<()> {
+        let mut writer = self.writer.take().context("an earlier write did not finish")?;
+        let line = format!("{}\n", record.json);
+        let (writer, written) = tokio::task::spawn_blocking(move || {
+            let written = writer.write_all(line.as_bytes()).and_then(|()| writer.flush());
+            (writer, written)
+        })
+        .await?;
+        self.writer = Some(writer);
+        Ok(written?)
+    }
 }
 
-/// The session ID in the header of the file `path`, whatever else the file holds.
-fn id_in(path: &Path) -> Result<String> {
-    let text = std::fs::read_to_string(path)?;
-    let header: serde_json::Value = serde_json::from_str(text.lines().next().context("an empty file")?)?;
-    Ok(header["id"].as_str().context("a header without an ID")?.to_string())
+/// The session `header` with `records`, each a record's JSON, as a storage would read it
+/// back, for loading or a snapshot.
+pub(super) fn loaded(header: SessionHeader, records: Vec<String>) -> LoadedSession {
+    LoadedSession {
+        header,
+        records,
+        incomplete_tail_bytes: 0,
+    }
+}
+
+/// The records of `store`, each as its log was given it.
+pub(super) fn records_of(store: &Transcript) -> Vec<String> {
+    store
+        .entries()
+        .iter()
+        .map(|entry| serde_json::to_string(entry).expect("an entry serializes"))
+        .collect()
 }
 
 /// A writer whose every write fails, like a full disk.

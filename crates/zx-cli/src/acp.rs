@@ -88,22 +88,38 @@ impl Host {
     /// The session `id` for `cwd`: the one this process has open, or the one kept among the
     /// session files, opened, when it was started in `cwd`.
     ///
-    /// A kept session is asked for by its ID and then checked against `cwd`, which reads
-    /// that one session: a listing of the directory would read every session in it.
+    /// A kept session is asked for by its ID: its file must be among the sessions of `cwd`
+    /// before it is opened, which sets it up. A listing of the directory would read every
+    /// session in it.
     async fn locate(&self, id: &SessionId, cwd: &Path) -> Result<Session> {
-        if let Some(session) = self.session(id) {
-            return Ok(session);
-        }
+        let open = self.session(id);
         let (id, place) = (&*id.0, &self.mode.place);
         let cwd = assembly::resolve_cwd(Some(cwd))?;
-        let directory = place
-            .location(&cwd)
+        let directory = place.location(&cwd);
+        let unknown = || match &directory {
+            Some(directory) => unknown_session(id, &format!("no such session in {}", directory.display())),
+            None => unknown_session(id, &format!("no such session in {}", cwd.display())),
+        };
+        if let Some(session) = open {
+            // Open in this process, it is still only a session of the directory it works in.
+            return if session.cwd() == cwd {
+                Ok(session)
+            } else {
+                Err(unknown().into())
+            };
+        }
+        let directory = directory
+            .clone()
             .ok_or_else(|| unknown_session(id, "the agent keeps no session files (--no-session)"))?;
-        let unknown = || unknown_session(id, &format!("no such session in {}", directory.display()));
-        if place.path_of(id).await?.is_none() {
+        let kept_there = place
+            .path_of(id)
+            .await?
+            .is_some_and(|path| path.parent() == Some(directory.as_path()));
+        if !kept_there {
             return Err(unknown().into());
         }
-        let session = self.mode.resume(id).await?;
+        let session = crate::process::resume(&self.mode, id).await?;
+        // Two directories can share a directory name of sessions (`/a-b` and `/a/b`).
         if session.cwd() != cwd {
             // Started in another directory: not a session of this one, and not left open,
             // where the next request would find it whatever directory it names.
@@ -307,7 +323,7 @@ pub(crate) async fn run(args: AcpArgs) -> Result<u8> {
 /// the answers is not waited for. The sessions close as the connection and the agent are
 /// dropped on the way out, before the caller exports what remains of the traces.
 async fn serve(args: AcpArgs, traces: Option<TraceHook>) -> Result<u8> {
-    let shared = assembly::Shared::connect(cli::overrides(args.base, &args.budget), Builtin::Assistant)
+    let shared = crate::process::connect(cli::overrides(args.base, &args.budget), Builtin::Assistant)
         .await?
         .with_traces(traces);
     let place = if args.no_session {

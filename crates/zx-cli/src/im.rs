@@ -138,7 +138,7 @@ pub(crate) async fn run(args: ImArgs) -> Result<u8> {
         let running = create_session_dirs(&dir)?;
 
         // Once for the process: every thread's session shares the connections.
-        let shared = assembly::Shared::connect(cli::overrides(args.base, &args.budget), Builtin::Assistant)
+        let shared = crate::process::connect(cli::overrides(args.base, &args.budget), Builtin::Assistant)
             .await?
             .with_hidden_env(hidden_env)
             .with_traces(telemetry.map(Telemetry::hook));

@@ -1,37 +1,14 @@
-//! Thread membership, input admission and context recorded without starting a run.
+//! Input admission, and context recorded without starting a run.
 
 use zx_core::input::Input;
 
-use super::{CANCEL_COMMAND, Incoming, Membership, NEW_COMMAND, Phase, Worker, WorkerInput};
+use super::{CANCEL_COMMAND, Incoming, NEW_COMMAND, Phase, Worker, WorkerInput};
 use crate::{
     Addressee, Session,
     outlet::{Asked, said},
 };
 
 impl Worker {
-    /// Unknown threads are looked up here, never on the server's routing loop.
-    async fn joined(&mut self, addressee: Addressee) -> bool {
-        if addressee == Addressee::Bot {
-            self.membership = Membership::Joined;
-        } else if self.membership == Membership::Unknown {
-            let lookup = self.out.shared.bounded(
-                Some(&self.out.key),
-                "look up the conversation's sessions",
-                self.out.shared.latest_session(&self.out.key),
-            );
-            let found = tokio::select! {
-                () = self.stop.cancelled() => None,
-                found = lookup => found,
-            };
-            self.membership = match found {
-                Some(Some(_)) => Membership::Joined,
-                Some(None) => Membership::Absent,
-                None => Membership::Unknown,
-            };
-        }
-        self.membership == Membership::Joined
-    }
-
     pub(super) async fn input(&mut self, input: WorkerInput) {
         match input {
             WorkerInput::Message(incoming) => self.message(incoming).await,
@@ -50,9 +27,6 @@ impl Worker {
     }
 
     async fn message(&mut self, incoming: Incoming) {
-        if !self.joined(incoming.addressee).await {
-            return;
-        }
         let answer = self.answers(&incoming);
         if answer {
             match incoming.text.trim() {
@@ -74,10 +48,13 @@ impl Worker {
             Some(permit) => permit.attach(input),
             None => self.budget.try_admit(input),
         };
-        let Ok(pending) = admitted else {
-            self.out.post(self.out.replies().overloaded.clone()).await;
+        let Some(pending) = admitted else {
             self.out
                 .failed("pending input capacity exceeded; message was not accepted".into());
+            // Talk the bot only records is refused without a word in the conversation.
+            if answer {
+                self.out.post(self.out.replies().overloaded.clone()).await;
+            }
             return;
         };
         if !answer {
@@ -90,7 +67,7 @@ impl Worker {
         let asked = Asked(pending);
         let steered = match &mut self.phase {
             Phase::Running { open, .. } => {
-                open.session.queues().steer_pending(asked.0);
+                open.session.queues().steer(asked.0);
                 true
             }
             Phase::Waiting { asked: waiting, .. } => {
@@ -99,7 +76,7 @@ impl Worker {
             }
             Phase::Idle { open, .. } => {
                 let open = open.take();
-                self.begin(open, asked, &incoming.message).await;
+                self.begin(open, vec![asked], Some(incoming.message.clone())).await;
                 false
             }
         };
@@ -108,31 +85,21 @@ impl Worker {
         }
     }
 
-    /// Write the messages heard but not answered into the session; a run that holds it
-    /// leaves them for its end. A released session is opened again for them.
+    /// Write the messages heard but not answered into the session when the conversation holds
+    /// it. A run that holds it, or waits for a slot, writes them when it next opens or ends; a
+    /// released session is opened again for them once a run slot is free, as for a run.
     pub(super) async fn record_heard(&mut self) {
-        if self.heard.is_empty() || matches!(self.phase, Phase::Running { .. }) {
+        if self.heard.is_empty() {
             return;
         }
-        if let Phase::Idle { open: None, .. } = self.phase {
-            match self.out.open(None).await {
-                Ok(opened) => self.phase = Phase::idle(Some(opened)),
-                Err(error) => {
-                    self.out.failed(format!(
-                        "cannot open the session; {} message(s) not recorded: {error}",
-                        self.heard.len()
-                    ));
-                    self.heard.clear();
-                    return;
-                }
+        match &self.phase {
+            Phase::Idle { open: Some(open), .. } => {
+                let session = open.session.clone();
+                self.record_in(&session).await;
             }
+            Phase::Idle { open: None, .. } => self.begin(None, Vec::new(), None).await,
+            Phase::Waiting { .. } | Phase::Running { .. } => {}
         }
-        let session = match &self.phase {
-            Phase::Waiting { open: Some(open), .. } | Phase::Idle { open: Some(open), .. } => open.session.clone(),
-            // Opened above, and no run started since.
-            Phase::Idle { open: None, .. } | Phase::Waiting { open: None, .. } | Phase::Running { .. } => return,
-        };
-        self.record_in(&session).await;
     }
 
     pub(super) async fn record_in(&mut self, session: &Session) {

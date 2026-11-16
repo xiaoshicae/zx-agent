@@ -8,7 +8,7 @@ use async_trait::async_trait;
 
 use super::{
     LoadedSession, LogRecord, SessionHeader, SessionInfo, SessionList, SessionLog, SessionQuery, SessionStorage,
-    Transcript, Unreadable, ensure_current_version,
+    Transcript, Unreadable,
 };
 use crate::sync::lock;
 
@@ -84,7 +84,7 @@ impl MemoryStorage {
 #[async_trait]
 impl SessionStorage for MemoryStorage {
     async fn create(&self, header: &SessionHeader) -> Result<Box<dyn SessionLog>> {
-        ensure_current_version(header)?;
+        header.check_version()?;
         let mut sessions = lock(&self.sessions);
         ensure!(
             !sessions.contains_key(&header.id),
@@ -113,6 +113,14 @@ impl SessionStorage for MemoryStorage {
     async fn read(&self, id: &str) -> Result<LoadedSession> {
         let sessions = lock(&self.sessions);
         Ok(sessions.get(id).ok_or_else(|| missing(id))?.loaded())
+    }
+
+    async fn headers(&self, query: &SessionQuery) -> Result<Vec<SessionHeader>> {
+        let headers = lock(&self.sessions)
+            .values()
+            .map(|stored| stored.header.clone())
+            .collect();
+        Ok(query.arrange_headers(headers))
     }
 
     async fn list(&self, query: &SessionQuery) -> Result<SessionList> {

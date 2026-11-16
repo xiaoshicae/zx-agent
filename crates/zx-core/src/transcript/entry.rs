@@ -5,6 +5,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -53,8 +54,33 @@ impl SessionHeader {
 /// with its type.
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub(super) enum HeaderLine {
+enum HeaderLine {
     Session(SessionHeader),
+}
+
+impl SessionHeader {
+    /// The header as the first line of a session file, without its newline: the line a
+    /// storage that keeps a session as lines writes before the records.
+    pub fn to_line(&self) -> Result<String> {
+        Ok(serde_json::to_string(&HeaderLine::Session(self.clone()))?)
+    }
+
+    /// The header that `line`, the first line of a session file, holds.
+    pub fn from_line(line: &[u8]) -> Result<Self> {
+        let HeaderLine::Session(header) = serde_json::from_slice(line)?;
+        Ok(header)
+    }
+
+    /// Fails for a session of another format than [`SESSION_VERSION`], which is neither read
+    /// nor written: a storage refuses to create one, and loading refuses to read one.
+    pub fn check_version(&self) -> Result<()> {
+        ensure!(
+            self.version == SESSION_VERSION,
+            "session format version {} is not supported; only version {SESSION_VERSION} can be read or written",
+            self.version
+        );
+        Ok(())
+    }
 }
 
 /// A conversation message stored in the tree.

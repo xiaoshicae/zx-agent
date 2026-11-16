@@ -5,6 +5,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use serde::de::IntoDeserializer;
 use serde::de::value::{Error as NameError, StrDeserializer};
 use serde::{Deserialize, Serialize};
@@ -180,10 +181,12 @@ pub enum ApiKey {
 }
 
 /// Supplies the bearer token for the next request; see [`ApiKey::Dynamic`].
+#[async_trait]
 pub trait ApiKeySource: Send + Sync {
-    /// The token to send. Called before every request, on the request's task; it must not
-    /// block, and should return promptly or fail.
-    fn api_key(&self) -> Result<String, String>;
+    /// The token to send, asked for before every request on the request's task, so a source
+    /// may refresh an expired one over the network here. The provider waits at most its
+    /// `idle_timeout`, and stops waiting when the request is cancelled.
+    async fn api_key(&self) -> Result<String, String>;
 }
 
 impl ApiKey {
@@ -194,11 +197,11 @@ impl ApiKey {
     }
 
     /// The token for the next request, or `None` to send no `Authorization` header.
-    pub(crate) fn resolve(&self) -> Result<Option<String>, String> {
+    pub(crate) async fn resolve(&self) -> Result<Option<String>, String> {
         match self {
             Self::None => Ok(None),
             Self::Fixed(key) => Ok(Some(key.clone())),
-            Self::Dynamic(source) => source.api_key().map(|key| (!key.is_empty()).then_some(key)),
+            Self::Dynamic(source) => source.api_key().await.map(|key| (!key.is_empty()).then_some(key)),
         }
     }
 }

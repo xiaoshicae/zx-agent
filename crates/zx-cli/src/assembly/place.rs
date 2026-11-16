@@ -10,7 +10,8 @@ use anyhow::{Context, Result, bail};
 
 use super::check_session_cwd;
 use crate::config;
-use zx_agent::transcript::{JsonlStorage, MemoryStorage, SessionInfo, SessionList, SessionQuery, SessionStorage};
+use zx_agent::builtin::jsonl::JsonlStorage;
+use zx_agent::transcript::{MemoryStorage, SessionInfo, SessionList, SessionQuery, SessionStorage};
 
 /// Under the zx-agent home directory: the sessions of every working directory.
 const SESSIONS_DIR: &str = "sessions";

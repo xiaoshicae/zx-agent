@@ -57,12 +57,12 @@ impl Opened {
     pub(crate) fn leftover(&self) -> Result<Vec<Asked>, SessionError> {
         // The loop looks for input at the end of each step, so a message steered after the
         // last look waits in the queue.
-        let queued = self.session.take_pending()?;
+        let queued = self.session.take_queued()?;
         let mut asked = Vec::new();
         for message in queued {
             match message.input() {
                 Input::User { .. } => asked.push(Asked(message)),
-                Input::Custom(_) => self.session.queues().steer_pending(message),
+                Input::Custom(_) => self.session.queues().steer(message),
             }
         }
         Ok(asked)
@@ -73,7 +73,7 @@ impl Opened {
     /// queued for that session goes with it.
     pub(crate) fn taken_back(&self) -> Vec<Asked> {
         let queues = self.session.queues();
-        let queued = queues.drain_pending();
+        let queued = queues.take_all();
         queued
             .into_iter()
             .filter_map(|message| match message.input() {
@@ -132,18 +132,26 @@ impl Outlet {
             .await;
     }
 
-    /// Open the conversation's latest session, or create its first one. Only that first
-    /// session, created for `trigger`, a mention of the bot in a thread someone else started,
-    /// records what was said there before: a session the conversation has already, such as
+    /// Open the conversation's session, or create its first one. Only that first session,
+    /// created for `trigger`, a mention of the bot in a thread someone else started, records
+    /// what was said there before, which is read before the session is made: a session either
+    /// starts with the thread or is not made. A session the conversation has already, such as
     /// one `/new` started, is opened as it is, however little it holds.
     pub(crate) async fn open(&self, trigger: Option<&MessageRef>) -> Result<Opened, String> {
         let shared = &self.shared;
-        if let Some(id) = shared.latest_session(&self.key).await? {
+        if let Some(id) = shared.session_of(&self.key) {
             return self.held(shared.agent.open_session(&id).await);
         }
+        let earlier = match trigger {
+            Some(trigger) => self.said_before(trigger).await,
+            None => Vec::new(),
+        };
         let opened = self.create().await?;
-        if let Some(trigger) = trigger {
-            self.read_thread(&opened, trigger).await;
+        for content in earlier {
+            if let Err(error) = opened.session.append_custom_message(said(content)).await {
+                self.failed(format!("cannot record the thread: {error}"));
+                break;
+            }
         }
         Ok(opened)
     }
@@ -155,7 +163,9 @@ impl Outlet {
             labels: self.key.labels(),
             ..SessionOptions::new(&self.shared.cwd)
         };
-        self.held(self.shared.agent.create_session(options).await)
+        let opened = self.held(self.shared.agent.create_session(options).await)?;
+        self.shared.go_on_in(&self.key, opened.session.id());
+        Ok(opened)
     }
 
     /// `session`, as the conversation holds it, or why the agent could not give one: the
@@ -274,12 +284,15 @@ impl Outlet {
     /// Record what was said in the thread before the bot was mentioned there by `trigger`, in
     /// the conversation's first session, which has nothing yet: the first answer then knows
     /// the talk it joins. Nothing is read when `trigger` started the thread.
-    async fn read_thread(&self, opened: &Opened, trigger: &MessageRef) {
+    /// What was said in the thread before `trigger`, as the model reads it: nothing in a
+    /// direct chat or a thread that `trigger` starts, and nothing when the platform cannot
+    /// give it, which is reported.
+    async fn said_before(&self, trigger: &MessageRef) -> Vec<String> {
         let Some(thread) = &self.key.thread else {
-            return;
+            return Vec::new();
         };
         if thread.0 == trigger.id.0 {
-            return;
+            return Vec::new();
         }
         let history = self
             .shared
@@ -291,15 +304,13 @@ impl Outlet {
             .await;
         // A failure was reported; the conversation goes on without the earlier messages.
         let Some(history) = history else {
-            return;
+            return Vec::new();
         };
-        for earlier in history.into_iter().filter(|earlier| earlier.id != trigger.id) {
-            let content = self.attributed(&earlier.sender, &earlier.text).await;
-            if let Err(error) = opened.session.append_custom_message(said(content)).await {
-                self.failed(format!("cannot record the thread: {error}"));
-                return;
-            }
+        let mut earlier = Vec::new();
+        for message in history.into_iter().filter(|earlier| earlier.id != trigger.id) {
+            earlier.push(self.attributed(&message.sender, &message.text).await);
         }
+        earlier
     }
 
     pub(crate) fn replies(&self) -> &Replies {

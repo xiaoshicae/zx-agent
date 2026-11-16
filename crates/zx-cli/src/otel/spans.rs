@@ -34,14 +34,18 @@ pub(super) async fn export(mut receiver: mpsc::Receiver<Signal>, mut runs: Runs,
     runs.end_all(SystemTime::now());
 }
 
-/// The open spans of each run, by run ID.
+/// The open spans of each run, by run ID. A run whose end was dropped from the full queue
+/// stays open until its session starts the next run, or a manual compaction: a session does
+/// one at a time, so its earlier runs have ended by then. What is still open when the export
+/// stops ends with it.
 pub(super) struct Runs {
     tracer: SdkTracer,
     open: HashMap<String, Open>,
 }
 
-#[derive(Default)]
 struct Open {
+    /// The session the run belongs to.
+    session: String,
     run: Option<Context>,
     attempt: Option<Context>,
     step: Option<Context>,
@@ -52,6 +56,18 @@ struct Open {
 }
 
 impl Open {
+    fn new(session: String) -> Self {
+        Self {
+            session,
+            run: None,
+            attempt: None,
+            step: None,
+            request: None,
+            compaction: None,
+            tools: HashMap::new(),
+        }
+    }
+
     /// The innermost span that a new span or event belongs to.
     fn current(&self) -> Option<&Context> {
         self.step.as_ref().or(self.attempt.as_ref()).or(self.run.as_ref())
@@ -70,6 +86,13 @@ impl Open {
         end(self.request.take(), at);
         end(self.compaction.take(), at);
         end(self.step.take(), at);
+    }
+
+    /// End every span still open, without what only a run's end tells.
+    fn end_all(&mut self, at: SystemTime) {
+        self.end_attempt_parts(at);
+        end(self.attempt.take(), at);
+        end(self.run.take(), at);
     }
 
     fn is_empty(&self) -> bool {
@@ -98,10 +121,15 @@ impl Runs {
             at,
             what,
         } = signal;
+        if !self.open.contains_key(&run_id) {
+            self.end_lost_runs(&session_id, at);
+        }
         let Self { tracer, open } = self;
         let mut run = OpenRun {
             tracer,
-            spans: open.entry(run_id.clone()).or_default(),
+            spans: open
+                .entry(run_id.clone())
+                .or_insert_with(|| Open::new(session_id.clone())),
             run_id: &run_id,
             at,
         };
@@ -146,12 +174,21 @@ impl Runs {
         }
     }
 
+    /// End what the runs of `session` still hold open, as another of its runs starts.
+    fn end_lost_runs(&mut self, session: &str, at: SystemTime) {
+        self.open.retain(|_, spans| {
+            let lost = spans.session == session;
+            if lost {
+                spans.end_all(at);
+            }
+            !lost
+        });
+    }
+
     /// End every span still open, as the export stops.
     pub(super) fn end_all(&mut self, at: SystemTime) {
         for (_, mut spans) in self.open.drain() {
-            spans.end_attempt_parts(at);
-            end(spans.attempt.take(), at);
-            end(spans.run.take(), at);
+            spans.end_all(at);
         }
     }
 }

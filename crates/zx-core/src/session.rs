@@ -321,20 +321,16 @@ impl Session {
             .map_err(|error| SessionError::WriteFailed(format!("{error:#}")))
     }
 
-    /// Take the input that `queues().steer` and `follow_up` queued and no run consumed: steering
-    /// messages first, then follow-ups, each oldest first. A run looks for input at the end
-    /// of each step, so input queued as it ends waits for the next run; a host that starts
-    /// runs itself calls this when one ends and sends what it gets. Returns Busy during a
-    /// run or compaction, whose loop may still take the input.
-    pub fn take_queued(&self) -> Result<Vec<Input>, SessionError> {
-        // Holding the state lock keeps a run from starting between the check and the take.
+    /// Take the input that `queues().steer` and `follow_up` queued and no run consumed, each
+    /// with its hold: steering messages first, then follow-ups, each oldest first. A run looks
+    /// for input at the end of each step, so input queued as it ends waits for the next run;
+    /// a host that starts runs itself calls this when one ends and sends what it gets
+    /// ([`PendingInput::into_input`]). Returns Busy during a run or compaction, whose loop
+    /// may still take the input.
+    pub fn take_queued(&self) -> Result<Vec<PendingInput>, SessionError> {
+        // Holding the state lock keeps a run from starting between the check and the take;
+        // the holds are handed out, not dropped, under it.
         self.idle(|_| self.shared.queues.take_all())
-    }
-
-    /// Take queued input while retaining its admission permits for another host queue.
-    /// Like [`Self::take_queued`], returns Busy while a run or compaction owns the session.
-    pub fn take_pending(&self) -> Result<Vec<PendingInput>, SessionError> {
-        self.idle(|_| self.shared.queues.drain_pending())
     }
 
     /// Cancel the run or compaction in progress; its [`Run`] then ends with a cancelled

@@ -13,7 +13,7 @@ use zx_core::events::{ApprovalResult, Event, EventKind};
 
 use crate::ai::text::clip;
 
-use super::{ApprovalId, ServerEvent, ServerSink, SessionKey};
+use super::{ApprovalCard, ApprovalId, ServerEvent, ServerSink, SessionKey};
 
 /// Longest command or argument text shown on a card; longer text ends with "...". A card is
 /// for deciding at a glance; the full call is in the session file.
@@ -27,11 +27,7 @@ pub(crate) enum ApprovalUpdate {
     Requested {
         /// The request's ID in the run, which is also the card's.
         id: ApprovalId,
-        tool: String,
-        /// The command, or the call's arguments, shortened for the card.
-        summary: String,
-        /// Why the policy asks.
-        reason: String,
+        card: ApprovalCard,
     },
     Resolved {
         /// The request that ended; `None` when a session grant covered the call and nobody
@@ -62,9 +58,11 @@ impl ApprovalEvents {
                 ..
             } => ApprovalUpdate::Requested {
                 id: ApprovalId(approval_id.clone()),
-                tool: tool_name.clone(),
-                summary: summarize(args),
-                reason: reason.clone(),
+                card: ApprovalCard {
+                    tool: tool_name.clone(),
+                    summary: summarize(args),
+                    reason: reason.clone(),
+                },
             },
             EventKind::ApprovalResolved {
                 approval_id,

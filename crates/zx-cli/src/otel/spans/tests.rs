@@ -361,3 +361,41 @@ fn a_manual_compaction_is_a_trace_of_its_own_and_is_forgotten_when_it_ends() {
     assert_eq!(attribute(compaction, "zx.usage.input_tokens").as_deref(), Some("7"));
     assert!(harness.runs.open.is_empty());
 }
+
+/// `signal`, as one of the run `run_id` of the session `session_id`.
+fn of(run_id: &str, session_id: &str, signal: Signal) -> Signal {
+    Signal {
+        run_id: run_id.into(),
+        session_id: session_id.into(),
+        ..signal
+    }
+}
+
+fn run_start() -> EventKind {
+    EventKind::RunStart {
+        model: "m".into(),
+        provider: "p".into(),
+    }
+}
+
+#[test]
+fn a_run_whose_end_was_lost_ends_when_its_session_starts_the_next() {
+    let mut harness = Harness::new();
+    harness.apply([
+        of("r1", "s1", at(1000, run_start())),
+        of("r1", "s1", at(1001, EventKind::AttemptStart { attempt: 1 })),
+        of("r1", "s1", at(1002, EventKind::StepStart { step: 1 })),
+        of("other", "s2", at(1003, run_start())),
+    ]);
+    // The end of r1 was dropped from the full queue.
+
+    harness.apply([of("r2", "s1", at(1100, run_start()))]);
+
+    let spans = harness.spans();
+    assert_eq!(spans.len(), 3, "{spans:?}");
+    assert!(spans.iter().all(|span| ms(span.end_time) == 1100), "{spans:?}");
+    assert_eq!(attribute(span(&spans, "run"), "zx.run.id").as_deref(), Some("r1"));
+    let mut open: Vec<&str> = harness.runs.open.keys().map(String::as_str).collect();
+    open.sort_unstable();
+    assert_eq!(open, ["other", "r2"]);
+}

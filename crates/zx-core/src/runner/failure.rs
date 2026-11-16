@@ -94,7 +94,7 @@ impl RunHost<'_> {
             .emit(EventKind::ContextOverflow { error: error.into() })
             .await;
         self.omit_failed_attempt(failed_entry).await.map_err(RunStop::Failed)?;
-        let compacted = self.compact_for_run(accounting).await.map_err(RunStop::Failed)?;
+        let compacted = self.compact_for_run(accounting).await;
         let reason = match compacted.end {
             End::Completed { .. } => return Ok(()),
             End::Cancelled(_) => return Err(RunStop::Ended(Ending::Cancelled)),

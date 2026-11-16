@@ -6,19 +6,18 @@
 //! earlier messages without touching the stored history, which stays available for auditing.
 //!
 //! A [`SessionStorage`] keeps the sessions, and the [`SessionLog`] it hands out keeps one
-//! session's entries: session files ([`JsonlStorage`]), memory ([`MemoryStorage`]), or a
-//! backend of the host's choice. Only the current format, [`SESSION_VERSION`], is read and
+//! session's entries: memory ([`MemoryStorage`]), session files (`JsonlStorage` of the
+//! zx-tools crate), or a backend of the host's choice. Only the current format, [`SESSION_VERSION`], is read and
 //! written.
 //!
 //! - `entry`: the header and the entries of the tree
 //! - `storage` and `log`: the interfaces of where sessions are kept: a storage of sessions,
 //!   and the log of one session's entries
-//! - `jsonl` and `memory`: the storages that ship with the kernel: session files, and memory
+//! - `memory`: the storage that ships with the kernel, in memory
 //! - `projection`: the messages a branch projects for the model
 //! - `compaction`: what a summary holds, and the records of a compaction with the rules they
 //!   follow
 //! - `request`: request configuration changes and per-request checkpoints
-//! - `tree`: rebuildable ancestry and request configuration indexes
 //! - `recovery`: start records of calls with side effects, and the calls an interrupted run
 //!   left without results
 //! - `name`: the session's name, kept in `session_info` records
@@ -27,7 +26,6 @@
 
 mod compaction;
 mod entry;
-mod jsonl;
 mod log;
 mod memory;
 mod name;
@@ -39,14 +37,12 @@ mod storage;
 mod test_support;
 #[cfg(test)]
 mod tests;
-mod tree;
 pub use compaction::{
     CompactionEntry, CompactionFailedEntry, CompactionPlan, CompactionStartedEntry, CompactionSummary, SummarizedBy,
     SummaryFact, SummaryRequest,
 };
 pub(crate) use compaction::{MAX_SUMMARY_BYTES, summary_input, summary_messages};
 pub use entry::{ContextEditEntry, CustomEntry, CustomMessage, CustomMessageEntry, Entry, MessageEntry, SessionHeader};
-pub use jsonl::JsonlStorage;
 pub use log::{LoadedSession, LogRecord, SessionLog};
 pub use memory::MemoryStorage;
 pub use name::{SessionInfoEntry, SessionName};
@@ -56,7 +52,7 @@ pub use recovery::{InterruptedToolCall, StartRecord, ToolCallStartedEntry};
 pub use request::{RequestConfig, RequestConfigEntry, RequestSource, RequestStartedEntry};
 pub use storage::{SessionInfo, SessionList, SessionQuery, SessionStorage, Unreadable};
 #[cfg(test)]
-pub(crate) use test_support::FailingWriter;
+pub(crate) use test_support::{FailingWriter, WriterLog};
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -123,7 +119,9 @@ pub struct Transcript {
     header: SessionHeader,
     entries: Vec<Entry>,
     index: HashMap<String, usize>,
-    tree: tree::TreeIndex,
+    /// For each entry, by position, the position of the request configuration in force there:
+    /// the nearest one on its branch, itself included.
+    request_configs: Vec<Option<usize>>,
     leaf: Option<String>,
     incomplete_tail_bytes: usize,
 }
@@ -139,7 +137,7 @@ impl Transcript {
             header,
             entries: Vec::new(),
             index: HashMap::new(),
-            tree: tree::TreeIndex::default(),
+            request_configs: Vec::new(),
             leaf: None,
             incomplete_tail_bytes: 0,
         }
@@ -182,7 +180,7 @@ impl Transcript {
             records,
             incomplete_tail_bytes,
         } = loaded;
-        ensure_current_version(&header)?;
+        header.check_version()?;
         let mut store = Self::in_memory(header);
         for (position, record) in (1..).zip(&records) {
             let entry: Entry = serde_json::from_str(record).map_err(|error| anyhow!("entry {position}: {error}"))?;
@@ -211,11 +209,11 @@ impl Transcript {
         }
     }
 
-    /// A session that writes entries to `writer` instead of a file, so tests can make writes
-    /// fail. The header is not written.
+    /// A session that writes entries to `writer` instead of a storage, so tests can make
+    /// writes fail. The header is not written.
     #[cfg(test)]
     pub(crate) fn with_writer(header: SessionHeader, writer: Box<dyn std::io::Write + Send + Sync>) -> Self {
-        Self::with_log(header, Box::new(jsonl::JsonlFile::with_writer(writer)))
+        Self::with_log(header, Box::new(WriterLog::new(writer)))
     }
 
     /// The header the session was created with.
@@ -486,12 +484,14 @@ impl Transcript {
     }
 
     fn insert(&mut self, entry: Entry) {
-        let parent = entry.parent_id().and_then(|id| self.index.get(id)).copied();
-        let kind = match &entry {
-            Entry::RequestConfig(_) => tree::RecordKind::RequestConfig,
-            _ => tree::RecordKind::Other,
+        let request_config = match &entry {
+            Entry::RequestConfig(_) => Some(self.entries.len()),
+            _ => entry
+                .parent_id()
+                .and_then(|id| self.index.get(id))
+                .and_then(|&parent| self.request_configs[parent]),
         };
-        self.tree.push(parent, kind);
+        self.request_configs.push(request_config);
         let id = entry.id().to_string();
         self.index.insert(id.clone(), self.entries.len());
         self.entries.push(entry);
@@ -507,16 +507,6 @@ impl Transcript {
             }
         }
     }
-}
-
-/// Only the current format is read and written: a session of another version is refused.
-pub(super) fn ensure_current_version(header: &SessionHeader) -> Result<()> {
-    ensure!(
-        header.version == SESSION_VERSION,
-        "session format version {} is not supported; only version {SESSION_VERSION} can be read or written",
-        header.version
-    );
-    Ok(())
 }
 
 /// Why a context edit may not change `message`, if it may not. A system message is never

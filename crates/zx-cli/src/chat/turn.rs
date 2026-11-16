@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use zx_agent::compaction;
 use zx_agent::events::{ApprovalResult, Event, EventKind, RunReport};
-use zx_agent::input::Input;
+use zx_agent::input::{Input, PendingInput};
 use zx_agent::policy::ApprovalDecision;
 use zx_agent::session::SessionError;
 use zx_agent::{Run, Session};
@@ -454,13 +454,16 @@ fn deny(session: &Session, output: &Output, ticket: &Ticket, reason: &str) {
 
 /// Input that `steer` queued and no run read; a task only reads it between turns.
 fn unread_input(session: &Session, output: &Output) -> Vec<Input> {
-    session.take_queued().unwrap_or_else(|error| {
-        output.line(
-            Tone::Error,
-            &format!("[chat] cannot take the unread input: {}", visible(&error.to_string())),
-        );
-        Vec::new()
-    })
+    match session.take_queued() {
+        Ok(queued) => queued.into_iter().map(PendingInput::into_input).collect(),
+        Err(error) => {
+            output.line(
+                Tone::Error,
+                &format!("[chat] cannot take the unread input: {}", visible(&error.to_string())),
+            );
+            Vec::new()
+        }
+    }
 }
 
 /// A queued message in one line, for notices.

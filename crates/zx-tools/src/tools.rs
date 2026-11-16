@@ -59,18 +59,19 @@ const DEFAULT_MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Build built-in tools by name, in the given order, without duplicates, running commands and
 /// reading and writing files through `executor`, which also decides what commands must not
-/// see (see [`LocalExecutor::hidden_env`]). edit_file and write_file share one
-/// [`FileMutationQueue`] with other default file tools in this process, including other
-/// sessions. Errors: a name that is not in [`BUILTIN_TOOL_NAMES`].
+/// see (see [`LocalExecutor::hidden_env`]). edit_file and write_file take their turns at each
+/// file from `files`, which the tools of other sessions may share to coordinate with them.
+/// Errors: a name that is not in [`BUILTIN_TOOL_NAMES`].
 ///
 /// [`LocalExecutor::hidden_env`]: crate::executor::LocalExecutor::hidden_env
 pub fn builtin_tools(
     names: &[String],
     bash_timeout: Duration,
     executor: &Arc<dyn Executor>,
+    files: &Arc<FileMutationQueue>,
 ) -> Result<Vec<Arc<dyn Tool>>> {
     let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
-    let queue = FileMutationQueue::shared();
+    let queue = Arc::clone(files);
     let search = SearchSettings {
         executor: Arc::clone(executor),
     };
@@ -178,13 +179,13 @@ mod tests {
     #[test]
     fn builds_tools_in_order_without_duplicates_or_blanks() {
         let requested = ["read_file", " bash ", "read_file", ""].map(String::from);
-        let tools = builtin_tools(&requested, Duration::from_secs(5), &local()).unwrap();
+        let tools = builtin_tools(&requested, Duration::from_secs(5), &local(), &Arc::default()).unwrap();
         assert_eq!(names(&tools), ["read_file", "bash"]);
     }
 
     #[test]
     fn rejects_unknown_tool_names() {
-        let error = builtin_tools(&["curl".to_string()], Duration::from_secs(5), &local())
+        let error = builtin_tools(&["curl".to_string()], Duration::from_secs(5), &local(), &Arc::default())
             .err()
             .unwrap()
             .to_string();
@@ -193,7 +194,7 @@ mod tests {
 
     #[test]
     fn bash_gets_the_default_timeout_and_keeps_the_larger_maximum() {
-        let tools = builtin_tools(&["bash".to_string()], Duration::from_secs(7), &local()).unwrap();
+        let tools = builtin_tools(&["bash".to_string()], Duration::from_secs(7), &local(), &Arc::default()).unwrap();
         let description = tools[0].definition().description;
         assert!(
             description.contains("after 7s unless timeout_secs is set (max 600s)"),

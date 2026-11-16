@@ -1,12 +1,9 @@
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::sync::mpsc;
 
 use async_trait::async_trait;
 use futures::FutureExt;
 
-use super::jsonl::JsonlFile;
-use super::test_support::{assistant, create_file, header, open_file, read_file, texts};
+use super::test_support::{assistant, header, loaded, records_of, texts};
 use super::*;
 use crate::ai::{AssistantMessage, ContentBlock, StopReason, ToolCall, Usage};
 
@@ -56,9 +53,7 @@ async fn a_text_replacement_cannot_erase_tool_calls() {
 
 #[tokio::test]
 async fn opening_rejects_a_context_edit_of_a_system_message() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("s.jsonl");
-    let mut store = create_file(&path, header()).await.unwrap();
+    let mut store = Transcript::in_memory(header());
     let system = store
         .append_message(Message::System(crate::ai::SystemMessage {
             sections: vec![crate::ai::SectionChange {
@@ -70,21 +65,20 @@ async fn opening_rejects_a_context_edit_of_a_system_message() {
         .await
         .unwrap();
     store.append_message(Message::user("q")).await.unwrap();
-    let leaf = store.leaf.clone();
-    drop(store);
     // Written by another program, or by hand: appending through the store refuses it.
     let edit = Entry::ContextEdit(ContextEditEntry {
         id: "edit".into(),
-        parent_id: leaf,
+        parent_id: store.leaf.clone(),
         timestamp: 0,
         target_id: system,
         replacement: None,
     });
-    let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
-    writeln!(file, "{}", serde_json::to_string(&edit).unwrap()).unwrap();
-    drop(file);
+    let mut records = records_of(&store);
+    records.push(serde_json::to_string(&edit).unwrap());
 
-    let error = open_file(&path).await.err().expect("the edit must be refused");
+    let error = Transcript::snapshot(loaded(header(), records))
+        .err()
+        .expect("the edit must be refused");
 
     assert!(format!("{error:#}").contains("system message"), "{error:#}");
 }
@@ -243,7 +237,7 @@ async fn an_append_that_times_out_stops_later_writes() {
 
     assert!(error.to_string().contains("did not answer within 10ms"), "{error}");
     assert!(store.entries().is_empty());
-    store.log = Some(Box::new(JsonlFile::with_writer(Box::new(std::io::sink()))));
+    store.log = Some(Box::new(WriterLog::new(Box::new(std::io::sink()))));
     let later = store.append_message(Message::user("later")).await.unwrap_err();
     assert!(later.to_string().contains("outcome is unknown"), "{later}");
 }
@@ -271,37 +265,12 @@ async fn why_writes_stopped_can_be_told_apart() {
     assert!(dropped.append_message(Message::user("q")).now_or_never().is_none());
     assert_eq!(dropped.writes_stopped(), Some(&WritesStopped::Interrupted));
 
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("s.jsonl");
-    drop(create_file(&path, header()).await.unwrap());
     assert_eq!(
-        read_file(&path).await.unwrap().writes_stopped(),
+        Transcript::snapshot(loaded(header(), Vec::new()))
+            .unwrap()
+            .writes_stopped(),
         Some(&WritesStopped::ReadOnly)
     );
-}
-
-#[tokio::test]
-async fn a_file_write_that_blocks_times_out_without_stalling_the_runtime() {
-    /// Answers every write late, like a session volume that stopped answering; bounded,
-    /// so that a store that waits for it still ends.
-    struct Stuck;
-    impl std::io::Write for Stuck {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            std::thread::sleep(Duration::from_secs(2));
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut store = Transcript::with_writer(header(), Box::new(Stuck));
-    store.append_timeout = Duration::from_millis(50);
-    let started = std::time::Instant::now();
-
-    let error = store.append_message(Message::user("q")).await.unwrap_err();
-
-    assert!(error.to_string().contains("did not answer within 50ms"), "{error}");
-    assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
 }
 
 #[tokio::test]
@@ -312,87 +281,9 @@ async fn an_append_dropped_while_waiting_stops_later_writes() {
     assert!(store.append_message(Message::user("q")).now_or_never().is_none());
 
     assert!(store.entries().is_empty());
-    store.log = Some(Box::new(JsonlFile::with_writer(Box::new(std::io::sink()))));
+    store.log = Some(Box::new(WriterLog::new(Box::new(std::io::sink()))));
     let later = store.append_message(Message::user("later")).await.unwrap_err();
     assert!(later.to_string().contains("outcome is unknown"), "{later}");
-}
-
-/// Keeps `keep` bytes of the first write and then fails once, like a disk that fills up
-/// in the middle of a record and is freed again. Later writes succeed.
-struct PartialWriteOnce {
-    file: std::fs::File,
-    keep: usize,
-    calls: usize,
-}
-
-impl Write for PartialWriteOnce {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.calls += 1;
-        match self.calls {
-            1 => {
-                let part = &bytes[..self.keep.min(bytes.len())];
-                self.file.write_all(part)?;
-                Ok(part.len())
-            }
-            2 => Err(std::io::Error::other("disk full")),
-            _ => self.file.write(bytes),
-        }
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.file.flush()
-    }
-}
-
-#[tokio::test]
-async fn a_partial_write_stops_later_writes_and_leaves_a_repairable_tail() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("s.jsonl");
-    let mut store = create_file(&path, header()).await.unwrap();
-    store.append_message(Message::user("kept")).await.unwrap();
-    drop(store);
-    let file = OpenOptions::new().append(true).open(&path).unwrap();
-    let writer = PartialWriteOnce {
-        file,
-        keep: 10,
-        calls: 0,
-    };
-    let mut store = Transcript::with_writer(header(), Box::new(writer));
-
-    assert!(store.append_message(Message::user("cut short")).await.is_err());
-    // A run keeps emitting messages until it observes its cancellation.
-    let later = store.append_message(Message::user("after the failure")).await;
-    assert!(later.is_err(), "an entry was written after a failed write");
-    drop(store);
-
-    let reopened = open_file(&path).await.unwrap();
-    assert_eq!(reopened.incomplete_tail_bytes(), 10);
-    assert_eq!(texts(&reopened), ["kept"]);
-}
-
-#[tokio::test]
-async fn opening_leaves_an_incomplete_tail_and_the_next_record_replaces_it() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("s.jsonl");
-    let mut store = create_file(&path, header()).await.unwrap();
-    store.append_message(Message::user("kept")).await.unwrap();
-    drop(store);
-    let tail = b"{\"type\":\"mess";
-    OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .unwrap()
-        .write_all(tail)
-        .unwrap();
-
-    let mut reopened = open_file(&path).await.unwrap();
-    assert!(std::fs::read(&path).unwrap().ends_with(tail), "opening changes nothing");
-    reopened.append_message(Message::user("next")).await.unwrap();
-    drop(reopened);
-
-    let read = read_file(&path).await.unwrap();
-    assert_eq!(read.incomplete_tail_bytes(), 0);
-    assert_eq!(texts(&read), ["kept", "next"]);
 }
 
 /// The message for a session of `version`, which is not the current one.
@@ -401,46 +292,39 @@ fn unsupported(version: u32) -> String {
 }
 
 #[tokio::test]
-async fn sessions_of_an_older_or_newer_version_are_refused_and_left_unchanged() {
-    let dir = tempfile::tempdir().unwrap();
+async fn sessions_of_an_older_or_newer_version_are_refused() {
     for version in [1, SESSION_VERSION - 1, SESSION_VERSION + 1] {
-        let path = dir.path().join(format!("v{version}.jsonl"));
-        let header =
-            serde_json::json!({"type":"session","version":version,"id":"h","timestamp":1,"cwd":"/","model":"m"});
+        let other = SessionHeader { version, ..header() };
         let message =
             serde_json::json!({"type":"message","id":"a","parentId":null,"timestamp":2,"message":Message::user("hi")});
-        let content = format!("{header}\n{message}\n");
-        std::fs::write(&path, &content).unwrap();
+        let records = vec![message.to_string()];
 
-        let opened = open_file(&path).await.err().unwrap().to_string();
-        let read = read_file(&path).await.err().unwrap().to_string();
+        let log = Box::new(WriterLog::new(Box::new(std::io::sink())));
+        let opened = Transcript::load(loaded(other.clone(), records.clone()), log);
+        let read = Transcript::snapshot(loaded(other, records));
 
-        assert_eq!(opened, unsupported(version));
-        assert_eq!(read, unsupported(version));
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+        assert_eq!(opened.err().unwrap().to_string(), unsupported(version));
+        assert_eq!(read.err().unwrap().to_string(), unsupported(version));
     }
 }
 
 #[tokio::test]
 async fn a_session_of_another_version_is_not_created() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("s.jsonl");
     let older = SessionHeader {
         version: SESSION_VERSION - 1,
         ..header()
     };
 
-    let error = create_file(&path, older).await.err().unwrap().to_string();
+    let error = MemoryStorage::default().create(&older).await.err().unwrap().to_string();
 
     assert_eq!(error, unsupported(SESSION_VERSION - 1));
-    assert!(!path.exists());
 }
 
 #[tokio::test]
 async fn an_actor_is_recorded_with_a_prompt_and_with_no_other_message() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("session.jsonl");
-    let mut store = create_file(&path, header()).await.unwrap();
+    let storage = MemoryStorage::default();
+    let header = header();
+    let mut store = Transcript::with_log(header.clone(), storage.create(&header).await.unwrap());
     store
         .append_message_from(Message::user("first"), Some("alice".into()))
         .await
@@ -459,15 +343,15 @@ async fn an_actor_is_recorded_with_a_prompt_and_with_no_other_message() {
     );
     assert_eq!(store.entries().len(), recorded, "nothing is written");
     drop(store);
-    let text = std::fs::read_to_string(&path).unwrap();
-    let lines: Vec<serde_json::Value> = text
-        .lines()
-        .skip(1)
+    let stored = storage.read(&header.id).await.unwrap();
+    let lines: Vec<serde_json::Value> = stored
+        .records
+        .iter()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
     assert_eq!(lines[0]["actor"], "alice");
     assert!(lines[1].get("actor").is_none(), "{}", lines[1]);
-    let reopened = read_file(&path).await.unwrap();
+    let reopened = Transcript::snapshot(stored).unwrap();
     assert_eq!(reopened.latest_actor(), None, "the last prompt names nobody");
 }
 

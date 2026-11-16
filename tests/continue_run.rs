@@ -17,7 +17,7 @@ use zx_agent::session::SessionError;
 use zx_agent::tools::Tool;
 use zx_agent::transcript::{Entry, Transcript};
 
-use common::{Collect, Driven, EchoTool, RunnerSetup, config, header, summarize, tool_call_answer};
+use common::{Collect, Driven, EchoTool, RunnerSetup, config, header, summarize, take_queued_inputs, tool_call_answer};
 
 fn runner(provider: &Arc<FauxProvider>, session: Transcript) -> (Driven, Arc<Collect>) {
     let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(EchoTool::new("echo"))];
@@ -160,8 +160,7 @@ async fn a_continuation_that_stops_at_a_queued_message_leaves_the_rest_in_the_qu
     assert_eq!(report.outcome, RunOutcome::Failed, "{report:?}");
     assert_eq!(provider.requests().len(), 1, "the refused input is not sent");
     // The run took the first message and stopped there: the second is still the host's.
-    let queued = runner.take_queued().unwrap();
-    assert_eq!(queued, [Input::from("kept")]);
+    assert_eq!(take_queued_inputs(&runner).unwrap(), [Input::from("kept")]);
 }
 
 #[tokio::test]

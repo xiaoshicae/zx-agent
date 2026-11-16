@@ -763,7 +763,7 @@ mod tests {
             lines[0],
             "OS: Debian GNU/Linux 12 (bookworm), Linux kernel 6.10.14-linuxkit (aarch64), in a container from image debian:bookworm-slim"
         );
-        assert!(lines[1].starts_with("Run started: "), "{section}");
+        assert!(lines[1].starts_with("Session opened: "), "{section}");
         assert_eq!(
             lines[2],
             "Working directory: /srv/app (writable; changes are made to the host's files)"

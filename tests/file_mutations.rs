@@ -10,7 +10,7 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::builtin::executor::{CommandOutput, Executor, LocalExecutor, ShellCommand};
-use zx_agent::builtin::tools::{WriteFileTool, builtin_tools};
+use zx_agent::builtin::tools::{FileMutationQueue, WriteFileTool, builtin_tools};
 use zx_agent::tools::{Tool, ToolContext};
 
 const WAIT: Duration = Duration::from_secs(5);
@@ -103,7 +103,13 @@ async fn independent_toolsets_coordinate_edits_of_the_same_file() {
     std::fs::write(dir.path().join("f"), "a=0\nb=0\n").unwrap();
     let held = Arc::new(HeldFile::default());
     let executor: Arc<dyn Executor> = held.clone();
-    let tools = || builtin_tools(&["edit_file".into()], WAIT, &executor).unwrap().remove(0);
+    // Two sessions' tools, which share the turns at each file as their host has them share.
+    let files = Arc::new(FileMutationQueue::default());
+    let tools = || {
+        builtin_tools(&["edit_file".into()], WAIT, &executor, &files)
+            .unwrap()
+            .remove(0)
+    };
     let (first, second) = (tools(), tools());
     let ctx = context(dir.path().into());
     let edit = first.execute(json!({"path":"f", "edits":[{"oldText":"a=0", "newText":"a=1"}]}), &ctx);

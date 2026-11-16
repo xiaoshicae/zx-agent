@@ -14,7 +14,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::process::Command;
 
-use common::http::{Request, read_request};
+use common::http::{Request, read_request, silent_listener};
 use common::mock_server::{MockServer, Reply};
 use common::{
     AgentHome, Home, agent_text, fake_model_config, json_lines, stderr, stdout, write_agent_file, write_config,
@@ -206,6 +206,39 @@ async fn sigterm_exits_5() {
     let output = child.wait_with_output().await.unwrap();
 
     assert_eq!(output.status.code(), Some(5), "{}", stderr(&output));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_second_signal_ends_the_process_without_waiting_for_its_shutdown() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let server = MockServer::start(vec![Reply::Stall(vec![])]).await;
+    // The traces left at the end go to a collector that never answers: exporting them takes
+    // the whole export timeout.
+    let (collector, mut exports) = silent_listener().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut child = run_against(&server, dir.path(), &["--tools", "", "check"])
+        .env(
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+            format!("http://{collector}/v1/traces"),
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    server.wait_for_requests(1).await;
+    common::signal(&child, "-INT").await;
+    // The export has begun: the first signal has ended the run.
+    exports.recv().await.unwrap();
+
+    common::signal(&child, "-INT").await;
+
+    let status = tokio::time::timeout(Duration::from_secs(30), child.wait())
+        .await
+        .expect("the program did not end")
+        .unwrap();
+    assert_eq!(status.signal(), Some(libc::SIGINT), "{status:?}");
 }
 
 #[tokio::test]

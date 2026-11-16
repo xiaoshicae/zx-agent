@@ -1,6 +1,6 @@
 # 作为库使用
 
-`zx-agent` 库再导出各 crate：内核 `zx-core` 按域模块原样导出（`zx_agent::agent`、`zx_agent::tools`、`zx_agent::policy`、`zx_agent::hooks`、`zx_agent::transcript` 等），模型层在 `zx_agent::ai`，`zx-tools` 附带的实现在 `zx_agent::builtin`。库里没有接入方式：IM 服务在 `zx-im`（平台在 `zx-im-slack` 与 `zx-im-feishu`），`config.toml`、agent 文件与 OpenTelemetry 导出在命令行的 crate `zx-cli`（`zx_cli::application`、`zx_cli::config`、`zx_cli::otel`）。只需要内核时可以只依赖 `zx-core` 与 `zx-ai`，按需加上 `zx-ai-openai`。`zx-core` 按 JSON Schema 校验工具参数的部分是默认开启的 feature `json-schema`；写 `default-features = false` 时参数只由工具自己解析，可以关闭这部分校验依赖。各 crate 都不发布到 crates.io。
+`zx-agent` 库再导出各 crate：内核 `zx-core` 按域模块原样导出（`zx_agent::agent`、`zx_agent::tools`、`zx_agent::policy`、`zx_agent::hooks`、`zx_agent::transcript` 等），模型层在 `zx_agent::ai`，`zx-tools` 附带的实现在 `zx_agent::builtin`。库里没有接入方式：IM 服务在 `zx-im`（平台在 `zx-im-slack` 与 `zx-im-feishu`），`config.toml`、agent 文件与 OpenTelemetry 导出在命令行的 crate `zx-cli`（`zx_cli::application`、`zx_cli::config`、`zx_cli::otel`）。只需要内核时可以只依赖 `zx-core` 与 `zx-ai`，按需加上 `zx-ai-openai`。`zx-core` 按 JSON Schema 校验工具参数的部分是默认开启的 feature `json-schema`；写 `default-features = false` 时参数只由工具自己解析，可以关闭这部分校验依赖；`zx-tools` 的 MCP 客户端同样是默认开启的 feature `mcp`，关掉时不编译 HTTP 客户端与 MCP SDK。各 crate 都不发布到 crates.io。
 
 ```rust
 let mut config = AgentConfig { system_prompt, tools, ..AgentConfig::new(provider, model) };
@@ -23,17 +23,15 @@ let report = run.wait().await;                // 只要结果时直接 session.s
 - 审批不是接口而是会话的一个操作：`AgentConfig::approvals` 默认 `ApprovalMode::Deny`（没有人回答，策略询问的调用立即被拒绝）；设为 `ApprovalMode::Wait(时长)` 后，运行发出带审批编号、工具名与参数的 `approval_requested` 事件并等待 `Session::resolve_approval(编号, 决定)`，超时或取消都按拒绝处理。读事件的循环里不要等人回答，否则超时与取消要到下一次读取才生效。
 - 事件只从 `Run` 读出。要观察所有运行的（如追踪导出）实现 `hooks::Hook::on_event`：不等待、不失败的钩子按顺序看到每个事件，被取消的运行也一样。
 - 扩展点都是 trait：`ai::Provider`、`tools::Tool`、`policy::ToolPolicy`、`hooks::Hook`、`extensions::Extension`、`agent::SessionSetup`、`compaction::Summarizer`（可选：自己产出摘要）、`transcript::SessionStorage`（会话存在哪里）及其 `transcript::SessionLog`（一个会话的记录）、`builtin::executor::Executor`；IM 另有 `zx_im::ImChannel` 与 `zx_im::StatusStore`。
-- 附带的实现：`ai::openai::OpenAiCompatible`、`transcript::JsonlStorage`（会话文件）与 `transcript::MemoryStorage`、`builtin::mcp::Server`（一个 `Extension`）、`builtin::executor::ContainerExecutor`、`builtin::redact::RedactSecrets`；追踪导出 `zx_cli::otel::Telemetry` 在命令行的 crate 里（它的 `hook()` 注册为 agent 的钩子）。
-- 会话存储：放进 `AgentConfig::storage`，默认是 `MemoryStorage`。`Agent` 用 `storage.create(&header)` 建新会话，用 `storage.open(id)` 读回会话并成为它的写入者；`storage.read(id)` 是只读快照，宿主交给 `Transcript::snapshot` 来读；`storage.list(&SessionQuery { cwd, labels, limit })` 按工作目录或标签列出，最近活动的在前（`Agent::list_sessions` 即它）。换一种存储（如数据库）只需实现这两个 trait，列出时用 `SessionList::new` 按查询排序与截断。
+- 附带的实现：`ai::openai::OpenAiCompatible`、`transcript::MemoryStorage` 与 `builtin::jsonl::JsonlStorage`（会话文件）、`builtin::mcp::Server`（一个 `Extension`，feature `mcp`）、`builtin::executor::ContainerExecutor`、`builtin::redact::RedactSecrets`；追踪导出 `zx_cli::otel::Telemetry` 在命令行的 crate 里（它的 `hook()` 注册为 agent 的钩子）。
+- 会话存储：放进 `AgentConfig::storage`，默认是 `MemoryStorage`。`Agent` 用 `storage.create(&header)` 建新会话，用 `storage.open(id)` 读回会话并成为它的写入者；`storage.read(id)` 是只读快照，宿主交给 `Transcript::snapshot` 来读；`storage.list(&SessionQuery { cwd, labels, limit })` 按工作目录或标签列出，最近活动的在前（`Agent::list_sessions` 即它）。`storage.headers(&query)` 只读会话头部，按开始时间从新到旧（`Agent::session_headers` 即它；默认实现经 `list` 与 `read`，能只读头部的存储应覆盖它）。换一种存储（如数据库）只需实现这两个 trait，列出时用 `SessionList::new`、读头部时用 `SessionQuery::arrange_headers` 按查询排序与截断。
 - 摘要：默认由内核请求模型，请求可从会话还原。给 `AgentConfig::summarizer` 一个 `compaction::Summarizer` 后由它产出摘要与用量：何时摘要、读哪一段（至多 2 MiB）、写开始与结果记录、校验每条事实引用的记录、超时与取消仍由内核负责；一次摘要计为运行的一次模型请求，它报告的用量计入运行的预算。
 
 ## 有界输入与轻量查询
 
-SDK 默认入队保持无配额语义。宿主要限制待处理输入时，创建共享 `Arc<InputBudget>`，在收件时 `try_reserve`，文本归属信息补齐后用 `InputPermit::attach` 得到 `PendingInput`，或直接用 `try_admit(Input)`。消息数量与 UTF-8 文本字节原子检查；`try_reserve` 满时返回 `None`，`try_admit` / `attach` 拒绝时用 `InputRejected::into_input` 取回原输入。actor、details 和 custom entry 不计入文本预算。
+内核的输入队列不限量，也不计配额。宿主要限制待处理的输入时，自己计量，再把计量凭证随输入放进队列：`PendingInput::held(输入, 凭证)` 交给 `queues().steer` 或 `follow_up`。凭证可以是任何 `Send` 的值，内核不读取它；输入被会话记录、被 `withdraw` 撤回、被不带凭证地取出（`PendingInput::into_input`、`drain_steering`、`drain_follow_up`）或随队列丢弃时，凭证随之丢弃，丢弃发生在队列的锁之外。`Session::take_queued` 与 `InputQueues::take_all` 连同凭证一起取出，宿主把输入转到自己的队列时，凭证继续有效。IM 服务按这种方式限制每个对话待处理消息的数量与文本字节（`crates/zx-im/src/admission.rs`）。
 
-`InputQueues::steer_pending` / `follow_up_pending` 接收这份输入并持有配额，直到记录或移除；`Session::take_pending` 与 `InputQueues::drain_pending` 在转移到宿主队列时保留配额。`take_queued`、普通 drain 和 `PendingInput::into_input` 返回裸输入并归还配额，适用于开始运行或停止保留。直接调用 `steer` / `follow_up` 仍是无配额入队，不会自动使用宿主创建的预算。
-
-只要最近会话 ID 时，用 `Agent::latest_session`（对应存储的 `latest`，自定义存储默认经 `list` 实现）。JSONL 实现按头部过滤、按最后完整记录的时间选择候选；活动时间相同时按创建时间、ID 排序，`limit = 0` 返回空。它不校验内部历史，打开时仍由 `Transcript::load` 完整校验；要完整列表和损坏诊断，用 `list_sessions`。头部/活动时间缓存各至多 1024 条，完整列表缓存至多 128 条；索引可丢弃重建，不写新的会话格式，文件发现仍扫描目录。
+宿主要建自己的会话索引时，用 `Agent::session_headers`：它只读头部、不读记录，打开会话时仍由 `Transcript::load` 完整校验；读不出头部或格式版本不符的会话不在其中，`list_sessions` 会把它们列为读不出。JSONL 存储不缓存：每次 `session_headers` 读取查询范围内每个会话文件的第一行，每次 `list_sessions` 回放匹配的会话。IM 服务在启动时用它建立对话到会话的索引。
 
 ## 复用配置装配
 
@@ -47,7 +45,7 @@ Application（其他 Rust 宿主） ├→ assembly → Agent → Session / Run
 
 | 入口或资源 | 契约 |
 |---|---|
-| `Application::from_config(config, home, overrides, role)` | 配置显式传入；`home` 只用于读取 agent 文件，不发现 config.toml，不读取 `ZX_MODEL`、`ZX_BASE_URL`、`ZX_SECRET_FILES` 覆盖；配置中命名的 API/MCP 凭据仍从环境变量读取 |
+| `Application::from_config(config, home, overrides, role)` | 配置显式传入，先经 `Config::validate` 检查，与读取 config.toml 时的检查相同；`home` 只用于读取 agent 文件，不发现 config.toml，不读取 `ZX_MODEL`、`ZX_BASE_URL`、`ZX_SECRET_FILES` 覆盖；配置中命名的 API/MCP 凭据仍从环境变量读取。没有模型时的错误可向下转型为 `NoModel`，措辞不提命令行参数 |
 | `Application::from_environment(overrides, role)` | 显式选择 CLI 的主目录配置发现，以及 `ZX_BASE_URL`、`ZX_SECRET_FILES`；`ZX_MODEL` 由宿主选择是否放入 `overrides.model` |
 | `build(place, approvals)` | 生成 `ConfiguredAgent`，还不创建会话；MCP 连接由 Application 内的装配资源共享 |
 | `SessionPlace` | 宿主显式选择 memory、file 或 directory；memory 中关闭的会话会被遗忘 |

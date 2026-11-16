@@ -4,13 +4,23 @@
 //! A channel only moves messages. The server owns routing, sessions, the run limit and
 //! approvals, so supporting another platform means implementing the four methods of
 //! [`ImChannel`], in a crate of its own; [`split_text`], [`Seen`], [`Pacer`],
-//! [`rate_limit_wait`], [`Cards`], [`Backoff`] and [`Keepalive`] help with the duties every
-//! platform has. The platforms of this workspace are such crates: `zx-im-slack` and
+//! [`rate_limit_wait`], [`Backoff`] and [`Keepalive`] help with the duties every platform
+//! has. The platforms of this workspace are such crates: `zx-im-slack` and
 //! `zx-im-feishu`.
 //!
 //! A server is one way to bring an agent to people, built on the kernel beside the command
 //! line: the `im` subcommand of `zx-cli` runs one with those platforms.
+//!
+//! - `server`: the server, its configuration and what it reports to the operator
+//! - `router`: takes each platform event and hands it to its conversation's worker
+//! - `worker`: one conversation: its session, its runs and what waits for them
+//! - `admission`: how much input a conversation may have waiting at once
+//! - `outlet`: where a conversation posts, and the session it holds
+//! - `approval`: approval requests of a run, as cards in the conversation
+//! - `status`: the status message of each run, kept so that a restart can replace it
+//! - `platform`: helpers for the duties every platform has
 
+mod admission;
 mod approval;
 mod outlet;
 mod platform;
@@ -31,8 +41,8 @@ use zx_ai as ai;
 use zx_core::{Agent, Session, session, transcript};
 
 pub use platform::{
-    Backoff, CARD_CAPACITY, Cards, Keepalive, MAX_TEXT_CHARS, Pacer, RATE_LIMIT_RETRIES, SEEN_CAPACITY, Seen, pause,
-    rate_limit_wait, split_text,
+    Backoff, Keepalive, MAX_TEXT_CHARS, Pacer, RATE_LIMIT_RETRIES, SEEN_CAPACITY, Seen, pause, rate_limit_wait,
+    split_text,
 };
 pub use server::{ApprovalRecord, Replies, Server, ServerConfig, ServerEvent, ServerSink, SessionKey};
 pub use status::{StatusFiles, StatusStore};
@@ -63,7 +73,8 @@ pub trait ImChannel: Send + Sync {
     fn platform(&self) -> &str;
 
     /// Receive from the platform into `inbound` until `cancel`, reconnecting as needed.
-    /// Returns `Ok` once cancelled, after it has stopped sending, or an error that retrying
+    /// Returns `Ok` soon after `cancel`, whatever it is doing, connecting included, once it
+    /// has stopped sending: the server's stop waits for it. Returns an error that retrying
     /// cannot fix, such as rejected credentials; the server then stops.
     async fn run(&self, inbound: mpsc::Sender<Inbound>, cancel: &CancellationToken) -> Result<(), ImError>;
 
@@ -211,16 +222,19 @@ pub enum Inbound {
 pub enum Post {
     /// Plain text; may contain code blocks.
     Text(String),
-    /// A card with an "allow once" and a "deny" button, whose clicks come back as
-    /// [`Inbound::Decision`] with this `id`.
-    ApprovalRequest {
-        id: ApprovalId,
-        tool: String,
-        /// The command, or the call's arguments, shortened for reading at a glance.
-        summary: String,
-        /// Why the policy asks.
-        reason: String,
-    },
+    /// A card that shows `card` with an "allow once" and a "deny" button, whose clicks come
+    /// back as [`Inbound::Decision`] with this `id`.
+    ApprovalRequest { id: ApprovalId, card: ApprovalCard },
+}
+
+/// What an approval card shows of the request, open and once closed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApprovalCard {
+    pub tool: String,
+    /// The command, or the call's arguments, shortened for reading at a glance.
+    pub summary: String,
+    /// Why the policy asks.
+    pub reason: String,
 }
 
 /// What the server puts in the place of a message it posted ([`ImChannel::update`]).
@@ -228,10 +242,11 @@ pub enum Post {
 pub enum Replacement {
     /// Plain text; may contain code blocks. The answer of a run, in the place of its status.
     Text(String),
-    /// How an approval ended, in the place of its card; `user` is who clicked, `None` when
-    /// nobody decided (timeout, cancellation, failure).
+    /// How an approval ended, in the place of its card, which shows `card` again; `user` is
+    /// who clicked, `None` when nobody decided (timeout, cancellation, failure).
     ApprovalResolved {
         id: ApprovalId,
+        card: ApprovalCard,
         user: Option<UserId>,
         result: ApprovalResult,
     },

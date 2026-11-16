@@ -3,6 +3,7 @@
 //! loop records through it: recording goes to the session as it would without a run, and
 //! preparing the context may summarize it (pi: AgentSession writes on `message_end`).
 
+use super::accounting::check_priced;
 use super::{Ending, EventTarget, FirstInput, Halt, LoopConfig, RunAccounting, Start};
 use crate::ai::{Message, StopReason};
 use crate::compaction::{self, Compacted, Compactor, End, TokenTrigger, Trigger};
@@ -60,6 +61,8 @@ pub(super) struct RunHost<'a> {
     pub(super) config: &'a LoopConfig,
     pub(super) compaction: &'a compaction::Config,
     pub(super) pause: &'a mut CompactionPause,
+    /// The run's cost budget, which every summary request must be priced for.
+    pub(super) cost_budget: Option<f64>,
 }
 
 impl RunHost<'_> {
@@ -72,6 +75,7 @@ impl RunHost<'_> {
             config: self.config,
             compaction: self.compaction,
             pause: &mut *self.pause,
+            cost_budget: self.cost_budget,
         }
     }
 
@@ -98,8 +102,16 @@ impl RunHost<'_> {
 
     /// Compact with `trigger`, summarizing the old prefix; the pause follows how it ends. When
     /// it ends `Completed`, the session's projection is the new context. `attempt` is the
-    /// attempt of the run that compacts, for the events of the summary; 1 outside a run.
+    /// attempt of the run that compacts, for the events of the summary; 1 outside a run. A
+    /// summary that the run's model would make, without the prices its cost budget needs,
+    /// fails before anything is recorded or requested.
     pub(super) async fn compact(&mut self, trigger: Trigger, attempt: u32) -> Compacted {
+        // The kernel asks the model only when the host has no summarizer.
+        if self.config.summarizer.is_none()
+            && let Err(error) = check_priced(&self.config.models, &self.config.model, self.cost_budget)
+        {
+            return Compacted::without_request(0, End::Failed(error));
+        }
         let compactor = Compactor {
             session: &mut *self.session,
             provider: self.config.provider.as_ref(),
@@ -192,7 +204,7 @@ impl RunHost<'_> {
                 "{paused}; compact manually to retry, start a new session, or disable automatic compaction"
             )));
         }
-        let compacted = self.compact_for_run(accounting).await.map_err(Halt::Failed)?;
+        let compacted = self.compact_for_run(accounting).await;
         match compacted.end {
             End::Completed { .. } => Ok(compacted.requests),
             End::Unrecorded(error) => Err(Halt::Unrecorded(error)),
@@ -205,14 +217,11 @@ impl RunHost<'_> {
         }
     }
 
-    /// Automatic summaries, including overflow recovery, obey the same model price check
-    /// and contribute to the same run accounting.
-    pub(super) async fn compact_for_run(&mut self, accounting: &mut RunAccounting) -> Result<Compacted, String> {
-        if self.config.summarizer.is_none() {
-            accounting.check_model(&self.config.models, &self.config.model)?;
-        }
+    /// Compact on the run's initiative, before a request or to recover from a context
+    /// overflow, counting the summary's requests and usage into `accounting`.
+    pub(super) async fn compact_for_run(&mut self, accounting: &mut RunAccounting) -> Compacted {
         let compacted = self.compact(Trigger::Automatic, accounting.attempts).await;
         accounting.count_requests(compacted.requests, &compacted.usage);
-        Ok(compacted)
+        compacted
     }
 }

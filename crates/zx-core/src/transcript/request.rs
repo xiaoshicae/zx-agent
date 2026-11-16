@@ -85,16 +85,8 @@ impl Transcript {
             cache_key: request.cache_key.clone(),
             provider_options,
         };
-        let existing = self
-            .leaf
-            .as_deref()
-            .and_then(|id| self.index.get(id))
-            .and_then(|index| self.tree.request_config(*index))
-            .and_then(|index| match &self.entries[index] {
-                Entry::RequestConfig(entry) => Some(entry),
-                _ => None,
-            });
-        let unchanged = existing
+        let unchanged = self
+            .request_config_at(self.leaf.as_deref())
             .filter(|entry| entry.config == config)
             .map(|entry| entry.id.clone());
         let config_id = match unchanged {
@@ -137,6 +129,16 @@ impl Transcript {
         Ok((config, request))
     }
 
+    /// The request configuration in force at the entry `id`: the nearest one on its branch,
+    /// which is the one every request recorded there names.
+    fn request_config_at(&self, id: Option<&str>) -> Option<&RequestConfigEntry> {
+        let position = self.request_configs[*self.index.get(id?)?]?;
+        match &self.entries[position] {
+            Entry::RequestConfig(entry) => Some(entry),
+            _ => None,
+        }
+    }
+
     fn request_config(&self, id: &str) -> Result<&RequestConfig> {
         match self.get(id) {
             Some(Entry::RequestConfig(entry)) => Ok(&entry.config),
@@ -153,19 +155,17 @@ impl Transcript {
         Ok(())
     }
 
-    /// The rules a request checkpoint follows: its configuration is on its branch, and so is
-    /// the compaction whose summary it requests, if it requests one, which the kernel's own
-    /// request makes.
+    /// The rules a request checkpoint follows: its configuration is the one in force on its
+    /// branch, as [`Transcript::record_request`] records it, and the compaction whose summary
+    /// it requests, if it requests one, which the kernel's own request makes, is on its branch.
     pub(super) fn validate_request_start(&self, started: &RequestStartedEntry) -> Result<()> {
         let parent = started.parent_id.as_deref();
         ensure!(
-            parent
-                .and_then(|id| self.index.get(id))
-                .zip(self.index.get(&started.config_id))
-                .is_some_and(|(leaf, config)| self.tree.contains(*config, *leaf)),
-            "request config is not on this branch"
+            self.request_config_at(parent)
+                .is_some_and(|config| config.id == started.config_id),
+            "request config {} is not the one in force on this branch",
+            started.config_id
         );
-        self.request_config(&started.config_id)?;
         // Check only what can fail: a projection can always be built, and building one for
         // every request record would clone the branch's messages once per record.
         if let RequestSource::Summary { compaction_id, .. } = &started.source {

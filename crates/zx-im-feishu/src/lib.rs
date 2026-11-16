@@ -26,7 +26,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use zx_ai::sync::lock;
 use zx_im::{
-    Backoff, CARD_CAPACITY, CardLabels, Cards, Destination, ErrorReport, ImChannel, ImError, Inbound, MAX_TEXT_CHARS,
+    ApprovalCard, Backoff, CardLabels, Destination, ErrorReport, ImChannel, ImError, Inbound, MAX_TEXT_CHARS,
     MessageId, MessageRef, Pacer, Post, Replacement, SEEN_CAPACITY, Seen, pause, split_text,
 };
 
@@ -93,7 +93,14 @@ pub struct FeishuChannel {
     posts: Pacer,
     /// Direct chats seen so far: replies there do not open a topic.
     direct: Mutex<HashSet<String>>,
-    cards: Cards,
+}
+
+/// What a card shows of the request `card`, open and once closed.
+fn shown(labels: &CardLabels, card: &ApprovalCard) -> String {
+    format!(
+        "**{}**: `{}`\n```\n{}\n```\n{}: {}",
+        labels.title, card.tool, card.summary, labels.reason, card.reason
+    )
 }
 
 impl FeishuChannel {
@@ -105,7 +112,6 @@ impl FeishuChannel {
             .map_err(|error| ImError::Config(format!("cannot build the HTTP client: {error}")))?;
         Ok(Self {
             posts: Pacer::new(config.post_interval),
-            cards: Cards::new(CARD_CAPACITY),
             config,
             http,
             token: tokio::sync::Mutex::new(None),
@@ -164,10 +170,12 @@ impl ImChannel for FeishuChannel {
         // Used while the server has set no reconnect interval.
         let mut backoff = Backoff::default();
         loop {
-            if cancel.is_cancelled() {
-                return Ok(());
-            }
-            let wait = match self.connect(&mut config).await? {
+            let connected = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Ok(()),
+                connected = self.connect(&mut config) => connected?,
+            };
+            let wait = match connected {
                 Connection::Open(link) => {
                     backoff.reset();
                     match self.receive(*link, &mut config, &inbound, &mut seen, cancel).await {
@@ -199,17 +207,9 @@ impl ImChannel for FeishuChannel {
                 }
                 Ok(posted)
             }
-            Post::ApprovalRequest {
-                id,
-                tool,
-                summary,
-                reason,
-            } => {
+            Post::ApprovalRequest { id, card: asked } => {
                 let labels = &self.config.labels;
-                let request = format!(
-                    "**{}**: `{tool}`\n```\n{summary}\n```\n{}: {reason}",
-                    labels.title, labels.reason
-                );
+                let request = shown(labels, asked);
                 // The click carries everything needed to find the conversation.
                 let value = |choice: &str| {
                     json!({
@@ -224,9 +224,7 @@ impl ImChannel for FeishuChannel {
                     button(&labels.allow_once, "primary", &value("allow_once")),
                     button(&labels.deny, "danger", &value("deny")),
                 ]);
-                let posted = self.post(to, "interactive", card).await?;
-                self.cards.remember(&posted.id, request);
-                Ok(posted)
+                self.post(to, "interactive", card).await
             }
         }
     }
@@ -252,12 +250,17 @@ impl ImChannel for FeishuChannel {
                 }
                 Ok(())
             }
-            Replacement::ApprovalResolved { user, result, .. } => {
-                let mut elements = Vec::new();
-                if let Some(request) = self.cards.forget(&posted.id) {
-                    elements.push(markdown(&request));
-                }
-                elements.push(markdown(&resolution(&self.config.labels, user.as_ref(), *result)));
+            Replacement::ApprovalResolved {
+                card: asked,
+                user,
+                result,
+                ..
+            } => {
+                let labels = &self.config.labels;
+                let elements = vec![
+                    markdown(&shown(labels, asked)),
+                    markdown(&resolution(labels, user.as_ref(), *result)),
+                ];
                 let path = format!("/open-apis/im/v1/messages/{}", posted.id.0);
                 self.api(Method::PATCH, &path, &json!({"content": card(&elements)}))
                     .await

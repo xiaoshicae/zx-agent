@@ -85,7 +85,7 @@ impl Chat {
         let approvals = Approvals::Person("shell commands require interactive approval");
         let agent = ModeAgent::build(&self.shared, model, place, approvals)?;
         let session = match resume {
-            Some(id) => agent.resume(id).await?,
+            Some(id) => crate::process::resume(&agent, id).await?,
             None => agent.create(None).await?,
         };
         let about = About::of(&agent, &session, place.path_of(session.id()).await?)?;
@@ -138,7 +138,7 @@ async fn converse(args: ChatArgs, traces: Option<TraceHook>) -> Result<u8> {
         no_session,
         resume,
     } = args;
-    let shared = assembly::Shared::connect(cli::overrides(base, &budget), Builtin::Assistant)
+    let shared = crate::process::connect(cli::overrides(base, &budget), Builtin::Assistant)
         .await?
         .with_traces(traces);
     let mode = if std::io::stdin().is_terminal() {

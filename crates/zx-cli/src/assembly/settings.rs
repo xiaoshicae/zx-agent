@@ -23,6 +23,22 @@ const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 120;
 /// notice a card in an IM thread, short enough that a forgotten one does not hold a task.
 const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 600;
 
+/// No model was given, and the configuration names none: the error of a start without a
+/// model, which a host recognizes by downcasting. `place` is where the configuration was
+/// read; a command line names its own ways to give a model instead.
+#[derive(Debug)]
+pub struct NoModel {
+    pub place: String,
+}
+
+impl std::fmt::Display for NoModel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "no model: none was given, and {} sets no model", self.place)
+    }
+}
+
+impl std::error::Error for NoModel {}
+
 /// config.toml with the command line over it, the defaults filled in.
 pub(crate) struct Settings {
     pub(crate) model: String,
@@ -49,23 +65,22 @@ impl Settings {
         Self::over(model, env_value(BASE_URL_ENV), config, home)
     }
 
-    /// `model` and `base_url` over `config`, read from `home`.
+    /// `model` and `base_url` over `config`, read from `home`. Every way in comes here, so
+    /// a configuration that was built rather than read is checked here as well.
     pub(crate) fn over(
         model: Option<&str>,
         base_url: Option<String>,
         mut config: Config,
         home: Option<PathBuf>,
     ) -> Result<Self> {
-        let model = model
-            .map(str::to_string)
-            .or_else(|| config.model.clone())
-            .with_context(|| {
-                let place = config
-                    .path
-                    .as_ref()
-                    .map_or_else(|| "config.toml".to_string(), |path| path.display().to_string());
-                format!("no model: pass --model, set ZX_MODEL, or set model in {place}")
-            })?;
+        config.validate().context("invalid configuration")?;
+        let Some(model) = model.map(str::to_string).or_else(|| config.model.clone()) else {
+            let place = config
+                .path
+                .as_ref()
+                .map_or_else(|| "config.toml".to_string(), |path| path.display().to_string());
+            return Err(NoModel { place }.into());
+        };
         anyhow::ensure!(!model.trim().is_empty(), "the model is empty");
         if let Some(url) = base_url {
             config.provider.openai.base_url = url;
@@ -154,12 +169,12 @@ mod tests {
     }
 
     #[test]
-    fn without_a_model_anywhere_the_error_names_every_place_to_set_one() {
+    fn without_a_model_anywhere_the_error_names_the_configuration() {
         let config = Config { model: None, ..file() };
-        let error = format!("{:#}", Settings::over(None, None, config, None).err().unwrap());
+        let error = Settings::over(None, None, config, None).err().unwrap();
         assert_eq!(
-            error,
-            "no model: pass --model, set ZX_MODEL, or set model in /home/me/.zx-agent/config.toml"
+            error.downcast_ref::<NoModel>().map(|no_model| no_model.place.as_str()),
+            Some("/home/me/.zx-agent/config.toml")
         );
     }
 }

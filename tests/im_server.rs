@@ -5,7 +5,7 @@ mod common;
 
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -29,8 +29,8 @@ use zx_agent::transcript::{
     Transcript,
 };
 use zx_im::{
-    Addressee, ApprovalId, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId,
-    MessageRef, Post, Replacement, Replies, Said, Server, ServerConfig, ServerEvent, ServerSink, SessionKey,
+    Addressee, ApprovalCard, ApprovalId, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError, Inbound,
+    MessageId, MessageRef, Post, Replacement, Replies, Said, Server, ServerConfig, ServerEvent, ServerSink, SessionKey,
     StatusStore, ThreadId, UserId,
 };
 
@@ -89,6 +89,8 @@ struct FakeChannel {
     updates: Updates,
     /// What every thread holds before the bot is mentioned there.
     history: Vec<Said>,
+    /// Holds each reading of a thread's history, when there is one.
+    history_gate: Option<Arc<Gate>>,
     /// Users' names; the others have none.
     names: HashMap<String, String>,
 }
@@ -96,6 +98,9 @@ struct FakeChannel {
 #[async_trait]
 impl ImChannel for FakeChannel {
     async fn thread_history(&self, _at: &Destination, _limit: usize) -> Result<Vec<Said>, ImError> {
+        if let Some(gate) = &self.history_gate {
+            gate.pass().await;
+        }
         Ok(self.history.clone())
     }
 
@@ -228,23 +233,57 @@ impl StatusStore for Statuses {
     }
 }
 
-/// What the tests know of the sessions the server opens: the scripted model, the `echo`
-/// tool, the storage that keeps them in memory, how often a session was set up, and how
-/// often the server listed sessions. It is the agent's session setup, which refuses every
-/// session when it has a reason to, and its storage, which counts the listings.
-struct ListGate {
+/// Holds what reaches it until it is released, once armed: the setup of the sessions of the
+/// thread `slow-thread`, or the reading of a thread's history.
+struct Gate {
+    armed: AtomicBool,
     entered: tokio::sync::Notify,
     release: CancellationToken,
 }
 
+impl Gate {
+    fn new() -> Arc<Self> {
+        let gate = Self::disarmed();
+        gate.arm();
+        gate
+    }
+
+    /// A gate that lets everything pass until it is armed.
+    fn disarmed() -> Arc<Self> {
+        Arc::new(Self {
+            armed: AtomicBool::new(false),
+            entered: tokio::sync::Notify::new(),
+            release: CancellationToken::new(),
+        })
+    }
+
+    fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+
+    /// Wait here until released, if armed.
+    async fn pass(&self) {
+        if self.armed.load(Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.cancelled().await;
+        }
+    }
+}
+
+/// What the tests know of the sessions the server opens: the scripted model, the `echo`
+/// tool, the storage that keeps them in memory, how often a session was set up, and how
+/// often the server read the storage's headers or listed sessions. It is the agent's session
+/// setup, which refuses every session when it has a reason to and can be held at a gate, and
+/// its storage, which counts what it is asked.
 struct Sessions {
     provider: Arc<FauxProvider>,
     echo: Arc<EchoTool>,
     storage: Arc<MemoryStorage>,
     opened: AtomicUsize,
+    indexed: AtomicUsize,
     listed: AtomicUsize,
     fail: Option<String>,
-    list_gate: Option<Arc<ListGate>>,
+    setup_gate: Option<Arc<Gate>>,
 }
 
 impl Sessions {
@@ -287,8 +326,13 @@ impl Sessions {
 
 #[async_trait]
 impl SessionSetup for Sessions {
-    async fn setup(&self, _header: &SessionHeader) -> anyhow::Result<SessionParts> {
+    async fn setup(&self, header: &SessionHeader) -> anyhow::Result<SessionParts> {
         self.opened.fetch_add(1, Ordering::SeqCst);
+        if header.labels.values().any(|value| value == "slow-thread")
+            && let Some(gate) = &self.setup_gate
+        {
+            gate.pass().await;
+        }
         match &self.fail {
             Some(reason) => Err(anyhow::anyhow!("{reason}")),
             None => Ok(SessionParts::default()),
@@ -310,14 +354,13 @@ impl SessionStorage for Sessions {
         self.storage.read(id).await
     }
 
+    async fn headers(&self, query: &SessionQuery) -> anyhow::Result<Vec<SessionHeader>> {
+        self.indexed.fetch_add(1, Ordering::SeqCst);
+        self.storage.headers(query).await
+    }
+
     async fn list(&self, query: &SessionQuery) -> anyhow::Result<SessionList> {
         self.listed.fetch_add(1, Ordering::SeqCst);
-        if query.labels.values().any(|value| value == "slow-thread")
-            && let Some(gate) = &self.list_gate
-        {
-            gate.entered.notify_one();
-            gate.release.cancelled().await;
-        }
         self.storage.list(query).await
     }
 }
@@ -336,7 +379,11 @@ struct Setup {
     config: ServerConfig,
     approval_timeout: Duration,
     fail_open: Option<String>,
-    list_gate: Option<Arc<ListGate>>,
+    setup_gate: Option<Arc<Gate>>,
+    history_gate: Option<Arc<Gate>>,
+    /// Where the sessions are kept: a new storage without one, the one an earlier server
+    /// left with one.
+    storage: Option<Arc<MemoryStorage>>,
     fail_channel: Option<String>,
     /// Events the channel passes on as the server stops.
     late: Vec<Inbound>,
@@ -362,7 +409,9 @@ impl Default for Setup {
             },
             approval_timeout: WAIT,
             fail_open: None,
-            list_gate: None,
+            setup_gate: None,
+            history_gate: None,
+            storage: None,
             fail_channel: None,
             late: Vec::new(),
             statuses: None,
@@ -390,11 +439,12 @@ fn start(setup: Setup) -> Harness {
     let sessions = Arc::new(Sessions {
         provider: Arc::new(FauxProvider::new(setup.steps)),
         echo: Arc::new(EchoTool::new("echo")),
-        storage: Arc::default(),
+        storage: setup.storage.unwrap_or_default(),
         opened: AtomicUsize::new(0),
+        indexed: AtomicUsize::new(0),
         listed: AtomicUsize::new(0),
         fail: setup.fail_open,
-        list_gate: setup.list_gate,
+        setup_gate: setup.setup_gate,
     });
     let agent = sessions.agent(setup.approval_timeout);
     let (inject, events_in) = mpsc::channel(16);
@@ -415,6 +465,7 @@ fn start(setup: Setup) -> Harness {
         fail: setup.fail_channel,
         updates: setup.updates,
         history: setup.history,
+        history_gate: setup.history_gate,
         names: setup.names,
     });
     let (events_to, events) = mpsc::unbounded_channel();
@@ -593,20 +644,11 @@ impl Harness {
         match self.next().await {
             Sent::Post {
                 to: actual,
-                message:
-                    Post::ApprovalRequest {
-                        id,
-                        tool,
-                        summary,
-                        reason,
-                    },
+                message: Post::ApprovalRequest { id, card },
                 posted,
             } => {
                 assert_eq!(&actual, to);
-                assert_eq!(
-                    (tool.as_str(), summary.as_str(), reason.as_str()),
-                    ("echo", r#"{"text":"done"}"#, "echo needs approval")
-                );
+                assert_eq!(card, echo_card());
                 (id, posted)
             }
             other => panic!("expected an approval card, got {other:?}"),
@@ -667,6 +709,15 @@ fn unanswered(root: &str, count: usize) -> ServerEvent {
     ServerEvent::Failed {
         key: Some(key(root)),
         error: format!("{count} message(s) were not answered: the server is stopping"),
+    }
+}
+
+/// What the card of an `echo` call shows.
+fn echo_card() -> ApprovalCard {
+    ApprovalCard {
+        tool: "echo".into(),
+        summary: r#"{"text":"done"}"#.into(),
+        reason: "echo needs approval".into(),
     }
 }
 
@@ -753,6 +804,7 @@ async fn an_approver_allows_a_call_and_the_card_shows_the_decision() {
     h.updated(
         &card,
         Replacement::ApprovalResolved {
+            card: echo_card(),
             id: id.clone(),
             user: Some(UserId(APPROVER.into())),
             result: ApprovalResult::AllowOnce,
@@ -805,6 +857,7 @@ async fn a_click_by_someone_who_is_not_an_approver_decides_nothing() {
     h.updated(
         &card,
         Replacement::ApprovalResolved {
+            card: echo_card(),
             id,
             user: Some(UserId(APPROVER.into())),
             result: ApprovalResult::Denied,
@@ -829,6 +882,7 @@ async fn an_unanswered_approval_times_out_and_its_card_says_so() {
     h.updated(
         &card,
         Replacement::ApprovalResolved {
+            card: echo_card(),
             id,
             user: None,
             result: ApprovalResult::TimedOut,
@@ -853,6 +907,7 @@ async fn cancel_in_the_thread_stops_the_run_and_closes_its_card() {
     h.updated(
         &card,
         Replacement::ApprovalResolved {
+            card: echo_card(),
             id,
             user: None,
             result: ApprovalResult::Cancelled,
@@ -896,6 +951,7 @@ async fn the_run_limit_makes_other_threads_wait_their_turn() {
     h.updated(
         &card,
         Replacement::ApprovalResolved {
+            card: echo_card(),
             id,
             user: Some(UserId(APPROVER.into())),
             result: ApprovalResult::AllowOnce,
@@ -924,6 +980,7 @@ async fn a_message_during_a_run_is_steered_into_it() {
     h.updated(
         &card,
         Replacement::ApprovalResolved {
+            card: echo_card(),
             id,
             user: Some(UserId(APPROVER.into())),
             result: ApprovalResult::AllowOnce,
@@ -1030,6 +1087,7 @@ async fn stopping_tells_a_thread_about_steering_its_run_did_not_take_in() {
     h.posted(&thread("m1"), text(&replies.not_approver)).await;
     let (sent, events) = h.stop_and_take().await;
     let closed = Replacement::ApprovalResolved {
+        card: echo_card(),
         id,
         user: None,
         result: ApprovalResult::Cancelled,
@@ -1297,6 +1355,7 @@ async fn two_channels_with_one_name_are_a_configuration_error() {
             fail: None,
             updates: Updates::default(),
             history: Vec::new(),
+            history_gate: None,
             names: HashMap::new(),
         })
     };
@@ -1448,6 +1507,7 @@ async fn new_during_a_run_cancels_it_and_then_starts_over() {
     let (id, card) = h.card(&direct()).await;
     h.say_directly("d2", "/new").await;
     let closed = Replacement::ApprovalResolved {
+        card: echo_card(),
         id,
         user: None,
         result: ApprovalResult::Cancelled,
@@ -1478,6 +1538,7 @@ async fn a_message_that_arrives_while_new_cancels_a_run_is_answered_in_the_new_s
     // The cancelled run closes its card, and the platform holds that update back: the
     // conversation is busy with it, its run not yet seen to have ended.
     let closed = Replacement::ApprovalResolved {
+        card: echo_card(),
         id,
         user: None,
         result: ApprovalResult::Cancelled,
@@ -1540,6 +1601,7 @@ async fn a_session_closed_during_its_run_is_let_go_and_opened_again_for_the_next
     let session = h.sessions.of(&direct_key()).await.unwrap().remove(0);
     assert!(h.agent.close_session(&session));
     let closed = Replacement::ApprovalResolved {
+        card: echo_card(),
         id,
         user: None,
         result: ApprovalResult::Cancelled,
@@ -1557,7 +1619,7 @@ async fn a_session_closed_during_its_run_is_let_go_and_opened_again_for_the_next
 }
 
 #[tokio::test]
-async fn the_storage_is_asked_once_about_a_thread_the_bot_never_joined() {
+async fn talk_in_a_thread_the_bot_never_joined_reaches_neither_a_worker_nor_the_storage() {
     let mut h = start(Setup {
         steps: vec![FauxStep::text("hi")],
         ..Setup::default()
@@ -1571,8 +1633,42 @@ async fn the_storage_is_asked_once_about_a_thread_the_bot_never_joined() {
     let status = h.posted(&direct(), text(&h.replies.working.clone())).await;
     h.updated(&status, text("hi")).await;
 
-    // Once for the thread, and once as the direct chat's conversation opens its session.
-    assert_eq!(h.sessions.listed.load(Ordering::SeqCst), 2);
+    assert_eq!(h.sessions.indexed.load(Ordering::SeqCst), 1, "read once, at the start");
+    assert_eq!(h.sessions.listed.load(Ordering::SeqCst), 0);
+    assert_eq!(h.sessions.opened.load(Ordering::SeqCst), 1, "the direct chat's session");
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_conversation_of_an_earlier_process_is_followed_without_a_mention() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("first")],
+        ..Setup::default()
+    });
+    h.say_as(ASKER, "m2", "m1", Addressee::Bot, "first").await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    h.updated(&status, text("first")).await;
+    let storage = Arc::clone(&h.sessions.storage);
+    h.stop().await.unwrap();
+
+    // A new server over the same storage, as after a restart.
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("second")],
+        storage: Some(storage),
+        ..Setup::default()
+    });
+    h.say_as(OTHER, "m3", "m1", Addressee::Nobody, "said while the bot was away")
+        .await;
+    h.say_as(ASKER, "m4", "m1", Addressee::Bot, "again").await;
+    let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    h.updated(&status, text("second")).await;
+    let request = &h.requests()[0];
+    assert!(
+        request
+            .iter()
+            .any(|message| message.contains("said while the bot was away")),
+        "{request:?}"
+    );
     h.stop().await.unwrap();
 }
 
@@ -1626,6 +1722,7 @@ async fn what_was_asked_during_a_run_whose_session_closed_is_answered_in_the_ses
     let session = h.sessions.of(&direct_key()).await.unwrap().remove(0);
     assert!(h.agent.close_session(&session));
     let closed = Replacement::ApprovalResolved {
+        card: echo_card(),
         id,
         user: None,
         result: ApprovalResult::Cancelled,
@@ -1654,6 +1751,7 @@ async fn new_starts_its_session_also_when_the_one_it_leaves_was_closed_meanwhile
     let (id, card) = h.card(&direct()).await;
     h.say_directly("d2", "/new").await;
     let closed = Replacement::ApprovalResolved {
+        card: echo_card(),
         id,
         user: None,
         result: ApprovalResult::Cancelled,
@@ -1823,25 +1921,154 @@ async fn talk_in_a_thread_after_its_session_was_released_is_still_recorded() {
 }
 
 #[tokio::test]
-async fn a_slow_thread_lookup_does_not_block_another_conversations_messages() {
-    let gate = Arc::new(ListGate {
-        entered: tokio::sync::Notify::new(),
-        release: CancellationToken::new(),
-    });
+async fn a_slow_session_setup_does_not_block_another_conversations_messages() {
+    let gate = Gate::new();
     let mut h = start(Setup {
         steps: vec![FauxStep::text("hi")],
-        list_gate: Some(gate.clone()),
+        setup_gate: Some(gate.clone()),
         ..Setup::default()
     });
-    h.say_as(OTHER, "m2", "slow-thread", Addressee::Nobody, "among people")
-        .await;
-    gate.entered.notified().await;
+    h.say_as(ASKER, "m2", "slow-thread", Addressee::Bot, "please").await;
+    tokio::time::timeout(WAIT, gate.entered.notified()).await.unwrap();
     h.say_directly("d1", "hello").await;
-    // The direct chat responds while the storage lookup is still held. Only WAIT, the
+    // The direct chat is answered while the thread's setup is still held. Only WAIT, the
     // harness's failure bound, limits this wait; no scheduler-speed assumption is needed.
     let status = h.posted(&direct(), text(&h.replies.working.clone())).await;
-    gate.release.cancel();
     h.updated(&status, text("hi")).await;
+    gate.release.cancel();
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancel_drops_what_was_steered_into_the_run_it_cancels() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::Hang],
+        ..Setup::default()
+    });
+    let replies = h.replies.clone();
+    let working: Post = text(&replies.working);
+    h.say_directly("d1", "run").await;
+    let status = h.posted(&direct(), working.clone()).await;
+    h.say_directly("d2", "also this").await;
+    h.acknowledged(&direct(), "d2").await;
+    h.say_directly("d3", "/cancel").await;
+    h.updated(&status, text(&replies.cancelled)).await;
+
+    let (sent, _) = h.stop_and_take().await;
+
+    assert!(
+        !sent
+            .iter()
+            .any(|sent| matches!(sent, Sent::Post { message, .. } if *message == working)),
+        "no run for the steering the cancelled run did not take in: {sent:?}"
+    );
+}
+
+#[tokio::test]
+async fn input_left_by_a_run_waits_behind_a_conversation_that_queued_first() {
+    let mut h = start(Setup {
+        steps: vec![echo_call(), FauxStep::text("b done"), FauxStep::text("a done")],
+        config: ServerConfig {
+            max_running: NonZeroUsize::MIN,
+            ..Setup::default().config
+        },
+        ..Setup::default()
+    });
+    let replies = h.replies.clone();
+    h.say_directly("d1", "run echo").await;
+    h.posted(&direct(), text(&replies.working)).await;
+    // The run waits for an approval, holding the only slot.
+    h.card(&direct()).await;
+    h.say("b1", None, "the other thread").await;
+    h.posted(&thread("b1"), text(&replies.queued)).await;
+    h.say_directly("d2", "more").await;
+    h.acknowledged(&direct(), "d2").await;
+    // Closing the session ends the run and leaves "more" to answer in the session opened
+    // again.
+    let session = h.sessions.of(&direct_key()).await.unwrap().remove(0);
+    assert!(h.agent.close_session(&session));
+    let done: Replacement = text("a done");
+    while !matches!(h.next().await, Sent::Update { message, .. } if message == done) {}
+
+    let requests = h.requests();
+    assert!(
+        requests[1].iter().any(|message| message.contains("the other thread")),
+        "the thread that queued first runs first: {requests:?}"
+    );
+    assert!(
+        requests[2].iter().any(|message| message.contains("more")),
+        "{requests:?}"
+    );
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_first_session_is_made_only_once_its_thread_is_read() {
+    let gate = Gate::new();
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("hi")],
+        history_gate: Some(gate.clone()),
+        ..Setup::default()
+    });
+    h.say_as(ASKER, "m2", "m1", Addressee::Bot, "please").await;
+    tokio::time::timeout(WAIT, gate.entered.notified()).await.unwrap();
+    assert_eq!(
+        h.sessions.opened.load(Ordering::SeqCst),
+        0,
+        "a session that starts before its thread is read could be left without it"
+    );
+    gate.release.cancel();
+    let status = h.posted(&thread("m1"), text(&h.replies.working.clone())).await;
+    h.updated(&status, text("hi")).await;
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn talk_after_a_release_waits_for_a_run_slot_to_open_the_session() {
+    let gate = Gate::disarmed();
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("first"), FauxStep::Hang],
+        config: ServerConfig {
+            max_running: NonZeroUsize::MIN,
+            idle: Duration::from_millis(20),
+            ..Setup::default().config
+        },
+        setup_gate: Some(gate.clone()),
+        ..Setup::default()
+    });
+    let replies = h.replies.clone();
+    let released = ServerEvent::Released {
+        key: key("slow-thread"),
+    };
+    // The bot takes part in the thread, whose session is then released.
+    h.say_as(ASKER, "m2", "slow-thread", Addressee::Bot, "first").await;
+    let status = h.posted(&thread("slow-thread"), text(&replies.working)).await;
+    h.updated(&status, text("first")).await;
+    while h.event().await != released {}
+    gate.arm();
+    // The direct chat's run holds the only slot.
+    h.say_directly("d1", "run").await;
+    let running = h.posted(&direct(), text(&replies.working)).await;
+
+    // Talk in the thread waits for the slot instead of setting up the session at once, so
+    // the thread's worker still answers a command meanwhile.
+    h.say_as(OTHER, "m3", "slow-thread", Addressee::Nobody, "said meanwhile")
+        .await;
+    h.say_as(ASKER, "m4", "slow-thread", Addressee::Bot, "/cancel").await;
+    h.posted(&thread("slow-thread"), text(&replies.nothing_to_cancel)).await;
+
+    // Once the slot is free, the session is set up and what was said is recorded.
+    h.say_directly("d2", "/cancel").await;
+    h.updated(&running, text(&replies.cancelled)).await;
+    tokio::time::timeout(WAIT, gate.entered.notified()).await.unwrap();
+    gate.release.cancel();
+    while h.event().await != released {}
+    let id = h.sessions.of(&key("slow-thread")).await.unwrap().remove(0);
+    let records = h.sessions.storage.read(&id).await.unwrap().records;
+    assert!(
+        records.iter().any(|record| record.contains("said meanwhile")),
+        "{records:?}"
+    );
     h.stop().await.unwrap();
 }
 
@@ -1911,28 +2138,39 @@ async fn a_waiting_conversation_bounds_its_messages_and_still_accepts_cancel() {
 }
 
 #[tokio::test]
-async fn the_inbox_and_a_blocked_worker_share_one_message_budget() {
-    let gate = Arc::new(ListGate {
-        entered: tokio::sync::Notify::new(),
-        release: CancellationToken::new(),
-    });
+async fn talk_refused_for_capacity_gets_no_reply_and_a_request_does() {
+    let gate = Gate::new();
     let mut h = start(Setup {
         config: ServerConfig {
             max_pending_messages: NonZeroUsize::new(1).unwrap(),
             ..Setup::default().config
         },
-        list_gate: Some(Arc::clone(&gate)),
+        setup_gate: Some(gate.clone()),
         ..Setup::default()
     });
-    h.say_as(OTHER, "m1", "slow-thread", Addressee::Nobody, "first").await;
-    // The first message still owns its reservation during membership lookup.
+    let overloaded: Post = text(&h.replies.overloaded);
+    h.say_as(ASKER, "m1", "slow-thread", Addressee::Bot, "first").await;
+    // The first message keeps its share of the budget while its session is set up.
     tokio::time::timeout(WAIT, gate.entered.notified()).await.unwrap();
-    h.say_as(OTHER, "m2", "slow-thread", Addressee::Nobody, "second").await;
-    h.posted(&thread("slow-thread"), text(&h.replies.overloaded.clone()))
+    h.say_as(OTHER, "m2", "slow-thread", Addressee::Nobody, "among people")
         .await;
-    assert_eq!(h.sessions.opened.load(Ordering::SeqCst), 0);
+    h.say_as(ASKER, "m3", "slow-thread", Addressee::Bot, "second").await;
+    // The first reply is the one to the request: the talk before it got none.
+    h.posted(&thread("slow-thread"), overloaded.clone()).await;
     gate.release.cancel();
-    h.stop().await.unwrap();
+    let (sent, events) = h.stop_and_take().await;
+
+    assert!(
+        !sent
+            .iter()
+            .any(|sent| matches!(sent, Sent::Post { message, .. } if *message == overloaded)),
+        "{sent:?}"
+    );
+    let refused = events
+        .iter()
+        .filter(|event| matches!(event, ServerEvent::Failed { error, .. } if error.contains("capacity exceeded")))
+        .count();
+    assert_eq!(refused, 2, "the operator hears of both: {events:?}");
 }
 
 #[tokio::test]

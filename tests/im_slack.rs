@@ -9,11 +9,12 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use common::fake_slack::{Answer, FakeSlack};
+use common::http::silent_listener;
 use common::im::run_channel;
 use zx_agent::events::ApprovalResult;
 use zx_im::{
-    Addressee, ApprovalId, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId,
-    MessageRef, Post, Replacement, Said, ThreadId, UserId,
+    Addressee, ApprovalCard, ApprovalId, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError, Inbound,
+    MessageId, MessageRef, Post, Replacement, Said, ThreadId, UserId,
 };
 use zx_im_slack::{SlackChannel, SlackConfig};
 
@@ -357,9 +358,11 @@ async fn an_approval_card_has_two_buttons_that_carry_the_approval_id() {
     let channel = channel(&slack);
     let card = Post::ApprovalRequest {
         id: ApprovalId("A1".into()),
-        tool: "bash".into(),
-        summary: "kubectl delete pod x".into(),
-        reason: "needs approval".into(),
+        card: ApprovalCard {
+            tool: "bash".into(),
+            summary: "kubectl delete pod x".into(),
+            reason: "needs approval".into(),
+        },
     };
     channel.send(&in_thread("C1", Some("7.1")), &card).await.unwrap();
     let body = &slack.calls("chat.postMessage")[0].body;
@@ -384,13 +387,20 @@ async fn a_closed_card_keeps_its_request_and_shows_who_decided() {
     let channel = channel(&slack);
     let card = Post::ApprovalRequest {
         id: ApprovalId("A1".into()),
-        tool: "bash".into(),
-        summary: "kubectl delete pod x".into(),
-        reason: "needs approval".into(),
+        card: ApprovalCard {
+            tool: "bash".into(),
+            summary: "kubectl delete pod x".into(),
+            reason: "needs approval".into(),
+        },
     };
     let posted = channel.send(&in_thread("C1", Some("8.1")), &card).await.unwrap();
     let request = slack.calls("chat.postMessage")[0].body["blocks"][0].clone();
     let closed = Replacement::ApprovalResolved {
+        card: ApprovalCard {
+            tool: "bash".into(),
+            summary: "kubectl delete pod x".into(),
+            reason: "needs approval".into(),
+        },
         id: ApprovalId("A1".into()),
         user: Some(UserId("U2".into())),
         result: ApprovalResult::AllowOnce,
@@ -509,6 +519,25 @@ async fn stopping_does_not_wait_out_a_long_retry_after() {
     tokio::time::timeout(WAIT, running.stop())
         .await
         .expect("the stop waited for the Retry-After")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn stopping_does_not_wait_for_a_connection_being_opened() {
+    let (address, mut connections) = silent_listener().await;
+    let slack = FakeSlack::start().await;
+    slack.script(
+        "apps.connections.open",
+        vec![Answer::Json(json!({"ok": true, "url": format!("ws://{address}/link")}))],
+    );
+    let mut config = config(&slack);
+    // Longer than the test waits, so that only the stop can end the attempt in time.
+    config.request_timeout = 3 * WAIT;
+    let running = run_channel(Arc::new(SlackChannel::new(config).unwrap()), WAIT);
+    connections.recv().await.unwrap();
+    tokio::time::timeout(WAIT, running.stop())
+        .await
+        .expect("the stop waited for the connection attempt")
         .unwrap();
 }
 

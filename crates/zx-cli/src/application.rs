@@ -19,7 +19,7 @@ use crate::config::{Builtin, Config};
 use crate::otel::TraceHook;
 
 #[doc(inline)]
-pub use crate::assembly::{Approvals, ModeAgent as ConfiguredAgent, Overrides, SessionPlace};
+pub use crate::assembly::{Approvals, ModeAgent as ConfiguredAgent, NoModel, Overrides, SessionPlace};
 
 /// The shared resources of configured agents: resolved settings, MCP connections,
 /// redaction configuration and optional trace observation. No sessions are opened at startup.

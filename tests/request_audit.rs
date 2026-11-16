@@ -13,7 +13,7 @@ use zx_agent::ai::{Message, PREAMBLE, Request, SystemPrompt};
 use zx_agent::compaction::{Config, Outcome};
 use zx_agent::events::RunOutcome;
 use zx_agent::tools::Tool;
-use zx_agent::transcript::{Entry, RequestSource, Transcript};
+use zx_agent::transcript::{Entry, LoadedSession, RequestSource, Transcript};
 
 use common::{EchoTool, RunnerSetup, config, header, read_lines, replayed_requests};
 
@@ -221,66 +221,91 @@ async fn requests_around_a_recovery_from_context_overflow_are_rebuilt_from_the_s
     assert_eq!(replayed(&path), sent);
 }
 
-#[tokio::test]
-async fn request_configuration_indexes_keep_branches_separate_when_replaying() {
-    let mut store = Transcript::in_memory(header());
-    let request = Request {
-        model: "first".into(),
+/// A request for `model` and nothing else.
+fn request_for(model: &str) -> Request {
+    Request {
+        model: model.into(),
         messages: vec![],
         tools: vec![],
         max_tokens: None,
         reasoning: None,
         cache_key: None,
-    };
-    let first = store
-        .record_request(&request, "p", json!({}), RequestSource::Projection)
-        .await
-        .unwrap();
-    let mut other = request.clone();
-    other.model = "other".into();
+    }
+}
+
+/// The IDs of the request configurations `store` recorded, oldest first.
+fn config_ids(store: &Transcript) -> Vec<String> {
     store
-        .record_request(&other, "p", json!({}), RequestSource::Projection)
-        .await
-        .unwrap();
-    let foreign = store
         .entries()
         .iter()
-        .rev()
-        .find_map(|entry| match entry {
+        .filter_map(|entry| match entry {
             Entry::RequestConfig(entry) => Some(entry.id.clone()),
             _ => None,
         })
-        .unwrap();
-    store.branch(&first).unwrap();
-    let last = store
-        .record_request(&request, "p", json!({}), RequestSource::Projection)
-        .await
-        .unwrap();
-    assert_eq!(
-        store
-            .entries()
-            .iter()
-            .filter(|entry| matches!(entry, Entry::RequestConfig(_)))
-            .count(),
-        2
-    );
-    let mut records = store
+        .collect()
+}
+
+/// Why the records of `store` do not load once a request checkpoint after `parent` names the
+/// configuration `config`.
+fn refusal_of_a_request(store: &Transcript, parent: &str, config: &str) -> String {
+    let mut records: Vec<String> = store
         .entries()
         .iter()
         .map(|entry| serde_json::to_string(entry).unwrap())
-        .collect::<Vec<_>>();
+        .collect();
     records.push(
-        json!({"type":"request_started", "id":"invalid", "parentId":last,
-        "timestamp":0, "configId":foreign, "source":{"kind":"projection"}})
+        json!({"type":"request_started", "id":"invalid", "parentId":parent,
+        "timestamp":0, "configId":config, "source":{"kind":"projection"}})
         .to_string(),
     );
-    let loaded = zx_agent::transcript::LoadedSession {
+    let loaded = LoadedSession {
         header: store.header().clone(),
         records,
         incomplete_tail_bytes: 0,
     };
-    let error = Transcript::snapshot(loaded)
-        .err()
-        .expect("the foreign configuration must be rejected");
-    assert!(format!("{error:#}").contains("request config is not on this branch"));
+    let error = Transcript::snapshot(loaded).err().expect("the request must be refused");
+    format!("{error:#}")
+}
+
+#[tokio::test]
+async fn request_configuration_indexes_keep_branches_separate_when_replaying() {
+    let mut store = Transcript::in_memory(header());
+    let first = store
+        .record_request(&request_for("first"), "p", json!({}), RequestSource::Projection)
+        .await
+        .unwrap();
+    store
+        .record_request(&request_for("other"), "p", json!({}), RequestSource::Projection)
+        .await
+        .unwrap();
+    let foreign = config_ids(&store).pop().unwrap();
+    store.branch(&first).unwrap();
+    let last = store
+        .record_request(&request_for("first"), "p", json!({}), RequestSource::Projection)
+        .await
+        .unwrap();
+    assert_eq!(config_ids(&store).len(), 2, "the branch reuses its configuration");
+
+    let error = refusal_of_a_request(&store, &last, &foreign);
+
+    assert!(error.contains("is not the one in force on this branch"), "{error}");
+}
+
+#[tokio::test]
+async fn a_request_names_the_configuration_in_force_not_an_earlier_one_of_its_branch() {
+    let mut store = Transcript::in_memory(header());
+    store
+        .record_request(&request_for("first"), "p", json!({}), RequestSource::Projection)
+        .await
+        .unwrap();
+    let last = store
+        .record_request(&request_for("other"), "p", json!({}), RequestSource::Projection)
+        .await
+        .unwrap();
+    let configs = config_ids(&store);
+    assert_eq!(configs.len(), 2);
+
+    let error = refusal_of_a_request(&store, &last, &configs[0]);
+
+    assert!(error.contains("is not the one in force on this branch"), "{error}");
 }

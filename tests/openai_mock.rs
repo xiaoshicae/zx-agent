@@ -462,8 +462,9 @@ struct RotatingKeys {
     until: usize,
 }
 
+#[async_trait::async_trait]
 impl zx_agent::ai::openai::ApiKeySource for RotatingKeys {
-    fn api_key(&self) -> Result<String, String> {
+    async fn api_key(&self) -> Result<String, String> {
         let n = self.issued.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         if n > self.until {
             return Err("the token service is down".to_string());
@@ -501,6 +502,46 @@ async fn custom_headers_and_a_dynamic_api_key_reach_every_request() {
             request.headers
         );
     }
+}
+
+/// A key source that never answers, such as a token service that stopped responding.
+struct SilentKeys;
+
+#[async_trait::async_trait]
+impl zx_agent::ai::openai::ApiKeySource for SilentKeys {
+    async fn api_key(&self) -> Result<String, String> {
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn a_key_source_that_does_not_answer_fails_the_request_within_the_idle_timeout() {
+    let server = MockServer::start(vec![Reply::text("never")]).await;
+    let (runner, _) = RunnerSetup {
+        retry: fast_retry(3),
+        ..setup_with_provider(
+            &server,
+            OpenAiConfig {
+                api_key: ApiKey::Dynamic(Arc::new(SilentKeys)),
+                idle_timeout: Duration::from_millis(50),
+                ..OpenAiConfig::default()
+            },
+        )
+    }
+    .build();
+
+    let report = runner.run("go").await;
+
+    assert_eq!((report.outcome, report.retries), (RunOutcome::Failed, 0));
+    assert_eq!(provider_error(&runner), ProviderError::ApiKey);
+    assert!(
+        report
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("did not answer")),
+        "{report:?}"
+    );
+    assert!(server.requests().is_empty(), "nothing is sent without a key");
 }
 
 #[tokio::test]

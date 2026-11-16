@@ -61,6 +61,17 @@ impl SessionKey {
         ])
     }
 
+    /// The conversation whose sessions carry `labels`, as [`labels`](Self::labels) gives them;
+    /// `None` for a session of something else.
+    fn of_labels(labels: &BTreeMap<String, String>) -> Option<Self> {
+        let thread = labels.get(THREAD_LABEL)?;
+        Some(Self {
+            platform: labels.get(PLATFORM_LABEL)?.clone(),
+            conversation: ConversationId(labels.get(CONVERSATION_LABEL)?.clone()),
+            thread: (!thread.is_empty()).then(|| ThreadId(thread.clone())),
+        })
+    }
+
     /// Where the server posts for this conversation: the direct chat, or the thread.
     pub(crate) fn destination(&self) -> Destination {
         Destination {
@@ -289,6 +300,7 @@ impl Server {
         // The chats served are the router's; the rest of the configuration is shared.
         let allowed = group(std::mem::take(&mut config.conversations));
         let shared = Arc::new(Shared::new(config, agent, sink));
+        shared.index_sessions().await?;
         // Read before any run can start, so that no status of this process is among them.
         let left = left_behind(&shared).await;
         let stop = cancel.child_token();
@@ -327,8 +339,8 @@ pub(crate) struct Shared {
     approvers: HashMap<String, HashSet<UserId>>,
     pub(crate) replies: Replies,
     pub(crate) max_conversations: usize,
-    pub(crate) max_pending_messages: usize,
-    pub(crate) max_pending_bytes: usize,
+    pub(crate) max_pending_messages: NonZeroUsize,
+    pub(crate) max_pending_bytes: NonZeroUsize,
     pub(crate) idle: Duration,
     pub(crate) outbound_timeout: Duration,
     /// Run slots of all conversations. Tokio's semaphore is fair: it hands permits out in
@@ -338,6 +350,11 @@ pub(crate) struct Shared {
     /// The names of users looked up so far, by platform; a user's ID stands for a name the
     /// platform did not give. As many as there are people writing to the bot.
     names: Mutex<HashMap<(String, UserId), String>>,
+    /// The session each conversation the bot took part in goes on in: its latest. Read from
+    /// the storage's headers once, at the start, and kept as the server makes sessions; only
+    /// this process makes sessions for these conversations. As many as there are
+    /// conversations the bot ever took part in.
+    sessions: Mutex<HashMap<SessionKey, String>>,
 }
 
 impl Shared {
@@ -367,11 +384,40 @@ impl Shared {
             outbound_timeout,
             permits: Arc::new(Semaphore::new(max_running.get())),
             max_conversations: max_conversations.get(),
-            max_pending_messages: max_pending_messages.get(),
-            max_pending_bytes: max_pending_bytes.get(),
+            max_pending_messages,
+            max_pending_bytes,
             statuses,
             names: Mutex::default(),
+            sessions: Mutex::default(),
         }
+    }
+
+    /// Find the session of each conversation the storage holds: the most recently started
+    /// of those with its labels. Run once, before any message is routed.
+    pub(crate) async fn index_sessions(&self) -> Result<(), ImError> {
+        let headers = self
+            .agent
+            .session_headers(&SessionQuery::default())
+            .await
+            .map_err(|error| ImError::Config(format!("cannot read the sessions of the conversations: {error:#}")))?;
+        let mut sessions = lock(&self.sessions);
+        // Most recently started first: the first of a conversation is its latest.
+        for header in headers {
+            if let Some(key) = SessionKey::of_labels(&header.labels) {
+                sessions.entry(key).or_insert(header.id);
+            }
+        }
+        Ok(())
+    }
+
+    /// The session the conversation `key` goes on in, if the bot ever took part in it.
+    pub(crate) fn session_of(&self, key: &SessionKey) -> Option<String> {
+        lock(&self.sessions).get(key).cloned()
+    }
+
+    /// The conversation `key` goes on in the session `id` from now on: one just made for it.
+    pub(crate) fn go_on_in(&self, key: &SessionKey, id: &str) {
+        lock(&self.sessions).insert(key.clone(), id.to_string());
     }
 
     /// The name people see for `user` on `channel`, asked once and then remembered. The user's
@@ -390,19 +436,6 @@ impl Shared {
             .unwrap_or_else(|| user.0.clone());
         lock(&self.names).insert(known, name.clone());
         name
-    }
-
-    /// The ID of the conversation's most recently active session, if it has one.
-    pub(crate) async fn latest_session(&self, key: &SessionKey) -> Result<Option<String>, String> {
-        let query = SessionQuery {
-            labels: key.labels(),
-            limit: Some(1),
-            ..SessionQuery::default()
-        };
-        match self.agent.latest_session(&query).await {
-            Ok(id) => Ok(id),
-            Err(error) => Err(format!("{error:#}")),
-        }
     }
 
     pub(crate) fn is_approver(&self, platform: &str, user: &UserId) -> bool {

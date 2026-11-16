@@ -32,7 +32,7 @@ use crate::runner::{Ending, EventTarget, RunAccounting, RunOutcome};
 
 pub(crate) use config::LoopConfig;
 pub(crate) use context::{PERSIST_FAILED, record_pending_entries};
-use step::{AfterTools, PendingInput, StepResponse};
+use step::{AfterTools, NextInput, StepResponse};
 
 /// Why the loop stops. Every part of a step returns it as its error, so `?` ends the attempt
 /// wherever a step stops it, and [`StepLoop::run`] returns the one that did. What the
@@ -147,9 +147,9 @@ impl<'a> StepLoop<'a> {
     /// Returns why it did.
     async fn run_steps(&mut self, first: FirstInput) -> Halt {
         let (prompt, mut pending) = match first {
-            FirstInput::Prompt(prompt) => (Some(prompt), PendingInput::None),
-            FirstInput::Conversation => (None, PendingInput::None),
-            FirstInput::QueuedFollowUps => (None, PendingInput::FollowUps),
+            FirstInput::Prompt(prompt) => (Some(prompt), NextInput::None),
+            FirstInput::Conversation => (None, NextInput::None),
+            FirstInput::QueuedFollowUps => (None, NextInput::FollowUps),
         };
         if let Err(halt) = self.initialize(prompt).await {
             return halt;
@@ -164,7 +164,7 @@ impl<'a> StepLoop<'a> {
 
     /// One step: prepare it with `pending`, request the model, handle the response, and
     /// decide what the next step starts with.
-    async fn run_step(&mut self, pending: PendingInput) -> Result<PendingInput, Halt> {
+    async fn run_step(&mut self, pending: NextInput) -> Result<NextInput, Halt> {
         let step = self.prepare_step(pending).await?;
         let message = self.request_model(step).await?;
         let response = self.handle_response(step, message).await?;
@@ -234,7 +234,7 @@ impl<'a> StepLoop<'a> {
 
     /// Gather input, starting with `pending`, and prepare the context before a task request.
     /// Returns the step that is ready for its request.
-    async fn prepare_step(&mut self, mut pending: PendingInput) -> Result<u32, Halt> {
+    async fn prepare_step(&mut self, mut pending: NextInput) -> Result<u32, Halt> {
         loop {
             // A step exists to make a request: without budget, or once cancelled, none is
             // made, and queued input stays queued for the next run. Checked before taking
@@ -247,10 +247,10 @@ impl<'a> StepLoop<'a> {
             // run leaves the rest of the queue for the next run.
             self.drain_queue(Queue::Steering).await?;
             match std::mem::take(&mut pending) {
-                PendingInput::None => {}
-                PendingInput::FollowUps => self.drain_queue(Queue::FollowUp).await?,
+                NextInput::None => {}
+                NextInput::FollowUps => self.drain_queue(Queue::FollowUp).await?,
                 // A hook asked for it: nobody sent it.
-                PendingInput::Requested(message) => self.input(*message, None, None).await?,
+                NextInput::Requested(message) => self.input(*message, None, None).await?,
             }
             self.ensure_can_request()?;
             let planned = self

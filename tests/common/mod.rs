@@ -32,14 +32,15 @@ use zx_agent::ai::retry::RetryPolicy;
 use zx_agent::ai::{
     AssistantMessage, ContentBlock, EventReceiver, Message, Provider, Request, StopReason, ToolCall, ToolDef, Usage,
 };
+use zx_agent::builtin::jsonl::JsonlStorage;
 use zx_agent::compaction;
 use zx_agent::events::{Event, EventKind, RunReport};
 use zx_agent::hooks::HookContext;
-use zx_agent::input::{Input, InputQueues};
+use zx_agent::input::{Input, InputQueues, PendingInput};
 use zx_agent::policy::{ApprovalDecision, ApprovalMode};
 use zx_agent::session::SessionError;
 use zx_agent::tools::{ExecutionMode, Tool, ToolContext, ToolOutput};
-use zx_agent::transcript::{Entry, JsonlStorage, LoadedSession, SessionHeader, SessionStorage, Transcript};
+use zx_agent::transcript::{Entry, LoadedSession, SessionHeader, SessionStorage, Transcript};
 use zx_agent::{Agent, AgentConfig, Run, Session};
 
 /// What a finished program wrote to stdout, decoded lossily.
@@ -300,6 +301,13 @@ pub(crate) fn refusal(config: AgentConfig) -> String {
         Ok(_) => panic!("an agent was made from the configuration"),
         Err(error) => format!("{error:#}"),
     }
+}
+
+/// The input `session` had queued and no run consumed, taken without the holds.
+pub(crate) fn take_queued_inputs(session: &Session) -> Result<Vec<Input>, SessionError> {
+    session
+        .take_queued()
+        .map(|queued| queued.into_iter().map(PendingInput::into_input).collect())
 }
 
 /// Short text of each message, for compact assertions.

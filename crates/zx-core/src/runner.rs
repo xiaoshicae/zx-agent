@@ -116,12 +116,6 @@ impl Runner {
     /// Summarize the old prefix without executing a task or tools, as the run `link` names.
     /// Cancellation and future drop cancel only this operation.
     pub(crate) async fn compact(&mut self, link: &RunLink) -> compaction::Report {
-        let accounting = RunAccounting::new(None, None, self.limits.cost_budget);
-        if self.config.summarizer.is_none()
-            && let Err(error) = accounting.check_model(&self.config.models, &self.config.model)
-        {
-            return compaction::Compacted::without_request(0, compaction::End::Failed(error)).into();
-        }
         let child = link.cancel.child_token();
         let _cancel_on_drop = child.drop_guard_ref();
         let trace = self.config.trace(&self.session, link.id.clone(), child.clone());
@@ -138,6 +132,7 @@ impl Runner {
             config: &self.config,
             compaction: &self.compaction,
             pause: &mut self.pause,
+            cost_budget: self.limits.cost_budget,
         };
         host.compact(Trigger::Manual, 1).await.into()
     }
@@ -212,6 +207,7 @@ impl Runner {
                 config,
                 compaction,
                 pause,
+                cost_budget: limits.cost_budget,
             },
             retry,
             limits,

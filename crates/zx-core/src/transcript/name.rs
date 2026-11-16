@@ -98,8 +98,8 @@ mod tests {
 
     use super::*;
     use crate::ai::Message;
-    use crate::transcript::SESSION_VERSION;
-    use crate::transcript::test_support::{assistant, create_file, header, open_file, texts};
+    use crate::transcript::test_support::{assistant, header, loaded, texts};
+    use crate::transcript::{MemoryStorage, SessionStorage};
 
     fn name(text: &str) -> SessionName {
         SessionName::new(text).unwrap()
@@ -135,15 +135,15 @@ mod tests {
 
     #[tokio::test]
     async fn a_name_is_written_as_a_session_info_record_and_reopens() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("s.jsonl");
-        let mut store = create_file(&path, header()).await.unwrap();
+        let storage = MemoryStorage::default();
+        let header = header();
+        let mut store = Transcript::with_log(header.clone(), storage.create(&header).await.unwrap());
         let question = store.append_message(Message::user("q")).await.unwrap();
         let id = store.append_session_name(name("排查 nginx 502")).await.unwrap();
         drop(store);
 
-        let text = std::fs::read_to_string(&path).unwrap();
-        let line = text.lines().last().unwrap();
+        let records = storage.read(&header.id).await.unwrap().records;
+        let line = records.last().unwrap().as_str();
         let timestamp = serde_json::from_str::<Value>(line).unwrap()["timestamp"].clone();
         assert!(timestamp.is_u64(), "{line}");
         assert_eq!(
@@ -152,23 +152,18 @@ mod tests {
                 r#"{{"type":"session_info","id":"{id}","parentId":"{question}","timestamp":{timestamp},"name":"排查 nginx 502"}}"#
             )
         );
-        let reopened = open_file(&path).await.unwrap();
+        let (loaded, log) = storage.open(&header.id).await.unwrap();
+        let reopened = Transcript::load(loaded, log).unwrap();
         assert_eq!(reopened.session_name().map(SessionName::as_str), Some("排查 nginx 502"));
     }
 
     #[tokio::test]
     async fn opening_refuses_a_name_that_could_not_have_been_given() {
-        let dir = tempfile::tempdir().unwrap();
         for stored in [" padded", "two\nlines", ""] {
-            let path = dir.path().join("s.jsonl");
-            let header = json!({"type": "session", "version": SESSION_VERSION, "id": "h", "timestamp": 1,
-                "cwd": "/", "model": "m"});
             let record = json!({"type": "session_info", "id": "n1", "parentId": null, "timestamp": 2,
                 "name": stored});
-            std::fs::write(&path, format!("{header}\n{record}\n")).unwrap();
 
-            let error = open_file(&path)
-                .await
+            let error = Transcript::snapshot(loaded(header(), vec![record.to_string()]))
                 .err()
                 .unwrap_or_else(|| panic!("{stored:?} was accepted"));
             assert!(

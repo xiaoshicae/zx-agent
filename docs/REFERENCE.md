@@ -24,7 +24,7 @@ README 给出概览与示例；这里是各子命令的参数、行为、语义�
 | `--deltas` | 关闭 | 仅 `jsonl`：同时输出流式的 `message_update` |
 | `--color` | `auto` | 仅 `chat`：`auto` 在交互终端上着色（设了 `NO_COLOR` 或 `TERM=dumb` 时不着色），`always`、`never` |
 
-其余设置在 `config.toml` 与 agent 中，见 [CONFIGURATION.md](CONFIGURATION.md)。流式响应的上限为每次请求 16 MiB、每个 SSE 事件 1 MiB，达到时以退出码 1 结束、不重试。重试依据 HTTP 状态与错误码，遵守服务端的 `Retry-After`（至多 60 秒）。服务端以 `stop`、`end`、`length`、`tool_calls`、`function_call` 以外的 `finish_reason`（如 `content_filter`）结束时按错误处理，错误码为 `finish_reason:<取值>`，不重试。
+其余设置在 `config.toml` 与 agent 中，见 [CONFIGURATION.md](CONFIGURATION.md)。流式响应的上限为每次请求 16 MiB、每个 SSE 事件 1 MiB，达到时以退出码 1 结束、不重试。重试依据 HTTP 状态与错误码（流中报出的错误码不在已知的表里时，按错误文本判断），遵守服务端的 `Retry-After`（至多 60 秒）。服务端以 `stop`、`end`、`length`、`tool_calls`、`function_call` 以外的 `finish_reason`（如 `content_filter`）结束时按错误处理，错误码为 `finish_reason:<取值>`，不重试。
 
 ## run 退出码
 
@@ -35,7 +35,7 @@ README 给出概览与示例；这里是各子命令的参数、行为、语义�
 | 2 | 参数或配置错误 |
 | 3 | 达到 `--max-model-requests` 上限：模型还要请求（包括续写被截断的回答），次数已用完 |
 | 4 | 达到 `--timeout-secs` 时间上限 |
-| 5 | 被 SIGINT 或 SIGTERM 中止 |
+| 5 | 被 SIGINT 或 SIGTERM 中止。中止后的收尾（如导出追踪）期间再收到一次信号时，进程立即被该信号结束，没有退出码 |
 | 6 | 截断：最终回答达到输出 token 上限，自动续写（agent 的 `continueOnLength`）的次数用完后仍未完成；续写所需的请求超出预算时按该预算的退出码（3、7、8）结束。已生成的部分照常输出 |
 | 7 | 达到 `--token-budget` 预算：用量已达预算，模型还要继续（包括续写被截断的回答） |
 | 8 | 达到 `--cost-budget` 预算：花费已达预算，模型还要继续（包括续写被截断的回答） |
@@ -84,7 +84,7 @@ README 给出概览与示例；这里是各子命令的参数、行为、语义�
 - 命令：建会话、载入或续接成功后，应答之后以 `available_commands_update` 声明 `/name`。`/name <名称>` 给会话起名，不发给模型：以 `session_info_update` 通知新标题，回合以 `end_turn` 结束。名称只取一行（换行等控制字符换成空格、去掉首尾空白）；没有给名称时以 JSON-RPC 错误（`-32602`）应答，回合进行中也以错误应答。`/named` 等其他文本仍是普通提问。
 - 回合：`session/prompt` 的回答结束时应答 `stopReason`：完成为 `end_turn`，截断与 token、成本预算用尽为 `max_tokens`，请求次数用尽为 `max_turn_requests`（回答被截断时也是），取消为 `cancelled`；出错或超时以 JSON-RPC 错误应答。`session/cancel` 取消当前回合，紧跟在 `session/prompt` 之后发出的也生效。
 - 更新：回答与推理流式发送，工具调用发 `tool_call` 及其状态，`write_file` 与 `edit_file` 附 diff。审批经 `session/request_permission`（允许一次、本会话允许相同调用、拒绝），等待时间同 chat。
-- 退出：客户端关闭 stdin 时退出；收到 SIGINT 或 SIGTERM 时先取消进行中的回合，等它们结束（被中止的回答记入会话）再退出，这时回合的应答不保证送达客户端。两种情况退出码都是 0。
+- 退出：客户端关闭 stdin 时退出；收到 SIGINT 或 SIGTERM 时先取消进行中的回合，等它们结束（被中止的回答记入会话）再退出，这时回合的应答不保证送达客户端。两种情况退出码都是 0。等待期间再收到一次信号时，进程立即被该信号结束。
 - 只用手写的 JSON-RPC 客户端与 SDK 的示例客户端验证过，没有在 Zed 或 Wisp 上验证。
 
 ## IM 服务
@@ -95,17 +95,17 @@ README 给出概览与示例；这里是各子命令的参数、行为、语义�
 |---|---|
 | Slack 应用 | 打开 Socket Mode 与 Interactivity；订阅 bot 事件 `app_mention` 与 `message.im`。bot token 需要读取 @ 消息的权限（`app_mentions:read`，以应用设置页显示的为准）、`im:history` 与 `chat:write`；app-level token 带 `connections:write`。可选：订阅 `message.channels`、`message.groups`（权限 `channels:history`、`groups:history`）后线程里不 @ 的回复也会送来，机器人也能读取它第一次被 @ 的线程（Slack 从最早的消息起分页返回，所以逐页读到末尾再取最近的：每页 200 条、至多 5 页；线程更长或后面的页读不到时，取已读到的部分里最近的，并记一条 `failed` 日志）；`users:read` 让模型看到发言人的名字；`reactions:write` 让插话得到 👀 回执。Marketplace 之外商业分发的应用读取线程受 Slack 的限频（每分钟 1 次、每次 15 条），自建的内部应用不受影响 |
 | ⚑ D:5/CHINA FLAG: 飞书应用 | 企业自建应用；事件与回调都选长连接；订阅事件 `im.message.receive_v1` 与回调 `card.action.trigger`；开通发送消息与读取 @ 机器人消息（`im:message.group_at_msg:readonly`）的权限。可选：开通“获取群组中所有消息”（`im:message.group_msg`）后，话题里不 @ 的回复也会送来。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：读取群内全部消息] Subject to Legal/Export Compliance approval。读话题历史、名字与回执未实现（模型看到的是 open_id） |
-| 会话 | 私聊直接发送。单独发送 `/new` 立即开新会话，之前的保留；此后会话被释放或进程重启，接上的也是这个新会话，它不再读入线程里已有的消息。频道（⚑ D:5/CHINA FLAG: 飞书为群）里 @ 机器人，回答在这条消息的线程里；刚被回答的人接着说不必再 @；别人在线程里的话只记进会话，被 @ 时一并参考。在别人发起的线程里第一次被 @ 时，先读入线程已有的消息（最近的至多 50 条）。群聊中交给模型的每条消息前加发言人的名字；机器人回答的消息，其发送者在平台上的用户 ID 作为这条输入的 actor 记入会话，并交给策略与钩子（排队等待运行期间收到的几条合成一条输入，取最后一条的发送者）。没 @ 机器人的频道消息、机器人没参与过的线程一概不理会；会话释放（`idleSecs`）或重启之后，接话要再 @ 一次 |
-| 运行中 | 要回答的消息作为插话进入运行；单独发送 `/cancel` 取消本会话的任务，`/new` 先取消任务再开新会话，取消完成前收到的消息在新会话里回答。开始时发“处理中”，结束时替换为回答 |
+| 会话 | 私聊直接发送。单独发送 `/new` 立即开新会话，之前的保留；此后会话被释放或进程重启，接上的也是这个新会话，它不再读入线程里已有的消息。频道（⚑ D:5/CHINA FLAG: 飞书为群）里 @ 机器人，回答在这条消息的线程里；刚被回答的人接着说不必再 @；别人在线程里的话只记进会话，被 @ 时一并参考；会话已释放时，等有运行名额再打开会话写入。在别人发起的线程里第一次被 @ 时，先读入线程已有的消息（最近的至多 50 条），再建会话。群聊中交给模型的每条消息前加发言人的名字；机器人回答的消息，其发送者在平台上的用户 ID 作为这条输入的 actor 记入会话，并交给策略与钩子（排队等待运行期间收到的几条合成一条输入，取最后一条的发送者）。没 @ 机器人的频道消息、机器人没参与过的线程一概不理会；会话释放（`idleSecs`）或重启之后，接话要再 @ 一次 |
+| 运行中 | 要回答的消息作为插话进入运行；任务结束时没读到的插话作为下一次运行的提问，与其他会话一样排队等运行名额。单独发送 `/cancel` 取消本会话的任务并丢弃没读到的插话，`/new` 先取消任务再开新会话，取消完成前收到的消息在新会话里回答。开始时发“处理中”，结束时替换为回答 |
 | 数据范围 | 只保存机器人参与过的线程与授权聊天中的消息，其余在入口丢弃。线程中任何人的话都会进入模型的上下文，写操作仍要审批 |
 | 审批 | 使用 assistant agent：自动放行的只读命令直接执行，其余发审批卡片，只有 `approvers` 中的用户点击才生效；超时（`approvalTimeoutSecs`）与取消也显示在卡片上 |
 | 凭据 | 两个平台的 token 与 secret 只从环境变量读取；命令的环境中删除这些变量，输出中出现其值时脱敏 |
-| 会话文件 | 每个对话（私聊，或群里的一个线程）的会话在头部带三个标签：`im.platform`、`im.conversation` 与 `im.thread`（私聊为空）。续接时取带这组标签、最近活动的会话，`/new` 用同样的标签立即再建一个，之前的保留 |
+| 会话文件 | 每个对话（私聊，或群里的一个线程）的会话在头部带三个标签：`im.platform`、`im.conversation` 与 `im.thread`（私聊为空）。服务启动时读取会话头部，记下每个对话最近创建的会话，续接时打开它；`/new` 用同样的标签立即再建一个，此后续接新的，之前的保留 |
 | 日志 | stdout 每行一个 JSON：`approval`（聊天、线程、工具调用、审批人、结果、时间）、`released`、`failed`。对话内容在会话文件中 |
-| 退出 | SIGINT 或 SIGTERM 时取消进行中的任务，状态改为 `stopped` 的文案；未处理的消息不再处理，所在线程收到提示。退出码：正常为 0，配置错误与被拒的凭据为 2，平台连接意外结束为 1 |
+| 退出 | SIGINT 或 SIGTERM 时取消进行中的任务，状态改为 `stopped` 的文案；未处理的消息不再处理，所在线程收到提示；正在建立的平台连接随即放弃。收尾期间再收到一次信号时，进程立即被该信号结束。退出码：正常为 0，配置错误与被拒的凭据为 2，平台连接意外结束为 1 |
 | 崩溃之后 | 未处理的消息丢失且没有提示。下次启动时，上个进程遗留的“处理中”改为 `interrupted` 的文案 |
 
-IM 的容量在 `im.toml` 的 `[limits]` 中设置：`maxConversations` 默认 128（运行、排队和空闲 worker 都计入），`maxPendingMessages` 默认 32，`maxPendingBytes` 默认 262144（每个会话自路由接纳起尚未处理的文本字节数，也是单条入站消息上限）。这三个值均为正整数。达到上限时，消息不被接纳并回复 `replies.overloaded`；消息未进入插话队列时不发送接收回执。`/cancel`、`/new` 与审批点击仍可处理。收件箱、waiting、heard 与 steering 共用这份配额，消息转移不重复计数，数量及 UTF-8 文本字节在同一把短锁下接纳；补入发送者名称后再次检查字节额度。worker 收件箱还有 32 条的结构上限。至多 64 字节的 `/cancel`、`/new` 和审批点击不占文本配额，但仍受收件箱容量限制。扩展直接调用无配额 SDK 入队方法的输入不计入这份宿主配额。排队中的新会话在取得 `maxRunning` 的名额后才初始化；`/new` 仍立即创建新会话。
+IM 的容量在 `im.toml` 的 `[limits]` 中设置：`maxConversations` 默认 128（运行、排队和空闲 worker 都计入），`maxPendingMessages` 默认 32，`maxPendingBytes` 默认 262144（每个会话自路由接纳起尚未处理的文本字节数，也是单条入站消息上限）。这三个值均为正整数。达到上限时，消息不被接纳并记一条 `failed` 日志；机器人要回答的消息另回复 `replies.overloaded`（在路由处被拒的只认 @），只记进会话的话不回复。消息未进入插话队列时不发送接收回执。`/cancel`、`/new` 与审批点击仍可处理。收件箱、waiting、heard 与 steering 共用这份配额，消息转移不重复计数，数量及 UTF-8 文本字节在同一把短锁下接纳；补入发送者名称后再次检查字节额度。worker 收件箱还有 32 条的结构上限。至多 64 字节的 `/cancel`、`/new` 和审批点击不占文本配额，但仍受收件箱容量限制。扩展直接调用无配额 SDK 入队方法的输入不计入这份宿主配额。打开会话（排队中的新会话，或为写入闲聊重新打开的会话）都在取得 `maxRunning` 的名额后进行；`/new` 仍立即创建新会话。
 
 其余参数与 `chat` 相同，`--max-model-requests` 等作用于每一次运行；没有 `--session`。
 
@@ -153,7 +153,7 @@ IM 的容量在 `im.toml` 的 `[limits]` 中设置：`maxConversations` 默认 1
 | 部分 | 内容 | 何时出现 |
 |---|---|---|
 | 说明 | agent 的说明 | 总是 |
-| `<environment>` | 操作系统与版本、CPU 架构、启动时间（UTC）与时区、工作目录；容器执行时描述容器 | 总是 |
+| `<environment>` | 操作系统与版本、CPU 架构、会话打开的时间（UTC）与时区、工作目录；容器执行时描述容器 | 总是 |
 | `<project_context>` | 自动发现的 `AGENTS.md` 与 agent 列出的文件 | 有项目说明时 |
 | `<available_skills>` | skill 的名称、描述与正文文件路径 | 启用 `read_skill` 且登记了 skill 时 |
 
@@ -179,7 +179,7 @@ IM 的容量在 `im.toml` 的 `[limits]` 中设置：`maxConversations` 默认 1
 
 run、chat 与 im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（完整地址）或 `OTEL_EXPORTER_OTLP_ENDPOINT`（后接 `/v1/traces`）时，用 OTLP/HTTP 导出追踪；都没设时不建立任何连接。其余标准变量由 OpenTelemetry SDK 读取，服务名默认 `zx-agent`。只导出 span，不导出指标，需要时由收集端从 span 推导。
 
-一次运行是一条 trace：`run` 之下有 `attempt`、`step`、`request`、`tool <工具名>` 与 `compaction`，属性带运行 ID（`zx.run.id`）、模型、结果（预算用完时另有 `zx.budget` 与 `zx.truncated`）、用量与成本。只含元数据，不含输入、输出、参数与错误文本。`run` 在 `TRACEPARENT`（及 `TRACESTATE`）为合法值时接续调用方的 trace。导出经有界队列，满时丢弃，退出时最多等待 5 秒。命令看不到可能带认证头的 `OTEL_EXPORTER_OTLP_HEADERS`、`OTEL_EXPORTER_OTLP_TRACES_HEADERS` 与 `OTEL_EXPORTER_OTLP_METRICS_HEADERS`。
+一次运行是一条 trace：`run` 之下有 `attempt`、`step`、`request`、`tool <工具名>` 与 `compaction`，属性带运行 ID（`zx.run.id`）、模型、结果（预算用完时另有 `zx.budget` 与 `zx.truncated`）、用量与成本。只含元数据，不含输入、输出、参数与错误文本。`run` 在 `TRACEPARENT`（及 `TRACESTATE`）为合法值时接续调用方的 trace。导出经有界队列，满时丢弃，退出时最多等待 5 秒；一次运行的结束被丢弃时，它的 span 在同一会话开始下一次运行时结束（没有结果属性），最迟在退出时结束。命令看不到可能带认证头的 `OTEL_EXPORTER_OTLP_HEADERS`、`OTEL_EXPORTER_OTLP_TRACES_HEADERS` 与 `OTEL_EXPORTER_OTLP_METRICS_HEADERS`，工具输出中出现它们的值时脱敏。
 
 ### 会话文件（`--session`）
 

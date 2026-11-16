@@ -12,6 +12,7 @@ use crate::config::Builtin;
 use crate::otel::TraceHook;
 use zx_agent::builtin::mcp::{Server, ServerConfig};
 use zx_agent::builtin::redact::{MIN_SECRET_CHARS, check_secret_files, short_secret_files};
+use zx_agent::builtin::tools::FileMutationQueue;
 use zx_agent::extensions::Extension;
 
 use super::{Overrides, Settings, env_value};
@@ -38,23 +39,19 @@ pub(crate) struct Shared {
     pub(super) hidden_env: Vec<String>,
     /// The hook that exports every session's runs as traces, when an export is configured.
     pub(super) traces: Option<TraceHook>,
+    /// The turns at each file to change, which the file tools of every session take, so that
+    /// two sessions never overwrite each other's edit.
+    pub(super) files: Arc<FileMutationQueue>,
 }
 
 impl Shared {
     /// Read the settings with `overrides` over them, connect the MCP servers of config.toml
-    /// and check the secret files, for sessions of `agent`.
+    /// and check the secret files, for sessions of `agent`. The notices are for the caller
+    /// to show.
     ///
-    /// A missing model, a missing token, a server that cannot be reached in time, a tool it
-    /// lacks or a secret file that cannot be used stops startup, like other configuration
-    /// errors.
-    pub(crate) async fn connect(overrides: Overrides, agent: Builtin) -> Result<Self> {
-        let shared = Self::from_environment(overrides, agent).await?;
-        for notice in &shared.notices {
-            eprintln!("{notice}");
-        }
-        Ok(shared)
-    }
-
+    /// A missing model ([`NoModel`]), a missing token, a server that cannot be reached in
+    /// time, a tool it lacks or a secret file that cannot be used stops startup, like other
+    /// configuration errors.
     pub(crate) async fn from_environment(overrides: Overrides, agent: Builtin) -> Result<Self> {
         let settings = Settings::resolve(overrides.model.as_deref())?;
         let files = secret_files(&settings.config.secret_files)?;
@@ -81,6 +78,7 @@ impl Shared {
             notices,
             hidden_env: Vec::new(),
             traces: None,
+            files: Arc::default(),
             settings,
             overrides,
             agent,
@@ -187,20 +185,14 @@ fn secret_files(configured: &[PathBuf]) -> Result<Vec<PathBuf>> {
         .chain(configured.iter().cloned())
         .filter(|path| !path.as_os_str().is_empty())
         .collect();
-    checked_secret_files(secret_files)
+    checked_secret_files(secret_files).context("secretFiles in config.toml or ZX_SECRET_FILES")
 }
 
 /// Validate explicit secret files without reading process overrides or printing notices.
 pub(crate) fn checked_secret_files(secret_files: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
     for path in &secret_files {
-        std::fs::metadata(path).with_context(|| {
-            format!(
-                "cannot use secret file {} (secretFiles in config.toml or ZX_SECRET_FILES)",
-                path.display()
-            )
-        })?;
+        std::fs::metadata(path).with_context(|| format!("cannot use secret file {}", path.display()))?;
     }
-    check_secret_files(&secret_files)
-        .map_err(|error| anyhow::anyhow!("{error} (secretFiles in config.toml or ZX_SECRET_FILES)"))?;
+    check_secret_files(&secret_files).map_err(|error| anyhow::anyhow!("{error}"))?;
     Ok(secret_files)
 }

@@ -11,7 +11,7 @@ use crate::runner::Ending;
 impl StepLoop<'_> {
     /// Ask the finish hooks and decide what the next step starts with. Ends the attempt when
     /// no step follows.
-    pub(super) async fn decide_next_step(&mut self, response: StepResponse) -> Result<PendingInput, Halt> {
+    pub(super) async fn decide_next_step(&mut self, response: StepResponse) -> Result<NextInput, Halt> {
         let StepResponse {
             response,
             step,
@@ -38,18 +38,18 @@ impl StepLoop<'_> {
         // top of every step; follow-ups only when the model has nothing left to do.
         let queues = &self.host.config.queues;
         if queues.has(Queue::Steering) {
-            return Ok(PendingInput::None);
+            return Ok(NextInput::None);
         }
         if !needs_more && queues.has(Queue::FollowUp) {
-            return Ok(PendingInput::FollowUps);
+            return Ok(NextInput::FollowUps);
         }
         let requested = requested_input(decision, disposition, self.accounting.exhausted())?;
         if requested.as_ref().is_some_and(continues_answer) {
             self.accounting.answer_continuations = self.accounting.answer_continuations.saturating_add(1);
         }
         match requested {
-            Some(message) => Ok(PendingInput::Requested(Box::new(message))),
-            None if needs_more => Ok(PendingInput::None),
+            Some(message) => Ok(NextInput::Requested(Box::new(message))),
+            None if needs_more => Ok(NextInput::None),
             None => Err(Halt::Ended(completed(stop))),
         }
     }
@@ -128,7 +128,7 @@ fn completed(stop: StopReason) -> Ending {
 /// What the next step starts with besides queued steering, decided at the end of the step
 /// before it.
 #[derive(Default)]
-pub(super) enum PendingInput {
+pub(super) enum NextInput {
     #[default]
     None,
     /// The follow-up queue: the model had nothing left to do.

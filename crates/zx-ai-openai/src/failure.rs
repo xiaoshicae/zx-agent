@@ -204,13 +204,14 @@ fn whole_milliseconds(value: f64) -> Option<u64> {
 
 /// Seconds since the Unix epoch of an IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`), the
 /// one date format servers must send (RFC 9110 §5.6.7); the two obsolete formats are not
-/// read.
+/// read. Its numbers have fixed widths, the year four digits, which also keeps the
+/// arithmetic below far from overflowing.
 fn http_date_epoch_secs(text: &str) -> Option<u64> {
     let mut parts = text.split_ascii_whitespace();
     let weekday = parts.next()?;
-    let day: i64 = parts.next()?.parse().ok()?;
+    let day = fixed_digits(parts.next()?, 2)?;
     let month = parts.next()?;
-    let year: i64 = parts.next()?.parse().ok()?;
+    let year = fixed_digits(parts.next()?, 4)?;
     let time = parts.next()?;
     let zone = parts.next()?;
     if parts.next().is_some() || !weekday.ends_with(',') || zone != "GMT" {
@@ -222,7 +223,7 @@ fn http_date_epoch_secs(text: &str) -> Option<u64> {
     .iter()
     .position(|name| *name == month)?;
     let month = i64::try_from(month).ok()? + 1;
-    let mut clock = time.split(':').map(|field| field.parse::<i64>().ok());
+    let mut clock = time.split(':').map(|field| fixed_digits(field, 2));
     let (hour, minute, second) = (clock.next()??, clock.next()??, clock.next()??);
     if clock.next().is_some()
         || !(1..=31).contains(&day)
@@ -244,6 +245,16 @@ fn http_date_epoch_secs(text: &str) -> Option<u64> {
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     let days = era * 146_097 + doe - 719_468;
     u64::try_from(days * 86_400 + hour * 3_600 + minute * 60 + second).ok()
+}
+
+/// The number that `text` writes in exactly `width` ASCII digits.
+fn fixed_digits(text: &str, width: usize) -> Option<i64> {
+    if text.len() != width {
+        return None;
+    }
+    text.bytes().try_fold(0, |value: i64, byte| {
+        byte.is_ascii_digit().then(|| value * 10 + i64::from(byte - b'0'))
+    })
 }
 
 #[cfg(test)]
@@ -329,6 +340,21 @@ mod tests {
             "Sun, 06 Foo 1994 08:49:37 GMT",
             "Sun, 06 Nov 1994 24:00:00 GMT",
             "",
+        ] {
+            assert_eq!(http_date_epoch_secs(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_date_whose_fields_are_not_of_their_fixed_widths_is_unreadable() {
+        for bad in [
+            // Far enough in the future that its seconds do not fit in an i64.
+            "Sun, 06 Nov 99999999999999 08:49:37 GMT",
+            "Sun, 06 Nov 994 08:49:37 GMT",
+            "Sun, 06 Nov +994 08:49:37 GMT",
+            "Sun, 6 Nov 1994 08:49:37 GMT",
+            "Sun, 06 Nov 1994 8:49:37 GMT",
+            "Sun, 06 Nov 1994 08:49:037 GMT",
         ] {
             assert_eq!(http_date_epoch_secs(bad), None, "{bad}");
         }

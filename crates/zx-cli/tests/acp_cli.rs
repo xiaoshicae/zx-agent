@@ -739,6 +739,28 @@ async fn a_session_started_in_another_directory_is_neither_loaded_nor_resumed() 
 }
 
 #[tokio::test]
+async fn a_live_session_is_neither_loaded_nor_resumed_for_another_directory() {
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let cwd = work.path().canonicalize().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let elsewhere = other.path().canonicalize().unwrap();
+    let server = MockServer::start(Vec::new()).await;
+    let mut acp = Acp::start_in(&server, &cwd, &[], Some(home.path())).await;
+    let id = acp.session(&cwd).await;
+    let unknown = format!(
+        "unknown session {id}: no such session in {}",
+        session_dir(home.path(), &elsewhere).display()
+    );
+    // Open in this process or not, a session belongs to the directory it works in.
+    for refused in [acp.load(&id, &elsewhere).await, acp.resume(&id, &elsewhere).await] {
+        assert_eq!(refused["error"]["code"], -32602, "{refused}");
+        assert_eq!(refused["error"]["message"], unknown.as_str(), "{refused}");
+    }
+    acp.finish().await;
+}
+
+#[tokio::test]
 async fn no_session_keeps_no_file_and_offers_no_loading() {
     let home = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();

@@ -12,8 +12,8 @@ use async_trait::async_trait;
 use crate::config::skills::TOOL_NAME;
 use crate::config::{ContainerSettings, Execution, ProjectContext};
 use zx_agent::agent::{SessionParts, SessionSetup};
-use zx_agent::builtin::output_store::{self, OutputStore, ReadOutputTool, SpillOutputs};
-use zx_agent::builtin::tools;
+use zx_agent::builtin::output_store::{self, OutputStore, SpillOutputs};
+use zx_agent::builtin::tools::{self, FileMutationQueue};
 use zx_agent::hooks::HookChain;
 use zx_agent::prompt;
 use zx_agent::tools::Tool;
@@ -43,6 +43,8 @@ pub(super) struct PerSession {
     pub(super) tool_output: output_store::Config,
     /// Where the sessions are kept, which a container must not be able to read.
     pub(super) place: SessionPlace,
+    /// The turns at each file to change, shared by every session of the process.
+    pub(super) files: Arc<FileMutationQueue>,
 }
 
 /// Whether `name` is a tool of this machine rather than of the executor: read_skill and
@@ -76,13 +78,13 @@ impl SessionSetup for PerSession {
         }
         if self.tools.iter().any(|name| name == output_store::TOOL_NAME) {
             let store = OutputStore::new(cwd, self.tool_output.clone())?;
-            // The reading tool and the writer hook each get a copy of the store. The tools that
-            // page their own output are exempt: a page of theirs is not stored again.
+            // The tools that page their own output are exempt: a page of theirs is not stored
+            // again.
             let paging = [output_store::TOOL_NAME, TOOL_NAME, tools::READ_FILE];
-            let spill = SpillOutputs::new(store.clone(), paging.map(String::from).to_vec());
+            let (spill, reader) = SpillOutputs::with_reader(store, paging.map(String::from).to_vec());
             // Named like the hooks every session shares (`cli::agent::hooks`).
             hooks.push("spill_outputs", Arc::new(spill));
-            host.push(Arc::new(ReadOutputTool::new(store)));
+            host.push(Arc::new(reader));
         }
         if self.execution == Execution::Container {
             check_session_outside(self.place.location(cwd).as_deref(), cwd)?;
@@ -96,7 +98,7 @@ impl SessionSetup for PerSession {
         )
         .await?;
         let built_in: Vec<String> = self.tools.iter().filter(|name| !host_tool(name)).cloned().collect();
-        let mut tools = tools::builtin_tools(&built_in, self.tool_timeout, &executor)?;
+        let mut tools = tools::builtin_tools(&built_in, self.tool_timeout, &executor, &self.files)?;
         tools.extend(host);
         Ok(SessionParts {
             tools,
