@@ -14,7 +14,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 use crate::config::skills::{ReadSkillTool, TOOL_NAME};
-use crate::config::{AgentDefinition, Config, Execution};
+use crate::config::{AgentDefinition, Config};
 use crate::otel;
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::{ModelMeta, Provider};
@@ -26,7 +26,6 @@ use zx_agent::hooks::HookChain;
 use zx_agent::policy::{ApprovalMode, PolicyChain, PolicyDecision};
 use zx_agent::prompt::build_system_prompt;
 use zx_agent::tools::Tool;
-use zx_agent::transcript::Transcript;
 use zx_agent::{Agent, AgentConfig, Session, SessionOptions};
 
 use super::setup::PerSession;
@@ -55,9 +54,8 @@ pub struct ModeAgent {
     pub(crate) auto_approve_commands: Vec<String>,
     /// Where the agent keeps its sessions, for a mode that lists them or shows their files.
     pub(crate) place: SessionPlace,
-    /// `--cwd`: where new sessions work unless a client names a directory.
+    /// Where new sessions work unless a client names a directory ([`Overrides::cwd`]).
     pub(crate) cwd: Option<PathBuf>,
-    execution: Execution,
 }
 
 impl ModeAgent {
@@ -116,7 +114,6 @@ impl ModeAgent {
             auto_approve_commands,
             place: place.clone(),
             cwd: shared.overrides.cwd.clone(),
-            execution: config.execution,
         })
     }
 
@@ -138,17 +135,10 @@ impl ModeAgent {
         }
     }
 
-    /// Where a new session works: `cwd` when a client names a project directory, else
-    /// `--cwd`'s, else the current directory. Container execution uses the directory's real
-    /// path: the container mounts the workspace there, and tools must use the same path.
+    /// Where a new session works: `cwd` when a client names a project directory, else the
+    /// configured one, else the current directory, by its real path.
     pub(crate) fn new_session_cwd(&self, cwd: Option<&Path>) -> Result<PathBuf> {
-        let cwd = resolve_cwd(cwd.or(self.cwd.as_deref()))?;
-        match self.execution {
-            Execution::Local => Ok(cwd),
-            Execution::Container => cwd
-                .canonicalize()
-                .with_context(|| format!("cannot resolve {}", cwd.display())),
-        }
+        resolve_cwd(cwd.or(self.cwd.as_deref()))
     }
 
     /// Create a session in `cwd`, otherwise in the configured override directory or the
@@ -159,20 +149,6 @@ impl ModeAgent {
     pub async fn create(&self, cwd: Option<&Path>) -> Result<Session> {
         let options = SessionOptions::new(self.new_session_cwd(cwd)?);
         self.agent.create_session(options).await
-    }
-
-    /// The session `id` of the mode's place, which goes on in the directory it started in.
-    ///
-    /// Startup reads, short session appends and, in container mode, starting the container.
-    pub(crate) async fn resume(&self, id: &str) -> Result<Session> {
-        let session = self.open(id).await?;
-        let cut_off = session.with_transcript(Transcript::incomplete_tail_bytes)?;
-        if cut_off > 0 {
-            eprintln!(
-                "[session] recovered incomplete final record; its {cut_off} bytes are cut off before the next record"
-            );
-        }
-        Ok(session)
     }
 }
 
@@ -344,14 +320,16 @@ fn hidden_env(shared: &Shared) -> Vec<String> {
         .collect()
 }
 
-/// The values to redact of the hidden variables besides the key; an unset or empty variable
-/// holds nothing.
+/// The values to redact of the hidden variables besides the key, the trace collector's headers
+/// among them; an unset or empty variable holds nothing.
 fn hidden_values(shared: &Shared) -> impl Iterator<Item = String> + '_ {
     shared
         .hidden_env
         .iter()
         .chain(&shared.mcp.token_env)
-        .filter_map(|name| env_value(name))
+        .map(String::as_str)
+        .chain(otel::HEADER_VARIABLES)
+        .filter_map(env_value)
 }
 
 /// The MCP tools, of `names`, that ask a person: those not in the agent's `permissions.allow`,

@@ -8,8 +8,11 @@ use anyhow::Result;
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio_util::sync::CancellationToken;
 
+use crate::assembly::{ModeAgent, NoModel, Overrides, Shared};
+use crate::config::Builtin;
 use crate::otel::{Telemetry, TraceHook, TraceParent};
 use zx_agent::events::{Budget, Event, EventKind, RunOutcome};
+use zx_agent::transcript::Transcript;
 use zx_agent::{Run, Session};
 
 /// Exit codes, so schedulers can react without parsing output.
@@ -24,6 +27,43 @@ const EXIT_TOKEN_BUDGET: u8 = 7;
 const EXIT_COST_BUDGET: u8 = 8;
 /// `run --fail-on-denied`: completed, but a policy or an approval denied a tool call.
 pub(crate) const EXIT_DENIED: u8 = 9;
+
+/// What the process shares, read and connected once for sessions of `agent`, with its
+/// startup notices written to stderr. Without a model, the error names the command line's
+/// ways to give one.
+pub(crate) async fn connect(overrides: Overrides, agent: Builtin) -> Result<Shared> {
+    let shared = Shared::from_environment(overrides, agent)
+        .await
+        .map_err(with_model_hint)?;
+    for notice in &shared.notices {
+        eprintln!("{notice}");
+    }
+    Ok(shared)
+}
+
+/// `error`, or, when no model was given, the command line's ways to give one.
+fn with_model_hint(error: anyhow::Error) -> anyhow::Error {
+    match error.downcast_ref::<NoModel>() {
+        Some(no_model) => anyhow::anyhow!(
+            "no model: pass --model, set ZX_MODEL, or set model in {}",
+            no_model.place
+        ),
+        None => error,
+    }
+}
+
+/// The stored session `id` of `agent`, opened. A cut-short final record, which the next
+/// record replaces, is reported on stderr.
+pub(crate) async fn resume(agent: &ModeAgent, id: &str) -> Result<Session> {
+    let session = agent.open(id).await?;
+    let cut_off = session.with_transcript(Transcript::incomplete_tail_bytes)?;
+    if cut_off > 0 {
+        eprintln!(
+            "[session] recovered incomplete final record; its {cut_off} bytes are cut off before the next record"
+        );
+    }
+    Ok(session)
+}
 
 /// The exit code that reports `outcome`.
 pub(crate) fn exit_code(outcome: RunOutcome) -> u8 {
@@ -215,5 +255,23 @@ async fn finish_telemetry(telemetry: Option<Telemetry>) {
     }
     if let Err(error) = telemetry.shutdown().await {
         eprintln!("[otel] {error:#}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_model_names_the_command_lines_ways_to_give_one() {
+        let no_model = NoModel {
+            place: "/home/me/.zx-agent/config.toml".into(),
+        };
+        assert_eq!(
+            format!("{:#}", with_model_hint(no_model.into())),
+            "no model: pass --model, set ZX_MODEL, or set model in /home/me/.zx-agent/config.toml"
+        );
+        let other = with_model_hint(anyhow::anyhow!("something else"));
+        assert_eq!(format!("{other:#}"), "something else");
     }
 }

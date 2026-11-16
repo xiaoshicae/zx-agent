@@ -105,6 +105,25 @@ async fn secret_files_named_in_the_environment_are_redacted() {
 }
 
 #[tokio::test]
+async fn the_trace_collectors_headers_are_redacted_like_other_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let headers = "Authorization=Bearer collector-secret-123";
+    std::fs::write(dir.path().join("leaked"), headers).unwrap();
+    let server = MockServer::start(vec![Reply::bash("c", "cat leaked"), Reply::text("done")]).await;
+
+    let output = run_bash(&server, dir.path())
+        .env("OTEL_EXPORTER_OTLP_HEADERS", headers)
+        .output()
+        .await
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let messages = server.requests()[1].body["messages"].to_string();
+    assert!(!messages.contains("collector-secret-123"), "{messages}");
+    assert!(messages.contains("[REDACTED]"), "{messages}");
+}
+
+#[tokio::test]
 async fn secret_files_of_config_toml_add_to_those_in_the_environment() {
     let dir = tempfile::tempdir().unwrap();
     let from_env = dir.path().join("env-token");

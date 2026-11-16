@@ -42,19 +42,12 @@ pub(crate) struct Shared {
 
 impl Shared {
     /// Read the settings with `overrides` over them, connect the MCP servers of config.toml
-    /// and check the secret files, for sessions of `agent`.
+    /// and check the secret files, for sessions of `agent`. The notices are for the caller
+    /// to show.
     ///
-    /// A missing model, a missing token, a server that cannot be reached in time, a tool it
-    /// lacks or a secret file that cannot be used stops startup, like other configuration
-    /// errors.
-    pub(crate) async fn connect(overrides: Overrides, agent: Builtin) -> Result<Self> {
-        let shared = Self::from_environment(overrides, agent).await?;
-        for notice in &shared.notices {
-            eprintln!("{notice}");
-        }
-        Ok(shared)
-    }
-
+    /// A missing model ([`NoModel`]), a missing token, a server that cannot be reached in
+    /// time, a tool it lacks or a secret file that cannot be used stops startup, like other
+    /// configuration errors.
     pub(crate) async fn from_environment(overrides: Overrides, agent: Builtin) -> Result<Self> {
         let settings = Settings::resolve(overrides.model.as_deref())?;
         let files = secret_files(&settings.config.secret_files)?;
@@ -187,20 +180,14 @@ fn secret_files(configured: &[PathBuf]) -> Result<Vec<PathBuf>> {
         .chain(configured.iter().cloned())
         .filter(|path| !path.as_os_str().is_empty())
         .collect();
-    checked_secret_files(secret_files)
+    checked_secret_files(secret_files).context("secretFiles in config.toml or ZX_SECRET_FILES")
 }
 
 /// Validate explicit secret files without reading process overrides or printing notices.
 pub(crate) fn checked_secret_files(secret_files: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
     for path in &secret_files {
-        std::fs::metadata(path).with_context(|| {
-            format!(
-                "cannot use secret file {} (secretFiles in config.toml or ZX_SECRET_FILES)",
-                path.display()
-            )
-        })?;
+        std::fs::metadata(path).with_context(|| format!("cannot use secret file {}", path.display()))?;
     }
-    check_secret_files(&secret_files)
-        .map_err(|error| anyhow::anyhow!("{error} (secretFiles in config.toml or ZX_SECRET_FILES)"))?;
+    check_secret_files(&secret_files).map_err(|error| anyhow::anyhow!("{error}"))?;
     Ok(secret_files)
 }

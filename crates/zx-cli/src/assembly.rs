@@ -24,6 +24,7 @@ use anyhow::{Context, Result};
 pub use agent::{Approvals, ModeAgent};
 pub(crate) use place::PlaceKind;
 pub use place::SessionPlace;
+pub use settings::NoModel;
 pub(crate) use settings::Settings;
 pub(crate) use shared::{Shared, checked_secret_files};
 
@@ -47,22 +48,28 @@ pub struct Overrides {
     pub cost_budget: Option<f64>,
 }
 
-/// The working directory of a new session, which is what its header records: `cwd` made
-/// absolute, or the current directory.
+/// The working directory of a new session, which is what its header records: `cwd`, or the
+/// current directory, by its real path. Local and container execution record a directory
+/// the same way, and the container mounts the workspace at that path.
 pub(crate) fn resolve_cwd(cwd: Option<&Path>) -> Result<PathBuf> {
-    let cwd = match cwd {
-        Some(path) => path
-            .canonicalize()
-            .with_context(|| format!("invalid --cwd {}", path.display()))?,
+    let asked = match cwd {
+        Some(path) => path.to_path_buf(),
         None => std::env::current_dir().context("cannot find the current directory")?,
     };
-    anyhow::ensure!(cwd.is_dir(), "--cwd is not a directory: {}", cwd.display());
+    let cwd = asked
+        .canonicalize()
+        .with_context(|| format!("cannot resolve the working directory {}", asked.display()))?;
+    anyhow::ensure!(
+        cwd.is_dir(),
+        "the working directory is not a directory: {}",
+        cwd.display()
+    );
     Ok(cwd)
 }
 
-/// Refuse `--cwd` when it names another directory than `session_cwd`, where the session to
-/// continue works: a session goes on in the directory it started in, and `--cwd` is where
-/// new ones work. Without `--cwd` nothing is asked.
+/// Refuse an explicit working directory ([`Overrides::cwd`]) that is another than
+/// `session_cwd`, where the session to continue works: a session goes on in the directory
+/// it started in, and the explicit one is where new ones work. Without one nothing is asked.
 fn check_session_cwd(explicit: Option<&Path>, session_cwd: &str) -> Result<()> {
     let Some(explicit) = explicit else {
         return Ok(());
@@ -75,7 +82,7 @@ fn check_session_cwd(explicit: Option<&Path>, session_cwd: &str) -> Result<()> {
         .is_ok_and(|recorded| recorded == asked);
     anyhow::ensure!(
         same,
-        "--cwd {} is not where the session works: it started in {session_cwd} and goes on there; leave --cwd out to continue it",
+        "the working directory {} is not where the session works: it started in {session_cwd} and goes on there; give none to continue it",
         asked.display()
     );
     Ok(())

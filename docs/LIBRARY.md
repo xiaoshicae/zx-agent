@@ -45,7 +45,7 @@ Application（其他 Rust 宿主） ├→ assembly → Agent → Session / Run
 
 | 入口或资源 | 契约 |
 |---|---|
-| `Application::from_config(config, home, overrides, role)` | 配置显式传入；`home` 只用于读取 agent 文件，不发现 config.toml，不读取 `ZX_MODEL`、`ZX_BASE_URL`、`ZX_SECRET_FILES` 覆盖；配置中命名的 API/MCP 凭据仍从环境变量读取 |
+| `Application::from_config(config, home, overrides, role)` | 配置显式传入，先经 `Config::validate` 检查，与读取 config.toml 时的检查相同；`home` 只用于读取 agent 文件，不发现 config.toml，不读取 `ZX_MODEL`、`ZX_BASE_URL`、`ZX_SECRET_FILES` 覆盖；配置中命名的 API/MCP 凭据仍从环境变量读取。没有模型时的错误可向下转型为 `NoModel`，措辞不提命令行参数 |
 | `Application::from_environment(overrides, role)` | 显式选择 CLI 的主目录配置发现，以及 `ZX_BASE_URL`、`ZX_SECRET_FILES`；`ZX_MODEL` 由宿主选择是否放入 `overrides.model` |
 | `build(place, approvals)` | 生成 `ConfiguredAgent`，还不创建会话；MCP 连接由 Application 内的装配资源共享 |
 | `SessionPlace` | 宿主显式选择 memory、file 或 directory；memory 中关闭的会话会被遗忘 |

@@ -19,7 +19,7 @@ pub(super) fn check_session_outside(location: Option<&Path>, cwd: &Path) -> Resu
     if let Some(path) = location {
         anyhow::ensure!(
             !resolve_location(path)?.starts_with(cwd),
-            "container execution needs the session file outside the working directory, which the container can read: {}; choose a --session path outside {}, or move the session directory with ZX_AGENT_HOME",
+            "container execution needs the session file outside the working directory, which the container can read: {}; keep the sessions outside {}",
             path.display(),
             cwd.display()
         );

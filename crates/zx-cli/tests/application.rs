@@ -125,3 +125,24 @@ async fn invalid_model_and_budget_are_rejected_before_any_session_is_created() {
     let error = app.build(&SessionPlace::memory(), Approvals::Nobody).err().unwrap();
     assert!(format!("{error:#}").contains("a cost budget needs the prices"));
 }
+
+#[tokio::test]
+async fn an_explicit_configuration_is_checked_as_a_file_would_be() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config {
+        approval_timeout_secs: Some(0),
+        ..configured()
+    };
+    let refused = Application::from_config(
+        config,
+        Some(dir.path().join("home")),
+        Overrides::default(),
+        Builtin::Unattended,
+    )
+    .await;
+    let error = match refused {
+        Ok(_) => panic!("an approval that times out at once was accepted"),
+        Err(error) => format!("{error:#}"),
+    };
+    assert!(error.contains("approvalTimeoutSecs must be at least 1"), "{error}");
+}

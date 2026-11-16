@@ -234,8 +234,24 @@ impl Config {
         Ok(names)
     }
 
-    /// Check the container settings, the tool output settings and the MCP servers.
-    fn validate(&self) -> Result<()> {
+    /// Check every value: what [`load`](Self::load) checks once it has read the file, and what
+    /// a configuration a host builds itself must pass as well before anything runs with it.
+    /// Errors name the key of config.toml that holds the value.
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.model.as_deref().is_none_or(|model| !model.trim().is_empty()),
+            "model must not be empty"
+        );
+        for (key, value) in [
+            ("toolTimeoutSecs", self.tool_timeout_secs),
+            ("approvalTimeoutSecs", self.approval_timeout_secs),
+        ] {
+            ensure!(value != Some(0), "{key} must be at least 1");
+        }
+        self.provider.validate()?;
+        for (id, meta) in &self.models {
+            check_model(id, meta)?;
+        }
         self.tool_output.validate().context("[toolOutput]")?;
         for (key, value) in [
             ("container.image", &self.container.image),
@@ -269,11 +285,11 @@ impl RawConfig {
     fn into_config(self, path: &Path, parent: &Path) -> Result<Config> {
         let mut config = Config {
             path: Some(path.to_path_buf()),
-            model: non_empty("model", self.model)?,
+            model: self.model,
             reasoning: parsed("reasoning", self.reasoning)?,
             max_tokens: self.max_tokens,
-            tool_timeout_secs: positive("toolTimeoutSecs", self.tool_timeout_secs)?,
-            approval_timeout_secs: positive("approvalTimeoutSecs", self.approval_timeout_secs)?,
+            tool_timeout_secs: self.tool_timeout_secs,
+            approval_timeout_secs: self.approval_timeout_secs,
             secret_files: secret_files(self.secret_files, parent)?,
             provider: self.provider.into_settings()?,
             execution: self.execution.unwrap_or_default(),
@@ -283,7 +299,13 @@ impl RawConfig {
             mcp: self.mcp,
         };
         for model in self.models {
-            model.add_to(&mut config.models)?;
+            config.models.insert(
+                model.id,
+                ModelMeta {
+                    context_window: model.context_window,
+                    cost: model.cost,
+                },
+            );
         }
         Ok(config)
     }
@@ -298,10 +320,10 @@ impl RawProvider {
             api_key_env,
             retry,
         } = &mut settings;
-        if let Some(url) = non_empty("provider.baseUrl", self.base_url)? {
+        if let Some(url) = self.base_url {
             openai.base_url = url;
         }
-        if let Some(env) = non_empty("provider.apiKeyEnv", self.api_key_env)? {
+        if let Some(env) = self.api_key_env {
             *api_key_env = env;
         }
         if let Some(updates) = parsed("provider.systemUpdates", self.system_updates)? {
@@ -315,9 +337,9 @@ impl RawProvider {
         }
         openai.body.fill_missing_reasoning = self.fill_missing_reasoning;
         openai.body.prompt_cache_key = self.prompt_cache_key;
-        openai.body.extra_fields = request_fields(self.request_fields)?;
-        openai.headers = headers(self.headers)?;
-        if let Some(secs) = positive("provider.idleTimeoutSecs", self.idle_timeout_secs)? {
+        openai.body.extra_fields = self.request_fields;
+        openai.headers = self.headers.into_iter().collect();
+        if let Some(secs) = self.idle_timeout_secs {
             openai.idle_timeout = Duration::from_secs(secs);
         }
         if let Some(retries) = self.max_retries {
@@ -327,10 +349,53 @@ impl RawProvider {
     }
 }
 
-/// `value`, which must be at least 1 when it is set.
-fn positive(key: &str, value: Option<u64>) -> Result<Option<u64>> {
-    ensure!(value != Some(0), "{key} must be at least 1");
-    Ok(value)
+impl ProviderSettings {
+    /// Check the provider's values: an address and a key variable that are not empty, a
+    /// positive idle timeout, request fields and headers with names, and no `Authorization`
+    /// header, which comes from the API key.
+    fn validate(&self) -> Result<()> {
+        let openai = &self.openai;
+        ensure!(!openai.base_url.trim().is_empty(), "provider.baseUrl must not be empty");
+        ensure!(
+            !self.api_key_env.trim().is_empty(),
+            "provider.apiKeyEnv must not be empty"
+        );
+        ensure!(
+            !openai.idle_timeout.is_zero(),
+            "provider.idleTimeoutSecs must be at least 1"
+        );
+        ensure!(
+            openai.body.extra_fields.keys().all(|field| !field.trim().is_empty()),
+            "provider.requestFields: a field has no name"
+        );
+        for (name, _) in &openai.headers {
+            ensure!(!name.trim().is_empty(), "provider.headers: a header has no name");
+            ensure!(
+                !name.trim().eq_ignore_ascii_case("authorization"),
+                "provider.headers: Authorization comes from the API key (provider.apiKeyEnv); it cannot be set as a header"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Check what is known about the model `id`: an ID, a positive context window, and prices
+/// that are numbers, zero or more.
+fn check_model(id: &str, meta: &ModelMeta) -> Result<()> {
+    ensure!(!id.trim().is_empty(), "models: an entry has no id");
+    ensure!(
+        meta.context_window.is_none_or(|window| window > 0),
+        "models.{id}: contextWindow must be greater than zero"
+    );
+    if let Some(cost) = &meta.cost {
+        ensure!(
+            [cost.input, cost.output, cost.cache_read, cost.cache_write]
+                .iter()
+                .all(|price| price.is_finite() && *price >= 0.0),
+            "models.{id}: prices must be zero or more, per million tokens"
+        );
+    }
+    Ok(())
 }
 
 /// The secret files, relative to `parent`, the directory of config.toml.
@@ -340,38 +405,6 @@ fn secret_files(paths: Vec<PathBuf>, parent: &Path) -> Result<Vec<PathBuf>> {
         "secretFiles: an entry is empty"
     );
     Ok(paths.into_iter().map(|path| parent.join(path)).collect())
-}
-
-/// The request fields, whose names must not be empty.
-fn request_fields(
-    fields: serde_json::Map<String, serde_json::Value>,
-) -> Result<serde_json::Map<String, serde_json::Value>> {
-    ensure!(
-        fields.keys().all(|field| !field.trim().is_empty()),
-        "provider.requestFields: a field has no name"
-    );
-    Ok(fields)
-}
-
-/// The headers, without `Authorization`, which comes from the API key.
-fn headers(headers: BTreeMap<String, String>) -> Result<Vec<(String, String)>> {
-    for name in headers.keys() {
-        ensure!(!name.trim().is_empty(), "provider.headers: a header has no name");
-        ensure!(
-            !name.trim().eq_ignore_ascii_case("authorization"),
-            "provider.headers: Authorization comes from the API key (provider.apiKeyEnv); it cannot be set as a header"
-        );
-    }
-    Ok(headers.into_iter().collect())
-}
-
-/// `value`, which must not be empty when it is set.
-fn non_empty(key: &str, value: Option<String>) -> Result<Option<String>> {
-    ensure!(
-        value.as_deref().is_none_or(|value| !value.trim().is_empty()),
-        "{key} must not be empty"
-    );
-    Ok(value)
 }
 
 /// `value` parsed by its type, with `key` naming it in the error.
@@ -396,35 +429,6 @@ impl RawToolOutput {
             config.max_file_bytes = bytes;
         }
         Ok(config)
-    }
-}
-
-impl RawModel {
-    /// Check the entry and record it under its id.
-    fn add_to(self, models: &mut HashMap<String, ModelMeta>) -> Result<()> {
-        ensure!(!self.id.trim().is_empty(), "models: an entry has no id");
-        ensure!(
-            self.context_window.is_none_or(|window| window > 0),
-            "models.{}: contextWindow must be greater than zero",
-            self.id
-        );
-        if let Some(cost) = &self.cost {
-            ensure!(
-                [cost.input, cost.output, cost.cache_read, cost.cache_write]
-                    .iter()
-                    .all(|price| price.is_finite() && *price >= 0.0),
-                "models.{}: prices must be zero or more, per million tokens",
-                self.id
-            );
-        }
-        models.insert(
-            self.id,
-            ModelMeta {
-                context_window: self.context_window,
-                cost: self.cost,
-            },
-        );
-        Ok(())
     }
 }
 
