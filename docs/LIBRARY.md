@@ -29,9 +29,7 @@ let report = run.wait().await;                // 只要结果时直接 session.s
 
 ## 有界输入与轻量查询
 
-SDK 默认入队保持无配额语义。宿主要限制待处理输入时，创建共享 `Arc<InputBudget>`，在收件时 `try_reserve`，文本归属信息补齐后用 `InputPermit::attach` 得到 `PendingInput`，或直接用 `try_admit(Input)`。消息数量与 UTF-8 文本字节原子检查；`try_reserve` 满时返回 `None`，`try_admit` / `attach` 拒绝时用 `InputRejected::into_input` 取回原输入。actor、details 和 custom entry 不计入文本预算。
-
-`InputQueues::steer_pending` / `follow_up_pending` 接收这份输入并持有配额，直到记录或移除；`Session::take_pending` 与 `InputQueues::drain_pending` 在转移到宿主队列时保留配额。`take_queued`、普通 drain 和 `PendingInput::into_input` 返回裸输入并归还配额，适用于开始运行或停止保留。直接调用 `steer` / `follow_up` 仍是无配额入队，不会自动使用宿主创建的预算。
+内核的输入队列不限量，也不计配额。宿主要限制待处理的输入时，自己计量，再把计量凭证随输入放进队列：`PendingInput::held(输入, 凭证)` 交给 `queues().steer` 或 `follow_up`。凭证可以是任何 `Send` 的值，内核不读取它；输入被会话记录、被 `withdraw` 撤回、被不带凭证地取出（`PendingInput::into_input`、`drain_steering`、`drain_follow_up`）或随队列丢弃时，凭证随之丢弃，丢弃发生在队列的锁之外。`Session::take_queued` 与 `InputQueues::take_all` 连同凭证一起取出，宿主把输入转到自己的队列时，凭证继续有效。IM 服务按这种方式限制每个对话待处理消息的数量与文本字节（`crates/zx-im/src/admission.rs`）。
 
 只要最近会话 ID 时，用 `Agent::latest_session`（对应存储的 `latest`，自定义存储默认经 `list` 实现）。JSONL 实现按头部过滤、按最后完整记录的时间选择候选；活动时间相同时按创建时间、ID 排序，`limit = 0` 返回空。它不校验内部历史，打开时仍由 `Transcript::load` 完整校验；要完整列表和损坏诊断，用 `list_sessions`。头部/活动时间缓存各至多 1024 条，完整列表缓存至多 128 条；索引可丢弃重建，不写新的会话格式，文件发现仍扫描目录。
 

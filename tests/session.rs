@@ -12,7 +12,7 @@ use futures::FutureExt;
 use serde_json::{Value, json};
 use tokio::sync::Notify;
 
-use common::{Collect, Driven, NotifyingProvider, RunnerSetup, config, header, summarize};
+use common::{Collect, Driven, NotifyingProvider, RunnerSetup, config, header, summarize, take_queued_inputs};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Reasoning, Request, ToolDef};
 use zx_agent::events::{EventKind, RunOutcome};
@@ -64,10 +64,10 @@ async fn take_queued_returns_input_no_run_consumed_steering_first() {
     session.queues().steer("now");
     session.queues().steer("also now");
     assert_eq!(
-        session.take_queued().unwrap(),
+        take_queued_inputs(&session).unwrap(),
         [Input::from("now"), Input::from("also now"), Input::from("later")]
     );
-    assert!(session.take_queued().unwrap().is_empty());
+    assert!(take_queued_inputs(&session).unwrap().is_empty());
     session.prompt("second").await.unwrap();
     assert_eq!(
         summarize(&provider.faux.requests()[1].messages),
@@ -81,10 +81,10 @@ async fn take_queued_during_a_run_is_busy_and_leaves_the_input_queued() {
     let mut running = Box::pin(session.prompt("first"));
     tokio::select! { () = provider.started.notified() => {}, _ = &mut running => panic!("must be running") }
     session.queues().steer("queued");
-    assert_eq!(session.take_queued(), Err(SessionError::Busy));
+    assert_eq!(take_queued_inputs(&session), Err(SessionError::Busy));
     assert!(session.cancel());
     assert_eq!(running.await.unwrap().outcome, RunOutcome::Cancelled);
-    assert_eq!(session.take_queued().unwrap(), [Input::from("queued")]);
+    assert_eq!(take_queued_inputs(&session).unwrap(), [Input::from("queued")]);
 }
 
 #[tokio::test]

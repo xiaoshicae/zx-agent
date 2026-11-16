@@ -23,11 +23,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::ai::now_ms;
 use crate::session::SessionError;
-use zx_core::input::{InputBudget, InputPermit, PendingInput};
+use zx_core::input::PendingInput;
 
 use zx_core::events::RunReport;
 use zx_core::policy::ApprovalDecision;
 
+use super::admission::{InputBudget, InputPermit};
 use super::approval::ApprovalUpdate;
 use super::outlet::{Asked, Opened, Outlet};
 use super::server::Shared;

@@ -1,10 +1,6 @@
 //! Messages injected into a running loop, and records an extension asks the loop to keep.
-//!
-//! - `admission`: transferable count and byte reservations for a host's pending input
 
-mod admission;
-pub use admission::{InputBudget, InputPermit, InputRejected, PendingInput};
-
+use std::any::Any;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
@@ -33,15 +29,6 @@ pub enum Input {
     Custom(CustomMessage),
 }
 
-impl Input {
-    fn text_bytes(&self) -> usize {
-        match self {
-            Self::User { text, .. } => text.len(),
-            Self::Custom(message) => message.content.len(),
-        }
-    }
-}
-
 impl From<String> for Input {
     fn from(text: String) -> Self {
         Self::User { text, actor: None }
@@ -51,6 +38,56 @@ impl From<String> for Input {
 impl From<&str> for Input {
     fn from(text: &str) -> Self {
         Self::from(text.to_string())
+    }
+}
+
+/// Input waiting in a queue, with what the host attached to it, if anything: a hold, such as a
+/// share of the host's capacity, that ends when the input leaves the queues: once it is
+/// recorded, withdrawn or taken without it ([`PendingInput::into_input`]), or when the queues
+/// are dropped. Ending a hold drops it, never under a queue's lock.
+#[derive(Debug)]
+pub struct PendingInput {
+    input: Input,
+    hold: Option<Box<dyn Any + Send>>,
+}
+
+impl PendingInput {
+    /// `input` with `hold`, which lasts while the input waits.
+    pub fn held(input: impl Into<Input>, hold: impl Any + Send) -> Self {
+        Self {
+            input: input.into(),
+            hold: Some(Box::new(hold)),
+        }
+    }
+
+    /// The input, while it waits.
+    pub fn input(&self) -> &Input {
+        &self.input
+    }
+
+    /// The input, ending its hold.
+    pub fn into_input(self) -> Input {
+        let Self { input, hold } = self;
+        drop(hold);
+        input
+    }
+}
+
+impl From<Input> for PendingInput {
+    fn from(input: Input) -> Self {
+        Self { input, hold: None }
+    }
+}
+
+impl From<String> for PendingInput {
+    fn from(text: String) -> Self {
+        Self::from(Input::from(text))
+    }
+}
+
+impl From<&str> for PendingInput {
+    fn from(text: &str) -> Self {
+        Self::from(Input::from(text))
     }
 }
 
@@ -89,34 +126,16 @@ pub struct InputQueues {
 }
 
 impl InputQueues {
-    /// Queue a message for the next step of the current task: the person's text, or any
-    /// [`Input`].
-    pub fn steer(&self, message: impl Into<Input>) {
-        self.steer_pending(PendingInput::unbudgeted(message.into()));
+    /// Queue a message for the next step of the current task: the person's text, any
+    /// [`Input`], or input with a hold of the host's ([`PendingInput::held`]).
+    pub fn steer(&self, message: impl Into<PendingInput>) {
+        lock(&self.steering).push_back(message.into());
     }
 
-    /// Queue a message for after the current task finishes: the person's text, or any
-    /// [`Input`].
-    pub fn follow_up(&self, message: impl Into<Input>) {
-        self.follow_up_pending(PendingInput::unbudgeted(message.into()));
-    }
-
-    /// Queue input while retaining its admission permit until it is recorded or removed.
-    pub fn steer_pending(&self, input: PendingInput) {
-        lock(&self.steering).push_back(input);
-    }
-
-    /// Queue a follow-up while retaining its admission permit.
-    pub fn follow_up_pending(&self, input: PendingInput) {
-        lock(&self.follow_up).push_back(input);
-    }
-
-    /// Take both lanes without releasing their admission permits. A host moving leftovers
-    /// into another waiting queue uses this instead of draining into bare inputs.
-    pub fn drain_pending(&self) -> Vec<PendingInput> {
-        let mut messages: Vec<_> = lock(&self.steering).drain(..).collect();
-        messages.extend(lock(&self.follow_up).drain(..));
-        messages
+    /// Queue a message for after the current task finishes, as [`steer`](Self::steer) takes
+    /// it.
+    pub fn follow_up(&self, message: impl Into<PendingInput>) {
+        lock(&self.follow_up).push_back(message.into());
     }
 
     /// Ask the loop to record state of an extension (pi: `appendEntry`) at the start of its
@@ -127,24 +146,6 @@ impl InputQueues {
             custom_type: custom_type.into(),
             data,
         });
-    }
-
-    /// Observe pending steering and follow-up messages and their UTF-8 text bytes, excluding
-    /// custom entries. Each lane is counted separately; concurrent producers can change the
-    /// result. Strict admission uses [`InputBudget`] and [`Self::steer_pending`] instead.
-    pub fn pending_size(&self) -> (usize, usize) {
-        let mut size = (0usize, 0usize);
-        for queue in [&self.steering, &self.follow_up] {
-            for input in lock(queue).iter() {
-                let text = match &input.input {
-                    Input::User { text, .. } => text,
-                    Input::Custom(message) => &message.content,
-                };
-                size.0 = size.0.saturating_add(1);
-                size.1 = size.1.saturating_add(text.len());
-            }
-        }
-        size
     }
 
     /// How queued messages are taken.
@@ -163,32 +164,43 @@ impl InputQueues {
     /// is recorded even so, since it leaves the queue only once recorded.
     pub fn withdraw(&self, message: &Input) -> bool {
         [Queue::Steering, Queue::FollowUp].into_iter().any(|queue| {
-            let mut messages = lock(self.lane(queue));
-            match messages.iter().position(|queued| &queued.input == message) {
-                Some(index) => {
-                    messages.remove(index);
-                    true
-                }
-                None => false,
-            }
+            let withdrawn = {
+                let mut messages = lock(self.lane(queue));
+                let index = messages.iter().position(|queued| &queued.input == message);
+                index.and_then(|index| messages.remove(index))
+            };
+            withdrawn.is_some()
         })
     }
 
-    /// Take every queued steering message, oldest first, whatever the mode.
+    /// Take every queued steering message, oldest first, whatever the mode, ending their
+    /// holds.
     pub fn drain_steering(&self) -> Vec<Input> {
-        lock(&self.steering).drain(..).map(PendingInput::into_input).collect()
+        Self::inputs(Self::take(&self.steering))
     }
 
-    /// Take every queued follow-up message, oldest first, whatever the mode.
+    /// Take every queued follow-up message, oldest first, whatever the mode, ending their
+    /// holds.
     pub fn drain_follow_up(&self) -> Vec<Input> {
-        lock(&self.follow_up).drain(..).map(PendingInput::into_input).collect()
+        Self::inputs(Self::take(&self.follow_up))
     }
 
-    /// Take every queued message: steering first, then follow-ups, each oldest first.
-    pub(crate) fn take_all(&self) -> Vec<Input> {
-        let mut messages = self.drain_steering();
-        messages.extend(self.drain_follow_up());
+    /// Take every queued message with its hold: steering first, then follow-ups, each oldest
+    /// first. A host that moves the messages into queues of its own keeps the holds with them.
+    pub fn take_all(&self) -> Vec<PendingInput> {
+        let mut messages = Self::take(&self.steering);
+        messages.extend(Self::take(&self.follow_up));
         messages
+    }
+
+    /// Everything in `lane`, taken under its lock and handed out after it.
+    fn take(lane: &Mutex<VecDeque<PendingInput>>) -> Vec<PendingInput> {
+        lock(lane).drain(..).collect()
+    }
+
+    /// The inputs of `messages`, whose holds end here, outside any queue's lock.
+    fn inputs(messages: Vec<PendingInput>) -> Vec<Input> {
+        messages.into_iter().map(PendingInput::into_input).collect()
     }
 
     /// Take the entries waiting to be recorded, oldest first.
@@ -204,12 +216,18 @@ impl InputQueues {
     }
 
     /// Remove the oldest message of `queue` after the session recorded it, unless a frontend
-    /// drained the queue in the meantime and it now starts with another message.
+    /// drained the queue in the meantime and it now starts with another message. Its hold
+    /// ends here, after the queue's lock is released.
     pub(crate) fn remove_front(&self, queue: Queue, message: &Input) {
-        let mut messages = lock(self.lane(queue));
-        if messages.front().is_some_and(|pending| &pending.input == message) {
-            messages.pop_front();
-        }
+        let removed = {
+            let mut messages = lock(self.lane(queue));
+            if messages.front().is_some_and(|pending| &pending.input == message) {
+                messages.pop_front()
+            } else {
+                None
+            }
+        };
+        drop(removed);
     }
 
     pub(crate) fn has(&self, queue: Queue) -> bool {
@@ -233,6 +251,9 @@ pub(crate) enum Queue {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
 
     fn texts(messages: Vec<Input>) -> Vec<String> {
@@ -326,7 +347,10 @@ mod tests {
         queues.steer(Input::Custom(custom.clone()));
         queues.append_entry("state", serde_json::json!({"n": 1}));
 
-        assert_eq!(queues.take_all(), [Input::from("a"), Input::Custom(custom)]);
+        assert_eq!(
+            InputQueues::inputs(queues.take_all()),
+            [Input::from("a"), Input::Custom(custom)]
+        );
         assert_eq!(
             queues.take_entries(),
             [PendingEntry {
@@ -335,6 +359,47 @@ mod tests {
             }]
         );
         assert!(queues.take_entries().is_empty());
+    }
+
+    /// A hold that counts how many of its kind are alive.
+    struct Hold(Arc<AtomicUsize>);
+
+    impl Hold {
+        fn new(alive: &Arc<AtomicUsize>) -> Self {
+            alive.fetch_add(1, Ordering::SeqCst);
+            Self(Arc::clone(alive))
+        }
+    }
+
+    impl Drop for Hold {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn a_hold_moves_with_its_input_and_ends_when_the_input_leaves_the_queues() {
+        let alive = Arc::new(AtomicUsize::new(0));
+        let queues = InputQueues::default();
+        queues.steer(PendingInput::held("a", Hold::new(&alive)));
+        queues.follow_up(PendingInput::held("b", Hold::new(&alive)));
+
+        let taken = queues.take_all();
+        assert_eq!(alive.load(Ordering::SeqCst), 2, "taking keeps the holds");
+        for pending in taken {
+            queues.steer(pending);
+        }
+        queues.remove_front(Queue::Steering, &"a".into());
+        assert_eq!(alive.load(Ordering::SeqCst), 1, "recorded input lets go of its hold");
+        assert!(queues.withdraw(&"b".into()));
+        assert_eq!(alive.load(Ordering::SeqCst), 0, "so does withdrawn input");
+
+        queues.steer(PendingInput::held("c", Hold::new(&alive)));
+        assert_eq!(texts(queues.drain_steering()), ["c"]);
+        assert_eq!(alive.load(Ordering::SeqCst), 0, "and input taken without it");
+        queues.follow_up(PendingInput::held("d", Hold::new(&alive)));
+        drop(queues);
+        assert_eq!(alive.load(Ordering::SeqCst), 0, "and input dropped with the queues");
     }
 
     #[test]

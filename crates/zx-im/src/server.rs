@@ -327,8 +327,8 @@ pub(crate) struct Shared {
     approvers: HashMap<String, HashSet<UserId>>,
     pub(crate) replies: Replies,
     pub(crate) max_conversations: usize,
-    pub(crate) max_pending_messages: usize,
-    pub(crate) max_pending_bytes: usize,
+    pub(crate) max_pending_messages: NonZeroUsize,
+    pub(crate) max_pending_bytes: NonZeroUsize,
     pub(crate) idle: Duration,
     pub(crate) outbound_timeout: Duration,
     /// Run slots of all conversations. Tokio's semaphore is fair: it hands permits out in
@@ -367,8 +367,8 @@ impl Shared {
             outbound_timeout,
             permits: Arc::new(Semaphore::new(max_running.get())),
             max_conversations: max_conversations.get(),
-            max_pending_messages: max_pending_messages.get(),
-            max_pending_bytes: max_pending_bytes.get(),
+            max_pending_messages,
+            max_pending_bytes,
             statuses,
             names: Mutex::default(),
         }

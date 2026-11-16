@@ -74,7 +74,7 @@ impl Worker {
             Some(permit) => permit.attach(input),
             None => self.budget.try_admit(input),
         };
-        let Ok(pending) = admitted else {
+        let Some(pending) = admitted else {
             self.out.post(self.out.replies().overloaded.clone()).await;
             self.out
                 .failed("pending input capacity exceeded; message was not accepted".into());
@@ -90,7 +90,7 @@ impl Worker {
         let asked = Asked(pending);
         let steered = match &mut self.phase {
             Phase::Running { open, .. } => {
-                open.session.queues().steer_pending(asked.0);
+                open.session.queues().steer(asked.0);
                 true
             }
             Phase::Waiting { asked: waiting, .. } => {

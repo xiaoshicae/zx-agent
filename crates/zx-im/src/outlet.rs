@@ -57,12 +57,12 @@ impl Opened {
     pub(crate) fn leftover(&self) -> Result<Vec<Asked>, SessionError> {
         // The loop looks for input at the end of each step, so a message steered after the
         // last look waits in the queue.
-        let queued = self.session.take_pending()?;
+        let queued = self.session.take_queued()?;
         let mut asked = Vec::new();
         for message in queued {
             match message.input() {
                 Input::User { .. } => asked.push(Asked(message)),
-                Input::Custom(_) => self.session.queues().steer_pending(message),
+                Input::Custom(_) => self.session.queues().steer(message),
             }
         }
         Ok(asked)
@@ -73,7 +73,7 @@ impl Opened {
     /// queued for that session goes with it.
     pub(crate) fn taken_back(&self) -> Vec<Asked> {
         let queues = self.session.queues();
-        let queued = queues.drain_pending();
+        let queued = queues.take_all();
         queued
             .into_iter()
             .filter_map(|message| match message.input() {

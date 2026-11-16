@@ -35,7 +35,7 @@ use zx_agent::ai::{
 use zx_agent::compaction;
 use zx_agent::events::{Event, EventKind, RunReport};
 use zx_agent::hooks::HookContext;
-use zx_agent::input::{Input, InputQueues};
+use zx_agent::input::{Input, InputQueues, PendingInput};
 use zx_agent::policy::{ApprovalDecision, ApprovalMode};
 use zx_agent::session::SessionError;
 use zx_agent::tools::{ExecutionMode, Tool, ToolContext, ToolOutput};
@@ -300,6 +300,13 @@ pub(crate) fn refusal(config: AgentConfig) -> String {
         Ok(_) => panic!("an agent was made from the configuration"),
         Err(error) => format!("{error:#}"),
     }
+}
+
+/// The input `session` had queued and no run consumed, taken without the holds.
+pub(crate) fn take_queued_inputs(session: &Session) -> Result<Vec<Input>, SessionError> {
+    session
+        .take_queued()
+        .map(|queued| queued.into_iter().map(PendingInput::into_input).collect())
 }
 
 /// Short text of each message, for compact assertions.

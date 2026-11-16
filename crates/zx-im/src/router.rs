@@ -8,8 +8,7 @@ use tokio::sync::mpsc;
 use tokio::task::{Id, JoinError, JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
-use zx_core::input::InputBudget;
-
+use super::admission::InputBudget;
 use super::platform::Seen;
 use super::server::Shared;
 use super::worker::{self, Incoming, Retire, WorkerInput, WorkerSetup};
@@ -291,7 +290,7 @@ impl Router {
             return;
         }
         let control = incoming.text.len() <= MAX_CONTROL_BYTES && worker::is_command(&incoming.text);
-        if incoming.text.len() > self.shared.max_pending_bytes && !control {
+        if incoming.text.len() > self.shared.max_pending_bytes.get() && !control {
             self.overloaded(channel, &key);
             return;
         }
@@ -315,14 +314,8 @@ impl Router {
         self.not_joined.remove(&key);
         let (inbox, receiver) = mpsc::channel(INBOX_CAPACITY);
         let budget = Arc::new(InputBudget::new(
-            self.shared
-                .max_pending_messages
-                .try_into()
-                .expect("positive configured message limit"),
-            self.shared
-                .max_pending_bytes
-                .try_into()
-                .expect("positive configured byte limit"),
+            self.shared.max_pending_messages,
+            self.shared.max_pending_bytes,
         ));
         let task = self.tasks.spawn(worker::run(WorkerSetup {
             key: key.clone(),

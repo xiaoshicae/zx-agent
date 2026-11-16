@@ -10,7 +10,17 @@
 //!
 //! A server is one way to bring an agent to people, built on the kernel beside the command
 //! line: the `im` subcommand of `zx-cli` runs one with those platforms.
+//!
+//! - `server`: the server, its configuration and what it reports to the operator
+//! - `router`: takes each platform event and hands it to its conversation's worker
+//! - `worker`: one conversation: its session, its runs and what waits for them
+//! - `admission`: how much input a conversation may have waiting at once
+//! - `outlet`: where a conversation posts, and the session it holds
+//! - `approval`: approval requests of a run, as cards in the conversation
+//! - `status`: the status message of each run, kept so that a restart can replace it
+//! - `platform`: helpers for the duties every platform has
 
+mod admission;
 mod approval;
 mod outlet;
 mod platform;
