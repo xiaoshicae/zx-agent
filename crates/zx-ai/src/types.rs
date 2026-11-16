@@ -170,6 +170,12 @@ pub struct ToolCall {
     pub arguments_error: Option<String>,
 }
 
+/// The start of the code of a [`ProviderError::Provider`] for a response that the provider
+/// ended with a reason other than a normal one, such as a content filter
+/// (`finish_reason:content_filter`). Such a response is never retried, whatever the reason is
+/// called: the prefix keeps it apart from the error codes that are.
+pub const FINISH_REASON_CODE: &str = "finish_reason:";
+
 /// Machine-readable provider failure details. Human-readable text stays in
 /// AssistantMessage::error_message. Optional metadata is left out of the JSON when absent.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -184,7 +190,8 @@ pub enum ProviderError {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retry_after_ms: Option<u64>,
     },
-    /// An error reported inside a successful streaming HTTP response.
+    /// An error reported inside a successful streaming HTTP response, or a response the
+    /// provider ended with an unusual reason, whose code starts with [`FINISH_REASON_CODE`].
     Provider {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         code: Option<String>,

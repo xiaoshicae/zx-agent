@@ -18,7 +18,6 @@
 //! - `compaction`: what a summary holds, and the records of a compaction with the rules they
 //!   follow
 //! - `request`: request configuration changes and per-request checkpoints
-//! - `tree`: rebuildable ancestry and request configuration indexes
 //! - `recovery`: start records of calls with side effects, and the calls an interrupted run
 //!   left without results
 //! - `name`: the session's name, kept in `session_info` records
@@ -39,7 +38,6 @@ mod storage;
 mod test_support;
 #[cfg(test)]
 mod tests;
-mod tree;
 pub use compaction::{
     CompactionEntry, CompactionFailedEntry, CompactionPlan, CompactionStartedEntry, CompactionSummary, SummarizedBy,
     SummaryFact, SummaryRequest,
@@ -123,7 +121,9 @@ pub struct Transcript {
     header: SessionHeader,
     entries: Vec<Entry>,
     index: HashMap<String, usize>,
-    tree: tree::TreeIndex,
+    /// For each entry, by position, the position of the request configuration in force there:
+    /// the nearest one on its branch, itself included.
+    request_configs: Vec<Option<usize>>,
     leaf: Option<String>,
     incomplete_tail_bytes: usize,
 }
@@ -139,7 +139,7 @@ impl Transcript {
             header,
             entries: Vec::new(),
             index: HashMap::new(),
-            tree: tree::TreeIndex::default(),
+            request_configs: Vec::new(),
             leaf: None,
             incomplete_tail_bytes: 0,
         }
@@ -486,12 +486,14 @@ impl Transcript {
     }
 
     fn insert(&mut self, entry: Entry) {
-        let parent = entry.parent_id().and_then(|id| self.index.get(id)).copied();
-        let kind = match &entry {
-            Entry::RequestConfig(_) => tree::RecordKind::RequestConfig,
-            _ => tree::RecordKind::Other,
+        let request_config = match &entry {
+            Entry::RequestConfig(_) => Some(self.entries.len()),
+            _ => entry
+                .parent_id()
+                .and_then(|id| self.index.get(id))
+                .and_then(|&parent| self.request_configs[parent]),
         };
-        self.tree.push(parent, kind);
+        self.request_configs.push(request_config);
         let id = entry.id().to_string();
         self.index.insert(id.clone(), self.entries.len());
         self.entries.push(entry);

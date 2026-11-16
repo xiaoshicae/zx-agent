@@ -32,7 +32,8 @@ async fn main() -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     // Read-only diagnostics only: other commands ask, and nobody is there to approve them.
     // `ps` is left out: on Linux, `ps e` can print the environment of the user's processes,
-    // which includes this process's API key.
+    // which includes this process's API key. So is `sort`, whose `--compress-program` runs
+    // another program.
     let rules = RulePolicy::new(vec![
         Rule {
             matcher: RuleMatcher::Tool("bash".to_string()),
@@ -43,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
             decision: PolicyDecision::Allow,
         },
     ])
-    .auto_approve(AutoApprove::new(["df", "free", "uptime", "head", "sort"]));
+    .auto_approve(AutoApprove::new(["df", "free", "uptime", "head"]));
     let system_prompt = build_system_prompt(INSTRUCTIONS, &[("environment", &local_environment_section(&cwd))]);
     // The key must not reach commands, where `env` would reveal it.
     let bash = BashTool {

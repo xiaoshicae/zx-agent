@@ -6,7 +6,7 @@ use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
 use std::time::Duration;
 
-use super::types::{AssistantMessage, ProviderError, StopReason};
+use super::types::{AssistantMessage, FINISH_REASON_CODE, ProviderError, StopReason};
 
 /// How often and how patiently to retry failed responses.
 #[derive(Clone, Debug)]
@@ -105,7 +105,8 @@ const TRANSIENT_TEXT: &[&str] = &[
 ];
 
 /// Whether a failed response is transient. Structured metadata takes precedence; messages
-/// without it, from providers that report none, use the text fallback.
+/// without it, from providers that report none, and stream errors with a code the tables do
+/// not know use the text fallback.
 pub fn is_retryable(message: &AssistantMessage) -> bool {
     if message.stop_reason != StopReason::Error {
         return false;
@@ -116,16 +117,13 @@ pub fn is_retryable(message: &AssistantMessage) -> bool {
             return !permanent && matches!(status, 408 | 429 | 500..=599);
         }
         Some(ProviderError::Provider { code: Some(code) }) => {
-            return matches!(
-                code.to_ascii_lowercase().as_str(),
-                "rate_limit_exceeded"
-                    | "rate_limit_error"
-                    | "server_error"
-                    | "internal_error"
-                    | "overloaded_error"
-                    | "server_busy"
-                    | "timeout"
-            );
+            if transient_code(code) {
+                return true;
+            }
+            if permanent_code(code) {
+                return false;
+            }
+            // A code this table does not know says nothing either way: the text decides.
         }
         Some(ProviderError::Transport | ProviderError::Timeout) => return true,
         // A key source that fails needs the host's attention, not another try.
@@ -222,9 +220,26 @@ fn overflow_text(error: &str) -> bool {
     OVERFLOW_TEXT.iter().any(|pattern| error.contains(pattern))
 }
 
-/// Error codes that a retry cannot get past: credentials, quota, and the overflow codes.
+/// Error codes of a failure in the stream that a retry may get past: throttling, and the
+/// server's own failures.
+fn transient_code(code: &str) -> bool {
+    matches!(
+        code.to_ascii_lowercase().as_str(),
+        "rate_limit_exceeded"
+            | "rate_limit_error"
+            | "server_error"
+            | "internal_error"
+            | "overloaded_error"
+            | "server_busy"
+            | "timeout"
+    )
+}
+
+/// Error codes that a retry cannot get past: credentials, quota, the overflow codes, and a
+/// response the provider ended with an unusual reason.
 fn permanent_code(code: &str) -> bool {
-    overflow_code(code)
+    code.starts_with(FINISH_REASON_CODE)
+        || overflow_code(code)
         || matches!(
             code.to_ascii_lowercase().as_str(),
             "insufficient_quota"
@@ -334,6 +349,28 @@ mod tests {
         message.provider_error = Some(ProviderError::ApiKey);
         assert!(!is_retryable(&message));
         assert!(!is_context_overflow(&message));
+    }
+
+    #[test]
+    fn an_unknown_stream_error_code_leaves_the_decision_to_the_text() {
+        let code = |code: &str, text: &str| {
+            let mut message = failed(text);
+            message.provider_error = Some(ProviderError::Provider {
+                code: Some(code.into()),
+            });
+            message
+        };
+        assert!(is_retryable(&code("server_overloaded", "overloaded")));
+        assert!(!is_retryable(&code("server_overloaded", "unknown model")));
+        assert!(
+            is_retryable(&code("server_busy", "unknown model")),
+            "a known code decides"
+        );
+        assert!(
+            !is_retryable(&code("invalid_api_key", "overloaded")),
+            "so does a permanent one"
+        );
+        assert!(!is_retryable(&code("context_length_exceeded", "overloaded")));
     }
 
     #[test]

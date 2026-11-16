@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use serde_json::{Value, json};
 use zx_ai::text::prefix_noted;
-use zx_ai::{AssistantMessage, ContentBlock, Delta, ProviderError, StopReason, ToolCall, Usage};
+use zx_ai::{AssistantMessage, ContentBlock, Delta, FINISH_REASON_CODE, ProviderError, StopReason, ToolCall, Usage};
 
 /// Response fields that carry reasoning text: `reasoning_content` (DeepSeek, vLLM) or
 /// `reasoning` (OpenRouter, Ollama). The first one present wins; replay uses the same name.
@@ -275,10 +275,8 @@ impl Accumulator {
                 Some(format!("the provider ended the response with finish_reason {other:?}")),
             ),
         };
-        // Prefixed so that an ending reason never shares a name with an error code that is
-        // retried, such as "timeout": an unknown ending is not retried.
         let details = error.is_some().then(|| ProviderError::Provider {
-            code: Some(format!("finish_reason:{reason}")),
+            code: Some(format!("{FINISH_REASON_CODE}{reason}")),
         });
         Ok(self.message(stop_reason, error, details))
     }

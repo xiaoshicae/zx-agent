@@ -41,16 +41,26 @@ pub(crate) struct RunAccounting {
     pub(crate) denied_calls: u32,
 }
 
+/// Refuse a request to `model` whose cost `cost_budget` could not count: with a budget, every
+/// model a run asks, for a task or a summary, has prices in `models`.
+pub(super) fn check_priced(
+    models: &HashMap<String, ModelMeta>,
+    model: &str,
+    cost_budget: Option<f64>,
+) -> Result<(), String> {
+    if cost_budget.is_some() && !models.get(model).is_some_and(|meta| meta.cost.is_some()) {
+        return Err(format!(
+            "a cost budget needs prices for model {model:?}; configure its model metadata before making requests"
+        ));
+    }
+    Ok(())
+}
+
 impl RunAccounting {
-    /// Refuse a request whose cost could not count towards the run's budget. Checked after
-    /// request hooks choose the final model, also after a session switches models.
+    /// Refuse a task request to `model`, the one the request hooks chose, that the run's cost
+    /// budget could not count.
     pub(super) fn check_model(&self, models: &HashMap<String, ModelMeta>, model: &str) -> Result<(), String> {
-        if self.cost_budget.is_some() && !models.get(model).is_some_and(|meta| meta.cost.is_some()) {
-            return Err(format!(
-                "a cost budget needs prices for model {model:?}; configure its model metadata before making requests"
-            ));
-        }
-        Ok(())
+        check_priced(models, model, self.cost_budget)
     }
 
     /// Nothing spent yet, against these budgets.

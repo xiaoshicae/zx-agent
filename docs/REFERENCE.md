@@ -24,7 +24,7 @@ README 给出概览与示例；这里是各子命令的参数、行为、语义�
 | `--deltas` | 关闭 | 仅 `jsonl`：同时输出流式的 `message_update` |
 | `--color` | `auto` | 仅 `chat`：`auto` 在交互终端上着色（设了 `NO_COLOR` 或 `TERM=dumb` 时不着色），`always`、`never` |
 
-其余设置在 `config.toml` 与 agent 中，见 [CONFIGURATION.md](CONFIGURATION.md)。流式响应的上限为每次请求 16 MiB、每个 SSE 事件 1 MiB，达到时以退出码 1 结束、不重试。重试依据 HTTP 状态与错误码，遵守服务端的 `Retry-After`（至多 60 秒）。服务端以 `stop`、`end`、`length`、`tool_calls`、`function_call` 以外的 `finish_reason`（如 `content_filter`）结束时按错误处理，错误码为 `finish_reason:<取值>`，不重试。
+其余设置在 `config.toml` 与 agent 中，见 [CONFIGURATION.md](CONFIGURATION.md)。流式响应的上限为每次请求 16 MiB、每个 SSE 事件 1 MiB，达到时以退出码 1 结束、不重试。重试依据 HTTP 状态与错误码（流中报出的错误码不在已知的表里时，按错误文本判断），遵守服务端的 `Retry-After`（至多 60 秒）。服务端以 `stop`、`end`、`length`、`tool_calls`、`function_call` 以外的 `finish_reason`（如 `content_filter`）结束时按错误处理，错误码为 `finish_reason:<取值>`，不重试。
 
 ## run 退出码
 
