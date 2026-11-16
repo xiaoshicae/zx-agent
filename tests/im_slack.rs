@@ -12,8 +12,8 @@ use common::fake_slack::{Answer, FakeSlack};
 use common::im::run_channel;
 use zx_agent::events::ApprovalResult;
 use zx_im::{
-    Addressee, ApprovalId, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId,
-    MessageRef, Post, Replacement, Said, ThreadId, UserId,
+    Addressee, ApprovalCard, ApprovalId, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError, Inbound,
+    MessageId, MessageRef, Post, Replacement, Said, ThreadId, UserId,
 };
 use zx_im_slack::{SlackChannel, SlackConfig};
 
@@ -357,9 +357,11 @@ async fn an_approval_card_has_two_buttons_that_carry_the_approval_id() {
     let channel = channel(&slack);
     let card = Post::ApprovalRequest {
         id: ApprovalId("A1".into()),
-        tool: "bash".into(),
-        summary: "kubectl delete pod x".into(),
-        reason: "needs approval".into(),
+        card: ApprovalCard {
+            tool: "bash".into(),
+            summary: "kubectl delete pod x".into(),
+            reason: "needs approval".into(),
+        },
     };
     channel.send(&in_thread("C1", Some("7.1")), &card).await.unwrap();
     let body = &slack.calls("chat.postMessage")[0].body;
@@ -384,13 +386,20 @@ async fn a_closed_card_keeps_its_request_and_shows_who_decided() {
     let channel = channel(&slack);
     let card = Post::ApprovalRequest {
         id: ApprovalId("A1".into()),
-        tool: "bash".into(),
-        summary: "kubectl delete pod x".into(),
-        reason: "needs approval".into(),
+        card: ApprovalCard {
+            tool: "bash".into(),
+            summary: "kubectl delete pod x".into(),
+            reason: "needs approval".into(),
+        },
     };
     let posted = channel.send(&in_thread("C1", Some("8.1")), &card).await.unwrap();
     let request = slack.calls("chat.postMessage")[0].body["blocks"][0].clone();
     let closed = Replacement::ApprovalResolved {
+        card: ApprovalCard {
+            tool: "bash".into(),
+            summary: "kubectl delete pod x".into(),
+            reason: "needs approval".into(),
+        },
         id: ApprovalId("A1".into()),
         user: Some(UserId("U2".into())),
         result: ApprovalResult::AllowOnce,

@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::{Bytes, Message};
 use tokio_util::sync::CancellationToken;
 use zx_im::{
-    Backoff, CARD_CAPACITY, CardLabels, Cards, Destination, ErrorReport, ImChannel, ImError, Inbound, Keepalive,
+    ApprovalCard, Backoff, CardLabels, Destination, ErrorReport, ImChannel, ImError, Inbound, Keepalive,
     MAX_TEXT_CHARS, MessageId, MessageRef, Pacer, Post, RATE_LIMIT_RETRIES, Replacement, SEEN_CAPACITY, Said, Seen,
     ThreadId, UserId, rate_limit_wait,
 };
@@ -112,7 +112,11 @@ pub struct SlackChannel {
     config: SlackConfig,
     http: reqwest::Client,
     posts: Pacer,
-    cards: Cards,
+}
+
+/// What a card shows of the request `card`, open and once closed.
+fn shown(labels: &CardLabels, card: &ApprovalCard) -> String {
+    card_request(labels, &card.tool, &card.summary, &card.reason)
 }
 
 type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -126,7 +130,6 @@ impl SlackChannel {
             .map_err(|error| ImError::Config(format!("cannot build the HTTP client: {error}")))?;
         Ok(Self {
             posts: Pacer::new(config.post_interval),
-            cards: Cards::new(CARD_CAPACITY),
             config,
             http,
         })
@@ -496,14 +499,9 @@ impl ImChannel for SlackChannel {
                 }
                 Ok(posted)
             }
-            Post::ApprovalRequest {
-                id,
-                tool,
-                summary,
-                reason,
-            } => {
+            Post::ApprovalRequest { id, card } => {
                 let labels = &self.config.labels;
-                let request = card_request(labels, tool, summary, reason);
+                let request = shown(labels, card);
                 // The thread travels in the button value: the documented block_actions
                 // fields do not include the message's thread.
                 let value = match &to.thread {
@@ -520,10 +518,8 @@ impl ImChannel for SlackChannel {
                         ],
                     },
                 ]);
-                let fallback = escape(&format!("{}: {tool}", labels.title));
-                let posted = self.post(to, &fallback, Some(blocks)).await?;
-                self.cards.remember(&posted.id, request);
-                Ok(posted)
+                let fallback = escape(&format!("{}: {}", labels.title, card.tool));
+                self.post(to, &fallback, Some(blocks)).await
             }
         }
     }
@@ -539,14 +535,11 @@ impl ImChannel for SlackChannel {
                 }
                 Ok(())
             }
-            Replacement::ApprovalResolved { user, result, .. } => {
-                let result = resolution(&self.config.labels, user.as_ref(), *result);
-                let mut blocks = Vec::new();
-                if let Some(request) = self.cards.forget(&posted.id) {
-                    blocks.push(section(&request));
-                }
-                blocks.push(section(&result));
-                self.edit(posted, &result, Some(Value::Array(blocks))).await
+            Replacement::ApprovalResolved { card, user, result, .. } => {
+                let labels = &self.config.labels;
+                let result = resolution(labels, user.as_ref(), *result);
+                let blocks = json!([section(&shown(labels, card)), section(&result)]);
+                self.edit(posted, &result, Some(blocks)).await
             }
         }
     }

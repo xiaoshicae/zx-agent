@@ -13,8 +13,8 @@ use common::fake_feishu::{Answer, FakeFeishu, TestFrame};
 use common::im::run_channel;
 use zx_agent::events::ApprovalResult;
 use zx_im::{
-    Addressee, ApprovalId, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId,
-    MessageRef, Post, Replacement, ThreadId, UserId,
+    Addressee, ApprovalCard, ApprovalId, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError, Inbound,
+    MessageId, MessageRef, Post, Replacement, ThreadId, UserId,
 };
 use zx_im_feishu::{FeishuChannel, FeishuConfig};
 
@@ -436,9 +436,11 @@ async fn a_card_carries_its_click_value_and_closing_it_keeps_the_request() {
     let channel = channel(&fake);
     let card = Post::ApprovalRequest {
         id: ApprovalId("A1".into()),
-        tool: "bash".into(),
-        summary: "kubectl delete pod x".into(),
-        reason: "needs approval".into(),
+        card: ApprovalCard {
+            tool: "bash".into(),
+            summary: "kubectl delete pod x".into(),
+            reason: "needs approval".into(),
+        },
     };
     let posted = channel.send(&at("oc_1", Some("om_root")), &card).await.unwrap();
     let call = &fake.calls("reply")[0];
@@ -458,6 +460,11 @@ async fn a_card_carries_its_click_value_and_closing_it_keeps_the_request() {
     assert_eq!(elements[2]["behaviors"][0]["value"]["zx"], json!("deny"));
 
     let closed = Replacement::ApprovalResolved {
+        card: ApprovalCard {
+            tool: "bash".into(),
+            summary: "kubectl delete pod x".into(),
+            reason: "needs approval".into(),
+        },
         id: ApprovalId("A1".into()),
         user: Some(UserId("ou_u2".into())),
         result: ApprovalResult::AllowOnce,

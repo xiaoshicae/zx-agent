@@ -29,8 +29,8 @@ use zx_agent::transcript::{
     Transcript,
 };
 use zx_im::{
-    Addressee, ApprovalId, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError, Inbound, MessageId,
-    MessageRef, Post, Replacement, Replies, Said, Server, ServerConfig, ServerEvent, ServerSink, SessionKey,
+    Addressee, ApprovalCard, ApprovalId, ChatKind, Choice, ConversationId, Destination, ImChannel, ImError, Inbound,
+    MessageId, MessageRef, Post, Replacement, Replies, Said, Server, ServerConfig, ServerEvent, ServerSink, SessionKey,
     StatusStore, ThreadId, UserId,
 };
 
@@ -644,20 +644,11 @@ impl Harness {
         match self.next().await {
             Sent::Post {
                 to: actual,
-                message:
-                    Post::ApprovalRequest {
-                        id,
-                        tool,
-                        summary,
-                        reason,
-                    },
+                message: Post::ApprovalRequest { id, card },
                 posted,
             } => {
                 assert_eq!(&actual, to);
-                assert_eq!(
-                    (tool.as_str(), summary.as_str(), reason.as_str()),
-                    ("echo", r#"{"text":"done"}"#, "echo needs approval")
-                );
+                assert_eq!(card, echo_card());
                 (id, posted)
             }
             other => panic!("expected an approval card, got {other:?}"),
@@ -718,6 +709,15 @@ fn unanswered(root: &str, count: usize) -> ServerEvent {
     ServerEvent::Failed {
         key: Some(key(root)),
         error: format!("{count} message(s) were not answered: the server is stopping"),
+    }
+}
+
+/// What the card of an `echo` call shows.
+fn echo_card() -> ApprovalCard {
+    ApprovalCard {
+        tool: "echo".into(),
+        summary: r#"{"text":"done"}"#.into(),
+        reason: "echo needs approval".into(),
     }
 }
 
@@ -804,6 +804,7 @@ async fn an_approver_allows_a_call_and_the_card_shows_the_decision() {
     h.updated(
         &card,
         Replacement::ApprovalResolved {
+            card: echo_card(),
             id: id.clone(),
             user: Some(UserId(APPROVER.into())),
             result: ApprovalResult::AllowOnce,
@@ -856,6 +857,7 @@ async fn a_click_by_someone_who_is_not_an_approver_decides_nothing() {
     h.updated(
         &card,
         Replacement::ApprovalResolved {
+            card: echo_card(),
             id,
             user: Some(UserId(APPROVER.into())),
             result: ApprovalResult::Denied,
@@ -880,6 +882,7 @@ async fn an_unanswered_approval_times_out_and_its_card_says_so() {
     h.updated(
         &card,
         Replacement::ApprovalResolved {
+            card: echo_card(),
             id,
             user: None,
             result: ApprovalResult::TimedOut,
@@ -904,6 +907,7 @@ async fn cancel_in_the_thread_stops_the_run_and_closes_its_card() {
     h.updated(
         &card,
         Replacement::ApprovalResolved {
+            card: echo_card(),
             id,
             user: None,
             result: ApprovalResult::Cancelled,
@@ -947,6 +951,7 @@ async fn the_run_limit_makes_other_threads_wait_their_turn() {
     h.updated(
         &card,
         Replacement::ApprovalResolved {
+            card: echo_card(),
             id,
             user: Some(UserId(APPROVER.into())),
             result: ApprovalResult::AllowOnce,
@@ -975,6 +980,7 @@ async fn a_message_during_a_run_is_steered_into_it() {
     h.updated(
         &card,
         Replacement::ApprovalResolved {
+            card: echo_card(),
             id,
             user: Some(UserId(APPROVER.into())),
             result: ApprovalResult::AllowOnce,
@@ -1081,6 +1087,7 @@ async fn stopping_tells_a_thread_about_steering_its_run_did_not_take_in() {
     h.posted(&thread("m1"), text(&replies.not_approver)).await;
     let (sent, events) = h.stop_and_take().await;
     let closed = Replacement::ApprovalResolved {
+        card: echo_card(),
         id,
         user: None,
         result: ApprovalResult::Cancelled,
@@ -1500,6 +1507,7 @@ async fn new_during_a_run_cancels_it_and_then_starts_over() {
     let (id, card) = h.card(&direct()).await;
     h.say_directly("d2", "/new").await;
     let closed = Replacement::ApprovalResolved {
+        card: echo_card(),
         id,
         user: None,
         result: ApprovalResult::Cancelled,
@@ -1530,6 +1538,7 @@ async fn a_message_that_arrives_while_new_cancels_a_run_is_answered_in_the_new_s
     // The cancelled run closes its card, and the platform holds that update back: the
     // conversation is busy with it, its run not yet seen to have ended.
     let closed = Replacement::ApprovalResolved {
+        card: echo_card(),
         id,
         user: None,
         result: ApprovalResult::Cancelled,
@@ -1592,6 +1601,7 @@ async fn a_session_closed_during_its_run_is_let_go_and_opened_again_for_the_next
     let session = h.sessions.of(&direct_key()).await.unwrap().remove(0);
     assert!(h.agent.close_session(&session));
     let closed = Replacement::ApprovalResolved {
+        card: echo_card(),
         id,
         user: None,
         result: ApprovalResult::Cancelled,
@@ -1712,6 +1722,7 @@ async fn what_was_asked_during_a_run_whose_session_closed_is_answered_in_the_ses
     let session = h.sessions.of(&direct_key()).await.unwrap().remove(0);
     assert!(h.agent.close_session(&session));
     let closed = Replacement::ApprovalResolved {
+        card: echo_card(),
         id,
         user: None,
         result: ApprovalResult::Cancelled,
@@ -1740,6 +1751,7 @@ async fn new_starts_its_session_also_when_the_one_it_leaves_was_closed_meanwhile
     let (id, card) = h.card(&direct()).await;
     h.say_directly("d2", "/new").await;
     let closed = Replacement::ApprovalResolved {
+        card: echo_card(),
         id,
         user: None,
         result: ApprovalResult::Cancelled,

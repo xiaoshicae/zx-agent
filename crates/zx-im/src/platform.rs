@@ -12,8 +12,6 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use zx_ai::sync::lock;
 
-use super::MessageId;
-
 /// Characters per posted message, beyond which a channel splits text with [`split_text`].
 /// Slack recommends keeping message text within 4,000 characters (chat.postMessage,
 /// "Truncating content"); other platforms take more, but longer messages read badly anywhere.
@@ -23,8 +21,6 @@ pub const RATE_LIMIT_RETRIES: u32 = 3;
 /// Messages a [`Seen`] remembers: platforms redeliver only for a short while, and this
 /// covers far more messages than arrive in that time.
 pub const SEEN_CAPACITY: usize = 1024;
-/// Cards a [`Cards`] remembers: an approval waits for a person, so few are open at once.
-pub const CARD_CAPACITY: usize = 256;
 
 /// Text in parts of at most `max` characters: the first part, which may be empty, and the
 /// rest.
@@ -157,40 +153,6 @@ impl Pacer {
             at
         };
         tokio::time::sleep_until(at).await;
-    }
-}
-
-/// The request texts of open approval cards, by card message, so that a closed card can
-/// still show what was asked; the oldest are forgotten first.
-pub struct Cards {
-    capacity: usize,
-    cards: Mutex<VecDeque<(MessageId, String)>>,
-}
-
-impl Cards {
-    /// Remember at most `capacity` cards.
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            capacity,
-            cards: Mutex::default(),
-        }
-    }
-
-    /// Keep `request`, the text shown on `card`, forgetting the oldest card beyond the
-    /// capacity.
-    pub fn remember(&self, card: &MessageId, request: String) {
-        let mut cards = lock(&self.cards);
-        cards.push_back((card.clone(), request));
-        if cards.len() > self.capacity {
-            cards.pop_front();
-        }
-    }
-
-    /// The request text of `card`, forgotten with this; `None` for an unknown card.
-    pub fn forget(&self, card: &MessageId) -> Option<String> {
-        let mut cards = lock(&self.cards);
-        let index = cards.iter().position(|(id, _)| id == card)?;
-        cards.remove(index).map(|(_, request)| request)
     }
 }
 

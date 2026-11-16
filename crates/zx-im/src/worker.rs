@@ -33,8 +33,8 @@ use super::approval::ApprovalUpdate;
 use super::outlet::{Asked, Opened, Outlet};
 use super::server::Shared;
 use super::{
-    Addressee, ApprovalId, ApprovalRecord, Choice, ImChannel, MessageRef, Post, Replacement, ServerEvent, SessionKey,
-    UserId,
+    Addressee, ApprovalCard, ApprovalId, ApprovalRecord, Choice, ImChannel, MessageRef, Post, Replacement, ServerEvent,
+    SessionKey, UserId,
 };
 
 /// Sent alone, cancels the conversation's run.
@@ -234,7 +234,10 @@ pub(crate) fn is_command(text: &str) -> bool {
 /// A card waiting for its result.
 struct Pending {
     id: ApprovalId,
-    card: MessageRef,
+    /// What the card shows, shown again once it is closed.
+    card: ApprovalCard,
+    /// The card as posted.
+    posted: MessageRef,
     decision: Decision,
 }
 
@@ -674,11 +677,16 @@ impl Worker {
 
     /// A call waits for approval: post its card. Without a card nobody can decide, so the
     /// call is denied, and the model hears why.
-    async fn ask(&mut self, id: ApprovalId, card: Post) {
-        match self.out.ask(&card).await {
-            Ok(card) => self.pending.push(Pending {
+    async fn ask(&mut self, id: ApprovalId, card: ApprovalCard) {
+        let request = Post::ApprovalRequest {
+            id: id.clone(),
+            card: card.clone(),
+        };
+        match self.out.ask(&request).await {
+            Ok(posted) => self.pending.push(Pending {
                 id,
                 card,
+                posted,
                 decision: Decision::Open,
             }),
             Err(error) => {
@@ -690,20 +698,7 @@ impl Worker {
 
     async fn approval(&mut self, update: ApprovalUpdate) {
         match update {
-            ApprovalUpdate::Requested {
-                id,
-                tool,
-                summary,
-                reason,
-            } => {
-                let card = Post::ApprovalRequest {
-                    id: id.clone(),
-                    tool,
-                    summary,
-                    reason,
-                };
-                self.ask(id, card).await;
-            }
+            ApprovalUpdate::Requested { id, card } => self.ask(id, card).await,
             ApprovalUpdate::Resolved {
                 id,
                 tool_call_id,
@@ -723,10 +718,11 @@ impl Worker {
                         };
                         let closed = Replacement::ApprovalResolved {
                             id: pending.id.clone(),
+                            card: pending.card,
                             user: user.clone(),
                             result,
                         };
-                        self.out.replace(&pending.card, closed).await;
+                        self.out.replace(&pending.posted, closed).await;
                         (Some(pending.id), user)
                     }
                     // No card: nobody was asked, or posting it failed.
