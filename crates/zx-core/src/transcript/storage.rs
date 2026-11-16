@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use super::{Entry, LoadedSession, SessionHeader, SessionLog, SessionName, Transcript};
 use crate::ai::{Message, UserMessageKind};
 
-/// Where sessions are kept: session files ([`JsonlStorage`](super::JsonlStorage)), memory
-/// ([`MemoryStorage`](super::MemoryStorage)), or a backend of the host's, such as a database.
+/// Where sessions are kept: memory ([`MemoryStorage`](super::MemoryStorage)), session files
+/// (`JsonlStorage` of the zx-tools crate), or a backend of the host's, such as a database.
 ///
 /// A storage keeps each session's header and, through the [`SessionLog`] it hands out, the
 /// session's records in order. It does not interpret the records: [`Transcript`] checks

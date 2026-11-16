@@ -2,8 +2,12 @@
 //! one named file (pi: `getDefaultSessionDirPath`, and the names of its session files).
 //!
 //! - `file`: one session file: its lock, reading it, repairing its end, and appending to it
+//! - `test_support` and `tests`, compiled for tests only: what the tests of session files
+//!   share, and the tests of the storage
 
 mod file;
+#[cfg(test)]
+mod test_support;
 #[cfg(test)]
 mod tests;
 
@@ -14,11 +18,12 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use async_trait::async_trait;
 
-use super::{
+use zx_core::transcript::{
     LoadedSession, SessionHeader, SessionInfo, SessionList, SessionLog, SessionQuery, SessionStorage, Transcript,
-    Unreadable, ensure_current_version,
+    Unreadable,
 };
-pub(super) use file::JsonlFile;
+
+use file::JsonlFile;
 
 /// What session files end in.
 const EXTENSION: &str = "jsonl";
@@ -133,7 +138,7 @@ impl Files {
     /// Create the file of a new session. In a directory, fails when a file there is named
     /// after the same session ID; one placed there under another name is not noticed.
     fn create(&self, header: &SessionHeader) -> Result<JsonlFile> {
-        ensure_current_version(header)?;
+        header.check_version()?;
         let path = match &self.layout {
             Layout::File(path) => path.clone(),
             Layout::Directory(root) => {
@@ -186,7 +191,7 @@ impl Files {
         let headers = paths
             .iter()
             .filter_map(|path| file::read_header(path).ok())
-            .filter(|header| ensure_current_version(header).is_ok())
+            .filter(|header| header.check_version().is_ok())
             .collect();
         Ok(query.arrange_headers(headers))
     }

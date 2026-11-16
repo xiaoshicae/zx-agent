@@ -3358,7 +3358,6 @@ dependencies = [
  "async-trait",
  "futures",
  "jsonschema",
- "libc",
  "serde",
  "serde_json",
  "tempfile",

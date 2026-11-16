@@ -185,7 +185,7 @@ zx-cli      crates/zx-cli    命令行程序 zx-agent（run、chat、acp、im、
   ├─ zx-im-feishu  crates/zx-im-feishu  ⚑ D:5/CHINA FLAG: 飞书平台
   │    └─ zx-im    crates/zx-im         IM 平台接口与按会话分派的服务（依赖 zx-core）
   └─ zx-agent  src/lib.rs    SDK：把下面四个 crate 再导出成一个库，没有自己的代码
-       ├─ zx-tools  crates/zx-tools  内置工具、执行环境、长结果落盘、命令与规则策略、续写与脱敏、MCP 客户端
+       ├─ zx-tools  crates/zx-tools  内置工具、执行环境、长结果落盘、命令与规则策略、续写与脱敏、会话文件存储、MCP 客户端
        ├─ zx-core   crates/zx-core   循环、会话、运行层、共享会话、摘要、提示词、扩展接口
        │    └─ zx-ai  crates/zx-ai   消息类型、流式事件协议、provider 契约
        └─ zx-ai-openai  crates/zx-ai-openai  OpenAI 兼容 provider（只依赖 zx-ai）

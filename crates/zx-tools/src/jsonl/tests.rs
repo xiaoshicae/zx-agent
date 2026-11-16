@@ -1,10 +1,13 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use std::fs::OpenOptions;
+use std::io::Write;
+
+use super::test_support::{header, texts};
 use super::*;
 use crate::ai::Message;
-use crate::transcript::test_support::{header, texts};
-use crate::transcript::{Entry, LogRecord, MessageEntry, SESSION_VERSION};
+use zx_core::transcript::{Entry, LogRecord, MessageEntry, SESSION_VERSION};
 
 /// A header for a session started in `cwd` at `timestamp`, with `id`.
 fn header_of(id: &str, cwd: &str, timestamp: u64) -> SessionHeader {
@@ -343,7 +346,7 @@ async fn one_file_holds_at_most_one_session() {
     assert_eq!(storage.location(Path::new("/anywhere")), path);
     assert_eq!(ids(&storage, &SessionQuery::default()).await, [header.id.as_str()]);
     assert_eq!(storage.path_of(&header.id).await.unwrap(), Some(path.clone()));
-    let second = storage.create(&crate::transcript::test_support::header()).await;
+    let second = storage.create(&super::test_support::header()).await;
     assert!(second.err().unwrap().to_string().contains("cannot create session file"));
     let error = storage.open("other").await.err().unwrap();
     assert_eq!(error.to_string(), format!("no session other in {}", path.display()));
@@ -365,4 +368,167 @@ async fn a_damaged_file_is_an_error_when_it_is_the_only_candidate() {
     assert!(listed.sessions.is_empty());
     assert_eq!(listed.unreadable.len(), 1);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "not json\n");
+}
+
+/// A session in the file `path`, made by the storage of that one file.
+async fn create_file(path: &Path) -> Transcript {
+    let header = header();
+    let log = JsonlStorage::file(path).create(&header).await.unwrap();
+    Transcript::with_log(header, log)
+}
+
+/// The session in the file `path`, opened by the storage of that one file.
+async fn open_file(path: &Path) -> Transcript {
+    let storage = JsonlStorage::file(path);
+    let id = file::read_header(path).unwrap().id;
+    let (loaded, log) = storage.open(&id).await.unwrap();
+    Transcript::load(loaded, log).unwrap()
+}
+
+/// A snapshot of the session in the file `path`.
+async fn read_file(path: &Path) -> Transcript {
+    let id = file::read_header(path).unwrap().id;
+    Transcript::snapshot(JsonlStorage::file(path).read(&id).await.unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn a_file_write_that_blocks_times_out_without_stalling_the_runtime() {
+    /// Answers every write late, like a session volume that stopped answering; bounded,
+    /// so that a store that waits for it still ends.
+    struct Stuck;
+    impl Write for Stuck {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut store = Transcript::with_log(header(), Box::new(JsonlFile::with_writer(Box::new(Stuck))));
+    let started = std::time::Instant::now();
+
+    let error = tokio::time::timeout(
+        std::time::Duration::from_millis(50),
+        store.append_message(Message::user("q")),
+    )
+    .await;
+
+    assert!(error.is_err(), "the append waited for the stuck write");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+/// Keeps `keep` bytes of the first write and then fails once, like a disk that fills up
+/// in the middle of a record and is freed again. Later writes succeed.
+struct PartialWriteOnce {
+    file: std::fs::File,
+    keep: usize,
+    calls: usize,
+}
+
+impl Write for PartialWriteOnce {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.calls += 1;
+        match self.calls {
+            1 => {
+                let part = &bytes[..self.keep.min(bytes.len())];
+                self.file.write_all(part)?;
+                Ok(part.len())
+            }
+            2 => Err(std::io::Error::other("disk full")),
+            _ => self.file.write(bytes),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+#[tokio::test]
+async fn a_partial_write_stops_later_writes_and_leaves_a_repairable_tail() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s.jsonl");
+    let mut store = create_file(&path).await;
+    store.append_message(Message::user("kept")).await.unwrap();
+    drop(store);
+    let file = OpenOptions::new().append(true).open(&path).unwrap();
+    let writer = PartialWriteOnce {
+        file,
+        keep: 10,
+        calls: 0,
+    };
+    let mut store = Transcript::with_log(header(), Box::new(JsonlFile::with_writer(Box::new(writer))));
+
+    assert!(store.append_message(Message::user("cut short")).await.is_err());
+    // A run keeps emitting messages until it observes its cancellation.
+    let later = store.append_message(Message::user("after the failure")).await;
+    assert!(later.is_err(), "an entry was written after a failed write");
+    drop(store);
+
+    let reopened = open_file(&path).await;
+    assert_eq!(reopened.incomplete_tail_bytes(), 10);
+    assert_eq!(texts(&reopened), ["kept"]);
+}
+
+#[tokio::test]
+async fn opening_leaves_an_incomplete_tail_and_the_next_record_replaces_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s.jsonl");
+    let mut store = create_file(&path).await;
+    store.append_message(Message::user("kept")).await.unwrap();
+    drop(store);
+    let tail = b"{\"type\":\"mess";
+    OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(tail)
+        .unwrap();
+
+    let mut reopened = open_file(&path).await;
+    assert!(std::fs::read(&path).unwrap().ends_with(tail), "opening changes nothing");
+    reopened.append_message(Message::user("next")).await.unwrap();
+    drop(reopened);
+
+    let read = read_file(&path).await;
+    assert_eq!(read.incomplete_tail_bytes(), 0);
+    assert_eq!(texts(&read), ["kept", "next"]);
+}
+
+#[tokio::test]
+async fn files_of_an_older_or_newer_version_are_refused_and_left_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    for version in [1, SESSION_VERSION - 1, SESSION_VERSION + 1] {
+        let path = dir.path().join(format!("v{version}.jsonl"));
+        let header =
+            serde_json::json!({"type":"session","version":version,"id":"h","timestamp":1,"cwd":"/","model":"m"});
+        let message =
+            serde_json::json!({"type":"message","id":"a","parentId":null,"timestamp":2,"message":Message::user("hi")});
+        let content = format!("{header}\n{message}\n");
+        std::fs::write(&path, &content).unwrap();
+        let storage = JsonlStorage::file(&path);
+
+        let (loaded, log) = storage.open("h").await.unwrap();
+        assert!(Transcript::load(loaded, log).is_err());
+        assert!(Transcript::snapshot(storage.read("h").await.unwrap()).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+    }
+}
+
+#[tokio::test]
+async fn a_file_of_another_version_is_not_created() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s.jsonl");
+    let older = SessionHeader {
+        version: SESSION_VERSION - 1,
+        ..header()
+    };
+
+    assert!(JsonlStorage::file(&path).create(&older).await.is_err());
+    assert!(!path.exists());
 }

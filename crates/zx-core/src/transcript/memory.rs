@@ -8,7 +8,7 @@ use async_trait::async_trait;
 
 use super::{
     LoadedSession, LogRecord, SessionHeader, SessionInfo, SessionList, SessionLog, SessionQuery, SessionStorage,
-    Transcript, Unreadable, ensure_current_version,
+    Transcript, Unreadable,
 };
 use crate::sync::lock;
 
@@ -84,7 +84,7 @@ impl MemoryStorage {
 #[async_trait]
 impl SessionStorage for MemoryStorage {
     async fn create(&self, header: &SessionHeader) -> Result<Box<dyn SessionLog>> {
-        ensure_current_version(header)?;
+        header.check_version()?;
         let mut sessions = lock(&self.sessions);
         ensure!(
             !sessions.contains_key(&header.id),

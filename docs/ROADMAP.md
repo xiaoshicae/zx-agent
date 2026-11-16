@@ -41,6 +41,7 @@
 | D26 | 运行用完预算报告 `BudgetExhausted { budget, truncated }`，预算按整次运行累计，由内核判断续写是否还有预算。配置费用预算后，每次任务请求在钩子选定最终模型后校验单价，自动、手动摘要及溢出恢复也校验；无法计价时在发送前失败。退出码与格式见 [REFERENCE.md](REFERENCE.md) |
 | D27 | IM 路由器只分派消息，按会话索引（D28）判断机器人是否参与过对话。运行、排队和空闲 worker 的总数以及待处理消息的数量和文本字节有上限。打开会话都要先取得运行名额，包括为写入闲聊重新打开；运行结束时先归还名额，没读到的插话作为下一次运行的提问重新排队，`/cancel` 则丢弃它们；第一次为线程建会话前先读线程历史。请求记录必须指向它所在分支上生效的请求配置（写入时一直如此），回放时直接比较；重回放在阻塞线程上完成；摘要投影跳过已被替换的正文。会话与事件格式不变 |
 | D28 | 会话头部与完整列表分开：`SessionStorage::headers` 只读头部，供宿主建自己的会话索引，打开时仍完整校验；JSONL 存储不缓存。IM 服务启动时从会话头部建立对话到会话的索引（每个对话取最近创建的会话），此后只由本进程维护；没 @ 机器人的消息只进入机器人参与过的对话，因容量被拒时不回复。IM 消息从路由接纳起持有同一份数量/文本字节配额，作为输入的凭证（`PendingInput::held`）转移到 waiting、heard 与 steering，消费或丢弃后归还；内核只携带凭证，不计配额；短控制命令和审批不占这份文本配额。宿主可用 `zx_cli::application::Application` 复用配置装配，显式配置不读进程配置覆盖，启动提示交由宿主处理；暂留在 `zx-cli`，有第二个独立宿主后再抽 crate。会话与事件格式不变 |
+| D29 | 内核只留机制：会话文件存储（JSONL，`flock`、尾记录修复与写线程）在 zx-tools（`builtin::jsonl`），内核定义记录与头部行的格式（`SessionHeader::to_line`、`from_line`、`check_version`）和存储接口，自带的存储只有 `MemoryStorage`，不依赖 libc。内核的输入队列只携带宿主的凭证（`PendingInput::held`），配额由宿主计量。文件工具的按路径锁由宿主传入（`builtin_tools` 的 `files`），不用进程级单例。zx-tools 的 MCP 客户端是默认开启的 feature `mcp`。`ApiKeySource` 是异步接口，受 `idle_timeout` 约束。`zx_cli::application` 的显式配置经 `Config::validate` 检查，缺模型时报 `NoModel`；assembly 不打印、措辞不提命令行参数。会话与事件格式不变 |
 
 ## 4. 当前阶段
 

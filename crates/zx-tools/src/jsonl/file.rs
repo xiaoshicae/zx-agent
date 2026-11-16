@@ -13,15 +13,14 @@ use async_trait::async_trait;
 use serde::de::IgnoredAny;
 use tokio::sync::oneshot;
 
-use crate::transcript::entry::HeaderLine;
-use crate::transcript::{LoadedSession, LogRecord, SessionHeader, SessionLog};
+use zx_core::transcript::{LoadedSession, LogRecord, SessionHeader, SessionLog};
 
 /// The longest header line read from a file that may not be a session at all.
 const MAX_HEADER_BYTES: u64 = 1024 * 1024;
 
 /// A session file open for appending. On Unix it holds an exclusive `flock(2)` lock until it
 /// is dropped, so a second writer, in this process or another, cannot open the same file.
-pub(in crate::transcript) struct JsonlFile {
+pub(super) struct JsonlFile {
     target: Target,
     /// The `seq` the next record must have.
     next_seq: u64,
@@ -176,7 +175,7 @@ impl JsonlFile {
             .open(path)
             .with_context(|| format!("cannot create session file {}", path.display()))?;
         lock(&file, path)?;
-        let line = serde_json::to_string(&HeaderLine::Session(header.clone()))?;
+        let line = header.to_line()?;
         writeln!(file, "{line}")
             .and_then(|()| file.flush())
             .with_context(|| format!("cannot write the header of {}", path.display()))?;
@@ -221,7 +220,7 @@ impl JsonlFile {
 
     /// Records go to `writer`, so tests can make writes fail. No header is written.
     #[cfg(test)]
-    pub(in crate::transcript) fn with_writer(writer: Box<dyn Write + Send + Sync>) -> Self {
+    pub(super) fn with_writer(writer: Box<dyn Write + Send + Sync>) -> Self {
         Self {
             target: Target::Writer(Writer::spawn(move || Ok(writer)).expect("tests can start a thread")),
             next_seq: 1,
@@ -249,9 +248,7 @@ pub(super) fn read_header(path: &Path) -> Result<SessionHeader> {
         "session file {} is empty",
         path.display()
     );
-    let HeaderLine::Session(header) =
-        serde_json::from_slice(&line).with_context(|| format!("{}: invalid session header", path.display()))?;
-    Ok(header)
+    SessionHeader::from_line(&line).with_context(|| format!("{}: invalid session header", path.display()))
 }
 
 /// The header and complete records of `content`, and where an incomplete last line starts.
@@ -269,8 +266,8 @@ fn parse(content: &[u8], path: &Path) -> Result<(LoadedSession, Option<usize>)> 
     let (_, first) = lines
         .first()
         .ok_or_else(|| anyhow!("session file {} is empty", path.display()))?;
-    let HeaderLine::Session(header) =
-        serde_json::from_slice(first).with_context(|| format!("{}: invalid session header", path.display()))?;
+    let header =
+        SessionHeader::from_line(first).with_context(|| format!("{}: invalid session header", path.display()))?;
 
     let mut records = Vec::new();
     let mut incomplete = None;
@@ -408,8 +405,8 @@ mod tests {
 
     use super::*;
     use crate::ai::Message;
-    use crate::transcript::test_support::{assistant, header, texts};
-    use crate::transcript::{SESSION_VERSION, Transcript};
+    use crate::jsonl::test_support::{assistant, header, texts};
+    use zx_core::transcript::{SESSION_VERSION, Transcript};
 
     /// A new session in the file `path`.
     fn create(path: &Path) -> Result<Transcript> {
