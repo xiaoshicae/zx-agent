@@ -179,6 +179,9 @@ enum Phase {
         status: Option<MessageRef>,
         open: Opened,
         after: AfterRun,
+        /// What was asked once `/cancel` or `/new` stopped the run, which takes no more
+        /// input: it runs next, as `after` says.
+        asked: Vec<Asked>,
     },
 }
 
@@ -189,7 +192,8 @@ enum AfterRun {
     Continue,
     /// `/new` cancelled the run: what was asked during it runs in a new session.
     Renew,
-    /// `/cancel` cancelled the run, or came as it ended: what was asked during it is dropped.
+    /// `/cancel` cancelled the run, or came as it ended: what was steered into it is dropped,
+    /// and what was asked after the cancel runs next, in the same session.
     Cancel,
 }
 
@@ -423,6 +427,7 @@ impl Worker {
             status,
             open,
             after: AfterRun::Continue,
+            asked: Vec::new(),
         };
     }
 
@@ -457,16 +462,17 @@ impl Worker {
     /// other. After `/new` that input runs in the new session, after `/cancel` it is dropped,
     /// and while the server stops it is unanswered.
     async fn ended(&mut self, ended: Result<Result<RunReport, SessionError>, JoinError>, closing: bool) {
-        let (status, open, after) = match self.take_phase() {
+        let (status, open, after, asked) = match self.take_phase() {
             Phase::Running {
                 slot,
                 status,
                 open,
                 after,
+                asked,
                 ..
             } => {
                 drop(slot);
-                (status, open, after)
+                (status, open, after, asked)
             }
             // Only a running conversation ends a run.
             other => {
@@ -482,7 +488,7 @@ impl Worker {
             if matches!(self.phase, Phase::Idle { open: Some(_), .. }) {
                 self.record_heard().await;
             }
-            self.unanswered += leftover.len();
+            self.unanswered += leftover.len() + asked.len();
             return;
         }
         let leftover = match after {
@@ -507,6 +513,8 @@ impl Worker {
                 Vec::new()
             }
         };
+        // What was asked while the run was being stopped runs after what it left.
+        let leftover: Vec<Asked> = leftover.into_iter().chain(asked).collect();
         self.record_heard().await;
         if leftover.is_empty() {
             return;
@@ -621,8 +629,9 @@ impl Worker {
 
     async fn cancel(&mut self) {
         if let Phase::Running { open, after, .. } = &mut self.phase {
-            // The run ends as aborted, and its status message then says so. What was asked
-            // during it is dropped with it, also when the run ended just before.
+            // The run ends as aborted, and its status message then says so. What was steered
+            // into it is dropped with it, also when the run ended just before; what is asked
+            // from now on waits for the next run.
             open.session.cancel();
             if *after == AfterRun::Continue {
                 *after = AfterRun::Cancel;

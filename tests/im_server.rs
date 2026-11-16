@@ -1940,6 +1940,47 @@ async fn a_slow_session_setup_does_not_block_another_conversations_messages() {
 }
 
 #[tokio::test]
+async fn a_message_that_arrives_while_cancel_stops_a_run_is_answered_after_it() {
+    let release = CancellationToken::new();
+    let mut h = start(Setup {
+        steps: vec![echo_call(), FauxStep::text("fresh")],
+        updates: Updates::Held(release.clone()),
+        ..Setup::default()
+    });
+    let replies = h.replies.clone();
+    h.say_directly("d1", "run echo").await;
+    let status = h.posted(&direct(), text(&replies.working)).await;
+    let (id, card) = h.card(&direct()).await;
+    h.say_directly("d2", "/cancel").await;
+    // The cancelled run closes its card, and the platform holds that update back: the
+    // conversation is busy with it, its run not yet seen to have ended.
+    let closed = Replacement::ApprovalResolved {
+        card: echo_card(),
+        id,
+        user: None,
+        result: ApprovalResult::Cancelled,
+    };
+    h.updated(&card, closed).await;
+    h.say_directly("d3", "again").await;
+    // The router passes messages on in the order it got them: once it has refused this one,
+    // the one before it waits in the conversation's inbox.
+    h.say_in("C2", "m1", None, "hello").await;
+    let elsewhere = Destination {
+        conversation: ConversationId("C2".into()),
+        thread: Some(ThreadId("m1".into())),
+    };
+    h.posted(&elsewhere, text(&replies.unauthorized)).await;
+    release.cancel();
+    h.acknowledged(&direct(), "d3").await;
+    h.updated(&status, text(&replies.cancelled)).await;
+    let status = h.posted(&direct(), text(&replies.working)).await;
+    h.updated(&status, text("fresh")).await;
+    let second = &h.requests()[1];
+    assert_eq!(second.last().map(String::as_str), Some("user:again"), "{second:?}");
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn cancel_drops_what_was_steered_into_the_run_it_cancels() {
     let mut h = start(Setup {
         steps: vec![FauxStep::Hang],
