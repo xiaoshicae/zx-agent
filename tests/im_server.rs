@@ -1868,6 +1868,26 @@ async fn the_first_mention_in_a_thread_reads_what_was_said_there() {
 }
 
 #[tokio::test]
+async fn the_first_mention_in_a_thread_reads_only_what_was_said_before_it() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("one")],
+        // Read once a run slot was free: by then the thread went on after the mention.
+        history: vec![
+            earlier("t1", OTHER, "the deploy failed"),
+            earlier("m2", ASKER, "why?"),
+            earlier("m3", OTHER, "any news?"),
+        ],
+        names: HashMap::from([(OTHER.to_string(), "Li".to_string())]),
+        ..Setup::default()
+    });
+    h.say("m2", Some("t1"), "why?").await;
+    let status = h.posted(&thread("t1"), text(&h.replies.working.clone())).await;
+    h.updated(&status, text("one")).await;
+    assert_eq!(h.requests()[0], ["user:Li: the deploy failed", "user:U-asker: why?"]);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn a_session_started_by_new_does_not_read_what_was_said_in_the_thread() {
     let mut h = start(Setup {
         steps: vec![FauxStep::text("one")],

@@ -281,12 +281,13 @@ impl Outlet {
             .await;
     }
 
-    /// Record what was said in the thread before the bot was mentioned there by `trigger`, in
-    /// the conversation's first session, which has nothing yet: the first answer then knows
-    /// the talk it joins. Nothing is read when `trigger` started the thread.
-    /// What was said in the thread before `trigger`, as the model reads it: nothing in a
-    /// direct chat or a thread that `trigger` starts, and nothing when the platform cannot
-    /// give it, which is reported.
+    /// What was said in the thread before `trigger`, the mention of the bot that starts the
+    /// conversation's first session, as the model reads it: the first answer then knows the
+    /// talk it joins. Nothing in a direct chat or a thread that `trigger` starts, and nothing
+    /// when the platform cannot give it, which is reported. The thread is read up to now,
+    /// which can be well after `trigger` when the session waited for a run slot; what came
+    /// after it is cut off, as it reaches the session as messages of its own. When `trigger`
+    /// is not among the messages read, all of them are kept.
     async fn said_before(&self, trigger: &MessageRef) -> Vec<String> {
         let Some(thread) = &self.key.thread else {
             return Vec::new();
@@ -303,11 +304,14 @@ impl Outlet {
             )
             .await;
         // A failure was reported; the conversation goes on without the earlier messages.
-        let Some(history) = history else {
+        let Some(mut history) = history else {
             return Vec::new();
         };
+        if let Some(position) = history.iter().position(|said| said.id == trigger.id) {
+            history.truncate(position);
+        }
         let mut earlier = Vec::new();
-        for message in history.into_iter().filter(|earlier| earlier.id != trigger.id) {
+        for message in history {
             earlier.push(self.attributed(&message.sender, &message.text).await);
         }
         earlier
