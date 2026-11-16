@@ -24,7 +24,7 @@ use crate::tools::{parse_args, unless_cancelled};
 use zx_core::hooks::{Hook, HookContext, HookResult, HookStage};
 use zx_core::tools::{Effects, Tool, ToolContext, ToolOutput};
 
-/// Paging tool name; enabling spilling requires registering this tool too.
+/// Name of [`ReadOutputTool`], which comes with the spill hook ([`SpillOutputs::with_reader`]).
 pub const TOOL_NAME: &str = "read_output";
 const DEFAULT_PAGE_BYTES: usize = 8 * 1024;
 const MAX_FILE_BYTES: usize = 1024 * 1024;
@@ -275,13 +275,16 @@ pub struct SpillOutputs {
 }
 
 impl SpillOutputs {
-    /// The host must also register a [`ReadOutputTool`] with a copy of the same store.
-    pub fn new(store: OutputStore, exempt_tools: Vec<String>) -> Self {
-        Self {
-            store,
+    /// The hook that stores in `store`, and the [`ReadOutputTool`] that pages what it stores:
+    /// the host registers both, since the first page of a stored result tells the model to
+    /// read on with that tool. `exempt_tools` are the tools whose results are never stored.
+    pub fn with_reader(store: OutputStore, exempt_tools: Vec<String>) -> (Self, ReadOutputTool) {
+        let hook = Self {
+            store: store.clone(),
             exempt_tools,
             write_timeout: WRITE_TIMEOUT,
-        }
+        };
+        (hook, ReadOutputTool::new(store))
     }
 
     /// Keep a result inline when storing it takes longer than `timeout` (3 seconds by
@@ -336,7 +339,9 @@ pub struct ReadOutputTool {
 }
 
 impl ReadOutputTool {
-    /// Use a copy of the writer hook's store, and the same settings across resumed sessions.
+    /// A reader of what was stored in `store` before, without the hook that stores; the two
+    /// together come from [`SpillOutputs::with_reader`]. Keep the same settings across
+    /// resumed sessions.
     pub fn new(store: OutputStore) -> Self {
         Self { store }
     }

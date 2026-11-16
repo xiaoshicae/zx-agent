@@ -42,10 +42,7 @@ const PAGING_TOOLS: [&str; 3] = [TOOL_NAME, "read_skill", "read_file"];
 
 fn parts(dir: &Path) -> (SpillOutputs, ReadOutputTool) {
     let store = OutputStore::new(dir, settings()).unwrap();
-    (
-        SpillOutputs::new(store.clone(), PAGING_TOOLS.map(String::from).to_vec()),
-        ReadOutputTool::new(store),
-    )
+    SpillOutputs::with_reader(store, PAGING_TOOLS.map(String::from).to_vec())
 }
 
 /// The output ID that the footer of a stored result's page names.
@@ -347,8 +344,7 @@ async fn an_output_directory_outside_the_working_directory_may_be_reached_throug
         ..settings()
     };
     let store = OutputStore::new(dir.path(), config).unwrap();
-    let hook = SpillOutputs::new(store.clone(), Vec::new());
-    let reader = ReadOutputTool::new(store);
+    let (hook, reader) = SpillOutputs::with_reader(store, Vec::new());
 
     let (left, id) = spill(&hook, &"z".repeat(500)).await;
 
@@ -365,8 +361,7 @@ async fn file_caps_bound_both_writes_and_reads_and_invalid_utf8_is_refused() {
         ..settings()
     };
     let store = OutputStore::new(dir.path(), config).unwrap();
-    let hook = SpillOutputs::new(store.clone(), vec![]);
-    let reader = ReadOutputTool::new(store);
+    let (hook, reader) = SpillOutputs::with_reader(store, vec![]);
     // Over the cap nothing is written; the bounded result stays inline with the reason.
     let kept = hook
         .after_tool(&call("bash"), ToolOutput::ok("x".repeat(513)), &common::hook_context())
@@ -451,7 +446,7 @@ async fn paging_tools_are_exempt_and_disabled_spilling_is_a_noop() {
             large
         );
     }
-    let disabled = SpillOutputs::new(
+    let (disabled, _) = SpillOutputs::with_reader(
         OutputStore::new(
             dir.path(),
             Config {
@@ -534,20 +529,15 @@ async fn redaction_precedes_both_output_file_and_session_persistence() {
         FauxStep::tool_call("c", "read_file", json!({"path":"source.txt"})),
         FauxStep::text("done"),
     ]));
+    let (spill, reader) = SpillOutputs::with_reader(store, vec![TOOL_NAME.into()]);
     let mut config = config(
         provider.clone(),
-        vec![
-            Arc::new(ReadFileTool::default()),
-            Arc::new(ReadOutputTool::new(store.clone())),
-        ],
+        vec![Arc::new(ReadFileTool::default()), Arc::new(reader)],
     );
     config
         .hooks
         .push("redact_secrets", Arc::new(RedactSecrets::new([secret.into()])));
-    config.hooks.push(
-        "spill_outputs",
-        Arc::new(SpillOutputs::new(store, vec![TOOL_NAME.into()])),
-    );
+    config.hooks.push("spill_outputs", Arc::new(spill));
     let audit = dir.path().join("session.jsonl");
     let (runner, _) = RunnerSetup {
         session: common::create_session_file(&audit, header_in(dir.path()))
@@ -595,16 +585,12 @@ async fn a_storage_error_keeps_the_redacted_result_inline_and_the_run_continues(
         FauxStep::tool_call("c", "read_file", json!({"path":"source.txt"})),
         FauxStep::text("must not execute"),
     ]));
+    let (spill, reader) = SpillOutputs::with_reader(store, vec![]);
     let mut config = config(
         provider.clone(),
-        vec![
-            Arc::new(ReadFileTool::default()),
-            Arc::new(ReadOutputTool::new(store.clone())),
-        ],
+        vec![Arc::new(ReadFileTool::default()), Arc::new(reader)],
     );
-    config
-        .hooks
-        .push("spill_outputs", Arc::new(SpillOutputs::new(store, vec![])));
+    config.hooks.push("spill_outputs", Arc::new(spill));
     let (runner, _) = RunnerSetup {
         session: Transcript::in_memory(header_in(dir.path())),
         ..RunnerSetup::new(config)
