@@ -8,7 +8,7 @@ use std::str::FromStr;
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 
-use crate::executor::environment::{pretty_name, run_started};
+use crate::executor::environment::{current_time, pretty_name};
 
 /// The user commands run as when the agent itself runs as root, or off Unix: nobody.
 pub(super) const NOBODY: &str = "65534:65534";
@@ -212,13 +212,13 @@ pub fn environment_section(config: &ContainerConfig, platform: &Platform) -> Str
         Access::ReadOnly => "outside the working directory only /tmp is writable",
     };
     format!(
-        "OS: {name}, Linux kernel {} ({}), in a container from image {}\nRun started: {}\n\
+        "OS: {name}, Linux kernel {} ({}), in a container from image {}\nSession opened: {}\n\
          Working directory: {} ({workspace})\n\
          Isolation: commands run as user {} {network}; {files}.",
         platform.kernel,
         platform.arch,
         config.image,
-        run_started(),
+        current_time(),
         config.workspace.display(),
         config.user,
     )

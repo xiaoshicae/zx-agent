@@ -1,10 +1,10 @@
 //! What the `environment` section of a system prompt says about where commands run.
 //!
-//! Facts the model needs, such as the operating system and the start time, are written into
-//! the prompt at startup instead of being left for the model to discover: discovering them
-//! costs turns, and a policy may deny or ask for the commands that would reveal them.
-//! [`environment_section`] describes this machine; a container describes itself with the same
-//! start time and OS name ([`run_started`], [`pretty_name`]).
+//! Facts the model needs, such as the operating system and the date, are written into the
+//! prompt when a session is opened instead of being left for the model to discover:
+//! discovering them costs turns, and a policy may deny or ask for the commands that would
+//! reveal them. [`environment_section`] describes this machine; a container describes itself
+//! with the same time and OS name ([`current_time`], [`pretty_name`]).
 
 use std::path::Path;
 
@@ -13,20 +13,21 @@ use crate::ai::now_ms;
 /// Facts about the machine; Claude Code, Codex, and Gemini CLI give the model similar ones.
 /// Host and user names are left out because the prompt goes to a third-party model.
 ///
-/// The start time is part of the prompt, so a resumed session gets a new prompt prefix and
-/// misses the provider's prompt cache on its first request.
+/// The section is made when the session is opened, and says so: the runs of a session that
+/// stays open, as in a chat, come later. The time is part of the prompt, so a resumed session
+/// gets a new prompt prefix and misses the provider's prompt cache on its first request.
 pub fn environment_section(cwd: &Path) -> String {
     let os = format!("{} ({})", os_release(), std::env::consts::ARCH);
     format!(
-        "OS: {os}\nRun started: {}\nWorking directory: {}",
-        run_started(),
+        "OS: {os}\nSession opened: {}\nWorking directory: {}",
+        current_time(),
         cwd.display()
     )
 }
 
 /// The current UTC time, with this machine's time zone when it is known, as an environment
 /// section states it.
-pub(super) fn run_started() -> String {
+pub(super) fn current_time() -> String {
     let started = format_utc(now_ms() / 1000);
     match time_zone() {
         Some(zone) => format!("{started} (local time zone: {zone})"),
@@ -125,13 +126,13 @@ mod tests {
     }
 
     #[test]
-    fn environment_names_the_os_start_time_and_directory() {
+    fn environment_names_the_os_the_time_the_session_was_opened_and_the_directory() {
         let section = environment_section(Path::new("/srv/app"));
         let lines: Vec<&str> = section.lines().collect();
         assert_eq!(lines.len(), 3, "{section}");
         assert!(lines[0].starts_with("OS: "), "{section}");
         assert!(
-            lines[1].starts_with("Run started: ") && lines[1].contains(" UTC"),
+            lines[1].starts_with("Session opened: ") && lines[1].contains(" UTC"),
             "{section}"
         );
         assert_eq!(lines[2], "Working directory: /srv/app");
