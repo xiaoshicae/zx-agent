@@ -1,7 +1,9 @@
-//! One HTTP/1.1 request per connection, read and answered, for the fake platform servers.
+//! One HTTP/1.1 request per connection, read and answered, for the fake platform servers;
+//! and a listener that never answers.
 
 use tokio::io::AsyncReadExt;
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
 
 pub(crate) struct Request {
     pub method: String,
@@ -93,4 +95,22 @@ pub(crate) fn response(status: &str, headers: &[(&str, String)], body: &str) -> 
         "HTTP/1.1 {status}\r\ncontent-type: application/json; charset=utf-8\r\ncontent-length: {}\r\n{extra}connection: close\r\n\r\n{body}",
         body.len()
     )
+}
+
+/// A listener that accepts connections and never answers them, for a request or a handshake
+/// that does not end: its address, and a receiver told of each connection it accepts.
+pub(crate) async fn silent_listener() -> (String, mpsc::UnboundedReceiver<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let (accepted, connections) = mpsc::unbounded_channel();
+    // Ends with the test's runtime; until then the connections stay open, unanswered.
+    tokio::spawn(async move {
+        let mut open = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            open.push(stream);
+            // The test may no longer be waiting for connections.
+            accepted.send(()).ok();
+        }
+    });
+    (address, connections)
 }

@@ -170,10 +170,12 @@ impl ImChannel for FeishuChannel {
         // Used while the server has set no reconnect interval.
         let mut backoff = Backoff::default();
         loop {
-            if cancel.is_cancelled() {
-                return Ok(());
-            }
-            let wait = match self.connect(&mut config).await? {
+            let connected = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Ok(()),
+                connected = self.connect(&mut config) => connected?,
+            };
+            let wait = match connected {
                 Connection::Open(link) => {
                     backoff.reset();
                     match self.receive(*link, &mut config, &inbound, &mut seen, cancel).await {

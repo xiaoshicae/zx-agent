@@ -309,7 +309,12 @@ impl SlackChannel {
         seen: &mut Seen<(String, String)>,
         cancel: &CancellationToken,
     ) -> Ended {
-        let Some(mut socket) = self.open_socket(url).await else {
+        let opened = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Ended::Cancelled,
+            opened = self.open_socket(url) => opened,
+        };
+        let Some(mut socket) = opened else {
             return Ended::Failed;
         };
         let mut keepalive = Keepalive::new(self.config.ping_interval);

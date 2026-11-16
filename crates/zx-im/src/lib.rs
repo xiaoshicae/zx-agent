@@ -73,7 +73,8 @@ pub trait ImChannel: Send + Sync {
     fn platform(&self) -> &str;
 
     /// Receive from the platform into `inbound` until `cancel`, reconnecting as needed.
-    /// Returns `Ok` once cancelled, after it has stopped sending, or an error that retrying
+    /// Returns `Ok` soon after `cancel`, whatever it is doing, connecting included, once it
+    /// has stopped sending: the server's stop waits for it. Returns an error that retrying
     /// cannot fix, such as rejected credentials; the server then stops.
     async fn run(&self, inbound: mpsc::Sender<Inbound>, cancel: &CancellationToken) -> Result<(), ImError>;
 

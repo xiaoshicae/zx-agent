@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use common::fake_slack::{Answer, FakeSlack};
+use common::http::silent_listener;
 use common::im::run_channel;
 use zx_agent::events::ApprovalResult;
 use zx_im::{
@@ -518,6 +519,25 @@ async fn stopping_does_not_wait_out_a_long_retry_after() {
     tokio::time::timeout(WAIT, running.stop())
         .await
         .expect("the stop waited for the Retry-After")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn stopping_does_not_wait_for_a_connection_being_opened() {
+    let (address, mut connections) = silent_listener().await;
+    let slack = FakeSlack::start().await;
+    slack.script(
+        "apps.connections.open",
+        vec![Answer::Json(json!({"ok": true, "url": format!("ws://{address}/link")}))],
+    );
+    let mut config = config(&slack);
+    // Longer than the test waits, so that only the stop can end the attempt in time.
+    config.request_timeout = 3 * WAIT;
+    let running = run_channel(Arc::new(SlackChannel::new(config).unwrap()), WAIT);
+    connections.recv().await.unwrap();
+    tokio::time::timeout(WAIT, running.stop())
+        .await
+        .expect("the stop waited for the connection attempt")
         .unwrap();
 }
 
