@@ -81,21 +81,42 @@ pub(crate) fn exit_code(outcome: RunOutcome) -> u8 {
     }
 }
 
-/// SIGINT and SIGTERM cancel `cancel`; what it cancels still reports how it ended.
+/// SIGINT and SIGTERM cancel `cancel`; what it cancels still reports how it ended. On Unix a
+/// second signal ends the process at once, for a stop that takes too long, such as an export
+/// to a collector that does not answer.
 ///
 /// The listeners are registered before this returns, so a signal that arrives once the run
 /// has started always cancels it instead of killing the process. The waiting task is detached
-/// on purpose: it lives until a signal arrives or the process exits.
+/// on purpose: it lives until a signal ends the process, or the process exits.
 pub(crate) fn spawn_signal_handler(cancel: CancellationToken) {
     match Signals::new() {
         Ok(mut signals) => {
             tokio::spawn(async move {
                 signals.next().await;
                 cancel.cancel();
+                #[cfg(unix)]
+                end_by(signals.next().await);
             });
         }
         // Without signal handling the run is still bounded by its own limits, so it continues.
         Err(e) => eprintln!("zx-agent: cannot listen for shutdown signals: {e}"),
+    }
+}
+
+/// End the process at once by the signal of `interrupt`, as it ends without a listener:
+/// shells and supervisors see a death by that signal. Tokio goes on catching a signal it has
+/// listened for, also once no listener is left, so the default action is restored first.
+#[cfg(unix)]
+fn end_by(interrupt: Interrupt) {
+    let number = match interrupt {
+        Interrupt::Cancel => libc::SIGINT,
+        Interrupt::Terminate => libc::SIGTERM,
+    };
+    // SAFETY: `signal` and `raise` take plain integers and touch no memory of this program;
+    // with the default action back, the raised signal ends the process.
+    unsafe {
+        libc::signal(number, libc::SIG_DFL);
+        libc::raise(number);
     }
 }
 
@@ -114,6 +135,7 @@ pub(crate) async fn next_event(run: &mut Run, session: &Session, stop: &Cancella
 }
 
 /// Which signal arrived.
+#[derive(Clone, Copy)]
 pub(crate) enum Interrupt {
     /// SIGINT, or Ctrl+C.
     Cancel,
