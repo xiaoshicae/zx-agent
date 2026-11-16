@@ -2,7 +2,7 @@
 //! and cards the channel posts.
 
 use serde_json::{Value, json};
-use zx_ai::sync::lock;
+use zx_im::sync::lock;
 use zx_im::{
     Addressee, ApprovalId, ApprovalResult, CardLabels, ChatKind, Choice, ConversationId, Destination, ImError, Inbound,
     MessageId, Seen, ThreadId, UserId,
@@ -160,9 +160,35 @@ fn decision(event: &Value) -> Option<Inbound> {
     })
 }
 
-/// The content of a text message: a JSON object as a string.
+/// The content of a text message: a JSON object as a string. Mentions in the text, which
+/// can come from the model and from what a tool returned to it, notify nobody.
 pub(crate) fn text_content(text: &str) -> String {
-    json!({ "text": text }).to_string()
+    json!({ "text": without_mentions(text) }).to_string()
+}
+
+/// Put between characters that Feishu would read as markup, so that they are shown as text.
+const ZERO_WIDTH_SPACE: char = '\u{200B}';
+
+/// `text` with every mention tag (`<at …>`, which notifies people, everyone with
+/// `user_id="all"`) broken by a zero-width space after its `<`.
+pub(crate) fn without_mentions(text: &str) -> String {
+    let mut shown = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(index) = rest.find('<') {
+        shown.push_str(&rest[..=index]);
+        rest = &rest[index + 1..];
+        if rest.get(..2).is_some_and(|tag| tag.eq_ignore_ascii_case("at")) {
+            shown.push(ZERO_WIDTH_SPACE);
+        }
+    }
+    shown.push_str(rest);
+    shown
+}
+
+/// `text` with no run of three backticks, which would end the code block of a card that
+/// shows it: a zero-width space goes between every two.
+pub(crate) fn without_fences(text: &str) -> String {
+    text.replace("``", &format!("`{ZERO_WIDTH_SPACE}`"))
 }
 
 /// A card in JSON 2.0 that can be updated, as a string.

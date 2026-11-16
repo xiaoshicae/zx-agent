@@ -9,10 +9,12 @@ use tokio_util::sync::CancellationToken;
 
 use super::answer::{ResponseBytes, parse_answer};
 use super::{
-    Compacted, Config, End, MAX_SOURCE_BYTES, Summarized, Summarizer, SummarySource, TokenTrigger, Trigger,
-    context_bytes, estimated_tokens, message_bytes,
+    Compacted, Config, End, MAX_SOURCE_BYTES, Summarized, Summarizer, SummaryReply, SummarySource, TokenTrigger,
+    Trigger, context_bytes, estimated_tokens, message_bytes,
 };
-use crate::ai::{AssistantMessage, Message, ModelMeta, Provider, Request, StreamEvent, Usage, duration_ms, now_ms};
+use crate::ai::{
+    AssistantMessage, Message, ModelMeta, Provider, Request, StopReason, StreamEvent, Usage, duration_ms, now_ms,
+};
 use crate::events::{Emit, EventKind, RequestKind};
 use crate::guard::{CancelSignal, Priority, Stopped, bounded};
 use crate::transcript::{
@@ -34,7 +36,7 @@ const CANCELLED: &str = "compaction cancelled";
 /// Runs one compaction over a session: chooses what to summarize, records its start, asks
 /// for the summary, checks it and records the result or the failure.
 pub(crate) struct Compactor<'a> {
-    pub(crate) session: &'a mut Transcript,
+    pub(crate) transcript: &'a mut Transcript,
     /// The model that summarizes when no summarizer does: the one the run asks.
     pub(crate) provider: &'a dyn Provider,
     pub(crate) model: &'a str,
@@ -131,6 +133,15 @@ impl Made {
             Self::Summary(summarized) => &summarized.usage,
         }
     }
+
+    /// Whether the request was answered: a response that ended with an error or was
+    /// aborted is no answer.
+    fn is_answer(&self) -> bool {
+        match self {
+            Self::Answer(message) => !matches!(message.stop_reason, StopReason::Error | StopReason::Aborted),
+            Self::Summary(_) => true,
+        }
+    }
 }
 
 /// Why an open compaction did not complete.
@@ -146,7 +157,7 @@ impl Compactor<'_> {
     /// check it, then record the result or the failure. When it ends `Completed`, the
     /// session's projection is the new context.
     pub(crate) async fn run(mut self) -> Compacted {
-        let input_bytes = match context_bytes(&self.session.messages()) {
+        let input_bytes = match context_bytes(&self.transcript.messages()) {
             Ok(bytes) => bytes,
             Err(error) => return Compacted::without_request(0, End::Failed(format!("{error:#}"))),
         };
@@ -166,9 +177,13 @@ impl Compactor<'_> {
             Ok(made) => made.usage().clone(),
             Err(_) => Usage::default(),
         };
+        let reply = match &made {
+            Ok(made) if made.is_answer() => SummaryReply::Answered,
+            Ok(_) | Err(_) => SummaryReply::Missing,
+        };
         let end = self.finish(&open, made, input_bytes, &usage).await;
         Compacted {
-            requests: 1,
+            reply,
             usage,
             input_bytes,
             end,
@@ -213,7 +228,7 @@ impl Compactor<'_> {
     /// summarize, or the latest summary already covers it; an error when what it would read
     /// or keep is out of bounds.
     fn candidate(&self) -> Result<Option<Candidate>> {
-        let store = &*self.session;
+        let store = &*self.transcript;
         let raw = store.raw_projection();
         let Some(last_user) = raw
             .iter()
@@ -315,7 +330,7 @@ impl Compactor<'_> {
             input_bytes,
         };
         let id = self
-            .session
+            .transcript
             .begin_compaction(plan)
             .await
             .context("cannot persist compaction request")?;
@@ -405,7 +420,7 @@ impl Compactor<'_> {
         };
         let options = self.provider.request_options();
         let entry = self
-            .session
+            .transcript
             .record_request(&request, self.provider.name(), options, source)
             .await
             .context("cannot persist summary request checkpoint")?;
@@ -464,7 +479,7 @@ impl Compactor<'_> {
             Err(error) => return self.fail(open, Cause::Rejected(error), response, usage).await,
         };
         let recorded = self
-            .session
+            .transcript
             .append_compaction(&open.id, summary, usage.clone())
             .await
             .context("cannot persist compaction result");
@@ -531,7 +546,7 @@ impl Compactor<'_> {
             Cause::Unrecorded(error) => (format!("{error:#}"), Some(error)),
         };
         if let Err(write_error) = self
-            .session
+            .transcript
             .fail_compaction(&open.id, error.clone(), usage.clone(), response)
             .await
         {

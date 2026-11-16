@@ -12,7 +12,6 @@
 //! - `guard`: a run's cancellation as host code sees it ([`CancelSignal`]), and the bound on
 //!   every call into host code
 //! - [`tools`]: the tool interface, the tools of a session, and which of them a run offers
-//! - [`prompt`]: the system prompt assembled from its sections
 //! - [`input`] (transcript): the messages given to a run and the queues that hold them while
 //!   it runs
 //! - [`policy`] (guard): the interface that decides whether a tool call may run, and the
@@ -104,7 +103,6 @@ mod guard;
 pub mod hooks;
 pub mod input;
 pub mod policy;
-pub mod prompt;
 mod runner;
 pub mod session;
 pub mod tools;

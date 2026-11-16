@@ -13,7 +13,7 @@ impl StepLoop<'_> {
     /// Record and send the task request of step `step`, then account for its response.
     pub(super) async fn request_model(&mut self, step: u32) -> Result<AssistantMessage, Halt> {
         let config = self.host.config;
-        let messages = self.host.session.messages();
+        let messages = self.host.transcript.messages();
         let configured = RequestSettings {
             model: config.model.clone(),
             reasoning: config.reasoning,
@@ -42,7 +42,7 @@ impl StepLoop<'_> {
         let provider = config.provider.as_ref();
         let request_entry = self
             .host
-            .session
+            .transcript
             .record_request(
                 &request,
                 provider.name(),

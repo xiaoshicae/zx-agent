@@ -18,7 +18,7 @@ let report = run.wait().await;                // 只要结果时直接 session.s
 
 - 入口：`Agent`（所有会话共用的角色 `AgentConfig`：模型、工具、策略、钩子、扩展、上限、重试、摘要与存储；`create_session`、`open_session(id)`、`session(id)`、`close_session(id)`、`list_sessions`）、`Session`（一个会话的句柄，克隆出来的是同一个会话：`send`、`continue_run`、`compact` 各返回一个 `Run`；另有 `cancel`、`set_model`、`set_name`、`branch`、`queues`、`active_tools`、`tool_names`、`cwd`、`run_command`、`is_closed`）、`Run`（一次执行：事件流与结果。读它才推进，事件经有界通道，读得慢运行就等；丢弃即取消并归还会话）、`transcript::Transcript`。
 - 会话在创建时给定的目录工作（`SessionOptions::cwd`，记在头部），再次打开时仍是那个目录。打开着的会话由 `Agent` 记着：再打开同一个会话得到同一个 `Session`；`close_session` 取消它正在进行的运行并释放它占用的东西，之后旧句柄的调用返回 `SessionError::Closed`，会话仍在存储里，可以再打开。记录写不进去的会话（写入失败、超时，或调用方在写入途中丢弃了 `Run`）在那次操作结束时自行关闭，句柄同样返回 `SessionError::Closed`，`open_session` 从存储重新打开它。
-- 属于单个会话的东西（绑定会话目录或为它启动的容器的工具、相应的钩子与提示词段落）由宿主实现的 `agent::SessionSetup` 在创建或打开会话时给出，随会话释放；它失败时新会话不会留在存储里。不需要按会话区分时不用实现，工具直接放进 `AgentConfig::tools`。
+- 属于单个会话的东西（绑定会话目录或为它启动的容器的工具、相应的钩子与提示词段落）由宿主实现的 `agent::SessionSetup` 在创建或打开会话时给出，随会话释放；它失败时新会话不会留在存储里。它给出的段名经 `section_names` 声明，扩展不能再用这些名字，也不能用 `preamble`。不需要按会话区分时不用实现，工具直接放进 `AgentConfig::tools`。
 - 调用者身份：会话的标签（`SessionOptions::labels`，如租户或所属对话）与输入的 actor（`Input::User { text, actor }`，这条输入是谁发的）经 `PolicyContext` 与 `HookContext` 的 `labels`、`actor` 交给策略与钩子。`actor` 是会话最近一条提问的发送者，没有给出时为 `None`；扩展发的消息不改变它。内核只记录与传递，不据此做任何判断。
 - 审批不是接口而是会话的一个操作：`AgentConfig::approvals` 默认 `ApprovalMode::Deny`（没有人回答，策略询问的调用立即被拒绝）；设为 `ApprovalMode::Wait(时长)` 后，运行发出带审批编号、工具名与参数的 `approval_requested` 事件并等待 `Session::resolve_approval(编号, 决定)`，超时或取消都按拒绝处理。读事件的循环里不要等人回答，否则超时与取消要到下一次读取才生效。
 - 事件只从 `Run` 读出。要观察所有运行的（如追踪导出）实现 `hooks::Hook::on_event`：不等待、不失败的钩子按顺序看到每个事件，被取消的运行也一样。

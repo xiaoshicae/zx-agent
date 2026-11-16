@@ -6,7 +6,7 @@
 use super::accounting::check_priced;
 use super::{Ending, EventTarget, FirstInput, Halt, LoopConfig, RunAccounting, Start};
 use crate::ai::{Message, StopReason};
-use crate::compaction::{self, Compacted, Compactor, End, TokenTrigger, Trigger};
+use crate::compaction::{self, Compacted, Compactor, End, SummaryReply, TokenTrigger, Trigger};
 use crate::events::EventKind;
 use crate::input::Queue;
 use crate::transcript::Transcript;
@@ -39,13 +39,15 @@ impl CompactionPause {
         self.0 = None;
     }
 
-    /// Pause after a paid failure, resume after a success; other ends change nothing.
+    /// Pause after a failure the summary request was answered for, which asking again would
+    /// pay for again; resume after a success. Other ends change nothing: a request that got
+    /// no answer may succeed the next time.
     fn note(&mut self, compacted: &Compacted) {
-        let paid = compacted.requests > 0;
+        let answered = compacted.reply == SummaryReply::Answered;
         match &compacted.end {
             End::Completed { .. } => self.0 = None,
-            End::Failed(error) if paid => self.0 = Some(error.clone()),
-            End::Unrecorded(error) if paid => self.0 = Some(format!("{error:#}")),
+            End::Failed(error) if answered => self.0 = Some(error.clone()),
+            End::Unrecorded(error) if answered => self.0 = Some(format!("{error:#}")),
             End::Failed(_) | End::Unrecorded(_) | End::Noop | End::Cancelled(_) => {}
         }
     }
@@ -54,7 +56,7 @@ impl CompactionPause {
 /// A run's borrow of the Runner: the session, the configuration with its hooks and model,
 /// and where the run's events go.
 pub(super) struct RunHost<'a> {
-    pub(super) session: &'a mut Transcript,
+    pub(super) transcript: &'a mut Transcript,
     /// How many entries the session had when the run started: what follows is the run's.
     pub(super) run_start: usize,
     pub(super) target: EventTarget<'a>,
@@ -69,7 +71,7 @@ impl RunHost<'_> {
     /// The same host, borrowed for a shorter time.
     pub(super) fn reborrow(&mut self) -> RunHost<'_> {
         RunHost {
-            session: &mut *self.session,
+            transcript: &mut *self.transcript,
             run_start: self.run_start,
             target: self.target,
             config: self.config,
@@ -90,6 +92,11 @@ impl RunHost<'_> {
                 provider: config.provider.name().into(),
             })
             .await;
+        // A failed answer that a continuation drops goes before recovery would answer its
+        // calls, which never ran.
+        if matches!(begin, Start::Continue) {
+            self.omit_failed_answer().await?;
+        }
         // Before any system prompt change or input, so that results directly follow their calls.
         self.recover_interrupted_calls()
             .await
@@ -113,7 +120,7 @@ impl RunHost<'_> {
             return Compacted::without_request(0, End::Failed(error));
         }
         let compactor = Compactor {
-            session: &mut *self.session,
+            transcript: &mut *self.transcript,
             provider: self.config.provider.as_ref(),
             model: &self.config.model,
             models: &self.config.models,
@@ -129,12 +136,33 @@ impl RunHost<'_> {
         compacted
     }
 
+    /// Omit a failed or cancelled answer at the end of the conversation with a context edit,
+    /// as a retry does: the model answers again.
+    async fn omit_failed_answer(&mut self) -> Result<(), String> {
+        let failed = self
+            .transcript
+            .projection()
+            .iter()
+            .rev()
+            .find(|item| !matches!(item.message, Message::System(_)))
+            .and_then(|last| match &last.message {
+                Message::Assistant(answer) if matches!(answer.stop_reason, StopReason::Error | StopReason::Aborted) => {
+                    Some(last.entry_id.clone())
+                }
+                _ => None,
+            });
+        match failed {
+            Some(failed) => self.omit_failed_attempt(&failed).await,
+            None => Ok(()),
+        }
+    }
+
     /// The input a continuation starts with, after omitting a failed answer at the end; an
     /// error when there is nothing for the model to answer. Queued input stays in its queue:
     /// the loop takes it as it does between steps, so that a message is taken only once it
     /// is recorded, and what a stopped run did not take is still queued.
     async fn continuation(&mut self) -> Result<FirstInput, String> {
-        let projection = self.session.projection();
+        let projection = self.transcript.projection();
         let Some(last) = projection
             .iter()
             .rev()
@@ -171,12 +199,12 @@ impl RunHost<'_> {
     /// it is estimated to hold. Each is measured only when its trigger is set.
     fn over_trigger(&self) -> anyhow::Result<bool> {
         if let Some(limit) = self.compaction.trigger_bytes
-            && compaction::context_bytes(&self.session.messages())? > limit
+            && compaction::context_bytes(&self.transcript.messages())? > limit
         {
             return Ok(true);
         }
         match self.compaction.trigger_tokens {
-            TokenTrigger::Above(limit) => Ok(compaction::context_tokens(self.session)? > limit),
+            TokenTrigger::Above(limit) => Ok(compaction::context_tokens(self.transcript)? > limit),
             TokenTrigger::Unset | TokenTrigger::Off => Ok(false),
         }
     }
@@ -206,7 +234,7 @@ impl RunHost<'_> {
         }
         let compacted = self.compact_for_run(accounting).await;
         match compacted.end {
-            End::Completed { .. } => Ok(compacted.requests),
+            End::Completed { .. } => Ok(compacted.reply.requests()),
             End::Unrecorded(error) => Err(Halt::Unrecorded(error)),
             End::Failed(error) | End::Cancelled(error) => Err(Halt::Failed(error)),
             End::Noop => Err(Halt::Failed(
@@ -221,7 +249,7 @@ impl RunHost<'_> {
     /// overflow, counting the summary's requests and usage into `accounting`.
     pub(super) async fn compact_for_run(&mut self, accounting: &mut RunAccounting) -> Compacted {
         let compacted = self.compact(Trigger::Automatic, accounting.attempts).await;
-        accounting.count_requests(compacted.requests, &compacted.usage);
+        accounting.count_requests(compacted.reply.requests(), &compacted.usage);
         compacted
     }
 }

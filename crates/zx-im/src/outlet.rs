@@ -10,7 +10,7 @@ use tokio::task::JoinError;
 use tokio_util::sync::CancellationToken;
 
 use crate::session::SessionError;
-use crate::transcript::CustomMessage;
+use crate::transcript::{CustomMessage, SessionQuery};
 use crate::{Agent, Session};
 use zx_core::SessionOptions;
 use zx_core::events::{Budget, RunOutcome, RunReport};
@@ -137,10 +137,20 @@ impl Outlet {
     /// what was said there before, which is read before the session is made: a session either
     /// starts with the thread or is not made. A session the conversation has already, such as
     /// one `/new` started, is opened as it is, however little it holds.
+    ///
+    /// A session the storage no longer has, such as one whose file was removed, is reported
+    /// and replaced as if the conversation were new; any other failure is the caller's to
+    /// report, and the next message tries again.
     pub(crate) async fn open(&self, trigger: Option<&MessageRef>) -> Result<Opened, String> {
         let shared = &self.shared;
         if let Some(id) = shared.session_of(&self.key) {
-            return self.held(shared.agent.open_session(&id).await);
+            match shared.agent.open_session(&id).await {
+                Ok(session) => return self.held(Ok::<_, String>(session)),
+                Err(error) if !self.still_kept(&id).await => {
+                    self.failed(format!("session {id} is gone ({error:#}); a new one is made"));
+                }
+                Err(error) => return Err(format!("{error:#}")),
+            }
         }
         let earlier = match trigger {
             Some(trigger) => self.said_before(trigger).await,
@@ -154,6 +164,19 @@ impl Outlet {
             }
         }
         Ok(opened)
+    }
+
+    /// Whether the storage still has the conversation's session `id`. A storage that cannot
+    /// tell counts as having it, so that a passing failure never starts a new session.
+    async fn still_kept(&self, id: &str) -> bool {
+        let query = SessionQuery {
+            labels: self.key.labels(),
+            ..SessionQuery::default()
+        };
+        match self.shared.agent.session_headers(&query).await {
+            Ok(headers) => headers.iter().any(|header| header.id == id),
+            Err(_) => true,
+        }
     }
 
     /// Create a session with the conversation's labels, which is its latest one from now
@@ -281,12 +304,13 @@ impl Outlet {
             .await;
     }
 
-    /// Record what was said in the thread before the bot was mentioned there by `trigger`, in
-    /// the conversation's first session, which has nothing yet: the first answer then knows
-    /// the talk it joins. Nothing is read when `trigger` started the thread.
-    /// What was said in the thread before `trigger`, as the model reads it: nothing in a
-    /// direct chat or a thread that `trigger` starts, and nothing when the platform cannot
-    /// give it, which is reported.
+    /// What was said in the thread before `trigger`, the mention of the bot that starts the
+    /// conversation's first session, as the model reads it: the first answer then knows the
+    /// talk it joins. Nothing in a direct chat or a thread that `trigger` starts, and nothing
+    /// when the platform cannot give it, which is reported. The thread is read up to now,
+    /// which can be well after `trigger` when the session waited for a run slot; what came
+    /// after it is cut off, as it reaches the session as messages of its own. When `trigger`
+    /// is not among the messages read, all of them are kept.
     async fn said_before(&self, trigger: &MessageRef) -> Vec<String> {
         let Some(thread) = &self.key.thread else {
             return Vec::new();
@@ -303,11 +327,14 @@ impl Outlet {
             )
             .await;
         // A failure was reported; the conversation goes on without the earlier messages.
-        let Some(history) = history else {
+        let Some(mut history) = history else {
             return Vec::new();
         };
+        if let Some(position) = history.iter().position(|said| said.id == trigger.id) {
+            history.truncate(position);
+        }
         let mut earlier = Vec::new();
-        for message in history.into_iter().filter(|earlier| earlier.id != trigger.id) {
+        for message in history {
             earlier.push(self.attributed(&message.sender, &message.text).await);
         }
         earlier

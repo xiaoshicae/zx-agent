@@ -74,8 +74,9 @@ impl Tool for LsTool {
             limit,
             Wording {
                 empty: "(empty directory)",
-                more: format!("more entries exist; showing the first {limit}. Raise limit to see more"),
-                cut: None,
+                more: "more entries exist",
+                advice: "Raise limit, or list a subdirectory",
+                long_lines: "long names were cut",
             },
         )
     }

@@ -433,6 +433,29 @@ async fn a_status_update_replaces_the_text_and_leaves_out_blocks() {
 }
 
 #[tokio::test]
+async fn a_refused_edit_posts_the_text_instead() {
+    let slack = FakeSlack::start().await;
+    slack.script("chat.update", vec![Answer::Error("message_not_found")]);
+    let channel = channel(&slack);
+    let posted = channel
+        .send(&in_thread("C1", Some("9.1")), &Post::Text("working".into()))
+        .await
+        .unwrap();
+
+    channel
+        .update(&posted, &Replacement::Text("done".into()))
+        .await
+        .unwrap();
+
+    let posts = slack.calls("chat.postMessage");
+    assert_eq!(posts.len(), 2, "{posts:?}");
+    assert_eq!(
+        posts[1].body,
+        json!({"channel": "C1", "thread_ts": "9.1", "text": "done"})
+    );
+}
+
+#[tokio::test]
 async fn a_rate_limited_post_waits_and_is_retried() {
     let slack = FakeSlack::start().await;
     slack.script("chat.postMessage", vec![Answer::RateLimited { retry_after_secs: 0 }]);
@@ -606,6 +629,24 @@ async fn replies_in_a_thread_are_passed_on_with_whom_they_mention() {
         group("6.3", Addressee::Others, "<@U2> over to you")
     );
     assert_eq!(running.next().await, group("6.4", Addressee::Bot, "you too"));
+    running.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_thread_reply_also_sent_to_the_channel_is_passed_on() {
+    let mut slack = FakeSlack::start().await;
+    let mut running = run_channel(channel(&slack), WAIT);
+    let mut socket = slack.socket().await;
+    let mut broadcast = channel_message("6.2", Some("6.0"), "and then?");
+    broadcast["event"]["subtype"] = json!("thread_broadcast");
+
+    socket.send(envelope("e1", "events_api", &broadcast)).await;
+
+    let at = in_thread("C1", Some("6.0"));
+    assert_eq!(
+        running.next().await,
+        said("6.2", at, ChatKind::Group, Addressee::Nobody, "and then?", "U1")
+    );
     running.stop().await.unwrap();
 }
 

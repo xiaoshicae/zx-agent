@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use zx_agent::agent::RunLimits;
+use zx_agent::ai::SystemPrompt;
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
 use zx_agent::builtin::continuation::ContinueOnLength;
 use zx_agent::builtin::executor::{LocalExecutor, local_environment_section};
@@ -15,7 +16,6 @@ use zx_agent::builtin::redact::RedactSecrets;
 use zx_agent::builtin::tools::{BashTool, ReadFileTool};
 use zx_agent::events::EventKind;
 use zx_agent::policy::PolicyDecision;
-use zx_agent::prompt::build_system_prompt;
 use zx_agent::{Agent, AgentConfig, SessionOptions};
 
 /// This embedder's scenario: a bounded, read-only report about the machine it runs on.
@@ -45,7 +45,7 @@ async fn main() -> anyhow::Result<()> {
         },
     ])
     .auto_approve(AutoApprove::new(["df", "free", "uptime", "head"]));
-    let system_prompt = build_system_prompt(INSTRUCTIONS, &[("environment", &local_environment_section(&cwd))]);
+    let system_prompt = SystemPrompt::new(INSTRUCTIONS).with_section("environment", &local_environment_section(&cwd));
     // The key must not reach commands, where `env` would reveal it.
     let bash = BashTool {
         executor: Arc::new(LocalExecutor {

@@ -2,26 +2,28 @@
 //!
 //! Socket Mode needs no public URL: the channel opens a WebSocket to Slack and acknowledges
 //! each envelope before handling it.
+//!
+//! The Web API calls are in `api.rs`; the Socket Mode connection in `connection.rs`; what
+//! arrives over it, and the cards, in `events.rs`.
 
+mod api;
+mod connection;
 mod events;
 
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::{SinkExt, StreamExt};
-use reqwest::header::{HeaderMap, RETRY_AFTER};
-use reqwest::{StatusCode, Url};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use tokio::sync::mpsc;
-use tokio_tungstenite::tungstenite::{Bytes, Message};
 use tokio_util::sync::CancellationToken;
 use zx_im::{
-    ApprovalCard, Backoff, CardLabels, Destination, ErrorReport, ImChannel, ImError, Inbound, Keepalive,
-    MAX_TEXT_CHARS, MessageId, MessageRef, Pacer, Post, RATE_LIMIT_RETRIES, Replacement, SEEN_CAPACITY, Said, Seen,
-    ThreadId, UserId, rate_limit_wait,
+    ApprovalCard, Backoff, CardLabels, Destination, ErrorReport, ImChannel, ImError, Inbound, MAX_TEXT_CHARS,
+    MessageRef, Pacer, Post, RATE_LIMIT_RETRIES, Replacement, SEEN_CAPACITY, Said, Seen, ThreadId, UserId,
 };
 
-use events::{button, card_request, decisions, escape, history, message, resolution, section, split};
+use api::CallError;
+use connection::{Ended, connection_url};
+use events::{button, card_request, escape, history, resolution, section, split};
 
 /// Where the Web API lives.
 const DEFAULT_API_BASE: &str = "https://slack.com/api";
@@ -119,8 +121,6 @@ fn shown(labels: &CardLabels, card: &ApprovalCard) -> String {
     card_request(labels, &card.tool, &card.summary, &card.reason)
 }
 
-type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-
 impl SlackChannel {
     /// A channel for `config`. Fails when the HTTP client cannot be built.
     pub fn new(config: SlackConfig) -> Result<Self, ImError> {
@@ -135,297 +135,11 @@ impl SlackChannel {
         })
     }
 
-    /// Call a Web API method with `token`, its arguments in the query (`args`) or in a JSON
-    /// `body`. A rate limit is waited out and retried; a method error that retrying cannot
-    /// fix is a configuration error.
-    async fn call(
-        &self,
-        method: &str,
-        token: &str,
-        args: &[(&str, &str)],
-        body: Option<&Value>,
-    ) -> Result<Value, ImError> {
-        self.call_retrying(method, token, args, body, RATE_LIMIT_RETRIES).await
-    }
-
-    /// [`Self::call`], waiting out a rate limit at most `rate_limit_retries` times: after
-    /// those, or with none, the limit is the call's error.
-    async fn call_retrying(
-        &self,
-        method: &str,
-        token: &str,
-        args: &[(&str, &str)],
-        body: Option<&Value>,
-        rate_limit_retries: u32,
-    ) -> Result<Value, ImError> {
-        let base = self.config.api_base.trim_end_matches('/');
-        let mut url = Url::parse(&format!("{base}/{method}"))
-            .map_err(|error| ImError::Config(format!("slack {method}: invalid API base {base}: {error}")))?;
-        if !args.is_empty() {
-            url.query_pairs_mut().extend_pairs(args);
-        }
-        let mut retries = 0;
-        loop {
-            let request = self.http.post(url.clone()).bearer_auth(token);
-            let request = match body {
-                Some(body) => request.json(body),
-                None => request,
-            };
-            let response = request
-                .send()
-                .await
-                .map_err(|error| ImError::Transport(format!("slack {method}: {error}")))?;
-            let status = response.status();
-            if status == StatusCode::TOO_MANY_REQUESTS && retries < rate_limit_retries {
-                retries += 1;
-                tokio::time::sleep(retry_after(response.headers())).await;
-                continue;
-            }
-            let answer: Value = response
-                .json()
-                .await
-                .map_err(|error| ImError::Transport(format!("slack {method}: HTTP {status}: {error}")))?;
-            if answer["ok"] == Value::Bool(true) {
-                return Ok(answer);
-            }
-            let error = answer["error"].as_str().unwrap_or("no error code");
-            return Err(if SETUP_ERRORS.contains(&error) {
-                ImError::Config(format!("slack {method}: {error}"))
-            } else {
-                ImError::Transport(format!("slack {method}: {error}"))
-            });
-        }
-    }
-
-    /// A Web API call without a body, given up when `cancel` is triggered: `None`.
-    async fn call_unless_cancelled(
-        &self,
-        method: &str,
-        token: &str,
-        cancel: &CancellationToken,
-    ) -> Option<Result<Value, ImError>> {
-        tokio::select! {
-            biased;
-            () = cancel.cancelled() => None,
-            answer = self.call(method, token, &[], None) => Some(answer),
-        }
-    }
-
     /// Tell the operator about `error`, which the channel goes on after.
     fn report(&self, error: &ImError) {
         if let Some(callback) = &self.config.on_error {
             callback(error);
         }
-    }
-
-    /// One page of the thread `thread` of `at`'s chat: the one `cursor` names, or the first
-    /// when it is empty. A rate limit is waited out at most `rate_limit_retries` times.
-    async fn replies_page(
-        &self,
-        at: &Destination,
-        thread: &ThreadId,
-        cursor: &str,
-        rate_limit_retries: u32,
-    ) -> Result<Value, ImError> {
-        let page_size = HISTORY_PAGE_MESSAGES.to_string();
-        let mut args = vec![
-            ("channel", at.conversation.0.as_str()),
-            ("ts", thread.0.as_str()),
-            ("limit", page_size.as_str()),
-        ];
-        if !cursor.is_empty() {
-            args.push(("cursor", cursor));
-        }
-        let token = &self.config.bot_token;
-        self.call_retrying("conversations.replies", token, &args, None, rate_limit_retries)
-            .await
-    }
-
-    async fn post(&self, to: &Destination, text: &str, blocks: Option<Value>) -> Result<MessageRef, ImError> {
-        self.posts.turn(&to.conversation.0).await;
-        let mut body = Map::new();
-        body.insert("channel".into(), json!(to.conversation.0));
-        body.insert("text".into(), json!(text));
-        if let Some(thread) = &to.thread {
-            body.insert("thread_ts".into(), json!(thread.0));
-        }
-        if let Some(blocks) = blocks {
-            body.insert("blocks".into(), blocks);
-        }
-        let answer = self
-            .call(
-                "chat.postMessage",
-                &self.config.bot_token,
-                &[],
-                Some(&Value::Object(body)),
-            )
-            .await?;
-        let ts = answer["ts"]
-            .as_str()
-            .ok_or_else(|| ImError::Transport("slack chat.postMessage: no ts in the answer".into()))?;
-        Ok(MessageRef {
-            at: to.clone(),
-            id: MessageId(ts.into()),
-        })
-    }
-
-    /// Replace a posted message. Without `blocks`, Slack removes the message's blocks and
-    /// shows `text` (chat.update: "If the `text` argument is provided and `blocks` are not
-    /// provided, the `blocks` will be removed").
-    async fn edit(&self, posted: &MessageRef, text: &str, blocks: Option<Value>) -> Result<(), ImError> {
-        let mut body = Map::new();
-        body.insert("channel".into(), json!(posted.at.conversation.0));
-        body.insert("ts".into(), json!(posted.id.0));
-        body.insert("text".into(), json!(text));
-        if let Some(blocks) = blocks {
-            body.insert("blocks".into(), blocks);
-        }
-        self.call("chat.update", &self.config.bot_token, &[], Some(&Value::Object(body)))
-            .await
-            .map(drop)
-    }
-
-    /// Open the Socket Mode connection at `url`; a failure is reported.
-    async fn open_socket(&self, url: &str) -> Option<Socket> {
-        let connected = tokio::time::timeout(self.config.request_timeout, tokio_tungstenite::connect_async(url)).await;
-        let failure = match connected {
-            Ok(Ok((socket, _))) => return Some(socket),
-            Ok(Err(error)) => format!("slack: cannot open the Socket Mode connection: {error}"),
-            Err(_) => format!(
-                "slack: opening the Socket Mode connection took longer than {} s",
-                self.config.request_timeout.as_secs()
-            ),
-        };
-        self.report(&ImError::Transport(failure));
-        None
-    }
-
-    /// Receive over one Socket Mode connection until it ends.
-    async fn receive(
-        &self,
-        url: &str,
-        inbound: &mpsc::Sender<Inbound>,
-        bot: Option<&str>,
-        seen: &mut Seen<(String, String)>,
-        cancel: &CancellationToken,
-    ) -> Ended {
-        let opened = tokio::select! {
-            biased;
-            () = cancel.cancelled() => return Ended::Cancelled,
-            opened = self.open_socket(url) => opened,
-        };
-        let Some(mut socket) = opened else {
-            return Ended::Failed;
-        };
-        let mut keepalive = Keepalive::new(self.config.ping_interval);
-        loop {
-            let frame = tokio::select! {
-                () = cancel.cancelled() => {
-                    // The server is stopping; a failed close changes nothing.
-                    socket.close(None).await.ok();
-                    return Ended::Cancelled;
-                }
-                () = tokio::time::sleep_until(keepalive.next_ping()) => {
-                    if socket.send(Message::Ping(Bytes::new())).await.is_err() {
-                        return Ended::Lost;
-                    }
-                    keepalive.pinged();
-                    continue;
-                }
-                () = tokio::time::sleep_until(keepalive.deadline()) => return Ended::Silent(keepalive.silence()),
-                frame = socket.next() => frame,
-            };
-            keepalive.alive();
-            let text = match frame {
-                Some(Ok(Message::Text(text))) => text,
-                // tungstenite answers pings itself, and the pongs answer ours; Slack sends no
-                // binary frames.
-                Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Binary(_) | Message::Frame(_))) => continue,
-                Some(Ok(Message::Close(_)) | Err(_)) | None => return Ended::Lost,
-            };
-            let Some(frame) = self.frame_of(&text) else {
-                continue;
-            };
-            if let Err(ended) = acknowledge(&mut socket, &frame).await {
-                return ended;
-            }
-            let events = match envelope(&frame, bot, seen) {
-                Envelope::Disconnect => return Ended::Lost,
-                Envelope::Events(events) => events,
-            };
-            for event in events {
-                if inbound.send(event).await.is_err() {
-                    // The server no longer reads: it is stopping.
-                    return Ended::Cancelled;
-                }
-            }
-        }
-    }
-
-    /// `text` as a JSON frame; one that is not is reported and dropped.
-    fn frame_of(&self, text: &str) -> Option<Value> {
-        match serde_json::from_str(text) {
-            Ok(frame) => Some(frame),
-            Err(error) => {
-                self.report(&ImError::Transport(format!(
-                    "slack: a Socket Mode frame is not JSON: {error}"
-                )));
-                None
-            }
-        }
-    }
-}
-
-/// Acknowledge the envelope of `frame`, if it has one. Slack redelivers what is not
-/// acknowledged in time, so this comes before any handling.
-async fn acknowledge(socket: &mut Socket, frame: &Value) -> Result<(), Ended> {
-    if let Some(id) = frame["envelope_id"].as_str() {
-        let ack = json!({ "envelope_id": id }).to_string();
-        socket.send(Message::text(ack)).await.map_err(|_| Ended::Lost)?;
-    }
-    Ok(())
-}
-
-/// The address in the answer of `apps.connections.open`.
-fn connection_url(answer: &Value) -> Result<String, ImError> {
-    answer["url"]
-        .as_str()
-        .map(String::from)
-        .ok_or_else(|| ImError::Transport("slack apps.connections.open: no url in the answer".into()))
-}
-
-enum Ended {
-    Cancelled,
-    /// Slack asked to reconnect, or the connection dropped.
-    Lost,
-    /// Nothing came over the connection for this long, not even answers to the pings.
-    Silent(Duration),
-    /// The WebSocket could not be opened.
-    Failed,
-}
-
-/// What a Socket Mode envelope asks for.
-enum Envelope {
-    /// Slack closes the connection soon; another is to be opened.
-    Disconnect,
-    /// The messages and clicks to pass on: none for `hello`, and for envelope types this bot
-    /// does not subscribe to.
-    Events(Vec<Inbound>),
-}
-
-/// What `frame` asks for; a redelivered message is left out.
-fn envelope(frame: &Value, bot: Option<&str>, seen: &mut Seen<(String, String)>) -> Envelope {
-    match frame["type"].as_str() {
-        Some("disconnect") => Envelope::Disconnect,
-        Some("events_api") => Envelope::Events(
-            message(&frame["payload"], bot)
-                .filter(|(key, _)| seen.insert(key))
-                .map(|(_, event)| event)
-                .into_iter()
-                .collect(),
-        ),
-        Some("interactive") => Envelope::Events(decisions(&frame["payload"])),
-        _ => Envelope::Events(Vec::new()),
     }
 }
 
@@ -533,8 +247,16 @@ impl ImChannel for SlackChannel {
         match replacement {
             Replacement::Text(text) => {
                 let (first, rest) = split(text, MAX_TEXT_CHARS);
-                self.edit(posted, &first, None).await?;
                 let thread = posted.thread();
+                match self.edit(posted, &first, None).await {
+                    Ok(()) => {}
+                    // Slack refused the edit, as for a message deleted since: the text is
+                    // posted instead of lost. A call without an answer may have edited it.
+                    Err(CallError::Refused { .. }) => {
+                        self.post(&thread, &first, None).await?;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
                 for part in &rest {
                     self.post(&thread, part, None).await?;
                 }
@@ -544,7 +266,7 @@ impl ImChannel for SlackChannel {
                 let labels = &self.config.labels;
                 let result = resolution(labels, user.as_ref(), *result);
                 let blocks = json!([section(&shown(labels, card)), section(&result)]);
-                self.edit(posted, &result, Some(blocks)).await
+                self.edit(posted, &result, Some(blocks)).await.map_err(ImError::from)
             }
         }
     }
@@ -637,13 +359,6 @@ fn read_in_part(at: &Destination, thread: &ThreadId, why: &str) -> ImError {
     ))
 }
 
-/// The wait a 429 asks for in the `Retry-After` of `headers`, at most [`MAX_RETRY_AFTER`]; a
-/// header that is not text counts as missing, which is one second ([`rate_limit_wait`]).
-fn retry_after(headers: &HeaderMap) -> Duration {
-    let seconds = headers.get(RETRY_AFTER).and_then(|value| value.to_str().ok());
-    rate_limit_wait(seconds, MAX_RETRY_AFTER)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -658,19 +373,5 @@ mod tests {
             assert!(seen.insert(&key(n)));
         }
         assert!(seen.insert(&key(0)), "the oldest key is forgotten");
-    }
-
-    #[test]
-    fn a_retry_after_is_capped_and_defaults_to_one_second() {
-        use reqwest::header::HeaderValue;
-
-        let mut headers = HeaderMap::new();
-        assert_eq!(retry_after(&headers), Duration::from_secs(1));
-        headers.insert(RETRY_AFTER, HeaderValue::from_static("soon"));
-        assert_eq!(retry_after(&headers), Duration::from_secs(1));
-        headers.insert(RETRY_AFTER, HeaderValue::from_static("5"));
-        assert_eq!(retry_after(&headers), Duration::from_secs(5));
-        headers.insert(RETRY_AFTER, HeaderValue::from_static("100000"));
-        assert_eq!(retry_after(&headers), MAX_RETRY_AFTER);
     }
 }

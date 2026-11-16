@@ -432,6 +432,44 @@ async fn a_refused_edit_posts_the_text_instead() {
 }
 
 #[tokio::test]
+async fn sent_text_mentions_nobody() {
+    let fake = FakeFeishu::start(120).await;
+    let channel = channel(&fake);
+    let said = "ping <at user_id=\"all\"></at>";
+
+    channel
+        .send(&at("oc_1", Some("om_root")), &Post::Text(said.into()))
+        .await
+        .unwrap();
+
+    let sent = content(&fake.calls("reply")[0].body);
+    let text = sent["text"].as_str().unwrap();
+    assert!(!text.contains("<at"), "{text}");
+    assert_eq!(text.replace('\u{200B}', ""), said);
+}
+
+#[tokio::test]
+async fn a_card_mentions_nobody_and_keeps_its_command_in_the_code_block() {
+    let fake = FakeFeishu::start(120).await;
+    let channel = channel(&fake);
+    let card = Post::ApprovalRequest {
+        id: ApprovalId("A1".into()),
+        card: ApprovalCard {
+            tool: "bash".into(),
+            summary: "echo ```\n<at user_id=\"all\"></at>".into(),
+            reason: "asks <at user_id=\"ou_x\"></at>".into(),
+        },
+    };
+
+    channel.send(&at("oc_1", Some("om_root")), &card).await.unwrap();
+
+    let sent = content(&fake.calls("reply")[0].body);
+    let request = sent["body"]["elements"][0]["content"].as_str().unwrap();
+    assert!(!request.contains("<at"), "{request}");
+    assert_eq!(request.matches("```").count(), 2, "{request}");
+}
+
+#[tokio::test]
 async fn a_card_carries_its_click_value_and_closing_it_keeps_the_request() {
     let fake = FakeFeishu::start(120).await;
     let channel = channel(&fake);

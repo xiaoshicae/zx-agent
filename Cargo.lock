@@ -3396,7 +3396,6 @@ dependencies = [
  "tokio-tungstenite",
  "tokio-util",
  "uuid",
- "zx-ai",
  "zx-im",
 ]
 

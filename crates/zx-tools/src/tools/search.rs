@@ -214,16 +214,22 @@ fn report(searched: &Searched, lines: &str, notes: &mut Vec<String>) -> ToolOutp
     }
 }
 
-/// What a search says about its result: when nothing was found, when more exists than is
-/// shown, and when lines were cut (`None`: cuts go unmentioned).
+/// What a search says about its result: when nothing was found, when not every line it
+/// found is shown, and when lines were cut short.
+#[derive(Clone, Copy)]
 struct Wording {
     empty: &'static str,
-    more: String,
-    cut: Option<&'static str>,
+    /// That more was found than is shown, such as "more files match".
+    more: &'static str,
+    /// What to do to see the rest.
+    advice: &'static str,
+    /// That lines too long to show whole were cut short, such as "long paths were cut".
+    long_lines: &'static str,
 }
 
 /// The result of a search that shows at most `shown` of its lines: the lines, then the notes
-/// `wording` gives, then which program searched and what it reported.
+/// `wording` gives, then which program searched and what it reported. A note says how many
+/// lines are shown whenever some are not, by `shown` or by the bound of a result.
 fn finish(searched: &Searched, shown: usize, wording: Wording) -> Result<ToolOutput, String> {
     if let Some(error) = failed(searched) {
         return Err(error);
@@ -235,11 +241,15 @@ fn finish(searched: &Searched, shown: usize, wording: Wording) -> Result<ToolOut
     let more = all.len() > shown || searched.dropped > 0;
     all.truncate(shown);
     let (text, cut) = bound(&all.join("\n"));
+    let kept = text.lines().count();
     let mut notes = Vec::new();
-    if more {
-        notes.push(wording.more);
-    } else if let Some(note) = wording.cut.filter(|_| cut) {
-        notes.push(note.to_string());
+    if more || kept < all.len() {
+        notes.push(format!(
+            "{}; showing the first {kept} lines. {}",
+            wording.more, wording.advice
+        ));
+    } else if cut {
+        notes.push(wording.long_lines.to_string());
     }
     Ok(report(searched, &text, &mut notes))
 }

@@ -7,12 +7,12 @@ use std::path::Path;
 use std::process::Stdio;
 
 use async_trait::async_trait;
-use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
 use super::capture::{Capture, await_end, collect};
 use super::{CommandOutput, Executor, ShellCommand, check_read_within, directory_error, special_file_error};
+use crate::files::{Links, open_without_blocking, read_bounded};
 
 /// Runs commands as child processes of the agent and reads files directly.
 ///
@@ -106,11 +106,7 @@ impl Executor for LocalExecutor {
                 max_bytes
             ));
         }
-        // Metadata can be stale (growing files and procfs). Bound the actual read too,
-        // using one extra byte to distinguish an exact-limit file from an oversized one.
-        let mut bytes = Vec::new();
-        file.take(max_bytes.saturating_add(1))
-            .read_to_end(&mut bytes)
+        let bytes = read_bounded(file, max_bytes)
             .await
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
         check_read_within(path, &bytes, max_bytes)?;
@@ -148,25 +144,20 @@ impl Executor for LocalExecutor {
 }
 
 /// Open the file at `path` for reading, with its metadata, refusing what is not a regular
-/// file. Without blocking: what was checked before may have been replaced by a FIFO since,
-/// and opening one waits for a writer, holding a blocking thread, and so the runtime's
-/// shutdown, until one comes. Here it is opened at once and refused.
+/// file: what was checked before may have been replaced by a FIFO since, which is opened at
+/// once and refused here ([`open_without_blocking`]).
 async fn open_regular_file(path: &Path) -> Result<(tokio::fs::File, std::fs::Metadata), String> {
-    let unreadable = |e: std::io::Error| format!("cannot read {}: {e}", path.display());
-    let mut options = tokio::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    options.custom_flags(libc::O_NONBLOCK);
-    let file = options.open(path).await.map_err(unreadable)?;
-    let meta = file.metadata().await.map_err(unreadable)?;
+    let (file, meta) = open_without_blocking(path, Links::Follow)
+        .await
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     regular_file(path, &meta)?;
     Ok((file, meta))
 }
 
 /// Replace the contents of the file at `path` with `bytes`, creating it when missing and
-/// refusing what is not a regular file. Opened without blocking, for the reason
-/// [`open_regular_file`] gives: opening a FIFO for writing waits for a reader. Truncated only
-/// once known to be a regular file.
+/// refusing what is not a regular file. Opened without blocking, as
+/// [`open_without_blocking`] says why: opening a FIFO for writing waits for a reader.
+/// Truncated only once known to be a regular file.
 fn overwrite_regular_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let unwritable = |e: std::io::Error| format!("cannot write {}: {e}", path.display());
     let mut options = std::fs::OpenOptions::new();

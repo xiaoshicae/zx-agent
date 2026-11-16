@@ -275,7 +275,7 @@ impl StepLoop<'_> {
         match runnable.effects {
             Effects::SideEffects => self
                 .host
-                .session
+                .transcript
                 .append_tool_call_started(&call.id, &call.name)
                 .await
                 .map(|_| ())

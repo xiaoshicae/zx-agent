@@ -6,9 +6,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use super::edit_text::{
-    Edit, apply_edits, line_ending, normalize_to_lf, restore_line_endings, split_bom, unified_patch,
-};
+use super::edit_text::{Edit, apply_edits, lf_endings, split_bom, unified_patch};
 use super::mutation::{FileMutationQueue, write_locked};
 use super::{DEFAULT_MAX_FILE_BYTES, check_path, looks_binary, parse_args, resolve, unless_cancelled};
 use crate::ai::ToolDef;
@@ -161,10 +159,8 @@ impl Tool for EditFileTool {
             )
         })?;
         let (bom, text) = split_bom(&raw);
-        let ending = line_ending(text);
-        let original = normalize_to_lf(text);
-        let changed = apply_edits(&original, &args.edits, shown)?;
-        let contents = format!("{bom}{}", restore_line_endings(&changed, ending));
+        let changed = apply_edits(text, &args.edits, shown)?;
+        let contents = format!("{bom}{changed}");
         // Checked last before writing: the executor finishes a write it has begun, also when
         // this call is dropped meanwhile, so that no file is left empty or cut short.
         if ctx.cancel.is_cancelled() {
@@ -174,7 +170,8 @@ impl Tool for EditFileTool {
 
         let mut details = Map::new();
         details.insert("path".into(), json!(path.display().to_string()));
-        if let Some((patch, first_changed_line)) = unified_patch(shown, &original, &changed) {
+        // The patch shows the lines as the model reads them, with `\n` endings.
+        if let Some((patch, first_changed_line)) = unified_patch(shown, &lf_endings(text), &lf_endings(&changed)) {
             details.insert("patch".into(), json!(bounded_patch(&patch)));
             details.insert("firstChangedLine".into(), json!(first_changed_line));
         }

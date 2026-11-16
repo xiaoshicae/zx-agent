@@ -9,6 +9,7 @@
 use std::path::Path;
 
 use crate::ai::now_ms;
+use crate::calendar::civil_from_days;
 
 /// Facts about the machine; Claude Code, Codex, and Gemini CLI give the model similar ones.
 /// Host and user names are left out because the prompt goes to a third-party model.
@@ -92,25 +93,10 @@ fn time_zone() -> Option<String> {
     Some(zone.to_string())
 }
 
-/// Seconds since the Unix epoch as `YYYY-MM-DD HH:MM UTC`, using Howard Hinnant's
-/// days-to-civil algorithm (the standard library has no calendar).
+/// Seconds since the Unix epoch as `YYYY-MM-DD HH:MM UTC`.
 fn format_utc(secs: u64) -> String {
-    let days = secs / 86_400;
     let (hour, minute) = (secs % 86_400 / 3600, secs % 3600 / 60);
-    // Count from 0000-03-01 so that the leap day is the last day of a year.
-    let shifted = days + 719_468;
-    let era = shifted / 146_097;
-    let day_of_era = shifted - era * 146_097;
-    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_index = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
-    let month = if month_index < 10 {
-        month_index + 3
-    } else {
-        month_index - 9
-    };
-    let year = year_of_era + era * 400 + u64::from(month <= 2);
+    let (year, month, day) = civil_from_days(secs / 86_400);
     format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02} UTC")
 }
 

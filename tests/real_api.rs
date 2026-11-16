@@ -41,14 +41,13 @@ use common::summary_eval::evaluate;
 use common::{RunnerSetup, config, fast_retry};
 use zx_agent::agent::RunLimits;
 use zx_agent::ai::openai::{BodyOptions, OpenAiCompatible, OpenAiConfig, SystemUpdates};
-use zx_agent::ai::{Message, Provider};
+use zx_agent::ai::{Message, Provider, SystemPrompt};
 use zx_agent::builtin::executor::{LocalExecutor, local_environment_section};
 use zx_agent::builtin::policy::{AutoApprove, Rule, RuleMatcher, RulePolicy};
 use zx_agent::builtin::tools::BashTool;
 use zx_agent::compaction::{Config, Outcome};
 use zx_agent::events::{RunOutcome, RunReport};
 use zx_agent::policy::PolicyDecision;
-use zx_agent::prompt::build_system_prompt;
 use zx_agent::transcript::Transcript;
 
 const PAID: &str = "calls a paid model API; needs ZX_E2E_AUTHORIZED=1 and the API owner's consent";
@@ -108,10 +107,10 @@ impl Endpoint {
         let mut config = config(Arc::new(self.provider(api_key)), vec![]);
         config.model = self.model.clone();
         config.max_tokens = Some(256);
-        config.system_prompt = build_system_prompt(
+        config.system_prompt = SystemPrompt::new(
             "You are a test assistant. Follow the user's instructions exactly and keep answers short.",
-            &[("environment", &local_environment_section(cwd))],
-        );
+        )
+        .with_section("environment", &local_environment_section(cwd));
         RunnerSetup {
             limits: RunLimits {
                 max_model_requests: Some(4),

@@ -2,7 +2,7 @@
 
 use zx_core::input::Input;
 
-use super::{CANCEL_COMMAND, Incoming, NEW_COMMAND, Phase, Worker, WorkerInput};
+use super::{AfterRun, CANCEL_COMMAND, Incoming, NEW_COMMAND, Phase, Worker, WorkerInput};
 use crate::{
     Addressee, Session,
     outlet::{Asked, said},
@@ -65,7 +65,17 @@ impl Worker {
         }
         self.answering = Some(incoming.sender.clone());
         let asked = Asked(pending);
-        let steered = match &mut self.phase {
+        let taken = match &mut self.phase {
+            // A run that `/cancel` or `/new` stopped takes no more input: what is asked now
+            // runs next.
+            Phase::Running {
+                after: AfterRun::Cancel | AfterRun::Renew,
+                asked: later,
+                ..
+            } => {
+                later.push(asked);
+                true
+            }
             Phase::Running { open, .. } => {
                 open.session.queues().steer(asked.0);
                 true
@@ -80,7 +90,8 @@ impl Worker {
                 false
             }
         };
-        if steered {
+        // Steered into the run, or kept for the next one: either way it will be answered.
+        if taken {
             self.out.acknowledge(&incoming.message).await;
         }
     }

@@ -3,7 +3,7 @@
 //! restart.
 mod common;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -274,7 +274,8 @@ impl Gate {
 /// tool, the storage that keeps them in memory, how often a session was set up, and how
 /// often the server read the storage's headers or listed sessions. It is the agent's session
 /// setup, which refuses every session when it has a reason to and can be held at a gate, and
-/// its storage, which counts what it is asked.
+/// its storage, which counts what it is asked and no longer has the sessions it was told to
+/// forget, as when their files are removed.
 struct Sessions {
     provider: Arc<FauxProvider>,
     echo: Arc<EchoTool>,
@@ -284,9 +285,19 @@ struct Sessions {
     listed: AtomicUsize,
     fail: Option<String>,
     setup_gate: Option<Arc<Gate>>,
+    forgotten: Mutex<HashSet<String>>,
 }
 
 impl Sessions {
+    /// Lose the session `id` from the storage.
+    fn forget(&self, id: &str) {
+        self.forgotten.lock().unwrap().insert(id.to_string());
+    }
+
+    fn is_forgotten(&self, id: &str) -> bool {
+        self.forgotten.lock().unwrap().contains(id)
+    }
+
     /// The IDs of the conversation's sessions, most recently active first.
     async fn of(&self, key: &SessionKey) -> Result<Vec<String>, String> {
         let query = SessionQuery {
@@ -347,6 +358,7 @@ impl SessionStorage for Sessions {
     }
 
     async fn open(&self, id: &str) -> anyhow::Result<(LoadedSession, Box<dyn SessionLog>)> {
+        anyhow::ensure!(!self.is_forgotten(id), "no session {id}");
         self.storage.open(id).await
     }
 
@@ -356,7 +368,9 @@ impl SessionStorage for Sessions {
 
     async fn headers(&self, query: &SessionQuery) -> anyhow::Result<Vec<SessionHeader>> {
         self.indexed.fetch_add(1, Ordering::SeqCst);
-        self.storage.headers(query).await
+        let mut headers = self.storage.headers(query).await?;
+        headers.retain(|header| !self.is_forgotten(&header.id));
+        Ok(headers)
     }
 
     async fn list(&self, query: &SessionQuery) -> anyhow::Result<SessionList> {
@@ -445,6 +459,7 @@ fn start(setup: Setup) -> Harness {
         listed: AtomicUsize::new(0),
         fail: setup.fail_open,
         setup_gate: setup.setup_gate,
+        forgotten: Mutex::default(),
     });
     let agent = sessions.agent(setup.approval_timeout);
     let (inject, events_in) = mpsc::channel(16);
@@ -1318,6 +1333,36 @@ async fn a_failing_channel_stops_the_server_with_its_error() {
 }
 
 #[tokio::test]
+async fn a_conversation_whose_session_is_gone_goes_on_in_a_new_one() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("one"), FauxStep::text("two")],
+        config: ServerConfig {
+            idle: Duration::from_millis(20),
+            ..Setup::default().config
+        },
+        ..Setup::default()
+    });
+    let working: Post = text(&h.replies.working.clone());
+    h.say_directly("d1", "hello").await;
+    let status = h.posted(&direct(), working.clone()).await;
+    h.updated(&status, text("one")).await;
+    assert_eq!(h.event().await, ServerEvent::Released { key: direct_key() });
+    let gone = h.sessions.of(&direct_key()).await.unwrap().remove(0);
+    h.sessions.forget(&gone);
+
+    h.say_directly("d2", "again").await;
+
+    match h.event().await {
+        ServerEvent::Failed { error, .. } => assert!(error.contains(&gone), "{error}"),
+        other => panic!("expected the lost session to be reported, got {other:?}"),
+    }
+    let status = h.posted(&direct(), working).await;
+    h.updated(&status, text("two")).await;
+    assert_eq!(h.requests()[1], ["user:again"]);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn a_session_that_cannot_be_opened_is_reported_and_tried_again() {
     let mut h = start(Setup {
         fail_open: Some("disk full".into()),
@@ -1868,6 +1913,26 @@ async fn the_first_mention_in_a_thread_reads_what_was_said_there() {
 }
 
 #[tokio::test]
+async fn the_first_mention_in_a_thread_reads_only_what_was_said_before_it() {
+    let mut h = start(Setup {
+        steps: vec![FauxStep::text("one")],
+        // Read once a run slot was free: by then the thread went on after the mention.
+        history: vec![
+            earlier("t1", OTHER, "the deploy failed"),
+            earlier("m2", ASKER, "why?"),
+            earlier("m3", OTHER, "any news?"),
+        ],
+        names: HashMap::from([(OTHER.to_string(), "Li".to_string())]),
+        ..Setup::default()
+    });
+    h.say("m2", Some("t1"), "why?").await;
+    let status = h.posted(&thread("t1"), text(&h.replies.working.clone())).await;
+    h.updated(&status, text("one")).await;
+    assert_eq!(h.requests()[0], ["user:Li: the deploy failed", "user:U-asker: why?"]);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn a_session_started_by_new_does_not_read_what_was_said_in_the_thread() {
     let mut h = start(Setup {
         steps: vec![FauxStep::text("one")],
@@ -1936,6 +2001,47 @@ async fn a_slow_session_setup_does_not_block_another_conversations_messages() {
     let status = h.posted(&direct(), text(&h.replies.working.clone())).await;
     h.updated(&status, text("hi")).await;
     gate.release.cancel();
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_message_that_arrives_while_cancel_stops_a_run_is_answered_after_it() {
+    let release = CancellationToken::new();
+    let mut h = start(Setup {
+        steps: vec![echo_call(), FauxStep::text("fresh")],
+        updates: Updates::Held(release.clone()),
+        ..Setup::default()
+    });
+    let replies = h.replies.clone();
+    h.say_directly("d1", "run echo").await;
+    let status = h.posted(&direct(), text(&replies.working)).await;
+    let (id, card) = h.card(&direct()).await;
+    h.say_directly("d2", "/cancel").await;
+    // The cancelled run closes its card, and the platform holds that update back: the
+    // conversation is busy with it, its run not yet seen to have ended.
+    let closed = Replacement::ApprovalResolved {
+        card: echo_card(),
+        id,
+        user: None,
+        result: ApprovalResult::Cancelled,
+    };
+    h.updated(&card, closed).await;
+    h.say_directly("d3", "again").await;
+    // The router passes messages on in the order it got them: once it has refused this one,
+    // the one before it waits in the conversation's inbox.
+    h.say_in("C2", "m1", None, "hello").await;
+    let elsewhere = Destination {
+        conversation: ConversationId("C2".into()),
+        thread: Some(ThreadId("m1".into())),
+    };
+    h.posted(&elsewhere, text(&replies.unauthorized)).await;
+    release.cancel();
+    h.acknowledged(&direct(), "d3").await;
+    h.updated(&status, text(&replies.cancelled)).await;
+    let status = h.posted(&direct(), text(&replies.working)).await;
+    h.updated(&status, text("fresh")).await;
+    let second = &h.requests()[1];
+    assert_eq!(second.last().map(String::as_str), Some("user:again"), "{second:?}");
     h.stop().await.unwrap();
 }
 

@@ -192,8 +192,6 @@ impl Host {
         responder: Responder<NewSessionResponse, V1>,
         cx: &ConnectionTo<Client>,
     ) -> Result<(), Error> {
-        // Session setup holds the dispatch loop, like any request handler; it is a few
-        // startup reads and, with MCP servers, nothing new: they are connected once.
         let result = self.create(&request.cwd).await;
         opened(responder, cx, result, NewSessionResponse::new)
     }
@@ -376,24 +374,36 @@ async fn connect(host: Arc<Host>) -> Result<(), Error> {
             async move |request: InitializeRequest, responder, _cx| on_initialize.initialize(&request, responder),
             agent_client_protocol::on_receive_request!(),
         )
+        // Opening a session sets it up, which can take long, as starting its container does;
+        // listing reads every session of a directory. They run outside the dispatch loop, so
+        // that the messages of the other sessions keep arriving meanwhile. A client uses a
+        // session only once it has the answer.
         .on_receive_request(
-            async move |request: NewSessionRequest, responder, cx| on_new.new_session(&request, responder, &cx).await,
+            async move |request: NewSessionRequest, responder, cx| {
+                let (host, connection) = (Arc::clone(&on_new), cx.clone());
+                cx.spawn(async move { host.new_session(&request, responder, &connection).await })
+            },
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
             async move |request: LoadSessionRequest, responder, cx| {
-                on_load.load_session(&request, responder, &cx).await
+                let (host, connection) = (Arc::clone(&on_load), cx.clone());
+                cx.spawn(async move { host.load_session(&request, responder, &connection).await })
             },
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
             async move |request: ResumeSessionRequest, responder, cx| {
-                on_resume.resume_session(&request, responder, &cx).await
+                let (host, connection) = (Arc::clone(&on_resume), cx.clone());
+                cx.spawn(async move { host.resume_session(&request, responder, &connection).await })
             },
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
-            async move |request: ListSessionsRequest, responder, _cx| on_list.list_sessions(&request, responder).await,
+            async move |request: ListSessionsRequest, responder, cx| {
+                let host = Arc::clone(&on_list);
+                cx.spawn(async move { host.list_sessions(&request, responder).await })
+            },
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(

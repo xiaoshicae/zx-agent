@@ -18,8 +18,7 @@
 //!   - [`agent`]: what a host sets up for one session
 //!
 //!   and what a run takes and gives is in [`input`], [`events`] and [`session`], its limits in
-//!   [`agent::RunLimits`];
-//!   [`prompt`] assembles the system prompt.
+//!   [`agent::RunLimits`].
 //! - [`ai`]: message types, the streaming event protocol and the provider contract of
 //!   `zx-ai` (pi: packages/ai), with the provider of `zx-ai-openai` as `ai::openai`
 //! - [`builtin`]: the implementations of `zx-tools`: the built-in tools (`builtin::tools`),

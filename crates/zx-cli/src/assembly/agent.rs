@@ -17,14 +17,13 @@ use crate::config::skills::{ReadSkillTool, TOOL_NAME};
 use crate::config::{AgentDefinition, Config};
 use crate::otel;
 use zx_agent::ai::openai::{OpenAiCompatible, OpenAiConfig};
-use zx_agent::ai::{ModelMeta, Provider};
+use zx_agent::ai::{ModelMeta, Provider, SystemPrompt};
 use zx_agent::builtin::continuation::ContinueOnLength;
 use zx_agent::builtin::policy::{AutoApprove, CommandPolicy, Rule, RuleMatcher, RulePolicy};
 use zx_agent::builtin::redact::RedactSecrets;
 use zx_agent::builtin::tools::BASH;
 use zx_agent::hooks::HookChain;
 use zx_agent::policy::{ApprovalMode, PolicyChain, PolicyDecision};
-use zx_agent::prompt::build_system_prompt;
 use zx_agent::tools::Tool;
 use zx_agent::{Agent, AgentConfig, Session, SessionOptions};
 
@@ -81,7 +80,7 @@ impl ModeAgent {
         let name = std::mem::take(&mut agent.name);
         let auto_approve_commands = agent.permissions.allowed_commands();
         let role = AgentConfig {
-            system_prompt: build_system_prompt(&agent.instructions, &[]),
+            system_prompt: SystemPrompt::new(&agent.instructions),
             max_tokens: config.max_tokens,
             reasoning: config.reasoning,
             hooks: hooks(shared, &agent, api_key),

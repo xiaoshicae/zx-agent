@@ -135,7 +135,7 @@ impl<'a> StepLoop<'a> {
 
         // A step that stopped before its request finished still ends, so step events pair up.
         self.end_step().await;
-        let cut_off = cut_off(&self.host.session.messages_since(self.host.run_start));
+        let cut_off = cut_off(&self.host.transcript.messages_since(self.host.run_start));
         self.emit(EventKind::AttemptEnd {
             outcome: halt.outcome(cut_off),
         })
@@ -215,7 +215,7 @@ impl<'a> StepLoop<'a> {
     async fn initialize(&mut self, prompt: Option<Input>) -> Result<(), Halt> {
         let config = self.host.config;
         self.start_step().await;
-        let changes = SystemPrompt::from_transcript(&self.host.session.messages()).diff(&config.system_prompt);
+        let changes = SystemPrompt::from_transcript(&self.host.transcript.messages()).diff(&config.system_prompt);
         if !changes.is_empty() {
             self.append(Message::System(SystemMessage {
                 sections: changes,
@@ -253,19 +253,24 @@ impl<'a> StepLoop<'a> {
                 NextInput::Requested(message) => self.input(*message, None, None).await?,
             }
             self.ensure_can_request()?;
+            let (targets, messages): (Vec<String>, Vec<Message>) = self
+                .host
+                .transcript
+                .projection()
+                .into_iter()
+                .map(|projected| (projected.entry_id, projected.message))
+                .unzip();
             let planned = self
                 .host
                 .config
                 .hooks
-                .transform_context(&self.host.session.messages(), &self.host.target.trace.context())
+                .transform_context(&messages, &self.host.target.trace.context())
                 .await;
             let edits = match planned {
                 Ok(edits) => edits,
                 Err(error) => return Err(self.hook_failed(error).await),
             };
-            for edit in edits {
-                self.edit(edit).await?;
-            }
+            self.record_plan(targets, edits).await?;
             self.ensure_can_request()?;
             // Summary requests count against the budget but are reported as a compaction,
             // not as steps of their own.

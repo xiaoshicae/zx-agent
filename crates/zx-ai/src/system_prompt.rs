@@ -24,6 +24,11 @@ pub struct SystemPrompt {
 impl SystemPrompt {
     /// Set section `name`, replacing one with the same name in place. Blank content is
     /// left out, so optional sections can be passed unconditionally.
+    /// A prompt of `instructions`, its preamble, before any section.
+    pub fn new(instructions: &str) -> Self {
+        Self::default().with_section(PREAMBLE, instructions)
+    }
+
     pub fn with_section(mut self, name: &str, content: &str) -> Self {
         let content = content.trim();
         if !content.is_empty() {
@@ -161,8 +166,7 @@ mod tests {
     use super::*;
 
     fn prompt(environment: &str, policy: &str) -> SystemPrompt {
-        SystemPrompt::default()
-            .with_section(PREAMBLE, "Do the task.")
+        SystemPrompt::new("Do the task.")
             .with_section("environment", environment)
             .with_section("command_policy", policy)
     }

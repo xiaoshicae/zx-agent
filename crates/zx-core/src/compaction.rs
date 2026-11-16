@@ -214,11 +214,12 @@ pub struct Report {
 impl From<Compacted> for Report {
     fn from(compacted: Compacted) -> Self {
         let Compacted {
-            requests,
+            reply,
             usage,
             input_bytes,
             end,
         } = compacted;
+        let requests = reply.requests();
         let (outcome, output_bytes, entry_id, error) = match end {
             End::Noop => (Outcome::Noop, input_bytes, None, None),
             End::Completed { entry_id, output_bytes } => (Outcome::Completed, output_bytes, Some(entry_id), None),
@@ -241,8 +242,8 @@ impl From<Compacted> for Report {
 /// What one compaction cost and how it ended, for the kernel; [`Report`] is the same for a
 /// frontend.
 pub(crate) struct Compacted {
-    /// Summaries asked for: 0 or 1.
-    pub(crate) requests: u32,
+    /// What the summary request got back.
+    pub(crate) reply: SummaryReply,
     /// What making the summary used; zero when none was made.
     pub(crate) usage: Usage,
     /// The context's size before the compaction.
@@ -254,10 +255,32 @@ impl Compacted {
     /// A compaction that ended before it made a request.
     pub(crate) fn without_request(input_bytes: usize, end: End) -> Self {
         Self {
-            requests: 0,
+            reply: SummaryReply::NotRequested,
             usage: Usage::default(),
             input_bytes,
             end,
+        }
+    }
+}
+
+/// What the summary request of a compaction got back. A failure is paid for again only when
+/// the request was answered: one that got no answer may succeed the next time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SummaryReply {
+    /// No request was made.
+    NotRequested,
+    /// No complete answer: the provider failed, the stream broke, or it timed out.
+    Missing,
+    /// The model, or the host's summarizer, answered.
+    Answered,
+}
+
+impl SummaryReply {
+    /// The model requests it counts: 0 or 1.
+    pub(crate) fn requests(self) -> u32 {
+        match self {
+            Self::NotRequested => 0,
+            Self::Missing | Self::Answered => 1,
         }
     }
 }
@@ -331,8 +354,8 @@ const BYTES_PER_TOKEN: usize = 4;
 /// quarter of the bytes of the messages after it; without such an answer, a quarter of all
 /// bytes. Only an estimate: the usage counts the request as it was sent, and bytes are not
 /// tokens.
-pub fn context_tokens(session: &Transcript) -> Result<u64> {
-    let (measured, rest) = session.measured_context();
+pub fn context_tokens(transcript: &Transcript) -> Result<u64> {
+    let (measured, rest) = transcript.measured_context();
     let known = measured.map_or(0, |usage| usage.input.saturating_add(usage.output));
     Ok(known.saturating_add(estimated_tokens(context_bytes(&rest)?)))
 }

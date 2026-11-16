@@ -2,39 +2,22 @@
 
 use anyhow::{Context, Result};
 
-use super::PERSIST_FAILED;
 use super::run_host::RunHost;
+use super::{PERSIST_FAILED, Runner};
 use crate::ai::{Message, ToolResultMessage, now_ms};
 use crate::events::{EventKind, Interruption};
-use crate::tools::Effects;
-use crate::transcript::StartRecord;
+use crate::tools::{Effects, Toolbox};
+use crate::transcript::{StartRecord, Transcript};
 
 impl RunHost<'_> {
     /// Record an error result for each call that an interrupted run left without one, so
     /// the next request cannot suggest that such a call did nothing. Calls are never run
     /// again. Stops at the first result the session cannot record.
     pub(super) async fn recover_interrupted_calls(&mut self) -> Result<()> {
-        for call in self.session.interrupted_tool_calls() {
-            let effects = self.config.tools.effects(&call.tool_name);
-            let state = interruption(call.start, effects);
-            let recovered = EventKind::ToolCallRecovered {
-                tool_call_id: call.tool_call_id.clone(),
-                tool_name: call.tool_name.clone(),
-                state,
-            };
-            let result = Message::ToolResult(ToolResultMessage {
-                tool_call_id: call.tool_call_id,
-                tool_name: call.tool_name,
-                content: recovered_result(state).to_string(),
-                is_error: true,
-                timestamp: now_ms(),
-                duration_ms: None,
-                details: None,
-                usage: None,
-            });
+        for (result, recovered) in recovered_results(self.transcript, &self.config.tools) {
             self.target.emit(EventKind::MessageStart { role: "toolResult" }).await;
             let entry_id = self
-                .session
+                .transcript
                 .append_message(result.clone())
                 .await
                 .context(PERSIST_FAILED)?;
@@ -50,6 +33,46 @@ impl RunHost<'_> {
         }
         Ok(())
     }
+}
+
+impl Runner {
+    /// Record the results a run's start records, while idle and without events, as no run
+    /// reads them: before a record the model reads, which would otherwise come between the
+    /// calls and their results and leave the calls unanswered for good.
+    pub(crate) async fn recover_interrupted_calls(&mut self) -> Result<()> {
+        for (result, _) in recovered_results(&self.transcript, &self.config.tools) {
+            self.transcript.append_message(result).await.context(PERSIST_FAILED)?;
+        }
+        Ok(())
+    }
+}
+
+/// The result to record for each call that an interrupted run left without one, in call
+/// order, with the event that reports it.
+fn recovered_results(transcript: &Transcript, tools: &Toolbox) -> Vec<(Message, EventKind)> {
+    transcript
+        .interrupted_tool_calls()
+        .into_iter()
+        .map(|call| {
+            let state = interruption(call.start, tools.effects(&call.tool_name));
+            let recovered = EventKind::ToolCallRecovered {
+                tool_call_id: call.tool_call_id.clone(),
+                tool_name: call.tool_name.clone(),
+                state,
+            };
+            let result = Message::ToolResult(ToolResultMessage {
+                tool_call_id: call.tool_call_id,
+                tool_name: call.tool_name,
+                content: recovered_result(state).to_string(),
+                is_error: true,
+                timestamp: now_ms(),
+                duration_ms: None,
+                details: None,
+                usage: None,
+            });
+            (result, recovered)
+        })
+        .collect()
 }
 
 /// What recovery may claim about an interrupted call. A start record means the call may

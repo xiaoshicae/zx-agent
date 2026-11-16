@@ -15,7 +15,6 @@ use zx_agent::agent::{SessionParts, SessionSetup};
 use zx_agent::builtin::output_store::{self, OutputStore, SpillOutputs};
 use zx_agent::builtin::tools::{self, FileMutationQueue};
 use zx_agent::hooks::HookChain;
-use zx_agent::prompt;
 use zx_agent::tools::Tool;
 use zx_agent::transcript::SessionHeader;
 
@@ -53,8 +52,20 @@ fn host_tool(name: &str) -> bool {
     name == TOOL_NAME || name == output_store::TOOL_NAME
 }
 
+/// The prompt sections a session gets: where commands run, the project's instructions such
+/// as AGENTS.md, and the catalog of skills the model can read.
+const ENVIRONMENT: &str = "environment";
+const PROJECT_CONTEXT: &str = "project_context";
+const AVAILABLE_SKILLS: &str = "available_skills";
+
 #[async_trait]
 impl SessionSetup for PerSession {
+    fn section_names(&self) -> Vec<String> {
+        [ENVIRONMENT, PROJECT_CONTEXT, AVAILABLE_SKILLS]
+            .map(String::from)
+            .to_vec()
+    }
+
     /// Startup reads, and in container mode starting the container. Configuration errors
     /// are reported before the container starts.
     async fn setup(&self, header: &SessionHeader) -> Result<SessionParts> {
@@ -104,9 +115,9 @@ impl SessionSetup for PerSession {
             tools,
             hooks,
             prompt_sections: vec![
-                (prompt::ENVIRONMENT.to_string(), environment),
-                (prompt::PROJECT_CONTEXT.to_string(), context),
-                (prompt::AVAILABLE_SKILLS.to_string(), catalog.to_string()),
+                (ENVIRONMENT.to_string(), environment),
+                (PROJECT_CONTEXT.to_string(), context),
+                (AVAILABLE_SKILLS.to_string(), catalog.to_string()),
             ],
         })
     }
