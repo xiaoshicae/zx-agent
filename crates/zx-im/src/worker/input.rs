@@ -76,7 +76,7 @@ impl Worker {
             }
             Phase::Idle { open, .. } => {
                 let open = open.take();
-                self.begin(open, asked, &incoming.message).await;
+                self.begin(open, vec![asked], Some(incoming.message.clone())).await;
                 false
             }
         };
@@ -85,31 +85,21 @@ impl Worker {
         }
     }
 
-    /// Write the messages heard but not answered into the session; a run that holds it
-    /// leaves them for its end. A released session is opened again for them.
+    /// Write the messages heard but not answered into the session when the conversation holds
+    /// it. A run that holds it, or waits for a slot, writes them when it next opens or ends; a
+    /// released session is opened again for them once a run slot is free, as for a run.
     pub(super) async fn record_heard(&mut self) {
-        if self.heard.is_empty() || matches!(self.phase, Phase::Running { .. }) {
+        if self.heard.is_empty() {
             return;
         }
-        if let Phase::Idle { open: None, .. } = self.phase {
-            match self.out.open(None).await {
-                Ok(opened) => self.phase = Phase::idle(Some(opened)),
-                Err(error) => {
-                    self.out.failed(format!(
-                        "cannot open the session; {} message(s) not recorded: {error}",
-                        self.heard.len()
-                    ));
-                    self.heard.clear();
-                    return;
-                }
+        match &self.phase {
+            Phase::Idle { open: Some(open), .. } => {
+                let session = open.session.clone();
+                self.record_in(&session).await;
             }
+            Phase::Idle { open: None, .. } => self.begin(None, Vec::new(), None).await,
+            Phase::Waiting { .. } | Phase::Running { .. } => {}
         }
-        let session = match &self.phase {
-            Phase::Waiting { open: Some(open), .. } | Phase::Idle { open: Some(open), .. } => open.session.clone(),
-            // Opened above, and no run started since.
-            Phase::Idle { open: None, .. } | Phase::Waiting { open: None, .. } | Phase::Running { .. } => return,
-        };
-        self.record_in(&session).await;
     }
 
     pub(super) async fn record_in(&mut self, session: &Session) {
