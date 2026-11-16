@@ -15,6 +15,9 @@ approvers = ["slack:U0123456789"]
 
 [limits]
 maxRunning = 4
+maxConversations = 128
+maxPendingMessages = 32
+maxPendingBytes = 262144
 idleSecs = 1800
 
 [sessions]
@@ -24,6 +27,7 @@ dir = "/data/sessions"
 # unless set here; any field may be left out. These are Chinese versions.
 [replies]
 working = "处理中…"
+overloaded = "待处理消息或会话已达上限，这条消息未接收，请稍后重试。"
 queued = "排队中：同时运行的任务已满，轮到时开始处理。"
 unauthorized = "未授权：本聊天不在服务名单中。"
 notApprover = "只有审批人名单中的成员可以批准或拒绝，本次点击不生效。"

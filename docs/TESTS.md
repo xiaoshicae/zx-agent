@@ -19,7 +19,7 @@
 | `tests/prepare_request.rs` | `Hook::prepare_request` 对单次请求的替换 |
 | `tests/continue_run.rs` | 不加新输入的续跑 |
 | `tests/overflow_recovery.rs` | 上下文过长后摘要并开始新的尝试 |
-| `tests/model_meta.rs` | 模型单价、成本与 token 阈值 |
+| `tests/model_meta.rs` | 模型单价、成本与 token 阈值；模型切换、请求钩子、摘要与溢出恢复的费用预算校验 |
 | `tests/extension_capabilities.rs` | 扩展在运行中发消息、记状态、改工具集与命令 |
 | `tests/custom_records.rs` | 扩展的 `custom` 与 `custom_message` 记录 |
 | `tests/session_branch.rs` | `Session::branch` 切换分支 |
@@ -29,9 +29,10 @@
 | `tests/compaction.rs` | 宿主的手动与自动摘要、计费、失败与上限 |
 | `tests/summarizer.rs` | 宿主自己的 `Summarizer`：产出摘要而不请求模型、开始记录写它的名字、失败、引用校验、超时、取消与 panic |
 | `tests/actors.rs` | 会话标签与输入的 actor：策略与钩子看到什么、换人说话、不带输入的续跑、记入会话 |
-| `tests/request_audit.rs` | 从会话文件还原请求（G3），含固定会话的逐字节比对 |
+| `tests/request_audit.rs` | 从会话文件还原请求（G3），含固定会话的逐字节比对与分支配置索引校验 |
 | `tests/executor.rs` | 工具只经执行器运行命令与读写文件 |
 | `tests/search_tools.rs` | grep、find、ls |
+| `tests/file_mutations.rs` | 文件锁跨会话共享；取消调用后仍保护后台写入，防止覆盖后续修改 |
 | `tests/file_tools.rs` | edit_file 与 write_file；调用被丢弃时文件仍写完整 |
 | `tests/output_store.rs` | 长结果落盘（留下第一页）与分页；不经符号链接读写 |
 | `tests/hooks.rs` | 钩子、审批、策略事件与脱敏 |
@@ -40,7 +41,7 @@
 | `tests/mcp.rs` | MCP 客户端对假服务器；运行被取消时通知服务器放弃调用 |
 | `tests/im_feishu.rs` | ⚑ D:5/CHINA FLAG: 飞书 channel 对假开放平台 |
 | `tests/im_slack.rs` | Slack channel 对假 Slack |
-| `tests/im_server.rs` | IM 服务的会话划分、接话、`/new`、审批与停止 |
+| `tests/im_server.rs` | IM 服务的会话划分、接话、`/new`、审批与停止；慢查询隔离、运行名额与待处理消息容量 |
 | `tests/real_api.rs` | 付费的真实模型 API，默认跳过（红线 9） |
 
 ## 驱动程序：`crates/zx-cli/tests/`

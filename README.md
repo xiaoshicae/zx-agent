@@ -124,7 +124,10 @@ conversations = ["slack:C0123456789"]   # 只在这些频道或私聊中回答�
 approvers = ["slack:U0123456789"]       # 只有这些用户的点击能批准写操作
 
 [limits]
-maxRunning = 4              # 同时运行的会话数，默认 4，其余排队
+maxRunning = 4              # 同时运行的会话数，默认 4，其余排队，取得名额后才初始化新会话
+maxConversations = 128       # 运行、排队和空闲的会话 worker 总数，默认 128
+maxPendingMessages = 32      # 每个会话已取入但尚未处理的消息数，默认 32
+maxPendingBytes = 262144     # 上述消息的 UTF-8 文本总字节数与单条入站消息上限，默认 256 KiB
 idleSecs = 1800             # 会话空闲多久后释放其文件锁，默认 1800
 
 [sessions]

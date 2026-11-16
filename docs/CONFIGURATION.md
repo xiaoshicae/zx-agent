@@ -107,7 +107,7 @@ You review code without changing files.
 | `limits.maxModelRequests` | 每轮模型请求数，失败的尝试也计入；`"unlimited"` 不限，`0` 不请求模型 |
 | `limits.timeoutSecs` | 每轮总时间上限，`0` 关闭 |
 | `limits.tokenBudget` | 每轮输入加输出 token 上限，以服务返回的用量为准，摘要请求、失败的尝试与缓存命中的输入也计入；`0` 关闭。用完时 run 以退出码 7 结束 |
-| `limits.costBudget` | 每轮花费上限，按 `[[models]]` 的单价计算，单位与单价相同；摘要请求与失败的尝试计入，工具报告的花费不计入；`0` 关闭。模型没有单价时以退出码 2 拒绝启动。用完时 run 以退出码 8 结束 |
+| `limits.costBudget` | 每轮花费上限，按 `[[models]]` 的单价计算，单位与单价相同；摘要请求与失败的尝试计入，工具报告的花费不计入；`0` 关闭。模型没有单价时以退出码 2 拒绝启动；切换模型或请求钩子选择了未配置单价的模型时，该次运行在发送请求前失败。用完时 run 以退出码 8 结束 |
 | `context.discover` | 是否自动发现项目 `AGENTS.md`；`assistant` 开启，`unattended` 关闭 |
 | `context.files` | 显式上下文文件 |
 | `[[skills]]` | 登记 `name`、`description`、`path`；正文由 `read_skill` 按需读取 |
@@ -186,7 +186,7 @@ skills 只来自 agent 的 `[[skills]]`，不扫描全局目录，不解析 SKIL
 | `compaction.maxSummaryTokens` | 摘要输出 token 上限，1–16384，默认 2048；把推理计入输出的模型需要调高 |
 | `compaction.timeoutSecs` | 摘要的总超时，秒，默认 120 |
 
-一次自动摘要占用一次模型请求预算。付费的自动摘要失败后，本会话暂停自动摘要，直到手动 `/compact` 成功、切换模型或开新会话。开启自动摘要时，模型以上下文过长拒绝请求后，运行先摘要一次，再从压缩后的上下文继续（不算重试，不占 `provider.maxRetries`）。摘要每次重新读取边界之前的全部原始记录，累计超过 2 MiB 后无法再摘要，需要 `/new`。
+一次自动摘要占用一次模型请求预算。配置费用预算时，手动 `/compact` 也会在发送前校验模型单价。付费的自动摘要失败后，本会话暂停自动摘要，直到手动 `/compact` 成功、切换模型或开新会话。开启自动摘要时，模型以上下文过长拒绝请求后，运行先摘要一次，再从压缩后的上下文继续（不算重试，不占 `provider.maxRetries`）。摘要每次重新读取边界之前的全部原始记录，累计超过 2 MiB 后无法再摘要，需要 `/new`。
 
 ## 工具结果落盘
 

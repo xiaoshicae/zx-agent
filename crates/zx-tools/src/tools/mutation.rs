@@ -3,11 +3,12 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use tokio::sync::OwnedMutexGuard;
 
 use crate::ai::sync::lock;
+use crate::executor::Executor;
 
 /// Serializes the changes to each file among the tools that share it. Changes to different
 /// files run at the same time.
@@ -19,6 +20,13 @@ pub struct FileMutationQueue {
 }
 
 impl FileMutationQueue {
+    /// Default tools coordinate across sessions as well as within one batch. The weak
+    /// per-path entries keep this process-wide coordinator from retaining old file locks.
+    pub(crate) fn shared() -> Arc<Self> {
+        static SHARED: OnceLock<Arc<FileMutationQueue>> = OnceLock::new();
+        Arc::clone(SHARED.get_or_init(Arc::default))
+    }
+
     /// Wait for the turn to change `path`. Paths that name the same file through symbolic
     /// links or `..` share a turn; for a file that does not exist yet, its directory is
     /// resolved instead. The turn lasts as long as the returned guard.
@@ -38,6 +46,23 @@ impl FileMutationQueue {
         };
         file_lock.lock_owned().await
     }
+}
+
+/// Move the file's turn into the write: a cancelled caller must neither stop a write nor
+/// let the next mutation read the file before that write has finished.
+pub(super) async fn write_locked(
+    executor: Arc<dyn Executor>,
+    path: PathBuf,
+    contents: Vec<u8>,
+    turn: OwnedMutexGuard<()>,
+) -> Result<(), String> {
+    // Not aborted on drop: the lock must live as long as the executor's actual write.
+    tokio::spawn(async move {
+        let _turn = turn;
+        executor.write_file(&path, &contents).await
+    })
+    .await
+    .map_err(|error| format!("file mutation did not finish: {error}"))?
 }
 
 /// The real path of `path`, or of its directory joined with its name when the file does not

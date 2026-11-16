@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use async_trait::async_trait;
 
 use super::{
@@ -16,6 +16,7 @@ use crate::sync::lock;
 /// such as `zx-agent chat --no-session`. Within the process a session can still be listed,
 /// read, and opened again once its writer is dropped; a storage made with
 /// [`MemoryStorage::forgetting`] drops the session then instead.
+/// Listing requires a Tokio runtime: record replay runs on its blocking threads.
 #[derive(Default)]
 pub struct MemoryStorage {
     /// Shared with the logs of the sessions, which outlive any borrow of the storage.
@@ -121,19 +122,24 @@ impl SessionStorage for MemoryStorage {
             .filter(|stored| query.matches(&stored.header))
             .map(Stored::loaded)
             .collect();
-        let mut sessions = Vec::new();
-        let mut unreadable = Vec::new();
-        for loaded in matching {
-            let id = loaded.header.id.clone();
-            match Transcript::snapshot(loaded) {
-                Ok(transcript) => sessions.push(SessionInfo::of(&transcript)),
-                Err(error) => unreadable.push(Unreadable {
-                    location: id,
-                    error: format!("{error:#}"),
-                }),
+        let query = query.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut sessions = Vec::new();
+            let mut unreadable = Vec::new();
+            for loaded in matching {
+                let id = loaded.header.id.clone();
+                match Transcript::snapshot(loaded) {
+                    Ok(transcript) => sessions.push(SessionInfo::of(&transcript)),
+                    Err(error) => unreadable.push(Unreadable {
+                        location: id,
+                        error: format!("{error:#}"),
+                    }),
+                }
             }
-        }
-        Ok(SessionList::new(query, sessions, unreadable))
+            SessionList::new(&query, sessions, unreadable)
+        })
+        .await
+        .context("session listing replay stopped")
     }
 }
 

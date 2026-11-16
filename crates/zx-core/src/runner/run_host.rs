@@ -192,8 +192,7 @@ impl RunHost<'_> {
                 "{paused}; compact manually to retry, start a new session, or disable automatic compaction"
             )));
         }
-        let compacted = self.compact(Trigger::Automatic, accounting.attempts).await;
-        accounting.count_requests(compacted.requests, &compacted.usage);
+        let compacted = self.compact_for_run(accounting).await.map_err(Halt::Failed)?;
         match compacted.end {
             End::Completed { .. } => Ok(compacted.requests),
             End::Unrecorded(error) => Err(Halt::Unrecorded(error)),
@@ -204,5 +203,16 @@ impl RunHost<'_> {
                     .into(),
             )),
         }
+    }
+
+    /// Automatic summaries, including overflow recovery, obey the same model price check
+    /// and contribute to the same run accounting.
+    pub(super) async fn compact_for_run(&mut self, accounting: &mut RunAccounting) -> Result<Compacted, String> {
+        if self.config.summarizer.is_none() {
+            accounting.check_model(&self.config.models, &self.config.model)?;
+        }
+        let compacted = self.compact(Trigger::Automatic, accounting.attempts).await;
+        accounting.count_requests(compacted.requests, &compacted.usage);
+        Ok(compacted)
     }
 }

@@ -321,7 +321,10 @@ impl Agent {
     /// Open the session `id` from the storage and set it up.
     async fn open(&self, id: &str) -> Result<Session> {
         let (loaded, log) = self.shared.config.storage.open(id).await?;
-        let transcript = Transcript::load(loaded, log).with_context(|| format!("cannot load session {id}"))?;
+        let transcript = tokio::task::spawn_blocking(move || Transcript::load(loaded, log))
+            .await
+            .context("session replay stopped")?
+            .with_context(|| format!("cannot load session {id}"))?;
         let parts = self.set_up(transcript.header()).await?;
         let assembled = self.assemble(transcript.header(), parts)?;
         self.start(assembled, transcript)

@@ -24,6 +24,9 @@ use super::status::{left_behind, replace_left_behind};
 use super::{ApprovalId, ConversationId, Destination, ImChannel, ImError, MessageRef, StatusStore, ThreadId, UserId};
 
 const DEFAULT_MAX_RUNNING: NonZeroUsize = NonZeroUsize::new(4).expect("4 is not zero");
+const DEFAULT_MAX_CONVERSATIONS: NonZeroUsize = NonZeroUsize::new(128).expect("128 is not zero");
+const DEFAULT_PENDING_MESSAGES: NonZeroUsize = NonZeroUsize::new(32).expect("32 is not zero");
+const DEFAULT_PENDING_BYTES: NonZeroUsize = NonZeroUsize::new(256 * 1024).expect("256 KiB is not zero");
 const DEFAULT_IDLE: Duration = Duration::from_secs(30 * 60);
 /// Long enough for a platform's rate-limit queue, short enough that a platform that stopped
 /// answering does not hold a conversation for minutes.
@@ -109,6 +112,8 @@ pub struct Replies {
     pub working: String,
     /// Posted when a conversation waits for a free run slot.
     pub queued: String,
+    /// The server or conversation has no capacity for this message; it was not accepted.
+    pub overloaded: String,
     /// The only answer in a chat the server does not serve.
     pub unauthorized: String,
     /// The answer to a click by someone who is not an approver.
@@ -151,6 +156,7 @@ impl Default for Replies {
         Self {
             working: "Working…".into(),
             queued: "Queued: as many tasks as allowed are running; this one starts when one ends.".into(),
+            overloaded: "Too many pending messages or conversations; this message was not accepted. Please try again later.".into(),
             unauthorized: "Not authorized: this chat is not on the service's list.".into(),
             not_approver: "Only listed approvers can allow or deny; this click has no effect.".into(),
             cancelled: "Cancelled.".into(),
@@ -184,6 +190,12 @@ pub struct ServerConfig {
     pub approvers: Vec<(String, UserId)>,
     /// Conversations that may run at once; the others wait in arrival order.
     pub max_running: NonZeroUsize,
+    /// Workers held at once, running, queued and idle included; default 128.
+    pub max_conversations: NonZeroUsize,
+    /// Messages waiting within one conversation, including steering and heard context; default 32.
+    pub max_pending_messages: NonZeroUsize,
+    /// UTF-8 text bytes waiting in one conversation, and the largest inbound message; default 256 KiB.
+    pub max_pending_bytes: NonZeroUsize,
     /// How long a conversation may go without input before its session is released.
     pub idle: Duration,
     /// Limit for each send or update, and for each call to [`statuses`](Self::statuses); a call
@@ -205,6 +217,9 @@ impl Default for ServerConfig {
             conversations: Vec::new(),
             approvers: Vec::new(),
             max_running: DEFAULT_MAX_RUNNING,
+            max_conversations: DEFAULT_MAX_CONVERSATIONS,
+            max_pending_messages: DEFAULT_PENDING_MESSAGES,
+            max_pending_bytes: DEFAULT_PENDING_BYTES,
             idle: DEFAULT_IDLE,
             outbound_timeout: DEFAULT_OUTBOUND_TIMEOUT,
             replies: Replies::default(),
@@ -311,6 +326,9 @@ pub(crate) struct Shared {
     pub(crate) sink: Arc<dyn ServerSink>,
     approvers: HashMap<String, HashSet<UserId>>,
     pub(crate) replies: Replies,
+    pub(crate) max_conversations: usize,
+    pub(crate) max_pending_messages: usize,
+    pub(crate) max_pending_bytes: usize,
     pub(crate) idle: Duration,
     pub(crate) outbound_timeout: Duration,
     /// Run slots of all conversations. Tokio's semaphore is fair: it hands permits out in
@@ -331,6 +349,9 @@ impl Shared {
             conversations: _,
             approvers,
             max_running,
+            max_conversations,
+            max_pending_messages,
+            max_pending_bytes,
             idle,
             outbound_timeout,
             replies,
@@ -345,6 +366,9 @@ impl Shared {
             idle,
             outbound_timeout,
             permits: Arc::new(Semaphore::new(max_running.get())),
+            max_conversations: max_conversations.get(),
+            max_pending_messages: max_pending_messages.get(),
+            max_pending_bytes: max_pending_bytes.get(),
             statuses,
             names: Mutex::default(),
         }

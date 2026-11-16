@@ -114,6 +114,9 @@ struct AccessSection {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct LimitsSection {
     max_running: Option<NonZeroUsize>,
+    max_conversations: Option<NonZeroUsize>,
+    max_pending_messages: Option<NonZeroUsize>,
+    max_pending_bytes: Option<NonZeroUsize>,
     idle_secs: Option<u64>,
 }
 
@@ -257,6 +260,15 @@ fn server_config(
     };
     if let Some(running) = limits.max_running {
         config.max_running = running;
+    }
+    if let Some(limit) = limits.max_conversations {
+        config.max_conversations = limit;
+    }
+    if let Some(limit) = limits.max_pending_messages {
+        config.max_pending_messages = limit;
+    }
+    if let Some(limit) = limits.max_pending_bytes {
+        config.max_pending_bytes = limit;
     }
     if let Some(secs) = limits.idle_secs {
         config.idle = Duration::from_secs(secs);
@@ -454,7 +466,14 @@ mod tests {
     fn unknown_keys_and_a_zero_run_limit_are_refused() {
         let base = "[access]\nconversations = []\n[sessions]\ndir = \"d\"\n";
         assert!(toml::from_str::<ConfigFile>(&format!("{base}[teams]\n")).is_err());
-        assert!(toml::from_str::<ConfigFile>(&format!("{base}[limits]\nmaxRunning = 0\n")).is_err());
+        for name in [
+            "maxRunning",
+            "maxConversations",
+            "maxPendingMessages",
+            "maxPendingBytes",
+        ] {
+            assert!(toml::from_str::<ConfigFile>(&format!("{base}[limits]\n{name} = 0\n")).is_err());
+        }
         // The approval timeout is config.toml's, shared with chat and acp.
         assert!(toml::from_str::<ConfigFile>(&format!("{base}[limits]\napprovalTimeoutSecs = 60\n")).is_err());
     }

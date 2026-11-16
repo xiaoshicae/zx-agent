@@ -3,9 +3,9 @@
 //! response and tool call as it happens and checks the budgets before each request; the
 //! run reads the totals for its report.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
-use crate::ai::Usage;
+use crate::ai::{ModelMeta, Usage};
 use crate::events::Budget;
 
 /// What a run has spent so far, over all its attempts, and its budgets.
@@ -17,8 +17,8 @@ pub(crate) struct RunAccounting {
     /// Tokens the run may use, input plus output as the provider reports them, summary
     /// requests included; `None` is unlimited.
     token_budget: Option<u64>,
-    /// What the run may spend, in the unit of the configured prices; a response without a
-    /// price counts as nothing. `None` is unlimited.
+    /// What the run may spend, in the unit of the configured prices. With a budget,
+    /// requests whose models have no prices are refused. `None` is unlimited.
     cost_budget: Option<f64>,
     /// Attempts started: the first, retries and recoveries from context overflow. The
     /// attempt in progress is the last one.
@@ -42,6 +42,17 @@ pub(crate) struct RunAccounting {
 }
 
 impl RunAccounting {
+    /// Refuse a request whose cost could not count towards the run's budget. Checked after
+    /// request hooks choose the final model, also after a session switches models.
+    pub(super) fn check_model(&self, models: &HashMap<String, ModelMeta>, model: &str) -> Result<(), String> {
+        if self.cost_budget.is_some() && !models.get(model).is_some_and(|meta| meta.cost.is_some()) {
+            return Err(format!(
+                "a cost budget needs prices for model {model:?}; configure its model metadata before making requests"
+            ));
+        }
+        Ok(())
+    }
+
     /// Nothing spent yet, against these budgets.
     pub(crate) fn new(max_model_requests: Option<u32>, token_budget: Option<u64>, cost_budget: Option<f64>) -> Self {
         Self {

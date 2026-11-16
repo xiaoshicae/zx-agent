@@ -105,6 +105,8 @@ README 给出概览与示例；这里是各子命令的参数、行为、语义�
 | 退出 | SIGINT 或 SIGTERM 时取消进行中的任务，状态改为 `stopped` 的文案；未处理的消息不再处理，所在线程收到提示。退出码：正常为 0，配置错误与被拒的凭据为 2，平台连接意外结束为 1 |
 | 崩溃之后 | 未处理的消息丢失且没有提示。下次启动时，上个进程遗留的“处理中”改为 `interrupted` 的文案 |
 
+IM 的容量在 `im.toml` 的 `[limits]` 中设置：`maxConversations` 默认 128（运行、排队和空闲 worker 都计入），`maxPendingMessages` 默认 32，`maxPendingBytes` 默认 262144（每个会话已取入但尚未处理的文本字节数，也是单条入站消息上限）。这三个值均为正整数。达到上限时，消息不被接纳并回复 `replies.overloaded`；消息未进入插话队列时不发送接收回执。`/cancel`、`/new` 与审批点击仍可处理。路由到 worker 前另有 32 条的有界收件箱。排队中的新会话在取得 `maxRunning` 的名额后才初始化；`/new` 仍立即创建新会话。
+
 其余参数与 `chat` 相同，`--max-model-requests` 等作用于每一次运行；没有 `--session`。
 
 ## 语义

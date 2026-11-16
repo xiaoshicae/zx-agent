@@ -26,6 +26,9 @@ impl StepLoop<'_> {
             Ok(settings) => settings,
             Err(error) => return Err(self.hook_failed(error).await),
         };
+        self.accounting
+            .check_model(&config.models, &settings.model)
+            .map_err(Halt::Failed)?;
         let request = Request {
             model: settings.model,
             messages,
