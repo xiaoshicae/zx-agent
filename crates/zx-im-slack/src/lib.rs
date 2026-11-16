@@ -145,7 +145,9 @@ impl SlackChannel {
         args: &[(&str, &str)],
         body: Option<&Value>,
     ) -> Result<Value, ImError> {
-        self.call_retrying(method, token, args, body, RATE_LIMIT_RETRIES).await
+        self.call_retrying(method, token, args, body, RATE_LIMIT_RETRIES)
+            .await
+            .map_err(ImError::from)
     }
 
     /// [`Self::call`], waiting out a rate limit at most `rate_limit_retries` times: after
@@ -157,10 +159,13 @@ impl SlackChannel {
         args: &[(&str, &str)],
         body: Option<&Value>,
         rate_limit_retries: u32,
-    ) -> Result<Value, ImError> {
+    ) -> Result<Value, CallError> {
         let base = self.config.api_base.trim_end_matches('/');
-        let mut url = Url::parse(&format!("{base}/{method}"))
-            .map_err(|error| ImError::Config(format!("slack {method}: invalid API base {base}: {error}")))?;
+        let mut url = Url::parse(&format!("{base}/{method}")).map_err(|error| {
+            CallError::Failed(ImError::Config(format!(
+                "slack {method}: invalid API base {base}: {error}"
+            )))
+        })?;
         if !args.is_empty() {
             url.query_pairs_mut().extend_pairs(args);
         }
@@ -174,25 +179,22 @@ impl SlackChannel {
             let response = request
                 .send()
                 .await
-                .map_err(|error| ImError::Transport(format!("slack {method}: {error}")))?;
+                .map_err(|error| CallError::Failed(ImError::Transport(format!("slack {method}: {error}"))))?;
             let status = response.status();
             if status == StatusCode::TOO_MANY_REQUESTS && retries < rate_limit_retries {
                 retries += 1;
                 tokio::time::sleep(retry_after(response.headers())).await;
                 continue;
             }
-            let answer: Value = response
-                .json()
-                .await
-                .map_err(|error| ImError::Transport(format!("slack {method}: HTTP {status}: {error}")))?;
+            let answer: Value = response.json().await.map_err(|error| {
+                CallError::Failed(ImError::Transport(format!("slack {method}: HTTP {status}: {error}")))
+            })?;
             if answer["ok"] == Value::Bool(true) {
                 return Ok(answer);
             }
-            let error = answer["error"].as_str().unwrap_or("no error code");
-            return Err(if SETUP_ERRORS.contains(&error) {
-                ImError::Config(format!("slack {method}: {error}"))
-            } else {
-                ImError::Transport(format!("slack {method}: {error}"))
+            return Err(CallError::Refused {
+                method: method.to_string(),
+                code: answer["error"].as_str().unwrap_or("no error code").to_string(),
             });
         }
     }
@@ -239,6 +241,7 @@ impl SlackChannel {
         let token = &self.config.bot_token;
         self.call_retrying("conversations.replies", token, &args, None, rate_limit_retries)
             .await
+            .map_err(ImError::from)
     }
 
     async fn post(&self, to: &Destination, text: &str, blocks: Option<Value>) -> Result<MessageRef, ImError> {
@@ -272,7 +275,7 @@ impl SlackChannel {
     /// Replace a posted message. Without `blocks`, Slack removes the message's blocks and
     /// shows `text` (chat.update: "If the `text` argument is provided and `blocks` are not
     /// provided, the `blocks` will be removed").
-    async fn edit(&self, posted: &MessageRef, text: &str, blocks: Option<Value>) -> Result<(), ImError> {
+    async fn edit(&self, posted: &MessageRef, text: &str, blocks: Option<Value>) -> Result<(), CallError> {
         let mut body = Map::new();
         body.insert("channel".into(), json!(posted.at.conversation.0));
         body.insert("ts".into(), json!(posted.id.0));
@@ -280,9 +283,16 @@ impl SlackChannel {
         if let Some(blocks) = blocks {
             body.insert("blocks".into(), blocks);
         }
-        self.call("chat.update", &self.config.bot_token, &[], Some(&Value::Object(body)))
-            .await
-            .map(drop)
+        let body = Value::Object(body);
+        self.call_retrying(
+            "chat.update",
+            &self.config.bot_token,
+            &[],
+            Some(&body),
+            RATE_LIMIT_RETRIES,
+        )
+        .await
+        .map(drop)
     }
 
     /// Open the Socket Mode connection at `url`; a failure is reported.
@@ -384,6 +394,27 @@ async fn acknowledge(socket: &mut Socket, frame: &Value) -> Result<(), Ended> {
         socket.send(Message::text(ack)).await.map_err(|_| Ended::Lost)?;
     }
     Ok(())
+}
+
+/// Why a Web API call failed.
+enum CallError {
+    /// Slack answered with `ok: false`: it refused the call, for the reason `code` names.
+    Refused { method: String, code: String },
+    /// No answer came that says how the call went.
+    Failed(ImError),
+}
+
+impl From<CallError> for ImError {
+    /// A refusal that retrying cannot fix is a configuration error.
+    fn from(error: CallError) -> Self {
+        match error {
+            CallError::Refused { method, code } if SETUP_ERRORS.contains(&code.as_str()) => {
+                ImError::Config(format!("slack {method}: {code}"))
+            }
+            CallError::Refused { method, code } => ImError::Transport(format!("slack {method}: {code}")),
+            CallError::Failed(error) => error,
+        }
+    }
 }
 
 /// The address in the answer of `apps.connections.open`.
@@ -533,8 +564,16 @@ impl ImChannel for SlackChannel {
         match replacement {
             Replacement::Text(text) => {
                 let (first, rest) = split(text, MAX_TEXT_CHARS);
-                self.edit(posted, &first, None).await?;
                 let thread = posted.thread();
+                match self.edit(posted, &first, None).await {
+                    Ok(()) => {}
+                    // Slack refused the edit, as for a message deleted since: the text is
+                    // posted instead of lost. A call without an answer may have edited it.
+                    Err(CallError::Refused { .. }) => {
+                        self.post(&thread, &first, None).await?;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
                 for part in &rest {
                     self.post(&thread, part, None).await?;
                 }
@@ -544,7 +583,7 @@ impl ImChannel for SlackChannel {
                 let labels = &self.config.labels;
                 let result = resolution(labels, user.as_ref(), *result);
                 let blocks = json!([section(&shown(labels, card)), section(&result)]);
-                self.edit(posted, &result, Some(blocks)).await
+                self.edit(posted, &result, Some(blocks)).await.map_err(ImError::from)
             }
         }
     }

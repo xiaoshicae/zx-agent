@@ -27,8 +27,7 @@ pub(crate) fn message(payload: &Value, bot: Option<&str>) -> Option<((String, St
         (Some("message"), Some("im")) => ChatKind::Direct,
         _ => return None,
     };
-    // Edits, deletions and joins carry a subtype; the bot's own posts carry a bot_id.
-    if event.get("subtype").is_some() || event.get("bot_id").is_some() {
+    if !is_talk(event) {
         return None;
     }
     let user = event["user"].as_str()?;
@@ -82,7 +81,7 @@ pub(crate) fn history(answer: &Value) -> Vec<Said> {
     };
     messages
         .iter()
-        .filter(|message| message.get("subtype").is_none() && message.get("bot_id").is_none())
+        .filter(|message| is_talk(message))
         .filter_map(|message| {
             Some(Said {
                 id: MessageId(message["ts"].as_str()?.into()),
@@ -212,6 +211,17 @@ pub(crate) fn resolution(labels: &CardLabels, user: Option<&UserId>, result: App
         Some(user) => format!("{} (<@{user}>)", escape(what)),
         None => escape(what),
     }
+}
+
+/// Whether `message` is what someone said: edits, deletions and joins carry a subtype, but a
+/// thread reply also sent to the channel carries `thread_broadcast` and is said like any
+/// other; the bot's own posts carry a bot_id.
+fn is_talk(message: &Value) -> bool {
+    let said = match message.get("subtype") {
+        None => true,
+        Some(subtype) => subtype == "thread_broadcast",
+    };
+    said && message.get("bot_id").is_none()
 }
 
 #[cfg(test)]

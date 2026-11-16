@@ -84,7 +84,8 @@ pub trait ImChannel: Send + Sync {
 
     /// Put `replacement` in the place of the message `posted`, such as the result of an
     /// approval in the place of its card. Text longer than one platform message replaces it
-    /// with the first part and posts the rest as replies.
+    /// with the first part and posts the rest as replies. Text the platform refuses to put in
+    /// place, as for a message deleted since, is posted as a reply instead of lost.
     async fn update(&self, posted: &MessageRef, replacement: &Replacement) -> Result<(), ImError>;
 
     /// What people said in the thread `at` so far, oldest first: at most the `limit` latest
