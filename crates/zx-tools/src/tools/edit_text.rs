@@ -30,26 +30,10 @@ pub(crate) fn split_bom(text: &str) -> (&str, &str) {
     }
 }
 
-/// `"\r\n"` when the first line ends with it, otherwise `"\n"` (pi: `detectLineEnding`).
-pub(crate) fn line_ending(text: &str) -> &'static str {
-    match text.find('\n') {
-        Some(index) if index > 0 && text.as_bytes()[index - 1] == b'\r' => "\r\n",
-        _ => "\n",
-    }
-}
-
-/// Every `\r\n` and lone `\r` as `\n`.
-pub(crate) fn normalize_to_lf(text: &str) -> String {
-    text.replace("\r\n", "\n").replace('\r', "\n")
-}
-
-/// `text`, whose lines end with `\n`, with `ending` instead.
-pub(crate) fn restore_line_endings(text: &str, ending: &str) -> String {
-    if ending == "\n" {
-        text.to_string()
-    } else {
-        text.replace('\n', ending)
-    }
+/// `text` with every `\r\n` as `\n`. A lone `\r` is no line ending and stays, so that the
+/// lines of the result are those of `text`, one for one.
+pub(crate) fn lf_endings(text: &str) -> String {
+    text.replace("\r\n", "\n")
 }
 
 /// The form two texts are compared in when they do not match exactly: trailing whitespace
@@ -104,15 +88,19 @@ fn which(index: usize, total: usize) -> String {
 /// tolerant form, all are matched in that form; the lines a replacement touches are then
 /// written from the tolerant form and every other line keeps its original bytes. Errors
 /// tell the model how to fix the call.
-pub(crate) fn apply_edits(content: &str, edits: &[Edit], path: &str) -> Result<String, String> {
+pub(crate) fn apply_edits(text: &str, edits: &[Edit], path: &str) -> Result<String, String> {
     if edits.is_empty() {
         return Err("edits must contain at least one replacement".into());
     }
+    // Matched with `\n` line endings, as the model writes them; written back with the
+    // endings each line had.
+    let content = lf_endings(text);
+    let content = content.as_str();
     let edits: Vec<Edit> = edits
         .iter()
         .map(|edit| Edit {
-            old_text: normalize_to_lf(&edit.old_text),
-            new_text: normalize_to_lf(&edit.new_text),
+            old_text: lf_endings(&edit.old_text),
+            new_text: lf_endings(&edit.new_text),
         })
         .collect();
     let total = edits.len();
@@ -132,8 +120,8 @@ pub(crate) fn apply_edits(content: &str, edits: &[Edit], path: &str) -> Result<S
     };
     let replacements = locate(&edits, base, &tolerant_content, path)?;
     check_overlaps(&replacements, path)?;
-    let changed = replace_touched_lines(content, base, &replacements);
-    if changed == content {
+    let changed = replace_touched_lines(text, base, &replacements);
+    if changed == text {
         return Err(format!(
             "no changes made to {path}: the replacement produced identical content"
         ));
@@ -190,8 +178,9 @@ fn check_overlaps(replacements: &[Replacement<'_>], path: &str) -> Result<(), St
 }
 
 /// `original` with the lines that `replacements`, matched in `base`, touch rewritten from
-/// `base`; every other line keeps its original bytes. `base` is `original` itself or its
-/// tolerant form, which has the same lines (pi: `applyReplacementsPreservingUnchangedLines`).
+/// `base`; every other line keeps its original bytes, its line ending included. `base` is
+/// `original` with `\n` line endings, or its tolerant form, which has the same lines (pi:
+/// `applyReplacementsPreservingUnchangedLines`).
 fn replace_touched_lines(original: &str, base: &str, replacements: &[Replacement<'_>]) -> String {
     let original_lines: Vec<&str> = original.split_inclusive('\n').collect();
     let mut spans = Vec::new();
@@ -227,13 +216,19 @@ fn replace_touched_lines(original: &str, base: &str, replacements: &[Replacement
             result.push_str(line);
         }
         let (group_start, group_end) = (spans[first].0, spans[last - 1].1);
+        let mut rewritten = String::new();
         let mut cursor = group_start;
         for replacement in group {
-            result.push_str(&base[cursor..replacement.start]);
-            result.push_str(replacement.new_text);
+            rewritten.push_str(&base[cursor..replacement.start]);
+            rewritten.push_str(replacement.new_text);
             cursor = replacement.start + replacement.len;
         }
-        result.push_str(&base[cursor..group_end]);
+        rewritten.push_str(&base[cursor..group_end]);
+        // The rewritten lines end as the first of them did.
+        if original_lines[first].ends_with("\r\n") {
+            rewritten = rewritten.replace('\n', "\r\n");
+        }
+        result.push_str(&rewritten);
         next_line = last;
     }
     for line in original_lines.iter().skip(next_line) {
@@ -482,14 +477,8 @@ mod tests {
         let raw = "\u{feff}one\r\ntwo\r\n";
         let (bom, text) = split_bom(raw);
         assert_eq!(bom, "\u{feff}");
-        let ending = line_ending(text);
-        assert_eq!(ending, "\r\n");
-        let changed = apply_edits(&normalize_to_lf(text), &[edit("two", "2")], "f").unwrap();
-        assert_eq!(
-            format!("{bom}{}", restore_line_endings(&changed, ending)),
-            "\u{feff}one\r\n2\r\n"
-        );
-        assert_eq!(line_ending("no newline"), "\n");
+        let changed = apply_edits(text, &[edit("two", "2")], "f").unwrap();
+        assert_eq!(format!("{bom}{changed}"), "\u{feff}one\r\n2\r\n");
         assert_eq!(split_bom("plain"), ("", "plain"));
     }
 

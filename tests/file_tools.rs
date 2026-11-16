@@ -71,6 +71,25 @@ async fn write_file_refuses_a_directory() {
 }
 
 #[tokio::test]
+async fn edit_file_keeps_the_line_endings_of_the_lines_it_does_not_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("mixed.txt");
+    std::fs::write(&file, "first\r\nsecond\nkeep\rthis\nlast\r\n").unwrap();
+
+    edit(
+        dir.path(),
+        json!({"path": "mixed.txt", "edits": [{"oldText": "second", "newText": "2nd"}]}),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "first\r\n2nd\nkeep\rthis\nlast\r\n"
+    );
+}
+
+#[tokio::test]
 async fn edit_file_replaces_text_keeps_the_bom_and_line_endings_and_reports_a_patch() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("config.ini");
