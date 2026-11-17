@@ -1,8 +1,6 @@
 //! Run-level behavior: retries, limits, continuation of cut-off answers, persistence, and
 //! resumed sessions.
 
-mod common;
-
 struct CancellationProbe {
     token: std::sync::Mutex<Option<CancellationToken>>,
     started: tokio::sync::Notify,
@@ -40,7 +38,7 @@ async fn dropping_a_run_cancels_its_provider() {
         token: std::sync::Mutex::new(None),
         started: tokio::sync::Notify::new(),
     });
-    let (runner, _) = RunnerSetup::new(config(probe.clone(), vec![])).build();
+    let (runner, _) = RunnerSetup::new(config(probe.clone(), vec![])).build().await;
     let mut running = Box::pin(runner.run("go"));
     tokio::select! {
         () = probe.started.notified() => {}
@@ -62,7 +60,6 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use common::{EchoTool, NotifyingProvider, RunnerSetup, config, fast_retry, header, read_lines, summarize};
 use zx_agent::agent::RunLimits;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{Message, ModelCost, ModelMeta, PREAMBLE, StopReason, SystemPrompt, ToolCall, Usage};
@@ -71,7 +68,11 @@ use zx_agent::events::{Budget, EVENT_SCHEMA_VERSION, EventKind, RequestKind, Run
 use zx_agent::hooks::{Hook, HookContext, HookResult};
 use zx_agent::input::Input;
 use zx_agent::policy::{PolicyContext, PolicyDecision, ToolPolicy};
-use zx_agent::transcript::{Entry, LoadedSession, LogRecord, SessionLog, Transcript};
+use zx_agent::transcript::{Entry, LoadedSession, LogRecord, SessionLog};
+use zx_testing::{
+    EchoTool, LogStorage, NotifyingProvider, RunnerSetup, Seed, Start, config, fast_retry, header, read_lines,
+    summarize,
+};
 
 /// A stored record, as a database row would hold it.
 #[derive(Debug)]
@@ -109,10 +110,11 @@ async fn a_session_in_a_custom_log_reloads_and_continues_the_same_conversation()
     ]));
     let tool = Arc::new(EchoTool::new("echo"));
     let (runner, _) = RunnerSetup {
-        session: Transcript::with_log(header(), Box::new(TableLog(sender))),
+        session: Start::with_log(TableLog(sender)),
         ..RunnerSetup::new(config(provider, vec![tool.clone()]))
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("go").await;
 
@@ -135,15 +137,20 @@ async fn a_session_in_a_custom_log_reloads_and_continues_the_same_conversation()
         incomplete_tail_bytes: 0,
     };
     let (sender, more) = mpsc::channel();
-    let reloaded = Transcript::load(loaded, Box::new(TableLog(sender))).unwrap();
-    assert_eq!(reloaded.entries(), runner.session().entries());
+    let reloaded = Start::Open {
+        id: loaded.header.id.clone(),
+        storage: Arc::new(LogStorage::holding(loaded, TableLog(sender))),
+    };
+    let entries = runner.session().entries().to_vec();
     let history = runner.session().messages();
     let next = Arc::new(FauxProvider::new([FauxStep::text("again")]));
     let (runner, _) = RunnerSetup {
         session: reloaded,
         ..RunnerSetup::new(config(next.clone(), vec![tool]))
     }
-    .build();
+    .build()
+    .await;
+    assert_eq!(runner.session().entries(), entries);
     let report = runner.run("next").await;
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
     let mut expected = history;
@@ -194,7 +201,8 @@ async fn default_limits_allow_more_than_thirty_requests() {
         limits: RunLimits::default(),
         ..RunnerSetup::new(config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]))
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("go").await;
 
@@ -210,7 +218,8 @@ async fn default_limits_leave_truncated_answers_for_the_caller() {
         limits: RunLimits::default(),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("go").await;
 
@@ -226,7 +235,8 @@ async fn zero_step_limit_does_not_call_the_provider() {
         limits: limits(0, None),
         ..setup(&provider)
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("go").await;
 
@@ -254,12 +264,13 @@ fn token_budget(tokens: u64) -> RunLimits {
 }
 
 /// A runner with the echo tool; each faux answer reports 10 input and 5 output tokens.
-fn echo_runner(provider: &Arc<FauxProvider>, limits: RunLimits) -> common::Driven {
+async fn echo_runner(provider: &Arc<FauxProvider>, limits: RunLimits) -> zx_testing::Driven {
     RunnerSetup {
         limits,
         ..RunnerSetup::new(config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]))
     }
     .build()
+    .await
     .0
 }
 
@@ -269,7 +280,7 @@ async fn the_token_budget_stops_a_run_before_the_request_it_cannot_pay_for() {
         FauxStep::tool_call("c1", "echo", json!({"text": "ok"})),
         FauxStep::text("must not be requested"),
     ]);
-    let runner = echo_runner(&provider, token_budget(15));
+    let runner = echo_runner(&provider, token_budget(15)).await;
 
     let report = runner.run("go").await;
 
@@ -294,7 +305,7 @@ async fn the_last_request_may_take_a_run_over_its_token_budget() {
         FauxStep::tool_call("c1", "echo", json!({"text": "ok"})),
         FauxStep::text("done"),
     ]);
-    let runner = echo_runner(&provider, token_budget(16));
+    let runner = echo_runner(&provider, token_budget(16)).await;
 
     let report = runner.run("go").await;
 
@@ -305,7 +316,7 @@ async fn the_last_request_may_take_a_run_over_its_token_budget() {
 
 /// A runner with the echo tool whose model costs 0.01 per faux answer (10 input tokens at
 /// 1000 per million; the 5 output tokens are free), in whatever currency the prices use.
-fn priced_runner(provider: &Arc<FauxProvider>, cost_budget: f64) -> common::Driven {
+async fn priced_runner(provider: &Arc<FauxProvider>, cost_budget: f64) -> zx_testing::Driven {
     let mut config = config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]);
     let price = ModelCost {
         input: 1000.0,
@@ -328,6 +339,7 @@ fn priced_runner(provider: &Arc<FauxProvider>, cost_budget: f64) -> common::Driv
         ..RunnerSetup::new(config)
     }
     .build()
+    .await
     .0
 }
 
@@ -337,7 +349,7 @@ async fn the_cost_budget_stops_a_run_before_the_request_it_cannot_pay_for() {
         FauxStep::tool_call("c1", "echo", json!({"text": "ok"})),
         FauxStep::text("must not be requested"),
     ]);
-    let runner = priced_runner(&provider, 0.01);
+    let runner = priced_runner(&provider, 0.01).await;
 
     let report = runner.run("go").await;
 
@@ -361,7 +373,7 @@ async fn the_last_request_may_take_a_run_over_its_cost_budget() {
         FauxStep::tool_call("c1", "echo", json!({"text": "ok"})),
         FauxStep::text("done"),
     ]);
-    let runner = priced_runner(&provider, 0.015);
+    let runner = priced_runner(&provider, 0.015).await;
 
     let report = runner.run("go").await;
 
@@ -404,7 +416,7 @@ async fn calls_a_policy_or_an_approval_denied_are_counted_in_the_report() {
     config
         .policies
         .push("deny_first_ask_second", Arc::new(DenyFirstAskSecond));
-    let (runner, _) = RunnerSetup::new(config).build();
+    let (runner, _) = RunnerSetup::new(config).build().await;
 
     let report = runner.run("go").await;
 
@@ -419,7 +431,8 @@ async fn an_unlimited_budget_can_explicitly_enable_continuation() {
         limits: RunLimits::default(),
         ..setup(&provider)
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("go").await;
 
@@ -445,7 +458,8 @@ async fn retries_transient_errors_without_repeating_the_prompt() {
         limits: RunLimits::default(),
         ..setup(&provider)
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("diagnose").await;
 
@@ -477,12 +491,13 @@ async fn a_retry_whose_edit_cannot_be_recorded_is_neither_counted_nor_announced(
         FauxStep::text("must not be requested"),
     ]);
     let (runner, sink) = RunnerSetup {
-        session: Transcript::with_log(header(), Box::new(RefusingContextEdits)),
+        session: Start::with_log(RefusingContextEdits),
         retry: fast_retry(3),
         limits: RunLimits::default(),
         ..setup(&provider)
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("diagnose").await;
 
@@ -502,10 +517,11 @@ async fn tool_result_details_are_recorded_and_survive_reopening_the_session() {
         FauxStep::text("done"),
     ]);
     let (runner, _) = RunnerSetup {
-        session: common::create_session_file(&path, header()).await.unwrap(),
+        session: zx_testing::create_session_file(&path, header()).await.unwrap().into(),
         ..RunnerSetup::new(config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]))
     }
-    .build();
+    .build()
+    .await;
 
     runner.run("go").await;
     drop(runner);
@@ -516,7 +532,7 @@ async fn tool_result_details_are_recorded_and_survive_reopening_the_session() {
         .map(|line| line["message"]["details"].clone())
         .collect();
     assert_eq!(recorded, std::slice::from_ref(&details));
-    let reopened = common::open_session_file(&path).await.unwrap();
+    let reopened = zx_testing::open_session_file(&path).await.unwrap();
     let kept = reopened.messages().into_iter().find_map(|message| match message {
         Message::ToolResult(result) => result.details,
         _ => None,
@@ -534,12 +550,13 @@ async fn tool_usage_is_reported_by_tool_recorded_in_the_file_and_left_out_of_the
         FauxStep::text("done"),
     ]);
     let (runner, _) = RunnerSetup {
-        session: common::create_session_file(&path, header()).await.unwrap(),
+        session: zx_testing::create_session_file(&path, header()).await.unwrap().into(),
         // Two faux answers of 15 tokens fit; the tool's 150 would not, if they counted.
         limits: token_budget(16),
         ..RunnerSetup::new(config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]))
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("go").await;
     drop(runner);
@@ -559,7 +576,7 @@ async fn tool_usage_is_reported_by_tool_recorded_in_the_file_and_left_out_of_the
         .map(|line| line["message"]["usage"].clone())
         .collect();
     assert_eq!(recorded, [usage]);
-    let reopened = common::open_session_file(&path).await.unwrap();
+    let reopened = zx_testing::open_session_file(&path).await.unwrap();
     let kept = reopened.messages().into_iter().find_map(|message| match message {
         Message::ToolResult(result) => result.usage,
         _ => None,
@@ -577,10 +594,11 @@ async fn a_retried_failure_stays_in_the_file_but_leaves_the_context() {
     ]);
     let (runner, _) = RunnerSetup {
         retry: fast_retry(3),
-        session: common::create_session_file(&path, header()).await.unwrap(),
+        session: zx_testing::create_session_file(&path, header()).await.unwrap().into(),
         ..setup(&provider)
     }
-    .build();
+    .build()
+    .await;
 
     runner.run("diagnose").await;
 
@@ -616,7 +634,8 @@ async fn permanent_errors_are_not_retried() {
         retry: fast_retry(3),
         ..setup(&provider)
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("go").await;
 
@@ -631,7 +650,8 @@ async fn retrying_stops_after_max_retries() {
         retry: fast_retry(2),
         ..setup(&provider)
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("go").await;
 
@@ -650,7 +670,8 @@ async fn a_retry_needs_request_budget_and_keeps_the_provider_error() {
         limits: limits(1, None),
         ..setup(&provider)
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("go").await;
 
@@ -674,7 +695,8 @@ async fn the_budget_and_the_step_numbers_span_the_attempts_of_a_run() {
         limits: limits(2, None),
         ..setup(&provider)
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("go").await;
 
@@ -702,7 +724,8 @@ async fn queued_input_waits_when_no_request_budget_is_left() {
         limits: limits(0, None),
         ..setup(&provider)
     }
-    .build();
+    .build()
+    .await;
     runner.queues().steer("later");
 
     let report = runner.run("go").await;
@@ -728,7 +751,8 @@ async fn a_retried_failure_is_reported_as_a_context_edit() {
         retry: fast_retry(3),
         ..setup(&provider)
     }
-    .build();
+    .build()
+    .await;
 
     runner.run("diagnose").await;
 
@@ -801,7 +825,7 @@ async fn queued_input_is_recorded_once_when_a_run_is_dropped_while_observers_run
         }),
         Duration::from_secs(3600),
     );
-    let (runner, _) = setup.build();
+    let (runner, _) = setup.build().await;
     runner.queues().steer("queued");
 
     // The first run records the queued input, then is dropped while an observer holds it.
@@ -830,7 +854,8 @@ async fn a_run_stops_at_the_step_limit() {
         limits: limits(3, None),
         ..RunnerSetup::new(config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]))
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("go").await;
 
@@ -853,7 +878,8 @@ async fn a_run_stops_at_the_time_limit() {
         limits: limits(10, Some(Duration::from_millis(150))),
         ..setup(&provider)
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("go").await;
 
@@ -862,12 +888,13 @@ async fn a_run_stops_at_the_time_limit() {
 
 #[tokio::test]
 async fn the_caller_can_cancel_a_waiting_run() {
-    let provider = NotifyingProvider::new([FauxStep::Hang]);
+    let provider = NotifyingProvider::new(FauxProvider::new([FauxStep::Hang]));
     let (runner, _) = RunnerSetup {
         limits: RunLimits::default(),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
-    .build();
+    .build()
+    .await;
     // Cancelled once the request has started.
     let (report, ()) = tokio::join!(runner.run("go"), async {
         provider.started.notified().await;
@@ -884,7 +911,7 @@ async fn the_caller_can_cancel_a_waiting_run() {
 #[tokio::test]
 async fn continues_a_truncated_answer_and_joins_the_parts() {
     let provider = provider([FauxStep::truncated("Part one, "), FauxStep::text("part two.")]);
-    let (runner, _) = setup(&provider).build();
+    let (runner, _) = setup(&provider).build().await;
 
     let report = runner.run("go").await;
 
@@ -907,7 +934,7 @@ async fn a_continuation_that_repeats_the_cut_line_is_joined_once() {
         FauxStep::truncated("Steps:\n1. Check logs\n2. Add a pre-deploy"),
         FauxStep::text("2. Add a pre-deploy check."),
     ]);
-    let (runner, _) = setup(&provider).build();
+    let (runner, _) = setup(&provider).build().await;
 
     let report = runner.run("go").await;
 
@@ -921,7 +948,8 @@ async fn reports_truncated_when_no_continuation_is_allowed() {
         limits: limits(30, None),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("go").await;
 
@@ -939,7 +967,8 @@ async fn continuations_count_against_the_step_limit() {
         limits: limits(1, None),
         ..setup(&provider)
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("go").await;
 
@@ -963,7 +992,8 @@ async fn a_cut_off_answer_that_the_token_budget_leaves_no_continuation_for_says_
         limits: token_budget(15),
         ..setup(&provider)
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("go").await;
 
@@ -993,10 +1023,11 @@ async fn events_are_forwarded_after_persistence() {
     let path = dir.path().join("e.jsonl");
     let provider = provider([FauxStep::text("hi")]);
     let (runner, sink) = RunnerSetup {
-        session: common::create_session_file(&path, header()).await.unwrap(),
+        session: zx_testing::create_session_file(&path, header()).await.unwrap().into(),
         ..setup(&provider)
     }
-    .build();
+    .build()
+    .await;
 
     runner.run("hello").await;
 
@@ -1016,7 +1047,7 @@ async fn events_are_forwarded_after_persistence() {
 #[tokio::test]
 async fn final_text_ignores_answers_from_earlier_runs() {
     let provider = provider([FauxStep::text("old answer")]);
-    let (runner, _) = setup(&provider).build();
+    let (runner, _) = setup(&provider).build().await;
     runner.run("first").await;
 
     // Cancelled before it is read, so before it asks anything.
@@ -1036,19 +1067,21 @@ async fn resumed_sessions_continue_the_conversation() {
     let path = dir.path().join("s.jsonl");
     let first = provider([FauxStep::text("nginx is down")]);
     let (runner, _) = RunnerSetup {
-        session: common::create_session_file(&path, header()).await.unwrap(),
+        session: zx_testing::create_session_file(&path, header()).await.unwrap().into(),
         ..setup(&first)
     }
-    .build();
+    .build()
+    .await;
     runner.run("check nginx").await;
     drop(runner);
 
     let second = provider([FauxStep::text("restart it")]);
     let (runner, _) = RunnerSetup {
-        session: common::open_session_file(&path).await.unwrap(),
+        session: zx_testing::open_session_file(&path).await.unwrap().into(),
         ..setup(&second)
     }
-    .build();
+    .build()
+    .await;
     let report = runner.run("what now?").await;
 
     assert_eq!(report.final_text, "restart it");
@@ -1059,16 +1092,17 @@ async fn resumed_sessions_continue_the_conversation() {
 }
 
 /// One run on `session` whose environment section says `started`.
-async fn run_with_environment(session: Transcript, started: &str) {
+async fn run_with_environment(session: Seed, started: &str) {
     let mut config = config(provider([FauxStep::text("ok")]), vec![]);
     config.system_prompt = SystemPrompt::default()
         .with_section(PREAMBLE, "Do it.")
         .with_section("environment", started);
     let (runner, _) = RunnerSetup {
-        session,
+        session: session.into(),
         ..RunnerSetup::new(config)
     }
-    .build();
+    .build()
+    .await;
     runner.run("go").await;
 }
 
@@ -1076,8 +1110,8 @@ async fn run_with_environment(session: Transcript, started: &str) {
 async fn resumed_sessions_record_prompt_changes_in_the_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("p.jsonl");
-    run_with_environment(common::create_session_file(&path, header()).await.unwrap(), "t1").await;
-    run_with_environment(common::open_session_file(&path).await.unwrap(), "t2").await;
+    run_with_environment(zx_testing::create_session_file(&path, header()).await.unwrap(), "t1").await;
+    run_with_environment(zx_testing::open_session_file(&path).await.unwrap(), "t2").await;
 
     // Request checkpoints sit between messages; only message lines carry roles.
     let messages: Vec<Value> = read_lines(&path)
@@ -1096,7 +1130,7 @@ async fn resumed_sessions_record_prompt_changes_in_the_file() {
 }
 
 /// A run that fails once with a retryable error, then answers.
-fn retried_run() -> (common::Driven, Arc<common::Collect>) {
+async fn retried_run() -> (zx_testing::Driven, Arc<zx_testing::Collect>) {
     let provider = Arc::new(FauxProvider::new([
         FauxStep::Fail("HTTP 503: retry".into()),
         FauxStep::text("done"),
@@ -1106,11 +1140,12 @@ fn retried_run() -> (common::Driven, Arc<common::Collect>) {
         ..RunnerSetup::new(config(provider, vec![]))
     }
     .build()
+    .await
 }
 
 #[tokio::test]
 async fn every_event_of_a_run_carries_its_ids_and_the_next_sequence_number() {
-    let (runner, events) = retried_run();
+    let (runner, events) = retried_run().await;
 
     runner.run("go").await;
 
@@ -1132,7 +1167,7 @@ async fn every_event_of_a_run_carries_its_ids_and_the_next_sequence_number() {
 
 #[tokio::test]
 async fn a_run_starts_with_run_start_and_ends_with_its_report() {
-    let (runner, events) = retried_run();
+    let (runner, events) = retried_run().await;
 
     let report = runner.run("go").await;
 
@@ -1152,7 +1187,7 @@ async fn a_run_starts_with_run_start_and_ends_with_its_report() {
 
 #[tokio::test]
 async fn attempts_and_requests_are_numbered_and_name_their_request_records() {
-    let (runner, events) = retried_run();
+    let (runner, events) = retried_run().await;
 
     runner.run("go").await;
 
@@ -1205,7 +1240,7 @@ async fn attempts_and_requests_are_numbered_and_name_their_request_records() {
 
 #[tokio::test]
 async fn each_attempt_reports_how_it_ended() {
-    let (runner, events) = retried_run();
+    let (runner, events) = retried_run().await;
 
     let report = runner.run("go").await;
 
@@ -1238,7 +1273,7 @@ async fn messages_and_context_edits_name_their_session_entries() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let mut config = config(provider, vec![]);
     config.hooks.push("uppercase", Arc::new(Uppercase));
-    let (runner, events) = RunnerSetup::new(config).build();
+    let (runner, events) = RunnerSetup::new(config).build().await;
 
     runner.run("go").await;
 

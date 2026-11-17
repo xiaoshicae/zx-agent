@@ -1,8 +1,6 @@
 //! Continuing a conversation without new input (pi: `Agent.continue`): what the session ends
 //! with decides what the model answers, and no user message is invented.
 
-mod common;
-
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -15,17 +13,21 @@ use zx_agent::hooks::{Hook, HookContext, HookResult};
 use zx_agent::input::{Input, QueueMode};
 use zx_agent::session::SessionError;
 use zx_agent::tools::Tool;
-use zx_agent::transcript::{CustomMessage, Entry, Transcript};
+use zx_agent::transcript::{CustomMessage, Entry};
 
-use common::{Collect, Driven, EchoTool, RunnerSetup, config, header, summarize, take_queued_inputs, tool_call_answer};
+use zx_testing::{
+    Collect, Driven, EchoTool, RunnerSetup, Seed, Start, config, header, summarize, take_queued_inputs,
+    tool_call_answer,
+};
 
-fn runner(provider: &Arc<FauxProvider>, session: Transcript) -> (Driven, Arc<Collect>) {
+async fn runner(provider: &Arc<FauxProvider>, session: Start) -> (Driven, Arc<Collect>) {
     let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(EchoTool::new("echo"))];
     RunnerSetup {
         session,
         ..RunnerSetup::new(config(provider.clone(), tools))
     }
     .build()
+    .await
 }
 
 /// An answer that asked for `echo` and was cut off by a crash before the call ran.
@@ -35,10 +37,10 @@ fn call_answer() -> Message {
 
 #[tokio::test]
 async fn continuing_answers_the_input_the_conversation_ends_with() {
-    let mut store = Transcript::in_memory(header());
+    let mut store = Seed::in_memory(header()).await;
     store.append_message(Message::user("question")).await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("answer")]));
-    let (runner, _) = runner(&provider, store);
+    let (runner, _) = runner(&provider, store.into()).await;
 
     let report = runner.continue_run().await.unwrap();
 
@@ -53,17 +55,18 @@ async fn continuing_answers_the_input_the_conversation_ends_with() {
 
 #[tokio::test]
 async fn after_a_crash_the_recovered_results_are_answered_without_running_the_call_again() {
-    let mut store = Transcript::in_memory(header());
+    let mut store = Seed::in_memory(header()).await;
     store.append_message(Message::user("echo hi")).await.unwrap();
     store.append_message(call_answer()).await.unwrap();
     store.append_tool_call_started("c1", "echo").await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("checked")]));
     let tool = Arc::new(EchoTool::new("echo"));
     let (runner, events) = RunnerSetup {
-        session: store,
+        session: store.into(),
         ..RunnerSetup::new(config(provider.clone(), vec![tool.clone()]))
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.continue_run().await.unwrap();
 
@@ -77,12 +80,12 @@ async fn after_a_crash_the_recovered_results_are_answered_without_running_the_ca
 
 #[tokio::test]
 async fn a_message_recorded_while_idle_after_a_crash_follows_the_recovered_results() {
-    let mut store = Transcript::in_memory(header());
+    let mut store = Seed::in_memory(header()).await;
     store.append_message(Message::user("echo hi")).await.unwrap();
     store.append_message(call_answer()).await.unwrap();
     store.append_tool_call_started("c1", "echo").await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("checked")]));
-    let (runner, _) = runner(&provider, store);
+    let (runner, _) = runner(&provider, store.into()).await;
     let heard = CustomMessage {
         custom_type: "heard".into(),
         content: "someone spoke".into(),
@@ -100,7 +103,7 @@ async fn a_message_recorded_while_idle_after_a_crash_follows_the_recovered_resul
 
 #[tokio::test]
 async fn a_failed_answer_with_calls_at_the_end_is_omitted_and_answered_again() {
-    let mut store = Transcript::in_memory(header());
+    let mut store = Seed::in_memory(header()).await;
     store.append_message(Message::user("echo hi")).await.unwrap();
     let mut failed = AssistantMessage::failure("faux", "test-model", StopReason::Error, "the stream broke");
     failed.content = vec![ContentBlock::ToolCall(ToolCall {
@@ -111,7 +114,7 @@ async fn a_failed_answer_with_calls_at_the_end_is_omitted_and_answered_again() {
     })];
     store.append_message(Message::Assistant(failed)).await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("second try")]));
-    let (runner, _) = runner(&provider, store);
+    let (runner, _) = runner(&provider, store.into()).await;
 
     let report = runner.continue_run().await.unwrap();
 
@@ -125,7 +128,7 @@ async fn a_failed_answer_at_the_end_is_omitted_and_answered_again() {
         FauxStep::Fail("HTTP 400: bad request".into()),
         FauxStep::text("second try"),
     ]));
-    let (runner, events) = runner(&provider, Transcript::in_memory(header()));
+    let (runner, events) = runner(&provider, Start::default()).await;
     let failed = runner.run("question").await;
     assert_eq!(failed.outcome, RunOutcome::Failed);
 
@@ -156,7 +159,7 @@ async fn a_finished_answer_leaves_nothing_to_continue_unless_input_is_queued() {
         FauxStep::text("done"),
         FauxStep::text("follow-up answer"),
     ]));
-    let (runner, _) = runner(&provider, Transcript::in_memory(header()));
+    let (runner, _) = runner(&provider, Start::default()).await;
     runner.run("question").await;
 
     let nothing = runner.continue_run().await.unwrap();
@@ -194,7 +197,7 @@ async fn a_continuation_that_stops_at_a_queued_message_leaves_the_rest_in_the_qu
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push("refuse_marked", Arc::new(RefuseMarked));
-    let (runner, _) = RunnerSetup::new(config).build();
+    let (runner, _) = RunnerSetup::new(config).build().await;
     runner.run("question").await;
     runner.queues().follow_up("refused");
     runner.queues().follow_up("kept");
@@ -214,7 +217,7 @@ async fn a_continuation_takes_queued_follow_ups_one_at_a_time_when_the_queue_say
         FauxStep::text("first answered"),
         FauxStep::text("second answered"),
     ]));
-    let (runner, _) = runner(&provider, Transcript::in_memory(header()));
+    let (runner, _) = runner(&provider, Start::default()).await;
     runner.run("question").await;
     runner.queues().set_mode(QueueMode::OneAtATime);
     runner.queues().follow_up("first");
@@ -234,7 +237,7 @@ async fn a_continuation_takes_queued_follow_ups_one_at_a_time_when_the_queue_say
 #[tokio::test]
 async fn an_empty_conversation_has_nothing_to_continue() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("must not be requested")]));
-    let (runner, events) = runner(&provider, Transcript::in_memory(header()));
+    let (runner, events) = runner(&provider, Start::default()).await;
 
     let report = runner.continue_run().await.unwrap();
 
@@ -250,14 +253,14 @@ async fn an_empty_conversation_has_nothing_to_continue() {
 async fn continuing_requests_are_rebuilt_from_the_session_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
-    let mut store = common::create_session_file(&path, header()).await.unwrap();
+    let mut store = zx_testing::create_session_file(&path, header()).await.unwrap();
     store.append_message(Message::user("question")).await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("answer")]));
-    let (runner, _) = runner(&provider, store);
+    let (runner, _) = runner(&provider, store.into()).await;
 
     runner.continue_run().await.unwrap();
 
-    let store = common::read_session_file(&path).unwrap();
+    let store = zx_testing::read_session_file(&path).unwrap();
     let id = store
         .entries()
         .iter()
@@ -272,7 +275,7 @@ async fn continuing_requests_are_rebuilt_from_the_session_file() {
 #[tokio::test]
 async fn a_running_session_refuses_to_continue() {
     let provider = Arc::new(FauxProvider::new([FauxStep::Hang]));
-    let (session, events) = runner(&provider, Transcript::in_memory(header()));
+    let (session, events) = runner(&provider, Start::default()).await;
     let mut running = Box::pin(session.prompt("first"));
     // Wait until the request is in flight.
     while !events

@@ -13,15 +13,17 @@ use tokio::sync::{Notify, mpsc};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 
-use super::http::{read_request, response};
+use crate::http::{read_request, response};
 
 /// Only reached when an expected frame or call never comes.
 const WAIT: Duration = Duration::from_secs(10);
 
 /// One Web API call.
 #[derive(Clone, Debug)]
-pub(crate) struct ApiCall {
+pub struct ApiCall {
+    /// The Web API method, such as `chat.postMessage`.
     pub method: String,
+    /// The `Authorization` header; empty without one.
     pub authorization: String,
     /// The arguments in the query, decoded, in order.
     pub args: Vec<(String, String)>,
@@ -31,7 +33,7 @@ pub(crate) struct ApiCall {
 
 impl ApiCall {
     /// The query argument `name`.
-    pub(crate) fn arg(&self, name: &str) -> Option<&str> {
+    pub fn arg(&self, name: &str) -> Option<&str> {
         self.args
             .iter()
             .find(|(key, _)| key == name)
@@ -41,16 +43,20 @@ impl ApiCall {
 
 /// A scripted answer to one call of a method.
 #[derive(Clone, Debug)]
-pub(crate) enum Answer {
+pub enum Answer {
     /// `{"ok": false, "error": ...}` with status 200, as Slack answers method errors.
     Error(&'static str),
     /// Status 429 with this `Retry-After`.
-    RateLimited { retry_after_secs: u64 },
+    RateLimited {
+        /// The `Retry-After` header, in seconds.
+        retry_after_secs: u64,
+    },
     /// Status 200 with this body, for answers the normal ones do not cover.
     Json(Value),
 }
 
-pub(crate) struct FakeSlack {
+/// A running fake Slack: its Web API and its Socket Mode endpoint, on local ports.
+pub struct FakeSlack {
     /// Pass as the channel's Web API base.
     pub api_base: String,
     calls: Arc<Mutex<Vec<ApiCall>>>,
@@ -60,7 +66,8 @@ pub(crate) struct FakeSlack {
 }
 
 impl FakeSlack {
-    pub(crate) async fn start() -> Self {
+    /// Start the Web API and the Socket Mode endpoint that `apps.connections.open` names.
+    pub async fn start() -> Self {
         let api = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let socket_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let socket_url = format!("ws://{}/link", socket_listener.local_addr().unwrap());
@@ -103,7 +110,7 @@ impl FakeSlack {
     }
 
     /// Answer the next calls of `method` this way, in order, before answering normally.
-    pub(crate) fn script(&self, method: &str, answers: Vec<Answer>) {
+    pub fn script(&self, method: &str, answers: Vec<Answer>) {
         self.scripted
             .lock()
             .unwrap()
@@ -113,14 +120,15 @@ impl FakeSlack {
     }
 
     /// The next Socket Mode connection.
-    pub(crate) async fn socket(&mut self) -> Socket {
+    pub async fn socket(&mut self) -> Socket {
         tokio::time::timeout(WAIT, self.sockets.recv())
             .await
             .expect("the channel did not connect in time")
             .expect("the listener is alive")
     }
 
-    pub(crate) fn calls(&self, method: &str) -> Vec<ApiCall> {
+    /// The calls of `method` so far, in order.
+    pub fn calls(&self, method: &str) -> Vec<ApiCall> {
         self.calls
             .lock()
             .unwrap()
@@ -131,7 +139,7 @@ impl FakeSlack {
     }
 
     /// Wait until `method` was called at least `count` times, and return its calls.
-    pub(crate) async fn wait_for(&self, method: &str, count: usize) -> Vec<ApiCall> {
+    pub async fn wait_for(&self, method: &str, count: usize) -> Vec<ApiCall> {
         tokio::time::timeout(WAIT, async {
             loop {
                 let notified = self.called.notified();
@@ -148,17 +156,18 @@ impl FakeSlack {
 }
 
 /// One Socket Mode connection, from the server's side.
-pub(crate) struct Socket {
+pub struct Socket {
     stream: WebSocketStream<TcpStream>,
 }
 
 impl Socket {
-    pub(crate) async fn send(&mut self, frame: Value) {
+    /// Send `frame` to the client as one text message.
+    pub async fn send(&mut self, frame: Value) {
         self.stream.send(Message::text(frame.to_string())).await.unwrap();
     }
 
     /// The next text frame from the client, as JSON. Control frames are skipped.
-    pub(crate) async fn receive(&mut self) -> Value {
+    pub async fn receive(&mut self) -> Value {
         loop {
             let frame = tokio::time::timeout(WAIT, self.stream.next())
                 .await
@@ -174,7 +183,7 @@ impl Socket {
     }
 
     /// Whether the client closed the connection, waiting for it.
-    pub(crate) async fn closed_by_client(&mut self) -> bool {
+    pub async fn closed_by_client(&mut self) -> bool {
         loop {
             match tokio::time::timeout(WAIT, self.stream.next()).await {
                 Ok(None | Some(Err(_) | Ok(Message::Close(_)))) => return true,

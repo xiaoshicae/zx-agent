@@ -42,14 +42,14 @@ toml.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+# The tests script the model with `ai::faux::FauxProvider`.
+zx-agent = { workspace = true, features = ["testing"] }
+zx-testing.workspace = true
+
 async-trait.workspace = true
-futures.workspace = true
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "time"] }
-# The fake chat platforms of the integration tests (crates/zx-agent/tests/common/) speak
-# WebSocket.
-tokio-tungstenite.workspace = true
 
 [target."cfg(unix)".dependencies]
 libc.workspace = true

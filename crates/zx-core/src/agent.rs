@@ -286,19 +286,6 @@ impl Agent {
         opening.get_or_try_init(|| self.open(id)).await.cloned()
     }
 
-    /// A session over `transcript`, which its caller made itself. `parts` are its own; the
-    /// agent's [`SessionSetup`] is not asked, and the agent's storage does not keep the
-    /// session. Fails when a session with the transcript's ID is open or being opened, and
-    /// for parts that the agent's tools or extensions clash with.
-    ///
-    /// Not part of the API: the workspace's tests enter here with a transcript they made. A
-    /// host puts its sessions into the agent's storage and opens them from there.
-    #[doc(hidden)]
-    pub fn adopt_session(&self, transcript: Transcript, parts: SessionParts) -> Result<Session> {
-        let assembled = self.assemble(transcript.header(), parts)?;
-        self.register(self.start(assembled, transcript)?)
-    }
-
     /// The session `id` when it is open. Reads nothing: a session that is only in the
     /// storage is not found.
     pub fn session(&self, id: &str) -> Option<Session> {

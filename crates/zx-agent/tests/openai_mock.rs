@@ -1,15 +1,11 @@
 //! The OpenAI-compatible provider over real HTTP against a local fake server: SSE parsing,
 //! tool results sent back, retries, timeouts, and cancellation. No network or API key needed.
 
-mod common;
-
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
 
-use common::mock_server::{MockServer, Reply};
-use common::{RunnerSetup, config, fast_retry};
 use zx_agent::Session;
 use zx_agent::ai::openai::{ApiKey, BodyOptions, MaxTokensField, OpenAiCompatible, OpenAiConfig};
 use zx_agent::ai::retry::RetryPolicy;
@@ -17,7 +13,9 @@ use zx_agent::ai::{Message, PREAMBLE, ProviderError, StopReason, SystemPrompt};
 use zx_agent::builtin::tools::BashTool;
 use zx_agent::compaction::Config;
 use zx_agent::events::{Event, EventKind, RunOutcome};
-use zx_agent::transcript::{SessionHeader, Transcript};
+use zx_agent::transcript::SessionHeader;
+use zx_testing::mock_server::{MockServer, Reply};
+use zx_testing::{RunnerSetup, Seed, Start, config, fast_retry};
 
 /// A runner whose provider talks to `server`, with a bash tool and a one-line system prompt.
 fn setup(server: &MockServer, idle_timeout: Duration) -> RunnerSetup {
@@ -51,7 +49,7 @@ fn raw_error(status: u16, headers: &str, body: &str) -> Reply {
     ))
 }
 
-fn provider_error(runner: &common::Driven) -> ProviderError {
+fn provider_error(runner: &zx_testing::Driven) -> ProviderError {
     match runner.session().messages().last() {
         Some(Message::Assistant(message)) => message.provider_error.clone().expect("structured provider error"),
         other => panic!("expected a failed assistant message: {other:?}"),
@@ -71,7 +69,8 @@ async fn response_budget_failure_is_not_retried() {
             },
         )
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("check").await;
 
@@ -91,7 +90,8 @@ async fn sse_event_budget_is_enforced() {
             ..OpenAiConfig::default()
         },
     )
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("check").await;
 
@@ -107,7 +107,8 @@ async fn http_status_prevents_retries_from_diagnostic_words() {
         retry: fast_retry(3),
         ..setup(&server, Duration::from_secs(10))
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("check").await;
 
@@ -133,7 +134,8 @@ async fn quota_errors_are_not_retried() {
         retry: fast_retry(3),
         ..setup(&server, Duration::from_secs(10))
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("check").await;
 
@@ -164,7 +166,8 @@ async fn numeric_retry_after_is_used_by_the_runner() {
         if matches!(event.event, EventKind::RetryScheduled { .. }) {
             session.cancel();
         }
-    });
+    })
+    .await;
 
     let report = runner.run("check").await;
 
@@ -187,7 +190,7 @@ async fn numeric_retry_after_is_used_by_the_runner() {
 #[tokio::test]
 async fn large_http_errors_keep_bounded_diagnostics() {
     let server = MockServer::start(vec![raw_error(400, "", &"x".repeat(128 * 1024))]).await;
-    let (runner, _) = setup(&server, Duration::from_secs(10)).build();
+    let (runner, _) = setup(&server, Duration::from_secs(10)).build().await;
 
     let report = runner.run("check").await;
 
@@ -205,7 +208,8 @@ async fn invalid_stream_json_is_a_non_retryable_protocol_error() {
         retry: fast_retry(3),
         ..setup(&server, Duration::from_secs(10))
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("check").await;
 
@@ -224,7 +228,8 @@ async fn an_unknown_finish_reason_is_a_provider_error_not_a_completed_answer() {
         retry: fast_retry(3),
         ..setup(&server, Duration::from_secs(10))
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("check").await;
 
@@ -259,7 +264,8 @@ async fn an_error_object_under_a_success_status_is_reported() {
         retry: fast_retry(3),
         ..setup(&server, Duration::from_secs(10))
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("check").await;
 
@@ -280,7 +286,8 @@ async fn a_whole_answer_instead_of_a_stream_is_named_in_the_error() {
         retry: fast_retry(3),
         ..setup(&server, Duration::from_secs(10))
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("check").await;
 
@@ -307,7 +314,7 @@ async fn tool_call_round_trip_over_http() {
         ]),
     ])
     .await;
-    let (runner, _) = setup(&server, Duration::from_secs(10)).build();
+    let (runner, _) = setup(&server, Duration::from_secs(10)).build().await;
 
     let report = runner.run("check").await;
 
@@ -352,7 +359,8 @@ async fn http_errors_are_retried_then_reported() {
         retry: fast_retry(1),
         ..setup(&server, Duration::from_secs(10))
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("check").await;
 
@@ -366,7 +374,7 @@ async fn http_errors_are_retried_then_reported() {
 async fn a_stalled_stream_fails_after_the_idle_timeout() {
     let first_chunk = json!({"choices":[{"index":0,"delta":{"content":"Start"}}]});
     let server = MockServer::start(vec![Reply::Stall(vec![first_chunk])]).await;
-    let (runner, _) = setup(&server, Duration::from_secs(1)).build();
+    let (runner, _) = setup(&server, Duration::from_secs(1)).build().await;
 
     let report = runner.run("check").await;
 
@@ -381,11 +389,13 @@ async fn cancelling_mid_stream_keeps_the_text_received_so_far() {
     let server = MockServer::start(vec![Reply::Stall(vec![first_chunk])]).await;
     // Cancelled at the first streamed delta, to cancel a response mid-stream without
     // depending on timing.
-    let (runner, _) = setup(&server, Duration::from_secs(10)).build_with(|event: &Event, session: &Session| {
-        if matches!(event.event, EventKind::MessageUpdate { .. }) {
-            session.cancel();
-        }
-    });
+    let (runner, _) = setup(&server, Duration::from_secs(10))
+        .build_with(|event: &Event, session: &Session| {
+            if matches!(event.event, EventKind::MessageUpdate { .. }) {
+                session.cancel();
+            }
+        })
+        .await;
 
     let report = runner.run("check").await;
 
@@ -428,7 +438,7 @@ async fn an_overflow_error_code_makes_the_runner_compact_and_continue() {
         Reply::text("answer"),
     ])
     .await;
-    let mut session = Transcript::in_memory(common::header());
+    let mut session = Seed::in_memory(zx_testing::header()).await;
     session
         .append_message(Message::user("observed ".repeat(600)))
         .await
@@ -443,11 +453,12 @@ async fn an_overflow_error_code_makes_the_runner_compact_and_continue() {
         ..Config::default()
     };
     let (runner, _) = RunnerSetup {
-        session,
+        session: session.into(),
         compaction,
         ..setup(&server, Duration::from_secs(10))
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("check").await;
 
@@ -487,7 +498,8 @@ async fn custom_headers_and_a_dynamic_api_key_reach_every_request() {
             ..OpenAiConfig::default()
         },
     )
-    .build();
+    .build()
+    .await;
 
     runner.run("first").await;
     runner.run("second").await;
@@ -528,7 +540,8 @@ async fn a_key_source_that_does_not_answer_fails_the_request_within_the_idle_tim
             },
         )
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("go").await;
 
@@ -560,7 +573,8 @@ async fn a_failing_api_key_source_fails_the_request_without_sending_or_retrying(
             },
         )
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("go").await;
 
@@ -592,8 +606,8 @@ async fn the_cache_key_is_sent_as_prompt_cache_key_only_when_the_provider_is_tol
         },
     );
     setup.config.session_cache_key = true;
-    setup.session = session_42();
-    let (runner, _) = setup.build();
+    setup.session = session_42().await;
+    let (runner, _) = setup.build().await;
     runner.run("go").await;
     assert_eq!(server.requests()[0].body["prompt_cache_key"], "session-42");
     // The audit replays the request with its key.
@@ -613,8 +627,8 @@ async fn the_cache_key_is_sent_as_prompt_cache_key_only_when_the_provider_is_tol
 
     let mut plain = setup_with_provider(&server, OpenAiConfig::default());
     plain.config.session_cache_key = true;
-    plain.session = session_42();
-    let (runner, _) = plain.build();
+    plain.session = session_42().await;
+    let (runner, _) = plain.build().await;
     runner.run("go").await;
     assert!(server.requests()[1].body.get("prompt_cache_key").is_none());
 }
@@ -632,7 +646,7 @@ async fn the_output_limit_is_sent_in_the_field_the_provider_is_told_to_use() {
             ..OpenAiConfig::default()
         },
     );
-    let (runner, _) = setup.build();
+    let (runner, _) = setup.build().await;
 
     let report = runner.run("go").await;
 
@@ -643,9 +657,11 @@ async fn the_output_limit_is_sent_in_the_field_the_provider_is_told_to_use() {
 }
 
 /// A new session in memory whose ID is `session-42`.
-fn session_42() -> Transcript {
-    Transcript::in_memory(SessionHeader {
+async fn session_42() -> Start {
+    let seed = Seed::in_memory(SessionHeader {
         id: "session-42".into(),
-        ..common::header()
+        ..zx_testing::header()
     })
+    .await;
+    seed.into()
 }

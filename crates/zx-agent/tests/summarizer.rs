@@ -1,7 +1,6 @@
 //! A summarizer of the host's own: it makes the summary of a compaction in place of the
 //! kernel's request to the model, and the kernel still decides when, records the start and
 //! the result, checks the summary and bounds the wait.
-mod common;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -16,7 +15,7 @@ use zx_agent::compaction::{Config, Outcome, Summarized, Summarizer, SummarySourc
 use zx_agent::events::RunOutcome;
 use zx_agent::transcript::{CompactionSummary, Entry, SummarizedBy, SummaryFact, Transcript};
 
-use common::{Collect, Driven, RunnerSetup, config, refusal, seeded_session};
+use zx_testing::{Collect, Driven, RunnerSetup, config, refusal, seeded_session};
 
 /// What a scripted summarizer answers a call with.
 type Answer = dyn Fn(&SummarySource<'_>) -> Result<Summarized, String> + Send + Sync;
@@ -116,7 +115,7 @@ async fn summarized_by(
     let mut config = config(provider.clone(), vec![]);
     config.summarizer = Some(summarizer);
     let (session, events) = RunnerSetup {
-        session: store,
+        session: store.into(),
         limits: RunLimits {
             max_model_requests: Some(2),
             ..RunLimits::default()
@@ -124,7 +123,8 @@ async fn summarized_by(
         compaction,
         ..RunnerSetup::new(config)
     }
-    .build();
+    .build()
+    .await;
     (session, events, provider, old)
 }
 

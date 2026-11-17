@@ -12,9 +12,11 @@ use serde_json::json;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-use common::mock_server::{MockServer, Reply};
-use common::{Home, fake_model_config, seed_session, stderr, stdout, write_config, zx_agent_in};
+use common::zx_agent_in;
 use zx_agent::ai::Message;
+use zx_testing::mock_server::{MockServer, Reply};
+use zx_testing::program::{Home, fake_model_config, seed_session, write_config};
+use zx_testing::{stderr, stdout};
 
 const KEY_VAR: &str = "ZX_SESSIONS_TEST_KEY";
 
@@ -40,7 +42,7 @@ impl Dirs {
     /// Where chat keeps this working directory's sessions by default, spelled out as pi
     /// spells it.
     fn session_dir(&self) -> PathBuf {
-        common::session_dir(self.home.path(), &self.cwd())
+        zx_testing::program::session_dir(self.home.path(), &self.cwd())
     }
 
     fn command(&self, args: &[&str]) -> Command {
@@ -80,11 +82,11 @@ impl Dirs {
 
 /// The session files in `dir`, by name.
 fn files(dir: &Path) -> Vec<PathBuf> {
-    common::session_files(dir)
+    zx_testing::program::session_files(dir)
 }
 
 fn prompts(path: &Path) -> Vec<String> {
-    common::read_session_file(path)
+    zx_testing::read_session_file(path)
         .unwrap()
         .messages()
         .into_iter()
@@ -117,7 +119,7 @@ async fn chat_keeps_each_conversation_in_its_own_file_under_the_home_directory()
     assert_eq!(prompts, [["again"], ["hello"]]);
     for path in &files {
         // Named <UTC time>_<session ID>.jsonl.
-        let id = common::read_session_file(path).unwrap().header().id.clone();
+        let id = zx_testing::read_session_file(path).unwrap().header().id.clone();
         let name = path.file_name().unwrap().to_str().unwrap();
         assert!(name.ends_with(&format!("_{id}.jsonl")), "{name}");
         assert!(name.starts_with("20") && name.contains('T'), "{name}");

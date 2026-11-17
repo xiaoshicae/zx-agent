@@ -343,28 +343,6 @@ async fn an_opening_that_fails_leaves_the_session_to_be_opened_later() {
     agent.open_session(&header.id).await.unwrap();
 }
 
-#[tokio::test]
-async fn an_adopted_transcript_is_a_session_of_the_agent_under_its_own_id() {
-    let (agent, storage, provider) = agent([FauxStep::text("done")]);
-    let mut transcript = Transcript::in_memory(SessionHeader::new(cwd(), "m"));
-    transcript.append_message(Message::user("earlier")).await.unwrap();
-    let id = transcript.header().id.clone();
-
-    let session = agent.adopt_session(transcript, SessionParts::default()).unwrap();
-    session.send("go").unwrap().wait().await;
-
-    assert_eq!(provider.requests()[0].messages.len(), 2);
-    assert!(agent.session(&id).is_some());
-    // The host made the transcript: the agent's storage does not keep it.
-    assert!(kept(&storage).await.is_empty());
-    let again = Transcript::in_memory(SessionHeader {
-        id: id.clone(),
-        ..SessionHeader::new(cwd(), "m")
-    });
-    let error = agent.adopt_session(again, SessionParts::default()).err().unwrap();
-    assert_eq!(error.to_string(), format!("session {id} is already open"));
-}
-
 #[test]
 fn an_agent_no_session_could_run_with_is_refused() {
     let provider = Arc::new(FauxProvider::new([]));

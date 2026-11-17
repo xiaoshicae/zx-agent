@@ -12,8 +12,10 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 
-use common::mock_server::{MockServer, Reply};
-use common::{Home, fake_model_config, seed_session, session_dir, stderr, write_agent, write_config, zx_agent_in};
+use common::zx_agent_in;
+use zx_testing::mock_server::{MockServer, Reply};
+use zx_testing::program::{Home, fake_model_config, seed_session, session_dir, write_agent, write_config};
+use zx_testing::stderr;
 
 const KEY_VAR: &str = "ZX_ACP_TEST_KEY";
 
@@ -32,7 +34,7 @@ struct Acp {
 
 /// The session files in `dir`, by name.
 fn session_files(dir: &Path) -> Vec<String> {
-    common::session_files(dir)
+    zx_testing::program::session_files(dir)
         .iter()
         .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
         .collect()
@@ -455,7 +457,7 @@ async fn a_cancel_right_behind_its_prompt_ends_the_turn_as_cancelled() {
 /// How the agent exited once it was sent SIGTERM.
 #[cfg(unix)]
 async fn terminated(acp: &mut Acp) -> ExitStatus {
-    common::signal(&acp.child, "-TERM").await;
+    zx_testing::signal(&acp.child, "-TERM").await;
     tokio::time::timeout(Duration::from_secs(5), acp.child.wait())
         .await
         .expect("the agent did not exit after SIGTERM")
@@ -493,13 +495,13 @@ async fn sigterm_cancels_the_turn_in_progress_before_the_agent_exits() {
     assert_eq!(status.code(), Some(0), "{status:?}");
     // Cancelled rather than dropped: the session holds the answer as far as it got, marked
     // as aborted, which only a run that is read to its end records.
-    let files = common::session_files(&session_dir(home.path(), &cwd));
+    let files = zx_testing::program::session_files(&session_dir(home.path(), &cwd));
     assert_eq!(files.len(), 1, "{files:?}");
-    let aborted: Vec<Value> = common::read_lines(&files[0])
+    let aborted: Vec<Value> = zx_testing::read_lines(&files[0])
         .into_iter()
         .filter(|line| line["message"]["stopReason"] == "aborted")
         .collect();
-    assert_eq!(aborted.len(), 1, "{:?}", common::read_lines(&files[0]));
+    assert_eq!(aborted.len(), 1, "{:?}", zx_testing::read_lines(&files[0]));
     assert!(aborted[0]["message"].to_string().contains("partial"), "{aborted:?}");
 }
 

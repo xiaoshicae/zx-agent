@@ -2,8 +2,6 @@
 //! exact text, both report what they changed, and changes to one file in one batch are applied
 //! one after another.
 
-mod common;
-
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
@@ -14,14 +12,14 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
+use zx_agent::SessionOptions;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::builtin::executor::{CommandOutput, Executor, LocalExecutor, ShellCommand};
 use zx_agent::builtin::tools::{EditFileTool, FileMutationQueue, WriteFileTool, builtin_tools};
 use zx_agent::events::{RunOutcome, RunReport};
 use zx_agent::tools::{Tool, ToolContext, ToolOutput};
-use zx_agent::transcript::Transcript;
 
-use common::{RunnerSetup, config, header_in};
+use zx_testing::{RunnerSetup, Start, config};
 
 fn ctx(dir: &Path) -> ToolContext {
     ToolContext::new(dir.to_path_buf(), CancellationToken::new())
@@ -322,10 +320,11 @@ async fn edit_in(cwd: &Path, provider: Arc<FauxProvider>, executor: &Arc<dyn Exe
     let names = ["edit_file", "write_file"].map(String::from);
     let tools = builtin_tools(&names, Duration::from_secs(5), executor, &Arc::default()).unwrap();
     let (runner, _) = RunnerSetup {
-        session: Transcript::in_memory(header_in(cwd)),
+        session: Start::New(SessionOptions::new(cwd)),
         ..RunnerSetup::new(config(provider, tools))
     }
-    .build();
+    .build()
+    .await;
     runner.run("edit").await
 }
 

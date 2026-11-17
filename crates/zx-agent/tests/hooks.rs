@@ -1,5 +1,4 @@
 //! Hook, approval and audit contracts, exercised through the public SDK.
-mod common;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -10,10 +9,6 @@ use async_trait::async_trait;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use common::{
-    Asked, EchoTool, RunnerSetup, config, fast_retry, header, read_lines, refusal, run_approved, run_prompt, summarize,
-};
-use zx_agent::CancelSignal;
 use zx_agent::agent::RunLimits;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{EventReceiver, Message, Provider, Request, SectionChange, StopReason, SystemMessage, ToolCall};
@@ -25,7 +20,12 @@ use zx_agent::hooks::{ContextEdit, FinishedStep, Hook, HookContext, HookResult, 
 use zx_agent::input::Input;
 use zx_agent::policy::{ApprovalDecision, ApprovalMode, PolicyContext, PolicyDecision, ToolPolicy};
 use zx_agent::tools::{Tool, ToolContext, ToolOutput};
-use zx_agent::transcript::{Entry, SessionHeader, Transcript};
+use zx_agent::transcript::Entry;
+use zx_agent::{CancelSignal, SessionOptions};
+use zx_testing::{
+    Asked, EchoTool, RunnerSetup, Seed, Start, config, fast_retry, header, read_lines, refusal, run_approved,
+    run_prompt, summarize,
+};
 
 struct Verdict(PolicyDecision);
 #[async_trait]
@@ -63,7 +63,7 @@ struct Approver {
     calls: AtomicUsize,
 }
 #[async_trait]
-impl common::Approver for Approver {
+impl zx_testing::Approver for Approver {
     async fn confirm(&self, request: &Asked) -> Option<ApprovalDecision> {
         assert_eq!(request.reason, "review");
         self.calls.fetch_add(1, Ordering::SeqCst);
@@ -138,7 +138,8 @@ async fn session_grants_require_exact_arguments_and_never_override_deny() {
         approver: Some(host.clone()),
         ..RunnerSetup::new(config)
     }
-    .build();
+    .build()
+    .await;
     for _ in 0..3 {
         assert_eq!(runner.run("go").await.outcome, RunOutcome::Completed);
     }
@@ -152,7 +153,7 @@ async fn session_grants_require_exact_arguments_and_never_override_deny() {
 /// Is asked and never answers; says when it was asked.
 struct WaitingHost(Arc<tokio::sync::Notify>);
 #[async_trait]
-impl common::Approver for WaitingHost {
+impl zx_testing::Approver for WaitingHost {
     async fn confirm(&self, _request: &Asked) -> Option<ApprovalDecision> {
         self.0.notify_one();
         std::future::pending().await
@@ -199,7 +200,8 @@ async fn cancellation_interrupts_a_pending_approval() {
         approver: Some(Arc::new(WaitingHost(entered.clone()))),
         ..RunnerSetup::new(config)
     }
-    .build();
+    .build()
+    .await;
     let mut running = Box::pin(runner.run("go"));
     tokio::select! { () = entered.notified() => {}, _ = &mut running => panic!("must wait for approval") }
     runner.cancel();
@@ -273,7 +275,7 @@ impl Provider for AuditProbe {
         "audit-probe"
     }
     fn stream(&self, request: Request, cancel: CancellationToken) -> EventReceiver {
-        let persisted = common::read_session_file(&self.path).unwrap();
+        let persisted = zx_testing::read_session_file(&self.path).unwrap();
         assert_eq!(
             request.messages,
             persisted.messages(),
@@ -287,7 +289,7 @@ impl Provider for AuditProbe {
 async fn input_and_context_changes_are_persisted_before_the_model_request() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session.jsonl");
-    let mut session = common::create_session_file(&path, header()).await.unwrap();
+    let mut session = zx_testing::create_session_file(&path, header()).await.unwrap();
     session.append_message(Message::user("old")).await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let probe = Arc::new(AuditProbe {
@@ -298,10 +300,11 @@ async fn input_and_context_changes_are_persisted_before_the_model_request() {
     config.hooks.push("rewrite_input", Arc::new(RewriteInput));
     config.hooks.push("project", Arc::new(Project));
     let (runner, _) = RunnerSetup {
-        session,
+        session: session.into(),
         ..RunnerSetup::new(config)
     }
-    .build();
+    .build()
+    .await;
     let report = runner.run("go").await;
     assert_eq!(report.outcome, RunOutcome::Completed);
     assert_eq!(report.final_text, "done");
@@ -313,7 +316,7 @@ async fn input_and_context_changes_are_persisted_before_the_model_request() {
     assert_eq!(lines[2]["message"]["content"], "go", "original input remains intact");
     assert_eq!(lines.iter().filter(|line| line["type"] == "context_edit").count(), 3);
     assert_eq!(
-        common::read_session_file(&path).unwrap().messages(),
+        zx_testing::read_session_file(&path).unwrap().messages(),
         runner.session().messages()
     );
 }
@@ -337,7 +340,7 @@ async fn an_invalid_edit_plan_is_rejected_before_any_partial_edit_or_request() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("never")]));
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push("invalid_plan", Arc::new(InvalidPlan));
-    let (runner, _) = RunnerSetup::new(config).build();
+    let (runner, _) = RunnerSetup::new(config).build().await;
     let report = runner.run("go").await;
     assert_eq!(report.outcome, RunOutcome::Failed);
     assert!(report.error.unwrap().contains("out of bounds"));
@@ -369,7 +372,8 @@ async fn rejected_input_is_logged_and_omitted_without_retrying_the_model() {
         retry: fast_retry(3),
         ..RunnerSetup::new(config)
     }
-    .build();
+    .build()
+    .await;
     let report = runner.run("go").await;
     assert_eq!(
         (report.outcome, report.model_requests, report.retries),
@@ -396,7 +400,7 @@ async fn steering_queued_after_a_rejected_message_stays_queued_for_the_next_run(
     let provider = Arc::new(FauxProvider::new([FauxStep::text("answer")]));
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push("reject_marked", Arc::new(RejectMarked));
-    let (runner, _) = RunnerSetup::new(config).build();
+    let (runner, _) = RunnerSetup::new(config).build().await;
     runner.queues().steer("reject-me");
     runner.queues().steer("keep-me");
     let first = runner.run("hello").await;
@@ -422,17 +426,18 @@ impl Hook for OmitEarlier {
 #[tokio::test]
 async fn omitting_prior_runs_does_not_lose_the_current_answer_or_usage() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("current")]));
-    let mut session = Transcript::in_memory(header());
+    let mut session = Seed::in_memory(header()).await;
     for _ in 0..5 {
         session.append_message(Message::user("old")).await.unwrap();
     }
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push("omit_earlier", Arc::new(OmitEarlier));
     let (runner, _) = RunnerSetup {
-        session,
+        session: session.into(),
         ..RunnerSetup::new(config)
     }
-    .build();
+    .build()
+    .await;
     let report = runner.run("go").await;
     assert_eq!(report.final_text, "current");
     assert_eq!(report.usage.total_tokens, 15);
@@ -487,7 +492,7 @@ async fn failed_output_hooks_withhold_raw_results_from_events_and_persistence() 
         config
             .hooks
             .push_with_timeout("bad_output", Arc::new(hook), Duration::ZERO);
-        let (runner, events) = RunnerSetup::new(config).build();
+        let (runner, events) = RunnerSetup::new(config).build().await;
         let report = runner.run("go").await;
         assert_eq!(report.outcome, RunOutcome::Completed);
         let serialized = serde_json::to_string(runner.session().entries()).unwrap();
@@ -535,7 +540,8 @@ async fn observer_failures_are_diagnostic_and_retry_events_are_observed_once() {
         retry: fast_retry(1),
         ..RunnerSetup::new(config)
     }
-    .build();
+    .build()
+    .await;
     let report = runner.run("go").await;
     assert_eq!(report.outcome, RunOutcome::Completed);
     let kinds = events.kinds();
@@ -568,7 +574,7 @@ async fn custom_continuation_wording_still_joins_answer_parts() {
     ]));
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push("custom_continue", Arc::new(CustomContinue));
-    let (runner, _) = RunnerSetup::new(config).build();
+    let (runner, _) = RunnerSetup::new(config).build().await;
     let report = runner.run("go").await;
     assert_eq!(report.final_text, "第一部分，第二部分。");
     assert!(matches!(&provider.requests()[1].messages[2], Message::User { content, .. } if content == "接着回答"));
@@ -591,7 +597,8 @@ async fn continuation_budget_is_not_reset_after_a_provider_retry() {
         limits: RunLimits::default(),
         ..RunnerSetup::new(config)
     }
-    .build();
+    .build()
+    .await;
     let report = runner.run("go").await;
     assert_eq!(
         (report.outcome, report.model_requests, report.retries),
@@ -615,7 +622,7 @@ async fn redaction_handles_overlapping_secrets_unicode_and_error_outputs() {
         .after_tool(
             &call,
             ToolOutput::error("token-long，令牌 token"),
-            &common::hook_context(),
+            &zx_testing::hook_context(),
         )
         .await
         .unwrap();
@@ -642,7 +649,7 @@ async fn secret_files_are_read_again_and_earlier_values_stay_redacted() {
         .after_tool(
             &redaction_call(),
             ToolOutput::ok("a first-token b"),
-            &common::hook_context(),
+            &zx_testing::hook_context(),
         )
         .await
         .unwrap();
@@ -653,7 +660,7 @@ async fn secret_files_are_read_again_and_earlier_values_stay_redacted() {
         .after_tool(
             &redaction_call(),
             ToolOutput::ok("first-token second-token"),
-            &common::hook_context(),
+            &zx_testing::hook_context(),
         )
         .await
         .unwrap();
@@ -670,7 +677,7 @@ async fn missing_or_empty_secret_files_redact_nothing_else() {
         .after_tool(
             &redaction_call(),
             ToolOutput::ok("key stays out, the rest stays"),
-            &common::hook_context(),
+            &zx_testing::hook_context(),
         )
         .await
         .unwrap();
@@ -693,7 +700,7 @@ async fn a_secret_file_that_is_not_utf8_is_redacted_as_tools_print_it() {
     let hook = RedactSecrets::new(Vec::new()).with_secret_files([dir.path().join("password")]);
 
     let output = hook
-        .after_tool(&redaction_call(), printed, &common::hook_context())
+        .after_tool(&redaction_call(), printed, &zx_testing::hook_context())
         .await
         .unwrap();
 
@@ -708,7 +715,7 @@ async fn a_secret_file_over_the_limit_fails_the_hook() {
     std::fs::write(&large, "x".repeat(64 * 1024 + 1)).unwrap();
     let hook = RedactSecrets::new(Vec::new()).with_secret_files([large]);
     let error = hook
-        .after_tool(&redaction_call(), ToolOutput::ok("output"), &common::hook_context())
+        .after_tool(&redaction_call(), ToolOutput::ok("output"), &zx_testing::hook_context())
         .await
         .unwrap_err();
     assert!(error.contains("cannot read a secret file"), "{error}");
@@ -779,7 +786,7 @@ async fn a_secret_directory_covers_its_visible_files_including_later_ones() {
         .after_tool(
             &redaction_call(),
             ToolOutput::ok("token-a token-hidden token-x"),
-            &common::hook_context(),
+            &zx_testing::hook_context(),
         )
         .await
         .unwrap();
@@ -787,7 +794,11 @@ async fn a_secret_directory_covers_its_visible_files_including_later_ones() {
     // A key added to a Secret volume later shows up as a new file in the same directory.
     std::fs::write(dir.path().join("cluster-b"), "token-b").unwrap();
     let output = hook
-        .after_tool(&redaction_call(), ToolOutput::ok("token-b"), &common::hook_context())
+        .after_tool(
+            &redaction_call(),
+            ToolOutput::ok("token-b"),
+            &zx_testing::hook_context(),
+        )
         .await
         .unwrap();
     assert_eq!(output.content, "[REDACTED]");
@@ -810,7 +821,7 @@ async fn every_current_secret_is_redacted_however_many_files_there_are() {
         .after_tool(
             &redaction_call(),
             ToolOutput::ok(all.join(" ")),
-            &common::hook_context(),
+            &zx_testing::hook_context(),
         )
         .await
         .unwrap();
@@ -839,7 +850,8 @@ async fn a_hook_follow_up_obeys_the_step_budget() {
         },
         ..RunnerSetup::new(config)
     }
-    .build();
+    .build()
+    .await;
     let report = runner.run("go").await;
     assert_eq!(
         report.outcome,
@@ -870,7 +882,7 @@ async fn stopping_from_a_hook_preserves_queued_user_input() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let mut config = config(provider, vec![]);
     config.hooks.push("stop_and_queue", Arc::new(StopAndQueue));
-    let (runner, _) = RunnerSetup::new(config).build();
+    let (runner, _) = RunnerSetup::new(config).build().await;
     let result = runner.run("go").await;
     assert_eq!(result.outcome, RunOutcome::Completed);
     assert_eq!(runner.queues().drain_steering(), [Input::from("pending user input")]);
@@ -893,7 +905,8 @@ async fn a_finish_hook_error_never_triggers_provider_retry() {
         retry: fast_retry(3),
         ..RunnerSetup::new(config)
     }
-    .build();
+    .build()
+    .await;
     let report = runner.run("go").await;
     assert_eq!(
         (report.outcome, report.model_requests, report.retries),
@@ -939,7 +952,7 @@ impl Hook for HoldInput {
     }
 }
 
-fn holding_runner(provider: Arc<FauxProvider>) -> (common::Driven, HoldInput) {
+async fn holding_runner(provider: Arc<FauxProvider>) -> (zx_testing::Driven, HoldInput) {
     let holding = Arc::new(tokio::sync::Notify::new());
     let released = Arc::new(AtomicBool::new(false));
     let mut config = config(provider, vec![]);
@@ -950,7 +963,7 @@ fn holding_runner(provider: Arc<FauxProvider>) -> (common::Driven, HoldInput) {
             released: released.clone(),
         }),
     );
-    let (runner, _) = RunnerSetup::new(config).build();
+    let (runner, _) = RunnerSetup::new(config).build().await;
     (runner, HoldInput { holding, released })
 }
 
@@ -964,7 +977,7 @@ fn mentions(messages: &[Message], text: &str) -> usize {
 #[tokio::test]
 async fn input_whose_hook_was_cancelled_is_not_recorded() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
-    let (runner, hold) = holding_runner(provider.clone());
+    let (runner, hold) = holding_runner(provider.clone()).await;
 
     let (report, ()) = tokio::join!(runner.run("hold: rotate the logs"), async {
         hold.holding.notified().await;
@@ -981,7 +994,7 @@ async fn input_whose_hook_was_cancelled_is_not_recorded() {
 #[tokio::test]
 async fn queued_input_whose_run_was_dropped_stays_queued_and_unrecorded() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
-    let (runner, hold) = holding_runner(provider.clone());
+    let (runner, hold) = holding_runner(provider.clone()).await;
     runner.queues().steer("hold: check the disk");
 
     tokio::select! {
@@ -1000,7 +1013,7 @@ async fn queued_input_whose_run_was_dropped_stays_queued_and_unrecorded() {
 }
 
 /// The policy verdicts and approvals of a run, in order, as `(call, what)` pairs.
-fn approvals(events: &common::Collect) -> Vec<(String, String)> {
+fn approvals(events: &zx_testing::Collect) -> Vec<(String, String)> {
     events
         .events()
         .into_iter()
@@ -1117,7 +1130,7 @@ async fn approvals_are_reported_when_asked_and_when_remembered() {
 /// Answers after `delay`, like a person who takes a moment.
 struct SlowApprover(Duration);
 #[async_trait]
-impl common::Approver for SlowApprover {
+impl zx_testing::Approver for SlowApprover {
     async fn confirm(&self, _request: &Asked) -> Option<ApprovalDecision> {
         tokio::time::sleep(self.0).await;
         Some(ApprovalDecision::AllowOnce)
@@ -1197,7 +1210,8 @@ async fn an_approval_interrupted_by_cancellation_is_reported_as_cancelled() {
         approver: Some(Arc::new(WaitingHost(entered.clone()))),
         ..RunnerSetup::new(config)
     }
-    .build();
+    .build()
+    .await;
 
     let (report, ()) = tokio::join!(runner.run("go"), async {
         entered.notified().await;
@@ -1311,10 +1325,11 @@ async fn every_hook_method_knows_the_session_run_and_working_directory() {
     let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
     config.hooks.push("probe", Arc::new(probe.clone()));
     let (runner, events) = RunnerSetup {
-        session: Transcript::in_memory(SessionHeader::new(Path::new("/srv/work"), "test-model")),
+        session: Start::New(SessionOptions::new("/srv/work")),
         ..RunnerSetup::new(config)
     }
-    .build();
+    .build()
+    .await;
 
     runner.run("go").await;
 
@@ -1350,7 +1365,7 @@ async fn a_named_hook_is_reported_under_its_name() {
     let provider = Arc::new(FauxProvider::new([FauxStep::text("done")]));
     let mut config = config(provider, vec![]);
     config.hooks.push("trace-exporter", Arc::new(FailingObserver));
-    let (runner, events) = RunnerSetup::new(config).build();
+    let (runner, events) = RunnerSetup::new(config).build().await;
 
     runner.run("go").await;
 

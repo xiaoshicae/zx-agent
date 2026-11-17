@@ -1,6 +1,5 @@
 //! Extensions through the public SDK: what an agent's extensions add to its sessions, and
 //! which extensions refuse the agent.
-mod common;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -8,7 +7,6 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde_json::json;
 
-use common::{EchoTool, config, refusal, run_prompt, summarize};
 use zx_agent::agent::{SessionParts, SessionSetup};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::ai::{SystemPrompt, ToolCall};
@@ -18,6 +16,7 @@ use zx_agent::hooks::{Hook, HookContext, HookResult, HookStage};
 use zx_agent::tools::{Tool, ToolOutput};
 use zx_agent::transcript::SessionHeader;
 use zx_agent::{Agent, AgentConfig, SessionOptions};
+use zx_testing::{EchoTool, config, refusal, run_prompt, summarize};
 
 /// Appends a mark to every tool result.
 struct Mark;

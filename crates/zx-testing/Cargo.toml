@@ -1,0 +1,28 @@
+[package]
+name = "zx-testing"
+description = "Test support the integration tests of the zx-agent workspace share: scripted sessions, fake servers and the programs under test"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# Never published, whatever the workspace sets: it exists for the workspace's own tests.
+publish = false
+
+[lints]
+workspace = true
+
+# Only ever a dev-dependency. It does not turn on the scripted provider of zx-ai (the feature
+# `testing`): a member's dependencies are built with every build of the whole workspace, the
+# release build too, so each package's tests turn it on themselves.
+[dependencies]
+zx-agent.workspace = true
+
+anyhow.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt", "sync", "time"] }
+# The fake chat platforms speak WebSocket.
+tokio-tungstenite.workspace = true
+tokio-util.workspace = true

@@ -1,12 +1,11 @@
 //! The records extensions append to a session: `custom` entries, which stay out
 //! of model context, and `custom_message` entries, which the model sees as user messages.
-mod common;
 
 use serde_json::json;
 
-use common::{header, read_lines, summarize};
 use zx_agent::ai::{Message, UserMessageKind};
 use zx_agent::transcript::{CustomMessage, Transcript};
+use zx_testing::{header, read_lines, summarize};
 
 fn note(text: &str) -> CustomMessage {
     CustomMessage {
@@ -44,7 +43,7 @@ async fn custom_messages_join_the_projection_as_user_messages_and_custom_entries
 async fn custom_records_are_written_with_camel_case_fields_and_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
-    let mut store = common::create_session_file(&path, header()).await.unwrap();
+    let mut store = zx_testing::create_session_file(&path, header()).await.unwrap();
     store.append_message(Message::user("first")).await.unwrap();
     store.append_custom_entry("state", json!(1)).await.unwrap();
     store.append_custom_message(note("remember")).await.unwrap();
@@ -67,7 +66,7 @@ async fn custom_records_are_written_with_camel_case_fields_and_reopen() {
         (Some("note"), Some("remember"), Some(true), Some(1))
     );
     assert_eq!(lines[3]["parentId"], lines[2]["id"]);
-    let reopened = common::open_session_file(&path).await.unwrap();
+    let reopened = zx_testing::open_session_file(&path).await.unwrap();
     assert_eq!(summarize(&reopened.messages()), ["user:first", "user:remember"]);
 }
 

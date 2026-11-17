@@ -1,15 +1,13 @@
 //! Forking a session (pi: `createBranchedSession`): a new session starts with one
 //! branch of another, copied unchanged, and records where it came from.
 
-mod common;
-
 use std::sync::Arc;
 
-use common::{RunnerSetup, config, header, read_lines};
 use zx_agent::ai::Message;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::events::RunOutcome;
 use zx_agent::transcript::{Entry, SESSION_VERSION, SessionHeader, Transcript};
+use zx_testing::{RunnerSetup, config, header, read_lines};
 
 fn ids(entries: &[&Entry]) -> Vec<String> {
     entries.iter().map(|entry| entry.id().to_string()).collect()
@@ -19,7 +17,7 @@ fn ids(entries: &[&Entry]) -> Vec<String> {
 async fn a_fork_copies_one_branch_unchanged_and_names_its_parent() {
     let dir = tempfile::tempdir().unwrap();
     let source_path = dir.path().join("source.jsonl");
-    let mut source = common::create_session_file(&source_path, header()).await.unwrap();
+    let mut source = zx_testing::create_session_file(&source_path, header()).await.unwrap();
     source.append_message(Message::user("question")).await.unwrap();
     let answer = source.append_message(Message::user("first answer")).await.unwrap();
     source.append_message(Message::user("abandoned")).await.unwrap();
@@ -27,7 +25,7 @@ async fn a_fork_copies_one_branch_unchanged_and_names_its_parent() {
     let kept = source.append_message(Message::user("kept")).await.unwrap();
     let fork_path = dir.path().join("fork.jsonl");
 
-    let mut fork = common::create_session_file(&fork_path, source.fork_header(dir.path(), "other-model"))
+    let mut fork = zx_testing::create_session_file(&fork_path, source.fork_header(dir.path(), "other-model"))
         .await
         .unwrap();
     let copied = fork.copy_branch(&source, &kept).await.unwrap();
@@ -55,7 +53,7 @@ async fn a_fork_copies_one_branch_unchanged_and_names_its_parent() {
     assert_ne!(header["id"], source_lines[0]["id"]);
     // The fork is an ordinary session: it reopens and takes new entries.
     drop(fork);
-    let mut reopened = common::open_session_file(&fork_path).await.unwrap();
+    let mut reopened = zx_testing::open_session_file(&fork_path).await.unwrap();
     reopened.append_message(Message::user("more")).await.unwrap();
     assert_eq!(reopened.messages().len(), 4);
     assert_eq!(
@@ -70,25 +68,27 @@ async fn requests_of_the_copied_branch_replay_from_the_fork() {
     let dir = tempfile::tempdir().unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("answer")]));
     let (runner, _) = RunnerSetup {
-        session: common::create_session_file(&dir.path().join("source.jsonl"), header())
+        session: zx_testing::create_session_file(&dir.path().join("source.jsonl"), header())
             .await
-            .unwrap(),
+            .unwrap()
+            .into(),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
-    .build();
+    .build()
+    .await;
     let report = runner.run("go").await;
     assert_eq!(report.outcome, RunOutcome::Completed);
     let source = &runner.session();
     let leaf = source.leaf_id().unwrap().to_string();
     let fork_path = dir.path().join("fork.jsonl");
 
-    let mut fork = common::create_session_file(&fork_path, source.fork_header(dir.path(), "m"))
+    let mut fork = zx_testing::create_session_file(&fork_path, source.fork_header(dir.path(), "m"))
         .await
         .unwrap();
     fork.copy_branch(source, &leaf).await.unwrap();
     drop(fork);
 
-    let fork = common::open_session_file(&fork_path).await.unwrap();
+    let fork = zx_testing::open_session_file(&fork_path).await.unwrap();
     let replayed: Vec<_> = fork
         .entries()
         .iter()

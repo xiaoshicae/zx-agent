@@ -9,9 +9,11 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{ChildStdout, Command};
 
-use common::mock_server::{MockServer, Reply};
-use common::{Home, json_lines, signal, stderr, stdout, tool_call_answer, write_agent, write_config, zx_agent_in};
+use common::zx_agent_in;
 use zx_agent::ai::Message;
+use zx_testing::mock_server::{MockServer, Reply};
+use zx_testing::program::{Home, write_agent, write_config};
+use zx_testing::{json_lines, signal, stderr, stdout, tool_call_answer};
 
 const KEY_VAR: &str = "ZX_CHAT_TEST_KEY";
 const KEY: &str = "sk-chat-test-key";
@@ -58,7 +60,9 @@ fn users(server: &MockServer, index: usize) -> Vec<String> {
 
 async fn seed_context(dir: &Path, bytes: usize) -> String {
     let path = dir.join("chat.jsonl");
-    let mut store = common::create_session_file(&path, common::header()).await.unwrap();
+    let mut store = zx_testing::create_session_file(&path, zx_testing::header())
+        .await
+        .unwrap();
     let id = store.append_message(Message::user("x".repeat(bytes))).await.unwrap();
     store.append_message(Message::user("recent input")).await.unwrap();
     id
@@ -155,7 +159,9 @@ async fn manual_compact_persists_a_summary_and_the_next_prompt_uses_it() {
     );
     assert_eq!(server.requests()[0].body["max_tokens"], 2048);
     assert!(server.requests()[0].body.get("tools").is_none());
-    let store = common::open_session_file(&dir.path().join("chat.jsonl")).await.unwrap();
+    let store = zx_testing::open_session_file(&dir.path().join("chat.jsonl"))
+        .await
+        .unwrap();
     assert!(store.latest_compaction().is_some());
     assert!(store.raw_projection().iter().any(|item| item.entry_id == id));
 }
@@ -196,7 +202,7 @@ async fn agent_settings_disable_automatic_compaction() {
         assert_eq!(server.requests().len(), 1);
         assert!(users(&server, 0)[0].len() > 256 * 1024);
         assert!(
-            common::open_session_file(&dir.path().join("chat.jsonl"))
+            zx_testing::open_session_file(&dir.path().join("chat.jsonl"))
                 .await
                 .unwrap()
                 .latest_compaction()
@@ -274,7 +280,7 @@ async fn sigint_cancels_a_manual_summary_and_keeps_the_conversation_reusable() {
         Some(0)
     );
     assert!(
-        common::open_session_file(&dir.path().join("chat.jsonl"))
+        zx_testing::open_session_file(&dir.path().join("chat.jsonl"))
             .await
             .unwrap()
             .latest_compaction()
@@ -427,7 +433,9 @@ async fn new_command_creates_a_separate_audit_file_and_preserves_the_old_one() {
     )
     .await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    let old = common::open_session_file(&dir.path().join("chat.jsonl")).await.unwrap();
+    let old = zx_testing::open_session_file(&dir.path().join("chat.jsonl"))
+        .await
+        .unwrap();
     let old_users: Vec<_> = old
         .messages()
         .into_iter()
@@ -447,7 +455,7 @@ async fn new_command_creates_a_separate_audit_file_and_preserves_the_old_one() {
         .iter()
         .find(|path| path.file_name().unwrap() != "chat.jsonl")
         .unwrap();
-    let next_users: Vec<_> = common::open_session_file(next)
+    let next_users: Vec<_> = zx_testing::open_session_file(next)
         .await
         .unwrap()
         .messages()
@@ -1503,7 +1511,7 @@ async fn quit_during_a_tty_approval_cancels_the_task_and_exits() {
 #[tokio::test]
 async fn resuming_an_interrupted_session_reports_the_recovered_call_without_running_it() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = common::create_session_file(&dir.path().join("chat.jsonl"), common::header())
+    let mut store = zx_testing::create_session_file(&dir.path().join("chat.jsonl"), zx_testing::header())
         .await
         .unwrap();
     store.append_message(Message::user("fix it")).await.unwrap();
@@ -1603,7 +1611,7 @@ async fn request_headers_and_the_prompt_cache_key_reach_the_server() {
     let request = &server.requests()[0];
     assert!(request.headers.contains("x-route: blue"), "{}", request.headers);
     assert!(request.headers.contains("x-tenant: a"), "{}", request.headers);
-    let session_id = common::open_session_file(&dir.path().join("s.jsonl"))
+    let session_id = zx_testing::open_session_file(&dir.path().join("s.jsonl"))
         .await
         .unwrap()
         .header()

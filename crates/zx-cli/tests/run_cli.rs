@@ -14,12 +14,11 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::process::Command;
 
-use common::http::{Request, read_request, silent_listener};
-use common::mock_server::{MockServer, Reply};
-use common::{
-    AgentHome, Home, agent_text, fake_model_config, json_lines, stderr, stdout, write_agent_file, write_config,
-    zx_agent_in,
-};
+use common::zx_agent_in;
+use zx_testing::http::{Request, read_request, silent_listener};
+use zx_testing::mock_server::{MockServer, Reply};
+use zx_testing::program::{AgentHome, Home, agent_text, fake_model_config, write_agent_file, write_config};
+use zx_testing::{json_lines, stderr, stdout};
 
 /// The variable the program reads the API key from, and the fake key it holds.
 const KEY_VAR: &str = "ZX_RUN_CLI_TEST_KEY";
@@ -109,7 +108,7 @@ async fn repaired_session_tails_are_reported_on_stderr() {
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session.jsonl");
-    let mut session = common::create_session_file(&path, SessionHeader::new(dir.path(), "mock-model"))
+    let mut session = zx_testing::create_session_file(&path, SessionHeader::new(dir.path(), "mock-model"))
         .await
         .unwrap();
     session.append_message(Message::user("earlier")).await.unwrap();
@@ -228,11 +227,11 @@ async fn a_second_signal_ends_the_process_without_waiting_for_its_shutdown() {
         .spawn()
         .unwrap();
     server.wait_for_requests(1).await;
-    common::signal(&child, "-INT").await;
+    zx_testing::signal(&child, "-INT").await;
     // The export has begun: the first signal has ended the run.
     exports.recv().await.unwrap();
 
-    common::signal(&child, "-INT").await;
+    zx_testing::signal(&child, "-INT").await;
 
     let status = tokio::time::timeout(Duration::from_secs(30), child.wait())
         .await
@@ -1086,7 +1085,7 @@ async fn a_run_exports_its_trace_only_when_an_endpoint_is_configured() {
         .output()
         .await
         .unwrap();
-    let stderr = common::stderr(&output);
+    let stderr = zx_testing::stderr(&output);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     assert!(!stderr.contains("[otel]"), "{stderr}");
     assert_eq!(received.lock().unwrap().len(), 1, "nothing more was sent");
@@ -1135,7 +1134,7 @@ async fn a_run_continues_the_trace_that_traceparent_names() {
         .output()
         .await
         .unwrap();
-    let stderr = common::stderr(&output);
+    let stderr = zx_testing::stderr(&output);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     assert!(
         stderr.contains(

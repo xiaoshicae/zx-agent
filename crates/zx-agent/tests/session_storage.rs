@@ -1,7 +1,6 @@
 //! A session storage of the host's own, through the public SDK: what a storage backed by a
 //! database implements, and that an agent creates its sessions in it, lists them from it and
 //! continues them from it.
-mod common;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -9,7 +8,6 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 
-use common::{config, header, summarize};
 use zx_agent::ai::Message;
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::events::RunOutcome;
@@ -18,6 +16,7 @@ use zx_agent::transcript::{
     Transcript, WritesStopped,
 };
 use zx_agent::{Agent, AgentConfig, SessionOptions};
+use zx_testing::{config, header, summarize};
 
 /// Two tables, as a database would hold them: the sessions by ID, and their records under
 /// the unique key of session ID and `seq`.

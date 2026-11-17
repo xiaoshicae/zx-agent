@@ -7,17 +7,23 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# The scripted provider `faux::FauxProvider`, for the tests of the crates built on this one;
+# off in every other build. It streams its answers from Tokio tasks.
+testing = ["dep:tokio"]
+
 [dependencies]
 zx-util.workspace = true
 
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["rt"] }
+tokio = { workspace = true, features = ["rt"], optional = true }
 tokio-util.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros"] }
+# The scripted provider's own tests run on Tokio's test runtime.
+tokio = { workspace = true, features = ["macros", "rt"] }
 
 [lints]
 workspace = true

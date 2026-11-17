@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 提交前自查：列出需要说明理由的写法。每一处命中都要能说出理由；"(无)" 表示没有命中。
-# 在任何目录下运行都可以，脚本会切到项目根目录。生产代码在 crates/*/src/；
+# 在任何目录下运行都可以，脚本会切到项目根目录。生产代码在 crates/*/src/，测试设施 crates/zx-testing 除外；
 # 集成测试在 crates/zx-agent/tests/、crates/zx-app/tests/ 与 crates/zx-cli/tests/。
 
 cd "$(dirname "$0")/../.." || exit 1
@@ -15,9 +15,10 @@ check() {
 # 只看生产代码：从紧跟在 #[cfg(test)] 或 #[cfg(all(test, ...))] 后面的内联 mod（`mod tests {`）开始，到文件结尾都跳过；
 # 整个 `tests.rs` 与 `test_support.rs` 也跳过，它们只以 `#[cfg(test)] mod tests;` 或 `mod test_support;` 引入（规则 09）。
 # 这样的声明本身不跳过任何内容：它可以写在文件开头，后面还是生产代码（如 crates/zx-core/src/transcript.rs）。
-# 单独带 #[cfg(test)] 的函数（如 crates/zx-core/src/transcript.rs 的 with_writer）不跳过。
+# 单独带 #[cfg(test)] 的函数（如 crates/zx-core/src/transcript.rs 的 with_writer）不跳过。测试设施 crates/zx-testing
+# 是测试代码（红线 2 允许 unwrap），整个跳过。
 production_unwraps() {
-    find crates/*/src -name '*.rs' -print0 | xargs -0 awk '
+    find crates/*/src -name '*.rs' -not -path 'crates/zx-testing/*' -print0 | xargs -0 awk '
         FNR == 1 { in_tests = (FILENAME ~ /(^|\/)(tests|test_support)\.rs$/); after_cfg_test = 0 }
         /^[[:space:]]*#\[cfg\((all\()?test/ { after_cfg_test = 1; next }
         after_cfg_test && /^[[:space:]]*(pub(\([a-z]+\))? )?mod [A-Za-z0-9_]+[[:space:]]*\{/ { in_tests = 1 }

@@ -1,7 +1,5 @@
 //! Session-host summaries, task request accounting and cancellation.
 
-mod common;
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,11 +14,11 @@ use zx_agent::compaction::{Config, Outcome, Report};
 use zx_agent::events::{Budget, Event, EventKind, RunOutcome};
 use zx_agent::hooks::{ContextEdit, Hook, HookContext};
 use zx_agent::session::SessionError;
-use zx_agent::transcript::{Entry, Transcript};
+use zx_agent::transcript::Entry;
 
-use common::summary_eval::{PLANTED, Planted, ROUNDS, evaluate, round, text_of};
-use common::{
-    EchoTool, RunnerSetup, config, fast_retry, header, replayed_requests, seeded_session, summarize, summary_json,
+use zx_testing::summary_eval::{PLANTED, Planted, ROUNDS, evaluate, round, text_of};
+use zx_testing::{
+    EchoTool, RunnerSetup, Seed, config, fast_retry, header, replayed_requests, seeded_session, summarize, summary_json,
 };
 
 fn budget() -> Config {
@@ -39,11 +37,12 @@ async fn manual_compaction_is_a_bounded_tool_free_request_and_survives_reuse() {
         FauxStep::text("finished"),
     ]));
     let (session, events) = RunnerSetup {
-        session: store,
+        session: store.into(),
         compaction: budget(),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
-    .build();
+    .build()
+    .await;
     let compact = session.compact().await.unwrap();
     assert_eq!(compact.outcome, Outcome::Completed, "{compact:?}");
     assert_eq!(compact.requests, 1);
@@ -85,7 +84,7 @@ async fn automatic_summary_counts_against_task_request_budget_and_usage() {
         FauxStep::text("answer"),
     ]));
     let (runner, events) = RunnerSetup {
-        session: store,
+        session: store.into(),
         limits: RunLimits {
             max_model_requests: Some(2),
             ..RunLimits::default()
@@ -96,7 +95,8 @@ async fn automatic_summary_counts_against_task_request_budget_and_usage() {
         },
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
-    .build();
+    .build()
+    .await;
     let report = runner.run("continue").await;
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
     assert_eq!(report.model_requests, 2);
@@ -142,14 +142,15 @@ async fn steering_received_during_a_summary_is_persisted_before_the_next_task_re
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push("steer_after_summary", Arc::new(SteerAfterSummary));
     let (runner, _) = RunnerSetup {
-        session: store,
+        session: store.into(),
         compaction: Config {
             trigger_bytes: Some(1024),
             ..budget()
         },
         ..RunnerSetup::new(config)
     }
-    .build();
+    .build()
+    .await;
     let report = runner.run("continue").await;
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
     assert!(
@@ -166,7 +167,7 @@ async fn summary_cannot_spend_an_extra_task_request_after_request_limit() {
         FauxStep::text("must not be sent"),
     ]));
     let (runner, _) = RunnerSetup {
-        session: store,
+        session: store.into(),
         limits: RunLimits {
             max_model_requests: Some(1),
             ..RunLimits::default()
@@ -177,7 +178,8 @@ async fn summary_cannot_spend_an_extra_task_request_after_request_limit() {
         },
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
-    .build();
+    .build()
+    .await;
     let report = runner.run("continue").await;
     assert_eq!(
         report.outcome,
@@ -201,7 +203,7 @@ async fn a_summary_request_counts_against_the_token_budget() {
         FauxStep::text("must not be sent"),
     ]));
     let (runner, _) = RunnerSetup {
-        session: store,
+        session: store.into(),
         limits: RunLimits {
             token_budget: Some(15),
             ..RunLimits::default()
@@ -212,7 +214,8 @@ async fn a_summary_request_counts_against_the_token_budget() {
         },
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
-    .build();
+    .build()
+    .await;
     let report = runner.run("continue").await;
     assert_eq!(
         report.outcome,
@@ -232,10 +235,11 @@ async fn sdk_defaults_do_not_make_summary_requests() {
     let (store, _) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([FauxStep::text("normal task answer")]));
     let (runner, _) = RunnerSetup {
-        session: store,
+        session: store.into(),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
-    .build();
+    .build()
+    .await;
     assert_eq!(runner.run("go").await.outcome, RunOutcome::Completed);
     assert_eq!(provider.requests().len(), 1);
     // Request checkpoints are always written; no compaction record may appear.
@@ -247,7 +251,7 @@ async fn sdk_defaults_do_not_make_summary_requests() {
 
 #[tokio::test]
 async fn summary_requests_and_context_sizes_leave_tool_result_details_out() {
-    let mut store = Transcript::in_memory(header());
+    let mut store = Seed::in_memory(header()).await;
     let old = store
         .append_message(Message::user("observed ".repeat(600)))
         .await
@@ -281,11 +285,12 @@ async fn summary_requests_and_context_sizes_leave_tool_result_details_out() {
     store.append_message(Message::user("most recent input")).await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text(summary_json(&old))]));
     let (runner, _) = RunnerSetup {
-        session: store,
+        session: store.into(),
         compaction: budget(),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.compact().await.unwrap();
 
@@ -305,11 +310,12 @@ async fn repeated_compaction_uses_originals_instead_of_a_previous_summary() {
         FauxStep::text(summary_json(&old)),
     ]));
     let (runner, _) = RunnerSetup {
-        session: store,
+        session: store.into(),
         compaction: budget(),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
-    .build();
+    .build()
+    .await;
     assert_eq!(runner.compact().await.unwrap().outcome, Outcome::Completed);
     assert_eq!(runner.compact().await.unwrap().outcome, Outcome::Noop);
     runner.run("new task").await;
@@ -334,7 +340,7 @@ async fn invalid_or_truncated_summaries_never_replace_context_or_retry_as_tasks(
         let before = store.raw_projection();
         let provider = Arc::new(FauxProvider::new([step, FauxStep::text("should not execute")]));
         let (runner, _) = RunnerSetup {
-            session: store,
+            session: store.into(),
             retry: fast_retry(3),
             compaction: Config {
                 trigger_bytes: Some(1024),
@@ -342,7 +348,8 @@ async fn invalid_or_truncated_summaries_never_replace_context_or_retry_as_tasks(
             },
             ..RunnerSetup::new(config(provider.clone(), vec![]))
         }
-        .build();
+        .build()
+        .await;
         let report = runner.run("continue").await;
         assert_eq!(report.outcome, RunOutcome::Failed, "{report:?}");
         assert_eq!(report.model_requests, 1);
@@ -363,11 +370,12 @@ async fn a_summary_citing_a_record_it_did_not_read_fails_as_an_invalid_answer() 
     let (store, _) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([FauxStep::text(summary_json("unknown"))]));
     let (runner, _) = RunnerSetup {
-        session: store,
+        session: store.into(),
         compaction: budget(),
         ..RunnerSetup::new(config(provider, vec![]))
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.compact().await.unwrap();
 
@@ -388,14 +396,15 @@ async fn an_automatic_summary_that_got_no_answer_is_tried_again_on_the_next_prom
         FauxStep::text("answered"),
     ]));
     let (runner, _) = RunnerSetup {
-        session: store,
+        session: store.into(),
         compaction: Config {
             trigger_bytes: Some(1024),
             ..budget()
         },
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
-    .build();
+    .build()
+    .await;
     let first = runner.run("continue").await;
     assert_eq!(first.outcome, RunOutcome::Failed, "{first:?}");
 
@@ -413,14 +422,15 @@ async fn a_failed_automatic_summary_is_not_paid_for_again_on_the_next_prompt() {
         FauxStep::text("must not be requested"),
     ]));
     let (runner, _) = RunnerSetup {
-        session: store,
+        session: store.into(),
         compaction: Config {
             trigger_bytes: Some(1024),
             ..budget()
         },
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
-    .build();
+    .build()
+    .await;
     let first = runner.run("continue").await;
     assert_eq!(first.outcome, RunOutcome::Failed, "{first:?}");
     let second = runner.run("try again").await;
@@ -458,14 +468,15 @@ async fn the_pause_survives_a_run_whose_future_is_dropped() {
         .hooks
         .push_with_timeout("hold", Arc::new(Hold(waiting.clone())), Duration::from_secs(3600));
     let (runner, _) = RunnerSetup {
-        session: store,
+        session: store.into(),
         compaction: Config {
             trigger_bytes: Some(1024),
             ..budget()
         },
         ..RunnerSetup::new(config)
     }
-    .build();
+    .build()
+    .await;
     let first = runner.run("continue").await;
     assert_eq!(first.outcome, RunOutcome::Failed, "{first:?}");
     {
@@ -500,14 +511,15 @@ async fn a_successful_manual_summary_resumes_automatic_summaries() {
         FauxStep::text("not JSON"),
     ]));
     let (runner, _) = RunnerSetup {
-        session: store,
+        session: store.into(),
         compaction: Config {
             trigger_bytes: Some(1024),
             ..budget()
         },
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
-    .build();
+    .build()
+    .await;
     assert_eq!(runner.run("continue").await.outcome, RunOutcome::Failed);
     let compact = runner.compact().await.unwrap();
     assert_eq!(compact.outcome, Outcome::Completed, "{compact:?}");
@@ -528,7 +540,8 @@ async fn an_input_that_cannot_fit_is_not_silently_truncated_or_sent_to_the_task_
         },
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
-    .build();
+    .build()
+    .await;
     let input = "界".repeat(1000);
     let report = runner.run(input.as_str()).await;
     assert_eq!(report.outcome, RunOutcome::Failed);
@@ -567,14 +580,15 @@ async fn context_hooks_are_persisted_before_a_summary_sees_the_source() {
     let mut config = config(provider.clone(), vec![]);
     config.hooks.push("correct", Arc::new(Correct));
     let (runner, _) = RunnerSetup {
-        session: store,
+        session: store.into(),
         compaction: Config {
             trigger_bytes: Some(1024),
             ..budget()
         },
         ..RunnerSetup::new(config)
     }
-    .build();
+    .build()
+    .await;
     assert_eq!(runner.run("go").await.outcome, RunOutcome::Completed);
     let source = serde_json::to_string(&provider.requests()[0].messages).unwrap();
     assert!(source.contains("corrected corrected"));
@@ -625,14 +639,15 @@ async fn a_context_plan_that_edits_a_summary_is_rejected_before_any_edit_is_writ
         .hooks
         .push("edit_input_then_summary", Arc::new(EditInputThenSummary));
     let (runner, _) = RunnerSetup {
-        session: store,
+        session: store.into(),
         compaction: Config {
             trigger_bytes: Some(1024),
             ..budget()
         },
         ..RunnerSetup::new(config)
     }
-    .build();
+    .build()
+    .await;
     let report = runner.run("go").await;
     assert_eq!(report.outcome, RunOutcome::Failed);
     // A hook rejection, decided while validating the plan, not a failed session write.
@@ -652,11 +667,12 @@ async fn pending_summary_shares_busy_cancel_and_drop_reuse_with_prompt() {
     let (store, _) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([FauxStep::Hang, FauxStep::text("reused")]));
     let (session, events) = RunnerSetup {
-        session: store,
+        session: store.into(),
         compaction: budget(),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
-    .build();
+    .build()
+    .await;
     let mut compact = Box::pin(session.compact());
     tokio::select! { biased; result = &mut compact => panic!("unexpected completion: {result:?}"), () = tokio::task::yield_now() => {} }
     assert!(events.kinds().contains(&"compaction_start"));
@@ -672,11 +688,12 @@ async fn aborting_summary_records_failure_and_the_session_is_immediately_reusabl
     let (store, _) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([FauxStep::Hang, FauxStep::text("reused")]));
     let (session, _) = RunnerSetup {
-        session: store,
+        session: store.into(),
         compaction: budget(),
         ..RunnerSetup::new(config(provider, vec![]))
     }
-    .build();
+    .build()
+    .await;
     let compact = session.compact();
     tokio::pin!(compact);
     tokio::select! { biased; result = &mut compact => panic!("unexpected completion: {result:?}"), () = tokio::task::yield_now() => {} }
@@ -691,14 +708,15 @@ async fn summary_timeout_is_bounded_and_keeps_original_context() {
     let before = store.messages();
     let provider = Arc::new(FauxProvider::new([FauxStep::Hang]));
     let (runner, _) = RunnerSetup {
-        session: store,
+        session: store.into(),
         compaction: Config {
             timeout: Duration::from_millis(10),
             ..budget()
         },
         ..RunnerSetup::new(config(provider, vec![]))
     }
-    .build();
+    .build()
+    .await;
     let report = runner.compact().await.unwrap();
     assert_eq!(report.outcome, Outcome::Failed);
     assert!(report.error.unwrap().contains("timed out"));
@@ -719,11 +737,12 @@ async fn source_and_summary_byte_limits_stop_unbounded_requests_and_responses() 
     store.append_message(Message::user("latest")).await.unwrap();
     let provider = Arc::new(FauxProvider::new([FauxStep::text("should not be sent")]));
     let (runner, _) = RunnerSetup {
-        session: store,
+        session: store.into(),
         compaction: budget(),
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
-    .build();
+    .build()
+    .await;
     let report = runner.compact().await.unwrap();
     assert_eq!(report.outcome, Outcome::Failed);
     assert!(report.error.unwrap().contains("source exceeds"));
@@ -732,11 +751,12 @@ async fn source_and_summary_byte_limits_stop_unbounded_requests_and_responses() 
     let (store, _) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([FauxStep::text("x".repeat(65 * 1024))]));
     let (runner, _) = RunnerSetup {
-        session: store,
+        session: store.into(),
         compaction: budget(),
         ..RunnerSetup::new(config(provider, vec![]))
     }
-    .build();
+    .build()
+    .await;
     let report = runner.compact().await.unwrap();
     assert_eq!(report.outcome, Outcome::Failed);
     assert!(report.error.unwrap().contains("exceeds 65536"));
@@ -752,11 +772,12 @@ async fn compact_answering(answer: impl FnOnce(&str) -> Vec<ContentBlock>) -> (R
         stop: StopReason::Stop,
     }]));
     let (runner, _) = RunnerSetup {
-        session: store,
+        session: store.into(),
         compaction: budget(),
         ..RunnerSetup::new(config(provider, vec![]))
     }
-    .build();
+    .build()
+    .await;
     let report = runner.compact().await.unwrap();
     let summarized = runner.session().latest_compaction().is_some();
     (report, summarized)
@@ -878,7 +899,7 @@ async fn the_run_timeout_also_bounds_automatic_compaction() {
     let (store, _) = seeded_session().await;
     let provider = Arc::new(FauxProvider::new([FauxStep::Hang]));
     let (runner, _) = RunnerSetup {
-        session: store,
+        session: store.into(),
         limits: RunLimits {
             timeout: Some(Duration::from_millis(10)),
             ..RunLimits::default()
@@ -889,7 +910,8 @@ async fn the_run_timeout_also_bounds_automatic_compaction() {
         },
         ..RunnerSetup::new(config(provider.clone(), vec![]))
     }
-    .build();
+    .build()
+    .await;
     let report = runner.run("continue").await;
     assert_eq!(report.outcome, RunOutcome::TimedOut);
     assert_eq!(report.model_requests, 1);
@@ -926,7 +948,8 @@ async fn one_prompt_whose_tool_calls_pass_the_trigger_is_compacted_within_its_tu
         },
         ..RunnerSetup::new(config(provider.clone(), vec![Arc::new(EchoTool::new("echo"))]))
     }
-    .build();
+    .build()
+    .await;
 
     let report = runner.run("go").await;
 
@@ -949,7 +972,7 @@ async fn one_prompt_whose_tool_calls_pass_the_trigger_is_compacted_within_its_tu
 
 #[tokio::test]
 async fn a_single_large_old_message_does_not_force_the_entire_history_to_be_retained() {
-    let mut store = Transcript::in_memory(header());
+    let mut store = Seed::in_memory(header()).await;
     let old = store
         .append_message(Message::user("x".repeat(300 * 1024)))
         .await
@@ -960,14 +983,15 @@ async fn a_single_large_old_message_does_not_force_the_entire_history_to_be_reta
         FauxStep::text("answer"),
     ]));
     let (runner, _) = RunnerSetup {
-        session: store,
+        session: store.into(),
         compaction: Config {
             trigger_bytes: Some(256 * 1024),
             ..Config::default()
         },
         ..RunnerSetup::new(config(provider, vec![]))
     }
-    .build();
+    .build()
+    .await;
     let report = runner.run("continue").await;
     assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
     assert_eq!(report.model_requests, 2);
