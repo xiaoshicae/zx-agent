@@ -21,17 +21,17 @@
 | `crates/zx-agent/tests/prepare_request.rs` | `Hook::prepare_request` 对单次请求的替换 |
 | `crates/zx-agent/tests/continue_run.rs` | 不加新输入的续跑 |
 | `crates/zx-agent/tests/overflow_recovery.rs` | 上下文过长后摘要并开始新的尝试 |
-| `crates/zx-agent/tests/model_meta.rs` | 模型单价、成本与 token 阈值；模型切换、请求钩子、摘要与溢出恢复的费用预算校验 |
+| `crates/zx-agent/tests/model_meta.rs` | 模型单价、成本与 token 阈值（随窗口的阈值跟着切换后的模型）；模型切换、请求钩子、摘要与溢出恢复的费用预算校验 |
 | `crates/zx-agent/tests/extension_capabilities.rs` | 扩展在运行中发消息、记状态、改工具集与命令 |
 | `crates/zx-agent/tests/custom_records.rs` | 扩展的 `custom` 与 `custom_message` 记录 |
 | `crates/zx-agent/tests/session_branch.rs` | `Session::branch` 切换分支 |
 | `crates/zx-agent/tests/session_fork.rs` | 复制分支成新会话 |
 | `crates/zx-agent/tests/session_storage.rs` | 宿主自己实现的 `SessionStorage`：`Agent` 在其中创建会话、按标签列出、由另一个 `Agent` 续接，以及唯一键拦住第二个写入者 |
-| `crates/zx-agent/tests/session_compaction.rs` | 会话层的摘要记录、引用与校验；回答上报的用量在摘要或修改之后是否还度量上下文 |
+| `crates/zx-agent/tests/session_compaction.rs` | 存储中的摘要记录：会话文件拒绝读不了的记录且不改动文件；从摘要留下的会话续跑，上下文计划结束了摘要仍修改它点名的消息。摘要记录本身与投影在 `zx-core` 的单元测试 |
 | `crates/zx-agent/tests/compaction.rs` | 宿主的手动与自动摘要、计费、失败与上限 |
 | `crates/zx-agent/tests/summarizer.rs` | 宿主自己的 `Summarizer`：产出摘要而不请求模型、开始记录写它的名字、失败、引用校验、超时、取消与 panic |
 | `crates/zx-agent/tests/actors.rs` | 会话标签与输入的 actor：策略与钩子看到什么、换人说话、不带输入的续跑、记入会话 |
-| `crates/zx-agent/tests/request_audit.rs` | 从会话文件还原请求（G3），含固定会话的逐字节比对与分支配置索引校验 |
+| `crates/zx-agent/tests/request_audit.rs` | 从会话文件还原请求（G3），含固定会话的逐字节比对；分支配置索引的校验在 `zx-core` 的单元测试 |
 | `crates/zx-agent/tests/executor.rs` | 工具只经执行器运行命令与读写文件 |
 | `crates/zx-agent/tests/search_tools.rs` | grep、find、ls |
 | `crates/zx-agent/tests/file_mutations.rs` | 文件锁跨会话共享；取消调用后仍保护后台写入，防止覆盖后续修改 |
@@ -75,4 +75,4 @@
 
 ---
 
-TESTS.md · v0.9 · 2026年11月
+TESTS.md · v0.10 · 2026年11月

@@ -221,7 +221,7 @@ skills 只来自 agent 的 `[[skills]]`，不扫描全局目录，不解析 SKIL
 |---|---|
 | `compaction.triggerBytes` | 自动摘要的字节阈值，0 关闭；非零须大于 `keepRecentBytes`，且超出部分不多于 2 MiB |
 | `compaction.keepRecentBytes` | 保留的近期消息字节数，大于零；最新输入与全部 system 总是完整保留 |
-| `compaction.triggerTokens` | 按 token 估算的阈值，0 关闭，任一阈值超过即摘要；须高于 `keepRecentBytes / 4`。省略时，开启了自动摘要且已知上下文窗口的话取“窗口减 `reserveTokens`” |
+| `compaction.triggerTokens` | 按 token 估算的阈值，0 关闭，任一阈值超过即摘要；须高于 `keepRecentBytes / 4`。省略时，开启了自动摘要且已知上下文窗口的话取“窗口减 `reserveTokens`”：窗口是会话当时所用模型的，每次请求前重新取，`/model` 换了模型就随之改变；差值不高于 `keepRecentBytes / 4` 的模型没有这个阈值 |
 | `compaction.reserveTokens` | 推导 `triggerTokens` 时留出的 token 数，默认 16384 |
 | `compaction.maxSummaryTokens` | 摘要输出 token 上限，1–16384，默认 2048；把推理计入输出的模型需要调高 |
 | `compaction.timeoutSecs` | 摘要的总超时，秒，默认 120 |
@@ -279,4 +279,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.17 · 2026年11月
+CONFIGURATION.md · v0.18 · 2026年11月
