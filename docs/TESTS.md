@@ -4,7 +4,7 @@
 
 单元测试写在被测模块里或其 `tests.rs` 中，覆盖各模块的逻辑与边界，包括会话文件与事件的 JSON 格式；`config.toml` 与 agent 文件（含 `deploy/kubernetes/agents/*.md`）的配置规则也在这一层测。
 
-集成测试分两处，按是否需要编译出的程序划分。两处的测试都可以在仓库根目录按文件名运行，如 `cargo test --test step_loop`、`cargo test --test run_cli`。
+集成测试分三处，按用到的 crate 与是否需要编译出的程序划分。各处的测试都可以在仓库根目录按文件名运行，如 `cargo test --test step_loop`、`cargo test --test run_cli`。
 
 ## 只用库：`tests/`
 
@@ -44,9 +44,17 @@
 | `tests/im_server.rs` | IM 服务的会话划分、接话、`/new`、审批与停止；启动时的会话索引、先读线程再建会话、慢的会话准备不挡其他对话、运行名额（残留插话重新排队、闲聊等名额再打开会话）、`/cancel` 丢弃未读插话与待处理消息容量（因容量被拒的闲聊不回复） |
 | `tests/real_api.rs` | 付费的真实模型 API，默认跳过（红线 9） |
 
+## 应用层：`crates/zx-app/tests/`
+
+属于应用层 `zx-app`，只经它的公开接口测，不用测试设施。
+
+| 文件 | 内容 |
+|---|---|
+| `crates/zx-app/tests/application.rs` | 非 CLI 宿主的显式配置装配、会话创建与续接、模型/预算校验、密钥文件与启动提示 |
+
 ## 驱动程序：`crates/zx-cli/tests/`
 
-属于命令行 `zx-cli`：运行编译出的 `zx-agent`，或用到命令行自己的库（`zx_cli::config`、`zx_cli::otel`）。
+属于命令行 `zx-cli`：运行编译出的 `zx-agent`，或既用 `zx-app` 又用测试设施（`tests/common` 依赖 IM 的 crate，`zx-app` 不依赖它们）。
 
 | 文件 | 内容 |
 |---|---|
@@ -55,7 +63,6 @@
 | `crates/zx-cli/tests/sessions_cli.rs` | chat 的会话目录、`--resume` 与 `zx-agent sessions` |
 | `crates/zx-cli/tests/acp_cli.rs` | `acp` 经 stdio 的协议、权限请求、取消、会话加载与关闭、`/name`、终止信号 |
 | `crates/zx-cli/tests/agents_cli.rs` | agent 文件、权限、上下文与 skill；配置错误以退出码 2 结束 |
-| `crates/zx-cli/tests/application.rs` | 非 CLI 宿主的显式配置装配、会话创建与续接、模型/预算校验、密钥文件与启动提示 |
 | `crates/zx-cli/tests/config_cli.rs` | `config.toml` 的位置与优先级 |
 | `crates/zx-cli/tests/hooks_cli.rs` | 程序中的密钥脱敏与钩子失败输出 |
 | `crates/zx-cli/tests/mcp_cli.rs` | `[[mcp]]` 接入 run、chat 与 im |
@@ -66,4 +73,4 @@
 
 ---
 
-TESTS.md · v0.5 · 2026年11月
+TESTS.md · v0.6 · 2026年11月

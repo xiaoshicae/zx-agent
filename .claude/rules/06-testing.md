@@ -14,7 +14,7 @@ paths:
 - **修 bug 先写回归测试**，并确认它在修复前失败。
 - **新功能至少覆盖**：成功路径、每一类失败、取消与超时、边界（空输入、刚好截断、多字节字符被切开）。
 - **确定、隔离、快速。** 不访问网络（付费 e2e 除外）；不依赖执行顺序和全局状态；不用 `std::env::set_var`；文件只写到 `tempfile::tempdir()`；不用 `sleep` 等结果，而是等待对应的事件或请求。
-- **复用测试设施，不复制粘贴。** 测试分三层：模块里的单元测试；集成测试，只用库的放根目录 `tests/`，要编译出的程序或用到 `zx_cli::config`、`zx_cli::otel` 的放 `crates/zx-cli/tests/`，新文件在 `docs/TESTS.md` 登记一行；付费的 `tests/real_api.rs`（红线 9）。
+- **复用测试设施，不复制粘贴。** 测试分三层：模块里的单元测试；集成测试，只用库的放根目录 `tests/`，只用 `zx-app` 的放 `crates/zx-app/tests/`，要编译出的程序或既用 `zx-app` 又用测试设施的放 `crates/zx-cli/tests/`，新文件在 `docs/TESTS.md` 登记一行；付费的 `tests/real_api.rs`（红线 9）。
 
 ## 约定
 

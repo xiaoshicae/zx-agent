@@ -38,12 +38,12 @@
 | D21 | 唯一入口是 `Agent`、`Session` 与由调用方读取的 `Run`；`Runner`、`StepLoop`、`LoopConfig` 与 `Toolbox` 为内核内部类型。预算与计数由一次运行持有，重试与溢出恢复共用；attempt 从 1 开始，首次、重试和溢出恢复都计入，retry 从 1 开始只计重试 |
 | D22 | 摘要功能统一叫 compaction：操作本身及其记录、模块、类型与 ID 都叫 compaction（记录中指向 `compaction_started` 的字段叫 `compactionId`）；summary 只指 compaction 产出的文本、文本的限额，以及向模型要这段文本的请求（`kind: summary`、`RequestSource::Summary`） |
 | D23 | 领域词只有 Session、Run、Step、ToolCall 四层：一次任务请求及其工具调用叫 step，不叫 turn；ACP 协议与 chat 界面里的 turn 指一次提问到回答。运行结果用过去分词：`completed`、`truncated`、`failed`、`cancelled`、`timed_out`；预算用完是 `budget_exhausted`，另带 `budget`（`model_request_limit`、`token_budget` 或 `cost_budget`）与 `truncated`，因为退出码、IM 回复与 ACP 的停止原因都要逐个区分预算。会话的记录树叫 transcript。事件格式版本为 5 |
-| D24 | 库与接入方式分开：根包 `zx-agent` 是 SDK，只把 `zx-core`、`zx-ai`、`zx-ai-openai` 与 `zx-tools` 再导出成一个库，不含命令行解析、ACP、追踪导出与 IM；命令行是 `zx-cli`（可执行文件仍叫 `zx-agent`），IM 服务是 `zx-im`，新的接入方式（如 Web 服务）是建在库上的独立 crate。集成测试按是否需要编译出的程序分两处：根目录 `tests/` 与 `crates/zx-cli/tests/` |
-| D25 | 会话写入失败、超时或写入中被丢弃后自行关闭，由 `Agent` 从存储重开。文件工具的按路径锁由宿主传入（`builtin_tools` 的 `files`），`zx-cli` 让一个进程的所有会话共用一个；读改写与后台写入都在锁内完成，取消调用不提前释放 |
+| D24 | 库与接入方式分开：根包 `zx-agent` 是 SDK，只把 `zx-core`、`zx-ai`、`zx-ai-openai` 与 `zx-tools` 再导出成一个库，不含命令行解析、ACP、追踪导出与 IM；命令行是 `zx-cli`（可执行文件仍叫 `zx-agent`），IM 服务是 `zx-im`，新的接入方式（如 Web 服务）是建在库上的独立 crate。`config.toml`、agent 文件、装配与追踪导出在应用层 `zx-app`，命令行和要共用配置的接入方式都依赖它，它不依赖命令行解析、ACP 与 IM。集成测试分三处：根目录 `tests/`、`crates/zx-app/tests/` 与 `crates/zx-cli/tests/` |
+| D25 | 会话写入失败、超时或写入中被丢弃后自行关闭，由 `Agent` 从存储重开。文件工具的按路径锁由宿主传入（`builtin_tools` 的 `files`），`zx-app` 的装配让一个进程的所有会话共用一个；读改写与后台写入都在锁内完成，取消调用不提前释放 |
 | D26 | 预算按整次运行累计，用完报告 `BudgetExhausted { budget, truncated }`，续写是否还有预算由内核判断。配置费用预算后，任务请求在钩子选定最终模型后校验单价，自动、手动摘要与溢出恢复也校验；无法计价时在发送前失败 |
 | D27 | IM 路由器只分派消息，运行、排队与空闲的会话数以及每个会话待处理消息的数量与文本字节都有上限。打开会话都要先取得运行名额；运行结束时没读到的插话作为下一次运行的提问重新排队，`/cancel` 丢弃它们；第一次为线程建会话前先读线程历史 |
 | D28 | 宿主建自己的会话索引用 `SessionStorage::headers`，只读头部，打开时仍完整校验；JSONL 存储不缓存。IM 服务启动时从会话头部建立对话到会话的索引（每个对话取最近创建的会话），此后只由本进程维护。IM 的配额作为输入的凭证（`PendingInput::held`）随消息转移，内核只携带、不计量 |
-| D29 | 内核只留机制：会话文件存储（JSONL）在 zx-tools，内核定义记录格式与存储接口，自带的存储只有 `MemoryStorage`，不依赖 libc。`zx_cli::application::Application` 让其他宿主复用配置装配，显式配置经 `Config::validate` 检查，装配不打印、措辞不提命令行参数；有第二个独立宿主后再抽成独立 crate |
+| D29 | 内核只留机制：会话文件存储（JSONL）在 zx-tools，内核定义记录格式与存储接口，自带的存储只有 `MemoryStorage`，不依赖 libc。`zx_app::Application` 让命令行与其他宿主共用配置装配，显式配置经 `Config::validate` 检查，装配不打印、措辞不提命令行参数 |
 | D30 | 宿主经 `SessionSetup::section_names` 声明它给出的提示词段名，内核不知道命令行的段名。自动摘要只在请求得到回答、摘要却不可用时暂停，出错、断流或超时不暂停。两个 IM 平台 crate 都只依赖 `zx-im` |
 
 ## 4. 当前阶段
@@ -72,7 +72,7 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 - 待用户决定：`run` 的内置 agent（及部署的 `unattended.md`）是否默认开启自动摘要；现在关闭，撞到上下文上限时以退出码 1 结束，开启的代价是摘要丢失信息。
 - 定时巡检的会话文件不自动清理，需要部署方定期删除。
 - 对照 pi durable 的较大项（待评审）：排队消息落盘（同时解决 IM 丢消息）、部分结果落盘、后台摘要（宿主已可用 `Summarizer` 自己产出摘要，钩子仍不提供摘要）、按会话的扩展（按会话的工具、钩子、提示词段落与工作目录已由 `SessionSetup` 给出）、扩展的可读状态、延迟加载的工具与 `tool_search`、持久化的睡眠与定时、宿主侧的环境接口、附带的数据库存储（接口 `SessionStorage` 已有，实现由宿主给出）。
-- 应用装配经 `zx_cli::application` 公开，仍要依赖整个 `zx-cli`；有第二个独立宿主后，才把 application、config 与 otel 一起提到独立 crate，CLI 保留参数、渲染、退出码与协议适配。尚无真实 Web 宿主验收。
+- 应用层 `zx-app` 尚无真实 Web 宿主验收。
 - 执行环境扩展前，需让执行器提供文件资源身份：共享宿主挂载的同一文件共用键，容器/远程私有文件带环境域，并在目标文件系统解析别名；当前锁按宿主路径协调。多副本之前还需定义持久化收件、会话所有权与接管，当前以单进程为部署边界。
 - 测试适配层经隐藏的 `Agent::adopt_session` 把测试给的 `Transcript` 变成会话。要删掉它，得让测试经存储建会话：约 80 处建会话的写法与 160 处 `build()` 要改成异步，收益只是少一个隐藏的方法，未做。
 - 容器里的文件写入在调用被丢弃后仍写完，只用假 docker 验证过。
@@ -106,4 +106,4 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，
 
 ---
 
-ROADMAP.md · v0.26 · 2026年11月
+ROADMAP.md · v0.27 · 2026年11月
