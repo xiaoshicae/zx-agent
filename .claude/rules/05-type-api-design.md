@@ -10,5 +10,5 @@ paths:
 - **构造**：字段多时用结构体加 `Default` 和结构体更新语法（参照 `OpenAiConfig`、`RetryPolicy`、`RunLimits`）。只有需要校验或分步构造时才用 builder。
 - **数值与切片**：不用 `as` 截断或换号（`cast_*` lint 会报），用 `try_from` 并处理失败；可以证明不会溢出时用 `expect("原因")`。切片可能切在 UTF-8 字符中间或越界，用 `get`、`is_char_boundary`。
 - **derive**：`Clone`、`PartialEq`、`Default` 只在语义成立时 derive，不为了让某处能编译而加。持有资源（文件、连接、子进程）的类型通常不应该是 `Clone`。
-- **持久化和对外的格式**：字段名用 camelCase。带标签的枚举照同类的已有类型写：消息和内容块沿用 pi 的 camelCase（`toolResult`、`toolCall`），会话条目、事件、流式增量用 snake_case（`context_edit`）。改变已持久化的格式时提高版本号（不变量 5）。新会话的字节由 `crates/zx-ai/src/types/tests.rs` 的 `messages_keep_the_session_file_format`、`tests/hook_contract.rs` 与固定会话的还原测试保护，这些测试失败就是格式变了。
+- **持久化和对外的格式**：字段名用 camelCase。带标签的枚举照同类的已有类型写：消息和内容块沿用 pi 的 camelCase（`toolResult`、`toolCall`），会话条目、事件、流式增量用 snake_case（`context_edit`）。改变已持久化的格式时提高版本号（不变量 5）。新会话的字节由 `crates/zx-ai/src/types/tests.rs` 的 `messages_keep_the_session_file_format`、`crates/zx-agent/tests/hook_contract.rs` 与固定会话的还原测试保护，这些测试失败就是格式变了。
 - **公开 API**：只公开使用者需要的；现在没有使用者，改公开 API 不算成本。给公开 trait 新增方法时提供默认实现（参照 `Tool::execution_mode`）。

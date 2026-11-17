@@ -121,7 +121,7 @@ zx-cli      crates/zx-cli    命令行程序 zx-agent（run、chat、acp、im、
   ├─ zx-im-slack   crates/zx-im-slack   Slack 平台
   ├─ zx-im-feishu  crates/zx-im-feishu  ⚑ D:5/CHINA FLAG: 飞书平台
   │    └─ zx-im    crates/zx-im         IM 平台接口与按会话分派的服务（依赖 zx-core）
-  └─ zx-agent  src/lib.rs    SDK：把下面四个 crate 再导出成一个库，没有自己的代码
+  └─ zx-agent  crates/zx-agent  SDK：把下面四个 crate 再导出成一个库，没有自己的代码
        ├─ zx-tools  crates/zx-tools  内置工具、执行环境、长结果落盘、命令与规则策略、续写与脱敏、会话文件存储、MCP 客户端
        ├─ zx-core   crates/zx-core   循环、会话、运行层、共享会话、摘要、提示词、扩展接口
        │    └─ zx-ai  crates/zx-ai   消息类型、流式事件协议、provider 契约
@@ -138,7 +138,7 @@ zx-util     crates/zx-util   各 crate 共用的小工具（加锁、文本截�
 
 ## 作为库使用
 
-`zx-agent` 库再导出内核、模型层与附带的工具实现，不含命令行、配置文件、追踪导出与 IM。库默认不限上限、没有钩子、会话只存在内存里，安全相关的设置也要嵌入方给出。用法见 [docs/LIBRARY.md](docs/LIBRARY.md) 与 `examples/library.rs`，接口与契约见 rustdoc（`cargo doc --open`）。
+`zx-agent` 库再导出内核、模型层与附带的工具实现，不含命令行、配置文件、追踪导出与 IM。库默认不限上限、没有钩子、会话只存在内存里，安全相关的设置也要嵌入方给出。用法见 [docs/LIBRARY.md](docs/LIBRARY.md) 与 `crates/zx-agent/examples/library.rs`，接口与契约见 rustdoc（`cargo doc --open`）。
 
 ## 文档
 
@@ -163,9 +163,9 @@ cargo fmt --check
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 ```
 
-在仓库根目录运行时覆盖全部 11 个 crate；加 `-p <crate>` 只处理一个。集成测试分三处：只用库的在根目录的 `tests/`，只用应用层的在 `crates/zx-app/tests/`，驱动程序的在 `crates/zx-cli/tests/`，每个文件覆盖什么见 [docs/TESTS.md](docs/TESTS.md)。
+在仓库根目录运行时覆盖全部 11 个 crate；加 `-p <crate>` 只处理一个。集成测试分三处：只用库的在 `crates/zx-agent/tests/`，只用应用层的在 `crates/zx-app/tests/`，驱动程序的在 `crates/zx-cli/tests/`，每个文件覆盖什么见 [docs/TESTS.md](docs/TESTS.md)。
 
-`tests/real_api.rs` 会产生费用：每个测试都标为 `#[ignore]`，没有设置 `ZX_E2E_AUTHORIZED=1` 时在发出请求前失败，运行方式见该文件开头的注释。
+`crates/zx-agent/tests/real_api.rs` 会产生费用：每个测试都标为 `#[ignore]`，没有设置 `ZX_E2E_AUTHORIZED=1` 时在发出请求前失败，运行方式见该文件开头的注释。
 
 ## CI 与发布
 

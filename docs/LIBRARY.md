@@ -14,7 +14,7 @@ while let Some(event) = run.next().await {
 let report = run.wait().await;                // 只要结果时直接 session.send(..)?.wait().await
 ```
 
-库默认不限模型请求数、时间、token 与花费，没有钩子，不自动续写、摘要或落盘，会话只存在内存里；说明、上限、策略与存储都由嵌入方给出。安全相关的默认值也一样：`LocalExecutor` 默认不对命令隐藏任何环境变量（`hidden_env` 为空，API key 也不例外），工具输出只在注册了 `builtin::redact::RedactSecrets` 钩子时脱敏。完整的组装见 `examples/library.rs`，它两样都做了。
+库默认不限模型请求数、时间、token 与花费，没有钩子，不自动续写、摘要或落盘，会话只存在内存里；说明、上限、策略与存储都由嵌入方给出。安全相关的默认值也一样：`LocalExecutor` 默认不对命令隐藏任何环境变量（`hidden_env` 为空，API key 也不例外），工具输出只在注册了 `builtin::redact::RedactSecrets` 钩子时脱敏。完整的组装见仓库的 `crates/zx-agent/examples/library.rs`，它两样都做了。
 
 ## 导览
 
@@ -48,4 +48,4 @@ let report = run.wait().await;                // 只要结果时直接 session.s
 
 ---
 
-LIBRARY.md · v0.5 · 2026年11月
+LIBRARY.md · v0.6 · 2026年11月
