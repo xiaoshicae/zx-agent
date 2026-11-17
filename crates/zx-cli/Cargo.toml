@@ -1,6 +1,6 @@
 [package]
 name = "zx-cli"
-description = "The zx-agent command line: run, chat, acp, im and sessions, with config.toml, agent files and trace export"
+description = "The zx-agent command line: run, chat, acp, im and sessions, with the agents zx-app configures"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -23,20 +23,15 @@ doc = false
 
 [dependencies]
 zx-agent.workspace = true
+zx-app.workspace = true
 zx-im.workspace = true
 zx-im-feishu.workspace = true
 zx-im-slack.workspace = true
 
 agent-client-protocol.workspace = true
 anyhow.workspace = true
-async-trait.workspace = true
 chrono.workspace = true
 clap.workspace = true
-futures.workspace = true
-opentelemetry.workspace = true
-opentelemetry-otlp.workspace = true
-opentelemetry_sdk.workspace = true
-reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
@@ -45,6 +40,8 @@ toml.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
+futures.workspace = true
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 # The fake chat platforms of the integration tests (tests/common/ of the repository root)

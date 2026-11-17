@@ -6,8 +6,8 @@
 FROM rust:1.88-slim-bookworm AS build
 WORKDIR /src
 # Only what the build reads, so edits elsewhere keep it cached: the library of the root
-# package (src) and the workspace crates. The program is crates/zx-cli, with the built-in
-# agents it compiles in.
+# package (src) and the workspace crates. The program is crates/zx-cli; the built-in agents
+# it compiles in are in crates/zx-app.
 COPY Cargo.toml Cargo.lock ./
 COPY src src
 COPY crates crates

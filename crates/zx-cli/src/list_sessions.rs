@@ -3,8 +3,8 @@
 
 use anyhow::Result;
 
-use crate::assembly::SessionPlace;
-use crate::assembly::resolve_cwd;
+use zx_app::{SessionPlace, resolve_cwd};
+
 use crate::cli::SessionsArgs;
 use crate::listing;
 use crate::process::{EXIT_COMPLETED, print_line};

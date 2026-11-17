@@ -8,7 +8,7 @@
 
 ## 架构
 
-9 个 crate，上层依赖下层；模块地图不在这里重复，看各 crate 的 `lib.rs` 与父模块的 `//!`。
+10 个 crate，上层依赖下层；模块地图不在这里重复，看各 crate 的 `lib.rs` 与父模块的 `//!`。
 
 | crate | 位置 | 负责 |
 |---|---|---|
@@ -18,7 +18,8 @@
 | `zx-tools` | `crates/zx-tools` | 内置工具、执行环境（本机与容器）、命令与规则策略、续写、脱敏、落盘、会话文件存储（JSONL）、MCP |
 | `zx-im`、`zx-im-slack`、⚑ D:5/CHINA FLAG: `zx-im-feishu` | `crates/zx-im*` | IM 服务与两个平台；与 `zx-tools` 互不依赖 |
 | `zx-agent` | `src/lib.rs` | SDK：把 `zx-core`、`zx-ai`、`zx-ai-openai`、`zx-tools` 再导出成一个库，没有自己的代码 |
-| `zx-cli` | `crates/zx-cli` | 命令行（都在库里，`main.rs` 只调用它；可执行文件仍叫 `zx-agent`）。`application` 提供复用配置装配的宿主入口，内部 `assembly` 与命令行参数分开；`config`（`config.toml` 与 agent 文件）、`otel`（追踪导出）供这一层共用；`run`、`chat`、`acp`、`im` 互不引用 |
+| `zx-app` | `crates/zx-app` | 应用层：`config`（`config.toml` 与 agent 文件）、由它们装配 agent 的 `Application`、`otel`（追踪导出）；不知道命令行、终端与协议，命令行与其他宿主（如 Web 服务）共用 |
+| `zx-cli` | `crates/zx-cli` | 命令行（都在库里，`main.rs` 只调用它；可执行文件仍叫 `zx-agent`）：参数、输出与退出码，`run`、`chat`、`acp`、`im`、`sessions` 互不引用，agent 都经 `zx_app::Application` 得到 |
 
 设计取舍（改动前先理解原因；括号里是 `docs/ROADMAP.md` 的决策编号，契约细节在各类型的 rustdoc）：
 
@@ -28,12 +29,12 @@
 - **会话是审计日志，也是模型上下文的唯一来源**（不变量 5、6）：修正上下文与提示词的变化都靠追加，原始记录始终保留；可替换的只是存储（`SessionStorage` 与 `SessionLog`，接口里没有文件路径）。
 - **审批由内核等待，不是接口**：策略询问时调用在 `ApprovalGate` 等待；`ApprovalMode::Deny`（默认）立即拒绝，`Wait` 等宿主经 `Session::resolve_approval` 按内核生成的审批编号回答；超时与取消按拒绝处理，审批不写入会话。
 - **新能力优先实现 trait，不改循环**（见下文"新增功能放在哪里"；执行环境 `Executor` 与 IM 的 `StatusStore` 也是 trait）。调用者身份（会话的标签、输入的 actor）经 `PolicyContext` 与 `HookContext` 只传给策略与钩子，内核不据此判断。
-- **分层由 crate 边界保证**（D24）：内核引用不到工具、执行环境、策略、MCP、IM 和 CLI；库 `zx-agent` 引用不到命令行、配置文件、追踪导出与 IM；同层模块互不引用（规则 09）。跨 crate 使用但不属于 API 的项写成 `#[doc(hidden)] pub` 并注明。
+- **分层由 crate 边界保证**（D24）：内核引用不到工具、执行环境、策略、MCP、IM 和 CLI；库 `zx-agent` 引用不到命令行、配置文件、追踪导出与 IM；`zx-app` 引用不到命令行、ACP 与 IM；同层模块互不引用（规则 09）。跨 crate 使用但不属于 API 的项写成 `#[doc(hidden)] pub` 并注明。
 - **界面交给 ACP 客户端**（D13），`chat` 不再加功能。**安全靠部署隔离**：策略只是第一道防线（`docs/SECURITY.md`）。
 
 ## 命令
 
-都在仓库根目录运行，覆盖全部 9 个 crate（经 `Cargo.toml` 的 `default-members`）；在 `crates/*` 里运行或加 `-p <crate>` 只处理那一个。
+都在仓库根目录运行，覆盖全部 10 个 crate（经 `Cargo.toml` 的 `default-members`）；在 `crates/*` 里运行或加 `-p <crate>` 只处理那一个。
 
 - 格式：`cargo fmt`（`rustfmt.toml`：`max_width = 120`）
 - lint：`cargo clippy --all-targets -- -D warnings`，零警告；改动内核的工具校验时另跑 `cargo clippy -p zx-core --no-default-features --all-targets -- -D warnings`（按 JSON Schema 校验参数是 `zx-core` 默认开启的 feature `json-schema`），改动 `zx-tools` 时另跑 `cargo clippy -p zx-tools --no-default-features --all-targets -- -D warnings`（MCP 客户端是它默认开启的 feature `mcp`）。有意保留的写法用 `#[expect(lint, reason = "...")]`
@@ -92,6 +93,6 @@
 | 打包的扩展 | 实现 `extensions::Extension`，进 `AgentConfig::extensions`：建 `Agent` 时向它要一次并校验，所有会话共用。运行中发消息、记状态或改工具集经 `HookContext` 的 `queues` 与 `active_tools` | `crates/zx-tools/src/mcp.rs` |
 | 会话存储 | 实现 `transcript::SessionStorage` 与 `SessionLog`，进 `AgentConfig::storage`：`append` 存好才返回，一个会话一个写入者，接口里不出现文件路径，列出时用 `SessionList::new`、读头部时用 `SessionQuery::arrange_headers` 排序与截断 | `transcript/memory.rs`；只换写入方式时 `tests/runner.rs` 的 `TableLog` |
 | 摘要器 | 实现 `compaction::Summarizer`，进 `AgentConfig::summarizer`；何时摘要、读哪一段、记录与校验仍由内核做 | `tests/summarizer.rs` |
-| 单个会话的部分 | 实现 `agent::SessionSetup`，返回 `SessionParts`（工具、钩子、提示词段落），并经 `section_names` 声明它给出的段名 | `crates/zx-cli/src/assembly/setup.rs` |
-| 接入方式（如 Web 服务） | 独立的 crate，依赖 `zx-agent`（只要内核时依赖 `zx-core`），构造 `Agent`，为每个对话创建或打开 `Session`，读它返回的 `Run`；不放进库 `zx-agent` | `crates/zx-cli`、`crates/zx-im` |
+| 单个会话的部分 | 实现 `agent::SessionSetup`，返回 `SessionParts`（工具、钩子、提示词段落），并经 `section_names` 声明它给出的段名 | `crates/zx-app/src/assembly/setup.rs` |
+| 接入方式（如 Web 服务） | 独立的 crate，依赖 `zx-agent`（只要内核时依赖 `zx-core`；要与命令行共用 `config.toml` 与 agent 文件时依赖 `zx-app`，经 `Application` 得到 agent），构造 `Agent`，为每个对话创建或打开 `Session`，读它返回的 `Run`；不放进库 `zx-agent` | `crates/zx-cli`、`crates/zx-im` |
 | IM 平台 | 独立的 crate 实现 `zx_im::ImChannel`：立即确认投递、按消息 ID 去重（`Seen`）、只转交私聊、@ 机器人的群消息与群里线程中的回复、遵守限频（`Pacer`、`rate_limit_wait`）、拆分超长文本（`split_text`）、文案用 `CardLabels` | `crates/zx-im-slack`；`tests/im_server.rs` 的 `FakeChannel` |

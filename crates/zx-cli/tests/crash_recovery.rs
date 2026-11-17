@@ -23,7 +23,7 @@ use zx_agent::builtin::tools::builtin_tools;
 use zx_agent::events::{EventKind, Interruption, RunOutcome};
 use zx_agent::tools::{Effects, ExecutionMode, Tool, ToolContext, ToolOutput};
 use zx_agent::transcript::Transcript;
-use zx_cli::config::skills::ReadSkillTool;
+use zx_app::config::skills::ReadSkillTool;
 
 use common::mock_server::{MockServer, Reply};
 use common::{

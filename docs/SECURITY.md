@@ -24,7 +24,7 @@
 ## 工具
 
 - bash 命令结束、超时或被取消时，终止其进程组；用 `setsid` 等方式脱离进程组的进程可能继续运行，需要保证时用容器执行。
-- 同一进程中各会话的 `edit_file` 与 `write_file` 共用按路径的锁（`zx-cli` 的装配让它们共用；嵌入方经 `builtin_tools` 的 `files` 参数决定），编辑的读改写逐个进行；取消调用后，后台写入完成才释放锁。这不协调其他进程或经 bash 写文件的操作。
+- 同一进程中各会话的 `edit_file` 与 `write_file` 共用按路径的锁（`zx-app` 的装配让它们共用；嵌入方经 `builtin_tools` 的 `files` 参数决定），编辑的读改写逐个进行；取消调用后，后台写入完成才释放锁。这不协调其他进程或经 bash 写文件的操作。
 - `read_file`、`grep`、`find`、`ls` 不经命令检查，可以读进程能读的任何文件；`edit_file`、`write_file` 可以写进程能写的任何普通文件，包括工作目录之外的。需要限制时不启用它们，或用容器执行。内置的 `unattended` 与 Kubernetes 的 agent 不启用写文件与搜索工具。
 - 输出都有界：`read_file` 单文件至多 10 MiB，每次至多 2000 行或 50 KiB；搜索工具有条数与 60 秒超时上限。
 - `read_output` 只读落盘目录中以输出 ID 命名的普通文件，不跟随符号链接；落盘目录在工作目录之下时，从工作目录到它的每一级都不能是符号链接，否则既不读也不写。落盘目录默认在工作目录下，容器中的命令也能写它，而 `read_output` 在本机读取。
@@ -32,7 +32,7 @@
 
 ## 密钥
 
-- 认证 API key 只从环境变量读取，bash 命令启动前删除该变量。工具输出在写入会话、事件和回传模型之前，把 key 的完整字面值替换为 `[REDACTED]`。这两项由 `zx-cli` 的装配设置；作为库使用时要嵌入方自己设置（`LocalExecutor::hidden_env` 与 `RedactSecrets`，见 [LIBRARY.md](LIBRARY.md)）。
+- 认证 API key 只从环境变量读取，bash 命令启动前删除该变量。工具输出在写入会话、事件和回传模型之前，把 key 的完整字面值替换为 `[REDACTED]`。这两项由 `zx-app` 的装配设置；作为库使用时要嵌入方自己设置（`LocalExecutor::hidden_env` 与 `RedactSecrets`，见 [LIBRARY.md](LIBRARY.md)）。
 - 其他凭据文件用 `config.toml` 的 `secretFiles` 或 `ZX_SECRET_FILES` 登记（如 Kubernetes ServiceAccount 的 token），程序本身不预设路径。文件每次过滤前重新读取，轮换下来的旧值保留最近 32 个继续过滤。短于 8 个字符的值照常过滤，但所有相同的文本都会被替换，启动时在 stderr 以 `[secret] <文件>: …` 提示。过滤器出错时丢弃原始输出，返回错误结果。
 - 过滤不识别未知、编码或拆分后的密钥，也不处理用户输入、模型输出、工具参数、项目上下文与说明。这些内容仍可能进入模型请求、会话和事件，需要控制会话文件的访问权限；chat 默认把会话写到主目录下，不想留下记录时用 `--no-session`。
 - 本机执行时，工具与 agent 是同一系统用户，仍可经其他途径读到凭据（如 Linux 的 `/proc/<pid>/environ`）；其他环境变量（如云厂商凭证）bash 仍能读到，需要时在启动前清理。隔离要靠容器执行或不同账号。
@@ -52,4 +52,4 @@
 
 ---
 
-SECURITY.md · v0.2 · 2026年11月
+SECURITY.md · v0.3 · 2026年11月

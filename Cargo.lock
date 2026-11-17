@@ -3322,6 +3322,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "zx-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "zx-agent",
+]
+
+[[package]]
 name = "zx-cli"
 version = "0.1.0"
 dependencies = [
@@ -3332,10 +3352,7 @@ dependencies = [
  "clap",
  "futures",
  "libc",
- "opentelemetry",
- "opentelemetry-otlp",
  "opentelemetry_sdk",
- "reqwest",
  "serde",
  "serde_json",
  "tempfile",
@@ -3345,6 +3362,7 @@ dependencies = [
  "toml",
  "uuid",
  "zx-agent",
+ "zx-app",
  "zx-im",
  "zx-im-feishu",
  "zx-im-slack",

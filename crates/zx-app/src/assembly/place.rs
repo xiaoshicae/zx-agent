@@ -34,11 +34,15 @@ enum Place {
     Directory(Arc<JsonlStorage>),
 }
 
-/// The distinction the command line needs when deciding whether to resume a session.
+/// What a [`SessionPlace`] keeps sessions in, for a host that decides by it, such as
+/// whether to resume a session.
 #[derive(Clone, Copy)]
-pub(crate) enum PlaceKind {
+pub enum PlaceKind {
+    /// Memory: [`SessionPlace::memory`].
     Memory,
+    /// One file, which holds one session: [`SessionPlace::file`].
     File,
+    /// Files under one directory: [`SessionPlace::directory`] and [`SessionPlace::home`].
     Directory,
 }
 
@@ -63,7 +67,8 @@ impl SessionPlace {
         !matches!(self.0, Place::Memory(_))
     }
 
-    pub(crate) fn kind(&self) -> PlaceKind {
+    /// What this place keeps sessions in.
+    pub fn kind(&self) -> PlaceKind {
         match self.0 {
             Place::Memory(_) => PlaceKind::Memory,
             Place::File(_) => PlaceKind::File,
@@ -71,13 +76,14 @@ impl SessionPlace {
         }
     }
 
-    /// `--session`'s file, or memory without one.
-    pub(crate) fn file_or_memory(path: Option<&Path>) -> Self {
+    /// The file at `path`, or memory without a path.
+    pub fn file_or_memory(path: Option<&Path>) -> Self {
         path.map_or_else(Self::memory, Self::file)
     }
 
     /// `sessions` in the zx-agent home directory (`ZX_AGENT_HOME`, else `~/.zx-agent`).
-    pub(crate) fn home() -> Result<Self> {
+    /// Fails when no home directory is known.
+    pub fn home() -> Result<Self> {
         let home = config::home()?.context("cannot find the home directory for session files; set ZX_AGENT_HOME")?;
         Ok(Self::directory(&home.join(SESSIONS_DIR)))
     }
@@ -113,7 +119,7 @@ impl SessionPlace {
 
     /// The sessions kept here that were started in `cwd`, most recently active first, and
     /// what was found among them and could not be read.
-    pub(crate) async fn started_in(&self, cwd: &Path) -> Result<SessionList> {
+    pub async fn started_in(&self, cwd: &Path) -> Result<SessionList> {
         let query = SessionQuery {
             cwd: Some(cwd.to_path_buf()),
             ..SessionQuery::default()
@@ -121,11 +127,11 @@ impl SessionPlace {
         self.storage().list(&query).await
     }
 
-    /// The ID of the session `--session`'s file holds already, which then continues; `None`
-    /// for a file that does not exist yet, and for a place that keeps more than one session.
-    /// Fails for a file that cannot be read as a session, and when `cwd`, the command line's
-    /// `--cwd`, names another directory than the one the session works in.
-    pub(crate) async fn held(&self, cwd: Option<&Path>) -> Result<Option<String>> {
+    /// The ID of the session a single file holds already, which then continues; `None` for
+    /// a file that does not exist yet, and for a place that keeps more than one session.
+    /// Fails for a file that cannot be read as a session, and when `cwd`, an explicit working
+    /// directory, names another directory than the one the session works in.
+    pub async fn held(&self, cwd: Option<&Path>) -> Result<Option<String>> {
         let Some(held) = self.only().await? else {
             return Ok(None);
         };

@@ -7,6 +7,7 @@ members = [
   "crates/zx-im",
   "crates/zx-im-slack",
   "crates/zx-im-feishu",
+  "crates/zx-app",
   "crates/zx-cli",
 ]
 # Commands run at the root (build, test, clippy, doc) cover every crate, not only zx-agent.
@@ -19,6 +20,7 @@ default-members = [
   "crates/zx-im",
   "crates/zx-im-slack",
   "crates/zx-im-feishu",
+  "crates/zx-app",
   "crates/zx-cli",
 ]
 
@@ -34,6 +36,7 @@ publish = false
 zx-agent = { path = "." }
 zx-ai = { path = "crates/zx-ai" }
 zx-ai-openai = { path = "crates/zx-ai-openai" }
+zx-app = { path = "crates/zx-app" }
 zx-core = { path = "crates/zx-core" }
 zx-im = { path = "crates/zx-im" }
 zx-im-feishu = { path = "crates/zx-im-feishu" }

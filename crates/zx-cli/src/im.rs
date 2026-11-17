@@ -12,9 +12,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use crate::config::Builtin;
-use crate::otel::Telemetry;
 use zx_agent::ai::now_ms;
+use zx_app::config::Builtin;
+use zx_app::otel::Telemetry;
+use zx_app::{Application, Approvals, ConfiguredAgent, SessionPlace, env_value};
 use zx_im::{
     CardLabels, ConversationId, ErrorReport, ImChannel, ImError, Replies, Server, ServerConfig, ServerEvent,
     ServerSink, SessionKey, StatusFiles, UserId,
@@ -22,8 +23,6 @@ use zx_im::{
 use zx_im_feishu::{FeishuChannel, FeishuConfig};
 use zx_im_slack::{SlackChannel, SlackConfig};
 
-use crate::assembly::SessionPlace;
-use crate::assembly::{self, Approvals, ModeAgent, env_value};
 use crate::cli::{self, ImArgs};
 use crate::process::{EXIT_COMPLETED, EXIT_ERROR, EXIT_USAGE, spawn_signal_handler, with_telemetry, write_line};
 
@@ -138,19 +137,19 @@ pub(crate) async fn run(args: ImArgs) -> Result<u8> {
         let running = create_session_dirs(&dir)?;
 
         // Once for the process: every thread's session shares the connections.
-        let shared = crate::process::connect(cli::overrides(args.base, &args.budget), Builtin::Assistant)
+        let app = crate::process::connect(cli::overrides(args.base, &args.budget), Builtin::Assistant)
             .await?
             .with_hidden_env(hidden_env)
             .with_traces(telemetry.map(Telemetry::hook));
         // A wrong model, agent or tool setting would otherwise surface only at the first
         // message, in the chat; check it once with a session that is never stored.
-        agent(&shared, &SessionPlace::memory())?
+        agent(&app, &SessionPlace::memory())?
             .create(None)
             .await
             .context("cannot prepare a session with these settings")?;
         // The sessions of every conversation are kept under `dir`; a conversation's sessions
         // are those that carry its labels.
-        let mode = agent(&shared, &SessionPlace::directory(&dir))?;
+        let mode = agent(&app, &SessionPlace::directory(&dir))?;
         let config = ServerConfig {
             cwd: mode.new_session_cwd(None)?,
             ..server_config(&file.limits, file.replies, running, conversations, approvers)
@@ -168,7 +167,7 @@ pub(crate) async fn run(args: ImArgs) -> Result<u8> {
         spawn_signal_handler(cancel.clone());
         // The session file is the record of each conversation; the operator log holds
         // approvals and failures (Log), and traces, when exported, the timeline.
-        let served = Server::new(config, mode.agent, Arc::new(Log))
+        let served = Server::new(config, mode.agent().clone(), Arc::new(Log))
             .run(channels, &cancel)
             .await;
         Ok(serve_exit_code(served))
@@ -179,9 +178,9 @@ pub(crate) async fn run(args: ImArgs) -> Result<u8> {
 /// The agent of every conversation, whose sessions are kept in `place`, as chat's are, with
 /// approvals in the conversation: the server answers each request with an approver's click
 /// on the card it posts.
-fn agent(shared: &assembly::Shared, place: &SessionPlace) -> Result<ModeAgent> {
+fn agent(app: &Application, place: &SessionPlace) -> Result<ConfiguredAgent> {
     let approvals = Approvals::Person("shell commands require approval in the chat");
-    ModeAgent::build(shared, &shared.settings.model, place, approvals)
+    app.build(app.model(), place, approvals)
 }
 
 /// The configured IM platforms: a channel for each, and the environment variables that hold

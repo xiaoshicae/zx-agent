@@ -12,7 +12,7 @@ use serde_json::json;
 use common::{EchoTool, RunnerSetup, config};
 use zx_agent::ai::faux::{FauxProvider, FauxStep};
 use zx_agent::events::RunOutcome;
-use zx_cli::otel::{Telemetry, TraceParent};
+use zx_app::otel::{Telemetry, TraceParent};
 
 /// Keeps every exported span, also after shutdown, which the SDK's in-memory exporter clears.
 #[derive(Clone, Debug, Default)]

@@ -113,11 +113,11 @@ zx-agent im --config im.toml --model <model> --max-model-requests 100 --timeout-
 
 ## 架构
 
-一个 Cargo workspace，9 个 crate，依赖只能自上而下，由编译器保证：
+一个 Cargo workspace，10 个 crate，依赖只能自上而下，由编译器保证：
 
 ```
-zx-cli      crates/zx-cli    命令行程序 zx-agent（run、chat、acp、im、sessions）、config.toml 与 agent、
-                             OpenTelemetry 导出
+zx-cli      crates/zx-cli    命令行程序 zx-agent（run、chat、acp、im、sessions）
+  ├─ zx-app        crates/zx-app        应用层：config.toml 与 agent、装配 agent、OpenTelemetry 导出（依赖 zx-agent）
   ├─ zx-im-slack   crates/zx-im-slack   Slack 平台
   ├─ zx-im-feishu  crates/zx-im-feishu  ⚑ D:5/CHINA FLAG: 飞书平台
   │    └─ zx-im    crates/zx-im         IM 平台接口与按会话分派的服务（依赖 zx-core）
@@ -128,7 +128,7 @@ zx-cli      crates/zx-cli    命令行程序 zx-agent（run、chat、acp、im、
        └─ zx-ai-openai  crates/zx-ai-openai  OpenAI 兼容 provider（只依赖 zx-ai）
 ```
 
-命令行与 IM 是建在库之上的两种接入方式，不在库里：引入 `zx-agent` 不编译命令行解析、ACP、追踪导出与 IM 平台。只嵌入内核的程序不编译 HTTP 客户端。代码中没有场景、环境或平台文案语言的规则：场景是 agent 文件，Kubernetes 的规则在 `deploy/kubernetes/`。循环语义与系统提示词的组成见[参考手册](docs/REFERENCE.md#语义)。
+命令行与 IM 是建在库之上的两种接入方式，不在库里：引入 `zx-agent` 不编译命令行解析、ACP、追踪导出与 IM 平台。要与命令行共用配置的宿主（如 Web 服务）依赖 `zx-app`，不编译命令行解析、ACP 与 IM 平台。只嵌入内核的程序不编译 HTTP 客户端。代码中没有场景、环境或平台文案语言的规则：场景是 agent 文件，Kubernetes 的规则在 `deploy/kubernetes/`。循环语义与系统提示词的组成见[参考手册](docs/REFERENCE.md#语义)。
 
 ## 安全模型
 
@@ -161,7 +161,7 @@ cargo fmt --check
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 ```
 
-在仓库根目录运行时覆盖全部 9 个 crate；加 `-p <crate>` 只处理一个。集成测试分两处：只用库的在根目录的 `tests/`，驱动程序的在 `crates/zx-cli/tests/`，每个文件覆盖什么见 [docs/TESTS.md](docs/TESTS.md)。
+在仓库根目录运行时覆盖全部 10 个 crate；加 `-p <crate>` 只处理一个。集成测试分三处：只用库的在根目录的 `tests/`，只用应用层的在 `crates/zx-app/tests/`，驱动程序的在 `crates/zx-cli/tests/`，每个文件覆盖什么见 [docs/TESTS.md](docs/TESTS.md)。
 
 `tests/real_api.rs` 会产生费用：每个测试都标为 `#[ignore]`，没有设置 `ZX_E2E_AUTHORIZED=1` 时在发出请求前失败，运行方式见该文件开头的注释。
 

@@ -3,23 +3,20 @@
 //! [`Application::from_config`] accepts explicit environment configuration and an optional
 //! agent-file directory. [`Application::from_environment`] opts into the command line's
 //! config discovery and process overrides. Both share MCP connections across agents and
-//! give each session its own executor through the same assembly used by the CLI.
+//! give each session its own executor through the same assembly.
 //!
 //! Startup notices are returned to the host, never printed. Credentials named by the
-//! configuration still come from environment variables. This boundary lives in `zx-cli`
-//! until a second host justifies extracting it together with `config` and `otel`.
+//! configuration still come from environment variables.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Result;
 
-use crate::assembly::{Settings, Shared, checked_secret_files};
+use crate::assembly::{Approvals, ConfiguredAgent, Overrides, SessionPlace, Settings, Shared, checked_secret_files};
 use crate::config::{Builtin, Config};
 use crate::otel::TraceHook;
-
-#[doc(inline)]
-pub use crate::assembly::{Approvals, ModeAgent as ConfiguredAgent, NoModel, Overrides, SessionPlace};
+use zx_agent::ai::Reasoning;
 
 /// The shared resources of configured agents: resolved settings, MCP connections,
 /// redaction configuration and optional trace observation. No sessions are opened at startup.
@@ -67,15 +64,27 @@ impl Application {
         self
     }
 
-    /// Assemble the selected role in `place`, sharing startup resources with other agents.
-    /// Per-session executors are created only when a session is created or opened.
-    pub fn build(&self, place: &SessionPlace, approvals: Approvals<'_>) -> Result<ConfiguredAgent> {
-        ConfiguredAgent::build(&self.shared, &self.shared.settings.model, place, approvals)
+    /// Assemble the selected role for `model`, usually [`Self::model`], in `place`, sharing
+    /// startup resources with other agents. Per-session executors are created only when a
+    /// session is created or opened.
+    pub fn build(&self, model: &str, place: &SessionPlace, approvals: Approvals<'_>) -> Result<ConfiguredAgent> {
+        ConfiguredAgent::build(&self.shared, model, place, approvals)
     }
 
     /// The resolved model ID.
     pub fn model(&self) -> &str {
         &self.shared.settings.model
+    }
+
+    /// The reasoning level config.toml sets; `None` when it sets none.
+    pub fn reasoning(&self) -> Option<Reasoning> {
+        self.shared.settings.config.reasoning
+    }
+
+    /// Where new sessions work unless a request names a directory: [`Overrides::cwd`];
+    /// `None` for the current directory.
+    pub fn cwd(&self) -> Option<&Path> {
+        self.shared.overrides.cwd.as_deref()
     }
 
     /// The configured time a host allows for an approval.

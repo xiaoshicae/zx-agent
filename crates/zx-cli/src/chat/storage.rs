@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::assembly;
-use crate::assembly::{PlaceKind, SessionPlace};
+use zx_app::{PlaceKind, SessionPlace, resolve_cwd};
+
 use crate::render::visible;
 
 /// Where conversations are kept.
@@ -86,7 +86,7 @@ pub(super) async fn opening(
 /// The session `--resume` opens among those started in this working directory, or why there
 /// is none to resume.
 async fn resume_target(place: &SessionPlace, cwd: Option<&Path>, id: Option<&str>) -> Result<First> {
-    let cwd = assembly::resolve_cwd(cwd)?;
+    let cwd = resolve_cwd(cwd)?;
     let list = place.started_in(&cwd).await?;
     let directory = place.location(&cwd).unwrap_or_default();
     match id {

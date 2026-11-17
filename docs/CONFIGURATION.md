@@ -97,7 +97,7 @@ apiKeyEnv = "DEEPSEEK_API_KEY"
 
 ### 内置 agent
 
-`run` 使用内置的 `unattended`，`chat`、`acp` 与 `im` 使用内置的 `assistant`，构建时嵌入程序（全文在仓库的 `crates/zx-cli/agents/`）。主目录下的同名文件替换它们；其他文件名不会被读取，也没有选择 agent 的命令行参数。Kubernetes 用的 agent 在仓库的 `deploy/kubernetes/agents/`。
+`run` 使用内置的 `unattended`，`chat`、`acp` 与 `im` 使用内置的 `assistant`，构建时嵌入程序（全文在仓库的 `crates/zx-app/agents/`）。主目录下的同名文件替换它们；其他文件名不会被读取，也没有选择 agent 的命令行参数。Kubernetes 用的 agent 在仓库的 `deploy/kubernetes/agents/`。
 
 | | `unattended` | `assistant` |
 |---|---|---|
@@ -279,4 +279,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.15 · 2026年11月
+CONFIGURATION.md · v0.16 · 2026年11月
