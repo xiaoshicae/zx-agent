@@ -54,7 +54,7 @@ cost = { input = 0.27, output = 1.10, cacheRead = 0.07 }   # 每百万 token 的
 | `provider.idleTimeoutSecs` | 等待响应头或下一段流的最长时间，秒，至少 1，默认 120 |
 | `provider.maxRetries` | 临时性错误的重试次数，默认 3 |
 | `execution` | `local`（默认）或 `container`，见下文“容器执行” |
-| `[[models]]` | 模型元数据：`id`（必填）、`contextWindow`（大于零）、`cost`（每百万 token 的单价 `input`、`output`、`cacheRead`、`cacheWrite`，不小于零，币种自定但须一致；`input` 指不读也不写缓存的提示词 token）。没有内置的模型表。有单价时回复带 `usage.totalCost`；花费预算需要单价；窗口用于推导 `compaction.triggerTokens` |
+| `[[models]]` | 模型元数据：`id`（必填，不能重复）、`contextWindow`（大于零）、`cost`（每百万 token 的单价 `input`、`output`、`cacheRead`、`cacheWrite`，不小于零，币种自定但须一致；`input` 指不读也不写缓存的提示词 token）。没有内置的模型表。有单价时回复带 `usage.totalCost`；花费预算需要单价；窗口用于推导 `compaction.triggerTokens` |
 | `[[mcp]]` | 外部 MCP 服务器，见下文“MCP 服务器” |
 
 推理设置、`maxTokensField`、`fillMissingReasoning`、缓存 key 与 `requestFields` 都记入会话的请求审计。
@@ -279,4 +279,4 @@ allowed = "已批准"
 
 ---
 
-CONFIGURATION.md · v0.16 · 2026年11月
+CONFIGURATION.md · v0.17 · 2026年11月
