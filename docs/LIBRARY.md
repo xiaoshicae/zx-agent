@@ -1,6 +1,6 @@
 # 作为库使用
 
-`zx-agent` 库再导出各 crate：内核 `zx-core` 按域模块原样导出（`zx_agent::agent`、`zx_agent::tools`、`zx_agent::policy`、`zx_agent::hooks`、`zx_agent::transcript` 等），模型层在 `zx_agent::ai`，`zx-tools` 附带的实现在 `zx_agent::builtin`。库里没有接入方式：IM 服务在 `zx-im`（平台在 `zx-im-slack` 与 ⚑ D:5/CHINA FLAG: `zx-im-feishu`），`config.toml`、agent 文件与 OpenTelemetry 导出在应用层 `zx-app`，命令行 `zx-cli` 建在它上面。只需要内核时可以只依赖 `zx-core` 与 `zx-ai`，按需加上 `zx-ai-openai`。`zx-core` 按 JSON Schema 校验工具参数的部分是默认开启的 feature `json-schema`，关掉时参数只由工具自己解析；`zx-tools` 的 MCP 客户端是默认开启的 feature `mcp`，关掉时不编译 HTTP 客户端与 MCP SDK。各 crate 都不发布到 crates.io。
+`zx-agent` 库再导出各 crate：内核 `zx-core` 按域模块原样导出（`zx_agent::agent`、`zx_agent::tools`、`zx_agent::policy`、`zx_agent::hooks`、`zx_agent::transcript` 等），模型层在 `zx_agent::ai`，`zx-tools` 附带的实现在 `zx_agent::builtin`。库里没有接入方式：IM 服务在 `zx-im`（平台在 `zx-im-slack` 与 ⚑ D:5/CHINA FLAG: `zx-im-feishu`），`config.toml`、agent 文件与 OpenTelemetry 导出在应用层 `zx-app`，命令行 `zx-cli` 建在它上面。只需要内核时可以只依赖 `zx-core` 与 `zx-ai`，按需加上 `zx-ai-openai`。`zx-core` 按 JSON Schema 校验工具参数的部分是默认开启的 feature `json-schema`，关掉时参数只由工具自己解析；`zx-tools` 的 MCP 客户端是默认开启的 feature `mcp`，关掉时不编译 HTTP 客户端与 MCP SDK。测试用的脚本化 provider `ai::faux::FauxProvider`（不联网，按脚本回答并记下每个请求）只在 feature `testing` 打开时编译，默认关闭：嵌入方的测试在 `[dev-dependencies]` 里给 `zx-agent` 加上这个 feature。各 crate 都不发布到 crates.io。
 
 ```rust
 let mut config = AgentConfig { system_prompt, tools, ..AgentConfig::new(provider, model) };
@@ -48,4 +48,4 @@ let report = run.wait().await;                // 只要结果时直接 session.s
 
 ---
 
-LIBRARY.md · v0.6 · 2026年11月
+LIBRARY.md · v0.7 · 2026年11月

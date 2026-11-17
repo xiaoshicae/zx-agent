@@ -5,7 +5,7 @@ paths:
 
 # 06 测试
 
-每个测试文件覆盖什么见 `docs/TESTS.md`。测试设施的索引在 `crates/zx-agent/tests/common/mod.rs` 的模块文档，每一项的用法写在它自己的文档注释里。
+每个测试文件覆盖什么见 `docs/TESTS.md`。测试设施在库 `zx-testing`（`crates/zx-testing`），索引在它 `src/lib.rs` 的模块文档，每一项的用法写在它自己的文档注释里。
 
 ## 原则
 
@@ -18,8 +18,8 @@ paths:
 
 ## 约定
 
-- 循环测试参照 `crates/zx-agent/tests/step_loop.rs` 的 `runs_tools_until_the_model_answers`：用 `run_prompt` 跑完后断言 `result.outcome`，再用 `summarize(&context)` 断言消息序列。运行层测试参照 `crates/zx-agent/tests/runner.rs`，写成 `RunnerSetup { retry: fast_retry(3), ..setup(&provider) }.build()`。
-- 驱动程序的测试经 `zx_agent()` 或 `zx_agent_in` 启动，开发者的配置与真实的家目录都进不了测试。权限、上下文、摘要、模型元数据、执行环境与 provider 设置没有命令行参数，经 `AgentHome` 与 `fake_model_config` 设置。
+- 循环测试参照 `crates/zx-agent/tests/step_loop.rs` 的 `runs_tools_until_the_model_answers`：用 `run_prompt` 跑完后断言 `result.outcome`，再用 `summarize(&context)` 断言消息序列。运行层测试参照 `crates/zx-agent/tests/runner.rs`，写成 `RunnerSetup { retry: fast_retry(3), ..setup(&provider) }.build().await`。
+- 驱动程序的测试经 `zx_agent_in` 启动（它交给 `zx_testing::program::command`），开发者的配置与真实的家目录都进不了测试。权限、上下文、摘要、模型元数据、执行环境与 provider 设置没有命令行参数，经 `zx_testing::program` 的 `AgentHome` 与 `fake_model_config` 设置。
 - 只能在 Unix 上运行的测试（如进程组、信号相关的）加 `#[cfg(unix)]`。
 - 测试函数同样受 `too_many_lines` 约束，例外见规则 09。
 
