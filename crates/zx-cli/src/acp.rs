@@ -37,15 +37,14 @@ use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::Builtin;
-use crate::otel::{Telemetry, TraceHook};
 use zx_agent::builtin::tools::{BASH, EDIT_FILE, FIND, GREP, LS, READ_FILE, WRITE_FILE};
 use zx_agent::events::{Budget, EventKind, RunOutcome, RunReport};
 use zx_agent::transcript::SessionInfo as StoredSession;
 use zx_agent::{Run, Session};
+use zx_app::config::Builtin;
+use zx_app::otel::{Telemetry, TraceHook};
+use zx_app::{Approvals, ConfiguredAgent, SessionPlace, resolve_cwd};
 
-use crate::assembly::SessionPlace;
-use crate::assembly::{self, Approvals, ModeAgent};
 use crate::cli::{self, AcpArgs};
 use crate::listing;
 use crate::process::{EXIT_COMPLETED, next_event, spawn_signal_handler, with_telemetry};
@@ -57,7 +56,7 @@ struct Host {
     /// client's approval is asked for its calls. With it, where the sessions are kept, which
     /// is the session files chat keeps too, or memory with `--no-session`, and `--cwd`, for
     /// a listing that names no directory.
-    mode: ModeAgent,
+    mode: ConfiguredAgent,
     /// Cancelled when the process is told to stop: every turn then cancels its run.
     stop: CancellationToken,
     /// Each turn holds a sender of this channel while it runs, and nothing is ever sent:
@@ -69,13 +68,13 @@ struct Host {
 impl Host {
     /// The session `id` when the client has it open.
     fn session(&self, id: &SessionId) -> Option<Session> {
-        self.mode.agent.session(&id.0)
+        self.mode.agent().session(&id.0)
     }
 
     /// Whether sessions are kept as files, where a later request or process finds them
     /// again: not with `--no-session`.
     fn keeps_files(&self) -> bool {
-        self.mode.place.is_persistent()
+        self.mode.place().is_persistent()
     }
 
     /// Create a session for `cwd`, the client's project directory, whatever `--cwd` says.
@@ -93,8 +92,8 @@ impl Host {
     /// session in it.
     async fn locate(&self, id: &SessionId, cwd: &Path) -> Result<Session> {
         let open = self.session(id);
-        let (id, place) = (&*id.0, &self.mode.place);
-        let cwd = assembly::resolve_cwd(Some(cwd))?;
+        let (id, place) = (&*id.0, &self.mode.place());
+        let cwd = resolve_cwd(Some(cwd))?;
         let directory = place.location(&cwd);
         let unknown = || match &directory {
             Some(directory) => unknown_session(id, &format!("no such session in {}", directory.display())),
@@ -123,7 +122,7 @@ impl Host {
         if session.cwd() != cwd {
             // Started in another directory: not a session of this one, and not left open,
             // where the next request would find it whatever directory it names.
-            self.mode.agent.close_session(id);
+            self.mode.agent().close_session(id);
             return Err(unknown().into());
         }
         Ok(session)
@@ -162,12 +161,12 @@ impl Host {
             )
             .into());
         }
-        let cwd = request.cwd.as_deref().or(self.mode.cwd.as_deref());
-        let cwd = assembly::resolve_cwd(cwd)?;
+        let cwd = request.cwd.as_deref().or(self.mode.cwd());
+        let cwd = resolve_cwd(cwd)?;
         if !self.keeps_files() {
             return Ok(Vec::new());
         }
-        let kept = self.mode.place.started_in(&cwd).await?;
+        let kept = self.mode.place().started_in(&cwd).await?;
         Ok(kept.sessions.iter().map(session_info).collect())
     }
 
@@ -295,7 +294,7 @@ impl Host {
         request: &CloseSessionRequest,
         responder: Responder<CloseSessionResponse, V1>,
     ) -> Result<(), Error> {
-        self.mode.agent.close_session(&request.session_id.0);
+        self.mode.agent().close_session(&request.session_id.0);
         responder.respond(CloseSessionResponse::new())
     }
 }
@@ -321,7 +320,7 @@ pub(crate) async fn run(args: AcpArgs) -> Result<u8> {
 /// the answers is not waited for. The sessions close as the connection and the agent are
 /// dropped on the way out, before the caller exports what remains of the traces.
 async fn serve(args: AcpArgs, traces: Option<TraceHook>) -> Result<u8> {
-    let shared = crate::process::connect(cli::overrides(args.base, &args.budget), Builtin::Assistant)
+    let app = crate::process::connect(cli::overrides(args.base, &args.budget), Builtin::Assistant)
         .await?
         .with_traces(traces);
     let place = if args.no_session {
@@ -331,7 +330,7 @@ async fn serve(args: AcpArgs, traces: Option<TraceHook>) -> Result<u8> {
     };
     // The client answers: each approval request becomes a `session/request_permission`.
     let approvals = Approvals::Person("the client must approve shell commands");
-    let mode = ModeAgent::build(&shared, &shared.settings.model, &place, approvals)?;
+    let mode = app.build(app.model(), &place, approvals)?;
     let stop = CancellationToken::new();
     spawn_signal_handler(stop.clone());
     let (turns, mut turns_ended) = mpsc::channel::<()>(1);

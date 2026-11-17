@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 提交前自查：列出需要说明理由的写法。每一处命中都要能说出理由；"(无)" 表示没有命中。
 # 在任何目录下运行都可以，脚本会切到项目根目录。生产代码在 src/（zx-agent）与 crates/*/src/；
-# 集成测试在 tests/ 与 crates/zx-cli/tests/。
+# 集成测试在 tests/、crates/zx-app/tests/ 与 crates/zx-cli/tests/。
 
 cd "$(dirname "$0")/../.." || exit 1
 

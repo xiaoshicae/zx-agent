@@ -43,21 +43,16 @@ pub enum Approvals<'a> {
 }
 
 /// The agent of a mode, and what the mode shows about it.
-pub struct ModeAgent {
-    pub(crate) agent: Agent,
-    /// The provider, for a mode that switches the model.
-    pub(crate) provider: Arc<dyn Provider>,
-    /// The selected agent's name, for a frontend to show.
-    pub(crate) name: String,
-    /// The agent's auto-approved command prefixes, for a frontend to show.
-    pub(crate) auto_approve_commands: Vec<String>,
-    /// Where the agent keeps its sessions, for a mode that lists them or shows their files.
-    pub(crate) place: SessionPlace,
-    /// Where new sessions work unless a client names a directory ([`Overrides::cwd`]).
-    pub(crate) cwd: Option<PathBuf>,
+pub struct ConfiguredAgent {
+    agent: Agent,
+    provider: Arc<dyn Provider>,
+    name: String,
+    auto_approve_commands: Vec<String>,
+    place: SessionPlace,
+    cwd: Option<PathBuf>,
 }
 
-impl ModeAgent {
+impl ConfiguredAgent {
     /// The agent of a mode that asks `model` and keeps its sessions in `place`, from what
     /// the process shares. Startup reads; no session exists yet.
     ///
@@ -127,6 +122,27 @@ impl ModeAgent {
         &self.name
     }
 
+    /// The provider, for a host that switches the model of a session.
+    pub fn provider(&self) -> &Arc<dyn Provider> {
+        &self.provider
+    }
+
+    /// The agent's auto-approved command prefixes, for a host to display.
+    pub fn auto_approve_commands(&self) -> &[String] {
+        &self.auto_approve_commands
+    }
+
+    /// Where the agent keeps its sessions, for a host that lists them or shows their files.
+    pub fn place(&self) -> &SessionPlace {
+        &self.place
+    }
+
+    /// Where new sessions work unless a client names a directory: [`Overrides::cwd`];
+    /// `None` for the current directory.
+    pub fn cwd(&self) -> Option<&Path> {
+        self.cwd.as_deref()
+    }
+
     /// Open a stored session without writing diagnostics to the process's outputs.
     pub async fn open(&self, id: &str) -> Result<Session> {
         match self.agent.open_session(id).await {
@@ -137,7 +153,9 @@ impl ModeAgent {
 
     /// Where a new session works: `cwd` when a client names a project directory, else the
     /// configured one, else the current directory, by its real path.
-    pub(crate) fn new_session_cwd(&self, cwd: Option<&Path>) -> Result<PathBuf> {
+    ///
+    /// Fails when that directory cannot be resolved or is not a directory.
+    pub fn new_session_cwd(&self, cwd: Option<&Path>) -> Result<PathBuf> {
         resolve_cwd(cwd.or(self.cwd.as_deref()))
     }
 

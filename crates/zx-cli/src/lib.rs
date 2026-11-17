@@ -2,21 +2,9 @@
 //! `acp`, `im` and `sessions`, built on the `zx-agent` library. The program itself
 //! (`src/main.rs`) only calls [`main`].
 //!
-//! What does not depend on one invocation is public, for the program's tests and for
-//! another way in that is configured the same:
-//!
-//! - [`application`]: configured agents for hosts that share the command line's settings
-//! - [`config`]: `config.toml`, the environment: the model, its provider and where commands
-//!   run; and the agents, as files: instructions, tools, permissions and limits
-//! - [`otel`]: OpenTelemetry traces of runs, exported when an OTLP endpoint is configured
-//!
-//! Every way in builds its agent in one place, which knows neither a command line nor a
-//! terminal:
-//!
-//! - `assembly`: an agent made from config.toml, the agent file and what one start says
-//!   over them; what each session gets for itself; where a mode keeps its sessions
-//!
-//! The ways in do not refer to each other; each depends on the three above:
+//! Every subcommand gets its agent from `zx-app`, which reads config.toml and the agent
+//! files and knows neither a command line nor a terminal. The subcommands do not refer to
+//! each other:
 //!
 //! - `run`, `chat`, `acp`, `im`, `list_sessions`: the subcommands
 //! - `cli`: the arguments of the subcommands
@@ -24,12 +12,7 @@
 //! - `process`: exit codes, signals, and what every subcommand writes to its outputs
 //! - `render`: how calls, results and times are shown
 
-pub mod application;
-pub mod config;
-pub mod otel;
-
 mod acp;
-mod assembly;
 mod chat;
 mod cli;
 mod im;

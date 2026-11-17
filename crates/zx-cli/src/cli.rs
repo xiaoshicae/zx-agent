@@ -1,12 +1,12 @@
 //! The command line: the subcommands and their arguments. Everything that describes the
-//! environment rather than one invocation is in config.toml (`crate::config::Config`); what
-//! is made of both is in `crate::assembly`.
+//! environment rather than one invocation is in config.toml (`zx_app::config::Config`);
+//! what one invocation says over it is [`Overrides`].
 
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use crate::assembly::Overrides;
+use zx_app::Overrides;
 
 #[derive(Parser)]
 #[command(name = "zx-agent", version, about = "Minimal general-purpose agent kernel")]

@@ -6,13 +6,12 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use tokio_util::sync::CancellationToken;
 
-use crate::config::Builtin;
 use zx_agent::ai::Message;
 use zx_agent::events::{Event, EventKind, RunOutcome, RunReport};
 use zx_agent::{Run, Session};
+use zx_app::config::Builtin;
+use zx_app::{Application, Approvals, SessionPlace};
 
-use crate::assembly;
-use crate::assembly::SessionPlace;
 use crate::cli::{self, OutputMode, RunArgs};
 use crate::process::{
     EXIT_DENIED, JsonlEvents, exit_code, next_event, print_line, run_traces, spawn_signal_handler, with_telemetry,
@@ -46,10 +45,10 @@ pub(crate) async fn run(args: RunArgs) -> Result<u8> {
         }
     };
     with_telemetry(async move |telemetry| {
-        let shared = crate::process::connect(cli::overrides(base, &budget), Builtin::Unattended)
+        let app = crate::process::connect(cli::overrides(base, &budget), Builtin::Unattended)
             .await?
             .with_traces(telemetry.map(run_traces));
-        let session = build_session(&shared, session_file.as_deref()).await?;
+        let session = build_session(&app, session_file.as_deref()).await?;
         let cancel = CancellationToken::new();
         spawn_signal_handler(cancel.clone());
         let run = match prompt {
@@ -85,10 +84,10 @@ fn read_prompt(arg: &str) -> Result<String> {
 /// A session of the `unattended` agent, or of the user's file that replaces it, in which
 /// nobody answers approvals: `--session` continues the session its file holds, or starts
 /// the file.
-async fn build_session(shared: &assembly::Shared, session: Option<&Path>) -> Result<Session> {
+async fn build_session(app: &Application, session: Option<&Path>) -> Result<Session> {
     let place = SessionPlace::file_or_memory(session);
-    let held = place.held(shared.overrides.cwd.as_deref()).await?;
-    let agent = assembly::ModeAgent::build(shared, &shared.settings.model, &place, assembly::Approvals::Nobody)?;
+    let held = place.held(app.cwd()).await?;
+    let agent = app.build(app.model(), &place, Approvals::Nobody)?;
     match held {
         Some(id) => crate::process::resume(&agent, &id).await,
         None => agent.create(None).await,

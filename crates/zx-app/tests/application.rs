@@ -3,8 +3,8 @@
 use std::path::Path;
 
 use zx_agent::transcript::{SessionName, SessionQuery};
-use zx_cli::application::{Application, Approvals, Overrides, SessionPlace};
-use zx_cli::config::{Builtin, Config};
+use zx_app::config::{Builtin, Config};
+use zx_app::{Application, Approvals, Overrides, SessionPlace};
 
 fn configured() -> Config {
     let mut config = Config {
@@ -47,7 +47,7 @@ async fn an_explicit_host_builds_and_reopens_sessions_without_the_command_line()
     assert_eq!(app.model(), "host-model");
     assert!(app.notices().is_empty());
     let place = SessionPlace::directory(&dir.path().join("sessions"));
-    let configured = app.build(&place, Approvals::Nobody).unwrap();
+    let configured = app.build(app.model(), &place, Approvals::Nobody).unwrap();
     assert_eq!(configured.name(), "unattended");
     let session = configured.create(None).await.unwrap();
     let id = session.id().to_string();
@@ -122,7 +122,10 @@ async fn invalid_model_and_budget_are_rejected_before_any_session_is_created() {
     )
     .await
     .unwrap();
-    let error = app.build(&SessionPlace::memory(), Approvals::Nobody).err().unwrap();
+    let error = app
+        .build(app.model(), &SessionPlace::memory(), Approvals::Nobody)
+        .err()
+        .unwrap();
     assert!(format!("{error:#}").contains("a cost budget needs the prices"));
 }
 

@@ -8,12 +8,12 @@ use anyhow::Result;
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio_util::sync::CancellationToken;
 
-use crate::assembly::{ModeAgent, NoModel, Overrides, Shared};
-use crate::config::Builtin;
-use crate::otel::{Telemetry, TraceHook, TraceParent};
 use zx_agent::events::{Budget, Event, EventKind, RunOutcome};
 use zx_agent::transcript::Transcript;
 use zx_agent::{Run, Session};
+use zx_app::config::Builtin;
+use zx_app::otel::{Telemetry, TraceHook, TraceParent};
+use zx_app::{Application, ConfiguredAgent, NoModel, Overrides};
 
 /// Exit codes, so schedulers can react without parsing output.
 pub(crate) const EXIT_COMPLETED: u8 = 0;
@@ -31,14 +31,14 @@ pub(crate) const EXIT_DENIED: u8 = 9;
 /// What the process shares, read and connected once for sessions of `agent`, with its
 /// startup notices written to stderr. Without a model, the error names the command line's
 /// ways to give one.
-pub(crate) async fn connect(overrides: Overrides, agent: Builtin) -> Result<Shared> {
-    let shared = Shared::from_environment(overrides, agent)
+pub(crate) async fn connect(overrides: Overrides, agent: Builtin) -> Result<Application> {
+    let app = Application::from_environment(overrides, agent)
         .await
         .map_err(with_model_hint)?;
-    for notice in &shared.notices {
+    for notice in app.notices() {
         eprintln!("{notice}");
     }
-    Ok(shared)
+    Ok(app)
 }
 
 /// `error`, or, when no model was given, the command line's ways to give one.
@@ -54,7 +54,7 @@ fn with_model_hint(error: anyhow::Error) -> anyhow::Error {
 
 /// The stored session `id` of `agent`, opened. A cut-short final record, which the next
 /// record replaces, is reported on stderr.
-pub(crate) async fn resume(agent: &ModeAgent, id: &str) -> Result<Session> {
+pub(crate) async fn resume(agent: &ConfiguredAgent, id: &str) -> Result<Session> {
     let session = agent.open(id).await?;
     let cut_off = session.with_transcript(Transcript::incomplete_tail_bytes)?;
     if cut_off > 0 {
@@ -238,7 +238,7 @@ where
     result
 }
 
-/// Export traces when an OTLP endpoint is configured (`crate::otel`), and say so on
+/// Export traces when an OTLP endpoint is configured (`zx_app::otel`), and say so on
 /// stderr.
 fn start_telemetry() -> Result<Option<Telemetry>> {
     let telemetry = Telemetry::from_env()?;

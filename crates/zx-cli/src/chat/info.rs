@@ -8,10 +8,10 @@ use zx_agent::Session;
 use zx_agent::ai::Message;
 use zx_agent::builtin::tools::BASH;
 use zx_agent::transcript::{Entry, Transcript};
+use zx_app::ConfiguredAgent;
 
 use super::output::{self, Output};
 use super::term::Tone;
-use crate::assembly::ModeAgent;
 use crate::render::{local_time, visible};
 
 /// How the last activity of a resumed session is shown.
@@ -38,11 +38,11 @@ pub(super) struct Resumed {
 impl About {
     /// What `session` of `agent` runs on, read before its first run; `file` is the session's
     /// file, `None` for a session in memory.
-    pub(super) fn of(agent: &ModeAgent, session: &Session, file: Option<PathBuf>) -> Result<Self> {
+    pub(super) fn of(agent: &ConfiguredAgent, session: &Session, file: Option<PathBuf>) -> Result<Self> {
         Ok(Self {
-            agent: agent.name.clone(),
+            agent: agent.name().to_string(),
             tools: session.tool_names().to_vec(),
-            auto_approve: agent.auto_approve_commands.clone(),
+            auto_approve: agent.auto_approve_commands().to_vec(),
             cwd: session.cwd().to_path_buf(),
             session: file,
             resumed: session.with_transcript(resumed)?,

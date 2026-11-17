@@ -1,6 +1,6 @@
 //! An agent made from its configuration: config.toml, the agent file and what one start of
-//! the program says over them. Every way in (run, chat, acp, im) builds its agent here, and
-//! none of this knows a command line or a terminal.
+//! the program says over them. Every way in (the command line's run, chat, acp and im, and
+//! other hosts) builds its agent here, and none of this knows a command line or a terminal.
 //!
 //! - `settings`: config.toml with the model and two variables over it
 //! - `shared`: what every session of a process shares, read or connected once
@@ -21,9 +21,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-pub use agent::{Approvals, ModeAgent};
-pub(crate) use place::PlaceKind;
-pub use place::SessionPlace;
+pub use agent::{Approvals, ConfiguredAgent};
+pub use place::{PlaceKind, SessionPlace};
 pub use settings::NoModel;
 pub(crate) use settings::Settings;
 pub(crate) use shared::{Shared, checked_secret_files};
@@ -51,7 +50,9 @@ pub struct Overrides {
 /// The working directory of a new session, which is what its header records: `cwd`, or the
 /// current directory, by its real path. Local and container execution record a directory
 /// the same way, and the container mounts the workspace at that path.
-pub(crate) fn resolve_cwd(cwd: Option<&Path>) -> Result<PathBuf> {
+///
+/// Fails when the directory cannot be resolved or is not a directory.
+pub fn resolve_cwd(cwd: Option<&Path>) -> Result<PathBuf> {
     let asked = match cwd {
         Some(path) => path.to_path_buf(),
         None => std::env::current_dir().context("cannot find the current directory")?,
@@ -89,7 +90,7 @@ fn check_session_cwd(explicit: Option<&Path>, session_cwd: &str) -> Result<()> {
 }
 
 /// The value of the environment variable `name`, when it is set and not empty.
-pub(crate) fn env_value(name: &str) -> Option<String> {
+pub fn env_value(name: &str) -> Option<String> {
     // A value that is not UTF-8 holds no usable key, token or path: it counts as unset.
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }

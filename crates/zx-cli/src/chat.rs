@@ -22,15 +22,14 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
-use crate::config::Builtin;
-use crate::otel::{Telemetry, TraceHook};
 use zx_agent::Session;
 use zx_agent::ai::{Provider, Reasoning};
 use zx_agent::input::Input;
 use zx_agent::session::SessionError;
+use zx_app::config::Builtin;
+use zx_app::otel::{Telemetry, TraceHook};
+use zx_app::{Application, Approvals, SessionPlace};
 
-use crate::assembly::SessionPlace;
-use crate::assembly::{self, Approvals, ModeAgent};
 use crate::cli::{self, ChatArgs};
 use crate::process::{EXIT_CANCELLED, EXIT_COMPLETED, EXIT_ERROR, Interrupt, Signals, with_telemetry};
 use crate::render::visible;
@@ -72,7 +71,7 @@ struct Built {
 
 /// What every conversation of this chat is built with.
 struct Chat {
-    shared: assembly::Shared,
+    app: Application,
     output: Arc<Output>,
 }
 
@@ -83,7 +82,7 @@ impl Chat {
     async fn build(&self, model: &str, place: &SessionPlace, resume: Option<&str>) -> Result<Built> {
         // The person at the terminal answers; `drive_turn` passes the answer on.
         let approvals = Approvals::Person("shell commands require interactive approval");
-        let agent = ModeAgent::build(&self.shared, model, place, approvals)?;
+        let agent = self.app.build(model, place, approvals)?;
         let session = match resume {
             Some(id) => crate::process::resume(&agent, id).await?,
             None => agent.create(None).await?,
@@ -97,7 +96,7 @@ impl Chat {
         Ok(Built {
             session,
             place: place.clone(),
-            provider: agent.provider,
+            provider: Arc::clone(agent.provider()),
             about,
             commands,
         })
@@ -138,7 +137,7 @@ async fn converse(args: ChatArgs, traces: Option<TraceHook>) -> Result<u8> {
         no_session,
         resume,
     } = args;
-    let shared = crate::process::connect(cli::overrides(base, &budget), Builtin::Assistant)
+    let app = crate::process::connect(cli::overrides(base, &budget), Builtin::Assistant)
         .await?
         .with_traces(traces);
     let mode = if std::io::stdin().is_terminal() {
@@ -148,12 +147,12 @@ async fn converse(args: ChatArgs, traces: Option<TraceHook>) -> Result<u8> {
     };
     let chat = Chat {
         output: Arc::new(Output::new(output_mode, deltas, color)),
-        shared,
+        app,
     };
     let output = &chat.output;
-    let model = chat.shared.settings.model.clone();
+    let model = chat.app.model().to_string();
     let resume = resume.as_ref().map(Option::as_deref);
-    let (storage, first) = opening(no_session, session, resume, chat.shared.overrides.cwd.as_deref()).await?;
+    let (storage, first) = opening(no_session, session, resume, chat.app.cwd()).await?;
     let built = chat.build(&model, &storage.place, first.id()).await?;
     let mut terminal = Terminal {
         signals: Signals::new().context("cannot register chat signal handlers")?,
@@ -172,7 +171,7 @@ async fn converse(args: ChatArgs, traces: Option<TraceHook>) -> Result<u8> {
         storage,
         built,
         model,
-        reasoning: chat.shared.settings.config.reasoning,
+        reasoning: chat.app.reasoning(),
     };
     loop {
         let line = match terminal.read(output).await? {
@@ -428,7 +427,7 @@ impl Repl<'_> {
     /// Give a new or reopened session the reasoning level /reasoning chose; it starts with
     /// the configured one.
     fn keep_reasoning(&self) {
-        if self.reasoning == self.chat.shared.settings.config.reasoning {
+        if self.reasoning == self.chat.app.reasoning() {
             return;
         }
         if let Err(error) = self.built.session.set_reasoning(self.reasoning) {
