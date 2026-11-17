@@ -16,7 +16,7 @@
 | `zx-ai-openai` | `crates/zx-ai-openai` | OpenAI 兼容的 provider；模型层里只有它依赖 reqwest，只依赖 `zx-ai` |
 | `zx-core` | `crates/zx-core` | 内核：入口 `Agent`、`Session`、`Run`，循环，会话记录与存储接口，摘要，工具、策略、钩子、扩展的接口 |
 | `zx-tools` | `crates/zx-tools` | 内置工具、执行环境（本机与容器）、命令与规则策略、续写、脱敏、落盘、会话文件存储（JSONL）、MCP |
-| `zx-im`、`zx-im-slack`、`zx-im-feishu` | `crates/zx-im*` | IM 服务与两个平台；与 `zx-tools` 互不依赖 |
+| `zx-im`、`zx-im-slack`、⚑ D:5/CHINA FLAG: `zx-im-feishu` | `crates/zx-im*` | IM 服务与两个平台；与 `zx-tools` 互不依赖 |
 | `zx-agent` | `src/lib.rs` | SDK：把 `zx-core`、`zx-ai`、`zx-ai-openai`、`zx-tools` 再导出成一个库，没有自己的代码 |
 | `zx-cli` | `crates/zx-cli` | 命令行（都在库里，`main.rs` 只调用它；可执行文件仍叫 `zx-agent`）。`application` 提供复用配置装配的宿主入口，内部 `assembly` 与命令行参数分开；`config`（`config.toml` 与 agent 文件）、`otel`（追踪导出）供这一层共用；`run`、`chat`、`acp`、`im` 互不引用 |
 

@@ -16,6 +16,8 @@
 
 ## 3. 已定决策
 
+每条是现行规则；细节以所指的文档与 rustdoc 为准。
+
 | 编号 | 现行规则 |
 |---|---|
 | D2 | 已授权的依赖：`toml`、`rmcp`、ACP 官方 Rust SDK（`agent-client-protocol`，只开 `stdio`）、`opentelemetry` / `opentelemetry_sdk` / `opentelemetry-otlp`、`chrono`（只开 `clock`）、`jsonschema`（`zx-core` 默认开启的 feature `json-schema`）、`thiserror`、`tokio-tungstenite`。reqwest 0.13，rustls 只用 aws-lc-rs 一个加密后端；HTTPS 的根证书用系统信任库，IM 的 WebSocket 长连接用编译进程序的根证书（`tokio-tungstenite` 的 `rustls-tls-webpki-roots`）。ACP SDK 打开了 serde_json 的 `preserve_order`。其他新依赖与升级先征得同意 |
@@ -28,27 +30,27 @@
 | D13 | 界面交给 ACP 客户端：`acp` 只实现 agent 一侧；`chat` 冻结为应急与脚本化入口，不再加功能；`run` 保留并维护 |
 | D14 | 不做 rpc 模式：非 Rust 宿主经 ACP，无人值守经 `run`，常驻服务经 `im` 与 SDK |
 | D15 | 只读写当前会话格式（`SESSION_VERSION` 为 11），其他版本的会话一律拒绝创建与加载；格式变化时提高版本号，不写升级代码 |
-| D16 | IM 按人的对话直觉：私聊整段一个会话，群聊一个线程一个会话；机器人参与过的线程里不 @ 它的消息只记作上下文，刚被它回答的人接着说不必 @；不读频道历史，不加开关。细节见 `docs/REFERENCE.md` 的“IM 服务” |
+| D16 | IM 按人的对话直觉：私聊整段一个会话，群聊一个线程一个会话；机器人参与过的线程里不 @ 它的消息只记作上下文，刚被它回答的人接着说不必 @；不读频道历史，不加开关。细节见 [REFERENCE.md](REFERENCE.md#im-服务) |
 | D17 | `config.toml` 是环境，agent 文件是角色，都在主目录（`~/.zx-agent`，`ZX_AGENT_HOME` 可改）；agent 的 front matter 用 TOML。没有项目级配置文件，项目内容不能改变环境或权限；主目录的 `agents/<名字>.md` 替换同名内置 agent，没有 `--agent`；权限用 ask / allow / deny。键与规则见 [CONFIGURATION.md](CONFIGURATION.md) |
 | D18 | 没有命令白名单、幂等键与增量摘要；摘要只用全量模式，摘要源上限 2 MiB，超过后要 `/new` 开新会话 |
 | D19 | CLI 精简：chat 没有执行时间线、状态行、fork 与会话树命令（会话树与复制在 SDK）；otel 只导出 span；审批等待只有 `config.toml` 的 `approvalTimeoutSecs`（默认 600 秒，chat、acp 与 im 共用）；`--session` 只属于 `run` 与 `chat`；`[[mcp]]` 没有不看进度的总超时 |
-| D20 | 会话可以起名（pi 的 `/name`）：追加 `session_info` 记录，不改头部与文件名；以文件中最后一条为准，与分支无关，不进入模型上下文，复制分支时随分支上的记录复制。名称只有一行（控制字符换成空格、去掉首尾空白），不能为空，也不能清除。`zx-agent sessions` 与 `session/list` 有名称时显示名称。起名只经 ACP 的 `/name <名称>`（`available_commands_update` 声明，`session_info_update` 通知标题，不请求模型）与 SDK 的 `Session::set_name`；chat 按 D13 不加命令；协议中由客户端改标题的 `session/set_title` 仍不稳定，不实现 |
-| D21 | 唯一入口是 `Agent`、`Session` 与由调用方读取的 `Run`；`Runner`、`StepLoop`、`LoopConfig` 与 `Toolbox` 为内核内部类型。预算与计数由一次运行持有，重试与溢出恢复共用。attempt 从 1 开始，首次、重试和溢出恢复都计入，retry 从 1 开始只计重试；契约见 [LIBRARY.md](LIBRARY.md) 与各类型 rustdoc |
-| D22 | 摘要功能统一叫 compaction：这次操作本身（触发、开始、结果、失败）及其记录、模块、类型、函数与 ID 都叫 compaction（`transcript::compaction`、`compaction::Compactor`，记录中指向 `compaction_started` 的字段叫 `compactionId`）；summary 只指 compaction 产出的文本、文本的限额，以及向模型要这段文本的请求（`request_start` 的 `kind: summary`、会话中的 `RequestSource::Summary`）；attempt 只用于运行的尝试（D21） |
-| D23 | 领域词只有 Session、Run、Step、ToolCall 四层：一次任务请求及其工具调用叫 step（事件 `step_start` / `step_end`、钩子 `finish_step`、追踪中的 `step` span），不再叫 turn；ACP 协议与 chat 界面里的 turn 指一次提问到回答，保持原样。attempt 仍只表示运行的尝试（D21），其事件叫 `attempt_start` / `attempt_end`。运行结果用过去分词：`completed`、`truncated`、`failed`、`cancelled`、`timed_out`；预算用完是 `budget_exhausted`，另带 `budget` 与 `truncated`，`budget` 沿用配置里的名字 `model_request_limit`、`token_budget`、`cost_budget`，因为退出码、IM 回复与 ACP 的停止原因都要逐个区分它们；`outcome` 在 JSON 中仍是一个字符串。会话的记录树叫 transcript（模块 `transcript`、类型 `Transcript`）。事件格式版本为 5 |
-| D24 | 库与接入方式分开：根包 `zx-agent` 是 SDK，只把 `zx-core`、`zx-ai`、`zx-ai-openai` 与 `zx-tools` 再导出成一个库，不依赖命令行解析、ACP、追踪导出与 IM。命令行是 `zx-cli`（可执行文件仍叫 `zx-agent`，带 `config.toml`、agent 文件与追踪导出），IM 服务是 `zx-im`；新的接入方式（如 Web 服务）是建在库上的独立 crate，不进库。集成测试按是否需要编译出的程序分两处：只用库的在根目录 `tests/`，驱动程序的在 `crates/zx-cli/tests/`，不按 crate 再分 |
-| D25 | 会话写入失败、超时或写入中被丢弃后自行关闭，由 `Agent` 从存储重开。文件工具按宿主传入的队列（`builtin_tools` 的 `files`）共享按路径的锁，`zx-cli` 让一个进程的所有会话共用一个；读改写与后台写入都在锁内完成，取消调用不提前释放写入的锁。契约见 [SECURITY.md](SECURITY.md) 与 `Transcript`、`Executor` rustdoc |
-| D26 | 运行用完预算报告 `BudgetExhausted { budget, truncated }`，预算按整次运行累计，由内核判断续写是否还有预算。配置费用预算后，每次任务请求在钩子选定最终模型后校验单价，自动、手动摘要及溢出恢复也校验；无法计价时在发送前失败。退出码与格式见 [REFERENCE.md](REFERENCE.md) |
-| D27 | IM 路由器只分派消息，按会话索引（D28）判断机器人是否参与过对话。运行、排队和空闲 worker 的总数以及待处理消息的数量和文本字节有上限。打开会话都要先取得运行名额，包括为写入闲聊重新打开；运行结束时先归还名额，没读到的插话作为下一次运行的提问重新排队，`/cancel` 则丢弃它们；第一次为线程建会话前先读线程历史。请求记录必须指向它所在分支上生效的请求配置（写入时一直如此），回放时直接比较；重回放在阻塞线程上完成；摘要投影跳过已被替换的正文。会话与事件格式不变 |
-| D28 | 会话头部与完整列表分开：`SessionStorage::headers` 只读头部，供宿主建自己的会话索引，打开时仍完整校验；JSONL 存储不缓存。IM 服务启动时从会话头部建立对话到会话的索引（每个对话取最近创建的会话），此后只由本进程维护；没 @ 机器人的消息只进入机器人参与过的对话，因容量被拒时不回复。IM 消息从路由接纳起持有同一份数量/文本字节配额，作为输入的凭证（`PendingInput::held`）转移到 waiting、heard 与 steering，消费或丢弃后归还；内核只携带凭证，不计配额；短控制命令和审批不占这份文本配额。宿主可用 `zx_cli::application::Application` 复用配置装配，显式配置不读进程配置覆盖，启动提示交由宿主处理；暂留在 `zx-cli`，有第二个独立宿主后再抽 crate。会话与事件格式不变 |
-| D29 | 内核只留机制：会话文件存储（JSONL，`flock`、尾记录修复与写线程）在 zx-tools（`builtin::jsonl`），内核定义记录与头部行的格式（`SessionHeader::to_line`、`from_line`、`check_version`）和存储接口，自带的存储只有 `MemoryStorage`，不依赖 libc。内核的输入队列只携带宿主的凭证（`PendingInput::held`），配额由宿主计量。文件工具的按路径锁由宿主传入（`builtin_tools` 的 `files`），不用进程级单例。zx-tools 的 MCP 客户端是默认开启的 feature `mcp`。`ApiKeySource` 是异步接口，受 `idle_timeout` 约束。`zx_cli::application` 的显式配置经 `Config::validate` 检查，缺模型时报 `NoModel`；assembly 不打印、措辞不提命令行参数。会话与事件格式不变 |
-| D30 | 宿主声明它给出的提示词段名（`SessionSetup::section_names`），扩展不能占用这些名字与 `preamble`；内核不再知道命令行的段名，`SystemPrompt::new` 取代 `build_system_prompt`，内核的 `prompt` 模块删除。内核内部指会话记录树的名字统一为 `transcript`。自动摘要只在请求得到回答、摘要却不可用时暂停（`SummaryReply`），请求出错、断流或超时不暂停。空闲时经 `Session::append_custom_message` 追加消息之前，先为中断的调用补写结果。钩子的上下文编辑计划按钩子所见上下文的 entry 解析，不随记录后变化的投影错位。被 `/cancel` 或 `/new` 停止的 IM 运行不再接收输入，期间的提问留给下一次运行；首个会话只读入触发消息之前的线程历史；存储里已没有的会话由新会话接替。平台替换文本被拒时改发新消息（`ImChannel::update` 的契约）；⚑ D:5/CHINA FLAG: 飞书外发内容中和提及标签；两个平台 crate 都只依赖 zx-im。会话与事件格式不变 |
+| D20 | 会话可以起名（pi 的 `/name`）：追加 `session_info` 记录，不改头部与文件名，以最后一条为准，不进入模型上下文，不能清除。只经 ACP 的 `/name` 与 SDK 的 `Session::set_name` 设置；chat 按 D13 不加命令；`session/set_title` 在协议中仍不稳定，不实现。细节见 [REFERENCE.md](REFERENCE.md) |
+| D21 | 唯一入口是 `Agent`、`Session` 与由调用方读取的 `Run`；`Runner`、`StepLoop`、`LoopConfig` 与 `Toolbox` 为内核内部类型。预算与计数由一次运行持有，重试与溢出恢复共用；attempt 从 1 开始，首次、重试和溢出恢复都计入，retry 从 1 开始只计重试 |
+| D22 | 摘要功能统一叫 compaction：操作本身及其记录、模块、类型与 ID 都叫 compaction（记录中指向 `compaction_started` 的字段叫 `compactionId`）；summary 只指 compaction 产出的文本、文本的限额，以及向模型要这段文本的请求（`kind: summary`、`RequestSource::Summary`） |
+| D23 | 领域词只有 Session、Run、Step、ToolCall 四层：一次任务请求及其工具调用叫 step，不叫 turn；ACP 协议与 chat 界面里的 turn 指一次提问到回答。运行结果用过去分词：`completed`、`truncated`、`failed`、`cancelled`、`timed_out`；预算用完是 `budget_exhausted`，另带 `budget`（`model_request_limit`、`token_budget` 或 `cost_budget`）与 `truncated`，因为退出码、IM 回复与 ACP 的停止原因都要逐个区分预算。会话的记录树叫 transcript。事件格式版本为 5 |
+| D24 | 库与接入方式分开：根包 `zx-agent` 是 SDK，只把 `zx-core`、`zx-ai`、`zx-ai-openai` 与 `zx-tools` 再导出成一个库，不含命令行解析、ACP、追踪导出与 IM；命令行是 `zx-cli`（可执行文件仍叫 `zx-agent`），IM 服务是 `zx-im`，新的接入方式（如 Web 服务）是建在库上的独立 crate。集成测试按是否需要编译出的程序分两处：根目录 `tests/` 与 `crates/zx-cli/tests/` |
+| D25 | 会话写入失败、超时或写入中被丢弃后自行关闭，由 `Agent` 从存储重开。文件工具的按路径锁由宿主传入（`builtin_tools` 的 `files`），`zx-cli` 让一个进程的所有会话共用一个；读改写与后台写入都在锁内完成，取消调用不提前释放 |
+| D26 | 预算按整次运行累计，用完报告 `BudgetExhausted { budget, truncated }`，续写是否还有预算由内核判断。配置费用预算后，任务请求在钩子选定最终模型后校验单价，自动、手动摘要与溢出恢复也校验；无法计价时在发送前失败 |
+| D27 | IM 路由器只分派消息，运行、排队与空闲的会话数以及每个会话待处理消息的数量与文本字节都有上限。打开会话都要先取得运行名额；运行结束时没读到的插话作为下一次运行的提问重新排队，`/cancel` 丢弃它们；第一次为线程建会话前先读线程历史 |
+| D28 | 宿主建自己的会话索引用 `SessionStorage::headers`，只读头部，打开时仍完整校验；JSONL 存储不缓存。IM 服务启动时从会话头部建立对话到会话的索引（每个对话取最近创建的会话），此后只由本进程维护。IM 的配额作为输入的凭证（`PendingInput::held`）随消息转移，内核只携带、不计量 |
+| D29 | 内核只留机制：会话文件存储（JSONL）在 zx-tools，内核定义记录格式与存储接口，自带的存储只有 `MemoryStorage`，不依赖 libc。`zx_cli::application::Application` 让其他宿主复用配置装配，显式配置经 `Config::validate` 检查，装配不打印、措辞不提命令行参数；有第二个独立宿主后再抽成独立 crate |
+| D30 | 宿主经 `SessionSetup::section_names` 声明它给出的提示词段名，内核不知道命令行的段名。自动摘要只在请求得到回答、摘要却不可用时暂停，出错、断流或超时不暂停。两个 IM 平台 crate 都只依赖 `zx-im` |
 
 ## 4. 当前阶段
 
-P0–P5、P10–P14（P10 为与 pi 的能力对齐）、P16、P17 与 P18 已完成（P16、P17 经 PR #105 合并，P18 经 PR #107 合并）。上一轮项目审查优化（D25–D27）的实现与本地验证已完成；D28 的实现与本地验证已完成；随后一轮评审优化（D29 及 D25–D28 的修订）已在本地实现并通过验证，其后复核并修正了评审遗留的 7 处问题（追踪 span、第二次信号、文件检查与打开之间的替换、落盘钩子与分页工具成对、环境段的时间、`Retry-After` 日期、IM 建连时的停止），经 PR #110 合并（`60d8bfd`）；第三轮评审的一致性修复与整洁重构（D30），连同 PR #110 合并后才补上的 `/cancel` 回归修正，经 PR #111 合并（`1a198f2`）；真实平台与部署验收仍见第 5 节。进行中：
+P0–P5、P10–P14（P10 为与 pi 的能力对齐）与 P16–P18 已完成，之后几轮评审定下的规则见 D25–D30。真实平台与部署的验收见第 5 节。进行中：
 
-- P6 执行环境：已实现，待真实集群与真实 IM 平台验收（第 5 节）。
+- P6 执行环境：已实现，待真实集群与真实 IM 平台验收。
 - P7 扩展与 MCP：已实现，待真实 MCP 服务器验收。
 - P8 `acp`：已实现，待在 Zed 或 Wisp 上实测。
 - P9 可选增强：剩更多 provider。
@@ -60,25 +62,22 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）、P16、P17 与 P18 已�
 - 真实 IM 平台验收（待凭据）：在 Slack 工作区与 ⚑ D:5/CHINA FLAG: 飞书租户中各跑通一次 @、回答与审批；换用 reqwest 0.13 与 rustls 后，对这两个平台的 HTTPS 连接没有验证过。
 - 真实集群验收：常驻 Pod 部署包与多集群配置没有在真实集群上执行过；只读规则只看命令字面。
 - 真实 MCP 服务器验收：对一个 Streamable HTTP 服务器跑通列出、调用与审批；HTTPS 未测。
-- ACP 客户端实测：只用手写客户端与 SDK 示例客户端验证过。顺带确认客户端是否发 `session/close`：不发时，`acp` 建过的会话留在内存中、文件保持锁定到进程退出，再考虑像 `im` 一样空闲释放。
-- IM 服务崩溃时丢失已确认、未处理的消息（重启后只替换遗留的“处理中…”）；持久化收件等多副本或实际丢消息时再评审。
+- ACP 客户端实测：只用手写客户端与 SDK 示例客户端验证过。顺带确认客户端是否发 `session/close`：不发时，`acp` 建过的会话留在内存中、文件保持锁定到进程退出，再考虑像 `im` 一样空闲释放。会话自行关闭之后，`session/prompt` 以“会话未打开”应答，客户端要先 `session/load` 或 `session/resume`；要自动重开，得记下客户端认为打开着的会话编号，未做。
+- IM 服务崩溃时丢失已确认、未处理的消息（重启后只替换遗留的“处理中…”）；持久化收件等多副本或实际丢消息时再评审。IM 的对话索引只由本进程更新，前提是只有本进程为这些对话建会话，多副本部署时要改为共享索引；索引随机器人参与过的对话增长，不淘汰。
 - 输入被钩子改写时，原始输入与替换它的 `context_edit` 分两次追加，其间崩溃时原始输入会留在投影中。
 - 会话写入只 `flush`、不 `fsync`，断电时已写入的记录可能没有落盘。
+- JSONL 存储不缓存：`headers` 每次读取查询范围内每个会话文件的头部，`list` 每次回放匹配的会话；会话很多、ACP 客户端频繁列出时，再引入磁盘索引或数据库。
 - 待评估：保留近期用户消息原文、摘要前把较早的长工具结果换成引用（可推迟碰到 2 MiB 上限）；失败运行后排队输入的处置（pi 的 `afterFailedRun`，现由宿主用 `take_queued` 处置）；工具触发的 `handoff`（pi 的 `control.handoff`，要先定会话格式）。
 - 暂缓：审计中写明自动放行命中的前缀（要改 `PolicyDecision` 的 JSON 契约）；FauxProvider 响应增量之间的取消、可脚本化 `ProviderError`；provider 取消后的宽限期与 `stop_reason` 一致性检查；`JsonlFile::create` 失败后留下文件。
 - 待用户决定：`run` 的内置 agent（及部署的 `unattended.md`）是否默认开启自动摘要；现在关闭，撞到上下文上限时以退出码 1 结束，开启的代价是摘要丢失信息。
 - 定时巡检的会话文件不自动清理，需要部署方定期删除。
 - 对照 pi durable 的较大项（待评审）：排队消息落盘（同时解决 IM 丢消息）、部分结果落盘、后台摘要（宿主已可用 `Summarizer` 自己产出摘要，钩子仍不提供摘要）、按会话的扩展（按会话的工具、钩子、提示词段落与工作目录已由 `SessionSetup` 给出）、扩展的可读状态、延迟加载的工具与 `tool_search`、持久化的睡眠与定时、宿主侧的环境接口、附带的数据库存储（接口 `SessionStorage` 已有，实现由宿主给出）。
-- 应用装配已通过 `zx_cli::application` 公开，仍要依赖整个 `zx-cli`；有第二个独立宿主后，才把 application、config 与 otel 一起提到独立 crate，CLI 保留参数、渲染、退出码与协议适配。当前入口经测试覆盖显式配置、会话创建与续接、失败与启动提示，尚无真实 Web 宿主验收。
-- JSONL 存储不缓存：`headers` 每次读取查询范围内每个会话文件的头部，`list` 每次回放匹配的会话；会话很多、ACP 客户端频繁列出时，再引入磁盘索引或数据库。
-- 执行环境扩展前，需让执行器提供文件资源身份：共享宿主挂载的同一文件共用键，容器/远程私有文件带环境域，并在目标文件系统解析别名。当前锁仍按宿主路径协调；本轮未增加新执行环境或修改容器镜像要求。多副本之前还需定义持久化收件、会话所有权与接管，当前仍以单进程为部署边界。
+- 应用装配经 `zx_cli::application` 公开，仍要依赖整个 `zx-cli`；有第二个独立宿主后，才把 application、config 与 otel 一起提到独立 crate，CLI 保留参数、渲染、退出码与协议适配。尚无真实 Web 宿主验收。
+- 执行环境扩展前，需让执行器提供文件资源身份：共享宿主挂载的同一文件共用键，容器/远程私有文件带环境域，并在目标文件系统解析别名；当前锁按宿主路径协调。多副本之前还需定义持久化收件、会话所有权与接管，当前以单进程为部署边界。
 - 测试适配层经隐藏的 `Agent::adopt_session` 把测试给的 `Transcript` 变成会话。要删掉它，得让测试经存储建会话：约 80 处建会话的写法与 160 处 `build()` 要改成异步，收益只是少一个隐藏的方法，未做。
-- 容器里的文件写入在调用被丢弃后仍写完，只用假 docker 验证过；`real_` 测试要真实 Docker，这一轮没有运行。
+- 容器里的文件写入在调用被丢弃后仍写完，只用假 docker 验证过。
 - 落盘目录的符号链接检查与随后的打开之间有竞态：同时在跑的命令可以在两者之间换掉目录。要消除得从工作目录起按目录描述符逐级打开，未做。
-- chat 在会话自行关闭后重开：没有端到端测试，子进程中途写入失败无法确定性地构造，只测了从错误链认出会话已关闭。
-- 尾记录修复改在写线程上做之后，卷无响应时运行时不被阻塞这一点无法确定性地测试，只测了修复本身；MCP 放弃通知的 10 秒超时没有测试。
-- IM 的对话索引在启动时从会话头部建立，此后只由本进程更新，前提是只有本进程为这些对话建会话；多副本部署时要改为共享索引。索引随机器人参与过的对话增长，不淘汰。
-- 会话自行关闭之后，ACP 的 `session/prompt` 以“会话未打开”应答，客户端要先 `session/load` 或 `session/resume`；要让它自动重开，得记下客户端认为打开着的会话编号，未做。
+- 没有确定性测试的行为：chat 在会话自行关闭后重开（子进程中途写入失败无法确定性地构造，只测了从错误链认出会话已关闭）；尾记录修复在写线程上进行时，卷无响应不阻塞运行时（只测了修复本身）；MCP 放弃通知的 10 秒超时。
 
 ## 6. 验证记录
 
@@ -107,4 +106,4 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）、P16、P17 与 P18 已�
 
 ---
 
-ROADMAP.md · v0.25 · 2026年11月
+ROADMAP.md · v0.26 · 2026年11月
