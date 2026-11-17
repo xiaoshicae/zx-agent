@@ -1,6 +1,6 @@
-# 配置：config.toml 与 agent
+# 配置：config.toml、agent 与 im.toml
 
-配置分两部分，都放在主目录里，都可以没有：`config.toml` 决定环境（模型、provider、执行环境、MCP 服务器、模型元数据、落盘位置），没有时用内置默认值；agent 决定角色（说明、工具、权限、预算、项目上下文、skills、摘要），没有时用内置的 agent。
+配置分两部分，都放在主目录里，都可以没有：`config.toml` 决定环境（模型、provider、执行环境、MCP 服务器、模型元数据、落盘位置），没有时用内置默认值；agent 决定角色（说明、工具、权限、预算、项目上下文、skills、摘要），没有时用内置的 agent。IM 服务另有自己的配置文件 `im.toml`，见文末。
 
 ## zx-agent 主目录
 
@@ -12,7 +12,7 @@
 | `agents/assistant.md`、`agents/unattended.md` | 替换同名的内置 agent |
 | `sessions/--<工作目录>--/` | chat 与 acp 的默认会话目录（`/` 换成 `-`），`zx-agent sessions` 列出的也是它 |
 
-只读主目录里的 `config.toml`，没有项目级配置文件：项目内容不能改变环境或权限。要为某个项目换一套配置，用另一个 `ZX_AGENT_HOME`。`im` 的 `--config <im.toml>` 是 IM 服务自己的配置文件，见 README 的“IM 服务”。
+只读主目录里的 `config.toml`，没有项目级配置文件：项目内容不能改变环境或权限。要为某个项目换一套配置，用另一个 `ZX_AGENT_HOME`。
 
 ## config.toml
 
@@ -49,7 +49,7 @@ cost = { input = 0.27, output = 1.10, cacheRead = 0.07 }   # 每百万 token 的
 | `provider.maxTokensField` | 输出 token 上限（`maxTokens`，以及摘要请求的 `compaction.maxSummaryTokens`）写进请求体的字段名：`max_tokens`（默认）或 `max_completion_tokens`，以服务的文档为准。OpenAI 的 API 已弃用 `max_tokens`，其 o 系列模型不接受它；不设上限的请求两个字段都不带 |
 | `provider.fillMissingReasoning` | `true` 时，只要此前有一个回答带 `reasoning_content`，其余回答发送时补一个空的，用于拒绝“只有部分回答带推理”的思考模式服务 |
 | `provider.promptCacheKey` | `true` 时把会话 ID 作为 `prompt_cache_key` 发送；拒绝未知字段的服务不能打开 |
-| `provider.requestFields` | 加到每个请求体中的字段（TOML 的值按 JSON 发送），如 ⚑ D:5/CHINA FLAG: DeepSeek 的 `thinking = { type = "disabled" }`。zx-agent 自己设置的字段（`model`、`messages`、`stream`、`stream_options`、`tools`，以及输出上限的两个字段名 `max_tokens` 与 `max_completion_tokens`）被拒绝；设了 `reasoning` 时，与它按 `reasoningFormat` 写入的字段重名也被拒绝 |
+| `provider.requestFields` | 加到每个请求体中的字段（TOML 的值按 JSON 发送），如下文 ⚑ D:5/CHINA FLAG: DeepSeek 示例中的 `thinking`。zx-agent 自己设置的字段（`model`、`messages`、`stream`、`stream_options`、`tools`，以及输出上限的两个字段名 `max_tokens` 与 `max_completion_tokens`）被拒绝；设了 `reasoning` 时，与它按 `reasoningFormat` 写入的字段重名也被拒绝 |
 | `provider.headers` | 每个请求都发送的请求头，如网关的路由头；`Authorization` 被拒绝。不记录在会话中 |
 | `provider.idleTimeoutSecs` | 等待响应头或下一段流的最长时间，秒，至少 1，默认 120 |
 | `provider.maxRetries` | 临时性错误的重试次数，默认 3 |
@@ -58,6 +58,26 @@ cost = { input = 0.27, output = 1.10, cacheRead = 0.07 }   # 每百万 token 的
 | `[[mcp]]` | 外部 MCP 服务器，见下文“MCP 服务器” |
 
 推理设置、`maxTokensField`、`fillMissingReasoning`、缓存 key 与 `requestFields` 都记入会话的请求审计。
+
+### provider 示例：⚑ D:5/CHINA FLAG: DeepSeek
+
+⚑ D:5/CHINA FLAG: DeepSeek（官方文档页面没有写明公司所在地；据公开信息为中国公司，未核实）。
+
+⚠ COMPLIANCE REVIEW: [对话内容、命令输出与工具结果会发往该服务的 API，属于远程访问与数据外发] 使用前须经法务 / 出口合规审批（Subject to Legal/Export Compliance approval）。
+
+该服务的 API 兼容 OpenAI 格式（[官方文档](https://api-docs.deepseek.com/)），用现有的 provider 即可：
+
+```toml
+model = "deepseek-flash"
+
+[provider]
+baseUrl = "https://api.deepseek.com"
+apiKeyEnv = "DEEPSEEK_API_KEY"
+# 关闭思考模式：
+# requestFields = { thinking = { type = "disabled" } }
+```
+
+思考模式默认开启，`requestFields` 中的 `reasoning_effort` 调整强度。回答中的 `reasoning_content` 记入会话并回传给模型（官方文档：带工具的请求必须回传，否则返回 400）。历史中混有不带推理内容的回答（如中途换过模型）时打开 `provider.fillMissingReasoning`：pi 记录过该服务对这种历史返回 “The `reasoning_content` in the thinking mode must be passed back to the API.”（pi #3668），本项目没有实测这种情况。
 
 ### 容器执行
 
@@ -75,9 +95,25 @@ cost = { input = 0.27, output = 1.10, cacheRead = 0.07 }   # 每百万 token 的
 
 ## agent
 
-`run` 使用内置的 `unattended`，`chat`、`im` 与 `acp` 使用内置的 `assistant`，即仓库的 [`crates/zx-cli/agents/unattended.md`](../crates/zx-cli/agents/unattended.md) 与 [`crates/zx-cli/agents/assistant.md`](../crates/zx-cli/agents/assistant.md)，构建时嵌入程序。主目录下的同名文件替换它们；其他文件名不会被读取，也没有选择 agent 的命令行参数。Kubernetes 用的 agent 在 `deploy/kubernetes/agents/`。
+### 内置 agent
 
-文件最多 64 KiB：第一行 `+++` 到下一行 `+++` 之间是 TOML front matter，之后是说明（系统提示词的开头）。格式错误或有未知的键时以退出码 2 报错。完整示例在 [`examples/agents/`](../examples/agents/)。
+`run` 使用内置的 `unattended`，`chat`、`acp` 与 `im` 使用内置的 `assistant`，构建时嵌入程序（全文在仓库的 `crates/zx-cli/agents/`）。主目录下的同名文件替换它们；其他文件名不会被读取，也没有选择 agent 的命令行参数。Kubernetes 用的 agent 在仓库的 `deploy/kubernetes/agents/`。
+
+| | `unattended` | `assistant` |
+|---|---|---|
+| 说明 | 没有人值守：只用工具收集证据，最后给出结果 | 和终端里的人对话 |
+| 工具 | `bash`、`read_file`、`read_skill` | `bash`、`read_file`、`edit_file`、`write_file`、`grep`、`find`、`ls`、`read_skill`、`read_output` |
+| 权限 | 没有 `[permissions]`：bash 命令除内置的拒绝规则外都直接执行 | bash、`edit_file`、`write_file` 要审批；`grep`、`head`、`tail`、`wc`、`jq` 开头的命令直接执行（`allowExcept = ["secret"]`） |
+| 上限 | 30 次模型请求、900 秒 | 不限 |
+| 截断后续写（`continueOnLength`） | 1 次 | 不续写 |
+| 项目 `AGENTS.md`（`context.discover`） | 不加载 | 加载 |
+| 自动摘要（`compaction.triggerBytes`） | 关闭 | 上下文超过 256 KiB 时 |
+
+`read_skill` 只在登记了 skill 时提供；`read_output` 见下文“工具结果落盘”。
+
+### 文件格式
+
+文件最多 64 KiB：第一行 `+++` 到下一行 `+++` 之间是 TOML front matter，之后是说明（系统提示词的开头）。格式错误或有未知的键时以退出码 2 报错。完整示例在仓库的 `examples/agents/`。
 
 ```markdown
 +++
@@ -108,7 +144,7 @@ You review code without changing files.
 | `limits.timeoutSecs` | 每轮总时间上限，`0` 关闭 |
 | `limits.tokenBudget` | 每轮输入加输出 token 上限，以服务返回的用量为准，摘要请求、失败的尝试与缓存命中的输入也计入；`0` 关闭。用完时 run 以退出码 7 结束 |
 | `limits.costBudget` | 每轮花费上限，按 `[[models]]` 的单价计算，单位与单价相同；摘要请求与失败的尝试计入，工具报告的花费不计入；`0` 关闭。模型没有单价时以退出码 2 拒绝启动；切换模型或请求钩子选择了未配置单价的模型时，该次运行在发送请求前失败。用完时 run 以退出码 8 结束 |
-| `context.discover` | 是否自动发现项目 `AGENTS.md`；`assistant` 开启，`unattended` 关闭 |
+| `context.discover` | 是否自动发现项目 `AGENTS.md`，见下文“项目上下文” |
 | `context.files` | 显式上下文文件 |
 | `[[skills]]` | 登记 `name`、`description`、`path`；正文由 `read_skill` 按需读取 |
 | `compaction.*` | 见下文“上下文管理” |
@@ -147,7 +183,7 @@ shortFlags = ["A"]
 
 ## MCP 服务器
 
-只支持 Streamable HTTP，本项目只做客户端；行为见 README 的“MCP 工具”。
+只支持 Streamable HTTP，本项目只做客户端。
 
 ```toml
 [[mcp]]
@@ -165,6 +201,10 @@ tools = ["query", "query_range"]
 | `tools` | 交给模型的工具，至少一个，其余不暴露；服务器缺少其中的工具时启动失败 |
 | `timeoutSecs` | 可选，一次调用多久没有应答也没有进度通知就超时，默认同 `toolTimeoutSecs`；每条进度通知重新计时 |
 
+- 只有列出的工具交给模型；agent 的 `permissions.allow` 列出的直接执行，其余每次都要审批（run 中因此拒绝）。服务器给出的 annotations 不影响放行。
+- 每个进程启动时连接一次；连不上、token 变量没有值、服务器缺少列出的工具时以退出码 2 报错。成功时 stderr 每个服务器一行 `[mcp] <名字>: <工具>; protocol <版本>; <地址>`，经 `http://` 发送 token 时另加 `the token is sent unencrypted`。
+- 先用 `server/discover` 握手，旧服务器回退到 `initialize`。结果中的文本原样交给模型，图片、音频与二进制资源只写一行说明，最多 2000 行或 50 KiB；进度通知作为工具进度显示。
+
 ## 项目上下文
 
 开启 `context.discover` 时，从最近的 Git 根目录到工具 cwd 依次加载各层 `AGENTS.md`（没有 Git 根目录时只检查 cwd）。自动发现的文件解析符号链接后必须位于 Git 根目录（或 cwd）内，否则在请求模型前以退出码 2 报错。每个文件最多 64 KiB，总量最多 256 KiB，超限报错，不截断。在不可信的仓库中运行时，用 `discover = false` 的 agent。
@@ -175,7 +215,7 @@ skills 只来自 agent 的 `[[skills]]`，不扫描全局目录，不解析 SKIL
 
 ## 上下文管理
 
-`assistant` 默认在上下文超过 256 KiB 时自动摘要，`unattended` 关闭。手动 `/compact` 不受这些设置影响。一次提问之内的工具调用超过阈值时同样摘要：较早的调用与结果进入摘要，这条提问原样保留在摘要之前。
+自动摘要由 `compaction.triggerBytes` 或 `compaction.triggerTokens` 开启；手动 `/compact` 不受这些设置影响。一次提问之内的工具调用超过阈值时同样摘要：较早的调用与结果进入摘要，这条提问原样保留在摘要之前。
 
 | 键 | 语义 |
 |---|---|
@@ -190,7 +230,7 @@ skills 只来自 agent 的 `[[skills]]`，不扫描全局目录，不解析 SKIL
 
 ## 工具结果落盘
 
-`assistant` 启用 `read_output`；`unattended` 不启用，结果保持内联。启用时，超过阈值的工具结果在脱敏之后写入文件，会话与模型收到它的第一页，末尾的脚注给出输出 ID 与下一页的字节偏移（`[Use read_output with id="<输出 ID>", offset=<偏移> to continue.]`），其余由模型用 `read_output` 分页读取；一页连同脚注不超过阈值。文件在结果目录中名为 `<输出 ID>.txt`。`read_file`、`read_skill` 与 `read_output` 自己分页，它们的结果不落盘。写入失败或 3 秒内没完成时结果保持内联。
+agent 启用 `read_output` 时，超过阈值的工具结果在脱敏之后写入文件，会话与模型收到它的第一页，末尾的脚注给出输出 ID 与下一页的字节偏移（`[Use read_output with id="<输出 ID>", offset=<偏移> to continue.]`），其余由模型用 `read_output` 分页读取；一页连同脚注不超过阈值。不启用时结果保持内联。文件在结果目录中名为 `<输出 ID>.txt`。`read_file`、`read_skill` 与 `read_output` 自己分页，它们的结果不落盘。写入失败或 3 秒内没完成时结果保持内联。
 
 | 键 | 语义 |
 |---|---|
@@ -200,6 +240,43 @@ skills 只来自 agent 的 `[[skills]]`，不扫描全局目录，不解析 SKIL
 
 文件不自动删除；目录中写入忽略全部文件的 `.gitignore`，Unix 上新目录与文件的权限为 0700 与 0600。
 
+## im.toml
+
+`zx-agent im --config <im.toml>` 读取的 IM 服务配置，未知的键视为错误。行为见 [REFERENCE.md](REFERENCE.md#im-服务)。
+
+```toml
+[slack]
+# appTokenEnv = "SLACK_APP_TOKEN"   # 存放 token 的环境变量名，此为默认值
+# botTokenEnv = "SLACK_BOT_TOKEN"
+
+# ⚑ D:5/CHINA FLAG: 飞书；两个平台可以同时配置。名单中写作 feishu:oc_…（群或私聊）与 feishu:ou_…（用户）
+# [feishu]
+# appIdEnv = "FEISHU_APP_ID"
+# appSecretEnv = "FEISHU_APP_SECRET"
+
+[access]
+conversations = ["slack:C0123456789"]   # 只在这些频道或私聊中回答，其他地方只回一句“未授权”
+approvers = ["slack:U0123456789"]       # 只有这些用户的点击能批准写操作
+
+[limits]
+maxRunning = 4              # 同时运行的会话数，默认 4，其余排队，取得名额后才初始化新会话
+maxConversations = 128       # 运行、排队和空闲的会话 worker 总数，默认 128
+maxPendingMessages = 32      # 每个会话已取入但尚未处理的消息数，默认 32
+maxPendingBytes = 262144     # 上述消息的 UTF-8 文本总字节数与单条入站消息上限，默认 256 KiB
+idleSecs = 1800             # 会话空闲多久后释放其文件锁，默认 1800
+
+[sessions]
+dir = "/data/sessions"      # 会话文件在 <dir>/--<工作目录>--/ 下，头部的标签记录它属于哪个对话
+
+# 可选：替换默认的英文文案（字段名见 Replies 与 CardLabels）
+[replies]
+working = "处理中…"
+[cardLabels]
+allowed = "已批准"
+```
+
+`[limits]` 中的四个上限须为正整数。达到上限时会发生什么见 [REFERENCE.md](REFERENCE.md#im-服务) 的“容量”。
+
 ---
 
-CONFIGURATION.md · v0.14 · 2026年11月
+CONFIGURATION.md · v0.15 · 2026年11月

@@ -4,15 +4,15 @@ README 给出概览与示例；这里是各子命令的参数、行为、语义�
 
 ## 命令行参数
 
-标注 agent 的默认值取自所用的 agent，显式传入时覆盖。`chat` 与 `im` 中的上限与预算为每轮上限。
+`--model`、`--cwd`、`--tools` 与四个预算参数每个子命令都有（`sessions` 只有 `--cwd`，`im` 另有必填的 `--config`）；其余参数标出了适用的子命令。默认值写作 agent 的取自所用的 agent（内置 agent 的取值见 [CONFIGURATION.md](CONFIGURATION.md#内置-agent)），显式传入时覆盖。上限与预算作用于每一次运行，chat 与 acp 中即每次提问。
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `--model` | `ZX_MODEL`，再取 `config.toml` 的 `model` | 模型 ID；都没有时以退出码 2 结束 |
-| `--tools` | agent：`run` 为 `bash,read_file`，`chat` 为 `bash,read_file,edit_file,write_file,grep,find,ls,read_output`；有 skill 目录时加入 `read_skill` | 替换工具集合 |
+| `--tools` | agent | 替换工具集合 |
 | `--cwd` | 当前目录 | 新会话的工作目录，也是 `sessions` 与 `--resume` 列出会话时所看的目录。续接的会话在它开始时的目录工作：续接时显式给出另一个目录，或原目录已不存在，都以退出码 2 结束。`acp` 中会话的目录由客户端给出，`--cwd` 只是 `session/list` 没有带 `cwd` 时所列的目录 |
-| `--max-model-requests` | agent：`run` 为 30，`chat` 不限 | 模型请求次数上限，失败的尝试也计入 |
-| `--timeout-secs` | agent：`run` 为 900，`chat` 为 0 | 时间上限，0 不限 |
+| `--max-model-requests` | agent | 模型请求次数上限，失败的尝试也计入 |
+| `--timeout-secs` | agent | 时间上限，0 不限 |
 | `--token-budget` | 不设 | 输入加输出 token 上限，`run` 用完时以 7 结束 |
 | `--cost-budget` | 不设 | 花费上限，需要模型的单价，`run` 用完时以 8 结束 |
 | `--fail-on-denied` | 关闭 | 仅 `run`：有工具调用被拒时以 9 代替 0 |
@@ -24,7 +24,7 @@ README 给出概览与示例；这里是各子命令的参数、行为、语义�
 | `--deltas` | 关闭 | 仅 `jsonl`：同时输出流式的 `message_update` |
 | `--color` | `auto` | 仅 `chat`：`auto` 在交互终端上着色（设了 `NO_COLOR` 或 `TERM=dumb` 时不着色），`always`、`never` |
 
-其余设置在 `config.toml` 与 agent 中，见 [CONFIGURATION.md](CONFIGURATION.md)。流式响应的上限为每次请求 16 MiB、每个 SSE 事件 1 MiB，达到时以退出码 1 结束、不重试。重试依据 HTTP 状态与错误码（流中报出的错误码不在已知的表里时，按错误文本判断），遵守服务端的 `Retry-After`（至多 60 秒）。服务端以 `stop`、`end`、`length`、`tool_calls`、`function_call` 以外的 `finish_reason`（如 `content_filter`）结束时按错误处理，错误码为 `finish_reason:<取值>`，不重试。
+流式响应的上限为每次请求 16 MiB、每个 SSE 事件 1 MiB，达到时以退出码 1 结束、不重试。重试依据 HTTP 状态与错误码（流中报出的错误码不在已知的表里时，按错误文本判断），遵守服务端的 `Retry-After`（至多 60 秒）。服务端以 `stop`、`end`、`length`、`tool_calls`、`function_call` 以外的 `finish_reason`（如 `content_filter`）结束时按错误处理，错误码为 `finish_reason:<取值>`，不重试。
 
 ## run 退出码
 
@@ -47,9 +47,9 @@ README 给出概览与示例；这里是各子命令的参数、行为、语义�
 
 - 直接输入问题开始下一轮。TTY 中运行时输入的文本作为插话，在下一次模型请求前进入上下文；任务结束时没被读到的插话作为下一轮提问发送，Ctrl+C 取消任务时丢弃。一次粘贴的多行合为一条消息（以 `/` 开头的命令只占一行；非 Unix 平台不合并）。管道输入逐轮、逐行消费。
 - 单行（以及合并后的一条消息）最多 1 MiB；超限或无效 UTF-8 的行整行丢弃并提示，对话继续。
-- stdout 只有模型的回答，其余在 stderr：启动信息、每个工具调用一行 `[tool] bash: <命令> -> ok 12ms` 及结果的前 3 行（`edit_file` 显示补丁的前 20 行），每轮一行 `[turn] 3 requests · 30 in · 15 out · 4.4s`。默认只在交互终端上着色，见 `--color`。
-- 上限取自 agent：内置的 assistant 不限模型请求数与时间、不自动续写。`--output jsonl` 每轮输出事件与一个 `run_end`。
+- stdout 只有模型的回答，其余在 stderr：启动信息、每个工具调用一行 `[tool] bash: <命令> -> ok 12ms` 及结果的前 3 行（`edit_file` 显示补丁的前 20 行），每轮一行 `[turn] 3 requests · 30 in · 15 out · 4.4s`。默认只在交互终端上着色，见 `--color`。`--output jsonl` 每轮输出事件与一个 `run_end`。
 - 这是逐行 REPL，没有行编辑：方向键等控制序列会原样作为输入发送。
+- 会话：不给 `--session` 时，每次对话存为 `~/.zx-agent/sessions/--<工作目录>--/<UTC 时间>_<会话 ID>.jsonl`（目录名为去掉开头 `/`、其余 `/` 换成 `-` 的工作目录），新建的目录权限 0700、文件 0600；`--no-session` 只保存在内存。`--resume` 找不到会话时新建并提示，`--resume <ID 前缀>` 找不到或不唯一时以退出码 2 结束。`zx-agent sessions` 每行一个会话：ID 前 8 个字符、最近活动时间、消息数、会话名称（没有名称时为第一条提示词的首行）。名称由 ACP 客户端的 `/name` 或 SDK 的 `Session::set_name` 设置，chat 没有起名命令。
 
 | 输入 | 行为 |
 |---|---|
@@ -65,7 +65,7 @@ README 给出概览与示例；这里是各子命令的参数、行为、语义�
 | Ctrl+C | 取消当前任务或审批，保留会话；空闲时 2 秒内连按两次退出 |
 | EOF（Ctrl+D）、SIGTERM | EOF 结束会话，管道中的任务先完成；SIGTERM 取消并退出 |
 
-需要审批的调用（内置 assistant 的 bash、`edit_file`、`write_file`）显示工具名与完整参数，等待选择；agent 的 `permissions.allow` 列出的只读命令（内置为 `grep`、`head`、`tail`、`wc`、`jq`）直接执行，规则见[安全模型](SECURITY.md)：
+需要审批的调用显示工具名与完整参数，等待选择；agent 的 `permissions.allow` 列出的只读命令直接执行，规则见[安全模型](SECURITY.md)：
 
 ```text
 [approval 1] bash: ls -la
@@ -89,7 +89,7 @@ README 给出概览与示例；这里是各子命令的参数、行为、语义�
 
 ## IM 服务
 
-命令与 `im.toml` 的例子在 README 的“IM 服务”。
+命令见 README 的“IM 服务”，`im.toml` 见 [CONFIGURATION.md](CONFIGURATION.md#imtoml)。
 
 | 项 | 说明 |
 |---|---|
@@ -97,6 +97,7 @@ README 给出概览与示例；这里是各子命令的参数、行为、语义�
 | ⚑ D:5/CHINA FLAG: 飞书应用 | 企业自建应用；事件与回调都选长连接；订阅事件 `im.message.receive_v1` 与回调 `card.action.trigger`；开通发送消息与读取 @ 机器人消息（`im:message.group_at_msg:readonly`）的权限。可选：开通“获取群组中所有消息”（`im:message.group_msg`）后，话题里不 @ 的回复也会送来。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：读取群内全部消息] Subject to Legal/Export Compliance approval。读话题历史、名字与回执未实现（模型看到的是 open_id） |
 | 会话 | 私聊直接发送。单独发送 `/new` 立即开新会话，之前的保留；此后会话被释放或进程重启，接上的也是这个新会话，它不再读入线程里已有的消息。频道（⚑ D:5/CHINA FLAG: 飞书为群）里 @ 机器人，回答在这条消息的线程里；刚被回答的人接着说不必再 @；别人在线程里的话只记进会话，被 @ 时一并参考；会话已释放时，等有运行名额再打开会话写入。在别人发起的线程里第一次被 @ 时，先读入线程里这次 @ 之前的消息（最近的至多 50 条），再建会话。群聊中交给模型的每条消息前加发言人的名字；机器人回答的消息，其发送者在平台上的用户 ID 作为这条输入的 actor 记入会话，并交给策略与钩子（排队等待运行期间收到的几条合成一条输入，取最后一条的发送者）。没 @ 机器人的频道消息、机器人没参与过的线程一概不理会；会话释放（`idleSecs`）或重启之后，接话要再 @ 一次 |
 | 运行中 | 要回答的消息作为插话进入运行；任务结束时没读到的插话作为下一次运行的提问，与其他会话一样排队等运行名额。单独发送 `/cancel` 取消本会话的任务并丢弃没读到的插话，取消完成前收到的消息在任务结束后回答；`/new` 先取消任务再开新会话，取消完成前收到的消息在新会话里回答。开始时发“处理中”，结束时替换为回答 |
+| 容量 | 达到 `[limits]` 的上限时，消息不被接纳并记一条 `failed` 日志；机器人要回答的消息另回复 `replies.overloaded`（在路由处被拒的只认 @ 机器人的消息），只记进会话的话不回复。一条消息从被接纳到处理完都计入它所在会话的数量与字节配额，补入发送者名称后再检查一次字节。`/cancel`、`/new` 与审批点击不占文本配额，达到上限时仍可处理，但每个会话的收件箱另有 32 条的上限。只有插入运行、或在运行被 `/cancel`、`/new` 取消期间留给下一次运行的消息才发送接收回执。打开会话（排队中的新会话，或为写入闲聊重新打开的会话）都在取得 `maxRunning` 的名额后进行；`/new` 仍立即创建新会话 |
 | 数据范围 | 只保存机器人参与过的线程与授权聊天中的消息，其余在入口丢弃。线程中任何人的话都会进入模型的上下文，写操作仍要审批 |
 | 审批 | 使用 assistant agent：自动放行的只读命令直接执行，其余发审批卡片，只有 `approvers` 中的用户点击才生效；超时（`approvalTimeoutSecs`）与取消也显示在卡片上 |
 | 凭据 | 两个平台的 token 与 secret 只从环境变量读取；命令的环境中删除这些变量，输出中出现其值时脱敏 |
@@ -104,10 +105,6 @@ README 给出概览与示例；这里是各子命令的参数、行为、语义�
 | 日志 | stdout 每行一个 JSON：`approval`（聊天、线程、工具调用、审批人、结果、时间）、`released`、`failed`。对话内容在会话文件中 |
 | 退出 | SIGINT 或 SIGTERM 时取消进行中的任务，状态改为 `stopped` 的文案；未处理的消息不再处理，所在线程收到提示；正在建立的平台连接随即放弃。收尾期间再收到一次信号时，进程立即被该信号结束。退出码：正常为 0，配置错误与被拒的凭据为 2，平台连接意外结束为 1 |
 | 崩溃之后 | 未处理的消息丢失且没有提示。下次启动时，上个进程遗留的“处理中”改为 `interrupted` 的文案 |
-
-IM 的容量在 `im.toml` 的 `[limits]` 中设置：`maxConversations` 默认 128（运行、排队和空闲 worker 都计入），`maxPendingMessages` 默认 32，`maxPendingBytes` 默认 262144（每个会话自路由接纳起尚未处理的文本字节数，也是单条入站消息上限）。这三个值均为正整数。达到上限时，消息不被接纳并记一条 `failed` 日志；机器人要回答的消息另回复 `replies.overloaded`（在路由处被拒的只认 @），只记进会话的话不回复。只有插入运行、或在运行被 `/cancel`、`/new` 取消期间留给下一次运行的消息才发送接收回执。`/cancel`、`/new` 与审批点击仍可处理。收件箱、waiting、heard 与 steering 共用这份配额，消息转移不重复计数，数量及 UTF-8 文本字节在同一把短锁下接纳；补入发送者名称后再次检查字节额度。worker 收件箱还有 32 条的结构上限。至多 64 字节的 `/cancel`、`/new` 和审批点击不占文本配额，但仍受收件箱容量限制。扩展直接调用无配额 SDK 入队方法的输入不计入这份宿主配额。打开会话（排队中的新会话，或为写入闲聊重新打开的会话）都在取得 `maxRunning` 的名额后进行；`/new` 仍立即创建新会话。
-
-除 `--config` 外只有 `--model`、`--cwd`（新会话的工作目录）、`--tools` 与预算参数，预算作用于每一次运行。
 
 ## 语义
 
@@ -118,7 +115,7 @@ IM 的容量在 `im.toml` 的 `[limits]` 中设置：`maxConversations` 默认 1
 3. 工具调用先逐个检查，再并发执行，按调用顺序写结果；有一个工具是 `Sequential` 时整批串行。
 4. 工具失败（找不到、参数无效、被拒绝、执行报错、panic）都变成工具结果，循环继续。
 5. 回复因 `length` 截断时，不执行其中的工具调用。
-6. 引导消息在每个轮次结束后插入，后续消息在本来要停下时插入；两个队列共用一种取法（`QueueMode`）。
+6. 引导消息在每一步结束后插入，后续消息在本来要停下时插入；两个队列共用一种取法（`QueueMode`）。
 7. 发给模型的上下文以会话投影为准；重试时用 `context_edit` 省略失败的回答，不重复用户消息。
 8. 系统提示词是对话的一部分：第一条 system 消息记录完整提示词，之后只追加变化的段落。
 
@@ -205,4 +202,4 @@ run、chat、acp 与 im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（完�
 
 ---
 
-REFERENCE.md · v0.2 · 2026年11月
+REFERENCE.md · v0.3 · 2026年11月

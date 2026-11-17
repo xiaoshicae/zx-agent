@@ -134,7 +134,7 @@ pub(crate) struct AcpArgs {
 #[derive(Args)]
 pub(crate) struct ImArgs {
     /// IM service configuration (TOML): platforms, who may use the bot, limits and the session
-    /// directory. Not config.toml; see README, section "IM 服务".
+    /// directory. Not config.toml; see docs/CONFIGURATION.md, section "im.toml".
     #[arg(long)]
     pub(crate) config: PathBuf,
 
