@@ -1,4 +1,42 @@
-//! Helpers shared by the integration tests.
+//! Helpers shared by the integration tests. The library's tests (`tests/`) use them as
+//! `common::…`; the program's tests (`crates/zx-cli/tests/`) reach them the same way, through
+//! their own `common` module, which includes this one whole. This is the index; how to use
+//! each helper is in its own documentation.
+//!
+//! In this file:
+//! - driving a session: [`RunnerSetup`], a builder with test defaults (`config`, `retry`,
+//!   `limits`, `compaction`, `session`, `approver`), gives a [`Driven`], which derefs to the
+//!   `Session`; its `run`, `prompt`, `continue_run` and `compact` read a run to its end, and
+//!   `session()` copies the record. Shorthands: [`run_prompt`], [`run_prompt_with`],
+//!   [`run_approved`]. [`Approver`] and [`Asked`] answer approval requests. A test of `Run`
+//!   itself calls `Session::send`, and cancels with the session's own `cancel()`.
+//! - stand-ins: [`EchoTool`]; [`NotifyingProvider`], which says when a request starts, to wait
+//!   for a run to be running; [`RefusingLog`], which refuses every record, so the session
+//!   closes itself
+//! - observing: [`Collect`] (`kinds()`, `events()`, `envelopes()`, `steps()`), [`summarize`],
+//!   [`replayed_requests`]
+//! - session files and records: [`header`], [`header_in`], [`create_session_file`],
+//!   [`open_session_file`], [`read_session_file`], [`seeded_session`], [`summary_json`],
+//!   [`tool_call_answer`], [`answer_reporting`]
+//! - the rest: [`config`], [`refusal`], [`fast_retry`], [`test_limits`], [`read_lines`],
+//!   [`json_lines`], [`stdout`], [`stderr`], [`signal`]
+//!
+//! The submodules:
+//! - `mock_server`: a local fake model service ([`MockServer`](mock_server::MockServer)): SSE,
+//!   HTTP errors, a stream that stalls after some data or ends when told, and waiting for a
+//!   number of requests
+//! - `fake_mcp`: an MCP server written from the specification, without rmcp
+//! - `fake_slack`, `fake_feishu`: the fake chat platforms
+//! - `im`: running a channel against the IM service
+//! - `http`: reading and answering one HTTP request, and a listener that never answers
+//! - `summary_eval`: the summary evaluation, shared by the paid evaluation and the regular
+//!   tests
+//!
+//! Elsewhere: the scripted model `FauxProvider` (`crates/zx-ai/src/faux.rs`), `MemoryStorage`
+//! for a session store without files, the program's helpers in
+//! `crates/zx-cli/tests/common/mod.rs` (the compiled `zx-agent`, a home of its own, session
+//! files, a pseudo-terminal), and the unit tests' own `test_support` modules in
+//! `zx-core`'s `transcript` and `zx-tools`'s `jsonl`.
 
 #![allow(
     dead_code,

@@ -1,5 +1,5 @@
 # Scheduled inspection: an unattended run with the read-only account. The answer is written
-# to the Pod log (kubectl logs); the exit code tells the result (README.md, "run 退出码").
+# to the Pod log (kubectl logs); the exit code tells the result (docs/REFERENCE.md, "run 退出码").
 # Each run also keeps its session file, the audit record of every request and command, on
 # the volume zx-agent-inspect-sessions as sessions/<Pod name>.jsonl.
 apiVersion: batch/v1

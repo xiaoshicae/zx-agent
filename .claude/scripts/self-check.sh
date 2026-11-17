@@ -27,7 +27,7 @@ production_unwraps() {
 }
 
 check 'Rc / RefCell / Box::leak / static mut / unsafe' 'Rc<\|RefCell\|Box::leak\|static mut\|unsafe ' src/ crates/*/src/
-check '#[allow]' '#\[allow' src/ crates/ tests/
+check '#[allow] / #![allow]' -e '#\[allow' -e '#!\[allow' src/ crates/ tests/
 echo "== 生产代码里的 unwrap()（已跳过测试模块）"
 unwraps=$(production_unwraps)
 echo "${unwraps:-(无)}"

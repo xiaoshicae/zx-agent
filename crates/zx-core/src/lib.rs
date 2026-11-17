@@ -20,8 +20,8 @@
 //!   the conversation, which the kernel asks the model for or the host's summarizer makes
 //! - [`hooks`] (transcript, events, guard, tools, input): the extension points around the
 //!   loop, and the chain that runs them
-//! - [`extensions`] (tools, prompt, input, policy, hooks): tools, policies, hooks, prompt
-//!   sections and slash commands registered together
+//! - [`extensions`] (tools, input, policy, hooks): tools, policies, hooks, prompt sections and
+//!   slash commands registered together
 //! - `runner` (all of the above): one run at a time: the step loop of each attempt, the
 //!   retries, limits, summaries and recovery around it, and the delivery of its events (pi:
 //!   packages/agent)

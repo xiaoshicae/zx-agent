@@ -5,8 +5,6 @@ paths:
 
 # 04 异步与并发（tokio）
 
-持有 `std::sync::Mutex` 的 guard 跨过 `.await`，clippy 默认会报，这里不再重复。
-
 - **不阻塞 async 线程**：用 `tokio::time::sleep`、`tokio::process::Command`；CPU 密集的计算和同步库调用放进 `spawn_blocking`（本机写文件就是这样，`crates/zx-tools/src/executor/local.rs`）。少量、快速的同步 I/O 可以接受，但要注释说明，例如启动时读取配置。
 - **所有外部等待都设超时**：无人值守时没人能中断卡住的程序。超时的错误写明在等什么、等了多久。已有的超时：provider 的 `CONNECT_TIMEOUT` 与 `idle_timeout`、bash 的 `timeout_secs`、整次运行的 `RunLimits::timeout`、读取子进程输出的 `PIPE_DRAIN_TIMEOUT`。
 - **取消**：用 `CancellationToken` 传递，耗时的操作在 `select!` 里同时监听 `cancel.cancelled()`。注意取消安全：没被选中的分支会被直接丢弃，做到一半的工作随之丢失。需要保留的进度放进独立任务和共享缓冲区（`crates/zx-tools/src/executor/capture.rs` 的 `Capture::spawn`）；一旦开始就必须做完的，放进不随调用被丢弃的任务（`Executor::write_file`）。

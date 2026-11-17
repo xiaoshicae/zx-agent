@@ -9,13 +9,13 @@
 - 工具：`bash`、`read_file`、`edit_file`、`write_file`，只读的 `grep`、`find`、`ls`，按需读取 skill 的 `read_skill`，分页读取落盘结果的 `read_output`，以及 MCP 服务器的工具。
 - 主目录中的 `config.toml`（环境）与 agent 文件（角色），项目 `AGENTS.md`；命令策略与 ask / allow / deny 权限；已知密钥脱敏；可选的容器执行。
 - 只追加的会话记录（默认 JSONL 文件，可续跑），可选的自动与手动摘要，长工具结果落盘。
-- 轮次、时间、token 与花费上限；JSONL 事件流与可选的 OpenTelemetry 追踪导出；扩展接口 `Extension`。
+- 模型请求数、时间、token 与花费上限；JSONL 事件流与可选的 OpenTelemetry 追踪导出；扩展接口 `Extension`。
 
 尚未实现：OpenAI 兼容以外的 provider（如 Anthropic），见[路线图](docs/ROADMAP.md)。
 
 ## 快速开始
 
-需要 Rust 1.88 及以上与 C 编译器（aws-lc 在构建时编译）。HTTPS 使用系统的根证书：Linux 上没有安装 CA 证书（如 Debian 的 `ca-certificates`）时启动即报错 `No CA certificates were loaded from the system`，只连 `http://` 时也一样。例外是 IM 平台（Slack 与 ⚑ D:5/CHINA FLAG: 飞书）的 WebSocket 长连接：它只信任编译进程序的根证书（`tokio-tungstenite` 的 `rustls-tls-webpki-roots`），不读系统信任库；在使用私有 CA 的出口代理后面，REST 调用能通而长连接的握手可能失败。
+需要 Rust 1.88 及以上与 C 编译器（aws-lc 在构建时编译）。HTTPS 使用系统的根证书：Linux 上没有安装 CA 证书（如 Debian 的 `ca-certificates`）时启动即报错 `No CA certificates were loaded from the system`，只连 `http://` 时也一样。例外是 IM 平台（Slack 与 ⚑ D:5/CHINA FLAG: 飞书）的 WebSocket 长连接：它只信任编译进程序的根证书，在使用私有 CA 的出口代理后面，REST 调用能通而长连接的握手可能失败。
 
 ```bash
 cargo build --release
@@ -39,6 +39,8 @@ apiKeyEnv = "OPENAI_API_KEY"
 ZX_BASE_URL=http://127.0.0.1:11434/v1 ./target/release/zx-agent run --model <模型名> "排查 nginx 返回 502 的原因"
 ```
 
+配置都在主目录（`~/.zx-agent`，或 `ZX_AGENT_HOME`）中，都可以没有：`config.toml` 决定环境，agent 决定角色。`run` 使用内置的 `unattended`，`chat`、`acp` 与 `im` 使用内置的 `assistant`，主目录下的 `agents/unattended.md`、`agents/assistant.md` 替换它们；两者的区别与每个键见 [CONFIGURATION.md](docs/CONFIGURATION.md)。
+
 ### 终端对话
 
 ```bash
@@ -49,9 +51,7 @@ zx-agent sessions                      # 列出本工作目录的会话（可加
 zx-agent chat --session ./chat.jsonl   # 指定会话文件
 ```
 
-不给 `--session` 时，每次对话存为 `~/.zx-agent/sessions/--<工作目录>--/<UTC 时间>_<会话 ID>.jsonl`（目录名为去掉开头 `/`、其余 `/` 换成 `-` 的工作目录），新建的目录权限 0700、文件 0600；`--no-session` 只保存在内存。`--resume` 找不到会话时新建并提示，`--resume <ID 前缀>` 找不到或不唯一时以退出码 2 结束。`sessions` 每行一个会话：ID 前 8 个字符、最近活动时间、消息数、会话名称（没有名称时为第一条提示词的首行）。名称由 ACP 客户端的 `/name` 或 SDK 的 `Session::set_name` 设置，chat 没有起名命令。
-
-输入与插话、`/` 命令、审批与退出码见[参考手册](docs/REFERENCE.md#chat)。
+会话文件的位置、输入与插话、`/` 命令、审批与退出码见[参考手册](docs/REFERENCE.md#chat)。
 
 ### ACP 客户端
 
@@ -59,15 +59,9 @@ zx-agent chat --session ./chat.jsonl   # 指定会话文件
 zx-agent acp
 ```
 
-`acp` 经 stdin 与 stdout 收发 [Agent Client Protocol](https://agentclientprotocol.com/) v1 的消息，由 ACP 客户端（Zed、JetBrains、Neovim、Emacs 的插件，或 Wisp 等终端客户端，见[客户端目录](https://agentclientprotocol.com/overview/clients)）启动：在客户端里把 agent 命令配置为上面这一行。参数与 `chat` 相同（`acp --help`），没有 `--session`、`--output` 与 `--color`；会话的工作目录由客户端给出，`--cwd` 在这里只是 `session/list` 没有带 `cwd` 时所列的目录。stdout 只走协议，诊断在 stderr。
+`acp` 经 stdin 与 stdout 收发 [Agent Client Protocol](https://agentclientprotocol.com/) v1 的消息，由 ACP 客户端（Zed、JetBrains、Neovim、Emacs 的插件，或 Wisp 等终端客户端，见[客户端目录](https://agentclientprotocol.com/overview/clients)）启动：在客户端里把 agent 命令配置为上面这一行。会话的工作目录由客户端给出；stdout 只走协议，诊断在 stderr。会话、命令、回合与退出见[参考手册](docs/REFERENCE.md#acp)。
 
-会话、命令、回合、更新与退出的细节见[参考手册](docs/REFERENCE.md#acp)。
-
-### 配置与 agent
-
-配置都在主目录（`~/.zx-agent`，或 `ZX_AGENT_HOME`）中，都可以没有。`config.toml` 决定环境：模型、provider、执行环境、MCP 服务器、模型的单价与上下文窗口。agent 决定角色：说明、工具、权限、上限、项目上下文、skills 与摘要。`run` 使用内置的 `unattended`，`chat`、`im` 与 `acp` 使用内置的 `assistant`；主目录下的 `agents/unattended.md`、`agents/assistant.md` 替换它们。`chat` 默认加载 Git 根目录到工作目录的 `AGENTS.md`，`run` 默认不加载。每个键见 [CONFIGURATION.md](docs/CONFIGURATION.md)。
-
-### 无人值守示例
+### 无人值守
 
 可用于 cron、systemd timer、Kubernetes Job：
 
@@ -81,6 +75,12 @@ extends = "unattended"
 [permissions]
 ask = ["bash"]
 allow = ["bash(kubectl get)", "bash(kubectl describe)", "bash(kubectl logs)", "bash(grep)", "bash(tail)", "bash(head)"]
+
+# 自动放行的 kubectl 只能带这些选项；不列出时任何选项（如 --kubeconfig、--server）都放行
+[permissions.allowOptions.kubectl]
+long = ["namespace", "all-namespaces", "output", "selector", "container", "previous", "since", "tail"]
+shortWithValue = ["n", "o", "l", "c"]
+shortFlags = ["A", "p"]
 +++
 EOF
 zx-agent run \
@@ -92,11 +92,11 @@ zx-agent run \
 echo "exit code: $?"
 ```
 
-`allow` 之外的 bash 命令要审批，`run` 没有人审批，因此拒绝。在 Kubernetes 中常驻部署见 [deploy/kubernetes/README.md](deploy/kubernetes/README.md)。
+`allow` 之外的 bash 命令，以及带了 `allowOptions` 之外选项的 kubectl 命令，都要审批；`run` 没有人审批，因此拒绝。`run` 用退出码表达结果：0 完成，1 失败，2 参数或配置错误，3 到 9 是各类上限、中止与被拒，见[参考手册](docs/REFERENCE.md#run-退出码)。在 Kubernetes 中常驻部署见 [deploy/kubernetes/README.md](deploy/kubernetes/README.md)。
 
 ### IM 服务
 
-`zx-agent im` 作为常驻进程接入 IM：私聊整段是一个会话，频道里一个线程一个会话；写操作在 IM 里审批。支持 Slack（Socket Mode）与 ⚑ D:5/CHINA FLAG: 飞书（长连接），都只需出网。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：对话内容、命令输出与用户 ID 发往该平台] 该平台的使用 Subject to Legal/Export Compliance approval。部署到 Kubernetes 见 `deploy/kubernetes/README.md` 的“IM 服务”。
+`zx-agent im` 作为常驻进程接入 IM：私聊整段是一个会话，频道里一个线程一个会话；写操作在 IM 里审批。支持 Slack（Socket Mode）与 ⚑ D:5/CHINA FLAG: 飞书（长连接），都只需出网。⚠ COMPLIANCE REVIEW: [⚑ D:5/CHINA FLAG: 飞书：对话内容、命令输出与用户 ID 发往该平台] 该平台的使用 Subject to Legal/Export Compliance approval。
 
 ```bash
 export SLACK_APP_TOKEN=xapp-...   # app-level token，用于 Socket Mode
@@ -105,74 +105,11 @@ export SLACK_BOT_TOKEN=xoxb-...   # bot token，用于发消息
 zx-agent im --config im.toml --model <model> --max-model-requests 100 --timeout-secs 3600
 ```
 
-内置的 assistant 不限模型请求数与时间，所以示例在命令行给每次运行加了上限：不加时，一次不收敛的运行会一直占着运行名额（`maxRunning`）。等待审批的时间也算在时间上限里。
-
-`im.toml`（未知的键视为错误）：
-
-```toml
-[slack]
-# appTokenEnv = "SLACK_APP_TOKEN"   # 存放 token 的环境变量名，此为默认值
-# botTokenEnv = "SLACK_BOT_TOKEN"
-
-# ⚑ D:5/CHINA FLAG: 飞书；两个平台可以同时配置。名单中写作 feishu:oc_…（群或私聊）与 feishu:ou_…（用户）
-# [feishu]
-# appIdEnv = "FEISHU_APP_ID"
-# appSecretEnv = "FEISHU_APP_SECRET"
-
-[access]
-conversations = ["slack:C0123456789"]   # 只在这些频道或私聊中回答，其他地方只回一句“未授权”
-approvers = ["slack:U0123456789"]       # 只有这些用户的点击能批准写操作
-
-[limits]
-maxRunning = 4              # 同时运行的会话数，默认 4，其余排队，取得名额后才初始化新会话
-maxConversations = 128       # 运行、排队和空闲的会话 worker 总数，默认 128
-maxPendingMessages = 32      # 每个会话已取入但尚未处理的消息数，默认 32
-maxPendingBytes = 262144     # 上述消息的 UTF-8 文本总字节数与单条入站消息上限，默认 256 KiB
-idleSecs = 1800             # 会话空闲多久后释放其文件锁，默认 1800
-
-[sessions]
-dir = "/data/sessions"      # 会话文件在 <dir>/--<工作目录>--/ 下，头部的标签记录它属于哪个对话
-
-# 可选：替换默认的英文文案（字段名见 Replies 与 CardLabels）
-[replies]
-working = "处理中…"
-[cardLabels]
-allowed = "已批准"
-```
-
-平台应用的设置、会话的划分、审批、日志、退出与崩溃之后的行为见[参考手册](docs/REFERENCE.md#im-服务)。其余参数与 `chat` 相同，`--max-model-requests` 等作用于每一次运行；没有 `--session`。
+内置的 assistant 不限模型请求数与时间，所以示例在命令行给每次运行加了上限：不加时，一次不收敛的运行会一直占着运行名额（`maxRunning`）。等待审批的时间也算在时间上限里。`im.toml` 见[配置说明](docs/CONFIGURATION.md#imtoml)，平台应用的设置、会话的划分、审批、日志与退出见[参考手册](docs/REFERENCE.md#im-服务)，部署到 Kubernetes 见 `deploy/kubernetes/README.md` 的“IM 服务”。
 
 ### MCP 工具
 
-在 `config.toml` 中用 `[[mcp]]` 列出外部 MCP 服务器及其工具（只支持 Streamable HTTP，[配置项](docs/CONFIGURATION.md#mcp-服务器)），模型以 `<服务器名>__<工具名>` 调用。
-
-- 只有列出的工具交给模型；agent 的 `permissions.allow` 列出的直接执行，其余每次都要审批（run 中因此拒绝）。服务器给出的 annotations 不影响放行。
-- 每个进程启动时连接一次；连不上、token 变量没有值、服务器缺少列出的工具时以退出码 2 报错。成功时 stderr 每个服务器一行 `[mcp] <名字>: <工具>; protocol <版本>; <地址>`，经 `http://` 发送 token 时另加 `the token is sent unencrypted`。
-- 先用 `server/discover` 握手，旧服务器回退到 `initialize`。结果中的文本原样交给模型，图片、音频与二进制资源只写一行说明，最多 2000 行或 50 KiB；进度通知作为工具进度显示。
-
-### DeepSeek
-
-⚑ D:5/CHINA FLAG: DeepSeek（官方文档页面没有写明公司所在地；据公开信息为中国公司，未核实）。
-
-⚠ COMPLIANCE REVIEW: [对话内容、命令输出与工具结果会发往该服务的 API，属于远程访问与数据外发] 使用前须经法务 / 出口合规审批（Subject to Legal/Export Compliance approval）。
-
-该服务的 API 兼容 OpenAI 格式（[官方文档](https://api-docs.deepseek.com/)），用现有的 provider 即可：
-
-```toml
-model = "deepseek-flash"
-
-[provider]
-baseUrl = "https://api.deepseek.com"
-apiKeyEnv = "DEEPSEEK_API_KEY"
-# 关闭思考模式：
-# requestFields = { thinking = { type = "disabled" } }
-```
-
-思考模式默认开启，`requestFields` 中的 `reasoning_effort` 调整强度。回答中的 `reasoning_content` 记入会话并回传给模型（官方文档：带工具的请求必须回传，否则返回 400）。历史中混有不带推理内容的回答（如中途换过模型）时打开 `provider.fillMissingReasoning`：pi 记录过该服务对这种历史返回 “The `reasoning_content` in the thinking mode must be passed back to the API.”（pi #3668），本项目没有实测这种情况。
-
-### 参数与退出码
-
-`run` 用退出码表达结果：0 完成，1 失败，2 参数或配置错误，3 到 9 是各类上限、中止与被拒，见[参考手册](docs/REFERENCE.md#run-退出码)。命令行参数见[参考手册](docs/REFERENCE.md#命令行参数)，其余设置在 `config.toml` 与 agent 中，见[配置说明](docs/CONFIGURATION.md)。
+在 `config.toml` 中用 `[[mcp]]` 列出外部 MCP 服务器（只支持 Streamable HTTP）及交给模型的工具，模型以 `<服务器名>__<工具名>` 调用；agent 的 `permissions.allow` 列出的直接执行，其余每次都要审批。见[配置说明](docs/CONFIGURATION.md#mcp-服务器)。
 
 ## 架构
 
@@ -191,11 +128,7 @@ zx-cli      crates/zx-cli    命令行程序 zx-agent（run、chat、acp、im、
        └─ zx-ai-openai  crates/zx-ai-openai  OpenAI 兼容 provider（只依赖 zx-ai）
 ```
 
-命令行与 IM 是建在库之上的两种接入方式，不在库里：引入 `zx-agent` 不编译命令行解析、ACP、追踪导出与 IM 平台。只嵌入内核的程序不编译 HTTP 客户端。代码中没有场景、环境或平台文案语言的规则：场景是 agent 文件，Kubernetes 的规则在 `deploy/kubernetes/`。
-
-一次运行：`Session::send` 取得会话并返回一个 `Run`，调用方读它，运行才推进；每一步先写入会话再发出事件；发给模型的上下文就是会话的投影；工具调用先逐个检查，再并发执行，按调用顺序写结果；失败的请求按策略重试，最后汇总为 `RunReport`。
-
-循环语义、与 pi 的差异和系统提示词的组成见[参考手册](docs/REFERENCE.md#语义)。
+命令行与 IM 是建在库之上的两种接入方式，不在库里：引入 `zx-agent` 不编译命令行解析、ACP、追踪导出与 IM 平台。只嵌入内核的程序不编译 HTTP 客户端。代码中没有场景、环境或平台文案语言的规则：场景是 agent 文件，Kubernetes 的规则在 `deploy/kubernetes/`。循环语义与系统提示词的组成见[参考手册](docs/REFERENCE.md#语义)。
 
 ## 安全模型
 
@@ -203,35 +136,19 @@ zx-cli      crates/zx-cli    命令行程序 zx-agent（run、chat、acp、im、
 
 ## 作为库使用
 
-`zx-agent` 库再导出各 crate：内核 `zx-core` 按域模块原样导出（`zx_agent::agent`、`zx_agent::tools`、`zx_agent::policy`、`zx_agent::hooks`、`zx_agent::transcript` 等），模型层在 `zx_agent::ai`，`zx-tools` 附带的实现在 `zx_agent::builtin`。库里没有接入方式：IM 服务在 `zx-im`（平台在 `zx-im-slack` 与 `zx-im-feishu`），`config.toml`、agent 文件与 OpenTelemetry 导出在命令行的 crate `zx-cli`（`zx_cli::config`、`zx_cli::otel`）。只需要内核时可以只依赖 `zx-core` 与 `zx-ai`，按需加上 `zx-ai-openai`。`zx-core` 按 JSON Schema 校验工具参数的部分是默认开启的 feature `json-schema`；写 `default-features = false` 时参数只由工具自己解析，内核的依赖从 103 个 crate 减到 40 个（含它自己）；`zx-tools` 的 MCP 客户端是默认开启的 feature `mcp`，关掉时不编译 HTTP 客户端与 MCP SDK。各 crate 都不发布到 crates.io。
-
-```rust
-let mut config = AgentConfig { system_prompt, tools, ..AgentConfig::new(provider, model) };
-config.policies.push("permissions", policy);
-let agent = Agent::new(config)?;              // 校验工具、扩展与摘要设置
-let session = agent.create_session(SessionOptions::new(cwd)).await?;
-let mut run = session.send("任务描述")?;      // 只取得会话；读它，运行才推进
-while let Some(event) = run.next().await {
-    // 渲染事件
-}
-let report = run.wait().await;                // 只要结果时直接 session.send(..)?.wait().await
-```
-
-库默认不限轮次、时间与 token，没有钩子，不自动续写、摘要或落盘，会话只存在内存里；说明、上限、策略与存储都由嵌入方给出。完整的组装见 `examples/library.rs`。
-
-入口、会话、审批、事件、扩展点、存储与摘要见 [docs/LIBRARY.md](docs/LIBRARY.md)，接口与契约见 rustdoc：`cargo doc --open`。
+`zx-agent` 库再导出内核、模型层与附带的工具实现，不含命令行、配置文件、追踪导出与 IM。库默认不限上限、没有钩子、会话只存在内存里，安全相关的设置也要嵌入方给出。用法见 [docs/LIBRARY.md](docs/LIBRARY.md) 与 `examples/library.rs`，接口与契约见 rustdoc（`cargo doc --open`）。
 
 ## 文档
 
 | 文档 | 内容 |
 |---|---|
-| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | `config.toml` 与 agent 文件的键 |
+| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | `config.toml`、agent 文件与 `im.toml` 的键，内置 agent |
 | [docs/REFERENCE.md](docs/REFERENCE.md) | 命令行参数、退出码，chat、ACP 与 IM 的行为，循环语义与 pi 的差异，事件、追踪与会话文件的格式 |
 | [docs/SECURITY.md](docs/SECURITY.md) | 安全模型与容器执行 |
 | [docs/LIBRARY.md](docs/LIBRARY.md) | 作为库使用 |
-| [docs/TESTS.md](docs/TESTS.md) | 每个测试文件覆盖什么 |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | 设计目标、已定决策与分阶段计划 |
-| [deploy/kubernetes/README.md](deploy/kubernetes/README.md) | 在 Kubernetes 中部署 |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | 设计目标、已定决策与当前阶段 |
+| [docs/TESTS.md](docs/TESTS.md) | 每个测试文件覆盖什么（开发用） |
+| [deploy/kubernetes/README.md](deploy/kubernetes/README.md) | 在 Kubernetes 中部署（只在仓库中，不在发布包里） |
 
 ## 开发
 
