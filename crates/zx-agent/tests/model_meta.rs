@@ -14,7 +14,7 @@ use zx_agent::ai::provider::{EventReceiver, event_channel, send_event};
 use zx_agent::ai::{
     AssistantMessage, Message, ModelCost, ModelMeta, Provider, Request, StopReason, StreamEvent, Usage,
 };
-use zx_agent::compaction::{self, Config, DEFAULT_RESERVE_TOKENS, TokenTrigger};
+use zx_agent::compaction::{self, Config, TokenTrigger};
 use zx_agent::events::RunOutcome;
 use zx_agent::hooks::{ContextEdit, Hook, HookContext, HookResult};
 use zx_agent::transcript::{Entry, SessionHeader, Transcript};
@@ -230,7 +230,7 @@ async fn no_summary_is_paid_for_when_the_latest_input_alone_passes_the_token_tri
 
     assert_eq!(report.outcome, RunOutcome::Failed, "{report:?}");
     let error = report.error.as_deref().unwrap_or_default();
-    assert!(error.contains("triggerTokens"), "{error}");
+    assert!(error.contains("trigger_tokens"), "{error}");
     assert!(provider.requests().is_empty(), "no summary is asked for");
 }
 
@@ -262,7 +262,7 @@ async fn a_summary_that_leaves_the_context_above_the_token_trigger_fails() {
 
     assert_eq!(report.outcome, RunOutcome::Failed, "{report:?}");
     let error = report.error.as_deref().unwrap_or_default();
-    assert!(error.contains("still exceeds triggerTokens"), "{error}");
+    assert!(error.contains("still exceeds trigger_tokens"), "{error}");
     assert_eq!(provider.requests().len(), 1, "the summary request, and no task request");
 }
 
@@ -398,62 +398,59 @@ async fn the_context_estimate_starts_from_the_last_reported_usage() {
     assert_eq!(compaction::context_tokens(&session_of(&[]).await).unwrap(), 1);
 }
 
-#[test]
-fn the_token_trigger_is_derived_from_a_context_window_below_its_reserve() {
-    let mut config = Config::default();
-    config.derive_trigger_tokens(100_000);
-    assert_eq!(
-        config.trigger_tokens,
-        TokenTrigger::Above(100_000 - DEFAULT_RESERVE_TOKENS)
-    );
-    config.derive_trigger_tokens(50_000);
-    assert_eq!(
-        config.trigger_tokens,
-        TokenTrigger::Above(100_000 - DEFAULT_RESERVE_TOKENS),
-        "an explicit value stays"
-    );
-    let mut small = Config {
-        reserve_tokens: 1000,
-        ..Config::default()
-    };
-    small.derive_trigger_tokens(1000);
-    assert_eq!(
-        small.trigger_tokens,
-        TokenTrigger::Unset,
-        "a window within the reserve sets nothing"
-    );
-    // 20000 - 16384 tokens would lie within the 64 KiB of recent messages a summary keeps.
-    let mut tight = Config::default();
-    tight.derive_trigger_tokens(20_000);
-    assert_eq!(
-        tight.trigger_tokens,
-        TokenTrigger::Unset,
-        "no trigger a summary could never bring the context under"
-    );
-    assert!(
-        Config {
-            trigger_tokens: TokenTrigger::Above(100),
+/// What is known about a model whose context holds `tokens`, without prices.
+fn window(tokens: u64) -> ModelMeta {
+    ModelMeta {
+        context_window: Some(tokens),
+        cost: None,
+    }
+}
+
+/// Run "continue" in a session with some 1400 tokens of context, whose token trigger lies 1000
+/// tokens below the window of the model it asks, after switching from the agent's model to
+/// `model` when one is given. Returns the kinds of the run's events and the requests made.
+async fn run_after_switching_to(model: Option<&str>) -> (Vec<&'static str>, usize) {
+    let (store, old) = seeded_session().await;
+    let provider = Arc::new(FauxProvider::new([
+        FauxStep::text(summary_json(&old)),
+        FauxStep::text("answer"),
+    ]));
+    let mut config = config(provider.clone(), vec![]);
+    // The context lies far below what the window of the agent's model leaves under the
+    // reserve, and above what the window of small-model leaves.
+    config.models.insert("test-model".into(), window(1_000_000));
+    config.models.insert("small-model".into(), window(2_000));
+    let (runner, events) = RunnerSetup {
+        session: store.into(),
+        compaction: Config {
+            trigger_tokens: TokenTrigger::BelowWindow { reserve_tokens: 1_000 },
+            keep_recent_bytes: 1,
+            timeout: Duration::from_secs(1),
             ..Config::default()
-        }
-        .validate()
-        .unwrap_err()
-        .to_string()
-        .contains("keepRecentBytes")
-    );
-    assert!(
-        Config {
-            trigger_tokens: TokenTrigger::Above(0),
-            ..Config::default()
-        }
-        .validate()
-        .is_err()
-    );
-    assert!(Config::default().validate().is_ok());
-    assert!(!Config::default().automatic());
-    assert!(
-        !small.automatic(),
-        "nothing turns summaries on when the window is within the reserve"
-    );
+        },
+        ..RunnerSetup::new(config)
+    }
+    .build()
+    .await;
+    if let Some(model) = model {
+        runner.set_model(provider.clone(), model).unwrap();
+    }
+
+    let report = runner.run("continue").await;
+
+    assert_eq!(report.outcome, RunOutcome::Completed, "{report:?}");
+    (events.kinds(), provider.requests().len())
+}
+
+#[tokio::test]
+async fn the_token_trigger_follows_the_window_of_the_model_the_session_switches_to() {
+    let (kinds, requests) = run_after_switching_to(None).await;
+    assert!(!kinds.contains(&"compaction_start"), "{kinds:?}");
+    assert_eq!(requests, 1);
+
+    let (kinds, requests) = run_after_switching_to(Some("small-model")).await;
+    assert!(kinds.contains(&"compaction_start"), "{kinds:?}");
+    assert_eq!(requests, 2, "the summary request, then the task request");
 }
 
 #[tokio::test]

@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::signal::{Signal, What};
 use zx_agent::ai::{StopReason, Usage};
-use zx_agent::events::{ApprovalResult, Interruption, RequestKind, RunOutcome, ToolVerdict};
+use zx_agent::events::{ApprovalResult, Interruption, RequestKind, RunOutcome};
 
 /// Builds spans from signals, one task owning every open span.
 pub(super) async fn export(mut receiver: mpsc::Receiver<Signal>, mut runs: Runs, stop: CancellationToken) {
@@ -288,8 +288,8 @@ impl OpenRun<'_> {
         self.spans.tools.insert(call, cx);
     }
 
-    fn decision(&self, call: &str, verdict: ToolVerdict) {
-        let attributes = vec![KeyValue::new("zx.verdict", name(&verdict))];
+    fn decision(&self, call: &str, verdict: &'static str) {
+        let attributes = vec![KeyValue::new("zx.verdict", verdict)];
         event(self.spans.for_call(call), "decision", self.at, attributes);
     }
 

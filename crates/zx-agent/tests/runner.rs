@@ -71,7 +71,7 @@ use zx_agent::policy::{PolicyContext, PolicyDecision, ToolPolicy};
 use zx_agent::transcript::{Entry, LoadedSession, LogRecord, SessionLog};
 use zx_testing::{
     EchoTool, LogStorage, NotifyingProvider, RunnerSetup, Seed, Start, config, fast_retry, header, read_lines,
-    summarize,
+    summarize, take_queued_inputs,
 };
 
 /// A stored record, as a database row would hold it.
@@ -738,7 +738,7 @@ async fn queued_input_waits_when_no_request_budget_is_left() {
         }
     );
     assert_eq!(summarize(&runner.session().messages()), ["user:go"]);
-    assert_eq!(runner.queues().drain_steering(), [Input::from("later")]);
+    assert_eq!(take_queued_inputs(&runner).unwrap(), [Input::from("later")]);
 }
 
 #[tokio::test]

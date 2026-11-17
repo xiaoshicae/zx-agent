@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::ai::{AssistantMessage, Message, Reasoning, ToolCall, UserMessageKind};
-use crate::events::{Event, EventKind, HookPoint};
+use crate::events::{Event, EventKind, HookPhase};
 use crate::guard::{CancelSignal, Stopped};
 use crate::input::InputQueues;
 use crate::tools::{ActiveTools, ToolOutput};
@@ -60,7 +60,7 @@ pub struct HookContext {
     #[serde(skip)]
     pub cancel: CancelSignal,
     /// The run's queues: a hook sends the model a message with `steer` or `follow_up` (pi:
-    /// `sendMessage`) and records state with `append_entry` (pi:
+    /// `sendMessage`) and records state with `append_custom_entry` (pi:
     /// `appendEntry`). In a context built with [`HookContext::new`] they belong to no loop.
     #[serde(skip)]
     pub queues: Arc<InputQueues>,
@@ -245,9 +245,10 @@ pub enum StepDecision {
 /// with [`Hook::stage`], so the guarantees below hold however a host registers it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum HookStage {
-    /// Extensions and other hooks; the default.
-    Extension,
-    /// Removes known secrets from tool output, after every extension has changed it.
+    /// Every hook that declares no other stage: the host's own and every extension's.
+    Default,
+    /// Removes known secrets from tool output, after every hook of the default stage has
+    /// changed it.
     Redaction,
     /// Saves long tool output, after redaction.
     Storage,
@@ -326,45 +327,31 @@ pub trait Hook: Send + Sync {
     }
 
     /// The stage this hook runs in. Only secret redaction and output storage, which live in
-    /// the zx-tools crate, declare a stage other than [`HookStage::Extension`].
+    /// the zx-tools crate, declare a stage other than [`HookStage::Default`].
     fn stage(&self) -> HookStage {
-        HookStage::Extension
+        HookStage::Default
     }
 }
 
 /// How one callback failed.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum HookFailure {
+pub(crate) enum HookFailure {
     /// The callback returned this error.
     #[error("failed: {0}")]
     Rejected(String),
-    /// The callback did not finish within its timeout.
-    #[error("timed out after {}ms", .0.as_millis())]
-    TimedOut(Duration),
-    #[error("panicked")]
-    Panicked,
-    /// The run was cancelled while the callback ran.
-    #[error("was cancelled")]
-    Cancelled,
+    /// The callback gave no value: it timed out or panicked, or the run was cancelled while
+    /// it ran.
+    #[error("{0}")]
+    Stopped(Stopped),
 }
 
-impl From<Stopped> for HookFailure {
-    fn from(stopped: Stopped) -> Self {
-        match stopped {
-            Stopped::TimedOut(timeout) => Self::TimedOut(timeout),
-            Stopped::Panicked => Self::Panicked,
-            Stopped::Cancelled => Self::Cancelled,
-        }
-    }
-}
-
-/// The failure of one callback, as the chain reports it.
+/// The failure of one callback, as the chain reports it in a `hook_failed` event.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{hook} {phase} {failure}")]
-pub struct HookError {
-    pub hook: String,
-    pub phase: HookPoint,
-    pub failure: HookFailure,
+pub(crate) struct HookError {
+    pub(crate) hook: String,
+    pub(crate) phase: HookPhase,
+    pub(crate) failure: HookFailure,
 }
 
 #[cfg(test)]
@@ -479,7 +466,7 @@ mod tests {
     fn guard() -> HookCall<'static> {
         HookCall {
             name: "test",
-            phase: HookPoint::AfterTool,
+            phase: HookPhase::AfterTool,
             timeout: Duration::ZERO,
         }
     }
@@ -494,7 +481,7 @@ mod tests {
             error,
             HookError {
                 hook: "test".into(),
-                phase: HookPoint::AfterTool,
+                phase: HookPhase::AfterTool,
                 failure: HookFailure::Rejected("rejected".into())
             }
         );
@@ -506,7 +493,7 @@ mod tests {
             .run::<()>(async { panic!("callback bug") }, &CancellationToken::new())
             .await
             .unwrap_err();
-        assert_eq!(error.failure, HookFailure::Panicked);
+        assert_eq!(error.failure, HookFailure::Stopped(Stopped::Panicked));
     }
 
     #[tokio::test]
@@ -515,7 +502,7 @@ mod tests {
             .run::<()>(std::future::pending(), &CancellationToken::new())
             .await
             .unwrap_err();
-        assert_eq!(error.failure, HookFailure::TimedOut(Duration::ZERO));
+        assert_eq!(error.failure, HookFailure::Stopped(Stopped::TimedOut(Duration::ZERO)));
     }
 
     #[tokio::test]
@@ -527,7 +514,7 @@ mod tests {
             ..guard()
         };
         let error = guard.run::<()>(std::future::pending(), &cancel).await.unwrap_err();
-        assert_eq!(error.failure, HookFailure::Cancelled);
+        assert_eq!(error.failure, HookFailure::Stopped(Stopped::Cancelled));
     }
 
     #[test]

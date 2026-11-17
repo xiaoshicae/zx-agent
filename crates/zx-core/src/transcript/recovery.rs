@@ -52,7 +52,7 @@ impl Transcript {
     /// Record that a call with side effects is about to run. Fails without writing anything
     /// if the call is not on the current branch, has another name, already has a result, or
     /// has already started.
-    pub async fn append_tool_call_started(&mut self, tool_call_id: &str, tool_name: &str) -> Result<String> {
+    pub(crate) async fn append_tool_call_started(&mut self, tool_call_id: &str, tool_name: &str) -> Result<String> {
         self.append(Entry::ToolCallStarted(ToolCallStartedEntry {
             id: self.new_id(),
             parent_id: self.leaf.clone(),

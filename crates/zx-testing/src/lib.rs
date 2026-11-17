@@ -10,8 +10,10 @@
 //!   [`json_lines`], [`read_lines`]
 //! - `stand_ins`: in place of the real thing, [`EchoTool`], [`NotifyingProvider`], which says
 //!   when a request starts, and [`hook_context`], to call a hook directly
-//! - `sessions`: where a test's session comes from ([`Start`], [`Seed`], [`seeded_session`])
-//!   and where it is kept: [`LogStorage`] with [`RefusingLog`], and session files
+//! - `sessions`: where a test's session comes from ([`Start`], [`Seed`], [`seeded_session`]),
+//!   with the records only the kernel writes, such as a crash leaves them
+//!   ([`Seed::append_record`], [`Seed::record_tool_call_started`]), and where it is kept:
+//!   [`LogStorage`] with [`RefusingLog`], and session files
 //!   ([`create_session_file`], [`open_session_file`], [`read_session_file`], [`header`],
 //!   [`header_in`])
 //! - `runner` (sessions): driving a session: [`RunnerSetup`] with its defaults ([`config`],

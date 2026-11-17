@@ -38,10 +38,10 @@ mod test_support;
 #[cfg(test)]
 mod tests;
 pub use compaction::{
-    CompactionEntry, CompactionFailedEntry, CompactionPlan, CompactionStartedEntry, CompactionSummary, SummarizedBy,
-    SummaryFact, SummaryRequest,
+    CompactionEntry, CompactionFailedEntry, CompactionStartedEntry, CompactionSummary, SummarizedBy, SummaryFact,
+    SummaryRequest,
 };
-pub(crate) use compaction::{MAX_SUMMARY_BYTES, summary_input, summary_messages};
+pub(crate) use compaction::{CompactionPlan, MAX_SUMMARY_BYTES, summary_input, summary_messages};
 pub use entry::{ContextEditEntry, CustomEntry, CustomMessage, CustomMessageEntry, Entry, MessageEntry, SessionHeader};
 pub use log::{LoadedSession, LogRecord, SessionLog};
 pub use memory::MemoryStorage;
@@ -65,24 +65,25 @@ use crate::ai::{Message, UserMessageKind, now_ms};
 /// The session format: written to every new header, and the only version a session may have
 /// to be created, loaded or read. A change to the format raises it, and sessions of any
 /// other version are refused.
-pub const SESSION_VERSION: u32 = 11;
+pub const SESSION_VERSION: u32 = 12;
 
 /// How long one append may wait for its log, such as a database that stopped answering.
 /// A file append finishes long before; a timed-out append stops writing, like a failed one.
 const APPEND_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Why a transcript no longer writes. Each case asks for something different before a session can
-/// be written again, so hosts such as a server that keeps sessions open can match on it.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum WritesStopped {
+/// Why a transcript no longer writes, as the error of every later append says. A session
+/// whose transcript stopped writing closes itself, and the agent opens it again from its
+/// storage, which holds what was recorded.
+#[derive(Debug, thiserror::Error)]
+enum WritesStopped {
     /// An append was dropped while it waited for its log, so the log may or may not hold the
-    /// record. Open the session again from its storage before writing.
+    /// record.
     #[error("an earlier append was interrupted before its log answered, so its outcome is unknown")]
     Interrupted,
     /// An append did not finish within this time; its outcome is unknown, as above.
     #[error("an earlier append did not finish within {0:?}, so its outcome is unknown")]
     TimedOut(Duration),
-    /// An append failed with this error. Remove the cause, then open the session again.
+    /// An append failed with this error.
     #[error("an earlier write failed: {0}")]
     Failed(String),
     /// The transcript is a snapshot ([`Transcript::snapshot`]), which never writes.
@@ -191,12 +192,6 @@ impl Transcript {
         }
         store.incomplete_tail_bytes = incomplete_tail_bytes;
         Ok(store)
-    }
-
-    /// Why this transcript no longer writes, or `None` while it does. Every append fails from
-    /// then on; [`WritesStopped`] says what to do before writing the session again.
-    pub fn writes_stopped(&self) -> Option<&WritesStopped> {
-        self.stopped.as_ref()
     }
 
     /// Whether an append failed, timed out or was interrupted, so that this transcript, which

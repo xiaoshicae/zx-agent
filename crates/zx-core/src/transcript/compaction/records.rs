@@ -13,7 +13,7 @@ use crate::transcript::{Entry, Transcript};
 impl Transcript {
     /// Persist the start, with who makes the summary, before the summary is asked for.
     /// Fails without writing anything if the plan does not match the branch.
-    pub async fn begin_compaction(&mut self, plan: CompactionPlan) -> Result<String> {
+    pub(crate) async fn begin_compaction(&mut self, plan: CompactionPlan) -> Result<String> {
         self.append(Entry::CompactionStarted(CompactionStartedEntry {
             id: self.new_id(),
             parent_id: self.leaf.clone(),
@@ -29,7 +29,7 @@ impl Transcript {
 
     /// Commit the result of a summary, validated like loading. Persistence precedes
     /// projection changes.
-    pub async fn append_compaction(
+    pub(crate) async fn append_compaction(
         &mut self,
         compaction_id: &str,
         summary: CompactionSummary,
@@ -50,7 +50,7 @@ impl Transcript {
     }
 
     /// Record a failed summary without replacing the current projection.
-    pub async fn fail_compaction(
+    pub(crate) async fn fail_compaction(
         &mut self,
         compaction_id: &str,
         error: String,

@@ -13,10 +13,10 @@ use super::{
 use crate::sync::lock;
 
 /// Sessions kept in memory, gone with the storage: what a host uses when it stores nothing,
-/// such as `zx-agent chat --no-session`. Within the process a session can still be listed,
-/// read, and opened again once its writer is dropped; a storage made with
-/// [`MemoryStorage::forgetting`] drops the session then instead.
-/// Listing requires a Tokio runtime: record replay runs on its blocking threads.
+/// such as for conversations that are not to outlast the process. Within the process a
+/// session can still be listed, read, and opened again once its writer is dropped; a storage
+/// made with [`MemoryStorage::forgetting`] drops the session then instead. Listing requires a
+/// Tokio runtime: record replay runs on its blocking threads.
 #[derive(Default)]
 pub struct MemoryStorage {
     /// Shared with the logs of the sessions, which outlive any borrow of the storage.

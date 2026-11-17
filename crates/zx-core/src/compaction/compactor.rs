@@ -9,8 +9,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::answer::{ResponseBytes, parse_answer};
 use super::{
-    Compacted, Config, End, MAX_SOURCE_BYTES, Summarized, Summarizer, SummaryReply, SummarySource, TokenTrigger,
-    Trigger, context_bytes, estimated_tokens, message_bytes,
+    Compacted, Config, End, MAX_SOURCE_BYTES, Summarized, Summarizer, SummaryReply, SummarySource, Trigger,
+    context_bytes, estimated_tokens, message_bytes,
 };
 use crate::ai::{
     AssistantMessage, Message, ModelMeta, Provider, Request, StopReason, StreamEvent, Usage, duration_ms, now_ms,
@@ -278,30 +278,29 @@ impl Compactor<'_> {
             let retained = context_bytes(&candidate.retained.messages)?;
             ensure!(
                 self.compaction.trigger_bytes.is_none_or(|limit| retained < limit),
-                "retained system messages and latest input already exceed triggerBytes; raise the budget or start a new session"
+                "retained system messages and latest input already exceed trigger_bytes; raise it or start a new session"
             );
             ensure!(
                 self.below_token_trigger(estimated_tokens(retained)),
-                "retained system messages and latest input already exceed triggerTokens; raise the budget or start a new session"
+                "retained system messages and latest input already exceed trigger_tokens; raise it or start a new session"
             );
         }
         Ok(Some(candidate))
     }
 
-    /// Whether `tokens` lie below the token trigger, or no token trigger is set.
+    /// The token trigger for the model that is asked, if one applies to it.
+    fn token_trigger(&self) -> Option<u64> {
+        self.compaction.trigger_tokens_for(self.models, self.model)
+    }
+
+    /// Whether `tokens` lie below the token trigger, or no token trigger applies.
     fn below_token_trigger(&self, tokens: u64) -> bool {
-        match self.compaction.trigger_tokens {
-            TokenTrigger::Above(limit) => tokens < limit,
-            TokenTrigger::Unset | TokenTrigger::Off => true,
-        }
+        self.token_trigger().is_none_or(|limit| tokens < limit)
     }
 
     /// Whether `tokens` pass the token trigger, as a request's trigger check counts it.
     fn above_token_trigger(&self, tokens: u64) -> bool {
-        match self.compaction.trigger_tokens {
-            TokenTrigger::Above(limit) => tokens > limit,
-            TokenTrigger::Unset | TokenTrigger::Off => false,
-        }
+        self.token_trigger().is_some_and(|limit| tokens > limit)
     }
 
     /// Who makes the summary, as the start records it.
@@ -516,13 +515,13 @@ impl Compactor<'_> {
         );
         ensure!(
             !self.automatic() || self.compaction.trigger_bytes.is_none_or(|limit| output_bytes <= limit),
-            "retained context still exceeds triggerBytes; reduce retained input or raise the budget"
+            "retained context still exceeds trigger_bytes; reduce retained input or raise the trigger"
         );
         // With no answer to measure it yet, the new context's tokens are estimated from its
         // bytes, as the next request's trigger check estimates them.
         ensure!(
             !self.automatic() || !self.above_token_trigger(estimated_tokens(output_bytes)),
-            "retained context still exceeds triggerTokens; reduce retained input or raise the budget"
+            "retained context still exceeds trigger_tokens; reduce retained input or raise the trigger"
         );
         if self.cancel.is_cancelled() {
             bail!(CANCELLED);

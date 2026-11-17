@@ -15,7 +15,7 @@ use zx_agent::ai::{EventReceiver, Message, Provider, Request, SectionChange, Sto
 use zx_agent::builtin::continuation::ContinueOnLength;
 use zx_agent::builtin::redact::{RedactSecrets, check_secret_files, short_secret_files};
 use zx_agent::builtin::tools::BashTool;
-use zx_agent::events::{ApprovalResult, Budget, Event, EventKind, RunOutcome, ToolVerdict};
+use zx_agent::events::{ApprovalResult, Budget, Event, EventKind, RunOutcome};
 use zx_agent::hooks::{ContextEdit, FinishedStep, Hook, HookContext, HookResult, HookStage, StepDecision};
 use zx_agent::input::Input;
 use zx_agent::policy::{ApprovalDecision, ApprovalMode, PolicyContext, PolicyDecision, ToolPolicy};
@@ -24,7 +24,7 @@ use zx_agent::transcript::Entry;
 use zx_agent::{CancelSignal, SessionOptions};
 use zx_testing::{
     Asked, EchoTool, RunnerSetup, Seed, Start, config, fast_retry, header, read_lines, refusal, run_approved,
-    run_prompt, summarize,
+    run_prompt, summarize, take_queued_inputs,
 };
 
 struct Verdict(PolicyDecision);
@@ -885,7 +885,10 @@ async fn stopping_from_a_hook_preserves_queued_user_input() {
     let (runner, _) = RunnerSetup::new(config).build().await;
     let result = runner.run("go").await;
     assert_eq!(result.outcome, RunOutcome::Completed);
-    assert_eq!(runner.queues().drain_steering(), [Input::from("pending user input")]);
+    assert_eq!(
+        take_queued_inputs(&runner).unwrap(),
+        [Input::from("pending user input")]
+    );
 }
 
 struct FinishFailure;
@@ -1019,8 +1022,8 @@ fn approvals(events: &zx_testing::Collect) -> Vec<(String, String)> {
         .into_iter()
         .filter_map(|event| match event {
             EventKind::ToolDecision {
-                tool_call_id, verdict, ..
-            } => Some((tool_call_id, format!("{verdict:?}"))),
+                tool_call_id, decision, ..
+            } => Some((tool_call_id, format!("{decision:?}"))),
             EventKind::ApprovalRequested { tool_call_id, .. } => Some((tool_call_id, "requested".into())),
             EventKind::ApprovalResolved {
                 tool_call_id, approval, ..
@@ -1039,20 +1042,13 @@ fn pairs(expected: &[(&str, &str)]) -> Vec<(String, String)> {
 
 #[tokio::test]
 async fn the_policy_verdict_of_every_call_is_reported_with_its_reason() {
-    for (decision, verdict, reason) in [
-        (PolicyDecision::Allow, ToolVerdict::Allow, None),
-        (
-            PolicyDecision::Deny("not on the list".into()),
-            ToolVerdict::Deny,
-            Some("not on the list".to_string()),
-        ),
-    ] {
+    for verdict in [PolicyDecision::Allow, PolicyDecision::Deny("not on the list".into())] {
         let provider = Arc::new(FauxProvider::new([
             FauxStep::tool_call("c1", "echo", json!({})),
             FauxStep::text("done"),
         ]));
         let mut config = config(provider, vec![Arc::new(EchoTool::new("echo"))]);
-        config.policies.push("verdict", Arc::new(Verdict(decision)));
+        config.policies.push("verdict", Arc::new(Verdict(verdict.clone())));
 
         let (_, events) = run_prompt(config, &mut Vec::new(), "go").await;
 
@@ -1060,11 +1056,11 @@ async fn the_policy_verdict_of_every_call_is_reported_with_its_reason() {
             .events()
             .into_iter()
             .filter_map(|event| match event {
-                EventKind::ToolDecision { verdict, reason, .. } => Some((verdict, reason)),
+                EventKind::ToolDecision { decision, .. } => Some(decision),
                 _ => None,
             })
             .collect();
-        assert_eq!(decisions, [(verdict, reason)]);
+        assert_eq!(decisions, [verdict]);
         assert_eq!(approvals(&events).len(), 1, "nobody is asked");
     }
 }
@@ -1075,10 +1071,10 @@ async fn approvals_are_reported_when_asked_and_when_remembered() {
         (
             ApprovalDecision::AllowOnce,
             pairs(&[
-                ("c1", "Ask"),
+                ("c1", r#"Ask("review")"#),
                 ("c1", "requested"),
                 ("c1", "AllowOnce"),
-                ("c2", "Ask"),
+                ("c2", r#"Ask("review")"#),
                 ("c2", "requested"),
                 ("c2", "AllowOnce"),
             ]),
@@ -1086,20 +1082,20 @@ async fn approvals_are_reported_when_asked_and_when_remembered() {
         (
             ApprovalDecision::AllowSession,
             pairs(&[
-                ("c1", "Ask"),
+                ("c1", r#"Ask("review")"#),
                 ("c1", "requested"),
                 ("c1", "AllowSession"),
-                ("c2", "Ask"),
+                ("c2", r#"Ask("review")"#),
                 ("c2", "Remembered"),
             ]),
         ),
         (
             ApprovalDecision::Deny("declined".into()),
             pairs(&[
-                ("c1", "Ask"),
+                ("c1", r#"Ask("review")"#),
                 ("c1", "requested"),
                 ("c1", "Denied"),
-                ("c2", "Ask"),
+                ("c2", r#"Ask("review")"#),
                 ("c2", "requested"),
                 ("c2", "Denied"),
             ]),
@@ -1221,7 +1217,7 @@ async fn an_approval_interrupted_by_cancellation_is_reported_as_cancelled() {
     assert_eq!(report.outcome, RunOutcome::Cancelled);
     assert_eq!(
         approvals(&events),
-        pairs(&[("c", "Ask"), ("c", "requested"), ("c", "Cancelled")])
+        pairs(&[("c", r#"Ask("review")"#), ("c", "requested"), ("c", "Cancelled")])
     );
 }
 
@@ -1409,8 +1405,8 @@ async fn hooks_run_in_stage_order_whatever_the_registration_order() {
     for (stage, tag) in [
         (HookStage::Storage, "storage"),
         (HookStage::Redaction, "redaction"),
-        (HookStage::Extension, "extension-1"),
-        (HookStage::Extension, "extension-2"),
+        (HookStage::Default, "default-1"),
+        (HookStage::Default, "default-2"),
     ] {
         config.hooks.push(
             "staged",
@@ -1425,7 +1421,7 @@ async fn hooks_run_in_stage_order_whatever_the_registration_order() {
     run_prompt(config, &mut Vec::new(), "go").await;
 
     let order = order.lock().unwrap().clone();
-    let expected: Vec<String> = ["extension-1", "extension-2", "redaction", "storage"]
+    let expected: Vec<String> = ["default-1", "default-2", "redaction", "storage"]
         .iter()
         .map(|tag| format!("after:{tag}"))
         .collect();

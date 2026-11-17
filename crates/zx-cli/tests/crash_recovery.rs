@@ -319,8 +319,8 @@ async fn an_interrupted_batch_gets_results_and_no_call_runs_again() {
         ]))
         .await
         .unwrap();
-    store.append_tool_call_started("c1", "write").await.unwrap();
-    store.append_tool_call_started("c2", "write").await.unwrap();
+    store.record_tool_call_started("c1", "write").await.unwrap();
+    store.record_tool_call_started("c2", "write").await.unwrap();
     store.append_message(result("c1", "write", "written")).await.unwrap();
     drop(store);
     let write = Counted::new("write", Effects::SideEffects);
@@ -563,7 +563,7 @@ async fn run_reports_a_recovered_call_and_does_not_run_the_command_again() {
     store.append_message(Message::user("fix it")).await.unwrap();
     let call = tool_call_answer("mock", "mock", "bash", json!({"command": "touch ran-again"}));
     store.append_message(call).await.unwrap();
-    store.append_tool_call_started("c1", "bash").await.unwrap();
+    store.record_tool_call_started("c1", "bash").await.unwrap();
     drop(store);
     let server = MockServer::start(vec![Reply::text("checked")]).await;
 

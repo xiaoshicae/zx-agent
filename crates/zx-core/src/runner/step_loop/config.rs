@@ -42,7 +42,8 @@ pub(crate) struct LoopConfig {
     pub(crate) active_tools: Arc<ActiveTools>,
     /// Slash commands extensions registered, for a frontend to run.
     pub(crate) commands: Vec<Arc<dyn SlashCommand>>,
-    /// What is known about models, by ID: the prices give each response a cost.
+    /// What is known about models, by ID: the prices give each response a cost, and the
+    /// window of `model` is what a token trigger that follows the window lies below.
     pub(crate) models: HashMap<String, ModelMeta>,
     /// Sent with every task request as its cache key ([`crate::ai::Request::cache_key`]);
     /// `None` sends none.

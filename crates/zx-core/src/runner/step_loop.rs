@@ -27,7 +27,7 @@ use crate::hooks::HookError;
 use crate::input::{Input, Queue};
 use crate::policy::ApprovalGate;
 use crate::runner::final_answer::cut_off;
-use crate::runner::run_host::RunHost;
+use crate::runner::run_scope::RunScope;
 use crate::runner::{Ending, EventTarget, RunAccounting, RunOutcome};
 
 pub(crate) use config::LoopConfig;
@@ -84,10 +84,10 @@ impl Halt {
 /// The Runner builds one per attempt with [`StepLoop::new`] and [`StepLoop::run`]s it;
 /// retries, the time limit and recovery stay with the run.
 pub(crate) struct StepLoop<'a> {
-    /// The run's borrow of its Runner, for this attempt: the session that records each step
-    /// before the loop acts on it and holds the context, the configuration, where the run's
-    /// events go and the run's trace, which carries the cancellation.
-    host: RunHost<'a>,
+    /// The scope of the run, for this attempt: the session that records each step before the
+    /// loop acts on it and holds the context, the configuration, where the run's events go
+    /// and the run's trace, which carries the cancellation.
+    run: RunScope<'a>,
     /// Where a call waits for the host's approval, and what the session was granted.
     approvals: &'a ApprovalGate,
     /// What the run has spent and may spend: the loop counts into it as it goes and checks
@@ -109,12 +109,12 @@ pub(crate) enum FirstInput {
 }
 
 impl<'a> StepLoop<'a> {
-    /// The loop for the attempt in progress of the run that lends it `host`, spending against
+    /// The loop for the attempt in progress of the run whose scope is `run`, spending against
     /// `accounting`; the run's cancellation is its trace's. Calls wait for approval at
     /// `approvals`, which keeps the session's grants.
-    pub(super) fn new(host: RunHost<'a>, approvals: &'a ApprovalGate, accounting: &'a mut RunAccounting) -> Self {
+    pub(super) fn new(run: RunScope<'a>, approvals: &'a ApprovalGate, accounting: &'a mut RunAccounting) -> Self {
         Self {
-            host,
+            run,
             approvals,
             accounting,
             step: None,
@@ -131,11 +131,11 @@ impl<'a> StepLoop<'a> {
         let halt = self
             .run_steps(first)
             .await
-            .aborted_if_cancelled(self.host.target.trace.cancel());
+            .aborted_if_cancelled(self.run.target.trace.cancel());
 
         // A step that stopped before its request finished still ends, so step events pair up.
         self.end_step().await;
-        let cut_off = cut_off(&self.host.transcript.messages_since(self.host.run_start));
+        let cut_off = cut_off(&self.run.transcript.messages_since(self.run.run_start));
         self.emit(EventKind::AttemptEnd {
             outcome: halt.outcome(cut_off),
         })
@@ -174,7 +174,7 @@ impl<'a> StepLoop<'a> {
     /// Where this attempt's events go. The target borrows the run, not the loop, so that the
     /// loop can record in its run's session while it holds one.
     fn target(&self) -> EventTarget<'a> {
-        self.host.target
+        self.run.target
     }
 
     async fn emit(&self, event: EventKind) {
@@ -213,9 +213,9 @@ impl<'a> StepLoop<'a> {
 
     /// Record the system prompt's changes and the prompt, if there is one.
     async fn initialize(&mut self, prompt: Option<Input>) -> Result<(), Halt> {
-        let config = self.host.config;
+        let config = self.run.config;
         self.start_step().await;
-        let changes = SystemPrompt::from_transcript(&self.host.transcript.messages()).diff(&config.system_prompt);
+        let changes = SystemPrompt::from_transcript(&self.run.transcript.messages()).diff(&config.system_prompt);
         if !changes.is_empty() {
             self.append(Message::System(SystemMessage {
                 sections: changes,
@@ -254,17 +254,17 @@ impl<'a> StepLoop<'a> {
             }
             self.ensure_can_request()?;
             let (targets, messages): (Vec<String>, Vec<Message>) = self
-                .host
+                .run
                 .transcript
                 .projection()
                 .into_iter()
                 .map(|projected| (projected.entry_id, projected.message))
                 .unzip();
             let planned = self
-                .host
+                .run
                 .config
                 .hooks
-                .transform_context(&messages, &self.host.target.trace.context())
+                .transform_context(&messages, &self.run.target.trace.context())
                 .await;
             let edits = match planned {
                 Ok(edits) => edits,
@@ -274,7 +274,7 @@ impl<'a> StepLoop<'a> {
             self.ensure_can_request()?;
             // Summary requests count against the budget but are reported as a compaction,
             // not as steps of their own.
-            let requests = self.host.prepare_context(self.accounting).await?;
+            let requests = self.run.prepare_context(self.accounting).await?;
             self.ensure_can_request()?;
             if requests == 0 {
                 return Ok(step);
@@ -339,7 +339,7 @@ impl<'a> StepLoop<'a> {
 
     /// End the attempt if the run was cancelled.
     fn ensure_not_cancelled(&self) -> Result<(), Halt> {
-        if self.host.target.trace.cancel().is_cancelled() {
+        if self.run.target.trace.cancel().is_cancelled() {
             return Err(Halt::Ended(Ending::Cancelled));
         }
         Ok(())

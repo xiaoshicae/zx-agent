@@ -11,6 +11,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::ai::{Delta, Message, Usage};
+use crate::policy::PolicyDecision;
 pub use report::{Budget, RunOutcome, RunReport};
 
 /// Where the events of a run go, for the kernel's own objects below the run, such as the
@@ -23,7 +24,7 @@ pub(crate) trait Emit: Send + Sync {
 
 /// Version of the event JSON, envelope and event types together. Raised on incompatible
 /// changes; events without a version predate the envelope.
-pub const EVENT_SCHEMA_VERSION: u32 = 5;
+pub const EVENT_SCHEMA_VERSION: u32 = 6;
 
 /// One event, with what a trace needs to place it. In JSON the envelope fields and the
 /// event's own fields share one object, and `type` names the event.
@@ -33,8 +34,8 @@ pub struct Event {
     /// [`EVENT_SCHEMA_VERSION`] when the event was emitted.
     pub schema_version: u32,
     /// Position within the run, from 1. A reader of the run sees no gap; a gap in what a
-    /// frontend passes on means that it left events out, such as the streaming deltas that
-    /// `--output jsonl` leaves out without `--deltas`.
+    /// frontend passes on means that it left events out, such as streaming deltas
+    /// (`message_update`) that it does not show.
     pub seq: u64,
     /// When the event was emitted, in milliseconds since the Unix epoch.
     pub at_ms: u64,
@@ -54,16 +55,6 @@ pub enum RequestKind {
     Task,
     /// A summary request of a compaction.
     Summary,
-}
-
-/// What the tool policy concluded about a call.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolVerdict {
-    Allow,
-    Deny,
-    /// Run only after an approval.
-    Ask,
 }
 
 /// How an approval ended.
@@ -99,12 +90,11 @@ pub enum Interruption {
     ReadOnly,
 }
 
-/// Which extension point of the loop a hook call is at: one per
-/// [`Hook`](crate::hooks::Hook) method.
-/// [`HookStage`](crate::hooks::HookStage) is something else: the order of hooks at the same
-/// point. In JSON, the name [`HookPoint::as_str`] gives.
+/// Which phase of the loop a hook call is in: one per [`Hook`](crate::hooks::Hook) method.
+/// [`HookStage`](crate::hooks::HookStage) is something else: the order of hooks in the same
+/// phase. In JSON, the name [`HookPhase::as_str`] gives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HookPoint {
+pub enum HookPhase {
     OnInput,
     TransformContext,
     PrepareRequest,
@@ -113,7 +103,8 @@ pub enum HookPoint {
     OnEvent,
 }
 
-impl HookPoint {
+impl HookPhase {
+    /// The phase as JSON names it: the name of the hook method, such as `after_tool`.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::OnInput => "on_input",
@@ -126,13 +117,13 @@ impl HookPoint {
     }
 }
 
-impl std::fmt::Display for HookPoint {
+impl std::fmt::Display for HookPhase {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.as_str())
     }
 }
 
-impl Serialize for HookPoint {
+impl Serialize for HookPhase {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(self.as_str())
     }
@@ -215,14 +206,14 @@ pub enum EventKind {
         tool_name: String,
         content: String,
     },
-    /// The verdict of the tool policies on a call. A policy that panics, runs past its timeout
-    /// or is cut short by cancellation denies the call, and `reason` names it.
+    /// The verdict of the tool policies on a call, in JSON its `decision` and, for a denial or
+    /// a question, its `reason`. A policy that panics, runs past its timeout or is cut short
+    /// by cancellation denies the call, and the reason names it.
     ToolDecision {
         tool_call_id: String,
         tool_name: String,
-        verdict: ToolVerdict,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        reason: Option<String>,
+        #[serde(flatten)]
+        decision: PolicyDecision,
     },
     /// A policy asked about a call, which now waits for the host's approval: the host
     /// answers `approval_id` with [`Session::resolve_approval`](crate::Session::resolve_approval).
@@ -300,7 +291,7 @@ pub enum EventKind {
     HookFailed {
         hook: String,
         /// Where the hook was called.
-        phase: HookPoint,
+        phase: HookPhase,
         error: String,
     },
     /// A compaction's start and its summary request are recorded; the model is asked next.
@@ -438,8 +429,7 @@ mod tests {
             EventKind::ToolDecision {
                 tool_call_id: "c".into(),
                 tool_name: "bash".into(),
-                verdict: ToolVerdict::Ask,
-                reason: Some("writes files".into()),
+                decision: PolicyDecision::Ask("writes files".into()),
             },
             EventKind::ApprovalRequested {
                 approval_id: "a".into(),
@@ -484,7 +474,7 @@ mod tests {
             },
             EventKind::HookFailed {
                 hook: "test".into(),
-                phase: HookPoint::OnEvent,
+                phase: HookPhase::OnEvent,
                 error: "failed".into(),
             },
             EventKind::CompactionStart {
@@ -542,7 +532,7 @@ mod tests {
     fn a_hook_failure_names_the_hook_method_as_its_phase() {
         let event = EventKind::HookFailed {
             hook: "audit".into(),
-            phase: HookPoint::AfterTool,
+            phase: HookPhase::AfterTool,
             error: "audit after_tool failed: full".into(),
         };
         assert_eq!(
@@ -552,8 +542,25 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_decision_carries_the_verdict_as_policies_give_it() {
+        let decision = |decision| EventKind::ToolDecision {
+            tool_call_id: "c".into(),
+            tool_name: "bash".into(),
+            decision,
+        };
+        assert_eq!(
+            serde_json::to_value(decision(PolicyDecision::Allow)).unwrap(),
+            json!({"type": "tool_decision", "toolCallId": "c", "toolName": "bash", "decision": "allow"})
+        );
+        assert_eq!(
+            serde_json::to_value(decision(PolicyDecision::Ask("writes files".into()))).unwrap(),
+            json!({"type": "tool_decision", "toolCallId": "c", "toolName": "bash", "decision": "ask", "reason": "writes files"})
+        );
+    }
+
+    #[test]
     fn event_fields_are_camel_case() {
-        // Consumers of `--output jsonl` read these names.
+        // Readers of the events as JSON, such as frontends that pass them on, read these names.
         let event = EventKind::ToolExecutionEnd {
             tool_call_id: "c".into(),
             tool_name: "bash".into(),

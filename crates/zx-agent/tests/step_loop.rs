@@ -22,6 +22,7 @@ use zx_agent::policy::{PolicyContext, PolicyDecision, ToolPolicy};
 use zx_agent::tools::{Effects, ExecutionMode, MAX_DETAILS_BYTES, Tool, ToolContext, ToolOutput};
 use zx_testing::{
     Collect, Driven, EchoTool, NotifyingProvider, RunnerSetup, config, run_prompt, run_prompt_with, summarize,
+    take_queued_inputs,
 };
 
 fn provider(steps: impl IntoIterator<Item = FauxStep>) -> Arc<FauxProvider> {
@@ -528,7 +529,7 @@ async fn a_withdrawn_follow_up_is_never_taken() {
             "assistant:stopped",
         ]
     );
-    assert!(runner.queues().drain_follow_up().is_empty());
+    assert!(take_queued_inputs(&runner).unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -557,7 +558,7 @@ async fn a_spent_budget_starts_no_new_step_and_leaves_queued_input_queued() {
         summarize(&runner.session().messages()),
         ["user:go", "assistant:calls[c1]", "tool:c1=ok"]
     );
-    assert_eq!(runner.queues().drain_steering(), [Input::from("also check disk")]);
+    assert_eq!(take_queued_inputs(&runner).unwrap(), [Input::from("also check disk")]);
     let steps: Vec<_> = events
         .kinds()
         .into_iter()

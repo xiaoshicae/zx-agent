@@ -1,6 +1,7 @@
 //! What the unit tests of the session modules share: a header, messages, the texts a store
-//! projects, a log that writes to a writer, and a writer that always fails. The rest of the
-//! crate's tests reach [`FailingWriter`] and [`WriterLog`] as `crate::transcript::...`.
+//! projects, a compaction's plan and summary, a log that writes to a writer, and a writer
+//! that always fails. The rest of the crate's tests reach [`FailingWriter`] and [`WriterLog`]
+//! as `crate::transcript::...`.
 
 use std::io::Write;
 use std::path::Path;
@@ -10,7 +11,10 @@ use async_trait::async_trait;
 
 use crate::ai::{AssistantMessage, ContentBlock, Message, StopReason};
 
-use super::{LoadedSession, LogRecord, SessionHeader, SessionLog, Transcript};
+use super::{
+    CompactionPlan, CompactionSummary, LoadedSession, LogRecord, SessionHeader, SessionLog, SummarizedBy, SummaryFact,
+    SummaryRequest, Transcript,
+};
 
 /// A log that writes each record and its newline to a writer, on a blocking thread as a file
 /// would be written: a writer that fails or blocks makes the append fail or time out. An
@@ -94,6 +98,48 @@ pub(super) fn assistant(text: &str) -> Message {
     message.error_message = None;
     message.content = vec![ContentBlock::Text { text: text.into() }];
     Message::Assistant(message)
+}
+
+/// An old message and the latest input, appended to `store`; returns their entry IDs.
+pub(super) async fn seeded(store: &mut Transcript) -> (String, String) {
+    let old = store.append_message(Message::user("old evidence")).await.unwrap();
+    let kept = store.append_message(Message::user("latest input")).await.unwrap();
+    (old, kept)
+}
+
+/// A summary whose one fact cites the record `id`.
+pub(super) fn summary(id: &str) -> CompactionSummary {
+    CompactionSummary {
+        facts: vec![SummaryFact {
+            text: "The old observation".into(),
+            source_entry_ids: vec![id.into()],
+        }],
+        inferences: vec!["An inference".into()],
+        plans: vec!["Continue the task".into()],
+    }
+}
+
+/// A compaction of `store` that the model summarizes, keeping from `first_kept` and reading
+/// every record before it.
+pub(super) fn plan(store: &Transcript, first_kept: &str) -> CompactionPlan {
+    let source_entry_ids = store
+        .raw_projection()
+        .into_iter()
+        .take_while(|item| item.entry_id != first_kept)
+        .map(|item| item.entry_id)
+        .collect();
+    CompactionPlan {
+        first_kept_entry_id: first_kept.into(),
+        kept_input_entry_id: None,
+        source_entry_ids,
+        by: SummarizedBy::Request(SummaryRequest {
+            provider: "faux".into(),
+            model: "m".into(),
+            instructions: "Summarize".into(),
+            max_tokens: 100,
+        }),
+        input_bytes: 1000,
+    }
 }
 
 pub(super) fn texts(store: &Transcript) -> Vec<String> {

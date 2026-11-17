@@ -96,3 +96,30 @@ pub enum PolicyDecision {
     /// Ask the host; no human is an explicit rejection.
     Ask(String),
 }
+
+impl PolicyDecision {
+    /// The decision as JSON names it, without its reason: `allow`, `deny` or `ask`.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Deny(_) => "deny",
+            Self::Ask(_) => "ask",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_are_the_ones_json_gives() {
+        for decision in [
+            PolicyDecision::Allow,
+            PolicyDecision::Deny("no".into()),
+            PolicyDecision::Ask("why".into()),
+        ] {
+            assert_eq!(serde_json::to_value(&decision).unwrap()["decision"], decision.name());
+        }
+    }
+}

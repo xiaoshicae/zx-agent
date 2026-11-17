@@ -1,5 +1,5 @@
 //! What a run produced, and how a run or one attempt of it ended. Defined beside the events
-//! because the `attempt_end` and `run_end` events carry them; the runner re-exports both.
+//! because the `attempt_end` and `run_end` events carry them; `events` re-exports them.
 
 use std::collections::BTreeMap;
 

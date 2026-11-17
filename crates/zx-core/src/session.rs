@@ -143,18 +143,18 @@ struct Shared {
 }
 
 impl Session {
-    /// A conversation recorded in `transcript`, running with `config`. Fails for compaction
-    /// budgets that cannot work, without making a request or changing the session.
+    /// A conversation recorded in `transcript`, running with `config` and the `compaction`
+    /// settings that the agent checked when it was made.
     pub(crate) fn new(
         config: LoopConfig,
         retry: RetryPolicy,
         limits: RunLimits,
         compaction: compaction::Config,
         transcript: Transcript,
-    ) -> anyhow::Result<Self> {
-        let runner = Runner::new(config, retry, limits, transcript).with_compaction(compaction)?;
+    ) -> Self {
+        let runner = Runner::new(config, retry, limits, transcript).with_compaction(compaction);
         let config = runner.config();
-        Ok(Self {
+        Self {
             shared: Arc::new(Shared {
                 queues: config.queues.clone(),
                 active_tools: config.active_tools.clone(),
@@ -165,7 +165,7 @@ impl Session {
                 id: runner.transcript().header().id.clone(),
                 state: Mutex::new(State::Idle(Box::new(runner))),
             }),
-        })
+        }
     }
 
     /// The session's ID, as its header records it.
@@ -238,7 +238,7 @@ impl Session {
 
     /// The conversation's queues: to steer or follow up with the person's input or a message
     /// from an extension (`steer`, `follow_up`), to record extension state during a run
-    /// (`append_entry`), and to choose how many queued
+    /// (`append_custom_entry`), and to choose how many queued
     /// messages a request takes (`set_mode`). A clone is a handle to the same queues, for a
     /// part of a frontend that only feeds them.
     pub fn queues(&self) -> &Arc<InputQueues> {
@@ -285,9 +285,9 @@ impl Session {
     }
 
     /// Record state of an extension in the session while idle (pi: `appendEntry`); during
-    /// a run, hooks and commands use `queues().append_entry` instead. Returns the entry's
+    /// a run, hooks and commands use `queues().append_custom_entry` instead. Returns the entry's
     /// ID. A run returns Busy; a write failure returns WriteFailed.
-    pub async fn append_entry(&self, custom_type: &str, data: Value) -> Result<String, SessionError> {
+    pub async fn append_custom_entry(&self, custom_type: &str, data: Value) -> Result<String, SessionError> {
         self.append_idle(async |runner| runner.transcript_mut().append_custom_entry(custom_type, data).await)
             .await
     }
@@ -341,7 +341,7 @@ impl Session {
 
     /// Cancel the run or compaction in progress; its [`Run`] then ends with a cancelled
     /// result. Returns false when idle or closed. The short operations that read or write the
-    /// session while idle (`with_transcript`, `append_entry`, `append_custom_message`,
+    /// session while idle (`with_transcript`, `append_custom_entry`, `append_custom_message`,
     /// `set_name`) hold the conversation as well: during one of them this returns true,
     /// although they have nothing to cancel.
     pub fn cancel(&self) -> bool {

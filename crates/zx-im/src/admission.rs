@@ -122,7 +122,8 @@ mod tests {
             queues.follow_up(pending);
         }
         assert_eq!(budget.reserved(), (1, 6));
-        assert_eq!(queues.drain_follow_up(), [Input::from("中文")]);
+        let taken: Vec<Input> = queues.take_all().into_iter().map(PendingInput::into_input).collect();
+        assert_eq!(taken, [Input::from("中文")]);
         assert_eq!(budget.reserved(), (0, 0));
     }
 

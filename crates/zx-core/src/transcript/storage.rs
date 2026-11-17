@@ -1,10 +1,10 @@
 //! Where sessions are kept: the storage interface, what a listing is asked for and what it
-//! returns (pi: `SessionManager.list`, `findMostRecentSession`, `findById`).
+//! returns (pi: `SessionManager.list`, `findMostRecentSession`).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use async_trait::async_trait;
 
 use super::{Entry, LoadedSession, SessionHeader, SessionLog, SessionName, Transcript};
@@ -95,8 +95,9 @@ pub trait SessionStorage: Send + Sync {
 /// Which sessions a listing returns. The default asks for every session.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SessionQuery {
-    /// Only sessions started in this working directory, compared as the header records it
-    /// (the canonical path for sessions the CLI creates).
+    /// Only sessions started in this working directory, compared as the header records it:
+    /// the absolute path that [`Agent::create_session`](crate::Agent::create_session) made of
+    /// the directory it was given.
     pub cwd: Option<PathBuf>,
     /// Only sessions that carry each of these labels with the same value.
     pub labels: BTreeMap<String, String>,
@@ -238,20 +239,6 @@ impl SessionList {
             unreadable,
         }
     }
-
-    /// The one session whose ID starts with `prefix`. Fails when none or several match, or
-    /// when `prefix` is empty.
-    pub fn find(&self, prefix: &str) -> Result<&SessionInfo> {
-        if prefix.is_empty() {
-            bail!("an empty session ID matches every session");
-        }
-        let mut matches = self.sessions.iter().filter(|session| session.id.starts_with(prefix));
-        match (matches.next(), matches.next()) {
-            (Some(session), None) => Ok(session),
-            (None, _) => bail!("no session ID starts with {prefix}"),
-            (Some(_), Some(_)) => bail!("more than one session ID starts with {prefix}; give more of the ID"),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -288,23 +275,6 @@ mod tests {
         assert_eq!(listed.title(), Some("fix the build"));
         listed.name = SessionName::new("build fix");
         assert_eq!(listed.title(), Some("build fix"));
-    }
-
-    #[test]
-    fn find_needs_a_prefix_that_matches_exactly_one_session() {
-        let list = SessionList {
-            sessions: vec![session("abc1", 2), session("abd2", 1)],
-            unreadable: vec![],
-        };
-        assert_eq!(list.find("abc").unwrap().id, "abc1");
-        assert!(list.find("ab").unwrap_err().to_string().contains("more than one"));
-        assert!(
-            list.find("x")
-                .unwrap_err()
-                .to_string()
-                .contains("no session ID starts with x")
-        );
-        assert!(list.find("").is_err());
     }
 
     #[test]

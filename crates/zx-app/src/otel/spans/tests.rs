@@ -9,6 +9,7 @@ use crate::otel::TraceParent;
 use crate::otel::signal::event;
 use zx_agent::ai::{AssistantMessage, ContentBlock, Message, ToolCall};
 use zx_agent::events::{EventKind, RunReport};
+use zx_agent::policy::PolicyDecision;
 
 const RUN: &str = "6f1c2c4e-0000-4000-8000-000000000001";
 const TRACEPARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
@@ -139,8 +140,7 @@ fn one_run() -> Vec<Signal> {
             EventKind::ToolDecision {
                 tool_call_id: "c1".into(),
                 tool_name: "bash".into(),
-                verdict: ToolVerdict::Allow,
-                reason: Some("the secret rule".into()),
+                decision: PolicyDecision::Ask("the secret rule".into()),
             },
         ),
         at(
@@ -211,7 +211,7 @@ fn a_run_is_one_trace_of_nested_spans_that_carry_metadata_only() {
     assert_eq!((ms(run.start_time), ms(run.end_time)), (1000, 1023));
     let decision = &tool.events.events[0];
     assert_eq!(decision.name, "decision");
-    assert_eq!(decision.attributes[0].value.as_str(), "allow");
+    assert_eq!(decision.attributes[0].value.as_str(), "ask");
     // Nothing of the conversation leaves the process: not the command, the answer or the rule.
     let exported = format!("{spans:?}");
     assert!(!exported.contains("secret"), "{exported}");

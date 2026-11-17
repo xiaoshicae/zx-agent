@@ -891,7 +891,7 @@ fn a_trigger_whose_first_summary_cannot_be_read_is_rejected() {
 
     assert!(readable.validate().is_ok());
     let error = unreadable.validate().unwrap_err();
-    assert!(error.to_string().contains("triggerBytes"), "{error}");
+    assert!(error.to_string().contains("trigger_bytes"), "{error}");
 }
 
 #[tokio::test]

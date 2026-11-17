@@ -2,7 +2,7 @@
 //! and asks again; a context the model rejected as too long is compacted once instead.
 //! Either way the failed answer stays in the session and leaves the context.
 
-use super::run_host::{RunHost, RunStop};
+use super::run_scope::{RunScope, RunStop};
 use super::{Ending, RunAccounting, Running};
 use crate::ai::retry::{RetryPolicy, is_context_overflow, is_retryable};
 use crate::ai::{AssistantMessage, duration_ms};
@@ -21,16 +21,16 @@ impl Running<'_> {
         task_steps: u32,
     ) -> Result<(), RunStop> {
         let error = failed.failure_reason();
-        let cancelled = self.host.target.trace.cancel().is_cancelled();
+        let cancelled = self.run.target.trace.cancel().is_cancelled();
         let out_of_budget = self.accounting.exhausted().is_some() || cancelled;
-        if is_context_overflow(failed) && self.host.compaction.automatic() {
+        if is_context_overflow(failed) && self.run.compacts_automatically() {
             // A context the model rejects as too long fails again however often it is sent:
             // compact once and continue. Not a retry, so it has its own limit: once per run,
             // until an answer succeeds again (more than one step in the attempt).
             let refusal = if self.overflow_recovered && task_steps <= 1 {
                 Some("the context still overflowed after compacting it once".to_string())
             } else {
-                self.host.pause.refusal()
+                self.run.pause.refusal()
             };
             if let Some(refusal) = refusal {
                 return Err(RunStop::Failed(format!("{error}; {refusal}")));
@@ -38,9 +38,7 @@ impl Running<'_> {
             if out_of_budget {
                 return Err(RunStop::Failed(error.to_string()));
             }
-            self.host
-                .recover_overflow(error, entry_id, &mut self.accounting)
-                .await?;
+            self.run.recover_overflow(error, entry_id, &mut self.accounting).await?;
             self.overflow_recovered = true;
             return Ok(());
         }
@@ -48,13 +46,13 @@ impl Running<'_> {
         if !is_retryable(failed) || self.accounting.retries >= self.retry.max_retries || out_of_budget {
             return Err(RunStop::Failed(error.to_string()));
         }
-        self.host
+        self.run
             .schedule_retry(self.retry, &mut self.accounting, failed, entry_id)
             .await
     }
 }
 
-impl RunHost<'_> {
+impl RunScope<'_> {
     /// Keep the failed answer `entry_id` in the session but drop it from the model context, so
     /// that the next attempt continues from the message before it without repeating the user
     /// message.
@@ -101,7 +99,7 @@ impl RunHost<'_> {
             End::Unrecorded(error) => return Err(RunStop::Failed(format!("{error:#}"))),
             End::Failed(reason) => reason,
             End::Noop => "the model rejected the context as too long but cannot compact while preserving \
-                          system messages and the latest input; lower keepRecentBytes, use a model with a \
+                          system messages and the latest input; lower keep_recent_bytes, use a model with a \
                           larger context or start a new session"
                 .into(),
         };

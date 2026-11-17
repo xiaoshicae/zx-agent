@@ -35,7 +35,7 @@ pub struct CommandContext {
     /// The session's ID.
     pub session_id: String,
     /// The conversation's queues: a command sends the model a message with `steer` or
-    /// `follow_up`, and records state with `append_entry`.
+    /// `follow_up`, and records state with `append_custom_entry`.
     pub queues: Arc<InputQueues>,
     /// The tools the next request offers.
     pub active_tools: Arc<ActiveTools>,
