@@ -299,6 +299,11 @@ impl RawConfig {
             mcp: self.mcp,
         };
         for model in self.models {
+            ensure!(
+                !config.models.contains_key(&model.id),
+                "more than one [[models]] entry has the id {:?}",
+                model.id
+            );
             config.models.insert(
                 model.id,
                 ModelMeta {
@@ -643,6 +648,10 @@ mod tests {
             (
                 "[[models]]\nid = 'm'\ncost = { input = -1.0, output = 0.0 }",
                 "prices must be zero or more",
+            ),
+            (
+                "[[models]]\nid = 'm'\ncontextWindow = 1000\n[[models]]\nid = 'm'\ncontextWindow = 2000",
+                "more than one [[models]] entry has the id \"m\"",
             ),
         ] {
             let error = error(text);

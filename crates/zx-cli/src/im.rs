@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use zx_agent::ai::now_ms;
-use zx_app::config::Builtin;
+use zx_app::config::{Builtin, read_text};
 use zx_app::otel::Telemetry;
 use zx_app::{Application, Approvals, ConfiguredAgent, SessionPlace, env_value};
 use zx_im::{
@@ -221,9 +221,10 @@ fn create_session_dirs(dir: &Path) -> Result<PathBuf> {
     Ok(running)
 }
 
-/// The IM service configuration file at `path`. A startup read; nothing runs concurrently yet.
+/// The IM service configuration file at `path`, read as config.toml is: a regular UTF-8 file
+/// within a size limit. A startup read; nothing runs concurrently yet.
 fn read_file(path: &Path) -> Result<ConfigFile> {
-    let text = std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let text = read_text(path)?;
     toml::from_str(&text).with_context(|| format!("invalid IM service configuration {}", path.display()))
 }
 
@@ -407,6 +408,15 @@ mod tests {
 
     fn platforms() -> HashSet<&'static str> {
         HashSet::from(["slack"])
+    }
+
+    #[test]
+    fn the_file_is_read_within_bounds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("im.toml");
+        let file = "[slack]\n[access]\nconversations = []\n[sessions]\ndir = \"/data/sessions\"\n";
+        std::fs::write(&path, format!("{file}# {}", "x".repeat(64 * 1024))).unwrap();
+        assert!(format!("{:#}", read_file(&path).err().unwrap()).contains("exceeds"));
     }
 
     #[test]
