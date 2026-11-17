@@ -27,7 +27,7 @@
 设计取舍（改动前先理解原因）：
 
 - **场景策略不进内核**：提示词、上限与续写默认值由 agent 文件提供；命令策略、续写、脱敏由外层注册。`run` 用退出码表达结果，调度器不必解析输出。
-- **配置与内容分工**：`config.toml` 决定环境，agent 决定角色，命令行只剩 `--model`、`--tools`、预算与会话参数。没有项目级配置文件：项目内容（含 AGENTS.md 与 skill 正文）不能改变环境、权限或控制策略。
+- **配置与内容分工**：`config.toml` 决定环境，agent 决定角色，命令行只选模型、工作目录、工具集、预算、会话与输出，不设环境与权限。没有项目级配置文件：项目内容（含 AGENTS.md 与 skill 正文）不能改变环境、权限或控制策略。
 - **`Agent` 是唯一入口**：`AgentConfig` 是所有会话共用的角色；属于单个会话的工具、钩子与提示词段落由宿主的 `SessionSetup` 给出，随会话释放。会话在创建时的目录工作，续接时不另给目录。打开着的会话记在 `Agent` 的表里：再打开得到同一个 `Session`，`close_session` 之后旧句柄返回 Closed；记录写不进去的会话自行关闭，由 `open_session` 从存储重新打开。工具的名称与参数声明在建 `Agent` 与会话时校验并取定。
 - **共享 API、独占执行**：`Session` 是可克隆的句柄，短锁只切换 Runner 所有权、不跨 await，重叠调用返回 Busy。`send`、`continue_run`、`compact` 返回 `Run`：读它才推进，事件经有界通道，结束、取消、panic 或丢弃后由 RAII 归还。事件只从 `Run` 读出；要观察所有运行的用 `Hook::on_event`。
 - **会话是审计日志，也是模型上下文的唯一来源**：修正上下文靠追加 `context_edit`，提示词变化靠追加 system 消息，原始记录始终保留；可替换的只是存储（`SessionStorage` 与 `SessionLog`，接口里没有文件路径）。摘要每次读取原始投影，原始事实被修正后整份失效；边界可以落在最近一轮之内，那一轮的提问原样留在摘要之前。
@@ -108,6 +108,6 @@
 | 打包的扩展 | 实现 `extensions::Extension`，进 `AgentConfig::extensions`：建 `Agent` 时向它要一次并校验，所有会话共用。运行中发消息、记状态或改工具集经 `HookContext` 的 `queues` 与 `active_tools` | `crates/zx-tools/src/mcp.rs` |
 | 会话存储 | 实现 `transcript::SessionStorage` 与 `SessionLog`，进 `AgentConfig::storage`：`append` 存好才返回，一个会话一个写入者，接口里不出现文件路径，列出时用 `SessionList::new`、读头部时用 `SessionQuery::arrange_headers` 排序与截断 | `transcript/memory.rs`；只换写入方式时 `tests/runner.rs` 的 `TableLog` |
 | 摘要器 | 实现 `compaction::Summarizer`，进 `AgentConfig::summarizer`；何时摘要、读哪一段、记录与校验仍由内核做 | `tests/summarizer.rs` |
-| 单个会话的部分 | 实现 `agent::SessionSetup`，返回 `SessionParts`（工具、钩子、提示词段落） | `crates/zx-cli/src/assembly/setup.rs` |
+| 单个会话的部分 | 实现 `agent::SessionSetup`，返回 `SessionParts`（工具、钩子、提示词段落），并经 `section_names` 声明它给出的段名 | `crates/zx-cli/src/assembly/setup.rs` |
 | 接入方式（如 Web 服务） | 独立的 crate，依赖 `zx-agent`（只要内核时依赖 `zx-core`），构造 `Agent`，为每个对话创建或打开 `Session`，读它返回的 `Run`；不放进库 `zx-agent` | `crates/zx-cli`、`crates/zx-im` |
-| IM 平台 | 独立的 crate 实现 `zx_im::ImChannel`：立即确认投递、按消息 ID 去重（`Seen`）、只转交发给机器人的消息、遵守限频（`Pacer`、`rate_limit_wait`）、拆分超长文本（`split_text`）、文案用 `CardLabels` | `crates/zx-im-slack`；`tests/im_server.rs` 的 `FakeChannel` |
+| IM 平台 | 独立的 crate 实现 `zx_im::ImChannel`：立即确认投递、按消息 ID 去重（`Seen`）、只转交私聊、@ 机器人的群消息与群里线程中的回复、遵守限频（`Pacer`、`rate_limit_wait`）、拆分超长文本（`split_text`）、文案用 `CardLabels` | `crates/zx-im-slack`；`tests/im_server.rs` 的 `FakeChannel` |

@@ -10,7 +10,7 @@ paths:
 ## 尺寸
 
 - **函数一屏**：目标 60 行以内，一个函数做一件事；写不出一句话文档的函数在做两件事。拆出来的函数按步骤命名（`load_agent`、`open_session`、`set_up`），不叫 `helper`、`do_x`。
-- **可以带 `#[expect(clippy::too_many_lines, reason = "...")]` 的只有两种**：按变体展开、每个分支一两行的 match（`one arm per event variant`）；一张数据表（`one event of every variant`）。冻结的模块（chat）只做不改行为的整理，也用这条。
+- **可以带 `#[expect(clippy::too_many_lines, reason = "...")]` 的只有三种**：按变体展开、每个分支一两行的 match（`one arm per event variant`）；一张数据表（`one event of every variant`）；测试里一段脚本化的场景（`a scripted conversation, one round per arm`）。
 - **文件一个主题**：一个文件讲几件事，就按职责拆成几个子模块（`transcript/compaction.rs` 与 `transcript/compaction/{records,source}.rs`），不论多长；不按类型拆（没有 `types.rs` 加 `impls.rs`）。入口文件只分派。产线代码（不含测试）超过 600 行时，确认它只讲一个主题：只讲一个主题的可以超过。
 - **父模块的文档是地图**：有子模块的入口文件，在 `//!` 里每个子模块写一行，说它管什么（参照 `transcript.rs`、`runner.rs`）。新增、改名或删除子模块时同步改这几行。
 - **测试跟着被测的代码走**：单元测试写在它所测代码的模块里，不集中在父模块。一个模块的测试超过约 300 行时，移到 `foo/tests.rs`，`foo.rs` 里只留 `#[cfg(test)] mod tests;`。几个子模块的测试共用的辅助放进父模块的 `test_support.rs`，不复制。

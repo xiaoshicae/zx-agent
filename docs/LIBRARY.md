@@ -14,7 +14,7 @@ while let Some(event) = run.next().await {
 let report = run.wait().await;                // 只要结果时直接 session.send(..)?.wait().await
 ```
 
-库默认不限轮次、时间与 token，没有钩子，不自动续写、摘要或落盘，会话只存在内存里；说明、上限、策略与存储都由嵌入方给出。完整的组装见 `examples/library.rs`。
+库默认不限模型请求数、时间、token 与花费，没有钩子，不自动续写、摘要或落盘，会话只存在内存里；说明、上限、策略与存储都由嵌入方给出。安全相关的默认值也一样：`LocalExecutor` 默认不对命令隐藏任何环境变量（`hidden_env` 为空，API key 也不例外），工具输出只在注册了 `builtin::redact::RedactSecrets` 钩子时脱敏。完整的组装见 `examples/library.rs`，它两样都做了。
 
 - 入口：`Agent`（所有会话共用的角色 `AgentConfig`：模型、工具、策略、钩子、扩展、上限、重试、摘要与存储；`create_session`、`open_session(id)`、`session(id)`、`close_session(id)`、`list_sessions`）、`Session`（一个会话的句柄，克隆出来的是同一个会话：`send`、`continue_run`、`compact` 各返回一个 `Run`；另有 `cancel`、`set_model`、`set_name`、`branch`、`queues`、`active_tools`、`tool_names`、`cwd`、`run_command`、`is_closed`）、`Run`（一次执行：事件流与结果。读它才推进，事件经有界通道，读得慢运行就等；丢弃即取消并归还会话）、`transcript::Transcript`。
 - 会话在创建时给定的目录工作（`SessionOptions::cwd`，记在头部），再次打开时仍是那个目录。打开着的会话由 `Agent` 记着：再打开同一个会话得到同一个 `Session`；`close_session` 取消它正在进行的运行并释放它占用的东西，之后旧句柄的调用返回 `SessionError::Closed`，会话仍在存储里，可以再打开。记录写不进去的会话（写入失败、超时，或调用方在写入途中丢弃了 `Run`）在那次操作结束时自行关闭，句柄同样返回 `SessionError::Closed`，`open_session` 从存储重新打开它。

@@ -20,7 +20,7 @@ README 给出概览与示例；这里是各子命令的参数、行为、语义�
 | `--no-session` | 关闭 | 仅 `chat` 与 `acp`：不写会话文件 |
 | `--resume [ID 前缀]` | 关闭 | 仅 `chat`，不能与 `--session` 同用 |
 | `--continue` | 关闭 | 仅 `run`，须给出已存在的 `--session`，不能再给提示词：不加新输入，让模型接着回答（如崩溃之后）。会话以失败或被取消的回答结尾时先省略该回答；以完成的回答结尾且没有排队的消息时以 1 结束、不发请求 |
-| `--output` | `text` | `text`：进度与诊断在 stderr，最终回答在 stdout；`jsonl`：每个事件一行 JSON，输出到 stdout |
+| `--output` | `text` | 仅 `run` 与 `chat`。`text`：进度与诊断在 stderr，最终回答在 stdout；`jsonl`：每个事件一行 JSON，输出到 stdout |
 | `--deltas` | 关闭 | 仅 `jsonl`：同时输出流式的 `message_update` |
 | `--color` | `auto` | 仅 `chat`：`auto` 在交互终端上着色（设了 `NO_COLOR` 或 `TERM=dumb` 时不着色），`always`、`never` |
 
@@ -48,7 +48,7 @@ README 给出概览与示例；这里是各子命令的参数、行为、语义�
 - 直接输入问题开始下一轮。TTY 中运行时输入的文本作为插话，在下一次模型请求前进入上下文；任务结束时没被读到的插话作为下一轮提问发送，Ctrl+C 取消任务时丢弃。一次粘贴的多行合为一条消息（以 `/` 开头的命令只占一行；非 Unix 平台不合并）。管道输入逐轮、逐行消费。
 - 单行（以及合并后的一条消息）最多 1 MiB；超限或无效 UTF-8 的行整行丢弃并提示，对话继续。
 - stdout 只有模型的回答，其余在 stderr：启动信息、每个工具调用一行 `[tool] bash: <命令> -> ok 12ms` 及结果的前 3 行（`edit_file` 显示补丁的前 20 行），每轮一行 `[turn] 3 requests · 30 in · 15 out · 4.4s`。默认只在交互终端上着色，见 `--color`。
-- 上限取自 agent：内置的 assistant 每轮不限轮次与时间、不自动续写。`--output jsonl` 每轮输出事件与一个 `run_end`。
+- 上限取自 agent：内置的 assistant 不限模型请求数与时间、不自动续写。`--output jsonl` 每轮输出事件与一个 `run_end`。
 - 这是逐行 REPL，没有行编辑：方向键等控制序列会原样作为输入发送。
 
 | 输入 | 行为 |
@@ -76,7 +76,7 @@ README 给出概览与示例；这里是各子命令的参数、行为、语义�
 
 1 只允许这一次；2 本会话允许工具名与参数完全相同的调用；3 拒绝；4 不执行，把输入的话交给当前任务。空输入不授权，超时（默认 600 秒，`approvalTimeoutSecs`）不执行。
 
-退出码：`/quit` 与 EOF 为 0，参数或配置错误、读取终端失败为 2，SIGTERM 为 5。单轮的模型或预算错误报告后继续对话。
+退出码：`/quit` 与 EOF 为 0，参数或配置错误、读取终端失败为 2，SIGTERM 为 5。单轮的模型或预算错误报告后继续对话。会话记录写不进去时会话自行关闭，chat 从存储重新打开它；会话只在内存中（`--no-session`）或重新打开失败时以 1 结束。
 
 ## ACP
 
@@ -107,7 +107,7 @@ README 给出概览与示例；这里是各子命令的参数、行为、语义�
 
 IM 的容量在 `im.toml` 的 `[limits]` 中设置：`maxConversations` 默认 128（运行、排队和空闲 worker 都计入），`maxPendingMessages` 默认 32，`maxPendingBytes` 默认 262144（每个会话自路由接纳起尚未处理的文本字节数，也是单条入站消息上限）。这三个值均为正整数。达到上限时，消息不被接纳并记一条 `failed` 日志；机器人要回答的消息另回复 `replies.overloaded`（在路由处被拒的只认 @），只记进会话的话不回复。只有插入运行、或在运行被 `/cancel`、`/new` 取消期间留给下一次运行的消息才发送接收回执。`/cancel`、`/new` 与审批点击仍可处理。收件箱、waiting、heard 与 steering 共用这份配额，消息转移不重复计数，数量及 UTF-8 文本字节在同一把短锁下接纳；补入发送者名称后再次检查字节额度。worker 收件箱还有 32 条的结构上限。至多 64 字节的 `/cancel`、`/new` 和审批点击不占文本配额，但仍受收件箱容量限制。扩展直接调用无配额 SDK 入队方法的输入不计入这份宿主配额。打开会话（排队中的新会话，或为写入闲聊重新打开的会话）都在取得 `maxRunning` 的名额后进行；`/new` 仍立即创建新会话。
 
-其余参数与 `chat` 相同，`--max-model-requests` 等作用于每一次运行；没有 `--session`。
+除 `--config` 外只有 `--model`、`--cwd`（新会话的工作目录）、`--tools` 与预算参数，预算作用于每一次运行。
 
 ## 语义
 
@@ -126,7 +126,7 @@ IM 的容量在 `im.toml` 的 `[limits]` 中设置：`maxConversations` 默认 1
 
 | 项目 | zx-agent |
 |---|---|
-| 上限 | 有轮次与时间上限 |
+| 上限 | 有模型请求数、时间、token 与花费上限 |
 | 工具确认 | 宿主审批；`run` 无人时拒绝 |
 | 工具放行 | 由独立的接口 `ToolPolicy` 判定（放行、拒绝、询问），所有策略取最严的结论；钩子只观察与改写，不拦截调用（pi 在 `beforeToolCall` 钩子里拦截） |
 | 输出截断 | 按 agent 的 `continueOnLength` 自动续写，仍未完成以退出码 6 结束；续写所需的请求超出预算时以该预算的退出码结束，报告的 `truncated` 为 true |
@@ -135,7 +135,7 @@ IM 的容量在 `im.toml` 的 `[limits]` 中设置：`maxConversations` 默认 1
 | 会话名称 | 只经 ACP 的 `/name` 与 SDK 的 `Session::set_name` 设置，不能清除；chat 没有起名命令；客户端改标题的 `session/set_title` 在协议中仍不稳定，未实现 |
 | 队列取法 | 两个队列共用一种，默认 `All` |
 | 扩展的消息与状态 | 运行中排队，下一回合开始或运行结束时写入；消息只有文本；请求只声明当前活跃的工具 |
-| 环境信息 | 启动时写入系统提示词 |
+| 环境信息 | 会话打开时写入系统提示词 |
 | 续接会话的目录 | 同样用会话记录的目录；该目录已不存在时报错，不询问是否改在当前目录继续 |
 | 参数校验 | 严格按 JSON Schema，不转换类型；改写只在工具的 `prepare_arguments` 中 |
 | 中断的工具调用 | 有副作用的调用执行前先记录开始；恢复时补写“结果未知”或“未执行”，不重放 |
@@ -177,7 +177,7 @@ IM 的容量在 `im.toml` 的 `[limits]` 中设置：`maxConversations` 默认 1
 
 ### OpenTelemetry 追踪
 
-run、chat 与 im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（完整地址）或 `OTEL_EXPORTER_OTLP_ENDPOINT`（后接 `/v1/traces`）时，用 OTLP/HTTP 导出追踪；都没设时不建立任何连接。其余标准变量由 OpenTelemetry SDK 读取，服务名默认 `zx-agent`。只导出 span，不导出指标，需要时由收集端从 span 推导。
+run、chat、acp 与 im 在设置了 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（完整地址）或 `OTEL_EXPORTER_OTLP_ENDPOINT`（后接 `/v1/traces`）时，用 OTLP/HTTP 导出追踪；都没设时不建立任何连接。其余标准变量由 OpenTelemetry SDK 读取，服务名默认 `zx-agent`。只导出 span，不导出指标，需要时由收集端从 span 推导。
 
 一次运行是一条 trace：`run` 之下有 `attempt`、`step`、`request`、`tool <工具名>` 与 `compaction`，属性带运行 ID（`zx.run.id`）、模型、结果（预算用完时另有 `zx.budget` 与 `zx.truncated`）、用量与成本。只含元数据，不含输入、输出、参数与错误文本。`run` 在 `TRACEPARENT`（及 `TRACESTATE`）为合法值时接续调用方的 trace。导出经有界队列，满时丢弃，退出时最多等待 5 秒；一次运行的结束被丢弃时，它的 span 在同一会话开始下一次运行时结束（没有结果属性），最迟在退出时结束。命令看不到可能带认证头的 `OTEL_EXPORTER_OTLP_HEADERS`、`OTEL_EXPORTER_OTLP_TRACES_HEADERS` 与 `OTEL_EXPORTER_OTLP_METRICS_HEADERS`，工具输出中出现它们的值时脱敏。
 

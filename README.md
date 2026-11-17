@@ -9,7 +9,7 @@
 - 工具：`bash`、`read_file`、`edit_file`、`write_file`，只读的 `grep`、`find`、`ls`，按需读取 skill 的 `read_skill`，分页读取落盘结果的 `read_output`，以及 MCP 服务器的工具。
 - 主目录中的 `config.toml`（环境）与 agent 文件（角色），项目 `AGENTS.md`；命令策略与 ask / allow / deny 权限；已知密钥脱敏；可选的容器执行。
 - 只追加的会话记录（默认 JSONL 文件，可续跑），可选的自动与手动摘要，长工具结果落盘。
-- 轮次、时间、token 与花费上限；JSONL 事件流与可选的 OpenTelemetry 追踪导出；扩展接口 `Extension`。
+- 模型请求数、时间、token 与花费上限；JSONL 事件流与可选的 OpenTelemetry 追踪导出；扩展接口 `Extension`。
 
 尚未实现：OpenAI 兼容以外的 provider（如 Anthropic），见[路线图](docs/ROADMAP.md)。
 
@@ -59,7 +59,7 @@ zx-agent chat --session ./chat.jsonl   # 指定会话文件
 zx-agent acp
 ```
 
-`acp` 经 stdin 与 stdout 收发 [Agent Client Protocol](https://agentclientprotocol.com/) v1 的消息，由 ACP 客户端（Zed、JetBrains、Neovim、Emacs 的插件，或 Wisp 等终端客户端，见[客户端目录](https://agentclientprotocol.com/overview/clients)）启动：在客户端里把 agent 命令配置为上面这一行。参数与 `chat` 相同（`acp --help`），没有 `--session`、`--output` 与 `--color`；会话的工作目录由客户端给出，`--cwd` 在这里只是 `session/list` 没有带 `cwd` 时所列的目录。stdout 只走协议，诊断在 stderr。
+`acp` 经 stdin 与 stdout 收发 [Agent Client Protocol](https://agentclientprotocol.com/) v1 的消息，由 ACP 客户端（Zed、JetBrains、Neovim、Emacs 的插件，或 Wisp 等终端客户端，见[客户端目录](https://agentclientprotocol.com/overview/clients)）启动：在客户端里把 agent 命令配置为上面这一行。参数只有 `--model`、`--cwd`、`--tools`、预算参数与 `--no-session`（`acp --help`）；会话的工作目录由客户端给出，`--cwd` 在这里只是 `session/list` 没有带 `cwd` 时所列的目录。stdout 只走协议，诊断在 stderr。
 
 会话、命令、回合、更新与退出的细节见[参考手册](docs/REFERENCE.md#acp)。
 
@@ -81,6 +81,12 @@ extends = "unattended"
 [permissions]
 ask = ["bash"]
 allow = ["bash(kubectl get)", "bash(kubectl describe)", "bash(kubectl logs)", "bash(grep)", "bash(tail)", "bash(head)"]
+
+# 自动放行的 kubectl 只能带这些选项；不列出时任何选项（如 --kubeconfig、--server）都放行
+[permissions.allowOptions.kubectl]
+long = ["namespace", "all-namespaces", "output", "selector", "container", "previous", "since", "tail"]
+shortWithValue = ["n", "o", "l", "c"]
+shortFlags = ["A", "p"]
 +++
 EOF
 zx-agent run \
@@ -92,7 +98,7 @@ zx-agent run \
 echo "exit code: $?"
 ```
 
-`allow` 之外的 bash 命令要审批，`run` 没有人审批，因此拒绝。在 Kubernetes 中常驻部署见 [deploy/kubernetes/README.md](deploy/kubernetes/README.md)。
+`allow` 之外的 bash 命令，以及带了 `allowOptions` 之外选项的 kubectl 命令，都要审批；`run` 没有人审批，因此拒绝。在 Kubernetes 中常驻部署见 [deploy/kubernetes/README.md](deploy/kubernetes/README.md)。
 
 ### IM 服务
 
@@ -140,7 +146,7 @@ working = "处理中…"
 allowed = "已批准"
 ```
 
-平台应用的设置、会话的划分、审批、日志、退出与崩溃之后的行为见[参考手册](docs/REFERENCE.md#im-服务)。其余参数与 `chat` 相同，`--max-model-requests` 等作用于每一次运行；没有 `--session`。
+平台应用的设置、会话的划分、审批、日志、退出与崩溃之后的行为见[参考手册](docs/REFERENCE.md#im-服务)。除 `--config` 外只有 `--model`、`--cwd`（新会话的工作目录）、`--tools` 与预算参数，预算作用于每一次运行。
 
 ### MCP 工具
 
@@ -217,7 +223,7 @@ while let Some(event) = run.next().await {
 let report = run.wait().await;                // 只要结果时直接 session.send(..)?.wait().await
 ```
 
-库默认不限轮次、时间与 token，没有钩子，不自动续写、摘要或落盘，会话只存在内存里；说明、上限、策略与存储都由嵌入方给出。完整的组装见 `examples/library.rs`。
+库默认不限模型请求数、时间、token 与花费，没有钩子，不自动续写、摘要或落盘，会话只存在内存里；说明、上限、策略与存储都由嵌入方给出。完整的组装见 `examples/library.rs`。
 
 入口、会话、审批、事件、扩展点、存储与摘要见 [docs/LIBRARY.md](docs/LIBRARY.md)，接口与契约见 rustdoc：`cargo doc --open`。
 

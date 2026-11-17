@@ -27,7 +27,7 @@ paths:
 
 - 只能在 Unix 上运行的测试（如进程组、信号相关的）加 `#[cfg(unix)]`。
 - 驱动程序的测试经 `zx_agent()` 或 `zx_agent_in` 启动，开发者的配置与真实的家目录都进不了测试。权限、上下文、摘要、模型元数据、执行环境与 provider 设置没有命令行参数，经 `AgentHome` 与 `fake_model_config` 设置。
-- 测试函数同样受 `too_many_lines` 约束；一个脚本化场景或一张"每个变体一条"的表可以带 `#[expect(clippy::too_many_lines, reason = "...")]`，理由说明它是什么表（规则 09）。
+- 测试函数同样受 `too_many_lines` 约束，例外见规则 09。
 - 新的集成测试按是否需要编译出的程序放在 `tests/` 或 `crates/zx-cli/tests/`（后者也放用到 `zx_cli::config`、`zx_cli::otel` 的），并在 `docs/TESTS.md` 里登记一行。
 
 ## 写付费的真实 API 测试
@@ -36,6 +36,6 @@ paths:
 
 - 只放在 `tests/real_api.rs`。每个测试标 `#[ignore = "..."]`，并在发出请求前调用 `Endpoint::from_env()`，它在缺少 `ZX_E2E_AUTHORIZED=1` 时直接失败。
 - 不写死服务商：地址、模型、key 所在的变量名都从环境变量读取。只用合成的提示词和临时目录里的文件。
-- 限制输出 token、轮次和时间，用 `print_usage` 打印用量；请求授权时说明大致用量。
+- 限制输出 token、模型请求数和时间，用 `print_usage` 打印用量；请求授权时说明大致用量。
 - 用量远高于其余测试的（如摘要评测），再要求一个专门的变量（摘要评测为 `ZX_E2E_EVAL=1`），未设置时只打印跳过。
 - 断言只依赖稳定的事实（结果类型、工具是否运行、关键词），不依赖模型的措辞。

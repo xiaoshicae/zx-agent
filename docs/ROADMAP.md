@@ -18,7 +18,7 @@
 
 | 编号 | 现行规则 |
 |---|---|
-| D2 | 已授权的依赖：`toml`、`rmcp`、ACP 官方 Rust SDK（`agent-client-protocol`，只开 `stdio`）、`opentelemetry` / `opentelemetry_sdk` / `opentelemetry-otlp`、`chrono`（只开 `clock`）、`jsonschema`（`zx-core` 默认开启的 feature `json-schema`）、`thiserror`、`tokio-tungstenite`。reqwest 0.13，rustls 只用 aws-lc-rs 一个加密后端，根证书用系统信任库。ACP SDK 打开了 serde_json 的 `preserve_order`。其他新依赖与升级先征得同意 |
+| D2 | 已授权的依赖：`toml`、`rmcp`、ACP 官方 Rust SDK（`agent-client-protocol`，只开 `stdio`）、`opentelemetry` / `opentelemetry_sdk` / `opentelemetry-otlp`、`chrono`（只开 `clock`）、`jsonschema`（`zx-core` 默认开启的 feature `json-schema`）、`thiserror`、`tokio-tungstenite`。reqwest 0.13，rustls 只用 aws-lc-rs 一个加密后端；HTTPS 的根证书用系统信任库，IM 的 WebSocket 长连接用编译进程序的根证书（`tokio-tungstenite` 的 `rustls-tls-webpki-roots`）。ACP SDK 打开了 serde_json 的 `preserve_order`。其他新依赖与升级先征得同意 |
 | D4 | 会话 API 是进程内方法调用，不做提交队列 / 事件队列（SQ/EQ） |
 | D5 | 命令默认在本机执行；容器执行在 `config.toml` 中显式开启。理由：Kubernetes Job 的 Pod 内通常没有 Docker |
 | D8 | 只做 MCP 客户端：只接工具，只用 Streamable HTTP；MCP 服务器与领域工具由外部实现 |
@@ -46,7 +46,7 @@
 
 ## 4. 当前阶段
 
-P0–P5、P10–P14（P10 为与 pi 的能力对齐）、P16、P17 与 P18 已完成（P16、P17 经 PR #105 合并，P18 经 PR #107 合并）。上一轮项目审查优化（D25–D27）的实现与本地验证已完成；D28 的实现与本地验证已完成；随后一轮评审优化（D29 及 D25–D28 的修订）已在本地实现并通过验证，其后复核并修正了评审遗留的 7 处问题（追踪 span、第二次信号、文件检查与打开之间的替换、落盘钩子与分页工具成对、环境段的时间、`Retry-After` 日期、IM 建连时的停止），经 PR #110 合并（`60d8bfd`）；第三轮评审的一致性修复与整洁重构（D30），连同 PR #110 合并后才补上的 `/cancel` 回归修正，已在本地实现并通过验证，待提 PR；真实平台与部署验收仍见第 5 节。进行中：
+P0–P5、P10–P14（P10 为与 pi 的能力对齐）、P16、P17 与 P18 已完成（P16、P17 经 PR #105 合并，P18 经 PR #107 合并）。上一轮项目审查优化（D25–D27）的实现与本地验证已完成；D28 的实现与本地验证已完成；随后一轮评审优化（D29 及 D25–D28 的修订）已在本地实现并通过验证，其后复核并修正了评审遗留的 7 处问题（追踪 span、第二次信号、文件检查与打开之间的替换、落盘钩子与分页工具成对、环境段的时间、`Retry-After` 日期、IM 建连时的停止），经 PR #110 合并（`60d8bfd`）；第三轮评审的一致性修复与整洁重构（D30），连同 PR #110 合并后才补上的 `/cancel` 回归修正，经 PR #111 合并（`1a198f2`）；真实平台与部署验收仍见第 5 节。进行中：
 
 - P6 执行环境：已实现，待真实集群与真实 IM 平台验收（第 5 节）。
 - P7 扩展与 MCP：已实现，待真实 MCP 服务器验收。
@@ -101,7 +101,7 @@ P0–P5、P10–P14（P10 为与 pi 的能力对齐）、P16、P17 与 P18 已�
 
 - `--output-schema`、异步审批、OS 级沙箱、由 webhook 或告警触发运行（D10）
 - rpc 模式（D14）；chat 的便利功能（D13）
-- durable 的自动续跑与重放、codemode 与 `runToolCall`、工具结果中的图片与 `structuredContent`（README“与 pi 的差异”）
+- durable 的自动续跑与重放、codemode 与 `runToolCall`、工具结果中的图片与 `structuredContent`（REFERENCE“与 pi 的差异”）
 - MCP 的 stdio、OAuth 与运行中更新工具列表（D8）
 - 完整 TUI、多 Agent 协作、插件热加载、WASM 插件、云端托管运行时、A/B 行为评测框架
 
